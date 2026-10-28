@@ -36,10 +36,10 @@ public static class OS
         try { return Aver.Framework.OS.HasFeature(tagName); }
         catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException) { return tagName.ToLowerInvariant() is "pc" or "64"; }
     }
-    public static ulong GetTicksMsec() => (ulong)Environment.TickCount64;
+    public static ulong GetTicksMsec() => (ulong)System.Environment.TickCount64;
     public static ulong GetTicksUsec() => (ulong)(System.Diagnostics.Stopwatch.GetTimestamp() * 1_000_000.0 / System.Diagnostics.Stopwatch.Frequency);
     public static bool IsDebugBuild() => Aver.Framework.OS.HasFeature("debug");
-    public static string GetEnvironment(string variable) => Environment.GetEnvironmentVariable(variable) ?? "";
+    public static string GetEnvironment(string variable) => System.Environment.GetEnvironmentVariable(variable) ?? "";
 }
 
 /// <summary>Godot's ProjectSettings singleton. The converter keeps the project's Godot values it can name in the manifest, so

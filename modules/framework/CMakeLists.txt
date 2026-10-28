@@ -43,6 +43,12 @@ add_library(Aver.Framework SHARED
   src/AccessAbi.cpp
   # Script overrides for sun, fog and sky light, and named post-process layers (wave 9, docs/plans/wave9/VISUAL_SCRIPTING_CSHARP_SYNC.md 2.4).
   src/WorldFxAbi.cpp
+  # Render-to-texture views a script or a converted level asks for; the host draws what the registry plans (G4 R5, docs/plans/fabric/G4_RENDER.md).
+  src/SubViewAbi.cpp
+  # Local fog volumes and reflection probes a script or a converted level places; the host reads what changed (G4 R8).
+  src/EnvFxAbi.cpp
+  # Meshes a script builds from arrays and MultiMesh instance tables baked into one mesh; the host uploads what changed (G4 R7).
+  src/RuntimeMeshAbi.cpp
   src/DataTableAbi.cpp
   src/EntityStateAbi.cpp
   # The floating origin (wave 11, docs/plans/wave11/LARGE_WORLD.md 2.5): a host-installed provider and the exact WorldPos conversions.

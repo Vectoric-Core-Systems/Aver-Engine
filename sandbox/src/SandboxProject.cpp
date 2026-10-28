@@ -4,6 +4,7 @@
 
 #include "SandboxApp.hpp"
 #include "aver/core/Types.hpp"   // AVER_PATH_SEP
+#include "aver/rhi/Tonemap.hpp"
 #include "aver/game/GameTick.hpp"
 #include "aver/game/GameLocalization.hpp"   // [wave11/shapes] Content/Physics/Surfaces.ocsurf -> the physics surface registry
 #include "aver/game/PhysicalSurfaces.hpp"   // [wave11/shapes] Content/Physics/Surfaces.ocsurf -> the physics surface registry
@@ -132,17 +133,16 @@ void SandboxApp::applyProject(Engine& e) {
     // flag asking for the default is indistinguishable from no flag. A postTonemapFromCli_ beside
     // the other three would close that, and it is a change to SandboxApp.hpp and setTonemap rather
     // than to this file.
-    if (project_.postTonemap >= 0 && post_.tonemap == rhi::PostSettings{}.tonemap) {
-        // Clamped to the three curves that exist, the same ceiling the post.tonemap console var
-        // applies (EditorConsole.hpp:1069): the parser stores whatever integer the file holds, and
-        // a mode nothing implements would select by falling off the end of a switch in the shader.
-        post_.tonemap = project_.postTonemap > 2 ? 2u : static_cast<u32>(project_.postTonemap);
-    }
+    // Clamped to the curves that exist (rhi/Tonemap.hpp), and the Godot white point and display adjustments ride along.
+    rhi::applyProjectTonemapKeys(post_, project_.postTonemap, project_.postTonemapWhite, project_.postAdjustBrightness,
+                                 project_.postAdjustContrast, project_.postAdjustSaturation,
+                                 post_.tonemap == rhi::PostSettings{}.tonemap);
     // THE EFFECTIVE VALUES, AFTER PRECEDENCE -- not what the manifest asked for. A log line saying
     // what the file requested would be exactly as reassuring and exactly as useless in the case
     // that matters, which is a flag and a key disagreeing.
     if (project_.postExposure >= 0.0f || project_.postBloom >= 0.0f ||
-        project_.postAutoExposure >= 0 || project_.postTonemap >= 0)
+        project_.postAutoExposure >= 0 || project_.postTonemap >= 0 || project_.postTonemapWhite >= 0.0f ||
+        project_.postAdjustBrightness >= 0.0f || project_.postAdjustContrast >= 0.0f || project_.postAdjustSaturation >= 0.0f)
         AVER_INFO("[Project] post chain from {}: exposure {:.3f}, bloom {:.3f}, auto-exposure {}, "
                   "tonemap {}", project_.manifestPath, post_.exposure, post_.bloomIntensity,
                   post_.autoExposure ? "on" : "off", post_.tonemap);
@@ -361,6 +361,10 @@ void SandboxApp::applyProjectRenderSettings() {
     // default is -1, so an unconditional assignment silently switched the flag back off one
     // frame after it was set -- the controller was wired, reachable and never once ran.
     if (!frameBudgetForced_) frameBudgetMs_ = project_.frameBudgetMs;
+#if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
+    // G4 R5: how many sub-viewports may exist and how many are drawn per frame; a mirror like the lines above (an unstated key is the default, not 'keep the last project's').
+    game::SubViewportHost::configure(game::subViewportSettingsOf(project_.subViewports, project_.subViewRenders, project_.subViewPixels));
+#endif
 #if AVER_MODULE_SR
     // optimisation-wave-2, 3.3 A: MIRRORS, NOT A DELTA, for the SAME reason projectBackend_ and
     // frameBudgetMs_ are up here rather than below the hasRenderSettings() guard -- but unlike

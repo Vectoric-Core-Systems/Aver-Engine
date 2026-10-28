@@ -138,6 +138,24 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
             if (t.size() > 1) out.rdStages = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.FOGOCCLUSION")) {
             if (t.size() > 1) out.fogOcclusion = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.MESHEXTRA")) {
+            if (t.size() > 1) out.meshExtra = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.MATERIALFX")) {
+            if (t.size() > 1) out.materialFx = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.LOCALRASTER")) {
+            if (t.size() > 1) out.localRaster = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.LOCALSHADOWS")) {
+            if (t.size() > 1) out.localShadows = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.VOLFOG")) {
+            if (t.size() > 1) out.volFog = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.VOLFOGDENSITY")) {
+            if (t.size() > 1) out.volFogDensity = static_cast<f32>(parseF64(t[1], -1.0));
+        } else if (equalsCI(key, "RENDER.SUBVIEWPORTS")) {
+            if (t.size() > 1) out.subViewports = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.SUBVIEWRENDERS")) {
+            if (t.size() > 1) out.subViewRenders = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.SUBVIEWPIXELS")) {
+            if (t.size() > 1) out.subViewPixels = static_cast<f32>(parseF64(t[1], -1.0));
         } else if (equalsCI(key, "RENDER.PTBOUNCES")) {
             if (t.size() > 1) out.ptBounces = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.PTMODE")) {
@@ -205,6 +223,14 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
             if (t.size() > 1) out.postAutoExposure = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.TONEMAP")) {
             if (t.size() > 1) out.postTonemap = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.TONEMAPWHITE")) {
+            if (t.size() > 1) out.postTonemapWhite = static_cast<f32>(parseF64(t[1], -1.0));
+        } else if (equalsCI(key, "RENDER.ADJUSTBRIGHTNESS")) {
+            if (t.size() > 1) out.postAdjustBrightness = static_cast<f32>(parseF64(t[1], -1.0));
+        } else if (equalsCI(key, "RENDER.ADJUSTCONTRAST")) {
+            if (t.size() > 1) out.postAdjustContrast = static_cast<f32>(parseF64(t[1], -1.0));
+        } else if (equalsCI(key, "RENDER.ADJUSTSATURATION")) {
+            if (t.size() > 1) out.postAdjustSaturation = static_cast<f32>(parseF64(t[1], -1.0));
         } else if (equalsCI(key, "WINDOW.TITLE")) {
             out.windowTitle = std::string(restOfLine(line, key));
         } else if (equalsCI(key, "WINDOW.SIZE")) {
@@ -366,7 +392,7 @@ bool isOwnedKey(std::string_view line) {
         "RENDER.GI", "RENDER.RAYTRACING", "RENDER.PATHTRACING",
         "RENDER.VOXELRES", "RENDER.GIINTENSITY", "RENDER.GIDISTANCE",
         "RENDER.RTSHADOWRAYS", "RENDER.RTPIXELSPERRAY", "RENDER.RTSHADOWDENOISE",
-        "RENDER.RTRENDERMODE", "RENDER.RDSTAGES", "RENDER.FOGOCCLUSION", "RENDER.PTBOUNCES", "RENDER.PTMODE", "RENDER.LAYEREDBSDF",
+        "RENDER.RTRENDERMODE", "RENDER.RDSTAGES", "RENDER.FOGOCCLUSION", "RENDER.MESHEXTRA", "RENDER.MATERIALFX", "RENDER.LOCALRASTER", "RENDER.LOCALSHADOWS", "RENDER.VOLFOG", "RENDER.VOLFOGDENSITY", "RENDER.SUBVIEWPORTS", "RENDER.SUBVIEWRENDERS", "RENDER.SUBVIEWPIXELS", "RENDER.PTBOUNCES", "RENDER.PTMODE", "RENDER.LAYEREDBSDF",
         "RENDER.GICONES", "RENDER.GIMODE", "RENDER.DENOISER", "RENDER.RESTIRVISIBILITY",
         "RENDER.RESTIRHISTORY",
         "RENDER.NEURALDENOISE",   // retired NRD v1 key: ignored on load, dropped on the next save
@@ -376,6 +402,7 @@ bool isOwnedKey(std::string_view line) {
         "RENDER.BACKEND", "RENDER.FRAMEBUDGETMS", "RENDER.AVERSR", "RENDER.FRAMEINTERP", "RENDER.TAA", "RENDER.NEURAA", "RENDER.MANYLIGHTS", "RENDER.PARTICLEGPU",
         "RENDER.MSAA", "RENDER.MESHSHADERS", "RENDER.GIUPDATEINTERVAL", "RENDER.GIVOLUME",
         "RENDER.EXPOSURE", "RENDER.BLOOM", "RENDER.AUTOEXPOSURE", "RENDER.TONEMAP",
+        "RENDER.TONEMAPWHITE", "RENDER.ADJUSTBRIGHTNESS", "RENDER.ADJUSTCONTRAST", "RENDER.ADJUSTSATURATION",
         "WINDOW.TITLE", "WINDOW.SIZE", "WINDOW.RESIZABLE", "WINDOW.FULLSCREEN",
         "IMPORT.SCALE", "IMPORT.CONVERTAXES", "IMPORT.GENNORMALS", "IMPORT.GENMIPS",
         "IMPORT.MAXTEXTURE",
@@ -428,6 +455,15 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
     appendKey(owned, "RENDER.RTRENDERMODE", d.rtRenderMode);
     appendKey(owned, "RENDER.RDSTAGES", d.rdStages);
     appendKey(owned, "RENDER.FOGOCCLUSION", d.fogOcclusion);
+    appendKey(owned, "RENDER.MESHEXTRA", d.meshExtra);
+    appendKey(owned, "RENDER.MATERIALFX", d.materialFx);
+    appendKey(owned, "RENDER.LOCALRASTER", d.localRaster);
+    appendKey(owned, "RENDER.LOCALSHADOWS", d.localShadows);
+    appendKey(owned, "RENDER.VOLFOG", d.volFog);
+    appendKey(owned, "RENDER.VOLFOGDENSITY", d.volFogDensity);
+    appendKey(owned, "RENDER.SUBVIEWPORTS", d.subViewports);
+    appendKey(owned, "RENDER.SUBVIEWRENDERS", d.subViewRenders);
+    appendKey(owned, "RENDER.SUBVIEWPIXELS", d.subViewPixels);
     appendKey(owned, "RENDER.PTBOUNCES", d.ptBounces);
     appendKey(owned, "RENDER.PTMODE", d.ptMode);
     appendKey(owned, "RENDER.LAYEREDBSDF", d.layeredBsdf);
@@ -468,6 +504,10 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
     appendKey(owned, "RENDER.BLOOM", d.postBloom);
     appendKey(owned, "RENDER.AUTOEXPOSURE", d.postAutoExposure);
     appendKey(owned, "RENDER.TONEMAP", d.postTonemap);
+    appendKey(owned, "RENDER.TONEMAPWHITE", d.postTonemapWhite);
+    appendKey(owned, "RENDER.ADJUSTBRIGHTNESS", d.postAdjustBrightness);
+    appendKey(owned, "RENDER.ADJUSTCONTRAST", d.postAdjustContrast);
+    appendKey(owned, "RENDER.ADJUSTSATURATION", d.postAdjustSaturation);
 
     // WINDOW.* -- how a shipped game presents itself.
     if (!d.windowTitle.empty()) owned += "WINDOW.TITLE " + d.windowTitle + "\n";

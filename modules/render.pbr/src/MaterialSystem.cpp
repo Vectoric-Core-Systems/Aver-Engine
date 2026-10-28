@@ -475,7 +475,7 @@ MaterialSystem::Entry& MaterialSystem::entryFor(MaterialHandle h) {
     if (e.set) {
         liveSets_.insert(e.set);   // see liveSets_: ownsBindingSet()'s O(1) index
         const MaterialDesc* d = MaterialLibrary::get().desc(h);
-        if (d) { e.constants = packMaterial(*d); writeSlots(*d, e.set); }
+        if (d) { e.constants = packMaterial(*d); e.ext = packMaterialFx(d->fx, d->alphaMode == AlphaMode::Mask); writeSlots(*d, e.set); }
     } else {
         AVER_ERROR("[PBR] binding set for material {} could not be created", h);
     }
@@ -555,6 +555,7 @@ void MaterialSystem::update() {
             const MaterialDesc* d = lib.desc(h);
             if (d) {
                 it->second.constants = packMaterial(*d);
+                it->second.ext = packMaterialFx(d->fx, d->alphaMode == AlphaMode::Mask);
                 // retryFailed: this material CHANGED, which is exactly when a texture it names that
                 // was missing before may now exist -- a fresh import, a file copied in, a corrected
                 // path.
@@ -682,6 +683,14 @@ bool MaterialSystem::ownsBindingSet(rhi::BindingSetHandle s) const {
 const MaterialConstants& MaterialSystem::constants(MaterialHandle h) {
     if (!res_ || !MaterialLibrary::get().valid(h)) return fallbackConstants_;
     return entryFor(h).constants;
+}
+
+// 192 for every material before R6; 256 for one with fx, whose draw constants carry the extension block right behind the base block.
+u32 MaterialSystem::constantBytes(MaterialHandle h) {
+    if (!res_ || !MaterialLibrary::get().valid(h)) return static_cast<u32>(sizeof(MaterialConstants));
+    const Entry& e = entryFor(h);
+    return (e.constants.flags & MaterialFlag_Fx) ? static_cast<u32>(sizeof(MaterialConstants) + sizeof(MaterialExtConstants))
+                                                 : static_cast<u32>(sizeof(MaterialConstants));
 }
 
 } // namespace aver::pbr

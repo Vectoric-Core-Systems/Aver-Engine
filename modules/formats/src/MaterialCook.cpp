@@ -87,6 +87,7 @@ bool cookMaterials(const std::vector<ImportedMaterial>& materials,
     for (const ImportedMaterial& m : materials) {
         refer(m.baseColorTex); refer(m.metalRoughTex); refer(m.normalTex);
         refer(m.occlusionTex); refer(m.emissiveTex);
+        refer(m.detailAlbedoTex); refer(m.heightTex); refer(m.detailNormalTex);
     }
 
     for (usize i = 0; i < images.size(); ++i) {
@@ -155,6 +156,7 @@ bool cookMaterials(const std::vector<ImportedMaterial>& materials,
         d.occlusionStrength = gm.occlusionStrength;
         d.alphaCutoff       = gm.alphaCutoff;
         d.twoSided          = gm.doubleSided;
+        d.vertexColor       = gm.vertexColor;
         d.subsurfaceWeight  = gm.subsurfaceWeight;
         d.subsurfaceRadius  = gm.subsurfaceRadius;
         for (int k = 0; k < 3; ++k) d.subsurfaceColor[k] = gm.subsurfaceColor[k];
@@ -165,6 +167,7 @@ bool cookMaterials(const std::vector<ImportedMaterial>& materials,
         // A slot whose image could not be read stays EMPTY. Pointing it at a path that is not there
         // would turn a stated import failure into a material that looks broken for no given reason.
         const auto bind = [&](const ImportedTexture& t, pbr::TextureSlot slot) {
+            if (!t.runtimePath.empty()) { d.textures[static_cast<u32>(slot)].path = t.runtimePath; return; }   // supplied by the engine at run time (G4 R5)
             if (t.imageIndex < 0 || usize(t.imageIndex) >= out.texturePaths.size()) return;
             const std::string& p = out.texturePaths[usize(t.imageIndex)];
             if (p.empty()) return;
@@ -175,6 +178,15 @@ bool cookMaterials(const std::vector<ImportedMaterial>& materials,
         bind(gm.normalTex,     pbr::TextureSlot::Normal);
         bind(gm.occlusionTex,  pbr::TextureSlot::Occlusion);
         bind(gm.emissiveTex,   pbr::TextureSlot::Emissive);
+        // R6: the detail albedo, the heightmap (R) and the detail normal use the layer-1 slots.
+        bind(gm.detailAlbedoTex, pbr::TextureSlot::Layer1BaseColor);
+        bind(gm.heightTex,       pbr::TextureSlot::Layer1MetalRough);
+        bind(gm.detailNormalTex, pbr::TextureSlot::Layer1Normal);
+        if (!gm.fxRecord.empty()) parseOcmatFx(gm.fxRecord, d.fx);
+        if (gm.reflectance >= 0.0f) d.reflectance = gm.reflectance;
+        d.coatWeight = gm.coatWeight; d.coatRoughness = gm.coatRoughness;
+        d.transmission = gm.transmission;
+        if (gm.ior >= 1.0f) d.ior = gm.ior;
 
         OcMatExtras ex;
         ex.shader = "standard";

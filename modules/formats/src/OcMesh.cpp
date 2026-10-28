@@ -25,6 +25,12 @@ constexpr u32 kChunkMLET = avrFourCC("MLET");
 // heard of it loads the base mesh.
 constexpr u32 kChunkMRPH = avrFourCC("MRPH");
 constexpr u16 kMrphChunkVersion = 1;
+// Optional extra vertex streams (colour, tangent, UV1), docs/plans/fabric/G4_RENDER.md R1. Never
+// Required: an older reader skips the chunk and loads the base mesh exactly as before.
+constexpr u32 kChunkVXEX = avrFourCC("VXEX");
+constexpr u16 kVxexChunkVersion = 1;
+constexpr u32 kVxexColor = 1u << 0, kVxexTangent = 1u << 1, kVxexUv1 = 1u << 2;
+constexpr u32 kVxexHeaderBytes = 8;   // u32 streamFlags, u32 vertexCount
 constexpr u32 kMrphDescBytes = 32;
 constexpr u32 kMrphHeaderBytes = 12;
 constexpr u32 kMrphEntryBytes = 16, kMrphEntryBytesNrm = 24;
@@ -277,6 +283,53 @@ usize groupSubmeshesByMaterial(OcMeshData& m) {
     m.submeshes = std::move(subs);
     m.materialSlots = std::move(kept);
     return m.submeshes.size();
+}
+
+void packTangent(const f32 n[3], const f32 t[3], const f32 dirV[3], f32 out[4]) {
+    out[0] = out[1] = out[2] = out[3] = 0.0f;
+    const f32 d = t[0]*n[0] + t[1]*n[1] + t[2]*n[2];
+    f32 o[3] = {t[0] - n[0]*d, t[1] - n[1]*d, t[2] - n[2]*d};
+    const f32 len = std::sqrt(o[0]*o[0] + o[1]*o[1] + o[2]*o[2]);
+    if (!(len > 1e-12f)) return;
+    for (f32& c : o) c /= len;
+    const f32 cr[3] = {n[1]*o[2] - n[2]*o[1], n[2]*o[0] - n[0]*o[2], n[0]*o[1] - n[1]*o[0]};
+    const f32 s = cr[0]*dirV[0] + cr[1]*dirV[1] + cr[2]*dirV[2];
+    out[0] = o[0]; out[1] = o[1]; out[2] = o[2];
+    out[3] = s < 0.0f ? -1.0f : 1.0f;
+}
+
+bool generateTangents(OcMeshData& m) {
+    const usize v = m.positions.size() / 3;
+    if (v == 0 || m.uvs.size() != v * 2 || m.normals.size() != v * 3) return false;
+    std::vector<f64> tAcc(v * 3, 0.0), bAcc(v * 3, 0.0);
+    for (usize i = 0; i + 2 < m.indices.size(); i += 3) {
+        const u32 ia = m.indices[i], ib = m.indices[i + 1], ic = m.indices[i + 2];
+        if (ia >= v || ib >= v || ic >= v) continue;
+        const f32* pa = &m.positions[usize(ia) * 3]; const f32* pb = &m.positions[usize(ib) * 3];
+        const f32* pc = &m.positions[usize(ic) * 3];
+        const f32* ta = &m.uvs[usize(ia) * 2]; const f32* tb = &m.uvs[usize(ib) * 2]; const f32* tc = &m.uvs[usize(ic) * 2];
+        f64 e1[3], e2[3];
+        for (int k = 0; k < 3; ++k) { e1[k] = pb[k] - pa[k]; e2[k] = pc[k] - pa[k]; }
+        const f64 du1 = tb[0] - ta[0], dv1 = tb[1] - ta[1], du2 = tc[0] - ta[0], dv2 = tc[1] - ta[1];
+        const f64 det = du1 * dv2 - du2 * dv1;
+        if (std::fabs(det) < 1e-20) continue;
+        const f64 inv = 1.0 / det;
+        // The triangle's area weights its tangent, so a sliver does not outvote its neighbours.
+        const f64 cx = e1[1]*e2[2] - e1[2]*e2[1], cy = e1[2]*e2[0] - e1[0]*e2[2], cz = e1[0]*e2[1] - e1[1]*e2[0];
+        const f64 area = std::sqrt(cx*cx + cy*cy + cz*cz);
+        for (int k = 0; k < 3; ++k) {
+            const f64 tk = (e1[k] * dv2 - e2[k] * dv1) * inv;   // dP/du
+            const f64 bk = (e2[k] * du1 - e1[k] * du2) * inv;   // dP/dv
+            for (const u32 vi : {ia, ib, ic}) { tAcc[usize(vi) * 3 + k] += tk * area; bAcc[usize(vi) * 3 + k] += bk * area; }
+        }
+    }
+    m.tangents.assign(v * 4, 0.0f);
+    for (usize i = 0; i < v; ++i) {
+        const f32 t[3] = {f32(tAcc[i*3]), f32(tAcc[i*3+1]), f32(tAcc[i*3+2])};
+        const f32 b[3] = {f32(bAcc[i*3]), f32(bAcc[i*3+1]), f32(bAcc[i*3+2])};
+        packTangent(&m.normals[i * 3], t, b, &m.tangents[i * 4]);
+    }
+    return true;
 }
 
 bool submeshesPartitionIndices(const OcMeshData& m, std::string* why) {
@@ -734,11 +787,45 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
         }
     }
 
+    // ---- VXEX: the optional colour / tangent / UV1 streams, each padded to 16 B. Colour is RGBA8, tangent
+    // 4 x snorm16 (w is +-1, exact in snorm16), UV1 2 x f32 (a lightmap UV wants the precision). ----
+    std::vector<u8> vxex;
+    const bool xColor = m.hasColor(), xTangent = m.hasTangent(), xUv1 = m.hasUv1();
+    const bool extras = xColor || xTangent || xUv1;
+    if (extras) {
+        W w{vxex};
+        w.u32v((xColor ? kVxexColor : 0u) | (xTangent ? kVxexTangent : 0u) | (xUv1 ? kVxexUv1 : 0u));
+        w.u32v(vcount);
+        while (vxex.size() % 16) vxex.push_back(0);
+        if (xColor) {
+            for (u32 i = 0; i < vcount; ++i)
+                for (u32 k = 0; k < 4; ++k) {
+                    f32 c = m.colors[usize(i) * 4 + k];
+                    c = c < 0.0f ? 0.0f : (c > 1.0f ? 1.0f : c);   // a NaN passes both compares; zeroed below
+                    w.u8v(static_cast<u8>(std::lround((c == c ? c : 0.0f) * 255.0f)));
+                }
+            w.pad16();
+        }
+        if (xTangent) {
+            for (u32 i = 0; i < vcount; ++i)
+                for (u32 k = 0; k < 4; ++k) w.i16v(toSnorm16(m.tangents[usize(i) * 4 + k]));
+            w.pad16();
+        }
+        if (xUv1) {
+            for (u32 i = 0; i < vcount; ++i) { w.f32v(m.uvs1[usize(i) * 2 + 0]); w.f32v(m.uvs1[usize(i) * 2 + 1]); }
+            w.pad16();
+        }
+    }
+
     // ---- MHDR ----
     std::vector<u8> mhdr;
     {
         W w{mhdr};
-        u32 flags = m.flags & ~(kOcMeshIndex32 | kOcMeshMeshlets | kOcMeshHasColor | kOcMeshHasUV1 | kOcMeshHasSkin | kOcMeshHasMorph);
+        u32 flags = m.flags & ~(kOcMeshIndex32 | kOcMeshMeshlets | kOcMeshHasColor | kOcMeshHasUV1 | kOcMeshHasTangent |
+                                kOcMeshHasSkin | kOcMeshHasMorph);
+        if (xColor) flags |= kOcMeshHasColor;
+        if (xUv1) flags |= kOcMeshHasUV1;
+        if (xTangent) flags |= kOcMeshHasTangent;
         if (morphed) flags |= kOcMeshHasMorph;
         if (index32) flags |= kOcMeshIndex32;
         if (skinned) flags |= kOcMeshHasSkin;
@@ -747,7 +834,7 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
         w.u8v(static_cast<u8>(lods.size()));                  // LODCount
         w.u8v(static_cast<u8>(m.submeshes.size()));            // SubmeshCount
         w.u8v(skinned ? 4 : 2);                               // StreamCount: +JOINTS +WEIGHTS
-        w.u8v(1);                                             // UVChannelCount
+        w.u8v(xUv1 ? 2 : 1);                                  // UVChannelCount
         w.f32v(m.boundsMin.x); w.f32v(m.boundsMin.y); w.f32v(m.boundsMin.z);
         w.f32v(m.boundsMax.x); w.f32v(m.boundsMax.y); w.f32v(m.boundsMax.z);
         // BoundsSphere: centre + radius, derived from the box.
@@ -828,7 +915,8 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
 
     Avr1File f;
     f.subtype = kAvrSubtypeMesh;
-    f.contentVersion = morphed ? 2 : 1;   // nothing branches on it; it only tells a tool morph data may be present
+    // Nothing branches on it; it only tells a tool morph data (2) or VXEX streams (3) may be present.
+    f.contentVersion = extras ? 3 : (morphed ? 2 : 1);
     f.flags = kAvrFlagCooked;
     f.add(kChunkMHDR, std::move(mhdr), kAvrChunkRequired);
     f.add(kChunkSTRT, strt.bytes());
@@ -842,6 +930,7 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
     // look for MLET is unaffected by its presence in a NEW file either).
     if (anyMeshlets) f.add(kChunkMLET, std::move(mlet), kAvrChunkGpuUploadable, kMlChunkVersionTopology);
     if (morphed) f.add(kChunkMRPH, std::move(mrph), 0, kMrphChunkVersion);
+    if (extras) f.add(kChunkVXEX, std::move(vxex), 0, kVxexChunkVersion);   // parsed on the CPU into OcMeshData, like MRPH
     return writeAvr1(f, out, why);
 }
 
@@ -1033,6 +1122,44 @@ bool parseOcMesh(const u8* bytes, usize size, OcMeshData& out, std::string* why)
                 out.weights[usize(i) * kOcMeshInfluences + k] =
                     static_cast<f32>(s[weightOffset + k]) / 255.0f;
             }
+        }
+    }
+
+    // ---- the optional VXEX streams (colour, tangent, UV1). Absent in every file written before them. ----
+    out.colors.clear(); out.tangents.clear(); out.uvs1.clear();
+    if (const AvrChunk* vx = f.find(kChunkVXEX)) {
+        R xr{vx->data.data(), vx->data.data() + vx->data.size()};
+        const u32 sflags = xr.u32v();
+        const u32 xcount = xr.u32v();
+        if (!xr.ok) return fail(why, ".ocmesh: truncated VXEX header");
+        if (xcount != vcount) return fail(why, ".ocmesh: VXEX describes " + std::to_string(xcount) +
+                                                   " vertices, the mesh has " + std::to_string(vcount));
+        const u64 vxSize = u64(vx->data.size());
+        u64 cursor = (u64(kVxexHeaderBytes) + 15) & ~u64(15);
+        const auto take = [&](u64 bytes, const u8*& base) -> bool {
+            if (cursor > vxSize || bytes > vxSize - cursor) return false;
+            base = vx->data.data() + cursor;
+            cursor = (cursor + bytes + 15) & ~u64(15);
+            return true;
+        };
+        const u8* b = nullptr;
+        if (sflags & kVxexColor) {
+            if (!take(u64(vcount) * 4, b)) return fail(why, ".ocmesh: VXEX is smaller than its colour stream requires");
+            out.colors.resize(usize(vcount) * 4);
+            for (usize k = 0; k < out.colors.size(); ++k) out.colors[k] = static_cast<f32>(b[k]) / 255.0f;
+        }
+        if (sflags & kVxexTangent) {
+            if (!take(u64(vcount) * 8, b)) return fail(why, ".ocmesh: VXEX is smaller than its tangent stream requires");
+            out.tangents.resize(usize(vcount) * 4);
+            for (usize k = 0; k < out.tangents.size(); ++k) {
+                u16 h; std::memcpy(&h, b + k * 2, 2);
+                out.tangents[k] = fromSnorm16(static_cast<i16>(h));
+            }
+        }
+        if (sflags & kVxexUv1) {
+            if (!take(u64(vcount) * 8, b)) return fail(why, ".ocmesh: VXEX is smaller than its UV1 stream requires");
+            out.uvs1.resize(usize(vcount) * 2);
+            std::memcpy(out.uvs1.data(), b, out.uvs1.size() * sizeof(f32));
         }
     }
 

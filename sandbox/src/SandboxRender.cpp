@@ -203,7 +203,7 @@ void SandboxApp::onRender(Engine& e)  {
         // setDrawBinding is sticky, so it is set unconditionally before every draw.
         if (pbr::MaterialSystem& ms = voxiRenderer_.materials(); ms.ready())
             e.device()->setDrawBinding(ms.bindingSet(o.material), &ms.constants(o.material),
-                                       sizeof(pbr::MaterialConstants));
+                                       ms.constantBytes(o.material));
 #endif
         // setDrawBlended is likewise sticky; forced false since this loop only draws opaque
         // editor placeholders (never an authored .ocmat) -- not left to draw ORDER, which a later
@@ -251,6 +251,7 @@ void SandboxApp::onRender(Engine& e)  {
 #if AVER_MODULE_SCENE && AVER_MODULE_VOXI
     // CLight entities -> Voxi's lamp list and the path tracer's lights, before the frame's draws.
     sceneLightFeed_.update(scene::World::instance(), voxiRenderer_, ptSceneView_.get(), project_.contentDir());
+    envFxFeed_.update(voxiRenderer_, eye_);   // G4 R8: local fog volumes
     // CDecal entities -> Voxi's projected-decal list (raster and ray hits both paint them).
     if (prefabModel_.contentDir() != project_.contentDir()) prefabModel_.setContentDir(project_.contentDir());
     decalImages_.setContentDir(project_.contentDir());
@@ -433,6 +434,8 @@ void SandboxApp::onRender(Engine& e)  {
                 popt.ownerHideRoot = firstPersonPawn_;
 
                 popt.ownerHideAll = playView_.ownerHideAll;   // the collision fade, in the depth prepass too
+                popt.cameraCullInv = playView_.cullInv;       // G4 R4: both passes must agree on what is drawn
+                popt.viewerPos = eye_; popt.haveViewerPos = true;
                 popt.mobility = &playMobility_;
                 // --no-walk-cache, negated (g_noWalkCacheArg true = cache OFF). MUST MATCH the
                 // colour call site's copt.useMeshLookupCache below -- both passes resolve the same
@@ -1574,6 +1577,8 @@ void SandboxApp::onRender(Engine& e)  {
         copt.ownerHideRoot = firstPersonPawn_;
 
         copt.ownerHideAll = playView_.ownerHideAll;   // the collision fade hides every mesh under the target, not only the flagged ones
+        copt.cameraCullInv = playView_.cullInv;       // G4 R4: Camera3D.cull_mask and visibility ranges, as in the prepass
+        copt.viewerPos = eye_; copt.haveViewerPos = true;
         copt.mobility = &playMobility_;
         // Worded differently from the library's line on purpose: "spawned CMeshRenderer entities"
         // names a concept a packaged game has no vocabulary for, and "culled" deliberately covers
@@ -2494,7 +2499,7 @@ SandboxApp::ResolvedSurface SandboxApp::resolveSurface(i32 mat) {
     if (pbr::MaterialSystem& ms = voxiRenderer_.materials(); ms.ready()) {
         rs.matSet = ms.bindingSet(rs.authored);
         rs.matConstants = &ms.constants(rs.authored);
-        rs.matBytes = sizeof(pbr::MaterialConstants);
+        rs.matBytes = ms.constantBytes(rs.authored);
     }
 #endif
     return rs;
@@ -2962,7 +2967,7 @@ void SandboxApp::syncPtSceneView(rhi::IDevice* dev) {
             [this](aver::rhi::BindingSetHandle set, const void* constants, aver::u32 bytes,
                    pt::PtSceneView::ResolvedMaterial& out) -> bool {
                 aver::f32* outAlbedo = out.albedo;
-                if (!set || !constants || bytes != sizeof(pbr::MaterialConstants)) return false;
+                if (!set || !constants || bytes < sizeof(pbr::MaterialConstants)) return false;
                 pbr::MaterialSystem& ms = voxiRenderer_.materials();
                 // This early return is why the view re-arms twice on a static scene -- not a tracer
                 // bug: until ready() flips, PtSurface uses the base colour; then every surface's

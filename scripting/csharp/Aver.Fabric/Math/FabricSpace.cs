@@ -61,6 +61,39 @@ public static class FabricSpace
         scale = ToAverScale(s);
     }
 
+    /// <summary>A Godot affine transform as the engine's instance matrix: 12 floats, the row-vector world matrix with its 4th column dropped (three basis rows, then
+    /// the translation in centimetres), written at <paramref name="offset"/>. Row i is where the engine's axis i goes, so a shear or a mirror survives.</summary>
+    public static void ToAverMatrix12(Transform3D t, float[] dest, int offset = 0)
+    {
+        // The engine axis u_i, seen from Godot, goes through the Godot basis and comes back through the map.
+        Vec3 r0 = ToAverDirection(t.Basis * FromAverDirection(new Vec3(1, 0, 0)));
+        Vec3 r1 = ToAverDirection(t.Basis * FromAverDirection(new Vec3(0, 1, 0)));
+        Vec3 r2 = ToAverDirection(t.Basis * FromAverDirection(new Vec3(0, 0, 1)));
+        Vec3 o = ToAverPosition(t.Origin);
+        dest[offset + 0] = r0.X; dest[offset + 1] = r0.Y; dest[offset + 2] = r0.Z;
+        dest[offset + 3] = r1.X; dest[offset + 4] = r1.Y; dest[offset + 5] = r1.Z;
+        dest[offset + 6] = r2.X; dest[offset + 7] = r2.Y; dest[offset + 8] = r2.Z;
+        dest[offset + 9] = o.X; dest[offset + 10] = o.Y; dest[offset + 11] = o.Z;
+    }
+
+    /// <summary>The tangent the engine stores for a vertex whose Godot normal and tangent (xyz and handedness) are given (G4 R1's contract): the unit tangent
+    /// made orthogonal to the normal, and w = +1/-1 so that cross(N, T) * w points along increasing v. Godot's bitangent cross(N, T) * w points at decreasing v
+    /// (the glTF rule), so the direction of increasing v is its negation. All in engine space; a vector with no usable tangent gives all zeros.</summary>
+    public static void ToAverTangent(Vector3 normal, Vector3 tangent, float handedness, float[] dest, int offset)
+    {
+        Vec3 n = ToAverDirection(normal), t = ToAverDirection(tangent);
+        Vector3 b = normal.Cross(tangent) * handedness;
+        Vec3 dirV = ToAverDirection(-b);
+        float d = t.X * n.X + t.Y * n.Y + t.Z * n.Z;
+        float ox = t.X - n.X * d, oy = t.Y - n.Y * d, oz = t.Z - n.Z * d;
+        float len = MathF.Sqrt(ox * ox + oy * oy + oz * oz);
+        if (!(len > 1e-12f)) { dest[offset] = dest[offset + 1] = dest[offset + 2] = dest[offset + 3] = 0f; return; }
+        ox /= len; oy /= len; oz /= len;
+        float cx = n.Y * oz - n.Z * oy, cy = n.Z * ox - n.X * oz, cz = n.X * oy - n.Y * ox;
+        float s = cx * dirV.X + cy * dirV.Y + cz * dirV.Z;
+        dest[offset] = ox; dest[offset + 1] = oy; dest[offset + 2] = oz; dest[offset + 3] = s < 0f ? -1f : 1f;
+    }
+
     /// <summary>An Aver entity's position, rotation and scale as a Godot transform.</summary>
     public static Transform3D FromAver(Vec3 position, Quat rotation, Vec3 scale) =>
         new(Basis.FromQuaternionScale(FromAverRotation(rotation), FromAverScale(scale)), FromAverPosition(position));

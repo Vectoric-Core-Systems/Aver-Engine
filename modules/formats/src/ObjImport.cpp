@@ -310,6 +310,8 @@ bool importObjFromMemory(const char* text, usize size, const std::string& baseDi
     // File-global vertex streams. OBJ indices address these across the WHOLE file, not per object,
     // which is why they live out here while each output mesh keeps its own de-indexed arrays.
     std::vector<f32> gp, gt, gn;                                // positions x3, uvs x2, normals x3
+    std::vector<f32> gc;                                        // colours x4, parallel to gp; kept only if any `v` line had rgb
+    bool sawColor = false;
     gp.reserve(size / 24);                                      // ~one vertex per 24 bytes of text
 
     std::vector<MeshBuild> builds;
@@ -347,8 +349,17 @@ bool importObjFromMemory(const char* text, usize size, const std::string& baseDi
             } else {
                 gp.push_back(x * opt.scale); gp.push_back(y * opt.scale); gp.push_back(z * opt.scale);
             }
-            // A `v` line may carry r g b after xyz. The engine's MeshVertex has no colour channel,
-            // so it is dropped -- reported once rather than per vertex.
+            // A `v` line may carry r g b after xyz: the R1 colour stream (white where a vertex has none).
+            const std::string_view cr = token(q, lineEnd);
+            if (!cr.empty()) {
+                gc.push_back(parseFloat(cr));
+                gc.push_back(parseFloat(token(q, lineEnd)));
+                gc.push_back(parseFloat(token(q, lineEnd)));
+                gc.push_back(1.0f);
+                sawColor = true;
+            } else {
+                gc.insert(gc.end(), {1.0f, 1.0f, 1.0f, 1.0f});
+            }
             continue;
         }
         if (kw == "vt") {
@@ -432,6 +443,13 @@ bool importObjFromMemory(const char* text, usize size, const std::string& baseDi
             mb->data.positions.push_back(gp[pi]);
             mb->data.positions.push_back(gp[pi + 1]);
             mb->data.positions.push_back(gp[pi + 2]);
+            if (sawColor) {
+                // Vertices made before the first coloured `v` line cannot exist (positions are read first), but a
+                // mesh that began earlier is padded white so the stream stays 1:1.
+                const usize ci = static_cast<usize>(c.v) * 4;
+                while (mb->data.colors.size() < usize(nv) * 4) mb->data.colors.push_back(1.0f);
+                mb->data.colors.insert(mb->data.colors.end(), gc.begin() + ci, gc.begin() + ci + 4);
+            }
 
             if (c.vt >= 0 && static_cast<usize>(c.vt) * 2 + 1 < gt.size()) {
                 mb->data.uvs.push_back(gt[static_cast<usize>(c.vt) * 2]);
@@ -481,6 +499,7 @@ bool importObjFromMemory(const char* text, usize size, const std::string& baseDi
 
     for (MeshBuild& b : builds) {
         if (b.data.positions.empty()) continue;
+        if (b.data.colors.size() != b.data.positions.size() / 3 * 4) b.data.colors.clear();
         if (!b.sawNormal && opt.generateMissingNormals) generateNormals(b.data);
         if (b.data.submeshes.empty()) {
             // A file with faces but no usemtl still needs one slot, or the renderer has nothing to

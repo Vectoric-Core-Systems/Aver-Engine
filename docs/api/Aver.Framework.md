@@ -2,7 +2,7 @@
 
 # Aver.Framework public API
 
-225 public types and 1895 public members, read from `scripting/csharp/Aver.Framework/` (135 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+234 public types and 1980 public members, read from `scripting/csharp/Aver.Framework/` (140 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Framework
 
@@ -1373,6 +1373,31 @@ Values: `Destroy = 0`, `Stop = 1`, `Reload = 2`, `Travel = 3`
 - `public AbilitySystem? Abilities { get; }` - This entity's gameplay ability system, or null if it has none (see AbilitySystem).
 - `public AbilitySystem GetOrAddAbilities()` - This entity's gameplay ability system, created if it has none.
 
+### EnvFx
+
+`public static class EnvFx` - Local fog volumes and reflection probes (Godot's FogVolume and ReflectionProbe).
+
+- `public const int MaxFogVolumes = 64`
+- `public const int MaxProbes = 32`
+- `public static int CreateFogVolume(string key)`
+- `public static bool DestroyFogVolume(int id)`
+- `public static int FindFogVolume(string key)`
+- `public static bool SetFogVolume(int id, FogVolumeShapeKind shape, float[] world12, float[] halfExtentCm3, float densityPerMetre, float[]? albedo3 = null, float[]? emission3 = null, float heightFalloff = 0f, float edgeFade = 0.1f)` - Everything about the volume in one call.
+- `public static bool SetFogVolumeEnabled(int id, bool on)`
+- `public static int FogVolumeCount { get; }`
+- `public static float FogDensityAt(float x, float y, float z)` - The summed signed extinction per centimetre of every enabled volume at an engine-space point.
+- `public static int CreateProbe(string key)`
+- `public static bool DestroyProbe(int id)`
+- `public static int FindProbe(string key)`
+- `public static bool SetProbeBox(int id, float[] world12, float[] halfExtentCm3, float[]? originOffsetCm3 = null)`
+- `public static bool SetProbeLook(int id, float intensity, float blendDistanceCm, float maxDistanceCm, bool boxProjection, bool interior, bool updateAlways, int resolution)`
+- `public static bool SetProbeAmbient(int id, int mode, float[]? colour3, float energy)` - Mode 0 disabled, 1 environment, 2 colour (Godot's ReflectionProbe.AmbientMode).
+- `public static bool SetProbeMasks(int id, uint cullMask, uint reflectionMask)`
+- `public static bool SetProbeEnabled(int id, bool on)`
+- `public static int ProbeCount { get; }`
+- `public static ProbeBlend SelectProbes(float x, float y, float z, float cameraX, float cameraY, float cameraZ)` - The probes that light an engine-space point seen from a camera position, with their shares of the blend.
+- `public static (float X, float Y, float Z) ProjectProbeDirection(int id, float x, float y, float z, float dx, float dy, float dz)` - The direction to look a probe's capture up with for a reflection ray from a point (box projection applied); the input direction for an unknown probe.
+
 ### EventData
 
 `public sealed class EventData` - The event being delivered: a snapshot, safe to keep after the handler returns.
@@ -1500,6 +1525,12 @@ Values: `None = 0`, `Int = 1`, `Float = 2`, `Bool = 3`, `String = 4`, `Vec3 = 5`
 `public enum FadeCurve` - The shape of a fade, mirroring AVER_AUDIO_FADE_* in audio_abi.h.
 
 Values: `Linear = 0`, `EqualPower = 1`
+
+### FogVolumeShapeKind
+
+`public enum FogVolumeShapeKind` - Godot's RenderingServer.FogVolumeShape numbers, the same as AVER_FW_FOGVOL_*.
+
+Values: `Ellipsoid = 0`, `Cone = 1`, `Cylinder = 2`, `Box = 3`, `World = 4`
 
 ### Frame
 
@@ -2117,6 +2148,23 @@ Values: `Simulation = 0`, `Animation = 1`
 
 Values: `Velocity = 0`, `Yaw = 1`
 
+### MultiMeshes
+
+`public static class MultiMeshes` - Instance tables drawn as one mesh (Godot's MultiMesh).
+
+- `public static int Create(string key)`
+- `public static bool Destroy(int id)`
+- `public static bool SetSource(int id, string meshPath)` - The mesh to instance: a content path ("Meshes/Rock.ocmesh") or a runtime mesh by its path (PathOf).
+- `public static bool SetFlags(int id, bool useColors, bool useCustom)`
+- `public static bool SetCount(int id, int count)`
+- `public static bool SetVisible(int id, int count)` - How many instances are drawn (the first N); -1 draws all of them.
+- `public static bool SetTransform(int id, int index, float[] t12)` - One instance's transform as 12 floats: the engine's row-vector world matrix with its 4th column dropped (three basis rows, then the translation).
+- `public static bool SetColor(int id, int index, float r, float g, float b, float a)`
+- `public static bool SetCustom(int id, int index, float x, float y, float z, float w)`
+- `public static bool SetBuffer(int id, int count, float[]? transforms12, float[]? colors4, float[]? custom4)` - The whole table at once; count instances (the table is resized to it); colours and custom data may be null.
+- `public static int MeshOf(int id)` - The runtime mesh the MultiMesh bakes into (its path is PathOf of "multimesh/&lt;key&gt;"); 0 for an unknown id.
+- `public static bool TryGetInfo(int id, out int instances, out int visible, out int drawn, out int generation)` - Instances, visible (requested), drawn (after the engine's vertex budget; 0 until the first bake) and the baked mesh's generation.
+
 ### Music
 
 `public static class Music` - The music slot.
@@ -2230,6 +2278,14 @@ Values: `Editor = 0`, `Playing = 1`, `Paused = 2`
 
 `public delegate void PreAttributeChange(AbilitySystem system, AttributeRef attribute, ref float newValue)` - Lets a game adjust an attribute's new Current value before it is stored (a custom clamp).
 
+### ProbeBlend
+
+`public readonly struct ProbeBlend` - The reflection probes that light a point.
+
+- `public int[] Ids { get; init; }` - Up to four probe ids, the most specific (smallest) first.
+- `public float[] Weights { get; init; }` - Each probe's share of the blend (its intensity included).
+- `public float Rest { get; init; }` - What is left for the sky / default environment, 0 to 1.
+
 ### ProjectSettings
 
 `public static class ProjectSettings` - The project manifest's settings by key (Godot's ProjectSettings.get_setting), as the text the manifest holds.
@@ -2303,6 +2359,18 @@ Values: `Start = 0`, `End = 1`
 ### RopeState
 
 `public readonly record struct RopeState(float LengthCm, float Strain, int Segments, bool Cut, bool Awake)` - A rope as of the last tick: the polyline length, its strain against the rest length, the segment count, whether it was cut.
+
+### RuntimeMeshes
+
+`public static class RuntimeMeshes` - Meshes built from arrays at run time.
+
+- `public static string PathOf(string key)` - The asset path an entity's mesh renderer names for the runtime mesh key: @rtmesh/&lt;key&gt;.
+- `public static int Create(string key)` - Makes the mesh named key (or returns the id it has).
+- `public static bool Destroy(int id)`
+- `public static bool Clear(int id)` - Removes every surface; the mesh keeps its key.
+- `public static int AddSurface(int id, float[] positions, float[]? normals, float[]? uv, float[]? colors, float[]? uv1, float[]? tangents, uint[]? indices, string? material)` - Appends a surface: positions is 3 floats per vertex; the optional arrays are 3 (normals), 2 (UV), 4 (colour), 2 (second UV) and 4 (tangent xyz and handedness) floats per vertex; indices is a triangle list (null draws the vertices in order).
+- `public static int SurfaceCount(int id)`
+- `public static bool TryGetInfo(int id, out int surfaces, out int vertices, out int triangles, out int generation)` - Surfaces, vertices, triangles and the generation counter of a mesh; false for an unknown id.
 
 ### SceneQueries
 
@@ -2481,6 +2549,58 @@ Values: `ClearAll`, `RemoveOne`
 `public enum StackScope` - How repeated applications of one effect combine.
 
 Values: `None`, `Target`, `Source`
+
+### SubViewClear
+
+`public enum SubViewClear` - Whether the target is cleared before a picture.
+
+Values: `Always = 0`, `Never = 1`, `Once = 2`
+
+### SubViewInfo
+
+`public readonly struct SubViewInfo` - What the host knows about a view: its modes and the size it is actually drawn at.
+
+- `public SubViewUpdate Update { get; init; }`
+- `public SubViewClear Clear { get; init; }`
+- `public bool Transparent { get; init; }`
+- `public int CameraEntity { get; init; }` - The camera entity handle, 0 for none.
+- `public int Width { get; init; }` - The size drawn: the requested size times the 3D scale, fitted to the pixel budget.
+- `public int Height { get; init; }`
+- `public int Renders { get; init; }` - Pictures drawn so far.
+- `public int Generation { get; init; }` - Changes when the texture is rebuilt; a consumer holding the old Texture must read it again.
+
+### SubViews
+
+`public static class SubViews` - Sub-viewports: extra views of the world drawn into textures that materials and the UI show (Godot's SubViewport and ViewportTexture).
+
+- `public const int DefaultMaxViews = 4`
+- `public const int DefaultRendersPerFrame = 2`
+- `public static int Create(string key, int width, int height)` - Makes the view named key or returns the one that exists.
+- `public static bool Destroy(int id)`
+- `public static int Find(string key)` - The id of the view with this key, or 0.
+- `public static bool SetSize(int id, int width, int height)`
+- `public static bool SetUpdate(int id, SubViewUpdate mode)` - Setting Once asks for one render now.
+- `public static bool SetClear(int id, SubViewClear mode)`
+- `public static bool SetTransparent(int id, bool on)` - A transparent view clears to alpha 0.
+- `public static bool SetOwnWorld(int id, bool on)` - Carried only: the engine has one world.
+- `public static bool SetCamera(int id, int entityHandle)` - The entity whose camera component and world transform draw the view; 0 clears it (a view with no camera is not drawn).
+- `public static bool SetScale(int id, float scale, int msaa = 0)` - Multiplies the drawn size (0.25 to 8); the multisample count is stored, not used.
+- `public static bool SetParentVisible(int id, bool visible)`
+- `public static bool SetClearColor(int id, float r, float g, float b, float a = 1f)` - The colour the target is cleared to (display values 0 to 1).
+- `public static bool AddMaterialConsumer(int id)` - Counts a material that shows the view's texture; a WhenVisible view is drawn only while there is one.
+- `public static bool RemoveMaterialConsumer(int id)`
+- `public static bool AddUiConsumer(int id)` - Counts a piece of UI that shows the view's texture.
+- `public static bool RemoveUiConsumer(int id)`
+- `public static bool RequestRender(int id)` - Asks for one more picture whatever the update mode says.
+- `public static bool SetScreenRect(int id, float x, float y, float width, float height, bool visible)` - Shows the view over the window, a rectangle in the UI's own pixels (a SubViewportContainer); visible false hides it.
+- `public static bool TryGetInfo(int id, out SubViewInfo info)` - False for an unknown id.
+- `public static ulong Texture(int id)` - The host's texture (an engine texture handle) for the view, 0 until a picture has been drawn.
+
+### SubViewUpdate
+
+`public enum SubViewUpdate` - When a view is drawn.
+
+Values: `Disabled = 0`, `Once = 1`, `WhenVisible = 2`, `WhenParentVisible = 3`, `Always = 4`
 
 ### Surface
 

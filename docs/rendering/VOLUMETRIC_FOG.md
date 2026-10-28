@@ -59,7 +59,7 @@ Needs `DeviceCaps::typedUavLoads`, SM 6.0 and DXC (the same gate as the NRD2 con
 | `volumetricFogMaxDistance` | `voxi.volFogDistance` | 20000 cm | where the volume ends |
 | `volumetricFogGridX/Y/Z` | `voxi.volFogGridX/Y/Z` | 160 / 90 / 64 | re-creates the volume |
 
-Not yet persisted in the project manifest (`RENDER.*` keys in `OcProject.hpp`/`ProjectRenderApply.hpp`), nor in the Details panel; console and `Settings` only.
+The switch and the uniform density are persisted in the project manifest since G4 R8: `RENDER.VOLFOG 0|1` and `RENDER.VOLFOGDENSITY <per cm>` (`OcProject.hpp`, `ProjectRenderApply.hpp`; docs/formats/FORMAT_SPECS.md). The other settings are not persisted, and none is in the Details panel; console and `Settings` only.
 
 ## 6. Known limits
 
@@ -69,3 +69,12 @@ Not yet persisted in the project manifest (`RENDER.*` keys in `OcProject.hpp`/`P
 - **Resolution**: 16 px froxels at 2560x1440 soften shaft edges; raise `GridX/Y` or shorten the distance to sharpen.
 - **Foliage**: cutouts block the sun's ray as whole cards, so shafts through trees are darker than real ones.
 - **Cost on AMD**: the shade sites add eight UAV loads to the `PSRayDriven`/Stage B pixel shaders. The off path is one uniform branch. If the register-pressure hangs ever show up with the volume on, the loads can move into a small post-pass without touching the volume.
+
+## 7. Local fog volumes (G4 R8)
+
+Godot's `FogVolume` + `FogMaterial` as shaped regions of extra fog inside this volume. `docs/plans/fabric/G4_RENDER.md` R8 has the contract; the pieces:
+
+- **Data**: `framework_envfx_abi.h` (`aver_fw_fogvol_*`, C#: `Aver.Framework.EnvFx`). A script or a converted level (`Aver.Fabric.FogVolume`) publishes a box / ellipsoid / cylinder / cone / world volume with density per metre (negative carves), albedo, emission, height falloff and edge fade. `Runtime/include/aver/game/EnvFxFeed.hpp` (both hosts, after the light feed) packs the 16 nearest the camera into a `FogVolumeBlock` (`aver/core/FogVolume.hpp`) and hands it to `VoxiRenderer::setFogVolumes`. With none registered nothing is pushed and the passes below are today's.
+- **Shader**: `voxi_froxel.hlsl` compiled with `AVER_FOG_VOLUMES=1` (both compute entries; built the first frame a volume exists, `VoxiFroxelFog::buildVolumePipelines`). The block is a tail of `FroxelCB` (97 float4). Per froxel the scatter pass sums the volumes' signed extinction at the jittered point and adds `albedo * density * (sun + sky light) + emission * density` to the radiance; this variant stores *(radiance per cm, extinction per cm without the analytic height fog)* so the transmittance the shade sites read leaves the height fog out, as before, and the integrate pass adds the height fog's extinction back at the slice's middle for the in-scatter. Switching between the ordinary and the volume passes drops the temporal history for a frame.
+- **Needs this fog on** (`RENDER.VOLFOG 1`, `voxi.volumetricFog`): as in Godot, where a FogVolume needs `volumetric_fog_enabled`.
+- **Limits**: 16 volumes per frame; the density is uniform inside the shape (no 3D density texture, no custom fog shader); edge fade and height falloff follow Godot's documented behaviour, not its code; a negative volume cannot make the medium thinner than zero; the nearest-first cut ignores a volume's size.

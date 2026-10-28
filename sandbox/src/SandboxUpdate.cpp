@@ -20,6 +20,7 @@
 #include "TextureEditor.hpp"   // makeTextureEditor; SandboxApp.hpp does not pull this one in
 #include "InstanceSetEditor.hpp"   // makeInstanceSetEditor (.ocinst); not pulled in by SandboxApp.hpp
 #include "aver/game/GameCamera.hpp"
+#include "aver/game/GameRender.hpp"   // DrawWorldOptions, for the sub-viewports' walk
 #include "aver/game/GameIkProbe.hpp"   // [wave5/ik-retarget] the foot-IK ground probe
 #include "aver/game/GameTick.hpp"
 #include "aver/game/GameSystemsWiring.hpp"
@@ -705,6 +706,18 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     else                    aver_ui_begin_frame(vpX_, vpY_, vpW_, vpH_);
     // Font and pointer lent per frame, right after frame opens. Font re-lent every frame (loadGameUiFont can leave it invalid).
     aver_ui_set_font(&uiFont_);
+#if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
+    // Sub-viewports shown over the window (G4 R5): first in the frame's list, so the HUD draws over them; the rectangle is in the UI frame's own space.
+    {
+        game::SubViewportHost::OnScreenView sv[16];
+        const u32 svCount = subViews_.onScreen(sv, 16);
+        float uiRect[4] = {0, 0, 0, 0};
+        if (svCount) aver_ui_viewport(uiRect);
+        for (u32 i = 0; i < svCount; ++i)
+            aver_ui_textured_rect(uiRect[0] + sv[i].x, uiRect[1] + sv[i].y, sv[i].w, sv[i].h, aver::render::ui::UiRenderer::textureId(sv[i].texture),
+                                  0.0f, 0.0f, 1.0f, 1.0f, 0xFFFFFFFFu);
+    }
+#endif
     // Pointer converted here (only place that can do it correctly): UI frame is laid out against viewport, not window.
     {
         const f32 ox = hudPreviewActive() ? hudRectX_ : static_cast<f32>(vpX_);
@@ -1204,6 +1217,31 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #endif
     // Outside the viewport rect is editor chrome, not sky.
     e.device()->setClearColor(0.055f, 0.055f, 0.062f, 1);
+#if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
+    // Runtime meshes (G4 R7): meshes a Play session's scripts built, or a MultiMesh baked, since last frame are uploaded before the draw walk. None = nothing to do.
+    content_.syncRuntimeMeshes(*e.device());
+    // Sub-viewports (G4 R5): a Play session's render-to-texture views. Their draw lists and cameras are set here because the views' features draw in the device's
+    // beginFrame, which follows. With no view in the registry (every editor session that is not playing one) this returns at once.
+    {
+        game::SubViewportHost::Inputs svIn;
+        svIn.frame = e.time().frame;
+        svIn.content = &content_;
+#if AVER_MODULE_PBR && AVER_MODULE_VOXI
+        svIn.materials = &voxiRenderer_.materials();
+#endif
+        svIn.skinning = skinnedScene_.get();
+        game::DrawWorldOptions svWalk;
+#if AVER_MODULE_RENDER_SOFTBODY
+        svWalk.softBodies = softBodyScene_.get();
+#if AVER_MODULE_RENDER_HAIR
+        svWalk.hair = hairScene_.get();
+#endif
+#endif
+        svIn.walk = &svWalk;
+        svIn.sky = &skyNow;
+        subViews_.update(svIn);
+    }
+#endif
     hm.mark("deviceSetup");
     // Console post.* vars write the device, not post_; adopt device changes into post_ before pushing.
     if (postPushedValid_ && !rhi::postSettingsEqual(e.device()->postProcess(), postPushed_))

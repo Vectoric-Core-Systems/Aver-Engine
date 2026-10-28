@@ -102,6 +102,51 @@ bool VoxiFroxelFog::buildPipelines(rhi::IResourceFactory& res, const rhi::Pipeli
     return true;
 }
 
+void VoxiFroxelFog::setFogVolumes(const FogVolumeBlock* block) {
+    if (!block || block->header[0] < 0.5f) { volCount_ = 0; return; }
+    vol_ = *block;
+    volCount_ = std::min(static_cast<u32>(block->header[0] + 0.5f), kFogVolumeMax);
+    vol_.header[0] = static_cast<f32>(volCount_);
+}
+
+// The AVER_FOG_VOLUMES twins of the scatter and integrate entries (voxi_froxel.hlsl). Same sun-shadow path as the ordinary scatter pass (rtBuilt_), so the
+// frame block's shadow mode means the same in both. Built the first frame a fog volume reaches record(); a failure is remembered until the shader files change.
+bool VoxiFroxelFog::buildVolumePipelines(rhi::IResourceFactory& res, const rhi::PipelineLayout& layout) {
+    const std::string& source = rhi::shaderFile(kShaderName);
+    if (source.empty()) return false;
+    const char* prelude = rhi::sharedShaderPrelude();
+
+    rhi::ShaderDesc sd{};
+    sd.source = source.c_str();
+    sd.prelude = prelude;
+    sd.entry = "CSFroxelScatter";
+    sd.stage = rhi::ShaderStage::Compute;
+    sd.minShaderModel = rtBuilt_ ? 65 : 60;
+    sd.defines = rtBuilt_ ? "AVER_RT=1;AVER_FOG_VOLUMES=1" : "AVER_RT=0;AVER_FOG_VOLUMES=1";
+    const rhi::ShaderHandle cs = res.createShader(sd);
+    rhi::ShaderDesc ig{};
+    ig.source = source.c_str();
+    ig.prelude = prelude;
+    ig.entry = "CSFroxelIntegrate";
+    ig.stage = rhi::ShaderStage::Compute;
+    ig.minShaderModel = 60;
+    ig.defines = "AVER_RT=0;AVER_FOG_VOLUMES=1";
+    const rhi::ShaderHandle ics = res.createShader(ig);
+    rhi::ComputePipelineDesc pd{};
+    pd.layout = layout;
+    if (cs) { pd.cs = cs; scatterVolPso_ = res.createComputePipeline(pd); res.destroyShader(cs); }
+    if (ics) { pd.cs = ics; integrateVolPso_ = res.createComputePipeline(pd); res.destroyShader(ics); }
+    if (!scatterVolPso_ || !integrateVolPso_) {
+        if (scatterVolPso_) res.destroyPipeline(scatterVolPso_);
+        if (integrateVolPso_) res.destroyPipeline(integrateVolPso_);
+        scatterVolPso_ = integrateVolPso_ = 0;
+        AVER_WARN("[Voxi] volumetric fog: the fog-volume compute variants would not build; fog volumes are not drawn");
+        return false;
+    }
+    AVER_INFO("[Voxi] volumetric fog: fog-volume compute variants ready");
+    return true;
+}
+
 bool VoxiFroxelFog::buildSky(rhi::IResourceFactory& res) {
     if (skyPso_) { res.destroyPipeline(skyPso_); skyPso_ = 0; }
     skySamples_ = sampleCount_;
@@ -220,7 +265,11 @@ void VoxiFroxelFog::destroyPipelines() {
     if (scatterPso_) res_->destroyPipeline(scatterPso_);
     if (integratePso_) res_->destroyPipeline(integratePso_);
     if (skyPso_) res_->destroyPipeline(skyPso_);
+    if (scatterVolPso_) res_->destroyPipeline(scatterVolPso_);
+    if (integrateVolPso_) res_->destroyPipeline(integrateVolPso_);
     scatterPso_ = integratePso_ = skyPso_ = 0;
+    scatterVolPso_ = integrateVolPso_ = 0;
+    volLive_ = false;
     skySamples_ = 0;
 }
 
@@ -249,8 +298,10 @@ bool VoxiFroxelFog::ensure(rhi::IResourceFactory& res, const rhi::PipelineLayout
     if (rev != builtRev_) {
         builtRev_ = rev;
         buildFailed_ = false;
+        volBuildFailed_ = false;
         destroyPipelines();
     }
+    layout_ = layout;
     if (!scatterPso_ && !buildFailed_) {
         if (!buildPipelines(res, layout, rtCapable)) buildFailed_ = true;
     }
@@ -305,6 +356,16 @@ void VoxiFroxelFog::record(rhi::IRenderContext& ctx, rhi::BindingSetHandle table
         AVER_INFO("[Voxi] volumetric fog: sun visibility from {}", kName[sunMode]);
     }
 
+    // G4 R8: fog volumes run the AVER_FOG_VOLUMES variants; without any, today's passes. The two store the scatter volume differently, so a switch
+    // between them drops the history for a frame.
+    bool useVol = false;
+    if (volCount_ > 0 && !volBuildFailed_ && res_) {
+        if (!scatterVolPso_ || !integrateVolPso_) volBuildFailed_ = !buildVolumePipelines(*res_, layout_);
+        useVol = scatterVolPso_ && integrateVolPso_;
+    }
+    if (useVol != volWasLive_) historyValid_ = false;
+    volWasLive_ = volLive_ = useVol;
+
     // History is good only if the last volume was recorded the frame before, from the same camera path.
     const bool useHistory = historyValid_ && f.historyOk && lastFrame_ + 1u == f.frameIndex;
 
@@ -341,17 +402,28 @@ void VoxiFroxelFog::record(rhi::IRenderContext& ctx, rhi::BindingSetHandle table
     if (mapRead)
         ctx.textureBarrier(f.shadowMap, rhi::ResourceState::ShaderResource, rhi::ResourceState::NonPixelShaderResource);
 
-    ctx.setPipeline(scatterPso_);
+    // The constants: the engine block alone, or (fog volumes) followed by the volume block the variants declare as the tail of FroxelCB.
+    u8 blob[sizeof(FroxelConstants) + sizeof(FogVolumeBlock)];
+    const void* cbData = &cb_;
+    u32 cbBytes = sizeof(cb_);
+    if (useVol) {
+        std::memcpy(blob, &cb_, sizeof(cb_));
+        std::memcpy(blob + sizeof(cb_), &vol_, sizeof(vol_));
+        cbData = blob;
+        cbBytes = static_cast<u32>(sizeof(blob));
+    }
+
+    ctx.setPipeline(useVol ? scatterVolPso_ : scatterPso_);
     ctx.setBindingSet(table0, 0);
     ctx.setBindingSet(sets_[hist], 1);
-    ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
+    ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, cbData, cbBytes);
     ctx.dispatch(groups(gx_), groups(gy_), gz_);
     ctx.uavBarrierTexture(tex_[cur]);
 
-    ctx.setPipeline(integratePso_);
+    ctx.setPipeline(useVol ? integrateVolPso_ : integratePso_);
     ctx.setBindingSet(table0, 0);
     ctx.setBindingSet(sets_[hist], 1);
-    ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
+    ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, cbData, cbBytes);
     ctx.dispatch(groups(gx_), groups(gy_), 1);
     ctx.uavBarrierTexture(final_);
 

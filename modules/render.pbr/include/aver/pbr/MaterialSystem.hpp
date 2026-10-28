@@ -94,6 +94,9 @@ public:
     const std::array<rhi::TextureHandle, kTextureSlotCount>* textures(rhi::BindingSetHandle set) const;
     // The constant block a draw of `h` uses. An unknown or stale handle gets the fallback.
     const MaterialConstants& constants(MaterialHandle h);
+    // How many bytes of the block at &constants(h) a draw hands setDrawBinding: sizeof(MaterialConstants) (192), or 256 for a material with
+    // MaterialDesc::fx, whose MaterialExtConstants follow the base block in memory. Every pre-R6 material answers 192.
+    u32 constantBytes(MaterialHandle h);
 
     // Whether `s` is one of THIS system's binding sets. The question a consumer has to ask when it
     // is handed an OPAQUE draw binding (rhi::IRenderFeature::submitDraw forwards a handle plus raw
@@ -209,7 +212,10 @@ private:
     struct Entry {
         rhi::BindingSetHandle set = 0;
         MaterialConstants      constants{};
+        // R6: must stay directly behind `constants` (a draw hands the device &constants and constantBytes()).
+        MaterialExtConstants   ext{};
     };
+    static_assert(sizeof(MaterialConstants) % alignof(MaterialExtConstants) == 0, "ext follows the base block without padding");
 
     // Creates the four 1x1 identity textures.
     bool createFallbackTextures();

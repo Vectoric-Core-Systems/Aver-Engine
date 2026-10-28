@@ -114,6 +114,8 @@ MaterialConstants packMaterial(const MaterialDesc& d) {
     // inverted. castShadow defaults to true, so the positive spelling is the one that agrees with
     // the default for anything that predates the flag.
     if (d.castShadow) flags |= MaterialFlag_CastShadow;
+    if (d.vertexColor) flags |= MaterialFlag_VertexColor;
+    if (d.fx.active() && !d.terrain.enabled() && d.shadingModel != ShadingModel::Hair) flags |= MaterialFlag_Fx;
     // Keyed on the WEIGHT alone: a radius with no weight scatters nothing, and letting it set the
     // flag would pay for the shader's subsurface branch to compute a zero.
     if (d.subsurfaceWeight > 0.0f) flags |= MaterialFlag_Subsurface;

@@ -2153,7 +2153,7 @@ void SandboxApp::buildRenderingSettings(int page) {
                 bool stated = project_.postTonemap >= 0;
                 // Clamped from both sources; neither is bounded.
                 int mode = stated ? project_.postTonemap : static_cast<int>(post_.tonemap);
-                if (mode > 2) mode = 2;
+                if (mode > 7) mode = 7;
                 if (ImGui::Checkbox("##stated", &stated)) {
                     project_.postTonemap = stated ? mode : -1;
                     if (stated) post_.tonemap = static_cast<u32>(mode);
@@ -2165,12 +2165,27 @@ void SandboxApp::buildRenderingSettings(int page) {
                 ImGui::SameLine();
                 ImGui::BeginDisabled(!stated);
                 if (ImGui::Combo("Tone curve", &mode,
-                                 "Per-channel ACES\0ACES fitted (default)\0ACES luminance\0")) {
+                                 "Per-channel ACES\0ACES fitted (default)\0ACES luminance\0"
+                                 "Godot linear\0Godot Reinhard\0Godot filmic\0Godot ACES\0Godot AgX\0")) {
                     project_.postTonemap = mode;
                     post_.tonemap = static_cast<u32>(mode);
                     projectDirty_ = true;
                 }
                 ImGui::EndDisabled();
+                {
+                    // Godot's white point and display adjustments (RENDER.TONEMAPWHITE / ADJUST*); an edit states the key.
+                    struct Row { const char* label; f32* project; f32* live; f32 hi; };
+                    Row rows[] = {{"Tone white", &project_.postTonemapWhite, &post_.tonemapWhite, 16.0f},
+                                  {"Brightness", &project_.postAdjustBrightness, &post_.adjustBrightness, 4.0f},
+                                  {"Contrast", &project_.postAdjustContrast, &post_.adjustContrast, 4.0f},
+                                  {"Saturation", &project_.postAdjustSaturation, &post_.adjustSaturation, 4.0f}};
+                    for (Row& r : rows) {
+                        float v = *r.project >= 0.0f ? *r.project : *r.live;
+                        if (ImGui::DragFloat(r.label, &v, 0.01f, 0.001f, r.hi, "%.3f")) {
+                            *r.project = v; *r.live = v; projectDirty_ = true;
+                        }
+                    }
+                }
                 uiReg_.track("project.post.tonemap");
                 if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                     ImGui::SetTooltip(

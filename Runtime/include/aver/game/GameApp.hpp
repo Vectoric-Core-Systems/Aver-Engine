@@ -41,6 +41,7 @@
 #include "aver/game/GameLevel.hpp"
 #include "aver/game/GameFoliage.hpp"
 #include "aver/game/GamePostVolumes.hpp"
+#include "aver/game/SubViewportHost.hpp"   // G4 R5
 #if AVER_WITH_SYNAPSE_AI && AVER_MODULE_SYNAPSE_GPU
 #  include "aver/synapse/CrowdGpu.hpp"
 #endif
@@ -52,6 +53,7 @@
 #if AVER_MODULE_SCENE && AVER_MODULE_VOXI
 #  include "aver/game/SceneDecalFeed.hpp"
 #  include "aver/game/SceneLightFeed.hpp"   // [wave3/level-instances]
+#  include "aver/game/EnvFxFeed.hpp"        // G4 R8: fog volumes
 #endif
 #if AVER_MODULE_SCENE
 #  include "aver/game/LevelInstancesAbiHost.hpp"   // [wave3/level-instances]
@@ -382,6 +384,9 @@ private:
 #if AVER_MODULE_SCENE
     SceneDecalFeed sceneDecalFeed_;   // CDecal entities -> Voxi's projected-decal list, per frame
     SceneLightFeed sceneLightFeed_;   // [wave3/level-instances] CLight entities -> Voxi lamps, per frame (the packaged game had none)
+#if AVER_MODULE_VOXI
+    EnvFxFeed envFxFeed_;             // G4 R8: the framework's fog volumes -> Voxi's volumetric fog, per frame
+#endif
 #endif
     u32  msaaPushed_ = 0;   // sample count last given to the device
     // Frame-budget state. Ticked once a frame and seeded from project_.frameBudgetMs.
@@ -403,6 +408,9 @@ private:
     particles::ParticleRenderer particleRenderer_;
     bool particlesAttached_ = false;
 #endif
+    // G4 R5: sub-viewports (render-to-texture views). Does nothing, and creates nothing, until a script or a converted level asks for a view.
+    game::SubViewportHost subViews_;
+    rhi::SkyAtmosphere skyForViews_;   // the sky the last pushFrame sent, for the views' sun and fill
 #if AVER_WITH_UI_ABI
     // The HUD render feature. Null means no HUD.
     render::ui::UiRenderer* gameUi_ = nullptr;

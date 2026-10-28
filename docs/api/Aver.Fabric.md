@@ -2,7 +2,7 @@
 
 # Aver.Fabric public API
 
-193 public types and 2661 public members, read from `scripting/csharp/Aver.Fabric/` (47 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+277 public types and 3355 public members, read from `scripting/csharp/Aver.Fabric/` (52 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Fabric
 
@@ -130,7 +130,24 @@ Values: `Disabled = 0`, `Combine = 1`, `CombineReplace = 2`, `Replace = 3`, `Rep
 
 ### ArrayMesh
 
-`public class ArrayMesh : Mesh`
+`public class ArrayMesh : Mesh` - A mesh built from arrays (Godot's ArrayMesh).
+
+- `public Aabb CustomAabb { get; set; }`
+- `public void AddSurfaceFromArrays(PrimitiveType primitive, Collections.Array arrays, Collections.Array<Collections.Array>? blendShapes = null, Collections.Dictionary? lods = null, ArrayFormat flags = 0)`
+- `public override int GetSurfaceCount()`
+- `public void ClearSurfaces()`
+- `public void SurfaceRemove(int surfIdx)`
+- `public Collections.Array SurfaceGetArrays(int surfIdx)`
+- `public int SurfaceGetArrayLen(int surfIdx)`
+- `public int SurfaceGetArrayIndexLen(int surfIdx)`
+- `public PrimitiveType SurfaceGetPrimitiveType(int surfIdx)`
+- `public int GetBlendShapeCount()`
+- `public void SurfaceSetName(int surfIdx, string name)`
+- `public string SurfaceGetName(int surfIdx)`
+- `public int SurfaceFindByName(string name)`
+- `public override Material? SurfaceGetMaterial(int surfIdx)`
+- `public override void SurfaceSetMaterial(int surfIdx, Material? material)`
+- `public override Aabb GetAabb()`
 
 ### BaseMaterial3D
 
@@ -139,6 +156,157 @@ Values: `Disabled = 0`, `Combine = 1`, `CombineReplace = 2`, `Replace = 3`, `Rep
 - `public Color AlbedoColor { get; set; }`
 - `public float Metallic { get; set; }`
 - `public float Roughness { get; set; }`
+- `public bool VertexColorUseAsAlbedo { get; set; }` - Multiplies the albedo and opacity by the mesh's vertex colour.
+- `public bool VertexColorIsSrgb { get; set; }` - Godot converts an sRGB vertex colour to linear first; the engine multiplies the colour as stored (linear).
+- `public Texture2D? AlbedoTexture { get; set; }` - The albedo map.
+- `public Texture2D? EmissionTexture { get; set; }`
+- `public Vector3 Uv1Scale { get; set; }`
+- `public Vector3 Uv1Offset { get; set; }`
+- `public Vector3 Uv2Scale { get; set; }`
+- `public Vector3 Uv2Offset { get; set; }`
+- `public bool Uv1Triplanar { get; set; }`
+- `public float Uv1TriplanarSharpness { get; set; }`
+- `public bool Uv1WorldTriplanar { get; set; }`
+- `public bool Uv2Triplanar { get; set; }`
+- `public float Uv2TriplanarSharpness { get; set; }`
+- `public bool Uv2WorldTriplanar { get; set; }`
+- `public TransparencyEnum Transparency { get; set; }`
+- `public float AlphaScissorThreshold { get; set; }`
+- `public float AlphaHashScale { get; set; }`
+- `public AlphaAntiAliasingEnum AlphaAntialiasingMode { get; set; }`
+- `public float AlphaAntialiasingEdge { get; set; }`
+- `public BlendModeEnum BlendMode { get; set; }`
+- `public CullModeEnum CullMode { get; set; }`
+- `public DepthDrawModeEnum DepthDrawMode { get; set; }`
+- `public bool NoDepthTest { get; set; }`
+- `public ShadingModeEnum ShadingMode { get; set; }`
+- `public bool ShadowToOpacity { get; set; }`
+- `public bool DisableReceiveShadows { get; set; }`
+- `public bool DisableAmbientLight { get; set; }`
+- `public bool DisableFog { get; set; }`
+- `public BillboardModeEnum BillboardMode { get; set; }`
+- `public bool BillboardKeepScale { get; set; }`
+- `public bool FixedSize { get; set; }`
+- `public bool Grow { get; set; }`
+- `public float GrowAmount { get; set; }`
+- `public int ParticlesAnimHFrames { get; set; }`
+- `public int ParticlesAnimVFrames { get; set; }`
+- `public bool ParticlesAnimLoop { get; set; }`
+- `public DistanceFadeModeEnum DistanceFadeMode { get; set; }`
+- `public float DistanceFadeMinDistance { get; set; }`
+- `public float DistanceFadeMaxDistance { get; set; }`
+- `public bool ProximityFadeEnabled { get; set; }`
+- `public float ProximityFadeDistance { get; set; }`
+- `public bool RimEnabled { get; set; }`
+- `public float Rim { get; set; }`
+- `public float RimTint { get; set; }`
+- `public bool ClearcoatEnabled { get; set; }`
+- `public float Clearcoat { get; set; }`
+- `public float ClearcoatRoughness { get; set; }`
+- `public bool AnisotropyEnabled { get; set; }`
+- `public float Anisotropy { get; set; }`
+- `public bool HeightmapEnabled { get; set; }`
+- `public float HeightmapScale { get; set; }`
+- `public bool HeightmapDeepParallax { get; set; }`
+- `public int HeightmapMinLayers { get; set; }`
+- `public int HeightmapMaxLayers { get; set; }`
+- `public bool HeightmapFlipTangent { get; set; }`
+- `public bool HeightmapFlipBinormal { get; set; }`
+- `public bool HeightmapFlipTexture { get; set; }`
+- `public Texture2D? HeightmapTexture { get; set; }`
+- `public bool SubsurfScatterEnabled { get; set; }`
+- `public float SubsurfScatterStrength { get; set; }`
+- `public bool BacklightEnabled { get; set; }`
+- `public Color Backlight { get; set; }`
+- `public bool RefractionEnabled { get; set; }`
+- `public float RefractionScale { get; set; }`
+- `public bool DetailEnabled { get; set; }`
+- `public BlendModeEnum DetailBlendMode { get; set; }`
+- `public DetailUVEnum DetailUvLayer { get; set; }`
+- `public Texture2D? DetailAlbedo { get; set; }`
+- `public Texture2D? DetailNormal { get; set; }`
+- `public Texture2D? DetailMask { get; set; }`
+- `public EmissionOperatorEnum EmissionOperator { get; set; }`
+- `public bool EmissionOnUv2 { get; set; }`
+- `public bool AoOnUv2 { get; set; }`
+- `public float AoLightAffect { get; set; }`
+- `public float MetallicSpecular { get; set; }`
+- `public DiffuseModeEnum DiffuseMode { get; set; }`
+- `public SpecularModeEnum SpecularMode { get; set; }`
+- `public string FxRecord()` - The pairs of the .ocmat FX record this material's properties bake to: the grammar the converter writes and aver::fmt::parseOcmatFx reads (docs/plans/fabric/G4_RENDER.md R6).
+- `public float Reflectance { get; }` - The F0 of the dielectric base the converter writes: 0.08 * metallic_specular (Godot's rule).
+
+### BaseMaterial3D.AlphaAntiAliasingEnum
+
+`public enum AlphaAntiAliasingEnum`
+
+Values: `Off = 0`, `AlphaToCoverage = 1`, `AlphaToCoverageAndToOne = 2`
+
+### BaseMaterial3D.BillboardModeEnum
+
+`public enum BillboardModeEnum`
+
+Values: `Disabled = 0`, `Enabled = 1`, `FixedY = 2`, `Particles = 3`
+
+### BaseMaterial3D.BlendModeEnum
+
+`public enum BlendModeEnum`
+
+Values: `Mix = 0`, `Add = 1`, `Sub = 2`, `Mul = 3`, `PremultAlpha = 4`
+
+### BaseMaterial3D.CullModeEnum
+
+`public enum CullModeEnum`
+
+Values: `Back = 0`, `Front = 1`, `Disabled = 2`
+
+### BaseMaterial3D.DepthDrawModeEnum
+
+`public enum DepthDrawModeEnum`
+
+Values: `OpaqueOnly = 0`, `Always = 1`, `Disabled = 2`
+
+### BaseMaterial3D.DetailUVEnum
+
+`public enum DetailUVEnum`
+
+Values: `DetailUv1 = 0`, `DetailUv2 = 1`
+
+### BaseMaterial3D.DiffuseModeEnum
+
+`public enum DiffuseModeEnum`
+
+Values: `Burley = 0`, `Lambert = 1`, `LambertWrap = 2`, `Toon = 3`
+
+### BaseMaterial3D.DistanceFadeModeEnum
+
+`public enum DistanceFadeModeEnum`
+
+Values: `Disabled = 0`, `PixelAlpha = 1`, `PixelDither = 2`, `ObjectDither = 3`
+
+### BaseMaterial3D.EmissionOperatorEnum
+
+`public enum EmissionOperatorEnum`
+
+Values: `Add = 0`, `Multiply = 1`
+
+### BaseMaterial3D.ShadingModeEnum
+
+`public enum ShadingModeEnum`
+
+Values: `Unshaded = 0`, `PerPixel = 1`, `PerVertex = 2`
+
+### BaseMaterial3D.SpecularModeEnum
+
+`public enum SpecularModeEnum`
+
+Values: `SchlickGgx = 0`, `Toon = 1`, `Disabled = 2`
+
+### BaseMaterial3D.TransparencyEnum
+
+`public enum TransparencyEnum`
+
+Values: `Disabled = 0`, `Alpha = 1`, `AlphaScissor = 2`, `AlphaHash = 3`, `AlphaDepthPrePass = 4`
 
 ### Basis
 
@@ -255,12 +423,13 @@ Values: `Disabled = 0`, `Combine = 1`, `CombineReplace = 2`, `Replace = 3`, `Rep
 - `public float Fov { get; set; }`
 - `public float Near { get; set; }`
 - `public float Far { get; set; }`
-- `public float Size { get; set; }`
+- `public float Size { get; set; }` - Metres across the width or height (per KeepAspect) of an orthogonal view, or of a frustum at its near plane.
 - `public ProjectionType Projection { get; set; }`
-- `public KeepAspectEnum KeepAspect { get; set; }`
-- `public uint CullMask { get; set; }`
-- `public float HOffset { get; set; }`
-- `public float VOffset { get; set; }`
+- `public KeepAspectEnum KeepAspect { get; set; }` - Which dimension Fov and Size describe; the other follows the window's aspect.
+- `public uint CullMask { get; set; }` - The instance layers this camera draws.
+- `public Vector2 FrustumOffset { get; set; }` - Slides the window's frustum sideways at the near plane (metres); frustum projection only.
+- `public float HOffset { get; set; }` - The camera slides this far along its own right axis (metres).
+- `public float VOffset { get; set; }` - The camera slides this far along its own up axis (metres).
 - `public bool Current { get; set; }` - Whether this is the camera that is drawn.
 - `public void MakeCurrent()`
 - `public void ClearCurrent(bool enableNext = true)`
@@ -271,7 +440,7 @@ Values: `Disabled = 0`, `Combine = 1`, `CombineReplace = 2`, `Replace = 3`, `Rep
 - `public Vector2 UnprojectPosition(Vector3 worldPoint)` - The screen point a world point appears at.
 - `public bool IsPositionBehind(Vector3 worldPoint)` - True when the world point is nearer the camera than its near plane along the view direction.
 - `public bool IsPositionInFrustum(Vector3 worldPoint)`
-- `public Transform3D GetCameraTransform()`
+- `public Transform3D GetCameraTransform()` - The camera's transform, with h_offset and v_offset applied.
 - `public Projection GetCameraProjection()`
 
 ### Camera3D.KeepAspectEnum
@@ -285,6 +454,43 @@ Values: `Width = 0`, `Height = 1`
 `public enum ProjectionType`
 
 Values: `Perspective = 0`, `Orthogonal = 1`, `Frustum = 2`
+
+### CameraAttributes
+
+`public class CameraAttributes : Resource`
+
+- `public float ExposureSensitivity { get; set; }`
+- `public float ExposureMultiplier { get; set; }`
+- `public bool AutoExposureEnabled { get; set; }`
+- `public float AutoExposureScale { get; set; }`
+- `public float AutoExposureSpeed { get; set; }`
+
+### CameraAttributesPhysical
+
+`public class CameraAttributesPhysical : CameraAttributes`
+
+- `public float FrustumFocusDistance { get; set; }`
+- `public float FrustumFocalLength { get; set; }`
+- `public float FrustumNear { get; set; }`
+- `public float FrustumFar { get; set; }`
+- `public float ExposureAperture { get; set; }`
+- `public float ExposureShutterSpeed { get; set; }`
+- `public float AutoExposureMinExposureValue { get; set; }`
+- `public float AutoExposureMaxExposureValue { get; set; }`
+
+### CameraAttributesPractical
+
+`public class CameraAttributesPractical : CameraAttributes`
+
+- `public bool DofBlurFarEnabled { get; set; }`
+- `public float DofBlurFarDistance { get; set; }`
+- `public float DofBlurFarTransition { get; set; }`
+- `public bool DofBlurNearEnabled { get; set; }`
+- `public float DofBlurNearDistance { get; set; }`
+- `public float DofBlurNearTransition { get; set; }`
+- `public float DofBlurAmount { get; set; }`
+- `public float AutoExposureMinSensitivity { get; set; }`
+- `public float AutoExposureMaxSensitivity { get; set; }`
 
 ### CanvasItem
 
@@ -588,6 +794,108 @@ Values: `Stop = 0`, `Pass = 1`, `Ignore = 2`
 
 Values: `TopLeft = 0`, `TopRight = 1`, `BottomRight = 2`, `BottomLeft = 3`
 
+### CSGBox3D
+
+`public class CSGBox3D : CSGPrimitive3D`
+
+- `public Vector3 Size { get; set; }`
+- `public Material? Material { get; set; }`
+
+### CSGCombiner3D
+
+`public class CSGCombiner3D : CSGShape3D`
+
+### CSGCylinder3D
+
+`public class CSGCylinder3D : CSGPrimitive3D`
+
+- `public float Radius { get; set; }`
+- `public float Height { get; set; }`
+- `public int Sides { get; set; }`
+- `public bool Cone { get; set; }`
+- `public bool SmoothFaces { get; set; }`
+- `public Material? Material { get; set; }`
+
+### CSGMesh3D
+
+`public class CSGMesh3D : CSGPrimitive3D` - A CSG node that brings a mesh into the tree.
+
+- `public Material? Material { get; set; }`
+
+### CSGPolygon3D
+
+`public class CSGPolygon3D : CSGPrimitive3D`
+
+- `public Vector2[] Polygon { get; set; }`
+- `public ModeEnum Mode { get; set; }`
+- `public float Depth { get; set; }`
+- `public float SpinDegrees { get; set; }`
+- `public int SpinSides { get; set; }`
+- `public bool SmoothFaces { get; set; }`
+- `public Material? Material { get; set; }`
+- `public NodePath PathNode { get; set; }`
+- `public int PathIntervalType { get; set; }`
+- `public float PathInterval { get; set; }`
+- `public float PathSimplifyAngle { get; set; }`
+- `public int PathRotation { get; set; }`
+- `public bool PathLocal { get; set; }`
+- `public bool PathContinuousU { get; set; }`
+- `public float PathUDistance { get; set; }`
+- `public bool PathJoined { get; set; }`
+
+### CSGPolygon3D.ModeEnum
+
+`public enum ModeEnum`
+
+Values: `Depth = 0`, `Spin = 1`, `Path = 2`
+
+### CSGPrimitive3D
+
+`public class CSGPrimitive3D : CSGShape3D`
+
+- `public bool FlipFaces { get; set; }`
+
+### CSGShape3D
+
+`public class CSGShape3D : MeshInstance3D` - A CSG node (Godot's CSGShape3D family).
+
+- `public OperationEnum Operation { get; set; }`
+- `public float Snap { get; set; }`
+- `public bool CalculateTangents { get; set; }`
+- `public bool UseCollision { get; set; }`
+- `public uint CollisionLayer { get; set; }`
+- `public uint CollisionMask { get; set; }`
+- `public float CollisionPriority { get; set; }`
+- `public bool InvertFaces { get; set; }`
+- `public bool IsRootShape()` - True for a shape that is not below another CSG node (the one that carries the baked mesh).
+
+### CSGShape3D.OperationEnum
+
+`public enum OperationEnum`
+
+Values: `Union = 0`, `Intersection = 1`, `Subtraction = 2`
+
+### CSGSphere3D
+
+`public class CSGSphere3D : CSGPrimitive3D`
+
+- `public float Radius { get; set; }`
+- `public int RadialSegments { get; set; }`
+- `public int Rings { get; set; }`
+- `public bool SmoothFaces { get; set; }`
+- `public Material? Material { get; set; }`
+
+### CSGTorus3D
+
+`public class CSGTorus3D : CSGPrimitive3D`
+
+- `public float InnerRadius { get; set; }`
+- `public float OuterRadius { get; set; }`
+- `public int Sides { get; set; }`
+- `public int RingSides { get; set; }`
+- `public bool SmoothFaces { get; set; }`
+- `public Material? Material { get; set; }`
+
 ### CylinderShape3D
 
 `public class CylinderShape3D : Shape3D`
@@ -607,9 +915,18 @@ Values: `TopLeft = 0`, `TopRight = 1`, `BottomRight = 2`, `BottomLeft = 3`
 
 ### DirectionalLight3D
 
-`public class DirectionalLight3D : Light3D`
+`public class DirectionalLight3D : Light3D` - A sun (Godot's DirectionalLight3D).
 
 - `public float DirectionalShadowMaxDistance { get; set; }`
+- `public float LightAngularDistance { get; set; }`
+- `public ShadowModeEnum DirectionalShadowMode { get; set; }`
+- `public bool IsSun { get; }` - True for the one directional light that drives the sky's sun.
+
+### DirectionalLight3D.ShadowModeEnum
+
+`public enum ShadowModeEnum`
+
+Values: `Orthogonal = 0`, `Parallel2Splits = 1`, `Parallel4Splits = 2`
 
 ### Engine
 
@@ -621,6 +938,88 @@ Values: `TopLeft = 0`, `TopRight = 1`, `BottomRight = 2`, `BottomLeft = 3`
 - `public static long GetPhysicsFrames()`
 - `public static double TimeScale { get; set; }`
 - `public static int PhysicsTicksPerSecond { get; }` - The physics step rate: 1 / the project's fixed step, 60 when it states none.
+
+### Environment
+
+`public class Environment : Resource` - Godot's Environment.
+
+- `public BGMode BackgroundMode { get; set; }`
+- `public Color BackgroundColor { get; set; }`
+- `public float BackgroundEnergyMultiplier { get; set; }`
+- `public Sky? Sky { get; set; }`
+- `public Vector3 SkyRotation { get; set; }`
+- `public float SkyCustomFov { get; set; }`
+- `public AmbientSource AmbientLightSource { get; set; }`
+- `public Color AmbientLightColor { get; set; }`
+- `public float AmbientLightEnergy { get; set; }`
+- `public float AmbientLightSkyContribution { get; set; }`
+- `public ToneMapper TonemapMode { get; set; }`
+- `public float TonemapExposure { get; set; }`
+- `public float TonemapWhite { get; set; }`
+- `public bool SsrEnabled { get; set; }`
+- `public bool SsaoEnabled { get; set; }`
+- `public bool SsilEnabled { get; set; }`
+- `public bool SdfgiEnabled { get; set; }`
+- `public bool GlowEnabled { get; set; }`
+- `public float GlowIntensity { get; set; }`
+- `public float GlowStrength { get; set; }`
+- `public float GlowBloom { get; set; }`
+- `public float GlowHdrThreshold { get; set; }`
+- `public bool FogEnabled { get; set; }`
+- `public FogModeEnum FogMode { get; set; }`
+- `public Color FogLightColor { get; set; }`
+- `public float FogLightEnergy { get; set; }`
+- `public float FogDensity { get; set; }`
+- `public float FogAerialPerspective { get; set; }`
+- `public float FogSkyAffect { get; set; }`
+- `public float FogHeight { get; set; }`
+- `public float FogHeightDensity { get; set; }`
+- `public float FogDepthBegin { get; set; }`
+- `public float FogDepthEnd { get; set; }`
+- `public float FogDepthCurve { get; set; }`
+- `public bool VolumetricFogEnabled { get; set; }`
+- `public float VolumetricFogDensity { get; set; }`
+- `public Color VolumetricFogAlbedo { get; set; }`
+- `public bool AdjustmentEnabled { get; set; }`
+- `public float AdjustmentBrightness { get; set; }`
+- `public float AdjustmentContrast { get; set; }`
+- `public float AdjustmentSaturation { get; set; }`
+- `public Resource? AdjustmentColorCorrection { get; set; }`
+
+### Environment.AmbientSource
+
+`public enum AmbientSource`
+
+Values: `Bg = 0`, `Disabled = 1`, `Color = 2`, `Sky = 3`
+
+### Environment.BGMode
+
+`public enum BGMode`
+
+Values: `Clear = 0`, `Color = 1`, `Sky = 2`, `Canvas = 3`, `Keep = 4`, `CameraFeed = 5`
+
+### Environment.FogModeEnum
+
+`public enum FogModeEnum`
+
+Values: `Exponential = 0`, `Depth = 1`
+
+### Environment.ToneMapper
+
+`public enum ToneMapper`
+
+Values: `Linear = 0`, `Reinhard = 1`, `Filmic = 2`, `Aces = 3`, `Agx = 4`
+
+### EnvironmentMapping
+
+`public static class EnvironmentMapping` - The mapping from Godot's environment to the engine's post volume keys, fog and sky light.
+
+- `public static int TonemapModeOf(Environment.ToneMapper mode)` - Aver's tonemap mode for Godot's tonemap_mode: 3 + mode.
+- `public static float FogDensityPerCm(float perMetre)` - The fog density per centimetre for a density per metre.
+- `public static float Exposure(float tonemapExposure, float cameraMultiplier)` - Godot's tonemap_exposure times the camera attributes' exposure multiplier.
+- `public static List<(string Key, float Value)> PostValues(Environment env, CameraAttributes? camera)` - The POSTVOLUME key values this environment states, in the order the converter writes them.
+- `public static float FogDensity(Environment env)` - The fog density per centimetre the environment states (0 when fog is off); volumetric fog counts as distance fog.
+- `public static float SkyLight(Environment env)` - The sky light multiplier: 0 with ambient light disabled, else the ambient energy.
 
 ### Error
 
@@ -684,7 +1083,28 @@ Values: `Xyz = 0`, `Xzy = 1`, `Yxz = 2`, `Yzx = 3`, `Zxy = 4`, `Zyx = 5`
 - `public static Vec3 ToAverScale(Vector3 s)` - A scale: dimensionless, so it permutes with the axes only.
 - `public static Vector3 FromAverScale(Vec3 s)`
 - `public static void ToAver(Transform3D t, out Vec3 position, out Quat rotation, out Vec3 scale)` - A Godot transform as the position, rotation and scale an Aver entity stores.
+- `public static void ToAverMatrix12(Transform3D t, float[] dest, int offset = 0)` - A Godot affine transform as the engine's instance matrix: 12 floats, the row-vector world matrix with its 4th column dropped (three basis rows, then the translation in centimetres), written at offset.
+- `public static void ToAverTangent(Vector3 normal, Vector3 tangent, float handedness, float[] dest, int offset)` - The tangent the engine stores for a vertex whose Godot normal and tangent (xyz and handedness) are given (G4 R1's contract): the unit tangent made orthogonal to the normal, and w = +1/-1 so that cross(N, T) * w points along increasing v.
 - `public static Transform3D FromAver(Vec3 position, Quat rotation, Vec3 scale)` - An Aver entity's position, rotation and scale as a Godot transform.
+
+### FogMaterial
+
+`public class FogMaterial : Material` - Godot's FogMaterial: what a FogVolume adds to the volumetric fog.
+
+- `public float Density { get; set; }`
+- `public Color Albedo { get; set; }`
+- `public Color Emission { get; set; }`
+- `public float HeightFalloff { get; set; }` - The rate, per metre of height above the volume's lowest point, at which the density falls (0 = uniform).
+- `public float EdgeFade { get; set; }` - The softness of the volume's edge, a fraction of its half size (Godot's default 0.1).
+- `public Texture3D? DensityTexture { get; set; }` - Carried only: the density inside the shape is uniform.
+
+### FogVolume
+
+`public class FogVolume : VisualInstance3D` - A shaped region of fog (Godot's FogVolume).
+
+- `public Vector3 Size { get; set; }`
+- `public RenderingServer.FogVolumeShape Shape { get; set; }`
+- `public Material? Material { get; set; }` - A FogMaterial.
 
 ### GD
 
@@ -859,6 +1279,12 @@ Values: `Xyz = 0`, `Xzy = 1`, `Yxz = 2`, `Yzx = 3`, `Zxy = 4`, `Zyx = 5`
 
 `public class GeometryInstance3D : VisualInstance3D`
 
+- `public float VisibilityRangeBegin { get; set; }` - Metres from the camera at which the instance appears (0: no lower bound).
+- `public float VisibilityRangeEnd { get; set; }` - Metres from the camera at which the instance disappears (0: no upper bound).
+- `public float VisibilityRangeBeginMargin { get; set; }` - The distance past the begin threshold the instance must cross to change state (hysteresis).
+- `public float VisibilityRangeEndMargin { get; set; }`
+- `public VisibilityRangeFadeModeEnum VisibilityRangeFadeMode { get; set; }`
+- `public GeometryInstance3D? VisibilityParent { get; set; }` - Kept, not applied: a visibility dependency is not faded in.
 - `public Material? MaterialOverride { get; set; }` - Replaces the mesh's own material; its asset name reaches the entity's mesh renderer.
 - `public Material? MaterialOverlay { get; set; }`
 - `public ShadowCastingSetting CastShadow { get; set; }`
@@ -870,6 +1296,12 @@ Values: `Xyz = 0`, `Xzy = 1`, `Yxz = 2`, `Yzx = 3`, `Zxy = 4`, `Zyx = 5`
 `public enum ShadowCastingSetting`
 
 Values: `Off = 0`, `On = 1`, `DoubleSided = 2`, `ShadowsOnly = 3`
+
+### GeometryInstance3D.VisibilityRangeFadeModeEnum
+
+`public enum VisibilityRangeFadeModeEnum`
+
+Values: `Disabled = 0`, `Self = 1`, `Dependencies = 2`
 
 ### GlobalClassAttribute
 
@@ -935,6 +1367,37 @@ Values: `Deferred = 1`, `Persist = 2`, `OneShot = 4`, `ReferenceCounted = 8`
 
 `public class SignalName` - The names of the signals a class declares itself, by the GodotSharp convention.
 
+### GridMap
+
+`public class GridMap : Node3D` - A grid of library items (Godot's GridMap).
+
+- `public const int InvalidCellItem = -1`
+- `public MeshLibrary? MeshLibrary { get; set; }`
+- `public Vector3 CellSize { get; set; }`
+- `public bool CellCenterX { get; set; }`
+- `public bool CellCenterY { get; set; }`
+- `public bool CellCenterZ { get; set; }`
+- `public float CellScale { get; set; }`
+- `public int CellOctantSize { get; set; }`
+- `public uint CollisionLayer { get; set; }`
+- `public uint CollisionMask { get; set; }`
+- `public float CollisionPriority { get; set; }`
+- `public PhysicsMaterial? PhysicsMaterial { get; set; }`
+- `public bool BakeNavigation { get; set; }`
+- `public Collections.Dictionary Data { get; set; }` - Godot's stored form: a dictionary whose "cells" is a PackedInt32Array, three ints per cell (x | y &lt;&lt; 16, z, item | orientation &lt;&lt; 16 | layer &lt;&lt; 21).
+- `public void SetCellItem(Vector3I position, int item, int orientation = 0)`
+- `public int GetCellItem(Vector3I position)`
+- `public int GetCellItemOrientation(Vector3I position)`
+- `public Basis GetCellItemBasis(Vector3I position)`
+- `public void Clear()`
+- `public Collections.Array<Vector3I> GetUsedCells()`
+- `public Collections.Array<Vector3I> GetUsedCellsByItem(int item)`
+- `public Vector3 MapToLocal(Vector3I mapPosition)` - The position of a cell's centre (or corner, per the centre flags) in this node's local space.
+- `public Vector3I LocalToMap(Vector3 localPosition)` - The cell a local position falls in.
+- `public Transform3D GetCellTransform(Vector3I position)` - The transform a cell's item is drawn with: its orientation (scaled by cell_scale) at the cell's position.
+- `public Basis GetBasisWithOrthogonalIndex(int index)` - One of the 24 orthogonal bases a cell can be turned to; the identity for an index out of range.
+- `public int GetOrthogonalIndexFromBasis(Basis basis)` - The index of the orthogonal basis closest to basis (the orientation to store), or -1 when it is not one of the 24.
+
 ### HorizontalAlignment
 
 `public enum HorizontalAlignment`
@@ -947,6 +1410,26 @@ Values: `Left = 0`, `Center = 1`, `Right = 2`, `Fill = 3`
 
 - `public string Path { get; }`
 - `public IconAttribute(string path)`
+
+### ImmediateMesh
+
+`public class ImmediateMesh : Mesh` - A mesh a script fills every frame (Godot's ImmediateMesh): SurfaceBegin, the setters and SurfaceAddVertex for each vertex, SurfaceEnd.
+
+- `public void SurfaceBegin(PrimitiveType primitive, Material? material = null)`
+- `public void SurfaceSetNormal(Vector3 normal)`
+- `public void SurfaceSetTangent(Plane tangent)`
+- `public void SurfaceSetColor(Color color)`
+- `public void SurfaceSetUV(Vector2 uv)`
+- `public void SurfaceSetUV2(Vector2 uv2)`
+- `public void SurfaceAddVertex(Vector3 vertex)`
+- `public void SurfaceAddVertex2D(Vector2 vertex)`
+- `public void SurfaceEnd()`
+- `public void ClearSurfaces()`
+- `public override int GetSurfaceCount()`
+- `public override Material? SurfaceGetMaterial(int surfIdx)`
+- `public override void SurfaceSetMaterial(int surfIdx, Material? material)`
+- `public PrimitiveType SurfaceGetPrimitiveType(int surfIdx)`
+- `public override Aabb GetAabb()`
 
 ### Input
 
@@ -1159,17 +1642,120 @@ Values: `None = 0`, `CodeMask = 8388607`, `ModifierMask = 532676608`, `Shift = 3
 - `public float GetDepth()`
 - `public float GetAngle(Vector3? upDirection = null, int collisionIndex = 0)` - The angle between the surface and upDirection (up by default), in radians.
 
+### Label3D
+
+`public class Label3D : GeometryInstance3D` - Text in the world (Godot's Label3D).
+
+- `public string Text { get; set; }`
+- `public Resource? Font { get; set; }`
+- `public int FontSize { get; set; }`
+- `public int OutlineSize { get; set; }`
+- `public float PixelSize { get; set; }`
+- `public Vector2 Offset { get; set; }`
+- `public Color Modulate { get; set; }`
+- `public Color OutlineModulate { get; set; }`
+- `public HorizontalAlignment HorizontalAlignment { get; set; }`
+- `public VerticalAlignment VerticalAlignment { get; set; }`
+- `public float LineSpacing { get; set; }`
+- `public int AutowrapMode { get; set; }`
+- `public float Width { get; set; }`
+- `public bool Uppercase { get; set; }`
+- `public BaseMaterial3D.BillboardModeEnum Billboard { get; set; }`
+- `public bool Shaded { get; set; }`
+- `public bool DoubleSided { get; set; }`
+- `public bool NoDepthTest { get; set; }`
+- `public bool FixedSize { get; set; }`
+- `public int AlphaCut { get; set; }`
+- `public float AlphaScissorThreshold { get; set; }`
+- `public float AlphaHashScale { get; set; }`
+- `public int TextureFilter { get; set; }`
+- `public int RenderPriority { get; set; }`
+- `public int OutlineRenderPriority { get; set; }`
+- `public string Language { get; set; }`
+- `public bool IsDrawn { get; }` - Always false: this runtime does not draw world-space text.
+
 ### Light3D
 
 `public class Light3D : VisualInstance3D` - Any light (Godot's Light3D).
 
-- `public const float LuxPerEnergy = 100000f` - Aver lux for a Godot energy of 1.
+- `public const float LuxPerEnergy = 104719.755f` - Aver lux of the sun for a Godot energy of 1: pi engine radiance units of 100000/3 lux.
+- `public const float CandelaPerEnergy = 104719.755f` - Aver candela of an omni or spot light for a Godot energy of 1: pi engine units of irradiance at 1 m.
 - `public Color LightColor { get; set; }`
 - `public float LightEnergy { get; set; }`
-- `public float LightIndirectEnergy { get; set; }`
-- `public float LightSpecular { get; set; }`
+- `public float LightIndirectEnergy { get; set; }` - Kept, not applied: local lights add no indirect light, and the sun's indirect light is Aver's global illumination.
+- `public float LightVolumetricFogEnergy { get; set; }`
+- `public float LightSpecular { get; set; }` - Godot's default is 0.5; the engine's specular multiplier is twice this (Godot's specular_amount).
+- `public bool LightNegative { get; set; }`
+- `public float LightSize { get; set; }` - The emitter radius in metres: widens the highlight and the shadow filter.
 - `public bool ShadowEnabled { get; set; }`
-- `public uint LightCullMask { get; set; }`
+- `public float ShadowBias { get; set; }`
+- `public float ShadowNormalBias { get; set; }`
+- `public float ShadowBlur { get; set; }`
+- `public bool DistanceFadeEnabled { get; set; }`
+- `public float DistanceFadeBegin { get; set; }`
+- `public float DistanceFadeShadow { get; set; }`
+- `public float DistanceFadeLength { get; set; }`
+- `public uint LightCullMask { get; set; }` - The instance layers this light affects (the raster local-light path; the ray-traced light path and the sun ignore it).
+- `public uint ShadowCasterMask { get; set; }` - The instance layers that cast this light's shadow (the raster local-light path).
+
+### LightmapGI
+
+`public class LightmapGI : VisualInstance3D` - Godot's LightmapGI.
+
+- `public BakeQualityEnum Quality { get; set; }`
+- `public bool Supersampling { get; set; }`
+- `public float SupersamplingFactor { get; set; }`
+- `public int Bounces { get; set; }`
+- `public float BounceIndirectEnergy { get; set; }`
+- `public bool Directional { get; set; }`
+- `public bool Interior { get; set; }`
+- `public bool UseTextureForBounces { get; set; }`
+- `public int MaxTextureSize { get; set; }`
+- `public bool UseDenoiser { get; set; }`
+- `public float DenoiserStrength { get; set; }`
+- `public int DenoiserRange { get; set; }`
+- `public float Bias { get; set; }`
+- `public float TexelScale { get; set; }`
+- `public GenerateProbesEnum GenerateProbesSubdiv { get; set; }`
+- `public EnvironmentModeEnum EnvironmentMode { get; set; }`
+- `public Resource? EnvironmentCustomSky { get; set; }`
+- `public Color EnvironmentCustomColor { get; set; }`
+- `public float EnvironmentCustomEnergy { get; set; }`
+- `public Resource? CameraAttributes { get; set; }`
+- `public LightmapGIData? LightData { get; set; }`
+- `public bool IsBaked { get; }` - Always false: a lightmap is never baked or used.
+
+### LightmapGI.BakeErrorEnum
+
+`public enum BakeErrorEnum`
+
+Values: `Ok = 0`, `NoSceneRoot = 1`, `ForeignData = 2`, `NoLightmapper = 3`, `NoSaveRoot = 4`, `InvalidMesh = 5`, `MeshSizeTooSmall = 6`, `TextureSizeTooSmall = 7`, `TooManyOccluders = 8`, `LightmappingFailed = 9`, `UserAborted = 10`, `TextureSizeTooBig = 11`
+
+### LightmapGI.BakeQualityEnum
+
+`public enum BakeQualityEnum`
+
+Values: `Low = 0`, `Medium = 1`, `High = 2`, `Ultra = 3`
+
+### LightmapGI.EnvironmentModeEnum
+
+`public enum EnvironmentModeEnum`
+
+Values: `Disabled = 0`, `Scene = 1`, `CustomSky = 2`, `CustomColor = 3`
+
+### LightmapGI.GenerateProbesEnum
+
+`public enum GenerateProbesEnum`
+
+Values: `Disabled = 0`, `Subdiv4 = 1`, `Subdiv8 = 2`, `Subdiv16 = 3`, `Subdiv32 = 4`
+
+### LightmapGIData
+
+`public class LightmapGIData : Resource` - Godot's baked lightmap resource (a .lmbake file).
+
+### LightmapProbe
+
+`public class LightmapProbe : Node3D` - Godot's LightmapProbe: a position that samples the baked lightmap for dynamic objects.
 
 ### Marker3D
 
@@ -1299,6 +1885,55 @@ Values: `None = 0`, `CodeMask = 8388607`, `ModifierMask = 532676608`, `Shift = 3
 
 `public class Mesh : Resource` - A mesh resource (Godot's Mesh).
 
+- `public virtual int GetSurfaceCount()`
+- `public virtual Material? SurfaceGetMaterial(int surfIdx)`
+- `public virtual void SurfaceSetMaterial(int surfIdx, Material? material)`
+- `public virtual Aabb GetAabb()`
+
+### Mesh.ArrayFormat
+
+`public enum ArrayFormat : long` - Surface format flags (RenderingServer.ArrayFormat).
+
+Values: `FormatVertex = 1`, `FormatNormal = 2`, `FormatTangent = 4`, `FormatColor = 8`, `FormatTexUV = 16`, `FormatTexUV2 = 32`, `FormatBones = 1024`, `FormatWeights = 2048`, `FormatIndex = 4096`, `FlagUse2DVertices = 1L << 25, FlagUseDynamicUpdate = 1L << 26, FlagUse8BoneWeights = 1L << 27, FlagCompressAttributes = 1L << 29,`
+
+### Mesh.ArrayType
+
+`public enum ArrayType` - The slots of the arrays an ArrayMesh surface is made from (RenderingServer.ArrayType).
+
+Values: `Vertex = 0`, `Normal = 1`, `Tangent = 2`, `Color = 3`, `TexUV = 4`, `TexUV2 = 5`, `Custom0 = 6`, `Custom1 = 7`, `Custom2 = 8`, `Custom3 = 9`, `Bones = 10`, `Weights = 11`, `Index = 12`, `Max = 13`
+
+### Mesh.PrimitiveType
+
+`public enum PrimitiveType`
+
+Values: `Points = 0`, `Lines = 1`, `LineStrip = 2`, `Triangles = 3`, `TriangleStrip = 4`
+
+### MeshDataTool
+
+`public class MeshDataTool : RefCounted` - Reads and edits the vertices and faces of one surface of an ArrayMesh (Godot's MeshDataTool).
+
+- `public Error CreateFromSurface(ArrayMesh mesh, int surface)`
+- `public void Clear()`
+- `public Error CommitToSurface(ArrayMesh mesh, ulong compressionFlags = 0)`
+- `public int GetVertexCount()`
+- `public int GetFaceCount()`
+- `public Vector3 GetVertex(int idx)`
+- `public void SetVertex(int idx, Vector3 vertex)`
+- `public Vector3 GetVertexNormal(int idx)`
+- `public void SetVertexNormal(int idx, Vector3 normal)`
+- `public Plane GetVertexTangent(int idx)`
+- `public Color GetVertexColor(int idx)`
+- `public void SetVertexColor(int idx, Color color)`
+- `public Vector2 GetVertexUV(int idx)`
+- `public void SetVertexUV(int idx, Vector2 uv)`
+- `public Vector2 GetVertexUV2(int idx)`
+- `public void SetVertexUV2(int idx, Vector2 uv)`
+- `public void SetMaterial(Material? material)`
+- `public Material? GetMaterial()`
+- `public int GetFaceVertex(int face, int vertex)` - The vertex index of corner 0, 1 or 2 of a face.
+- `public Vector3 GetFaceNormal(int face)` - A face's normal (clockwise front faces, so cross(c - a, b - a)).
+- `public int GetFormat()`
+
 ### MeshInstance3D
 
 `public class MeshInstance3D : GeometryInstance3D` - A node that draws a mesh (Godot's MeshInstance3D).
@@ -1307,6 +1942,26 @@ Values: `None = 0`, `CodeMask = 8388607`, `ModifierMask = 532676608`, `Shift = 3
 - `public int GetSurfaceOverrideMaterialCount()`
 - `public Material? GetSurfaceOverrideMaterial(int surface)`
 - `public void SetSurfaceOverrideMaterial(int surface, Material? material)`
+
+### MeshLibrary
+
+`public class MeshLibrary : Resource` - The items a GridMap places: a mesh, its transform and collision shapes per item id (Godot's MeshLibrary).
+
+- `public Collections.Array Items { get; set; }` - The converter's form: an array of dictionaries with "id", "name" and "mesh".
+- `public void CreateItem(int id)`
+- `public void Clear()`
+- `public void RemoveItem(int id)`
+- `public int[] GetItemList()`
+- `public int GetLastUnusedItemId()`
+- `public int FindItemByName(string name)`
+- `public void SetItemName(int id, string name)`
+- `public string GetItemName(int id)`
+- `public void SetItemMesh(int id, Mesh? mesh)`
+- `public Mesh? GetItemMesh(int id)`
+- `public void SetItemMeshTransform(int id, Transform3D t)`
+- `public Transform3D GetItemMeshTransform(int id)`
+- `public void SetItemShapes(int id, Collections.Array shapes)` - The item's collision shapes: shape, transform, shape, transform, ...
+- `public Collections.Array GetItemShapes(int id)`
 
 ### MethodTweener
 
@@ -1327,6 +1982,38 @@ Values: `None = 0`, `Left = 1`, `Right = 2`, `Middle = 3`, `WheelUp = 4`, `Wheel
 `public enum MouseButtonMask`
 
 Values: `Left = 1`, `Right = 2`, `Middle = 4`, `MbXbutton1 = 128`, `MbXbutton2 = 256`
+
+### MultiMesh
+
+`public class MultiMesh : Resource` - An instance table drawn as one mesh (Godot's MultiMesh): a transform per instance, optionally a colour and four custom floats.
+
+- `public Mesh? Mesh { get; set; }` - The mesh each instance draws.
+- `public TransformFormatEnum TransformFormat { get; set; }` - Godot's default is 2D; this runtime draws 3D tables only (a 2D table is stored and not drawn), so a script that forgets to set it still works.
+- `public bool UseColors { get; set; }`
+- `public bool UseCustomData { get; set; }`
+- `public int InstanceCount { get; set; }`
+- `public int VisibleInstanceCount { get; set; }` - How many instances are drawn, the first N; -1 draws all.
+- `public Aabb CustomAabb { get; set; }`
+- `public void SetInstanceTransform(int instance, Transform3D transform)`
+- `public Transform3D GetInstanceTransform(int instance)`
+- `public void SetInstanceColor(int instance, Color color)`
+- `public Color GetInstanceColor(int instance)`
+- `public void SetInstanceCustomData(int instance, Color customData)`
+- `public Color GetInstanceCustomData(int instance)`
+- `public float[] Buffer { get; set; }` - The whole table in Godot's layout: per instance the transform as three rows of (3 basis floats, 1 origin float), then the colour and the custom data when they are used.
+- `public Aabb GetAabb()` - The box around every instance's mesh box (the custom box when one is set).
+
+### MultiMesh.TransformFormatEnum
+
+`public enum TransformFormatEnum`
+
+Values: `Transform2D = 0`, `Transform3D = 1`
+
+### MultiMeshInstance3D
+
+`public class MultiMeshInstance3D : GeometryInstance3D` - Draws a MultiMesh (Godot's MultiMeshInstance3D).
+
+- `public MultiMesh? Multimesh { get; set; }`
 
 ### Node
 
@@ -1429,7 +2116,7 @@ Values: `Left = 1`, `Right = 2`, `Middle = 4`, `MbXbutton1 = 128`, `MbXbutton2 =
 - `public T Duplicate<T>(int flags = 15) where T : Node`
 - `public new bool Persistent { get; set; }` - True for an autoload: it survives a scene change (Game.ChangeLevel), with everything below it.
 - `public SceneTree? GetTree()` - The scene tree this node is in, or null when it is not in one.
-- `public Viewport? GetViewport()` - The window at the top of the tree.
+- `public Viewport? GetViewport()` - The viewport this node is drawn in: the nearest Viewport above it (a SubViewport for a node inside one), else the window at the top of the tree.
 - `public Window? GetWindow()`
 - `public Tween CreateTween()` - A tween bound to this node: it stops when the node is freed, waits while the node is out of the tree, and pauses with it.
 - `public bool IsInsideTree()`
@@ -1600,13 +2287,26 @@ Values: `Inherit = 0`, `Pausable = 1`, `WhenPaused = 2`, `Always = 3`, `Disabled
 `public class OmniLight3D : Light3D`
 
 - `public float OmniRange { get; set; }`
-- `public float OmniAttenuation { get; set; }`
+- `public float OmniAttenuation { get; set; }` - The distance falloff exponent: 1 (Godot's default) is linear, 2 is inverse square, 0 is constant until the range's edge.
+- `public ShadowMode OmniShadowMode { get; set; }` - Kept: the engine always shadows an omni light with a cube.
+
+### OmniLight3D.ShadowMode
+
+`public enum ShadowMode`
+
+Values: `DualParaboloid = 0`, `Cube = 1`
 
 ### Orientation
 
 `public enum Orientation`
 
 Values: `Vertical = 1`, `Horizontal = 0`
+
+### ORMMaterial3D
+
+`public class ORMMaterial3D : BaseMaterial3D` - Godot's ORMMaterial3D: a StandardMaterial3D whose occlusion, roughness and metallic come from one packed texture (R, G, B), the layout the .ocmat packs.
+
+- `public Texture2D? OrmTexture { get; set; }`
 
 ### OS
 
@@ -1633,6 +2333,29 @@ Values: `Vertical = 1`, `Horizontal = 0`
 `public enum GenEditState`
 
 Values: `Disabled = 0`, `Instance = 1`, `Main = 2`, `MainInherited = 3`
+
+### PanoramaSkyMaterial
+
+`public class PanoramaSkyMaterial : SkyMaterial` - An equirectangular sky.
+
+- `public Texture2D? Panorama { get; set; }`
+- `public bool Filter { get; set; }`
+- `public float EnergyMultiplier { get; set; }`
+
+### PhysicalSkyMaterial
+
+`public class PhysicalSkyMaterial : SkyMaterial`
+
+- `public float RayleighCoefficient { get; set; }`
+- `public Color RayleighColor { get; set; }`
+- `public float MieCoefficient { get; set; }`
+- `public float MieEccentricity { get; set; }`
+- `public Color MieColor { get; set; }`
+- `public float Turbidity { get; set; }`
+- `public float SunDiskScale { get; set; }`
+- `public Color GroundColor { get; set; }`
+- `public float EnergyMultiplier { get; set; }`
+- `public bool UseDebanding { get; set; }`
 
 ### PhysicsBody3D
 
@@ -1769,6 +2492,22 @@ Values: `Transform = 0`, `LinearVelocity = 1`, `AngularVelocity = 2`, `Sleeping 
 - `public override readonly bool Equals(object? obj)`
 - `public override readonly int GetHashCode()`
 - `public override readonly string ToString()`
+
+### ProceduralSkyMaterial
+
+`public class ProceduralSkyMaterial : SkyMaterial` - Godot's ProceduralSkyMaterial.
+
+- `public Color SkyTopColor { get; set; }`
+- `public Color SkyHorizonColor { get; set; }`
+- `public float SkyCurve { get; set; }`
+- `public float SkyEnergyMultiplier { get; set; }`
+- `public Color GroundBottomColor { get; set; }`
+- `public Color GroundHorizonColor { get; set; }`
+- `public float GroundCurve { get; set; }`
+- `public float GroundEnergyMultiplier { get; set; }`
+- `public float SunAngleMax { get; set; }`
+- `public float SunCurve { get; set; }`
+- `public bool UseDebanding { get; set; }`
 
 ### Projection
 
@@ -1975,6 +2714,50 @@ Values: `None = 0`, `Range = 1`, `Enum = 2`, `EnumSuggestion = 3`, `ExpRange = 4
 ### RefCounted
 
 `public class RefCounted : GodotObject` - Object kept alive by reference (Godot's RefCounted); in C# the garbage collector does that.
+
+### ReflectionProbe
+
+`public class ReflectionProbe : VisualInstance3D` - Godot's ReflectionProbe.
+
+- `public UpdateModeEnum UpdateMode { get; set; }`
+- `public float Intensity { get; set; }`
+- `public float MaxDistance { get; set; }` - Metres from the camera beyond which the probe is not used (0 = always).
+- `public Vector3 Size { get; set; }`
+- `public Vector3 OriginOffset { get; set; }`
+- `public bool BoxProjection { get; set; }`
+- `public bool Interior { get; set; }`
+- `public bool EnableShadows { get; set; }`
+- `public uint CullMask { get; set; }`
+- `public uint ReflectionMask { get; set; }`
+- `public float MeshLodThreshold { get; set; }`
+- `public float BlendDistance { get; set; }` - Metres: the fade inside the box walls.
+- `public AmbientModeEnum AmbientMode { get; set; }`
+- `public Color AmbientColor { get; set; }`
+- `public float AmbientColorEnergy { get; set; }`
+- `public static (ReflectionProbe Probe, float Weight)[] Select(Vector3 point, Vector3 camera, out float rest)` - The probes that light a point (Godot metres, world space) seen from a camera position, smallest box first, with their share of the blend; the share left for the sky is rest.
+- `public Vector3 ProjectDirection(Vector3 point, Vector3 direction)` - The direction (Godot space, unit) to look this probe's capture up with for a reflection ray from a point: box projection applied when the probe has it.
+
+### ReflectionProbe.AmbientModeEnum
+
+`public enum AmbientModeEnum`
+
+Values: `Disabled = 0`, `Environment = 1`, `Color = 2`
+
+### ReflectionProbe.UpdateModeEnum
+
+`public enum UpdateModeEnum`
+
+Values: `Once = 0`, `Always = 1`
+
+### RenderingServer
+
+`public static class RenderingServer` - Godot's RenderingServer enums that the environment nodes use.
+
+### RenderingServer.FogVolumeShape
+
+`public enum FogVolumeShape`
+
+Values: `Ellipsoid = 0`, `Cone = 1`, `Cylinder = 2`, `Box = 3`, `World = 4`
 
 ### Resource
 
@@ -2244,6 +3027,30 @@ Values: `Left = 0`, `Top = 1`, `Right = 2`, `Bottom = 3`
 - `public Variant[] GetResult()`
 - `public SignalAwaiter GetAwaiter()`
 
+### Sky
+
+`public class Sky : Resource`
+
+- `public SkyMaterial? SkyMaterial { get; set; }`
+- `public RadianceSizeEnum RadianceSize { get; set; }`
+- `public ProcessModeEnum ProcessMode { get; set; }`
+
+### Sky.ProcessModeEnum
+
+`public enum ProcessModeEnum`
+
+Values: `Automatic`, `Quality`, `Incremental`, `Realtime`
+
+### Sky.RadianceSizeEnum
+
+`public enum RadianceSizeEnum`
+
+Values: `Size32`, `Size64`, `Size128`, `Size256`, `Size512`, `Size1024`, `Size2048`
+
+### SkyMaterial
+
+`public class SkyMaterial : Material`
+
 ### SphereMesh
 
 `public class SphereMesh : Mesh`
@@ -2263,7 +3070,52 @@ Values: `Left = 0`, `Top = 1`, `Right = 2`, `Bottom = 3`
 
 - `public float SpotRange { get; set; }`
 - `public float SpotAngle { get; set; }` - The cone's half-angle in degrees.
-- `public float SpotAttenuation { get; set; }`
+- `public float SpotAttenuation { get; set; }` - The distance falloff exponent (as OmniAttenuation).
+- `public float SpotAngleAttenuation { get; set; }` - The cone-edge curve: the cone fades as 1 - rim^(1/this), rim 0 on the axis and 1 at the edge.
+
+### Sprite3D
+
+`public class Sprite3D : SpriteBase3D` - A textured quad in the world (Godot's Sprite3D), baked by the converter.
+
+- `public Texture2D? Texture { get; set; }`
+- `public int Hframes { get; set; }`
+- `public int Vframes { get; set; }`
+- `public int Frame { get; set; }`
+- `public Vector2I FrameCoords { get; set; }`
+- `public bool RegionEnabled { get; set; }`
+- `public Rect2 RegionRect { get; set; }`
+- `public Rect2 GetItemRect()` - The size of one frame in pixels when the texture's size is known (it is zero for a file texture at run time).
+
+### SpriteBase3D
+
+`public class SpriteBase3D : GeometryInstance3D` - What Sprite3D and Label3D share (Godot's SpriteBase3D).
+
+- `public float PixelSize { get; set; }`
+- `public bool Centered { get; set; }`
+- `public Vector2 Offset { get; set; }`
+- `public bool FlipH { get; set; }`
+- `public bool FlipV { get; set; }`
+- `public Color Modulate { get; set; }`
+- `public BaseMaterial3D.BillboardModeEnum Billboard { get; set; }`
+- `public bool Transparent { get; set; }`
+- `public bool Shaded { get; set; }`
+- `public bool DoubleSided { get; set; }`
+- `public AlphaCutMode AlphaCut { get; set; }`
+- `public float AlphaScissorThreshold { get; set; }`
+- `public float AlphaHashScale { get; set; }`
+- `public bool NoDepthTest { get; set; }`
+- `public bool FixedSize { get; set; }`
+- `public int RenderPriority { get; set; }`
+- `public int TextureFilter { get; set; }`
+- `public int Axis { get; set; }`
+- `public float SortingOffset { get; set; }`
+- `public Mesh? Mesh { get; set; }` - The baked quad (written by the converter).
+
+### SpriteBase3D.AlphaCutMode
+
+`public enum AlphaCutMode`
+
+Values: `Disabled = 0`, `Discard = 1`, `OpaquePrepass = 2`, `Hash = 3`
 
 ### StandardMaterial3D
 
@@ -2333,9 +3185,93 @@ Values: `Left = 0`, `Top = 1`, `Right = 2`, `Bottom = 3`
 
 - `public SubtweenTweener SetDelay(double delay)`
 
+### SubViewport
+
+`public class SubViewport : Viewport` - A view of the world drawn into a texture (Godot's SubViewport).
+
+- `public override Vector2I Size { get; set; }` - The size in pixels (Godot's default is 512 by 512).
+- `public Vector2I Size2DOverride { get; set; }`
+- `public UpdateMode RenderTargetUpdateMode { get; set; }`
+- `public ClearMode RenderTargetClearMode { get; set; }`
+- `public bool TransparentBg { get; set; }`
+- `public bool OwnWorld3D { get; set; }` - Carried only: the engine has one world, so the view always shows it.
+- `public MsaaMode Msaa3D { get; set; }` - Carried only: the view is drawn at one sample.
+- `public Scaling3DModeType Scaling3DMode { get; set; }` - Carried only: any non-bilinear mode is drawn as a plain scale.
+- `public float Scaling3DScale { get; set; }` - Multiplies the size the view is drawn at (0.25 to 8).
+- `public bool Disable3D { get; set; }` - A view with 3D disabled draws nothing: the engine is given no camera for it.
+- `public Color ClearColor { get; set; }` - The colour the target is cleared to when the background is not transparent (Godot takes it from the environment; the engine's views clear to a flat colour, Godot's default clear colour unless set).
+- `public override ViewportTexture? GetTexture()` - The picture this viewport draws.
+- `public override Camera3D? GetCamera3D()`
+- `public void RequestRender()` - Asks for one more picture whatever the update mode says.
+
+### SubViewport.ClearMode
+
+`public enum ClearMode`
+
+Values: `Always = 0`, `Never = 1`, `Once = 2`
+
+### SubViewport.MsaaMode
+
+`public enum MsaaMode`
+
+Values: `Disabled = 0`, `Msaa2X = 1`, `Msaa4X = 2`, `Msaa8X = 3`
+
+### SubViewport.Scaling3DModeType
+
+`public enum Scaling3DModeType`
+
+Values: `Bilinear = 0`, `Fsr = 1`, `Fsr2 = 2`, `Max = 3`
+
+### SubViewport.UpdateMode
+
+`public enum UpdateMode`
+
+Values: `Disabled = 0`, `Once = 1`, `WhenVisible = 2`, `WhenParentVisible = 3`, `Always = 4`
+
+### SubViewportContainer
+
+`public class SubViewportContainer : Control` - Shows a SubViewport child on the window (Godot's SubViewportContainer): split screen, a picture-in-picture, a minimap.
+
+- `public bool Stretch { get; set; }`
+- `public int StretchShrink { get; set; }`
+- `public Rect2 GetGlobalRect()` - The container's rectangle in window pixels: its own layout plus its Control ancestors' positions (Godot offsets by the parents' rectangles).
+
+### SurfaceTool
+
+`public class SurfaceTool : RefCounted` - Builds a mesh a vertex at a time (Godot's SurfaceTool).
+
+- `public void Begin(Mesh.PrimitiveType primitive)`
+- `public void Clear()`
+- `public void SetNormal(Vector3 normal)`
+- `public void SetTangent(Plane tangent)`
+- `public void SetColor(Color color)`
+- `public void SetUV(Vector2 uv)`
+- `public void SetUV2(Vector2 uv2)`
+- `public void SetSmoothGroup(uint index)` - -1 makes the next vertices flat-shaded; 0 (the default) and above smooth with the vertices of the same group at the same position.
+- `public void SetMaterial(Material? material)`
+- `public void AddVertex(Vector3 vertex)`
+- `public void AddIndex(int index)`
+- `public void AddTriangleFan(Vector3[] vertices, Vector2[]? uvs = null, Color[]? colors = null, Vector2[]? uv2s = null, Vector3[]? normals = null, Plane[]? tangents = null)` - Adds a fan of triangles around the first vertex.
+- `public void Index()` - Merges vertices that are identical in every stream and fills the index list.
+- `public void Deindex()` - Expands the index list back into one vertex per index.
+- `public void GenerateNormals(bool flip = false)` - Face normals added up per position and smooth group; Godot's front faces are clockwise, so a face normal is cross(c - a, b - a).
+- `public void GenerateTangents()` - Tangents from the UV derivatives: T along increasing u, handedness chosen so that cross(N, T) * w points at decreasing v (Godot's and glTF's normal-map convention).
+- `public Collections.Array CommitToArrays()` - The arrays in Godot's layout, ready for AddSurfaceFromArrays.
+- `public ArrayMesh? Commit(ArrayMesh? existing = null, Mesh.ArrayFormat flags = 0)` - Adds the surface to existing (or a new ArrayMesh) and returns the mesh.
+- `public void CreateFrom(Mesh existing, int surface)` - Starts from a surface of an ArrayMesh (the arrays, the primitive and the material).
+- `public void AppendFrom(Mesh existing, int surface, Transform3D transform)` - Appends a surface, transformed, to what is held.
+
 ### Texture2D
 
 `public class Texture2D : Resource`
+
+- `public virtual Vector2 GetSize()` - The size in pixels.
+- `public int GetWidth()`
+- `public int GetHeight()`
+
+### Texture3D
+
+`public class Texture3D : Resource` - A 3D texture resource.
 
 ### Timer
 
@@ -3139,21 +4075,53 @@ Values: `Top = 0`, `Center = 1`, `Bottom = 2`, `Fill = 3`
 
 `public class Viewport : Node` - A rendering/input area (Godot's Viewport).
 
-- `public Vector2I Size { get; set; }` - The size in pixels.
+- `public virtual Vector2I Size { get; set; }` - The size in pixels.
+- `public virtual ViewportTexture? GetTexture()` - The picture this viewport draws as a texture.
 - `public Rect2 GetVisibleRect()`
 - `public World3D World3D { get; set; }` - The 3D world of this viewport: its physics space.
-- `public Camera3D? GetCamera3D()` - The camera that is drawn (the one made current last).
+- `public virtual Camera3D? GetCamera3D()` - The camera that is drawn (the one made current last).
 - `public Vector2 GetMousePosition()` - The pointer in viewport pixels.
 - `public void SetInputAsHandled()` - Stops the input event being processed by anything further (Godot's set_input_as_handled).
 - `public bool IsInputHandled()`
+
+### ViewportTexture
+
+`public class ViewportTexture : Texture2D` - The picture a SubViewport draws (Godot's ViewportTexture).
+
+- `public NodePath ViewportPath { get; set; }` - The viewport's path as the scene stored it, relative to the scene's root; empty for a texture made by GetTexture.
+- `public SubViewport? GetViewport()` - The viewport this texture shows, null until it is in the tree.
+- `public override Vector2 GetSize()`
+- `public ulong NativeHandle { get; }` - The engine's texture for the view (an engine texture handle), 0 until the view has been drawn once.
+- `public int Generation { get; }` - Changes whenever NativeHandle does.
+- `public string MaterialReference { get; }` - The texture reference a material names this view by: @rt:viewport.&lt;key&gt;.
 
 ### VisualInstance3D
 
 `public class VisualInstance3D : Node3D` - Anything drawn in 3D (Godot's VisualInstance3D).
 
-- `public uint Layers { get; set; }`
+- `public uint Layers { get; set; }` - The render layers this instance is on (default layer 1).
 - `public bool GetLayerMaskValue(int layerNumber)`
 - `public void SetLayerMaskValue(int layerNumber, bool value)`
+
+### VoxelGI
+
+`public class VoxelGI : VisualInstance3D` - Godot's VoxelGI.
+
+- `public SubdivEnum Subdiv { get; set; }`
+- `public Vector3 Size { get; set; }`
+- `public Resource? CameraAttributes { get; set; }`
+- `public VoxelGIData? Data { get; set; }`
+- `public bool IsBaked { get; }`
+
+### VoxelGI.SubdivEnum
+
+`public enum SubdivEnum`
+
+Values: `Subdiv64 = 0`, `Subdiv128 = 1`, `Subdiv256 = 2`, `Subdiv512 = 3`, `Max = 4`
+
+### VoxelGIData
+
+`public class VoxelGIData : Resource` - Godot's baked VoxelGI resource.
 
 ### Window
 
@@ -3173,6 +4141,14 @@ Values: `Top = 0`, `Center = 1`, `Bottom = 2`, `Fill = 3`
 `public class WorldBoundaryShape3D : Shape3D`
 
 - `public Plane Plane { get; set; }`
+
+### WorldEnvironment
+
+`public class WorldEnvironment : Node` - Godot's WorldEnvironment.
+
+- `public const string Layer = "fabric.environment"` - The script post layer the node writes to.
+- `public Environment? Environment { get; set; }`
+- `public CameraAttributes? CameraAttributes { get; set; }`
 
 ## namespace Aver.Fabric.Collections
 

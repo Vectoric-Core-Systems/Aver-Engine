@@ -9,6 +9,7 @@
 // and shadow map are final -> the scene shaders read -> drawSky() from transparentPass. Not thread-safe.
 #pragma once
 
+#include "aver/core/FogVolume.hpp"
 #include "aver/core/Types.hpp"
 #include "aver/rhi/RHIResources.hpp"
 #include "aver/rhi/WorldShift.hpp"
@@ -90,6 +91,14 @@ public:
     bool ensure(rhi::IResourceFactory& res, const rhi::PipelineLayout& layout, bool rtCapable, bool shaderOk,
                 bool on, const Params& p, rhi::BindingSetHandle table0);
 
+    // G4 R8: local fog volumes for the next record() (Godot FogVolume). Null or a block with no volume goes back to the ordinary passes, which are then
+    // byte-for-byte today's. A block with volumes is drawn by the AVER_FOG_VOLUMES variants of the two compute passes, built the first time one is wanted;
+    // if they would not compile the volumes are dropped and the ordinary passes run. Copies the block.
+    void setFogVolumes(const FogVolumeBlock* block);
+    u32 fogVolumeCount() const { return volCount_; }
+    // Whether the volume variants are what the last record() ran.
+    bool fogVolumesLive() const { return volLive_; }
+
     // Both compute passes. The volume rests in UnorderedAccess afterwards, readable by the scene shaders.
     void record(rhi::IRenderContext& ctx, rhi::BindingSetHandle table0, const Frame& f);
 
@@ -132,6 +141,15 @@ private:
     u32 parity_ = 0;
 
     rhi::PipelineHandle scatterPso_ = 0, integratePso_ = 0, skyPso_ = 0;
+    // G4 R8: the AVER_FOG_VOLUMES twins of the two compute passes, built lazily.
+    bool buildVolumePipelines(rhi::IResourceFactory& res, const rhi::PipelineLayout& layout);
+    rhi::PipelineHandle scatterVolPso_ = 0, integrateVolPso_ = 0;
+    bool volBuildFailed_ = false;   // at builtRev_
+    bool volLive_ = false;
+    bool volWasLive_ = false;       // the last record() ran the variants: a switch drops the history (the two layouts of the volume differ)
+    u32 volCount_ = 0;
+    FogVolumeBlock vol_{};
+    rhi::PipelineLayout layout_{};  // the compute layout ensure() last saw, for the lazy build
     u64  builtRev_ = ~0ull;      // shader-file revision the pipelines were compiled from
     bool buildFailed_ = false;   // at builtRev_; retried when the shader files change
     bool rtBuilt_ = false;       // the scatter pipeline carries the ray-query path

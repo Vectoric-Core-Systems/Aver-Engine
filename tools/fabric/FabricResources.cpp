@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 
@@ -169,7 +170,7 @@ bool isMaterial3DType(const std::string& t) { return t == "StandardMaterial3D" |
 
 bool isPrimitiveMeshType(const std::string& t) {
     return t == "BoxMesh" || t == "SphereMesh" || t == "CapsuleMesh" || t == "CylinderMesh" || t == "PlaneMesh" || t == "QuadMesh" ||
-           t == "PrismMesh" || t == "TorusMesh";
+           t == "PrismMesh" || t == "TorusMesh" || t == "TubeTrailMesh" || t == "RibbonTrailMesh";
 }
 
 // The collision shape classes Aver.Fabric's ClassDB can build from an Object(...) value (G3_RUNTIME 1.2).
@@ -272,8 +273,13 @@ char channelOf(double v) {
 
 // ---- materials -----------------------------------------------------------------------------------------------------
 
-std::string Converter::materialAsset(const std::string& key, const std::string& type, const std::vector<gd::GodotProperty>& props,
+std::string Converter::materialAsset(const std::string& materialKey, const std::string& type, const std::vector<gd::GodotProperty>& props,
                                      const gd::GodotDocBase& doc, const std::string& nameHint, const Where& w) {
+    // G4 R5: a ViewportTexture in a texture slot names the SubViewport of the node that uses the material, so the same material resource used from two
+    // nodes (or two instances of a scene) can bake two different views: the views are part of the cache key. Counted on every use, cached or not.
+    const std::string vpAlbedo = viewportReference(findProp(props, "albedo_texture"), doc, w, "albedo_texture");
+    const std::string vpEmission = viewportReference(findProp(props, "emission_texture"), doc, w, "emission_texture");
+    const std::string key = vpAlbedo.empty() && vpEmission.empty() ? materialKey : materialKey + "|" + vpAlbedo + "|" + vpEmission;
     if (const auto it = materialAssets_.find(key); it != materialAssets_.end()) return it->second;
     materialAssets_[key] = {};   // a failure below is final; the entry is replaced on success
 
@@ -310,11 +316,20 @@ std::string Converter::materialAsset(const std::string& key, const std::string& 
         materialStemsUsed_.insert(name_ + "_" + unique);
     }
 
+    // G4 R6: the BaseMaterial3D features, as the pairs of the .ocmat FX record (OcMat.hpp, parseOcmatFx). Each property below is rated where it is read.
+    std::string fx;
+    const auto addFx = [&](const std::string& kv) { if (!fx.empty()) fx += ' '; fx += kv; };
+    const auto fnum = [](double v) { char b[40]; std::snprintf(b, sizeof b, "%.6g", v); return std::string(b); };
+    std::set<std::string> rated;   // properties this block rated, so the leftover loop at the end skips them
+    const auto rate = [&](const std::string& prop, Rating r, const std::string& why) { rated.insert(prop); report_.add("property", file, w.node, type, prop, r, why, 0); };
+    const auto has = [&](const char* n) { return get(n) != nullptr; };
+
     // Albedo: Godot stores the colour as displayed (sRGB); the .ocmat holds sRGB too.
     m.baseColorFactorLinear = false;
     if (const Var* c = get("albedo_color"); c && c->type == VType::Color && c->nums.size() >= 4)
         for (int k = 0; k < 4; ++k) m.baseColorFactor[k] = static_cast<float>(c->nums[k]);
     bind(m.baseColorTex, tex("albedo_texture"));
+    if (!vpAlbedo.empty()) m.baseColorTex.runtimePath = vpAlbedo;   // G4 R5: the view's picture, supplied by the engine
 
     m.metallicFactor = static_cast<float>(numOf(get("metallic"), 0.0));
     m.roughnessFactor = static_cast<float>(numOf(get("roughness"), 1.0));
@@ -343,8 +358,19 @@ std::string Converter::materialAsset(const std::string& key, const std::string& 
     }
     if (boolOf(get("ao_enabled"), false) && ormTex.empty()) {
         bind(m.occlusionTex, tex("ao_texture"), channelOf(numOf(get("ao_texture_channel"), 0)));
-        m.occlusionStrength = static_cast<float>(numOf(get("ao_light_affect"), 0.0));
-        if (m.occlusionTex.imageIndex >= 0 && m.occlusionStrength == 0.0f) m.occlusionStrength = 1.0f;
+        // The map darkens the ambient light fully; ao_light_affect (how much it also darkens direct light) is the material's `aoaffect`.
+        m.occlusionStrength = 1.0f;
+    }
+    if (const double affect = numOf(get("ao_light_affect"), 0.0); affect > 0.0) {
+        addFx("aoaffect=" + fnum(affect));
+        rate("ao_light_affect", Rating::Approximated, "the occlusion map also darkens the diffuse light that arrives directly (the diffuse albedo is scaled), not the specular");
+    }
+    // Godot's unshaded mode shows the texture as it is, lit by nothing. The .ocmat has no unshaded switch, so a view's picture in an unshaded material is also its
+    // emissive map: it glows by itself on top of whatever light falls on it.
+    const bool unshadedView = !vpAlbedo.empty() && vpEmission.empty() && static_cast<int>(numOf(get("shading_mode"), 1)) == 0;
+    if (unshadedView) {
+        m.emissiveTex.runtimePath = vpAlbedo;
+        for (int k = 0; k < 3; ++k) m.emissiveFactor[k] = 1.0f;
     }
     if (boolOf(get("emission_enabled"), false)) {
         const double energy = numOf(get("emission_energy_multiplier"), 1.0);
@@ -353,58 +379,309 @@ std::string Converter::materialAsset(const std::string& key, const std::string& 
         else
             for (int k = 0; k < 3; ++k) m.emissiveFactor[k] = static_cast<float>(energy);   // Godot's emission default is black, so this is only for a texture
         bind(m.emissiveTex, tex("emission_texture"));
+        if (!vpEmission.empty()) m.emissiveTex.runtimePath = vpEmission;
         report_.add("property", file, w.node, type, "emission_energy_multiplier", Rating::Approximated,
                     "Godot's emission energy is scene-referred; the value is carried over as the .ocmat emissive factor without a unit calibration", 0);
     }
 
-    switch (static_cast<int>(numOf(get("transparency"), 0))) {
+    // ---- transparency, blend, cull, depth (G4 R6) ----
+    const int transparency = static_cast<int>(numOf(get("transparency"), 0));
+    switch (transparency) {
         case 1: m.alphaMode = "BLEND"; break;
         case 2: m.alphaMode = "MASK"; break;
-        case 3:
-            m.alphaMode = "MASK";
-            report_.add("property", file, w.node, type, "transparency", Rating::Approximated, "alpha hash is written as alpha scissor", 0);
+        case 3:   // alpha hash: a noise threshold (opaque pipeline, late depth), not a scissor
+            m.alphaMode = "OPAQUE";
+            addFx("alphaext=hash");
+            if (const double hs = numOf(get("alpha_hash_scale"), 1.0); hs != 1.0) addFx("hashscale=" + fnum(hs));
+            rate("transparency", Rating::Approximated, "alpha hash is a stable per-texel noise threshold on an opaque surface (the noise pattern is not Godot's)");
             break;
         case 4:
             m.alphaMode = "BLEND";
-            report_.add("property", file, w.node, type, "transparency", Rating::Approximated, "alpha depth pre-pass is written as plain alpha blend", 0);
+            addFx("depthdraw=always");
+            rate("transparency", Rating::Approximated, "alpha depth pre-pass is an alpha blend that also writes depth (Godot writes depth for the opaque part only)");
             break;
         default: break;
     }
+    if (transparency == 1 || transparency == 2) rate("transparency", Rating::Converted, transparency == 1 ? "alpha blend" : "alpha scissor (the .ocmat masked mode with the threshold)");
     m.alphaCutoff = static_cast<float>(numOf(get("alpha_scissor_threshold"), 0.5));
+    if (has("alpha_scissor_threshold")) rate("alpha_scissor_threshold", Rating::Converted, "the .ocmat cut-off");
+    if (has("alpha_hash_scale")) rate("alpha_hash_scale", transparency == 3 ? Rating::Converted : Rating::Approximated, transparency == 3 ? "the noise grid scale" : "only alpha hash reads it");
+    if (const int aa = static_cast<int>(numOf(get("alpha_antialiasing_mode"), 0)); aa != 0) {
+        addFx("alphaext=aa");
+        if (transparency == 2 || transparency == 3) {
+            if (transparency == 3) m.alphaMode = "MASK";
+            rate("alpha_antialiasing_mode", Rating::Approximated, "alpha to coverage needs MSAA; the edge is dithered over the width of the alpha's screen derivative instead");
+        } else {
+            rate("alpha_antialiasing_mode", Rating::Unsupported, "alpha antialiasing only applies to alpha scissor and alpha hash");
+        }
+    }
+    if (has("alpha_antialiasing_edge")) rate("alpha_antialiasing_edge", Rating::Approximated, "the edge softness is the alpha's screen derivative, not a setting");
+
+    if (const int bm = static_cast<int>(numOf(get("blend_mode"), 0)); bm != 0) {
+        static const char* const kModes[] = {"mix", "add", "sub", "mul", "premult"};
+        addFx(std::string("blend=") + kModes[std::min(bm, 4)]);
+        if (m.alphaMode != "BLEND") m.alphaMode = "BLEND";   // any mode but mix puts the surface in the transparent pass, as in Godot
+        rate("blend_mode", bm == 4 ? Rating::Approximated : Rating::Converted,
+             bm == 4 ? "premultiplied alpha is drawn with the engine's own premultiplied blend" : std::string("a dedicated blend state (") + kModes[std::min(bm, 4)] + ")");
+    }
+    if (const int dd = static_cast<int>(numOf(get("depth_draw_mode"), 0)); dd == 1 || dd == 2) {
+        addFx(dd == 1 ? "depthdraw=always" : "depthdraw=never");
+        rate("depth_draw_mode", Rating::Converted, dd == 1 ? "depth is written for every pixel" : "no depth is written");
+    }
+    if (boolOf(get("no_depth_test"), false)) { addFx("nodepthtest=1"); rate("no_depth_test", Rating::Converted, "the depth test is off (the surface draws over everything)"); }
+    if (has("depth_test")) rate("depth_test", Rating::Unsupported, "an inverted depth test has no pipeline state in the engine");
+    if (has("render_priority")) {
+        addFx("priority=" + std::to_string(static_cast<int>(numOf(get("render_priority"), 0))));
+        rate("render_priority", Rating::Converted, "sorts translucent draws (higher draws later, before the distance sort); opaque draws have no order");
+    }
+    if (has("next_pass")) rate("next_pass", Rating::Unsupported, "a second material pass has no equivalent");
 
     const int cull = static_cast<int>(numOf(get("cull_mode"), 0));
     m.doubleSided = cull == 2;
-    if (cull == 1) report_.add("property", file, w.node, type, "cull_mode", Rating::Unsupported, "front-face culling has no .ocmat equivalent; the material culls back faces", 0);
+    addFx(cull == 1 ? "cull=front" : (cull == 2 ? "cull=none" : "cull=back"));
+    rate("cull_mode", Rating::Converted, cull == 0 ? "back faces are culled (the pipeline's cull state, new for the material variants)"
+                                       : (cull == 1 ? "front faces are culled" : "both faces draw"));
 
+    // R1: the mesh's vertex colour multiplies the albedo (the mesh must carry the colour stream; the glTF, FBX and OBJ importers keep it).
+    if (boolOf(get("vertex_color_use_as_albedo"), false)) {
+        m.vertexColor = true;
+        report_.add("property", file, w.node, type, "vertex_color_use_as_albedo", Rating::Converted,
+                    "written as the .ocmat vertexcolor flag; the albedo and opacity are multiplied by the mesh's vertex colour in the raster scene pass "
+                    "(ray-traced reflections and GI hits do not see it yet)", 0);
+        if (boolOf(get("vertex_color_is_srgb"), false))
+            report_.add("property", file, w.node, type, "vertex_color_is_srgb", Rating::Approximated,
+                        "the vertex colour is multiplied as written (linear); Godot would convert an sRGB colour to linear first", 0);
+    }
+
+    // ---- subsurface scattering (existing subsurface fields) ----
     if (boolOf(get("subsurf_scatter_enabled"), false)) {
         m.subsurfaceWeight = static_cast<float>(std::min(1.0, numOf(get("subsurf_scatter_strength"), 0.0)));
         m.subsurfaceRadius = 0.5f;
-        report_.add("property", file, w.node, type, "subsurf_scatter_strength", Rating::Approximated, "mapped to the .ocmat subsurface weight with a fixed radius", 0);
+        rate("subsurf_scatter_strength", Rating::Approximated, "mapped to the .ocmat subsurface weight with a fixed radius");
+        rate("subsurf_scatter_enabled", Rating::Approximated, "wrap and thin-surface transmission, not a screen-space blur");
+        if (boolOf(get("subsurf_scatter_transmittance_enabled"), false)) {
+            if (const Var* c = get("subsurf_scatter_transmittance_color"); c && c->type == VType::Color && c->nums.size() >= 3)
+                for (int k = 0; k < 3; ++k) m.subsurfaceColor[k] = static_cast<float>(c->nums[k]);
+            const double depthCm = numOf(get("subsurf_scatter_transmittance_depth"), 0.1) * 100.0;
+            m.subsurfaceRadius = static_cast<float>(std::max(0.0, std::min(1.0, (depthCm - 0.25) / 4.75)));
+            rate("subsurf_scatter_transmittance_enabled", Rating::Approximated, "the transmittance colour tints the scattered light and the depth sets the radius (0.25 to 5 cm)");
+        }
+    }
+    if (has("subsurf_scatter_skin_mode")) rate("subsurf_scatter_skin_mode", Rating::Approximated, "the skin profile is not modelled; the generic wrap is used");
+    for (const char* n : {"subsurf_scatter_texture", "subsurf_scatter_transmittance_texture", "subsurf_scatter_transmittance_boost"})
+        if (has(n)) rate(n, Rating::Unsupported, "no per-texel or boost control; the scalar subsurface weight is used");
+
+    // ---- reflectance, clearcoat, refraction (existing material fields) ----
+    if (has("metallic_specular")) {
+        m.reflectance = static_cast<float>(numOf(get("metallic_specular"), 0.5) * 0.08);
+        rate("metallic_specular", Rating::Converted, "F0 of the dielectric base is 0.08 * metallic_specular, the rule Godot uses");
+    }
+    if (boolOf(get("clearcoat_enabled"), false)) {
+        m.coatWeight = static_cast<float>(std::max(0.0, std::min(1.0, numOf(get("clearcoat"), 1.0))));
+        m.coatRoughness = static_cast<float>(std::max(0.0, std::min(1.0, numOf(get("clearcoat_roughness"), 0.5))));
+        rate("clearcoat_enabled", Rating::Approximated, "the layered BSDF's coat lobe; it draws only with RENDER.LAYEREDBSDF on");
+        rate("clearcoat", Rating::Approximated, "the coat weight");
+        rate("clearcoat_roughness", Rating::Approximated, "the coat roughness");
+    }
+    if (has("clearcoat_texture")) rate("clearcoat_texture", Rating::Unsupported, "no per-texel coat; the scalar weight is used");
+    if (boolOf(get("refraction_enabled"), false)) {
+        const double scale = numOf(get("refraction_scale"), 0.05);
+        m.transmission = 0.85f;
+        m.ior = static_cast<float>(std::max(1.0, std::min(2.0, 1.0 + 5.0 * scale)));
+        rate("refraction_enabled", Rating::Approximated, "transmission 0.85 and ior = 1 + 5 * refraction_scale: Aver's screen-space or traced refraction (RENDER.REFRACTION) bends the backdrop; it is not Godot's offset");
+        rate("refraction_scale", Rating::Approximated, "the ior above");
+    }
+    for (const char* n : {"refraction_texture", "refraction_texture_channel"})
+        if (has(n)) rate(n, Rating::Unsupported, "no per-texel refraction strength");
+
+    // ---- UV transforms and triplanar (R6) ----
+    {
+        const V3 s1 = vec3Of(get("uv1_scale"), V3{1, 1, 1}), o1 = vec3Of(get("uv1_offset"), V3{0, 0, 0});
+        const V3 s2 = vec3Of(get("uv2_scale"), V3{1, 1, 1}), o2 = vec3Of(get("uv2_offset"), V3{0, 0, 0});
+        if (s1.x != 1 || s1.y != 1) addFx("uv1scale=" + fnum(s1.x) + "," + fnum(s1.y));
+        if (o1.x != 0 || o1.y != 0) addFx("uv1offset=" + fnum(o1.x) + "," + fnum(o1.y));
+        if (s2.x != 1 || s2.y != 1) addFx("uv2scale=" + fnum(s2.x) + "," + fnum(s2.y));
+        if (o2.x != 0 || o2.y != 0) addFx("uv2offset=" + fnum(o2.x) + "," + fnum(o2.y));
+        if (has("uv1_scale")) rate("uv1_scale", Rating::Converted, "UV * scale + offset in the material variant's pixel shader (x and y; both feed the triplanar position)");
+        if (has("uv1_offset")) rate("uv1_offset", Rating::Converted, "UV * scale + offset in the material variant's pixel shader");
+        if (has("uv2_scale")) rate("uv2_scale", Rating::Converted, "applied to the maps that read UV2 (detail on UV2, AO and emission on UV2); needs the mesh's second UV set, else UV1 is used");
+        if (has("uv2_offset")) rate("uv2_offset", Rating::Converted, "as uv2_scale");
+        if (boolOf(get("uv1_triplanar"), false)) {
+            addFx("uv1tri=1");
+            if (boolOf(get("uv1_world_triplanar"), false)) addFx("uv1world=1");
+            if (has("uv1_triplanar_sharpness")) addFx("uv1sharp=" + fnum(numOf(get("uv1_triplanar_sharpness"), 1.0)));
+            rate("uv1_triplanar", Rating::Converted, "three projections of the base maps blended by the normal; position in metres (object space, or world with uv1_world_triplanar) * uv1_scale + uv1_offset");
+            rate("uv1_world_triplanar", Rating::Converted, "world-space position instead of object space");
+            rate("uv1_triplanar_sharpness", Rating::Converted, "the blend exponent");
+        } else {
+            for (const char* n : {"uv1_world_triplanar", "uv1_triplanar_sharpness"}) if (has(n)) rate(n, Rating::Approximated, "only read with uv1_triplanar");
+        }
+        if (boolOf(get("uv2_triplanar"), false)) {
+            addFx("uv2tri=1");
+            rate("uv2_triplanar", Rating::Unsupported, "stored; the engine has one triplanar projection (uv1) and the UV2 maps stay planar");
+        }
+        for (const char* n : {"uv2_world_triplanar", "uv2_triplanar_sharpness"}) if (has(n)) rate(n, Rating::Unsupported, "see uv2_triplanar");
     }
 
-    // Features the .ocmat has no field for; each one is listed rather than dropped silently.
+    // ---- shading, shadows, fog, fades (R6) ----
+    {
+        const int sm = static_cast<int>(numOf(get("shading_mode"), 1));
+        if (sm == 0) {
+            addFx("unshaded=1");
+            rate("shading_mode", unshadedView ? Rating::Approximated : Rating::Converted, unshadedView ? "unshaded: the view picture is also written as the emissive map; the material variant shows the albedo without lighting" : "unshaded: the albedo and glow reach the target without lighting");
+        } else if (sm == 2) {
+            rate("shading_mode", Rating::Approximated, "per-vertex shading is drawn per pixel");
+        }
+        if (boolOf(get("disable_receive_shadows"), false)) { addFx("noshadows=1"); rate("disable_receive_shadows", Rating::Converted, "the sun reaches the surface unshadowed"); }
+        if (boolOf(get("disable_ambient_light"), false)) { addFx("noambient=1"); rate("disable_ambient_light", Rating::Approximated, "the sky ambient term and the specular occlusion are zeroed"); }
+        if (has("disable_fog")) rate("disable_fog", Rating::Unsupported, "fog is applied to every lit surface");
+        if (boolOf(get("shadow_to_opacity"), false)) { addFx("shadowtoopacity=1"); rate("shadow_to_opacity", Rating::Unsupported, "stored; the opacity does not follow the shadow"); }
+        if (has("disable_specular_occlusion")) rate("disable_specular_occlusion", Rating::Unsupported, "specular occlusion is not a per-material switch");
+        const int dm = static_cast<int>(numOf(get("diffuse_mode"), 0));
+        if (has("diffuse_mode")) {
+            if (dm == 2) addFx("diffuse=wrap");
+            if (dm == 3) addFx("diffuse=toon");
+            if (dm == 1) addFx("diffuse=lambert");
+            rate("diffuse_mode", dm == 1 ? Rating::Converted : Rating::Approximated,
+                 dm == 1 ? "the engine's diffuse lobe is Lambert" : (dm == 2 ? "lambert wrap is the subsurface wrap term" : (dm == 3 ? "toon diffuse is drawn as Lambert" : "burley is drawn as the engine's Lambert")));
+        }
+        const int spm = static_cast<int>(numOf(get("specular_mode"), 0));
+        if (has("specular_mode")) {
+            if (spm == 1) addFx("spec=toon");
+            if (spm == 2) addFx("spec=off");
+            rate("specular_mode", spm == 2 ? Rating::Converted : Rating::Approximated, spm == 2 ? "no specular reflection" : (spm == 1 ? "toon specular is drawn as GGX" : "Schlick-GGX"));
+        }
+        if (const int fm = static_cast<int>(numOf(get("distance_fade_mode"), 0)); fm != 0) {
+            addFx(fm == 1 ? "fade=alpha" : (fm == 2 ? "fade=dither" : "fade=object"));
+            addFx("fademin=" + fnum(numOf(get("distance_fade_min_distance"), 0.0) * 100.0));
+            addFx("fademax=" + fnum(numOf(get("distance_fade_max_distance"), 10.0) * 100.0));
+            rate("distance_fade_mode", fm == 1 ? Rating::Approximated : Rating::Converted,
+                 fm == 1 ? "pixel alpha fades the opacity of a blended material; an opaque one dithers instead" : (fm == 2 ? "screen-door dither by the pixel's distance" : "screen-door dither by the object's distance"));
+            rate("distance_fade_min_distance", Rating::Converted, "metres to centimetres: invisible closer than this");
+            rate("distance_fade_max_distance", Rating::Converted, "metres to centimetres: fully opaque beyond this");
+        } else {
+            for (const char* n : {"distance_fade_min_distance", "distance_fade_max_distance"}) if (has(n)) rate(n, Rating::Approximated, "only read with distance_fade_mode");
+        }
+        if (boolOf(get("proximity_fade_enabled"), false)) rate("proximity_fade_enabled", Rating::Unsupported, "fading near other geometry needs the opaque depth, which a translucent draw cannot read");
+        if (has("proximity_fade_distance")) rate("proximity_fade_distance", Rating::Unsupported, "see proximity_fade_enabled");
+    }
+
+    // ---- vertex stage (R6) ----
+    {
+        const int bb = static_cast<int>(numOf(get("billboard_mode"), 0));
+        if (bb != 0) {
+            addFx(bb == 1 ? "billboard=on" : (bb == 2 ? "billboard=y" : "billboard=particles"));
+            if (boolOf(get("billboard_keep_scale"), false)) addFx("keepscale=1");
+            rate("billboard_mode", bb == 3 ? Rating::Approximated : Rating::Converted,
+                 bb == 3 ? "billboard like mode 1; the sprite sheet shows its first frame (the engine's mesh draws carry no particle age)"
+                         : "the vertex stage turns the mesh toward the camera (VSMainFx); its shadow and depth prepass are the un-billboarded mesh's");
+            if (bb == 3) {
+                addFx("frames=" + std::to_string(static_cast<int>(numOf(get("particles_anim_h_frames"), 1))) + "," + std::to_string(static_cast<int>(numOf(get("particles_anim_v_frames"), 1))));
+                for (const char* n : {"particles_anim_h_frames", "particles_anim_v_frames", "particles_anim_loop"}) if (has(n)) rate(n, Rating::Approximated, "the sheet's first frame is shown");
+            }
+        }
+        if (has("billboard_keep_scale")) rate("billboard_keep_scale", bb != 0 ? Rating::Converted : Rating::Approximated, "the node's scale survives the billboard");
+        if (boolOf(get("fixed_size"), false)) { addFx("fixedsize=1"); rate("fixed_size", Rating::Converted, "the object keeps one apparent size (offsets from its origin scale with view depth; 1 m of depth is the size authored)"); }
+        if (boolOf(get("grow"), false)) {
+            addFx("grow=1");
+            addFx("growcm=" + fnum(numOf(get("grow_amount"), 0.0) * 100.0));
+            rate("grow", Rating::Converted, "vertices are pushed along their normals (metres to centimetres); shadows and the depth prepass use the ungrown mesh");
+            rate("grow_amount", Rating::Converted, "metres to centimetres");
+        } else if (has("grow_amount")) {
+            rate("grow_amount", Rating::Approximated, "only read with grow");
+        }
+        for (const char* n : {"use_point_size", "point_size"}) if (has(n)) rate(n, Rating::Unsupported, "point rendering has no equivalent");
+        for (const char* n : {"use_particle_trails"}) if (has(n)) rate(n, Rating::Unsupported, "particle trails have no equivalent");
+        for (const char* n : {"use_z_clip_scale", "z_clip_scale", "use_fov_override", "fov_override"}) if (has(n)) rate(n, Rating::Unsupported, "no per-material projection override");
+    }
+
+    // ---- surface features (R6) ----
+    {
+        if (boolOf(get("rim_enabled"), false)) {
+            addFx("rim=1");
+            addFx("rimamount=" + fnum(numOf(get("rim"), 1.0)));
+            addFx("rimtint=" + fnum(numOf(get("rim_tint"), 0.5)));
+            rate("rim_enabled", Rating::Approximated, "Godot's per-light rim, added as glow from the sun only (local lights and ambient add none)");
+            rate("rim", Rating::Approximated, "the rim amount");
+            rate("rim_tint", Rating::Converted, "mix of white and the albedo");
+        }
+        if (has("rim_texture")) rate("rim_texture", Rating::Unsupported, "no per-texel rim; the scalar amount is used");
+        if (boolOf(get("anisotropy_enabled"), false)) {
+            addFx("aniso=1");
+            addFx("anisoamount=" + fnum(numOf(get("anisotropy"), 0.0)));
+            rate("anisotropy_enabled", Rating::Approximated, "the shared BRDF is isotropic: the highlight is widened by the amount, not stretched along the tangent");
+            rate("anisotropy", Rating::Approximated, "the widening amount");
+        }
+        if (has("anisotropy_flowmap")) rate("anisotropy_flowmap", Rating::Unsupported, "no flow direction texture");
+        if (boolOf(get("heightmap_enabled"), false)) {
+            addFx("height=1");
+            addFx("heightscale=" + fnum(numOf(get("heightmap_scale"), 5.0)));
+            bind(m.heightTex, tex("heightmap_texture"));
+            if (boolOf(get("heightmap_deep_parallax"), false)) {
+                addFx("deepparallax=1");
+                addFx("layers=" + std::to_string(static_cast<int>(numOf(get("heightmap_min_layers"), 8))) + "," + std::to_string(static_cast<int>(numOf(get("heightmap_max_layers"), 32))));
+            }
+            if (boolOf(get("heightmap_flip_tangent"), false)) addFx("flipt=1");
+            if (boolOf(get("heightmap_flip_binormal"), false)) addFx("flipb=1");
+            if (boolOf(get("heightmap_flip_texture"), false)) addFx("invertheight=1");
+            rate("heightmap_enabled", Rating::Converted, "parallax offset mapping from the heightmap's red channel (the layer-1 metal-rough texture slot)");
+            rate("heightmap_scale", Rating::Approximated, "a UV depth of scale / 100; Godot's scale is in its own units");
+            rate("heightmap_deep_parallax", Rating::Approximated, "steep parallax with the layer count by view angle; not Godot's occlusion refinement");
+            for (const char* n : {"heightmap_min_layers", "heightmap_max_layers", "heightmap_flip_tangent", "heightmap_flip_binormal", "heightmap_flip_texture", "heightmap_texture"})
+                if (has(n)) rate(n, Rating::Converted, "read by the parallax");
+        } else {
+            for (const char* n : {"heightmap_texture", "heightmap_scale", "heightmap_deep_parallax", "heightmap_min_layers", "heightmap_max_layers", "heightmap_flip_tangent",
+                                  "heightmap_flip_binormal", "heightmap_flip_texture"})
+                if (has(n)) rate(n, Rating::Approximated, "only read with heightmap_enabled");
+        }
+        if (boolOf(get("backlight_enabled"), false)) {
+            addFx("backlight=1");
+            if (const Var* c = get("backlight"); c && c->type == VType::Color && c->nums.size() >= 3)
+                addFx("backlightcolor=" + fnum(srgbToLinear(c->nums[0])) + "," + fnum(srgbToLinear(c->nums[1])) + "," + fnum(srgbToLinear(c->nums[2])));
+            rate("backlight_enabled", Rating::Approximated, "light from behind the surface, from the sun only, added as glow");
+            rate("backlight", Rating::Approximated, "the tint (linear)");
+        }
+        if (has("backlight_texture")) rate("backlight_texture", Rating::Unsupported, "no per-texel backlight; the colour is used");
+        if (boolOf(get("detail_enabled"), false)) {
+            addFx("detail=1");
+            bind(m.detailAlbedoTex, tex("detail_albedo"));
+            bind(m.detailNormalTex, tex("detail_normal"));
+            const int db = static_cast<int>(numOf(get("detail_blend_mode"), 0));
+            if (db > 0) addFx("detailblend=" + std::to_string(std::min(db, 3)));
+            if (static_cast<int>(numOf(get("detail_uv_layer"), 0)) == 1) addFx("detailuv=2");
+            rate("detail_enabled", Rating::Converted, "the detail albedo and normal (the layer-1 texture slots) blended over the base maps");
+            rate("detail_blend_mode", db == 4 ? Rating::Approximated : Rating::Converted, "mix, add, subtract, multiply; premultiplied alpha is drawn as mix");
+            rate("detail_uv_layer", Rating::Converted, "UV1 or UV2 (UV2 needs the mesh's second UV set)");
+            rate("detail_albedo", Rating::Converted, "bound to the layer-1 base colour slot");
+            rate("detail_normal", Rating::Converted, "bound to the layer-1 normal slot");
+            if (has("detail_mask")) rate("detail_mask", Rating::Unsupported, "the mask texture is not read; the detail applies everywhere");
+        } else {
+            for (const char* n : {"detail_albedo", "detail_normal", "detail_mask", "detail_blend_mode", "detail_uv_layer"}) if (has(n)) rate(n, Rating::Approximated, "only read with detail_enabled");
+        }
+        if (static_cast<int>(numOf(get("emission_operator"), 0)) == 1) { addFx("emitmul=1"); rate("emission_operator", Rating::Converted, "multiply: the emission is multiplied by the albedo"); }
+        else if (has("emission_operator")) rate("emission_operator", Rating::Converted, "add (the engine's emissive)");
+        if (boolOf(get("emission_on_uv2"), false)) { addFx("emituv2=1"); rate("emission_on_uv2", Rating::Converted, "the emission map is sampled with UV2 (needs the second UV set)"); }
+        if (boolOf(get("ao_on_uv2"), false)) { addFx("aouv2=1"); rate("ao_on_uv2", Rating::Converted, "the occlusion map is sampled with UV2 (needs the second UV set)"); }
+        if (has("emission_intensity")) rate("emission_intensity", Rating::Approximated, "physical emission units are not calibrated; emission_energy_multiplier carries the strength");
+        if (has("texture_filter")) rate("texture_filter", Rating::Approximated, "the material sampler is shared (linear, anisotropic)");
+        if (has("texture_repeat")) rate("texture_repeat", Rating::Approximated, "the material sampler wraps");
+        for (const char* n : {"albedo_texture_force_srgb"}) if (has(n)) rate(n, Rating::Approximated, "the albedo slot is always sRGB");
+        for (const char* n : {"albedo_texture_msdf", "msdf_pixel_range", "msdf_outline_size"}) if (has(n)) rate(n, Rating::Unsupported, "no MSDF text rendering in materials");
+        for (const char* n : {"bent_normal_enabled", "bent_normal_texture"}) if (has(n)) rate(n, Rating::Unsupported, "no bent normal map");
+        for (const char* n : {"stencil_mode", "stencil_flags", "stencil_compare", "stencil_reference", "stencil_color", "stencil_outline_thickness"})
+            if (has(n)) rate(n, Rating::Unsupported, "no stencil buffer in the engine");
+    }
+    m.fxRecord = fx;   // `cull=back` alone is a record: the engine culled nothing before
+
+    // Features the material cook has no field for; each one is listed rather than dropped silently.
     for (const gd::GodotProperty& p : props) {
         const std::string& n = p.name;
         static const std::set<std::string> handled = {
             "albedo_color", "albedo_texture", "metallic", "roughness", "orm_texture", "roughness_texture", "metallic_texture",
             "roughness_texture_channel", "metallic_texture_channel", "normal_enabled", "normal_scale", "normal_texture",
-            "ao_enabled", "ao_texture", "ao_texture_channel", "ao_light_affect", "emission_enabled", "emission", "emission_energy_multiplier",
-            "emission_texture", "transparency", "alpha_scissor_threshold", "cull_mode", "subsurf_scatter_enabled", "subsurf_scatter_strength"};
-        if (handled.count(n) || ignorableResourceProp(n)) continue;
-        if (n == "uv1_scale" || n == "uv1_offset") {
-            const V3 v = vec3Of(&p.value, n == "uv1_scale" ? V3{1, 1, 1} : V3{0, 0, 0});
-            const bool unchanged = n == "uv1_scale" ? (v.x == 1 && v.y == 1) : (v.x == 0 && v.y == 0);
-            if (!unchanged)
-                report_.add("property", file, w.node, type, n, Rating::Unsupported,
-                            "the .ocmat has no UV scale or offset (only world-aligned tiling); the texture is not tiled or shifted", p.line);
-            continue;
-        }
-        if (n == "shading_mode" && static_cast<int>(numOf(&p.value, 1)) == 1) continue;
-        if (n == "blend_mode" && static_cast<int>(numOf(&p.value, 0)) == 0) continue;
-        if ((n == "texture_filter" || n == "texture_repeat" || n == "specular_mode" || n == "diffuse_mode" || n == "metallic_specular")) {
-            report_.add("property", file, w.node, type, n, Rating::Approximated, "the engine's shading model has no such switch; its default is used", p.line);
-            continue;
-        }
+            "ao_enabled", "ao_texture", "ao_texture_channel", "emission_enabled", "emission", "emission_energy_multiplier",
+            "emission_texture", "vertex_color_use_as_albedo", "vertex_color_is_srgb"};
+        if (handled.count(n) || rated.count(n) || ignorableResourceProp(n)) continue;
         report_.add("property", file, w.node, type, n, Rating::Unsupported, "the .ocmat has no equivalent", p.line);
     }
 
@@ -433,6 +710,46 @@ std::string Converter::materialAsset(const std::string& key, const std::string& 
     report_.add("resource", doc.file, w.node, type, "", Rating::Unsupported, "this build of AverAssetC has no material compiler (AVER_MODULE_PBR is off)", 0);
     return {};
 #endif
+}
+
+// ---- sub-viewports (docs/plans/fabric/G4_RENDER.md R5) ----------------------------------------------------------------
+
+std::string Converter::viewportReference(const Var* value, const gd::GodotDocBase& doc, const Where& w, const std::string& prop) {
+    if (!value || value->type != VType::SubResource) return {};
+    const gd::GodotSubResource* sr = doc.findSub(value->s);
+    if (!sr || sr->type != "ViewportTexture") return {};
+    const std::string path = stringOf(findProp(sr->props, "viewport_path"));
+    if (!emitting_ || path.empty() || path[0] == '/') {
+        report_.add("property", doc.file, w.node, w.type, prop, Rating::Unsupported,
+                    emitting_ ? "the ViewportTexture's viewport_path is empty or absolute; only a path relative to its scene's root is resolved"
+                              : "a ViewportTexture outside a node cannot be resolved to a SubViewport",
+                    value->line);
+        return {};
+    }
+    // The path is relative to the root of the scene the using node was authored in (for a node of an instanced scene, the instance's root).
+    const FNode* cur = emitting_->owner ? emitting_->owner : emitting_;
+    size_t at = 0;
+    while (cur && at <= path.size()) {
+        const size_t slash = path.find('/', at);
+        const std::string seg = path.substr(at, slash == std::string::npos ? std::string::npos : slash - at);
+        at = slash == std::string::npos ? path.size() + 1 : slash + 1;
+        if (seg.empty() || seg == ".") continue;
+        cur = seg == ".." ? cur->parent : cur->findChild(seg);
+    }
+    if (!cur || cur->type != "SubViewport") {
+        report_.add("property", doc.file, w.node, w.type, prop, Rating::Unsupported,
+                    cur ? "the ViewportTexture's viewport_path '" + path + "' names a " + cur->type + ", not a SubViewport"
+                        : "the ViewportTexture's viewport_path '" + path + "' names a node that does not exist",
+                    value->line);
+        return {};
+    }
+    const std::string key = viewportKeyOf(emittingLevel_, *cur);
+    if (++viewportUsers_[key] == 1)
+        report_.add("property", doc.file, w.node, w.type, prop, Rating::Converted,
+                    "a ViewportTexture: written as the texture reference '@rt:viewport." + key + "', which the engine resolves to the SubViewport's picture "
+                    "(drawn by the cheap raster configuration, linear values; the view is drawn only while a material, a container or a script's UI shows it)",
+                    value->line);
+    return "@rt:viewport." + key;
 }
 
 // ---- primitive meshes ----------------------------------------------------------------------------------------------
@@ -473,11 +790,18 @@ std::string Converter::primitiveMeshAsset(const std::string& type, const std::ve
         static const std::set<std::string> known = {
             "size", "subdivide_width", "subdivide_height", "subdivide_depth", "radius", "height", "radial_segments", "rings",
             "is_hemisphere", "top_radius", "bottom_radius", "cap_top", "cap_bottom", "orientation", "center_offset", "left_to_right",
-            "inner_radius", "outer_radius", "ring_segments", "subdivide_depth", "material", "flip_faces"};
+            "inner_radius", "outer_radius", "ring_segments", "subdivide_depth", "material", "flip_faces",
+            "radial_steps", "sections", "section_length", "section_rings", "shape", "section_segments"};
         if (known.count(p.name) || ignorableResourceProp(p.name)) continue;
         report_.add("property", doc.file, w.node, type, p.name, Rating::Approximated, "not used by the generated mesh", p.line);
     }
-    report_.add("resource", doc.file, "", type, "", Rating::Converted, "generated " + asset + " with Godot's dimensions", 0);
+    if (type == "TubeTrailMesh" || type == "RibbonTrailMesh")
+        report_.add("resource", doc.file, "", type, "", Rating::Approximated,
+                    "a trail mesh is bent along a particle's path by the particle system; it is generated as a static straight " + std::string(type == "TubeTrailMesh" ? "tube" : "ribbon") +
+                        " along Y, centred, and its curve (width over length) is not applied",
+                    0);
+    else
+        report_.add("resource", doc.file, "", type, "", Rating::Converted, "generated " + asset + " with Godot's dimensions", 0);
     meshAssets_[key] = asset;
     return asset;
 }
@@ -582,6 +906,60 @@ Var Converter::shapeObject(const std::string& type, const std::vector<gd::GodotP
     return genericResourceDict(type, props, doc, w, "this shape class has no Aver.Fabric counterpart yet; its parameters are kept as a dictionary");
 }
 
+namespace {
+
+bool isEnvironmentType(const std::string& t) {
+    static const std::set<std::string> s = {"Environment", "Sky", "ProceduralSkyMaterial", "PhysicalSkyMaterial", "PanoramaSkyMaterial",
+                                            "CameraAttributes", "CameraAttributesPractical", "CameraAttributesPhysical",
+                                            "FogMaterial"};   // G4 R8: a FogVolume's material is held as a value like the environment's resources
+    return s.count(t) != 0;
+}
+
+}  // namespace
+
+Var Converter::environmentObject(const std::string& type, const std::vector<gd::GodotProperty>& props, const gd::GodotDocBase& doc, const Where& w) {
+    std::vector<std::pair<std::string, Var>> entries;
+    for (const gd::GodotProperty& p : props) {
+        if (ignorableResourceProp(p.name)) continue;
+        if (type == "FogMaterial") {
+            // G4 R8: what each FogMaterial key becomes in the engine's fog volume (framework_envfx_abi.h; shader: voxi_froxel.hlsl, AVER_FOG_VOLUMES).
+            const char* why = nullptr;
+            Rating r = Rating::Converted;
+            if (p.name == "density") why = "extinction per metre, per centimetre in the engine (/100); may be negative, which carves fog out of the volumes it overlaps";
+            else if (p.name == "albedo") why = "the scattering colour: the sun and the sky light the volume's fog with it (sRGB to linear)";
+            else if (p.name == "emission") { why = "radiance the fog adds per unit density (sRGB to linear), not occluded and not lit"; r = Rating::Approximated; }
+            else if (p.name == "height_falloff") { why = "density falls by e^(-falloff x height in metres) above the volume's lowest point (Godot's exact reference height is not documented; this one is assumed)"; r = Rating::Approximated; }
+            else if (p.name == "edge_fade") { why = "a soft edge: full density from this fraction of the half size inside the shape's surface, ramping linearly to nothing at the surface (Godot's exact falloff curve is not documented)"; r = Rating::Approximated; }
+            else if (p.name == "density_texture") { report_.add("resource", doc.file, w.node, type, p.name, Rating::Unsupported, "a 3D density texture is not sampled; the density is uniform inside the shape", p.line); continue; }
+            if (why) report_.add("resource", doc.file, w.node, type, p.name, r, why, p.line);
+        }
+        if (type == "PanoramaSkyMaterial" && p.name == "panorama" && p.value.type == VType::ExtResource) {
+            // The file is kept as it is (the renderers do not sample it, but the node holds the reference); .hdr and .exr are not images the engine decodes.
+            const gd::GodotExtResource* e = doc.findExt(p.value.s);
+            const std::string res = e ? fs_.resolve(*e, &diag_, doc.file) : std::string();
+            std::vector<u8> bytes;
+            const std::string disk = res.empty() ? std::string() : fs_.toDiskPath(res);
+            if (disk.empty() || !readFileBytes(disk, bytes)) {
+                report_.add("resource", doc.file, w.node, type, "panorama", Rating::Unsupported, "the panorama file is missing", p.line);
+                continue;
+            }
+            const std::string asset = "Textures/" + (res.rfind("res://", 0) == 0 ? res.substr(6) : res);
+            const std::string dst = contentDir_ + "/" + asset;
+            createDirectories(std::filesystem::path(dst).parent_path().string());
+            if (!writeFileBytes(dst, bytes.data(), bytes.size())) {
+                report_.add("resource", doc.file, w.node, type, "panorama", Rating::Unsupported, "could not write " + dst, p.line);
+                continue;
+            }
+            entries.emplace_back(p.name, makeResource(asset));
+            continue;
+        }
+        Var cv = convertValue(p.value, doc, w, p.name);
+        if (cv.isNil() && !p.value.isNil()) continue;   // already reported
+        entries.emplace_back(p.name, std::move(cv));
+    }
+    return makeObject(type, std::move(entries));
+}
+
 Var Converter::convertValue(const Var& v, const gd::GodotDocBase& doc, const Where& w, const std::string& prop) {
     switch (v.type) {
         case VType::Array: {
@@ -615,16 +993,33 @@ Var Converter::convertValue(const Var& v, const gd::GodotDocBase& doc, const Whe
                 report_.add("resource", doc.file, w.node, t, "", Rating::Unsupported, "shader materials need the Godot shader front-end (G6)", sr->line);
                 return makeNil();
             }
+            if (t == "ViewportTexture") {
+                // G4 R5: a ViewportTexture held as a node or script value keeps its path for Aver.Fabric's ViewportTexture. (A material's texture slot is
+                // handled in materialAsset, which writes the engine's texture reference into the .ocmat.)
+                const Var* path = findProp(sr->props, "viewport_path");
+                report_.add("resource", doc.file, w.node, t, "", Rating::Converted,
+                            "kept as Object(ViewportTexture) with its viewport_path; it names the SubViewport relative to its scene and its picture is the view's", sr->line);
+                return makeObject("ViewportTexture", {{"viewport_path", path ? *path : makeNil()}});
+            }
             if (isPrimitiveMeshType(t)) {
                 const std::string a = primitiveMeshAsset(t, sr->props, doc, w);
                 return a.empty() ? makeNil() : makeResource(a);
             }
-            if (t == "ArrayMesh" || t == "ImmediateMesh" || t == "PointMesh") {
+            if (t == "ArrayMesh") {
+                const std::string a = arrayMeshAsset(sr->props, doc, w);
+                return a.empty() ? makeNil() : makeResource(a);
+            }
+            if (t == "MultiMesh") return multiMeshObject(sr->props, doc, w);
+            if (t == "ImmediateMesh" || t == "PointMesh" || t == "TextMesh") {
                 report_.add("resource", doc.file, w.node, t, "", Rating::Unsupported,
-                            "the surface data is Godot's packed vertex format and is not decoded; re-export the mesh as .glb", sr->line);
+                            t == "TextMesh" ? "TextMesh extrudes glyph outlines; the converter has no font tessellator (a Label3D or a UI label shows text instead)"
+                            : t == "ImmediateMesh" ? "an ImmediateMesh holds no stored surfaces: a script fills it every frame (Aver.Fabric's ImmediateMesh does the same at run time)"
+                                                   : "a point mesh has no triangles",
+                            sr->line);
                 return makeNil();
             }
             if (isShapeType(t)) return shapeObject(t, sr->props, doc, w);
+            if (isEnvironmentType(t)) return environmentObject(t, sr->props, doc, w);
             return genericResourceDict(t, sr->props, doc, w, "no Aver counterpart for this resource class; its properties are kept as a dictionary");
         }
         case VType::ExtResource: {
@@ -678,9 +1073,15 @@ Var Converter::convertValue(const Var& v, const gd::GodotDocBase& doc, const Whe
                     return a.empty() ? makeNil() : makeResource(a);
                 }
                 if (isShapeType(rt)) return shapeObject(rt, r->props, *r, w);
+                if (isEnvironmentType(rt)) return environmentObject(rt, r->props, *r, w);
                 if (rt == "ArrayMesh") {
+                    const std::string a = arrayMeshAsset(r->props, *r, w);
+                    return a.empty() ? makeNil() : makeResource(a);
+                }
+                if (rt == "MultiMesh") return multiMeshObject(r->props, *r, w);
+                if (rt == "TextMesh" || rt == "ImmediateMesh" || rt == "PointMesh") {
                     report_.add("resource", res, w.node, rt, "", Rating::Unsupported,
-                                "the surface data is Godot's packed vertex format and is not decoded; re-export the mesh as .glb", 0);
+                                rt == "TextMesh" ? "TextMesh extrudes glyph outlines; the converter has no font tessellator" : "this mesh class holds no stored triangles to convert", 0);
                     return makeNil();
                 }
                 return genericResourceDict(rt, r->props, *r, w, "no Aver counterpart for this resource class; its properties are kept as a dictionary");
@@ -705,6 +1106,11 @@ void Converter::convertStandaloneResources() {
             const std::string& t = r->header.type;
             if (isMaterial3DType(t)) { materialAsset(res, t, r->props, *r, stemOf(res), w); continue; }
             if (isPrimitiveMeshType(t)) { primitiveMeshAsset(t, r->props, *r, w); continue; }
+            if (t == "ArrayMesh") { arrayMeshAsset(r->props, *r, w); continue; }
+            if (t == "MultiMesh" || t == "MeshLibrary") {
+                report_.add("resource", res, "", t, "", Rating::Converted, "converted where a scene uses it", 0);
+                continue;
+            }
             if (t == "ShaderMaterial")
                 report_.add("resource", res, "", t, "", Rating::Unsupported, "shader materials need the Godot shader front-end (G6)", 0);
             else if (isShapeType(t))

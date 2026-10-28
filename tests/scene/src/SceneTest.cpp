@@ -362,8 +362,28 @@ static void testFields(World& world) {
         {"CLight.cookie", kComponentLight, FieldKind::I64, static_cast<u16>(offsetof(CLight, cookie)), 0},
         {"CLight.flags", kComponentLight, FieldKind::I32, static_cast<u16>(offsetof(CLight, flags)), 0},
         {"CLight.sourceRadiusCm", kComponentLight, FieldKind::F32, static_cast<u16>(offsetof(CLight, sourceRadiusCm)), 1},
+        {"CLight.attenuation", kComponentLight, FieldKind::F32, static_cast<u16>(offsetof(CLight, attenuation)), 1},
+        {"CLight.spotAttenuation", kComponentLight, FieldKind::F32, static_cast<u16>(offsetof(CLight, spotAttenuation)), 1},
+        {"CLight.specularScale", kComponentLight, FieldKind::F32, static_cast<u16>(offsetof(CLight, specularScale)), 1},
+        {"CLight.shadowBias", kComponentLight, FieldKind::F32, static_cast<u16>(offsetof(CLight, shadowBias)), 1},
+        {"CLight.shadowNormalBias", kComponentLight, FieldKind::F32, static_cast<u16>(offsetof(CLight, shadowNormalBias)), 1},
+        {"CLight.fadeBeginCm", kComponentLight, FieldKind::F32, static_cast<u16>(offsetof(CLight, fadeBeginCm)), 1},
+        {"CLight.fadeLengthCm", kComponentLight, FieldKind::F32, static_cast<u16>(offsetof(CLight, fadeLengthCm)), 1},
+        {"CLight.fadeShadowCm", kComponentLight, FieldKind::F32, static_cast<u16>(offsetof(CLight, fadeShadowCm)), 1},
         {"CCamera.fovYRad", kComponentCamera, FieldKind::F32,
          static_cast<u16>(offsetof(CCamera, fovYRad)), 1},
+        // G4 R4: render layers, visibility ranges, camera lens and cull masks
+        {"CMeshRenderer.layersInv", kComponentMeshRenderer, FieldKind::I32, static_cast<u16>(offsetof(CMeshRenderer, layersInv)), 0},
+        {"CMeshRenderer.visBeginCm", kComponentMeshRenderer, FieldKind::F32, static_cast<u16>(offsetof(CMeshRenderer, visBeginCm)), 1},
+        {"CMeshRenderer.visEndMarginCm", kComponentMeshRenderer, FieldKind::F32, static_cast<u16>(offsetof(CMeshRenderer, visEndMarginCm)), 1},
+        {"CMeshRenderer.rangeState", kComponentMeshRenderer, FieldKind::I32, static_cast<u16>(offsetof(CMeshRenderer, rangeState)), 0},
+        {"CLight.cullInv", kComponentLight, FieldKind::I32, static_cast<u16>(offsetof(CLight, cullInv)), 0},
+        {"CLight.shadowCasterInv", kComponentLight, FieldKind::I32, static_cast<u16>(offsetof(CLight, shadowCasterInv)), 0},
+        {"CCamera.flags", kComponentCamera, FieldKind::I32, static_cast<u16>(offsetof(CCamera, flags)), 0},
+        {"CCamera.projection", kComponentCamera, FieldKind::I32, static_cast<u16>(offsetof(CCamera, projection)), 0},
+        {"CCamera.sizeCm", kComponentCamera, FieldKind::F32, static_cast<u16>(offsetof(CCamera, sizeCm)), 1},
+        {"CCamera.hOffsetCm", kComponentCamera, FieldKind::F32, static_cast<u16>(offsetof(CCamera, hOffsetCm)), 1},
+        {"CCamera.cullInv", kComponentCamera, FieldKind::I32, static_cast<u16>(offsetof(CCamera, cullInv)), 0},
     };
     for (const FieldExpect& fe : fields) {
         const u32        id = world.fieldId(fe.qualified);
@@ -1002,7 +1022,7 @@ static void testSceneAbiErrors(World& world) {
 // CLight's rect/IES/cookie fields and scene::gatherLights: what the renderer is handed.
 static void testLights(World& world) {
     AVER_INFO("=== lights ===");
-    check(sizeof(CLight) == 64, "CLight is 64 bytes with its new fields");
+    check(sizeof(CLight) == 104, "CLight is 104 bytes with the G4 R2 Godot parameter block and the G4 R4 masks");
 
     // A rect light at (100, 200, 300), turned a quarter turn about Z.
     Transform xf;
@@ -1048,6 +1068,34 @@ static void testLights(World& world) {
         check(w.widthCm == 200.0f && w.heightCm == kLightDefaultRectCm, "a zero height reads as the 100 cm default");
         check(w.sourceRadiusCm == kLightDefaultRadiusCm, "a zero radius reads as 1 cm");
         check(!w.castShadows && w.iesProfile == 0x1234 && w.cookie == 0x5678, "flags and asset ids carry through");
+        // G4 R2: a light that never heard of Godot's block reads as the Aver curves with the neutral multipliers.
+        check(!w.godot && !w.negative && w.attenuation == 0.0f && w.specularScale == 1.0f && w.shadowBias == 0.0f && w.fadeLengthCm == 0.0f,
+              "an untouched light has no Godot block: Aver curves, specular 1, no bias override, no fade");
+    }
+
+    // G4 R2: Godot's block, resolved. 0 is a value for attenuation and specular once kLightGodot is set; the spot curve defaults to 1.
+    {
+        Transform xg;
+        xg.position = {5, 6, 7};
+        const Entity g = world.create("godot-light", kInvalidEntity, xg);
+        CLight* gc = static_cast<CLight*>(world.addComponent(g, kComponentLight));
+        *gc = CLight{};
+        gc->intensityLux = 1000.0f;
+        gc->flags = kLightGodot | kLightNegative;
+        gc->attenuation = 0.0f;
+        gc->specularScale = 0.0f;
+        gc->shadowBias = 0.3f; gc->shadowNormalBias = 4.0f;
+        gc->fadeBeginCm = 4000.0f; gc->fadeLengthCm = 1000.0f; gc->fadeShadowCm = 5000.0f;
+        WorldLight wg;
+        check(makeWorldLight(*gc, world.worldMatrix(g), wg), "a Godot-flagged light gathers");
+        check(wg.godot && wg.negative && wg.attenuation == 0.0f && wg.specularScale == 0.0f && wg.spotAttenuation == 1.0f,
+              "zero attenuation and zero specular are values under kLightGodot; the angle attenuation defaults to 1");
+        check(wg.shadowBias == 0.3f && wg.shadowNormalBias == 4.0f && wg.fadeBeginCm == 4000.0f && wg.fadeLengthCm == 1000.0f && wg.fadeShadowCm == 5000.0f,
+              "bias and fade values carry through");
+        gc->flags = 0;
+        check(makeWorldLight(*gc, world.worldMatrix(g), wg) && !wg.godot && wg.specularScale == 1.0f && wg.attenuation == 0.0f,
+              "without the flag the stored attenuation and specular are not read");
+        world.destroy(g);
     }
 
     // Scale must not leak into the axes.

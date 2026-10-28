@@ -53,6 +53,10 @@ bool parseOcmat(std::string_view text, pbr::MaterialDesc& out,
 bool loadOcmat(const std::string& path, pbr::MaterialDesc& out,
                OcMatExtras* extras = nullptr, std::string* err = nullptr);
 
+// R6: parses the key=value pairs of an `FX` record (the text after the keyword, or the whole record) into `out`; the same grammar parseOcmat reads from a file.
+// The Godot converter composes the pairs and the cook applies them with this, so the key names live in one place.
+void parseOcmatFx(std::string_view pairs, pbr::MaterialFx& out);
+
 // Serialises a material to the text form. Round-trips through parseOcmat.
 std::string writeOcmat(const pbr::MaterialDesc& d, const OcMatExtras* extras = nullptr);
 

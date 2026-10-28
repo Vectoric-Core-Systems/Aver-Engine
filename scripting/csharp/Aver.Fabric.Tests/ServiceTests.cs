@@ -69,6 +69,10 @@ static class ServiceTests
             var floor = main.GetNode<StaticBody3D>("Floor");
             T.Check("the floor: layer 3, group, physics material", floor.CollisionLayer == 3 && floor.IsInGroup("ground") && floor.PhysicsMaterialOverride is { } pm && T.Near(pm.Friction, 0.1f) && T.Near(pm.Bounce, 0.4f) && pm.Rough);
             T.Check("its box shape is built from Object(BoxShape3D, ...)", floor.GetNode<CollisionShape3D>("Shape").Shape is BoxShape3D { Size: var fs } && fs == new Vector3(20, 1, 20));
+            var world = main.GetNode<WorldEnvironment>("World");
+            T.Check("the WorldEnvironment node holds its Environment (ACES, exposure 1.25, fog) and a procedural sky (G4 R3)",
+                world.Environment is { TonemapMode: Aver.Fabric.Environment.ToneMapper.Aces, FogEnabled: true, Sky.SkyMaterial: ProceduralSkyMaterial } e && T.Near(e.TonemapExposure, 1.25f) &&
+                T.Near(e.FogDensity, 0.02f));
             var ball = main.GetNode<RigidBody3D>("Ball");
             T.Check("the ball: mass 2, effective damping 0.75, axis lock, contact monitor, layer 4 mask 5", ball.Mass == 2f && T.Near(ball.LinearDamp, 0.75f) && ball.AxisLockAngularY && ball.ContactMonitor && ball.MaxContactsReported == 4 && ball.CollisionLayer == 4 && ball.CollisionMask == 5);
             var zone = main.GetNode<Area3D>("Zone");

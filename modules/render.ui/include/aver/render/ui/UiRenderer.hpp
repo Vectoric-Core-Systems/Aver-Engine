@@ -39,6 +39,10 @@ public:
     // The GPU texture of an atlas page, 0 when it has none yet (the editor shows these as thumbnails).
     rhi::TextureHandle pageTexture(u32 page) const;
 
+    // Forgets the binding set made for a texture the UI drew (G4 R5: a sub-viewport's target when it is rebuilt or destroyed). A host calls it before the
+    // texture goes; a texture the UI never drew is a no-op.
+    void dropBinding(rhi::TextureHandle t);
+
     // Uploads every dirty atlas page: creates the RGBA8Unorm page texture on first use, expands A8 to
     // premultiplied RGBA8 (c, c, c, c) through the coverage-gamma LUT row by row at the footprint's row
     // pitch into one transient upload buffer, then per page: barrier ShaderResource -> CopyDest,
@@ -63,7 +67,6 @@ private:
 
     // The binding set for a texture, created on first use and kept.
     rhi::BindingSetHandle bindingFor(rhi::TextureHandle t);
-    void dropBinding(rhi::TextureHandle t);
     // Grows the vertex/index buffers to hold at least this much. Safe mid-frame.
     bool ensureCapacity(u32 vertexCount, u32 indexCount);
 

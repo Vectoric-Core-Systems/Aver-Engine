@@ -216,3 +216,21 @@ if(TARGET Aver.Render.PBR.Materials)
   target_compile_definitions(VoxiSpirvCompileTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
   set_target_properties(VoxiSpirvCompileTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# RasterLightsTest -- the raster local lights' CPU half (aver/voxi/RasterLights.hpp, G4 R2): culling, ranking and the 32-light cap, Godot's
+# attenuation curves against its documented formulas (aver/formats/GodotLight.hpp), the energy calibration, the shadow-tile budget and atlas
+# packing, the tile matrices, and the HLSL's constants read back from voxi.hlsl / voxi_locallights_raster.hlsli. Header-only, no device.
+add_executable(RasterLightsTest src/RasterLightsTest.cpp)
+target_link_libraries(RasterLightsTest PRIVATE Aver.Core Aver.Platform)
+target_include_directories(RasterLightsTest PRIVATE ${CMAKE_SOURCE_DIR}/modules/render.voxi/include ${CMAKE_SOURCE_DIR}/modules/formats/include)
+target_compile_definitions(RasterLightsTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
+set_target_properties(RasterLightsTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# CameraProjectionTest -- G4 R4: orthographic / frustum / keep_aspect projections (aver/core/CameraProjection.hpp) against reference values and
+# unprojection round trips, render-layer masks and visibility ranges (aver/scene/RenderMasks.hpp), the component fields that carry them, and the
+# raster light list's mask packing. Header-only, no device.
+add_executable(CameraProjectionTest src/CameraProjectionTest.cpp)
+target_link_libraries(CameraProjectionTest PRIVATE Aver.Core Aver.Platform)
+target_include_directories(CameraProjectionTest PRIVATE ${CMAKE_SOURCE_DIR}/modules/render.voxi/include ${CMAKE_SOURCE_DIR}/modules/formats/include ${CMAKE_SOURCE_DIR}/modules/scene/include)
+target_compile_definitions(CameraProjectionTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
+set_target_properties(CameraProjectionTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

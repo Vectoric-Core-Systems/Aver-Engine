@@ -8,6 +8,7 @@
 #include "aver/platform/FileSystem.hpp"
 #include "aver/rhi/ShaderCacheSweep.hpp"
 #include "aver/rhi/FrameConstants.hpp"
+#include "aver/rhi/Tonemap.hpp"
 #include "aver/rhi/DxcShaderInclude.hpp"
 #include "aver/rhi/EditorLines.hpp"
 #include "aver/core/Log.hpp"
@@ -451,6 +452,14 @@ struct GpuMesh {
     u32  vbShares = 0;
     MeshHandle vbSource = 0;
 
+    // R1: the optional second vertex stream (MeshVertexExtra, input slot 1). xOwned false on a vertex-sharing mesh, which
+    // borrows its root's stream exactly as it borrows the vertices (so destroyMesh's root refusal protects it too).
+    ComPtr<ID3D12Resource> vbx;
+    D3D12_VERTEX_BUFFER_VIEW vbxv{};
+    BufferHandle vbxBuffer = 0;
+    bool hasExtra = false;
+    bool xOwned = true;
+
     // False once destroyMesh releases this slot. Slot itself is kept for stale handle safety.
     bool alive = true;
 };
@@ -468,6 +477,7 @@ DXGI_FORMAT toDxgiFormat(Format f) {
         case Format::RGBA16F:        return DXGI_FORMAT_R16G16B16A16_FLOAT;
         case Format::R32Float:       return DXGI_FORMAT_R32_FLOAT;
         case Format::RG32Float:      return DXGI_FORMAT_R32G32_FLOAT;
+        case Format::RGB32Float:     return DXGI_FORMAT_R32G32B32_FLOAT;
         case Format::R32Uint:        return DXGI_FORMAT_R32_UINT;
         case Format::D32Float:       return DXGI_FORMAT_D32_FLOAT;
         case Format::R32Typeless:    return DXGI_FORMAT_R32_TYPELESS;
@@ -507,6 +517,7 @@ const char* semanticName(VertexSemantic s) {
         case VertexSemantic::Normal:   return "NORMAL";
         case VertexSemantic::TexCoord: return "TEXCOORD";
         case VertexSemantic::Color:    return "COLOR";
+        case VertexSemantic::Tangent:  return "TANGENT";
     }
     return "POSITION";
 }
@@ -524,7 +535,7 @@ UINT buildInputLayout(const VertexLayout& l, D3D12_INPUT_ELEMENT_DESC (&out)[kMa
         out[n].SemanticName = semanticName(a.semantic);
         out[n].SemanticIndex = a.semanticIndex;
         out[n].Format = f;
-        out[n].InputSlot = 0;
+        out[n].InputSlot = a.slot;
         out[n].AlignedByteOffset = a.offset;
         out[n].InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
         out[n].InstanceDataStepRate = 0;
@@ -1094,6 +1105,10 @@ public:
     MeshHandle adoptMeshSharingVertices(MeshHandle source, std::unique_ptr<MeshStaging> indices) override;
     MeshHandle createSkinTargetMesh(MeshHandle source, BufferHandle* outVertices) override;
     bool destroyMesh(MeshHandle mesh) override;
+    bool setMeshExtra(MeshHandle mesh, const MeshVertexExtra* extra, u32 vertexCount) override;
+    bool meshHasExtra(MeshHandle mesh) const override {
+        return mesh != 0 && mesh <= meshes_.size() && meshes_[mesh - 1].alive && meshes_[mesh - 1].hasExtra;
+    }
 
     // Static mesh heap selection (see setStaticMeshHeapDefault).
     void setStaticMeshHeapDefault(bool onDefaultHeap) override { staticMeshDefaultHeap_ = onDefaultHeap; }
@@ -1158,6 +1173,7 @@ public:
 
     // Blended-mesh path (sticky across frames).
     void setDrawBlended(bool blended) override { drawBlended_ = blended; }
+    void setDrawLayers(u32 layersInv) override { drawLayersInv_ = layersInv; }
     bool drawBlended() const override { return drawBlended_; }
 
     void setLineDepth(bool testDepth) override { editorLines_.setDepthTest(testDepth); }
@@ -1562,6 +1578,7 @@ private:
     bool wireframeFrame_ = false;
     // See IDevice::setUnlit. Sticky like wireframe_.
     bool unlit_ = false;
+    u32 drawLayersInv_ = 0;   // setDrawLayers: written to the object block's _objPad word
     ComPtr<ID3D12Resource> frameCBs_[kFrameCount];
     u8* frameCBPtr_[kFrameCount] = {nullptr, nullptr};
 
@@ -1591,6 +1608,11 @@ private:
     ComPtr<ID3D12PipelineState> bloomPrefilterPso_, bloomDownPso_, bloomUpPso_;
     // Composite permutations: [bloom on][auto-exposure on].
     ComPtr<ID3D12PipelineState> compositePso_[2][2];
+    // The AVER_POST_TONEMAP_EXT twins (Godot tonemappers, display adjustments): built the first frame postNeedsExtComposite()
+    // asks for one, never otherwise. compositeExtFailed_ makes a failed build fall back to compositePso_ without retrying every frame.
+    ComPtr<ID3D12PipelineState> compositeExtPso_[2][2];
+    bool compositeExtFailed_ = false;
+    ID3D12PipelineState* compositePsoFor(bool bloom, bool autoExp);
     ComPtr<ID3D12PipelineState> histogramPso_, exposurePso_;
     ComPtr<ID3D12PipelineState> localGridPso_, localBlurPso_;
     // Lens effects: the half-resolution DOF pair (prep, gather), the two RGBA16F targets they write (made
@@ -1840,6 +1862,7 @@ struct RhiPipeline {
     u32  slotDwords[kMaxConstantSlots] = {};  // 0 = root CBV; non-zero = root constants.
     i32  msVertexParam = -1, msIndexParam = -1, msCountParam = -1;
     i32  instanceWorldParam = -1;   // -1 unless GraphicsPipelineDesc::instanced was set.
+    bool extraSlot = false;         // The vertex layout reads input slot 1 (MeshVertexExtra): only a mesh with that stream can draw.
 };
 
 // One suballocated descriptor range plus the kind declared for each slot.
@@ -3911,6 +3934,46 @@ MeshHandle D3D12Device::createMesh(const MeshVertex* verts, u32 vcount, const u3
     return static_cast<MeshHandle>(meshes_.size());
 }
 
+// R1: uploads the optional second vertex stream and attaches it to `mesh`.
+bool D3D12Device::setMeshExtra(MeshHandle mesh, const MeshVertexExtra* extra, u32 vcount) {
+    if (!device_ || !rhiFactory_ || !extra || mesh == 0 || mesh > meshes_.size()) return false;
+    GpuMesh& m = meshes_[mesh - 1];
+    // A sharer borrows its root's stream, and a compute-written mesh's vertices are not the ones the stream describes.
+    if (!m.alive || m.hasExtra || m.computeWritten || !m.vbOwned || vcount != m.vertexCount) return false;
+    const u64 bytes = static_cast<u64>(vcount) * sizeof(MeshVertexExtra);
+    bool onDefault = staticMeshDefaultHeap_;
+    for (int attempt = 0; attempt < 2; ++attempt, onDefault = false) {
+        BufferDesc bd;
+        bd.bytes = bytes;
+        bd.kind = onDefault ? BufferKind::Default : BufferKind::Upload;
+        bd.debugName = "mesh vertex extras";
+        const BufferHandle h = rhiFactory_->createBuffer(bd);
+        RhiBuffer* rb = rhiFactory_->buffer(h);
+        if (!rb || !rb->res) {
+            AVER_ERROR("[RHI.D3D12] setMeshExtra could not allocate its buffer");
+            if (h) rhiFactory_->destroyBuffer(h);
+            return false;
+        }
+        if (onDefault) {
+            if (!rhiFactory_->uploadBuffers({{rb->res.Get(), extra, bytes}})) {
+                rhiFactory_->destroyBuffer(h);
+                continue;   // retry once on the Upload heap, as createMesh does
+            }
+        } else {
+            rhiFactory_->writeBuffer(h, extra, bytes, 0);
+        }
+        m.vbx = rb->res;
+        m.vbxBuffer = h;
+        m.vbxv.BufferLocation = m.vbx->GetGPUVirtualAddress();
+        m.vbxv.SizeInBytes = static_cast<UINT>(bytes);
+        m.vbxv.StrideInBytes = sizeof(MeshVertexExtra);
+        m.hasExtra = true;
+        m.xOwned = true;
+        return true;
+    }
+    return false;
+}
+
 // Shares source's vertex buffer, owns its index buffer (inverse of createSkinTargetMesh).
 MeshHandle D3D12Device::createMeshSharingVertices(MeshHandle source, const u32* indices, u32 indexCount) {
     return shareVertices(source, indices, indexCount, /*posed=*/false);
@@ -3965,6 +4028,11 @@ MeshHandle D3D12Device::shareVertices(MeshHandle source, const u32* indices, u32
     m.vbOwned = false;
     m.vbSource = root;
     m.computeWritten = posed;   // a posed part IS posed geometry; see createPosedPartMesh
+    // R1: the second vertex stream goes with the vertices it describes. The root outlives this mesh (vbShares), so it is borrowed.
+    if (src.hasExtra && !posed) {
+        m.vbx = src.vbx; m.vbxv = src.vbxv; m.vbxBuffer = src.vbxBuffer;
+        m.hasExtra = true; m.xOwned = false;
+    }
 
     const u64 ibytes = static_cast<u64>(indexCount) * sizeof(u32);
     // Use same Upload/Default policy as createMesh() (lambda avoids duplication).
@@ -4501,6 +4569,8 @@ bool D3D12Device::destroyMesh(MeshHandle mesh) {
     if (rhiFactory_) {
         // ONLY IF OWNED. A vertex-sharing mesh's vertices belong to its root.
         if (m.vbOwned && m.vbBuffer) rhiFactory_->destroyBuffer(m.vbBuffer);
+        // R1: the second vertex stream, likewise only by the mesh that owns it.
+        if (m.xOwned && m.vbxBuffer) rhiFactory_->destroyBuffer(m.vbxBuffer);
         // ONLY IF OWNED. A skin target's indices belong to its source.
         if (m.ibOwned && m.ibBuffer) rhiFactory_->destroyBuffer(m.ibBuffer);
     }
@@ -4518,6 +4588,11 @@ bool D3D12Device::destroyMesh(MeshHandle mesh) {
     // Slot CLEARED AND KEPT (never recycled); a stale handle draws nothing, not random memory.
     m.vb.Reset();
     m.ib.Reset();
+    m.vbx.Reset();
+    m.vbxv = D3D12_VERTEX_BUFFER_VIEW{};
+    m.vbxBuffer = 0;
+    m.hasExtra = false;
+    m.xOwned = true;
     m.vbv = D3D12_VERTEX_BUFFER_VIEW{};
     m.ibv = D3D12_INDEX_BUFFER_VIEW{};
     m.indexCount = 0;
@@ -4562,7 +4637,9 @@ bool D3D12Device::depthOnlyDraw(MeshHandle mesh, const f32 world[16], const f32 
 
     for (IRenderFeature* f : features_) {
         if (!f->overridesScenePipeline()) continue;
-        const PipelineHandle pp = f->depthPrepassPipeline();
+        // R1: a mesh with the second vertex stream is prepassed through the vertex shader its colour pass will use (bit-identical depth).
+        PipelineHandle pp = meshes_[mesh - 1].hasExtra ? f->depthPrepassPipelineExtra() : 0;
+        if (!pp) pp = f->depthPrepassPipeline();
         if (!pp) return false;   // this feature has no prepass PSO; nothing else offers one either today
         const BindingSetHandle bs = f->sceneBindingSet();
         const void* cb = nullptr; u32 cbBytes = 0;
@@ -4642,8 +4719,21 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
         if (!f->overridesScenePipeline() || !rhiContext_) continue;
         // Unlit uses feature's pipeline (not fallback, which hardcodes gBaseColor).
         // Prepassed draw must use IA path (depth prepass writes through IA/vsMain, not mesh shaders).
-        const bool featureMs = msActive_ && msPso_ && !prepassed;
-        const PipelineHandle fp = f->scenePipeline(featureMs, prepassed, false);
+        bool featureMs = msActive_ && msPso_ && !prepassed;
+        PipelineHandle fp = 0;
+        // R1: a mesh with the second vertex stream takes the feature's variant that reads it, on the input-assembler path
+        // (the mesh-shader path fetches MeshVertex only). 0 = no variant yet, and the mesh draws as every mesh does.
+        if (meshes_[mesh - 1].hasExtra) {
+            fp = f->scenePipelineExtra(prepassed);
+            if (fp) featureMs = false;
+        }
+        // R6: a material with BaseMaterial3D features takes its own variant (never prepassed; input-assembler path). 0 = not built yet.
+        if (!prepassed) {
+            if (const u32 fxKey = drawMaterialFxKey(drawBinding_.constants, drawBinding_.bytes)) {
+                if (const PipelineHandle fxp = f->scenePipelineFx(fxKey, meshes_[mesh - 1].hasExtra, false)) { fp = fxp; featureMs = false; }
+            }
+        }
+        if (!fp) fp = f->scenePipeline(featureMs, prepassed, false);
         if (!fp) break;
         const BindingSetHandle bs = f->sceneBindingSet();
         const void* cb = nullptr; u32 cbBytes = 0;
@@ -4671,6 +4761,7 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
         std::memcpy(fc + 16, color, 4 * sizeof(f32));
         fc[20] = metallic; fc[21] = roughness; fc[22] = unlit_ ? 1.0f : 0.0f; fc[23] = 0.0f;
         writeShadingConstants(fc, unlit_);
+        if (drawLayersInv_) std::memcpy(fc + 27, &drawLayersInv_, sizeof(u32));
         rhiContext_->setConstants(kObjectConstantRegister, fc, kObjectConstantDwords);
         // featureMs: draw call must match pipeline chosen (prepassed = IA path).
         if (featureMs) rhiContext_->dispatchMeshFor(mesh);
@@ -5062,6 +5153,45 @@ bool D3D12Device::createPostPipelines() {
     if (!hrOk(device_->CreateDescriptorHeap(&rh, IID_PPV_ARGS(&postRtvHeap_)), "post RTV heap")) return false;
     postRtvSize_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     return true;
+}
+
+// The composite pipeline for this frame: the ordinary permutation, or its AVER_POST_TONEMAP_EXT twin when the settings ask for a
+// Godot tonemapper or a display adjustment (built here, once). The default path never reaches the second branch.
+ID3D12PipelineState* D3D12Device::compositePsoFor(bool bloom, bool autoExp) {
+    const int b = bloom ? 1 : 0, a = autoExp ? 1 : 0;
+    ID3D12PipelineState* plain = compositePso_[b][a].Get();
+    if (!postNeedsExtComposite(post_) || compositeExtFailed_ || !postRootSig_) return plain;
+    if (compositeExtPso_[b][a]) return compositeExtPso_[b][a].Get();
+
+    const char* src = postShaderSource();
+    ComPtr<ID3DBlob> vs, ps;
+    std::string defs = "AVER_POST_DEPTHFX=1;AVER_POST_LUT=1;AVER_POST_TONEMAP_EXT=1;";
+    if (bloom)   defs += "AVER_POST_BLOOM=1;";
+    if (autoExp) defs += "AVER_POST_AUTOEXPOSURE=1;";
+    if (FAILED(shaderCompiler().compile(src, "PostVS", "vs_5_1", &vs)) ||
+        FAILED(shaderCompiler().compile(src, "PSComposite", "ps_5_1", &ps, nullptr, defs.c_str()))) {
+        compositeExtFailed_ = true;
+        AVER_WARN("[RHI.D3D12] the Godot tonemapper composite failed to compile; the project's ordinary tonemapper is used");
+        return plain;
+    }
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC d{};
+    d.pRootSignature = postRootSig_.Get();
+    d.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};
+    d.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
+    d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    d.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    d.SampleMask = UINT_MAX;
+    d.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    d.NumRenderTargets = 1;
+    d.RTVFormats[0] = kBackbufferFormat;
+    d.SampleDesc.Count = 1;
+    if (!hrOk(device_->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&compositeExtPso_[b][a])), "post pso (tonemap ext)")) {
+        compositeExtFailed_ = true;
+        return plain;
+    }
+    AVER_INFO("[RHI.D3D12] Godot tonemapper composite built (bloom {}, auto-exposure {})", b, a);
+    return compositeExtPso_[b][a].Get();
 }
 
 // GPU handle of descriptor triple `triple` in the post heap.
@@ -5865,14 +5995,14 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
             // Outside sub-rect, vt keeps prior content. Confined viewport/scissor means DrawInstanced
             // never rasterizes there. Only SandboxShell's Level ImGui::Image reads vt, with same crop.
             D3D12_CPU_DESCRIPTOR_HANDLE trtv = vt->rtvHeap->GetCPUDescriptorHandleForHeapStart();
-            fullscreen(compositePso_[bloom ? 1 : 0][autoExp ? 1 : 0].Get(), compositeTriple,
+            fullscreen(compositePsoFor(bloom, autoExp), compositeTriple,
                        compositeW, compositeH, &trtv, compositeX, compositeY);
             auto backToSrv = transition(vt->res.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
                                         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             cmdList_->ResourceBarrier(1, &backToSrv);
             cmdList_->OMSetRenderTargets(1, &bbRtv, FALSE, nullptr);
         } else {
-            fullscreen(compositePso_[bloom ? 1 : 0][autoExp ? 1 : 0].Get(), compositeTriple,
+            fullscreen(compositePsoFor(bloom, autoExp), compositeTriple,
                        compositeW, compositeH, &bbRtv, compositeX, compositeY);
         }
     }
@@ -6029,6 +6159,9 @@ void D3D12Device::endFrame() {
             const f32 cx = frameCB_.camPos[0], cy = frameCB_.camPos[1], cz = frameCB_.camPos[2];
             std::sort(blendedDraws_.begin(), blendedDraws_.end(),
                       [cx, cy, cz](const BlendedDraw& a, const BlendedDraw& b) {
+                // R6: render_priority first (lower draws earlier), distance within a priority.
+                const i32 pa = drawMaterialFxPriority(a.binding.constants, a.binding.bytes), pb = drawMaterialFxPriority(b.binding.constants, b.binding.bytes);
+                if (pa != pb) return pa < pb;
                 const f32 adx = a.world[12] - cx, ady = a.world[13] - cy, adz = a.world[14] - cz;
                 const f32 bdx = b.world[12] - cx, bdy = b.world[13] - cy, bdz = b.world[14] - cz;
                 // Squared distance (monotonic with real distance, avoids sqrt cost).
@@ -6068,19 +6201,25 @@ void D3D12Device::endFrame() {
                     }
                 }
 
+                // R6: a translucent material with BaseMaterial3D features (blend mode, depth modes, cull, shader features) has its own variant.
+                PipelineHandle drawPso = blendedPso;
+                bool drawMs = msActive_ && msPso_;
+                if (const u32 fxKey = drawMaterialFxKey(bd.binding.constants, bd.binding.bytes)) {
+                    if (const PipelineHandle fxp = owner->scenePipelineFx(fxKey, false, true)) { drawPso = fxp; drawMs = false; }
+                }
                 const BindingSetHandle bs = owner->sceneBindingSet();
                 const void* cb = nullptr; u32 cbBytes = 0;
                 const bool haveCb = owner->sceneConstants(&cb, &cbBytes) && cb && cbBytes;
-                const bool same = fovValid_ && blendedPso == fovPso_ && bs == fovSet_ &&
+                const bool same = fovValid_ && drawPso == fovPso_ && bs == fovSet_ &&
                                   haveCb == (fovCbBytes_ != 0) &&
                                   (!haveCb || (cbBytes == fovCbBytes_ && fovCb_.size() == cbBytes &&
                                                std::memcmp(fovCb_.data(), cb, cbBytes) == 0));
                 if (!same) {
-                    rhiContext_->setPipeline(blendedPso);
+                    rhiContext_->setPipeline(drawPso);
                     rhiContext_->setBindlessTable(owner->sceneBindlessTable());
                     if (bs) rhiContext_->setBindingSet(bs, 0);
                     if (haveCb) rhiContext_->setConstantBuffer(kFeatureFrameConstantRegister, cb, cbBytes);
-                    fovPso_ = blendedPso; fovSet_ = bs; fovCbBytes_ = haveCb ? cbBytes : 0;
+                    fovPso_ = drawPso; fovSet_ = bs; fovCbBytes_ = haveCb ? cbBytes : 0;
                     if (haveCb) fovCb_.assign(static_cast<const u8*>(cb), static_cast<const u8*>(cb) + cbBytes);
                     else        fovCb_.clear();
                     fovValid_ = true;
@@ -6093,8 +6232,8 @@ void D3D12Device::endFrame() {
                 fc[20] = bd.metallic; fc[21] = bd.roughness; fc[22] = 0.0f; fc[23] = 0.0f;
                 writeShadingConstants(fc);
                 rhiContext_->setConstants(kObjectConstantRegister, fc, kObjectConstantDwords);
-                if (msActive_ && msPso_) rhiContext_->dispatchMeshFor(bd.mesh);
-                else                     rhiContext_->drawMesh(bd.mesh);
+                if (drawMs) rhiContext_->dispatchMeshFor(bd.mesh);
+                else        rhiContext_->drawMesh(bd.mesh);
                 boundRootSig_ = nullptr;
                 boundPso_ = nullptr;
             }
@@ -7943,6 +8082,8 @@ PipelineHandle D3D12ResourceFactory::createGraphicsPipeline(const GraphicsPipeli
     p.msIndexParam = rs->msIndexParam;
     p.msCountParam = rs->msCountParam;
     p.instanceWorldParam = rs->instanceWorldParam;
+    for (u32 i = 0; i < d.vertexLayout.attribCount && i < kMaxVertexAttribs; ++i)
+        if (d.vertexLayout.attribs[i].slot == 1) p.extraSlot = true;
     for (u32 i = 0; i < kMaxConstantSlots; ++i) { p.slotParam[i] = rs->slotParam[i]; p.slotDwords[i] = d.layout.constantDwords[i]; }
 
     D3D12_RASTERIZER_DESC raster{};
@@ -7994,6 +8135,16 @@ PipelineHandle D3D12ResourceFactory::createGraphicsPipeline(const GraphicsPipeli
                 rt0.SrcBlend  = rt0.SrcBlendAlpha  = D3D12_BLEND_ONE;
                 rt0.DestBlend = rt0.DestBlendAlpha = D3D12_BLEND_ONE;
                 rt0.BlendOp   = rt0.BlendOpAlpha   = D3D12_BLEND_OP_ADD;
+                break;
+            case BlendMode::Subtractive:   // R6: dst - src (colour); the alpha channel keeps dst
+                rt0.BlendEnable = TRUE;
+                rt0.SrcBlend  = D3D12_BLEND_ONE;  rt0.DestBlend  = D3D12_BLEND_ONE;  rt0.BlendOp = D3D12_BLEND_OP_REV_SUBTRACT;
+                rt0.SrcBlendAlpha = D3D12_BLEND_ZERO; rt0.DestBlendAlpha = D3D12_BLEND_ONE; rt0.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+                break;
+            case BlendMode::Multiplicative:   // R6: dst * src (colour); the alpha channel keeps dst
+                rt0.BlendEnable = TRUE;
+                rt0.SrcBlend  = D3D12_BLEND_DEST_COLOR; rt0.DestBlend = D3D12_BLEND_ZERO; rt0.BlendOp = D3D12_BLEND_OP_ADD;
+                rt0.SrcBlendAlpha = D3D12_BLEND_ZERO; rt0.DestBlendAlpha = D3D12_BLEND_ONE; rt0.BlendOpAlpha = D3D12_BLEND_OP_ADD;
                 break;
         }
         // Blended pipeline writes target 0 only; mask other G-buffer targets.
@@ -9502,9 +9653,20 @@ void D3D12RenderContext::drawMesh(MeshHandle mesh) {
     if (!dev_->cmdList_) return;
     if (mesh == 0 || mesh > dev_->meshes_.size()) { AVER_ERROR("[RHI.D3D12] drawMesh with an invalid mesh handle"); return; }
     const GpuMesh& m = dev_->meshes_[mesh - 1];
+    // A pipeline whose layout reads slot 1 needs a mesh that has it; drawing without would read an unbound buffer.
+    if (pipe_ && pipe_->extraSlot && !m.hasExtra) {
+        AVER_ERROR("[RHI.D3D12] drawMesh: the bound pipeline reads the second vertex stream and mesh {} has none; draw skipped", mesh);
+        return;
+    }
     applyDrawBinding();
     dev_->cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    dev_->cmdList_->IASetVertexBuffers(0, 1, &m.vbv);
+    if (m.hasExtra) {
+        // Two streams; a pipeline that does not read slot 1 ignores it.
+        const D3D12_VERTEX_BUFFER_VIEW views[2] = {m.vbv, m.vbxv};
+        dev_->cmdList_->IASetVertexBuffers(0, 2, views);
+    } else {
+        dev_->cmdList_->IASetVertexBuffers(0, 1, &m.vbv);
+    }
     dev_->cmdList_->IASetIndexBuffer(&m.ibv);
     dev_->cmdList_->DrawIndexedInstanced(m.indexCount, 1, 0, 0, 0);
 }

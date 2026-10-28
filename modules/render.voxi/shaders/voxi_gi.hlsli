@@ -152,6 +152,13 @@ cbuffer VoxiFrame : register(AVER_GI_JOIN(b, AVER_GI_FRAME_REG)) {
     // Projected-decal control -- mirrors gDecalParams in voxi.hlsl. NOTHING IN THIS PRELUDE READS IT;
     // it is here so the block stays the full FrameConstants layout (see the note above).
     float4   gDecalParams;
+#if AVER_LOCAL_RASTER
+    // G4 R2 raster local-light tail, mirrored from voxi.hlsl; no GI shader defines AVER_LOCAL_RASTER, so it is never present here.
+    float4   gRlHeader;
+    float4   gRlLight[AVER_RL_MAX_LIGHTS * AVER_RL_LIGHT_VECS];
+    float4x4 gRlTileVP[AVER_RL_MAX_TILES];
+    float4   gRlTileUv[AVER_RL_MAX_TILES];
+#endif
 };
 
 // t(AVER_GI_SRV) the GI volume, t(AVER_GI_SRV_1) the shadow map -- the only two of Voxi's table-0

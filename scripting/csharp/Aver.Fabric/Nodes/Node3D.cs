@@ -78,7 +78,11 @@ public partial class Node3D : Node
         Self.SetLocalPosition(_pushedPos);
         Self.SetLocalRotation(_pushedQuat);
         Self.SetLocalScale(_pushedScale);
+        OnTransformPushed();
     }
+
+    // A node type that follows its own transform (the sun) reacts here, after the entity holds the new local transform.
+    internal virtual void OnTransformPushed() { }
 
     // The local transform in the form Fw.aver_fw_spawn takes.
     internal void GetLocalForEngine(float[] pos, float[] quat, float[] scale)

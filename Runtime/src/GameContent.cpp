@@ -41,6 +41,9 @@
 #  include "aver/anim/AnimSystem.hpp"
 #  include "aver/formats/OcMesh.hpp"
 #  include "aver/scene/scene_abi.h"
+#  if AVER_MODULE_FRAMEWORK
+#    include "aver/framework/framework_rtmesh_abi.h"   // G4 R7: script-built meshes
+#  endif
 #  if AVER_MODULE_PHYSICS
 #    include "aver/physics/physics_abi.h"
 #    include "aver/physics/physics_shape_builder_abi.h"   // aver_phys_shape_mesh: a collision shape with a surface palette
@@ -405,6 +408,15 @@ void GameContent::prepareMeshCpu(const fmt::OcMeshData& md, const std::string& r
         v.nx = md.normals[usize(i)*3+0];   v.ny = md.normals[usize(i)*3+1];   v.nz = md.normals[usize(i)*3+2];
         v.u  = md.uvs[usize(i)*2+0];       v.v  = md.uvs[usize(i)*2+1];
     }
+    // R1: the second vertex stream, for a static mesh that has any of colour, tangent or UV1 (a skinned mesh's vertices are written by compute).
+    out.extra.clear();
+    if (!md.hasSkin() && md.hasExtra()) {
+        out.extra.resize(md.vertexCount());
+        const bool c = md.hasColor(), t = md.hasTangent(), u = md.hasUv1();
+        for (u32 i = 0; i < md.vertexCount(); ++i)
+            out.extra[i] = rhi::packMeshVertexExtra(c ? &md.colors[usize(i)*4] : nullptr, t ? &md.tangents[usize(i)*4] : nullptr,
+                                                    u ? &md.uvs1[usize(i)*2] : nullptr);
+    }
     // Per-material split: each part an index slice over these vertices (see buildMeshParts).
     out.parts.clear();
     if (md.submeshes.size() <= 1) return;   // common case: nothing to split
@@ -445,6 +457,9 @@ bool GameContent::uploadMesh(rhi::IDevice& device, u64 id, const fmt::OcMeshData
     if (!h) h = device.createMesh(verts.data(), (u32)verts.size(), md.indices.data(), (u32)md.indices.size());
     hm.mark("upload:createMesh");
     if (!h) { AVER_WARN("[Mesh] the device refused '{}'", rel); return false; }
+    // R1: attached before any part or LOD shares this mesh's vertices, so they borrow the stream. Refused = the mesh draws without it.
+    if (!cpu->extra.empty() && !device.setMeshExtra(h, cpu->extra.data(), static_cast<u32>(cpu->extra.size())))
+        AVER_WARN("[Mesh] '{}': the device kept no vertex colour / tangent / UV1 stream; it draws without them", rel);
 
     sceneMeshes_[id] = h;
     meshBounds_[id] = {md.boundsMin, md.boundsMax};
@@ -454,7 +469,7 @@ bool GameContent::uploadMesh(rhi::IDevice& device, u64 id, const fmt::OcMeshData
         meshSlot0Name_[id] = md.materialSlots[0];
     }
     // The per-submesh split: a mesh naming several materials draws one part per material.
-    buildMeshParts(device, id, md, h, verts, cpu->parts, rel);
+    buildMeshParts(device, id, md, h, verts, cpu->extra, cpu->parts, rel);
     hm.mark("upload:parts");
     projectMeshIds_.push_back(id);
     if (meshLoaded_) meshLoaded_(LoadedMesh{id, rel, &md, verts, md.indices, h}, meshLoadedUser_);
@@ -605,6 +620,67 @@ void GameContent::releaseMesh(rhi::IDevice& device, u64 id) {
 
 bool GameContent::meshLoaded(u64 id) const { return sceneMeshes_.count(id) != 0; }
 
+// G4 R7: script-built meshes (framework_rtmesh_abi.h). They go through uploadMesh like a streamed mesh (lazyLoading_ makes the acquired hook fire, which is what
+// builds the ray-traced geometry for a mesh that appears after load), and an update replaces the mesh: the old handles wait in the release queue.
+u32 GameContent::syncRuntimeMeshes(rhi::IDevice& device) {
+    u32 uploaded = 0;
+#if AVER_MODULE_FRAMEWORK
+    aver_fw_rtmesh_pump();
+    u64 removed[32];
+    while (const i32 n = aver_fw_rtmesh_take_removed(removed, 32)) {
+        for (i32 i = 0; i < n; ++i)
+            if (sceneMeshes_.count(removed[i])) unloadToPending(removed[i]);
+    }
+    i32 ids[32];
+    while (const i32 n = aver_fw_rtmesh_take_dirty(ids, 32)) {
+        for (i32 k = 0; k < n; ++k) {
+            const u64 oid = aver_fw_rtmesh_object_id(ids[k]);
+            if (oid == 0) continue;
+            AverFwRtMeshView v{};
+            if (!aver_fw_rtmesh_view(ids[k], &v)) {   // emptied: nothing to draw
+                if (sceneMeshes_.count(oid)) unloadToPending(oid);
+                continue;
+            }
+            fmt::OcMeshData md;
+            const usize vc = static_cast<usize>(v.vertexCount);
+            md.positions.assign(v.pos, v.pos + vc * 3);
+            md.normals.assign(v.nrm, v.nrm + vc * 3);
+            md.uvs.assign(v.uv, v.uv + vc * 2);
+            if (v.col) md.colors.assign(v.col, v.col + vc * 4);
+            if (v.uv1) md.uvs1.assign(v.uv1, v.uv1 + vc * 2);
+            if (v.tan) md.tangents.assign(v.tan, v.tan + vc * 4);
+            md.indices.assign(v.idx, v.idx + v.indexCount);
+            for (i32 s = 0; s < v.submeshCount; ++s) {
+                const std::string mat = v.subMaterial[s] ? v.subMaterial[s] : "M_Default";
+                u32 slot = 0;
+                for (; slot < md.materialSlots.size(); ++slot) if (md.materialSlots[slot] == mat) break;
+                if (slot == md.materialSlots.size()) md.materialSlots.push_back(mat);
+                fmt::OcMeshSubmesh sm;
+                sm.name = mat;
+                sm.materialSlot = slot;
+                sm.indexStart = static_cast<u32>(v.subStart[s]);
+                sm.indexCount = static_cast<u32>(v.subCount[s]);
+                sm.baseVertex = 0;
+                sm.vertexCount = static_cast<u32>(vc);
+                md.submeshes.push_back(std::move(sm));
+            }
+            md.computeBounds();
+            if (!md.valid()) { AVER_WARN("[RuntimeMesh] id {} is not a valid mesh; not uploaded", ids[k]); continue; }
+            char key[128] = {};
+            aver_fw_rtmesh_key(ids[k], key, sizeof key);
+            const std::string rel = std::string(AVER_FW_RTMESH_PATH_PREFIX) + key;
+            if (sceneMeshes_.count(oid)) unloadToPending(oid);
+            lazyLoading_ = true;
+            if (uploadMesh(device, oid, md, rel)) ++uploaded;
+            lazyLoading_ = false;
+        }
+    }
+#else
+    (void)device;
+#endif
+    return uploaded;
+}
+
 // Forgets every table entry for `id` at once (nothing can draw it) and queues its handles; the GPU
 // frees wait in flushMeshReleases because D3D12Device::destroyMesh frees the mesh's own resources now.
 void GameContent::unloadToPending(u64 id) {
@@ -701,8 +777,8 @@ void GameContent::flushMeshReleases(rhi::IDevice& device, u64 frameIndex) {
 // the Default heap). Parts take the parent's bounds. A device that refuses the share gets the whole vertex
 // array per part, which is correct, just larger.
 void GameContent::buildMeshParts(rhi::IDevice& device, u64 id, const fmt::OcMeshData& md, rhi::MeshHandle whole,
-                                  const std::vector<rhi::MeshVertex>& verts, std::vector<PartCpu>& cpuParts,
-                                  const std::string& rel) {
+                                  const std::vector<rhi::MeshVertex>& verts, const std::vector<rhi::MeshVertexExtra>& extra,
+                                  std::vector<PartCpu>& cpuParts, const std::string& rel) {
     if (cpuParts.empty()) return;
     std::vector<MeshPart> parts;
     parts.reserve(cpuParts.size());
@@ -713,9 +789,12 @@ void GameContent::buildMeshParts(rhi::IDevice& device, u64 id, const fmt::OcMesh
         part.mesh = pc.staged ? device.adoptMeshSharingVertices(whole, std::move(pc.staged)) : 0;
         if (!part.mesh)
             part.mesh = device.createMeshSharingVertices(whole, pc.indices.data(), static_cast<u32>(pc.indices.size()));
-        if (!part.mesh)
+        if (!part.mesh) {
             part.mesh = device.createMesh(verts.data(), static_cast<u32>(verts.size()),
                                           pc.indices.data(), static_cast<u32>(pc.indices.size()));
+            // The device refused the share, so this part owns a whole vertex copy and needs its own second stream.
+            if (part.mesh && !extra.empty()) device.setMeshExtra(part.mesh, extra.data(), static_cast<u32>(extra.size()));
+        }
         if (!part.mesh) {
             AVER_WARN("[Mesh] the device refused submesh '{}' of '{}'", pc.name, rel);
             continue;

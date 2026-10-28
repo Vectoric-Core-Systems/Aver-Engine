@@ -11,6 +11,8 @@ aver_add_module(Aver.Formats.Godot
     src/GodotScene.cpp
     src/GodotProject.cpp
     src/GodotProjectFs.cpp
+    # ArrayMesh surfaces and GridMap cells as plain arrays (G4 R7).
+    src/GodotMesh.cpp
   DEPS
     Aver.Core
     Aver.Platform

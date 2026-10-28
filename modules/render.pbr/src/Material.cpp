@@ -3,6 +3,7 @@
 #include "aver/pbr/pbr_abi.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <vector>
 
@@ -82,6 +83,43 @@ void sanitise(MaterialDesc& d) {
         h.trt            = std::clamp(h.trt, 0.0f, 4.0f);
         h.azimuthRough   = std::clamp(h.azimuthRough, 0.02f, 1.0f);
         h.scatter        = std::clamp(h.scatter, 0.0f, 1.0f);
+    }
+    // ---- R6 fx: enums into range, magnitudes finite and bounded ----
+    {
+        MaterialFx& f = d.fx;
+        const auto fin = [](f32 v, f32 lo, f32 hi, f32 dflt) { return std::isfinite(v) ? std::clamp(v, lo, hi) : dflt; };
+        for (f32& v : f.uv1Scale) v = fin(v, -1000.0f, 1000.0f, 1.0f);
+        for (f32& v : f.uv2Scale) v = fin(v, -1000.0f, 1000.0f, 1.0f);
+        for (f32& v : f.uv1Offset) v = fin(v, -1000.0f, 1000.0f, 0.0f);
+        for (f32& v : f.uv2Offset) v = fin(v, -1000.0f, 1000.0f, 0.0f);
+        f.uv1Sharpness = fin(f.uv1Sharpness, 0.0f, 64.0f, 1.0f);
+        f.uv2Sharpness = fin(f.uv2Sharpness, 0.0f, 64.0f, 1.0f);
+        if (static_cast<u32>(f.cull) > static_cast<u32>(FxCull::None)) f.cull = FxCull::Default;
+        if (static_cast<u32>(f.blend) > static_cast<u32>(FxBlend::PremultAlpha)) f.blend = FxBlend::Default;
+        if (static_cast<u32>(f.depthDraw) > static_cast<u32>(FxDepthDraw::Never)) f.depthDraw = FxDepthDraw::Default;
+        if (static_cast<u32>(f.alphaExt) > static_cast<u32>(FxAlphaExt::Antialias)) f.alphaExt = FxAlphaExt::None;
+        if (static_cast<u32>(f.billboard) > static_cast<u32>(FxBillboard::Particles)) f.billboard = FxBillboard::Off;
+        if (static_cast<u32>(f.distanceFade) > static_cast<u32>(FxDistanceFade::ObjectDither)) f.distanceFade = FxDistanceFade::Off;
+        if (static_cast<u32>(f.detailBlend) > static_cast<u32>(FxBlendOp::Mul)) f.detailBlend = FxBlendOp::Mix;
+        if (static_cast<u32>(f.specularMode) > static_cast<u32>(FxSpecular::Disabled)) f.specularMode = FxSpecular::Schlick;
+        if (static_cast<u32>(f.diffuseMode) > static_cast<u32>(FxDiffuse::Toon)) f.diffuseMode = FxDiffuse::Burley;
+        f.renderPriority = std::clamp(f.renderPriority, -128, 127);
+        f.alphaHashScale = fin(f.alphaHashScale, 0.05f, 20.0f, 1.0f);
+        f.growCm = fin(f.growCm, -10000.0f, 10000.0f, 0.0f);
+        f.fadeMinCm = fin(f.fadeMinCm, 0.0f, 1.0e6f, 0.0f);
+        f.fadeMaxCm = fin(f.fadeMaxCm, 0.0f, 1.0e6f, 1000.0f);
+        f.rimAmount = fin(f.rimAmount, 0.0f, 16.0f, 1.0f);
+        f.rimTint = fin(f.rimTint, 0.0f, 1.0f, 0.5f);
+        f.anisotropyAmount = fin(f.anisotropyAmount, -1.0f, 1.0f, 0.0f);
+        f.heightScale = fin(f.heightScale, -100.0f, 100.0f, 5.0f);
+        f.aoLightAffect = fin(f.aoLightAffect, 0.0f, 1.0f, 0.0f);
+        for (f32& v : f.backlightColor) v = fin(v, 0.0f, 1.0f, 0.0f);
+        f.detailUv = f.detailUv ? 1 : 0;
+        f.emissionOp = f.emissionOp ? 1 : 0;
+        f.particlesH = std::clamp<u8>(f.particlesH, 1, 63);
+        f.particlesV = std::clamp<u8>(f.particlesV, 1, 63);
+        f.minLayers = std::clamp<u8>(f.minLayers, 1, 31);
+        f.maxLayers = std::clamp<u8>(f.maxLayers, f.minLayers, 63);
     }
     // ---- wave3 terrain layers ----
     {

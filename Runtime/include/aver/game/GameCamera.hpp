@@ -14,6 +14,7 @@
 #pragma once
 #include "aver/core/Types.hpp"
 #include "aver/core/Math.hpp"
+#include "aver/core/CameraProjection.hpp"
 #include "aver/rhi/RHI.hpp"
 
 #if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE
@@ -59,6 +60,23 @@ struct PlayView {
     f32 farCm = kCameraFarCm;
     bool ownerHideAll = false;   // hide every mesh under ownerHideRoot, not only the flagged ones (the collision fade)
     bool cut = false;            // this frame teleported the camera (the host resets streaming's velocity tracking)
+    // G4 R4: the lens of a camera node flagged kCameraDrivesView. The defaults are today's perspective camera (projectionMatrix then builds
+    // exactly Mat4::perspectiveLH(fovYRad, aspect, nearCm, farCm)).
+    ProjectionKind projection = ProjectionKind::Perspective;
+    f32 sizeCm = 100.0f;         // orthographic / frustum size (width when keepWidth, else height)
+    f32 offsetXCm = 0.0f;        // frustum offset at the near plane
+    f32 offsetYCm = 0.0f;
+    bool keepWidth = false;      // fovYRad / sizeCm describe the width
+    u32 cullInv = 0;             // the camera's cull mask, stored inverted (scene/RenderMasks.hpp); 0 = every layer
+
+    // True for the camera every host built before G4 R4.
+    bool isDefaultLens() const { return projection == ProjectionKind::Perspective && !keepWidth; }
+    CameraProjection lens() const {
+        CameraProjection c;
+        c.kind = projection; c.fovRad = fovYRad; c.sizeCm = sizeCm; c.offsetXCm = offsetXCm; c.offsetYCm = offsetYCm;
+        c.keepWidth = keepWidth; c.nearCm = nearCm; c.farCm = farCm;
+        return c;
+    }
 };
 
 // World up turned about `forward` by roll (positive tips the camera's top toward its right). Exactly (0,0,1) at roll 0.
@@ -80,7 +98,7 @@ inline CameraMatrices pushCamera(rhi::IDevice& device, const Vec3& pos, const Ve
     // horizontal components round away and the view matrix collapses to no basis at all. See
     // Mat4::lookAtDirLH's own comment for the measurement.
     const Mat4 view = Mat4::lookAtDirLH(pos, forward, rolledUp(forward, pv.rollRad));
-    const Mat4 proj     = Mat4::perspectiveLH(pv.fovYRad, aspect, pv.nearCm, pv.farCm);
+    const Mat4 proj     = projectionMatrix(pv.lens(), aspect);   // a default PlayView is Mat4::perspectiveLH(fov, aspect, near, far) itself
     const Mat4 viewProj = view * proj;           // row-vector: v * M, so view then proj
 
     // THE DEVICE GETS THE CAMERA-RELATIVE INVERSE: the same view with its translation row zeroed
@@ -241,6 +259,27 @@ inline scene::Entity drivePlayCamera(Vec3& pos, f32& yaw, f32& pitch, PlayView& 
     view = PlayView{};
     const detail::LegacyCamera legacy = detail::legacyPlayCamera(pos, yaw, pitch, standInPawn);
     if (!legacy.placed) return legacy.hide;
+    // G4 R4: a camera node that asked to drive the view (Aver.Fabric Camera3D) sets the lens, the cull mask and slides by its offsets. Every other
+    // view node, and every pawn, leaves the PlayView at its defaults, so nothing changes for a project that does not use it.
+    if (legacy.viewNode != scene::kInvalidEntity) {
+        if (const auto* cam = scene::World::instance().component<scene::CCamera>(legacy.viewNode, scene::kComponentCamera);
+            cam && (cam->flags & scene::kCameraDrivesView)) {
+            view.projection = projectionKindFromInt(cam->projection);
+            view.keepWidth = (cam->flags & scene::kCameraKeepWidth) != 0;
+            view.fovYRad = cam->fovYRad;
+            view.nearCm = cam->nearCm;
+            view.farCm = cam->farCm;
+            view.sizeCm = cam->sizeCm > 0.0f ? cam->sizeCm : 100.0f;
+            view.offsetXCm = cam->offsetXCm;
+            view.offsetYCm = cam->offsetYCm;
+            view.cullInv = cam->cullInv;
+            if (cam->hOffsetCm != 0.0f || cam->vOffsetCm != 0.0f) {
+                const Vec3 fwd = cameraForward(yaw, pitch);
+                const Vec3 right = cross(Vec3{0, 0, 1}, fwd).getSafeNormal();
+                if (right.sizeSquared() > 0.5f) pos = pos + right * cam->hOffsetCm + cross(fwd, right) * cam->vOffsetCm;
+            }
+        }
+    }
 #if AVER_MODULE_CAMERA
     camera::RigFrame fr;
     fr.dt = dt;

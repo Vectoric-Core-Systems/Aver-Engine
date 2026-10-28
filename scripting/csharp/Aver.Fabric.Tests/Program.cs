@@ -32,6 +32,10 @@ static class Program
         failures += SignalTests.RunAll();    // Callable, signals with every ConnectFlags value, Timer
         failures += NodeTests.RunAll();      // tree API, paths, groups, lifecycle order, processing, exported values
         failures += Node3DTests.RunAll();    // Node3D, the node classes, physics signal routing
+        failures += EnvironmentTests.RunAll(); // G4 R3: WorldEnvironment, Environment, Sky, CameraAttributes and what they push to the engine
+        failures += SubViewportTests.RunAll(); // G4 R5: SubViewport, ViewportTexture, SubViewportContainer and what they ask the engine for
+        failures += EnvFxTests.RunAll();     // G4 R8: FogVolume, ReflectionProbe, LightmapGI, VoxelGI and what they publish to the engine
+        failures += GeometryTests.RunAll();// G4 R7: ArrayMesh, SurfaceTool, ImmediateMesh, MultiMesh, GridMap, CSG, Sprite3D, Label3D and what they push to the engine
         failures += SceneValueTests.RunAll(); // ClassDB, Object(...) values, resource and node-reference properties
         failures += TweenTests.RunAll();     // F2b: easing curves, tween sequencing, loops, pause and process modes
         failures += ServiceTests.RunAll();   // F2b: SceneTree frame signals, timers, await, groups, scene changes, ResourceLoader, PackedScene

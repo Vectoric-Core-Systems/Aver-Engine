@@ -6,3 +6,9 @@ target_link_libraries(FormatsGodotTest PRIVATE Aver.Formats.Godot Aver.Platform 
 target_compile_definitions(FormatsGodotTest PRIVATE AVER_FABRIC_DATA="${CMAKE_SOURCE_DIR}/tests/fabric/data")
 set_target_properties(FormatsGodotTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# GodotMeshTest -- G4 R7: ArrayMesh surfaces decoded from hand-built byte arrays, and GridMap's packed cells and 24 bases (pure data).
+add_executable(GodotMeshTest src/GodotMeshTest.cpp)
+target_link_libraries(GodotMeshTest PRIVATE Aver.Formats.Godot Aver.Platform Aver.Core)
+set_target_properties(GodotMeshTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

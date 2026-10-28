@@ -119,7 +119,11 @@ struct SceneDrawStats {
 // excludes skinned entities (posed vertices are compute-written), the GPU cluster mesh-shader path
 // (no depth-only twin) and the CPU per-cluster path from its prepass, and every one of those
 // exclusions is about machinery this library does not have. It answers them from decide().
-enum class DrawWorldPass : u8 { Colour, DepthPrepass };
+//
+// View (G4 R5) walks the world for a SECONDARY camera (a sub-viewport): every draw of an entity inside the viewProj it is given, with the camera's cull mask, is
+// handed to DrawWorldOptions::onViewDraw and nothing else happens -- no device call, no Voxi submission, no counter, no hook of the primary walk, and the
+// visibility-range hysteresis is read but not written (the primary walk owns that memory). The primary view's frame is untouched by it.
+enum class DrawWorldPass : u8 { Colour, DepthPrepass, View };
 
 // Which once-per-material warning the walk is throttling. THE TEXT IS THE HOST'S, the throttle is
 // the library's: the editor's wording names editor-only directories ("no .ocmat under
@@ -307,6 +311,12 @@ using DrawWorldDirectDrawFn = void (*)(rhi::MeshHandle mesh, const f32 world[16]
                                        const void* matConstants, u32 matBytes, bool translucent,
                                        bool hiddenFromOwner, void* user);
 
+// G4 R5, DrawWorldPass::View only: one planned draw of an entity the secondary camera sees. `col` is the look's colour (1,1,1,1 for an authored material, whose
+// real colour is in `matSet` / `matConstants`: MaterialSystem::averageBaseColor(matSet) gives the colour a flat-shaded view draws it with). `translucent` is the
+// look's blended flag. All pointers live only for the duration of the call.
+using DrawWorldViewDrawFn = void (*)(rhi::MeshHandle mesh, const f32 world[16], const f32 col[4], f32 metallic, f32 roughness,
+                                     rhi::BindingSetHandle matSet, const void* matConstants, u32 matBytes, bool translucent, void* user);
+
 // Once per material token per process, for each warning kind -- the library owns that throttle, the
 // host owns the sentence. See SurfaceWarning. Null leaves the walk printing its own "[Game]" lines,
 // which is what it has always done.
@@ -340,6 +350,16 @@ struct DrawWorldOptions {
     // fade, when the arm is squashed against the pivot and the camera would sit inside the target's body (shadows, GI and RT
     // geometry still receive the meshes, as for the flagged ones). False changes nothing.
     bool ownerHideAll = false;
+
+    // G4 R4. The camera's cull mask, stored inverted (scene::storeMask; 0 = render every layer). An entity whose CMeshRenderer::layersInv shares no
+    // layer with it is treated as hidden from the viewer exactly like an owner-hidden mesh: no raster draw, but it still casts shadows and stays in
+    // GI and ray-traced geometry (Godot's cull_mask is a camera filter, not a visibility switch). 0 changes nothing.
+    u32 cameraCullInv = 0;
+
+    // G4 R4. Where the viewer is, for visibility ranges (CMeshRenderer::visBeginCm / visEndCm): an entity outside its range is skipped outright
+    // (no draw, no shadow, no GI), like a hidden instance in Godot. Unset, ranges are not evaluated. A range of 0 / 0 (the default) is never tested.
+    Vec3 viewerPos{0, 0, 0};
+    bool haveViewerPos = false;
 
     // Where a frustum-culled or owner-hidden entity's draw goes INSTEAD of the raster pass -- the
     // "unified direct route" of aver/game/SceneSubmission.hpp, which this walk now owns outright
@@ -430,6 +450,8 @@ struct DrawWorldOptions {
     DrawWorldDirectDrawFn onDirectDraw = nullptr;
     DrawWorldSurfaceWarnFn onSurfaceWarn = nullptr;
     DrawWorldSkippedFn onSkipped = nullptr;
+    // The sink of DrawWorldPass::View (G4 R5); never called by the other passes.
+    DrawWorldViewDrawFn onViewDraw = nullptr;
     // A level sequence's material tracks: true with rgb filled scales the entity's material
     // emissiveFactor for this walk (every delivery path, raster and ray-traced).
     bool (*emissiveScale)(scene::Entity e, f32 outRgb[3], void* user) = nullptr;

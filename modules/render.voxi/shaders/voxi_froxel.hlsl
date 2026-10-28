@@ -20,6 +20,13 @@
 #ifndef AVER_FX_SKY
 #define AVER_FX_SKY 0
 #endif
+// G4 R8: Godot FogVolumes. A separate variant of the two compute entries, built only when a fog volume exists (docs/plans/fabric/G4_RENDER.md R8).
+// The volumes are a tail of FroxelCB. AVER_FV_MAX / AVER_FV_VECS mirror kFogVolumeMax / kFogVolumeVecs (aver/core/FogVolume.hpp).
+#ifndef AVER_FOG_VOLUMES
+#define AVER_FOG_VOLUMES 0
+#endif
+#define AVER_FV_MAX 16
+#define AVER_FV_VECS 6
 
 #include "voxi_froxel.hlsli"
 
@@ -37,6 +44,12 @@ cbuffer FroxelCB : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
                                      // y = 1 / shadow atlas size, z = cascade count, w = ray bias cm
     float4   gFxVoxel;               // xyz = GI volume min corner, w = 1 / world size
     float4   gFxVoxelParams;         // x = the air-visibility volume is real
+#if AVER_FOG_VOLUMES
+    // FogVolumeBlock (aver/core/FogVolume.hpp). Per volume, six float4: three rows world -> unit box (xyz coefficients, w offset); x extinction per cm,
+    // y edge fade, z height falloff per cm, w shape; rgb albedo, w the volume's lowest world Z; rgb emission.
+    float4   gFvHeader;              // x = volume count
+    float4   gFvVol[AVER_FV_MAX * AVER_FV_VECS];
+#endif
 };
 
 #if AVER_FX_SKY
@@ -132,6 +145,47 @@ float3 fxAmbient(float3 p) {
     return a * av;
 }
 
+#if AVER_FOG_VOLUMES
+// The fog volumes at a world point: signed extinction per cm (a negative volume carves), and the scattering albedo and emission summed over the positive
+// density. Mirrors fogv::density in FogVolume.hpp (EnvFxTest pins the maths; this is its twin).
+void fxVolumes(float3 p, out float sigmaV, out float3 scat, out float3 emit) {
+    sigmaV = 0.0;
+    scat = float3(0.0, 0.0, 0.0);
+    emit = float3(0.0, 0.0, 0.0);
+    const uint n = min((uint)gFvHeader.x, (uint)AVER_FV_MAX);
+    [loop] for (uint i = 0u; i < n; ++i) {
+        const uint b = i * (uint)AVER_FV_VECS;
+        const float3 u = float3(dot(p, gFvVol[b].xyz) + gFvVol[b].w, dot(p, gFvVol[b + 1u].xyz) + gFvVol[b + 1u].w,
+                                dot(p, gFvVol[b + 2u].xyz) + gFvVol[b + 2u].w);
+        const float4 prm = gFvVol[b + 3u];
+        const uint shape = (uint)(prm.w + 0.5);
+        float sdf = -1.0;
+        if (shape == 3u)      sdf = max(max(abs(u.x), abs(u.y)), abs(u.z)) - 1.0;
+        else if (shape == 0u) sdf = length(u) - 1.0;
+        else if (shape == 2u) sdf = max(length(u.xy) - 1.0, abs(u.z) - 1.0);
+        else if (shape == 1u) sdf = max(length(u.xy) - 0.5 * (1.0 - u.z), abs(u.z) - 1.0);
+        if (sdf >= 0.0) continue;
+        float w = shape == 4u ? 1.0 : saturate(-sdf / prm.y);
+        if (prm.z > 0.0) w *= exp(-prm.z * max(p.z - gFvVol[b + 4u].w, 0.0));
+        const float dens = prm.x * w;
+        sigmaV += dens;
+        const float pos = max(dens, 0.0);
+        scat += gFvVol[b + 4u].rgb * pos;
+        emit += gFvVol[b + 5u].rgb * pos;
+    }
+}
+
+// The exponential height fog's extinction per cm at a point `t` cm along the view ray (the analytic fog applies this part itself).
+float fxHeightSigma(float3 p, float t) {
+    float s = 0.0;
+    if (t > gFogParams.z) {
+        const float k = gFogParams.x;
+        s = gFogColor.a * (k <= 1e-8 ? 1.0 : exp(clamp(-(p.z - gFogParams.y) * k, -30.0, 30.0)));
+    }
+    return s * gFxMedium.x;
+}
+#endif
+
 // View ray and the factor from view depth to distance along it, for the froxel column (x, y).
 void fxColumn(uint2 xy, uint2 dims, out float3 dir, out float invCos) {
     const float2 uv = (float2(xy) + 0.5) / float2(dims);
@@ -164,6 +218,31 @@ void CSFroxelScatter(uint3 id : SV_DispatchThreadID) {
     }
     sigmaH *= gFxMedium.x;
     const float sigmaG = gFxMedium.y;
+#if AVER_FOG_VOLUMES
+    // Fog volumes (G4 R8). This variant stores (radiance per cm, extinction per cm WITHOUT the height fog's) instead of (radiance per unit extinction,
+    // total extinction): the height fog's part is analytic and applied once at the shade site, so the transmittance the sites read must leave it out,
+    // while the in-scatter integrate below adds it back at the slice's middle.
+    float sigmaV; float3 vScat, vEmit;
+    fxVolumes(pJ, sigmaV, vScat, vEmit);
+    const float sigmaBase = sigmaH + sigmaG;
+    const float sigma = max(sigmaBase + sigmaV, 0.0);
+    float3 rad = float3(0.0, 0.0, 0.0);
+    if (sigma > 1e-12 || any(vEmit > 0.0)) {
+        const float3 L = normalize(gLightDir.xyz);
+        const float3 sunE = averSunRadiance();
+        float3 sunTerm = float3(0.0, 0.0, 0.0);
+        if (any(sunE > 0.0) && (sigmaBase > 1e-12 || any(vScat > 0.0))) {
+            const float vis = fxSunVisibility(pJ, tJ, L);
+            sunTerm = sunE * (fxHG(dot(dir, L), gFxMedium.w) * vis * gFxMedium.z);
+        }
+        rad = sunTerm * max(sigmaBase, 0.0);
+        if (sigmaG > 0.0) rad += fxAmbient(pJ) * sigmaG;
+        if (any(vScat > 0.0)) rad += vScat * (sunTerm + fxAmbient(pJ));
+        rad += vEmit;
+        rad = min(rad, 6.0e4);
+    }
+    float4 cur = float4(rad, sigmaG + sigmaV);
+#else
     const float sigma = sigmaH + sigmaG;
 
     // Source radiance per unit extinction: sunlight scattered toward the eye, plus the sky light the uniform
@@ -181,6 +260,7 @@ void CSFroxelScatter(uint3 id : SV_DispatchThreadID) {
     }
 
     float4 cur = float4(src, sigma);
+#endif
 
     if (gFxTemporal.x > 0.0) {
         const float tC = nearCm * exp(wC * logRange) * invCos;
@@ -214,11 +294,21 @@ void CSFroxelIntegrate(uint3 id : SV_DispatchThreadID) {
         const float dt = zFar - zNear;
         zNear = zFar;
         const float4 c = gFxCur[uint3(id.xy, z)];
+#if AVER_FOG_VOLUMES
+        // c = (radiance per cm, extinction per cm without the height fog): the height fog's part is read at the slice's middle.
+        const float tMid = nearCm * exp((float(z) + 0.5) / float(dim.z) * logRange) * invCos;
+        const float sigmaTot = max(c.a, 0.0) + fxHeightSigma(gCamPos.xyz + dir * tMid, tMid);
+        const float stepT = exp(-sigmaTot * dt);
+        scatter += tTotal * c.rgb * (sigmaTot > 1e-9 ? (1.0 - stepT) / sigmaTot : dt);
+        tTotal *= stepT;
+        tUniform *= exp(-max(c.a, 0.0) * dt);
+#else
         // A constant source across the slice, attenuated by everything in front of it.
         const float stepT = exp(-c.a * dt);
         scatter += tTotal * c.rgb * (1.0 - stepT);
         tTotal *= stepT;
         tUniform *= exp(-gFxMedium.y * dt);
+#endif
         gFxFinal[uint3(id.xy, z)] = float4(min(scatter, 6.0e4), tUniform);
     }
 }

@@ -111,6 +111,7 @@ struct FNode {
 bool isNode3DClass(const std::string& type);
 bool isControlClass(const std::string& type);
 bool is2DClass(const std::string& type);
+bool isCsgClass(const std::string& type);   // G4 R7: the CSGShape3D family (FabricGeometry.cpp)
 // Classes a project's GDExtension plugins register (FabricExtensions.cpp), name -> whether it is spatial. Such a node is placed as a
 // GDExtensionNode / GDExtensionNode3D with the Prop extension_class (docs/plans/fabric/G3_GDEXT.md section 7).
 void setExtensionClasses(const std::map<std::string, bool>& classes);
@@ -124,6 +125,10 @@ struct ClassChoice {
 };
 ClassChoice chooseClass(const std::string& godotType);
 
+// G4 R5: the name the engine knows a SubViewport by, and a baked material reaches it through ("@rt:viewport.<key>"): the level's name, then the node names from the
+// level's root, e.g. "main:Main/Screen/View". Plain characters only (it travels in a .ocmat texture reference and a level Prop).
+std::string viewportKeyOf(const std::string& level, const FNode& node);
+
 // ---- the converter -------------------------------------------------------------------------------------------------
 struct EnvInfo {
     bool found = false;
@@ -131,13 +136,31 @@ struct EnvInfo {
     double zenith[3] = {0.24, 0.45, 0.85}, horizon[3] = {0.72, 0.83, 0.95}, ground[3] = {0.24, 0.23, 0.21};
     double skyLight = 1.0;
     bool hasFog = false;
-    double fogDensityPerCm = 0, fogColor[3] = {1, 1, 1}, fogHeightCm = 0, fogFalloff = 0;
-    int tonemapMode = 0;
+    double fogDensityPerCm = 0, fogColor[3] = {1, 1, 1}, fogHeightCm = 0, fogFalloff = 0, fogStartCm = 0;
+    int tonemapMode = 0;             // Godot's Environment.tonemap_mode
     double tonemapExposure = 1.0;
     bool glow = false;
     double glowIntensity = 0.8;
+    // ---- G4 R3: the rest of the WorldEnvironment ----
+    bool hasDomeExponent = false;
+    double domeExponent = 0.65;      // from a panorama fit
+    bool hasSkyMieScale = false;
+    double skyMieScale = 1.0;        // PhysicalSkyMaterial: mie_coefficient / turbidity relative to Godot's defaults
+    double tonemapWhite = 1.0;
+    double cameraExposure = 1.0;     // CameraAttributes.exposure_multiplier
+    bool autoExposure = false;       // CameraAttributesPractical.auto_exposure_enabled
+    bool adjust = false;             // adjustment_enabled
+    double adjBrightness = 1.0, adjContrast = 1.0, adjSaturation = 1.0;
+    double glowThreshold = -1.0;     // glow_hdr_threshold when stated (< 0 = not stated)
+    bool dof = false;
+    double dofFocusCm = 1000, dofFStop = 4, dofFocalMm = 35;
+    bool volumetricFog = false;      // G4 R8: volumetric_fog_enabled; the project turns Voxi's light-shaft fog on (RENDER.VOLFOG 1), where FogVolumes draw
     std::string source;              // "res://main.tscn:WorldEnvironment"
 };
+
+// The post settings a WorldEnvironment states, as POSTVOLUME keys (FabricScene.cpp); the project's RENDER.* keys carry the start level's.
+struct PostKey { const char* key; double v; };
+std::vector<PostKey> postKeysOf(const EnvInfo& env);
 
 struct LevelScan;   // what one level's emission collects: the sun, the camera, the environment (FabricScene.cpp)
 
@@ -217,6 +240,10 @@ public:
     // The cooked material for a resource of material type; the asset path "Materials/<stem>.ocmat" or "".
     std::string materialAsset(const std::string& key, const std::string& type, const std::vector<gd::GodotProperty>& props,
                               const gd::GodotDocBase& doc, const std::string& nameHint, const Where& w);
+    // G4 R5: a ViewportTexture value (a SubResource of that class) used by the node being emitted, as the texture reference a material carries
+    // ("@rt:viewport.<key>"); counts the use for the SubViewport's consumer total. "" when the value is not a ViewportTexture; an unresolvable one is
+    // reported and also gives "".
+    std::string viewportReference(const Var* value, const gd::GodotDocBase& doc, const Where& w, const std::string& prop);
     // A generated primitive mesh; the asset path or "".
     std::string primitiveMeshAsset(const std::string& type, const std::vector<gd::GodotProperty>& props, const gd::GodotDocBase& doc,
                                    const Where& w);
@@ -229,10 +256,21 @@ public:
     std::set<std::string> materialStemsUsed_;
     std::set<std::string> materialTextureSources_;   // res:// textures a cooked material already carries
     Var shapeObject(const std::string& type, const std::vector<gd::GodotProperty>& props, const gd::GodotDocBase& doc, const Where& w);
+    // Environment, Sky, the sky materials and CameraAttributes as `Object(Class, ...)` for Aver.Fabric's WorldEnvironment node (G4 R3).
+    Var environmentObject(const std::string& type, const std::vector<gd::GodotProperty>& props, const gd::GodotDocBase& doc, const Where& w);
     Var genericResourceDict(const std::string& type, const std::vector<gd::GodotProperty>& props, const gd::GodotDocBase& doc,
                             const Where& w, const char* why);
     void convertStandaloneResources();
     void reportProjectFiles();
+
+    // ---- FabricGeometry.cpp (G4 R7) --------------------------------------------------------------------------------
+    // A Godot ArrayMesh sub-resource's stored surfaces decoded into one .ocmesh; the asset path or "".
+    std::string arrayMeshAsset(const std::vector<gd::GodotProperty>& props, const gd::GodotDocBase& doc, const Where& w);
+    // A MultiMesh resource as `Object(MultiMesh, ...)` for Aver.Fabric's MultiMeshInstance3D; nil when it cannot be converted.
+    Var multiMeshObject(const std::vector<gd::GodotProperty>& props, const gd::GodotDocBase& doc, const Where& w);
+    // What the geometry node classes (MultiMeshInstance3D, Label3D, Sprite3D, the CSG family, GridMap) need beyond their properties: baked mesh and material
+    // assets added to `props`, and child nodes (collision bodies, instanced grid items) appended to `synthetic`, which the caller emits below the node.
+    void geometryNode(FNode& fn, std::vector<std::pair<std::string, Var>>& props, std::vector<std::unique_ptr<FNode>>& synthetic, ClassChoice& cc);
 
     // ---- FabricScene.cpp -------------------------------------------------------------------------------------------
     bool convertScenes();
@@ -243,6 +281,11 @@ public:
     void emitNode(FNode& fn, int parent, const Xform& parentWorld, fmt::OcWorldData& level, LevelScan& scan);
     bool writePrefabs();
     std::set<std::string> instancedScenes_;
+    // G4 R5: sub-viewports. The node whose properties are being converted (a ViewportTexture's viewport_path is relative to that node's scene), the level being
+    // emitted (the first part of a view's key) and, per view key, how many materials show it.
+    const FNode* emitting_ = nullptr;
+    std::string emittingLevel_;
+    std::map<std::string, int> viewportUsers_;
     std::map<std::string, std::unique_ptr<gd::GodotScene>> sceneDocs_;
     std::map<std::string, bool> sceneLoadFailed_;
     std::string levelAssetFor(const std::string& sceneRes) const;   // "Maps/props/crate.ocworld"

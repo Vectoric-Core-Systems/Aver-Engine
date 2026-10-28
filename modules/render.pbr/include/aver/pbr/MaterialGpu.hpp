@@ -59,6 +59,16 @@ enum MaterialFlag : u32 {
     // use for. packMaterial never sets MaterialFlag_Coat or MaterialFlag_Subsurface alongside it, so the standard model, run on a ray hit, sees
     // those slots as zero weights and shades the fibre as a plain dielectric.
     MaterialFlag_Hair                = 1u << 18,
+
+    // ---- R1 vertex colour ----
+    // MaterialDesc::vertexColor. The shader multiplies albedo and opacity by the vertex colour only in the AVER_MESH_EXTRA variants
+    // (a mesh carrying the second vertex stream); everywhere else the bit is ignored.
+    MaterialFlag_VertexColor         = 1u << 19,
+
+    // ---- R6 BaseMaterial3D features ----
+    // MaterialDesc::fx.active(). The draw constants of such a material are kFxBaseBytes + sizeof(MaterialExtConstants) bytes (MaterialSystem::constantBytes);
+    // the ray-traced material table and every other reader of MaterialConstants ignore the tail and the bit.
+    MaterialFlag_Fx                  = 1u << 20,
 };
 
 // The packed per-material GPU constant block. MIRRORS the HLSL `cbuffer AverMaterial` in

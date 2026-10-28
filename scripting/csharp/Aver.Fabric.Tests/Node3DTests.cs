@@ -19,6 +19,10 @@ static class Node3DTests
         T.Run("Node3D: top_level and reparent keep the global transform", TopLevelAndReparent);
         T.Run("Node3D: what the engine is given at spawn (Godot numbers to Aver space)", EngineValues);
         T.Run("classes: the converter's node types and their Godot defaults", ClassDefaults);
+        T.Run("lights: calibration and the values pushed to the engine (G4 R2)", LightValues);
+        T.Run("lights: one sun, owned by the sky (G4 R2)", OneSun);
+        T.Run("cameras: what the engine is given, the frustum maths and keep_aspect (G4 R4)", CameraValues);
+        T.Run("layers, visibility ranges and light cull masks: the values pushed to the engine (G4 R4)", LayerValues);
         T.Run("physics: area and body signals", PhysicsSignals);
         T.Run("physics: nodes without a world do not throw", PhysicsWithoutWorld);
     });
@@ -203,6 +207,178 @@ static class Node3DTests
         T.Check("control placeholder keeps its layout values", ctl.GetRect() == new Rect2(5, 6, 100, 50) && ctl.MouseFilter == Control.MouseFilterEnum.Stop);
         var mat = new StandardMaterial3D { AlbedoColor = Colors.Red };
         T.Check("materials and shapes are resources", mat is Resource && new BoxShape3D { Size = new Vector3(1, 2, 3) }.Size.Y == 2f && new CapsuleShape3D().Height == 2f && new SphereShape3D().Radius == 0.5f);
+        T.Check("material vertex colour: Godot's names, off by default",
+                !mat.VertexColorUseAsAlbedo && !mat.VertexColorIsSrgb && new StandardMaterial3D { VertexColorUseAsAlbedo = true }.VertexColorUseAsAlbedo);
+        MaterialFeatures();
+    }
+
+    // G4 R6: BaseMaterial3D under Godot's names, the defaults Godot has, and the FX record the properties bake to (the grammar tools/fabric writes and
+    // aver::fmt::parseOcmatFx reads: tests/formats MaterialFxTest and FabricMaterialFxTest hold the native side).
+    private static void MaterialFeatures()
+    {
+        var def = new StandardMaterial3D();
+        T.Check("material features: Godot's defaults",
+                def.Uv1Scale == Vector3.One && def.Uv1Offset == Vector3.Zero && def.Transparency == BaseMaterial3D.TransparencyEnum.Disabled && def.CullMode == BaseMaterial3D.CullModeEnum.Back &&
+                def.BlendMode == BaseMaterial3D.BlendModeEnum.Mix && def.ShadingMode == BaseMaterial3D.ShadingModeEnum.PerPixel && def.MetallicSpecular == 0.5f && def.Rim == 1f &&
+                def.RimTint == 0.5f && def.Clearcoat == 1f && def.ClearcoatRoughness == 0.5f && def.HeightmapScale == 5f && def.DistanceFadeMaxDistance == 10f &&
+                def.RefractionScale == 0.05f && def.AlphaScissorThreshold == 0.5f && def.RenderPriority == 0 && def.Uv1TriplanarSharpness == 1f);
+        T.Check("a default material bakes to the cull mode alone (back-face culling is Godot's default and a feature here)", def.FxRecord() == "cull=back");
+        T.Check("ORMMaterial3D is a base material with the packed texture slot", new ORMMaterial3D() is BaseMaterial3D { } && new ORMMaterial3D().OrmTexture == null && ClassDB.TypeOf("ORMMaterial3D") == typeof(ORMMaterial3D));
+        var m = new StandardMaterial3D
+        {
+            Uv1Scale = new Vector3(2, 3, 1), Uv1Offset = new Vector3(0.25f, 0.5f, 0), Uv1Triplanar = true, Uv1WorldTriplanar = true, Uv1TriplanarSharpness = 4f,
+            Transparency = BaseMaterial3D.TransparencyEnum.Alpha, BlendMode = BaseMaterial3D.BlendModeEnum.Add, CullMode = BaseMaterial3D.CullModeEnum.Disabled,
+            DepthDrawMode = BaseMaterial3D.DepthDrawModeEnum.Always, NoDepthTest = true, RenderPriority = 5, ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+            BillboardMode = BaseMaterial3D.BillboardModeEnum.FixedY, BillboardKeepScale = true, FixedSize = true, Grow = true, GrowAmount = 0.02f,
+            DistanceFadeMode = BaseMaterial3D.DistanceFadeModeEnum.PixelDither, DistanceFadeMinDistance = 2f, DistanceFadeMaxDistance = 20f,
+            RimEnabled = true, Rim = 0.8f, RimTint = 0.2f, HeightmapEnabled = true, HeightmapScale = 8f, HeightmapDeepParallax = true, HeightmapMinLayers = 4, HeightmapMaxLayers = 16,
+            DetailEnabled = true, DetailBlendMode = BaseMaterial3D.BlendModeEnum.Mul, DetailUvLayer = BaseMaterial3D.DetailUVEnum.DetailUv2,
+            SpecularMode = BaseMaterial3D.SpecularModeEnum.Disabled, DiffuseMode = BaseMaterial3D.DiffuseModeEnum.LambertWrap, MetallicSpecular = 0.25f,
+        };
+        var rec = " " + m.FxRecord() + " ";
+        T.Check("the record names UV scale, offset and the triplanar settings", rec.Contains(" uv1scale=2,3 ") && rec.Contains(" uv1offset=0.25,0.5 ") && rec.Contains(" uv1tri=1 ") && rec.Contains(" uv1world=1 ") && rec.Contains(" uv1sharp=4 "));
+        T.Check("pipeline state: two-sided, add blend, depth modes, priority, unshaded", rec.Contains(" cull=none ") && rec.Contains(" blend=add ") && rec.Contains(" depthdraw=always ") && rec.Contains(" nodepthtest=1 ") && rec.Contains(" priority=5 ") && rec.Contains(" unshaded=1 "));
+        T.Check("vertex stage in centimetres: grow 0.02 m is 2 cm, distances 2 m and 20 m are 200 and 2000", rec.Contains(" billboard=y ") && rec.Contains(" keepscale=1 ") && rec.Contains(" fixedsize=1 ") && rec.Contains(" growcm=2 ") && rec.Contains(" fade=dither ") && rec.Contains(" fademin=200 ") && rec.Contains(" fademax=2000 "));
+        T.Check("surface features", rec.Contains(" rim=1 ") && rec.Contains(" rimamount=0.8 ") && rec.Contains(" height=1 ") && rec.Contains(" deepparallax=1 ") && rec.Contains(" layers=4,16 ") && rec.Contains(" detail=1 ") && rec.Contains(" detailblend=3 ") && rec.Contains(" detailuv=2 ") && rec.Contains(" spec=off ") && rec.Contains(" diffuse=wrap "));
+        T.Check("metallic_specular 0.25 is a reflectance of 0.02", T.Near(m.Reflectance, 0.02f, 1e-6f));
+    }
+
+    // Godot energy 1 on a white surface returns 1 in Godot (energy * pi, diffuse 1/pi); Aver's diffuse carries 1/pi and its lights are engine
+    // radiance units of 100000/3 lux (the 100000 lux sun is 3.0), so energy 1 is pi units. The same constant is in tools/fabric (the SUN
+    // record) and aver/formats/GodotLight.hpp; RasterLightsTest and FabricConvertTest check those against 104719.755.
+    private static void CameraValues()
+    {
+        T.Reset();
+        var def = new Camera3D().ComputeFields();
+        T.Check("a default camera is perspective, keep height, every layer, no offsets", def.Projection == 0 && (def.Flags & Camera3D.FlagKeepWidth) == 0 && def.CullInv == 0
+                && def.HOffsetCm == 0f && def.VOffsetCm == 0f);
+        T.Check("it asks to drive the view", (def.Flags & Camera3D.FlagDrivesView) != 0);
+        T.Check("fov 75 degrees, near 0.05 m = 5 cm, far 4000 m = 400000 cm", T.Near(def.FovRad, 75f * MathF.PI / 180f, 1e-5f) && T.Near(def.NearCm, 5f) && T.Near(def.FarCm, 400000f, 0.1f));
+
+        var cam = new Camera3D { Projection = Camera3D.ProjectionType.Orthogonal, Size = 12f, KeepAspect = Camera3D.KeepAspectEnum.Width, CullMask = 6u,
+                                 HOffset = 0.5f, VOffset = -0.25f, FrustumOffset = new Vector2(0.3f, -0.1f) };
+        var f = cam.ComputeFields();
+        T.Check("orthogonal is projection 1 with the size in cm", f.Projection == 1 && T.Near(f.SizeCm, 1200f));
+        T.Check("keep_aspect width sets the flag", (f.Flags & Camera3D.FlagKeepWidth) != 0);
+        T.Check("cull_mask 6 (layers 2 and 3) is stored inverted: 0xFFFF9", f.CullInv == 0xFFFF9);
+        T.Check("h_offset and v_offset, metres to cm", T.Near(f.HOffsetCm, 50f) && T.Near(f.VOffsetCm, -25f));
+        T.Check("frustum_offset, metres to cm", T.Near(f.OffsetXCm, 30f) && T.Near(f.OffsetYCm, -10f));
+        T.Check("cull_mask 0xFFFFF (every layer) is stored as 0", new Camera3D { CullMask = 0xFFFFFu }.ComputeFields().CullInv == 0);
+
+        // The frustum camera: the projection, the ray and the unprojection agree.
+        var fr = new Camera3D { Projection = Camera3D.ProjectionType.Frustum, Size = 2f, Near = 0.5f, Far = 100f, FrustumOffset = new Vector2(0.3f, -0.1f) };
+        float aspect = 1280f / 720f;
+        Projection p = fr.GetCameraProjection();
+        T.Check("a frustum projection is the offset-window frustum", p == Aver.Fabric.Projection.CreateFrustum(-aspect + 0.3f, aspect + 0.3f, -1f - 0.1f, 1f - 0.1f, 0.5f, 100f));
+        // top-left pixel: the ray goes through the near plane's top-left corner of the shifted window
+        Vector3 dir = fr.ProjectRayNormal(new Vector2(0, 0));
+        T.CheckVec("the top-left ray points through the shifted window corner", new Vector3(-aspect + 0.3f, 1f - 0.1f, -0.5f).Normalized(), dir, 1e-4f);
+        T.CheckVec("a frustum ray starts at the camera", Vector3.Zero, fr.ProjectRayOrigin(new Vector2(10, 10)), 1e-6f);
+        Vector3 world = fr.ProjectPosition(new Vector2(320, 90), 7f);
+        T.Check("unprojecting a projected position returns the pixel", fr.UnprojectPosition(world).DistanceTo(new Vector2(320, 90)) < 1e-2f);
+        T.Check("the centre pixel is not on the axis of a shifted frustum", MathF.Abs(fr.ProjectRayNormal(new Vector2(640, 360)).X) > 1e-3f);
+
+        // h_offset slides the camera along its own X: the transform and the rays move with it.
+        var slid = new Camera3D { HOffset = 2f, VOffset = 1f };
+        T.CheckVec("h_offset / v_offset are in get_camera_transform", new Vector3(2, 1, 0), slid.GetCameraTransform().Origin, 1e-5f);
+        T.CheckVec("and in the ray origin", new Vector3(2, 1, 0), slid.ProjectRayOrigin(new Vector2(0, 0)), 1e-5f);
+
+        // keep_aspect width on a perspective camera: fov is the horizontal one.
+        var kw = new Camera3D { Fov = 90f, KeepAspect = Camera3D.KeepAspectEnum.Width };
+        Vector3 edge = kw.ProjectRayNormal(new Vector2(1280, 360));
+        T.Check("horizontal fov 90: the right edge ray is 45 degrees off the axis", T.Near(MathF.Atan2(edge.X, -edge.Z), MathF.PI / 4f, 1e-4f));
+        var kh = new Camera3D { Fov = 90f };
+        Vector3 top = kh.ProjectRayNormal(new Vector2(640, 0));
+        T.Check("vertical fov 90: the top edge ray is 45 degrees off the axis", T.Near(MathF.Atan2(top.Y, -top.Z), MathF.PI / 4f, 1e-4f));
+    }
+
+    private static void LayerValues()
+    {
+        T.Reset();
+        var mesh = new MeshInstance3D();
+        T.Check("a mesh instance is on layer 1 by default", mesh.Layers == 1u && VisualInstance3D.StoreMask(mesh.Layers) == 0xFFFFE);
+        T.Check("storing every layer gives zero (the engine's zero-fill default)", VisualInstance3D.StoreMask(0xFFFFFu) == 0 && VisualInstance3D.StoreMask(0xFFFFFFFFu) == 0);
+        mesh.SetLayerMaskValue(3, true);
+        T.Check("set_layer_mask_value(3) adds layer 3", mesh.Layers == 5u && mesh.GetLayerMaskValue(3) && mesh.GetLayerMaskValue(1) && !mesh.GetLayerMaskValue(2));
+
+        var none = mesh.ComputeRangeFields();
+        T.Check("no visibility range by default", none.BeginCm == 0f && none.EndCm == 0f && none.FadeMode == 0);
+        var geo = new MeshInstance3D { VisibilityRangeBegin = 5f, VisibilityRangeBeginMargin = 1f, VisibilityRangeEnd = 40f, VisibilityRangeEndMargin = 2f,
+                                       VisibilityRangeFadeMode = GeometryInstance3D.VisibilityRangeFadeModeEnum.Self };
+        var r = geo.ComputeRangeFields();
+        T.Check("range and margins, metres to cm", T.Near(r.BeginCm, 500f) && T.Near(r.EndCm, 4000f) && T.Near(r.BeginMarginCm, 100f) && T.Near(r.EndMarginCm, 200f));
+        T.Check("the fade mode carries (the engine hard-cuts it)", r.FadeMode == 1);
+        T.Check("a negative range is no range", new MeshInstance3D { VisibilityRangeEnd = -3f }.ComputeRangeFields().EndCm == 0f);
+
+        var light = new OmniLight3D();
+        var d = light.ComputeFields();
+        T.Check("a light affects and is shadowed by every layer by default", d.CullInv == 0 && d.ShadowCasterInv == 0 && light.LightCullMask == 0xFFFFFFFFu);
+        var masked = new OmniLight3D { LightCullMask = 2u, ShadowCasterMask = 4u }.ComputeFields();
+        T.Check("light_cull_mask 2 and shadow_caster_mask 4 are stored inverted", masked.CullInv == 0xFFFFD && masked.ShadowCasterInv == 0xFFFFB);
+        var spot = new SpotLight3D { LightCullMask = 8u }.ComputeFields();
+        T.Check("a spot light carries its mask too", spot.CullInv == 0xFFFF7 && spot.Kind == 1);
+        T.Check("the kind-specific values survive the mask (range)", T.Near(new OmniLight3D { OmniRange = 3f, LightCullMask = 1u }.ComputeFields().RangeCm, 300f));
+    }
+
+    private static void LightValues()
+    {
+        T.Reset();
+        const float engineUnitLux = 100000f / 3f;
+        T.Check("Light3D.LuxPerEnergy is pi engine radiance units", MathF.Abs(Light3D.LuxPerEnergy / engineUnitLux - MathF.PI) < 1e-4f && MathF.Abs(Light3D.LuxPerEnergy - 104719.755f) < 0.01f);
+        T.Check("an omni's candela per energy is the same number (irradiance at 1 m)", Light3D.CandelaPerEnergy == Light3D.LuxPerEnergy);
+
+        var omni = new OmniLight3D { LightEnergy = 2f, OmniRange = 8f, OmniAttenuation = 2f, ShadowEnabled = true, LightSpecular = 0.25f, LightSize = 0.1f,
+                                     LightColor = new Color(0.5f, 0.5f, 0.5f), ShadowBias = 0.3f, ShadowNormalBias = 4f };
+        LightFields f = omni.ComputeFields();
+        T.Check("omni: kind point, candela = energy * calibration", f.Kind == 0 && T.Near(f.Intensity, 2f * Light3D.CandelaPerEnergy, 0.05f));
+        T.Check("omni: range metres to cm, decay as authored", T.Near(f.RangeCm, 800f) && f.Attenuation == 2f);
+        T.Check("omni: sRGB 0.5 is linear 0.2140", T.Near(f.Colour.X, 0.21404f, 1e-4f) && T.Near(f.Colour.Y, f.Colour.X) && T.Near(f.Colour.Z, f.Colour.X));
+        T.Check("omni: light_specular 0.25 is a factor 0.5 (Godot doubles it)", T.Near(f.SpecularScale, 0.5f));
+        T.Check("omni: light_size 0.1 m is a 10 cm emitter radius", T.Near(f.SourceRadiusCm, 10f));
+        T.Check("omni: shadows and the bias values carry", f.Shadows && T.Near(f.ShadowBias, 0.3f) && T.Near(f.ShadowNormalBias, 4f));
+        T.Check("omni: no distance fade unless enabled", f.FadeBeginCm == 0f && f.FadeLengthCm == 0f && f.FadeShadowCm == 0f);
+
+        var defaults = new OmniLight3D().ComputeFields();
+        T.Check("Godot's defaults: specular 0.5 -> 1, attenuation 1, range 5 m, no shadow, bias 0.1 / 2",
+                T.Near(defaults.SpecularScale, 1f) && defaults.Attenuation == 1f && T.Near(defaults.RangeCm, 500f) && !defaults.Shadows &&
+                T.Near(defaults.ShadowBias, 0.1f) && T.Near(defaults.ShadowNormalBias, 2f) && !defaults.Negative && defaults.SourceRadiusCm == 0f);
+
+        var fading = new OmniLight3D { DistanceFadeEnabled = true }.ComputeFields();
+        T.Check("distance fade: Godot's 40 / 50 / 10 m defaults in cm", T.Near(fading.FadeBeginCm, 4000f) && T.Near(fading.FadeShadowCm, 5000f) && T.Near(fading.FadeLengthCm, 1000f));
+        T.Check("light_negative is carried", new OmniLight3D { LightNegative = true }.ComputeFields().Negative);
+
+        var spot = new SpotLight3D { SpotRange = 12f, SpotAngle = 30f, SpotAttenuation = 2f, SpotAngleAttenuation = 0.5f, LightEnergy = 0.5f };
+        LightFields s = spot.ComputeFields();
+        T.Check("spot: kind spot, range, outer angle = spot_angle, inner 80 percent for the ray-traced path",
+                s.Kind == 1 && T.Near(s.RangeCm, 1200f) && T.Near(s.OuterDeg, 30f) && T.Near(s.InnerDeg, 24f));
+        T.Check("spot: distance decay and cone-edge curve are separate", s.Attenuation == 2f && s.SpotAttenuation == 0.5f && T.Near(s.Intensity, 0.5f * Light3D.CandelaPerEnergy, 0.05f));
+
+        var sun = new DirectionalLight3D { LightEnergy = 1.5f }.ComputeFields();
+        T.Check("sun: kind directional, lux = energy * calibration", sun.Kind == 2 && T.Near(sun.Intensity, 1.5f * Light3D.LuxPerEnergy, 0.05f));
+        T.Check("pushing without an engine does nothing and logs nothing", T.ErrorCount() == 0);
+    }
+
+    private static void OneSun()
+    {
+        T.Reset();
+        var tree = SceneTree.Instance;
+        var a = new DirectionalLight3D { Name = "A" };
+        var b = new DirectionalLight3D { Name = "B" };
+        T.Check("no sun before any directional light is in the tree", DirectionalLight3D.Sun == null && !a.IsSun);
+        tree.Root.AddChild(a);
+        tree.Root.AddChild(b);
+        T.Check("the first directional light to enter the tree is the sun", a.IsSun && !b.IsSun && ReferenceEquals(DirectionalLight3D.Sun, a));
+        T.CheckVec("unrotated, the sun is behind the node (+Z in Godot) -> Aver -X", new Vector3(-1, 0, 0), new Vector3(a.SunDirection().X, a.SunDirection().Y, a.SunDirection().Z));
+        a.Rotation = new Vector3(-MathF.PI / 2, 0, 0);   // looking straight down
+        var d = a.SunDirection();
+        T.CheckVec("a light pitched to look straight down puts the sun overhead (+Z in Aver)", new Vector3(0, 0, 1), new Vector3(d.X, d.Y, d.Z), 1e-4f);
+        a.QueueFree();
+        T.Frames(2, 1.0 / 60.0);
+        var c = new DirectionalLight3D { Name = "C" };
+        tree.Root.AddChild(c);
+        T.Check("when the sun node leaves, the next directional light to enter takes over", c.IsSun && !a.IsInsideTree());
+        SceneTree.Reset();
+        T.Check("a reset forgets the sun", DirectionalLight3D.Sun == null);
     }
 
     private static void PhysicsSignals()

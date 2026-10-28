@@ -123,6 +123,22 @@ target_link_libraries(MeshTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(MeshTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# MeshExtraTest -- G4 R1, the second vertex stream (colour, tangent, UV2): the 16-byte rhi packing (a header-only include, hence the include
+# path rather than a link to Aver.RHI), the .ocmesh VXEX chunk both ways, the glTF / OBJ importers on tests/fabric/data/ExtraGame, and the
+# simplifier keeping the streams in step. Trifactor is optional, like TrifactorTest above.
+add_executable(MeshExtraTest src/MeshExtraTest.cpp)
+target_link_libraries(MeshExtraTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+target_include_directories(MeshExtraTest PRIVATE ${CMAKE_SOURCE_DIR}/modules/rhi/include)
+target_compile_definitions(MeshExtraTest PRIVATE AVER_FABRIC_DATA="${CMAKE_SOURCE_DIR}/tests/fabric/data")
+if(TARGET Aver.Trifactor)
+  target_link_libraries(MeshExtraTest PRIVATE Aver.Trifactor)
+  target_compile_definitions(MeshExtraTest PRIVATE AVER_MESHEXTRA_TRIFACTOR=1)
+else()
+  target_compile_definitions(MeshExtraTest PRIVATE AVER_MESHEXTRA_TRIFACTOR=0)
+endif()
+set_target_properties(MeshExtraTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # LandscapeTest — `.ocland`, the landscape heightfield. Its own executable for MeshTest's reason: the
 # fixtures are synthesised in memory, so it has nothing to say when handed a file path.
 #
@@ -376,6 +392,7 @@ target_sources(AverAssetC PRIVATE
   ${CMAKE_SOURCE_DIR}/tools/fabric/FabricProcess.cpp
   ${CMAKE_SOURCE_DIR}/tools/fabric/FabricScripts.cpp
   ${CMAKE_SOURCE_DIR}/tools/fabric/FabricMeshGen.cpp
+  ${CMAKE_SOURCE_DIR}/tools/fabric/FabricGeometry.cpp
   ${CMAKE_SOURCE_DIR}/tools/fabric/FabricProject.cpp
   ${CMAKE_SOURCE_DIR}/tools/fabric/FabricReport.cpp
   ${CMAKE_SOURCE_DIR}/tools/fabric/FabricResources.cpp
@@ -567,6 +584,12 @@ add_executable(CubeLutTest src/CubeLutTest.cpp)
 target_link_libraries(CubeLutTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(CubeLutTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# PanoramaSkyTest -- G4 R3: the Radiance .hdr reader (flat and run-length scanlines) and the equirectangular panorama fitted onto the
+# authored sky dome (zenith, horizon, ground albedo, blend exponent), plus Godot's environment parameter mapping. No device.
+add_executable(PanoramaSkyTest src/PanoramaSkyTest.cpp)
+target_link_libraries(PanoramaSkyTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(PanoramaSkyTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # ---- FBX import (docs/plans/wave9/FBX_IMPORT.md) --------------------------------------------------------------
 #
 # NO add_test for any of these: aver_register_ctest_in (root CMakeLists) picks up every *Test executable and
@@ -616,3 +639,16 @@ set_target_properties(OcSurfTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BIN
 add_executable(OcShapeTest src/OcShapeTest.cpp)
 target_link_libraries(OcShapeTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(OcShapeTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# MaterialFxTest -- G4 R6: the BaseMaterial3D feature block (pbr::MaterialFx), its .ocmat FX record, the 64-byte extension behind the material constants, the
+# variant key, the library's sanitising and the shader text that has to agree. CPU only. Guarded on the target for MaterialTest's reason.
+if(TARGET Aver.Formats.Material)
+  add_executable(MaterialFxTest src/MaterialFxTest.cpp)
+  target_link_libraries(MaterialFxTest PRIVATE
+    Aver.Formats.Material Aver.Formats Aver.Render.PBR.Materials Aver.RHI Aver.Core Aver.Platform)
+  target_compile_definitions(MaterialFxTest PRIVATE
+    AVER_PRELUDE_PATH="${CMAKE_SOURCE_DIR}/modules/render.pbr/shaders/material_prelude.hlsl"
+    AVER_VOXI_PATH="${CMAKE_SOURCE_DIR}/modules/render.voxi/shaders/voxi.hlsl")
+  set_target_properties(MaterialFxTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()

@@ -89,6 +89,25 @@ float4 PreviewPS(PreviewOut i) : SV_TARGET {
     return float4(toGamma(acesTonemap(lit)), 1.0);
 }
 
+// ---- G4 R5: the scene view (a sub-viewport's picture of the world) ----
+//
+// A NEW entry point beside PreviewPS, which stays as it was. One sun and a sky fill on the draw's flat colour -- no textures, no shadows, no GI:
+// a secondary view is the cheap raster configuration, see docs/plans/fabric/G4_RENDER.md R5. The sun's radiance (colour times intensity) rides
+// in gPreviewGrid.xyz, the output encoding in gPreviewMode.y (0 = tonemapped display values, 1 = linear, for a target a material reads).
+float4 SceneViewPS(PreviewOut i) : SV_TARGET {
+    float3 n = normalize(i.nrmWS);
+    float3 lit = gBaseColor.rgb;
+    if (gMaterial.z < 0.5) {   // gMaterial.z is the draw's unlit switch
+        float ndl = saturate(dot(n, normalize(gPreviewKey.xyz)));
+        float up = n.z * 0.5 + 0.5;
+        float3 fill = lerp(gPreviewAmbient.rgb * 0.35, gPreviewAmbient.rgb, up);
+        lit = gBaseColor.rgb * (fill + ndl * gPreviewGrid.rgb);
+    }
+    lit += gEmissive.rgb;
+    float3 c = gPreviewMode.y > 0.5 ? saturate(lit) : toGamma(acesTonemap(lit));
+    return float4(c, 1.0);
+}
+
 // ---- the studio backdrop: a fullscreen triangle, drawn first with depth off ----
 
 struct PreviewBackdropOut {

@@ -1,0 +1,61 @@
+[gd_scene load_steps=5 format=3]
+
+[sub_resource type="BoxMesh" id="BoxMesh_floor"]
+size = Vector3(20, 0.2, 20)
+
+[sub_resource type="BoxMesh" id="BoxMesh_crate"]
+size = Vector3(1, 1, 1)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_grey"]
+albedo_color = Color(0.8, 0.8, 0.8, 1)
+
+[node name="Main" type="Node3D"]
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.70710678, 0.70710678, 0, -0.70710678, 0.70710678, 0, 10, 0)
+light_color = Color(1, 0.95, 0.9, 1)
+light_energy = 2.0
+light_angular_distance = 0.5
+shadow_enabled = true
+directional_shadow_max_distance = 80.0
+
+[node name="Moon" type="DirectionalLight3D" parent="."]
+light_energy = 0.1
+
+[node name="Lamp" type="OmniLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2, 3, 1)
+light_energy = 3.0
+light_indirect_energy = 0.5
+light_specular = 0.25
+light_size = 0.1
+light_cull_mask = 1
+shadow_enabled = true
+shadow_bias = 0.3
+shadow_normal_bias = 4.0
+distance_fade_enabled = true
+omni_range = 6.0
+omni_attenuation = 2.0
+
+[node name="Torch" type="SpotLight3D" parent="."]
+light_negative = true
+spot_range = 12.0
+spot_attenuation = 1.5
+spot_angle = 30.0
+spot_angle_attenuation = 0.5
+
+[node name="Beam" type="SpotLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.70710678, 0.70710678, 0, -0.70710678, 0.70710678, -1, 4, 0)
+light_energy = 4.0
+shadow_enabled = true
+spot_range = 10.0
+spot_angle = 35.0
+
+[node name="Floor" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.1, 0)
+mesh = SubResource("BoxMesh_floor")
+surface_material_override/0 = SubResource("StandardMaterial3D_grey")
+
+[node name="Crate" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.5, -3.5)
+mesh = SubResource("BoxMesh_crate")
+surface_material_override/0 = SubResource("StandardMaterial3D_grey")

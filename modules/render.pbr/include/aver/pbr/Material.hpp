@@ -1,5 +1,6 @@
 #pragma once
 #include "aver/core/Types.hpp"
+#include "aver/pbr/MaterialFx.hpp"
 
 #include <string>
 #include <vector>
@@ -267,6 +268,9 @@ struct MaterialDesc {
     f32       alphaCutoff = 0.5f;   // read only under AlphaMode::Mask
     bool      twoSided    = false;
     bool      castShadow  = true;
+    // Multiply the albedo (rgb) and opacity by the mesh's vertex colour (Godot's vertex_color_use_as_albedo). Read only on
+    // a mesh that carries the colour stream (docs/plans/fabric/G4_RENDER.md R1); off is every material before this field.
+    bool      vertexColor = false;
 
     UvMode uvMode   = UvMode::Mesh;
     f32    uvTiling = 200.0f;   // world CENTIMETRES per tile, read only under WorldAligned
@@ -299,6 +303,10 @@ struct MaterialDesc {
     // MaterialFlag_Hair for Hair, marks the material two sided and never sets the Coat or Subsurface flags for it.
     ShadingModel shadingModel = ShadingModel::Standard;
     HairParams hair;
+
+    // G4 R6: BaseMaterial3D features (MaterialFx.hpp). All default to off; a material with fx.active() false is every material before this field.
+    // The detail, heightmap and flowmap textures ride the Layer1 slots (5 detail albedo, 6 heightmap, 7 detail normal) of a material that is not slope blended.
+    MaterialFx fx;
 };
 
 // ------------------------------------------------------- the one translucency test, and its answer

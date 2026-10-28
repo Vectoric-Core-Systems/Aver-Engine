@@ -70,7 +70,14 @@ void registerBuiltinComponents(World& world) {
             .field("aabbMax", FieldKind::Vec3, static_cast<u16>(offsetof(CMeshRenderer, aabbMax)))
             .field("material", FieldKind::I32, static_cast<u16>(offsetof(CMeshRenderer, material)))
             .field("flags", FieldKind::I32, static_cast<u16>(offsetof(CMeshRenderer, flags)))
-            .field("dirty", FieldKind::I32, static_cast<u16>(offsetof(CMeshRenderer, dirty)), 0, /*readOnly*/ true);
+            .field("dirty", FieldKind::I32, static_cast<u16>(offsetof(CMeshRenderer, dirty)), 0, /*readOnly*/ true)
+            .field("layersInv", FieldKind::I32, static_cast<u16>(offsetof(CMeshRenderer, layersInv)))
+            .field("visBeginCm", FieldKind::F32, static_cast<u16>(offsetof(CMeshRenderer, visBeginCm)))
+            .field("visEndCm", FieldKind::F32, static_cast<u16>(offsetof(CMeshRenderer, visEndCm)))
+            .field("visBeginMarginCm", FieldKind::F32, static_cast<u16>(offsetof(CMeshRenderer, visBeginMarginCm)))
+            .field("visEndMarginCm", FieldKind::F32, static_cast<u16>(offsetof(CMeshRenderer, visEndMarginCm)))
+            .field("visFade", FieldKind::I32, static_cast<u16>(offsetof(CMeshRenderer, visFade)))
+            .field("rangeState", FieldKind::I32, static_cast<u16>(offsetof(CMeshRenderer, rangeState)), 0, /*readOnly*/ true);
         expect(b.verify(sizeof(CMeshRenderer)), b.typeId(), kComponentMeshRenderer, "CMeshRenderer");
     }
     {
@@ -86,7 +93,17 @@ void registerBuiltinComponents(World& world) {
             .field("iesProfile", FieldKind::I64, static_cast<u16>(offsetof(CLight, iesProfile)))
             .field("cookie", FieldKind::I64, static_cast<u16>(offsetof(CLight, cookie)))
             .field("flags", FieldKind::I32, static_cast<u16>(offsetof(CLight, flags)))
-            .field("sourceRadiusCm", FieldKind::F32, static_cast<u16>(offsetof(CLight, sourceRadiusCm)));
+            .field("sourceRadiusCm", FieldKind::F32, static_cast<u16>(offsetof(CLight, sourceRadiusCm)))
+            .field("attenuation", FieldKind::F32, static_cast<u16>(offsetof(CLight, attenuation)))
+            .field("spotAttenuation", FieldKind::F32, static_cast<u16>(offsetof(CLight, spotAttenuation)))
+            .field("specularScale", FieldKind::F32, static_cast<u16>(offsetof(CLight, specularScale)))
+            .field("shadowBias", FieldKind::F32, static_cast<u16>(offsetof(CLight, shadowBias)))
+            .field("shadowNormalBias", FieldKind::F32, static_cast<u16>(offsetof(CLight, shadowNormalBias)))
+            .field("fadeBeginCm", FieldKind::F32, static_cast<u16>(offsetof(CLight, fadeBeginCm)))
+            .field("fadeLengthCm", FieldKind::F32, static_cast<u16>(offsetof(CLight, fadeLengthCm)))
+            .field("fadeShadowCm", FieldKind::F32, static_cast<u16>(offsetof(CLight, fadeShadowCm)))
+            .field("cullInv", FieldKind::I32, static_cast<u16>(offsetof(CLight, cullInv)))
+            .field("shadowCasterInv", FieldKind::I32, static_cast<u16>(offsetof(CLight, shadowCasterInv)));
         expect(b.verify(sizeof(CLight)), b.typeId(), kComponentLight, "CLight");
     }
     {
@@ -94,7 +111,15 @@ void registerBuiltinComponents(World& world) {
         b.field("fovYRad", FieldKind::F32, static_cast<u16>(offsetof(CCamera, fovYRad)))
             .field("nearCm", FieldKind::F32, static_cast<u16>(offsetof(CCamera, nearCm)))
             .field("farCm", FieldKind::F32, static_cast<u16>(offsetof(CCamera, farCm)))
-            .field("priority", FieldKind::I32, static_cast<u16>(offsetof(CCamera, priority)));
+            .field("priority", FieldKind::I32, static_cast<u16>(offsetof(CCamera, priority)))
+            .field("flags", FieldKind::I32, static_cast<u16>(offsetof(CCamera, flags)))
+            .field("projection", FieldKind::I32, static_cast<u16>(offsetof(CCamera, projection)))
+            .field("sizeCm", FieldKind::F32, static_cast<u16>(offsetof(CCamera, sizeCm)))
+            .field("offsetXCm", FieldKind::F32, static_cast<u16>(offsetof(CCamera, offsetXCm)))
+            .field("offsetYCm", FieldKind::F32, static_cast<u16>(offsetof(CCamera, offsetYCm)))
+            .field("hOffsetCm", FieldKind::F32, static_cast<u16>(offsetof(CCamera, hOffsetCm)))
+            .field("vOffsetCm", FieldKind::F32, static_cast<u16>(offsetof(CCamera, vOffsetCm)))
+            .field("cullInv", FieldKind::I32, static_cast<u16>(offsetof(CCamera, cullInv)));
         expect(b.verify(sizeof(CCamera)), b.typeId(), kComponentCamera, "CCamera");
     }
     // APPENDED, never inserted. Dense ids are registration order, so adding one anywhere but the end

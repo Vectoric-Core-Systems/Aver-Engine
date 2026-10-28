@@ -6,6 +6,8 @@ aver_add_module(Aver.Formats
     src/ImportRecord.cpp
     # .cube 3D colour LUTs for post-process volumes and grading: text and arithmetic, no device.
     src/CubeLut.cpp
+    # An equirectangular panorama (Radiance .hdr or an 8-bit image) fitted onto the authored sky dome (G4 R3): arithmetic, no device.
+    src/PanoramaSky.cpp
     # The GI derived-data cache (.cache). Base target: it is the AVR1 container and arithmetic --
     # no device, no renderer -- which is what lets its test run with neither.
     src/GiCache.cpp
@@ -42,6 +44,9 @@ aver_add_module(Aver.Formats
     src/LocGather.cpp
     src/OcMap.cpp
     src/OcMesh.cpp
+    # G4 R7: meshes built from arrays at run time, instance tables baked into one mesh, and BSP constructive solid geometry for the converter.
+    src/MeshBuild.cpp
+    src/Csg.cpp
 
     src/MorphTarget.cpp
     src/OcWorld.cpp

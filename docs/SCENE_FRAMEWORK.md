@@ -502,7 +502,8 @@ about the built-ins is privileged**.
 // an undeclared edge — and the ABI already crosses the same value as int32_t.
 struct CMeshRenderer { u64 mesh = 0; i32 material = 0; u32 flags = 0; f32 aabbMin[3]; f32 aabbMax[3]; u32 dirty = 1; };
 struct CLight  { i32 kind = 0; f32 colour[3]; f32 intensityLux = 100000.0f; f32 rangeCm = 0.0f; f32 innerCos = 1.0f, outerCos = 0.7f;
-                 f32 widthCm = 0, heightCm = 0; i64 iesProfile = 0, cookie = 0; i32 flags = 0; f32 sourceRadiusCm = 0; };   // docs/rendering/LIGHTS.md
+                 f32 widthCm = 0, heightCm = 0; i64 iesProfile = 0, cookie = 0; i32 flags = 0; f32 sourceRadiusCm = 0;
+                 f32 attenuation = 0, spotAttenuation = 0, specularScale = 0, shadowBias = 0, shadowNormalBias = 0, fadeBeginCm = 0, fadeLengthCm = 0, fadeShadowCm = 0; };   // docs/rendering/LIGHTS.md; the last eight: G4 R2 (kLightGodot)
 struct CCamera { f32 fovYRad = 1.0472f; f32 nearCm = 5.0f; f32 farCm = 500000.0f; i32 priority = 0; };
 ```
 

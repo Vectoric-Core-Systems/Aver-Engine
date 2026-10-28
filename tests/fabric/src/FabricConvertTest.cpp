@@ -353,8 +353,8 @@ int main() {
         const int sun = find(w, {"Main", "Sun"});
         check(sun >= 0 && w.placements[static_cast<usize>(sun)].className == "DirectionalLight3D" && near(w.placements[static_cast<usize>(sun)].z, 1000), "Sun: a DirectionalLight3D 10 m up");
         check(propIs(w, sun, "light_energy", "1.5") && propIs(w, sun, "shadow_enabled", "true"), "its energy and shadows are Props");
-        check(w.hasSun && near(w.sunLux, 150000, 1) && near(w.sunDir[0], -0.70710678, 1e-4) && near(w.sunDir[1], 0, 1e-4) && near(w.sunDir[2], 0.70710678, 1e-4),
-              "the SUN record points at the sun (the light's -Z reversed, through the axis map) with energy 1.5 as 150000 lux");
+        check(w.hasSun && near(w.sunLux, 1.5 * 104719.755, 1) && near(w.sunDir[0], -0.70710678, 1e-4) && near(w.sunDir[1], 0, 1e-4) && near(w.sunDir[2], 0.70710678, 1e-4),
+              "the SUN record points at the sun (the light's -Z reversed, through the axis map) with energy 1.5 as 1.5 * 104719.755 lux (pi engine units per unit of energy)");
         check(w.sunColor[0] > 0.99 && w.sunColor[1] < 0.95 && w.sunColor[2] < 0.9, "the sun colour is linear");
         check(find(w, {"Main", "Lamp"}) >= 0 && propIs(w, find(w, {"Main", "Lamp"}), "omni_range", "8.0"), "OmniLight3D: omni_range in metres");
         check(find(w, {"Main", "Spot"}) >= 0 && propIs(w, find(w, {"Main", "Spot"}), "spot_angle", "30.0"), "SpotLight3D: spot_angle");
@@ -366,7 +366,7 @@ int main() {
               "ProceduralSkyMaterial becomes the authored dome, the ambient energy the sky light");
         check(w.hasFog && near(w.fogDensity, 0.0002, 1e-7) && near(w.fogColor[2], 0.7), "fog density is per metre / 100 per centimetre");
         const int env = find(w, {"Main", "World"});
-        check(env >= 0 && w.placements[static_cast<usize>(env)].className == "Node" && propIs(w, env, "_class", "\"WorldEnvironment\""), "the WorldEnvironment node is kept as a plain node");
+        check(env >= 0 && w.placements[static_cast<usize>(env)].className == "WorldEnvironment", "the WorldEnvironment node is placed as the WorldEnvironment class (G4 R3)");
     }
 
     // Stand-ins for what the runtime does not have.
@@ -517,9 +517,10 @@ int main() {
         check(has("\"type\":\"Sprite2D\"", "\"rating\":\"unsupported\"", "2D nodes are out of scope"), "a 2D node is reported unsupported");
         check(has("\"type\":\"HingeJoint3D\"", "\"rating\":\"unsupported\"", "\"kind\":\"node\""), "a joint is reported unsupported");
         check(has("\"type\":\"Label\"", "\"rating\":\"approximated\"", "placeholders"), "a UI control is reported approximated");
-        check(has("\"type\":\"StandardMaterial3D\"", "\"property\":\"uv1_scale\"", "\"rating\":\"unsupported\""), "a material feature with no .ocmat field is listed (uv1_scale)");
+        check(has("\"type\":\"StandardMaterial3D\"", "\"property\":\"uv1_scale\"", "\"rating\":\"converted\""), "uv1_scale is converted now (the .ocmat FX record, G4 R6)");
         check(has("\"type\":\"ShaderMaterial\"", "\"rating\":\"unsupported\"", "G6"), "a ShaderMaterial is reported unsupported (G6)");
-        check(has("\"property\":\"ssao_enabled\"", "\"type\":\"Environment\"", "\"rating\":\"unsupported\""), "an Environment setting with no record is reported");
+        check(has("\"property\":\"ambient_light_sky_contribution\"", "\"type\":\"Environment\"", "\"rating\":\"unsupported\""), "an Environment setting with no record is reported");
+        check(has("\"property\":\"ssao_enabled\"", "\"type\":\"Environment\"", "\"rating\":\"approximated\""), "SSAO is approximated by Aver's GI occlusion (G4 R8)");
         check(has("\"kind\":\"input\"", "debug_menu", "\"rating\":\"unsupported\""), "an unmapped key is reported");
         check(has("\"kind\":\"node\"", "\"type\":\"RigidBody3D\"", "\"rating\":\"converted\""), "a converted node is rated converted");
         check(has("\"kind\":\"script\"", "res://scripts/player.gd", "\"rating\":\"unsupported\""), "a script is rated unsupported until its conversion package lands");

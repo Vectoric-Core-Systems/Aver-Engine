@@ -56,6 +56,8 @@ struct RenderTargetState {
     u32 width = 0, height = 0;
 };
 RenderTargetState g_rt;
+// setTargetsIsolated(true): draws open their own scope over g_rt instead of joining the device's (see IRenderContext::setTargetsIsolated).
+bool g_isolated = false;
 
 // Returns whether a scope was actually OPENED. False means one was already open -- VulkanDevice's
 // own scene, overlay or upscale pass, with this draw coming from a feature it called from inside
@@ -75,7 +77,7 @@ bool beginRenderScope(VulkanDevice& dev, VkCommandBuffer cb) {
     ri.colorAttachmentCount = g_rt.colorCount;
     ri.pColorAttachments = g_rt.colorCount ? g_rt.colors : nullptr;
     ri.pDepthAttachment = g_rt.hasDepth ? &g_rt.depth : nullptr;
-    return dev.pushRenderScope(cb, ri);
+    return dev.pushRenderScope(cb, ri, g_isolated);
 }
 void endRenderScope(VulkanDevice& dev, VkCommandBuffer cb, bool opened) {
     dev.popRenderScope(cb, opened);
@@ -269,6 +271,8 @@ void VulkanRenderContext::setRenderTargets(const TextureHandle* colors, u32 coun
     g_rt.width = w;
     g_rt.height = h;
 }
+
+void VulkanRenderContext::setTargetsIsolated(bool on) { g_isolated = on; }
 
 // ====================================================================================================
 // clearDepth / clearColor -- standalone single-attachment scopes against the NAMED texture, matching
@@ -638,9 +642,21 @@ void VulkanRenderContext::drawMesh(MeshHandle mesh) {
         AVER_ERROR("[RHI.Vulkan] drawMesh with a destroyed mesh handle");
         return;
     }
+    // A pipeline whose layout reads binding 1 needs a mesh that has it (D3D12RenderContext::drawMesh's twin).
+    if (pipe_ && pipe_->extraSlot && !m.hasExtra) {
+        AVER_ERROR("[RHI.Vulkan] drawMesh: the bound pipeline reads the second vertex stream and mesh {} has none; draw skipped", mesh);
+        return;
+    }
     applyDrawBinding();
-    const VkDeviceSize zeroOffset = 0;
-    dev_->api().CmdBindVertexBuffers(cb, 0, 1, &m.vb, &zeroOffset);
+    if (m.hasExtra) {
+        // Two bindings; a pipeline that does not read binding 1 ignores it.
+        const VkBuffer bufs[2] = {m.vb, m.vbx};
+        const VkDeviceSize offs[2] = {0, 0};
+        dev_->api().CmdBindVertexBuffers(cb, 0, 2, bufs, offs);
+    } else {
+        const VkDeviceSize zeroOffset = 0;
+        dev_->api().CmdBindVertexBuffers(cb, 0, 1, &m.vb, &zeroOffset);
+    }
     dev_->api().CmdBindIndexBuffer(cb, m.ib, 0, VK_INDEX_TYPE_UINT32);
     const bool ownScope = beginRenderScope(*dev_, cb);
     dev_->api().CmdDrawIndexed(cb, m.indexCount, 1, 0, 0, 0);

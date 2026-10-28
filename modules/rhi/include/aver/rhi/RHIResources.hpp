@@ -56,6 +56,8 @@ enum class Format : u8 {
     // and of whatever must match one -- the editor's viewport texture is drawn by the same pipeline.
     // Appended, so no value above moves.
     BGRA8Unorm,
+    // Three 32-bit floats: a vertex attribute (the engine mesh's position and normal), never a texture format.
+    RGB32Float,
 };
 
 // True for block-compressed formats, whose extents are counted in 4x4 blocks.
@@ -209,6 +211,8 @@ enum class BlendMode : u8 {
     AlphaBlend,                // src.rgb * src.a + dst.rgb * (1 - src.a)
     PremultipliedAlpha,        // src.rgb + dst.rgb * (1 - src.a)
     Additive,
+    Subtractive,               // R6: dst.rgb - src.rgb (the shader premultiplies); alpha channel keeps dst
+    Multiplicative,            // R6: dst.rgb * src.rgb (the shader writes lerp(1, colour, coverage)); alpha channel keeps dst
 };
 // Whether triangles are filled or drawn as wireframe.
 enum class FillMode : u8 { Solid, Wireframe };
@@ -274,7 +278,7 @@ inline u32 declaredSrvCount(const PipelineLayout& l) { return l.srvCount + l.srv
 // For pipelines that draw geometry the caller owns, beside MeshHandle.
 
 // What a vertex attribute means to the input assembler.
-enum class VertexSemantic : u8 { Position, Normal, TexCoord, Color };
+enum class VertexSemantic : u8 { Position, Normal, TexCoord, Color, Tangent };   // Tangent appended: no value above moves
 
 // One attribute in a caller-owned vertex.
 struct VertexAttrib {
@@ -282,6 +286,9 @@ struct VertexAttrib {
     u8             semanticIndex = 0;    // POSITION0, TEXCOORD1, ...
     Format         format = Format::Unknown;
     u32            offset = 0;           // bytes from vertex start
+    // Input slot the attribute is read from: 0 (every layout before R1) or 1, the mesh's optional second stream
+    // (MeshVertexExtra, bound by drawMesh for a mesh that has one). Offsets are within that slot's vertex.
+    u8             slot = 0;
 };
 
 constexpr u32 kMaxVertexAttribs = 8;
@@ -292,6 +299,9 @@ struct VertexLayout {
     u32          attribCount = 0;
     // Bytes per vertex.
     u32          stride = 0;
+    // Bytes per vertex of slot 1; 0 when no attribute uses it. A pipeline that does use it can only draw a mesh that
+    // has the second stream (IDevice::setMeshExtra): drawMesh refuses any other.
+    u32          stride1 = 0;
 };
 
 // How to create a graphics pipeline.
@@ -383,6 +393,21 @@ constexpr u32 kObjectConstantDwords = 32;
 constexpr u32 kDrawConstantRegister = 2;
 // Largest b2 block setDrawBinding will carry.
 constexpr u32 kMaxDrawConstantBytes = 256;
+// R6: a b2 draw block longer than kDrawMaterialBaseBytes carries pbr::MaterialExtConstants behind the 192-byte pbr::MaterialConstants. Its first
+// dword is (render priority + 128) | variant key << 8; key 0 means "no pipeline change". The RHI reads nothing else of it.
+constexpr u32 kDrawMaterialBaseBytes = 192;
+inline u32 drawMaterialFxWord(const void* constants, u32 bytes) {
+    if (!constants || bytes < kDrawMaterialBaseBytes + 4u) return 0;
+    u32 w = 0;
+    const u8* p = static_cast<const u8*>(constants) + kDrawMaterialBaseBytes;
+    w = static_cast<u32>(p[0]) | (static_cast<u32>(p[1]) << 8) | (static_cast<u32>(p[2]) << 16) | (static_cast<u32>(p[3]) << 24);
+    return w;
+}
+inline u32 drawMaterialFxKey(const void* constants, u32 bytes) { return drawMaterialFxWord(constants, bytes) >> 8; }
+inline i32 drawMaterialFxPriority(const void* constants, u32 bytes) {
+    const u32 w = drawMaterialFxWord(constants, bytes);
+    return w ? static_cast<i32>(w & 0xFFu) - 128 : 0;
+}
 // b0: engine's PerFrame block, bound by backend on every pipeline bind.
 constexpr u32 kEngineFrameConstantRegister = 0;
 static_assert(kFeatureFrameConstantRegister < kMaxConstantSlots,
@@ -589,6 +614,10 @@ public:
 
     // Binds render targets; caller must already have transitioned them.
     virtual void setRenderTargets(const TextureHandle* colors, u32 count, TextureHandle depth) = 0;
+    // While on, draws go to the targets last bound with setRenderTargets even from inside a scene scope the device holds open (the Vulkan
+    // backend otherwise lets such a draw join the scope and land in the scene's attachments -- the long-standing cascade-map defect,
+    // docs/VULKAN.md). R2's local-light shadow pass is the user; the cascade passes keep the old behaviour. D3D12 binds targets directly: no-op.
+    virtual void setTargetsIsolated(bool on) { (void)on; }
     virtual void clearDepth(TextureHandle depth, f32 value) = 0;
     // Clears a colour target to an RGBA value (4 floats).
     virtual void clearColor(TextureHandle target, const f32 color[4]) = 0;
@@ -754,10 +783,25 @@ public:
         (void)meshShaders; (void)depthPrepassed; (void)blended; return 0;
     }
 
+    // The lit pipeline for a mesh that carries the second vertex stream (IDevice::setMeshExtra), or 0 to draw it with
+    // scenePipeline() as every mesh was before R1 (the stream is then bound and ignored). Never asked for a mesh without
+    // the stream, a blended draw, or a mesh-shader draw. Same layout, bindings and constants as scenePipeline().
+    virtual PipelineHandle scenePipelineExtra(bool depthPrepassed) const { (void)depthPrepassed; return 0; }
+
+    // R6: the pipeline for a draw whose material carries BaseMaterial3D features (the 64-byte extension behind the 192-byte material block; see
+    // drawMaterialFxKey). `key` is that variant's 24-bit key, `meshExtra` says the mesh has the second vertex stream, `blended` selects the translucent
+    // pass (never a G-buffer write). 0 = not built (yet): the draw then takes scenePipeline() as every draw did before R6. Never asked for a key of 0.
+    virtual PipelineHandle scenePipelineFx(u32 key, bool meshExtra, bool blended) const {
+        (void)key; (void)meshExtra; (void)blended; return 0;
+    }
+
     // The bindless texture table the pipelines expect, or 0 for pipelines that declare none.
     virtual BindlessTableHandle sceneBindlessTable() const { return 0; }
     // Depth-only pipeline for same-frame depth prepass (paired with scenePipeline(..., depthPrepassed=true)).
     virtual PipelineHandle depthPrepassPipeline() const { return 0; }
+    // The depth-only twin for a mesh with the second vertex stream: 0 unless scenePipelineExtra(true) would answer non-zero for it. The LessEqual
+    // colour pass needs bit-identical depth, so a mesh whose colour pass uses the extra vertex shader must get its prepass from this one's.
+    virtual PipelineHandle depthPrepassPipelineExtra() const { return 0; }
     // Bindings and constants the scene shaders need.
     virtual BindingSetHandle sceneBindingSet() const { return 0; }
     virtual bool sceneConstants(const void** data, u32* bytes) const { (void)data; (void)bytes; return false; }

@@ -188,8 +188,11 @@ struct PostCB {
     // ACCESSIBILITY: x the packed colour-vision filter (ColourVision.hpp packColourVision; 0 = off, the frame is then
     // bit-identical), yzw unused. Mirrors `gPostAccess` in shaders/post.hlsl.
     f32 access[4];
+    // x tonemap white point, yzw display-space brightness / contrast / saturation. Declared in post.hlsl as `gPostExt` only
+    // under AVER_POST_TONEMAP_EXT, so the ordinary composite variants never see it.
+    f32 ext[4];
 };
-static_assert(sizeof(PostCB) == 288, "the HLSL cbuffer mirrors this byte for byte");
+static_assert(sizeof(PostCB) == 304, "the HLSL cbuffer mirrors this byte for byte");
 
 // The linear-sRGB multiplier that makes a source of colour temperature `kelvin` read as the 6500 K
 // reference, with `tint` (+ = magenta, - = green) on the green channel. Planckian xy from Kim et al.
@@ -275,6 +278,11 @@ inline void fillPostLens(PostCB& cb, const PostSettings& p, u32 srcW, u32 srcH, 
 
     cb.access[0] = packColourVision(p);
     cb.access[1] = cb.access[2] = cb.access[3] = 0.0f;
+
+    cb.ext[0] = std::max(p.tonemapWhite, 1e-3f);
+    cb.ext[1] = std::max(p.adjustBrightness, 0.0f);
+    cb.ext[2] = std::max(p.adjustContrast, 0.0f);
+    cb.ext[3] = std::max(p.adjustSaturation, 0.0f);
 }
 
 } // namespace aver::rhi

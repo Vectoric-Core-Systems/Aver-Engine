@@ -68,6 +68,14 @@ struct CMeshRenderer {
     i32 material    = 0;
     u32 flags       = 1;   // bit 0: visible, bit 1: hidden from owner (see kMeshRendererHiddenFromOwner)
     u32 dirty       = 1;   // upload bookkeeping, set by a write and cleared by the GPU path
+    // ---- G4 R4 (appended; zero = off, the pool zero-fills). See aver/scene/RenderMasks.hpp for the encodings. ----
+    u32 layersInv   = 0;   // render layers, stored inverted: 0 = every layer (Godot VisualInstance3D.layers is 20 bits)
+    f32 visBeginCm  = 0.0f;       // visibility range: visible from this distance (0 = no lower bound)
+    f32 visEndCm    = 0.0f;       // ... until this one (0 = no upper bound)
+    f32 visBeginMarginCm = 0.0f;  // hysteresis at the begin threshold
+    f32 visEndMarginCm   = 0.0f;  // hysteresis at the end threshold
+    u32 visFade     = 0;   // Godot fade mode: 0 disabled, 1 self, 2 dependencies (the engine hard-cuts all three)
+    u32 rangeState  = 0;   // runtime: the last range verdict (kRangeHidden / kRangeKnown), written by the scene walk
 };
 
 inline constexpr u32 kMeshRendererVisible = 0x1;
@@ -115,6 +123,10 @@ inline constexpr i32 kLightRect        = 3;
 // CLight::flags bits.
 inline constexpr i32 kLightNoShadows = 0x1;
 inline constexpr i32 kLightIesPeak   = 0x2;   // normalise the IES profile to its peak, not its luminous flux
+// Godot's parameter block is live (G4 R2): `attenuation`, `spotAttenuation` and `specularScale` are read as stored (0 is a value), the
+// omni window is Godot's linear one and a spot's edge is Godot's `1 - rim^(1/spotAttenuation)`. Clear = the Aver curves (docs/plans/fabric/G4_RENDER.md R2).
+inline constexpr i32 kLightGodot     = 0x4;
+inline constexpr i32 kLightNegative  = 0x8;   // subtracts light (Godot light_negative); the raster local-light path only
 
 // A light's kind, colour, brightness, cone shaping, rectangle size, and optional IES profile and cookie.
 //
@@ -134,14 +146,39 @@ struct CLight {
     i64 cookie        = 0;      // ObjectId of the cookie texture path; 0 = none
     i32 flags         = 0;      // kLight* bits
     f32 sourceRadiusCm = 0.0f;  // Point/Spot: emitter radius for soft shadows; 0 = 1 cm
+    // ---- G4 R2: Godot's light parameters. Zero = off / default (the pool zero-fills); the first three are read only with kLightGodot. ----
+    f32 attenuation = 0.0f;      // omni_attenuation / spot_attenuation: distance falloff exponent (Godot default 1, physical 2)
+    f32 spotAttenuation = 0.0f;  // spot_angle_attenuation: the cone-edge curve exponent (Godot default 1)
+    f32 specularScale = 0.0f;    // light_specular * 2 (Godot's specular_amount; default light_specular 0.5 gives 1)
+    f32 shadowBias = 0.0f;       // shadow_bias (Godot units); 0 = Godot's default 0.1
+    f32 shadowNormalBias = 0.0f; // shadow_normal_bias, in shadow texels; 0 = Godot's default 2
+    f32 fadeBeginCm = 0.0f;      // distance_fade_begin in cm; 0 with fadeLengthCm 0 = no fade
+    f32 fadeLengthCm = 0.0f;     // distance_fade_length in cm: the light is gone at begin + length
+    f32 fadeShadowCm = 0.0f;     // distance_fade_shadow in cm: the shadow is gone from here; 0 = at begin
+    // ---- G4 R4: layer masks, stored inverted (aver/scene/RenderMasks.hpp), 0 = every layer ----
+    u32 cullInv = 0;             // light_cull_mask: the instance layers this light affects (raster local-light path)
+    u32 shadowCasterInv = 0;     // shadow_caster_mask: the instance layers that cast this light's shadows (raster local-light path)
 };
 
-// Perspective camera parameters, plus the priority that picks between cameras.
+// CCamera::flags bits (all zero by default).
+inline constexpr u32 kCameraKeepWidth  = 0x1;   // Godot KEEP_WIDTH: fovYRad / sizeCm describe the width (clear = height)
+inline constexpr u32 kCameraDrivesView = 0x2;   // this camera, when it is the view node, sets the play view's lens (fov, clip planes, projection)
+
+// Perspective camera parameters, plus the priority that picks between cameras. The fields after `priority` (G4 R4) are read only for a
+// camera flagged kCameraDrivesView: projection 0 perspective / 1 orthographic / 2 frustum (aver/core/CameraProjection.hpp).
 struct CCamera {
     f32 fovYRad = 1.0472f;
     f32 nearCm  = 5.0f;
     f32 farCm   = 500000.0f;
     i32 priority = 0;
+    u32 flags = 0;
+    i32 projection = 0;
+    f32 sizeCm = 0.0f;       // orthographic / frustum size (width or height per kCameraKeepWidth); 0 reads as 100 cm
+    f32 offsetXCm = 0.0f;    // frustum_offset
+    f32 offsetYCm = 0.0f;
+    f32 hOffsetCm = 0.0f;    // Camera3D.h_offset / v_offset: the camera slides along its own right and up axes
+    f32 vOffsetCm = 0.0f;
+    u32 cullInv = 0;         // Camera3D.cull_mask, stored inverted: the layers it renders (0 = all)
 };
 
 // Binds a skeleton to whatever this entity already draws, rather than being a second kind of mesh

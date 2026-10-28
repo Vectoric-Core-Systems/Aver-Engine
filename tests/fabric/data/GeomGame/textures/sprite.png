@@ -1,0 +1,1 @@
+stand-in for a PNG: FabricGeometryTest replaces it with a real PNG header (64 x 32) in its scratch copy, because the converter reads the size from the IHDR chunk.

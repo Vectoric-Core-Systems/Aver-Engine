@@ -3,6 +3,7 @@
 
 #include "aver/core/Version.hpp"
 #include "aver/formats/AxisMap.hpp"
+#include "aver/formats/GodotEnvironment.hpp"
 #include "aver/formats/OcInput.hpp"
 #include "aver/formats/OcProject.hpp"
 #include "aver/platform/FileSystem.hpp"
@@ -264,9 +265,28 @@ bool Converter::convertProject(const std::string& startLevelAsset) {
     report_.add("setting", kProject, "", "", "physics", Rating::Converted, "PHYSICS.COMBINE godot", 0);
 
     // The start scene's environment: bloom and exposure are project-wide in Aver.
+    // Godot's exposure is fixed unless CameraAttributes asks for auto exposure, so eye adaptation is off; the tonemapper is Godot's.
     if (projectEnv_.found) {
-        if (projectEnv_.glow) d.postBloom = static_cast<f32>(projectEnv_.glowIntensity);
-        if (projectEnv_.tonemapExposure != 1.0) d.postExposure = static_cast<f32>(projectEnv_.tonemapExposure);
+        namespace ge = fmt::godotenv;
+        d.postBloom = projectEnv_.glow ? static_cast<f32>(projectEnv_.glowIntensity) : 0.0f;
+        const double exposure = ge::exposure(projectEnv_.tonemapExposure, projectEnv_.cameraExposure);
+        if (exposure != 1.0) d.postExposure = static_cast<f32>(exposure);
+        d.postAutoExposure = projectEnv_.autoExposure ? 1 : 0;
+        d.postTonemap = ge::tonemapMode(projectEnv_.tonemapMode);
+        d.postTonemapWhite = static_cast<f32>(projectEnv_.tonemapWhite);
+        if (projectEnv_.adjust) {
+            d.postAdjustBrightness = static_cast<f32>(projectEnv_.adjBrightness);
+            d.postAdjustContrast = static_cast<f32>(projectEnv_.adjContrast);
+            d.postAdjustSaturation = static_cast<f32>(projectEnv_.adjSaturation);
+        }
+        if (projectEnv_.volumetricFog) {
+            d.volFog = 1;   // G4 R8: the light-shaft fog, where FogVolumes draw. The uniform medium stays 0: the level's fog already carries the density
+            d.volFogDensity = 0.0f;
+            report_.add("setting", kProject, "", "Environment", "volumetric_fog_enabled", Rating::Approximated,
+                        "RENDER.VOLFOG 1 and RENDER.VOLFOGDENSITY 0: sun shafts through the level's fog, and FogVolume nodes add their own density", 0);
+        }
+        report_.add("setting", kProject, "", "Environment", "tonemap", Rating::Converted,
+                    "RENDER.TONEMAP " + std::to_string(d.postTonemap) + " / TONEMAPWHITE / EXPOSURE / AUTOEXPOSURE / ADJUST* from the start scene's WorldEnvironment", 0);
     }
 
     // Comments the writer keeps verbatim: the layer names, which have no key of their own.

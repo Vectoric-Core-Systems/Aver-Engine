@@ -127,7 +127,7 @@ std::string stageShaders() {
     std::error_code ec;
     fs::remove_all(dst, ec);
     fs::create_directories(dst, ec);
-    for (const char* mod : {"rhi", "render.pbr", "render.voxi", "render.pt", "fluids", "render.denoise"}) {
+    for (const char* mod : {"rhi", "render.pbr", "render.voxi", "render.pt", "fluids", "render.denoise", "render.actorpreview"}) {
         for (const auto& e : fs::directory_iterator(root / mod / "shaders", ec)) {
             const std::string ext = e.path().extension().string();
             if (e.is_regular_file() && (ext == ".hlsl" || ext == ".hlsli"))
@@ -171,6 +171,11 @@ int main() {
                                 rhi::shaderFile("voxi.hlsl");
     const std::string ptSrc = std::string(rhi::sharedShaderPrelude()) + rhi::shaderFile("pt_pathtrace.hlsl");
     const std::string waterSrc = rhi::shaderFile("water_displace.hlsl");
+    // VoxiFroxelFog compiles voxi_froxel.hlsl with the shared prelude and no material defines.
+    const std::string froxelSrc = std::string(rhi::sharedShaderPrelude()) + rhi::shaderFile("voxi_froxel.hlsl");
+    // ActorPreview compiles its simple entry points as the shared prelude plus actor_preview.hlsl, with no defines.
+    const std::string previewSrc = std::string(rhi::sharedShaderPrelude()) + rhi::shaderFile("actor_preview.hlsl");
+    const std::string postSrc = rhi::postShaderSource();   // color.hlsli + post.hlsl, as both backends compile it
     // NRD2, the guide and the resolve are compiled with no prelude (Nrd2.cpp, NeuRaCGuide.cpp, NeuRaC.cpp).
     const std::string nrd2Src = rhi::shaderFile("nrd2.hlsl");
     const std::string guideSrc = rhi::shaderFile("voxi_neurac_guide.hlsl");
@@ -181,10 +186,54 @@ int main() {
     const std::string bindless = "AVER_RT=1;AVER_RT_BINDLESS=1;AVER_RT_TEX_CAPACITY=" + std::to_string(kRtTextureCapacity);
     const std::string singlePass = ";AVER_RD_SINGLE_PASS=1";
     auto vx = [&](const std::string& extra) { return extra.empty() ? mat : mat + ";" + extra; };
+    // R6: what VoxiRenderer::createFxPipelines compiles a scene pixel shader with (the scene shaders also carry strand hair).
+    const std::string fxBase = "AVER_MATX=1;AVER_HAIR_SHADING=1";
+    const std::string fxAll = ";AVER_MATX_UVX=1;AVER_MATX_TRI=1;AVER_MATX_RIM=1;AVER_MATX_ANISO=1;AVER_MATX_PARALLAX=1;AVER_MATX_BACKLIGHT=1;"
+                              "AVER_MATX_DETAIL=1;AVER_MATX_SURF=1;AVER_MATX_MODES=1;AVER_MATX_HASH=1;AVER_MATX_FADE=1;AVER_MATX_UNSHADED=1;AVER_MATX_LATEZ=1";
 
     std::vector<Variant> variants = {
         {"Voxi VSMain (bindless)",              voxiSrc, "VSMain",    'v', 51, vx(bindless)},
         {"Voxi VSky (bindless)",                voxiSrc, "VSky",      'v', 51, vx(bindless)},
+        // R1 (docs/plans/fabric/G4_RENDER.md): the raster scene variants a mesh with the second vertex stream draws through. The plain raster
+        // PSMainVoxi row is the default pipeline's twin, so the extra rows are read against a variant known to compile.
+        {"Voxi PSMainVoxi raster",              voxiSrc, "PSMainVoxi", 'p', 51, vx("AVER_HAIR_SHADING=1")},
+        {"Voxi PSDepthPrepass",                 voxiSrc, "PSDepthPrepass", 'p', 51, vx("")},
+        {"Voxi PSDepthPrepass mesh extra",      voxiSrc, "PSDepthPrepass", 'p', 51, vx("AVER_MESH_EXTRA=1")},
+        {"Voxi VSMain mesh extra",              voxiSrc, "VSMain",    'v', 51, vx("AVER_MESH_EXTRA=1")},
+        {"Voxi PSMainVoxi mesh extra",          voxiSrc, "PSMainVoxi", 'p', 51, vx("AVER_MESH_EXTRA=1;AVER_HAIR_SHADING=1")},
+        {"Voxi PSMainVoxi mesh extra G-buffer", voxiSrc, "PSMainVoxi", 'p', 51, vx("AVER_MESH_EXTRA=1;AVER_HAIR_SHADING=1;AVER_GBUFFER=1")},
+        {"Voxi PSMainVoxi RT mesh extra",       voxiSrc, "PSMainVoxi", 'p', 65, vx("AVER_RT=1;AVER_MESH_EXTRA=1;AVER_HAIR_SHADING=1"), true},
+        {"Voxi PSMainVoxi RT mesh extra G-buffer", voxiSrc, "PSMainVoxi", 'p', 65, vx("AVER_RT=1;AVER_GBUFFER=1;AVER_MESH_EXTRA=1;AVER_HAIR_SHADING=1"), true},
+        // R2 (docs/plans/fabric/G4_RENDER.md): the raster local-light twins of the scene pixel shader -- the path Vulkan takes, plus the mesh-extra
+        // and ray-traced-raster (RENDER.LOCALRASTER 1) combinations. Read against the default rows above.
+        {"Voxi PSMainVoxi raster local lights",            voxiSrc, "PSMainVoxi", 'p', 51, vx("AVER_HAIR_SHADING=1;AVER_LOCAL_RASTER=1")},
+        {"Voxi PSMainVoxi raster local lights G-buffer",   voxiSrc, "PSMainVoxi", 'p', 51, vx("AVER_HAIR_SHADING=1;AVER_LOCAL_RASTER=1;AVER_GBUFFER=1")},
+        {"Voxi PSMainVoxi mesh extra local lights",        voxiSrc, "PSMainVoxi", 'p', 51, vx("AVER_MESH_EXTRA=1;AVER_HAIR_SHADING=1;AVER_LOCAL_RASTER=1")},
+        {"Voxi PSMainVoxi RT local lights",                voxiSrc, "PSMainVoxi", 'p', 65, vx("AVER_RT=1;AVER_HAIR_SHADING=1;AVER_LOCAL_RASTER=1"), true},
+        {"Voxi PSMainVoxi RT local lights G-buffer",       voxiSrc, "PSMainVoxi", 'p', 65, vx("AVER_RT=1;AVER_GBUFFER=1;AVER_HAIR_SHADING=1;AVER_LOCAL_RASTER=1"), true},
+        // R6 (docs/plans/fabric/G4_RENDER.md): the material variants, one row per BaseMaterial3D feature group beside the default row above, then every
+        // feature at once, the G-buffer / ray-traced-raster / second-stream / local-light combinations, blend multiply and the vertex stage.
+        {"Voxi PSMainVoxi material fx uv",          voxiSrc, "PSMainVoxi", 'p', 51, vx(fxBase + ";AVER_MATX_UVX=1")},
+        {"Voxi PSMainVoxi material fx triplanar",   voxiSrc, "PSMainVoxi", 'p', 51, vx(fxBase + ";AVER_MATX_TRI=1")},
+        {"Voxi PSMainVoxi material fx rim",         voxiSrc, "PSMainVoxi", 'p', 51, vx(fxBase + ";AVER_MATX_RIM=1")},
+        {"Voxi PSMainVoxi material fx anisotropy",  voxiSrc, "PSMainVoxi", 'p', 51, vx(fxBase + ";AVER_MATX_ANISO=1")},
+        {"Voxi PSMainVoxi material fx parallax",    voxiSrc, "PSMainVoxi", 'p', 51, vx(fxBase + ";AVER_MATX_PARALLAX=1")},
+        {"Voxi PSMainVoxi material fx backlight",   voxiSrc, "PSMainVoxi", 'p', 51, vx(fxBase + ";AVER_MATX_BACKLIGHT=1")},
+        {"Voxi PSMainVoxi material fx detail",      voxiSrc, "PSMainVoxi", 'p', 51, vx(fxBase + ";AVER_MATX_DETAIL=1")},
+        {"Voxi PSMainVoxi material fx surface",     voxiSrc, "PSMainVoxi", 'p', 51, vx(fxBase + ";AVER_MATX_SURF=1")},
+        {"Voxi PSMainVoxi material fx modes",       voxiSrc, "PSMainVoxi", 'p', 51, vx(fxBase + ";AVER_MATX_MODES=1")},
+        {"Voxi PSMainVoxi material fx hash",        voxiSrc, "PSMainVoxi", 'p', 51, vx(fxBase + ";AVER_MATX_HASH=1;AVER_MATX_LATEZ=1")},
+        {"Voxi PSMainVoxi material fx fade",        voxiSrc, "PSMainVoxi", 'p', 51, vx(fxBase + ";AVER_MATX_FADE=1;AVER_MATX_LATEZ=1")},
+        {"Voxi PSMainVoxi material fx unshaded",    voxiSrc, "PSMainVoxi", 'p', 51, vx(fxBase + ";AVER_MATX_UNSHADED=1")},
+        {"Voxi PSMainVoxi material fx multiply",    voxiSrc, "PSMainVoxi", 'p', 51, vx(fxBase + ";AVER_MATX_MUL=1")},
+        {"Voxi PSMainVoxi material fx all",         voxiSrc, "PSMainVoxi", 'p', 51, vx(fxBase + fxAll)},
+        {"Voxi PSMainVoxi material fx all G-buffer", voxiSrc, "PSMainVoxi", 'p', 51, vx(fxBase + fxAll + ";AVER_GBUFFER=1")},
+        {"Voxi PSMainVoxi material fx all mesh extra", voxiSrc, "PSMainVoxi", 'p', 51, vx(fxBase + fxAll + ";AVER_MESH_EXTRA=1")},
+        {"Voxi PSMainVoxi material fx all local lights", voxiSrc, "PSMainVoxi", 'p', 51, vx(fxBase + fxAll + ";AVER_LOCAL_RASTER=1")},
+        {"Voxi PSMainVoxi RT material fx all",      voxiSrc, "PSMainVoxi", 'p', 65, vx("AVER_RT=1;" + fxBase + fxAll), true},
+        {"Voxi PSMainVoxi RT material fx all G-buffer", voxiSrc, "PSMainVoxi", 'p', 65, vx("AVER_RT=1;AVER_GBUFFER=1;" + fxBase + fxAll), true},
+        {"Voxi VSMainFx",                           voxiSrc, "VSMainFx", 'v', 51, vx(fxBase + ";AVER_MATX_VS=1")},
+        {"Voxi VSMainFx mesh extra",                voxiSrc, "VSMainFx", 'v', 51, vx(fxBase + ";AVER_MATX_VS=1;AVER_MESH_EXTRA=1")},
         {"Voxi PSMainVoxi RT",                  voxiSrc, "PSMainVoxi", 'p', 65, vx("AVER_RT=1"), true},
         {"Voxi PSMainVoxi blended pass",        voxiSrc, "PSMainVoxi", 'p', 65, vx(bindless + ";AVER_BLENDED_PASS=1"), true},
         {"Voxi PSMainVoxi RT G-buffer",         voxiSrc, "PSMainVoxi", 'p', 65, vx("AVER_RT=1;AVER_GBUFFER=1"), true},
@@ -197,6 +246,25 @@ int main() {
         {"Voxi CSRdGi",                         voxiSrc, "CSRdGi",     'c', 66, vx(bindless)},
         // MANY LIGHTS (docs/plans/wave4/MANY_LIGHTS.md 3.9): authored SM 6.5-clean, so the same source is the Vulkan pass.
         {"Voxi CSRdManyLights",                 voxiSrc, "CSRdManyLights", 'c', 65, vx(bindless), true},
+        // R3 (docs/plans/fabric/G4_RENDER.md): the post composite, ordinary and with the Godot tonemappers / display adjustments
+        // (AVER_POST_TONEMAP_EXT). The ordinary rows are what ships today; the EXT rows are read against them. D3D12 declares the lens
+        // table in every composite; Vulkan only what a permutation uses, so both define sets are compiled.
+        {"Post PSComposite (D3D12 defines)",             postSrc, "PSComposite", 'p', 60, "AVER_POST_DEPTHFX=1;AVER_POST_LUT=1;AVER_POST_BLOOM=1;AVER_POST_AUTOEXPOSURE=1"},
+        {"Post PSComposite tonemap ext (D3D12 defines)", postSrc, "PSComposite", 'p', 60, "AVER_POST_DEPTHFX=1;AVER_POST_LUT=1;AVER_POST_BLOOM=1;AVER_POST_AUTOEXPOSURE=1;AVER_POST_TONEMAP_EXT=1"},
+        {"Post PSComposite (Vulkan, plain)",             postSrc, "PSComposite", 'p', 60, ""},
+        {"Post PSComposite tonemap ext (Vulkan, plain)", postSrc, "PSComposite", 'p', 60, "AVER_POST_TONEMAP_EXT=1"},
+        {"Post PSComposite tonemap ext (Vulkan, LUT)",   postSrc, "PSComposite", 'p', 60, "AVER_POST_TONEMAP_EXT=1;AVER_POST_LUT=1;AVER_POST_BLOOM=1;AVER_POST_AUTOEXPOSURE=1"},
+        // R8 (docs/plans/fabric/G4_RENDER.md): the volumetric-fog compute passes, ordinary and with local fog volumes (AVER_FOG_VOLUMES, built only when a
+        // FogVolume exists). The ordinary rows are what ships today; the volume rows are read against them. VoxiFroxelFog compiles with AVER_RT 0 or 1.
+        {"Froxel CSFroxelScatter",                  froxelSrc, "CSFroxelScatter",  'c', 60, "AVER_RT=0"},
+        {"Froxel CSFroxelScatter RT",               froxelSrc, "CSFroxelScatter",  'c', 65, "AVER_RT=1", true},
+        {"Froxel CSFroxelIntegrate",                froxelSrc, "CSFroxelIntegrate", 'c', 60, "AVER_RT=0"},
+        {"Froxel CSFroxelScatter fog volumes",      froxelSrc, "CSFroxelScatter",  'c', 60, "AVER_RT=0;AVER_FOG_VOLUMES=1"},
+        {"Froxel CSFroxelScatter RT fog volumes",   froxelSrc, "CSFroxelScatter",  'c', 65, "AVER_RT=1;AVER_FOG_VOLUMES=1", true},
+        {"Froxel CSFroxelIntegrate fog volumes",    froxelSrc, "CSFroxelIntegrate", 'c', 60, "AVER_RT=0;AVER_FOG_VOLUMES=1"},
+        // R5 (docs/plans/fabric/G4_RENDER.md): the sub-viewport's pixel shader, a new entry point beside the studio preview's PreviewPS (its default twin).
+        {"Preview PreviewPS (studio)",          previewSrc, "PreviewPS",   'p', 51, ""},
+        {"Preview SceneViewPS (sub-viewport)",  previewSrc, "SceneViewPS", 'p', 51, ""},
         {"Water CSWaterDisplace",               waterSrc, "CSWaterDisplace", 'c', 60, "AVER_MAX_WAVES=" + std::to_string(kMaxWaves)},
         {"PT CSPathTrace",                      ptSrc, "CSPathTrace", 'c', 65, "AVER_PT_ENERGY_DIM=" + std::to_string(kPtEnergyDim), true},
         {"PT CSPathTrace bindless",             ptSrc, "CSPathTrace", 'c', 65,
@@ -223,6 +291,55 @@ int main() {
             ++failures;
         }
     }
+#if defined(_WIN32)
+    // R2: the D3D12 half of the same sources. The D3D12 backend compiles a shader-model 5.1 request with DXC as 6.0 when DXC exists
+    // (D3D12Device.cpp, ShaderCompiler::compile), so the AVER_LOCAL_RASTER rows and their default twins are compiled to DXIL here with the
+    // redistributable dxcompiler.dll beside the test and the same arguments (-Zpr -HV 2021 -I .). No device is created: this proves DXC accepts the
+    // source for D3D12, not that a driver will run it. Skipped quietly where that dxcompiler.dll is absent.
+    {
+        const fs::path dxcDll = fs::path(executableDir()) / "dxcompiler.dll";
+        void* dxDll = fs::exists(dxcDll) ? loadLibrary(reinterpret_cast<const char*>(dxcDll.u8string().c_str())) : nullptr;
+        auto dxCreate = dxDll ? reinterpret_cast<DxcCreateInstanceProc>(librarySymbol(dxDll, "DxcCreateInstance")) : nullptr;
+        ComPtr<IDxcCompiler3> dxCompiler;
+        ComPtr<IDxcUtils> dxUtils;
+        if (dxCreate && SUCCEEDED(dxCreate(CLSID_DxcUtils, IID_PPV_ARGS(&dxUtils))) && SUCCEEDED(dxCreate(CLSID_DxcCompiler, IID_PPV_ARGS(&dxCompiler)))) {
+            int dxFailures = 0, dxCount = 0;
+            for (const Variant& v : variants) {
+                const bool wanted = v.name.find("local lights") != std::string::npos || (v.name.find("material fx") != std::string::npos && v.stage == 'p') || v.name == "Voxi PSMainVoxi raster" || v.name == "Voxi PSMainVoxi RT" ||
+                                    v.name.find("(D3D12 defines)") != std::string::npos || v.name.rfind("Preview ", 0) == 0 || v.name.rfind("Froxel ", 0) == 0;
+                if (!wanted) continue;
+                ++dxCount;
+                const u32 sm = v.sm < 60 ? 60u : v.sm;
+                const std::wstring target = std::wstring(v.stage == 'c' ? L"cs_" : L"ps_") + std::to_wstring(sm / 10) + L"_" + std::to_wstring(sm % 10);
+                const std::wstring entry(v.entry, v.entry + std::strlen(v.entry));
+                const std::vector<std::wstring> defs = splitDefines(v.defines);
+                std::vector<LPCWSTR> args = {L"-E", entry.c_str(), L"-T", target.c_str(), L"-Zpr", L"-HV", L"2021", L"-I", L"."};
+                for (const std::wstring& d : defs) { args.push_back(L"-D"); args.push_back(d.c_str()); }
+                DxcBuffer buf{v.source.c_str(), v.source.size(), DXC_CP_UTF8};
+                rhi::DxcShaderInclude includes(dxUtils.Get());
+                ComPtr<IDxcResult> result;
+                HRESULT hr = dxCompiler->Compile(&buf, args.data(), static_cast<UINT32>(args.size()), &includes, IID_PPV_ARGS(&result));
+                if (SUCCEEDED(hr) && result) result->GetStatus(&hr);
+                ComPtr<IDxcBlob> obj;
+                if (SUCCEEDED(hr) && result) result->GetOutput(DXC_OUT_OBJECT, IID_PPV_ARGS(&obj), nullptr);
+                if (SUCCEEDED(hr) && obj && obj->GetBufferSize()) {
+                    AVER_INFO("  PASS  {} ({} bytes of DXIL, {})", v.name, obj->GetBufferSize(), "D3D12 target");
+                } else {
+                    ComPtr<IDxcBlobUtf8> errs;
+                    std::string text;
+                    if (result && SUCCEEDED(result->GetOutput(DXC_OUT_ERRORS, IID_PPV_ARGS(&errs), nullptr)) && errs && errs->GetStringLength())
+                        text.assign(errs->GetStringPointer(), errs->GetStringLength());
+                    AVER_ERROR("  FAIL  {} (DXIL): {}", v.name, text);
+                    ++dxFailures;
+                }
+            }
+            failures += dxFailures;
+            AVER_INFO("  DXIL: {} variant(s) compiled for D3D12, {} failure(s)", dxCount, dxFailures);
+        } else {
+            AVER_WARN("  SKIP  the DXIL pass: no usable dxcompiler.dll beside the test");
+        }
+    }
+#endif
     if (failures) {
         AVER_ERROR("=== VoxiSpirvCompileTest FAILED === ({} of {} variant(s))", failures, variants.size());
         return 1;

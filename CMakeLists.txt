@@ -651,6 +651,9 @@ if(AVER_BUILD_TESTS)
     add_subdirectory(tests/framework_import)   # wave9 FBX_IMPORT: the model import ABI relay
     add_subdirectory(tests/framework_ik)   # wave5 #24: the IK / rig-input ABI relay
     add_subdirectory(tests/framework_worldfx)   # wave9 VISUAL_SCRIPTING_CSHARP_SYNC: sun / fog / sky light and post layer overrides
+    add_subdirectory(tests/framework_subview)   # G4 R5: sub-viewport registry rules and the C ABI over them
+    add_subdirectory(tests/framework_rtmesh)   # G4 R7: runtime meshes, MultiMesh baking, CSG and the C ABI over them
+    add_subdirectory(tests/framework_envfx)   # G4 R8: fog volume and reflection probe maths and the C ABI over them
     add_subdirectory(tests/framework_origin)   # wave11 LARGE_WORLD: the floating-origin ABI relay and the WorldPos conversions
 
     add_subdirectory(tests/framework_morph)   # wave9 MORPH_TARGETS: the blend-shape / lip-sync ABI relay

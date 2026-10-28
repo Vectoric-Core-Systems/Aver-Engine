@@ -760,6 +760,104 @@ int main() {
         check(ctx.count(Call::Kind::Pipeline) == 3, "backdrop, mesh, then the grid's own pipeline");
     }
 
+    AVER_INFO("=== a scene view (G4 R5): a sub-viewport's picture of the world ===");
+    {
+        check(!p->sceneViewActive() && !p->sceneViewReady(), "a preview is the studio until a scene view is set, and builds nothing extra for it");
+        const usize pipelinesBefore = dev.factory.pipelines.size();
+        const usize shadersBefore = dev.factory.shaders.size();
+
+        SceneViewParams sv;
+        for (int i = 0; i < 16; ++i) sv.viewProj[i] = static_cast<f32>(i + 1);
+        sv.eye[0] = 11.0f; sv.eye[1] = 22.0f; sv.eye[2] = 33.0f;
+        sv.sunDir[0] = 0.0f; sv.sunDir[1] = 0.0f; sv.sunDir[2] = 1.0f;
+        sv.sunRadiance[0] = 3.0f; sv.sunRadiance[1] = 2.0f; sv.sunRadiance[2] = 1.0f;
+        sv.clearColor[0] = 0.1f; sv.clearColor[3] = 0.0f;
+        p->setSceneView(sv);
+        check(p->sceneViewActive() && p->sceneView().eye[1] == 22.0f, "setSceneView arms it");
+
+        PreviewDraw a, b, none;
+        a.mesh = 5;
+        a.world[12] = 7.0f;
+        a.baseColor[0] = 0.25f;
+        a.emissive[1] = 4.0f;
+        b.mesh = 6;
+        b.unlit = true;
+        p->setDrawList({a, none, b});
+
+        MockContext ctx;
+        p->prePass(ctx);
+        check(p->sceneViewReady(), "the scene-view pipeline is built on the first scene-view pass");
+        check(dev.factory.pipelines.size() == pipelinesBefore + 1 && dev.factory.shaders.size() == shadersBefore + 1,
+              "one pixel shader and one pipeline, nothing else");
+        check(dev.factory.shaders.back().entry != nullptr && std::string(dev.factory.shaders.back().entry) == "SceneViewPS" &&
+                  dev.factory.shaders.back().stage == rhi::ShaderStage::Pixel,
+              "the new pixel entry point");
+        check(dev.factory.pipelines.back().vs == dev.factory.pipelines[0].vs && dev.factory.pipelines.back().ps != dev.factory.pipelines[0].ps &&
+                  dev.factory.pipelines.back().depth.write && dev.factory.pipelines.back().sampleCount == 1,
+              "it is the mesh pipeline with only the pixel stage replaced");
+
+        check(ctx.count(Call::Kind::DrawMesh) == 2, "the two real meshes are drawn; no backdrop, grid or bounds");
+        check(ctx.count(Call::Kind::Pipeline) == 1, "through one pipeline bind");
+        check(ctx.count(Call::Kind::ClearColor) == 1 && ctx.count(Call::Kind::ClearDepth) == 1, "colour and depth are cleared (the first picture always is)");
+        const std::vector<Call> cam = ctx.ofKind(Call::Kind::ConstantBuffer);
+        check(cam.size() == 1 && cam[0].a == rhi::kFeatureFrameConstantRegister, "the camera block is published once, at b4");
+        if (cam.size() == 1) {
+            check(cam[0].payload[0] == 1.0f && cam[0].payload[15] == 16.0f, "the view-projection is the one given");
+            check(cam[0].payload[16] == 11.0f && cam[0].payload[18] == 33.0f, "and the eye");
+            check(cam[0].payload[22] == 1.0f && cam[0].payload[23] == 1.0f, "the sun direction, with unit intensity (the radiance rides elsewhere)");
+            check(cam[0].payload[20] == 0.0f && cam[0].payload[21] == 0.0f, "(x and y of the direction)");
+            check(cam[0].payload[29] == 0.0f, "display output: mode.y is 0");
+            check(cam[0].payload[32] == 3.0f && cam[0].payload[33] == 2.0f && cam[0].payload[34] == 1.0f, "the sun's radiance is in grid.xyz");
+        }
+        const std::vector<Call> obj = ctx.ofKind(Call::Kind::Constants);
+        check(obj.size() == 2 && obj[0].b == rhi::kObjectConstantDwords, "one whole per-draw block per mesh");
+        if (obj.size() == 2) {
+            check(obj[0].payload[12] == 7.0f && obj[0].payload[16] == 0.25f, "world and colour");
+            check(obj[0].payload[22] == 0.0f && obj[1].payload[22] == 1.0f, "the unlit switch rides in gMaterial.z");
+            check(obj[0].payload[29] == 4.0f && obj[1].payload[29] == 0.0f, "emission in gEmissive");
+        }
+        check(ctx.count(Call::Kind::Barrier) == 2, "two barriers: in and out");
+
+        // Clear Never keeps the previous picture; the linear flag reaches the shader.
+        sv.clearTarget = false;
+        sv.linearOutput = true;
+        p->setSceneView(sv);
+        MockContext ctx2;
+        p->prePass(ctx2);
+        check(ctx2.count(Call::Kind::ClearColor) == 0 && ctx2.count(Call::Kind::ClearDepth) == 1, "a view that does not clear its colour keeps it (depth is always fresh)");
+        const std::vector<Call> cam2 = ctx2.ofKind(Call::Kind::ConstantBuffer);
+        check(cam2.size() == 1 && cam2[0].payload[29] == 1.0f, "and a linear target says so in mode.y");
+        check(dev.factory.pipelines.size() == pipelinesBefore + 1, "no second pipeline is built");
+
+        // Disabled previews draw nothing; the studio comes back untouched.
+        p->setEnabled(false);
+        MockContext off;
+        p->prePass(off);
+        check(off.calls.empty(), "a disabled preview records nothing, scene view or not");
+        p->setEnabled(true);
+
+        p->clearSceneView();
+        MockContext studio;
+        PreviewDraw s;
+        s.mesh = 1;
+        p->setDrawList({s});
+        p->prePass(studio);
+        check(!p->sceneViewActive() && studio.count(Call::Kind::Pipeline) >= 2, "clearSceneView returns to the studio (backdrop and mesh pipelines)");
+        check(studio.count(Call::Kind::ClearColor) == 1, "with its own clear");
+    }
+
+    AVER_INFO("=== a preview made without the studio chrome (G4 R5) ===");
+    {
+        const usize pipelinesBefore = dev.factory.pipelines.size();
+        const usize shadersBefore = dev.factory.shaders.size();
+        ActorPreview* bare = ActorPreview::create(dev, 64, 32, false);
+        check(bare != nullptr && bare->ready(), "it is created and ready");
+        check(dev.factory.pipelines.size() == pipelinesBefore + 1 && dev.factory.shaders.size() == shadersBefore + 2,
+              "with the mesh pipeline and its two shaders and nothing else: no wireframe, backdrop, grid or bounds");
+        check(bare->width() == 64 && bare->height() == 32, "at the size asked");
+        delete bare;
+    }
+
     AVER_INFO("=== teardown ===");
     {
         const u32 waitedBefore = dev.factory.waited;

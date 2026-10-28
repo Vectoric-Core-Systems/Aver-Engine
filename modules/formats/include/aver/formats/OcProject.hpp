@@ -61,6 +61,27 @@ struct ProjectDesc {
                                   //                         2 = staged + half-rate GI (default)
     // RENDER.FOGOCCLUSION: fog in-scatter scaled by sky visibility, so enclosed air stops glowing.
     int fogOcclusion       = -1; // RENDER.FOGOCCLUSION     0/1 (engine default 1)
+    // RENDER.MESHEXTRA: meshes that carry the second vertex stream (vertex colour, authored tangent, UV2) draw through the pipelines that read it.
+    // 0 keeps every mesh on the pipelines meshes without the stream use (the stream is bound and ignored). Default 1; no effect on a mesh without it.
+    int meshExtra          = -1; // RENDER.MESHEXTRA        0/1 (engine default 1)
+    // RENDER.MATERIALFX: materials with BaseMaterial3D features (the .ocmat FX record: UV transforms, cull / blend / depth modes, billboard, rim, ...) draw
+    // through their own pipeline variants. 0 draws every material through the ordinary pipelines (the features are ignored). Default 1; no effect on
+    // a material without an FX record.
+    int materialFx         = -1; // RENDER.MATERIALFX       0/1 (engine default 1)
+    // RENDER.LOCALRASTER: omni/spot lights from the raster path (no ray tracing, Vulkan). 0 auto (where the ray-traced lights cannot serve),
+    // 1 on (also in raster-primary ray-traced frames), 2 off. RENDER.LOCALSHADOWS: shadow maps for them, 0/1 (default 1).
+    int localRaster        = -1; // RENDER.LOCALRASTER      0/1/2 (engine default 0)
+    int localShadows       = -1; // RENDER.LOCALSHADOWS     0/1 (engine default 1)
+    // G4 R8: RENDER.VOLFOG switches Voxi's volumetric fog (light shafts; the home of Godot FogVolumes) on or off; RENDER.VOLFOGDENSITY is its uniform
+    // medium in extinction per CENTIMETRE (engine default 0.00002). Off by default; the Fabric converter writes both for a Godot project with volumetric fog.
+    int volFog             = -1;    // RENDER.VOLFOG         0/1 (engine default 0)
+    f32 volFogDensity      = -1.0f; // RENDER.VOLFOGDENSITY  per cm, [0, 0.01]
+    // G4 R5, sub-viewports (render-to-texture views): the cost guard. RENDER.SUBVIEWPORTS = how many views may be live at once (0 turns the feature
+    // off, default 4, at most 16); RENDER.SUBVIEWRENDERS = how many are drawn per frame (default 2); RENDER.SUBVIEWPIXELS = the summed pixel cap in
+    // megapixels (default 8). A project with no view in any level pays nothing whatever these say.
+    int subViewports       = -1; // RENDER.SUBVIEWPORTS     [0,16] (engine default 4)
+    int subViewRenders     = -1; // RENDER.SUBVIEWRENDERS   [1,16] (engine default 2)
+    f32 subViewPixels      = -1.0f; // RENDER.SUBVIEWPIXELS megapixels (engine default 8)
     int ptBounces          = -1; // RENDER.PTBOUNCES        PATH tracing: bounces after the first hit, [1,8]
     int ptMode             = -1; // RENDER.PTMODE           0 = ReSTIR path tracing, 1 = reference (converging)
     int layeredBsdf        = -1; // RENDER.LAYEREDBSDF      0=Off 1=Low 2=Medium 3=High 4=Epic
@@ -134,8 +155,14 @@ struct ProjectDesc {
     f32 postExposure     = -1.0f; // RENDER.EXPOSURE      linear pre-tonemap multiplier; < 0 = unstated
     f32 postBloom        = -1.0f; // RENDER.BLOOM         bloom intensity; 0 = no bloom pass at all
     int postAutoExposure = -1;    // RENDER.AUTOEXPOSURE  0/1; when on, EXPOSURE is compensation on it
-    // RENDER.TONEMAP: curve selector (Narkowicz/Hill=0, Narkowicz+ACES=1, acesLuma=2).
-    int postTonemap      = -1;    // RENDER.TONEMAP  0/1/2; -1 keeps PostSettings' own default (0)
+    // RENDER.TONEMAP: curve selector (Narkowicz/Hill=0, Narkowicz+ACES=1, acesLuma=2; 3..7 Godot's linear, Reinhard,
+    // filmic, ACES, AgX: rhi/Tonemap.hpp).
+    int postTonemap      = -1;    // RENDER.TONEMAP  0..7; -1 keeps PostSettings' own default
+    // Godot-style tonemap white point and display-space adjustments (all identity when unstated; < 0 = unstated).
+    f32 postTonemapWhite    = -1.0f;   // RENDER.TONEMAPWHITE
+    f32 postAdjustBrightness = -1.0f;  // RENDER.ADJUSTBRIGHTNESS
+    f32 postAdjustContrast   = -1.0f;  // RENDER.ADJUSTCONTRAST
+    f32 postAdjustSaturation = -1.0f;  // RENDER.ADJUSTSATURATION
 
     // True when the manifest stated at least one RENDER.* key.
     // Bug N9: giMode/denoiser were parsed but not applied because this check did not include them.
@@ -145,13 +172,16 @@ struct ProjectDesc {
                rtShadowRays >= 0 || rtPixelsPerRayTile >= 0 || rtShadowDenoise >= 0 ||
                rtRenderMode >= 0 || ptBounces >= 0 || ptMode >= 0 || layeredBsdf >= 0 ||
                giCones >= 0 || giMode >= 0 || denoiser >= 0 || restirVisibility >= 0 ||
-               restirHistory >= 0 || rdStages >= 0 || fogOcclusion >= 0 ||
+               restirHistory >= 0 || rdStages >= 0 || fogOcclusion >= 0 || meshExtra >= 0 || materialFx >= 0 || localRaster >= 0 || localShadows >= 0 ||
+               volFog >= 0 || volFogDensity >= 0.0f ||
+               subViewports >= 0 || subViewRenders >= 0 || subViewPixels >= 0.0f ||
                refractionMode >= 0 || refractionStrength >= 0.0f ||
                refractionEdgeFade >= 0.0f || lodSelect >= 0 || lodThresholdPx >= 0.0f ||
                occlusionCull >= 0 || depthPrepass >= 0 ||
                msaa >= 0 || meshShaders >= 0 || giUpdateInterval >= 0 || hasGiVolume ||
                postExposure >= 0.0f || postBloom >= 0.0f ||
                postAutoExposure >= 0 || postTonemap >= 0 ||
+               postTonemapWhite >= 0.0f || postAdjustBrightness >= 0.0f || postAdjustContrast >= 0.0f || postAdjustSaturation >= 0.0f ||
                !backend.empty() || frameBudgetMs > 0.0f || averSr >= 0 || taa >= 0 || neuraa >= 0 || manyLights >= 0 || particleGpu >= 0;
     }
 

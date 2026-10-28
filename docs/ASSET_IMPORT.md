@@ -439,7 +439,9 @@ before ufbx sees it, because ufbx also reads OBJ and `ObjImport` owns that.
   packs the pair (see below) instead of dropping the metalness the way OBJ does.
 - **Records.** Every FBX import leaves `<stem>.ocimport` beside its outputs; the Content Browser's
   **Reimport** re-runs it with the stored options.
-- **Not carried, and reported:** lights, vertex colours, a second UV set, bump/height maps, layered or
+- **Vertex colour, authored tangent and a second UV set** are carried into the `.ocmesh` VXEX chunk (glTF `COLOR_0` / `TANGENT` /
+  `TEXCOORD_1`, FBX vertex colour / tangent+bitangent / the second UV set, OBJ `v x y z r g b`); see `docs/plans/fabric/G4_RENDER.md` R1.
+- **Not carried, and reported:** lights, bump/height maps, a third UV set, layered or
   procedural textures, UV transforms, dual-quaternion skinning, blend shapes (until the morph-target feature
   lands), in-between blend shapes, animated ancestors above a skeleton root, geometry caches, NURBS.
 

@@ -25,6 +25,7 @@
 #include "aver/core/Log.hpp"
 // GPU-timing tree formatter
 #include "aver/rhi/GpuTimingFormat.hpp"
+#include "aver/rhi/Tonemap.hpp"
 
 // OK to define twice: separate binaries don't collide on symbols (unlike Image.cpp's STB_IMAGE_IMPLEMENTATION).
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -1253,6 +1254,10 @@ void GameApp::openProject(Engine& e) {
     // Read frame budget from manifest (<=0 disables it)
     frameBudget_.budgetMs = project_.frameBudgetMs;
 #endif
+#if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
+    // G4 R5: how many sub-viewports may exist and how many are drawn per frame (the defaults when the manifest is silent).
+    game::SubViewportHost::configure(game::subViewportSettingsOf(project_.subViewports, project_.subViewRenders, project_.subViewPixels));
+#endif
     // Load order is critical: index -> meshes -> levels
     content_.adopt(project_);
     // The project's physical-surface table, before any level builds a shape: a material slot's PHYSSURFACE, a landscape layer or a
@@ -1761,11 +1766,9 @@ void GameApp::applyProjectPostSettings() {
     if (project_.postExposure >= 0.0f)  { post_.exposure       = project_.postExposure;          stated = true; }
     if (project_.postBloom    >= 0.0f)  { post_.bloomIntensity = project_.postBloom;             stated = true; }
     if (project_.postAutoExposure >= 0) { post_.autoExposure   = project_.postAutoExposure != 0; stated = true; }
-    if (project_.postTonemap >= 0) {
-        // Clamp mode [0,2] (matches console and frame reporting)
-        post_.tonemap = static_cast<u32>(project_.postTonemap > 2 ? 2 : project_.postTonemap);
+    if (rhi::applyProjectTonemapKeys(post_, project_.postTonemap, project_.postTonemapWhite, project_.postAdjustBrightness,
+                                     project_.postAdjustContrast, project_.postAdjustSaturation, true))
         stated = true;
-    }
     if (!stated) return;
 
     AVER_INFO("[Project] applied post settings: exposure={:.3f} bloom={:.3f} autoExposure={} tonemap={}",
@@ -1882,6 +1885,7 @@ void GameApp::pushFrame(Engine& e) {
 #else
     const rhi::SkyAtmosphere& skyNow = sky_;
 #endif
+    skyForViews_ = skyNow;   // the sun and fill the sub-viewports shade with (G4 R5)
 
 #if AVER_MODULE_VOXI
     if (voxiAttached_) {
@@ -1997,6 +2001,18 @@ void GameApp::onInit(Engine& e) {
     attachGameUi(e);
     // loadGameUiFont only needs a device; grouped with UI-ABI setup.
     loadGameUiFont(e);
+#endif
+#if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
+    // Sub-viewports (G4 R5): no GPU object exists until a view is asked for. The UI is told when a view's texture is rebuilt, so it forgets its cached binding.
+    if (rhi::IDevice* svDev = e.device()) {
+#if AVER_WITH_UI_ABI
+        subViews_.attach(*svDev, [](rhi::TextureHandle t, void* self) {
+            if (auto* ui = static_cast<GameApp*>(self)->gameUi_) ui->dropBinding(t);
+        }, this);
+#else
+        subViews_.attach(*svDev);
+#endif
+    }
 #endif
     attachParticles(e);
     if (cfg_.pcgVolumeTest) attachPcgTest(e);
@@ -2275,6 +2291,18 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     }
     // Font lent per frame (mirrors SandboxApp). loadGameUiFont is non-fatal.
     aver_ui_set_font(&uiFont_);
+#if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
+    // Sub-viewports shown over the window (SubViewportContainer, split screen): first in the frame's list, so the HUD draws over them.
+    {
+        game::SubViewportHost::OnScreenView sv[16];
+        const u32 svCount = subViews_.onScreen(sv, 16);
+        float uiRect[4] = {0, 0, 0, 0};
+        if (svCount) aver_ui_viewport(uiRect);   // a view's rectangle is in the UI frame's own space
+        for (u32 i = 0; i < svCount; ++i)
+            aver_ui_textured_rect(uiRect[0] + sv[i].x, uiRect[1] + sv[i].y, sv[i].w, sv[i].h, render::ui::UiRenderer::textureId(sv[i].texture),
+                                  0.0f, 0.0f, 1.0f, 1.0f, 0xFFFFFFFFu);
+    }
+#endif
     // Pointer: no offset needed. input_.mouseX()/mouseY() are already window-relative. Captured session has no pause menu.
     {
         u32 buttons = 0;
@@ -2451,6 +2479,32 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     // beginFrame takes ONE snapshot of PerFrameCB. setCamera/setLight/setSkyAtmosphere touch CPU shadow copy.
     // Calling from onRender would render frame N with frame N-1 constants and culling divergence.
     pushFrame(e);
+
+#if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
+    // Runtime meshes (G4 R7): meshes a script built or a MultiMesh baked since last frame are uploaded before the draw walk. With none in the registry this does nothing.
+    if (rhi::IDevice* rtDev = e.device()) content_.syncRuntimeMeshes(*rtDev);
+    // Sub-viewports (G4 R5): the views' draw lists and cameras are set here because their features draw in the device's beginFrame, which follows. With no
+    // view in the registry this returns at once.
+    {
+        game::SubViewportHost::Inputs svIn;
+        svIn.frame = e.time().frame;
+        svIn.content = &content_;
+#if AVER_MODULE_PBR && AVER_MODULE_VOXI
+        if (voxiAttached_) svIn.materials = &voxiRenderer_.materials();
+#endif
+        svIn.skinning = skinnedScene_.get();
+        DrawWorldOptions svWalk;
+#if AVER_MODULE_RENDER_SOFTBODY
+        svWalk.softBodies = softBodyScene_.get();
+#if AVER_MODULE_RENDER_HAIR
+        svWalk.hair = hairScene_.get();
+#endif
+#endif
+        svIn.walk = &svWalk;
+        svIn.sky = &skyForViews_;
+        subViews_.update(svIn);
+    }
+#endif
 }
 
 #if AVER_WITH_UI_ABI
@@ -2476,6 +2530,7 @@ void GameApp::onRender(Engine& e) {
         // content index, like every other asset.
         // [wave3/level-instances] CLight entities -> Voxi's lamp list (no reference path tracer in the game).
         if (voxiAttached_) sceneLightFeed_.update(scene::World::instance(), voxiRenderer_, nullptr, project_.contentDir());
+        if (voxiAttached_) envFxFeed_.update(voxiRenderer_, eye_);   // G4 R8: local fog volumes
         if (voxiAttached_)
             sceneDecalFeed_.update(scene::World::instance(), voxiRenderer_,
                                    [this](u64 id, voxi::DecalImageKind, ImageData& out) {
@@ -2501,6 +2556,8 @@ void GameApp::onRender(Engine& e) {
         opts.ownerHideRoot = firstPersonPawn_;
 
         opts.ownerHideAll = playView_.ownerHideAll;   // the collision fade hides every mesh under the target, not only the flagged ones
+        opts.cameraCullInv = playView_.cullInv;       // G4 R4: Camera3D.cull_mask; 0 (every layer) unless a camera node asks
+        opts.viewerPos = eye_; opts.haveViewerPos = true;   // visibility ranges
         // Possessed pawn's tree is movable from first frame; everything else by PlayMobility.
         {
             scene::Entity movableRoot = scene::kInvalidEntity;
@@ -2568,6 +2625,10 @@ void GameApp::onShutdown(Engine& e) {
     // Exact reverse registration order: device holds bare pointers to render features.
     // voxiRenderer_ is a MEMBER by value, so it outlives the device if unregistered first.
     rhi::IDevice* dev = e.device();
+#if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
+    // The views' features were registered after everything below, and their textures are named by the UI and by materials: out first.
+    subViews_.detach();
+#endif
 #if AVER_WITH_SYNAPSE_AI && AVER_MODULE_SYNAPSE_GPU
     if (crowdGpuAttached_) { game::removeCrowdGpu(dev, crowdGpu_); crowdGpuAttached_ = false; }
 #endif

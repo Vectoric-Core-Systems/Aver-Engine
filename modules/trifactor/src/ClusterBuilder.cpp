@@ -1617,6 +1617,20 @@ bool simplifyMesh(fmt::OcMeshData& mesh, f32 ratio, std::string* why) {
         uv.resize(newVerts * 2);
         meshopt_remapVertexBuffer(uv.data(), mesh.uvs.data(), vcount, sizeof(f32) * 2, remap.data());
     }
+    // The R1 extra streams (colour, tangent, UV1) follow the same compaction.
+    std::vector<f32> xcol, xtan, xuv1;
+    if (mesh.hasColor()) {
+        xcol.resize(newVerts * 4);
+        meshopt_remapVertexBuffer(xcol.data(), mesh.colors.data(), vcount, sizeof(f32) * 4, remap.data());
+    }
+    if (mesh.hasTangent()) {
+        xtan.resize(newVerts * 4);
+        meshopt_remapVertexBuffer(xtan.data(), mesh.tangents.data(), vcount, sizeof(f32) * 4, remap.data());
+    }
+    if (mesh.hasUv1()) {
+        xuv1.resize(newVerts * 2);
+        meshopt_remapVertexBuffer(xuv1.data(), mesh.uvs1.data(), vcount, sizeof(f32) * 2, remap.data());
+    }
 
     // THE SKIN STREAMS: forgetting them made this unusable on any rigged asset -- positions/normals/
     // uvs remapped to newVerts while joints/weights kept the OLD count, so hasSkin() (both must be
@@ -1644,6 +1658,9 @@ bool simplifyMesh(fmt::OcMeshData& mesh, f32 ratio, std::string* why) {
     mesh.positions = std::move(pos);
     mesh.normals   = std::move(nrm);
     mesh.uvs       = std::move(uv);
+    mesh.colors    = std::move(xcol);
+    mesh.tangents  = std::move(xtan);
+    mesh.uvs1      = std::move(xuv1);
     // Both, together, or neither: hasSkin() is an all-or-nothing predicate, and a mesh carrying
     // joints without matching weights is exactly the invalid state this bug produced.
     mesh.joints    = std::move(jnt);

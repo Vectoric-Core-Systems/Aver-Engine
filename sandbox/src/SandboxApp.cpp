@@ -597,6 +597,7 @@ editor::shutdownAnimEditors();
     neuraa_.reset();   // holds the device's factory: must go while the device lives (it crashed in ~SandboxApp)
 #endif
     game::uiTextShutdown();   // unbind the atlas from gameUi_ and close the fonts before the renderer and device go
+    subViews_.detach();       // the sub-viewport features and their targets: before the UI renderer that may hold a binding to one, and the device
     // Same order: clear device pointer before destroying the object.
     e.device()->setFrameInterpolation(false);
     e.device()->setFrameInterpolator(nullptr);

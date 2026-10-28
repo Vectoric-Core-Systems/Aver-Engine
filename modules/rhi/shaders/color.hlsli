@@ -146,6 +146,76 @@ float3 averTonemap(float3 x, float mode) {
     return mode > 0.5 ? acesFittedTonemap(x) : acesTonemap(x);
 }
 
+#ifdef AVER_POST_TONEMAP_EXT
+// ---- GODOT'S TONEMAPPERS AND DISPLAY ADJUSTMENTS (docs/plans/fabric/G4_RENDER.md R3) ----------------------------------
+// Compiled only into the post composite's AVER_POST_TONEMAP_EXT variant. CPU twin and reference values: rhi/Tonemap.hpp.
+// mode 3 linear, 4 Reinhard, 5 filmic, 6 ACES, 7 AgX (Godot's tonemap_mode + 3).
+
+float3 averTonemapReinhardGodot(float3 c, float white) { return c * (1.0 + c / (white * white)) / (1.0 + c); }
+
+float3 averFilmicCurveGodot(float3 x) {
+    const float A = 0.22 * 4.0, B = 0.30 * 2.0, C = 0.10, D = 0.20, E = 0.01, F = 0.30;
+    return ((x * (A * x + C * B) + D * E) / (x * (A * x + B) + D * F)) - E / F;
+}
+float3 averTonemapFilmicGodot(float3 c, float white) { return averFilmicCurveGodot(c) / averFilmicCurveGodot(float3(white, white, white)).x; }
+
+float3 averTonemapAcesGodot(float3 c, float white) {
+    const float bias = 1.8;
+    const float A = 0.0245786, B = 0.000090537, C = 0.983729, D = 0.4329510, E = 0.238081;
+    float3 x = mul(kAcesInput, c) * bias;
+    float3 t = (x * (x + A) - B) / (x * (C * x + D) + E);
+    float w = white * bias;
+    float wt = (w * (w + A) - B) / (w * (C * w + D) + E);
+    return mul(kAcesOutput, t) / wt;
+}
+
+static const float3x3 kAgxToRec2020 = float3x3(
+    0.6274039, 0.3292830, 0.0433131,
+    0.0690973, 0.9195405, 0.0113622,
+    0.0163914, 0.0880133, 0.8955953);
+static const float3x3 kAgxInset = float3x3(
+    0.856627153315983, 0.0951212405381588, 0.0482516061458583,
+    0.137318972929847, 0.761241990602591, 0.101439036467562,
+    0.11189821299995, 0.0767994186031903, 0.811302368396859);
+static const float3x3 kAgxOutset = float3x3(
+     1.1271005818144368, -0.11060664309660323, -0.016493938717834573,
+    -0.1413297634984383,  1.157823702216272,   -0.016493938717834257,
+    -0.14132976349843826, -0.11060664309660294, 1.2519364065950405);
+static const float3x3 kAgxFromRec2020 = float3x3(
+     1.6604910, -0.5876411, -0.0728499,
+    -0.1245505,  1.1328999, -0.0083494,
+    -0.0181508, -0.1005789,  1.1187297);
+
+float3 averTonemapAgxGodot(float3 c) {
+    const float minEv = -12.4739311883324, maxEv = 4.02606881166759;
+    float3 v = mul(kAgxInset, mul(kAgxToRec2020, c));
+    v = clamp(log2(max(v, 2e-10)), minEv, maxEv);
+    v = (v - minEv) / (maxEv - minEv);
+    float3 v2 = v * v, v4 = v2 * v2;
+    v = 0.021 * v + 4.0111 * v2 - 25.682 * v2 * v + 70.359 * v4 - 74.778 * v4 * v + 27.069 * v4 * v2;
+    v = pow(max(v, 0.0), 2.4);
+    return mul(kAgxFromRec2020, mul(kAgxOutset, v));
+}
+
+float3 averTonemapGodot(float3 c, float mode, float white) {
+    c = max(c, 0.0);
+    white = max(white, 1e-3);
+    if (mode > 6.5) return saturate(averTonemapAgxGodot(c));
+    if (mode > 5.5) return saturate(averTonemapAcesGodot(c, white));
+    if (mode > 4.5) return saturate(averTonemapFilmicGodot(c, white));
+    if (mode > 3.5) return saturate(averTonemapReinhardGodot(c, white));
+    return saturate(c);
+}
+
+// Godot's apply_bcs on the display colour: x brightness, y contrast about 0.5, z saturation about the channel mean.
+float3 averDisplayAdjust(float3 c, float3 bcs) {
+    c *= bcs.x;
+    c = 0.5 + (c - 0.5) * bcs.y;
+    float m = (c.r + c.g + c.b) * 0.33333;
+    return saturate(m + (c - m) * bcs.z);
+}
+#endif
+
 // Encodes linear colour to gamma 2.2.
 float3 toGamma(float3 c){ return pow(max(c,0.0), 1.0/2.2); }
 // Decodes gamma-2.2 colour to linear.

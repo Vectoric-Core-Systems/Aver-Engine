@@ -436,8 +436,26 @@ void VoxiRenderer::shutdown() {
                                         rdReflPtCsPso_, rdReflSplitPtCsPso_,
                                         rdReflSplitCsPso_, rdReflFilterCsPso_,
                                         rayDrivenSplitNrd2Pso_, rdHalfFillCsPso_,
-                                        airVisPso_};
+                                        airVisPso_,
+                                        extraScene_[0].lit, extraScene_[0].litGbuf, extraScene_[0].prepassed, extraScene_[0].prepassedGbuf,
+                                        extraScene_[1].lit, extraScene_[1].litGbuf, extraScene_[1].prepassed, extraScene_[1].prepassedGbuf,
+                                        extraDepthPso_,
+                                        extraSceneLocal_[0].lit, extraSceneLocal_[0].litGbuf, extraSceneLocal_[0].prepassed, extraSceneLocal_[0].prepassedGbuf,
+                                        extraSceneLocal_[1].lit, extraSceneLocal_[1].litGbuf, extraSceneLocal_[1].prepassed, extraSceneLocal_[1].prepassedGbuf,
+                                        localScene_[0].lit, localScene_[0].litGbuf, localScene_[0].prepassed, localScene_[0].prepassedGbuf,
+                                        localScene_[1].lit, localScene_[1].litGbuf, localScene_[1].prepassed, localScene_[1].prepassedGbuf};
     for (rhi::PipelineHandle p : psos) if (p) res_->destroyPipeline(p);
+    extraScene_[0] = ExtraScene{};
+    extraScene_[1] = ExtraScene{};
+    extraSceneLocal_[0] = extraSceneLocal_[1] = ExtraScene{};
+    localScene_[0] = localScene_[1] = LocalScene{};
+    localTried_[0] = localTried_[1] = extraLocalTried_[0] = extraLocalTried_[1] = false;
+    destroyFxScenes();   // R6
+    localRasterLive_ = false;
+    localAtlasBound_ = false;
+    if (localShadowTex_) { res_->destroyTexture(localShadowTex_); localShadowTex_ = 0; }
+    extraDepthPso_ = 0;
+    extraTried_[0] = extraTried_[1] = false;
     shadowPso_ = shadowInstancedPso_ = giShadowPso_ = giShadowInstancedPso_ = 0;
     voxelPso_ = mipPso_ = clearPso_ = resolvePso_ = debugPso_ = airVisPso_ = 0;
     scenePso_ = sceneMsPso_ = sceneRtPso_ = sceneMsRtPso_ = 0;
@@ -1252,6 +1270,7 @@ void VoxiRenderer::submit(rhi::MeshHandle mesh, const f32 world[16], const f32 b
     d.movable = movable;
     d.noRay = submitNoRay_;
     d.noShadow = submitNoShadow_;
+    d.layersInv = submitLayersInv_;
 
     // World-space bounding sphere for per-cascade cull.
     // Only local-space bounds are cached; world-space transforms per entity (differs per instance).
@@ -1320,6 +1339,12 @@ void VoxiRenderer::submitDraw(rhi::MeshHandle mesh, const f32 world[16], const f
 void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
     rdVisWrittenThisFrame_ = false;
     froxelRecorded_ = false;
+    // G4 R4: an orthographic view (parallel rays) is drawn by the rasteriser; see rayDrivenActive().
+    orthoView_ = viewIsOrthographicNow();
+    if (orthoView_ && !orthoLogged_) {
+        orthoLogged_ = true;
+        AVER_INFO("[Voxi] orthographic camera: the rasteriser draws the primary view (no ray-driven pass); sky, fog and screen-space terms still assume a perspective view ray");
+    }
     if (!giReady_) return;
     // Material graph appeared since pipelines were built.
     if (scenePipelineGraphRev_ != pbr::materialGraphs().revision()) {
@@ -1337,6 +1362,23 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
         if (!createScenePipelines(dev_->sampleCount(), dev_->backbufferFormat(), dev_->depthFormat()))
             AVER_ERROR("[Voxi] scene pipelines could not be rebuilt from the changed shader files -- "
                        "the previous pipelines are still bound, so the last good shader keeps drawing");
+    }
+    // R1: the first frame after a mesh with the second vertex stream was drawn, compile the scene variants that read it (once per set).
+    if (extraWanted_ && settings_.meshExtraStreams && scenePso_ && !extraTried_[rtActive_ ? 1 : 0])
+        createExtraScenePipelines(rtActive_);
+    // R6: compile the material variants draws asked for since the last frame (nothing here runs for a scene without fx materials).
+    if (!fxWanted_.empty()) {
+        std::vector<u64> wanted;
+        wanted.swap(fxWanted_);
+        for (const u64 mk : wanted) {
+            const auto it = fxScenes_.find(mk);
+            if (it == fxScenes_.end() || !it->second.tried) createFxPipelines(mk);
+        }
+    }
+    // R2: compile the raster local-light twins (and the second-stream twins that carry them) the first frame the path has a light to draw.
+    if (localRasterWanted() && scenePso_) {
+        if (!localTried_[rtActive_ ? 1 : 0]) createLocalRasterPipelines(rtActive_);
+        if (extraWanted_ && settings_.meshExtraStreams && !extraLocalTried_[rtActive_ ? 1 : 0]) createExtraScenePipelines(rtActive_, true);
     }
     ++rtFrameIndex_;
     // Sample frame time at the TOP of the feature's frame.
@@ -1433,6 +1475,8 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
                           "acceleration structure; shadow rays walk transmittance", rtTlasTranslucent_);
         }
     }
+    // R2: decided before the ray-traced list is built, because a live raster path replaces that list. Needs its twin; without it nothing changes.
+    localRasterLive_ = localRasterWanted() && localScene_[rtActive_ ? 1 : 0].lit != 0;
     buildLocalLights();
     buildDecals();
     // Radiance cache: create/destroy, record clear dispatch, rebind t22/u20/u21 BEFORE shadowPass.
@@ -1443,6 +1487,7 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
                                      : 0.0f;
     beginShadowHistory(ctx);
     shadowPass(ctx);
+    localShadowPass(ctx);
     if (giEnabled() && giBuild_.active) {
         // A STAGED REBUILD in progress (giBuildStep): one more slice this frame, gate untouched.
         giBuildStep(ctx);
@@ -3191,7 +3236,8 @@ u32 VoxiRenderer::fitCascades() {
     if (!(camFar > camNear + 1e-3f)) return 0;
 
     const f32 zNear = camNear;
-    const f32 reach = camNear * kShadowRangeFromNear;
+    // An orthographic view has no "far is thousands of times near" geometry to scale from: 300 m of depth, or the far plane if nearer (G4 R4).
+    const f32 reach = isOrthographicViewProj(curViewProj_) ? std::fmin(camFar, 30000.0f) : camNear * kShadowRangeFromNear;
     const f32 zFar  = camFar < reach ? camFar : reach;
     if (!(zFar > zNear)) return 0;
 
@@ -4785,7 +4831,8 @@ void VoxiRenderer::buildLocalLights() {
     if (!res_ || !bindings_) return;
 
     f32 vp[16], eye[3] = {};
-    const bool wanted = settings_.localLights && rtActive_ && dev_ &&
+    // R2: a live raster path replaces the ray-traced list (only reachable with the RENDER.LOCALRASTER 1 opt-in while ray tracing is active).
+    const bool wanted = settings_.localLights && rtActive_ && !localRasterLive_ && dev_ &&
                         dev_->caps().computeInScenePass && dev_->camera(vp, nullptr, eye);
     // MANY LIGHTS runs in the staged passes, which need compute inside the scene pass (D3D12 today; MANY_LIGHTS.md 3.9).
     if (settings_.manyLights != 0u && rtActive_ && dev_ && !dev_->caps().computeInScenePass && !rdManyLightsApiLogged_) {
@@ -5726,6 +5773,15 @@ void VoxiRenderer::filterMips(rhi::IRenderContext& ctx) {
 // Hands the backend Voxi's per-frame constant block.
 bool VoxiRenderer::sceneConstants(const void** data, u32* bytes) const {
     if (!giReady_) return false;
+    if (localRasterLive_) {
+        // R2: the engine block followed by rl::Block (the tail of cbuffer VoxiFrame in the AVER_LOCAL_RASTER variants). The tail is written once a
+        // frame by localShadowPass; the engine block is refreshed here because it keeps changing while the frame is submitted.
+        if (localCbBlob_.size() == sizeof(cb_) + sizeof(rl::Block)) {
+            std::memcpy(localCbBlob_.data(), &cb_, sizeof(cb_));
+            *data = localCbBlob_.data(); *bytes = static_cast<u32>(localCbBlob_.size());
+            return true;
+        }
+    }
     *data = &cb_; *bytes = sizeof(cb_);
     return true;
 }
@@ -7969,6 +8025,13 @@ rhi::PipelineHandle VoxiRenderer::scenePipeline(bool meshShaders, bool depthPrep
         if (rtActive_) return meshShaders && sceneMsRtBlendedPso_ ? sceneMsRtBlendedPso_ : sceneRtBlendedPso_;
         return meshShaders && sceneMsBlendedPso_ ? sceneMsBlendedPso_ : sceneBlendedPso_;
     }
+    // R2: while the raster local lights are live the plain and prepassed raster twins are the AVER_LOCAL_RASTER ones (same vertex shader, so a
+    // prepassed draw still matches depth). Mesh-shader draws keep the ordinary pipeline and are not lit by these lights.
+    if (localRasterLive_ && !meshShaders) {
+        const LocalScene& ls = localScene_[rtActive_ ? 1 : 0];
+        if (depthPrepassed && ls.prepassed) return pickGbuf(ls.prepassed, ls.prepassedGbuf);
+        if (!depthPrepassed && ls.lit) return pickGbuf(ls.lit, ls.litGbuf);
+    }
     // LessEqual/no-write twin for prepassed draws. Mesh shaders never take this: backends guarantee this is false.
     if (depthPrepassed && !meshShaders) {
         if (rtActive_ && sceneRtPsoPrepassed_) return pickGbuf(sceneRtPsoPrepassed_, sceneRtPsoPrepassedGbuf_);
@@ -7985,6 +8048,26 @@ rhi::PipelineHandle VoxiRenderer::scenePipeline(bool meshShaders, bool depthPrep
 rhi::PipelineHandle VoxiRenderer::depthPrepassPipeline() const {
     const rhi::PipelineHandle twin = rtActive_ ? sceneRtPsoPrepassed_ : scenePsoPrepassed_;
     return twin ? depthPrepassPso_ : 0;
+}
+
+// R1: the lit pipeline for a mesh with the second vertex stream (see the declaration). 0 means "draw it as any mesh".
+rhi::PipelineHandle VoxiRenderer::scenePipelineExtra(bool depthPrepassed) const {
+    if (!settings_.meshExtraStreams) return 0;
+    extraWanted_ = true;
+    // R2: with the raster local lights live, the twin that also carries them (built the frame after a mesh with the stream was first drawn).
+    const bool lit = localRasterLive_ && extraSceneLocal_[rtActive_ ? 1 : 0].lit != 0;
+    const ExtraScene& e = lit ? extraSceneLocal_[rtActive_ ? 1 : 0] : extraScene_[rtActive_ ? 1 : 0];
+    // A prepassed colour draw is only valid over depth written through the same vertex shader (depthPrepassPipelineExtra).
+    if (depthPrepassed) return (e.prepassed && extraDepthPso_) ? pickGbuf(e.prepassed, e.prepassedGbuf) : 0;
+    return e.lit ? pickGbuf(e.lit, e.litGbuf) : 0;
+}
+
+// The device asks this only for a mesh with the second stream; non-zero exactly when scenePipelineExtra(true) is.
+rhi::PipelineHandle VoxiRenderer::depthPrepassPipelineExtra() const {
+    if (!settings_.meshExtraStreams) return 0;
+    const bool lit = localRasterLive_ && extraSceneLocal_[rtActive_ ? 1 : 0].lit != 0;
+    const ExtraScene& e = lit ? extraSceneLocal_[rtActive_ ? 1 : 0] : extraScene_[rtActive_ ? 1 : 0];
+    return (e.prepassed && extraDepthPso_) ? extraDepthPso_ : 0;
 }
 
 // Creates the cascaded shadow atlas.
@@ -8518,8 +8601,26 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
                                         rdGiPtCsPso_, rdGiPtCbCsPso_, rdGiTracePtCsPso_, rdGiTracePtCbCsPso_, rdGiPtRcCsPso_, rdGiTracePtRcCsPso_, rdGiPtRcCbCsPso_, rdGiTracePtRcCbCsPso_, rdPtRefCsPso_, rdReflPtRcCsPso_, rdReflSplitPtRcCsPso_,
                                         rdReflPtCsPso_, rdReflSplitPtCsPso_,
                                          rdReflSplitCsPso_, rdReflFilterCsPso_,
-                                         rayDrivenSplitNrd2Pso_, rdHalfFillCsPso_};
+                                         rayDrivenSplitNrd2Pso_, rdHalfFillCsPso_,
+                                         // R1's twins bake the same formats and shader files; rebuilt on the next prePass that wants them.
+                                         extraScene_[0].lit, extraScene_[0].litGbuf, extraScene_[0].prepassed, extraScene_[0].prepassedGbuf,
+                                         extraScene_[1].lit, extraScene_[1].litGbuf, extraScene_[1].prepassed, extraScene_[1].prepassedGbuf,
+                                         extraDepthPso_,
+                                         // R2's twins likewise.
+                                         extraSceneLocal_[0].lit, extraSceneLocal_[0].litGbuf, extraSceneLocal_[0].prepassed, extraSceneLocal_[0].prepassedGbuf,
+                                         extraSceneLocal_[1].lit, extraSceneLocal_[1].litGbuf, extraSceneLocal_[1].prepassed, extraSceneLocal_[1].prepassedGbuf,
+                                         localScene_[0].lit, localScene_[0].litGbuf, localScene_[0].prepassed, localScene_[0].prepassedGbuf,
+                                         localScene_[1].lit, localScene_[1].litGbuf, localScene_[1].prepassed, localScene_[1].prepassedGbuf};
     for (rhi::PipelineHandle p : stale) if (p) res_->destroyPipeline(p);
+    extraScene_[0] = ExtraScene{};
+    extraScene_[1] = ExtraScene{};
+    extraSceneLocal_[0] = extraSceneLocal_[1] = ExtraScene{};
+    localScene_[0] = localScene_[1] = LocalScene{};
+    localTried_[0] = localTried_[1] = extraLocalTried_[0] = extraLocalTried_[1] = false;
+    destroyFxScenes();   // R6: material variants bake the same formats and shader files
+    localRasterLive_ = false;
+    extraDepthPso_ = 0;
+    extraTried_[0] = extraTried_[1] = false;
     debugPso_ = scenePso_ = sceneMsPso_ = sceneRtPso_ = sceneMsRtPso_ = 0;
     sceneBlendedPso_ = sceneMsBlendedPso_ = sceneRtBlendedPso_ = sceneMsRtBlendedPso_ = 0;
     depthPrepassPso_ = scenePsoPrepassed_ = sceneRtPsoPrepassed_ = 0;
@@ -9117,6 +9218,479 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
 
     // Only the two mandatory ones; scenePipeline() falls back for optional variants.
     return debugPso_ && scenePso_;
+}
+
+// R1. The raster scene variants a mesh with the second vertex stream draws through: the same VSMain/PSMainVoxi with AVER_MESH_EXTRA=1 and a
+// vertex layout that reads input slot 1 (rhi::MeshVertexExtra). Only the raster entry points: nothing here touches PSRayDriven, the
+// AVER_RD_SINGLE_PASS variants or the shadow-ray code, and the mesh-shader and blended variants have no twin (those draws are bound with the
+// stream and ignore it). A failure leaves the handles 0 and the meshes draw through the ordinary pipelines.
+bool VoxiRenderer::createExtraScenePipelines(bool rt, bool local) {
+    (local ? extraLocalTried_ : extraTried_)[rt ? 1 : 0] = true;
+    const bool rtOk = caps_.rayTracingTier >= 11 && caps_.shaderModel >= 65 && caps_.dxcAvailable;
+    if (rt && (!rtOk || !sceneRtPso_)) return false;   // no ray-traced scene pipeline to twin
+    if (!rt && !scenePso_) return false;
+
+    ShaderScope compile(*res_);
+    const rhi::PipelineLayout gi = giLayout();
+    const std::string matDefs = pbr::materialShaderDefines(gi.srvCount, kMaterialSamplerSlot, layeredBsdf_);
+    const std::string extraDef = "AVER_MESH_EXTRA=1";
+    const auto rasterDefs = [&](const std::string& more) { return matDefs + ";" + extraDef + (more.empty() ? std::string() : ";" + more); };
+    const auto sceneDefs  = [&](const std::string& more) { return rasterDefs(more) + ";AVER_HAIR_SHADING=1"; };
+
+    rhi::PipelineLayout layout = gi;
+    std::string rtFlat;
+    if (rt) {
+        ensureTextureTable();
+        layout = rtGeomBindless_ ? rtLayout() : gi;
+        rtFlat = std::string("AVER_RT=1") + rtGeomDefs();
+    }
+    const u32 sm = rt ? 65u : kBaseSm;
+
+    // Slot 0 is rhi::MeshVertex, slot 1 rhi::MeshVertexExtra. The ORDER is the Vulkan input location order (positional) and must match the
+    // member order of VSIn under AVER_MESH_EXTRA in shared_prelude.hlsl.
+    rhi::VertexLayout vl;
+    const auto attrib = [&](rhi::VertexSemantic s, u8 index, rhi::Format f, u32 offset, u8 slot) {
+        rhi::VertexAttrib& a = vl.attribs[vl.attribCount++];
+        a.semantic = s; a.semanticIndex = index; a.format = f; a.offset = offset; a.slot = slot;
+    };
+    attrib(rhi::VertexSemantic::Position, 0, rhi::Format::RGB32Float, static_cast<u32>(offsetof(rhi::MeshVertex, px)), 0);
+    attrib(rhi::VertexSemantic::Normal,   0, rhi::Format::RGB32Float, static_cast<u32>(offsetof(rhi::MeshVertex, nx)), 0);
+    attrib(rhi::VertexSemantic::TexCoord, 0, rhi::Format::RG32Float,  static_cast<u32>(offsetof(rhi::MeshVertex, u)),  0);
+    attrib(rhi::VertexSemantic::Color,    0, rhi::Format::RGBA8Unorm, static_cast<u32>(offsetof(rhi::MeshVertexExtra, color)),   1);
+    attrib(rhi::VertexSemantic::Tangent,  0, rhi::Format::RGBA8Unorm, static_cast<u32>(offsetof(rhi::MeshVertexExtra, tangent)), 1);
+    attrib(rhi::VertexSemantic::TexCoord, 1, rhi::Format::RG32Float,  static_cast<u32>(offsetof(rhi::MeshVertexExtra, u2)),      1);
+    vl.stride  = static_cast<u32>(sizeof(rhi::MeshVertex));
+    vl.stride1 = static_cast<u32>(sizeof(rhi::MeshVertexExtra));
+
+    rhi::GraphicsPipelineDesc scene;
+    scene.layout = layout;
+    scene.vertexLayout = vl;
+    scene.cull = rhi::CullMode::None;
+    scene.depth = {true, true, rhi::CompareOp::Less};
+    scene.renderTargetCount = 1;
+    scene.renderTargets[0] = sceneColorFmt_;
+    scene.depthFormat = sceneDepthFmt_;
+    scene.sampleCount = sceneSampleCount_;
+    rhi::GraphicsPipelineDesc sceneGbuf = scene;
+    sceneGbuf.renderTargetCount = 4;
+    sceneGbuf.renderTargets[1] = rhi::Format::RG16F;
+    sceneGbuf.renderTargets[2] = rhi::Format::R32Float;
+    sceneGbuf.renderTargets[3] = rhi::Format::RGB10A2Unorm;
+
+    const rhi::ShaderHandle vs = compile("VSMain", rhi::ShaderStage::Vertex, kBaseSm, rasterDefs({}).c_str());
+    // R2: the pixel shader alone carries AVER_LOCAL_RASTER; the vertex shader stays the one the ordinary twins and the depth twin share.
+    const std::string lr = local ? ";AVER_LOCAL_RASTER=1" : "";
+    const std::string psDefs     = (rt ? sceneDefs(rtFlat) : sceneDefs({})) + lr;
+    const std::string psGbufDefs = (rt ? sceneDefs(rtFlat + ";AVER_GBUFFER=1") : sceneDefs("AVER_GBUFFER=1")) + lr;
+    const rhi::ShaderHandle ps     = compile("PSMainVoxi", rhi::ShaderStage::Pixel, sm, psDefs.c_str());
+    const rhi::ShaderHandle psGbuf = compile("PSMainVoxi", rhi::ShaderStage::Pixel, sm, psGbufDefs.c_str());
+    ExtraScene& e = (local ? extraSceneLocal_ : extraScene_)[rt ? 1 : 0];
+    // The depth-only twin, through THIS vertex shader: the LessEqual colour twins below only match depth written by the same code.
+    if (vs && depthPrepassPso_ && !extraDepthPso_) {
+        if (const rhi::ShaderHandle psDepth = compile("PSDepthPrepass", rhi::ShaderStage::Pixel, kBaseSm, rasterDefs({}).c_str())) {
+            rhi::GraphicsPipelineDesc p;
+            p.vs = vs; p.ps = psDepth;
+            p.layout = gi;   // same table-0 shape as depthPrepassPso_
+            p.vertexLayout = vl;
+            p.cull = rhi::CullMode::None;
+            p.depth = {true, true, rhi::CompareOp::Less};
+            p.renderTargetCount = 0;
+            p.depthFormat = sceneDepthFmt_;
+            p.sampleCount = sceneSampleCount_;
+            extraDepthPso_ = res_->createGraphicsPipeline(p);
+        }
+    }
+    if (vs && ps) {
+        rhi::GraphicsPipelineDesc p = scene;
+        p.vs = vs; p.ps = ps;
+        e.lit = res_->createGraphicsPipeline(p);
+        if (depthPrepassPso_) {   // the LessEqual / no-write twin, like scenePsoPrepassed_
+            p.depth = {true, false, rhi::CompareOp::LessEqual};
+            e.prepassed = res_->createGraphicsPipeline(p);
+        }
+    }
+    if (vs && psGbuf) {
+        rhi::GraphicsPipelineDesc p = sceneGbuf;
+        p.vs = vs; p.ps = psGbuf;
+        e.litGbuf = res_->createGraphicsPipeline(p);
+        if (depthPrepassPso_) {
+            p.depth = {true, false, rhi::CompareOp::LessEqual};
+            e.prepassedGbuf = res_->createGraphicsPipeline(p);
+        }
+    }
+    const char* const setName = rt ? (local ? "ray-traced raster, raster local lights" : "ray-traced raster") : (local ? "raster, raster local lights" : "raster");
+    if (e.lit) AVER_INFO("[Voxi] second-vertex-stream scene variants built ({}): vertex colour, authored tangent and UV2 are live for meshes that carry them", setName);
+    else       AVER_WARN("[Voxi] second-vertex-stream scene variant ({}) unavailable; meshes with vertex colour or tangents draw through the ordinary pipeline", setName);
+    return e.lit != 0;
+}
+
+// ---- R6: material variants ------------------------------------------------------------------------------------------------------------------
+
+namespace {
+// The compile-time defines of a variant key: the pixel-shader features (material_prelude.hlsl AVER_MATX_*), the late-Z switch and the vertex stage.
+std::string fxShaderDefines(u32 key) {
+    struct Bit { u32 bit; const char* name; };
+    static constexpr Bit kBits[] = {
+        {pbr::fxkey::kUvx, "AVER_MATX_UVX"}, {pbr::fxkey::kTri, "AVER_MATX_TRI"}, {pbr::fxkey::kRim, "AVER_MATX_RIM"},
+        {pbr::fxkey::kAniso, "AVER_MATX_ANISO"}, {pbr::fxkey::kParallax, "AVER_MATX_PARALLAX"}, {pbr::fxkey::kBacklight, "AVER_MATX_BACKLIGHT"},
+        {pbr::fxkey::kDetail, "AVER_MATX_DETAIL"}, {pbr::fxkey::kSurf, "AVER_MATX_SURF"}, {pbr::fxkey::kModes, "AVER_MATX_MODES"},
+        {pbr::fxkey::kHash, "AVER_MATX_HASH"}, {pbr::fxkey::kFade, "AVER_MATX_FADE"}, {pbr::fxkey::kUnshaded, "AVER_MATX_UNSHADED"},
+        {pbr::fxkey::kLateZ, "AVER_MATX_LATEZ"}, {pbr::fxkey::kVertex, "AVER_MATX_VS"},
+    };
+    std::string d = "AVER_MATX=1";
+    for (const Bit& b : kBits) if (key & b.bit) { d += ';'; d += b.name; d += "=1"; }
+    if (((key >> pbr::fxkey::kBlendShift) & 7u) == 3u) d += ";AVER_MATX_MUL=1";   // blend_mode multiply writes the multiplier, not a colour
+    return d;
+}
+}  // namespace
+
+// The scene pipeline of a material variant, or 0 (not built yet: the draw takes the ordinary pipeline). Marks the key wanted; prePass builds it.
+rhi::PipelineHandle VoxiRenderer::scenePipelineFx(u32 key, bool meshExtra, bool blended) const {
+    if (!key || !settings_.materialFx) return 0;
+    const u64 mk = fxMapKey(key, rtActive_, meshExtra && settings_.meshExtraStreams);
+    const auto it = fxScenes_.find(mk);
+    if (it == fxScenes_.end() || !it->second.tried) {
+        if (std::find(fxWanted_.begin(), fxWanted_.end(), mk) == fxWanted_.end()) fxWanted_.push_back(mk);
+        return 0;
+    }
+    const FxScene& e = it->second;
+    if (blended) return e.blended;
+    return e.lit ? pickGbuf(e.lit, e.litGbuf) : 0;
+}
+
+void VoxiRenderer::destroyFxScenes() {
+    if (res_) {
+        for (auto& kv : fxScenes_) {
+            if (kv.second.lit) res_->destroyPipeline(kv.second.lit);
+            if (kv.second.litGbuf) res_->destroyPipeline(kv.second.litGbuf);
+            if (kv.second.blended) res_->destroyPipeline(kv.second.blended);
+        }
+    }
+    fxScenes_.clear();
+    fxWanted_.clear();
+}
+
+// Builds one variant: the raster scene pixel shader (plain and G-buffer, plus the translucent twin) compiled with the variant's AVER_MATX_* defines, its
+// vertex stage (VSMainFx when the variant moves vertices), cull / blend / depth state from the key. Only raster entry points: PSRayDriven, the
+// AVER_RD_SINGLE_PASS variants and the shadow-ray code are untouched. Mesh-shader draws and the depth prepass have no twin (such draws are not prepassed).
+bool VoxiRenderer::createFxPipelines(u64 mapKey) {
+    FxScene& e = fxScenes_[mapKey];
+    e.tried = true;
+    const u32 key = static_cast<u32>(mapKey & pbr::fxkey::kPipelineMask);
+    const bool rt = ((mapKey >> 32) & 1ull) != 0;
+    const bool extra = ((mapKey >> 33) & 1ull) != 0;
+    const bool rtOk = caps_.rayTracingTier >= 11 && caps_.shaderModel >= 65 && caps_.dxcAvailable;
+    if (rt && (!rtOk || !sceneRtPso_)) return false;
+    if (!rt && !scenePso_) return false;
+
+    ShaderScope compile(*res_);
+    const rhi::PipelineLayout gi = giLayout();
+    const std::string matDefs = pbr::materialShaderDefines(gi.srvCount, kMaterialSamplerSlot, layeredBsdf_);
+    const std::string fxDefs = fxShaderDefines(key) + (extra ? ";AVER_MESH_EXTRA=1" : "");
+    const auto rasterDefs = [&](const std::string& more) { return matDefs + ";" + fxDefs + (more.empty() ? std::string() : ";" + more); };
+    const auto sceneDefs  = [&](const std::string& more) { return rasterDefs(more) + ";AVER_HAIR_SHADING=1"; };
+
+    rhi::PipelineLayout layout = gi;
+    std::string rtFlat;
+    if (rt) {
+        ensureTextureTable();
+        layout = rtGeomBindless_ ? rtLayout() : gi;
+        rtFlat = std::string("AVER_RT=1") + rtGeomDefs();
+    }
+    const u32 sm = rt ? 65u : kBaseSm;
+
+    rhi::GraphicsPipelineDesc scene;
+    scene.layout = layout;
+    if (extra) {   // slot 0 rhi::MeshVertex, slot 1 rhi::MeshVertexExtra, in createExtraScenePipelines' order
+        rhi::VertexLayout vl;
+        const auto attrib = [&](rhi::VertexSemantic sem, u8 index, rhi::Format f, u32 offset, u8 slot) {
+            rhi::VertexAttrib& a = vl.attribs[vl.attribCount++];
+            a.semantic = sem; a.semanticIndex = index; a.format = f; a.offset = offset; a.slot = slot;
+        };
+        attrib(rhi::VertexSemantic::Position, 0, rhi::Format::RGB32Float, static_cast<u32>(offsetof(rhi::MeshVertex, px)), 0);
+        attrib(rhi::VertexSemantic::Normal,   0, rhi::Format::RGB32Float, static_cast<u32>(offsetof(rhi::MeshVertex, nx)), 0);
+        attrib(rhi::VertexSemantic::TexCoord, 0, rhi::Format::RG32Float,  static_cast<u32>(offsetof(rhi::MeshVertex, u)),  0);
+        attrib(rhi::VertexSemantic::Color,    0, rhi::Format::RGBA8Unorm, static_cast<u32>(offsetof(rhi::MeshVertexExtra, color)),   1);
+        attrib(rhi::VertexSemantic::Tangent,  0, rhi::Format::RGBA8Unorm, static_cast<u32>(offsetof(rhi::MeshVertexExtra, tangent)), 1);
+        attrib(rhi::VertexSemantic::TexCoord, 1, rhi::Format::RG32Float,  static_cast<u32>(offsetof(rhi::MeshVertexExtra, u2)),      1);
+        vl.stride  = static_cast<u32>(sizeof(rhi::MeshVertex));
+        vl.stride1 = static_cast<u32>(sizeof(rhi::MeshVertexExtra));
+        scene.vertexLayout = vl;
+    }
+    const u32 cullBits = (key >> pbr::fxkey::kCullShift) & 3u;
+    scene.cull = cullBits == 1u ? rhi::CullMode::Back : (cullBits == 2u ? rhi::CullMode::Front : rhi::CullMode::None);
+    const u32 depthDraw = (key >> pbr::fxkey::kDepthDrawShift) & 3u;   // 0 default, 1 always, 2 never
+    const bool testDepth = (key & pbr::fxkey::kNoDepthTest) == 0;
+    scene.depth = {testDepth, testDepth && depthDraw != 2u, rhi::CompareOp::Less};
+    scene.renderTargetCount = 1;
+    scene.renderTargets[0] = sceneColorFmt_;
+    scene.depthFormat = sceneDepthFmt_;
+    scene.sampleCount = sceneSampleCount_;
+    rhi::GraphicsPipelineDesc sceneGbuf = scene;
+    sceneGbuf.renderTargetCount = 4;
+    sceneGbuf.renderTargets[1] = rhi::Format::RG16F;
+    sceneGbuf.renderTargets[2] = rhi::Format::R32Float;
+    sceneGbuf.renderTargets[3] = rhi::Format::RGB10A2Unorm;
+
+    const char* const vsEntry = (key & pbr::fxkey::kVertex) ? "VSMainFx" : "VSMain";
+    const rhi::ShaderHandle vs = compile(vsEntry, rhi::ShaderStage::Vertex, kBaseSm, rasterDefs({}).c_str());
+    const std::string psDefs     = rt ? sceneDefs(rtFlat) : sceneDefs({});
+    const std::string psGbufDefs = rt ? sceneDefs(rtFlat + ";AVER_GBUFFER=1") : sceneDefs("AVER_GBUFFER=1");
+    const rhi::ShaderHandle ps     = compile("PSMainVoxi", rhi::ShaderStage::Pixel, sm, psDefs.c_str());
+    const rhi::ShaderHandle psGbuf = compile("PSMainVoxi", rhi::ShaderStage::Pixel, sm, psGbufDefs.c_str());
+    if (vs && ps) {
+        rhi::GraphicsPipelineDesc p = scene;
+        p.vs = vs; p.ps = ps;
+        e.lit = res_->createGraphicsPipeline(p);
+        // The translucent twin: the variant's blend mode, depth write off unless the material asked for "always" (Godot's depth_draw_mode).
+        rhi::GraphicsPipelineDesc b = scene;
+        b.vs = vs; b.ps = ps;
+        const u32 blendBits = (key >> pbr::fxkey::kBlendShift) & 7u;
+        b.blend = blendBits == 1u ? rhi::BlendMode::Additive
+                : (blendBits == 2u ? rhi::BlendMode::Subtractive
+                : (blendBits == 3u ? rhi::BlendMode::Multiplicative : rhi::BlendMode::PremultipliedAlpha));
+        b.depth.write = testDepth && depthDraw == 1u;
+        e.blended = res_->createGraphicsPipeline(b);
+    }
+    if (vs && psGbuf) {
+        rhi::GraphicsPipelineDesc p = sceneGbuf;
+        p.vs = vs; p.ps = psGbuf;
+        e.litGbuf = res_->createGraphicsPipeline(p);
+    }
+    if (e.lit) AVER_INFO("[Voxi] material variant 0x{:06x} built ({}{}): BaseMaterial3D features are live for draws that use it", key,
+                         rt ? "ray-traced raster" : "raster", extra ? ", second vertex stream" : "");
+    else       AVER_WARN("[Voxi] material variant 0x{:06x} ({}) unavailable; its materials draw through the ordinary pipeline", key,
+                         rt ? "ray-traced raster" : "raster");
+    return e.lit != 0;
+}
+
+// ---- R2: raster local lights ---------------------------------------------------------------------------------------------------------------
+
+// Policy: is this frame's raster scene lit by the raster local-light path? Needs a point or spot light. Without ray tracing it is the auto
+// behaviour; with ray tracing active only the opt-in (RENDER.LOCALRASTER 1) in a frame the rasteriser draws (never when PSRayDriven draws
+// the primary surfaces, whose lights stay the ray-traced list).
+bool VoxiRenderer::localRasterWanted() const {
+    if (settings_.localLightsRaster >= 2u || !dev_ || !res_) return false;
+    bool any = false;
+    for (const SceneLight& l : sceneLights_) if (l.kind == 0 || l.kind == 1) { any = true; break; }
+    if (!any) return false;
+    if (!rtActive_) return true;
+    return settings_.localLightsRaster == 1u && !rayDrivenActive() && !suppressesScene();
+}
+
+// The raster scene pixel shader again with AVER_LOCAL_RASTER: plain, G-buffer and their depth-prepassed LessEqual twins, for the plain raster set
+// (rt false) or the ray-traced raster set (rt true; only reached through the opt-in). The same VSMain as the ordinary set, so a prepassed draw
+// matches depth bit for bit. Only the raster entry point: PSRayDriven, the AVER_RD_SINGLE_PASS variants and the shadow-ray code are untouched,
+// and the mesh-shader and blended variants have no twin.
+bool VoxiRenderer::createLocalRasterPipelines(bool rt) {
+    localTried_[rt ? 1 : 0] = true;
+    const bool rtOk = caps_.rayTracingTier >= 11 && caps_.shaderModel >= 65 && caps_.dxcAvailable;
+    if (rt && (!rtOk || !sceneRtPso_)) return false;
+    if (!rt && !scenePso_) return false;
+
+    ShaderScope compile(*res_);
+    const rhi::PipelineLayout gi = giLayout();
+    const std::string matDefs = pbr::materialShaderDefines(gi.srvCount, kMaterialSamplerSlot, layeredBsdf_);
+    const auto sceneDefs = [&](const std::string& more) { return matDefs + (more.empty() ? std::string() : ";" + more) + ";AVER_HAIR_SHADING=1;AVER_LOCAL_RASTER=1"; };
+
+    rhi::PipelineLayout layout = gi;
+    std::string rtFlat;
+    if (rt) {
+        ensureTextureTable();
+        layout = rtGeomBindless_ ? rtLayout() : gi;
+        rtFlat = std::string("AVER_RT=1") + rtGeomDefs();
+    }
+    const u32 sm = rt ? 65u : kBaseSm;
+
+    rhi::GraphicsPipelineDesc scene;
+    scene.layout = layout;
+    scene.cull = rhi::CullMode::None;
+    scene.depth = {true, true, rhi::CompareOp::Less};
+    scene.renderTargetCount = 1;
+    scene.renderTargets[0] = sceneColorFmt_;
+    scene.depthFormat = sceneDepthFmt_;
+    scene.sampleCount = sceneSampleCount_;
+    rhi::GraphicsPipelineDesc sceneGbuf = scene;
+    sceneGbuf.renderTargetCount = 4;
+    sceneGbuf.renderTargets[1] = rhi::Format::RG16F;
+    sceneGbuf.renderTargets[2] = rhi::Format::R32Float;
+    sceneGbuf.renderTargets[3] = rhi::Format::RGB10A2Unorm;
+
+    const rhi::ShaderHandle vs = compile("VSMain", rhi::ShaderStage::Vertex, kBaseSm, matDefs.c_str());
+    const std::string psDefs     = sceneDefs(rt ? rtFlat : std::string());
+    const std::string psGbufDefs = sceneDefs(rt ? rtFlat + ";AVER_GBUFFER=1" : std::string("AVER_GBUFFER=1"));
+    const rhi::ShaderHandle ps     = compile("PSMainVoxi", rhi::ShaderStage::Pixel, sm, psDefs.c_str());
+    const rhi::ShaderHandle psGbuf = compile("PSMainVoxi", rhi::ShaderStage::Pixel, sm, psGbufDefs.c_str());
+    LocalScene& e = localScene_[rt ? 1 : 0];
+    if (vs && ps) {
+        rhi::GraphicsPipelineDesc p = scene;
+        p.vs = vs; p.ps = ps;
+        e.lit = res_->createGraphicsPipeline(p);
+        if (depthPrepassPso_) {
+            p.depth = {true, false, rhi::CompareOp::LessEqual};
+            e.prepassed = res_->createGraphicsPipeline(p);
+        }
+    }
+    if (vs && psGbuf) {
+        rhi::GraphicsPipelineDesc p = sceneGbuf;
+        p.vs = vs; p.ps = psGbuf;
+        e.litGbuf = res_->createGraphicsPipeline(p);
+        if (depthPrepassPso_) {
+            p.depth = {true, false, rhi::CompareOp::LessEqual};
+            e.prepassedGbuf = res_->createGraphicsPipeline(p);
+        }
+    }
+    if (e.lit) AVER_INFO("[Voxi] raster local-light scene variants built ({}): omni and spot lights are lit in the raster scene pass{}", rt ? "ray-traced raster" : "raster",
+                         e.litGbuf ? "" : " (no G-buffer twin: with the G-buffer on, these lights wait for it)");
+    else       AVER_WARN("[Voxi] raster local-light scene variant ({}) unavailable; omni and spot lights keep their old behaviour", rt ? "ray-traced raster" : "raster");
+    return e.lit != 0;
+}
+
+// The shadow atlas (rl::AtlasPacker::kGrid cells of rl::kCellPx). Typeless 32-bit so the DSV writes D32 and the SRV in t19 reads R32, like shadowTex_.
+bool VoxiRenderer::createLocalShadowAtlas() {
+    if (localShadowTex_) return true;
+    rhi::TextureDesc d;
+    d.dim    = rhi::TextureDim::Tex2D;
+    d.width  = rl::AtlasPacker::kGrid * rl::kCellPx;
+    d.height = rl::AtlasPacker::kGrid * rl::kCellPx;
+    d.format = rhi::Format::R32Typeless;
+    d.bind   = rhi::ResourceBind::ShaderResource | rhi::ResourceBind::DepthStencil;
+    d.initialState  = rhi::ResourceState::ShaderResource;
+    d.hasClearValue = true;
+    d.clearDepth    = 1.0f;
+    d.debugName     = "Voxi local-light shadow atlas";
+    localShadowTex_ = res_->createTexture(d);
+    if (!localShadowTex_) AVER_ERROR("[Voxi] local-light shadow atlas {}^2 could not be created; raster local lights draw unshadowed", d.width);
+    return localShadowTex_ != 0;
+}
+
+// Packs this frame's list, renders the shadow tiles, binds the atlas to t19 and assembles the buffer the scene pass reads (engine block + tail).
+void VoxiRenderer::localShadowPass(rhi::IRenderContext& ctx) {
+    if (!localRasterLive_) {
+        // Hand t19 back: the ray-driven history's read half, or the placeholder. (The staged passes rebind their own pair every frame they run.)
+        if (localAtlasBound_ && res_ && bindings_) {
+            if (rdLocalHist_[0] && rdLocalHist_[1]) res_->setSrv(bindings_, 19, rdLocalHist_[1]);
+            else if (rdLocalHistPlaceholder_) res_->setSrv(bindings_, 19, rdLocalHistPlaceholder_);
+        }
+        localAtlasBound_ = false;
+        localCbBlob_.clear();
+        return;
+    }
+
+    f32 vp[16] = {}, eye[3] = {};
+    const bool haveCam = dev_ && dev_->camera(vp, nullptr, eye);
+    const bool shadowPipes = (shadowPso_ || shadowInstancedPso_) && !drawsPrev_.empty();
+    rl::Input in;
+    in.lights = sceneLights_.data();
+    in.count = static_cast<u32>(sceneLights_.size());
+    for (int i = 0; i < 3; ++i) in.eye[i] = eye[i];
+    in.viewProj = haveCam ? vp : nullptr;
+    in.shadows = settings_.localLightShadows && shadowPipes;
+    rl::build(in, localRl_);
+
+    // Tiles need the atlas; without it (or without the t19 slot to show it in) the lights are drawn unshadowed.
+    bool atlasOk = false;
+    if (!localRl_.tiles.empty() && bindings_ && createLocalShadowAtlas()) atlasOk = true;
+    if (!localRl_.tiles.empty() && !atlasOk) {
+        for (u32 li = 0; li < localRl_.lightCount; ++li) {
+            localRl_.block.light[li][3][3] = static_cast<f32>(static_cast<u32>(localRl_.block.light[li][3][3]) & ~rl::kFlagShadowed);
+            localRl_.block.light[li][4][1] = 0.0f;
+        }
+        localRl_.tiles.clear();
+        localRl_.block.header[1] = 0.0f;
+    }
+
+    if (atlasOk) {
+        rhi::ScopedGpuStat gpuStat(ctx, "Voxi local-light shadows");
+        const bool useInstancing = shadowInstancedPso_ != 0;
+        ctx.textureBarrier(localShadowTex_, rhi::ResourceState::ShaderResource, rhi::ResourceState::DepthWrite);
+        ctx.setPipeline(useInstancing ? shadowInstancedPso_ : shadowPso_);
+        ctx.setBindingSet(bindings_);
+        ctx.setRenderTargets(nullptr, 0, localShadowTex_);
+        ctx.clearDepth(localShadowTex_, 1.0f);
+        ctx.setTargetsIsolated(true);   // Vulkan: these draws must not join the scene's scope
+        ctx.setDrawBinding(materials_.fallbackBindingSet(), &materials_.fallbackConstants(), sizeof(pbr::MaterialConstants));
+
+        FrameConstants tile = cb_;   // a copy: the sun's cascade 0 matrix in cb_ must survive this pass
+        for (const rl::Tile& t : localRl_.tiles) {
+            std::memcpy(tile.cascadeViewProj[0], &t.viewProj.m[0][0], sizeof(tile.cascadeViewProj[0]));
+            tile.shadowDraw[0] = 0.0f;
+            ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &tile, sizeof(tile));
+            const u32 px = t.pixels();
+            ctx.setViewport(t.cx * rl::kCellPx, t.cy * rl::kCellPx, px, px);
+            ctx.setScissor(t.cx * rl::kCellPx, t.cy * rl::kCellPx, px, px);
+
+            const SceneLight& sl = sceneLights_[localRl_.sourceIndex[t.light]];
+            const f32 range = localRl_.block.light[t.light][1][3];
+            const Vec3 lc{sl.pos[0], sl.pos[1], sl.pos[2]};
+            const u32 casterInv = sl.shadowCasterInv;   // shadow_caster_mask (G4 R4): 0 = every layer casts
+            if (useInstancing) {
+                for (ShadowInstanceGroup& g : shadowInstanceGroups_) g.worlds.clear();
+                for (const Draw& d : drawsPrev_) {
+                    if (d.translucent || d.noShadow) continue;
+                    if (casterInv != 0 && !rl::layersOverlap(d.layersInv, casterInv)) continue;
+                    if (d.boundsRadius >= 0.0f) {
+                        const Vec3 dc{d.boundsCentre[0], d.boundsCentre[1], d.boundsCentre[2]};
+                        if (dist(dc, lc) > range + d.boundsRadius) continue;
+                    }
+                    ShadowInstanceGroup& group = shadowGroupFor(shadowInstanceGroups_, shadowGroupIndex_, d.depthMesh);
+                    const usize base = group.worlds.size();
+                    group.worlds.resize(base + 16);
+                    std::memcpy(group.worlds.data() + base, d.world, 16 * sizeof(f32));
+                }
+                for (const ShadowInstanceGroup& g : shadowInstanceGroups_) {
+                    if (g.worlds.empty()) continue;
+                    ctx.drawMeshInstanced(g.mesh, g.worlds.data(), static_cast<u32>(g.worlds.size() / 16));
+                }
+            } else {
+                for (const Draw& d : drawsPrev_) {
+                    if (d.translucent || d.noShadow) continue;
+                    if (casterInv != 0 && !rl::layersOverlap(d.layersInv, casterInv)) continue;
+                    if (d.boundsRadius >= 0.0f) {
+                        const Vec3 dc{d.boundsCentre[0], d.boundsCentre[1], d.boundsCentre[2]};
+                        if (dist(dc, lc) > range + d.boundsRadius) continue;
+                    }
+                    f32 consts[rhi::kObjectConstantDwords]{};
+                    std::memcpy(consts, d.world, 16 * sizeof(f32));
+                    ctx.setConstants(rhi::kObjectConstantRegister, consts, rhi::kObjectConstantDwords);
+                    ctx.drawMesh(d.depthMesh);
+                }
+            }
+        }
+        ctx.setTargetsIsolated(false);
+        ctx.textureBarrier(localShadowTex_, rhi::ResourceState::DepthWrite, rhi::ResourceState::ShaderResource);
+        // Restore the frame constants the passes after this one expect (they upload cb_ themselves, but keep the slot honest).
+        ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
+    }
+
+    // t19 shows the atlas to the scene pass. The ray-driven history may own the slot on D3D12 with ray tracing wanted, but this path is live only in
+    // frames PSRayDriven and its staged passes do not run, so nothing reads the history SRV meanwhile; the restore above gives it back.
+    if (atlasOk && bindings_) {
+        res_->setSrv(bindings_, 19, localShadowTex_);
+        localAtlasBound_ = true;
+        localRl_.block.header[3] = 1.0f;
+    }
+    if (!localRl_.tiles.empty() && localRl_.block.header[3] < 0.5f) {
+        // The atlas could not be shown in t19: no shadows, rather than reading the wrong texture.
+        for (u32 li = 0; li < localRl_.lightCount; ++li) {
+            localRl_.block.light[li][3][3] = static_cast<f32>(static_cast<u32>(localRl_.block.light[li][3][3]) & ~rl::kFlagShadowed);
+            localRl_.block.light[li][4][1] = 0.0f;
+        }
+    }
+
+    localCbBlob_.resize(sizeof(cb_) + sizeof(rl::Block));
+    std::memcpy(localCbBlob_.data(), &cb_, sizeof(cb_));
+    std::memcpy(localCbBlob_.data() + sizeof(cb_), &localRl_.block, sizeof(rl::Block));
+
+    // One line when the path's state changes: lights drawn, shadows, what was left out.
+    const u32 stateKey = (localRl_.lightCount << 16) ^ (static_cast<u32>(localRl_.stats.shadowed) << 8) ^ (rtActive_ ? 1u : 0u) ^ (localRl_.stats.overCap << 24);
+    if (stateKey != localRasterStateLogged_) {
+        localRasterStateLogged_ = stateKey;
+        AVER_INFO("[Voxi] raster local lights: {} lit, {} with shadow maps ({} tiles), {} offered, {} out of view, {} faded, {} over the cap of {}, {} rectangle light(s) skipped, {} shadow(s) without atlas room{}",
+                  localRl_.lightCount, localRl_.stats.shadowed, static_cast<u32>(localRl_.tiles.size()), localRl_.stats.considered,
+                  localRl_.stats.culled, localRl_.stats.faded, localRl_.stats.overCap, rl::kMaxLights, localRl_.stats.skippedKind,
+                  localRl_.stats.shadowDenied, rtActive_ ? " [ray tracing active: opt-in raster path replaces the ray-traced light list]" : "");
+    }
 }
 
 } // namespace aver::voxi

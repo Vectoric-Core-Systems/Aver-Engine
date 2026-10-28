@@ -72,6 +72,8 @@ Keyed on the job, not the module. If your job is here, the seam is decided.
 | Change MSAA; ask what counts are accepted | Voxi | `aver_voxi_set_msaa`, `aver_voxi_msaa_mask` |
 | Tune GI itself (resolution, intensity, reach) | Voxi | `aver_voxi_set_voxel_resolution`, `…_set_gi_intensity`, `…_set_gi_max_distance` |
 | Ask what the **GPU** actually supports | Voxi | `aver_voxi_ray_tracing_tier`, `…_max_msaa`, `…_mesh_shader_tier`, `…_shader_model` |
+| **Build a mesh from arrays at run time**; draw N instances of a mesh as one (G4 R7) | Framework (own header, own version) | `framework_rtmesh_abi.h`: `aver_fw_rtmesh_create` / `…_add_surface`, `aver_fw_multimesh_*`; an entity draws the mesh at the path `@rtmesh/<key>` |
+| **Place a local fog volume** (inside the volumetric fog); record a reflection probe and ask which probes light a point (G4 R8) | Framework (own header, own version) | `framework_envfx_abi.h`: `aver_fw_fogvol_create` / `…_set`, `aver_fw_probe_create` / `…_set_box` / `…_select` / `…_project`; the host reads `aver_fw_fogvol_pack` |
 | **Raycast**; sweep; overlap query | Physics | `aver_phys_raycast`, `aver_phys_sphere_cast`, `aver_phys_overlap_sphere` |
 | Put a collider in the world | Physics | `aver_phys_add_static_box` … `aver_phys_add_heightfield` |
 | Make something that **walks** | Physics | `aver_phys_character_create` and the `aver_phys_character_*` family |

@@ -346,6 +346,7 @@ inline VkFormat toVkFormat(Format f) {
         case Format::RGBA16F:        return VK_FORMAT_R16G16B16A16_SFLOAT;
         case Format::R32Float:       return VK_FORMAT_R32_SFLOAT;
         case Format::RG32Float:      return VK_FORMAT_R32G32_SFLOAT;
+        case Format::RGB32Float:     return VK_FORMAT_R32G32B32_SFLOAT;
         case Format::R32Uint:        return VK_FORMAT_R32_UINT;
         case Format::D32Float:       return VK_FORMAT_D32_SFLOAT;
         case Format::R32Typeless:    return VK_FORMAT_D32_SFLOAT;   // Vulkan images keep ONE fixed format for life; sampled via a SEPARATE aspect-qualified view of the same image, not a format change -- simpler than D3D12's trick, not harder (architecture scout finding #6)
@@ -597,7 +598,7 @@ inline u32 buildVertexInputAttributes(const VertexLayout& l,
             AVER_ERROR("[RHI.Vulkan] vertex attribute {} has no usable format", i);
             continue;
         }
-        out[n] = VkVertexInputAttributeDescription{n, 0, f, l.attribs[i].offset};
+        out[n] = VkVertexInputAttributeDescription{n, l.attribs[i].slot, f, l.attribs[i].offset};
         ++n;
     }
     return n;
@@ -891,6 +892,12 @@ struct GpuMesh {
     bool vbOwned = true;
     u32  vbShares = 0;
     MeshHandle vbSource = 0;
+    // R1: the optional second vertex stream (MeshVertexExtra, binding 1). xOwned false on a vertex-sharing mesh, which borrows
+    // its root's stream exactly as it borrows the vertices.
+    VkBuffer vbx = VK_NULL_HANDLE;
+    BufferHandle vbxBuffer = 0;
+    bool hasExtra = false;
+    bool xOwned = true;
     bool alive = true;
 };
 
@@ -1084,6 +1091,7 @@ struct RhiPipeline {
     bool compute = false;
     bool mesh = false;
     bool amplification = false;   // GraphicsPipelineDesc::as != 0: a dispatchMeshClusters() pipeline, not dispatchMeshFor()
+    bool extraSlot = false;       // R1: the vertex layout reads binding 1 (MeshVertexExtra); only a mesh with that stream can draw
     bool instanced = false;       // GraphicsPipelineDesc::instanced: set kVkSetInstances exists, vertex shader reads gInstanceWorlds; drawMeshInstanced checks this exactly as D3D12RenderContext::drawMeshInstanced checks pipe_->instanceWorldParam >= 0
 };
 
@@ -1482,6 +1490,10 @@ public:
     MeshHandle createMeshSharingVertices(MeshHandle source, const u32* indices, u32 indexCount) override;
     MeshHandle createPosedPartMesh(MeshHandle posedSource, const u32* indices, u32 indexCount) override;
     bool destroyMesh(MeshHandle mesh) override;
+    bool setMeshExtra(MeshHandle mesh, const MeshVertexExtra* extra, u32 vertexCount) override;
+    bool meshHasExtra(MeshHandle mesh) const override {
+        return mesh != 0 && mesh <= meshes_.size() && meshes_[mesh - 1].alive && meshes_[mesh - 1].hasExtra;
+    }
     bool destroyLineMesh(LineHandle mesh) override;
     MeshHandle createSkinTargetMesh(MeshHandle source, BufferHandle* outVertices) override;
     BufferHandle meshVertexBuffer(MeshHandle mesh) const override;
@@ -1553,6 +1565,7 @@ public:
     }
     // ---- translucency: sticky like setDrawBinding; drawMesh captures, endFrame replays (IDevice::setDrawBlended) ----
     void setDrawBlended(bool blended) override { drawBlended_ = blended; }
+    void setDrawLayers(u32 layersInv) override { drawLayersInv_ = layersInv; }
     bool drawBlended() const override { return drawBlended_; }
     TextureHandle sceneColorBackdropTexture() override;
 
@@ -1613,7 +1626,7 @@ public:
 
     // ---- accessors for the free helpers and the two friend classes below ----
     const VulkanApi& api() const { return api_; }
-    bool pushRenderScope(VkCommandBuffer cmd, const VkRenderingInfo& ri);   // opens a dynamic-rendering scope, or joins the one open; returns whether it opened one -- caller MUST pass that to popRenderScope, so an inner no-op open can't close its outer owner's scope (see renderScopeDepth_)
+    bool pushRenderScope(VkCommandBuffer cmd, const VkRenderingInfo& ri, bool isolated = false);   // R2: `isolated` draws never join the scene scope: it is suspended and a temporary scope over `ri` is opened (popRenderScope closes it, the scene resumes on its next draw). Otherwise: opens a dynamic-rendering scope, or joins the one open; returns whether it opened one -- caller MUST pass that to popRenderScope, so an inner no-op open can't close its outer owner's scope (see renderScopeDepth_)
     // `opened` is pushRenderScope's return value. False closes nothing.
     void popRenderScope(VkCommandBuffer cmd, bool opened);
     bool renderScopeActive() const { return renderScopeDepth_ != 0; }
@@ -1789,6 +1802,7 @@ private:
     u32 renderScopeDepth_ = 0;
     // The open scope's attachments, kept so a suspended scope can be resumed (suspendRenderScope).
     bool renderScopeSuspended_ = false;
+    bool tempScopeOpen_ = false;   // R2: an isolated draw's temporary scope is open (pushRenderScope isolated)
     VkRenderingAttachmentInfo scopeColors_[4]{};
     VkRenderingAttachmentInfo scopeDepth_{};
     VkRenderingInfo scopeInfo_{};
@@ -1869,6 +1883,7 @@ private:
     bool wireframeFrame_ = false;
     // See IDevice::setUnlit. Sticky exactly as wireframe_ is.
     bool unlit_ = false;
+    u32 drawLayersInv_ = 0;   // setDrawLayers: written to the object block's _objPad word
     // Editor chrome (grid, gizmos, selection outlines, collider/nav overlays), replayed in endFrame's
     // overlay stage after the post chain -- see aver/rhi/EditorLines.hpp. Owns its own meshes/queue/
     // pipelines; createLineMesh/destroyLineMesh/drawLines/setLineDepth/setLineWidth all delegate here.
@@ -1928,6 +1943,10 @@ private:
     // a second set -- set 3 of the post layout, rewritten each frame in flight. DOF and motion blur are absent
     // here: this backend has no G-buffer to read (see post.hlsl's AVER_POST_DEPTHFX).
     VkPipeline compositeLutPso_[2][2] = {};
+    // The AVER_POST_TONEMAP_EXT twins, [lut][bloom][auto-exposure], built the first frame postNeedsExtComposite() asks for one.
+    VkPipeline compositeExtPso_[2][2][2] = {};
+    bool compositeExtFailed_ = false;
+    VkPipeline compositePsoFor(bool lut, bool bloom, bool autoExp);
     VkDescriptorSetLayout postLutSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorSet postLutSets_[kFrameCount] = {};
     u32 lensFrame_ = 0;   // film grain's per-frame seed
@@ -2374,6 +2393,7 @@ public:
     void setViewport(u32 x, u32 y, u32 w, u32 h) override;
     void setScissor(u32 x, u32 y, u32 w, u32 h) override;
     void setRenderTargets(const TextureHandle* colors, u32 count, TextureHandle depth) override;
+    void setTargetsIsolated(bool on) override;
     void clearDepth(TextureHandle depth, f32 value) override;
     void clearColor(TextureHandle target, const f32 color[4]) override;
     void setBindingSet(BindingSetHandle set, u32 table) override;

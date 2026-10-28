@@ -1,0 +1,10 @@
+; Engine configuration file.
+; A fixture for the SubViewport / ViewportTexture / SubViewportContainer conversion (FabricViewportTest, docs/plans/fabric/G4_RENDER.md R5).
+
+config_version=5
+
+[application]
+
+config/name="Viewport Game"
+run/main_scene="res://main.tscn"
+config/features=PackedStringArray("4.3", "Forward Plus")

@@ -772,9 +772,23 @@ float3 averSkyIrradiance(float3 N) {
 
 // ---- PBR mesh with sky ambient + distance fog ----
 // Scene vertex as the input assembler delivers it.
+#if AVER_MESH_EXTRA
+// AVER_MESH_EXTRA: the mesh also has a second vertex stream (rhi::MeshVertexExtra, input slot 1; G4_RENDER.md R1). Compiled only for the
+// scene pipelines a mesh with that stream draws through; every other variant sees the three-attribute VSIn below unchanged.
+//   col  linear RGBA (UNORM8)
+//   tng  xyz = tangent * 0.5 + 0.5, w = 1 (+1 handedness), 0 (-1), ~0.5 (none: the pixel shader derives the frame)
+//   uv2  the second UV set
+struct VSIn  { float3 pos : POSITION; float3 nrm : NORMAL; float2 uv : TEXCOORD0;
+               float4 col : COLOR0; float4 tng : TANGENT0; float2 uv2 : TEXCOORD1; };
+// vcol is the vertex colour; tanWS.xyz the world tangent and tanWS.w its handedness with the world matrix's mirroring folded in
+// (0 = this vertex has no tangent).
+struct VSOut { float4 pos : SV_POSITION; float3 nrmWS : NORMAL; float3 wpos : TEXCOORD0; float2 uv : TEXCOORD1;
+               float4 vcol : COLOR0; float4 tanWS : TEXCOORD2; float2 uv2 : TEXCOORD3; };
+#else
 struct VSIn  { float3 pos : POSITION; float3 nrm : NORMAL; float2 uv : TEXCOORD0; };
 // Interpolants the scene pixel shaders read.
 struct VSOut { float4 pos : SV_POSITION; float3 nrmWS : NORMAL; float3 wpos : TEXCOORD0; float2 uv : TEXCOORD1; };
+#endif
 
 // Transforms one scene vertex to clip space, keeping world position and normal.
 VSOut VSMain(VSIn i) {
@@ -784,6 +798,20 @@ VSOut VSMain(VSIn i) {
     o.pos = mul(wp, gViewProj);
     o.nrmWS = averTransformNormal(i.nrm, gWorld);
     o.uv = i.uv;
+#if AVER_MESH_EXTRA
+    o.vcol = i.col;
+    o.uv2 = i.uv2;
+    const float tw = i.tng.w * 2.0 - 1.0;
+    if (abs(tw) > 0.5) {
+        // A tangent is a surface direction, so it takes the world matrix itself (the normal takes its inverse transpose). A mirroring
+        // world matrix (negative determinant) flips cross(N, T), so the handedness flips with it.
+        const float3 mirror = cross(gWorld[0].xyz, gWorld[1].xyz);
+        const float  hand   = (tw > 0.0 ? 1.0 : -1.0) * (dot(mirror, gWorld[2].xyz) < 0.0 ? -1.0 : 1.0);
+        o.tanWS = float4(mul(float4(i.tng.xyz * 2.0 - 1.0, 0.0), gWorld).xyz, hand);
+    } else {
+        o.tanWS = float4(0.0, 0.0, 0.0, 0.0);
+    }
+#endif
     return o;
 }
 

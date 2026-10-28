@@ -93,6 +93,16 @@ cbuffer AverMaterial : register(b2) {
     // AverAuthored::scatterColor, only meaningful with gAttenuationDistance > 0.
     float3 gScatterColor;
     float  gScatterAnisotropy;
+#if AVER_MATX
+    // G4 R6: pbr::MaterialExtConstants (MaterialFx.hpp), the 64 bytes behind the 192 above, declared only in the material-variant pipelines. Scalars
+    // only, so HLSL packs them dword for dword the way the C++ struct lays them out (a float4 would jump to the next register).
+    uint   gFxVariant;                        // (priority + 128) | key << 8; the shader needs none of it
+    uint   gFxModes;                          // pbr::modes bits
+    float  gFxUv1ScaleX, gFxUv1ScaleY, gFxUv1OffsetX, gFxUv1OffsetY;
+    uint   gFxUv2Scale, gFxUv2Offset, gFxSharp, gFxRim;   // half2 pairs
+    uint   gFxAniso, gFxHeightGrow, gFxBacklight, gFxFade;
+    uint   gFxHash, gFxFrames;
+#endif
 };
 
 // gMaterialFlags bits, mirroring pbr::MaterialFlag.
@@ -124,6 +134,16 @@ cbuffer AverMaterial : register(b2) {
 // Strand hair (pbr::MaterialFlag_Hair): selects AVER_MODEL_HAIR for the draw, whatever gShadingModel says, and reinterprets nine otherwise unused
 // or flag-gated slots under it (see averHairInit). Clear for every material that is not hair, so nothing else changes.
 #define AVER_MAT_HAIR           (1u << 18)
+// pbr::MaterialFlag_VertexColor: multiply albedo and opacity by the mesh's vertex colour. Read only where AVER_MESH_EXTRA is defined
+// (the pipelines a mesh with the second vertex stream draws through, G4_RENDER.md R1); ignored everywhere else.
+#define AVER_MAT_VERTEX_COLOR   (1u << 19)
+// pbr::MaterialFlag_Fx: the draw constants carry the R6 extension block. Read only under AVER_MATX (the material-variant pipelines).
+#define AVER_MAT_FX             (1u << 20)
+// AVER_MESH_EXTRA: AverVertex carries the vertex colour and the authored tangent, and averBuildSurface uses the tangent in place of the
+// derived frame. Undefined (0) for every pipeline today's meshes draw through, so none of it exists there.
+#ifndef AVER_MESH_EXTRA
+#define AVER_MESH_EXTRA 0
+#endif
 // The hair MODEL compiles only into the pipelines that draw hair (AVER_HAIR_SHADING=1: Voxi's PSMainVoxi variants). Elsewhere a hair
 // material shades with the standard model. The model grows AverSurface by 22 floats and adds three code paths; extra registers in a
 // shader that never draws hair (PSVoxel's mesh-shader voxelisation) are the suspect in AMD driver timeouts on NeonDistrict loads.
@@ -231,6 +251,13 @@ struct AverVertex {
     // surface, eye inside the volume the front face encloses. averVertexOf already computes this to
     // flip the normal; keeping it is the whole plumbing cost of total internal reflection.
     bool backFace;
+#if AVER_MESH_EXTRA
+    // Set by averVertexOf from the second vertex stream; a hand-built vertex (ray hits, voxelisation) leaves them unset and never reaches the code
+    // that reads them (averEvalMaterial / averBuildSurface on the raster path).
+    float4 color;     // vertex colour, linear RGBA
+    float4 tangentWS; // xyz world tangent, w handedness (mirroring folded in); w == 0: no authored tangent
+    float2 uv2;       // the second UV set
+#endif
 };
 
 // One light's contribution as the renderer resolved it.
@@ -266,6 +293,11 @@ AverVertex averVertexOf(VSOut i) {
     v.backFace = dot(v.N, v.V) < 0.0;
     if (v.backFace) v.N = -v.N;
     v.uv   = i.uv;
+#if AVER_MESH_EXTRA
+    v.color     = i.vcol;
+    v.tangentWS = i.tanWS;
+    v.uv2       = i.uv2;
+#endif
     return v;
 }
 
@@ -1130,9 +1162,32 @@ AverSurface averComposeSurface(AverVertex v, AverLight l, AverAuthored a, AverMa
 
 // Raster: the draw's own shading normal (screen-space tangent frame), the composition above with b2
 // and the per-draw cbuffer, then the alpha mask's clip.
+#if AVER_MESH_EXTRA
+// averPerturbNormal with the mesh's AUTHORED tangent where the vertex has one (the R1 contract: tangentWS.xyz points along increasing u,
+// cross(geometric normal, T) * tangentWS.w along increasing v -- the same frame the derived path solves for). The derived frame is
+// evaluated unconditionally (its derivatives need uniform control flow) and wins where there is no authored tangent, or the texture
+// coordinate is not the mesh's own (world-aligned UVs).
+float3 averPerturbNormalAuthored(AverVertex v, float2 uv, float3 nTS) {
+    const float3 derived = averPerturbNormal(v.N, v.wpos, uv, nTS);
+    if (v.tangentWS.w == 0.0 || (gMaterialFlags & AVER_MAT_WORLD_UV)) return derived;
+    const float3 geoN = v.backFace ? -v.N : v.N;   // v.N was face-forwarded; the frame is built on the interpolated normal
+    float3 T = v.tangentWS.xyz - geoN * dot(v.tangentWS.xyz, geoN);
+    const float tl = dot(T, T);
+    if (!(tl > 1e-12)) return derived;
+    T *= rsqrt(tl);
+    const float3 B = cross(geoN, T) * v.tangentWS.w;
+    return normalize(T * nTS.x + B * nTS.y + v.N * nTS.z);
+}
+#endif
+
 AverSurface averBuildSurface(AverVertex v, AverLight l, AverAuthored a, float2 uv) {
+#if AVER_MESH_EXTRA
+    const AverSurface s = averComposeSurface(v, l, a, averMaterialData(), averDrawTerms(),
+                                             averPerturbNormalAuthored(v, uv, a.normalTS));
+#else
     const AverSurface s = averComposeSurface(v, l, a, averMaterialData(), averDrawTerms(),
                                              averPerturbNormal(v.N, v.wpos, uv, a.normalTS));
+#endif
     if (gMaterialFlags & AVER_MAT_ALPHA_MASK) clip(s.alpha - a.alphaCutoff);
     return s;
 }
@@ -1145,11 +1200,300 @@ AverSurface averBuildSurface(AverVertex v, AverLight l, AverAuthored a, float2 u
 // after. Everything below this point only reads an AverSurface and never calls averEvalMaterial
 // (grep it: the three call sites are all in renderer sources, outside this prelude), so nothing
 // else here has to change and the stock path is never deleted, only not compiled.
+#if AVER_MATX
+// ================= G4 R6: BaseMaterial3D features (docs/plans/fabric/G4_RENDER.md R6) =================
+// Compiled ONLY into the material-variant scene pipelines (VoxiRenderer::createFxPipelines); every other shader sees none of this, and the stock
+// averEvalMaterial below is unchanged. Each feature is its own AVER_MATX_* define, so a variant carries only what its material uses.
+// The parameters are the extension block behind the 192-byte material block (gFx* in the AverMaterial cbuffer, pbr::MaterialExtConstants).
+// RT hits, the path tracer and material GRAPHS never run this: they read the base block only.
+
+// SV_Position.xy of the pixel being shaded, set by PSMainVoxi before the material is evaluated (dither and hash noise).
+static float2 gAverFxPixel = float2(0.0, 0.0);
+
+// pbr::modes (MaterialFx.hpp) bit masks.
+#define AVER_FX_KEEP_SCALE   (1u << 2)
+#define AVER_FX_DETAIL_UV2   (1u << 6)
+#define AVER_FX_EMIT_MUL     (1u << 7)
+#define AVER_FX_EMIT_UV2     (1u << 8)
+#define AVER_FX_AO_UV2       (1u << 9)
+#define AVER_FX_UV1_TRI      (1u << 10)
+#define AVER_FX_UV1_WORLD    (1u << 12)
+#define AVER_FX_DEEP         (1u << 22)
+#define AVER_FX_FLIP_T       (1u << 23)
+#define AVER_FX_FLIP_B       (1u << 24)
+#define AVER_FX_INVERT       (1u << 25)
+#define AVER_FX_NO_SHADOWS   (1u << 30)
+#define AVER_FX_NO_AMBIENT   (1u << 31)
+
+bool  averFxMode(uint bit) { return (gFxModes & bit) != 0u; }
+float2 averFxHalf2(uint w) { return float2(f16tof32(w & 0xFFFFu), f16tof32(w >> 16)); }
+
+// Interleaved gradient noise in (0, 1), per pixel: the dither threshold of the pixel and object fades.
+float averFxDither(float2 p) { return frac(52.9829189 * frac(dot(p, float2(0.06711056, 0.00583715)))); }
+
+float2 averFxUv1(float2 uv) { return uv * float2(gFxUv1ScaleX, gFxUv1ScaleY) + float2(gFxUv1OffsetX, gFxUv1OffsetY); }
+float2 averFxUv2(float2 uv) { return uv * averFxHalf2(gFxUv2Scale) + averFxHalf2(gFxUv2Offset); }
+
+// The unit tangent and bitangent of the UV frame (the same screen-derivative solve as averPerturbNormal). False where the UVs give none.
+bool averFxFrame(float3 N, float3 wpos, float2 uv, out float3 T, out float3 B) {
+    const float3 dp1 = ddx(wpos), dp2 = ddy(wpos);
+    const float2 du1 = ddx(uv),   du2 = ddy(uv);
+    const float3 dp2perp = cross(dp2, N);
+    const float3 dp1perp = cross(N, dp1);
+    T = dp2perp * du1.x + dp1perp * du2.x;
+    B = dp2perp * du1.y + dp1perp * du2.y;
+    const float tl = dot(T, T), bl = dot(B, B);
+    if (tl < 1e-18 || bl < 1e-18) { T = float3(1.0, 0.0, 0.0); B = float3(0.0, 1.0, 0.0); return false; }
+    T *= rsqrt(tl); B *= rsqrt(bl);
+    return true;
+}
+
+#ifdef AVER_MATERIAL_SRV
+#if AVER_MATX_PARALLAX
+// Heightmap parallax (Godot's heightmap_*): the heightmap is the second layer-1 slot (R channel). Offset mapping, or steep parallax with
+// heightmap_deep_parallax. heightmap_scale is in Godot's units (a depth of scale / 100 of the UV).
+float averFxHeight(float2 uv, float2 dx, float2 dy) {
+    const float h = gL1MetalRoughMap.SampleGrad(gMaterialSampler, uv, dx, dy).r;
+    return averFxMode(AVER_FX_INVERT) ? 1.0 - h : h;
+}
+float2 averFxParallax(AverVertex v, float2 uv) {
+    float3 T, B;
+    if (!averFxFrame(v.N, v.wpos, uv, T, B)) return uv;
+    float3 vts = float3(dot(v.V, T), dot(v.V, B), dot(v.V, v.N));
+    if (averFxMode(AVER_FX_FLIP_T)) vts.x = -vts.x;
+    if (averFxMode(AVER_FX_FLIP_B)) vts.y = -vts.y;
+    const float  scale = averFxHalf2(gFxHeightGrow).x * 0.01;
+    const float2 dx = ddx(uv), dy = ddy(uv);
+    const float2 dir = vts.xy / max(vts.z, 0.1);
+    if (!averFxMode(AVER_FX_DEEP)) return uv - dir * (averFxHeight(uv, dx, dy) * scale);
+    const uint minL = (gFxFrames >> 13) & 31u, maxL = (gFxFrames >> 18) & 63u;
+    const float layersF = max(lerp((float)maxL, (float)minL, saturate(abs(vts.z))), 1.0);
+    const uint  layers = (uint)layersF;
+    const float layerD = 1.0 / (float)layers;
+    const float2 dUv = dir * scale * layerD;
+    float2 cur = uv;
+    float  depthHere = 1.0 - averFxHeight(cur, dx, dy);
+    float  curD = 0.0;
+    [loop] for (uint i = 0u; i < layers && curD < depthHere; ++i) {
+        cur -= dUv;
+        depthHere = 1.0 - averFxHeight(cur, dx, dy);
+        curD += layerD;
+    }
+    const float2 prev = cur + dUv;
+    const float after  = depthHere - curD;
+    const float before = (1.0 - averFxHeight(prev, dx, dy)) - (curD - layerD);
+    const float denom = after - before;
+    return lerp(cur, prev, abs(denom) > 1e-5 ? saturate(after / denom) : 0.0);
+}
+#endif
+
+#if AVER_MATX_TRI
+// Triplanar mapping of the base maps (uv1_triplanar): the position in object space (or world with uv1_world_triplanar), in metres, times uv1_scale plus
+// uv1_offset, projected along each axis and blended by the normal raised to the sharpness.
+float3 averFxTriPos(AverVertex v, bool world) {
+    float3 p = v.wpos;
+    if (!world) {
+        const float3 d = v.wpos - gWorld[3].xyz;
+        p = float3(dot(d, normalize(gWorld[0].xyz)), dot(d, normalize(gWorld[1].xyz)), dot(d, normalize(gWorld[2].xyz)));
+    }
+    return p * 0.01 * float3(gFxUv1ScaleX, gFxUv1ScaleY, gFxUv1ScaleX) + float3(gFxUv1OffsetX, gFxUv1OffsetY, gFxUv1OffsetX);
+}
+float4 averFxTriSample(Texture2D tex, float3 p, float3 w) {
+    return tex.Sample(gMaterialSampler, p.zy) * w.x + tex.Sample(gMaterialSampler, p.xz) * w.y + tex.Sample(gMaterialSampler, p.xy) * w.z;
+}
+// The blended world normal of a triplanar normal map (the axis-swizzled "UDN" blend); N and the result are in the projection frame.
+float3 averFxTriNormal(Texture2D tex, float3 p, float3 w, float3 N, float scale) {
+    float3 tx = tex.Sample(gMaterialSampler, p.zy).xyz * 2.0 - 1.0;
+    float3 ty = tex.Sample(gMaterialSampler, p.xz).xyz * 2.0 - 1.0;
+    float3 tz = tex.Sample(gMaterialSampler, p.xy).xyz * 2.0 - 1.0;
+    tx = float3(tx.xy * scale + N.zy, abs(tx.z) * N.x);
+    ty = float3(ty.xy * scale + N.xz, abs(ty.z) * N.y);
+    tz = float3(tz.xy * scale + N.xy, abs(tz.z) * N.z);
+    return normalize(tx.zyx * w.x + ty.xzy * w.y + tz.xyz * w.z);
+}
+#endif
+#endif   // AVER_MATERIAL_SRV
+#endif   // AVER_MATX
+
 #ifndef AVER_MATERIAL_GRAPH
+#if AVER_MATX
+// The stock material with the variant's features. Same composition as the stock path below (maps, slope layers, factors, normal, composition, mask clip);
+// the features are added at the points they act on, in this order: UV transform, parallax, maps (triplanar replaces the bound base maps), detail, the
+// uv2 maps, vertex colour, fades and alpha hash, composition, then the surface terms (rim, backlight, modes, unshaded).
+AverSurface averEvalMaterial(AverVertex v, AverLight l) {
+    const AverMaterialData m = averMaterialData();
+    float2 uvA = averSurfaceUV(v);
+    float2 uvB = uvA;
+#if AVER_MESH_EXTRA
+    uvB = v.uv2;
+#endif
+#if AVER_MATX_UVX
+    uvA = averFxUv1(uvA);
+    uvB = averFxUv2(uvB);
+#endif
+#if AVER_MATX_PARALLAX
+    uvA = averFxParallax(v, uvA);
+#endif
+    AverMaps map = averSampleMaps(uvA);
+    map = averBlendLayers(map, uvA, v.N);
+
+    float3 triN = v.N;
+    bool   triNormal = false;
+#if AVER_MATX_TRI && defined(AVER_MATERIAL_SRV)
+    if (averFxMode(AVER_FX_UV1_TRI)) {
+        const bool world = averFxMode(AVER_FX_UV1_WORLD);
+        const float3 p = averFxTriPos(v, world);
+        float3 nObj = v.N;
+        float3 ax = float3(1.0, 0.0, 0.0), ay = float3(0.0, 1.0, 0.0), az = float3(0.0, 0.0, 1.0);
+        if (!world) {
+            ax = normalize(gWorld[0].xyz); ay = normalize(gWorld[1].xyz); az = normalize(gWorld[2].xyz);
+            nObj = float3(dot(v.N, ax), dot(v.N, ay), dot(v.N, az));
+        }
+        const float sharp = averFxHalf2(gFxSharp).x;
+        float3 w = pow(abs(nObj), max(sharp, 0.01).xxx);
+        w /= max(w.x + w.y + w.z, 1e-5);
+        if (gMaterialFlags & AVER_MAT_BASECOLOR_MAP) map.baseColor = averFxTriSample(gBaseColorMap, p, w);
+        if (gMaterialFlags & AVER_MAT_METALROUGH_MAP) { const float4 mr = averFxTriSample(gMetalRoughMap, p, w); map.metalRough = float2(mr.g, mr.b); }
+        if (gMaterialFlags & AVER_MAT_OCCLUSION_MAP) map.occlusion = averFxTriSample(gOcclusionMap, p, w).r;
+        if (gMaterialFlags & AVER_MAT_EMISSIVE_MAP) map.emissive = averFxTriSample(gEmissiveMap, p, w).rgb;
+        if (gMaterialFlags & AVER_MAT_NORMAL_MAP) {
+            const float3 r = averFxTriNormal(gNormalMap, p, w, nObj, gNormalScale);
+            triN = world ? r : normalize(ax * r.x + ay * r.y + az * r.z);
+            triNormal = true;
+            map.normalTS = float3(0.0, 0.0, 1.0);
+            map.normalLen = 1.0;
+        }
+    }
+#endif
+#if AVER_MATX_DETAIL && defined(AVER_MATERIAL_SRV)
+    {
+        // Slots 5 and 7 hold the detail albedo and the detail normal (the layer-1 slots of a material that is not slope blended). The mask map is not read: 1.
+        const float2 uvD = averFxMode(AVER_FX_DETAIL_UV2) ? uvB : uvA;
+        const uint op = (gFxModes >> 4) & 3u;
+        if (gMaterialFlags & AVER_MAT_L1_BASECOLOR) {
+            const float3 d = gL1BaseColorMap.Sample(gMaterialSampler, uvD).rgb;
+            const float3 b = map.baseColor.rgb;
+            map.baseColor.rgb = op == 0u ? d : (op == 1u ? b + d : (op == 2u ? max(b - d, 0.0) : b * d));
+        }
+        if ((gMaterialFlags & AVER_MAT_L1_NORMAL) && !triNormal) {
+            const float3 n2 = gL1NormalMap.Sample(gMaterialSampler, uvD).xyz * 2.0 - 1.0;
+            map.normalTS = normalize(float3(map.normalTS.xy + n2.xy * gNormalScale, map.normalTS.z * max(n2.z, 0.05)));
+        }
+    }
+#endif
+#if AVER_MATX_SURF && defined(AVER_MATERIAL_SRV)
+    if (averFxMode(AVER_FX_AO_UV2) && (gMaterialFlags & AVER_MAT_OCCLUSION_MAP)) map.occlusion = gOcclusionMap.Sample(gMaterialSampler, uvB).r;
+    if (averFxMode(AVER_FX_EMIT_UV2) && (gMaterialFlags & AVER_MAT_EMISSIVE_MAP)) map.emissive = gEmissiveMap.Sample(gMaterialSampler, uvB).rgb;
+#endif
+
+    AverAuthored a = averAuthoredFrom(m, map);
+#if AVER_MESH_EXTRA
+    if (gMaterialFlags & AVER_MAT_VERTEX_COLOR) { a.baseColor *= v.color.rgb; a.opacity *= v.color.a; }
+#endif
+#if AVER_MATX_SURF
+    if (averFxMode(AVER_FX_EMIT_MUL)) a.emissive *= a.baseColor;
+#endif
+#if AVER_MATX_FADE
+    {
+        // distance_fade: 1 pixel alpha (a blended material fades its opacity; an opaque one dithers), 2 pixel dither, 3 object dither (the object's origin).
+        const uint  mode = (gFxModes >> 14) & 3u;
+        const float dist = mode == 3u ? length(gWorld[3].xyz - gCamPos.xyz) : length(v.wpos - gCamPos.xyz);
+        const float2 fd = averFxHalf2(gFxFade);   // min, max in cm; min above max reverses the fade
+        const float span = fd.y - fd.x;
+        float f = abs(span) > 1e-3 ? saturate((dist - fd.x) / span) : (dist >= fd.x ? 1.0 : 0.0);
+        if (mode == 1u && (gMaterialFlags & AVER_MAT_ALPHA_BLEND)) a.opacity *= f;
+        else clip(f - averFxDither(gAverFxPixel));
+    }
+#endif
+#if AVER_MATX_HASH
+    {
+        // alpha_hash (stable noise over the texture) and the alpha-to-coverage stand-in (the same noise against a coverage that follows the alpha's edge).
+        const float scale = f16tof32(gFxHash & 0xFFFFu);
+        const float n = averHash21(floor(uvA * (256.0 * max(scale, 0.05))) + 0.5);
+        const bool aa = (gFxHash & 0x10000u) != 0u;
+        const float edge = max(fwidth(a.opacity), 1e-3);
+        const float cov = aa ? saturate((a.opacity - m.alphaCutoff) / edge + 0.5) : a.opacity;
+        clip(cov - n);
+        a.opacity = 1.0;
+    }
+#endif
+
+    float3 N = triN;
+    if (!triNormal) {
+#if AVER_MESH_EXTRA
+        N = averPerturbNormalAuthored(v, uvA, a.normalTS);
+#else
+        N = averPerturbNormal(v.N, v.wpos, uvA, a.normalTS);
+#endif
+    }
+    AverSurface s = averComposeSurface(v, l, a, m, averDrawTerms(), N);
+    if (gMaterialFlags & AVER_MAT_ALPHA_MASK) clip(s.alpha - a.alphaCutoff);
+
+#if AVER_MATX_SURF
+    {
+        const float ao = s.occlusion;
+        // ao_light_affect: occlusion also darkens the diffuse light that arrives directly (Aver applies it to ambient light only).
+        s.kdAlbedo *= lerp(1.0, ao, averFxHalf2(gFxAniso).y);
+        if (averFxMode(AVER_FX_NO_AMBIENT)) s.occlusion = 0.0;
+    }
+#endif
+#if AVER_MATX_ANISO
+    // anisotropy: no stretched highlight (the shared BRDF is isotropic); the lobe is widened by the amount, which keeps the energy of a stretched one.
+    s.rough = clamp(s.rough * (1.0 + 0.5 * abs(averFxHalf2(gFxAniso).x)), 0.045, 1.0);
+#endif
+#if AVER_MATX_RIM || AVER_MATX_BACKLIGHT
+    {
+        // The sun's share of Godot's per-light rim and backlight terms, added as glow (local lights and ambient add none).
+        const float3 sunE = l.radiance * l.visibility * (1.0 / PI);
+        float3 add = float3(0.0, 0.0, 0.0);
+#if AVER_MATX_RIM
+        {
+            const float2 rt = averFxHalf2(gFxRim);   // amount, tint
+            const float rimLight = pow(max(0.0, 1.0 - s.ndv), max(0.0, (1.0 - s.rough) * 16.0));
+            add += rimLight * rt.x * lerp(float3(1.0, 1.0, 1.0), s.albedo, rt.y) * sunE;
+        }
+#endif
+#if AVER_MATX_BACKLIGHT
+        {
+            const float3 bl = float3((float)(gFxBacklight & 255u), (float)((gFxBacklight >> 8) & 255u), (float)((gFxBacklight >> 16) & 255u)) * (1.0 / 255.0);
+            add += bl * s.albedo * saturate(dot(-s.N, l.direction)) * sunE;
+        }
+#endif
+        s.emissive += add;
+    }
+#endif
+#if AVER_MATX_MODES
+    {
+        const uint spec = (gFxModes >> 17) & 3u, diff = (gFxModes >> 19) & 3u;
+        if (spec == 2u) {   // specular_mode disabled: no F0, no grazing term
+            s.F0 = float3(0.0, 0.0, 0.0); s.F = float3(0.0, 0.0, 0.0); s.f90 = 0.0; s.reflectance = 0.0; s.metallic = 0.0;
+            s.kdAlbedo = s.albedo * (1.0 - saturate(a.transmission));
+        }
+        // diffuse_mode lambert wrap: the subsurface wrap term (tinted white) stands in. Toon diffuse and toon specular are the default lobes.
+        if (diff == 2u) { s.sssWeight = max(s.sssWeight, 0.5); s.sssRadius = max(s.sssRadius, 0.25); s.sssColor = float3(1.0, 1.0, 1.0); }
+    }
+#endif
+#if AVER_MATX_UNSHADED
+    // shading_mode unshaded: the albedo and the glow reach the target as they are (a blended surface premultiplied for the blend state).
+    s.display = true;
+    s.displayColor = float4(s.albedo + s.emissive, s.alpha);
+    if (gMaterialFlags & AVER_MAT_ALPHA_BLEND) s.displayColor.rgb *= s.displayColor.a;
+#endif
+    return s;
+}
+#else
 AverSurface averEvalMaterial(AverVertex v, AverLight l) {
     float2 uv = averSurfaceUV(v);
+#if AVER_MESH_EXTRA
+    // The vertex colour tints the albedo and the opacity when the material asks (Godot's vertex_color_use_as_albedo).
+    AverAuthored a = averStockAuthoredAt(v, uv);
+    if (gMaterialFlags & AVER_MAT_VERTEX_COLOR) { a.baseColor *= v.color.rgb; a.opacity *= v.color.a; }
+    return averBuildSurface(v, l, a, uv);
+#else
     return averBuildSurface(v, l, averStockAuthoredAt(v, uv), uv);
+#endif
 }
+#endif   // AVER_MATX
 #endif
 
 // True when the surface has an authored display colour that must reach the backbuffer untouched.

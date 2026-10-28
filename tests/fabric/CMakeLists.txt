@@ -16,6 +16,21 @@ target_compile_definitions(FabricConvertTest PRIVATE
 set_target_properties(FabricConvertTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# FabricMeshExtraTest -- G4 R1 (vertex colour, tangent, UV2) through the converter on tests/fabric/data/ExtraGame: the extra streams in the
+# converted .ocmesh files and the vertexcolor flag in the .ocmat. Runs the tool as a process, like FabricConvertTest.
+add_executable(FabricMeshExtraTest src/FabricMeshExtraTest.cpp)
+target_link_libraries(FabricMeshExtraTest PRIVATE Aver.Formats.Godot Aver.Formats Aver.Platform Aver.Core)
+if(TARGET Aver.Formats.Material)
+  target_link_libraries(FabricMeshExtraTest PRIVATE Aver.Formats.Material Aver.Render.PBR.Materials)
+  target_compile_definitions(FabricMeshExtraTest PRIVATE AVER_FABRIC_TEST_OCMAT=1)
+endif()
+add_dependencies(FabricMeshExtraTest AverAssetC)
+target_compile_definitions(FabricMeshExtraTest PRIVATE
+  AVER_ASSETC_EXE="$<TARGET_FILE:AverAssetC>"
+  AVER_FABRIC_DATA="${CMAKE_SOURCE_DIR}/tests/fabric/data")
+set_target_properties(FabricMeshExtraTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # GdextHostTest -- the GDExtension host (modules/fabric.gdext) against FabricTestExt, a GDExtension written in C against
 # gdextension_interface.h only (gdext_test/fabric_test_ext.c; no godot-cpp). The extension and the .gdextension fixtures
 # (data/gdext/) land in bin/gdext_test. Headless: no device, no .NET, no engine run.
@@ -79,3 +94,92 @@ if(TARGET Aver.Scripting.Bridge)
 endif()
 target_compile_definitions(FabricImportTest PRIVATE AVER_FABRIC_DATA="${CMAKE_SOURCE_DIR}/tests/fabric/data")
 set_target_properties(FabricImportTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# FabricLightsTest -- G4 R2 (omni/spot/sun calibration and ratings) through the converter on tests/fabric/data/LightsGame: the SUN record's lux,
+# the light Props, one sun, and the per-property report. Runs the tool as a process, like FabricConvertTest.
+add_executable(FabricLightsTest src/FabricLightsTest.cpp)
+target_link_libraries(FabricLightsTest PRIVATE Aver.Formats.Godot Aver.Formats Aver.Platform Aver.Core)
+add_dependencies(FabricLightsTest AverAssetC)
+target_compile_definitions(FabricLightsTest PRIVATE
+  AVER_ASSETC_EXE="$<TARGET_FILE:AverAssetC>"
+  AVER_FABRIC_DATA="${CMAKE_SOURCE_DIR}/tests/fabric/data")
+set_target_properties(FabricLightsTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# FabricCameraTest -- G4 R4 (camera projection, keep_aspect, offsets, cull masks, render layers, visibility ranges) through the converter on
+# tests/fabric/data/CameraGame: the Props, the made-current first camera, and the per-property report. Runs the tool as a process.
+add_executable(FabricCameraTest src/FabricCameraTest.cpp)
+target_link_libraries(FabricCameraTest PRIVATE Aver.Formats.Godot Aver.Formats Aver.Platform Aver.Core)
+add_dependencies(FabricCameraTest AverAssetC)
+target_compile_definitions(FabricCameraTest PRIVATE
+  AVER_ASSETC_EXE="$<TARGET_FILE:AverAssetC>"
+  AVER_FABRIC_DATA="${CMAKE_SOURCE_DIR}/tests/fabric/data")
+set_target_properties(FabricCameraTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# FabricEnvTest -- G4 R3 (WorldEnvironment, tonemapper, adjustments, fog, panorama sky, CameraAttributes) through the converter on
+# tests/fabric/data/EnvGame, and LightsGame (no environment) for the unchanged default. Runs the tool as a process, like FabricConvertTest.
+add_executable(FabricEnvTest src/FabricEnvTest.cpp)
+target_link_libraries(FabricEnvTest PRIVATE Aver.Formats.Godot Aver.Formats Aver.Platform Aver.Core)
+add_dependencies(FabricEnvTest AverAssetC)
+target_compile_definitions(FabricEnvTest PRIVATE
+  AVER_ASSETC_EXE="$<TARGET_FILE:AverAssetC>"
+  AVER_FABRIC_DATA="${CMAKE_SOURCE_DIR}/tests/fabric/data")
+set_target_properties(FabricEnvTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# FabricEnvVolTest -- G4 R8 (FogVolume + FogMaterial, ReflectionProbe, LightmapGI, LightmapProbe, VoxelGI, volumetric fog, the screen-space / SDF flags) through the
+# converter on tests/fabric/data/EnvVolGame; EnvGame and LightsGame for the unchanged default. Runs the tool as a process, like FabricEnvTest.
+add_executable(FabricEnvVolTest src/FabricEnvVolTest.cpp)
+target_link_libraries(FabricEnvVolTest PRIVATE Aver.Formats.Godot Aver.Formats Aver.Platform Aver.Core)
+add_dependencies(FabricEnvVolTest AverAssetC)
+target_compile_definitions(FabricEnvVolTest PRIVATE
+  AVER_ASSETC_EXE="$<TARGET_FILE:AverAssetC>"
+  AVER_FABRIC_DATA="${CMAKE_SOURCE_DIR}/tests/fabric/data")
+set_target_properties(FabricEnvVolTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# FabricViewportTest -- G4 R5 (SubViewport, ViewportTexture, SubViewportContainer) through the converter on tests/fabric/data/ViewportGame: the view's key and
+# consumers, the '@rt:viewport.<key>' texture reference in the .ocmat, cameras below a view, the container's Props, and the per-property report. Runs the tool
+# as a process, like FabricConvertTest.
+add_executable(FabricViewportTest src/FabricViewportTest.cpp)
+target_link_libraries(FabricViewportTest PRIVATE Aver.Formats.Godot Aver.Formats Aver.Platform Aver.Core)
+if(TARGET Aver.Formats.Material)
+  target_link_libraries(FabricViewportTest PRIVATE Aver.Formats.Material Aver.Render.PBR.Materials)
+  target_compile_definitions(FabricViewportTest PRIVATE AVER_FABRIC_TEST_OCMAT=1)
+endif()
+add_dependencies(FabricViewportTest AverAssetC)
+target_compile_definitions(FabricViewportTest PRIVATE
+  AVER_ASSETC_EXE="$<TARGET_FILE:AverAssetC>"
+  AVER_FABRIC_DATA="${CMAKE_SOURCE_DIR}/tests/fabric/data")
+set_target_properties(FabricViewportTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# FabricMaterialFxTest -- G4 R6 (StandardMaterial3D / ORMMaterial3D features: UV transforms, triplanar, cull / blend / depth modes, alpha hash, billboard,
+# fades, rim, clearcoat, parallax, detail ...) through the converter on tests/fabric/data/MatGame: the .ocmat files read back with the engine's own loader
+# and the per-property report. Runs the tool as a process, like FabricConvertTest.
+if(TARGET Aver.Formats.Material)
+  add_executable(FabricMaterialFxTest src/FabricMaterialFxTest.cpp)
+  target_link_libraries(FabricMaterialFxTest PRIVATE Aver.Formats.Godot Aver.Formats Aver.Formats.Material Aver.Render.PBR.Materials Aver.Platform Aver.Core)
+  add_dependencies(FabricMaterialFxTest AverAssetC)
+  target_compile_definitions(FabricMaterialFxTest PRIVATE
+    AVER_ASSETC_EXE="$<TARGET_FILE:AverAssetC>"
+    AVER_FABRIC_DATA="${CMAKE_SOURCE_DIR}/tests/fabric/data")
+  set_target_properties(FabricMaterialFxTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
+# FabricGeometryTest -- G4 R7 (ArrayMesh, MultiMesh, trail meshes, CSG, Sprite3D, Label3D, GridMap) through the converter on tests/fabric/data/GeomGame.
+# Runs the tool as a process, like FabricConvertTest.
+add_executable(FabricGeometryTest src/FabricGeometryTest.cpp)
+target_link_libraries(FabricGeometryTest PRIVATE Aver.Formats.Godot Aver.Formats Aver.Platform Aver.Core)
+if(TARGET Aver.Formats.Material)
+  target_link_libraries(FabricGeometryTest PRIVATE Aver.Formats.Material Aver.Render.PBR.Materials)
+  target_compile_definitions(FabricGeometryTest PRIVATE AVER_FABRIC_TEST_OCMAT=1)
+endif()
+add_dependencies(FabricGeometryTest AverAssetC)
+target_compile_definitions(FabricGeometryTest PRIVATE
+  AVER_ASSETC_EXE="$<TARGET_FILE:AverAssetC>"
+  AVER_FABRIC_DATA="${CMAKE_SOURCE_DIR}/tests/fabric/data")
+set_target_properties(FabricGeometryTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

@@ -544,6 +544,16 @@ VkPipelineColorBlendAttachmentState toVkBlendAttachment(BlendMode m) {
             a.dstColorBlendFactor = a.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
             a.colorBlendOp = a.alphaBlendOp = VK_BLEND_OP_ADD;
             break;
+        case BlendMode::Subtractive:   // R6: dst - src (colour); the alpha channel keeps dst
+            a.blendEnable = VK_TRUE;
+            a.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;  a.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;  a.colorBlendOp = VK_BLEND_OP_REVERSE_SUBTRACT;
+            a.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO; a.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;  a.alphaBlendOp = VK_BLEND_OP_ADD;
+            break;
+        case BlendMode::Multiplicative:   // R6: dst * src (colour); the alpha channel keeps dst
+            a.blendEnable = VK_TRUE;
+            a.srcColorBlendFactor = VK_BLEND_FACTOR_DST_COLOR; a.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO; a.colorBlendOp = VK_BLEND_OP_ADD;
+            a.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;      a.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;  a.alphaBlendOp = VK_BLEND_OP_ADD;
+            break;
     }
     return a;
 }
@@ -2733,6 +2743,7 @@ PipelineHandle VulkanResourceFactory::createGraphicsPipeline(const GraphicsPipel
     VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
     ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     VkVertexInputBindingDescription binding{};
+    VkVertexInputBindingDescription bindings[2]{};   // binding 1 is R1's MeshVertexExtra stream, declared only when an attribute reads it
     VkVertexInputAttributeDescription meshAttribs[3];
     VkVertexInputAttributeDescription layoutAttribs[kMaxVertexAttribs];
 
@@ -2751,8 +2762,14 @@ PipelineHandle VulkanResourceFactory::createGraphicsPipeline(const GraphicsPipel
         if (d.vertexLayout.attribCount > 0) {
             binding = {0, d.vertexLayout.stride, VK_VERTEX_INPUT_RATE_VERTEX};
             const u32 n = buildVertexInputAttributes(d.vertexLayout, layoutAttribs);
-            vin.vertexBindingDescriptionCount = 1;
-            vin.pVertexBindingDescriptions = &binding;
+            bindings[0] = binding;
+            bool usesSlot1 = false;
+            for (u32 a = 0; a < d.vertexLayout.attribCount && a < kMaxVertexAttribs; ++a)
+                if (d.vertexLayout.attribs[a].slot == 1) usesSlot1 = true;
+            if (usesSlot1) bindings[1] = {1, d.vertexLayout.stride1, VK_VERTEX_INPUT_RATE_VERTEX};
+            p.extraSlot = usesSlot1;
+            vin.vertexBindingDescriptionCount = usesSlot1 ? 2u : 1u;
+            vin.pVertexBindingDescriptions = bindings;
             vin.vertexAttributeDescriptionCount = n;
             vin.pVertexAttributeDescriptions = layoutAttribs;
         } else {

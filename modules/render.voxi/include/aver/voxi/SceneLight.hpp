@@ -26,6 +26,13 @@ struct SceneLight {
     bool castShadows = true;
     bool iesPeak = false;                 // normalise the IES profile to its peak, not its flux
     u64  iesId = 0, cookieId = 0;         // registerIesProfile / registerCookie ids; 0 = none
+    // G4 R2: Godot's parameter block (scene::WorldLight), read by the raster local-light path (RasterLights.hpp). The RT path ignores it.
+    bool godot = false, negative = false;
+    f32  attenuation = 0.0f, spotAttenuation = 1.0f, specularScale = 1.0f;
+    f32  shadowBias = 0.0f, shadowNormalBias = 0.0f;
+    f32  fadeBeginCm = 0.0f, fadeLengthCm = 0.0f, fadeShadowCm = 0.0f;
+    // G4 R4: light_cull_mask and shadow_caster_mask, stored inverted (aver/scene/RenderMasks.hpp; 0 = every layer). Raster local-light path only.
+    u32  cullInv = 0, shadowCasterInv = 0;
 };
 
 // One light as the GPU reads it (AverLightRec). Field meanings are documented in aver_lights.hlsli.

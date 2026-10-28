@@ -133,15 +133,24 @@ visibility shared across lights.
 - Lights flagged no-shadow are never picked for a ray and are added unshadowed.
 - The history is keyed on the byte hash of the list, so **a moving light restarts its visibility
   history every frame**: shadows from a moving light are noisier than from a static one.
-- D3D12 only, and only with ray tracing on (`settings.localLights`), like emissive lamps. Without ray
-  tracing there are no local lights at all. The raster scene draws (`PSMainVoxi`) light and shadow
-  from the same list when ray tracing is on.
+- The ray-traced path is D3D12 only, and only with ray tracing on (`settings.localLights`), like emissive lamps. The raster scene
+  draws (`PSMainVoxi`) light and shadow from the same list when ray tracing is on. Without ray tracing, and on Vulkan, point and spot
+  lights are drawn by the raster local-light path (G4 R2, below); rectangles, IES profiles and cookies still need the ray-traced one.
 - The single-pass ray-driven megakernel (`AVER_RD_SINGLE_PASS`) sits at the register limit, so it compiles
   `AVER_LIGHTS_SIMPLE`: point and spot lights only; rectangles, IES profiles and cookies need the staged path.
 - Asset ids are immutable for a session: editing an `.ies` or cookie on disk needs a restart.
-- Vulkan is not ported (local lights are D3D12 only today).
+- Vulkan: the staged ray-traced path is D3D12 only; Vulkan gets point and spot lights from the raster path below.
 
 - **Many lights (2026-10-17).** The grid sees at most 24 lights per cell. With `voxi.manyLights` live (NRD2 frames, more than `voxi.manyLightsMin` = 48 lamps and scene lights, or forced) the visible surface's tail and every GI, reflection and path hit are lit from a light tree instead: M candidates by importance, resampled into S slots, one shadow ray each, so rays per pixel stay bounded however many lights there are (the list cut `kMaxListLights` = 4000 still applies). FidelityFX and None frames, scenes at or under the threshold, raster and Vulkan keep the grid path. See `docs/rendering/MANY_LIGHTS.md`.
+
+## The raster local-light path (G4 R2)
+
+Point and spot `CLight`s are also shaded in the raster scene pass, with no ray query, on every backend: a list of at most 32 lights (culled against the frustum, ranked by importance) read from a tail of the `VoxiFrame`
+constant block in the `AVER_LOCAL_RASTER` pixel-shader variants, with PCF shadow maps from a 4096 px atlas (a spot is one perspective tile, an omni a cube of six; at most 8 shadowed lights, 24 tiles). It is live where the ray-traced
+list cannot serve (ray tracing off, no ray queries, Vulkan), or in raster-primary ray-traced frames with `RENDER.LOCALRASTER 1`; `RENDER.LOCALRASTER 2` turns it off and `RENDER.LOCALSHADOWS 0` drops the shadow maps. With ray tracing on
+and the defaults nothing changes. The `CLight` fields `attenuation`, `spotAttenuation`, `specularScale`, `shadowBias`, `shadowNormalBias`, `fadeBeginCm`, `fadeLengthCm`, `fadeShadowCm` and the flags `kLightGodot` / `kLightNegative`
+give a light Godot's falloff curves, specular multiplier, negative light, biases and distance fade (all zero = the Aver behaviour described above; set with the component field ABI). Limits: blended draws and mesh-shader draws are not
+lit by it, rectangles, IES and cookies are skipped, no indirect light. Design, units, calibration and the Vulkan note: `docs/plans/fabric/G4_RENDER.md` R2.
 
 ## Path tracer agreement
 
@@ -170,6 +179,12 @@ Add Component > Light (or the Light section of any entity that has one): type, c
 cone (degrees), rectangle size, source radius, shadows, IES profile and cookie pickers listing the
 project's `.ies` / image files, and the "Intensity = IES peak" switch. Levels save lights as `LIGHT`
 records (`docs/formats/FORMAT_SPECS.md` section 11).
+
+## Layer masks (G4 R4)
+
+`CLight::cullInv` and `shadowCasterInv` are Godot's `light_cull_mask` and `shadow_caster_mask`, stored inverted so that 0 (every layer) is the zero-fill default. Only the raster
+local-light path (docs/plans/fabric/G4_RENDER.md R2, R4) honours them: an instance's layers travel with its draw, a light skips instances it excludes, and the shadow pass leaves out
+casters the shadow mask excludes. The ray-traced light list, the sun and the GI ignore them.
 
 ## Verification
 

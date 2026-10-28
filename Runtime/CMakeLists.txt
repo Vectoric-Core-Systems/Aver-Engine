@@ -46,6 +46,8 @@ aver_add_module(Aver.Runtime.Game.Core
     # .ocshape trees -> physics shapes, and the CollisionShape component (apply / capture / registration).
     src/ColliderShapes.cpp
     src/GameRender.cpp
+    # G4 R5: sub-viewports -- the views a script or converted level asks for, drawn by the cheap raster feature and handed to materials and the UI.
+    src/SubViewportHost.cpp
     src/GameInput.cpp
     src/GameStreaming.cpp
     src/LevelStreaming.cpp
@@ -121,6 +123,11 @@ if(TARGET Aver.Render.Voxi)
 endif()
 if(TARGET Aver.Scene)
   target_link_libraries(Aver.Runtime.Game.Core PUBLIC Aver.Scene)
+endif()
+# Sub-viewports (SubViewportHost.cpp): each view is drawn by an ActorPreview feature in scene-view mode. PUBLIC for the same reason as the PBR link above:
+# ActorPreview.hpp's class layout depends on AVER_MODULE_PBR, which reaches a translation unit only through the link interface.
+if(TARGET Aver.Render.ActorPreview)
+  target_link_libraries(Aver.Runtime.Game.Core PUBLIC Aver.Render.ActorPreview)
 endif()
 # meshoptimizer (MIT): collisionMeshFor's simplification step (GameContent.cpp), which is scene-gated
 # in the source (`#if AVER_MODULE_SCENE`) because collision triangles are a scene concept -- so the

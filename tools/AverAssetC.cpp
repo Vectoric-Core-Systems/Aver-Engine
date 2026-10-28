@@ -803,6 +803,25 @@ fmt::OcMeshData mergeAll(const std::vector<MeshItem>& items, usize& mergedCount,
         m.positions.insert(m.positions.end(), src.positions.begin(), src.positions.end());
         m.normals.insert(m.normals.end(), src.normals.begin(), src.normals.end());
         m.uvs.insert(m.uvs.end(), src.uvs.begin(), src.uvs.end());
+        // R1 extra streams: a part without one gets neutral values (white, no tangent -- w 0 makes the shader derive it -- UV1 0).
+        {
+            const auto mergeExtra = [&](std::vector<f32>& dst, bool dstHas, const std::vector<f32>& s, bool srcHas, usize comps,
+                                        const f32* fill) {
+                if (!dstHas && !srcHas) return;
+                if (!dstHas) {
+                    dst.clear();
+                    for (u32 v = 0; v < base; ++v) dst.insert(dst.end(), fill, fill + comps);
+                }
+                if (srcHas) dst.insert(dst.end(), s.begin(), s.end());
+                else for (u32 v = 0; v < src.vertexCount(); ++v) dst.insert(dst.end(), fill, fill + comps);
+            };
+            static const f32 kWhite[4] = {1, 1, 1, 1}, kNone[4] = {0, 0, 0, 0};
+            const bool hadColor = m.colors.size() == usize(base) * 4, hadTan = m.tangents.size() == usize(base) * 4,
+                       hadUv1 = m.uvs1.size() == usize(base) * 2;
+            mergeExtra(m.colors, hadColor, src.colors, src.hasColor(), 4, kWhite);
+            mergeExtra(m.tangents, hadTan, src.tangents, src.hasTangent(), 4, kNone);
+            mergeExtra(m.uvs1, hadUv1, src.uvs1, src.hasUv1(), 2, kNone);
+        }
         if (sameSkeleton) {
             m.joints.insert(m.joints.end(), src.joints.begin(), src.joints.end());
             m.weights.insert(m.weights.end(), src.weights.begin(), src.weights.end());

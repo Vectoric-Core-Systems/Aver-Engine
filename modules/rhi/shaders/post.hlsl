@@ -47,6 +47,10 @@ cbuffer AverPost : register(b0) {
     float4 gPostDof;     // x focus (cm), y CoC scale (px at the composite source's width), z max radius
                          // (half-res px), w unused
     float4 gPostAccess;  // x packed colour-vision filter (mode + 4 simulate + 8 round(strength*100); 0 = off), yzw unused
+#ifdef AVER_POST_TONEMAP_EXT
+    // Godot tonemappers and display adjustments (PostCB::ext): x white point, yzw brightness / contrast / saturation.
+    float4 gPostExt;
+#endif
 };
 
 Texture2D<float4>     gPostSceneTex : register(t0);
@@ -755,7 +759,14 @@ float4 PSComposite(AverPostVSOut i) : SV_TARGET {
 #endif
     if (gPostGrade.z > 0.0) c = averPostGrade(c);
     if (gPostLens.x > 0.0) c *= averPostVignette(i.uv);
+#ifdef AVER_POST_TONEMAP_EXT
+    // Modes 3..7 are Godot's tonemappers (color.hlsli); the adjustments run on the display colour, before the LUT.
+    float3 toned = gPostMisc.w > 2.5 ? averTonemapGodot(c, gPostMisc.w, gPostExt.x) : averTonemap(c, gPostMisc.w);
+    float3 outc = toGamma(toned);
+    if (gPostExt.y != 1.0 || gPostExt.z != 1.0 || gPostExt.w != 1.0) outc = averDisplayAdjust(outc, gPostExt.yzw);
+#else
     float3 outc = toGamma(averTonemap(c, gPostMisc.w));
+#endif
 #ifdef AVER_POST_LUT
     // The grading LUT in display space: texel centres, so 0 and 1 land on the first and last entry.
     if (gPostWb.w > 0.0 && gPostGrade.w > 0.0) {

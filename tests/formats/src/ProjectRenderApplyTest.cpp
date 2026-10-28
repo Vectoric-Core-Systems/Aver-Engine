@@ -834,7 +834,251 @@ static void testRestirHistoryRoundTrip() {
           "an absent (-1) RESTIRHISTORY writes no RENDER.RESTIRHISTORY line at all");
 }
 
+// RENDER.MATERIALFX (G4 R6): the same shape as RENDER.MESHEXTRA -- absent leaves the default (on), 0/1 land in Settings::materialFx, the key round-trips, capture writes it
+// only when off.
+static void testMaterialFxKey() {
+    AVER_INFO("=== RENDER.MATERIALFX: the material-variant switch ===");
+    fmt::ProjectDesc absent;
+    voxi::Settings s{};
+    check(absent.materialFx == -1 && !absent.hasRenderSettings() && s.materialFx, "absent: -1, no RENDER.* key stated, the engine default is on");
+    voxi::applyManifestKnobs(absent, s);
+    check(s.materialFx, "an absent key leaves it on");
+    fmt::ProjectDesc off;
+    off.materialFx = 0;
+    check(off.hasRenderSettings(), "a stated key counts as a render setting");
+    voxi::applyManifestKnobs(off, s);
+    check(!s.materialFx, "RENDER.MATERIALFX 0 -> Settings::materialFx off");
+    fmt::ProjectDesc on;
+    on.materialFx = 1;
+    voxi::applyManifestKnobs(on, s);
+    check(s.materialFx, "RENDER.MATERIALFX 1 -> on again");
+    fmt::ProjectDesc p;
+    p.name = "FxSwitch";
+    p.materialFx = 0;
+    const std::string first = fmt::writeOcproject(p, "");
+    check(first.find("RENDER.MATERIALFX 0") != std::string::npos, "RENDER.MATERIALFX 0 is written");
+    fmt::ProjectDesc back;
+    std::string err;
+    check(fmt::parseOcproject(first, back, &err) && back.materialFx == 0, "and parses back: " + err);
+    fmt::ProjectDesc none;
+    none.name = "NoFx";
+    check(fmt::writeOcproject(none, "").find("RENDER.MATERIALFX") == std::string::npos, "an absent key writes no line");
+    const voxi::DeviceInfo d = fullyCapableDevice();
+    voxi::Settings live{};
+    voxi::Settings requested = live;
+    requested.materialFx = false;
+    fmt::ProjectDesc cap;
+    voxi::captureVoxiSettings(cap, requested, live, d, 0);
+    check(cap.materialFx == 0, "capture: switched off is written as 0");
+    requested.materialFx = true;
+    fmt::ProjectDesc cap2;
+    voxi::captureVoxiSettings(cap2, requested, live, d, 0);
+    check(cap2.materialFx == -1, "capture: on does not add the key to a project that never mentioned it");
+}
+
+// RENDER.MESHEXTRA (G4 R1): absent leaves the default (on), 0/1 land in Settings::meshExtraStreams, the key round-trips and a manifest that
+// never mentions it stays free of it.
+static void testMeshExtraKey() {
+    AVER_INFO("=== RENDER.MESHEXTRA: the second-vertex-stream switch ===");
+    fmt::ProjectDesc absent;
+    check(absent.meshExtra == -1 && !absent.hasRenderSettings(), "absent: -1, and no RENDER.* key is stated");
+    voxi::Settings s{};
+    check(s.meshExtraStreams, "the engine default is on");
+    voxi::applyManifestKnobs(absent, s);
+    check(s.meshExtraStreams, "an absent key leaves it on");
+
+    fmt::ProjectDesc off;
+    off.meshExtra = 0;
+    check(off.hasRenderSettings(), "a stated key counts as a render setting");
+    voxi::applyManifestKnobs(off, s);
+    check(!s.meshExtraStreams, "RENDER.MESHEXTRA 0 -> Settings::meshExtraStreams off");
+    fmt::ProjectDesc on;
+    on.meshExtra = 1;
+    voxi::applyManifestKnobs(on, s);
+    check(s.meshExtraStreams, "RENDER.MESHEXTRA 1 -> on again");
+
+    fmt::ProjectDesc p;
+    p.name = "ExtraSwitch";
+    p.meshExtra = 0;
+    const std::string first = fmt::writeOcproject(p, "");
+    check(first.find("RENDER.MESHEXTRA 0") != std::string::npos, "RENDER.MESHEXTRA 0 is written");
+    fmt::ProjectDesc back;
+    std::string err;
+    check(fmt::parseOcproject(first, back, &err) && back.meshExtra == 0, "and parses back: " + err);
+    fmt::ProjectDesc none;
+    none.name = "NoSwitch";
+    check(fmt::writeOcproject(none, "").find("RENDER.MESHEXTRA") == std::string::npos, "an absent key writes no line");
+
+    // Capture: switched off is remembered; on does not add a key to a project that never had one.
+    const voxi::DeviceInfo d = fullyCapableDevice();
+    voxi::Settings live{};
+    voxi::Settings requested = live;
+    requested.meshExtraStreams = false;
+    fmt::ProjectDesc cap;
+    voxi::captureVoxiSettings(cap, requested, live, d, /*overallFollowMask=*/0);
+    check(cap.meshExtra == 0, "capture: switched off is written as 0");
+    requested.meshExtraStreams = true;
+    fmt::ProjectDesc cap2;
+    voxi::captureVoxiSettings(cap2, requested, live, d, 0);
+    check(cap2.meshExtra == -1, "capture: on does not add the key to a project that never mentioned it");
+    fmt::ProjectDesc cap3;
+    cap3.meshExtra = 0;
+    voxi::captureVoxiSettings(cap3, requested, live, d, 0);
+    check(cap3.meshExtra == 1, "capture: a project that had it off and is switched on writes 1");
+}
+
+// RENDER.LOCALRASTER / RENDER.LOCALSHADOWS (G4 R2): absent leaves the defaults (auto, shadows on), values land in Settings, they round-trip and a
+// manifest that never mentions them stays free of them.
+static void testLocalRasterKeys() {
+    AVER_INFO("=== RENDER.LOCALRASTER / RENDER.LOCALSHADOWS: the raster local-light switches ===");
+    fmt::ProjectDesc absent;
+    check(absent.localRaster == -1 && absent.localShadows == -1 && !absent.hasRenderSettings(), "absent: -1, and no RENDER.* key is stated");
+    voxi::Settings s{};
+    check(s.localLightsRaster == 0u && s.localLightShadows, "the engine default is auto with shadow maps on");
+    voxi::applyManifestKnobs(absent, s);
+    check(s.localLightsRaster == 0u && s.localLightShadows, "an absent key leaves both alone");
+
+    fmt::ProjectDesc on;
+    on.localRaster = 1; on.localShadows = 0;
+    check(on.hasRenderSettings(), "a stated key counts as a render setting");
+    voxi::applyManifestKnobs(on, s);
+    check(s.localLightsRaster == 1u && !s.localLightShadows, "LOCALRASTER 1 and LOCALSHADOWS 0 land in Settings");
+    fmt::ProjectDesc off;
+    off.localRaster = 2;
+    voxi::applyManifestKnobs(off, s);
+    check(s.localLightsRaster == 2u && !s.localLightShadows, "LOCALRASTER 2 is off; the unstated shadow switch keeps its value");
+    fmt::ProjectDesc bad;
+    bad.localRaster = 7;
+    voxi::applyManifestKnobs(bad, s);
+    check(s.localLightsRaster == 2u, "an out-of-range mode is ignored");
+
+    fmt::ProjectDesc p;
+    p.name = "LocalRaster";
+    p.localRaster = 1; p.localShadows = 0;
+    const std::string text = fmt::writeOcproject(p, "");
+    check(text.find("RENDER.LOCALRASTER 1") != std::string::npos && text.find("RENDER.LOCALSHADOWS 0") != std::string::npos, "both keys are written");
+    fmt::ProjectDesc back;
+    std::string err;
+    check(fmt::parseOcproject(text, back, &err) && back.localRaster == 1 && back.localShadows == 0, "and parse back: " + err);
+    fmt::ProjectDesc none;
+    none.name = "NoKeys";
+    const std::string plain = fmt::writeOcproject(none, "");
+    check(plain.find("RENDER.LOCALRASTER") == std::string::npos && plain.find("RENDER.LOCALSHADOWS") == std::string::npos, "absent keys write no line");
+
+    const voxi::DeviceInfo d = fullyCapableDevice();
+    voxi::Settings live{};
+    voxi::Settings requested = live;
+    fmt::ProjectDesc cap;
+    voxi::captureVoxiSettings(cap, requested, live, d, 0);
+    check(cap.localRaster == -1 && cap.localShadows == -1, "capture: defaults add no key");
+    requested.localLightsRaster = 1; requested.localLightShadows = false;
+    fmt::ProjectDesc cap2;
+    voxi::captureVoxiSettings(cap2, requested, live, d, 0);
+    check(cap2.localRaster == 1 && cap2.localShadows == 0, "capture: opt-in and shadows off are written");
+    requested.localLightsRaster = 0; requested.localLightShadows = true;
+    fmt::ProjectDesc cap3;
+    cap3.localRaster = 1; cap3.localShadows = 0;
+    voxi::captureVoxiSettings(cap3, requested, live, d, 0);
+    check(cap3.localRaster == 0 && cap3.localShadows == 1, "capture: a project that had them stated writes the new values");
+}
+
+// RENDER.SUBVIEWPORTS / SUBVIEWRENDERS / SUBVIEWPIXELS (G4 R5): the sub-viewport cost guard. They are manifest-only keys the hosts read (no voxi::Settings field):
+// absent is -1 and writes nothing, stated values parse, round-trip and count as render settings.
+static void testSubViewportKeys() {
+    AVER_INFO("=== RENDER.SUBVIEWPORTS / SUBVIEWRENDERS / SUBVIEWPIXELS: the sub-viewport cost guard ===");
+    fmt::ProjectDesc absent;
+    check(absent.subViewports == -1 && absent.subViewRenders == -1 && absent.subViewPixels < 0.0f && !absent.hasRenderSettings(), "absent: unstated, and no RENDER.* key is stated");
+    fmt::ProjectDesc p;
+    p.name = "SubViews";
+    p.subViewports = 6; p.subViewRenders = 3; p.subViewPixels = 12.5f;
+    check(p.hasRenderSettings(), "a stated key counts as a render setting");
+    const std::string text = fmt::writeOcproject(p, "");
+    check(text.find("RENDER.SUBVIEWPORTS 6") != std::string::npos && text.find("RENDER.SUBVIEWRENDERS 3") != std::string::npos &&
+              text.find("RENDER.SUBVIEWPIXELS 12.5") != std::string::npos,
+          "the three keys are written");
+    fmt::ProjectDesc back;
+    std::string err;
+    check(fmt::parseOcproject(text, back, &err) && back.subViewports == 6 && back.subViewRenders == 3 && back.subViewPixels == 12.5f, "and parse back: " + err);
+    fmt::ProjectDesc zero;
+    zero.name = "Off";
+    zero.subViewports = 0;
+    const std::string offText = fmt::writeOcproject(zero, "");
+    fmt::ProjectDesc offBack;
+    check(offText.find("RENDER.SUBVIEWPORTS 0") != std::string::npos && fmt::parseOcproject(offText, offBack, &err) && offBack.subViewports == 0 && offBack.subViewRenders == -1,
+          "0 views (the feature off) is a real value and survives; the unstated keys stay unstated");
+    fmt::ProjectDesc none;
+    none.name = "NoKeys";
+    const std::string plain = fmt::writeOcproject(none, "");
+    check(plain.find("RENDER.SUBVIEW") == std::string::npos, "absent keys write no line");
+    // A hand-edited line is owned by the writer: a rewrite replaces it rather than duplicating it.
+    const std::string rewritten = fmt::writeOcproject(p, "RENDER.SUBVIEWPORTS 2\n");
+    size_t count = 0;
+    for (size_t at = rewritten.find("RENDER.SUBVIEWPORTS"); at != std::string::npos; at = rewritten.find("RENDER.SUBVIEWPORTS", at + 1)) ++count;
+    check(count == 1 && rewritten.find("RENDER.SUBVIEWPORTS 6") != std::string::npos, "a rewrite replaces an existing line (the key is owned)");
+}
+
+// RENDER.VOLFOG / RENDER.VOLFOGDENSITY (G4 R8): volumetric fog, the home of Godot FogVolumes. Absent leaves the engine defaults (off), stated values land in
+// Settings, round-trip, and capture writes them only when on or already stated.
+static void testVolFogKeys() {
+    AVER_INFO("=== RENDER.VOLFOG / RENDER.VOLFOGDENSITY: volumetric fog ===");
+    fmt::ProjectDesc absent;
+    check(absent.volFog == -1 && absent.volFogDensity < 0.0f && !absent.hasRenderSettings(), "absent: unstated, and no RENDER.* key is stated");
+    voxi::Settings s{};
+    check(!s.volumetricFog, "the engine default is off");
+    const f32 defaultDensity = s.volumetricFogDensity;
+    voxi::applyManifestKnobs(absent, s);
+    check(!s.volumetricFog && s.volumetricFogDensity == defaultDensity, "an absent key leaves both alone");
+
+    fmt::ProjectDesc on;
+    on.volFog = 1; on.volFogDensity = 0.0005f;
+    check(on.hasRenderSettings(), "a stated key counts as a render setting");
+    voxi::applyManifestKnobs(on, s);
+    check(s.volumetricFog && s.volumetricFogDensity == 0.0005f, "VOLFOG 1 and a density land in Settings");
+    fmt::ProjectDesc big;
+    big.volFogDensity = 5.0f;
+    voxi::applyManifestKnobs(big, s);
+    check(s.volumetricFogDensity == 0.01f && s.volumetricFog, "a density past the limit is clamped; the unstated switch keeps its value");
+    fmt::ProjectDesc off;
+    off.volFog = 0;
+    voxi::applyManifestKnobs(off, s);
+    check(!s.volumetricFog, "VOLFOG 0 switches it off");
+
+    fmt::ProjectDesc p;
+    p.name = "VolFog";
+    p.volFog = 1; p.volFogDensity = 0.0005f;
+    const std::string text = fmt::writeOcproject(p, "");
+    check(text.find("RENDER.VOLFOG 1") != std::string::npos && text.find("RENDER.VOLFOGDENSITY ") != std::string::npos, "both keys are written");
+    fmt::ProjectDesc back;
+    std::string err;
+    check(fmt::parseOcproject(text, back, &err) && back.volFog == 1 && back.volFogDensity == 0.0005f, "and parse back: " + err);
+    fmt::ProjectDesc none;
+    none.name = "NoKeys";
+    check(fmt::writeOcproject(none, "").find("RENDER.VOLFOG") == std::string::npos, "absent keys write no line");
+
+    const voxi::DeviceInfo d = fullyCapableDevice();
+    voxi::Settings live{};
+    voxi::Settings requested = live;
+    fmt::ProjectDesc cap;
+    voxi::captureVoxiSettings(cap, requested, live, d, 0);
+    check(cap.volFog == -1 && cap.volFogDensity < 0.0f, "capture: defaults add no key");
+    requested.volumetricFog = true;
+    fmt::ProjectDesc cap2;
+    voxi::captureVoxiSettings(cap2, requested, live, d, 0);
+    check(cap2.volFog == 1 && cap2.volFogDensity < 0.0f, "capture: fog switched on writes the switch, not an unstated density");
+    requested.volumetricFog = false;
+    fmt::ProjectDesc cap3;
+    cap3.volFog = 1; cap3.volFogDensity = 0.1f;
+    requested.volumetricFogDensity = 0.002f;
+    voxi::captureVoxiSettings(cap3, requested, live, d, 0);
+    check(cap3.volFog == 0 && cap3.volFogDensity == 0.002f, "capture: a project that had them stated writes the new values");
+}
+
 int main() {
+    testVolFogKeys();
+    testSubViewportKeys();
+    testLocalRasterKeys();
+    testMeshExtraKey();
+    testMaterialFxKey();
     testEveryKeyReachesSettings();
     testN6AbsentDerivedKnobResetsToLadder();
     testN6RestirVisibilityFollowsTier();

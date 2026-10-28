@@ -1,0 +1,10 @@
+[gd_scene load_steps=1 format=3]
+
+[node name="OnlyView" type="Node3D"]
+
+[node name="View" type="SubViewport" parent="."]
+size = Vector2i(128, 128)
+
+[node name="ViewCam" type="Camera3D" parent="View"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 7, 8, 9)
+current = true

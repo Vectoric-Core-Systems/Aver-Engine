@@ -110,10 +110,14 @@ public class CanvasItem : Node
         {
             if (_visible == value) return;
             _visible = value;
+            OnShownChanged();
             EmitSignal(SignalName.VisibilityChanged);
             if (!value) EmitSignal(SignalName.Hidden);
         }
     }
+
+    /// <summary>This item's own visible flag changed (before the signal). A <see cref="SubViewportContainer"/> shows or hides its view with it.</summary>
+    internal virtual void OnShownChanged() { }
 
     public Color Modulate { get; set; } = new(1, 1, 1, 1);
     public Color SelfModulate { get; set; } = new(1, 1, 1, 1);
@@ -151,8 +155,14 @@ public class Control : CanvasItem
         public static readonly StringName MinimumSizeChanged = "minimum_size_changed";
     }
 
-    public Vector2 Position { get; set; }
-    public Vector2 Size { get; set; }
+    private Vector2 _position, _size;
+
+    public Vector2 Position { get => _position; set { _position = value; OnRectChanged(); } }
+    public Vector2 Size { get => _size; set { _size = value; OnRectChanged(); } }
+
+    /// <summary>The control's rectangle changed. A <see cref="SubViewportContainer"/> keeps the view it shows in step with it.</summary>
+    internal virtual void OnRectChanged() { }
+
     public Vector2 CustomMinimumSize { get; set; }
     public Vector2 PivotOffset { get; set; }
     public float Rotation { get; set; }

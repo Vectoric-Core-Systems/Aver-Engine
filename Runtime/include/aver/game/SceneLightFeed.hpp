@@ -58,6 +58,11 @@ public:
             s.radiusCm = w.sourceRadiusCm;
             s.castShadows = w.castShadows;
             s.iesPeak = w.iesPeak;
+            s.godot = w.godot; s.negative = w.negative;
+            s.attenuation = w.attenuation; s.spotAttenuation = w.spotAttenuation; s.specularScale = w.specularScale;
+            s.shadowBias = w.shadowBias; s.shadowNormalBias = w.shadowNormalBias;
+            s.fadeBeginCm = w.fadeBeginCm; s.fadeLengthCm = w.fadeLengthCm; s.fadeShadowCm = w.fadeShadowCm;
+            s.cullInv = w.cullInv; s.shadowCasterInv = w.shadowCasterInv;
 
             voxi::SceneLightAssets ptAssets;
             const Asset* ies = w.iesProfile ? asset(static_cast<u64>(w.iesProfile), true, voxi, pt) : nullptr;

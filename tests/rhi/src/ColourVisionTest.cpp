@@ -134,7 +134,7 @@ int main() {
         p.colourVisionStrength = 0.5f;
         fillPostLens(cb, p, 1920, 1080, true, 0, 3);
         check(cb.access[0] == packColourVision(2, false, 0.5f), "fillPostLens writes the packed filter to access.x");
-        check(sizeof(PostCB) == 288 && sizeof(PostSettings) == 180, "the constant block and the settings grew by exactly the new fields");
+        check(sizeof(PostCB) == 304 && sizeof(PostSettings) == 196, "the constant block and the settings grew by exactly the new fields");
         PostSettings a, b;
         check(postSettingsEqual(a, b), "equal settings compare equal");
         b.colourVision = 1u;

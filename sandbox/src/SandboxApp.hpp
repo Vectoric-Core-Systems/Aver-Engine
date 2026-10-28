@@ -27,6 +27,7 @@
 #include "aver/game/OriginParticipants.hpp"
 
 #include "aver/game/GameCamera.hpp"   // PlayView
+#include "aver/game/SubViewportHost.hpp"   // G4 R5: sub-viewports
 #if AVER_MODULE_SCENE && AVER_MODULE_PHYSICS
 #include "aver/world/VehicleSystem.hpp"
 #endif
@@ -194,6 +195,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "aver/synapse/CrowdGpu.hpp"
 #endif
 #include "aver/game/SceneDecalFeed.hpp"
+#include "aver/game/EnvFxFeed.hpp"   // G4 R8
 #endif
 #if AVER_MODULE_SCENE
 #include "MotionDebugOverlay.hpp"   // motion matching overlay (wave 5 #25)
@@ -3882,6 +3884,7 @@ private:
     voxi::VoxiRenderer voxiRenderer_;
     editor::SceneLightFeed sceneLightFeed_;   // CLight entities -> Voxi lamps + path-tracer lights, per frame
     game::SceneDecalFeed sceneDecalFeed_;     // CDecal entities -> Voxi's projected-decal list, per frame
+    game::EnvFxFeed envFxFeed_;               // G4 R8: the framework's fog volumes -> Voxi's volumetric fog, per frame
     bool voxiAttached_=false;
     // Viewport's ray-hit/triangles debug view (Ray Hit: Instances/Materials/Distance, Triangles), or None. NOT PERSISTED: reasserted every frame.
     voxi::VoxiRenderer::ViewDebug debugView_ = voxi::VoxiRenderer::ViewDebug::None;
@@ -3937,6 +3940,8 @@ private:
     // BESIDE skinDraw_, outside the scene guard: ThumbnailCache (sandbox/src/ThumbnailCache.hpp) stands on the RHI and ActorPreview only.
     // The content browser already treats that as settled.
     aver::editor::ThumbnailCache thumbnails_;
+    // G4 R5: render-to-texture views a Play session asks for. Idle (and allocating nothing) while the registry holds no view; the registry is cleared when Play ends.
+    aver::game::SubViewportHost subViews_;
     std::unique_ptr<aver::editor::SkinDrawTest> skinDraw_;
 #if AVER_MODULE_SCENE
     // The scene join: gives every entity with a CSkeletalMesh its own posed mesh. Null when the skinning shader would not compile.

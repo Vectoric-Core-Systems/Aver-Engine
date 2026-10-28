@@ -27,6 +27,7 @@ fog_density = 0.02
 glow_enabled = true
 glow_intensity = 0.6
 ssao_enabled = true
+ambient_light_sky_contribution = 0.5
 
 [sub_resource type="BoxMesh" id="BoxMesh_floor"]
 size = Vector3(20, 1, 20)

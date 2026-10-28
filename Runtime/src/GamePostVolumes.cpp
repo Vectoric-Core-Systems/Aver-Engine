@@ -62,6 +62,10 @@ void applyPostVolumeFields(rhi::PostSettings& s, const fmt::OcPostVolume& v, f32
         else if (k == "bloomthreshold")  s.bloomThreshold = lerpF(s.bloomThreshold, ovF(ov, *ki), w);
         else if (k == "bloomknee")       s.bloomKnee = lerpF(s.bloomKnee, ovF(ov, *ki), w);
         else if (k == "tonemap")         { if (flip) s.tonemap = static_cast<u32>(std::lround(ovF(ov, *ki))); }
+        else if (k == "tonemapwhite")    s.tonemapWhite = lerpF(s.tonemapWhite, ovF(ov, *ki), w);
+        else if (k == "adjbrightness")   s.adjustBrightness = lerpF(s.adjustBrightness, ovF(ov, *ki), w);
+        else if (k == "adjcontrast")     s.adjustContrast = lerpF(s.adjustContrast, ovF(ov, *ki), w);
+        else if (k == "adjsaturation")   s.adjustSaturation = lerpF(s.adjustSaturation, ovF(ov, *ki), w);
         else if (k == "maxradiance")     s.maxRadiance = lerpF(s.maxRadiance, ovF(ov, *ki), w);
         else if (k == "localshadows")    s.localExposureShadows = lerpF(s.localExposureShadows, ovF(ov, *ki), w);
         else if (k == "localhighlights") s.localExposureHighlights = lerpF(s.localExposureHighlights, ovF(ov, *ki), w);
@@ -97,6 +101,10 @@ bool readPostField(const rhi::PostSettings& s, std::string_view k, f64 out[3]) {
     else if (k == "bloomthreshold")  out[0] = s.bloomThreshold;
     else if (k == "bloomknee")       out[0] = s.bloomKnee;
     else if (k == "tonemap")         out[0] = s.tonemap;
+    else if (k == "tonemapwhite")    out[0] = s.tonemapWhite;
+    else if (k == "adjbrightness")   out[0] = s.adjustBrightness;
+    else if (k == "adjcontrast")     out[0] = s.adjustContrast;
+    else if (k == "adjsaturation")   out[0] = s.adjustSaturation;
     else if (k == "maxradiance")     out[0] = s.maxRadiance;
     else if (k == "localshadows")    out[0] = s.localExposureShadows;
     else if (k == "localhighlights") out[0] = s.localExposureHighlights;

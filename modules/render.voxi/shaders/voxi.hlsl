@@ -2,6 +2,15 @@
 // Feature-owned frame constants, at the register RHIResources.hpp reserves for a render feature.
 #define AVER_SHADOW_CASCADES 4
 
+// Raster local lights (G4 R2). Off in every ordinary variant; the AVER_LOCAL_RASTER variants append rl::Block to VoxiFrame below.
+// The three constants mirror rl::kMaxLights / kLightVecs / kMaxTiles (RasterLights.hpp); RasterLightsTest compares the text.
+#ifndef AVER_LOCAL_RASTER
+#define AVER_LOCAL_RASTER 0
+#endif
+#define AVER_RL_MAX_LIGHTS 32
+#define AVER_RL_LIGHT_VECS 7
+#define AVER_RL_MAX_TILES 24
+
 // Use AVER_CB_JOIN, not a literal register (rhi::kFeatureFrameConstantRegister is the sole definition).
 cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     float4   gVoxelOrigin; // xyz = volume min corner, w = 1/volumeWorldSize
@@ -101,6 +110,14 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     // x = projected decals this frame (voxi_decal.hlsli; 0 skips every decal call); y = light-grid header record
     // in t18 (0 = none, voxi_rt.hlsli rdLightsAt); z, w = shadow rays per pixel / per hit for the light list.
     float4   gDecalParams;
+#if AVER_LOCAL_RASTER
+    // G4 R2 raster local lights: the tail of the frame block, present only in the AVER_LOCAL_RASTER variants. Mirrors
+    // rl::Block (RasterLights.hpp) byte for byte; the host uploads engine block + tail as one buffer while the path is live.
+    float4   gRlHeader;   // x = lights, y = tiles, z = 1 / atlas pixels, w = 1 when the atlas is bound
+    float4   gRlLight[AVER_RL_MAX_LIGHTS * AVER_RL_LIGHT_VECS];
+    float4x4 gRlTileVP[AVER_RL_MAX_TILES];
+    float4   gRlTileUv[AVER_RL_MAX_TILES];
+#endif
 };
 
 // ---- Voxi: voxel cone traced GI ----
@@ -1269,6 +1286,10 @@ void rtReflectionHistoryVacate(float2 pixel) {
 }
 #endif
 
+#if AVER_LOCAL_RASTER
+#include "voxi_locallights_raster.hlsli"
+#endif
+
 // 3x3 PCF inside ONE cascade's quadrant of the atlas.
 float shadowSampleCascade(float3 wpos, uint c) {
     float4 lp = mul(float4(wpos, 1.0), gCascadeViewProj[c]);
@@ -1536,12 +1557,68 @@ bool aver_IsGiRestirPoisonColour(float3 c) {
 }
 
 // The Voxi lit pixel shader. Voxi supplies light transport only – sun visibility, sky, bounce – and the material shades it.
+#if AVER_MATX_VS
+// R6: VSMain plus the vertex-stage BaseMaterial3D features: billboard (enabled, fixed Y, particles' first frame), fixed_size and grow. Compiled only for the
+// material variants that need it; the depth prepass and the shadow cascades keep VSMain (a draw with these is not prepassed, and its shadow is the
+// un-billboarded mesh's).
+//   billboard: the mesh's own axes are mapped (Godot -Z, X, Y = engine X, Y, Z) onto the camera's backward, right and up vectors, so a quad that faces its
+//   local -X faces the camera. The node's scale is dropped unless billboard_keep_scale. FIXED_Y keeps +Z up and turns about it.
+//   fixed_size: the offsets from the object's origin scale with the view depth (1 m of depth = the size authored).
+VSOut VSMainFx(VSIn i) {
+    VSOut o = VSMain(i);
+    float3 wpos = o.wpos;
+    float3 nrm = o.nrmWS;
+    const float3 origin = gWorld[3].xyz;
+    const uint bb = gFxModes & 3u;
+    if (bb != 0u) {
+        const float3 fwd = averViewRayDir(float2(0.0, 0.0));
+        float3 camR = averViewRayDir(float2(1.0, 0.0)) - averViewRayDir(float2(-1.0, 0.0));
+        float3 camU = averViewRayDir(float2(0.0, 1.0)) - averViewRayDir(float2(0.0, -1.0));
+        camR = normalize(camR - fwd * dot(camR, fwd));
+        camU = normalize(camU - fwd * dot(camU, fwd) - camR * dot(camU, camR));
+        float3 R = camR, U = camU, B = -fwd;
+        if (bb == 2u) {
+            const float2 fh = normalize(fwd.xy + float2(1.0e-5, 0.0));
+            B = float3(-fh.x, -fh.y, 0.0);
+            R = float3(-fh.y, fh.x, 0.0);
+            U = float3(0.0, 0.0, 1.0);
+        }
+        const bool keep = (gFxModes & AVER_FX_KEEP_SCALE) != 0u;
+        const float3 sc = keep ? float3(length(gWorld[0].xyz), length(gWorld[1].xyz), length(gWorld[2].xyz)) : float3(1.0, 1.0, 1.0);
+        wpos = origin + B * (i.pos.x * sc.x) + R * (i.pos.y * sc.y) + U * (i.pos.z * sc.z);
+        nrm = normalize(B * i.nrm.x + R * i.nrm.y + U * i.nrm.z);
+        if (bb == 3u) {   // particles: the first frame of the sheet
+            const float2 hv = float2((float)(gFxFrames & 63u), (float)((gFxFrames >> 6) & 63u));
+            o.uv = o.uv / max(hv, float2(1.0, 1.0));
+        }
+    }
+    if ((gFxModes & (1u << 3)) != 0u) {   // fixed_size
+        const float depth = max(dot(origin - gCamPos.xyz, averViewRayDir(float2(0.0, 0.0))), 1.0);
+        wpos = origin + (wpos - origin) * (depth * 0.01);
+    }
+    if ((gFxModes & (1u << 16)) != 0u) wpos += nrm * averFxHalf2(gFxHeightGrow).y;   // grow
+    o.wpos = wpos;
+    o.nrmWS = nrm;
+    o.pos = mul(float4(wpos, 1.0), gViewProj);
+    return o;
+}
+#endif
+
+// R6: a material variant that discards by noise or alpha (AVER_MATX_LATEZ) is compiled without forced early depth: the depth write must wait for the clip.
+#if AVER_MATX_LATEZ
+#define AVER_EARLYZ
+#else
+#define AVER_EARLYZ [earlydepthstencil]
+#endif
 #if AVER_GBUFFER
-[earlydepthstencil]
+AVER_EARLYZ
 GBufferOut PSMainVoxi(VSOut i) {
 #else
-[earlydepthstencil]
+AVER_EARLYZ
 float4 PSMainVoxi(VSOut i) : SV_TARGET {
+#endif
+#if AVER_MATX
+    gAverFxPixel = i.pos.xy;
 #endif
     float3 N = normalize(i.nrmWS);
     // Face-forwarded by averVertexOf's rule (dot(N,V) < 0 flips).
@@ -1662,6 +1739,10 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
         sun.visibility *= 1.0 + averCausticFocus(vtx.wpos);
 
     AverSurface s = averEvalMaterial(vtx, sun);
+#if AVER_MATX_SURF
+    // R6 disable_receive_shadows: the sun reaches this surface unshadowed.
+    if (averFxMode(AVER_FX_NO_SHADOWS)) sun.visibility = float3(1.0, 1.0, 1.0);
+#endif
     // Decals repaint the surface before anything lights it (voxi_decal.hlsli); opaque draws only.
     // Plain raster only: with decals compiled into the ray-traced PSMainVoxi variants (here or through
     // rtHitSurface) NewSponza Night's default view hung the RX 7800 XT (docs/rendering/DECALS.md).
@@ -1744,6 +1825,10 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
 
     // Translucent materials take a separate early-returning path.
     if (gMaterialFlags & AVER_MAT_ALPHA_BLEND) {
+#if AVER_MATX_MUL
+        // R6 blend_mode multiply: the target is multiplied by the albedo, weighted by the opacity (the pipeline's Multiplicative blend state).
+        AVER_GBUF_RETURN(float4(lerp(float3(1.0, 1.0, 1.0), saturate(s.albedo), saturate(s.alpha)), 1.0));
+#endif
         // averShadeSplit keeps direct/indirect separate: blended draws get same energy as opaque.
         float3 dif, spc;
         averShadeSplit(s, sun, ind4, dif, spc);
@@ -1788,6 +1873,11 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
 
     float3 radiance = 0.0;
     radiance = averShadeDirect(radiance, s, sun);
+#if AVER_LOCAL_RASTER
+    // G4 R2: the capped raster list with shadow-map PCF (voxi_locallights_raster.hlsli). Not in the blended pass; not with RD lamps (the host
+    // publishes no ray-traced light list while this is live).
+    if (gRlHeader.x > 0.5) radiance += rlShade(s, i.wpos, N);
+#endif
 #if AVER_RT && AVER_RD_LAMPS
     // Local lights on opaque surface.
     if (rdLocalLampsLive())
@@ -1795,6 +1885,9 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
                                        rdLocalLightsVisibility(i.wpos, vtx.N, i.pos.xy, uint2(i.pos.xy), true));
 #endif
     radiance = averShadeIndirect(radiance, s, ind4);
+#if AVER_LOCAL_RASTER
+    radiance = max(radiance, 0.0);   // a negative light may have taken more than the pixel had
+#endif
     radiance = averApplyFogAirVis(radiance, i.wpos, true, voxiAirVisibility(i.wpos));
     radiance = voxiFroxelApply(radiance, i.wpos);
     // Poison marker.
@@ -3449,6 +3542,10 @@ void PSDepthPrepass(VSOut i) {
         AverVertex v = averVertexOf(i);
         float2 uv = averSurfaceUV(v);
         float alpha = gBaseColor.a * gBaseColorFactor.a * gBaseColorMap.Sample(gMaterialSampler, uv).a;
+#if AVER_MESH_EXTRA
+        // The colour pass multiplies the opacity by the vertex colour's alpha (averEvalMaterial); the cut-out must agree or depth outlives the colour.
+        if (gMaterialFlags & AVER_MAT_VERTEX_COLOR) alpha *= v.color.a;
+#endif
         clip(alpha - gAlphaCutoff);
     }
 #endif

@@ -61,6 +61,25 @@ struct PreviewDraw {
     // ActorPreview::setMaterialTextureResolver for what "wired in" means and what happens before it
     // is.
     u32 materialHandle = 0;
+    // G4 R5, read only by a scene view (SceneViewParams): the radiance the surface emits on its own, linear rgb, and whether it ignores the lights.
+    f32 emissive[3] = {0.0f, 0.0f, 0.0f};
+    bool unlit = false;
+};
+
+// G4 R5: the same targets and draw path used as a SUB-VIEWPORT -- a game camera's picture of the world instead of the studio preview. A view
+// that is active draws its draw list with the camera and lighting given here: no backdrop, grid or bounds, one sun, a sky fill, a clear colour of
+// the caller's choosing (alpha 0 for a transparent view), flat per-draw colours (no material textures; see docs/plans/fabric/G4_RENDER.md R5).
+// An inactive view (the default) is the studio preview, unchanged.
+struct SceneViewParams {
+    bool active = false;
+    f32 viewProj[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};   // row-major, row-vector (the engine's)
+    f32 eye[3] = {0.0f, 0.0f, 0.0f};                            // world centimetres
+    f32 sunDir[3] = {0.4f, 0.3f, 0.86f};                        // direction TO the sun
+    f32 sunRadiance[3] = {1.6f, 1.6f, 1.6f};                    // colour times intensity
+    f32 ambient[3] = {0.26f, 0.30f, 0.36f};                     // the sky fill
+    f32 clearColor[4] = {0.0f, 0.0f, 0.0f, 1.0f};               // display values
+    bool clearTarget = true;                                    // false keeps the previous picture
+    bool linearOutput = false;                                  // store linear values (a material reads them) instead of tonemapped display values
 };
 
 // Largest instance count one drawMeshInstanced call carries. Each call suballocates count * 64 B from
@@ -111,7 +130,8 @@ struct PreviewCamera {
 class ActorPreview final : public rhi::IRenderFeature {
 public:
     // Creates the feature. Returns null when the backend has no GPU support.
-    static ActorPreview* create(rhi::IDevice& device, u32 width = 1024, u32 height = 0);
+    // `studioChrome` false skips the wireframe, backdrop, grid and bounds pipelines and their meshes: a feature used only as a scene view (G4 R5) never draws them.
+    static ActorPreview* create(rhi::IDevice& device, u32 width = 1024, u32 height = 0, bool studioChrome = true);
     ~ActorPreview() override;
 
     const char* name() const override { return "Aver.Render.ActorPreview"; }
@@ -144,6 +164,15 @@ public:
     // recorded. For a preview whose tab is hidden. True by default.
     void setEnabled(bool on) { enabled_ = on; }
     bool enabled() const { return enabled_; }
+
+    // G4 R5: draw the draw list as a game camera's view (see SceneViewParams) from the next prePass on. Builds one extra pixel shader and pipeline
+    // the first time it draws; the studio preview's own pipelines are untouched. clearSceneView() returns to the studio.
+    void setSceneView(const SceneViewParams& p) { scene_ = p; scene_.active = true; }
+    void clearSceneView() { scene_.active = false; }
+    bool sceneViewActive() const { return scene_.active; }
+    const SceneViewParams& sceneView() const { return scene_; }
+    // Whether the scene-view pipeline exists (it is built on the first scene-view prePass; false before, and when the backend refused it).
+    bool sceneViewReady() const { return sceneViewPipeline_ != 0; }
 
     // A hook for translucent content that belongs in the picture (the particle editor's preview). Called inside prePass after the
     // opaque draws and the instanced batches and before the grid, with this preview's colour and depth targets bound and its
@@ -224,7 +253,7 @@ public:
 private:
     ActorPreview() = default;
     // Builds the targets, the shaders and the pipeline.
-    bool init(rhi::IDevice& device, u32 width, u32 height);
+    bool init(rhi::IDevice& device, u32 width, u32 height, bool studioChrome);
     // Creates a colour and depth target pair at a size.
     bool createTargets(u32 width, u32 height);
     // Composes the orbit camera's view and projection.
@@ -236,6 +265,10 @@ private:
     // first time a batch is drawn. False when the backend cannot run them; batches then draw one
     // setConstants + drawMesh per instance.
     bool ensureInstancedPipelines();
+    // G4 R5: builds the scene-view pixel shader and pipeline once; false when the backend refuses them (the view then stays as it was).
+    bool ensureSceneViewPipeline();
+    // G4 R5: the scene-view pass: one barrier in, clear, the draw list, one barrier out.
+    void drawSceneView(rhi::IRenderContext& ctx);
     // Draws batches_ after the draw list. `frame` is the PreviewFrame block prePass built.
     void drawInstanceBatches(rhi::IRenderContext& ctx, const void* frame, u32 frameBytes, bool wire,
                              rhi::PipelineHandle meshPipeline);
@@ -285,6 +318,10 @@ private:
     bool haveExternalBounds_ = false;
     bool enabled_ = true;
     std::function<void(rhi::IRenderContext&)> transparentHook_;
+    SceneViewParams scene_{};
+    rhi::ShaderHandle sceneViewPs_ = 0;
+    rhi::PipelineHandle sceneViewPipeline_ = 0;
+    bool sceneViewTried_ = false;
 
 #if AVER_MODULE_PBR
     // The SECOND pipeline: shades through averEvalMaterial instead of the fixed key-light-plus-fill

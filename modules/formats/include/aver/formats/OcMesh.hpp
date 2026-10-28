@@ -18,6 +18,8 @@ inline constexpr u32 kOcMeshIndex32   = 1u << 3;
 inline constexpr u32 kOcMeshHasSkin   = 1u << 5;
 inline constexpr u32 kOcMeshTwoSided  = 1u << 9;
 inline constexpr u32 kOcMeshHasMorph  = 1u << 11;   // an MRPH chunk is present (MORPH_TARGETS.md 2.2)
+inline constexpr u32 kOcMeshHasTangent = 1u << 12;  // the VXEX chunk carries an authored tangent (docs/plans/fabric/G4_RENDER.md R1)
+// HasColor and HasUV1 above are set by the writer exactly when the VXEX chunk carries that stream.
 
 inline constexpr u32 kOcMeshMaxMorphTargets = 512;
 // FBX_IMPORT.md 2.7 guards its blend-shape attach on this macro.
@@ -224,6 +226,11 @@ struct OcMeshData {
     std::vector<f32> positions;      // 3 per vertex
     std::vector<f32> normals;        // 3 per vertex
     std::vector<f32> uvs;            // 2 per vertex
+    // Optional second-stream attributes (the VXEX chunk). Each is empty or exactly one entry per vertex.
+    std::vector<f32> colors;         // 4 per vertex: linear RGBA 0..1 (stored as RGBA8, so it round-trips in 1/255 steps)
+    std::vector<f32> tangents;       // 4 per vertex: unit tangent xyz = direction of increasing u in engine space, w = +-1 so
+                                     // that cross(normal, tangent) * w points along increasing v (R1 contract)
+    std::vector<f32> uvs1;           // 2 per vertex: the second UV set (TEXCOORD_1)
     std::vector<u32> indices;
     std::vector<OcMeshSubmesh> submeshes;
     std::vector<std::string>   materialSlots;   // slot index -> surface name
@@ -298,10 +305,18 @@ struct OcMeshData {
     // feature present" from "is the file well-formed".
     bool hasMeshlets() const { return !meshlets.empty(); }
     bool hasMorph() const { return !morphTargets.empty(); }
+    // The optional streams, each present only when sized for the vertex count.
+    bool hasColor() const   { const usize v = positions.size() / 3; return v > 0 && colors.size()   == v * 4; }
+    bool hasTangent() const { const usize v = positions.size() / 3; return v > 0 && tangents.size() == v * 4; }
+    bool hasUv1() const     { const usize v = positions.size() / 3; return v > 0 && uvs1.size()     == v * 2; }
+    bool hasExtra() const { return hasColor() || hasTangent() || hasUv1(); }
     // True when the streams are non-empty and the same length.
     bool valid() const {
         const usize v = positions.size() / 3;
         if (!(v > 0 && !indices.empty() && normals.size() == v * 3 && uvs.size() == v * 2)) return false;
+        // A half-sized extra stream would be written then mis-sized by the reader.
+        if ((!colors.empty() && !hasColor()) || (!tangents.empty() && !hasTangent()) || (!uvs1.empty() && !hasUv1()))
+            return false;
         // Half a skin is worse than none: it would write a stream the reader then mis-sizes.
         if (!joints.empty() || !weights.empty()) { if (!hasSkin()) return false; }
         if (morphTargets.size() > kOcMeshMaxMorphTargets) return false;
@@ -311,6 +326,16 @@ struct OcMeshData {
     // Recomputes boundsMin/boundsMax from positions.
     void computeBounds();
 };
+
+// The tangent a vertex stores (R1 contract): `tangent` made orthogonal to `normal` and unit length, and
+// w = +1 / -1 so that cross(normal, tangent) * w points along `dirV`, the direction in which the stored v
+// coordinate increases. A degenerate input (zero tangent, or dirV perpendicular) writes the "no tangent"
+// vertex (0,0,0,0), which the shader answers with its derived frame. All vectors in engine space.
+void packTangent(const f32 normal[3], const f32 tangent[3], const f32 dirV[3], f32 out[4]);
+
+// Fills m.tangents from the normals and UV0 (per-triangle UV derivatives, accumulated per vertex).
+// For meshes a generator or an importer built without tangents. Returns false when the mesh has no UVs.
+bool generateTangents(OcMeshData& m);
 
 // True when `m.submeshes` accounts for every LOD-0 index exactly once, in whole triangles: every range
 // inside `indices`, a multiple of 3 long, no gap, no overlap (table order does not matter).

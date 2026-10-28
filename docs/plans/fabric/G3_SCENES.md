@@ -71,7 +71,7 @@ Output is deterministic: the same input gives the same files byte for byte (test
 | `internationalization/locale/translations` | `.po` files copied to `Localization/<culture>/`; the culture is the file's `Language:` header, else its name. `.translation` and `.csv` are reported unsupported |
 | `layer_names/3d_physics/layer_N` | `# FABRIC.LAYER 3d_physics N <name>` comment lines in the .ocproject (it has no key) and `layerNames` in `Fabric/project.json` |
 | `[autoload]` with `*` | persistent top-level placements, first in the **start level** (below). An entry without `*` is reported and not placed, as Godot does not add it to the tree either |
-| first scene's `WorldEnvironment` | `RENDER.BLOOM` (glow intensity when glow is on), `RENDER.EXPOSURE` (tonemap exposure); tonemap mode in `Fabric/project.json` only |
+| first scene's `WorldEnvironment` | (G4 R3) `RENDER.TONEMAP` (3 + Godot's `tonemap_mode`), `RENDER.TONEMAPWHITE`, `RENDER.EXPOSURE` (`tonemap_exposure` x the camera attributes' `exposure_multiplier`, written only off 1), `RENDER.AUTOEXPOSURE` (0 unless CameraAttributesPractical enables it), `RENDER.BLOOM` (glow intensity, 0 without glow), `RENDER.ADJUST*` (display adjustments, written only when `adjustment_enabled`); the tonemap mode is also in `Fabric/project.json` |
 | every other setting | reported unsupported, by key |
 
 ### Input map
@@ -100,7 +100,7 @@ PLACE none <x y z yaw pitch roll scale> class <Class> name <Name>       (PLACEG 
 ```
 
 - **Transform.** Godot local transform to the placement line through `aver/formats/AxisMap.hpp`, the one map `GltfImport.cpp`, `ObjImport.cpp` and the Y-up USD path use: position `(x,y,z) -> (-z,x,y) * 100`, rotation quaternion `(x,y,z,w) -> (z,-x,-y,w)`, scale `(x,y,z) -> (z,x,y)`. A basis is decomposed Godot's way (scale = column lengths, negated when the determinant is; rotation = columns divided by them), so `transform`, `position` + `rotation` (order YXZ unless `rotation_order`) + `scale`, `rotation_degrees`, `quaternion` and `basis` all come out the same. Float noise in a scale (0.99999994) is snapped to 1. A sheared basis also writes the exact `transform` Prop and is reported approximated. Transforms are parent-relative.
-- **Class.** The node's Godot class when it is in G3_RUNTIME's class table (Node, Node3D, Marker3D, VisualInstance3D, GeometryInstance3D, MeshInstance3D, Camera3D, the three lights, CollisionShape3D, StaticBody3D, AnimatableBody3D, RigidBody3D, CharacterBody3D, Area3D, Timer); the **script's generated class** when a script is attached. Everything else is a *carrier*: the placement is the nearest class that exists and `_class="<GodotClass>"` names the real one, with the node's properties kept as Props (metadata at runtime). Control family -> `Control`, SubViewport -> `Viewport`, WorldEnvironment -> `Node`, other 3D classes (joints, RayCast3D, AudioStreamPlayer3D, Path3D ...) -> `Node3D`, 2D classes and everything else -> `Node`.
+- **Class.** The node's Godot class when it is in G3_RUNTIME's class table (Node, Node3D, Marker3D, VisualInstance3D, GeometryInstance3D, MeshInstance3D, Camera3D, the three lights, CollisionShape3D, StaticBody3D, AnimatableBody3D, RigidBody3D, CharacterBody3D, Area3D, Timer); the **script's generated class** when a script is attached. Everything else is a *carrier*: the placement is the nearest class that exists and `_class="<GodotClass>"` names the real one, with the node's properties kept as Props (metadata at runtime). Control family -> `Control`, SubViewport -> `Viewport`, WorldEnvironment -> its own class since G4 R3, other 3D classes (joints, RayCast3D, AudioStreamPlayer3D, Path3D ...) -> `Node3D`, 2D classes and everything else -> `Node`.
 - **Props.** `_name` always, then `_owner` (relative path to the owner, omitted on the scene root), `_unique`, `_class`, `_persistent`, then every property line in file order as Godot's Variant text. `ExtResource`/`SubResource` never reach the file: a mesh is `Resource("Meshes/...ocmesh")`, a material `Resource("Materials/...ocmat")`, a texture `Resource("Textures/...")`, a PackedScene value `Resource("Maps/...ocworld")`, a collision shape `Object(BoxShape3D, "size": Vector3(...))` in Godot metres (the runtime converts). Properties whose value could not be converted are left out and reported. A path-style property (`metadata/x`) is written and reported approximated.
 - **Groups**: header `groups=[...]` plus overrides, as `COMPONENT Groups names=a,b`.
 - **Connections**: every `[connection]` rides on its source node as `_connections` (array of `{signal, to, method, flags, binds, unbinds}`), `to` relative to the source, the method name as Godot wrote it. A connection naming a missing node is reported.
@@ -134,17 +134,18 @@ Joints (`PinJoint3D`, `HingeJoint3D`, ...) are carriers whose parameters and `no
 
 ### Lights, camera, environment
 
-Lights and cameras are class placements with Godot's own properties (`light_energy`, `omni_range`, `spot_angle`, `fov`, `near`, `far`, `current` ...); the runtime does the unit mapping (G3_RUNTIME 1.4, `LuxPerEnergy` 100000). The level also gets records, so it is right before any node is ready:
+Lights and cameras are class placements with Godot's own properties (`light_energy`, `omni_range`, `spot_angle`, `fov`, `near`, `far`, `current` ...); the runtime does the unit mapping (G3_RUNTIME 1.4, `Light3D.LuxPerEnergy` / `CandelaPerEnergy` 104719.755, G4_RENDER.md R2). The level also gets records, so it is right before any node is ready:
 
 | Level record | From |
 |---|---|
-| `SUN` | the first DirectionalLight3D: direction = the light's -Z reversed through the axis map, colour linear, `lux = light_energy * 100000`, `angular = light_angular_distance`. The node is still placed |
+| `SUN` | the first DirectionalLight3D: direction = the light's -Z reversed through the axis map, colour linear, `lux = light_energy * 104719.755` (pi engine units, G4 R2), `angular = light_angular_distance`. The node is still placed |
 | `CAMERA` | the `current` Camera3D (else the first): world position in cm, yaw and pitch of its -Z |
-| `SKY` | WorldEnvironment's Environment: background colour / ProceduralSkyMaterial -> the authored dome; PhysicalSkyMaterial -> Aver's physical sky; panorama sky unsupported; `ambient_light_energy` -> `skylight` |
-| `FOG` | `fog_enabled`: density per metre / 100 per centimetre, light colour |
-| project `RENDER.*` | glow intensity, tonemap exposure; tonemap mode in `Fabric/project.json` |
+| `SKY` | WorldEnvironment's Environment: background colour / ProceduralSkyMaterial -> the authored dome (colours scaled by the energy multipliers in linear light); PhysicalSkyMaterial -> Aver's physical sky (haze scales the Mie terms, `ground_color` the ground albedo, energy the sky light); PanoramaSkyMaterial -> the panorama fitted onto the authored dome (`PanoramaSky.hpp`, G4 R3: approximated, the renderers do not sample it); `ambient_light_energy` -> `skylight` |
+| `FOG` | `fog_enabled`: density per metre / 100 per centimetre, light colour; depth fog (`fog_mode` 1) -> a start distance and a density reaching ~95% at the end; `fog_height` / `fog_height_density` -> Aver's height falloff; `volumetric_fog_enabled` -> distance fog at `volumetric_fog_density` (all approximated) |
+| `POSTVOLUME` | (G4 R3) one infinite volume named `WorldEnvironment` per level that has the node: `tonemap`, `tonemapwhite`, `exposure`, `autoexposure`, `bloom` (+ `bloomthreshold` when stated), `adjbrightness`, `adjcontrast`, `adjsaturation`, `dof` / `doffocus` / `dofstop` / `dofmm` from the camera attributes |
+| project `RENDER.*` | the start level's environment, see the table above |
 
-Every Environment setting without a record (SSAO, SSR, SDFGI, DOF ...) is reported unsupported by name.
+The `WorldEnvironment` node itself is placed as the `WorldEnvironment` class with its `environment` and `camera_attributes` as inline `Object(Environment, ...)` / `Object(CameraAttributesPractical, ...)` values (and `Object(Sky, ...)`, the sky materials inside), so scripts read Godot's properties; the panorama texture is kept under `Textures/`. Every Environment setting without a record (SSAO, SSR, SSIL, SDFGI ...) is reported unsupported by name, with the note that Aver's ray-traced GI, AO and reflections cover it when ray tracing is on.
 
 ### Instanced scenes
 
@@ -203,7 +204,7 @@ What the report calls unsupported today: 2D nodes; every 3D class outside the ru
 ## Not verified, and limits
 
 - Nothing here has run in the engine (engine-run ban). The levels load with `loadOcworld`, the meshes with `loadOcMesh`, the materials with `loadOcmat`, the prefabs and input with their loaders; what the runtime then does with the Props is G3_RUNTIME's contract and F2a's tests, not this package's.
-- The level `SUN` record and a DirectionalLight3D node's own light component both describe the sun; whether the engine draws it twice is a lighting question for G4 (the node's energy and the record use the same lux).
+- The level `SUN` record is the sun (G4 R2): the engine never drew a directional light component, and the DirectionalLight3D node now adds none; the first directional light forwards later changes to the sky's sun overrides and any further one is inert and reported.
 - A `.gltf`/`.glb` mesh property takes the first mesh; model `root_scale` and import-time options (LOD, lightmap UVs, animation splitting) are not applied. Skeletons and clips are written next to the meshes but no node uses them (no AnimationPlayer or skeleton nodes yet).
 - Textures are copied verbatim; Godot's `.import` texture settings (compression, mipmaps, normal-map flags) are ignored.
 - The test fixture's "PNG" is a stand-in text file, as in `MiniGame`: the cook copies bytes and the image decoder is not exercised, except by the packed-roughness path, which no fixture reaches (a material with both a roughness and a metallic texture).

@@ -52,6 +52,7 @@
 #  include "aver/voxi/VoxiRenderer.hpp"
 #endif
 #include "aver/scene/World.hpp"
+#include "aver/scene/RenderMasks.hpp"
 #include "aver/scene/scene_abi.h"
 #include "GameMath.hpp"
 
@@ -159,6 +160,9 @@ struct DrawLook {
     rhi::BindingSetHandle matSet = 0;
     const void* matConstants = nullptr;
     u32 matBytes = 0;
+    // R6: the material has BaseMaterial3D features. Such a draw takes no part in the depth prepass (vertex, UV and discard changes would disagree with
+    // the prepass shaders) and draws its depth itself in the colour pass.
+    bool fx = false;
 };
 
 // Power of two, for the same one-mask reason as kMeshLookupCacheSlots. 1024 slots hold several
@@ -352,6 +356,8 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
     // The depth-prepass walk is the same walk emitting depth-only draws (see DrawWorldPass). Cached
     // in a local since it's tested per entity and per planned draw and cannot change mid-call.
     const bool depthPass = options.pass == DrawWorldPass::DepthPrepass;
+    // A secondary camera's walk (G4 R5): hands its draws to options.onViewDraw and does nothing else.
+    const bool viewPass = options.pass == DrawWorldPass::View;
     int drawn = 0, culled = 0, ownerHidden = 0;
 
     // WalkLookup's mesh cache and the per-material look memo for this call alone -- see
@@ -518,7 +524,8 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
         if (materials && materials->ready()) {
             dl.matSet = materials->bindingSet(authored);
             dl.matConstants = &materials->constants(authored);
-            dl.matBytes = sizeof(pbr::MaterialConstants);
+            dl.matBytes = materials->constantBytes(authored);   // 192, or 256 with the R6 fx block behind it
+            dl.fx = dl.matBytes > sizeof(pbr::MaterialConstants);
         }
 #else
         (void)materials;
@@ -558,15 +565,17 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
     // look is shared by every entity of the material and must stay untouched. The copy is only valid
     // until the next call, which is fine, every sink copies the bytes before returning.
 #if AVER_MODULE_PBR && AVER_MODULE_VOXI
-    pbr::MaterialConstants emissiveCopy;
+    // The base block plus, for a material with fx (R6), the extension block behind it.
+    struct EmissiveCopy { pbr::MaterialConstants base; pbr::MaterialExtConstants ext; } emissiveCopy;
+    static_assert(sizeof(EmissiveCopy) == sizeof(pbr::MaterialConstants) + sizeof(pbr::MaterialExtConstants), "no padding between the blocks");
     auto constantsFor = [&](scene::Entity e, const DrawLook& dl) -> const void* {
         f32 rgb[3];
         if (!options.emissiveScale || !dl.matConstants || !options.emissiveScale(e, rgb, options.user))
             return dl.matConstants;
-        emissiveCopy = *static_cast<const pbr::MaterialConstants*>(dl.matConstants);
-        emissiveCopy.emissiveFactor[0] *= rgb[0];
-        emissiveCopy.emissiveFactor[1] *= rgb[1];
-        emissiveCopy.emissiveFactor[2] *= rgb[2];
+        std::memcpy(&emissiveCopy, dl.matConstants, std::min<usize>(dl.matBytes, sizeof(emissiveCopy)));
+        emissiveCopy.base.emissiveFactor[0] *= rgb[0];
+        emissiveCopy.base.emissiveFactor[1] *= rgb[1];
+        emissiveCopy.base.emissiveFactor[2] *= rgb[2];
         return &emissiveCopy;
     };
 #else
@@ -610,6 +619,17 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
             if (options.onSkipped)
                 options.onSkipped(ent, mr->mesh, DrawSkipReason::NotVisible, options.user);
             continue;
+        }
+
+        // Visibility range (G4 R4): outside [begin, end] the instance does not exist for this frame. Two compares for every entity without one.
+        if ((mr->visBeginCm > 0.0f || mr->visEndCm > 0.0f) && options.haveViewerPos) {
+            const Mat4& rwm = w.worldMatrix(ent);
+            const Vec3 d{rwm.m[3][0] - options.viewerPos.x, rwm.m[3][1] - options.viewerPos.y, rwm.m[3][2] - options.viewerPos.z};
+            u32 st = mr->rangeState;
+            const bool shown = scene::rangeShown(d.size(), mr->visBeginCm, mr->visEndCm, mr->visBeginMarginCm, mr->visEndMarginCm, st);
+            // The hysteresis memory belongs to the primary walk; a secondary camera reads it and leaves it as it found it.
+            if (!viewPass) const_cast<scene::CMeshRenderer*>(mr)->rangeState = st;
+            if (!shown) continue;
         }
 
         // This entity's cache slot, resolved once (at the first WalkLookup site) and threaded by
@@ -757,6 +777,8 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
                 if (anc == options.ownerHideRoot) { ownerHiddenHere = true; break; }
             }
         }
+        // The camera's cull mask (G4 R4) hides the same way: out of the primary view, still a shadow caster and GI/RT geometry.
+        if (options.cameraCullInv != 0 && !scene::masksOverlap(mr->layersInv, options.cameraCullInv)) ownerHiddenHere = true;
 
         // Frustum cull on the world-space extent of the entity's own box. A DEGENERATE box is DRAWN
         // rather than culled: an entity whose bounds were never filled in must not vanish, and being
@@ -994,12 +1016,28 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
                 // (the colour pass's own per-draw prepass gate excludes `blended` too) and make
                 // objects behind the glass fail depth-test against it, vanishing under it instead of
                 // showing through.
-                if (dl.look.blended) continue;
+                if (dl.look.blended || dl.fx) continue;
                 if (dl.matBytes) device.setDrawBinding(dl.matSet, constantsFor(ent, dl), dl.matBytes);
                 // dl.look.col: same base colour the colour pass hands drawMesh (minus the debug
                 // tint, which only touches .g). PSDepthPrepass's alpha test multiplies by its .a;
                 // without it every alpha-masked material clipped every pixel and wrote no depth.
                 device.drawMeshDepthPrepass(pd.mesh, &wm.m[0][0], dl.look.col);
+            }
+            continue;
+        }
+
+        if (viewPass) {
+            // SECONDARY CAMERA DELIVERY (G4 R5): the draws of an entity this camera sees, to the sink and nowhere else. An entity the camera's frustum or cull
+            // mask excludes is not delivered; nothing reaches the device, Voxi or the primary view's counters.
+            lap.to(CpuSpan::WalkEmitRaster);
+            if (!route.raster || !options.onViewDraw) continue;
+            for (u32 pdi = 0; pdi < pdrawCount; ++pdi) {
+                const PlannedDraw& pd = pdraws[pdi];
+                if (!pd.mesh) continue;
+                const auto dl = resolveDrawLook(pd.material);
+                const f32 col[4] = {dl.look.col[0], dl.look.col[1], dl.look.col[2], dl.look.col[3]};
+                options.onViewDraw(pd.mesh, &wm.m[0][0], col, dl.look.metallic, dl.look.roughness, dl.matSet, constantsFor(ent, dl),
+                                   dl.matBytes, dl.look.blended, options.user);
             }
             continue;
         }
@@ -1014,6 +1052,14 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
             // WalkEmitRaster: mutually exclusive with WalkEmitDepth (already `continue`d above when
             // depthPass) and WalkEmitDirect below (an entity takes exactly one, per iteration).
             lap.to(CpuSpan::WalkEmitRaster);
+            // Render layers (G4 R4): to the pixel shader (light cull masks) and to Voxi's draw (shadow caster masks). Only for an entity that has
+            // some; the default zero is what the device and Voxi already hold, so the ordinary walk issues no extra call.
+            if (mr->layersInv) {
+                device.setDrawLayers(mr->layersInv);
+#if AVER_MODULE_VOXI
+                if (options.voxiRenderer) options.voxiRenderer->setSubmitLayers(mr->layersInv);
+#endif
+            }
 #if AVER_MODULE_VOXI
             // drawMesh reaches Voxi through IRenderFeature::submitDraw, which has no movable
             // parameter; the flag rides on Voxi itself for these draws and is cleared after them.
@@ -1050,7 +1096,7 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
                 // LessEqual/no-write pipeline for parts no depth-prepass walk ever wrote depth for.
                 // dec.prepassEligible is the host's half: false unless a host says it ran a prepass
                 // walk.
-                bool prepassedDraw = dec.prepassEligible && !dl.look.blended;
+                bool prepassedDraw = dec.prepassEligible && !dl.look.blended && !dl.fx;
 #if AVER_MODULE_PBR && AVER_MODULE_VOXI
                 // ---- AN ALPHA-MASKED DRAW WRITES ITS OWN DEPTH FIRST WHEN NO PREPASS DID ----
                 //
@@ -1076,7 +1122,7 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
                 // Known residuals: cluster-dispatched geometry never reaches this loop, and a
                 // material graph driving opacity outside the stock alpha can disagree with
                 // PSDepthPrepass at cut-out edges, same as under the frame-wide prepass.
-                if (!prepassedDraw && !dl.look.blended && dl.matConstants &&
+                if (!prepassedDraw && !dl.look.blended && !dl.fx && dl.matConstants &&
                     (static_cast<const pbr::MaterialConstants*>(dl.matConstants)->flags &
                      pbr::MaterialFlag_AlphaMask) != 0u) {
                     // `col` is the exact array drawMesh gets below; the depth shader's alpha test
@@ -1098,6 +1144,12 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
             }
 #  endif
 #endif
+            if (mr->layersInv) {
+                device.setDrawLayers(0);
+#if AVER_MODULE_VOXI
+                if (options.voxiRenderer) options.voxiRenderer->setSubmitLayers(0);
+#endif
+            }
         } else if (dec.emitDirectDraws &&
                    (options.voxiRenderer != nullptr || options.onDirectDraw != nullptr)) {
             // WalkEmitDirect: the culled/hidden direct route to Voxi, mutually exclusive with
@@ -1147,10 +1199,12 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
                     options.voxiRenderer->setSubmitNoRay(hairNoRay);
                     options.voxiRenderer->setSubmitNoShadow(hairNoShadow);
 #  endif
+                    if (mr->layersInv) options.voxiRenderer->setSubmitLayers(mr->layersInv);
                     options.voxiRenderer->submit(del.mesh, &wm.m[0][0], col, dl.look.metallic,
                                                  dl.look.roughness, dl.matSet, directConstants,
                                                  dl.matBytes, del.translucent, del.hiddenFromOwner,
                                                  movableHere);
+                    if (mr->layersInv) options.voxiRenderer->setSubmitLayers(0);
 #  if defined(AVER_VOXI_SUBMIT_NO_RAY)
                     options.voxiRenderer->setSubmitNoRay(false);
                     options.voxiRenderer->setSubmitNoShadow(false);
@@ -1203,7 +1257,7 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
     // depth-prepass call's own hits/misses are
     // deliberately dropped, not added to the colour pass's, to avoid reporting a rate no call
     // actually produced.
-    if (!depthPass) {
+    if (!depthPass && !viewPass) {
         stats.drawn = drawn;
         stats.culled = culled;
         stats.ownerHidden = ownerHidden;

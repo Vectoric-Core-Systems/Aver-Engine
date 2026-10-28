@@ -7,6 +7,7 @@
 #include "aver/framework/framework_abi.h"
 #include "aver/game/GameCamera.hpp"
 #include "aver/scene/World.hpp"
+#include "aver/scene/RenderMasks.hpp"
 
 #if AVER_MODULE_CAMERA
 #  include "aver/camera/CameraRigSystem.hpp"
@@ -169,6 +170,65 @@ static void testLegacyBoom() {
     aver_fw_set_view(AVER_FW_VIEW_THIRD_PERSON, 160.0f, 450.0f);
 }
 
+// G4 R4: a camera node that asks to drive the view sets the lens, the cull mask and slides by its offsets; one that does not changes nothing.
+static void testCameraNode() {
+    AVER_INFO("=== a camera node that drives the view (G4 R4) ===");
+    scene::World& w = scene::World::instance();
+    Pawn pawn(Vec3{100, 0, 0});
+    aver_fw_set_view(AVER_FW_VIEW_THIRD_PERSON, 160.0f, 450.0f);
+    const scene::Entity cn = w.create("camera node");
+    Transform xf;
+    xf.position = Vec3{0, 0, 200};
+    w.setLocalTransform(cn, xf);
+    scene::CCamera* cc = static_cast<scene::CCamera*>(w.addComponent(cn, scene::kComponentCamera));
+    *cc = scene::CCamera{};
+    cc->fovYRad = radians(40.0f);
+    w.flush();
+    aver_fw_set_view_entity(static_cast<int32_t>(cn));
+
+    Vec3 pos{}, base{};
+    f32 yaw = 0, pitch = 0, yaw0 = 0, pitch0 = 0;
+    game::PlayView view;
+    game::drivePlayCamera(pos, yaw, pitch, view, 0.016f, pawn.e);
+    check(view.isDefaultLens() && view.fovYRad == radians(60.0f) && view.cullInv == 0 && near(pos.z, 200.0f, 1e-3f),
+          "a camera node that does not ask to drive the view leaves the lens at its defaults (only its pose is used)");
+    base = pos; yaw0 = yaw; pitch0 = pitch;
+
+    cc = w.component<scene::CCamera>(cn, scene::kComponentCamera);
+    cc->flags = scene::kCameraDrivesView;
+    cc->fovYRad = radians(40.0f);
+    cc->nearCm = 7.0f; cc->farCm = 9000.0f;
+    game::drivePlayCamera(pos, yaw, pitch, view, 0.016f, pawn.e);
+    check(near(view.fovYRad, radians(40.0f), 1e-5f) && view.nearCm == 7.0f && view.farCm == 9000.0f && view.isDefaultLens(),
+          "a camera node that drives the view sets the field of view and the clip planes");
+
+    cc->projection = 1;
+    cc->flags = scene::kCameraDrivesView | scene::kCameraKeepWidth;
+    cc->sizeCm = 600.0f;
+    cc->cullInv = scene::storeMask(6);
+    cc->hOffsetCm = 50.0f; cc->vOffsetCm = 25.0f;
+    game::drivePlayCamera(pos, yaw, pitch, view, 0.016f, pawn.e);
+    check(view.projection == ProjectionKind::Orthographic && view.keepWidth && view.sizeCm == 600.0f && view.cullInv == scene::storeMask(6),
+          "an orthographic node carries its projection, keep_aspect, size and cull mask");
+    check(yaw == yaw0 && pitch == pitch0 && near(pos.y - base.y, 50.0f, 1e-3f) && near(pos.z - base.z, 25.0f, 1e-3f) && near(pos.x, base.x, 1e-3f),
+          "h_offset slides the camera along its right axis and v_offset along its up axis (facing +X: right is +Y, up is +Z)");
+
+    RecDevice dev;
+    game::pushCamera(dev, pos, game::cameraForward(yaw, pitch), 16.0f / 9.0f, view);
+    check(isOrthographicViewProj(dev.viewProj), "pushCamera hands the device an orthographic view-projection");
+    Mat4 vp;
+    std::memcpy(&vp.m[0][0], dev.viewProj, sizeof dev.viewProj);
+    f32 ox = 0, oy = 0, oz = 0, fx = 0, fy = 0, fz = 0;
+    const bool a = projectToNdc(vp, pos + Vec3{1000, 300, 0}, ox, oy, oz);
+    const bool b = projectToNdc(vp, pos + Vec3{5000, 300, 0}, fx, fy, fz);
+    check(a && b && near(ox, 1.0f, 1e-3f) && near(oy, 0.0f, 1e-3f) && near(fx, ox, 1e-4f),
+          "keep width: 300 cm to the side is the right screen edge (x = 1) at any distance, as an orthographic view should");
+
+    aver_fw_set_view_entity(0);
+    w.destroy(cn);
+    w.flush();
+}
+
 #if AVER_MODULE_CAMERA
 static void testWithRig() {
     AVER_INFO("=== drivePlayCamera with a rig ===");
@@ -236,6 +296,7 @@ int main() {
     AVER_INFO("game camera");
     testPushCamera();
     testLegacyBoom();
+    testCameraNode();
 #if AVER_MODULE_CAMERA
     testWithRig();
 #else

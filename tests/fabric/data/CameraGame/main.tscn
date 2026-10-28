@@ -1,0 +1,46 @@
+[gd_scene load_steps=2 format=3]
+
+[sub_resource type="BoxMesh" id="BoxMesh_a"]
+size = Vector3(1, 1, 1)
+
+[node name="Main" type="Node3D"]
+
+[node name="Ortho" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2, 10)
+projection = 1
+size = 12.0
+keep_aspect = 0
+near = 0.1
+far = 200.0
+cull_mask = 6
+h_offset = 0.5
+v_offset = -0.25
+current = true
+
+[node name="Frust" type="Camera3D" parent="."]
+projection = 2
+size = 2.0
+frustum_offset = Vector2(0.3, -0.1)
+doppler_tracking = 1
+
+[node name="Persp" type="Camera3D" parent="."]
+fov = 90.0
+keep_aspect = 0
+
+[node name="Near" type="MeshInstance3D" parent="."]
+mesh = SubResource("BoxMesh_a")
+layers = 2
+visibility_range_begin = 5.0
+visibility_range_begin_margin = 1.0
+visibility_range_end = 40.0
+visibility_range_end_margin = 2.0
+visibility_range_fade_mode = 1
+
+[node name="Plain" type="MeshInstance3D" parent="."]
+mesh = SubResource("BoxMesh_a")
+visibility_range_end = 100.0
+
+[node name="Lamp" type="OmniLight3D" parent="."]
+layers = 4
+light_cull_mask = 2
+shadow_caster_mask = 4

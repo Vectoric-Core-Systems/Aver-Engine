@@ -13,11 +13,15 @@ namespace Aver.Fabric;
 public class Viewport : Node
 {
     /// <summary>The size in pixels. Defaults to the project's window size (WINDOW.SIZE) or 1280 by 720.</summary>
-    public Vector2I Size
+    public virtual Vector2I Size
     {
         get => _size ?? ProjectWindowSize();
         set => _size = value;
     }
+
+    /// <summary>The picture this viewport draws as a texture. A <see cref="SubViewport"/> has one (a render-to-texture view, G4_RENDER.md R5); the
+    /// window's own viewport is the screen and has none, so this is null for it.</summary>
+    public virtual ViewportTexture? GetTexture() => null;
 
     private Vector2I? _size;
 
@@ -38,7 +42,7 @@ public class Viewport : Node
     public World3D World3D { get; set; } = new();
 
     /// <summary>The camera that is drawn (the one made current last).</summary>
-    public Camera3D? GetCamera3D() => Camera3D.CurrentCamera;
+    public virtual Camera3D? GetCamera3D() => Camera3D.CurrentCamera;
 
     /// <summary>The pointer in viewport pixels. The engine gives no absolute pointer position yet: this is where script-fed events last put it.</summary>
     public Vector2 GetMousePosition() => Input.MousePosition;
@@ -114,6 +118,7 @@ public class SceneTree : GodotObject
         Node.ResetGroups();
         Input.ResetForTests();
         Camera3D.ResetCurrent();
+        DirectionalLight3D.ResetSun();
     }
 
     /// <summary>The window every scene hangs from. Always in the tree; it has no entity.</summary>

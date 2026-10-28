@@ -8,6 +8,7 @@
 #include "aver/voxi/Scalability.hpp"
 #include "aver/formats/OcProject.hpp"
 
+#include <algorithm>
 #include <type_traits>
 
 // THE ONE PLACE A .ocproject's RENDER.* KEYS BECOME A voxi::Settings, SHARED BY BOTH HOSTS. Before
@@ -138,6 +139,17 @@ inline void applyManifestKnobs(const fmt::ProjectDesc& project, Settings& s) {
     // RENDER.FOGOCCLUSION: the same plain-knob shape again -- no ladder rung, so an absent key keeps
     // the engine default (on).
     if (project.fogOcclusion >= 0) s.fogOcclusion = project.fogOcclusion != 0;
+
+    // RENDER.MESHEXTRA: a plain bool knob, absent keeps the engine default (on).
+    if (project.meshExtra >= 0) s.meshExtraStreams = project.meshExtra != 0;
+    // RENDER.MATERIALFX: a plain bool knob, absent keeps the engine default (on).
+    if (project.materialFx >= 0) s.materialFx = project.materialFx != 0;
+    // RENDER.LOCALRASTER (0 auto / 1 on / 2 off) and RENDER.LOCALSHADOWS: absent keeps the engine defaults; an out-of-range mode is ignored.
+    if (project.localRaster >= 0 && project.localRaster <= 2) s.localLightsRaster = static_cast<u32>(project.localRaster);
+    if (project.localShadows >= 0) s.localLightShadows = project.localShadows != 0;
+    // G4 R8 RENDER.VOLFOG (volumetric fog on / off) and RENDER.VOLFOGDENSITY (its uniform medium, per cm): plain knobs, absent keeps the engine defaults.
+    if (project.volFog >= 0) s.volumetricFog = project.volFog != 0;
+    if (project.volFogDensity >= 0.0f) s.volumetricFogDensity = std::clamp(project.volFogDensity, 0.0f, 0.01f);
 
     // THE TENTH TIER-DERIVED KNOB (N6): absent RENDER.RESTIRVISIBILITY follows the GI tier that was
     // just committed above, exactly like voxelResolution/giCones/giUpdateInterval do -- not whatever
@@ -576,6 +588,21 @@ inline void captureVoxiSettings(fmt::ProjectDesc& project, const Settings& reque
     project.rdStages           = static_cast<int>(requested.rayDrivenStages);
     // RENDER.FOGOCCLUSION: unconditional capture, denoiser's shape (a bool, no tier to race).
     project.fogOcclusion       = requested.fogOcclusion ? 1 : 0;
+    // RENDER.MESHEXTRA: captured only when switched off, so a project that never mentions it stays free of the key.
+    if (!requested.meshExtraStreams) project.meshExtra = 0;
+    else if (project.meshExtra >= 0) project.meshExtra = 1;
+    // RENDER.MATERIALFX: captured only when switched off, like RENDER.MESHEXTRA.
+    if (!requested.materialFx) project.materialFx = 0;
+    else if (project.materialFx >= 0) project.materialFx = 1;
+    // RENDER.LOCALRASTER / LOCALSHADOWS: written only when they differ from the defaults, or when the project already stated them.
+    if (requested.localLightsRaster != 0 || project.localRaster >= 0) project.localRaster = static_cast<int>(requested.localLightsRaster);
+    if (!requested.localLightShadows) project.localShadows = 0;
+    else if (project.localShadows >= 0) project.localShadows = 1;
+    // RENDER.VOLFOG / VOLFOGDENSITY: written only when on, or when the project already stated them (the console can switch the fog; a project that never
+    // mentions it stays free of the keys).
+    if (requested.volumetricFog) project.volFog = 1;
+    else if (project.volFog >= 0) project.volFog = 0;
+    if (project.volFogDensity >= 0.0f) project.volFogDensity = requested.volumetricFogDensity;
     project.refractionStrength = requested.refractionStrength;
     project.refractionEdgeFade = requested.refractionEdgeFade;
 }

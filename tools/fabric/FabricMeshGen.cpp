@@ -198,6 +198,26 @@ bool buildPrimitiveMesh(const std::string& type, const PropGetter& get, SoupMesh
         for (int i = 0; i < rings; ++i)
             for (int j = 0; j < segs; ++j)
                 b.quad(ids[i * (segs + 1) + j], ids[(i + 1) * (segs + 1) + j], ids[(i + 1) * (segs + 1) + j + 1], ids[i * (segs + 1) + j + 1]);
+    } else if (type == "TubeTrailMesh") {
+        // G4 R7: the static shape of a trail mesh: a straight tube along Y, centred. The particle system's bend and the width curve are not applied.
+        const double radius = num(get, "radius", 0.5), len = num(get, "section_length", 0.2);
+        const int radial = std::max(inum(get, "radial_steps", 8), 3), sections = std::max(inum(get, "sections", 5), 1), rings = std::max(inum(get, "section_rings", 3), 1);
+        const double total = sections * len;
+        const int rows = sections * rings;
+        std::vector<ProfilePoint> prof;
+        for (int k = 0; k <= rows; ++k) {
+            const double t = static_cast<double>(k) / rows;
+            prof.push_back({radius, total / 2 - t * total, 1.0, 0.0, t});
+        }
+        revolve(b, prof, radial);
+        if (boolOf(get("cap_top"), true)) cap(b, radius, total / 2, 1.0, radial);
+        if (boolOf(get("cap_bottom"), true)) cap(b, radius, -total / 2, -1.0, radial);
+    } else if (type == "RibbonTrailMesh") {
+        const double size = num(get, "size", 1.0), len = num(get, "section_length", 0.2);
+        const int sections = std::max(inum(get, "sections", 5), 1), segs = std::max(inum(get, "section_segments", 3), 1);
+        const double total = sections * len;
+        b.grid({0, 0, 0}, {size / 2, 0, 0}, {0, total / 2, 0}, {0, 0, 1}, 1, sections * segs, {1, 0, 0}, {0, -1, 0});
+        if (inum(get, "shape", 1) == 1) b.grid({0, 0, 0}, {0, 0, size / 2}, {0, total / 2, 0}, {1, 0, 0}, 1, sections * segs, {0, 0, -1}, {0, -1, 0});
     } else {
         if (why) *why = type + " is not a primitive mesh the converter generates";
         return false;
@@ -239,6 +259,8 @@ fmt::OcMeshData toOcMesh(const SoupMesh& soup, const std::string& materialSlot) 
     sm.vertexCount = static_cast<u32>(n);
     m.submeshes.push_back(std::move(sm));
     m.computeBounds();
+    // Godot's PrimitiveMesh arrays carry tangents; so do these (R1). UV0 only: Godot adds UV2 only for add_uv2.
+    fmt::generateTangents(m);
     return m;
 }
 

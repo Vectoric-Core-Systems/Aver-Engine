@@ -137,6 +137,8 @@ const char* blendWord(rhi::BlendMode b) {
         case rhi::BlendMode::Opaque:              return "opaque";
         case rhi::BlendMode::AlphaBlend:           return "alphablend";
         case rhi::BlendMode::Additive:             return "additive";
+        case rhi::BlendMode::Subtractive:
+        case rhi::BlendMode::Multiplicative:       return "premultiplied";   // R6 modes are material-only
         case rhi::BlendMode::PremultipliedAlpha:   default: return "premultiplied";
     }
 }

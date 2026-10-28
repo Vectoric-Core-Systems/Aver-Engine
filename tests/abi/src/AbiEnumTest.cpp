@@ -838,6 +838,11 @@ static const Group kGroups[] = {
     // wave 9: the sun / fog / sky-light override keys a script sets (framework_worldfx_abi.h).
     {"world effects keys",    "modules/framework/include/aver/framework/framework_worldfx_abi.h", "AVER_FW_ENV_",
      "scripting/csharp/Aver.Framework/WorldFxNative.cs", "WorldEnvKey", ""},
+    // G4 R5: sub-viewport update and clear modes (framework_subview_abi.h), Godot's SubViewport.UpdateMode / ClearMode numbers.
+    {"sub-viewport update modes", "modules/framework/include/aver/framework/framework_subview_abi.h", "AVER_FW_SUBVIEW_UPDATE_",
+     "scripting/csharp/Aver.Framework/SubViews.cs", "SubViewUpdate", ""},
+    {"sub-viewport clear modes", "modules/framework/include/aver/framework/framework_subview_abi.h", "AVER_FW_SUBVIEW_CLEAR_",
+     "scripting/csharp/Aver.Framework/SubViews.cs", "SubViewClear", ""},
     // wave 11 SOFTBODY_HAIR: the collider shapes a script passes (framework_hair_abi.h) against HairColliderShape in Hair.cs.
     {"hair collider shapes",  "modules/framework/include/aver/framework/framework_hair_abi.h", "AVER_FW_HAIR_SHAPE_",
      "scripting/csharp/Aver.Framework/Hair.cs", "HairColliderShape", ""},

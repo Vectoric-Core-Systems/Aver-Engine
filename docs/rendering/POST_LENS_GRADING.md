@@ -36,6 +36,19 @@ scene (HDR, linear)
 | `whiteBalanceK`, `whiteBalanceTint` | 6500 / 0 | `whiteBalanceK` is the colour temperature of the scene's light; the image is corrected so that light reads neutral (so 3200 cools, 10000 warms), as Unreal's White Balance. Luminance-preserving; 2500..15000 K. Tint + is magenta, - is green. |
 | `gradingLut`, `gradingLutIntensity` | | A 3D LUT texture (`TextureDim::Tex3D`, RGBA8 or RGBA16F, N x N x N, x = R, y = G, z = B), looked up with the display-space colour after the tonemap and blended by the intensity. Create it with `initialState = ShaderResource`. |
 
+## Godot tonemappers and display adjustments (G4 R3)
+
+`PostSettings::tonemap` 3..7 selects Godot's linear, Reinhard, filmic, ACES and AgX curves (`rhi/Tonemap.hpp` is the CPU twin and the
+reference; `color.hlsli` the HLSL), with `tonemapWhite` (Reinhard, filmic, ACES) and three display-space adjustments, `adjustBrightness`,
+`adjustContrast`, `adjustSaturation` (Godot's `apply_bcs`: scale, pivot on 0.5, pivot on the channel mean), run AFTER the tonemap and the gamma
+encode and BEFORE the grading LUT. Project keys `RENDER.TONEMAP 0..7`, `RENDER.TONEMAPWHITE`, `RENDER.ADJUSTBRIGHTNESS / CONTRAST /
+SATURATION`; post-volume keys `tonemap`, `tonemapwhite`, `adjbrightness`, `adjcontrast`, `adjsaturation`.
+
+The code sits in a separate composite: `PSComposite` compiled with `AVER_POST_TONEMAP_EXT` (D3D12 and Vulkan), built the first frame
+`rhi::postNeedsExtComposite(post)` is true (a Godot tonemapper, or an adjustment off 1). The ordinary composite, its defines and its
+pipelines are untouched, and so is `averTonemap`; `PostCB` gained one row (`ext`) that only the EXT variant declares. Unlike the grade stage
+above, the adjustments are in display space, as Godot's are.
+
 ## Depth of field
 
 `c(d) = f^2 / (N (S - f)) * (d - S) / d` on a 36 mm sensor (3.6 cm), with `f` the focal length, `N` the f-stop, `S`

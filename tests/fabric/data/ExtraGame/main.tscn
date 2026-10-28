@@ -1,0 +1,19 @@
+[gd_scene load_steps=4 format=3 uid="uid://cextramain01"]
+
+[ext_resource type="PackedScene" path="res://models/quad.gltf" id="1_quad"]
+[ext_resource type="Material" path="res://materials/tinted.tres" id="2_tint"]
+
+[sub_resource type="BoxMesh" id="BoxMesh_cube"]
+size = Vector3(1, 1, 1)
+material = ExtResource("2_tint")
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_plain"]
+albedo_color = Color(0.5, 0.5, 0.5, 1)
+
+[node name="Main" type="Node3D"]
+
+[node name="Model" parent="." instance=ExtResource("1_quad")]
+
+[node name="Cube" type="MeshInstance3D" parent="."]
+mesh = SubResource("BoxMesh_cube")
+surface_material_override/0 = SubResource("StandardMaterial3D_plain")

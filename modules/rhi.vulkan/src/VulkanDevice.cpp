@@ -7,6 +7,7 @@
 // VulkanCommon.hpp; see this session's honestState for what could not be checked otherwise.
 #include "VulkanCommon.hpp"
 #include "aver/rhi/ShaderFiles.hpp"   // scene.hlsl is loaded, not compiled in
+#include "aver/rhi/Tonemap.hpp"
 #include "aver/rhi/vulkan/UiBackend.hpp"
 #include "aver/core/DynamicLibrary.hpp"
 #include "aver/platform/Window.hpp"   // vulkanGetInstanceProcAddr / createVulkanSurface off Windows
@@ -950,6 +951,8 @@ VulkanDevice::~VulkanDevice() {
     {
         if (compositePso_[b][a]) api_.DestroyPipeline(device_, compositePso_[b][a], nullptr);
         if (compositeLutPso_[b][a]) api_.DestroyPipeline(device_, compositeLutPso_[b][a], nullptr);
+        for (int l = 0; l < 2; ++l)
+            if (compositeExtPso_[l][b][a]) api_.DestroyPipeline(device_, compositeExtPso_[l][b][a], nullptr);
     }
     for (u32 i = 0; i < kFrameCount; ++i) {
         if (postRing_[i].buffer) destroyBufferCommitted(*this, postRing_[i].buffer, postRing_[i].memory);
@@ -2186,6 +2189,52 @@ MeshHandle VulkanDevice::createMesh(const MeshVertex* verts, u32 vcount, const u
     return static_cast<MeshHandle>(meshes_.size());
 }
 
+// R1: uploads the optional second vertex stream and attaches it to `mesh` (D3D12Device::setMeshExtra's twin).
+bool VulkanDevice::setMeshExtra(MeshHandle mesh, const MeshVertexExtra* extra, u32 vcount) {
+    if (!device_ || !rhiFactory_ || !extra || mesh == 0 || mesh > meshes_.size()) return false;
+    GpuMesh& m = meshes_[mesh - 1];
+    // A sharer borrows its root's stream, and a compute-written mesh's vertices are not the ones the stream describes.
+    if (!m.alive || m.hasExtra || m.computeWritten || !m.vbOwned || vcount != m.vertexCount) return false;
+    const u64 bytes = static_cast<u64>(vcount) * sizeof(MeshVertexExtra);
+    bool useDefaultHeap = staticMeshDefaultHeap_ && !deviceMemoryTight();
+    BufferDesc bd; bd.bytes = bytes; bd.kind = useDefaultHeap ? BufferKind::Default : BufferKind::Upload; bd.debugName = "mesh vertex extras";
+    BufferHandle h = rhiFactory_->createBuffer(bd);
+    if (!h && useDefaultHeap) {   // device memory refused: host memory for this one
+        useDefaultHeap = false;
+        bd.kind = BufferKind::Upload;
+        h = rhiFactory_->createBuffer(bd);
+    }
+    RhiBuffer* rb = rhiFactory_->buffer(h);
+    if (!rb || !rb->buffer) {
+        AVER_ERROR("[RHI.Vulkan] setMeshExtra could not allocate its buffer");
+        if (h) rhiFactory_->destroyBuffer(h);
+        return false;
+    }
+    bool uploaded = false;
+    if (useDefaultHeap) {
+        const VkBuffer dsts[1] = {rb->buffer};
+        const void* srcs[1] = {extra};
+        const VkDeviceSize sizes[1] = {bytes};
+        uploaded = rhiFactory_->uploadToDeviceBuffers(dsts, srcs, sizes, 1, "rhi setMeshExtra default-heap upload");
+        if (!uploaded) {   // this one mesh on the Upload heap, as createMesh does
+            rhiFactory_->destroyBuffer(h);
+            bd.kind = BufferKind::Upload;
+            h = rhiFactory_->createBuffer(bd);
+            rb = rhiFactory_->buffer(h);
+            if (!rb || !rb->buffer) {
+                if (h) rhiFactory_->destroyBuffer(h);
+                return false;
+            }
+        }
+    }
+    if (!uploaded) rhiFactory_->writeBuffer(h, extra, bytes, 0);
+    m.vbx = rb->buffer;
+    m.vbxBuffer = h;
+    m.hasExtra = true;
+    m.xOwned = true;
+    return true;
+}
+
 // W11: a new mesh sharing `source`'s vertex buffer, with its own index buffer -- the LOD-ladder case
 // IDevice::createMeshSharingVertices exists for (RHI.hpp's full contract): a coarser LOD keeps the
 // same vertex positions/normals/uvs, only thinning triangles, so duplicating the vertex stream per
@@ -2279,6 +2328,11 @@ MeshHandle VulkanDevice::shareVertices(MeshHandle source, const u32* indices, u3
     m.vbOwned = false;
     m.vbSource = root;
     m.computeWritten = posed;   // a posed part IS posed geometry; see createPosedPartMesh
+    // R1: the second vertex stream goes with the vertices it describes; the root outlives this mesh (vbShares), so it is borrowed.
+    if (rootMesh.hasExtra && !posed) {
+        m.vbx = rootMesh.vbx; m.vbxBuffer = rootMesh.vbxBuffer;
+        m.hasExtra = true; m.xOwned = false;
+    }
 
     m.ib = irb->buffer; m.ibMemory = irb->memory; m.ibAddress = irb->address;
     m.ibBuffer = ibBuffer;
@@ -2414,6 +2468,7 @@ bool VulkanDevice::destroyMesh(MeshHandle mesh) {
         // free memory the root and every OTHER sharer still draws. Mirrors the ibOwned gate on the
         // next line (same check, index buffer).
         if (m.vbOwned && m.vbBuffer) rhiFactory_->destroyBuffer(m.vbBuffer);
+        if (m.xOwned && m.vbxBuffer) rhiFactory_->destroyBuffer(m.vbxBuffer);   // R1's second stream, by its owner only
         if (m.ibOwned && m.ibBuffer) rhiFactory_->destroyBuffer(m.ibBuffer);
     }
     if (!m.ibOwned && m.ibSource != 0 && m.ibSource <= meshes_.size()) {
@@ -2429,6 +2484,7 @@ bool VulkanDevice::destroyMesh(MeshHandle mesh) {
     m.vbAddress = m.ibAddress = 0;
     m.indexCount = 0; m.vertexCount = 0;
     m.vbBuffer = 0; m.ibBuffer = 0;
+    m.vbx = VK_NULL_HANDLE; m.vbxBuffer = 0; m.hasExtra = false; m.xOwned = true;
     m.computeWritten = false;
     m.ibSource = 0;
     m.vbOwned = true;
@@ -2793,17 +2849,24 @@ void VulkanDevice::replayBlendedDraws(VkCommandBuffer cmd) {
     // Back-to-front: furthest first, by squared distance of the world translation (world[12..14]) to the camera.
     const f32 cx = frameCB_.camPos[0], cy = frameCB_.camPos[1], cz = frameCB_.camPos[2];
     std::sort(blendedDraws_.begin(), blendedDraws_.end(), [cx, cy, cz](const BlendedDraw& a, const BlendedDraw& b) {
+        // R6: render_priority first (lower draws earlier), distance within a priority.
+        const i32 pa = drawMaterialFxPriority(a.binding.constants, a.binding.bytes), pb = drawMaterialFxPriority(b.binding.constants, b.binding.bytes);
+        if (pa != pb) return pa < pb;
         const f32 adx = a.world[12] - cx, ady = a.world[13] - cy, adz = a.world[14] - cz;
         const f32 bdx = b.world[12] - cx, bdy = b.world[13] - cy, bdz = b.world[14] - cz;
         return (adx * adx + ady * ady + adz * adz) > (bdx * bdx + bdy * bdy + bdz * bdz);
     });
 
-    // Bound once: pipeline, descriptor sets and constants survive the scope split above.
-    rhiContext_->setPipeline(blendedPso);
-    rhiContext_->setBindlessTable(owner->sceneBindlessTable());
-    if (const BindingSetHandle bs = owner->sceneBindingSet()) rhiContext_->setBindingSet(bs, 0);
-    const void* cb = nullptr; u32 cbBytes = 0;
-    if (owner->sceneConstants(&cb, &cbBytes) && cb && cbBytes) rhiContext_->setConstantBuffer(kFeatureFrameConstantRegister, cb, cbBytes);
+    // Bound once: pipeline, descriptor sets and constants survive the scope split above (re-bound when an R6 material variant changes the pipeline).
+    const auto bindFeature = [&](PipelineHandle pso) {
+        rhiContext_->setPipeline(pso);
+        rhiContext_->setBindlessTable(owner->sceneBindlessTable());
+        if (const BindingSetHandle bs = owner->sceneBindingSet()) rhiContext_->setBindingSet(bs, 0);
+        const void* cb = nullptr; u32 cbBytes = 0;
+        if (owner->sceneConstants(&cb, &cbBytes) && cb && cbBytes) rhiContext_->setConstantBuffer(kFeatureFrameConstantRegister, cb, cbBytes);
+    };
+    PipelineHandle curPso = blendedPso;
+    bindFeature(curPso);
 
     u32 layerResolves = 0, captures = 0, drawsDone = 0;
     bool captured = false, capReached = false;
@@ -2828,6 +2891,12 @@ void VulkanDevice::replayBlendedDraws(VkCommandBuffer cmd) {
                 }
             }
         }
+        PipelineHandle drawPso = blendedPso;
+        bool drawMs = blendedMs;
+        if (const u32 fxKey = drawMaterialFxKey(bd.binding.constants, bd.binding.bytes)) {
+            if (const PipelineHandle fxp = owner->scenePipelineFx(fxKey, false, true)) { drawPso = fxp; drawMs = false; }
+        }
+        if (drawPso != curPso) { bindFeature(drawPso); curPso = drawPso; }
         rhiContext_->setDrawBinding(bd.binding.set, bd.binding.constants, bd.binding.bytes);
         f32 fc[kObjectConstantDwords];
         std::memcpy(fc, bd.world, 16 * sizeof(f32));
@@ -2835,8 +2904,8 @@ void VulkanDevice::replayBlendedDraws(VkCommandBuffer cmd) {
         fc[20] = bd.metallic; fc[21] = bd.roughness; fc[22] = 0.0f; fc[23] = 0.0f;   // unlit blended mesh not plumbed, as on D3D12
         writeShadingConstants(fc);
         rhiContext_->setConstants(kObjectConstantRegister, fc, kObjectConstantDwords);
-        if (blendedMs) rhiContext_->dispatchMeshFor(bd.mesh);
-        else           rhiContext_->drawMesh(bd.mesh);
+        if (drawMs) rhiContext_->dispatchMeshFor(bd.mesh);
+        else        rhiContext_->drawMesh(bd.mesh);
     }
 
     // Logged on CHANGE, power-of-two spaced.
@@ -2906,8 +2975,21 @@ void VulkanDevice::drawMesh(MeshHandle mesh, const f32 world[16], const f32 colo
         // assembler; drawMeshDepthPrepass has no mesh-shader twin). Passing msActive_ unconditionally
         // gave prepassed draws the ordinary Less/write-on pipeline, rejecting the equal depth the prepass
         // just wrote -- the frame came out almost unshaded (full account/measurement: D3D12Device::drawMesh's twin).
-        const bool featureMs = msActive_ && meshPso_ && !prepassed;
-        const PipelineHandle fp = f->scenePipeline(featureMs, prepassed, false);
+        bool featureMs = msActive_ && meshPso_ && !prepassed;
+        PipelineHandle fp = 0;
+        // R1: a mesh with the second vertex stream takes the feature's variant that reads it, on the vertex-input path
+        // (D3D12Device::drawMesh's twin); 0 = none yet, and the mesh draws as every mesh does.
+        if (meshes_[mesh - 1].hasExtra) {
+            fp = f->scenePipelineExtra(prepassed);
+            if (fp) featureMs = false;
+        }
+        // R6: a material with BaseMaterial3D features takes its own variant (D3D12Device::drawMesh's twin).
+        if (!prepassed) {
+            if (const u32 fxKey = drawMaterialFxKey(drawBinding_.constants, drawBinding_.bytes)) {
+                if (const PipelineHandle fxp = f->scenePipelineFx(fxKey, meshes_[mesh - 1].hasExtra, false)) { fp = fxp; featureMs = false; }
+            }
+        }
+        if (!fp) fp = f->scenePipeline(featureMs, prepassed, false);
         if (!fp) break;
         rhiContext_->setPipeline(fp);
         rhiContext_->setBindlessTable(f->sceneBindlessTable());   // ray-traced scene variants read geometry there
@@ -2922,6 +3004,7 @@ void VulkanDevice::drawMesh(MeshHandle mesh, const f32 world[16], const f32 colo
         // UNLIT reaches the material shader too, not just gMaterial.z (D3D12Device.cpp's twin call;
         // see writeShadingConstants there for why both fields are written).
         writeShadingConstants(fc, unlit_);
+        if (drawLayersInv_) std::memcpy(fc + 27, &drawLayersInv_, sizeof(u32));
         rhiContext_->setConstants(kObjectConstantRegister, fc, kObjectConstantDwords);
         // The draw call has to match the pipeline actually returned: a feature whose mesh-shader
         // variant failed to build hands back its vertex pipeline even when asked for featureMs.
@@ -2994,7 +3077,9 @@ bool VulkanDevice::depthOnlyDraw(MeshHandle mesh, const f32 world[16], const f32
 
     for (IRenderFeature* f : features_) {
         if (!f->overridesScenePipeline()) continue;
-        const PipelineHandle pp = f->depthPrepassPipeline();
+        // R1: a mesh with the second vertex stream is prepassed through the vertex shader its colour pass will use (bit-identical depth).
+        PipelineHandle pp = meshes_[mesh - 1].hasExtra ? f->depthPrepassPipelineExtra() : 0;
+        if (!pp) pp = f->depthPrepassPipeline();
         if (!pp) return false;   // this feature has no prepass PSO; nothing else offers one either today
         rhiContext_->setPipeline(pp);
         if (const BindingSetHandle bs = f->sceneBindingSet()) rhiContext_->setBindingSet(bs, 0);
@@ -3277,8 +3362,18 @@ bool VulkanDevice::openSceneScope(VkCommandBuffer cmd, bool load) {
 // REAL FIX: belongs with setRenderTargets -- the scope must follow the bound targets (close on
 // retarget, reopen lazily, persist across draws) and pipelines must match the targets they actually
 // use; a deliberate change, not a patch under this bug.
-bool VulkanDevice::pushRenderScope(VkCommandBuffer cmd, const VkRenderingInfo& ri) {
-    if (renderScopeDepth_ != 0) {   // already inside one: join it rather than nest
+bool VulkanDevice::pushRenderScope(VkCommandBuffer cmd, const VkRenderingInfo& ri, bool isolated) {
+    if (renderScopeDepth_ != 0) {
+        if (isolated) {
+            // R2 (setTargetsIsolated): this draw names its own attachments, so it must not land in the scene's. End the scene instance (it keeps its
+            // attachments in scopeInfo_ and resumes with LOAD on its next draw) and open a temporary one over `ri`; popRenderScope closes it.
+            // Only the local-light shadow pass asks for this; the cascade passes keep joining, as before.
+            suspendRenderScope(cmd);
+            api_.CmdBeginRendering(cmd, &ri);
+            tempScopeOpen_ = true;
+            return true;
+        }
+        // already inside one: join it rather than nest
         ensureRenderScope(cmd);
         return false;
     }
@@ -3299,6 +3394,11 @@ bool VulkanDevice::pushRenderScope(VkCommandBuffer cmd, const VkRenderingInfo& r
 }
 
 void VulkanDevice::popRenderScope(VkCommandBuffer cmd, bool opened) {
+    if (opened && tempScopeOpen_) {   // an isolated draw's own scope: the scene's stays suspended until its next draw
+        api_.CmdEndRendering(cmd);
+        tempScopeOpen_ = false;
+        return;
+    }
     if (!opened || renderScopeDepth_ == 0) return;
     --renderScopeDepth_;
     if (renderScopeSuspended_) { renderScopeSuspended_ = false; return; }   // already ended
@@ -3867,6 +3967,75 @@ void VulkanDevice::releasePostTargets() {
         expReadbackPending_[i] = false;
     }
     postReady_ = false;
+}
+
+// The composite pipeline for this frame: the ordinary permutation, or its AVER_POST_TONEMAP_EXT twin when the settings ask for a
+// Godot tonemapper or a display adjustment (built here, once, the first time). The default path never reaches the second branch.
+VkPipeline VulkanDevice::compositePsoFor(bool lut, bool bloom, bool autoExp) {
+    const int l = lut ? 1 : 0, b = bloom ? 1 : 0, a = autoExp ? 1 : 0;
+    const VkPipeline plain = lut ? compositeLutPso_[b][a] : compositePso_[b][a];
+    if (!postNeedsExtComposite(post_) || compositeExtFailed_ || !postPipelineLayout_ || swapchainFormat_ == VK_FORMAT_UNDEFINED) return plain;
+    if (compositeExtPso_[l][b][a]) return compositeExtPso_[l][b][a];
+
+    std::string defs = "AVER_POST_TONEMAP_EXT=1;";
+    if (lut) defs += "AVER_POST_LUT=1;";
+    if (bloom) defs += "AVER_POST_BLOOM=1;";
+    if (autoExp) defs += "AVER_POST_AUTOEXPOSURE=1;";
+    const char* src = postShaderSource();
+    std::vector<u32> vsSpv, psSpv;
+    VkShaderModule vsMod{}, psMod{};
+    bool ok = vulkanShaderCompiler().compile(src, "PostVS", ShaderStage::Vertex, 60, nullptr, vsSpv, kPostBinds, kPostBindCount) &&
+              vulkanShaderCompiler().compile(src, "PSComposite", ShaderStage::Pixel, 60, defs.c_str(), psSpv, kPostBinds, kPostBindCount);
+    if (ok) {
+        VkShaderModuleCreateInfo vci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        vci.codeSize = vsSpv.size() * sizeof(u32); vci.pCode = vsSpv.data();
+        VkShaderModuleCreateInfo pci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        pci.codeSize = psSpv.size() * sizeof(u32); pci.pCode = psSpv.data();
+        ok = vkOk(api_.CreateShaderModule(device_, &vci, nullptr, &vsMod), "post vs module (tonemap ext)") &&
+             vkOk(api_.CreateShaderModule(device_, &pci, nullptr, &psMod), "post ps module (tonemap ext)");
+    }
+    if (ok) {
+        VkPipelineVertexInputStateCreateInfo emptyVin{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+        VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+        ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkPipelineViewportStateCreateInfo vp{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+        vp.viewportCount = 1; vp.scissorCount = 1;
+        VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+        rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = VK_CULL_MODE_NONE; rs.lineWidth = 1.0f;
+        VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+        ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineColorBlendAttachmentState blendAtt{};
+        blendAtt.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+        cb.attachmentCount = 1; cb.pAttachments = &blendAtt;
+        VkDynamicState dynStates[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+        VkPipelineDynamicStateCreateInfo dyn{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+        dyn.dynamicStateCount = 2; dyn.pDynamicStates = dynStates;
+        VkFormat rtFormat = swapchainFormat_;
+        VkPipelineRenderingCreateInfo rendering{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+        rendering.colorAttachmentCount = 1; rendering.pColorAttachmentFormats = &rtFormat;
+        VkPipelineShaderStageCreateInfo stages[2] = {
+            {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, vsMod, "PostVS", nullptr},
+            {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, psMod, "PSComposite", nullptr},
+        };
+        VkGraphicsPipelineCreateInfo gp{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+        gp.pNext = &rendering;
+        gp.stageCount = 2; gp.pStages = stages;
+        gp.pVertexInputState = &emptyVin; gp.pInputAssemblyState = &ia; gp.pViewportState = &vp;
+        gp.pRasterizationState = &rs; gp.pMultisampleState = &ms; gp.pColorBlendState = &cb; gp.pDynamicState = &dyn;
+        gp.layout = postPipelineLayout_;
+        ok = vkOk(api_.CreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &gp, nullptr, &compositeExtPso_[l][b][a]), "composite pso (tonemap ext)");
+    }
+    if (vsMod) api_.DestroyShaderModule(device_, vsMod, nullptr);
+    if (psMod) api_.DestroyShaderModule(device_, psMod, nullptr);
+    if (!ok) {
+        compositeExtFailed_ = true;
+        compositeExtPso_[l][b][a] = VK_NULL_HANDLE;
+        AVER_WARN("[RHI.Vulkan] the Godot tonemapper composite failed to build; the project's ordinary tonemapper is used");
+        return plain;
+    }
+    AVER_INFO("[RHI.Vulkan] Godot tonemapper composite built (lut {}, bloom {}, auto-exposure {})", l, b, a);
+    return compositeExtPso_[l][b][a];
 }
 
 // Builds PSComposite's 4 permutations against swapchainFormat_ (deferred from createPostPipelines, see that comment). Guarded to run once: swapchainFormat_ is fixed for the swapchain's life, so nothing here rebuilds on later createPostTargets() calls.
@@ -4585,7 +4754,7 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
                                             VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
                                             VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT);
     pipelineBarrier(api_, cmd, &toRt, 1);
-    fullscreen(lutSize ? compositeLutPso_[bloom ? 1 : 0][autoExp ? 1 : 0] : compositePso_[bloom ? 1 : 0][autoExp ? 1 : 0],
+    fullscreen(compositePsoFor(lutSize != 0, bloom, autoExp),
               srUpscaled ? kPostSlotCompositeUpscaled : kPostSlotComposite,
               compositeW, compositeH, dstView, compositeX, compositeY, lutSet);
 

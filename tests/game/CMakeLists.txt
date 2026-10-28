@@ -208,3 +208,12 @@ if(TARGET Aver.Framework AND TARGET Aver.Scene)
   target_link_libraries(PlacementPropsTest PRIVATE Aver.Runtime.Game.Core Aver.Framework Aver.Scene Aver.Formats Aver.Core)
   set_target_properties(PlacementPropsTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# SubViewportHostTest -- G4 R5: a camera entity's view, the secondary world walk (DrawWorldPass::View), the sun and fill from the sky, the cost guard, and
+# SubViewportHost end to end against a recording device: views planned from the framework registry, a feature per view, textures published to scripts and
+# materials, resizes, the on-screen list. A real scene::World and GameContent; no window, no GPU.
+if(TARGET Aver.Framework AND TARGET Aver.Scene AND TARGET Aver.Render.PBR.Materials)
+  add_executable(SubViewportHostTest src/SubViewportHostTest.cpp)
+  target_link_libraries(SubViewportHostTest PRIVATE Aver.Runtime.Game.Core Aver.Render.ActorPreview Aver.Render.PBR.Materials Aver.Framework Aver.Scene Aver.Formats Aver.Core)
+  set_target_properties(SubViewportHostTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()

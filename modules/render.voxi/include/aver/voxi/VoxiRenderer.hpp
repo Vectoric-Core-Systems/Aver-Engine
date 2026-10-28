@@ -5,11 +5,13 @@
 // Present in builds that have VoxiRenderer::setSubmitNoRay / setSubmitNoShadow (Runtime/src/GameRender.cpp tests it, so it compiles either way).
 #define AVER_VOXI_SUBMIT_NO_RAY 1
 #include "aver/rhi/RHI.hpp"
+#include "aver/core/CameraProjection.hpp"   // G4 R4: isOrthographicViewProj
 #include "aver/rhi/RHIResources.hpp"
 #include "aver/pbr/MaterialSystem.hpp"
 #include "aver/voxi/Voxi.hpp"
 #include "aver/voxi/SceneLight.hpp"
 #include "aver/voxi/SceneDecal.hpp"
+#include "aver/voxi/RasterLights.hpp"   // R2: rl::Result (the frame's raster local-light list)
 #include "aver/voxi/GiDispatchBounds.hpp"   // VoxelBox/GiDispatchConstants
 #include "aver/render/denoise/Denoiser.hpp"
 #include "aver/render/denoise/Nrd2.hpp"
@@ -147,6 +149,9 @@ public:
     // Draws submitted while these are on are left out of the acceleration structure / the shadow cascades (see Draw::noRay). Sticky like setSubmitMovable.
     void setSubmitNoRay(bool on) { submitNoRay_ = on; }
     void setSubmitNoShadow(bool on) { submitNoShadow_ = on; }
+    // G4 R4: the render layers (inverted, scene::storeMask; 0 = every layer) of the draws submitted next. Sticky like setSubmitMovable; the scene walk
+    // sets it only for an entity whose layers are not the default and puts it back to 0 after. Read by the raster local-light shadow pass.
+    void setSubmitLayers(u32 layersInv) { submitLayersInv_ = layersInv; }
 
     // ---- scene lights (CLight): point, spot and rectangular area lights ----
     // World space (SceneLight.hpp), filled by the host from scene::gatherLights. They share the staged
@@ -189,6 +194,13 @@ public:
     rhi::PipelineHandle scenePipeline(bool meshShaders, bool depthPrepassed = false,
                                       bool blended = false) const override;
     rhi::PipelineHandle depthPrepassPipeline() const override;
+    // R1: the raster scene variant for a mesh with the second vertex stream (vertex colour, authored tangent, UV2). 0 until that variant
+    // has been compiled -- the first such draw only marks it wanted, prePass builds it, and meanwhile the mesh draws as every mesh does.
+    rhi::PipelineHandle scenePipelineExtra(bool depthPrepassed) const override;
+    // The depth-only twin through the SAME extra vertex shader, answered only while the extra prepassed colour twin exists too.
+    rhi::PipelineHandle depthPrepassPipelineExtra() const override;
+    // R6: the scene pipeline of a material variant (BaseMaterial3D features); built lazily by prePass the frame after the first draw that asked.
+    rhi::PipelineHandle scenePipelineFx(u32 key, bool meshExtra, bool blended) const override;
 
     rhi::BindlessTableHandle sceneBindlessTable() const override;
     bool suppressesScene() const override;
@@ -199,6 +211,10 @@ public:
     void scenePass(rhi::IRenderContext& ctx) override;
     // Volumetric fog on the sky (the shade sites fog everything else); see VoxiFroxelFog.hpp.
     void transparentPass(rhi::IRenderContext& ctx) override;
+    // G4 R8: local fog volumes (Godot FogVolume) for the coming frames; they live inside the volumetric fog, so they show only with
+    // Settings::volumetricFog on. Null or an empty block clears them (today's passes). Copies. Once per frame from the host.
+    void setFogVolumes(const FogVolumeBlock* block) { froxel_.setFogVolumes(block); }
+    bool volumetricFogOn() const { return settings_.volumetricFog; }
     // Ray-driven frames record at endFrame so moving objects use this frame's transforms.
     bool wantsLateScenePass() const override;
     // This frame's translucent draws were composited inside the ray-driven frame; skip their replay.
@@ -245,6 +261,9 @@ private:
     void manageInjectionAccumulator(rhi::IRenderContext& ctx);
     bool createPipelines();
     bool createScenePipelines(u32 sampleCount, rhi::Format color, rhi::Format depth);
+    // R1: compiles the AVER_MESH_EXTRA scene variants (plain, G-buffer, and their depth-prepassed twins) for the ray-traced (rt) or the
+    // plain raster set. Only ever called after a mesh with the second vertex stream was drawn; never at startup.
+    bool createExtraScenePipelines(bool rt, bool local = false);
     rhi::PipelineHandle pickGbuf(rhi::PipelineHandle plain, rhi::PipelineHandle gbuf) const;
     void shadowPass(rhi::IRenderContext& ctx);
     // Both take the slice [begin, end) of drawsPrev_: `first` clears, `last` finishes (a staged
@@ -353,6 +372,43 @@ private:
     // Optional (0 = couldn't build); built alongside plain twins, gated on msOk/rtOk; runtime on/off via pickGbuf().
     rhi::PipelineHandle sceneGbufPso_ = 0, sceneMsGbufPso_ = 0, sceneRtGbufPso_ = 0, sceneMsRtGbufPso_ = 0;
     rhi::PipelineHandle scenePsoPrepassedGbuf_ = 0, sceneRtPsoPrepassedGbuf_ = 0;
+    // R1 second-vertex-stream twins (AVER_MESH_EXTRA), index 0 = plain raster, 1 = ray-traced raster. Built lazily by createExtraScenePipelines;
+    // a failed build leaves 0 and scenePipelineExtra answers 0 (the mesh then draws through the ordinary pipeline).
+    struct ExtraScene { rhi::PipelineHandle lit = 0, litGbuf = 0, prepassed = 0, prepassedGbuf = 0; };
+    ExtraScene extraScene_[2];
+    rhi::PipelineHandle extraDepthPso_ = 0;   // VSMain + PSDepthPrepass with AVER_MESH_EXTRA, shared by both sets (layout = the plain one, like depthPrepassPso_)
+    bool extraTried_[2] = {false, false};
+    mutable bool extraWanted_ = false;   // set by the first scenePipelineExtra call
+    // ---- R6: material variants (docs/plans/fabric/G4_RENDER.md R6) ----
+    // One entry per (variant key, ray-traced raster set, second-vertex-stream mesh). `lit` / `litGbuf` are the opaque pipelines, `blended` the translucent one
+    // (no G-buffer write). A key is built the first prePass after a draw asked for it; until then, and if the build fails, the draw takes the ordinary pipeline.
+    struct FxScene { rhi::PipelineHandle lit = 0, litGbuf = 0, blended = 0; bool tried = false; };
+    std::unordered_map<u64, FxScene> fxScenes_;
+    mutable std::vector<u64> fxWanted_;
+    bool createFxPipelines(u64 mapKey);
+    void destroyFxScenes();
+    static u64 fxMapKey(u32 key, bool rt, bool extra) { return static_cast<u64>(key) | (rt ? (1ull << 32) : 0ull) | (extra ? (1ull << 33) : 0ull); }
+
+    // R2: the same twins compiled with AVER_LOCAL_RASTER too, so a mesh with the second stream is lit by the raster local lights as any mesh is.
+    ExtraScene extraSceneLocal_[2];
+    bool extraLocalTried_[2] = {false, false};
+
+    // ---- R2: raster local lights (omni and spot, no ray tracing; docs/plans/fabric/G4_RENDER.md R2) ----
+    // The AVER_LOCAL_RASTER twins of the raster scene set, [0] plain raster and [1] ray-traced raster. Built the first frame the path is live.
+    struct LocalScene { rhi::PipelineHandle lit = 0, litGbuf = 0, prepassed = 0, prepassedGbuf = 0; };
+    LocalScene localScene_[2];
+    bool localTried_[2] = {false, false};
+    bool createLocalRasterPipelines(bool rt);
+    // Whether this frame's raster scene draws take the twins: settings, at least one point/spot light, and (with ray tracing active) the opt-in.
+    bool localRasterWanted() const;
+    void localShadowPass(rhi::IRenderContext& ctx);
+    bool createLocalShadowAtlas();
+    bool localRasterLive_ = false;       // decided in prePass, read by scenePipeline / sceneConstants
+    bool localAtlasBound_ = false;       // t19 currently holds the atlas
+    rhi::TextureHandle localShadowTex_ = 0;
+    rl::Result localRl_;                 // this frame's packed list, tiles and statistics
+    mutable std::vector<u8> localCbBlob_;   // engine block + rl::Block, handed to the device while the path is live
+    u32 localRasterStateLogged_ = 0xFFFFFFFFu;
     // PSRayDriven twin (RayDrivenGBufferOut + SV_DEPTH).
     rhi::PipelineHandle rayDrivenGbufPso_ = 0;
 
@@ -890,8 +946,10 @@ private:
         bool noShadow = false;
         // MOVABLE: moves during play (game::PlayMobility decides); out of voxelisation and GI rebuild gate.
         bool movable = false;
+        u32 layersInv = 0;   // G4 R4: render layers, inverted (0 = every layer); see setSubmitLayers
     };
     bool submitMovable_ = false;
+    u32 submitLayersInv_ = 0;
     bool submitNoRay_ = false;
     bool submitNoShadow_ = false;
 
@@ -1584,7 +1642,16 @@ private:
     // The DEBUG RAYMARCH has taken over the scene.
     bool debugViewActive() const { return giReady_ && giEnabled() && debugView_; }
     // RAY-DRIVEN PRIMARY VISIBILITY is running this frame.
-    bool rayDrivenActive() const { return rtActive_ && rtRenderMode_ == 1u && rayDrivenPso_ != 0; }
+    // G4 R4: an orthographic view never takes the ray-driven path. PSRayDriven finds its primary ray from the camera position and the inverse
+    // view-projection (one centre of projection); an orthographic camera has parallel rays, and PSRayDriven may not be touched, so the
+    // rasteriser draws the primaries instead. `orthoView_` is refreshed at the top of prePass; perspective cameras never set it.
+    bool rayDrivenActive() const { return rtActive_ && rtRenderMode_ == 1u && rayDrivenPso_ != 0 && !orthoView_; }
+    bool orthoView_ = false;
+    bool orthoLogged_ = false;
+    bool viewIsOrthographicNow() const {
+        f32 vp[16];
+        return dev_ && dev_->camera(vp, nullptr, nullptr) && isOrthographicViewProj(vp);
+    }
 
 public:
     // PREDICTS suppressesScene() (debugViewActive() || rayDrivenActive()) for THIS frame.
@@ -1593,7 +1660,7 @@ public:
     bool willSuppressSceneThisFrame() const {
         const bool rayDrivenWillBeActive = rtSupported_ && settings_.rayTracing != Quality::Off &&
                                             !draws_.empty() && rtRenderMode_ == 1u &&
-                                            rayDrivenPso_ != 0;
+                                            rayDrivenPso_ != 0 && !viewIsOrthographicNow();
         return debugViewActive() || rayDrivenWillBeActive;
     }
 

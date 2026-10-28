@@ -178,8 +178,13 @@ struct FbxVert {
     double uv[2];
     uint32_t cp;
     uint32_t pad;
+    // R1 streams; zero when the mesh has none, so they leave the weld of a mesh without them unchanged.
+    double tan[3];
+    double bit[3];
+    double uv1[2];
+    double col[4];
 };
-static_assert(sizeof(FbxVert) == 72, "FbxVert must be padding-free");
+static_assert(sizeof(FbxVert) == 168, "FbxVert must be padding-free");
 
 // The slot index for a material name, appending it when new.
 u32 slotFor(OcMeshData& m, const std::string& name) {
@@ -206,6 +211,11 @@ bool buildMeshCopy(Ctx& c, const MeshIn& in, OcMeshData& m, std::vector<u32>& cp
     const bool hasNrm = mesh->vertex_normal.exists && mesh->vertex_normal.indices.count >= mesh->num_indices;
     const bool hasUv  = mesh->vertex_uv.exists && mesh->vertex_uv.indices.count >= mesh->num_indices;
     if (!mesh->vertex_position.exists) return fail(why, "FBX: a mesh has no vertex positions");
+    const bool hasCol = mesh->vertex_color.exists && mesh->vertex_color.indices.count >= mesh->num_indices;
+    const bool hasTan = hasNrm && hasUv && mesh->vertex_tangent.exists && mesh->vertex_bitangent.exists &&
+                        mesh->vertex_tangent.indices.count >= mesh->num_indices && mesh->vertex_bitangent.indices.count >= mesh->num_indices;
+    const bool hasUv1 = mesh->uv_sets.count > 1 && mesh->uv_sets.data[1].vertex_uv.exists &&
+                        mesh->uv_sets.data[1].vertex_uv.indices.count >= mesh->num_indices;
 
     // ---- corners, one run per material part ----
     struct Run { usize materialPart; usize begin, count; };
@@ -235,6 +245,21 @@ bool buildMeshCopy(Ctx& c, const MeshIn& in, OcMeshData& m, std::vector<u32>& cp
                 v.uv[0] = uv.x; v.uv[1] = uv.y;
             }
             v.cp = mesh->vertex_indices.data[ix];
+            if (hasCol) {
+                const ufbx_vec4 cl = mesh->vertex_color.values.data[mesh->vertex_color.indices.data[ix]];
+                v.col[0] = cl.x; v.col[1] = cl.y; v.col[2] = cl.z; v.col[3] = cl.w;
+            }
+            if (hasTan) {
+                const ufbx_vec3 tg = mesh->vertex_tangent.values.data[mesh->vertex_tangent.indices.data[ix]];
+                const ufbx_vec3 bt = mesh->vertex_bitangent.values.data[mesh->vertex_bitangent.indices.data[ix]];
+                v.tan[0] = tg.x; v.tan[1] = tg.y; v.tan[2] = tg.z;
+                v.bit[0] = bt.x; v.bit[1] = bt.y; v.bit[2] = bt.z;
+            }
+            if (hasUv1) {
+                const ufbx_uv_set& s1 = mesh->uv_sets.data[1];
+                const ufbx_vec2 u1 = s1.vertex_uv.values.data[s1.vertex_uv.indices.data[ix]];
+                v.uv1[0] = u1.x; v.uv1[1] = u1.y;
+            }
             verts.push_back(v);
         }
     };
@@ -291,6 +316,22 @@ bool buildMeshCopy(Ctx& c, const MeshIn& in, OcMeshData& m, std::vector<u32>& cp
         m.uvs[u * 2 + 0] = f32(v.uv[0]);
         m.uvs[u * 2 + 1] = f32(1.0 - v.uv[1]);      // FBX's origin is bottom-left, like OBJ and USD
         cpOut[u] = v.cp;
+
+        if (hasCol) m.colors.insert(m.colors.end(), {f32(v.col[0]), f32(v.col[1]), f32(v.col[2]), f32(v.col[3])});
+        if (hasUv1) m.uvs1.insert(m.uvs1.end(), {f32(v.uv1[0]), f32(1.0 - v.uv1[1])});
+        if (hasTan) {
+            // Tangent-plane directions take the geometry basis like a position (no translation), then the axis map. FBX's v
+            // runs up, the stored v is flipped, so the direction of increasing stored v is minus the FBX bitangent.
+            f64 tw[3], bw[3];
+            applyRows(basis, v.tan[0], v.tan[1], v.tan[2], tw);
+            applyRows(basis, -v.bit[0], -v.bit[1], -v.bit[2], bw);
+            const Vec3 te = c.basis.toEngine(tw[0], tw[1], tw[2], true);
+            const Vec3 dv = c.basis.toEngine(bw[0], bw[1], bw[2], true);
+            const f32 tgt[3] = {te.x, te.y, te.z}, dir[3] = {dv.x, dv.y, dv.z};
+            f32 packed[4];
+            packTangent(&m.normals[u * 3], tgt, dir, packed);
+            m.tangents.insert(m.tangents.end(), packed, packed + 4);
+        }
     }
 
     m.indices.resize(idx.size());
@@ -414,8 +455,7 @@ void importScene(Ctx& c) {
         meshNodes.push_back(n);
         if (o.importSkeletons && mesh->skin_deformers.count > 0 && mesh->skin_deformers.data[0]->clusters.count > 0)
             { skinnedNodes.push_back(n); skinnedSet.insert(n); }
-        if (mesh->vertex_color.exists) c.note("vertex colour");
-        if (mesh->uv_sets.count > 1) c.note("a second UV set (only the first is carried)");
+        if (mesh->uv_sets.count > 2) c.note("a third UV set (only the first two are carried)");
         if (mesh->subdivision_render_levels > 0 && mesh->subdivision_display_mode != UFBX_SUBDIVISION_DISPLAY_DISABLED)
             c.note("subdivision surfaces (the control cage was imported, unsubdivided)");
         if (mesh->cache_deformers.count > 0) c.note("geometry caches");

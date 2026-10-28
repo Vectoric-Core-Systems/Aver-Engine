@@ -132,6 +132,10 @@ public:
     const char* acquireTag = nullptr;   // diagnostics: who is acquiring (AVER_HITCH_MS sync-read lines)
     void releaseMesh(rhi::IDevice& device, u64 id);
     bool meshLoaded(u64 id) const;
+    // G4 R7: uploads the meshes scripts built at run time (framework_rtmesh_abi.h: ArrayMesh, SurfaceTool, ImmediateMesh, MultiMesh) that changed since the last
+    // call, and unloads the ones scripts destroyed. A mesh is drawn through the id its path "@rtmesh/<key>" hashes to, like any asset. Returns how many were
+    // uploaded; with no runtime mesh in the registry it does nothing. Call once a frame before the draw walk.
+    u32 syncRuntimeMeshes(rhi::IDevice& device);
     // Prepares a lazy mesh on a worker thread (read, vertices and parts, collision mesh and shape) so a
     // later acquireMesh only uploads. Workers take the lowest `priority` first (a streamer passes the
     // distance); asking again updates it. No-op for eager or loaded meshes.
@@ -301,6 +305,7 @@ private:
     };
     struct MeshCpu {
         std::vector<rhi::MeshVertex> verts;
+        std::vector<rhi::MeshVertexExtra> extra;   // R1: the second vertex stream (colour, tangent, UV2); empty when the mesh has none
         std::vector<PartCpu> parts;
         std::unique_ptr<rhi::MeshStaging> staged;
         std::vector<std::unique_ptr<rhi::MeshStaging>> lodStaged;   // per coarser LOD level
@@ -345,8 +350,8 @@ private:
     // not a split" fallback. Called unconditionally from loadProjectMeshes, not gated on
     // AVER_MODULE_LANDSCAPE the way the editor's call site is -- see MeshPart's own comment for why.
     void buildMeshParts(rhi::IDevice& device, u64 id, const fmt::OcMeshData& md, rhi::MeshHandle whole,
-                         const std::vector<rhi::MeshVertex>& verts, std::vector<PartCpu>& cpuParts,
-                         const std::string& rel);
+                         const std::vector<rhi::MeshVertex>& verts, const std::vector<rhi::MeshVertexExtra>& extra,
+                         std::vector<PartCpu>& cpuParts, const std::string& rel);
 #endif
 
 #if AVER_MODULE_PBR

@@ -335,6 +335,26 @@ struct Settings {
     // DEVICE-GATED: needs SM 6.0 and DXC (VoxiRenderer::airVisWanted()).
     bool fogOcclusion = true;
 
+    // ---- R1: the second vertex stream ----
+    // Meshes carrying vertex colour / authored tangent / UV2 (rhi::MeshVertexExtra) draw through the raster scene variants that read them
+    // (VoxiRenderer::scenePipelineExtra), compiled the first frame such a mesh is drawn. Off keeps every mesh on the pipelines meshes without
+    // the stream use. No effect, and nothing compiled, while no mesh has the stream. Project key RENDER.MESHEXTRA.
+    bool meshExtraStreams = true;
+
+    // ---- R6: BaseMaterial3D features ----
+    // Materials with an .ocmat FX record draw through their own pipeline variants (VoxiRenderer::scenePipelineFx), compiled the first frame a draw uses one.
+    // Off draws every material through the ordinary pipelines. No effect, and nothing compiled, without such a material. Project key RENDER.MATERIALFX.
+    bool materialFx = true;
+
+    // ---- R2: omni and spot lights without ray tracing ----
+    // The raster local-light path (RasterLights.hpp, voxi_locallights_raster.hlsli): a capped light list shaded in the raster scene pass, with
+    // PCF shadow maps from an atlas. 0 = auto: used where the ray-traced lights cannot serve (ray tracing off, no ray queries, Vulkan);
+    // 1 = on: also in frames the rasteriser draws with ray tracing active (RENDER.RTRENDERMODE 0 / Low tier; ray-driven frames still use the
+    // ray-traced list), and then the ray-traced light list is not published; 2 = off (today's behaviour exactly). Project key RENDER.LOCALRASTER.
+    u32  localLightsRaster = 0;
+    // Shadow maps for the raster local lights (a light still needs its own cast-shadows switch). Project key RENDER.LOCALSHADOWS.
+    bool localLightShadows = true;
+
     // ---- volumetric fog: light shafts from a camera-aligned froxel volume (VoxiFroxelFog.hpp) ----
     // Sun light scattered by the air, shadowed by the scene (ray query, else the cascade map). It ADDS to the
     // authored height fog: the shafts see that fog's density (volumetricFogHeightFog), plus an optional uniform

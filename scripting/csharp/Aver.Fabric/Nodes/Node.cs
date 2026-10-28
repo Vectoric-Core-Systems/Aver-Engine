@@ -660,8 +660,15 @@ public partial class Node : GodotObject
     /// <summary>The scene tree this node is in, or null when it is not in one.</summary>
     public SceneTree? GetTree() => _insideTree ? SceneTree.Instance : null;
 
-    /// <summary>The window at the top of the tree.</summary>
-    public Viewport? GetViewport() => _insideTree ? SceneTree.Instance.Root : null;
+    /// <summary>The viewport this node is drawn in: the nearest <see cref="Viewport"/> above it (a <see cref="SubViewport"/> for a node inside one), else
+    /// the window at the top of the tree.</summary>
+    public Viewport? GetViewport()
+    {
+        if (!_insideTree) return null;
+        for (Node? n = GetParent(); n != null; n = n.GetParent())
+            if (n is Viewport v) return v;
+        return SceneTree.Instance.Root;
+    }
 
     public Window? GetWindow() => _insideTree ? SceneTree.Instance.Root : null;
 

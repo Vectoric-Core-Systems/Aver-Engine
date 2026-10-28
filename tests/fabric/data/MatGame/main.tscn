@@ -1,0 +1,156 @@
+[gd_scene load_steps=20 format=3 uid="uid://cmatgamemain01"]
+
+[ext_resource type="Texture2D" path="res://textures/height.png" id="1_height"]
+[ext_resource type="Texture2D" path="res://textures/detail.png" id="2_detail"]
+[ext_resource type="Texture2D" path="res://textures/detail_n.png" id="3_detailn"]
+[ext_resource type="Texture2D" path="res://textures/mask.png" id="4_mask"]
+
+[sub_resource type="BoxMesh" id="BoxMesh_cube"]
+size = Vector3(1, 1, 1)
+
+[sub_resource type="StandardMaterial3D" id="M_Default"]
+albedo_color = Color(0.8, 0.8, 0.8, 1)
+
+[sub_resource type="StandardMaterial3D" id="M_Uv"]
+albedo_color = Color(1, 1, 1, 1)
+uv1_scale = Vector3(2, 3, 1)
+uv1_offset = Vector3(0.25, 0.5, 0)
+uv1_triplanar = true
+uv1_triplanar_sharpness = 4.0
+uv1_world_triplanar = true
+uv2_scale = Vector3(4, 4, 1)
+uv2_offset = Vector3(0.1, 0, 0)
+uv2_triplanar = true
+
+[sub_resource type="StandardMaterial3D" id="M_State"]
+transparency = 1
+blend_mode = 1
+cull_mode = 2
+depth_draw_mode = 1
+no_depth_test = true
+render_priority = 5
+shading_mode = 0
+albedo_color = Color(1, 1, 1, 0.5)
+
+[sub_resource type="StandardMaterial3D" id="M_Hash"]
+transparency = 3
+alpha_hash_scale = 2.0
+alpha_antialiasing_mode = 1
+albedo_color = Color(1, 1, 1, 0.6)
+
+[sub_resource type="StandardMaterial3D" id="M_Scissor"]
+transparency = 2
+alpha_scissor_threshold = 0.3
+cull_mode = 1
+
+[sub_resource type="StandardMaterial3D" id="M_Mul"]
+blend_mode = 3
+albedo_color = Color(0.5, 0.5, 1, 0.8)
+
+[sub_resource type="StandardMaterial3D" id="M_Vertex"]
+billboard_mode = 2
+billboard_keep_scale = true
+fixed_size = true
+grow = true
+grow_amount = 0.02
+
+[sub_resource type="StandardMaterial3D" id="M_Fade"]
+transparency = 1
+distance_fade_mode = 2
+distance_fade_min_distance = 2.0
+distance_fade_max_distance = 20.0
+proximity_fade_enabled = true
+proximity_fade_distance = 0.5
+
+[sub_resource type="StandardMaterial3D" id="M_Surface"]
+rim_enabled = true
+rim = 0.8
+rim_tint = 0.2
+clearcoat_enabled = true
+clearcoat = 0.7
+clearcoat_roughness = 0.2
+anisotropy_enabled = true
+anisotropy = 0.5
+backlight_enabled = true
+backlight = Color(0.5, 0.25, 0.1, 1)
+refraction_enabled = true
+refraction_scale = 0.1
+subsurf_scatter_enabled = true
+subsurf_scatter_strength = 0.6
+emission_enabled = true
+emission = Color(1, 0.5, 0, 1)
+emission_operator = 1
+ao_light_affect = 0.5
+metallic_specular = 0.25
+specular_mode = 2
+diffuse_mode = 2
+disable_receive_shadows = true
+disable_ambient_light = true
+disable_fog = true
+texture_filter = 0
+texture_repeat = false
+
+[sub_resource type="StandardMaterial3D" id="M_Height"]
+heightmap_enabled = true
+heightmap_texture = ExtResource("1_height")
+heightmap_scale = 8.0
+heightmap_deep_parallax = true
+heightmap_min_layers = 4
+heightmap_max_layers = 16
+heightmap_flip_tangent = true
+detail_enabled = true
+detail_albedo = ExtResource("2_detail")
+detail_normal = ExtResource("3_detailn")
+detail_mask = ExtResource("4_mask")
+detail_blend_mode = 3
+detail_uv_layer = 1
+
+[sub_resource type="ORMMaterial3D" id="M_Orm"]
+uv1_scale = Vector3(5, 5, 1)
+cull_mode = 2
+
+[node name="Main" type="Node3D"]
+
+[node name="Default" type="MeshInstance3D" parent="."]
+mesh = SubResource("BoxMesh_cube")
+surface_material_override/0 = SubResource("M_Default")
+
+[node name="Uv" type="MeshInstance3D" parent="."]
+mesh = SubResource("BoxMesh_cube")
+surface_material_override/0 = SubResource("M_Uv")
+
+[node name="State" type="MeshInstance3D" parent="."]
+mesh = SubResource("BoxMesh_cube")
+surface_material_override/0 = SubResource("M_State")
+
+[node name="Hash" type="MeshInstance3D" parent="."]
+mesh = SubResource("BoxMesh_cube")
+surface_material_override/0 = SubResource("M_Hash")
+
+[node name="Scissor" type="MeshInstance3D" parent="."]
+mesh = SubResource("BoxMesh_cube")
+surface_material_override/0 = SubResource("M_Scissor")
+
+[node name="Mul" type="MeshInstance3D" parent="."]
+mesh = SubResource("BoxMesh_cube")
+surface_material_override/0 = SubResource("M_Mul")
+
+[node name="Vertex" type="MeshInstance3D" parent="."]
+mesh = SubResource("BoxMesh_cube")
+surface_material_override/0 = SubResource("M_Vertex")
+
+[node name="Fade" type="MeshInstance3D" parent="."]
+mesh = SubResource("BoxMesh_cube")
+surface_material_override/0 = SubResource("M_Fade")
+
+[node name="Surface" type="MeshInstance3D" parent="."]
+mesh = SubResource("BoxMesh_cube")
+surface_material_override/0 = SubResource("M_Surface")
+
+[node name="Height" type="MeshInstance3D" parent="."]
+mesh = SubResource("BoxMesh_cube")
+surface_material_override/0 = SubResource("M_Height")
+
+[node name="Orm" type="MeshInstance3D" parent="."]
+mesh = SubResource("BoxMesh_cube")
+surface_material_override/0 = SubResource("M_Orm")

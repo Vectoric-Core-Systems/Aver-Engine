@@ -190,9 +190,9 @@ const char* actorPreviewShaderSource() {
 }
 
 // Creates the feature. Returns null when the backend has no GPU support.
-ActorPreview* ActorPreview::create(rhi::IDevice& device, u32 width, u32 height) {
+ActorPreview* ActorPreview::create(rhi::IDevice& device, u32 width, u32 height, bool studioChrome) {
     auto* p = new ActorPreview();
-    if (!p->init(device, width, height)) { delete p; return nullptr; }
+    if (!p->init(device, width, height, studioChrome)) { delete p; return nullptr; }
     return p;
 }
 
@@ -210,6 +210,8 @@ ActorPreview::~ActorPreview() {
     if (instPipeline_) res_->destroyPipeline(instPipeline_);
     if (instWirePipeline_) res_->destroyPipeline(instWirePipeline_);
     if (instVs_) res_->destroyShader(instVs_);
+    if (sceneViewPipeline_) res_->destroyPipeline(sceneViewPipeline_);
+    if (sceneViewPs_) res_->destroyShader(sceneViewPs_);
     if (vs_) res_->destroyShader(vs_);
     if (ps_) res_->destroyShader(ps_);
     if (backdropVs_) res_->destroyShader(backdropVs_);
@@ -256,7 +258,7 @@ bool ActorPreview::createTargets(u32 width, u32 height) {
 }
 
 // Builds the targets, the shaders and the pipeline.
-bool ActorPreview::init(rhi::IDevice& device, u32 width, u32 height) {
+bool ActorPreview::init(rhi::IDevice& device, u32 width, u32 height, bool studioChrome) {
     device_ = &device;
     res_ = device.resources();
     if (!res_) return false;
@@ -292,7 +294,7 @@ bool ActorPreview::init(rhi::IDevice& device, u32 width, u32 height) {
     pipeline_ = res_->createGraphicsPipeline(gp);
     if (!pipeline_) { AVER_ERROR("[Preview] the preview pipeline would not build"); return false; }
     meshDesc_ = gp;
-    createChrome(gp);
+    if (studioChrome) createChrome(gp);
 
     uiTextureId_ = device.uiTextureId(color_);
     AVER_INFO("[Preview] ready: {}x{} target, pipeline {}", width_, height_, pipeline_);
@@ -680,9 +682,81 @@ void ActorPreview::drawInstanceBatches(rhi::IRenderContext& ctx, const void* fra
     }
 }
 
+// Builds the scene-view pixel shader and its pipeline, the first time a scene view draws. The vertex shader, layout and render-target formats are the
+// mesh pipeline's own, so only the pixel stage differs.
+bool ActorPreview::ensureSceneViewPipeline() {
+    if (sceneViewPipeline_) return true;
+    if (sceneViewTried_) return false;
+    sceneViewTried_ = true;
+    rhi::ShaderDesc pd;
+    pd.source = actorPreviewShaderSource();
+    pd.prelude = rhi::sharedShaderPrelude();
+    pd.entry = "SceneViewPS";
+    pd.stage = rhi::ShaderStage::Pixel;
+    sceneViewPs_ = res_->createShader(pd);
+    if (!sceneViewPs_) { AVER_WARN("[Preview] the scene-view pixel shader would not compile; the view is not drawn"); return false; }
+    rhi::GraphicsPipelineDesc gp = meshDesc_;
+    gp.ps = sceneViewPs_;
+    sceneViewPipeline_ = res_->createGraphicsPipeline(gp);
+    if (!sceneViewPipeline_) { AVER_WARN("[Preview] the scene-view pipeline would not build; the view is not drawn"); return false; }
+    AVER_INFO("[Preview] scene-view pipeline built: pipeline {}", sceneViewPipeline_);
+    return true;
+}
+
+// The scene-view pass (G4 R5): the draw list seen through scene_'s camera and lighting, into this feature's own targets.
+void ActorPreview::drawSceneView(rhi::IRenderContext& ctx) {
+    if (!ensureSceneViewPipeline()) return;
+
+    ctx.pushMarker("SceneView");
+    ctx.textureBarrier(color_, rhi::ResourceState::ShaderResource, rhi::ResourceState::RenderTarget);
+    const rhi::TextureHandle targets[1] = {color_};
+    ctx.setRenderTargets(targets, 1, depth_);
+    ctx.setViewport(0, 0, width_, height_);
+    ctx.setScissor(0, 0, width_, height_);
+    ctx.clearDepth(depth_, 1.0f);
+    // The first picture always clears: there is nothing worth keeping, and an uncleared target holds undefined texels.
+    if (scene_.clearTarget || !everRendered_) ctx.clearColor(color_, scene_.clearColor);
+
+    ctx.setPipeline(sceneViewPipeline_);
+
+    // Mirrors the PreviewFrame cbuffer field for field (actor_preview.hlsl). The scene view reads the sun's radiance from `grid.xyz` and the
+    // output encoding from `mode.y`; the studio shaders never read either in that way.
+    struct Frame {
+        f32 viewProj[16];
+        f32 eye[4];
+        f32 key[4];
+        f32 ambient[4];
+        f32 mode[4];
+        f32 grid[4];
+    } frame{};
+    std::memcpy(frame.viewProj, scene_.viewProj, sizeof frame.viewProj);
+    for (int i = 0; i < 3; ++i) { frame.eye[i] = scene_.eye[i]; frame.key[i] = scene_.sunDir[i]; frame.ambient[i] = scene_.ambient[i]; frame.grid[i] = scene_.sunRadiance[i]; }
+    frame.key[3] = 1.0f;
+    frame.mode[0] = static_cast<f32>(static_cast<u8>(PreviewViewMode::Lit));
+    frame.mode[1] = scene_.linearOutput ? 1.0f : 0.0f;
+    ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &frame, sizeof(frame));
+
+    for (const PreviewDraw& d : draws_) {
+        if (!d.mesh) continue;
+        f32 obj[rhi::kObjectConstantDwords] = {};
+        std::memcpy(obj, d.world, sizeof(d.world));
+        obj[16] = d.baseColor[0]; obj[17] = d.baseColor[1]; obj[18] = d.baseColor[2]; obj[19] = d.baseColor[3];
+        obj[20] = d.metallic; obj[21] = d.roughness; obj[22] = d.unlit ? 1.0f : 0.0f;
+        obj[28] = d.emissive[0]; obj[29] = d.emissive[1]; obj[30] = d.emissive[2];   // gEmissive, the last float4 of PerObject
+        ctx.setConstants(rhi::kObjectConstantRegister, obj, rhi::kObjectConstantDwords);
+        ctx.drawMesh(d.mesh);
+    }
+
+    ctx.textureBarrier(color_, rhi::ResourceState::RenderTarget, rhi::ResourceState::ShaderResource);
+    everRendered_ = true;
+    ctx.popMarker();
+}
+
 // Draws the preview's targets: one barrier in, the draw list, one barrier back out for the UI.
 void ActorPreview::prePass(rhi::IRenderContext& ctx) {
     if (!ready() || !enabled_) return;
+    // A sub-viewport (G4 R5) has its own pass; it touches none of the studio preview's state below.
+    if (scene_.active) { drawSceneView(ctx); return; }
 
 #if AVER_MODULE_PBR
     // DOES ANYTHING IN THIS FRAME'S LIST WANT THE MATERIAL PIPELINE. Two independent reasons a draw

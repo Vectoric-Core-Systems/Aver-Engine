@@ -391,7 +391,17 @@ bool Gltf::importPrimitive(const JsonValue& prim, const f32 node[16], OcMeshData
     if (pos.components != 3) return fail(why, "glTF: POSITION is not VEC3");
     const bool hasNrm = attrs.has("NORMAL") && readAccessor(attrs["NORMAL"].asInt(-1), nrm, why) && nrm.components == 3;
     const bool hasUv  = attrs.has("TEXCOORD_0") && readAccessor(attrs["TEXCOORD_0"].asInt(-1), uv, why) && uv.components == 2;
-    if (attrs.has("COLOR_0"))  note("vertex colour");
+    // R1: the optional second stream. COLOR_0 is linear RGB(A), TANGENT is VEC4 (xyz + handedness), TEXCOORD_1 the lightmap/detail set.
+    AccessorF col, tan, uv1;
+    const bool hasCol = attrs.has("COLOR_0") && readAccessor(attrs["COLOR_0"].asInt(-1), col, why)
+                     && (col.components == 3 || col.components == 4) && col.count == pos.count;
+    const bool hasTan = hasNrm && nrm.count == pos.count && attrs.has("TANGENT") && readAccessor(attrs["TANGENT"].asInt(-1), tan, why)
+                     && tan.components == 4 && tan.count == pos.count;
+    const bool hasUv1 = attrs.has("TEXCOORD_1") && readAccessor(attrs["TEXCOORD_1"].asInt(-1), uv1, why)
+                     && uv1.components == 2 && uv1.count == pos.count;
+    if (attrs.has("COLOR_0") && !hasCol)   note("a COLOR_0 that does not match the primitive's vertices");
+    if (attrs.has("TANGENT") && !hasTan)   note("a TANGENT without a usable NORMAL (the tangent frame is derived instead)");
+    if (attrs.has("TEXCOORD_2"))           note("a third UV set (only TEXCOORD_0 and TEXCOORD_1 are carried)");
     if (attrs.has("JOINTS_1")) note("a second set of bone influences (only JOINTS_0 is carried)");
 
     // Skinning. Both must be present: joints with no weights move nothing, weights with no joints
@@ -440,6 +450,17 @@ bool Gltf::importPrimitive(const JsonValue& prim, const f32 node[16], OcMeshData
             m.weights.push_back(m.weights.size() % kOcMeshInfluences == 0 ? 1.0f : 0.0f);
         }
     }
+    // The R1 streams stay either empty or 1:1 with the positions: a primitive that has one after a
+    // primitive that did not back-fills neutral values (white, no tangent, UV 0), and the reverse pads.
+    static const f32 kWhite[4] = {1, 1, 1, 1}, kZero[4] = {0, 0, 0, 0};
+    const auto fillExtra = [](std::vector<f32>& s, usize comps, usize count, const f32* value) {
+        for (usize k = 0; k < count; ++k) s.insert(s.end(), value, value + comps);
+    };
+    if (hasCol && m.colors.empty() && baseVertex) fillExtra(m.colors, 4, baseVertex, kWhite);
+    if (hasTan && m.tangents.empty() && baseVertex) fillExtra(m.tangents, 4, baseVertex, kZero);
+    if (hasUv1 && m.uvs1.empty() && baseVertex) fillExtra(m.uvs1, 2, baseVertex, kZero);
+    const bool padCol = !hasCol && !m.colors.empty(), padTan = !hasTan && !m.tangents.empty(),
+               padUv1 = !hasUv1 && !m.uvs1.empty();
     for (u32 i = 0; i < pos.count; ++i) {
         f32 t[3];
         xform(node, pos.v[usize(i)*3+0], pos.v[usize(i)*3+1], pos.v[usize(i)*3+2], true, t);
@@ -459,6 +480,35 @@ bool Gltf::importPrimitive(const JsonValue& prim, const f32 node[16], OcMeshData
 
         if (hasUv && i < uv.count) m.uvs.insert(m.uvs.end(), {uv.v[usize(i)*2+0], uv.v[usize(i)*2+1]});
         else                        m.uvs.insert(m.uvs.end(), {0.0f, 0.0f});
+
+        // R1 streams. COLOR_0 and TEXCOORD_1 pass through; the tangent takes the node basis and the axis map like any
+        // surface direction, and its handedness is re-derived in engine space: glTF's bitangent cross(N, T) * w points
+        // at DECREASING v (green is up in the image, v runs down it), the engine's w points at increasing v.
+        if (hasCol) {
+            const f32* c = &col.v[usize(i) * col.components];
+            m.colors.insert(m.colors.end(), {c[0], c[1], c[2], col.components == 4 ? c[3] : 1.0f});
+        } else if (padCol) {
+            m.colors.insert(m.colors.end(), {1.0f, 1.0f, 1.0f, 1.0f});
+        }
+        if (hasTan) {
+            const f32* tv = &tan.v[usize(i) * 4];
+            const f32* nl = &nrm.v[usize(i) * 3];
+            const f32 bl[3] = {(nl[1]*tv[2] - nl[2]*tv[1]) * tv[3], (nl[2]*tv[0] - nl[0]*tv[2]) * tv[3],
+                               (nl[0]*tv[1] - nl[1]*tv[0]) * tv[3]};
+            f32 tw[3], bw[3];
+            xform(node, tv[0], tv[1], tv[2], false, tw);
+            xform(node, bl[0], bl[1], bl[2], false, bw);
+            const Vec3 te = toEngine(tw[0], tw[1], tw[2], true);
+            const Vec3 dv = toEngine(-bw[0], -bw[1], -bw[2], true);
+            const f32 tgt[3] = {te.x, te.y, te.z}, dir[3] = {dv.x, dv.y, dv.z};
+            f32 packed[4];
+            packTangent(&m.normals[m.normals.size() - 3], tgt, dir, packed);
+            m.tangents.insert(m.tangents.end(), packed, packed + 4);
+        } else if (padTan) {
+            m.tangents.insert(m.tangents.end(), {0.0f, 0.0f, 0.0f, 0.0f});
+        }
+        if (hasUv1) m.uvs1.insert(m.uvs1.end(), {uv1.v[usize(i) * 2 + 0], uv1.v[usize(i) * 2 + 1]});
+        else if (padUv1) m.uvs1.insert(m.uvs1.end(), {0.0f, 0.0f});
 
         // Bone influences pass through UNCONVERTED: they index a skin's joint list and weight it,
         // and neither is a direction, so the basis change does not touch them.

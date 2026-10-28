@@ -26,6 +26,129 @@ std::string num(f32 v) {
     return buf;
 }
 
+// ---- R6: the FX record (BaseMaterial3D features), `FX key=value ...`, written only for a material whose fx is active. Vectors are comma separated.
+// Only values that differ from MaterialFx's defaults are written, so the record names exactly what the material changes.
+std::string fxPair(const char* key, const std::string& val) { return std::string(" ") + key + "=" + val; }
+std::string fxNum(f32 v) { return num(v); }
+
+std::string writeFx(const pbr::MaterialFx& f) {
+    const pbr::MaterialFx d{};
+    std::string s = "FX";
+    const auto v2 = [&](const char* k, const f32* a, const f32* b) { if (a[0] != b[0] || a[1] != b[1]) s += fxPair(k, fxNum(a[0]) + "," + fxNum(a[1])); };
+    const auto fl = [&](const char* k, f32 a, f32 b) { if (a != b) s += fxPair(k, fxNum(a)); };
+    const auto on = [&](const char* k, bool a) { if (a) s += fxPair(k, "1"); };
+    v2("uv1scale", f.uv1Scale, d.uv1Scale); v2("uv1offset", f.uv1Offset, d.uv1Offset);
+    v2("uv2scale", f.uv2Scale, d.uv2Scale); v2("uv2offset", f.uv2Offset, d.uv2Offset);
+    on("uv1tri", f.uv1Triplanar); on("uv2tri", f.uv2Triplanar); on("uv1world", f.uv1WorldTriplanar); on("uv2world", f.uv2WorldTriplanar);
+    fl("uv1sharp", f.uv1Sharpness, d.uv1Sharpness); fl("uv2sharp", f.uv2Sharpness, d.uv2Sharpness);
+    if (f.cull != pbr::FxCull::Default) s += fxPair("cull", f.cull == pbr::FxCull::Back ? "back" : (f.cull == pbr::FxCull::Front ? "front" : "none"));
+    if (f.blend != pbr::FxBlend::Default) {
+        static const char* const kBlend[] = {"", "add", "sub", "mul", "mix", "premult"};
+        s += fxPair("blend", kBlend[static_cast<u32>(f.blend)]);
+    }
+    if (f.depthDraw != pbr::FxDepthDraw::Default) s += fxPair("depthdraw", f.depthDraw == pbr::FxDepthDraw::Always ? "always" : "never");
+    on("nodepthtest", f.noDepthTest);
+    if (f.renderPriority != 0) s += fxPair("priority", std::to_string(f.renderPriority));
+    on("unshaded", f.unshaded);
+    if (f.alphaExt != pbr::FxAlphaExt::None) s += fxPair("alphaext", f.alphaExt == pbr::FxAlphaExt::Hash ? "hash" : "aa");
+    fl("hashscale", f.alphaHashScale, d.alphaHashScale);
+    on("shadowtoopacity", f.shadowToOpacity);
+    if (f.billboard != pbr::FxBillboard::Off) s += fxPair("billboard", f.billboard == pbr::FxBillboard::Enabled ? "on" : (f.billboard == pbr::FxBillboard::FixedY ? "y" : "particles"));
+    on("keepscale", f.billboardKeepScale); on("fixedsize", f.fixedSize); on("grow", f.grow);
+    fl("growcm", f.growCm, d.growCm);
+    if (f.particlesH != 1 || f.particlesV != 1) s += fxPair("frames", std::to_string(f.particlesH) + "," + std::to_string(f.particlesV));
+    on("loop", f.particlesLoop);
+    if (f.distanceFade != pbr::FxDistanceFade::Off)
+        s += fxPair("fade", f.distanceFade == pbr::FxDistanceFade::PixelAlpha ? "alpha" : (f.distanceFade == pbr::FxDistanceFade::PixelDither ? "dither" : "object"));
+    fl("fademin", f.fadeMinCm, d.fadeMinCm); fl("fademax", f.fadeMaxCm, d.fadeMaxCm);
+    on("rim", f.rim); fl("rimamount", f.rimAmount, d.rimAmount); fl("rimtint", f.rimTint, d.rimTint);
+    on("aniso", f.anisotropy); fl("anisoamount", f.anisotropyAmount, d.anisotropyAmount);
+    on("height", f.heightmap); fl("heightscale", f.heightScale, d.heightScale); on("deepparallax", f.deepParallax);
+    if (f.minLayers != d.minLayers || f.maxLayers != d.maxLayers) s += fxPair("layers", std::to_string(f.minLayers) + "," + std::to_string(f.maxLayers));
+    on("flipt", f.flipTangent); on("flipb", f.flipBinormal); on("invertheight", f.invertHeight);
+    on("backlight", f.backlight);
+    if (f.backlightColor[0] != 0.0f || f.backlightColor[1] != 0.0f || f.backlightColor[2] != 0.0f)
+        s += fxPair("backlightcolor", fxNum(f.backlightColor[0]) + "," + fxNum(f.backlightColor[1]) + "," + fxNum(f.backlightColor[2]));
+    on("detail", f.detail);
+    if (f.detailBlend != pbr::FxBlendOp::Mix) s += fxPair("detailblend", std::to_string(static_cast<u32>(f.detailBlend)));
+    if (f.detailUv) s += fxPair("detailuv", "2");
+    on("emitmul", f.emissionOp != 0); on("emituv2", f.emissionOnUv2); on("aouv2", f.aoOnUv2);
+    fl("aoaffect", f.aoLightAffect, d.aoLightAffect);
+    if (f.specularMode != pbr::FxSpecular::Schlick) s += fxPair("spec", f.specularMode == pbr::FxSpecular::Toon ? "toon" : "off");
+    if (f.diffuseMode != pbr::FxDiffuse::Burley)
+        s += fxPair("diffuse", f.diffuseMode == pbr::FxDiffuse::Lambert ? "lambert" : (f.diffuseMode == pbr::FxDiffuse::LambertWrap ? "wrap" : "toon"));
+    on("noambient", f.disableAmbient); on("noshadows", f.noReceiveShadows);
+    return s;
+}
+
+void readFx(const std::vector<std::string_view>& t, pbr::MaterialFx& f) {
+    for (usize i = 1; i < t.size(); ++i) {
+        const std::vector<std::string_view> kv = splitChar(t[i], '=');
+        if (kv.size() != 2) continue;
+        const std::string_view k = kv[0];
+        const std::vector<std::string_view> val = splitChar(kv[1], ',');
+        const auto fv = [&](usize n, f32 dflt) { return tokF(val, n, dflt); };
+        const bool b = parseI32(kv[1], 0) != 0;
+        const auto word = [&](const char* w) { return equalsCI(kv[1], w); };
+        if (equalsCI(k, "uv1scale")) { f.uv1Scale[0] = fv(0, 1.0f); f.uv1Scale[1] = fv(1, 1.0f); }
+        else if (equalsCI(k, "uv1offset")) { f.uv1Offset[0] = fv(0, 0.0f); f.uv1Offset[1] = fv(1, 0.0f); }
+        else if (equalsCI(k, "uv2scale")) { f.uv2Scale[0] = fv(0, 1.0f); f.uv2Scale[1] = fv(1, 1.0f); }
+        else if (equalsCI(k, "uv2offset")) { f.uv2Offset[0] = fv(0, 0.0f); f.uv2Offset[1] = fv(1, 0.0f); }
+        else if (equalsCI(k, "uv1tri")) f.uv1Triplanar = b;
+        else if (equalsCI(k, "uv2tri")) f.uv2Triplanar = b;
+        else if (equalsCI(k, "uv1world")) f.uv1WorldTriplanar = b;
+        else if (equalsCI(k, "uv2world")) f.uv2WorldTriplanar = b;
+        else if (equalsCI(k, "uv1sharp")) f.uv1Sharpness = fv(0, 1.0f);
+        else if (equalsCI(k, "uv2sharp")) f.uv2Sharpness = fv(0, 1.0f);
+        else if (equalsCI(k, "cull")) f.cull = word("back") ? pbr::FxCull::Back : (word("front") ? pbr::FxCull::Front : (word("none") ? pbr::FxCull::None : pbr::FxCull::Default));
+        else if (equalsCI(k, "blend")) f.blend = word("add") ? pbr::FxBlend::Add : (word("sub") ? pbr::FxBlend::Sub : (word("mul") ? pbr::FxBlend::Mul
+                                              : (word("mix") ? pbr::FxBlend::Mix : (word("premult") ? pbr::FxBlend::PremultAlpha : pbr::FxBlend::Default))));
+        else if (equalsCI(k, "depthdraw")) f.depthDraw = word("always") ? pbr::FxDepthDraw::Always : (word("never") ? pbr::FxDepthDraw::Never : pbr::FxDepthDraw::Default);
+        else if (equalsCI(k, "nodepthtest")) f.noDepthTest = b;
+        else if (equalsCI(k, "priority")) f.renderPriority = parseI32(kv[1], 0);
+        else if (equalsCI(k, "unshaded")) f.unshaded = b;
+        else if (equalsCI(k, "alphaext")) f.alphaExt = word("hash") ? pbr::FxAlphaExt::Hash : (word("aa") ? pbr::FxAlphaExt::Antialias : pbr::FxAlphaExt::None);
+        else if (equalsCI(k, "hashscale")) f.alphaHashScale = fv(0, 1.0f);
+        else if (equalsCI(k, "shadowtoopacity")) f.shadowToOpacity = b;
+        else if (equalsCI(k, "billboard")) f.billboard = word("on") ? pbr::FxBillboard::Enabled : (word("y") ? pbr::FxBillboard::FixedY : (word("particles") ? pbr::FxBillboard::Particles : pbr::FxBillboard::Off));
+        else if (equalsCI(k, "keepscale")) f.billboardKeepScale = b;
+        else if (equalsCI(k, "fixedsize")) f.fixedSize = b;
+        else if (equalsCI(k, "grow")) f.grow = b;
+        else if (equalsCI(k, "growcm")) f.growCm = fv(0, 0.0f);
+        else if (equalsCI(k, "frames")) { f.particlesH = static_cast<u8>(parseI32(val.size() > 0 ? val[0] : std::string_view("1"), 1)); f.particlesV = static_cast<u8>(parseI32(val.size() > 1 ? val[1] : std::string_view("1"), 1)); }
+        else if (equalsCI(k, "loop")) f.particlesLoop = b;
+        else if (equalsCI(k, "fade")) f.distanceFade = word("alpha") ? pbr::FxDistanceFade::PixelAlpha : (word("dither") ? pbr::FxDistanceFade::PixelDither : (word("object") ? pbr::FxDistanceFade::ObjectDither : pbr::FxDistanceFade::Off));
+        else if (equalsCI(k, "fademin")) f.fadeMinCm = fv(0, 0.0f);
+        else if (equalsCI(k, "fademax")) f.fadeMaxCm = fv(0, 1000.0f);
+        else if (equalsCI(k, "rim")) f.rim = b;
+        else if (equalsCI(k, "rimamount")) f.rimAmount = fv(0, 1.0f);
+        else if (equalsCI(k, "rimtint")) f.rimTint = fv(0, 0.5f);
+        else if (equalsCI(k, "aniso")) f.anisotropy = b;
+        else if (equalsCI(k, "anisoamount")) f.anisotropyAmount = fv(0, 0.0f);
+        else if (equalsCI(k, "height")) f.heightmap = b;
+        else if (equalsCI(k, "heightscale")) f.heightScale = fv(0, 5.0f);
+        else if (equalsCI(k, "deepparallax")) f.deepParallax = b;
+        else if (equalsCI(k, "layers")) { f.minLayers = static_cast<u8>(parseI32(val.size() > 0 ? val[0] : std::string_view("8"), 8)); f.maxLayers = static_cast<u8>(parseI32(val.size() > 1 ? val[1] : std::string_view("32"), 32)); }
+        else if (equalsCI(k, "flipt")) f.flipTangent = b;
+        else if (equalsCI(k, "flipb")) f.flipBinormal = b;
+        else if (equalsCI(k, "invertheight")) f.invertHeight = b;
+        else if (equalsCI(k, "backlight")) f.backlight = b;
+        else if (equalsCI(k, "backlightcolor")) { for (usize c = 0; c < 3; ++c) f.backlightColor[c] = fv(c, 0.0f); }
+        else if (equalsCI(k, "detail")) f.detail = b;
+        else if (equalsCI(k, "detailblend")) { const i32 o = parseI32(kv[1], 0); f.detailBlend = static_cast<pbr::FxBlendOp>(o < 0 ? 0 : (o > 3 ? 3 : o)); }
+        else if (equalsCI(k, "detailuv")) f.detailUv = parseI32(kv[1], 1) >= 2 ? 1 : 0;
+        else if (equalsCI(k, "emitmul")) f.emissionOp = b ? 1 : 0;
+        else if (equalsCI(k, "emituv2")) f.emissionOnUv2 = b;
+        else if (equalsCI(k, "aouv2")) f.aoOnUv2 = b;
+        else if (equalsCI(k, "aoaffect")) f.aoLightAffect = fv(0, 0.0f);
+        else if (equalsCI(k, "spec")) f.specularMode = word("toon") ? pbr::FxSpecular::Toon : (word("off") ? pbr::FxSpecular::Disabled : pbr::FxSpecular::Schlick);
+        else if (equalsCI(k, "diffuse")) f.diffuseMode = word("lambert") ? pbr::FxDiffuse::Lambert : (word("wrap") ? pbr::FxDiffuse::LambertWrap : (word("toon") ? pbr::FxDiffuse::Toon : pbr::FxDiffuse::Burley));
+        else if (equalsCI(k, "noambient")) f.disableAmbient = b;
+        else if (equalsCI(k, "noshadows")) f.noReceiveShadows = b;
+        else AVER_WARN("[ocmat] unknown FX key '{}' -- ignored (a typo, or a file from a newer engine)", std::string(k));
+    }
+}
+
 // Looks up a texture slot by its name, case-insensitively.
 bool slotFromName(std::string_view name, TextureSlot& out) {
     for (u32 i = 0; i < pbr::kTextureSlotCount; ++i) {
@@ -169,9 +292,19 @@ bool parseOcmat(std::string_view text, pbr::MaterialDesc& out, OcMatExtras* extr
         } else if (equalsCI(key, "NAME")) {
             if (t.size() > 1) out.name = std::string(trim(after(key)));
         } else if (equalsCI(key, "SHADER")) {
-            if (t.size() > 1) ex.shader = std::string(t[1]);
+            if (t.size() > 1) {
+                ex.shader = std::string(t[1]);
+                if (equalsCI(t[1], "unlit")) out.fx.unshaded = true;   // R6: the recorded value is wired up
+            }
         } else if (equalsCI(key, "CULL")) {
-            if (t.size() > 1) ex.cull = std::string(t[1]);
+            if (t.size() > 1) {
+                ex.cull = std::string(t[1]);
+                // R6: only an explicit front cull is wired up. `back` is what every file the editor wrote says (and the engine drew without culling), so it
+                // stays the record it was; ask for back-face culling with the FX record's cull=back.
+                if (equalsCI(t[1], "front")) out.fx.cull = pbr::FxCull::Front;
+            }
+        } else if (equalsCI(key, "FX")) {
+            readFx(t, out.fx);
         } else if (equalsCI(key, "BLEND")) {
             if (t.size() > 1) {
                 if (equalsCI(t[1], "opaque")) {
@@ -184,6 +317,7 @@ bool parseOcmat(std::string_view text, pbr::MaterialDesc& out, OcMatExtras* extr
                 } else if (equalsCI(t[1], "additive")) {
                     ex.additive = true;
                     out.alphaMode = pbr::AlphaMode::Blend;
+                    out.fx.blend = pbr::FxBlend::Add;   // R6
                 }
             }
         } else if (equalsCI(key, "FLAGS")) {
@@ -193,6 +327,7 @@ bool parseOcmat(std::string_view text, pbr::MaterialDesc& out, OcMatExtras* extr
                 const bool on = parseI32(kv[1], 0) != 0;
                 if (equalsCI(kv[0], "twosided"))       out.twoSided = on;
                 else if (equalsCI(kv[0], "castshadow")) out.castShadow = on;
+                else if (equalsCI(kv[0], "vertexcolor")) out.vertexColor = on;
                 else if (equalsCI(kv[0], "worlduv"))    out.uvMode = on ? pbr::UvMode::WorldAligned
                                                                         : pbr::UvMode::Mesh;
             }
@@ -488,6 +623,12 @@ bool parseOcmat(std::string_view text, pbr::MaterialDesc& out, OcMatExtras* extr
     return true;
 }
 
+void parseOcmatFx(std::string_view pairs, pbr::MaterialFx& out) {
+    std::vector<std::string_view> t = splitWhitespace(pairs);
+    if (t.empty() || !equalsCI(t[0], "FX")) t.insert(t.begin(), std::string_view("FX"));
+    readFx(t, out);
+}
+
 // Reads an .ocmat file. The filename stem supplies the name when the file carries none.
 bool loadOcmat(const std::string& path, pbr::MaterialDesc& out, OcMatExtras* extras, std::string* err) {
     std::string text;
@@ -528,7 +669,11 @@ std::string writeOcmat(const pbr::MaterialDesc& d, const OcMatExtras* extras) {
     s += "CULL "; s += d.twoSided ? "none" : (ex.cull == "front" ? "front" : "back"); s += "\n";
     s += "FLAGS twosided="; s += d.twoSided ? "1" : "0";
     s += " castshadow="; s += d.castShadow ? "1" : "0";
-    s += " worlduv="; s += d.uvMode == pbr::UvMode::WorldAligned ? "1" : "0"; s += "\n\n";
+    s += " worlduv="; s += d.uvMode == pbr::UvMode::WorldAligned ? "1" : "0";
+    if (d.vertexColor) s += " vertexcolor=1";   // omitted when off: every older file stays byte-identical
+    s += "\n";
+    if (d.fx.active() || d.fx.cull != pbr::FxCull::Default) s += writeFx(d.fx) + "\n";   // R6; absent for every material that uses none of it
+    s += "\n";
 
     s += "PARAM baseColorFactor " + num(d.baseColorFactor[0]) + " " + num(d.baseColorFactor[1]) + " "
        + num(d.baseColorFactor[2]) + " " + num(d.baseColorFactor[3]) + "\n";

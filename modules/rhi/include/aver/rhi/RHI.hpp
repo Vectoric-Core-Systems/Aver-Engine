@@ -6,6 +6,7 @@
 #pragma once
 #include "aver/core/Types.hpp"
 #include "aver/rhi/Atmosphere.hpp"
+#include "aver/rhi/MeshVertexExtra.hpp"
 #include "aver/rhi/RHIResources.hpp"
 #include "aver/rhi/WorldShift.hpp"
 
@@ -186,7 +187,7 @@ struct PostSettings {
     f32  histogramHighPercent = 0.90f;
 
     // Which tone curve. 0 = original per-channel Narkowicz/Hill; 1 = ACES with matrices;
-    // 2 = acesLumaTonemap (tonemaps luminance, restores chromaticity).
+    // 2 = acesLumaTonemap (tonemaps luminance, restores chromaticity). 3..7 = Godot's linear, Reinhard, filmic, ACES, AgX (Tonemap.hpp).
     u32  tonemap = 1;
 
     // Ceiling on scene radiance immediately before the tonemap; 0 disables it.
@@ -222,12 +223,19 @@ struct PostSettings {
     // option after the post volumes blend, so a level cannot undo it. 0 records nothing and changes no pixel.
     u32  colourVision = 0;
     f32  colourVisionStrength = 1;   // 0..1, how far the filter moves the colour
+
+    // ---- Godot-style tonemapping and display adjustments (rhi/Tonemap.hpp; docs/plans/fabric/G4_RENDER.md R3) ----
+    // `tonemap` 3..7 (Godot linear, Reinhard, filmic, ACES, AgX) and any adjustment off 1 select the AVER_POST_TONEMAP_EXT composite,
+    // built the first frame one is wanted. tonemapWhite is Godot's tonemap_white (Reinhard, filmic, ACES). The adjustments run in
+    // display space after the tonemap, before the grading LUT (Godot's adjustment_brightness / contrast / saturation).
+    f32  tonemapWhite = 1;
+    f32  adjustBrightness = 1, adjustContrast = 1, adjustSaturation = 1;
 };
 
 // Field by field, not memcmp: the bool leaves padding whose bytes a copy need not preserve. The size
 // check is the reminder -- a new PostSettings field changes it, and must be added here too.
 inline bool postSettingsEqual(const PostSettings& a, const PostSettings& b) {
-    static_assert(sizeof(PostSettings) == 180, "a PostSettings field was added: compare it below too");
+    static_assert(sizeof(PostSettings) == 196, "a PostSettings field was added: compare it below too");
     return a.exposure == b.exposure && a.bloomIntensity == b.bloomIntensity &&
            a.bloomThreshold == b.bloomThreshold && a.bloomKnee == b.bloomKnee &&
            a.autoExposure == b.autoExposure && a.exposureMin == b.exposureMin &&
@@ -250,7 +258,9 @@ inline bool postSettingsEqual(const PostSettings& a, const PostSettings& b) {
            a.gain[0] == b.gain[0] && a.gain[1] == b.gain[1] && a.gain[2] == b.gain[2] &&
            a.whiteBalanceK == b.whiteBalanceK && a.whiteBalanceTint == b.whiteBalanceTint &&
            a.gradingLut == b.gradingLut && a.gradingLutIntensity == b.gradingLutIntensity &&
-           a.colourVision == b.colourVision && a.colourVisionStrength == b.colourVisionStrength;
+           a.colourVision == b.colourVision && a.colourVisionStrength == b.colourVisionStrength &&
+           a.tonemapWhite == b.tonemapWhite && a.adjustBrightness == b.adjustBrightness &&
+           a.adjustContrast == b.adjustContrast && a.adjustSaturation == b.adjustSaturation;
 }
 
 // Which sky the engine draws. Authored is a two-colour dome; Physical derives the dome, the direct
@@ -501,6 +511,15 @@ public:
         (void)verts; (void)vertexCount; (void)indices; (void)indexCount; return 0;
     }
 
+    // R1: attaches the optional second vertex stream (colour, authored tangent, UV2; MeshVertexExtra) to `mesh`. Call it once, right
+    // after createMesh/adoptMesh and before createMeshSharingVertices (sharers borrow the stream, as they borrow the vertices).
+    // `vertexCount` must equal the mesh's. False (nothing attached) on a dead handle, a count mismatch, a compute-written mesh or a
+    // backend without the stream; the mesh then draws as it always did. A mesh with no stream binds nothing new.
+    virtual bool setMeshExtra(MeshHandle mesh, const MeshVertexExtra* extra, u32 vertexCount) {
+        (void)mesh; (void)extra; (void)vertexCount; return false;
+    }
+    virtual bool meshHasExtra(MeshHandle mesh) const { (void)mesh; return false; }
+
     // Off-thread mesh creation: a stager (null where the backend has none, or while createMesh uploads
     // to the Default heap), and the render-thread registration of what it staged -- as createMesh's
     // result, without its allocation and copy. adoptMesh: 0 for staging from another device.
@@ -681,6 +700,10 @@ public:
     virtual void setDrawBlended(bool blended) { (void)blended; }
     // What setDrawBlended last set, for a caller that saves and restores it around a nested draw.
     virtual bool drawBlended() const { return false; }
+    // G4 R4: the render layers (stored inverted, 20 bits; 0 = every layer) of the subsequent scene drawMesh() calls, sticky. They reach the
+    // pixel shader in the per-object block's unread pad word (`_objPad`), where the raster local-light variant tests them against a light's
+    // cull mask. 0 (the default) writes the block exactly as before; a backend that ignores this is correct for every scene without masks.
+    virtual void setDrawLayers(u32 layersInv) { (void)layersInv; }
 
     // Unlit line geometry (grid, gizmos, selection outlines, collider/nav overlays): per-vertex
     // DISPLAY colour, drawn as a line list.
