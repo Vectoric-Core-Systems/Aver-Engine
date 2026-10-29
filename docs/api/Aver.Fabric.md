@@ -2,7 +2,7 @@
 
 # Aver.Fabric public API
 
-604 public types and 6436 public members, read from `scripting/csharp/Aver.Fabric/` (102 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+649 public types and 6910 public members, read from `scripting/csharp/Aver.Fabric/` (115 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Fabric
 
@@ -1941,6 +1941,8 @@ Values: `Begin = 0`, `Center = 1`, `End = 2`
 - `public Variant Call(params Variant[] args)` - Calls it.
 - `public Variant Callv(Collections.Array arguments)` - Calls it with the arguments in an array.
 - `public void CallDeferred(params Variant[] args)` - Calls it when the current tick pass ends (Godot's call_deferred).
+- `public Error Rpc(params Variant[] args)` - Calls the node method this callable names as an RPC on every other peer (GDScript's func.rpc(args)).
+- `public Error RpcId(long peerId, params Variant[] args)` - Calls the node method this callable names as an RPC on one peer (GDScript's func.rpc_id(peer, args)).
 - `public Callable Bind(params Variant[] args)` - A callable that passes args after whatever it is called with.
 - `public Callable Unbind(int argCount)` - A callable that drops the last argCount arguments it is called with.
 - `public bool Equals(Callable other)`
@@ -2894,6 +2896,123 @@ Values: `Free = 0`, `Linear = 1`
 
 Values: `Orthogonal = 0`, `Parallel2Splits = 1`, `Parallel4Splits = 2`
 
+### EncodedObjectAsId
+
+`public class EncodedObjectAsId : RefCounted` - What a Variant holding an object becomes after a round trip without full objects: only the instance id survives (Godot's EncodedObjectAsID).
+
+- `public ulong ObjectId { get; set; }`
+
+### ENetConnection
+
+`public class ENetConnection : RefCounted` - A reliable-UDP host: connects out, accepts in and moves packets (Godot's ENetConnection).
+
+- `public Error CreateHostBound(string bindAddress, int bindPort, int maxPeers = 32, int maxChannels = 0, int inBandwidth = 0, int outBandwidth = 0)`
+- `public Error CreateHost(int maxPeers = 32, int maxChannels = 0, int inBandwidth = 0, int outBandwidth = 0)` - A host with no address of its own (a client): its socket opens at the first ConnectToHost.
+- `public new void Destroy()`
+- `public ENetPacketPeer? ConnectToHost(string address, int port, int channels = 0, int data = 0)`
+- `public GArray Service(int timeout = 0)` - The next event, as a list of [EventType, peer, data, channel]; waits up to timeout ms for one.
+- `public void Flush()`
+- `public void BandwidthLimit(int inBandwidth = 0, int outBandwidth = 0)`
+- `public void ChannelLimit(int limit)`
+- `public void Broadcast(int channel, byte[] packet, int flags)` - Sends to every connected peer.
+- `public void Compress(CompressionMode mode)` - Stored; Aver's protocol has no compression, so the wire is unchanged.
+- `public Error DtlsServerSetup(object serverOptions)`
+- `public Error DtlsClientSetup(string hostname, object? clientOptions = null)`
+- `public void RefuseNewConnections(bool refuse)`
+- `public double PopStatistic(HostStatistic statistic)` - The traffic since the last call for the same statistic.
+- `public int GetMaxChannels()`
+- `public int GetLocalPort()`
+- `public GArray GetPeers()` - The peers that are connected or connecting.
+- `public void SocketSend(string destinationAddress, int destinationPort, byte[] packet)` - Sends a raw datagram from the host's socket.
+- `public override void Free()`
+
+### ENetConnection.CompressionMode
+
+`public enum CompressionMode`
+
+Values: `None = 0`, `RangeCoder = 1`, `Fastlz = 2`, `Zlib = 3`, `Zstd = 4`
+
+### ENetConnection.EventType
+
+`public enum EventType`
+
+Values: `Error = -1`, `None = 0`, `Connect = 1`, `Disconnect = 2`, `Receive = 3`
+
+### ENetConnection.HostStatistic
+
+`public enum HostStatistic`
+
+Values: `SentData = 0`, `SentPackets = 1`, `ReceivedData = 2`, `ReceivedPackets = 3`
+
+### ENetMultiplayerPeer
+
+`public class ENetMultiplayerPeer : MultiplayerPeer` - Multiplayer over the reliable-UDP host (Godot's ENetMultiplayerPeer).
+
+- `public ENetConnection? Host { get; }` - The underlying host (null until a server or client is created).
+- `public Error SetBindIp(string ip)`
+- `public string GetBindIp()`
+- `public Error CreateServer(int port, int maxClients = 32, int maxChannels = 0, int inBandwidth = 0, int outBandwidth = 0)`
+- `public Error CreateClient(string address, int port, int channelCount = 0, int inBandwidth = 0, int outBandwidth = 0, int localPort = 0)`
+- `public Error CreateMesh(int uniqueId)` - Mesh mode (every peer connected to every other) is not implemented.
+- `public Error AddMeshPeer(int peerId, ENetConnection host)`
+- `public ENetPacketPeer? GetPeer(int id)`
+- `public override bool RefuseNewConnections { get; set; }`
+- `public override void Poll()`
+- `public override void SetTargetPeer(int id)`
+- `public override int GetAvailablePacketCount()`
+- `public override int GetPacketPeer()`
+- `public override int GetPacketChannel()`
+- `public override TransferModeEnum GetPacketMode()`
+- `public override Error PutPacket(byte[] buffer)`
+- `public override void Close()`
+- `public override void DisconnectPeer(int peer, bool force = false)`
+- `public override ConnectionStatus GetConnectionStatus()`
+- `public override int GetUniqueId()`
+- `public override bool IsServer()`
+- `public override bool IsServerRelaySupported()`
+- `public override void Free()`
+
+### ENetPacketPeer
+
+`public class ENetPacketPeer : PacketPeer` - One remote end of an ENetConnection (Godot's ENetPacketPeer).
+
+- `public const int PacketLossScale = 65536`
+- `public const int PacketThrottleScale = 32`
+- `public const int FlagReliable = 1`
+- `public const int FlagUnsequenced = 2`
+- `public const int FlagUnreliableFragment = 8`
+- `public PeerState GetState()`
+- `public bool IsActive()`
+- `public int GetChannels()`
+- `public Error Send(int channel, byte[] packet, int flags)` - Sends on a channel with ENet's flags (reliable, unsequenced; neither is unreliable and ordered).
+- `public void Ping()`
+- `public void PingInterval(int pingInterval)`
+- `public void Reset()`
+- `public void PeerDisconnect(int data = 0)`
+- `public void PeerDisconnectLater(int data = 0)`
+- `public void PeerDisconnectNow(int data = 0)`
+- `public void ThrottleConfigure(int interval, int acceleration, int deceleration)` - Stored and reported; Aver applies no RTT-driven throttle, so it changes nothing on the wire.
+- `public void SetTimeout(int timeout, int timeoutMin, int timeoutMax)`
+- `public double GetStatistic(PeerStatistic statistic)`
+- `public string GetRemoteAddress()`
+- `public int GetRemotePort()`
+- `public int GetPacketChannel()` - The channel the last packet taken with GetPacket() arrived on.
+- `public int GetPacketFlags()` - The flags the last packet taken arrived with (FlagReliable, FlagUnsequenced, or 0).
+- `public override int GetAvailablePacketCount()`
+- `public override Error PutPacket(byte[] buffer)` - A reliable packet on channel 0.
+
+### ENetPacketPeer.PeerState
+
+`public enum PeerState`
+
+Values: `Disconnected = 0`, `Connecting = 1`, `AcknowledgingConnect = 2`, `ConnectionPending = 3`, `ConnectionSucceeded = 4`, `Connected = 5`, `DisconnectLater = 6`, `Disconnecting = 7`, `AcknowledgingDisconnect = 8`, `Zombie = 9`
+
+### ENetPacketPeer.PeerStatistic
+
+`public enum PeerStatistic`
+
+Values: `PacketLoss = 0`, `PacketLossVariance = 1`, `PacketThrottle = 2`, `RoundTripTime = 3`, `RoundTripTimeVariance = 4`, `LastRoundTripTime = 5`, `LastRoundTripTimeVariance = 6`, `PacketLossEpoch = 7`, `PacketThrottleEpoch = 8`, `PacketThrottleAcceleration = 9`, `PacketThrottleDeceleration = 10`, `PacketThrottleInterval = 11`
+
 ### Engine
 
 `public static class Engine` - Godot's Engine singleton.
@@ -3101,7 +3220,7 @@ Values: `Inherit = 0`, `Begin = 1`, `Center = 2`, `End = 3`
 
 - `public Vector3 Size { get; set; }`
 - `public RenderingServer.FogVolumeShape Shape { get; set; }`
-- `public Material? Material { get; set; }` - A FogMaterial.
+- `public Material? Material { get; set; }` - A FogMaterial, or a ShaderMaterial over a fog shader (G6 SH3), whose DENSITY, ALBEDO and EMISSION replace the material's.
 
 ### Font
 
@@ -3206,6 +3325,10 @@ Values: `None = 0`, `Light = 1`, `Normal = 2`
 - `public static T Preload<T>(string path) where T : class` - GDScript's preload: the resource, loaded once and kept for the run; a file that is not there is an error.
 - `public static Resource Preload(string path)`
 - `public static int Hash(Variant var)`
+- `public static byte[] VarToBytes(Variant var)` - Serializes a Variant to Godot's binary encoding (objects travel as instance ids).
+- `public static byte[] VarToBytesWithObjects(Variant var)` - Like VarToBytes but with full objects requested; this runtime cannot carry them, so an object answers empty.
+- `public static Variant BytesToVar(byte[] bytes)` - Reads a Variant from Godot's binary encoding; nil when the bytes are not one.
+- `public static Variant BytesToVarWithObjects(byte[] bytes)`
 
 ### GDExtensionManager
 
@@ -3438,6 +3561,42 @@ Values: `Deferred = 1`, `Persist = 2`, `OneShot = 4`, `ReferenceCounted = 8`
 ### GodotObject.SignalName
 
 `public class SignalName` - The names of the signals a class declares itself, by the GodotSharp convention.
+
+### GPUParticles3D
+
+`public class GPUParticles3D : GeometryInstance3D` - Godot's GPUParticles3D.
+
+- `public bool Emitting { get; set; }` - Whether the emitter is playing.
+- `public int Amount { get; set; }`
+- `public double Lifetime { get; set; }`
+- `public bool OneShot { get; set; }`
+- `public double Preprocess { get; set; }`
+- `public double SpeedScale { get; set; }`
+- `public double Explosiveness { get; set; }`
+- `public double Randomness { get; set; }`
+- `public bool LocalCoords { get; set; }`
+- `public int FixedFps { get; set; }`
+- `public bool Interpolate { get; set; }`
+- `public bool FractDelta { get; set; }`
+- `public DrawOrderEnum DrawOrder { get; set; }`
+- `public TransformAlignEnum TransformAlign { get; set; }`
+- `public Aabb VisibilityAabb { get; set; }`
+- `public Mesh? DrawPass1 { get; set; }`
+- `public int DrawPasses { get; set; }`
+- `public Material? ProcessMaterial { get; set; }` - A ShaderMaterial over a particles shader (G6 SH3).
+- `public void Restart()` - Restarts the emission (a burst of Amount for a one-shot emitter).
+
+### GPUParticles3D.DrawOrderEnum
+
+`public enum DrawOrderEnum`
+
+Values: `Index = 0`, `Lifetime = 1`, `ReverseLifetime = 2`, `ViewDepth = 3`
+
+### GPUParticles3D.TransformAlignEnum
+
+`public enum TransformAlignEnum`
+
+Values: `Disabled = 0`, `ZBillboard = 1`, `YToVelocity = 2`, `ZBillboardYToVelocity = 3`
 
 ### Gradient
 
@@ -3748,6 +3907,35 @@ Values: `Visible = 0`, `Hidden = 1`, `Captured = 2`, `Confined = 3`, `ConfinedHi
 ### IntervalTweener
 
 `public class IntervalTweener : Tweener` - Waits (Godot's IntervalTweener).
+
+### IP
+
+`public static class IP` - Name resolution and the local interface list (Godot's IP singleton).
+
+- `public const int ResolverMaxQueries = 256`
+- `public const int ResolverInvalidId = -1`
+- `public static string ResolveHostname(string host, Type ipType = Type.Any)` - The first address of the name, or an empty string.
+- `public static string[] ResolveHostnameAddresses(string host, Type ipType = Type.Any)` - Every address of the name (IPv4 first when both exist).
+- `public static int ResolveHostnameQueueItem(string host, Type ipType = Type.Any)` - Resolves at once (there is no worker thread) and keeps the answer under an id.
+- `public static ResolverStatus GetResolveItemStatus(int id)`
+- `public static string GetResolveItemAddress(int id)`
+- `public static GArray GetResolveItemAddresses(int id)`
+- `public static void EraseResolveItem(int id)`
+- `public static string[] GetLocalAddresses()` - The addresses of every interface that is up, as numeric text.
+- `public static GArray GetLocalInterfaces()` - One entry holding all the local addresses: the engine reports addresses, not adapter names.
+- `public static void ClearCache(string hostname = "")`
+
+### IP.ResolverStatus
+
+`public enum ResolverStatus`
+
+Values: `None = 0`, `Waiting = 1`, `Done = 2`, `Error = 3`
+
+### IP.Type
+
+`public enum Type`
+
+Values: `None = 0`, `Ipv4 = 1`, `Ipv6 = 2`, `Any = 3`
 
 ### ItemList
 
@@ -4413,6 +4601,149 @@ Values: `Transform2D = 0`, `Transform3D = 1`
 
 - `public MultiMesh? Multimesh { get; set; }`
 
+### MultiplayerApi
+
+`public abstract class MultiplayerApi : RefCounted` - The API behind a branch of the scene tree: its multiplayer peer, the peers it sees and the RPC entry point (Godot's MultiplayerAPI).
+
+- `public event Action<long> PeerConnected`
+- `public event Action<long> PeerDisconnected`
+- `public event Action ConnectedToServer`
+- `public event Action ConnectionFailed`
+- `public event Action ServerDisconnected`
+- `public abstract MultiplayerPeer? MultiplayerPeer { get; set; }` - The transport.
+- `public abstract bool HasMultiplayerPeer()`
+- `public abstract int GetUniqueId()`
+- `public abstract bool IsServer()`
+- `public abstract int GetRemoteSenderId()` - The peer whose RPC is running right now, or 0 outside an RPC (and in a local call).
+- `public abstract int[] GetPeers()` - The ids of the connected peers, ascending (a client sees the server and, with server_relay, the other clients).
+- `public abstract void Poll()` - Moves the network: receives, dispatches and (for the scene API) replicates.
+- `public abstract Error Rpc(int peer, GodotObject @object, StringName method, GArray? args = null)` - Calls method of object on the peer (0 = all, negative = all but that peer).
+- `public virtual Error ObjectConfigurationAdd(GodotObject? @object, Variant configuration)`
+- `public virtual Error ObjectConfigurationRemove(GodotObject? @object, Variant configuration)`
+- `public static MultiplayerApi CreateDefaultInterface()`
+- `public static StringName GetDefaultInterface()` - The class a new scene tree makes its default API from; only "SceneMultiplayer" exists.
+- `public static void SetDefaultInterface(StringName @interface)`
+
+### MultiplayerApi.RpcMode
+
+`public enum RpcMode` - Who may call an RPC: nobody, any peer, or only the node's multiplayer authority.
+
+Values: `Disabled = 0`, `AnyPeer = 1`, `Authority = 2`
+
+### MultiplayerApi.SignalName
+
+`public new class SignalName : GodotObject.SignalName`
+
+- `public static readonly StringName PeerConnected`
+- `public static readonly StringName PeerDisconnected`
+- `public static readonly StringName ConnectedToServer`
+- `public static readonly StringName ConnectionFailed`
+- `public static readonly StringName ServerDisconnected`
+
+### MultiplayerPeer
+
+`public abstract class MultiplayerPeer : PacketPeer` - The transport behind Godot's multiplayer API: peers with ids, packets with a mode and a channel, and connect / disconnect signals.
+
+- `public const int TargetPeerBroadcast = 0` - The target of a send meaning every peer.
+- `public const int TargetPeerServer = 1` - The target of a send meaning the server, and the server's own id.
+- `public event Action<long> PeerConnected`
+- `public event Action<long> PeerDisconnected`
+- `public virtual TransferModeEnum TransferMode { get; set; }`
+- `public virtual int TransferChannel { get; set; }`
+- `public virtual bool RefuseNewConnections { get; set; }`
+- `public uint GenerateUniqueId()` - A random client id: 2 up to 2^31 - 1 (1 is the server's).
+- `public abstract void SetTargetPeer(int id)`
+- `public abstract int GetPacketPeer()`
+- `public abstract int GetPacketChannel()`
+- `public abstract TransferModeEnum GetPacketMode()`
+- `public abstract void Poll()`
+- `public abstract void Close()`
+- `public abstract void DisconnectPeer(int peer, bool force = false)`
+- `public abstract ConnectionStatus GetConnectionStatus()`
+- `public abstract int GetUniqueId()`
+- `public abstract bool IsServer()`
+- `public abstract bool IsServerRelaySupported()`
+- `public virtual int GetMaxPacketSize()`
+
+### MultiplayerPeer.ConnectionStatus
+
+`public enum ConnectionStatus`
+
+Values: `Disconnected = 0`, `Connecting = 1`, `Connected = 2`
+
+### MultiplayerPeer.SignalName
+
+`public new class SignalName : GodotObject.SignalName`
+
+- `public static readonly StringName PeerConnected`
+- `public static readonly StringName PeerDisconnected`
+
+### MultiplayerPeer.TransferModeEnum
+
+`public enum TransferModeEnum`
+
+Values: `Unreliable = 0`, `UnreliableOrdered = 1`, `Reliable = 2`
+
+### MultiplayerSpawner
+
+`public class MultiplayerSpawner : Node` - Replicates nodes added below spawn_path from the spawner's multiplayer authority to the other peers (Godot's MultiplayerSpawner).
+
+- `public event Action<Node> Spawned` - Emitted on a remote peer when the authority's spawn arrived and the node was added.
+- `public event Action<Node> Despawned` - Emitted on a remote peer just before a despawned node is freed.
+- `public NodePath SpawnPath { get; set; }` - The node the spawned scenes live under, relative to the spawner.
+- `public uint SpawnLimit { get; set; }` - The most nodes this spawner replicates at once; 0 means no limit.
+- `public Callable SpawnFunction { get; set; }` - Makes the node for Spawn from its data, on every peer.
+- `public string[] SpawnableScenes { get; set; }` - The scenes that replicate when added under spawn_path (the scene file paths; the position in this list is what travels on the wire).
+- `public void AddSpawnableScene(string path)`
+- `public void ClearSpawnableScenes()`
+- `public int GetSpawnableSceneCount()`
+- `public string GetSpawnableScene(int index)`
+- `public Node? Spawn(Variant data = default)` - Calls spawn_function with the data, adds the node it returns under spawn_path and replicates it.
+- `public override void _EnterTree()`
+- `public override void _ExitTree()`
+
+### MultiplayerSpawner.SignalName
+
+`public new class SignalName : Node.SignalName`
+
+- `public static readonly StringName Spawned`
+- `public static readonly StringName Despawned`
+
+### MultiplayerSynchronizer
+
+`public class MultiplayerSynchronizer : Node` - Copies properties from the node's multiplayer authority to the other peers, every sync interval (Always), when they change (OnChange), and with a spawn (Godot's MultiplayerSynchronizer).
+
+- `public event Action Synchronized`
+- `public event Action DeltaSynchronized`
+- `public event Action<long> VisibilityChanged`
+- `public NodePath RootPath { get; set; }` - The node whose properties the config names, relative to this node (default: the parent).
+- `public SceneReplicationConfig? ReplicationConfig { get; set; }`
+- `public double ReplicationInterval { get; set; }` - Seconds between Always-mode syncs; 0 sends on every frame.
+- `public double DeltaInterval { get; set; }` - Seconds between looks at the OnChange properties; 0 looks on every frame.
+- `public bool PublicVisibility { get; set; }` - Whether every peer sees this synchronizer unless set_visibility_for says otherwise.
+- `public VisibilityUpdateModeEnum VisibilityUpdateMode { get; set; }`
+- `public void SetVisibilityFor(int peer, bool visible)` - Shows (or hides) this synchronizer to one peer; peer 0 changes public_visibility instead.
+- `public bool GetVisibilityFor(int peer)`
+- `public void AddVisibilityFilter(Callable filter)` - A filter is called with a peer id and returns whether that peer may see this synchronizer.
+- `public void RemoveVisibilityFilter(Callable filter)`
+- `public void UpdateVisibility(int forPeer = 0)` - Evaluates the filters again now, for one peer or (0) all, and acts on a change.
+- `public override void _EnterTree()`
+- `public override void _ExitTree()`
+
+### MultiplayerSynchronizer.SignalName
+
+`public new class SignalName : Node.SignalName`
+
+- `public static readonly StringName Synchronized`
+- `public static readonly StringName DeltaSynchronized`
+- `public static readonly StringName VisibilityChanged`
+
+### MultiplayerSynchronizer.VisibilityUpdateModeEnum
+
+`public enum VisibilityUpdateModeEnum`
+
+Values: `Idle = 0`, `Physics = 1`, `None = 2`
+
 ### NavigationAgent3D
 
 `public class NavigationAgent3D : Node` - Finds a path for its parent node and follows it, and (with avoidance on) turns the parent's wanted velocity into a safe one (Godot's NavigationAgent3D).
@@ -4819,6 +5150,14 @@ Values: `Stretch = 0`, `Tile = 1`, `TileFit = 2`
 
 `public class Node : GodotObject` - A node of the scene tree (Godot's Node).
 
+- `public MultiplayerApi? Multiplayer { get; }` - The multiplayer API of the branch this node is in: the one a SceneTree.SetMultiplayer call named for an ancestor path, else the tree's default.
+- `public int GetMultiplayerAuthority()` - The peer that owns this node: it may call authority-mode RPCs and sends the node's synchronizer state.
+- `public void SetMultiplayerAuthority(int id, bool recursive = true)` - Gives the node (and, by default, every node below it) to a peer.
+- `public bool IsMultiplayerAuthority()` - True when this peer owns the node (always true offline).
+- `public Error Rpc(StringName method, params Variant[] args)` - Calls an [Rpc] method on every other peer (and here too when it is call_local).
+- `public Error RpcId(long peerId, StringName method, params Variant[] args)` - Calls an [Rpc] method on one peer (negative: on everyone but that peer).
+- `public void RpcConfig(StringName method, Variant config)` - Sets (or, with nil, removes) one method's RPC settings: a dictionary with rpc_mode, transfer_mode, call_local and channel (Godot's rpc_config).
+- `public Variant GetRpcConfig()` - Every RPC method of this node as a dictionary of settings, by name (Godot's get_rpc_config).
 - `public virtual void _EnterTree()` - Called when the node enters the tree, parents before children.
 - `public virtual void _ExitTree()` - Called when the node leaves the tree, children before parents.
 - `public virtual void _Ready()` - Called once when the node and all its children have entered the tree: children first.
@@ -5082,6 +5421,25 @@ Values: `Inherit = 0`, `Pausable = 1`, `WhenPaused = 2`, `Always = 3`, `Disabled
 - `public override int GetHashCode()`
 - `public override string ToString()`
 
+### OfflineMultiplayerPeer
+
+`public class OfflineMultiplayerPeer : MultiplayerPeer` - A multiplayer peer that is always the connected server and never talks to anyone (Godot's OfflineMultiplayerPeer).
+
+- `public override void SetTargetPeer(int id)`
+- `public override int GetPacketPeer()`
+- `public override int GetPacketChannel()`
+- `public override TransferModeEnum GetPacketMode()`
+- `public override void Poll()`
+- `public override void Close()`
+- `public override void DisconnectPeer(int peer, bool force = false)`
+- `public override ConnectionStatus GetConnectionStatus()`
+- `public override int GetUniqueId()`
+- `public override bool IsServer()`
+- `public override bool IsServerRelaySupported()`
+- `public override int GetMaxPacketSize()`
+- `public override int GetAvailablePacketCount()`
+- `public override Error PutPacket(byte[] buffer)`
+
 ### OmniLight3D
 
 `public class OmniLight3D : Light3D`
@@ -5181,6 +5539,39 @@ Values: `Vertical = 1`, `Horizontal = 0`
 `public enum GenEditState`
 
 Values: `Disabled = 0`, `Instance = 1`, `Main = 2`, `MainInherited = 3`
+
+### PacketPeer
+
+`public abstract class PacketPeer : RefCounted` - The packet side of Godot's networking: whole messages, one at a time (PacketPeer).
+
+- `public int EncodeBufferMaxSize { get; set; }` - The largest Variant PutVar will encode (Godot's default, 8 MiB).
+- `public abstract int GetAvailablePacketCount()`
+- `public virtual byte[] GetPacket()`
+- `public Error GetPacketError()`
+- `public abstract Error PutPacket(byte[] buffer)`
+- `public virtual Variant GetVar(bool allowObjects = false)`
+- `public virtual Error PutVar(Variant var, bool fullObjects = false)`
+
+### PacketPeerUDP
+
+`public class PacketPeerUDP : PacketPeer` - Datagrams over UDP (Godot's PacketPeerUDP).
+
+- `public Error Bind(int port, string bindAddress = "*", int recvBufSize = 65536)` - Binds a local port; "*" is the wildcard (every interface), anything else a numeric address or a name.
+- `public void Close()`
+- `public bool IsBound()`
+- `public int GetLocalPort()`
+- `public Error Wait()` - Waits until a packet is queued (up to a minute); Error.Unconfigured when there is no socket.
+- `public Error ConnectToHost(string host, int port)` - Gives the peer a default destination; it also keeps only packets from that address (a connected UDP socket).
+- `public bool IsSocketConnected()`
+- `public Error SetDestAddress(string host, int port)`
+- `public void SetBroadcastEnabled(bool enabled)`
+- `public Error JoinMulticastGroup(string multicastAddress, string interfaceName)`
+- `public Error LeaveMulticastGroup(string multicastAddress, string interfaceName)`
+- `public string GetPacketIP()`
+- `public int GetPacketPort()`
+- `public override int GetAvailablePacketCount()`
+- `public override Error PutPacket(byte[] buffer)`
+- `public override void Free()`
 
 ### Panel
 
@@ -5864,11 +6255,24 @@ Values: `Once = 0`, `Always = 1`
 
 `public static class RenderingServer` - Godot's RenderingServer enums that the environment nodes use.
 
+- `public static void GlobalShaderParameterAdd(StringName name, GlobalShaderParameterType type, Variant defaultValue)`
+- `public static void GlobalShaderParameterRemove(StringName name)`
+- `public static void GlobalShaderParameterSet(StringName name, Variant value)` - Sets a global shader parameter and rewrites it in every live ShaderMaterial that declares it.
+- `public static Variant GlobalShaderParameterGet(StringName name)`
+- `public static GlobalShaderParameterType GlobalShaderParameterGetType(StringName name)`
+- `public static StringName[] GlobalShaderParameterGetList()`
+
 ### RenderingServer.FogVolumeShape
 
 `public enum FogVolumeShape`
 
 Values: `Ellipsoid = 0`, `Cone = 1`, `Cylinder = 2`, `Box = 3`, `World = 4`
+
+### RenderingServer.GlobalShaderParameterType
+
+`public enum GlobalShaderParameterType` - Godot's RenderingServer.GlobalShaderParameterType (the numbering of GLOBAL_VAR_TYPE_*).
+
+Values: `Bool = 0`, `Bvec2 = 1`, `Bvec3 = 2`, `Bvec4 = 3`, `Int = 4`, `Ivec2 = 5`, `Ivec3 = 6`, `Ivec4 = 7`, `Rect2I = 8`, `Uint = 9`, `Uvec2 = 10`, `Uvec3 = 11`, `Uvec4 = 12`, `Float = 13`, `Vec2 = 14`, `Vec3 = 15`, `Vec4 = 16`, `Color = 17`, `Rect2 = 18`, `Mat2 = 19`, `Mat3 = 20`, `Mat4 = 21`, `Transform2D = 22`, `Transform = 23`, `Sampler2D = 24`, `Sampler2DArray = 25`, `Sampler3D = 26`, `SamplerCube = 27`, `SamplerExternal = 28`, `Max = 29`
 
 ### Resource
 
@@ -6113,16 +6517,88 @@ Values: `Static = 0`, `Kinematic = 1`
 
 ### RpcAttribute
 
-`public sealed class RpcAttribute : Attribute` - Documents a method as an RPC (networking is a later wave; recorded only).
+`public sealed class RpcAttribute : Attribute` - Marks a method as an RPC (G6 NET2): GodotSharp's attribute.
 
 - `public RpcAttribute()`
-- `public RpcAttribute(string mode)`
-- `public string Mode { get; }`
+- `public RpcAttribute(MultiplayerApi.RpcMode mode)`
+- `public RpcAttribute(string mode)` - The form an earlier conversion wrote: the mode by name ("AnyPeer", "authority", "any_peer", "disabled").
+- `public MultiplayerApi.RpcMode Mode { get; }`
+- `public bool CallLocal { get; set; }`
+- `public MultiplayerPeer.TransferModeEnum TransferMode { get; set; }`
+- `public int TransferChannel { get; set; }`
+
+### SceneMultiplayer
+
+`public class SceneMultiplayer : MultiplayerApi` - Godot's SceneMultiplayer: the multiplayer API of a scene tree branch.
+
+- `public override Error ObjectConfigurationAdd(GodotObject? @object, Variant configuration)`
+- `public override Error ObjectConfigurationRemove(GodotObject? @object, Variant configuration)`
+- `public event Action<long> PeerAuthenticating`
+- `public event Action<long> PeerAuthenticationFailed`
+- `public event Action<long, byte[]> PeerPacket`
+- `public bool ServerRelay { get; set; }` - Clients reach each other through the server, and learn of each other's connections, when true (default).
+- `public bool AllowObjectDecoding { get; set; }` - Whether Variants that carry full objects may be decoded.
+- `public Callable AuthCallback { get; set; }` - Called with (peer id, data) for each authentication packet; with it set, a new peer is admitted only after both sides called CompleteAuth.
+- `public double AuthTimeout { get; set; }` - Seconds a peer may stay unauthenticated before it is disconnected.
+- `public NodePath RootPath { get; set; }` - The node whose path the packets are relative to (set by SceneTree.SetMultiplayer); empty means the tree's root window.
+- `public int MaxSyncPacketSize { get; set; }` - The largest synchronization packet (always-mode properties) a synchronizer may send, in bytes.
+- `public int MaxDeltaPacketSize { get; set; }` - The largest delta packet (on-change properties) a synchronizer may send, in bytes.
+- `public bool RefuseNewConnections { get; set; }`
+- `public SceneMultiplayer()`
+- `public override MultiplayerPeer? MultiplayerPeer { get; set; }`
+- `public override bool HasMultiplayerPeer()`
+- `public override int GetUniqueId()`
+- `public override bool IsServer()`
+- `public override int GetRemoteSenderId()`
+- `public override int[] GetPeers()`
+- `public int[] GetAuthenticatingPeers()` - The peers that are connected but have not finished authenticating.
+- `public void DisconnectPeer(long id)`
+- `public override void Poll()` - Polls on a script's own call: the time since the last poll drives the synchronizers' intervals.
+- `public Error SendAuth(long id, byte[] data)` - Sends authentication data to a peer that is still authenticating.
+- `public Error CompleteAuth(long id)` - Says this side is satisfied with a peer; when both sides have, the peer is admitted.
+- `public Error SendBytes(byte[] bytes, int id = 0, MultiplayerPeer.TransferModeEnum mode = MultiplayerPeer.TransferModeEnum.Reliable, int channel = 0)` - Sends bytes to a peer (0 = all, negative = all but one) that arrive there as the peer_packet signal.
+- `public override Error Rpc(int peer, GodotObject @object, StringName method, GArray? args = null)`
+
+### SceneMultiplayer.SignalName
+
+`public new class SignalName : MultiplayerApi.SignalName`
+
+- `public static readonly StringName PeerAuthenticating`
+- `public static readonly StringName PeerAuthenticationFailed`
+- `public static readonly StringName PeerPacket`
+
+### SceneReplicationConfig
+
+`public class SceneReplicationConfig : Resource` - The properties a MultiplayerSynchronizer replicates and how (Godot's SceneReplicationConfig).
+
+- `public void AddProperty(NodePath path, int index = -1)` - Adds a property (spawn on, replicated every sync); a path that names no property, or one already there, is refused.
+- `public void RemoveProperty(NodePath path)`
+- `public bool HasProperty(NodePath path)`
+- `public GArray GetProperties()`
+- `public int PropertyGetIndex(NodePath path)`
+- `public bool PropertyGetSpawn(NodePath path)`
+- `public void PropertySetSpawn(NodePath path, bool enabled)`
+- `public ReplicationMode PropertyGetReplicationMode(NodePath path)`
+- `public void PropertySetReplicationMode(NodePath path, ReplicationMode mode)`
+- `public bool PropertyGetSync(NodePath path)` - The older spelling of mode Always.
+- `public void PropertySetSync(NodePath path, bool enabled)`
+- `public bool PropertyGetWatch(NodePath path)` - The older spelling of mode OnChange.
+- `public void PropertySetWatch(NodePath path, bool enabled)`
+- `public Variant Properties { get; set; }` - The list as scene text carries it: an array of {"path", "spawn", "replication_mode"} (what the converter writes for Object(SceneReplicationConfig, "properties": ...)).
+
+### SceneReplicationConfig.ReplicationMode
+
+`public enum ReplicationMode`
+
+Values: `Never = 0`, `Always = 1`, `OnChange = 2`
 
 ### SceneTree
 
 `public class SceneTree : GodotObject` - The scene tree (Godot's SceneTree): the root window, the current scene, groups, pause, timers, tweens and scene changes.
 
+- `public bool MultiplayerPoll { get; set; }` - Whether the tree polls its multiplayer APIs at the head of every process frame (Godot's multiplayer_poll).
+- `public MultiplayerApi GetMultiplayer(NodePath? forPath = null)` - The API for a path: the one set for the deepest ancestor path of it, else the default.
+- `public void SetMultiplayer(MultiplayerApi multiplayer, NodePath? rootPath = null)` - Gives a branch its own API.
 - `public event Action ProcessFrame`
 - `public event Action PhysicsFrame`
 - `public event Action<Node> NodeAdded`
@@ -6250,6 +6726,34 @@ Values: `Disabled = 0`, `Auto = 1`, `ShowAlways = 2`, `ShowNever = 3`, `Reserve 
 `public class Separator : Control` - Base of the separators (Godot's Separator).
 
 - `public Separator()`
+
+### Shader
+
+`public class Shader : Resource` - Godot's Shader.
+
+- `public string Code { get; set; }` - The shader source.
+- `public string SourcePath { get; }` - The res:// path of the .gdshader (or the scene and sub-resource of an inline one) this shader was converted from.
+- `public Mode GetMode()`
+- `public string[] GetUniformNames()` - The names of the shader's uniforms (not its samplers), in declaration order within the normal, instance and global blocks.
+- `public string[] GetSamplerNames()` - The names of the shader's sampler uniforms.
+
+### Shader.Mode
+
+`public enum Mode`
+
+Values: `Spatial = 0`, `CanvasItem = 1`, `Particles = 2`, `Sky = 3`, `Fog = 4`
+
+### ShaderMaterial
+
+`public class ShaderMaterial : Material` - Godot's ShaderMaterial.
+
+- `public Shader? Shader { get; set; }`
+- `public string EngineMaterialName { get; }` - The library name of the engine material this resource drives (the .ocmat's NAME), or empty for a ShaderMaterial made in code.
+- `public float[] GetUniformTable()` - The uniform table as the engine holds it, 4 floats a register (a copy).
+- `public void SetShaderParameter(StringName param, Variant value)`
+- `public Variant GetShaderParameter(StringName param)`
+- `public void RefreshEngine()` - Re-resolves the engine material (a level change may have rebuilt it) and writes the table again.
+- `public string EnvironmentKind { get; }` - "sky", "fog" or "particles" for a converted environment shader, else empty.
 
 ### Shape3D
 
@@ -6435,7 +6939,7 @@ Values: `Physics = 0`, `Idle = 1`
 
 `public class Sky : Resource`
 
-- `public SkyMaterial? SkyMaterial { get; set; }`
+- `public Material? SkyMaterial { get; set; }` - A SkyMaterial, or a ShaderMaterial over a sky shader (G6 SH3), which replaces the sky.
 - `public RadianceSizeEnum RadianceSize { get; set; }`
 - `public ProcessModeEnum ProcessMode { get; set; }`
 
@@ -6612,6 +7116,80 @@ Values: `Disabled = 0`, `Discard = 1`, `OpaquePrepass = 2`, `Hash = 3`
 
 - `public Vector3 ConstantLinearVelocity { get; set; }` - A surface speed in metres per second: bodies touching this one are carried along it (a conveyor).
 - `public Vector3 ConstantAngularVelocity { get; set; }`
+
+### StreamPeer
+
+`public abstract class StreamPeer : RefCounted` - A byte stream (Godot's StreamPeer): sized integers, floats, strings and Variants in either byte order over some transport.
+
+- `public bool BigEndian { get; set; }` - Big-endian integers and floats when true (default little-endian).
+- `public abstract int GetAvailableBytes()`
+- `public Error PutData(byte[] data)`
+- `public GArray PutPartialData(byte[] data)` - [Error, number of bytes sent]; one attempt.
+- `public GArray GetData(int bytes)` - [Error, bytes]: blocks (a socket, up to 30 s) until all of them arrived.
+- `public GArray GetPartialData(int bytes)` - [Error, bytes]: what is available now, at most bytes.
+- `public void Put8(sbyte value)`
+- `public void PutU8(byte value)`
+- `public void Put16(short value)`
+- `public void PutU16(ushort value)`
+- `public void Put32(int value)`
+- `public void PutU32(uint value)`
+- `public void Put64(long value)`
+- `public void PutU64(ulong value)`
+- `public void PutHalf(float value)`
+- `public void PutFloat(float value)`
+- `public void PutDouble(double value)`
+- `public void PutString(string value)` - A 32-bit length, then the ASCII bytes (anything outside ASCII becomes '?').
+- `public void PutUtf8String(string value)`
+- `public Error PutVar(Variant var, bool fullObjects = false)` - A 32-bit length, then the encoded Variant (Godot's StreamPeer prefixes it; PacketPeer does not).
+- `public sbyte Get8()`
+- `public byte GetU8()`
+- `public short Get16()`
+- `public ushort GetU16()`
+- `public int Get32()`
+- `public uint GetU32()`
+- `public long Get64()`
+- `public ulong GetU64()`
+- `public float GetHalf()`
+- `public float GetFloat()`
+- `public double GetDouble()`
+- `public string GetString(int bytes = -1)` - With bytes = -1 the length comes first from the stream.
+- `public string GetUtf8String(int bytes = -1)`
+- `public Variant GetVar(bool allowObjects = false)` - Reads a length-prefixed Variant; nil when the bytes are not one.
+
+### StreamPeerBuffer
+
+`public class StreamPeerBuffer : StreamPeer` - A byte buffer with a cursor that is also a StreamPeer (Godot's StreamPeerBuffer): writes land at the cursor and grow the buffer.
+
+- `public byte[] Data { get; set; }` - A copy of the buffer.
+- `public void Resize(int size)`
+- `public void Clear()`
+- `public void Seek(int position)`
+- `public int GetSize()`
+- `public int GetPosition()`
+- `public StreamPeerBuffer Duplicate()`
+- `public override int GetAvailableBytes()`
+
+### StreamPeerTCP
+
+`public class StreamPeerTCP : StreamPeer` - A TCP connection (Godot's StreamPeerTCP).
+
+- `public Error ConnectToHost(string host, int port)`
+- `public Error Bind(int port, string host = "*")` - Binding the local side of a TCP client is not available.
+- `public Error Poll()`
+- `public Status GetStatus()`
+- `public string GetConnectedHost()`
+- `public int GetConnectedPort()`
+- `public int GetLocalPort()`
+- `public void SetNoDelay(bool enabled)`
+- `public void DisconnectFromHost()`
+- `public override int GetAvailableBytes()`
+- `public override void Free()`
+
+### StreamPeerTCP.Status
+
+`public enum Status`
+
+Values: `None = 0`, `Connecting = 1`, `Connected = 2`, `Error = 3`
 
 ### StringExtensions
 
@@ -7019,6 +7597,18 @@ Values: `ShowNever = 0`, `ShowActiveOnly = 1`, `ShowAlways = 2`
 `public enum TabPositionEnum`
 
 Values: `Top = 0`, `Bottom = 1`, `Max = 2`
+
+### TCPServer
+
+`public class TCPServer : RefCounted` - Listens for TCP connections (Godot's TCPServer).
+
+- `public Error Listen(int port, string bindAddress = "*")`
+- `public bool IsListening()`
+- `public int GetLocalPort()`
+- `public bool IsConnectionAvailable()`
+- `public StreamPeerTCP? TakeConnection()`
+- `public void Stop()`
+- `public override void Free()`
 
 ### TextEdit
 
@@ -7715,6 +8305,20 @@ Values: `Physics = 0`, `Idle = 1`
 
 - `public static readonly StringName Finished`
 
+### UDPServer
+
+`public class UDPServer : RefCounted` - Accepts UDP "connections": the first datagram from an unknown address makes a PacketPeerUDP, and later datagrams from it go to that peer (Godot's UDPServer).
+
+- `public int MaxPendingConnections { get; set; }`
+- `public Error Listen(int port, string bindAddress = "*")`
+- `public bool IsListening()`
+- `public int GetLocalPort()`
+- `public Error Poll()` - Reads the socket: a datagram from a known address joins that peer's queue, from a new one makes a pending connection (dropped past MaxPendingConnections).
+- `public bool IsConnectionAvailable()`
+- `public PacketPeerUDP? TakeConnection()`
+- `public void Stop()`
+- `public override void Free()`
+
 ### Variant
 
 `public readonly struct Variant : IEquatable<Variant>` - A value of any Godot type.
@@ -7808,6 +8412,7 @@ Values: `Physics = 0`, `Idle = 1`
 - `public static implicit operator Variant(Vector2[]? v)`
 - `public static implicit operator Variant(Vector3[]? v)`
 - `public static implicit operator Variant(Color[]? v)`
+- `public static implicit operator Variant(Vector4[]? v)`
 - `public static explicit operator bool(Variant v)`
 - `public static explicit operator int(Variant v)`
 - `public static explicit operator long(Variant v)`
@@ -8403,6 +9008,12 @@ Values: `Inherit = 0`, `Always = 1`, `WhenPaused = 2`
 - `public uint Layers { get; set; }` - The render layers this instance is on (default layer 1).
 - `public bool GetLayerMaskValue(int layerNumber)`
 - `public void SetLayerMaskValue(int layerNumber, bool value)`
+
+### VisualShader
+
+`public class VisualShader : Shader` - Godot's VisualShader: a shader built from nodes.
+
+- `public string GetCode()` - The shading-language text Godot would generate for the graph, as the converter re-generated it.
 
 ### VoxelGI
 

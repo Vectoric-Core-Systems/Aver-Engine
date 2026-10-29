@@ -121,6 +121,9 @@ void sanitise(MaterialDesc& d) {
         f.minLayers = std::clamp<u8>(f.minLayers, 1, 31);
         f.maxLayers = std::clamp<u8>(f.maxLayers, f.minLayers, 63);
     }
+    // ---- G6 SH2: the Godot shader's uniform registers. NOT clamped as values (ints and bools are bit patterns); only the count is bounded. ----
+    if (d.gd.regs.size() > static_cast<usize>(kGdMaxRegisters) * 4u) d.gd.regs.resize(static_cast<usize>(kGdMaxRegisters) * 4u);
+    if (d.gd.regs.size() % 4u) d.gd.regs.resize((d.gd.regs.size() + 3u) / 4u * 4u, 0.0f);
     // ---- wave3 terrain layers ----
     {
         TerrainDesc& t = d.terrain;
@@ -380,6 +383,9 @@ using aver::pbr::MaterialDesc;
 using aver::pbr::MaterialHandle;
 using aver::pbr::MaterialLibrary;
 using aver::pbr::TextureSlot;
+using aver::usize;
+using aver::pbr::TextureRef;
+using aver::pbr::kGdTableSlot;
 
 namespace {
 
@@ -666,6 +672,39 @@ int32_t aver_pbr_clear_texture(aver_pbr_material m, int32_t slot) {
     MaterialDesc* d = edit(m);
     if (!d || !validSlot(slot)) return 0;
     d->textures[slot] = aver::pbr::TextureRef{};
+    return commit(m);
+}
+
+// ---- G6 SH2: a converted Godot shader's uniform registers ----
+int32_t aver_pbr_get_gd_register_count(aver_pbr_material m) {
+    const MaterialDesc* d = read(m);
+    return d ? static_cast<int32_t>(d->gd.registerCount()) : 0;
+}
+int32_t aver_pbr_get_gd_registers(aver_pbr_material m, float* out, int32_t capacityFloats) {
+    const MaterialDesc* d = read(m);
+    if (!d) return -1;
+    const usize n = std::min<usize>(d->gd.regs.size(), capacityFloats > 0 && out ? static_cast<usize>(capacityFloats) : 0u);
+    if (n) std::memcpy(out, d->gd.regs.data(), n * sizeof(float));
+    return static_cast<int32_t>(n);
+}
+int32_t aver_pbr_set_gd_registers(aver_pbr_material m, const float* values, int32_t floatCount) {
+    MaterialDesc* d = edit(m);
+    if (!d) return 0;
+    const usize n = values && floatCount > 0 ? static_cast<usize>(floatCount) : 0u;
+    if (n == d->gd.regs.size() && (n == 0 || std::memcmp(d->gd.regs.data(), values, n * sizeof(float)) == 0)) return 1;   // nothing changed: no upload
+    d->gd.regs.assign(values, values + n);
+    // Slot 7 carries the table while there are registers, and is a free slot again when there are none.
+    if (n) d->textures[kGdTableSlot].path = "@gdu";
+    else if (d->textures[kGdTableSlot].path == "@gdu") d->textures[kGdTableSlot] = TextureRef{};
+    return commit(m);
+}
+int32_t aver_pbr_set_gd_register_floats(aver_pbr_material m, int32_t firstFloat, const float* values, int32_t count) {
+    MaterialDesc* d = edit(m);
+    if (!d || !values || firstFloat < 0 || count <= 0) return 0;
+    const usize first = static_cast<usize>(firstFloat), n = static_cast<usize>(count);
+    if (first + n > d->gd.regs.size()) return 0;
+    if (std::memcmp(d->gd.regs.data() + first, values, n * sizeof(float)) == 0) return 1;
+    std::memcpy(d->gd.regs.data() + first, values, n * sizeof(float));
     return commit(m);
 }
 

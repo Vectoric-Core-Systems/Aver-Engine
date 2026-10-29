@@ -212,7 +212,10 @@ endif()
 # Skips (77) without the vendored dxcompiler.dll. AVER_REPO_ROOT: stages the module shader trees.
 if(TARGET Aver.Render.PBR.Materials)
   add_executable(VoxiSpirvCompileTest src/VoxiSpirvCompileTest.cpp)
-  target_link_libraries(VoxiSpirvCompileTest PRIVATE Aver.Render.PBR.Materials Aver.RHI Aver.Platform Aver.Core)
+  # G6 SH2: converted Godot shaders are registered so the scene, ray-driven and compute variants are compiled WITH one (GdGraphBridge.hpp lives with the
+  # formats.godot tests); the Godot front-end and the graph node live in Aver.Formats.Godot / Aver.Formats.
+  target_link_libraries(VoxiSpirvCompileTest PRIVATE Aver.Render.PBR.Materials Aver.Formats.Godot Aver.Formats Aver.RHI Aver.Platform Aver.Core)
+  target_include_directories(VoxiSpirvCompileTest PRIVATE ${CMAKE_SOURCE_DIR}/tests/formats.godot/src)
   target_compile_definitions(VoxiSpirvCompileTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
   set_target_properties(VoxiSpirvCompileTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()

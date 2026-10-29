@@ -501,6 +501,40 @@
     },
     {
       "schema": 1,
+      "name": "Aver.Net",
+      "dir": "net",
+      "displayName": "Networking",
+      "description": "OS sockets (UDP, TCP, IPv4 and IPv6) and a reliable-UDP host/peer protocol with ENet-like semantics, tested on a simulated network.",
+      "category": "Networking",
+      "option": "AVER_MODULE_NET",
+      "required": false,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core"
+      ],
+      "consequence": "A converted Godot project cannot use ENet multiplayer, UDP or TCP sockets."
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Net.Abi",
+      "dir": "net.abi",
+      "displayName": "Networking ABI",
+      "description": "Plain-C seam onto sockets and the reliable-UDP protocol so Aver.Fabric's multiplayer, UDP and TCP classes drive them.",
+      "category": "Networking",
+      "option": null,
+      "required": false,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.Net"
+      ],
+      "derivedFrom": [
+        "Aver.Net"
+      ],
+      "consequence": ""
+    },
+    {
+      "schema": 1,
       "name": "Aver.Occlusion",
       "dir": "occlusion",
       "displayName": "Occlusion Culling",
@@ -1381,17 +1415,6 @@
       "category": "Networking",
       "dependsOn": [
         "Aver.Core"
-      ]
-    },
-    {
-      "name": "Aver.Net",
-      "dir": "net",
-      "displayName": "Networking",
-      "description": "Planned: modular replication over UDP.",
-      "category": "Networking",
-      "dependsOn": [
-        "Aver.Core",
-        "Aver.Platform"
       ]
     },
     {

@@ -2,7 +2,9 @@
 
 #include "aver/framework/framework_envfx_abi.h"
 
+#include "GodotEnvInternal.hpp"
 #include "aver/core/FogVolume.hpp"
+#include "aver/framework/framework_godotenv_abi.h"
 #include "aver/core/Log.hpp"
 #include "aver/core/ReflectionProbe.hpp"
 
@@ -20,6 +22,7 @@ struct Fog {
     aver::FogVolumeDesc desc;
     bool set = false;       // aver_fw_fogvol_set was called
     bool enabled = true;
+    std::string shaderName; // G6 SH3: a registered Godot fog shader (framework_godotenv_abi.h), empty = none
 };
 
 struct Probe {
@@ -127,6 +130,14 @@ int32_t aver_fw_fogvol_set(int32_t id, int32_t shape, const float* world12, cons
     return 1;
 }
 
+int32_t aver_fw_fogvol_set_shader(int32_t id, const char* name) {
+    Fog* f = fogOf(id);
+    if (!f) return 0;
+    const std::string want = name ? name : "";
+    if (f->shaderName != want) { f->shaderName = want; ++store().fogRev; }
+    return 1;
+}
+
 int32_t aver_fw_fogvol_set_enabled(int32_t id, int32_t on) {
     Fog* f = fogOf(id);
     if (!f) return 0;
@@ -162,7 +173,11 @@ int32_t aver_fw_fogvol_pack(float x, float y, float z, float* outFloats, int32_t
     }
     std::stable_sort(c.begin(), c.end(), [](const Cand& a, const Cand& b) { return a.d2 < b.d2; });
     std::vector<aver::FogVolumeDesc> descs;
-    for (const Cand& k : c) descs.push_back(k.f->desc);
+    for (const Cand& k : c) {
+        descs.push_back(k.f->desc);
+        // G6 SH3: the shader's place in the renderer's fog-shader table (0 = none, or not registered).
+        descs.back().shader = k.f->shaderName.empty() ? 0u : aver_fw_genv_fog_index(k.f->shaderName);
+    }
     aver::FogVolumeBlock block;
     const uint32_t n = aver::fogv::packAll(descs.data(), static_cast<uint32_t>(descs.size()), block);
     std::memcpy(outFloats, &block, sizeof(block));
@@ -292,6 +307,7 @@ void aver_fw_envfx_reset(void) {
     if (!s.fog.empty()) { s.fog.clear(); ++s.fogRev; }
     if (!s.probes.empty()) { s.probes.clear(); ++s.probeRev; }
     s.fogFullLogged = s.probeFullLogged = false;
+    aver_fw_genv_reset();   // G6 SH3: the converted shaders a level registered go with it
 }
 
 void aver_fw_envfx_tick(void) {

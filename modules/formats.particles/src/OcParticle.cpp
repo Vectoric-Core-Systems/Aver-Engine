@@ -34,6 +34,7 @@
 //   GI on|off                                      -- ParticleEffect::receivesGI (particles DECIDED 4)
 //   MODULE <key> [off] <param>=<number|@Name[.x|.y|.z|.w]> ...   -- the module stack, authored order
 //   ONEVENT death|collide SPAWN <emitter> <count> [inherit <k>]
+//   GDSHADER <name>                                -- G6 SH3: a converted Godot particles shader (Shaders/<name>.particles.ocgraph) is the emitter's custom stage
 //
 // Every v1 record except NAME and TEX is always written (ParticleEffect always carries a value
 // for it); the v2 records are written only when they differ from their defaults, so a v1 effect is written back as v1,
@@ -151,6 +152,7 @@ enum class Rec : u8 {
     Header, Name, Param, EmitterHdr,
     Sim, Shape, Render, Sprite, Subuv, SizeCurve, ColorCurve, Blend, Emission, Lifetime, Direction, Speed, Gravity,
     Damping, Size, ColorStart, ColorEnd, Tex, Gi, Lighting, Sort, Fog, Bounds, Cull, SpawnAt, Module, OnEvent,
+    GdShader,   // G6 SH3
     Other, Count
 };
 constexpr usize kRecCount = static_cast<usize>(Rec::Count);
@@ -169,7 +171,7 @@ Rec classifyLine(std::string_view line, bool sawHeaderYet) {
         {"SPEED", Rec::Speed}, {"GRAVITY", Rec::Gravity}, {"DAMPING", Rec::Damping}, {"SIZE", Rec::Size},
         {"TEX", Rec::Tex}, {"GI", Rec::Gi}, {"LIGHTING", Rec::Lighting}, {"SORT", Rec::Sort}, {"FOG", Rec::Fog},
         {"BOUNDS", Rec::Bounds}, {"CULL", Rec::Cull}, {"SPAWNAT", Rec::SpawnAt}, {"MODULE", Rec::Module},
-        {"ONEVENT", Rec::OnEvent},
+        {"ONEVENT", Rec::OnEvent}, {"GDSHADER", Rec::GdShader},
     };
     for (const Entry& e : kTable)
         if (equalsCI(k, e.word)) return e.rec;
@@ -184,7 +186,7 @@ bool isV2OnlyRec(Rec r) {
     switch (r) {
     case Rec::Param: case Rec::EmitterHdr: case Rec::Sim: case Rec::Render: case Rec::Sprite: case Rec::Subuv:
     case Rec::SizeCurve: case Rec::ColorCurve: case Rec::Lighting: case Rec::Sort: case Rec::Fog: case Rec::Bounds:
-    case Rec::Cull: case Rec::SpawnAt: case Rec::Module: case Rec::OnEvent:
+    case Rec::Cull: case Rec::SpawnAt: case Rec::Module: case Rec::OnEvent: case Rec::GdShader:
         return true;
     default:
         return false;
@@ -567,6 +569,10 @@ bool parseOcparticleSystem(std::string_view text, particles::ParticleSystemDef& 
             u64 id = 0;
             if (!strictU64(trim(inner.substr(5)), id) || id == 0) return fail("TEX guid is malformed or zero");
             emitter().textureId = id;
+        } else if (equalsCI(key, "GDSHADER")) {
+            // G6 SH3: the name of a registered converted Godot particles shader.
+            if (t.size() != 2 || t[1].empty()) return fail("GDSHADER requires exactly 1 field: the shader's name");
+            emitter().godotShader = std::string(t[1]);
         } else if (equalsCI(key, "GI")) {
             if (t.size() != 2) return fail("GI requires exactly 1 field: GI on|off");
             particles::ParticleEffect& e = emitter();
@@ -870,6 +876,7 @@ EmitterText buildEmitterText(const particles::ParticleSystemDef& def, usize inde
     if (e.boundsRadiusCm != 0.0f) R(Rec::Bounds) = "BOUNDS " + num(e.boundsRadiusCm) + "\n";
     if (e.cullDistanceCm != 0.0f) R(Rec::Cull) = "CULL " + num(e.cullDistanceCm) + "\n";
     if (e.spawnAtTarget != d.spawnAtTarget) R(Rec::SpawnAt) = std::string("SPAWNAT ") + (e.spawnAtTarget ? "on" : "off") + "\n";
+    if (!e.godotShader.empty()) R(Rec::GdShader) = "GDSHADER " + e.godotShader + "\n";
     if (e.textureId != 0) {
         char buf[32];
         std::snprintf(buf, sizeof buf, "{guid:0x%016llX}", static_cast<unsigned long long>(e.textureId));
@@ -901,7 +908,7 @@ std::string freshEmitterBody(const EmitterText& t) {
         Rec::Sim, Rec::Shape, Rec::Render, Rec::Sprite, Rec::Subuv, Rec::Blend, Rec::Other /*blank*/,
         Rec::Emission, Rec::Lifetime, Rec::Direction, Rec::Speed, Rec::Gravity, Rec::Damping, Rec::Size, Rec::SizeCurve,
         Rec::ColorStart, Rec::ColorEnd, Rec::ColorCurve, Rec::Other /*blank*/,
-        Rec::Lighting, Rec::Gi, Rec::Sort, Rec::Fog, Rec::Bounds, Rec::Cull, Rec::SpawnAt, Rec::Tex,
+        Rec::Lighting, Rec::Gi, Rec::Sort, Rec::Fog, Rec::Bounds, Rec::Cull, Rec::SpawnAt, Rec::Tex, Rec::GdShader,
         Rec::Module, Rec::OnEvent,
     };
     std::string out;
@@ -1170,7 +1177,7 @@ std::string writeV2Text(const particles::ParticleSystemDef& def, std::string_vie
             Rec::Sim, Rec::Shape, Rec::Render, Rec::Sprite, Rec::Subuv, Rec::Blend, Rec::Emission, Rec::Lifetime,
             Rec::Direction, Rec::Speed, Rec::Gravity, Rec::Damping, Rec::Size, Rec::SizeCurve, Rec::ColorStart,
             Rec::ColorEnd, Rec::ColorCurve, Rec::Lighting, Rec::Gi, Rec::Sort, Rec::Fog, Rec::Bounds, Rec::Cull,
-            Rec::SpawnAt, Rec::Tex, Rec::Module, Rec::OnEvent};
+            Rec::SpawnAt, Rec::Tex, Rec::GdShader, Rec::Module, Rec::OnEvent};
         for (Rec r : kFlushOrder) {
             if (placed[static_cast<usize>(idx)][static_cast<usize>(r)]) continue;
             placed[static_cast<usize>(idx)][static_cast<usize>(r)] = true;

@@ -6,13 +6,13 @@ Generated from source by `scripts/csharp-api-index.py`. Hand-written guides: `do
 
 | Assembly | Public types | Public members |
 |---|---|---|
-| [Aver.Framework](Aver.Framework.md) | 234 | 1980 |
+| [Aver.Framework](Aver.Framework.md) | 236 | 1989 |
 | [Aver.Scene](Aver.Scene.md) | 10 | 116 |
 | [Aver.Physics](Aver.Physics.md) | 126 | 1233 |
 | [Aver.UI](Aver.UI.md) | 23 | 193 |
 | [Aver.Synapse](Aver.Synapse.md) | 38 | 176 |
 | [Aver.LevelInstance](Aver.LevelInstance.md) | 4 | 46 |
 | [Aver.Prefab](Aver.Prefab.md) | 4 | 28 |
-| [Aver.Scripting](Aver.Scripting.md) | 14 | 121 |
+| [Aver.Scripting](Aver.Scripting.md) | 14 | 126 |
 | [Aver.Pcg.Apply](Aver.Pcg.Apply.md) | 2 | 8 |
-| [Aver.Fabric](Aver.Fabric.md) | 604 | 6436 |
+| [Aver.Fabric](Aver.Fabric.md) | 649 | 6910 |

@@ -239,6 +239,11 @@ rhi::PipelineLayout giLayout(u32 bindlessTextures = 0, u32 bindlessGeometry = 0)
     return l;
 }
 
+// G6 SH3: the registered Godot sky shader's program text (empty = none), its name and a revision. VoxiRenderer::setGodotSky writes them, voxiShaderPrelude reads them.
+std::string gGodotSkyProgram;
+std::string gGodotSkyName;
+u64 gGodotSkyRev = 0;
+
 // Voxi's shader body, read from shaders/voxi.hlsl (here for test access without RHI dependency).
 const char* voxiHlsl() {
     // No static: the loader owns the cache and reloadShaderFiles() clears it. A static here would
@@ -252,12 +257,17 @@ const char* voxiShaderPrelude() {
     static std::string s;   // owned by a static, because the caller borrows it
     static u64 built = ~0ull;
     // Both revisions, because either can move independently: a project can register a material
-    // graph, and --shader-source can rewrite the prelude underneath it.
-    const u64 rev = pbr::materialGraphs().revision() * 1000003ull + rhi::shaderFileRevision();
+    // graph, and --shader-source can rewrite the prelude underneath it. G6 SH3: and a registered Godot sky shader.
+    const u64 rev = pbr::materialGraphs().revision() * 1000003ull + rhi::shaderFileRevision() + gGodotSkyRev * 7919ull;
     if (built != rev) {
-        s = std::string(rhi::sharedShaderPrelude());
+        // G6 SH3: a registered Godot sky shader is spliced into the shared prelude and routes the sky functions to it (AVER_GD_SKY). Without one, nothing is added.
+        s = gGodotSkyProgram.empty() ? std::string() : std::string("#define AVER_GD_SKY 1\n");
+        // G6 SH2: converted Godot shaders' varyings are named before the shared prelude declares VSOut (applied only by the variant that defines AVER_GD_VARYINGS_ON).
+        if (pbr::materialGraphs().hasGodotVaryings()) s += pbr::materialGraphs().vsOutMembersDefine();
+        s += gGodotSkyProgram.empty() ? std::string(rhi::sharedShaderPrelude()) : rhi::spliceGodotSky(rhi::sharedShaderPrelude(), gGodotSkyProgram);
         const std::string& graphs = pbr::materialGraphs().hlsl();
         if (!graphs.empty()) s += "\n#define AVER_MATERIAL_GRAPH 1\n";
+        if (pbr::materialGraphs().hasGodotShaders()) s += "#define AVER_GD_FX_STOCK 1\n";
         s += pbr::materialShaderPrelude();
         s += graphs;
         built = rev;
@@ -1353,6 +1363,13 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
                   pbr::materialGraphs().count());
         if (!createScenePipelines(dev_->sampleCount(), dev_->backbufferFormat(), dev_->depthFormat()))
             AVER_ERROR("[Voxi] scene pipelines could not be rebuilt for the material graphs");
+    }
+    // G6 SH3: a Godot sky shader was set, replaced or cleared; the sky code lives in the prelude every Voxi shader compiles against.
+    if (scenePipelineSkyRev_ != gGodotSkyRev) {
+        scenePipelineSkyRev_ = gGodotSkyRev;
+        AVER_INFO("[Voxi] rebuilding scene pipelines for the {} sky", gGodotSkyProgram.empty() ? "engine's own" : "Godot");
+        if (!createScenePipelines(dev_->sampleCount(), dev_->backbufferFormat(), dev_->depthFormat()))
+            AVER_ERROR("[Voxi] scene pipelines could not be rebuilt for the sky shader");
     }
     // Shader file changed on disk; only safe to rebuild here.
     if (scenePipelineShaderRev_ != rhi::shaderFileRevision()) {
@@ -6523,6 +6540,7 @@ void VoxiRenderer::onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rh
         AVER_ERROR("[Voxi] scene pipelines could not be rebuilt for {} sample(s)", sampleCount);
     scenePipelineGraphRev_ = pbr::materialGraphs().revision();
     scenePipelineShaderRev_ = rhi::shaderFileRevision();   // same reason as the line above
+    scenePipelineSkyRev_ = gGodotSkyRev;
     // Remembered even when the call below decides to allocate nothing: setSettings needs a size to
     // create at if ray tracing is switched on later.
     rtHistWantW_ = width;
@@ -8402,7 +8420,26 @@ void VoxiRenderer::recordFroxelFog(rhi::IRenderContext& ctx) {
 }
 
 // The sky is the one thing no shade site reaches: apply the volume's far end to the pixels still at the far plane.
+void VoxiRenderer::setGodotSky(const rhi::GodotEnvProgram* program) {
+    std::string text = program ? rhi::godotSkyProgram(*program) : std::string();
+    const std::string name = program ? program->name : std::string();
+    if (text == gGodotSkyProgram && name == gGodotSkyName) return;
+    gGodotSkyProgram = std::move(text);
+    gGodotSkyName = name;
+    ++gGodotSkyRev;
+    if (program && gGodotSkyProgram.empty()) AVER_WARN("[Voxi] the Godot sky shader '{}' could not be composed; the engine's sky stays", name);
+}
+
 void VoxiRenderer::transparentPass(rhi::IRenderContext& ctx) {
+    // G6 SH3: the Godot sky replaces the engine's background on the pixels still at the far plane, before the fog is applied over it.
+    if (godotSkyPso_ && bindings_ && !suppressesScene()) {
+        rhi::ScopedGpuStat stat(ctx, "Voxi Godot sky");
+        ctx.setPipeline(godotSkyPso_);
+        ctx.setBindingSet(bindings_);
+        ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
+        ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
+        ctx.drawFullscreen();
+    }
     if (froxelRecorded_) froxel_.drawSky(ctx);
 }
 
@@ -8571,6 +8608,7 @@ bool VoxiRenderer::createPipelines() {
                                               dev_->depthFormat());
     scenePipelineGraphRev_ = pbr::materialGraphs().revision();
     scenePipelineShaderRev_ = rhi::shaderFileRevision();
+    scenePipelineSkyRev_ = gGodotSkyRev;
 
     return shadowPso_ && voxelPso_ && clearPso_ && mipPso_ && sceneOk;
 }
@@ -8610,8 +8648,10 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
                                          extraSceneLocal_[0].lit, extraSceneLocal_[0].litGbuf, extraSceneLocal_[0].prepassed, extraSceneLocal_[0].prepassedGbuf,
                                          extraSceneLocal_[1].lit, extraSceneLocal_[1].litGbuf, extraSceneLocal_[1].prepassed, extraSceneLocal_[1].prepassedGbuf,
                                          localScene_[0].lit, localScene_[0].litGbuf, localScene_[0].prepassed, localScene_[0].prepassedGbuf,
-                                         localScene_[1].lit, localScene_[1].litGbuf, localScene_[1].prepassed, localScene_[1].prepassedGbuf};
+                                         localScene_[1].lit, localScene_[1].litGbuf, localScene_[1].prepassed, localScene_[1].prepassedGbuf,
+                                         godotSkyPso_};
     for (rhi::PipelineHandle p : stale) if (p) res_->destroyPipeline(p);
+    godotSkyPso_ = 0;
     extraScene_[0] = ExtraScene{};
     extraScene_[1] = ExtraScene{};
     extraSceneLocal_[0] = extraSceneLocal_[1] = ExtraScene{};
@@ -8670,6 +8710,25 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
         debugPso_ = res_->createGraphicsPipeline(p);
     }
     if (!debugPso_) AVER_ERROR("[Voxi] voxel debug pipeline unavailable");
+
+    // --- 6b. G6 SH3: the Godot sky shader as the background (only when one is registered) ---
+    if (!gGodotSkyProgram.empty() && vsky) {
+        if (const rhi::ShaderHandle ps = compile("PSGodotSky", rhi::ShaderStage::Pixel, kBaseSm, rasterDefs(nullptr).c_str())) {
+            rhi::GraphicsPipelineDesc p;
+            p.vs = vsky; p.ps = ps;
+            p.layout = gi;
+            p.cull = rhi::CullMode::None;
+            // The pixels still at the far plane (VSky emits z = 1), as the froxel fog's sky draw: test on, write off, replace the colour.
+            p.depth = {true, false, rhi::CompareOp::LessEqual};
+            p.renderTargetCount = 1;
+            p.renderTargets[0] = color;
+            p.depthFormat = depth;
+            p.sampleCount = sampleCount;
+            godotSkyPso_ = res_->createGraphicsPipeline(p);
+        }
+        if (!godotSkyPso_) AVER_ERROR("[Voxi] the Godot sky pipeline would not build; the engine's own sky stays");
+        else AVER_INFO("[Voxi] Godot sky shader '{}' compiled into the scene pipelines", gGodotSkyName);
+    }
 
     // --- 7-10. scene lit variants: cone trace and RayQuery live inside pixel shader ---
     rhi::GraphicsPipelineDesc scene;
@@ -9386,7 +9445,10 @@ bool VoxiRenderer::createFxPipelines(u64 mapKey) {
     ShaderScope compile(*res_);
     const rhi::PipelineLayout gi = giLayout();
     const std::string matDefs = pbr::materialShaderDefines(gi.srvCount, kMaterialSamplerSlot, layeredBsdf_);
-    const std::string fxDefs = fxShaderDefines(key) + (extra ? ";AVER_MESH_EXTRA=1" : "");
+    // G6 SH2: a converted Godot shader's vertex() runs in VSMainGd; its varyings ride the vertex output of both stages of this variant.
+    const bool gdVs = (key & pbr::fxkey::kGdVertex) != 0;
+    const bool gdVary = gdVs && pbr::materialGraphs().hasGodotVaryings();
+    const std::string fxDefs = fxShaderDefines(key) + (extra ? ";AVER_MESH_EXTRA=1" : "") + (gdVary ? ";AVER_GD_VARYINGS_ON=1" : "");
     const auto rasterDefs = [&](const std::string& more) { return matDefs + ";" + fxDefs + (more.empty() ? std::string() : ";" + more); };
     const auto sceneDefs  = [&](const std::string& more) { return rasterDefs(more) + ";AVER_HAIR_SHADING=1"; };
 
@@ -9432,8 +9494,9 @@ bool VoxiRenderer::createFxPipelines(u64 mapKey) {
     sceneGbuf.renderTargets[2] = rhi::Format::R32Float;
     sceneGbuf.renderTargets[3] = rhi::Format::RGB10A2Unorm;
 
-    const char* const vsEntry = (key & pbr::fxkey::kVertex) ? "VSMainFx" : "VSMain";
-    const rhi::ShaderHandle vs = compile(vsEntry, rhi::ShaderStage::Vertex, kBaseSm, rasterDefs({}).c_str());
+    const char* const vsEntry = gdVs ? "VSMainGd" : ((key & pbr::fxkey::kVertex) ? "VSMainFx" : "VSMain");
+    const std::string vsDefs = rasterDefs(gdVs ? std::string("AVER_MATX_GDVS=1;AVER_GD_NO_DERIVATIVES=1") : std::string());
+    const rhi::ShaderHandle vs = compile(vsEntry, rhi::ShaderStage::Vertex, kBaseSm, vsDefs.c_str());
     const std::string psDefs     = rt ? sceneDefs(rtFlat) : sceneDefs({});
     const std::string psGbufDefs = rt ? sceneDefs(rtFlat + ";AVER_GBUFFER=1") : sceneDefs("AVER_GBUFFER=1");
     const rhi::ShaderHandle ps     = compile("PSMainVoxi", rhi::ShaderStage::Pixel, sm, psDefs.c_str());

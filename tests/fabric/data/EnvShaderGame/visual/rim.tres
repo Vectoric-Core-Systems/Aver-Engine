@@ -1,0 +1,60 @@
+[gd_resource type="VisualShader" load_steps=10 format=3]
+
+[sub_resource type="VisualShaderNodeFloatParameter" id="VisualShaderNodeFloatParameter_p1"]
+parameter_name = "rim_power"
+hint = 1
+min = 0.5
+max = 8.0
+default_value_enabled = true
+default_value = 3.0
+
+[sub_resource type="VisualShaderNodeFresnel" id="VisualShaderNodeFresnel_f1"]
+
+[sub_resource type="VisualShaderNodeColorConstant" id="VisualShaderNodeColorConstant_c1"]
+constant = Color(0.1, 0.4, 0.9, 1)
+
+[sub_resource type="VisualShaderNodeMix" id="VisualShaderNodeMix_m1"]
+default_input_values = [1, Vector3(1, 0.8, 0.2)]
+op_type = 2
+
+[sub_resource type="VisualShaderNodeInput" id="VisualShaderNodeInput_i1"]
+input_name = "time"
+
+[sub_resource type="VisualShaderNodeFloatFunc" id="VisualShaderNodeFloatFunc_s1"]
+function = 0
+
+[sub_resource type="VisualShaderNodeExpression" id="VisualShaderNodeExpression_e1"]
+size = Vector2(300, 100)
+expression = "o = a * 0.5 + 0.5;"
+input_ports = "0,0,a;"
+output_ports = "0,0,o;"
+
+[sub_resource type="VisualShaderNodeCurveTexture" id="VisualShaderNodeCurveTexture_u1"]
+
+[sub_resource type="VisualShaderNodeTexture" id="VisualShaderNodeTexture_t1"]
+source = 0
+
+[resource]
+code = "shader_type spatial;"
+modes/cull = 2
+flags/unshaded = true
+nodes/fragment/0/position = Vector2(700, 100)
+nodes/fragment/2/node = SubResource("VisualShaderNodeFloatParameter_p1")
+nodes/fragment/2/position = Vector2(-300, 300)
+nodes/fragment/3/node = SubResource("VisualShaderNodeFresnel_f1")
+nodes/fragment/3/position = Vector2(-100, 300)
+nodes/fragment/4/node = SubResource("VisualShaderNodeColorConstant_c1")
+nodes/fragment/4/position = Vector2(-100, 100)
+nodes/fragment/5/node = SubResource("VisualShaderNodeMix_m1")
+nodes/fragment/5/position = Vector2(300, 100)
+nodes/fragment/6/node = SubResource("VisualShaderNodeInput_i1")
+nodes/fragment/6/position = Vector2(-300, 500)
+nodes/fragment/7/node = SubResource("VisualShaderNodeFloatFunc_s1")
+nodes/fragment/7/position = Vector2(-100, 500)
+nodes/fragment/8/node = SubResource("VisualShaderNodeExpression_e1")
+nodes/fragment/8/position = Vector2(100, 500)
+nodes/fragment/9/node = SubResource("VisualShaderNodeCurveTexture_u1")
+nodes/fragment/9/position = Vector2(100, 700)
+nodes/fragment/10/node = SubResource("VisualShaderNodeTexture_t1")
+nodes/fragment/10/position = Vector2(100, 900)
+nodes/fragment/connections = PackedInt32Array(2, 0, 3, 3, 4, 0, 5, 0, 3, 0, 5, 2, 5, 0, 0, 0, 6, 0, 7, 0, 7, 0, 8, 0, 8, 0, 0, 1, 9, 0, 0, 2, 10, 0, 0, 5)

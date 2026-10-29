@@ -3,12 +3,11 @@
   "name": "Aver.Net",
   "dir": "net",
   "displayName": "Networking",
-  "description": "Planned: modular replication over UDP.",
+  "description": "OS sockets (UDP, TCP, IPv4 and IPv6) and a reliable-UDP host/peer protocol with ENet-like semantics, tested on a simulated network.",
   "category": "Networking",
-  "option": null,
+  "option": "AVER_MODULE_NET",
   "required": false,
-  "default": false,
-  "dependsOn": ["Aver.Core", "Aver.Platform"],
-  "skeleton": true,
-  "consequence": ""
+  "default": true,
+  "dependsOn": ["Aver.Core"],
+  "consequence": "A converted Godot project cannot use ENet multiplayer, UDP or TCP sockets."
 }

@@ -49,6 +49,7 @@
 #define PGPU_FLAG_COLLIDE_EVT 8u
 #define PGPU_FLAG_SUBUV_START 16u
 #define PGPU_FLAG_HAS_EVENTS 32u
+#define PGPU_FLAG_GODOT 64u   // G6 SH3: a converted Godot particles shader runs as the custom stage (AVER_GD_PARTICLES variants only)
 
 // counters[]
 #define PCTR_DEAD 0u

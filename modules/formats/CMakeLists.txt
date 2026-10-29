@@ -24,6 +24,8 @@ aver_add_module(Aver.Formats
     src/OcAnim.cpp
     src/OcBeam.cpp
     src/OcGraph.cpp
+    # Fabric G6 SH2: the GodotShader node of a material graph (a converted Godot shader carried as emitted HLSL).
+    src/OcGraphGodot.cpp
     # .ocprefab and the prefab-instance records of .ocworld: text, by-name components, no Aver.Scene.
     src/OcPrefab.cpp
     # [wave3/level-instances begin] LEVELINST/EXTENT records and the .ocpack level-pack sidecar: text, no Aver.Scene.

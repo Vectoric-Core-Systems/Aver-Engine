@@ -989,9 +989,9 @@ Var Converter::convertValue(const Var& v, const gd::GodotDocBase& doc, const Whe
                 const std::string a = materialAsset(doc.file + "#" + sr->id, t, sr->props, doc, stemOf(doc.file) + "_" + sr->id, w);
                 return a.empty() ? makeNil() : makeResource(a);
             }
-            if (t == "ShaderMaterial") {
-                report_.add("resource", doc.file, w.node, t, "", Rating::Unsupported, "shader materials need the Godot shader front-end (G6)", sr->line);
-                return makeNil();
+            if (t == "ShaderMaterial") {   // G6 SH2
+                const std::string a = shaderMaterialAsset(doc.file + "#" + sr->id, sr->props, doc, stemOf(doc.file) + "_" + sr->id, w);
+                return a.empty() ? makeNil() : makeResource(a);
             }
             if (t == "ViewportTexture") {
                 // G4 R5: a ViewportTexture held as a node or script value keeps its path for Aver.Fabric's ViewportTexture. (A material's texture slot is
@@ -1018,6 +1018,7 @@ Var Converter::convertValue(const Var& v, const gd::GodotDocBase& doc, const Whe
             if (t == "AnimationLibrary") return animationLibraryValue(sr->props, doc, w);
             if (isAnimTreeResourceType(t)) return animTreeObject(t, sr->props, doc, w, sr->line);
             if (isNavigationResourceType(t)) return navigationMeshObject(t, sr->props, doc, w, sr->line);
+            if (isReplicationResourceType(t)) return replicationConfigObject(sr->props, doc, w, sr->line);   // G6 NET2
             if (isAudioStreamResourceType(t)) return audioStreamObject(t, sr->props, doc, w, sr->line);
             if (t == "Theme") {   // G5 U1: a theme resource held by a scene becomes an .octheme file
                 const std::string a = themeAsset(doc.file + "#" + sr->id, sr->props, doc, stemOf(doc.file) + "_" + sr->id, w);
@@ -1084,9 +1085,9 @@ Var Converter::convertValue(const Var& v, const gd::GodotDocBase& doc, const Whe
                     const std::string a = materialAsset(res, rt, r->props, *r, stemOf(res), w);
                     return a.empty() ? makeNil() : makeResource(a);
                 }
-                if (rt == "ShaderMaterial") {
-                    report_.add("resource", res, w.node, rt, "", Rating::Unsupported, "shader materials need the Godot shader front-end (G6)", 0);
-                    return makeNil();
+                if (rt == "ShaderMaterial") {   // G6 SH2
+                    const std::string a = shaderMaterialAsset(res, r->props, *r, stemOf(res), w);
+                    return a.empty() ? makeNil() : makeResource(a);
                 }
                 if (isPrimitiveMeshType(rt)) {
                     const std::string a = primitiveMeshAsset(rt, r->props, *r, w);
@@ -1106,6 +1107,7 @@ Var Converter::convertValue(const Var& v, const gd::GodotDocBase& doc, const Whe
                 if (rt == "AnimationLibrary") return animationLibraryValue(r->props, *r, w);
                 if (isAnimTreeResourceType(rt)) return animTreeObject(rt, r->props, *r, w, 0);
                 if (isNavigationResourceType(rt)) return navigationMeshObject(rt, r->props, *r, w, 0);
+                if (isReplicationResourceType(rt)) return replicationConfigObject(r->props, *r, w, 0);   // G6 NET2
                 if (isAudioStreamResourceType(rt)) return audioStreamObject(rt, r->props, *r, w, 0);
                 if (rt == "Theme") {   // G5 U1
                     const std::string a = themeAsset(res, r->props, *r, stemOf(res), w);
@@ -1147,7 +1149,7 @@ void Converter::convertStandaloneResources() {
                 report_.add("resource", res, "", t, "", Rating::Converted, "converted where a scene uses it", 0);
                 continue;
             }
-            if (isNavigationResourceType(t)) {
+            if (isNavigationResourceType(t) || isReplicationResourceType(t)) {
                 report_.add("resource", res, "", t, "", Rating::Converted, "converted where a scene uses it", 0);
                 continue;
             }
@@ -1170,7 +1172,7 @@ void Converter::convertStandaloneResources() {
                 continue;
             }
             if (t == "ShaderMaterial")
-                report_.add("resource", res, "", t, "", Rating::Unsupported, "shader materials need the Godot shader front-end (G6)", 0);
+                shaderMaterialAsset(res, r->props, *r, stemOf(res), w);   // G6 SH2: every shader material is written, whether or not a scene names it
             else if (isShapeType(t))
                 report_.add("resource", res, "", t, "", Rating::Converted, "converted where a scene uses it", 0);
             else
@@ -1195,9 +1197,12 @@ void Converter::reportProjectFiles() {
         report_.add("file", res, "", "", "", Rating::Unsupported, "a binary Godot resource: resave it as text (.tscn / .tres) and convert again", 0);
     for (const std::string& res : fs_.files()) {
         const std::string ext = extOf(res);
-        if (ext == ".gdshader" || ext == ".gdshaderinc")
-            report_.add("file", res, "", "Shader", "", Rating::Unsupported, "Godot shaders need the shader front-end (G6)", 0);
-        else if (ext == ".gdextension")
+        if (ext == ".gdshader") {   // G6 SH2: the shaders a ShaderMaterial used are reported where they were prepared
+            if (!shaders_.count(res))
+                report_.add("file", res, "", "Shader", "", Rating::Approximated, "no ShaderMaterial uses this shader, so nothing was written for it", 0);
+        } else if (ext == ".gdshaderinc") {
+            report_.add("file", res, "", "Shader", "", Rating::Converted, "included into the shaders that name it", 0);
+        } else if (ext == ".gdextension")
             continue;   // FabricExtensions.cpp reports it
         else if (ext == ".wav" || ext == ".ogg" || ext == ".mp3")
             continue;   // FabricAudio.cpp copies and reports it

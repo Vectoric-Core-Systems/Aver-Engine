@@ -123,6 +123,19 @@ struct HairParams {
     f32 scatter = 0.5f;                        // [0,1] the multiple-scatter ambient: lifts the shadow floor of a thick head of hair
 };
 
+// G6 SH2: the uniform values of a converted Godot shader (docs/plans/fabric/G6_SHADERS.md). The shader itself is the material graph named by GRAPHREF;
+// this is the per-material half. Empty = an ordinary material. The registers are in the layout the converter's emitter fixed (std140-like, 16 bytes
+// each; ints and bools are the 32-bit pattern in the float slot): the normal block, then the instance block, then the global block. MaterialSystem
+// uploads them as a small RGBA32F texture bound to texture slot 7 (TextureSlot::Layer1Normal), which the generated shader reads with Load, so a
+// value changed at run time re-uploads one tiny texture and never recompiles anything. A material that sets regs must not use slot 7 itself.
+inline constexpr u32 kGdTableSlot = 7;
+inline constexpr u32 kGdMaxRegisters = 256;
+struct GdShaderParams {
+    std::vector<f32> regs;   // 4 floats per register
+    bool active() const { return !regs.empty(); }
+    u32 registerCount() const { return static_cast<u32>(regs.size() / 4u); }
+};
+
 // The authored surface. Defaults are glTF's.
 struct MaterialDesc {
     std::string name;
@@ -307,6 +320,9 @@ struct MaterialDesc {
     // G4 R6: BaseMaterial3D features (MaterialFx.hpp). All default to off; a material with fx.active() false is every material before this field.
     // The detail, heightmap and flowmap textures ride the Layer1 slots (5 detail albedo, 6 heightmap, 7 detail normal) of a material that is not slope blended.
     MaterialFx fx;
+
+    // G6 SH2: the uniform registers of the Godot shader this material runs (see GdShaderParams). Written by `.ocmat` GDREGS; texture slot 7 is the table.
+    GdShaderParams gd;
 };
 
 // ------------------------------------------------------- the one translucency test, and its answer

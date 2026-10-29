@@ -3,6 +3,8 @@ aver_add_module(Aver.RHI
     src/RHI.cpp
     src/RHIShaders.cpp
     src/ShaderFiles.cpp
+    # G6 SH3: the HLSL of converted Godot sky, fog and particles shaders.
+    src/GodotEnvPrograms.cpp
     src/Atmosphere.cpp
     src/EditorLines.cpp
     src/null/NullDevice.cpp

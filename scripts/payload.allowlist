@@ -54,6 +54,8 @@ Aver.Fabric.GDExt.Abi.dll
 Aver.Anim.Abi.dll
 # The polygon navigation seam of Aver.Fabric's navigation nodes and A* graphs.
 Aver.Nav.Abi.dll
+# The sockets and reliable-UDP seam of Aver.Fabric's networking classes.
+Aver.Net.Abi.dll   ?AVER_MODULE_NET
 extension_api.json
 
 # SETTINGS IS NOT ONE THE EDITOR LOAD-TIME LINKS -- it is the exception this block used to claim did

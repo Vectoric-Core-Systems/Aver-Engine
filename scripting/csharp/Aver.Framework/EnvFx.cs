@@ -57,6 +57,10 @@ public static class EnvFx
 
     public static bool SetFogVolumeEnabled(int id, bool on) => id > 0 && FwEnvFx.aver_fw_fogvol_set_enabled(id, on ? 1 : 0) != 0;
 
+    /// <summary>G6 SH3: a converted Godot fog shader (registered with <see cref="GodotEnv.Register"/> as <see cref="GodotEnvKind.Fog"/>) replaces the volume's
+    /// density, albedo and emission. Null or empty goes back to the volume's own values.</summary>
+    public static bool SetFogVolumeShader(int id, string? shaderName) => id > 0 && FwEnvFx.aver_fw_fogvol_set_shader(id, shaderName) != 0;
+
     public static int FogVolumeCount => FwEnvFx.aver_fw_fogvol_count();
 
     /// <summary>The summed signed extinction per centimetre of every enabled volume at an engine-space point.</summary>

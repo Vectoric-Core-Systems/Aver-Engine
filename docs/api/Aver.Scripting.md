@@ -2,7 +2,7 @@
 
 # Aver.Scripting public API
 
-14 public types and 121 public members, read from `scripting/csharp/Aver.Scripting/` (4 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+14 public types and 126 public members, read from `scripting/csharp/Aver.Scripting/` (4 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Scripting
 
@@ -50,6 +50,7 @@ Values: `Trace = 0`, `Info = 1`, `Warn = 2`, `Error = 3`, `Critical = 4`, `Fatal
 - `public static PbrMaterial Create(string name)` - Creates a material with the glTF default surface.
 - `public static int Count { get; }` - Live materials.
 - `public static PbrMaterial At(int index)` - The material at an enumeration index.
+- `public static PbrMaterial FromHandle(int handle)` - Wraps a raw ABI handle read earlier (Handle).
 
 ### Pbr.PbrMaterial
 
@@ -87,6 +88,10 @@ Values: `Trace = 0`, `Info = 1`, `Warn = 2`, `Error = 3`, `Critical = 4`, `Fatal
 - `public bool SetTextureId(PbrTextureSlot slot, long id)` - Binds an opaque asset id to a slot.
 - `public bool ClearTexture(PbrTextureSlot slot)` - Clears both the path and the id on a slot.
 - `public bool ConsumeDirty()` - True when this material owes the GPU an upload.
+- `public int GdRegisterCount { get; }` - How many 16-byte uniform registers the material carries; 0 for an ordinary material.
+- `public float[] GetGdRegisters()` - The uniform table, four floats a register (ints and bools are 32-bit patterns); empty for an ordinary material.
+- `public bool SetGdRegisters(float[] values)` - Replaces the whole table (an empty array clears it).
+- `public bool SetGdRegisterFloats(int firstFloat, float[] values)` - Overwrites a range of the table, starting at a float index.
 - `public bool Equals(PbrMaterial other)`
 - `public override bool Equals(object? obj)`
 - `public override int GetHashCode()`

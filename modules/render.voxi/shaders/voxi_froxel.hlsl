@@ -25,6 +25,11 @@
 #ifndef AVER_FOG_VOLUMES
 #define AVER_FOG_VOLUMES 0
 #endif
+// G6 SH3: Godot fog shaders on those volumes. Built only when a volume carries one; the converted code arrives in the prelude (godot_fog.hlsl, aver::rhi::godotFogProgram,
+// which defines AVER_GD_FOG_REG_COUNT) and the shader registers are a tail of FroxelCB after the volumes.
+#ifndef AVER_FOG_SHADERS
+#define AVER_FOG_SHADERS 0
+#endif
 #define AVER_FV_MAX 16
 #define AVER_FV_VECS 6
 
@@ -49,6 +54,9 @@ cbuffer FroxelCB : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     // y edge fade, z height falloff per cm, w shape; rgb albedo, w the volume's lowest world Z; rgb emission.
     float4   gFvHeader;              // x = volume count
     float4   gFvVol[AVER_FV_MAX * AVER_FV_VECS];
+#if AVER_FOG_SHADERS
+    float4   gFvGd[AVER_GD_FOG_REG_COUNT];   // the fog shaders' uniform registers, 16 per shader (a volume's shape word names its shader: shape + 8 * index)
+#endif
 #endif
 };
 
@@ -158,7 +166,8 @@ void fxVolumes(float3 p, out float sigmaV, out float3 scat, out float3 emit) {
         const float3 u = float3(dot(p, gFvVol[b].xyz) + gFvVol[b].w, dot(p, gFvVol[b + 1u].xyz) + gFvVol[b + 1u].w,
                                 dot(p, gFvVol[b + 2u].xyz) + gFvVol[b + 2u].w);
         const float4 prm = gFvVol[b + 3u];
-        const uint shape = (uint)(prm.w + 0.5);
+        const uint shapeWord = (uint)(prm.w + 0.5);
+        const uint shape = shapeWord & 7u;
         float sdf = -1.0;
         if (shape == 3u)      sdf = max(max(abs(u.x), abs(u.y)), abs(u.z)) - 1.0;
         else if (shape == 0u) sdf = length(u) - 1.0;
@@ -166,6 +175,19 @@ void fxVolumes(float3 p, out float sigmaV, out float3 scat, out float3 emit) {
         else if (shape == 1u) sdf = max(length(u.xy) - 0.5 * (1.0 - u.z), abs(u.z) - 1.0);
         if (sdf >= 0.0) continue;
         float w = shape == 4u ? 1.0 : saturate(-sdf / prm.y);
+#if AVER_FOG_SHADERS
+        if ((shapeWord >> 3) != 0u) {
+            // A Godot fog shader: density per metre, albedo and emission from the shader; the edge fade still shapes it.
+            float sDens; float3 sAlb, sEmi;
+            averGdFogEval(shapeWord >> 3, p, gFvVol[b + 4u].xyz, gFvVol[b + 5u].xyz, u, sDens, sAlb, sEmi);
+            const float dens = sDens * 0.01 * w;
+            sigmaV += dens;
+            const float pos = max(dens, 0.0);
+            scat += sAlb * pos;
+            emit += sEmi * pos;
+            continue;
+        }
+#endif
         if (prm.z > 0.0) w *= exp(-prm.z * max(p.z - gFvVol[b + 4u].w, 0.0));
         const float dens = prm.x * w;
         sigmaV += dens;
@@ -200,6 +222,9 @@ void CSFroxelScatter(uint3 id : SV_DispatchThreadID) {
     const uint3 dim = uint3(gFxGrid.xyz);
     if (any(id >= dim)) return;
     const float nearCm = gFxDepth.x, logRange = gFxDepth.z;
+#if AVER_FOG_VOLUMES && AVER_FOG_SHADERS
+    [unroll] for (uint gi = 0u; gi < (uint)AVER_GD_FOG_REG_COUNT; ++gi) gGdFogRegs[gi] = gFvGd[gi];
+#endif
 
     float3 dir; float invCos;
     fxColumn(id.xy, dim.xy, dir, invCos);

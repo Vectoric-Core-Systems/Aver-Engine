@@ -517,7 +517,7 @@ int main() {
         check(has("\"type\":\"HingeJoint3D\"", "\"rating\":\"unsupported\"", "\"kind\":\"node\""), "a joint is reported unsupported");
         check(has("\"type\":\"Label\"", "\"property\":\"text\"", "\"rating\":\"converted\""), "a UI control's text is reported converted (G5 U2: Aver.Fabric's Label reads it)");
         check(has("\"type\":\"StandardMaterial3D\"", "\"property\":\"uv1_scale\"", "\"rating\":\"converted\""), "uv1_scale is converted now (the .ocmat FX record, G4 R6)");
-        check(has("\"type\":\"ShaderMaterial\"", "\"rating\":\"unsupported\"", "G6"), "a ShaderMaterial is reported unsupported (G6)");
+        check(has("\"type\":\"ShaderMaterial\"", "\"rating\":\"unsupported\"", "has no shader"), "a ShaderMaterial without a shader is reported unsupported (G6 SH2: a shader is converted, an empty one has nothing to run)");
         check(has("\"property\":\"ambient_light_sky_contribution\"", "\"type\":\"Environment\"", "\"rating\":\"unsupported\""), "an Environment setting with no record is reported");
         check(has("\"property\":\"ssao_enabled\"", "\"type\":\"Environment\"", "\"rating\":\"approximated\""), "SSAO is approximated by Aver's GI occlusion (G4 R8)");
         check(has("\"kind\":\"input\"", "debug_menu", "\"rating\":\"unsupported\""), "an unmapped key is reported");

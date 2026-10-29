@@ -1,11 +1,12 @@
 # Aver.Net  (`modules/net`)
 
 - **Language:** C++
-- **Depends on:** Core, Platform
-- **Planned phase:** 6
+- **Depends on:** Core
+- **Option:** `AVER_MODULE_NET` (default on). Nothing links it except `Aver.Net.Abi` (`modules/net.abi`) and the tests.
 
-[opt] Modular replication: payload/channel/module/coordinator triad, LE UDP codec, pose paging, damage fragmentation, join-parity gate. Interop-exact with the C# OCServer. See docs/recon/networking.md (protocol needs OCServer Wire.cs confirmation).
+OS sockets (UDP, TCP, listeners; IPv4 + IPv6; non-blocking; `waitSocket`), name resolution, and a reliable-UDP host/peer protocol with
+ENet-like semantics (channels, reliable / unreliable-ordered / unsequenced packets, fragmentation, RTT estimation, timeouts, bandwidth
+limits), plus `SimNetwork`, an in-memory network with seeded loss, delay, duplication and reordering that the protocol is tested on.
 
-> Skeleton only — not yet wired into the top-level `CMakeLists.txt`. It will be
-> added (`add_subdirectory(modules/net)`) when Phase 6 implements it.
-> See [docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md) for the full module DAG.
+Not wire compatible with ENet or with the old OCServer protocol (`docs/recon/networking.md`). Design, the wire format and the contract
+for the layers above: [docs/plans/fabric/G6_NETWORK.md](../../docs/plans/fabric/G6_NETWORK.md).

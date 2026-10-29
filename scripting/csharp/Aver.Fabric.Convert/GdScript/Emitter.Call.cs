@@ -528,6 +528,9 @@ internal sealed partial class GdEmitter
             case "call_deferred": return new Ex($"{recv}.CallDeferred({list})", GdType.Void);
             case "bind": return new Ex($"{recv}.Bind({list})", GdType.Callable);
             case "unbind": return new Ex($"{recv}.Unbind({Adapt(Expr(args[0], GdType.Int32), GdType.Int32)})", GdType.Callable);
+            case "rpc": return new Ex($"(int){recv}.Rpc({list})", GdType.Int32);
+            case "rpc_id" when args.Count > 0:
+                return new Ex($"(int){recv}.RpcId({Adapt(Expr(args[0], GdType.Int), GdType.Int)}{(args.Count > 1 ? ", " + string.Join(", ", va.Skip(1)) : "")})", GdType.Int32);
             case "is_valid": return new Ex($"{recv}.IsValid()", GdType.Bool);
             case "is_null": return new Ex($"{recv}.IsNull", GdType.Bool);
             case "get_method": return new Ex($"{recv}.Method", GdType.StringName);

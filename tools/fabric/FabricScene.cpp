@@ -39,6 +39,8 @@ const std::set<std::string>& supportedClasses() {
                                             "CSGCylinder3D", "CSGTorus3D", "CSGPolygon3D", "CSGMesh3D",
                                             // G4 R8: environment volumes
                                             "FogVolume", "ReflectionProbe", "LightmapGI", "LightmapProbe", "VoxelGI",
+                                            // G6 SH3: a particle emitter whose process material is a particles shader
+                                            "GPUParticles3D",
                                             // G5 A1: property-track animation
                                             "AnimationPlayer",
                                             // G5 A2: animation trees, skeletons, paths and helper nodes
@@ -48,6 +50,8 @@ const std::set<std::string>& supportedClasses() {
                                             "AudioStreamPlayer", "AudioStreamPlayer3D", "AudioListener3D",
                                             // G5 N1: navigation
                                             "NavigationRegion3D", "NavigationLink3D", "NavigationObstacle3D", "NavigationAgent3D",
+                                            // G6 NET2: multiplayer replication
+                                            "MultiplayerSpawner", "MultiplayerSynchronizer",
                                             // G5 U1: the Control base, the containers and Panel; G5 U2's widgets are in FabricWidgets.cpp
                                             "Control", "Container", "BoxContainer", "HBoxContainer", "VBoxContainer", "GridContainer", "MarginContainer", "CenterContainer",
                                             "PanelContainer", "ScrollContainer", "Panel"};
@@ -660,6 +664,7 @@ void Converter::emitNode(FNode& fn, int parent, const Xform& parentWorld, fmt::O
     if (fn.type == "AudioStreamPlayer" || fn.type == "AudioStreamPlayer3D" || fn.type == "AudioListener3D") noteAudioNode(fn);
     noteAnimTreeNode(fn);
     noteNavigationNode(fn);
+    if (fn.type == "MultiplayerSpawner" || fn.type == "MultiplayerSynchronizer") noteMultiplayerNode(fn);   // G6 NET2
     if (isControlClass(fn.type)) noteUiNode(fn);
     for (const Prop& pr : fn.props) {
         if (fn.type == "CollisionPolygon3D" && havePolygonShape && (pr.key == "polygon" || pr.key == "depth" || pr.key == "margin")) continue;
@@ -671,6 +676,7 @@ void Converter::emitNode(FNode& fn, int parent, const Xform& parentWorld, fmt::O
         }
         const Where pw{fn.reportFile, fn.reportPath, fn.type};
         if (fn.type == "GridMap" && pr.key == "mesh_library") { props.emplace_back(pr.key, makeNil()); continue; }   // geometryNode reads the library itself
+        if (fn.type == "MultiplayerSpawner" && pr.key == "_spawnable_scenes") { props.emplace_back(pr.key, spawnableScenesValue(pr.value, fn, pr)); continue; }   // G6 NET2
         Var cv = pr.doc ? convertValue(pr.value, *pr.doc, pw, pr.key) : pr.value;
         if (cv.isNil() && !pr.value.isNil()) continue;   // a resource that could not be converted; already reported
         // parameters/... (AnimationTree) and bones/... (Skeleton3D) are members the runtime classes read by their scene names.
@@ -854,7 +860,7 @@ void Converter::emitNode(FNode& fn, int parent, const Xform& parentWorld, fmt::O
             if (fn.type == "FogVolume") {
                 if (k == "size") note(pr, Rating::Converted, "metres to centimetres, along the node's own axes (the node's scale scales it); ignored for the World shape");
                 else if (k == "shape") note(pr, Rating::Converted, "ellipsoid, cone, cylinder, box and world, Godot's numbers; the cone's tip and the cylinder's axis are the node's up axis (the cone's orientation follows Godot's code from memory and is unverified)");
-                else if (k == "material") note(pr, Rating::Converted, "a FogMaterial keeps density, albedo, emission, height_falloff and edge_fade; a ShaderMaterial (custom fog shader) is not converted");
+                else if (k == "material") note(pr, Rating::Converted, "a FogMaterial keeps density, albedo, emission, height_falloff and edge_fade; a ShaderMaterial over a fog shader (G6 SH3) replaces them with the shader's DENSITY, ALBEDO and EMISSION");
             } else if (fn.type == "ReflectionProbe") {
                 if (k == "size" || k == "origin_offset") note(pr, Rating::Converted, "the influence box and the capture point (metres to centimetres, the node's axes); used for the blend and for box-projected queries");
                 else if (k == "box_projection" || k == "blend_distance" || k == "max_distance" || k == "interior" || k == "intensity")
@@ -949,6 +955,7 @@ void Converter::emitNode(FNode& fn, int parent, const Xform& parentWorld, fmt::O
     comp.type = "Props";
     for (auto& [k, v] : props) comp.kv.emplace_back(k, gd::godotVariantToText(v));
     p.components.push_back(std::move(comp));
+    if (fn.type == "GPUParticles3D") emitGpuParticles(fn, props, p, scan.prefabPass);   // G6 SH3
     if (!fn.groups.empty()) {
         fmt::OcPlacedComponent g;
         g.type = "Groups";
@@ -1121,6 +1128,9 @@ static EnvInfo readEnvironment(Converter& c, const FNode& wenv) {
                                 }
                             }
                             if (!fitted && !rprop(*mat, "panorama")) note("sky_material", Rating::Approximated, "a PanoramaSkyMaterial with no panorama; the physical sky is used");
+                        } else if (mat->type == "ShaderMaterial") {
+                            note("sky_material", Rating::Approximated, "a ShaderMaterial over a sky shader is converted to Shaders/<name>.sky.ocgraph and made the sky at run time by Aver.Fabric (docs/plans/fabric/G6_SHADERS.md SH3); "
+                                                                       "the level's own sky record stays the physical sky, which still feeds anything the shader does not replace");
                         } else {
                             note("sky_material", Rating::Unsupported, mat->type + " is not converted; the physical sky is used");
                         }

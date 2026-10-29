@@ -217,6 +217,17 @@ target_compile_definitions(FabricNavTest PRIVATE
 set_target_properties(FabricNavTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# FabricNetTest -- G6 NET2 (high-level multiplayer) through the converter on tests/fabric/data/NetGame: MultiplayerSpawner / MultiplayerSynchronizer placed as their classes, the
+# SceneReplicationConfig sub-resource as an Object(...) value, the spawnable scene list as converted level paths, and every node, property and entry rated.
+add_executable(FabricNetTest src/FabricNetTest.cpp)
+target_link_libraries(FabricNetTest PRIVATE Aver.Formats.Godot Aver.Formats Aver.Platform Aver.Core)
+add_dependencies(FabricNetTest AverAssetC)
+target_compile_definitions(FabricNetTest PRIVATE
+  AVER_ASSETC_EXE="$<TARGET_FILE:AverAssetC>"
+  AVER_FABRIC_DATA="${CMAKE_SOURCE_DIR}/tests/fabric/data")
+set_target_properties(FabricNetTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # FabricUiTest -- G5 U1 (Control foundations) through the converter on tests/fabric/data/UiGame: the Control family placed as its classes, style boxes as Object(...) values,
 # Theme resources as .octheme files the engine's parser reads, the project's stretch / theme / tooltip settings as UI.* keys, and every property rated.
 add_executable(FabricUiTest src/FabricUiTest.cpp)
@@ -249,3 +260,28 @@ target_compile_definitions(FabricTreeTest PRIVATE
   AVER_FABRIC_DATA="${CMAKE_SOURCE_DIR}/tests/fabric/data")
 set_target_properties(FabricTreeTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# FabricShaderTest -- G6 SH2 (ShaderMaterial over .gdshader: the shader written as a material graph, the material as GRAPHREF + FX + GDREGS + TEX slots) through the
+# converter on tests/fabric/data/ShaderGame. Runs the tool as a process, like FabricMaterialFxTest.
+if(TARGET Aver.Formats.Material)
+  add_executable(FabricShaderTest src/FabricShaderTest.cpp)
+  target_link_libraries(FabricShaderTest PRIVATE Aver.Formats.Godot Aver.Formats Aver.Formats.Material Aver.Render.PBR.Materials Aver.RHI Aver.Platform Aver.Core)
+  add_dependencies(FabricShaderTest AverAssetC)
+  target_compile_definitions(FabricShaderTest PRIVATE
+    AVER_ASSETC_EXE="$<TARGET_FILE:AverAssetC>"
+    AVER_FABRIC_DATA="${CMAKE_SOURCE_DIR}/tests/fabric/data")
+  set_target_properties(FabricShaderTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
+# FabricEnvShaderTest -- G6 SH3 (sky, fog and particles shaders, GPUParticles3D, VisualShader) through the converter on tests/fabric/data/EnvShaderGame.
+if(TARGET Aver.Formats.Material AND TARGET Aver.Formats.Particles)
+  add_executable(FabricEnvShaderTest src/FabricEnvShaderTest.cpp)
+  target_link_libraries(FabricEnvShaderTest PRIVATE Aver.Formats.Godot Aver.Formats Aver.Formats.Material Aver.Formats.Particles Aver.Render.PBR.Materials Aver.RHI Aver.Platform Aver.Core)
+  add_dependencies(FabricEnvShaderTest AverAssetC)
+  target_compile_definitions(FabricEnvShaderTest PRIVATE
+    AVER_ASSETC_EXE="$<TARGET_FILE:AverAssetC>"
+    AVER_FABRIC_DATA="${CMAKE_SOURCE_DIR}/tests/fabric/data")
+  set_target_properties(FabricEnvShaderTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()

@@ -162,7 +162,7 @@ int main() {
         check(has("\"type\":\"FogMaterial\"", "\"property\":\"height_falloff\"", "\"rating\":\"approximated\"") && has("\"type\":\"FogMaterial\"", "\"property\":\"edge_fade\"", "\"rating\":\"approximated\"") &&
                   has("\"type\":\"FogMaterial\"", "\"property\":\"emission\"", "\"rating\":\"approximated\""),
               "height falloff, edge fade and emission are approximated");
-        check(has("\"type\":\"ShaderMaterial\"", "\"rating\":\"unsupported\"", "G6"), "a custom fog shader is unsupported");
+        check(has("\"type\":\"ShaderMaterial\"", "\"rating\":\"unsupported\"", "has no shader"), "a custom fog material without a shader is unsupported (a fog shader is G6 SH3)");
         check(has("\"type\":\"ReflectionProbe\"", "\"kind\":\"node\"", "\"rating\":\"approximated\"") && has("\"type\":\"ReflectionProbe\"", "\"kind\":\"node\"", "sample"),
               "a ReflectionProbe is approximated and the report says nothing samples a capture");
         check(has("\"type\":\"ReflectionProbe\"", "\"property\":\"box_projection\"", "\"rating\":\"approximated\"") && has("\"type\":\"ReflectionProbe\"", "\"property\":\"size\"", "\"rating\":\"converted\"") &&

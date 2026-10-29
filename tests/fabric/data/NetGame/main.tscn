@@ -1,0 +1,37 @@
+[gd_scene load_steps=4 format=3 uid="uid://netgame0001"]
+
+[ext_resource type="Script" path="res://main.gd" id="1_main"]
+[ext_resource type="Script" path="res://lobby.gd" id="2_lobby"]
+
+[sub_resource type="SceneReplicationConfig" id="SceneReplicationConfig_world"]
+properties/0/path = NodePath(".:round_number")
+properties/0/spawn = true
+properties/0/replication_mode = 2
+properties/1/path = NodePath(".:clock")
+properties/1/spawn = false
+properties/1/replication_mode = 1
+
+[node name="Main" type="Node3D"]
+script = ExtResource("1_main")
+
+[node name="Lobby" type="Node" parent="."]
+script = ExtResource("2_lobby")
+
+[node name="Players" type="Node3D" parent="."]
+
+[node name="Spawner" type="MultiplayerSpawner" parent="."]
+_spawnable_scenes = PackedStringArray("res://player.tscn", "res://gone.tscn")
+spawn_path = NodePath("../Players")
+spawn_limit = 4
+
+[node name="Orphan" type="MultiplayerSpawner" parent="."]
+spawn_path = NodePath("../NotThere")
+
+[node name="WorldSync" type="MultiplayerSynchronizer" parent="."]
+replication_config = SubResource("SceneReplicationConfig_world")
+root_path = NodePath("..")
+replication_interval = 0.2
+delta_interval = 0.5
+public_visibility = false
+visibility_update_mode = 2
+bogus_option = 3

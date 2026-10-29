@@ -336,12 +336,7 @@ internal sealed partial class GdEmitter
             : $"{p.Type.Cs} {p.Cs}{(p.DefaultCode != null && !needOverloads ? " = " + p.DefaultCode : p.Default != null && !needOverloads ? " = default" : "")}"));
         string header = isCtor ? $"{mods}{name}({sig})" : $"{mods}{RetCs()} {name}({sig})";
 
-        if (fd.GetAnnotation("rpc") is { } rpc)
-        {
-            string mode = rpc.Args.Count > 0 && rpc.Args[0] is Literal { Kind: LitKind.String } ml && (string)ml.Value! == "any_peer" ? "AnyPeer" : "Authority";
-            Note(fd, "attribute", "Rpc", Rating.Approximated, "@rpc is recorded as [Rpc]; nothing is networked yet");
-            _w.Line($"[Rpc({Lit(mode)})]");
-        }
+        if (fd.GetAnnotation("rpc") is { } rpc) EmitRpcAttribute(fd, rpc);
         _w.Open(header);
         if (isCtor && ctorInits != null)
             foreach ((MemberInfo m, string code) in ctorInits) _w.Line($"{FieldTarget(m)} = {code};");
@@ -393,5 +388,43 @@ internal sealed partial class GdEmitter
                 else _w.Line($"{baseMods}{r} {name}({sig}) => {call};");
             }
         }
+    }
+
+    // @rpc(mode, sync, transfer_mode, channel): the four arguments are told apart by value and may come in any order, as Godot reads them. GDScript's defaults
+    // (authority, call_remote, unreliable, channel 0) differ from GodotSharp's attribute (reliable), so the transfer mode is always written.
+    private void EmitRpcAttribute(FuncDecl fd, Annotation rpc)
+    {
+        string mode = "Authority", transfer = "Unreliable";
+        bool local = false;
+        long channel = 0;
+        var ignored = new List<string>();
+        foreach (Expr a in rpc.Args)
+        {
+            if (a is Literal { Kind: LitKind.Int } il) { channel = (long)il.Value!; continue; }
+            if (a is Literal { Kind: LitKind.String or LitKind.StringName } sl)
+            {
+                switch ((string)sl.Value!)
+                {
+                    case "any_peer": mode = "AnyPeer"; continue;
+                    case "authority": mode = "Authority"; continue;
+                    case "disabled": mode = "Disabled"; continue;
+                    case "call_local": local = true; continue;
+                    case "call_remote": local = false; continue;
+                    case "reliable": transfer = "Reliable"; continue;
+                    case "unreliable": transfer = "Unreliable"; continue;
+                    case "unreliable_ordered": transfer = "UnreliableOrdered"; continue;
+                }
+            }
+            ignored.Add(a is Literal l ? l.Text : "an expression");
+        }
+        var parts = new List<string> { "MultiplayerApi.RpcMode." + mode };
+        if (local) parts.Add("CallLocal = true");
+        if (transfer != "Reliable") parts.Add("TransferMode = MultiplayerPeer.TransferModeEnum." + transfer);
+        if (channel != 0) parts.Add("TransferChannel = " + channel);
+        if (ignored.Count > 0)
+            Note(fd, "attribute", "Rpc", Rating.Approximated, "@rpc: " + string.Join(", ", ignored) + " is not a mode, sync, transfer mode or channel Godot knows (a computed value is not allowed in an annotation); it was ignored");
+        else
+            Note(fd, "attribute", "Rpc", Rating.Converted, "@rpc becomes [Rpc] with its mode, call-local, transfer mode and channel written out; SceneMultiplayer (G6 NET2) dispatches it");
+        _w.Line($"[Rpc({string.Join(", ", parts)})]");
     }
 }

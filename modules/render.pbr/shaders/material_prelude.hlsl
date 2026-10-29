@@ -1315,7 +1315,13 @@ float3 averFxTriNormal(Texture2D tex, float3 p, float3 w, float3 N, float scale)
 #endif   // AVER_MATERIAL_SRV
 #endif   // AVER_MATX
 
-#ifndef AVER_MATERIAL_GRAPH
+// G6 SH2: with converted Godot shaders registered the renderer defines AVER_GD_FX_STOCK, and the stock / BaseMaterial3D evaluator below is compiled even though
+// a graph is present, under the name averEvalMaterialFx; the generated averEvalMaterial calls it for a material with no graph (id 0), so those materials keep
+// their fx. Without AVER_GD_FX_STOCK nothing here changes.
+#if defined(AVER_GD_FX_STOCK) && defined(AVER_MATERIAL_GRAPH)
+#define averEvalMaterial averEvalMaterialFx
+#endif
+#if !defined(AVER_MATERIAL_GRAPH) || defined(AVER_GD_FX_STOCK)
 #if AVER_MATX
 // The stock material with the variant's features. Same composition as the stock path below (maps, slope layers, factors, normal, composition, mask clip);
 // the features are added at the points they act on, in this order: UV transform, parallax, maps (triplanar replaces the bound base maps), detail, the
@@ -1494,6 +1500,9 @@ AverSurface averEvalMaterial(AverVertex v, AverLight l) {
 #endif
 }
 #endif   // AVER_MATX
+#endif
+#if defined(AVER_GD_FX_STOCK) && defined(AVER_MATERIAL_GRAPH)
+#undef averEvalMaterial
 #endif
 
 // True when the surface has an authored display colour that must reach the backbuffer untouched.

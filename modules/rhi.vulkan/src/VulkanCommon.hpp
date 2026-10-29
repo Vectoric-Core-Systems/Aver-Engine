@@ -347,6 +347,7 @@ inline VkFormat toVkFormat(Format f) {
         case Format::R32Float:       return VK_FORMAT_R32_SFLOAT;
         case Format::RG32Float:      return VK_FORMAT_R32G32_SFLOAT;
         case Format::RGB32Float:     return VK_FORMAT_R32G32B32_SFLOAT;
+        case Format::RGBA32Float:    return VK_FORMAT_R32G32B32A32_SFLOAT;
         case Format::R32Uint:        return VK_FORMAT_R32_UINT;
         case Format::D32Float:       return VK_FORMAT_D32_SFLOAT;
         case Format::R32Typeless:    return VK_FORMAT_D32_SFLOAT;   // Vulkan images keep ONE fixed format for life; sampled via a SEPARATE aspect-qualified view of the same image, not a format change -- simpler than D3D12's trick, not harder (architecture scout finding #6)
@@ -375,6 +376,7 @@ inline Format fromVkFormat(VkFormat f) {
         case VK_FORMAT_R8G8_UNORM:            return Format::RG8Unorm;
         case VK_FORMAT_R8_UNORM:              return Format::R8Unorm;
         case VK_FORMAT_R16G16B16A16_SFLOAT:   return Format::RGBA16F;
+        case VK_FORMAT_R32G32B32A32_SFLOAT:   return Format::RGBA32Float;
         case VK_FORMAT_R32_SFLOAT:            return Format::R32Float;
         case VK_FORMAT_R32G32_SFLOAT:         return Format::RG32Float;
         case VK_FORMAT_R32_UINT:              return Format::R32Uint;
@@ -402,6 +404,7 @@ inline VkImageAspectFlags toVkAspect(Format f) {
 
 inline u32 texelBytesVk(Format f) {
     switch (f) {
+        case Format::RGBA32Float:    return 16;
         case Format::RGBA16F:        return 8;
         case Format::RGBA8Unorm:
         case Format::RGBA8UnormSrgb:

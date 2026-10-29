@@ -10,6 +10,7 @@
 #include "aver/core/Log.hpp"
 #include "aver/core/Math.hpp"
 #include "aver/framework/framework_envfx_abi.h"
+#include "aver/game/GodotEnvFeed.hpp"   // G6 SH3: converted Godot sky / fog / particles shaders
 #include "aver/voxi/VoxiRenderer.hpp"
 
 namespace aver::game {
@@ -19,6 +20,7 @@ public:
     // Once per frame, before the frame renders.
     void update(voxi::VoxiRenderer& voxi, const Vec3& eye) {
         aver_fw_envfx_tick();
+        godotEnv_.update(voxi);   // before the fog volumes: a volume's shader index names the table this just pushed
         const bool any = aver_fw_fogvol_count() > 0;
         if (!any) {
             if (pushed_) { voxi.setFogVolumes(nullptr); pushed_ = false; }
@@ -42,6 +44,7 @@ public:
     }
 
 private:
+    GodotEnvFeed godotEnv_;
     bool pushed_ = false;
     bool probeLogged_ = false;
     int32_t lastCount_ = -1;

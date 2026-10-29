@@ -47,6 +47,8 @@ add_library(Aver.Framework SHARED
   src/SubViewAbi.cpp
   # Local fog volumes and reflection probes a script or a converted level places; the host reads what changed (G4 R8).
   src/EnvFxAbi.cpp
+  # Converted Godot sky, fog and particles shaders a script registers; the host hands them to the renderers (G6 SH3).
+  src/GodotEnvAbi.cpp
   # Meshes a script builds from arrays and MultiMesh instance tables baked into one mesh; the host uploads what changed (G4 R7).
   src/RuntimeMeshAbi.cpp
   src/DataTableAbi.cpp

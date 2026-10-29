@@ -49,6 +49,8 @@ Aver.Fabric.GDExt.Abi.dll
 Aver.Anim.Abi.dll
 # The polygon navigation seam of Aver.Fabric's navigation nodes and A* graphs (a converted Godot project's NavigationRegion3D / NavigationAgent3D).
 Aver.Nav.Abi.dll
+# The sockets and reliable-UDP seam of Aver.Fabric's PacketPeerUDP, StreamPeerTCP, ENetConnection and ENetMultiplayerPeer (a converted Godot project's multiplayer).
+Aver.Net.Abi.dll   ?AVER_MODULE_NET
 extension_api.json
 Aver.Render.PBR.dll   ?AVER_MODULE_PBR
 Aver.Render.Voxi.dll  ?AVER_MODULE_VOXI

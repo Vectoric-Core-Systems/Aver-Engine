@@ -55,7 +55,8 @@ public class Sky : Resource
     public enum RadianceSizeEnum { Size32, Size64, Size128, Size256, Size512, Size1024, Size2048 }
     public enum ProcessModeEnum { Automatic, Quality, Incremental, Realtime }
 
-    public SkyMaterial? SkyMaterial { get; set; }
+    /// <summary>A <see cref="SkyMaterial"/>, or a <see cref="ShaderMaterial"/> over a sky shader (G6 SH3), which replaces the sky.</summary>
+    public Material? SkyMaterial { get; set; }
     public RadianceSizeEnum RadianceSize { get; set; } = RadianceSizeEnum.Size256;
     public ProcessModeEnum ProcessMode { get; set; } = ProcessModeEnum.Automatic;
 }
@@ -266,6 +267,7 @@ public class WorldEnvironment : Node
     {
         base.OnEnteringTree();
         _live = true;   // what follows is a change, not the load
+        if (_environment != null) PushSkyShader();   // G6 SH3: a converted sky shader is the sky from the moment the environment is in the tree
     }
 
     internal int PushCount { get; private set; }
@@ -276,6 +278,7 @@ public class WorldEnvironment : Node
     {
         if (!_live || _environment == null) return;
         PushCount++;
+        PushSkyShader();
         if (!NodeHost.Current.IsEngine) return;
         foreach ((string key, float value) in EnvironmentMapping.PostValues(_environment, _camera))
             Aver.Framework.PostFx.SetValue(Layer, key, value);
@@ -289,4 +292,23 @@ public class WorldEnvironment : Node
             Aver.Framework.Sky.SetFogShape(Math.Abs(_environment.FogHeightDensity) / 100f, _environment.FogHeight * 100f, 0f);
         Aver.Framework.Sky.SetSkyLight(EnvironmentMapping.SkyLight(_environment));
     }
+
+    private ShaderMaterial? _skyShader;
+
+    // G6 SH3: a Sky whose material is a converted sky shader is registered with the engine and made the sky; the engine's own sky returns when it is taken away.
+    private void PushSkyShader()
+    {
+        ShaderMaterial? want = _environment?.BackgroundMode == Environment.BGMode.Sky ? _environment.Sky?.SkyMaterial as ShaderMaterial : null;
+        if (want != null && want.EnvironmentKind != "sky") want = null;
+        if (!ReferenceEquals(want, _skyShader))
+        {
+            if (_skyShader != null) _skyShader.EnvRegistersChanged -= OnSkyRegisters;
+            _skyShader = want;
+            if (_skyShader != null) _skyShader.EnvRegistersChanged += OnSkyRegisters;
+        }
+        if (_skyShader != null) _skyShader.UseAsSky();
+        else EnvShaderBackend.Current.UseSky(null);
+    }
+
+    private void OnSkyRegisters(ShaderMaterial m) { if (_live) PushSkyShader(); }
 }

@@ -137,27 +137,13 @@ internal sealed class GodotSharpRewriter : CSharpSyntaxRewriter
         return attr;
     }
 
-    // Aver.Fabric's [Rpc] takes the mode as a string; Godot's takes an RpcMode and named options. Networking itself is not provided.
-    private AttributeSyntax RewriteRpc(AttributeSyntax attr)
-    {
-        AttributeArgumentSyntax? first = attr.ArgumentList?.Arguments.FirstOrDefault(a => a.NameEquals == null && a.NameColon == null);
-        string? mode = first?.Expression switch
+    // Aver.Fabric's [Rpc] is GodotSharp's (G6 NET2): the RpcMode, CallLocal, TransferMode and TransferChannel are all read, so the attribute stays as written.
+    private AttributeSyntax RewriteRpc(AttributeSyntax attr) =>
+        attr.WithAdditionalAnnotations(_book.Add(new Note
         {
-            MemberAccessExpressionSyntax m => m.Name.Identifier.ValueText,
-            IdentifierNameSyntax i => i.Identifier.ValueText,
-            LiteralExpressionSyntax lit when lit.IsKind(SyntaxKind.StringLiteralExpression) => lit.Token.ValueText,   // already converted
-            _ => null,
-        };
-        bool dropped = attr.ArgumentList != null && attr.ArgumentList.Arguments.Count > (mode != null ? 1 : 0);
-        AttributeSyntax result = mode != null
-            ? attr.WithArgumentList(SyntaxFactory.ParseAttributeArgumentList("(\"" + mode + "\")")!.WithTrailingTrivia(attr.GetTrailingTrivia()))
-            : attr.WithArgumentList(null);
-        return result.WithAdditionalAnnotations(_book.Add(new Note
-        {
-            Type = "attribute", Property = "Rpc", Rating = Rating.Approximated, Comment = true,
-            Reason = "[Rpc] is recorded and nothing is networked (wave 10)" + (dropped ? "; the transfer mode, channel and call-local options were dropped" : ""),
+            Type = "attribute", Property = "Rpc", Rating = Rating.Converted, Comment = false,
+            Reason = "[Rpc] is kept: SceneMultiplayer (G6 NET2) dispatches it with the mode, call-local, transfer mode and channel as written",
         }));
-    }
 
     // ---- the script class ----
 

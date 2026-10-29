@@ -332,6 +332,12 @@ bool Converter::convertProject(const std::string& startLevelAsset) {
             for (const char* h : handled)
                 if (key.rfind(h, 0) == 0) { ok = true; break; }
             if (ok) continue;
+            if (key.rfind("shader_globals/", 0) == 0) {   // G6 SH2: a global shader uniform's default rides in each shader material's uniform table
+                report_.add("setting", kProject, "", "", key, Rating::Approximated,
+                            "the default is written into every shader material that declares this global uniform; Fabric/shaders.json lists the globals "
+                            "and RenderingServer.global_shader_parameter_set updates them at run time", e.line);
+                continue;
+            }
             report_.add("setting", kProject, "", "", key, Rating::Unsupported, "no Aver project key for this setting", e.line);
         }
     }

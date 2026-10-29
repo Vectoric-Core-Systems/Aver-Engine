@@ -206,6 +206,7 @@ public readonly struct Variant : IEquatable<Variant>
     public static implicit operator Variant(Vector2[]? v) => CreateFrom(v);
     public static implicit operator Variant(Vector3[]? v) => CreateFrom(v);
     public static implicit operator Variant(Color[]? v) => CreateFrom(v);
+    public static implicit operator Variant(Vector4[]? v) => CreateFrom(v);
 
     public static explicit operator bool(Variant v) => v.AsBool();
     public static explicit operator int(Variant v) => v.AsInt32();

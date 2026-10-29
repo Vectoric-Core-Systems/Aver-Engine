@@ -32,7 +32,15 @@ struct FogVolumeDesc {
     f32 emission[3] = {0, 0, 0};  // radiance added per unit density, linear
     f32 heightFalloff = 0.0f;     // per metre; 0 = uniform
     f32 edgeFade = 0.1f;          // depth of the soft edge, as a fraction of the half size
+    // G6 SH3: a converted Godot fog shader (1-based index into the frame's fog-shader table, 0 = none). The shader replaces density, albedo and emission
+    // (density is per metre, as FogMaterial.density is); the shape and the edge fade still apply, the height falloff does not.
+    u32 shader = 0;
 };
+
+// The shape field of a packed volume carries the shape in its low three bits and the fog-shader index above them (0 = no shader, today's volumes).
+inline constexpr i32 kFogVolumeShapeBits = 3;
+inline i32 fogVolumeShapeOf(f32 packed) { return static_cast<i32>(packed + 0.5f) & ((1 << kFogVolumeShapeBits) - 1); }
+inline u32 fogVolumeShaderOf(f32 packed) { return static_cast<u32>(static_cast<i32>(packed + 0.5f) >> kFogVolumeShapeBits); }
 
 // What the shader reads for one volume (kFogVolumeVecs float4s):
 //   toUnit0..2  world position -> unit-box coordinates: u_i = dot(p, rowi.xyz) + rowi.w
@@ -85,11 +93,16 @@ inline bool pack(const FogVolumeDesc& v, f32 out[kFogVolumeVecs][4]) {
     out[3][0] = v.densityPerM * 0.01f;
     out[3][1] = std::max(v.edgeFade, 1e-3f);
     out[3][2] = std::max(v.heightFalloff, 0.0f) * 0.01f;
-    out[3][3] = static_cast<f32>(static_cast<i32>(v.shape));
+    out[3][3] = static_cast<f32>(static_cast<i32>(v.shape) + (static_cast<i32>(v.shader) << kFogVolumeShapeBits));
     out[4][0] = std::clamp(v.albedo[0], 0.0f, 1.0f); out[4][1] = std::clamp(v.albedo[1], 0.0f, 1.0f); out[4][2] = std::clamp(v.albedo[2], 0.0f, 1.0f);
     out[4][3] = lowestZ(v.world, v.halfExtentCm);
     out[5][0] = std::max(v.emission[0], 0.0f); out[5][1] = std::max(v.emission[1], 0.0f); out[5][2] = std::max(v.emission[2], 0.0f);
     out[5][3] = minHalf;
+    if (v.shader != 0) {
+        // The shader supplies albedo and emission, so those slots carry what it needs instead: the volume's centre (world cm) and its local half extents (cm).
+        out[4][0] = v.world[9]; out[4][1] = v.world[10]; out[4][2] = v.world[11];
+        out[5][0] = v.halfExtentCm[0]; out[5][1] = v.halfExtentCm[1]; out[5][2] = v.halfExtentCm[2];
+    }
     return true;
 }
 
@@ -130,7 +143,7 @@ inline f32 sdf(FogVolumeShape shape, const f32 u[3]) {
 inline f32 density(const f32 pk[kFogVolumeVecs][4], const f32 p[3]) {
     f32 u[3];
     for (int j = 0; j < 3; ++j) u[j] = p[0] * pk[j][0] + p[1] * pk[j][1] + p[2] * pk[j][2] + pk[j][3];
-    const FogVolumeShape shape = static_cast<FogVolumeShape>(static_cast<i32>(pk[3][3] + 0.5f));
+    const FogVolumeShape shape = static_cast<FogVolumeShape>(fogVolumeShapeOf(pk[3][3]));
     const f32 d = sdf(shape, u);
     if (d >= 0.0f) return 0.0f;
     f32 weight = 1.0f;

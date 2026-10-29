@@ -26,6 +26,7 @@ inline constexpr u32 kGpuFlagDeathEvent  = 1u << 2;
 inline constexpr u32 kGpuFlagCollideEvent = 1u << 3;
 inline constexpr u32 kGpuFlagSubuvStart  = 1u << 4;
 inline constexpr u32 kGpuFlagHasEvents   = 1u << 5;   // an events buffer is bound (this emitter raises events or has children)
+inline constexpr u32 kGpuFlagGodot       = 1u << 6;   // G6 SH3: a converted Godot particles shader is the custom stage (gTrail holds its state)
 
 inline constexpr u32 kCtrDead = 0;
 inline constexpr u32 kCtrAlive = 1;

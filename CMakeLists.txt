@@ -210,6 +210,11 @@ add_subdirectory(modules/anim.abi)
 add_subdirectory(modules/synapse)
 # The plain-C seam onto polygon navigation, the navmesh baker and the A* graphs (Godot navigation parity, Aver.Fabric). Synapse + Core only.
 add_subdirectory(modules/nav.abi)
+# OS sockets and the reliable-UDP host/peer protocol (Fabric G6 NET1); opt-in, linked by nothing but its own C seam (Aver.Net.Abi) and tests.
+if(AVER_MODULE_NET)
+  add_subdirectory(modules/net)
+  add_subdirectory(modules/net.abi)
+endif()
 # Aver Sound: a .ocsnd node graph rendered to PCM. Core+Formats only, beside Synapse and for the
 # identical reason -- it builds and tests with no device, no mixer and no scene.
 add_subdirectory(modules/sound)
@@ -640,6 +645,10 @@ if(AVER_BUILD_TESTS)
   endif()
   if(TARGET Aver.Settings)
     add_subdirectory(tests/settings)
+  endif()
+
+  if(TARGET Aver.Net)
+    add_subdirectory(tests/net)   # Fabric G6 NET1: the protocol on a simulated network, sockets over loopback only
   endif()
 
   if(TARGET Aver.Synapse)

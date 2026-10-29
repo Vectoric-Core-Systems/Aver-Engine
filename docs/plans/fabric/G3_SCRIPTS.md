@@ -57,7 +57,7 @@ Output is deterministic for a given input and runtime: converting twice gives th
 | `[Tool]` | kept (Aver.Fabric has the attribute, no effect) and marked `// FABRIC:` | **unsupported**: no editor scripts in Aver; the class runs in the game only |
 | `[GlobalClass]` | kept | converted: the class is registered under its name (framework registry); there is no editor Create dialog |
 | `[Icon("res://x.svg")]` | kept (`IconAttribute` added to Aver.Fabric, no effect) | approximated |
-| `[Rpc(MultiplayerApi.RpcMode.AnyPeer, CallLocal = true)]` | `[Rpc("AnyPeer")]`; the other options are dropped; marked `// FABRIC:` | approximated: recorded, nothing is networked (wave 10) |
+| `[Rpc(MultiplayerApi.RpcMode.AnyPeer, CallLocal = true)]` | kept as written (G6 NET2: `RpcAttribute` has GodotSharp's mode, `CallLocal`, `TransferMode`, `TransferChannel`) | converted |
 | `[ExportToolButton]`, `GodotSharp`-only attributes | left; the compiler's missing-type error is reported (below) | unsupported by name |
 | a class whose name `scripts.json` changed (reserved name such as `Node`, or a duplicate) | `[global::Aver.Framework.AverClass("<scripts.json name>")]` on the class, so the scenes' placements find it | approximated |
 | `Timer`, `Array`, `Dictionary<,>`, any name `System.*` and `Aver.Fabric` both have | `using Timer = Aver.Fabric.Timer;` in the file; a generic name (an alias cannot be an open generic) is qualified at the use: `global::Aver.Fabric.Collections.Dictionary<string, int>` | counted ("using alias for ...") |
@@ -236,7 +236,7 @@ Godot 3 syntax (`setget`, `onready var`, `export(...)`, `yield`, `tool`, `.metho
 | `_init(args)` | a constructor; defaults give the parameterless constructor the runtime needs; `super(args)` in it is dropped (`approximated`) |
 | `_ready`, `_process(delta)`, `_physics_process`, `_input(event)`, `_unhandled_input`, `_enter_tree`, `_exit_tree`, `_notification` | `public override void _Ready()`, `_Process(double delta)`, ... with the runtime's signatures |
 | other functions | `public` (`virtual` when a descendant script overrides it); `_name` becomes `Name` (leading underscore dropped, as the scenes' `_connections` lookup does); a function without `-> T` takes the type its `return`s agree on, else `Variant`; `void` when it returns nothing |
-| `@rpc("any_peer", ...)` | `[Rpc("AnyPeer")]` (`approximated`: nothing is networked) |
+| `@rpc("any_peer", ...)` | `[Rpc(MultiplayerApi.RpcMode.AnyPeer, CallLocal = ..., TransferMode = ..., TransferChannel = ...)]` with the four arguments read in any order and every option that differs from GodotSharp's defaults written (G6 NET2; `converted`) |
 | `await sig`, `await obj.sig`, `await get_tree().create_timer(t).timeout` | `await ToSignal(owner, Owner.SignalName.X)` (`ToSignal(obj, "name")` for a signal the runtime does not list); the value of `await` is `GDScript.AwaitResult(...)` (null, the argument, or an Array). A function that contains `await` is `async void` (an override or a handler) or `async Task` / `Task<T>` when another script awaits it |
 | `x.connect(f)`, `.connect(f, CONNECT_ONE_SHOT)`, `.disconnect(f)`, `.is_connected(f)`, `.emit(a)` | `x.Connect(Name, callable, (uint)flags)`, `Disconnect`, `IsConnected`; our own signal: `EmitSignalX(a)`, another object's: `EmitSignal(Name, a)` |
 | a function as a value (`f`, `self.f`) | `Callable.From<A, B>(F)` (typed); by name with `MethodName.F` when it has defaults or `...rest` |

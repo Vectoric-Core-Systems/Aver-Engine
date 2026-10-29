@@ -38,6 +38,18 @@ static class Program
             Console.WriteLine(failures == 0 ? $"\nAll tests passed ({T.Checks} checks)." : $"\n{failures} check(s) failed.");
             return failures;
         }
+        if (args.Length == 1 && args[0] == "network") // only the G6 NET1 suite
+        {
+            failures = NetworkTests.RunAll();
+            Console.WriteLine(failures == 0 ? $"\nAll tests passed ({T.Checks} checks)." : $"\n{failures} check(s) failed.");
+            return failures;
+        }
+        if (args.Length == 1 && args[0] == "multiplayer") // only the G6 NET2 suites
+        {
+            failures = MultiplayerTests.RunAll() + ReplicationTests.RunAll();
+            Console.WriteLine(failures == 0 ? $"\nAll tests passed ({T.Checks} checks)." : $"\n{failures} check(s) failed.");
+            return failures;
+        }
         if (args.Length == 1 && args[0] == "ui") // only the G5 U1 suite
         {
             failures = UiTests.RunAll();
@@ -71,6 +83,8 @@ static class Program
         failures += EnvironmentTests.RunAll(); // G4 R3: WorldEnvironment, Environment, Sky, CameraAttributes and what they push to the engine
         failures += SubViewportTests.RunAll(); // G4 R5: SubViewport, ViewportTexture, SubViewportContainer and what they ask the engine for
         failures += EnvFxTests.RunAll();     // G4 R8: FogVolume, ReflectionProbe, LightmapGI, VoxelGI and what they publish to the engine
+        failures += ShaderTests.RunAll();    // G6 SH2: Shader, ShaderMaterial, global shader parameters and what they push to the engine's material library
+        failures += EnvShaderTests.RunAll(); // G6 SH3: sky, fog and particles shaders, GPUParticles3D, VisualShader and what they register with the engine
         failures += GeometryTests.RunAll();// G4 R7: ArrayMesh, SurfaceTool, ImmediateMesh, MultiMesh, GridMap, CSG, Sprite3D, Label3D and what they push to the engine
         failures += SceneValueTests.RunAll(); // ClassDB, Object(...) values, resource and node-reference properties
         failures += TweenTests.RunAll();     // F2b: easing curves, tween sequencing, loops, pause and process modes
@@ -82,6 +96,9 @@ static class Program
         failures += AnimationTreeTests.RunAll(); // G5 A2: AnimationTree over the engine's property-track player
         failures += AudioTests.RunAll();     // G5 S1: AudioServer, bus effects, audio streams, AudioStreamPlayer(3D), AudioListener3D over the engine's mixer (offline)
         failures += NavigationTests.RunAll(); // G5 N1: navigation maps, regions, links, obstacles, agents, baking, AStar3D / AStar2D / AStarGrid2D over Aver.Nav.Abi
+        failures += NetworkTests.RunAll();    // G6 NET1: Variant binary encoding, StreamPeerBuffer, IP, UDP / TCP peers, ENetConnection and the multiplayer peers over Aver.Net.Abi (loopback only)
+        failures += MultiplayerTests.RunAll(); // G6 NET2: SceneMultiplayer, RPC, authority over ENet loopback, a lossy UDP proxy and an in-memory link (branches of one tree)
+        failures += ReplicationTests.RunAll(); // G6 NET2: MultiplayerSpawner, MultiplayerSynchronizer, SceneReplicationConfig, a converted GDScript with @rpc
         failures += UiTests.RunAll();         // G5 U1: Control layout, containers, themes, style boxes, stretch, the GUI (input, focus, tooltips, drag and drop) over Aver.UI.Abi
         failures += WidgetTests.RunAll();     // G5 U2: Label, Range, buttons, menus, dialogs, LineEdit, TextEdit, ItemList, Tree, tabs, layout widgets, colour picker, fonts
         failures += RichTextTests.RunAll();   // G5 U2: BBCode, RichTextLabel layout, effects, meta and hints

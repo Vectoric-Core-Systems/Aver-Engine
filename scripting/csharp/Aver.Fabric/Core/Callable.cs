@@ -101,6 +101,19 @@ public readonly struct Callable : IEquatable<Callable>
         Deferred.Call(() => { if (self.IsValid()) self.Call(args); });
     }
 
+    /// <summary>Calls the node method this callable names as an RPC on every other peer (GDScript's <c>func.rpc(args)</c>).</summary>
+    public Error Rpc(params Variant[] args) => RpcId(MultiplayerPeer.TargetPeerBroadcast, args);
+
+    /// <summary>Calls the node method this callable names as an RPC on one peer (GDScript's <c>func.rpc_id(peer, args)</c>).</summary>
+    public Error RpcId(long peerId, params Variant[] args)
+    {
+        if (Target is Node node && Method is { IsEmpty: false } method) return node.RpcId(peerId, method, args);
+        // a method reference a converted script made (Callable.From(this.TakeDamage)) names its method too; a lambda has no name to send
+        if (_inner == null && _delegate is { Target: Node owner } d && d.Method.Name.IndexOf('<') < 0) return owner.RpcId(peerId, d.Method.Name, args);
+        Aver.Scripting.Log.Error("[Fabric] Callable.rpc: only a method of a node can be called as an RPC");
+        return Error.InvalidParameter;
+    }
+
     /// <summary>A callable that passes <paramref name="args"/> after whatever it is called with.</summary>
     public Callable Bind(params Variant[] args) => new(this, args, 0);
 

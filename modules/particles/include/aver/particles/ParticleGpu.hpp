@@ -4,13 +4,23 @@
 #pragma once
 #include "aver/particles/ParticleSortNetwork.hpp"
 #include "aver/particles/ParticleSystem.hpp"
+#include "aver/rhi/GodotEnvPrograms.hpp"
 #include "aver/rhi/RHI.hpp"
 #include "aver/rhi/RHIResources.hpp"
 
 #include <array>
+#include <string>
 #include <vector>
 
 namespace aver::particles {
+
+// G6 SH3: the converted Godot particles shaders by name, fed by the host every time the framework's registry moves. An effect names one in
+// ParticleEffect::godotShader. Process-wide, like the material graph registry; empty by default, and an empty registry changes nothing.
+void setGodotParticlePrograms(std::vector<rhi::GodotEnvProgram> programs);
+const rhi::GodotEnvProgram* findGodotParticleProgram(const std::string& name);
+u64 godotParticleProgramRevision();
+// The GPU tier needs this many float4s of state per slot for a Godot shader's emitter (see particles_sim.hlsl, PGD_VECS).
+inline constexpr u32 kGodotParticleStateVecs = 5;
 
 // A buffer and the state it was last left in; the RHI never transitions implicitly.
 struct TrackedBuffer {
@@ -117,6 +127,7 @@ private:
         u32 capacity = 0;
         u32 poolCapacity = 0;
         bool linked = false, trail = false, sorted = false, hasEvents = false;
+        u32 gdKernels = 0;          // G6 SH3: 1-based index into gdKernels_ when the emitter carries a Godot particles shader (trailBuf then holds its state)
         u32 trailRing = 0;
         u32 indexCount = 6;
         u32 parent = 0;
@@ -154,6 +165,11 @@ private:
     u64 frame_ = 0;
 
     TrackedBuffer dummy_;
+    // G6 SH3: the spawn and update kernels compiled with one Godot particles shader (built lazily, by program name; rebuilt when the program text changes).
+    struct GdKernels { std::string name; u64 revision = 0; rhi::PipelineHandle spawn = 0, update = 0; bool failed = false; };
+    std::vector<GdKernels> gdKernels_;
+    u32 gdKernelsFor(const std::string& name);                       // 1-based index, 0 = none / not buildable
+    static bool usesTrailBuf(const Instance& in) { return in.trail || in.gdKernels != 0; }
     rhi::PipelineHandle csInit_ = 0, csBegin_ = 0, csSpawn_ = 0, csArgsUpdate_ = 0, csUpdate_ = 0, csFinish_ = 0, csProbe_ = 0, csRngProbe_ = 0;
     rhi::PipelineHandle csSortKeys_ = 0, csSortLocal_ = 0, csSortGlobal_ = 0, csSortLocalMerge_ = 0, csSortFinal_ = 0;
     rhi::PipelineHandle csShift_ = 0;   // optional: a stale deploy without CSShift only loses the origin shift, not the tier

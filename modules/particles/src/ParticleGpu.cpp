@@ -21,6 +21,90 @@ u32 groupsFor(u32 threads, u32 groupSize) { return (threads + groupSize - 1u) / 
 
 } // namespace
 
+// ------------------------------------------------------------------------------------------------ G6 SH3: Godot particles shaders
+namespace {
+std::vector<rhi::GodotEnvProgram>& godotPrograms() {
+    static std::vector<rhi::GodotEnvProgram> v;
+    return v;
+}
+u64 gGodotProgramRev = 0;
+} // namespace
+
+void setGodotParticlePrograms(std::vector<rhi::GodotEnvProgram> programs) {
+    std::vector<rhi::GodotEnvProgram>& cur = godotPrograms();
+    bool same = cur.size() == programs.size();
+    for (usize i = 0; same && i < cur.size(); ++i)
+        same = cur[i].name == programs[i].name && cur[i].source == programs[i].source && cur[i].regs == programs[i].regs && cur[i].hasStart == programs[i].hasStart &&
+               cur[i].hasProcess == programs[i].hasProcess;
+    cur = std::move(programs);
+    if (!same) ++gGodotProgramRev;
+}
+
+const rhi::GodotEnvProgram* findGodotParticleProgram(const std::string& name) {
+    for (const rhi::GodotEnvProgram& p : godotPrograms()) if (p.name == name) return &p;
+    return nullptr;
+}
+
+u64 godotParticleProgramRevision() { return gGodotProgramRev; }
+
+// The spawn and update kernels compiled with one program. The simulation shader is the same file with AVER_GD_PARTICLES=1 and the program text as its prelude.
+u32 ParticleGpu::gdKernelsFor(const std::string& name) {
+    const rhi::GodotEnvProgram* prog = findGodotParticleProgram(name);
+    if (!prog || !res_) return 0;
+    usize at = gdKernels_.size();
+    for (usize i = 0; i < gdKernels_.size(); ++i) if (gdKernels_[i].name == name) at = i;
+    if (at == gdKernels_.size()) { gdKernels_.emplace_back(); gdKernels_.back().name = name; }
+    GdKernels& k = gdKernels_[at];
+    if (k.revision == gGodotProgramRev && (k.spawn || k.failed)) return k.spawn && k.update ? static_cast<u32>(at + 1) : 0u;
+    // A changed program: drop the old kernels (instances already built keep the handles they hold only until the next frame; the host re-creates the emitter).
+    if (k.spawn) res_->destroyPipeline(k.spawn);
+    if (k.update) res_->destroyPipeline(k.update);
+    k.spawn = k.update = 0;
+    k.failed = true;
+    k.revision = gGodotProgramRev;
+
+    const std::string sim = rhi::shaderFile("particles_sim.hlsl");
+    const std::string program = rhi::godotParticlesProgram(*prog);
+    if (sim.empty() || program.empty()) {
+        AVER_ERROR("[Particles] the Godot particles shader '{}' could not be composed; its emitters simulate without it", name);
+        return 0;
+    }
+    rhi::PipelineLayout layout;
+    layout.uavCount = kSimUavCount;
+    layout.slotKindsDeclared = true;
+    for (u32 i = 0; i < kSimUavCount; ++i) layout.uavKinds[i] = rhi::SlotKind::StructuredBuffer;
+    layout.constantDwords[kSimConstantRegister] = 0;
+    const auto build = [&](const char* entry) {
+        rhi::ShaderDesc sd;
+        sd.source = sim.c_str();
+        sd.prelude = program.c_str();
+        sd.entry = entry;
+        sd.stage = rhi::ShaderStage::Compute;
+        sd.minShaderModel = 60;
+        sd.defines = "AVER_GD_PARTICLES=1";
+        const rhi::ShaderHandle cs = res_->createShader(sd);
+        if (!cs) return rhi::PipelineHandle(0);
+        rhi::ComputePipelineDesc pd;
+        pd.cs = cs;
+        pd.layout = layout;
+        const rhi::PipelineHandle p = res_->createComputePipeline(pd);
+        res_->destroyShader(cs);
+        return p;
+    };
+    k.spawn = build("CSSpawn");
+    k.update = build("CSUpdate");
+    if (!k.spawn || !k.update) {
+        if (k.spawn) res_->destroyPipeline(k.spawn);
+        if (k.update) res_->destroyPipeline(k.update);
+        k.spawn = k.update = 0;
+        AVER_ERROR("[Particles] the Godot particles shader '{}' would not compile; its emitters simulate without it", name);
+        return 0;
+    }
+    k.failed = false;
+    AVER_INFO("[Particles] Godot particles shader '{}' compiled", name);
+    return static_cast<u32>(at + 1);
+}
+
 u32 ParticleGpu::capacityFor(const ParticleEffect& fx) const {
     const bool linked = fx.render == RenderKind::Ribbon && fx.linked;
     const u32 n = linked ? std::clamp<u32>(fx.linkedCapacity, 2u, kMaxLinkedCapacity) : std::max(1u, fx.maxParticles);
@@ -121,8 +205,13 @@ void ParticleGpu::shutdown() {
         for (rhi::PipelineHandle p : {csInit_, csBegin_, csSpawn_, csArgsUpdate_, csUpdate_, csFinish_, csProbe_, csRngProbe_, csSortKeys_,
                                       csSortLocal_, csSortGlobal_, csSortLocalMerge_, csSortFinal_, csShift_})
             if (p) res_->destroyPipeline(p);
+        for (GdKernels& k : gdKernels_) {
+            if (k.spawn) res_->destroyPipeline(k.spawn);
+            if (k.update) res_->destroyPipeline(k.update);
+        }
         if (dummy_.h) res_->destroyBuffer(dummy_.h);
     }
+    gdKernels_.clear();
     pool_.shutdown();
     instances_.clear();
     freeHandles_.clear();
@@ -183,12 +272,14 @@ u32 ParticleGpu::acquire(const ParticleEffect& fx, u32 parent) {
         in.eventsBuf.h = res_->createBuffer(bd);
         extra += kEventsBytes;
     }
-    if (in.trail) {
+    // G6 SH3: an emitter with a converted Godot particles shader keeps the state the 64-byte particle has no room for in this buffer (a sprite emitter has no trails).
+    if (!fx.godotShader.empty() && !in.trail && !linked) in.gdKernels = gdKernelsFor(fx.godotShader);
+    if (usesTrailBuf(in)) {
         rhi::BufferDesc bd;
-        bd.bytes = static_cast<u64>(n) * in.trailRing * 16u;
+        bd.bytes = static_cast<u64>(n) * (in.trail ? in.trailRing : kGodotParticleStateVecs) * 16u;
         bd.kind = rhi::BufferKind::Default;
         bd.allowUnorderedAccess = true;
-        bd.debugName = "Aver.Particles trails";
+        bd.debugName = in.trail ? "Aver.Particles trails" : "Aver.Particles Godot state";
         in.trailBuf.h = res_->createBuffer(bd);
         extra += bd.bytes;
     }
@@ -197,7 +288,7 @@ u32 ParticleGpu::acquire(const ParticleEffect& fx, u32 parent) {
     sd.uavCount = kSimUavCount;
     for (u32 i = 0; i < kSimUavCount; ++i) sd.uavKinds[i] = rhi::SlotKind::StructuredBuffer;
     in.set = res_->createBindingSet(sd);
-    if (!in.set || (in.hasEvents && !in.eventsBuf.h) || (in.trail && !in.trailBuf.h)) {
+    if (!in.set || (in.hasEvents && !in.eventsBuf.h) || (usesTrailBuf(in) && !in.trailBuf.h)) {
         AVER_ERROR("[Particles] GPU instance allocation failed");
         if (in.set) res_->destroyBindingSet(in.set);
         if (in.eventsBuf.h) res_->destroyBuffer(in.eventsBuf.h);
@@ -216,7 +307,8 @@ u32 ParticleGpu::acquire(const ParticleEffect& fx, u32 parent) {
                        (par && par->eventsBuf.h) ? kGpuEventRegionUints * 2u : kDummyBytes / 4u, 0);
     if (pg.sortable) res_->setUavBuffer(in.set, 7, pg.sortKeys.h, 8, C, idx * C);
     else             res_->setUavBuffer(in.set, 7, dummy_.h, 8, kDummyBytes / 8u, 0);
-    res_->setUavBuffer(in.set, 8, in.trailBuf.h ? in.trailBuf.h : dummy_.h, 16, in.trailBuf.h ? n * in.trailRing : kDummyBytes / 16u, 0);
+    res_->setUavBuffer(in.set, 8, in.trailBuf.h ? in.trailBuf.h : dummy_.h, 16,
+                       in.trailBuf.h ? n * (in.trail ? in.trailRing : kGodotParticleStateVecs) : kDummyBytes / 16u, 0);
     dedicatedBytes_ += extra;
 
     u32 handle;
@@ -238,7 +330,7 @@ void ParticleGpu::release(u32 handle) {
         if (in->set) res_->destroyBindingSet(in->set);
         if (in->eventsBuf.h) { res_->destroyBuffer(in->eventsBuf.h); dedicatedBytes_ = dedicatedBytes_ >= kEventsBytes ? dedicatedBytes_ - kEventsBytes : 0u; }
         if (in->trailBuf.h) {
-            const u64 b = static_cast<u64>(in->capacity) * in->trailRing * 16u;
+            const u64 b = static_cast<u64>(in->capacity) * (in->trail ? in->trailRing : kGodotParticleStateVecs) * 16u;
             res_->destroyBuffer(in->trailBuf.h);
             dedicatedBytes_ = dedicatedBytes_ >= b ? dedicatedBytes_ - b : 0u;
         }
@@ -327,7 +419,7 @@ void ParticleGpu::recordShifts(rhi::IRenderContext& ctx, std::vector<GpuShift>& 
         ParticleGpuPool::Page& pg = pool_.page(in->range.page);
         const ResourceState restParticles = pg.particles.st, restTrail = in->trailBuf.st;
         to(ctx, pg.particles, ResourceState::UnorderedAccess);
-        if (in->trail) to(ctx, in->trailBuf, ResourceState::UnorderedAccess);
+        if (usesTrailBuf(*in)) to(ctx, in->trailBuf, ResourceState::UnorderedAccess);
         to(ctx, in->eventsBuf, ResourceState::UnorderedAccess);
 
         GpuSimHeader& h = cb.h;
@@ -345,11 +437,11 @@ void ParticleGpu::recordShifts(rhi::IRenderContext& ctx, std::vector<GpuShift>& 
         ctx.setConstantBuffer(kSimConstantRegister, &cb, kHeaderBytes);
         ctx.dispatch(groupsFor(threads, 64), 1, 1);
         barrier(ctx, pg.particles);
-        if (in->trail) barrier(ctx, in->trailBuf);
+        if (usesTrailBuf(*in)) barrier(ctx, in->trailBuf);
         barrier(ctx, in->eventsBuf);
         // record() leaves these in a rest state for the draw; a frame that does not run the instance must still find them there.
         if (restParticles != ResourceState::Common) to(ctx, pg.particles, restParticles);
-        if (in->trail && restTrail != ResourceState::Common) to(ctx, in->trailBuf, restTrail);
+        if (usesTrailBuf(*in) && restTrail != ResourceState::Common) to(ctx, in->trailBuf, restTrail);
     }
     ctx.popMarker();
     shifts.clear();
@@ -396,7 +488,7 @@ u32 ParticleGpu::record(rhi::IRenderContext& ctx, std::vector<GpuJob>& jobs, con
     for (std::vector<Item>& round : rounds)
         for (Item& it : round) {
             Instance& in = *it.inst;
-            if (in.trail) to(ctx, in.trailBuf, ResourceState::GeometryRead);
+            if (usesTrailBuf(in)) to(ctx, in.trailBuf, ResourceState::GeometryRead);
             if (in.ranFrame != frame_) {
                 if (in.firstRan == 0) in.firstRan = frame_;
                 in.ranFrame = frame_;
@@ -421,7 +513,7 @@ void ParticleGpu::recordRound(rhi::IRenderContext& ctx, std::vector<Item>& items
         to(ctx, pg.counters, ResourceState::UnorderedAccess);
         to(ctx, pg.args, ResourceState::UnorderedAccess);
         if (in.sorted) to(ctx, pg.sortKeys, ResourceState::UnorderedAccess);
-        if (in.trail) to(ctx, in.trailBuf, ResourceState::UnorderedAccess);
+        if (usesTrailBuf(in)) to(ctx, in.trailBuf, ResourceState::UnorderedAccess);
         to(ctx, in.eventsBuf, ResourceState::UnorderedAccess);
         if (Instance* parent = find(in.parent)) to(ctx, parent->eventsBuf, ResourceState::UnorderedAccess);
 
@@ -436,6 +528,7 @@ void ParticleGpu::recordRound(rhi::IRenderContext& ctx, std::vector<Item>& items
         const Instance* par = find(in.parent);
         h.evActive = (h.evActive != 0 && par && par->hasEvents && par->ranFrame != 0 && par->ranFrame + 1 == frame_) ? 1u : 0u;
         if (in.hasEvents) h.flags |= kGpuFlagHasEvents;
+        if (in.gdKernels != 0) h.flags |= kGpuFlagGodot;
         in.lastAliveWrite = in.sorted ? h.sortedBase : h.aliveWrite;
     }
     std::vector<u32> pages;
@@ -485,14 +578,20 @@ void ParticleGpu::recordRound(rhi::IRenderContext& ctx, std::vector<Item>& items
     argsTo(ResourceState::IndirectArgument);
 
     // ---- Phase 2: spawn (batch 0 is sized on the GPU, extra batches by the CPU) ----
+    // G6 SH3: an emitter with a Godot particles shader spawns and updates with its own kernels; every other emitter keeps the shared ones.
+    const auto spawnPso = [&](const Item& it) { return it.inst->gdKernels ? gdKernels_[it.inst->gdKernels - 1].spawn : csSpawn_; };
+    const auto updatePso = [&](const Item& it) { return it.inst->gdKernels ? gdKernels_[it.inst->gdKernels - 1].update : csUpdate_; };
     ctx.setPipeline(csSpawn_);
     for (Item& it : items) {
+        if (it.inst->gdKernels) ctx.setPipeline(spawnPso(it));
         bind(it, static_cast<u32>(sizeof(GpuSimCB)));
         ctx.dispatchIndirect(pool_.page(it.inst->range.page).args.h, argsOffset(it, kArgSpawn));
+        if (it.inst->gdKernels) ctx.setPipeline(csSpawn_);
     }
     for (Item& it : items) {
         GpuJob& j = *it.job;
         if (j.extra.empty()) continue;
+        ctx.setPipeline(spawnPso(it));
         GpuSimCB batch = j.cb;
         u32 firstId = j.cb.h.firstId + j.cb.h.spawnTotal;
         for (usize start = 0; start < j.extra.size(); start += kGpuMaxRequests) {
@@ -523,8 +622,10 @@ void ParticleGpu::recordRound(rhi::IRenderContext& ctx, std::vector<Item>& items
     // ---- Phase 4: update ----
     ctx.setPipeline(csUpdate_);
     for (Item& it : items) {
+        if (it.inst->gdKernels) ctx.setPipeline(updatePso(it));
         bind(it, kHeaderBytes);
         ctx.dispatchIndirect(pool_.page(it.inst->range.page).args.h, argsOffset(it, kArgUpdate));
+        if (it.inst->gdKernels) ctx.setPipeline(csUpdate_);
     }
     barrierAll(false);
     argsTo(ResourceState::UnorderedAccess);

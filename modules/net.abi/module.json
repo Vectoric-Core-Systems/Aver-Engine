@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Aver.Net.Abi",
+  "dir": "net.abi",
+  "displayName": "Networking ABI",
+  "description": "Plain-C seam onto sockets and the reliable-UDP protocol so Aver.Fabric's multiplayer, UDP and TCP classes drive them.",
+  "category": "Networking",
+  "option": null,
+  "required": false,
+  "default": true,
+  "dependsOn": ["Aver.Core", "Aver.Net"],
+  "derivedFrom": ["Aver.Net"],
+  "consequence": ""
+}

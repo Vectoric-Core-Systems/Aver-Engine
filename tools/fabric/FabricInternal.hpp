@@ -9,6 +9,7 @@
 #include "aver/formats/OcProject.hpp"
 #include "aver/formats/OcWorld.hpp"
 #include "aver/formats/godot/GodotProjectFs.hpp"
+#include "aver/formats/godot/GodotShaderEngine.hpp"
 
 #include <map>
 #include <memory>
@@ -114,6 +115,7 @@ bool isControlClass(const std::string& type);
 bool is2DClass(const std::string& type);
 bool isCsgClass(const std::string& type);   // G4 R7: the CSGShape3D family (FabricGeometry.cpp)
 bool isNavigationResourceType(const std::string& type);   // G5 N1: NavigationMesh (FabricNav.cpp)
+bool isReplicationResourceType(const std::string& type);  // G6 NET2: SceneReplicationConfig (FabricNet.cpp)
 bool isAnimTreeResourceType(const std::string& type);   // G5 A2: AnimationNode*, Curve, Curve3D, Gradient (FabricAnimTree.cpp)
 bool isAudioExt(const std::string& ext);                // G5 S1: ".wav", ".ogg", ".mp3" (FabricAudio.cpp)
 bool isAudioStreamResourceType(const std::string& type);   // G5 S1: AudioStreamRandomizer, Playlist, Synchronized, Interactive, Polyphonic, Generator, WAV
@@ -142,6 +144,9 @@ bool isWidgetResourceType(const std::string& type);                             
 // G4 R5: the name the engine knows a SubViewport by, and a baked material reaches it through ("@rt:viewport.<key>"): the level's name, then the node names from the
 // level's root, e.g. "main:Main/Screen/View". Plain characters only (it travels in a .ocmat texture reference and a level Prop).
 std::string viewportKeyOf(const std::string& level, const FNode& node);
+
+// G6 SH3: the shader_type of a shading-language source: 0 sky, 1 fog, 2 particles, -1 anything else.
+int envShaderKindOf(const std::string& source);
 
 // ---- the converter -------------------------------------------------------------------------------------------------
 struct EnvInfo {
@@ -254,6 +259,32 @@ public:
     // The cooked material for a resource of material type; the asset path "Materials/<stem>.ocmat" or "".
     std::string materialAsset(const std::string& key, const std::string& type, const std::vector<gd::GodotProperty>& props,
                               const gd::GodotDocBase& doc, const std::string& nameHint, const Where& w);
+    // ---- FabricShader.cpp (G6 SH2) ----
+    // A ShaderMaterial (its shader prepared once for the engine and written as Shaders/<name>.ocgraph) written as Materials/<name>.ocmat: GRAPHREF, the FX record
+    // the render modes ask for, GDREGS at the material's shader_parameter/* values and a TEX per texture parameter. The asset path or "".
+    std::string shaderMaterialAsset(const std::string& key, const std::vector<gd::GodotProperty>& props, const gd::GodotDocBase& doc, const std::string& nameHint,
+                                    const Where& w);
+    bool writeShadersManifest();   // Fabric/shaders.json: every shader's uniform layout, samplers and materials (Aver.Fabric's ShaderMaterial reads it)
+    // G6 SH3. A ShaderMaterial whose shader is a sky, fog or particles shader (used by the environment, a FogVolume or a GPUParticles3D) becomes
+    // Shaders/<name>.<kind>.ocgraph (a `DOMAIN godotenv` graph, OcGraphGodot.hpp) with the material's shader_parameter/* baked into its register table; the asset path or "".
+    std::string envShaderAsset(const std::string& materialKey, int kindIndex, const std::string& source, const std::string& shaderKey, const std::string& srcFile,
+                               const std::vector<gd::GodotProperty>& props, const gd::GodotDocBase& doc, const std::string& nameHint, const Where& w);
+    // GPUParticles3D with a particles ShaderMaterial: the .ocparticle it plays and the ParticleEmitter component on its placement.
+    void emitGpuParticles(const FNode& fn, const std::vector<std::pair<std::string, Var>>& props, aver::fmt::OcWorldPlacement& p, bool quiet);
+    // A VisualShader .tres as shading-language text (and the per-node report); false when it does not convert.
+    bool visualShaderSource(const gd::GodotResource& r, const std::string& file, std::string& source);
+    std::map<std::string, std::string> visualShaderCode_;   // VisualShader file -> generated text (written under Fabric/visualshaders/)
+    struct ShaderInfo {
+        bool ok = false;
+        std::string kind = "spatial";   // spatial | sky | fog | particles
+        std::string res, stem, graphAsset;
+        aver::fmt::godot::GdEngineShader prepared;
+        std::vector<std::string> materials;                                 // Materials/<name>.ocmat written for this shader
+        std::vector<std::pair<std::string, std::string>> globalTypes;       // the project's [shader_globals]: name -> Godot type
+    };
+    std::map<std::string, ShaderInfo> shaders_;
+    std::map<std::string, std::string> shaderMaterialAssets_;
+    std::set<std::string> shaderStemsUsed_;
     // G4 R5: a ViewportTexture value (a SubResource of that class) used by the node being emitted, as the texture reference a material carries
     // ("@rt:viewport.<key>"); counts the use for the SubViewport's consumer total. "" when the value is not a ViewportTexture; an unresolvable one is
     // reported and also gives "".
@@ -322,6 +353,14 @@ public:
     Var navigationMeshObject(const std::string& type, const std::vector<gd::GodotProperty>& props, const gd::GodotDocBase& doc, const Where& w, int line);
     // Rates the properties of NavigationRegion3D, NavigationLink3D, NavigationObstacle3D and NavigationAgent3D.
     void noteNavigationNode(const FNode& fn);
+
+    // ---- FabricNet.cpp (G6 NET2) ----
+    // A SceneReplicationConfig as `Object(SceneReplicationConfig, "properties": [{"path": NodePath, "spawn": bool, "replication_mode": 0|1|2}, ...])`, every entry rated (4.0 / 4.1 sync + watch become modes).
+    Var replicationConfigObject(const std::vector<gd::GodotProperty>& props, const gd::GodotDocBase& doc, const Where& w, int line);
+    // A MultiplayerSpawner's `_spawnable_scenes`: the scene paths as the converted level paths, positions kept.
+    Var spawnableScenesValue(const Var& v, const FNode& fn, const Prop& pr);
+    // Rates the properties of MultiplayerSpawner and MultiplayerSynchronizer and the node as a whole.
+    void noteMultiplayerNode(const FNode& fn);
 
     // ---- FabricUi.cpp (G5 U1) ----
     // A StyleBox* resource as `Object(StyleBoxFlat|Texture|Line|Empty, "prop": value, ...)` for a node's theme_override_styles or a script's value, every property rated.

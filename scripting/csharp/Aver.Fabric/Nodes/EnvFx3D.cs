@@ -11,7 +11,7 @@ using Aver.Scene;
 namespace Aver.Fabric;
 
 /// <summary>Godot's RenderingServer enums that the environment nodes use.</summary>
-public static class RenderingServer
+public static partial class RenderingServer
 {
     public enum FogVolumeShape { Ellipsoid = 0, Cone = 1, Cylinder = 2, Box = 3, World = 4 }
 }
@@ -28,6 +28,7 @@ internal interface IEnvFxBackend
     bool DestroyFogVolume(int id);
     bool SetFogVolume(int id, FogVolumeShapeKind shape, float[] world12, float[] halfExtentCm3, float densityPerMetre, float[] albedo3, float[] emission3, float heightFalloff, float edgeFade);
     bool SetFogVolumeEnabled(int id, bool on);
+    bool SetFogVolumeShader(int id, string? shaderName) => false;   // G6 SH3 (a default member, so a backend written before it still compiles)
     int CreateProbe(string key);
     bool DestroyProbe(int id);
     bool SetProbeBox(int id, float[] world12, float[] halfExtentCm3, float[] originOffsetCm3);
@@ -44,6 +45,7 @@ internal sealed class NativeEnvFxBackend : IEnvFxBackend
     public bool DestroyFogVolume(int id) => EnvFx.DestroyFogVolume(id);
     public bool SetFogVolume(int id, FogVolumeShapeKind shape, float[] w, float[] h, float d, float[] a, float[] e, float f, float edge) => EnvFx.SetFogVolume(id, shape, w, h, d, a, e, f, edge);
     public bool SetFogVolumeEnabled(int id, bool on) => EnvFx.SetFogVolumeEnabled(id, on);
+    public bool SetFogVolumeShader(int id, string? shaderName) => EnvFx.SetFogVolumeShader(id, shaderName);
     public int CreateProbe(string key) => EnvFx.CreateProbe(key);
     public bool DestroyProbe(int id) => EnvFx.DestroyProbe(id);
     public bool SetProbeBox(int id, float[] w, float[] h, float[] o) => EnvFx.SetProbeBox(id, w, h, o);
@@ -119,7 +121,8 @@ public class FogVolume : VisualInstance3D
     public Vector3 Size { get => _size; set { _size = value; Publish(); } }
     public RenderingServer.FogVolumeShape Shape { get => _shape; set { _shape = value; Publish(); } }
 
-    /// <summary>A <see cref="FogMaterial"/>. Another material (a ShaderMaterial) is not converted: the volume then has Godot's default fog (density 1, white).</summary>
+    /// <summary>A <see cref="FogMaterial"/>, or a <see cref="ShaderMaterial"/> over a fog shader (G6 SH3), whose DENSITY, ALBEDO and EMISSION replace the material's. Any other
+    /// material leaves the volume with Godot's default fog (density 1, white).</summary>
     public Material? Material
     {
         get => _material;
@@ -170,6 +173,9 @@ public class FogVolume : VisualInstance3D
         FogVolumeFields f = ComputeFields();
         b.SetFogVolume(_id, f.Shape, f.World, f.Half, f.DensityPerMetre, f.Albedo, f.Emission, f.HeightFalloff, f.EdgeFade);
         b.SetFogVolumeEnabled(_id, IsVisibleInTree());
+        // G6 SH3: a ShaderMaterial over a converted fog shader replaces density, albedo and emission.
+        if (_material is ShaderMaterial { EnvironmentKind: "fog" } sm && sm.RegisterWithEngine()) b.SetFogVolumeShader(_id, sm.EnvName);
+        else b.SetFogVolumeShader(_id, null);
         _published = GlobalTransform;
         _havePublished = true;
         PublishCount++;

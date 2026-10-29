@@ -20,6 +20,7 @@ internal static class FwEnvFx
     [DllImport(Lib)] internal static extern int aver_fw_fogvol_find([MarshalAs(UnmanagedType.LPUTF8Str)] string key);
     [DllImport(Lib)] internal static extern int aver_fw_fogvol_set(int id, int shape, float[] world12, float[] halfExtentCm3, float densityPerM, float[]? albedo3,
                                                                    float[]? emission3, float heightFalloff, float edgeFade);
+    [DllImport(Lib)] internal static extern int aver_fw_fogvol_set_shader(int id, [MarshalAs(UnmanagedType.LPUTF8Str)] string? name);
     [DllImport(Lib)] internal static extern int aver_fw_fogvol_set_enabled(int id, int on);
     [DllImport(Lib)] internal static extern int aver_fw_fogvol_count();
     [DllImport(Lib)] internal static extern float aver_fw_fogvol_density_at(float x, float y, float z);

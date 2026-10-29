@@ -478,6 +478,7 @@ DXGI_FORMAT toDxgiFormat(Format f) {
         case Format::R32Float:       return DXGI_FORMAT_R32_FLOAT;
         case Format::RG32Float:      return DXGI_FORMAT_R32G32_FLOAT;
         case Format::RGB32Float:     return DXGI_FORMAT_R32G32B32_FLOAT;
+        case Format::RGBA32Float:    return DXGI_FORMAT_R32G32B32A32_FLOAT;
         case Format::R32Uint:        return DXGI_FORMAT_R32_UINT;
         case Format::D32Float:       return DXGI_FORMAT_D32_FLOAT;
         case Format::R32Typeless:    return DXGI_FORMAT_R32_TYPELESS;
@@ -553,6 +554,7 @@ Format fromDxgiFormat(DXGI_FORMAT f) {
         case DXGI_FORMAT_R8G8_UNORM:          return Format::RG8Unorm;
         case DXGI_FORMAT_R8_UNORM:            return Format::R8Unorm;
         case DXGI_FORMAT_R16G16B16A16_FLOAT:  return Format::RGBA16F;
+        case DXGI_FORMAT_R32G32B32A32_FLOAT:  return Format::RGBA32Float;
         case DXGI_FORMAT_R32_FLOAT:           return Format::R32Float;
         case DXGI_FORMAT_R32G32_FLOAT:        return Format::RG32Float;
         case DXGI_FORMAT_R32_UINT:            return Format::R32Uint;
@@ -581,6 +583,7 @@ bool isDepthFormat(Format f) { return f == Format::D32Float || f == Format::R32T
 // Bytes per texel, for interpreting the caller's rows only. Zero for block formats.
 u32 texelBytes(Format f) {
     switch (f) {
+        case Format::RGBA32Float:    return 16;
         case Format::RGBA16F:        return 8;
         case Format::RGBA8Unorm:
         case Format::RGBA8UnormSrgb:

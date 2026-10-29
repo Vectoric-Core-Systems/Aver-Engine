@@ -58,6 +58,8 @@ enum class Format : u8 {
     BGRA8Unorm,
     // Three 32-bit floats: a vertex attribute (the engine mesh's position and normal), never a texture format.
     RGB32Float,
+    // Four 32-bit floats: the converted Godot shaders' uniform table (G6 SH2), one register per texel, read with Load. Appended.
+    RGBA32Float,
 };
 
 // True for block-compressed formats, whose extents are counted in 4x4 blocks.

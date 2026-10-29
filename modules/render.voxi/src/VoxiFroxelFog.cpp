@@ -109,12 +109,52 @@ void VoxiFroxelFog::setFogVolumes(const FogVolumeBlock* block) {
     vol_.header[0] = static_cast<f32>(volCount_);
 }
 
+// G6 SH3: the fog shader set. A different set (by name, source and register counts) bumps the revision, which makes the next record() rebuild the volume variants.
+void VoxiFroxelFog::setFogShaders(std::vector<rhi::GodotEnvProgram> shaders) {
+    if (shaders.size() > rhi::kGodotFogShaderMax) shaders.resize(rhi::kGodotFogShaderMax);
+    bool same = shaders.size() == shaders_.size();
+    for (usize i = 0; same && i < shaders.size(); ++i)
+        same = shaders[i].source == shaders_[i].source && shaders[i].ns == shaders_[i].ns && shaders[i].regs == shaders_[i].regs && shaders[i].globalRegs == shaders_[i].globalRegs;
+    if (same) {
+        for (usize i = 0; i < shaders.size(); ++i) shaders_[i].values = std::move(shaders[i].values);
+        return;
+    }
+    shaders_ = std::move(shaders);
+    ++shaderRev_;
+    shaderRegs_.assign(static_cast<usize>(rhi::kGodotFogShaderMax) * rhi::kGodotFogShaderRegs * 4, 0.0f);
+    for (usize i = 0; i < shaders_.size(); ++i)
+        std::copy(shaders_[i].values.begin(), shaders_[i].values.begin() + std::min<usize>(shaders_[i].values.size(), rhi::kGodotFogShaderRegs * 4),
+                  shaderRegs_.begin() + static_cast<std::ptrdiff_t>(i * rhi::kGodotFogShaderRegs * 4));
+}
+
+void VoxiFroxelFog::setFogShaderRegisters(const std::vector<std::vector<f32>>& perShader) {
+    if (shaderRegs_.size() < static_cast<usize>(rhi::kGodotFogShaderMax) * rhi::kGodotFogShaderRegs * 4)
+        shaderRegs_.assign(static_cast<usize>(rhi::kGodotFogShaderMax) * rhi::kGodotFogShaderRegs * 4, 0.0f);
+    for (usize i = 0; i < perShader.size() && i < rhi::kGodotFogShaderMax; ++i) {
+        f32* dst = shaderRegs_.data() + i * rhi::kGodotFogShaderRegs * 4;
+        const usize n = std::min<usize>(perShader[i].size(), rhi::kGodotFogShaderRegs * 4);
+        std::copy(perShader[i].begin(), perShader[i].begin() + static_cast<std::ptrdiff_t>(n), dst);
+    }
+}
+
 // The AVER_FOG_VOLUMES twins of the scatter and integrate entries (voxi_froxel.hlsl). Same sun-shadow path as the ordinary scatter pass (rtBuilt_), so the
 // frame block's shadow mode means the same in both. Built the first frame a fog volume reaches record(); a failure is remembered until the shader files change.
 bool VoxiFroxelFog::buildVolumePipelines(rhi::IResourceFactory& res, const rhi::PipelineLayout& layout) {
     const std::string& source = rhi::shaderFile(kShaderName);
     if (source.empty()) return false;
+    // G6 SH3: with converted fog shaders the prelude carries their code and the variants are built with AVER_FOG_SHADERS; without, exactly as before.
+    std::string composedPrelude;
     const char* prelude = rhi::sharedShaderPrelude();
+    const bool withShaders = !shaders_.empty();
+    if (withShaders) {
+        std::vector<const rhi::GodotEnvProgram*> list;
+        for (const rhi::GodotEnvProgram& p : shaders_) list.push_back(&p);
+        const std::string program = rhi::godotFogProgram(list);
+        if (program.empty()) { AVER_WARN("[Voxi] volumetric fog: the Godot fog shaders could not be composed; volumes are drawn without them"); }
+        else { composedPrelude = std::string(prelude) + program; prelude = composedPrelude.c_str(); }
+    }
+    const bool shaderBuild = withShaders && !composedPrelude.empty();
+    volShaderRev_ = shaderRev_;
 
     rhi::ShaderDesc sd{};
     sd.source = source.c_str();
@@ -122,7 +162,8 @@ bool VoxiFroxelFog::buildVolumePipelines(rhi::IResourceFactory& res, const rhi::
     sd.entry = "CSFroxelScatter";
     sd.stage = rhi::ShaderStage::Compute;
     sd.minShaderModel = rtBuilt_ ? 65 : 60;
-    sd.defines = rtBuilt_ ? "AVER_RT=1;AVER_FOG_VOLUMES=1" : "AVER_RT=0;AVER_FOG_VOLUMES=1";
+    const std::string scatterDefs = std::string(rtBuilt_ ? "AVER_RT=1;AVER_FOG_VOLUMES=1" : "AVER_RT=0;AVER_FOG_VOLUMES=1") + (shaderBuild ? ";AVER_FOG_SHADERS=1" : "");
+    sd.defines = scatterDefs.c_str();
     const rhi::ShaderHandle cs = res.createShader(sd);
     rhi::ShaderDesc ig{};
     ig.source = source.c_str();
@@ -130,7 +171,8 @@ bool VoxiFroxelFog::buildVolumePipelines(rhi::IResourceFactory& res, const rhi::
     ig.entry = "CSFroxelIntegrate";
     ig.stage = rhi::ShaderStage::Compute;
     ig.minShaderModel = 60;
-    ig.defines = "AVER_RT=0;AVER_FOG_VOLUMES=1";
+    const std::string integrateDefs = std::string("AVER_RT=0;AVER_FOG_VOLUMES=1") + (shaderBuild ? ";AVER_FOG_SHADERS=1" : "");
+    ig.defines = integrateDefs.c_str();
     const rhi::ShaderHandle ics = res.createShader(ig);
     rhi::ComputePipelineDesc pd{};
     pd.layout = layout;
@@ -359,6 +401,13 @@ void VoxiFroxelFog::record(rhi::IRenderContext& ctx, rhi::BindingSetHandle table
     // G4 R8: fog volumes run the AVER_FOG_VOLUMES variants; without any, today's passes. The two store the scatter volume differently, so a switch
     // between them drops the history for a frame.
     bool useVol = false;
+    if (scatterVolPso_ && volShaderRev_ != shaderRev_) {
+        // The fog shader set changed: the volume variants carry the old code.
+        res_->destroyPipeline(scatterVolPso_);
+        if (integrateVolPso_) res_->destroyPipeline(integrateVolPso_);
+        scatterVolPso_ = integrateVolPso_ = 0;
+        volBuildFailed_ = false;
+    }
     if (volCount_ > 0 && !volBuildFailed_ && res_) {
         if (!scatterVolPso_ || !integrateVolPso_) volBuildFailed_ = !buildVolumePipelines(*res_, layout_);
         useVol = scatterVolPso_ && integrateVolPso_;
@@ -403,14 +452,22 @@ void VoxiFroxelFog::record(rhi::IRenderContext& ctx, rhi::BindingSetHandle table
         ctx.textureBarrier(f.shadowMap, rhi::ResourceState::ShaderResource, rhi::ResourceState::NonPixelShaderResource);
 
     // The constants: the engine block alone, or (fog volumes) followed by the volume block the variants declare as the tail of FroxelCB.
-    u8 blob[sizeof(FroxelConstants) + sizeof(FogVolumeBlock)];
+    // G6 SH3: with fog shaders the block is followed by their registers (the variants declare gFvGd after the volumes).
+    constexpr usize kGdBytes = static_cast<usize>(rhi::kGodotFogShaderMax) * rhi::kGodotFogShaderRegs * 4 * sizeof(f32);
+    u8 blob[sizeof(FroxelConstants) + sizeof(FogVolumeBlock) + kGdBytes];
     const void* cbData = &cb_;
     u32 cbBytes = sizeof(cb_);
     if (useVol) {
         std::memcpy(blob, &cb_, sizeof(cb_));
         std::memcpy(blob + sizeof(cb_), &vol_, sizeof(vol_));
         cbData = blob;
-        cbBytes = static_cast<u32>(sizeof(blob));
+        cbBytes = static_cast<u32>(sizeof(cb_) + sizeof(vol_));
+        if (!shaders_.empty() && shaderRegs_.size() * sizeof(f32) >= kGdBytes) {
+            const usize dim = shaders_.size() * rhi::kGodotFogShaderRegs * 4 * sizeof(f32);
+            std::memset(blob + cbBytes, 0, kGdBytes);
+            std::memcpy(blob + cbBytes, shaderRegs_.data(), std::min(dim, kGdBytes));
+            cbBytes += static_cast<u32>(shaders_.size() * rhi::kGodotFogShaderRegs * 4 * sizeof(f32));
+        }
     }
 
     ctx.setPipeline(useVol ? scatterVolPso_ : scatterPso_);

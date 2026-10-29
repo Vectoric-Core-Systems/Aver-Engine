@@ -7,6 +7,11 @@ target_compile_definitions(EnvFxTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}
 set_target_properties(EnvFxTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+add_executable(FrameworkGodotEnvAbiTest src/FrameworkGodotEnvAbiTest.cpp)
+target_link_libraries(FrameworkGodotEnvAbiTest PRIVATE Aver.Framework Aver.Formats Aver.Core)
+set_target_properties(FrameworkGodotEnvAbiTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 add_executable(FrameworkEnvFxAbiTest src/FrameworkEnvFxAbiTest.cpp)
 target_link_libraries(FrameworkEnvFxAbiTest PRIVATE Aver.Framework Aver.Core)
 set_target_properties(FrameworkEnvFxAbiTest PROPERTIES

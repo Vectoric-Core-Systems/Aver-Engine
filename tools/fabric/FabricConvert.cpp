@@ -301,6 +301,7 @@ int Converter::run() {
                             0);
         writeScriptsManifest();
         writeProjectManifest();
+        writeShadersManifest();   // G6 SH2
     }
 
     const std::string reportTitle = project_.name.empty() ? name_ : project_.name;

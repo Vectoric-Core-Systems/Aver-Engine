@@ -111,9 +111,9 @@ static class ConvertScriptsTests
         T.Check("[Tool] is reported unsupported with its line in the output", tool is { Rating: Rating.Unsupported, Line: 4 }, tool?.ToJson() ?? "no item");
         T.Check("[GlobalClass] is converted", Item(r, "attribute", "GlobalClass") is { Rating: Rating.Converted });
         T.Check("[Icon] is approximated", Item(r, "attribute", "Icon") is { Rating: Rating.Approximated });
-        T.Check("[Rpc(mode, options)] becomes [Rpc(\"AnyPeer\")]", text.Contains("[Rpc(\"AnyPeer\")]"));
+        T.Check("[Rpc(mode, options)] is kept as written", text.Contains("[Rpc(MultiplayerApi.RpcMode.AnyPeer, CallLocal = true)]"));
         T.Check("a bare [Rpc] stays bare", text.Contains("[Rpc] public void R2()"));
-        T.Check("both Rpcs are reported approximated", r.Items.Count(i => i.Property == "Rpc" && i.Rating == Rating.Approximated) == 2);
+        T.Check("both Rpcs are reported converted (G6 NET2 dispatches them)", r.Items.Count(i => i.Property == "Rpc" && i.Rating == Rating.Converted) == 2);
         T.Check("[Export] [ExportGroup] [Signal] are kept as written", text.Contains("[ExportGroup(\"G\")] [Export] public int A;") && text.Contains("[Signal] public delegate void DoneEventHandler();"));
         T.Check("the script's summary line counts the export", r.Scripts[0].Items[0].Reason.Contains("1 [Export] member(s)"));
     }
@@ -390,7 +390,7 @@ static class ConvertScriptsTests
         Type kt = asm.GetType("Pickup")!;
         T.Check("[Tool] and [GlobalClass] are kept", kt.GetCustomAttribute<ToolAttribute>() != null && kt.GetCustomAttribute<GlobalClassAttribute>() != null);
         T.Check("[Icon] is kept", kt.GetCustomAttribute<IconAttribute>()?.Path == "res://icons/pickup.svg");
-        T.Check("[Rpc(mode, CallLocal = true)] became [Rpc(\"AnyPeer\")]", kt.GetMethod("Collect")!.GetCustomAttribute<RpcAttribute>()?.Mode == "AnyPeer");
+        T.Check("[Rpc(mode, CallLocal = true)] is kept with its options", kt.GetMethod("Collect")!.GetCustomAttribute<RpcAttribute>() is { Mode: MultiplayerApi.RpcMode.AnyPeer, CallLocal: true, TransferMode: MultiplayerPeer.TransferModeEnum.Reliable, TransferChannel: 0 });
         T.Check("MethodName.Collect", kt.GetNestedType("MethodName")!.GetField("Collect")!.GetValue(null)!.ToString() == "Collect");
         var pickup = (Area3D)Activator.CreateInstance(kt)!;
         SceneTree.Instance.Root.AddChild(pickup);

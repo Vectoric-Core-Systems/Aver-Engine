@@ -317,6 +317,13 @@ private:
     // ---- wave3 terrain layers ----
     TerrainResolver terrainResolve_ = nullptr;
     void*           terrainUser_ = nullptr;
+    // ---- G6 SH2: the uniform table of a converted Godot shader (MaterialDesc::gd) ----
+    // One RGBA32F texture per binding set, one register per texel, owned here and rebuilt when the registers change. It is bound to slot kGdTableSlot and is
+    // not part of the texture refcount; update()'s eviction and shutdown() destroy it.
+    struct GdTable { rhi::TextureHandle tex = 0; std::vector<f32> regs; };
+    std::unordered_map<rhi::BindingSetHandle, GdTable> gdTables_;
+    std::unordered_set<rhi::TextureHandle> gdHandles_;
+    rhi::TextureHandle gdTableFor(rhi::BindingSetHandle set, const GdShaderParams& p);
     std::unordered_map<std::string, rhi::TextureHandle> rtTextures_;   // "@rt:<name>" -> handle (not owned)
     std::unordered_set<rhi::TextureHandle> rtHandles_;                 // the same handles, for retain/release to skip
     std::unordered_map<std::string, TerrainTextures> terrainInfo_;     // atlas key -> layout and averages

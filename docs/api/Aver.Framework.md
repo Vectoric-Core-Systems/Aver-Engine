@@ -2,7 +2,7 @@
 
 # Aver.Framework public API
 
-234 public types and 1980 public members, read from `scripting/csharp/Aver.Framework/` (140 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+236 public types and 1989 public members, read from `scripting/csharp/Aver.Framework/` (141 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Framework
 
@@ -1384,6 +1384,7 @@ Values: `Destroy = 0`, `Stop = 1`, `Reload = 2`, `Travel = 3`
 - `public static int FindFogVolume(string key)`
 - `public static bool SetFogVolume(int id, FogVolumeShapeKind shape, float[] world12, float[] halfExtentCm3, float densityPerMetre, float[]? albedo3 = null, float[]? emission3 = null, float heightFalloff = 0f, float edgeFade = 0.1f)` - Everything about the volume in one call.
 - `public static bool SetFogVolumeEnabled(int id, bool on)`
+- `public static bool SetFogVolumeShader(int id, string? shaderName)` - G6 SH3: a converted Godot fog shader (registered with Register as Fog) replaces the volume's density, albedo and emission.
 - `public static int FogVolumeCount { get; }`
 - `public static float FogDensityAt(float x, float y, float z)` - The summed signed extinction per centimetre of every enabled volume at an engine-space point.
 - `public static int CreateProbe(string key)`
@@ -1707,6 +1708,22 @@ Values: `DPadUp = 0`, `DPadDown`, `DPadLeft`, `DPadRight`, `Start`, `Back`, `Lef
 - `public void Clear()` - Drops every tag.
 - `public IEnumerator<GameplayTag> GetEnumerator()` - Exact tags in id order.
 - `public override string ToString()` - Inherited documentation.
+
+### GodotEnv
+
+`public static class GodotEnv` - Converted Godot sky, fog and particles shaders (docs/plans/fabric/G6_SHADERS.md SH3).
+
+- `public static bool Register(GodotEnvKind kind, string name, string ocgraphText)` - Registers (or replaces) the shader name from the text of its .ocgraph.
+- `public static bool SetRegisters(GodotEnvKind kind, string name, float[] registers)` - Replaces the shader's uniform registers (four floats a register, normal block then global block).
+- `public static bool UseSky(string? name)` - Makes the registered sky shader the sky; null or empty returns to the engine's own sky.
+- `public static bool Unregister(GodotEnvKind kind, string name)` - Removes the shader; false when no shader of that kind and name is registered.
+- `public static int Count(GodotEnvKind kind)` - How many shaders of the kind are registered.
+
+### GodotEnvKind
+
+`public enum GodotEnvKind` - The kinds of converted Godot shader the renderers can run beyond a mesh material (AVER_FW_GENV_*).
+
+Values: `Sky = 0`, `Fog = 1`, `Particles = 2`
 
 ### GroundSample
 

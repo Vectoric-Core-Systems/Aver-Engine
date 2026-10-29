@@ -4,6 +4,7 @@
 
 #include "aver/core/Log.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -120,6 +121,9 @@ void MaterialSystem::shutdown() {
     // wrote there. cacheAverage_/setAverage_/setTextures_ predate level-scoped residency and were
     // never cleared here before it; textureRefs_/cacheKeyOf_/cacheBytes_ are its own new state and
     // would be just as stale left behind.
+    for (auto& kv : gdTables_) if (kv.second.tex) res_->destroyTexture(kv.second.tex);   // G6 SH2
+    gdTables_.clear();
+    gdHandles_.clear();
     cacheAverage_.clear();
     cacheBytes_.clear();
     cacheKeyOf_.clear();
@@ -263,6 +267,8 @@ void MaterialSystem::writeSlots(const MaterialDesc& d, rhi::BindingSetHandle set
             else if (i >= 3 && i <= 5) r = resolveTexture(d.textures[i], static_cast<TextureSlot>(i), retryFailed);
             if (i == 3 || i == 4) { if (!r.handle) r.handle = zero_; }
             if (i == 5 && !r.handle) r.handle = tb.params;
+        } else if (i == kGdTableSlot && d.gd.active()) {
+            r.handle = gdTableFor(set, d.gd);   // G6 SH2: the Godot shader's uniform registers, not a file
         } else {
             r = resolveTexture(d.textures[i], static_cast<TextureSlot>(i), retryFailed);
         }
@@ -306,6 +312,30 @@ void MaterialSystem::writeSlots(const MaterialDesc& d, rhi::BindingSetHandle set
         // eviction loop) is what this system's "MiB freed" line exists to report.
     }
     setTextures_[set] = effective;
+}
+
+// G6 SH2. The registers as an RGBA32F texture `registerCount` texels wide. Rebuilt (the old one destroyed, deferred by contract) only when the values differ.
+rhi::TextureHandle MaterialSystem::gdTableFor(rhi::BindingSetHandle set, const GdShaderParams& p) {
+    GdTable& t = gdTables_[set];
+    if (t.tex && t.regs == p.regs) return t.tex;
+    rhi::TextureDesc td;
+    td.width = std::max<u32>(p.registerCount(), 1u);
+    td.height = 1;
+    td.format = rhi::Format::RGBA32Float;
+    td.bind = rhi::ResourceBind::ShaderResource;
+    td.initialState = rhi::ResourceState::ShaderResource;
+    const void* levels[1] = {p.regs.data()};
+    td.initialData = levels;
+    td.initialDataCount = 1;
+    td.initialRowPitch = td.width * 16u;
+    td.debugName = "GodotShaderUniforms";
+    const rhi::TextureHandle fresh = res_->createTexture(td);
+    if (!fresh) return t.tex;   // keep the previous table rather than bind nothing
+    if (t.tex) { gdHandles_.erase(t.tex); res_->destroyTexture(t.tex); }
+    t.tex = fresh;
+    t.regs = p.regs;
+    gdHandles_.insert(fresh);
+    return fresh;
 }
 
 // ---- wave3 terrain layers ----
@@ -417,7 +447,7 @@ MaterialSystem::TerrainBound MaterialSystem::resolveTerrain(const MaterialDesc& 
 // fallback every OTHER material also falls back to.
 void MaterialSystem::retainSlotTextures(const std::array<rhi::TextureHandle, kTextureSlotCount>& effective) {
     for (const rhi::TextureHandle h : effective) {
-        if (!h || h == white_ || h == flatNormal_ || h == metalRough_ || h == zero_ || isRuntimeTexture(h)) continue;
+        if (!h || h == white_ || h == flatNormal_ || h == metalRough_ || h == zero_ || isRuntimeTexture(h) || gdHandles_.count(h)) continue;
         ++textureRefs_[h];
     }
 }
@@ -609,6 +639,10 @@ void MaterialSystem::update() {
                 setTextures_.erase(st);
             }
             setAverage_.erase(it->second.set);
+            if (const auto gt = gdTables_.find(it->second.set); gt != gdTables_.end()) {   // G6 SH2
+                if (gt->second.tex) { gdHandles_.erase(gt->second.tex); res_->destroyTexture(gt->second.tex); }
+                gdTables_.erase(gt);
+            }
             releasedSets_.insert(it->second.set);
             res_->destroyBindingSet(it->second.set);
         }

@@ -21,6 +21,7 @@
 #include "aver/pbr/MaterialGraphHlsl.hpp"
 
 #include "aver/formats/OcGraph.hpp"
+#include "aver/rhi/ShaderFiles.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -782,6 +783,18 @@ MaterialGraphBody compileMaterialGraph(const fmt::OcGraphData& g) {
         return r;
     }
 
+    // G6 SH2: a converted Godot shader is one GodotShader node and nothing else; its arms are built by materialGraphHlsl from the node's parts.
+    if (fmt::ocGraphHasGodotShader(g)) {
+        std::string gerr;
+        if (!fmt::unpackGodotShader(g, r.gd, &gerr)) { r.error = gerr; return r; }
+        if (!r.gd.hasFragment && !r.gd.hasVertex) { r.error = "the GodotShader node has neither a fragment() nor a vertex() to run"; return r; }
+        if (r.gd.ns.empty()) { r.error = "the GodotShader node has no ns= name prefix"; return r; }
+        if (r.gd.totalRegs() > 256u) { r.error = "the shader's uniforms need " + std::to_string(r.gd.totalRegs()) + " registers; a material table holds 256"; return r; }
+        r.isGodot = true;
+        r.ok = true;
+        return r;
+    }
+
     // Exactly one sink. Two would each be a complete description of the surface, and nothing in the
     // file would say which one wins.
     const fmt::OcGraphNode* out = nullptr;
@@ -841,6 +854,24 @@ MaterialGraphBody compileMaterialGraph(const fmt::OcGraphData& g) {
 // holds whatever was last bound, never the hit's material). The body is the graph's one compile,
 // with its raster-only tokens substituted for the ray twin rather than emitted twice from the graph,
 // so the two copies cannot drift.
+// G6 SH2: the arm of a converted Godot shader. Loads the shader's uniform registers from the material's table (slot 7), runs its fragment() (the raster
+// flavour or, for the ray twin, the derivative-free ray flavour of the same source) and maps the context onto the AverAuthored. `fx` carries the
+// render-mode bits gdPost acts on once the surface is built (bit 31: a Godot shader ran).
+static std::string godotArm(const MaterialGraphEntry& e, bool rayTwin) {
+    const fmt::GodotShaderPart& p = e.gd;
+    const std::string load = rayTwin ? "gdrLoadReg" : "gdLoadReg";
+    std::string s;
+    s += rayTwin ? "        gdrFragmentBegin(v, uv);\n" : "        gdFragmentBegin(v, uv);\n";
+    if (p.regsU) s += "        [unroll] for (uint k = 0u; k < " + std::to_string(p.regsU) + "u; ++k) gGdU[k] = " + load + "(k);\n";
+    if (p.regsI) s += "        [unroll] for (uint k = 0u; k < " + std::to_string(p.regsI) + "u; ++k) gGdI[k] = " + load + "(" + std::to_string(p.regsU) + "u + k);\n";
+    if (p.regsG) s += "        [unroll] for (uint k = 0u; k < " + std::to_string(p.regsG) + "u; ++k) gGdG[k] = " + load + "(" + std::to_string(p.regsU + p.regsI) + "u + k);\n";
+    if (p.hasFragment) s += "        " + p.ns + (rayTwin ? "T_" : "R_") + "main_fragment();\n";
+    const u32 fx = p.fx | 0x80000000u;
+    s += "        gdFragmentEnd(a, v, " + std::to_string(fx) + "u);\n";
+    if (!rayTwin) s += "        gGdFx = " + std::to_string(fx) + "u;\n";
+    return s;
+}
+
 static void emitSwitch(std::string& s, const std::vector<MaterialGraphEntry>& entries,
                        const char* key, bool rayTwin) {
     // A UNIFORM SWITCH on raster (constant across the draw); per lane on a ray pass.
@@ -854,8 +885,8 @@ static void emitSwitch(std::string& s, const std::vector<MaterialGraphEntry>& en
         s += "\n    case ";
         s += std::to_string(e.id);
         s += ": {\n";
-        std::string body = e.hlsl;
-        if (rayTwin) {
+        std::string body = e.isGodot ? godotArm(e, rayTwin) : e.hlsl;
+        if (rayTwin && !e.isGodot) {
             // The ray hit samples through the bindless table (voxi_rt.hlsli's adapter), and its object
             // position is the hit instance's, not the raster draw's gWorld.
             const auto subst = [&body](const std::string& from, const std::string& to) {
@@ -872,7 +903,156 @@ static void emitSwitch(std::string& s, const std::vector<MaterialGraphEntry>& en
     s += "    }\n";
 }
 
+bool anyGodotShader(const std::vector<MaterialGraphEntry>& entries) {
+    for (const MaterialGraphEntry& e : entries) if (e.isGodot) return true;
+    return false;
+}
+
+u32 godotVaryingRows(const std::vector<MaterialGraphEntry>& entries) {
+    u32 rows = 0;
+    for (const MaterialGraphEntry& e : entries)
+        if (e.isGodot) for (const fmt::GodotShaderVarying& v : e.gd.varyings) rows += v.rows;
+    return rows;
+}
+
+std::string godotVsOutMembersDefine(const std::vector<MaterialGraphEntry>& entries) {
+    std::string members;
+    u32 sem = kGdVaryingFirstSemantic;
+    for (const MaterialGraphEntry& e : entries) {
+        if (!e.isGodot) continue;
+        for (const fmt::GodotShaderVarying& v : e.gd.varyings) {
+            members += (v.flat ? "nointerpolation " : "") + v.decl + " : TEXCOORD" + std::to_string(sem) + "; ";
+            sem += v.rows;
+        }
+    }
+    return members.empty() ? std::string() : "#define AVER_GD_VSOUT_MEMBERS " + members + "\n";
+}
+
+namespace {
+
+// The names the library and the HLSL derivative intrinsics are redirected to for the ray flavour of a converted source.
+constexpr const char* kRayRenames[][2] = {
+    {"gd_texture", "gdr_texture"}, {"gd_textureLod", "gdr_textureLod"}, {"gd_textureGrad", "gdr_textureGrad"}, {"gd_textureSize", "gdr_textureSize"},
+    {"gd_textureQueryLevels", "gdr_textureQueryLevels"}, {"gd_textureQueryLod", "gdr_textureQueryLod"}, {"gd_textureProj", "gdr_textureProj"},
+    {"gd_textureProjLod", "gdr_textureProjLod"}, {"gd_texelFetch", "gdr_texelFetch"}, {"gd_textureGather", "gdr_textureGather"},
+    {"ddx", "gdrDdx"}, {"ddy", "gdrDdy"}, {"ddx_coarse", "gdrDdxCoarse"}, {"ddy_coarse", "gdrDdyCoarse"}, {"ddx_fine", "gdrDdxFine"}, {"ddy_fine", "gdrDdyFine"},
+    {"fwidth", "gdrFwidth"},
+};
+
+// The converted shaders' generated code: the engine's hook prelude, the library, the shaders' sources (per flavour) and the two functions the renderer
+// calls. `rayFlavour` below mirrors the raster flavour exactly except for the derivative-free texture path.
+std::string godotMaterialGraphHlsl(const std::vector<MaterialGraphEntry>& entries) {
+    std::string s;
+    s += "// ---- generated from .ocgraph material graphs (with converted Godot shaders); do not edit ----\n";
+    u32 maxU = 1, maxI = 1, maxG = 1;
+    for (const MaterialGraphEntry& e : entries) {
+        if (!e.isGodot) continue;
+        maxU = std::max(maxU, e.gd.regsU); maxI = std::max(maxI, e.gd.regsI); maxG = std::max(maxG, e.gd.regsG);
+    }
+    s += "#define AVER_GD_MAX_U " + std::to_string(maxU) + "\n#define AVER_GD_MAX_I " + std::to_string(maxI) + "\n#define AVER_GD_MAX_G " + std::to_string(maxG) + "\n";
+    s += "#define AVER_GD_SLOT_SAMPLERS 1\n";
+    s += rhi::shaderFile("material_godot.hlsl");
+    s += "\n";
+    s += rhi::shaderFile("material_godot_lib.hlsl");
+    s += "\n#define GDN(x) GD_CAT(GD_NS_CUR, x)\n";
+
+    // The varyings every converted shader declares, as one static the emitted code reads and writes.
+    const std::string vsOut = godotVsOutMembersDefine(entries);
+    if (!vsOut.empty()) {
+        s += "struct AverGdVars {";
+        for (const MaterialGraphEntry& e : entries)
+            if (e.isGodot) for (const fmt::GodotShaderVarying& v : e.gd.varyings) s += " " + v.decl + ";";
+        s += " };\nstatic AverGdVars gGdVars;\n#define AVER_GD_VARYINGS gGdVars\n";
+        s += "#ifdef AVER_GD_VARYINGS_ON\n";
+        s += "void averGdStoreVaryings(inout VSOut o) {\n";
+        for (const MaterialGraphEntry& e : entries)
+            if (e.isGodot) for (const fmt::GodotShaderVarying& v : e.gd.varyings) {
+                const usize sp = v.decl.rfind(' ');
+                std::string name = v.decl.substr(sp + 1);
+                if (const usize br = name.find('['); br != std::string::npos) name.erase(br);
+                s += "    o." + name + " = gGdVars." + name + ";\n";
+            }
+        s += "}\nvoid averGdLoadVaryings(VSOut i) {\n";
+        for (const MaterialGraphEntry& e : entries)
+            if (e.isGodot) for (const fmt::GodotShaderVarying& v : e.gd.varyings) {
+                const usize sp = v.decl.rfind(' ');
+                std::string name = v.decl.substr(sp + 1);
+                if (const usize br = name.find('['); br != std::string::npos) name.erase(br);
+                s += "    gGdVars." + name + " = i." + name + ";\n";
+            }
+        s += "}\n#endif\n";
+    }
+
+    // ---- the vertex-stage compile (VSMainGd, AVER_MATX_GDVS) ----
+    s += "#if AVER_MATX_GDVS\n";
+    for (const MaterialGraphEntry& e : entries) {
+        if (!e.isGodot || !e.gd.hasVertex) continue;
+        s += "#undef GD_NS_CUR\n#define GD_NS_CUR " + e.gd.ns + "V_\n";
+        s += e.gd.vertexSource;
+        s += "\n";
+    }
+    s += "void averGdVertex(VSIn i, inout VSOut o) {\n    switch (gMaterialGraphId) {\n";
+    for (const MaterialGraphEntry& e : entries) {
+        if (!e.isGodot || !e.gd.hasVertex) continue;
+        s += "    case " + std::to_string(e.id) + "u: {\n";
+        s += "        gdVertexBegin(i, o, " + std::to_string(e.gd.fx) + "u);\n";
+        if (e.gd.regsU) s += "        [unroll] for (uint k = 0u; k < " + std::to_string(e.gd.regsU) + "u; ++k) gGdU[k] = gdLoadReg(k);\n";
+        if (e.gd.regsI) s += "        [unroll] for (uint k = 0u; k < " + std::to_string(e.gd.regsI) + "u; ++k) gGdI[k] = gdLoadReg(" + std::to_string(e.gd.regsU) + "u + k);\n";
+        if (e.gd.regsG) s += "        [unroll] for (uint k = 0u; k < " + std::to_string(e.gd.regsG) + "u; ++k) gGdG[k] = gdLoadReg(" + std::to_string(e.gd.regsU + e.gd.regsI) + "u + k);\n";
+        s += "        " + e.gd.ns + "V_main_vertex();\n";
+        s += "        gdVertexEnd(i, o, " + std::to_string(e.gd.fx) + "u);\n";
+        s += "        break;\n    }\n";
+    }
+    s += "    default: break;\n    }\n";
+    if (!vsOut.empty()) s += "#ifdef AVER_GD_VARYINGS_ON\n    averGdStoreVaryings(o);\n#endif\n";
+    s += "}\n";
+    // The vertex compile never runs a pixel shader; the declaration keeps voxi.hlsl's pixel entry points well formed.
+    s += "AverSurface averEvalMaterial(AverVertex v, AverLight l) {\n    float2 uv = averSurfaceUV(v);\n    return averBuildSurface(v, l, averStockAuthoredAt(v, uv), uv);\n}\n";
+    s += "#else\n";
+
+    // ---- the pixel-stage compile ----
+    for (const MaterialGraphEntry& e : entries) {
+        if (!e.isGodot || !e.gd.hasFragment) continue;
+        s += "#undef GD_NS_CUR\n#define GD_NS_CUR " + e.gd.ns + "R_\n";
+        s += e.gd.fragmentSource;
+        s += "\n";
+    }
+    s += "#ifdef AVER_RT_BINDLESS\n";
+    for (const auto& rn : kRayRenames) s += std::string("#define ") + rn[0] + " " + rn[1] + "\n";
+    s += "#define discard   // a ray hit cannot discard (a compute pass has no such statement); cut-outs come from ALPHA_SCISSOR_THRESHOLD\n";
+    for (const MaterialGraphEntry& e : entries) {
+        if (!e.isGodot || !e.gd.hasFragment) continue;
+        s += "#undef GD_NS_CUR\n#define GD_NS_CUR " + e.gd.ns + "T_\n";
+        s += e.gd.fragmentSource;
+        s += "\n";
+    }
+    for (const auto& rn : kRayRenames) s += std::string("#undef ") + rn[0] + "\n";
+    s += "#undef discard\n";
+    s += "#endif\n";
+
+    s += "AverSurface averEvalMaterial(AverVertex v, AverLight l) {\n";
+    s += "#if AVER_MATX && defined(AVER_GD_FX_STOCK)\n    if (gMaterialGraphId == 0u) return averEvalMaterialFx(v, l);\n#endif\n";
+    s += "    float2 uv = averSurfaceUV(v);\n";
+    s += "    AverAuthored a = averStockAuthoredAt(v, uv);\n";
+    s += "    gGdFx = 0u;\n";
+    emitSwitch(s, entries, "gMaterialGraphId", false);
+    s += "    AverSurface s = averBuildSurface(v, l, a, uv);\n";
+    s += "    if ((gGdFx & 0x80000000u) != 0u) gdPost(s, v, l, gGdFx);\n";
+    s += "    return s;\n}\n";
+    s += "#ifdef AVER_RT_BINDLESS\n";
+    s += "float4 averRtSampleSlotGraph(uint slot, float2 uv);\n";
+    s += "static float3 gAverGraphObjectPos;\n";
+    s += "AverAuthored averApplyMaterialGraphRt(uint graphId, AverAuthored a, AverVertex v, float2 uv) {\n";
+    emitSwitch(s, entries, "graphId", true);
+    s += "    return a;\n}\n#endif\n";
+    s += "#endif\n";
+    return s;
+}
+
+}  // namespace
+
 std::string materialGraphHlsl(const std::vector<MaterialGraphEntry>& entries) {
+    if (anyGodotShader(entries)) return godotMaterialGraphHlsl(entries);
     std::string s;
     s += "// ---- generated from .ocgraph material graphs; do not edit ----\n";
 

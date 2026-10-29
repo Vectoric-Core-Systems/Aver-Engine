@@ -229,7 +229,7 @@ public class Window : Viewport
 }
 
 /// <summary>The scene tree (Godot's SceneTree): the root window, the current scene, groups, pause, timers, tweens and scene changes.</summary>
-public class SceneTree : GodotObject
+public partial class SceneTree : GodotObject
 {
     public new class SignalName : GodotObject.SignalName
     {
@@ -548,6 +548,7 @@ public class SceneTree : GodotObject
     internal void BeginPass(double dt, bool physics, double? realDelta = null)
     {
         if (!physics) LastRealDelta = realDelta ?? RealDelta();
+        PollMultiplayers(dt, physics);   // G6 NET2: Godot polls its multiplayer APIs at the head of the process frame, before the frame signal
         EmitSignal(physics ? SignalName.PhysicsFrame : SignalName.ProcessFrame);
     }
 

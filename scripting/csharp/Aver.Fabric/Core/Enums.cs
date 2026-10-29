@@ -96,13 +96,28 @@ public sealed class IconAttribute : Attribute
 [AttributeUsage(AttributeTargets.Class)]
 public sealed class ToolAttribute : Attribute { }
 
-/// <summary>Documents a method as an RPC (networking is a later wave; recorded only).</summary>
+/// <summary>Marks a method as an RPC (G6 NET2): GodotSharp's attribute. The mode is who may call it, <c>CallLocal</c> also runs it on the caller,
+/// <c>TransferMode</c> and <c>TransferChannel</c> choose how the packet travels. The defaults are GodotSharp's: authority, call remote, reliable, channel 0.</summary>
 [AttributeUsage(AttributeTargets.Method)]
 public sealed class RpcAttribute : Attribute
 {
     public RpcAttribute() { }
-    public RpcAttribute(string mode) { Mode = mode; }
-    public string Mode { get; } = "authority";
+    public RpcAttribute(MultiplayerApi.RpcMode mode) { Mode = mode; }
+
+    /// <summary>The form an earlier conversion wrote: the mode by name ("AnyPeer", "authority", "any_peer", "disabled").</summary>
+    public RpcAttribute(string mode) { Mode = ParseMode(mode); }
+
+    public MultiplayerApi.RpcMode Mode { get; } = MultiplayerApi.RpcMode.Authority;
+    public bool CallLocal { get; set; }
+    public MultiplayerPeer.TransferModeEnum TransferMode { get; set; } = MultiplayerPeer.TransferModeEnum.Reliable;
+    public int TransferChannel { get; set; }
+
+    internal static MultiplayerApi.RpcMode ParseMode(string mode) => mode.Replace("_", "").ToLowerInvariant() switch
+    {
+        "anypeer" => MultiplayerApi.RpcMode.AnyPeer,
+        "disabled" => MultiplayerApi.RpcMode.Disabled,
+        _ => MultiplayerApi.RpcMode.Authority,
+    };
 }
 
 /// <summary>How an exported property is edited (Godot's PropertyHint, the values scripts name).</summary>

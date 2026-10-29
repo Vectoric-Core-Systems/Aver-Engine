@@ -26,6 +26,84 @@ RWStructuredBuffer<uint>      gParentEvents: register(u6);   // the parent's, re
 RWStructuredBuffer<uint2>     gSortKeys    : register(u7);   // unused by the simulation, bound for the sort kernels
 RWStructuredBuffer<float4>    gTrail       : register(u8);   // trail ribbons: ring points per slot
 
+#if AVER_GD_PARTICLES
+// ------------------------------------------------------------------------------------------------ G6 SH3: a Godot particles shader as the custom stage
+// Compiled only for an emitter that carries one (godot_particles.hlsl is in the prelude, aver::rhi::godotParticlesProgram). The shader sees Godot's state in
+// Godot's space and units (metres, +Y up); the particle keeps position, velocity, age and lifetime, and gTrail -- unused by a sprite emitter -- holds what the
+// 64-byte particle has no room for: per slot five float4s, COLOR, CUSTOM, then the transform's three basis columns with MASS in the first one's w.
+// The draw reads colour (as 8 bits per channel), uniform scale and a spin from the particle; the full state stays here. Godot's process() does the integrating
+// (TRANSFORM[3].xyz += VELOCITY * DELTA), so the built-in gravity, damping, modules and position step are skipped for such an emitter.
+#define PGD_VECS 5u
+void pGdLoadTable() {
+    [unroll] for (uint i = 0u; i < 16u; ++i) {
+        gGdPartU[i] = gUser[i];
+        gGdPartG[i] = gUser[min(i + (uint)AVER_GD_PART_REGS, 15u)];
+    }
+}
+void pGdStore(uint slot, inout PParticle p, GdPartIO io) {
+    p.position = gdeG2E(io.xform[3].xyz) * 100.0;
+    p.velocity = gdeG2E(io.velocity) * 100.0;
+    const float3 c0 = io.xform[0].xyz, c1 = io.xform[1].xyz, c2 = io.xform[2].xyz;
+    p.sizeScale = (length(c0) + length(c1) + length(c2)) * (1.0 / 3.0);
+    p.rotation = atan2(c0.y, c0.x);
+    p.tint = pPackRgba8(saturate(io.color));
+    const uint b = slot * PGD_VECS;
+    gTrail[b + 0u] = io.color;
+    gTrail[b + 1u] = io.custom;
+    gTrail[b + 2u] = float4(c0, io.mass);
+    gTrail[b + 3u] = float4(c1, 0.0);
+    gTrail[b + 4u] = float4(c2, 0.0);
+    if (!io.active) p.age = p.lifetime;   // dies at the next update
+}
+GdPartIO pGdBase(uint slot, PParticle p) {
+    GdPartIO io = (GdPartIO)0;
+    io.lifetime = p.lifetime;
+    io.delta = gS.dt;
+    io.time = gS.time;
+    io.number = p.id;
+    io.index = slot;
+    io.seed = p.seed;
+    io.active = true;
+    io.mass = 1.0;
+    io.color = float4(1.0, 1.0, 1.0, 1.0);
+    io.custom = float4(0.0, 0.0, 0.0, 0.0);
+    io.emission = gdePartMatrixFromEngine(float3(1, 0, 0), float3(0, 1, 0), float3(0, 0, 1), float3(0, 0, 0));
+    return io;
+}
+void pGdSpawn(uint slot, inout PParticle p, float4 xf0, float4 xf1, float4 xf2, float4 xf3) {
+    pGdLoadTable();
+    GdPartIO io = pGdBase(slot, p);
+    io.restart = true;
+    io.emission = gdePartMatrixFromEngine(xf0.xyz, xf1.xyz, xf2.xyz, xf3.xyz);
+    io.xform = gdePartMatrixFromEngine(xf0.xyz, xf1.xyz, xf2.xyz, p.position);
+    io.velocity = gdeE2G(p.velocity) * 0.01;
+#if AVER_GD_HAS_START
+    averGdParticleStart(io);
+#endif
+    pGdStore(slot, p, io);
+}
+// False when the shader cleared ACTIVE (the particle dies).
+bool pGdProcess(uint slot, inout PParticle p) {
+#if AVER_GD_HAS_PROCESS
+    pGdLoadTable();
+    const uint b = slot * PGD_VECS;
+    const float4 r0 = gTrail[b + 2u], r1 = gTrail[b + 3u], r2 = gTrail[b + 4u];
+    GdPartIO io = pGdBase(slot, p);
+    io.restart = (p.age - gS.dt) <= 1.0e-6;
+    io.color = gTrail[b + 0u];
+    io.custom = gTrail[b + 1u];
+    io.mass = r0.w;
+    io.xform = float4x4(float4(r0.xyz, 0.0), float4(r1.xyz, 0.0), float4(r2.xyz, 0.0), float4(gdeE2G(p.position) * 0.01, 1.0));
+    io.velocity = gdeE2G(p.velocity) * 0.01;
+    averGdParticleProcess(io);
+    pGdStore(slot, p, io);
+    return io.active;
+#else
+    return true;
+#endif
+}
+#endif
+
 float pUserValue(uint refByte, float literal) {
     if (refByte == 0u) return literal;
     uint r = refByte - 1u;
@@ -195,6 +273,9 @@ void CSSpawn(uint3 dtid : SV_DispatchThreadID) {
         PMod m = pLoadModule(mi);
         if (m.stage == 0u) pRunSpawnModule(m, p, velocity);
     }
+#if AVER_GD_PARTICLES
+    if ((gS.flags & PGPU_FLAG_GODOT) != 0u) pGdSpawn(slot, p, xf0, xf1, xf2, xf3);
+#endif
 
     if (gS.trailRing != 0u) {
         gTrail[slot * gS.trailRing] = float4(p.position, 0.0);
@@ -240,7 +321,17 @@ void CSUpdate(uint3 dtid : SV_DispatchThreadID) {
     if (p.age >= p.lifetime) {
         if ((gS.flags & PGPU_FLAG_DEATH_EVT) != 0u) pRaiseEvent(0u, p);
         dead = true;
-    } else {
+    }
+#if AVER_GD_PARTICLES
+    else if ((gS.flags & PGPU_FLAG_GODOT) != 0u) {
+        // G6 SH3: the Godot shader's process() is the whole update (see pGdProcess).
+        if (!pGdProcess(slot, p)) {
+            if ((gS.flags & PGPU_FLAG_DEATH_EVT) != 0u) pRaiseEvent(0u, p);
+            dead = true;
+        }
+    }
+#endif
+    else {
         p.velocity += gS.gravity * gS.dt;
         if (gS.damping > 0.0) p.velocity *= max(0.0, 1.0 - gS.damping * gS.dt);
         for (uint mi = 0u; mi < gS.moduleCount; ++mi) {

@@ -42,6 +42,9 @@ AVER_FW_ABI int32_t aver_fw_fogvol_find(const char* key);
  * densityPerM is Godot's FogMaterial.density (extinction per metre, negative carves). Returns 0 for a bad id, a non-finite value or a singular matrix. */
 AVER_FW_ABI int32_t aver_fw_fogvol_set(int32_t id, int32_t shape, const float* world12, const float* halfExtentCm3, float densityPerM,
                                        const float* albedo3, const float* emission3, float heightFalloff, float edgeFade);
+/* G6 SH3: a converted Godot fog shader (registered through framework_godotenv_abi.h as kind AVER_FW_GENV_FOG) replaces the volume's density, albedo and emission.
+ * null or empty goes back to the volume's own values. Returns 0 for a bad id; an unregistered name is kept and takes effect once it is registered. */
+AVER_FW_ABI int32_t aver_fw_fogvol_set_shader(int32_t id, const char* name);
 AVER_FW_ABI int32_t aver_fw_fogvol_set_enabled(int32_t id, int32_t on);
 AVER_FW_ABI int32_t aver_fw_fogvol_count(void);
 /* The density (extinction per cm, signed) of every volume summed at a world point: the number the shader adds to the medium. For scripts and tests. */

@@ -605,7 +605,28 @@ static void testMeta() {
     check(sizeof(particles::Particle) == 64, "the simulation POD this format feeds is the 64-byte wave-10 layout");
 }
 
+// G6 SH3: GDSHADER names a converted Godot particles shader; it forces the v2 spelling and round trips.
+static void testGodotShader() {
+    AVER_INFO("=== .ocparticle: GDSHADER ===");
+    const char* text =
+        "OCPARTICLE 2\nPARAM reg0 color 1 0 0 1\nEMITTER sparks\nSIM gpu\nSHAPE point 0 0 0\nBLEND premultiplied\nEMISSION 32 0 64\nLIFETIME 2 2\nDIRECTION 0 0 1 0\nSPEED 0 0\nGRAVITY 0 0 0\n"
+        "DAMPING 0\nSIZE 50 50\nCOLOR start 1 1 1 1\nCOLOR end 1 1 1 1\nGDSHADER ge12345678_sparks\n";
+    particles::ParticleSystemDef def;
+    std::string err;
+    check(fmt::parseOcparticleSystem(text, def, nullptr, &err), "a system with GDSHADER parses: " + err);
+    check(def.emitters.size() == 1 && def.emitters[0].godotShader == "ge12345678_sparks", "the shader name is read");
+    const std::string written = fmt::writeOcparticleSystem(def);
+    check(written.rfind("OCPARTICLE 2", 0) == 0 && written.find("GDSHADER ge12345678_sparks") != std::string::npos, "it is written back, as version 2");
+    particles::ParticleSystemDef back;
+    check(fmt::parseOcparticleSystem(written, back, nullptr, &err) && back.emitters[0].godotShader == "ge12345678_sparks" && fmt::writeOcparticleSystem(back) == written, "write -> parse -> write is byte-identical");
+    particles::ParticleSystemDef plain;
+    plain.emitters.emplace_back();
+    check(fmt::writeOcparticleSystem(plain).find("GDSHADER") == std::string::npos && fmt::ocparticleFitsV1(plain), "an effect without a shader writes no GDSHADER and stays version 1");
+    check(!fmt::parseOcparticleSystem("OCPARTICLE 2\nGDSHADER\n", back, nullptr, &err) && !fmt::parseOcparticleSystem("OCPARTICLE 2\nGDSHADER a b\n", back, nullptr, &err), "a GDSHADER without exactly one name is refused");
+}
+
 int main() {
+    testGodotShader();
     testMeta();
     testRangesRefused();
     testFullParse();

@@ -157,6 +157,9 @@ struct ParticleEffect {
     std::vector<Module> modules;        // authored order is execution order within a phase
     std::vector<EventSpawn> events;
     std::string name;                   // emitter name (events and the editor refer to it)
+    // G6 SH3: the name of a registered converted Godot particles shader (setGodotParticlePrograms). Its start() runs when a particle is born and its process() on every
+    // update, replacing the built-in integration; it needs the GPU tier (an emitter that lands on the CPU tier simulates without it). Empty = none, today's emitter.
+    std::string godotShader;
 };
 
 // A whole authored effect: one or more emitters sharing user parameters.
