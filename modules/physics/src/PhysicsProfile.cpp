@@ -358,9 +358,12 @@ std::string topSummary() {
     std::string s;
     for (size_t i = 0; i < rows.size() && i < 3; ++i) {
         if (rows[i].exclusiveMs <= 0.0) break;
-        char buf[96];
-        std::snprintf(buf, sizeof buf, "%s%s %.2f ms", s.empty() ? "" : " | ", rows[i].name.c_str(), rows[i].exclusiveMs);
-        s += buf;
+        // GCC and Clang name Jolt's scopes by their whole signature, so the name is appended untruncated.
+        char ms[32];
+        std::snprintf(ms, sizeof ms, " %.2f ms", rows[i].exclusiveMs);
+        if (!s.empty()) s += " | ";
+        s += rows[i].name;
+        s += ms;
     }
     return s;
 }

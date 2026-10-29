@@ -131,9 +131,15 @@ static void testTree() {
         if (x.name == "PhysicsStep") check(x.calls > 0.95 && x.calls < 1.05, "PhysicsStep runs once per fixed step");
     check(!r.empty() && r[0].incl > 0.0, "the first row has time in it");
 
-    uint8_t summary[256] = {};
-    const int need = aver_phys_profile_summary(summary, static_cast<int32_t>(sizeof summary));
-    check(need > 1 && std::strlen(reinterpret_cast<const char*>(summary)) + 1 == static_cast<size_t>(need), "summary names the largest scopes");
+    // Sized by a first call: GCC and Clang scope names are whole signatures, so three of them can pass 256 bytes.
+    const int need = aver_phys_profile_summary(nullptr, 0);
+    std::vector<uint8_t> summary(static_cast<size_t>(need > 0 ? need : 1), 0);
+    const int got = aver_phys_profile_summary(summary.data(), static_cast<int32_t>(summary.size()));
+    check(need > 1 && got == need && std::strlen(reinterpret_cast<const char*>(summary.data())) + 1 == static_cast<size_t>(need),
+          "summary names the largest scopes");
+    uint8_t small[8] = {};
+    check(aver_phys_profile_summary(small, static_cast<int32_t>(sizeof small)) == need && small[sizeof small - 1] == 0,
+          "a short buffer gets a terminated prefix and the full length");
     check(aver_phys_profile_summary(nullptr, 0) == need, "summary with no buffer answers the length needed");
 
     double v[4]; int pd[2]; uint8_t nm[8];
