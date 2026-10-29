@@ -61,6 +61,7 @@ static std::string slurp(const std::string& path) {
 static float lin(double c) { return static_cast<float>(c <= 0.04045 ? c / 12.92 : std::pow((c + 0.055) / 1.055, 2.4)); }
 static bool near(float a, float b, float tol = 1e-5f) { return std::fabs(a - b) <= tol; }
 static int asInt(float f) { int i; std::memcpy(&i, &f, sizeof i); return i; }
+static unsigned asBits(float f) { unsigned u; std::memcpy(&u, &f, sizeof u); return u; }
 
 // The first file in `dir` whose name ends with `suffix`.
 static std::string findFile(const std::string& dir, const std::string& suffix) {
@@ -149,7 +150,10 @@ int main() {
             check(e.simTier == particles::SimTier::Gpu && e.maxParticles == 64 && std::fabs(e.lifetimeMin - 2.0f) < 1e-5f, "SIM gpu, amount 64, lifetime 2");
             check(std::fabs(e.emissionRate - 32.0f) < 1e-3f && e.burstCount == 0, "the rate is amount / lifetime");
             check(std::fabs(e.sizeStart - 50.0f) < 1e-3f, "the QuadMesh's 0.5 m is the sprite size (50 cm)");
-            check(def.params.size() == 2 && def.params[0].name == "reg0" && def.params[0].kind == 2, "the shader's two registers are the colour-kind user parameters reg0 and reg1");
+            check(def.params.size() == 3 && def.params[0].name == "reg0" && def.params[0].kind == 2, "the shader's three registers are the colour-kind user parameters reg0 to reg2");
+            // reg2 holds the int uniforms as raw words: -1 is a NaN pattern and 100000000 does not survive six digits
+            check(def.params.size() == 3 && asBits(def.params[2].v[0]) == 0xFFFFFFFFu && asBits(def.params[2].v[1]) == 100000000u, "int defaults keep their bit patterns through the baked user parameters");
+            if (loaded && p.defaults.size() >= 12) check(asBits(p.defaults[8]) == 0xFFFFFFFFu && asBits(p.defaults[9]) == 100000000u, "and the graph holds the same raw words");
         }
         const std::string world = slurp(content + "/Maps/main.ocworld");
         check(world.find("ParticleEmitter") != std::string::npos && world.find("Particles/") != std::string::npos && world.find("sim=gpu") != std::string::npos,

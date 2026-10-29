@@ -226,7 +226,7 @@ bool unpackGodotEnvShader(const OcGraphData& g, GodotEnvPart& out, std::string* 
     }
     out.regs = uintAttr(*node, "regs");
     out.globalRegs = uintAttr(*node, "gregs");
-    if (out.regs + out.globalRegs > 16) { if (err) *err = "the GodotEnvShader node declares more than 16 uniform registers"; return false; }
+    if (static_cast<u64>(out.regs) + out.globalRegs > 16) { if (err) *err = "the GodotEnvShader node declares more than 16 uniform registers"; return false; }
     out.hasStart = uintAttr(*node, "start") != 0;
     out.hasProcess = uintAttr(*node, "process") != 0;
     const std::string words = attrOf(*node, "reg");

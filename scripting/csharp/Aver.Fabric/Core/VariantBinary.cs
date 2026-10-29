@@ -181,11 +181,15 @@ internal static class VariantBinary
     // ---- decode ----
 
     /// <summary>Reads one Variant from the start of <paramref name="data"/>; <paramref name="used"/> is the bytes it took.</summary>
-    internal static Error Decode(ReadOnlySpan<byte> data, bool allowObjects, out Variant value, out int used)
+    internal static Error Decode(ReadOnlySpan<byte> data, bool allowObjects, out Variant value, out int used) =>
+        Decode(data.ToArray(), 0, allowObjects, out value, out used);
+
+    /// <summary>Like the span overload, reading in place from <paramref name="offset"/> (a packet reader decodes many Variants from one buffer without copying it each time).</summary>
+    internal static Error Decode(byte[] data, int offset, bool allowObjects, out Variant value, out int used)
     {
-        var r = new Reader(data);
+        var r = new Reader(data, offset);
         Error e = DecodeInner(r, allowObjects, 0, out value);
-        used = r.Pos;
+        used = r.Pos - offset;
         return e;
     }
 
@@ -193,7 +197,7 @@ internal static class VariantBinary
     {
         private readonly byte[] _d;
         public int Pos;
-        public Reader(ReadOnlySpan<byte> d) { _d = d.ToArray(); Pos = 0; }
+        public Reader(byte[] d, int pos) { _d = d; Pos = pos; }
         public int Left => _d.Length - Pos;
         public bool Has(long n) => n >= 0 && n <= Left;
         public uint U32() { uint v = (uint)(_d[Pos] | (_d[Pos + 1] << 8) | (_d[Pos + 2] << 16) | (_d[Pos + 3] << 24)); Pos += 4; return v; }

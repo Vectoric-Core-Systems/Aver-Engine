@@ -64,16 +64,16 @@ float4 gd_smoothstep(float4 a, float4 b, float4 x) { return smoothstep(a, b, x);
 float2 gd_smoothstep(float a, float b, float2 x) { return smoothstep((float2)a, (float2)b, x); }
 float3 gd_smoothstep(float a, float b, float3 x) { return smoothstep((float3)a, (float3)b, x); }
 float4 gd_smoothstep(float a, float b, float4 x) { return smoothstep((float4)a, (float4)b, x); }
-float gd_asinh(float x) { return log(x + sqrt(x * x + 1.0)); }
+float gd_asinh(float x) { return (float)sign(x) * log(abs(x) + sqrt(x * x + 1.0)); }
 float gd_acosh(float x) { return log(x + sqrt(x * x - 1.0)); }
 float gd_atanh(float x) { return 0.5 * log((1.0 + x) / (1.0 - x)); }
-float2 gd_asinh(float2 x) { return log(x + sqrt(x * x + 1.0)); }
+float2 gd_asinh(float2 x) { return (float2)sign(x) * log(abs(x) + sqrt(x * x + 1.0)); }
 float2 gd_acosh(float2 x) { return log(x + sqrt(x * x - 1.0)); }
 float2 gd_atanh(float2 x) { return 0.5 * log((1.0 + x) / (1.0 - x)); }
-float3 gd_asinh(float3 x) { return log(x + sqrt(x * x + 1.0)); }
+float3 gd_asinh(float3 x) { return (float3)sign(x) * log(abs(x) + sqrt(x * x + 1.0)); }
 float3 gd_acosh(float3 x) { return log(x + sqrt(x * x - 1.0)); }
 float3 gd_atanh(float3 x) { return 0.5 * log((1.0 + x) / (1.0 - x)); }
-float4 gd_asinh(float4 x) { return log(x + sqrt(x * x + 1.0)); }
+float4 gd_asinh(float4 x) { return (float4)sign(x) * log(abs(x) + sqrt(x * x + 1.0)); }
 float4 gd_acosh(float4 x) { return log(x + sqrt(x * x - 1.0)); }
 float4 gd_atanh(float4 x) { return 0.5 * log((1.0 + x) / (1.0 - x)); }
 float gd_fwidthCoarse(float x) { return abs(ddx_coarse(x)) + abs(ddy_coarse(x)); }

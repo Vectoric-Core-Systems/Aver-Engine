@@ -189,7 +189,7 @@ struct GdSamplerCubeArray { TextureCubeArray<float4> t; SamplerState s; };
     perSize(s, "$F gd_step(float e, $F x) { return step(($F)e, x); }\n", 2);
     perSize(s, "$F gd_smoothstep($F a, $F b, $F x) { return smoothstep(a, b, x); }\n");
     perSize(s, "$F gd_smoothstep(float a, float b, $F x) { return smoothstep(($F)a, ($F)b, x); }\n", 2);
-    perSize(s, "$F gd_asinh($F x) { return log(x + sqrt(x * x + 1.0)); }\n$F gd_acosh($F x) { return log(x + sqrt(x * x - 1.0)); }\n"
+    perSize(s, "$F gd_asinh($F x) { return ($F)sign(x) * log(abs(x) + sqrt(x * x + 1.0)); }\n$F gd_acosh($F x) { return log(x + sqrt(x * x - 1.0)); }\n"
                "$F gd_atanh($F x) { return 0.5 * log((1.0 + x) / (1.0 - x)); }\n");
     perSize(s, "$F gd_fwidthCoarse($F x) { return abs(ddx_coarse(x)) + abs(ddy_coarse(x)); }\n$F gd_fwidthFine($F x) { return abs(ddx_fine(x)) + abs(ddy_fine(x)); }\n");
 

@@ -101,6 +101,15 @@ static class ShaderTests
         var values = new Collections.Array { Variant.CreateFrom(0.1f), Variant.CreateFrom(0.2f), Variant.CreateFrom(0.3f) };
         ShaderPacking.Pack(arr, Variant.CreateFrom(values), ar);
         T.Check("a float[3] takes one register an element", T.Near(ar[0], 0.1f) && T.Near(ar[4], 0.2f) && T.Near(ar[8], 0.3f));
+        var pr = new float[12];
+        T.Check("a PackedFloat32Array fills a float[3] like an Array", ShaderPacking.Pack(arr, Variant.CreateFrom(new float[] { 0.1f, 0.2f, 0.3f }), pr) && T.Near(pr[0], 0.1f) && T.Near(pr[4], 0.2f) && T.Near(pr[8], 0.3f));
+        var v3 = new ShaderUniformInfo { Name = "p", Type = "vec3", Array = 2, Reg = 0, Comp = 0, Registers = 2, Stride = 1 };
+        var v3r = new float[8];
+        T.Check("a PackedVector3Array fills a vec3[2]", ShaderPacking.Pack(v3, Variant.CreateFrom(new[] { new Vector3(1, 2, 3), new Vector3(4, 5, 6) }), v3r) && T.Near(v3r[0], 1) && T.Near(v3r[2], 3) && T.Near(v3r[4], 4) && T.Near(v3r[6], 6));
+        var v4 = new ShaderUniformInfo { Name = "q", Type = "vec4", Array = 1, Reg = 0, Comp = 0, Registers = 1, Stride = 1 };
+        var v4r = new float[4];
+        T.Check("a PackedColorArray fills a vec4[1]", ShaderPacking.Pack(v4, Variant.CreateFrom(new[] { new Color(0.25f, 0.5f, 0.75f, 0.5f) }), v4r) && T.Near(v4r[3], 0.5f));
+        T.Check("a PackedVector4Array fills a vec4[1]", ShaderPacking.Pack(v4, Variant.CreateFrom(new[] { new Vector4(1, 2, 3, 4) }), v4r) && T.Near(v4r[3], 4));
         _ = f;
     }
 

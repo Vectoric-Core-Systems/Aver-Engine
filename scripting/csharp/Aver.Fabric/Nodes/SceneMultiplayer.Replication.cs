@@ -195,6 +195,12 @@ public partial class SceneMultiplayer
         info.SentTo.Clear();
     }
 
+    // The spawner left the tree (freed with its parent, removed, a scene change): what it replicated goes away on the peers, as in Godot.
+    internal void UntrackAllSpawns(MultiplayerSpawner spawner)
+    {
+        foreach (Node n in spawner.Local.Keys.ToArray()) UntrackSpawn(spawner, n);
+    }
+
     // Brings a peer in line with what it should have: the node when it is visible to it and it has none, no node when it is not.
     private void RefreshSpawn(SpawnInfo info, int peer)
     {

@@ -65,7 +65,7 @@ internal sealed class NetReader
 
     internal Variant Var(bool allowObjects)
     {
-        if (VariantBinary.Decode(_d.AsSpan(Pos), allowObjects, out Variant v, out int used) != Error.Ok || used <= 0) throw new FormatException("bad Variant");
+        if (VariantBinary.Decode(_d, Pos, allowObjects, out Variant v, out int used) != Error.Ok || used <= 0) throw new FormatException("bad Variant");
         Pos += used;
         return v;
     }
@@ -461,19 +461,25 @@ public partial class SceneMultiplayer : MultiplayerApi
         return w;
     }
 
+    private const int MaxCachedPaths = 65536;
+
+    // Remembers a path that resolved. The sender treats every id we confirm as known for good, so an entry is never dropped to make room: past the cap a new id is not
+    // cached and not confirmed, and the sender keeps sending its path.
+    private bool CachePath(int from, uint id, string path)
+    {
+        if (!_recvPaths.TryGetValue(from, out Dictionary<uint, string>? cache)) _recvPaths[from] = cache = new Dictionary<uint, string>();
+        if (cache.Count >= MaxCachedPaths && !cache.ContainsKey(id)) return false;
+        cache[id] = path;
+        return true;
+    }
+
     /// <summary>Reads the node a packet is addressed to. A path is cached and confirmed to the sender; null (and an error unless <paramref name="quiet"/>) when the node is not there.</summary>
     private Node? ReadNodeRef(int from, int cmdByte, NetReader r, bool quiet)
     {
         uint id = r.U32();
         string? path;
         bool full = (cmdByte & PathFlag) != 0;
-        if (full)
-        {
-            path = r.Str();
-            if (!_recvPaths.TryGetValue(from, out Dictionary<uint, string>? cache)) _recvPaths[from] = cache = new Dictionary<uint, string>();
-            if (cache.Count > 65536) cache.Clear();
-            cache[id] = path;
-        }
+        if (full) path = r.Str();
         else if (!(_recvPaths.TryGetValue(from, out Dictionary<uint, string>? c) && c.TryGetValue(id, out path)))
         {
             if (!quiet) Aver.Scripting.Log.Error($"[Fabric] multiplayer: peer {from} addressed a node by an id ({id}) this peer has no path for");
@@ -486,7 +492,7 @@ public partial class SceneMultiplayer : MultiplayerApi
             if (!quiet) Aver.Scripting.Log.Error($"[Fabric] multiplayer: peer {from} addressed the node '{path}', which does not exist here");
             return null;
         }
-        if (full) SendRaw(from, new NetWriter().U8(CmdConfirm).U32(id).ToArray(), MultiplayerPeer.TransferModeEnum.Reliable, 0);
+        if (full && CachePath(from, id, path)) SendRaw(from, new NetWriter().U8(CmdConfirm).U32(id).ToArray(), MultiplayerPeer.TransferModeEnum.Reliable, 0);
         return node;
     }
 

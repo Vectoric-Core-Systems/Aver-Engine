@@ -259,17 +259,16 @@ struct DxcLib {
     bool ok() const { return compiler != nullptr; }
 };
 
-DxcLib loadDxc(const fs::path& path) {
-    DxcLib l;
-    if (!fs::exists(path)) return l;
+// Fills l in place: off Windows ComPtr can be neither copied nor moved.
+void loadDxc(const fs::path& path, DxcLib& l) {
+    if (!fs::exists(path)) return;
     l.dll = loadLibrary(reinterpret_cast<const char*>(path.u8string().c_str()));
-    if (!l.dll) return l;
+    if (!l.dll) return;
     auto create = reinterpret_cast<DxcCreateInstanceProc>(librarySymbol(l.dll, "DxcCreateInstance"));
     if (!create || FAILED(create(CLSID_DxcUtils, IID_PPV_ARGS(&l.utils))) || FAILED(create(CLSID_DxcCompiler, IID_PPV_ARGS(&l.compiler)))) {
         l.utils.Reset();
         l.compiler.Reset();
     }
-    return l;
 }
 
 std::vector<std::wstring> splitDefines(const std::string& all) {
@@ -513,8 +512,9 @@ int main() {
 #else
     const fs::path spirvPath = fs::path(executableDir()) / "libdxcompiler.so";
 #endif
-    const DxcLib dxil = loadDxc(dxilPath);
-    const DxcLib spirv = loadDxc(spirvPath);
+    DxcLib dxil, spirv;
+    loadDxc(dxilPath, dxil);
+    loadDxc(spirvPath, spirv);
     if (!dxil.ok()) AVER_WARN("  SKIP  the DXIL compiles: no dxcompiler.dll beside the test");
     if (!spirv.ok()) AVER_WARN("  SKIP  the SPIR-V compiles: no SPIR-V-capable dxcompiler.dll");
 

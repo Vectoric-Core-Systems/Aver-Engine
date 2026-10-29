@@ -87,8 +87,27 @@ private:
     std::vector<GdShaderDiag>& diags_;
     std::map<std::string, Macro> macros_;
     bool failed_ = false;
+    bool aborted_ = false;     // a hostile-input budget ran out: every loop unwinds
+    static constexpr usize kMaxOutput = usize{1} << 25;     // output bytes (macro bombs)
+    static constexpr usize kMaxFiles = 4096;                // files pulled in by #include (also keeps GdLineOrigin::file in a u16)
+    static constexpr usize kMaxDiags = 1000;
+
+    void abort(int fileIdx, int line, const std::string& msg) {
+        if (aborted_) return;
+        aborted_ = true;
+        failed_ = true;
+        GdShaderDiag d;
+        d.severity = GodotSeverity::Error;
+        d.file = out_.files[static_cast<usize>(fileIdx)];
+        d.line = line;
+        d.column = 1;
+        d.code = "gdshader.preprocess";
+        d.message = msg;
+        diags_.push_back(std::move(d));
+    }
 
     void diag(GodotSeverity sev, int fileIdx, int line, int col, const std::string& msg) {
+        if (aborted_) return;
         GdShaderDiag d;
         d.severity = sev;
         d.file = out_.files[static_cast<usize>(fileIdx)];
@@ -98,12 +117,15 @@ private:
         d.message = msg;
         diags_.push_back(std::move(d));
         if (sev == GodotSeverity::Error) failed_ = true;
+        if (diags_.size() >= kMaxDiags) abort(fileIdx, line, "too many diagnostics");
     }
 
     void emit(const std::string& text, int fileIdx, int line) {
+        if (aborted_) return;
         out_.text += text;
         out_.text += '\n';
         out_.lines.push_back({static_cast<u16>(fileIdx), line});
+        if (out_.text.size() > kMaxOutput) abort(fileIdx, line, "preprocessed output is too large");
     }
 
     // True when a function-like macro name in `line` is followed by an argument list that does not close on this line.
@@ -185,7 +207,9 @@ private:
             // substitute parameters in the body
             std::string sub;
             for (usize b = 0; b < m.body.size();) {
-                if (isIdStart(m.body[b])) {
+                if (std::isdigit(static_cast<unsigned char>(m.body[b]))) {   // a number keeps its suffix letters (255u, 2.0f)
+                    while (b < m.body.size() && (isIdChar(m.body[b]) || m.body[b] == '.')) sub += m.body[b++];
+                } else if (isIdStart(m.body[b])) {
                     usize c = b;
                     while (c < m.body.size() && isIdChar(m.body[c])) ++c;
                     const std::string id = m.body.substr(b, c - b);
@@ -383,7 +407,7 @@ private:
         std::vector<Cond> conds;
         bool active = true;
         bool noPre = false;
-        for (usize li = 0; li < raw.size(); ++li) {
+        for (usize li = 0; li < raw.size() && !aborted_; ++li) {
             const int lineNo = static_cast<int>(li) + 1;
             std::string line = raw[li];
             usize extra = 0;
@@ -477,6 +501,7 @@ private:
                         diag(GodotSeverity::Error, fileIdx, lineNo, col, "cannot open include file '" + path + "'");
                         continue;
                     }
+                    if (out_.files.size() >= kMaxFiles) { abort(fileIdx, lineNo, "too many #include files (limit " + std::to_string(kMaxFiles) + ")"); continue; }
                     out_.files.push_back(resolved.empty() ? path : resolved);
                     const int idx = static_cast<int>(out_.files.size()) - 1;
                     file(inc, idx, depth + 1);
@@ -503,7 +528,7 @@ private:
             for (usize x = 0; x < extra; ++x) emit("", fileIdx, lineNo + static_cast<int>(x) + 1);
             li += extra;
         }
-        if (!conds.empty()) diag(GodotSeverity::Error, fileIdx, static_cast<int>(raw.size()), 1, "unterminated #if / #ifdef (missing #endif)");
+        if (!conds.empty() && !aborted_) diag(GodotSeverity::Error, fileIdx, static_cast<int>(raw.size()), 1, "unterminated #if / #ifdef (missing #endif)");
     }
 };
 

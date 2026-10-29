@@ -145,6 +145,7 @@ struct GdExpr {
     int functionIdx = -1;   // Call -> user function (GdShaderModule::functions)
     int builtinOverload = -1;   // Call -> built-in overload id (valid with name when functionIdx < 0)
     int memberIdx = -1;
+    int height = 1;         // tree height, bounded by the parser so the recursive folder and emitter stay within a small stack
     std::shared_ptr<const GdConstValue> cv;   // Var that names a constant (local or global): its folded value
     std::vector<std::unique_ptr<GdExpr>> args;
 

@@ -32,6 +32,7 @@ static class ReplicationTests
             T.Run("replication: SceneReplicationConfig and MultiplayerSynchronizer API", ConfigApi);
             T.Run("replication on the in-memory link: sync intervals counted in frames, stale packets dropped, deltas only on change", MemSync);
             T.Run("replication on the in-memory link: visibility_update_mode physics looks at the filters on physics steps only", MemVisibilityModes);
+            T.Run("spawner on the in-memory link: freeing the spawner together with its spawn_path node and the spawned nodes despawns them on the peers", MemSpawnerExit);
             T.Run("scripts: a converted GDScript with @rpc, rpc, rpc_id, Callable.rpc and multiplayer.* is compiled and called across peers", ConvertedScript);
             if (!native)
             {
@@ -174,6 +175,36 @@ static class ReplicationTests
     }
 
     // ---- in-memory ----
+
+    // A level that holds the spawner, its spawn_path node and (on the authority) the spawned players: freeing the level frees all of them at once.
+    private static void LevelWorld(NetPeer p)
+    {
+        ResourceLoader.Provider ??= (path, type) => path == "res://player.tscn" ? s_scene ??= PlayerScene() : null;
+        var level = new Node { Name = "Level" };
+        p.Root.AddChild(level);
+        level.AddChild(new Node { Name = "Players" });
+        var sp = new MultiplayerSpawner { Name = "Spawner", SpawnPath = new NodePath("../Players") };
+        sp.AddSpawnableScene("res://player.tscn");
+        level.AddChild(sp);
+        sp.Despawned += n => p.Events.Add("despawned " + n.Name);
+    }
+
+    private static void MemSpawnerExit()
+    {
+        var hub = new MemHub(4);
+        NetCluster c = NetCluster.StartMem(hub, 1, LevelWorld);
+        c.FullyConnected(2000);
+        NetPeer s = c.Server, a = c.C(1);
+        var pl = (NetPlayer)((PackedScene)ResourceLoader.Load("res://player.tscn", typeof(PackedScene))!).Instantiate();
+        pl.Name = a.Id.ToString();
+        s.Root.GetNode("Level/Players").AddChild(pl);
+        string path = "Level/Players/" + a.Id;
+        T.Check("a spawned player reaches the client", c.Until(() => a.Root.GetNodeOrNull(path) != null, 2000));
+        s.Root.GetNode("Level").Free();
+        T.Check("freeing the level that holds the spawner, its spawn_path node and the spawned player despawns the player on the client", c.Until(() => a.Root.GetNodeOrNull(path) == null, 2000));
+        T.Check("with despawned emitted there", a.Events.Contains("despawned " + a.Id));
+        c.Close();
+    }
 
     private static void MemSync()
     {

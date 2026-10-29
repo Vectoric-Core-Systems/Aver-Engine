@@ -41,6 +41,8 @@ static void testAddress() {
     check(Address::parse("[2001:db8::7]", 1, a) && a.family == 6 && a.ipString() == "2001:db8::7" && !a.isLoopback(), "bracketed IPv6");
     check(!Address::parse("localhost", 1, a) && !Address::parse("999.1.1.1", 1, a) && !Address::parse("", 1, a) && !Address::parse("1.2.3", 1, a), "names and malformed text are not numeric addresses");
     check(Address::parse("0.0.0.0", 0, a) && a.isUnspecified(), "unspecified");
+    check(Address::parse("fe80::1%7", 1, a) && a.scope == 7 && Address::parse("fe80::1%4294967295", 1, a) && a.scope == 4294967295u, "a numeric zone id up to 32 bits is kept");
+    check(!Address::parse("fe80::1%4294967296", 1, a) && !Address::parse("fe80::1%99999999999999999999", 1, a), "a numeric zone id past 32 bits is refused, not thrown");
     std::vector<Address> v;
     check(resolve("127.0.0.1", 0, v) && v.size() == 1 && v[0].isLoopback(), "resolve takes numeric text without a lookup");
     check(resolve("localhost", 4, v) && !v.empty() && v[0].family == 4 && v[0].isLoopback(), "localhost resolves to a loopback IPv4 address");

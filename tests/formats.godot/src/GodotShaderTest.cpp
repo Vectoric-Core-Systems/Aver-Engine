@@ -1298,6 +1298,106 @@ static void testRobustness() {
     check(silentFails == 0, "every failed compile carried an error diagnostic (" + std::to_string(okCount) + " of " + std::to_string(ran) + " compiled)");
 }
 
+// Hostile-input budgets, macro/number lexing and library formulas that earlier reviews found wrong.
+static void testHostileAndMacros() {
+    AVER_INFO("=== hostile input budgets and macro lexing ===");
+    GdPreprocessOptions plain;
+
+    // a numeric literal's suffix is not an identifier
+    {
+        const std::string out = pre("#define PACK(x, u) ((x) * 255u + (u))\nuint r = PACK(a, b);", plain);
+        check(squeeze(out) == "uintr=((a)*255u+(b));", "a macro parameter named like a literal suffix does not eat 255u: " + out);
+        const std::string f = pre("#define SC(x, f) ((x) * 2.0f + (f))\nfloat r = SC(a, b);", plain);
+        check(squeeze(f) == "floatr=((a)*2.0f+(b));", "a parameter named f does not eat 2.0f: " + f);
+        const std::string e = pre("#define K(x, e) ((x) * 1e5 + (e))\nfloat r = K(a, b);", plain);
+        check(squeeze(e) == "floatr=((a)*1e5+(b));", "a parameter named e does not eat 1e5: " + e);
+    }
+
+    // exponential #include expansion stops at the file budget
+    {
+        GdPreprocessOptions o;
+        o.maxIncludeDepth = 17;
+        o.resolver = [](const std::string&, const std::string&, std::string& text, std::string& resolved) {
+            text = "#include \"a\"\n#include \"a\"\nint x;\n";
+            resolved = "a";
+            return true;
+        };
+        std::vector<GdShaderDiag> d;
+        GdPreprocessed out;
+        const bool ok = gdShaderPreprocess("#include \"a\"\n", "main.gdshader", o, out, d);
+        check(!ok && !d.empty() && out.files.size() <= 65535 && d.size() <= 1100, "an include bomb (depth 17) fails with a diagnostic and bounded files/diagnostics");
+        bool tooMany = false;
+        for (const GdShaderDiag& x : d) tooMany = tooMany || x.message.find("too many") != std::string::npos;
+        check(tooMany, "the include budget names itself");
+    }
+
+    // macro output is bounded in total, not only per line
+    {
+        std::string src;
+        src += "#define L0 x\n";
+        for (int i = 1; i <= 18; ++i) src += "#define L" + std::to_string(i) + " L" + std::to_string(i - 1) + " L" + std::to_string(i - 1) + "\n";
+        for (int i = 0; i < 400; ++i) src += "L18\n";
+        GdPreprocessed out;
+        std::vector<GdShaderDiag> d;
+        const bool ok = gdShaderPreprocess(src, "main.gdshader", plain, out, d);
+        check(!ok && out.text.size() <= (usize{1} << 25) + (usize{1} << 21), "a macro bomb repeated on many lines stops at the output budget (" + std::to_string(out.text.size()) + " bytes)");
+    }
+
+    // nested left-deep chains: each parenthesis level restarts the chain counter, the tree height is bounded instead
+    {
+        auto chainOf = [](const std::string& inner, int terms, const char* lit) {
+            std::string s = "(" + inner + ")";
+            for (int i = 0; i < terms; ++i) s += std::string("+") + lit;
+            return s;
+        };
+        std::string e = "1";
+        for (int lvl = 0; lvl < 47; ++lvl) e = chainOf(e, 300, "1");
+        GdShaderModule m = compile("shader_type spatial;\nconst int a = " + e + ";\n");
+        check(!m.ok && m.errorCount() > 0, "a 47x300 nested chain in a constant is rejected with a diagnostic");
+        std::string f = "1.0";
+        for (int lvl = 0; lvl < 47; ++lvl) f = chainOf(f, 300, "1.0");
+        GdShaderModule m2 = compile("shader_type spatial;\nvoid fragment() { float f = " + f + "; }\n");
+        check(!m2.ok && m2.errorCount() > 0, "a 47x300 nested chain in a function body is rejected before the emitter sees it");
+        bool named = false;
+        for (const GdShaderDiag& x : m2.diags) named = named || x.message.find("too deep") != std::string::npos;
+        check(named, "the height limit is named");
+
+        std::string g = "1.0";
+        g = chainOf(g, 70, "1.0");
+        g = chainOf(g, 50, "1.0");
+        GdShaderModule m3 = compile("shader_type spatial;\nvoid fragment() { float f = " + g + "; ALBEDO = vec3(f); }\n");
+        check(m3.ok, "a 120-deep chain still compiles: " + diagText(m3.diags));
+        if (m3.ok) check(gdShaderEmitHlsl(m3).ok, "and still emits");
+        std::string h = "1.0";
+        h = chainOf(h, 70, "1.0");
+        h = chainOf(h, 70, "1.0");
+        GdShaderModule m4 = compile("shader_type spatial;\nvoid fragment() { float f = " + h + "; ALBEDO = vec3(f); }\n");
+        check(!m4.ok && m4.errorCount() > 0, "a 140-deep chain is over the height limit");
+    }
+
+    // asinh must stay finite and odd for large negative arguments
+    {
+        const std::string lib = gdShaderHlslLibrary();
+        const usize at = lib.find("float gd_asinh(float x)");
+        const std::string body = at == std::string::npos ? std::string() : lib.substr(at, lib.find('}', at) - at);
+        check(body.find("abs(x)") != std::string::npos && body.find("sign(x)") != std::string::npos, "gd_asinh works on |x| and restores the sign: " + body);
+    }
+
+    // the same include bomb at the default depth (2^25 expansions without a budget); last because it is the slow one when the budget is missing
+    {
+        GdPreprocessOptions o;
+        o.resolver = [](const std::string&, const std::string&, std::string& text, std::string& resolved) {
+            text = "#include \"a\"\n#include \"a\"\nint x;\n";
+            resolved = "a";
+            return true;
+        };
+        std::vector<GdShaderDiag> d;
+        GdPreprocessed out;
+        const bool ok = gdShaderPreprocess("#include \"a\"\n", "main.gdshader", o, out, d);
+        check(!ok && out.files.size() <= 4096 && out.lines.size() < 100000, "an include bomb at the default depth ends quickly with bounded output");
+    }
+}
+
 // What the emitter writes, spot-checked on small shaders (no DXC).
 static void testEmittedText() {
     AVER_INFO("=== emitted HLSL spot checks ===");
@@ -1458,6 +1558,7 @@ int main(int argc, char** argv) {
     testLayout();
     testEmittedText();
     testRobustness();
+    testHostileAndMacros();
     testHlsl();
     AVER_INFO("GodotShaderTest: {} checks, {} failures", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

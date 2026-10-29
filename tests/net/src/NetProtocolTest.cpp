@@ -677,6 +677,94 @@ static void testHostile() {
     check(cp2 != nullptr, "hosts that agree to skip the checksum still talk");
 }
 
+// Wraps a socket and remembers the peer id, session and time field of the datagrams it sends, so a test can forge ones the peer accepts.
+struct SpySocket final : DatagramSocket {
+    std::unique_ptr<DatagramSocket> in;
+    u8 hdr[6] = {0xFF, 0xFF, 0, 0, 0, 0};
+    explicit SpySocket(std::unique_ptr<DatagramSocket> s) : in(std::move(s)) {}
+    int send(const Address& to, const u8* d, usize n) override {
+        if (n >= 12 && !(d[4] == 0xFF && d[5] == 0xFF)) std::memcpy(hdr, d + 4, 6);
+        return in->send(to, d, n);
+    }
+    int recv(Address& from, u8* buf, usize cap) override { return in->recv(from, buf, cap); }
+    Address localAddress() const override { return in->localAddress(); }
+};
+
+static void put16(std::vector<u8>& b, u32 v) { b.push_back(u8(v)); b.push_back(u8(v >> 8)); }
+static void put32(std::vector<u8>& b, u32 v) { put16(b, v & 0xFFFF); put16(b, v >> 16); }
+
+// One datagram holding one unreliable fragment command, with a valid checksum.
+static std::vector<u8> forgeFragment(const SpySocket& spy, u16 group, u16 count, u16 num, u32 total, u32 off, const std::vector<u8>& data) {
+    std::vector<u8> d(4, 0);
+    d.insert(d.end(), spy.hdr, spy.hdr + 6);
+    d.push_back(1); d.push_back(0);                       // one command, no flags
+    std::vector<u8> pl;
+    put16(pl, group); put16(pl, count); put16(pl, num); put32(pl, total); put32(pl, off);
+    pl.insert(pl.end(), data.begin(), data.end());
+    d.push_back(10); d.push_back(0); put16(d, 0); put16(d, static_cast<u32>(pl.size()));   // kSendUnrelFragment, channel 0
+    d.insert(d.end(), pl.begin(), pl.end());
+    const u32 c = crc32(d.data(), d.size());
+    for (int k = 0; k < 4; ++k) d[k] = static_cast<u8>(c >> (8 * k));
+    return d;
+}
+
+static void testForgedFragments() {
+    AVER_INFO("forged fragment headers");
+    Rig r(81);
+    Node& server = r.add(5000);
+    auto cn = std::make_unique<Node>();
+    cn->addr = Address::loopback4(5001);
+    auto spyOwn = std::make_unique<SpySocket>(r.net.bind(cn->addr));
+    SpySocket* spy = spyOwn.get();
+    HostConfig cc; cc.seed = 2001;
+    cn->host = std::make_unique<Host>(std::move(spyOwn), cc);
+    r.nodes.push_back(std::move(cn));
+    Node& client = *r.nodes.back();
+    Peer* cp = connectPair(r, client, server);
+    if (!cp) { check(false, "connected"); return; }
+    r.settle(50);
+    auto fire = [&](const std::vector<u8>& d) { client.host->socketSend(server.addr, d.data(), d.size()); r.settle(30); };
+
+    const size_t base = server.count(EventType::Receive);
+    fire(forgeFragment(*spy, 1, 1, 0, 32u << 20, 0, {}));
+    check(server.count(EventType::Receive) == base, "one empty fragment cannot claim a 32 MB packet");
+    fire(forgeFragment(*spy, 2, 2, 0, 100000, 0, pattern(500, 1)));
+    fire(forgeFragment(*spy, 2, 2, 1, 100000, 4000, pattern(500, 2)));
+    check(server.count(EventType::Receive) == base, "a total no two fragments could carry is refused");
+    fire(forgeFragment(*spy, 3, 2, 0, 6000, 0, pattern(100, 3)));
+    fire(forgeFragment(*spy, 3, 2, 1, 6000, 1000, pattern(100, 4)));
+    check(server.count(EventType::Receive) == base, "fragments that do not add up to the claimed size deliver nothing");
+    fire(forgeFragment(*spy, 4, 2, 0, 2000, 0, pattern(1000, 5)));
+    fire(forgeFragment(*spy, 4, 2, 1, 2000, 1000, pattern(1000, 6)));
+    const auto rx = server.of(EventType::Receive);
+    check(rx.size() == base + 1 && rx.back().packet.size() == 2000, "while a well-formed two-fragment packet is delivered whole");
+    if (rx.size() == base + 1) {
+        std::vector<u8> want = pattern(1000, 5), b = pattern(1000, 6);
+        want.insert(want.end(), b.begin(), b.end());
+        check(rx.back().packet == want, "with its bytes in place");
+    }
+    check(server.count(EventType::Disconnect) == 0, "and the connection survives the forgeries");
+}
+
+static void testDeadPeerUnderUnreliableTraffic() {
+    AVER_INFO("a dead peer with unreliable traffic flowing");
+    Rig r(82);
+    Node& server = r.add(5000);
+    Node& client = r.add(5001);
+    Peer* cp = connectPair(r, client, server);
+    Peer* sp = serverPeer(server);
+    if (!cp || !sp) { check(false, "connected"); return; }
+    r.net.blackhole(client.addr, true);
+    const auto p = u32pkt(5);
+    const bool gone = r.run([&] {
+        if (sp->state() == PeerState::Connected) sp->send(0, p.data(), p.size(), 0);   // a snapshot every 100 ms
+        return server.count(EventType::Disconnect) > 0;
+    }, 60000, 100);
+    check(gone, "the server times the silent client out although it sends every 100 ms");
+    const auto d = server.of(EventType::Disconnect);
+    check(!d.empty() && d[0].reason == DisconnectReason::Timeout, "with the Timeout reason");
+}
+
 static void testDeterminism() {
     AVER_INFO("determinism");
     auto run = [] {
@@ -711,6 +799,8 @@ int main() {
     testBandwidth();
     testBroadcastAndMany();
     testHostile();
+    testForgedFragments();
+    testDeadPeerUnderUnreliableTraffic();
     testDeterminism();
     if (g_failures) { AVER_ERROR("{} check(s) failed", g_failures); return 1; }
     AVER_INFO("all checks passed");

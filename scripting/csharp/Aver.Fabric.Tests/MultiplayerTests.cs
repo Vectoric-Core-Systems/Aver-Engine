@@ -18,6 +18,7 @@ static class MultiplayerTests
             T.Run("multiplayer: the default API offline, authority, rpc config, call_local, errors, per-branch APIs, Callable.rpc", Offline);
             T.Run("multiplayer: transfer modes and channels are the RPC's, on a link that drops unreliable packets", Modes);
             T.Run("multiplayer: a peer replaced, hostile packets, send_bytes, authentication on the in-memory link", MemMisc);
+            T.Run("multiplayer: a packet with a huge argument count costs memory in proportion to the packet, and a full path cache keeps what the sender was told is confirmed", MemPacketLimits);
             if (!native)
             {
                 Console.WriteLine("Test: multiplayer over sockets (SKIP: build/bin/Aver.Net.Abi was not found; build the Aver.Net.Abi target)");
@@ -189,6 +190,51 @@ static class MultiplayerTests
         s.Mp.MultiplayerPeer = offline;
         T.Check("replacing the peer clears the peer list quietly", s.Mp.GetPeers().Length == 0 && s.Events.Count == 0 && s.Mp.IsServer() && s.Mp.GetUniqueId() == 1);
         T.Check("a disconnected peer is refused", s.Mp.MultiplayerPeer == offline && ReplaceWithClosed(s.Mp) && T.ErrorCount("connecting or connected") == 1);
+        c.Close();
+    }
+
+    private static void Inject(NetPeer from, NetWriter w)
+    {
+        from.Net.SetTargetPeer(1);
+        from.Net.TransferMode = MultiplayerPeer.TransferModeEnum.Reliable;
+        from.Net.PutPacket(w.ToArray());
+    }
+
+    private static void MemPacketLimits()
+    {
+        var hub = new MemHub(13);
+        NetCluster c = NetCluster.StartMem(hub, 1, NetCluster.GameOnly);
+        c.FullyConnected(2000);
+        NetPeer s = c.Server, a = c.C(1);
+        c.Settle(50);
+
+        // an RPC that claims 8000 arguments, each a 4-byte nil, in a 400 KB packet: reading it must not copy the rest of the packet once per argument
+        const int argc = 8000;
+        var big = new NetWriter().U8(0 | 0x80).U32(900).Str("Game").Str("Any").U16(argc).Bytes(new byte[argc * 4 + 400_000]);
+        Inject(a, big);
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        c.Step();
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        T.Check("decoding 8000 arguments from one 400 KB packet allocates a small multiple of the packet, not 8000 copies of it", allocated < 64_000_000, $"{allocated / 1_000_000} MB");
+
+        // a sender that addressed more than 65536 distinct nodes: what the receiver confirmed earlier must still resolve
+        s.Game.Log.Clear();
+        for (uint id = 1; id <= 65538; id++)
+        {
+            Inject(a, new NetWriter().U8(10 | 0x80).U32(id).Str("Game"));   // a sync for a node that is no synchronizer: resolved, cached, confirmed, ignored
+            if (id % 2000 == 0) c.Step();
+        }
+        c.Settle(100);
+        var byId = new NetWriter().U8(0).U32(1).Str("Any").U16(1);
+        byId.Var("by id");
+        Inject(a, byId);
+        c.Settle(100);
+        T.Check("after 65538 distinct ids an id the receiver had confirmed is still known", s.Game.Log.Contains($"Any by id <{a.Id}>"), string.Join(",", s.Game.Log.Take(3)));
+        var fullRef = new NetWriter().U8(0 | 0x80).U32(70000).Str("Game").Str("Any").U16(1);
+        fullRef.Var("full ref");
+        Inject(a, fullRef);
+        c.Settle(100);
+        T.Check("and a new id past the cap is still served from its full path", s.Game.Log.Contains($"Any full ref <{a.Id}>"));
         c.Close();
     }
 

@@ -119,6 +119,7 @@ public class MultiplayerSpawner : Node
 
     public override void _ExitTree()
     {
+        _api?.UntrackAllSpawns(this);   // while the spawner still has its place in the tree: the DESPAWN names it by path
         Unbind();
         _api?.UnregisterSpawner(this);
         _api = null;

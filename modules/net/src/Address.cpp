@@ -87,7 +87,14 @@ bool Address::parse(std::string_view text, u16 port, Address& out) {
     if (const auto pct = s.find('%'); pct != std::string::npos) {
         const std::string z = s.substr(pct + 1);
         s.erase(pct);
-        if (!z.empty() && std::all_of(z.begin(), z.end(), [](char c) { return c >= '0' && c <= '9'; })) scope = static_cast<unsigned>(std::stoul(z));
+        if (!z.empty() && std::all_of(z.begin(), z.end(), [](char c) { return c >= '0' && c <= '9'; })) {
+            unsigned long long v = 0;
+            for (const char c : z) {
+                v = v * 10 + static_cast<unsigned>(c - '0');
+                if (v > 0xFFFFFFFFull) { out = Address{}; return false; }   // not a zone index
+            }
+            scope = static_cast<unsigned>(v);
+        }
     }
     in_addr a4{};
     if (s.find(':') == std::string::npos && inet_pton(AF_INET, s.c_str(), &a4) == 1) {

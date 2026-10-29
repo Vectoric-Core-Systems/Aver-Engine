@@ -280,7 +280,7 @@ A **node ref** is `u32 id` and, when bit 7 of the command is set, the node's pat
 order. This is Godot's path cache: the first packets to a peer for a node carry the path; the receiver stores `id -> path` per sender, resolves it (a path that leaves the branch, or names nothing, is refused and reported) and answers CONFIRM;
 once every receiver of a send has confirmed the id, the sender writes only the id. A broadcast uses the id form only when **every** connected peer has confirmed it; a sync to a subset of peers always carries the path. Confirmations are tracked per
 peer and dropped when the peer leaves. `FullRefsSent` / `CachedRefsSent` on `SceneMultiplayer` (internal) count the two forms; the tests read them. A node renamed or re-parented after its path was cached keeps the old path at the receiver (as in Godot,
-the cache is per node, not re-sent): do not rename networked nodes.
+the cache is per node, not re-sent): do not rename networked nodes. The receiver keeps at most 65536 ids per sender and never drops one it confirmed; past that a new id is not cached or confirmed, so the sender keeps writing its path.
 
 Methods go by **name**, not by Godot's index into a sorted table: the receiver looks the name up in its own RPC table and says "not an RPC method of that node" when it is absent. A script that renamed a method on one side gets a clear error instead of
 a call to the wrong method.
@@ -334,7 +334,7 @@ authority is not transferred by the spawner; the usual Godot pattern is a script
   the **position in the list** travels, so every peer needs the same list in the same order. Spawn state is read when the node enters the tree (after its `_enter_tree`, before `_ready`), so set properties before `add_child`.
 * **Remote side.** The scene (or `spawn_function(data)`) is instanced, takes the authority's exact name (auto names such as `@NetPlayer@2` included), gets the spawn-flag property values applied to its synchronizers (matched in tree order) **before** it enters the tree, is added under the spawn node, and `spawned` is emitted.
   A spawn from a peer that is not the spawner's authority, for an unknown scene index, past the limit, or with no valid spawn path is refused and reported. A duplicate net id is ignored.
-* **Despawn.** Freeing or removing the node on the authority (or freeing its parent: a per-frame check notices nodes that vanished without a signal) sends DESPAWN to the peers that have it; they emit `despawned` and `queue_free` it.
+* **Despawn.** Freeing or removing the node on the authority (or freeing its parent: a per-frame check notices nodes that vanished without a signal; a spawner leaving the tree despawns everything it replicated) sends DESPAWN to the peers that have it; they emit `despawned` and `queue_free` it.
 * **Late joiners.** A peer admitted later gets a SPAWN for every tracked node visible to it, then the synchronizers' state. Each node is sent to a peer at most once.
 * **Limit.** `spawn_limit` > 0 counts the nodes the spawner replicates at once; one more than allowed stays local and is reported (the node itself is not removed).
 * **Visibility.** A spawned node is visible to a peer when **every** synchronizer in its subtree is. A synchronizer's visibility changing spawns or despawns the node on that peer.

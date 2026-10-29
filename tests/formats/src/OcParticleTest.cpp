@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <string>
 
@@ -625,7 +626,39 @@ static void testGodotShader() {
     check(!fmt::parseOcparticleSystem("OCPARTICLE 2\nGDSHADER\n", back, nullptr, &err) && !fmt::parseOcparticleSystem("OCPARTICLE 2\nGDSHADER a b\n", back, nullptr, &err), "a GDSHADER without exactly one name is refused");
 }
 
+// A register holding an int or bool is a bit pattern: 0x<hex> reads as the raw word, and the writer keeps every word exact.
+static u32 wordOf(f32 f) { u32 w; std::memcpy(&w, &f, sizeof w); return w; }
+static void testParamWords() {
+    AVER_INFO("=== .ocparticle: PARAM raw words ===");
+    particles::ParticleSystemDef def;
+    std::string err;
+    check(fmt::parseOcparticleSystem("OCPARTICLE 2\nPARAM r color 0xFFFFFFFF 0x05F5E100 0X3f800000 1.5\nEMITTER e\n", def, nullptr, &err) && def.params.size() == 1, "0x<hex> components parse: " + err);
+    if (def.params.size() != 1) return;
+    const particles::UserParam& p = def.params[0];
+    check(wordOf(p.v[0]) == 0xFFFFFFFFu && wordOf(p.v[1]) == 0x05F5E100u && p.v[2] == 1.0f && p.v[3] == 1.5f, "as raw words, a decimal as before");
+    particles::ParticleSystemDef bad;
+    check(!fmt::parseOcparticleSystem("OCPARTICLE 2\nPARAM r float 0x\nEMITTER e\n", bad, nullptr, &err) && !fmt::parseOcparticleSystem("OCPARTICLE 2\nPARAM r float 0x123456789\nEMITTER e\n", bad, nullptr, &err) &&
+              !fmt::parseOcparticleSystem("OCPARTICLE 2\nPARAM r float 0xZZ\nEMITTER e\n", bad, nullptr, &err), "a malformed hex word is refused");
+    const std::string written = fmt::writeOcparticleSystem(def);
+    particles::ParticleSystemDef back;
+    check(fmt::parseOcparticleSystem(written, back, nullptr, &err) && back.params.size() == 1, "the written system parses: " + err);
+    if (back.params.size() == 1) {
+        bool same = true;
+        for (int k = 0; k < 4; ++k) same = same && wordOf(back.params[0].v[k]) == wordOf(p.v[k]);
+        check(same, "every word survives a write and a read");
+    }
+    particles::ParticleSystemDef fine;
+    check(fmt::parseOcparticleSystem("OCPARTICLE 2\nPARAM r vec3 0.333333343 100000000 -2.5\nEMITTER e\n", fine, nullptr, &err) && fine.params.size() == 1, "nine-digit decimals parse");
+    if (fine.params.size() == 1) {
+        particles::ParticleSystemDef again;
+        const std::string w2 = fmt::writeOcparticleSystem(fine);
+        check(fmt::parseOcparticleSystem(w2, again, nullptr, &err) && again.params.size() == 1 && wordOf(again.params[0].v[0]) == wordOf(fine.params[0].v[0]) &&
+                  wordOf(again.params[0].v[1]) == wordOf(fine.params[0].v[1]) && fmt::writeOcparticleSystem(again) == w2, "a float with more than six digits survives a write exactly, and the second write is identical");
+    }
+}
+
 int main() {
+    testParamWords();
     testGodotShader();
     testMeta();
     testRangesRefused();

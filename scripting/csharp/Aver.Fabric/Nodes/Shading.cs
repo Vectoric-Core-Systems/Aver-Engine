@@ -206,8 +206,17 @@ internal static class ShaderPacking
         int count = u.Array > 0 ? u.Array : 1;
         if (u.Array > 0)
         {
-            if (value.VariantType != Variant.Type.Array) return false;
-            Collections.Array arr = value.As<Collections.Array>();
+            Collections.Array arr;
+            switch (value.VariantType)
+            {
+                case Variant.Type.Array: arr = value.As<Collections.Array>(); break;
+                case Variant.Type.PackedInt32Array: case Variant.Type.PackedInt64Array: case Variant.Type.PackedFloat32Array: case Variant.Type.PackedFloat64Array:
+                case Variant.Type.PackedVector2Array: case Variant.Type.PackedVector3Array: case Variant.Type.PackedColorArray:
+                    arr = value.AsGodotArray(); break;
+                case Variant.Type.PackedVector4Array:
+                    arr = new Collections.Array(value.AsVector4Array().Select(x => Variant.CreateFrom(x))); break;
+                default: return false;
+            }
             for (int i = 0; i < count && i < arr.Count; i++) if (!Components(arr[i], u.Type, comps)) return false;
         }
         else if (!Components(value, u.Type, comps)) return false;

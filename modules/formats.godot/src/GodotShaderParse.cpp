@@ -966,6 +966,7 @@ private:
             c->args.push_back(std::move(e));
             c->args.push_back(std::move(r));
             e = std::move(c);
+            seal(*e);
         }
         return e;
     }
@@ -983,6 +984,15 @@ private:
         ~DepthGuard() { --p.depth_; }
     };
     int depth_ = 0;
+
+    // Records the height of a finished node. Parentheses restart the per-loop chain counters, so nested left-deep chains need this bound too.
+    static constexpr int kMaxExprHeight = 128;   // a debug-build emitter frame pair is ~3 KB: 320 levels already overflow a 1 MB stack
+    void seal(GdExpr& e) {
+        int h = 0;
+        for (const GdExprP& a : e.args) h = std::max(h, a->height);
+        e.height = h + 1;
+        if (e.height > kMaxExprHeight) fail(peek(), "expression is too deep (limit " + std::to_string(kMaxExprHeight) + ")");
+    }
 
     GdExprP parseAssign() {
         DepthGuard guard(*this);
@@ -1004,6 +1014,7 @@ private:
             e->type = lhs->type;
             e->args.push_back(std::move(lhs));
             e->args.push_back(std::move(rhs));
+            seal(*e);
             return e;
         }
         return lhs;
@@ -1023,6 +1034,7 @@ private:
             e->args.push_back(std::move(c));
             e->args.push_back(std::move(a));
             e->args.push_back(std::move(b));
+            seal(*e);
             return e;
         }
         return c;
@@ -1067,6 +1079,7 @@ private:
             e->args.push_back(std::move(l));
             e->args.push_back(std::move(r));
             l = std::move(e);
+            seal(*l);
         }
     }
 
@@ -1082,6 +1095,7 @@ private:
             e->op = op.text;
             e->type = rt;
             e->args.push_back(std::move(a));
+            seal(*e);
             return e;
         }
         if (t.k == TK::Punct && (t.text == "++" || t.text == "--")) {
@@ -1095,6 +1109,7 @@ private:
             e->postfix = false;
             e->type = rt;
             e->args.push_back(std::move(a));
+            seal(*e);
             return e;
         }
         return parsePostfix();
@@ -1103,6 +1118,7 @@ private:
     GdExprP parsePostfix() {
         GdExprP e = parsePrimary();
         for (int chain = 0;; ++chain) {
+            seal(*e);
             if (chain > 300 && (isP(".") || isP("[") || isP("++") || isP("--"))) fail(peek(), "expression has too many chained accesses (limit 300)");
             if (isP(".")) {
                 const Token dot = next();

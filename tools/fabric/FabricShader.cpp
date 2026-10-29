@@ -20,6 +20,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <filesystem>
 
 namespace aver::fabric {
@@ -531,11 +533,24 @@ void Converter::emitGpuParticles(const FNode& fn, const std::vector<std::pair<st
     }
     char buf[96];
     const auto num = [&](double v) { std::snprintf(buf, sizeof buf, "%.6g", v); return std::string(buf); };
+    // A register may hold an int or bool as a bit pattern (-1 is a NaN, 1e8 loses digits in %.6g): a decimal that reparses to the same word, else nine digits, else the raw word as 0x<hex>.
+    const auto word = [&](float v) {
+        if (!std::isfinite(v)) {
+            unsigned w;
+            std::memcpy(&w, &v, sizeof w);
+            std::snprintf(buf, sizeof buf, "0x%08X", w);
+            return std::string(buf);
+        }
+        std::string d = num(v);
+        if (const float back = static_cast<float>(std::strtod(d.c_str(), nullptr)); std::memcmp(&back, &v, sizeof v) == 0) return d;
+        std::snprintf(buf, sizeof buf, "%.9g", static_cast<double>(v));
+        return std::string(buf);
+    };
     std::string t = "OCPARTICLE 2\nNAME " + fn.name + "\n";
     if (info) {
         const std::vector<float>& regs = info->prepared.defaultRegisters;
         for (usize r = 0; r < regs.size() / 4 && r < 16; ++r)
-            t += "PARAM reg" + std::to_string(r) + " color " + num(regs[r * 4]) + " " + num(regs[r * 4 + 1]) + " " + num(regs[r * 4 + 2]) + " " + num(regs[r * 4 + 3]) + "\n";
+            t += "PARAM reg" + std::to_string(r) + " color " + word(regs[r * 4]) + " " + word(regs[r * 4 + 1]) + " " + word(regs[r * 4 + 2]) + " " + word(regs[r * 4 + 3]) + "\n";
     }
     t += "EMITTER " + fn.name + "\nSIM gpu\nSHAPE point 0 0 0\nBLEND premultiplied\n";
     t += "EMISSION " + num(oneShot ? 0.0 : amount / lifetime) + " " + std::to_string(oneShot ? amount : 0) + " " + std::to_string(amount) + "\n";

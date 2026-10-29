@@ -8,7 +8,7 @@
 //
 //   OCPARTICLE 1|2                                -- header, required, exactly once
 //   NAME <text to end of line>                    -- optional authoring label (the system's name)
-//   PARAM <name> float <v> | vec3 <x y z> | color <r g b a>   -- user parameters (max 16)
+//   PARAM <name> float <v> | vec3 <x y z> | color <r g b a>   -- user parameters (max 16); a number may be 0x<hex> for the raw 32-bit word
 //   EMITTER <name to end of line>                 -- starts an emitter block (max 8)
 //   SIM auto|cpu|gpu
 //   SHAPE point|sphere|box <x> <y> <z>             -- v1 spelling, always three numbers
@@ -54,7 +54,9 @@
 #include "aver/platform/FileSystem.hpp"
 
 #include <charconv>
+#include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -87,6 +89,33 @@ bool strictF32(std::string_view s, f32& out) {
     if (r.ec != std::errc{} || r.ptr != s.data() + s.size()) return false;
     out = static_cast<f32>(v);
     return true;
+}
+// A PARAM component: a decimal, or 0x<hex> for the raw 32-bit word. A register that holds an int or bool is a bit pattern a decimal cannot always carry (NaN words, ints past 2^24).
+bool paramF32(std::string_view s, f32& out) {
+    s = trim(s);
+    if (s.size() > 2 && s.size() <= 10 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        u32 w{};
+        const auto r = std::from_chars(s.data() + 2, s.data() + s.size(), w, 16);
+        if (r.ec != std::errc{} || r.ptr != s.data() + s.size()) return false;
+        std::memcpy(&out, &w, sizeof out);
+        return true;
+    }
+    return strictF32(s, out);
+}
+// The writer's spelling of a PARAM component: the usual decimal when it reparses to the same word, nine digits (exact for a finite float) when not, 0x<hex> for a NaN or infinity.
+std::string paramNum(f32 v) {
+    char buf[40];
+    if (!std::isfinite(v)) {
+        u32 w{};
+        std::memcpy(&w, &v, sizeof w);
+        std::snprintf(buf, sizeof buf, "0x%08X", w);
+        return buf;
+    }
+    std::string d = num(v);
+    f32 back{};
+    if (strictF32(d, back) && std::memcmp(&back, &v, sizeof v) == 0) return d;
+    std::snprintf(buf, sizeof buf, "%.9g", static_cast<f64>(v));
+    return buf;
 }
 bool strictU32(std::string_view s, u32& out) {
     s = trim(s);
@@ -342,7 +371,7 @@ bool parseOcparticleSystem(std::string_view text, particles::ParticleSystemDef& 
             else return fail("PARAM kind must be float, vec3 or color, got '" + std::string(t[2]) + "'");
             if (t.size() != 3 + want) return fail("PARAM " + std::string(t[2]) + " takes " + std::to_string(want) + " number(s)");
             for (usize k = 0; k < want; ++k)
-                if (!strictF32(t[3 + k], up.v[k])) return fail("PARAM has a malformed number");
+                if (!paramF32(t[3 + k], up.v[k])) return fail("PARAM has a malformed number");
             if (up.kind == 2 && want == 4) { /* colour: rgba as given */ }
             def.params.push_back(up);
         } else if (equalsCI(key, "EMITTER")) {
@@ -896,7 +925,7 @@ std::string paramsText(const particles::ParticleSystemDef& def) {
     for (const particles::UserParam& p : def.params) {
         s += "PARAM " + p.name + (p.kind == 0 ? " float" : (p.kind == 1 ? " vec3" : " color"));
         const int n = p.kind == 0 ? 1 : (p.kind == 1 ? 3 : 4);
-        for (int k = 0; k < n; ++k) s += " " + num(p.v[k]);
+        for (int k = 0; k < n; ++k) s += " " + paramNum(p.v[k]);
         s += "\n";
     }
     return s;

@@ -23,6 +23,9 @@ constexpr u32 kUnseqWindow = 1024;
 constexpr u32 kMinRto = 30, kInitialRto = 500;
 constexpr usize kMaxAssemblies = 16;
 constexpr u32 kMaxDatagram = 4096;
+constexpr u32 kMinMtu = 576;
+constexpr u64 kFragMinChunk = kMinMtu - kHeaderSize - kCmdHeader - 20;        // the data in a fragment of a sender on the smallest MTU
+constexpr u64 kFragMaxChunk = kMaxDatagram - kHeaderSize - kCmdHeader - 20;   // and on the largest
 
 enum Cmd : u8 {
     kAck = 1, kConnect = 2, kVerify = 3, kDisconnect = 4, kPing = 5, kSendReliable = 6, kSendUnreliable = 7, kSendUnsequenced = 8,
@@ -59,6 +62,13 @@ u32 crcStep(u32 c, const u8* d, usize n) {
 inline u16 t16(u64 now) { return static_cast<u16>(now & 0xFFFF); }
 inline bool seqNewer(u16 a, u16 b) { return static_cast<i16>(static_cast<u16>(a - b)) > 0; }   // a is after b
 
+// A fragment whose count, total and offset no sender could have produced is refused, so a few bytes of wire cannot claim a huge packet.
+inline bool fragmentOk(u32 count, u32 num, u32 total, u32 off, usize dl) {
+    if (count == 0 || num >= count || total > kMaxPacketSize || off > total || dl > total - off) return false;
+    if (total > static_cast<u64>(count) * kFragMaxChunk || static_cast<u64>(count - 1) * kFragMinChunk >= total) return false;
+    return off <= static_cast<u64>(num) * kFragMaxChunk && off >= static_cast<u64>(num) * kFragMinChunk;
+}
+
 } // namespace
 
 u32 crc32(const u8* data, usize len) { return ~crcStep(0xFFFFFFFFu, data, len); }
@@ -81,9 +91,9 @@ struct OutCmd {
 struct InCmd { u8 type = 0; std::vector<u8> payload; };
 
 struct Assembly {
-    std::vector<u8> data;
-    std::vector<u8> got;          // unreliable fragments: which have arrived
-    u32 remaining = 0, total = 0;
+    std::vector<u8> data;         // grows with the fragments that arrive, never ahead of them
+    std::vector<bool> got;        // unreliable fragments: which have arrived
+    u32 remaining = 0, total = 0, received = 0;
     u16 group = 0;
     bool unseq = false;
 };
@@ -435,7 +445,9 @@ struct Host::Impl {
             ++p.packetsLost; ++p.epochLost;
         }
         if (p.state == PeerState::Connecting && p.connectAckedAt && now - p.connectAckedAt >= p.timeoutMin) { timedOut(p); return; }
-        if (p.state == PeerState::Connected && p.outgoing.empty() && now - p.lastSend >= p.pingInterval) queueReliable(p, kPing, kControl, {});
+        // Silence from the other end, not our own sending, is what a ping tests: unreliable traffic out proves nothing about the wire.
+        if (p.state == PeerState::Connected && p.sentReliable.empty() && now - p.lastReceive >= p.pingInterval &&
+            std::none_of(p.outgoing.begin(), p.outgoing.end(), [](const OutCmd& c) { return c.reliable(); })) queueReliable(p, kPing, kControl, {});
         if (p.state == PeerState::DisconnectLater && p.outgoing.empty() && p.sentReliable.empty()) startDisconnect(p, p.laterData);
         if (now - p.lossEpoch >= 1000) {
             if (p.epochSent) {
@@ -588,6 +600,15 @@ struct Host::Impl {
 
     void handleCommand(P& p, u8 type, u8 chIdx, u16 seq, std::vector<u8>&& payload, u16 sent) {
         const u8 cmd = type & kTypeMask;
+        if (p.state == PeerState::AcknowledgingConnect && cmd >= kPing && cmd <= kBandwidth) {   // the client speaks, so it has the VERIFY even if its ack was lost
+            auto it = std::find_if(p.sentReliable.begin(), p.sentReliable.end(), [](const OutCmd& c) { return (c.type & kTypeMask) == kVerify; });
+            if (it != p.sentReliable.end()) {
+                p.sentReliable.erase(it);
+                if (p.control.inFlight) --p.control.inFlight;
+            }
+            p.state = PeerState::Connected;
+            emit(EventType::Connect, p, 0, p.connectData, DisconnectReason::None);
+        }
         if (!allowed(p.state, cmd)) return;
         if (cmd == kAck) {
             Rd r(payload.data(), payload.size());
@@ -646,7 +667,7 @@ struct Host::Impl {
             const u32 off = r.g32();
             const usize dl = r.left();
             const u8* dp = r.take(dl);
-            if (r.bad || count == 0 || num >= count || total > kMaxPacketSize || off > total || dl > total - off) return;
+            if (r.bad || !fragmentOk(count, num, total, off, dl)) return;
             if (!unseq && !seqNewer(group, ch->inUnreliable)) return;
             Assembly* a = nullptr;
             for (Assembly& x : ch->unrelAsm) if (x.group == group && x.unseq == unseq) { a = &x; break; }
@@ -654,14 +675,21 @@ struct Host::Impl {
                 if (ch->unrelAsm.size() >= kMaxAssemblies) ch->unrelAsm.pop_front();
                 ch->unrelAsm.emplace_back();
                 a = &ch->unrelAsm.back();
-                a->data.resize(total); a->got.assign(count, 0); a->remaining = count; a->total = total; a->group = group; a->unseq = unseq;
+                a->got.assign(count, false); a->remaining = count; a->total = total; a->group = group; a->unseq = unseq;
             }
             if (a->total != total || a->got.size() != count || a->got[num]) return;
-            a->got[num] = 1;
-            if (dl) std::memcpy(a->data.data() + off, dp, dl);
+            a->got[num] = true;
+            if (dl) {
+                if (a->data.size() < off + dl) a->data.resize(off + dl);
+                std::memcpy(a->data.data() + off, dp, dl);
+                a->received += static_cast<u32>(dl);
+            }
             if (--a->remaining != 0) return;
             std::vector<u8> whole = std::move(a->data);
+            const bool full = a->received == total;
             ch->unrelAsm.erase(std::remove_if(ch->unrelAsm.begin(), ch->unrelAsm.end(), [&](const Assembly& x) { return x.group == group && x.unseq == unseq; }), ch->unrelAsm.end());
+            if (!full) return;                     // the fragments did not add up to the size they claimed
+            whole.resize(total);
             if (unseq) { if (!acceptUnseq(p, group)) return; }
             else { if (!seqNewer(group, ch->inUnreliable)) return; ch->inUnreliable = group; }
             emit(EventType::Receive, p, chIdx, unseq ? kFlagUnsequenced : 0, DisconnectReason::None, std::move(whole));
@@ -714,20 +742,27 @@ struct Host::Impl {
                 const u32 off = r.g32();
                 const usize dl = r.left();
                 const u8* dp = r.take(dl);
-                if (r.bad || count == 0 || num >= count || total > kMaxPacketSize || off > total || dl > total - off) break;
+                if (r.bad || !fragmentOk(count, num, total, off, dl)) break;
                 auto it = ch.relAsm.find(start);
                 if (it == ch.relAsm.end()) {
                     if (ch.relAsm.size() >= 8) break;
                     Assembly a;
-                    a.data.resize(total); a.remaining = count; a.total = total;
+                    a.remaining = count; a.total = total;
                     it = ch.relAsm.emplace(start, std::move(a)).first;
                 }
                 Assembly& a = it->second;
                 if (a.total != total) break;
-                if (dl) std::memcpy(a.data.data() + off, dp, dl);
+                if (dl) {
+                    if (a.data.size() < off + dl) a.data.resize(off + dl);
+                    std::memcpy(a.data.data() + off, dp, dl);
+                    a.received += static_cast<u32>(dl);
+                }
                 if (--a.remaining == 0) {
                     std::vector<u8> whole = std::move(a.data);
+                    const bool full = a.received == total;
                     ch.relAsm.erase(it);
+                    if (!full) break;              // the fragments did not add up to the size they claimed
+                    whole.resize(total);
                     emit(EventType::Receive, p, chIdx, kFlagReliable, DisconnectReason::None, std::move(whole));
                 }
                 break;

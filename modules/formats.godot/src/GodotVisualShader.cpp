@@ -294,7 +294,7 @@ bool buildSpec(const GodotSubResource& n, Ctx& c, Spec& s) {
             std::string h;
             if (src == 1) h = " : hint_screen_texture";
             else if (src == 4) h = " : hint_depth_texture";
-            else { const int tt = Pi(n, "texture_type"); h = tt == 1 ? " : hint_normal" : tt == 2 ? " : source_color" : ""; if (src == 3) h = " : hint_normal"; }
+            else { const int tt = Pi(n, "texture_type"); h = tt == 1 ? " : source_color" : tt == 2 ? " : hint_normal" : ""; if (src == 3) h = " : hint_normal"; }
             addUniform(c, uname, "uniform sampler2D " + uname + h + ";");
             samp = uname;
             if (src == 0 || src == 2 || src == 3)
@@ -455,7 +455,8 @@ bool buildSpec(const GodotSubResource& n, Ctx& c, Spec& s) {
         s.in = {T::Float, T::Float, T::Float, T::V3, T::V3, T::V3};
         s.inDefault = {"0.0", "0.0", "1e-5", "vec3(0.0)", "vec3(0.0)", "vec3(0.0)"};
         s.out = {T::V3};
-        s.code = "if (abs(%0 - %1) < %2) {\n\t$0 = %4;\n} else if (%0 < %1) {\n\t$0 = %5;\n} else {\n\t$0 = %3;\n}";
+        // Ports 3, 4, 5 are "a == b", "a > b", "a < b".
+        s.code = "if (abs(%0 - %1) < %2) {\n\t$0 = %3;\n} else if (%0 < %1) {\n\t$0 = %5;\n} else {\n\t$0 = %4;\n}";
         return true;
     }
     if (ty == "VisualShaderNodeSwitch") {
@@ -493,9 +494,11 @@ bool buildSpec(const GodotSubResource& n, Ctx& c, Spec& s) {
         return true;
     }
     if (ty == "VisualShaderNodeTransformOp") {
-        static const char* k[] = {"%0 * %1", "%1 * %0", "%0 + %1", "%0 - %1", "%0 / %1"};
+        // AxB, BxA, AxB_COMP, BxA_COMP, ADD, A_MINUS_B, B_MINUS_A, A_DIV_B, B_DIV_A (the _COMP and divide forms work per column).
+        static const char* k[] = {"%0 * %1", "%1 * %0", "mat4(%0[0] * %1[0], %0[1] * %1[1], %0[2] * %1[2], %0[3] * %1[3])", "mat4(%1[0] * %0[0], %1[1] * %0[1], %1[2] * %0[2], %1[3] * %0[3])",
+            "%0 + %1", "%0 - %1", "%1 - %0", "mat4(%0[0] / %1[0], %0[1] / %1[1], %0[2] / %1[2], %0[3] / %1[3])", "mat4(%1[0] / %0[0], %1[1] / %0[1], %1[2] / %0[2], %1[3] / %0[3])"};
         s.in = {T::Mat, T::Mat}; s.inDefault = {"mat4(1.0)", "mat4(1.0)"}; s.out = {T::Mat};
-        s.code = std::string("$0 = ") + k[std::clamp(Pi(n, "operator"), 0, 4)] + ";";
+        s.code = std::string("$0 = ") + k[std::clamp(Pi(n, "operator"), 0, 8)] + ";";
         return true;
     }
     if (ty == "VisualShaderNodeTransformCompose") {
@@ -509,8 +512,8 @@ bool buildSpec(const GodotSubResource& n, Ctx& c, Spec& s) {
         return true;
     }
     if (ty == "VisualShaderNodeReroute") {
-        static const T tt[] = {T::Float, T::V2, T::V3, T::Bool, T::Mat, T::Sampler};
-        const T t = tt[std::clamp(Pi(n, "port_type"), 0, 5)];
+        static const T tt[] = {T::Float, T::Int, T::UInt, T::V2, T::V3, T::V4, T::Bool, T::Mat, T::Sampler};   // Godot's PortType order
+        const T t = tt[std::clamp(Pi(n, "port_type"), 0, 8)];
         s.in = {t}; s.inDefault = {zero(t)}; s.out = {t}; s.code = "$0 = %0;";
         return true;
     }
@@ -702,6 +705,14 @@ GdVisualShaderResult gdVisualShaderToCode(const GodotResource& res) {
             const OutPort& op = (*ports)[static_cast<usize>(cn.toPort)];
             tail += std::string("\t") + op.code + " = " + conv(pr->second.var, pr->second.type, op.type) + ";\n";
             anyConnected = true;
+        }
+        // Godot emits every node's globals, wired or not: global expressions and parameters (uniforms) have nothing to be reached from.
+        for (const auto& [id, sub] : nodes) {
+            if (done.count(id) || (sub->type != "VisualShaderNodeGlobalExpression" && sub->type.find("Parameter") == std::string::npos)) continue;
+            Ctx local = c;
+            local.id = id;
+            Spec unused;
+            buildSpec(*sub, local, unused);
         }
         std::string indented;
         for (usize b = 0; b < code.size();) {

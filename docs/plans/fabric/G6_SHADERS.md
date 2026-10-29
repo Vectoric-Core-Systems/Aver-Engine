@@ -106,7 +106,9 @@ line per origin line and `GdPreprocessed::lines` maps each back to (file, line),
 ### Limits (so hostile or broken input is an error, never a crash)
 
 Nesting of expressions and statements 96 (counted together), 300 chained binary operators / member accesses / commas in one expression, integer literals that do not fit 64 bits are
-errors, an iterative `~GdExpr`. The test feeds truncated, mutated and hostile shaders (100 000 parentheses, 100 000-term sums, macro bombs).
+errors, an iterative `~GdExpr`. An expression tree is at most 128 levels high (`GdExpr::height`; parentheses restart the chain counters, and the folder and emitter recurse over
+the tree). The preprocessor stops at 4096 included files, 32 MiB of output and 1000 diagnostics. The test feeds truncated, mutated and hostile shaders (100 000 parentheses,
+100 000-term sums, nested 47 x 300 chains, macro bombs, include bombs).
 
 ---
 

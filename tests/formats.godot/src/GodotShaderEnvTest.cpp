@@ -167,17 +167,16 @@ struct DxcLib {
     bool ok() const { return compiler != nullptr; }
 };
 
-DxcLib loadDxc(const fs::path& path) {
-    DxcLib l;
-    if (!fs::exists(path)) return l;
+// Fills l in place: off Windows ComPtr can be neither copied nor moved.
+void loadDxc(const fs::path& path, DxcLib& l) {
+    if (!fs::exists(path)) return;
     l.dll = loadLibrary(reinterpret_cast<const char*>(path.u8string().c_str()));
-    if (!l.dll) return l;
+    if (!l.dll) return;
     auto create = reinterpret_cast<DxcCreateInstanceProc>(librarySymbol(l.dll, "DxcCreateInstance"));
     if (!create || FAILED(create(CLSID_DxcUtils, IID_PPV_ARGS(&l.utils))) || FAILED(create(CLSID_DxcCompiler, IID_PPV_ARGS(&l.compiler)))) {
         l.utils.Reset();
         l.compiler.Reset();
     }
-    return l;
 }
 
 std::vector<std::wstring> splitDefines(const std::string& all) {
@@ -451,6 +450,117 @@ int main() {
         GodotResource particles;
         parseGodotResource("[gd_resource type=\"VisualShader\" format=3]\n\n[resource]\nmode = 2\n", "p.tres", particles, d2);
         check(!gdVisualShaderToCode(particles).ok, "a particles VisualShader is refused with a reason");
+
+        // Enum orders and reachability, from inline resources.
+        const auto inlineVs = [&](const char* text) {
+            GodotResource r;
+            GodotDiagnostics d;
+            const bool parsed = parseGodotResource(text, "inline.tres", r, d);
+            check(parsed, "an inline VisualShader parses");
+            return gdVisualShaderToCode(r);
+        };
+        const auto has = [](const GdVisualShaderResult& r, const char* s) { return r.code.find(s) != std::string::npos; };
+        {
+            const GdVisualShaderResult r = inlineVs(
+                "[gd_resource type=\"VisualShader\" format=3]\n"
+                "[sub_resource type=\"VisualShaderNodeTexture\" id=\"a\"]\ntexture_type = 1\n"
+                "[sub_resource type=\"VisualShaderNodeTexture\" id=\"b\"]\ntexture_type = 2\n"
+                "[resource]\nmode = 0\n"
+                "nodes/fragment/2/node = SubResource(\"a\")\nnodes/fragment/3/node = SubResource(\"b\")\n"
+                "nodes/fragment/connections = PackedInt32Array(2, 0, 0, 0, 3, 0, 0, 9)\n");
+            check(r.ok, "a Texture colour and normal-map pair converts (" + r.error + ")");
+            check(has(r, "uniform sampler2D tex_fra_2 : source_color;"), "Texture type Color (1) is declared source_color");
+            check(has(r, "uniform sampler2D tex_fra_3 : hint_normal;"), "Texture type Normal Map (2) is declared hint_normal");
+        }
+        {
+            const GdVisualShaderResult r = inlineVs(
+                "[gd_resource type=\"VisualShader\" format=3]\n"
+                "[sub_resource type=\"VisualShaderNodeVec3Constant\" id=\"a\"]\nconstant = Vector3(1, 2, 3)\n"
+                "[sub_resource type=\"VisualShaderNodeReroute\" id=\"b\"]\nport_type = 4\n"
+                "[resource]\nmode = 0\n"
+                "nodes/fragment/2/node = SubResource(\"a\")\nnodes/fragment/3/node = SubResource(\"b\")\n"
+                "nodes/fragment/connections = PackedInt32Array(2, 0, 3, 0, 3, 0, 0, 0)\n");
+            check(r.ok && has(r, "vec3 n_out3p0") && !has(r, "mat4"), "a vec3 Reroute (port_type 4) is a vec3 local");
+            GdEngineShader gs;
+            GdEngineOptions go;
+            go.name = "reroute";
+            check(gdShaderForEngine(r.code, "reroute.gdshader", go, gs), "the Reroute shader compiles through the SH2 path (" + gs.error + ")");
+        }
+        {
+            // TransformOp operators: AxB 0, BxA 1, AxB_COMP 2, BxA_COMP 3, ADD 4, A_MINUS_B 5, B_MINUS_A 6, A_DIV_B 7, B_DIV_A 8.
+            const auto top = [&](int op) {
+                return inlineVs((std::string("[gd_resource type=\"VisualShader\" format=3]\n"
+                    "[sub_resource type=\"VisualShaderNodeTransformConstant\" id=\"a\"]\n"
+                    "[sub_resource type=\"VisualShaderNodeTransformConstant\" id=\"b\"]\n"
+                    "[sub_resource type=\"VisualShaderNodeTransformOp\" id=\"c\"]\noperator = ") + std::to_string(op) + "\n"
+                    "[resource]\nmode = 0\n"
+                    "nodes/vertex/2/node = SubResource(\"a\")\nnodes/vertex/3/node = SubResource(\"b\")\nnodes/vertex/4/node = SubResource(\"c\")\n"
+                    "nodes/vertex/connections = PackedInt32Array(2, 0, 4, 0, 3, 0, 4, 1, 4, 0, 0, 10)\n").c_str());
+            };
+            const GdVisualShaderResult mulComp = top(2), add = top(4), sub = top(5), subBA = top(6), div = top(7), divBA = top(8), axb = top(0);
+            check(has(axb, "n_out4p0 = n_out2p0 * n_out3p0;"), "TransformOp AxB multiplies");
+            check(has(mulComp, "n_out2p0[0] * n_out3p0[0]") && !has(mulComp, "n_out4p0 = n_out2p0 + "), "TransformOp AxB_COMP multiplies component-wise");
+            check(has(add, "n_out4p0 = n_out2p0 + n_out3p0;"), "TransformOp ADD adds");
+            check(has(sub, "n_out4p0 = n_out2p0 - n_out3p0;"), "TransformOp A_MINUS_B subtracts");
+            check(has(subBA, "n_out4p0 = n_out3p0 - n_out2p0;"), "TransformOp B_MINUS_A subtracts the other way");
+            check(has(div, "n_out2p0[0] / n_out3p0[0]"), "TransformOp A_DIV_B divides component-wise");
+            check(has(divBA, "n_out3p0[0] / n_out2p0[0]"), "TransformOp B_DIV_A divides the other way");
+        }
+        {
+            const GdVisualShaderResult r = inlineVs(
+                "[gd_resource type=\"VisualShader\" format=3]\n"
+                "[sub_resource type=\"VisualShaderNodeIf\" id=\"a\"]\n"
+                "default_input_values = [0, 2.0, 1, 1.0, 3, Vector3(1, 0, 0), 4, Vector3(0, 1, 0), 5, Vector3(0, 0, 1)]\n"
+                "[resource]\nmode = 0\n"
+                "nodes/fragment/2/node = SubResource(\"a\")\n"
+                "nodes/fragment/connections = PackedInt32Array(2, 0, 0, 0)\n");
+            // Ports: a == b is 3, a > b is 4, a < b is 5; a > b is the else branch.
+            check(r.ok && has(r, "n_out2p0 = vec3(1.0, 0.0, 0.0);\n\t} else if") && has(r, "n_out2p0 = vec3(0.0, 0.0, 1.0);\n\t} else {") && has(r, "n_out2p0 = vec3(0.0, 1.0, 0.0);\n\t}\n"),
+                  "If maps a == b, a < b and a > b to their own ports");
+        }
+        {
+            const GdVisualShaderResult r = inlineVs(
+                "[gd_resource type=\"VisualShader\" format=3]\n"
+                "[sub_resource type=\"VisualShaderNodeGlobalExpression\" id=\"g\"]\nexpression = \"float gx_f(float x) { return x * 2.0; }\"\n"
+                "[sub_resource type=\"VisualShaderNodeFloatParameter\" id=\"p\"]\nparameter_name = \"unwired\"\n"
+                "[sub_resource type=\"VisualShaderNodeExpression\" id=\"e\"]\noutput_ports = \"0,0,o;\"\nexpression = \"o = gx_f(1.0);\"\n"
+                "[resource]\nmode = 0\n"
+                "nodes/fragment/2/node = SubResource(\"g\")\nnodes/fragment/3/node = SubResource(\"p\")\nnodes/fragment/4/node = SubResource(\"e\")\n"
+                "nodes/fragment/connections = PackedInt32Array(4, 0, 0, 1)\n");
+            check(r.ok && has(r, "float gx_f(float x)"), "an unconnected GlobalExpression is still emitted");
+            check(has(r, "uniform float unwired;"), "an unconnected parameter node still declares its uniform");
+            GdEngineShader gs;
+            GdEngineOptions go;
+            go.name = "gx";
+            check(gdShaderForEngine(r.code, "gx.gdshader", go, gs), "the shader calling the global function compiles through the SH2 path (" + gs.error + ")");
+        }
+    }
+    // The register-count bound must not wrap.
+    {
+        fmt::GodotEnvPart p;
+        p.kind = "sky";
+        p.name = "wrap";
+        p.ns = "ge0_";
+        p.source = "void ge0_main() {}\n";
+        fmt::OcGraphData g;
+        fmt::packGodotEnvShader(p, g);
+        for (std::string& t : g.nodes[0].extraTokens) {
+            if (t.rfind("regs=", 0) == 0) t = "regs=4294967295";
+            if (t.rfind("gregs=", 0) == 0) t = "gregs=1";
+        }
+        fmt::GodotEnvPart q;
+        std::string err;
+        check(!fmt::unpackGodotEnvShader(g, q, &err), "a register count that wraps the u32 sum is refused");
+        for (std::string& t : g.nodes[0].extraTokens) {
+            if (t.rfind("regs=", 0) == 0) t = "regs=-1";
+            if (t.rfind("gregs=", 0) == 0) t = "gregs=0";
+        }
+        check(!fmt::unpackGodotEnvShader(g, q, &err), "a negative register count is refused");
+        for (std::string& t : g.nodes[0].extraTokens) {
+            if (t.rfind("regs=", 0) == 0) t = "regs=10";
+            if (t.rfind("gregs=", 0) == 0) t = "gregs=6";
+        }
+        check(fmt::unpackGodotEnvShader(g, q, &err) && q.defaults.size() == 64, "sixteen registers in all still unpack");
     }
 
     // ---------------------------------------------------------------------------------------------------------------- part 2: DXC
@@ -464,8 +574,9 @@ int main() {
     const fs::path dxilPath = fs::path(executableDir()) / "libdxcompiler.so";
     const fs::path spirvPath = dxilPath;
 #endif
-    const DxcLib dxil = loadDxc(dxilPath);
-    const DxcLib spirv = loadDxc(spirvPath);
+    DxcLib dxil, spirv;
+    loadDxc(dxilPath, dxil);
+    loadDxc(spirvPath, spirv);
     if (!dxil.ok() && !spirv.ok()) {
         AVER_WARN("  SKIP  no DXC compiler found next to the test or in third_party/dxc-spirv: the translation-unit compiles are skipped");
     } else {
