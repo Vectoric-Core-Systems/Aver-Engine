@@ -1,6 +1,8 @@
 #include "aver/net/Socket.hpp"
 #include "SockPlatform.hpp"
 
+#include <chrono>
+
 namespace aver::net {
 
 using namespace detail;
@@ -27,21 +29,34 @@ static void noSigpipe(Fd f) {
 #endif
 }
 
+// Polls again until the deadline: WSAPoll wakes on the system timer tick (often 15.6 ms), so a timeout can end early,
+// and a POSIX poll can be cut short by a signal.
 bool waitSocket(NativeSocket s, bool forWrite, int timeoutMs) {
     if (s == -1) return false;
+    using Clock = std::chrono::steady_clock;
+    const auto deadline = Clock::now() + std::chrono::milliseconds(timeoutMs > 0 ? timeoutMs : 0);
+    int left = timeoutMs;
+    for (;;) {
 #if defined(_WIN32)
-    WSAPOLLFD p{};
-    p.fd = toFd(s);
-    p.events = forWrite ? POLLWRNORM : POLLRDNORM;
-    const int r = WSAPoll(&p, 1, timeoutMs);
-    return r > 0 && (p.revents & (p.events | POLLHUP | POLLERR)) != 0;
+        WSAPOLLFD p{};
+        p.fd = toFd(s);
+        p.events = forWrite ? POLLWRNORM : POLLRDNORM;
+        const int r = WSAPoll(&p, 1, left);
+        const bool interrupted = false;
 #else
-    pollfd p{};
-    p.fd = toFd(s);
-    p.events = forWrite ? POLLOUT : POLLIN;
-    const int r = ::poll(&p, 1, timeoutMs);
-    return r > 0 && (p.revents & (p.events | POLLHUP | POLLERR)) != 0;
+        pollfd p{};
+        p.fd = toFd(s);
+        p.events = forWrite ? POLLOUT : POLLIN;
+        const int r = ::poll(&p, 1, left);
+        const bool interrupted = r < 0 && errno == EINTR;
 #endif
+        if (r > 0) return (p.revents & (p.events | POLLHUP | POLLERR)) != 0;
+        if ((r < 0 && !interrupted) || timeoutMs == 0) return false;
+        if (timeoutMs < 0) continue;   // infinite: only an interrupt gets here
+        const auto now = Clock::now();
+        if (now >= deadline) return false;
+        left = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count()) + 1;
+    }
 }
 
 // ---- UDP ----
