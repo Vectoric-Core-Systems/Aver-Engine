@@ -5,6 +5,7 @@
 
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Rs = Microsoft.CodeAnalysis;
 
 namespace Aver.Fabric.Convert.GdScript;
 
@@ -62,7 +63,7 @@ internal sealed partial class GdEmitter
         else if (vd.Init != null)
         {
             init = Expr(vd.Init, null);
-            GdType it = CleanInferred(init.Type);
+            GdType it = GuardScene(CleanInferred(init.Type), vd.Name, (Node?)_ctx.BodyRoot ?? vd);
             t = vd.Inferred ? it : Unify(it, vd.Name, (Node?)_ctx.BodyRoot ?? vd);
             if (it.Kind == GK.Lambda) t = GdType.Callable;
         }
@@ -250,6 +251,45 @@ internal sealed partial class GdEmitter
         return true;
     }
 
+    // `if x is A or x is B:` leaves x typed as the nearest API class A and B share inside the branch, so `x.get_rid()` there is a typed call.
+    // The cast is safe because the condition holds; a branch that assigns x keeps it as it was.
+    private void NarrowOrChain(Expr cond, Block body)
+    {
+        var tests = new List<TypeTest>();
+        if (!CollectOrTests(cond, tests) || tests.Count < 2 || tests[0].Value is not Identifier id) return;
+        if (tests.Any(t => t.Value is not Identifier other || other.Name != id.Name) || AssignsTo(body, id.Name)) return;
+        Ex target = Expr(id, null);
+        if (target.Type.Kind != GK.Object) return;
+        Rs.INamedTypeSymbol? common = null;
+        foreach (TypeTest t in tests)
+        {
+            GdType ty = ResolveType(t.Type);
+            if (ty.Kind != GK.Object || ty.Sym == null) return;
+            common = common == null ? ty.Sym : CommonBase(common, ty.Sym);
+            if (common == null) return;
+        }
+        if (!ApiModel.IsGodotDerived(common) || common!.Name == "GodotObject" || (target.Type.Sym != null && GdType.Derives(target.Type.Sym, common))) return;
+        GdType narrowed = GdType.Obj(common);
+        _ctx.Narrow[id.Name] = ($"(({narrowed.Cs}){target.Code})", narrowed);
+    }
+
+    private static bool CollectOrTests(Expr e, List<TypeTest> into)
+    {
+        switch (e)
+        {
+            case TypeTest tt: into.Add(tt); return true;
+            case Binary { Op: "or" } b: return CollectOrTests(b.Left, into) && CollectOrTests(b.Right, into);
+            default: return false;
+        }
+    }
+
+    private static Rs.INamedTypeSymbol? CommonBase(Rs.INamedTypeSymbol a, Rs.INamedTypeSymbol b)
+    {
+        for (Rs.INamedTypeSymbol? t = a; t != null; t = t.BaseType)
+            if (GdType.Derives(b, t)) return t;
+        return null;
+    }
+
     private void EmitIf(IfStmt s)
     {
         for (int i = 0; i < s.Branches.Count; i++)
@@ -257,6 +297,7 @@ internal sealed partial class GdEmitter
             IfBranch br = s.Branches[i];
             var saved = new Dictionary<string, (string, GdType)>(_ctx.Narrow);
             string cond = CondCode(br.Cond);
+            NarrowOrChain(br.Cond, br.Body);
             if (i > 0) _w.Line("else if (" + cond + ")");
             else _w.Line("if (" + cond + ")");
             _w.Line("{"); _w.Indent++;

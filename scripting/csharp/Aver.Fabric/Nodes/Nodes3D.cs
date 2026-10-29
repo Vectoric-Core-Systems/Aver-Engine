@@ -329,6 +329,12 @@ public class DirectionalLight3D : Light3D
     public enum ShadowModeEnum { Orthogonal = 0, Parallel2Splits = 1, Parallel4Splits = 2 }
     public ShadowModeEnum DirectionalShadowMode { get; set; } = ShadowModeEnum.Parallel4Splits;
 
+    /// <summary>What the light does besides lighting the scene: LightOnly lights without drawing in the sky, SkyOnly draws in the sky without lighting.</summary>
+    public enum SkyModeEnum { LightAndSky = 0, LightOnly = 1, SkyOnly = 2 }
+
+    /// <summary>Kept as set and not applied: the sun the sky draws is the level's one SUN record, lit and drawn together.</summary>
+    public SkyModeEnum SkyMode { get; set; } = SkyModeEnum.LightAndSky;
+
     private bool _live;
 
     internal override int LightKind => 2;

@@ -841,6 +841,26 @@ const ModelResult* Converter::modelFor(const std::string& resPath, const Where& 
     return &models_[resPath];
 }
 
+const ModelTree* Converter::modelTreeFor(const std::string& resPath, const Where& w) {
+    if (const auto it = modelTrees_.find(resPath); it != modelTrees_.end()) return it->second.get();
+    const std::string ext = [&] { const size_t d = resPath.find_last_of('.'); return d == std::string::npos ? std::string{} : lower(resPath.substr(d)); }();
+    std::unique_ptr<ModelTree> tree;
+    if (ext == ".glb" || ext == ".gltf") {
+        tree = std::make_unique<ModelTree>();
+        std::string why;
+        if (!buildModelTree(fs_.toDiskPath(resPath), *tree, why)) {
+            report_.add("resource", resPath, w.node, "PackedScene", "", Rating::Approximated,
+                        "the model's node tree could not be read (" + why + "); its meshes are placed directly below the instance, so children hung on nodes inside the model are dropped", 0);
+            tree.reset();
+        } else {
+            for (const std::string& n : tree->notes) report_.add("resource", resPath, "", "PackedScene", "", Rating::Approximated, n, 0);
+        }
+    }
+    const ModelTree* p = tree.get();
+    modelTrees_[resPath] = std::move(tree);
+    return p;
+}
+
 const gd::GodotResource* Converter::resourceDoc(const std::string& resPath) {
     if (const auto it = resourceDocs_.find(resPath); it != resourceDocs_.end()) return it->second.get();
     auto doc = std::make_unique<gd::GodotResource>();
@@ -1136,7 +1156,7 @@ void Converter::convertStandaloneResources() {
     for (const std::string& res : fs_.files()) {
         const std::string ext = extOf(res);
         const Where w{res, "", ""};
-        if (ext == ".tres") {
+        if (ext == ".tres" || ext == ".res") {   // a binary .res reads into the same model (GodotBinary.hpp)
             const gd::GodotResource* r = resourceDoc(res);
             if (!r) continue;
             const std::string& t = r->header.type;
@@ -1193,8 +1213,15 @@ void Converter::convertStandaloneResources() {
 }
 
 void Converter::reportProjectFiles() {
-    for (const std::string& res : fs_.binaryResources())
-        report_.add("file", res, "", "", "", Rating::Unsupported, "a binary Godot resource: resave it as text (.tscn / .tres) and convert again", 0);
+    // Binary .scn / .res files are read by the binary reader into the text model; the scene and resource rows say what became of their contents.
+    for (const std::string& res : fs_.binaryResources()) {
+        const bool scene = extOf(res) == ".scn";
+        const bool read = scene ? sceneDoc(res) != nullptr : resourceDoc(res) != nullptr;
+        if (read)
+            report_.add("file", res, "", scene ? "PackedScene" : "", "", Rating::Converted, "a binary Godot " + std::string(scene ? "scene" : "resource") + " (RSRC): read like its text form (.tscn / .tres)", 0);
+        else
+            report_.add("file", res, "", "", "", Rating::Unsupported, "a binary Godot resource that could not be read (see the entries above); resave it as text (.tscn / .tres) and convert again", 0);
+    }
     for (const std::string& res : fs_.files()) {
         const std::string ext = extOf(res);
         if (ext == ".gdshader") {   // G6 SH2: the shaders a ShaderMaterial used are reported where they were prepared

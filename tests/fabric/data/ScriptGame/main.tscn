@@ -1,0 +1,19 @@
+[gd_scene load_steps=4 format=3 uid="uid://cscriptgamemain"]
+
+[ext_resource type="Script" path="res://main.gd" id="1_main"]
+[ext_resource type="PackedScene" path="res://mob.tscn" id="2_mob"]
+
+[node name="Main" type="Node3D"]
+script = ExtResource("1_main")
+mob_scene = ExtResource("2_mob")
+
+[node name="Title" type="Label3D" parent="."]
+unique_name_in_owner = true
+text = "Score"
+
+[node name="Hud" type="CanvasLayer" parent="."]
+layer = 3
+
+[node name="Panel" type="Control" parent="Hud"]
+
+[node name="Mob1" parent="." instance=ExtResource("2_mob")]

@@ -37,6 +37,8 @@ internal sealed class Ex
     public Node? Provisional;              // the untyped variable (VarDecl or Param) whose type was inferred from its first value
     public bool IsDynamic;                 // a member read/written by name at run time
     public bool FromName;                  // a named constant: its Const value is for folding only, the code keeps the name
+    public List<ScenePlace>? Where;        // the nodes of the scenes this value is (a node reached by a path), so the next path can be followed
+    public string? SceneRes;               // a PackedScene value whose scene is known (preload, an export set in a scene): res:// path
 
     public Ex() { }
     public Ex(string code, GdType type, int prec = P.Primary) { Code = code; Type = type; Prec = prec; }

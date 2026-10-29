@@ -49,6 +49,43 @@ const char* averKeyName(long long code) {
     }
 }
 
+// Godot 3 wrote a special key (arrows, Enter, Tab, ...) as 1<<24 | n and Godot 4 writes 1<<22 | n; the low bits are the same.
+// Old projects keep the old codes in their [input] section. Returns the Godot 4 code, or 0 when `code` is not a Godot 3 special key.
+long long legacySpecialKey(long long code) {
+    constexpr long long kOld = 1LL << 24, kNew = 1LL << 22;
+    return (code >> 24) == 1 ? (code & (kOld - 1)) | kNew : 0;
+}
+
+// The names of Godot 4's special keys (1<<22 | n), for the report.
+const char* godotSpecialKeyName(long long n) {
+    static const char* const names[] = {"", "Escape", "Tab", "Backtab", "Backspace", "Enter", "KP Enter", "Insert", "Delete", "Pause", "Print", "SysReq",
+                                        "Clear", "Home", "End", "Left", "Up", "Right", "Down", "PageUp", "PageDown", "Shift", "Ctrl", "Meta", "Alt",
+                                        "CapsLock", "NumLock", "ScrollLock"};
+    return n >= 1 && n < static_cast<long long>(sizeof(names) / sizeof(names[0])) ? names[n] : nullptr;
+}
+
+// Godot 3's joypad buttons, which the same old projects keep: the d-pad is 12 to 15 there and 11 to 14 in Godot 4, the shoulders 4 and 5,
+// the triggers buttons 6 and 7 (axes in Godot 4), the sticks 8 and 9, Select 10, Start 11. Null for a trigger (see the caller).
+const char* averPadButtonLegacy(long long idx) {
+    switch (idx) {
+        case 0: return "A";
+        case 1: return "B";
+        case 2: return "X";
+        case 3: return "Y";
+        case 4: return "LeftShoulder";
+        case 5: return "RightShoulder";
+        case 8: return "LeftThumb";
+        case 9: return "RightThumb";
+        case 10: return "Back";
+        case 11: return "Start";
+        case 12: return "DPadUp";
+        case 13: return "DPadDown";
+        case 14: return "DPadLeft";
+        case 15: return "DPadRight";
+        default: return nullptr;
+    }
+}
+
 const char* averPadButton(long long idx) {
     switch (idx) {
         case 0: return "A";
@@ -82,9 +119,30 @@ const char* averPadAxis(long long idx) {
 }
 
 std::string keyDescription(long long code) {
-    const char* n = averKeyName(code);
-    return n ? n : "keycode " + std::to_string(code);
+    if (const char* n = averKeyName(code)) return n;
+    if ((code >> 22) == 1)
+        if (const char* s = godotSpecialKeyName(code & ((1LL << 22) - 1))) return s;
+    if ((code >> 22) == 1 && (code & ((1LL << 22) - 1)) >= 28 && (code & ((1LL << 22) - 1)) < 28 + 35) return "F" + std::to_string((code & ((1LL << 22) - 1)) - 27);
+    if (code > 32 && code < 127) return std::string("'") + static_cast<char>(code) + "'";
+    return "keycode " + std::to_string(code);
 }
+
+const char* gamepadButtonName(long long idx, bool legacy) {
+    if (legacy) return idx == 6 ? "L2 (a trigger)" : idx == 7 ? "R2 (a trigger)" : "unknown";
+    switch (idx) {
+        case 5: return "Guide";
+        case 15: return "Misc 1";
+        case 16: return "Paddle 1";
+        case 17: return "Paddle 2";
+        case 18: return "Paddle 3";
+        case 19: return "Paddle 4";
+        case 20: return "Touchpad";
+        default: return "unknown";
+    }
+}
+
+constexpr const char* kAverKeySet =
+    "A-Z, 0-9, Space, Enter, Escape, Tab, the arrows, Shift, Ctrl, Alt and the three mouse buttons";
 
 }  // namespace
 
@@ -100,22 +158,44 @@ void Converter::convertInput() {
         a.name = act.name;
         std::vector<fmt::OcInputBinding> binds;
         bool axis = false;
-        int converted = 0, unmapped = 0;
+        int converted = 0, unmapped = 0, empty = 0;
         const auto skip = [&](const std::string& why, int line) {
             ++unmapped;
             report_.add("input", kProject, act.name, "InputEvent", "", Rating::Unsupported, why, line);
         };
+        const auto keyCodeOf = [](const Var& ev) {
+            long long code = static_cast<long long>(numOf(ev.find("keycode"), 0));
+            if (code == 0) code = static_cast<long long>(numOf(ev.find("physical_keycode"), 0));
+            if (code == 0) code = static_cast<long long>(numOf(ev.find("key_label"), 0));
+            return code;
+        };
+        // An action that still holds Godot 3 key codes holds Godot 3 joypad numbers too (the old d-pad is 12 to 15).
+        bool legacyPad = false;
+        for (const Var& ev : act.events)
+            if (ev.type == VType::Object && ev.s == "InputEventKey" && legacySpecialKey(keyCodeOf(ev)) != 0) legacyPad = true;
         for (const Var& ev : act.events) {
             if (ev.type != VType::Object) { skip("an event that is not an InputEvent object", act.line); continue; }
             const std::string& cls = ev.s;
             fmt::OcInputBinding b;
             b.action = act.name;
             if (cls == "InputEventKey") {
-                long long code = static_cast<long long>(numOf(ev.find("keycode"), 0));
-                if (code == 0) code = static_cast<long long>(numOf(ev.find("physical_keycode"), 0));
-                if (code == 0) code = static_cast<long long>(numOf(ev.find("key_label"), 0));
+                long long code = keyCodeOf(ev);
+                if (code == 0) {
+                    ++empty;
+                    report_.add("input", kProject, act.name, cls, "", Rating::Approximated,
+                                "an empty key event (no keycode, physical keycode or key label) binds no key in Godot either; nothing is written for it", act.line);
+                    continue;
+                }
+                const long long modern = legacySpecialKey(code);
+                if (modern) code = modern;
                 const char* n = averKeyName(code);
-                if (!n) { skip("the key (" + keyDescription(code) + ") is not in Aver's key set", act.line); continue; }
+                if (!n) {
+                    skip(std::string("the ") + keyDescription(code) + " key" + (modern ? " (in Godot 3's key encoding)" : "") + " is not in Aver's Key enum (" + kAverKeySet + ")", act.line);
+                    continue;
+                }
+                if (modern)
+                    report_.add("input", kProject, act.name, cls, "", Rating::Approximated,
+                                "the key code is in Godot 3's encoding (special-key flag 1<<24, Godot 4 uses 1<<22); read as the " + keyDescription(code) + " key", act.line);
                 b.source = fmt::OcInputSource::Key;
                 b.key = n;
                 if (boolOf(ev.find("shift_pressed"), false) || boolOf(ev.find("ctrl_pressed"), false) || boolOf(ev.find("alt_pressed"), false) ||
@@ -135,8 +215,26 @@ void Converter::convertInput() {
                     continue;
                 }
             } else if (cls == "InputEventJoypadButton") {
-                const char* n = averPadButton(static_cast<long long>(numOf(ev.find("button_index"), -1)));
-                if (!n) { skip("gamepad button " + std::to_string(static_cast<long long>(numOf(ev.find("button_index"), -1))) + " is not in Aver's gamepad set", act.line); continue; }
+                const long long idx = static_cast<long long>(numOf(ev.find("button_index"), -1));
+                if (legacyPad && (idx == 6 || idx == 7)) {   // Godot 3's L2 and R2 are buttons; Aver reads the triggers as axes
+                    b.source = fmt::OcInputSource::GamepadAxis;
+                    b.key = idx == 6 ? "LeftTrigger" : "RightTrigger";
+                    axis = true;
+                    report_.add("input", kProject, act.name, cls, "", Rating::Approximated,
+                                "Godot 3 joypad numbering (this action holds Godot 3 key codes): the trigger button is bound as Aver's trigger axis", act.line);
+                    ++converted;
+                    binds.push_back(std::move(b));
+                    continue;
+                }
+                const char* n = legacyPad ? averPadButtonLegacy(idx) : averPadButton(idx);
+                if (!n) {
+                    skip("gamepad button " + std::to_string(idx) + " (" + gamepadButtonName(idx, legacyPad) + ") is not in Aver's GamepadButton enum (A, B, X, Y, Back, Start, the two thumbs, the two shoulders, the d-pad)",
+                         act.line);
+                    continue;
+                }
+                if (legacyPad)
+                    report_.add("input", kProject, act.name, cls, "", Rating::Approximated,
+                                "Godot 3 joypad numbering (this action holds Godot 3 key codes): button " + std::to_string(idx) + " read as " + n, act.line);
                 b.source = fmt::OcInputSource::GamepadButton;
                 b.key = n;
             } else if (cls == "InputEventJoypadMotion") {
@@ -157,8 +255,12 @@ void Converter::convertInput() {
                 skip(cls + " is not an input the converter maps (mouse motion, touch and shortcuts are not bound by action)", act.line);
                 continue;
             }
+            // Two events can name one Aver input (Enter and KP Enter): one binding is enough.
+            bool duplicate = false;
+            for (const fmt::OcInputBinding& o : binds)
+                duplicate = duplicate || (o.source == b.source && o.key == b.key && o.scale == b.scale);
             ++converted;
-            binds.push_back(std::move(b));
+            if (!duplicate) binds.push_back(std::move(b));
         }
         a.type = axis ? fmt::OcInputValueType::Axis1D : fmt::OcInputValueType::Digital;
         if (axis) {
@@ -168,11 +270,15 @@ void Converter::convertInput() {
             dz.v[1] = 1.0f;
             a.modifiers.push_back(fmt::formatModifierSpec(dz));
         }
+        const size_t written = binds.size();
         data.actions.push_back(std::move(a));
         for (auto& b : binds) data.bindings.push_back(std::move(b));
         if (converted > 0) report_.add("input", kProject, act.name, "InputAction", "", unmapped ? Rating::Approximated : Rating::Converted,
-                                       std::to_string(converted) + " binding(s)" + (unmapped ? ", " + std::to_string(unmapped) + " not mapped" : ""), act.line);
-        else report_.add("input", kProject, act.name, "InputAction", "", Rating::Unsupported, "none of its events could be mapped", act.line);
+                                       std::to_string(written) + " binding(s)" + (unmapped ? ", " + std::to_string(unmapped) + " not mapped" : ""), act.line);
+        else if (empty > 0 && unmapped == 0)
+            report_.add("input", kProject, act.name, "InputAction", "", Rating::Approximated, "its only event is an empty key event; the action is written with no bindings", act.line);
+        else report_.add("input", kProject, act.name, "InputAction", "", Rating::Unsupported,
+                         "none of its events could be mapped (" + std::to_string(unmapped) + " event(s) are outside Aver's input set, see the rows above)", act.line);
     }
     report_.add("input", kProject, "", "InputMap", "", Rating::Approximated,
                 "only the actions the project overrides are written; Godot's built-in ui_* actions are not", 0);
@@ -336,6 +442,17 @@ bool Converter::convertProject(const std::string& startLevelAsset) {
                 report_.add("setting", kProject, "", "", key, Rating::Approximated,
                             "the default is written into every shader material that declares this global uniform; Fabric/shaders.json lists the globals "
                             "and RenderingServer.global_shader_parameter_set updates them at run time", e.line);
+                continue;
+            }
+            // Editor and import-time settings change nothing a running game does.
+            static const char* editorOnly[] = {"application/config/tags", "debug/gdscript/warnings/", "debug/shader_language/warnings/",
+                                               "rendering/textures/vram_compression/"};
+            bool editorSetting = false;
+            for (const char* h : editorOnly)
+                if (key.rfind(h, 0) == 0) { editorSetting = true; break; }
+            if (editorSetting) {
+                report_.add("setting", kProject, "", "", key, Rating::Approximated,
+                            "an editor or import-time setting (project tags, script warnings, texture compression formats); it changes nothing a running game does, so it is not written", e.line);
                 continue;
             }
             report_.add("setting", kProject, "", "", key, Rating::Unsupported, "no Aver project key for this setting", e.line);

@@ -583,6 +583,10 @@ public partial class Node : GodotObject
         lock (s_groupMembers) foreach (string g in _groups) if (s_groupMembers.TryGetValue(g, out var list)) list.Remove(this);
     }
 
+    /// <summary>Godot's reset_physics_interpolation. Does nothing: the engine's physics interpolation (PHYSICS.INTERPOLATION) blends only simulated bodies and
+    /// keeps no per-node state a script could reset.</summary>
+    public void ResetPhysicsInterpolation() { }
+
     // ---- deferred destruction ----
 
     /// <summary>Frees the node and its descendants at the end of the frame (Godot's queue_free).</summary>

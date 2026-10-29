@@ -91,6 +91,19 @@ public readonly partial struct Body
         return false;
     }
 
+    /// <summary>Tracked contact <paramref name="index"/> (0 .. contact count - 1, ascending partner handle): the partner, where the touch began and its
+    /// normal (from this body to the partner). False when the body is not monitored or the index is out of range.</summary>
+    public bool TryGetContactAt(int index, out Body other, out Float3 point, out Float3 normal)
+    {
+        other = default; point = Float3.Zero; normal = Float3.Zero;
+        var p = new float[3]; var nrm = new float[3];
+        if (index < 0 || Native.aver_phys_body_contact_get(Handle, index, out int o, p, nrm) == 0) return false;
+        other = new Body(o);
+        point = new Float3(p[0], p[1], p[2]);
+        normal = new Float3(nrm[0], nrm[1], nrm[2]);
+        return true;
+    }
+
     /// <summary>What the areas and the world would give this body now: gravity in cm/s^2 before its gravity factor (Godot total_gravity).</summary>
     public Float3 AreaGravity
     {

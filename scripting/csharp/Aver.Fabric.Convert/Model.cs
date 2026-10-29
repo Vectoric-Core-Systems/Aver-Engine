@@ -99,6 +99,9 @@ public sealed class ConvertSettings
     public bool KeepAssembly { get; init; }
     /// <summary>The Godot project folder (autoloads are read from its project.godot). Optional.</summary>
     public string? ProjectDir { get; init; }
+    /// <summary>The text of Fabric/nodes.json, the scene converter's list of the nodes it placed. With it a GDScript's $Path, get_node("path") and %Unique are typed
+    /// from the scenes the script is attached to. Null: no scene is known and they stay untyped.</summary>
+    public string? SceneNodes { get; init; }
     /// <summary>Extra C# source the compile sees besides the scripts and the reference folder (tests stub classes the runtime lacks).</summary>
     public IReadOnlyList<(string Path, string Text)>? ExtraSources { get; init; }
 }

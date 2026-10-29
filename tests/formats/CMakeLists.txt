@@ -392,6 +392,7 @@ target_sources(AverAssetC PRIVATE
   ${CMAKE_SOURCE_DIR}/tools/fabric/FabricProcess.cpp
   ${CMAKE_SOURCE_DIR}/tools/fabric/FabricScripts.cpp
   ${CMAKE_SOURCE_DIR}/tools/fabric/FabricMeshGen.cpp
+  ${CMAKE_SOURCE_DIR}/tools/fabric/FabricModelTree.cpp
   ${CMAKE_SOURCE_DIR}/tools/fabric/FabricGeometry.cpp
   ${CMAKE_SOURCE_DIR}/tools/fabric/FabricAnimation.cpp
   ${CMAKE_SOURCE_DIR}/tools/fabric/FabricAnimTree.cpp

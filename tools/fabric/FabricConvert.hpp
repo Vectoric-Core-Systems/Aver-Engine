@@ -12,6 +12,7 @@ struct ModelPart {
     std::string meshAsset;   // content-relative path of the .ocmesh
     std::string name;        // the source node's name
     double x = 0, y = 0, z = 0;   // where it sits in the model, engine centimetres
+    int node = -1;           // the source node's index in a glTF file; -1 when the importer has none (FBX, OBJ)
 };
 
 struct ModelResult {

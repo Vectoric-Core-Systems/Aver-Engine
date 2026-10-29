@@ -43,6 +43,7 @@ struct GltfPlacement {
     i32  meshIndex = -1;                     // into GltfImportResult::meshes
     Vec3 position{0, 0, 0};                  // ENGINE space, centimetres -- already through toEngine
     std::string name;                        // the node's name, or the mesh's when the node had none
+    i32  node = -1;                          // the glTF node's index; -1 from importers with no node numbering (FBX)
 };
 
 // STRAND CURVES a glTF carried: its LINES and LINE_STRIP primitives, which the triangle path skips. Consecutive segments that share an endpoint

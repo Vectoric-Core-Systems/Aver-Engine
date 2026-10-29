@@ -1,0 +1,34 @@
+{
+  "asset": {"version": "2.0"},
+  "scene": 0,
+  "scenes": [{"nodes": [0, 5]}],
+  "nodes": [
+    {"name": "Armature", "scale": [0.5, 0.5, 0.5], "children": [1, 2]},
+    {"name": "Body", "mesh": 0, "skin": 0},
+    {"name": "Root", "translation": [0, 1, 0], "children": [3]},
+    {"name": "Tip.001", "translation": [0, 1, 0], "children": [4]},
+    {"name": "Hand", "translation": [0.25, 0, 0]},
+    {"name": "Prop", "mesh": 1, "translation": [2, 0, 0]}
+  ],
+  "skins": [{"joints": [2, 3], "inverseBindMatrices": 4}],
+  "animations": [{"name": "idle", "channels": [], "samplers": []}],
+  "meshes": [
+    {"name": "BodyMesh", "primitives": [{"attributes": {"POSITION": 0, "JOINTS_0": 2, "WEIGHTS_0": 3}, "indices": 1}]},
+    {"name": "PropMesh", "primitives": [{"attributes": {"POSITION": 0}, "indices": 1}]}
+  ],
+  "buffers": [{"byteLength": 232, "uri": "data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAABAAIAAAAAAQAAAAEAAAABAAAAAAA/AAAAPwAAAAAAAAAAAAAAPwAAAD8AAAAAAAAAAAAAAD8AAAA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAAAAAAIA/AACAPwAAAAAAAAAAAAAAAAAAAAAAAIA/AAAAAAAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAAAAAAAAAAAAACAPw=="}],
+  "bufferViews": [
+    {"buffer": 0, "byteOffset": 0, "byteLength": 36, "target": 34962},
+    {"buffer": 0, "byteOffset": 36, "byteLength": 6, "target": 34963},
+    {"buffer": 0, "byteOffset": 44, "byteLength": 12, "target": 34962},
+    {"buffer": 0, "byteOffset": 56, "byteLength": 48, "target": 34962},
+    {"buffer": 0, "byteOffset": 104, "byteLength": 128}
+  ],
+  "accessors": [
+    {"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0, 0, 0], "max": [1, 1, 0]},
+    {"bufferView": 1, "componentType": 5123, "count": 3, "type": "SCALAR"},
+    {"bufferView": 2, "componentType": 5121, "count": 3, "type": "VEC4"},
+    {"bufferView": 3, "componentType": 5126, "count": 3, "type": "VEC4"},
+    {"bufferView": 4, "componentType": 5126, "count": 2, "type": "MAT4"}
+  ]
+}

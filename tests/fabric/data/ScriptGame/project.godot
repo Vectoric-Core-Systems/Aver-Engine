@@ -1,0 +1,10 @@
+; Engine configuration file.
+; A fixture for Fabric/nodes.json, the list of nodes the script converter types $Path, get_node and %Unique from (FabricConvertTest).
+
+config_version=5
+
+[application]
+
+config/name="Script Game"
+run/main_scene="res://main.tscn"
+config/features=PackedStringArray("4.3", "Forward Plus")

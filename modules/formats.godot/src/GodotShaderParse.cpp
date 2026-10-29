@@ -519,6 +519,11 @@ private:
         const bool tex2d = u.type.base == B::Sampler2D || u.type.base == B::ISampler2D || u.type.base == B::USampler2D;
         auto needTex = [&] { if (!tex2d && !gdIsSampler(u.type.base)) typeFail(ht, "hint '" + h + "' applies to texture uniforms"); };
         auto needSampler2D = [&] { if (u.type.base != B::Sampler2D) typeFail(ht, "hint '" + h + "' applies to sampler2D uniforms"); };
+        // Godot also takes the default-colour hints on array, 3D and cube textures (the platformer demo's sky does: samplerCube ... hint_default_black).
+        auto needDefaultTex = [&] {
+            if (u.type.base != B::Sampler2D && u.type.base != B::Sampler2DArray && u.type.base != B::Sampler3D && u.type.base != B::SamplerCube && u.type.base != B::SamplerCubeArray)
+                typeFail(ht, "hint '" + h + "' applies to sampler2D, sampler2DArray, sampler3D and samplerCube uniforms");
+        };
 
         std::vector<GdConstValue> numArgs;
         std::vector<std::string> strArgs;
@@ -562,9 +567,9 @@ private:
             if (numArgs.size() != 1 || numArgs[0].v[0] < 0 || numArgs[0].v[0] > 15) typeFail(ht, "instance_index takes one value from 0 to 15");
             u.instanceIndex = static_cast<int>(numArgs[0].v[0]);
         } else if (h == "hint_normal") { noArgs(); needSampler2D(); u.texHint = GdTexHint::Normal; }
-        else if (h == "hint_default_white") { noArgs(); needSampler2D(); u.texHint = GdTexHint::DefaultWhite; }
-        else if (h == "hint_default_black") { noArgs(); needSampler2D(); u.texHint = GdTexHint::DefaultBlack; }
-        else if (h == "hint_default_transparent") { noArgs(); needSampler2D(); u.texHint = GdTexHint::DefaultTransparent; }
+        else if (h == "hint_default_white") { noArgs(); needDefaultTex(); u.texHint = GdTexHint::DefaultWhite; }
+        else if (h == "hint_default_black") { noArgs(); needDefaultTex(); u.texHint = GdTexHint::DefaultBlack; }
+        else if (h == "hint_default_transparent") { noArgs(); needDefaultTex(); u.texHint = GdTexHint::DefaultTransparent; }
         else if (h == "hint_anisotropy") { noArgs(); needSampler2D(); u.texHint = GdTexHint::Anisotropy; }
         else if (h == "hint_roughness_r") { noArgs(); needSampler2D(); u.texHint = GdTexHint::RoughnessR; }
         else if (h == "hint_roughness_g") { noArgs(); needSampler2D(); u.texHint = GdTexHint::RoughnessG; }

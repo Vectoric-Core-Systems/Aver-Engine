@@ -137,7 +137,7 @@ internal sealed partial class GdEmitter
                     GdType t = CleanInferred(TypeOf(p.Default));
                     result.Add(p.Inferred ? t : DefaultLiteralType(p.Default, t));
                 }
-                else result.Add(GdType.Variant);
+                else result.Add(ParamHint(mi, i, p) ?? GdType.Variant);
             }
         }
         finally { (_script, _ctx, _w) = saved; }

@@ -104,6 +104,7 @@ internal sealed class AutoloadInfo
 internal sealed class ProjectModel
 {
     public ApiModel? Api;
+    public SceneIndex? Scenes;                                  // Fabric/nodes.json: the scenes' nodes, for typed node access
     public readonly List<ScriptInfo> Scripts = new();           // top-level scripts in manifest order
     public readonly Dictionary<string, ScriptInfo> ByPath = new(StringComparer.Ordinal);
     public readonly Dictionary<string, ScriptInfo> ByClassName = new(StringComparer.Ordinal);

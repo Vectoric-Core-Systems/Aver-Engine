@@ -2198,6 +2198,7 @@ bool Gltf::run(std::string* why) {
             pl.meshIndex = target;
             pl.position  = toEngine(world[12], world[13], world[14], false);
             pl.name      = n["name"].asString("");
+            pl.node      = static_cast<i32>(cur.node);
             if (pl.name.empty()) pl.name = r_.meshNames[usize(target)];
             // What the copy was baked with, which is the first node's basis when nodes share one copy:
             // an object clip has to undo exactly that (see importObjectAnimations).

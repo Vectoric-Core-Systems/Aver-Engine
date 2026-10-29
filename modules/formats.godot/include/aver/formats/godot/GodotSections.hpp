@@ -59,10 +59,12 @@ enum class GodotFileKind : u8 {
 
 GodotFileKind detectGodotFileKind(const u8* data, usize size);
 
-// Reads `path` as text. A binary Godot resource is reported as an error with code
-// "godot.binary_resource" ("resave as text") and returns false, as does an unreadable file.
+// Reads `path` as text. A binary Godot resource is reported as an error with code "godot.binary_resource" and
+// returns false (the scene and resource loaders read those through GodotBinary.hpp), as does an unreadable file.
 // `displayName` (default: path) names the file in diagnostics, e.g. its res:// path.
 bool readGodotTextFile(const std::string& path, std::string& text, GodotDiagnostics& diag,
                        std::string_view displayName = {});
+// The same check over bytes already read: true and `text` set when they are a text file.
+bool godotTextFromBytes(const std::vector<u8>& bytes, std::string_view name, std::string& text, GodotDiagnostics& diag);
 
 }  // namespace aver::fmt::godot

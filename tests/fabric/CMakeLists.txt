@@ -261,6 +261,17 @@ target_compile_definitions(FabricTreeTest PRIVATE
 set_target_properties(FabricTreeTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# FabricCorpusPatternsTest -- the patterns two Godot demo projects showed, on tests/fabric/data/CorpusGame: children and overrides below the nodes of an
+# instanced glTF model, Godot 3 key codes and joypad numbers, libraries/ properties, a curve's _limits. Runs the tool as a process, like FabricTreeTest.
+add_executable(FabricCorpusPatternsTest src/FabricCorpusPatternsTest.cpp)
+target_link_libraries(FabricCorpusPatternsTest PRIVATE Aver.Formats.Godot Aver.Formats Aver.Platform Aver.Core)
+add_dependencies(FabricCorpusPatternsTest AverAssetC)
+target_compile_definitions(FabricCorpusPatternsTest PRIVATE
+  AVER_ASSETC_EXE="$<TARGET_FILE:AverAssetC>"
+  AVER_FABRIC_DATA="${CMAKE_SOURCE_DIR}/tests/fabric/data")
+set_target_properties(FabricCorpusPatternsTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # FabricShaderTest -- G6 SH2 (ShaderMaterial over .gdshader: the shader written as a material graph, the material as GRAPHREF + FX + GDREGS + TEX slots) through the
 # converter on tests/fabric/data/ShaderGame. Runs the tool as a process, like FabricMaterialFxTest.
 if(TARGET Aver.Formats.Material)
@@ -285,3 +296,12 @@ if(TARGET Aver.Formats.Material AND TARGET Aver.Formats.Particles)
   set_target_properties(FabricEnvShaderTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# FabricBinaryTest -- binary .res / .scn (RSRC) through the converter: a binary ArrayMesh, BoxShape3D and GridMap scene built by the test (fixtures shared with
+# tests/formats.godot/src/GodotBinaryTest.cpp), converted by the tool run as a process. No device, no .NET, no engine run.
+add_executable(FabricBinaryTest src/FabricBinaryTest.cpp)
+target_link_libraries(FabricBinaryTest PRIVATE Aver.Formats.Godot Aver.Formats Aver.Platform Aver.Core)
+add_dependencies(FabricBinaryTest AverAssetC)
+target_compile_definitions(FabricBinaryTest PRIVATE AVER_ASSETC_EXE="$<TARGET_FILE:AverAssetC>")
+set_target_properties(FabricBinaryTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

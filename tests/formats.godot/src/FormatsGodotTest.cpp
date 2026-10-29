@@ -464,12 +464,14 @@ static void testBinary() {
     AVER_INFO("=== binary resources ===");
     GodotDiagnostics d;
     std::string text;
-    check(!readGodotTextFile(kData + "/MiniGame/binary/level.scn", text, d, "res://binary/level.scn"), "a binary .scn is refused");
-    check(hasDiag(d, GodotSeverity::Error, "godot.binary_resource", "resave as text"), "with the 'resave as text' diagnostic");
+    // level.scn is a stand-in: the RSRC magic and nothing valid after it. The real binary reader is GodotBinaryTest.
+    check(!readGodotTextFile(kData + "/MiniGame/binary/level.scn", text, d, "res://binary/level.scn"), "a binary .scn is not text");
+    check(hasDiag(d, GodotSeverity::Error, "godot.binary_resource", "binary Godot resource (RSRC)"), "the text reader says it is a binary resource");
     check(d.items.size() == 1 && d.items[0].file == "res://binary/level.scn", "naming the res:// file");
     GodotScene s;
     GodotDiagnostics d2;
-    check(!loadGodotScene(kData + "/MiniGame/binary/level.scn", s, d2) && hasDiag(d2, GodotSeverity::Error, "godot.binary_resource"), "loadGodotScene reports it too");
+    check(!loadGodotScene(kData + "/MiniGame/binary/level.scn", s, d2) && hasDiag(d2, GodotSeverity::Error, "godot.binary_resource", "could not be read"),
+          "loadGodotScene runs the binary reader on it, which finds the stand-in damaged");
     const u8 rsrc[] = {'R', 'S', 'R', 'C', 0, 1, 2};
     const u8 rscc[] = {'R', 'S', 'C', 'C', 0, 1, 2};
     const u8 gdsc[] = {'G', 'D', 'S', 'C', 0, 1, 2};
@@ -586,8 +588,8 @@ static void testProjectFs() {
     bool sorted = true;
     for (usize i = 1; i < fs.files().size(); ++i) sorted = sorted && fs.files()[i - 1] <= fs.files()[i];
     check(sorted, "files() is sorted");
-    check(fs.binaryResources() == std::vector<std::string>({"res://binary/level.scn"}), "the binary .scn is listed for a text resave");
-    check(hasDiag(d, GodotSeverity::Warning, "godot.binary_resource", "resave as text"), "and warned about");
+    check(fs.binaryResources() == std::vector<std::string>({"res://binary/level.scn"}), "the binary .scn is listed");
+    check(hasDiag(d, GodotSeverity::Warning, "godot.binary_resource", "could not be read"), "and warned about, because its header is not a Godot resource header");
 
     const GodotUidMap& u = fs.uids();
     auto uidIs = [&](const char* uid, const char* res) { const std::string* p = u.find(uid); return p && *p == res; };
@@ -627,7 +629,7 @@ static void testProjectFs() {
     check(!fs.loadScene("uid://not-a-uid", lost, dl) && hasDiag(dl, GodotSeverity::Error, "godot.unresolved"), "an unresolvable reference is an error, not a crash");
     GodotScene bin;
     GodotDiagnostics db;
-    check(!fs.loadScene("res://binary/level.scn", bin, db) && hasDiag(db, GodotSeverity::Error, "godot.binary_resource"), "loadScene on the binary scene reports 'resave as text'");
+    check(!fs.loadScene("res://binary/level.scn", bin, db) && hasDiag(db, GodotSeverity::Error, "godot.binary_resource"), "loadScene on the damaged binary scene is an error, not a crash");
 
     const std::string disk = fs.toDiskPath("res://props/crate.tscn");
     check(!disk.empty() && disk.find("props/crate.tscn") != std::string::npos, "toDiskPath");

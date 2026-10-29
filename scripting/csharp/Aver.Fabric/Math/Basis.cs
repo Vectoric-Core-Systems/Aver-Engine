@@ -33,6 +33,22 @@ public struct Basis : IEquatable<Basis>
         }
     }
 
+    /// <summary>Column 0 to 2 as a vector (GDScript's basis[i] and GodotSharp's Basis[i]; Basis[0] is the X axis).</summary>
+    public Vector3 this[int column]
+    {
+        readonly get => column switch { 0 => Column0, 1 => Column1, 2 => Column2, _ => throw new ArgumentOutOfRangeException(nameof(column)) };
+        set
+        {
+            switch (column)
+            {
+                case 0: Column0 = value; break;
+                case 1: Column1 = value; break;
+                case 2: Column2 = value; break;
+                default: throw new ArgumentOutOfRangeException(nameof(column));
+            }
+        }
+    }
+
     public Vector3 Column0
     {
         readonly get => new(Row0.X, Row1.X, Row2.X);

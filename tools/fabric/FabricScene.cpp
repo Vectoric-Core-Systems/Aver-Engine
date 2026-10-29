@@ -17,6 +17,7 @@
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 
 namespace aver::fabric {
 
@@ -63,6 +64,9 @@ bool endsWith(const std::string& s, const char* suffix) {
     return s.size() >= n && s.compare(s.size() - n, n, suffix) == 0;
 }
 
+// A packed scene file: text (.tscn) or binary (.scn, read by GodotBinary.hpp).
+bool isSceneFile(const std::string& res) { return endsWith(res, ".tscn") || endsWith(res, ".scn"); }
+
 bool isBodyClass(const std::string& t) {
     return t == "StaticBody3D" || t == "AnimatableBody3D" || t == "RigidBody3D" || t == "CharacterBody3D" || t == "Area3D";
 }
@@ -93,7 +97,7 @@ bool isControlClass(const std::string& t) {
 }
 
 bool is2DClass(const std::string& t) {
-    static const std::set<std::string> s = {"CanvasLayer", "CanvasModulate", "ParallaxBackground", "ParallaxLayer", "TileMap", "TileMapLayer",
+    static const std::set<std::string> s = {"CanvasModulate", "ParallaxBackground", "ParallaxLayer", "TileMap", "TileMapLayer",
                                             "CanvasGroup", "BackBufferCopy", "Skeleton2D", "Bone2D"};
     return endsWith(t, "2D") || s.count(t) != 0;
 }
@@ -136,6 +140,12 @@ ClassChoice chooseClass(const std::string& t) {
         c.fabricClass = t;
         c.rating = Rating::Approximated;
         c.reason = "solved with FABRIK on the script-level skeleton, not with Godot's solver";
+        return c;
+    }
+    if (t == "CanvasLayer") {
+        c.fabricClass = t;
+        c.rating = Rating::Approximated;
+        c.reason = "its visible flag hides what is drawn on it; the layer number, offset, rotation and scale are kept but not applied (the GUI draws every Control in tree order, in viewport space)";
         return c;
     }
     if (t == "VisibleOnScreenNotifier3D" || t == "VisibleOnScreenEnabler3D") {
@@ -295,6 +305,144 @@ bool applyTransformProp(FNode& fn, const gd::GodotProperty& p) {
     return true;
 }
 
+// Godot 4 stores an AnimationPlayer's libraries as libraries/<name> properties; the runtime reads one `libraries` dictionary.
+void mergeAnimationLibrary(FNode& fn, const gd::GodotProperty& p, const gd::GodotDocBase* doc) {
+    const std::string name = p.name.substr(std::strlen("libraries/"));
+    Prop* lib = nullptr;
+    for (Prop& e : fn.props)
+        if (e.key == "libraries") lib = &e;
+    if (!lib || lib->doc != doc || lib->value.type != VType::Dictionary) {
+        Var d;
+        d.type = VType::Dictionary;
+        if (lib) { lib->value = std::move(d); lib->doc = doc; lib->line = p.line; }
+        else { fn.props.push_back(Prop{"libraries", std::move(d), doc, p.line}); lib = &fn.props.back(); }
+    }
+    for (size_t i = 0; i < lib->value.keys.size() && i < lib->value.items.size(); ++i)
+        if (lib->value.keys[i].asString() == name) { lib->value.items[i] = p.value; return; }
+    lib->value.keys.push_back(makeString(name));
+    lib->value.items.push_back(p.value);
+}
+
+Var xformVar(const Xform& x) {
+    Var v;
+    v.type = VType::Transform3D;
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c) v.nums.push_back(x.basis.m[r][c]);
+    v.nums.insert(v.nums.end(), {x.pos.x, x.pos.y, x.pos.z});
+    return v;
+}
+
+bool invertXform(const Xform& x, Xform& out) {
+    const M3& a = x.basis;
+    const double det = a.determinant();
+    if (std::fabs(det) < 1e-12) return false;
+    M3 i;
+    i.m[0][0] = (a.m[1][1] * a.m[2][2] - a.m[1][2] * a.m[2][1]) / det;
+    i.m[0][1] = -(a.m[0][1] * a.m[2][2] - a.m[0][2] * a.m[2][1]) / det;
+    i.m[0][2] = (a.m[0][1] * a.m[1][2] - a.m[0][2] * a.m[1][1]) / det;
+    i.m[1][0] = -(a.m[1][0] * a.m[2][2] - a.m[1][2] * a.m[2][0]) / det;
+    i.m[1][1] = (a.m[0][0] * a.m[2][2] - a.m[0][2] * a.m[2][0]) / det;
+    i.m[1][2] = -(a.m[0][0] * a.m[1][2] - a.m[0][2] * a.m[1][0]) / det;
+    i.m[2][0] = (a.m[1][0] * a.m[2][1] - a.m[1][1] * a.m[2][0]) / det;
+    i.m[2][1] = -(a.m[0][0] * a.m[2][1] - a.m[0][1] * a.m[2][0]) / det;
+    i.m[2][2] = (a.m[0][0] * a.m[1][1] - a.m[0][1] * a.m[1][0]) / det;
+    out.basis = i;
+    out.pos = (i * x.pos) * -1.0;
+    return true;
+}
+
+// A Skeleton3D's bones as the bones/N/... properties a scene stores (name, parent, rest, and the pose, which starts at the rest).
+void addBoneProps(FNode& f, const ModelTreeNode& tn) {
+    for (size_t i = 0; i < tn.bones.size(); ++i) {
+        const ModelBone& b = tn.bones[i];
+        const std::string k = "bones/" + std::to_string(i) + "/";
+        Var rot;
+        rot.type = VType::Quaternion;
+        const Q4 q = b.rest.quaternion();
+        rot.nums = {q.x, q.y, q.z, q.w};
+        const V3 s = b.rest.scale();
+        f.props.push_back(Prop{k + "name", makeString(b.name), nullptr, 0});
+        f.props.push_back(Prop{k + "parent", makeInt(b.parent), nullptr, 0});
+        f.props.push_back(Prop{k + "rest", xformVar(b.rest), nullptr, 0});
+        f.props.push_back(Prop{k + "enabled", makeBool(true), nullptr, 0});
+        f.props.push_back(Prop{k + "position", makeVector3(b.rest.pos.x, b.rest.pos.y, b.rest.pos.z), nullptr, 0});
+        f.props.push_back(Prop{k + "rotation", std::move(rot), nullptr, 0});
+        f.props.push_back(Prop{k + "scale", makeVector3(s.x, s.y, s.z), nullptr, 0});
+    }
+}
+
+// The nodes of an instanced model below `root`: the tree Godot's importer makes (`tree`, null when it could not be read), each mesh node showing the
+// mesh the importer wrote for it. A mesh is stored with its world rotation and scale baked into the vertices and its position kept apart (the part's
+// position), so a mesh node's local transform is the one that puts it at that position under the real transforms of its parents. Meshes the tree has
+// no node for (and every mesh when there is no tree) are placed directly below the root.
+void buildModelNodes(FNode& root, const ModelTree* tree, const ModelResult& model, const std::string& modelRes) {
+    const auto partPosition = [](const ModelPart& part) {
+        // The part's position is engine centimetres; the node holds Godot metres.
+        Xform x;
+        x.pos = {part.y / 100.0, part.z / 100.0, -part.x / 100.0};
+        return x;
+    };
+    std::map<int, const ModelPart*> partOf;
+    std::set<int> placed;
+    if (tree)
+        for (const ModelPart& p : model.parts)
+            if (p.node >= 0 && !partOf.count(p.node)) partOf[p.node] = &p;
+
+    std::function<void(int, FNode&, const Xform&, const Xform&, const std::string&)> make;
+    make = [&](int idx, FNode& parentF, const Xform& parentActual, const Xform& parentTrue, const std::string& parentPath) {
+        const ModelTreeNode& tn = tree->nodes[static_cast<size_t>(idx)];
+        const Xform trueWorld = parentTrue.composed(tn.xf);   // where Godot puts the node
+        Xform actualWorld = trueWorld;                        // where this node's transform puts it (differs for a mesh: see above)
+        const ModelPart* part = nullptr;
+        if (tn.type == "MeshInstance3D" && tn.gltfNode >= 0)
+            if (const auto it = partOf.find(tn.gltfNode); it != partOf.end()) { part = it->second; placed.insert(tn.gltfNode); }
+        if (part) actualWorld = partPosition(*part);
+        Xform local = tn.xf;
+        Xform inv;
+        if (invertXform(parentActual, inv)) local = inv.composed(actualWorld);
+        else actualWorld = parentActual.composed(local);
+
+        auto f = std::make_unique<FNode>();
+        f->name = tn.name;
+        f->type = tn.type;
+        f->fromModel = true;
+        f->sceneFile = modelRes;
+        f->reportFile = modelRes;
+        f->reportPath = parentPath.empty() ? tn.name : parentPath + "/" + tn.name;
+        f->parent = &parentF;
+        f->owner = &root;
+        f->xf = local;
+        f->hasXform = true;
+        if (part) f->props.push_back(Prop{"mesh", makeResource(part->meshAsset), nullptr, 0});
+        if (tn.type == "Skeleton3D") addBoneProps(*f, tn);
+        if (tn.type == "BoneAttachment3D") f->props.push_back(Prop{"bone_name", makeString(tn.boneName), nullptr, 0});
+        FNode& ref = *f;
+        parentF.children.push_back(std::move(f));
+        for (const int c : tn.children) make(c, ref, actualWorld, trueWorld, ref.reportPath);
+    };
+    if (tree)
+        for (const int c : tree->nodes[0].children) make(c, root, Xform{}, Xform{}, "");
+
+    int k = 0;
+    for (const ModelPart& part : model.parts) {
+        if (tree && part.node >= 0 && placed.count(part.node)) continue;
+        auto child = std::make_unique<FNode>();
+        child->name = part.name.empty() ? "Mesh" + std::to_string(k) : part.name;
+        child->type = "MeshInstance3D";
+        child->fromModel = true;
+        child->sceneFile = modelRes;
+        child->reportFile = modelRes;
+        child->reportPath = child->name;
+        child->parent = &root;
+        child->owner = &root;
+        child->xf = partPosition(part);
+        child->hasXform = true;
+        child->props.push_back(Prop{"mesh", makeResource(part.meshAsset), nullptr, 0});
+        root.children.push_back(std::move(child));
+        ++k;
+    }
+}
+
 }  // namespace
 
 std::unique_ptr<FNode> Converter::buildScene(const std::string& resPath, int depth, const Where& from) {
@@ -340,6 +488,7 @@ std::unique_ptr<FNode> Converter::buildScene(const std::string& resPath, int dep
                 continue;
             }
             if (spatial && applyTransformProp(fn, p)) continue;
+            if (p.name.rfind("libraries/", 0) == 0 && (fn.type == "AnimationPlayer" || fn.type == "AnimationMixer")) { mergeAnimationLibrary(fn, p, doc); continue; }
             if (p.name == "unique_name_in_owner") { fn.unique = boolOf(&p.value, false); continue; }
             upsertProp(fn, p.name, p.value, doc, p.line);
         }
@@ -377,27 +526,7 @@ std::unique_ptr<FNode> Converter::buildScene(const std::string& resPath, int dep
                 made = std::make_unique<FNode>();
                 made->type = "Node3D";
                 made->fromModel = true;
-                const ModelResult* mr = modelFor(subRes, w);
-                if (mr) {
-                    int k = 0;
-                    for (const ModelPart& part : mr->parts) {
-                        auto child = std::make_unique<FNode>();
-                        child->name = part.name.empty() ? "Mesh" + std::to_string(k) : part.name;
-                        child->type = "MeshInstance3D";
-                        child->fromModel = true;
-                        child->sceneFile = subRes;
-                        child->reportFile = subRes;
-                        child->reportPath = child->name;
-                        child->parent = made.get();
-                        child->owner = made.get();
-                        // The part's position is engine centimetres; the node holds Godot metres.
-                        child->xf.pos = {part.y / 100.0, part.z / 100.0, -part.x / 100.0};
-                        child->hasXform = true;
-                        child->props.push_back(Prop{"mesh", makeResource(part.meshAsset), nullptr, 0});
-                        made->children.push_back(std::move(child));
-                        ++k;
-                    }
-                }
+                if (const ModelResult* mr = modelFor(subRes, w)) buildModelNodes(*made, modelTreeFor(subRes, w), *mr, subRes);
                 made->instanceOf = subRes;
             } else {
                 made = subRes.empty() ? nullptr : buildScene(subRes, depth + 1, w);
@@ -610,6 +739,31 @@ void Converter::emitNode(FNode& fn, int parent, const Xform& parentWorld, fmt::O
             cc.carrier = false;
             cc.rating = Rating::Approximated;
             cc.reason = std::string("CollisionPolygon3D is extruded into a ") + (convex ? "convex" : "triangle-mesh") + " shape";
+        }
+    }
+
+    // What this node became, for Fabric/nodes.json: the script converter types $Path, get_node and %Unique from it. Recorded once per scene and path.
+    {
+        const FNode* top = &fn;
+        while (top->parent) top = top->parent;
+        std::string nodePath = ".";
+        for (const FNode* a = &fn; a->parent; a = a->parent) nodePath = nodePath == "." ? a->name : a->name + "/" + nodePath;
+        if (!top->reportFile.empty() && sceneNodePaths_[top->reportFile].insert(nodePath).second) {
+            SceneNodeRecord rec;
+            rec.path = nodePath;
+            rec.baseClass = cc.fabricClass;
+            rec.cls = cls;
+            rec.script = fn.scriptPath;
+            rec.owner = fn.owner ? relPath(top, fn.owner) : "";
+            rec.unique = fn.unique;
+            if (si)
+                for (const Prop& pr : fn.props)
+                    if (pr.doc && pr.value.type == VType::ExtResource)
+                        if (const gd::GodotExtResource* e = pr.doc->findExt(pr.value.s)) {
+                            const std::string res = fs_.resolve(*e, nullptr, pr.doc->file);
+                            if (isSceneFile(res)) rec.packedScenes.emplace_back(pr.key, res);
+                        }
+            sceneNodes_[top->reportFile].push_back(std::move(rec));
         }
     }
 
@@ -1311,7 +1465,7 @@ bool Converter::emitLevel(const std::string& sceneRes, FNode& root, fmt::OcWorld
             std::string ext;
             if (const size_t d = res.find_last_of('.'); d != std::string::npos) ext = lower(res.substr(d));
             std::unique_ptr<FNode> node;
-            if (ext == ".tscn") {
+            if (ext == ".tscn" || ext == ".scn") {
                 node = buildScene(res, 0, w);
                 if (node) { node->instanceOf = res; instancedScenes_.insert(res); }
             } else if (ext == ".gd" || ext == ".cs") {
@@ -1333,7 +1487,7 @@ bool Converter::emitLevel(const std::string& sceneRes, FNode& root, fmt::OcWorld
             node->name = a.name;
             node->persistent = true;
             node->owner = nullptr;
-            if (!node->scriptPath.empty() || ext == ".tscn")
+            if (!node->scriptPath.empty() || ext == ".tscn" || ext == ".scn")
                 report_.add("setting", "res://project.godot", a.name, "Autoload", "", Rating::Converted, "a persistent top-level node, first in the start level", a.line);
             autoloads.push_back(std::move(node));
         }
@@ -1438,7 +1592,7 @@ bool Converter::writePrefabs() {
     for (const std::string& res : instancedScenes_) {
         std::string ext;
         if (const size_t d = res.find_last_of('.'); d != std::string::npos) ext = lower(res.substr(d));
-        if (ext != ".tscn") continue;
+        if (ext != ".tscn" && ext != ".scn") continue;
         const Where w{res, "", ""};
         std::unique_ptr<FNode> root = buildScene(res, 0, w);
         if (!root) continue;
@@ -1517,7 +1671,7 @@ bool Converter::convertScenes() {
     bool ok = true;
     std::vector<std::string> scenes;
     for (const std::string& res : fs_.files())
-        if (res.size() > 5 && lower(res.substr(res.size() - 5)) == ".tscn") scenes.push_back(res);
+        if ((res.size() > 5 && lower(res.substr(res.size() - 5)) == ".tscn") || (res.size() > 4 && lower(res.substr(res.size() - 4)) == ".scn")) scenes.push_back(res);
 
     // The start scene first, so its environment is the project's.
     std::string start;
@@ -1531,7 +1685,7 @@ bool Converter::convertScenes() {
         std::unique_ptr<FNode> root = buildScene(res, 0, w);
         if (!root) {
             report_.add("scene", res, "", "PackedScene", "", Rating::Unsupported, "the scene could not be read", 0);
-            ok = false;
+            if (!endsWith(res, ".scn")) ok = false;   // a binary scene that cannot be read is reported, as before; it does not fail the run
             continue;
         }
         fmt::OcWorldData level;

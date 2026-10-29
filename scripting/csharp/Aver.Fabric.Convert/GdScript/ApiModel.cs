@@ -165,6 +165,16 @@ internal sealed class ApiModel
         return null;
     }
 
+    /// <summary>The element type of the type's one-int indexer (Vector3[i] is a float, Basis[i] a Vector3), or null when it has none.</summary>
+    public GdType? IndexerType(INamedTypeSymbol? type)
+    {
+        foreach (INamedTypeSymbol t in Chain(type))
+            foreach (IPropertySymbol p in t.GetMembers().OfType<IPropertySymbol>())
+                if (p.IsIndexer && Visible(p) && p.Parameters.Length == 1 && p.Parameters[0].Type.SpecialType == SpecialType.System_Int32)
+                    return FromSymbol(p.Type);
+        return null;
+    }
+
     private static bool SameSignature(IMethodSymbol a, IMethodSymbol b)
     {
         if (a.Parameters.Length != b.Parameters.Length || a.TypeParameters.Length != b.TypeParameters.Length) return false;

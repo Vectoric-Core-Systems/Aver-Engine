@@ -30,6 +30,7 @@ internal sealed class GdType
     public string Name = "";               // the C# spelling for kinds that carry one (an unresolved class, a nested name)
     public bool Weak;                      // the declared type is a guess (GetNode with no type): member misses become dynamic access
     public bool IsClassRef;                // the value is the class itself (Foo.new(), Foo.CONSTANT), not an instance
+    public bool FromScene;                 // the type came from the scenes the script is attached to (Fabric/nodes.json): a real type, but a member miss is a dynamic access
 
     public static readonly GdType Variant = new() { Kind = GK.Variant, Name = "Variant" };
     public static readonly GdType Void = new() { Kind = GK.Void, Name = "void" };
@@ -72,6 +73,14 @@ internal sealed class GdType
     {
         var c = (GdType)MemberwiseClone();
         c.Weak = weak;
+        return c;
+    }
+
+    public GdType AsScene()
+    {
+        if (FromScene) return this;
+        var c = (GdType)MemberwiseClone();
+        c.FromScene = true;
         return c;
     }
 

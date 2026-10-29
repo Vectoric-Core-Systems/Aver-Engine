@@ -182,19 +182,10 @@ GodotFileKind detectGodotFileKind(const u8* data, usize size) {
     return GodotFileKind::Text;
 }
 
-bool readGodotTextFile(const std::string& path, std::string& text, GodotDiagnostics& diag, std::string_view displayName) {
-    const std::string_view name = displayName.empty() ? std::string_view(path) : displayName;
-    std::vector<u8> bytes;
-    if (!aver::readFileBytes(path, bytes)) {
-        diag.error(name, 0, "cannot read the file", "godot.unreadable");
-        return false;
-    }
+bool godotTextFromBytes(const std::vector<u8>& bytes, std::string_view name, std::string& text, GodotDiagnostics& diag) {
     const GodotFileKind kind = detectGodotFileKind(bytes.data(), bytes.size());
     if (kind == GodotFileKind::BinaryResource) {
-        diag.error(name, 0,
-                   "binary Godot resource; resave as text (open it in the Godot editor and save as .tscn/.tres, "
-                   "or set the project's text-format resave option)",
-                   "godot.binary_resource");
+        diag.error(name, 0, "this is a binary Godot resource (RSRC), not a text file; it is read through the binary reader", "godot.binary_resource");
         return false;
     }
     if (kind == GodotFileKind::BinaryScript) {
@@ -202,11 +193,21 @@ bool readGodotTextFile(const std::string& path, std::string& text, GodotDiagnost
         return false;
     }
     if (kind == GodotFileKind::Unknown && !bytes.empty()) {
-        diag.error(name, 0, "not a text file; if this is a binary .scn/.res, resave as text", "godot.binary_resource");
+        diag.error(name, 0, "not a text file (it holds NUL bytes) and not a Godot binary resource", "godot.binary_resource");
         return false;
     }
     text.assign(reinterpret_cast<const char*>(bytes.data()), bytes.size());
     return true;
+}
+
+bool readGodotTextFile(const std::string& path, std::string& text, GodotDiagnostics& diag, std::string_view displayName) {
+    const std::string_view name = displayName.empty() ? std::string_view(path) : displayName;
+    std::vector<u8> bytes;
+    if (!aver::readFileBytes(path, bytes)) {
+        diag.error(name, 0, "cannot read the file", "godot.unreadable");
+        return false;
+    }
+    return godotTextFromBytes(bytes, name, text, diag);
 }
 
 }  // namespace aver::fmt::godot

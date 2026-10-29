@@ -11,6 +11,9 @@ aver_add_module(Aver.Formats.Godot
     src/GodotScene.cpp
     src/GodotProject.cpp
     src/GodotProjectFs.cpp
+    # Binary .res / .scn (RSRC, RSCC): the container, the Variant reader, PackedScene unpacking, and the Zstandard decoder its compressed blocks need.
+    src/GodotBinary.cpp
+    src/GodotZstd.cpp
     # ArrayMesh surfaces and GridMap cells as plain arrays (G4 R7).
     src/GodotMesh.cpp
     # The Godot shading-language front-end (G6 SH1): preprocessor, parser + type checker, HLSL emitter.

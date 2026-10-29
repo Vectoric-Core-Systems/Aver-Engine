@@ -450,7 +450,9 @@ void Converter::noteUiNode(const FNode& fn) {
                 if (k == "vertical") { row(Rating::Converted, "Aver.Fabric BoxContainer reads it"); continue; }
             }
         }
-        if (real) row(Rating::Unsupported, "Aver.Fabric " + fn.type + " has no such property");
+        if (real && !fn.scriptPath.empty())   // an exported variable of the node's script: carried by name, not a Control property
+            row(Rating::Approximated, "not a property of Aver.Fabric " + fn.type + ", so it is set by name for the attached script " + fn.scriptPath + " to read as its variable; it has effect only if that script declares it");
+        else if (real) row(Rating::Unsupported, "Aver.Fabric " + fn.type + " has no such property");
         else row(Rating::Approximated, "carried as node metadata: Aver.Fabric has no " + fn.type + " widget, so it is a placeholder Control");
     }
 }

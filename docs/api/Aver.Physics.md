@@ -2,7 +2,7 @@
 
 # Aver.Physics public API
 
-126 public types and 1233 public members, read from `scripting/csharp/Aver.Physics/` (54 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+126 public types and 1234 public members, read from `scripting/csharp/Aver.Physics/` (54 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Physics
 
@@ -62,6 +62,7 @@ Values: `None = 0`, `Distance = 1`, `Dihedral = 2`
 - `public bool ContactMonitored { get; }` - True while the body is contact-monitored.
 - `public IReadOnlyList<Body> Contacts { get; }` - The bodies this monitored body touches now (ascending handle, at most max_contacts); empty if unmonitored.
 - `public bool TryGetContact(Body other, out Float3 point, out Float3 normal)` - Where a tracked touch began and its normal (from this body to other); false if not a tracked partner.
+- `public bool TryGetContactAt(int index, out Body other, out Float3 point, out Float3 normal)` - Tracked contact index (0 ..
 - `public Float3 AreaGravity { get; }` - What the areas and the world would give this body now: gravity in cm/s^2 before its gravity factor (Godot total_gravity).
 - `public (float Linear, float Angular) AreaDamping` - The linear and angular damping the areas and the body's own would give it now.
 - `public int Handle { get; }` - The raw ABI handle.

@@ -2,6 +2,7 @@
 // The converter's shared state and the pieces that live in FabricProject / FabricResources / FabricScene / FabricConvert.
 #include "FabricConvert.hpp"
 #include "FabricMath.hpp"
+#include "FabricModelTree.hpp"
 #include "FabricReport.hpp"
 
 #include "aver/formats/ImportedMaterial.hpp"
@@ -246,6 +247,7 @@ public:
     ScriptInfo* script(const std::string& resPath);
     bool writeScriptsManifest();
     bool writeProjectManifest();
+    bool writeNodesManifest();   // Fabric/nodes.json: what each scene's nodes became, for the script converter's typed node access
     std::map<std::string, ScriptInfo> scripts_;
     std::set<std::string> usedClassNames_;
     std::vector<std::string> sceneLevels_;   // content-relative level assets written
@@ -294,6 +296,9 @@ public:
                                    const Where& w);
     // An imported model file; the parts it produced (cached per file).
     const ModelResult* modelFor(const std::string& resPath, const Where& w);
+    // The node tree Godot's importer makes for a glTF model (cached per file); null for other model formats and unreadable files.
+    const ModelTree* modelTreeFor(const std::string& resPath, const Where& w);
+    std::map<std::string, std::unique_ptr<ModelTree>> modelTrees_;
     const gd::GodotResource* resourceDoc(const std::string& resPath);
     std::map<std::string, std::unique_ptr<gd::GodotResource>> resourceDocs_;
     std::map<std::string, std::string> meshAssets_, materialAssets_, textureAssets_;
@@ -394,6 +399,18 @@ public:
     void emitNode(FNode& fn, int parent, const Xform& parentWorld, fmt::OcWorldData& level, LevelScan& scan);
     bool writePrefabs();
     std::set<std::string> instancedScenes_;
+    // One node of a scene as the runtime places it, recorded while the scene is written (see writeNodesManifest).
+    struct SceneNodeRecord {
+        std::string path;                  // from the scene's root ("." for the root itself)
+        std::string baseClass;             // the Aver.Fabric class placed
+        std::string cls;                   // the class named in the level: the script's class when a script is attached
+        std::string script;                // res:// path of the attached script, "" none
+        std::string owner;                 // path of the node that owns it ("" for the root): where a %Unique name is looked up
+        bool unique = false;
+        std::vector<std::pair<std::string, std::string>> packedScenes;   // property -> res:// scene, for the properties a .tscn is assigned to
+    };
+    std::map<std::string, std::vector<SceneNodeRecord>> sceneNodes_;   // top scene res:// path -> its nodes, in the order written
+    std::map<std::string, std::set<std::string>> sceneNodePaths_;
     // G4 R5: sub-viewports. The node whose properties are being converted (a ViewportTexture's viewport_path is relative to that node's scene), the level being
     // emitted (the first part of a view's key) and, per view key, how many materials show it.
     const FNode* emitting_ = nullptr;

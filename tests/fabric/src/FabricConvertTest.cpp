@@ -540,6 +540,43 @@ int main() {
         check(slurp(out1 + "/FabricReport.jsonl") == slurp(out2 + "/FabricReport.jsonl"), "and the report");
     }
 
+    // Fabric/nodes.json: what each scene's nodes became, for the script converter's typed $Path / get_node / %Unique / instantiate; and a CanvasLayer
+    // is a UI node of Aver.Fabric, not one of the 2D nodes that are out of scope.
+    AVER_INFO("-- nodes.json and CanvasLayer --");
+    {
+        const std::string out5 = (outRoot / "scriptgame").string();
+        std::string log5;
+        const int code5 = runCapture("\"" + exe.string() + "\" fabric \"" + std::string(AVER_FABRIC_DATA) + "/ScriptGame\" \"" + out5 + "\" --scenes-only", log5);
+        check(code5 == 0, "ScriptGame converts (exit " + std::to_string(code5) + ")");
+        const std::string nodes = slurp(out5 + "/ScriptGame/Fabric/nodes.json");
+        const auto hasNode = [&](const std::string& text) { return nodes.find(text) != std::string::npos; };
+        check(hasNode("{\"scene\": \"res://main.tscn\", \"nodes\": ["), "nodes.json lists main.tscn");
+        check(hasNode("{\"path\": \".\", \"base\": \"Node3D\", \"class\": \"Main\", \"script\": \"res://main.gd\", \"owner\": \"\", \"unique\": false, \"packed\": {\"mob_scene\": \"res://mob.tscn\"}}"),
+              "the root carries its script and the scene its mob_scene property is set to");
+        check(hasNode("{\"path\": \"Title\", \"base\": \"Label3D\", \"class\": \"Label3D\", \"script\": \"\", \"owner\": \".\", \"unique\": true, \"packed\": {}}"),
+              "a %Unique node is flagged and owned by the root");
+        check(hasNode("{\"path\": \"Hud\", \"base\": \"CanvasLayer\", \"class\": \"CanvasLayer\""), "the CanvasLayer is placed as a CanvasLayer");
+        check(hasNode("{\"path\": \"Hud/Panel\", \"base\": \"Control\""), "and its Control below it");
+        check(hasNode("{\"path\": \"Mob1\", \"base\": \"CharacterBody3D\", \"class\": \"Mob\", \"script\": \"res://mob.gd\", \"owner\": \".\""),
+              "an instanced scene's root is a node of the scene that instances it, with its script's class");
+        check(hasNode("{\"path\": \"Mob1/Tag\", \"base\": \"Label3D\", \"class\": \"Label3D\", \"script\": \"\", \"owner\": \"Mob1\", \"unique\": true"),
+              "its children are owned by the instance root, where their %Unique names are looked up");
+        check(hasNode("{\"scene\": \"res://mob.tscn\", \"nodes\": [\n      {\"path\": \".\", \"base\": \"CharacterBody3D\", \"class\": \"Mob\""), "the instanced scene is listed on its own too");
+        const std::string report5 = slurp(out5 + "/FabricReport.jsonl");
+        const auto reported = [&](const std::string& a, const std::string& b) {
+            std::istringstream is(report5);
+            std::string line;
+            while (std::getline(is, line))
+                if (line.find(a) != std::string::npos && line.find(b) != std::string::npos) return true;
+            return false;
+        };
+        check(reported("\"type\":\"CanvasLayer\"", "\"rating\":\"approximated\"") && !reported("\"type\":\"CanvasLayer\"", "2D nodes are out of scope"),
+              "CanvasLayer is rated approximated (layer order, offset, rotation and scale are kept, not applied), not out of scope");
+        std::string log6;
+        runCapture("\"" + exe.string() + "\" fabric \"" + std::string(AVER_FABRIC_DATA) + "/ScriptGame\" \"" + (outRoot / "scriptgame2").string() + "\" --scenes-only", log6);
+        check(slurp((outRoot / "scriptgame2").string() + "/ScriptGame/Fabric/nodes.json") == nodes, "nodes.json is the same on a second run");
+    }
+
     // Failure modes: nothing to convert, binary scenes.
     AVER_INFO("-- failures are reported, not crashed on --");
     {

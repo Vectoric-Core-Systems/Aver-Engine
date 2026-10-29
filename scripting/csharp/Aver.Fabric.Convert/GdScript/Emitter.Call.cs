@@ -85,10 +85,12 @@ internal sealed partial class GdEmitter
             }
         }
 
+        if (name is "get_node" or "get_node_or_null" && TrySceneGetNode(name, null, c, expected, out Ex? sceneNode)) return sceneNode!;
+
         Rs.INamedTypeSymbol? root = _script.ApiRoot;
-        ApiMember? api = Api?.Lookup(root, name);
+        ApiMember? api = IsApiTypeName(name) ? null : Api?.Lookup(root, name);
         if (api != null && api.Kind == MemberKind.Method) return CallApi(api, "", c.Args, expected, c);
-        Ex? acc = Api != null ? ApiAccessorCall(root, "", name, c.Args, c) : null;
+        Ex? acc = Api != null && !IsApiTypeName(name) ? ApiAccessorCall(root, "", name, c.Args, c) : null;
         if (acc != null) return acc;
 
         if (TryBuiltin(name, c, expected, out Ex? built)) return built!;
@@ -123,6 +125,7 @@ internal sealed partial class GdEmitter
         List<GdType> pt = ParamTypes(mi);
         bool rest = fd.Params.Count > 0 && fd.Params[^1].IsRest;
         GdType ret = ReturnTypeOf(mi);
+        if (_observed != null && _dry == 0) Observe(mi, args);
         string argText = ArgsFor(args, pt, rest);
         string cs = mi.CsName;
         string code;
@@ -300,6 +303,8 @@ internal sealed partial class GdEmitter
         bool weak = !m.IsGenericMethod && m.ReturnType is Rs.INamedTypeSymbol rn && (rn.Name == "Node" || rn.Name == "GodotObject");
         string typePrefix = m.IsStatic && receiver.Length == 0 ? m.ContainingType.ToDisplayString(s_nameFormat) + "." : prefix;
         var ex = new Ex($"{typePrefix}{m.Name}{typeArgs}({argText})", weak ? ret.WithWeak(true) : ret) { Api = api, UsesInstance = !m.IsStatic && receiver.Length == 0 };
+        // A GDScript int is a long and C# has no implicit ulong to long (an object id, a Rid's number).
+        if (m.ReturnType.SpecialType == Rs.SpecialType.System_UInt64) { ex.Code = "(long)" + ex.Code; ex.Prec = P.Unary; }
         return ex;
     }
 
@@ -373,6 +378,8 @@ internal sealed partial class GdEmitter
         }
 
         GdType tt = t.Type;
+        if (name is "get_node" or "get_node_or_null" && tt.IsGodotObject && TrySceneGetNode(name, t, c, expected, out Ex? sceneNode)) return sceneNode!;
+        if (name == "instantiate" && tt.Kind == GK.Object && TryInstantiate(t, c, expected, out Ex? instance)) return instance!;
         switch (tt.Kind)
         {
             case GK.String or GK.StringName or GK.NodePath:
@@ -413,7 +420,7 @@ internal sealed partial class GdEmitter
                 }
                 Ex? acc = ApiAccessorCall(sym, rc, name, c.Args, c);
                 if (acc != null) return acc;
-                if (tt.Weak || sym == null || sym.Name is "Node" or "GodotObject") return DynamicCall(t, name, c);
+                if (tt.Weak || tt.FromScene || sym == null || sym.Name is "Node" or "GodotObject") return DynamicCall(t, name, c);
                 // A member the runtime lacks: keep the name, let the compiler say so.
                 string args = string.Join(", ", c.Args.Select(a => VariantFromTyped(Expr(a, null))));
                 Note(c, "call", name, Rating.Unsupported, $"Aver.Fabric has no method '{name}' on {tt.Cs}");

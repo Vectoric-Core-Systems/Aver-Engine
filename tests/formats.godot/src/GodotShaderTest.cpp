@@ -475,6 +475,7 @@ instance uniform float inst_b : instance_index(3) = 0.5;
 global uniform float wind_strength;
 uniform samplerCube env;
 uniform sampler3D vol : repeat_disable;
+uniform samplerCube sky_cube : filter_linear, source_color, hint_default_black;
 void fragment() {}
 )";
     GdShaderModule m;
@@ -492,6 +493,8 @@ void fragment() {}
     check(u("inst_a").scope == GdUniformScope::Instance && u("inst_b").instanceIndex == 3 && u("wind_strength").scope == GdUniformScope::Global, "instance and global uniforms");
     check(u("tint").group == "look" && u("tint").subgroup.empty() && u("nrm").group == "look" && u("nrm").subgroup == "detail" && u("screen").group.empty(), "group_uniforms groups and subgroups");
     check(u("vol").repeat == GdRepeat::Disable && u("env").type.base == GdBase::SamplerCube, "sampler3D and samplerCube uniforms");
+    check(u("sky_cube").texHint == GdTexHint::DefaultBlack && u("sky_cube").sourceColor, "hint_default_black on a samplerCube (the platformer demo's sky does)");
+    expectErrorAt("shader_type spatial;\nuniform samplerCube c : hint_normal;\nvoid fragment() {}\n", "hint_normal", "applies to sampler2D uniforms");
 
     GdCompileOptions opt;
     opt.globalUniformNames = {"other"};

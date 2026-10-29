@@ -6,8 +6,8 @@
 //   - `uid="uid://..."` in the header of every .tscn / .tres;
 //   - `<file>.uid` sidecars (Godot 4.4+, one `uid://...` line each: foo.gd.uid -> res://foo.gd);
 //   - `[remap] uid=` of every `<file>.import` (-> the source file res://<file>).
-// Binary .scn/.res carry their uid in binary; they are listed in binaryResources() so the converter
-// can ask for a text resave.
+// Binary .scn/.res carry their uid in their header (GodotBinary.hpp reads it); they are also listed in
+// binaryResources() so the converter can report each one.
 #include "aver/formats/godot/GodotDiagnostics.hpp"
 #include "aver/formats/godot/GodotProject.hpp"
 #include "aver/formats/godot/GodotScene.hpp"
@@ -61,20 +61,22 @@ public:
     bool exists(std::string_view ref) const;
 
     // Walks the project (skipping dot-folders such as .godot and .git, and folders holding .gdignore),
-    // lists every file and builds the uid map. Warns once per duplicate uid and per binary resource.
+    // lists every file and builds the uid map. Warns once per duplicate uid and per binary resource whose header cannot be read.
     bool scan(GodotDiagnostics& diag);
     const std::vector<std::string>& files() const { return files_; }          // res:// paths, sorted
     const std::vector<std::string>& binaryResources() const { return binary_; }  // .scn / .res
     const GodotUidMap& uids() const { return uids_; }
     GodotUidMap& uids() { return uids_; }
 
-    // Resolve + read + parse. `ref` is a res:// path or a uid://.
+    // Resolve + read + parse. `ref` is a res:// path or a uid://. A binary .scn / .res is read through GodotBinary.hpp into the same model.
     bool loadScene(std::string_view ref, GodotScene& out, GodotDiagnostics& diag) const;
     bool loadResource(std::string_view ref, GodotResource& out, GodotDiagnostics& diag) const;
     bool loadImport(std::string_view sourceRef, GodotImport& out, GodotDiagnostics& diag) const;  // reads <ref>.import
+    // Text only: a binary resource is an error.
     bool readText(std::string_view ref, std::string& out, GodotDiagnostics& diag) const;
 
 private:
+    bool readBytes(std::string_view ref, std::vector<u8>& out, std::string& res, GodotDiagnostics& diag) const;
     std::string root_;
     GodotUidMap uids_;
     std::vector<std::string> files_;

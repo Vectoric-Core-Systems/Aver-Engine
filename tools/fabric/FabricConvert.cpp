@@ -93,7 +93,7 @@ bool reservedClassName(const std::string& n) {
     static const std::set<std::string> extra = {"Object", "GodotObject", "RefCounted", "Resource", "Mesh", "Material", "Shape3D", "Texture2D", "PackedScene",
                                                 "SceneTree", "Variant", "Callable", "Signal", "StringName", "NodePath", "Vector2", "Vector3",
                                                 "Transform3D", "Basis", "Quaternion", "Color", "Aabb", "Plane", "Projection", "GD", "Mathf", "Input"};
-    return extra.count(n) || isControlClass(n) || is2DClass(n) || isNode3DClass(n) || n == "Node" || n == "Timer" || n == "Viewport" ||
+    return extra.count(n) || isControlClass(n) || is2DClass(n) || isNode3DClass(n) || n == "Node" || n == "Timer" || n == "Viewport" || n == "CanvasLayer" ||
            n == "Window" || n == "CanvasItem" || n == "WorldEnvironment" || n == "AnimationPlayer" || n == "AudioStreamPlayer" ||
            n == "AudioStreamPlayer3D" || n == "AudioListener3D" || n == "AudioServer" || n == "AudioStream" || n == "NavigationAgent3D" ||
            n == "AStar3D" || n == "AStar2D" || n == "AStarGrid2D" || n == "NavigationMesh";
@@ -189,6 +189,30 @@ bool Converter::writeScriptsManifest() {
     }
     j += first ? "]\n}\n" : "\n  ]\n}\n";
     return writeFileText(fabricDir_ + "/scripts.json", j);
+}
+
+// Fabric/nodes.json: for every scene written, its nodes as the runtime places them (path from the scene's root, the class placed, the script, the
+// owner and %Unique flag, and the .tscn files assigned to a scripted node's properties). The script converter reads it to type $Path, get_node("path"),
+// %Unique and PackedScene.instantiate() from the scene the script is attached to.
+bool Converter::writeNodesManifest() {
+    std::string j = "{\n  \"schema\": 1,\n  \"scenes\": [";
+    bool firstScene = true;
+    for (const auto& [scene, nodes] : sceneNodes_) {
+        j += firstScene ? "\n" : ",\n";
+        firstScene = false;
+        j += "    {\"scene\": " + jsonString(scene) + ", \"nodes\": [";
+        for (size_t i = 0; i < nodes.size(); ++i) {
+            const SceneNodeRecord& n = nodes[i];
+            j += std::string(i ? ",\n" : "\n") + "      {\"path\": " + jsonString(n.path) + ", \"base\": " + jsonString(n.baseClass) + ", \"class\": " + jsonString(n.cls) +
+                 ", \"script\": " + jsonString(n.script) + ", \"owner\": " + jsonString(n.owner) + ", \"unique\": " + (n.unique ? "true" : "false") + ", \"packed\": {";
+            for (size_t k = 0; k < n.packedScenes.size(); ++k)
+                j += std::string(k ? ", " : "") + jsonString(n.packedScenes[k].first) + ": " + jsonString(n.packedScenes[k].second);
+            j += "}}";
+        }
+        j += nodes.empty() ? "]}" : "\n    ]}";
+    }
+    j += firstScene ? "]\n}\n" : "\n  ]\n}\n";
+    return writeFileText(fabricDir_ + "/nodes.json", j);
 }
 
 bool Converter::writeProjectManifest() {
@@ -300,6 +324,7 @@ int Converter::run() {
                                 "), recorded in Fabric/scripts.json" + (si.uses.empty() ? "; no scene uses it" : ""),
                             0);
         writeScriptsManifest();
+        writeNodesManifest();
         writeProjectManifest();
         writeShadersManifest();   // G6 SH2
     }

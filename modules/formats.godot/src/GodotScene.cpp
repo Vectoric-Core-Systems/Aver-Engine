@@ -1,8 +1,11 @@
 // .tscn / .tres interpretation over the generic section parser (GodotSections.cpp).
 #include "aver/formats/godot/GodotScene.hpp"
 
+#include "GodotSceneInternal.hpp"
+#include "aver/formats/godot/GodotBinary.hpp"
+#include "aver/platform/FileSystem.hpp"
+
 #include <cstdlib>
-#include <unordered_map>
 
 namespace aver::fmt::godot {
 
@@ -194,54 +197,9 @@ bool parseDoc(std::string_view text, std::string_view file, bool wantScene, Godo
 
             if (n.name.empty()) diag.error(file, line, "[node] has no name");
             if (!n.isRoot && !parentAttr) diag.error(file, line, "node '" + n.name + "' has no parent and the scene already has a root");
-            n.isOverride = !n.isRoot && n.type.empty() && !n.isInstance();
-
-            if (n.isRoot) {
-                n.path = ".";
-            } else if (n.parentPath == ".") {
-                n.path = n.name;
-            } else {
-                n.path = n.parentPath + "/" + n.name;
-            }
-
-            const int myIndex = static_cast<int>(scene->nodes.size());
-            if (!n.isRoot) {
-                if (n.parentPath == ".") {
-                    n.parent = scene->nodes.empty() ? -1 : 0;
-                } else {
-                    auto it = pathIndex.find(n.parentPath);
-                    if (it != pathIndex.end()) {
-                        n.parent = it->second;
-                    } else {
-                        // Walk the longest prefix that is a node of this file: the instance that hosts it.
-                        std::string prefix = n.parentPath;
-                        int anchor = -1;
-                        while (true) {
-                            const usize cut = prefix.find_last_of('/');
-                            if (cut == std::string::npos) break;
-                            prefix.resize(cut);
-                            auto pit = pathIndex.find(prefix);
-                            if (pit != pathIndex.end()) { anchor = pit->second; break; }
-                        }
-                        if (anchor < 0 && !scene->nodes.empty()) {
-                            // A single-component path: could still be an unseen instance child only if
-                            // the root is an inherited scene.
-                            if (!scene->nodes[0].instance.empty()) anchor = 0;
-                        }
-                        if (anchor >= 0) {
-                            n.unresolvedParent = true;
-                            n.anchor = anchor;
-                        } else {
-                            diag.error(file, line, "node '" + n.name + "': parent \"" + n.parentPath + "\" is not a node of this scene", "godot.node_parent");
-                        }
-                    }
-                }
-            }
-            if (!pathIndex.emplace(n.path, myIndex).second)
-                diag.error(file, line, "two nodes have the path \"" + n.path + "\"", "godot.node_path");
             if (!n.instance.empty() && !base.findExt(n.instance))
                 diag.error(file, line, "instance=ExtResource(\"" + n.instance + "\") is not declared");
-            scene->nodes.push_back(std::move(n));
+            godotPlaceNode(*scene, pathIndex, std::move(n), file, diag);
         } else if (name == "connection" && wantScene) {
             GodotConnection c;
             c.line = line;
@@ -289,6 +247,56 @@ bool parseDoc(std::string_view text, std::string_view file, bool wantScene, Godo
 
 }  // namespace
 
+void godotPlaceNode(GodotScene& scene, std::unordered_map<std::string, int>& pathIndex, GodotNode n, std::string_view file, GodotDiagnostics& diag) {
+    const int line = n.line;
+    n.isOverride = !n.isRoot && n.type.empty() && !n.isInstance();
+
+    if (n.isRoot) {
+        n.path = ".";
+    } else if (n.parentPath == ".") {
+        n.path = n.name;
+    } else {
+        n.path = n.parentPath + "/" + n.name;
+    }
+
+    const int myIndex = static_cast<int>(scene.nodes.size());
+    if (!n.isRoot) {
+        if (n.parentPath == ".") {
+            n.parent = scene.nodes.empty() ? -1 : 0;
+        } else {
+            auto it = pathIndex.find(n.parentPath);
+            if (it != pathIndex.end()) {
+                n.parent = it->second;
+            } else {
+                // Walk the longest prefix that is a node of this file: the instance that hosts it.
+                std::string prefix = n.parentPath;
+                int anchor = -1;
+                while (true) {
+                    const usize cut = prefix.find_last_of('/');
+                    if (cut == std::string::npos) break;
+                    prefix.resize(cut);
+                    auto pit = pathIndex.find(prefix);
+                    if (pit != pathIndex.end()) { anchor = pit->second; break; }
+                }
+                if (anchor < 0 && !scene.nodes.empty()) {
+                    // A single-component path: could still be an unseen instance child only if
+                    // the root is an inherited scene.
+                    if (!scene.nodes[0].instance.empty()) anchor = 0;
+                }
+                if (anchor >= 0) {
+                    n.unresolvedParent = true;
+                    n.anchor = anchor;
+                } else {
+                    diag.error(file, line, "node '" + n.name + "': parent \"" + n.parentPath + "\" is not a node of this scene", "godot.node_parent");
+                }
+            }
+        }
+    }
+    if (!pathIndex.emplace(n.path, myIndex).second)
+        diag.error(file, line, "two nodes have the path \"" + n.path + "\"", "godot.node_path");
+    scene.nodes.push_back(std::move(n));
+}
+
 bool parseGodotScene(std::string_view text, std::string_view file, GodotScene& out, GodotDiagnostics& diag) {
     out = GodotScene{};
     GodotDocBase base;
@@ -306,15 +314,29 @@ bool parseGodotResource(std::string_view text, std::string_view file, GodotResou
 }
 
 bool loadGodotScene(const std::string& path, GodotScene& out, GodotDiagnostics& diag, std::string_view displayName) {
+    const std::string_view name = displayName.empty() ? std::string_view(path) : displayName;
+    std::vector<u8> bytes;
+    if (!aver::readFileBytes(path, bytes)) {
+        diag.error(name, 0, "cannot read the file", "godot.unreadable");
+        return false;
+    }
+    if (detectGodotFileKind(bytes.data(), bytes.size()) == GodotFileKind::BinaryResource) return parseGodotBinaryScene(bytes.data(), bytes.size(), name, out, diag);
     std::string text;
-    if (!readGodotTextFile(path, text, diag, displayName)) return false;
-    return parseGodotScene(text, displayName.empty() ? std::string_view(path) : displayName, out, diag);
+    if (!godotTextFromBytes(bytes, name, text, diag)) return false;
+    return parseGodotScene(text, name, out, diag);
 }
 
 bool loadGodotResource(const std::string& path, GodotResource& out, GodotDiagnostics& diag, std::string_view displayName) {
+    const std::string_view name = displayName.empty() ? std::string_view(path) : displayName;
+    std::vector<u8> bytes;
+    if (!aver::readFileBytes(path, bytes)) {
+        diag.error(name, 0, "cannot read the file", "godot.unreadable");
+        return false;
+    }
+    if (detectGodotFileKind(bytes.data(), bytes.size()) == GodotFileKind::BinaryResource) return parseGodotBinaryResource(bytes.data(), bytes.size(), name, out, diag);
     std::string text;
-    if (!readGodotTextFile(path, text, diag, displayName)) return false;
-    return parseGodotResource(text, displayName.empty() ? std::string_view(path) : displayName, out, diag);
+    if (!godotTextFromBytes(bytes, name, text, diag)) return false;
+    return parseGodotResource(text, name, out, diag);
 }
 
 std::string detectGodotTextKind(std::string_view text) {

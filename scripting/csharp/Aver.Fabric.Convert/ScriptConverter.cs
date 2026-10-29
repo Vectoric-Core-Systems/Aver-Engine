@@ -65,7 +65,7 @@ public static class ScriptConverter
         {
             ApiModel? api = refs != null ? ApiModel.Create(refs, settings.ExtraSources) : null;
             var gdInput = gdSources.Select(s => new GdSource { ResPath = s.ResPath, Text = s.Text, ClassName = s.ClassName.Length > 0 ? s.ClassName : GdScript.Naming.Pascal(SyntaxUtil.StemOf(s.ResPath)), Output = s.Output }).ToList();
-            foreach (GdConvertedFile f in GdScriptConverter.Convert(gdInput, api, settings.ProjectDir)) gd[f.ResPath] = f;
+            foreach (GdConvertedFile f in GdScriptConverter.Convert(gdInput, api, settings.ProjectDir, settings.SceneNodes != null ? SceneIndex.Parse(settings.SceneNodes) : null)) gd[f.ResPath] = f;
         }
 
         foreach (ScriptSource src0 in sources)

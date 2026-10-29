@@ -102,6 +102,17 @@ Var Converter::animTreeObject(const std::string& type, const std::vector<gd::God
     int approximated = 0, unknown = 0;
     for (const gd::GodotProperty& p : props) {
         if (ignorable(p.name)) continue;
+        // Older Godot 4 versions store a curve's value range and domain as one array: [min_value, max_value, min_domain, max_domain].
+        if (type == "Curve" && p.name == "_limits" && p.value.type == VType::Array && p.value.items.size() >= 2) {
+            static const char* const names[4] = {"min_value", "max_value", "min_domain", "max_domain"};
+            for (size_t i = 0; i < 4 && i < p.value.items.size(); ++i) {
+                bool stated = false;
+                for (const gd::GodotProperty& q : props) stated = stated || q.name == names[i];
+                if (!stated) entries.emplace_back(names[i], makeFloat(p.value.items[i].asNumber()));
+            }
+            report_.add("property", doc.file, w.node, type, p.name, Rating::Converted, "written as min_value, max_value" + std::string(p.value.items.size() >= 4 ? ", min_domain and max_domain" : ""), p.line);
+            continue;
+        }
         bool known = false;
         if (fam) {
             for (const char* k : fam->known) if (matches(p.name, k)) { known = true; break; }
@@ -134,6 +145,7 @@ void Converter::noteAnimTreeNode(const FNode& fn) {
     if (!fam) return;
     for (const Prop& pr : fn.props) {
         const std::string& k = pr.key;
+        if (fn.fromModel && !pr.doc) continue;   // the converter's own bone list from the model file, not a property the scene states
         if (k == "_name" || k == "script" || k == "unique_name_in_owner" || k.rfind("metadata/", 0) == 0 || k == "process_mode" || k == "process_priority" ||
             k == "process_physics_priority" || k == "visible" || k == "top_level" || k == "scene_file_path" || k == "position" || k == "rotation" || k == "scale" ||
             k == "transform" || k == "basis" || k == "rotation_degrees" || k == "rotation_edit_mode" || k == "rotation_order" || k == "editor_description")

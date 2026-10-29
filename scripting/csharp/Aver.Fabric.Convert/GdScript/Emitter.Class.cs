@@ -402,7 +402,7 @@ internal sealed partial class GdEmitter
                 if (vd.Type != null) mi.Type = ResolveType(vd.Type, mi.Owner);
                 else if (vd.Init != null)
                 {
-                    GdType t = CleanInferred(TypeOf(vd.Init));
+                    GdType t = GuardScene(CleanInferred(TypeOf(vd.Init)), vd.Name, mi.Owner.Decl);
                     mi.Type = vd.Inferred ? t : Unify(t, vd.Name, mi.Owner.Decl);
                     if (!vd.Inferred && _forced.TryGetValue(vd, out GdType? forced)) mi.Type = forced;
                 }
@@ -419,6 +419,8 @@ internal sealed partial class GdEmitter
     private GdType Unify(GdType init, string name, Node scope)
     {
         if (init.Kind is GK.Variant or GK.Null or GK.Void or GK.Lambda || init.Weak) return GdType.Variant;
+        // A type read off a scene is what the node is where it was found; a variable that is assigned again may hold another kind of node.
+        if (init.FromScene && AssignsTo(scope, name)) return GdType.Variant;
         if (init.Kind is GK.Object or GK.ScriptClass) return init;
         GdType cur = init;
         foreach (Assign a in AssignsIn(scope))

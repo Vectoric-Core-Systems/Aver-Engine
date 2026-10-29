@@ -76,7 +76,12 @@ public static class ProjectConverter
         res.Items.AddRange(PackageReferences(projectDir, handled));
 
         string? refs = o.RefsDir ?? DefaultRefs();
-        ConversionResult conv = ScriptConverter.Convert(sources, new ConvertSettings { RefsDir = refs, ProjectDir = projectDir });
+        // The scene converter's list of the nodes it placed sits beside the manifest.
+        string nodesFile = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(manifest)) ?? outDir, "nodes.json");
+        string? sceneNodes = null;
+        try { if (File.Exists(nodesFile)) sceneNodes = File.ReadAllText(nodesFile); }
+        catch (IOException) { }
+        ConversionResult conv = ScriptConverter.Convert(sources, new ConvertSettings { RefsDir = refs, ProjectDir = projectDir, SceneNodes = sceneNodes });
         res.Conversion = conv;
 
         foreach (ConvertedScript s in conv.Scripts)

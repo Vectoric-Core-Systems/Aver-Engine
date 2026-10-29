@@ -93,8 +93,12 @@ public class CanvasItem : Node
     public bool IsVisibleInTree()
     {
         if (!IsInsideTree()) return false;
-        for (Node? n = this; n is CanvasItem ci; n = n.GetParent())
+        Node? n = this;
+        for (; n is CanvasItem ci; n = n.GetParent())
             if (!ci._visible) return false;
+        // Above the topmost canvas item: the layer it is drawn on can hide it too.
+        for (; n != null; n = n.GetParent())
+            if (n is CanvasLayer layer) return layer.IsVisibleInTree();
         return true;
     }
 

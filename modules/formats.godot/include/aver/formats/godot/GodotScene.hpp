@@ -117,7 +117,7 @@ struct GodotResource : GodotDocBase {
 bool parseGodotScene(std::string_view text, std::string_view file, GodotScene& out, GodotDiagnostics& diag);
 bool parseGodotResource(std::string_view text, std::string_view file, GodotResource& out, GodotDiagnostics& diag);
 
-// Reads the file from disk (binary .scn/.res are reported as "resave as text").
+// Reads the file from disk. A binary .scn / .res (RSRC, GodotBinary.hpp) is read into the same model.
 bool loadGodotScene(const std::string& path, GodotScene& out, GodotDiagnostics& diag, std::string_view displayName = {});
 bool loadGodotResource(const std::string& path, GodotResource& out, GodotDiagnostics& diag,
                        std::string_view displayName = {});

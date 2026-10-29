@@ -386,10 +386,13 @@ std::string Converter::arrayMeshAsset(const std::vector<gd::GodotProperty>& prop
     report_.add("resource", doc.file, w.node, "ArrayMesh", "", Rating::Converted, say, 0);
     for (const std::string& n : allNotes) report_.add("resource", doc.file, w.node, "ArrayMesh", "", Rating::Approximated, n, 0);
     if (skipped) report_.add("resource", doc.file, w.node, "ArrayMesh", "", Rating::Approximated, std::to_string(skipped) + " surface(s) were left out", 0);
+    const Var* shapeNames = findP(props, "_blend_shape_names");
+    const bool hasShapes = shapeNames && shapeNames->count() > 0;   // the mode (a binary .res always stores it) means nothing without shapes
     for (const gd::GodotProperty& p : props) {
         if (p.name == "_surfaces" || p.name == "resource_name" || p.name == "resource_local_to_scene" || p.name == "resource_path" || p.name == "script") continue;
-        if (p.name == "blend_shape_mode" || p.name == "_blend_shape_names")
-            report_.add("property", doc.file, w.node, "ArrayMesh", p.name, Rating::Unsupported, "blend shapes are not decoded", p.line);
+        if (p.name == "blend_shape_mode" || p.name == "_blend_shape_names") {
+            if (hasShapes) report_.add("property", doc.file, w.node, "ArrayMesh", p.name, Rating::Unsupported, "blend shapes are not decoded", p.line);
+        }
         else if (p.name == "custom_aabb" || p.name == "shadow_mesh" || p.name == "lightmap_size_hint")
             report_.add("property", doc.file, w.node, "ArrayMesh", p.name, Rating::Approximated, "not used: the bounds follow the vertices and a shadow proxy is not a separate mesh", p.line);
     }
@@ -641,8 +644,15 @@ void Converter::geometryNode(FNode& fn, std::vector<std::pair<std::string, Var>>
                             const Var sv = convertValue(p.value.items[k], *lib->doc, w, "mesh_library");
                             if (sv.type == VType::Object) it.shapes.emplace_back(sv, xformOfVar(&p.value.items[k + 1]));
                         }
-                    } else if (field == "navigation_mesh" || field == "navigation_mesh_transform" || field == "navigation_layers")
-                        report_.add("property", libProp->doc->file, w.node, "MeshLibrary", p.name, Rating::Unsupported, "navigation meshes of library items are not converted", p.line);
+                    } else if (field == "navigation_mesh" || field == "navigation_mesh_transform" || field == "navigation_layers") {
+                        // The transform and layers are always stored; they only matter when the item has a navigation mesh.
+                        const std::string meshKey = "item/" + p.name.substr(5, slash - 5) + "/navigation_mesh";
+                        bool hasNavMesh = false;
+                        for (const gd::GodotProperty& q : *lib->props)
+                            if (q.name == meshKey && !q.value.isNil()) hasNavMesh = true;
+                        if (hasNavMesh)
+                            report_.add("property", libProp->doc->file, w.node, "MeshLibrary", p.name, Rating::Unsupported, "navigation meshes of library items are not converted", p.line);
+                    }
                 }
                 for (const auto& [id, it] : items)
                     libItems.push_back(makeDict({{"id", makeInt(id)}, {"name", makeString(it.name)}, {"mesh", it.meshAsset.empty() ? makeNil() : makeResource(it.meshAsset)}}));

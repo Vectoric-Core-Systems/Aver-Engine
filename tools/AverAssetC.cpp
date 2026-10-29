@@ -1727,16 +1727,18 @@ fabric::ModelResult fabricImportModel(const std::string& input, const std::strin
 
     int code = exitCode(ExitCode::Failed);
     std::vector<std::string> positionNames;
+    std::vector<int> positionNodes;   // parallel to positionNames: the glTF node a placement came from, -1 when unknown
     if (ext == ".gltf" || ext == ".glb") {
         fmt::GltfImportResult res;
         std::string why;
         if (!fmt::importGltf(input, res, {}, &why)) { out.error = why; return out; }
         code = convertImportedModel(margs, res, stats);
-        for (const fmt::GltfPlacement& p : res.placements) positionNames.push_back(p.name);
+        for (const fmt::GltfPlacement& p : res.placements) { positionNames.push_back(p.name); positionNodes.push_back(p.node); }
         if (placements.empty())
             for (usize i = 0; i < res.meshes.size(); ++i) {
                 placements.push_back(ScenePlacement{i32(i), Vec3{0, 0, 0}});
                 positionNames.push_back(i < res.meshNames.size() ? res.meshNames[i] : std::string{});
+                positionNodes.push_back(-1);
             }
         for (const std::string& u : res.unsupported) out.notes.push_back("unsupported in the model: " + u);
     }
@@ -1790,6 +1792,7 @@ fabric::ModelResult fabricImportModel(const std::string& input, const std::strin
         fabric::ModelPart part;
         part.meshAsset = outSubdir + "/" + stems[usize(p.meshIndex)] + ".ocmesh";
         part.name = i < positionNames.size() ? positionNames[i] : std::string{};
+        part.node = i < positionNodes.size() ? positionNodes[i] : -1;
         part.x = p.position.x; part.y = p.position.y; part.z = p.position.z;
         out.parts.push_back(std::move(part));
     }

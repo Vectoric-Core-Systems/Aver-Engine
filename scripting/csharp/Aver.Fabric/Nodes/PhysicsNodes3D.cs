@@ -210,6 +210,15 @@ public class PhysicsBody3D : CollisionObject3D
 {
     private PhysicsMaterial? _material;
 
+    /// <summary>The gravity acting on this body in metres per second squared: the world's plus the gravity areas it is in, before its gravity scale
+    /// (Godot 4.3's get_gravity). Before the body exists in the engine, the project's default gravity.</summary>
+    public Vector3 GetGravity()
+    {
+        if (Body.IsValid) return FromPhys(Body.AreaGravity, 1f / FabricSpace.CmPerMetre);
+        double g = ProjectSettings.GetSetting("physics/3d/default_gravity", 9.8).AsDouble();
+        return ProjectSettings.GetSetting("physics/3d/default_gravity_vector", Vector3.Down).AsVector3() * (float)g;
+    }
+
     /// <summary>The surface the body has instead of Godot's defaults (friction 1, bounce 0).</summary>
     public PhysicsMaterial? PhysicsMaterialOverride
     {
@@ -315,6 +324,51 @@ public class PhysicsDirectBodyState3D : GodotObject
 
     public int GetContactCount() => _contacts;
 
+    // ---- per-contact reads: the body's tracked contacts (ContactMonitor on, MaxContactsReported above 0), in ascending partner order ----
+    // The engine tracks the partner, the point where the touch began and the normal, nothing per shape and no impulse, so the shape indices and
+    // GetContactImpulse are not offered. Both positions are that one point.
+
+    internal RigidBody3D? Owner;
+
+    private bool Contact(int index, out Aver.Physics.Body other, out Vector3 point, out Vector3 normal)
+    {
+        other = default; point = default; normal = default;
+        if (Owner == null || !Owner.Body.IsValid || index < 0 || index >= _contacts) return false;
+        if (!Owner.Body.TryGetContactAt(index, out other, out Aver.Physics.Float3 p, out Aver.Physics.Float3 n)) return false;
+        point = FabricSpace.FromAverPosition(new Aver.Scene.Vec3(p.X, p.Y, p.Z));
+        // The engine's normal runs from this body to the partner; Godot's local normal points from the partner toward this body.
+        normal = -CollisionObject3D.FromPhys(n);
+        return true;
+    }
+
+    /// <summary>The node this body touches in contact <paramref name="contactIdx"/>, or null.</summary>
+    public GodotObject? GetContactColliderObject(int contactIdx) => Contact(contactIdx, out var o, out _, out _) ? CollisionObject3D.NodeOfBody(o) : null;
+
+    public ulong GetContactColliderId(int contactIdx) => GetContactColliderObject(contactIdx)?.GetInstanceId() ?? 0UL;
+
+    public Rid GetContactColliderRid(int contactIdx) => Contact(contactIdx, out var o, out _, out _) ? new Rid((ulong)o.Handle) : default;
+
+    /// <summary>Where the touch began, in global coordinates (metres).</summary>
+    public Vector3 GetContactLocalPosition(int contactIdx) => Contact(contactIdx, out _, out var p, out _) ? p : Vector3.Zero;
+
+    /// <summary>The same point: the engine does not give the two bodies' surface points apart.</summary>
+    public Vector3 GetContactColliderPosition(int contactIdx) => GetContactLocalPosition(contactIdx);
+
+    /// <summary>The contact normal in global axes, pointing from the other body toward this one.</summary>
+    public Vector3 GetContactLocalNormal(int contactIdx) => Contact(contactIdx, out _, out _, out var n) ? n : Vector3.Zero;
+
+    /// <summary>This body's velocity at the contact point (metres per second).</summary>
+    public Vector3 GetContactLocalVelocityAtPosition(int contactIdx) =>
+        Contact(contactIdx, out _, out var p, out _) ? _linear + _angular.Cross(p - _transform.Origin) : Vector3.Zero;
+
+    /// <summary>The other body's velocity at the contact point (metres per second).</summary>
+    public Vector3 GetContactColliderVelocityAtPosition(int contactIdx)
+    {
+        if (!Contact(contactIdx, out var o, out var p, out _) || !o.IsValid) return Vector3.Zero;
+        Vector3 centre = FabricSpace.FromAverPosition(new Aver.Scene.Vec3(o.Position.X, o.Position.Y, o.Position.Z));
+        return CollisionObject3D.FromPhys(o.Velocity, 1f / FabricSpace.CmPerMetre) + CollisionObject3D.FromPhysAngular(o.AngularVelocity).Cross(p - centre);
+    }
+
     public void ApplyCentralImpulse(Vector3 impulse) => LinearVelocity = _linear + impulse * _invMass;
     public void ApplyCentralForce(Vector3 force) => LinearVelocity = _linear + force * (_invMass * _dt);
     public void ApplyImpulse(Vector3 impulse, Vector3 position = default)
@@ -392,6 +446,7 @@ public class RigidBody3D : PhysicsBody3D
     {
         _integrates = System.Array.Exists(GetType().GetMethods(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public),
             m => m.Name == nameof(_IntegrateForces) && m.GetBaseDefinition().DeclaringType == typeof(RigidBody3D) && m.DeclaringType != typeof(RigidBody3D));
+        _state.Owner = this;
     }
 
     /// <summary>The mass in kilograms.</summary>

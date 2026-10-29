@@ -182,7 +182,23 @@ public partial class Node3D : Node
     // ---- global transform ----
 
     /// <summary>True: this node ignores its parent's transform.</summary>
-    public bool TopLevel { get => _topLevel; set => _topLevel = value; }
+    public bool TopLevel
+    {
+        get => _topLevel;
+        set
+        {
+            if (_topLevel == value) return;
+            // Inside the tree the node stays where it is: its local transform becomes the global one (or back, relative to the parent).
+            Transform3D global = IsInsideTree() ? GlobalTransform : default;
+            _topLevel = value;
+            if (IsInsideTree()) GlobalTransform = global;
+        }
+    }
+
+    /// <summary>Godot's set_as_top_level: the same as setting <see cref="TopLevel"/>.</summary>
+    public void SetAsTopLevel(bool enable) => TopLevel = enable;
+
+    public bool IsSetAsTopLevel() => _topLevel;
 
     private Node3D? ParentNode3D => _topLevel ? null : GetParent() as Node3D;
 

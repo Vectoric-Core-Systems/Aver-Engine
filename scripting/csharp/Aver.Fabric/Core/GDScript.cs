@@ -582,6 +582,7 @@ public static class GDScript
             case Variant.Type.Vector2: return target.AsVector2()[(int)key.AsInt64()];
             case Variant.Type.Vector3: return target.AsVector3()[(int)key.AsInt64()];
             case Variant.Type.Color: return target.AsColor()[(int)key.AsInt64()];
+            case Variant.Type.Basis: return target.AsBasis()[(int)key.AsInt64()];
             case Variant.Type.PackedStringArray: return target.AsStringArray()[key.AsInt64()];
             case Variant.Type.PackedInt32Array: return target.AsInt32Array()[key.AsInt64()];
             case Variant.Type.PackedInt64Array: return target.AsInt64Array()[key.AsInt64()];

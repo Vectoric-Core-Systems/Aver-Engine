@@ -2,7 +2,7 @@
 
 # Aver.Fabric public API
 
-649 public types and 6910 public members, read from `scripting/csharp/Aver.Fabric/` (115 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+656 public types and 6973 public members, read from `scripting/csharp/Aver.Fabric/` (117 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Fabric
 
@@ -1788,6 +1788,7 @@ Values: `Disabled = 0`, `Alpha = 1`, `AlphaScissor = 2`, `AlphaHash = 3`, `Alpha
 - `public Vector3 Row1`
 - `public Vector3 Row2`
 - `public float this[int column, int row] { get; set; }` - The matrix element in the given column and row (GodotSharp's index order).
+- `public Vector3 this[int column] { get; set; }` - Column 0 to 2 as a vector (GDScript's basis[i] and GodotSharp's Basis[i]; Basis[0] is the X axis).
 - `public Vector3 Column0 { get; set; }`
 - `public Vector3 Column1 { get; set; }`
 - `public Vector3 Column2 { get; set; }`
@@ -2080,6 +2081,31 @@ Values: `Perspective = 0`, `Orthogonal = 1`, `Frustum = 2`
 - `public static readonly StringName VisibilityChanged`
 - `public static readonly StringName Hidden`
 - `public static readonly StringName ItemRectChanged`
+
+### CanvasLayer
+
+`public class CanvasLayer : Node` - A group of UI drawn together (Godot's CanvasLayer).
+
+- `public event Action VisibilityChanged`
+- `public int Layer { get; set; }` - The draw order among layers: higher is drawn over lower.
+- `public bool Visible { get; set; }`
+- `public void Show()`
+- `public void Hide()`
+- `public bool IsVisibleInTree()` - True when this layer and every layer above it is shown and the node is in the tree.
+- `public Vector2 Offset { get; set; }`
+- `public float Rotation { get; set; }`
+- `public float RotationDegrees { get; set; }`
+- `public Vector2 Scale { get; set; }`
+- `public bool FollowViewportEnabled { get; set; }`
+- `public float FollowViewportScale { get; set; }`
+- `public Transform2D Transform { get; set; }` - The offset, rotation and scale as one transform.
+- `public Transform2D GetFinalTransform()`
+
+### CanvasLayer.SignalName
+
+`public new class SignalName : Node.SignalName`
+
+- `public static readonly StringName VisibilityChanged`
 
 ### CapsuleShape3D
 
@@ -2888,6 +2914,7 @@ Values: `Free = 0`, `Linear = 1`
 - `public float DirectionalShadowMaxDistance { get; set; }`
 - `public float LightAngularDistance { get; set; }`
 - `public ShadowModeEnum DirectionalShadowMode { get; set; }`
+- `public SkyModeEnum SkyMode { get; set; }` - Kept as set and not applied: the sun the sky draws is the level's one SUN record, lit and drawn together.
 - `public bool IsSun { get; }` - True for the one directional light that drives the sky's sun.
 
 ### DirectionalLight3D.ShadowModeEnum
@@ -2895,6 +2922,18 @@ Values: `Free = 0`, `Linear = 1`
 `public enum ShadowModeEnum`
 
 Values: `Orthogonal = 0`, `Parallel2Splits = 1`, `Parallel4Splits = 2`
+
+### DirectionalLight3D.SkyModeEnum
+
+`public enum SkyModeEnum` - What the light does besides lighting the scene: LightOnly lights without drawing in the sky, SkyOnly draws in the sky without lighting.
+
+Values: `LightAndSky = 0`, `LightOnly = 1`, `SkyOnly = 2`
+
+### DisplayServer
+
+`public static class DisplayServer` - Godot's DisplayServer singleton, as far as game scripts use it to ask what device they run on.
+
+- `public static bool IsTouchscreenAvailable()` - Whether the device has a touch screen.
 
 ### EncodedObjectAsId
 
@@ -3875,6 +3914,35 @@ Values: `Visible = 0`, `Hidden = 1`, `Captured = 2`, `Confined = 3`, `ConfinedHi
 - `public Vector2 Velocity { get; set; }` - Pixels per second.
 - `public Vector2 ScreenVelocity { get; set; }`
 - `public float Pressure { get; set; }`
+- `public override string AsText()`
+
+### InputEventScreenDrag
+
+`public class InputEventScreenDrag : InputEvent` - A finger moving on the screen (Godot's InputEventScreenDrag).
+
+- `public int Index { get; set; }`
+- `public Vector2 Position { get; set; }`
+- `public Vector2 Relative { get; set; }` - The movement since the last drag event, in viewport pixels.
+- `public Vector2 ScreenRelative { get; set; }`
+- `public Vector2 Velocity { get; set; }` - Pixels per second.
+- `public Vector2 ScreenVelocity { get; set; }`
+- `public float Pressure { get; set; }`
+- `public Vector2 Tilt { get; set; }`
+- `public bool PenInverted { get; set; }`
+- `public override string AsText()`
+
+### InputEventScreenTouch
+
+`public class InputEventScreenTouch : InputEvent` - A finger touching or leaving the screen (Godot's InputEventScreenTouch).
+
+- `public int Index { get; set; }` - Which finger (0 for the first).
+- `public Vector2 Position { get; set; }`
+- `public bool Pressed { get; set; }`
+- `public bool Canceled { get; set; }`
+- `public bool DoubleTap { get; set; }`
+- `public override bool IsPressed()`
+- `public override bool IsReleased()`
+- `public override bool IsActionType()`
 - `public override string AsText()`
 
 ### InputEventWithModifiers
@@ -5249,6 +5317,7 @@ Values: `Stretch = 0`, `Tile = 1`, `TileFit = 2`
 - `public void RemoveFromGroup(StringName group)`
 - `public bool IsInGroup(StringName group)`
 - `public Collections.Array<StringName> GetGroups()`
+- `public void ResetPhysicsInterpolation()` - Godot's reset_physics_interpolation.
 - `public void QueueFree()` - Frees the node and its descendants at the end of the frame (Godot's queue_free).
 - `public override void Free()` - Frees the node and its descendants now.
 - `public Node Duplicate(int flags = 15)` - Copies this node and its descendants: same class, name, properties and children; groups and signals as the flags say.
@@ -5340,6 +5409,8 @@ Values: `Inherit = 0`, `Pausable = 1`, `WhenPaused = 2`, `Always = 3`, `Disabled
 - `public Basis Basis { get; set; }` - The rotation and scale, as a Basis (rotation times scale).
 - `public Transform3D Transform { get; set; }`
 - `public bool TopLevel { get; set; }` - True: this node ignores its parent's transform.
+- `public void SetAsTopLevel(bool enable)` - Godot's set_as_top_level: the same as setting TopLevel.
+- `public bool IsSetAsTopLevel()`
 - `public Transform3D GlobalTransform { get; set; }`
 - `public Vector3 GlobalPosition { get; set; }`
 - `public Vector3 GlobalRotation { get; set; }`
@@ -5668,6 +5739,7 @@ Values: `Region = 0`, `Link = 1`
 
 `public class PhysicsBody3D : CollisionObject3D`
 
+- `public Vector3 GetGravity()` - The gravity acting on this body in metres per second squared: the world's plus the gravity areas it is in, before its gravity scale (Godot 4.3's get_gravity).
 - `public PhysicsMaterial? PhysicsMaterialOverride { get; set; }` - The surface the body has instead of Godot's defaults (friction 1, bounce 0).
 - `public bool AxisLockLinearX { get; set; }`
 - `public bool AxisLockLinearY { get; set; }`
@@ -5687,6 +5759,14 @@ Values: `Region = 0`, `Link = 1`
 - `public Vector3 AngularVelocity { get; set; }`
 - `public Transform3D Transform { get; }` - The body's pose this step.
 - `public int GetContactCount()`
+- `public GodotObject? GetContactColliderObject(int contactIdx)` - The node this body touches in contact contactIdx, or null.
+- `public ulong GetContactColliderId(int contactIdx)`
+- `public Rid GetContactColliderRid(int contactIdx)`
+- `public Vector3 GetContactLocalPosition(int contactIdx)` - Where the touch began, in global coordinates (metres).
+- `public Vector3 GetContactColliderPosition(int contactIdx)` - The same point: the engine does not give the two bodies' surface points apart.
+- `public Vector3 GetContactLocalNormal(int contactIdx)` - The contact normal in global axes, pointing from the other body toward this one.
+- `public Vector3 GetContactLocalVelocityAtPosition(int contactIdx)` - This body's velocity at the contact point (metres per second).
+- `public Vector3 GetContactColliderVelocityAtPosition(int contactIdx)` - The other body's velocity at the contact point (metres per second).
 - `public void ApplyCentralImpulse(Vector3 impulse)`
 - `public void ApplyCentralForce(Vector3 force)`
 - `public void ApplyImpulse(Vector3 impulse, Vector3 position = default)`
@@ -6255,6 +6335,10 @@ Values: `Once = 0`, `Always = 1`
 
 `public static class RenderingServer` - Godot's RenderingServer enums that the environment nodes use.
 
+- `public static string GetCurrentRenderingMethod()` - The rendering method in Godot's spelling.
+- `public static string GetCurrentRenderingDriverName()` - The graphics API name in Godot's spelling ("vulkan", "d3d12" or "metal"); Aver picks by platform.
+- `public static void DirectionalSoftShadowFilterSetQuality(ShadowQuality quality)` - Kept as set.
+- `public static void PositionalSoftShadowFilterSetQuality(ShadowQuality quality)` - Kept as set.
 - `public static void GlobalShaderParameterAdd(StringName name, GlobalShaderParameterType type, Variant defaultValue)`
 - `public static void GlobalShaderParameterRemove(StringName name)`
 - `public static void GlobalShaderParameterSet(StringName name, Variant value)` - Sets a global shader parameter and rewrites it in every live ShaderMaterial that declares it.
@@ -6273,6 +6357,12 @@ Values: `Ellipsoid = 0`, `Cone = 1`, `Cylinder = 2`, `Box = 3`, `World = 4`
 `public enum GlobalShaderParameterType` - Godot's RenderingServer.GlobalShaderParameterType (the numbering of GLOBAL_VAR_TYPE_*).
 
 Values: `Bool = 0`, `Bvec2 = 1`, `Bvec3 = 2`, `Bvec4 = 3`, `Int = 4`, `Ivec2 = 5`, `Ivec3 = 6`, `Ivec4 = 7`, `Rect2I = 8`, `Uint = 9`, `Uvec2 = 10`, `Uvec3 = 11`, `Uvec4 = 12`, `Float = 13`, `Vec2 = 14`, `Vec3 = 15`, `Vec4 = 16`, `Color = 17`, `Rect2 = 18`, `Mat2 = 19`, `Mat3 = 20`, `Mat4 = 21`, `Transform2D = 22`, `Transform = 23`, `Sampler2D = 24`, `Sampler2DArray = 25`, `Sampler3D = 26`, `SamplerCube = 27`, `SamplerExternal = 28`, `Max = 29`
+
+### RenderingServer.ShadowQuality
+
+`public enum ShadowQuality` - Godot's RenderingServer.ShadowQuality (SHADOW_QUALITY_*).
+
+Values: `Hard = 0`, `SoftVeryLow = 1`, `SoftLow = 2`, `SoftMedium = 3`, `SoftHigh = 4`, `SoftUltra = 5`, `Max = 6`
 
 ### Resource
 

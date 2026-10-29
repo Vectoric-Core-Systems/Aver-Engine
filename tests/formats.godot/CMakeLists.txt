@@ -13,6 +13,12 @@ target_link_libraries(GodotMeshTest PRIVATE Aver.Formats.Godot Aver.Platform Ave
 set_target_properties(GodotMeshTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# GodotBinaryTest -- Godot 4 binary resources (RSRC / RSCC) and the Zstandard decoder behind them: hand-built fixtures, a hostile-input sweep. Pure data: no device.
+add_executable(GodotBinaryTest src/GodotBinaryTest.cpp)
+target_link_libraries(GodotBinaryTest PRIVATE Aver.Formats.Godot Aver.Platform Aver.Core)
+set_target_properties(GodotBinaryTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # GodotShaderTest -- G6 SH1: the Godot shading-language front-end (preprocessor, parser + type checker, HLSL emitter). The HLSL it emits is compiled by the
 # engine's DXC to DXIL (dxcompiler.dll beside the test) and to SPIR-V (third_party/dxc-spirv); no device, no window. Aver.RHI is linked for dxcapi.h only.
 # The DXC halves skip (and say so) when a compiler DLL is missing.

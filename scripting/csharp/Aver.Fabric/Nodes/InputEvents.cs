@@ -221,6 +221,42 @@ public class InputEventMouseMotion : InputEventMouse
     public override string AsText() => $"Mouse motion relative ({Relative.X}, {Relative.Y})";
 }
 
+/// <summary>A finger touching or leaving the screen (Godot's InputEventScreenTouch). Aver's input chain has no touch source, so these arrive only from
+/// <see cref="Input.ParseInputEvent"/>; a script written for a touch screen compiles and runs, and receives nothing from a desktop.</summary>
+public class InputEventScreenTouch : InputEvent
+{
+    /// <summary>Which finger (0 for the first).</summary>
+    public int Index { get; set; }
+    public Vector2 Position { get; set; }
+    public bool Pressed { get; set; }
+    public bool Canceled { get; set; }
+    public bool DoubleTap { get; set; }
+
+    public override bool IsPressed() => Pressed;
+    public override bool IsReleased() => !Pressed;
+    public override bool IsActionType() => true;
+
+    public override string AsText() => $"Screen {(Pressed ? "touched" : "released")} at ({Position.X}, {Position.Y}) index {Index}";
+}
+
+/// <summary>A finger moving on the screen (Godot's InputEventScreenDrag).</summary>
+public class InputEventScreenDrag : InputEvent
+{
+    public int Index { get; set; }
+    public Vector2 Position { get; set; }
+    /// <summary>The movement since the last drag event, in viewport pixels.</summary>
+    public Vector2 Relative { get; set; }
+    public Vector2 ScreenRelative { get; set; }
+    /// <summary>Pixels per second.</summary>
+    public Vector2 Velocity { get; set; }
+    public Vector2 ScreenVelocity { get; set; }
+    public float Pressure { get; set; }
+    public Vector2 Tilt { get; set; }
+    public bool PenInverted { get; set; }
+
+    public override string AsText() => $"Screen dragged index {Index} at ({Position.X}, {Position.Y}) relative ({Relative.X}, {Relative.Y})";
+}
+
 /// <summary>A gamepad button going down or up (Godot's InputEventJoypadButton).</summary>
 public class InputEventJoypadButton : InputEvent
 {

@@ -93,9 +93,9 @@ internal sealed partial class GdEmitter
 
         // The base class from Aver.Fabric: properties, fields, methods, signals of Node3D and so on.
         Rs.INamedTypeSymbol? root = _script.ApiRoot;
-        ApiMember? api = Api?.Lookup(root, name);
+        ApiMember? api = IsApiTypeName(name) ? null : Api?.Lookup(root, name);
         if (api != null && api.Kind != MemberKind.NestedType) return ApiValue(api, "", root, expected);
-        if (Api != null && root != null && Api.IsSignal(root, name, out string sig))
+        if (Api != null && root != null && !IsApiTypeName(name) && Api.IsSignal(root, name, out string sig))
             return new Ex("new Signal(this, " + root.Name + ".SignalName." + sig + ")", GdType.Signal)
             {
                 Signal = new SignalRef { Owner = "", NameCode = root.Name + ".SignalName." + sig, OwnerType = GdType.OfScript(_script) }, UsesInstance = true,
@@ -129,6 +129,11 @@ internal sealed partial class GdEmitter
         return new Ex($"Get({q})", GdType.Variant) { SetTemplate = $"Set({q}, \u0001)", UsesInstance = true };
     }
 
+    // GDScript is case sensitive: Basis is the type and basis the property, but the case-blind member match would take Basis for the Node3D property
+    // (and Mesh for MeshInstance3D.Mesh) and the constructor call would become a call by name. A PascalCase name that is a type of the API is the type.
+    private bool IsApiTypeName(string name) =>
+        Api != null && name.Length > 1 && char.IsUpper(name[0]) && name.Any(char.IsLower) && Api.Fabric(name) != null;
+
     private Ex AutoloadEx(AutoloadInfo a)
     {
         ScriptInfo? s = _m.ByPath.GetValueOrDefault(a.Path);
@@ -153,7 +158,11 @@ internal sealed partial class GdEmitter
                 if (!mi.IsStatic && receiver == null) _ctx.UsedInstance = true;
                 var vdecl = (VarDecl)mi.Decl;
                 bool prov = vdecl.Type == null && !vdecl.Inferred && vdecl.Init != null && !t.IsVariant;
-                return new Ex(code, t) { Addressable = !mi.HasAccessors || backing, UsesInstance = !mi.IsStatic && receiver == null, Provisional = prov ? vdecl : null };
+                return new Ex(code, t)
+                {
+                    Addressable = !mi.HasAccessors || backing, UsesInstance = !mi.IsStatic && receiver == null, Provisional = prov ? vdecl : null,
+                    SceneRes = t.Kind == GK.Object && t.Sym?.Name == "PackedScene" ? PackedSceneOf(mi) : null,
+                };
             }
             case MK.Const:
             {
@@ -166,7 +175,7 @@ internal sealed partial class GdEmitter
                 if (mi.AliasScript != null) return TypeRef(GdType.OfScript(mi.AliasScript), QualifiedScript(mi.AliasScript));
                 GdType t = ConstType(mi);
                 string code = receiver != null ? receiver + "." + mi.CsName : (ScriptVisibleByName(mi.Owner) ? mi.CsName : mi.Owner.CsPath + "." + mi.CsName);
-                var ex = new Ex(code, t) { IsConstExpr = IsCsConst(mi), Const = ConstLiteralValue(mi), FromName = true };
+                var ex = new Ex(code, t) { IsConstExpr = IsCsConst(mi), Const = ConstLiteralValue(mi), FromName = true, SceneRes = SceneOfConst(mi) };
                 return ex;
             }
             case MK.Enum:
@@ -242,11 +251,16 @@ internal sealed partial class GdEmitter
             case MemberKind.Property:
             case MemberKind.Field:
             case MemberKind.Constant:
-                return new Ex(prefix + api.CsName, api.Type)
+            {
+                var value = new Ex(prefix + api.CsName, api.Type)
                 {
                     Addressable = api.Kind == MemberKind.Field && api.CanWrite, UsesInstance = !api.IsStatic && receiver.Length == 0,
                     IsConstExpr = api.Kind == MemberKind.Constant, Api = api,
                 };
+                // A GDScript int is a long and C# has no implicit ulong to long.
+                if (!api.CanWrite && (api.Symbol as Rs.IPropertySymbol)?.Type.SpecialType == Rs.SpecialType.System_UInt64) { value.Code = "(long)" + value.Code; value.Prec = P.Unary; }
+                return value;
+            }
             case MemberKind.Method:
             {
                 // A method used as a value: a Callable of it.
@@ -341,7 +355,7 @@ internal sealed partial class GdEmitter
                     { Signal = new SignalRef { Owner = tcode, NameCode = sym.ToDisplayString(s_nameFormat) + ".SignalName." + sig, OwnerType = tt } };
                 // A Godot snake_case accessor the C# API names as a property is handled by the call path; a plain miss on an
                 // untyped (weak) receiver is a dynamic property read.
-                if (tt.Weak || sym == null || sym.Name is "Node" or "GodotObject") return DynamicMember(target, name, at);
+                if (tt.Weak || tt.FromScene || sym == null || sym.Name is "Node" or "GodotObject") return DynamicMember(target, name, at);
                 Note(at, "member", name, Rating.Unsupported, $"Aver.Fabric has no member '{name}' on {tt.Cs}");
                 return new Ex(tcode + "." + Naming.Pascal(name), GdType.Variant);
             }
@@ -441,8 +455,8 @@ internal sealed partial class GdEmitter
             }
             case GK.String:
                 return new Ex($"{tc}[{Adapt(i, GdType.Int32)}].ToString()", GdType.String);
-            case GK.Struct:
-                return new Ex($"{tc}[{Adapt(i, GdType.Int32)}]", GdType.Float32) { Addressable = false };
+            case GK.Struct when Api?.IndexerType(t.Type.Sym) is { } element:
+                return new Ex($"{tc}[{Adapt(i, GdType.Int32)}]", element) { Addressable = false };
             case GK.Variant:
             default:
                 return new Ex($"GDScript.Index({VariantFromTyped(t)}, {VariantFromTyped(i)})", GdType.Variant)
@@ -458,6 +472,9 @@ internal sealed partial class GdEmitter
         string path = Naming.Quote(g.Path);
         if (expected != null && expected.IsGodotObject && expected.Kind != GK.Null && !expected.Weak && !(expected.Sym?.Name == "GodotObject"))
             return new Ex($"GetNode<{expected.Cs}>({path})", expected.WithWeak(false)) { UsesInstance = true };
+        // No type was asked for: the scenes this script is attached to say what is there.
+        if (ScriptIsNode() && SceneNodeEx(g.Path, false, SelfPlaces(), "") is { } typed) return typed;
+        if (CastPathEx(g.Path, false) is { } cast) return cast;
         return new Ex($"GetNode({path})", Obj("Node").WithWeak(true)) { UsesInstance = true };
     }
 
@@ -524,7 +541,7 @@ internal sealed partial class GdEmitter
             if (path.EndsWith(".gd", StringComparison.Ordinal) && _m.ByPath.TryGetValue(path, out ScriptInfo? s))
                 return TypeRef(GdType.OfScript(s), QualifiedScript(s));
             GdType t = Obj(ResourceClassFor(path));
-            return new Ex($"GD.Preload<{t.Cs}>({Naming.Quote(path)})", t);
+            return new Ex($"GD.Preload<{t.Cs}>({Naming.Quote(path)})", t) { SceneRes = path.EndsWith(".tscn", StringComparison.Ordinal) ? path : null };
         }
         Ex pe = Expr(p.Path, GdType.String);
         return new Ex($"GD.Preload<Resource>({Adapt(pe, GdType.String)})", Obj("Resource"));

@@ -1,5 +1,6 @@
 #include "aver/formats/godot/GodotProjectFs.hpp"
 
+#include "aver/formats/godot/GodotBinary.hpp"
 #include "aver/platform/FileSystem.hpp"
 
 #include <algorithm>
@@ -31,6 +32,39 @@ std::string trimLine(std::string_view s) {
     while (b < e && (s[b] == ' ' || s[b] == '\t' || s[b] == '\r' || s[b] == '\n')) ++b;
     while (e > b && (s[e - 1] == ' ' || s[e - 1] == '\t' || s[e - 1] == '\r' || s[e - 1] == '\n')) --e;
     return std::string(s.substr(b, e - b));
+}
+
+// The uid of a binary resource, read from the first bytes of the file (the whole file only when a compressed one needs more). Empty when it has
+// none; *why is set when the header cannot be read.
+std::string binaryUid(const std::string& full, std::string& why) {
+    aver::File f;
+    if (!f.open(full, aver::File::Mode::Read)) {
+        why = "cannot open the file";
+        return {};
+    }
+    const i64 size = f.size();
+    if (size <= 0) {
+        why = "the file is empty";
+        return {};
+    }
+    std::vector<u8> head(static_cast<usize>(std::min<i64>(size, 65536)));
+    if (!f.readAt(0, head.data(), head.size())) {
+        why = "cannot read the file";
+        return {};
+    }
+    GodotBinaryHeader h;
+    bool more = false;
+    if (!readGodotBinaryHeader(head.data(), head.size(), static_cast<i64>(head.size()) == size, h, &why, &more)) {
+        if (!more) return {};
+        std::vector<u8> all;
+        if (!aver::readFileBytes(full, all)) {
+            why = "cannot read the file";
+            return {};
+        }
+        why.clear();
+        if (!readGodotBinaryHeader(all.data(), all.size(), true, h, &why)) return {};
+    }
+    return h.uid;
 }
 
 bool prefixEqual(const std::string& s, const std::string& prefix) {
@@ -221,6 +255,10 @@ bool GodotProjectFs::scan(GodotDiagnostics& diag) {
             if (isUid(uid)) found.push_back({uid, res});
         } else if (endsWith(rel, ".scn") || endsWith(rel, ".res")) {
             binary_.push_back(res);
+            std::string why;
+            const std::string uid = binaryUid(full, why);
+            if (!why.empty()) diag.warn(res, 0, "binary Godot resource that could not be read: " + why, "godot.binary_resource");
+            if (isUid(uid)) found.push_back({uid, res});
         }
     }
     if (ec) diag.warn(root_, 0, "the folder walk stopped early: " + ec.message(), "godot.scan");
@@ -233,8 +271,6 @@ bool GodotProjectFs::scan(GodotDiagnostics& diag) {
         if (!uids_.add(f.uid, f.res))
             diag.warn(f.res, 0, "uid " + f.uid + " is also used by " + *uids_.find(f.uid) + "; the first one wins", "godot.uid_duplicate");
     }
-    for (const std::string& b : binary_)
-        diag.warn(b, 0, "binary Godot resource; resave as text", "godot.binary_resource");
     return true;
 }
 
@@ -251,17 +287,37 @@ bool GodotProjectFs::readText(std::string_view ref, std::string& out, GodotDiagn
     return readGodotTextFile(disk, out, diag, display);
 }
 
+bool GodotProjectFs::readBytes(std::string_view ref, std::vector<u8>& out, std::string& res, GodotDiagnostics& diag) const {
+    const std::string disk = toDiskPath(ref);
+    if (disk.empty()) {
+        diag.error(ref, 0, "cannot resolve this reference inside the project", "godot.unresolved");
+        return false;
+    }
+    res = isUid(ref) ? *uids_.find(ref) : normalizeRes(ref);
+    if (!aver::readFileBytes(disk, out)) {
+        diag.error(res, 0, "cannot read the file", "godot.unreadable");
+        return false;
+    }
+    return true;
+}
+
 bool GodotProjectFs::loadScene(std::string_view ref, GodotScene& out, GodotDiagnostics& diag) const {
+    std::vector<u8> bytes;
+    std::string res;
+    if (!readBytes(ref, bytes, res, diag)) return false;
+    if (detectGodotFileKind(bytes.data(), bytes.size()) == GodotFileKind::BinaryResource) return parseGodotBinaryScene(bytes.data(), bytes.size(), res, out, diag);
     std::string text;
-    if (!readText(ref, text, diag)) return false;
-    const std::string res = isUid(ref) ? *uids_.find(ref) : normalizeRes(ref);
+    if (!godotTextFromBytes(bytes, res, text, diag)) return false;
     return parseGodotScene(text, res, out, diag);
 }
 
 bool GodotProjectFs::loadResource(std::string_view ref, GodotResource& out, GodotDiagnostics& diag) const {
+    std::vector<u8> bytes;
+    std::string res;
+    if (!readBytes(ref, bytes, res, diag)) return false;
+    if (detectGodotFileKind(bytes.data(), bytes.size()) == GodotFileKind::BinaryResource) return parseGodotBinaryResource(bytes.data(), bytes.size(), res, out, diag);
     std::string text;
-    if (!readText(ref, text, diag)) return false;
-    const std::string res = isUid(ref) ? *uids_.find(ref) : normalizeRes(ref);
+    if (!godotTextFromBytes(bytes, res, text, diag)) return false;
     return parseGodotResource(text, res, out, diag);
 }
 
