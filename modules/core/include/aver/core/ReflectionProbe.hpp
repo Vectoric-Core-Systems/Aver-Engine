@@ -225,8 +225,9 @@ inline u32 cubeFace(const Vec3& d, f32& s, f32& t) {
     else if (ay >= az)        { face = d.y >= 0 ? 2u : 3u; ma = ay; sc = d.y >= 0 ? d.x : -d.x; tc = -d.z; }
     else                      { face = d.z >= 0 ? 4u : 5u; ma = az; sc = d.y; tc = d.z >= 0 ? d.x : -d.x; }
     const f32 inv = ma > 0.0f ? 0.5f / ma : 0.0f;
-    s = sc * inv + 0.5f;
-    t = tc * inv + 0.5f;
+    // Clamped: on an edge a fused multiply-add (arm64 Clang) lands a hair outside the face.
+    s = std::clamp(sc * inv + 0.5f, 0.0f, 1.0f);
+    t = std::clamp(tc * inv + 0.5f, 0.0f, 1.0f);
     return face;
 }
 
