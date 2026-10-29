@@ -30,7 +30,7 @@ static bool has(const std::string& s, const std::string& needle) { return s.find
 static std::string slurp(const char* path) {
     std::string s;
     readFileText(path, s);
-    s.erase(std::remove(s.begin(), s.end(), ''), s.end());   // the shader files may be checked out with CRLF
+    s.erase(std::remove(s.begin(), s.end(), '\r'), s.end());   // the shader files may be checked out with CRLF
     return s;
 }
 
