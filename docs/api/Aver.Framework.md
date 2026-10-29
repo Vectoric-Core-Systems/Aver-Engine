@@ -2,7 +2,7 @@
 
 # Aver.Framework public API
 
-236 public types and 1989 public members, read from `scripting/csharp/Aver.Framework/` (141 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+240 public types and 2036 public members, read from `scripting/csharp/Aver.Framework/` (144 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Framework
 
@@ -276,10 +276,22 @@ Values: `None = 0`, `Started = 1`, `Ongoing = 2`, `Triggered = 4`, `Completed = 
 
 `public static class Audio` - The mixer as a script sees it: load a sound, play it, steer it, place the listener.
 
+- `public const int ZoneReverbSlots = 4` - How many zone send reverbs the mixer pre-allocates.
+- `public static bool SetZoneReverb(int slot, float wet, float decaySeconds = 1.5f, float damping = 0.4f, Sound impulse = default, float predelayMs = 0f)` - Sets zone send reverb slot: wet is its return level (0 turns the slot off), decay the RT60 in seconds.
 - `public static bool Ready { get; }` - True when a device is open and the mixer thread is running.
 - `public static int SampleRate { get; }` - The device's sample rate in Hz, or 0 before audio has started.
-- `public static int Channels { get; }` - The mixer's channel count (1 or 2), or 0 before audio has started.
+- `public static int Channels { get; }` - The mixer's channel count (1, 2, 6 or 8), or 0 before audio has started.
+- `public static SpeakerLayout Speakers { get; set; }` - The layout the project asks for.
+- `public static StereoUpmix Upmix { get; set; }` - How a stereo source and the reverb return are spread over 5.1 / 7.1.
+- `public static float LfeSend { get; set; }` - How much of every voice goes to the LFE channel of a 5.1 / 7.1 mix, 0..1.
+- `public static bool Binaural { get; set; }` - Headphone mode: positional sounds on a stereo mix are placed with an analytic head model (interaural delay, head shadow, a pinna cue; no measured data) instead of the plain pan.
 - `public static int Underruns { get; }` - Buffers the device asked for and did not get in time.
+- `public static AudioDeviceState DeviceState { get; }` - Where the output device stands.
+- `public static string DeviceName { get; }` - The output device's friendly name; the last one that was open while there is none.
+- `public static int DeviceChannels { get; }` - The device's hardware channel count (Channels is what the mixer renders: 1, 2, 6 or 8).
+- `public static int DeviceBufferFrames { get; }` - The device buffer (period) granted, in frames.
+- `public static float DeviceLatencyMs { get; }` - Output latency in milliseconds: the backend's own figure when it has one, else the buffer length.
+- `public static int DeviceChanges { get; }` - Devices opened after the first: default changes, unplugs and returns.
 - `public static int ActiveVoices { get; }` - How many voices are sounding right now.
 - `public static int StolenVoices { get; }` - How many voices have been cut short to make room for a newer one.
 - `public static void Collect()` - Reclaims unloaded sounds whose last voice has ended.
@@ -293,12 +305,23 @@ Values: `None = 0`, `Started = 1`, `Ongoing = 2`, `Triggered = 4`, `Completed = 
 - `public static float MasterVolume { get; set; }` - The master volume, 0..1, applied over every bus.
 - `public static float GetBusVolume(Bus bus)` - Reads one bus's volume, 0..1.
 - `public static void SetBusVolume(Bus bus, float volume)` - Sets one bus's volume, 0..1 — how a game gives the player separate SFX and music sliders.
+- `public static SoundGraph LoadGraph(string path)` - Loads and compiles a .ocsnd for real-time play.
+- `public static Voice PlayGraph(SoundGraph graph, float volume = 1f, bool looping = false, Bus bus = Bus.Sfx, uint seed = 0)` - Plays a sound graph flat in both ears, evaluated on the audio thread.
+- `public static Voice PlayGraph(SoundGraph graph, float volume, bool looping, Bus bus, uint seed, ReadOnlySpan<(string Name, float Value)> inputs)` - As PlayGraph(SoundGraph, float, bool, Bus, uint), with live inputs set before the first block, so a voice that starts at rpm 3000 does not ramp up from the default.
+- `public static Voice PlayGraphAt(SoundGraph graph, Vec3 position, float volume = 1f, bool looping = false, Bus bus = Bus.Sfx, float innerCm = 100f, float outerCm = 2000f, uint seed = 0)` - Plays a sound graph at a world position, panned and attenuated against the listener (centimetres).
+- `public static Voice PlayGraphAt(SoundGraph graph, Vec3 position, float volume, bool looping, Bus bus, float innerCm, float outerCm, uint seed, ReadOnlySpan<(string Name, float Value)> inputs)` - As the other PlayGraphAt, with live inputs set before the first block.
 - `public static Voice PlayStream(string path, float volume = 1f, float pitch = 1f, bool looping = false, Bus bus = Bus.Sfx, float fadeInSeconds = 0f)` - Streams a file from disk, flat in both ears: long ambience, dialogue, music.
 - `public static Voice PlayStreamAt(string path, Vec3 position, float volume = 1f, float pitch = 1f, bool looping = false, Bus bus = Bus.Sfx, float innerCm = 100f, float outerCm = 2000f, float fadeInSeconds = 0f)` - Streams a file as a positioned voice.
 - `public static void SetReverb(float wet, float decaySeconds = 1.5f, float damping = 0.4f)` - The listener-side reverb.
 - `public static void SetOcclusionCurve(float minCutoffHz, float minVolume)` - The low-pass cutoff and linear volume a fully occluded voice reaches.
 - `public static int StreamUnderruns { get; }` - Blocks in which a stream ran out of decoded audio.
 - `public static int ActiveStreams { get; }` - Streams currently held by a playing voice.
+
+### AudioDeviceState
+
+`public enum AudioDeviceState` - Where the output device stands, mirroring AVER_AUDIO_DEVICE_* in audio_abi.h and aver::audio::OutputState.
+
+Values: `Stopped = 0`, `Running = 1`, `None = 2`
 
 ### AverAbilityAttribute
 
@@ -1132,6 +1155,9 @@ Values: `Destroy = 0`, `Stop = 1`, `Reload = 2`, `Travel = 3`
 - `public bool TryGetAnimationCurve(string curve, out float value)` - As GetAnimationCurve, but says whether the curve was there at all.
 - `public bool DetachFromSocket()` - Stops riding a socket.
 - `public long AttachedSocketId { get; }` - The socket this entity is riding, as the fnv1a64 the component stores, or 0.
+- `public bool SetReverbZoneImpulse(Sound impulse, float predelayMs = 0f)` - Gives this reverb zone a convolution reverb: while the zone has a send reverb slot it convolves with the loaded impulse instead of the algorithmic reverb.
+- `public bool SetAudioZoneSends(bool enabled = true, float reverbSendBase = 1f)` - Makes the voice of this entity's occlusion emitter (SetAudioOcclusion) send to the reverb zone(s) it is inside, through the mixer's send reverbs, instead of only hearing the listener's.
+- `public bool SetAudioDiffraction(bool enabled = true, int directions = 8, int maxRays = 256, float maxOffsetCm = 3200f, float maxOcclusion = 0.85f)` - Turns diffraction on for this entity's occlusion emitter: when the direct path is blocked the probe looks for the shortest path around an edge or through an opening and uses its gain and low-pass instead of the fully occluded value.
 - `public bool SetReverbZone(Vec3 halfExtentsCm, float blendDistanceCm = 200f, float wet = 0.35f, float decaySeconds = 1.8f, float damping = 0.4f, int priority = 0, int shape = 0)` - Makes this entity a reverb volume.
 - `public bool SetAudioOcclusion(Voice voice, int rayCount = 5, float probeRadiusCm = 50f)` - Drives voice's occlusion from line-of-sight rays between the listener and this entity, and moves the voice with the entity.
 - `public Blackboard Blackboard { get; }` - This entity's AI blackboard (see Blackboard).
@@ -2541,6 +2567,31 @@ Values: `ClothLight = 0`, `ClothHeavy = 1`, `Metal = 2`, `Wood = 3`, `Glass = 4`
 - `public override int GetHashCode()` - The handle itself.
 - `public override string ToString()` - Diagnostic text.
 
+### SoundGraph
+
+`public readonly struct SoundGraph : IEquatable<SoundGraph>` - A loaded, compiled .ocsnd that can be played as a real-time voice.
+
+- `public readonly int Handle` - The raw handle.
+- `public SoundGraph(int handle)` - Wraps a raw handle.
+- `public static SoundGraph None { get; }` - The absence of a graph, and what a failed load gives back.
+- `public bool IsValid { get; }` - True when this refers to a loaded graph.
+- `public double Duration { get; }` - The authored length in seconds: how long a non-looping play lasts.
+- `public int ParamCount { get; }` - How many named live inputs (Parameter nodes) the graph has.
+- `public string ParamName(int id)` - The name of live input id, or an empty string.
+- `public int FindParam(string name)` - The id of a named live input, or -1.
+- `public float ParamDefault(int id)` - The value live input id was authored with.
+- `public void Unload()` - Forgets the graph.
+- `public bool Equals(SoundGraph other)` - Handle equality.
+- `public override bool Equals(object? o)` - Handle equality.
+- `public override int GetHashCode()` - The handle itself.
+- `public override string ToString()` - Diagnostic text.
+
+### SpeakerLayout
+
+`public enum SpeakerLayout` - The output channel layouts a project can ask for, mirroring AVER_AUDIO_SPEAKERS_* in audio_abi.h.
+
+Values: `Stereo = 2`, `Surround51 = 6`, `Surround71 = 8`
+
 ### Speech
 
 `public static class Speech` - The game talking through the OS voice (SAPI on Windows): narrated menus, captions and script announcements.
@@ -2566,6 +2617,12 @@ Values: `ClearAll`, `RemoveOne`
 `public enum StackScope` - How repeated applications of one effect combine.
 
 Values: `None`, `Target`, `Source`
+
+### StereoUpmix
+
+`public enum StereoUpmix` - How a stereo source is placed on a 5.1 or 7.1 mix, mirroring AVER_AUDIO_UPMIX_* in audio_abi.h.
+
+Values: `Front = 0`, `Wrap = 1`
 
 ### SubViewClear
 
@@ -2771,6 +2828,7 @@ Values: `Car = 0`, `Van = 1`, `Truck = 2`, `Bus = 3`, `Sports = 4`, `Tank = 5`
 
 `public readonly struct Voice : IEquatable<Voice>` - One playing instance of a Sound.
 
+- `public void SetZoneSend(int slot, float send)` - How much of this voice feeds zone send reverb slot (0 to ZoneReverbSlots - 1), 0 to 1.
 - `public readonly int Handle` - The raw handle.
 - `public Voice(int handle)` - Wraps a raw handle.
 - `public static Voice None { get; }` - The absence of a voice, and what a refused play gives back.
@@ -2784,6 +2842,10 @@ Values: `Car = 0`, `Van = 1`, `Truck = 2`, `Bus = 3`, `Sports = 4`, `Tank = 5`
 - `public override bool Equals(object? o)` - Handle equality.
 - `public override int GetHashCode()` - The handle itself.
 - `public override string ToString()` - Diagnostic text.
+- `public bool IsGraphVoice { get; }` - True when this is a live sound-graph voice (one from PlayGraph(SoundGraph, float, bool, Bus, uint)) that has not ended.
+- `public bool SetGraphParam(string name, float value)` - Sets a sound graph's named live input (rpm, intensity, surface).
+- `public bool SetGraphParam(int id, float value)` - Sets a live input by id (FindParam), which skips the name lookup in a per-frame loop.
+- `public void GraphNoteOff()` - The note-off: ADSR nodes release from their current level and the voice ends once the longest release has played (a graph with no ADSR fades over 10 ms).
 - `public void FadeTo(float gain, float seconds, FadeCurve curve = FadeCurve.EqualPower, bool stopWhenDone = false)` - Ramps this voice's fade gain (on top of Volume) to gain.
 - `public void FadeOut(float seconds, FadeCurve curve = FadeCurve.EqualPower)` - Fades to silence over seconds and ends the voice.
 - `public float Occlusion { set; }` - 0 clear to 1 fully blocked: the mixer low-passes and ducks the voice.

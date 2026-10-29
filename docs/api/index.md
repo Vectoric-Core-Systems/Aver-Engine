@@ -6,7 +6,7 @@ Generated from source by `scripts/csharp-api-index.py`. Hand-written guides: `do
 
 | Assembly | Public types | Public members |
 |---|---|---|
-| [Aver.Framework](Aver.Framework.md) | 236 | 1989 |
+| [Aver.Framework](Aver.Framework.md) | 240 | 2036 |
 | [Aver.Scene](Aver.Scene.md) | 10 | 116 |
 | [Aver.Physics](Aver.Physics.md) | 126 | 1234 |
 | [Aver.UI](Aver.UI.md) | 23 | 193 |
@@ -15,4 +15,4 @@ Generated from source by `scripts/csharp-api-index.py`. Hand-written guides: `do
 | [Aver.Prefab](Aver.Prefab.md) | 4 | 28 |
 | [Aver.Scripting](Aver.Scripting.md) | 14 | 126 |
 | [Aver.Pcg.Apply](Aver.Pcg.Apply.md) | 2 | 8 |
-| [Aver.Fabric](Aver.Fabric.md) | 656 | 6973 |
+| [Aver.Fabric](Aver.Fabric.md) | 657 | 6978 |

@@ -100,6 +100,7 @@ int main(int argc, char** argv) {
         check(fmt::isImportableAudio("a/b/c.wav"), ".wav is importable");
         check(fmt::isImportableAudio("SHOUT.MP3"), "and the check is case-insensitive");
         check(fmt::isImportableAudio("x.flac") && fmt::isImportableAudio("x.m4a"), "flac and m4a too");
+        check(fmt::isImportableAudio("x.ogg") && fmt::isImportableAudio("x.OGA"), "and Ogg Vorbis");
         check(!fmt::isImportableAudio("x.png"), "a texture is not");
         check(!fmt::isImportableAudio("noextension"), "and neither is a file with no extension");
 
@@ -156,7 +157,8 @@ int main(int argc, char** argv) {
             const fmt::AudioImportResult r = fmt::audioImportFile(compressed, d);
             check(r.ok, "a compressed file imports (" + compressed + ")");
             if (r.ok) {
-                check(r.decoder == "media foundation", "through the platform decoder");
+                const bool vendored = r.decoder == "vorbis" || r.decoder == "flac" || r.decoder == "mp3";
+                check(vendored || r.decoder == "media foundation", "through a vendored decoder (ogg/flac/mp3) or the platform one (m4a/wma)");
                 check(d.frames() > 0 && d.channels >= 1, "and yields real audio");
                 check(d.samples.size() % d.channels == 0, "with no trailing partial frame");
             }

@@ -630,6 +630,10 @@ static const Abi kAbis[] = {
     {"audio ABI",
      {"modules/audio.abi/include/aver/audio/audio_abi.h", nullptr},
      "AVER_AUDIO_API", "scripting/csharp/Aver.Framework/Audio.cs", "aver_audio_"},
+    // Real-time sound graphs (.ocsnd on the audio thread), against Aver.Framework/AudioSoundGraph.cs.
+    {"audio sound graph ABI",
+     {"modules/audio.abi/include/aver/audio/audio_abi.h", nullptr},
+     "AVER_AUDIO_API", "scripting/csharp/Aver.Framework/AudioSoundGraph.cs", "aver_audio_soundgraph_"},
     // G5 S1: the bus graph, effects and Godot-style players, names and types against Aver.Fabric/Nodes/AudioNative.cs.
     {"audio ABI (Aver.Fabric)",
      {"modules/audio.abi/include/aver/audio/audio_abi.h", nullptr},
@@ -907,6 +911,14 @@ static const Group kGroups[] = {
     // has that copy now, so this row is what pins the third corner of the triangle.
     {"audio buses",           "modules/audio.abi/include/aver/audio/audio_abi.h",           "AVER_AUDIO_BUS_",
      "scripting/csharp/Aver.Framework/Audio.cs", "Bus",         ""},
+    // The output device states (device robustness): audio_abi.h against Audio.cs; AudioAbi.cpp static_asserts the header against aver::audio::OutputState.
+    {"audio device states",   "modules/audio.abi/include/aver/audio/audio_abi.h",           "AVER_AUDIO_DEVICE_",
+     "scripting/csharp/Aver.Framework/Audio.cs", "AudioDeviceState", ""},
+    // Surround output and the stereo upmix (docs/AUDIO.md section 14): audio_abi.h against Audio.cs; AudioAbi.cpp static_asserts the upmix against aver::audio::StereoUpmix.
+    {"audio speaker layouts", "modules/audio.abi/include/aver/audio/audio_abi.h",           "AVER_AUDIO_SPEAKERS_",
+     "scripting/csharp/Aver.Framework/Audio.cs", "SpeakerLayout", ""},
+    {"audio stereo upmix",    "modules/audio.abi/include/aver/audio/audio_abi.h",           "AVER_AUDIO_UPMIX_",
+     "scripting/csharp/Aver.Framework/Audio.cs", "StereoUpmix", ""},
     // wave 3: what kind of water a Water.Sample answered with (framework_terrain_abi.h).
     {"water kinds",           "modules/framework/include/aver/framework/framework_terrain_abi.h", "AVER_FW_WATER_KIND_",
      "scripting/csharp/Aver.Framework/Water.cs", "WaterKind",   ""},

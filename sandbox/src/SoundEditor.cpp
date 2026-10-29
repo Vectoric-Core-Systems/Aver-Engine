@@ -115,8 +115,27 @@ const char* snKindName(fmt::OcSoundNodeKind kind) {
         case fmt::OcSoundNodeKind::Adsr:     return "ADSR";
         case fmt::OcSoundNodeKind::Mix:      return "Mix";
         case fmt::OcSoundNodeKind::Multiply: return "Multiply";
+        case fmt::OcSoundNodeKind::Parameter: return "Parameter (live input)";
+        case fmt::OcSoundNodeKind::Lfo:       return "LFO";
+        case fmt::OcSoundNodeKind::HighPass:  return "High pass";
+        case fmt::OcSoundNodeKind::BandPass:  return "Band pass";
+        case fmt::OcSoundNodeKind::Random:    return "Random";
+        case fmt::OcSoundNodeKind::Crossfade: return "Crossfade";
+        case fmt::OcSoundNodeKind::WavePlayer: return "Wave player";
+        case fmt::OcSoundNodeKind::Delay:     return "Delay";
+        case fmt::OcSoundNodeKind::Clamp:     return "Clamp";
+        case fmt::OcSoundNodeKind::MapRange:  return "Map range";
+        case fmt::OcSoundNodeKind::EnvelopeFollower: return "Envelope follower";
     }
     return "?";
+}
+
+const char* snNameLabel(fmt::OcSoundNodeKind kind) {
+    switch (kind) {
+        case fmt::OcSoundNodeKind::Parameter:  return "Input name";
+        case fmt::OcSoundNodeKind::WavePlayer: return "Sound asset";
+        default: return nullptr;
+    }
 }
 
 const char* snParamLabel(fmt::OcSoundNodeKind kind, u32 slot) {
@@ -124,6 +143,58 @@ const char* snParamLabel(fmt::OcSoundNodeKind kind, u32 slot) {
         case fmt::OcSoundNodeKind::Sine:
         case fmt::OcSoundNodeKind::Saw:
             return slot == 0 ? "Frequency (Hz)" : nullptr;
+        case fmt::OcSoundNodeKind::Parameter:
+            if (slot == 0) return "Default";
+            if (slot == 1) return "Smoothing (s, 0 = 0.02)";
+            if (slot == 2) return "Min";
+            if (slot == 3) return "Max (clamps when above Min)";
+            return nullptr;
+        case fmt::OcSoundNodeKind::Lfo:
+            if (slot == 0) return "Rate (Hz)";
+            if (slot == 1) return "Depth";
+            if (slot == 2) return "Shape (0 sine, 1 tri, 2 square, 3 saw)";
+            if (slot == 3) return "Offset";
+            return nullptr;
+        case fmt::OcSoundNodeKind::HighPass:
+        case fmt::OcSoundNodeKind::BandPass:
+            if (slot == 0) return "Cutoff (Hz)";
+            if (slot == 1) return "Q (0 = 0.707)";
+            return nullptr;
+        case fmt::OcSoundNodeKind::Random:
+            if (slot == 0) return "Min";
+            if (slot == 1) return "Max";
+            if (slot == 2) return "Redraw rate (Hz, 0 = once per play)";
+            return nullptr;
+        case fmt::OcSoundNodeKind::Crossfade:
+            if (slot == 0) return "Position (0..N-1)";
+            if (slot == 1) return "Inputs N (0 = 2, max 8)";
+            if (slot == 2) return "Curve (0 equal power, 1 linear)";
+            return nullptr;
+        case fmt::OcSoundNodeKind::WavePlayer:
+            if (slot == 0) return "Pitch ratio (0 = 1)";
+            if (slot == 1) return "Loop (1 = on)";
+            if (slot == 2) return "Start (s)";
+            return nullptr;
+        case fmt::OcSoundNodeKind::Delay:
+            if (slot == 0) return "Time (s)";
+            if (slot == 1) return "Feedback (0..0.95)";
+            if (slot == 2) return "Mix (0..1)";
+            if (slot == 3) return "Max length (s, 0 = 1, max 10)";
+            return nullptr;
+        case fmt::OcSoundNodeKind::Clamp:
+            if (slot == 0) return "Min";
+            if (slot == 1) return "Max";
+            return nullptr;
+        case fmt::OcSoundNodeKind::MapRange:
+            if (slot == 0) return "In min";
+            if (slot == 1) return "In max";
+            if (slot == 2) return "Out min";
+            if (slot == 3) return "Out max";
+            return nullptr;
+        case fmt::OcSoundNodeKind::EnvelopeFollower:
+            if (slot == 0) return "Attack (s)";
+            if (slot == 1) return "Release (s)";
+            return nullptr;
         case fmt::OcSoundNodeKind::Square:
             if (slot == 0) return "Frequency (Hz)";
             if (slot == 1) return "Duty (0..1)";
@@ -152,14 +223,40 @@ const char* snParamLabel(fmt::OcSoundNodeKind kind, u32 slot) {
 const char* snInputLabel(fmt::OcSoundNodeKind kind, u32 input) {
     switch (kind) {
         case fmt::OcSoundNodeKind::Gain:
-        case fmt::OcSoundNodeKind::LowPass:
         case fmt::OcSoundNodeKind::Adsr:
+        case fmt::OcSoundNodeKind::Clamp:
+        case fmt::OcSoundNodeKind::MapRange:
+        case fmt::OcSoundNodeKind::EnvelopeFollower:
             return input == 0 ? "In" : nullptr;
         case fmt::OcSoundNodeKind::Mix:
         case fmt::OcSoundNodeKind::Multiply:
             if (input == 0) return "A";
             if (input == 1) return "B";
             return nullptr;
+        // Version 2: the oscillators and filters take a modulation input that ADDS to their own parameter, and reads 0 when unconnected.
+        case fmt::OcSoundNodeKind::Sine:
+        case fmt::OcSoundNodeKind::Saw:
+        case fmt::OcSoundNodeKind::Square:
+            return input == 0 ? "Frequency offset (Hz)" : nullptr;
+        case fmt::OcSoundNodeKind::Lfo:
+            return input == 0 ? "Rate offset (Hz)" : nullptr;
+        case fmt::OcSoundNodeKind::WavePlayer:
+            return input == 0 ? "Pitch offset (semitones)" : nullptr;
+        case fmt::OcSoundNodeKind::LowPass:
+        case fmt::OcSoundNodeKind::HighPass:
+        case fmt::OcSoundNodeKind::BandPass:
+            if (input == 0) return "In";
+            if (input == 1) return "Cutoff offset (Hz)";
+            return nullptr;
+        case fmt::OcSoundNodeKind::Delay:
+            if (input == 0) return "In";
+            if (input == 1) return "Time offset (s)";
+            return nullptr;
+        case fmt::OcSoundNodeKind::Crossfade: {
+            static const char* const kNames[] = {"Position offset", "Signal 1", "Signal 2", "Signal 3", "Signal 4",
+                                                 "Signal 5", "Signal 6", "Signal 7", "Signal 8"};
+            return input < 9 ? kNames[input] : nullptr;
+        }
         default:
             return nullptr;
     }
@@ -195,6 +292,48 @@ void snDefaultParams(fmt::OcSoundNodeKind kind, f32 params[4]) {
         case fmt::OcSoundNodeKind::Mix:
         case fmt::OcSoundNodeKind::Multiply:
             break;                              // nothing to configure
+        case fmt::OcSoundNodeKind::Parameter:
+            params[1] = 0.02f;                  // 20 ms: a jump from gameplay is a ramp, not a click
+            break;
+        case fmt::OcSoundNodeKind::Lfo:
+            params[0] = 4.0f;
+            params[1] = 0.5f;
+            break;
+        case fmt::OcSoundNodeKind::HighPass:
+            params[0] = 200.0f;
+            params[1] = 0.7071f;
+            break;
+        case fmt::OcSoundNodeKind::BandPass:
+            params[0] = 1000.0f;
+            params[1] = 1.0f;
+            break;
+        case fmt::OcSoundNodeKind::Random:
+            params[1] = 1.0f;                   // 0..1, drawn once per play
+            break;
+        case fmt::OcSoundNodeKind::Crossfade:
+            params[1] = 2.0f;
+            break;
+        case fmt::OcSoundNodeKind::WavePlayer:
+            params[0] = 1.0f;
+            break;
+        case fmt::OcSoundNodeKind::Delay:
+            params[0] = 0.25f;
+            params[1] = 0.35f;
+            params[2] = 0.35f;
+            params[3] = 1.0f;
+            break;
+        case fmt::OcSoundNodeKind::Clamp:
+            params[0] = -1.0f;
+            params[1] = 1.0f;
+            break;
+        case fmt::OcSoundNodeKind::MapRange:
+            params[1] = 1.0f;
+            params[3] = 1.0f;
+            break;
+        case fmt::OcSoundNodeKind::EnvelopeFollower:
+            params[0] = 0.01f;
+            params[1] = 0.1f;
+            break;
     }
 }
 
@@ -202,8 +341,17 @@ i32 snAddNode(fmt::OcSoundData& d, fmt::OcSoundNodeKind kind) {
     fmt::OcSoundNode fresh;
     fresh.kind = kind;
     snDefaultParams(kind, fresh.params);
+    if (kind == fmt::OcSoundNodeKind::Parameter) fresh.name = "input";   // named, so it can be addressed from gameplay at once
     d.nodes.push_back(fresh);
     return static_cast<i32>(d.nodes.size()) - 1;
+}
+
+bool snSetName(fmt::OcSoundData& d, i32 index, const std::string& name) {
+    if (!inRange(d, index)) return false;
+    fmt::OcSoundNode& n = d.nodes[static_cast<usize>(index)];
+    if (!snNameLabel(n.kind)) return false;
+    n.name = name.size() > fmt::kOcSoundMaxName ? name.substr(0, fmt::kOcSoundMaxName) : name;
+    return true;
 }
 
 i32 snDeleteNode(fmt::OcSoundData& d, i32 index) {
@@ -237,6 +385,7 @@ void snSetKind(fmt::OcSoundData& d, i32 index, fmt::OcSoundNodeKind kind) {
     fmt::OcSoundNode& n = d.nodes[static_cast<usize>(index)];
     n.kind = kind;
     snDefaultParams(kind, n.params);
+    n.name = kind == fmt::OcSoundNodeKind::Parameter ? "input" : std::string();   // a name means something different for every kind too
 
     const u32 inputs = fmt::ocSoundInputCount(kind);
     std::vector<fmt::OcSoundLink> keep;
@@ -566,7 +715,7 @@ void SoundEditor::drawDetails() {
     fmt::OcSoundNode& node = graph_.nodes[static_cast<usize>(selected_)];
 
     if (ImGui::BeginCombo("Kind", snKindName(node.kind))) {
-        for (u32 k = 0; k <= static_cast<u32>(fmt::OcSoundNodeKind::Multiply); ++k) {
+        for (u32 k = 0; k <= fmt::kOcSoundLastKind; ++k) {
             const auto kind = static_cast<fmt::OcSoundNodeKind>(k);
             if (ImGui::Selectable(snKindName(kind), kind == node.kind)) setSelectedKind(kind);
         }
@@ -575,6 +724,23 @@ void SoundEditor::drawDetails() {
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Changing the kind resets this node's parameters -- a slot means\n"
                           "something different for every kind. Undo restores them.");
+
+    // ---- the name a Parameter is addressed by from gameplay, or the asset a WavePlayer plays ---------------
+    if (const char* nameLabel = snNameLabel(node.kind)) {
+        char buf[fmt::kOcSoundMaxName + 1];
+        std::snprintf(buf, sizeof buf, "%s", node.name.c_str());
+        const std::string beforeFrame = node.name;
+        if (ImGui::InputText(nameLabel, buf, sizeof buf)) { node.name = buf; dirty_ = true; }
+        if (ImGui::IsItemActivated()) nameBefore_ = beforeFrame;
+        if (ImGui::IsItemDeactivatedAfterEdit() && node.name != nameBefore_) {
+            // One typing session is one undo entry, like a parameter drag.
+            const std::string after = node.name;
+            node.name = nameBefore_;
+            pushUndo();
+            node.name = after;
+            dirty_ = true;
+        }
+    }
 
     // ---- inputs -------------------------------------------------------------------------------
     const u32 inputs = fmt::ocSoundInputCount(node.kind);
@@ -758,7 +924,7 @@ void SoundEditor::draw(Engine& e) {
 
     ImGui::SameLine();
     if (ImGui::BeginCombo("##add", ICON_ADD " Add node")) {
-        for (u32 k = 0; k <= static_cast<u32>(fmt::OcSoundNodeKind::Multiply); ++k) {
+        for (u32 k = 0; k <= fmt::kOcSoundLastKind; ++k) {
             const auto kind = static_cast<fmt::OcSoundNodeKind>(k);
             if (ImGui::Selectable(snKindName(kind))) addNode(kind);
         }

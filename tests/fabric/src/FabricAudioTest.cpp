@@ -203,8 +203,8 @@ int main() {
             return false;
         };
         check(has("loop.wav", "\"rating\":\"converted\"", "copied to Audio/sfx/loop.wav"), "the WAV is rated converted");
-        check(has("song.ogg", "\"rating\":\"approximated\"", "Vorbis"), "the Ogg file is rated approximated, with the decoder reason");
-        check(has("jingle.mp3", "\"rating\":\"approximated\"", "Media Foundation"), "the MP3 file is rated approximated, with the decoder reason");
+        check(has("song.ogg", "\"rating\":\"converted\"", "decodes Ogg Vorbis itself"), "the Ogg file is rated converted: the engine decodes it on every platform");
+        check(has("jingle.mp3", "\"rating\":\"converted\"", "decodes MP3 itself"), "the MP3 file is rated converted: the engine decodes it on every platform");
         check(has("loop.wav", "\"property\":\"edit/trim\"", "\"rating\":\"approximated\""), "an import-time trim is reported as not applied");
         check(has("AudioEffectReverb", "\"rating\":\"approximated\"", "Freeverb"), "the reverb is rated approximated with its difference");
         check(has("AudioEffectCompressor", "\"rating\":\"approximated\"", "compressor"), "the compressor is rated approximated with its difference");

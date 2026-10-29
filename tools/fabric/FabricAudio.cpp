@@ -109,12 +109,11 @@ std::string Converter::audioFileAsset(const std::string& resPath, const Where& w
         } else if (ext == ".wav") {
             report_.add("resource", resPath, "", "AudioStreamWAV", "", Rating::Converted, "copied to " + asset + "; the engine reads WAV itself", 0);
         } else if (ext == ".mp3") {
-            report_.add("resource", resPath, "", "AudioStreamMP3", "", Rating::Approximated,
-                        "copied to " + asset + "; decoded by the platform's media stack (Windows Media Foundation), so it plays on Windows only: the engine has no MP3 decoder of its own", 0);
+            report_.add("resource", resPath, "", "AudioStreamMP3", "", Rating::Converted,
+                        "copied to " + asset + "; the engine decodes MP3 itself on every platform (streamed, gapless when the file carries a LAME tag)", 0);
         } else {
-            report_.add("resource", resPath, "", "AudioStreamOggVorbis", "", Rating::Approximated,
-                        "copied to " + asset + "; the engine has no Ogg Vorbis decoder: Windows Media Foundation decodes it only when the Web Media Extensions codec is installed, and other platforms cannot "
-                        "play it (convert the file to WAV, or see docs/AUDIO.md for what a decoder dependency would add)", 0);
+            report_.add("resource", resPath, "", "AudioStreamOggVorbis", "", Rating::Converted,
+                        "copied to " + asset + "; the engine decodes Ogg Vorbis itself on every platform (streamed; a looping stream uses the file's LOOPSTART / LOOPLENGTH comments)", 0);
         }
     }
     audioAssets_[resPath] = asset;

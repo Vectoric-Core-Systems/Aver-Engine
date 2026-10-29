@@ -6,6 +6,7 @@
 #include "aver/core/Types.hpp"
 #include "aver/scene/World.hpp"
 
+#include <utility>
 #include <vector>
 
 namespace aver::audio {
@@ -22,6 +23,8 @@ struct CReverbZone {
     f32 wet = 0.35f;
     f32 decaySec = 1.8f;
     f32 damping = 0.4f;
+    i32 impulseSound = 0;                            // a mixer sound to convolve with when the zone has a send reverb slot; 0 = the algorithmic reverb
+    f32 predelayMs = 0.0f;                           // predelay of that convolution
     f32 weight = 0.0f;                               // runtime: last computed weight
 };
 
@@ -38,6 +41,19 @@ struct CAudioOcclusion {
     f32 thinkAccumulatorSec = 0.0f; // runtime
     f32 measured = 0.0f;
     f32 occlusion = 0.0f;
+
+    // Diffraction (off by default; with it off the occlusion is exactly the direct probe's). When the direct line is blocked, look for the
+    // shortest bent path around an edge and use its gain + low-pass instead of the fully occluded value (Music.hpp, findDiffractionPath).
+    i32 diffraction = 0;
+    i32 diffractionDirections = 8;
+    i32 diffractionMaxRays = 256;
+    f32 diffractionMaxOffsetCm = 3200.0f;
+    f32 diffractionMaxOcclusion = 0.85f;
+    f32 detourCm = 0.0f;            // runtime: the bent path's extra length, 0 when none was found
+
+    // Zone sends (off by default): the voice sends to the reverb zone(s) it is inside, through the mixer's pre-allocated send reverbs.
+    i32 zoneSends = 0;
+    f32 reverbSendBase = 1.0f;      // the voice's overall reverb level (what its reverb send would be without zones)
 };
 
 // How the system reaches the mixer. The default is the audio C ABI; tests install fakes.
@@ -48,6 +64,11 @@ struct AudioControl {
     bool (*voicePlaying)(void* user, i32 voice) = nullptr;
     // Writes the listener position into out[3]. Null: the position set by setListenerPosition.
     void (*getListener)(void* user, f32 out[3]) = nullptr;
+    // Zone sends (only called for emitters with CAudioOcclusion::zoneSends): a send reverb slot's settings, a voice's amount into a slot,
+    // and the voice's listener-side reverb send.
+    void (*setZoneReverb)(void* user, u32 slot, const ZoneReverb& zone) = nullptr;
+    void (*setVoiceZoneSend)(void* user, i32 voice, u32 slot, f32 send) = nullptr;
+    void (*setVoiceReverbSend)(void* user, i32 voice, f32 send) = nullptr;
     void* user = nullptr;
 };
 
@@ -76,6 +97,13 @@ public:
     void rebase(f32 dxCm, f32 dyCm, f32 dzCm) { listener_[0] -= dxCm; listener_[1] -= dyCm; listener_[2] -= dzCm; }
     // What the reverb is outside every zone.
     void setAmbientReverb(const ReverbParams& p) { ambient_ = p; }
+    // Smooths the listener-side reverb blend: the applied wet / decay / damping follow the blended target with this time constant, so a
+    // listener crossing a zone edge or a priority change eases rather than steps. 0 (default) applies the blend as it is computed.
+    void setReverbSmoothing(f32 tauSeconds) { reverbTau_ = tauSeconds > 0.0f ? tauSeconds : 0.0f; }
+
+    // Zone sends: which entity's zone occupies send reverb slot `slot` (0 = free), for tests and tooling. Slots are assigned to the zones
+    // tracked voices are inside (CAudioOcclusion::zoneSends); the highest priority and most present zones keep them.
+    u64 slotZone(u32 slot) const { return slot < kMaxZoneReverbs ? slotKey_[slot] : 0; }
 
     // Blends the zones around the listener into one reverb, and updates every emitter's occlusion.
     void tick(scene::World& world, f32 dt);
@@ -92,6 +120,21 @@ private:
     ReverbParams applied_{};
     bool pushed_ = false;
     std::vector<ReverbZoneInput> inputs_;
+    f32 reverbTau_ = 0.0f;
+    ReverbParams smoothed_{};
+
+    // ---- zone sends ----
+    struct ZoneRef { u64 key = 0; i32 priority = 0; f32 weight = 0.0f; f32 relevance = 0.0f; const CReverbZone* z = nullptr; Mat4 m; };
+    struct Tracked { i32 voice = 0; f32 pos[3] = {0, 0, 0}; f32 base = 1.0f; };
+    struct SentState { f32 send[kMaxZoneReverbs] = {}; f32 legacy = 1.0f; f32 base = 1.0f; bool seen = false; bool pushed = false; };
+    void tickZoneSends(scene::World& world, f32 dt);
+    std::vector<ZoneRef> zoneRefs_;
+    std::vector<Tracked> tracked_;
+    std::vector<std::pair<i32, SentState>> sent_;
+    u64 slotKey_[kMaxZoneReverbs] = {};
+    f32 slotIdle_[kMaxZoneReverbs] = {};
+    ZoneReverb slotPushed_[kMaxZoneReverbs];
+    bool slotLive_[kMaxZoneReverbs] = {};
 };
 
 // The process-global system, matching synapse::perceptionSystem().

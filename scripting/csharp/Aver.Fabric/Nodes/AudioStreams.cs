@@ -179,7 +179,7 @@ public class AudioStreamFile : AudioStream
         if (path == null) { Aver.Scripting.Log.Warn($"[Fabric] the audio file for '{ResourcePath}' does not exist"); return 0; }
         Handle = AudioNative.aver_audio_load(path);
         Generation = AudioServer.Generation;
-        if (Handle == 0) Aver.Scripting.Log.Warn($"[Fabric] the engine could not decode '{path}' (Ogg Vorbis needs the platform's codec; see docs/AUDIO.md)");
+        if (Handle == 0) Aver.Scripting.Log.Warn($"[Fabric] the engine could not decode '{path}' (it reads WAV, Ogg Vorbis, FLAC and MP3 itself; is the file damaged? see docs/AUDIO.md)");
         else OnLoaded();
         return Handle;
     }
@@ -302,8 +302,7 @@ public class AudioStreamWav : AudioStreamFile
 
 }
 
-/// <summary>An Ogg Vorbis file (Godot's AudioStreamOggVorbis). The engine has no Vorbis decoder of its own: it decodes through the platform's
-/// media stack, which on Windows needs the Web Media Extensions codec; see docs/AUDIO.md.</summary>
+/// <summary>An Ogg Vorbis file (Godot's AudioStreamOggVorbis), decoded by the engine on every platform (docs/AUDIO.md).</summary>
 public class AudioStreamOggVorbis : AudioStreamFile
 {
     private bool _loop;
@@ -317,7 +316,7 @@ public class AudioStreamOggVorbis : AudioStreamFile
     public override int GetBeatCount() => BeatCount;
 }
 
-/// <summary>An MP3 file (Godot's AudioStreamMP3), decoded by the platform's media stack.</summary>
+/// <summary>An MP3 file (Godot's AudioStreamMP3), decoded by the engine on every platform (docs/AUDIO.md).</summary>
 public class AudioStreamMP3 : AudioStreamFile
 {
     private bool _loop;

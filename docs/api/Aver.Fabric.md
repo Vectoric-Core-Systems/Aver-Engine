@@ -2,7 +2,7 @@
 
 # Aver.Fabric public API
 
-656 public types and 6973 public members, read from `scripting/csharp/Aver.Fabric/` (117 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+657 public types and 6978 public members, read from `scripting/csharp/Aver.Fabric/` (117 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Fabric
 
@@ -987,6 +987,16 @@ Values: `Euclidean = 0`, `Manhattan = 1`, `Octile = 2`, `Chebyshev = 3`, `Max = 
 - `public float Mix { get; set; }`
 - `public StringName Sidechain { get; set; }` - The bus whose signal drives the detector instead of this bus's own.
 
+### AudioEffectConvolutionReverb
+
+`public class AudioEffectConvolutionReverb : AudioEffect` - A convolution reverb (an engine addition, not a Godot class): the bus signal convolved with an impulse response taken from a loaded sound, mixed with the dry signal.
+
+- `public float Dry { get; set; }`
+- `public float Wet { get; set; }`
+- `public float PredelayMsec { get; set; }`
+- `public float GainDb { get; set; }`
+- `public bool SetImpulse(int sound)` - Takes the impulse response from a loaded engine sound (any rate; the effect keeps its own copy).
+
 ### AudioEffectDelay
 
 `public class AudioEffectDelay : AudioEffect`
@@ -1345,7 +1355,7 @@ Values: `SamePosition = 0`, `Start = 1`
 
 ### AudioStreamMP3
 
-`public class AudioStreamMP3 : AudioStreamFile` - An MP3 file (Godot's AudioStreamMP3), decoded by the platform's media stack.
+`public class AudioStreamMP3 : AudioStreamFile` - An MP3 file (Godot's AudioStreamMP3), decoded by the engine on every platform (docs/AUDIO.md).
 
 - `public bool Loop { get; set; }`
 - `public double LoopOffset { get; set; }`
@@ -1357,7 +1367,7 @@ Values: `SamePosition = 0`, `Start = 1`
 
 ### AudioStreamOggVorbis
 
-`public class AudioStreamOggVorbis : AudioStreamFile` - An Ogg Vorbis file (Godot's AudioStreamOggVorbis).
+`public class AudioStreamOggVorbis : AudioStreamFile` - An Ogg Vorbis file (Godot's AudioStreamOggVorbis), decoded by the engine on every platform (docs/AUDIO.md).
 
 - `public bool Loop { get; set; }`
 - `public double LoopOffset { get; set; }`

@@ -77,7 +77,7 @@ int main() {
     // ---- defaults ------------------------------------------------------------------------------
     AVER_INFO("a freshly added node is configured, not zeroed");
     {
-        for (u32 k = 0; k <= static_cast<u32>(fmt::OcSoundNodeKind::Multiply); ++k) {
+        for (u32 k = 0; k <= fmt::kOcSoundLastKind; ++k) {
             const auto kind = static_cast<fmt::OcSoundNodeKind>(k);
             f32 params[4];
             editor::snDefaultParams(kind, params);
@@ -92,18 +92,65 @@ int main() {
                               " has a non-zero parameter");
         }
         // Every kind names itself, and every named param slot is one the kind really reads.
-        for (u32 k = 0; k <= static_cast<u32>(fmt::OcSoundNodeKind::Multiply); ++k) {
+        for (u32 k = 0; k <= fmt::kOcSoundLastKind; ++k) {
             const auto kind = static_cast<fmt::OcSoundNodeKind>(k);
             check(std::string(editor::snKindName(kind)) != "?",
                   std::string("kind ") + std::to_string(k) + " has a display name");
             const u32 inputs = fmt::ocSoundInputCount(kind);
-            for (u32 in = 0; in < 2; ++in) {
+            for (u32 in = 0; in <= fmt::kOcSoundMaxCrossfade + 1; ++in) {
                 const bool named = editor::snInputLabel(kind, in) != nullptr;
                 check(named == (in < inputs),
                       std::string(editor::snKindName(kind)) + " names input " + std::to_string(in) +
                       " exactly when it has one");
             }
         }
+    }
+
+    // ---- version 2: the new kinds are palette data ---------------------------------------------
+    AVER_INFO("the real-time kinds are in the palette: named, configured, wired and saved");
+    {
+        // The Add menu and Kind combo walk 0..kOcSoundLastKind, so a kind is in the palette exactly when the tables above know it. Every kind
+        // adds to a graph that stays valid, and a fresh graph of ALL of them renders (an unresolved WavePlayer is silent, a Parameter is its default).
+        fmt::OcSoundData all;
+        for (u32 k = 0; k <= fmt::kOcSoundLastKind; ++k) editor::snAddNode(all, static_cast<fmt::OcSoundNodeKind>(k));
+        check(all.nodes.size() == fmt::kOcSoundLastKind + 1 && all.valid(), "adding one of every kind gives a valid graph");
+        // Only names that matter carry one.
+        for (const fmt::OcSoundNode& n : all.nodes) {
+            const bool takesName = editor::snNameLabel(n.kind) != nullptr;
+            check(takesName == (n.kind == fmt::OcSoundNodeKind::Parameter || n.kind == fmt::OcSoundNodeKind::WavePlayer),
+                  std::string(editor::snKindName(n.kind)) + (takesName ? " takes a name" : " takes no name"));
+        }
+        check(all.nodes[static_cast<usize>(fmt::OcSoundNodeKind::Parameter)].name == "input", "a new Parameter is born named, so gameplay can address it at once");
+
+        // Wire a live input through a range to an oscillator, which only works because oscillators now have a frequency input.
+        fmt::OcSoundData d;
+        const i32 p = editor::snAddNode(d, fmt::OcSoundNodeKind::Parameter);
+        const i32 m = editor::snAddNode(d, fmt::OcSoundNodeKind::MapRange);
+        const i32 s = editor::snAddNode(d, fmt::OcSoundNodeKind::Sine);
+        check(editor::snSetName(d, p, "rpm") && d.nodes[0].name == "rpm", "a Parameter can be renamed");
+        check(!editor::snSetName(d, s, "x") && d.nodes[2].name.empty(), "a Sine takes no name");
+        editor::snSetName(d, p, std::string(700, 'x'));
+        check(d.nodes[0].name.size() == fmt::kOcSoundMaxName, "and an over-long name is truncated to what the format allows");
+        editor::snSetName(d, p, "rpm");
+        d.nodes[static_cast<usize>(m)].params[0] = 800; d.nodes[static_cast<usize>(m)].params[1] = 6000;
+        d.nodes[static_cast<usize>(m)].params[2] = 40;  d.nodes[static_cast<usize>(m)].params[3] = 300;
+        d.nodes[static_cast<usize>(s)].params[0] = 0.0f;
+        check(editor::snAddLink(d, p, m, 0) >= 0 && editor::snAddLink(d, m, s, 0) >= 0, "a Parameter links into a MapRange and into a Sine's frequency input");
+        d.outputNode = static_cast<u32>(s);
+        check(d.valid() && d.needsVersion2(), "the graph is valid and needs format version 2");
+
+        // Changing a Parameter into something else drops the name; the other way gives it one.
+        editor::snSetKind(d, p, fmt::OcSoundNodeKind::Const);
+        check(d.nodes[static_cast<usize>(p)].name.empty(), "changing a Parameter to another kind drops its name");
+        editor::snSetKind(d, p, fmt::OcSoundNodeKind::Parameter);
+        check(d.nodes[static_cast<usize>(p)].name == "input", "and changing a node to a Parameter names it");
+
+        // The preview render (the half that can be wrong) works for it, with the input at its default.
+        std::string why;
+        sound::RenderParams rp;
+        std::vector<f32> pcm;
+        d.durationSec = 0.2f;
+        check(sound::renderSound(d, rp, pcm, &why) && !pcm.empty(), "a graph with a live input renders for the preview: " + why);
     }
 
     // ---- the re-sort ---------------------------------------------------------------------------
@@ -173,8 +220,8 @@ int main() {
         check(editor::snAddLink(d, 0, 0, 0) == -1, "linking a node to itself is refused");
         check(editor::snAddLink(d, 0, 99, 0) == -1, "an out-of-range consumer is refused");
         check(editor::snAddLink(d, 99, 1, 0) == -1, "an out-of-range source is refused");
-        // The low pass has ONE input, so input 1 does not exist on it.
-        check(editor::snAddLink(d, 0, 1, 1) == -1, "a link to an input the kind does not have is refused");
+        // The low pass has TWO inputs (version 2: the signal and a cutoff offset), so input 2 does not exist on it.
+        check(editor::snAddLink(d, 0, 1, 2) == -1, "a link to an input the kind does not have is refused");
         check(d.links.size() == links, "every refusal left the link list exactly as it was");
         check(!editor::snRemoveLink(d, 0, 2, 0), "removing a link that is not there reports false");
         check(!editor::snSetOutput(d, 99), "an out-of-range output is refused");

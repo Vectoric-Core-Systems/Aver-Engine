@@ -42,6 +42,52 @@ AVER_AUDIO_API int32_t aver_audio_channels(void);
 // Buffers the device asked for and did not get in time. Every one is an audible gap.
 AVER_AUDIO_API int32_t aver_audio_underruns(void);
 
+/* ---- the output device (docs/AUDIO.md "Device robustness") ----------------------------------------------------
+ * The device follows the system default: unplug it, switch the default or change its sample rate and the mixer moves to the new one with
+ * every voice, stream and bus intact (assets keep their own rate and are resampled per voice). With no device at all the mixer keeps running
+ * into nothing at real-time pace, so playback positions still advance, and re-opens when one returns. Each change logs one line to the
+ * Output Log. aver_audio_sample_rate / _channels above are the MIXER's current rate and channels (the device's, after a change); the
+ * values below describe the last device that was open, and keep describing it while there is none. All zero / empty before init, and offline. */
+#define AVER_AUDIO_DEVICE_STOPPED 0   /* audio not started */
+#define AVER_AUDIO_DEVICE_RUNNING 1   /* a device is open and buffers flow */
+#define AVER_AUDIO_DEVICE_NONE    2   /* started with no device open: mixing silently, retrying (also offline mode) */
+AVER_AUDIO_API int32_t aver_audio_device_state(void);
+// The device's friendly name, UTF-8, into the caller's buffer (truncated to `cap`, always terminated); the full length is returned.
+AVER_AUDIO_API int32_t aver_audio_device_name(uint8_t* textOut, int32_t cap);
+// The hardware channel count (aver_audio_channels is what the mixer renders: 1, 2, 6 or 8).
+AVER_AUDIO_API int32_t aver_audio_device_channels(void);
+// The period granted, in frames.
+AVER_AUDIO_API int32_t aver_audio_device_buffer_frames(void);
+// Output latency in milliseconds (the backend's own figure when it has one, else the period).
+AVER_AUDIO_API float   aver_audio_device_latency_ms(void);
+// Devices opened after the first: default changes, unplugs and returns.
+AVER_AUDIO_API int32_t aver_audio_device_changes(void);
+
+/* ---- surround output, LFE send, binaural (docs/AUDIO.md section 14) ---------------------------------------------
+ * All opt-in and off by default: a game that calls none of these renders exactly what it always did (stereo, constant-power pan). They may be
+ * called before or after aver_audio_init and are remembered; every one is a game-thread call. */
+#define AVER_AUDIO_SPEAKERS_STEREO 2   /* the default */
+#define AVER_AUDIO_SPEAKERS_SURROUND_5_1 6
+#define AVER_AUDIO_SPEAKERS_SURROUND_7_1 8
+#define AVER_AUDIO_UPMIX_FRONT 0       /* a stereo source plays on the front pair only */
+#define AVER_AUDIO_UPMIX_WRAP  1       /* the default: plus a power-preserving share to the surrounds on its side */
+// The channel count the project wants: 2, 6 or 8 (anything else is 2). Returns the value stored. The device decides at open: a device that
+// cannot play it is mixed in stereo, and aver_audio_channels says what the mixer really renders. Changing it with a device open reopens the
+// device (a short gap). It has no effect on an offline mixer, which has the channel count it was made with.
+AVER_AUDIO_API int32_t aver_audio_set_speakers(int32_t channels);
+// The channel count last requested (not necessarily what the device got).
+AVER_AUDIO_API int32_t aver_audio_speakers(void);
+// How a stereo source and the reverb / bus-graph returns are spread over 5.1 and 7.1 (AVER_AUDIO_UPMIX_*).
+AVER_AUDIO_API void    aver_audio_set_stereo_upmix(int32_t mode);
+AVER_AUDIO_API int32_t aver_audio_stereo_upmix(void);
+// How much of every voice goes to the LFE channel of a 5.1 / 7.1 mix, 0..1. 0 (the default) leaves it silent.
+AVER_AUDIO_API void    aver_audio_set_lfe_send(float send);
+AVER_AUDIO_API float   aver_audio_lfe_send(void);
+// Headphone mode on a stereo mixer: positional voices go through an analytic head model (interaural delay, head shadow, a pinna cue; no
+// measured data set) instead of the constant-power pan. 0 (the default) off. Ignored on mono, 5.1 and 7.1 mixers.
+AVER_AUDIO_API void    aver_audio_set_binaural(int32_t on);
+AVER_AUDIO_API int32_t aver_audio_binaural(void);
+
 // Reclaims sounds released with aver_audio_unload whose last voice has ended. Call once a frame.
 AVER_AUDIO_API void aver_audio_collect(void);
 
@@ -115,7 +161,7 @@ AVER_AUDIO_API int32_t aver_audio_stolen_voices(void);
  * A stream owns a decoder thread; the decoder is freed by aver_audio_collect once the voice ends,
  * so keep calling that once a frame. Mono and stereo sources only. */
 
-// Streams a file from disk (WAV and Media Foundation formats decode incrementally). The voice is
+// Streams a file from disk (WAV, Ogg Vorbis, FLAC and MP3 decode incrementally on every platform; Media Foundation formats on Windows). The voice is
 // silent until a quarter second is buffered. Flat in both ears. Returns a VOICE handle, or 0.
 AVER_AUDIO_API int32_t aver_audio_stream_play(const char* utf8Path, float volume, float pitch,
                                               int32_t looping, int32_t bus, float fadeInSeconds);
@@ -147,6 +193,16 @@ AVER_AUDIO_API void aver_audio_set_voice_reverb_send(int32_t voice, float send);
 AVER_AUDIO_API void aver_audio_set_occlusion_curve(float minCutoffHz, float minVolume);
 // The listener-side reverb. wet 0 turns it off; decay is the RT60 in seconds; damping 0..1.
 AVER_AUDIO_API void aver_audio_set_reverb(float wet, float decaySeconds, float damping);
+
+/* ---- environment: zone send reverbs, convolution reverb (docs/AUDIO.md section 15) -----------------------
+ * AVER_AUDIO_ZONE_REVERBS send reverbs are pre-allocated. A voice sends into one with _set_voice_zone_send (0 by default); a slot's return is
+ * added at `wet` (0 turns the slot off). impulseSound is a loaded sound (any format the loaders decode): the slot then convolves with it, 0
+ * keeps the algorithmic reverb. Scenes drive these through CReverbZone / CAudioOcclusion.zoneSends; they are here for scripts that do not. */
+#define AVER_AUDIO_ZONE_REVERBS 4
+// 1 when applied; 0 for a bad slot or an unknown impulse sound.
+AVER_AUDIO_API int32_t aver_audio_set_zone_reverb(int32_t slot, float wet, float decaySeconds, float damping, int32_t impulseSound, float predelayMs);
+// How much of a voice feeds slot `slot`, 0..1.
+AVER_AUDIO_API void aver_audio_set_voice_zone_send(int32_t voice, int32_t slot, float send);
 
 /* ---- play observer (accessibility captions, docs/ACCESSIBILITY.md) ----------------------------------------
  * Called on the calling (game) thread right after every SUCCESSFUL start (voice != 0) from aver_audio_play,
@@ -221,6 +277,9 @@ AVER_AUDIO_API float   aver_audio_effect_get_param(int32_t id, const char* name)
 AVER_AUDIO_API int32_t aver_audio_effect_class(int32_t id, uint8_t* textOut, int32_t cap);
 AVER_AUDIO_API int32_t aver_audio_effect_param_count(int32_t id);
 AVER_AUDIO_API int32_t aver_audio_effect_param_info(int32_t id, int32_t index, uint8_t* nameOut, int32_t cap, float* def, float* lo, float* hi);
+// Gives a convolution reverb effect ("AudioEffectConvolutionReverb") its impulse response from a loaded sound (any rate; resampled). The
+// effect keeps its own copy, so the sound can be unloaded. 1 on success; 0 for an unknown effect (or one that takes no impulse) or sound.
+AVER_AUDIO_API int32_t aver_audio_effect_set_impulse(int32_t id, int32_t sound);
 // The readable effects. Capture: stereo frames, interleaved.
 AVER_AUDIO_API int32_t aver_audio_capture_available(int32_t id);
 AVER_AUDIO_API int32_t aver_audio_capture_read(int32_t id, float* dst, int32_t maxFrames);
@@ -256,6 +315,47 @@ AVER_AUDIO_API int32_t aver_audio_live_play(float volume, float pitch, int32_t b
 AVER_AUDIO_API int32_t aver_audio_live_push(int32_t voice, const float* interleaved, int32_t frames);
 AVER_AUDIO_API int32_t aver_audio_live_free(int32_t voice);
 AVER_AUDIO_API void    aver_audio_live_flush(int32_t voice);
+
+/* ---- real-time sound graphs (.ocsnd; docs/AUDIO.md section 13) ---------------------------------------------------
+ * A .ocsnd node graph evaluated per block ON THE AUDIO THREAD, so it answers live inputs while it plays: named floats (rpm, intensity,
+ * surface) set from the game thread, and a note-off that lets an ADSR release instead of cutting. Same evaluator as the offline render and the
+ * same real-time rule as everything else (no allocation, lock or managed call in mix(); the voice's state is allocated in aver_audio_soundgraph_play).
+ *
+ * aver_audio_soundgraph_load reads the file and the sounds its WavePlayer nodes name (through aver_audio_load, so they are path-cached and live
+ * until shutdown). A graph voice is an ordinary voice: aver_audio_stop (a fade-out within one block), _playing, _set_voice_volume, _set_voice_position,
+ * _fade_voice, _set_voice_occlusion all work on it; _set_voice_pitch does not (the graph makes its own pitch). A finite graph (looping 0) plays for its
+ * own duration; looping 1 runs until aver_audio_soundgraph_note_off. Unknown parameter names are ignored (return 0). Positions in CENTIMETRES. */
+
+// Loads and compiles a .ocsnd. Returns a graph handle, or 0 (unreadable, invalid, over a limit, or no output). The same path yields the same handle.
+AVER_AUDIO_API int32_t aver_audio_soundgraph_load(const char* utf8Path);
+// Forgets a graph. Voices already playing it keep going.
+AVER_AUDIO_API void    aver_audio_soundgraph_unload(int32_t graph);
+// The graph's named live inputs: how many, their names (UTF-8 into the caller's buffer, truncated to cap, the full length returned), an id by name
+// (-1 when absent) and the default a Parameter node was authored with.
+AVER_AUDIO_API int32_t aver_audio_soundgraph_param_count(int32_t graph);
+AVER_AUDIO_API int32_t aver_audio_soundgraph_param_name(int32_t graph, int32_t id, uint8_t* textOut, int32_t cap);
+AVER_AUDIO_API int32_t aver_audio_soundgraph_param_find(int32_t graph, const char* utf8Name);
+AVER_AUDIO_API float   aver_audio_soundgraph_param_default(int32_t graph, int32_t id);
+// The graph's authored duration in seconds; 0 for an unknown handle.
+AVER_AUDIO_API double  aver_audio_soundgraph_duration(int32_t graph);
+
+// Plays a graph. `seed` 0 picks a different seed each play (Noise and Random vary), anything else repeats exactly. paramNames/paramValues (any may
+// be NULL with count 0) set live inputs before the first block, so a voice that starts at rpm 3000 does not ramp up from the default. Returns a
+// VOICE handle, or 0 (no device, a bad graph, or no voice).
+AVER_AUDIO_API int32_t aver_audio_soundgraph_play(int32_t graph, float volume, int32_t looping, int32_t bus, uint32_t seed,
+                                                  const char** paramNames, const float* paramValues, int32_t paramCount);
+AVER_AUDIO_API int32_t aver_audio_soundgraph_play_at(int32_t graph, float x, float y, float z, float volume, int32_t looping, int32_t bus,
+                                                     float innerCm, float outerCm, uint32_t seed,
+                                                     const char** paramNames, const float* paramValues, int32_t paramCount);
+// Sets a live input by name / by id (from _param_find). Latest value wins; a Parameter node smooths toward it, so a jump is a ramp, not a click.
+// Returns 1 when the voice is a live graph voice that has the input, else 0.
+AVER_AUDIO_API int32_t aver_audio_soundgraph_set_param(int32_t voice, const char* utf8Name, float value);
+AVER_AUDIO_API int32_t aver_audio_soundgraph_set_param_id(int32_t voice, int32_t id, float value);
+// The note-off: ADSR nodes release from their current level and the voice ends once the longest release has played (at least 10 ms of fade for a
+// graph with no ADSR). aver_audio_stop on the same voice fades it out within one block instead.
+AVER_AUDIO_API void    aver_audio_soundgraph_note_off(int32_t voice);
+// 1 when the voice is a live graph voice.
+AVER_AUDIO_API int32_t aver_audio_soundgraph_is_voice(int32_t voice);
 
 #ifdef __cplusplus
 } // extern "C"

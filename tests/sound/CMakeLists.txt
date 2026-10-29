@@ -7,3 +7,9 @@
 add_executable(SynthTest src/SynthTest.cpp)
 target_link_libraries(SynthTest PRIVATE Aver.Sound Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(SynthTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# SoundNodesTest -- the version-2 node kinds rendered offline, the format versioning (v1 files load unchanged, v2 round-trips, hostile input is
+# refused) and the evaluator limits. The real-time side is tests/audio/SoundGraphTest.
+add_executable(SoundNodesTest src/SoundNodesTest.cpp)
+target_link_libraries(SoundNodesTest PRIVATE Aver.Sound Aver.Audio Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(SoundNodesTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

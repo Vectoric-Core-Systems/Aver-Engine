@@ -21,7 +21,8 @@ if(_aver_audio_device AND TARGET Aver.Formats.Audio)
   target_include_directories(Aver.Audio.Abi PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
   target_compile_features(Aver.Audio.Abi PUBLIC cxx_std_20)
   # PRIVATE: nothing that includes this header needs the mixer on its own link line.
-  target_link_libraries(Aver.Audio.Abi PRIVATE Aver.Core Aver.Audio ${_aver_audio_device} Aver.Formats.Audio)
+  # Aver.Sound: aver_audio_graph_* compiles a .ocsnd into the program the mixer evaluates on the audio thread.
+  target_link_libraries(Aver.Audio.Abi PRIVATE Aver.Core Aver.Audio ${_aver_audio_device} Aver.Formats.Audio Aver.Sound)
   target_compile_definitions(Aver.Audio.Abi PRIVATE AVER_AUDIO_ABI_BUILD)
   # Media Foundation, read incrementally for streamed music (the importer already links it for whole-file decode).
   if(WIN32)

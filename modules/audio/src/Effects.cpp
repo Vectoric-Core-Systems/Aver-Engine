@@ -1,6 +1,7 @@
 // The bus effects (Godot's AudioEffect* set). Each one is a small class over interleaved stereo blocks; docs/AUDIO.md lists what is
 // Godot's algorithm and what is an approximation of it.
 #include "aver/audio/Effects.hpp"
+#include "aver/audio/Convolver.hpp"
 #include "aver/audio/Reverb.hpp"
 
 #include <algorithm>
@@ -128,6 +129,11 @@ struct Tables {
         add(EffectKind::Reverb, "dry", 1.0f, 0.0f, 1.0f);
         add(EffectKind::Reverb, "wet", 0.5f, 0.0f, 1.0f);
 
+        add(EffectKind::ConvolutionReverb, "dry", 1.0f, 0.0f, 1.0f);
+        add(EffectKind::ConvolutionReverb, "wet", 0.5f, 0.0f, 1.0f);
+        add(EffectKind::ConvolutionReverb, "predelay_msec", 0.0f, 0.0f, 500.0f);
+        add(EffectKind::ConvolutionReverb, "gain_db", 0.0f, -24.0f, 24.0f);
+
         add(EffectKind::Panner, "pan", 0.0f, -1.0f, 1.0f);
 
         add(EffectKind::StereoEnhance, "pan_pullout", 1.0f, 0.0f, 4.0f);
@@ -151,7 +157,8 @@ constexpr const char* kClassNames[] = {
     "AudioEffectAmplify", "AudioEffectDelay", "AudioEffectChorus", "AudioEffectCompressor", "AudioEffectLimiter", "AudioEffectHardLimiter",
     "AudioEffectEQ6", "AudioEffectEQ10", "AudioEffectEQ21", "AudioEffectLowPassFilter", "AudioEffectHighPassFilter", "AudioEffectBandPassFilter",
     "AudioEffectNotchFilter", "AudioEffectLowShelfFilter", "AudioEffectHighShelfFilter", "AudioEffectDistortion", "AudioEffectPhaser",
-    "AudioEffectPitchShift", "AudioEffectReverb", "AudioEffectPanner", "AudioEffectStereoEnhance", "AudioEffectCapture", "AudioEffectSpectrumAnalyzer"};
+    "AudioEffectPitchShift", "AudioEffectReverb", "AudioEffectPanner", "AudioEffectStereoEnhance", "AudioEffectCapture", "AudioEffectSpectrumAnalyzer",
+    "AudioEffectConvolutionReverb"};
 static_assert(sizeof(kClassNames) / sizeof(kClassNames[0]) == static_cast<usize>(EffectKind::Count), "one Godot class name per effect kind");
 
 // ---------------------------------------------------------------- Amplify
@@ -600,6 +607,46 @@ private:
     f32 hp_ = 0.0f;
 };
 
+// ---------------------------------------------------------------- Convolution reverb
+
+// dry * input + wet * (input convolved with the impulse). The impulse comes from a decoded sound (setImpulse); with none loaded the wet
+// signal is silent. The wet path lags the dry by one partition (latencyFrames), which reads as a few ms of predelay.
+class ConvolutionFx final : public Effect {
+public:
+    explicit ConvolutionFx(u32 rate) : Effect(EffectKind::ConvolutionReverb, rate), conv_(rate) {
+        inL_.assign(kChunk, 0.0f); inR_.assign(kChunk, 0.0f);
+        wetL_.assign(kChunk, 0.0f); wetR_.assign(kChunk, 0.0f);
+    }
+    bool setImpulse(const SoundData& ir) override { return conv_.setImpulse(ir); }
+    void clearImpulse() override { conv_.clearImpulse(); }
+    bool hasImpulse() const override { return conv_.hasImpulse(); }
+    void collect() override { conv_.collect(); }
+    void adoptFrom(const Effect& old) override {
+        if (old.kind() == EffectKind::ConvolutionReverb) conv_.adoptImpulse(static_cast<const ConvolutionFx&>(old).conv_);
+    }
+    u32 latencyFrames() const override { return conv_.latencyFrames(); }
+    void reset() override { conv_.reset(); }
+    void process(f32* io, u32 frames, const f32*) override {
+        conv_.setPredelayFrames(static_cast<u32>(param(2) * 0.001f * static_cast<f32>(rate_)));
+        const f32 dry = param(0), wet = param(1) * dbToLin(param(3));
+        u32 done = 0;
+        while (done < frames) {
+            const u32 n = std::min(kChunk, frames - done);
+            f32* p = io + 2 * static_cast<usize>(done);
+            for (u32 i = 0; i < n; ++i) { inL_[i] = p[2 * i]; inR_[i] = p[2 * i + 1]; }
+            conv_.process(inL_.data(), inR_.data(), wetL_.data(), wetR_.data(), n);
+            for (u32 i = 0; i < n; ++i) {
+                p[2 * i] = inL_[i] * dry + wetL_[i] * wet;
+                p[2 * i + 1] = inR_[i] * dry + wetR_[i] * wet;
+            }
+            done += n;
+        }
+    }
+private:
+    Convolver conv_;
+    std::vector<f32> inL_, inR_, wetL_, wetR_;
+};
+
 // ---------------------------------------------------------------- Panner and StereoEnhance
 
 class Panner final : public Effect {
@@ -891,6 +938,7 @@ std::unique_ptr<Effect> Effect::create(EffectKind kind, u32 rate) {
         case EffectKind::Phaser: return std::make_unique<Phaser>(rate);
         case EffectKind::PitchShift: return std::make_unique<PitchShift>(rate);
         case EffectKind::Reverb: return std::make_unique<ReverbFx>(rate);
+        case EffectKind::ConvolutionReverb: return std::make_unique<ConvolutionFx>(rate);
         case EffectKind::Panner: return std::make_unique<Panner>(rate);
         case EffectKind::StereoEnhance: return std::make_unique<StereoEnhance>(rate);
         case EffectKind::Capture: return std::make_unique<Capture>(rate);

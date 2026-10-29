@@ -9,7 +9,8 @@ touches a device: all of it is exercised headlessly by `tests/audio`.
 | Decoder thread, ring buffer, WAV streaming | `modules/audio` (`Stream.hpp`, `WavStream.cpp`) |
 | Per-voice fade, occlusion filter, reverb send, stream voices | `modules/audio` (`Mixer.*`, `Dsp.*`, `Reverb.*`) |
 | Music crossfader, occlusion ray probe | `modules/audio` (`Music.*`) |
-| Media Foundation streaming, `.ocaudio` fallback | `modules/audio.abi/src/StreamSources.*` |
+| Ogg Vorbis / FLAC / MP3 stream sources (windows, loops, gapless) | `modules/formats` (`AudioDecode*.cpp`, `AudioDecode.hpp`) |
+| Source selection, Media Foundation streaming, `.ocaudio` fallback | `modules/audio.abi/src/StreamSources.*` |
 | C ABI | `modules/audio.abi` (`audio_abi.h`) |
 | `CReverbZone`, `CAudioOcclusion`, `AudioSceneSystem` | `modules/audio.scene` (new target `Aver.Audio.Scene`) |
 | C# | `Aver.Framework`: `AudioStreaming.cs`, `AudioStreamGraph.cs`, `AudioVolumes.cs` |
@@ -45,16 +46,17 @@ thread only reads atomics and the ring: it never waits for the decoder.
 
 ### Decoders
 
-Only decoders the engine already had, used incrementally where they allow it:
+Used incrementally where they allow it:
 
 | Source | Streams? |
 |---|---|
 | `.wav` (8/16/24/32-bit PCM, 32-bit float, mono or stereo) | Yes, bounded memory, own reader (`openWavStream`) |
-| `.mp3 .m4a .aac .wma .flac` through Media Foundation (Windows) | Yes, `IMFSourceReader::ReadSample` one sample at a time, seek via `SetCurrentPosition`. More than two channels are folded to stereo by the decoder or refused. **Untested**: needs real media and a device. |
-| `.ocaudio` | **No.** The container holds raw f32 in one AVR1 chunk with no incremental reader. It is decoded whole and replayed from memory, with a warning. Ship music as WAV, FLAC or MP3 to stream it. |
+| `.ogg .oga` (Vorbis), `.flac`, `.mp3` on **every platform** (vendored `stb_vorbis`, `dr_flac`, `dr_mp3`; `docs/AUDIO.md` section 12) | Yes, bounded memory, seek, Ogg `LOOPSTART`/`LOOPLENGTH` loop points, optional start offset and duration, MP3 encoder delay/padding trimmed. 3 to 8 channels are folded to stereo. Taken ahead of Media Foundation. |
+| `.m4a .aac .wma` through Media Foundation (Windows), and an `.ogg .flac .mp3` the vendored decoders refuse | Yes, `IMFSourceReader::ReadSample` one sample at a time, seek via `SetCurrentPosition`. More than two channels are folded to stereo by the decoder or refused. **Untested**: needs real media and a device. |
+| `.ocaudio` | **No.** The container holds raw f32 in one AVR1 chunk with no incremental reader. It is decoded whole and replayed from memory, with a warning. Ship music as WAV, OGG, FLAC or MP3 to stream it. |
 | anything else, or no Media Foundation | decoded whole by `audioImportFile`, replayed from memory, with a warning |
 
-`.ogg` has no decoder in the engine and still does not.
+Ogg Opus is not decoded.
 
 ## Crossfades and fades
 
@@ -81,9 +83,10 @@ log-interpolated. Defaults: 450 Hz and 0.30 at full occlusion, set with `setOccl
 `measureOcclusion(rayFn, user, listener, source, probe)` is the measurement: one ray from the listener to
 the source and a ring of `rayCount - 1` more to points around it (`probeRadiusCm`), each returning a
 blocking amount 0..1, averaged. A single ray is a hard switch as someone walks past a door frame; the ring
-turns it into a ramp. This is direct-path obstruction only: no diffraction around corners and no
-propagation through portals, and every hit blocks equally (the ray function may return less than 1 for a
-thin material).
+turns it into a ramp. This is direct-path obstruction: no propagation through portals, and every hit blocks
+equally (the ray function may return less than 1 for a thin material). Diffraction around corners and
+through openings is an opt-in extension of the same probe (`CAudioOcclusion::diffraction`, default off;
+[AUDIO.md](AUDIO.md) section 15); with it off the measurement above is exactly what runs.
 
 `CAudioOcclusion` (component, `modules/audio.scene`) drives one voice: fields `voice`, `followEntity`
 (moves the voice to the entity each tick), `rayCount`, `probeRadiusCm`, `thinkIntervalSec`, `riseSec`,
@@ -203,10 +206,12 @@ registration is listed under "Wiring for the integration step". Node types:
 
 ## Not done
 
-- No seek or resume for streams (play from the start only); no `.ocaudio` streaming; no Ogg; no more than
-  two channels.
-- Occlusion is direct-path only (no diffraction or portal propagation). The reverb is one global listener
-  reverb: a source in another room is not reverberated by its own room.
+- No resume for streams through the C ABI (a stream plays from the start; start offset and duration are
+  `DecodeOptions` on the native side only); no `.ocaudio` streaming; no Ogg Opus; more than two channels are
+  folded to stereo.
+- Occlusion is direct-path unless diffraction is switched on per emitter (no portal propagation either way).
+  The reverb is one global listener reverb unless an emitter opts in to zone sends, when the zone it is in
+  reverberates it through one of four pre-allocated send reverbs ([AUDIO.md](AUDIO.md) section 15).
 - No editor visualisation for zones (wire boxes, gizmos) and no details panel; `AN_ReverbVolume` is
   edited through its class fields.
 - The managed layer has no C# unit tests (needs the native DLL beside the host, as for timers).

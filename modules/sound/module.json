@@ -3,11 +3,11 @@
   "name": "Aver.Sound",
   "dir": "sound",
   "displayName": "Sound Design",
-  "description": "A .ocsnd node graph rendered to PCM.",
+  "description": "A .ocsnd node graph rendered to PCM or played in real time.",
   "category": "Audio",
   "option": null,
   "required": true,
   "default": true,
-  "dependsOn": ["Aver.Core", "Aver.Formats"],
+  "dependsOn": ["Aver.Audio", "Aver.Core", "Aver.Formats"],
   "consequence": ""
 }

@@ -1,6 +1,8 @@
-// The .ocaudio container, plus importing source audio through the platform's media stack.
+// The .ocaudio container, plus importing source audio: this module's WAV reader, the vendored
+// Vorbis/FLAC/MP3 decoders, and the platform's media stack for the rest.
 
 #include "aver/formats/OcAudio.hpp"
+#include "aver/formats/AudioDecode.hpp"
 #include "aver/formats/Wav.hpp"
 
 #include <algorithm>
@@ -227,11 +229,12 @@ bool loadOcAudio(const std::string& path, audio::SoundData& out, std::string* wh
 
 // ---------------------------------------------------------------- import
 
-// True for an extension the importer will attempt. Only .wav is guaranteed; the rest need a codec.
+// True for an extension the importer will attempt. .wav, .ogg, .flac and .mp3 decode on every
+// platform; .m4a/.aac/.wma need the platform codecs.
 bool isImportableAudio(const std::string& path) {
     const std::string e = lowerExtension(path);
     return e == ".wav" || e == ".mp3" || e == ".m4a" || e == ".aac" ||
-           e == ".wma" || e == ".flac" || e == ".ogg";
+           e == ".wma" || e == ".flac" || e == ".ogg" || e == ".oga";
 }
 
 // The .ocaudio path a source file compiles to.
@@ -263,12 +266,33 @@ AudioImportResult audioImportFile(const std::string& path, audio::SoundData& out
 #endif
     }
 
+    // Ogg Vorbis, FLAC and MP3 decode with the vendored decoders on every platform, also on Windows
+    // where Media Foundation would take the MP3 (it gives no gapless trim and no Vorbis).
+    if (audioCodecForPath(path) != AudioCodec::None) {
+        AudioImportResult r;
+        std::string why;
+        AudioCodec codec = AudioCodec::None;
+        if (decodeAudioFile(path, out, &why, &codec)) {
+            r.ok = true;
+            r.decoder = audioCodecName(codec);
+            return r;
+        }
+        r.decoder = codec != AudioCodec::None ? audioCodecName(codec) : audioCodecName(audioCodecForPath(path));
+        r.error = why;
+#if defined(_WIN32)
+        AudioImportResult mf = mfDecode(path, out);
+        if (mf.ok) return mf;
+        r.error += "; and the platform decoder also declined: " + mf.error;
+#endif
+        return r;
+    }
+
 #if defined(_WIN32)
     return mfDecode(path, out);
 #else
     AudioImportResult r;
     r.decoder = "none";
-    r.error = "only .wav can be imported on this platform";
+    r.error = "only .wav, .ogg, .flac and .mp3 can be imported on this platform";
     return r;
 #endif
 }

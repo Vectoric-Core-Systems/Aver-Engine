@@ -49,6 +49,13 @@ const char* snParamLabel(fmt::OcSoundNodeKind kind, u32 slot);
 // What input `input` means for this kind, or nullptr when the kind has no such input.
 const char* snInputLabel(fmt::OcSoundNodeKind kind, u32 input);
 
+// What the node's name means for this kind (a Parameter's live-input name, a WavePlayer's asset path), or nullptr when the kind has none.
+// The palette is these tables: a new kind is a case in each, and the tab's Add menu and Kind combo walk 0..kOcSoundLastKind.
+const char* snNameLabel(fmt::OcSoundNodeKind kind);
+
+// Sets the node's name (truncated to kOcSoundMaxName). False when out of range or the kind takes no name.
+bool snSetName(fmt::OcSoundData& d, i32 index, const std::string& name);
+
 // The params a freshly created node of this kind starts with. NOT ZEROES: a Sine at 0 Hz and a Gain
 // of 0 are both silent, and a node that does nothing when you add it reads as broken rather than as
 // unconfigured.
@@ -185,6 +192,7 @@ private:
 
     std::vector<f32> previewPcm_;
     std::string previewError_;
+    std::string nameBefore_;   // the node name when its text box was activated, so one typing session is one undo entry
     u32 previewSeed_ = 1;
     i32 previewSound_ = 0;   // aver_audio_load_pcm handle, 0 when none
     i32 previewVoice_ = 0;   // aver_audio_play handle, 0 when none

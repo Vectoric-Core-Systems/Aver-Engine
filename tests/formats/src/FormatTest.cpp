@@ -437,6 +437,30 @@ static void checkOcproject() {
         check(writeOcproject(none, "").find("AUDIO.") == std::string::npos,
               "and writing it back adds no AUDIO line -- a project cannot grow a mix by being saved");
     }
+    {
+        // AUDIO.SPEAKERS / AUDIO.BINAURAL: opt-in; absent, 7, 4 and 2 are all the stereo default, and a re-save does not add a line.
+        ProjectDesc s;
+        check(parseOcproject("OCPROJECT 1\nNAME S\nAUDIO.SPEAKERS 6\nAUDIO.BINAURAL 1\n", s, &err) && s.audioSpeakers == 6 && s.audioBinaural, "AUDIO.SPEAKERS 6 and AUDIO.BINAURAL 1 parse");
+        const std::string w = writeOcproject(s, "");
+        ProjectDesc r;
+        check(w.find("AUDIO.SPEAKERS 6") != std::string::npos && w.find("AUDIO.BINAURAL 1") != std::string::npos && parseOcproject(w, r, &err) &&
+                  r.audioSpeakers == 6 && r.audioBinaural && writeOcproject(r, w) == w,
+              "both write, read back and re-save byte-stable");
+        ProjectDesc e;
+        check(parseOcproject("OCPROJECT 1\nNAME E\nAUDIO.SPEAKERS 8\n", e, &err) && e.audioSpeakers == 8 && !e.audioBinaural, "7.1 parses; binaural stays off when unstated");
+        for (const char* odd : {"AUDIO.SPEAKERS 7", "AUDIO.SPEAKERS 4", "AUDIO.SPEAKERS 2", "AUDIO.SPEAKERS banana"}) {
+            ProjectDesc o;
+            check(parseOcproject(std::string("OCPROJECT 1\nNAME O\n") + odd + "\n", o, &err) && o.audioSpeakers == 0 && writeOcproject(o, "").find("AUDIO.SPEAKERS") == std::string::npos,
+                  std::string(odd) + " is the stereo default and writes nothing");
+        }
+        const std::string replaced = writeOcproject(s, "OCPROJECT 1\nNAME S\nAUDIO.SPEAKERS 8\nAUDIO.BINAURAL 0\n");
+        check(replaced.find("AUDIO.SPEAKERS 8") == std::string::npos && replaced.find("AUDIO.SPEAKERS 6") != std::string::npos && replaced.find("AUDIO.BINAURAL 0") == std::string::npos,
+              "existing lines are replaced, not duplicated");
+        ProjectDesc none;
+        check(parseOcproject("OCPROJECT 1\nNAME N\n", none, &err) && none.audioSpeakers == 0 && !none.audioBinaural && writeOcproject(none, "").find("AUDIO.SPEAKERS") == std::string::npos &&
+                  writeOcproject(none, "").find("AUDIO.BINAURAL") == std::string::npos,
+              "a manifest with neither key reports the defaults and a re-save adds none");
+    }
 
     const std::string future = written + "COOKTARGET WindowsClient\n";
     ProjectDesc f;

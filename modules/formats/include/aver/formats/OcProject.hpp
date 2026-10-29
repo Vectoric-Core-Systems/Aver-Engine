@@ -274,6 +274,10 @@ struct ProjectDesc {
     // AUDIO.BUSLAYOUT: the content path of an .ocbus bus layout (aver/formats/OcBusLayout.hpp). Empty = unstated: no bus graph is set up and the
     // four legacy buses are all there is. Aver.Fabric's AudioServer applies it the first time a script touches the bus graph.
     std::string audioBusLayout;                // AUDIO.BUSLAYOUT
+    // AUDIO.SPEAKERS <2|6|8>: the output channel layout the project asks for (stereo, 5.1, 7.1). 0 = unstated = stereo, the default; the device
+    // still decides at open (a device that cannot play it is mixed in stereo). AUDIO.BINAURAL <0|1>: headphone mode (docs/AUDIO.md section 14).
+    int  audioSpeakers = 0;                    // AUDIO.SPEAKERS
+    bool audioBinaural = false;                // AUDIO.BINAURAL
 
     // ---- UI.* -- the Control runtime's project settings (Aver.Fabric; docs/plans/fabric/G5_PARITY.md U1). Empty / negative = unstated: today's behaviour.
     std::string uiTheme;                       // UI.THEME <content path>: the project's .octheme (Godot's gui/theme/custom)

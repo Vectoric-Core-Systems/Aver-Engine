@@ -106,6 +106,9 @@ inline void applyProjectAudioMix(const fmt::ProjectDesc& project) {
         aver_audio_set_master_volume(project.masterVolume);
         for (int b = 0; b < 4; ++b) aver_audio_set_bus_volume(b, project.busVolume[b]);
     }
+    // AUDIO.SPEAKERS / AUDIO.BINAURAL: both are remembered by the ABI whether audio has started or not; the defaults (stereo, off) are left alone.
+    if (project.audioSpeakers == 6 || project.audioSpeakers == 8) aver_audio_set_speakers(project.audioSpeakers);
+    if (project.audioBinaural) aver_audio_set_binaural(1);
 }
 #endif
 

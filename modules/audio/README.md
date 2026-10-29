@@ -70,8 +70,23 @@ module stays Core-only.
 
 ## What it does not do
 
-No HRTF, no per-source environment (one listener-side reverb) and no occlusion by diffraction. Those are
-`docs/AUDIO.md` §5 and §8.
+No measured HRTF data set (the headphone mode below is an analytic head model), no room simulation (the
+listener-side reverb, plus the opt-in zone send reverbs below) and no portal propagation (diffraction is an
+opt-in one-bend probe). Those are `docs/AUDIO.md` §5, §8 and §15.
+
+## Surround and binaural (`Speakers.hpp`, `Binaural.hpp`)
+
+Opt-in, off by default (a stereo mixer renders the same samples as before, pinned in `tests/audio`). The mixer renders 1, 2, 6 (5.1) or
+8 (7.1) channels in the `WAVEFORMATEXTENSIBLE` / SDL order (`L R C LFE Ls Rs`, `L R C LFE Lb Rb Ls Rs`). Positional voices are panned over the
+speakers with a pairwise constant-power law (`sum(g*g) == 1` at every angle; a source overhead or inside the head spreads over all of them);
+stereo sources, the reverb return and the bus graph are upmixed by a power-preserving matrix (`StereoUpmix::Wrap`, or `Front`); an LFE send
+(0 by default = silent) low-passes a mono mix at 120 Hz. `Mixer::setSpeakerRequest(2/6/8)` is what the project wants; the device layer
+decides with `chooseMixChannels` from the device's channel count and speaker mask (`OutputInfo::channelMask`) and reopens the device when
+the request changes, and `buildDeviceMap` says which mixer channel feeds each device channel. `setBinaural(true)` on a stereo mixer places
+positional voices with Woodworth's interaural delay, a Brown-Duda head-shadow filter per ear and a pinna reflection that moves with elevation,
+interpolated per sample (no zipper noise, delays slew at most half a sample per sample), all in fixed per-voice state. Projects switch it on
+with `AUDIO.SPEAKERS 6|8` and `AUDIO.BINAURAL 1`; the C ABI and `Audio.Speakers` / `Binaural` / `LfeSend` / `Upmix` reach the same settings.
+`tests/audio/AudioSurroundTest` runs it offline; `docs/AUDIO.md` section 14 has the details and the headed checks.
 
 ## Bus graph, effects, Godot-style players
 
@@ -82,3 +97,72 @@ spectrum analyser); Godot's AudioStreamPlayer3D attenuation, panning, cone, filt
 functions; pause, start offset, playback position, live (generator) voices. Opt-in: the graph does nothing
 until `mixer.graph().setActive(true)`, and a mixer that never uses it renders exactly as before.
 `tests/audio` (`AudioBusTest`, `AudioSpatialTest`, `AudioAbiTest`) run all of it offline.
+
+## Device robustness (`OutputDriver.hpp`, `AudioDevice.hpp`)
+
+The mixer still never touches a device, but the policy for what a device does is here too, so a test can drive it. A backend
+(`modules/audio.wasapi`, `modules/audio.sdl`) implements `OutputBackend` for one open endpoint (`open`, `start`, `service`, `close`); the
+`OutputDriver` owns the loop and every decision, and `AudioDevice` is the render thread around it.
+
+- **Loss and default change.** A lost or invalidated device, a changed system default or a device that asks for nothing for two seconds is
+  closed and reopened on the new default; `Mixer::setOutputFormat(rate, channels)` moves the mixer to its format with every voice, stream,
+  sound, bus, graph bus and effect kept (effects and the reverb are rebuilt for the new rate: parameters, order and effect ids survive, delay
+  memory is cleared; a fade in progress keeps its length in seconds). One Output Log line per change.
+- **No device.** The mixer keeps mixing into nothing at real-time pace (`idleStep`), so playback positions, fades and finishing voices
+  advance, and the open is retried every second. A thread that was starved owes at most half a second of audio, not the whole gap. A device
+  that fails again within 250 ms of a rebuild waits for the retry instead of being reopened in a loop.
+- **Sample-rate rule.** Assets keep their own rate; every voice resamples to the device rate (`srcRate / deviceRate` per output frame), so a
+  48 kHz asset plays at the right pitch and length on a 44.1 or 96 kHz device and across a change between them. Nothing is resampled at
+  import.
+- **Reporting.** Underruns, state, device name, hardware channels, buffer and latency, and the change count are on `AudioDevice` and through
+  `audio_abi.h` (`aver_audio_device_*`) and `Audio.Device*` in C#.
+
+`setOutputFormat` allocates and is not audio-thread safe: the driver calls it only while no endpoint is open (between `close` and `start`),
+never from `mix()`. `tests/audio/AudioDeviceTest` runs all of it against a fake device and a fake clock; the real WASAPI and SDL backends
+are compile-checked only (docs/AUDIO.md section 11 lists what to listen for).
+
+## Real-time sound graphs (`SoundGraph.hpp`)
+
+A `.ocsnd` node graph played on the audio thread (`docs/AUDIO.md` section 13). `SoundProgram` is a graph compiled once from plain data (the
+format layer, `Aver.Sound`'s `compileSound`, converts a `.ocsnd`; this module reads no files); `SoundRunner` is one playing instance. Same rule
+as `mix()`: the runner's constructor allocates everything (node state, a value table, one delay memory sized for all Delay nodes) on the game
+thread, and `process()` is arithmetic only. `Mixer::playGraph` makes a voice of it; the runner hangs off the voice slot, is replaced when the
+slot is next acquired and freed in `collect()`, and the audio thread only clears its pointer.
+
+- **Live inputs are latest-value atomics.** `setParam` (by id; `setGraphParam` by name) stores; `process()` snapshots at the start of a block;
+  the Parameter node smooths toward it per sample (20 ms by default), so a jump is a ramp. `noteOff` is a flag latched at the next block: an Adsr
+  releases from its current level and the voice ends after the longest release. `Voice.stop` is still the one-block fade.
+- **One evaluator.** `Aver.Sound`'s offline `renderSound` constructs a runner and calls `process()` once. The loop is per sample with all state in
+  the runner, so any chunking gives identical samples; `tests/audio/SoundGraphTest` pins offline == audio thread bit for bit, and counts
+  allocations in `mix()` with a replacement `operator new` (0).
+- Kinds added: Parameter, LFO, HighPass, BandPass, Random, Crossfade, WavePlayer, Delay, Clamp, MapRange, EnvelopeFollower; oscillators and LowPass
+  gained an additive modulation input. A graph voice ignores voice pitch (a Parameter on an oscillator is its pitch) and the speed scale.
+
+## Decoders (`modules/formats`, not this module)
+
+This module stays Core-only and decodes nothing. The decoders are `audio::StreamSource`s in `Aver.Formats.Audio`
+(`aver/formats/AudioDecode.hpp`): Ogg Vorbis (`third_party/stb/stb_vorbis.c`), FLAC (`dr_flac.h`) and MP3 (`dr_mp3.h`)
+on every platform, each vendored file compiled in one translation unit. They stream with bounded memory on the decoder
+thread (so `mix()` never sees them), seek, take a start offset, a duration and loop points (Ogg `LOOPSTART` /
+`LOOPLENGTH` comments; FLAC and MP3 loop where the caller says), trim an MP3's encoder delay and padding (LAME/Xing tag),
+fold 3 to 8 channels to stereo, and refuse hostile input instead of crashing. `modules/audio.abi/src/StreamSources.cpp`
+picks them ahead of Media Foundation, which keeps `.m4a .aac .wma`; the importer and the Content Browser accept `.ogg
+.oga .flac .mp3` wherever `.wav` is accepted. `tests/audio/AudioDecodeTest` builds FLAC and MP3 streams in code and checks
+them sample for sample; `docs/AUDIO.md` section 12 lists the headed checks.
+
+## Environment (`Convolver.hpp`, `Reverb.hpp`, `Music.hpp`)
+
+Opt-in, off by default (a mixer that uses none of it renders the same samples as before, pinned in `tests/audio`); `docs/AUDIO.md` section 15 has the
+details, the numbers and the headed checks.
+
+- **Zone send reverbs.** `kMaxZoneReverbs` (4) send reverbs are allocated in `Mixer::init`; `setZoneReverb(slot, {wet, decay, damping, impulse,
+  predelayMs})` and `setVoiceZoneSend(voice, slot, send)` are latest-value atomics, the audio thread ramps each send across the block. The scene
+  (`modules/audio.scene`) gives the four most relevant `CReverbZone`s a slot and sets each tracked voice's sends by priority blend (`zoneShares`), so a
+  voice rings in the room it is in; `AudioSceneSystem::setReverbSmoothing` eases the listener-side blend.
+- **Convolution.** `Convolver` is a uniformly partitioned (256-frame) overlap-save FFT convolver with its own radix-2 FFT: latency one partition,
+  any impulse length (12 s cap), impulse built on the game thread from a decoded sound at any rate and crossfaded in, predelay, no allocation or lock
+  in `process()`. It is the `"AudioEffectConvolutionReverb"` bus effect (`dry`, `wet`, `predelay_msec`, `gain_db`) and an alternative reverb for a zone slot.
+- **Diffraction.** `findDiffractionPath` searches for the shortest one-bend path around an edge or through an opening with the existing `RayBlockFn`
+  and turns it into an occlusion value for the voice's own gain and low-pass (no delay, no new audio-thread code); `CAudioOcclusion::diffraction`
+  (default 0) enables it per emitter.
+- `tests/audio/AudioEnvironmentTest` runs it all offline, including the convolver against a direct time-domain convolution and its cost per block.

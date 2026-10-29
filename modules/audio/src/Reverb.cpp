@@ -145,4 +145,19 @@ ReverbParams blendReverbZones(const ReverbZoneInput* zones, usize count, const R
     return out;
 }
 
+void zoneShares(const f32* weights, const i32* priorities, usize count, f32* shares, f32& remainder) {
+    for (usize i = 0; i < count; ++i) shares[i] = 0.0f;
+    std::vector<u32> order;
+    order.reserve(count);
+    for (usize i = 0; i < count; ++i) if (weights[i] > 0.0f) order.push_back(static_cast<u32>(i));
+    std::stable_sort(order.begin(), order.end(), [&](u32 a, u32 b) { return priorities[a] > priorities[b]; });
+    f32 remaining = 1.0f;
+    for (const u32 i : order) {
+        const f32 w = clampf(weights[i], 0.0f, 1.0f);
+        shares[i] = w * remaining;
+        remaining *= (1.0f - w);
+    }
+    remainder = remaining;
+}
+
 } // namespace aver::audio

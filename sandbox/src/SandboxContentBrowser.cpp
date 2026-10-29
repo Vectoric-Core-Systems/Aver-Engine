@@ -1926,6 +1926,8 @@ void SandboxApp::drawFolderTree(const std::string& dir) {
         {".ocaudio",    {ICON_AUDIO,      IM_COL32(  0, 175, 255, 255), "Audio"}},
         {".wav",        {ICON_AUDIO,      IM_COL32(  0, 175, 255, 255), "Audio"}},
         {".ogg",        {ICON_AUDIO,      IM_COL32(  0, 175, 255, 255), "Audio"}},
+        {".mp3",        {ICON_AUDIO,      IM_COL32(  0, 175, 255, 255), "Audio"}},
+        {".flac",       {ICON_AUDIO,      IM_COL32(  0, 175, 255, 255), "Audio"}},
         {".ocbt",       {ICON_TREE,       IM_COL32( 63, 126, 255, 255), "Behaviour Tree"}},
         {".ocst",       {ICON_TREE,       IM_COL32(110, 185, 255, 255), "State Tree"}},          // AI: wave 3 #21
         {".oceqs",      {ICON_TUNE,       IM_COL32(120, 215, 170, 255), "Environment Query"}},
@@ -2575,7 +2577,7 @@ void SandboxApp::drawImportModal() {
     static bool s_overwrite = false;
     if (ImGui::IsWindowAppearing()) { s_overwrite = false; modelImportDialogReset(); }
     ImGui::TextUnformatted("Import an asset into the selected folder.");
-    ImGui::TextDisabled(".gltf/.glb/.fbx become .ocmesh; .wav/.mp3/.m4a/.flac become .ocaudio.");
+    ImGui::TextDisabled(".gltf/.glb/.fbx become .ocmesh; .wav/.ogg/.mp3/.flac/.m4a become .ocaudio.");
     ImGui::TextDisabled("Anything else is copied as-is.");
     ImGui::SetNextItemWidth(420.0f * dpi_);
     ImGui::InputText("Source file", importPath_, sizeof(importPath_));
@@ -2584,8 +2586,8 @@ void SandboxApp::drawImportModal() {
         const std::string start = importPath_[0] != '\0'
             ? std::filesystem::path(importPath_).parent_path().string() : std::string();
 #if AVER_HAVE_AUDIO_IMPORT
-        const char* kFilterLabel = "Importable assets (*.gltf, *.glb, *.fbx, *.wav, *.mp3, *.m4a, *.flac)";
-        const char* kFilterSpec  = "*.gltf;*.glb;*.fbx;*.wav;*.mp3;*.m4a;*.flac";
+        const char* kFilterLabel = "Importable assets (*.gltf, *.glb, *.fbx, *.wav, *.ogg, *.mp3, *.flac, *.m4a)";
+        const char* kFilterSpec  = "*.gltf;*.glb;*.fbx;*.wav;*.ogg;*.mp3;*.flac;*.m4a";
 #else
         const char* kFilterLabel = "Importable assets (*.gltf, *.glb, *.fbx)";
         const char* kFilterSpec  = "*.gltf;*.glb;*.fbx";
@@ -2748,7 +2750,7 @@ void SandboxApp::importAsset(const std::string& src, const std::string& destDir,
 
 #if AVER_WITH_IMGUI
 #if AVER_HAVE_AUDIO_IMPORT
-// Decodes .wav / .mp3 / .m4a / .flac into one .ocaudio in destDir. The source is not copied.
+// Decodes .wav / .ogg / .mp3 / .flac / .m4a into one .ocaudio in destDir. The source is not copied.
 void SandboxApp::importAudio(const std::string& src, const std::string& destDir, bool overwrite) {
     audio::SoundData data;
     const fmt::AudioImportResult r = fmt::audioImportFile(src, data);

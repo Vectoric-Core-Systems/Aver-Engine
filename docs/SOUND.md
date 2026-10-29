@@ -19,12 +19,23 @@ beside it is the audio *plan*; this one is not a plan.
 | The editor tab | `sandbox/src/SoundEditor.*` | `SoundEditorTest`, 137 checks |
 | Creating one | Content Browser → **+ Add** → **New Sound Graph** | — |
 
-Ten node kinds: `Sine`, `Saw`, `Square`, `Noise`, `Const` (sources, no inputs); `Gain`, `LowPass`,
-`Adsr` (one input); `Mix`, `Multiply` (two inputs).
+Ten node kinds in version 1: `Sine`, `Saw`, `Square`, `Noise`, `Const` (sources); `Gain`, `LowPass`,
+`Adsr` (shapers); `Mix`, `Multiply` (combiners). Version 2 adds eleven (section 7): `Parameter`, `Lfo`,
+`HighPass`, `BandPass`, `Random`, `Crossfade`, `WavePlayer`, `Delay`, `Clamp`, `MapRange`,
+`EnvelopeFollower`, and a frequency / cutoff modulation input on the oscillators and `LowPass`. A graph
+also plays in **real time** on the audio thread, answering live inputs and a note-off
+(`docs/AUDIO.md` section 13).
 
 ---
 
 ## 2. Rendered offline, and what that costs
+
+> **Updated.** The graph can now ALSO be evaluated per block on the audio thread (`Mixer::playGraph`,
+> `docs/AUDIO.md` section 13), with the node state pre-allocated at play time, named live inputs and a
+> note-off. `renderSound()` below is the same evaluator run once over the whole length, so a graph with
+> no live input gives identical samples either way. What follows describes the offline path and the
+> reasoning that led to the real-time one; the "cannot respond to a live parameter" cost applies to the
+> offline path only.
 
 `renderSound()` turns a graph into a whole buffer up front. The mixer then plays it like any other
 sound. The alternative — evaluating the graph per block on the audio thread, which is what Unreal's
@@ -93,8 +104,15 @@ would then have to grow a chunk for.
 
 ## 6. Where this stops
 
-**A graph author cannot yet play a `.ocsnd` from a visual script.** This is the one real gap, and it
-is worth stating precisely rather than leaving to be discovered:
+**The real-time route now closes most of this gap.** The `Play Sound Graph`, `Play Sound Graph At`,
+`Set Sound Graph Input` and `Note Off Sound Graph` nodes (family `ProceduralSound`) play a `.ocsnd` on the
+audio thread from a visual script, and `Audio.PlayGraph` does from C#. What remains is the **offline**
+route from a script: `PlaySound` still takes a cooked `.ocaudio` or an importable file and does not
+render a `.ocsnd`; render-per-play with a fresh seed (and the caching decision below) is still only
+reachable from C# with `Audio.LoadPcm`. The original text of the gap follows.
+
+**A graph author cannot yet play a `.ocsnd` from a visual script** through the offline route. This is the
+one real gap there, and it is worth stating precisely rather than leaving to be discovered:
 
 - The Audio nodes (`PlaySound`, `PlaySoundAt`, …) take a path and hand it to `aver_audio_load`,
   which reads cooked `.ocaudio` or imports a `.wav`/`.ogg`. It does **not** know about `.ocsnd`.
@@ -115,3 +133,27 @@ Also absent, and smaller:
   for a sound meant to be stereo at source.
 - **No `.ocsnd` cook step.** The graph is stored, not the audio, and it is re-rendered on every use.
   That is cheap for the node counts involved and has not been measured at scale.
+
+---
+
+## 7. Version 2: the real-time node kinds
+
+`.ocsnd` content version 2 (`OcSound.hpp`) adds node kinds 10 to 20 and a name chunk `SNAM` (a node's
+name: the live input a `Parameter` answers to, the asset a `WavePlayer` plays). **A graph that uses nothing
+new is still written as version 1, byte for byte as before**, so older tools open it; a graph with a new
+kind, a name, or a link into an input version 1 did not have (the oscillators' frequency offset, the
+filters' cutoff offset) is version 2. The reader takes both and refuses a newer one. Kinds, inputs and
+parameters are tabulated in `docs/AUDIO.md` section 13; the `OcSoundNodeKind` comments in `OcSound.hpp`
+are the one-line version.
+
+- **Inputs add, and read 0 unconnected.** `Sine`/`Saw`/`Square` input 0 is a frequency offset in Hz added
+  to `params[0]`; `LowPass` input 1 is a cutoff offset. That is how a `Parameter` drives pitch or tone.
+- **Offline, a `Parameter` is its default** unless `RenderParams::inputs` names a value (the editor's
+  Preview uses the defaults); a `WavePlayer` needs `RenderParams::resolveWave` or it is silent.
+- **Random is per play**: drawn from the render seed per node, so two seeds differ and one seed repeats.
+- **Limits** (refused at compile with a reason): 256 nodes, 32 distinct Parameter names, 8 distinct
+  WavePlayer assets, 30 s of delay memory in total (10 s per node).
+- **The editor palette is data.** `snKindName`, `snParamLabel`, `snInputLabel`, `snDefaultParams` and
+  `snNameLabel` in `SoundEditor.cpp` name the new kinds; the Kind combo and Add menu list every kind up to
+  `kOcSoundLastKind`. A Parameter or WavePlayer node shows a name box. Preview is unchanged and opens no
+  device in any test.

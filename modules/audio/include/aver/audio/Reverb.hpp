@@ -58,4 +58,22 @@ struct ReverbZoneInput {
 // blend among the zones only, so a zone fading out keeps its own tail length.
 ReverbParams blendReverbZones(const ReverbZoneInput* zones, usize count, const ReverbParams& ambient);
 
+// ---- zone send reverbs (docs/AUDIO.md section 15) ----
+
+// How many send reverbs the mixer pre-allocates for reverb zones.
+inline constexpr u32 kMaxZoneReverbs = 4;
+
+// What one zone send reverb plays: the algorithmic reverb's parameters, or, when `impulse` names a sound in the mixer, a convolution with
+// it (the algorithmic parameters are then unused except wet).
+struct ZoneReverb {
+    ReverbParams reverb;
+    u32 impulse = 0;            // SoundHandle of the impulse response; 0 = the algorithmic reverb
+    f32 predelayMs = 0.0f;
+};
+
+// The priority blend of blendReverbZones as shares: the highest-priority zone takes its weight first, lower zones take what is left
+// (share[i] = weight[i] * what the higher ones left). `remainder` is what no zone took. Sum(share) + remainder == 1 for weights in [0,1].
+// Continuous in every weight; ties keep input order.
+void zoneShares(const f32* weights, const i32* priorities, usize count, f32* shares, f32& remainder);
+
 } // namespace aver::audio

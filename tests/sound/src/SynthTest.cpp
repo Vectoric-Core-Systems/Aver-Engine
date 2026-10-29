@@ -8,6 +8,7 @@
 #include "aver/sound/Synth.hpp"
 
 #include "aver/core/Log.hpp"
+#include "aver/formats/Avr1.hpp"
 #include "aver/formats/OcSound.hpp"
 
 #include <cmath>
@@ -55,6 +56,100 @@ static fmt::OcSoundData oscillator(fmt::OcSoundNodeKind kind, f32 freq, f32 seco
     g.outputNode = 0;
     g.durationSec = seconds;
     return g;
+}
+
+// THE RENDERER AS IT WAS BEFORE THE REAL-TIME EVALUATOR, copied here verbatim (only the namespace is new) as the reference for "a graph that uses
+// none of the new features renders exactly the same samples". renderSound now runs modules/audio's SoundRunner; this is the old standalone loop.
+namespace legacy {
+constexpr f32 kPi2 = 6.28318530717958647692f;
+struct NodeState { f32 phase = 0.0f; f32 last = 0.0f; u32 rng = 1u; };
+f32 nextNoise(u32& s) { s ^= s << 13; s ^= s >> 17; s ^= s << 5; return (static_cast<f32>(s & 0xFFFFFFu) / 8388608.0f) - 1.0f; }
+f32 onePole(f32 in, f32& last, f32 cutoffHz, f32 sampleRate) {
+    if (cutoffHz <= 0.0f) return 0.0f;
+    const f32 nyquist = sampleRate * 0.5f;
+    if (cutoffHz >= nyquist) { last = in; return in; }
+    const f32 rc = 1.0f / (kPi2 * cutoffHz);
+    const f32 dt = 1.0f / sampleRate;
+    const f32 a  = dt / (rc + dt);
+    last += a * (in - last);
+    return last;
+}
+f32 adsrAt(f32 t, f32 duration, f32 a, f32 d, f32 s, f32 r) {
+    if (t < 0.0f || t > duration) return 0.0f;
+    a = a < 0.0f ? 0.0f : a;
+    d = d < 0.0f ? 0.0f : d;
+    r = r < 0.0f ? 0.0f : r;
+    s = s < 0.0f ? 0.0f : (s > 1.0f ? 1.0f : s);
+    const f32 releaseStart = duration - r;
+    if (r > 0.0f && t >= releaseStart) {
+        const f32 atRelease = releaseStart <= a && a > 0.0f ? (releaseStart / a)
+                            : (releaseStart <= a + d && d > 0.0f ? 1.0f - (1.0f - s) * ((releaseStart - a) / d) : s);
+        const f32 k = (t - releaseStart) / r;
+        return atRelease * (1.0f - (k > 1.0f ? 1.0f : k));
+    }
+    if (a > 0.0f && t < a) return t / a;
+    if (d > 0.0f && t < a + d) return 1.0f - (1.0f - s) * ((t - a) / d);
+    return s;
+}
+std::vector<f32> render(const fmt::OcSoundData& graph, u32 sampleRate, u32 seed) {
+    const f32 duration = graph.durationSec;
+    const u32 frames = static_cast<u32>(static_cast<u64>(duration * static_cast<f32>(sampleRate)));
+    const u32 n = static_cast<u32>(graph.nodes.size());
+    const f32 sr = static_cast<f32>(sampleRate);
+    std::vector<NodeState> state(n);
+    for (u32 i = 0; i < n; ++i) state[i].rng = (seed * 2654435761u + i * 40503u) | 1u;
+    std::vector<f32> value(n, 0.0f), in0(n, 0.0f), in1(n, 0.0f);
+    std::vector<f32> out(frames, 0.0f);
+    for (u32 f = 0; f < frames; ++f) {
+        const f32 t = static_cast<f32>(f) / sr;
+        for (u32 i = 0; i < n; ++i) { in0[i] = 0.0f; in1[i] = 0.0f; }
+        for (u32 i = 0; i < n; ++i) {
+            const fmt::OcSoundNode& node = graph.nodes[i];
+            NodeState& st = state[i];
+            const f32 p0 = node.params[0], p1 = node.params[1];
+            f32 v = 0.0f;
+            switch (node.kind) {
+                case fmt::OcSoundNodeKind::Sine: v = std::sin(st.phase * kPi2); st.phase += p0 / sr; break;
+                case fmt::OcSoundNodeKind::Saw: v = st.phase * 2.0f - 1.0f; st.phase += p0 / sr; break;
+                case fmt::OcSoundNodeKind::Square: { const f32 duty = p1 > 0.0f && p1 < 1.0f ? p1 : 0.5f; v = st.phase < duty ? 1.0f : -1.0f; st.phase += p0 / sr; break; }
+                case fmt::OcSoundNodeKind::Noise: v = nextNoise(st.rng); break;
+                case fmt::OcSoundNodeKind::Const: v = p0; break;
+                case fmt::OcSoundNodeKind::Gain: v = in0[i] * p0; break;
+                case fmt::OcSoundNodeKind::LowPass: v = onePole(in0[i], st.last, p0, sr); break;
+                case fmt::OcSoundNodeKind::Adsr: v = in0[i] * adsrAt(t, duration, node.params[0], node.params[1], node.params[2], node.params[3]); break;
+                case fmt::OcSoundNodeKind::Mix: v = in0[i] + in1[i]; break;
+                case fmt::OcSoundNodeKind::Multiply: v = in0[i] * in1[i]; break;
+                default: break;
+            }
+            if (st.phase >= 1.0f) st.phase -= std::floor(st.phase);
+            value[i] = v;
+            for (const fmt::OcSoundLink& l : graph.links) {
+                if (l.fromNode != i) continue;
+                if (l.toInput == 0) in0[l.toNode] += v; else in1[l.toNode] += v;
+            }
+        }
+        f32 s = value[graph.outputNode];
+        s = s < -1.0f ? -1.0f : (s > 1.0f ? 1.0f : s);
+        out[f] = s;
+    }
+    return out;
+}
+} // namespace legacy
+
+// Bit-identical where the compiler does not fuse multiply-adds differently between two translation units (x86 as built here); within 1e-5 where it
+// may (arm64 contracts a*b+c, and the two copies of the loop are separate TUs), which is far below anything audible and still catches a changed render.
+static bool sameAsLegacy(const std::vector<f32>& a, const std::vector<f32>& b) {
+    if (a.size() != b.size()) return false;
+#if defined(__aarch64__) || defined(_M_ARM64) || defined(__ARM_NEON)
+    for (usize i = 0; i < a.size(); ++i) if (std::fabs(a[i] - b[i]) > 1.0e-5f) return false;
+    return true;
+#else
+    return a == b;
+#endif
+}
+
+static fmt::OcSoundNode mk(fmt::OcSoundNodeKind k, f32 p0 = 0, f32 p1 = 0, f32 p2 = 0, f32 p3 = 0) {
+    fmt::OcSoundNode n; n.kind = k; n.params[0] = p0; n.params[1] = p1; n.params[2] = p2; n.params[3] = p3; return n;
 }
 
 int main() {
@@ -218,7 +313,7 @@ int main() {
 
         // An input a kind does not have.
         fmt::OcSoundData bad2 = g;
-        bad2.links.push_back({0, 1, 1});   // LowPass has ONE input
+        bad2.links.push_back({0, 1, 2});   // LowPass has TWO inputs since version 2: the signal and a cutoff offset
         check(!bad2.valid(), "a link into an input the target does not have is refused too");
     }
 
@@ -238,6 +333,46 @@ int main() {
         check(why.find("exceeds the cap") != std::string::npos,
               "AND FOR THE RIGHT REASON -- the frame cap, not some other validity failure");
         check(pcm.empty(), "and nothing was allocated for it");
+    }
+
+    AVER_INFO("a graph that uses none of the new features renders the SAME samples it did before the real-time evaluator existed");
+    {
+        using K = fmt::OcSoundNodeKind;
+        // Every version-1 kind, a shared source, and several links into one input (so the order inputs are summed in is exercised).
+        fmt::OcSoundData big;
+        big.nodes = {mk(K::Saw, 220), mk(K::Sine, 3), mk(K::Square, 110, 0.3f), mk(K::Noise), mk(K::Const, 0.5f),
+                     mk(K::Gain, 0.5f), mk(K::Mix), mk(K::LowPass, 1200), mk(K::Multiply), mk(K::Mix), mk(K::Gain, 0.3f),
+                     mk(K::Adsr, 0.01f, 0.05f, 0.6f, 0.1f)};
+        big.links = {{0, 5, 0}, {5, 6, 0}, {3, 6, 1}, {6, 7, 0}, {7, 8, 0}, {1, 8, 1}, {8, 9, 0}, {2, 9, 1}, {9, 10, 0}, {4, 10, 0}, {10, 11, 0}};
+        big.outputNode = 11;
+        big.durationSec = 0.3f;
+        fmt::OcSoundData sums;
+        sums.nodes = {mk(K::Saw, 200), mk(K::Sine, 330), mk(K::Noise), mk(K::Gain, 0.25f)};
+        sums.links = {{0, 3, 0}, {1, 3, 0}, {2, 3, 0}, {1, 3, 0}};
+        sums.outputNode = 3;
+        sums.durationSec = 0.2f;
+        fmt::OcSoundData rel;   // a release that begins during the attack, and one with no release at all
+        rel.nodes = {mk(K::Const, 1.0f), mk(K::Adsr, 0.5f, 0.2f, 0.4f, 0.4f), mk(K::Adsr, 0.01f, 0.01f, 0.7f, 0.0f)};
+        rel.links = {{0, 1, 0}, {1, 2, 0}};
+        rel.outputNode = 2;
+        rel.durationSec = 0.6f;
+        for (const fmt::OcSoundData* g : {&big, &sums, &rel}) {
+            for (const u32 seed : {1u, 9u}) {
+                for (const u32 rate : {48000u, 44100u}) {
+                    sound::RenderParams p; p.sampleRate = rate; p.seed = seed;
+                    std::vector<f32> now;
+                    sound::renderSound(*g, p, now, &why);
+                    check(sameAsLegacy(now, legacy::render(*g, rate, seed)),
+                          "bit-identical to the old renderer (" + std::to_string(g->nodes.size()) + " nodes, seed " + std::to_string(seed) + ", " + std::to_string(rate) + " Hz)");
+                }
+            }
+        }
+        // And the format: a graph of version-1 kinds is still written as version 1, with no name chunk.
+        std::vector<u8> bytes;
+        fmt::writeOcSound(big, bytes, &why);
+        fmt::Avr1File f;
+        check(fmt::parseAvr1(bytes.data(), bytes.size(), f, &why) && f.contentVersion == 1 && !f.find(fmt::avrFourCC("SNAM")),
+              "a version-1 graph is written as content version 1 with no SNAM chunk, so older tools still open it");
     }
 
     AVER_INFO(g_failures ? "SynthTest: {} FAILURES" : "SynthTest: all checks passed ({})", g_failures);

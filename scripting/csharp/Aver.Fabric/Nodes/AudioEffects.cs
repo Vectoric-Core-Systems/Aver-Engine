@@ -70,6 +70,7 @@ public class AudioEffect : Resource
         "AudioEffectStereoEnhance" => new AudioEffectStereoEnhance(),
         "AudioEffectCapture" => new AudioEffectCapture(),
         "AudioEffectSpectrumAnalyzer" => new AudioEffectSpectrumAnalyzer(),
+        "AudioEffectConvolutionReverb" => new AudioEffectConvolutionReverb(),
         _ => null,
     };
 
@@ -278,6 +279,36 @@ public class AudioEffectReverb : AudioEffect
     public float Hipass { get => P("hipass", 0f); set => SetP("hipass", value); }
     public float Dry { get => P("dry", 1f); set => SetP("dry", value); }
     public float Wet { get => P("wet", 0.5f); set => SetP("wet", value); }
+}
+
+/// <summary>A convolution reverb (an engine addition, not a Godot class): the bus signal convolved with an impulse response taken from a
+/// loaded sound, mixed with the dry signal. The wet signal lags the dry by one 256-frame partition.</summary>
+public class AudioEffectConvolutionReverb : AudioEffect
+{
+    private int _impulse;
+
+    internal override string NativeClass => "AudioEffectConvolutionReverb";
+    public float Dry { get => P("dry", 1f); set => SetP("dry", value); }
+    public float Wet { get => P("wet", 0.5f); set => SetP("wet", value); }
+    public float PredelayMsec { get => P("predelay_msec", 0f); set => SetP("predelay_msec", value); }
+    public float GainDb { get => P("gain_db", 0f); set => SetP("gain_db", value); }
+
+    /// <summary>Takes the impulse response from a loaded engine sound (any rate; the effect keeps its own copy). True when applied;
+    /// before the effect is on a bus it is remembered and applied when it is added.</summary>
+    public bool SetImpulse(int sound)
+    {
+        _impulse = sound;
+        if (!AudioNative.Available || sound <= 0) return false;
+        bool ok = false;
+        foreach (int id in NativeIds) ok |= AudioNative.aver_audio_effect_set_impulse(id, sound) != 0;
+        return ok;
+    }
+
+    internal override void Attach(int id)
+    {
+        base.Attach(id);
+        if (_impulse > 0 && AudioNative.Available) AudioNative.aver_audio_effect_set_impulse(id, _impulse);
+    }
 }
 
 public class AudioEffectPanner : AudioEffect

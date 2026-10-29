@@ -209,15 +209,24 @@ if(TARGET Aver.Audio)
       src/OcAudio.cpp
       # .ocbus -- an audio bus layout (Godot AudioBusLayout parity, G5 S1); the layout structs are plain data in aver/audio/BusLayout.hpp.
       src/OcBusLayout.cpp
+      # Ogg Vorbis, FLAC and MP3 on every platform: the shared plumbing, then each vendored decoder in
+      # its own translation unit (its implementation macro is defined in exactly that one file).
+      src/AudioDecode.cpp
+      src/AudioDecodeVorbis.cpp
+      src/AudioDecodeFlac.cpp
+      src/AudioDecodeMp3.cpp
     DEPS
       Aver.Formats
       Aver.Audio
   )
+  target_include_directories(Aver.Formats.Audio PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/stb ${CMAKE_SOURCE_DIR}/third_party/dr_libs)
+  # Somebody else's code: this tree's warning level is for ours. Off for these three files only.
+  set_source_files_properties(src/AudioDecodeVorbis.cpp src/AudioDecodeFlac.cpp src/AudioDecodeMp3.cpp
+    PROPERTIES COMPILE_OPTIONS "$<IF:$<CXX_COMPILER_ID:MSVC>,/w,-w>")
   if(WIN32)
-    # Media Foundation is how .mp3/.m4a/.wma/.flac get imported without vendoring a decoder. An MP3
-    # decoder is two thousand lines of Huffman, IMDCT and polyphase synthesis, and the operating
-    # system already ships a correct one -- the same reasoning that chose WASAPI over a vendored
-    # audio backend. .wav still goes through this module's own reader, which needs none of it.
+    # Media Foundation still decodes what the vendored decoders do not (.m4a/.aac/.wma), and is the
+    # fallback for an .ogg/.flac/.mp3 they decline. .wav goes through this module's own reader.
     target_link_libraries(Aver.Formats.Audio PRIVATE mfplat mfreadwrite mfuuid ole32)
   endif()
 endif()

@@ -32,6 +32,9 @@ public:
     void init(u32 sampleRate);
     void shutdown();
     u32 sampleRate() const { return rate_; }
+    // A device rate change: every effect is rebuilt for the new rate with its parameters, enabled flag, sidechain and id kept (its delay
+    // lines and filter memory start empty). Allocates; the audio thread must not be mixing (the device layer calls it between devices).
+    void setSampleRate(u32 sampleRate);
 
     // The graph is inert until activated; voices on graph buses are silent while it is not.
     bool active() const { return active_.load(std::memory_order_acquire); }
@@ -77,6 +80,9 @@ public:
     // A compressor's sidechain: the bus it listens to (empty clears). Resolved with the sends.
     void setSidechain(i32 bus, i32 effectIdx, const std::string& busName);
     const std::string& sidechain(i32 bus, i32 effectIdx) const;
+
+    // Game thread: lets every effect free what the audio thread has finished with (a convolution reverb's replaced impulse).
+    void collect();
 
     // ---- meters ----
     // Godot's get_bus_peak_volume_left/right_db: the peak of the bus's last block after effects and volume; -200 when silent.

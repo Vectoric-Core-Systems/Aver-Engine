@@ -43,6 +43,18 @@ add_executable(AudioSpatialTest src/AudioSpatialTest.cpp)
 target_link_libraries(AudioSpatialTest PRIVATE Aver.Audio Aver.Core Aver.Platform)
 set_target_properties(AudioSpatialTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# AudioDeviceTest -- device robustness with no sound card: the output policy (loss mid-block, default-device change to another rate, no device,
+# device back, a wedged or flapping device) against a fake device, the render thread against a fake, and the sample-rate rule.
+add_executable(AudioDeviceTest src/AudioDeviceTest.cpp)
+target_link_libraries(AudioDeviceTest PRIVATE Aver.Audio Aver.Core Aver.Platform)
+set_target_properties(AudioDeviceTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# SoundGraphTest -- real-time sound graphs (docs/AUDIO.md section 13): the audio-thread path against the offline render, live inputs, note-off, the voice
+# pool, and no allocation in mix() (counted with a replacement operator new). Offline; no device.
+add_executable(SoundGraphTest src/SoundGraphTest.cpp)
+target_link_libraries(SoundGraphTest PRIVATE Aver.Sound Aver.Audio Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(SoundGraphTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # AudioAbiTest -- the same through the plain-C seam in OFFLINE mode (the real mixer, no device), plus the .ocbus layout format.
 if(TARGET Aver.Audio.Abi)
   add_executable(AudioAbiTest src/AudioAbiTest.cpp)
@@ -56,3 +68,35 @@ if(TARGET Aver.Audio.Scene)
   target_link_libraries(AudioSceneTest PRIVATE Aver.Audio.Scene Aver.Audio Aver.Scene Aver.Core Aver.Platform)
   set_target_properties(AudioSceneTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# AudioDecodeTest -- Ogg Vorbis / FLAC / MP3 (docs/AUDIO.md "Decoders"): FLAC and MP3 streams built in code and decoded exactly, the gapless
+# trim, windows and loop points, hostile input for all three decoders, and (with the ABI target) a streamed FLAC against the same audio as a
+# WAV through the offline mixer. Ships no audio file and needs no encoder. `AudioDecodeTest --file <path>` decodes one outside file and reports it.
+if(TARGET Aver.Formats.Audio)
+  add_executable(AudioDecodeTest src/AudioDecodeTest.cpp)
+  target_link_libraries(AudioDecodeTest PRIVATE Aver.Formats.Audio Aver.Formats Aver.Audio Aver.Core Aver.Platform)
+  if(TARGET Aver.Audio.Abi)
+    target_link_libraries(AudioDecodeTest PRIVATE Aver.Audio.Abi)
+    target_compile_definitions(AudioDecodeTest PRIVATE AVER_TEST_HAS_ABI=1)
+  endif()
+  set_target_properties(AudioDecodeTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
+# AudioSurroundTest -- surround output and binaural (docs/AUDIO.md section 14), no device: the pairwise pan and its energy, sources at known angles in
+# 5.1 / 7.1, the stereo upmix, the LFE send, the device layout choice and channel map, the output policy changing layout against a fake device, the
+# analytic head model (ITD sign and size, level, front/back and elevation cues, smooth interpolation), defaults unchanged, and no allocation in mix().
+add_executable(AudioSurroundTest src/AudioSurroundTest.cpp)
+target_link_libraries(AudioSurroundTest PRIVATE Aver.Audio Aver.Core Aver.Platform)
+set_target_properties(AudioSurroundTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# AudioEnvironmentTest -- environment audio (docs/AUDIO.md section 15), no device: the partitioned FFT convolver against a direct time-domain
+# convolution (exact within float tolerance, partition boundaries, chunking, swaps, tails, hostile input, rate changes) with a ms-per-block cost
+# report for a 2 s impulse, the convolution reverb effect, the zone send reverbs in the mixer (independent slots, exact ramps, clean restart, no
+# allocation in mix(), defaults unchanged), the zone share blend, and diffraction (monotonic with the blocker, through an opening, limits).
+add_executable(AudioEnvironmentTest src/AudioEnvironmentTest.cpp)
+target_link_libraries(AudioEnvironmentTest PRIVATE Aver.Audio Aver.Core Aver.Platform)
+if(TARGET Aver.Formats.Audio)
+  target_link_libraries(AudioEnvironmentTest PRIVATE Aver.Formats.Audio Aver.Formats)
+  target_compile_definitions(AudioEnvironmentTest PRIVATE AVER_TEST_HAS_FORMATS=1)
+endif()
+set_target_properties(AudioEnvironmentTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

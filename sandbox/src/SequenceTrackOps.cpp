@@ -300,7 +300,7 @@ SeqAssetKind seqClassifyAsset(const std::string& path) {
     const usize dot = path.rfind('.');
     if (dot == std::string::npos) return SeqAssetKind::None;
     const std::string ext = lower(std::string_view(path).substr(dot));
-    if (ext == ".wav" || ext == ".mp3" || ext == ".m4a" || ext == ".wma" || ext == ".flac" || ext == ".ogg")
+    if (ext == ".wav" || ext == ".mp3" || ext == ".m4a" || ext == ".wma" || ext == ".flac" || ext == ".ogg" || ext == ".oga")
         return SeqAssetKind::Sound;
     if (ext == ".ocanim") return SeqAssetKind::Clip;
     if (ext == ".ocmontage") return SeqAssetKind::Montage;

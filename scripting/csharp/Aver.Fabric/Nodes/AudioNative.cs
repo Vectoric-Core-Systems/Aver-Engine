@@ -118,6 +118,7 @@ internal static class AudioNative
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int aver_audio_effect_set_param(int id, [MarshalAs(UnmanagedType.LPUTF8Str)] string name, float value);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern float aver_audio_effect_get_param(int id, [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int aver_audio_effect_class(int id, byte[] textOut, int cap);
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int aver_audio_effect_set_impulse(int id, int sound);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int aver_audio_effect_param_count(int id);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int aver_audio_effect_param_info(int id, int index, byte[] nameOut, int cap, out float def, out float lo, out float hi);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] internal static extern int aver_audio_capture_available(int id);

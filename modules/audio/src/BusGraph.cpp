@@ -24,6 +24,22 @@ void BusGraph::init(u32 sampleRate) {
     nextEffectId_ = 1;
 }
 
+void BusGraph::setSampleRate(u32 sampleRate) {
+    Guard g(lock_);
+    if (rate_ == 0 || sampleRate == 0 || sampleRate == rate_) return;
+    rate_ = sampleRate;
+    for (auto& b : buses_) {
+        for (auto& slot : b->effects) {
+            std::unique_ptr<Effect> fresh = Effect::create(slot->fx->kind(), sampleRate);
+            if (!fresh) continue;
+            for (u32 i = 0; i < fresh->paramCount(); ++i) fresh->setParam(i, slot->fx->param(i));
+            fresh->adoptFrom(*slot->fx);        // an impulse response is rebuilt for the new rate
+            slot->fx = std::move(fresh);
+        }
+    }
+    resolveLinks();     // the new effects get their sidechain buses back
+}
+
 void BusGraph::shutdown() {
     Guard g(lock_);
     buses_.clear();
@@ -204,6 +220,15 @@ bool BusGraph::findEffect(u32 id, i32& bus, i32& effectIdx) const {
             if (e[k]->id == id) { bus = i; effectIdx = static_cast<i32>(k); return true; }
     }
     return false;
+}
+
+void BusGraph::collect() {
+    // Called every frame by Mixer::collect: never wait for a chunk in progress, try again next frame.
+    if (!lock_.tryLock()) return;
+    for (auto& b : buses_)
+        for (auto& slot : b->effects)
+            if (slot->fx) slot->fx->collect();
+    lock_.unlock();
 }
 
 Effect* BusGraph::effect(u32 id) const {

@@ -16,6 +16,7 @@ namespace {
 constexpr u32 kChunkSHDR = avrFourCC("SHDR");
 constexpr u32 kChunkSNOD = avrFourCC("SNOD");
 constexpr u32 kChunkSLNK = avrFourCC("SLNK");
+constexpr u32 kChunkSNAM = avrFourCC("SNAM");
 constexpr u32 kSubtypeSound = avrFourCC("SND ");   // padded to four, as .ocnav's "NAV " is
 
 bool fail(std::string* why, std::string m) { if (why) *why = std::move(m); return false; }
@@ -39,6 +40,10 @@ bool OcSoundData::valid() const {
     if (nodes.empty()) return false;
     if (outputNode >= nodes.size()) return false;
     if (durationSec <= 0.0f) return false;
+    for (const OcSoundNode& n : nodes) {
+        if (static_cast<u32>(n.kind) > kOcSoundLastKind) return false;
+        if (n.name.size() > kOcSoundMaxName) return false;
+    }
     for (const OcSoundLink& l : links) {
         if (l.fromNode >= nodes.size() || l.toNode >= nodes.size()) return false;
         // SOURCES BEFORE CONSUMERS -- the whole cycle guard, in one comparison. See the header.
@@ -46,6 +51,14 @@ bool OcSoundData::valid() const {
         if (l.toInput >= ocSoundInputCount(nodes[l.toNode].kind)) return false;
     }
     return true;
+}
+
+bool OcSoundData::needsVersion2() const {
+    for (const OcSoundNode& n : nodes)
+        if (static_cast<u32>(n.kind) > static_cast<u32>(OcSoundNodeKind::Multiply) || !n.name.empty()) return true;
+    for (const OcSoundLink& l : links)
+        if (l.toNode < nodes.size() && l.toInput >= ocSoundInputCountV1(nodes[l.toNode].kind)) return true;
+    return false;
 }
 
 bool writeOcSound(const OcSoundData& in, std::vector<u8>& out, std::string* why) {
@@ -82,14 +95,34 @@ bool writeOcSound(const OcSoundData& in, std::vector<u8>& out, std::string* why)
         }
     }
 
+    // Names (Parameter, WavePlayer), version 2 only: u32 count, then per entry u32 node index, u32 byte length, the bytes.
+    const bool v2 = in.needsVersion2();
+    std::vector<u8> snam;
+    if (v2) {
+        W w{snam};
+        u32 named = 0;
+        for (const OcSoundNode& n : in.nodes) if (!n.name.empty()) ++named;
+        w.u32v(named);
+        for (u32 i = 0; i < static_cast<u32>(in.nodes.size()); ++i) {
+            const std::string& s = in.nodes[i].name;
+            if (s.empty()) continue;
+            w.u32v(i);
+            w.u32v(static_cast<u32>(s.size()));
+            snam.insert(snam.end(), s.begin(), s.end());
+        }
+    }
+
     Avr1File f;
     f.subtype = kSubtypeSound;
-    f.contentVersion = 1;
+    // VERSIONED BY WHAT THE GRAPH USES, the way OcMesh does: a graph of v1 kinds is written as v1 and is byte-identical to what earlier
+    // builds wrote, so a tool that has not been updated still opens it. A graph using a v2 feature says so.
+    f.contentVersion = v2 ? kOcSoundVersion : 1;
     f.flags = kAvrFlagCooked;
     f.add(kChunkSHDR, std::move(shdr), kAvrChunkRequired);
     f.add(kChunkSNOD, std::move(snod), kAvrChunkRequired);
     // A graph of ONE node is legal and needs no links, so SLNK is written but not required on read.
     f.add(kChunkSLNK, std::move(slnk));
+    if (v2) f.add(kChunkSNAM, std::move(snam));
     return writeAvr1(f, out, why);
 }
 
@@ -97,6 +130,9 @@ bool parseOcSound(const u8* bytes, usize size, OcSoundData& out, std::string* wh
     Avr1File f;
     if (!parseAvr1(bytes, size, f, why)) return false;
     if (f.subtype != kSubtypeSound) return fail(why, ".ocsnd: container subtype is not SND");
+    if (f.contentVersion > kOcSoundVersion)
+        return fail(why, ".ocsnd: content version " + std::to_string(f.contentVersion) + " is newer than this build reads (" +
+                         std::to_string(kOcSoundVersion) + ")");
 
     const AvrChunk* shdr = f.find(kChunkSHDR);
     const AvrChunk* snod = f.find(kChunkSNOD);
@@ -123,7 +159,7 @@ bool parseOcSound(const u8* bytes, usize size, OcSoundData& out, std::string* wh
     out.nodes.resize(nodeCount);
     for (u32 i = 0; i < nodeCount; ++i) {
         const u32 kindRaw = n.u32v();
-        if (kindRaw > static_cast<u32>(OcSoundNodeKind::Multiply))
+        if (kindRaw > kOcSoundLastKind)
             return fail(why, ".ocsnd: node " + std::to_string(i) + " has an unknown kind " +
                              std::to_string(kindRaw));
         out.nodes[i].kind = static_cast<OcSoundNodeKind>(kindRaw);
@@ -147,6 +183,26 @@ bool parseOcSound(const u8* bytes, usize size, OcSoundData& out, std::string* wh
             out.links[i].toInput  = l.u32v();
         }
         if (!l.ok) return fail(why, ".ocsnd: truncated link table");
+    }
+
+    for (OcSoundNode& node : out.nodes) node.name.clear();
+    if (const AvrChunk* snam = f.find(kChunkSNAM)) {
+        R r{snam->data.data(), snam->data.data() + snam->data.size()};
+        const u32 named = r.u32v();
+        if (!r.ok) return fail(why, ".ocsnd: truncated SNAM header");
+        // Each entry is at least 8 bytes, so a count the chunk cannot hold is refused before the loop.
+        if (static_cast<u64>(named) * 8 > snam->data.size() || named > nodeCount)
+            return fail(why, ".ocsnd: SNAM claims " + std::to_string(named) + " names, more than the chunk or the graph can hold");
+        for (u32 i = 0; i < named; ++i) {
+            const u32 idx = r.u32v();
+            const u32 len = r.u32v();
+            if (!r.ok) return fail(why, ".ocsnd: truncated SNAM entry");
+            if (idx >= nodeCount) return fail(why, ".ocsnd: SNAM names node " + std::to_string(idx) + " of " + std::to_string(nodeCount));
+            if (len > kOcSoundMaxName || !r.need(len)) return fail(why, ".ocsnd: SNAM name of node " + std::to_string(idx) + " is too long or truncated");
+            if (!out.nodes[idx].name.empty()) return fail(why, ".ocsnd: SNAM names node " + std::to_string(idx) + " twice");
+            out.nodes[idx].name.assign(reinterpret_cast<const char*>(r.p), len);
+            r.p += len;
+        }
     }
 
     if (!out.valid())

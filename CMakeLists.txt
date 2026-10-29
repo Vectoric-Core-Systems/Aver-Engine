@@ -215,8 +215,8 @@ if(AVER_MODULE_NET)
   add_subdirectory(modules/net)
   add_subdirectory(modules/net.abi)
 endif()
-# Aver Sound: a .ocsnd node graph rendered to PCM. Core+Formats only, beside Synapse and for the
-# identical reason -- it builds and tests with no device, no mixer and no scene.
+# Aver Sound: a .ocsnd node graph rendered to PCM, or compiled for the mixer's real-time path. Core, Formats and the (Core-only) mixer
+# library, beside Synapse and for the identical reason -- it builds and tests with no device and no scene.
 add_subdirectory(modules/sound)
 # Sub-bone vertex deformation, above anim because a cage is generated against a skeleton's rest
 # pose. Optional: a game that only needs bone skinning does not link it.

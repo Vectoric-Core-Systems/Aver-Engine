@@ -118,7 +118,7 @@ would be two SDLs in one process.
 ### Not available off Windows yet
 
 - The D3D12-only render features, which is every one `docs/VULKAN.md` lists as D3D12-only.
-- Compressed audio import and video encoding, which use Media Foundation. WAV imports everywhere.
+- `.m4a`/`.aac`/`.wma` audio import and video encoding, which use Media Foundation. WAV, Ogg Vorbis, FLAC and MP3 import everywhere (vendored decoders).
 - The crash reporter: a crash there is the system's own, a core dump or the macOS crash report.
 - Single-instance forwarding: every launch opens its own editor.
 - The MCP control channel (`modules/mcp`, `"platforms": ["windows"]`). Its sockets port easily, but the

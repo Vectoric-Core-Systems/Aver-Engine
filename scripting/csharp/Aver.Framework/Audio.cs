@@ -19,6 +19,20 @@ internal static class Ax
     [DllImport(Lib)] internal static extern int  aver_audio_sample_rate();
     [DllImport(Lib)] internal static extern int  aver_audio_channels();
     [DllImport(Lib)] internal static extern int  aver_audio_underruns();
+    [DllImport(Lib)] internal static extern int  aver_audio_device_state();
+    [DllImport(Lib)] internal static extern int  aver_audio_device_name(byte[] textOut, int cap);
+    [DllImport(Lib)] internal static extern int  aver_audio_device_channels();
+    [DllImport(Lib)] internal static extern int  aver_audio_device_buffer_frames();
+    [DllImport(Lib)] internal static extern float aver_audio_device_latency_ms();
+    [DllImport(Lib)] internal static extern int  aver_audio_device_changes();
+    [DllImport(Lib)] internal static extern int  aver_audio_set_speakers(int channels);
+    [DllImport(Lib)] internal static extern int  aver_audio_speakers();
+    [DllImport(Lib)] internal static extern void aver_audio_set_stereo_upmix(int mode);
+    [DllImport(Lib)] internal static extern int  aver_audio_stereo_upmix();
+    [DllImport(Lib)] internal static extern void aver_audio_set_lfe_send(float send);
+    [DllImport(Lib)] internal static extern float aver_audio_lfe_send();
+    [DllImport(Lib)] internal static extern void aver_audio_set_binaural(int on);
+    [DllImport(Lib)] internal static extern int  aver_audio_binaural();
     [DllImport(Lib)] internal static extern void aver_audio_collect();
 
     [DllImport(Lib)] internal static extern int  aver_audio_load([MarshalAs(UnmanagedType.LPUTF8Str)] string utf8Path);
@@ -80,6 +94,38 @@ public enum Bus
     Voice = 2,
     /// <summary>Interface clicks and notifications, which usually keep playing while paused.</summary>
     Ui = 3,
+}
+
+/// <summary>Where the output device stands, mirroring <c>AVER_AUDIO_DEVICE_*</c> in audio_abi.h and <c>aver::audio::OutputState</c>.</summary>
+public enum AudioDeviceState
+{
+    /// <summary>Audio has not been started.</summary>
+    Stopped = 0,
+    /// <summary>A device is open and buffers are flowing.</summary>
+    Running = 1,
+    /// <summary>Started, but no device is open: the mixer keeps running into nothing at real-time pace
+    /// (playback positions still advance) and the engine retries about once a second. Also offline mode.</summary>
+    None = 2,
+}
+
+/// <summary>The output channel layouts a project can ask for, mirroring <c>AVER_AUDIO_SPEAKERS_*</c> in audio_abi.h. The value is the channel count.</summary>
+public enum SpeakerLayout
+{
+    /// <summary>Two channels. The default; nothing changes for a game that never asks for more.</summary>
+    Stereo = 2,
+    /// <summary>5.1: front left and right, centre, LFE, and two surrounds.</summary>
+    Surround51 = 6,
+    /// <summary>7.1: 5.1 plus a back pair.</summary>
+    Surround71 = 8,
+}
+
+/// <summary>How a stereo source is placed on a 5.1 or 7.1 mix, mirroring <c>AVER_AUDIO_UPMIX_*</c> in audio_abi.h.</summary>
+public enum StereoUpmix
+{
+    /// <summary>Front pair only.</summary>
+    Front = 0,
+    /// <summary>The default: the front pair plus a power-preserving share to the surrounds on the same side.</summary>
+    Wrap = 1,
 }
 
 /// <summary>A decoded sound, ready to play. 0 is "nothing", which every call below tolerates.</summary>
@@ -174,12 +220,79 @@ public static partial class Audio
     /// <summary>The device's sample rate in Hz, or 0 before audio has started.</summary>
     public static int SampleRate { get { try { return Ax.aver_audio_sample_rate(); } catch (DllNotFoundException) { return 0; } } }
 
-    /// <summary>The mixer's channel count (1 or 2), or 0 before audio has started.</summary>
+    /// <summary>The mixer's channel count (1, 2, 6 or 8), or 0 before audio has started.</summary>
     public static int Channels { get { try { return Ax.aver_audio_channels(); } catch (DllNotFoundException) { return 0; } } }
+
+    /// <summary>The layout the project asks for. Stereo unless set; the device decides at open, so a device that cannot play it is mixed in
+    /// stereo (read <see cref="Channels"/> for what the mixer really renders). Setting it with a device open reopens the device, a short gap.
+    /// Remembered whether set before or after audio starts.</summary>
+    public static SpeakerLayout Speakers
+    {
+        get { try { return (SpeakerLayout)Ax.aver_audio_speakers(); } catch (DllNotFoundException) { return SpeakerLayout.Stereo; } }
+        set { try { Ax.aver_audio_set_speakers((int)value); } catch (DllNotFoundException) { } }
+    }
+
+    /// <summary>How a stereo source and the reverb return are spread over 5.1 / 7.1. <see cref="StereoUpmix.Wrap"/> by default.</summary>
+    public static StereoUpmix Upmix
+    {
+        get { try { return (StereoUpmix)Ax.aver_audio_stereo_upmix(); } catch (DllNotFoundException) { return StereoUpmix.Wrap; } }
+        set { try { Ax.aver_audio_set_stereo_upmix((int)value); } catch (DllNotFoundException) { } }
+    }
+
+    /// <summary>How much of every voice goes to the LFE channel of a 5.1 / 7.1 mix, 0..1. 0 (default) leaves the LFE silent.</summary>
+    public static float LfeSend
+    {
+        get { try { return Ax.aver_audio_lfe_send(); } catch (DllNotFoundException) { return 0f; } }
+        set { try { Ax.aver_audio_set_lfe_send(value); } catch (DllNotFoundException) { } }
+    }
+
+    /// <summary>Headphone mode: positional sounds on a stereo mix are placed with an analytic head model (interaural delay, head shadow, a
+    /// pinna cue; no measured data) instead of the plain pan. Off by default. Ignored on a 5.1 / 7.1 mix.</summary>
+    public static bool Binaural
+    {
+        get { try { return Ax.aver_audio_binaural() != 0; } catch (DllNotFoundException) { return false; } }
+        set { try { Ax.aver_audio_set_binaural(value ? 1 : 0); } catch (DllNotFoundException) { } }
+    }
 
     /// <summary>Buffers the device asked for and did not get in time. Every one is an audible gap,
     /// so this is worth watching in a profiler HUD rather than ignoring.</summary>
     public static int Underruns { get { try { return Ax.aver_audio_underruns(); } catch (DllNotFoundException) { return 0; } } }
+
+    /// <summary>Where the output device stands. The engine follows the system default: unplug it or switch the
+    /// default and the mixer moves to the new device with every voice, stream and bus intact; with no device it
+    /// keeps mixing into nothing and retries.</summary>
+    public static AudioDeviceState DeviceState
+    {
+        get { try { return (AudioDeviceState)Ax.aver_audio_device_state(); } catch (DllNotFoundException) { return AudioDeviceState.Stopped; } }
+    }
+
+    /// <summary>The output device's friendly name; the last one that was open while there is none. Empty before audio starts.</summary>
+    public static string DeviceName
+    {
+        get
+        {
+            try
+            {
+                byte[] buf = new byte[256];
+                int len = Ax.aver_audio_device_name(buf, buf.Length);
+                if (len >= buf.Length) { buf = new byte[len + 1]; len = Ax.aver_audio_device_name(buf, buf.Length); }
+                return System.Text.Encoding.UTF8.GetString(buf, 0, Math.Min(len, buf.Length - 1));
+            }
+            catch (DllNotFoundException) { return string.Empty; }
+        }
+    }
+
+    /// <summary>The device's hardware channel count (<see cref="Channels"/> is what the mixer renders: 1, 2, 6 or 8).</summary>
+    public static int DeviceChannels { get { try { return Ax.aver_audio_device_channels(); } catch (DllNotFoundException) { return 0; } } }
+
+    /// <summary>The device buffer (period) granted, in frames.</summary>
+    public static int DeviceBufferFrames { get { try { return Ax.aver_audio_device_buffer_frames(); } catch (DllNotFoundException) { return 0; } } }
+
+    /// <summary>Output latency in milliseconds: the backend's own figure when it has one, else the buffer length.</summary>
+    public static float DeviceLatencyMs { get { try { return Ax.aver_audio_device_latency_ms(); } catch (DllNotFoundException) { return 0f; } } }
+
+    /// <summary>Devices opened after the first: default changes, unplugs and returns. Each also logs one line to the Output Log.</summary>
+    public static int DeviceChanges { get { try { return Ax.aver_audio_device_changes(); } catch (DllNotFoundException) { return 0; } } }
 
     /// <summary>How many voices are sounding right now.</summary>
     public static int ActiveVoices { get { try { return Ax.aver_audio_active_voices(); } catch (DllNotFoundException) { return 0; } } }

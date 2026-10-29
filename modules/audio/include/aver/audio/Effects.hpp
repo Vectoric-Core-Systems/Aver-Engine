@@ -4,6 +4,7 @@
 // while the audio thread runs. Parameter names, defaults and ranges are Godot's (docs/AUDIO.md section "Bus graph").
 // Used by BusGraph; nothing here knows about voices or devices.
 #include "aver/audio/Dsp.hpp"
+#include "aver/audio/Sound.hpp"
 #include "aver/core/Types.hpp"
 
 #include <atomic>
@@ -17,6 +18,7 @@ enum class EffectKind : u32 {
     Amplify = 0, Delay, Chorus, Compressor, Limiter, HardLimiter, EQ6, EQ10, EQ21,
     LowPass, HighPass, BandPass, Notch, LowShelf, HighShelf,
     Distortion, Phaser, PitchShift, Reverb, Panner, StereoEnhance, Capture, SpectrumAnalyzer,
+    ConvolutionReverb,
     Count
 };
 
@@ -66,8 +68,18 @@ public:
     virtual void process(f32* io, u32 frames, const f32* sidechain) = 0;
     // Clears the effect's memory (delay lines, filter state).
     virtual void reset() {}
-    // Frames of latency the effect adds (the hard limiter's look-ahead).
+    // Frames of latency the effect adds (the hard limiter's look-ahead, the convolution reverb's partition).
     virtual u32 latencyFrames() const { return 0; }
+
+    // ---- impulse-response effects (ConvolutionReverb); other kinds answer false / zero ----
+    // Game thread: builds the effect's impulse from a decoded sound (any rate; resampled) and hands it to the audio thread, which crossfades.
+    virtual bool setImpulse(const SoundData& ir) { (void)ir; return false; }
+    virtual void clearImpulse() {}
+    virtual bool hasImpulse() const { return false; }
+    // Game thread: frees what the audio thread has finished with.
+    virtual void collect() {}
+    // Game thread, on a device rate change: takes the impulse source of the effect this one replaces, so it is rebuilt for the new rate.
+    virtual void adoptFrom(const Effect& old) { (void)old; }
 
     // ---- readable effects (Capture, SpectrumAnalyzer); other kinds answer zero ----
     virtual u32  captureAvailable() const { return 0; }

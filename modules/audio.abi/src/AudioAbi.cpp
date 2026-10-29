@@ -5,6 +5,8 @@
 #include "aver/audio/Music.hpp"
 #include "aver/formats/OcAudio.hpp"
 #include "aver/formats/OcBusLayout.hpp"
+#include "aver/formats/OcSound.hpp"
+#include "aver/sound/Synth.hpp"
 #include "aver/core/Log.hpp"
 
 #include <algorithm>
@@ -27,6 +29,16 @@ aver::audio::Mixer& mixerRef() { return g_isOffline ? g_offline : g_device.mixer
 // Path <-> handle, so the same file loaded from several call sites is decoded and held once.
 std::unordered_map<std::string, aver::audio::SoundHandle> g_byPath;
 std::unordered_map<aver::audio::SoundHandle, std::string> g_paths;
+
+// Loaded .ocsnd graphs: the compiled program and the sound-table handles its WavePlayer nodes play. Game thread only, like the rest.
+struct GraphAsset {
+    std::string path;
+    std::shared_ptr<const aver::audio::SoundProgram> program;
+    std::vector<aver::audio::SoundHandle> waves;
+};
+std::unordered_map<int32_t, GraphAsset> g_graphs;
+std::unordered_map<std::string, int32_t> g_graphByPath;
+int32_t g_nextGraph = 1;
 
 AverAudioPlayObserver g_playObserver = nullptr;
 void* g_playObserverUser = nullptr;
@@ -144,6 +156,8 @@ void aver_audio_shutdown(void) {
     else g_device.stop();
     g_byPath.clear();
     g_paths.clear();
+    g_graphs.clear();
+    g_graphByPath.clear();
     g_started = false;
 }
 
@@ -151,6 +165,45 @@ int32_t aver_audio_ready(void)       { return g_started && (g_isOffline || g_dev
 int32_t aver_audio_sample_rate(void) { return g_started ? static_cast<int32_t>(g_isOffline ? g_offline.sampleRate() : g_device.sampleRate()) : 0; }
 int32_t aver_audio_channels(void)    { return g_started ? static_cast<int32_t>(g_isOffline ? g_offline.channels() : g_device.channels()) : 0; }
 int32_t aver_audio_underruns(void)   { return g_started && !g_isOffline ? static_cast<int32_t>(g_device.underruns()) : 0; }
+
+static_assert(AVER_AUDIO_DEVICE_STOPPED == static_cast<int32_t>(aver::audio::OutputState::Stopped), "audio_abi.h mirrors audio::OutputState");
+static_assert(AVER_AUDIO_DEVICE_RUNNING == static_cast<int32_t>(aver::audio::OutputState::Running), "audio_abi.h mirrors audio::OutputState");
+static_assert(AVER_AUDIO_DEVICE_NONE    == static_cast<int32_t>(aver::audio::OutputState::NoDevice), "audio_abi.h mirrors audio::OutputState");
+
+static_assert(AVER_AUDIO_UPMIX_FRONT == static_cast<int32_t>(aver::audio::StereoUpmix::Front), "audio_abi.h mirrors audio::StereoUpmix");
+static_assert(AVER_AUDIO_UPMIX_WRAP  == static_cast<int32_t>(aver::audio::StereoUpmix::Wrap), "audio_abi.h mirrors audio::StereoUpmix");
+
+// Surround, LFE and binaural settings live on the mixers themselves and survive init and shutdown, so they are applied to both the device's
+// mixer and the offline one and may be set at any time.
+int32_t aver_audio_set_speakers(int32_t channels) {
+    const aver::u32 n = channels == AVER_AUDIO_SPEAKERS_SURROUND_5_1 || channels == AVER_AUDIO_SPEAKERS_SURROUND_7_1 ? static_cast<aver::u32>(channels) : 2u;
+    g_device.mixer().setSpeakerRequest(n);
+    g_offline.setSpeakerRequest(n);
+    return static_cast<int32_t>(n);
+}
+int32_t aver_audio_speakers(void) { return static_cast<int32_t>(g_device.mixer().speakerRequest()); }
+void aver_audio_set_stereo_upmix(int32_t mode) {
+    const aver::audio::StereoUpmix m = mode == AVER_AUDIO_UPMIX_FRONT ? aver::audio::StereoUpmix::Front : aver::audio::StereoUpmix::Wrap;
+    g_device.mixer().setStereoUpmix(m);
+    g_offline.setStereoUpmix(m);
+}
+int32_t aver_audio_stereo_upmix(void) { return static_cast<int32_t>(g_device.mixer().upmixMode()); }
+void aver_audio_set_lfe_send(float send) { g_device.mixer().setLfeSend(send); g_offline.setLfeSend(send); }
+float aver_audio_lfe_send(void) { return g_device.mixer().lfeSend(); }
+void aver_audio_set_binaural(int32_t on) { g_device.mixer().setBinaural(on != 0); g_offline.setBinaural(on != 0); }
+int32_t aver_audio_binaural(void) { return g_device.mixer().binaural() ? 1 : 0; }
+
+int32_t aver_audio_device_state(void) {
+    if (!g_started) return AVER_AUDIO_DEVICE_STOPPED;
+    return g_isOffline ? AVER_AUDIO_DEVICE_NONE : static_cast<int32_t>(g_device.state());
+}
+int32_t aver_audio_device_name(uint8_t* out, int32_t cap) {
+    return g_started && !g_isOffline ? copyOut(g_device.deviceName(), out, cap) : copyOut(std::string(), out, cap);
+}
+int32_t aver_audio_device_channels(void)      { return g_started && !g_isOffline ? static_cast<int32_t>(g_device.deviceChannels()) : 0; }
+int32_t aver_audio_device_buffer_frames(void) { return g_started && !g_isOffline ? static_cast<int32_t>(g_device.bufferFrames()) : 0; }
+float   aver_audio_device_latency_ms(void)    { return g_started && !g_isOffline ? g_device.latencyMs() : 0.0f; }
+int32_t aver_audio_device_changes(void)       { return g_started && !g_isOffline ? static_cast<int32_t>(g_device.deviceChanges()) : 0; }
 
 // Reclaims unloaded sounds whose last voice has ended.
 void aver_audio_collect(void) { if (g_started) mixerRef().collect(); }
@@ -384,6 +437,19 @@ void aver_audio_set_voice_occlusion(int32_t v, float occlusion) {
 void aver_audio_set_voice_reverb_send(int32_t v, float send) {
     if (g_started) mixerRef().setVoiceReverbSend(static_cast<aver::audio::VoiceHandle>(v), send);
 }
+int32_t aver_audio_set_zone_reverb(int32_t slot, float wet, float decaySeconds, float damping, int32_t impulseSound, float predelayMs) {
+    if (!g_started || slot < 0 || impulseSound < 0) return 0;
+    aver::audio::ZoneReverb z;
+    z.reverb.wet = wet;
+    z.reverb.decaySec = decaySeconds;
+    z.reverb.damping = damping;
+    z.impulse = static_cast<aver::u32>(impulseSound);
+    z.predelayMs = predelayMs;
+    return mixerRef().setZoneReverb(static_cast<aver::u32>(slot), z) ? 1 : 0;
+}
+void aver_audio_set_voice_zone_send(int32_t v, int32_t slot, float send) {
+    if (g_started && slot >= 0) mixerRef().setVoiceZoneSend(static_cast<aver::audio::VoiceHandle>(v), static_cast<aver::u32>(slot), send);
+}
 void aver_audio_set_occlusion_curve(float minCutoffHz, float minVolume) {
     if (!g_started) return;
     aver::audio::OcclusionCurve c;
@@ -407,7 +473,7 @@ int32_t aver_audio_active_streams(void)   { return g_started ? static_cast<int32
 
 int32_t aver_audio_offline_init(int32_t sampleRate, int32_t channels) {
     if (g_started) return g_isOffline ? 1 : 0;
-    if (sampleRate <= 0 || (channels != 1 && channels != 2)) return 0;
+    if (sampleRate <= 0 || !aver::audio::validMixChannels(static_cast<aver::u32>(channels < 0 ? 0 : channels))) return 0;
     if (!g_offline.init(static_cast<aver::u32>(sampleRate), static_cast<aver::u32>(channels))) return 0;
     g_isOffline = true;
     g_started = true;
@@ -535,6 +601,11 @@ int32_t aver_audio_effect_param_info(int32_t id, int32_t index, uint8_t* nameOut
     return copyOut(p.name, nameOut, cap);
 }
 
+int32_t aver_audio_effect_set_impulse(int32_t id, int32_t sound) {
+    if (!g_started || id <= 0 || sound <= 0) return 0;
+    return mixerRef().setEffectImpulse(static_cast<aver::u32>(id), static_cast<aver::audio::SoundHandle>(sound)) ? 1 : 0;
+}
+
 int32_t aver_audio_capture_available(int32_t id) { aver::audio::Effect* fx = effectOf(id); return fx ? static_cast<int32_t>(fx->captureAvailable()) : 0; }
 int32_t aver_audio_capture_read(int32_t id, float* dst, int32_t maxFrames) {
     aver::audio::Effect* fx = effectOf(id);
@@ -600,5 +671,125 @@ int32_t aver_audio_live_push(int32_t voice, const float* frames, int32_t count) 
 }
 int32_t aver_audio_live_free(int32_t voice) { return g_started ? static_cast<int32_t>(mixerRef().liveFree(static_cast<aver::audio::VoiceHandle>(voice))) : 0; }
 void    aver_audio_live_flush(int32_t voice) { if (g_started) mixerRef().liveFlush(static_cast<aver::audio::VoiceHandle>(voice)); }
+
+} // extern "C"
+
+// ---- real-time sound graphs (docs/AUDIO.md section 13) ----
+
+namespace {
+
+// Starts a graph voice. The live inputs are applied before the voice's first block.
+int32_t startGraph(int32_t graph, const aver::audio::PlayDesc& desc, uint32_t seed,
+                   const char* const* names, const float* values, int32_t count) {
+    if (!g_started) return 0;
+    const auto it = g_graphs.find(graph);
+    if (it == g_graphs.end()) return 0;
+    const GraphAsset& a = it->second;
+    std::vector<aver::audio::Mixer::GraphParam> init;
+    if (names && values && count > 0) {
+        init.reserve(static_cast<size_t>(count));
+        for (int32_t i = 0; i < count; ++i)
+            if (names[i]) init.push_back({names[i], values[i]});
+    }
+    const int32_t voice = static_cast<int32_t>(mixerRef().playGraph(a.program, a.waves.data(), static_cast<aver::u32>(a.waves.size()), desc, seed,
+                                                                     init.data(), static_cast<aver::u32>(init.size())));
+    if (voice != 0) notifyPlay(a.path.c_str(), voice, busValue(desc.bus), desc.positional,
+                               desc.position[0], desc.position[1], desc.position[2], desc.looping);
+    return voice;
+}
+
+} // namespace
+
+extern "C" {
+
+int32_t aver_audio_soundgraph_load(const char* utf8Path) {
+    if (!g_started || !utf8Path || !*utf8Path) return 0;
+    const std::string path = utf8Path;
+    if (auto it = g_graphByPath.find(path); it != g_graphByPath.end()) return it->second;
+
+    aver::fmt::OcSoundData data;
+    std::string why;
+    if (!aver::fmt::loadOcSound(path, data, &why)) { AVER_ERROR("[Audio] could not load sound graph '{}': {}", path, why); return 0; }
+    GraphAsset a;
+    a.path = path;
+    a.program = aver::sound::compileSound(data, &why);
+    if (!a.program) { AVER_ERROR("[Audio] could not compile sound graph '{}': {}", path, why); return 0; }
+    // The sounds its WavePlayer nodes play, loaded the ordinary way (cached by path). A missing one leaves that player silent and says so.
+    for (aver::u32 s = 0; s < a.program->waveCount(); ++s) {
+        const int32_t h = aver_audio_load(a.program->waveAsset(s).c_str());
+        if (h == 0) AVER_WARN("[Audio] sound graph '{}': could not load '{}' for a WavePlayer; that player is silent", path, a.program->waveAsset(s));
+        a.waves.push_back(static_cast<aver::audio::SoundHandle>(h));
+    }
+    const int32_t id = g_nextGraph++;
+    g_graphs[id] = std::move(a);
+    g_graphByPath[path] = id;
+    return id;
+}
+
+void aver_audio_soundgraph_unload(int32_t graph) {
+    const auto it = g_graphs.find(graph);
+    if (it == g_graphs.end()) return;
+    g_graphByPath.erase(it->second.path);
+    g_graphs.erase(it);
+}
+
+int32_t aver_audio_soundgraph_param_count(int32_t graph) {
+    const auto it = g_graphs.find(graph);
+    return it == g_graphs.end() ? 0 : static_cast<int32_t>(it->second.program->paramCount());
+}
+int32_t aver_audio_soundgraph_param_name(int32_t graph, int32_t id, uint8_t* out, int32_t cap) {
+    const auto it = g_graphs.find(graph);
+    if (it == g_graphs.end() || id < 0 || static_cast<aver::u32>(id) >= it->second.program->paramCount()) return copyOut(std::string(), out, cap);
+    return copyOut(it->second.program->paramName(static_cast<aver::u32>(id)), out, cap);
+}
+int32_t aver_audio_soundgraph_param_find(int32_t graph, const char* name) {
+    const auto it = g_graphs.find(graph);
+    return it == g_graphs.end() ? -1 : it->second.program->findParam(name);
+}
+float aver_audio_soundgraph_param_default(int32_t graph, int32_t id) {
+    const auto it = g_graphs.find(graph);
+    if (it == g_graphs.end() || id < 0 || static_cast<aver::u32>(id) >= it->second.program->paramCount()) return 0.0f;
+    return it->second.program->paramDefault(static_cast<aver::u32>(id));
+}
+double aver_audio_soundgraph_duration(int32_t graph) {
+    const auto it = g_graphs.find(graph);
+    return it == g_graphs.end() ? 0.0 : static_cast<double>(it->second.program->durationSec());
+}
+
+int32_t aver_audio_soundgraph_play(int32_t graph, float volume, int32_t looping, int32_t bus, uint32_t seed,
+                                   const char** names, const float* values, int32_t count) {
+    aver::audio::PlayDesc d;
+    d.volume = volume;
+    d.looping = looping != 0;
+    d.bus = busOf(bus);
+    return startGraph(graph, d, seed, names, values, count);
+}
+
+int32_t aver_audio_soundgraph_play_at(int32_t graph, float x, float y, float z, float volume, int32_t looping, int32_t bus,
+                                      float innerCm, float outerCm, uint32_t seed,
+                                      const char** names, const float* values, int32_t count) {
+    aver::audio::PlayDesc d;
+    d.volume = volume;
+    d.looping = looping != 0;
+    d.bus = busOf(bus);
+    d.positional = true;
+    d.position[0] = x; d.position[1] = y; d.position[2] = z;
+    if (innerCm > 0.0f) d.attenuation.innerRadius = innerCm;
+    if (outerCm > innerCm) d.attenuation.outerRadius = outerCm;
+    return startGraph(graph, d, seed, names, values, count);
+}
+
+int32_t aver_audio_soundgraph_set_param(int32_t voice, const char* name, float value) {
+    return g_started && name && mixerRef().setGraphParam(static_cast<aver::audio::VoiceHandle>(voice), name, value) ? 1 : 0;
+}
+int32_t aver_audio_soundgraph_set_param_id(int32_t voice, int32_t id, float value) {
+    return g_started && id >= 0 && mixerRef().setGraphParamId(static_cast<aver::audio::VoiceHandle>(voice), static_cast<aver::u32>(id), value) ? 1 : 0;
+}
+void aver_audio_soundgraph_note_off(int32_t voice) {
+    if (g_started) mixerRef().graphNoteOff(static_cast<aver::audio::VoiceHandle>(voice));
+}
+int32_t aver_audio_soundgraph_is_voice(int32_t voice) {
+    return g_started && mixerRef().isGraphVoice(static_cast<aver::audio::VoiceHandle>(voice)) ? 1 : 0;
+}
 
 } // extern "C"

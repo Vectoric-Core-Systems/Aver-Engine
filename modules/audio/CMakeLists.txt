@@ -16,10 +16,20 @@ aver_add_module(Aver.Audio
     src/WavStream.cpp
     src/Reverb.cpp
     src/Music.cpp
+    # Real-time sound graphs: the .ocsnd evaluator shared by the audio thread and Aver.Sound's offline render (docs/AUDIO.md section 13).
+    src/SoundGraph.cpp
     # G5 S1 (Godot audio parity, docs/AUDIO.md "Bus graph"): the AudioEffect* set, the bus graph and the AudioStreamPlayer3D maths.
     src/Effects.cpp
     src/BusGraph.cpp
     src/Spatial.cpp
+    # Surround output (5.1 / 7.1 speaker panning, upmix, device layout choice) and the analytic binaural head model (docs/AUDIO.md section 14).
+    src/Speakers.cpp
+    src/Binaural.cpp
+    # Environment (docs/AUDIO.md section 15): the partitioned FFT convolver behind the convolution reverb effect and the zone send reverbs.
+    src/Convolver.cpp
+    # Device robustness: the output policy (loss, default change, no device, retry) and the render thread, behind a backend seam a test can fake.
+    src/OutputDriver.cpp
+    src/AudioDevice.cpp
   DEPS
     Aver.Core
 )

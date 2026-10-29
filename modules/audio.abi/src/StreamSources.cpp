@@ -180,14 +180,56 @@ std::unique_ptr<StreamSource> openMfStream(const std::string& utf8Path, std::str
 }
 #endif // _WIN32
 
-OpenedStream openStreamSource(const std::string& path, std::string* why) {
+namespace {
+
+// The options for a source that is not one of the vendored decoders (those apply them themselves):
+// the loop override, then the window, with the file's loop points moved into it.
+OpenedStream withOptions(OpenedStream s, const aver::fmt::DecodeOptions* opt) {
+    if (!s.source || !opt) return s;
+    u64 lb = s.loopBegin, le = s.loopEnd;
+    bool loop = lb != 0 || le != 0;
+    if (opt->loopBegin != 0 || opt->loopLength != 0) {
+        loop = true;
+        lb = opt->loopBegin;
+        le = opt->loopLength ? lb + opt->loopLength : 0;
+    }
+    if (opt->startFrame != 0 || opt->durationFrames != 0) {
+        s.source = aver::fmt::makeWindowedSource(std::move(s.source), opt->startFrame, opt->durationFrames);
+        if (loop && !aver::fmt::loopIntoWindow(opt->startFrame, opt->durationFrames, lb, le)) loop = false;
+    }
+    s.loopBegin = loop ? static_cast<u32>(lb) : 0;
+    s.loopEnd = loop ? static_cast<u32>(le) : 0;
+    return s;
+}
+
+} // namespace
+
+OpenedStream openStreamSource(const std::string& path, std::string* why, const aver::fmt::DecodeOptions* opt) {
     OpenedStream out;
     const std::string ext = lowerExt(path);
+
+    // Ogg Vorbis, FLAC and MP3 decode the same way on every platform, and ahead of Media Foundation
+    // on Windows: it has no gapless trim, no loop tags, and no Vorbis without an optional codec.
+    if (aver::fmt::audioCodecForPath(path) != aver::fmt::AudioCodec::None) {
+        std::string codecWhy;
+        aver::fmt::DecodedStream ds = aver::fmt::openDecodedFile(path, opt ? *opt : aver::fmt::DecodeOptions{}, &codecWhy);
+        if (ds.source) {
+            out.source = std::move(ds.source);
+            out.loopBegin = ds.loopBegin;
+            out.loopEnd = ds.loopEnd;
+            out.decoder = aver::fmt::audioCodecName(ds.codec);
+            return out;
+        }
+        if (why) *why = codecWhy;
+#if !defined(_WIN32)
+        return out;
+#endif
+    }
 
     if (ext == ".wav") {
         std::string wavWhy;
         out.source = openWavStream(path.c_str(), &wavWhy);
-        if (out.source) { out.decoder = "wav"; return out; }
+        if (out.source) { out.decoder = "wav"; return withOptions(std::move(out), opt); }
         if (why) *why = wavWhy;
     }
 
@@ -199,12 +241,12 @@ OpenedStream openStreamSource(const std::string& path, std::string* why) {
         out.loopEnd = data.loopEnd;
         out.source = std::make_unique<MemoryStreamSource>(std::move(data));
         out.decoder = "resident";
-        return out;
+        return withOptions(std::move(out), opt);
     }
 
 #if defined(_WIN32)
     out.source = openMfStream(path, why);
-    if (out.source) { out.decoder = "media foundation"; return out; }
+    if (out.source) { out.decoder = "media foundation"; return withOptions(std::move(out), opt); }
 #endif
 
     // No incremental decoder took it: decode whole and replay from memory.
@@ -212,9 +254,11 @@ OpenedStream openStreamSource(const std::string& path, std::string* why) {
     const aver::fmt::AudioImportResult r = aver::fmt::audioImportFile(path, data);
     if (!r.ok) { if (why) *why = r.error; return out; }
     if (data.channels > 2) { if (why) *why = "more than two channels"; return out; }
+    out.loopBegin = data.loopBegin;
+    out.loopEnd = data.loopEnd;
     out.source = std::make_unique<MemoryStreamSource>(std::move(data));
     out.decoder = "resident";
-    return out;
+    return withOptions(std::move(out), opt);
 }
 
 } // namespace aver::audio

@@ -2,11 +2,15 @@
 // The mixer: voices in, one interleaved float buffer out. It never touches a device.
 // mix() runs on the audio callback thread and must not allocate, lock, block, log or call
 // managed code. Units are the engine's: centimetres, +X forward, +Y right, +Z up, left-handed.
+#include "aver/audio/Binaural.hpp"
 #include "aver/audio/BusGraph.hpp"
+#include "aver/audio/Convolver.hpp"
 #include "aver/audio/Dsp.hpp"
 #include "aver/audio/Reverb.hpp"
 #include "aver/audio/Sound.hpp"
+#include "aver/audio/SoundGraph.hpp"
 #include "aver/audio/Spatial.hpp"
+#include "aver/audio/Speakers.hpp"
 #include "aver/audio/Stream.hpp"
 
 #include <atomic>
@@ -60,14 +64,25 @@ public:
     Mixer(const Mixer&) = delete;
     Mixer& operator=(const Mixer&) = delete;
 
-    // Sizes the pools for a device of this rate and channel count. 1 or 2 channels only.
+    // Sizes the pools for a device of this rate and channel count: 1 (mono), 2 (stereo, the default), 6 (5.1) or 8 (7.1), interleaved in the
+    // order of Speakers.hpp. The speaker / binaural / LFE settings below are kept across init, so they may be set before the device opens.
     bool init(u32 sampleRate, u32 channels, u32 maxVoices = 64, u32 maxSounds = 1024, u32 maxStreams = 16);
     // Releases the pools. The caller must have stopped the device first.
     void shutdown();
     bool ready() const { return ready_; }
 
-    u32 sampleRate() const { return sampleRate_; }
-    u32 channels() const { return channels_; }
+    u32 sampleRate() const { return sampleRate_.load(std::memory_order_relaxed); }
+    u32 channels() const { return channels_.load(std::memory_order_relaxed); }
+
+    // Moves a running mixer to another device format (a default-device change) and keeps everything else: voices, streams, sounds, bus
+    // volumes, the bus graph and its effects. Per-asset rates are untouched; every voice resamples from its own source rate to the new
+    // `rate` from its next block. Effects and the reverb are rebuilt for the new rate (their delay memory is cleared; parameters, order
+    // and effect ids survive); a fade in progress keeps its length in seconds. 1, 2, 6 or 8 channels; a change of channel count makes every
+    // voice take its new gains at once instead of ramping.
+    //
+    // NOT AUDIO-THREAD SAFE: the caller must guarantee no mix() is running (the device layer calls it with the old device closed and the new
+    // one not yet started). It allocates, so it is never called from mix(). False on bad arguments or before init().
+    bool setOutputFormat(u32 rate, u32 channels);
 
     // ---- game thread: content ----
     //
@@ -124,6 +139,23 @@ public:
     void setReverb(const ReverbParams& p);
     ReverbParams reverb() const;
 
+    // ---- game thread: zone send reverbs (docs/AUDIO.md section 15) ----
+    //
+    // kMaxZoneReverbs send reverbs are pre-allocated at init, each an algorithmic reverb or a convolution with an impulse response. A voice
+    // sends to a slot with setVoiceZoneSend (0 by default, so nothing changes until a scene asks); the slot's return is added to the output
+    // at `wet`. A slot is off (and silent, with its tail cleared) while wet is 0 and nothing sends. The listener-side reverb above is
+    // separate and unchanged.
+    //
+    // Sets a slot's reverb: wet 0 turns it off. A non-zero zone.impulse is a sound in this mixer; the slot then convolves with it (the sound
+    // can be removed afterwards: the convolver keeps its own copy). 0 returns the slot to the algorithmic reverb. False for a bad slot or an
+    // unknown impulse sound.
+    bool setZoneReverb(u32 slot, const ZoneReverb& zone);
+    ZoneReverb zoneReverb(u32 slot) const;
+    // How much of a voice feeds a slot, 0..1 (a latest-value atomic; the audio thread ramps it per block).
+    void setVoiceZoneSend(VoiceHandle v, u32 slot, f32 send);
+    // The impulse-response effect on the bus graph: builds effect `effectId`'s impulse from a sound in this mixer (see Effect::setImpulse).
+    bool setEffectImpulse(u32 effectId, SoundHandle ir);
+
     // ---- game thread: the bus graph, Godot-spatial voices, pause, position, live rings ----
     //
     // The graph (docs/AUDIO.md). It does nothing until graph().setActive(true); voices with a graphBus are silent before that.
@@ -153,6 +185,49 @@ public:
     void liveFlush(VoiceHandle v);
     // Under-runs of a stream or live voice (Godot's get_skips).
     u32  voiceUnderruns(VoiceHandle v) const;
+
+    // ---- game thread: real-time sound graphs (docs/AUDIO.md section 13) ----
+    //
+    // A live value for a graph's named input, applied before the first block so the voice does not ramp up from the default.
+    struct GraphParam { const char* name; f32 value; };
+    // Starts a .ocsnd graph as a voice evaluated on the audio thread. The runner's whole state is allocated HERE (game thread); mix() only
+    // does arithmetic. `waves` are the sounds the program's WavePlayer slots play, in program->waveAsset() order (0 = silent slot); the voice
+    // holds a reference on each until it ends. desc.looping: run until graphNoteOff()/stop() instead of for the graph's duration. desc.pitch
+    // does not apply (the graph makes its own pitch; use a Parameter). seed 0 picks a different seed per play, so Noise and Random vary.
+    // Steals like any voice when the pool is full. Returns 0 on failure.
+    VoiceHandle playGraph(std::shared_ptr<const SoundProgram> program, const SoundHandle* waves, u32 waveCount, const PlayDesc& desc,
+                          u32 seed = 0, const GraphParam* initial = nullptr, u32 initialCount = 0);
+    // Latest-value store on a graph voice's named input. False for a stale handle, a voice that is not a graph, or an unknown name.
+    bool setGraphParam(VoiceHandle v, const char* name, f32 value);
+    bool setGraphParamId(VoiceHandle v, u32 id, f32 value);
+    // The id of a graph voice's named input, or -1.
+    i32  graphParamId(VoiceHandle v, const char* name) const;
+    // The note-off: Adsr nodes release from their current level and the voice ends once the longest release has played. stop() instead
+    // fades the voice out within one block, like any voice.
+    void graphNoteOff(VoiceHandle v);
+    bool isGraphVoice(VoiceHandle v) const;
+
+    // ---- game thread: surround output, LFE send, binaural (docs/AUDIO.md section 14) ----
+    //
+    // All opt-in: with the defaults (speaker request 2, binaural off, LFE send 0) a stereo mixer renders exactly the samples it always did.
+    //
+    // The channel count the project WANTS: 2 (default), 6 or 8 (anything else is stored as 2). The mixer's own channel count is still the
+    // device's decision at open (OutputDriver, chooseMixChannels): a request the device cannot play is quietly stereo. The driver reopens the
+    // device when this changes. An offline mixer is sized by init() and ignores it.
+    void setSpeakerRequest(u32 channels) { speakerReq_.store(channels == 6 || channels == 8 ? channels : 2u, std::memory_order_relaxed); }
+    u32  speakerRequest() const { return speakerReq_.load(std::memory_order_relaxed); }
+    // How a stereo source (and the reverb and bus-graph returns) is spread over 5.1 / 7.1. Wrap by default.
+    void setStereoUpmix(StereoUpmix m) { upmix_.store(static_cast<u32>(m), std::memory_order_relaxed); }
+    StereoUpmix upmixMode() const { return static_cast<StereoUpmix>(upmix_.load(std::memory_order_relaxed)); }
+    // How much of every voice is sent to the LFE channel (5.1 / 7.1 only), 0..1; 0 (default) leaves the LFE silent. The send is the voice's
+    // mono mix at its final level, low-passed once at 120 Hz.
+    void setLfeSend(f32 send) { lfeSend_.store(send < 0.0f ? 0.0f : (send > 1.0f ? 1.0f : send), std::memory_order_relaxed); }
+    f32  lfeSend() const { return lfeSend_.load(std::memory_order_relaxed); }
+    // Headphone mode: positional voices on a STEREO mixer are placed with the analytic head model of Binaural.hpp (interaural delay, head
+    // shadow, a pinna cue) instead of the constant-power pan. Off by default; ignored on mono, 5.1 and 7.1 mixers and for voices that are not
+    // positional.
+    void setBinaural(bool on) { binaural_.store(on, std::memory_order_relaxed); }
+    bool binaural() const { return binaural_.load(std::memory_order_relaxed); }
 
     // Moves the listener.
     void setListener(const Listener& l);
@@ -246,6 +321,17 @@ private:
         bool occPrimed = false, filterActive = false;
         BiquadState filtL, filtR;
 
+        // Zone send reverbs: the published amount per slot and the audio thread's ramped gain.
+        std::atomic<f32> zoneSend[kMaxZoneReverbs];
+        f32  zoneGain[kMaxZoneReverbs] = {};
+
+        // Surround and binaural output (audio thread). spk is a positional voice's smoothed gain per speaker; lfeGain its LFE send; bin the
+        // head-model filter, primed (cleared and snapped) the first block it is used.
+        f32  spk[kMaxSpeakers] = {};
+        f32  lfeGain = 0.0f;
+        BinauralState bin;
+        bool binReady = false;
+
         // The bus graph, Godot's 3D model, pause and position (all opt-in; the defaults leave a voice exactly as it was).
         std::atomic<i32>  graphBus{-1};
         std::atomic<bool> godot3d{false};
@@ -257,6 +343,13 @@ private:
         bool pauseSilenced = false;
         BiquadState shL, shR;                // the attenuation filter (high shelf)
         bool shelfActive = false;
+
+        // A graph voice: the runner is owned here and only the game thread creates or frees it (play and collect). graphRun is the audio
+        // thread's view of it, null for every other kind of voice. waveHandles are the sound-table references the voice holds.
+        std::unique_ptr<SoundRunner> runner;
+        SoundRunner* graphRun = nullptr;
+        SoundHandle waveHandles[kSoundMaxWaves] = {};
+        u32 waveCount = 0;
     };
 
     // One streamed source's decoder. attached is true while a voice reads it.
@@ -292,21 +385,48 @@ private:
     f32 advanceFade(Voice& vo, u32 frames, bool& stopNow);
     void requestFade(Voice& vo, f32 target, u32 frames, FadeCurve curve, bool stopAtEnd);
 
+    // Drops what a voice holds in the sound table and stream pool (sound, stream slot, graph waves). Audio thread or the stealing game thread.
+    void releaseVoiceResources(Voice& vo);
+
     // Adds one voice into the block (outCh interleaved channels). Returns false when the voice has ended.
     bool renderVoice(Voice& vo, f32* out, u32 frames, u32 outCh);
     // The pair of gains this voice contributes, after distance, panning and its bus. For a Godot-spatial voice `shelf` receives the
     // attenuation filter's linear gain (1 = none) and `dopplerPitch` the pitch multiplier.
     void voiceGains(const Voice& vo, f32& outL, f32& outR, f32* shelf = nullptr, f32* dopplerPitch = nullptr) const;
+    // Where a positional voice is for surround and binaural output: its level before any panning (distance, volume, bus, fade; no back
+    // attenuation, the speakers and the head model express front and back), the direction in the listener's frame (azimuth 0 ahead, positive
+    // right; elevation positive up), the horizontal share of that direction (0 overhead or inside the head, 1 on the horizon) and how much of
+    // it a Godot-spatial voice's panning strength lets through (1 for a plain voice).
+    struct Direction { f32 level = 0.0f, azimuth = 0.0f, elevation = 0.0f, horizontal = 1.0f, panScale = 1.0f; };
+    Direction voiceDirection(const Voice& vo) const;
     // One chunk of the mix: the legacy voices into `out`, graph voices into their buses when graphOn, the reverb return, the graph output.
-    void mixChunk(f32* out, u32 frames, bool graphOn);
+    void mixChunk(f32* out, u32 frames, u32 outCh, bool graphOn);
+
+    // One zone send reverb: targets from the game thread, processors and scratch for the audio thread.
+    struct ZoneSlot {
+        std::atomic<f32> wet{0.0f}, decay{1.5f}, damp{0.4f};
+        std::atomic<u32> impulse{0};
+        std::atomic<f32> predelayMs{0.0f};
+        Reverb rv;
+        std::unique_ptr<Convolver> conv;
+        std::vector<f32> send;            // mono send bus
+        f32 prevWet = 0.0f, smDecay = 1.5f, smDamp = 0.4f;
+        bool dirty = false;
+    };
+    // Adds the stereo returns of the zone slots that ran this chunk into `out` (after the legacy reverb), ramping each from last chunk's wet.
+    void mixZoneReturns(f32* out, u32 frames, u32 outCh, const UpmixMatrix& um);
 
     bool ready_ = false;
-    u32  sampleRate_ = 0;
-    u32  channels_ = 0;
+    // Atomic only because setOutputFormat (the render thread, between devices) can run while the game thread calls play() or fadeVoice().
+    std::atomic<u32> sampleRate_{0};
+    std::atomic<u32> channels_{0};
 
     std::vector<Voice>     voices_;
     std::vector<SoundSlot> sounds_;
     std::vector<StreamSlot> streams_;
+
+    std::vector<f32> graphScratch_;   // one chunk of a graph voice's mono output, audio thread only
+    std::atomic<u32> graphSeed_{1};
 
     std::atomic<u64> playCounter_{1};
     std::atomic<u32> stolen_{0};
@@ -325,6 +445,16 @@ private:
 
     std::atomic<f32> occMinCutoff_{450.0f}, occMinVolume_{0.30f};
 
+    // Surround / LFE / binaural: settings from the game thread (kept across init); the LFE scratch and filter belong to the audio thread.
+    std::atomic<u32>  speakerReq_{2};
+    std::atomic<u32>  upmix_{static_cast<u32>(StereoUpmix::Wrap)};
+    std::atomic<f32>  lfeSend_{0.0f};
+    std::atomic<bool> binaural_{false};
+    std::vector<f32>  lfeBuf_;
+    f32* lfePtr_ = nullptr;           // non-null only while this block feeds the LFE channel
+    bool lfeTail_ = false;            // the LFE ran last block: run one more with every send ramping to 0
+    BiquadState lfeLp_[2];
+
     // Reverb: parameters from the game thread; the processor and scratch belong to the audio thread.
     std::atomic<f32> rvWet_{0.0f}, rvDecay_{1.5f}, rvDamp_{0.4f};
     Reverb reverb_;
@@ -332,6 +462,12 @@ private:
     f32* sendPtr_ = nullptr;          // non-null only while this block feeds the reverb
     f32  rvPrevWet_ = 0.0f;
     bool rvDirty_ = false;            // the reverb holds a tail that must be cleared when it stops
+
+    // Zone send reverbs. zonePtr_[s] is non-null only while this chunk's voices feed slot s; zoneRan_[s] says the slot processes this chunk.
+    ZoneSlot zones_[kMaxZoneReverbs];
+    f32* zonePtr_[kMaxZoneReverbs] = {};
+    bool zoneRan_[kMaxZoneReverbs] = {};
+    bool zoneAny_ = false;
 };
 
 // Distance attenuation: 1 at or inside the inner radius, 0 at or beyond the outer.

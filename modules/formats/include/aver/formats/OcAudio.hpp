@@ -35,11 +35,12 @@ bool writeOcAudio(const audio::SoundData& in, const std::string& sourceName, std
 struct AudioImportResult {
     bool ok = false;
     std::string error;
-    std::string decoder;   // "wav" or "media foundation"
+    std::string decoder;   // "wav", "vorbis", "flac", "mp3" or "media foundation"
 };
 
-// Decodes any supported source file into memory. WAV goes through this module's reader; everything
-// else through the platform media stack, which makes this Windows-only.
+// Decodes any supported source file into memory. WAV goes through this module's reader; Ogg Vorbis,
+// FLAC and MP3 through the vendored decoders (every platform, loop tags and MP3 gapless trim kept);
+// everything else (.m4a, .aac, .wma) through the platform media stack, which makes that Windows-only.
 AudioImportResult audioImportFile(const std::string& path, audio::SoundData& out);
 
 // True for an extension audioImportFile can read.

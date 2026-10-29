@@ -316,6 +316,13 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
             if (t.size() > 1) { out.masterVolume = static_cast<f32>(parseF64(t[1])); out.hasAudioMix = true; }
         } else if (equalsCI(key, "AUDIO.BUSLAYOUT")) {
             if (t.size() > 1) out.audioBusLayout = std::string(t[1]);
+        } else if (equalsCI(key, "AUDIO.SPEAKERS")) {
+            if (t.size() > 1) {
+                const int n = static_cast<int>(parseF64(t[1], 0.0));
+                out.audioSpeakers = (n == 6 || n == 8) ? n : 0;     // anything but 5.1 / 7.1 is the stereo default
+            }
+        } else if (equalsCI(key, "AUDIO.BINAURAL")) {
+            if (t.size() > 1) out.audioBinaural = parseF64(t[1], 0.0) != 0.0;
         } else if (equalsCI(key, "UI.THEME")) {
             if (t.size() > 1) out.uiTheme = std::string(t[1]);
         } else if (equalsCI(key, "UI.STRETCH")) {
@@ -430,7 +437,7 @@ bool isOwnedKey(std::string_view line) {
         "WORLD.FLOATINGORIGIN", "WORLD.REBASEMARGIN", "WORLD.ALLOWSHIFTREQUEST",
         "PHYSICS.MAXBODIES", "PHYSICS.MAXBODYPAIRS", "PHYSICS.MAXCONTACTS", "PHYSICS.TEMPALLOCMB",
         "PHYSICS.GRAVITY", "PHYSICS.FIXEDSTEP", "PHYSICS.THREADS", "PHYSICS.SHAPECACHE", "PHYSICS.INTERPOLATION", "PHYSICS.COMBINE",
-        "AUDIO.MASTER", "AUDIO.BUS", "AUDIO.BUSLAYOUT",
+        "AUDIO.MASTER", "AUDIO.BUS", "AUDIO.BUSLAYOUT", "AUDIO.SPEAKERS", "AUDIO.BINAURAL",
         "UI.THEME", "UI.STRETCH", "UI.ASPECT", "UI.STRETCHSCALEMODE", "UI.STRETCHSCALE", "UI.TOOLTIPDELAY", "UI.BASESIZE",
     };
     const std::vector<std::string_view> t = splitWhitespace(l);
@@ -597,6 +604,8 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
         owned += b;
     }
     if (!d.audioBusLayout.empty()) { owned += "AUDIO.BUSLAYOUT "; owned += d.audioBusLayout; owned += '\n'; }
+    if (d.audioSpeakers == 6 || d.audioSpeakers == 8) { owned += "AUDIO.SPEAKERS " + std::to_string(d.audioSpeakers) + "\n"; }
+    if (d.audioBinaural) owned += "AUDIO.BINAURAL 1\n";
     if (!d.uiTheme.empty()) { owned += "UI.THEME "; owned += d.uiTheme; owned += '\n'; }
     if (!d.uiStretch.empty()) { owned += "UI.STRETCH "; owned += d.uiStretch; owned += '\n'; }
     if (!d.uiAspect.empty()) { owned += "UI.ASPECT "; owned += d.uiAspect; owned += '\n'; }
