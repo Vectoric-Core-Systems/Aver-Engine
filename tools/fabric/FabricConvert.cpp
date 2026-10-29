@@ -94,7 +94,9 @@ bool reservedClassName(const std::string& n) {
                                                 "SceneTree", "Variant", "Callable", "Signal", "StringName", "NodePath", "Vector2", "Vector3",
                                                 "Transform3D", "Basis", "Quaternion", "Color", "Aabb", "Plane", "Projection", "GD", "Mathf", "Input"};
     return extra.count(n) || isControlClass(n) || is2DClass(n) || isNode3DClass(n) || n == "Node" || n == "Timer" || n == "Viewport" ||
-           n == "Window" || n == "CanvasItem" || n == "WorldEnvironment" || n == "AnimationPlayer" || n == "AudioStreamPlayer";
+           n == "Window" || n == "CanvasItem" || n == "WorldEnvironment" || n == "AnimationPlayer" || n == "AudioStreamPlayer" ||
+           n == "AudioStreamPlayer3D" || n == "AudioListener3D" || n == "AudioServer" || n == "AudioStream" || n == "NavigationAgent3D" ||
+           n == "AStar3D" || n == "AStar2D" || n == "AStarGrid2D" || n == "NavigationMesh";
 }
 
 }  // namespace

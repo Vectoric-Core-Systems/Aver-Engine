@@ -52,5 +52,19 @@ if(TARGET Aver.Synapse.Scene)
   set_target_properties(BtSystemTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
 
+# Polygon navigation (docs/plans/fabric/G5_PARITY.md N1): maps with floors, links, layers and costs, the geometry baker, and the generic
+# A* graphs. All pure, like NavTest.
+foreach(t NavMesh NavMeshBake NavGraph)
+  add_executable(${t}Test src/${t}Test.cpp)
+  target_link_libraries(${t}Test PRIVATE Aver.Synapse Aver.Formats Aver.Core Aver.Platform)
+  set_target_properties(${t}Test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endforeach()
+
+# NavAbiTest -- the same through the plain-C seam Aver.Fabric calls (modules/nav.abi): maps, queries, the baker, avoidance, the A* graphs with
+# scripted costs, and stale handles.
+add_executable(NavAbiTest src/NavAbiTest.cpp)
+target_link_libraries(NavAbiTest PRIVATE Aver.Nav.Abi Aver.Core)
+set_target_properties(NavAbiTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # Steering, ORCA crowds, hearing, cover/squads (docs/AI_CROWDS_HEARING_COVER.md).
 include(${CMAKE_CURRENT_LIST_DIR}/SynapseAiTests.cmake)

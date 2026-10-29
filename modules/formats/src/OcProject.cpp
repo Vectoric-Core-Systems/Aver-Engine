@@ -314,6 +314,25 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
             }
         } else if (equalsCI(key, "AUDIO.MASTER")) {
             if (t.size() > 1) { out.masterVolume = static_cast<f32>(parseF64(t[1])); out.hasAudioMix = true; }
+        } else if (equalsCI(key, "AUDIO.BUSLAYOUT")) {
+            if (t.size() > 1) out.audioBusLayout = std::string(t[1]);
+        } else if (equalsCI(key, "UI.THEME")) {
+            if (t.size() > 1) out.uiTheme = std::string(t[1]);
+        } else if (equalsCI(key, "UI.STRETCH")) {
+            if (t.size() > 1) out.uiStretch = std::string(t[1]);
+        } else if (equalsCI(key, "UI.ASPECT")) {
+            if (t.size() > 1) out.uiAspect = std::string(t[1]);
+        } else if (equalsCI(key, "UI.STRETCHSCALEMODE")) {
+            if (t.size() > 1) out.uiStretchScaleMode = std::string(t[1]);
+        } else if (equalsCI(key, "UI.STRETCHSCALE")) {
+            if (t.size() > 1) out.uiStretchScale = static_cast<f32>(parseF64(t[1], -1.0));
+        } else if (equalsCI(key, "UI.TOOLTIPDELAY")) {
+            if (t.size() > 1) out.uiTooltipDelay = static_cast<f32>(parseF64(t[1], -1.0));
+        } else if (equalsCI(key, "UI.BASESIZE")) {
+            if (t.size() > 2) {
+                out.uiBaseW = static_cast<int>(parseF64(t[1], 0.0));
+                out.uiBaseH = static_cast<int>(parseF64(t[2], 0.0));
+            }
         } else if (equalsCI(key, "AUDIO.BUS")) {
             // Four values on one line, in audio_abi.h's bus order, to keep mix readable.
             if (t.size() > 4) {
@@ -411,7 +430,8 @@ bool isOwnedKey(std::string_view line) {
         "WORLD.FLOATINGORIGIN", "WORLD.REBASEMARGIN", "WORLD.ALLOWSHIFTREQUEST",
         "PHYSICS.MAXBODIES", "PHYSICS.MAXBODYPAIRS", "PHYSICS.MAXCONTACTS", "PHYSICS.TEMPALLOCMB",
         "PHYSICS.GRAVITY", "PHYSICS.FIXEDSTEP", "PHYSICS.THREADS", "PHYSICS.SHAPECACHE", "PHYSICS.INTERPOLATION", "PHYSICS.COMBINE",
-        "AUDIO.MASTER", "AUDIO.BUS",
+        "AUDIO.MASTER", "AUDIO.BUS", "AUDIO.BUSLAYOUT",
+        "UI.THEME", "UI.STRETCH", "UI.ASPECT", "UI.STRETCHSCALEMODE", "UI.STRETCHSCALE", "UI.TOOLTIPDELAY", "UI.BASESIZE",
     };
     const std::vector<std::string_view> t = splitWhitespace(l);
     if (t.empty()) return false;
@@ -576,6 +596,14 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
                       static_cast<double>(d.busVolume[2]), static_cast<double>(d.busVolume[3]));
         owned += b;
     }
+    if (!d.audioBusLayout.empty()) { owned += "AUDIO.BUSLAYOUT "; owned += d.audioBusLayout; owned += '\n'; }
+    if (!d.uiTheme.empty()) { owned += "UI.THEME "; owned += d.uiTheme; owned += '\n'; }
+    if (!d.uiStretch.empty()) { owned += "UI.STRETCH "; owned += d.uiStretch; owned += '\n'; }
+    if (!d.uiAspect.empty()) { owned += "UI.ASPECT "; owned += d.uiAspect; owned += '\n'; }
+    if (!d.uiStretchScaleMode.empty()) { owned += "UI.STRETCHSCALEMODE "; owned += d.uiStretchScaleMode; owned += '\n'; }
+    if (d.uiStretchScale >= 0.0f) appendKey(owned, "UI.STRETCHSCALE", d.uiStretchScale);
+    if (d.uiBaseW > 0 && d.uiBaseH > 0) { owned += "UI.BASESIZE " + std::to_string(d.uiBaseW) + " " + std::to_string(d.uiBaseH) + "\n"; }
+    if (d.uiTooltipDelay >= 0.0f) appendKey(owned, "UI.TOOLTIPDELAY", d.uiTooltipDelay);
 
     if (trim(existing).empty()) {
         std::string out = "OCPROJECT " + std::to_string(d.version > 0 ? d.version : 1) + "\n";

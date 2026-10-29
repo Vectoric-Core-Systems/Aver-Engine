@@ -4,6 +4,7 @@
 #include "aver/ui/UiDrawList.hpp"
 #include "aver/ui/UiFont.hpp"
 #include "aver/ui/UiText.hpp"
+#include "aver/ui/UiTextEffect.hpp"
 #include "aver/ui/UiTextEngine.hpp"
 
 #include <cstring>
@@ -337,6 +338,23 @@ float aver_ui_text_block(float x, float y, const char* utf8, uint32_t rgba, cons
         outWHL[2] = static_cast<float>(l->lines.size());
     }
     return l->height;
+}
+
+float aver_ui_text_block_fx(float x, float y, const char* utf8, uint32_t rgba, const char* family, float px, int32_t flags,
+                            float maxWidth, int32_t align, float outlineSize, uint32_t outlineRgba, uint32_t shadowRgba,
+                            float shadowOffX, float shadowOffY, float shadowOutlineSize, float* outWHL) {
+    aver::ui::UiTextFxStyle fx;
+    fx.outlineSize = outlineSize;
+    fx.outlineRgba = outlineRgba;
+    fx.shadowRgba = shadowRgba;
+    fx.shadowOffX = shadowOffX;
+    fx.shadowOffY = shadowOffY;
+    fx.shadowOutlineSize = shadowOutlineSize;
+    float height = 0.0f;
+    for (const aver::ui::UiTextFxPass& p : aver::ui::uiTextFxPasses(fx, rgba))
+        height = aver_ui_text_block(x + p.dx, y + p.dy, utf8, p.fill ? rgba : p.rgba, family, px, flags, maxWidth, align,
+                                    p.fill ? outWHL : nullptr);
+    return height;
 }
 
 void aver_ui_text_prewarm(const char* utf8, const char* family, float px, int32_t flags) {

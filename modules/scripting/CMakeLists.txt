@@ -190,6 +190,10 @@ add_dependencies(Aver.Scripting.Host Aver.Scripting.Bridge)
 if(TARGET Aver.Fabric.GDExt.Abi)
   add_dependencies(Aver.Scripting.Host Aver.Fabric.GDExt.Abi)
 endif()
+# ... and the property-track animation seam of Aver.Fabric's AnimationPlayer (docs/plans/fabric/G5_PARITY.md, A1).
+if(TARGET Aver.Anim.Abi)
+  add_dependencies(Aver.Scripting.Host Aver.Anim.Abi)
+endif()
 
 # ---------------------------------------------------------------------------------------------------
 # WHY THE FOUR COMMANDS BELOW (SampleBehaviour, SampleActor, the F# sample, Aver.Pcg.Apply) ARE

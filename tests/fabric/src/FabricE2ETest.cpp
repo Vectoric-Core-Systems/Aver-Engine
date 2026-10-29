@@ -246,15 +246,15 @@ int main() {
     std::set<std::string> unsupported;
     for (const Entry& e : report)
         if (e.rating == "unsupported") unsupported.insert(e.kind + ":" + e.type + ":" + e.node + ":" + e.property);
-    const std::set<std::string> wantUnsupported = {"node:AudioStreamPlayer3D:Music:", "node:Sprite2D:Logo:", "setting:::rendering/renderer/rendering_method"};
-    check(unsupported == wantUnsupported, "exactly the audio player, the 2D sprite and the renderer setting are unsupported (" + std::to_string(unsupported.size()) + " item(s))");
+    const std::set<std::string> wantUnsupported = {"node:XROrigin3D:Music:", "node:Sprite2D:Logo:", "setting:::rendering/renderer/rendering_method"};
+    check(unsupported == wantUnsupported, "exactly the XR node, the 2D sprite and the renderer setting are unsupported (" + std::to_string(unsupported.size()) + " item(s))");
     if (unsupported != wantUnsupported)
         for (const std::string& u : unsupported) AVER_INFO("        unsupported: {}", u);
     const std::string md = slurp(out1 + "/FabricReport.md");
     check(contains(md, "# Fabric conversion report: E2E Game") && contains(md, "**Result: " + std::to_string(counts["converted"]) + " converted, " +
                                                                             std::to_string(counts["approximated"]) + " approximated, " + std::to_string(counts["unsupported"]) + " unsupported.**"),
           "FabricReport.md opens with the merged result line");
-    check(contains(md, "| script |") && contains(md, "| node |") && contains(md, "| file |") && contains(md, "### Top unsupported features") && contains(md, "AudioStreamPlayer3D"),
+    check(contains(md, "| script |") && contains(md, "| node |") && contains(md, "| file |") && contains(md, "### Top unsupported features") && contains(md, "XROrigin3D"),
           "and has the per-category table and the top unsupported features");
 
     // ---- the other modes ---------------------------------------------------------------------------------------------------------

@@ -26,6 +26,7 @@ static class GdScriptConvertTests
         T.Run("gdscript map: built-in functions and type conversions", MapBuiltins);
         T.Run("gdscript map: node paths, get/set accessors, struct members, dynamic access, untyped variables", MapMembersAndTypes);
         T.Run("gdscript map: what Aver.Fabric lacks is left, marked and reported", MapMissingApi);
+        T.Run("gdscript map: navigation (AStar3D override, NavigationAgent3D signals, AStarGrid2D) converts, compiles and runs", MapNavigation);
         T.Run("gdscript map: autoloads and project-wide class names", MapProject);
         T.Run("gdscript run: Calc (match, for / range, string formatting, integer math, arrays, lambdas) against GDScript's results", RunCalc);
         T.Run("gdscript run: Counter (export, onready, setget, signal, await on a Timer, _process)", RunCounter);
@@ -35,52 +36,12 @@ static class GdScriptConvertTests
         T.Run("gdscript cli: scripts.json with .gd entries, the report, a rerun, the scan fallback and exit codes", Cli);
     });
 
-    // Classes the shipped runtime does not have yet (audio, animation, UI controls): the realistic scripts use them, so the compile
-    // check supplies stand-ins. The list is exactly the runtime gap these two scripts show.
-    public const string Stubs = @"
-using System;
-namespace Aver.Fabric
-{
-    public class AudioStream : Resource { }
-    public class AudioStreamPlayer : Node
-    {
-        public new class SignalName : Node.SignalName { public static readonly StringName Finished = ""finished""; }
-        public AudioStream Stream { get; set; }
-        public void Play(double fromPosition = 0.0) { }
-    }
-    public class AudioStreamPlayer3D : Node3D
-    {
-        public new class SignalName : Node3D.SignalName { public static readonly StringName Finished = ""finished""; }
-        public AudioStream Stream { get; set; }
-        public void Play(double fromPosition = 0.0) { }
-    }
-    public class AnimationPlayer : Node
-    {
-        public new class SignalName : Node.SignalName { public static readonly StringName AnimationFinished = ""animation_finished""; }
-        public void Play(StringName name = null, double customBlend = -1, float customSpeed = 1, bool fromEnd = false) { }
-    }
-    public class Button : Control
-    {
-        public new class SignalName : Control.SignalName { public static readonly StringName Pressed = ""pressed""; public static readonly StringName Toggled = ""toggled""; }
-        public string Text { get; set; }
-    }
-    public class Range : Control { public double Value { get; set; } }
-    public class HSlider : Range
-    {
-        public new class SignalName : Control.SignalName { public static readonly StringName ValueChanged = ""value_changed""; }
-    }
-    public class TextureRect : Control { public Texture2D Texture { get; set; } }
-    public static class AudioServer
-    {
-        public static void SetBusVolumeDb(int busIdx, double volumeDb) { }
-    }
-}
-";
+    // The stand-in classes of the earlier packages are gone: every class the realistic scripts use (the audio, animation and UI controls) is real now.
 
     // ---- helpers ----
 
     private static string Refs => AppContext.BaseDirectory;
-    private static IReadOnlyList<(string, string)> Extra => new[] { ("Stubs.cs", Stubs) };
+    private static IReadOnlyList<(string, string)> Extra => System.Array.Empty<(string, string)>();
 
     private static string DataDir => Path.Combine(T.DataDir(), "gdscript");
 
@@ -495,6 +456,55 @@ namespace Aver.Fabric
         T.Check("the report has the unsupported entry from the converter and from the compiler", r.Items.Any(i => i.Type == "call" && i.Property == "get_aabb" && i.Rating == Rating.Unsupported) &&
                 r.Items.Any(i => i.Type == "CS1061" && i.Rating == Rating.Unsupported && i.Line > 0));
         T.Check("the script as a whole is unsupported (it does not compile)", r.Items.First(i => i.Type == "gdscript").Rating == Rating.Unsupported);
+    }
+
+    private static void MapNavigation()
+    {
+        // G5 N1: the navigation classes exist, so GDScript that subclasses AStar3D and drives a NavigationAgent3D converts with no error.
+        const string astar =
+            "class_name Pathy\nextends AStar3D\n\nvar calls := 0\n\nfunc _compute_cost(from_id: int, to_id: int) -> float:\n\tcalls += 1\n\tif from_id == 1 and to_id == 2:\n\t\treturn 100.0\n" +
+            "\treturn get_point_position(from_id).distance_to(get_point_position(to_id))\n";
+        const string chaser =
+            "class_name Chaser\nextends CharacterBody3D\n\n@onready var agent: NavigationAgent3D = $NavigationAgent3D\nvar arrived := false\nvar waypoints := 0\n\n" +
+            "func _ready() -> void:\n\tagent.navigation_finished.connect(_on_done)\n\tagent.waypoint_reached.connect(_on_waypoint)\n\tagent.path_desired_distance = 0.5\n\tagent.target_position = Vector3(1, 0, 1)\n\n" +
+            "func _on_done() -> void:\n\tarrived = true\n\nfunc _on_waypoint(details: Dictionary) -> void:\n\twaypoints += 1\n\nfunc heading() -> Vector3:\n\treturn (agent.get_next_path_position() - global_position).normalized()\n" +
+            "\nfunc grid() -> int:\n\tvar g := AStarGrid2D.new()\n\tg.region = Rect2i(0, 0, 4, 4)\n\tg.diagonal_mode = AStarGrid2D.DIAGONAL_MODE_NEVER\n\tg.update()\n\tg.set_point_solid(Vector2i(1, 1))\n\treturn g.get_id_path(Vector2i(0, 0), Vector2i(3, 3)).size()\n";
+        ConversionResult r = Convert(new[]
+        {
+            new ScriptSource { ResPath = "res://pathy.gd", Text = astar, Kind = "gdscript", ClassName = "Pathy", Output = "Content/Scripts/Pathy.cs" },
+            new ScriptSource { ResPath = "res://chaser.gd", Text = chaser, Kind = "gdscript", ClassName = "Chaser", Output = "Content/Scripts/Chaser.cs" },
+        }, keep: true);
+        T.Check("both scripts compile against the real navigation classes", r.Success, Errors(r));
+        if (!r.Success) return;
+        T.Check("_compute_cost overrides the runtime's virtual", Text(r, 0).Contains("override float _ComputeCost(long fromId, long toId)"));
+        T.Check("the agent's signals and properties are typed (no dynamic access)", Has(Text(r, 1), "public NavigationAgent3D Agent;", "NavigationAgent3D.SignalName.NavigationFinished", "NavigationAgent3D.SignalName.WaypointReached", "Agent.TargetPosition = new Vector3(1f, 0f, 1f);") &&
+                !Text(r, 1).Contains("// FABRIC: could not") && !Text(r, 1).Contains("Agent.Set(") && !Text(r, 1).Contains("Agent.Call("));
+        if (!NavigationTests.EnsureNative()) { Console.WriteLine("  SKIP (run): build/bin/Aver.Nav.Abi was not found"); return; }
+        NavigationServer3D.ResetForTests();
+        Assembly asm = Assembly.Load(r.Assembly!);
+        var g = (AStar3D)Activator.CreateInstance(asm.GetType("Pathy")!)!;
+        g.AddPoint(1, new Vector3(0, 0, 0)); g.AddPoint(2, new Vector3(1, 0, 0)); g.AddPoint(3, new Vector3(2, 0, 0)); g.AddPoint(4, new Vector3(1, 1, 0));
+        g.ConnectPoints(1, 2); g.ConnectPoints(2, 3); g.ConnectPoints(1, 4); g.ConnectPoints(4, 3);
+        T.Check("the converted script's cost is called by the search and obeyed", g.GetIdPath(1, 3).SequenceEqual(new long[] { 1, 4, 3 }) && (long)asm.GetType("Pathy")!.GetField("Calls")!.GetValue(g)! > 0);
+
+        var floor = new NavigationMesh { Vertices = new[] { new Vector3(-5, 0, -5), new Vector3(5, 0, -5), new Vector3(5, 0, 5), new Vector3(-5, 0, 5) } };
+        floor.AddPolygon(new[] { 0, 1, 2, 3 });
+        SceneTree.Instance.Root.AddChild(new NavigationRegion3D { NavigationMesh = floor });
+        var body = (CharacterBody3D)Activator.CreateInstance(asm.GetType("Chaser")!)!;
+        body.Position = new Vector3(-3, 0, -3);
+        body.AddChild(new NavigationAgent3D { Name = "NavigationAgent3D", TargetDesiredDistance = 0.5f });
+        SceneTree.Instance.Root.AddChild(body);
+        Type chaserType = asm.GetType("Chaser")!;
+        for (int i = 0; i < 600 && !(bool)chaserType.GetField("Arrived")!.GetValue(body)!; i++)
+        {
+            Vector3 h = (Vector3)chaserType.GetMethod("Heading")!.Invoke(body, null)!;
+            body.Position += h * 0.1f;
+            T.Frame(1.0 / 60.0, 1);
+        }
+        T.Check("the converted script walks the agent to its target: navigation_finished fired and waypoints were counted",
+                (bool)chaserType.GetField("Arrived")!.GetValue(body)! && (long)chaserType.GetField("Waypoints")!.GetValue(body)! >= 2 && body.Position.DistanceTo(new Vector3(1, 0, 1)) < 0.7f);
+        T.Check("AStarGrid2D from GDScript: region, DIAGONAL_MODE_NEVER, a solid cell, a path of seven cells round it",
+                (long)chaserType.GetMethod("Grid")!.Invoke(body, null)! == 7);
     }
 
     private static void MapProject()

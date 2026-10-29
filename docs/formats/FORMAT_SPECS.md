@@ -304,6 +304,50 @@ The sub-viewport (render-to-texture view) cost guard. `RENDER.SUBVIEWPORTS <0..1
 ### `.ocproject` keys `RENDER.VOLFOG` and `RENDER.VOLFOGDENSITY`
 `RENDER.VOLFOG <0|1>` (`ProjectDesc::volFog`, `-1` = unstated, `voxi::Settings::volumetricFog`, engine default 0): Voxi's volumetric fog (light shafts), the place Godot-style fog volumes draw (`docs/rendering/VOLUMETRIC_FOG.md` section 7). `RENDER.VOLFOGDENSITY <per cm>` (`volFogDensity`, `Settings::volumetricFogDensity`, clamped to [0, 0.01], engine default 0.00002): the uniform medium. Absent leaves the defaults; both are owned by the writer. The Fabric converter writes `RENDER.VOLFOG 1` and `RENDER.VOLFOGDENSITY 0` when the start scene's Environment enables `volumetric_fog_enabled` (the density already rides in the level's fog). `docs/plans/fabric/G4_RENDER.md` R8.
 
+### `.ocproject` key `AUDIO.BUSLAYOUT`
+`AUDIO.BUSLAYOUT <content path>` (`ProjectDesc::audioBusLayout`, empty = unstated): the `.ocbus` bus layout (below) the project starts with, relative to `Content/`. Absent: no bus graph is set up and the four legacy buses are all there is. `Aver.Fabric`'s `AudioServer` applies it the first time a script or player uses audio (`aver_audio_bus_load_layout` does it from any host). Owned by the writer (`isOwnedKey`), so a re-save keeps it. The Fabric converter writes it for the project's `audio/buses/default_bus_layout`. `docs/AUDIO.md` section 10.
+
+### `.ocproject` keys `UI.*` (Fabric G5 U1)
+All optional; absent (or empty / negative) = today's behaviour, so an existing project is unchanged. Owned by the writer (`isOwnedKey`), so a re-save keeps them. The Fabric converter writes them from the Godot project; `Aver.Fabric`'s `Window` and `ProjectSettings` read them (`gui/theme/custom`, `display/window/stretch/mode|aspect|scale_mode|scale`, `gui/timers/tooltip_delay_sec`).
+- `UI.THEME <content path>` (`ProjectDesc::uiTheme`): the project's `.octheme` (below), relative to `Content/`; Godot's `gui/theme/custom`.
+- `UI.STRETCH disabled|canvas_items|viewport` (`uiStretch`), `UI.ASPECT ignore|keep|keep_width|keep_height|expand` (`uiAspect`, Godot's default `keep`), `UI.STRETCHSCALEMODE fractional|integer` (`uiStretchScaleMode`), `UI.STRETCHSCALE <float>` (`uiStretchScale`, `< 0` unstated), `UI.BASESIZE <w> <h>` (`uiBaseW/H`, the size the UI is authored at; 0 = none, which behaves as `disabled`).
+- `UI.TOOLTIPDELAY <seconds>` (`uiTooltipDelay`, `< 0` unstated, Godot's default 0.5).
+
+### `.octheme` — UI theme (Fabric G5 U1)
+Text, one record per line (`#` comments, LF or CRLF), read by `aver::ui::uiThemeParse` into `UiThemeSheet` (`modules/ui/include/aver/ui/UiThemeSheet.hpp`, in `Aver.UI`, no file I/O) and written by `uiThemeWrite`; the managed reader is `Aver.Fabric` `Theme`. A token with spaces is quoted.
+
+```
+OCTHEME 1
+NAME Main
+DEFAULTFONT "Fonts/ui.ttf"
+DEFAULTFONTSIZE 18
+BASESCALE 1
+VARIATION HeaderLabel Label
+COLOR Label font_color #FFFFFFFF
+CONSTANT Button h_separation 6
+FONT HeaderLabel font "Fonts/bold.ttf"
+FONTSIZE HeaderLabel font_size 28
+ICON CheckBox checked "Textures/checked.png"
+STYLEBOX Button normal flat bg=#2E2E2EFF border=2,2,2,2 border_color=#80C0FFFF radius=4,4,4,4 content=8,4,8,4
+STYLEBOX PanelContainer panel texture tex=Textures/frame.png tex_size=12,10 patch=4,4,4,4 axis_h=tile modulate=#FFFFFFFF
+```
+`VARIATION <name> <base type>` declares a type variation (Godot's `theme_type_variation`); `COLOR`, `CONSTANT`, `FONT`, `FONTSIZE`, `ICON` and `STYLEBOX` name a type (a Godot class or a variation), an item and a value; colours are `#RRGGBBAA`. `STYLEBOX <type> <item> flat|texture|line|empty` takes `key=value` pairs (`flat`: `bg`, `border`, `border_color` (or `border_colors` for four), `radius`, `detail`, `expand`, `content` (-1 = the kind's default margin), `aa_size`, `skew`, `shadow_color`, `shadow_size`, `shadow_offset`, `flags`; `texture`: `tex`, `tex_size`, `region`, `patch`, `axis_h`, `axis_v`, `modulate`, `expand`, `content`, `flags`; `line`: `color`, `thickness`, `grow`, `flags`); `flags` bit 0 draw centre, 1 anti-alias, 2 border blend, 3 vertical (`UiStyleBox::flags`). Lookup order for a Control (`Control.get_theme_*`): its own override, then each `theme` up the node chain, the project theme, the built-in default (`uiGodotDefaultTheme`); in one theme the type list is the variation, the bases it names, then the class chain.
+
+#### What the converter writes for fonts and shared widget resources (Fabric G5 U2)
+- `Content/UI/Fonts.ocfonts` (the format is `docs/GAME_UI_TEXT.md`; the engine loads it at start-up): `OCFONTS 1`, `DEFAULT <family>` (Godot's `gui/theme/custom_font`, else the project theme's `default_font`, else the first file), and one `FAMILY <stem>` per converted font file with `FACE Fonts/<res path under Content> [weight=bold] [italic]`, `SYSTEM auto`, `BITMAP legacy`. The family name is the file name without its extension (`Font.Family` in `Aver.Fabric` is the same); `weight=bold` / `italic` are set when the file name says bold, heavy, black, italic or oblique. Two files with the same name share one family (the first wins, reported).
+- A shared button group is the reference `Resource("ButtonGroups/<scene>_<id>[_unpress].ocbuttongroup")`. No file exists behind it: `ResourceLoader` makes one `ButtonGroup` per path (`_unpress` before the extension sets `allow_unpress`).
+
+### `.ocbus` — audio bus layout (Fabric G5 S1)
+Text, one record per line (`#` comments, LF or CRLF), read by `aver::fmt::parseOcBusLayout` into `audio::BusLayout` (`modules/formats/include/aver/formats/OcBusLayout.hpp`, built into `Aver.Formats.Audio`):
+
+```
+OCBUS 1
+BUS "Master" send="" volume_db=0 mute=0 solo=0 bypass=0
+BUS "Music" send="Master" volume_db=-6 mute=0 solo=0 bypass=0
+EFFECT "AudioEffectReverb" enabled=1 sidechain="" room_size=0.6 wet=0.3
+```
+`BUS "name"` starts a bus (the first is Master whatever it is called; `send` is a bus name, resolved when mixing); `EFFECT "class"` adds an effect to the bus above it, `class` being Godot's class name (`AudioEffectReverb`, `AudioEffectEQ10`, `AudioEffectLowPassFilter`...), `enabled`, `sidechain` (a compressor's detector bus) and then any number of `name=value` pairs in Godot's property names (`room_size`, `tap1_delay_ms`, `voice/2/delay_ms`, `band_db/1000_hz`); a class or parameter the mixer does not know is skipped when the layout is applied. Names are quoted and may not contain a double quote. `docs/AUDIO.md` section 10.
+
 ### `.ocmat` `FLAGS vertexcolor=1`
 `MaterialDesc::vertexColor` (Godot's `vertex_color_use_as_albedo`): the albedo and opacity are multiplied by the vertex colour. Written only when on, so every older file is byte-identical.
 
@@ -522,7 +566,7 @@ the first time something attaches.
 **Imported from glTF as an Empty parented to a bone** — see `docs/ASSET_IMPORT.md`.
 ## 9. `.ocanim` — animation clip
 
-Subtype `'ANIM'`. Fixes the three fidelity losses from recon `assets §7/§9`: **no forced 30 fps resample**, **cubicspline tangents preserved**, **step curves preserved**. Chunks: `AHDR` (required), `TRKS` (track data), `NOTF` (notifies, optional), `NTFD` (notify durations, optional), `CRVE` (curves, optional), `CTAN` (curve tangents, optional), `STRT`.
+Subtype `'ANIM'`. Fixes the three fidelity losses from recon `assets §7/§9`: **no forced 30 fps resample**, **cubicspline tangents preserved**, **step curves preserved**. Chunks: `AHDR` (required), `TRKS` (track data), `NOTF` (notifies, optional), `NTFD` (notify durations, optional), `CRVE` (curves, optional), `CTAN` (curve tangents, optional), `PROP` (property tracks, optional, 9.4c), `STRT`.
 
 ### 9.1 `AHDR`
 | Off | Size | Type | Field |
@@ -613,6 +657,18 @@ Read at runtime through the same curve sampler `CRVE` is (`AnimSampler.cpp`'s `s
 falls back to LINEAR precisely when a curve's tangent arrays are absent or mis-sized — see `CRVE`'s
 own `CUBICSPLINE` note above. Authored in the animation editor's curve canvas: draggable keys and
 draggable tangent handles, same shape as the graph editor's node canvas.
+
+### 9.4c `PROP` — property tracks (optional; Fabric G5 A1)
+Godot AnimationPlayer parity (`docs/plans/fabric/G5_PARITY.md`): tracks that drive a named property of any node instead of a bone. A clip with no property tracks writes no `PROP` chunk, so its bytes are what they always were, and a reader that does not know the chunk plays the bone tracks as before. A clip that is only a Godot Animation (a length, maybe no tracks yet) writes an empty `PROP` chunk and may have `TrackCount` 0. Little-endian; strings are `u32` length + UTF-8 (not the string table, because a variant text can exceed its 64 KiB entry limit).
+```
+u8 loopMode (0 none, 1 linear, 2 ping-pong)   f32 step   u32 trackCount
+per track: u8 type (0 value, 1 position_3d, 2 rotation_3d, 3 scale_3d, 4 blend_shape, 5 method, 6 bezier, 7 audio, 8 animation)
+           u8 interp (0 nearest, 1 linear, 2 cubic, 3 linear_angle, 4 cubic_angle)   u8 update (0 continuous, 1 discrete, 2 capture)
+           u8 flags (1 loop_wrap, 2 enabled, 4 imported)   str path   u32 keyCount
+  per key: f64 time   f64 transition   value   f64 handle[4] (bezier in x,y then out x,y)   f64 startOffset   f64 endOffset   u32 argCount   value[argCount]
+value: u8 kind (0 nil, 1 bool, 2 int, 3 float, 4 vec2, 5 vec3, 6 vec4, 7 quat, 8 color, 9 string, 10 text)   f64 n[4]   str s
+```
+`path` is Godot's track path (`Node/Child:property:subproperty`, relative to the player's `root_node`). A key's `value` is the key's data: the property value (value track), a method name (`s`, arguments in `args`), the stream path (audio; offsets in `startOffset`/`endOffset`), an animation name (animation track; `[stop]` stops the sub-player) or a float (bezier, blend shape). `text` is a Godot Variant in its text form, for values with no numeric form; it never blends. **Space:** `position_3d`, `rotation_3d` and `scale_3d` values are engine space (centimetres, +Z up, left-handed, through `aver/formats/AxisMap.hpp`); every other value is the Godot number the property takes. `transition` is Godot's easing of the segment that starts at the key (1 linear, 0 hold, below 0 in-out). Playback rules: `modules/anim/include/aver/anim/PropAnim.hpp`.
 
 ### 9.4b Curve naming for facial animation
 By convention a curve named `morph.<target>` is the weight of that blend shape and `pose.<name>` the weight of a named face pose; the prefix-stripped name is hashed (fnv1a64) at runtime and not stored. A clip with curves and zero tracks is valid (a curve-only clip: blend-shape weights on a face with no rig); its `SkeletonRef` may be empty. No byte layout changes. docs/ANIM_MORPH_FACE.md.

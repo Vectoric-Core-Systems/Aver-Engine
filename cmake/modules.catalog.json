@@ -20,6 +20,24 @@
     },
     {
       "schema": 1,
+      "name": "Aver.Anim.Abi",
+      "dir": "anim.abi",
+      "displayName": "Property animation ABI",
+      "description": "Plain-C seam onto property-track animation so Aver.Fabric's AnimationPlayer drives it.",
+      "category": "Animation",
+      "option": null,
+      "required": true,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.Platform",
+        "Aver.Formats",
+        "Aver.Anim"
+      ],
+      "consequence": ""
+    },
+    {
+      "schema": 1,
       "name": "Aver.Anim.Scene",
       "dir": "anim.scene",
       "displayName": "Animation (Scene)",
@@ -462,6 +480,24 @@
         "Aver.Core"
       ],
       "consequence": "The render queue cannot write MP4 video."
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Nav.Abi",
+      "dir": "nav.abi",
+      "displayName": "Polygon navigation ABI",
+      "description": "Plain-C seam onto polygon navigation maps, the navmesh baker and the A* graphs so Aver.Fabric's navigation nodes drive them.",
+      "category": "Gameplay",
+      "option": null,
+      "required": true,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.Platform",
+        "Aver.Formats",
+        "Aver.Synapse"
+      ],
+      "consequence": ""
     },
     {
       "schema": 1,

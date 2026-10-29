@@ -21,6 +21,9 @@ if(AVER_DOTNET)
             --configuration Release --nologo
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
   # Aver.Fabric (the Godot-compatible runtime): math, Variant, signals, node tree and lifecycle, run by the managed node host.
+  # Its AnimationTests copy build/bin/Aver.Anim.Abi beside the test assembly (like the GDExtension host) and skip, saying so, when it was not built.
+  # Its AudioTests do the same with Aver.Audio.Abi and render the mixer offline (no output device is ever opened).
+  # Its NavigationTests do the same with Aver.Nav.Abi (pure arithmetic: maps, queries, the baker, A* graphs; no device).
   add_test(NAME FabricManagedTests
     COMMAND "${AVER_DOTNET}" run --project "${CMAKE_SOURCE_DIR}/scripting/csharp/Aver.Fabric.Tests/Aver.Fabric.Tests.csproj"
             --configuration Release --nologo

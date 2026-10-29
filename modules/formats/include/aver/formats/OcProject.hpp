@@ -271,6 +271,18 @@ struct ProjectDesc {
     bool hasAudioMix = false;
     f32  masterVolume = 1.0f;                  // AUDIO.MASTER
     f32  busVolume[4] = {1.0f, 1.0f, 1.0f, 1.0f};   // AUDIO.BUS <sfx> <music> <voice> <ui>
+    // AUDIO.BUSLAYOUT: the content path of an .ocbus bus layout (aver/formats/OcBusLayout.hpp). Empty = unstated: no bus graph is set up and the
+    // four legacy buses are all there is. Aver.Fabric's AudioServer applies it the first time a script touches the bus graph.
+    std::string audioBusLayout;                // AUDIO.BUSLAYOUT
+
+    // ---- UI.* -- the Control runtime's project settings (Aver.Fabric; docs/plans/fabric/G5_PARITY.md U1). Empty / negative = unstated: today's behaviour.
+    std::string uiTheme;                       // UI.THEME <content path>: the project's .octheme (Godot's gui/theme/custom)
+    std::string uiStretch;                     // UI.STRETCH disabled|canvas_items|viewport (display/window/stretch/mode)
+    std::string uiAspect;                      // UI.ASPECT ignore|keep|keep_width|keep_height|expand
+    std::string uiStretchScaleMode;            // UI.STRETCHSCALEMODE fractional|integer
+    f32  uiStretchScale = -1.0f;               // UI.STRETCHSCALE: extra scale on top of the stretch (display/window/stretch/scale); < 0 = unstated
+    int  uiBaseW = 0, uiBaseH = 0;             // UI.BASESIZE w h: the size the UI is authored at; 0 = none
+    f32  uiTooltipDelay = -1.0f;               // UI.TOOLTIPDELAY seconds (gui/timers/tooltip_delay_sec); < 0 = unstated
 
     std::string dir;                    // absolute directory the manifest lives in
     std::string manifestPath;           // absolute path to the .ocproject itself

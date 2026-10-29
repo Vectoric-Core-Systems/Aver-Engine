@@ -1,0 +1,208 @@
+[gd_scene load_steps=30 format=3 uid="uid://treegame0001"]
+
+[sub_resource type="Animation" id="Animation_idle"]
+resource_name = "idle"
+length = 1.0
+loop_mode = 1
+tracks/0/type = "value"
+tracks/0/imported = false
+tracks/0/enabled = true
+tracks/0/path = NodePath("Lamp:light_energy")
+tracks/0/interp = 1
+tracks/0/loop_wrap = true
+tracks/0/keys = {
+"times": PackedFloat32Array(0, 1),
+"transitions": PackedFloat32Array(1, 1),
+"update": 0,
+"values": [1.0, 1.0]
+}
+
+[sub_resource type="Animation" id="Animation_run"]
+resource_name = "run"
+length = 1.0
+loop_mode = 1
+tracks/0/type = "value"
+tracks/0/imported = false
+tracks/0/enabled = true
+tracks/0/path = NodePath("Lamp:light_energy")
+tracks/0/interp = 1
+tracks/0/loop_wrap = true
+tracks/0/keys = {
+"times": PackedFloat32Array(0, 1),
+"transitions": PackedFloat32Array(1, 1),
+"update": 0,
+"values": [3.0, 3.0]
+}
+
+[sub_resource type="Animation" id="Animation_walk"]
+resource_name = "walk"
+length = 1.0
+loop_mode = 1
+tracks/0/type = "position_3d"
+tracks/0/imported = false
+tracks/0/enabled = true
+tracks/0/path = NodePath("Skeleton3D:Root")
+tracks/0/interp = 1
+tracks/0/loop_wrap = true
+tracks/0/keys = PackedFloat32Array(0, 1, 0, 0, 0, 1, 1, 4, 0, 0)
+
+[sub_resource type="AnimationLibrary" id="AnimationLibrary_a"]
+_data = {
+&"idle": SubResource("Animation_idle"),
+&"run": SubResource("Animation_run"),
+&"walk": SubResource("Animation_walk")
+}
+
+[sub_resource type="Curve" id="Curve_ease"]
+_data = [Vector2(0, 0), 0.0, 0.0, 0, 0, Vector2(1, 1), 2.0, 0.0, 0, 0]
+point_count = 2
+
+[sub_resource type="Curve3D" id="Curve3D_track"]
+_data = {
+"points": PackedVector3Array(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10, 0, 0),
+"tilts": PackedFloat32Array(0, 0)
+}
+point_count = 2
+
+[sub_resource type="SphereShape3D" id="SphereShape3D_a"]
+radius = 0.25
+
+[sub_resource type="AnimationNodeAnimation" id="AN_idle"]
+animation = &"idle"
+
+[sub_resource type="AnimationNodeAnimation" id="AN_run"]
+animation = &"run"
+use_custom_timeline = true
+
+[sub_resource type="AnimationNodeAnimation" id="AN_walk"]
+animation = &"walk"
+
+[sub_resource type="AnimationNodeBlend2" id="AnimationNodeBlend2_a"]
+filter_enabled = true
+filters = ["Lamp:light_energy"]
+
+[sub_resource type="AnimationNodeBlendTree" id="AnimationNodeBlendTree_move"]
+graph_offset = Vector2(-100, 0)
+nodes/Idle/node = SubResource("AN_idle")
+nodes/Idle/position = Vector2(0, 0)
+nodes/Run/node = SubResource("AN_run")
+nodes/Run/position = Vector2(0, 100)
+nodes/Blend2/node = SubResource("AnimationNodeBlend2_a")
+nodes/Blend2/position = Vector2(200, 50)
+nodes/output/position = Vector2(400, 50)
+node_connections = [&"Blend2", 0, &"Idle", &"Blend2", 1, &"Run", &"output", 0, &"Blend2"]
+
+[sub_resource type="AnimationNodeBlendSpace1D" id="AnimationNodeBlendSpace1D_a"]
+blend_point_0/node = SubResource("AN_idle")
+blend_point_0/pos = 0.0
+blend_point_1/node = SubResource("AN_run")
+blend_point_1/pos = 1.0
+min_space = 0.0
+
+[sub_resource type="AnimationNodeBlendSpace2D" id="AnimationNodeBlendSpace2D_a"]
+blend_point_0/node = SubResource("AN_idle")
+blend_point_0/pos = Vector2(0, 0)
+blend_point_1/node = SubResource("AN_run")
+blend_point_1/pos = Vector2(1, 0)
+blend_point_2/node = SubResource("AN_walk")
+blend_point_2/pos = Vector2(0, 1)
+triangles = PackedInt32Array(0, 1, 2)
+
+[sub_resource type="AnimationNodeStateMachineTransition" id="T_start"]
+
+[sub_resource type="AnimationNodeStateMachineTransition" id="T_move"]
+switch_mode = 1
+advance_condition = &"running"
+xfade_time = 0.2
+xfade_curve = SubResource("Curve_ease")
+
+[sub_resource type="AnimationNodeStateMachineTransition" id="T_idle"]
+switch_mode = 2
+advance_mode = 2
+advance_expression = "speed < 1.0"
+priority = 2
+
+[sub_resource type="AnimationNodeStateMachine" id="AnimationNodeStateMachine_a"]
+states/Idle/node = SubResource("AN_idle")
+states/Idle/position = Vector2(300, 100)
+states/Move/node = SubResource("AnimationNodeBlendTree_move")
+states/Move/position = Vector2(500, 100)
+transitions = ["Start", "Idle", SubResource("T_start"), "Idle", "Move", SubResource("T_move"), "Move", "Idle", SubResource("T_idle")]
+graph_offset = Vector2(-100, -50)
+
+[node name="Main" type="Node3D"]
+
+[node name="Lamp" type="OmniLight3D" parent="."]
+
+[node name="AnimationPlayer" type="AnimationPlayer" parent="."]
+libraries = {
+"": SubResource("AnimationLibrary_a")
+}
+
+[node name="AnimationTree" type="AnimationTree" parent="."]
+tree_root = SubResource("AnimationNodeStateMachine_a")
+anim_player = NodePath("../AnimationPlayer")
+active = true
+advance_expression_base_node = NodePath("../Brain")
+root_motion_track = NodePath("Skeleton3D:Root")
+parameters/conditions/running = false
+parameters/Move/Blend2/blend_amount = 0.5
+
+[node name="Brain" type="Node" parent="."]
+
+[node name="Skeleton3D" type="Skeleton3D" parent="."]
+bones/0/name = "Root"
+bones/0/parent = -1
+bones/0/rest = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)
+bones/0/enabled = true
+bones/0/position = Vector3(0, 0, 0)
+bones/0/rotation = Quaternion(0, 0, 0, 1)
+bones/0/scale = Vector3(1, 1, 1)
+bones/1/name = "Arm"
+bones/1/parent = 0
+bones/1/rest = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0)
+bones/1/enabled = true
+bones/1/position = Vector3(0, 1, 0)
+bones/1/rotation = Quaternion(0, 0, 0, 1)
+bones/1/scale = Vector3(1, 1, 1)
+bones/2/name = "Hand"
+bones/2/parent = 1
+bones/2/rest = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0)
+bones/2/enabled = true
+bones/2/position = Vector3(0, 1, 0)
+bones/2/rotation = Quaternion(0, 0, 0, 1)
+bones/2/scale = Vector3(1, 1, 1)
+
+[node name="Grip" type="BoneAttachment3D" parent="Skeleton3D"]
+bone_name = "Hand"
+
+[node name="Reach" type="SkeletonIK3D" parent="Skeleton3D"]
+root_bone = &"Root"
+tip_bone = &"Hand"
+max_iterations = 6
+override_tip_basis = false
+
+[node name="Look" type="LookAtModifier3D" parent="Skeleton3D"]
+
+[node name="Track" type="Path3D" parent="."]
+curve = SubResource("Curve3D_track")
+
+[node name="Rider" type="PathFollow3D" parent="Track"]
+progress_ratio = 0.5
+rotation_mode = 4
+loop = false
+
+[node name="Boom" type="SpringArm3D" parent="."]
+shape = SubResource("SphereShape3D_a")
+spring_length = 3.0
+margin = 0.05
+
+[node name="Cam" type="Camera3D" parent="Boom"]
+
+[node name="Mirror" type="RemoteTransform3D" parent="."]
+remote_path = NodePath("../Lamp")
+update_scale = false
+
+[node name="Seen" type="VisibleOnScreenEnabler3D" parent="Lamp"]
+aabb = AABB(-1, -1, -1, 2, 2, 2)
+enable_mode = 1

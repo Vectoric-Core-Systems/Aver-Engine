@@ -1,0 +1,10 @@
+; Engine configuration file.
+; A fixture for the navigation conversion (FabricNavTest, docs/plans/fabric/G5_PARITY.md N1).
+
+config_version=5
+
+[application]
+
+config/name="Nav Game"
+run/main_scene="res://main.tscn"
+config/features=PackedStringArray("4.3", "Forward Plus")

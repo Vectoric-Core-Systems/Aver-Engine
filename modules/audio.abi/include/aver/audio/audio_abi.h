@@ -163,6 +163,100 @@ AVER_AUDIO_API int32_t aver_audio_stream_underruns(void);
 // Streams currently held by a playing voice.
 AVER_AUDIO_API int32_t aver_audio_active_streams(void);
 
+/* ---- bus graph, effects, Godot-style players (G5 S1; docs/AUDIO.md "Bus graph") ---------------------------------
+ * Opt-in: nothing below changes the four legacy buses. The graph is Godot's AudioServer model (named buses, bus 0 is "Master", sends,
+ * mute / solo / bypass, effect chains, peaks); voices started with aver_audio_play_ex / aver_audio_stream_play_ex / aver_audio_live_play
+ * and a graphBus >= 0 sum into it. All calls are game-thread calls. Strings are UTF-8; a name written to a caller's buffer is truncated
+ * to `cap` bytes and always terminated, and the call returns the full length.
+ *
+ * OFFLINE MODE: aver_audio_offline_init makes the same mixer with NO device, for tests and tools; aver_audio_offline_mix renders a block
+ * into the caller's buffer. It is used instead of aver_audio_init, never with it. */
+AVER_AUDIO_API int32_t aver_audio_offline_init(int32_t sampleRate, int32_t channels);
+AVER_AUDIO_API int32_t aver_audio_offline_mix(float* outInterleaved, int32_t frames);
+AVER_AUDIO_API int32_t aver_audio_is_offline(void);
+
+AVER_AUDIO_API void    aver_audio_graph_set_active(int32_t active);
+AVER_AUDIO_API int32_t aver_audio_graph_active(void);
+
+AVER_AUDIO_API int32_t aver_audio_bus_count(void);
+AVER_AUDIO_API int32_t aver_audio_bus_add(int32_t at);
+AVER_AUDIO_API int32_t aver_audio_bus_remove(int32_t index);
+AVER_AUDIO_API int32_t aver_audio_bus_move(int32_t from, int32_t to);
+AVER_AUDIO_API void    aver_audio_bus_set_count(int32_t count);
+AVER_AUDIO_API int32_t aver_audio_bus_find(const char* utf8Name);
+AVER_AUDIO_API int32_t aver_audio_bus_name(int32_t index, uint8_t* textOut, int32_t cap);
+AVER_AUDIO_API void    aver_audio_bus_set_name(int32_t index, const char* utf8Name);
+AVER_AUDIO_API void    aver_audio_bus_set_send(int32_t index, const char* utf8Name);
+AVER_AUDIO_API int32_t aver_audio_bus_send_name(int32_t index, uint8_t* textOut, int32_t cap);
+AVER_AUDIO_API void    aver_audio_bus_set_volume_db(int32_t index, float db);
+AVER_AUDIO_API float   aver_audio_bus_get_volume_db(int32_t index);
+AVER_AUDIO_API void    aver_audio_bus_set_flag(int32_t index, int32_t flag, int32_t value);
+AVER_AUDIO_API int32_t aver_audio_bus_get_flag(int32_t index, int32_t flag);
+#define AVER_AUDIO_BUSFLAG_MUTE   0
+#define AVER_AUDIO_BUSFLAG_SOLO   1
+#define AVER_AUDIO_BUSFLAG_BYPASS 2
+AVER_AUDIO_API float   aver_audio_bus_peak_db(int32_t index, int32_t channel);
+// Replaces the layout with a .ocbus file / its text. Returns the number of effects that could not be made, or -1 when the file is unreadable.
+AVER_AUDIO_API int32_t aver_audio_bus_load_layout(const char* utf8Path);
+AVER_AUDIO_API int32_t aver_audio_bus_apply_layout_text(const char* utf8Text);
+// The current layout as .ocbus text (length returned; truncated to cap).
+AVER_AUDIO_API int32_t aver_audio_bus_layout_text(uint8_t* textOut, int32_t cap);
+
+// Effects. `godotClass` is Godot's class name ("AudioEffectReverb"); the id is stable until the effect is removed.
+AVER_AUDIO_API int32_t aver_audio_effect_add(int32_t bus, const char* godotClass, int32_t at);
+AVER_AUDIO_API int32_t aver_audio_effect_remove(int32_t bus, int32_t index);
+AVER_AUDIO_API int32_t aver_audio_effect_move(int32_t bus, int32_t from, int32_t to);
+AVER_AUDIO_API int32_t aver_audio_effect_count(int32_t bus);
+AVER_AUDIO_API int32_t aver_audio_effect_id(int32_t bus, int32_t index);
+// The bus and index an id is at; 1 when found.
+AVER_AUDIO_API int32_t aver_audio_effect_find(int32_t id, int32_t* bus, int32_t* index);
+AVER_AUDIO_API void    aver_audio_effect_set_enabled(int32_t bus, int32_t index, int32_t enabled);
+AVER_AUDIO_API int32_t aver_audio_effect_get_enabled(int32_t bus, int32_t index);
+AVER_AUDIO_API void    aver_audio_effect_set_sidechain(int32_t bus, int32_t index, const char* utf8BusName);
+AVER_AUDIO_API int32_t aver_audio_effect_sidechain(int32_t bus, int32_t index, uint8_t* textOut, int32_t cap);
+// Parameters by Godot property name; set returns 1 when the effect has it.
+AVER_AUDIO_API int32_t aver_audio_effect_set_param(int32_t id, const char* name, float value);
+AVER_AUDIO_API float   aver_audio_effect_get_param(int32_t id, const char* name);
+// Godot's class name of an effect ("AudioEffectReverb"); its length is returned, 0 for an unknown id.
+AVER_AUDIO_API int32_t aver_audio_effect_class(int32_t id, uint8_t* textOut, int32_t cap);
+AVER_AUDIO_API int32_t aver_audio_effect_param_count(int32_t id);
+AVER_AUDIO_API int32_t aver_audio_effect_param_info(int32_t id, int32_t index, uint8_t* nameOut, int32_t cap, float* def, float* lo, float* hi);
+// The readable effects. Capture: stereo frames, interleaved.
+AVER_AUDIO_API int32_t aver_audio_capture_available(int32_t id);
+AVER_AUDIO_API int32_t aver_audio_capture_read(int32_t id, float* dst, int32_t maxFrames);
+AVER_AUDIO_API int32_t aver_audio_capture_capacity(int32_t id);
+AVER_AUDIO_API int32_t aver_audio_capture_discarded(int32_t id);
+AVER_AUDIO_API void    aver_audio_capture_clear(int32_t id);
+// SpectrumAnalyzer: linear magnitude over a frequency range, mode 0 average / 1 maximum; 1 when it has enough audio.
+AVER_AUDIO_API int32_t aver_audio_spectrum(int32_t id, float fromHz, float toHz, int32_t mode, float* outLeft, float* outRight);
+
+/* Players. `spatial18` is 18 floats (aver::audio::Spatial3D::pack: model, unit_size, max_db, max_distance, panning_strength, global panning,
+ * cone enabled, cone angle, cone filter dB, filter cutoff, filter dB, emit dir xyz, doppler, velocity xyz in cm/s) or NULL for a flat voice.
+ * Positions are engine centimetres. graphBus < 0 plays on the legacy `bus`. */
+AVER_AUDIO_API int32_t aver_audio_play_ex(int32_t sound, float volume, float pitch, int32_t looping, int32_t bus, int32_t graphBus,
+                                          float startSeconds, int32_t paused, float x, float y, float z, const float* spatial18);
+AVER_AUDIO_API int32_t aver_audio_stream_play_ex(const char* utf8Path, float volume, float pitch, int32_t looping, int32_t bus, int32_t graphBus,
+                                                 float startSeconds, int32_t paused, float x, float y, float z, const float* spatial18);
+AVER_AUDIO_API void    aver_audio_set_voice_bus(int32_t voice, int32_t graphBus);
+AVER_AUDIO_API void    aver_audio_set_voice_paused(int32_t voice, int32_t paused);
+AVER_AUDIO_API void    aver_audio_set_voice_spatial(int32_t voice, const float* spatial18);
+// Seconds played (a looping source wraps) and the source's length (0 unknown); -1 for a stale handle.
+AVER_AUDIO_API double  aver_audio_voice_position(int32_t voice);
+AVER_AUDIO_API double  aver_audio_voice_length(int32_t voice);
+AVER_AUDIO_API int32_t aver_audio_voice_underruns(int32_t voice);
+AVER_AUDIO_API void    aver_audio_set_listener_velocity(float vx, float vy, float vz);
+AVER_AUDIO_API void    aver_audio_set_speed_scale(float scale);
+AVER_AUDIO_API float   aver_audio_speed_scale(void);
+// A loaded sound's length in seconds and loop points (frames; end 0 = to the end).
+AVER_AUDIO_API double  aver_audio_sound_length(int32_t sound);
+AVER_AUDIO_API void    aver_audio_sound_set_loop(int32_t sound, int32_t beginFrame, int32_t endFrame);
+// A voice fed by the caller (AudioStreamGenerator): stereo or mono frames at `rate`, in a ring of ringFrames frames.
+AVER_AUDIO_API int32_t aver_audio_live_play(float volume, float pitch, int32_t bus, int32_t graphBus, float x, float y, float z,
+                                            const float* spatial18, int32_t rate, int32_t channels, int32_t ringFrames);
+AVER_AUDIO_API int32_t aver_audio_live_push(int32_t voice, const float* interleaved, int32_t frames);
+AVER_AUDIO_API int32_t aver_audio_live_free(int32_t voice);
+AVER_AUDIO_API void    aver_audio_live_flush(int32_t voice);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif

@@ -205,6 +205,52 @@ struct OcCurve {
     mutable u64 poseId = 0;
 };
 
+// ---- property tracks (Godot AnimationPlayer parity; docs/plans/fabric/G5_PARITY.md, A1) ----
+//
+// A clip may carry tracks that drive named properties of any node or entity instead of bones: value, transform,
+// blend-shape, method, bezier, audio and animation (sub-player) tracks, in Godot's vocabulary. They live in ONE
+// optional chunk (PROP), so a clip without them writes the same bytes it always did and an older reader that does
+// not know the chunk plays the bone tracks unchanged. The playback rules are in aver/anim/PropAnim.hpp.
+enum class OcPropKind : u8 { Nil, Bool, Int, Float, Vec2, Vec3, Vec4, Quat, Color, String, Text };
+
+// One value. n[] holds the numeric payload (Bool/Int/Float in n[0]; Vec2 xy; Vec3 xyz; Vec4 and Quat xyzw; Color rgba).
+// String is a plain string; Text is a Godot Variant in its text form, for the types with no numeric form (arrays,
+// dictionaries, node paths, resources); it never blends.
+struct OcPropValue {
+    OcPropKind kind = OcPropKind::Nil;
+    f64 n[4] = {0, 0, 0, 0};
+    std::string s;
+    bool operator==(const OcPropValue& o) const {
+        return kind == o.kind && n[0] == o.n[0] && n[1] == o.n[1] && n[2] == o.n[2] && n[3] == o.n[3] && s == o.s;
+    }
+};
+
+enum class OcPropTrackType : u8 { Value, Position3D, Rotation3D, Scale3D, BlendShape, Method, Bezier, Audio, Animation };
+enum class OcPropInterp   : u8 { Nearest, Linear, Cubic, LinearAngle, CubicAngle };
+enum class OcPropUpdate   : u8 { Continuous, Discrete, Capture };
+enum class OcPropLoop     : u8 { None, Linear, PingPong };
+
+struct OcPropKey {
+    f64 time = 0;
+    f64 transition = 1;            // Godot's easing curve of the segment that starts at this key; 0 = hold, 1 = linear
+    OcPropValue value;             // Method: String name. Audio: String stream path. Animation: String name ("[stop]" stops)
+    f64 handle[4] = {0, 0, 0, 0};  // Bezier: in handle (x time offset <= 0, y value offset) then out handle
+    std::vector<OcPropValue> args; // Method arguments
+    f64 startOffset = 0;           // Audio: seconds trimmed from the start / end of the stream
+    f64 endOffset = 0;
+};
+
+struct OcPropTrack {
+    OcPropTrackType type = OcPropTrackType::Value;
+    std::string path;              // "Node/Child:property:subproperty" or ":property", relative to the player's root
+    OcPropInterp interp = OcPropInterp::Linear;
+    OcPropUpdate update = OcPropUpdate::Continuous;
+    bool loopWrap = true;          // interpolate across the loop point
+    bool enabled = true;
+    bool imported = false;
+    std::vector<OcPropKey> keys;   // ascending by time
+};
+
 struct OcAnimation {
     f32  duration = 0.0f;                      // seconds
     OcAnimStorage storage = OcAnimStorage::Keyframed;
@@ -241,6 +287,15 @@ struct OcAnimation {
     // Named float curves. Optional in the same way notifies are: a clip with none emits no chunk,
     // so a file written now is byte-identical to one written before curves existed.
     std::vector<OcCurve> curves;
+
+    // Property tracks (see OcPropTrack). Empty for every clip written before they existed: no PROP chunk.
+    // `propLoop` and `propStep` are the clip's Godot loop mode and editor step; they only matter with propTracks.
+    std::vector<OcPropTrack> propTracks;
+    // True for a property animation even when it has no tracks yet (a Godot Animation can be just a length); written as an
+    // empty PROP chunk. Implied by having property tracks.
+    bool propClip = false;
+    OcPropLoop propLoop = OcPropLoop::None;
+    f32 propStep = 1.0f / 30.0f;
 
     // The curve of that name, or nullptr. Linear, for the reason OcSkeleton::socket is.
     const OcCurve* curve(const std::string& name) const;

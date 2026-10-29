@@ -70,5 +70,15 @@ module stays Core-only.
 
 ## What it does not do
 
-No HRTF, no per-source environment (one listener-side reverb), no occlusion by diffraction, no stream
-seek, and no general DSP chain. Those are `docs/AUDIO.md` §5 and §8.
+No HRTF, no per-source environment (one listener-side reverb) and no occlusion by diffraction. Those are
+`docs/AUDIO.md` §5 and §8.
+
+## Bus graph, effects, Godot-style players
+
+`BusGraph.hpp`, `Effects.hpp` and `Spatial.hpp` (Fabric G5 S1, `docs/AUDIO.md` section 10): Godot's AudioServer
+bus list with sends, mute, solo, bypass and peaks; the AudioEffect set (filters, EQs, delay, chorus,
+compressor with sidechain, limiters, distortion, phaser, pitch shift, reverb, panner, stereo enhance, capture,
+spectrum analyser); Godot's AudioStreamPlayer3D attenuation, panning, cone, filter and Doppler as pure
+functions; pause, start offset, playback position, live (generator) voices. Opt-in: the graph does nothing
+until `mixer.graph().setActive(true)`, and a mixer that never uses it renders exactly as before.
+`tests/audio` (`AudioBusTest`, `AudioSpatialTest`, `AudioAbiTest`) run all of it offline.

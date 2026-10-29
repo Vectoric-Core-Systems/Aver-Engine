@@ -240,9 +240,42 @@ public class ORMMaterial3D : BaseMaterial3D
 
 public class Texture2D : Resource
 {
-    /// <summary>The size in pixels. A file texture's size is not read at run time (the engine loads it), so this is zero for one; a
-    /// <see cref="ViewportTexture"/> reports the size its view is drawn at.</summary>
-    public virtual Vector2 GetSize() => Vector2.Zero;
+    private Vector2? _fileSize;
+
+    /// <summary>The size in pixels. A PNG file texture reads it from the file's header (G5 U1: a 9-patch needs it); the engine loads the pixels, so any other
+    /// file format is zero; a <see cref="ViewportTexture"/> reports the size its view is drawn at.</summary>
+    public virtual Vector2 GetSize() => _fileSize ??= ReadPngSize();
+
+    private Vector2 ReadPngSize()
+    {
+        if (ResourcePath.Length == 0 || !ResourcePath.EndsWith(".png", StringComparison.OrdinalIgnoreCase)) return Vector2.Zero;
+        try
+        {
+            string? file = ResourceLoader.FindFile(ResourcePath);
+            if (file == null) return Vector2.Zero;
+            var head = new byte[24];
+            using (var s = System.IO.File.OpenRead(file)) if (s.Read(head, 0, 24) < 24) return Vector2.Zero;
+            if (head[0] != 0x89 || head[1] != (byte)'P' || head[2] != (byte)'N' || head[3] != (byte)'G') return Vector2.Zero;
+            return new Vector2((head[16] << 24) | (head[17] << 16) | (head[18] << 8) | head[19], (head[20] << 24) | (head[21] << 16) | (head[22] << 8) | head[23]);
+        }
+        catch (Exception ex) when (ex is System.IO.IOException or UnauthorizedAccessException) { return Vector2.Zero; }
+    }
+
+    /// <summary>The engine's texture handle for UI drawing (the id <c>aver_ui_textured_rect</c> takes), 0 when the host has not given the texture one.
+    /// The host sets it, or <see cref="HandleResolver"/> finds it by path on first use (G5 U1: style boxes with a texture need it).</summary>
+    public ulong HostHandle { get; set; }
+
+    /// <summary>Set by a host that can look a texture up by its resource path.</summary>
+    public static Func<Texture2D, ulong>? HandleResolver { get; set; }
+
+    internal virtual ulong EngineHandle
+    {
+        get
+        {
+            if (HostHandle == 0 && HandleResolver != null && ResourcePath.Length > 0) HostHandle = HandleResolver(this);
+            return HostHandle;
+        }
+    }
 
     public int GetWidth() => (int)GetSize().X;
 

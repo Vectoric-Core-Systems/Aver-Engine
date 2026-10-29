@@ -1,0 +1,51 @@
+[gd_resource type="Theme" load_steps=5 format=3 uid="uid://uigametheme1"]
+
+[ext_resource type="FontFile" path="res://ui/fonts/ui.ttf" id="1_font"]
+[ext_resource type="Texture2D" path="res://ui/panel9.png" id="2_tex"]
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_panel"]
+bg_color = Color(0.1, 0.12, 0.2, 1)
+border_width_left = 2
+border_width_top = 2
+border_width_right = 2
+border_width_bottom = 2
+border_color = Color(0.5, 0.7, 1, 1)
+corner_radius_top_left = 8
+corner_radius_top_right = 8
+corner_radius_bottom_right = 4
+corner_radius_bottom_left = 4
+corner_detail = 6
+content_margin_left = 10.0
+content_margin_top = 6.0
+content_margin_right = 10.0
+content_margin_bottom = 6.0
+shadow_color = Color(0, 0, 0, 0.5)
+shadow_size = 6
+shadow_offset = Vector2(2, 3)
+anti_aliasing_size = 0.75
+
+[sub_resource type="StyleBoxTexture" id="StyleBoxTexture_frame"]
+texture = ExtResource("2_tex")
+texture_margin_left = 4.0
+texture_margin_top = 4.0
+texture_margin_right = 4.0
+texture_margin_bottom = 4.0
+axis_stretch_horizontal = 1
+modulate_color = Color(1, 0.9, 0.8, 1)
+
+[sub_resource type="StyleBoxEmpty" id="StyleBoxEmpty_focus"]
+content_margin_left = 3.0
+
+[resource]
+default_font = ExtResource("1_font")
+default_font_size = 20
+Control/colors/font_color = Color(0.9, 0.9, 0.7, 1)
+Control/constants/tint = 3
+Panel/styles/panel = SubResource("StyleBoxFlat_panel")
+PanelContainer/styles/panel = SubResource("StyleBoxTexture_frame")
+HeaderPanel/base_type = "PanelContainer"
+HeaderPanel/styles/panel = SubResource("StyleBoxFlat_panel")
+HeaderPanel/colors/font_color = Color(1, 0.5, 0.5, 1)
+BoxContainer/constants/separation = 7
+Control/styles/focus = SubResource("StyleBoxEmpty_focus")
+Control/font_sizes/font_size = 24

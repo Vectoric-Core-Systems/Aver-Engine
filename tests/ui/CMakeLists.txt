@@ -12,6 +12,18 @@ add_executable(UiWidgetTest src/UiWidgetTest.cpp)
 target_link_libraries(UiWidgetTest PRIVATE Aver.UI Aver.Core Aver.Platform)
 set_target_properties(UiWidgetTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# Godot-parity control rendering (docs/plans/fabric/G5_PARITY.md U1): style box tessellation, stretch / letterbox maths and the
+# .octheme resource, all CPU-side; UiStyleAbiTest links the DLL Aver.Fabric loads (the style box seam, stretch, default theme).
+foreach(_t UiStyleBoxTest UiStretchTest UiThemeSheetTest)
+  add_executable(${_t} src/${_t}.cpp)
+  target_link_libraries(${_t} PRIVATE Aver.UI Aver.Core Aver.Platform)
+  set_target_properties(${_t} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endforeach()
+
+add_executable(UiStyleAbiTest src/UiStyleAbiTest.cpp)
+target_link_libraries(UiStyleAbiTest PRIVATE Aver.UI.Abi Aver.UI Aver.Core Aver.Platform)
+set_target_properties(UiStyleAbiTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # UiLayoutAssetTest — the .ocui layout asset: the property table, round trip, parse errors,
 # forward compatibility, the editor's structural edits and instantiate/capture.
 add_executable(UiLayoutAssetTest src/UiLayoutAssetTest.cpp)
@@ -63,6 +75,11 @@ endforeach()
 add_executable(UiTextAbiTest src/UiTextAbiTest.cpp)
 target_link_libraries(UiTextAbiTest PRIVATE Aver.UI.Abi Aver.UI Aver.Core Aver.Platform)
 set_target_properties(UiTextAbiTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# UiTextEffectTest -- text outline / shadow passes (G5 U2): the ring geometry and the ABI call that draws them. Links the DLL the C# side loads.
+add_executable(UiTextEffectTest src/UiTextEffectTest.cpp)
+target_link_libraries(UiTextEffectTest PRIVATE Aver.UI.Abi Aver.UI Aver.Core Aver.Platform)
+set_target_properties(UiTextEffectTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # FontSetEditorTest -- the .ocfonts font set editor tab's headless core (the document edits, load/save/dirty/undo,
 # coverage, the preview engine). Same arrangement as UiLayoutEditorTest above: Sandbox is add_executable-only, so

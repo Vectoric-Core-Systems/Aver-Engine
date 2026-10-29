@@ -24,6 +24,12 @@ aver_add_module(Aver.UI
     src/UiTreeInput.cpp
     src/UiTreeDraw.cpp
     src/UiLayoutAsset.cpp
+    # Godot-parity control rendering (docs/plans/fabric/G5_PARITY.md U1): style boxes, the .octheme resource, stretch maths.
+    src/UiStyleBox.cpp
+    src/UiThemeSheet.cpp
+    src/UiStretch.cpp
+    # Text outline / shadow passes (G5 U2).
+    src/UiTextEffect.cpp
     src/UiScreens.cpp
     # Accessibility: the spoken form of a widget and the caption overlay (docs/ACCESSIBILITY.md).
     src/UiAccess.cpp

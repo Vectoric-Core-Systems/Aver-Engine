@@ -38,7 +38,19 @@ const std::set<std::string>& supportedClasses() {
                                             "MultiMeshInstance3D", "Sprite3D", "Label3D", "GridMap", "CSGShape3D", "CSGCombiner3D", "CSGBox3D", "CSGSphere3D",
                                             "CSGCylinder3D", "CSGTorus3D", "CSGPolygon3D", "CSGMesh3D",
                                             // G4 R8: environment volumes
-                                            "FogVolume", "ReflectionProbe", "LightmapGI", "LightmapProbe", "VoxelGI"};
+                                            "FogVolume", "ReflectionProbe", "LightmapGI", "LightmapProbe", "VoxelGI",
+                                            // G5 A1: property-track animation
+                                            "AnimationPlayer",
+                                            // G5 A2: animation trees, skeletons, paths and helper nodes
+                                            "AnimationTree", "Skeleton3D", "BoneAttachment3D", "SkeletonIK3D", "Path3D", "PathFollow3D", "SpringArm3D",
+                                            "RemoteTransform3D", "VisibleOnScreenNotifier3D", "VisibleOnScreenEnabler3D",
+                                            // G5 S1: audio
+                                            "AudioStreamPlayer", "AudioStreamPlayer3D", "AudioListener3D",
+                                            // G5 N1: navigation
+                                            "NavigationRegion3D", "NavigationLink3D", "NavigationObstacle3D", "NavigationAgent3D",
+                                            // G5 U1: the Control base, the containers and Panel; G5 U2's widgets are in FabricWidgets.cpp
+                                            "Control", "Container", "BoxContainer", "HBoxContainer", "VBoxContainer", "GridContainer", "MarginContainer", "CenterContainer",
+                                            "PanelContainer", "ScrollContainer", "Panel"};
     return s;
 }
 
@@ -102,6 +114,7 @@ bool isNode3DClass(const std::string& t) {
     static const std::set<std::string> s = {"Node3D", "Decal", "FogVolume", "VoxelGI", "LightmapGI", "ReflectionProbe", "GridMap",
                                             "LightmapProbe", "OccluderInstance3D", "WorldEnvironment3D"};
     bool ext3D = false;
+    if (t == "NavigationAgent3D") return false;   // a plain Node under its mover: no transform
     if (isExtensionClass(t, &ext3D)) return ext3D;
     return endsWith(t, "3D") || s.count(t) != 0;
 }
@@ -109,6 +122,32 @@ bool isNode3DClass(const std::string& t) {
 ClassChoice chooseClass(const std::string& t) {
     ClassChoice c;
     if (t.empty()) { c.fabricClass = "Node"; return c; }
+    if (t == "Skeleton3D") {
+        c.fabricClass = t;
+        c.rating = Rating::Approximated;
+        c.reason = "the skeleton is a script-level pose model (bone list, rests, poses, overrides, bone tracks); it is not connected to a skinned mesh, so posing it moves no vertices";
+        return c;
+    }
+    if (t == "SkeletonIK3D") {
+        c.fabricClass = t;
+        c.rating = Rating::Approximated;
+        c.reason = "solved with FABRIK on the script-level skeleton, not with Godot's solver";
+        return c;
+    }
+    if (t == "VisibleOnScreenNotifier3D" || t == "VisibleOnScreenEnabler3D") {
+        c.fabricClass = t;
+        c.rating = Rating::Approximated;
+        c.reason = "tested every frame against the current camera's frustum and the box; the renderer's occlusion culling is not consulted";
+        return c;
+    }
+    if (t == "ScrollContainer") {
+        c.fabricClass = t;
+        c.rating = Rating::Approximated;
+        c.reason = "scrolls through scroll_horizontal / scroll_vertical, the wheel and the scroll bars it draws and lets the player drag; the bars have no arrow buttons and get_h_scroll_bar() / get_v_scroll_bar() "
+                   "are detached bars that mirror the position";
+        return c;
+    }
+    if (widgetClassChoice(t, c)) return c;   // G5 U2: the widgets
     if (supportedClasses().count(t)) { c.fabricClass = t; return c; }
     bool ext3D = false;
     if (isExtensionClass(t, &ext3D)) {
@@ -126,10 +165,18 @@ ClassChoice chooseClass(const std::string& t) {
         c.carrier = t != c.fabricClass;
         return c;
     }
+    if (t == "VideoStreamPlayer") {
+        c.fabricClass = "Control";
+        c.rating = Rating::Unsupported;
+        c.reason = "the engine has no video decoder (modules/media only encodes H.264); the node is kept as a Control with its properties so the tree and its script survive. A decoder dependency "
+                   "(for example Theora/Ogg or a platform media-foundation reader) would be needed; see docs/AUDIO.md";
+        c.carrier = true;
+        return c;
+    }
     if (isControlClass(t)) {
         c.fabricClass = "Control";
         c.rating = Rating::Approximated;
-        c.reason = "UI controls are placeholders holding layout values until the UI package fills them";
+        c.reason = "Aver.Fabric has no " + t + " widget: placed as a Control carrying its layout, theme and input properties, so the tree and its scripts survive (its drawing and behaviour are missing)";
         c.carrier = t != "Control";
         return c;
     }
@@ -609,6 +656,11 @@ void Converter::emitNode(FNode& fn, int parent, const Xform& parentWorld, fmt::O
     if (!si && cls.rfind("GDExtensionNode", 0) == 0) props.emplace_back("extension_class", makeString(fn.type));
     if (fn.persistent) props.emplace_back("_persistent", makeInt(1));
 
+    if (fn.type == "AnimationPlayer") noteAnimationPlayer(fn);
+    if (fn.type == "AudioStreamPlayer" || fn.type == "AudioStreamPlayer3D" || fn.type == "AudioListener3D") noteAudioNode(fn);
+    noteAnimTreeNode(fn);
+    noteNavigationNode(fn);
+    if (isControlClass(fn.type)) noteUiNode(fn);
     for (const Prop& pr : fn.props) {
         if (fn.type == "CollisionPolygon3D" && havePolygonShape && (pr.key == "polygon" || pr.key == "depth" || pr.key == "margin")) continue;
         if (inSubViewport && fn.type == "Camera3D" && pr.key == "current") {
@@ -621,13 +673,25 @@ void Converter::emitNode(FNode& fn, int parent, const Xform& parentWorld, fmt::O
         if (fn.type == "GridMap" && pr.key == "mesh_library") { props.emplace_back(pr.key, makeNil()); continue; }   // geometryNode reads the library itself
         Var cv = pr.doc ? convertValue(pr.value, *pr.doc, pw, pr.key) : pr.value;
         if (cv.isNil() && !pr.value.isNil()) continue;   // a resource that could not be converted; already reported
-        if (pr.key.find('/') != std::string::npos && pr.key.rfind("surface_material_override/", 0) != 0) {
+        // parameters/... (AnimationTree) and bones/... (Skeleton3D) are members the runtime classes read by their scene names.
+        const bool dynamicKey = (fn.type == "AnimationTree" && pr.key.rfind("parameters/", 0) == 0) || (fn.type == "Skeleton3D" && pr.key.rfind("bones/", 0) == 0) ||
+                                (isControlClass(fn.type) && pr.key.rfind("theme_override_", 0) == 0) || isWidgetDynamicKey(fn.type, pr.key);
+        if (pr.key.find('/') != std::string::npos && pr.key.rfind("surface_material_override/", 0) != 0 && !dynamicKey) {
             report_.add("property", fn.reportFile, fn.reportPath, fn.type, pr.key, Rating::Approximated,
                         "a path-style property is not a member of the runtime class; it is kept as node metadata", pr.line);
         }
         props.emplace_back(pr.key, std::move(cv));
     }
     if (havePolygonShape) props.emplace_back("shape", polygonShape);
+
+    // G5 N1: a navigation mesh that was never baked in the editor is baked by the region when it is ready (an Aver.Fabric extension; Godot leaves it empty).
+    if (fn.type == "NavigationRegion3D")
+        if (Var* nm = findProp("navigation_mesh"); nm && nm->type == VType::Object && nm->s == "NavigationMesh") {
+            bool baked = false;
+            for (size_t i = 0; i < nm->keys.size(); ++i)
+                if (nm->keys[i].asString() == "polygons" && nm->items[i].count() > 0) baked = true;
+            if (!baked) props.emplace_back("bake_on_ready", makeBool(true));
+        }
 
     // G4 R7: baked meshes and materials, and the child nodes, of MultiMeshInstance3D, Label3D, Sprite3D, the CSG family and GridMap.
     std::vector<std::unique_ptr<FNode>> synthetic;

@@ -16,6 +16,10 @@ aver_add_module(Aver.Audio
     src/WavStream.cpp
     src/Reverb.cpp
     src/Music.cpp
+    # G5 S1 (Godot audio parity, docs/AUDIO.md "Bus graph"): the AudioEffect* set, the bus graph and the AudioStreamPlayer3D maths.
+    src/Effects.cpp
+    src/BusGraph.cpp
+    src/Spatial.cpp
   DEPS
     Aver.Core
 )

@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "Aver.Anim.Abi",
+  "dir": "anim.abi",
+  "displayName": "Property animation ABI",
+  "description": "Plain-C seam onto property-track animation so Aver.Fabric's AnimationPlayer drives it.",
+  "category": "Animation",
+  "option": null,
+  "required": true,
+  "default": true,
+  "dependsOn": ["Aver.Core", "Aver.Platform", "Aver.Formats", "Aver.Anim"],
+  "consequence": ""
+}

@@ -239,6 +239,7 @@ bool Converter::convertProject(const std::string& startLevelAsset) {
     d.startMap = startLevelAsset;
     if (!project_.inputActions.empty()) d.inputScheme = "Input/" + name_ + ".ocinput";
     d.localeDefault = settingString("internationalization/locale/fallback", "en");
+    d.audioBusLayout = audioBusLayout_;   // G5 S1: the default AudioBusLayout converted by convertStandaloneResources, "" when the project has none
 
     // Window.
     d.windowTitle = project_.name;
@@ -248,6 +249,7 @@ bool Converter::convertProject(const std::string& startLevelAsset) {
     const int mode = static_cast<int>(setting("display/window/size/mode", 0));
     d.windowFullscreen = (mode == 3 || mode == 4) ? 1 : 0;
     report_.add("setting", kProject, "", "", "display/window/size", Rating::Converted, "WINDOW.SIZE / RESIZABLE / FULLSCREEN", 0);
+    convertProjectUi(d);   // G5 U1: stretch mode, aspect, scale, the project theme, the tooltip delay
 
     // Physics: Godot's rules, stated.
     const V3 gdir = vec3Of(project_.setting("physics/3d/default_gravity_vector"), {0, -1, 0});
@@ -318,7 +320,8 @@ bool Converter::convertProject(const std::string& startLevelAsset) {
 
     // Settings nobody converted, each named.
     static const char* handled[] = {"application/config/name", "application/config/description", "application/config/features",
-                                    "application/config/icon", "application/run/main_scene", "display/window/size/", "physics/3d/default_gravity",
+                                    "application/config/icon", "application/run/main_scene", "display/window/size/", "display/window/stretch/",
+                                    "gui/theme/custom", "gui/timers/tooltip_delay_sec", "physics/3d/default_gravity",
                                     "physics/3d/default_gravity_vector", "physics/3d/default_linear_damp", "physics/3d/default_angular_damp",
                                     "physics/common/physics_ticks_per_second", "physics/common/physics_interpolation", "internationalization/locale/",
                                     "input/", "autoload/", "layer_names/", "editor_plugins/", "dotnet/project/", "config_version"};

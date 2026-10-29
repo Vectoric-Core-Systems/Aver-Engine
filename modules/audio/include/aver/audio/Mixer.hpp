@@ -2,9 +2,11 @@
 // The mixer: voices in, one interleaved float buffer out. It never touches a device.
 // mix() runs on the audio callback thread and must not allocate, lock, block, log or call
 // managed code. Units are the engine's: centimetres, +X forward, +Y right, +Z up, left-handed.
+#include "aver/audio/BusGraph.hpp"
 #include "aver/audio/Dsp.hpp"
 #include "aver/audio/Reverb.hpp"
 #include "aver/audio/Sound.hpp"
+#include "aver/audio/Spatial.hpp"
 #include "aver/audio/Stream.hpp"
 
 #include <atomic>
@@ -34,6 +36,13 @@ struct PlayDesc {
     f32         fadeInSeconds = 0.0f;                 // ramps the voice up from silence
     FadeCurve   fadeCurve = FadeCurve::EqualPower;
     f32         reverbSend = -1.0f;                   // < 0: 1 on Sfx and Voice, 0 on Music and Ui
+
+    // ---- the bus graph and Godot's 3D player (opt-in; the defaults are the legacy behaviour) ----
+    i32         graphBus = -1;                        // >= 0: sum into this BusGraph bus instead of a legacy bus (needs graph().setActive)
+    bool        godotSpatial = false;                 // positional with Godot's AudioStreamPlayer3D model (needs `positional`); `attenuation` is ignored
+    Spatial3D   spatial{};
+    f32         startSeconds = 0.0f;                  // where in the sound to start
+    bool        paused = false;
 };
 
 // The listener: where the ears are and which way they face.
@@ -69,6 +78,10 @@ public:
     // Reclaims retired sounds whose last voice has ended, and finished streams. Game thread only.
     void collect();
     u32  soundCount() const;
+    // Length in seconds of a loaded sound; 0 for an unknown handle.
+    f64  soundLengthSeconds(SoundHandle h) const;
+    // Sets a loaded sound's loop points in frames (end 0 = to the end). Voices already playing pick them up at their next block.
+    void setSoundLoop(SoundHandle h, u32 beginFrame, u32 endFrame);
 
     // ---- game thread: playback ----
     // Starts a voice, stealing one if the pool is full. Returns its handle, or 0.
@@ -110,6 +123,36 @@ public:
     // The listener-side reverb return. wet 0 disables it.
     void setReverb(const ReverbParams& p);
     ReverbParams reverb() const;
+
+    // ---- game thread: the bus graph, Godot-spatial voices, pause, position, live rings ----
+    //
+    // The graph (docs/AUDIO.md). It does nothing until graph().setActive(true); voices with a graphBus are silent before that.
+    BusGraph& graph() { return graph_; }
+    const BusGraph& graph() const { return graph_; }
+    // Re-routes a live voice to a graph bus (an out-of-range index plays on Master).
+    void setVoiceGraphBus(VoiceHandle v, i32 bus);
+    // Replaces a Godot-spatial voice's parameters (and makes it one).
+    void setVoiceSpatial(VoiceHandle v, const Spatial3D& s);
+    // A paused voice fades to silence within one block and holds its position.
+    void setVoicePaused(VoiceHandle v, bool paused);
+    // Seconds played of the source (a looping source wraps); -1 for a stale handle. Streams count from the start frame.
+    f64  voicePositionSeconds(VoiceHandle v) const;
+    // Length of the source in seconds, 0 when unknown (a live ring, some streams).
+    f64  voiceLengthSeconds(VoiceHandle v) const;
+    // The listener's velocity, cm/s, for Doppler.
+    void setListenerVelocity(f32 x, f32 y, f32 z);
+    // Godot's AudioServer.playback_speed_scale: multiplies every voice's rate (1 = unchanged).
+    void setPlaybackSpeedScale(f32 s) { speedScale_.store(s > 0.0f ? s : 1.0f, std::memory_order_relaxed); }
+    f32  playbackSpeedScale() const { return speedScale_.load(std::memory_order_relaxed); }
+
+    // A voice fed by the game thread (AudioStreamGenerator): a ring of `ringFrames` frames at `rate`, `channels` 1 or 2. Returns the voice.
+    VoiceHandle playLive(const PlayDesc& desc, u32 rate, u32 channels, u32 ringFrames);
+    // Queues frames (interleaved) on a live voice; returns how many fitted.
+    u32  pushLive(VoiceHandle v, const f32* frames, u32 count);
+    u32  liveFree(VoiceHandle v) const;
+    void liveFlush(VoiceHandle v);
+    // Under-runs of a stream or live voice (Godot's get_skips).
+    u32  voiceUnderruns(VoiceHandle v) const;
 
     // Moves the listener.
     void setListener(const Listener& l);
@@ -202,6 +245,18 @@ private:
         f32  occSmooth = 0.0f, sendGain = 0.0f;
         bool occPrimed = false, filterActive = false;
         BiquadState filtL, filtR;
+
+        // The bus graph, Godot's 3D model, pause and position (all opt-in; the defaults leave a voice exactly as it was).
+        std::atomic<i32>  graphBus{-1};
+        std::atomic<bool> godot3d{false};
+        std::atomic<f32>  sp[Spatial3D::kFloats];
+        std::atomic<bool> paused{false};
+        std::atomic<f64>  posPub{0.0};       // source frames played (statics: the cursor; streams: start frame + consumed)
+        f64  lengthSec = 0.0, srcRateHz = 0.0;
+        u64  streamStart = 0, streamFrames = 0;
+        bool pauseSilenced = false;
+        BiquadState shL, shR;                // the attenuation filter (high shelf)
+        bool shelfActive = false;
     };
 
     // One streamed source's decoder. attached is true while a voice reads it.
@@ -232,15 +287,18 @@ private:
     // Claims a Pending voice slot, stealing if the pool is full. 0xFFFFFFFF when none.
     u32 acquireVoice();
     // Fills a claimed voice's shared fields from a PlayDesc and publishes it Active.
-    VoiceHandle activate(u32 index, const PlayDesc& desc);
+    VoiceHandle activate(u32 index, const PlayDesc& desc, f64 startCursor = 0.0, f64 lengthSec = 0.0, f64 srcRate = 0.0, u64 streamStart = 0);
     // Latches a pending fade request and returns the fade gain at the end of this block.
     f32 advanceFade(Voice& vo, u32 frames, bool& stopNow);
     void requestFade(Voice& vo, f32 target, u32 frames, FadeCurve curve, bool stopAtEnd);
 
-    // Adds one voice into the block. Returns false when the voice has ended.
-    bool renderVoice(Voice& vo, f32* out, u32 frames);
-    // The pair of gains this voice contributes, after distance, panning and its bus.
-    void voiceGains(const Voice& vo, f32& outL, f32& outR) const;
+    // Adds one voice into the block (outCh interleaved channels). Returns false when the voice has ended.
+    bool renderVoice(Voice& vo, f32* out, u32 frames, u32 outCh);
+    // The pair of gains this voice contributes, after distance, panning and its bus. For a Godot-spatial voice `shelf` receives the
+    // attenuation filter's linear gain (1 = none) and `dopplerPitch` the pitch multiplier.
+    void voiceGains(const Voice& vo, f32& outL, f32& outR, f32* shelf = nullptr, f32* dopplerPitch = nullptr) const;
+    // One chunk of the mix: the legacy voices into `out`, graph voices into their buses when graphOn, the reverb return, the graph output.
+    void mixChunk(f32* out, u32 frames, bool graphOn);
 
     bool ready_ = false;
     u32  sampleRate_ = 0;
@@ -261,6 +319,9 @@ private:
     std::atomic<f32> lisPos_[3];
     std::atomic<f32> lisFwd_[3];
     std::atomic<f32> lisRight_[3];
+    std::atomic<f32> lisVel_[3];
+    std::atomic<f32> speedScale_{1.0f};
+    BusGraph graph_;
 
     std::atomic<f32> occMinCutoff_{450.0f}, occMinVolume_{0.30f};
 

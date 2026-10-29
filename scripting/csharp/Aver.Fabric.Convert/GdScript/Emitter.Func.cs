@@ -155,6 +155,8 @@ internal sealed partial class GdEmitter
     {
         if (mi.Type != null) return mi.Type;
         FuncDecl fd = mi.Func!;
+        // An override of a runtime virtual returns what the virtual returns (a `-> float` over a C# float virtual is a float, not a double).
+        if (mi.IsOverride && mi.ApiBase != null && fd.ReturnType != null) return mi.Type = Api!.FromSymbol(mi.ApiBase.ReturnType);
         if (fd.ReturnType != null) return mi.Type = ResolveType(fd.ReturnType, mi.Owner);
         if (mi.IsOverride)
         {

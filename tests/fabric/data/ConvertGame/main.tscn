@@ -247,7 +247,7 @@ text = "Hello"
 [node name="Icon" type="Sprite2D" parent="."]
 position = Vector2(10, 20)
 
-[node name="Hum" type="AudioStreamPlayer3D" parent="."]
+[node name="Hum" type="XROrigin3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0)
 
 [node name="Hinge" type="HingeJoint3D" parent="."]

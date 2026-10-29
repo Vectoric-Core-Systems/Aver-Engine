@@ -66,6 +66,11 @@ public:
     void addGlyphQuad(f32 x, f32 y, f32 w, f32 h, u64 texture, f32 u0, f32 v0, f32 u1, f32 v1, u32 rgba,
                       f32 skew = 0.0f, f32 shearBaselineY = 0.0f);
 
+    // Appends triangles built elsewhere (the style boxes: UiStyleBox.hpp). Vertex colours are STRAIGHT and are
+    // premultiplied on the way in; `indices` are relative to `verts`. Merges like any other textured run. Nothing is
+    // drawn for an empty clip, no triangles, or an index past the vertices.
+    void addMesh(const UiVertex* verts, usize vertCount, const u32* indices, usize indexCount, u64 texture);
+
     // ---- TEXT, which this draw list could not produce at all -----------------------------------
     //
     // The text is UTF-8 and glyphs are looked up per code point (a multi-byte sequence used to draw one

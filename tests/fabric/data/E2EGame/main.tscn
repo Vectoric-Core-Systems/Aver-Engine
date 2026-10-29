@@ -61,6 +61,6 @@ Label = "Front door"
 [node name="Probe" type="FabricTestNode" parent="."]
 speed = 2.5
 
-[node name="Music" type="AudioStreamPlayer3D" parent="."]
+[node name="Music" type="XROrigin3D" parent="."]
 
 [node name="Logo" type="Sprite2D" parent="."]

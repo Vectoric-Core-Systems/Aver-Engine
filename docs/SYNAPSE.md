@@ -200,10 +200,21 @@ Components are registered dynamically at each composition root, so no edit to
 
 ## 7. What is not built
 
-- **No local avoidance.** Agents push through each other via Jolt.
-- **No off-mesh links.** No jumping, ladders or dropped ledges; `NLNK` is reserved, unwritten.
-- **No runtime nav baking.** A level with no `.ocnav` beside it has no navigation.
+- **The grid has no local avoidance, no off-mesh links and no runtime baking.** The polygon form of section 8 has all three (Godot parity, Fabric G5 N1); `.ocnav` and everything built on it are unchanged, and a level with no `.ocnav` beside it still has no grid navigation. Crowds (`Crowd.hpp`) are the grid's avoidance.
 - **Hearing exists now**, as a separate system from sight: noise events with occlusion, a decaying last-known-position memory per listener, and its blackboard seam. See [AI_CROWDS_HEARING_COVER.md](AI_CROWDS_HEARING_COVER.md).
 - **The `.ocbt` editor has a node canvas now**, with decorators, a blackboard schema and live debugging; the old list editor remains registered as the fallback. See [BLACKBOARD_BT.md](BLACKBOARD_BT.md).
 - **Environment queries, smart objects and StateTree exist now.** See [AI_QUERIES_SMARTOBJECTS_STATETREE.md](AI_QUERIES_SMARTOBJECTS_STATETREE.md). Queries run on the baked grid, not a navmesh.
 - **One target, globally.** The resolver answers per tick, not per agent.
+
+---
+
+## 8. Polygon navigation (Godot's NavigationServer3D model)
+
+Added for Fabric G5 N1 (`docs/plans/fabric/G5_PARITY.md`); nothing above it changed. Pure like the rest of Synapse (no scene, physics or device); the C seam is `Aver.Nav.Abi` (`nav_abi.h`, `docs/ABI.md`).
+
+- **`NavServer`** (`aver/synapse/NavMesh.hpp`): *maps* hold *regions* (convex polygons in world space, any number per region, any number of floors over the same ground plan), *links* (a start and an end, one-way or both, with layers and costs), *obstacles* and *agents*. A map joins two regions where their edges lie within `edgeConnectionMarginCm` (25 cm) and attaches a link end to the nearest polygon within `linkConnectionRadiusCm` (100 cm). Regions have a 32-bit `layers` mask, an `enterCost` (added when a path enters the region) and a `travelCost` (multiplies the distance walked in it); a query's layer mask must share a bit with a region or link to use it. Floors that merely overlap in plan stay separate, and a start or target is snapped to the closest polygon by distance *and height*.
+- **Paths**: A* over polygons, then the funnel (corner-hugging, the default), edge-centred (portal midpoints) or none (the raw corridor); optional Ramer-Douglas-Peucker simplification; included / excluded region lists. A result carries a type (region or link), a region or link id and the owner id set on it per point, plus `reachedTarget` (false: a partial path to the closest reachable spot) and `endGapCm`.
+- **Baking** (`NavMeshBake.hpp`): triangles in, polygons out; pure and thread-safe. A heightfield method (rasterise, filter by slope, climb and headroom, erode by the agent radius, split into floors by connectivity, cover each floor with plane-fitting rectangles). Honoured: cell size and height, agent height / radius / max climb / max slope, region min size, edge max length, vertices per polygon (3 triangulates), the three span filters, border size, bounds, and obstacle shapes (circles or polygons with a height range) that cut holes. Stored but not applied (the method has no counterpart): Recast's partition type, region merge size, edge max error, detail sampling distance. The polygons are Aver's, not Recast's.
+- **Avoidance** (`NavMeshAvoid.cpp`): the crowd's ORCA core. An agent whose velocity was set since the last `stepAvoidance` gets a safe velocity; nothing moves by itself. Round and wall-polygon obstacles; layers and masks on both sides; ground-plane only.
+- **A\* graphs** (`NavGraph.hpp`): `AStarGraph` (64-bit ids, weights, disabled points, one-way segments, partial paths, closest point and closest point on a segment, scripted `compute` / `estimate` costs; AStar2D is the same with z = 0) and `AStarGrid` (rectangular region, solid cells, weights, the four heuristics, the four diagonal modes, jump-point search, scripted costs). They hold plain numbers: no axis map, no units.
+- **Not built**: a navigation mesh in the editor's viewport; Recast-style detail meshes; 3D avoidance; dynamic-obstacle carving of a running map (obstacles carve at *bake* time, as in Godot); streaming or tiled navigation for very large worlds; `.ocnav` is not read into the polygon form (the two are separate systems).

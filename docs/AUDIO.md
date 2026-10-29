@@ -247,3 +247,48 @@ Stages 1 and 2 are worth doing even if the rest slips: they are the parts that c
 - **Sample-rate mismatch on a device change**: assets resampled at import to 48 kHz are wrong for a
   44.1 kHz device. Either resample on load or keep the source rate in the file and resample per
   voice; not decided.
+
+---
+
+## 10. Bus graph, effects and Godot-style players (Fabric G5 S1)
+
+Added for converted Godot projects (`docs/plans/fabric/G5_PARITY.md`, S1), on the same mixer and under the same real-time rule. **Everything here is opt-in**: the four legacy buses (`audio::Bus`), `PlayDesc` defaults and the `mix()` of a mixer whose graph was never activated are exactly what they were (`AudioTest`, `AudioStreamTest` and `AudioSceneTest` are unchanged and pass).
+
+**The bus graph** (`BusGraph.hpp`, owned by the `Mixer`, `mixer.graph()`). Godot's AudioServer model: a list of named buses, index 0 is `Master`; each bus has `volume_db`, `mute`, `solo`, `bypass_fx`, a send (by name) and an effect chain. Voices started with `PlayDesc::graphBus >= 0` sum into their bus; the buses are processed from the last index down to Master (so a send always reaches a bus that has not been processed yet); the graph's Master block is added to the legacy output and the sum is hard-clipped as before. The rules are Godot's: a send to a bus at the same or a higher index, or to a name that does not exist, goes to Master; solo marks the soloed buses and every bus on their send chains up to Master, silences the rest and makes `mute` irrelevant; peaks are read after effects and volume (`-200 dB` when silent); `add_bus` names buses `New Bus`, `New Bus 2`...; `move_bus(from, to)` numbers `to` before the move; Master cannot be moved or removed; `bus_count` is 1..255. Gains ramp across the block. A voice on a graph bus takes no legacy bus or master gain. `AudioServer.playback_speed_scale` is `Mixer::setPlaybackSpeedScale` (a multiplier on every voice's rate, default 1).
+
+**Threading.** Structure edits (add, remove or move a bus or effect, a send or sidechain change, applying a layout) take a spin lock that the audio thread only `try_lock`s: a block that finds the graph being edited renders without its graph voices, a rare gap of one block while a script rebuilds the layout. Volume, mute, solo, bypass, enable flags and every effect parameter are atomics and never lock; effects and buses are allocated and freed on the game thread.
+
+**Effects** (`Effects.hpp`; Godot's class names and property names, defaults and ranges; `Effect::create`, `findParam`, `setParam`). All allocate only when made and work in place on an interleaved stereo block.
+
+| Effect | Implementation | Against Godot |
+|---|---|---|
+| Amplify | gain ramp | same |
+| LowPass / HighPass / BandPass / Notch / LowShelf / HighShelf | Godot's `AudioFilterSW` coefficients (cutoff clamp, resonance as Q, BandPass Q x2, shelf gain, `db` = 1..4 cascaded stages with Godot's Q and gain adjustment) | same coefficients, tested against the formulas |
+| Delay | two taps (delay, level, pan) and a low-passed feedback line | same structure; pan law is constant power, unity at the centre |
+| Chorus | up to four LFO-modulated voices, low-passed, panned, from the mono mix | approximated |
+| Compressor | peak envelope (attack in microseconds, release in ms) on the static curve (threshold, ratio, makeup, mix); sidechain from a bus with a higher index | approximated detector, exact static curve |
+| Limiter | soft clip: transparent below the knee (ceiling minus `soft_clip_db`), tanh above | approximated |
+| HardLimiter | 1.5 ms look-ahead brick wall; the output never exceeds the ceiling | approximated release |
+| EQ6 / EQ10 / EQ21 | peaking filters at Godot's band centres | exact gain at each centre; band shape approximated |
+| Distortion | clip, atan, lo-fi, overdrive, wave shape; `keep_hf_hz` leaves the highs alone | approximated curves |
+| Phaser | six all-pass stages, LFO between `range_min_hz` and `range_max_hz` | approximated depth scale |
+| PitchShift | time-domain two-head shifter | approximated (some modulation on sustained tones; pitch within a few percent) |
+| Reverb | the existing send reverb (combs and all-passes) with a pre-delay line, hi-pass, damping, spread, dry and wet | approximated |
+| Panner | linear balance | approximated |
+| StereoEnhance | mid/side widening, right channel delayed | approximated |
+| Capture | stereo ring the game thread reads (`buffer_length`, up to 2 s; frames that do not fit are dropped and counted) | same behaviour |
+| SpectrumAnalyzer | history ring; a Hann-windowed FFT on request (`fft_size` 256..4096, `tap_back_pos`); average or maximum magnitude over a range, a full-scale sine reads about its amplitude | same interface, own scaling |
+
+Not implemented: `AudioEffectRecord` (microphone input), `AudioEffectBandLimitFilter`.
+
+**Players.** `PlayDesc` gained `graphBus`, `godotSpatial` + `Spatial3D`, `startSeconds` and `paused`. A Godot-spatial voice (`Spatial.hpp`, pure functions tested in `AudioSpatialTest`) gets, per block: the attenuation model (inverse distance, inverse square, logarithmic, disabled) with `unit_size` and the `max_db` clamp, the `max_distance` linear fade, Godot's stereo panning law (project setting `audio/general/3d_panning_strength`, default 0.5), the emission cone, the attenuation filter (a one-stage high shelf at `attenuation_filter_cutoff_hz` whose gain follows `(1 - distance gain) * attenuation_filter_db`, plus the cone's dB outside it), and the Doppler pitch (`343 / (343 + |v| * cos)`, clamped to 1/8..8, from the emitter's and the camera's tracked velocities). `setVoicePaused` fades a voice out in one block and holds its playhead; `voicePositionSeconds` / `voiceLengthSeconds` read the playhead. A **live** voice (`playLive`, `StreamParams::live`) is a ring the game thread pushes frames into (`AudioStreamGenerator`); running dry is an under-run (counted, `get_skips`), not the end of the voice.
+
+**Streams that pick or mix other streams** (`AudioStreamRandomizer`, `Polyphonic`, `Playlist`, `Synchronized`, `Interactive`) are `Aver.Fabric` objects that start ordinary voices; the engine needs nothing for them. Approximations: a playlist plays its entries back to back (no cross-fade), an interactive stream switches clips at once and keeps its transition rules without timing them.
+
+**What decodes what.** WAV (8/16/24/32-bit PCM and float) by `Wav.cpp` / `WavStream.cpp`, on every platform, with loop points settable on a loaded sound (`aver_audio_sound_set_loop`; ping-pong and backward loops play forward). **Everything else** (`.ogg`, `.mp3`, `.flac`, `.m4a`, `.wma`) goes through Windows Media Foundation (`audioImportFile`, `StreamSources.cpp`): MP3 and FLAC decode on a stock Windows 10+, **Ogg Vorbis only where Microsoft's "Web Media Extensions" codec is installed**, and on Linux and macOS only WAV and `.ocaudio` decode. The engine has no Vorbis or MP3 decoder of its own and none was added. A decoder dependency would add: for Ogg Vorbis, a BSD-licensed decoder (libvorbis + libogg, or the single-file public-domain stb_vorbis, about 5,000 lines) plus an incremental `StreamSource` over it (about 150 lines, `openWavStream` is the template); for MP3, a single-header public-domain decoder (minimp3 or dr_mp3); both would make the three platforms agree and remove the Windows-only caveat. FLAC (dr_flac) likewise.
+
+**Video.** `VideoStreamPlayer` is **unsupported**: `modules/media` is an H.264/MP4 *encoder* (`VideoEncoder`, Media Foundation `IMFSinkWriter`, for the render queue); the engine has no video decoder or texture-streaming path. The converter places the node as a Control carrier with its properties and reports it unsupported, and `.ogv` / `.webm` files are reported the same way. A decoder dependency would add: a Theora/Ogg decoder (libtheora + libogg + the Vorbis decoder above) for Godot's own `.ogv` format, or Media Foundation's source reader on Windows for H.264 `.mp4` (no new library, Windows only), plus a per-frame texture upload through `render.ui`'s texture path and an audio-track tap into a stream voice.
+
+**Offline mode** (`aver_audio_offline_init` / `_offline_mix`): the same mixer with no device, for tests and tools. `Aver.Fabric` also falls back to it, stepped by the frame loop, when a game has no output device, so players still finish. A game never opens it by choice.
+
+**Bus layouts.** `BusLayout` (`BusLayout.hpp`) is plain data (buses, effects by Godot class name, parameters by Godot property name); `BusGraph::applyLayout` / `exportLayout` apply and read it; `.ocbus` (`docs/formats/FORMAT_SPECS.md`) is its text form (`OcBusLayout.hpp`, in `Aver.Formats.Audio`); the project key `AUDIO.BUSLAYOUT <content path>` names the layout a project starts with (empty = none, no graph). `AverAssetC fabric` converts a Godot `AudioBusLayout` into one.

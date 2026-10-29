@@ -69,12 +69,21 @@ public static class ProjectSettings
                 return TryFloat(Manifest("PHYSICS.FIXEDSTEP", ""), out double step) && step > 0 ? (long)Math.Round(1.0 / step) : 60L;
             case "display/window/size/viewport_width": return WindowSize(0, 1152);
             case "display/window/size/viewport_height": return WindowSize(1, 648);
+            // G5 U1: the UI.* project keys (docs/formats/FORMAT_SPECS.md)
+            case "gui/theme/custom": return Manifest("UI.THEME", "");
+            case "display/window/stretch/mode": return Manifest("UI.STRETCH", "disabled");
+            case "display/window/stretch/aspect": return Manifest("UI.ASPECT", "keep");
+            case "display/window/stretch/scale_mode": return Manifest("UI.STRETCHSCALEMODE", "fractional");
+            case "display/window/stretch/scale": return TryFloat(Manifest("UI.STRETCHSCALE", ""), out double scale) && scale > 0 ? scale : 1.0;
+            case "gui/timers/tooltip_delay_sec": return TryFloat(Manifest("UI.TOOLTIPDELAY", ""), out double delay) && delay >= 0 ? delay : 0.5;
         }
         return @default;
     }
 
     public static bool HasSetting(string name) => name is "physics/3d/default_gravity" or "physics/3d/default_gravity_vector" or "application/config/name"
-        or "physics/common/physics_ticks_per_second" or "display/window/size/viewport_width" or "display/window/size/viewport_height";
+        or "physics/common/physics_ticks_per_second" or "display/window/size/viewport_width" or "display/window/size/viewport_height"
+        or "gui/theme/custom" or "display/window/stretch/mode" or "display/window/stretch/aspect" or "display/window/stretch/scale_mode"
+        or "display/window/stretch/scale" or "gui/timers/tooltip_delay_sec";
 
     private static bool TryFloat(string s, out double d) => double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out d);
 

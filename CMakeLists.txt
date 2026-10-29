@@ -203,9 +203,13 @@ add_subdirectory(modules/formats.roslyn)
 # Animation sampling, above formats because it reads .ocskel/.ocanim through it and below anything
 # that draws. Posing a skeleton is arithmetic, so this needs no RHI and never will.
 add_subdirectory(modules/anim)
+# The plain-C seam onto the property-track player (Godot AnimationPlayer parity, Aver.Fabric). Anim + Formats + Core only.
+add_subdirectory(modules/anim.abi)
 # Synapse: navigation and pathfinding. Core+Formats only, so it builds and tests with no scene,
 # no physics and no device -- see the module's own CMakeLists for why that split is the point.
 add_subdirectory(modules/synapse)
+# The plain-C seam onto polygon navigation, the navmesh baker and the A* graphs (Godot navigation parity, Aver.Fabric). Synapse + Core only.
+add_subdirectory(modules/nav.abi)
 # Aver Sound: a .ocsnd node graph rendered to PCM. Core+Formats only, beside Synapse and for the
 # identical reason -- it builds and tests with no device, no mixer and no scene.
 add_subdirectory(modules/sound)

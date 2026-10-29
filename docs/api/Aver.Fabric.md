@@ -2,7 +2,7 @@
 
 # Aver.Fabric public API
 
-277 public types and 3355 public members, read from `scripting/csharp/Aver.Fabric/` (52 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+604 public types and 6436 public members, read from `scripting/csharp/Aver.Fabric/` (102 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Fabric
 
@@ -44,11 +44,651 @@
 - `public override readonly int GetHashCode()`
 - `public override readonly string ToString()`
 
+### AcceptDialog
+
+`public class AcceptDialog : PopupWindow` - A dialog with a message and an OK button (Godot's AcceptDialog).
+
+- `public event Action Confirmed`
+- `public event Action Canceled`
+- `public event Action<StringName> CustomAction`
+- `public AcceptDialog()`
+- `public string DialogText { get; set; }`
+- `public bool DialogHideOnOk { get; set; }`
+- `public bool DialogCloseOnEscape { get; set; }`
+- `public bool DialogAutowrap { get; set; }`
+- `public string OkButtonText { get; set; }`
+- `public Button GetOkButton()`
+- `public Label GetLabel()`
+- `public Button AddButton(string text, bool right = false, string action = "")` - Adds a button to the dialog; pressing it emits custom_action with action (and hides the dialog when the action is empty).
+- `public Button AddCancelButton(string name)`
+- `public void RemoveButton(Control button)`
+- `public void RegisterTextEnter(LineEdit lineEdit)`
+- `public override void _Notification(int what)`
+- `public override void _Draw()`
+
+### AcceptDialog.SignalName
+
+`public new class SignalName : PopupWindow.SignalName`
+
+- `public static readonly StringName Confirmed`
+- `public static readonly StringName Canceled`
+- `public static readonly StringName CustomAction`
+
 ### AnimatableBody3D
 
 `public class AnimatableBody3D : StaticBody3D` - A body moved by script or animation that pushes others (Godot's AnimatableBody3D).
 
 - `public bool SyncToPhysics { get; set; }` - When true the body follows its node through the physics step, so what rests on it is carried.
+
+### Animation
+
+`public class Animation : Resource` - One animation: tracks of keys, a length and a loop mode (Godot's Animation).
+
+- `public Animation()`
+- `public override Resource Duplicate(bool subresources = false)`
+- `public void Clear()` - Removes every track and resets the length and loop mode.
+- `public float Length { get; set; }`
+- `public LoopModeEnum LoopMode { get; set; }`
+- `public float Step { get; set; }`
+- `public bool CaptureIncluded { get; }` - True when a track is in capture update mode.
+- `public int GetTrackCount()`
+- `public int AddTrack(TrackType type, int atPosition = -1)`
+- `public void RemoveTrack(int trackIdx)`
+- `public TrackType TrackGetType(int trackIdx)`
+- `public NodePath TrackGetPath(int trackIdx)`
+- `public void TrackSetPath(int trackIdx, NodePath path)`
+- `public int FindTrack(NodePath path, TrackType type)`
+- `public void TrackMoveTo(int trackIdx, int toIdx)`
+- `public void TrackSwap(int trackIdx, int withIdx)`
+- `public void TrackSetImported(int trackIdx, bool imported)`
+- `public bool TrackIsImported(int trackIdx)`
+- `public void TrackSetEnabled(int trackIdx, bool enabled)`
+- `public bool TrackIsEnabled(int trackIdx)`
+- `public void TrackSetInterpolationLoopWrap(int trackIdx, bool interpolation)`
+- `public bool TrackGetInterpolationLoopWrap(int trackIdx)`
+- `public void TrackSetInterpolationType(int trackIdx, InterpolationType interpolation)`
+- `public InterpolationType TrackGetInterpolationType(int trackIdx)`
+- `public void ValueTrackSetUpdateMode(int trackIdx, UpdateMode mode)`
+- `public UpdateMode ValueTrackGetUpdateMode(int trackIdx)`
+- `public int TrackGetKeyCount(int trackIdx)`
+- `public double TrackGetKeyTime(int trackIdx, int keyIdx)`
+- `public float TrackGetKeyTransition(int trackIdx, int keyIdx)`
+- `public void TrackSetKeyTransition(int trackIdx, int keyIdx, float transition)`
+- `public void TrackSetKeyTime(int trackIdx, int keyIdx, double time)`
+- `public void TrackRemoveKey(int trackIdx, int keyIdx)`
+- `public void TrackRemoveKeyAtTime(int trackIdx, double time)`
+- `public int TrackFindKey(int trackIdx, double time, FindMode findMode = FindMode.Nearest, bool limit = false, bool backward = false)`
+- `public int TrackInsertKey(int trackIdx, double time, Variant key, float transition = 1)` - Adds a key.
+- `public void TrackSetKeyValue(int trackIdx, int keyIdx, Variant value)`
+- `public Variant TrackGetKeyValue(int trackIdx, int keyIdx)`
+- `public Variant ValueTrackInterpolate(int trackIdx, double timeSec, bool backward = false)` - The value of a track at a time: its interpolation, update mode and this animation's loop mode applied.
+- `public Vector3 PositionTrackInterpolate(int trackIdx, double timeSec, bool backward = false)`
+- `public Quaternion RotationTrackInterpolate(int trackIdx, double timeSec, bool backward = false)`
+- `public Vector3 ScaleTrackInterpolate(int trackIdx, double timeSec, bool backward = false)`
+- `public float BlendShapeTrackInterpolate(int trackIdx, double timeSec, bool backward = false)`
+- `public float BezierTrackInterpolate(int trackIdx, double timeSec)`
+- `public int PositionTrackInsertKey(int trackIdx, double time, Vector3 position)`
+- `public int RotationTrackInsertKey(int trackIdx, double time, Quaternion rotation)`
+- `public int ScaleTrackInsertKey(int trackIdx, double time, Vector3 scale)`
+- `public int BlendShapeTrackInsertKey(int trackIdx, double time, float amount)`
+- `public int BezierTrackInsertKey(int trackIdx, double time, float value, Vector2 inHandle = default, Vector2 outHandle = default)`
+- `public void BezierTrackSetKeyValue(int trackIdx, int keyIdx, float value)`
+- `public float BezierTrackGetKeyValue(int trackIdx, int keyIdx)`
+- `public void BezierTrackSetKeyInHandle(int trackIdx, int keyIdx, Vector2 inHandle, float balancedValueTimeRatio = 1.0f)`
+- `public void BezierTrackSetKeyOutHandle(int trackIdx, int keyIdx, Vector2 outHandle, float balancedValueTimeRatio = 1.0f)`
+- `public Vector2 BezierTrackGetKeyInHandle(int trackIdx, int keyIdx)`
+- `public Vector2 BezierTrackGetKeyOutHandle(int trackIdx, int keyIdx)`
+- `public StringName MethodTrackGetName(int trackIdx, int keyIdx)`
+- `public Collections.Array MethodTrackGetParams(int trackIdx, int keyIdx)` - The arguments a method key calls with.
+- `public int AudioTrackInsertKey(int trackIdx, double time, Resource stream, float startOffset = 0, float endOffset = 0)`
+- `public Resource? AudioTrackGetKeyStream(int trackIdx, int keyIdx)`
+- `public void AudioTrackSetKeyStream(int trackIdx, int keyIdx, Resource stream)`
+- `public float AudioTrackGetKeyStartOffset(int trackIdx, int keyIdx)`
+- `public float AudioTrackGetKeyEndOffset(int trackIdx, int keyIdx)`
+- `public void AudioTrackSetKeyStartOffset(int trackIdx, int keyIdx, float offset)`
+- `public void AudioTrackSetKeyEndOffset(int trackIdx, int keyIdx, float offset)`
+- `public int AnimationTrackInsertKey(int trackIdx, double time, StringName animation)`
+- `public StringName AnimationTrackGetKeyAnimation(int trackIdx, int keyIdx)`
+- `public void AnimationTrackSetKeyAnimation(int trackIdx, int keyIdx, StringName animation)`
+
+### Animation.FindMode
+
+`public enum FindMode`
+
+Values: `Nearest = 0`, `Approx = 1`, `Exact = 2`
+
+### Animation.InterpolationType
+
+`public enum InterpolationType`
+
+Values: `Nearest = 0`, `Linear = 1`, `Cubic = 2`, `LinearAngle = 3`, `CubicAngle = 4`
+
+### Animation.LoopedFlag
+
+`public enum LoopedFlag`
+
+Values: `None = 0`, `End = 1`, `Start = 2`
+
+### Animation.LoopModeEnum
+
+`public enum LoopModeEnum`
+
+Values: `None = 0`, `Linear = 1`, `Pingpong = 2`
+
+### Animation.TrackType
+
+`public enum TrackType`
+
+Values: `Value = 0`, `Position3D = 1`, `Rotation3D = 2`, `Scale3D = 3`, `BlendShape = 4`, `Method = 5`, `Bezier = 6`, `Audio = 7`, `Animation = 8`
+
+### Animation.UpdateMode
+
+`public enum UpdateMode`
+
+Values: `Continuous = 0`, `Discrete = 1`, `Capture = 2`
+
+### AnimationLibrary
+
+`public class AnimationLibrary : Resource` - A named set of animations (Godot's AnimationLibrary).
+
+- `public Error AddAnimation(StringName name, Animation animation)`
+- `public void RemoveAnimation(StringName name)`
+- `public void RenameAnimation(StringName name, StringName newname)`
+- `public bool HasAnimation(StringName name)`
+- `public Animation? GetAnimation(StringName name)`
+- `public StringName[] GetAnimationList()` - The animation names, in the order they were added.
+- `public int GetAnimationListSize()`
+
+### AnimationLibrary.SignalName
+
+`public new class SignalName : Resource.SignalName`
+
+- `public static readonly StringName AnimationAdded`
+- `public static readonly StringName AnimationRemoved`
+- `public static readonly StringName AnimationRenamed`
+- `public static readonly StringName AnimationChanged`
+
+### AnimationMixer
+
+`public class AnimationMixer : Node` - The base of AnimationPlayer: libraries of animations and the engine player that mixes them (Godot's AnimationMixer).
+
+- `public event Action<StringName> AnimationFinished`
+- `public event Action<StringName> AnimationStarted`
+- `public event Action AnimationListChanged`
+- `public event Action AnimationLibrariesUpdated`
+- `public event Action MixerApplied`
+- `public AnimationMixer()`
+- `public override void Free()`
+- `public bool Active { get; set; }`
+- `public AnimationCallbackModeProcess CallbackModeProcess { get; set; }`
+- `public AnimationCallbackModeMethod CallbackModeMethod { get; set; }`
+- `public AnimationCallbackModeDiscrete CallbackModeDiscrete { get; set; }`
+- `public bool Deterministic { get; set; }` - When true the weights of the animations being blended are not normalised, so a target only some of them touch fades towards its RESET value instead of keeping the value of the animation that touches it.
+- `public NodePath RootNode { get; set; }` - The node track paths are relative to (default: the parent).
+- `public NodePath RootMotionTrack { get; set; }` - The position / rotation / scale track whose movement is not applied to its node but reported by GetRootMotionPosition and the other root-motion getters (a character's body movement then comes from the animation).
+- `public bool RootMotionLocal { get; set; }` - Stored; root motion is reported in the track's own space whatever this is (Godot 4.4's local-space option is not modelled).
+- `public Vector3 GetRootMotionPosition()` - How far the root-motion position track moved in the last pass (Godot metres and axes), zero without such a track.
+- `public Quaternion GetRootMotionRotation()` - The rotation the root-motion rotation track made in the last pass, identity without one.
+- `public Vector3 GetRootMotionScale()` - How far the root-motion scale track moved in the last pass, zero without one.
+- `public Vector3 GetRootMotionPositionAccumulator()` - The blended absolute position of the root-motion track (not a delta), for placing a body that is driven by the animation.
+- `public Quaternion GetRootMotionRotationAccumulator()` - The blended absolute rotation of the root-motion track.
+- `public Vector3 GetRootMotionScaleAccumulator()` - The blended absolute scale of the root-motion track.
+- `public bool ResetOnSave { get; set; }`
+- `public int AudioMaxPolyphony { get; set; }`
+- `public Error AddAnimationLibrary(StringName name, AnimationLibrary library)`
+- `public void RemoveAnimationLibrary(StringName name)`
+- `public void RenameAnimationLibrary(StringName name, StringName newname)`
+- `public bool HasAnimationLibrary(StringName name)`
+- `public AnimationLibrary? GetAnimationLibrary(StringName name)`
+- `public StringName[] GetAnimationLibraryList()`
+- `public Collections.Dictionary Libraries { get; set; }` - The libraries as scripts and scenes set them: library name to library.
+- `public bool HasAnimation(StringName name)`
+- `public Animation? GetAnimation(StringName name)`
+- `public string[] GetAnimationList()` - Every animation as "name" (default library) or "library/name".
+- `public StringName FindAnimation(Animation animation)`
+- `public StringName FindAnimationLibrary(Animation animation)`
+- `public virtual void Advance(double delta)` - Runs one pass of the mixer now, as if delta seconds had passed.
+- `public void ClearCaches()` - Forgets the nodes and properties tracks were resolved to; they are looked up again on the next pass.
+- `public void Capture(StringName name, double duration, Tween.TransitionType transType = Tween.TransitionType.Linear, Tween.EaseType easeType = Tween.EaseType.In)` - Snapshots the current values of the capture-mode tracks of an animation and fades that snapshot out over duration seconds while the animation comes in.
+
+### AnimationMixer.AnimationCallbackModeDiscrete
+
+`public enum AnimationCallbackModeDiscrete`
+
+Values: `Dominant = 0`, `Recessive = 1`, `ForceContinuous = 2`
+
+### AnimationMixer.AnimationCallbackModeMethod
+
+`public enum AnimationCallbackModeMethod`
+
+Values: `Deferred = 0`, `Immediate = 1`
+
+### AnimationMixer.AnimationCallbackModeProcess
+
+`public enum AnimationCallbackModeProcess`
+
+Values: `Physics = 0`, `Idle = 1`, `Manual = 2`
+
+### AnimationMixer.SignalName
+
+`public new class SignalName : Node.SignalName`
+
+- `public static readonly StringName AnimationFinished`
+- `public static readonly StringName AnimationStarted`
+- `public static readonly StringName AnimationListChanged`
+- `public static readonly StringName AnimationLibrariesUpdated`
+- `public static readonly StringName CachesCleared`
+- `public static readonly StringName MixerApplied`
+- `public static readonly StringName MixerUpdated`
+
+### AnimationNode
+
+`public class AnimationNode : Resource` - A node of an AnimationTree's graph (Godot's AnimationNode).
+
+- `public bool FilterEnabled { get; set; }` - When true the node's filter list decides which tracks its inputs affect (blend, add and one-shot nodes).
+- `public void SetFilterPath(NodePath path, bool enable)` - Adds or removes a track path on the filter list.
+- `public bool IsPathFiltered(NodePath path)`
+- `public Collections.Array Filters { get; set; }` - The filter list as a scene stores it: an array of node paths.
+- `public virtual string GetCaption()`
+- `public virtual bool HasFilter()`
+
+### AnimationNode.FilterAction
+
+`public enum FilterAction`
+
+Values: `Ignore = 0`, `Pass = 1`, `Stop = 2`, `Blend = 3`
+
+### AnimationNode.SignalName
+
+`public new class SignalName : Resource.SignalName`
+
+- `public static readonly StringName TreeChanged`
+- `public static readonly StringName AnimationNodeRenamed`
+- `public static readonly StringName AnimationNodeRemoved`
+
+### AnimationNodeAdd2
+
+`public class AnimationNodeAdd2 : AnimationNodeSync` - Adds the second input on top of the first by add_amount (additive: the second's difference from its initial pose).
+
+- `public override string GetCaption()`
+
+### AnimationNodeAdd3
+
+`public class AnimationNodeAdd3 : AnimationNodeSync` - Adds the first or the last input on top of the middle one by add_amount in -1..1.
+
+- `public override string GetCaption()`
+- `public override bool HasFilter()`
+
+### AnimationNodeAnimation
+
+`public class AnimationNodeAnimation : AnimationRootNode` - Plays one animation (Godot's AnimationNodeAnimation).
+
+- `public StringName Animation { get; set; }` - The key of the animation in the tree's libraries ("walk" or "library/walk").
+- `public PlayModeEnum PlayMode { get; set; }`
+- `public bool AdvanceOnStart { get; set; }` - Stored; the first pass always includes the key at the start.
+- `public bool UseCustomTimeline { get; set; }` - Stored: the timeline of the animation itself is used (a custom start, length and stretch are not applied).
+- `public double TimelineLength { get; set; }`
+- `public bool StretchTimeScale { get; set; }`
+- `public double StartOffset { get; set; }`
+- `public Animation.LoopModeEnum LoopMode { get; set; }`
+- `public override string GetCaption()`
+
+### AnimationNodeAnimation.PlayModeEnum
+
+`public enum PlayModeEnum`
+
+Values: `Forward = 0`, `Backward = 1`
+
+### AnimationNodeBlend2
+
+`public class AnimationNodeBlend2 : AnimationNodeSync` - Mixes two inputs by parameters/.../blend_amount (0 = the first, 1 = the second); a filter keeps the mix to some tracks.
+
+- `public override string GetCaption()`
+
+### AnimationNodeBlend3
+
+`public class AnimationNodeBlend3 : AnimationNodeSync` - Mixes three inputs by blend_amount in -1..1 (-1 = the first, 0 = the middle one, 1 = the last).
+
+- `public override string GetCaption()`
+- `public override bool HasFilter()`
+
+### AnimationNodeBlendSpace1D
+
+`public class AnimationNodeBlendSpace1D : AnimationRootNode`
+
+- `public float MinSpace { get; set; }`
+- `public float MaxSpace { get; set; }`
+- `public float Snap { get; set; }`
+- `public string ValueLabel { get; set; }`
+- `public BlendModeEnum BlendMode { get; set; }`
+- `public bool Sync { get; set; }`
+- `public override string GetCaption()`
+- `public void AddBlendPoint(AnimationRootNode node, float pos, int atIndex = -1)`
+- `public void SetBlendPointPosition(int point, float pos)`
+- `public float GetBlendPointPosition(int point)`
+- `public void SetBlendPointNode(int point, AnimationRootNode node)`
+- `public AnimationRootNode? GetBlendPointNode(int point)`
+- `public void RemoveBlendPoint(int point)`
+- `public int GetBlendPointCount()`
+- `public float[] GetWeights(float position)` - The weight of each point at position: the two either side share it, the end points take it outside.
+
+### AnimationNodeBlendSpace1D.BlendModeEnum
+
+`public enum BlendModeEnum`
+
+Values: `Interpolated = 0`, `Discrete = 1`, `DiscreteCarry = 2`
+
+### AnimationNodeBlendSpace2D
+
+`public class AnimationNodeBlendSpace2D : AnimationRootNode`
+
+- `public Vector2 MinSpace { get; set; }`
+- `public Vector2 MaxSpace { get; set; }`
+- `public Vector2 Snap { get; set; }`
+- `public string XLabel { get; set; }`
+- `public string YLabel { get; set; }`
+- `public BlendModeEnum BlendMode { get; set; }`
+- `public bool Sync { get; set; }`
+- `public bool AutoTriangles { get; set; }` - When true (the default) the triangles are recomputed whenever a point is added, moved or removed.
+- `public override string GetCaption()`
+- `public void AddBlendPoint(AnimationRootNode node, Vector2 pos, int atIndex = -1)`
+- `public void SetBlendPointPosition(int point, Vector2 pos)`
+- `public Vector2 GetBlendPointPosition(int point)`
+- `public void SetBlendPointNode(int point, AnimationRootNode node)`
+- `public AnimationRootNode? GetBlendPointNode(int point)`
+- `public void RemoveBlendPoint(int point)`
+- `public int GetBlendPointCount()`
+- `public void AddTriangle(int x, int y, int z, int atIndex = -1)`
+- `public int GetTrianglePoint(int triangle, int point)`
+- `public void RemoveTriangle(int triangle)`
+- `public int GetTriangleCount()`
+- `public int[] Triangles { get; set; }` - The triangles as a scene stores them: three point indices each.
+- `public float[] GetWeights(Vector2 position)` - The weight of each point at position: the three corners of the triangle that holds it share it by barycentric weights; outside every triangle the nearest point of the nearest edge decides.
+
+### AnimationNodeBlendSpace2D.BlendModeEnum
+
+`public enum BlendModeEnum`
+
+Values: `Interpolated = 0`, `Discrete = 1`, `DiscreteCarry = 2`
+
+### AnimationNodeBlendTree
+
+`public class AnimationNodeBlendTree : AnimationRootNode` - A graph of blend nodes wired from an output (Godot's AnimationNodeBlendTree).
+
+- `public const string OutputName = "output"`
+- `public Vector2 GraphOffset { get; set; }`
+- `public AnimationNodeBlendTree()`
+- `public override string GetCaption()`
+- `public void AddNode(StringName name, AnimationNode node, Vector2 position = default)`
+- `public AnimationNode? GetNode(StringName name)`
+- `public bool HasNode(StringName name)`
+- `public void RemoveNode(StringName name)`
+- `public void RenameNode(StringName name, StringName newName)`
+- `public void SetNodePosition(StringName name, Vector2 position)`
+- `public Vector2 GetNodePosition(StringName name)`
+- `public StringName[] GetNodeList()` - The names of the nodes in the order they were added (the output first).
+- `public void ConnectNode(StringName inputNode, int inputIndex, StringName outputNode)` - Wires the output of outputNode to input inputIndex of inputNode.
+- `public void DisconnectNode(StringName inputNode, int inputIndex)`
+- `public ConnectionError CanConnect(StringName inputNode, int inputIndex, StringName outputNode)`
+- `public Collections.Array NodeConnections { get; set; }` - The wiring as scenes store it: input node, input index and source node, repeated.
+
+### AnimationNodeBlendTree.ConnectionError
+
+`public enum ConnectionError`
+
+Values: `Ok = 0`, `NoInput = 1`, `NoInputIndex = 2`, `NoOutput = 3`, `SameNode = 4`, `ConnectionExists = 5`
+
+### AnimationNodeEndState
+
+`public class AnimationNodeEndState : AnimationRootNode` - The state that ends a machine: reaching it stops the playback (Godot's AnimationNodeEndState).
+
+- `public override string GetCaption()`
+
+### AnimationNodeOneShot
+
+`public class AnimationNodeOneShot : AnimationNodeSync` - Plays the second input over the first once, on request (Godot's AnimationNodeOneShot): request 1 fires it, 2 aborts it, 3 fades it out.
+
+- `public MixModeEnum MixMode { get; set; }`
+- `public double FadeinTime { get; set; }`
+- `public Curve? FadeinCurve { get; set; }`
+- `public double FadeoutTime { get; set; }`
+- `public Curve? FadeoutCurve { get; set; }`
+- `public bool BreakLoopAtEnd { get; set; }`
+- `public bool Autorestart { get; set; }`
+- `public double AutorestartDelay { get; set; }`
+- `public double AutorestartRandomDelay { get; set; }`
+- `public bool AbortOnReset { get; set; }`
+- `public override string GetCaption()`
+
+### AnimationNodeOneShot.MixModeEnum
+
+`public enum MixModeEnum`
+
+Values: `Blend = 0`, `Add = 1`
+
+### AnimationNodeOneShot.OneShotRequest
+
+`public enum OneShotRequest`
+
+Values: `None = 0`, `Fire = 1`, `Abort = 2`, `FadeOut = 3`
+
+### AnimationNodeOutput
+
+`public class AnimationNodeOutput : AnimationNode` - The sink of a blend tree (Godot's AnimationNodeOutput): its one input is what the tree plays.
+
+- `public override string GetCaption()`
+
+### AnimationNodeStartState
+
+`public class AnimationNodeStartState : AnimationRootNode` - The state a machine starts in: it plays nothing and its transitions leave at once (Godot's AnimationNodeStartState).
+
+- `public override string GetCaption()`
+
+### AnimationNodeStateMachine
+
+`public class AnimationNodeStateMachine : AnimationRootNode` - A machine of states joined by transitions (Godot's AnimationNodeStateMachine).
+
+- `public const string StartState = "Start"`
+- `public const string EndState = "End"`
+- `public bool AllowTransitionToSelf { get; set; }`
+- `public bool ResetEnds { get; set; }`
+- `public StateMachineTypeEnum StateMachineType { get; set; }`
+- `public Vector2 GraphOffset { get; set; }`
+- `public AnimationNodeStateMachine()`
+- `public override string GetCaption()`
+- `public void AddNode(StringName name, AnimationNode node, Vector2 position = default)`
+- `public void ReplaceNode(StringName name, AnimationNode node)`
+- `public AnimationNode? GetNode(StringName name)`
+- `public bool HasNode(StringName name)`
+- `public StringName GetNodeName(AnimationNode node)`
+- `public void RemoveNode(StringName name)`
+- `public void RenameNode(StringName name, StringName newName)`
+- `public StringName[] GetNodeList()`
+- `public void SetNodePosition(StringName name, Vector2 position)`
+- `public Vector2 GetNodePosition(StringName name)`
+- `public bool HasTransition(StringName from, StringName to)`
+- `public void AddTransition(StringName from, StringName to, AnimationNodeStateMachineTransition transition)`
+- `public int GetTransitionCount()`
+- `public AnimationNodeStateMachineTransition? GetTransition(int idx)`
+- `public StringName GetTransitionFrom(int idx)`
+- `public StringName GetTransitionTo(int idx)`
+- `public void RemoveTransitionByIndex(int idx)`
+- `public void RemoveTransition(StringName from, StringName to)`
+- `public Collections.Array Transitions { get; set; }` - The transitions as a scene stores them: from, to and the transition resource, repeated.
+
+### AnimationNodeStateMachine.StateMachineTypeEnum
+
+`public enum StateMachineTypeEnum`
+
+Values: `Root = 0`, `Nested = 1`, `Grouped = 2`
+
+### AnimationNodeStateMachinePlayback
+
+`public class AnimationNodeStateMachinePlayback : Resource` - Where a state machine is and what it is doing; read and driven from scripts as parameters/playback (Godot's AnimationNodeStateMachinePlayback).
+
+- `public void Travel(StringName toNode, bool resetOnTeleport = true)` - Goes to a state through the transitions (the shortest way).
+- `public void Start(StringName node, bool reset = true)` - Starts playing at a state, at once on the next pass.
+- `public void Next()` - Takes the next transition now: the travel path's next step or the first automatic transition whose conditions hold.
+- `public void Stop()`
+- `public bool IsPlaying()`
+- `public StringName GetCurrentNode()`
+- `public float GetCurrentPlayPosition()`
+- `public float GetCurrentLength()`
+- `public StringName GetFadingFromNode()`
+- `public StringName[] GetTravelPath()` - The states travel() will pass through next, in order, ending at its target.
+
+### AnimationNodeStateMachineTransition
+
+`public class AnimationNodeStateMachineTransition : Resource` - How a machine leaves one state for another (Godot's AnimationNodeStateMachineTransition).
+
+- `public SwitchModeEnum SwitchMode { get; set; }` - Immediate leaves at once; Sync leaves at once and starts the next state at the same fraction of its length; AtEnd waits for the current state to end.
+- `public AdvanceModeEnum AdvanceMode { get; set; }` - Disabled: never used.
+- `public StringName AdvanceCondition { get; set; }` - A parameters/conditions/&lt;name&gt; bool that must be true.
+- `public string AdvanceExpression { get; set; }` - An expression over the tree's expression base node that must be true.
+- `public float XfadeTime { get; set; }` - Seconds the two states are cross-faded for.
+- `public Curve? XfadeCurve { get; set; }`
+- `public bool Reset { get; set; }` - When true the next state restarts from its beginning.
+- `public int Priority { get; set; }` - Of several usable transitions, the one with the lowest number is preferred (also when travelling).
+- `public bool AutoAdvance { get; set; }` - Godot 4.0 name of AdvanceMode: true when the advance mode is Auto.
+- `public bool Disabled { get; set; }`
+
+### AnimationNodeStateMachineTransition.AdvanceModeEnum
+
+`public enum AdvanceModeEnum`
+
+Values: `Disabled = 0`, `Enabled = 1`, `Auto = 2`
+
+### AnimationNodeStateMachineTransition.SignalName
+
+`public new class SignalName : Resource.SignalName`
+
+- `public static readonly StringName AdvanceConditionChanged`
+
+### AnimationNodeStateMachineTransition.SwitchModeEnum
+
+`public enum SwitchModeEnum`
+
+Values: `Immediate = 0`, `Sync = 1`, `AtEnd = 2`
+
+### AnimationNodeSub2
+
+`public class AnimationNodeSub2 : AnimationNodeSync` - Takes the second input away from the first by sub_amount (the opposite of Add2).
+
+- `public override string GetCaption()`
+
+### AnimationNodeSync
+
+`public class AnimationNodeSync : AnimationNode` - The base of the nodes with a sync switch (Godot's AnimationNodeSync): with it off, an input whose weight is 0 stands still.
+
+- `public bool Sync { get; set; }`
+- `public override bool HasFilter()`
+
+### AnimationNodeTimeScale
+
+`public class AnimationNodeTimeScale : AnimationNode` - Plays its input at scale times the speed (Godot's AnimationNodeTimeScale).
+
+- `public override string GetCaption()`
+
+### AnimationNodeTimeSeek
+
+`public class AnimationNodeTimeSeek : AnimationNode` - Jumps its input to a time when seek_request is 0 or more (Godot's AnimationNodeTimeSeek); the request clears itself.
+
+- `public override string GetCaption()`
+
+### AnimationNodeTransition
+
+`public class AnimationNodeTransition : AnimationNodeSync` - Plays one of several inputs, cross-fading when the transition_request names another (Godot's AnimationNodeTransition).
+
+- `public double XfadeTime { get; set; }`
+- `public Curve? XfadeCurve { get; set; }`
+- `public bool AllowTransitionToSelf { get; set; }`
+- `public int InputCount { get; set; }`
+- `public override string GetCaption()`
+- `public override bool HasFilter()`
+- `public void SetInputName(int input, string name)`
+- `public string GetInputName(int input)`
+- `public int FindInput(string name)`
+- `public void SetInputAsAutoAdvance(int input, bool enable)`
+- `public bool IsInputSetAsAutoAdvance(int input)`
+- `public void SetInputResetEnabled(int input, bool enable)`
+- `public bool IsInputResetEnabled(int input)`
+
+### AnimationPlayer
+
+`public class AnimationPlayer : AnimationMixer` - Plays animations: property, transform, method, audio and sub-player tracks on any node (Godot's AnimationPlayer).
+
+- `public event Action<StringName, StringName> AnimationChanged`
+- `public event Action<StringName> CurrentAnimationChanged`
+- `public event Action<StringName> AnimationLooped`
+- `public StringName Autoplay { get; set; }` - The animation played when the node becomes ready.
+- `public bool PlaybackAutoCapture { get; set; }`
+- `public double PlaybackAutoCaptureDuration { get; set; }`
+- `public Tween.TransitionType PlaybackAutoCaptureTransitionType { get; set; }`
+- `public Tween.EaseType PlaybackAutoCaptureEaseType { get; set; }`
+- `public bool MovieQuitOnFinish { get; set; }`
+- `public double PlaybackDefaultBlendTime { get; set; }` - The blend time between two animations that have no entry of their own, in seconds.
+- `public float SpeedScale { get; set; }`
+- `public StringName CurrentAnimation { get; set; }` - The key of the animation playing now, or empty when none is.
+- `public StringName AssignedAnimation { get; set; }` - The key of the animation playing now or last played.
+- `public float CurrentAnimationLength { get; }`
+- `public float CurrentAnimationPosition { get; }`
+- `public Collections.Array BlendTimes { set; }` - Blend times as scenes store them: a flat array of from, to, seconds triples.
+- `public bool IsPlaying()`
+- `public bool IsAnimationActive()`
+- `public float GetPlayingSpeed()`
+- `public void Play(StringName? name = null, double customBlend = -1, float customSpeed = 1.0f, bool fromEnd = false)` - Plays an animation.
+- `public void PlayBackwards(StringName? name = null, double customBlend = -1)` - Plays an animation backwards from its end.
+- `public void PlayWithCapture(StringName? name = null, double duration = -1.0, double customBlend = -1, float customSpeed = 1.0f, bool fromEnd = false, Tween.TransitionType transType = Tween.TransitionType.Linear, Tween.EaseType easeType = Tween.EaseType.In)` - Plays an animation after capturing the current values of its capture-mode tracks and fading from them over duration.
+- `public void Stop(bool keepState = false)`
+- `public void Pause()`
+- `public void Queue(StringName name)` - Plays the animation after the current one and the ones queued before it finish (at once if nothing is playing).
+- `public void ClearQueue()`
+- `public StringName[] GetQueue()`
+- `public void Seek(double seconds, bool update = false, bool updateOnly = false)` - Moves the playhead.
+- `public void SetBlendTime(StringName animationFrom, StringName animationTo, double sec)`
+- `public double GetBlendTime(StringName animationFrom, StringName animationTo)`
+- `public void AnimationSetNext(StringName animationFrom, StringName animationTo)`
+- `public StringName AnimationGetNext(StringName animationFrom)`
+- `public AnimationMethodCallMode GetMethodCallMode()`
+- `public void SetMethodCallMode(AnimationMethodCallMode mode)`
+- `public AnimationProcessCallback GetProcessCallback()`
+- `public void SetProcessCallback(AnimationProcessCallback mode)`
+- `public NodePath GetRoot()`
+- `public void SetRoot(NodePath path)`
+
+### AnimationPlayer.AnimationMethodCallMode
+
+`public enum AnimationMethodCallMode`
+
+Values: `Deferred = 0`, `Immediate = 1`
+
+### AnimationPlayer.AnimationProcessCallback
+
+`public enum AnimationProcessCallback`
+
+Values: `Physics = 0`, `Idle = 1`, `Manual = 2`
+
+### AnimationPlayer.SignalName
+
+`public new class SignalName : AnimationMixer.SignalName`
+
+- `public static readonly StringName AnimationChanged`
+- `public static readonly StringName CurrentAnimationChanged`
+- `public static readonly StringName AnimationLooped` - An Aver extension (Godot has no such signal): the playhead wrapped round a looping animation or bounced off an end of a ping-pong one.
+
+### AnimationRootNode
+
+`public class AnimationRootNode : AnimationNode` - A node that can be the root of a tree (Godot's AnimationRootNode).
+
+### AnimationTree
+
+`public class AnimationTree : AnimationMixer` - Plays a graph of animation nodes (Godot's AnimationTree): a state machine, a blend tree or a blend space, evaluated every pass and mixed by the engine.
+
+- `public AnimationTree()`
+- `public AnimationRootNode? TreeRoot { get; set; }` - The root of the graph.
+- `public NodePath AnimPlayer { get; set; }` - The AnimationPlayer whose animation libraries and root node this tree uses.
+- `public NodePath AdvanceExpressionBaseNode { get; set; }` - The node whose properties and methods a transition's advance_expression reads (default: the tree itself).
+- `public override void Advance(double delta)`
 
 ### Area3D
 
@@ -148,6 +788,838 @@ Values: `Disabled = 0`, `Combine = 1`, `CombineReplace = 2`, `Replace = 3`, `Rep
 - `public override Material? SurfaceGetMaterial(int surfIdx)`
 - `public override void SurfaceSetMaterial(int surfIdx, Material? material)`
 - `public override Aabb GetAabb()`
+
+### AspectRatioContainer
+
+`public class AspectRatioContainer : Container` - Keeps its children at a fixed aspect ratio (Godot's AspectRatioContainer).
+
+- `public float Ratio { get; set; }`
+- `public StretchModeEnum StretchMode { get; set; }`
+- `public AlignmentMode AlignmentHorizontal { get; set; }`
+- `public AlignmentMode AlignmentVertical { get; set; }`
+
+### AspectRatioContainer.AlignmentMode
+
+`public enum AlignmentMode`
+
+Values: `Begin = 0`, `Center = 1`, `End = 2`
+
+### AspectRatioContainer.StretchModeEnum
+
+`public enum StretchModeEnum`
+
+Values: `WidthControlsHeight = 0`, `HeightControlsWidth = 1`, `Fit = 2`, `Cover = 3`
+
+### AStar2D
+
+`public class AStar2D : RefCounted` - The 2D form of AStar3D (Godot's AStar2D): the same graph with the third coordinate always zero.
+
+- `public AStar2D()`
+- `public virtual float _ComputeCost(long fromId, long toId)`
+- `public virtual float _EstimateCost(long fromId, long toId)`
+- `public long GetAvailablePointId()`
+- `public void AddPoint(long id, Vector2 position, float weightScale = 1f)`
+- `public Vector2 GetPointPosition(long id)`
+- `public void SetPointPosition(long id, Vector2 position)`
+- `public float GetPointWeightScale(long id)`
+- `public void SetPointWeightScale(long id, float weightScale)`
+- `public void RemovePoint(long id)`
+- `public bool HasPoint(long id)`
+- `public long[] GetPointConnections(long id)`
+- `public long[] GetPointIds()`
+- `public void SetPointDisabled(long id, bool disabled = true)`
+- `public bool IsPointDisabled(long id)`
+- `public void ConnectPoints(long id, long toId, bool bidirectional = true)`
+- `public void DisconnectPoints(long id, long toId, bool bidirectional = true)`
+- `public bool ArePointsConnected(long id, long toId, bool bidirectional = true)`
+- `public int GetPointCount()`
+- `public int GetPointCapacity()`
+- `public void ReserveSpace(int numNodes)`
+- `public void Clear()`
+- `public long GetClosestPoint(Vector2 toPosition, bool includeDisabled = false)`
+- `public Vector2 GetClosestPositionInSegment(Vector2 toPosition)`
+- `public long[] GetIdPath(long fromId, long toId, bool allowPartialPath = false)`
+- `public Vector2[] GetPointPath(long fromId, long toId, bool allowPartialPath = false)`
+
+### AStar3D
+
+`public class AStar3D : RefCounted` - A graph of points joined by segments, searched with A* (Godot's AStar3D).
+
+- `public AStar3D()`
+- `public virtual float _ComputeCost(long fromId, long toId)` - Called for the cost of moving between two points that are joined (the default is their distance).
+- `public virtual float _EstimateCost(long fromId, long toId)` - Called for the estimate of the cost from a point to the target (the default is their distance).
+- `public long GetAvailablePointId()`
+- `public void AddPoint(long id, Vector3 position, float weightScale = 1f)`
+- `public Vector3 GetPointPosition(long id)`
+- `public void SetPointPosition(long id, Vector3 position)`
+- `public float GetPointWeightScale(long id)`
+- `public void SetPointWeightScale(long id, float weightScale)`
+- `public void RemovePoint(long id)`
+- `public bool HasPoint(long id)`
+- `public long[] GetPointConnections(long id)`
+- `public long[] GetPointIds()`
+- `public void SetPointDisabled(long id, bool disabled = true)`
+- `public bool IsPointDisabled(long id)`
+- `public void ConnectPoints(long id, long toId, bool bidirectional = true)`
+- `public void DisconnectPoints(long id, long toId, bool bidirectional = true)`
+- `public bool ArePointsConnected(long id, long toId, bool bidirectional = true)`
+- `public int GetPointCount()`
+- `public int GetPointCapacity()`
+- `public void ReserveSpace(int numNodes)`
+- `public void Clear()`
+- `public long GetClosestPoint(Vector3 toPosition, bool includeDisabled = false)` - The id of the closest point (-1 when there is none).
+- `public Vector3 GetClosestPositionInSegment(Vector3 toPosition)`
+- `public long[] GetIdPath(long fromId, long toId, bool allowPartialPath = false)`
+- `public Vector3[] GetPointPath(long fromId, long toId, bool allowPartialPath = false)`
+
+### AStarGrid2D
+
+`public class AStarGrid2D : RefCounted` - A rectangular grid of cells searched with A* (Godot's AStarGrid2D).
+
+- `public AStarGrid2D()`
+- `public virtual float _ComputeCost(Vector2I fromId, Vector2I toId)` - The cost of moving between two neighbouring cells; the default is the distance by the compute heuristic.
+- `public virtual float _EstimateCost(Vector2I fromId, Vector2I toId)` - The estimate of the cost from a cell to the target; the default is the estimate heuristic.
+- `public Rect2I Region { get; set; }`
+- `public Vector2I Size { get; set; }` - The size of the region, whose position stays (Godot's deprecated size).
+- `public Vector2 Offset { get; set; }`
+- `public Vector2 CellSize { get; set; }`
+- `public CellShapeEnum CellShape { get; set; }`
+- `public bool JumpingEnabled { get; set; }`
+- `public DiagonalModeEnum DiagonalMode { get; set; }`
+- `public HeuristicEnum DefaultComputeHeuristic { get; set; }`
+- `public HeuristicEnum DefaultEstimateHeuristic { get; set; }`
+- `public bool IsDirty()`
+- `public void Update()` - Allocates the grid for the region; every cell is open with weight 1 afterwards.
+- `public bool IsInBounds(int x, int y)`
+- `public bool IsInBoundsv(Vector2I id)`
+- `public void SetPointSolid(Vector2I id, bool solid = true)`
+- `public bool IsPointSolid(Vector2I id)`
+- `public void SetPointWeightScale(Vector2I id, float weightScale)`
+- `public float GetPointWeightScale(Vector2I id)`
+- `public void FillSolidRegion(Rect2I region, bool solid = true)`
+- `public void FillWeightScaleRegion(Rect2I region, float weightScale)`
+- `public void Clear()` - Clears the grid and sets the region to an empty rectangle (Godot's clear).
+- `public Vector2 GetPointPosition(Vector2I id)`
+- `public Collections.Array<Collections.Dictionary> GetPointDataInRegion(Rect2I region)` - The cells in a region as dictionaries with "id", "position", "solid" and "weight_scale".
+- `public Collections.Array<Vector2I> GetIdPath(Vector2I fromId, Vector2I toId, bool allowPartialPath = false)`
+- `public Vector2[] GetPointPath(Vector2I fromId, Vector2I toId, bool allowPartialPath = false)`
+
+### AStarGrid2D.CellShapeEnum
+
+`public enum CellShapeEnum`
+
+Values: `Square = 0`, `IsometricRight = 1`, `IsometricDown = 2`, `Max = 3`
+
+### AStarGrid2D.DiagonalModeEnum
+
+`public enum DiagonalModeEnum`
+
+Values: `Always = 0`, `Never = 1`, `AtLeastOneWalkable = 2`, `OnlyIfNoObstacles = 3`, `Max = 4`
+
+### AStarGrid2D.HeuristicEnum
+
+`public enum HeuristicEnum`
+
+Values: `Euclidean = 0`, `Manhattan = 1`, `Octile = 2`, `Chebyshev = 3`, `Max = 4`
+
+### AudioBusLayout
+
+`public class AudioBusLayout : Resource` - A saved bus layout (Godot's AudioBusLayout), held as the engine's .ocbus text.
+
+- `public string Text { get; set; }` - The layout as .ocbus text (see aver/formats/OcBusLayout.hpp).
+
+### AudioEffect
+
+`public class AudioEffect : Resource` - The base of every bus effect (Godot's AudioEffect).
+
+### AudioEffectAmplify
+
+`public class AudioEffectAmplify : AudioEffect`
+
+- `public float VolumeDb { get; set; }`
+
+### AudioEffectBandPassFilter
+
+`public class AudioEffectBandPassFilter : AudioEffectFilter`
+
+### AudioEffectCapture
+
+`public class AudioEffectCapture : AudioEffect` - Keeps what plays through its bus so a script can read it (Godot's AudioEffectCapture).
+
+- `public float BufferLength { get; set; }` - How many seconds the buffer holds (the engine keeps up to two).
+- `public int GetFramesAvailable()`
+- `public bool CanGetBuffer(int frames)`
+- `public int GetBufferLengthFrames()`
+- `public int GetDiscardedFrames()`
+- `public long GetPushedFrames()`
+- `public void ClearBuffer()`
+- `public Vector2[] GetBuffer(int frames)` - Takes frames stereo frames (left, right) out of the buffer; an empty array when fewer are queued.
+
+### AudioEffectChorus
+
+`public class AudioEffectChorus : AudioEffect`
+
+- `public int VoiceCount { get; set; }`
+- `public float Dry { get; set; }`
+- `public float Wet { get; set; }`
+- `public void SetVoiceDelayMs(int voiceIdx, float delayMs)`
+- `public float GetVoiceDelayMs(int voiceIdx)`
+- `public void SetVoiceRateHz(int voiceIdx, float rateHz)`
+- `public float GetVoiceRateHz(int voiceIdx)`
+- `public void SetVoiceDepthMs(int voiceIdx, float depthMs)`
+- `public float GetVoiceDepthMs(int voiceIdx)`
+- `public void SetVoiceLevelDb(int voiceIdx, float levelDb)`
+- `public float GetVoiceLevelDb(int voiceIdx)`
+- `public void SetVoiceCutoffHz(int voiceIdx, float cutoffHz)`
+- `public float GetVoiceCutoffHz(int voiceIdx)`
+- `public void SetVoicePan(int voiceIdx, float pan)`
+- `public float GetVoicePan(int voiceIdx)`
+
+### AudioEffectCompressor
+
+`public class AudioEffectCompressor : AudioEffect`
+
+- `public float Threshold { get; set; }`
+- `public float Ratio { get; set; }`
+- `public float Gain { get; set; }`
+- `public float AttackUs { get; set; }`
+- `public float ReleaseMs { get; set; }`
+- `public float Mix { get; set; }`
+- `public StringName Sidechain { get; set; }` - The bus whose signal drives the detector instead of this bus's own.
+
+### AudioEffectDelay
+
+`public class AudioEffectDelay : AudioEffect`
+
+- `public float Dry { get; set; }`
+- `public bool Tap1Active { get; set; }`
+- `public float Tap1DelayMs { get; set; }`
+- `public float Tap1LevelDb { get; set; }`
+- `public float Tap1Pan { get; set; }`
+- `public bool Tap2Active { get; set; }`
+- `public float Tap2DelayMs { get; set; }`
+- `public float Tap2LevelDb { get; set; }`
+- `public float Tap2Pan { get; set; }`
+- `public bool FeedbackActive { get; set; }`
+- `public float FeedbackDelayMs { get; set; }`
+- `public float FeedbackLevelDb { get; set; }`
+- `public float FeedbackLowpass { get; set; }`
+
+### AudioEffectDistortion
+
+`public class AudioEffectDistortion : AudioEffect`
+
+- `public ModeEnum Mode { get; set; }`
+- `public float PreGain { get; set; }`
+- `public float KeepHfHz { get; set; }`
+- `public float Drive { get; set; }`
+- `public float PostGain { get; set; }`
+
+### AudioEffectDistortion.ModeEnum
+
+`public enum ModeEnum`
+
+Values: `Clip = 0`, `Atan = 1`, `Lofi = 2`, `Overdrive = 3`, `WaveShape = 4`
+
+### AudioEffectEQ
+
+`public class AudioEffectEQ : AudioEffect` - The common part of the three equalisers: bands by index, in dB.
+
+- `public int GetBandCount()`
+- `public void SetBandGainDb(int bandIdx, float volumeDb)`
+- `public float GetBandGainDb(int bandIdx)`
+- `public float GetBandFrequency(int bandIdx)` - The centre frequency of a band in Hz (an Aver extension; Godot names the bands by it).
+
+### AudioEffectEQ10
+
+`public class AudioEffectEQ10 : AudioEffectEQ`
+
+- `public AudioEffectEQ10()`
+
+### AudioEffectEQ21
+
+`public class AudioEffectEQ21 : AudioEffectEQ`
+
+- `public AudioEffectEQ21()`
+
+### AudioEffectEQ6
+
+`public class AudioEffectEQ6 : AudioEffectEQ`
+
+- `public AudioEffectEQ6()`
+
+### AudioEffectFilter
+
+`public class AudioEffectFilter : AudioEffect` - The common part of the filters (Godot's AudioEffectFilter): cutoff, resonance, gain and the steepness in stages of 6 dB per octave.
+
+- `public float CutoffHz { get; set; }`
+- `public float Resonance { get; set; }`
+- `public float Gain { get; set; }`
+- `public FilterDB Db { get; set; }`
+
+### AudioEffectFilter.FilterDB
+
+`public enum FilterDB`
+
+Values: `Filter6Db = 0`, `Filter12Db = 1`, `Filter18Db = 2`, `Filter24Db = 3`
+
+### AudioEffectHardLimiter
+
+`public class AudioEffectHardLimiter : AudioEffect`
+
+- `public float PreGainDb { get; set; }`
+- `public float CeilingDb { get; set; }`
+- `public float Release { get; set; }`
+
+### AudioEffectHighPassFilter
+
+`public class AudioEffectHighPassFilter : AudioEffectFilter`
+
+### AudioEffectHighShelfFilter
+
+`public class AudioEffectHighShelfFilter : AudioEffectFilter`
+
+### AudioEffectInstance
+
+`public class AudioEffectInstance : RefCounted` - What a bus effect looks like once it runs (Godot's AudioEffectInstance).
+
+### AudioEffectLimiter
+
+`public class AudioEffectLimiter : AudioEffect`
+
+- `public float CeilingDb { get; set; }`
+- `public float ThresholdDb { get; set; }`
+- `public float SoftClipDb { get; set; }`
+- `public float SoftClipRatio { get; set; }`
+
+### AudioEffectLowPassFilter
+
+`public class AudioEffectLowPassFilter : AudioEffectFilter`
+
+### AudioEffectLowShelfFilter
+
+`public class AudioEffectLowShelfFilter : AudioEffectFilter`
+
+### AudioEffectNotchFilter
+
+`public class AudioEffectNotchFilter : AudioEffectFilter`
+
+### AudioEffectPanner
+
+`public class AudioEffectPanner : AudioEffect`
+
+- `public float Pan { get; set; }`
+
+### AudioEffectPhaser
+
+`public class AudioEffectPhaser : AudioEffect`
+
+- `public float RangeMinHz { get; set; }`
+- `public float RangeMaxHz { get; set; }`
+- `public float RateHz { get; set; }`
+- `public float Feedback { get; set; }`
+- `public float Depth { get; set; }`
+
+### AudioEffectPitchShift
+
+`public class AudioEffectPitchShift : AudioEffect`
+
+- `public float PitchScale { get; set; }`
+- `public int Oversampling { get; set; }`
+- `public FFTSize FftSize { get; set; }`
+
+### AudioEffectPitchShift.FFTSize
+
+`public enum FFTSize`
+
+Values: `Size256 = 0`, `Size512 = 1`, `Size1024 = 2`, `Size2048 = 3`, `Size4096 = 4`, `Max = 5`
+
+### AudioEffectReverb
+
+`public class AudioEffectReverb : AudioEffect`
+
+- `public float PredelayMsec { get; set; }`
+- `public float PredelayFeedback { get; set; }`
+- `public float RoomSize { get; set; }`
+- `public float Damping { get; set; }`
+- `public float Spread { get; set; }`
+- `public float Hipass { get; set; }`
+- `public float Dry { get; set; }`
+- `public float Wet { get; set; }`
+
+### AudioEffectSpectrumAnalyzer
+
+`public class AudioEffectSpectrumAnalyzer : AudioEffect` - Measures the spectrum of what plays through its bus (Godot's AudioEffectSpectrumAnalyzer); read it through the instance GetBusEffectInstance returns.
+
+- `public float BufferLength { get; set; }`
+- `public FFTSize FftSize { get; set; }`
+- `public float TapBackPos { get; set; }`
+
+### AudioEffectSpectrumAnalyzer.FFTSize
+
+`public enum FFTSize`
+
+Values: `Size256 = 0`, `Size512 = 1`, `Size1024 = 2`, `Size2048 = 3`, `Size4096 = 4`, `Max = 5`
+
+### AudioEffectSpectrumAnalyzerInstance
+
+`public class AudioEffectSpectrumAnalyzerInstance : AudioEffectInstance` - The reader of a spectrum analyser on a bus (Godot's AudioEffectSpectrumAnalyzerInstance).
+
+- `public Vector2 GetMagnitudeForFrequencyRange(float fromHz, float toHz, MagnitudeMode mode = MagnitudeMode.Max)` - The magnitude of the left and right channels over a frequency range (linear; a full-scale sine reads about its amplitude).
+
+### AudioEffectSpectrumAnalyzerInstance.MagnitudeMode
+
+`public enum MagnitudeMode`
+
+Values: `Average = 0`, `Max = 1`
+
+### AudioEffectStereoEnhance
+
+`public class AudioEffectStereoEnhance : AudioEffect`
+
+- `public float PanPullout { get; set; }`
+- `public float TimePulloutMs { get; set; }`
+- `public float Surround { get; set; }`
+
+### AudioListener3D
+
+`public class AudioListener3D : Node3D` - Makes the 3D players hear from this node instead of from the camera (Godot's AudioListener3D).
+
+- `public void MakeCurrent()`
+- `public void ClearCurrent()`
+- `public bool IsCurrent()`
+- `public Transform3D GetListenerTransform()`
+
+### AudioServer
+
+`public static class AudioServer` - Godot's AudioServer singleton.
+
+- `public static event Action? BusLayoutChanged`
+- `public static int GetMixRate()`
+- `public static SpeakerMode GetSpeakerMode()`
+- `public static double GetOutputLatency()`
+- `public static double GetTimeToNextMix()`
+- `public static double GetTimeSinceLastMix()`
+- `public static string GetDriverName()`
+- `public static void Lock()`
+- `public static void Unlock()`
+- `public static float PlaybackSpeedScale { get; set; }` - Scales how fast every sound plays (0.5 = half speed, an octave down).
+- `public static int BusCount { get; set; }`
+- `public static int GetBusCount()`
+- `public static void SetBusCount(int amount)`
+- `public static void AddBus(int atPosition = -1)`
+- `public static void RemoveBus(int index)`
+- `public static void MoveBus(int index, int toIndex)` - Moves a bus; toIndex is numbered before the move (Godot's rule), -1 appends.
+- `public static int GetBusIndex(StringName busName)`
+- `public static StringName GetBusName(int busIdx)`
+- `public static void SetBusName(int busIdx, string name)`
+- `public static void SetBusVolumeDb(int busIdx, float volumeDb)`
+- `public static float GetBusVolumeDb(int busIdx)`
+- `public static void SetBusVolumeLinear(int busIdx, float linear)`
+- `public static float GetBusVolumeLinear(int busIdx)`
+- `public static void SetBusSend(int busIdx, StringName send)`
+- `public static StringName GetBusSend(int busIdx)`
+- `public static void SetBusSolo(int busIdx, bool enable)`
+- `public static bool IsBusSolo(int busIdx)`
+- `public static void SetBusMute(int busIdx, bool enable)`
+- `public static bool IsBusMute(int busIdx)`
+- `public static void SetBusBypassEffects(int busIdx, bool enable)`
+- `public static bool IsBusBypassingEffects(int busIdx)`
+- `public static float GetBusPeakVolumeLeftDb(int busIdx, int channel)` - Peak of the bus's last block after its effects and volume, in dB (-200 when silent).
+- `public static float GetBusPeakVolumeRightDb(int busIdx, int channel)`
+- `public static bool IsBusChannelActive(int busIdx, int channel)`
+- `public static int GetBusChannels(int busIdx)`
+- `public static int GetBusEffectCount(int busIdx)`
+- `public static void AddBusEffect(int busIdx, AudioEffect effect, int atPosition = -1)` - Puts an effect on a bus (at the end by default).
+- `public static void RemoveBusEffect(int busIdx, int effectIdx)`
+- `public static AudioEffect? GetBusEffect(int busIdx, int effectIdx)` - The effect at an index.
+- `public static void SwapBusEffects(int busIdx, int effectIdx, int byEffectIdx)`
+- `public static void SetBusEffectEnabled(int busIdx, int effectIdx, bool enabled)`
+- `public static bool IsBusEffectEnabled(int busIdx, int effectIdx)`
+- `public static AudioEffectInstance? GetBusEffectInstance(int busIdx, int effectIdx, int channel = 0)` - The running form of an effect (what a spectrum analyser is read through).
+- `public static AudioBusLayout GenerateBusLayout()`
+- `public static void SetBusLayout(AudioBusLayout layout)` - Replaces every bus and effect with the layout's.
+- `public static string[] GetInputDeviceList()`
+- `public static string GetInputDevice()`
+- `public static string[] GetOutputDeviceList()`
+- `public static string GetOutputDevice()`
+
+### AudioServer.PlaybackType
+
+`public enum PlaybackType`
+
+Values: `Default = 0`, `Stream = 1`, `Sample = 2`, `Max = 3`
+
+### AudioServer.SpeakerMode
+
+`public enum SpeakerMode`
+
+Values: `ModeStereo = 0`, `Surround31 = 1`, `Surround51 = 2`, `Surround71 = 3`
+
+### AudioStream
+
+`public class AudioStream : Resource` - The base of every audio stream (Godot's AudioStream).
+
+- `public virtual double GetLength()`
+- `public virtual bool IsMonophonic()`
+- `public virtual double GetBpm()`
+- `public virtual int GetBeatCount()`
+- `public virtual bool CanBeSampled()`
+- `public AudioStreamPlayback? InstantiatePlayback()` - A playback of this stream, not yet started (an AudioStreamPlayer starts it).
+
+### AudioStreamFile
+
+`public class AudioStreamFile : AudioStream` - An audio file decoded by the engine (WAV by its own reader; Ogg Vorbis, MP3 and the rest by the platform's media stack).
+
+- `public string SourcePath { get; set; }` - An Aver extension: the file this stream reads when it is not the resource's own path (the converter writes it for a WAV with import-time loop settings).
+- `public override double GetLength()`
+
+### AudioStreamGenerator
+
+`public class AudioStreamGenerator : AudioStream`
+
+- `public float MixRate { get; set; }`
+- `public Mode MixRateMode { get; set; }`
+- `public float BufferLength { get; set; }`
+
+### AudioStreamGenerator.Mode
+
+`public enum Mode`
+
+Values: `Output = 0`, `Input = 1`, `Custom = 2`
+
+### AudioStreamGeneratorPlayback
+
+`public class AudioStreamGeneratorPlayback : AudioStreamPlayback` - Frames a script pushes to the player (Godot's AudioStreamGeneratorPlayback).
+
+- `public int GetFramesAvailable()` - Frames the buffer can still take.
+- `public bool CanPushBuffer(int amount)`
+- `public int GetSkips()`
+- `public void ClearBuffer()`
+- `public bool PushFrame(Vector2 frame)`
+- `public bool PushBuffer(Vector2[] frames)` - Queues frames (left, right); false, and nothing queued, when they would not all fit.
+- `public override double GetPlaybackPosition()`
+
+### AudioStreamInteractive
+
+`public class AudioStreamInteractive : AudioStream`
+
+- `public const int ClipAny = -1`
+- `public int InitialClip { get; set; }`
+- `public int ClipCount { get; set; }`
+- `public void SetClipName(int clipIndex, StringName name)`
+- `public StringName GetClipName(int clipIndex)`
+- `public void SetClipStream(int clipIndex, AudioStream? stream)`
+- `public AudioStream? GetClipStream(int clipIndex)`
+- `public void SetClipAutoAdvance(int clipIndex, AutoAdvanceMode mode)`
+- `public AutoAdvanceMode GetClipAutoAdvance(int clipIndex)`
+- `public void SetClipAutoAdvanceNextClip(int clipIndex, int autoAdvanceNextClip)`
+- `public int GetClipAutoAdvanceNextClip(int clipIndex)`
+- `public void AddTransition(int fromClip, int toClip, TransitionFromTime fromTime, TransitionToTime toTime, FadeMode fadeMode, float fadeBeats, bool useFillerClip = false, int fillerClip = -1, bool holdPrevious = false)` - Records a transition rule.
+- `public bool HasTransition(int fromClip, int toClip)`
+- `public void EraseTransition(int fromClip, int toClip)`
+
+### AudioStreamInteractive.AutoAdvanceMode
+
+`public enum AutoAdvanceMode`
+
+Values: `Disabled = 0`, `Enabled = 1`, `ReturnToHold = 2`
+
+### AudioStreamInteractive.FadeMode
+
+`public enum FadeMode`
+
+Values: `Disabled = 0`, `FadeIn = 1`, `FadeOut = 2`, `Cross = 3`, `Automatic = 4`
+
+### AudioStreamInteractive.TransitionFromTime
+
+`public enum TransitionFromTime`
+
+Values: `Immediate = 0`, `NextBeat = 1`, `NextBar = 2`, `End = 3`
+
+### AudioStreamInteractive.TransitionToTime
+
+`public enum TransitionToTime`
+
+Values: `SamePosition = 0`, `Start = 1`
+
+### AudioStreamMP3
+
+`public class AudioStreamMP3 : AudioStreamFile` - An MP3 file (Godot's AudioStreamMP3), decoded by the platform's media stack.
+
+- `public bool Loop { get; set; }`
+- `public double LoopOffset { get; set; }`
+- `public double Bpm { get; set; }`
+- `public int BeatCount { get; set; }`
+- `public int BarBeats { get; set; }`
+- `public override double GetBpm()`
+- `public override int GetBeatCount()`
+
+### AudioStreamOggVorbis
+
+`public class AudioStreamOggVorbis : AudioStreamFile` - An Ogg Vorbis file (Godot's AudioStreamOggVorbis).
+
+- `public bool Loop { get; set; }`
+- `public double LoopOffset { get; set; }`
+- `public double Bpm { get; set; }`
+- `public int BeatCount { get; set; }`
+- `public int BarBeats { get; set; }`
+- `public override double GetBpm()`
+- `public override int GetBeatCount()`
+
+### AudioStreamPlayback
+
+`public class AudioStreamPlayback : RefCounted` - One running instance of a stream (Godot's AudioStreamPlayback).
+
+- `public bool IsPlaying()`
+- `public virtual double GetPlaybackPosition()` - Seconds played of the sound (a looping sound wraps).
+
+### AudioStreamPlaybackInteractive
+
+`public class AudioStreamPlaybackInteractive : AudioStreamPlaybackMulti`
+
+- `public void SwitchToClip(int clipIndex)` - Switches to a clip now (the transition rules are stored, not timed).
+- `public void SwitchToClipByName(StringName clipName)`
+- `public int GetCurrentClipIndex()`
+
+### AudioStreamPlaybackMulti
+
+`public class AudioStreamPlaybackMulti : AudioStreamPlayback` - A playback made of other playbacks (the randomizer's pick, a playlist's current clip, a synchronized set).
+
+### AudioStreamPlaybackPolyphonic
+
+`public class AudioStreamPlaybackPolyphonic : AudioStreamPlaybackMulti` - Plays several streams at once on one player (Godot's AudioStreamPlaybackPolyphonic).
+
+- `public const long InvalidId = -1`
+- `public long PlayStream(AudioStream? stream, float fromOffset = 0f, float volumeDb = 0f, float pitchScale = 1f)` - Starts a stream on this playback; the id names it for the calls below.
+- `public void SetStreamPitchScale(long stream, float pitchScale)`
+- `public void SetStreamVolumeDb(long stream, float volumeDb)`
+- `public bool IsStreamPlaying(long stream)`
+- `public void StopStream(long stream)`
+
+### AudioStreamPlayer
+
+`public class AudioStreamPlayer : Node, IAnimationAudioTarget` - Plays an audio stream with no position (Godot's AudioStreamPlayer).
+
+- `public event Action Finished`
+- `public AudioStreamPlayer()`
+- `public AudioStream? Stream { get; set; }`
+- `public float VolumeDb { get; set; }`
+- `public float PitchScale { get; set; }`
+- `public StringName Bus { get; set; }`
+- `public bool Autoplay { get; set; }`
+- `public MixTargetEnum MixTarget { get; set; }`
+- `public int MaxPolyphony { get; set; }`
+- `public AudioServer.PlaybackType PlaybackType { get; set; }`
+- `public bool StreamPaused { get; set; }`
+- `public bool Playing { get; set; }` - True while a sound of this player is sounding.
+- `public void Play(double fromPosition = 0.0)`
+- `public void Seek(double toPosition)`
+- `public void Stop()`
+- `public double GetPlaybackPosition()`
+- `public bool HasStreamPlayback()`
+- `public AudioStreamPlayback? GetStreamPlayback()`
+- `public override void _Notification(int what)`
+
+### AudioStreamPlayer.MixTargetEnum
+
+`public enum MixTargetEnum`
+
+Values: `Stereo = 0`, `Surround = 1`, `Center = 2`
+
+### AudioStreamPlayer.SignalName
+
+`public new class SignalName : Node.SignalName`
+
+- `public static readonly StringName Finished`
+
+### AudioStreamPlayer3D
+
+`public class AudioStreamPlayer3D : Node3D, IAnimationAudioTarget` - Plays an audio stream from a point in the world (Godot's AudioStreamPlayer3D).
+
+- `public event Action Finished`
+- `public AudioStreamPlayer3D()`
+- `public AudioStream? Stream { get; set; }`
+- `public float VolumeDb { get; set; }`
+- `public float UnitDb { get; set; }` - The old name of VolumeDb.
+- `public float PitchScale { get; set; }`
+- `public StringName Bus { get; set; }`
+- `public bool Autoplay { get; set; }`
+- `public int MaxPolyphony { get; set; }`
+- `public bool StreamPaused { get; set; }`
+- `public AudioServer.PlaybackType PlaybackType { get; set; }`
+- `public AttenuationModelEnum AttenuationModel { get; set; }`
+- `public float UnitSize { get; set; }`
+- `public float MaxDb { get; set; }`
+- `public float MaxDistance { get; set; }`
+- `public float PanningStrength { get; set; }`
+- `public bool EmissionAngleEnabled { get; set; }`
+- `public float EmissionAngleDegrees { get; set; }`
+- `public float EmissionAngleFilterAttenuationDb { get; set; }`
+- `public float AttenuationFilterCutoffHz { get; set; }`
+- `public float AttenuationFilterDb { get; set; }`
+- `public DopplerTrackingEnum DopplerTracking { get; set; }`
+- `public uint AreaMask { get; set; }` - Which areas' reverb buses apply (stored; area reverb buses are not routed).
+- `public bool Playing { get; set; }`
+- `public void Play(double fromPosition = 0.0)`
+- `public void Seek(double toPosition)`
+- `public void Stop()`
+- `public double GetPlaybackPosition()`
+- `public bool HasStreamPlayback()`
+- `public AudioStreamPlayback? GetStreamPlayback()`
+- `public override void _Notification(int what)`
+
+### AudioStreamPlayer3D.AttenuationModelEnum
+
+`public enum AttenuationModelEnum`
+
+Values: `InverseDistance = 0`, `InverseSquareDistance = 1`, `Logarithmic = 2`, `Disabled = 3`
+
+### AudioStreamPlayer3D.DopplerTrackingEnum
+
+`public enum DopplerTrackingEnum`
+
+Values: `Disabled = 0`, `IdleStep = 1`, `PhysicsStep = 2`
+
+### AudioStreamPlayer3D.SignalName
+
+`public new class SignalName : Node3D.SignalName`
+
+- `public static readonly StringName Finished`
+
+### AudioStreamPlaylist
+
+`public class AudioStreamPlaylist : AudioStream`
+
+- `public const int MaxStreams = 64`
+- `public bool Shuffle { get; set; }`
+- `public bool Loop { get; set; }`
+- `public float FadeTime { get; set; }` - Godot cross-fades this long between entries; the engine plays them back to back (approximated).
+- `public double Bpm { get; set; }`
+- `public int BeatCount { get; set; }`
+- `public int StreamCount { get; set; }`
+- `public void SetListStream(int streamIdx, AudioStream? stream)`
+- `public AudioStream? GetListStream(int streamIdx)`
+- `public override double GetLength()`
+
+### AudioStreamPolyphonic
+
+`public class AudioStreamPolyphonic : AudioStream`
+
+- `public int Polyphony { get; set; }`
+- `public override bool IsMonophonic()`
+
+### AudioStreamRandomizer
+
+`public class AudioStreamRandomizer : AudioStream`
+
+- `public PlaybackModeEnum PlaybackMode { get; set; }`
+- `public float RandomPitch { get; set; }`
+- `public float RandomVolumeOffsetDb { get; set; }`
+- `public int StreamsCount { get; set; }`
+- `public void AddStream(int index, AudioStream? stream, float weight = 1f)`
+- `public void MoveStream(int indexFrom, int indexTo)`
+- `public void RemoveStream(int index)`
+- `public void SetStream(int index, AudioStream? stream)`
+- `public AudioStream? GetStream(int index)`
+- `public void SetStreamProbabilityWeight(int index, float weight)`
+- `public float GetStreamProbabilityWeight(int index)`
+- `public override double GetLength()`
+
+### AudioStreamRandomizer.PlaybackModeEnum
+
+`public enum PlaybackModeEnum`
+
+Values: `RandomNoRepeats = 0`, `Random = 1`, `Sequential = 2`
+
+### AudioStreamSynchronized
+
+`public class AudioStreamSynchronized : AudioStream`
+
+- `public const int MaxStreams = 32`
+- `public int StreamCount { get; set; }`
+- `public void SetSyncStream(int streamIdx, AudioStream? stream)`
+- `public AudioStream? GetSyncStream(int streamIdx)`
+- `public void SetSyncStreamVolume(int streamIdx, float volumeDb)`
+- `public float GetSyncStreamVolume(int streamIdx)`
+- `public override double GetLength()`
+
+### AudioStreamWav
+
+`public class AudioStreamWav : AudioStreamFile` - A WAV file or WAV data (Godot's AudioStreamWAV).
+
+- `public byte[] Data { get; set; }` - Raw samples in Format, interleaved when Stereo.
+- `public FormatEnum Format { get; set; }`
+- `public int MixRate { get; set; }`
+- `public bool Stereo { get; set; }`
+- `public LoopModeEnum LoopMode { get; set; }`
+- `public int LoopBegin { get; set; }`
+- `public int LoopEnd { get; set; }`
+- `public override bool IsMonophonic()`
+- `public override bool CanBeSampled()`
+- `public override double GetLength()`
+
+### AudioStreamWav.FormatEnum
+
+`public enum FormatEnum`
+
+Values: `Format8Bits = 0`, `Format16Bits = 1`, `FormatImaAdpcm = 2`, `FormatQoa = 3`
+
+### AudioStreamWav.LoopModeEnum
+
+`public enum LoopModeEnum`
+
+Values: `Disabled = 0`, `Forward = 1`, `PingPong = 2`, `Backward = 3`
+
+### BaseButton
+
+`public class BaseButton : Control` - Base of every button (Godot's BaseButton).
+
+- `public event Action Pressed`
+- `public event Action ButtonDown`
+- `public event Action ButtonUp`
+- `public event Action<bool> Toggled`
+- `public BaseButton()`
+- `public ActionModeEnum ActionMode { get; set; }`
+- `public MouseButtonMask ButtonMask { get; set; }`
+- `public bool KeepPressedOutside { get; set; }`
+- `public bool ShortcutFeedback { get; set; }`
+- `public bool ShortcutInTooltip { get; set; }`
+- `public bool Disabled { get; set; }`
+- `public bool ToggleMode { get; set; }`
+- `public bool ButtonPressed { get; set; }` - Whether a toggle button is pressed.
+- `public void SetPressedNoSignal(bool pressed)` - Sets the pressed state without any signal.
+- `public ButtonGroup? ButtonGroup { get; set; }`
+- `public Shortcut? Shortcut { get; set; }`
+- `public bool IsPressed()`
+- `public bool IsHovered()`
+- `public override void _UnhandledKeyInput(InputEvent @event)`
+- `public virtual void _Pressed()` - A script's reaction to a press (Godot's _pressed).
+- `public virtual void _Toggled(bool toggledOn)` - A script's reaction to a toggle (Godot's _toggled).
+- `public override void _GuiInput(InputEvent @event)`
+- `public override void _Notification(int what)`
+- `public DrawMode GetDrawMode()` - Which of the looks the button has now.
+
+### BaseButton.ActionModeEnum
+
+`public enum ActionModeEnum`
+
+Values: `ButtonPress = 0`, `ButtonRelease = 1`
+
+### BaseButton.DrawMode
+
+`public enum DrawMode`
+
+Values: `Normal = 0`, `Pressed = 1`, `Hover = 2`, `Disabled = 3`, `HoverPressed = 4`
+
+### BaseButton.SignalName
+
+`public new class SignalName : Control.SignalName`
+
+- `public static readonly StringName Pressed`
+- `public static readonly StringName ButtonDown`
+- `public static readonly StringName ButtonUp`
+- `public static readonly StringName Toggled`
 
 ### BaseMaterial3D
 
@@ -365,6 +1837,40 @@ Values: `Disabled = 0`, `Alpha = 1`, `AlphaScissor = 2`, `AlphaHash = 3`, `Alpha
 - `public override readonly int GetHashCode()`
 - `public override readonly string ToString()`
 
+### BlendSpaceMath
+
+`public static class BlendSpaceMath` - The geometry of a 2D blend space, separate from the nodes so it can be checked alone.
+
+- `public static bool Barycentric(Vector2 p, Vector2 a, Vector2 b, Vector2 c, out float wa, out float wb, out float wc)` - The barycentric weights of p in the triangle, or false when it lies outside it (or the triangle is flat).
+- `public static float ClosestOnSegment(Vector2 p, Vector2 a, Vector2 b)` - The point of segment a-b nearest to p, as the fraction t along it.
+- `public static List<(int A, int B, int C)> Triangulate(IReadOnlyList<Vector2> points)` - The triangles of a Delaunay triangulation of the points (Bowyer-Watson).
+
+### BoneAttachment3D
+
+`public class BoneAttachment3D : Node3D` - Follows one bone of a skeleton (Godot's BoneAttachment3D): its global transform is the bone's global pose in the skeleton's space.
+
+- `public bool OverridePose { get; set; }`
+- `public bool UseExternalSkeleton { get; set; }`
+- `public NodePath ExternalSkeleton { get; set; }`
+- `public string BoneName { get; set; }`
+- `public int BoneIdx { get; set; }`
+- `public Skeleton3D? GetSkeleton()` - The skeleton it follows.
+- `public void OnSkeletonUpdate()` - Moves the node to the bone now.
+
+### BoxContainer
+
+`public class BoxContainer : Container` - Lays children out in a row or a column (Godot's BoxContainer).
+
+- `public bool Vertical { get; set; }`
+- `public AlignmentMode Alignment { get; set; }`
+- `public BoxContainer()`
+
+### BoxContainer.AlignmentMode
+
+`public enum AlignmentMode`
+
+Values: `Begin = 0`, `Center = 1`, `End = 2`
+
 ### BoxMesh
 
 `public class BoxMesh : Mesh` - A box mesh (Godot's BoxMesh), size in metres.
@@ -376,6 +1882,40 @@ Values: `Disabled = 0`, `Alpha = 1`, `AlphaScissor = 2`, `AlphaHash = 3`, `Alpha
 `public class BoxShape3D : Shape3D`
 
 - `public Vector3 Size { get; set; }` - The full size of the box (not the half extents).
+
+### Button
+
+`public class Button : BaseButton` - A text and icon button (Godot's Button).
+
+- `public string Text { get; set; }`
+- `public Texture2D? Icon { get; set; }`
+- `public bool Flat { get; set; }`
+- `public HorizontalAlignment Alignment { get; set; }`
+- `public HorizontalAlignment IconAlignment { get; set; }`
+- `public VerticalAlignment VerticalIconAlignment { get; set; }`
+- `public bool ExpandIcon { get; set; }`
+- `public bool ClipText { get; set; }`
+- `public TextServer.OverrunBehavior TextOverrunBehavior { get; set; }`
+- `public TextServer.AutowrapMode AutowrapMode { get; set; }`
+- `public string Language { get; set; }`
+- `public new TextServer.Direction TextDirection { get; set; }`
+- `public int AutowrapTrimFlags { get; set; }`
+- `public override void _Draw()`
+
+### ButtonGroup
+
+`public class ButtonGroup : Resource` - A set of buttons of which one at a time is pressed (Godot's ButtonGroup).
+
+- `public event Action<BaseButton> Pressed`
+- `public bool AllowUnpress { get; set; }` - Whether the pressed button of the group can be pressed again to leave none pressed.
+- `public BaseButton? GetPressedButton()`
+- `public Collections.Array<BaseButton> GetButtons()`
+
+### ButtonGroup.SignalName
+
+`public new class SignalName : Resource.SignalName`
+
+- `public static readonly StringName Pressed`
 
 ### Callable
 
@@ -420,6 +1960,7 @@ Values: `Disabled = 0`, `Alpha = 1`, `AlphaScissor = 2`, `AlphaHash = 3`, `Alpha
 
 `public class Camera3D : Node3D` - A camera (Godot's Camera3D).
 
+- `public DopplerTrackingEnum DopplerTracking { get; set; }` - Whether the camera's own motion is tracked for the Doppler shift of AudioStreamPlayer3D sounds (G5 S1).
 - `public float Fov { get; set; }`
 - `public float Near { get; set; }`
 - `public float Far { get; set; }`
@@ -442,6 +1983,12 @@ Values: `Disabled = 0`, `Alpha = 1`, `AlphaScissor = 2`, `AlphaHash = 3`, `Alpha
 - `public bool IsPositionInFrustum(Vector3 worldPoint)`
 - `public Transform3D GetCameraTransform()` - The camera's transform, with h_offset and v_offset applied.
 - `public Projection GetCameraProjection()`
+
+### Camera3D.DopplerTrackingEnum
+
+`public enum DopplerTrackingEnum`
+
+Values: `Disabled = 0`, `IdleStep = 1`, `PhysicsStep = 2`
 
 ### Camera3D.KeepAspectEnum
 
@@ -494,8 +2041,15 @@ Values: `Perspective = 0`, `Orthogonal = 1`, `Frustum = 2`
 
 ### CanvasItem
 
-`public class CanvasItem : Node` - Anything drawn in 2D or UI space (Godot's CanvasItem).
+`public class CanvasItem : Node` - Anything drawn in UI space (Godot's CanvasItem).
 
+- `public event Action Draw`
+- `public const int NotificationDraw = 30`
+- `public const int NotificationVisibilityChanged = 31`
+- `public const int NotificationEnterCanvas = 32`
+- `public const int NotificationExitCanvas = 33`
+- `public const int NotificationLocalTransformChanged = 35`
+- `public const int NotificationTransformChanged = 2000`
 - `public bool Visible { get; set; }`
 - `public Color Modulate { get; set; }`
 - `public Color SelfModulate { get; set; }`
@@ -504,7 +2058,17 @@ Values: `Perspective = 0`, `Orthogonal = 1`, `Frustum = 2`
 - `public void Show()`
 - `public void Hide()`
 - `public bool IsVisibleInTree()`
-- `public void QueueRedraw()`
+- `public Color GetCombinedModulate(bool includeSelf = true)` - The colour multiplier from this item and every CanvasItem above it (their Modulate), times its own SelfModulate.
+- `public void QueueRedraw()` - Asks for _Draw to run again before the next frame is drawn.
+- `public virtual void _Draw()` - Called when the item needs drawing: record with the Draw methods.
+- `public void DrawRect(Rect2 rect, Color color, bool filled = true, float width = -1f, bool antialiased = false)` - A rectangle.
+- `public void DrawStyleBox(StyleBox styleBox, Rect2 rect)` - Draws a style box over a rectangle in the item's own space (Godot's draw_style_box).
+- `public void DrawString(Font? font, Vector2 pos, string text, HorizontalAlignment alignment = HorizontalAlignment.Left, float width = -1f, int fontSize = 16, Color? modulate = null)` - Draws a string with its baseline starting at pos.
+- `public void DrawStringOutline(Font? font, Vector2 pos, string text, HorizontalAlignment alignment = HorizontalAlignment.Left, float width = -1f, int fontSize = 16, int size = 1, Color? modulate = null)` - Draws a string with an outline of size pixels (Godot's draw_string_outline); draw the plain string over it.
+- `public void DrawTexture(Texture2D texture, Vector2 position, Color? modulate = null)` - Draws a texture with its top-left corner at position (Godot's draw_texture).
+- `public void DrawTextureRect(Texture2D texture, Rect2 rect, bool tile, Color? modulate = null, bool transpose = false)`
+- `public void DrawTextureRectRegion(Texture2D texture, Rect2 rect, Rect2 srcRect, Color? modulate = null)` - Draws a part of a texture (srcRect, in texels) into a rectangle (Godot's draw_texture_rect_region).
+- `public void DrawLine(Vector2 from, Vector2 to, Color color, float width = -1f, bool antialiased = false)` - A line.
 
 ### CanvasItem.SignalName
 
@@ -521,6 +2085,12 @@ Values: `Perspective = 0`, `Orthogonal = 1`, `Frustum = 2`
 
 - `public float Radius { get; set; }`
 - `public float Height { get; set; }` - The whole height, including both caps.
+
+### CenterContainer
+
+`public class CenterContainer : Container` - Centres each child at its minimum size (Godot's CenterContainer).
+
+- `public bool UseTopLeft { get; set; }` - Centre on the container's top-left corner instead of its middle.
 
 ### CharacterBody3D
 
@@ -571,6 +2141,37 @@ Values: `Grounded = 0`, `Floating = 1`
 `public enum PlatformOnLeaveEnum`
 
 Values: `AddVelocity = 0`, `AddUpwardVelocity = 1`, `DoNothing = 2`
+
+### CharFXTransform
+
+`public class CharFXTransform : RefCounted` - What a custom effect sees and changes for one character (Godot's CharFXTransform).
+
+- `public Vector2I Range { get; set; }`
+- `public double ElapsedTime { get; set; }`
+- `public bool Visible { get; set; }`
+- `public bool Outline { get; set; }`
+- `public Vector2 Offset { get; set; }`
+- `public Color Color { get; set; }`
+- `public Collections.Dictionary Env { get; set; }`
+- `public int RelativeIndex { get; set; }`
+- `public int AbsoluteIndex { get; set; }`
+- `public long Glyph { get; set; }`
+- `public long GlyphFlags { get; set; }`
+- `public long GlyphIndex { get; set; }`
+- `public int GlyphCount { get; set; }`
+- `public long FontCache { get; set; }`
+
+### CheckBox
+
+`public class CheckBox : Button` - A button with a check box (Godot's CheckBox): a toggle whose box shows the state; in a button group it is a radio button.
+
+- `public CheckBox()`
+
+### CheckButton
+
+`public class CheckButton : Button` - A toggle drawn as a switch (Godot's CheckButton): the text on the left, the switch on the right.
+
+- `public CheckButton()`
 
 ### ClassDB
 
@@ -669,6 +2270,92 @@ Values: `AddVelocity = 0`, `AddUpwardVelocity = 1`, `DoNothing = 2`
 - `public override readonly int GetHashCode()`
 - `public override readonly string ToString()`
 
+### ColorPicker
+
+`public class ColorPicker : Control` - Picks a colour (Godot's ColorPicker).
+
+- `public event Action<Color> ColorChanged`
+- `public event Action<Color> PresetAdded`
+- `public event Action<Color> PresetRemoved`
+- `public bool EditAlpha { get; set; }`
+- `public bool EditIntensity { get; set; }`
+- `public bool SamplerVisible { get; set; }`
+- `public bool DeferredMode { get; set; }`
+- `public bool CanAddSwatches { get; set; }`
+- `public bool SwatchesVisible { get; set; }`
+- `public bool SlidersVisible { get; set; }`
+- `public bool HexVisible { get; set; }`
+- `public bool PresetsVisible { get; set; }`
+- `public bool ColorModesVisible { get; set; }`
+- `public ColorModeType ColorMode { get; set; }`
+- `public PickerShapeType PickerShape { get; set; }`
+- `public ColorPicker()`
+- `public Color Color { get; set; }` - The picked colour.
+- `public float Hue { get; }`
+- `public float Saturation { get; }`
+- `public float Value { get; }`
+- `public float Alpha { get; }`
+- `public void SetHsv(float h, float s, float v)`
+- `public void SetAlpha(float a)`
+- `public void AddPreset(Color color)`
+- `public void ErasePreset(Color color)`
+- `public Color[] GetPresets()`
+- `public void AddRecentPreset(Color color)`
+- `public void EraseRecentPreset(Color color)`
+- `public Color[] GetRecentPresets()`
+- `public override void _GuiInput(InputEvent @event)`
+- `public override void _Draw()`
+
+### ColorPicker.ColorModeType
+
+`public enum ColorModeType`
+
+Values: `Rgb = 0`, `Hsv = 1`, `Raw = 2`, `Okhsl = 3`
+
+### ColorPicker.PickerShapeType
+
+`public enum PickerShapeType`
+
+Values: `HsvRectangle = 0`, `HsvWheel = 1`, `VhsCircle = 2`, `OkhslCircle = 3`, `None = 4`
+
+### ColorPicker.SignalName
+
+`public new class SignalName : Control.SignalName`
+
+- `public static readonly StringName ColorChanged`
+- `public static readonly StringName PresetAdded`
+- `public static readonly StringName PresetRemoved`
+
+### ColorPickerButton
+
+`public class ColorPickerButton : Button` - A button that shows a colour and opens a picker (Godot's ColorPickerButton).
+
+- `public event Action<Color> ColorChanged`
+- `public event Action PopupClosed`
+- `public ColorPickerButton()`
+- `public Color Color { get; set; }`
+- `public bool EditAlpha { get; set; }`
+- `public bool EditIntensity { get; set; }`
+- `public ColorPicker GetPicker()`
+- `public PopupPanel GetPopup()`
+- `public void ShowPicker()`
+- `public override void _Draw()`
+
+### ColorPickerButton.SignalName
+
+`public new class SignalName : Button.SignalName`
+
+- `public static readonly StringName ColorChanged`
+- `public static readonly StringName PopupClosed`
+- `public static readonly StringName PickerCreated`
+
+### ColorRect
+
+`public class ColorRect : Control` - A filled rectangle (Godot's ColorRect).
+
+- `public Color Color { get; set; }`
+- `public override void _Draw()`
+
 ### Colors
 
 `public static class Colors` - The named colours of Godot's palette that scripts use most (a subset of its full list).
@@ -737,15 +2424,131 @@ Values: `AddVelocity = 0`, `AddUpwardVelocity = 1`, `DoNothing = 2`
 
 - `public Vector3[] Data { get; set; }`
 
+### ConfirmationDialog
+
+`public class ConfirmationDialog : AcceptDialog` - An OK and Cancel dialog (Godot's ConfirmationDialog).
+
+- `public ConfirmationDialog()`
+- `public Button GetCancelButton()`
+- `public string CancelButtonText { get; set; }`
+
+### Container
+
+`public class Container : Control` - Base of the nodes that lay their Control children out (Godot's Container).
+
+- `public const int NotificationPreSortChildren = 50`
+- `public const int NotificationSortChildren = 51`
+- `public event Action SortChildrenSignal`
+- `public Container()`
+- `public void QueueSort()` - Asks for the children to be laid out again at the end of the frame.
+- `public void FitChildInRect(Control child, Rect2 rect)` - Places a child inside a rectangle the way its size flags say: filling it, or at its minimum size at the start, centre or end of it.
+
+### Container.SignalName
+
+`public new class SignalName : Control.SignalName`
+
+- `public static readonly StringName PreSortChildren`
+- `public static readonly StringName SortChildren`
+
 ### Control
 
-`public class Control : CanvasItem` - A UI element (Godot's Control).
+`public class Control : CanvasItem` - A UI element (Godot's Control): a rectangle laid out by anchors and offsets or by a container, with a theme, input, focus, tooltips and drag and drop.
 
-- `public Vector2 Position { get; set; }`
-- `public Vector2 Size { get; set; }`
+- `public MouseFilterEnum MouseFilter { get; set; }`
+- `public string TooltipText { get; set; }`
+- `public FocusModeEnum FocusMode { get; set; }`
+- `public NodePath FocusNeighborLeft { get; set; }`
+- `public NodePath FocusNeighborTop { get; set; }`
+- `public NodePath FocusNeighborRight { get; set; }`
+- `public NodePath FocusNeighborBottom { get; set; }`
+- `public NodePath FocusNext { get; set; }`
+- `public NodePath FocusPrevious { get; set; }`
+- `public void SetFocusNeighbor(Side side, NodePath neighbor)`
+- `public NodePath GetFocusNeighbor(Side side)`
+- `public virtual void _GuiInput(InputEvent @event)` - Called with every input event that reaches the control (mouse events at the control's local position).
+- `public virtual bool _HasPoint(Vector2 point)` - Whether the point (in the control's own space) is on the control: the rectangle by default.
+- `public bool HasPoint(Vector2 point)`
+- `public void AcceptEvent()` - Stops the event being passed on: no parent control receives it and the game's unhandled input never sees it.
+- `public void GrabFocus()` - Takes keyboard focus (the control needs a focus mode and to be visible in the tree).
+- `public void ReleaseFocus()`
+- `public bool HasFocus()`
+- `public void GrabClickFocus()`
+- `public Control? FindNextValidFocus()` - The next control Tab reaches: FocusNext if set, else the next control in tree order that accepts keyboard focus (focus mode All), wrapping round.
+- `public Control? FindPrevValidFocus()`
+- `public Control? FindValidFocusNeighbor(Side side)` - The control that arrow keys in side move focus to: the neighbour the scene set, else the nearest focusable control in that direction (nearest by the gap between the rectangles, with a penalty for sliding sideways).
+- `public virtual string _GetTooltip(Vector2 atPosition)` - Called to find the tooltip text for the point (in the control's own space): TooltipText by default.
+- `public string GetTooltip(Vector2 atPosition = default)`
+- `public virtual GodotObject? _MakeCustomTooltip(string forText)` - A script's own tooltip control for forText (null for the default text tooltip).
+- `public virtual Variant _GetDragData(Vector2 atPosition)` - Called when a drag starts on the control (the left button held and moved past a few pixels).
+- `public virtual bool _CanDropData(Vector2 atPosition, Variant data)` - Called as a drag moves over the control and when it is released: whether the data can be dropped here.
+- `public virtual void _DropData(Vector2 atPosition, Variant data)` - Called when the data is dropped on a control that said it can take it.
+- `public void SetDragPreview(Control control)` - Shows control under the pointer for the rest of the drag (the control is freed when the drag ends).
+- `public void ForceDrag(Variant data, Control? preview)` - Starts a drag now with the given data and an optional preview.
+- `public void WarpMouse(Vector2 position)` - Moves the pointer (the engine has no pointer warp; the GUI's position is set).
+- `public Theme? Theme { get; set; }` - The theme this control and its descendants use before the project's (Godot's theme).
+- `public StringName ThemeTypeVariation { get; set; }` - A type of the theme to look this control's items up under before its class (Godot's theme_type_variation).
+- `public string GetThemeClassName()` - The Godot class name of this control (the nearest class Aver.Fabric defines).
+- `public Color GetThemeColor(StringName name, StringName themeType = default!)`
+- `public int GetThemeConstant(StringName name, StringName themeType = default!)`
+- `public Font? GetThemeFont(StringName name, StringName themeType = default!)`
+- `public int GetThemeFontSize(StringName name, StringName themeType = default!)`
+- `public Texture2D? GetThemeIcon(StringName name, StringName themeType = default!)`
+- `public StyleBox GetThemeStylebox(StringName name, StringName themeType = default!)` - The style box the theme gives name; an empty one (never null) when no theme has it.
+- `public bool HasThemeColor(StringName name, StringName themeType = default!)`
+- `public bool HasThemeConstant(StringName name, StringName themeType = default!)`
+- `public bool HasThemeFont(StringName name, StringName themeType = default!)`
+- `public bool HasThemeFontSize(StringName name, StringName themeType = default!)`
+- `public bool HasThemeIcon(StringName name, StringName themeType = default!)`
+- `public bool HasThemeStylebox(StringName name, StringName themeType = default!)`
+- `public Font? GetThemeDefaultFont()` - The default font: the nearest theme in the chain that set one.
+- `public int GetThemeDefaultFontSize()`
+- `public float GetThemeDefaultBaseScale()`
+- `public void AddThemeColorOverride(StringName name, Color color)`
+- `public void AddThemeConstantOverride(StringName name, int constant)`
+- `public void AddThemeFontOverride(StringName name, Font font)`
+- `public void AddThemeFontSizeOverride(StringName name, int fontSize)`
+- `public void AddThemeIconOverride(StringName name, Texture2D texture)`
+- `public void AddThemeStyleboxOverride(StringName name, StyleBox stylebox)`
+- `public void RemoveThemeColorOverride(StringName name)`
+- `public void RemoveThemeConstantOverride(StringName name)`
+- `public void RemoveThemeFontOverride(StringName name)`
+- `public void RemoveThemeFontSizeOverride(StringName name)`
+- `public void RemoveThemeIconOverride(StringName name)`
+- `public void RemoveThemeStyleboxOverride(StringName name)`
+- `public bool HasThemeColorOverride(StringName name)`
+- `public bool HasThemeConstantOverride(StringName name)`
+- `public bool HasThemeFontOverride(StringName name)`
+- `public bool HasThemeFontSizeOverride(StringName name)`
+- `public bool HasThemeIconOverride(StringName name)`
+- `public bool HasThemeStyleboxOverride(StringName name)`
+- `public const int NotificationResized = 40`
+- `public const int NotificationMouseEnter = 41`
+- `public const int NotificationMouseExit = 42`
+- `public const int NotificationFocusEnter = 43`
+- `public const int NotificationFocusExit = 44`
+- `public const int NotificationThemeChanged = 45`
+- `public const int NotificationScrollBegin = 47`
+- `public const int NotificationScrollEnd = 48`
+- `public const int NotificationLayoutDirectionChanged = 49`
+- `public const int NotificationMouseEnterSelf = 60`
+- `public const int NotificationMouseExitSelf = 61`
+- `public const int NotificationDragBegin = 21`
+- `public const int NotificationDragEnd = 22`
+- `public event Action Resized`
+- `public event Action MouseEntered`
+- `public event Action MouseExited`
+- `public event Action FocusEntered`
+- `public event Action FocusExited`
+- `public event Action MinimumSizeChanged`
+- `public event Action SizeFlagsChanged`
+- `public event Action ThemeChanged`
+- `public event Action<InputEvent> GuiInput`
+- `public Vector2 Position { get; set; }` - The position in the parent's space.
+- `public Vector2 Size { get; set; }` - The size, never below the combined minimum size.
 - `public Vector2 CustomMinimumSize { get; set; }`
 - `public Vector2 PivotOffset { get; set; }`
 - `public float Rotation { get; set; }`
+- `public float RotationDegrees { get; set; }`
 - `public Vector2 Scale { get; set; }`
 - `public float AnchorLeft { get; set; }`
 - `public float AnchorTop { get; set; }`
@@ -755,13 +2558,86 @@ Values: `AddVelocity = 0`, `AddUpwardVelocity = 1`, `DoNothing = 2`
 - `public float OffsetTop { get; set; }`
 - `public float OffsetRight { get; set; }`
 - `public float OffsetBottom { get; set; }`
-- `public MouseFilterEnum MouseFilter { get; set; }`
-- `public string TooltipText { get; set; }`
-- `public Vector2 GetMinimumSize()`
+- `public GrowDirection GrowHorizontal { get; set; }`
+- `public GrowDirection GrowVertical { get; set; }`
+- `public SizeFlags SizeFlagsHorizontal { get; set; }`
+- `public SizeFlags SizeFlagsVertical { get; set; }`
+- `public float SizeFlagsStretchRatio { get; set; }`
+- `public int LayoutMode { get; set; }` - Godot stores the layout form the editor used (0 position, 1 anchors, 2 container, 3 uncontrolled).
+- `public int AnchorsPreset { get; set; }` - The anchor preset the scene recorded.
+- `public Vector2 GetParentAreaSize()` - The size of the parent area the anchors refer to.
+- `public void SetPosition(Vector2 position, bool keepOffsets = false)`
+- `public void SetSize(Vector2 size, bool keepOffsets = false)`
+- `public void ResetSize()` - Resets the size to the minimum size.
+- `public void SetBegin(Vector2 position)` - The top-left corner (Godot's set_begin: moves the left and top offsets, leaves the opposite edges).
+- `public void SetEnd(Vector2 position)`
+- `public Vector2 GetBegin()`
+- `public Vector2 GetEnd()`
+- `public void SetAnchor(Side side, float anchor, bool keepOffset = true, bool pushOppositeAnchor = true)`
+- `public float GetAnchor(Side side)`
+- `public void SetOffset(Side side, float offset)`
+- `public float GetOffset(Side side)`
+- `public void SetAnchorsPreset(LayoutPreset preset, bool keepOffsets = false)`
+- `public void SetOffsetsPreset(LayoutPreset preset, LayoutPresetMode resizeMode = LayoutPresetMode.Minsize, int margin = 0)`
+- `public void SetAnchorsAndOffsetsPreset(LayoutPreset preset, LayoutPresetMode resizeMode = LayoutPresetMode.Minsize, int margin = 0)`
 - `public Rect2 GetRect()`
-- `public void GrabFocus()`
-- `public bool HasFocus()`
-- `public void ReleaseFocus()`
+- `public Transform2D GetTransform()` - Position, then pivoted rotation and scale: the control's transform to its parent's space.
+- `public Transform2D GetGlobalTransform()`
+- `public Transform2D GetGlobalTransformWithCanvas()`
+- `public Vector2 GlobalPosition { get; set; }`
+- `public void SetGlobalPosition(Vector2 position, bool keepOffsets = false)`
+- `public Rect2 GetGlobalRect()`
+- `public Vector2 GetScreenPosition()`
+- `public Rect2 GetScreenRect()`
+- `public Rect2 GetItemRect()`
+- `public Vector2 GetCombinedMinimumSize()` - The smallest size this control can take: its custom minimum size or what the control itself needs (a container's children, a label's text), whichever is larger on each axis.
+- `public Vector2 GetMinimumSize()` - What the control needs by itself: its own sizing rule and a script's _GetMinimumSize, largest per axis.
+- `public virtual Vector2 _GetMinimumSize()` - A script's override of the minimum size.
+- `public void UpdateMinimumSize()` - Tells the control its minimum size may have changed (a label's text, a stylebox's margins).
+- `public bool ClipContents { get; set; }` - Children are clipped to the control's rectangle when drawn and cannot receive the pointer outside it.
+- `public LayoutDirection LayoutDirectionMode { get; set; }`
+- `public TextDirection TextDirectionMode { get; set; }`
+- `public bool AutoTranslate { get; set; }`
+- `public CursorShape MouseDefaultCursorShape { get; set; }`
+- `public bool MouseForcePassScrollEvents { get; set; }`
+- `public CursorShape GetCursorShape(Vector2 position = default)`
+- `public bool IsLayoutRtl()`
+
+### Control.CursorShape
+
+`public enum CursorShape`
+
+Values: `Arrow = 0`, `Ibeam = 1`, `PointingHand = 2`, `Cross = 3`, `Wait = 4`, `Busy = 5`, `Drag = 6`, `CanDrop = 7`, `Forbidden = 8`, `Vsize = 9`, `Hsize = 10`, `Bdiagsize = 11`, `Fdiagsize = 12`, `Move = 13`, `Vsplit = 14`, `Hsplit = 15`, `Help = 16`
+
+### Control.FocusModeEnum
+
+`public enum FocusModeEnum`
+
+Values: `None = 0`, `Click = 1`, `All = 2`
+
+### Control.GrowDirection
+
+`public enum GrowDirection`
+
+Values: `Begin = 0`, `End = 1`, `Both = 2`
+
+### Control.LayoutDirection
+
+`public enum LayoutDirection`
+
+Values: `Inherited = 0`, `ApplicationLocale = 1`, `Ltr = 2`, `Rtl = 3`, `SystemLocale = 4`
+
+### Control.LayoutPreset
+
+`public enum LayoutPreset`
+
+Values: `TopLeft = 0`, `TopRight = 1`, `BottomLeft = 2`, `BottomRight = 3`, `CenterLeft = 4`, `CenterTop = 5`, `CenterRight = 6`, `CenterBottom = 7`, `Center = 8`, `LeftWide = 9`, `TopWide = 10`, `RightWide = 11`, `BottomWide = 12`, `VcenterWide = 13`, `HcenterWide = 14`, `FullRect = 15`
+
+### Control.LayoutPresetMode
+
+`public enum LayoutPresetMode`
+
+Values: `Minsize = 0`, `KeepWidth = 1`, `KeepHeight = 2`, `KeepSize = 3`
 
 ### Control.MouseFilterEnum
 
@@ -781,6 +2657,19 @@ Values: `Stop = 0`, `Pass = 1`, `Ignore = 2`
 - `public static readonly StringName FocusExited`
 - `public static readonly StringName SizeFlagsChanged`
 - `public static readonly StringName MinimumSizeChanged`
+- `public static readonly StringName ThemeChanged`
+
+### Control.SizeFlags
+
+`public enum SizeFlags`
+
+Values: `ShrinkBegin = 0`, `Fill = 1`, `Expand = 2`, `ExpandFill = 3`, `ShrinkCenter = 4`, `ShrinkEnd = 8`
+
+### Control.TextDirection
+
+`public enum TextDirection`
+
+Values: `Inherited = 3`, `Auto = 0`, `Ltr = 1`, `Rtl = 2`
 
 ### ConvexPolygonShape3D
 
@@ -895,6 +2784,83 @@ Values: `Union = 0`, `Intersection = 1`, `Subtraction = 2`
 - `public int RingSides { get; set; }`
 - `public bool SmoothFaces { get; set; }`
 - `public Material? Material { get; set; }`
+
+### Curve
+
+`public class Curve : Resource` - A function of one variable made of points with tangents (Godot's Curve): sampled with cubic segments, or from a baked table.
+
+- `public float MinValue { get; set; }`
+- `public float MaxValue { get; set; }`
+- `public float MinDomain { get; set; }`
+- `public float MaxDomain { get; set; }`
+- `public int BakeResolution { get; set; }`
+- `public int PointCount { get; set; }`
+- `public int AddPoint(Vector2 position, float leftTangent = 0, float rightTangent = 0, TangentMode leftMode = TangentMode.Free, TangentMode rightMode = TangentMode.Free)` - Adds a point, keeping the points in order of X; returns its index.
+- `public void RemovePoint(int index)`
+- `public void ClearPoints()`
+- `public Vector2 GetPointPosition(int index)`
+- `public void SetPointValue(int index, float y)`
+- `public int SetPointOffset(int index, float offset)` - Moves a point along X; its place in the order may change.
+- `public float GetPointLeftTangent(int index)`
+- `public float GetPointRightTangent(int index)`
+- `public TangentMode GetPointLeftMode(int index)`
+- `public TangentMode GetPointRightMode(int index)`
+- `public void SetPointLeftTangent(int index, float tangent)`
+- `public void SetPointRightTangent(int index, float tangent)`
+- `public void SetPointLeftMode(int index, TangentMode mode)`
+- `public void SetPointRightMode(int index, TangentMode mode)`
+- `public void CleanDupes()` - Removes points that sit on top of each other.
+- `public Collections.Array Data { get; set; }` - The points as a scene stores them: position, left tangent, right tangent, left mode, right mode, for each point.
+- `public float Sample(float offset)` - The value at offset, from the points' cubic segments.
+- `public void Bake()` - Fills the table SampleBaked reads (done on demand, and again after any change).
+- `public float SampleBaked(float offset)` - The value at offset from the baked table, linearly interpolated (cheaper than Sample).
+
+### Curve.SignalName
+
+`public new class SignalName : Resource.SignalName`
+
+- `public static readonly StringName RangeChanged`
+- `public static readonly StringName DomainChanged`
+
+### Curve.TangentMode
+
+`public enum TangentMode`
+
+Values: `Free = 0`, `Linear = 1`
+
+### Curve3D
+
+`public class Curve3D : Resource` - One curve in 3D: bezier points with in and out handles and a tilt, baked into a polyline spaced BakeInterval apart (Godot's Curve3D).
+
+- `public float BakeInterval { get; set; }`
+- `public bool UpVectorEnabled { get; set; }`
+- `public bool Closed { get; set; }`
+- `public int PointCount { get; set; }`
+- `public void AddPoint(Vector3 position, Vector3 inHandle = default, Vector3 outHandle = default, int index = -1)` - Adds a point (the handles are relative to the position); index -1 appends.
+- `public void RemovePoint(int index)`
+- `public void ClearPoints()`
+- `public Vector3 GetPointPosition(int index)`
+- `public Vector3 GetPointIn(int index)`
+- `public Vector3 GetPointOut(int index)`
+- `public float GetPointTilt(int index)`
+- `public void SetPointPosition(int index, Vector3 position)`
+- `public void SetPointIn(int index, Vector3 position)`
+- `public void SetPointOut(int index, Vector3 position)`
+- `public void SetPointTilt(int index, float tilt)`
+- `public Collections.Dictionary Data { get; set; }` - The points as a scene stores them: "points" (in, out and position of each point) and "tilts".
+- `public Vector3 Sample(int idx, float t)` - The point on the bezier segment starting at idx, at t in 0..1.
+- `public Vector3 Samplef(float fofs)` - The point at fofs: the integer part is the segment, the fraction the place along it.
+- `public Vector3[] Tessellate(int maxStages = 5, float toleranceDegrees = 4f)` - The curve cut into straight pieces, adding points where a bezier bends by more than toleranceDegrees.
+- `public Vector3[] TessellateEvenLength(int maxStages = 5, float lengthM = 0.2f)` - The curve cut into pieces about lengthM long.
+- `public float GetBakedLength()` - How long the baked curve is.
+- `public Vector3[] GetBakedPoints()`
+- `public float[] GetBakedTilts()`
+- `public Vector3[] GetBakedUpVectors()`
+- `public Vector3 SampleBaked(float offset, bool cubic = false)` - The point offset metres along the baked curve (clamped to its ends).
+- `public Vector3 SampleBakedUpVector(float offset, bool applyTilt = false)` - The up vector at offset, turned about the path direction by the interpolated tilt when applyTilt.
+- `public Transform3D SampleBakedWithRotation(float offset, bool cubic = false, bool applyTilt = false)` - The position and the orientation (-Z along the path, Y the up vector) at offset.
+- `public Vector3 GetClosestPoint(Vector3 toPoint)` - The point of the baked curve nearest to toPoint.
+- `public float GetClosestOffset(Vector3 toPoint)` - How far along the baked curve the point nearest to toPoint is.
 
 ### CylinderShape3D
 
@@ -1065,6 +3031,15 @@ Values: `Xyz = 0`, `Xzy = 1`, `Yxz = 2`, `Yzx = 3`, `Zxy = 4`, `Zyx = 5`
 - `public string Prefix { get; }`
 - `public ExportSubgroupAttribute(string name, string prefix = "")`
 
+### Expression
+
+`public class Expression : RefCounted` - Parses and evaluates a one-line expression (Godot's Expression).
+
+- `public Error Parse(string expression, string[]? inputNames = null)` - Compiles expression; inputNames names the values Execute will be given.
+- `public Variant Execute(Collections.Array? inputs = null, GodotObject? baseInstance = null, bool showError = true, bool constCallsOnly = false)` - Evaluates the compiled expression.
+- `public bool HasExecuteFailed()`
+- `public string GetErrorText()`
+
 ### FabricSpace
 
 `public static class FabricSpace` - Godot space (metres, +Y up, -Z forward, right-handed) to Aver space (centimetres, +Z up, +X forward, left-handed).
@@ -1087,6 +3062,28 @@ Values: `Xyz = 0`, `Xzy = 1`, `Yxz = 2`, `Yzx = 3`, `Zxy = 4`, `Zyx = 5`
 - `public static void ToAverTangent(Vector3 normal, Vector3 tangent, float handedness, float[] dest, int offset)` - The tangent the engine stores for a vertex whose Godot normal and tangent (xyz and handedness) are given (G4 R1's contract): the unit tangent made orthogonal to the normal, and w = +1/-1 so that cross(N, T) * w points along increasing v.
 - `public static Transform3D FromAver(Vec3 position, Quat rotation, Vec3 scale)` - An Aver entity's position, rotation and scale as a Godot transform.
 
+### FlowContainer
+
+`public class FlowContainer : Container` - Children laid out in lines that wrap (Godot's FlowContainer).
+
+- `public bool Vertical { get; set; }`
+- `public AlignmentMode Alignment { get; set; }`
+- `public LastWrapAlignmentMode LastWrapAlignment { get; set; }`
+- `public bool ReverseFill { get; set; }`
+- `public override void _Notification(int what)`
+
+### FlowContainer.AlignmentMode
+
+`public enum AlignmentMode`
+
+Values: `Begin = 0`, `Center = 1`, `End = 2`
+
+### FlowContainer.LastWrapAlignmentMode
+
+`public enum LastWrapAlignmentMode`
+
+Values: `Inherit = 0`, `Begin = 1`, `Center = 2`, `End = 3`
+
 ### FogMaterial
 
 `public class FogMaterial : Material` - Godot's FogMaterial: what a FogVolume adds to the volumetric fog.
@@ -1105,6 +3102,81 @@ Values: `Xyz = 0`, `Xzy = 1`, `Yxz = 2`, `Yzx = 3`, `Zxy = 4`, `Zyx = 5`
 - `public Vector3 Size { get; set; }`
 - `public RenderingServer.FogVolumeShape Shape { get; set; }`
 - `public Material? Material { get; set; }` - A FogMaterial.
+
+### Font
+
+`public class Font : Resource` - A font (Godot's Font): a family of the engine's font set plus a style.
+
+- `public string FontPath { get; set; }` - The content path of the font file, empty for the project's default.
+- `public Font[] Fallbacks { get; set; }`
+- `public virtual string GetFontName()`
+- `public virtual string GetFontStyleName()`
+- `public virtual long GetFontStyle()` - Godot's TextServer.FontStyle flags: bold 1, italic 2, fixed width 4.
+- `public float GetHeight(int fontSize = 16)`
+- `public float GetAscent(int fontSize = 16)`
+- `public float GetDescent(int fontSize = 16)`
+- `public float GetUnderlinePosition(int fontSize = 16)`
+- `public float GetUnderlineThickness(int fontSize = 16)`
+- `public Vector2 GetStringSize(string text, HorizontalAlignment alignment = HorizontalAlignment.Left, float width = -1f, int fontSize = 16)` - The size of one line of text.
+- `public Vector2 GetMultilineStringSize(string text, HorizontalAlignment alignment = HorizontalAlignment.Left, float width = -1f, int fontSize = 16, int maxLines = -1)` - The size of text broken at newlines and, when width is positive, wrapped at words.
+- `public Vector2 GetCharSize(long @char, int fontSize)`
+- `public bool HasChar(long @char)`
+- `public string GetSupportedChars()`
+- `public bool IsLanguageSupported(string language)`
+- `public bool IsScriptSupported(string script)`
+
+### FontFile
+
+`public class FontFile : Font` - A font read from a file (Godot's FontFile).
+
+- `public string FontName { get; set; }`
+- `public string StyleName { get; set; }`
+- `public long FontStyle { get; set; }`
+- `public int FixedSize { get; set; }`
+- `public int FixedSizeScaleMode { get; set; }`
+- `public FontAntialiasing Antialiasing { get; set; }`
+- `public bool GenerateMipmaps { get; set; }`
+- `public bool MultichannelSignedDistanceField { get; set; }`
+- `public int MsdfPixelRange { get; set; }`
+- `public int MsdfSize { get; set; }`
+- `public bool AllowSystemFallback { get; set; }`
+- `public bool ForceAutohinter { get; set; }`
+- `public FontHinting Hinting { get; set; }`
+- `public int SubpixelPositioning { get; set; }`
+- `public float Oversampling { get; set; }`
+- `public Collections.Dictionary OpentypeFeatures { get; set; }`
+- `public byte[] Data { get; set; }`
+- `public override string GetFontName()`
+- `public Error LoadDynamicFont(string path)` - Loads a font file as this font (Godot's load_dynamic_font): the path becomes the resource path.
+
+### FontFile.FontAntialiasing
+
+`public enum FontAntialiasing`
+
+Values: `None = 0`, `Gray = 1`, `Lcd = 2`
+
+### FontFile.FontHinting
+
+`public enum FontHinting`
+
+Values: `None = 0`, `Light = 1`, `Normal = 2`
+
+### FontVariation
+
+`public class FontVariation : Font` - A font with variation settings on a base font (Godot's FontVariation).
+
+- `public Font? BaseFont { get; set; }`
+- `public Collections.Dictionary VariationOpentype { get; set; }`
+- `public int VariationFaceIndex { get; set; }`
+- `public float VariationEmbolden { get; set; }`
+- `public Transform2D VariationTransform { get; set; }`
+- `public Collections.Dictionary OpentypeFeatures { get; set; }`
+- `public int SpacingGlyph { get; set; }`
+- `public int SpacingSpace { get; set; }`
+- `public int SpacingTop { get; set; }`
+- `public int SpacingBottom { get; set; }`
+- `public float BaselineOffset { get; set; }`
+- `public override string GetFontName()`
 
 ### GD
 
@@ -1367,6 +3439,42 @@ Values: `Deferred = 1`, `Persist = 2`, `OneShot = 4`, `ReferenceCounted = 8`
 
 `public class SignalName` - The names of the signals a class declares itself, by the GodotSharp convention.
 
+### Gradient
+
+`public class Gradient : Resource` - Colours along 0..1 (Godot's Gradient).
+
+- `public InterpolationModeEnum InterpolationMode { get; set; }` - How colours between two points are chosen.
+- `public ColorSpaceEnum InterpolationColorSpace { get; set; }` - Stored; blending is done in sRGB whatever this is.
+- `public int PointCount { get; }`
+- `public float[] Offsets { get; set; }`
+- `public Color[] Colors { get; set; }`
+- `public void AddPoint(float offset, Color color)`
+- `public void RemovePoint(int point)`
+- `public void SetOffset(int point, float offset)`
+- `public float GetOffset(int point)`
+- `public void SetColor(int point, Color color)`
+- `public Color GetColor(int point)`
+- `public void Reverse()`
+- `public Color Sample(float offset)` - The colour at offset: the end colours outside the points, Godot's mode between them.
+
+### Gradient.ColorSpaceEnum
+
+`public enum ColorSpaceEnum`
+
+Values: `Srgb = 0`, `LinearSrgb = 1`, `Oklab = 2`
+
+### Gradient.InterpolationModeEnum
+
+`public enum InterpolationModeEnum`
+
+Values: `Linear = 0`, `Constant = 1`, `Cubic = 2`
+
+### GridContainer
+
+`public class GridContainer : Container` - A grid with a fixed number of columns (Godot's GridContainer).
+
+- `public int Columns { get; set; }`
+
 ### GridMap
 
 `public class GridMap : Node3D` - A grid of library items (Godot's GridMap).
@@ -1398,11 +3506,44 @@ Values: `Deferred = 1`, `Persist = 2`, `OneShot = 4`, `ReferenceCounted = 8`
 - `public Basis GetBasisWithOrthogonalIndex(int index)` - One of the 24 orthogonal bases a cell can be turned to; the identity for an index out of range.
 - `public int GetOrthogonalIndexFromBasis(Basis basis)` - The index of the orthogonal basis closest to basis (the orientation to store), or -1 when it is not one of the 24.
 
+### HBoxContainer
+
+`public class HBoxContainer : BoxContainer` - A row (Godot's HBoxContainer).
+
+### HFlowContainer
+
+`public class HFlowContainer : FlowContainer`
+
 ### HorizontalAlignment
 
 `public enum HorizontalAlignment`
 
 Values: `Left = 0`, `Center = 1`, `Right = 2`, `Fill = 3`
+
+### HScrollBar
+
+`public class HScrollBar : ScrollBar`
+
+### HSeparator
+
+`public class HSeparator : Separator` - A horizontal line (Godot's HSeparator).
+
+- `public override void _Draw()`
+
+### HSlider
+
+`public class HSlider : Slider` - A horizontal slider (Godot's HSlider).
+
+### HSplitContainer
+
+`public class HSplitContainer : SplitContainer`
+
+### IAnimationAudioTarget
+
+`public interface IAnimationAudioTarget` - A node an animation's audio track can start and stop (the contract with the audio package).
+
+- `void AnimationPlayStream(string streamPath, double startOffset, double endOffset)` - Starts streamPath at startOffset seconds into it; endOffset seconds are trimmed from its end.
+- `void AnimationStopStream()` - Stops what the animation started.
 
 ### IconAttribute
 
@@ -1430,6 +3571,12 @@ Values: `Left = 0`, `Center = 1`, `Right = 2`, `Fill = 3`
 - `public override void SurfaceSetMaterial(int surfIdx, Material? material)`
 - `public PrimitiveType SurfaceGetPrimitiveType(int surfIdx)`
 - `public override Aabb GetAabb()`
+
+### InlineAlignment
+
+`public enum InlineAlignment` - How an inline image or table sits on its line (Godot's InlineAlignment).
+
+Values: `TopTo = 0`, `CenterTo = 1`, `BaselineTo = 3`, `BottomTo = 2`, `ToTop = 0`, `ToCenter = 4`, `ToBaseline = 8`, `ToBottom = 12`, `Top = 0`, `Center = 5`, `Bottom = 14`
 
 ### Input
 
@@ -1602,6 +3749,94 @@ Values: `Visible = 0`, `Hidden = 1`, `Captured = 2`, `Confined = 3`, `ConfinedHi
 
 `public class IntervalTweener : Tweener` - Waits (Godot's IntervalTweener).
 
+### ItemList
+
+`public class ItemList : Control` - A list of items to pick from (Godot's ItemList).
+
+- `public event Action<long> ItemSelected`
+- `public event Action<Vector2, long> EmptyClicked`
+- `public event Action<long, Vector2, long> ItemClicked`
+- `public event Action<long, bool> MultiSelected`
+- `public event Action<long> ItemActivated`
+- `public SelectModeEnum SelectMode { get; set; }`
+- `public bool AllowReselect { get; set; }`
+- `public bool AllowRmbSelect { get; set; }`
+- `public bool AllowSearch { get; set; }`
+- `public bool AutoHeight { get; set; }`
+- `public bool AutoWidth { get; set; }`
+- `public int MaxTextLines { get; set; }`
+- `public TextServer.OverrunBehavior TextOverrunBehavior { get; set; }`
+- `public bool SameColumnWidth { get; set; }`
+- `public int FixedColumnWidth { get; set; }`
+- `public IconModeEnum IconMode { get; set; }`
+- `public float IconScale { get; set; }`
+- `public Vector2I FixedIconSize { get; set; }`
+- `public bool WraptextOnLines { get; set; }`
+- `public int MaxColumns { get; set; }`
+- `public int ItemCount { get; set; }`
+- `public bool WraparoundItems { get; set; }`
+- `public int ScrollHintMode { get; set; }`
+- `public bool TileScrollHint { get; set; }`
+- `public ItemList()`
+- `public int AddItem(string text, Texture2D? icon = null, bool selectable = true)`
+- `public int AddIconItem(Texture2D icon, bool selectable = true)`
+- `public void SetItemText(int idx, string text)`
+- `public string GetItemText(int idx)`
+- `public void SetItemIcon(int idx, Texture2D? icon)`
+- `public Texture2D? GetItemIcon(int idx)`
+- `public void SetItemDisabled(int idx, bool disabled)`
+- `public bool IsItemDisabled(int idx)`
+- `public void SetItemSelectable(int idx, bool selectable)`
+- `public bool IsItemSelectable(int idx)`
+- `public void SetItemMetadata(int idx, Variant metadata)`
+- `public Variant GetItemMetadata(int idx)`
+- `public void SetItemTooltip(int idx, string tooltip)`
+- `public string GetItemTooltip(int idx)`
+- `public void SetItemCustomFgColor(int idx, Color color)`
+- `public Color GetItemCustomFgColor(int idx)`
+- `public void SetItemCustomBgColor(int idx, Color color)`
+- `public Color GetItemCustomBgColor(int idx)`
+- `public bool IsSelected(int idx)`
+- `public int GetItemCount()`
+- `public void RemoveItem(int idx)`
+- `public void Clear()`
+- `public void MoveItem(int fromIdx, int toIdx)`
+- `public void SortItemsByText()`
+- `public void Select(int idx, bool single = true)` - Selects an item.
+- `public void Deselect(int idx)`
+- `public void DeselectAll()`
+- `public int[] GetSelectedItems()`
+- `public int GetCurrent()`
+- `public VScrollBar GetVScrollBar()`
+- `public void EnsureCurrentIsVisible()`
+- `public Rect2 GetItemRect(int idx, bool expand = true)` - The rectangle of an item in the control's space (scrolled when expand is false).
+- `public int GetItemAtPosition(Vector2 position, bool exact = false)` - The item under a point, or -1.
+- `public override void _GuiInput(InputEvent @event)`
+- `public override string _GetTooltip(Vector2 atPosition)`
+- `public override void _Draw()`
+
+### ItemList.IconModeEnum
+
+`public enum IconModeEnum`
+
+Values: `Top = 0`, `Left = 1`
+
+### ItemList.SelectModeEnum
+
+`public enum SelectModeEnum`
+
+Values: `Single = 0`, `Multi = 1`, `Toggle = 2`
+
+### ItemList.SignalName
+
+`public new class SignalName : Control.SignalName`
+
+- `public static readonly StringName ItemSelected`
+- `public static readonly StringName EmptyClicked`
+- `public static readonly StringName ItemClicked`
+- `public static readonly StringName MultiSelected`
+- `public static readonly StringName ItemActivated`
+
 ### JoyAxis
 
 `public enum JoyAxis`
@@ -1642,6 +3877,38 @@ Values: `None = 0`, `CodeMask = 8388607`, `ModifierMask = 532676608`, `Shift = 3
 - `public float GetDepth()`
 - `public float GetAngle(Vector3? upDirection = null, int collisionIndex = 0)` - The angle between the surface and upDirection (up by default), in radians.
 
+### Label
+
+`public class Label : Control` - Text on the screen (Godot's Label).
+
+- `public Label()`
+- `public string Text { get; set; }`
+- `public LabelSettings? LabelSettings { get; set; }`
+- `public HorizontalAlignment HorizontalAlignment { get; set; }`
+- `public VerticalAlignment VerticalAlignment { get; set; }`
+- `public TextServer.AutowrapMode AutowrapMode { get; set; }`
+- `public TextServer.JustificationFlag JustificationFlags { get; set; }`
+- `public bool ClipText { get; set; }`
+- `public TextServer.OverrunBehavior TextOverrunBehavior { get; set; }`
+- `public string EllipsisChar { get; set; }`
+- `public bool Uppercase { get; set; }`
+- `public int LinesSkipped { get; set; }`
+- `public int MaxLinesVisible { get; set; }`
+- `public string Language { get; set; }`
+- `public string ParagraphSeparator { get; set; }`
+- `public new TextServer.Direction TextDirection { get; set; }`
+- `public float[] TabStops { get; set; }`
+- `public TextServer.VisibleCharactersBehavior VisibleCharactersBehavior { get; set; }`
+- `public int VisibleCharacters { get; set; }` - How many characters are shown; -1 shows all.
+- `public float VisibleRatio { get; set; }` - The shown share of the characters, 0 to 1.
+- `public int GetLineCount()` - The number of lines the text is broken into.
+- `public int GetVisibleLineCount()` - The number of lines drawn (after lines_skipped and max_lines_visible).
+- `public int GetLineHeight(int line = -1)`
+- `public int GetTotalCharacterCount()` - The characters in the text, newlines not counted.
+- `public Rect2 GetCharacterBounds(int pos)`
+- `public override void _Notification(int what)`
+- `public override void _Draw()`
+
 ### Label3D
 
 `public class Label3D : GeometryInstance3D` - Text in the world (Godot's Label3D).
@@ -1673,6 +3940,21 @@ Values: `None = 0`, `CodeMask = 8388607`, `ModifierMask = 532676608`, `Shift = 3
 - `public int OutlineRenderPriority { get; set; }`
 - `public string Language { get; set; }`
 - `public bool IsDrawn { get; }` - Always false: this runtime does not draw world-space text.
+
+### LabelSettings
+
+`public class LabelSettings : Resource` - Shared settings for a Label's font, size, colours, outline and shadow (Godot's LabelSettings).
+
+- `public float LineSpacing { get; set; }`
+- `public float ParagraphSpacing { get; set; }`
+- `public Font? Font { get; set; }`
+- `public int FontSize { get; set; }`
+- `public Color FontColor { get; set; }`
+- `public int OutlineSize { get; set; }`
+- `public Color OutlineColor { get; set; }`
+- `public int ShadowSize { get; set; }`
+- `public Color ShadowColor { get; set; }`
+- `public Vector2 ShadowOffset { get; set; }`
 
 ### Light3D
 
@@ -1757,6 +4039,98 @@ Values: `Disabled = 0`, `Subdiv4 = 1`, `Subdiv8 = 2`, `Subdiv16 = 3`, `Subdiv32 
 
 `public class LightmapProbe : Node3D` - Godot's LightmapProbe: a position that samples the baked lightmap for dynamic objects.
 
+### LineEdit
+
+`public class LineEdit : Control` - A single-line text field (Godot's LineEdit).
+
+- `public event Action<string> TextChanged`
+- `public event Action<string> TextSubmitted`
+- `public event Action<string> TextChangeRejected`
+- `public event Action<bool> EditingToggled`
+- `public LineEdit()`
+- `public string Text { get; set; }`
+- `public string PlaceholderText { get; set; }`
+- `public bool Editable { get; set; }`
+- `public bool Secret { get; set; }`
+- `public string SecretCharacter { get; set; }`
+- `public int MaxLength { get; set; }`
+- `public HorizontalAlignment Alignment { get; set; }`
+- `public bool ExpandToTextLength { get; set; }`
+- `public bool ClearButtonEnabled { get; set; }`
+- `public bool CaretBlink { get; set; }`
+- `public float CaretBlinkInterval { get; set; }`
+- `public bool CaretForceDisplayed { get; set; }`
+- `public bool CaretMidGrapheme { get; set; }`
+- `public bool SelectingEnabled { get; set; }`
+- `public bool DeselectOnFocusLossEnabled { get; set; }`
+- `public bool SelectAllOnFocus { get; set; }`
+- `public bool ContextMenuEnabled { get; set; }`
+- `public bool ShortcutKeysEnabled { get; set; }`
+- `public bool MiddleMousePasteEnabled { get; set; }`
+- `public bool VirtualKeyboardEnabled { get; set; }`
+- `public bool VirtualKeyboardShowOnFocus { get; set; }`
+- `public int VirtualKeyboardType { get; set; }`
+- `public bool DragAndDropSelectionEnabled { get; set; }`
+- `public Texture2D? RightIcon { get; set; }`
+- `public bool DrawControlChars { get; set; }`
+- `public bool EmojiMenuEnabled { get; set; }`
+- `public bool Flat { get; set; }`
+- `public string Language { get; set; }`
+- `public new TextServer.Direction TextDirection { get; set; }`
+- `public int CaretColumn { get; set; }`
+- `public bool HasSelection()`
+- `public string GetSelectedText()`
+- `public int GetSelectionFromColumn()`
+- `public int GetSelectionToColumn()`
+- `public void Select(int from = 0, int to = -1)`
+- `public void SelectAll()`
+- `public void Deselect()`
+- `public bool IsEditing()`
+- `public void Edit()`
+- `public void Unedit()`
+- `public void Clear()`
+- `public void DeleteText(int fromColumn, int toColumn)`
+- `public void InsertTextAtCaret(string text)` - Types text at the caret, replacing the selection (Godot's insert_text_at_caret).
+- `public void Undo()`
+- `public void Redo()`
+- `public void Copy()`
+- `public void Cut()`
+- `public void Paste()`
+- `public override void _GuiInput(InputEvent @event)`
+- `public override void _Notification(int what)`
+- `public override void _Draw()`
+
+### LineEdit.SignalName
+
+`public new class SignalName : Control.SignalName`
+
+- `public static readonly StringName TextChanged`
+- `public static readonly StringName TextSubmitted`
+- `public static readonly StringName TextChangeRejected`
+- `public static readonly StringName EditingToggled`
+
+### LinkButton
+
+`public class LinkButton : BaseButton` - A button that looks like a hyperlink (Godot's LinkButton).
+
+- `public string Text { get; set; }`
+- `public UnderlineModeEnum Underline { get; set; }`
+- `public string Uri { get; set; }`
+- `public string Language { get; set; }`
+- `public new TextServer.Direction TextDirection { get; set; }`
+- `public LinkButton()`
+- `public override void _Draw()`
+
+### LinkButton.UnderlineModeEnum
+
+`public enum UnderlineModeEnum`
+
+Values: `Always = 0`, `OnHover = 1`, `Never = 2`
+
+### MarginContainer
+
+`public class MarginContainer : Container` - Insets its children by four margins (Godot's MarginContainer; the margins are theme constants margin_left, margin_top, ...).
+
 ### Marker3D
 
 `public class Marker3D : Node3D` - A point in space to mark a position (Godot's Marker3D).
@@ -1780,6 +4154,10 @@ Values: `Disabled = 0`, `Subdiv4 = 1`, `Subdiv8 = 2`, `Subdiv16 = 3`, `Subdiv32 
 - `public const float Tau = 6.2831853071795864769f`
 - `public const float Inf = float.PositiveInfinity`
 - `public const float NaN = float.NaN`
+- `public static float DbToLinear(float db)` - Decibels to a linear amplitude (10^(db/20)).
+- `public static double DbToLinear(double db)`
+- `public static float LinearToDb(float linear)` - A linear amplitude to decibels.
+- `public static double LinearToDb(double linear)`
 - `public static int Abs(int s)`
 - `public static float Abs(float s)`
 - `public static double Abs(double s)`
@@ -1881,6 +4259,24 @@ Values: `Disabled = 0`, `Subdiv4 = 1`, `Subdiv8 = 2`, `Subdiv16 = 3`, `Subdiv32 
 - `public static int NearestPo2(int value)`
 - `public static int StepDecimals(double step)` - The number of decimals needed to write a step size exactly (at most 10).
 
+### MenuButton
+
+`public class MenuButton : Button` - A button that opens a menu (Godot's MenuButton).
+
+- `public event Action AboutToPopup`
+- `public bool SwitchOnHover { get; set; }`
+- `public bool ItemCountSet { get; set; }`
+- `public MenuButton()`
+- `public PopupMenu GetPopup()`
+- `public int ItemCount { get; set; }`
+- `public void ShowPopup()` - Opens the menu under the button.
+
+### MenuButton.SignalName
+
+`public new class SignalName : Button.SignalName`
+
+- `public static readonly StringName AboutToPopup`
+
 ### Mesh
 
 `public class Mesh : Resource` - A mesh resource (Godot's Mesh).
@@ -1939,6 +4335,8 @@ Values: `Points = 0`, `Lines = 1`, `LineStrip = 2`, `Triangles = 3`, `TriangleSt
 `public class MeshInstance3D : GeometryInstance3D` - A node that draws a mesh (Godot's MeshInstance3D).
 
 - `public Mesh? Mesh { get; set; }`
+- `public void SetBlendShapeValueByName(string name, float value)`
+- `public float GetBlendShapeValueByName(string name)`
 - `public int GetSurfaceOverrideMaterialCount()`
 - `public Material? GetSurfaceOverrideMaterial(int surface)`
 - `public void SetSurfaceOverrideMaterial(int surface, Material? material)`
@@ -2014,6 +4412,408 @@ Values: `Transform2D = 0`, `Transform3D = 1`
 `public class MultiMeshInstance3D : GeometryInstance3D` - Draws a MultiMesh (Godot's MultiMeshInstance3D).
 
 - `public MultiMesh? Multimesh { get; set; }`
+
+### NavigationAgent3D
+
+`public class NavigationAgent3D : Node` - Finds a path for its parent node and follows it, and (with avoidance on) turns the parent's wanted velocity into a safe one (Godot's NavigationAgent3D).
+
+- `public event Action PathChanged`
+- `public event Action TargetReached`
+- `public event Action<Collections.Dictionary> WaypointReached`
+- `public event Action<Collections.Dictionary> LinkReached`
+- `public event Action NavigationFinished`
+- `public event Action<Vector3> VelocityComputed`
+- `public float PathDesiredDistance { get; set; }`
+- `public float TargetDesiredDistance { get; set; }`
+- `public float PathHeightOffset { get; set; }`
+- `public float PathMaxDistance { get; set; }`
+- `public bool SimplifyPath { get; set; }`
+- `public float SimplifyEpsilon { get; set; }`
+- `public PathfindingAlgorithm PathfindingAlgorithm { get; set; }`
+- `public PathPostProcessing PathPostprocessing { get; set; }`
+- `public PathMetadataFlags PathMetadataFlags { get; set; }`
+- `public uint NavigationLayers { get; set; }`
+- `public bool DebugEnabled { get; set; }`
+- `public bool DebugUseCustom { get; set; }`
+- `public Color DebugPathCustomColor { get; set; }`
+- `public float DebugPathCustomPointSize { get; set; }`
+- `public bool GetNavigationLayerValue(int layerNumber)`
+- `public void SetNavigationLayerValue(int layerNumber, bool value)`
+- `public Vector3 TargetPosition { get; set; }` - Where the agent is going.
+- `public bool AvoidanceEnabled { get; set; }`
+- `public float Radius { get; set; }`
+- `public float Height { get; set; }`
+- `public float MaxSpeed { get; set; }`
+- `public float NeighborDistance { get; set; }`
+- `public int MaxNeighbors { get; set; }`
+- `public float TimeHorizonAgents { get; set; }`
+- `public float TimeHorizonObstacles { get; set; }`
+- `public uint AvoidanceLayers { get; set; }`
+- `public uint AvoidanceMask { get; set; }`
+- `public float AvoidancePriority { get; set; }`
+- `public bool Use3DAvoidance { get; set; }`
+- `public bool KeepYVelocity { get; set; }`
+- `public bool DebugEnabledAvoidance { get; set; }`
+- `public bool GetAvoidanceLayerValue(int layerNumber)`
+- `public void SetAvoidanceLayerValue(int layerNumber, bool value)`
+- `public bool GetAvoidanceMaskValue(int maskNumber)`
+- `public void SetAvoidanceMaskValue(int maskNumber, bool value)`
+- `public Vector3 Velocity { get; set; }` - The velocity the parent wants (m/s).
+- `public void SetVelocity(Vector3 velocity)`
+- `public void SetVelocityForced(Vector3 velocity)` - Like SetVelocity, for the frame a parent was teleported.
+- `public Rid GetRid()`
+- `public Rid GetNavigationMap()`
+- `public void SetNavigationMap(Rid navigationMap)`
+- `public Vector3 GetNextPathPosition()` - The next position to head for: refreshes the path if needed and passes waypoints the parent has reached.
+- `public bool IsNavigationFinished()`
+- `public bool IsTargetReached()`
+- `public bool IsTargetReachable()` - Whether the last path point is within TargetDesiredDistance of the target.
+- `public float DistanceToTarget()`
+- `public Vector3 GetFinalPosition()`
+- `public Vector3[] GetCurrentNavigationPath()`
+- `public int GetCurrentNavigationPathIndex()`
+- `public NavigationPathQueryResult3D GetCurrentNavigationResult()`
+- `public float GetPathLength()` - The length of the current path in metres, from the first point.
+
+### NavigationAgent3D.SignalName
+
+`public new class SignalName : Node.SignalName`
+
+- `public static readonly StringName PathChanged`
+- `public static readonly StringName TargetReached`
+- `public static readonly StringName WaypointReached`
+- `public static readonly StringName LinkReached`
+- `public static readonly StringName NavigationFinished`
+- `public static readonly StringName VelocityComputed`
+
+### NavigationLink3D
+
+`public class NavigationLink3D : Node3D` - A connection between two points of a navigation map (Godot's NavigationLink3D), for jumps, ladders and teleports.
+
+- `public bool Enabled { get; set; }`
+- `public bool Bidirectional { get; set; }`
+- `public uint NavigationLayers { get; set; }`
+- `public float EnterCost { get; set; }`
+- `public float TravelCost { get; set; }`
+- `public Vector3 StartPosition { get; set; }`
+- `public Vector3 EndPosition { get; set; }`
+- `public Vector3 GlobalStartPosition { get; set; }`
+- `public Vector3 GlobalEndPosition { get; set; }`
+- `public bool GetNavigationLayerValue(int layerNumber)`
+- `public void SetNavigationLayerValue(int layerNumber, bool value)`
+- `public Rid GetRid()`
+- `public Rid GetNavigationMap()`
+- `public void SetNavigationMap(Rid navigationMap)`
+
+### NavigationMesh
+
+`public class NavigationMesh : Resource` - A navigation mesh: polygons over a vertex list (Godot's NavigationMesh) and the settings it is baked with.
+
+- `public SamplePartitionTypeEnum SamplePartitionType { get; set; }`
+- `public ParsedGeometryTypeEnum GeometryParsedGeometryType { get; set; }`
+- `public uint GeometryCollisionMask { get; set; }`
+- `public SourceGeometryModeEnum GeometrySourceGeometryMode { get; set; }`
+- `public StringName GeometrySourceGroupName { get; set; }`
+- `public float CellSize { get; set; }`
+- `public float CellHeight { get; set; }`
+- `public float BorderSize { get; set; }`
+- `public float AgentHeight { get; set; }`
+- `public float AgentRadius { get; set; }`
+- `public float AgentMaxClimb { get; set; }`
+- `public float AgentMaxSlope { get; set; }`
+- `public float RegionMinSize { get; set; }`
+- `public float RegionMergeSize { get; set; }`
+- `public float EdgeMaxLength { get; set; }`
+- `public float EdgeMaxError { get; set; }`
+- `public int VerticesPerPolygon { get; set; }`
+- `public float DetailSampleDistance { get; set; }`
+- `public float DetailSampleMaxError { get; set; }`
+- `public bool FilterLowHangingObstacles { get; set; }`
+- `public bool FilterLedgeSpans { get; set; }`
+- `public bool FilterWalkableLowHeightSpans { get; set; }`
+- `public Aabb FilterBakingAabb { get; set; }`
+- `public Vector3 FilterBakingAabbOffset { get; set; }`
+- `public Vector3[] Vertices { get; set; }` - The vertices (Godot's vertices property, a PackedVector3Array).
+- `public Collections.Array Polygons { get; set; }` - The polygons (Godot's polygons property: an array of PackedInt32Array).
+- `public void SetVertices(Vector3[] vertices)`
+- `public Vector3[] GetVertices()`
+- `public void AddPolygon(int[] polygon)`
+- `public int GetPolygonCount()`
+- `public int[] GetPolygon(int idx)`
+- `public void ClearPolygons()`
+- `public void Clear()` - Removes the vertices and the polygons.
+- `public void CreateFromMesh(Mesh mesh)` - Makes a polygon of every triangle of a mesh (Godot's create_from_mesh).
+- `public bool GetCollisionMaskValue(int layerNumber)`
+- `public void SetCollisionMaskValue(int layerNumber, bool value)`
+- `public override Resource Duplicate(bool subresources = false)`
+
+### NavigationMesh.ParsedGeometryTypeEnum
+
+`public enum ParsedGeometryTypeEnum`
+
+Values: `MeshInstances = 0`, `StaticColliders = 1`, `Both = 2`, `Max = 3`
+
+### NavigationMesh.SamplePartitionTypeEnum
+
+`public enum SamplePartitionTypeEnum`
+
+Values: `Watershed = 0`, `Monotone = 1`, `Layers = 2`, `Max = 3`
+
+### NavigationMesh.SourceGeometryModeEnum
+
+`public enum SourceGeometryModeEnum`
+
+Values: `RootNodeChildren = 0`, `GroupsWithChildren = 1`, `GroupsExplicit = 2`, `Max = 3`
+
+### NavigationMeshGenerator
+
+`public static class NavigationMeshGenerator` - Parses the scene tree for triangles and bakes navigation meshes (Godot's NavigationMeshGenerator, and the work NavigationServer3D's parse and bake calls do).
+
+- `public static void Bake(NavigationMesh navigationMesh, Node rootNode)` - Parses rootNode and bakes navigationMesh in one call.
+- `public static void Clear(NavigationMesh navigationMesh)` - Removes the polygons of the mesh.
+
+### NavigationMeshSourceGeometryData3D
+
+`public class NavigationMeshSourceGeometryData3D : Resource` - The triangles a bake reads (Godot's NavigationMeshSourceGeometryData3D): vertices as flat xyz floats and triangle indices, both in the space of the root node the geometry was parsed against, plus obstructions that discard geometry.
+
+- `public float[] Vertices { get; set; }`
+- `public int[] Indices { get; set; }`
+- `public Collections.Array ProjectedObstructions { get; set; }` - Obstructions as Godot stores them: dictionaries with "vertices" (Vector3[]), "elevation", "height" and "carve".
+- `public void SetVertices(float[] vertices)`
+- `public float[] GetVertices()`
+- `public void SetIndices(int[] indices)`
+- `public int[] GetIndices()`
+- `public bool HasData()`
+- `public void Clear()`
+- `public void AddFaces(Vector3[] faces, Transform3D xform)` - Appends triangles given as vertex triples (faces, three per triangle) transformed by xform.
+- `public void AddMeshArray(Collections.Array meshArray, Transform3D xform)` - Appends a vertex array and the triangle indices into it.
+- `public void AddMesh(Mesh mesh, Transform3D xform)`
+- `public void AppendArrays(float[] vertices, int[] indices)`
+- `public void Merge(NavigationMeshSourceGeometryData3D other)`
+- `public Aabb GetBounds()`
+- `public void AddProjectedObstruction(Vector3[] vertices, float elevation, float height, bool carve)`
+- `public void ClearProjectedObstructions()`
+
+### NavigationObstacle3D
+
+`public class NavigationObstacle3D : Node3D` - Something avoidance agents steer around (Godot's NavigationObstacle3D): a round obstacle with a Radius, or a wall polygon (Vertices, in the node's space) that agents are kept out of (wound clockwise seen from above) or inside (counter-clockwise).
+
+- `public float Radius { get; set; }`
+- `public float Height { get; set; }`
+- `public Vector3 Velocity { get; set; }`
+- `public bool AvoidanceEnabled { get; set; }`
+- `public uint AvoidanceLayers { get; set; }`
+- `public bool Paused { get; set; }`
+- `public bool AffectNavigationMesh { get; set; }`
+- `public bool CarveNavigationMesh { get; set; }`
+- `public bool Use3DAvoidance { get; set; }`
+- `public Vector3[] Vertices { get; set; }` - The wall polygon in the node's space (fewer than three vertices: a round obstacle).
+- `public bool GetAvoidanceLayerValue(int layerNumber)`
+- `public void SetAvoidanceLayerValue(int layerNumber, bool value)`
+- `public Rid GetRid()`
+- `public Rid GetNavigationMap()`
+- `public void SetNavigationMap(Rid navigationMap)`
+
+### NavigationPathQueryParameters3D
+
+`public class NavigationPathQueryParameters3D : RefCounted` - A path query (Godot's NavigationPathQueryParameters3D).
+
+- `public Rid Map { get; set; }`
+- `public Vector3 StartPosition { get; set; }`
+- `public Vector3 TargetPosition { get; set; }`
+- `public uint NavigationLayers { get; set; }`
+- `public PathfindingAlgorithm PathfindingAlgorithm { get; set; }`
+- `public PathPostProcessing PathPostprocessing { get; set; }`
+- `public PathMetadataFlags MetadataFlags { get; set; }`
+- `public bool SimplifyPath { get; set; }`
+- `public float SimplifyEpsilon { get; set; }` - The simplification tolerance in metres.
+- `public Collections.Array<Rid> ExcludedRegions { get; set; }`
+- `public Collections.Array<Rid> IncludedRegions { get; set; }`
+
+### NavigationPathQueryResult3D
+
+`public class NavigationPathQueryResult3D : RefCounted` - The answer to a path query (Godot's NavigationPathQueryResult3D).
+
+- `public Vector3[] Path { get; set; }`
+- `public int[] PathTypes { get; set; }`
+- `public Collections.Array<Rid> PathRids { get; set; }`
+- `public long[] PathOwnerIds { get; set; }`
+- `public float PathLength { get; set; }`
+- `public bool ReachedTarget { get; }` - True when the last path point is the polygon the target snapped to (a path to somewhere short of the target is partial).
+- `public void Reset()`
+
+### NavigationRegion3D
+
+`public class NavigationRegion3D : Node3D` - A piece of navigation mesh placed in the world (Godot's NavigationRegion3D).
+
+- `public event Action NavigationMeshChanged`
+- `public event Action BakeFinished`
+- `public NavigationMesh? NavigationMesh { get; set; }`
+- `public bool Enabled { get; set; }`
+- `public bool UseEdgeConnections { get; set; }`
+- `public uint NavigationLayers { get; set; }`
+- `public float EnterCost { get; set; }`
+- `public float TravelCost { get; set; }`
+- `public bool GetNavigationLayerValue(int layerNumber)`
+- `public void SetNavigationLayerValue(int layerNumber, bool value)`
+- `public Rid GetRid()` - The server's handle of this region (made on first use; empty without Aver.Nav.Abi).
+- `public Rid GetRegionRid()`
+- `public Rid GetNavigationMap()`
+- `public void SetNavigationMap(Rid navigationMap)`
+- `public Aabb GetBounds()` - The bounds of the navigation mesh in global space.
+- `public bool IsBaking()`
+- `public bool BakeOnReady { get; set; }` - Aver extension, written by the converter for a mesh that was never baked in the editor: bake it from the geometry below this node when the node is ready (Godot leaves such a mesh empty until BakeNavigationMesh is called).
+- `public void BakeNavigationMesh(bool onThread = true)` - Bakes the navigation mesh from the geometry under this node (the mesh's own settings say which), on a worker thread or now.
+
+### NavigationRegion3D.SignalName
+
+`public new class SignalName : Node3D.SignalName`
+
+- `public static readonly StringName NavigationMeshChanged`
+- `public static readonly StringName BakeFinished`
+
+### NavigationServer3D
+
+`public static class NavigationServer3D` - The navigation server: maps, regions, links, avoidance agents and obstacles, path queries and navigation mesh baking.
+
+- `public static event Action<Rid>? MapChanged` - Emitted when a map's polygons were rebuilt after a change (Godot's map_changed).
+- `public static void SetActive(bool active)` - Turns navigation processing on or off (Godot's set_active).
+- `public static Rid GetDefaultMapRid()` - The map the 3D world uses (NavigationMap): made on first use.
+- `public static Rid MapCreate()`
+- `public static void MapSetActive(Rid map, bool active)`
+- `public static bool MapIsActive(Rid map)`
+- `public static void MapSetUp(Rid map, Vector3 up)` - Godot keeps the map's "up" for its 2D-in-3D avoidance; here it is always +Y.
+- `public static Vector3 MapGetUp(Rid map)`
+- `public static void MapSetCellSize(Rid map, float cellSize)`
+- `public static float MapGetCellSize(Rid map)`
+- `public static void MapSetCellHeight(Rid map, float cellHeight)`
+- `public static float MapGetCellHeight(Rid map)`
+- `public static void MapSetEdgeConnectionMargin(Rid map, float margin)`
+- `public static float MapGetEdgeConnectionMargin(Rid map)`
+- `public static void MapSetLinkConnectionRadius(Rid map, float radius)`
+- `public static float MapGetLinkConnectionRadius(Rid map)`
+- `public static void MapSetUseEdgeConnections(Rid map, bool enabled)`
+- `public static bool MapGetUseEdgeConnections(Rid map)`
+- `public static void MapForceUpdate(Rid map)` - Applies pending changes to the map now (Godot's map_force_update).
+- `public static uint MapGetIterationId(Rid map)`
+- `public static Collections.Array<Rid> GetMaps()`
+- `public static Collections.Array<Rid> MapGetRegions(Rid map)`
+- `public static Collections.Array<Rid> MapGetLinks(Rid map)`
+- `public static Collections.Array<Rid> MapGetAgents(Rid map)`
+- `public static Collections.Array<Rid> MapGetObstacles(Rid map)`
+- `public static Vector3[] MapGetPath(Rid map, Vector3 origin, Vector3 destination, bool optimize, uint navigationLayers = 1)` - A path across the map between two global positions.
+- `public static void QueryPath(NavigationPathQueryParameters3D parameters, NavigationPathQueryResult3D result)` - Runs a path query and fills result.
+- `public static Vector3 MapGetClosestPoint(Rid map, Vector3 toPoint)`
+- `public static Vector3 MapGetClosestPointNormal(Rid map, Vector3 toPoint)`
+- `public static Rid MapGetClosestPointOwner(Rid map, Vector3 toPoint)`
+- `public static Vector3 MapGetClosestPointToSegment(Rid map, Vector3 start, Vector3 end, bool useCollision = false)` - The point of the navigation mesh closest to a segment (Godot's map_get_closest_point_to_segment).
+- `public static Vector3 MapGetRandomPoint(Rid map, uint navigationLayers, bool uniformly)` - A random point on the map's polygons that match the layers (uniformly weights polygons by area).
+- `public static Rid RegionCreate()`
+- `public static void RegionSetMap(Rid region, Rid map)`
+- `public static Rid RegionGetMap(Rid region)`
+- `public static void RegionSetEnabled(Rid region, bool enabled)`
+- `public static bool RegionGetEnabled(Rid region)`
+- `public static void RegionSetUseEdgeConnections(Rid region, bool enabled)`
+- `public static bool RegionGetUseEdgeConnections(Rid region)`
+- `public static void RegionSetNavigationLayers(Rid region, uint layers)`
+- `public static uint RegionGetNavigationLayers(Rid region)`
+- `public static void RegionSetEnterCost(Rid region, float enterCost)`
+- `public static float RegionGetEnterCost(Rid region)`
+- `public static void RegionSetTravelCost(Rid region, float travelCost)`
+- `public static float RegionGetTravelCost(Rid region)`
+- `public static void RegionSetOwnerId(Rid region, ulong ownerId)`
+- `public static ulong RegionGetOwnerId(Rid region)`
+- `public static void RegionSetNavigationMesh(Rid region, NavigationMesh? mesh, Transform3D? transform = null)` - Gives the region the polygons of a navigation mesh, placed with transform (the region node's global transform).
+- `public static int RegionGetConnectionsCount(Rid region)` - How many edge connections the region has to other regions (Godot's region_get_connections_count).
+- `public static Vector3 RegionGetConnectionPathwayStart(Rid region, int connection)`
+- `public static Vector3 RegionGetConnectionPathwayEnd(Rid region, int connection)`
+- `public static bool RegionOwnsPoint(Rid region, Vector3 point)` - Whether a global point lies on the region's polygons (within the map's cell height).
+- `public static Rid LinkCreate()`
+- `public static void LinkSetMap(Rid link, Rid map)`
+- `public static Rid LinkGetMap(Rid link)`
+- `public static void LinkSetEnabled(Rid link, bool enabled)`
+- `public static bool LinkGetEnabled(Rid link)`
+- `public static void LinkSetBidirectional(Rid link, bool bidirectional)`
+- `public static bool LinkIsBidirectional(Rid link)`
+- `public static void LinkSetNavigationLayers(Rid link, uint layers)`
+- `public static uint LinkGetNavigationLayers(Rid link)`
+- `public static void LinkSetEnterCost(Rid link, float enterCost)`
+- `public static float LinkGetEnterCost(Rid link)`
+- `public static void LinkSetTravelCost(Rid link, float travelCost)`
+- `public static float LinkGetTravelCost(Rid link)`
+- `public static void LinkSetOwnerId(Rid link, ulong ownerId)`
+- `public static ulong LinkGetOwnerId(Rid link)`
+- `public static void LinkSetStartPosition(Rid link, Vector3 position)`
+- `public static void LinkSetEndPosition(Rid link, Vector3 position)`
+- `public static Vector3 LinkGetStartPosition(Rid link)`
+- `public static Vector3 LinkGetEndPosition(Rid link)`
+- `public static int LinkGetConnectedEnds(Rid link)` - How many of the link's ends attached to a polygon after the last update (Aver extension for tests and debugging).
+- `public static Rid AgentCreate()`
+- `public static void AgentSetMap(Rid agent, Rid map)`
+- `public static Rid AgentGetMap(Rid agent)`
+- `public static void AgentSetAvoidanceEnabled(Rid agent, bool enabled)`
+- `public static bool AgentGetAvoidanceEnabled(Rid agent)`
+- `public static void AgentSetPaused(Rid agent, bool paused)`
+- `public static bool AgentGetPaused(Rid agent)`
+- `public static void AgentSetRadius(Rid agent, float radius)`
+- `public static void AgentSetHeight(Rid agent, float height)`
+- `public static void AgentSetMaxSpeed(Rid agent, float maxSpeed)`
+- `public static void AgentSetNeighborDistance(Rid agent, float distance)`
+- `public static void AgentSetMaxNeighbors(Rid agent, int count)`
+- `public static void AgentSetTimeHorizonAgents(Rid agent, float seconds)`
+- `public static void AgentSetTimeHorizonObstacles(Rid agent, float seconds)`
+- `public static void AgentSetAvoidanceLayers(Rid agent, uint layers)`
+- `public static void AgentSetAvoidanceMask(Rid agent, uint mask)`
+- `public static void AgentSetAvoidancePriority(Rid agent, float priority)`
+- `public static void AgentSetPosition(Rid agent, Vector3 position)`
+- `public static void AgentSetVelocity(Rid agent, Vector3 velocity)` - Sets the velocity the agent wants.
+- `public static void AgentSetAvoidanceCallback(Rid agent, Callable callback)` - Sets the callback that receives the safe velocity (Callable(Vector3 safeVelocity)).
+- `public static bool AgentHasAvoidanceCallback(Rid agent)`
+- `public static Rid ObstacleCreate()`
+- `public static void ObstacleSetMap(Rid obstacle, Rid map)`
+- `public static Rid ObstacleGetMap(Rid obstacle)`
+- `public static void ObstacleSetAvoidanceEnabled(Rid obstacle, bool enabled)`
+- `public static bool ObstacleGetAvoidanceEnabled(Rid obstacle)`
+- `public static void ObstacleSetPaused(Rid obstacle, bool paused)`
+- `public static bool ObstacleGetPaused(Rid obstacle)`
+- `public static void ObstacleSetAvoidanceLayers(Rid obstacle, uint layers)`
+- `public static uint ObstacleGetAvoidanceLayers(Rid obstacle)`
+- `public static void ObstacleSetRadius(Rid obstacle, float radius)`
+- `public static float ObstacleGetRadius(Rid obstacle)`
+- `public static void ObstacleSetHeight(Rid obstacle, float height)`
+- `public static float ObstacleGetHeight(Rid obstacle)`
+- `public static void ObstacleSetPosition(Rid obstacle, Vector3 position)`
+- `public static void ObstacleSetVelocity(Rid obstacle, Vector3 velocity)`
+- `public static void ObstacleSetVertices(Rid obstacle, Vector3[] vertices)` - Sets the obstacle's wall polygon from GLOBAL positions (empty for a round obstacle).
+- `public static void FreeRid(Rid rid)` - Frees a map, region, link, agent or obstacle.
+- `public static void ParseSourceGeometryData(NavigationMesh navigationMesh, NavigationMeshSourceGeometryData3D sourceGeometryData, Node rootNode, Callable callback = default)` - Collects triangles from the scene under rootNode as the navigation mesh's parsing settings say.
+- `public static void BakeFromSourceGeometryData(NavigationMesh navigationMesh, NavigationMeshSourceGeometryData3D sourceGeometryData, Callable callback = default)` - Bakes the triangles into the navigation mesh, now.
+- `public static void BakeFromSourceGeometryDataAsync(NavigationMesh navigationMesh, NavigationMeshSourceGeometryData3D sourceGeometryData, Callable callback = default)` - Bakes on a worker thread; the mesh is updated and the callback called from a later frame's pump.
+- `public static bool IsBakingNavigationMesh(NavigationMesh navigationMesh)`
+
+### NinePatchRect
+
+`public class NinePatchRect : Control` - A texture drawn as a nine-patch (Godot's NinePatchRect).
+
+- `public Texture2D? Texture { get; set; }`
+- `public bool DrawCenter { get; set; }`
+- `public Rect2 RegionRect { get; set; }`
+- `public int PatchMarginLeft { get; set; }`
+- `public int PatchMarginTop { get; set; }`
+- `public int PatchMarginRight { get; set; }`
+- `public int PatchMarginBottom { get; set; }`
+- `public AxisStretchMode AxisStretchHorizontal { get; set; }`
+- `public AxisStretchMode AxisStretchVertical { get; set; }`
+- `public NinePatchRect()`
+- `public void SetPatchMargin(Side margin, int value)`
+- `public int GetPatchMargin(Side margin)`
+- `public override void _Draw()`
+
+### NinePatchRect.AxisStretchMode
+
+`public enum AxisStretchMode`
+
+Values: `Stretch = 0`, `Tile = 1`, `TileFit = 2`
 
 ### Node
 
@@ -2296,6 +5096,54 @@ Values: `Inherit = 0`, `Pausable = 1`, `WhenPaused = 2`, `Always = 3`, `Disabled
 
 Values: `DualParaboloid = 0`, `Cube = 1`
 
+### OptionButton
+
+`public class OptionButton : Button` - A button that drops a list of choices (Godot's OptionButton): one item is selected and shown on the button.
+
+- `public event Action<long> ItemSelected`
+- `public event Action<long> ItemFocused`
+- `public bool FitToLongestItem { get; set; }`
+- `public bool AllowReselect { get; set; }`
+- `public OptionButton()`
+- `public PopupMenu GetPopup()`
+- `public void ShowPopup()` - Shows the choices under the button.
+- `public int ItemCount { get; set; }`
+- `public int Selected { get; set; }`
+- `public void Select(int index)`
+- `public int GetSelectedId()`
+- `public Variant GetSelectedMetadata()`
+- `public void AddItem(string label, int id = -1)`
+- `public void AddIconItem(Texture2D texture, string label, int id = -1)`
+- `public void AddSeparator(string text = "")`
+- `public void SetItemText(int index, string text)`
+- `public string GetItemText(int index)`
+- `public void SetItemIcon(int index, Texture2D? icon)`
+- `public Texture2D? GetItemIcon(int index)`
+- `public void SetItemId(int index, int id)`
+- `public int GetItemId(int index)`
+- `public int GetItemIndex(int id)`
+- `public void SetItemMetadata(int index, Variant metadata)`
+- `public Variant GetItemMetadata(int index)`
+- `public void SetItemDisabled(int index, bool disabled)`
+- `public bool IsItemDisabled(int index)`
+- `public bool IsItemSeparator(int index)`
+- `public void SetItemTooltip(int index, string tooltip)`
+- `public string GetItemTooltip(int index)`
+- `public int GetItemCount()`
+- `public bool HasSelectableItems()`
+- `public int GetSelectableItem(bool fromLast = false)`
+- `public void SetItemCount(int count)`
+- `public void RemoveItem(int index)`
+- `public void Clear()`
+- `public override void _Draw()`
+
+### OptionButton.SignalName
+
+`public new class SignalName : Button.SignalName`
+
+- `public static readonly StringName ItemSelected`
+- `public static readonly StringName ItemFocused`
+
 ### Orientation
 
 `public enum Orientation`
@@ -2334,6 +5182,18 @@ Values: `Vertical = 1`, `Horizontal = 0`
 
 Values: `Disabled = 0`, `Instance = 1`, `Main = 2`, `MainInherited = 3`
 
+### Panel
+
+`public class Panel : Control` - A rectangle that draws the theme's "panel" style box (Godot's Panel).
+
+- `public override void _Draw()`
+
+### PanelContainer
+
+`public class PanelContainer : Container` - A container that draws the theme's "panel" style box and keeps its children inside its margins (Godot's PanelContainer).
+
+- `public override void _Draw()`
+
 ### PanoramaSkyMaterial
 
 `public class PanoramaSkyMaterial : SkyMaterial` - An equirectangular sky.
@@ -2341,6 +5201,62 @@ Values: `Disabled = 0`, `Instance = 1`, `Main = 2`, `MainInherited = 3`
 - `public Texture2D? Panorama { get; set; }`
 - `public bool Filter { get; set; }`
 - `public float EnergyMultiplier { get; set; }`
+
+### Path3D
+
+`public class Path3D : Node3D` - A node holding a curve in 3D (Godot's Path3D).
+
+- `public event Action CurveChanged`
+- `public Curve3D? Curve { get; set; }` - The path.
+
+### Path3D.SignalName
+
+`public new class SignalName : Node3D.SignalName`
+
+- `public static readonly StringName CurveChanged`
+
+### PathfindingAlgorithm
+
+`public enum PathfindingAlgorithm` - Which pathfinding algorithm a query uses (Godot's NavigationPathQueryParameters3D.PathfindingAlgorithm).
+
+Values: `Astar = 0`
+
+### PathFollow3D
+
+`public class PathFollow3D : Node3D` - Rides the curve of the Path3D it is a child of (Godot's PathFollow3D).
+
+- `public float Progress { get; set; }` - How far along the baked curve the node is, in metres.
+- `public float ProgressRatio { get; set; }` - The same as a fraction of the curve's length (0 for an empty or missing curve).
+- `public float HOffset { get; set; }` - Slides the node sideways (along its own X) off the curve, in metres.
+- `public float VOffset { get; set; }` - Slides the node up (along its own Y) off the curve, in metres.
+- `public RotationModeEnum RotationMode { get; set; }`
+- `public bool CubicInterp { get; set; }` - Interpolates the baked points with a cubic instead of a line.
+- `public bool Loop { get; set; }` - Wraps progress past the ends; false stops at them.
+- `public bool TiltEnabled { get; set; }` - Applies the curve's tilt to the rotation (XYZ and Oriented modes).
+
+### PathFollow3D.RotationModeEnum
+
+`public enum RotationModeEnum`
+
+Values: `None = 0`, `Y = 1`, `Xy = 2`, `Xyz = 3`, `Oriented = 4`
+
+### PathMetadataFlags
+
+`public enum PathMetadataFlags` - What a query result carries per path point (Godot's PathMetadataFlags).
+
+Values: `IncludeNone = 0`, `IncludeTypes = 1`, `IncludeRids = 2`, `IncludeOriginalIds = 4`, `IncludeOwners = 8`, `IncludeAll = 15`
+
+### PathPostProcessing
+
+`public enum PathPostProcessing` - How a path found over the polygon corridor is post-processed (Godot's PathPostProcessing).
+
+Values: `CorridorFunnel = 0`, `Edgecentered = 1`, `None = 2`
+
+### PathSegmentType
+
+`public enum PathSegmentType` - What a path point is (Godot's PathSegmentType).
+
+Values: `Region = 0`, `Link = 1`
 
 ### PhysicalSkyMaterial
 
@@ -2493,6 +5409,148 @@ Values: `Transform = 0`, `LinearVelocity = 1`, `AngularVelocity = 2`, `Sleeping 
 - `public override readonly int GetHashCode()`
 - `public override readonly string ToString()`
 
+### Popup
+
+`public class Popup : PopupWindow` - A popup (Godot's Popup): it hides when the player clicks outside it.
+
+### PopupMenu
+
+`public class PopupMenu : Popup` - A menu that pops up with a list of items (Godot's PopupMenu).
+
+- `public event Action<long> IdPressed`
+- `public event Action<long> IdFocused`
+- `public event Action<long> IndexPressed`
+- `public event Action MenuChanged`
+- `public bool HideOnItemSelection { get; set; }`
+- `public bool HideOnCheckableItemSelection { get; set; }`
+- `public bool HideOnStateItemSelection { get; set; }`
+- `public float SubmenuPopupDelay { get; set; }`
+- `public bool AllowSearch { get; set; }`
+- `public int SystemMenuId { get; set; }`
+- `public bool PreferNativeMenu { get; set; }`
+- `public bool ShrinkHeight { get; set; }`
+- `public bool ShrinkWidth { get; set; }`
+- `public PopupMenu()`
+- `public int ItemCount { get; set; }`
+- `public void AddItem(string label, int id = -1, Key accel = Key.None)`
+- `public void AddIconItem(Texture2D texture, string label, int id = -1, Key accel = Key.None)`
+- `public void AddCheckItem(string label, int id = -1, Key accel = Key.None)`
+- `public void AddIconCheckItem(Texture2D texture, string label, int id = -1, Key accel = Key.None)`
+- `public void AddRadioCheckItem(string label, int id = -1, Key accel = Key.None)`
+- `public void AddIconRadioCheckItem(Texture2D texture, string label, int id = -1, Key accel = Key.None)`
+- `public void AddMultistateItem(string label, int maxStates, int defaultState = 0, int id = -1, Key accel = Key.None)` - An item that cycles through maxStates states when activated.
+- `public void AddShortcut(Shortcut shortcut, int id = -1, bool global = false, bool allowEcho = false)`
+- `public void AddIconShortcut(Texture2D texture, Shortcut shortcut, int id = -1, bool global = false, bool allowEcho = false)`
+- `public void AddCheckShortcut(Shortcut shortcut, int id = -1, bool global = false)`
+- `public void AddRadioCheckShortcut(Shortcut shortcut, int id = -1, bool global = false)`
+- `public void AddSeparator(string label = "", int id = -1)`
+- `public void AddSubmenuItem(string label, string submenu, int id = -1)` - An item that opens the submenu named submenu (a PopupMenu child of this menu).
+- `public void AddSubmenuNodeItem(string label, PopupMenu submenu, int id = -1)`
+- `public string GetItemText(int index)`
+- `public void SetItemText(int index, string text)`
+- `public Texture2D? GetItemIcon(int index)`
+- `public void SetItemIcon(int index, Texture2D? icon)`
+- `public int GetItemId(int index)`
+- `public void SetItemId(int index, int id)`
+- `public bool IsItemChecked(int index)`
+- `public void SetItemChecked(int index, bool @checked)`
+- `public bool IsItemCheckable(int index)`
+- `public bool IsItemRadioCheckable(int index)`
+- `public void SetItemAsCheckable(int index, bool enable)`
+- `public void SetItemAsRadioCheckable(int index, bool enable)`
+- `public void SetItemAsSeparator(int index, bool enable)`
+- `public bool IsItemSeparator(int index)`
+- `public bool IsItemDisabled(int index)`
+- `public void SetItemDisabled(int index, bool disabled)`
+- `public Variant GetItemMetadata(int index)`
+- `public void SetItemMetadata(int index, Variant metadata)`
+- `public string GetItemTooltip(int index)`
+- `public void SetItemTooltip(int index, string tooltip)`
+- `public Shortcut? GetItemShortcut(int index)`
+- `public void SetItemShortcut(int index, Shortcut? shortcut, bool global = false)`
+- `public Key GetItemAccelerator(int index)`
+- `public void SetItemAccelerator(int index, Key accel)`
+- `public string GetItemSubmenu(int index)`
+- `public void SetItemSubmenu(int index, string submenu)`
+- `public PopupMenu? GetItemSubmenuNode(int index)`
+- `public void SetItemSubmenuNode(int index, PopupMenu? submenu)`
+- `public int GetItemMultistateMax(int index)`
+- `public int GetItemMultistate(int index)`
+- `public void SetItemMultistate(int index, int state)`
+- `public void ToggleItemChecked(int index)`
+- `public void ToggleItemMultistate(int index)`
+- `public int GetItemIndex(int id)`
+- `public int GetItemCount()`
+- `public void RemoveItem(int index)`
+- `public void Clear(bool freeSubmenus = false)`
+- `public int GetFocusedItem()`
+- `public void SetFocusedItem(int index)`
+- `public void ActivateItem(int index)` - Activates the item as a click would: toggles a check item, cycles a multistate item, emits id_pressed and index_pressed and hides the menu.
+- `public bool ActivateItemByEvent(InputEvent @event, bool forGlobalOnly = false)` - Triggers the item whose shortcut or accelerator matches the key event; false when none does.
+- `public override void _UnhandledKeyInput(InputEvent @event)`
+- `public int GetItemAt(Vector2 position)` - The item under a point of the menu, or -1.
+- `public override string _GetTooltip(Vector2 atPosition)`
+- `public override void _GuiInput(InputEvent @event)`
+- `public override void _Draw()`
+
+### PopupMenu.SignalName
+
+`public new class SignalName : Popup.SignalName`
+
+- `public static readonly StringName IdPressed`
+- `public static readonly StringName IdFocused`
+- `public static readonly StringName IndexPressed`
+- `public static readonly StringName MenuChanged`
+
+### PopupPanel
+
+`public class PopupPanel : Popup` - A popup with a panel behind its contents (Godot's PopupPanel); the children fill the panel.
+
+- `public override void _Notification(int what)`
+- `public override void _Draw()`
+
+### PopupWindow
+
+`public class PopupWindow : Control` - The shared behaviour of the popup classes: a top-level control that is hidden until it is popped up (the part of Godot's Window a popup uses).
+
+- `public event Action PopupHide`
+- `public event Action AboutToPopup`
+- `public event Action CloseRequested`
+- `public string Title { get; set; }`
+- `public bool Exclusive { get; set; }`
+- `public bool Transient { get; set; }`
+- `public bool Unresizable { get; set; }`
+- `public bool Borderless { get; set; }`
+- `public bool AlwaysOnTop { get; set; }`
+- `public bool Transparent { get; set; }`
+- `public bool PopupWindowFlag { get; set; }`
+- `public bool WrapControls { get; set; }`
+- `public int InitialPosition { get; set; }`
+- `public bool TransientToFocused { get; set; }`
+- `public bool ForceNative { get; set; }`
+- `public int Mode { get; set; }`
+- `public Vector2I MinSize { get; set; }`
+- `public Vector2I MaxSize { get; set; }`
+- `public PopupWindow()`
+- `public bool IsPopupShown { get; }` - A shown popup is in the GUI's popup list (hit first, drawn last).
+- `public void Popup(Rect2I? rect = null)` - Shows the popup at the given rectangle, or where it is at its content size (Godot's Window.popup).
+- `public void PopupCentered(Vector2I? minsize = null)` - Shows the popup centred in the screen, at least minsize big.
+- `public void PopupCenteredRatio(float ratio = 0.8f)` - Shows the popup centred, ratio of the screen's size.
+- `public void PopupCenteredClamped(Vector2I? minsize = null, float fallbackRatio = 0.75f)` - Shows the popup centred at its content size or minsize, shrunk to fallbackRatio of the screen if it is bigger.
+- `public void PopupOnParent(Rect2I parentRect)` - Shows the popup at a rectangle given in the parent's coordinates.
+- `public void PopupCenteredExclusive(Vector2I? minsize = null)`
+- `public void PopupExclusive(Rect2I? rect = null)`
+- `public void SetVisible(bool visible)`
+- `public override void _GuiInput(InputEvent @event)`
+
+### PopupWindow.SignalName
+
+`public new class SignalName : Control.SignalName`
+
+- `public static readonly StringName PopupHide`
+- `public static readonly StringName AboutToPopup`
+- `public static readonly StringName CloseRequested`
+
 ### ProceduralSkyMaterial
 
 `public class ProceduralSkyMaterial : SkyMaterial` - Godot's ProceduralSkyMaterial.
@@ -2508,6 +5566,23 @@ Values: `Transform = 0`, `LinearVelocity = 1`, `AngularVelocity = 2`, `Sleeping 
 - `public float SunAngleMax { get; set; }`
 - `public float SunCurve { get; set; }`
 - `public bool UseDebanding { get; set; }`
+
+### ProgressBar
+
+`public class ProgressBar : Range` - A bar that fills with the value (Godot's ProgressBar).
+
+- `public bool ShowPercentage { get; set; }`
+- `public FillModeEnum FillMode { get; set; }`
+- `public bool Indeterminate { get; set; }`
+- `public bool EditorPreviewIndeterminate { get; set; }`
+- `public ProgressBar()`
+- `public override void _Draw()`
+
+### ProgressBar.FillModeEnum
+
+`public enum FillModeEnum`
+
+Values: `BeginToEnd = 0`, `EndToBegin = 1`, `TopToBottom = 2`, `BottomToTop = 3`
 
 ### Projection
 
@@ -2624,6 +5699,31 @@ Values: `None = 0`, `Range = 1`, `Enum = 2`, `EnumSuggestion = 3`, `ExpRange = 4
 - `public float Randfn(float mean = 0f, float deviation = 1f)`
 - `public uint Randi()`
 - `public int RandiRange(int from, int to)`
+
+### Range
+
+`public class Range : Control` - A control that holds a number between a minimum and a maximum (Godot's Range).
+
+- `public event Action<double> ValueChanged`
+- `public double MinValue { get; set; }`
+- `public double MaxValue { get; set; }`
+- `public double Step { get; set; }`
+- `public double Page { get; set; }`
+- `public bool ExpEdit { get; set; }`
+- `public bool Rounded { get; set; }`
+- `public bool AllowGreater { get; set; }`
+- `public bool AllowLesser { get; set; }`
+- `public double Value { get; set; }`
+- `public void SetValueNoSignal(double value)` - Sets the value without telling anyone (Godot's set_value_no_signal).
+- `public double GetAsRatio()` - The value as a share of the range, 0 to 1 (exponential when exp_edit is on and the minimum is not negative).
+- `public void SetAsRatio(double value)` - Sets the value from a ratio, 0 to 1.
+
+### Range.SignalName
+
+`public new class SignalName : Control.SignalName`
+
+- `public static readonly StringName ValueChanged`
+- `public static readonly StringName Changed`
 
 ### RayCast3D
 
@@ -2749,6 +5849,17 @@ Values: `Disabled = 0`, `Environment = 1`, `Color = 2`
 
 Values: `Once = 0`, `Always = 1`
 
+### RemoteTransform3D
+
+`public class RemoteTransform3D : Node3D` - Copies this node's transform to another node (Godot's RemoteTransform3D): its position, rotation and scale, in global or in local terms, each switchable.
+
+- `public NodePath RemotePath { get; set; }` - The node that follows (default: the parent).
+- `public bool UseGlobalCoordinates { get; set; }` - True: the global transform is copied; false: the local one.
+- `public bool UpdatePosition { get; set; }`
+- `public bool UpdateRotation { get; set; }`
+- `public bool UpdateScale { get; set; }`
+- `public void ForceUpdateCache()` - Looks the remote node up again (after the scene changed) and copies the transform to it now.
+
 ### RenderingServer
 
 `public static class RenderingServer` - Godot's RenderingServer enums that the environment nodes use.
@@ -2803,6 +5914,136 @@ Values: `Ignore = 0`, `Reuse = 1`, `Replace = 2`
 `public enum ThreadLoadStatus`
 
 Values: `InvalidResource = 0`, `InProgress = 1`, `Failed = 2`, `Loaded = 3`
+
+### RichTextEffect
+
+`public class RichTextEffect : Resource` - A custom effect for RichTextLabel (Godot's RichTextEffect): [bbcode] in the text runs it over the characters inside.
+
+- `public string Bbcode { get; set; }` - The tag the effect answers to.
+- `public virtual bool _ProcessCustomFx(CharFXTransform charFx)` - Called for every character in the effect's range; return false to hide the character.
+
+### RichTextLabel
+
+`public class RichTextLabel : Control` - Text with styles, images, lists, tables and effects (Godot's RichTextLabel).
+
+- `public void AddText(string text)` - Adds plain text (no BBCode) to the end.
+- `public void Newline()` - Ends the current line.
+- `public void PushBold()`
+- `public void PushItalics()`
+- `public void PushBoldItalics()`
+- `public void PushNormal()`
+- `public void PushMono()`
+- `public void PushUnderline()`
+- `public void PushStrikethrough()`
+- `public void PushFont(Font font, int fontSize = 0)`
+- `public void PushFontSize(int fontSize)`
+- `public void PushColor(Color color)`
+- `public void PushBgcolor(Color bgcolor)`
+- `public void PushFgcolor(Color fgcolor)`
+- `public void PushOutlineSize(int outlineSize)`
+- `public void PushOutlineColor(Color color)`
+- `public void PushMeta(Variant data, MetaUnderline underlineMode = MetaUnderline.Always, string tooltip = "")`
+- `public void PushHint(string description)`
+- `public void PushParagraph(HorizontalAlignment alignment, TextServer.Direction baseDirection = TextServer.Direction.Auto, string language = "")`
+- `public void PushIndent(int level)`
+- `public void PushLanguage(string language)`
+- `public void PushList(int level, ListType type, bool capitalize, string bullet = "•")` - Starts a list: each line until the matching pop is an item.
+- `public void PushTable(int columns, InlineAlignment inlineAlign = InlineAlignment.Top, int alignToRow = -1)` - Starts a table of columns columns; push_cell() starts each cell in turn.
+- `public void PushCell()`
+- `public void SetTableColumnExpand(int column, bool expand, int ratio = 1, bool shrink = true)`
+- `public void SetCellRowBackgroundColor(Color oddRowBg, Color evenRowBg)`
+- `public void SetCellBorderColor(Color color)`
+- `public void SetCellSizeOverride(Vector2 minSize, Vector2 maxSize)`
+- `public void SetCellPadding(Rect2 padding)`
+- `public void PushEffect(string tag, Dictionary<string, string>? args = null)`
+- `public void Pop()` - Closes the innermost open tag.
+- `public void PopAll()` - Closes every open tag.
+- `public int PushContext()` - Pops down to a context pushed with push_context() (here the whole stack is one context).
+- `public void PopContext()`
+- `public void AddImage(Texture2D image, int width = 0, int height = 0, Color? color = null, InlineAlignment inlineAlign = InlineAlignment.Center, Rect2? region = null, Variant key = default, bool pad = false, string tooltip = "", bool sizeInPercent = false)` - Adds an image (Godot's add_image).
+- `public void Clear()` - Removes everything and returns the label to an empty document.
+- `public bool RemoveParagraph(int paragraph, bool noInvalidate = false)` - Removes the paragraph at the index (a paragraph ends at a newline).
+- `public string GetParsedText()` - The text without the mark-up (Godot's get_parsed_text): text runs and newlines; table cells of a row are separated by a tab and rows by a newline.
+- `public int GetTotalCharacterCount()` - The characters in the document: text characters, and one for each image; newlines are not counted.
+- `public int GetParagraphCount()` - The paragraphs: lines of the source separated by a newline.
+- `public event Action<Variant> MetaClicked`
+- `public event Action<Variant> MetaHoverStarted`
+- `public event Action<Variant> MetaHoverEnded`
+- `public RichTextLabel()`
+- `public string Text { get; set; }`
+- `public bool BbcodeEnabled { get; set; }`
+- `public TextServer.AutowrapMode AutowrapMode { get; set; }`
+- `public int TabSize { get; set; }`
+- `public bool FitContent { get; set; }`
+- `public bool ScrollActive { get; set; }`
+- `public bool ScrollFollowing { get; set; }`
+- `public bool MetaUnderlined { get; set; }`
+- `public bool HintUnderlined { get; set; }`
+- `public bool SelectionEnabled { get; set; }`
+- `public bool DeselectOnFocusLossEnabled { get; set; }`
+- `public bool ContextMenuEnabled { get; set; }`
+- `public bool ShortcutKeysEnabled { get; set; }`
+- `public bool Threaded { get; set; }`
+- `public float ProgressBarDelay { get; set; }`
+- `public string Language { get; set; }`
+- `public new TextServer.Direction TextDirection { get; set; }`
+- `public TextServer.VisibleCharactersBehavior VisibleCharactersBehavior { get; set; }`
+- `public TextServer.OverrunBehavior TextOverrunBehavior { get; set; }`
+- `public Collections.Array<RichTextEffect> CustomEffects { get; set; }`
+- `public string GetText()`
+- `public void AppendText(string bbcode)` - Parses BBCode and adds it to the end of the document (Godot's append_text).
+- `public Error ParseBbcode(string bbcode)` - Replaces the document with the BBCode text (Godot's parse_bbcode).
+- `public int VisibleCharacters { get; set; }`
+- `public float VisibleRatio { get; set; }`
+- `public bool HasCustomEffect(string tag)`
+- `public void InstallEffect(Variant effect)`
+- `public VScrollBar GetVScrollBar()`
+- `public int GetContentHeight()`
+- `public int GetContentWidth()`
+- `public int GetLineCount()`
+- `public int GetVisibleLineCount()`
+- `public int GetLineOffset(int line)`
+- `public int GetParagraphOffset(int paragraph)`
+- `public void ScrollToLine(int line)`
+- `public void ScrollToParagraph(int paragraph)`
+- `public void ScrollToSelection()`
+- `public override void _Notification(int what)`
+- `public override void _Process(double delta)`
+- `public override void _Draw()`
+- `public bool SelectAll()`
+- `public void Deselect()`
+- `public int GetSelectionFrom()`
+- `public int GetSelectionTo()`
+- `public string GetSelectedText()`
+- `public override void _GuiInput(InputEvent @event)`
+- `public override string _GetTooltip(Vector2 atPosition)`
+
+### RichTextLabel.ImageUpdateMask
+
+`public enum ImageUpdateMask`
+
+Values: `Texture = 1`, `Size = 2`, `Color = 4`, `Alignment = 8`, `Region = 16`, `Pad = 32`, `Tooltip = 64`, `WidthInPercent = 128`, `HeightInPercent = 256`
+
+### RichTextLabel.ListType
+
+`public enum ListType`
+
+Values: `Numbers = 0`, `Letters = 1`, `Roman = 2`, `Dots = 3`
+
+### RichTextLabel.MetaUnderline
+
+`public enum MetaUnderline`
+
+Values: `Never = 0`, `Always = 1`, `OnHover = 2`
+
+### RichTextLabel.SignalName
+
+`public new class SignalName : Control.SignalName`
+
+- `public static readonly StringName MetaClicked`
+- `public static readonly StringName MetaHoverStarted`
+- `public static readonly StringName MetaHoverEnded`
+- `public static readonly StringName Finished`
 
 ### Rid
 
@@ -2956,6 +6197,60 @@ Values: `Default = 0`, `Reverse = 1`, `Deferred = 2`, `Unique = 4`
 
 - `public static readonly StringName Timeout`
 
+### ScrollBar
+
+`public class ScrollBar : Range` - Base of the scroll bars (Godot's ScrollBar): a range whose page is the visible part of the content.
+
+- `public event Action Scrolling`
+- `public float CustomStep { get; set; }`
+- `public ScrollBar()`
+- `public override void _GuiInput(InputEvent @event)`
+- `public override void _Draw()`
+
+### ScrollBar.SignalName
+
+`public new class SignalName : Range.SignalName`
+
+- `public static readonly StringName Scrolling`
+
+### ScrollContainer
+
+`public class ScrollContainer : Container` - Scrolls one big child inside its own rectangle (Godot's ScrollContainer).
+
+- `public ScrollContainer()`
+- `public ScrollMode HorizontalScrollMode { get; set; }`
+- `public ScrollMode VerticalScrollMode { get; set; }`
+- `public bool FollowFocus { get; set; }`
+- `public int ScrollDeadzone { get; set; }`
+- `public int ScrollHorizontal { get; set; }`
+- `public int ScrollVertical { get; set; }`
+- `public bool HorizontalBarVisible { get; }` - Whether the scroll bars are showing (they are not drawn here; a layout decision).
+- `public bool VerticalBarVisible { get; }`
+- `public void EnsureControlVisible(Control control)` - Scrolls so that control is inside the view (Godot's ensure_control_visible).
+- `public HScrollBar GetHScrollBar()`
+- `public VScrollBar GetVScrollBar()`
+- `public override void _GuiInput(InputEvent @event)`
+- `public override void _Draw()`
+
+### ScrollContainer.ScrollMode
+
+`public enum ScrollMode`
+
+Values: `Disabled = 0`, `Auto = 1`, `ShowAlways = 2`, `ShowNever = 3`, `Reserve = 4`
+
+### ScrollContainer.SignalName
+
+`public new class SignalName : Container.SignalName`
+
+- `public static readonly StringName ScrollStarted`
+- `public static readonly StringName ScrollEnded`
+
+### Separator
+
+`public class Separator : Control` - Base of the separators (Godot's Separator).
+
+- `public Separator()`
+
 ### Shape3D
 
 `public class Shape3D : Resource` - A collision shape resource (Godot's Shape3D).
@@ -2987,6 +6282,15 @@ Values: `Default = 0`, `Reverse = 1`, `Deferred = 2`, `Unique = 4`
 - `public Vector3 GetCollisionNormal(int index)`
 - `public float GetClosestCollisionSafeFraction()`
 - `public float GetClosestCollisionUnsafeFraction()`
+
+### Shortcut
+
+`public class Shortcut : Resource` - A list of input events that trigger something (Godot's Shortcut).
+
+- `public Collections.Array Events { get; set; }`
+- `public bool MatchesEvent(InputEvent @event)` - Whether the event is one of the shortcut's.
+- `public bool HasValidEvent()`
+- `public string GetAsText()`
 
 ### Side
 
@@ -3027,6 +6331,106 @@ Values: `Left = 0`, `Top = 1`, `Right = 2`, `Bottom = 3`
 - `public Variant[] GetResult()`
 - `public SignalAwaiter GetAwaiter()`
 
+### Skeleton3D
+
+`public class Skeleton3D : Node3D` - A hierarchy of bones with rest and current poses (Godot's Skeleton3D).
+
+- `public event Action SkeletonUpdated`
+- `public event Action PoseUpdated`
+- `public event Action<long> BoneEnabledChanged`
+- `public const int NotificationUpdateSkeleton = 50`
+- `public ModifierCallbackModeProcessEnum ModifierCallbackModeProcess { get; set; }`
+- `public int GetBoneCount()`
+- `public int AddBone(string name)` - Adds a bone with no parent and returns its index; -1 for an empty or taken name.
+- `public int FindBone(string name)`
+- `public string GetBoneName(int boneIdx)`
+- `public void SetBoneName(int boneIdx, string name)`
+- `public int GetBoneParent(int boneIdx)`
+- `public void SetBoneParent(int boneIdx, int parentIdx)` - Sets the parent of a bone (-1 for none).
+- `public int[] GetParentlessBones()`
+- `public int[] GetBoneChildren(int boneIdx)`
+- `public void ClearBones()`
+- `public Transform3D GetBoneRest(int boneIdx)`
+- `public void SetBoneRest(int boneIdx, Transform3D rest)`
+- `public Transform3D GetBoneGlobalRest(int boneIdx)`
+- `public void LocalizeRests()` - Re-expresses every rest relative to its parent's, for a skeleton whose rests were given in skeleton space.
+- `public Vector3 GetBonePosePosition(int boneIdx)`
+- `public Quaternion GetBonePoseRotation(int boneIdx)`
+- `public Vector3 GetBonePoseScale(int boneIdx)`
+- `public void SetBonePosePosition(int boneIdx, Vector3 position)`
+- `public void SetBonePoseRotation(int boneIdx, Quaternion rotation)`
+- `public void SetBonePoseScale(int boneIdx, Vector3 scale)`
+- `public Transform3D GetBonePose(int boneIdx)` - The pose relative to the parent: the rest-relative position, rotation and scale as a transform.
+- `public void SetBonePose(int boneIdx, Transform3D pose)`
+- `public Transform3D GetBoneGlobalPose(int boneIdx)` - The pose in the skeleton's space (the parent's global pose times this bone's), with any override blended in.
+- `public Transform3D GetBoneGlobalPoseNoOverride(int boneIdx)` - The same without the overrides.
+- `public void SetBoneGlobalPose(int boneIdx, Transform3D pose)` - Sets the pose so that the bone's global pose becomes pose, given where its parent is now.
+- `public void SetBoneGlobalPoseOverride(int boneIdx, Transform3D pose, float amount, bool persistent = false)` - Makes a bone's global pose follow pose by amount (0..1) until cleared; with persistent it stays across updates, otherwise it is dropped after the next modifier pass.
+- `public Transform3D GetBoneGlobalPoseOverride(int boneIdx)`
+- `public void ClearBonesGlobalPoseOverride()`
+- `public void ResetBonePose(int boneIdx)` - Puts a bone's pose back to its rest.
+- `public void ResetBonePoses()`
+- `public bool IsBoneEnabled(int boneIdx)`
+- `public void SetBoneEnabled(int boneIdx, bool enabled)`
+- `public bool ShowRestOnly { get; set; }`
+- `public float MotionScale { get; set; }`
+- `public void SetBoneMeta(int boneIdx, StringName key, Variant value)`
+- `public Variant GetBoneMeta(int boneIdx, StringName key)`
+- `public void ForceUpdateAllBoneTransforms()` - Recomputes the global poses now (they are otherwise recomputed when read) and tells followers.
+- `public void AdvanceModifiers(double delta)` - Runs the modifiers that are children of this skeleton, in order, then tells followers (BoneAttachment3D) the pose changed.
+
+### Skeleton3D.ModifierCallbackModeProcessEnum
+
+`public enum ModifierCallbackModeProcessEnum`
+
+Values: `Physics = 0`, `Idle = 1`
+
+### Skeleton3D.SignalName
+
+`public new class SignalName : Node3D.SignalName`
+
+- `public static readonly StringName SkeletonUpdated`
+- `public static readonly StringName PoseUpdated`
+- `public static readonly StringName RestUpdated`
+- `public static readonly StringName BoneEnabledChanged`
+- `public static readonly StringName BoneListChanged`
+- `public static readonly StringName ShowRestOnlyChanged`
+
+### SkeletonIK3D
+
+`public class SkeletonIK3D : SkeletonModifier3D` - Reaches a bone chain towards a target (Godot's SkeletonIK3D): FABRIK on the chain from RootBone to TipBone, then each bone turned to follow.
+
+- `public StringName RootBone { get; set; }`
+- `public StringName TipBone { get; set; }`
+- `public Transform3D Target { get; set; }` - The target in the skeleton's parent space...
+- `public NodePath TargetNode { get; set; }`
+- `public float MinDistance { get; set; }`
+- `public int MaxIterations { get; set; }`
+- `public bool UseMagnet { get; set; }`
+- `public Vector3 Magnet { get; set; }`
+- `public float Interpolation { get; set; }` - Godot 4.0's name of Influence.
+- `public SkeletonIK3D()`
+- `public void Start(bool oneTime = false)`
+- `public void Stop()`
+- `public bool IsRunning()`
+- `public override void _ProcessModification()`
+
+### SkeletonModifier3D
+
+`public class SkeletonModifier3D : Node3D` - A node that edits a skeleton's pose every pass (Godot 4.3's SkeletonModifier3D).
+
+- `public event Action ModificationProcessed`
+- `public bool Active { get; set; }` - When false the skeleton skips this modifier.
+- `public float Influence { get; set; }` - How much of the modification is kept: 0 leaves the pose as it was, 1 keeps all of it.
+- `public Skeleton3D? GetSkeleton()`
+- `public virtual void _ProcessModification()` - Overridden by modifiers: edit the skeleton's pose here.
+
+### SkeletonModifier3D.SignalName
+
+`public new class SignalName : Node3D.SignalName`
+
+- `public static readonly StringName ModificationProcessed`
+
 ### Sky
 
 `public class Sky : Resource`
@@ -3051,6 +6455,27 @@ Values: `Size32`, `Size64`, `Size128`, `Size256`, `Size512`, `Size1024`, `Size20
 
 `public class SkyMaterial : Material`
 
+### Slider
+
+`public class Slider : Range` - Base of the sliders (Godot's Slider).
+
+- `public event Action DragStarted`
+- `public event Action<bool> DragEnded`
+- `public bool Editable { get; set; }`
+- `public bool Scrollable { get; set; }`
+- `public int TickCount { get; set; }`
+- `public bool TicksOnBorders { get; set; }`
+- `public Slider()`
+- `public override void _GuiInput(InputEvent @event)`
+- `public override void _Draw()`
+
+### Slider.SignalName
+
+`public new class SignalName : Range.SignalName`
+
+- `public static readonly StringName DragStarted`
+- `public static readonly StringName DragEnded`
+
 ### SphereMesh
 
 `public class SphereMesh : Mesh`
@@ -3064,6 +6489,52 @@ Values: `Size32`, `Size64`, `Size128`, `Size256`, `Size512`, `Size1024`, `Size20
 
 - `public float Radius { get; set; }`
 
+### SpinBox
+
+`public class SpinBox : Range` - A number field with arrows (Godot's SpinBox).
+
+- `public SpinBox()`
+- `public string Prefix { get; set; }`
+- `public string Suffix { get; set; }`
+- `public bool Editable { get; set; }`
+- `public bool UpdateOnTextChanged { get; set; }`
+- `public double CustomArrowStep { get; set; }`
+- `public bool SelectAllOnFocus { get; set; }`
+- `public HorizontalAlignment Alignment { get; set; }`
+- `public LineEdit GetLineEdit()`
+- `public void Apply()` - Reads the field's text as a number and sets the value (Godot's apply()).
+- `public override void _Notification(int what)`
+- `public override void _GuiInput(InputEvent @event)`
+- `public override void _Draw()`
+
+### SplitContainer
+
+`public class SplitContainer : Container` - Two children with a draggable divider (Godot's SplitContainer).
+
+- `public event Action<long> Dragged`
+- `public bool Vertical { get; set; }`
+- `public int SplitOffset { get; set; }`
+- `public bool Collapsed { get; set; }`
+- `public DraggerVisibilityEnum DraggerVisibility { get; set; }`
+- `public bool DraggingEnabled { get; set; }`
+- `public int[] SplitOffsets { get; set; }`
+- `public SplitContainer()`
+- `public override bool _HasPoint(Vector2 point)`
+- `public override void _GuiInput(InputEvent @event)`
+- `public override void _Draw()`
+
+### SplitContainer.DraggerVisibilityEnum
+
+`public enum DraggerVisibilityEnum`
+
+Values: `Visible = 0`, `Hidden = 1`, `HiddenCollapsed = 2`
+
+### SplitContainer.SignalName
+
+`public new class SignalName : Container.SignalName`
+
+- `public static readonly StringName Dragged`
+
 ### SpotLight3D
 
 `public class SpotLight3D : Light3D`
@@ -3072,6 +6543,20 @@ Values: `Size32`, `Size64`, `Size128`, `Size256`, `Size512`, `Size1024`, `Size20
 - `public float SpotAngle { get; set; }` - The cone's half-angle in degrees.
 - `public float SpotAttenuation { get; set; }` - The distance falloff exponent (as OmniAttenuation).
 - `public float SpotAngleAttenuation { get; set; }` - The cone-edge curve: the cone fades as 1 - rim^(1/this), rim 0 on the axis and 1 at the edge.
+
+### SpringArm3D
+
+`public class SpringArm3D : Node3D` - Moves its direct children along its +Z axis to the first thing a cast finds, up to SpringLength (Godot's SpringArm3D): a third-person camera on a boom that shortens in tight spaces.
+
+- `public float SpringLength { get; set; }`
+- `public float Margin { get; set; }` - How far in front of the hit the children stop.
+- `public uint CollisionMask { get; set; }`
+- `public Shape3D? Shape { get; set; }` - A shape swept instead of a ray (a sphere keeps a camera from clipping the wall).
+- `public float GetHitLength()`
+- `public void AddExcludedObject(Rid rid)`
+- `public bool RemoveExcludedObject(Rid rid)`
+- `public void ClearExcludedObjects()`
+- `public void ForceUpdate()` - Runs one pass now (for a script that moves the arm and wants the children placed before the next physics step).
 
 ### Sprite3D
 
@@ -3179,6 +6664,127 @@ Values: `Disabled = 0`, `Discard = 1`, `OpaquePrepass = 2`, `Hash = 3`
 - `public int CompareTo(StringName? other)`
 - `public override string ToString()`
 
+### StyleBox
+
+`public abstract class StyleBox : Resource` - Base of every style box (Godot's StyleBox): the panel, button and frame backgrounds Controls draw.
+
+- `public float ContentMarginLeft { get; set; }`
+- `public float ContentMarginTop { get; set; }`
+- `public float ContentMarginRight { get; set; }`
+- `public float ContentMarginBottom { get; set; }`
+- `public void SetContentMargin(Side margin, float offset)`
+- `public void SetContentMarginAll(float offset)`
+- `public float GetContentMargin(Side margin)` - The explicit content margin, or -1 when it is unset.
+- `public float GetMargin(Side margin)` - The margin in force: the explicit one, else the kind's own (a flat box's border, a texture box's texture margin).
+- `public Vector2 GetMinimumSize()`
+- `public Vector2 GetOffset()` - The offset of the content from the box's top-left corner.
+- `public Rect2 GetContentRect(Rect2 rect)` - The rectangle inside the content margins.
+- `public virtual Rect2 GetDrawRect(Rect2 rect)` - The rectangle the box is drawn over: rect grown by the expand margins.
+- `public virtual bool TestMask(Vector2 point, Rect2 rect)` - Whether a point of the box is solid (Godot's test_mask).
+- `public void Draw(Rect2 rect)` - Draws the box over rect into the UI draw list, on the current layer (Godot's StyleBox.draw with the canvas item implied).
+- `public StyleBoxMesh? Tessellate(Rect2 rect)` - The triangles the engine would draw for this box over a rectangle; null when the engine library is absent.
+- `public StyleBox DuplicateBox()` - A copy that shares nothing with this one.
+
+### StyleBoxEmpty
+
+`public class StyleBoxEmpty : StyleBox` - A style box that draws nothing and holds content margins only (Godot's StyleBoxEmpty).
+
+### StyleBoxFlat
+
+`public class StyleBoxFlat : StyleBox` - A rectangle with a background, borders, rounded corners, a shadow and optional skew (Godot's StyleBoxFlat).
+
+- `public Color BgColor { get; set; }`
+- `public bool DrawCenter { get; set; }`
+- `public bool BorderBlend { get; set; }`
+- `public bool AntiAliasing { get; set; }`
+- `public float AntiAliasingSize { get; set; }`
+- `public int CornerDetail { get; set; }`
+- `public Vector2 Skew { get; set; }`
+- `public Color BorderColor { get; set; }` - Godot's one border colour: reading gives the left side's, writing sets all four (BorderColorLeft and the others are an Aver extension for per-side colours).
+- `public Color BorderColorLeft { get; set; }`
+- `public Color BorderColorTop { get; set; }`
+- `public Color BorderColorRight { get; set; }`
+- `public Color BorderColorBottom { get; set; }`
+- `public int BorderWidthLeft { get; set; }`
+- `public int BorderWidthTop { get; set; }`
+- `public int BorderWidthRight { get; set; }`
+- `public int BorderWidthBottom { get; set; }`
+- `public int CornerRadiusTopLeft { get; set; }`
+- `public int CornerRadiusTopRight { get; set; }`
+- `public int CornerRadiusBottomRight { get; set; }`
+- `public int CornerRadiusBottomLeft { get; set; }`
+- `public float ExpandMarginLeft { get; set; }`
+- `public float ExpandMarginTop { get; set; }`
+- `public float ExpandMarginRight { get; set; }`
+- `public float ExpandMarginBottom { get; set; }`
+- `public Color ShadowColor { get; set; }`
+- `public int ShadowSize { get; set; }`
+- `public Vector2 ShadowOffset { get; set; }`
+- `public void SetBorderWidthAll(int width)`
+- `public int GetBorderWidthMin()`
+- `public void SetBorderWidth(Side margin, int width)`
+- `public int GetBorderWidth(Side margin)`
+- `public void SetCornerRadiusAll(int radius)`
+- `public void SetCornerRadiusIndividual(int topLeft, int topRight, int bottomRight, int bottomLeft)`
+- `public void SetCornerRadius(Corner corner, int radius)`
+- `public int GetCornerRadius(Corner corner)`
+- `public void SetExpandMarginAll(float size)`
+- `public void SetExpandMargin(Side margin, float size)`
+- `public float GetExpandMargin(Side margin)`
+- `public override Rect2 GetDrawRect(Rect2 rect)`
+
+### StyleBoxLine
+
+`public class StyleBoxLine : StyleBox` - A horizontal or vertical line (Godot's StyleBoxLine).
+
+- `public Color Color { get; set; }`
+- `public int Thickness { get; set; }`
+- `public float GrowBegin { get; set; }`
+- `public float GrowEnd { get; set; }`
+- `public bool Vertical { get; set; }`
+
+### StyleBoxMesh
+
+`public sealed class StyleBoxMesh` - The geometry the engine tessellated for a style box: what aver_ui_stylebox_mesh returns.
+
+- `public float[] Xyuv` - x, y, u, v per vertex.
+- `public uint[] Colors` - Straight 0xAABBGGRR per vertex.
+- `public uint[] Indices`
+- `public ulong Texture`
+- `public int VertexCount { get; }`
+
+### StyleBoxTexture
+
+`public class StyleBoxTexture : StyleBox` - A 9-patch (Godot's StyleBoxTexture): the texture's corners keep their size, its edges and middle stretch or tile.
+
+- `public Texture2D? Texture { get; set; }`
+- `public Rect2 RegionRect { get; set; }`
+- `public Color ModulateColor { get; set; }`
+- `public bool DrawCenter { get; set; }`
+- `public AxisStretchMode AxisStretchHorizontal { get; set; }`
+- `public AxisStretchMode AxisStretchVertical { get; set; }`
+- `public float TextureMarginLeft { get; set; }`
+- `public float TextureMarginTop { get; set; }`
+- `public float TextureMarginRight { get; set; }`
+- `public float TextureMarginBottom { get; set; }`
+- `public float ExpandMarginLeft { get; set; }`
+- `public float ExpandMarginTop { get; set; }`
+- `public float ExpandMarginRight { get; set; }`
+- `public float ExpandMarginBottom { get; set; }`
+- `public void SetTextureMarginAll(float size)`
+- `public void SetTextureMargin(Side margin, float size)`
+- `public float GetTextureMargin(Side margin)`
+- `public void SetExpandMarginAll(float size)`
+- `public void SetExpandMargin(Side margin, float size)`
+- `public float GetExpandMargin(Side margin)`
+- `public override Rect2 GetDrawRect(Rect2 rect)`
+
+### StyleBoxTexture.AxisStretchMode
+
+`public enum AxisStretchMode`
+
+Values: `Stretch = 0`, `Tile = 1`, `TileFit = 2`
+
 ### SubtweenTweener
 
 `public class SubtweenTweener : Tweener` - Plays another tween as a step (Godot's SubtweenTweener).
@@ -3234,7 +6840,6 @@ Values: `Disabled = 0`, `Once = 1`, `WhenVisible = 2`, `WhenParentVisible = 3`, 
 
 - `public bool Stretch { get; set; }`
 - `public int StretchShrink { get; set; }`
-- `public Rect2 GetGlobalRect()` - The container's rectangle in window pixels: its own layout plus its Control ancestors' positions (Godot offsets by the parents' rectangles).
 
 ### SurfaceTool
 
@@ -3261,17 +6866,491 @@ Values: `Disabled = 0`, `Once = 1`, `WhenVisible = 2`, `WhenParentVisible = 3`, 
 - `public void CreateFrom(Mesh existing, int surface)` - Starts from a surface of an ArrayMesh (the arrays, the primitive and the material).
 - `public void AppendFrom(Mesh existing, int surface, Transform3D transform)` - Appends a surface, transformed, to what is held.
 
+### SystemFont
+
+`public class SystemFont : Font` - A font found by name among the operating system's fonts (Godot's SystemFont).
+
+- `public string[] FontNames { get; set; }`
+- `public bool FontItalic { get; set; }`
+- `public int FontWeight { get; set; }`
+- `public int FontStretch { get; set; }`
+- `public FontFile.FontAntialiasing Antialiasing { get; set; }`
+- `public bool GenerateMipmaps { get; set; }`
+- `public bool AllowSystemFallback { get; set; }`
+- `public bool ForceAutohinter { get; set; }`
+- `public FontFile.FontHinting Hinting { get; set; }`
+- `public int SubpixelPositioning { get; set; }`
+- `public float Oversampling { get; set; }`
+- `public bool MultichannelSignedDistanceField { get; set; }`
+- `public int MsdfPixelRange { get; set; }`
+- `public int MsdfSize { get; set; }`
+- `public override string GetFontName()`
+
+### TabBar
+
+`public class TabBar : Control` - A strip of tabs (Godot's TabBar).
+
+- `public event Action<long> TabChanged`
+- `public event Action<long> TabSelected`
+- `public event Action<long> TabClicked`
+- `public event Action<long> TabClosePressed`
+- `public event Action<long> TabHovered`
+- `public event Action<long> TabRmbClicked`
+- `public bool ClipTabs { get; set; }`
+- `public bool ScrollingEnabled { get; set; }`
+- `public bool DragToRearrangeEnabled { get; set; }`
+- `public bool SelectWithRmb { get; set; }`
+- `public int TabsRearrangeGroup { get; set; }`
+- `public bool SwitchOnDragHover { get; set; }`
+- `public bool DeselectEnabled { get; set; }`
+- `public bool ScrollToSelected { get; set; }`
+- `public TabBar()`
+- `public int TabCount { get; set; }`
+- `public AlignmentMode TabAlignment { get; set; }`
+- `public CloseButtonDisplayPolicy TabCloseDisplayPolicy { get; set; }`
+- `public int MaxTabWidth { get; set; }`
+- `public int CurrentTab { get; set; }`
+- `public void AddTab(string title = "", Texture2D? icon = null)`
+- `public void RemoveTab(int tabIdx)`
+- `public void Clear()`
+- `public void MoveTab(int from, int to)`
+- `public void SetTabTitle(int tabIdx, string title)`
+- `public string GetTabTitle(int tabIdx)`
+- `public void SetTabIcon(int tabIdx, Texture2D? icon)`
+- `public Texture2D? GetTabIcon(int tabIdx)`
+- `public void SetTabDisabled(int tabIdx, bool disabled)`
+- `public bool IsTabDisabled(int tabIdx)`
+- `public void SetTabHidden(int tabIdx, bool hidden)`
+- `public bool IsTabHidden(int tabIdx)`
+- `public void SetTabTooltip(int tabIdx, string tooltip)`
+- `public string GetTabTooltip(int tabIdx)`
+- `public void SetTabMetadata(int tabIdx, Variant metadata)`
+- `public Variant GetTabMetadata(int tabIdx)`
+- `public int GetTabIdxAtPoint(Vector2 point)`
+- `public Rect2 GetTabRect(int tabIdx)`
+- `public int GetPreviousTab()`
+- `public bool SelectPreviousAvailable()`
+- `public bool SelectNextAvailable()`
+- `public override void _GuiInput(InputEvent @event)`
+- `public override void _Notification(int what)`
+- `public override string _GetTooltip(Vector2 atPosition)`
+- `public override void _Draw()`
+
+### TabBar.AlignmentMode
+
+`public enum AlignmentMode`
+
+Values: `Left = 0`, `Center = 1`, `Right = 2`
+
+### TabBar.CloseButtonDisplayPolicy
+
+`public enum CloseButtonDisplayPolicy`
+
+Values: `ShowNever = 0`, `ShowActiveOnly = 1`, `ShowAlways = 2`
+
+### TabBar.SignalName
+
+`public new class SignalName : Control.SignalName`
+
+- `public static readonly StringName TabChanged`
+- `public static readonly StringName TabSelected`
+- `public static readonly StringName TabClicked`
+- `public static readonly StringName TabClosePressed`
+- `public static readonly StringName TabHovered`
+- `public static readonly StringName TabRmbClicked`
+- `public static readonly StringName ActiveTabRearranged`
+
+### TabContainer
+
+`public class TabContainer : Container` - Shows one of its Control children at a time under a row of tabs (Godot's TabContainer).
+
+- `public event Action<long> TabChanged`
+- `public event Action<long> TabSelected`
+- `public event Action<long> TabClicked`
+- `public event Action<long> TabHovered`
+- `public bool ClipTabs { get; set; }`
+- `public bool UseHiddenTabsForMinSize { get; set; }`
+- `public bool DragToRearrangeEnabled { get; set; }`
+- `public bool DeselectEnabled { get; set; }`
+- `public int TabsRearrangeGroup { get; set; }`
+- `public FocusModeEnum TabFocusMode { get; set; }`
+- `public bool SwitchOnDragHover { get; set; }`
+- `public bool AllTabsInFront { get; set; }`
+- `public TabContainer()`
+- `public TabBar.AlignmentMode TabAlignment { get; set; }`
+- `public TabPositionEnum TabsPosition { get; set; }`
+- `public bool TabsVisible { get; set; }`
+- `public int TabsRearrangeGroupId { get; set; }`
+- `public int CurrentTab { get; set; }`
+- `public int GetTabCount()`
+- `public Control? GetCurrentTabControl()`
+- `public Control? GetTabControl(int tabIdx)`
+- `public int GetTabIdxFromControl(Control control)`
+- `public string GetTabTitle(int tabIdx)`
+- `public void SetTabTitle(int tabIdx, string title)`
+- `public Texture2D? GetTabIcon(int tabIdx)`
+- `public void SetTabIcon(int tabIdx, Texture2D? icon)`
+- `public bool IsTabDisabled(int tabIdx)`
+- `public void SetTabDisabled(int tabIdx, bool disabled)`
+- `public bool IsTabHidden(int tabIdx)`
+- `public void SetTabHidden(int tabIdx, bool hidden)`
+- `public int GetPreviousTab()`
+- `public bool SelectPreviousAvailable()`
+- `public bool SelectNextAvailable()`
+- `public int GetTabIdxAtPoint(Vector2 point)`
+- `public override void _GuiInput(InputEvent @event)`
+- `public override void _Notification(int what)`
+- `public override string _GetTooltip(Vector2 atPosition)`
+- `public override void _Draw()`
+
+### TabContainer.SignalName
+
+`public new class SignalName : Container.SignalName`
+
+- `public static readonly StringName TabChanged`
+- `public static readonly StringName TabSelected`
+- `public static readonly StringName TabClicked`
+- `public static readonly StringName TabHovered`
+- `public static readonly StringName TabButtonPressed`
+- `public static readonly StringName PrePopupPressed`
+
+### TabContainer.TabPositionEnum
+
+`public enum TabPositionEnum`
+
+Values: `Top = 0`, `Bottom = 1`, `Max = 2`
+
+### TextEdit
+
+`public class TextEdit : Control` - A multi-line text editor (Godot's TextEdit).
+
+- `public event Action TextSet`
+- `public event Action TextChanged`
+- `public event Action CaretChanged`
+- `public TextEdit()`
+- `public string Text { get; set; }`
+- `public string PlaceholderText { get; set; }`
+- `public bool Editable { get; set; }`
+- `public LineWrappingMode WrapMode { get; set; }`
+- `public bool SelectingEnabled { get; set; }`
+- `public bool DeselectOnFocusLossEnabled { get; set; }`
+- `public bool ContextMenuEnabled { get; set; }`
+- `public bool ShortcutKeysEnabled { get; set; }`
+- `public bool MiddleMousePasteEnabled { get; set; }`
+- `public bool VirtualKeyboardEnabled { get; set; }`
+- `public bool CaretBlink { get; set; }`
+- `public float CaretBlinkInterval { get; set; }`
+- `public bool CaretMoveOnRightClick { get; set; }`
+- `public bool CaretMultiple { get; set; }`
+- `public int CaretType { get; set; }`
+- `public bool EmojiMenuEnabled { get; set; }`
+- `public bool ScrollSmooth { get; set; }`
+- `public float ScrollVScrollSpeed { get; set; }`
+- `public int MinimapWidth { get; set; }`
+- `public bool DragAndDropSelectionEnabled { get; set; }`
+- `public bool UseDefaultWordSeparators { get; set; }`
+- `public bool UseCustomWordSeparators { get; set; }`
+- `public string CustomWordSeparators { get; set; }`
+- `public bool HighlightAllOccurrences { get; set; }`
+- `public bool HighlightCurrentLine { get; set; }`
+- `public bool DrawControlChars { get; set; }`
+- `public bool DrawTabs { get; set; }`
+- `public bool DrawSpaces { get; set; }`
+- `public bool ScrollFitContentHeight { get; set; }`
+- `public bool ScrollFitContentWidth { get; set; }`
+- `public bool ScrollPastEndOfFile { get; set; }`
+- `public bool SmoothScrollEnabled { get; set; }`
+- `public float VScrollSpeed { get; set; }`
+- `public bool MinimapDraw { get; set; }`
+- `public bool IndentUseSpaces { get; set; }`
+- `public int IndentSize { get; set; }`
+- `public Resource? SyntaxHighlighter { get; set; }`
+- `public string Language { get; set; }`
+- `public new TextServer.Direction TextDirection { get; set; }`
+- `public double ScrollVertical { get; set; }`
+- `public int ScrollHorizontal { get; set; }`
+- `public int GetLineCount()`
+- `public string GetLine(int line)`
+- `public void SetLine(int line, string newText)`
+- `public int GetLineLength(int line)`
+- `public int GetCaretLine()`
+- `public int GetCaretColumn()`
+- `public void SetCaretLine(int line, bool adjustViewport = true)`
+- `public void SetCaretColumn(int column, bool adjustViewport = true)`
+- `public bool HasSelection()`
+- `public int GetSelectionFromLine()`
+- `public int GetSelectionFromColumn()`
+- `public int GetSelectionToLine()`
+- `public int GetSelectionToColumn()`
+- `public string GetSelectedText()`
+- `public void Select(int originLine, int originColumn, int caretLine, int caretColumn)`
+- `public void SelectAll()`
+- `public void SelectWordUnderCaret()`
+- `public void Deselect()`
+- `public void InsertTextAtCaret(string text, int caretIndex = -1)` - Types text at the caret, replacing the selection (Godot's insert_text_at_caret).
+- `public void InsertText(string text, int line, int column, bool beforeSelectionBegin = true, bool beforeSelectionEnd = false)`
+- `public void InsertLineAt(int line, string text)`
+- `public void RemoveLineAt(int line, bool moveCaretColumn = true)`
+- `public void RemoveText(int fromLine, int fromColumn, int toLine, int toColumn)`
+- `public void DeleteSelection()`
+- `public void Clear()`
+- `public void Undo()`
+- `public void Redo()`
+- `public bool HasUndo()`
+- `public bool HasRedo()`
+- `public void ClearUndoHistory()`
+- `public void Copy()`
+- `public void Cut()`
+- `public void Paste()`
+- `public Vector2I Search(string text, uint flags, int fromLine, int fromColumn)` - Finds text from a position; the result is (column, line) or (-1, -1).
+- `public int GetVisibleLineCount()` - The number of lines that fit the view.
+- `public int GetFirstVisibleLine()`
+- `public int GetTotalVisibleLineCount()`
+- `public override void _GuiInput(InputEvent @event)`
+- `public override void _Notification(int what)`
+- `public override void _Draw()`
+
+### TextEdit.LineWrappingMode
+
+`public enum LineWrappingMode`
+
+Values: `None = 0`, `Boundary = 1`
+
+### TextEdit.SearchFlags
+
+`public enum SearchFlags`
+
+Values: `MatchCase = 1`, `WholeWords = 2`, `Backwards = 4`
+
+### TextEdit.SignalName
+
+`public new class SignalName : Control.SignalName`
+
+- `public static readonly StringName TextSet`
+- `public static readonly StringName TextChanged`
+- `public static readonly StringName LinesEditedFrom`
+- `public static readonly StringName CaretChanged`
+
+### TextServer
+
+`public static class TextServer` - Godot's TextServer, reduced to the enums the text controls name.
+
+### TextServer.AutowrapMode
+
+`public enum AutowrapMode`
+
+Values: `Off = 0`, `Arbitrary = 1`, `Word = 2`, `WordSmart = 3`
+
+### TextServer.Direction
+
+`public enum Direction`
+
+Values: `Auto = 0`, `Ltr = 1`, `Rtl = 2`, `Inherited = 3`
+
+### TextServer.FontStyle
+
+`public enum FontStyle`
+
+Values: `Bold = 1`, `Italic = 2`, `FixedWidth = 4`
+
+### TextServer.JustificationFlag
+
+`public enum JustificationFlag`
+
+Values: `None = 0`, `Kashida = 1`, `WordBound = 2`, `TrimEdgeSpaces = 4`, `AfterLastTab = 8`, `ConstrainEllipsis = 16`, `SkipLastLine = 32`, `SkipLastLineWithVisibleChars = 64`, `DoNotSkipSingleLine = 128`
+
+### TextServer.Orientation
+
+`public enum Orientation`
+
+Values: `Horizontal = 0`, `Vertical = 1`
+
+### TextServer.OverrunBehavior
+
+`public enum OverrunBehavior`
+
+Values: `NoTrimming = 0`, `TrimChar = 1`, `TrimWord = 2`, `TrimEllipsis = 3`, `TrimWordEllipsis = 4`, `TrimEllipsisForce = 5`, `TrimWordEllipsisForce = 6`
+
+### TextServer.VisibleCharactersBehavior
+
+`public enum VisibleCharactersBehavior`
+
+Values: `CharsBeforeShaping = 0`, `CharsAfterShaping = 1`, `GlyphsAuto = 2`, `GlyphsLtr = 3`, `GlyphsRtl = 4`
+
 ### Texture2D
 
 `public class Texture2D : Resource`
 
 - `public virtual Vector2 GetSize()` - The size in pixels.
+- `public ulong HostHandle { get; set; }` - The engine's texture handle for UI drawing (the id aver_ui_textured_rect takes), 0 when the host has not given the texture one.
+- `public static Func<Texture2D, ulong>? HandleResolver { get; set; }` - Set by a host that can look a texture up by its resource path.
 - `public int GetWidth()`
 - `public int GetHeight()`
 
 ### Texture3D
 
 `public class Texture3D : Resource` - A 3D texture resource.
+
+### TextureButton
+
+`public class TextureButton : BaseButton` - A button drawn from textures (Godot's TextureButton).
+
+- `public Texture2D? TextureNormal { get; set; }`
+- `public Texture2D? TexturePressed { get; set; }`
+- `public Texture2D? TextureHover { get; set; }`
+- `public Texture2D? TextureDisabled { get; set; }`
+- `public Texture2D? TextureFocused { get; set; }`
+- `public Resource? TextureClickMask { get; set; }`
+- `public bool IgnoreTextureSize { get; set; }`
+- `public StretchModeEnum StretchMode { get; set; }`
+- `public bool FlipH { get; set; }`
+- `public bool FlipV { get; set; }`
+- `public override void _Draw()`
+
+### TextureButton.StretchModeEnum
+
+`public enum StretchModeEnum`
+
+Values: `Scale = 0`, `Tile = 1`, `Keep = 2`, `KeepCentered = 3`, `KeepAspect = 4`, `KeepAspectCentered = 5`, `KeepAspectCovered = 6`
+
+### TextureProgressBar
+
+`public class TextureProgressBar : Range` - A bar drawn from textures (Godot's TextureProgressBar): an under texture, a progress texture revealed by the value, and an over texture.
+
+- `public FillModeEnum FillMode { get; set; }`
+- `public Texture2D? TextureUnder { get; set; }`
+- `public Texture2D? TextureOver { get; set; }`
+- `public Texture2D? TextureProgress { get; set; }`
+- `public Vector2 TextureProgressOffset { get; set; }`
+- `public Color TintUnder { get; set; }`
+- `public Color TintOver { get; set; }`
+- `public Color TintProgress { get; set; }`
+- `public float RadialInitialAngle { get; set; }`
+- `public float RadialFillDegrees { get; set; }`
+- `public Vector2 RadialCenterOffset { get; set; }`
+- `public bool NinePatchStretch { get; set; }`
+- `public int StretchMarginLeft { get; set; }`
+- `public int StretchMarginTop { get; set; }`
+- `public int StretchMarginRight { get; set; }`
+- `public int StretchMarginBottom { get; set; }`
+- `public TextureProgressBar()`
+- `public Rect2 GetFillRegion()` - The part of the progress texture shown for linear fills, as a share of the texture (x, y, width, height from 0 to 1).
+- `public (float Start, float Sweep) GetRadialAngles()` - The start and sweep of a radial fill in degrees (Godot measures clockwise from the top).
+- `public override void _Draw()`
+
+### TextureProgressBar.FillModeEnum
+
+`public enum FillModeEnum`
+
+Values: `LeftToRight = 0`, `RightToLeft = 1`, `TopToBottom = 2`, `BottomToTop = 3`, `Clockwise = 4`, `CounterClockwise = 5`, `BilinearLeftAndRight = 6`, `BilinearTopAndBottom = 7`, `ClockwiseAndCounterClockwise = 8`
+
+### TextureRect
+
+`public class TextureRect : Control` - A texture on the screen (Godot's TextureRect).
+
+- `public TextureRect()`
+- `public Texture2D? Texture { get; set; }`
+- `public ExpandModeEnum ExpandMode { get; set; }`
+- `public StretchModeEnum StretchMode { get; set; }`
+- `public bool FlipH { get; set; }`
+- `public bool FlipV { get; set; }`
+- `public override void _Draw()`
+
+### TextureRect.ExpandModeEnum
+
+`public enum ExpandModeEnum`
+
+Values: `KeepSize = 0`, `IgnoreSize = 1`, `FitWidth = 2`, `FitWidthProportional = 3`, `FitHeight = 4`, `FitHeightProportional = 5`
+
+### TextureRect.StretchModeEnum
+
+`public enum StretchModeEnum`
+
+Values: `Scale = 0`, `Tile = 1`, `Keep = 2`, `KeepCentered = 3`, `KeepAspect = 4`, `KeepAspectCentered = 5`, `KeepAspectCovered = 6`
+
+### Theme
+
+`public class Theme : Resource` - A collection of UI items per type (Godot's Theme): colours, constants, fonts, font sizes, icons and style boxes, type variations and a default font.
+
+- `public float DefaultBaseScale { get; set; }`
+- `public Font? DefaultFont { get; set; }`
+- `public int DefaultFontSize { get; set; }`
+- `public bool HasDefaultBaseScale()`
+- `public bool HasDefaultFont()`
+- `public bool HasDefaultFontSize()`
+- `public void SetColor(StringName name, StringName themeType, Color color)`
+- `public Color GetColor(StringName name, StringName themeType)`
+- `public bool HasColor(StringName name, StringName themeType)`
+- `public void ClearColor(StringName name, StringName themeType)`
+- `public void RenameColor(StringName oldName, StringName name, StringName themeType)`
+- `public string[] GetColorList(StringName themeType)`
+- `public string[] GetColorTypeList()`
+- `public void SetConstant(StringName name, StringName themeType, int constant)`
+- `public int GetConstant(StringName name, StringName themeType)`
+- `public bool HasConstant(StringName name, StringName themeType)`
+- `public void ClearConstant(StringName name, StringName themeType)`
+- `public void RenameConstant(StringName oldName, StringName name, StringName themeType)`
+- `public string[] GetConstantList(StringName themeType)`
+- `public string[] GetConstantTypeList()`
+- `public void SetFont(StringName name, StringName themeType, Font font)`
+- `public Font? GetFont(StringName name, StringName themeType)`
+- `public bool HasFont(StringName name, StringName themeType)`
+- `public void ClearFont(StringName name, StringName themeType)`
+- `public void RenameFont(StringName oldName, StringName name, StringName themeType)`
+- `public string[] GetFontList(StringName themeType)`
+- `public string[] GetFontTypeList()`
+- `public void SetFontSize(StringName name, StringName themeType, int fontSize)`
+- `public int GetFontSize(StringName name, StringName themeType)`
+- `public bool HasFontSize(StringName name, StringName themeType)`
+- `public void ClearFontSize(StringName name, StringName themeType)`
+- `public void RenameFontSize(StringName oldName, StringName name, StringName themeType)`
+- `public string[] GetFontSizeList(StringName themeType)`
+- `public string[] GetFontSizeTypeList()`
+- `public void SetIcon(StringName name, StringName themeType, Texture2D texture)`
+- `public Texture2D? GetIcon(StringName name, StringName themeType)`
+- `public bool HasIcon(StringName name, StringName themeType)`
+- `public void ClearIcon(StringName name, StringName themeType)`
+- `public void RenameIcon(StringName oldName, StringName name, StringName themeType)`
+- `public string[] GetIconList(StringName themeType)`
+- `public string[] GetIconTypeList()`
+- `public void SetStylebox(StringName name, StringName themeType, StyleBox texture)`
+- `public StyleBox? GetStylebox(StringName name, StringName themeType)`
+- `public bool HasStylebox(StringName name, StringName themeType)`
+- `public void ClearStylebox(StringName name, StringName themeType)`
+- `public void RenameStylebox(StringName oldName, StringName name, StringName themeType)`
+- `public string[] GetStyleboxList(StringName themeType)`
+- `public string[] GetStyleboxTypeList()`
+- `public void SetThemeItem(DataType dataType, StringName name, StringName themeType, Variant value)`
+- `public Variant GetThemeItem(DataType dataType, StringName name, StringName themeType)`
+- `public bool HasThemeItem(DataType dataType, StringName name, StringName themeType)`
+- `public void ClearThemeItem(DataType dataType, StringName name, StringName themeType)`
+- `public string[] GetThemeItemList(DataType dataType, StringName themeType)`
+- `public void AddType(StringName themeType)`
+- `public void RemoveType(StringName themeType)`
+- `public string[] GetTypeList()`
+- `public void SetTypeVariation(StringName themeType, StringName baseType)`
+- `public bool IsTypeVariation(StringName themeType, StringName baseType)`
+- `public void ClearTypeVariation(StringName themeType)`
+- `public StringName GetTypeVariationBase(StringName themeType)`
+- `public string[] GetTypeVariationList(StringName baseType)`
+- `public void MergeWith(Theme other)` - Copies another theme's items over this one's (its default font and size too when it has them).
+- `public void Clear()`
+- `public bool LoadFromText(string text, out string error)` - Reads an .octheme document (aver/ui/UiThemeSheet.hpp).
+
+### Theme.DataType
+
+`public enum DataType`
+
+Values: `Color = 0`, `Constant = 1`, `Font = 2`, `FontSize = 3`, `Icon = 4`, `Stylebox = 5`
+
+### ThemeDB
+
+`public static class ThemeDB` - The engine-wide themes (Godot's ThemeDB): the project theme from the project's UI.THEME key and the built-in default.
+
+- `public static Theme GetDefaultTheme()` - The theme every lookup ends in: the metrics of Godot's built-in theme (from the engine's default text; empty and with default font size 16 when the engine library is absent).
+- `public static Theme? GetProjectTheme()` - The project's theme (the Godot setting gui/theme/custom, the project key UI.THEME), or null when it names none.
+- `public static void SetProjectTheme(Theme? theme)` - Sets the project theme (a script or the host).
+- `public static int FallbackFontSize { get; }` - The fallback font size when no theme sets one.
 
 ### Timer
 
@@ -3383,6 +7462,179 @@ Values: `Physics = 0`, `Idle = 1`
 - `public override readonly bool Equals(object? obj)`
 - `public override readonly int GetHashCode()`
 - `public override readonly string ToString()`
+
+### Tree
+
+`public class Tree : Control` - A tree or table of items (Godot's Tree).
+
+- `public event Action ItemSelected`
+- `public event Action CellSelected`
+- `public event Action<TreeItem, long, bool> MultiSelected`
+- `public event Action<Vector2, long> ItemMouseSelected`
+- `public event Action<Vector2, long> EmptyClicked`
+- `public event Action ItemEdited`
+- `public event Action<TreeItem> ItemCollapsed`
+- `public event Action ItemActivated`
+- `public event Action<long, long> ColumnTitleClicked`
+- `public event Action<TreeItem, long, long, long> ButtonClicked`
+- `public SelectModeEnum SelectMode { get; set; }`
+- `public bool AllowReselect { get; set; }`
+- `public bool AllowRmbSelect { get; set; }`
+- `public bool AllowSearch { get; set; }`
+- `public bool EnableRecursiveFolding { get; set; }`
+- `public bool ScrollHorizontalEnabled { get; set; }`
+- `public bool ScrollVerticalEnabled { get; set; }`
+- `public DropModeFlagsEnum DropModeFlags { get; set; }`
+- `public int ScrollHintMode { get; set; }`
+- `public bool TileScrollHint { get; set; }`
+- `public bool ColumnTitlesVisible { get; set; }`
+- `public bool HideRoot { get; set; }`
+- `public bool HideFolding { get; set; }`
+- `public int Columns { get; set; }`
+- `public Tree()`
+- `public TreeItem? CreateItem(TreeItem? parent = null, int index = -1)` - Makes an item: the root when there is none, otherwise a child of parent (the root by default) at index.
+- `public TreeItem? GetRoot()`
+- `public void Clear()`
+- `public void SetColumnTitle(int column, string title)`
+- `public string GetColumnTitle(int column)`
+- `public void SetColumnExpand(int column, bool expand)`
+- `public bool IsColumnExpanding(int column)`
+- `public void SetColumnExpandRatio(int column, int ratio)`
+- `public int GetColumnExpandRatio(int column)`
+- `public void SetColumnCustomMinimumWidth(int column, int minWidth)`
+- `public int GetColumnCustomMinimumWidth(int column)`
+- `public void SetColumnClipContent(int column, bool enable)`
+- `public void SetColumnTitleAlignment(int column, HorizontalAlignment alignment)`
+- `public Rect2 GetItemAreaRect(TreeItem item, int column = -1, int button = -1)` - The rectangle of an item's cell (or the whole row for column -1), in the control's space.
+- `public TreeItem? GetItemAtPosition(Vector2 position)`
+- `public int GetColumnAtPosition(Vector2 position)`
+- `public int GetColumnWidth(int column)`
+- `public void ScrollToItem(TreeItem item, bool centerOnItem = false)`
+- `public void EnsureCursorIsVisible()`
+- `public TreeItem? GetSelected()`
+- `public int GetSelectedColumn()`
+- `public void SetSelected(TreeItem item, int column)`
+- `public TreeItem? GetNextSelected(TreeItem? from)`
+- `public void DeselectAll()`
+- `public TreeItem? GetEdited()`
+- `public int GetEditedColumn()`
+- `public bool EditSelected(bool forceEdit = false)`
+- `public override void _GuiInput(InputEvent @event)`
+- `public override void _Draw()`
+
+### Tree.DropModeFlagsEnum
+
+`public enum DropModeFlagsEnum`
+
+Values: `Disabled = 0`, `OnItem = 1`, `Inbetween = 2`
+
+### Tree.SelectModeEnum
+
+`public enum SelectModeEnum`
+
+Values: `Single = 0`, `Row = 1`, `Multi = 2`
+
+### Tree.SignalName
+
+`public new class SignalName : Control.SignalName`
+
+- `public static readonly StringName ItemSelected`
+- `public static readonly StringName CellSelected`
+- `public static readonly StringName MultiSelected`
+- `public static readonly StringName ItemMouseSelected`
+- `public static readonly StringName EmptyClicked`
+- `public static readonly StringName ItemEdited`
+- `public static readonly StringName ItemCollapsed`
+- `public static readonly StringName ItemActivated`
+- `public static readonly StringName ColumnTitleClicked`
+- `public static readonly StringName ButtonClicked`
+- `public static readonly StringName CheckPropagatedToItem`
+
+### TreeItem
+
+`public class TreeItem : GodotObject` - One item of a Tree (Godot's TreeItem).
+
+- `public bool Collapsed { get; set; }`
+- `public bool DisableFolding { get; set; }`
+- `public bool IsCollapsed()`
+- `public void SetCollapsed(bool enable)`
+- `public bool IsFoldingDisabled()`
+- `public void SetCollapsedRecursive(bool enable)`
+- `public bool IsAnyCollapsed(bool onlyVisible = false)`
+- `public bool Visible { get; set; }`
+- `public bool IsVisible()`
+- `public void SetVisible(bool visible)`
+- `public bool IsVisibleInTree()`
+- `public int CustomMinimumHeight { get; set; }`
+- `public TreeItem? GetParent()`
+- `public int GetChildCount()`
+- `public TreeItem? GetChild(int index)`
+- `public TreeItem? GetFirstChild()`
+- `public Collections.Array<TreeItem> GetChildren()`
+- `public int GetIndex()`
+- `public TreeItem? GetNext()`
+- `public TreeItem? GetPrev()`
+- `public TreeItem? GetNextInTree(bool wrap = false)`
+- `public TreeItem? GetPrevInTree(bool wrap = false)`
+- `public TreeItem? GetNextVisible(bool wrap = false)`
+- `public TreeItem? GetPrevVisible(bool wrap = false)`
+- `public TreeItem? CreateChild(int index = -1)`
+- `public void AddChild(TreeItem child)`
+- `public void RemoveChild(TreeItem child)`
+- `public void MoveBefore(TreeItem item)`
+- `public void MoveAfter(TreeItem item)`
+- `public override void Free()`
+- `public Tree? GetTree()`
+- `public void SetCellMode(int column, TreeCellMode mode)`
+- `public TreeCellMode GetCellMode(int column)`
+- `public void SetText(int column, string text)`
+- `public string GetText(int column)`
+- `public void SetTextAlignment(int column, HorizontalAlignment alignment)`
+- `public HorizontalAlignment GetTextAlignment(int column)`
+- `public void SetSuffix(int column, string text)`
+- `public string GetSuffix(int column)`
+- `public void SetIcon(int column, Texture2D? texture)`
+- `public Texture2D? GetIcon(int column)`
+- `public void SetChecked(int column, bool @checked)`
+- `public bool IsChecked(int column)`
+- `public void SetIndeterminate(int column, bool indeterminate)`
+- `public bool IsIndeterminate(int column)`
+- `public void SetEditable(int column, bool enabled)`
+- `public bool IsEditable(int column)`
+- `public void SetSelectable(int column, bool selectable)`
+- `public bool IsSelectable(int column)`
+- `public void SetMetadata(int column, Variant meta)`
+- `public Variant GetMetadata(int column)`
+- `public void SetTooltipText(int column, string tooltip)`
+- `public string GetTooltipText(int column)`
+- `public void SetCustomColor(int column, Color color)`
+- `public Color GetCustomColor(int column)`
+- `public void ClearCustomColor(int column)`
+- `public void SetCustomBgColor(int column, Color color, bool justOutline = false)`
+- `public Color GetCustomBgColor(int column)`
+- `public void ClearCustomBgColor(int column)`
+- `public void SetRange(int column, double value)`
+- `public double GetRange(int column)`
+- `public void SetRangeConfig(int column, double min, double max, double step, bool expr = false)`
+- `public Collections.Dictionary GetRangeConfig(int column)`
+- `public void AddButton(int column, Texture2D button, int id = -1, bool disabled = false, string tooltipText = "")`
+- `public int GetButtonCount(int column)`
+- `public int GetButtonId(int column, int index)`
+- `public int GetButtonById(int column, int id)`
+- `public Texture2D GetButton(int column, int index)`
+- `public bool IsButtonDisabled(int column, int index)`
+- `public void EraseButton(int column, int index)`
+- `public void Select(int column)`
+- `public void Deselect(int column)`
+- `public bool IsSelected(int column)`
+- `public void UncollapseTree()`
+- `public void CallRecursive(StringName method, params Variant[] args)`
+
+### TreeItem.TreeCellMode
+
+`public enum TreeCellMode`
+
+Values: `String = 0`, `Check = 1`, `Range = 2`, `Icon = 3`, `Custom = 4`
 
 ### Tween
 
@@ -3645,6 +7897,12 @@ Values: `Nil = 0`, `Bool = 1`, `Int = 2`, `Float = 3`, `String = 4`, `Vector2 = 
 - `public static byte[] EncodeArguments(ReadOnlySpan<Variant> args)` - The wire form of an argument list: an Array of the values.
 - `public static Variant Decode(ReadOnlySpan<byte> bytes)` - Reads one Variant.
 - `public static Variant[] DecodeArguments(ReadOnlySpan<byte> bytes)` - Reads an argument list (an Array in wire form).
+
+### VBoxContainer
+
+`public class VBoxContainer : BoxContainer` - A column (Godot's VBoxContainer).
+
+- `public VBoxContainer()`
 
 ### Vector2
 
@@ -4071,13 +8329,26 @@ Values: `X = 0`, `Y = 1`, `Z = 2`, `W = 3`
 
 Values: `Top = 0`, `Center = 1`, `Bottom = 2`, `Fill = 3`
 
+### VFlowContainer
+
+`public class VFlowContainer : FlowContainer`
+
+- `public VFlowContainer()`
+
 ### Viewport
 
 `public class Viewport : Node` - A rendering/input area (Godot's Viewport).
 
 - `public virtual Vector2I Size { get; set; }` - The size in pixels.
 - `public virtual ViewportTexture? GetTexture()` - The picture this viewport draws as a texture.
-- `public Rect2 GetVisibleRect()`
+- `public virtual Rect2 GetVisibleRect()` - The area Controls are laid out in: the viewport's size (the window's stretched content size for the root window).
+- `public Control? GuiGetFocusOwner()` - The control that has keyboard focus, or null.
+- `public void GuiReleaseFocus()` - Takes keyboard focus away from whichever control has it.
+- `public Control? GuiGetHoveredControl()` - The control the pointer is over (the deepest one that takes mouse events), or null.
+- `public bool GuiIsDragging()`
+- `public Variant GuiGetDragData()`
+- `public bool GuiIsDragSuccessful()` - Whether the last drag ended with a control taking the data.
+- `public void GuiCancelDrag()`
 - `public World3D World3D { get; set; }` - The 3D world of this viewport: its physics space.
 - `public virtual Camera3D? GetCamera3D()` - The camera that is drawn (the one made current last).
 - `public Vector2 GetMousePosition()` - The pointer in viewport pixels.
@@ -4094,6 +8365,36 @@ Values: `Top = 0`, `Center = 1`, `Bottom = 2`, `Fill = 3`
 - `public ulong NativeHandle { get; }` - The engine's texture for the view (an engine texture handle), 0 until the view has been drawn once.
 - `public int Generation { get; }` - Changes whenever NativeHandle does.
 - `public string MaterialReference { get; }` - The texture reference a material names this view by: @rt:viewport.&lt;key&gt;.
+
+### VisibleOnScreenEnabler3D
+
+`public class VisibleOnScreenEnabler3D : VisibleOnScreenNotifier3D` - Turns another node on only while a box is on screen (Godot's VisibleOnScreenEnabler3D): the node's process mode is EnableMode's while it is seen and Disabled otherwise.
+
+- `public VisibleOnScreenEnabler3D()`
+- `public EnableModeEnum EnableMode { get; set; }`
+- `public NodePath EnableNodePath { get; set; }` - The node to enable (default: the parent).
+
+### VisibleOnScreenEnabler3D.EnableModeEnum
+
+`public enum EnableModeEnum`
+
+Values: `Inherit = 0`, `Always = 1`, `WhenPaused = 2`
+
+### VisibleOnScreenNotifier3D
+
+`public class VisibleOnScreenNotifier3D : Node3D` - Reports when a box is on the current camera's screen (Godot's VisibleOnScreenNotifier3D): screen_entered and screen_exited.
+
+- `public event Action ScreenEntered`
+- `public event Action ScreenExited`
+- `public Aabb Aabb { get; set; }` - The box, in the node's own space.
+- `public bool IsOnScreen()`
+
+### VisibleOnScreenNotifier3D.SignalName
+
+`public new class SignalName : Node3D.SignalName`
+
+- `public static readonly StringName ScreenEntered`
+- `public static readonly StringName ScreenExited`
 
 ### VisualInstance3D
 
@@ -4123,11 +8424,60 @@ Values: `Subdiv64 = 0`, `Subdiv128 = 1`, `Subdiv256 = 2`, `Subdiv512 = 3`, `Max 
 
 `public class VoxelGIData : Resource` - Godot's baked VoxelGI resource.
 
+### VScrollBar
+
+`public class VScrollBar : ScrollBar`
+
+### VSeparator
+
+`public class VSeparator : Separator` - A vertical line (Godot's VSeparator).
+
+- `public override void _Draw()`
+
+### VSlider
+
+`public class VSlider : Slider` - A vertical slider (Godot's VSlider).
+
+### VSplitContainer
+
+`public class VSplitContainer : SplitContainer`
+
+- `public VSplitContainer()`
+
 ### Window
 
 `public class Window : Viewport` - The window at the top of the tree; its name is "root" (Godot's Window).
 
 - `public string Title { get; set; }`
+- `public ContentScaleModeEnum ContentScaleMode { get; set; }` - How the UI follows the window's size: nothing stretches (default), the canvas is drawn scaled (canvas_items), or the picture is rendered at the base size and scaled up (viewport).
+- `public ContentScaleAspectEnum ContentScaleAspect { get; set; }` - What happens when the window's shape differs from the base size's.
+- `public ContentScaleStretchEnum ContentScaleStretch { get; set; }` - Fractional or integer scaling.
+- `public Vector2I ContentScaleSize { get; set; }` - The size the UI is authored at; zero in either axis means none (no stretch).
+- `public float ContentScaleFactor { get; set; }` - The extra scale applied on top of the stretch.
+- `public override Vector2I Size { get; set; }`
+- `public override Rect2 GetVisibleRect()` - The area Controls are laid out in: the window's pixels divided by the content scale factor, or the base size (letterboxed or grown) when the stretch mode is on.
+- `public Rect2 GetContentScreenRect()` - Where the stretched content lands in the window, in window pixels (the letterbox is the rest).
+- `public bool IsLetterboxed()`
+- `public Vector2 WindowToContent(Vector2 p)` - A point in window pixels (the pointer) in UI space; a point in a letterbox bar comes out outside the visible rectangle.
+- `public Vector2 ContentToWindow(Vector2 p)`
+
+### Window.ContentScaleAspectEnum
+
+`public enum ContentScaleAspectEnum`
+
+Values: `Ignore = 0`, `Keep = 1`, `KeepWidth = 2`, `KeepHeight = 3`, `Expand = 4`
+
+### Window.ContentScaleModeEnum
+
+`public enum ContentScaleModeEnum`
+
+Values: `Disabled = 0`, `CanvasItems = 1`, `Viewport = 2`
+
+### Window.ContentScaleStretchEnum
+
+`public enum ContentScaleStretchEnum`
+
+Values: `Fractional = 0`, `Integer = 1`
 
 ### World3D
 
@@ -4135,6 +8485,7 @@ Values: `Subdiv64 = 0`, `Subdiv128 = 1`, `Subdiv256 = 2`, `Subdiv512 = 3`, `Max 
 
 - `public PhysicsDirectSpaceState3D DirectSpaceState { get; }` - The physics space for ray and shape queries.
 - `public Rid Space { get; }`
+- `public Rid NavigationMap { get; }` - The navigation map of this world (the one regions, links and agents join by default).
 
 ### WorldBoundaryShape3D
 

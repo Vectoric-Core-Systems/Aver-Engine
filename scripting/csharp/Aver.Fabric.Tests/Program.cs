@@ -20,6 +20,42 @@ static class Program
             Console.WriteLine(failures == 0 ? $"\nAll tests passed ({T.Checks} checks)." : $"\n{failures} check(s) failed.");
             return failures;
         }
+        if (args.Length == 1 && args[0] == "animation") // only the G5 A1 suite
+        {
+            failures = AnimationTests.RunAll();
+            Console.WriteLine(failures == 0 ? $"\nAll tests passed ({T.Checks} checks)." : $"\n{failures} check(s) failed.");
+            return failures;
+        }
+        if (args.Length == 1 && args[0] == "audio") // only the G5 S1 suite
+        {
+            failures = AudioTests.RunAll();
+            Console.WriteLine(failures == 0 ? $"\nAll tests passed ({T.Checks} checks)." : $"\n{failures} check(s) failed.");
+            return failures;
+        }
+        if (args.Length == 1 && args[0] == "navigation") // only the G5 N1 suite
+        {
+            failures = NavigationTests.RunAll();
+            Console.WriteLine(failures == 0 ? $"\nAll tests passed ({T.Checks} checks)." : $"\n{failures} check(s) failed.");
+            return failures;
+        }
+        if (args.Length == 1 && args[0] == "ui") // only the G5 U1 suite
+        {
+            failures = UiTests.RunAll();
+            Console.WriteLine(failures == 0 ? $"\nAll tests passed ({T.Checks} checks)." : $"\n{failures} check(s) failed.");
+            return failures;
+        }
+        if (args.Length == 1 && args[0] == "widgets") // only the G5 U2 suites
+        {
+            failures = WidgetTests.RunAll() + RichTextTests.RunAll();
+            Console.WriteLine(failures == 0 ? $"\nAll tests passed ({T.Checks} checks)." : $"\n{failures} check(s) failed.");
+            return failures;
+        }
+        if (args.Length == 1 && args[0] == "animtree") // only the G5 A2 suites
+        {
+            failures = CurvePathTests.RunAll() + AnimationTreeTests.RunAll();
+            Console.WriteLine(failures == 0 ? $"\nAll tests passed ({T.Checks} checks)." : $"\n{failures} check(s) failed.");
+            return failures;
+        }
         if (args.Length == 1 && args[0] == "gdext") // only the F5 suite
         {
             failures = GdextTests.RunAll();
@@ -41,6 +77,14 @@ static class Program
         failures += ServiceTests.RunAll();   // F2b: SceneTree frame signals, timers, await, groups, scene changes, ResourceLoader, PackedScene
         failures += InputTests.RunAll();     // F2b: Input and InputMap, InputEvent classes, the engine-event bridge, _Input delivery
         failures += PhysicsWrapperTests.RunAll(); // F2b: Camera3D maths, physics node defaults and conversions, vehicle, queries without a world
+        failures += AnimationTests.RunAll(); // G5 A1: Animation, AnimationLibrary, AnimationPlayer over the engine's property-track player
+        failures += CurvePathTests.RunAll(); // G5 A2: Expression, Curve, Curve3D, Gradient, PathFollow3D, Skeleton3D, SpringArm3D, RemoteTransform3D, on-screen notifiers
+        failures += AnimationTreeTests.RunAll(); // G5 A2: AnimationTree over the engine's property-track player
+        failures += AudioTests.RunAll();     // G5 S1: AudioServer, bus effects, audio streams, AudioStreamPlayer(3D), AudioListener3D over the engine's mixer (offline)
+        failures += NavigationTests.RunAll(); // G5 N1: navigation maps, regions, links, obstacles, agents, baking, AStar3D / AStar2D / AStarGrid2D over Aver.Nav.Abi
+        failures += UiTests.RunAll();         // G5 U1: Control layout, containers, themes, style boxes, stretch, the GUI (input, focus, tooltips, drag and drop) over Aver.UI.Abi
+        failures += WidgetTests.RunAll();     // G5 U2: Label, Range, buttons, menus, dialogs, LineEdit, TextEdit, ItemList, Tree, tabs, layout widgets, colour picker, fonts
+        failures += RichTextTests.RunAll();   // G5 U2: BBCode, RichTextLabel layout, effects, meta and hints
         failures += ConvertScriptsTests.RunAll(); // F3: Aver.Fabric.Convert, GodotSharp scripts rewritten, compiled against this runtime and run
         failures += GdScriptParserTests.RunAll(); // F4a: the GDScript tokenizer and parser (typed AST, error recovery)
         failures += GdScriptConvertTests.RunAll(); // F4b: GDScript converted to C#, compiled against this runtime, run against GDScript's results

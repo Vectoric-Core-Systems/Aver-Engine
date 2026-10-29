@@ -1010,6 +1010,21 @@ Var Converter::convertValue(const Var& v, const gd::GodotDocBase& doc, const Whe
                 return a.empty() ? makeNil() : makeResource(a);
             }
             if (t == "MultiMesh") return multiMeshObject(sr->props, doc, w);
+            if (t == "Animation") {
+                const Var* rn = findProp(sr->props, "resource_name");
+                const std::string a = animationAsset(doc.file + "#" + sr->id, sr->props, doc, stemOf(doc.file) + "_" + (rn && !rn->asString().empty() ? rn->asString() : sr->id), w);
+                return a.empty() ? makeNil() : makeResource(a);
+            }
+            if (t == "AnimationLibrary") return animationLibraryValue(sr->props, doc, w);
+            if (isAnimTreeResourceType(t)) return animTreeObject(t, sr->props, doc, w, sr->line);
+            if (isNavigationResourceType(t)) return navigationMeshObject(t, sr->props, doc, w, sr->line);
+            if (isAudioStreamResourceType(t)) return audioStreamObject(t, sr->props, doc, w, sr->line);
+            if (t == "Theme") {   // G5 U1: a theme resource held by a scene becomes an .octheme file
+                const std::string a = themeAsset(doc.file + "#" + sr->id, sr->props, doc, stemOf(doc.file) + "_" + sr->id, w);
+                return a.empty() ? makeNil() : makeResource(a);
+            }
+            if (isStyleBoxType(t)) return styleBoxObject(t, sr->props, doc, w, sr->line);
+            if (isWidgetResourceType(t)) return widgetResource(t, sr->props, doc, w, sr->line, sr->id);   // G5 U2
             if (t == "ImmediateMesh" || t == "PointMesh" || t == "TextMesh") {
                 report_.add("resource", doc.file, w.node, t, "", Rating::Unsupported,
                             t == "TextMesh" ? "TextMesh extrudes glyph outlines; the converter has no font tessellator (a Label3D or a UI label shows text instead)"
@@ -1039,6 +1054,10 @@ Var Converter::convertValue(const Var& v, const gd::GodotDocBase& doc, const Whe
                 report_.add("property", doc.file, w.node, w.type, prop, Rating::Unsupported, "a script held as a value is not converted", v.line);
                 return makeNil();
             }
+            if (isFontExt(ext)) {   // G5 U1
+                const std::string a = fontAsset(res, w);
+                return a.empty() ? makeNil() : makeResource(a);
+            }
             if (isModelExt(ext)) {
                 const ModelResult* m = modelFor(res, w);
                 if (!m || m->parts.empty()) return makeNil();
@@ -1052,6 +1071,7 @@ Var Converter::convertValue(const Var& v, const gd::GodotDocBase& doc, const Whe
                             "a PackedScene value points at the level written for that scene; PackedScene.Instantiate is not in the runtime yet", v.line);
                 return makeResource(levelAssetFor(res));
             }
+            if (isAudioExt(ext)) return audioFileValue(res, t, w, prop, v.line);
             if (isImageExt(ext) || isOtherTextureExt(ext) || t.find("Texture") != std::string::npos) {
                 const std::string a = copyTexture(res, w);
                 return a.empty() ? makeNil() : makeResource(a);
@@ -1079,6 +1099,20 @@ Var Converter::convertValue(const Var& v, const gd::GodotDocBase& doc, const Whe
                     return a.empty() ? makeNil() : makeResource(a);
                 }
                 if (rt == "MultiMesh") return multiMeshObject(r->props, *r, w);
+                if (rt == "Animation") {
+                    const std::string a = animationAsset(res, r->props, *r, stemOf(res), w);
+                    return a.empty() ? makeNil() : makeResource(a);
+                }
+                if (rt == "AnimationLibrary") return animationLibraryValue(r->props, *r, w);
+                if (isAnimTreeResourceType(rt)) return animTreeObject(rt, r->props, *r, w, 0);
+                if (isNavigationResourceType(rt)) return navigationMeshObject(rt, r->props, *r, w, 0);
+                if (isAudioStreamResourceType(rt)) return audioStreamObject(rt, r->props, *r, w, 0);
+                if (rt == "Theme") {   // G5 U1
+                    const std::string a = themeAsset(res, r->props, *r, stemOf(res), w);
+                    return a.empty() ? makeNil() : makeResource(a);
+                }
+                if (isStyleBoxType(rt)) return styleBoxObject(rt, r->props, *r, w, 0);
+                if (isWidgetResourceType(rt)) return widgetResource(rt, r->props, *r, w, 0, "");   // G5 U2
                 if (rt == "TextMesh" || rt == "ImmediateMesh" || rt == "PointMesh") {
                     report_.add("resource", res, w.node, rt, "", Rating::Unsupported,
                                 rt == "TextMesh" ? "TextMesh extrudes glyph outlines; the converter has no font tessellator" : "this mesh class holds no stored triangles to convert", 0);
@@ -1107,6 +1141,30 @@ void Converter::convertStandaloneResources() {
             if (isMaterial3DType(t)) { materialAsset(res, t, r->props, *r, stemOf(res), w); continue; }
             if (isPrimitiveMeshType(t)) { primitiveMeshAsset(t, r->props, *r, w); continue; }
             if (t == "ArrayMesh") { arrayMeshAsset(r->props, *r, w); continue; }
+            if (t == "Animation") { animationAsset(res, r->props, *r, stemOf(res), w); continue; }
+            if (t == "AnimationLibrary") { animationLibraryValue(r->props, *r, w); continue; }
+            if (isAnimTreeResourceType(t)) {
+                report_.add("resource", res, "", t, "", Rating::Converted, "converted where a scene uses it", 0);
+                continue;
+            }
+            if (isNavigationResourceType(t)) {
+                report_.add("resource", res, "", t, "", Rating::Converted, "converted where a scene uses it", 0);
+                continue;
+            }
+            if (t == "AudioBusLayout") { convertBusLayout(res, *r); continue; }
+            if (t == "Theme") { themeAsset(res, r->props, *r, stemOf(res), w); continue; }   // G5 U1: every theme is written, whether or not a scene names it
+            if (isStyleBoxType(t) || isWidgetResourceType(t)) {
+                report_.add("resource", res, "", t, "", Rating::Converted, "converted where a scene or theme uses it", 0);
+                continue;
+            }
+            if (isAudioStreamResourceType(t)) {
+                report_.add("resource", res, "", t, "", Rating::Converted, "converted where a scene uses it", 0);
+                continue;
+            }
+            if (t.rfind("AudioEffect", 0) == 0) {
+                report_.add("resource", res, "", t, "", Rating::Converted, "an effect resource converts inside the bus layout that holds it", 0);
+                continue;
+            }
             if (t == "MultiMesh" || t == "MeshLibrary") {
                 report_.add("resource", res, "", t, "", Rating::Converted, "converted where a scene uses it", 0);
                 continue;
@@ -1119,6 +1177,10 @@ void Converter::convertStandaloneResources() {
                 report_.add("resource", res, "", t, "", Rating::Unsupported, "a " + t + " resource has no Aver counterpart yet", 0);
         } else if (isModelExt(ext)) {
             modelFor(res, w);
+        } else if (isAudioExt(ext)) {
+            audioFileAsset(res, w);   // every sound is copied, so a script's load("res://x.wav") finds it too
+        } else if (isFontExt(ext)) {
+            fontAsset(res, w);        // G5 U1: every font file is copied, so a theme or a script's load("res://ui.ttf") finds it
         }
     }
     // Textures last, so the ones a material already carried into Content/Textures/<Name>/ are not copied a second time.
@@ -1138,17 +1200,20 @@ void Converter::reportProjectFiles() {
         else if (ext == ".gdextension")
             continue;   // FabricExtensions.cpp reports it
         else if (ext == ".wav" || ext == ".ogg" || ext == ".mp3")
-            report_.add("file", res, "", "AudioStream", "", Rating::Unsupported, "audio nodes are not in the runtime yet; the file is not imported", 0);
-        else if (ext == ".ttf" || ext == ".otf" || ext == ".woff" || ext == ".woff2" || ext == ".fnt")
-            report_.add("file", res, "", "Font", "", Rating::Unsupported, "fonts belong to the UI package", 0);
+            continue;   // FabricAudio.cpp copies and reports it
+        else if (ext == ".ttf" || ext == ".otf" || ext == ".woff" || ext == ".woff2")
+            continue;   // FabricUi.cpp copies and reports it
+        else if (ext == ".fnt")
+            report_.add("file", res, "", "Font", "", Rating::Unsupported, "bitmap font files (.fnt) are not converted", 0);
         else if (ext == ".ogv" || ext == ".webm")
-            report_.add("file", res, "", "VideoStream", "", Rating::Unsupported, "the engine has no video decoder", 0);
+            report_.add("file", res, "", "VideoStream", "", Rating::Unsupported,
+                        "the engine has no video decoder (modules/media only encodes H.264 through Media Foundation); a VideoStreamPlayer needs a decoder dependency, see docs/AUDIO.md", 0);
         else if (ext == ".translation" || ext == ".csv")
             report_.add("file", res, "", "Translation", "", Rating::Unsupported, "only .po translations are converted", 0);
         else if (ext == ".theme")
-            report_.add("file", res, "", "Theme", "", Rating::Unsupported, "themes belong to the UI package", 0);
+            report_.add("file", res, "", "Theme", "", Rating::Unsupported, "a binary Godot theme file: resave it as a text .tres and convert again", 0);
         else if (ext == ".anim" || ext == ".animlib")
-            report_.add("file", res, "", "Animation", "", Rating::Unsupported, "AnimationPlayer is not in the runtime yet", 0);
+            report_.add("file", res, "", "Animation", "", Rating::Unsupported, "a binary Godot animation file: resave it as a text .tres and convert again", 0);
     }
 }
 

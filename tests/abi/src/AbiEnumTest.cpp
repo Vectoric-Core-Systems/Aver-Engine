@@ -459,7 +459,11 @@ static void splitParams(std::string list, Signature& sig) {
                 name.erase(name.size() - 2);
                 type += "[]";
             }
-            sig.types.push_back(canonType(type));
+            // A callback or an opaque pointer is an address whether the C side spells it `void*` or a typedef ending in _fn and the C# side
+            // IntPtr (G5 N1: nav_abi.h's cost callbacks); as a parameter only, so a `const char*` return still binds as IntPtr.
+            std::string canon = canonType(type);
+            if (canon == "IntPtr" || canon == "void*" || (canon.size() > 3 && canon.compare(canon.size() - 3, 3, "_fn") == 0)) canon = "void*";
+            sig.types.push_back(canon);
             sig.names.push_back(normalise(name));
         }
         if (last) break;
@@ -602,9 +606,34 @@ static const Abi kAbis[] = {
     {"physics shape builder ABI",
      {"modules/physics/include/aver/physics/physics_shape_builder_abi.h", nullptr},
      "AVER_PHYS_API", "scripting/csharp/Aver.Physics/Native.ShapeBuilder.cs", "aver_phys_"},
+    // G5 A1: property-track animation (clips, then the player), names and types against Aver.Fabric/Nodes/AnimationNative.cs.
+    {"property animation clip ABI",
+     {"modules/anim.abi/include/aver/anim/propanim_abi.h", nullptr},
+     "AVER_PANIM_API", "scripting/csharp/Aver.Fabric/Nodes/AnimationNative.cs", "aver_panim_"},
+    {"property animation player ABI",
+     {"modules/anim.abi/include/aver/anim/propanim_abi.h", nullptr},
+     "AVER_PANIM_API", "scripting/csharp/Aver.Fabric/Nodes/AnimationNative.cs", "aver_pplayer_"},
+    // G5 N1: polygon navigation, the A* point graphs and the A* grids, against Aver.Fabric/Nodes/NavigationNative.cs.
+    {"navigation ABI",
+     {"modules/nav.abi/include/aver/nav/nav_abi.h", nullptr},
+     "AVER_NAV_API", "scripting/csharp/Aver.Fabric/Nodes/NavigationNative.cs", "aver_nav_"},
+    {"A* graph ABI",
+     {"modules/nav.abi/include/aver/nav/nav_abi.h", nullptr},
+     "AVER_NAV_API", "scripting/csharp/Aver.Fabric/Nodes/NavigationNative.cs", "aver_astar_"},
+    {"A* grid ABI",
+     {"modules/nav.abi/include/aver/nav/nav_abi.h", nullptr},
+     "AVER_NAV_API", "scripting/csharp/Aver.Fabric/Nodes/NavigationNative.cs", "aver_agrid_"},
     {"audio ABI",
      {"modules/audio.abi/include/aver/audio/audio_abi.h", nullptr},
      "AVER_AUDIO_API", "scripting/csharp/Aver.Framework/Audio.cs", "aver_audio_"},
+    // G5 S1: the bus graph, effects and Godot-style players, names and types against Aver.Fabric/Nodes/AudioNative.cs.
+    {"audio ABI (Aver.Fabric)",
+     {"modules/audio.abi/include/aver/audio/audio_abi.h", nullptr},
+     "AVER_AUDIO_API", "scripting/csharp/Aver.Fabric/Nodes/AudioNative.cs", "aver_audio_"},
+    // G5 U1: the style box, stretch and default-theme seam plus the HUD draw calls the GUI uses, against Aver.Fabric/Nodes/UiNative.cs.
+    {"UI style ABI (Aver.Fabric)",
+     {"modules/ui.abi/include/aver/ui/ui_abi.h", "modules/ui.abi/include/aver/ui/ui_style_abi.h", nullptr},
+     "AVER_UI_API", "scripting/csharp/Aver.Fabric/Nodes/UiNative.cs", "aver_ui_"},
     {"soft field ABI", {"modules/framework/include/aver/framework/framework_softfield_abi.h", nullptr}, "AVER_FW_ABI", "scripting/csharp/Aver.Framework/SoftFieldNative.cs", "aver_fw_softfield_"},
 
     {"soft shape ABI", {"modules/framework/include/aver/framework/framework_softshape_abi.h", nullptr}, "AVER_FW_ABI", "scripting/csharp/Aver.Framework/FwSoftShape.cs", "aver_fw_softshape_"},
@@ -723,6 +752,52 @@ static const Group kGroups[] = {
      "scripting/csharp/Aver.UI/TextStyle.cs",    "TextDirection", ""},
     {"UI text flags",         "modules/ui.abi/include/aver/ui/ui_abi.h",                    "AVER_UI_TEXT_FLAG_",
      "scripting/csharp/Aver.UI/TextStyle.cs",    "TextFlags",   ""},
+    // G5 A1: the property-track animation seam (modules/anim.abi), mirrored by Aver.Fabric/Nodes/AnimationNative.cs.
+    {"property animation kinds",    "modules/anim.abi/include/aver/anim/propanim_abi.h", "AVER_PANIM_KIND_",
+     "scripting/csharp/Aver.Fabric/Nodes/AnimationNative.cs", "PanimKind", ""},
+    {"property animation tracks",   "modules/anim.abi/include/aver/anim/propanim_abi.h", "AVER_PANIM_TRACK_",
+     "scripting/csharp/Aver.Fabric/Nodes/AnimationNative.cs", "PanimTrackType", ""},
+    {"property animation interps",  "modules/anim.abi/include/aver/anim/propanim_abi.h", "AVER_PANIM_INTERP_",
+     "scripting/csharp/Aver.Fabric/Nodes/AnimationNative.cs", "PanimInterp", ""},
+    {"property animation updates",  "modules/anim.abi/include/aver/anim/propanim_abi.h", "AVER_PANIM_UPDATE_",
+     "scripting/csharp/Aver.Fabric/Nodes/AnimationNative.cs", "PanimUpdate", ""},
+    {"property animation loops",    "modules/anim.abi/include/aver/anim/propanim_abi.h", "AVER_PANIM_LOOP_",
+     "scripting/csharp/Aver.Fabric/Nodes/AnimationNative.cs", "PanimLoop", ""},
+    {"property animation discrete", "modules/anim.abi/include/aver/anim/propanim_abi.h", "AVER_PANIM_DISCRETE_",
+     "scripting/csharp/Aver.Fabric/Nodes/AnimationNative.cs", "PanimDiscrete", ""},
+    {"property animation events",   "modules/anim.abi/include/aver/anim/propanim_abi.h", "AVER_PANIM_EVENT_",
+     "scripting/csharp/Aver.Fabric/Nodes/AnimationNative.cs", "PanimEvent", ""},
+    // G5 N1: the polygon navigation seam (modules/nav.abi), mirrored by Aver.Fabric/Nodes/NavigationNative.cs.
+    {"navigation post-processing", "modules/nav.abi/include/aver/nav/nav_abi.h", "AVER_NAV_POST_",
+     "scripting/csharp/Aver.Fabric/Nodes/NavigationNative.cs", "NavPost", ""},
+    {"navigation object kinds",    "modules/nav.abi/include/aver/nav/nav_abi.h", "AVER_NAV_KIND_",
+     "scripting/csharp/Aver.Fabric/Nodes/NavigationNative.cs", "NavKind", ""},
+    {"navigation point types",     "modules/nav.abi/include/aver/nav/nav_abi.h", "AVER_NAV_POINT_",
+     "scripting/csharp/Aver.Fabric/Nodes/NavigationNative.cs", "NavPoint", ""},
+    {"navigation heuristics",      "modules/nav.abi/include/aver/nav/nav_abi.h", "AVER_NAV_HEURISTIC_",
+     "scripting/csharp/Aver.Fabric/Nodes/NavigationNative.cs", "NavHeuristic", ""},
+    {"navigation diagonal modes",  "modules/nav.abi/include/aver/nav/nav_abi.h", "AVER_NAV_DIAGONAL_",
+     "scripting/csharp/Aver.Fabric/Nodes/NavigationNative.cs", "NavDiagonal", ""},
+    {"navigation bake slots",      "modules/nav.abi/include/aver/nav/nav_abi.h", "AVER_NAV_BAKE_",
+     "scripting/csharp/Aver.Fabric/Nodes/NavigationNative.cs", "NavBake", ""},
+    {"navigation agent slots",     "modules/nav.abi/include/aver/nav/nav_abi.h", "AVER_NAV_AGENT_",
+     "scripting/csharp/Aver.Fabric/Nodes/NavigationNative.cs", "NavAgent", ""},
+    // G5 U1: the style box kinds and flags, the 9-patch axis modes and the stretch settings (modules/ui.abi), mirrored by Aver.Fabric/Nodes/UiNative.cs.
+    {"UI style box kinds",          "modules/ui.abi/include/aver/ui/ui_style_abi.h", "AVER_UI_SB_",
+     "scripting/csharp/Aver.Fabric/Nodes/UiNative.cs", "UiSbKind", ""},
+    {"UI style box flags",          "modules/ui.abi/include/aver/ui/ui_style_abi.h", "AVER_UI_SBF_",
+     "scripting/csharp/Aver.Fabric/Nodes/UiNative.cs", "UiSbFlags", ""},
+    {"UI 9-patch axis modes",       "modules/ui.abi/include/aver/ui/ui_style_abi.h", "AVER_UI_AXIS_",
+     "scripting/csharp/Aver.Fabric/Nodes/UiNative.cs", "UiAxisStretch", ""},
+    {"UI stretch modes",            "modules/ui.abi/include/aver/ui/ui_style_abi.h", "AVER_UI_STRETCH_",
+     "scripting/csharp/Aver.Fabric/Nodes/UiNative.cs", "UiStretchModeId", ""},
+    {"UI stretch aspects",          "modules/ui.abi/include/aver/ui/ui_style_abi.h", "AVER_UI_ASPECT_",
+     "scripting/csharp/Aver.Fabric/Nodes/UiNative.cs", "UiStretchAspectId", ""},
+    {"UI stretch scale modes",      "modules/ui.abi/include/aver/ui/ui_style_abi.h", "AVER_UI_SCALEMODE_",
+     "scripting/csharp/Aver.Fabric/Nodes/UiNative.cs", "UiStretchScaleModeId", ""},
+    // G5 S1: the audio bus flags (modules/audio.abi), mirrored by Aver.Fabric/Nodes/AudioNative.cs.
+    {"audio bus flags",             "modules/audio.abi/include/aver/audio/audio_abi.h", "AVER_AUDIO_BUSFLAG_",
+     "scripting/csharp/Aver.Fabric/Nodes/AudioNative.cs", "AudioBusFlag", ""},
     // THE LOG LEVELS, which are mirrored THREE times and were checked zero. Log.hpp says the order
     // "is load-bearing", names both mirrors by path, and warns that a value inserted in the middle
     // "would silently renumber every one of those without a single compile error" -- and then
@@ -1127,7 +1202,10 @@ int main() {
             ++mirrored;
             const Signature& sc = it->second;
 
-            check(sc.ret == sm.ret,
+            // A C `const char*` return binds as IntPtr and is decoded by the file's Str helper: a `string` return would make the marshaller free a
+            // pointer the library owns (docs/ABI.md section 16, step 7).
+            const bool textReturn = sc.ret == "char*" && sm.ret == "IntPtr";
+            check(sc.ret == sm.ret || textReturn,
                   std::string(a.label) + ": " + name + " returns " + sc.ret + " / " + sm.ret);
 
             if (sc.types.size() != sm.types.size()) {

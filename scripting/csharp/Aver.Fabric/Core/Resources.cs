@@ -103,9 +103,10 @@ public static class ResourceLoader
         }
         yield return rel;
         yield return "Textures/" + rel;
+        yield return "Audio/" + rel;   // G5 S1: the converter copies sound files under Audio/
     }
 
-    private static string? FindFile(string path)
+    internal static string? FindFile(string path)
     {
         string root = ContentRoot;
         if (root.Length == 0) return null;
@@ -127,6 +128,13 @@ public static class ResourceLoader
         ".tscn" or ".scn" or ".ocworld" => typeof(PackedScene),
         ".ocmesh" => typeof(Mesh),
         ".ocmat" => typeof(StandardMaterial3D),
+        ".ocanim" => typeof(Animation),
+        ".octheme" => typeof(Theme),
+        ".ttf" or ".otf" or ".woff" or ".woff2" => typeof(FontFile),
+        ".ocbuttongroup" => typeof(ButtonGroup),   // G5 U2: a button group the converter names; one path is one shared group
+        ".wav" => typeof(AudioStreamWav),
+        ".ogg" => typeof(AudioStreamOggVorbis),
+        ".mp3" => typeof(AudioStreamMP3),
         ".png" or ".jpg" or ".jpeg" or ".webp" or ".bmp" or ".tga" or ".dds" or ".exr" or ".hdr" or ".svg" => typeof(Texture2D),
         _ => typeof(Resource),
     };
@@ -148,6 +156,10 @@ public static class ResourceLoader
                 if (!type.IsAssignableFrom(made)) made = type;
                 if (typeof(Resource).IsAssignableFrom(made) && !made.IsAbstract && made.GetConstructor(System.Type.EmptyTypes) != null)
                     r = (Resource)Activator.CreateInstance(made)!;
+                if (r is Animation anim && file != null && !anim.LoadFrom(file))
+                    Aver.Scripting.Log.Warn($"[Fabric] cannot read the animation '{path}'");
+                if (r is Theme theme && file != null) theme.LoadFrom(file);   // G5 U1: a malformed theme is reported there and stays empty
+                if (r is ButtonGroup group && path.EndsWith("_unpress.ocbuttongroup", StringComparison.Ordinal)) group.AllowUnpress = true;
             }
         }
         if (r == null) return null;

@@ -54,6 +54,20 @@ struct StreamParams {
     u32  loopBegin       = 0;       // frames
     u32  loopEnd         = 0;       // frames; 0 = end of source
     bool threaded        = true;    // false: the owner calls pump() itself (tests)
+    u64  startFrame      = 0;       // the source frame to start from (a seek before the first read)
+    bool live            = false;   // no source behind the ring: the game thread pushes frames (AudioStreamGenerator); running dry is an under-run, never the end
+};
+
+// The source a live ring is made with: it has a format and nothing to read.
+class LiveSource final : public StreamSource {
+public:
+    LiveSource(u32 channels, u32 rate) : channels_(channels), rate_(rate) {}
+    u32 channels() const override { return channels_; }
+    u32 sampleRate() const override { return rate_; }
+    u32 read(f32*, u32) override { return 0; }
+    bool seek(u64) override { return false; }
+private:
+    u32 channels_, rate_;
 };
 
 // Owns a source, its ring and (optionally) the decoder thread.
@@ -87,6 +101,16 @@ public:
     void consume(u32 frames);
     void noteUnderrun() { underruns_.fetch_add(1, std::memory_order_relaxed); }
 
+    // ---- live rings (StreamParams::live) ----
+    // Game thread: queues up to `frames` frames, as many as fit; returns the number taken.
+    u32  pushLive(const f32* src, u32 frames);
+    // Frames the ring can still take.
+    u32  freeFrames() const { return capacity_ - available(); }
+    // Game thread: asks the audio thread to drop everything queued.
+    void requestFlush() { flush_.store(true, std::memory_order_release); }
+    // Audio thread: true once after requestFlush.
+    bool takeFlush() { return flush_.exchange(false, std::memory_order_acq_rel); }
+
     u32 underruns() const { return underruns_.load(std::memory_order_relaxed); }
     u64 decodedFrames() const { return head_.load(std::memory_order_relaxed); }
 
@@ -106,6 +130,7 @@ private:
     std::atomic<u64> tail_{0};              // total frames consumed
     std::atomic<bool> eof_{false};
     std::atomic<bool> quit_{false};
+    std::atomic<bool> flush_{false};
     std::atomic<u32>  underruns_{0};
 
     // Producer-owned.

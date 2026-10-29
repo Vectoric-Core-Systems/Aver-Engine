@@ -36,7 +36,28 @@ public class Viewport : Node
         return new Vector2I(1280, 720);
     }
 
-    public Rect2 GetVisibleRect() => new(Vector2.Zero, new Vector2(Size.X, Size.Y));
+    /// <summary>The area Controls are laid out in: the viewport's size (the window's stretched content size for the root window).</summary>
+    public virtual Rect2 GetVisibleRect() => new(Vector2.Zero, new Vector2(Size.X, Size.Y));
+
+    // ---- the GUI (G5 U1) ----
+
+    /// <summary>The control that has keyboard focus, or null.</summary>
+    public Control? GuiGetFocusOwner() => Gui.FocusOwner;
+
+    /// <summary>Takes keyboard focus away from whichever control has it.</summary>
+    public void GuiReleaseFocus() => Gui.ReleaseFocusQuiet();
+
+    /// <summary>The control the pointer is over (the deepest one that takes mouse events), or null.</summary>
+    public Control? GuiGetHoveredControl() => Gui.HoveredControl;
+
+    public bool GuiIsDragging() => Gui.IsDragging;
+
+    public Variant GuiGetDragData() => Gui.DragData;
+
+    /// <summary>Whether the last drag ended with a control taking the data.</summary>
+    public bool GuiIsDragSuccessful() => Gui.DragSuccessful;
+
+    public void GuiCancelDrag() => Gui.CancelDrag();
 
     /// <summary>The 3D world of this viewport: its physics space.</summary>
     public World3D World3D { get; set; } = new();
@@ -60,7 +81,151 @@ public class Viewport : Node
 /// <summary>The window at the top of the tree; its name is "root" (Godot's Window).</summary>
 public class Window : Viewport
 {
+    public enum ContentScaleModeEnum { Disabled = 0, CanvasItems = 1, Viewport = 2 }
+
+    public enum ContentScaleAspectEnum { Ignore = 0, Keep = 1, KeepWidth = 2, KeepHeight = 3, Expand = 4 }
+
+    public enum ContentScaleStretchEnum { Fractional = 0, Integer = 1 }
+
     public string Title { get; set; } = "";
+
+    private ContentScaleModeEnum? _mode;
+    private ContentScaleAspectEnum? _aspect;
+    private ContentScaleStretchEnum? _stretch;
+    private Vector2I? _baseSize;
+    private float? _factor;
+
+    // The project's display/window/stretch settings (the UI.* keys); a script may change any of them.
+    private static string Project(string key) => ProjectSettingsKey(key);
+
+    private static string ProjectSettingsKey(string key)
+    {
+        try { return Aver.Framework.ProjectSettings.Get(key, ""); }
+        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException) { return ""; }
+    }
+
+    /// <summary>How the UI follows the window's size: nothing stretches (default), the canvas is drawn scaled (canvas_items), or the picture is rendered at the
+    /// base size and scaled up (viewport). Project key UI.STRETCH.</summary>
+    public ContentScaleModeEnum ContentScaleMode
+    {
+        get => _mode ??= Project("UI.STRETCH") switch { "canvas_items" => ContentScaleModeEnum.CanvasItems, "viewport" => ContentScaleModeEnum.Viewport, _ => ContentScaleModeEnum.Disabled };
+        set { _mode = value; ContentChanged(); }
+    }
+
+    /// <summary>What happens when the window's shape differs from the base size's. Project key UI.ASPECT.</summary>
+    public ContentScaleAspectEnum ContentScaleAspect
+    {
+        get => _aspect ??= Project("UI.ASPECT") switch
+        {
+            "ignore" => ContentScaleAspectEnum.Ignore, "keep_width" => ContentScaleAspectEnum.KeepWidth, "keep_height" => ContentScaleAspectEnum.KeepHeight,
+            "expand" => ContentScaleAspectEnum.Expand, _ => ContentScaleAspectEnum.Keep,
+        };
+        set { _aspect = value; ContentChanged(); }
+    }
+
+    /// <summary>Fractional or integer scaling. Project key UI.STRETCHSCALEMODE.</summary>
+    public ContentScaleStretchEnum ContentScaleStretch
+    {
+        get => _stretch ??= Project("UI.STRETCHSCALEMODE") == "integer" ? ContentScaleStretchEnum.Integer : ContentScaleStretchEnum.Fractional;
+        set { _stretch = value; ContentChanged(); }
+    }
+
+    /// <summary>The size the UI is authored at; zero in either axis means none (no stretch). Project key UI.BASESIZE.</summary>
+    public Vector2I ContentScaleSize
+    {
+        get
+        {
+            if (_baseSize is { } s) return s;
+            string[] p = Project("UI.BASESIZE").Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            return (_baseSize = p.Length >= 2 && int.TryParse(p[0], out int w) && int.TryParse(p[1], out int h) ? new Vector2I(w, h) : Vector2I.Zero).Value;
+        }
+        set { _baseSize = value; ContentChanged(); }
+    }
+
+    /// <summary>The extra scale applied on top of the stretch. Project key UI.STRETCHSCALE.</summary>
+    public float ContentScaleFactor
+    {
+        get => _factor ??= float.TryParse(Project("UI.STRETCHSCALE"), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float f) && f > 0 ? f : 1f;
+        set { _factor = Math.Max(0.01f, value); ContentChanged(); }
+    }
+
+    public override Vector2I Size
+    {
+        get => base.Size;
+        set { base.Size = value; ContentChanged(); }
+    }
+
+    // The window's size in device pixels: the engine's UI rectangle when there is one, else the window's size.
+    internal Vector2 WindowPixels => EnginePixels ?? new Vector2(Size.X, Size.Y);
+
+    private static Vector2? EnginePixels
+    {
+        get
+        {
+            if (!NodeHost.Current.IsEngine || !UiNative.Available) return null;
+            try
+            {
+                var xywh = new float[4];
+                UiNative.aver_ui_viewport(xywh);
+                return xywh[2] > 0 && xywh[3] > 0 ? new Vector2(xywh[2], xywh[3]) : null;
+            }
+            catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException) { return null; }
+        }
+    }
+
+    private (Rect2 Screen, Vector2 Content, Vector2 Render, Vector2 Scale, bool Letterboxed) Compute()
+    {
+        Vector2 px = WindowPixels;
+        Vector2I b = ContentScaleSize;
+        return UiNative.Stretch((UiStretchModeId)(int)ContentScaleMode, (UiStretchAspectId)(int)ContentScaleAspect, (UiStretchScaleModeId)(int)ContentScaleStretch,
+                                b.X, b.Y, ContentScaleFactor, px.X, px.Y);
+    }
+
+    /// <summary>The area Controls are laid out in: the window's pixels divided by the content scale factor, or the base size (letterboxed or grown) when the
+    /// stretch mode is on. Without the engine library the stretch is not computed and this is the window's size.</summary>
+    public override Rect2 GetVisibleRect()
+    {
+        if (ContentScaleMode == ContentScaleModeEnum.Disabled && ContentScaleFactor == 1f) return base.GetVisibleRect();
+        Vector2 c = Compute().Content;
+        return new Rect2(Vector2.Zero, c);
+    }
+
+    /// <summary>Where the stretched content lands in the window, in window pixels (the letterbox is the rest).</summary>
+    public Rect2 GetContentScreenRect() => Compute().Screen;
+
+    public bool IsLetterboxed() => Compute().Letterboxed;
+
+    /// <summary>A point in window pixels (the pointer) in UI space; a point in a letterbox bar comes out outside the visible rectangle.</summary>
+    public Vector2 WindowToContent(Vector2 p)
+    {
+        var r = Compute();
+        return new Vector2((p.X - r.Screen.Position.X) / (r.Scale.X > 0 ? r.Scale.X : 1f), (p.Y - r.Screen.Position.Y) / (r.Scale.Y > 0 ? r.Scale.Y : 1f));
+    }
+
+    public Vector2 ContentToWindow(Vector2 p)
+    {
+        var r = Compute();
+        return new Vector2(p.X * r.Scale.X + r.Screen.Position.X, p.Y * r.Scale.Y + r.Screen.Position.Y);
+    }
+
+    /// <summary>UI space to window pixels as a transform: scale, then the letterbox offset.</summary>
+    internal Transform2D ContentToWindowTransform()
+    {
+        var r = Compute();
+        return new Transform2D(new Vector2(r.Scale.X, 0), new Vector2(0, r.Scale.Y), r.Screen.Position);
+    }
+
+    // The visible area changed: Controls that hang from the window lay themselves out again.
+    private void ContentChanged()
+    {
+        foreach (Node n in ChildrenSnapshot()) RelayoutFrom(n);
+    }
+
+    private static void RelayoutFrom(Node n)
+    {
+        if (n is Control c) { c.SizeChanged(); return; }
+        foreach (Node k in n.ChildrenSnapshot()) RelayoutFrom(k);
+    }
 }
 
 /// <summary>The scene tree (Godot's SceneTree): the root window, the current scene, groups, pause, timers, tweens and scene changes.</summary>
@@ -116,6 +281,8 @@ public class SceneTree : GodotObject
     {
         s_instance = null;
         Node.ResetGroups();
+        Gui.ResetForTests();
+        ThemeDB.ResetForTests();
         Input.ResetForTests();
         Camera3D.ResetCurrent();
         DirectionalLight3D.ResetSun();
@@ -405,6 +572,7 @@ public class SceneTree : GodotObject
         }
         // Like Godot's physics_frames, the count of steps that have finished: a press made between steps is "just pressed" in the next one.
         if (physics) _managedPhysicsFrames++;
+        else Gui.FrameUpdate(dt);   // G5 U1: layout, tooltips and Control drawing at the end of the idle frame
     }
 
     // Seconds of real time since the last call (the driver's clock for ignore_time_scale timers and tweens).
@@ -479,6 +647,7 @@ public class SceneTree : GodotObject
                 n.DeliverInput(e, unhandled: false);
                 if (e.IsHandled) return;
             }
+            if (Gui.HandleInput(e)) return;   // G5 U1: Controls take their turn between _Input and _UnhandledInput, as in Godot
             foreach (Node n in nodes)
             {
                 if (!n.IsAlive || !n.IsInsideTree() || !n.CanProcess()) continue;

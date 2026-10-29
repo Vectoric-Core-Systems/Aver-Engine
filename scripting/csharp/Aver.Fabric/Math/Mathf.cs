@@ -18,6 +18,13 @@ public static class Mathf
     public const float Inf = float.PositiveInfinity;
     public const float NaN = float.NaN;
 
+    /// <summary>Decibels to a linear amplitude (10^(db/20)).</summary>
+    public static float DbToLinear(float db) => MathF.Exp(db * 0.11512925464970228420089957273422f);
+    public static double DbToLinear(double db) => Math.Exp(db * 0.11512925464970228420089957273422);
+    /// <summary>A linear amplitude to decibels.</summary>
+    public static float LinearToDb(float linear) => MathF.Log(linear) * 8.6858896380650365530225783783321f;
+    public static double LinearToDb(double linear) => Math.Log(linear) * 8.6858896380650365530225783783321;
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)] public static int Abs(int s) => Math.Abs(s);
     [MethodImpl(MethodImplOptions.AggressiveInlining)] public static float Abs(float s) => Math.Abs(s);
     [MethodImpl(MethodImplOptions.AggressiveInlining)] public static double Abs(double s) => Math.Abs(s);

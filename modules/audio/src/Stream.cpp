@@ -54,8 +54,26 @@ StreamDecoder::StreamDecoder(std::unique_ptr<StreamSource> source, const StreamP
     if (total && loopEnd_ > total) loopEnd_ = total;
     looping_ = params_.looping && params_.loopBegin < loopEnd_;
 
+    if (params_.live) {
+        // Nothing decodes into this ring; the voice may start on the first frame pushed.
+        prebuffer_ = 1;
+        valid_ = true;
+        return;
+    }
+    if (params_.startFrame > 0 && source_->seek(params_.startFrame)) {
+        srcPos_ = params_.startFrame;
+        justSeeked_ = true;
+    }
+
     valid_ = true;
     if (params_.threaded) thread_ = std::thread([this] { threadMain(); });
+}
+
+u32 StreamDecoder::pushLive(const f32* src, u32 frames) {
+    if (!valid_ || !params_.live) return 0;
+    const u32 n = std::min(frames, freeFrames());
+    if (n) push(src, n);
+    return n;
 }
 
 StreamDecoder::~StreamDecoder() {
@@ -73,7 +91,7 @@ void StreamDecoder::push(const f32* src, u32 frames) {
 }
 
 u32 StreamDecoder::pump(u32 maxFrames) {
-    if (!valid_ || eof_.load(std::memory_order_relaxed)) return 0;
+    if (!valid_ || params_.live || eof_.load(std::memory_order_relaxed)) return 0;
     const u64 h = head_.load(std::memory_order_relaxed);
     const u64 t = tail_.load(std::memory_order_acquire);
     const u32 room = capacity_ - static_cast<u32>(h - t);

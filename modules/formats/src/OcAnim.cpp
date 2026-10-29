@@ -45,6 +45,8 @@ constexpr u32 kChunkNTFD = avrFourCC("NTFD");
 // from a per-curve chunk would: a curve with no tangents of its own still gets a dense zero-filled
 // pair back from disk once another curve in the same clip needed the chunk written at all.
 constexpr u32 kChunkCTAN = avrFourCC("CTAN");
+// OPTIONAL: the property tracks (OcAnimation::propTracks). A clip without them writes no chunk.
+constexpr u32 kChunkPROP = avrFourCC("PROP");
 
 // Sets `why` and returns false.
 bool fail(std::string* why, std::string m) { if (why) *why = std::move(m); return false; }
@@ -58,6 +60,8 @@ struct W {
     void i32v(i32 v) { u32v(static_cast<u32>(v)); }
     void u64v(u64 v) { for (int i = 0; i < 8; ++i) b.push_back(u8(v >> (i * 8))); }
     void f32v(f32 v) { u32 x; std::memcpy(&x, &v, 4); u32v(x); }
+    void f64v(f64 v) { u64 x; std::memcpy(&x, &v, 8); u64v(x); }
+    void str(const std::string& s) { u32v(static_cast<u32>(s.size())); b.insert(b.end(), s.begin(), s.end()); }
 };
 
 // Bounds-checked little-endian byte reader. `ok` goes false on the first short read.
@@ -70,7 +74,104 @@ struct R {
     i32 i32v() { return static_cast<i32>(u32v()); }
     u64 u64v() { if (!need(8)) return 0; u64 v; std::memcpy(&v, p, 8); p += 8; return v; }
     f32 f32v() { u32 x = u32v(); f32 f; std::memcpy(&f, &x, 4); return f; }
+    f64 f64v() { u64 x = u64v(); f64 f; std::memcpy(&f, &x, 8); return f; }
+    std::string str() {
+        const u32 n = u32v();
+        if (!ok || !need(n)) { ok = false; return {}; }
+        std::string s(reinterpret_cast<const char*>(p), n);
+        p += n;
+        return s;
+    }
 };
+
+// PROP chunk (property tracks). Little-endian: u8 loop, f32 step, u32 trackCount, then per track
+// u8 type, u8 interp, u8 update, u8 flags (1 loopWrap, 2 enabled, 4 imported), str path, u32 keyCount, then per key
+// f64 time, f64 transition, value, f64 handle[4], f64 start, f64 end, u32 argCount, value* args.
+// A value is u8 kind, f64 n[4], str.
+void writePropValue(W& w, const OcPropValue& v) {
+    w.u8v(static_cast<u8>(v.kind));
+    for (int i = 0; i < 4; ++i) w.f64v(v.n[i]);
+    w.str(v.s);
+}
+
+bool readPropValue(R& r, OcPropValue& v) {
+    const u8 k = r.u8v();
+    if (k > static_cast<u8>(OcPropKind::Text)) return false;
+    v.kind = static_cast<OcPropKind>(k);
+    for (int i = 0; i < 4; ++i) v.n[i] = r.f64v();
+    v.s = r.str();
+    return r.ok;
+}
+
+void writeProp(std::vector<u8>& out, const OcAnimation& a) {
+    W w{out};
+    w.u8v(static_cast<u8>(a.propLoop));
+    w.f32v(a.propStep);
+    w.u32v(static_cast<u32>(a.propTracks.size()));
+    for (const OcPropTrack& t : a.propTracks) {
+        w.u8v(static_cast<u8>(t.type));
+        w.u8v(static_cast<u8>(t.interp));
+        w.u8v(static_cast<u8>(t.update));
+        w.u8v(u8((t.loopWrap ? 1 : 0) | (t.enabled ? 2 : 0) | (t.imported ? 4 : 0)));
+        w.str(t.path);
+        w.u32v(static_cast<u32>(t.keys.size()));
+        for (const OcPropKey& k : t.keys) {
+            w.f64v(k.time);
+            w.f64v(k.transition);
+            writePropValue(w, k.value);
+            for (int i = 0; i < 4; ++i) w.f64v(k.handle[i]);
+            w.f64v(k.startOffset);
+            w.f64v(k.endOffset);
+            w.u32v(static_cast<u32>(k.args.size()));
+            for (const OcPropValue& v : k.args) writePropValue(w, v);
+        }
+    }
+}
+
+bool readProp(const std::vector<u8>& data, OcAnimation& a, std::string* why) {
+    R r{data.data(), data.data() + data.size()};
+    const u8 loop = r.u8v();
+    if (loop > static_cast<u8>(OcPropLoop::PingPong)) return fail(why, ".ocanim: unknown loop mode in PROP");
+    a.propLoop = static_cast<OcPropLoop>(loop);
+    a.propStep = r.f32v();
+    const u32 count = r.u32v();
+    if (!r.ok || count > data.size() / 8) return fail(why, ".ocanim: PROP says it holds more tracks than it can");
+    a.propTracks.clear();
+    a.propTracks.resize(count);
+    for (OcPropTrack& t : a.propTracks) {
+        const u8 type = r.u8v(), interp = r.u8v(), update = r.u8v(), flags = r.u8v();
+        if (type > static_cast<u8>(OcPropTrackType::Animation) || interp > static_cast<u8>(OcPropInterp::CubicAngle) ||
+            update > static_cast<u8>(OcPropUpdate::Capture))
+            return fail(why, ".ocanim: unknown track type, interpolation or update mode in PROP");
+        t.type = static_cast<OcPropTrackType>(type);
+        t.interp = static_cast<OcPropInterp>(interp);
+        t.update = static_cast<OcPropUpdate>(update);
+        t.loopWrap = (flags & 1) != 0;
+        t.enabled = (flags & 2) != 0;
+        t.imported = (flags & 4) != 0;
+        t.path = r.str();
+        const u32 keys = r.u32v();
+        if (!r.ok || keys > data.size() / 16) return fail(why, ".ocanim: a PROP track says it holds more keys than the chunk can");
+        t.keys.resize(keys);
+        for (OcPropKey& k : t.keys) {
+            k.time = r.f64v();
+            k.transition = r.f64v();
+            if (!readPropValue(r, k.value)) return fail(why, ".ocanim: bad value in PROP");
+            for (int i = 0; i < 4; ++i) k.handle[i] = r.f64v();
+            k.startOffset = r.f64v();
+            k.endOffset = r.f64v();
+            const u32 argc = r.u32v();
+            if (!r.ok || argc > data.size() / 8) return fail(why, ".ocanim: a PROP key says it holds more arguments than the chunk can");
+            k.args.resize(argc);
+            for (OcPropValue& v : k.args)
+                if (!readPropValue(r, v)) return fail(why, ".ocanim: bad argument in PROP");
+        }
+        for (usize i = 1; i < t.keys.size(); ++i)
+            if (t.keys[i].time < t.keys[i - 1].time) return fail(why, ".ocanim: PROP key times are not ascending on '" + t.path + "'");
+    }
+    if (!r.ok) return fail(why, ".ocanim: truncated PROP chunk");
+    return true;
+}
 
 // Reads a whole file into `out`. `what` prefixes any error message.
 bool readWholeFile(const std::string& path, std::vector<u8>& out, std::string* why, const char* what) {
@@ -294,7 +395,7 @@ bool OcTrack::valid() const {
 
 // True when the animation has tracks, a non-negative duration, and every track is valid.
 bool OcAnimation::valid() const {
-    if (tracks.empty() && curves.empty()) return false;
+    if (tracks.empty() && curves.empty() && propTracks.empty() && !propClip) return false;
     if (!(duration >= 0.0f)) return false;                           // also rejects NaN
     for (const OcTrack& t : tracks) if (!t.valid()) return false;
     if (storage == OcAnimStorage::BakedUniform && sampleRate == 0) return false;
@@ -305,7 +406,11 @@ bool OcAnimation::valid() const {
 
 // Encodes an animation into an .ocanim container. Returns false with `why` set on invalid input.
 bool writeOcAnim(const OcAnimation& in, std::vector<u8>& out, std::string* why) {
-    if (in.tracks.empty() && in.curves.empty()) return fail(why, ".ocanim: no tracks");
+    if (in.tracks.empty() && in.curves.empty() && in.propTracks.empty() && !in.propClip) return fail(why, ".ocanim: no tracks");
+    for (const OcPropTrack& pt : in.propTracks)
+        for (usize k = 1; k < pt.keys.size(); ++k)
+            if (pt.keys[k].time < pt.keys[k - 1].time)
+                return fail(why, ".ocanim: key times are not ascending on property track '" + pt.path + "'");
     if (in.tracks.size() > 0xFFFFFFFFull) return fail(why, ".ocanim: too many tracks");
     for (usize i = 0; i < in.tracks.size(); ++i) {
         const OcTrack& t = in.tracks[i];
@@ -475,6 +580,11 @@ bool writeOcAnim(const OcAnimation& in, std::vector<u8>& out, std::string* why) 
     if (!ntfd.empty()) f.add(kChunkNTFD, std::move(ntfd));
     if (!crve.empty()) f.add(kChunkCRVE, std::move(crve));
     if (!ctan.empty()) f.add(kChunkCTAN, std::move(ctan));
+    if (!in.propTracks.empty() || in.propClip) {
+        std::vector<u8> prop;
+        writeProp(prop, in);
+        f.add(kChunkPROP, std::move(prop));
+    }
     // AFTER the notify names have been interned, or the table would be written without them.
     f.add(kChunkSTRT, strt.bytes());
     return writeAvr1(f, out, why);
@@ -608,8 +718,16 @@ bool parseOcAnim(const u8* bytes, usize size, OcAnimation& out, std::string* why
         for (const f32 dur : out.notifyDurations)
             if (!(dur >= 0.0f)) return fail(why, ".ocanim: a notify duration is negative or NaN");
     }
+    out.propTracks.clear();
+    out.propClip = false;
+    out.propLoop = OcPropLoop::None;
+    out.propStep = 1.0f / 30.0f;
+    if (const AvrChunk* prop = f.find(kChunkPROP)) {
+        if (!readProp(prop->data, out, why)) return false;
+        out.propClip = true;
+    }
     if (!r.ok) return fail(why, ".ocanim: truncated AHDR");
-    if (n == 0 && out.curves.empty()) return fail(why, ".ocanim: TrackCount is 0");
+    if (n == 0 && out.curves.empty() && !out.propClip) return fail(why, ".ocanim: TrackCount is 0");
     if (out.storage != OcAnimStorage::Keyframed && out.storage != OcAnimStorage::BakedUniform)
         return fail(why, ".ocanim: unknown Storage value");
 

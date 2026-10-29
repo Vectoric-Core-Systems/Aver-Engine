@@ -393,12 +393,22 @@ target_sources(AverAssetC PRIVATE
   ${CMAKE_SOURCE_DIR}/tools/fabric/FabricScripts.cpp
   ${CMAKE_SOURCE_DIR}/tools/fabric/FabricMeshGen.cpp
   ${CMAKE_SOURCE_DIR}/tools/fabric/FabricGeometry.cpp
+  ${CMAKE_SOURCE_DIR}/tools/fabric/FabricAnimation.cpp
+  ${CMAKE_SOURCE_DIR}/tools/fabric/FabricAnimTree.cpp
+  ${CMAKE_SOURCE_DIR}/tools/fabric/FabricAudio.cpp
+  ${CMAKE_SOURCE_DIR}/tools/fabric/FabricNav.cpp
   ${CMAKE_SOURCE_DIR}/tools/fabric/FabricProject.cpp
   ${CMAKE_SOURCE_DIR}/tools/fabric/FabricReport.cpp
   ${CMAKE_SOURCE_DIR}/tools/fabric/FabricResources.cpp
+  ${CMAKE_SOURCE_DIR}/tools/fabric/FabricUi.cpp
+  ${CMAKE_SOURCE_DIR}/tools/fabric/FabricWidgets.cpp
   ${CMAKE_SOURCE_DIR}/tools/fabric/FabricScene.cpp)
 target_include_directories(AverAssetC PRIVATE ${CMAKE_SOURCE_DIR}/tools)
 target_link_libraries(AverAssetC PRIVATE Aver.Formats.Godot)
+# G5 U1: the .octheme writer (Aver.UI is Core-only), so the converter and the engine share one text form.
+target_link_libraries(AverAssetC PRIVATE Aver.UI)
+# G5 S1: the engine's effect tables (which parameters the mixer implements) and the .ocbus writer, so the converter cannot drift from the mixer.
+target_link_libraries(AverAssetC PRIVATE Aver.Formats.Audio Aver.Audio)
 # `AverAssetC cook-chunks` (LARGE_WORLD 2.4.5). The cook is the pure half of Aver.World (Core + Formats + Platform). It is compiled straight into the tool, like
 # HairCurves.cpp below, rather than by linking Aver.World: that library's PUBLIC link interface carries Aver.Scene, Aver.Physics (Jolt) and Aver.Vehicle, and a shipping
 # asset compiler must not depend on them. None of these files may see AVER_MODULE_SCENE (the tool must not link anything that defines it); none does.

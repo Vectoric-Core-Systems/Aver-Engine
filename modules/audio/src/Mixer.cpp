@@ -71,6 +71,10 @@ bool Mixer::init(u32 sampleRate, u32 channels, u32 maxVoices, u32 maxSounds, u32
     occMinCutoff_.store(450.0f, std::memory_order_relaxed);
     occMinVolume_.store(0.30f, std::memory_order_relaxed);
 
+    for (int i = 0; i < 3; ++i) lisVel_[i].store(0.0f, std::memory_order_relaxed);
+    speedScale_.store(1.0f, std::memory_order_relaxed);
+    graph_.init(sampleRate);
+
     reverb_.init(sampleRate);
     sendBuf_.assign(kMaxSendFrames, 0.0f);
     rvL_.assign(kMaxSendFrames, 0.0f);
@@ -96,6 +100,7 @@ bool Mixer::init(u32 sampleRate, u32 channels, u32 maxVoices, u32 maxSounds, u32
 // Releases the pools. The caller must have stopped the device first.
 void Mixer::shutdown() {
     ready_ = false;
+    graph_.shutdown();
     voices_.clear();
     streams_.clear();   // joins every decoder thread
     sounds_.clear();
@@ -149,6 +154,19 @@ u32 Mixer::soundCount() const {
     u32 n = 0;
     for (const SoundSlot& s : sounds_) if (s.data) ++n;
     return n;
+}
+
+f64 Mixer::soundLengthSeconds(SoundHandle h) const {
+    if (!ready_ || h == 0 || h > sounds_.size() || !sounds_[h - 1].data) return 0.0;
+    const SoundData& d = *sounds_[h - 1].data;
+    return d.sampleRate ? static_cast<f64>(d.frames()) / static_cast<f64>(d.sampleRate) : 0.0;
+}
+
+void Mixer::setSoundLoop(SoundHandle h, u32 beginFrame, u32 endFrame) {
+    if (!ready_ || h == 0 || h > sounds_.size() || !sounds_[h - 1].data) return;
+    SoundData& d = *sounds_[h - 1].data;
+    d.loopBegin = beginFrame;
+    d.loopEnd = endFrame;
 }
 
 // Number of stream voices owning a decoder.
@@ -237,14 +255,32 @@ u32 Mixer::acquireVoice() {
 }
 
 // Fills a claimed voice from the description and publishes it Active.
-VoiceHandle Mixer::activate(u32 index, const PlayDesc& desc) {
+VoiceHandle Mixer::activate(u32 index, const PlayDesc& desc, f64 startCursor, f64 lengthSec, f64 srcRate, u64 streamStart) {
     Voice& vo = voices_[index];
     vo.looping     = desc.looping;
     vo.bus         = desc.bus < Bus::Count ? desc.bus : Bus::Sfx;
     vo.positional  = desc.positional;
     vo.attenuation = desc.attenuation;
     vo.startOrder  = playCounter_.fetch_add(1, std::memory_order_relaxed);
-    vo.cursor      = 0.0;
+    vo.cursor      = startCursor;
+    vo.lengthSec   = lengthSec;
+    vo.srcRateHz   = srcRate;
+    vo.streamStart = streamStart;
+    vo.streamFrames = 0;
+    vo.posPub.store(startCursor, std::memory_order_relaxed);
+    vo.graphBus.store(desc.graphBus, std::memory_order_relaxed);
+    vo.paused.store(desc.paused, std::memory_order_relaxed);
+    vo.pauseSilenced = false;
+    vo.shelfActive = false;
+    vo.shL.reset();
+    vo.shR.reset();
+    vo.godot3d.store(false, std::memory_order_relaxed);
+    if (desc.godotSpatial) {
+        f32 packed[Spatial3D::kFloats];
+        desc.spatial.pack(packed);
+        for (u32 i = 0; i < Spatial3D::kFloats; ++i) vo.sp[i].store(packed[i], std::memory_order_relaxed);
+        vo.godot3d.store(true, std::memory_order_relaxed);
+    }
     vo.gainL = vo.gainR = 0.0f;
     vo.primed = false;
     vo.resumeRamp = false;
@@ -303,7 +339,11 @@ VoiceHandle Mixer::play(const PlayDesc& desc) {
     vo.streamSlot  = kNoSlot;
 
     slot.refs.fetch_add(1, std::memory_order_acq_rel);
-    return activate(index, desc);
+    const f64 rate = static_cast<f64>(slot.data->sampleRate);
+    const f64 frames = static_cast<f64>(slot.data->frames());
+    f64 start = desc.startSeconds > 0.0f ? static_cast<f64>(desc.startSeconds) * rate : 0.0;
+    if (start >= frames) start = 0.0;
+    return activate(index, desc, start, rate > 0.0 ? frames / rate : 0.0, rate);
 }
 
 // Starts a streamed voice. The decoder is owned by a stream slot until collect() frees it.
@@ -316,6 +356,11 @@ VoiceHandle Mixer::playStream(std::unique_ptr<StreamSource> source, const PlayDe
     if (slot == kNoSlot) { AVER_WARN("[Audio] all {} stream slots are in use", streams_.size()); return 0; }
 
     params.looping = desc.looping;
+    const f64 srcRate = static_cast<f64>(source->sampleRate());
+    const u64 total = source->totalFrames();
+    if (desc.startSeconds > 0.0f && params.startFrame == 0) params.startFrame = static_cast<u64>(static_cast<f64>(desc.startSeconds) * srcRate);
+    if (total && params.startFrame >= total) params.startFrame = 0;
+    const u64 startFrame = params.startFrame;
     auto dec = std::make_unique<StreamDecoder>(std::move(source), params);
     if (!dec->valid()) return 0;
 
@@ -330,7 +375,91 @@ VoiceHandle Mixer::playStream(std::unique_ptr<StreamSource> source, const PlayDe
     vo.soundHandle = 0;
     vo.stream      = streams_[slot].dec.get();
     vo.streamSlot  = slot;
-    return activate(index, desc);
+    return activate(index, desc, 0.0, srcRate > 0.0 ? static_cast<f64>(total) / srcRate : 0.0, srcRate, startFrame);
+}
+
+// A voice fed by the game thread. The ring is a live StreamDecoder; running dry is an under-run, not the end.
+VoiceHandle Mixer::playLive(const PlayDesc& desc, u32 rate, u32 channels, u32 ringFrames) {
+    if (!ready_ || rate == 0 || (channels != 1 && channels != 2)) return 0;
+    collect();
+    u32 slot = kNoSlot;
+    for (u32 i = 0; i < streams_.size(); ++i) if (!streams_[i].dec) { slot = i; break; }
+    if (slot == kNoSlot) { AVER_WARN("[Audio] all {} stream slots are in use", streams_.size()); return 0; }
+
+    StreamParams params;
+    params.live = true;
+    params.threaded = false;
+    params.looping = false;
+    params.ringFrames = ringFrames ? ringFrames : rate / 2;
+    auto dec = std::make_unique<StreamDecoder>(std::make_unique<LiveSource>(channels, rate), params);
+    if (!dec->valid()) return 0;
+
+    const u32 index = acquireVoice();
+    if (index == 0xFFFFFFFFu) return 0;
+    streams_[slot].dec = std::move(dec);
+    streams_[slot].attached.store(true, std::memory_order_release);
+
+    Voice& vo = voices_[index];
+    vo.sound       = nullptr;
+    vo.soundHandle = 0;
+    vo.stream      = streams_[slot].dec.get();
+    vo.streamSlot  = slot;
+    return activate(index, desc, 0.0, 0.0, static_cast<f64>(rate), 0);
+}
+
+u32 Mixer::pushLive(VoiceHandle v, const f32* frames, u32 count) {
+    Voice* vo = resolve(v);
+    return (vo && vo->stream && frames) ? vo->stream->pushLive(frames, count) : 0;
+}
+
+u32 Mixer::liveFree(VoiceHandle v) const {
+    const Voice* vo = resolve(v);
+    return (vo && vo->stream) ? vo->stream->freeFrames() : 0;
+}
+
+void Mixer::liveFlush(VoiceHandle v) {
+    if (Voice* vo = resolve(v)) if (vo->stream) vo->stream->requestFlush();
+}
+
+u32 Mixer::voiceUnderruns(VoiceHandle v) const {
+    const Voice* vo = resolve(v);
+    return (vo && vo->stream) ? vo->stream->underruns() : 0;
+}
+
+void Mixer::setVoiceGraphBus(VoiceHandle v, i32 bus) {
+    if (Voice* vo = resolve(v)) vo->graphBus.store(bus, std::memory_order_relaxed);
+}
+
+void Mixer::setVoiceSpatial(VoiceHandle v, const Spatial3D& s) {
+    Voice* vo = resolve(v);
+    if (!vo) return;
+    f32 packed[Spatial3D::kFloats];
+    s.pack(packed);
+    for (u32 i = 0; i < Spatial3D::kFloats; ++i) vo->sp[i].store(packed[i], std::memory_order_relaxed);
+    vo->godot3d.store(true, std::memory_order_release);
+}
+
+void Mixer::setVoicePaused(VoiceHandle v, bool paused) {
+    if (Voice* vo = resolve(v)) vo->paused.store(paused, std::memory_order_release);
+}
+
+f64 Mixer::voicePositionSeconds(VoiceHandle v) const {
+    const Voice* vo = resolve(v);
+    if (!vo || vo->srcRateHz <= 0.0) return -1.0;
+    f64 s = vo->posPub.load(std::memory_order_relaxed) / vo->srcRateHz;
+    if (vo->looping && vo->lengthSec > 0.0) s = std::fmod(s, vo->lengthSec);
+    return s;
+}
+
+f64 Mixer::voiceLengthSeconds(VoiceHandle v) const {
+    const Voice* vo = resolve(v);
+    return vo ? vo->lengthSec : 0.0;
+}
+
+void Mixer::setListenerVelocity(f32 x, f32 y, f32 z) {
+    lisVel_[0].store(x, std::memory_order_relaxed);
+    lisVel_[1].store(y, std::memory_order_relaxed);
+    lisVel_[2].store(z, std::memory_order_relaxed);
 }
 
 // Flags a voice to fade out over one block. The audio thread frees the slot.
@@ -476,13 +605,37 @@ u32 Mixer::activeVoices() const {
 // ---------------------------------------------------------------- the audio thread
 
 // The left/right gains this voice contributes, after distance, pan, bus, fade and master.
-void Mixer::voiceGains(const Voice& vo, f32& outL, f32& outR) const {
-    f32 g = vo.volume.load(std::memory_order_relaxed)
-          * buses_[static_cast<usize>(vo.bus)].load(std::memory_order_relaxed)
-          * master_.load(std::memory_order_relaxed)
-          * vo.fadePub.load(std::memory_order_relaxed);
+void Mixer::voiceGains(const Voice& vo, f32& outL, f32& outR, f32* shelf, f32* dopplerOut) const {
+    if (shelf) *shelf = 1.0f;
+    if (dopplerOut) *dopplerOut = 1.0f;
+    // A voice on a graph bus takes its volume from the bus, not from the legacy bus and master gains.
+    const bool graphVoice = vo.graphBus.load(std::memory_order_relaxed) >= 0;
+    const f32 busGain = graphVoice ? 1.0f : buses_[static_cast<usize>(vo.bus)].load(std::memory_order_relaxed);
+    const f32 masterGain = graphVoice ? 1.0f : master_.load(std::memory_order_relaxed);
+    const f32 route = busGain * masterGain;
+    f32 g = vo.volume.load(std::memory_order_relaxed) * busGain * masterGain * vo.fadePub.load(std::memory_order_relaxed);   // the legacy order of products
 
     if (!vo.positional) { outL = outR = g; return; }
+
+    if (vo.godot3d.load(std::memory_order_acquire)) {
+        f32 packed[Spatial3D::kFloats];
+        for (u32 i = 0; i < Spatial3D::kFloats; ++i) packed[i] = vo.sp[i].load(std::memory_order_relaxed);
+        const Spatial3D s = Spatial3D::unpack(packed);
+        const f32 lp[3] = {lisPos_[0].load(std::memory_order_relaxed), lisPos_[1].load(std::memory_order_relaxed), lisPos_[2].load(std::memory_order_relaxed)};
+        const f32 lf[3] = {lisFwd_[0].load(std::memory_order_relaxed), lisFwd_[1].load(std::memory_order_relaxed), lisFwd_[2].load(std::memory_order_relaxed)};
+        const f32 lr[3] = {lisRight_[0].load(std::memory_order_relaxed), lisRight_[1].load(std::memory_order_relaxed), lisRight_[2].load(std::memory_order_relaxed)};
+        const f32 sp[3] = {vo.posX.load(std::memory_order_relaxed), vo.posY.load(std::memory_order_relaxed), vo.posZ.load(std::memory_order_relaxed)};
+        const SpatialResult r = spatialize(s, vo.volume.load(std::memory_order_relaxed), lp, lf, lr, sp);
+        const f32 base = route * vo.fadePub.load(std::memory_order_relaxed);
+        outL = r.gainL * base;
+        outR = r.gainR * base;
+        if (shelf) *shelf = r.filterGain;
+        if (dopplerOut && s.doppler) {
+            const f32 lv[3] = {lisVel_[0].load(std::memory_order_relaxed), lisVel_[1].load(std::memory_order_relaxed), lisVel_[2].load(std::memory_order_relaxed)};
+            *dopplerOut = dopplerPitch(lp, lv, sp, s.velocity);
+        }
+        return;
+    }
 
     const f32 dx = vo.posX.load(std::memory_order_relaxed) - lisPos_[0].load(std::memory_order_relaxed);
     const f32 dy = vo.posY.load(std::memory_order_relaxed) - lisPos_[1].load(std::memory_order_relaxed);
@@ -553,10 +706,19 @@ f32 Mixer::advanceFade(Voice& vo, u32 frames, bool& stopNow) {
 }
 
 // Adds one voice into the output block. Returns false when the voice has ended.
-bool Mixer::renderVoice(Voice& vo, f32* out, u32 frames) {
+bool Mixer::renderVoice(Voice& vo, f32* out, u32 frames, u32 outCh) {
     StreamDecoder* st = vo.stream;
     const SoundData* snd = vo.sound;
     if (frames == 0) return false;
+
+    // Pause: one block ramps the voice to silence (the cursor is put back afterwards), then it holds and renders nothing.
+    const bool stoppingNow = vo.stopping.load(std::memory_order_acquire);
+    const bool pausedReq = vo.paused.load(std::memory_order_acquire) && !stoppingNow;
+    if (stoppingNow && vo.pauseSilenced) return false;
+    if (pausedReq && vo.pauseSilenced) return true;
+    if (!pausedReq && vo.pauseSilenced) { vo.pauseSilenced = false; vo.resumeRamp = true; }
+    const f64 cursorAtEntry = vo.cursor;
+    if (st && st->takeFlush()) { st->consume(st->available()); vo.cursor = 0.0; }
 
     u32 srcFrames = 0, srcCh = 0, srcRate = 0;
     if (st) {
@@ -574,14 +736,27 @@ bool Mixer::renderVoice(Voice& vo, f32* out, u32 frames) {
     // A stream still filling its first buffer is silent and does not advance.
     if (st && !st->prebuffered()) return !stopping;
 
-    const f64 step = (static_cast<f64>(srcRate) / static_cast<f64>(sampleRate_))
-                   * static_cast<f64>(vo.pitch.load(std::memory_order_relaxed));
-
     bool fadeStop = false;
     advanceFade(vo, frames, fadeStop);
 
-    f32 targetL = 0.0f, targetR = 0.0f;
-    if (!stopping) voiceGains(vo, targetL, targetR);
+    f32 targetL = 0.0f, targetR = 0.0f, shelfGain = 1.0f, doppler = 1.0f;
+    if (!stopping) voiceGains(vo, targetL, targetR, &shelfGain, &doppler);
+    if (pausedReq) targetL = targetR = 0.0f;
+
+    const f64 step = (static_cast<f64>(srcRate) / static_cast<f64>(sampleRate_))
+                   * static_cast<f64>(vo.pitch.load(std::memory_order_relaxed))
+                   * static_cast<f64>(speedScale_.load(std::memory_order_relaxed)) * static_cast<f64>(doppler);
+
+    // Godot's attenuation filter: a one-stage high shelf at the voice's cutoff, only while it has something to take off.
+    const bool shelving = shelfGain < 0.999f;
+    BiquadCoeffs shelf;
+    if (shelving) {
+        shelf = godotFilterCoeffs(FilterMode::HighShelf, vo.sp[9].load(std::memory_order_relaxed), 1.0f, shelfGain, 1, static_cast<f32>(sampleRate_));
+    } else if (vo.shelfActive) {
+        vo.shL.reset();
+        vo.shR.reset();
+    }
+    vo.shelfActive = shelving;
 
     // Occlusion: follow the published value, then low-pass and duck.
     const f32 occTarget = clampf(vo.occlusion.load(std::memory_order_relaxed), 0.0f, 1.0f);
@@ -686,6 +861,7 @@ bool Mixer::renderVoice(Voice& vo, f32* out, u32 frames) {
         }
 
         if (filtering) { sl = vo.filtL.process(lp, sl); sr = vo.filtR.process(lp, sr); }
+        if (shelving) { sl = vo.shL.process(shelf, sl); sr = vo.shR.process(shelf, sr); }
         if (f >= tailStart && tailLen > 0) {
             const f32 tg = static_cast<f32>(nRender - f) / static_cast<f32>(tailLen + 1);
             sl *= tg;
@@ -695,7 +871,7 @@ bool Mixer::renderVoice(Voice& vo, f32* out, u32 frames) {
         vo.gainL += dL;
         vo.gainR += dR;
 
-        if (channels_ == 1) {
+        if (outCh == 1) {
             out[f] += (sl * vo.gainL + sr * vo.gainR) * 0.5f;
         } else {
             out[f * 2 + 0] += sl * vo.gainL;
@@ -714,9 +890,15 @@ bool Mixer::renderVoice(Voice& vo, f32* out, u32 frames) {
         st->consume(consumed);
         vo.cursor -= static_cast<f64>(consumed);
         if (vo.cursor < 0.0) vo.cursor = 0.0;
+        vo.streamFrames += consumed;
+        vo.posPub.store(static_cast<f64>(vo.streamStart + vo.streamFrames), std::memory_order_relaxed);
         if (streamEnd) return false;
         if (st->endReached() && st->available() == 0) return false;
+    } else if (!ended) {
+        if (pausedReq) vo.cursor = cursorAtEntry;       // the ramp-out block did not move the playhead
+        vo.posPub.store(vo.cursor, std::memory_order_relaxed);
     }
+    if (pausedReq) vo.pauseSilenced = true;
 
     if (ended) return false;
     if (fadeStop) return false;
@@ -736,6 +918,20 @@ void Mixer::mix(f32* out, u32 frames) {
 
     for (u32 i = 0; i < samples; ++i) out[i] = 0.0f;
 
+    // Without the bus graph this is one chunk, the whole call: exactly the mixer that existed before the graph.
+    const bool graphOn = graph_.active();
+    u32 done = 0;
+    while (done < frames) {
+        const u32 n = graphOn ? std::min(frames - done, BusGraph::kBlock) : frames;
+        mixChunk(out + static_cast<usize>(done) * channels_, n, graphOn);
+        done += n;
+    }
+
+    for (u32 i = 0; i < samples; ++i) out[i] = clampf(out[i], -1.0f, 1.0f);
+}
+
+// One chunk: voices into the output (legacy) or into their graph buses, the reverb return, then the graph's Master folded in.
+void Mixer::mixChunk(f32* out, u32 frames, bool graphOn) {
     // Reverb runs while it is wanted, and for one more block to ramp its return out.
     const f32 wet = rvWet_.load(std::memory_order_relaxed);
     const bool wantSend = wet > 1.0e-4f;
@@ -745,6 +941,10 @@ void Mixer::mix(f32* out, u32 frames) {
         std::fill(sendBuf_.begin(), sendBuf_.begin() + frames, 0.0f);
         if (wantSend) sendPtr_ = sendBuf_.data();
     }
+
+    // The graph's structure lock is held for the chunk; when a script is editing the layout the graph voices wait one block.
+    const bool graphLocked = graphOn && graph_.begin();
+    if (graphLocked) graph_.clear(frames);
 
     for (Voice& vo : voices_) {
         // CLAIMED FOR THE DURATION OF THE BLOCK. Reading the state and then rendering left the
@@ -756,7 +956,14 @@ void Mixer::mix(f32* out, u32 frames) {
                                               std::memory_order_acq_rel, std::memory_order_acquire))
             continue;
 
-        if (renderVoice(vo, out, frames)) {
+        const i32 gb = graphOn ? vo.graphBus.load(std::memory_order_relaxed) : -1;
+        if (gb >= 0 && !graphLocked) {
+            vo.state.store(static_cast<u32>(State::Active), std::memory_order_release);
+            continue;
+        }
+        const bool alive = gb >= 0 ? renderVoice(vo, graph_.busBuffer(gb), frames, 2)
+                                   : renderVoice(vo, out, frames, channels_);
+        if (alive) {
             // Still sounding: hand it back. A plain store is right -- this thread owns the voice
             // while it is Rendering, so nothing else can have changed the state under it.
             vo.state.store(static_cast<u32>(State::Active), std::memory_order_release);
@@ -796,7 +1003,14 @@ void Mixer::mix(f32* out, u32 frames) {
         rvPrevWet_ = 0.0f;
     }
 
-    for (u32 i = 0; i < samples; ++i) out[i] = clampf(out[i], -1.0f, 1.0f);
+    if (graphLocked) {
+        graph_.process(frames);
+        const f32* m = graph_.busBuffer(0);
+        const f32 mg = master_.load(std::memory_order_relaxed);
+        if (channels_ == 1) for (u32 f = 0; f < frames; ++f) out[f] += 0.5f * (m[2 * f] + m[2 * f + 1]) * mg;
+        else for (u32 f = 0; f < frames * 2; ++f) out[f] += m[f] * mg;
+        graph_.end();
+    }
 }
 
 } // namespace aver::audio

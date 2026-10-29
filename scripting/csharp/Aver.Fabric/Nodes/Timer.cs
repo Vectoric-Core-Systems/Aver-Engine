@@ -1,7 +1,7 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
-// Timer, and the UI placeholders CanvasItem and Control (stored properties; the UI runtime is a later package).
+// Timer.
 
 namespace Aver.Fabric;
 
@@ -90,97 +90,4 @@ public class Timer : Node
 
 }
 
-/// <summary>Anything drawn in 2D or UI space (Godot's CanvasItem). Only the shared properties are kept here.</summary>
-public class CanvasItem : Node
-{
-    public new class SignalName : Node.SignalName
-    {
-        public static readonly StringName Draw = "draw";
-        public static readonly StringName VisibilityChanged = "visibility_changed";
-        public static readonly StringName Hidden = "hidden";
-        public static readonly StringName ItemRectChanged = "item_rect_changed";
-    }
-
-    private bool _visible = true;
-
-    public bool Visible
-    {
-        get => _visible;
-        set
-        {
-            if (_visible == value) return;
-            _visible = value;
-            OnShownChanged();
-            EmitSignal(SignalName.VisibilityChanged);
-            if (!value) EmitSignal(SignalName.Hidden);
-        }
-    }
-
-    /// <summary>This item's own visible flag changed (before the signal). A <see cref="SubViewportContainer"/> shows or hides its view with it.</summary>
-    internal virtual void OnShownChanged() { }
-
-    public Color Modulate { get; set; } = new(1, 1, 1, 1);
-    public Color SelfModulate { get; set; } = new(1, 1, 1, 1);
-    public int ZIndex { get; set; }
-    public bool TopLevel { get; set; }
-
-    public void Show() => Visible = true;
-    public void Hide() => Visible = false;
-
-    public bool IsVisibleInTree()
-    {
-        if (!IsInsideTree()) return false;
-        for (Node? n = this; n is CanvasItem ci; n = n.GetParent())
-            if (!ci._visible) return false;
-        return true;
-    }
-
-    public void QueueRedraw() { }
-}
-
-/// <summary>A UI element (Godot's Control). The layout properties are stored; the UI runtime that lays out and draws them is a later package.</summary>
-public class Control : CanvasItem
-{
-    public enum MouseFilterEnum { Stop = 0, Pass = 1, Ignore = 2 }
-
-    public new class SignalName : CanvasItem.SignalName
-    {
-        public static readonly StringName Resized = "resized";
-        public static readonly StringName GuiInput = "gui_input";
-        public static readonly StringName MouseEntered = "mouse_entered";
-        public static readonly StringName MouseExited = "mouse_exited";
-        public static readonly StringName FocusEntered = "focus_entered";
-        public static readonly StringName FocusExited = "focus_exited";
-        public static readonly StringName SizeFlagsChanged = "size_flags_changed";
-        public static readonly StringName MinimumSizeChanged = "minimum_size_changed";
-    }
-
-    private Vector2 _position, _size;
-
-    public Vector2 Position { get => _position; set { _position = value; OnRectChanged(); } }
-    public Vector2 Size { get => _size; set { _size = value; OnRectChanged(); } }
-
-    /// <summary>The control's rectangle changed. A <see cref="SubViewportContainer"/> keeps the view it shows in step with it.</summary>
-    internal virtual void OnRectChanged() { }
-
-    public Vector2 CustomMinimumSize { get; set; }
-    public Vector2 PivotOffset { get; set; }
-    public float Rotation { get; set; }
-    public Vector2 Scale { get; set; } = Vector2.One;
-    public float AnchorLeft { get; set; }
-    public float AnchorTop { get; set; }
-    public float AnchorRight { get; set; }
-    public float AnchorBottom { get; set; }
-    public float OffsetLeft { get; set; }
-    public float OffsetTop { get; set; }
-    public float OffsetRight { get; set; }
-    public float OffsetBottom { get; set; }
-    public MouseFilterEnum MouseFilter { get; set; } = MouseFilterEnum.Stop;
-    public string TooltipText { get; set; } = "";
-
-    public Vector2 GetMinimumSize() => CustomMinimumSize;
-    public Rect2 GetRect() => new(Position, Size);
-    public void GrabFocus() { }
-    public bool HasFocus() => false;
-    public void ReleaseFocus() { }
-}
+// CanvasItem and Control moved to CanvasItem.cs and Control.cs (G5 U1).

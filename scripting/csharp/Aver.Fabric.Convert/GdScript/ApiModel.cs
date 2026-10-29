@@ -43,7 +43,9 @@ internal sealed class ApiModel
     public INamedTypeSymbol? Fabric(string name)
     {
         if (_types.TryGetValue(name, out INamedTypeSymbol? hit)) return hit;
-        INamedTypeSymbol? t = _comp.GetTypeByMetadataName("Aver.Fabric." + name.Replace('.', '+'));
+        // GDScript spells the integer vectors and rectangle Vector2i / Vector3i / Vector4i / Rect2i; GodotSharp (and so Aver.Fabric) spells them with a capital I.
+        string lookup = name is "Vector2i" or "Vector3i" or "Vector4i" or "Rect2i" ? name[..^1] + "I" : name;
+        INamedTypeSymbol? t = _comp.GetTypeByMetadataName("Aver.Fabric." + lookup.Replace('.', '+'));
         _types[name] = t;
         return t;
     }

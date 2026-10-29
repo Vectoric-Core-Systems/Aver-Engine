@@ -86,6 +86,8 @@ public class ViewportTexture : Texture2D
 
     public override Vector2 GetSize() => Source != null ? new Vector2(Source.DrawnSize.X, Source.DrawnSize.Y) : Vector2.Zero;
 
+    internal override ulong EngineHandle => NativeHandle;
+
     /// <summary>The engine's texture for the view (an engine texture handle), 0 until the view has been drawn once. It changes when the view is resized;
     /// <see cref="Generation"/> says when.</summary>
     public ulong NativeHandle => Source?.NativeTexture ?? 0;
@@ -369,27 +371,7 @@ public class SubViewportContainer : Control
             if (c is SubViewport sv) yield return sv;
     }
 
-    /// <summary>The container's rectangle in its parent: <see cref="Position"/> and <see cref="Size"/> when a script or the scene set them, else what its anchors
-    /// and offsets make of the parent's size (the parent Control's size, or the window's for a top-level one).</summary>
-    internal Rect2 LayoutRect()
-    {
-        bool anchored = AnchorLeft != 0 || AnchorTop != 0 || AnchorRight != 0 || AnchorBottom != 0 || OffsetLeft != 0 || OffsetTop != 0 || OffsetRight != 0 || OffsetBottom != 0;
-        if (Size.X != 0 || Size.Y != 0 || !anchored) return new Rect2(Position, Size);
-        Vector2 parent = GetParent() is Control pc && (pc.Size.X != 0 || pc.Size.Y != 0) ? pc.Size
-                       : GetViewport() is { } vp ? new Vector2(vp.Size.X, vp.Size.Y) : new Vector2(1280, 720);
-        float l = parent.X * AnchorLeft + OffsetLeft, r = parent.X * AnchorRight + OffsetRight;
-        float t = parent.Y * AnchorTop + OffsetTop, b = parent.Y * AnchorBottom + OffsetBottom;
-        return new Rect2(new Vector2(l, t), new Vector2(Math.Max(0f, r - l), Math.Max(0f, b - t)));
-    }
-
-    /// <summary>The container's rectangle in window pixels: its own layout plus its Control ancestors' positions (Godot offsets by the parents' rectangles).</summary>
-    public Rect2 GetGlobalRect()
-    {
-        Rect2 local = LayoutRect();
-        Vector2 p = local.Position;
-        for (Node? n = GetParent(); n is Control c; n = n.GetParent()) p += c.Position;
-        return new Rect2(p, local.Size);
-    }
+    // The container's rectangle is the Control's: anchors and offsets against the parent (G5 U1 gave Control the real layout), GetGlobalRect() from it.
 
     internal override void OnEnteringTree()
     {
@@ -409,9 +391,17 @@ public class SubViewportContainer : Control
         base.OnExitingTree();
     }
 
-    internal override void OnRectChanged() => Refresh();
+    internal override void OnRectChanged()
+    {
+        base.OnRectChanged();
+        Refresh();
+    }
 
-    internal override void OnShownChanged() => Refresh();
+    internal override void OnShownChanged()
+    {
+        base.OnShownChanged();
+        Refresh();
+    }
 
     // Puts the first viewport child on screen (or takes it off) and sizes it. Safe to call at any time.
     internal void Refresh()

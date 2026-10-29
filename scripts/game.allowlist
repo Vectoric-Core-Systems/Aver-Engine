@@ -45,6 +45,10 @@ Aver.LevelInstance.Abi.dll   ?AVER_MODULE_SCENE
 # The GDExtension host of the Fabric Connector (a converted Godot project's native plugins), and the API dump its
 # method-hash checks read from beside the executable.
 Aver.Fabric.GDExt.Abi.dll
+# The property-track animation seam of Aver.Fabric's AnimationPlayer (a converted Godot project's animations).
+Aver.Anim.Abi.dll
+# The polygon navigation seam of Aver.Fabric's navigation nodes and A* graphs (a converted Godot project's NavigationRegion3D / NavigationAgent3D).
+Aver.Nav.Abi.dll
 extension_api.json
 Aver.Render.PBR.dll   ?AVER_MODULE_PBR
 Aver.Render.Voxi.dll  ?AVER_MODULE_VOXI

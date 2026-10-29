@@ -329,7 +329,9 @@ public partial class Node
                 case "_unique": unique = text is "1" or "true"; continue;
                 case "_connections": _pendingConnections = text; continue;
                 case "_persistent": Persistent = text is "1" or "true"; continue;
-                case "_class": continue;   // read by FromEntity for a plain placement; a class placement already is its class
+                case "_class":   // read by FromEntity for a plain placement; a class placement already is its class
+                    if (this is Control && PlainText(text) is { Length: > 0 } carried && carried != GetClass()) SetMeta("_class", carried);   // a Button / Label carrier: theme lookups use the Godot class
+                    continue;
             }
             if (!VariantText.TryParse(text, out Variant v))
             {
@@ -362,7 +364,7 @@ public partial class Node
                     own._SetupLocalToScene();
                     v = own;
                 }
-                if (!MemberAccess.TrySet(this, key, v))
+                if (!MemberAccess.TrySet(this, key, v) && !TryDynamicSet(key, v))
                     Log.Warn($"[Fabric] {GetClass()} '{_name}' has no property '{key}'; the value is kept in metadata");
                     // kept so a script can still read it with GetMeta
                 else continue;

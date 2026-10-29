@@ -205,6 +205,8 @@ if(TARGET Aver.Audio)
     SOURCES
       src/Wav.cpp
       src/OcAudio.cpp
+      # .ocbus -- an audio bus layout (Godot AudioBusLayout parity, G5 S1); the layout structs are plain data in aver/audio/BusLayout.hpp.
+      src/OcBusLayout.cpp
     DEPS
       Aver.Formats
       Aver.Audio

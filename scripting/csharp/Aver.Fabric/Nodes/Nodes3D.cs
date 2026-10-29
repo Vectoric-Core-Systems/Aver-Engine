@@ -127,6 +127,30 @@ public class MeshInstance3D : GeometryInstance3D
         set { _mesh = value; ApplyMesh(); }
     }
 
+    // Blend shapes by name (an animation's blend-shape track writes them). The engine's morph weight of that name follows once the node has an entity.
+    private readonly Dictionary<string, float> _blendShapes = new(StringComparer.Ordinal);
+
+    public void SetBlendShapeValueByName(string name, float value)
+    {
+        _blendShapes[name] = value;
+        if (NodeHost.Current.IsEngine && Self.IsValid) Self.SetMorphWeight(name, value);
+    }
+
+    public float GetBlendShapeValueByName(string name) => _blendShapes.TryGetValue(name, out float v) ? v : 0f;
+
+    internal override bool TryDynamicSet(string name, Variant value)
+    {
+        if (!name.StartsWith("blend_shapes/", StringComparison.Ordinal)) return base.TryDynamicSet(name, value);
+        SetBlendShapeValueByName(name["blend_shapes/".Length..], value.AsSingle());
+        return true;
+    }
+
+    internal override bool TryDynamicGet(string name, out Variant value)
+    {
+        if (name.StartsWith("blend_shapes/", StringComparison.Ordinal)) { value = GetBlendShapeValueByName(name["blend_shapes/".Length..]); return true; }
+        return base.TryDynamicGet(name, out value);
+    }
+
     public int GetSurfaceOverrideMaterialCount() => 1;
     public Material? GetSurfaceOverrideMaterial(int surface) => surface == 0 ? MaterialOverride : null;
     public void SetSurfaceOverrideMaterial(int surface, Material? material) { if (surface == 0) MaterialOverride = material; }
@@ -406,6 +430,10 @@ public class Camera3D : Node3D
 {
     public enum ProjectionType { Perspective = 0, Orthogonal = 1, Frustum = 2 }
     public enum KeepAspectEnum { Width = 0, Height = 1 }
+    public enum DopplerTrackingEnum { Disabled = 0, IdleStep = 1, PhysicsStep = 2 }
+
+    /// <summary>Whether the camera's own motion is tracked for the Doppler shift of AudioStreamPlayer3D sounds (G5 S1).</summary>
+    public DopplerTrackingEnum DopplerTracking { get; set; } = DopplerTrackingEnum.Disabled;
 
     private float _fov = 75f, _near = 0.05f, _far = 4000f;
 

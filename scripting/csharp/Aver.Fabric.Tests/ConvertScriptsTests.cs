@@ -224,20 +224,20 @@ static class ConvertScriptsTests
     private static void MissingMembers()
     {
         const string src =
-            "using Godot;\npublic partial class Sample : CharacterBody3D\n{\n    private NavigationRegion3D _label;\n    public override void _PhysicsProcess(double delta)\n    {\n        MoveAndSlide();\n" +
-            "        ApplyFloorSnap();\n        var p = GetNode<AudioStreamPlayer3D>(\"Voice\");\n    }\n}\n";
+            "using Godot;\npublic partial class Sample : CharacterBody3D\n{\n    private XRCamera3D _label;\n    public override void _PhysicsProcess(double delta)\n    {\n        MoveAndSlide();\n" +
+            "        ApplyFloorSnap();\n        var p = GetNode<XROrigin3D>(\"Voice\");\n    }\n}\n";
         ConversionResult r = Run(src);
         T.Check("it does not compile, and says so", !r.Success && r.Errors.Count == 3, string.Join("; ", r.Errors));
         string text = TextOf(r);
         T.Check("each failing line is marked", text.Split('\n').Count(l => l.Contains("// FABRIC: Aver.Fabric has no")) == 3);
-        T.Check("the first mark names the type", text.Contains("private NavigationRegion3D _label; // FABRIC: Aver.Fabric has no 'NavigationRegion3D'"));
+        T.Check("the first mark names the type", text.Contains("private XRCamera3D _label; // FABRIC: Aver.Fabric has no 'XRCamera3D'"));
         ReportItem? snap = Item(r, "CS0103", "ApplyFloorSnap");
         // Source lines 4, 8 and 9; the output has the two header lines in front.
         T.Check("the missing method is reported by its exact name, unsupported, with its line", snap is { Rating: Rating.Unsupported, Line: 10 }, snap?.ToJson() ?? "no item");
-        T.Check("the missing generic argument is reported", Item(r, "CS0246", "AudioStreamPlayer3D") is { Line: 11 });
+        T.Check("the missing generic argument is reported", Item(r, "CS0246", "XROrigin3D") is { Line: 11 });
         T.Check("the item names the class it is in", snap?.Node == "Sample");
         T.Check("the script as a whole is unsupported", r.Scripts[0].Items[0].Rating == Rating.Unsupported && r.Scripts[0].ErrorCount == 3);
-        T.Check("an error carries the output path and position", r.Errors.Any(e => e.Output == "Content/Scripts/Sample.cs" && e.Line == 6 && e.Member == "NavigationRegion3D"));
+        T.Check("an error carries the output path and position", r.Errors.Any(e => e.Output == "Content/Scripts/Sample.cs" && e.Line == 6 && e.Member == "XRCamera3D"));
         T.Check("and the mark is on that very line", text.Split('\n')[5].Contains("// FABRIC:") && text.Split('\n')[9].Contains("ApplyFloorSnap"));
     }
 

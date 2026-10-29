@@ -1,0 +1,9 @@
+[gd_resource type="Theme" format=3 uid="uid://uigamenodetheme"]
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_node"]
+bg_color = Color(0.3, 0.3, 0.3, 1)
+border_color = Color(1, 1, 1, 1)
+
+[resource]
+Control/colors/font_color = Color(1, 1, 1, 1)
+Panel/styles/panel = SubResource("StyleBoxFlat_node")

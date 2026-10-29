@@ -20,6 +20,8 @@ public static class ClassDB
             s_scanned = true;
             foreach (System.Type t in typeof(GodotObject).Assembly.GetTypes())
                 if (t.IsPublic && !t.IsNested && typeof(GodotObject).IsAssignableFrom(t)) s_types.TryAdd(t.Name, t);
+            // Godot's class names that GodotSharp spells differently in C#.
+            s_types.TryAdd("AudioStreamWAV", typeof(AudioStreamWav));
         }
     }
 
@@ -67,7 +69,7 @@ public static class ClassDB
         {
             try
             {
-                if (!MemberAccess.TrySet(o, name, value))
+                if (!MemberAccess.TrySet(o, name, value) && !o.TryDynamicSet(name, value))
                     Aver.Scripting.Log.Warn($"[Fabric] {@class} has no property '{name}'");
             }
             catch (Exception ex)

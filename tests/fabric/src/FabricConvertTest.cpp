@@ -372,16 +372,15 @@ int main() {
     // Stand-ins for what the runtime does not have.
     {
         const int hud = find(w, {"Main", "Hud"});
-        check(hud >= 0 && w.placements[static_cast<usize>(hud)].className == "Control" && propIs(w, hud, "_class", "\"Label\"") && propIs(w, hud, "text", "\"Hello\""), "a Label is a Control placeholder");
+        check(hud >= 0 && w.placements[static_cast<usize>(hud)].className == "Label" && propIs(w, hud, "text", "\"Hello\""), "a Label is placed as Aver.Fabric's Label (G5 U2: no longer a Control placeholder)");
         const int icon = find(w, {"Main", "Icon"});
         check(icon >= 0 && w.placements[static_cast<usize>(icon)].className == "Node" && propIs(w, icon, "_class", "\"Sprite2D\""), "a 2D node is kept as a plain node");
         const int hum = find(w, {"Main", "Hum"});
-        check(hum >= 0 && w.placements[static_cast<usize>(hum)].className == "Node3D" && propIs(w, hum, "_class", "\"AudioStreamPlayer3D\""), "an unsupported 3D class is a Node3D carrier");
+        check(hum >= 0 && w.placements[static_cast<usize>(hum)].className == "Node3D" && propIs(w, hum, "_class", "\"XROrigin3D\""), "an unsupported 3D class is a Node3D carrier");
         const int route = find(w, {"Main", "Route"});
         const gd::GodotVariant curve = variantOf(w, route, "curve");
-        check(route >= 0 && w.placements[static_cast<usize>(route)].className == "Node3D" && propIs(w, route, "_class", "\"Path3D\"") &&
-                  curve.type == gd::GodotVType::Dictionary && curve.find("__class") && curve.find("__class")->asString() == "Curve3D" && curve.find("_data"),
-              "a Path3D is recorded: a Node3D carrier whose Curve3D data is kept as a dictionary");
+        check(route >= 0 && w.placements[static_cast<usize>(route)].className == "Path3D" && curve.type == gd::GodotVType::Object && curve.s == "Curve3D" && curve.find("_data"),
+              "a Path3D is a Path3D (G5 A2) whose Curve3D is an Object(Curve3D, ...) value");
         const int hinge = find(w, {"Main", "Hinge"});
         check(hinge >= 0 && propIs(w, hinge, "_class", "\"HingeJoint3D\"") && propIs(w, hinge, "node_a", "NodePath(\"../Ball\")"), "a joint keeps its parameters as properties");
     }
@@ -516,7 +515,7 @@ int main() {
         };
         check(has("\"type\":\"Sprite2D\"", "\"rating\":\"unsupported\"", "2D nodes are out of scope"), "a 2D node is reported unsupported");
         check(has("\"type\":\"HingeJoint3D\"", "\"rating\":\"unsupported\"", "\"kind\":\"node\""), "a joint is reported unsupported");
-        check(has("\"type\":\"Label\"", "\"rating\":\"approximated\"", "placeholders"), "a UI control is reported approximated");
+        check(has("\"type\":\"Label\"", "\"property\":\"text\"", "\"rating\":\"converted\""), "a UI control's text is reported converted (G5 U2: Aver.Fabric's Label reads it)");
         check(has("\"type\":\"StandardMaterial3D\"", "\"property\":\"uv1_scale\"", "\"rating\":\"converted\""), "uv1_scale is converted now (the .ocmat FX record, G4 R6)");
         check(has("\"type\":\"ShaderMaterial\"", "\"rating\":\"unsupported\"", "G6"), "a ShaderMaterial is reported unsupported (G6)");
         check(has("\"property\":\"ambient_light_sky_contribution\"", "\"type\":\"Environment\"", "\"rating\":\"unsupported\""), "an Environment setting with no record is reported");

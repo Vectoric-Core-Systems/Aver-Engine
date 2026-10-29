@@ -6,6 +6,7 @@
 
 #include "aver/formats/ImportedMaterial.hpp"
 #include "aver/formats/OcMesh.hpp"
+#include "aver/formats/OcProject.hpp"
 #include "aver/formats/OcWorld.hpp"
 #include "aver/formats/godot/GodotProjectFs.hpp"
 
@@ -112,6 +113,12 @@ bool isNode3DClass(const std::string& type);
 bool isControlClass(const std::string& type);
 bool is2DClass(const std::string& type);
 bool isCsgClass(const std::string& type);   // G4 R7: the CSGShape3D family (FabricGeometry.cpp)
+bool isNavigationResourceType(const std::string& type);   // G5 N1: NavigationMesh (FabricNav.cpp)
+bool isAnimTreeResourceType(const std::string& type);   // G5 A2: AnimationNode*, Curve, Curve3D, Gradient (FabricAnimTree.cpp)
+bool isAudioExt(const std::string& ext);                // G5 S1: ".wav", ".ogg", ".mp3" (FabricAudio.cpp)
+bool isAudioStreamResourceType(const std::string& type);   // G5 S1: AudioStreamRandomizer, Playlist, Synchronized, Interactive, Polyphonic, Generator, WAV
+bool isStyleBoxType(const std::string& type);              // G5 U1: StyleBoxFlat, StyleBoxTexture, StyleBoxLine, StyleBoxEmpty (FabricUi.cpp)
+bool isFontExt(const std::string& ext);                    // G5 U1: ".ttf", ".otf", ".woff", ".woff2"
 // Classes a project's GDExtension plugins register (FabricExtensions.cpp), name -> whether it is spatial. Such a node is placed as a
 // GDExtensionNode / GDExtensionNode3D with the Prop extension_class (docs/plans/fabric/G3_GDEXT.md section 7).
 void setExtensionClasses(const std::map<std::string, bool>& classes);
@@ -124,6 +131,13 @@ struct ClassChoice {
     bool carrier = false;            // placed as a stand-in: `_class` metadata names the real class
 };
 ClassChoice chooseClass(const std::string& godotType);
+
+// G5 U2 (FabricWidgets.cpp): the widget classes Aver.Fabric has, what they read, and the resources they hold.
+bool isWidgetClass(const std::string& type);
+bool isWidgetDynamicKey(const std::string& type, const std::string& key);                      // "popup/item_0/text", "item_0/text", "tab_0/title"
+int widgetPropertyRating(const std::string& type, const std::string& key, std::string& why);   // 1 converted, 2 approximated, 0 not a property of the class
+bool widgetClassChoice(const std::string& type, ClassChoice& out);
+bool isWidgetResourceType(const std::string& type);                                            // LabelSettings, FontVariation, SystemFont, ButtonGroup, Shortcut, ...
 
 // G4 R5: the name the engine knows a SubViewport by, and a baked material reaches it through ("@rt:viewport.<key>"): the level's name, then the node names from the
 // level's root, e.g. "main:Main/Screen/View". Plain characters only (it travels in a .ocmat texture reference and a level Prop).
@@ -271,6 +285,66 @@ public:
     // What the geometry node classes (MultiMeshInstance3D, Label3D, Sprite3D, the CSG family, GridMap) need beyond their properties: baked mesh and material
     // assets added to `props`, and child nodes (collision bodies, instanced grid items) appended to `synthetic`, which the caller emits below the node.
     void geometryNode(FNode& fn, std::vector<std::pair<std::string, Var>>& props, std::vector<std::unique_ptr<FNode>>& synthetic, ClassChoice& cc);
+
+    // ---- FabricAnimation.cpp (G5 A1) -------------------------------------------------------------------------------
+    // A Godot Animation resource (sub-resource or .tres) written as an .ocanim with property tracks; the asset path "Animations/<name>.ocanim" or "".
+    std::string animationAsset(const std::string& key, const std::vector<gd::GodotProperty>& props, const gd::GodotDocBase& doc,
+                               const std::string& nameHint, const Where& w);
+    // An AnimationLibrary resource as a dictionary { animation name: Resource("Animations/x.ocanim") } for Aver.Fabric's AnimationPlayer.libraries.
+    Var animationLibraryValue(const std::vector<gd::GodotProperty>& props, const gd::GodotDocBase& doc, const Where& w);
+    // The AnimationPlayer node's own properties, rated.
+    void noteAnimationPlayer(const FNode& fn);
+    std::map<std::string, std::string> animationAssets_;
+    std::set<std::string> animationStemsUsed_;
+
+    // ---- FabricAudio.cpp (G5 S1) ----
+    // A sound file copied to Content/Audio/<its res:// path>; the asset path or "" (reported either way).
+    std::string audioFileAsset(const std::string& resPath, const Where& w);
+    // The value for an audio file used as a stream: Resource("Audio/x.wav"), or Object(AudioStreamWAV|MP3|OggVorbis, ...) when its import settings loop it.
+    Var audioFileValue(const std::string& resPath, const std::string& godotType, const Where& w, const std::string& prop, int line);
+    // AudioStreamRandomizer / Playlist / Synchronized / Interactive / Polyphonic / Generator / WAV data as `Object(Class, "prop": value, ...)`.
+    Var audioStreamObject(const std::string& type, const std::vector<gd::GodotProperty>& props, const gd::GodotDocBase& doc, const Where& w, int line);
+    // Rates the properties of AudioStreamPlayer, AudioStreamPlayer3D and AudioListener3D.
+    void noteAudioNode(const FNode& fn);
+    // A Godot AudioBusLayout written as an .ocbus; the default layout becomes the project's AUDIO.BUSLAYOUT.
+    bool convertBusLayout(const std::string& resPath, const gd::GodotResource& r);
+    std::map<std::string, std::string> audioAssets_;
+    std::string audioBusLayout_;
+
+    // ---- FabricAnimTree.cpp (G5 A2) ----
+    // An AnimationNode* / Curve / Curve3D / Gradient resource as `Object(Class, "prop": value, ...)` for Aver.Fabric to build (nested resources resolved, every property rated).
+    Var animTreeObject(const std::string& type, const std::vector<gd::GodotProperty>& props, const gd::GodotDocBase& doc, const Where& w, int line);
+    // Rates the properties of AnimationTree, Skeleton3D, BoneAttachment3D, SkeletonIK3D, Path3D, PathFollow3D, SpringArm3D, RemoteTransform3D and the VisibleOnScreen nodes.
+    void noteAnimTreeNode(const FNode& fn);
+
+    // ---- FabricNav.cpp (G5 N1) ----
+    // A NavigationMesh resource as `Object(NavigationMesh, "vertices": ..., "polygons": ..., "cell_size": ...)` in Godot space, every property rated; a mesh with no polygons is reported as needing a run-time bake.
+    Var navigationMeshObject(const std::string& type, const std::vector<gd::GodotProperty>& props, const gd::GodotDocBase& doc, const Where& w, int line);
+    // Rates the properties of NavigationRegion3D, NavigationLink3D, NavigationObstacle3D and NavigationAgent3D.
+    void noteNavigationNode(const FNode& fn);
+
+    // ---- FabricUi.cpp (G5 U1) ----
+    // A StyleBox* resource as `Object(StyleBoxFlat|Texture|Line|Empty, "prop": value, ...)` for a node's theme_override_styles or a script's value, every property rated.
+    Var styleBoxObject(const std::string& type, const std::vector<gd::GodotProperty>& props, const gd::GodotDocBase& doc, const Where& w, int line);
+    // A Theme resource (a .tres or a sub-resource) written as Content/Themes/<name>.octheme; the asset path "Themes/<name>.octheme" or "".
+    std::string themeAsset(const std::string& key, const std::vector<gd::GodotProperty>& props, const gd::GodotDocBase& doc, const std::string& nameHint, const Where& w);
+    // A font file copied to Content/Fonts/<its res:// path>; the asset path or "".
+    std::string fontAsset(const std::string& resPath, const Where& w);
+    // Rates the properties of the Control family (every Control class shares the layout, input, tooltip and theme properties).
+    void noteUiNode(const FNode& fn);
+    // The project's display/window/stretch/*, gui/theme/custom and gui/timers settings into the project description.
+    void convertProjectUi(fmt::ProjectDesc& d);
+    std::map<std::string, std::string> themeAssets_, fontAssets_;
+    std::set<std::string> themeStemsUsed_;
+
+    // ---- FabricWidgets.cpp (G5 U2) ----
+    // LabelSettings, FontVariation, SystemFont, FontFile, ButtonGroup, Shortcut and input events as `Object(...)` values (a ButtonGroup as one shared Resource()), every property rated.
+    Var widgetResource(const std::string& type, const std::vector<gd::GodotProperty>& props, const gd::GodotDocBase& doc, const Where& w, int line, const std::string& id);
+    // Content/UI/Fonts.ocfonts: one family per converted font file, the project's default font first.
+    void writeFontSet(const std::string& defaultFontAsset);
+    void noteFontAsset(const std::string& asset);
+    std::map<std::string, std::string> buttonGroups_;
+    std::set<std::string> fontFiles_;
 
     // ---- FabricScene.cpp -------------------------------------------------------------------------------------------
     bool convertScenes();

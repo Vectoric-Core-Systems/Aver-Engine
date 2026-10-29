@@ -8,6 +8,12 @@ aver_add_module(Aver.Synapse
   SOURCES
     src/Nav.cpp
     src/NavBake.cpp
+    # Polygon navigation maps (regions, links, layers, costs, funnel paths), their geometry baker, avoidance on the ORCA core, and
+    # the generic A* graphs of Godot parity (docs/plans/fabric/G5_PARITY.md N1). Pure for the same reason Nav.cpp is.
+    src/NavMesh.cpp
+    src/NavMeshAvoid.cpp
+    src/NavMeshBake.cpp
+    src/NavGraph.cpp
     # The behaviour-tree evaluator -- pure for the identical reason Nav.cpp is: a hand-built tree
     # and a pair of fake Condition/Action functions test the whole algorithm with no world at all.
     src/Bt.cpp

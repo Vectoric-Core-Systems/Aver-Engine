@@ -183,3 +183,69 @@ target_compile_definitions(FabricGeometryTest PRIVATE
   AVER_FABRIC_DATA="${CMAKE_SOURCE_DIR}/tests/fabric/data")
 set_target_properties(FabricGeometryTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# FabricAnimTest -- G5 A1 (AnimationPlayer) through the converter on tests/fabric/data/AnimGame: Animation sub-resources and an external .tres become
+# .ocanim files with property tracks (transform tracks through the axis map), the player node keeps its libraries, and every track is rated.
+add_executable(FabricAnimTest src/FabricAnimTest.cpp)
+target_link_libraries(FabricAnimTest PRIVATE Aver.Formats.Godot Aver.Formats Aver.Platform Aver.Core)
+add_dependencies(FabricAnimTest AverAssetC)
+target_compile_definitions(FabricAnimTest PRIVATE
+  AVER_ASSETC_EXE="$<TARGET_FILE:AverAssetC>"
+  AVER_FABRIC_DATA="${CMAKE_SOURCE_DIR}/tests/fabric/data")
+set_target_properties(FabricAnimTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# FabricAudioTest -- G5 S1 (audio) through the converter on tests/fabric/data/AudioGame: sound files copied under Content/Audio, stream resources as Object(...) values, the audio
+# nodes placed as their classes, the default AudioBusLayout as an .ocbus named by AUDIO.BUSLAYOUT, and every item rated (the Ogg / MP3 decoders, the effects, VideoStreamPlayer).
+add_executable(FabricAudioTest src/FabricAudioTest.cpp)
+target_link_libraries(FabricAudioTest PRIVATE Aver.Formats.Audio Aver.Formats.Godot Aver.Formats Aver.Audio Aver.Platform Aver.Core)
+add_dependencies(FabricAudioTest AverAssetC)
+target_compile_definitions(FabricAudioTest PRIVATE
+  AVER_ASSETC_EXE="$<TARGET_FILE:AverAssetC>"
+  AVER_FABRIC_DATA="${CMAKE_SOURCE_DIR}/tests/fabric/data")
+set_target_properties(FabricAudioTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# FabricNavTest -- G5 N1 (navigation) through the converter on tests/fabric/data/NavGame: regions, links, obstacles and agents placed as their classes, baked
+# NavigationMesh resources as Object(...) values, a never-baked mesh flagged for a run-time bake, and every node and baking parameter rated.
+add_executable(FabricNavTest src/FabricNavTest.cpp)
+target_link_libraries(FabricNavTest PRIVATE Aver.Formats.Godot Aver.Formats Aver.Platform Aver.Core)
+add_dependencies(FabricNavTest AverAssetC)
+target_compile_definitions(FabricNavTest PRIVATE
+  AVER_ASSETC_EXE="$<TARGET_FILE:AverAssetC>"
+  AVER_FABRIC_DATA="${CMAKE_SOURCE_DIR}/tests/fabric/data")
+set_target_properties(FabricNavTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# FabricUiTest -- G5 U1 (Control foundations) through the converter on tests/fabric/data/UiGame: the Control family placed as its classes, style boxes as Object(...) values,
+# Theme resources as .octheme files the engine's parser reads, the project's stretch / theme / tooltip settings as UI.* keys, and every property rated.
+add_executable(FabricUiTest src/FabricUiTest.cpp)
+target_link_libraries(FabricUiTest PRIVATE Aver.UI Aver.Formats.Godot Aver.Formats Aver.Platform Aver.Core)
+add_dependencies(FabricUiTest AverAssetC)
+target_compile_definitions(FabricUiTest PRIVATE
+  AVER_ASSETC_EXE="$<TARGET_FILE:AverAssetC>"
+  AVER_FABRIC_DATA="${CMAKE_SOURCE_DIR}/tests/fabric/data")
+set_target_properties(FabricUiTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# FabricWidgetTest -- G5 U2 (widgets and rich text) through the converter on tests/fabric/data/WidgetGame: widgets placed as their classes, every property rated, LabelSettings /
+# FontVariation / SystemFont / ButtonGroup / Shortcut as Object(...) values or one shared Resource(), and UI/Fonts.ocfonts the engine's font set parser reads.
+add_executable(FabricWidgetTest src/FabricWidgetTest.cpp)
+target_link_libraries(FabricWidgetTest PRIVATE Aver.UI Aver.Formats.Godot Aver.Formats Aver.Platform Aver.Core)
+add_dependencies(FabricWidgetTest AverAssetC)
+target_compile_definitions(FabricWidgetTest PRIVATE
+  AVER_ASSETC_EXE="$<TARGET_FILE:AverAssetC>"
+  AVER_FABRIC_DATA="${CMAKE_SOURCE_DIR}/tests/fabric/data")
+set_target_properties(FabricWidgetTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# FabricTreeTest -- G5 A2 (AnimationTree, skeleton, path and helper nodes) through the converter on tests/fabric/data/TreeGame: the tree's graph becomes one
+# Object(...) value, the nodes are placed as their classes, curves and bones keep their data, and every node and property is rated.
+add_executable(FabricTreeTest src/FabricTreeTest.cpp)
+target_link_libraries(FabricTreeTest PRIVATE Aver.Formats.Godot Aver.Formats Aver.Platform Aver.Core)
+add_dependencies(FabricTreeTest AverAssetC)
+target_compile_definitions(FabricTreeTest PRIVATE
+  AVER_ASSETC_EXE="$<TARGET_FILE:AverAssetC>"
+  AVER_FABRIC_DATA="${CMAKE_SOURCE_DIR}/tests/fabric/data")
+set_target_properties(FabricTreeTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

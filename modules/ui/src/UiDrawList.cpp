@@ -98,6 +98,22 @@ void UiDrawList::addTexturedRect(f32 x, f32 y, f32 w, f32 h, u64 texture,
     append(6, texture);
 }
 
+// Triangles built elsewhere: straight colours in, premultiplied out.
+void UiDrawList::addMesh(const UiVertex* verts, usize vertCount, const u32* indices, usize indexCount, u64 texture) {
+    if (!verts || !indices || vertCount == 0 || indexCount < 3 || clip().empty()) return;
+    const usize whole = indexCount - indexCount % 3;
+    for (usize i = 0; i < whole; ++i)
+        if (indices[i] >= vertCount) return;
+    const u32 base = static_cast<u32>(verts_.size());
+    for (usize i = 0; i < vertCount; ++i) {
+        UiVertex v = verts[i];
+        v.rgba = uiPremultiply(v.rgba);
+        verts_.push_back(v);
+    }
+    for (usize i = 0; i < whole; ++i) idx_.push_back(base + indices[i]);
+    append(static_cast<u32>(whole), texture);
+}
+
 // One textured quad per glyph, all on the font's atlas. See the header for why the pen is the
 // baseline rather than a box corner.
 f32 UiDrawList::addText(f32 x, f32 y, std::string_view text, const UiFont& font, u32 rgba) {

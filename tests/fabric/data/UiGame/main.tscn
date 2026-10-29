@@ -1,0 +1,121 @@
+[gd_scene load_steps=6 format=3 uid="uid://uigamemain01"]
+
+[ext_resource type="Theme" path="res://ui/node_theme.tres" id="1_nodetheme"]
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_hud"]
+bg_color = Color(0.9, 0.2, 0.1, 0.8)
+border_width_bottom = 3
+border_color = Color(1, 1, 1, 1)
+corner_radius_top_left = 12
+corner_radius_bottom_right = 12
+skew = Vector2(4, 0)
+draw_center = false
+bogus_stylebox_option = 1
+
+[sub_resource type="StyleBoxLine" id="StyleBoxLine_rule"]
+color = Color(1, 1, 0, 1)
+thickness = 3
+vertical = true
+
+[sub_resource type="Theme" id="Theme_inline"]
+Label/colors/font_color = Color(0, 1, 0, 1)
+Label/constants/line_spacing = 9
+
+[node name="Root" type="Control"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+theme = ExtResource("1_nodetheme")
+tooltip_text = "the whole screen"
+mouse_filter = 1
+
+[node name="Hud" type="PanelContainer" parent="."]
+layout_mode = 1
+anchors_preset = 10
+anchor_right = 1.0
+offset_bottom = 60.0
+grow_horizontal = 2
+theme_type_variation = &"HeaderPanel"
+theme_override_styles/panel = SubResource("StyleBoxFlat_hud")
+theme_override_colors/font_color = Color(0.2, 0.4, 0.6, 1)
+theme_override_constants/margin = 4
+
+[node name="Row" type="HBoxContainer" parent="Hud"]
+layout_mode = 2
+alignment = 1
+theme_override_constants/separation = 12
+
+[node name="Grid" type="GridContainer" parent="Hud/Row"]
+layout_mode = 2
+size_flags_horizontal = 3
+columns = 3
+
+[node name="Cell" type="Control" parent="Hud/Row/Grid"]
+custom_minimum_size = Vector2(40, 24)
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 4
+size_flags_stretch_ratio = 2.0
+focus_mode = 2
+focus_neighbor_right = NodePath("../Cell2")
+focus_next = NodePath("../Cell2")
+tooltip_text = "a cell"
+
+[node name="Cell2" type="Control" parent="Hud/Row/Grid"]
+custom_minimum_size = Vector2(40, 24)
+layout_mode = 2
+focus_mode = 1
+
+[node name="Rule" type="Panel" parent="Hud/Row"]
+layout_mode = 2
+theme_override_styles/panel = SubResource("StyleBoxLine_rule")
+mouse_filter = 2
+clip_contents = true
+
+[node name="Margin" type="MarginContainer" parent="."]
+layout_mode = 1
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -100.0
+offset_top = -50.0
+offset_right = 100.0
+offset_bottom = 50.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_constants/margin_left = 8
+theme_override_constants/margin_top = 6
+
+[node name="Scroll" type="ScrollContainer" parent="Margin"]
+layout_mode = 2
+horizontal_scroll_mode = 3
+vertical_scroll_mode = 2
+scroll_vertical = 12
+
+[node name="Center" type="CenterContainer" parent="Margin/Scroll"]
+layout_mode = 2
+use_top_left = true
+
+[node name="Cap" type="Label" parent="Margin/Scroll/Center"]
+layout_mode = 2
+theme = SubResource("Theme_inline")
+text = "carried"
+horizontal_alignment = 1
+pivot_offset = Vector2(5, 5)
+mouse_default_cursor_shape = 2
+texture_filter = 2
+
+[node name="Go" type="Button" parent="."]
+layout_mode = 0
+offset_left = 20.0
+offset_top = 400.0
+offset_right = 120.0
+offset_bottom = 440.0
+text = "Go"
+rotation = 0.3
+focus_mode = 0

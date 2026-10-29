@@ -21,6 +21,9 @@ public class World3D : Resource
     public PhysicsDirectSpaceState3D DirectSpaceState => _space;
 
     public Rid Space => new(1);
+
+    /// <summary>The navigation map of this world (the one regions, links and agents join by default).</summary>
+    public Rid NavigationMap => NavigationServer3D.GetDefaultMapRid();
 }
 
 /// <summary>A ray query (Godot's PhysicsRayQueryParameters3D). Defaults are Godot's: bodies yes, areas no, back faces yes, from inside no.</summary>

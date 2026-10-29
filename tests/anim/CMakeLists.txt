@@ -70,3 +70,16 @@ foreach(t FaceRig Viseme)
   set_target_properties(${t}Test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endforeach()
 # [wave9/morph end]
+
+# PropAnimTest -- property-track animation with Godot's AnimationPlayer semantics (docs/plans/fabric/G5_PARITY.md, A1):
+# track sampling per interpolation and update mode, loop and ping-pong boundaries, crossfade weights, method-call order
+# across frame boundaries, signal order, the queue, and the .ocanim PROP chunk. Same link set and the same reason.
+add_executable(PropAnimTest src/PropAnimTest.cpp)
+target_link_libraries(PropAnimTest PRIVATE Aver.Anim Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(PropAnimTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# PropAnimAbiTest -- the same property-track animation through the plain-C seam Aver.Fabric calls (modules/anim.abi): a clip built with the exports,
+# played on a player, values and events read back in order, an .ocanim saved and loaded, and the neutral answers for stale handles.
+add_executable(PropAnimAbiTest src/PropAnimAbiTest.cpp)
+target_link_libraries(PropAnimAbiTest PRIVATE Aver.Anim.Abi Aver.Core)
+set_target_properties(PropAnimAbiTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

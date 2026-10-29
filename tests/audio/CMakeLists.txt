@@ -34,6 +34,22 @@ add_executable(AudioStreamTest src/AudioStreamTest.cpp)
 target_link_libraries(AudioStreamTest PRIVATE Aver.Audio Aver.Core Aver.Platform)
 set_target_properties(AudioStreamTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# AudioBusTest / AudioSpatialTest -- G5 S1 (Godot audio parity, docs/AUDIO.md "Bus graph"): the AudioEffect* set against reference responses,
+# the bus graph's routing rules (send order, solo chains, bypass, sidechain, layouts) and Godot's AudioStreamPlayer3D maths, all offline.
+add_executable(AudioBusTest src/AudioBusTest.cpp)
+target_link_libraries(AudioBusTest PRIVATE Aver.Audio Aver.Core Aver.Platform)
+set_target_properties(AudioBusTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+add_executable(AudioSpatialTest src/AudioSpatialTest.cpp)
+target_link_libraries(AudioSpatialTest PRIVATE Aver.Audio Aver.Core Aver.Platform)
+set_target_properties(AudioSpatialTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# AudioAbiTest -- the same through the plain-C seam in OFFLINE mode (the real mixer, no device), plus the .ocbus layout format.
+if(TARGET Aver.Audio.Abi)
+  add_executable(AudioAbiTest src/AudioAbiTest.cpp)
+  target_link_libraries(AudioAbiTest PRIVATE Aver.Audio.Abi Aver.Formats.Audio Aver.Formats Aver.Audio Aver.Core Aver.Platform)
+  set_target_properties(AudioAbiTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
 # AudioSceneTest -- CReverbZone and CAudioOcclusion on a real scene::World, mixer and raycast faked.
 if(TARGET Aver.Audio.Scene)
   add_executable(AudioSceneTest src/AudioSceneTest.cpp)
