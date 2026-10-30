@@ -411,7 +411,7 @@ add_executable(ProjectCopyTest
   src/ProjectCopyTest.cpp
   ${CMAKE_SOURCE_DIR}/sandbox/src/ProjectScaffold.cpp)
 target_include_directories(ProjectCopyTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
-target_link_libraries(ProjectCopyTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+target_link_libraries(ProjectCopyTest PRIVATE Aver.Extensions Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(ProjectCopyTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # TemplateScaffoldTest -- listTemplatesIn()/listTemplates()/scaffoldProjectFromTemplate(), the New
@@ -437,7 +437,7 @@ if(TARGET Aver.Upgrade)
     ${CMAKE_SOURCE_DIR}/sandbox/src/ProjectScaffold.cpp)
   target_include_directories(ProjectMigrateTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
   target_link_libraries(ProjectMigrateTest PRIVATE
-    Aver.Upgrade Aver.Formats Aver.Core Aver.Platform)
+    Aver.Upgrade Aver.Extensions Aver.Formats Aver.Core Aver.Platform)
   set_target_properties(ProjectMigrateTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
@@ -447,8 +447,18 @@ add_executable(TemplateScaffoldTest
   ${CMAKE_SOURCE_DIR}/sandbox/src/ProjectScaffold.cpp)
 target_include_directories(TemplateScaffoldTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
 target_compile_definitions(TemplateScaffoldTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
-target_link_libraries(TemplateScaffoldTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+target_link_libraries(TemplateScaffoldTest PRIVATE Aver.Extensions Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(TemplateScaffoldTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# ProjectUpgradeTest -- inspectProject/applyProjectUpgrade on a project's script references to an extension's assembly: a dead
+# ProjectReference from before the extension existed becomes a HintPath to the installed assembly, a HintPath left behind by a moved
+# engine is repointed, and the manifest gains the EXTENSION line. Same ProjectCopyTest precedent; the installed list is passed in.
+add_executable(ProjectUpgradeTest
+  src/ProjectUpgradeTest.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/ProjectScaffold.cpp)
+target_include_directories(ProjectUpgradeTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(ProjectUpgradeTest PRIVATE Aver.Extensions Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(ProjectUpgradeTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # EditorEntitySnapshotTest -- EditorEntitySnapshot.hpp/.cpp: capture a live entity's components,
 # destroy it, rebuild it from the snapshot, and check the rebuild is byte-exact where it should be

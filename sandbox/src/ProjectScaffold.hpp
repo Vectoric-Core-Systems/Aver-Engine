@@ -111,7 +111,9 @@ struct ProjectFix {
         CreateCsproj,      // no Scripts.csproj at all
         AddReference,      // an engine assembly the .csproj does not name
         AddMaterialsGlob,  // the <Compile Include="..\Materials\**\*.cs" /> item
-        RepointReference,  // a ProjectReference whose target does not exist
+        RepointReference,  // a ProjectReference or HintPath whose target does not exist
+        UseExtensionAssembly,  // a dead ProjectReference to an assembly an installed extension ships: becomes a HintPath to it
+        AddExtension,      // the scripts use an installed extension the manifest has no EXTENSION line for
     };
     Kind kind = Kind::CreateFolder;
     std::string summary;   // one line, for the prompt
@@ -124,8 +126,20 @@ struct ProjectUpgrade {
     bool empty() const { return fixes.empty(); }
 };
 
+// A managed assembly an installed extension ships (<Extensions>/<Name>/managed/<file>), which project scripts reference by HintPath.
+struct ExtensionAssembly {
+    std::string extension, version;
+    std::string assembly;   // the file name without .dll
+    std::string path;       // absolute
+};
+
+// The managed runtime assemblies of every Ready extension beside the executable.
+std::vector<ExtensionAssembly> installedExtensionAssemblies();
+
 // Reports what `proj` is missing. Reads only; writes nothing. Empty means the project is current.
 ProjectUpgrade inspectProject(const fmt::ProjectDesc& proj);
+// The same against a given list of installed extension assemblies (tests).
+ProjectUpgrade inspectProject(const fmt::ProjectDesc& proj, const std::vector<ExtensionAssembly>& installed);
 
 // Applies everything `inspectProject` found. The `.csproj` is merged, never regenerated. Returns
 // false with `err` set on the first failure, having applied whatever came before it.

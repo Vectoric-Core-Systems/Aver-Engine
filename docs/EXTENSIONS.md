@@ -70,6 +70,13 @@ An extension with `managed.runtime` assemblies brings C# into the game: `Aver.Fa
 
 `.ocproject` records the extensions a project needs: `EXTENSION <Name> [<version>]` (see [formats/FORMAT_SPECS.md](formats/FORMAT_SPECS.md)). A converter writes its own line (`EXTENSION FabricConnector 0.1.0`). When a project opens in the game or the editor, `aver::ext::warnMissingProjectExtensions` logs one warning for each named extension that is not installed, or is installed but Refused, naming it. The project still loads.
 
+The editor's project upgrade (`inspectProject` / `applyProjectUpgrade` in `sandbox/src/ProjectScaffold.cpp`, test `ProjectUpgradeTest`) knows every Ready extension's `managed.runtime` assemblies and fixes script references to them:
+- A dead `ProjectReference` to `<Assembly>.csproj` becomes a `HintPath` reference (`Private` false) to the installed `<Assembly>.dll`. This covers projects converted before the extension existed, whose scripts referenced the assembly's C# project inside the engine tree.
+- A `HintPath` to one of those assemblies that no longer resolves, because the engine or its `Extensions` folder moved, is repointed at the installed copy.
+- A project whose scripts use an installed extension but whose manifest has no `EXTENSION` line for it gets one, with the installed version. Its other lines are kept.
+
+A reference that no installed extension explains is reported as before ("cannot resolve; edit by hand"). `ProjectUpgradeTest --project <manifest>` runs the upgrade on one real project against the extensions installed beside it and prints each fix.
+
 ## Command line
 
 `AverAssetC <cmd> ...` for a command it does not know asks the loader. If an installed, Ready extension lists `cmd`, AverAssetC loads it and exits with the code `runCommand` returns. `AverAssetC --help` ends with each extension command, its usage and its summary. With nothing installed an unknown command is a usage error (exit 2).

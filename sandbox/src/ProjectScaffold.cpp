@@ -9,6 +9,7 @@
 #endif
 #include <cstring>
 
+#include "aver/extensions/Extensions.hpp"
 #include "aver/formats/detail/TextScan.hpp"
 #include "aver/platform/FileSystem.hpp"
 #include "aver/core/Version.hpp"
@@ -1107,7 +1108,87 @@ std::vector<std::string> projectReferences(const std::string& xml) {
     return out;
 }
 
+// Every <HintPath>...</HintPath> value in the file, in order.
+std::vector<std::string> hintPaths(const std::string& xml) {
+    std::vector<std::string> out;
+    usize i = 0;
+    while ((i = xml.find("<HintPath>", i)) != std::string::npos) {
+        const usize a = i + 10;
+        const usize b = xml.find("</HintPath>", a);
+        if (b == std::string::npos) break;
+        out.push_back(xml.substr(a, b - a));
+        i = b;
+    }
+    return out;
+}
+
+std::string fileStem(const std::string& path) {
+    std::string s = path;
+    std::replace(s.begin(), s.end(), '\\', '/');
+    return std::filesystem::path(s).stem().string();
+}
+
+bool sameNameCI(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) return false;
+    for (usize k = 0; k < a.size(); ++k)
+        if (std::tolower(static_cast<unsigned char>(a[k])) != std::tolower(static_cast<unsigned char>(b[k]))) return false;
+    return true;
+}
+
+const ExtensionAssembly* findAssembly(const std::vector<ExtensionAssembly>& installed, const std::string& stem) {
+    for (const ExtensionAssembly& a : installed)
+        if (sameNameCI(a.assembly, stem)) return &a;
+    return nullptr;
+}
+
+// MSBuild path from the Scripts folder to `target`, in the same form engineProjectReference writes.
+std::string msbuildRelative(const std::string& scriptsDir, const std::string& target) {
+    std::error_code ec;
+    const std::filesystem::path rel = std::filesystem::relative(target, scriptsDir, ec);
+    std::string s = ec || rel.empty() ? target : rel.string();
+    std::replace(s.begin(), s.end(), '/', '\\');
+    return s;
+}
+
+std::string extensionReferenceXml(const std::string& assembly, const std::string& hintPath) {
+    return "    <Reference Include=\"" + assembly + "\">\n      <HintPath>" + hintPath +
+           "</HintPath>\n      <Private>false</Private>\n    </Reference>\n";
+}
+
+// Removes the <ProjectReference Include="include" .../> element (self-closing or with a closing tag) and the indentation and line
+// break around it. False when it is not there.
+bool eraseProjectReference(std::string& xml, const std::string& include) {
+    const usize at = xml.find("<ProjectReference Include=\"" + include + "\"");
+    if (at == std::string::npos) return false;
+    const usize close = xml.find('>', at);
+    if (close == std::string::npos) return false;
+    usize end = close + 1;
+    if (xml[close - 1] != '/') {
+        const usize tail = xml.find("</ProjectReference>", close);
+        if (tail == std::string::npos) return false;
+        end = tail + 19;
+    }
+    usize begin = at;
+    while (begin > 0 && (xml[begin - 1] == ' ' || xml[begin - 1] == '\t')) --begin;
+    if (end < xml.size() && xml[end] == '\r') ++end;
+    if (end < xml.size() && xml[end] == '\n') ++end;
+    xml.erase(begin, end - begin);
+    return true;
+}
+
 } // namespace
+
+std::vector<ExtensionAssembly> installedExtensionAssemblies() {
+    std::vector<ExtensionAssembly> out;
+    ext::Registry registry;
+    registry.scanDefault();
+    for (const ext::Extension& e : registry.extensions()) {
+        if (!e.ready()) continue;
+        for (const std::string& m : e.managedRuntime)
+            out.push_back({e.name, e.version, fileStem(m), e.dir + "/managed/" + m});
+    }
+    return out;
+}
 
 // Lists what an older project is missing: content folders, the csproj, engine references, dead
 // references and the materials glob.
@@ -1130,6 +1211,10 @@ bool hasAnyCSharp(const fmt::ProjectDesc& proj) {
 }
 
 ProjectUpgrade inspectProject(const fmt::ProjectDesc& proj) {
+    return inspectProject(proj, installedExtensionAssemblies());
+}
+
+ProjectUpgrade inspectProject(const fmt::ProjectDesc& proj, const std::vector<ExtensionAssembly>& installed) {
     ProjectUpgrade up;
     if (!proj.valid()) return up;
 
@@ -1179,6 +1264,12 @@ ProjectUpgrade inspectProject(const fmt::ProjectDesc& proj) {
                             ref.empty() ? std::string("(engine tree not found from the editor)") : ref});
     }
 
+    // The installed extensions whose assemblies the scripts use, for the EXTENSION check below.
+    std::vector<const ExtensionAssembly*> usedExtensions;
+    auto noteUsed = [&](const ExtensionAssembly* a) {
+        if (std::find(usedExtensions.begin(), usedExtensions.end(), a) == usedExtensions.end()) usedExtensions.push_back(a);
+    };
+
     // ---- references whose target is not on disk ----
     for (const std::string& ref : projectReferences(xml)) {
         std::error_code ec;
@@ -1186,6 +1277,15 @@ ProjectUpgrade inspectProject(const fmt::ProjectDesc& proj) {
         const std::filesystem::path abs =
             (std::filesystem::path(scriptsDir) / ref).lexically_normal();
         if (std::filesystem::exists(abs, ec)) continue;
+        // A project written when an extension's assembly was built from a C# project in the engine tree: it now references the
+        // extension's installed assembly instead.
+        if (const ExtensionAssembly* a = findAssembly(installed, fileStem(ref))) {
+            noteUsed(a);
+            up.fixes.push_back({ProjectFix::Kind::UseExtensionAssembly,
+                                "Reference " + a->assembly + " from the installed " + a->extension + " extension",
+                                ref + "  ->  " + msbuildRelative(scriptsDir, a->path)});
+            continue;
+        }
         std::string repointed;
         for (const RefSpec& r : kEngineRefSpecs) {
             const std::string leaf = std::filesystem::path(r.tail).filename().string();
@@ -1197,6 +1297,30 @@ ProjectUpgrade inspectProject(const fmt::ProjectDesc& proj) {
                             "Repoint a reference whose target no longer exists",
                             ref + (repointed.empty() ? std::string("  ->  (cannot resolve; edit by hand)")
                                                      : "  ->  " + repointed)});
+    }
+
+    // ---- HintPaths to an extension's assembly: repointed when the engine (and so its Extensions folder) has moved ----
+    for (const std::string& hint : hintPaths(xml)) {
+        const ExtensionAssembly* a = findAssembly(installed, fileStem(hint));
+        if (!a) continue;
+        noteUsed(a);
+        std::error_code ec;
+        if (std::filesystem::exists((std::filesystem::path(scriptsDir) / hint).lexically_normal(), ec)) continue;
+        up.fixes.push_back({ProjectFix::Kind::RepointReference,
+                            "Repoint " + a->assembly + " to the installed " + a->extension + " extension",
+                            hint + "  ->  " + msbuildRelative(scriptsDir, a->path)});
+    }
+
+    std::vector<std::string> recorded;
+    for (const fmt::ProjectExtension& e : proj.extensions) recorded.push_back(e.name);
+    for (const ExtensionAssembly* a : usedExtensions) {
+        bool listed = false;
+        for (const std::string& name : recorded)
+            if (sameNameCI(name, a->extension)) listed = true;
+        if (listed) continue;
+        recorded.push_back(a->extension);
+            up.fixes.push_back({ProjectFix::Kind::AddExtension, "Record that the scripts need the " + a->extension + " extension",
+                                a->extension + (a->version.empty() ? std::string() : " " + a->version)});
     }
 
     if (xml.find("..\\Materials\\") == std::string::npos && xml.find("../Materials/") == std::string::npos)
@@ -1225,10 +1349,42 @@ bool applyProjectUpgrade(const fmt::ProjectDesc& proj, const ProjectUpgrade& up,
         }
     }
 
+    // EXTENSION lines, merged into the manifest as it is on disk.
+    std::vector<fmt::ProjectExtension> addExtensions;
+    for (const ProjectFix& f : up.fixes) {
+        if (f.kind != ProjectFix::Kind::AddExtension) continue;
+        const usize space = f.detail.find(' ');
+        addExtensions.push_back({f.detail.substr(0, space), space == std::string::npos ? std::string() : f.detail.substr(space + 1)});
+    }
+    if (!addExtensions.empty()) {
+        std::string text;
+        if (proj.manifestPath.empty() || !readFileText(proj.manifestPath, text)) {
+            if (err) *err = "could not read " + proj.manifestPath;
+            return false;
+        }
+        fmt::ProjectDesc updated = proj;
+        for (fmt::ProjectExtension& e : addExtensions) updated.extensions.push_back(std::move(e));
+        if (!writeFileText(proj.manifestPath, fmt::writeOcproject(updated, text))) {
+            if (err) *err = "could not write " + proj.manifestPath;
+            return false;
+        }
+    }
+
     // The .csproj edits, in one read-modify-write.
     std::string xml;
     if (!fileExists(csproj) || !readFileText(csproj, xml)) return true;
     bool touched = false;
+    std::string extensionRefs;
+
+    for (const ProjectFix& f : up.fixes) {
+        if (f.kind != ProjectFix::Kind::UseExtensionAssembly) continue;
+        const usize arrow = f.detail.find("  ->  ");
+        if (arrow == std::string::npos) continue;
+        const std::string from = f.detail.substr(0, arrow);
+        if (!eraseProjectReference(xml, from)) continue;
+        extensionRefs += extensionReferenceXml(fileStem(from), f.detail.substr(arrow + 6));
+        touched = true;
+    }
 
     for (const ProjectFix& f : up.fixes) {
         if (f.kind != ProjectFix::Kind::RepointReference) continue;
@@ -1252,11 +1408,12 @@ bool applyProjectUpgrade(const fmt::ProjectDesc& proj, const ProjectUpgrade& up,
     for (const ProjectFix& f : up.fixes)
         if (f.kind == ProjectFix::Kind::AddMaterialsGlob) wantGlob = true;
 
-    if (!additions.empty() || wantGlob) {
+    if (!additions.empty() || wantGlob || !extensionRefs.empty()) {
         std::string block;
         block += "\n  <!-- Added by the Aver Engine editor when this project was upgraded.\n";
         block += "       Everything above is as you left it. -->\n";
         if (!additions.empty()) block += "  <ItemGroup>\n" + additions + "  </ItemGroup>\n";
+        if (!extensionRefs.empty()) block += "  <ItemGroup>\n" + extensionRefs + "  </ItemGroup>\n";
         if (wantGlob) {
             block += "  <ItemGroup>\n";
             block += "    <Compile Include=\"..\\Materials\\**\\*.cs\" />\n";
