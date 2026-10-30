@@ -39,7 +39,7 @@ internal enum TickPass
     Process = 1,
 }
 
-/// <summary>Whether an actor ticks while the game is paused (Godot's <c>process_mode</c>).</summary>
+/// <summary>Whether an actor ticks while the game is paused (the process mode).</summary>
 public enum PauseMode
 {
     /// <summary>Whatever the nearest actor above it in the scene tree uses; Pausable at the top.</summary>

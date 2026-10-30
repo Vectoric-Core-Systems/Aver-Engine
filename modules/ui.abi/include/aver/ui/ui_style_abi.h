@@ -1,5 +1,5 @@
 #pragma once
-// Aver.UI style ABI (G5 U1): the pieces of Godot's Control rendering the managed Aver.Fabric UI asks the engine for. Style
+// Aver.UI style ABI: the pieces of control rendering the managed UI layer asks the engine for. Style
 // boxes are tessellated here and drawn into the same draw list as the HUD (ui_abi.h), so the renderer needs nothing new;
 // the stretch arithmetic and the built-in default theme text have one implementation, in C++. Part of the Aver.UI.Abi
 // library; plain C, int32 / float / pointers only.
@@ -48,7 +48,7 @@ AVER_UI_API int32_t aver_ui_style_abi_version(void);
 // opaque pointer; its fields are documented by aver/ui/UiStyleBox.hpp and mirrored by Aver.Fabric.UiStyleBoxStruct.
 AVER_UI_API int32_t aver_ui_stylebox_struct_size(void);
 
-// Fills `outStyleBox` (a UiStyleBox) with the defaults of `kind` (Godot's property defaults).
+// Fills `outStyleBox` (a UiStyleBox) with the defaults of `kind` (its usual property defaults).
 AVER_UI_API void aver_ui_stylebox_defaults(int32_t kind, void* outStyleBox);
 
 // ---- style boxes ---------------------------------------------------------------------------------------------------
@@ -73,12 +73,12 @@ AVER_UI_API int32_t aver_ui_ninepatch_slices(const void* styleBox, float x, floa
 // ---- stretch -------------------------------------------------------------------------------------------------------
 
 // in6 = {mode, aspect, scaleMode, baseW, baseH, scale}; out11 = {screenX, screenY, screenW, screenH, contentW, contentH,
-// renderW, renderH, scaleX, scaleY, letterboxed}. Godot's content-scale rules (aver/ui/UiStretch.hpp).
+// renderW, renderH, scaleX, scaleY, letterboxed}. The content-scale rules (aver/ui/UiStretch.hpp).
 AVER_UI_API void aver_ui_stretch_compute(const float* in6, float windowW, float windowH, float* out11);
 
 // ---- the default theme -----------------------------------------------------------------------------------------------
 
-// The .octheme text of the built-in Godot-like default theme. Copies at most cap - 1 bytes plus a terminator when outText
+// The .octheme text of the built-in default theme. Copies at most cap - 1 bytes plus a terminator when outText
 // is not null; returns the full length.
 AVER_UI_API int32_t aver_ui_theme_default_text(void* outText, int32_t cap);
 

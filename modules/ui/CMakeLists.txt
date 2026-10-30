@@ -24,7 +24,7 @@ aver_add_module(Aver.UI
     src/UiTreeInput.cpp
     src/UiTreeDraw.cpp
     src/UiLayoutAsset.cpp
-    # Godot-parity control rendering (docs/plans/fabric/G5_PARITY.md U1): style boxes, the .octheme resource, stretch maths.
+    # Control rendering: style boxes, the .octheme resource, stretch maths.
     src/UiStyleBox.cpp
     src/UiThemeSheet.cpp
     src/UiStretch.cpp

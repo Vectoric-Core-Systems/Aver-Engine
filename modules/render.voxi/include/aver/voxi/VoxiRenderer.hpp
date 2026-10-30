@@ -211,17 +211,17 @@ public:
     void scenePass(rhi::IRenderContext& ctx) override;
     // Volumetric fog on the sky (the shade sites fog everything else); see VoxiFroxelFog.hpp.
     void transparentPass(rhi::IRenderContext& ctx) override;
-    // G4 R8: local fog volumes (Godot FogVolume) for the coming frames; they live inside the volumetric fog, so they show only with
+    // G4 R8: local fog volumes for the coming frames; they live inside the volumetric fog, so they show only with
     // Settings::volumetricFog on. Null or an empty block clears them (today's passes). Copies. Once per frame from the host.
     void setFogVolumes(const FogVolumeBlock* block) { froxel_.setFogVolumes(block); }
-    // G6 SH3: converted Godot fog shaders the volumes of the next block name, and their uniform registers (see VoxiFroxelFog::setFogShaders).
-    void setFogShaders(std::vector<rhi::GodotEnvProgram> shaders) { froxel_.setFogShaders(std::move(shaders)); }
+    // Custom fog programs the volumes of the next block name, and their uniform registers (see VoxiFroxelFog::setFogShaders).
+    void setFogShaders(std::vector<rhi::CustomEnvProgram> shaders) { froxel_.setFogShaders(std::move(shaders)); }
     void setFogShaderRegisters(const std::vector<std::vector<f32>>& perShader) { froxel_.setFogShaderRegisters(perShader); }
-    // G6 SH3: a converted Godot sky shader as the sky: the background, reflections, ambient light and fog's sky colour read it. Null goes back to the engine's own
-    // sky. The shader is compiled into the scene pipelines, which are rebuilt the next frame; a changed uniform value rebuilds them too (the registers are baked in).
+    // A custom sky program as the sky: the background, reflections, ambient light and fog's sky colour read it. Null goes back to the engine's own
+    // sky. The program is compiled into the scene pipelines, which are rebuilt the next frame; a changed uniform value rebuilds them too (the registers are baked in).
     // Opt-in: with none set the shader text and the pipelines are what they always were. Process-wide, like the material graph registry.
-    void setGodotSky(const rhi::GodotEnvProgram* program);
-    bool godotSkyActive() const { return godotSkyPso_ != 0; }
+    void setCustomSky(const rhi::CustomEnvProgram* program);
+    bool customSkyActive() const { return customSkyPso_ != 0; }
     bool volumetricFogOn() const { return settings_.volumetricFog; }
     // Ray-driven frames record at endFrame so moving objects use this frame's transforms.
     bool wantsLateScenePass() const override;
@@ -333,7 +333,7 @@ private:
     // Injection accumulator: R32_UINT Tex3D, (res*4) x res x res, channels interleaved along x.
     rhi::TextureHandle  voxelAccumTex_ = 0;
     rhi::PipelineHandle voxelPso_ = 0, mipPso_ = 0, clearPso_ = 0, debugPso_ = 0;
-    rhi::PipelineHandle godotSkyPso_ = 0;   // G6 SH3: PSGodotSky, the Godot sky as the background
+    rhi::PipelineHandle customSkyPso_ = 0;  // PSCustomSky, the custom sky program as the background
     u64 scenePipelineSkyRev_ = 0;           // the sky revision the scene pipelines were built with
     rhi::PipelineHandle resolvePso_ = 0;
     // Fog occlusion: kAirVisResolution^3, R16F. At t17(SRV)/u16(UAV). Created with volume, released on off edge.

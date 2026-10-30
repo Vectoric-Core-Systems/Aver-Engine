@@ -109,9 +109,9 @@ void VoxiFroxelFog::setFogVolumes(const FogVolumeBlock* block) {
     vol_.header[0] = static_cast<f32>(volCount_);
 }
 
-// G6 SH3: the fog shader set. A different set (by name, source and register counts) bumps the revision, which makes the next record() rebuild the volume variants.
-void VoxiFroxelFog::setFogShaders(std::vector<rhi::GodotEnvProgram> shaders) {
-    if (shaders.size() > rhi::kGodotFogShaderMax) shaders.resize(rhi::kGodotFogShaderMax);
+// The fog shader set. A different set (by name, source and register counts) bumps the revision, which makes the next record() rebuild the volume variants.
+void VoxiFroxelFog::setFogShaders(std::vector<rhi::CustomEnvProgram> shaders) {
+    if (shaders.size() > rhi::kCustomFogShaderMax) shaders.resize(rhi::kCustomFogShaderMax);
     bool same = shaders.size() == shaders_.size();
     for (usize i = 0; same && i < shaders.size(); ++i)
         same = shaders[i].source == shaders_[i].source && shaders[i].ns == shaders_[i].ns && shaders[i].regs == shaders_[i].regs && shaders[i].globalRegs == shaders_[i].globalRegs;
@@ -121,18 +121,18 @@ void VoxiFroxelFog::setFogShaders(std::vector<rhi::GodotEnvProgram> shaders) {
     }
     shaders_ = std::move(shaders);
     ++shaderRev_;
-    shaderRegs_.assign(static_cast<usize>(rhi::kGodotFogShaderMax) * rhi::kGodotFogShaderRegs * 4, 0.0f);
+    shaderRegs_.assign(static_cast<usize>(rhi::kCustomFogShaderMax) * rhi::kCustomFogShaderRegs * 4, 0.0f);
     for (usize i = 0; i < shaders_.size(); ++i)
-        std::copy(shaders_[i].values.begin(), shaders_[i].values.begin() + std::min<usize>(shaders_[i].values.size(), rhi::kGodotFogShaderRegs * 4),
-                  shaderRegs_.begin() + static_cast<std::ptrdiff_t>(i * rhi::kGodotFogShaderRegs * 4));
+        std::copy(shaders_[i].values.begin(), shaders_[i].values.begin() + std::min<usize>(shaders_[i].values.size(), rhi::kCustomFogShaderRegs * 4),
+                  shaderRegs_.begin() + static_cast<std::ptrdiff_t>(i * rhi::kCustomFogShaderRegs * 4));
 }
 
 void VoxiFroxelFog::setFogShaderRegisters(const std::vector<std::vector<f32>>& perShader) {
-    if (shaderRegs_.size() < static_cast<usize>(rhi::kGodotFogShaderMax) * rhi::kGodotFogShaderRegs * 4)
-        shaderRegs_.assign(static_cast<usize>(rhi::kGodotFogShaderMax) * rhi::kGodotFogShaderRegs * 4, 0.0f);
-    for (usize i = 0; i < perShader.size() && i < rhi::kGodotFogShaderMax; ++i) {
-        f32* dst = shaderRegs_.data() + i * rhi::kGodotFogShaderRegs * 4;
-        const usize n = std::min<usize>(perShader[i].size(), rhi::kGodotFogShaderRegs * 4);
+    if (shaderRegs_.size() < static_cast<usize>(rhi::kCustomFogShaderMax) * rhi::kCustomFogShaderRegs * 4)
+        shaderRegs_.assign(static_cast<usize>(rhi::kCustomFogShaderMax) * rhi::kCustomFogShaderRegs * 4, 0.0f);
+    for (usize i = 0; i < perShader.size() && i < rhi::kCustomFogShaderMax; ++i) {
+        f32* dst = shaderRegs_.data() + i * rhi::kCustomFogShaderRegs * 4;
+        const usize n = std::min<usize>(perShader[i].size(), rhi::kCustomFogShaderRegs * 4);
         std::copy(perShader[i].begin(), perShader[i].begin() + static_cast<std::ptrdiff_t>(n), dst);
     }
 }
@@ -142,15 +142,15 @@ void VoxiFroxelFog::setFogShaderRegisters(const std::vector<std::vector<f32>>& p
 bool VoxiFroxelFog::buildVolumePipelines(rhi::IResourceFactory& res, const rhi::PipelineLayout& layout) {
     const std::string& source = rhi::shaderFile(kShaderName);
     if (source.empty()) return false;
-    // G6 SH3: with converted fog shaders the prelude carries their code and the variants are built with AVER_FOG_SHADERS; without, exactly as before.
+    // With custom fog shaders the prelude carries their code and the variants are built with AVER_FOG_SHADERS; without, exactly as before.
     std::string composedPrelude;
     const char* prelude = rhi::sharedShaderPrelude();
     const bool withShaders = !shaders_.empty();
     if (withShaders) {
-        std::vector<const rhi::GodotEnvProgram*> list;
-        for (const rhi::GodotEnvProgram& p : shaders_) list.push_back(&p);
-        const std::string program = rhi::godotFogProgram(list);
-        if (program.empty()) { AVER_WARN("[Voxi] volumetric fog: the Godot fog shaders could not be composed; volumes are drawn without them"); }
+        std::vector<const rhi::CustomEnvProgram*> list;
+        for (const rhi::CustomEnvProgram& p : shaders_) list.push_back(&p);
+        const std::string program = rhi::customFogProgram(list);
+        if (program.empty()) { AVER_WARN("[Voxi] volumetric fog: the custom fog shaders could not be composed; volumes are drawn without them"); }
         else { composedPrelude = std::string(prelude) + program; prelude = composedPrelude.c_str(); }
     }
     const bool shaderBuild = withShaders && !composedPrelude.empty();
@@ -452,9 +452,9 @@ void VoxiFroxelFog::record(rhi::IRenderContext& ctx, rhi::BindingSetHandle table
         ctx.textureBarrier(f.shadowMap, rhi::ResourceState::ShaderResource, rhi::ResourceState::NonPixelShaderResource);
 
     // The constants: the engine block alone, or (fog volumes) followed by the volume block the variants declare as the tail of FroxelCB.
-    // G6 SH3: with fog shaders the block is followed by their registers (the variants declare gFvGd after the volumes).
-    constexpr usize kGdBytes = static_cast<usize>(rhi::kGodotFogShaderMax) * rhi::kGodotFogShaderRegs * 4 * sizeof(f32);
-    u8 blob[sizeof(FroxelConstants) + sizeof(FogVolumeBlock) + kGdBytes];
+    // With fog shaders the block is followed by their registers (the variants declare gFvCustom after the volumes).
+    constexpr usize kShaderBytes = static_cast<usize>(rhi::kCustomFogShaderMax) * rhi::kCustomFogShaderRegs * 4 * sizeof(f32);
+    u8 blob[sizeof(FroxelConstants) + sizeof(FogVolumeBlock) + kShaderBytes];
     const void* cbData = &cb_;
     u32 cbBytes = sizeof(cb_);
     if (useVol) {
@@ -462,11 +462,11 @@ void VoxiFroxelFog::record(rhi::IRenderContext& ctx, rhi::BindingSetHandle table
         std::memcpy(blob + sizeof(cb_), &vol_, sizeof(vol_));
         cbData = blob;
         cbBytes = static_cast<u32>(sizeof(cb_) + sizeof(vol_));
-        if (!shaders_.empty() && shaderRegs_.size() * sizeof(f32) >= kGdBytes) {
-            const usize dim = shaders_.size() * rhi::kGodotFogShaderRegs * 4 * sizeof(f32);
-            std::memset(blob + cbBytes, 0, kGdBytes);
-            std::memcpy(blob + cbBytes, shaderRegs_.data(), std::min(dim, kGdBytes));
-            cbBytes += static_cast<u32>(shaders_.size() * rhi::kGodotFogShaderRegs * 4 * sizeof(f32));
+        if (!shaders_.empty() && shaderRegs_.size() * sizeof(f32) >= kShaderBytes) {
+            const usize dim = shaders_.size() * rhi::kCustomFogShaderRegs * 4 * sizeof(f32);
+            std::memset(blob + cbBytes, 0, kShaderBytes);
+            std::memcpy(blob + cbBytes, shaderRegs_.data(), std::min(dim, kShaderBytes));
+            cbBytes += static_cast<u32>(shaders_.size() * rhi::kCustomFogShaderRegs * 4 * sizeof(f32));
         }
     }
 

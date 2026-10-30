@@ -1,7 +1,7 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
-// InputRouterTests: Godot's input propagation -- every actor's OnInput in the order given, then the UI for the
+// InputRouterTests: input propagation -- every actor's OnInput in the order given, then the UI for the
 // device it wants, then OnUnhandledInput, stopping at the first that handles it. No host.
 
 using Aver.Framework;

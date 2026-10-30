@@ -1,4 +1,4 @@
-// The bus graph: Godot's AudioServer bus model (list order, sends, solo chains, effects, peaks) over the mixer's blocks.
+// The bus graph: the bus model (list order, sends, solo chains, effects, peaks) over the mixer's blocks.
 #include "aver/audio/BusGraph.hpp"
 #include "aver/core/Log.hpp"
 
@@ -7,7 +7,7 @@
 namespace aver::audio {
 namespace {
 const std::string kEmpty;
-constexpr f32 kPeakOffset = 1.0e-10f;   // Godot's AUDIO_PEAK_OFFSET
+constexpr f32 kPeakOffset = 1.0e-10f;   // peak floor offset
 } // namespace
 
 BusGraph::BusGraph() = default;
@@ -53,7 +53,7 @@ std::string BusGraph::uniqueName(const std::string& want, const Bus* except) con
         return false;
     };
     if (!taken(want)) return want;
-    // Godot: "New Bus", "New Bus 2", "New Bus 3" ...
+    // "New Bus", "New Bus 2", "New Bus 3" ...
     for (int attempt = 2;; ++attempt) {
         std::string n = want + " " + std::to_string(attempt);
         if (!taken(n)) return n;
@@ -69,7 +69,7 @@ void BusGraph::resolveLinks() {
     for (i32 i = 0; i < n; ++i) {
         Bus& b = *buses_[static_cast<usize>(i)];
         const i32 s = i == 0 ? -1 : find(b.send);
-        b.sendIdx = (s >= 0 && s < i) ? s : 0;                      // Godot: an invalid send goes to Master
+        b.sendIdx = (s >= 0 && s < i) ? s : 0;                      // an invalid send goes to Master
         for (auto& slot : b.effects) slot->fx->sidechainBus.store(slot->sidechain.empty() ? -1 : find(slot->sidechain), std::memory_order_relaxed);
     }
 }
@@ -132,7 +132,7 @@ void BusGraph::setBusName(i32 idx, const std::string& name) {
     Guard g(lock_);
     Bus& b = *buses_[static_cast<usize>(idx)];
     b.name = uniqueName(name, &b);
-    // Godot keeps sends by name: a rename leaves the buses that sent here pointing at the old name.
+    // Sends are kept by name: a rename leaves the buses that sent here pointing at the old name.
     resolveLinks();
 }
 
@@ -323,7 +323,7 @@ BusLayout BusGraph::exportLayout() const {
         lb.bypass = bp->bypass.load();
         for (const auto& s : bp->effects) {
             BusLayoutEffect le;
-            le.className = Effect::godotClassName(s->fx->kind());
+            le.className = Effect::className(s->fx->kind());
             le.enabled = s->enabled.load();
             le.sidechain = s->sidechain;
             for (u32 i = 0; i < s->fx->paramCount(); ++i) le.params.emplace_back(s->fx->paramInfo(i).name, s->fx->param(i));
@@ -357,7 +357,7 @@ void BusGraph::process(u32 frames) {
         if (b->solo.load(std::memory_order_relaxed)) soloMode = true;
     }
     if (soloMode) {
-        // Soloing a bus keeps every bus it sends through, up to Master, audible (Godot marks the chain).
+        // Soloing a bus keeps every bus it sends through, up to Master, audible (the chain is marked).
         for (i32 i = 0; i < n; ++i) {
             if (!buses_[static_cast<usize>(i)]->solo.load(std::memory_order_relaxed)) continue;
             i32 k = i;

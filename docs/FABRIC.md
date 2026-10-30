@@ -14,7 +14,7 @@ Scope: **3D and UI first.** 2D is out of scope for now; 2D nodes are reported as
 AverAssetC fabric <godot-project-dir> <out-dir> [--dry-run] [--scenes-only] [--scripts-only] [--overwrite]
 ```
 
-`AverAssetC` is in the folder of the editor (`bin/`). It writes:
+`AverAssetC` is in the folder of the editor (`bin/`). `fabric` is not one of its own commands: it belongs to the Fabric Connector, an engine extension installed in `Extensions/FabricConnector/` beside it (`AverAssetC` hands the command to the extension loader, [EXTENSIONS.md](EXTENSIONS.md); `AverAssetC --help` lists it). Without that folder `fabric` is an unknown command. The extension's sources are in `extensions/FabricConnector/` and the CMake option `AVER_WITH_FABRIC` (default ON) builds it. It writes:
 
 ```
 <out-dir>/FabricReport.md          what converted, what did not (read this first)
@@ -36,11 +36,11 @@ AverAssetC fabric <godot-project-dir> <out-dir> [--dry-run] [--scenes-only] [--s
 
 Exit code: **0** converted (the report may list approximated and unsupported items; that is not a failure), **1** the conversion failed (no `project.godot`, a Godot 3 project, a file could not be written, the project already exists without `--overwrite`, or the script converter could not run), **2** wrong arguments. The last line on stdout is a JSON summary (`"kind":"fabric"`, with the output folder, the counts, how many scripts and GDExtensions were found, and the report path).
 
-Scripts are converted by `Aver.Fabric.Convert`, a .NET tool in `bin/Tools`. It needs the **.NET SDK** (`dotnet` on `PATH`, or `DOTNET_ROOT`) and the managed runtime in `bin/Scripting`. A project with no scripts needs neither.
+Scripts are converted by `Aver.Fabric.Convert`, a .NET tool in the extension's `tools` folder (`bin/Extensions/FabricConnector/tools`). It needs the **.NET SDK** (`dotnet` on `PATH`, or `DOTNET_ROOT`), the extension's managed runtime (`Extensions/FabricConnector/managed/Aver.Fabric.dll`) and the engine's assemblies in `bin/Scripting`. A project with no scripts needs none of them. The converted project's `Scripts.csproj` references `Aver.Fabric.dll` by a `HintPath` to the installed extension, and its `.ocproject` gains `EXTENSION FabricConnector <version>`: opening the project on an engine without the extension logs that name.
 
 ### From the editor
 
-**File > Import Godot Project...** opens a dialog:
+**File > Import Godot Project...** is a menu item the Fabric Connector adds through its `extension.json` (`importers`): the editor's import dialog is generic and draws whatever the installed extensions list, so the item exists only while the extension is installed ([EXTENSIONS.md](EXTENSIONS.md), "The editor"). The dialog:
 
 1. **Godot project**: browse to the project's `project.godot` (or type the folder).
 2. **Output folder**: filled in as `<project>_Aver` beside the Godot folder; change it if you like.
@@ -48,7 +48,7 @@ Scripts are converted by `Aver.Fabric.Convert`, a .NET tool in `bin/Tools`. It n
 4. **Import**. The converter runs as a separate process, so the editor stays usable. The log scrolls in the dialog and goes to the Output Log; a notification tracks progress and ends with the counts. Closing the dialog does not stop the import.
 5. When it ends, **Open converted project** switches the editor to it (save your open level first). The report path is shown and can be copied.
 
-The menu item is greyed out when `AverAssetC` is not beside the editor (build the `AverAssetC` target).
+The menu item is greyed out when `AverAssetC` is not beside the editor (build the `AverAssetC` target). The dialog runs `AverAssetC fabric <godot-dir> <out-dir> [--overwrite] [--dry-run]` and reads the summary line the command ends with; no extension code runs inside the editor. The dialog itself has not been run (engine-run ban); its logic is covered headless by `ExtensionImportTest` (the generic dialog logic against fake manifests and a fake tool) and `FabricImportTest` (the Fabric Connector's manifest through the loader and the real `AverAssetC`).
 
 ## Run the converted project
 
@@ -86,7 +86,7 @@ The three ratings in the report:
 
 | Godot | Result |
 |---|---|
-| name, main scene, window size, resizable, fullscreen, physics tick rate, interpolation, gravity | converted into the `.ocproject` (including `PHYSICS.COMBINE godot`, which turns on Godot's friction and bounce combine rules) |
+| name, main scene, window size, resizable, fullscreen, physics tick rate, interpolation, gravity | converted into the `.ocproject` (including `PHYSICS.COMBINE material`, which turns on Godot's friction and bounce combine rules) |
 | `[autoload]` with `*` | converted: persistent placements, first in the start level, in `project.godot` order. An autoload without `*` is not added to the tree, as in Godot, and is reported |
 | input map: keys A-Z, 0-9, Space, Shift, Ctrl, Alt, Enter, Escape, Tab, arrows; mouse buttons; wheel; gamepad buttons and axes | converted into an `.ocinput`; modifiers and chords, the wheel and the sign of axes are approximated. An old project's Godot 3 key codes and joypad numbers are read as the Godot 4 inputs they meant (approximated, reported); an empty key event binds nothing |
 | other keys (F-keys, Backspace, PageUp ...), Godot's Guide and extra gamepad buttons, touch, mouse motion, shortcuts | unsupported, listed by action with the key or button named |
@@ -142,7 +142,7 @@ Every script is compiled together against `Aver.Fabric`. A script that compiles 
 
 Each `.gdextension` file and the libraries it names are copied into `Content/` at the same `res://` path, and declared in `Fabric/project.json`. Nodes of a class the plugin registers (named in the file's `[icons]` section) are placed as `GDExtensionNode` (`GDExtensionNode3D` when the scene gives them a 3D transform) with the property `extension_class`; their properties are handed to the native class. The plugins are loaded from `Content/` the first time such a node needs its class.
 
-The host (`modules/fabric.gdext`) serves the interface subset godot-cpp uses and a small engine class registry (`Object`, `RefCounted`, `Resource`, `Node`, `Node3D`). It was written against Godot's published interface and tested with a plugin written in C; **it has not been run against a real godot-cpp plugin**, so the file is rated approximated. A plugin whose classes need `Control`, 2D, rendering, physics or `SceneTree` classes will report what it asked for that the host cannot provide. A library for the operating system you run on must be in the project (Godot projects often ship only some platforms); a missing desktop library is reported.
+The host (`extensions/FabricConnector/native/gdext`, exported by `Aver.Fabric.Native`) serves the interface subset godot-cpp uses and a small engine class registry (`Object`, `RefCounted`, `Resource`, `Node`, `Node3D`). It was written against Godot's published interface and tested with a plugin written in C; **it has not been run against a real godot-cpp plugin**, so the file is rated approximated. A plugin whose classes need `Control`, 2D, rendering, physics or `SceneTree` classes will report what it asked for that the host cannot provide. A library for the operating system you run on must be in the project (Godot projects often ship only some platforms); a missing desktop library is reported.
 
 ## Reading FabricReport
 
@@ -168,6 +168,6 @@ A good order: read the result line, then Top unsupported features, then the unsu
 
 - Converter contracts: `docs/plans/fabric/G3_FORMATS.md` (text-format reader), `G3_SCENES.md` (scenes, project, report), `G3_RUNTIME.md` (the node contract of `Aver.Fabric`), `G3_SCRIPTS.md` (GodotSharp and GDScript), `G3_GDEXT.md` (GDExtension host).
 - Plan and status tables: `docs/plans/fabric/FABRIC_CONNECTOR.md`.
-- Godot physics semantics on Aver: `docs/physics/GODOT_FILTERING.md`, `GODOT_QUERIES.md`, `GODOT_KINEMATIC.md`, `GODOT_AREAS.md`, `GODOT_VEHICLE.md`.
+- Godot physics semantics on Aver: `docs/physics/LAYER_FILTERING.md`, `SPACE_QUERIES.md`, `KINEMATIC.md`, `AREAS.md`, `RAYCAST_VEHICLE.md` (renamed from `GODOT_*.md` when the general features lost the Godot name).
 - Runtime API list: `docs/api/Aver.Fabric.md`.
 - The axis map: `docs/ASSET_IMPORT.md`.

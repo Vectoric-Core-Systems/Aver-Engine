@@ -1,7 +1,7 @@
 #pragma once
 #include "aver/core/Types.hpp"
 
-// G4 R6: the BaseMaterial3D features a converted Godot project expects (docs/plans/fabric/G4_RENDER.md R6). Core-only, header-only, no RHI.
+// G4 R6: the BaseMaterial3D features a converted project expects (docs/plans/fabric/G4_RENDER.md R6). Core-only, header-only, no RHI.
 //
 // A material that uses none of this has `fx.active() == false`: it packs to exactly the 192-byte MaterialConstants block it always did, draws
 // through the pipelines it always did and is shaded by the shader code it always was. A material that uses any of it gets
@@ -13,7 +13,7 @@ namespace aver::pbr {
 
 enum class FxCull : u8 { Default = 0, Back, Front, None };                 // Default = today's: no culling
 enum class FxBlend : u8 { Default = 0, Add, Sub, Mul, Mix, PremultAlpha };  // Default = the alpha-blend path as it is
-enum class FxDepthDraw : u8 { Default = 0, Always, Never };                // Default = Godot's opaque-only (blended: no write; opaque: write)
+enum class FxDepthDraw : u8 { Default = 0, Always, Never };                // Default = opaque-only (blended: no write; opaque: write)
 enum class FxAlphaExt : u8 { None = 0, Hash, Antialias };                  // AlphaMode::Mask stays the plain scissor
 enum class FxBillboard : u8 { Off = 0, Enabled, FixedY, Particles };
 enum class FxDistanceFade : u8 { Off = 0, PixelAlpha, PixelDither, ObjectDither };
@@ -67,9 +67,9 @@ struct MaterialFx {
     FxDiffuse  diffuseMode = FxDiffuse::Burley;
     bool disableAmbient = false, noReceiveShadows = false;
 
-    // ---- G6 SH2: a converted Godot spatial shader (the graph named by the .ocmat GRAPHREF; docs/plans/fabric/G6_SHADERS.md)
-    bool gdVertex = false;     // the shader has a vertex(): VSMainGd runs it (a raster variant; ray hits and shadow maps see the unmoved mesh)
-    bool gdDiscard = false;    // fragment() can discard or writes ALPHA_SCISSOR_THRESHOLD: the variant is compiled without forced early depth
+    // ---- an embedded HLSL shader (the graph named by the .ocmat GRAPHREF; OcGraphHlsl.hpp)
+    bool embVertex = false;    // the shader has a vertex(): VSMainEmb runs it (a raster variant; ray hits and shadow maps see the unmoved mesh)
+    bool embDiscard = false;   // fragment() can discard or writes ALPHA_SCISSOR_THRESHOLD: the variant is compiled without forced early depth
 
     bool usesUv() const {
         return uv1Scale[0] != 1.0f || uv1Scale[1] != 1.0f || uv1Offset[0] != 0.0f || uv1Offset[1] != 0.0f ||
@@ -84,7 +84,7 @@ struct MaterialFx {
     bool active() const {
         return usesUv() || usesTriplanar() || usesSurface() || usesVertex() || cull == FxCull::Back || cull == FxCull::Front || blend == FxBlend::Add || blend == FxBlend::Sub || blend == FxBlend::Mul ||
                depthDraw != FxDepthDraw::Default || noDepthTest || renderPriority != 0 || unshaded || alphaExt != FxAlphaExt::None ||
-               shadowToOpacity || distanceFade != FxDistanceFade::Off || rim || anisotropy || heightmap || backlight || detail || gdVertex || gdDiscard;
+               shadowToOpacity || distanceFade != FxDistanceFade::Off || rim || anisotropy || heightmap || backlight || detail || embVertex || embDiscard;
     }
 };
 
@@ -108,14 +108,14 @@ inline constexpr u32 kModes = 1u << 18;       // specular / diffuse modes
 inline constexpr u32 kHash = 1u << 19;        // alpha hash and alpha-to-coverage approximation
 inline constexpr u32 kFade = 1u << 20;        // distance fade
 inline constexpr u32 kUnshaded = 1u << 21;
-inline constexpr u32 kGdVertex = 1u << 22;    // G6 SH2: VSMainGd (a Godot shader's vertex()) instead of VSMain; also compiles the stage's varyings in
+inline constexpr u32 kEmbVertex = 1u << 22;   // VSMainEmb (an embedded shader's vertex()) instead of VSMain; also compiles the stage's varyings in
 inline constexpr u32 kShaderMask = kUvx | kTri | kRim | kAniso | kParallax | kBacklight | kDetail | kSurf | kModes | kHash | kFade | kUnshaded;
 inline constexpr u32 kPipelineMask = (1u << 24) - 1u;
 }  // namespace fxkey
 
 // Which of the engine's passes a draw with this key must not join: the frame-wide depth prepass and the per-draw depth-only draw write depth
 // through the ordinary vertex and pixel shaders, which disagree with a variant that moves vertices, transforms UVs or discards by noise.
-inline constexpr u32 kFxNoPrepassKeys = fxkey::kVertex | fxkey::kShaderMask | fxkey::kLateZ | fxkey::kGdVertex;
+inline constexpr u32 kFxNoPrepassKeys = fxkey::kVertex | fxkey::kShaderMask | fxkey::kLateZ | fxkey::kEmbVertex;
 
 // What the ray tracer's material table and everything else keyed on the first 192 bytes must not see.
 inline constexpr u32 kFxBaseBytes = 192;
@@ -202,8 +202,8 @@ inline u32 fxVariantKey(const MaterialFx& fx) {
     if (fx.alphaExt != FxAlphaExt::None) k |= fxkey::kHash | fxkey::kLateZ;
     if (fx.distanceFade != FxDistanceFade::Off) k |= fxkey::kFade | fxkey::kLateZ;
     if (fx.unshaded) k |= fxkey::kUnshaded;
-    if (fx.gdVertex) k |= fxkey::kGdVertex;
-    if (fx.gdDiscard) k |= fxkey::kLateZ;
+    if (fx.embVertex) k |= fxkey::kEmbVertex;
+    if (fx.embDiscard) k |= fxkey::kLateZ;
     return k & fxkey::kPipelineMask;
 }
 

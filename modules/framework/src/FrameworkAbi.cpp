@@ -1235,7 +1235,7 @@ int64_t aver_fw_tree_revision(void) { return static_cast<int64_t>(world().hierar
 
 void aver_fw_spawn_batch_begin(void) { ++g_spawnBatchDepth; }
 
-// Godot's _ready order: post-order depth-first, so a descendant precedes its ancestor and siblings keep
+// The ready order: post-order depth-first, so a descendant precedes its ancestor and siblings keep
 // their order. Paths are order stamps from the root, as aver_fw_tree_order builds them.
 int32_t aver_fw_spawn_batch_end(void) {
     if (g_spawnBatchDepth == 0 || --g_spawnBatchDepth > 0) return 0;
@@ -1250,7 +1250,7 @@ int32_t aver_fw_spawn_batch_end(void) {
         std::reverse(path.begin(), path.end());
         ready.emplace_back(std::move(path), e);
     }
-    // Enter first, parent before child (pre-order: plain path order), as Godot's _enter_tree.
+    // Enter first, parent before child (pre-order: plain path order).
     std::stable_sort(ready.begin(), ready.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
     for (const auto& [path, e] : ready)
         if (w.valid(e) && !w.destroyPending(e) && classOfEntity(e) != 0 && managedInstalled() && managedDispatch().enter_tree)

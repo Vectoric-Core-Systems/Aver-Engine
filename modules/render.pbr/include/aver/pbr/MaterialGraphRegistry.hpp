@@ -15,7 +15,7 @@
 // returned before. 0 is reserved and means "no graph": it is what every material authored before
 // this feature holds, and what the generated switch's `default:` arm answers.
 #include "aver/core/Types.hpp"
-#include "aver/formats/OcGraphGodot.hpp"
+#include "aver/formats/OcGraphHlsl.hpp"
 
 #include <string>
 #include <vector>
@@ -45,11 +45,11 @@ public:
     // untouched and cannot be affected by any of this.
     const std::string& hlsl() const { return hlsl_; }
 
-    // G6 SH2. True when a registered graph carries a converted Godot shader. A renderer then (a) defines AVER_GD_FX_STOCK before the material prelude (it keeps
+    // True when a registered graph carries an embedded HLSL shader. A renderer then (a) defines AVER_CUSTOM_FX_STOCK before the material prelude (it keeps
     // the BaseMaterial3D evaluator reachable for materials without a graph), (b) puts vsOutMembersDefine() before the shared prelude, and (c) compiles a
-    // material variant whose key has fxkey::kGdVertex with AVER_MATX_GDVS=1, AVER_GD_VARYINGS_ON=1 (when hasGodotVaryings()) and AVER_GD_NO_DERIVATIVES=1.
-    bool hasGodotShaders() const { return godot_; }
-    bool hasGodotVaryings() const { return !vsOutMembers_.empty(); }
+    // material variant whose key has fxkey::kEmbVertex with AVER_MATX_EMBVS=1, AVER_CUSTOM_VARYINGS_ON=1 (when hasEmbeddedVaryings()) and AVER_CUSTOM_NO_DERIVATIVES=1.
+    bool hasEmbeddedShaders() const { return embedded_; }
+    bool hasEmbeddedVaryings() const { return !vsOutMembers_.empty(); }
     const std::string& vsOutMembersDefine() const { return vsOutMembers_; }
 
     // Bumped whenever hlsl() changes. A renderer records the revision its pipelines were built
@@ -69,15 +69,15 @@ private:
         std::string name;   // for the comment in the emitted shader
         std::string body;   // the compiled statements
         u32 id = 0;
-        bool isGodot = false;        // G6 SH2
-        fmt::GodotShaderPart gd;
+        bool isEmbedded = false;
+        fmt::EmbeddedHlslPart emb;
     };
     void rebuild();
 
     std::vector<Entry> entries_;
     std::string hlsl_;
     std::string vsOutMembers_;
-    bool godot_ = false;
+    bool embedded_ = false;
     u64 revision_ = 0;
     u32 nextId_ = 1;
 };

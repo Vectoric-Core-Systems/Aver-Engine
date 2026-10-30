@@ -1,6 +1,6 @@
-// Reflection probes (G4 R8, docs/plans/fabric/G4_RENDER.md): the placement, box-projection and blending maths of Godot's ReflectionProbe, and the
+// Reflection probes: the placement, box-projection and blending maths of a reflection probe, and the
 // octahedral mapping a captured environment would be stored in. Header-only and pure. The capture and the shading that samples it are NOT in the
-// engine yet (G4_RENDER.md R8 says why and what the next step is); what is here is what the framework registry answers script queries with, and what
+// engine yet; what is here is what the framework registry answers script queries with, and what
 // that step will use unchanged.
 //
 // Engine space: centimetres, +Z up, left-handed. A probe is an oriented box (the node's transform) of influence; its capture point is the box centre
@@ -14,15 +14,15 @@
 
 namespace aver {
 
-enum class ProbeAmbient : i32 { Disabled = 0, Environment = 1, Colour = 2 };   // Godot's ReflectionProbe.AmbientMode
-enum class ProbeUpdate : i32 { Once = 0, Always = 1 };                          // Godot's ReflectionProbe.UpdateMode
+enum class ProbeAmbient : i32 { Disabled = 0, Environment = 1, Colour = 2 };   // ambient mode
+enum class ProbeUpdate : i32 { Once = 0, Always = 1 };                          // update mode
 
 inline constexpr u32 kProbeMaxActive = 4;   // probes that can blend on one surface
 
 struct ReflectionProbeDesc {
     // Instance matrix: three basis rows then the translation (row vectors), centimetres. The basis rotates (and scales) the box.
     f32 world[12] = {1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0};
-    f32 halfExtentCm[3] = {1000, 1000, 1000};   // Godot size / 2, axis-mapped, before the matrix's scale
+    f32 halfExtentCm[3] = {1000, 1000, 1000};   // half the authored size, axis-mapped, before the matrix's scale
     f32 originOffsetCm[3] = {0, 0, 0};          // capture point relative to the centre, in the probe's local axes
     f32 intensity = 1.0f;
     f32 blendDistanceCm = 100.0f;               // the fade inside the box walls
@@ -107,7 +107,7 @@ inline f32 depthInside(const ReflectionProbeDesc& p, const Frame& f, const Vec3&
     return std::min({dx, dy, dz});
 }
 
-// Influence at a point: 0 outside the box, 1 deeper than the blend distance, a linear ramp between (Godot's blend_distance fades inward from the walls).
+// Influence at a point: 0 outside the box, 1 deeper than the blend distance, a linear ramp between (the blend distance fades inward from the walls).
 inline f32 influence(const ReflectionProbeDesc& p, const Frame& f, const Vec3& worldPos) {
     if (!f.ok) return 0.0f;
     const f32 d = depthInside(p, f, worldPos);

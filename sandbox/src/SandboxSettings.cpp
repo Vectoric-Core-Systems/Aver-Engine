@@ -2166,14 +2166,14 @@ void SandboxApp::buildRenderingSettings(int page) {
                 ImGui::BeginDisabled(!stated);
                 if (ImGui::Combo("Tone curve", &mode,
                                  "Per-channel ACES\0ACES fitted (default)\0ACES luminance\0"
-                                 "Godot linear\0Godot Reinhard\0Godot filmic\0Godot ACES\0Godot AgX\0")) {
+                                 "Extended linear\0Extended Reinhard\0Extended filmic\0Extended ACES\0Extended AgX\0")) {
                     project_.postTonemap = mode;
                     post_.tonemap = static_cast<u32>(mode);
                     projectDirty_ = true;
                 }
                 ImGui::EndDisabled();
                 {
-                    // Godot's white point and display adjustments (RENDER.TONEMAPWHITE / ADJUST*); an edit states the key.
+                    // The white point and display adjustments (RENDER.TONEMAPWHITE / ADJUST*); an edit states the key.
                     struct Row { const char* label; f32* project; f32* live; f32 hi; };
                     Row rows[] = {{"Tone white", &project_.postTonemapWhite, &post_.tonemapWhite, 16.0f},
                                   {"Brightness", &project_.postAdjustBrightness, &post_.adjustBrightness, 4.0f},

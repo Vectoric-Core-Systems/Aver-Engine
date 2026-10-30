@@ -9,5 +9,5 @@
   "required": false,
   "default": true,
   "dependsOn": ["Aver.Core"],
-  "consequence": "A converted Godot project cannot use ENet multiplayer, UDP or TCP sockets."
+  "consequence": "An imported project cannot use ENet multiplayer, UDP or TCP sockets."
 }

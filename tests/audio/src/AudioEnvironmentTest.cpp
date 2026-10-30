@@ -440,7 +440,7 @@ static void testConvolutionEffect() {
     using audio::Effect;
     using audio::EffectKind;
     auto fx = Effect::create(EffectKind::ConvolutionReverb, kRate);
-    check(fx && fx->kind() == EffectKind::ConvolutionReverb && std::string(Effect::godotClassName(EffectKind::ConvolutionReverb)) == "AudioEffectConvolutionReverb",
+    check(fx && fx->kind() == EffectKind::ConvolutionReverb && std::string(Effect::className(EffectKind::ConvolutionReverb)) == "AudioEffectConvolutionReverb",
           "the effect exists and has a class name");
     check(near(fx->paramByName("dry"), 1.0f) && near(fx->paramByName("wet"), 0.5f) && near(fx->paramByName("predelay_msec"), 0.0f) && near(fx->paramByName("gain_db"), 0.0f),
           "its defaults are dry 1, wet 0.5, no predelay, 0 dB");

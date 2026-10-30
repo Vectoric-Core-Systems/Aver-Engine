@@ -28,7 +28,7 @@
 // and loadProjectParticleEffects (particles-guarded); scoping to either guard breaks the other.
 #include "aver/assets/AssetId.hpp"
 #if AVER_MODULE_FRAMEWORK
-#include "aver/framework/framework_godotenv_abi.h"   // G6 SH3: a particles effect's Godot shader is registered when the effect loads
+#include "aver/framework/framework_customenv_abi.h"   // a particles effect's custom program is registered when the effect loads
 #endif
 #include "aver/rhi/PrimitiveMeshes.hpp"
 #include "aver/platform/FileSystem.hpp"   // toNativeSeparators
@@ -2240,14 +2240,14 @@ void GameContent::loadProjectParticleEffects() {
 
         // Effect id is fnv1a64(relative path), matches CParticleEmitter::effect. A v1 file arrives as a one-emitter system.
         particles::particleEffects().setSystem(fnv1a64(std::string_view(rel)), def);
-        // G6 SH3: an emitter that names a converted Godot particles shader needs its program in the registry before the first emitter instance asks the GPU tier for it.
+        // An emitter that names a custom particles program needs it in the registry before the first emitter instance asks the GPU tier for it.
 #if AVER_MODULE_FRAMEWORK
         for (const particles::ParticleEffect& em : def.emitters) {
-            if (em.godotShader.empty()) continue;
-            std::ifstream sf(std::filesystem::path(dir) / "Shaders" / (em.godotShader + ".particles.ocgraph"), std::ios::binary);
+            if (em.customShader.empty()) continue;
+            std::ifstream sf(std::filesystem::path(dir) / "Shaders" / (em.customShader + ".particles.ocgraph"), std::ios::binary);
             std::string text((std::istreambuf_iterator<char>(sf)), std::istreambuf_iterator<char>());
-            if (text.empty() || aver_fw_genv_register(AVER_FW_GENV_PARTICLES, em.godotShader.c_str(), text.c_str()) == 0)
-                AVER_WARN("[Particles] effect {}: the Godot particles shader '{}' could not be registered from Shaders/{}.particles.ocgraph; the emitter simulates without it", rel, em.godotShader, em.godotShader);
+            if (text.empty() || aver_fw_cenv_register(AVER_FW_CENV_PARTICLES, em.customShader.c_str(), text.c_str()) == 0)
+                AVER_WARN("[Particles] effect {}: the custom particles shader '{}' could not be registered from Shaders/{}.particles.ocgraph; the emitter simulates without it", rel, em.customShader, em.customShader);
         }
 #endif
         ++loaded;

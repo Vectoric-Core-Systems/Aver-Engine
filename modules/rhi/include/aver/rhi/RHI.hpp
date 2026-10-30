@@ -187,7 +187,7 @@ struct PostSettings {
     f32  histogramHighPercent = 0.90f;
 
     // Which tone curve. 0 = original per-channel Narkowicz/Hill; 1 = ACES with matrices;
-    // 2 = acesLumaTonemap (tonemaps luminance, restores chromaticity). 3..7 = Godot's linear, Reinhard, filmic, ACES, AgX (Tonemap.hpp).
+    // 2 = acesLumaTonemap (tonemaps luminance, restores chromaticity). 3..7 = the extended linear, Reinhard, filmic, ACES, AgX (Tonemap.hpp).
     u32  tonemap = 1;
 
     // Ceiling on scene radiance immediately before the tonemap; 0 disables it.
@@ -224,10 +224,10 @@ struct PostSettings {
     u32  colourVision = 0;
     f32  colourVisionStrength = 1;   // 0..1, how far the filter moves the colour
 
-    // ---- Godot-style tonemapping and display adjustments (rhi/Tonemap.hpp; docs/plans/fabric/G4_RENDER.md R3) ----
-    // `tonemap` 3..7 (Godot linear, Reinhard, filmic, ACES, AgX) and any adjustment off 1 select the AVER_POST_TONEMAP_EXT composite,
-    // built the first frame one is wanted. tonemapWhite is Godot's tonemap_white (Reinhard, filmic, ACES). The adjustments run in
-    // display space after the tonemap, before the grading LUT (Godot's adjustment_brightness / contrast / saturation).
+    // ---- extended tonemapping and display adjustments (rhi/Tonemap.hpp) ----
+    // `tonemap` 3..7 (extended linear, Reinhard, filmic, ACES, AgX) and any adjustment off 1 select the AVER_POST_TONEMAP_EXT composite,
+    // built the first frame one is wanted. tonemapWhite is the white point (Reinhard, filmic, ACES). The adjustments run in
+    // display space after the tonemap, before the grading LUT (brightness / contrast / saturation).
     f32  tonemapWhite = 1;
     f32  adjustBrightness = 1, adjustContrast = 1, adjustSaturation = 1;
 };

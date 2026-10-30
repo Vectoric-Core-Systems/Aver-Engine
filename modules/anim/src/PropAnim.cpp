@@ -1,4 +1,4 @@
-// Property-track sampling (see aver/anim/PropAnim.hpp). Godot's documented behaviour, written for this tree.
+// Property-track sampling (see aver/anim/PropAnim.hpp). Written from the documented behaviour of animation players.
 
 #include "aver/anim/PropAnim.hpp"
 
@@ -101,7 +101,7 @@ double cubicAngleInTime(double from, double to, double pre, double post, double 
     return cubicInTime(fromRot, toRot, preRot, postRot, w, toT, preT, postT);
 }
 
-// Rotation about the same axis as a cubic in "log space" (Godot's spherical cubic).
+// Rotation about the same axis as a cubic in "log space" (a spherical cubic).
 Q sphericalCubic(Q from, Q to, Q pre, Q post, double w, double toT, double preT, double postT) {
     from = norm(from); pre = norm(pre); to = norm(to); post = norm(post);
     if (dot(from, pre) < 0) pre = neg(pre);

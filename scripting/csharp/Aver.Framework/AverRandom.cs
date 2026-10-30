@@ -7,8 +7,7 @@ using Aver.Scene;
 
 namespace Aver.Framework;
 
-/// <summary>One process-wide pseudo-random generator for gameplay, reseedable so a sequence can repeat (Godot's
-/// global randi/randf/seed).</summary>
+/// <summary>One process-wide pseudo-random generator for gameplay, reseedable so a sequence can repeat.</summary>
 /// <remarks>Single game thread only. Unseeded it starts from a random seed; <see cref="Seed"/> makes every later
 /// draw repeat for the same seed. Graph and C# draws share the one stream, so a seeded graph and script interleave
 /// reproducibly. It is a PCG32 <see cref="RandomNumberGenerator"/>.</remarks>
@@ -22,7 +21,7 @@ public static class AverRandom
     /// <summary>Restarts the generator from <paramref name="seed"/>; the same seed repeats the same sequence.</summary>
     public static void Seed(int seed) => s_rng.Seed = unchecked((ulong)seed);
 
-    /// <summary>Reseeds from the clock (Godot's randomize()).</summary>
+    /// <summary>Reseeds from the clock.</summary>
     public static void Randomize() => s_rng.Randomize();
 
     /// <summary>A float in [0, 1).</summary>

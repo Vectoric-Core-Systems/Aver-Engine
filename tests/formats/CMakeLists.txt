@@ -124,12 +124,12 @@ set_target_properties(MeshTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # MeshExtraTest -- G4 R1, the second vertex stream (colour, tangent, UV2): the 16-byte rhi packing (a header-only include, hence the include
-# path rather than a link to Aver.RHI), the .ocmesh VXEX chunk both ways, the glTF / OBJ importers on tests/fabric/data/ExtraGame, and the
+# path rather than a link to Aver.RHI), the .ocmesh VXEX chunk both ways, the glTF / OBJ importers on tests/formats/data/quad.gltf, and the
 # simplifier keeping the streams in step. Trifactor is optional, like TrifactorTest above.
 add_executable(MeshExtraTest src/MeshExtraTest.cpp)
 target_link_libraries(MeshExtraTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 target_include_directories(MeshExtraTest PRIVATE ${CMAKE_SOURCE_DIR}/modules/rhi/include)
-target_compile_definitions(MeshExtraTest PRIVATE AVER_FABRIC_DATA="${CMAKE_SOURCE_DIR}/tests/fabric/data")
+target_compile_definitions(MeshExtraTest PRIVATE AVER_FORMATS_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/data")
 if(TARGET Aver.Trifactor)
   target_link_libraries(MeshExtraTest PRIVATE Aver.Trifactor)
   target_compile_definitions(MeshExtraTest PRIVATE AVER_MESHEXTRA_TRIFACTOR=1)
@@ -241,6 +241,15 @@ if(TARGET Aver.Render.PBR.Materials)
   target_link_libraries(MaterialGraphRegistryTest PRIVATE
     Aver.Render.PBR.Materials Aver.Formats Aver.RHI Aver.Core Aver.Platform)
   set_target_properties(MaterialGraphRegistryTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
+# OcGraphHlslTest -- the EmbeddedHlsl / EmbeddedHlslEnv nodes (OcGraphHlsl.hpp): the new spellings, the round trip, and the files written before the rename.
+if(TARGET Aver.Render.PBR.Materials)
+  add_executable(OcGraphHlslTest src/OcGraphHlslTest.cpp)
+  target_link_libraries(OcGraphHlslTest PRIVATE
+    Aver.Render.PBR.Materials Aver.Formats Aver.RHI Aver.Core Aver.Platform)
+  set_target_properties(OcGraphHlslTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
 
@@ -384,34 +393,9 @@ set_target_properties(AverAssetC PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BIN
 # PointInstancer produces. Header-only and Core-only, so an include directory and no link -- the
 # arrangement tests/editor already uses for it.
 target_include_directories(AverAssetC PRIVATE ${CMAKE_SOURCE_DIR}/modules/world/include)
-# `AverAssetC fabric <godot-dir> <out-dir>` (Fabric Connector, docs/plans/fabric/G3_SCENES.md). The converter is tools/fabric/*.cpp; it reads Godot's text
-# formats through Aver.Formats.Godot and calls back into this file for the model importers. Its material cook rides on AVER_HAVE_MATERIAL_COMPILE below.
-target_sources(AverAssetC PRIVATE
-  ${CMAKE_SOURCE_DIR}/tools/fabric/FabricConvert.cpp
-  ${CMAKE_SOURCE_DIR}/tools/fabric/FabricExtensions.cpp
-  ${CMAKE_SOURCE_DIR}/tools/fabric/FabricProcess.cpp
-  ${CMAKE_SOURCE_DIR}/tools/fabric/FabricScripts.cpp
-  ${CMAKE_SOURCE_DIR}/tools/fabric/FabricMeshGen.cpp
-  ${CMAKE_SOURCE_DIR}/tools/fabric/FabricModelTree.cpp
-  ${CMAKE_SOURCE_DIR}/tools/fabric/FabricGeometry.cpp
-  ${CMAKE_SOURCE_DIR}/tools/fabric/FabricAnimation.cpp
-  ${CMAKE_SOURCE_DIR}/tools/fabric/FabricAnimTree.cpp
-  ${CMAKE_SOURCE_DIR}/tools/fabric/FabricAudio.cpp
-  ${CMAKE_SOURCE_DIR}/tools/fabric/FabricNav.cpp
-  ${CMAKE_SOURCE_DIR}/tools/fabric/FabricNet.cpp
-  ${CMAKE_SOURCE_DIR}/tools/fabric/FabricProject.cpp
-  ${CMAKE_SOURCE_DIR}/tools/fabric/FabricReport.cpp
-  ${CMAKE_SOURCE_DIR}/tools/fabric/FabricResources.cpp
-  ${CMAKE_SOURCE_DIR}/tools/fabric/FabricShader.cpp
-  ${CMAKE_SOURCE_DIR}/tools/fabric/FabricUi.cpp
-  ${CMAKE_SOURCE_DIR}/tools/fabric/FabricWidgets.cpp
-  ${CMAKE_SOURCE_DIR}/tools/fabric/FabricScene.cpp)
-target_include_directories(AverAssetC PRIVATE ${CMAKE_SOURCE_DIR}/tools)
-target_link_libraries(AverAssetC PRIVATE Aver.Formats.Godot)
-# G5 U1: the .octheme writer (Aver.UI is Core-only), so the converter and the engine share one text form.
-target_link_libraries(AverAssetC PRIVATE Aver.UI)
-# G5 S1: the engine's effect tables (which parameters the mixer implements) and the .ocbus writer, so the converter cannot drift from the mixer.
-target_link_libraries(AverAssetC PRIVATE Aver.Formats.Audio Aver.Audio)
+# Subcommands this file does not know go to the extension loader, which finds them in <exe dir>/Extensions (docs/EXTENSIONS.md). The model importer
+# an extension may call back into (AverExtHost::importModel) is in this file.
+target_link_libraries(AverAssetC PRIVATE Aver.Extensions)
 # `AverAssetC cook-chunks` (LARGE_WORLD 2.4.5). The cook is the pure half of Aver.World (Core + Formats + Platform). It is compiled straight into the tool, like
 # HairCurves.cpp below, rather than by linking Aver.World: that library's PUBLIC link interface carries Aver.Scene, Aver.Physics (Jolt) and Aver.Vehicle, and a shipping
 # asset compiler must not depend on them. None of these files may see AVER_MODULE_SCENE (the tool must not link anything that defines it); none does.
@@ -598,7 +582,7 @@ target_link_libraries(CubeLutTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(CubeLutTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # PanoramaSkyTest -- G4 R3: the Radiance .hdr reader (flat and run-length scanlines) and the equirectangular panorama fitted onto the
-# authored sky dome (zenith, horizon, ground albedo, blend exponent), plus Godot's environment parameter mapping. No device.
+# authored sky dome (zenith, horizon, ground albedo, blend exponent), plus the render project keys. No device.
 add_executable(PanoramaSkyTest src/PanoramaSkyTest.cpp)
 target_link_libraries(PanoramaSkyTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(PanoramaSkyTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

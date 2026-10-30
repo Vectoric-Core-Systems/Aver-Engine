@@ -2,9 +2,9 @@
 
 #include "aver/framework/framework_envfx_abi.h"
 
-#include "GodotEnvInternal.hpp"
+#include "CustomEnvInternal.hpp"
 #include "aver/core/FogVolume.hpp"
-#include "aver/framework/framework_godotenv_abi.h"
+#include "aver/framework/framework_customenv_abi.h"
 #include "aver/core/Log.hpp"
 #include "aver/core/ReflectionProbe.hpp"
 
@@ -22,7 +22,7 @@ struct Fog {
     aver::FogVolumeDesc desc;
     bool set = false;       // aver_fw_fogvol_set was called
     bool enabled = true;
-    std::string shaderName; // G6 SH3: a registered Godot fog shader (framework_godotenv_abi.h), empty = none
+    std::string shaderName; // a registered custom fog program (framework_customenv_abi.h), empty = none
 };
 
 struct Probe {
@@ -176,7 +176,7 @@ int32_t aver_fw_fogvol_pack(float x, float y, float z, float* outFloats, int32_t
     for (const Cand& k : c) {
         descs.push_back(k.f->desc);
         // G6 SH3: the shader's place in the renderer's fog-shader table (0 = none, or not registered).
-        descs.back().shader = k.f->shaderName.empty() ? 0u : aver_fw_genv_fog_index(k.f->shaderName);
+        descs.back().shader = k.f->shaderName.empty() ? 0u : aver_fw_cenv_fog_index(k.f->shaderName);
     }
     aver::FogVolumeBlock block;
     const uint32_t n = aver::fogv::packAll(descs.data(), static_cast<uint32_t>(descs.size()), block);
@@ -307,7 +307,7 @@ void aver_fw_envfx_reset(void) {
     if (!s.fog.empty()) { s.fog.clear(); ++s.fogRev; }
     if (!s.probes.empty()) { s.probes.clear(); ++s.probeRev; }
     s.fogFullLogged = s.probeFullLogged = false;
-    aver_fw_genv_reset();   // G6 SH3: the converted shaders a level registered go with it
+    aver_fw_cenv_reset();   // the custom programs a level registered go with it
 }
 
 void aver_fw_envfx_tick(void) {

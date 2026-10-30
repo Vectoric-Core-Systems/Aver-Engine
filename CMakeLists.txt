@@ -96,6 +96,9 @@ option(AVER_BUILD_SANDBOX "Build the sandbox sample app" ON)
 # its old name on purpose -- renaming it would silently invalidate every existing CMake cache that set it.
 option(AVER_BUILD_GAME "Build the runtime (Aver.Runtime.Game + AverEngineRuntime.exe)" ON)
 option(AVER_BUILD_TESTS "Build test executables" ON)
+# The Fabric Connector extension (extensions/FabricConnector): the converter for Godot 4 projects, built into bin/Extensions/FabricConnector. The
+# engine reaches it only through the extension loader, so OFF configures and builds the engine without it.
+option(AVER_WITH_FABRIC "Build the Fabric Connector extension (extensions/FabricConnector)" ON)
 # CTest, so the suites are runnable by ONE command from a terminal or a build server.
 #
 # They were not, until now. The only two things that ran them were tools/mcp/aver_mcp.py's
@@ -192,10 +195,8 @@ endif()
 # rather than behind a module switch: a game with no scene still has settings.
 add_subdirectory(modules/settings)
 add_subdirectory(modules/formats)  # Phase 2 (.ocbeam / .ocmap loaders)
-# Godot 4 text-format reader for the Fabric converter (Core + Platform only, always built).
-add_subdirectory(modules/formats.godot)
-# GDExtension host of the Fabric Connector (hosts a converted project's native Godot plugins; the aver_gdext C ABI).
-add_subdirectory(modules/fabric.gdext)
+# The extension loader and the plain-C extension ABI (aver_ext.h): extensions are directories under <exe dir>/Extensions.
+add_subdirectory(modules/extensions)
 # The Roslyn backend for actor scripts. Above Aver.Formats rather than inside it, so the base
 # module keeps its no-dependency, no-process guarantee. See its CMakeLists for the full argument --
 # including why it is guarded on Aver.Formats.Material rather than on a switch of its own.
@@ -203,14 +204,14 @@ add_subdirectory(modules/formats.roslyn)
 # Animation sampling, above formats because it reads .ocskel/.ocanim through it and below anything
 # that draws. Posing a skeleton is arithmetic, so this needs no RHI and never will.
 add_subdirectory(modules/anim)
-# The plain-C seam onto the property-track player (Godot AnimationPlayer parity, Aver.Fabric). Anim + Formats + Core only.
+# The plain-C seam onto the property-track player (animation-player model, driven by managed layers). Anim + Formats + Core only.
 add_subdirectory(modules/anim.abi)
 # Synapse: navigation and pathfinding. Core+Formats only, so it builds and tests with no scene,
 # no physics and no device -- see the module's own CMakeLists for why that split is the point.
 add_subdirectory(modules/synapse)
-# The plain-C seam onto polygon navigation, the navmesh baker and the A* graphs (Godot navigation parity, Aver.Fabric). Synapse + Core only.
+# The plain-C seam onto polygon navigation, the navmesh baker and the A* graphs (navigation-server model, driven by managed layers). Synapse + Core only.
 add_subdirectory(modules/nav.abi)
-# OS sockets and the reliable-UDP host/peer protocol (Fabric G6 NET1); opt-in, linked by nothing but its own C seam (Aver.Net.Abi) and tests.
+# OS sockets and the reliable-UDP host/peer protocol (G6 NET1); opt-in, linked by nothing but its own C seam (Aver.Net.Abi) and tests.
 if(AVER_MODULE_NET)
   add_subdirectory(modules/net)
   add_subdirectory(modules/net.abi)
@@ -465,6 +466,14 @@ if(AVER_BUILD_SANDBOX)
   add_subdirectory(sandbox)
 endif()
 
+# EXTENSIONS built from this tree. Each is a directory the engine finds at run time under bin/Extensions (modules/extensions); nothing above
+# reaches one except through that loader. Fabric Connector converts Godot 4 projects (docs/FABRIC.md); it is meant to move to its own repository
+# (docs/plans/fabric/EXTENSION.md), and with this option OFF the engine configures and builds without it. After every module and the editor, so
+# the optional modules its targets link are already known.
+if(AVER_WITH_FABRIC)
+  add_subdirectory(extensions/FabricConnector)
+endif()
+
 # THE MODULE DAG CHECK, here rather than inside aver_add_module.
 #
 # This is the earliest point at which the question is answerable: CMake permits forward references,
@@ -515,8 +524,7 @@ if(AVER_BUILD_TESTS)
   endif()
   add_subdirectory(tests/pcg)
   add_subdirectory(tests/formats)
-  add_subdirectory(tests/formats.godot)
-  add_subdirectory(tests/fabric)   # FabricConvertTest: AverAssetC fabric end to end
+  add_subdirectory(tests/extensions)   # the extension loader against fake extensions and a tiny test library
   # The render queue's video encoder; skips (exit 77) on a machine without an H.264 encoder.
   if(TARGET Aver.Media)
     add_subdirectory(tests/media)
@@ -648,7 +656,7 @@ if(AVER_BUILD_TESTS)
   endif()
 
   if(TARGET Aver.Net)
-    add_subdirectory(tests/net)   # Fabric G6 NET1: the protocol on a simulated network, sockets over loopback only
+    add_subdirectory(tests/net)   # G6 NET1: the protocol on a simulated network, sockets over loopback only
   endif()
 
   if(TARGET Aver.Synapse)

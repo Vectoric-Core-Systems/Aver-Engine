@@ -11,7 +11,7 @@
 add_library(Aver.UI.Abi SHARED
   src/UiAbi.cpp
   src/UiWidgetAbi.cpp    # the retained widget tree's C ABI, ui_widget_abi.h
-  src/UiStyleAbi.cpp)    # style boxes, stretch and the default theme text for Aver.Fabric (ui_style_abi.h)
+  src/UiStyleAbi.cpp)    # style boxes, stretch and the default theme text for scripts and extensions (ui_style_abi.h)
 
 target_include_directories(Aver.UI.Abi PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(Aver.UI.Abi PUBLIC cxx_std_20)

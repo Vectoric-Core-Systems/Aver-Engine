@@ -100,7 +100,7 @@ function Get-PeImports {
 $AverOsProvidedDlls = @(
     'advapi32.dll', 'avrt.dll', 'comctl32.dll', 'd3d11.dll', 'd3d12.dll', 'd3dcompiler_47.dll',
     'dbghelp.dll', 'dxgi.dll',
-    'gdi32.dll', 'imm32.dll', 'kernel32.dll', 'mfplat.dll', 'mfreadwrite.dll', 'mscoree.dll',
+    'gdi32.dll', 'imm32.dll', 'iphlpapi.dll', 'kernel32.dll', 'mfplat.dll', 'mfreadwrite.dll', 'mscoree.dll',
     'ole32.dll', 'oleaut32.dll', 'shell32.dll', 'shlwapi.dll', 'user32.dll', 'version.dll',
     'ws2_32.dll', 'ucrtbase.dll', 'xinput1_4.dll'
 )

@@ -142,7 +142,7 @@ public readonly struct Joint : IEquatable<Joint>
         set => Native.aver_phys_joint_set_enabled(Handle, value ? 1 : 0);
     }
 
-    /// <summary>Godot's exclude_nodes_from_collision: while true the two jointed bodies do not collide with each other.
+    /// <summary>Exclude from collision: while true the two jointed bodies do not collide with each other.
     /// Off for every new joint (as before); set it per joint. Owned by the joint, so it ends when the joint does.
     /// Setting it fails (value unchanged) for a body that cannot take a collision filter, e.g. a ragdoll part.</summary>
     public bool ExcludeCollision

@@ -17,7 +17,7 @@
 // they did. The trade is that all graphs share a compile, which is also what collapses the
 // N-materials x M-consumer-shaders compile cost this tree has no cache for down to M.
 #include "aver/core/Types.hpp"
-#include "aver/formats/OcGraphGodot.hpp"
+#include "aver/formats/OcGraphHlsl.hpp"
 
 #include <string>
 #include <vector>
@@ -35,10 +35,10 @@ struct MaterialGraphBody {
     // Statements writing into an `AverAuthored a`, free to read `v` (AverVertex), `l` (AverLight)
     // and `uv` (float2). Indented ready to drop inside a switch arm; never empty when ok.
     std::string hlsl;
-    // G6 SH2: a graph holding a GodotShader node (OcGraphGodot.hpp). `hlsl` is then empty and `gd` is what materialGraphHlsl() builds the switch arms and the
-    // converted sources from.
-    bool isGodot = false;
-    fmt::GodotShaderPart gd;
+    // A graph holding an EmbeddedHlsl node (OcGraphHlsl.hpp). `hlsl` is then empty and `emb` is what materialGraphHlsl() builds the switch arms and the
+    // embedded sources from.
+    bool isEmbedded = false;
+    fmt::EmbeddedHlslPart emb;
 };
 
 // Compiles one material graph. Fails, rather than emitting something plausible, when the graph
@@ -51,20 +51,20 @@ struct MaterialGraphEntry {
     u32 id = 0;         // the gMaterialGraphId value. NEVER 0: that is reserved for "no graph".
     std::string name;   // emitted as a comment, so a dumped shader names the graph it came from
     std::string hlsl;   // MaterialGraphBody::hlsl
-    bool isGodot = false;        // G6 SH2
-    fmt::GodotShaderPart gd;
+    bool isEmbedded = false;
+    fmt::EmbeddedHlslPart emb;
 };
 
-// G6 SH2: the first TEXCOORD a converted shader's varyings take in the VS output (the engine's own VSOut uses 0..3), and how many rows they may use together.
-inline constexpr u32 kGdVaryingFirstSemantic = 4;
-inline constexpr u32 kGdVaryingMaxRows = 24;
+// The first TEXCOORD an embedded shader's varyings take in the VS output (the engine's own VSOut uses 0..3), and how many rows they may use together.
+inline constexpr u32 kEmbVaryingFirstSemantic = 4;
+inline constexpr u32 kEmbVaryingMaxRows = 24;
 
-// The `#define AVER_GD_VSOUT_MEMBERS ...` line naming every converted shader's varyings with their semantics, or empty when there are none. A renderer puts
-// it BEFORE rhi::sharedShaderPrelude() and defines AVER_GD_VARYINGS_ON for the variant that carries them (shared_prelude.hlsl adds the members to VSOut).
-std::string godotVsOutMembersDefine(const std::vector<MaterialGraphEntry>& entries);
-// How many varying rows the converted shaders in `entries` use together.
-u32 godotVaryingRows(const std::vector<MaterialGraphEntry>& entries);
-bool anyGodotShader(const std::vector<MaterialGraphEntry>& entries);
+// The `#define AVER_CUSTOM_VSOUT_MEMBERS ...` line naming every embedded shader's varyings with their semantics, or empty when there are none. A renderer puts
+// it BEFORE rhi::sharedShaderPrelude() and defines AVER_CUSTOM_VARYINGS_ON for the variant that carries them (shared_prelude.hlsl adds the members to VSOut).
+std::string embeddedVsOutMembersDefine(const std::vector<MaterialGraphEntry>& entries);
+// How many varying rows the embedded shaders in `entries` use together.
+u32 embeddedVaryingRows(const std::vector<MaterialGraphEntry>& entries);
+bool anyEmbeddedShader(const std::vector<MaterialGraphEntry>& entries);
 
 // The averEvalMaterial that replaces the stock one. Compile the prelude with AVER_MATERIAL_GRAPH
 // defined and append this; see materialShaderPrelude()'s own comment for that contract.

@@ -1,13 +1,13 @@
 #pragma once
 // Synapse polygon navigation: maps made of regions (convex polygons in world space), links between them, path queries with layers,
-// costs and funnel smoothing, and RVO-style avoidance. Godot 4's NavigationServer3D semantics (docs/plans/fabric/G5_PARITY.md, N1).
+// costs and funnel smoothing, and RVO-style avoidance. Navigation-server semantics.
 //
 // WHY NEXT TO THE GRID. `.ocnav` (Nav.hpp) is a 2.5D grid with ONE floor per cell and no layers or costs; a bridge over a road, a second
 // storey or a link between two roofs cannot be said in it. This is the polygon form the grid's header reserved room for. The grid, the
 // crowd and the existing AI keep working unchanged; the two forms share the ORCA core (CrowdOrca.hpp) and nothing else.
 //
 // PURE like the rest of Synapse: arithmetic on vectors, no scene, no physics, no device. Engine space: centimetres, +Z up; the ground
-// plane is XY. Nothing here knows about Godot's axes; the Aver.Fabric layer converts at the boundary (FabricSpace).
+// plane is XY. Nothing here knows about other axis conventions; the caller converts at the boundary.
 #include "aver/core/Math.hpp"
 #include "aver/synapse/SteerMath.hpp"
 
@@ -17,19 +17,19 @@
 
 namespace aver::synapse {
 
-// Path post-processing (Godot's PathPostProcessing).
+// Path post-processing.
 inline constexpr i32 kNavPostCorridorFunnel = 0;
 inline constexpr i32 kNavPostEdgeCentered   = 1;
 inline constexpr i32 kNavPostNone           = 2;
 
-// Which per-point arrays a path result carries (Godot's PathMetadataFlags). The engine always fills them; the flags select what the
+// Which per-point arrays a path result carries (path metadata flags). The engine always fills them; the flags select what the
 // managed layer hands out.
 inline constexpr u32 kNavMetaTypes  = 1;
 inline constexpr u32 kNavMetaRids   = 2;
 inline constexpr u32 kNavMetaOrigins = 4;
 inline constexpr u32 kNavMetaOwners = 8;
 
-// Path point types (Godot's PathSegmentType).
+// Path point types.
 inline constexpr i32 kNavPointRegion = 0;
 inline constexpr i32 kNavPointLink   = 1;
 
@@ -157,7 +157,7 @@ public:
     bool setRegionMesh(u32 region, std::vector<Vec3> verts, std::vector<std::vector<u32>> polys);
     void markDirty(u32 map);
 
-    // Rebuilds the map's polygon graph if anything changed (Godot's map_force_update). Returns true when it rebuilt.
+    // Rebuilds the map's polygon graph if anything changed (a forced update). Returns true when it rebuilt.
     bool update(u32 map);
 
     // Path queries. `points` is empty when the map has no usable polygon.

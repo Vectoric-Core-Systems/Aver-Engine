@@ -9,7 +9,7 @@
 #include "aver/physics/physics_ragdoll_abi.h"
 #include "PhysicsShapeTable.hpp"
 #include "PhysicsSurface.hpp"
-#include "PhysicsBodyGodot.hpp"   // the disabled-shape records
+#include "PhysicsRigidExtras.hpp"   // the disabled-shape records
 
 #include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
@@ -187,8 +187,8 @@ bool editable(int32_t body, Editable& e) {
 
 // Disabled-shape records (aver_phys_body_set_shape_disabled). A disabled mutable-compound child is a weightless, collision-less stand-in: an empty shape
 // scaled to a thousandth, because Jolt's EmptyShape reports a mass of 1 kg to the compound's centre-of-mass and inertia sums.
-bool wholeDisabled(int32_t body) { return g_world->bodyGodot && g_world->bodyGodot->disabledWhole.count(body) != 0; }
-void forgetDisabledChildren(int32_t body) { if (g_world->bodyGodot) g_world->bodyGodot->disabledChildren.erase(body); }
+bool wholeDisabled(int32_t body) { return g_world->rigidExtras && g_world->rigidExtras->disabledWhole.count(body) != 0; }
+void forgetDisabledChildren(int32_t body) { if (g_world->rigidExtras) g_world->rigidExtras->disabledChildren.erase(body); }
 
 JPH::RefConst<JPH::Shape> childPlaceholder() {
     const JPH::RefConst<JPH::Shape> empty = new JPH::EmptyShape();
@@ -430,8 +430,8 @@ int32_t aver_phys_body_compound_remove(int32_t body, int32_t index) {
         e.mc->AdjustCenterOfMass();
     }
     commitEdit(e.id, *e.mc, prevCom, mass);
-    if (g_world->bodyGodot) {   // the disabled set follows the shifted indices
-        auto& all = g_world->bodyGodot->disabledChildren;
+    if (g_world->rigidExtras) {   // the disabled set follows the shifted indices
+        auto& all = g_world->rigidExtras->disabledChildren;
         if (const auto rec = all.find(body); rec != all.end()) {
             std::map<uint32_t, JPH::RefConst<JPH::Shape>> shifted;
             for (const auto& [k, s] : rec->second) {
@@ -483,7 +483,7 @@ int32_t aver_phys_body_compound_count(int32_t body) {
     return static_cast<int32_t>(static_cast<const JPH::CompoundShape*>(s.GetPtr())->GetNumSubShapes());
 }
 
-// ---- per-shape disable (Godot CollisionShape3D.disabled) ------------------------------------------------------
+// ---- per-shape disable ------------------------------------------------------
 
 int32_t aver_phys_body_set_shape_disabled(int32_t body, int32_t index, int32_t disabled) {
     const JPH::BodyID* idp = findBody(body);
@@ -499,7 +499,7 @@ int32_t aver_phys_body_set_shape_disabled(int32_t body, int32_t index, int32_t d
         if (!reshapable(body, id)) return 0;
         if ((disabled != 0) == whole) { aver::setAbiError(AbiError::Ok); return 1; }
         const float mass = bodyMassKg(id);
-        BodyGodotState& st = bodyGodotOrCreate();
+        RigidExtrasState& st = rigidExtrasOrCreate();
         if (disabled) {
             // Same centre of mass, so the body does not move; its mass stays, its inertia is the stand-in's.
             commitShape(id, JPH::RefConst<JPH::Shape>(new JPH::EmptyShape(cur->GetCenterOfMass())), mass);
@@ -517,7 +517,7 @@ int32_t aver_phys_body_set_shape_disabled(int32_t body, int32_t index, int32_t d
     if (!editable(body, e)) return 0;   // a static compound cannot be edited
     const uint32_t child = static_cast<uint32_t>(index);
     if (child >= e.mc->GetNumSubShapes()) return fail(AbiError::OutOfRange);
-    auto& kids = bodyGodotOrCreate().disabledChildren[body];
+    auto& kids = rigidExtrasOrCreate().disabledChildren[body];
     const auto it = kids.find(child);
     if ((it != kids.end()) == (disabled != 0)) { aver::setAbiError(AbiError::Ok); return 1; }
 
@@ -555,8 +555,8 @@ int32_t aver_phys_body_shape_disabled(int32_t body, int32_t index, int32_t* outD
         *outDisabled = whole ? 1 : 0;
     } else {
         if (static_cast<uint32_t>(index) >= static_cast<const JPH::CompoundShape*>(cur.GetPtr())->GetNumSubShapes()) return fail(AbiError::OutOfRange);
-        const bool off = g_world->bodyGodot && g_world->bodyGodot->disabledChildren.count(body) &&
-                         g_world->bodyGodot->disabledChildren[body].count(static_cast<uint32_t>(index));
+        const bool off = g_world->rigidExtras && g_world->rigidExtras->disabledChildren.count(body) &&
+                         g_world->rigidExtras->disabledChildren[body].count(static_cast<uint32_t>(index));
         *outDisabled = off ? 1 : 0;
     }
     aver::setAbiError(AbiError::Ok);

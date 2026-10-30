@@ -781,7 +781,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         aver_fw_set_paused(0);
         frameStepGuard.active = true;
     }
-    // Godot's order: OnPhysicsTick before each fixed step, then OnTick (GameTick.hpp).
+    // The frame order: OnPhysicsTick before each fixed step, then OnTick (GameTick.hpp).
     if (!spawnTestClass_.empty() || aver_fw_play_state() == AVER_FW_PLAY_PLAYING) {
 #if AVER_MODULE_SCENE && AVER_MODULE_PHYSICS
         // Level's cars: each driver sets input before physics step, each entity written after.

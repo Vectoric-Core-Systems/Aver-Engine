@@ -1017,7 +1017,7 @@ static void testSubViewportKeys() {
     check(count == 1 && rewritten.find("RENDER.SUBVIEWPORTS 6") != std::string::npos, "a rewrite replaces an existing line (the key is owned)");
 }
 
-// RENDER.VOLFOG / RENDER.VOLFOGDENSITY (G4 R8): volumetric fog, the home of Godot FogVolumes. Absent leaves the engine defaults (off), stated values land in
+// RENDER.VOLFOG / RENDER.VOLFOGDENSITY : volumetric fog, the home of fog volumes. Absent leaves the engine defaults (off), stated values land in
 // Settings, round-trip, and capture writes them only when on or already stated.
 static void testVolFogKeys() {
     AVER_INFO("=== RENDER.VOLFOG / RENDER.VOLFOGDENSITY: volumetric fog ===");

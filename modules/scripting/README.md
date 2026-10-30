@@ -8,7 +8,7 @@ Gated by `-DAVER_MODULE_SCRIPTING=OFF`; the engine builds and runs exactly as be
 
 | Target | Kind | Links | Holds |
 |---|---|---|---|
-| `Aver.Scripting.Host` | STATIC | `Aver.Core`, `Aver.Platform` | `ScriptHost`, the hostfxr sequence, `scripting_abi.h` |
+| `Aver.Scripting.Host` | STATIC | `Aver.Core`, `Aver.Platform`, `Aver.Extensions` | `ScriptHost`, the hostfxr sequence, `scripting_abi.h`; reads the installed extensions' manifests for their managed assemblies |
 | `Aver.Scripting.Bridge` | C# | `Aver.Scripting` | The entry points, the collectible load context, exception boundary |
 | `Aver.Scripting` | C# | — | `AverBehaviour`, `Log`, the Voxi/PBR bindings — what **user scripts** reference |
 
@@ -36,6 +36,8 @@ All thirteen oracle gates return their raw codes. Scripting does not touch rende
 2. `LoadLibraryW(<that path>)` → `hostfxr_initialize_for_runtime_config()` against `Aver.Scripting.Bridge.runtimeconfig.json`.
 3. `hostfxr_get_runtime_delegate(hdt_load_assembly_and_get_function_pointer)`.
 4. Bind six `[UnmanagedCallersOnly]` entry points on `Aver.Scripting.Bridge.HostBridge` — `Bootstrap`, `LoadScripts`, `UnloadScripts`, `Update`, `Shutdown`, and the three HUD entries `HudCount` / `HudName` / `HudDraw`.
+
+5. After `Bootstrap`, `LoadExtensions` (bound optionally) gets the managed half of each installed extension: `HostDesc::extensionsDir` (default `<exe dir>/Extensions`) is scanned through `Aver.Extensions`, and each Ready extension with `managed.runtime` assemblies is passed as its name, `actorBase` and assembly paths. The bridge loads them into the host load context and declares their actor classes before any project script; a Refused or unusable extension logs one line and is skipped. See [docs/EXTENSIONS.md](../../docs/EXTENSIONS.md).
 
 The hostfxr declarations live in `src/ScriptHost.cpp` rather than in `nethost.h` / `hostfxr.h`, which only exist on machines with the .NET SDK. Including them would make the engine unbuildable without .NET — the same property the run-time path requires. The surface is four functions and has been stable since .NET Core 3.0.
 

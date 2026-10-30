@@ -670,7 +670,7 @@ static void testDefaults() {
     }
     check(render(flat1, 12000) == render(flat2, 12000), "with binaural on, non-positional voices render bit-identical samples");
 
-    // A mono mixer and a mixer on a Godot-spatial voice are untouched by binaural off; with a mono mixer it is ignored when on.
+    // A mono mixer and a mixer on a spatial-model voice are untouched by binaural off; with a mono mixer it is ignored when on.
     Mixer mono1; mono1.init(kRate, 1, 16, 16, 2); Mixer mono2; mono2.init(kRate, 1, 16, 16, 2); mono2.setBinaural(true);
     for (Mixer* mm : {&mono1, &mono2}) { listener(*mm); playAt(*mm, mm->addSound(sine(300.0f, 0.4f)), 0.0f, 200.0f, 0.0f); }
     check(render(mono1, 6000) == render(mono2, 6000), "binaural is ignored on a mono mixer");

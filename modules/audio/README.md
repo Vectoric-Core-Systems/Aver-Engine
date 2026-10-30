@@ -88,12 +88,12 @@ interpolated per sample (no zipper noise, delays slew at most half a sample per 
 with `AUDIO.SPEAKERS 6|8` and `AUDIO.BINAURAL 1`; the C ABI and `Audio.Speakers` / `Binaural` / `LfeSend` / `Upmix` reach the same settings.
 `tests/audio/AudioSurroundTest` runs it offline; `docs/AUDIO.md` section 14 has the details and the headed checks.
 
-## Bus graph, effects, Godot-style players
+## Bus graph, effects, spatial-model players
 
-`BusGraph.hpp`, `Effects.hpp` and `Spatial.hpp` (Fabric G5 S1, `docs/AUDIO.md` section 10): Godot's AudioServer
+`BusGraph.hpp`, `Effects.hpp` and `Spatial.hpp` (`docs/AUDIO.md` section 10): a
 bus list with sends, mute, solo, bypass and peaks; the AudioEffect set (filters, EQs, delay, chorus,
 compressor with sidechain, limiters, distortion, phaser, pitch shift, reverb, panner, stereo enhance, capture,
-spectrum analyser); Godot's AudioStreamPlayer3D attenuation, panning, cone, filter and Doppler as pure
+spectrum analyser); a 3D player's attenuation, panning, cone, filter and Doppler as pure
 functions; pause, start offset, playback position, live (generator) voices. Opt-in: the graph does nothing
 until `mixer.graph().setActive(true)`, and a mixer that never uses it renders exactly as before.
 `tests/audio` (`AudioBusTest`, `AudioSpatialTest`, `AudioAbiTest`) run all of it offline.

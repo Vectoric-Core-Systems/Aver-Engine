@@ -1,10 +1,10 @@
-// Local fog volumes (G4 R8, docs/plans/fabric/G4_RENDER.md): Godot's FogVolume + FogMaterial as shaped regions of extra extinction, scattering and
+// Local fog volumes: shaped regions of extra extinction, scattering and
 // emission inside Voxi's volumetric-fog froxel volume. Header-only and pure: the framework registry, the renderer and the tests share one set of formulas,
 // and the HLSL in voxi_froxel.hlsl (AVER_FOG_VOLUMES) mirrors fogVolumeWeight() line by line.
 //
 // Engine space: centimetres, +Z up, left-handed, row vectors. A volume is a unit box [-1,1]^3 carried by an affine matrix; the shape lives in that unit
-// space, so one world->unit transform (three float4 rows) is all the shader needs. Godot's local Y axis is the engine's local Z (the axis map sends
-// Godot (x, y, z) to engine (-z, x, y)), so "up" for the cone and the cylinder is local +Z here.
+// space, so one world->unit transform (three float4 rows) is all the shader needs. An importer's local Y axis is the engine's local Z (the axis map
+// sends (x, y, z) to engine (-z, x, y)), so "up" for the cone and the cylinder is local +Z here.
 #pragma once
 #include "aver/core/Types.hpp"
 
@@ -14,7 +14,7 @@
 
 namespace aver {
 
-// Godot's RenderingServer.FogVolumeShape numbers.
+// The shape numbers.
 enum class FogVolumeShape : i32 { Ellipsoid = 0, Cone = 1, Cylinder = 2, Box = 3, World = 4 };
 
 inline constexpr u32 kFogVolumeMax = 16;       // volumes in one frame's block (mirrors AVER_FV_MAX in voxi_froxel.hlsl)
@@ -25,15 +25,15 @@ struct FogVolumeDesc {
     FogVolumeShape shape = FogVolumeShape::Box;
     // The engine instance matrix: three basis rows then the translation (12 floats, row vectors). The basis carries the node's scale.
     f32 world[12] = {1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0};
-    // Half size along the engine's local X, Y, Z before the matrix's scale (Godot size / 2, axis-mapped, centimetres).
+    // Half size along the engine's local X, Y, Z before the matrix's scale (half the authored size, axis-mapped, centimetres).
     f32 halfExtentCm[3] = {100, 100, 100};
     f32 densityPerM = 1.0f;       // FogMaterial.density: extinction per metre; may be negative (it carves)
     f32 albedo[3] = {1, 1, 1};    // scattering colour, linear
     f32 emission[3] = {0, 0, 0};  // radiance added per unit density, linear
     f32 heightFalloff = 0.0f;     // per metre; 0 = uniform
     f32 edgeFade = 0.1f;          // depth of the soft edge, as a fraction of the half size
-    // G6 SH3: a converted Godot fog shader (1-based index into the frame's fog-shader table, 0 = none). The shader replaces density, albedo and emission
-    // (density is per metre, as FogMaterial.density is); the shape and the edge fade still apply, the height falloff does not.
+    // A custom fog shader (1-based index into the frame's fog-shader table, 0 = none). The shader replaces density, albedo and emission
+    // (density is per metre); the shape and the edge fade still apply, the height falloff does not.
     u32 shader = 0;
 };
 

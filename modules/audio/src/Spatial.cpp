@@ -1,4 +1,4 @@
-// Godot's AudioStreamPlayer3D maths; see Spatial.hpp.
+// The 3D player maths; see Spatial.hpp.
 #include "aver/audio/Spatial.hpp"
 
 #include <algorithm>
@@ -6,7 +6,7 @@
 
 namespace aver::audio {
 namespace {
-constexpr f32 kEps = 0.00001f;   // Godot's CMP_EPSILON
+constexpr f32 kEps = 0.00001f;   // comparison epsilon
 constexpr f32 kSpeedOfSound = 343.0f;
 
 f32 clampf(f32 v, f32 lo, f32 hi) { return v < lo ? lo : (v > hi ? hi : v); }
@@ -40,7 +40,7 @@ f32 attenuationDb(AttenuationModel model, f32 d, f32 unitSize) {
     }
 }
 
-void godotPanGains(f32 cosx, f32 panningStrength, f32 globalStrength, f32& left, f32& right) {
+void spatialPanGains(f32 cosx, f32 panningStrength, f32 globalStrength, f32& left, f32& right) {
     const f32 s = panningStrength * globalStrength;
     const f32 g = clampf((1.0f - s) * (1.0f - s), 0.0f, 1.0f);
     const f32 f = (1.0f - g) / (1.0f + g);
@@ -63,12 +63,12 @@ SpatialResult spatialize(const Spatial3D& s, f32 volume, const f32 L[3], const f
     }
     r.distanceGain = mult;
 
-    // Pan: the lateral offset over the horizontal distance, in the listener's frame (Godot: +X right, +Z behind).
+    // Pan: the lateral offset over the horizontal distance, in the listener's frame (+X right, +Z behind).
     const f32 lateral = dot3(d, right), back = -dot3(d, fwd);
     const f32 radius = std::sqrt(lateral * lateral + back * back);
     const f32 cosx = radius > 1.0e-6f ? clampf(lateral / radius, -1.0f, 1.0f) : 0.0f;
     f32 pl, pr;
-    godotPanGains(cosx, s.panningStrength, s.globalPanningStrength, pl, pr);
+    spatialPanGains(cosx, s.panningStrength, s.globalPanningStrength, pl, pr);
     r.gainL = pl * mult;
     r.gainR = pr * mult;
 

@@ -1,4 +1,4 @@
-// ContactMonitorTest -- per-body contact monitoring (physics_areas_abi.h, G2): Godot's contact_monitor, max_contacts_reported, body_entered / body_exited.
+// ContactMonitorTest -- per-body contact monitoring (physics_areas_abi.h): the contact cap and the begin / end events.
 //
 //   1. a world that never monitors anything is unchanged, and a monitored world simulates bit-identically (the monitor only watches),
 //   2. BEGIN and END per body pair, with a point and a normal pointing from the monitored body to its partner,

@@ -1,7 +1,7 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
-// GameThreadTests: Godot's call_deferred and await on the game thread -- what runs when, in what order,
+// GameThreadTests: deferred calls and await on the game thread -- what runs when, in what order,
 // and from which thread. A bare process: this test's thread plays the game thread.
 
 using Aver.Framework;

@@ -83,19 +83,19 @@ target_link_libraries(LayerTest PRIVATE Aver.Physics Aver.Core)
 set_target_properties(LayerTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-# GodotFilterTest -- Godot-style 32-bit layer/mask, collision exceptions, joint exclusion and mask queries (G2). Through the ABI only.
-add_executable(GodotFilterTest src/GodotFilterTest.cpp)
-target_link_libraries(GodotFilterTest PRIVATE Aver.Physics Aver.Core)
-set_target_properties(GodotFilterTest PROPERTIES
+# LayerFilterTest -- 32-bit layer/mask, collision exceptions, joint exclusion and mask queries. Through the ABI only.
+add_executable(LayerFilterTest src/LayerFilterTest.cpp)
+target_link_libraries(LayerFilterTest PRIVATE Aver.Physics Aver.Core)
+set_target_properties(LayerFilterTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-# CombineRulesTest -- Jolt's and Godot's material combine rules (ROUGH / ABSORBENT) measured through real contacts (G2). Through the ABI only.
+# CombineRulesTest -- Jolt's and the material combine rules (ROUGH / ABSORBENT) measured through real contacts. Through the ABI only.
 add_executable(CombineRulesTest src/CombineRulesTest.cpp)
 target_link_libraries(CombineRulesTest PRIVATE Aver.Physics Aver.Core)
 set_target_properties(CombineRulesTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-# ContactMonitorTest and AreaTest -- Godot's contact_monitor and Area3D (physics_areas_abi.h, G2). Through the ABI only.
+# ContactMonitorTest and AreaTest -- contact monitoring and areas (physics_areas_abi.h). Through the ABI only.
 add_executable(ContactMonitorTest src/ContactMonitorTest.cpp)
 target_link_libraries(ContactMonitorTest PRIVATE Aver.Physics Aver.Core)
 set_target_properties(ContactMonitorTest PROPERTIES
@@ -105,19 +105,19 @@ target_link_libraries(AreaTest PRIVATE Aver.Physics Aver.Core)
 set_target_properties(AreaTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-# BodyGodotTest -- Godot's rigid-body extras (G2): _integrate_forces, custom integrator, constant velocity on static bodies, SeparationRay, per-shape disable. Through the ABI only.
-add_executable(BodyGodotTest src/BodyGodotTest.cpp)
-target_link_libraries(BodyGodotTest PRIVATE Aver.Physics Aver.Core)
-set_target_properties(BodyGodotTest PROPERTIES
+# RigidExtrasTest -- rigid-body extras: integrate-forces callback, custom integrator, constant velocity on static bodies, SeparationRay, per-shape disable. Through the ABI only.
+add_executable(RigidExtrasTest src/RigidExtrasTest.cpp)
+target_link_libraries(RigidExtrasTest PRIVATE Aver.Physics Aver.Core)
+set_target_properties(RigidExtrasTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-# KinematicCharacterTest -- Godot's CharacterBody3D.move_and_slide on a kinematic rigid body (physics_kinematic_abi.h, G2). Through the ABI only.
+# KinematicCharacterTest -- move_and_slide on a kinematic rigid body (physics_kinematic_abi.h). Through the ABI only.
 add_executable(KinematicCharacterTest src/KinematicCharacterTest.cpp)
 target_link_libraries(KinematicCharacterTest PRIVATE Aver.Physics Aver.Core)
 set_target_properties(KinematicCharacterTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-# RaycastVehicleTest -- Godot's VehicleBody3D as a raycast vehicle (physics_raycast_vehicle_abi.h, G2). Through the ABI only.
+# RaycastVehicleTest -- the raycast vehicle (physics_raycast_vehicle_abi.h). Through the ABI only.
 add_executable(RaycastVehicleTest src/RaycastVehicleTest.cpp)
 target_link_libraries(RaycastVehicleTest PRIVATE Aver.Physics Aver.Core)
 set_target_properties(RaycastVehicleTest PROPERTIES
@@ -168,7 +168,7 @@ add_executable(QueryTest src/QueryTest.cpp)
 target_link_libraries(QueryTest PRIVATE Aver.Physics Aver.Core)
 set_target_properties(QueryTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-# SpaceQueryTest -- Godot's PhysicsDirectSpaceState3D and body_test_motion (G2): ray options, intersect/collide/rest_info/cast_motion, test motion. Through the ABI only.
+# SpaceQueryTest -- space-state queries and body test motion: ray options, intersect/collide/rest_info/cast_motion, test motion. Through the ABI only.
 add_executable(SpaceQueryTest src/SpaceQueryTest.cpp)
 target_link_libraries(SpaceQueryTest PRIVATE Aver.Physics Aver.Core)
 set_target_properties(SpaceQueryTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

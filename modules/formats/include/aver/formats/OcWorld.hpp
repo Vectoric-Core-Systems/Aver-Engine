@@ -644,7 +644,7 @@ inline constexpr OcPostKeyInfo kOcPostKeys[] = {
     {"bloomthreshold",  "Bloom Threshold",       1, 0, 0, 32.0f},
     {"bloomknee",       "Bloom Knee",            1, 0, 0, 1},
     {"tonemap",         "Tonemap",               1, 2, 0, 7},
-    {"tonemapwhite",    "Tonemap White (Godot)", 1, 0, 0.001f, 16.0f},
+    {"tonemapwhite",    "Tonemap White",         1, 0, 0.001f, 16.0f},
     {"adjbrightness",   "Display Brightness",    1, 0, 0, 4.0f},
     {"adjcontrast",     "Display Contrast",      1, 0, 0, 4.0f},
     {"adjsaturation",   "Display Saturation",    1, 0, 0, 4.0f},

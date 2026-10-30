@@ -2,10 +2,10 @@
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 //
-// Godot's PhysicsDirectSpaceState3D, body_test_motion, RayCast3D and ShapeCast3D on Aver.Physics (G2). The native side is the
-// "Godot-style space-state queries" section of physics_queries_abi.h; docs/physics/GODOT_QUERIES.md has the semantics.
+// Space-state queries, body test motion, ray casts and shape casts on Aver.Physics. The native side is the
+// "space-state queries" section of physics_queries_abi.h; docs/physics/SPACE_QUERIES.md has the semantics.
 //
-// NONE OF GODOT'S DEFAULTS IS BUILT IN. Every option is a parameter; the converter or Aver.Fabric passes Godot's values (hit back faces
+// NO DEFAULTS ARE BUILT IN. Every option is a parameter; the caller passes the values (for example hit back faces
 // true, hit from inside false, bodies true, areas false, margin 0.001 m = 0.1 cm).
 
 using System;
@@ -13,20 +13,20 @@ using System.Collections.Generic;
 
 namespace Aver.Physics;
 
-/// <summary>Options of the Godot-style queries. Values are the header's AVER_PHYS_SQ_*. <see cref="None"/> collides with nothing.</summary>
+/// <summary>Options of the space-state queries. Values are the header's AVER_PHYS_SQ_*. <see cref="None"/> collides with nothing.</summary>
 [Flags]
 public enum SpaceQueryFlags
 {
     None = 0,
-    /// <summary>Bodies and characters count (Godot collide_with_bodies).</summary>
+    /// <summary>Bodies and characters count.</summary>
     Bodies = 1,
-    /// <summary>Sensors count (Godot collide_with_areas).</summary>
+    /// <summary>Sensors count.</summary>
     Areas = 2,
-    /// <summary>Ray: the back of a triangle and the exit face of a convex body are hit (Godot hit_back_faces).</summary>
+    /// <summary>Ray: the back of a triangle and the exit face of a convex body are hit.</summary>
     BackFaces = 4,
-    /// <summary>Ray: starting inside a convex body hits it at distance 0 with a zero normal (Godot hit_from_inside).</summary>
+    /// <summary>Ray: starting inside a convex body hits it at distance 0 with a zero normal.</summary>
     FromInside = 8,
-    /// <summary>Test motion: depenetration counts as a collision (Godot recovery_as_collision).</summary>
+    /// <summary>Test motion: depenetration counts as a collision.</summary>
     RecoveryAsCollision = 16,
 }
 
@@ -39,7 +39,7 @@ internal enum MotionInt { Collider = 0, Entity = 1, Subshape = 2, Contacts = 3, 
 internal enum MotionContactFloat { Point = 0, Normal = 3, Velocity = 6, AngularVelocity = 9, Depth = 12, Count = 13 }
 internal enum MotionContactInt { Body = 0, Entity = 1, Subshape = 2, Count = 3 }
 
-/// <summary>What a Godot-style ray found.</summary>
+/// <summary>What a space-state ray found.</summary>
 public readonly struct SpaceRayHit
 {
     public Body Collider { get; }
@@ -83,8 +83,8 @@ public readonly record struct MotionTestResult(bool Collided, Float3 Travel, Flo
     public MotionContact Collision => Contacts.Length > 0 ? Contacts[0] : default;
 }
 
-/// <summary>Godot's PhysicsDirectSpaceState3D. Poses are the shape's ORIGIN (as <see cref="CollisionShape.CreateBody"/> places it).
-/// The exclude list is Godot's exclude array. Allocates per call: this is the scripting surface.</summary>
+/// <summary>The physics space state. Poses are the shape's ORIGIN (as <see cref="CollisionShape.CreateBody"/> places it).
+/// The exclude list is an array of bodies to skip. Allocates per call: this is the scripting surface.</summary>
 public static class SpaceState
 {
     internal static float[] Pose(Float3 position, Quaternion rotation) =>
@@ -100,7 +100,7 @@ public static class SpaceState
         return ids;
     }
 
-    /// <summary>Godot intersect_ray: the nearest hit along <paramref name="from"/> to <paramref name="to"/>.</summary>
+    /// <summary>Intersect ray: the nearest hit along <paramref name="from"/> to <paramref name="to"/>.</summary>
     public static SpaceRayHit Raycast(Float3 from, Float3 to, uint collisionMask, SpaceQueryFlags flags, IReadOnlyList<Body>? exclude = null)
     {
         var dir = to - from;
@@ -113,7 +113,7 @@ public static class SpaceState
         return body == 0 ? default : new SpaceRayHit(new Body(body), entity, sub, dist, new Float3(pt[0], pt[1], pt[2]), new Float3(n[0], n[1], n[2]));
     }
 
-    /// <summary>Godot intersect_shape: what the shape overlaps (within <paramref name="marginCm"/>), deepest first.</summary>
+    /// <summary>Intersect shape: what the shape overlaps (within <paramref name="marginCm"/>), deepest first.</summary>
     public static ShapeOverlap[] IntersectShape(CollisionShape shape, Float3 position, Quaternion rotation, float marginCm, uint collisionMask,
                                                 SpaceQueryFlags flags, IReadOnlyList<Body>? exclude = null, int maxResults = 32)
     {
@@ -126,7 +126,7 @@ public static class SpaceState
         return res;
     }
 
-    /// <summary>Godot collide_shape: the contacts of the shape, deepest first.</summary>
+    /// <summary>Collide shape: the contacts of the shape, deepest first.</summary>
     public static ShapeContact[] CollideShape(CollisionShape shape, Float3 position, Quaternion rotation, float marginCm, uint collisionMask,
                                               SpaceQueryFlags flags, IReadOnlyList<Body>? exclude = null, int maxContacts = 32)
     {
@@ -143,7 +143,7 @@ public static class SpaceState
         return res;
     }
 
-    /// <summary>Godot get_rest_info: the single deepest contact, or null when there is none.</summary>
+    /// <summary>Rest info: the single deepest contact, or null when there is none.</summary>
     public static RestInfo? GetRestInfo(CollisionShape shape, Float3 position, Quaternion rotation, float marginCm, uint collisionMask,
                                         SpaceQueryFlags flags, IReadOnlyList<Body>? exclude = null)
     {
@@ -154,7 +154,7 @@ public static class SpaceState
         return body == 0 ? null : new RestInfo(new Body(body), entity, sub, V(pt, 0), V(n, 0), V(v, 0), depth);
     }
 
-    /// <summary>Godot cast_motion: how far the shape can move along <paramref name="motion"/> (centimetres).</summary>
+    /// <summary>Cast motion: how far the shape can move along <paramref name="motion"/> (centimetres).</summary>
     public static MotionCast CastMotion(CollisionShape shape, Float3 position, Quaternion rotation, Float3 motion, float marginCm, uint collisionMask,
                                         SpaceQueryFlags flags, IReadOnlyList<Body>? exclude = null)
     {
@@ -170,7 +170,7 @@ public static class SpaceState
 
 public readonly partial struct Body
 {
-    /// <summary>Godot body_test_motion for this body: where would it get to if it moved by <paramref name="motion"/> (centimetres)? The body does
+    /// <summary>Body test motion for this body: where would it get to if it moved by <paramref name="motion"/> (centimetres)? The body does
     /// not move. Recovery (depenetration) comes first, then the motion; the pair filter is the body's own layer, mask and exceptions plus
     /// <paramref name="exclude"/>. <paramref name="originPose"/> tests from another pose (the body's origin, not its centre of mass). Returns
     /// null when the body cannot be tested (dead handle, character, soft body, mesh or heightfield).</summary>
@@ -201,11 +201,11 @@ public readonly partial struct Body
     private static Float3 At(float[] a, int i) => new(a[i], a[i + 1], a[i + 2]);
 }
 
-/// <summary>Godot's RayCast3D as a plain object: set it up, call <see cref="Update"/> once per physics tick, read the result. World space.</summary>
+/// <summary>A ray cast as a plain object: set it up, call <see cref="Update"/> once per physics tick, read the result. World space.</summary>
 public sealed class RayCast3D
 {
     public Float3 Origin { get; set; }
-    /// <summary>The far end of the ray in world space (Godot's target_position, already transformed).</summary>
+    /// <summary>The far end of the ray in world space (the target position, already transformed).</summary>
     public Float3 Target { get; set; }
     public bool Enabled { get; set; } = true;
     public uint CollisionMask { get; set; } = Physics.LayerMaskAll;
@@ -225,7 +225,7 @@ public sealed class RayCast3D
     public void RemoveException(Body b) => Exceptions.Remove(b);
     public void ClearExceptions() => Exceptions.Clear();
 
-    /// <summary>Re-casts the ray now (Godot force_raycast_update). A disabled ray reports no collision.</summary>
+    /// <summary>Re-casts the ray now (a forced update). A disabled ray reports no collision.</summary>
     public SpaceRayHit Update()
     {
         if (!Enabled) return Result = default;
@@ -238,14 +238,14 @@ public sealed class RayCast3D
     }
 }
 
-/// <summary>Godot's ShapeCast3D as a plain object: sweeps <see cref="Shape"/> along <see cref="Motion"/> and lists what it touches. Call
+/// <summary>A shape cast as a plain object: sweeps <see cref="Shape"/> along <see cref="Motion"/> and lists what it touches. Call
 /// <see cref="Update"/> once per physics tick.</summary>
 public sealed class ShapeCast3D
 {
     public CollisionShape Shape { get; set; }
     public Float3 Position { get; set; }
     public Quaternion Rotation { get; set; } = Quaternion.Identity;
-    /// <summary>The displacement to sweep, centimetres (Godot's target_position).</summary>
+    /// <summary>The displacement to sweep, centimetres (the target position).</summary>
     public Float3 Motion { get; set; }
     public float MarginCm { get; set; }
     public int MaxResults { get; set; } = 32;
@@ -256,7 +256,7 @@ public sealed class ShapeCast3D
     public List<Body> Exceptions { get; } = new();
 
     public MotionCast Cast { get; private set; } = new(1f, 1f, default, default, default);
-    /// <summary>What the shape overlaps where it starts, then its contacts where it first touches (Godot get_collision_count and friends).</summary>
+    /// <summary>What the shape overlaps where it starts, then its contacts where it first touches.</summary>
     public ShapeContact[] Contacts { get; private set; } = Array.Empty<ShapeContact>();
     public bool IsColliding => Contacts.Length > 0;
     public float ClosestSafeFraction => Cast.Safe;
@@ -266,7 +266,7 @@ public sealed class ShapeCast3D
     public void RemoveException(Body b) => Exceptions.Remove(b);
     public void ClearExceptions() => Exceptions.Clear();
 
-    /// <summary>Re-casts now (Godot force_shapecast_update).</summary>
+    /// <summary>Re-casts now (a forced update).</summary>
     public void Update()
     {
         Cast = new MotionCast(1f, 1f, default, default, default);

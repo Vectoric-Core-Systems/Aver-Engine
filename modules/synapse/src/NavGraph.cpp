@@ -31,7 +31,7 @@ struct HeapWorse {
 // ------------------------------------------------------------------------------------------------------------ AStarGraph
 
 void AStarGraph::addPoint(i64 id, const Vec3& pos, f32 weightScale) {
-    if (id < 0) return;   // Godot refuses negative ids
+    if (id < 0) return;   // negative ids are refused
     Pt& p = pts_[id];
     p.pos = pos;
     p.weight = weightScale < 0 ? 1.0f : weightScale;

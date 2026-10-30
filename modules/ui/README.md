@@ -21,7 +21,7 @@ calls (`Aver.Render.UI`), and the whole thing is testable with no GPU and no win
 | `UiLayoutAsset` | The `.ocui` layout asset: parse, write, instantiate, capture, the editor's structural edits. |
 | `UiScreens` | A settings screen (graphics, audio, controls with key rebinding) and a command menu. |
 | `UiHostInput` | Raw key/gamepad state to navigation, text editing and typed characters, with key repeat. |
-| `UiTextEffect` | The draw passes of a text outline and shadow (a ring of copies, the shadow's ring, the fill last) and the bounds they grow to; `aver_ui_text_block_fx` walks them (Fabric G5 U2). |
+| `UiTextEffect` | The draw passes of a text outline and shadow (a ring of copies, the shadow's ring, the fill last) and the bounds they grow to; `aver_ui_text_block_fx` walks them (G5 U2). |
 
 Deliberately not Dear ImGui, which stays the editor's (the one exception is the vendored `imstb_truetype.h`,
 a private include of this module used by `UiTrueType.cpp` only). No file I/O either: fonts arrive as byte blobs

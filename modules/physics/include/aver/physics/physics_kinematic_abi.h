@@ -1,13 +1,13 @@
 #pragma once
-// Aver.Physics: a kinematic-body character controller with the semantics of Godot's CharacterBody3D.move_and_slide (G2).
-// Docs: docs/physics/GODOT_KINEMATIC.md.
+// Aver.Physics: a kinematic-body character controller with move_and_slide semantics.
+// Docs: docs/physics/KINEMATIC.md.
 //
 // OPT-IN, ADDITIVE. The CharacterVirtual-based character API (physics_character_abi.h) is untouched and keeps working. This is a SECOND
 // controller, for a kinematic RIGID body of any convex shape (a capsule, a box, a compound): the script sets the velocity (gravity too),
 // aver_phys_kc_move_and_slide moves the body by velocity * dt in up to max_slides slide iterations of aver_phys_body_test_motion, classifies
-// every contact as floor / wall / ceiling against up_direction, and writes the slid velocity back, the way Godot does.
-// Godot's defaults are NOT built into any call except the creation defaults listed below; the converter or Aver.Fabric sets every option
-// explicitly (the C# KinematicCharacter does, from KinematicCharacterOptions.Godot).
+// every contact as floor / wall / ceiling against up_direction, and writes the slid velocity back.
+// No imported defaults are built into any call except the creation defaults listed below; an importer sets every option
+// explicitly (the C# KinematicCharacter does, from KinematicCharacterOptions.Default).
 //
 // Units and axes are the engine's: centimetres, cm/s, radians, +X forward, +Y right, +Z up, left-handed. `up` is an engine-axes direction.
 // Returns 1/0 with aver_phys_last_error unless stated. Everything is a between-step call, on the thread that steps the world.
@@ -16,7 +16,7 @@
 //
 // The body must be KINEMATIC (aver_phys_body_motion_type == AVER_PHYS_MOTION_KINEMATIC) and not a mesh, heightfield or soft body. The
 // controller teleports it (aver_phys_body_set_position) and never gives it a velocity. What it collides with is the body's own filter: its
-// 16-layer object layer, its 32-bit Godot layer/mask, collision exceptions and joint exclusion, exactly as aver_phys_body_test_motion has
+// 16-layer object layer, its 32-bit layer/mask, collision exceptions and joint exclusion, exactly as aver_phys_body_test_motion has
 // it; sensors never block. Destroying the body kills the controller (every call then fails with a bad handle).
 #include <stdint.h>
 
@@ -79,11 +79,11 @@ AVER_PHYS_API int32_t aver_phys_kc_body(int32_t kc);
 
 AVER_PHYS_API int32_t aver_phys_kc_set_param(int32_t kc, int32_t param, float value);
 AVER_PHYS_API int32_t aver_phys_kc_param(int32_t kc, int32_t param, float* outValue);
-/* Godot's up_direction (world, any length, normalised here; zero refused). */
+/* The up direction (world, any length, normalised here; zero refused). */
 AVER_PHYS_API int32_t aver_phys_kc_set_up(int32_t kc, const float* up3);
 AVER_PHYS_API int32_t aver_phys_kc_up(int32_t kc, float* outUp3);
-/* Godot's platform_floor_layers / platform_wall_layers: a platform whose Godot layer bits meet the mask carries the body while the body
-   stands on it (floor) or leans on it (wall). A body without a Godot filter has the single bit of its 16-layer user layer. */
+/* Platform floor / wall layers: a platform whose layer bits meet the mask carries the body while the body
+   stands on it (floor) or leans on it (wall). A body without a layer filter has the single bit of its 16-layer user layer. */
 AVER_PHYS_API int32_t aver_phys_kc_set_platform_layers(int32_t kc, uint32_t floorLayers, uint32_t wallLayers);
 AVER_PHYS_API int32_t aver_phys_kc_platform_layers(int32_t kc, uint32_t* outFloorLayers, uint32_t* outWallLayers);
 
@@ -91,8 +91,8 @@ AVER_PHYS_API int32_t aver_phys_kc_platform_layers(int32_t kc, uint32_t* outFloo
 AVER_PHYS_API int32_t aver_phys_kc_set_velocity(int32_t kc, const float* velocity3);
 AVER_PHYS_API int32_t aver_phys_kc_velocity(int32_t kc, float* outVelocity3);
 
-/* Godot's move_and_slide for a step of `dt` seconds. The body is moved (teleported) and the results below are rebuilt. outCollided (optional)
-   is 1 when at least one collision was recorded, like the bool Godot returns. Refused for dt <= 0 or non-finite. */
+/* Move-and-slide for a step of `dt` seconds. The body is moved (teleported) and the results below are rebuilt. outCollided (optional)
+   is 1 when at least one collision was recorded. Refused for dt <= 0 or non-finite. */
 AVER_PHYS_API int32_t aver_phys_kc_move_and_slide(int32_t kc, float dt, int32_t* outCollided);
 /* Forgets the results and the platform (after a teleport, a respawn, a level change). The velocity is kept. */
 AVER_PHYS_API int32_t aver_phys_kc_clear(int32_t kc);

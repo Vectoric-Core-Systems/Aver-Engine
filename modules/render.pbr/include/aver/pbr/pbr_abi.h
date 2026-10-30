@@ -176,13 +176,13 @@ AVER_PBR_ABI int64_t     aver_pbr_get_texture_id(aver_pbr_material m, int32_t sl
 AVER_PBR_ABI int32_t     aver_pbr_set_texture_id(aver_pbr_material m, int32_t slot, int64_t id);
 AVER_PBR_ABI int32_t     aver_pbr_clear_texture(aver_pbr_material m, int32_t slot);
 
-/* ---- G6 SH2: the uniform registers of a converted Godot shader (the material's GRAPHREF names the shader). Four floats per register in the layout the
- * converter fixed; ints and bools are 32-bit patterns in the float slots. Setting registers on a material makes it a Godot-shader material (texture slot 7
+/* ---- the uniform registers of an embedded HLSL shader (the material's GRAPHREF names the shader). Four floats per register in the layout the
+ * translator fixed; ints and bools are 32-bit patterns in the float slots. Setting registers on a material makes it an embedded-shader material (texture slot 7
  * becomes the uniform table); setting zero floats clears them. The count is a register count in the first call and a float count in the others. ---- */
-AVER_PBR_ABI int32_t aver_pbr_get_gd_register_count(aver_pbr_material m);
-AVER_PBR_ABI int32_t aver_pbr_get_gd_registers(aver_pbr_material m, float* out, int32_t capacityFloats);          /* floats copied, -1 for a stale handle */
-AVER_PBR_ABI int32_t aver_pbr_set_gd_registers(aver_pbr_material m, const float* values, int32_t floatCount);     /* replaces all; no upload when nothing changed */
-AVER_PBR_ABI int32_t aver_pbr_set_gd_register_floats(aver_pbr_material m, int32_t firstFloat, const float* values, int32_t count); /* patches a range */
+AVER_PBR_ABI int32_t aver_pbr_get_embedded_register_count(aver_pbr_material m);
+AVER_PBR_ABI int32_t aver_pbr_get_embedded_registers(aver_pbr_material m, float* out, int32_t capacityFloats);          /* floats copied, -1 for a stale handle */
+AVER_PBR_ABI int32_t aver_pbr_set_embedded_registers(aver_pbr_material m, const float* values, int32_t floatCount);     /* replaces all; no upload when nothing changed */
+AVER_PBR_ABI int32_t aver_pbr_set_embedded_register_floats(aver_pbr_material m, int32_t firstFloat, const float* values, int32_t count); /* patches a range */
 
 /* ---- upload bookkeeping ---- */
 /* 1 when this material still owes the GPU an upload. READING IT CLEARS IT. */

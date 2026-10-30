@@ -388,13 +388,13 @@ float3 averGroundRadianceLit(float3 sunT) {
     return albedo * E / PI;
 }
 
-//@AVER_GD_SKY_SPLICE@
+//@AVER_CUSTOM_SKY_SPLICE@
 // The whole authored dome: sky above the horizon, fading to the lit ground below it.
 float3 skyColorFull(float3 dir)
 {
-#if AVER_GD_SKY
-    // G6 SH3: a converted Godot sky shader (spliced in at the marker above) replaces the dome. Only a variant that defines AVER_GD_SKY sees this.
-    return averGdSky(dir, false);
+#if AVER_CUSTOM_SKY
+    // A custom sky program (spliced in at the marker above) replaces the dome. Only a variant that defines AVER_CUSTOM_SKY sees this.
+    return averCustomSky(dir, false);
 #else
     float3 above = averSkyAbove(dir);
     float g = smoothstep(0.0, 0.35, saturate(-dir.z)) * gGroundColor.a;
@@ -530,8 +530,8 @@ float3 skyColor(float3 dir){
     // path learned to defer it (see averFogInscatter below) -- no equivalent threshold here, since
     // a reflection either needs the sky or doesn't. Measure before assuming this is small; if not,
     // the fix is a cheaper directional approximation, not a mismatched gradient.
-#if AVER_GD_SKY
-    return averGdSky(dir, true);   // G6 SH3: reflections and the like see the Godot sky (AT_CUBEMAP_PASS true)
+#if AVER_CUSTOM_SKY
+    return averCustomSky(dir, true);   // reflections and the like see the custom sky (AT_CUBEMAP_PASS true)
 #else
     if (averAtmoOn()) return averSkyPhysical(dir);
     return skyColorFull(dir);
@@ -761,8 +761,8 @@ float3 averShRadiance(float3 d) {
 // an ambient term can't see anyway.
 float3 averSkyRadianceCheap(float3 d) {
     if (averFurnaceOn()) return averFurnaceL();
-#if AVER_GD_SKY
-    return averGdSky(d, true);     // G6 SH3
+#if AVER_CUSTOM_SKY
+    return averCustomSky(d, true);
 #else
     if (averAtmoOn()) return averShRadiance(d);
     return skyColorFull(d);
@@ -772,8 +772,8 @@ float3 averSkyRadianceCheap(float3 d) {
 // The sky as light: the cosine-weighted average radiance over the hemisphere about N.
 float3 averSkyIrradiance(float3 N) {
     if (averFurnaceOn()) return averFurnaceL();
-#if AVER_GD_SKY
-    return averGdSkyIrradiance(N);   // G6 SH3: the Godot sky sampled about N
+#if AVER_CUSTOM_SKY
+    return averCustomSkyIrradiance(N);   // the custom sky sampled about N
 #endif
     // The physical branch varies with azimuth (nine SH coefficients, ~20 ALU) where the authored
     // dome below does not: everything below this line reads only N.z, so a wall facing the sun and
@@ -788,12 +788,12 @@ float3 averSkyIrradiance(float3 N) {
 }
 
 // ---- PBR mesh with sky ambient + distance fog ----
-// G6 SH2: a converted Godot shader's varyings ride the vertex output. The renderer defines AVER_GD_VSOUT_MEMBERS (the members with their semantics, from the
-// material graph registry) before this prelude and AVER_GD_VARYINGS_ON for the one variant that carries them; every other compile sees an empty macro.
-#if defined(AVER_GD_VARYINGS_ON) && defined(AVER_GD_VSOUT_MEMBERS)
-#define AVER_GD_VSOUT_EXTRA AVER_GD_VSOUT_MEMBERS
+// An embedded shader's varyings ride the vertex output. The renderer defines AVER_CUSTOM_VSOUT_MEMBERS (the members with their semantics, from the
+// material graph registry) before this prelude and AVER_CUSTOM_VARYINGS_ON for the one variant that carries them; every other compile sees an empty macro.
+#if defined(AVER_CUSTOM_VARYINGS_ON) && defined(AVER_CUSTOM_VSOUT_MEMBERS)
+#define AVER_CUSTOM_VSOUT_EXTRA AVER_CUSTOM_VSOUT_MEMBERS
 #else
-#define AVER_GD_VSOUT_EXTRA
+#define AVER_CUSTOM_VSOUT_EXTRA
 #endif
 // Scene vertex as the input assembler delivers it.
 #if AVER_MESH_EXTRA
@@ -807,11 +807,11 @@ struct VSIn  { float3 pos : POSITION; float3 nrm : NORMAL; float2 uv : TEXCOORD0
 // vcol is the vertex colour; tanWS.xyz the world tangent and tanWS.w its handedness with the world matrix's mirroring folded in
 // (0 = this vertex has no tangent).
 struct VSOut { float4 pos : SV_POSITION; float3 nrmWS : NORMAL; float3 wpos : TEXCOORD0; float2 uv : TEXCOORD1;
-               float4 vcol : COLOR0; float4 tanWS : TEXCOORD2; float2 uv2 : TEXCOORD3; AVER_GD_VSOUT_EXTRA };
+               float4 vcol : COLOR0; float4 tanWS : TEXCOORD2; float2 uv2 : TEXCOORD3; AVER_CUSTOM_VSOUT_EXTRA };
 #else
 struct VSIn  { float3 pos : POSITION; float3 nrm : NORMAL; float2 uv : TEXCOORD0; };
 // Interpolants the scene pixel shaders read.
-struct VSOut { float4 pos : SV_POSITION; float3 nrmWS : NORMAL; float3 wpos : TEXCOORD0; float2 uv : TEXCOORD1; AVER_GD_VSOUT_EXTRA };
+struct VSOut { float4 pos : SV_POSITION; float3 nrmWS : NORMAL; float3 wpos : TEXCOORD0; float2 uv : TEXCOORD1; AVER_CUSTOM_VSOUT_EXTRA };
 #endif
 
 // Transforms one scene vertex to clip space, keeping world position and normal.

@@ -1,13 +1,13 @@
 #pragma once
-/* Aver.Anim.Abi -- the plain-C seam onto property-track animation (aver/anim/PropAnim.hpp), so Aver.Fabric's
- * AnimationPlayer drives it. Conventions as docs/ABI.md section 13: setters return 1 on success and 0 on a rejected request
+/* Aver.Anim.Abi -- the plain-C seam onto property-track animation (aver/anim/PropAnim.hpp), so scripts and
+ * managed extensions can drive it. Conventions as docs/ABI.md section 13: setters return 1 on success and 0 on a rejected request
  * (stale handle, bad index), getters return the value or a neutral one (0, -1 for "none", "" for text) for a stale handle.
  * Handles are int32, 0 invalid. Single game thread. Every const char* return is valid until the next call into this library.
  *
  * VALUES. A value crosses as double v[5] = {kind, n0, n1, n2, n3} plus a string: kind is aver::fmt::OcPropKind (0 nil, 1 bool,
  * 2 int, 3 float, 4 vec2, 5 vec3, 6 vec4, 7 quat, 8 color, 9 string, 10 text); the string is the value for kinds 9 and 10 (text
- * is a Godot Variant in its text form).
- * ENUMS (mirrored by hand in Aver.Fabric/Nodes/AnimationNative.cs and checked by AbiEnumTest):
+ * is a variant in its text form).
+ * ENUMS (mirrored by hand in the extension's managed half, extensions/FabricConnector/managed/Aver.Fabric/Nodes/AnimationNative.cs, and checked by AbiEnumTest):
  *   track type 0 value, 1 position3d, 2 rotation3d, 3 scale3d, 4 blend_shape, 5 method, 6 bezier, 7 audio, 8 animation
  *   interpolation 0 nearest, 1 linear, 2 cubic, 3 linear_angle, 4 cubic_angle
  *   update 0 continuous, 1 discrete, 2 capture;  loop 0 none, 1 linear, 2 ping-pong;  discrete mode 0 dominant, 1 recessive, 2 force
@@ -150,7 +150,7 @@ AVER_PANIM_API int32_t aver_pplayer_has_clip(int32_t player, const char* key);
 AVER_PANIM_API int32_t aver_pplayer_clip_count(int32_t player);
 AVER_PANIM_API const char* aver_pplayer_clip_key(int32_t player, int32_t index);
 AVER_PANIM_API int32_t aver_pplayer_set_blend_time(int32_t player, const char* from, const char* to, double seconds);
-AVER_PANIM_API double  aver_pplayer_blend_time(int32_t player, const char* from, const char* to);   /* Godot's get_blend_time: 0 when none */
+AVER_PANIM_API double  aver_pplayer_blend_time(int32_t player, const char* from, const char* to);   /* the blend time: 0 when none */
 AVER_PANIM_API int32_t aver_pplayer_set_next(int32_t player, const char* from, const char* to);
 AVER_PANIM_API const char* aver_pplayer_next(int32_t player, const char* from);
 

@@ -127,4 +127,4 @@ wrong axis does not look.
 
 ## Godot-style queries (G2)
 
-Ray options (back faces, from inside, bodies/areas, 32-bit mask, exclude array), `intersect_shape`, `collide_shape`, `get_rest_info`, `cast_motion` on shape handles and `body_test_motion` are in `docs/physics/GODOT_QUERIES.md`. The queries on this page are unchanged.
+Ray options (back faces, from inside, bodies/areas, 32-bit mask, exclude array), `intersect_shape`, `collide_shape`, `get_rest_info`, `cast_motion` on shape handles and `body_test_motion` are in `docs/physics/SPACE_QUERIES.md`. The queries on this page are unchanged.

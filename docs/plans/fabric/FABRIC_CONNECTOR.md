@@ -2,6 +2,17 @@
 
 Status tracker: rows flip to DONE only with test evidence (commit + test name).
 
+**Paths.** The Fabric Connector now lives in `extensions/FabricConnector/` ([EXTENSION.md](EXTENSION.md), [../../EXTENSIONS.md](../../EXTENSIONS.md)). The G* documents in this folder name the old places; read them as:
+
+| Written as | Now |
+|---|---|
+| `modules/formats.godot` | `extensions/FabricConnector/native/formats.godot` |
+| `modules/fabric.gdext`, `Aver.Fabric.GDExt.Abi` | `extensions/FabricConnector/native/gdext`, exported by `Aver.Fabric.Native` |
+| `tools/fabric` | `extensions/FabricConnector/native/tools/fabric` |
+| `scripting/csharp/Aver.Fabric`, `.Convert`, `.Tests` | `extensions/FabricConnector/managed/Aver.Fabric`, `.Convert`, `.Tests` |
+| `tests/fabric`, `tests/formats.godot` | `extensions/FabricConnector/tests/fabric`, `.../tests/formats.godot` |
+| `third_party/godot-gdextension` | `extensions/FabricConnector/third_party/godot-gdextension` |
+
 ## Context
 The owner wants Godot projects and plugins converted one way into standalone native Aver projects ("Fabric Connector"), and asked whether Aver can behave **1:1 with base Godot**. Three read-only surveys (10-27) checked Godot 4.x feature by feature against the tree: core runtime; rendering, 2D and UI; physics, animation, audio and navigation. This plan answers that question, lists the gaps, orders the work to close them, and keeps the converter design that was agreed earlier.
 

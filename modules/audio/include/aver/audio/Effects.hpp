@@ -1,7 +1,8 @@
 #pragma once
-// Bus effects: the Godot AudioEffect* set implemented in the mixer's own DSP (no library). Every effect works in place on an
+// Bus effects: the AudioEffect* set implemented in the mixer's own DSP (no library). Every effect works in place on an
 // interleaved stereo block, allocates only when it is made, and keeps its parameters as atomics so the game thread can change them
-// while the audio thread runs. Parameter names, defaults and ranges are Godot's (docs/AUDIO.md section "Bus graph").
+// while the audio thread runs. Parameter names, defaults and ranges are documented in docs/AUDIO.md section "Bus graph".
+// The effect class names ("AudioEffectReverb" ...) are the .ocbus file format's names for the effects and are read as stored.
 // Used by BusGraph; nothing here knows about voices or devices.
 #include "aver/audio/Dsp.hpp"
 #include "aver/audio/Sound.hpp"
@@ -25,18 +26,18 @@ enum class EffectKind : u32 {
 inline f32 dbToLin(f32 db) { return db <= -200.0f ? 0.0f : std::pow(10.0f, db * 0.05f); }
 inline f32 linToDb(f32 lin) { return lin <= 1.0e-10f ? -200.0f : 20.0f * std::log10(lin); }
 
-// One named parameter: Godot's property name, its default and the range it is clamped to.
+// One named parameter: its property name, its default and the range it is clamped to.
 struct ParamInfo {
     const char* name;
     f32 def, lo, hi;
 };
 
-// Godot's filter modes (AudioFilterSW) and the coefficients it computes for them, in the engine's biquad layout.
+// The filter modes and the coefficients computed for them, in the engine's biquad layout.
 enum class FilterMode : u32 { LowPass = 0, HighPass, BandPass, Notch, Peak, LowShelf, HighShelf };
-// `stages` > 1 cascades the same section; Godot lowers Q (to Q^(1/stages)) and the gain (to gain^(1/(stages+1))) to keep the total response.
-BiquadCoeffs godotFilterCoeffs(FilterMode mode, f32 cutoffHz, f32 resonance, f32 gain, u32 stages, f32 sampleRate);
+// `stages` > 1 cascades the same section; Q is lowered (to Q^(1/stages)) and the gain (to gain^(1/(stages+1))) to keep the total response.
+BiquadCoeffs filterCoeffs(FilterMode mode, f32 cutoffHz, f32 resonance, f32 gain, u32 stages, f32 sampleRate);
 // |H| of `stages` identical sections at freqHz.
-f32 godotFilterMagnitude(FilterMode mode, f32 cutoffHz, f32 resonance, f32 gain, u32 stages, f32 sampleRate, f32 freqHz);
+f32 filterMagnitude(FilterMode mode, f32 cutoffHz, f32 resonance, f32 gain, u32 stages, f32 sampleRate, f32 freqHz);
 
 // The compressor's static curve: the level (dB) it settles to for a steady input level.
 f32 compressorOutputDb(f32 inputDb, f32 thresholdDb, f32 ratio);
@@ -47,8 +48,8 @@ public:
 
     EffectKind kind() const { return kind_; }
     // "AudioEffectReverb" ...
-    static const char* godotClassName(EffectKind k);
-    // EffectKind from a Godot class name; Count when unknown.
+    static const char* className(EffectKind k);
+    // EffectKind from a class name; Count when unknown.
     static EffectKind kindFromClassName(const char* name);
 
     static std::unique_ptr<Effect> create(EffectKind kind, u32 sampleRate);

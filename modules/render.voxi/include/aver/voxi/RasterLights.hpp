@@ -1,8 +1,8 @@
 #pragma once
-// Raster local lights (G4 R2): the host half of the omni/spot path that needs no ray tracing and runs on Vulkan. Pure and header-only so
-// the tests run it without a device: culling, ranking, the capped light list, Godot's curves, the shadow-tile budget and the tile
-// matrices. voxi.hlsl (AVER_LOCAL_RASTER) reads `Block`; the constants below are mirrored there (RasterLightsTest checks the text).
-// Design and units: docs/plans/fabric/G4_RENDER.md R2.
+// Raster local lights: the host half of the omni/spot path that needs no ray tracing and runs on Vulkan. Pure and header-only so
+// the tests run it without a device: culling, ranking, the capped light list, the parametric curves (linear window, decay exponent,
+// cone-edge exponent), the shadow-tile budget and the tile matrices. voxi.hlsl (AVER_LOCAL_RASTER) reads `Block`; the constants below
+// are mirrored there (RasterLightsTest checks the text).
 #include "aver/core/Math.hpp"
 #include "aver/core/Types.hpp"
 #include "aver/voxi/SceneLight.hpp"
@@ -23,15 +23,15 @@ inline constexpr f32 kMaxSpotShadowHalfAngleDeg = 75.0f;   // a wider cone is sh
 inline constexpr f32 kShadowNearCm = 3.0f;
 
 // Light flag bits, in the float packed at vec 3 .w (AVER_RL_F_*).
-inline constexpr u32 kFlagGodot = 1, kFlagNegative = 2, kFlagShadowed = 4, kFlagCube = 8;
+inline constexpr u32 kFlagParametric = 1, kFlagNegative = 2, kFlagShadowed = 4, kFlagCube = 8;
 
 // Two render-layer masks stored inverted (0 = every layer, 20 bits) share a layer: the same rule as aver::scene::masksOverlap (RenderMasks.hpp),
 // repeated here because the renderer does not link the scene module. A test pins the two together.
 inline constexpr bool layersOverlap(u32 a, u32 b) { return ((~a) & (~b) & 0xFFFFFu) != 0; }
 
-// Godot's default shadow_bias / shadow_normal_bias when a light stores 0, and how they map to Aver world units.
-inline constexpr f32 kGodotDefaultShadowBias = 0.1f, kGodotDefaultNormalBias = 2.0f;
-inline constexpr f32 kBiasCmPerGodotUnit = 10.0f;   // shadow_bias 0.1 -> 1 cm pushed toward the light; approximate (Godot's unit is not a length)
+// The default shadow bias / normal bias of a parametric light that stores 0, and how the bias maps to Aver world units.
+inline constexpr f32 kParametricDefaultShadowBias = 0.1f, kParametricDefaultNormalBias = 2.0f;
+inline constexpr f32 kBiasCmPerUnit = 10.0f;   // bias 0.1 -> 1 cm pushed toward the light; approximate (the unit is not a length)
 
 // What the shader reads, appended to the VoxiFrame cbuffer after the engine's own fields. Float4-aligned throughout.
 struct Block {
@@ -45,26 +45,26 @@ static_assert(sizeof(Block) == 16 + kMaxLights * kLightVecs * 16 + kMaxTiles * 6
 
 // ---- curves (CPU mirror of voxi_locallights_raster.hlsli) ------------------------------------------------------------------------------
 
-// Aver's window, (1 - (d/R)^4)^2, and Godot's, 1 - d/R. Distances in the same unit.
+// Aver's window, (1 - (d/R)^4)^2, and the parametric model's linear one, 1 - d/R. Distances in the same unit.
 inline f32 windowAver(f32 d, f32 range) {
     const f32 x = d / std::max(range, 1e-3f);
     const f32 w = std::min(std::max(1.0f - x * x * x * x, 0.0f), 1.0f);
     return w * w;
 }
-inline f32 windowGodot(f32 d, f32 range) { return std::max(1.0f - d / std::max(range, 1e-3f), 0.0f); }
+inline f32 windowLinear(f32 d, f32 range) { return std::max(1.0f - d / std::max(range, 1e-3f), 0.0f); }
 
-// Factor on the irradiance at 1 m at distance dCm: Aver = (100/max(d, r))^2 * window; Godot = window * (1 m / max(d, r))^decay.
-inline f32 distanceFactor(f32 dCm, f32 rangeCm, f32 radiusCm, bool godot, f32 decay) {
+// Factor on the irradiance at 1 m at distance dCm: Aver = (100/max(d, r))^2 * window; parametric = window * (1 m / max(d, r))^decay.
+inline f32 distanceFactor(f32 dCm, f32 rangeCm, f32 radiusCm, bool parametric, f32 decay) {
     const f32 d = std::max(dCm, std::max(radiusCm, 0.01f));
     if (dCm >= rangeCm) return 0.0f;
-    if (!godot) return windowAver(dCm, rangeCm) * (100.0f / d) * (100.0f / d);
-    return windowGodot(dCm, rangeCm) * std::pow(100.0f / d, decay);
+    if (!parametric) return windowAver(dCm, rangeCm) * (100.0f / d) * (100.0f / d);
+    return windowLinear(dCm, rangeCm) * std::pow(100.0f / d, decay);
 }
 
-// Spot cone factor for `cosAxis` = dot(light->receiver, axis). Aver: smoothstep inner..outer. Godot: 1 - rim^(1/angleAttenuation).
-inline f32 coneFactor(f32 cosAxis, f32 cosOuter, f32 cosInner, bool godot, f32 angleAttenuation) {
+// Spot cone factor for `cosAxis` = dot(light->receiver, axis). Aver: smoothstep inner..outer. Parametric: 1 - rim^(1/angleAttenuation).
+inline f32 coneFactor(f32 cosAxis, f32 cosOuter, f32 cosInner, bool parametric, f32 angleAttenuation) {
     if (cosAxis <= cosOuter) return 0.0f;
-    if (!godot) {
+    if (!parametric) {
         const f32 t = std::min(std::max((cosAxis - cosOuter) / std::max(cosInner - cosOuter, 1e-3f), 0.0f), 1.0f);
         return t * t * (3.0f - 2.0f * t);
     }
@@ -72,7 +72,7 @@ inline f32 coneFactor(f32 cosAxis, f32 cosOuter, f32 cosInner, bool godot, f32 a
     return 1.0f - std::pow(rim, 1.0f / std::max(angleAttenuation, 1e-3f));
 }
 
-// Light fade by camera distance (Godot distance_fade_*): 1 until `begin`, 0 at begin + length; no fade when both are 0.
+// Light fade by camera distance: 1 until `begin`, 0 at begin + length; no fade when both are 0.
 inline f32 lightFade(f32 distCm, f32 beginCm, f32 lengthCm) {
     if (!(beginCm > 0.0f) && !(lengthCm > 0.0f)) return 1.0f;
     if (!(lengthCm > 0.0f)) return distCm <= beginCm ? 1.0f : 0.0f;
@@ -273,15 +273,15 @@ inline void build(const Input& in, Result& out) {
         v[1][3] = range;
         for (int k = 0; k < 3; ++k) v[2][k] = s.axis[k];
         v[2][3] = spot ? 1.0f : 0.0f;
-        const f32 decay = s.godot ? std::max(s.attenuation, 0.0f) : 2.0f;
+        const f32 decay = s.parametric ? std::max(s.attenuation, 0.0f) : 2.0f;
         const f32 outerCos = spot ? s.outerCos : -1.0f;
         v[3][0] = decay;
         v[3][1] = outerCos;
-        v[3][2] = s.godot ? 1.0f / std::max(s.spotAttenuation, 1e-3f) : std::min(std::max(s.innerCos, outerCos + 1e-3f), 1.0f);
-        u32 flags = (s.godot ? kFlagGodot : 0u) | (s.negative ? kFlagNegative : 0u);
-        v[4][0] = s.godot ? s.specularScale : 1.0f;
+        v[3][2] = s.parametric ? 1.0f / std::max(s.spotAttenuation, 1e-3f) : std::min(std::max(s.innerCos, outerCos + 1e-3f), 1.0f);
+        u32 flags = (s.parametric ? kFlagParametric : 0u) | (s.negative ? kFlagNegative : 0u);
+        v[4][0] = s.parametric ? s.specularScale : 1.0f;
         v[4][1] = 0.0f;
-        v[4][2] = static_cast<f32>(s.cullInv & 0xFFFFFu);          // light_cull_mask, inverted: the shader skips an instance it excludes (G4 R4)
+        v[4][2] = static_cast<f32>(s.cullInv & 0xFFFFFu);          // light cull mask, inverted: the shader skips an instance it excludes
         v[4][3] = static_cast<f32>(s.shadowCasterInv & 0xFFFFFu);  // shadow_caster_mask, inverted: read by the CPU shadow pass only
 
         // Shadow tiles: the light must cast, the shadow must not have faded out, and the atlas must have room.
@@ -310,8 +310,8 @@ inline void build(const Input& in, Result& out) {
                     v[4][1] = sf;
                     v[5][0] = static_cast<f32>(base);
                     v[5][1] = static_cast<f32>(faces);
-                    v[5][2] = (s.shadowBias > 0.0f ? s.shadowBias : kGodotDefaultShadowBias) * kBiasCmPerGodotUnit;
-                    v[5][3] = s.shadowNormalBias > 0.0f ? s.shadowNormalBias : kGodotDefaultNormalBias;
+                    v[5][2] = (s.shadowBias > 0.0f ? s.shadowBias : kParametricDefaultShadowBias) * kBiasCmPerUnit;
+                    v[5][3] = s.shadowNormalBias > 0.0f ? s.shadowNormalBias : kParametricDefaultNormalBias;
                     const f32 halfTan = cube ? 1.0f : std::tan(halfAngle) * 1.04f;
                     v[6][0] = 2.0f * halfTan / tileTexels;                         // world size of a texel per unit distance
                     v[6][1] = 1.0f + std::min(s.radiusCm * 0.1f, 3.0f);            // filter radius in texels (light_size)

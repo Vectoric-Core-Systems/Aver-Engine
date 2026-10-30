@@ -26,8 +26,8 @@ struct SceneLight {
     bool castShadows = true;
     bool iesPeak = false;                 // normalise the IES profile to its peak, not its flux
     u64  iesId = 0, cookieId = 0;         // registerIesProfile / registerCookie ids; 0 = none
-    // G4 R2: Godot's parameter block (scene::WorldLight), read by the raster local-light path (RasterLights.hpp). The RT path ignores it.
-    bool godot = false, negative = false;
+    // The parametric block (scene::WorldLight), read by the raster local-light path (RasterLights.hpp). The RT path ignores it.
+    bool parametric = false, negative = false;
     f32  attenuation = 0.0f, spotAttenuation = 1.0f, specularScale = 1.0f;
     f32  shadowBias = 0.0f, shadowNormalBias = 0.0f;
     f32  fadeBeginCm = 0.0f, fadeLengthCm = 0.0f, fadeShadowCm = 0.0f;

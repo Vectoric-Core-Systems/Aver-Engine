@@ -42,16 +42,14 @@ Roboto-Regular.png
 Aver.Synapse.Abi.dll   ?AVER_MODULE_SCENE
 Aver.Prefab.Abi.dll     ?AVER_MODULE_SCENE
 Aver.LevelInstance.Abi.dll   ?AVER_MODULE_SCENE
-# The GDExtension host of the Fabric Connector (a converted Godot project's native plugins), and the API dump its
-# method-hash checks read from beside the executable.
-Aver.Fabric.GDExt.Abi.dll
-# The property-track animation seam of Aver.Fabric's AnimationPlayer (a converted Godot project's animations).
+# Extensions are not listed here: stage-game.ps1 reads the project's EXTENSION lines and copies each named extension's extension.json and
+# runtimeFiles (never its tools/) to Extensions/<Name>/ (docs/EXTENSIONS.md, docs/PACKAGING.md).
+# The property-track animation seam (prop animation played by scripts and extensions).
 Aver.Anim.Abi.dll
-# The polygon navigation seam of Aver.Fabric's navigation nodes and A* graphs (a converted Godot project's NavigationRegion3D / NavigationAgent3D).
+# The polygon navigation seam (navigation maps, A* graphs and avoidance for scripts and extensions).
 Aver.Nav.Abi.dll
-# The sockets and reliable-UDP seam of Aver.Fabric's PacketPeerUDP, StreamPeerTCP, ENetConnection and ENetMultiplayerPeer (a converted Godot project's multiplayer).
+# The sockets and reliable-UDP seam (sockets, TCP, UDP and ENet-style peers for scripts and extensions).
 Aver.Net.Abi.dll   ?AVER_MODULE_NET
-extension_api.json
 Aver.Render.PBR.dll   ?AVER_MODULE_PBR
 Aver.Render.Voxi.dll  ?AVER_MODULE_VOXI
 Aver.Scene.dll        ?AVER_MODULE_SCENE

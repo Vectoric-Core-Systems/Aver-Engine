@@ -1,5 +1,5 @@
 #pragma once
-// The theme resource (.octheme): Godot's Theme as data. Items per type (colours, constants, fonts, font sizes, icons,
+// The theme resource (.octheme): a Theme as data. Items per type (colours, constants, fonts, font sizes, icons,
 // style boxes), type variations, and the lookup order of Control.get_theme_*: the nearest theme in the node chain wins,
 // then the project theme, then the default theme, and inside one theme the type list runs variation -> its base ->
 // the control's class chain. Text, the same OC dialect as the other formats; parse from memory and write to a string
@@ -77,9 +77,9 @@ const UiThemeSheet* uiThemeFindStyleBox(const std::vector<const UiThemeSheet*>& 
 bool uiThemeDefaultFont(const std::vector<const UiThemeSheet*>& themes, std::string& out);
 i32 uiThemeDefaultFontSize(const std::vector<const UiThemeSheet*>& themes, i32 fallback);
 
-// The metrics of Godot's built-in theme, approximated for converted projects that name no theme: the fallback at the
-// end of every lookup. The look is close to Godot's default dark theme; none of Godot's theme assets are used.
-const UiThemeSheet& uiGodotDefaultTheme();
-const std::string& uiGodotDefaultThemeText();
+// The metrics of the built-in theme, for projects that name no theme: the fallback at the
+// end of every lookup. A dark default look; no third-party theme assets are used.
+const UiThemeSheet& uiBuiltinDefaultTheme();
+const std::string& uiBuiltinDefaultThemeText();
 
 } // namespace aver::ui

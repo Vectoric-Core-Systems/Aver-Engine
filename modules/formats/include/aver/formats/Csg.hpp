@@ -1,6 +1,6 @@
 #pragma once
-// Constructive solid geometry on convex polygons (G4 R7): union, intersection and subtraction by BSP trees, the way a converted Godot level's CSG tree is baked
-// into a static mesh at convert time. Plain doubles, no engine type, no axis: the caller picks the space (the converter works in Godot metres, +Y up) and
+// Constructive solid geometry on convex polygons: union, intersection and subtraction by BSP trees, the way an imported level's CSG tree is baked
+// into a static mesh at convert time. Plain doubles, no engine type, no axis: the caller picks the space (an importer may work in metres, +Y up) and
 // maps the result. A solid is a closed set of polygons wound counter-clockwise seen from outside; an open surface is carried but gives no meaningful boolean.
 // Contract: docs/plans/fabric/G4_RENDER.md R7.
 #include <cstdint>
@@ -24,7 +24,7 @@ struct Mesh {
     bool empty() const { return polys.empty(); }
 };
 
-enum class Op { Union = 0, Intersection = 1, Subtraction = 2 };   // Godot's CSGShape3D.Operation numbers
+enum class Op { Union = 0, Intersection = 1, Subtraction = 2 };   // the operation numbers
 
 // a OP b. Both are copied; neither is modified.
 Mesh combine(const Mesh& a, const Mesh& b, Op op);
@@ -41,7 +41,7 @@ Bounds bounds(const Mesh& m);
 double volume(const Mesh& m);
 double surfaceArea(const Mesh& m);
 
-// ---- solids (Godot space, centred as Godot's CSG nodes are) ----
+// ---- solids (source space, centred) ----
 Mesh makeBox(const double size[3], int material = 0);
 // radialSegments around Y, rings + 1 latitude bands (CSGSphere3D's radial_segments and rings); smooth = vertex normals follow the sphere.
 Mesh makeSphere(double radius, int radialSegments, int rings, bool smooth, int material = 0);
@@ -64,7 +64,7 @@ struct Soup {
     std::vector<int> materials;          // the material of each range
     std::vector<uint32_t> rangeStart, rangeCount;
 };
-// Triangulates (fans) every polygon, drops slivers, snaps positions to `snap` (0 = none; Godot's default is 0.001) and welds equal vertices. A vertex with
+// Triangulates (fans) every polygon, drops slivers, snaps positions to `snap` (0 = none; a usual value is 0.001) and welds equal vertices. A vertex with
 // a zero normal gets its polygon's plane normal.
 Soup toSoup(const Mesh& m, double snap);
 

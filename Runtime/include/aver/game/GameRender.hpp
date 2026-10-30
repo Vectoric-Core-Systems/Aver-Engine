@@ -353,11 +353,11 @@ struct DrawWorldOptions {
 
     // G4 R4. The camera's cull mask, stored inverted (scene::storeMask; 0 = render every layer). An entity whose CMeshRenderer::layersInv shares no
     // layer with it is treated as hidden from the viewer exactly like an owner-hidden mesh: no raster draw, but it still casts shadows and stays in
-    // GI and ray-traced geometry (Godot's cull_mask is a camera filter, not a visibility switch). 0 changes nothing.
+    // GI and ray-traced geometry (a cull mask is a camera filter, not a visibility switch). 0 changes nothing.
     u32 cameraCullInv = 0;
 
     // G4 R4. Where the viewer is, for visibility ranges (CMeshRenderer::visBeginCm / visEndCm): an entity outside its range is skipped outright
-    // (no draw, no shadow, no GI), like a hidden instance in Godot. Unset, ranges are not evaluated. A range of 0 / 0 (the default) is never tested.
+    // (no draw, no shadow, no GI), like a hidden instance. Unset, ranges are not evaluated. A range of 0 / 0 (the default) is never tested.
     Vec3 viewerPos{0, 0, 0};
     bool haveViewerPos = false;
 

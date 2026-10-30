@@ -9,6 +9,6 @@
   "required": false,
   "default": true,
   "editions": {"standard": true, "slim": true, "full": true},
-  "dependsOn": ["Aver.Core", "Aver.Platform"],
+  "dependsOn": ["Aver.Core", "Aver.Platform", "Aver.Extensions"],
   "consequence": "No C# scripts or script graphs run; actors have no script logic."
 }

@@ -1,10 +1,10 @@
 #pragma once
-// Aver.Physics: per-body contact monitoring and Areas (G2, Godot's contact_monitor and Area3D). Docs: docs/physics/GODOT_AREAS.md.
+// Aver.Physics: per-body contact monitoring and Areas. Docs: docs/physics/AREAS.md.
 //
 // OPT-IN, ADDITIVE. A world that never calls anything here steps exactly as before, and the existing global queues
 // (aver_phys_contact_* and aver_phys_overlap_*) keep their meaning. Both features are configuration, not simulation state:
 // physics snapshots do not capture them. A restore re-seeds the contact monitors silently and leaves areas to correct themselves
-// on the next step (docs/physics/GODOT_AREAS.md says how).
+// on the next step (docs/physics/AREAS.md says how).
 // Units: cm, cm/s^2 for gravity, kg*cm/s^2 for the wind force (aver_phys_body_add_force's unit), +X forward, +Y right, +Z up, left-handed.
 // Returns 1/0 with aver_phys_last_error unless stated. Setters are between-step calls.
 #include <stdint.h>
@@ -26,7 +26,7 @@ extern "C" {
 #define AVER_PHYS_AREAS_ABI_VERSION 1
 AVER_PHYS_API int32_t aver_phys_areas_abi_version(void);
 
-/* ---- contact monitor (Godot contact_monitor + max_contacts_reported) ----
+/* ---- contact monitor (with a cap on the contacts reported) ----
    A monitored body keeps the set of solid bodies it touches and reports BEGIN (body_entered) and END (body_exited) once per body PAIR,
    however many sub-shapes touch. Sensors and areas are not contacts. A body that FALLS ASLEEP does not end its touches (Jolt drops a
    sleeping body's contacts; the monitor tells that from a real separation and waits for the wake). A touch lost while a body sleeps ends
@@ -47,13 +47,13 @@ AVER_PHYS_API int32_t aver_phys_contact_event_count(void);
 AVER_PHYS_API int32_t aver_phys_contact_event_get(int32_t index, int32_t* outBody, int32_t* outOther, int32_t* outBegan,
                                                   float* outPoint, float* outNormal);
 
-/* ---- areas (Godot Area3D) ----
+/* ---- areas ----
    An area is a SENSOR body (aver_phys_add_sensor_*, or aver_phys_body_set_sensor) registered with aver_phys_area_create; its handle is the
    body's. Detection is the area's own query: at the end of every fixed step the sensor's shape is tested against the world, so STATIC and
    SLEEPING bodies are found (a Jolt static sensor only sees awake movers; making it kinematic with CollideKinematicVsNonDynamic would need
    an always-awake sensor and costs far more). One enter and one exit per (area, body) however many sub-shapes overlap. The 16-layer
    matrix is not consulted; the rule is the area's own mask against the other's layer bits: (area.mask & other.layer) != 0, where a body's
-   layer bits are its Godot layer (aver_phys_body_set_collision_filter) or else the single bit of its user layer. An area is detected by
+   layer bits are its 32-bit layer (aver_phys_body_set_collision_filter) or else the single bit of its user layer. An area is detected by
    another area when it is `monitorable` and its own layer (aver_phys_area_set_collision, default the bit of its user layer) is in that
    area's mask. Plain sensors, soft bodies and character inner bodies are never detected.
    Bodies that are not dynamic only trigger events; the overrides below act on dynamic bodies. */
@@ -104,7 +104,7 @@ AVER_PHYS_API int32_t aver_phys_area_event_count(void);
 AVER_PHYS_API int32_t aver_phys_area_event_get(int32_t index, int32_t* outArea, int32_t* outOther, int32_t* outEntered, int32_t* outIsArea);
 
 /* What the areas and the world would give a dynamic body right now (before its gravity factor): gravity in cm/s^2 (float[3]) and the damping
-   its Jolt body would be set to. Computed fresh from positions, for scripts that need Godot's total_gravity / total damping. */
+   its Jolt body would be set to. Computed fresh from positions, for scripts that need the total gravity / total damping. */
 AVER_PHYS_API int32_t aver_phys_body_area_gravity(int32_t body, float* outGravityCmS2);
 AVER_PHYS_API int32_t aver_phys_body_area_damping(int32_t body, float* outLinear, float* outAngular);
 

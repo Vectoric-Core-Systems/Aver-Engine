@@ -133,7 +133,7 @@ void SandboxApp::applyProject(Engine& e) {
     // flag asking for the default is indistinguishable from no flag. A postTonemapFromCli_ beside
     // the other three would close that, and it is a change to SandboxApp.hpp and setTonemap rather
     // than to this file.
-    // Clamped to the curves that exist (rhi/Tonemap.hpp), and the Godot white point and display adjustments ride along.
+    // Clamped to the curves that exist (rhi/Tonemap.hpp), and the white point and display adjustments ride along.
     rhi::applyProjectTonemapKeys(post_, project_.postTonemap, project_.postTonemapWhite, project_.postAdjustBrightness,
                                  project_.postAdjustContrast, project_.postAdjustSaturation,
                                  post_.tonemap == rhi::PostSettings{}.tonemap);

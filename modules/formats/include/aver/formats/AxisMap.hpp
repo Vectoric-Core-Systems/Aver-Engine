@@ -1,7 +1,7 @@
 #pragma once
-// The one basis change from a right-handed, +Y up, metre source (glTF, Godot) to engine space (left-handed, +Z up,
-// +X forward, centimetres). GltfImport.cpp's toEngine / toEngineQuat / toEngineScale call these, and so does the
-// Godot scene converter (tools/fabric), so a model and a Godot scene land in the same place.
+// The one basis change from a right-handed, +Y up, metre source (glTF and other importers) to engine space (left-handed, +Z up,
+// +X forward, centimetres). GltfImport.cpp's toEngine / toEngineQuat / toEngineScale call these, and so does every scene
+// importer, so a model and a scene land in the same place.
 #include "aver/core/Math.hpp"
 #include "aver/core/Types.hpp"
 

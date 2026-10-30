@@ -44,7 +44,7 @@
 #include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/Hash.hpp"
-#include "fabric/FabricConvert.hpp"   // `fabric`: the Godot project converter (tools/fabric)
+#include "aver/extensions/Extensions.hpp"   // subcommands an installed extension offers (docs/EXTENSIONS.md)
 
 #if AVER_HAVE_AUDIO_IMPORT
 #include "aver/formats/OcAudio.hpp"
@@ -1558,7 +1558,7 @@ struct ModelConvertArgs {
     bool merge = false;
     f32 lodRatio = 0.0f;
     u32 maxTexture = 0;
-    // `fabric` (tools/fabric): the caller wants each mesh's stem and placement back instead of a level, and no summary line.
+    // An extension's model import (hostImportModel): the caller wants each mesh's stem and placement back instead of a level, and no summary line.
     std::vector<std::string>* stemsOut = nullptr;
     std::vector<ScenePlacement>* placementsOut = nullptr;
 };
@@ -1707,14 +1707,28 @@ int convertImportedModel(const ModelConvertArgs& args, fmt::GltfImportResult& re
     return exitCode(anyFailed ? ExitCode::Failed : ExitCode::Ok);
 }
 
-// ---- `fabric`: the model importer the Godot converter calls (tools/fabric) ----
+// ---- the model importer an extension calls (AverExtHost::importModel) ----
 //
 // One model file (glTF, GLB, FBX, OBJ) written as meshes, materials, textures, skeletons and clips under
 // <contentDir>/<outSubdir>, returning each mesh's content path and where it sits in the model. The JSON artifact
-// lines the importer emits go to stdout like any other run; the summary line is the fabric run's own.
-fabric::ModelResult fabricImportModel(const std::string& input, const std::string& contentDir, const std::string& outSubdir,
-                                      const std::string& base) {
-    fabric::ModelResult out;
+// lines the importer emits go to stdout like any other run; the summary line is the extension command's own.
+struct ImportedModelPart {
+    std::string meshAsset;   // content-relative path of the .ocmesh
+    std::string name;        // the source node's name
+    double x = 0, y = 0, z = 0;
+    int node = -1;           // the source node's index in a glTF file; -1 when there is none (FBX, OBJ)
+};
+
+struct ImportedModel {
+    bool ok = false;
+    std::string error;
+    std::vector<ImportedModelPart> parts;
+    std::vector<std::string> notes;   // anything the importer dropped
+};
+
+ImportedModel importModelFile(const std::string& input, const std::string& contentDir, const std::string& outSubdir,
+                              const std::string& base) {
+    ImportedModel out;
     const std::string outDir = contentDir + "/" + outSubdir;
     createDirectories(outDir);
     const std::string ext = extOf(input);
@@ -1789,7 +1803,7 @@ fabric::ModelResult fabricImportModel(const std::string& input, const std::strin
     for (usize i = 0; i < placements.size(); ++i) {
         const ScenePlacement& p = placements[i];
         if (p.meshIndex < 0 || usize(p.meshIndex) >= stems.size() || stems[usize(p.meshIndex)].empty()) continue;
-        fabric::ModelPart part;
+        ImportedModelPart part;
         part.meshAsset = outSubdir + "/" + stems[usize(p.meshIndex)] + ".ocmesh";
         part.name = i < positionNames.size() ? positionNames[i] : std::string{};
         part.node = i < positionNodes.size() ? positionNodes[i] : -1;
@@ -1799,6 +1813,68 @@ fabric::ModelResult fabricImportModel(const std::string& input, const std::strin
     out.ok = !out.parts.empty();
     if (!out.ok) out.error = "the model produced no meshes";
     return out;
+}
+
+// importModelFile's result as the plain structs aver_ext.h defines. Everything the arrays point at lives in `hostData`, which
+// hostFreeModelResult releases.
+struct ModelResultStorage {
+    std::string error;
+    std::vector<std::string> strings;   // meshAsset and name of every part, then the notes
+    std::vector<AverExtModelPart> parts;
+    std::vector<const char*> notes;
+};
+
+int32_t hostImportModel(const AverExtModelArgs* args, AverExtModelResult* out) {
+    if (!args || !out) return 1;
+    ImportedModel m = importModelFile(args->input ? args->input : "", args->contentDir ? args->contentDir : "",
+                                      args->outSubdir ? args->outSubdir : "", args->base ? args->base : "");
+    auto* s = new ModelResultStorage();
+    s->error = m.error;
+    s->strings.reserve(m.parts.size() * 2 + m.notes.size());
+    for (const ImportedModelPart& p : m.parts) { s->strings.push_back(p.meshAsset); s->strings.push_back(p.name); }
+    for (const std::string& n : m.notes) s->strings.push_back(n);
+    for (usize i = 0; i < m.parts.size(); ++i) {
+        const ImportedModelPart& p = m.parts[i];
+        s->parts.push_back(AverExtModelPart{s->strings[i * 2].c_str(), s->strings[i * 2 + 1].c_str(), p.x, p.y, p.z, int32_t(p.node)});
+    }
+    for (usize i = 0; i < m.notes.size(); ++i) s->notes.push_back(s->strings[m.parts.size() * 2 + i].c_str());
+    out->ok = m.ok ? 1 : 0;
+    out->error = s->error.c_str();
+    out->parts = s->parts.data();
+    out->partCount = uint32_t(s->parts.size());
+    out->notes = s->notes.data();
+    out->noteCount = uint32_t(s->notes.size());
+    out->hostData = s;
+    return m.ok ? 0 : 1;
+}
+
+void hostFreeModelResult(AverExtModelResult* r) {
+    if (!r) return;
+    delete static_cast<ModelResultStorage*>(r->hostData);
+    r->hostData = nullptr;
+    r->parts = nullptr; r->partCount = 0; r->notes = nullptr; r->noteCount = 0; r->error = "";
+}
+
+// The extensions installed beside the executable, with the model importer on offer. Scanned when a subcommand is not one of ours, or for --help.
+void openExtensions(ext::Registry& registry) {
+    ext::HostServices services;
+    services.importModel = hostImportModel;
+    services.freeModelResult = hostFreeModelResult;
+    registry.setHostServices(services);
+    registry.scanDefault();
+}
+
+// One usage line per command an installed extension lists.
+std::string extensionUsage(const ext::Registry& registry) {
+    std::string text;
+    for (const ext::Extension& e : registry.extensions()) {
+        if (!e.ready()) continue;
+        for (const ext::CommandInfo& c : e.commands) {
+            text += "\n       AverAssetC " + c.name + (c.usage.empty() ? std::string() : " " + c.usage);
+            text += "\n                          " + (c.summary.empty() ? std::string("a command of the extension") : c.summary) + " [extension " + e.name + "]";
+        }
+    }
+    return text;
 }
 
 } // namespace
@@ -2044,15 +2120,23 @@ int main(int argc, char** argv) {
         "\n       AverAssetC hair <file.gltf|.glb> --out <groom.ochair> [--scalp <mesh.ocmesh>] [--scalp-asset <ref>] [--submesh N]"
         "\n                          [--joints a,b,c] [--default-width-cm F] [--max-root-cm F]   glTF line strands -> strand groom"
         "\n       AverAssetC hair-text <groom.txt> --out <groom.ochair>   the HEAD records of a groom (SCALP, SIM, MATERIAL, LOOK, GENERATE ...) as text -> .ochair"
-        "\n       AverAssetC fabric <godot-project-dir> <out-dir> [--dry-run] [--scenes-only] [--scripts-only] [--overwrite]"
-        "\n                          a Godot 4.1+ project as a standalone Aver project: <out-dir>/<Name>/ plus FabricReport.md/.jsonl (docs/FABRIC.md)"
         ;
+    // The usage text, then the commands installed extensions add. Printed for a usage error (stderr, exit 2) and for --help (exit 0).
+    auto usageWithExtensions = [&]() {
+        ext::Registry registry;
+        openExtensions(registry);
+        return std::string(kUsage) + extensionUsage(registry);
+    };
 
     if (argc < 2) {
-        AVER_ERROR("{}", kUsage);
+        AVER_ERROR("{}", usageWithExtensions());
         return exitCode(ExitCode::Usage);
     }
     const std::string subcommand = argv[1];
+    if (subcommand == "--help" || subcommand == "-h" || subcommand == "help") {
+        AVER_INFO("{}", usageWithExtensions());
+        return exitCode(ExitCode::Ok);
+    }
 
 #if AVER_HAVE_MATERIAL_COMPILE
     if (subcommand == "material") return runMaterial(argc, argv);
@@ -2066,14 +2150,15 @@ int main(int argc, char** argv) {
     if (subcommand == "visbake") return runVisBake(argc, argv);
     if (subcommand == "hair") return runHair(argc, argv);
     if (subcommand == "hair-text") return runHairText(argc, argv);
-    if (subcommand == "fabric") {
-        fabric::Host host;
-        host.importModel = fabricImportModel;
-        return fabric::run(argc, argv, host);
-    }
 
     if (subcommand != "convert") {
-        AVER_ERROR("{}", kUsage);
+        // Not one of ours: an installed extension may list it. argv[1..] is the extension's argv (argv[0] there is the command).
+        ext::Registry registry;
+        openExtensions(registry);
+        int code = 0;
+        std::string why;
+        if (registry.run(subcommand, argc - 1, argv + 1, code, &why)) return code;
+        AVER_ERROR("unknown command '{}': {}\n{}{}", subcommand, why, kUsage, extensionUsage(registry));
         return exitCode(ExitCode::Usage);
     }
 

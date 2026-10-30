@@ -1,5 +1,18 @@
 # Fabric G6: the Godot shading-language front-end (contracts)
 
+> **Names changed after this was written.** The engine-side receivers of the translated HLSL became a general "embedded HLSL program" feature
+> (EXTENSION.md, section 2). Read this file with the table below; the translator keeps its own `Gd*` C++ names.
+>
+> | Written here | Now |
+> |---|---|
+> | `GodotShader` / `GodotEnvShader` node, `OcGraphGodot`, `GodotShaderPart` / `GodotEnvPart`, `DOMAIN godotenv` | `EmbeddedHlsl` / `EmbeddedHlslEnv` node, `OcGraphHlsl`, `EmbeddedHlslPart` / `EmbeddedHlslEnvPart`, `DOMAIN customenv` (the old spellings still read) |
+> | `AVER_GD_*` hook macros, `GDN`, `GD_NS_CUR`, `GdSampler2D`, `gd_*` / `gdr_*`, `gdSlot*`, `gGd` | `AVER_CUSTOM_*`, `EMBN`, `EMB_NS_CUR`, `EmbSampler2D`, `emb_*` / `embr_*`, `embSlot*`, `gEmb` |
+> | `material_godot.hlsl`, `material_godot_lib.hlsl` | `material_embedded.hlsl`, `material_embedded_lib.hlsl` |
+> | `godot_{env_common,sky,fog,particles}.hlsl`, `GodotEnvPrograms`, `setGodotSky`, `PSGodotSky`, `AVER_GD_PARTICLES` | `custom_*.hlsl`, `CustomEnvPrograms`, `setCustomSky`, `PSCustomSky`, `AVER_CUSTOM_PARTICLES` |
+> | `framework_godotenv_abi.h` (`aver_fw_genv_*`), `GodotEnv.cs` | `framework_customenv_abi.h` (`aver_fw_cenv_*`), `CustomEnv.cs` |
+> | `.ocmat` `GDREGS`, FX `gdvs` / `gddiscard`, `MaterialFx::gdVertex` / `gdDiscard`, `GdShaderParams`, `aver_pbr_*_gd_register*` | `EMBREGS`, `embvs` / `embdiscard`, `embVertex` / `embDiscard`, `EmbeddedParams`, `aver_pbr_*_embedded_register*` |
+> | `.ocparticle` `GDSHADER`, `ParticleEffect::godotShader`, `kGpuFlagGodot` | `CUSTOMSHADER`, `customShader`, `kGpuFlagCustom` |
+
 G6 is the shader half of the Fabric Connector (`FABRIC_CONNECTOR.md`, "Rendering": the shader-language row): a converted Godot 4 project keeps its `.gdshader` /
 `.gdshaderinc` files, and Aver runs them. This file holds the design and one section per package. 2D (`shader_type canvas_item`) is out of scope for the whole
 converter: the front-end parses and checks it, flags it, and the emitter refuses it.

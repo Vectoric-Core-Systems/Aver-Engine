@@ -1,5 +1,5 @@
 #pragma once
-// Property-track animation with Godot's AnimationPlayer semantics (docs/plans/fabric/G5_PARITY.md, A1).
+// Property-track animation with animation-player semantics.
 //
 // The clip is aver::fmt::OcAnimation with its propTracks (the optional PROP chunk of .ocanim). This header is the
 // pure, GPU-free half: sampling one track, finding the keys a playhead passed, and PropPlayer, the playback state
@@ -24,7 +24,7 @@ using fmt::OcPropTrackType;
 inline constexpr double kPropEps = 1e-5;
 inline constexpr double kPropTau = 6.283185307179586476925286766559;
 
-// Godot's easing of a segment: c = 1 linear, c > 1 slow start, 0 < c < 1 slow end, c < 0 in-out, c = 0 a step.
+// The easing of a segment: c = 1 linear, c > 1 slow start, 0 < c < 1 slow end, c < 0 in-out, c = 0 a step.
 double propEase(double x, double c);
 
 // ---- one track ----
@@ -107,9 +107,9 @@ public:
     std::vector<std::string> clipKeys() const;               // insertion order
 
     void setBlendTime(const std::string& from, const std::string& to, double sec);
-    // Godot's lookup: from->to, then *->to, then from->*, "" is the wildcard; -1 when none is set.
+    // The lookup: from->to, then *->to, then from->*, "" is the wildcard; -1 when none is set.
     double explicitBlendTime(const std::string& from, const std::string& to) const;
-    // That, or 0 when none is set (Godot's get_blend_time; play() falls back to default_blend_time itself).
+    // That, or 0 when none is set (the blend time; play() falls back to default_blend_time itself).
     double blendTime(const std::string& from, const std::string& to) const;
     void setNext(const std::string& from, const std::string& to);
     std::string next(const std::string& from) const;

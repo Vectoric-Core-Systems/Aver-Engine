@@ -1,18 +1,18 @@
 #pragma once
-// Aver.Physics: the raycast vehicle (G2, Godot's VehicleBody3D / VehicleWheel3D). Docs: docs/physics/GODOT_VEHICLE.md.
+// Aver.Physics: the raycast vehicle. Docs: docs/physics/RAYCAST_VEHICLE.md.
 //
 // A SECOND vehicle model next to Jolt's wheeled controller (physics_vehicle_abi.h), which is untouched and stays the default. A raycast vehicle
 // is an ordinary dynamic body (the chassis) plus N wheels that are not bodies: each fixed step, before the solver, every wheel casts one ray along
 // its suspension, applies a spring and damper force at the contact, and applies friction impulses limited by friction_slip. It is the behaviour of a
 // btRaycastVehicle-style model, written from its description. A world that never calls anything here steps exactly as before.
 //
-// Per-wheel drive is set by the caller each frame: engine force, brake and steering (Godot's VehicleBody3D spreads its own engine_force, brake and
+// Per-wheel drive is set by the caller each frame: engine force, brake and steering (a vehicle node may spread one engine force, brake and
 // steering over the wheels flagged TRACTION and STEERING; here that is the caller's job, and the two flags only GATE a wheel's engine force and steering).
 // Units: cm for lengths, kg*cm/s^2 for forces (aver_phys_body_add_force's unit), radians, kg, +X forward, +Y right, +Z up, left-handed. Vectors in a
 // wheel block are CHASSIS-LOCAL (the body's origin and rotation). Positive steering turns the wheel's forward toward its axle side (+Y for the default
-// axle: a right turn). Godot's metres, brake impulses and left-positive steering are the converter's to convert (C# RaycastWheel.FromGodot does it).
+// axle: a right turn). Content in metres, with brake impulses or left-positive steering, is converted by the importer.
 // Returns 1/0 with aver_phys_last_error unless stated. Everything here is configuration or per-step input; physics snapshots do not capture it
-// (the forces are a pure function of the chassis state and these inputs, so a restore replays exactly; docs/physics/GODOT_VEHICLE.md).
+// (the forces are a pure function of the chassis state and these inputs, so a restore replays exactly; docs/physics/RAYCAST_VEHICLE.md).
 #include <stdint.h>
 
 #if defined(_WIN32)
@@ -33,7 +33,7 @@ extern "C" {
 AVER_PHYS_API int32_t aver_phys_rayveh_abi_version(void);
 
 /* ---- wheel parameter block (AVER_PHYS_RAYW_*, floats; `index NAME (unit) = default`) ----
-   The defaults are Aver's own neutral numbers; none is a Godot default. */
+   The defaults are Aver's own neutral numbers. */
 #define AVER_PHYS_RAYW_CONNECT_X            0    /* connection point in chassis-local cm: where the suspension ray starts (0) */
 #define AVER_PHYS_RAYW_CONNECT_Y            1    /* (0) */
 #define AVER_PHYS_RAYW_CONNECT_Z            2    /* (0) */
@@ -88,7 +88,7 @@ AVER_PHYS_API int32_t aver_phys_rayveh_add_wheel(int32_t veh, const float* p, in
 AVER_PHYS_API int32_t aver_phys_rayveh_wheel_count(int32_t veh);          /* -1 for a dead vehicle */
 AVER_PHYS_API int32_t aver_phys_rayveh_set_wheel_param(int32_t veh, int32_t wheel, int32_t key, float value);   /* live, between steps */
 AVER_PHYS_API int32_t aver_phys_rayveh_wheel_param(int32_t veh, int32_t wheel, int32_t key, float* outValue);
-/* The wheel's ray collides with bodies whose Godot layer bits (aver_phys_body_set_collision_filter, else the bit of the user layer) meet this mask.
+/* The wheel's ray collides with bodies whose layer bits (aver_phys_body_set_collision_filter, else the bit of the user layer) meet this mask.
    Default 0xFFFFFFFF. The chassis itself and sensors are never hit. */
 AVER_PHYS_API int32_t aver_phys_rayveh_set_wheel_mask(int32_t veh, int32_t wheel, uint32_t mask);
 AVER_PHYS_API int32_t aver_phys_rayveh_wheel_mask(int32_t veh, int32_t wheel, uint32_t* outMask);
@@ -96,8 +96,8 @@ AVER_PHYS_API int32_t aver_phys_rayveh_wheel_mask(int32_t veh, int32_t wheel, ui
 /* ---- drive, per wheel (wheel -1 = every wheel); they stay in force until changed ----
    engineForce (kg*cm/s^2): thrust along the wheel's forward at the contact, only while it touches ground, only with TRACTION, limited by the wheel's
    friction. While it is non-zero the brake is ignored for that wheel. A non-zero engine force wakes a sleeping chassis.
-   brake (kg*cm/s^2 >= 0): the most braking force the wheel may apply to stop it rolling relative to the ground. Not frame-rate dependent: Godot's
-   brake is an impulse per step, so the converter multiplies it by the step rate and 100.
+   brake (kg*cm/s^2 >= 0): the most braking force the wheel may apply to stop it rolling relative to the ground. Not frame-rate dependent: a brake
+   given as an impulse per step is multiplied by the step rate and 100 by the importer.
    steering (rad): the wheel turns about the suspension axis, only with STEERING. */
 AVER_PHYS_API int32_t aver_phys_rayveh_set_engine_force(int32_t veh, int32_t wheel, float engineForce);
 AVER_PHYS_API int32_t aver_phys_rayveh_set_brake(int32_t veh, int32_t wheel, float brake);

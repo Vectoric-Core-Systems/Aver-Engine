@@ -48,15 +48,13 @@ Aver.UI.Abi.dll
 Aver.Synapse.Abi.dll   ?AVER_MODULE_SCENE
 Aver.Prefab.Abi.dll     ?AVER_MODULE_SCENE
 Aver.LevelInstance.Abi.dll   ?AVER_MODULE_SCENE
-# The GDExtension host of the Fabric Connector and the API dump its method-hash checks read from beside the executable.
-Aver.Fabric.GDExt.Abi.dll
-# The property-track animation seam of Aver.Fabric's AnimationPlayer.
+# Extensions are not listed here: they are installed beside the executable (docs/EXTENSIONS.md). stage-payload.ps1 -WithExtension <Name> carries one.
+# The property-track animation seam (prop animation played by scripts and extensions).
 Aver.Anim.Abi.dll
-# The polygon navigation seam of Aver.Fabric's navigation nodes and A* graphs.
+# The polygon navigation seam (navigation maps, A* graphs and avoidance for scripts and extensions).
 Aver.Nav.Abi.dll
-# The sockets and reliable-UDP seam of Aver.Fabric's networking classes.
+# The sockets and reliable-UDP seam (sockets, TCP, UDP and ENet-style peers for scripts and extensions).
 Aver.Net.Abi.dll   ?AVER_MODULE_NET
-extension_api.json
 
 # SETTINGS IS NOT ONE THE EDITOR LOAD-TIME LINKS -- it is the exception this block used to claim did
 # not exist, and the reason it was absent from this file entirely.

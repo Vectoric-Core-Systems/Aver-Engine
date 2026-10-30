@@ -7,7 +7,7 @@
 #include "aver/physics/physics_joints_abi.h"
 #include "Convert.hpp"
 #include "PhysicsInternal.hpp"
-#include "PhysicsGodotFilter.hpp"
+#include "PhysicsLayerFilter.hpp"
 #include "PhysicsOrigin.hpp"
 
 #include "aver/core/Log.hpp"
@@ -62,7 +62,7 @@ struct Joint {
     // A joint to the world (handle 0) is built against this unadded static body instead of Body::sFixedToWorld, so the floating
     // origin can move the world side of the constraint with everything else (LARGE_WORLD 2.3.4). Invalid for a joint between two bodies.
     JPH::BodyID anchorBody;
-    // aver_phys_joint_set_exclude_collision: while set, the two bodies are excluded from colliding (PhysicsGodotFilter.cpp).
+    // aver_phys_joint_set_exclude_collision: while set, the two bodies are excluded from colliding (PhysicsLayerFilter.cpp).
     bool excludeCollision = false;
     bool breakable() const { return breakForceN > 0.0f || breakTorqueNm > 0.0f; }
 };
@@ -295,7 +295,7 @@ int32_t aver_phys_joint_remove(int32_t joint) {
     Joint* j = findJoint(joint);
     if (!j) return 0;
     if (j->breakable()) --g_breakableCount;
-    if (j->excludeCollision) godotJointExclusion(j->bodyA, j->bodyB, false);
+    if (j->excludeCollision) layerJointExclusion(j->bodyA, j->bodyB, false);
     g_world->system.RemoveConstraint(j->constraint);   // findJoint proved g_world is alive
     if (!j->anchorBody.IsInvalid()) bi().DestroyBody(j->anchorBody);   // after the constraint that pointed at it
     noteConstraintTopology();
@@ -983,7 +983,7 @@ int32_t aver_phys_joint_set_exclude_collision(int32_t joint, int32_t exclude) {
     if (!j) return 0;
     const bool want = exclude != 0;
     if (want == j->excludeCollision) return 1;
-    if (!godotJointExclusion(j->bodyA, j->bodyB, want)) return 0;
+    if (!layerJointExclusion(j->bodyA, j->bodyB, want)) return 0;
     j->excludeCollision = want;
     return 1;
 }

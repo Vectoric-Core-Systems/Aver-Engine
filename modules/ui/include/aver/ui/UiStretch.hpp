@@ -1,6 +1,6 @@
 #pragma once
-// The project's stretch settings (Godot's display/window/stretch/*): how a base size the UI is authored at lands in a
-// window of any shape. Pure arithmetic, no tree and no device (docs/plans/fabric/G5_PARITY.md, U1).
+// The project's stretch settings (mode, aspect, scale mode): how a base size the UI is authored at lands in a
+// window of any shape. Pure arithmetic, no tree and no device.
 //
 //   disabled      the content is the window's size (times the scale factor): nothing stretches
 //   canvas_items  the content keeps its base size and is drawn scaled to the window (crisp text and edges)
@@ -32,7 +32,7 @@ struct UiStretchResult {
     bool letterboxed = false;   // bars appear on at least one side
 };
 
-// Godot's content-scale rules. A window of zero size gives a zero result.
+// The content-scale rules. A window of zero size gives a zero result.
 UiStretchResult uiComputeStretch(const UiStretchSettings& s, f32 windowW, f32 windowH);
 
 // A point in window pixels -> content units (the pointer that Controls hit-test against), and back.

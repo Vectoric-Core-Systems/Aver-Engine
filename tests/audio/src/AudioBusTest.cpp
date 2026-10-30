@@ -1,5 +1,5 @@
 // Headless test for the bus graph and its effects (G5 S1): every response is checked against a value worked out from the maths (the filter
-// formulas, the compressor's static curve, delay tap positions), and the routing against the Godot rules (send order, solo chains, bypass).
+// formulas, the compressor's static curve, delay tap positions), and the routing rules (send order, solo chains, bypass).
 // No sound card: effects run on buffers and the mixer renders offline.
 #include "aver/audio/BusGraph.hpp"
 #include "aver/audio/Effects.hpp"
@@ -84,22 +84,22 @@ static void testParams() {
     for (u32 k = 0; k < static_cast<u32>(EffectKind::Count); ++k) {
         auto fx = Effect::create(static_cast<EffectKind>(k), kRate);
         all = all && fx && fx->kind() == static_cast<EffectKind>(k);
-        classNames.insert(Effect::godotClassName(static_cast<EffectKind>(k)));
-        all = all && Effect::kindFromClassName(Effect::godotClassName(static_cast<EffectKind>(k))) == static_cast<EffectKind>(k);
+        classNames.insert(Effect::className(static_cast<EffectKind>(k)));
+        all = all && Effect::kindFromClassName(Effect::className(static_cast<EffectKind>(k))) == static_cast<EffectKind>(k);
     }
-    check(all, "every kind can be made and round-trips through its Godot class name");
+    check(all, "every kind can be made and round-trips through its class name");
     check(classNames.size() == static_cast<usize>(EffectKind::Count), "all class names differ");
     check(Effect::kindFromClassName("AudioEffectNope") == EffectKind::Count, "an unknown class name is Count");
 
     auto rv = make(EffectKind::Reverb);
-    check(near(rv->paramByName("room_size"), 0.8f) && near(rv->paramByName("wet"), 0.5f) && near(rv->paramByName("predelay_msec"), 150.0f), "Reverb defaults are Godot's");
+    check(near(rv->paramByName("room_size"), 0.8f) && near(rv->paramByName("wet"), 0.5f) && near(rv->paramByName("predelay_msec"), 150.0f), "Reverb defaults are the documented ones");
     rv->setParamByName("room_size", 5.0f);
     check(near(rv->paramByName("room_size"), 1.0f), "a value is clamped to the parameter's range");
     check(rv->findParam("nonsense") == -1, "an unknown parameter name is -1");
     auto dl = make(EffectKind::Delay);
-    check(near(dl->paramByName("tap1_delay_ms"), 250.0f) && near(dl->paramByName("tap2_level_db"), -12.0f) && near(dl->paramByName("feedback_lowpass"), 16000.0f), "Delay defaults are Godot's");
+    check(near(dl->paramByName("tap1_delay_ms"), 250.0f) && near(dl->paramByName("tap2_level_db"), -12.0f) && near(dl->paramByName("feedback_lowpass"), 16000.0f), "Delay defaults are the documented ones");
     auto cp = make(EffectKind::Compressor);
-    check(near(cp->paramByName("ratio"), 4.0f) && near(cp->paramByName("attack_us"), 20.0f) && near(cp->paramByName("release_ms"), 250.0f), "Compressor defaults are Godot's");
+    check(near(cp->paramByName("ratio"), 4.0f) && near(cp->paramByName("attack_us"), 20.0f) && near(cp->paramByName("release_ms"), 250.0f), "Compressor defaults are the documented ones");
     check(make(EffectKind::EQ6)->paramCount() == 6 && make(EffectKind::EQ10)->paramCount() == 10 && make(EffectKind::EQ21)->paramCount() == 21, "EQ6 / EQ10 / EQ21 have 6 / 10 / 21 bands");
     check(make(EffectKind::EQ10)->findParam("band_db/1000_hz") >= 0, "EQ bands are named band_db/<hz>_hz");
     check(make(EffectKind::Chorus)->findParam("voice/2/rate_hz") >= 0, "Chorus voices are voice/N/...");
@@ -109,25 +109,25 @@ static void testFilters() {
     AVER_INFO("=== filters ===");
     const f32 r = static_cast<f32>(kRate);
     const f32 q = 0.70710678f;
-    check(nearRel(godotFilterMagnitude(FilterMode::LowPass, 1000, q, 1, 1, r, 1000), 0.70710678f, 0.002f), "low-pass |H(fc)| = Q (0.7071 for Butterworth)");
-    check(nearRel(godotFilterMagnitude(FilterMode::LowPass, 1000, 0.5f, 1, 1, r, 1000), 0.5f, 0.002f), "low-pass with Godot's default resonance 0.5: |H(fc)| = 0.5");
-    check(near(godotFilterMagnitude(FilterMode::LowPass, 1000, q, 1, 1, r, 20), 1.0f, 0.002f), "low-pass passes 20 Hz");
-    const f32 decade = godotFilterMagnitude(FilterMode::LowPass, 1000, q, 1, 1, r, 10000);
+    check(nearRel(filterMagnitude(FilterMode::LowPass, 1000, q, 1, 1, r, 1000), 0.70710678f, 0.002f), "low-pass |H(fc)| = Q (0.7071 for Butterworth)");
+    check(nearRel(filterMagnitude(FilterMode::LowPass, 1000, 0.5f, 1, 1, r, 1000), 0.5f, 0.002f), "low-pass with the default resonance 0.5: |H(fc)| = 0.5");
+    check(near(filterMagnitude(FilterMode::LowPass, 1000, q, 1, 1, r, 20), 1.0f, 0.002f), "low-pass passes 20 Hz");
+    const f32 decade = filterMagnitude(FilterMode::LowPass, 1000, q, 1, 1, r, 10000);
     check(decade > 0.006f && decade < 0.02f, "low-pass is about 40 dB down a decade up (12 dB per octave; the bilinear transform bends it a little)");
-    check(nearRel(godotFilterMagnitude(FilterMode::HighPass, 1000, q, 1, 1, r, 1000), 0.70710678f, 0.002f), "high-pass |H(fc)| = Q");
-    check(near(godotFilterMagnitude(FilterMode::HighPass, 1000, q, 1, 1, r, 20000), 1.0f, 0.01f), "high-pass passes 20 kHz");
-    check(godotFilterMagnitude(FilterMode::HighPass, 1000, q, 1, 1, r, 100) < 0.012f, "high-pass is down a decade below");
-    check(godotFilterMagnitude(FilterMode::Notch, 1000, 2.0f, 1, 1, r, 1000) < 1.0e-3f, "notch is empty at its centre");
-    check(near(godotFilterMagnitude(FilterMode::Notch, 1000, 2.0f, 1, 1, r, 100), 1.0f, 0.03f), "notch passes a decade below");
-    const f32 bpC = godotFilterMagnitude(FilterMode::BandPass, 1000, 1.0f, 1, 1, r, 1000);
-    check(bpC > godotFilterMagnitude(FilterMode::BandPass, 1000, 1.0f, 1, 1, r, 100) * 3.0f && bpC > godotFilterMagnitude(FilterMode::BandPass, 1000, 1.0f, 1, 1, r, 10000) * 3.0f, "band-pass peaks at its centre");
-    // The shelves (A = gain, as Godot's coefficients have it): DC and Nyquist gain of the shelf side is gain^2.
-    check(nearRel(godotFilterMagnitude(FilterMode::HighShelf, 4000, 1.0f, 0.5f, 1, r, 23000), 0.25f, 0.06f), "high shelf: the high end settles at gain^2 (0.5 -> 0.25)");
-    check(near(godotFilterMagnitude(FilterMode::HighShelf, 4000, 1.0f, 0.5f, 1, r, 50), 1.0f, 0.01f), "high shelf leaves the low end");
-    check(nearRel(godotFilterMagnitude(FilterMode::LowShelf, 500, 1.0f, 2.0f, 1, r, 20), 4.0f, 0.03f), "low shelf: the low end settles at gain^2");
-    check(near(godotFilterMagnitude(FilterMode::LowShelf, 500, 1.0f, 2.0f, 1, r, 20000), 1.0f, 0.03f), "low shelf leaves the high end");
-    const f32 one = godotFilterMagnitude(FilterMode::LowPass, 1000, q, 1, 1, r, 8000);
-    const f32 four = godotFilterMagnitude(FilterMode::LowPass, 1000, q, 1, 4, r, 8000);
+    check(nearRel(filterMagnitude(FilterMode::HighPass, 1000, q, 1, 1, r, 1000), 0.70710678f, 0.002f), "high-pass |H(fc)| = Q");
+    check(near(filterMagnitude(FilterMode::HighPass, 1000, q, 1, 1, r, 20000), 1.0f, 0.01f), "high-pass passes 20 kHz");
+    check(filterMagnitude(FilterMode::HighPass, 1000, q, 1, 1, r, 100) < 0.012f, "high-pass is down a decade below");
+    check(filterMagnitude(FilterMode::Notch, 1000, 2.0f, 1, 1, r, 1000) < 1.0e-3f, "notch is empty at its centre");
+    check(near(filterMagnitude(FilterMode::Notch, 1000, 2.0f, 1, 1, r, 100), 1.0f, 0.03f), "notch passes a decade below");
+    const f32 bpC = filterMagnitude(FilterMode::BandPass, 1000, 1.0f, 1, 1, r, 1000);
+    check(bpC > filterMagnitude(FilterMode::BandPass, 1000, 1.0f, 1, 1, r, 100) * 3.0f && bpC > filterMagnitude(FilterMode::BandPass, 1000, 1.0f, 1, 1, r, 10000) * 3.0f, "band-pass peaks at its centre");
+    // The shelves (A = gain, as the coefficients have it): DC and Nyquist gain of the shelf side is gain^2.
+    check(nearRel(filterMagnitude(FilterMode::HighShelf, 4000, 1.0f, 0.5f, 1, r, 23000), 0.25f, 0.06f), "high shelf: the high end settles at gain^2 (0.5 -> 0.25)");
+    check(near(filterMagnitude(FilterMode::HighShelf, 4000, 1.0f, 0.5f, 1, r, 50), 1.0f, 0.01f), "high shelf leaves the low end");
+    check(nearRel(filterMagnitude(FilterMode::LowShelf, 500, 1.0f, 2.0f, 1, r, 20), 4.0f, 0.03f), "low shelf: the low end settles at gain^2");
+    check(near(filterMagnitude(FilterMode::LowShelf, 500, 1.0f, 2.0f, 1, r, 20000), 1.0f, 0.03f), "low shelf leaves the high end");
+    const f32 one = filterMagnitude(FilterMode::LowPass, 1000, q, 1, 1, r, 8000);
+    const f32 four = filterMagnitude(FilterMode::LowPass, 1000, q, 1, 4, r, 8000);
     check(four < one * 0.1f, "four stages cut a decade-ish above much harder than one");
 
     // The processing filters agree with the formula.
@@ -480,7 +480,7 @@ static void testGraph() {
     g.setBusCount(3);
     check(g.busCount() == 3, "and removes them from the end");
 
-    // Move: Godot numbers `to` before the move.
+    // Move: `to` is numbered before the move.
     g.addBus(); g.setBusName(3, "Ambience");
     check(g.moveBus(1, 3) && g.busName(1) == "SFX" && g.busName(2) == "Music" && g.busName(3) == "Ambience", "move_bus(1, 3) puts Music after SFX (insert-before, numbered before the move)");
     check(!g.moveBus(0, 2) && !g.moveBus(2, 0), "Master neither moves nor is moved over");
@@ -492,7 +492,7 @@ static void testGraph() {
     g.setSend(2, "Music");     // SFX is bus 2 now? (Music 1, SFX 2)
     check(g.busName(2) == "SFX" && g.sendIndex(2) == 1, "a bus can send to a bus above it");
     g.setSend(1, "SFX");
-    check(g.sendIndex(1) == 0, "a send to a bus at a higher index falls back to Master (Godot's rule)");
+    check(g.sendIndex(1) == 0, "a send to a bus at a higher index falls back to Master");
     g.setSend(1, "nobody");
     check(g.sendIndex(1) == 0, "so does a send to a name that does not exist");
     g.setSend(1, "Master");
@@ -605,7 +605,7 @@ static void testMixingRules() {
     check(skipped == 1, "a layout effect of an unknown class is skipped and counted");
     check(lg.busCount() == 3 && lg.busName(1) == "Music" && near(lg.volumeDb(1), -6.0f) && lg.mute(1) && lg.solo(2) && lg.bypassEffects(2), "buses, volumes, mute, solo and bypass come from the layout");
     check(lg.sendIndex(2) == 1 && near(lg.volumeDb(0), -3.0f), "sends are resolved by name; Master keeps its volume");
-    check(lg.effectCount(1) == 1 && near(lg.effectAt(1, 0)->paramByName("room_size"), 0.3f), "effects get their parameters by Godot name");
+    check(lg.effectCount(1) == 1 && near(lg.effectAt(1, 0)->paramByName("room_size"), 0.3f), "effects get their parameters by name");
     check(!lg.effectEnabled(2, 0) && lg.sidechain(2, 0) == "Music", "enabled flags and sidechains are kept");
     const BusLayout back = lg.exportLayout();
     check(back.buses.size() == 3 && back.buses[1].effects.size() == 1 && back.buses[1].effects[0].className == "AudioEffectReverb" && back.buses[2].send == "Music", "export gives the layout back");

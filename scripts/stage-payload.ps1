@@ -34,6 +34,10 @@
 .PARAMETER WithSamples
     Also stage the [samples] section (SampleScripts\, ActorScripts\).
 
+.PARAMETER WithExtension
+    Names of extensions (docs/EXTENSIONS.md) to carry in the payload: each one's whole folder under the build tree's bin\Extensions\<Name>\, tools\ included, goes
+    to <out>\bin\Extensions\<Name>\. The payload has no extension by default: they are installed beside the executable, not part of the editor.
+
 .EXAMPLE
     ./scripts/stage-payload.ps1 -Out ..\stage\AverEngine-0.1.0
     ./scripts/gates.ps1 -Release -Exe ..\stage\AverEngine-0.1.0\bin\Sandbox.exe
@@ -44,6 +48,7 @@ param(
     [Parameter(Mandatory = $true)] [string] $Out,
     [string] $BuildDir,
     [switch] $WithSamples,
+    [string[]] $WithExtension = @(),
     [switch] $Force,
     [switch] $AllowDebugCrt
 )
@@ -251,6 +256,13 @@ function Add-Section {
 
 Add-Section -Name 'bin'    -Base $bin  -Prefix 'bin'
 if ($WithSamples) { Add-Section -Name 'samples' -Base $bin -Prefix 'bin' }
+foreach ($extName in $WithExtension) {
+    $extBase = Join-Path (Join-Path $bin 'Extensions') $extName
+    if (-not (Test-Path -LiteralPath (Join-Path $extBase 'extension.json'))) { Fail "-WithExtension '$extName': there is no extension.json in $extBase"; continue }
+    foreach ($f in (Resolve-Pattern -Base $extBase -Pattern '**')) {
+        $plan[(Join-Path (Join-Path 'bin\Extensions' $extName) $f.FullName.Substring($extBase.Length).TrimStart('\'))] = $f
+    }
+}
 # [engine] patterns are repo-relative and keep their own path, which is what puts scripting\csharp\
 # where ProjectScaffold.cpp's walk-up expects it.
 foreach ($entry in $sections['engine']) {

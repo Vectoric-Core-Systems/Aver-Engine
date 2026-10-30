@@ -11,7 +11,7 @@
 
 #include "aver/core/FogVolume.hpp"
 #include "aver/core/Types.hpp"
-#include "aver/rhi/GodotEnvPrograms.hpp"
+#include "aver/rhi/CustomEnvPrograms.hpp"
 #include "aver/rhi/RHIResources.hpp"
 #include "aver/rhi/WorldShift.hpp"
 #include "aver/voxi/Voxi.hpp"
@@ -92,14 +92,14 @@ public:
     bool ensure(rhi::IResourceFactory& res, const rhi::PipelineLayout& layout, bool rtCapable, bool shaderOk,
                 bool on, const Params& p, rhi::BindingSetHandle table0);
 
-    // G4 R8: local fog volumes for the next record() (Godot FogVolume). Null or a block with no volume goes back to the ordinary passes, which are then
+    // G4 R8: local fog volumes for the next record(). Null or a block with no volume goes back to the ordinary passes, which are then
     // byte-for-byte today's. A block with volumes is drawn by the AVER_FOG_VOLUMES variants of the two compute passes, built the first time one is wanted;
     // if they would not compile the volumes are dropped and the ordinary passes run. Copies the block.
     void setFogVolumes(const FogVolumeBlock* block);
-    // G6 SH3: the converted Godot fog shaders the volumes of the block name (a volume's shape word is shape + 8 * (index + 1)); at most kGodotFogShaderMax.
-    // Setting a different set rebuilds the volume variants with the shaders compiled in; an empty list (the default) builds them without, as before.
-    // `registers` is kGodotFogShaderRegs float4s per shader (four floats each), copied into the constants every frame, so a changed parameter needs no rebuild.
-    void setFogShaders(std::vector<rhi::GodotEnvProgram> shaders);
+    // The custom fog programs the volumes of the block name (a volume's shape word is shape + 8 * (index + 1)); at most kCustomFogShaderMax.
+    // Setting a different set rebuilds the volume variants with the programs compiled in; an empty list (the default) builds them without, as before.
+    // `registers` is kCustomFogShaderRegs float4s per program (four floats each), copied into the constants every frame, so a changed parameter needs no rebuild.
+    void setFogShaders(std::vector<rhi::CustomEnvProgram> shaders);
     void setFogShaderRegisters(const std::vector<std::vector<f32>>& perShader);
     u32 fogShaderCount() const { return static_cast<u32>(shaders_.size()); }
     u32 fogVolumeCount() const { return volCount_; }
@@ -152,9 +152,9 @@ private:
     bool buildVolumePipelines(rhi::IResourceFactory& res, const rhi::PipelineLayout& layout);
     rhi::PipelineHandle scatterVolPso_ = 0, integrateVolPso_ = 0;
     bool volBuildFailed_ = false;   // at builtRev_
-    std::vector<rhi::GodotEnvProgram> shaders_;              // G6 SH3
+    std::vector<rhi::CustomEnvProgram> shaders_;
     u64 shaderRev_ = 0, volShaderRev_ = 0;                   // the set's revision, and the one the volume variants were built with
-    std::vector<f32> shaderRegs_;                            // kGodotFogShaderMax * kGodotFogShaderRegs float4s
+    std::vector<f32> shaderRegs_;                            // kCustomFogShaderMax * kCustomFogShaderRegs float4s
     bool volLive_ = false;
     bool volWasLive_ = false;       // the last record() ran the variants: a switch drops the history (the two layouts of the volume differ)
     u32 volCount_ = 0;

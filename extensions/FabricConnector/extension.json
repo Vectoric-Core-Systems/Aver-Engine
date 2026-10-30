@@ -1,0 +1,40 @@
+{
+  "name": "FabricConnector",
+  "displayName": "Fabric Connector",
+  "version": "0.1.0",
+  "abi": 1,
+  "engine": ">=0.7.0 <0.9.0",
+  "license": "LGPL-2.1",
+  "source": "https://github.com/Vectoric-Core-Systems/Fabric-Connector",
+  "native": "Aver.Fabric.Native",
+  "managed": { "runtime": ["Aver.Fabric.dll"], "actorBase": "Aver.Fabric.Node" },
+  "commands": [ { "name": "fabric", "summary": "convert a Godot 4 project", "usage": "<godot-project-dir> <out-dir> [--dry-run] [--scenes-only] [--scripts-only] [--overwrite]" } ],
+  "importers": [ {
+    "menu": "Import Godot Project...",
+    "command": "fabric",
+    "input": "folder",
+    "detect": "project.godot",
+    "detectVersion": { "key": "config_version=", "min": 5, "message": "This is a Godot 3 project (config_version {value}). Fabric converts Godot 4.1 and later." },
+    "opensResult": true,
+    "tooltip": "Convert a Godot 4.1+ project (scenes, assets, scripts, GDExtensions) into an Aver project.\nSee docs/FABRIC.md.",
+    "description": "Converts a Godot 4.1+ project (3D scenes, assets, scripts and GDExtensions) into a standalone Aver project. The Godot project is only read. What did not convert is listed in FabricReport.md.",
+    "inputLabel": "Godot project",
+    "outputLabel": "Output folder (the project is written to <folder>/<Name>)",
+    "outputSuffix": "_Aver",
+    "options": [
+      { "flag": "--overwrite", "label": "Replace a project already converted there" },
+      { "flag": "--dry-run", "label": "Report only (convert nothing to disk)" }
+    ],
+    "openLabel": "Open converted project",
+    "busyText": "Converting...",
+    "logTag": "Fabric",
+    "notify": { "running": "Importing Godot project", "done": "Godot project imported", "checked": "Godot project checked", "failed": "Godot import failed" },
+    "summary": {
+      "text": "{converted} converted, {approximated} approximated, {unsupported} unsupported; {levels} level(s), {scripts} script(s), {extensions} GDExtension(s).",
+      "brief": "{converted} converted, {approximated} approximated, {unsupported} unsupported",
+      "warnIfNonZero": "unsupported",
+      "notes": [ { "text": "The scripts were not converted; see the report.", "when": "scripts", "unless": "scriptsConverted" } ]
+    }
+  } ],
+  "runtimeFiles": ["native/{platform}/Aver.Fabric.Native.*", "managed/Aver.Fabric.dll", "data/extension_api.json"]
+}

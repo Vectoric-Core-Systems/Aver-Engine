@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "Aver.Extensions",
+  "dir": "extensions",
+  "displayName": "Extensions",
+  "description": "Finds installed extensions, checks their manifests and loads their native libraries on first use; the plain-C aver_ext.h contract.",
+  "category": "Tools",
+  "option": null,
+  "required": true,
+  "default": true,
+  "dependsOn": ["Aver.Core", "Aver.Platform", "Aver.Formats"],
+  "consequence": ""
+}

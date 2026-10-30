@@ -38,7 +38,7 @@ aver_add_module(Aver.Anim
     src/FaceRig.cpp
     src/Viseme.cpp
     # [wave9/morph end]
-    # Property-track animation with Godot's AnimationPlayer semantics (docs/plans/fabric/G5_PARITY.md, A1): sampling and the player.
+    # Property-track animation (an animation-player model): sampling and the player.
     src/PropAnim.cpp
     src/PropPlayer.cpp
   DEPS

@@ -18,7 +18,7 @@ aver_add_module(Aver.Audio
     src/Music.cpp
     # Real-time sound graphs: the .ocsnd evaluator shared by the audio thread and Aver.Sound's offline render (docs/AUDIO.md section 13).
     src/SoundGraph.cpp
-    # G5 S1 (Godot audio parity, docs/AUDIO.md "Bus graph"): the AudioEffect* set, the bus graph and the AudioStreamPlayer3D maths.
+    # Bus graph (docs/AUDIO.md "Bus graph"): the AudioEffect* set, the bus graph and the 3D player maths.
     src/Effects.cpp
     src/BusGraph.cpp
     src/Spatial.cpp

@@ -6,8 +6,8 @@
  * or a converted level makes one.
  *
  * Own version, separate from AVER_FW_ABI_VERSION_MINOR. int32_t/uint32_t/uint64_t/float/const char* only; 1 on success and 0 on refusal. All state lives
- * in this DLL, single game thread. Everything is in ENGINE space: centimetres, +Z up, counter-clockwise front faces seen from outside (Aver.Fabric does
- * the Godot conversion before it calls).
+ * in this DLL, single game thread. Everything is in ENGINE space: centimetres, +Z up, counter-clockwise front faces seen from outside (a caller in another
+ * space converts before it calls).
  *
  * A mesh is named by a KEY (UTF-8, 1..120 bytes). An entity draws it by setting its mesh renderer's mesh to the asset path AVER_FW_RTMESH_PATH_PREFIX + key
  * ("@rtmesh/<key>"; the id the renderer looks up is fnv1a64 of that path, as for every asset), and its material as usual. The material of a surface is
@@ -61,7 +61,7 @@ AVER_FW_ABI int32_t aver_fw_multimesh_create(const char* key);
 AVER_FW_ABI int32_t aver_fw_multimesh_destroy(int32_t id);
 /* The mesh to instance: a content-relative .ocmesh path ("Meshes/Rock.ocmesh"), or a runtime mesh by its path ("@rtmesh/<key>"). */
 AVER_FW_ABI int32_t aver_fw_multimesh_set_source(int32_t id, const char* meshPath);
-/* useColors: per-instance colours multiply the mesh's vertex colour (the material needs vertex colour as albedo, as Godot's does). useCustom: custom.xy
+/* useColors: per-instance colours multiply the mesh's vertex colour (the material needs vertex colour as albedo). useCustom: custom.xy
  * become the mesh's second UV set. */
 AVER_FW_ABI int32_t aver_fw_multimesh_set_flags(int32_t id, int32_t useColors, int32_t useCustom);
 /* Resizes the instance table (new instances are identity transforms, white, zero custom data). */

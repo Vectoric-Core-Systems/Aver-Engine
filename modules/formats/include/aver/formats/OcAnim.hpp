@@ -205,16 +205,16 @@ struct OcCurve {
     mutable u64 poseId = 0;
 };
 
-// ---- property tracks (Godot AnimationPlayer parity; docs/plans/fabric/G5_PARITY.md, A1) ----
+// ---- property tracks ----
 //
 // A clip may carry tracks that drive named properties of any node or entity instead of bones: value, transform,
-// blend-shape, method, bezier, audio and animation (sub-player) tracks, in Godot's vocabulary. They live in ONE
+// blend-shape, method, bezier, audio and animation (sub-player) tracks. They live in ONE
 // optional chunk (PROP), so a clip without them writes the same bytes it always did and an older reader that does
 // not know the chunk plays the bone tracks unchanged. The playback rules are in aver/anim/PropAnim.hpp.
 enum class OcPropKind : u8 { Nil, Bool, Int, Float, Vec2, Vec3, Vec4, Quat, Color, String, Text };
 
 // One value. n[] holds the numeric payload (Bool/Int/Float in n[0]; Vec2 xy; Vec3 xyz; Vec4 and Quat xyzw; Color rgba).
-// String is a plain string; Text is a Godot Variant in its text form, for the types with no numeric form (arrays,
+// String is a plain string; Text is a variant in its text form, for the types with no numeric form (arrays,
 // dictionaries, node paths, resources); it never blends.
 struct OcPropValue {
     OcPropKind kind = OcPropKind::Nil;
@@ -232,7 +232,7 @@ enum class OcPropLoop     : u8 { None, Linear, PingPong };
 
 struct OcPropKey {
     f64 time = 0;
-    f64 transition = 1;            // Godot's easing curve of the segment that starts at this key; 0 = hold, 1 = linear
+    f64 transition = 1;            // the easing curve of the segment that starts at this key; 0 = hold, 1 = linear
     OcPropValue value;             // Method: String name. Audio: String stream path. Animation: String name ("[stop]" stops)
     f64 handle[4] = {0, 0, 0, 0};  // Bezier: in handle (x time offset <= 0, y value offset) then out handle
     std::vector<OcPropValue> args; // Method arguments
@@ -289,9 +289,9 @@ struct OcAnimation {
     std::vector<OcCurve> curves;
 
     // Property tracks (see OcPropTrack). Empty for every clip written before they existed: no PROP chunk.
-    // `propLoop` and `propStep` are the clip's Godot loop mode and editor step; they only matter with propTracks.
+    // `propLoop` and `propStep` are the clip's loop mode and editor step; they only matter with propTracks.
     std::vector<OcPropTrack> propTracks;
-    // True for a property animation even when it has no tracks yet (a Godot Animation can be just a length); written as an
+    // True for a property animation even when it has no tracks yet (an animation can be just a length); written as an
     // empty PROP chunk. Implied by having property tracks.
     bool propClip = false;
     OcPropLoop propLoop = OcPropLoop::None;

@@ -2,7 +2,7 @@
 
 # Aver.Fabric public API
 
-657 public types and 6978 public members, read from `scripting/csharp/Aver.Fabric/` (117 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+667 public types and 7053 public members, read from `extensions/FabricConnector/managed/Aver.Fabric/` (119 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Fabric
 
@@ -3383,7 +3383,7 @@ Values: `None = 0`, `Light = 1`, `Normal = 2`
 
 `public static class GDExtensionManager` - Godot's GDExtensionManager for a converted project: Load a plugin, then ClassDB.Instantiate("TheClass") or a level's GDExtensionNode placement uses its classes.
 
-- `public static bool IsNativeAvailable { get; }` - True when the native host library (Aver.Fabric.GDExt.Abi) can be loaded and speaks this ABI version.
+- `public static bool IsNativeAvailable { get; }` - True when the native host library (Aver.Fabric.Native) can be loaded and speaks this ABI version.
 - `public static string LastError { get; }` - Why the last call that returned false failed.
 - `public static string? ProjectDirectory { get; set; }` - The folder res:// library paths of .gdextension files resolve against; the loaded project's folder.
 - `public static bool SetApiPath(string path)` - The extension_api.json of the Godot version the plugins target, for the method-hash checks (optional).
@@ -3551,6 +3551,101 @@ Values: `Disabled = 0`, `Self = 1`, `Dependencies = 2`
 
 `public sealed class GlobalClassAttribute : Attribute` - Registers a script class by name for the editor's Create dialog (no runtime effect).
 
+### GodotAngularAxis
+
+`public sealed record GodotAngularAxis` - One angular axis of a Generic6DOFJoint3D (radians, newton-metres).
+
+- `public bool LimitEnabled { get; init; }`
+- `public float LimitUpper { get; init; }`
+- `public float LimitLower { get; init; }`
+- `public bool SpringEnabled { get; init; }`
+- `public float SpringStiffness { get; init; }` - N*m/rad.
+- `public float SpringDamping { get; init; }` - N*m*s/rad.
+- `public float SpringEquilibriumPoint { get; init; }`
+- `public bool MotorEnabled { get; init; }`
+- `public float MotorTargetVelocity { get; init; }` - rad/s.
+- `public float MotorForceLimit { get; init; }` - N*m; 0 leaves the motor unlimited.
+- `public float? LimitSoftness { get; init; }`
+- `public float? LimitRestitution { get; init; }`
+- `public float? LimitForceLimit { get; init; }`
+- `public float? LimitErp { get; init; }`
+
+### GodotConeTwistParams
+
+`public sealed record GodotConeTwistParams` - ConeTwistJoint3D.
+
+- `public float SwingSpan { get; init; }`
+- `public float TwistSpan { get; init; }`
+- `public bool SpansAreFullAngles { get; init; }`
+- `public float? Bias { get; init; }`
+- `public float? Softness { get; init; }`
+- `public float? Relaxation { get; init; }`
+
+### GodotGeneric6DofParams
+
+`public sealed record GodotGeneric6DofParams` - Generic6DOFJoint3D: the frame's X, Y and Z are the three axes.
+
+- `public GodotLinearAxis LinearX { get; init; }`
+- `public GodotLinearAxis LinearY { get; init; }`
+- `public GodotLinearAxis LinearZ { get; init; }`
+- `public GodotAngularAxis AngularX { get; init; }`
+- `public GodotAngularAxis AngularY { get; init; }`
+- `public GodotAngularAxis AngularZ { get; init; }`
+- `public float? EffectiveInertiaKgM2 { get; init; }` - kg*m^2 about the joint axes, for the angular springs (the body's inertia, or the pair's reduced inertia).
+
+### GodotHingeParams
+
+`public sealed record GodotHingeParams` - HingeJoint3D.
+
+- `public bool UseLimit { get; init; }`
+- `public float LimitUpper { get; init; }`
+- `public float LimitLower { get; init; }`
+- `public bool EnableMotor { get; init; }`
+- `public float MotorTargetVelocity { get; init; }`
+- `public float MotorMaxImpulse { get; init; }`
+- `public float? LimitBias { get; init; }`
+- `public float? LimitSoftness { get; init; }`
+- `public float? LimitRelaxation { get; init; }`
+- `public float? Bias { get; init; }`
+
+### GodotJointResult
+
+`public sealed class GodotJointResult` - A joint and what could not be carried over.
+
+- `public Joint Joint { get; }`
+- `public IReadOnlyList<string> Notes { get; }`
+- `public bool Created { get; }`
+
+### GodotJoints
+
+`public static class GodotJoints`
+
+- `public static (float FrequencyHz, float DampingRatio) SpringToHz(float stiffness, float damping, float effectiveMass)` - A spring in Godot's terms (stiffness k, damping c, acting on an effective mass or inertia m) as Jolt's frequency (Hz) and damping ratio.
+- `public static float ReducedMass(Body a, Body b)` - The reduced mass of a pair: both bodies' mass if both move, the moving body's if the other is static or the world.
+- `public static GodotJointResult Pin(Body a, Body b, Float3 anchorCm, GodotPinParams? p = null)` - PinJoint3D -&gt; a point (ball) joint at the anchor.
+- `public static GodotJointResult Hinge(Body a, Body b, Float3 anchorCm, Float3 axis, GodotHingeParams p, float physicsTicksPerSecond)` - HingeJoint3D -&gt; a hinge about axis.
+- `public static GodotJointResult Slider(Body a, Body b, Float3 anchorCm, Float3 axis, GodotSliderParams p)` - SliderJoint3D -&gt; a slider along axis.
+- `public static GodotJointResult ConeTwist(Body a, Body b, Float3 anchorCm, Float3 twistAxis, GodotConeTwistParams p)` - ConeTwistJoint3D -&gt; a swing-twist joint about twistAxis: a round swing cone of swing_span and a twist range of +-twist_span.
+- `public static GodotJointResult Generic6Dof(Body a, Body b, Float3 anchorCm, Float3 axisX, Float3 axisY, GodotGeneric6DofParams p)` - Generic6DOFJoint3D -&gt; a six-DOF joint.
+
+### GodotLinearAxis
+
+`public sealed record GodotLinearAxis` - One linear axis of a Generic6DOFJoint3D (metres, newtons).
+
+- `public bool LimitEnabled { get; init; }`
+- `public float LimitUpper { get; init; }`
+- `public float LimitLower { get; init; }`
+- `public bool SpringEnabled { get; init; }`
+- `public float SpringStiffness { get; init; }` - N/m.
+- `public float SpringDamping { get; init; }` - N*s/m.
+- `public float SpringEquilibriumPoint { get; init; }` - Metres from the joint frame.
+- `public bool MotorEnabled { get; init; }`
+- `public float MotorTargetVelocity { get; init; }` - m/s.
+- `public float MotorForceLimit { get; init; }` - N; 0 leaves the motor unlimited.
+- `public float? LimitSoftness { get; init; }`
+- `public float? LimitRestitution { get; init; }`
+- `public float? LimitDamping { get; init; }`
+
 ### GodotObject
 
 `public abstract class GodotObject : AverActor, IDisposable` - The root of Godot's class tree (GodotObject).
@@ -3610,6 +3705,26 @@ Values: `Deferred = 1`, `Persist = 2`, `OneShot = 4`, `ReferenceCounted = 8`
 ### GodotObject.SignalName
 
 `public class SignalName` - The names of the signals a class declares itself, by the GodotSharp convention.
+
+### GodotPinParams
+
+`public sealed record GodotPinParams` - PinJoint3D.
+
+- `public float? Bias { get; init; }`
+- `public float? Damping { get; init; }`
+- `public float? ImpulseClamp { get; init; }`
+
+### GodotSliderParams
+
+`public sealed record GodotSliderParams` - SliderJoint3D.
+
+- `public float LinearLimitUpper { get; init; }`
+- `public float LinearLimitLower { get; init; }`
+- `public float? LinearLimitSoftness { get; init; }`
+- `public float? LinearLimitRestitution { get; init; }`
+- `public float? LinearLimitDamping { get; init; }`
+- `public float? AngularLimitUpper { get; init; }`
+- `public float? AngularLimitLower { get; init; }`
 
 ### GPUParticles3D
 
@@ -6232,6 +6347,16 @@ Values: `None = 0`, `Range = 1`, `Enum = 2`, `EnumSuggestion = 3`, `ExpRange = 4
 - `public Vector3 GetCollisionPoint()`
 - `public Vector3 GetCollisionNormal()`
 - `public int GetCollisionFaceIndex()`
+
+### RaycastWheelGodot
+
+`public static class RaycastWheelGodot`
+
+- `public static Float3 FromGodotAxes(Float3 g)` - Godot's axes (+X right, +Y up, -Z forward) to Aver's (+Y right, +Z up, +X forward) for a direction or a position.
+- `public static RaycastWheelSettings FromGodot(Float3 connectionPoint, Float3 suspensionDirection, Float3 axle, float restLength, float suspensionTravel, float stiffness, float dampingCompression, float dampingRelaxation, float maxForceN, float radius, float frictionSlip, float rollInfluence, bool useAsTraction, bool useAsSteering, uint collisionMask = 0xFFFFFFFFu)` - The settings of a Godot VehicleWheel3D.
+- `public static float EngineForceFromGodot(float newtons)` - Godot's engine_force (newtons) to the ABI's kg*cm/s^2.
+- `public static float BrakeFromGodot(float brakeImpulsePerStep, float physicsTicksPerSecond)` - Godot's brake is an IMPULSE applied every physics step; the ABI takes a force: impulse x ticks per second x 100 (cm).
+- `public static float SteeringFromGodot(float radians)` - Godot's steering is positive to the LEFT; the ABI's is positive toward the axle side (right).
 
 ### Rect2
 

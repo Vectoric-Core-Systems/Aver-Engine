@@ -5,7 +5,7 @@
 
 namespace Aver.Framework;
 
-// Godot's process_mode rules, kept free of the scene so they test without a host.
+// The process-mode rules, kept free of the scene so they test without a host.
 internal static class PauseRules
 {
     // The first mode that is not Inherit, walking from the actor up to the root; Pausable when every one inherits.

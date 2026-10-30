@@ -1,5 +1,5 @@
-// The bus effects (Godot's AudioEffect* set). Each one is a small class over interleaved stereo blocks; docs/AUDIO.md lists what is
-// Godot's algorithm and what is an approximation of it.
+// The bus effects (the AudioEffect* set). Each one is a small class over interleaved stereo blocks; docs/AUDIO.md lists what is
+// exact and what is an approximation.
 #include "aver/audio/Effects.hpp"
 #include "aver/audio/Convolver.hpp"
 #include "aver/audio/Reverb.hpp"
@@ -159,7 +159,7 @@ constexpr const char* kClassNames[] = {
     "AudioEffectNotchFilter", "AudioEffectLowShelfFilter", "AudioEffectHighShelfFilter", "AudioEffectDistortion", "AudioEffectPhaser",
     "AudioEffectPitchShift", "AudioEffectReverb", "AudioEffectPanner", "AudioEffectStereoEnhance", "AudioEffectCapture", "AudioEffectSpectrumAnalyzer",
     "AudioEffectConvolutionReverb"};
-static_assert(sizeof(kClassNames) / sizeof(kClassNames[0]) == static_cast<usize>(EffectKind::Count), "one Godot class name per effect kind");
+static_assert(sizeof(kClassNames) / sizeof(kClassNames[0]) == static_cast<usize>(EffectKind::Count), "one class name per effect kind");
 
 // ---------------------------------------------------------------- Amplify
 
@@ -385,7 +385,7 @@ public:
     void reset() override { for (auto& c : st_) for (auto& s : c) s.reset(); }
     void process(f32* io, u32 frames, const f32*) override {
         const u32 stages = static_cast<u32>(clampf(param(3), 0.0f, 3.0f)) + 1;
-        const BiquadCoeffs c = godotFilterCoeffs(mode_, param(0), param(1), param(2), stages, static_cast<f32>(rate_));
+        const BiquadCoeffs c = filterCoeffs(mode_, param(0), param(1), param(2), stages, static_cast<f32>(rate_));
         for (u32 i = 0; i < frames; ++i)
             for (u32 ch = 0; ch < 2; ++ch) {
                 f32 x = io[2 * i + ch];
@@ -514,7 +514,7 @@ private:
 
 // ---------------------------------------------------------------- PitchShift
 
-// Two read heads sweeping a delay line, cross-faded with sin^2 windows. A time-domain shifter: Godot's is FFT-based, so this one
+// Two read heads sweeping a delay line, cross-faded with sin^2 windows. A time-domain shifter: an FFT-based one exists elsewhere, so this one
 // is approximate (some modulation on sustained tones) but needs no transform and stays in tune.
 class PitchShift final : public Effect {
 public:
@@ -686,7 +686,7 @@ private:
 
 // ---------------------------------------------------------------- Capture and SpectrumAnalyzer
 
-// Audio thread writes, game thread reads; frames that do not fit are dropped and counted (Godot's behaviour).
+// Audio thread writes, game thread reads; frames that do not fit are dropped and counted.
 class Capture final : public Effect {
 public:
     // The ring holds two seconds; buffer_length (up to that) is how much of it may be queued.
@@ -808,9 +808,9 @@ private:
 
 } // namespace
 
-// ---------------------------------------------------------------- Godot's filter maths
+// ---------------------------------------------------------------- the filter maths
 
-BiquadCoeffs godotFilterCoeffs(FilterMode mode, f32 cutoffHz, f32 resonance, f32 gain, u32 stages, f32 sampleRate) {
+BiquadCoeffs filterCoeffs(FilterMode mode, f32 cutoffHz, f32 resonance, f32 gain, u32 stages, f32 sampleRate) {
     f64 fc = cutoffHz;
     const f64 lim = std::floor(sampleRate * 0.5) + 512.0;
     if (fc > lim) fc = lim;
@@ -866,8 +866,8 @@ BiquadCoeffs godotFilterCoeffs(FilterMode mode, f32 cutoffHz, f32 resonance, f32
     return c;
 }
 
-f32 godotFilterMagnitude(FilterMode mode, f32 cutoffHz, f32 resonance, f32 gain, u32 stages, f32 sampleRate, f32 freqHz) {
-    const BiquadCoeffs c = godotFilterCoeffs(mode, cutoffHz, resonance, gain, stages, sampleRate);
+f32 filterMagnitude(FilterMode mode, f32 cutoffHz, f32 resonance, f32 gain, u32 stages, f32 sampleRate, f32 freqHz) {
+    const BiquadCoeffs c = filterCoeffs(mode, cutoffHz, resonance, gain, stages, sampleRate);
     return std::pow(biquadMagnitude(c, freqHz, sampleRate), static_cast<f32>(stages < 1 ? 1 : stages));
 }
 
@@ -905,7 +905,7 @@ void Effect::setParam(u32 index, f32 value) {
     values_[index].store(clampf(value, table_[index].lo, table_[index].hi), std::memory_order_relaxed);
 }
 
-const char* Effect::godotClassName(EffectKind k) {
+const char* Effect::className(EffectKind k) {
     return k < EffectKind::Count ? kClassNames[static_cast<usize>(k)] : "";
 }
 

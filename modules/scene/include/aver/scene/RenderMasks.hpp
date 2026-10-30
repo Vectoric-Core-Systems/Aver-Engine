@@ -11,7 +11,7 @@
 
 namespace aver::scene {
 
-// Godot's VisualInstance3D.layers and Camera3D.cull_mask are 20 bits.
+// Render layers and camera cull masks are 20 bits.
 inline constexpr u32 kAllLayers = 0xFFFFFu;
 
 inline constexpr u32 storeMask(u32 mask) { return ~mask & kAllLayers; }
@@ -27,7 +27,7 @@ inline constexpr bool masksOverlap(u32 storedLayers, u32 storedMask) {
 inline constexpr u32 kRangeHidden = 0x1;   // the last verdict was "hidden"
 inline constexpr u32 kRangeKnown = 0x2;    // there has been a verdict (the first one uses the plain thresholds)
 
-// Godot's GeometryInstance3D visibility range with the fade mode disabled: visible from `begin` to `end` (0 turns a bound off). A margin is
+// A geometry instance's visibility range with the fade mode disabled: visible from `begin` to `end` (0 turns a bound off). A margin is
 // a hysteresis: a visible instance stays so until it has crossed a threshold by the margin, a hidden one reappears only once it has
 // crossed back by the margin. `state` is the caller's remembered verdict (kRange* bits). Fade modes self / dependencies are a hard cut.
 inline bool rangeShown(f32 distCm, f32 beginCm, f32 endCm, f32 beginMarginCm, f32 endMarginCm, u32& state) {

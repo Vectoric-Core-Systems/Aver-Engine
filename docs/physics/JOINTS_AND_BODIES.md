@@ -5,7 +5,7 @@ What `physics_joints_abi.h` gained (breakable joints, soft limits, motor springs
 C# mirrors: `Joint.SetBreak / SetLimitSpring / SetMotorSpring`, `Physics.JointBreaks()`, and the
 `Body` members in `BodyExt.cs`. Test: `tests/physics/src/JointBreakTest.cpp`.
 The same header also carries Godot's `_integrate_forces`, custom integrator and static-body constant velocity (Fabric G2; angular values in radians there):
-`docs/PHYSICS_SHAPES.md` section 11, `BodyGodot.cs`, `tests/physics/src/BodyGodotTest.cpp`.
+`docs/PHYSICS_SHAPES.md` section 11, `RigidExtras.cs`, `tests/physics/src/RigidExtrasTest.cpp`.
 
 Units are the engine's (cm, +X forward / +Y right / +Z up, left-handed) with three deliberate exceptions,
 each called out in the header: break thresholds are SI (N, N*m), the max angular velocity is degrees per
@@ -83,4 +83,4 @@ lives in the upper half of the same user-data word the entity stamp uses, which 
 
 ## Collision exclusion (G2)
 
-`aver_phys_joint_set_exclude_collision(joint, 1)` stops the joint's two bodies colliding with each other (Godot's `exclude_nodes_from_collision`). Off for every joint by default. See `GODOT_FILTERING.md`.
+`aver_phys_joint_set_exclude_collision(joint, 1)` stops the joint's two bodies colliding with each other (Godot's `exclude_nodes_from_collision`). Off for every joint by default. See `LAYER_FILTERING.md`.

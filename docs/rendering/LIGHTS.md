@@ -148,7 +148,7 @@ visibility shared across lights.
 Point and spot `CLight`s are also shaded in the raster scene pass, with no ray query, on every backend: a list of at most 32 lights (culled against the frustum, ranked by importance) read from a tail of the `VoxiFrame`
 constant block in the `AVER_LOCAL_RASTER` pixel-shader variants, with PCF shadow maps from a 4096 px atlas (a spot is one perspective tile, an omni a cube of six; at most 8 shadowed lights, 24 tiles). It is live where the ray-traced
 list cannot serve (ray tracing off, no ray queries, Vulkan), or in raster-primary ray-traced frames with `RENDER.LOCALRASTER 1`; `RENDER.LOCALRASTER 2` turns it off and `RENDER.LOCALSHADOWS 0` drops the shadow maps. With ray tracing on
-and the defaults nothing changes. The `CLight` fields `attenuation`, `spotAttenuation`, `specularScale`, `shadowBias`, `shadowNormalBias`, `fadeBeginCm`, `fadeLengthCm`, `fadeShadowCm` and the flags `kLightGodot` / `kLightNegative`
+and the defaults nothing changes. The `CLight` fields `attenuation`, `spotAttenuation`, `specularScale`, `shadowBias`, `shadowNormalBias`, `fadeBeginCm`, `fadeLengthCm`, `fadeShadowCm` and the flags `kLightParametric` / `kLightNegative`
 give a light Godot's falloff curves, specular multiplier, negative light, biases and distance fade (all zero = the Aver behaviour described above; set with the component field ABI). Limits: blended draws and mesh-shader draws are not
 lit by it, rectangles, IES and cookies are skipped, no indirect light. Design, units, calibration and the Vulkan note: `docs/plans/fabric/G4_RENDER.md` R2.
 

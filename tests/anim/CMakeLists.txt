@@ -71,7 +71,7 @@ foreach(t FaceRig Viseme)
 endforeach()
 # [wave9/morph end]
 
-# PropAnimTest -- property-track animation with Godot's AnimationPlayer semantics (docs/plans/fabric/G5_PARITY.md, A1):
+# PropAnimTest -- property-track animation with animation-player semantics:
 # track sampling per interpolation and update mode, loop and ping-pong boundaries, crossfade weights, method-call order
 # across frame boundaries, signal order, the queue, and the .ocanim PROP chunk. Same link set and the same reason.
 add_executable(PropAnimTest src/PropAnimTest.cpp)

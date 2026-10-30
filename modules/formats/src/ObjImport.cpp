@@ -344,7 +344,7 @@ bool importObjFromMemory(const char* text, usize size, const std::string& baseDi
             // The basis change, matching GltfImport.cpp:173 exactly: engine.x = -src.z,
             // engine.y = src.x, engine.z = src.y. Scale applies after, so it is a pure unit change.
             if (opt.convertAxes) {
-                const Vec3 e = axis::direction(x, y, z);   // AxisMap.hpp, shared with glTF and the Godot converter
+                const Vec3 e = axis::direction(x, y, z);   // AxisMap.hpp, shared with glTF and the other importers
                 gp.push_back(e.x * opt.scale); gp.push_back(e.y * opt.scale); gp.push_back(e.z * opt.scale);
             } else {
                 gp.push_back(x * opt.scale); gp.push_back(y * opt.scale); gp.push_back(z * opt.scale);

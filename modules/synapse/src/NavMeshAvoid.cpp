@@ -1,5 +1,5 @@
-// Avoidance for NavServer: Godot's agents and obstacles on the ORCA core the crowd already uses (CrowdOrca.hpp).
-// An agent that had its velocity set since the last step gets a safe velocity; nothing moves by itself, as in Godot
+// Avoidance for NavServer: agents and obstacles on the ORCA core the crowd already uses (CrowdOrca.hpp).
+// An agent that had its velocity set since the last step gets a safe velocity; nothing moves by itself
 // (the agent node reads the answer and moves its body).
 #include "aver/synapse/CrowdOrca.hpp"
 #include "aver/synapse/NavMesh.hpp"
@@ -47,7 +47,7 @@ void NavServer::stepAvoidance(u32 map, f32 dt) {
         const f32 wallHorizon = std::max(a->timeHorizonObstacles, 0.1f);
         const f32 reach = a->radius + a->maxSpeed * wallHorizon;
         for (NavObstacleData* o : obstacles) {
-            if (o->verts.size() < 3 || (o->layers & a->avoidanceMask) == 0) continue;   // a wall needs a polygon, as in Godot
+            if (o->verts.size() < 3 || (o->layers & a->avoidanceMask) == 0) continue;   // a wall needs a polygon
             f32 zMin = o->verts[0].z;
             for (const Vec3& v : o->verts) zMin = std::min(zMin, v.z);
             if (!heightsOverlap(a->position.z, a->height, zMin, o->height)) continue;

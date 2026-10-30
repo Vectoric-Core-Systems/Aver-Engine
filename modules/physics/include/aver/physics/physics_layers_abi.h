@@ -101,16 +101,16 @@ AVER_PHYS_API int32_t aver_phys_sphere_cast_ex(float ox, float oy, float oz,
                                                uint32_t layerMask, int32_t ignoreBody,
                                                float* outPoint, float* outNormal);
 
-// ---- Godot-style 32-bit layer and mask (G2, additive) -------------------------------------------------
+// ---- 32-bit layer and mask (additive) ------------------------------------------------------------------
 //
-// AN OPT-IN ALTERNATIVE TO THE 16-LAYER MATRIX ABOVE, for content that arrives with Godot's rule. A body
+// AN OPT-IN ALTERNATIVE TO THE 16-LAYER MATRIX ABOVE, for content that arrives with a layer/mask rule. A body
 // that never calls anything in this group keeps today's filtering exactly.
 //
 // The rule: A and B collide when (A.mask & B.layer) != 0 OR (B.mask & A.layer) != 0 -- one side wanting
-// the other is enough, which is NOT the matrix's symmetric yes/no. Bit N is layer N+1 in Godot's naming.
+// the other is enough, which is NOT the matrix's symmetric yes/no. Bit N is layer N+1 in the usual naming.
 //
 // HOW THE TWO COEXIST. The object-layer matrix is still consulted first, so both must allow a pair. The
-// mask rule applies only when BOTH bodies carry a Godot filter; a pair with an unfiltered body is decided
+// mask rule applies only when BOTH bodies carry a layer filter; a pair with an unfiltered body is decided
 // by the matrix alone. (Default matrix = everything collides, so for a filtered pair the mask decides.)
 // Static-vs-static never collides, whatever the masks say. Filtering lives in the body's Jolt collision
 // group, so it is applied in the broad phase and survives a body being rebuilt (static -> movable).
@@ -121,15 +121,15 @@ AVER_PHYS_API int32_t aver_phys_sphere_cast_ex(float ox, float oy, float oz,
 // Not captured by physics snapshots (physics_state_abi.h), like the layer matrix: configuration, not state.
 // Setters are refused (return 0) while aver_phys_step is running.
 
-// Gives a body a Godot layer and mask. Both are bitmasks; 0 layer = nobody's mask hits it, 0 mask = it wants
+// Gives a body a 32-bit layer and mask. Both are bitmasks; 0 layer = nobody's mask hits it, 0 mask = it wants
 // nobody (others' masks can still hit it). Returns 0 for a dead handle or a body that cannot take a filter.
 AVER_PHYS_API int32_t aver_phys_body_set_collision_filter(int32_t body, uint32_t layerBits, uint32_t maskBits);
-// 1 and the bits when the body carries a Godot filter; 0 (outputs untouched) when it follows the matrix only.
+// 1 and the bits when the body carries a layer filter; 0 (outputs untouched) when it follows the matrix only.
 AVER_PHYS_API int32_t aver_phys_body_collision_filter(int32_t body, uint32_t* outLayerBits, uint32_t* outMaskBits);
 // Back to the matrix alone. Exceptions on the body stay.
 AVER_PHYS_API int32_t aver_phys_body_clear_collision_filter(int32_t body);
 
-// Two bodies that never collide (Godot add_collision_exception_with). Symmetric, works with or without a
+// Two bodies that never collide (a collision exception). Symmetric, works with or without a
 // layer/mask on either body, and stays until removed or one body is. Adding twice is one exception.
 // Applies to rigid-body simulation, not to queries or CharacterVirtual movement.
 AVER_PHYS_API int32_t aver_phys_body_add_collision_exception(int32_t bodyA, int32_t bodyB);
@@ -140,12 +140,12 @@ AVER_PHYS_API int32_t aver_phys_body_has_collision_exception(int32_t bodyA, int3
 AVER_PHYS_API int32_t aver_phys_body_clear_collision_exceptions(int32_t body);
 
 // Whether the simulation would let these two collide, from filtering alone: static-vs-static, the
-// matrix, then the Godot rule, exceptions and joint exclusion. 0 for a dead handle or the same body
+// matrix, then the mask rule, exceptions and joint exclusion. 0 for a dead handle or the same body
 // twice. Says nothing about geometry or motion type (a static and a kinematic body still never collide).
 AVER_PHYS_API int32_t aver_phys_bodies_can_collide(int32_t bodyA, int32_t bodyB);
 
-// Queries with a 32-bit Godot mask: as aver_phys_raycast_ex / _overlap_sphere_ex / _sphere_cast_ex, but a
-// body is hit when (collisionMask & its layer bits) != 0. A body without a Godot filter has the single
+// Queries with a 32-bit mask: as aver_phys_raycast_ex / _overlap_sphere_ex / _sphere_cast_ex, but a
+// body is hit when (collisionMask & its layer bits) != 0. A body without a layer filter has the single
 // layer bit of its 16-layer user layer (layer 0 = bit 0), so a mask can still address it. Exceptions do not
 // apply to queries. Sensors are not skipped, as in the _ex forms.
 AVER_PHYS_API int32_t aver_phys_raycast_mask(float ox, float oy, float oz,

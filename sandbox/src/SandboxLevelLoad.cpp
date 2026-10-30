@@ -690,7 +690,7 @@ void SandboxApp::onLegacyOcmapInstantiated(const game::GameLevel::LoadedLevel& l
 // and this matches how every ORDINARY mesh placement already behaves. Accepted consequence: a
 // placed class runs OnTick immediately on load, even outside Play.
 void SandboxApp::spawnClassPlacements() {
-    // One spawn batch: every placed actor begins play after all of them exist, children first (Godot's _ready).
+    // One spawn batch: every placed actor begins play after all of them exist, children first.
     aver_fw_spawn_batch_begin();
     for (usize slot = 0; slot < classAuthored_.size(); ++slot) spawnClassSlot(slot, nullptr);
     placementTree_.attachUnderClassPlacements(scene::World::instance());

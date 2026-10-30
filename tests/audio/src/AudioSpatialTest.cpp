@@ -1,4 +1,4 @@
-// Headless test for Godot's AudioStreamPlayer3D maths (G5 S1): the four attenuation models, unit_size / max_db / max_distance, the panning law,
+// Headless test for the 3D player maths: the four attenuation models, unit_size / max_db / max_distance, the panning law,
 // the emission cone and attenuation filter, Doppler, and the same functions applied by the mixer to a voice. Reference values are worked out
 // from the formulas by hand (stated beside each check).
 #include "aver/audio/Mixer.hpp"
@@ -53,7 +53,7 @@ static void testSpatialize() {
     check(near(r.gainL, r.gainR, 1.0e-5f) && near(r.gainL, 0.7071f * 0.2f, 1.0e-3f), "dead ahead pans to the centre (sqrt 0.5 each side)");
     const f32 behind[3] = {-500, 0, 0};
     r = spatialize(s, 1.0f, kPos, kFwd, kRight, behind);
-    check(near(r.gainL, r.gainR, 1.0e-5f), "dead behind pans to the centre too (Godot has no front/back cue)");
+    check(near(r.gainL, r.gainR, 1.0e-5f), "dead behind pans to the centre too (no front/back cue)");
     const f32 rightSide[3] = {0, 500, 0};
     r = spatialize(s, 1.0f, kPos, kFwd, kRight, rightSide);
     // strength 1 * global 0.5 -> g = (1-0.5)^2 = 0.25, f = 0.6; L = sqrt((1-0.6)/2) = 0.4472, R = sqrt(1.6/2) = 0.8944.
@@ -128,7 +128,7 @@ static void testDoppler() {
     check(near(dopplerPitch(kPos, zero, src, zero), 1.0f), "standing still changes nothing");
     check(near(dopplerPitch(kPos, away, src, zero), 343.0f / (343.0f - 34.3f), 1.0e-3f), "a listener running away from a static source hears the same shift as the opposite motion (relative velocity)");
     check(near(dopplerPitch(kPos, zero, src, fast), 8.0f), "the factor is clamped to 8 (343 / (343 - 340) = 114)");
-    check(near(dopplerPitch(kPos, zero, src, supersonic), 0.125f), "and to 1/8 when the formula goes negative (faster than sound, as Godot's does)");
+    check(near(dopplerPitch(kPos, zero, src, supersonic), 0.125f), "and to 1/8 when the formula goes negative (faster than sound)");
 }
 
 static void testMixerApplies() {
@@ -146,14 +146,14 @@ static void testMixerApplies() {
     p.sound = snd;
     p.looping = true;
     p.positional = true;
-    p.godotSpatial = true;
+    p.spatialModel = true;
     p.spatial = base();
     p.position[0] = 0.0f; p.position[1] = 500.0f; p.position[2] = 0.0f;       // 5 m to the right
     std::vector<f32> out(480 * 2);
     VoiceHandle v = m.play(p);
     m.mix(out.data(), 480);
     m.mix(out.data(), 480);
-    check(near(out[2 * 200], 0.5f * 0.2f * 0.4472f, 1.0e-3f) && near(out[2 * 200 + 1], 0.5f * 0.2f * 0.8944f, 1.0e-3f), "a Godot-spatial voice is attenuated and panned by the formulas");
+    check(near(out[2 * 200], 0.5f * 0.2f * 0.4472f, 1.0e-3f) && near(out[2 * 200 + 1], 0.5f * 0.2f * 0.8944f, 1.0e-3f), "a spatial-model voice is attenuated and panned by the formulas");
     m.setVoicePosition(v, 0.0f, 0.0f, 0.0f);
     for (int i = 0; i < 4; ++i) m.mix(out.data(), 480);
     check(near(out[2 * 200], 0.5f * std::pow(10.0f, 3.0f / 20.0f) * 0.7071f, 2.0e-3f), "moving it onto the listener hits the max_db clamp and the centre");
@@ -193,7 +193,7 @@ static void testMixerApplies() {
     PlayDesc dp;
     dp.sound = m.addSound(std::move(longs));
     dp.positional = true;
-    dp.godotSpatial = true;
+    dp.spatialModel = true;
     dp.spatial = base();
     dp.spatial.doppler = true;
     dp.spatial.velocity[0] = -3430.0f;

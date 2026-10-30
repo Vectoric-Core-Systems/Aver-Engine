@@ -32,7 +32,7 @@ void aver_ui_stylebox_defaults(int32_t kind, void* outStyleBox) {
         case UiStyleBoxKind::Texture: sb.flags = kSbDrawCenter; break;
         case UiStyleBoxKind::Line: sb.flags = 0; break;
         case UiStyleBoxKind::Empty: sb.flags = 0; break;
-        default: sb.kind = static_cast<i32>(UiStyleBoxKind::Flat); sb.flags = kSbDrawCenter | kSbAntiAlias; break;   // Godot's StyleBoxFlat: anti_aliasing is on
+        default: sb.kind = static_cast<i32>(UiStyleBoxKind::Flat); sb.flags = kSbDrawCenter | kSbAntiAlias; break;   // a flat style box: anti-aliasing is on
     }
     std::memcpy(outStyleBox, &sb, sizeof sb);
 }
@@ -110,7 +110,7 @@ void aver_ui_stretch_compute(const float* in6, float windowW, float windowH, flo
 }
 
 int32_t aver_ui_theme_default_text(void* outText, int32_t cap) {
-    const std::string& t = uiGodotDefaultThemeText();
+    const std::string& t = uiBuiltinDefaultThemeText();
     if (outText && cap > 0) {
         char* dst = static_cast<char*>(outText);
         const usize n = std::min(t.size(), static_cast<usize>(cap - 1));

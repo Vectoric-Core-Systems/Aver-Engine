@@ -146,19 +146,19 @@ float4 averRtSampleSlotGraph(uint slot, float2 uv) {
                             float4(1.0, 1.0, 1.0, 1.0));
 }
 
-// G6 SH2: the converted Godot shaders' ray flavour (material_godot.hlsl declares these ahead of this point). The hit's material and footprint travel in the
+// The embedded shaders' ray flavour (material_embedded.hlsl declares these ahead of this point). The hit's material and footprint travel in the
 // same statics; every access is explicit-level or explicit-gradient, so a compute pass compiles it.
-bool averRtGdBound(uint slot) { return gAverGraphMat.texIndex[slot] != AVER_TEX_UNBOUND; }
-float4 averRtGdSample(uint slot, float2 uv) {
+bool averRtEmbBound(uint slot) { return gAverGraphMat.texIndex[slot] != AVER_TEX_UNBOUND; }
+float4 averRtEmbSample(uint slot, float2 uv) {
     return gRtTextures[NonUniformResourceIndex(gAverGraphMat.texIndex[slot])].SampleGrad(gMaterialSampler, uv, gAverGraphGx, gAverGraphGy);
 }
-float4 averRtGdSampleLod(uint slot, float2 uv, float lod) {
+float4 averRtEmbSampleLod(uint slot, float2 uv, float lod) {
     return gRtTextures[NonUniformResourceIndex(gAverGraphMat.texIndex[slot])].SampleLevel(gMaterialSampler, uv, lod);
 }
-float4 averRtGdLoad(uint slot, int2 p, int mip) {
+float4 averRtEmbLoad(uint slot, int2 p, int mip) {
     return gRtTextures[NonUniformResourceIndex(gAverGraphMat.texIndex[slot])].Load(int3(p, mip));
 }
-int2 averRtGdSize(uint slot) {
+int2 averRtEmbSize(uint slot) {
     uint w = 1u, h = 1u, l = 1u;
     gRtTextures[NonUniformResourceIndex(gAverGraphMat.texIndex[slot])].GetDimensions(0u, w, h, l);
     return int2((int)w, (int)h);

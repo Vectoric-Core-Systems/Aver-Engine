@@ -1,14 +1,13 @@
 #pragma once
-// Baking a polygon navigation mesh from triangles (Godot's NavigationMesh parameters; docs/plans/fabric/G5_PARITY.md, N1).
+// Baking a polygon navigation mesh from triangles.
 //
-// PURE and thread-safe: triangles in, polygons out, no shared state, so a caller may run it on a worker thread (Godot's
-// bake_navigation_mesh(on_thread = true)). The method is a heightfield one: triangles are rasterised into columns of spans,
+// PURE and thread-safe: triangles in, polygons out, no shared state, so a caller may run it on a worker thread. The method is a heightfield one: triangles are rasterised into columns of spans,
 // walkable spans are filtered (slope, climb, headroom), eroded by the agent radius, split into floors by connectivity, and each
 // floor is covered with rectangles that fit a plane. Several floors over the same ground plan, ramps and stairs up to the climb
 // height come out connected where an agent can really step, and separate where it cannot.
 //
 // Triangle winding: the normal that counts is cross(b - a, c - a) computed on the coordinates as given; a floor faces up (+Z).
-// A caller whose source is mirrored (Godot -> Aver) swaps two indices.
+// A caller whose source is mirrored (another handedness) swaps two indices.
 #include "aver/core/Math.hpp"
 
 #include <string>
@@ -23,7 +22,7 @@ struct NavBakeParams {
     f32  agentRadiusCm = 50.0f;
     f32  agentMaxClimbCm = 25.0f;
     f32  agentMaxSlopeDeg = 45.0f;
-    f32  regionMinSize = 2.0f;           // a region needs at least size * size cells (Godot: region_min_size)
+    f32  regionMinSize = 2.0f;           // a region needs at least size * size cells (the region minimum size)
     f32  regionMergeSize = 20.0f;        // stored; the rectangle cover does not merge by size
     f32  edgeMaxLengthCm = 0.0f;         // longer polygon edges are split; 0 = unlimited
     f32  edgeMaxError = 1.3f;            // stored; the rectangle cover has no contour to simplify
@@ -38,7 +37,7 @@ struct NavBakeParams {
     Vec3 boundsMin, boundsMax;
 };
 
-// A shape that discards the walkable surface it covers (Godot: NavigationObstacle3D with affect_navigation_mesh).
+// A shape that discards the walkable surface it covers (an obstacle that affects the navigation mesh).
 struct NavBakeObstacle {
     std::vector<Vec3> verts;             // a polygon in XY; empty for a circle
     Vec3 position;                       // the circle's centre, or ignored when verts is set

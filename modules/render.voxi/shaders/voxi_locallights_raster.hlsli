@@ -1,18 +1,18 @@
 // Raster local lights (G4 R2): omni and spot lights shaded in PSMainVoxi from the capped list in the AVER_LOCAL_RASTER tail of the frame block
 // (gRlHeader, gRlLight, gRlTileVP, gRlTileUv), with PCF shadow maps from an atlas. No ray query, no bindless table: it runs on Vulkan and with
 // ray tracing off. Included by voxi.hlsl only under AVER_LOCAL_RASTER; nothing here is in any other variant.
-// Host side and layout: modules/render.voxi/include/aver/voxi/RasterLights.hpp. Design: docs/plans/fabric/G4_RENDER.md R2.
+// Host side and layout: modules/render.voxi/include/aver/voxi/RasterLights.hpp.
 //
 // One light = AVER_RL_LIGHT_VECS float4:
 //   0 pos.xyz (cm), emitter radius cm         1 colour * irradiance at 1 m (engine units, fade applied), range cm
-//   2 axis.xyz, 1 for a spot                  3 decay exponent, cos outer, (Aver: cos inner | Godot: 1 / angle attenuation), flags
+//   2 axis.xyz, 1 for a spot                  3 decay exponent, cos outer, (Aver: cos inner | parametric: 1 / angle attenuation), flags
 //   4 specular scale, shadow weight, light cull mask (inverted), shadow caster mask (inverted; the CPU shadow pass reads it)
 //                                             5 first tile, tile count, constant bias cm, normal bias texels
 //   6 world texel size per unit distance, filter radius texels, near cm, far cm
 #ifndef AVER_VOXI_LOCALLIGHTS_RASTER_HLSLI
 #define AVER_VOXI_LOCALLIGHTS_RASTER_HLSLI
 
-#define AVER_RL_F_GODOT    1u
+#define AVER_RL_F_PARAMETRIC 1u
 #define AVER_RL_F_NEGATIVE 2u
 #define AVER_RL_F_SHADOWED 4u
 #define AVER_RL_F_CUBE     8u
@@ -59,19 +59,19 @@ float rlShadowVis(uint b, uint flags, float3 wpos, float3 Nf, float3 toL, float 
     return lerp(1.0, s / 9.0, v4.y);
 }
 
-// Godot's and Aver's falloff, as rl::distanceFactor.
-float rlDistanceFactor(float d, float range, float radius, bool godot, float decay) {
+// The parametric and Aver falloff, as rl::distanceFactor.
+float rlDistanceFactor(float d, float range, float radius, bool parametric, float decay) {
     const float x = d / range;
-    if (godot) return max(1.0 - x, 0.0) * pow(100.0 / max(d, max(radius, 0.01)), decay);
+    if (parametric) return max(1.0 - x, 0.0) * pow(100.0 / max(d, max(radius, 0.01)), decay);
     float w = saturate(1.0 - x * x * x * x);
     w *= w;
     return w * 1e4 / max(d * d, radius * radius);
 }
 
 // The cone, as rl::coneFactor.
-float rlConeFactor(float cosAxis, float cosOuter, float cosInnerOrInvAtt, bool godot) {
+float rlConeFactor(float cosAxis, float cosOuter, float cosInnerOrInvAtt, bool parametric) {
     if (cosAxis <= cosOuter) return 0.0;
-    if (godot) {
+    if (parametric) {
         const float rim = max(1e-4, (1.0 - cosAxis) / max(1.0 - cosOuter, 1e-6));
         return 1.0 - pow(rim, cosInnerOrInvAtt);
     }
@@ -80,7 +80,7 @@ float rlConeFactor(float cosAxis, float cosOuter, float cosInnerOrInvAtt, bool g
 }
 
 // Every listed light through the surface's own BRDF (Cook-Torrance GGX, the sun's terms), diffuse and specular apart so `specular scale`
-// (Godot's light_specular) can scale the second. Nf is the face-forwarded surface normal, for the shadow offset. May be negative for a
+// can scale the second. Nf is the face-forwarded surface normal, for the shadow offset. May be negative for a
 // negative light; the caller clamps the finished pixel.
 float3 rlShade(AverSurface s, float3 wpos, float3 Nf) {
     if (s.model == AVER_MODEL_UNLIT) return float3(0.0, 0.0, 0.0);
@@ -93,7 +93,7 @@ float3 rlShade(AverSurface s, float3 wpos, float3 Nf) {
         const float3 toC = v0.xyz - wpos;
         const float  d2 = dot(toC, toC);
         if (d2 >= v1.w * v1.w) continue;
-        // Godot's light_cull_mask (G4 R4): both masks are stored inverted (0 = every layer), so a light that excludes nothing skips this test.
+        // The light cull mask: both masks are stored inverted (0 = every layer), so a light that excludes nothing skips this test.
         // _objPad carries the instance's inverted layers (IDevice::setDrawLayers); zero for everything that never set any.
         const float4 v4 = gRlLight[b + 4u];
         const uint   lightCullInv = (uint)(v4.z + 0.5);
@@ -101,12 +101,12 @@ float3 rlShade(AverSurface s, float3 wpos, float3 Nf) {
         const float4 v2 = gRlLight[b + 2u];
         const float4 v3 = gRlLight[b + 3u];
         const uint   flags = (uint)(v3.w + 0.5);
-        const bool   godot = (flags & AVER_RL_F_GODOT) != 0u;
+        const bool   parametric = (flags & AVER_RL_F_PARAMETRIC) != 0u;
         const float  d = sqrt(d2);
         const float3 toL = toC / max(d, 1e-4);
 
-        float f = rlDistanceFactor(d, v1.w, v0.w, godot, v3.x);
-        if (v2.w > 0.5) f *= rlConeFactor(dot(-toL, v2.xyz), v3.y, v3.z, godot);
+        float f = rlDistanceFactor(d, v1.w, v0.w, parametric, v3.x);
+        if (v2.w > 0.5) f *= rlConeFactor(dot(-toL, v2.xyz), v3.y, v3.z, parametric);
         if (f <= 0.0) continue;
 
         float vis = 1.0;

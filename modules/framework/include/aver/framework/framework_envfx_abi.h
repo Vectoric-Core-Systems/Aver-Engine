@@ -26,7 +26,7 @@ AVER_FW_ABI int32_t aver_fw_envfx_abi_version(void);
 #define AVER_FW_FOGVOL_MAX   64   /* volumes the registry keeps; the renderer draws the 16 nearest the camera */
 #define AVER_FW_PROBE_MAX    32
 
-/* Godot's FogVolumeShape numbers. */
+/* The fog volume shape numbers. */
 #define AVER_FW_FOGVOL_ELLIPSOID 0
 #define AVER_FW_FOGVOL_CONE      1
 #define AVER_FW_FOGVOL_CYLINDER  2
@@ -39,10 +39,10 @@ AVER_FW_ABI int32_t aver_fw_fogvol_create(const char* key);
 AVER_FW_ABI int32_t aver_fw_fogvol_destroy(int32_t id);
 AVER_FW_ABI int32_t aver_fw_fogvol_find(const char* key);
 /* Everything about the volume in one call. albedo3 / emission3 may be null (white / black). heightFalloff per metre, edgeFade a fraction of the half size.
- * densityPerM is Godot's FogMaterial.density (extinction per metre, negative carves). Returns 0 for a bad id, a non-finite value or a singular matrix. */
+ * densityPerM is the fog density (extinction per metre, negative carves). Returns 0 for a bad id, a non-finite value or a singular matrix. */
 AVER_FW_ABI int32_t aver_fw_fogvol_set(int32_t id, int32_t shape, const float* world12, const float* halfExtentCm3, float densityPerM,
                                        const float* albedo3, const float* emission3, float heightFalloff, float edgeFade);
-/* G6 SH3: a converted Godot fog shader (registered through framework_godotenv_abi.h as kind AVER_FW_GENV_FOG) replaces the volume's density, albedo and emission.
+/* A custom fog program (registered through framework_customenv_abi.h as kind AVER_FW_CENV_FOG) replaces the volume's density, albedo and emission.
  * null or empty goes back to the volume's own values. Returns 0 for a bad id; an unregistered name is kept and takes effect once it is registered. */
 AVER_FW_ABI int32_t aver_fw_fogvol_set_shader(int32_t id, const char* name);
 AVER_FW_ABI int32_t aver_fw_fogvol_set_enabled(int32_t id, int32_t on);

@@ -80,7 +80,7 @@ std::string writeFx(const pbr::MaterialFx& f) {
     if (f.diffuseMode != pbr::FxDiffuse::Burley)
         s += fxPair("diffuse", f.diffuseMode == pbr::FxDiffuse::Lambert ? "lambert" : (f.diffuseMode == pbr::FxDiffuse::LambertWrap ? "wrap" : "toon"));
     on("noambient", f.disableAmbient); on("noshadows", f.noReceiveShadows);
-    on("gdvs", f.gdVertex); on("gddiscard", f.gdDiscard);
+    on("embvs", f.embVertex); on("embdiscard", f.embDiscard);
     return s;
 }
 
@@ -148,8 +148,8 @@ void readFx(const std::vector<std::string_view>& t, pbr::MaterialFx& f) {
         else if (equalsCI(k, "diffuse")) f.diffuseMode = word("lambert") ? pbr::FxDiffuse::Lambert : (word("wrap") ? pbr::FxDiffuse::LambertWrap : (word("toon") ? pbr::FxDiffuse::Toon : pbr::FxDiffuse::Burley));
         else if (equalsCI(k, "noambient")) f.disableAmbient = b;
         else if (equalsCI(k, "noshadows")) f.noReceiveShadows = b;
-        else if (equalsCI(k, "gdvs")) f.gdVertex = b;
-        else if (equalsCI(k, "gddiscard")) f.gdDiscard = b;
+        else if (equalsCI(k, "embvs") || equalsCI(k, "gdvs")) f.embVertex = b;   // gdvs, gddiscard: the spellings files written before the rename carry
+        else if (equalsCI(k, "embdiscard") || equalsCI(k, "gddiscard")) f.embDiscard = b;
         else AVER_WARN("[ocmat] unknown FX key '{}' -- ignored (a typo, or a file from a newer engine)", std::string(k));
     }
 }
@@ -408,20 +408,20 @@ bool parseOcmat(std::string_view text, pbr::MaterialDesc& out, OcMatExtras* extr
             // DESCRIPTION makes in OcGraph.cpp, because a content path may contain spaces and a
             // single token would cut it at the first one and point at a file that does not exist.
             if (t.size() > 1) ex.graphRef = std::string(trim(after(key)));
-        } else if (equalsCI(key, "GDREGS")) {
-            // G6 SH2: the uniform registers of a converted Godot shader, one hexadecimal 32-bit pattern per float (ints and bools are bit patterns), four
-            // per register. May repeat; the values append.
+        } else if (equalsCI(key, "EMBREGS") || equalsCI(key, "GDREGS")) {
+            // The uniform registers of an embedded HLSL shader, one hexadecimal 32-bit pattern per float (ints and bools are bit patterns), four
+            // per register. May repeat; the values append. GDREGS is the spelling files written before the rename carry.
             for (usize i = 1; i < t.size(); ++i) {
                 u32 bits = 0;
                 const std::string_view w = t[i];
                 const auto r = std::from_chars(w.data(), w.data() + w.size(), bits, 16);
                 if (r.ec != std::errc() || r.ptr != w.data() + w.size()) {
-                    AVER_WARN("[ocmat] GDREGS word '{}' is not a hexadecimal 32-bit value -- ignored", std::string(w));
+                    AVER_WARN("[ocmat] EMBREGS word '{}' is not a hexadecimal 32-bit value -- ignored", std::string(w));
                     continue;
                 }
                 f32 f;
                 std::memcpy(&f, &bits, sizeof f);
-                out.gd.regs.push_back(f);
+                out.embedded.regs.push_back(f);
             }
         } else if (equalsCI(key, "PHYSSURFACE")) {
             // The name of a physical surface (see OcMatExtras::physSurface). One token: a name has no spaces.
@@ -625,8 +625,8 @@ bool parseOcmat(std::string_view text, pbr::MaterialDesc& out, OcMatExtras* extr
         if (err) *err = "not an .ocmat file: no OCMAT version line";
         return false;
     }
-    // G6 SH2: the uniform table rides texture slot 7. A "@gdu" reference only marks the slot bound; MaterialSystem builds the texture itself.
-    if (out.gd.active()) out.textures[pbr::kGdTableSlot].path = "@gdu";
+    // The uniform table rides texture slot 7. An "@embu" reference only marks the slot bound; MaterialSystem builds the texture itself.
+    if (out.embedded.active()) out.textures[pbr::kEmbeddedTableSlot].path = "@embu";
     // wave3 terrain layers: more than 8 layers, a duplicate or a bad name refuses the whole block, and
     // the material loads as a plain one.
     if (sawTerrain && !terrain.layers.empty()) {
@@ -780,7 +780,7 @@ std::string writeOcmat(const pbr::MaterialDesc& d, const OcMatExtras* extras) {
     for (u32 i = 0; i < pbr::kTextureSlotCount; ++i) {
         const pbr::TextureRef& r = d.textures[i];
         if (r.empty()) continue;
-        if (i == pbr::kGdTableSlot && d.gd.active()) continue;   // the Godot shader's uniform table: GDREGS below
+        if (i == pbr::kEmbeddedTableSlot && d.embedded.active()) continue;   // the embedded shader's uniform table: EMBREGS below
         if (!anyTex) { s += "\n"; anyTex = true; }
         const auto slot = static_cast<TextureSlot>(i);
         s += "TEX ";
@@ -799,14 +799,14 @@ std::string writeOcmat(const pbr::MaterialDesc& d, const OcMatExtras* extras) {
         s += "\n";
     }
 
-    // G6 SH2: the Godot shader's uniform registers, as hexadecimal bit patterns, eight words (two registers) to a line.
-    if (d.gd.active()) {
+    // The embedded shader's uniform registers, as hexadecimal bit patterns, eight words (two registers) to a line.
+    if (d.embedded.active()) {
         s += "\n";
-        for (usize i = 0; i < d.gd.regs.size(); i += 8) {
-            s += "GDREGS";
-            for (usize k = i; k < i + 8 && k < d.gd.regs.size(); ++k) {
+        for (usize i = 0; i < d.embedded.regs.size(); i += 8) {
+            s += "EMBREGS";
+            for (usize k = i; k < i + 8 && k < d.embedded.regs.size(); ++k) {
                 u32 bits = 0;
-                std::memcpy(&bits, &d.gd.regs[k], sizeof bits);
+                std::memcpy(&bits, &d.embedded.regs[k], sizeof bits);
                 char buf[16];
                 std::snprintf(buf, sizeof buf, " %08x", bits);
                 s += buf;

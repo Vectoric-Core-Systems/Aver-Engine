@@ -82,7 +82,7 @@ struct ImportedMaterial {
     f32  alphaCutoff        = 0.5f;    // only meaningful when alphaMode is MASK
     std::string alphaMode   = "OPAQUE";
     bool doubleSided        = false;
-    // Godot's vertex_color_use_as_albedo: multiply albedo by the mesh's vertex colour (pbr::MaterialDesc::vertexColor).
+    // Vertex colour as albedo: multiply albedo by the mesh's vertex colour (pbr::MaterialDesc::vertexColor).
     bool vertexColor        = false;
 
     ImportedTexture baseColorTex, metalRoughTex, normalTex, occlusionTex, emissiveTex;
@@ -117,13 +117,13 @@ struct ImportedMaterial {
     // Blender materials feed into Transmission; without them every leaf is opaque against the sun.
     ImportedTexture translucencyTex;
 
-    // ---- G4 R6: BaseMaterial3D features (the Godot converter fills these; no other importer does) ----
+    // ---- base-material features (a scene importer fills these; the mesh importers do not) ----
     // The pairs of an `FX` record (OcMat.hpp, parseOcmatFx) the cook applies to the MaterialDesc; empty = none, and the material is written exactly as before.
     std::string fxRecord;
     // The detail albedo, the heightmap and the detail normal ride the .ocmat's layer-1 slots (a material with these is not slope blended).
     ImportedTexture detailAlbedoTex, heightTex, detailNormalTex;
     // Overrides of MaterialDesc fields the .ocmat has and no importer set before; negative = leave the default.
-    f32 reflectance = -1.0f;      // Godot's metallic_specular * 0.08
+    f32 reflectance = -1.0f;      // the specular input * 0.08
     f32 coatWeight = 0.0f, coatRoughness = 0.0f;   // clearcoat
     f32 transmission = 0.0f, ior = 0.0f;           // refraction (ior 0 = leave the default)
 };

@@ -147,19 +147,19 @@ float3 averTonemap(float3 x, float mode) {
 }
 
 #ifdef AVER_POST_TONEMAP_EXT
-// ---- GODOT'S TONEMAPPERS AND DISPLAY ADJUSTMENTS (docs/plans/fabric/G4_RENDER.md R3) ----------------------------------
+// ---- THE EXTENDED TONEMAPPERS AND DISPLAY ADJUSTMENTS ---------------------------------------------------------------
 // Compiled only into the post composite's AVER_POST_TONEMAP_EXT variant. CPU twin and reference values: rhi/Tonemap.hpp.
-// mode 3 linear, 4 Reinhard, 5 filmic, 6 ACES, 7 AgX (Godot's tonemap_mode + 3).
+// mode 3 linear, 4 Reinhard, 5 filmic, 6 ACES, 7 AgX (the extended curve index + 3).
 
-float3 averTonemapReinhardGodot(float3 c, float white) { return c * (1.0 + c / (white * white)) / (1.0 + c); }
+float3 averTonemapReinhardExt(float3 c, float white) { return c * (1.0 + c / (white * white)) / (1.0 + c); }
 
-float3 averFilmicCurveGodot(float3 x) {
+float3 averFilmicCurveExt(float3 x) {
     const float A = 0.22 * 4.0, B = 0.30 * 2.0, C = 0.10, D = 0.20, E = 0.01, F = 0.30;
     return ((x * (A * x + C * B) + D * E) / (x * (A * x + B) + D * F)) - E / F;
 }
-float3 averTonemapFilmicGodot(float3 c, float white) { return averFilmicCurveGodot(c) / averFilmicCurveGodot(float3(white, white, white)).x; }
+float3 averTonemapFilmicExt(float3 c, float white) { return averFilmicCurveExt(c) / averFilmicCurveExt(float3(white, white, white)).x; }
 
-float3 averTonemapAcesGodot(float3 c, float white) {
+float3 averTonemapAcesExt(float3 c, float white) {
     const float bias = 1.8;
     const float A = 0.0245786, B = 0.000090537, C = 0.983729, D = 0.4329510, E = 0.238081;
     float3 x = mul(kAcesInput, c) * bias;
@@ -186,7 +186,7 @@ static const float3x3 kAgxFromRec2020 = float3x3(
     -0.1245505,  1.1328999, -0.0083494,
     -0.0181508, -0.1005789,  1.1187297);
 
-float3 averTonemapAgxGodot(float3 c) {
+float3 averTonemapAgxExt(float3 c) {
     const float minEv = -12.4739311883324, maxEv = 4.02606881166759;
     float3 v = mul(kAgxInset, mul(kAgxToRec2020, c));
     v = clamp(log2(max(v, 2e-10)), minEv, maxEv);
@@ -197,17 +197,17 @@ float3 averTonemapAgxGodot(float3 c) {
     return mul(kAgxFromRec2020, mul(kAgxOutset, v));
 }
 
-float3 averTonemapGodot(float3 c, float mode, float white) {
+float3 averTonemapExt(float3 c, float mode, float white) {
     c = max(c, 0.0);
     white = max(white, 1e-3);
-    if (mode > 6.5) return saturate(averTonemapAgxGodot(c));
-    if (mode > 5.5) return saturate(averTonemapAcesGodot(c, white));
-    if (mode > 4.5) return saturate(averTonemapFilmicGodot(c, white));
-    if (mode > 3.5) return saturate(averTonemapReinhardGodot(c, white));
+    if (mode > 6.5) return saturate(averTonemapAgxExt(c));
+    if (mode > 5.5) return saturate(averTonemapAcesExt(c, white));
+    if (mode > 4.5) return saturate(averTonemapFilmicExt(c, white));
+    if (mode > 3.5) return saturate(averTonemapReinhardExt(c, white));
     return saturate(c);
 }
 
-// Godot's apply_bcs on the display colour: x brightness, y contrast about 0.5, z saturation about the channel mean.
+// Brightness / contrast / saturation on the display colour: x brightness, y contrast about 0.5, z saturation about the channel mean.
 float3 averDisplayAdjust(float3 c, float3 bcs) {
     c *= bcs.x;
     c = 0.5 + (c - 0.5) * bcs.y;

@@ -88,10 +88,10 @@ Values: `Trace = 0`, `Info = 1`, `Warn = 2`, `Error = 3`, `Critical = 4`, `Fatal
 - `public bool SetTextureId(PbrTextureSlot slot, long id)` - Binds an opaque asset id to a slot.
 - `public bool ClearTexture(PbrTextureSlot slot)` - Clears both the path and the id on a slot.
 - `public bool ConsumeDirty()` - True when this material owes the GPU an upload.
-- `public int GdRegisterCount { get; }` - How many 16-byte uniform registers the material carries; 0 for an ordinary material.
-- `public float[] GetGdRegisters()` - The uniform table, four floats a register (ints and bools are 32-bit patterns); empty for an ordinary material.
-- `public bool SetGdRegisters(float[] values)` - Replaces the whole table (an empty array clears it).
-- `public bool SetGdRegisterFloats(int firstFloat, float[] values)` - Overwrites a range of the table, starting at a float index.
+- `public int EmbeddedRegisterCount { get; }` - How many 16-byte uniform registers the material carries; 0 for an ordinary material.
+- `public float[] GetEmbeddedRegisters()` - The uniform table, four floats a register (ints and bools are 32-bit patterns); empty for an ordinary material.
+- `public bool SetEmbeddedRegisters(float[] values)` - Replaces the whole table (an empty array clears it).
+- `public bool SetEmbeddedRegisterFloats(int firstFloat, float[] values)` - Overwrites a range of the table, starting at a float index.
 - `public bool Equals(PbrMaterial other)`
 - `public override bool Equals(object? obj)`
 - `public override int GetHashCode()`

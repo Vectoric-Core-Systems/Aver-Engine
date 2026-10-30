@@ -1,7 +1,7 @@
 #pragma once
-// Generic A* graphs with Godot's semantics (docs/plans/fabric/G5_PARITY.md, N1): an arbitrary point graph (AStar3D; AStar2D is the
+// Generic A* graphs: an arbitrary point graph (AStar3D; AStar2D is the
 // same graph with z = 0) and a rectangular grid (AStarGrid2D) with diagonal modes, heuristics, weights and jump-point search.
-// Scripts override the cost and the estimate, so both classes take callables; the defaults are Godot's.
+// Scripts override the cost and the estimate, so both classes take callables; the defaults are the usual ones.
 //
 // PURE. Ids are 64-bit for the graph and (x, y) cell pairs for the grid.
 #include "aver/core/Math.hpp"

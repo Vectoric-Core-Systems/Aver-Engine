@@ -1,4 +1,4 @@
-// AreaTest -- Godot's Area3D on Aver.Physics (physics_areas_abi.h, G2).
+// AreaTest -- areas on Aver.Physics (physics_areas_abi.h).
 //
 // Detection is the area's own query, so the claims worth testing are the ones Jolt's sensor events cannot make:
 //   1. a world with areas that do nothing simulates bit-identically; refusals and defaults,

@@ -399,6 +399,49 @@ foreach ($entry in ($sections.bin + $sections.scripting)) {
 }
 Note "copied $copied engine file(s)"
 
+# Extensions the project names. Each `EXTENSION <Name> [<version>]` line of the manifest (docs/EXTENSIONS.md) pulls in that extension's
+# extension.json and the files its runtimeFiles list, copied from <bin>\Extensions\<Name>\ to <out>\Extensions\<Name>\ at the same relative
+# paths: the game's loader finds them beside the executable. tools\ (conversion-time files) is never shipped, and a project that names an
+# extension the build tree does not have fails here rather than at run time. {platform} is this machine's platform directory.
+$platformDir = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'win-arm64' } else { 'win-x64' }
+$extCopied = 0
+$extSeen = @{}
+foreach ($raw in $manifestRawLines) {
+    if ($raw.Trim() -notmatch '^EXTENSION\s+(\S+)') { continue }
+    $extName = $Matches[1]
+    if ($extSeen.ContainsKey($extName)) { continue }
+    $extSeen[$extName] = $true
+    $extSrc = Join-Path (Join-Path $bin 'Extensions') $extName
+    $extManifest = Join-Path $extSrc 'extension.json'
+    if (-not (Test-Path -LiteralPath $extManifest)) { Fail "the project needs the extension '$extName', which is not in $extSrc"; continue }
+    $extJson = Get-Content -LiteralPath $extManifest -Raw | ConvertFrom-Json
+    $extRels = New-Object System.Collections.Generic.List[string]
+    $extRels.Add('extension.json')
+    foreach ($listed in @($extJson.runtimeFiles)) {
+        if (-not $listed) { continue }
+        $rel = ([string]$listed).Replace('{platform}', $platformDir).Replace('\', '/')
+        if ($rel.StartsWith('/') -or $rel -match '(^|/)\.\.(/|$)' -or $rel -match '^[A-Za-z]:') { Fail "extension '$extName' lists '$listed', which leaves its folder"; continue }
+        if ($rel -match '^tools(/|$)') { Fail "extension '$extName' lists '$listed' in runtimeFiles, but tools/ never ships"; continue }
+        $leaf = $rel.Substring($rel.LastIndexOf('/') + 1)
+        $relDir = if ($rel.Contains('/')) { $rel.Substring(0, $rel.LastIndexOf('/')) } else { '' }
+        $dirPath = if ($relDir) { Join-Path $extSrc $relDir } else { $extSrc }
+        $hits = @()
+        if (Test-Path -LiteralPath $dirPath) { $hits = @(Get-ChildItem -LiteralPath $dirPath -File -Filter $leaf) }
+        if ($hits.Count -eq 0) { Fail "extension '$extName' lists '$listed' but no such file is in $extSrc"; continue }
+        foreach ($h in $hits) { $extRels.Add(($(if ($relDir) { "$relDir/" } else { '' }) + $h.Name)) }
+    }
+    foreach ($rel in ($extRels | Select-Object -Unique)) {
+        if ($rel -match '\.(pdb|ilk|exp|lib)$') { continue }   # a `*` in runtimeFiles also sweeps up the linker's by-products
+        $src = Join-Path $extSrc $rel
+        $dst = Join-Path (Join-Path (Join-Path $outFull 'Extensions') $extName) $rel
+        $dstDir = Split-Path -Parent $dst
+        if (-not (Test-Path -LiteralPath $dstDir)) { New-Item -ItemType Directory -Path $dstDir -Force | Out-Null }
+        Copy-Item -LiteralPath $src -Destination $dst -Force
+        ++$extCopied
+    }
+}
+if ($extSeen.Count -gt 0) { Note "copied $extCopied file(s) of $($extSeen.Count) extension(s): $(($extSeen.Keys | Sort-Object) -join ', ')" }
+
 # Content, FILTERED. Dropping these changes the id of nothing, because ObjectIds hash paths and no
 # shipped asset references a .cs: sources, build intermediates and debug symbols only.
 $dropDirs  = @('\bin\', '\obj\', '\Source\')

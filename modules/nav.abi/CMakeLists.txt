@@ -1,5 +1,5 @@
-# Aver.Nav.Abi -- the plain-C seam onto polygon navigation (Godot NavigationServer3D parity), the navmesh baker and the A* graphs, so
-# Aver.Fabric drives them.
+# Aver.Nav.Abi -- the plain-C seam onto polygon navigation (a navigation server), the navmesh baker and the A* graphs, so
+# scripts and managed extensions drive them.
 #
 # SHARED because the .NET host P/Invokes it. It links Aver.Synapse (pure: no scene, no physics, no device) statically and nothing else, so a
 # managed test host loads it from a plain folder. The file is Aver.Nav.Abi and no managed assembly shares the name, so the shared

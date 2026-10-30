@@ -1250,8 +1250,8 @@ bool averFxFrame(float3 N, float3 wpos, float2 uv, out float3 T, out float3 B) {
 
 #ifdef AVER_MATERIAL_SRV
 #if AVER_MATX_PARALLAX
-// Heightmap parallax (Godot's heightmap_*): the heightmap is the second layer-1 slot (R channel). Offset mapping, or steep parallax with
-// heightmap_deep_parallax. heightmap_scale is in Godot's units (a depth of scale / 100 of the UV).
+// Heightmap parallax (heightmap_*): the heightmap is the second layer-1 slot (R channel). Offset mapping, or steep parallax with
+// heightmap_deep_parallax. heightmap_scale is in the source's units (a depth of scale / 100 of the UV).
 float averFxHeight(float2 uv, float2 dx, float2 dy) {
     const float h = gL1MetalRoughMap.SampleGrad(gMaterialSampler, uv, dx, dy).r;
     return averFxMode(AVER_FX_INVERT) ? 1.0 - h : h;
@@ -1315,13 +1315,13 @@ float3 averFxTriNormal(Texture2D tex, float3 p, float3 w, float3 N, float scale)
 #endif   // AVER_MATERIAL_SRV
 #endif   // AVER_MATX
 
-// G6 SH2: with converted Godot shaders registered the renderer defines AVER_GD_FX_STOCK, and the stock / BaseMaterial3D evaluator below is compiled even though
+// With embedded HLSL shaders registered the renderer defines AVER_CUSTOM_FX_STOCK, and the stock / BaseMaterial3D evaluator below is compiled even though
 // a graph is present, under the name averEvalMaterialFx; the generated averEvalMaterial calls it for a material with no graph (id 0), so those materials keep
-// their fx. Without AVER_GD_FX_STOCK nothing here changes.
-#if defined(AVER_GD_FX_STOCK) && defined(AVER_MATERIAL_GRAPH)
+// their fx. Without AVER_CUSTOM_FX_STOCK nothing here changes.
+#if defined(AVER_CUSTOM_FX_STOCK) && defined(AVER_MATERIAL_GRAPH)
 #define averEvalMaterial averEvalMaterialFx
 #endif
-#if !defined(AVER_MATERIAL_GRAPH) || defined(AVER_GD_FX_STOCK)
+#if !defined(AVER_MATERIAL_GRAPH) || defined(AVER_CUSTOM_FX_STOCK)
 #if AVER_MATX
 // The stock material with the variant's features. Same composition as the stock path below (maps, slope layers, factors, normal, composition, mask clip);
 // the features are added at the points they act on, in this order: UV transform, parallax, maps (triplanar replaces the bound base maps), detail, the
@@ -1449,7 +1449,7 @@ AverSurface averEvalMaterial(AverVertex v, AverLight l) {
 #endif
 #if AVER_MATX_RIM || AVER_MATX_BACKLIGHT
     {
-        // The sun's share of Godot's per-light rim and backlight terms, added as glow (local lights and ambient add none).
+        // The sun's share of the per-light rim and backlight terms, added as glow (local lights and ambient add none).
         const float3 sunE = l.radiance * l.visibility * (1.0 / PI);
         float3 add = float3(0.0, 0.0, 0.0);
 #if AVER_MATX_RIM
@@ -1491,7 +1491,7 @@ AverSurface averEvalMaterial(AverVertex v, AverLight l) {
 AverSurface averEvalMaterial(AverVertex v, AverLight l) {
     float2 uv = averSurfaceUV(v);
 #if AVER_MESH_EXTRA
-    // The vertex colour tints the albedo and the opacity when the material asks (Godot's vertex_color_use_as_albedo).
+    // The vertex colour tints the albedo and the opacity when the material asks (the vertex-colour-as-albedo option).
     AverAuthored a = averStockAuthoredAt(v, uv);
     if (gMaterialFlags & AVER_MAT_VERTEX_COLOR) { a.baseColor *= v.color.rgb; a.opacity *= v.color.a; }
     return averBuildSurface(v, l, a, uv);
@@ -1501,7 +1501,7 @@ AverSurface averEvalMaterial(AverVertex v, AverLight l) {
 }
 #endif   // AVER_MATX
 #endif
-#if defined(AVER_GD_FX_STOCK) && defined(AVER_MATERIAL_GRAPH)
+#if defined(AVER_CUSTOM_FX_STOCK) && defined(AVER_MATERIAL_GRAPH)
 #undef averEvalMaterial
 #endif
 

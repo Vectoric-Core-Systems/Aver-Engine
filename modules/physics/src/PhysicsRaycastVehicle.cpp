@@ -1,11 +1,11 @@
-// PhysicsRaycastVehicle.cpp -- the raycast vehicle (G2, Godot's VehicleBody3D): a dynamic chassis plus wheels that are rays, not bodies. The ABI is
-// physics_raycast_vehicle_abi.h; the model, its limits and the differences from Godot are in docs/physics/GODOT_VEHICLE.md.
+// PhysicsRaycastVehicle.cpp -- the raycast vehicle: a dynamic chassis plus wheels that are rays, not bodies. The ABI is
+// physics_raycast_vehicle_abi.h; the model and its limits are in docs/physics/RAYCAST_VEHICLE.md.
 // Written from the behaviour of a raycast-vehicle model (spring and damper at the contact, friction impulses limited by friction_slip, side force at a
-// roll-reduced height); no code from Bullet or Godot. All the arithmetic is in Jolt's SI space (metres, right-handed): the parameters are converted when
+// roll-reduced height); no code from Bullet or any other engine. All the arithmetic is in Jolt's SI space (metres, right-handed): the parameters are converted when
 // a step reads them, so the ABI keeps the engine's centimetres. Wheels are walked in handle order, so a replay is exact.
 #include "aver/physics/physics_raycast_vehicle_abi.h"
 #include "Convert.hpp"
-#include "PhysicsGodotFilter.hpp"
+#include "PhysicsLayerFilter.hpp"
 #include "PhysicsInternal.hpp"
 #include "PhysicsQueryFilters.hpp"
 #include "PhysicsRaycastVehicle.hpp"
@@ -144,12 +144,12 @@ float invEff(const Dyn& d, JPH::Vec3Arg p, JPH::Vec3Arg dir) {
     return d.invM + a.Cross(r).Dot(dir);
 }
 
-// Skips the chassis and sensors, and keeps bodies whose Godot layer bits meet the wheel's mask.
+// Skips the chassis and sensors, and keeps bodies whose layer bits meet the wheel's mask.
 class WheelRayFilter final : public JPH::BodyFilter {
 public:
     WheelRayFilter(const JPH::BodyID& chassis, uint32_t mask) : chassis_(chassis), mask_(mask) {}
     bool ShouldCollide(const JPH::BodyID& other) const override { return other != chassis_; }
-    bool ShouldCollideLocked(const JPH::Body& body) const override { return !body.IsSensor() && (mask_ & godotLayerBitsOf(body)) != 0u; }
+    bool ShouldCollideLocked(const JPH::Body& body) const override { return !body.IsSensor() && (mask_ & layerBitsOfBody(body)) != 0u; }
 private:
     JPH::BodyID chassis_;
     uint32_t mask_;

@@ -1,6 +1,6 @@
 #pragma once
 // A network endpoint (IPv4 or IPv6 plus a port), numeric parsing, name resolution and the local interface addresses.
-// Fabric G6 NET1 (docs/plans/fabric/G6_NETWORK.md).
+// G6 NET1 (docs/plans/fabric/G6_NETWORK.md).
 #include "aver/core/Types.hpp"
 
 #include <string>
@@ -38,7 +38,7 @@ struct Address {
 // Numeric text or a host name. family 0 = any, 4, 6. Blocks on the system resolver for a name; the numeric case never does.
 bool resolve(std::string_view host, int family, std::vector<Address>& out);
 
-// Every address of every interface that is up (Godot's IP.get_local_addresses), numeric text, loopback included.
+// Every address of every interface that is up (the local addresses), numeric text, loopback included.
 std::vector<std::string> localAddresses();
 
 } // namespace aver::net

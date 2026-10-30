@@ -15,7 +15,7 @@
 extern "C" {
 #endif
 
-/* 2: aver_fw_loc_tr / aver_fw_loc_tr_n (gettext messages from .po files, Godot's tr). */
+/* 2: aver_fw_loc_tr / aver_fw_loc_tr_n (gettext messages from .po files). */
 #define AVER_FW_LOC_ABI_VERSION 2
 AVER_FW_ABI int32_t aver_fw_loc_abi_version(void);
 
@@ -50,10 +50,10 @@ AVER_FW_ABI int32_t aver_fw_loc_has(const char* utf8Table, const char* utf8Key);
  * localization file, else 0. */
 AVER_FW_ABI int32_t aver_fw_loc_reload_path(const char* utf8AbsPath);
 /* "Table:Key" requested since init/clear that no culture in the chain had, unique, in first-hit order. */
-/* A message by its source text (Godot's tr), from the .po files of the culture chain: the translation, or the
+/* A message by its source text, from the .po files of the culture chain: the translation, or the
  * source text itself when no culture has one. `context` is msgctxt, null or "" for none. Same length/copy rule. (2) */
 AVER_FW_ABI int32_t aver_fw_loc_tr(const char* utf8Message, const char* utf8Context, char* out, int32_t cap);
-/* The plural form for count `n` (Godot's tr_n): msgstr[0] for n == 1, msgstr[1] otherwise; the source singular or
+/* The plural form for count `n`: msgstr[0] for n == 1, msgstr[1] otherwise; the source singular or
  * plural when untranslated. (2) */
 AVER_FW_ABI int32_t aver_fw_loc_tr_n(const char* utf8Message, const char* utf8Plural, int32_t n, const char* utf8Context,
                                      char* out, int32_t cap);

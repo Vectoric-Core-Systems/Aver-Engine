@@ -1,7 +1,7 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
-// ConfigFile: sections of typed key/value pairs in Godot's ConfigFile text format, for settings and small saves.
+// ConfigFile: sections of typed key/value pairs in an INI-style text format, for settings and small saves.
 
 using System.Globalization;
 using System.Text;
@@ -9,14 +9,14 @@ using Aver.Scene;
 
 namespace Aver.Framework;
 
-/// <summary>Sections of key/value pairs saved as text in Godot's ConfigFile format: <c>[section]</c> lines, then
+/// <summary>Sections of key/value pairs saved as text in an INI-style format: <c>[section]</c> lines, then
 /// <c>key=value</c> with strings quoted, numbers and <c>true</c>/<c>false</c> bare, and <c>Vector3(x, y, z)</c>.
 /// Values are string, long, double, bool or Vec3; ints and floats are stored as long and double.</summary>
 public sealed class ConfigFile
 {
     private readonly List<(string Name, List<(string Key, object Value)> Keys)> _sections = new();
 
-    /// <summary>Sets a value, adding the section and key if needed. A null value erases the key (as Godot does).</summary>
+    /// <summary>Sets a value, adding the section and key if needed. A null value erases the key.</summary>
     public void SetValue(string section, string key, object? value)
     {
         if (value is null) { EraseSectionKey(section, key); return; }

@@ -1,10 +1,10 @@
 #pragma once
-// Godot's tonemappers and the post-tonemap adjustments, as the CPU twin of color.hlsli's AVER_POST_TONEMAP_EXT block.
-// docs/plans/fabric/G4_RENDER.md, R3. The GPU runs the HLSL; this header is what the headless tests check against
-// reference values and what the composite-variant selection (postNeedsExtComposite) is decided by.
+// The extended tonemappers (linear, Reinhard, filmic, ACES, AgX, each with a white point) and the post-tonemap adjustments,
+// as the CPU twin of color.hlsli's AVER_POST_TONEMAP_EXT block. The GPU runs the HLSL; this header is what the headless tests
+// check against reference values and what the composite-variant selection (postNeedsExtComposite) is decided by.
 //
-// Modes ride PostSettings::tonemap and PostCB::misc.w. 0..2 are Aver's own curves and are untouched; Godot's
-// Environment.tonemap_mode m (0 linear, 1 Reinhard, 2 filmic, 3 ACES, 4 AgX) is mode 3 + m.
+// Modes ride PostSettings::tonemap and PostCB::misc.w. 0..2 are Aver's own curves and are untouched; the extended curve
+// with index m (0 linear, 1 Reinhard, 2 filmic, 3 ACES, 4 AgX) is mode 3 + m.
 #include "aver/core/Types.hpp"
 #include "aver/rhi/RHI.hpp"
 
@@ -15,19 +15,19 @@ namespace aver::rhi {
 
 enum TonemapMode : u32 {
     kTonemapAces = 0, kTonemapAcesFitted = 1, kTonemapAcesLuma = 2,   // Aver's own
-    kTonemapGodotLinear = 3, kTonemapGodotReinhard = 4, kTonemapGodotFilmic = 5, kTonemapGodotAces = 6, kTonemapGodotAgx = 7,
+    kTonemapExtLinear = 3, kTonemapExtReinhard = 4, kTonemapExtFilmic = 5, kTonemapExtAces = 6, kTonemapExtAgx = 7,
 };
 inline constexpr u32 kTonemapModeCount = 8;
 
-inline bool tonemapIsGodot(u32 mode) { return mode >= kTonemapGodotLinear; }
+inline bool tonemapIsExt(u32 mode) { return mode >= kTonemapExtLinear; }
 inline u32 clampTonemapMode(i64 mode) { return static_cast<u32>(std::clamp<i64>(mode, 0, kTonemapModeCount - 1)); }
-// Godot's Environment.tonemap_mode (0..4) as an Aver mode.
-inline u32 tonemapModeFromGodot(i64 godotMode) { return kTonemapGodotLinear + static_cast<u32>(std::clamp<i64>(godotMode, 0, 4)); }
+// An extended-curve index (0..4: linear, Reinhard, filmic, ACES, AgX) as an Aver mode.
+inline u32 tonemapModeFromExtIndex(i64 extIndex) { return kTonemapExtLinear + static_cast<u32>(std::clamp<i64>(extIndex, 0, 4)); }
 
-// True when the post chain needs the AVER_POST_TONEMAP_EXT composite: a Godot tonemapper, or any display-space adjustment off identity.
+// True when the post chain needs the AVER_POST_TONEMAP_EXT composite: an extended tonemapper, or any display-space adjustment off identity.
 // False is the default path: the ordinary composite pipelines, compiled with today's defines and nothing else.
 inline bool postNeedsExtComposite(const PostSettings& p) {
-    return tonemapIsGodot(p.tonemap) || p.adjustBrightness != 1.0f || p.adjustContrast != 1.0f || p.adjustSaturation != 1.0f;
+    return tonemapIsExt(p.tonemap) || p.adjustBrightness != 1.0f || p.adjustContrast != 1.0f || p.adjustSaturation != 1.0f;
 }
 
 // The project's RENDER.TONEMAP* keys onto `p` (each < 0 = unstated and left alone). `mode` is applied only when `modeAllowed`
@@ -46,9 +46,9 @@ namespace tmap {
 
 struct Vec3f { f32 v[3]; };
 
-// ---- Godot's curves (servers/rendering/renderer_rd/shaders/effects/tonemap.glsl, read for behaviour; written out here) ----
+// ---- the extended curves (written from their published definitions) ----
 
-// tonemap_mode 0. The result is clipped by the display encode.
+// Extended index 0. The result is clipped by the display encode.
 inline Vec3f linear(Vec3f c, f32 /*white*/) { return c; }
 
 // Extended Reinhard: c * (1 + c / white^2) / (1 + c).
@@ -74,7 +74,7 @@ inline Vec3f filmic(Vec3f c, f32 white) {
 
 // ACES (Stephen Hill's RRT+ODT fit) with an exposure bias of 1.8 in the input matrix; the white point goes through the
 // same curve (scaled by the bias) and divides the result.
-inline Vec3f acesGodot(Vec3f c, f32 white) {
+inline Vec3f acesExt(Vec3f c, f32 white) {
     constexpr f32 bias = 1.8f;
     constexpr f32 A = 0.0245786f, B = 0.000090537f, C = 0.983729f, D = 0.4329510f, E = 0.238081f;
     static constexpr f32 in[3][3] = {{0.59719f, 0.35458f, 0.04823f}, {0.07600f, 0.90834f, 0.01566f}, {0.02840f, 0.13383f, 0.83777f}};
@@ -123,19 +123,19 @@ inline Vec3f agx(Vec3f c, f32 /*white*/) {
 }
 
 // The tonemapper `mode` (3..7) on linear, exposed radiance. Negative input is floored at zero except by AgX, which floors it itself.
-inline Vec3f godot(u32 mode, Vec3f c, f32 white) {
+inline Vec3f ext(u32 mode, Vec3f c, f32 white) {
     white = std::max(white, 1e-3f);
     for (int i = 0; i < 3; ++i) c.v[i] = std::max(c.v[i], 0.0f);
     switch (mode) {
-        case kTonemapGodotReinhard: return reinhard(c, white);
-        case kTonemapGodotFilmic:   return filmic(c, white);
-        case kTonemapGodotAces:     return acesGodot(c, white);
-        case kTonemapGodotAgx:      return agx(c, white);
-        default:                    return linear(c, white);
+        case kTonemapExtReinhard: return reinhard(c, white);
+        case kTonemapExtFilmic:   return filmic(c, white);
+        case kTonemapExtAces:     return acesExt(c, white);
+        case kTonemapExtAgx:      return agx(c, white);
+        default:                  return linear(c, white);
     }
 }
 
-// Godot's brightness / contrast / saturation (apply_bcs), on the display-space colour after the tonemap: brightness scales,
+// Brightness / contrast / saturation, on the display-space colour after the tonemap: brightness scales,
 // contrast pivots on 0.5, saturation pivots on the channel mean.
 inline Vec3f adjust(Vec3f c, f32 brightness, f32 contrast, f32 saturation) {
     for (int i = 0; i < 3; ++i) c.v[i] *= brightness;

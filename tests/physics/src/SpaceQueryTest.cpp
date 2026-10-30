@@ -1,4 +1,4 @@
-// SpaceQueryTest -- Godot's PhysicsDirectSpaceState3D and body_test_motion on the plain-C ABI (G2): the ray with explicit options, intersect_shape,
+// SpaceQueryTest -- space-state queries and body test motion on the plain-C ABI: the ray with explicit options, intersect_shape,
 // collide_shape, get_rest_info, cast_motion and aver_phys_body_test_motion.
 //
 // EVERY SCENE IS BUILT FROM BODIES THAT NEVER STEP, so each expected number is arithmetic on the positions below. Scenes are off-axis (walls on +X,
@@ -398,7 +398,7 @@ static void testMotionFloorAndCorner() {
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     AVER_INFO("==================================================");
-    AVER_INFO("Godot space-state queries and body_test_motion");
+    AVER_INFO("space-state queries and body_test_motion");
 
     testRay();
     testRayBackFacesAndInside();

@@ -134,7 +134,7 @@ int32_t aver_panim_track_add(int32_t clip, int32_t type, int32_t at) {
     if (!c || type < 0 || type > int(OcPropTrackType::Animation)) return -1;
     OcPropTrack t;
     t.type = static_cast<OcPropTrackType>(type);
-    // Godot's default interpolation for a transform track is linear; a method track has none.
+    // The default interpolation for a transform track is linear; a method track has none.
     const usize pos = (at < 0 || usize(at) >= c->propTracks.size()) ? c->propTracks.size() : usize(at);
     c->propTracks.insert(c->propTracks.begin() + isize(pos), std::move(t));
     return int(pos);
@@ -197,7 +197,7 @@ int32_t aver_panim_key_insert(int32_t clip, int32_t track, double time, const do
     key.time = time;
     key.transition = transition;
     key.value = readValue(v5, s);
-    // An existing key at the same time is replaced, as Godot's track_insert_key does.
+    // An existing key at the same time is replaced.
     usize i = 0;
     while (i < t->keys.size() && t->keys[i].time < time - 1e-5) ++i;
     if (i < t->keys.size() && std::fabs(t->keys[i].time - time) <= 1e-5) { t->keys[i] = std::move(key); return int(i); }

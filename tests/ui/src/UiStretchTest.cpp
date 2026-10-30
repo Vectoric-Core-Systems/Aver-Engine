@@ -1,4 +1,4 @@
-// Headless test for the stretch / letterbox arithmetic (G5 U1): Godot's display/window/stretch rules for every mode and aspect.
+// Headless test for the stretch / letterbox arithmetic: the stretch rules for every mode and aspect.
 #include "aver/core/Log.hpp"
 #include "aver/ui/UiStretch.hpp"
 

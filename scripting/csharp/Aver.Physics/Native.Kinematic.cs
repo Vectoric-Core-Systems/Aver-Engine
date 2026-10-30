@@ -2,7 +2,7 @@
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 //
-// P/Invokes for physics_kinematic_abi.h: the kinematic-body character controller with Godot's move_and_slide semantics. A further part of Native, so
+// P/Invokes for physics_kinematic_abi.h: the kinematic-body character controller with move_and_slide semantics. A further part of Native, so
 // the parity test in tests/abi checks every name and parameter name below against the header; they are copied from it character for character.
 // KinematicCharacter.cs is the public surface.
 using System.Runtime.InteropServices;

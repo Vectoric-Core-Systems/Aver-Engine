@@ -1,5 +1,5 @@
-// PhysicsAreas.cpp -- per-body contact monitoring and Godot-style Areas on top of Jolt (G2). Rationale, the sleep rule and what snapshots do
-// with all of it are in docs/physics/GODOT_AREAS.md; the ABI is physics_areas_abi.h.
+// PhysicsAreas.cpp -- per-body contact monitoring and Areas on top of Jolt. Rationale, the sleep rule and what snapshots do
+// with all of it are in docs/physics/AREAS.md; the ABI is physics_areas_abi.h.
 //
 // CONTACT MONITOR. The contact listener (workers) appends raw Added/Removed sub-shape contacts that touch a monitored body to a locked
 // list. At the end of each fixed step the game thread folds them, sorted, into a pair table (one entry per body pair, a sub-shape count),
@@ -9,7 +9,7 @@
 // bodies are seen; overrides are re-queried at the start of each step from present positions, so they carry no state across a restore.
 #include "PhysicsAreas.hpp"
 
-#include "PhysicsGodotFilter.hpp"
+#include "PhysicsLayerFilter.hpp"
 
 #include "aver/physics/physics_areas_abi.h"
 #include "aver/core/ErrorCodes.hpp"
@@ -348,7 +348,7 @@ public:
             const auto ai = st_.areas.find(hi->second);
             return ai != st_.areas.end() && ai->second.monitorable && (mask_ & areaLayerBits(ai->second, b)) != 0u;
         }
-        return (mask_ & godotLayerBitsOf(b)) != 0u;
+        return (mask_ & layerBitsOfBody(b)) != 0u;
     }
 private:
     JPH::BodyID self_;

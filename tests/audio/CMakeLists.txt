@@ -34,8 +34,8 @@ add_executable(AudioStreamTest src/AudioStreamTest.cpp)
 target_link_libraries(AudioStreamTest PRIVATE Aver.Audio Aver.Core Aver.Platform)
 set_target_properties(AudioStreamTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-# AudioBusTest / AudioSpatialTest -- G5 S1 (Godot audio parity, docs/AUDIO.md "Bus graph"): the AudioEffect* set against reference responses,
-# the bus graph's routing rules (send order, solo chains, bypass, sidechain, layouts) and Godot's AudioStreamPlayer3D maths, all offline.
+# AudioBusTest / AudioSpatialTest -- (docs/AUDIO.md "Bus graph"): the AudioEffect* set against reference responses,
+# the bus graph's routing rules (send order, solo chains, bypass, sidechain, layouts) and the 3D player maths, all offline.
 add_executable(AudioBusTest src/AudioBusTest.cpp)
 target_link_libraries(AudioBusTest PRIVATE Aver.Audio Aver.Core Aver.Platform)
 set_target_properties(AudioBusTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

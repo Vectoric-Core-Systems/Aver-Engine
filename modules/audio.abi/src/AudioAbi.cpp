@@ -114,7 +114,7 @@ aver::audio::Effect* effectOf(int32_t id) {
     return g_started && id > 0 ? mixerRef().graph().effect(static_cast<aver::u32>(id)) : nullptr;
 }
 
-// The PlayDesc the *_ex calls share. spatial18 non-null makes a Godot-spatial positional voice at (x, y, z).
+// The PlayDesc the *_ex calls share. spatial18 non-null makes a spatial-model positional voice at (x, y, z).
 aver::audio::PlayDesc exDesc(float volume, float pitch, int32_t looping, int32_t bus, int32_t graphBus, float startSeconds, int32_t paused,
                              float x, float y, float z, const float* spatial18) {
     aver::audio::PlayDesc d;
@@ -128,7 +128,7 @@ aver::audio::PlayDesc exDesc(float volume, float pitch, int32_t looping, int32_t
     d.position[0] = x; d.position[1] = y; d.position[2] = z;
     if (spatial18) {
         d.positional = true;
-        d.godotSpatial = true;
+        d.spatialModel = true;
         d.spatial = aver::audio::Spatial3D::unpack(spatial18);
     }
     return d;
@@ -469,7 +469,7 @@ void aver_audio_set_reverb(float wet, float decaySeconds, float damping) {
 int32_t aver_audio_stream_underruns(void) { return g_started ? static_cast<int32_t>(mixerRef().streamUnderruns()) : 0; }
 int32_t aver_audio_active_streams(void)   { return g_started ? static_cast<int32_t>(mixerRef().activeStreams()) : 0; }
 
-// ---- bus graph, effects, Godot-style players (G5 S1) ----
+// ---- bus graph, effects, spatial-model players ----
 
 int32_t aver_audio_offline_init(int32_t sampleRate, int32_t channels) {
     if (g_started) return g_isOffline ? 1 : 0;
@@ -549,9 +549,9 @@ int32_t aver_audio_bus_layout_text(uint8_t* out, int32_t cap) {
     return g_started ? copyOut(aver::fmt::writeOcBusLayout(mixerRef().graph().exportLayout()), out, cap) : 0;
 }
 
-int32_t aver_audio_effect_add(int32_t bus, const char* godotClass, int32_t at) {
-    if (!g_started || !godotClass) return 0;
-    const aver::audio::EffectKind k = aver::audio::Effect::kindFromClassName(godotClass);
+int32_t aver_audio_effect_add(int32_t bus, const char* effectClass, int32_t at) {
+    if (!g_started || !effectClass) return 0;
+    const aver::audio::EffectKind k = aver::audio::Effect::kindFromClassName(effectClass);
     if (k == aver::audio::EffectKind::Count) return 0;
     return static_cast<int32_t>(mixerRef().graph().addEffect(bus, k, at));
 }
@@ -588,7 +588,7 @@ float aver_audio_effect_get_param(int32_t id, const char* name) {
 }
 int32_t aver_audio_effect_class(int32_t id, uint8_t* out, int32_t cap) {
     aver::audio::Effect* fx = effectOf(id);
-    return fx ? copyOut(aver::audio::Effect::godotClassName(fx->kind()), out, cap) : 0;
+    return fx ? copyOut(aver::audio::Effect::className(fx->kind()), out, cap) : 0;
 }
 int32_t aver_audio_effect_param_count(int32_t id) { aver::audio::Effect* fx = effectOf(id); return fx ? static_cast<int32_t>(fx->paramCount()) : 0; }
 int32_t aver_audio_effect_param_info(int32_t id, int32_t index, uint8_t* nameOut, int32_t cap, float* def, float* lo, float* hi) {

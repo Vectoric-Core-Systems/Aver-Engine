@@ -8,7 +8,7 @@
 
 namespace aver::fmt {
 
-// One surface of a script-built mesh (Godot's ArrayMesh surface, SurfaceTool commit, an ImmediateMesh surface), already in engine space and winding.
+// One surface of a script-built mesh (an array-mesh surface, a surface-tool commit, an immediate-mesh surface), already in engine space and winding.
 struct RuntimeSurface {
     std::vector<f32> pos;            // 3 per vertex (required)
     std::vector<f32> nrm;            // 3 per vertex, or empty = smooth normals are computed

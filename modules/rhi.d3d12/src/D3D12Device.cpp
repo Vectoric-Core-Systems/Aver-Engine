@@ -1611,7 +1611,7 @@ private:
     ComPtr<ID3D12PipelineState> bloomPrefilterPso_, bloomDownPso_, bloomUpPso_;
     // Composite permutations: [bloom on][auto-exposure on].
     ComPtr<ID3D12PipelineState> compositePso_[2][2];
-    // The AVER_POST_TONEMAP_EXT twins (Godot tonemappers, display adjustments): built the first frame postNeedsExtComposite()
+    // The AVER_POST_TONEMAP_EXT twins (extended tonemappers, display adjustments): built the first frame postNeedsExtComposite()
     // asks for one, never otherwise. compositeExtFailed_ makes a failed build fall back to compositePso_ without retrying every frame.
     ComPtr<ID3D12PipelineState> compositeExtPso_[2][2];
     bool compositeExtFailed_ = false;
@@ -5159,7 +5159,7 @@ bool D3D12Device::createPostPipelines() {
 }
 
 // The composite pipeline for this frame: the ordinary permutation, or its AVER_POST_TONEMAP_EXT twin when the settings ask for a
-// Godot tonemapper or a display adjustment (built here, once). The default path never reaches the second branch.
+// extended tonemapper or a display adjustment (built here, once). The default path never reaches the second branch.
 ID3D12PipelineState* D3D12Device::compositePsoFor(bool bloom, bool autoExp) {
     const int b = bloom ? 1 : 0, a = autoExp ? 1 : 0;
     ID3D12PipelineState* plain = compositePso_[b][a].Get();
@@ -5174,7 +5174,7 @@ ID3D12PipelineState* D3D12Device::compositePsoFor(bool bloom, bool autoExp) {
     if (FAILED(shaderCompiler().compile(src, "PostVS", "vs_5_1", &vs)) ||
         FAILED(shaderCompiler().compile(src, "PSComposite", "ps_5_1", &ps, nullptr, defs.c_str()))) {
         compositeExtFailed_ = true;
-        AVER_WARN("[RHI.D3D12] the Godot tonemapper composite failed to compile; the project's ordinary tonemapper is used");
+        AVER_WARN("[RHI.D3D12] the extended tonemapper composite failed to compile; the project's ordinary tonemapper is used");
         return plain;
     }
     D3D12_GRAPHICS_PIPELINE_STATE_DESC d{};
@@ -5193,7 +5193,7 @@ ID3D12PipelineState* D3D12Device::compositePsoFor(bool bloom, bool autoExp) {
         compositeExtFailed_ = true;
         return plain;
     }
-    AVER_INFO("[RHI.D3D12] Godot tonemapper composite built (bloom {}, auto-exposure {})", b, a);
+    AVER_INFO("[RHI.D3D12] extended tonemapper composite built (bloom {}, auto-exposure {})", b, a);
     return compositeExtPso_[b][a].Get();
 }
 

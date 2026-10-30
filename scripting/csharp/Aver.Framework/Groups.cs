@@ -1,7 +1,7 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
-// Groups: named groups of entities (Godot's add_to_group / get_nodes_in_group / call_group), kept natively so a
+// Groups: named groups of entities, kept natively so a
 // level can carry them (COMPONENT Groups names=...).
 
 using System.Runtime.InteropServices;
@@ -42,7 +42,7 @@ public static class Groups
     }
 
     /// <summary>Calls <paramref name="action"/> on every actor of type <typeparamref name="T"/> in the group, in tree
-    /// order (Godot's call_group). Members that are not such an actor are skipped. Returns how many it called.</summary>
+    /// order. Members that are not such an actor are skipped. Returns how many it called.</summary>
     public static int Call<T>(string group, Action<T> action) where T : AverActor
     {
         int n = 0;
@@ -54,7 +54,7 @@ public static class Groups
 
 public abstract partial class AverActor
 {
-    /// <summary>Puts this actor in a named group (Godot's add_to_group).</summary>
+    /// <summary>Puts this actor in a named group.</summary>
     public bool AddToGroup(string group) => Groups.Add(Self, group);
 
     /// <summary>Takes this actor out of a named group.</summary>

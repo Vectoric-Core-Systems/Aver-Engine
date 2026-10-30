@@ -1022,7 +1022,7 @@ static void testSceneAbiErrors(World& world) {
 // CLight's rect/IES/cookie fields and scene::gatherLights: what the renderer is handed.
 static void testLights(World& world) {
     AVER_INFO("=== lights ===");
-    check(sizeof(CLight) == 104, "CLight is 104 bytes with the G4 R2 Godot parameter block and the G4 R4 masks");
+    check(sizeof(CLight) == 104, "CLight is 104 bytes with the parametric block and the masks");
 
     // A rect light at (100, 200, 300), turned a quarter turn about Z.
     Transform xf;
@@ -1068,32 +1068,32 @@ static void testLights(World& world) {
         check(w.widthCm == 200.0f && w.heightCm == kLightDefaultRectCm, "a zero height reads as the 100 cm default");
         check(w.sourceRadiusCm == kLightDefaultRadiusCm, "a zero radius reads as 1 cm");
         check(!w.castShadows && w.iesProfile == 0x1234 && w.cookie == 0x5678, "flags and asset ids carry through");
-        // G4 R2: a light that never heard of Godot's block reads as the Aver curves with the neutral multipliers.
-        check(!w.godot && !w.negative && w.attenuation == 0.0f && w.specularScale == 1.0f && w.shadowBias == 0.0f && w.fadeLengthCm == 0.0f,
-              "an untouched light has no Godot block: Aver curves, specular 1, no bias override, no fade");
+        // A light that never heard of the parametric block reads as the Aver curves with the neutral multipliers.
+        check(!w.parametric && !w.negative && w.attenuation == 0.0f && w.specularScale == 1.0f && w.shadowBias == 0.0f && w.fadeLengthCm == 0.0f,
+              "an untouched light has no parametric block: Aver curves, specular 1, no bias override, no fade");
     }
 
-    // G4 R2: Godot's block, resolved. 0 is a value for attenuation and specular once kLightGodot is set; the spot curve defaults to 1.
+    // The parametric block, resolved. 0 is a value for attenuation and specular once kLightParametric is set; the spot curve defaults to 1.
     {
         Transform xg;
         xg.position = {5, 6, 7};
-        const Entity g = world.create("godot-light", kInvalidEntity, xg);
+        const Entity g = world.create("parametric-light", kInvalidEntity, xg);
         CLight* gc = static_cast<CLight*>(world.addComponent(g, kComponentLight));
         *gc = CLight{};
         gc->intensityLux = 1000.0f;
-        gc->flags = kLightGodot | kLightNegative;
+        gc->flags = kLightParametric | kLightNegative;
         gc->attenuation = 0.0f;
         gc->specularScale = 0.0f;
         gc->shadowBias = 0.3f; gc->shadowNormalBias = 4.0f;
         gc->fadeBeginCm = 4000.0f; gc->fadeLengthCm = 1000.0f; gc->fadeShadowCm = 5000.0f;
         WorldLight wg;
-        check(makeWorldLight(*gc, world.worldMatrix(g), wg), "a Godot-flagged light gathers");
-        check(wg.godot && wg.negative && wg.attenuation == 0.0f && wg.specularScale == 0.0f && wg.spotAttenuation == 1.0f,
-              "zero attenuation and zero specular are values under kLightGodot; the angle attenuation defaults to 1");
+        check(makeWorldLight(*gc, world.worldMatrix(g), wg), "a parametric-flagged light gathers");
+        check(wg.parametric && wg.negative && wg.attenuation == 0.0f && wg.specularScale == 0.0f && wg.spotAttenuation == 1.0f,
+              "zero attenuation and zero specular are values under kLightParametric; the angle attenuation defaults to 1");
         check(wg.shadowBias == 0.3f && wg.shadowNormalBias == 4.0f && wg.fadeBeginCm == 4000.0f && wg.fadeLengthCm == 1000.0f && wg.fadeShadowCm == 5000.0f,
               "bias and fade values carry through");
         gc->flags = 0;
-        check(makeWorldLight(*gc, world.worldMatrix(g), wg) && !wg.godot && wg.specularScale == 1.0f && wg.attenuation == 0.0f,
+        check(makeWorldLight(*gc, world.worldMatrix(g), wg) && !wg.parametric && wg.specularScale == 1.0f && wg.attenuation == 0.0f,
               "without the flag the stored attenuation and specular are not read");
         world.destroy(g);
     }

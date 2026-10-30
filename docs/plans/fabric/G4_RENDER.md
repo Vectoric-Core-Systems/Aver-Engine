@@ -192,7 +192,7 @@ one file. The constants `AVER_RL_MAX_LIGHTS 32`, `AVER_RL_LIGHT_VECS 7`, `AVER_R
 
 One light is seven `float4`s (`voxi_locallights_raster.hlsli` header comment is the layout): position and emitter radius; colour times the irradiance at 1 m (engine
 units, distance fade applied) and range; axis and spot flag; decay exponent, cos outer, cos inner (Aver curve) or 1 / angle attenuation (Godot), flags; specular scale
-and shadow weight; first tile, tile count, constant bias (cm), normal bias (texels); world texel size per unit distance, filter radius, near, far. Flags: `kFlagGodot` 1,
+and shadow weight; first tile, tile count, constant bias (cm), normal bias (texels); world texel size per unit distance, filter radius, near, far. Flags: `kFlagParametric` (was `kFlagGodot`) 1,
 `kFlagNegative` 2, `kFlagShadowed` 4, `kFlagCube` 8.
 
 **The atlas is bound to t19**, the slot the ray-driven local-light history uses. The path is live only in frames PSRayDriven and the staged ray-driven passes do not run, so nothing reads that SRV
@@ -226,7 +226,7 @@ Lines are from Godot's `scene_forward_lights_inc.glsl` and `light_storage.cpp` (
 - spot cone: `scos = max(cos, cos(spot_angle)); rim = max(1e-4, (1 - scos) / (1 - cos(spot_angle))); f = 1 - rim^(1 / spot_angle_attenuation)` (`rl::coneFactor`).
 - energy: `light_energy * pi` for omni, spot and directional alike (non-physical units); diffuse carries `1/pi`.
 - specular: `specular_amount = light_specular * 2`, multiplying only the specular terms.
-- Aver lights (no `kLightGodot` flag) keep today's law exactly: `(1 m / d)^2 * (1 - (d/R)^4)^2` and the smoothstep cone between the inner and outer cosines, decay 2.
+- Aver lights (no `kLightParametric` flag, was `kLightGodot`) keep today's law exactly: `(1 m / d)^2 * (1 - (d/R)^4)^2` and the smoothstep cone between the inner and outer cosines, decay 2.
 - Not implemented: Godot's `light_projector`, `shadow_blur` (read as `light_size`), `omni_shadow_mode` (always cube), `shadow_reverse_cull_face`, per-light cull masks, a baked mode, `light_indirect_energy`
   (local lights give no indirect light on either path), `light_volumetric_fog_energy`.
 
@@ -240,7 +240,7 @@ and its lights are irradiance in engine radiance units, one unit being `kLuminan
 - a white-ish albedo 0.8 under an energy-1 omni at 1 m (decay 1, window 1 - 1/range) therefore returns `0.8 * (1 - 1/range)` in both engines, before Aver's exposure and tonemap, which are Aver's own.
 
 This replaces the placeholder `Light3D.LuxPerEnergy = 100000` and the converter's `kLuxPerEnergy = 100000` (3.0 vs pi: 4.7 percent brighter, and the lamps used lux where they need candela at 1 m). The constant
-lives in `aver/formats/GodotLight.hpp` (`kLuxPerEnergy`, `kCandelaPerEnergy`, plus the two documented curves as functions), is repeated in `Light3D` (`LuxPerEnergy`, `CandelaPerEnergy`) and the converter takes it
+lives in `aver/formats/godot/GodotLight.hpp` (moved out of core with the extension; RasterLightsTest keeps a reference copy) (`kLuxPerEnergy`, `kCandelaPerEnergy`, plus the two documented curves as functions), is repeated in `Light3D` (`LuxPerEnergy`, `CandelaPerEnergy`) and the converter takes it
 from the header; `RasterLightsTest`, `FabricLightsTest` and the managed "lights: calibration ..." test each pin it to 104719.755. A real Godot render was not available to compare pixel values: the calibration
 is derived from the documented formulas and Godot's source above, not measured. The ray-traced path reads the same candela with Aver's inverse square, so an energy-1 omni is the same at 1 m and
 differs with distance (Godot's default decay 1 is flatter): rated approximated.
@@ -270,7 +270,7 @@ images that do not use these lights do not change (the cascade defect itself is 
 - The shader was compiled to SPIR-V and, in the same test, to DXIL (`ps_6_0` for the plain rasters as the D3D12 backend does, `ps_6_5` for the ray-traced ones) by DXC with no device. `VoxiShaderCompileTest`, `PrecompiledShaderTest` and `ShaderIncludeResolveTest` create a device (WARP or the adapter) and were not run; the lazily built R2 variants are not among what `buildAllVariants` compiles anyway.
 - Glass, water and other blended draws, mesh-shader draws, skinned and soft-body meshes' shadow casting beyond what the existing shadow pipelines already do, rectangle lights, IES and cookies on the raster path.
 - The `LIGHT` record of the `.ocworld` and the editor's light panel do not carry the Godot block (`CLight::attenuation`, `spotAttenuation`, `specularScale`, `shadowBias`, `shadowNormalBias`, `fadeBeginCm`, `fadeLengthCm`,
-  `fadeShadowCm`, flags `kLightGodot` / `kLightNegative`). They are set at run time through the component field ABI (`Aver.Fabric` does) and an editor save of a level drops them for plain lights; a converted level re-pushes them from its Props.
+  `fadeShadowCm`, flags `kLightParametric` / `kLightNegative`). They are set at run time through the component field ABI (`Aver.Fabric` does) and an editor save of a level drops them for plain lights; a converted level re-pushes them from its Props.
 - Local lights give no indirect light on either path.
 - The ray-traced path ignores `light_specular`, `light_negative`, the curves, the fade and the shadow biases.
 
@@ -297,7 +297,7 @@ Status: code, converter, runtime and headless tests done; nothing here has run o
 | Project keys | `RENDER.TONEMAP 0..7`, `RENDER.TONEMAPWHITE`, `RENDER.ADJUSTBRIGHTNESS`, `RENDER.ADJUSTCONTRAST`, `RENDER.ADJUSTSATURATION` (`OcProject`, applied by `rhi::applyProjectTonemapKeys` in both hosts; the editor's Project Settings > Post page shows them) |
 | Level selection | post-volume keys `tonemap` (now 0..7), `tonemapwhite`, `adjbrightness`, `adjcontrast`, `adjsaturation`; the converter writes one infinite volume named `WorldEnvironment` |
 | Panorama sky | `modules/formats/.../PanoramaSky.hpp`: a Radiance `.hdr` reader and `fitSkyDome` (zenith, horizon, ground albedo, blend exponent by elevation) |
-| Godot parameter mapping | `modules/formats/.../GodotEnvironment.hpp` (tonemap offset, energy scaling, fog and height-fog units, depth of field) |
+| Godot parameter mapping | `modules/formats.godot/include/aver/formats/godot/GodotEnvironment.hpp` (tonemap offset, energy scaling, fog and height-fog units, depth of field) |
 | Converter | `readEnvironment` in `tools/fabric/FabricScene.cpp`, `postKeysOf`, `FabricProject.cpp`, `environmentObject` in `FabricResources.cpp` |
 | Runtime | `scripting/csharp/Aver.Fabric/Nodes/Environment3D.cs`: `WorldEnvironment`, `Environment`, `Sky`, `SkyMaterial`, `ProceduralSkyMaterial`, `PhysicalSkyMaterial`, `PanoramaSkyMaterial`, `CameraAttributes`, `CameraAttributesPractical`, `CameraAttributesPhysical`, `EnvironmentMapping` |
 
@@ -972,11 +972,11 @@ is in the `[Voxi]` prefix and appears in `Output Log` / the log file.
 ### R3
 
 Back out with `RENDER.TONEMAP 1` (Aver's default) and no `RENDER.ADJUST*` keys (the ordinary composite is then the only one built) and report which step differed. The
-post chain runs on both backends; the new composite is logged once when built: `[RHI.D3D12] Godot tonemapper composite built (bloom B, auto-exposure A)` /
-`[RHI.Vulkan] Godot tonemapper composite built (lut L, bloom B, auto-exposure A)`; `... composite failed to compile/build; the project's ordinary tonemapper is used` is the failure line.
+post chain runs on both backends; the new composite is logged once when built: `[RHI.D3D12] extended tonemapper composite built (bloom B, auto-exposure A)` /
+`[RHI.Vulkan] extended tonemapper composite built (lut L, bloom B, auto-exposure A)`; `... composite failed to compile/build; the project's ordinary tonemapper is used` is the failure line.
 Console: `set post.tonemap N` (0..7), the editor's Project Settings > Rendering > Post page (tone curve, tone white, brightness, contrast, saturation).
 
-0. Defaults unchanged, first: open any existing project or level (NewSponza_Night, NeonDistrict) with its own settings. It must look exactly as before and the log must NOT contain "Godot tonemapper composite built".
+0. Defaults unchanged, first: open any existing project or level (NewSponza_Night, NeonDistrict) with its own settings. It must look exactly as before and the log must NOT contain "extended tonemapper composite built".
 1. Convert the fixture: `AverAssetC fabric tests/fabric/data/EnvGame <out> --scenes-only` (the panorama scene needs a `sky.hdr` beside it; skip `Maps/panorama` for this step). Open `<out>/EnvGame/EnvGame.ocproject`, load
    `Maps/main.ocworld`. The project states `RENDER.TONEMAP 7` (AgX), `RENDER.TONEMAPWHITE 6`, `RENDER.AUTOEXPOSURE 0`, `RENDER.BLOOM 0.7` and `RENDER.ADJUST*`; the log shows the composite built line. Correct: the image is
    tonemapped with no eye adaptation (it does not slowly re-expose when you look at the sky); AgX looks softer in the highlights and keeps saturated colours from clipping to white earlier than the ACES default does.

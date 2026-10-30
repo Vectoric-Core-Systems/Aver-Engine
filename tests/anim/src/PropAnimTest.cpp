@@ -1,4 +1,4 @@
-// Property-track animation with Godot's AnimationPlayer semantics (modules/anim PropAnim / PropPlayer, the .ocanim PROP chunk).
+// Property-track animation with animation-player semantics (modules/anim PropAnim / PropPlayer, the .ocanim PROP chunk).
 //
 // Every property here belongs to a clock or to arithmetic on keys: which key a playhead met first, how a loop point splits a frame,
 // what weight an outgoing clip has, which signal comes before which. None of it shows in a screenshot of one frame, so it is checked as
@@ -684,7 +684,7 @@ static void testFormat() {
     OcAnimation back3;
     check(fmt::parseOcAnim(b1.data(), b1.size(), back3, &why) && back3.propTracks.empty(), "an old file has no property tracks");
 
-    // A property animation with no tracks (a Godot Animation can be only a length) round-trips.
+    // A property animation with no tracks (an animation can be only a length) round-trips.
     OcAnimation empty;
     empty.duration = 3.5f;
     empty.propClip = true;

@@ -39,9 +39,62 @@ internal static class NativeResolver
     private static IntPtr Resolve(string libraryName, Assembly assembly, DllImportSearchPath? searchPath)
     {
         if (!libraryName.StartsWith("Aver.", StringComparison.Ordinal)) return IntPtr.Zero;
+        // An extension's own library comes first: <extension>/native/<platform>/, beside the <extension>/managed/ folder the calling assembly sits in.
+        IntPtr own = ExtensionNative(libraryName, assembly);
+        if (own != IntPtr.Zero) return own;
         string? dir = ExecutableDirectory();
         if (dir is null) return IntPtr.Zero;
-        return NativeLibrary.TryLoad(Path.Combine(dir, NativeFileName(libraryName)), out IntPtr handle) ? handle : IntPtr.Zero;
+        if (NativeLibrary.TryLoad(Path.Combine(dir, NativeFileName(libraryName)), out IntPtr handle)) return handle;
+        // The assembly was loaded from somewhere else (the bridge's folder): any installed extension's native folder for this platform.
+        return InstalledExtensionNative(dir, libraryName);
+    }
+
+    /// <summary>The platform folder name an extension's native library sits under: win-x64, linux-x64, osx-arm64 ...</summary>
+    internal static string PlatformDirName() =>
+        (OperatingSystem.IsWindows() ? "win" : OperatingSystem.IsMacOS() ? "osx" : "linux") + "-" +
+        (RuntimeInformation.ProcessArchitecture == Architecture.Arm64 ? "arm64" : "x64");
+
+    /// <summary>An extension's library file name: &lt;name&gt;.dll, &lt;name&gt;.so or &lt;name&gt;.dylib (no "lib" prefix).</summary>
+    internal static string ExtensionFileName(string libraryName) =>
+        libraryName + (OperatingSystem.IsWindows() ? ".dll" : OperatingSystem.IsMacOS() ? ".dylib" : ".so");
+
+    private static IntPtr TryLoadFrom(string folder, string libraryName)
+    {
+        if (NativeLibrary.TryLoad(Path.Combine(folder, ExtensionFileName(libraryName)), out IntPtr handle)) return handle;
+        return NativeLibrary.TryLoad(Path.Combine(folder, NativeFileName(libraryName)), out handle) ? handle : IntPtr.Zero;
+    }
+
+    private static IntPtr ExtensionNative(string libraryName, Assembly assembly)
+    {
+        try
+        {
+            string location = assembly.Location;
+            string? managed = string.IsNullOrEmpty(location) ? null : Path.GetDirectoryName(location);
+            string? root = managed is null ? null : Path.GetDirectoryName(managed);
+            return root is null ? IntPtr.Zero : TryLoadFrom(Path.Combine(root, "native", PlatformDirName()), libraryName);
+        }
+        catch (Exception ex) when (ex is IOException or ArgumentException or UnauthorizedAccessException)
+        {
+            return IntPtr.Zero;
+        }
+    }
+
+    private static IntPtr InstalledExtensionNative(string exeDir, string libraryName)
+    {
+        try
+        {
+            string root = Path.Combine(exeDir, "Extensions");
+            if (!Directory.Exists(root)) return IntPtr.Zero;
+            foreach (string ext in Directory.EnumerateDirectories(root))
+            {
+                IntPtr h = TryLoadFrom(Path.Combine(ext, "native", PlatformDirName()), libraryName);
+                if (h != IntPtr.Zero) return h;
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+        }
+        return IntPtr.Zero;
     }
 
     /// <summary>CMake's SHARED naming: Aver.Scene.dll, libAver.Scene.so, libAver.Scene.dylib.</summary>

@@ -17,6 +17,13 @@ inline constexpr int kOcProjectVersion = 1;
 int physicsSettingCount();
 const char* physicsSettingName(int index);   // nullptr when out of range
 
+// EXTENSION <Name> [<version>]: an engine extension (docs/EXTENSIONS.md) the project needs, such as the Fabric Connector for a converted
+// Godot project. The version is the one the converter that wrote the project saw; it may be empty.
+struct ProjectExtension {
+    std::string name;
+    std::string version;
+};
+
 struct ProjectDesc {
     int version = 1;                    // OCPROJECT <n>
     std::string name;                   // NAME
@@ -42,6 +49,8 @@ struct ProjectDesc {
     // LOCALE.DEFAULT: the culture every missing translation falls back to (BCP-47-like tag). Empty = unstated = "en".
     std::string localeDefault;          // LOCALE.DEFAULT
     std::string author;                 // AUTHOR (free text, rest of line)
+    // EXTENSION lines, in file order (one per extension). A name repeated keeps its first line.
+    std::vector<ProjectExtension> extensions;
 
     // RENDER.*, all -1 when the manifest did not state them.
     int giQuality       = -1;   // RENDER.GI            0=Off 1=Low 2=Medium 3=High 4=Epic
@@ -72,8 +81,8 @@ struct ProjectDesc {
     // 1 on (also in raster-primary ray-traced frames), 2 off. RENDER.LOCALSHADOWS: shadow maps for them, 0/1 (default 1).
     int localRaster        = -1; // RENDER.LOCALRASTER      0/1/2 (engine default 0)
     int localShadows       = -1; // RENDER.LOCALSHADOWS     0/1 (engine default 1)
-    // G4 R8: RENDER.VOLFOG switches Voxi's volumetric fog (light shafts; the home of Godot FogVolumes) on or off; RENDER.VOLFOGDENSITY is its uniform
-    // medium in extinction per CENTIMETRE (engine default 0.00002). Off by default; the Fabric converter writes both for a Godot project with volumetric fog.
+    // RENDER.VOLFOG switches Voxi's volumetric fog (light shafts; the home of fog volumes) on or off; RENDER.VOLFOGDENSITY is its uniform
+    // medium in extinction per CENTIMETRE (engine default 0.00002). Off by default; importers write both for a project with volumetric fog.
     int volFog             = -1;    // RENDER.VOLFOG         0/1 (engine default 0)
     f32 volFogDensity      = -1.0f; // RENDER.VOLFOGDENSITY  per cm, [0, 0.01]
     // G4 R5, sub-viewports (render-to-texture views): the cost guard. RENDER.SUBVIEWPORTS = how many views may be live at once (0 turns the feature
@@ -155,10 +164,10 @@ struct ProjectDesc {
     f32 postExposure     = -1.0f; // RENDER.EXPOSURE      linear pre-tonemap multiplier; < 0 = unstated
     f32 postBloom        = -1.0f; // RENDER.BLOOM         bloom intensity; 0 = no bloom pass at all
     int postAutoExposure = -1;    // RENDER.AUTOEXPOSURE  0/1; when on, EXPOSURE is compensation on it
-    // RENDER.TONEMAP: curve selector (Narkowicz/Hill=0, Narkowicz+ACES=1, acesLuma=2; 3..7 Godot's linear, Reinhard,
+    // RENDER.TONEMAP: curve selector (Narkowicz/Hill=0, Narkowicz+ACES=1, acesLuma=2; 3..7 the extended linear, Reinhard,
     // filmic, ACES, AgX: rhi/Tonemap.hpp).
     int postTonemap      = -1;    // RENDER.TONEMAP  0..7; -1 keeps PostSettings' own default
-    // Godot-style tonemap white point and display-space adjustments (all identity when unstated; < 0 = unstated).
+    // Tonemap white point and display-space adjustments (all identity when unstated; < 0 = unstated).
     f32 postTonemapWhite    = -1.0f;   // RENDER.TONEMAPWHITE
     f32 postAdjustBrightness = -1.0f;  // RENDER.ADJUSTBRIGHTNESS
     f32 postAdjustContrast   = -1.0f;  // RENDER.ADJUSTCONTRAST
@@ -248,11 +257,11 @@ struct ProjectDesc {
     // PHYSICS.SHAPECACHE: 1 = keep mesh and heightfield collision shapes' BVHs on disk (Saved/DerivedDataCache/Physics),
     // 0 = do not; -1 = unstated (the default, which is off until the cache has been measured on the real levels).
     int physShapeCache        = -1;
-    // PHYSICS.INTERPOLATION: 1 = draw simulated bodies between the last two fixed steps (Godot's physics
+    // PHYSICS.INTERPOLATION: 1 = draw simulated bodies between the last two fixed steps (physics
     // interpolation), 0 = at the last step; -1 = unstated (off).
     int physInterpolation     = -1;
-    // PHYSICS.COMBINE: how two materials combine in a contact. 0 = jolt (friction sqrt(f1 f2), restitution max), 1 = godot (friction
-    // min or max when rough, restitution a clamped sum); -1 = unstated (jolt).
+    // PHYSICS.COMBINE: how two materials combine in a contact. 0 = jolt (friction sqrt(f1 f2), restitution max), 1 = material (friction
+    // min or max when rough, restitution a clamped sum; the old spelling "godot" is still read); -1 = unstated (jolt).
     int physCombine           = -1;
     // PHYSICS.<NAME> for the live solver settings of physics_world_abi.h (PHYSICS.VELOCITYSTEPS,
     // PHYSICS.SLEEPTIME ...): only the ones the file states, in file order, the name in the setting table's own
@@ -272,15 +281,15 @@ struct ProjectDesc {
     f32  masterVolume = 1.0f;                  // AUDIO.MASTER
     f32  busVolume[4] = {1.0f, 1.0f, 1.0f, 1.0f};   // AUDIO.BUS <sfx> <music> <voice> <ui>
     // AUDIO.BUSLAYOUT: the content path of an .ocbus bus layout (aver/formats/OcBusLayout.hpp). Empty = unstated: no bus graph is set up and the
-    // four legacy buses are all there is. Aver.Fabric's AudioServer applies it the first time a script touches the bus graph.
+    // four legacy buses are all there is. a managed extension's audio server applies it the first time a script touches the bus graph.
     std::string audioBusLayout;                // AUDIO.BUSLAYOUT
     // AUDIO.SPEAKERS <2|6|8>: the output channel layout the project asks for (stereo, 5.1, 7.1). 0 = unstated = stereo, the default; the device
     // still decides at open (a device that cannot play it is mixed in stereo). AUDIO.BINAURAL <0|1>: headphone mode (docs/AUDIO.md section 14).
     int  audioSpeakers = 0;                    // AUDIO.SPEAKERS
     bool audioBinaural = false;                // AUDIO.BINAURAL
 
-    // ---- UI.* -- the Control runtime's project settings (Aver.Fabric; docs/plans/fabric/G5_PARITY.md U1). Empty / negative = unstated: today's behaviour.
-    std::string uiTheme;                       // UI.THEME <content path>: the project's .octheme (Godot's gui/theme/custom)
+    // ---- UI.* -- the Control runtime's project settings (docs/plans/fabric/G5_PARITY.md U1). Empty / negative = unstated: today's behaviour.
+    std::string uiTheme;                       // UI.THEME <content path>: the project's .octheme
     std::string uiStretch;                     // UI.STRETCH disabled|canvas_items|viewport (display/window/stretch/mode)
     std::string uiAspect;                      // UI.ASPECT ignore|keep|keep_width|keep_height|expand
     std::string uiStretchScaleMode;            // UI.STRETCHSCALEMODE fractional|integer

@@ -1,5 +1,5 @@
-// PhysicsRaycastVehicle.hpp -- the raycast vehicle (G2, Godot's VehicleBody3D). SRC-LOCAL like PhysicsInternal.hpp. The ABI is
-// physics_raycast_vehicle_abi.h; the model and its limits are in docs/physics/GODOT_VEHICLE.md. Every hook is a pointer test when nothing uses it.
+// PhysicsRaycastVehicle.hpp -- the raycast vehicle. SRC-LOCAL like PhysicsInternal.hpp. The ABI is
+// physics_raycast_vehicle_abi.h; the model and its limits are in docs/physics/RAYCAST_VEHICLE.md. Every hook is a pointer test when nothing uses it.
 #pragma once
 #include "PhysicsInternal.hpp"
 

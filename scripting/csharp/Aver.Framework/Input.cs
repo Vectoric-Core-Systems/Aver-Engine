@@ -41,14 +41,14 @@ public static class Input
     /// <summary>True while <paramref name="k"/> is held.</summary>
     public static bool GetKey(Key k) => Fw.aver_fw_input_key((int)k) != 0;
 
-    /// <summary>Stops the input event being routed from going any further (Godot's set_input_as_handled). Call it from
+    /// <summary>Stops the input event being routed from going any further. Call it from
     /// OnInput or OnUnhandledInput.</summary>
     public static void SetInputAsHandled()
     {
         if (InputRouter.Current is InputEvent ev) ev.Handled = true;
     }
 
-    /// <summary>Routes a made-up event through the actors next frame, as if it were real input (Godot's parse_input_event).
+    /// <summary>Routes a made-up event through the actors next frame, as if it were real input.
     /// Polled state (GetKey, actions) is unchanged.</summary>
     public static void ParseInputEvent(InputEvent ev) => InputEventSource.Inject(ev);
 

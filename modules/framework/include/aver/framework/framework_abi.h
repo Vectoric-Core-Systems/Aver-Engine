@@ -36,7 +36,7 @@ extern "C" {
  * Every minor bump below is additive only: a host built against an older minor still links and
  * runs unchanged against a newer header. */
 #define AVER_FW_ABI_VERSION_MAJOR 2
-/* Major 2: Godot tick order. The three tick groups became two passes (AVER_FW_TICK_PHYSICS once per
+/* Major 2: the physics-then-process tick order. The three tick groups became two passes (AVER_FW_TICK_PHYSICS once per
  * fixed physics step, AVER_FW_TICK_PROCESS once per frame) and aver_fw_class_set_tick is gone;
  * aver_fw_tree_order / aver_fw_tree_revision were added. Major 1's minors, for the record:
  * 1: aver_fw_set_view_entity / aver_fw_view_entity.
@@ -64,10 +64,10 @@ extern "C" {
  *    event_count/event_at; aver_fw_input_scheme_trigger_count/trigger_spec/modifier_count/
  *    modifier_spec) -- see NAMED ACTIONS and INPUT SCHEME below.
  * 12: AVER_FW_PUMP_FRAME, the tick_all value for the per-frame pumps that also run while paused. */
-/* 2.1: aver_fw_spawn_batch_begin / aver_fw_spawn_batch_end (Godot's _ready order for a batch of spawns).
+/* 2.1: aver_fw_spawn_batch_begin / aver_fw_spawn_batch_end (the ready order for a batch of spawns).
  * 2.2: aver_fw_adopt (an existing entity -- a prefab node -- becomes an actor).
  * 2.3: aver_fw_props_* (per-instance [Editable] values, a level's COMPONENT Props record).
- * 2.4: aver_fw_group_* (named groups, Godot's add_to_group; a level's COMPONENT Groups record).
+ * 2.4: aver_fw_group_* (named groups; a level's COMPONENT Groups record).
  * 2.5: aver_fw_set_project / aver_fw_project_dir / content_dir / user_dir / is_editor (res:// and user://).
  * 2.6: aver_fw_debug_line* (script debug drawing) and aver_fw_request_vsync / aver_fw_take_vsync_request.
  * 2.7: level travel (aver_fw_request_travel / take_travel_request / travel_begin / travel_end) and persistent
@@ -105,7 +105,7 @@ typedef int32_t aver_field;    /* a dense scene field id; carries its component 
 #define AVER_FW_CLASS_ABSTRACT      0x0040
 #define AVER_FW_CLASS_TICK_IN_EDITOR 0x0080
 
-/* Tick passes, Godot's order — pinned to Aver.Framework's TickPass (Enums.cs). PHYSICS runs
+/* Tick passes, in this order — pinned to Aver.Framework's TickPass (Enums.cs). PHYSICS runs
  * OnPhysicsTick once per fixed physics step, before that step; PROCESS runs OnTick once per frame,
  * after the frame's steps. Each walks its actors by priority, then tree order (aver_fw_tree_order). */
 #define AVER_FW_TICK_PHYSICS      0
@@ -128,7 +128,7 @@ AVER_FW_ABI int64_t aver_fw_tree_revision(void);
 
 /* A spawn batch (a level or a scene being instanced): every actor aver_fw_spawn creates inside it binds
  * at once but begins play when the outermost batch ends, children before their parent and siblings in
- * the order they were added (Godot's _ready order), so a parent's OnBeginPlay sees its children ready.
+ * the order they were added (the ready order), so a parent's OnBeginPlay sees its children ready.
  * Parent the batch's entities before ending it. An actor destroyed inside the batch never begins.
  * Batches nest; end returns how many actors began (0 for an inner end). (2.1) */
 AVER_FW_ABI void    aver_fw_spawn_batch_begin(void);
@@ -143,7 +143,7 @@ AVER_FW_ABI int32_t aver_fw_adopt(int32_t entity, int32_t c);
  * that class seals (a level's prefabs load before its scripts). 0 until then. (2.2) */
 AVER_FW_ABI int32_t aver_fw_adopt_by_name(int32_t entity, const char* className);
 
-/* Per-instance property values (Godot's exported values): text by field name, set by a host from a level's
+/* Per-instance property values (exported values): text by field name, set by a host from a level's
  * COMPONENT Props record or by the editor, read by the scripting bridge, which writes them into the actor's
  * [Editable] fields before OnBeginPlay. Names compare case-insensitively; set replaces, an empty value is kept.
  * Dropped when the entity is destroyed. Strings returned stay valid until that entity's props change. (2.3) */
@@ -153,7 +153,7 @@ AVER_FW_ABI const char* aver_fw_props_name(int32_t entity, int32_t index);    /*
 AVER_FW_ABI const char* aver_fw_props_value(int32_t entity, int32_t index);   /* "" when out of range */
 AVER_FW_ABI int32_t     aver_fw_props_clear(int32_t entity);
 
-/* Named groups (Godot's add_to_group): any entity, actor or not, in any number of groups, by case-sensitive
+/* Named groups: any entity, actor or not, in any number of groups, by case-sensitive
  * name. Members are kept in the order they joined; a destroyed entity leaves every group. Strings returned stay
  * valid until that group or entity's membership changes. (2.4) */
 AVER_FW_ABI int32_t     aver_fw_group_add(int32_t entity, const char* group);      /* 1 if added, 0 if already in or bad */
@@ -187,11 +187,11 @@ AVER_FW_ABI void         aver_fw_debug_lines_advance(float realDt);
 AVER_FW_ABI void    aver_fw_request_vsync(int32_t on);
 AVER_FW_ABI int32_t aver_fw_take_vsync_request(void);
 
-/* Level travel (Godot's change_scene_to_file). A script requests it; the host takes the request between frames,
+/* Level travel. A script requests it; the host takes the request between frames,
  * calls travel_begin (every actor but the GameInstance and the persistent ones ends with AVER_FW_END_TRAVEL; a
  * persistent actor is lifted to a root first so the level's teardown cannot take it), unloads the level, loads
  * the new one, spawns its placed actors, then calls travel_end, which spawns the GameMode, controller and pawn
- * as begin_play does. A persistent actor (Godot's autoload) lives until the session ends. take returns the
+ * as begin_play does. A persistent actor (an autoload) lives until the session ends. take returns the
  * path's length (0: none) and writes it NUL-terminated into out. (2.7) */
 AVER_FW_ABI void    aver_fw_request_travel(const char* levelPath);
 AVER_FW_ABI int32_t aver_fw_take_travel_request(char* out, int32_t cap);

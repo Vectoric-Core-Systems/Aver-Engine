@@ -1,10 +1,10 @@
-// PhysicsSpaceState.cpp -- Godot's PhysicsDirectSpaceState3D and body_test_motion on Jolt (G2): a ray with explicit back-face / from-inside /
+// PhysicsSpaceState.cpp -- space-state queries and body test motion on Jolt: a ray with explicit back-face / from-inside /
 // bodies / areas options, intersect_shape, collide_shape, get_rest_info, cast_motion, and the motion test move_and_collide is built on.
-// The ABI and its semantics are in physics_queries_abi.h; the rationale in docs/physics/GODOT_QUERIES.md. Algorithms are written from the
+// The ABI and its semantics are in physics_queries_abi.h; the rationale in docs/physics/SPACE_QUERIES.md. Algorithms are written from the
 // documented behaviour only. Every existing query is untouched: this file adds entry points and reads, it changes no simulation state.
 #include "aver/physics/physics_queries_abi.h"
 #include "Convert.hpp"
-#include "PhysicsGodotFilter.hpp"
+#include "PhysicsLayerFilter.hpp"
 #include "PhysicsInternal.hpp"
 #include "PhysicsQueryFilters.hpp"
 #include "PhysicsShapeTable.hpp"
@@ -83,7 +83,7 @@ bool isExcluded(const std::vector<JPH::BodyID>& ids, const JPH::BodyID& id) {
     });
 }
 
-// Godot's query filter: the 32-bit mask against the body's layer bits, bodies versus areas, and the exclude array.
+// The query filter: the 32-bit mask against the body's layer bits, bodies versus areas, and the exclude array.
 class SpaceFilter final : public JPH::BodyFilter {
 public:
     SpaceFilter(uint32_t mask, int32_t flags, std::vector<JPH::BodyID> exclude)
@@ -91,7 +91,7 @@ public:
           exclude_(std::move(exclude)) {}
     bool ShouldCollide(const JPH::BodyID& id) const override { return !isExcluded(exclude_, id); }
     bool ShouldCollideLocked(const JPH::Body& b) const override {
-        if ((mask_ & godotLayerBitsOf(b)) == 0u) return false;
+        if ((mask_ & layerBitsOfBody(b)) == 0u) return false;
         return b.IsSensor() ? areas_ : bodies_;
     }
 private:
@@ -100,7 +100,7 @@ private:
     std::vector<JPH::BodyID> exclude_;
 };
 
-// The tested body's own filtering: the simulation's group rule (Godot layer/mask, exceptions, joint exclusion) plus the exclude array.
+// The tested body's own filtering: the simulation's group rule (layer/mask, exceptions, joint exclusion) plus the exclude array.
 class MotionFilter final : public JPH::BodyFilter {
 public:
     MotionFilter(const JPH::BodyID& self, const JPH::CollisionGroup& group, int32_t flags, std::vector<JPH::BodyID> exclude)

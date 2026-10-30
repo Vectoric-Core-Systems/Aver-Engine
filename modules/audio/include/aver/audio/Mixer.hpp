@@ -41,9 +41,9 @@ struct PlayDesc {
     FadeCurve   fadeCurve = FadeCurve::EqualPower;
     f32         reverbSend = -1.0f;                   // < 0: 1 on Sfx and Voice, 0 on Music and Ui
 
-    // ---- the bus graph and Godot's 3D player (opt-in; the defaults are the legacy behaviour) ----
+    // ---- the bus graph and the 3D player model (opt-in; the defaults are the legacy behaviour) ----
     i32         graphBus = -1;                        // >= 0: sum into this BusGraph bus instead of a legacy bus (needs graph().setActive)
-    bool        godotSpatial = false;                 // positional with Godot's AudioStreamPlayer3D model (needs `positional`); `attenuation` is ignored
+    bool        spatialModel = false;                 // positional with the 3D player model (Spatial.hpp; needs `positional`); `attenuation` is ignored
     Spatial3D   spatial{};
     f32         startSeconds = 0.0f;                  // where in the sound to start
     bool        paused = false;
@@ -156,14 +156,14 @@ public:
     // The impulse-response effect on the bus graph: builds effect `effectId`'s impulse from a sound in this mixer (see Effect::setImpulse).
     bool setEffectImpulse(u32 effectId, SoundHandle ir);
 
-    // ---- game thread: the bus graph, Godot-spatial voices, pause, position, live rings ----
+    // ---- game thread: the bus graph, spatial-model voices, pause, position, live rings ----
     //
     // The graph (docs/AUDIO.md). It does nothing until graph().setActive(true); voices with a graphBus are silent before that.
     BusGraph& graph() { return graph_; }
     const BusGraph& graph() const { return graph_; }
     // Re-routes a live voice to a graph bus (an out-of-range index plays on Master).
     void setVoiceGraphBus(VoiceHandle v, i32 bus);
-    // Replaces a Godot-spatial voice's parameters (and makes it one).
+    // Replaces a spatial-model voice's parameters (and makes it one).
     void setVoiceSpatial(VoiceHandle v, const Spatial3D& s);
     // A paused voice fades to silence within one block and holds its position.
     void setVoicePaused(VoiceHandle v, bool paused);
@@ -173,7 +173,7 @@ public:
     f64  voiceLengthSeconds(VoiceHandle v) const;
     // The listener's velocity, cm/s, for Doppler.
     void setListenerVelocity(f32 x, f32 y, f32 z);
-    // Godot's AudioServer.playback_speed_scale: multiplies every voice's rate (1 = unchanged).
+    // The global playback speed scale: multiplies every voice's rate (1 = unchanged).
     void setPlaybackSpeedScale(f32 s) { speedScale_.store(s > 0.0f ? s : 1.0f, std::memory_order_relaxed); }
     f32  playbackSpeedScale() const { return speedScale_.load(std::memory_order_relaxed); }
 
@@ -183,7 +183,7 @@ public:
     u32  pushLive(VoiceHandle v, const f32* frames, u32 count);
     u32  liveFree(VoiceHandle v) const;
     void liveFlush(VoiceHandle v);
-    // Under-runs of a stream or live voice (Godot's get_skips).
+    // Under-runs of a stream or live voice (skips).
     u32  voiceUnderruns(VoiceHandle v) const;
 
     // ---- game thread: real-time sound graphs (docs/AUDIO.md section 13) ----
@@ -332,9 +332,9 @@ private:
         BinauralState bin;
         bool binReady = false;
 
-        // The bus graph, Godot's 3D model, pause and position (all opt-in; the defaults leave a voice exactly as it was).
+        // The bus graph, the 3D model, pause and position (all opt-in; the defaults leave a voice exactly as it was).
         std::atomic<i32>  graphBus{-1};
-        std::atomic<bool> godot3d{false};
+        std::atomic<bool> spatial3d{false};
         std::atomic<f32>  sp[Spatial3D::kFloats];
         std::atomic<bool> paused{false};
         std::atomic<f64>  posPub{0.0};       // source frames played (statics: the cursor; streams: start frame + consumed)
@@ -390,13 +390,13 @@ private:
 
     // Adds one voice into the block (outCh interleaved channels). Returns false when the voice has ended.
     bool renderVoice(Voice& vo, f32* out, u32 frames, u32 outCh);
-    // The pair of gains this voice contributes, after distance, panning and its bus. For a Godot-spatial voice `shelf` receives the
+    // The pair of gains this voice contributes, after distance, panning and its bus. For a spatial-model voice `shelf` receives the
     // attenuation filter's linear gain (1 = none) and `dopplerPitch` the pitch multiplier.
     void voiceGains(const Voice& vo, f32& outL, f32& outR, f32* shelf = nullptr, f32* dopplerPitch = nullptr) const;
     // Where a positional voice is for surround and binaural output: its level before any panning (distance, volume, bus, fade; no back
     // attenuation, the speakers and the head model express front and back), the direction in the listener's frame (azimuth 0 ahead, positive
     // right; elevation positive up), the horizontal share of that direction (0 overhead or inside the head, 1 on the horizon) and how much of
-    // it a Godot-spatial voice's panning strength lets through (1 for a plain voice).
+    // it a spatial-model voice's panning strength lets through (1 for a plain voice).
     struct Direction { f32 level = 0.0f, azimuth = 0.0f, elevation = 0.0f, horizontal = 1.0f, panScale = 1.0f; };
     Direction voiceDirection(const Voice& vo) const;
     // One chunk of the mix: the legacy voices into `out`, graph voices into their buses when graphOn, the reverb return, the graph output.

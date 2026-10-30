@@ -2,7 +2,7 @@
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 //
-// P/Invokes for physics_areas_abi.h: per-body contact monitoring and Godot-style Areas. A further part of Native, so the parity test in
+// P/Invokes for physics_areas_abi.h: per-body contact monitoring and Areas. A further part of Native, so the parity test in
 // tests/abi checks every name and parameter name below against the header; they are copied from it character for character.
 // Areas.cs is the public surface.
 using System.Runtime.InteropServices;

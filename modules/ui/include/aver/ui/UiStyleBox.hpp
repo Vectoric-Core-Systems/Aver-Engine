@@ -1,9 +1,8 @@
 #pragma once
-// Style boxes (docs/plans/fabric/G5_PARITY.md, U1): the panel, button and frame backgrounds of a converted Godot
-// Control tree. A style box is a plain value; drawing one is CPU tessellation into triangles that go to the draw list
+// Style boxes: the panel, button and frame backgrounds of a control tree. A style box is a plain value; drawing one is CPU tessellation into triangles that go to the draw list
 // through UiDrawList::addMesh, so Aver.Render.UI draws them with the shader it already has (no new pipeline).
 //
-// Four kinds, Godot's: Flat (background, per-side borders, per-corner radii, shadow, anti-aliasing, skew), Texture
+// Four kinds: Flat (background, per-side borders, per-corner radii, shadow, anti-aliasing, skew), Texture
 // (9-patch with stretch / tile / tile-fit axes and a region), Line, Empty. Colours are STRAIGHT 0xAABBGGRR; sizes are
 // pixels. Nothing here touches the widget tree's own drawing.
 #include "aver/ui/UiDrawList.hpp"
@@ -16,16 +15,16 @@ namespace aver::ui {
 enum class UiStyleBoxKind : i32 { Empty = 0, Flat = 1, Texture = 2, Line = 3 };
 
 // UiStyleBox::flags
-inline constexpr u32 kSbDrawCenter = 1;    // default on in Godot: both Flat and Texture fill the middle
+inline constexpr u32 kSbDrawCenter = 1;    // default on: both Flat and Texture fill the middle
 inline constexpr u32 kSbAntiAlias  = 2;
 inline constexpr u32 kSbBorderBlend = 4;   // Flat: colours blend round corners instead of splitting at the 45-degree point
 inline constexpr u32 kSbVertical   = 8;    // Line
 
-// How a 9-patch axis fills its middle (Godot's AxisStretchMode).
+// How a 9-patch axis fills its middle.
 enum class UiAxisStretch : i32 { Stretch = 0, Tile = 1, TileFit = 2 };
 
 // One struct for all four kinds so the C seam can pass it by pointer (aver_ui_stylebox_*). Every field is 32 bits
-// except `texture`; the layout is mirrored by scripting/csharp/Aver.Fabric/Nodes/UiNative.cs and pinned by
+// except `texture`; the layout is mirrored by extensions/FabricConnector/managed/Aver.Fabric/Nodes/UiNative.cs and pinned by
 // UiStyleAbiTest. Fields a kind does not use are ignored.
 struct UiStyleBox {
     u64 texture = 0;                     // Texture: the engine texture handle (0 = none, nothing is drawn)
@@ -34,14 +33,14 @@ struct UiStyleBox {
     f32 contentL = -1, contentT = -1, contentR = -1, contentB = -1;   // < 0 = unset (the kind's default margin)
     f32 expandL = 0, expandT = 0, expandR = 0, expandB = 0;           // the box is drawn this much larger
     // Flat
-    u32 bgColor = 0xFF999999;            // Godot's default (0.6, 0.6, 0.6); the border default is (0.8, 0.8, 0.8)
+    u32 bgColor = 0xFF999999;            // default grey (0.6, 0.6, 0.6); the border default is (0.8, 0.8, 0.8)
     u32 borderColorL = 0xFFCCCCCC, borderColorT = 0xFFCCCCCC, borderColorR = 0xFFCCCCCC, borderColorB = 0xFFCCCCCC;
     f32 borderL = 0, borderT = 0, borderR = 0, borderB = 0;
     f32 radiusTL = 0, radiusTR = 0, radiusBR = 0, radiusBL = 0;
     i32 cornerDetail = 8;                // segments per rounded corner (1..)
     f32 aaSize = 1.0f;                   // width of the anti-aliasing fringe
     f32 skewX = 0, skewY = 0;            // total lean in pixels across the box
-    u32 shadowColor = 0x99000000;        // Godot's default (0, 0, 0, 0.6); size 0 draws no shadow
+    u32 shadowColor = 0x99000000;        // default (0, 0, 0, 0.6); size 0 draws no shadow
     f32 shadowSize = 0;
     f32 shadowOffX = 0, shadowOffY = 0;
     // Texture
@@ -74,7 +73,7 @@ struct UiPatchSlice {
 // The rectangle the box is actually drawn over: `rect` grown by the expand margins.
 UiRect uiStyleBoxDrawRect(const UiStyleBox& sb, const UiRect& rect);
 
-// Godot's content margins: the explicit one, else the kind's default (Flat: the border width; Texture: the texture
+// Content margins: the explicit one, else the kind's default (Flat: the border width; Texture: the texture
 // margin; Line and Empty: 0).
 UiInsets uiStyleBoxMargins(const UiStyleBox& sb);
 

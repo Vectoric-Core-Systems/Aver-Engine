@@ -9,7 +9,7 @@ aver_add_module(Aver.Synapse
     src/Nav.cpp
     src/NavBake.cpp
     # Polygon navigation maps (regions, links, layers, costs, funnel paths), their geometry baker, avoidance on the ORCA core, and
-    # the generic A* graphs of Godot parity (docs/plans/fabric/G5_PARITY.md N1). Pure for the same reason Nav.cpp is.
+    # the generic A* graphs. Pure for the same reason Nav.cpp is.
     src/NavMesh.cpp
     src/NavMeshAvoid.cpp
     src/NavMeshBake.cpp

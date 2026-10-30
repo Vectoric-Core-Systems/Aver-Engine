@@ -30,7 +30,7 @@ int main() {
         UiStyleBox sb;
         aver_ui_stylebox_defaults(AVER_UI_SB_FLAT, &sb);
         check(sb.kind == AVER_UI_SB_FLAT && (sb.flags & kSbDrawCenter) && (sb.flags & kSbAntiAlias) && sb.cornerDetail == 8 && sb.bgColor == 0xFF999999 && sb.borderColorL == 0xFFCCCCCC,
-              "flat: Godot's defaults (draw_center and anti_aliasing on, detail 8, background grey 0.6, border grey 0.8)");
+              "flat: the defaults (draw_center and anti_aliasing on, detail 8, background grey 0.6, border grey 0.8)");
         aver_ui_stylebox_defaults(AVER_UI_SB_LINE, &sb);
         check(sb.kind == AVER_UI_SB_LINE && sb.thickness == 1 && sb.growBegin == 1, "line: thickness 1, grow 1");
         aver_ui_stylebox_defaults(99, &sb);

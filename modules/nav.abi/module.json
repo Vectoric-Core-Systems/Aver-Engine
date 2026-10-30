@@ -3,7 +3,7 @@
   "name": "Aver.Nav.Abi",
   "dir": "nav.abi",
   "displayName": "Polygon navigation ABI",
-  "description": "Plain-C seam onto polygon navigation maps, the navmesh baker and the A* graphs so Aver.Fabric's navigation nodes drive them.",
+  "description": "Plain-C seam onto polygon navigation maps, the navmesh baker and the A* graphs so scripts and managed extensions can drive them.",
   "category": "Gameplay",
   "option": null,
   "required": true,

@@ -46,7 +46,7 @@ typedef struct AvActorVTable {
     aver_fw_vt_end_play_fn   endPlay;          /* per actor of this class, before teardown              */
 } AvActorVTable;
 
-/* 3: enter_tree (Godot's _enter_tree, parent first, before any OnBeginPlay of a spawn batch). */
+/* 3: enter_tree (parent first, before any OnBeginPlay of a spawn batch). */
 #define AVER_FW_DISPATCH_VERSION 3
 
 /* 1 == an instance of the named class now exists on the managed side and is bound to entity `e`. */

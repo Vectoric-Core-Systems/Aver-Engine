@@ -1,7 +1,7 @@
 #pragma once
 // BodyPoseSync: a simulated (dynamic) rigid body moves its entity. After every fixed step each dynamic CRigidBody's
 // pose is written to its entity, so OnPhysicsTick sees where the bodies are; with physics interpolation on
-// (PHYSICS.INTERPOLATION, Godot's physics/common/physics_interpolation) the entity is drawn between the last two
+// (PHYSICS.INTERPOLATION) the entity is drawn between the last two
 // steps by the step alpha, and put back on the real pose before the next frame's gameplay reads it.
 // Header-only: GameTick drives it for both hosts.
 #include "aver/core/Math.hpp"

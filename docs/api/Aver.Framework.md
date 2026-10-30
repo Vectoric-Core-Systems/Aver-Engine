@@ -2,7 +2,7 @@
 
 # Aver.Framework public API
 
-240 public types and 2036 public members, read from `scripting/csharp/Aver.Framework/` (144 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+241 public types and 2050 public members, read from `scripting/csharp/Aver.Framework/` (145 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Framework
 
@@ -345,10 +345,10 @@ Values: `Stopped = 0`, `Running = 1`, `None = 2`
 
 - `public Entity Self { get; }` - This actor's entity.
 - `public virtual void OnBeginPlay(BeginReason reason)` - Runs once when this actor begins playing, for a spawn, a world start or a hot reload.
-- `public virtual void OnTick(float dt)` - Runs once a frame, after the frame's physics steps (Godot's _process).
-- `public virtual void OnPhysicsTick(float dt)` - Runs once per fixed physics step, before that step (Godot's _physics_process): 0 to 8 times a frame.
-- `public virtual void OnInput(InputEvent e)` - Receives each input event first, deepest actor first (Godot's _input).
-- `public virtual void OnUnhandledInput(InputEvent e)` - Receives the input events nothing else handled (Godot's _unhandled_input): the place for gameplay controls, so a click on a menu does not also fire a weapon.
+- `public virtual void OnTick(float dt)` - Runs once a frame, after the frame's physics steps.dt is the frame time in seconds.
+- `public virtual void OnPhysicsTick(float dt)` - Runs once per fixed physics step, before that step: 0 to 8 times a frame.
+- `public virtual void OnInput(InputEvent e)` - Receives each input event first, deepest actor first.
+- `public virtual void OnUnhandledInput(InputEvent e)` - Receives the input events nothing else handled: the place for gameplay controls, so a click on a menu does not also fire a weapon.
 - `public bool InputEnabled { get; set; }` - Whether this actor receives input events.
 - `public bool TickEnabled { get; set; }` - Whether OnTick runs.
 - `public bool PhysicsTickEnabled { get; set; }` - Whether OnPhysicsTick runs.
@@ -356,19 +356,19 @@ Values: `Stopped = 0`, `Running = 1`, `None = 2`
 - `public int PhysicsTickPriority { get; set; }` - Order among actors in the OnPhysicsTick pass, as TickPriority.
 - `public PauseMode PauseMode { get; set; }` - Whether this actor ticks while the game is paused; Inherit by default, which takes the nearest actor above it in the scene tree.
 - `public static AverActor? TakePending(Type type)` - The instance offered for the bind that is running, when it is a type; otherwise null.
-- `public virtual void OnEnterTree()` - Runs when the actor enters the world, before OnBeginPlay (Godot's _enter_tree).
-- `public virtual void OnExitTree()` - Runs when the actor leaves the world, before OnEndPlay (Godot's _exit_tree); children leave before their parent.
-- `public virtual void OnParentChanged()` - Runs when the actor's parent in the scene tree changed (Godot's NOTIFICATION_PARENTED / UNPARENTED).
-- `public virtual void OnTransformChanged()` - Runs once a frame, after OnTick, when the actor's world transform moved, if NotifyTransform is on (Godot's NOTIFICATION_TRANSFORM_CHANGED with set_notify_transform).
+- `public virtual void OnEnterTree()` - Runs when the actor enters the world, before OnBeginPlay.
+- `public virtual void OnExitTree()` - Runs when the actor leaves the world, before OnEndPlay; children leave before their parent.
+- `public virtual void OnParentChanged()` - Runs when the actor's parent in the scene tree changed.
+- `public virtual void OnTransformChanged()` - Runs once a frame, after OnTick, when the actor's world transform moved, if NotifyTransform is on.
 - `public bool NotifyTransform { get; set; }` - Whether OnTransformChanged is called.
-- `public void QueueDestroy()` - Destroys this actor at the end of the frame, after every tick and deferred call (Godot's queue_free).
+- `public void QueueDestroy()` - Destroys this actor at the end of the frame, after every tick and deferred call.
 - `public virtual void OnEndPlay(EndReason reason)` - Runs once when this actor stops playing.
 - `public virtual void OnRebound()` - Runs after a hot reload has rebound this instance and restored its native state.
 - `public virtual bool OnEvent(string name)` - Runs when a named event is raised at this actor's entity.
-- `public bool AddToGroup(string group)` - Puts this actor in a named group (Godot's add_to_group).
+- `public bool AddToGroup(string group)` - Puts this actor in a named group.
 - `public bool RemoveFromGroup(string group)` - Takes this actor out of a named group.
 - `public bool IsInGroup(string group)` - Whether this actor is in a named group.
-- `public bool Persistent { get; set; }` - Survives level travel, with everything under it (Godot's autoload).
+- `public bool Persistent { get; set; }` - Survives level travel, with everything under it (an autoload).
 
 ### AverCharacter
 
@@ -503,11 +503,11 @@ Values: `Stopped = 0`, `Running = 1`, `None = 2`
 
 ### AverRandom
 
-`public static class AverRandom` - One process-wide pseudo-random generator for gameplay, reseedable so a sequence can repeat (Godot's global randi/randf/seed).
+`public static class AverRandom` - One process-wide pseudo-random generator for gameplay, reseedable so a sequence can repeat.
 
 - `public static RandomNumberGenerator Generator { get; }` - The shared generator itself, for its state or the methods not mirrored here.
 - `public static void Seed(int seed)` - Restarts the generator from seed; the same seed repeats the same sequence.
-- `public static void Randomize()` - Reseeds from the clock (Godot's randomize()).
+- `public static void Randomize()` - Reseeds from the clock.
 - `public static float NextFloat()` - A float in [0, 1).
 - `public static float NextFloat(float min, float max)` - A float in [min, max).
 - `public static int NextInt(int min, int max)` - An integer in [min, max] with BOTH ends reachable.
@@ -822,7 +822,7 @@ Values: `Local = 1`, `World = 2`, `Hierarchy = 3`, `Name = 4`, `Tags = 5`, `Mesh
 
 ### ConfigFile
 
-`public sealed class ConfigFile` - Sections of key/value pairs saved as text in Godot's ConfigFile format: [section] lines, then key=value with strings quoted, numbers and true/false bare, and Vector3(x, y, z).
+`public sealed class ConfigFile` - Sections of key/value pairs saved as text in an INI-style format: [section] lines, then key=value with strings quoted, numbers and true/false bare, and Vector3(x, y, z).
 
 - `public void SetValue(string section, string key, object? value)` - Sets a value, adding the section and key if needed.
 - `public object? GetValue(string section, string key, object? fallback = null)` - The value, or fallback when the section or key is absent.
@@ -848,6 +848,22 @@ Values: `Local = 1`, `World = 2`, `Hierarchy = 3`, `Name = 4`, `Tags = 5`, `Mesh
 - `public Vec3 Point { get; }` - Where they touched, centimetres.
 - `public Vec3 Normal { get; }` - The contact normal, unit length.
 - `public Body Other(Body one)` - The other body in this contact; invalid if one is neither.
+
+### CustomEnv
+
+`public static class CustomEnv` - Custom sky, fog and particles programs.
+
+- `public static bool Register(CustomEnvKind kind, string name, string ocgraphText)` - Registers (or replaces) the program name from the text of its .ocgraph.
+- `public static bool SetRegisters(CustomEnvKind kind, string name, float[] registers)` - Replaces the program's uniform registers (four floats a register, normal block then global block).
+- `public static bool UseSky(string? name)` - Makes the registered sky program the sky; null or empty returns to the engine's own sky.
+- `public static bool Unregister(CustomEnvKind kind, string name)` - Removes the program; false when no program of that kind and name is registered.
+- `public static int Count(CustomEnvKind kind)` - How many programs of the kind are registered.
+
+### CustomEnvKind
+
+`public enum CustomEnvKind` - The kinds of custom HLSL program the renderers can run beyond a mesh material (AVER_FW_CENV_*).
+
+Values: `Sky = 0`, `Fog = 1`, `Particles = 2`
 
 ### DataColumnAttribute
 
@@ -936,7 +952,7 @@ Values: `Radial`, `Axial`
 
 ### DebugDraw
 
-`public static class DebugDraw` - World-space debug lines drawn on top of the frame (Godot's debug drawing).
+`public static class DebugDraw` - World-space debug lines drawn on top of the frame.
 
 - `public static void Line(Vec3 from, Vec3 to, Vec3? rgb = null, float seconds = 0f)` - A line from from to to.
 - `public static void Box(Vec3 center, Vec3 halfExtents, Vec3? rgb = null, float seconds = 0f)` - An axis-aligned box: its twelve edges.
@@ -944,13 +960,13 @@ Values: `Radial`, `Axial`
 
 ### Deferred
 
-`public static class Deferred` - Work for the game thread at the end of the current tick pass (Godot's call_deferred).
+`public static class Deferred` - Work for the game thread at the end of the current tick pass.
 
 - `public static void Call(Action action)` - Runs action on the game thread when the current tick pass ends.
 
 ### Display
 
-`public static class Display` - The display, for what a script may change at runtime (Godot's DisplayServer).
+`public static class Display` - The display, for what a script may change at runtime.
 
 - `public static void SetVSync(bool on)` - Asks the shipped game to turn vsync on or off; it applies it next frame where the device allows turning it off.
 
@@ -1103,7 +1119,7 @@ Values: `Destroy = 0`, `Stop = 1`, `Reload = 2`, `Travel = 3`
 
 ### Engine
 
-`public static class Engine` - The engine's frame counters (Godot's Engine.get_frames_per_second, get_process_frames and get_physics_frames).
+`public static class Engine` - The engine's frame counters (frames per second, process frames and physics frames).
 
 - `public static float FramesPerSecond { get; }` - Frames per second, measured over the last whole second of real time.
 - `public static long ProcessFrames { get; }` - How many OnTick passes have run.
@@ -1401,7 +1417,7 @@ Values: `Destroy = 0`, `Stop = 1`, `Reload = 2`, `Travel = 3`
 
 ### EnvFx
 
-`public static class EnvFx` - Local fog volumes and reflection probes (Godot's FogVolume and ReflectionProbe).
+`public static class EnvFx` - Local fog volumes and reflection probes.
 
 - `public const int MaxFogVolumes = 64`
 - `public const int MaxProbes = 32`
@@ -1410,7 +1426,7 @@ Values: `Destroy = 0`, `Stop = 1`, `Reload = 2`, `Travel = 3`
 - `public static int FindFogVolume(string key)`
 - `public static bool SetFogVolume(int id, FogVolumeShapeKind shape, float[] world12, float[] halfExtentCm3, float densityPerMetre, float[]? albedo3 = null, float[]? emission3 = null, float heightFalloff = 0f, float edgeFade = 0.1f)` - Everything about the volume in one call.
 - `public static bool SetFogVolumeEnabled(int id, bool on)`
-- `public static bool SetFogVolumeShader(int id, string? shaderName)` - G6 SH3: a converted Godot fog shader (registered with Register as Fog) replaces the volume's density, albedo and emission.
+- `public static bool SetFogVolumeShader(int id, string? shaderName)` - A custom fog program (registered with Register as Fog) replaces the volume's density, albedo and emission.
 - `public static int FogVolumeCount { get; }`
 - `public static float FogDensityAt(float x, float y, float z)` - The summed signed extinction per centimetre of every enabled volume at an engine-space point.
 - `public static int CreateProbe(string key)`
@@ -1418,7 +1434,7 @@ Values: `Destroy = 0`, `Stop = 1`, `Reload = 2`, `Travel = 3`
 - `public static int FindProbe(string key)`
 - `public static bool SetProbeBox(int id, float[] world12, float[] halfExtentCm3, float[]? originOffsetCm3 = null)`
 - `public static bool SetProbeLook(int id, float intensity, float blendDistanceCm, float maxDistanceCm, bool boxProjection, bool interior, bool updateAlways, int resolution)`
-- `public static bool SetProbeAmbient(int id, int mode, float[]? colour3, float energy)` - Mode 0 disabled, 1 environment, 2 colour (Godot's ReflectionProbe.AmbientMode).
+- `public static bool SetProbeAmbient(int id, int mode, float[]? colour3, float energy)` - Mode 0 disabled, 1 environment, 2 colour.
 - `public static bool SetProbeMasks(int id, uint cullMask, uint reflectionMask)`
 - `public static bool SetProbeEnabled(int id, bool on)`
 - `public static int ProbeCount { get; }`
@@ -1555,7 +1571,7 @@ Values: `Linear = 0`, `EqualPower = 1`
 
 ### FogVolumeShapeKind
 
-`public enum FogVolumeShapeKind` - Godot's RenderingServer.FogVolumeShape numbers, the same as AVER_FW_FOGVOL_*.
+`public enum FogVolumeShapeKind` - The fog volume shape numbers, the same as AVER_FW_FOGVOL_*.
 
 Values: `Ellipsoid = 0`, `Cone = 1`, `Cylinder = 2`, `Box = 3`, `World = 4`
 
@@ -1563,9 +1579,9 @@ Values: `Ellipsoid = 0`, `Cone = 1`, `Cylinder = 2`, `Box = 3`, `World = 4`
 
 `public static class Frame` - Awaitable points in the frame.
 
-- `public static Task Next()` - Completes at the start of the next OnTick pass (Godot's process_frame).
-- `public static Task NextPhysics()` - Completes at the start of the next OnPhysicsTick pass (Godot's physics_frame).
-- `public static Task Delay(float seconds)` - Completes after seconds of game time: scaled by the time scale and held while paused (Godot's create_timer(seconds).timeout).
+- `public static Task Next()` - Completes at the start of the next OnTick pass.
+- `public static Task NextPhysics()` - Completes at the start of the next OnPhysicsTick pass.
+- `public static Task Delay(float seconds)` - Completes after seconds of game time: scaled by the time scale and held while paused after a delay.
 
 ### FrameworkRebindProvider
 
@@ -1596,7 +1612,7 @@ Values: `Ellipsoid = 0`, `Cone = 1`, `Cylinder = 2`, `Box = 3`, `World = 4`
 - `public static bool IsPaused { get; }` - True while a session exists but is frozen.
 - `public static bool HasSession { get; }` - True while a session exists at all — Playing or Paused.
 - `public static bool SetPaused(bool paused)` - Freezes (true) or resumes (false) the play session's tick without tearing it down.
-- `public static float TimeScale { get; set; }` - Game time per real time, clamped to [0, 100] (Godot's Engine.time_scale): scales OnTick and OnPhysicsTick's dt, each physics step, timers, animation, particles, AI and vehicles.
+- `public static float TimeScale { get; set; }` - Game time per real time, clamped to [0, 100]: scales OnTick and OnPhysicsTick's dt, each physics step, timers, animation, particles, AI and vehicles.
 - `public static bool Pause()` - Freezes the play session.
 - `public static bool Resume()` - Resumes a paused play session.
 - `public static void Quit()` - Requests that the host exit.
@@ -1623,7 +1639,7 @@ Values: `Ellipsoid = 0`, `Cone = 1`, `Cylinder = 2`, `Box = 3`, `World = 4`
 - `public static bool SpawnFluidVolume(Vec3 centreCm, Vec3 halfExtentCm, string name = "unnamed", float compliance = 1.0e-4f, float damping = 0.1f, int iterations = 5, float pressure = -1f)` - Requests a simulated fluid volume centred at centreCm (world-space centimetres) with the given half-extent, using the solver's OWN RAW knobs -- see FluidVolume.hpp's own FluidVolumeDesc comment for what each means and its unit.
 - `public static bool SpawnFluidVolumeMaterial(Vec3 centreCm, Vec3 halfExtentCm, string name = "unnamed", float compliance = 1.0e-4f, float damping = 0.1f, int iterations = 5, float pressure = -1f, float densityKgM3 = -1f, float viscosityPaS = -1f, string materialPreset = "")` - Same request as SpawnFluidVolume, plus the MATERIAL layer: real density (kg/m^3) and viscosity (Pa*s) instead of typing compliance/damping directly -- see fluids::FluidMaterial's own comment (FluidVolume.hpp) for the honest split between the two (density real, viscosity a calibrated fit onto `damping`, some things refused outright).
 - `public static IEnumerable<Entity> WithTag(uint mask)` - Every live entity carrying all of the tag bits in mask.
-- `public static void ChangeLevel(string levelPath)` - Replaces the level at the end of this frame (Godot's change_scene_to_file): every actor ends with Travel except the GameInstance and Persistent ones, the new level loads and its actors begin, then a GameMode, controller and pawn begin as at the start of play.
+- `public static void ChangeLevel(string levelPath)` - Replaces the level at the end of this frame: every actor ends with Travel except the GameInstance and Persistent ones, the new level loads and its actors begin, then a GameMode, controller and pawn begin as at the start of play.
 
 ### Game.CursorScope
 
@@ -1735,22 +1751,6 @@ Values: `DPadUp = 0`, `DPadDown`, `DPadLeft`, `DPadRight`, `Start`, `Back`, `Lef
 - `public IEnumerator<GameplayTag> GetEnumerator()` - Exact tags in id order.
 - `public override string ToString()` - Inherited documentation.
 
-### GodotEnv
-
-`public static class GodotEnv` - Converted Godot sky, fog and particles shaders (docs/plans/fabric/G6_SHADERS.md SH3).
-
-- `public static bool Register(GodotEnvKind kind, string name, string ocgraphText)` - Registers (or replaces) the shader name from the text of its .ocgraph.
-- `public static bool SetRegisters(GodotEnvKind kind, string name, float[] registers)` - Replaces the shader's uniform registers (four floats a register, normal block then global block).
-- `public static bool UseSky(string? name)` - Makes the registered sky shader the sky; null or empty returns to the engine's own sky.
-- `public static bool Unregister(GodotEnvKind kind, string name)` - Removes the shader; false when no shader of that kind and name is registered.
-- `public static int Count(GodotEnvKind kind)` - How many shaders of the kind are registered.
-
-### GodotEnvKind
-
-`public enum GodotEnvKind` - The kinds of converted Godot shader the renderers can run beyond a mesh material (AVER_FW_GENV_*).
-
-Values: `Sky = 0`, `Fog = 1`, `Particles = 2`
-
 ### GroundSample
 
 `public readonly record struct GroundSample(bool Found, float Z, Vec3 Normal, int DominantLayer, string Surface, int SurfaceId, float Friction, float Restitution)` - What the landscape is at one point: height, slope, the dominant paint layer and its physical surface.
@@ -1764,7 +1764,7 @@ Values: `Sky = 0`, `Fog = 1`, `Particles = 2`
 - `public static bool Has(Entity e, string group)` - Whether the entity is in the group.
 - `public static Entity[] Members(string group)` - The group's members in scene-tree order (a parent before its children, siblings in the order added).
 - `public static string[] Of(Entity e)` - The groups the entity is in, in the order it joined them.
-- `public static int Call<T>(string group, Action<T> action) where T : AverActor` - Calls action on every actor of type T in the group, in tree order (Godot's call_group).
+- `public static int Call<T>(string group, Action<T> action) where T : AverActor` - Calls action on every actor of type T in the group, in tree order.
 
 ### Hair
 
@@ -1823,8 +1823,8 @@ Values: `World = 0`, `Model = 1`
 `public static class Input` - Polled keyboard and mouse.
 
 - `public static bool GetKey(Key k)` - True while k is held.
-- `public static void SetInputAsHandled()` - Stops the input event being routed from going any further (Godot's set_input_as_handled).
-- `public static void ParseInputEvent(InputEvent ev)` - Routes a made-up event through the actors next frame, as if it were real input (Godot's parse_input_event).
+- `public static void SetInputAsHandled()` - Stops the input event being routed from going any further.
+- `public static void ParseInputEvent(InputEvent ev)` - Routes a made-up event through the actors next frame, as if it were real input.
 - `public static bool GetKeyDown(Key k)` - True on the frame k went down.
 - `public static bool GetKeyUp(Key k)` - True on the frame k went up.
 - `public static float MouseDeltaX { get; }` - This frame's horizontal mouse movement, in pixels.
@@ -1881,7 +1881,7 @@ Values: `World = 0`, `Model = 1`
 
 - `public bool Handled { get; }` - Set by SetInputAsHandled (or the UI): the event goes no further.
 - `public virtual bool Pressed { get; }` - Whether this is a press.
-- `public bool IsActionPressed(string action)` - Whether the action was pressed this frame and this event is a press (Godot's is_action_pressed on an event).
+- `public bool IsActionPressed(string action)` - Whether the action was pressed this frame and this event is a press (an action-pressed test on an event).
 - `public bool IsActionReleased(string action)` - Whether the action was released this frame and this event is a release.
 
 ### InputEventJoypadButton
@@ -2062,8 +2062,8 @@ Values: `A = 0`, `B`, `C`, `D`, `E`, `F`, `G`, `H`, `I`, `J`, `K`, `L`, `M`, `N`
 - `public static CultureInfo CultureInfo { get; }` - For number and date formatting in the active culture; invariant when the OS does not know the tag.
 - `public static bool SetCulture(string tag, bool persist = true)` - Switches the active culture.
 - `public static string Text(string table, string key, string? defaultText = null)` - The text for table/key: the chain, then defaultText, then "[Table:Key]".
-- `public static string Tr(string message, string context = "")` - A message by its source text (Godot's tr), from the culture chain's .po files; the source text itself when no culture translates it.
-- `public static string TrN(string message, string plural, int n, string context = "")` - The singular or plural form of a message for n (Godot's tr_n): msgstr[0] for 1, msgstr[1] otherwise; the source forms when untranslated.
+- `public static string Tr(string message, string context = "")` - A message by its source text, from the culture chain's .po files; the source text itself when no culture translates it.
+- `public static string TrN(string message, string plural, int n, string context = "")` - The singular or plural form of a message for n: msgstr[0] for 1, msgstr[1] otherwise; the source forms when untranslated.
 - `public static bool TryGet(string table, string key, out string text)` - The text for the key in the chain only: false when no culture in it has the key (no default, no brackets).
 - `public static string Resolve(string textOrReference)` - "@T:K=D" resolved, "@@x" to "@x", anything else unchanged.
 - `public static string Format(string table, string key, string? defaultText, params object?[] args)` - Text formatted with args in the active culture's number and date style.
@@ -2193,7 +2193,7 @@ Values: `Velocity = 0`, `Yaw = 1`
 
 ### MultiMeshes
 
-`public static class MultiMeshes` - Instance tables drawn as one mesh (Godot's MultiMesh).
+`public static class MultiMeshes` - Instance tables drawn as one mesh (a multi-mesh).
 
 - `public static int Create(string key)`
 - `public static bool Destroy(int id)`
@@ -2218,7 +2218,7 @@ Values: `Velocity = 0`, `Yaw = 1`
 
 ### OS
 
-`public static class OS` - The operating system and build (Godot's OS.get_name and OS.has_feature).
+`public static class OS` - The operating system and build (name and features).
 
 - `public static string Name { get; }` - "Windows", "Linux" or "macOS".
 - `public static bool HasFeature(string tag)` - Whether a feature tag applies: the OS ("windows", "linux", "macos"), "pc", "64", the build ("debug" or "release") and the host ("editor" or "standalone").
@@ -2254,16 +2254,16 @@ Values: `Float = 0`, `Vector = 1`, `Color = 2`
 
 ### Paths
 
-`public static class Paths` - The project's directories and Godot's res:// and user:// paths.
+`public static class Paths` - The project's directories and the res:// and user:// paths.
 
 - `public static string Project { get; }` - The directory holding the project's manifest; "" before a project opens.
 - `public static string Content { get; }` - The project's content directory, what res:// names; "" before a project opens.
 - `public static string User { get; }` - The player's writable directory for this project, what user:// names (created on first use).
-- `public static string Globalize(string path)` - An OS path for path: res://a/b under Content, user://a/b under User, anything else unchanged (Godot's ProjectSettings.globalize_path).
+- `public static string Globalize(string path)` - An OS path for path: res://a/b under Content, user://a/b under User, anything else unchanged.
 
 ### PauseMode
 
-`public enum PauseMode` - Whether an actor ticks while the game is paused (Godot's process_mode).
+`public enum PauseMode` - Whether an actor ticks while the game is paused (the process mode).
 
 Values: `Inherit = 0`, `Pausable = 1`, `WhenPaused = 2`, `Always = 3`, `Disabled = 4`
 
@@ -2331,7 +2331,7 @@ Values: `Editor = 0`, `Playing = 1`, `Paused = 2`
 
 ### ProjectSettings
 
-`public static class ProjectSettings` - The project manifest's settings by key (Godot's ProjectSettings.get_setting), as the text the manifest holds.
+`public static class ProjectSettings` - The project manifest's settings by key, as the text the manifest holds.
 
 - `public static string Get(string key, string fallback = "")` - The value of a manifest key (any case), or fallback when it is absent.
 - `public static bool Has(string key)` - Whether the manifest states the key.
@@ -2344,7 +2344,7 @@ Values: `Kinematic = 0`, `Limp = 1`, `Powered = 2`
 
 ### RandomNumberGenerator
 
-`public sealed class RandomNumberGenerator` - A seedable PCG32 generator with Godot's RandomNumberGenerator methods.
+`public sealed class RandomNumberGenerator` - A seedable PCG32 generator with the usual random-number-generator methods.
 
 - `public const ulong DefaultStream = 1442695040888963407UL` - The stream every generator uses unless told otherwise (PCG's default increment).
 - `public RandomNumberGenerator()` - A generator seeded from the clock and a counter, so two made at once differ.
@@ -2645,7 +2645,7 @@ Values: `Always = 0`, `Never = 1`, `Once = 2`
 
 ### SubViews
 
-`public static class SubViews` - Sub-viewports: extra views of the world drawn into textures that materials and the UI show (Godot's SubViewport and ViewportTexture).
+`public static class SubViews` - Sub-viewports: extra views of the world drawn into textures that materials and the UI show.
 
 - `public const int DefaultMaxViews = 4`
 - `public const int DefaultRendersPerFrame = 2`
@@ -2923,3 +2923,24 @@ Values: `SunDir = 1`, `SunLux = 2`, `SunColor = 3`, `SunTemp = 4`, `FogDensity =
 - `public static bool operator ==(WorldPos a, WorldPos b)` - Exact equality.
 - `public static bool operator !=(WorldPos a, WorldPos b)` - Exact inequality.
 - `public override string ToString()` - Inherited documentation.
+
+## namespace Aver.Framework.Hosting
+
+### ExtensionHost
+
+`public static class ExtensionHost` - For extensions, not for game scripts.
+
+- `public static Entity EntityFromHandle(int handle)` - The entity for a raw ABI handle (the Handle of a live entity); default for 0.
+- `public static int SpawnActor(ActorClass cls, string? name, float[] position, float[] rotation, float[] scale, AverActor? instance)` - Spawns an actor of cls and binds instance to it instead of constructing one, so a node an extension made with new becomes the actor.
+- `public static void BeginSpawnBatch()` - Starts a spawn batch: the actors spawned until EndSpawnBatch run their begin-play together, parents first.
+- `public static int EndSpawnBatch()` - Ends the batch BeginSpawnBatch started.
+- `public static List<(string Key, string Text)> ReadProperties(Entity entity)` - The level-authored property values of entity (the key/value pairs of its placement), in file order.
+- `public static void SetViewEntity(Entity entity)` - Makes entity the entity the renderer views from.
+- `public static List<string> RegisteredActionNames()` - The names of the input actions the project registered natively, in handle order.
+- `public static void SetSelf(AverActor actor, Entity entity)` - Binds an actor instance to an entity without a spawn (a wrapper around an entity that already exists).
+- `public static void MarkEditablesApplied(AverActor actor)` - Tells the bridge the actor's [Editable] values were written early, so its write before begin-play skips it.
+- `public static void MarkHandled(InputEvent e)` - Marks an input event handled, so it goes no further down the chain.
+- `public static void BeginPass(bool physics)` - Starts a tick pass on the game thread: wakes what awaited the next frame and runs the continuations.
+- `public static void EndFrame()` - Ends a frame on the game thread: flushes the deferred calls and the end-of-frame destroys.
+- `public static int FlushDeferred()` - Runs the queued deferred calls now, including ones queued while it runs.
+- `public static void ResetDeferred()` - Drops every queued deferred call and pending frame wait.

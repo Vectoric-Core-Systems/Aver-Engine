@@ -783,14 +783,14 @@ MaterialGraphBody compileMaterialGraph(const fmt::OcGraphData& g) {
         return r;
     }
 
-    // G6 SH2: a converted Godot shader is one GodotShader node and nothing else; its arms are built by materialGraphHlsl from the node's parts.
-    if (fmt::ocGraphHasGodotShader(g)) {
+    // An embedded shader is one EmbeddedHlsl node and nothing else; its arms are built by materialGraphHlsl from the node's parts.
+    if (fmt::ocGraphHasEmbeddedHlsl(g)) {
         std::string gerr;
-        if (!fmt::unpackGodotShader(g, r.gd, &gerr)) { r.error = gerr; return r; }
-        if (!r.gd.hasFragment && !r.gd.hasVertex) { r.error = "the GodotShader node has neither a fragment() nor a vertex() to run"; return r; }
-        if (r.gd.ns.empty()) { r.error = "the GodotShader node has no ns= name prefix"; return r; }
-        if (r.gd.totalRegs() > 256u) { r.error = "the shader's uniforms need " + std::to_string(r.gd.totalRegs()) + " registers; a material table holds 256"; return r; }
-        r.isGodot = true;
+        if (!fmt::unpackEmbeddedHlsl(g, r.emb, &gerr)) { r.error = gerr; return r; }
+        if (!r.emb.hasFragment && !r.emb.hasVertex) { r.error = "the EmbeddedHlsl node has neither a fragment() nor a vertex() to run"; return r; }
+        if (r.emb.ns.empty()) { r.error = "the EmbeddedHlsl node has no ns= name prefix"; return r; }
+        if (r.emb.totalRegs() > 256u) { r.error = "the shader's uniforms need " + std::to_string(r.emb.totalRegs()) + " registers; a material table holds 256"; return r; }
+        r.isEmbedded = true;
         r.ok = true;
         return r;
     }
@@ -854,21 +854,21 @@ MaterialGraphBody compileMaterialGraph(const fmt::OcGraphData& g) {
 // holds whatever was last bound, never the hit's material). The body is the graph's one compile,
 // with its raster-only tokens substituted for the ray twin rather than emitted twice from the graph,
 // so the two copies cannot drift.
-// G6 SH2: the arm of a converted Godot shader. Loads the shader's uniform registers from the material's table (slot 7), runs its fragment() (the raster
+// The arm of an embedded shader. Loads the shader's uniform registers from the material's table (slot 7), runs its fragment() (the raster
 // flavour or, for the ray twin, the derivative-free ray flavour of the same source) and maps the context onto the AverAuthored. `fx` carries the
-// render-mode bits gdPost acts on once the surface is built (bit 31: a Godot shader ran).
-static std::string godotArm(const MaterialGraphEntry& e, bool rayTwin) {
-    const fmt::GodotShaderPart& p = e.gd;
-    const std::string load = rayTwin ? "gdrLoadReg" : "gdLoadReg";
+// render-mode bits embPost acts on once the surface is built (bit 31: an embedded shader ran).
+static std::string embeddedArm(const MaterialGraphEntry& e, bool rayTwin) {
+    const fmt::EmbeddedHlslPart& p = e.emb;
+    const std::string load = rayTwin ? "embrLoadReg" : "embLoadReg";
     std::string s;
-    s += rayTwin ? "        gdrFragmentBegin(v, uv);\n" : "        gdFragmentBegin(v, uv);\n";
-    if (p.regsU) s += "        [unroll] for (uint k = 0u; k < " + std::to_string(p.regsU) + "u; ++k) gGdU[k] = " + load + "(k);\n";
-    if (p.regsI) s += "        [unroll] for (uint k = 0u; k < " + std::to_string(p.regsI) + "u; ++k) gGdI[k] = " + load + "(" + std::to_string(p.regsU) + "u + k);\n";
-    if (p.regsG) s += "        [unroll] for (uint k = 0u; k < " + std::to_string(p.regsG) + "u; ++k) gGdG[k] = " + load + "(" + std::to_string(p.regsU + p.regsI) + "u + k);\n";
+    s += rayTwin ? "        embrFragmentBegin(v, uv);\n" : "        embFragmentBegin(v, uv);\n";
+    if (p.regsU) s += "        [unroll] for (uint k = 0u; k < " + std::to_string(p.regsU) + "u; ++k) gEmbU[k] = " + load + "(k);\n";
+    if (p.regsI) s += "        [unroll] for (uint k = 0u; k < " + std::to_string(p.regsI) + "u; ++k) gEmbI[k] = " + load + "(" + std::to_string(p.regsU) + "u + k);\n";
+    if (p.regsG) s += "        [unroll] for (uint k = 0u; k < " + std::to_string(p.regsG) + "u; ++k) gEmbG[k] = " + load + "(" + std::to_string(p.regsU + p.regsI) + "u + k);\n";
     if (p.hasFragment) s += "        " + p.ns + (rayTwin ? "T_" : "R_") + "main_fragment();\n";
     const u32 fx = p.fx | 0x80000000u;
-    s += "        gdFragmentEnd(a, v, " + std::to_string(fx) + "u);\n";
-    if (!rayTwin) s += "        gGdFx = " + std::to_string(fx) + "u;\n";
+    s += "        embFragmentEnd(a, v, " + std::to_string(fx) + "u);\n";
+    if (!rayTwin) s += "        gEmbFx = " + std::to_string(fx) + "u;\n";
     return s;
 }
 
@@ -885,8 +885,8 @@ static void emitSwitch(std::string& s, const std::vector<MaterialGraphEntry>& en
         s += "\n    case ";
         s += std::to_string(e.id);
         s += ": {\n";
-        std::string body = e.isGodot ? godotArm(e, rayTwin) : e.hlsl;
-        if (rayTwin && !e.isGodot) {
+        std::string body = e.isEmbedded ? embeddedArm(e, rayTwin) : e.hlsl;
+        if (rayTwin && !e.isEmbedded) {
             // The ray hit samples through the bindless table (voxi_rt.hlsli's adapter), and its object
             // position is the hit instance's, not the raster draw's gWorld.
             const auto subst = [&body](const std::string& from, const std::string& to) {
@@ -903,108 +903,108 @@ static void emitSwitch(std::string& s, const std::vector<MaterialGraphEntry>& en
     s += "    }\n";
 }
 
-bool anyGodotShader(const std::vector<MaterialGraphEntry>& entries) {
-    for (const MaterialGraphEntry& e : entries) if (e.isGodot) return true;
+bool anyEmbeddedShader(const std::vector<MaterialGraphEntry>& entries) {
+    for (const MaterialGraphEntry& e : entries) if (e.isEmbedded) return true;
     return false;
 }
 
-u32 godotVaryingRows(const std::vector<MaterialGraphEntry>& entries) {
+u32 embeddedVaryingRows(const std::vector<MaterialGraphEntry>& entries) {
     u32 rows = 0;
     for (const MaterialGraphEntry& e : entries)
-        if (e.isGodot) for (const fmt::GodotShaderVarying& v : e.gd.varyings) rows += v.rows;
+        if (e.isEmbedded) for (const fmt::EmbeddedHlslVarying& v : e.emb.varyings) rows += v.rows;
     return rows;
 }
 
-std::string godotVsOutMembersDefine(const std::vector<MaterialGraphEntry>& entries) {
+std::string embeddedVsOutMembersDefine(const std::vector<MaterialGraphEntry>& entries) {
     std::string members;
-    u32 sem = kGdVaryingFirstSemantic;
+    u32 sem = kEmbVaryingFirstSemantic;
     for (const MaterialGraphEntry& e : entries) {
-        if (!e.isGodot) continue;
-        for (const fmt::GodotShaderVarying& v : e.gd.varyings) {
+        if (!e.isEmbedded) continue;
+        for (const fmt::EmbeddedHlslVarying& v : e.emb.varyings) {
             members += (v.flat ? "nointerpolation " : "") + v.decl + " : TEXCOORD" + std::to_string(sem) + "; ";
             sem += v.rows;
         }
     }
-    return members.empty() ? std::string() : "#define AVER_GD_VSOUT_MEMBERS " + members + "\n";
+    return members.empty() ? std::string() : "#define AVER_CUSTOM_VSOUT_MEMBERS " + members + "\n";
 }
 
 namespace {
 
-// The names the library and the HLSL derivative intrinsics are redirected to for the ray flavour of a converted source.
+// The names the library and the HLSL derivative intrinsics are redirected to for the ray flavour of an embedded source.
 constexpr const char* kRayRenames[][2] = {
-    {"gd_texture", "gdr_texture"}, {"gd_textureLod", "gdr_textureLod"}, {"gd_textureGrad", "gdr_textureGrad"}, {"gd_textureSize", "gdr_textureSize"},
-    {"gd_textureQueryLevels", "gdr_textureQueryLevels"}, {"gd_textureQueryLod", "gdr_textureQueryLod"}, {"gd_textureProj", "gdr_textureProj"},
-    {"gd_textureProjLod", "gdr_textureProjLod"}, {"gd_texelFetch", "gdr_texelFetch"}, {"gd_textureGather", "gdr_textureGather"},
-    {"ddx", "gdrDdx"}, {"ddy", "gdrDdy"}, {"ddx_coarse", "gdrDdxCoarse"}, {"ddy_coarse", "gdrDdyCoarse"}, {"ddx_fine", "gdrDdxFine"}, {"ddy_fine", "gdrDdyFine"},
-    {"fwidth", "gdrFwidth"},
+    {"emb_texture", "embr_texture"}, {"emb_textureLod", "embr_textureLod"}, {"emb_textureGrad", "embr_textureGrad"}, {"emb_textureSize", "embr_textureSize"},
+    {"emb_textureQueryLevels", "embr_textureQueryLevels"}, {"emb_textureQueryLod", "embr_textureQueryLod"}, {"emb_textureProj", "embr_textureProj"},
+    {"emb_textureProjLod", "embr_textureProjLod"}, {"emb_texelFetch", "embr_texelFetch"}, {"emb_textureGather", "embr_textureGather"},
+    {"ddx", "embrDdx"}, {"ddy", "embrDdy"}, {"ddx_coarse", "embrDdxCoarse"}, {"ddy_coarse", "embrDdyCoarse"}, {"ddx_fine", "embrDdxFine"}, {"ddy_fine", "embrDdyFine"},
+    {"fwidth", "embrFwidth"},
 };
 
-// The converted shaders' generated code: the engine's hook prelude, the library, the shaders' sources (per flavour) and the two functions the renderer
+// The embedded shaders' generated code: the engine's hook prelude, the library, the shaders' sources (per flavour) and the two functions the renderer
 // calls. `rayFlavour` below mirrors the raster flavour exactly except for the derivative-free texture path.
-std::string godotMaterialGraphHlsl(const std::vector<MaterialGraphEntry>& entries) {
+std::string embeddedMaterialGraphHlsl(const std::vector<MaterialGraphEntry>& entries) {
     std::string s;
-    s += "// ---- generated from .ocgraph material graphs (with converted Godot shaders); do not edit ----\n";
+    s += "// ---- generated from .ocgraph material graphs (with embedded HLSL shaders); do not edit ----\n";
     u32 maxU = 1, maxI = 1, maxG = 1;
     for (const MaterialGraphEntry& e : entries) {
-        if (!e.isGodot) continue;
-        maxU = std::max(maxU, e.gd.regsU); maxI = std::max(maxI, e.gd.regsI); maxG = std::max(maxG, e.gd.regsG);
+        if (!e.isEmbedded) continue;
+        maxU = std::max(maxU, e.emb.regsU); maxI = std::max(maxI, e.emb.regsI); maxG = std::max(maxG, e.emb.regsG);
     }
-    s += "#define AVER_GD_MAX_U " + std::to_string(maxU) + "\n#define AVER_GD_MAX_I " + std::to_string(maxI) + "\n#define AVER_GD_MAX_G " + std::to_string(maxG) + "\n";
-    s += "#define AVER_GD_SLOT_SAMPLERS 1\n";
-    s += rhi::shaderFile("material_godot.hlsl");
+    s += "#define AVER_CUSTOM_MAX_U " + std::to_string(maxU) + "\n#define AVER_CUSTOM_MAX_I " + std::to_string(maxI) + "\n#define AVER_CUSTOM_MAX_G " + std::to_string(maxG) + "\n";
+    s += "#define AVER_CUSTOM_SLOT_SAMPLERS 1\n";
+    s += rhi::shaderFile("material_embedded.hlsl");
     s += "\n";
-    s += rhi::shaderFile("material_godot_lib.hlsl");
-    s += "\n#define GDN(x) GD_CAT(GD_NS_CUR, x)\n";
+    s += rhi::shaderFile("material_embedded_lib.hlsl");
+    s += "\n#define EMBN(x) EMB_CAT(EMB_NS_CUR, x)\n";
 
-    // The varyings every converted shader declares, as one static the emitted code reads and writes.
-    const std::string vsOut = godotVsOutMembersDefine(entries);
+    // The varyings every embedded shader declares, as one static the emitted code reads and writes.
+    const std::string vsOut = embeddedVsOutMembersDefine(entries);
     if (!vsOut.empty()) {
-        s += "struct AverGdVars {";
+        s += "struct AverEmbVars {";
         for (const MaterialGraphEntry& e : entries)
-            if (e.isGodot) for (const fmt::GodotShaderVarying& v : e.gd.varyings) s += " " + v.decl + ";";
-        s += " };\nstatic AverGdVars gGdVars;\n#define AVER_GD_VARYINGS gGdVars\n";
-        s += "#ifdef AVER_GD_VARYINGS_ON\n";
-        s += "void averGdStoreVaryings(inout VSOut o) {\n";
+            if (e.isEmbedded) for (const fmt::EmbeddedHlslVarying& v : e.emb.varyings) s += " " + v.decl + ";";
+        s += " };\nstatic AverEmbVars gEmbVars;\n#define AVER_CUSTOM_VARYINGS gEmbVars\n";
+        s += "#ifdef AVER_CUSTOM_VARYINGS_ON\n";
+        s += "void averEmbStoreVaryings(inout VSOut o) {\n";
         for (const MaterialGraphEntry& e : entries)
-            if (e.isGodot) for (const fmt::GodotShaderVarying& v : e.gd.varyings) {
+            if (e.isEmbedded) for (const fmt::EmbeddedHlslVarying& v : e.emb.varyings) {
                 const usize sp = v.decl.rfind(' ');
                 std::string name = v.decl.substr(sp + 1);
                 if (const usize br = name.find('['); br != std::string::npos) name.erase(br);
-                s += "    o." + name + " = gGdVars." + name + ";\n";
+                s += "    o." + name + " = gEmbVars." + name + ";\n";
             }
-        s += "}\nvoid averGdLoadVaryings(VSOut i) {\n";
+        s += "}\nvoid averEmbLoadVaryings(VSOut i) {\n";
         for (const MaterialGraphEntry& e : entries)
-            if (e.isGodot) for (const fmt::GodotShaderVarying& v : e.gd.varyings) {
+            if (e.isEmbedded) for (const fmt::EmbeddedHlslVarying& v : e.emb.varyings) {
                 const usize sp = v.decl.rfind(' ');
                 std::string name = v.decl.substr(sp + 1);
                 if (const usize br = name.find('['); br != std::string::npos) name.erase(br);
-                s += "    gGdVars." + name + " = i." + name + ";\n";
+                s += "    gEmbVars." + name + " = i." + name + ";\n";
             }
         s += "}\n#endif\n";
     }
 
-    // ---- the vertex-stage compile (VSMainGd, AVER_MATX_GDVS) ----
-    s += "#if AVER_MATX_GDVS\n";
+    // ---- the vertex-stage compile (VSMainEmb, AVER_MATX_EMBVS) ----
+    s += "#if AVER_MATX_EMBVS\n";
     for (const MaterialGraphEntry& e : entries) {
-        if (!e.isGodot || !e.gd.hasVertex) continue;
-        s += "#undef GD_NS_CUR\n#define GD_NS_CUR " + e.gd.ns + "V_\n";
-        s += e.gd.vertexSource;
+        if (!e.isEmbedded || !e.emb.hasVertex) continue;
+        s += "#undef EMB_NS_CUR\n#define EMB_NS_CUR " + e.emb.ns + "V_\n";
+        s += e.emb.vertexSource;
         s += "\n";
     }
-    s += "void averGdVertex(VSIn i, inout VSOut o) {\n    switch (gMaterialGraphId) {\n";
+    s += "void averEmbVertex(VSIn i, inout VSOut o) {\n    switch (gMaterialGraphId) {\n";
     for (const MaterialGraphEntry& e : entries) {
-        if (!e.isGodot || !e.gd.hasVertex) continue;
+        if (!e.isEmbedded || !e.emb.hasVertex) continue;
         s += "    case " + std::to_string(e.id) + "u: {\n";
-        s += "        gdVertexBegin(i, o, " + std::to_string(e.gd.fx) + "u);\n";
-        if (e.gd.regsU) s += "        [unroll] for (uint k = 0u; k < " + std::to_string(e.gd.regsU) + "u; ++k) gGdU[k] = gdLoadReg(k);\n";
-        if (e.gd.regsI) s += "        [unroll] for (uint k = 0u; k < " + std::to_string(e.gd.regsI) + "u; ++k) gGdI[k] = gdLoadReg(" + std::to_string(e.gd.regsU) + "u + k);\n";
-        if (e.gd.regsG) s += "        [unroll] for (uint k = 0u; k < " + std::to_string(e.gd.regsG) + "u; ++k) gGdG[k] = gdLoadReg(" + std::to_string(e.gd.regsU + e.gd.regsI) + "u + k);\n";
-        s += "        " + e.gd.ns + "V_main_vertex();\n";
-        s += "        gdVertexEnd(i, o, " + std::to_string(e.gd.fx) + "u);\n";
+        s += "        embVertexBegin(i, o, " + std::to_string(e.emb.fx) + "u);\n";
+        if (e.emb.regsU) s += "        [unroll] for (uint k = 0u; k < " + std::to_string(e.emb.regsU) + "u; ++k) gEmbU[k] = embLoadReg(k);\n";
+        if (e.emb.regsI) s += "        [unroll] for (uint k = 0u; k < " + std::to_string(e.emb.regsI) + "u; ++k) gEmbI[k] = embLoadReg(" + std::to_string(e.emb.regsU) + "u + k);\n";
+        if (e.emb.regsG) s += "        [unroll] for (uint k = 0u; k < " + std::to_string(e.emb.regsG) + "u; ++k) gEmbG[k] = embLoadReg(" + std::to_string(e.emb.regsU + e.emb.regsI) + "u + k);\n";
+        s += "        " + e.emb.ns + "V_main_vertex();\n";
+        s += "        embVertexEnd(i, o, " + std::to_string(e.emb.fx) + "u);\n";
         s += "        break;\n    }\n";
     }
     s += "    default: break;\n    }\n";
-    if (!vsOut.empty()) s += "#ifdef AVER_GD_VARYINGS_ON\n    averGdStoreVaryings(o);\n#endif\n";
+    if (!vsOut.empty()) s += "#ifdef AVER_CUSTOM_VARYINGS_ON\n    averEmbStoreVaryings(o);\n#endif\n";
     s += "}\n";
     // The vertex compile never runs a pixel shader; the declaration keeps voxi.hlsl's pixel entry points well formed.
     s += "AverSurface averEvalMaterial(AverVertex v, AverLight l) {\n    float2 uv = averSurfaceUV(v);\n    return averBuildSurface(v, l, averStockAuthoredAt(v, uv), uv);\n}\n";
@@ -1012,18 +1012,18 @@ std::string godotMaterialGraphHlsl(const std::vector<MaterialGraphEntry>& entrie
 
     // ---- the pixel-stage compile ----
     for (const MaterialGraphEntry& e : entries) {
-        if (!e.isGodot || !e.gd.hasFragment) continue;
-        s += "#undef GD_NS_CUR\n#define GD_NS_CUR " + e.gd.ns + "R_\n";
-        s += e.gd.fragmentSource;
+        if (!e.isEmbedded || !e.emb.hasFragment) continue;
+        s += "#undef EMB_NS_CUR\n#define EMB_NS_CUR " + e.emb.ns + "R_\n";
+        s += e.emb.fragmentSource;
         s += "\n";
     }
     s += "#ifdef AVER_RT_BINDLESS\n";
     for (const auto& rn : kRayRenames) s += std::string("#define ") + rn[0] + " " + rn[1] + "\n";
     s += "#define discard   // a ray hit cannot discard (a compute pass has no such statement); cut-outs come from ALPHA_SCISSOR_THRESHOLD\n";
     for (const MaterialGraphEntry& e : entries) {
-        if (!e.isGodot || !e.gd.hasFragment) continue;
-        s += "#undef GD_NS_CUR\n#define GD_NS_CUR " + e.gd.ns + "T_\n";
-        s += e.gd.fragmentSource;
+        if (!e.isEmbedded || !e.emb.hasFragment) continue;
+        s += "#undef EMB_NS_CUR\n#define EMB_NS_CUR " + e.emb.ns + "T_\n";
+        s += e.emb.fragmentSource;
         s += "\n";
     }
     for (const auto& rn : kRayRenames) s += std::string("#undef ") + rn[0] + "\n";
@@ -1031,13 +1031,13 @@ std::string godotMaterialGraphHlsl(const std::vector<MaterialGraphEntry>& entrie
     s += "#endif\n";
 
     s += "AverSurface averEvalMaterial(AverVertex v, AverLight l) {\n";
-    s += "#if AVER_MATX && defined(AVER_GD_FX_STOCK)\n    if (gMaterialGraphId == 0u) return averEvalMaterialFx(v, l);\n#endif\n";
+    s += "#if AVER_MATX && defined(AVER_CUSTOM_FX_STOCK)\n    if (gMaterialGraphId == 0u) return averEvalMaterialFx(v, l);\n#endif\n";
     s += "    float2 uv = averSurfaceUV(v);\n";
     s += "    AverAuthored a = averStockAuthoredAt(v, uv);\n";
-    s += "    gGdFx = 0u;\n";
+    s += "    gEmbFx = 0u;\n";
     emitSwitch(s, entries, "gMaterialGraphId", false);
     s += "    AverSurface s = averBuildSurface(v, l, a, uv);\n";
-    s += "    if ((gGdFx & 0x80000000u) != 0u) gdPost(s, v, l, gGdFx);\n";
+    s += "    if ((gEmbFx & 0x80000000u) != 0u) embPost(s, v, l, gEmbFx);\n";
     s += "    return s;\n}\n";
     s += "#ifdef AVER_RT_BINDLESS\n";
     s += "float4 averRtSampleSlotGraph(uint slot, float2 uv);\n";
@@ -1052,7 +1052,7 @@ std::string godotMaterialGraphHlsl(const std::vector<MaterialGraphEntry>& entrie
 }  // namespace
 
 std::string materialGraphHlsl(const std::vector<MaterialGraphEntry>& entries) {
-    if (anyGodotShader(entries)) return godotMaterialGraphHlsl(entries);
+    if (anyEmbeddedShader(entries)) return embeddedMaterialGraphHlsl(entries);
     std::string s;
     s += "// ---- generated from .ocgraph material graphs; do not edit ----\n";
 

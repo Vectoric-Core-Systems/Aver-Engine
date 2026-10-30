@@ -297,8 +297,8 @@ AVER_PHYS_API void aver_phys_joint_break_clear(void);
 
 // ---- Jointed bodies do not collide with each other (G2, additive) -----------------------------------------
 //
-// Godot's exclude_nodes_from_collision (on by default THERE). Here every joint starts as it always did,
-// colliding; the Godot import turns this on per joint. While on, the two bodies are excluded from colliding
+// Some content jointed bodies that do not collide by default. Here every joint starts as it always did,
+// colliding; an importer turns this on per joint. While on, the two bodies are excluded from colliding
 // with each other, exactly like a collision exception (physics_layers_abi.h) but owned by the joint: it
 // ends with the joint, and counts per joint, so two joints on one pair need both removed. Unaffected by
 // aver_phys_joint_set_enabled (a disabled joint still excludes). A joint to the world has nothing to exclude

@@ -23,6 +23,7 @@
 #  include "aver/game/ScriptDebugLines.hpp"
 #endif
 #include "aver/core/Log.hpp"
+#include "aver/extensions/Extensions.hpp"   // warnMissingProjectExtensions
 // GPU-timing tree formatter
 #include "aver/rhi/GpuTimingFormat.hpp"
 #include "aver/rhi/Tonemap.hpp"
@@ -1243,6 +1244,7 @@ void GameApp::openProject(Engine& e) {
     AVER_INFO("[Game] project '{}'  content={}  startMap='{}'",
               project_.name, project_.contentDir(),
               project_.startMap.empty() ? "<none>" : project_.startMap);
+    ext::warnMissingProjectExtensions(project_);   // an EXTENSION line whose extension is not installed
 #if AVER_MODULE_PBR
     // Set texture cache dir before any load
     assets::setTextureCacheDir(project_.dir + AVER_PATH_SEP "Saved" AVER_PATH_SEP "DerivedDataCache" AVER_PATH_SEP "Textures");
@@ -1605,7 +1607,7 @@ void GameApp::loadLevelNav() {
 #endif
 }
 
-// Level travel (Game.ChangeLevel, Godot's change_scene_to_file), between frames: the session's actors end
+// Level travel (Game.ChangeLevel), between frames: the session's actors end
 // (the GameInstance and persistent actors stay), the level is replaced, its placed actors spawn, and the
 // GameMode, controller and pawn begin again at the new level's spawn.
 void GameApp::travelTo(const std::string& requested) {

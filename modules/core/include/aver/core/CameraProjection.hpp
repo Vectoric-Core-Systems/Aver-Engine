@@ -1,5 +1,5 @@
 // Camera projections beyond the symmetric perspective one (G4 R4, docs/plans/fabric/G4_RENDER.md): orthographic, off-centre frustum, and
-// Godot's keep_aspect. Header-only and pure so the host, the renderers and the tests share one set of formulas.
+// keep-aspect. Header-only and pure so the host, the renderers and the tests share one set of formulas.
 //
 // Row-vector, left-handed, depth [0,1] like Mat4::perspectiveLH. The default CameraProjection (perspective, keep height) builds
 // EXACTLY Mat4::perspectiveLH(fov, aspect, near, far), so a camera that never asks for anything else is unchanged bit for bit.
@@ -18,8 +18,8 @@ inline ProjectionKind projectionKindFromInt(i32 v) {
 }
 
 // What a camera asks of its projection. Lengths in centimetres. `fovRad` is the field of view of the KEPT dimension (vertical unless
-// keepWidth), as Godot's `fov` is. `sizeCm` is the width or height (per keepWidth) of the orthographic view, or of the frustum at its
-// near plane. `offsetXCm/offsetYCm` shift a frustum's window at the near plane (Godot's frustum_offset).
+// keepWidth), as a keep-aspect `fov` is. `sizeCm` is the width or height (per keepWidth) of the orthographic view, or of the frustum at its
+// near plane. `offsetXCm/offsetYCm` shift a frustum's window at the near plane (the frustum offset).
 struct CameraProjection {
     ProjectionKind kind = ProjectionKind::Perspective;
     f32 fovRad = 1.0471975512f;
@@ -62,7 +62,7 @@ inline Mat4 orthographicOffCenterLH(f32 l, f32 r, f32 b, f32 t, f32 zn, f32 zf) 
 }
 
 // Half extents of the view: perspective, at distance 1 (tangents of the half angles); orthographic, in centimetres at any distance;
-// frustum, in centimetres at the near plane. Godot's rule: keep_aspect names the dimension `fov` / `size` describes.
+// frustum, in centimetres at the near plane. The rule: keep-aspect names the dimension `fov` / `size` describes.
 inline void projectionHalfExtents(const CameraProjection& p, f32 aspect, f32& halfW, f32& halfH) {
     if (!(aspect > 0.0f)) aspect = 1.0f;
     if (p.kind == ProjectionKind::Perspective) {

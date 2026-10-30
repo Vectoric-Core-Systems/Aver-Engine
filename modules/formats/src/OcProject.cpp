@@ -112,6 +112,12 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
             if (t.size() > 1) out.localeDefault = std::string(t[1]);
         } else if (equalsCI(key, "AUTHOR")) {
             out.author = std::string(restOfLine(line, key));
+        } else if (equalsCI(key, "EXTENSION")) {
+            if (t.size() > 1) {
+                bool seen = false;
+                for (const ProjectExtension& e : out.extensions) seen = seen || e.name == t[1];
+                if (!seen) out.extensions.push_back({std::string(t[1]), t.size() > 2 ? std::string(t[2]) : std::string()});
+            }
         } else if (equalsCI(key, "RENDER.GI")) {
             if (t.size() > 1) out.giQuality = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.RAYTRACING")) {
@@ -298,7 +304,7 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
         } else if (equalsCI(key, "PHYSICS.COMBINE")) {
             if (t.size() > 1) {   // a value that is neither word is dropped, not read as jolt: a typo must not silently pick a rule
                 if (equalsCI(t[1], "jolt")) out.physCombine = 0;
-                else if (equalsCI(t[1], "godot")) out.physCombine = 1;
+                else if (equalsCI(t[1], "material") || equalsCI(t[1], "godot")) out.physCombine = 1;   // "godot" is the old spelling, still read
             }
         } else if (const int ps = physicsSettingIndex(key); ps >= 0) {
             // A value that is not a number is dropped, not read as 0: a typo must not silently become a setting.
@@ -414,7 +420,7 @@ bool isOwnedKey(std::string_view line) {
     const std::string_view l = trim(line);
     if (l.empty() || l[0] == '#') return false;
     static const char* kOwned[] = {
-        "NAME", "ENGINE", "CREATEDWITH", "CONTENT", "STARTMAP", "AUTHOR", "DRONE.GRAPH", "INPUT.SCHEME", "GAME.MODE", "LOCALE.DEFAULT",
+        "NAME", "ENGINE", "CREATEDWITH", "CONTENT", "STARTMAP", "AUTHOR", "EXTENSION", "DRONE.GRAPH", "INPUT.SCHEME", "GAME.MODE", "LOCALE.DEFAULT",
         "RENDER.GI", "RENDER.RAYTRACING", "RENDER.PATHTRACING",
         "RENDER.VOXELRES", "RENDER.GIINTENSITY", "RENDER.GIDISTANCE",
         "RENDER.RTSHADOWRAYS", "RENDER.RTPIXELSPERRAY", "RENDER.RTSHADOWDENOISE",
@@ -464,6 +470,12 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
     if (!d.contentRoot.empty())      { owned += "CONTENT ";  owned += d.contentRoot; owned += '\n'; }
     if (!d.startMap.empty())         { owned += "STARTMAP "; owned += d.startMap;    owned += '\n'; }
     if (!d.author.empty())           { owned += "AUTHOR ";   owned += d.author;      owned += '\n'; }
+    for (const ProjectExtension& e : d.extensions) {
+        if (e.name.empty()) continue;
+        owned += "EXTENSION "; owned += e.name;
+        if (!e.version.empty()) { owned += ' '; owned += e.version; }
+        owned += '\n';
+    }
     // Owned key: stripped if present, replaced with this if not empty.
     if (!d.droneGraph.empty())       { owned += "DRONE.GRAPH "; owned += d.droneGraph; owned += '\n'; }
     // Owned key: stripped if present, replaced with this if not empty.
@@ -570,7 +582,7 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
     if (d.physThreads > -2) { owned += "PHYSICS.THREADS "; owned += std::to_string(d.physThreads); owned += '\n'; }
     if (d.physShapeCache >= 0) { owned += "PHYSICS.SHAPECACHE "; owned += std::to_string(d.physShapeCache); owned += '\n'; }
     if (d.physInterpolation >= 0) { owned += "PHYSICS.INTERPOLATION "; owned += std::to_string(d.physInterpolation); owned += '\n'; }
-    if (d.physCombine >= 0) { owned += "PHYSICS.COMBINE "; owned += d.physCombine == 1 ? "godot" : "jolt"; owned += '\n'; }
+    if (d.physCombine >= 0) { owned += "PHYSICS.COMBINE "; owned += d.physCombine == 1 ? "material" : "jolt"; owned += '\n'; }
     // The live solver settings, in the order the project stated them; a name the mirror does not know is dropped
     // (the parser would not read it back).
     for (const auto& [name, value] : d.physicsSettings) {

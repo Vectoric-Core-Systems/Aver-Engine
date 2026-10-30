@@ -149,7 +149,7 @@ inline void applyProjectPhysicsKeys(const fmt::ProjectDesc& project) {
         // The material combine rule is world state: stated -> that rule; a project that does not state it puts Jolt's back if the last one changed it.
         PhysicsAppliedKeys& applied = physicsAppliedKeys();
         if (project.physCombine >= 0) {
-            if (aver_phys_set_combine_mode(project.physCombine == 1 ? AVER_PHYS_COMBINE_GODOT : AVER_PHYS_COMBINE_JOLT)) applied.combine = true;
+            if (aver_phys_set_combine_mode(project.physCombine == 1 ? AVER_PHYS_COMBINE_MATERIAL : AVER_PHYS_COMBINE_JOLT)) applied.combine = true;
             else AVER_WARN("[Project] PHYSICS.COMBINE refused");
         } else if (applied.combine) {
             aver_phys_set_combine_mode(AVER_PHYS_COMBINE_JOLT);

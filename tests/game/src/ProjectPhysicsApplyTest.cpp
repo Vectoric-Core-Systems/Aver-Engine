@@ -204,8 +204,10 @@ static void testCombineKey() {
     resetAll();
     aver_phys_init();
     check(aver_phys_combine_mode() == AVER_PHYS_COMBINE_JOLT, "Jolt's rules by default");
+    game::applyProjectPhysicsKeys(parse("OCPROJECT 1\nNAME M\nPHYSICS.COMBINE material\n"));
+    check(aver_phys_combine_mode() == AVER_PHYS_COMBINE_MATERIAL, "PHYSICS.COMBINE material selects the material rules");
     game::applyProjectPhysicsKeys(parse("OCPROJECT 1\nNAME M\nPHYSICS.COMBINE godot\n"));
-    check(aver_phys_combine_mode() == AVER_PHYS_COMBINE_GODOT, "PHYSICS.COMBINE godot selects Godot's rules");
+    check(aver_phys_combine_mode() == AVER_PHYS_COMBINE_MATERIAL, "the old spelling godot is still read");
     game::applyProjectPhysicsKeys(parse("OCPROJECT 1\nNAME M\n"));
     check(aver_phys_combine_mode() == AVER_PHYS_COMBINE_JOLT, "a later project that does not state it puts Jolt's back");
     game::applyProjectPhysicsKeys(parse("OCPROJECT 1\nNAME M\nPHYSICS.COMBINE jolt\n"));

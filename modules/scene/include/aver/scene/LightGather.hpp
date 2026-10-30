@@ -30,8 +30,8 @@ struct WorldLight {
     bool   castShadows = true;
     bool   iesPeak = false;
     i64    iesProfile = 0, cookie = 0;
-    // G4 R2 (CLight's Godot block, resolved): godot = kLightGodot set; the rest are the stored values (0 = default).
-    bool   godot = false, negative = false;
+    // CLight's parametric block, resolved: parametric = kLightParametric set; the rest are the stored values (0 = default).
+    bool   parametric = false, negative = false;
     f32    attenuation = 0.0f, spotAttenuation = 0.0f, specularScale = 1.0f;
     f32    shadowBias = 0.0f, shadowNormalBias = 0.0f;
     f32    fadeBeginCm = 0.0f, fadeLengthCm = 0.0f, fadeShadowCm = 0.0f;
@@ -87,9 +87,9 @@ inline bool makeWorldLight(const CLight& c, const Mat4& m, WorldLight& out) {
     w.iesPeak = (c.flags & kLightIesPeak) != 0;
     w.iesProfile = c.iesProfile;
     w.cookie = c.cookie;
-    w.godot = (c.flags & kLightGodot) != 0;
+    w.parametric = (c.flags & kLightParametric) != 0;
     w.negative = (c.flags & kLightNegative) != 0;
-    if (w.godot) {
+    if (w.parametric) {
         w.attenuation = c.attenuation >= 0.0f ? c.attenuation : 0.0f;
         w.spotAttenuation = c.spotAttenuation > 0.0f ? c.spotAttenuation : 1.0f;
         w.specularScale = c.specularScale >= 0.0f ? c.specularScale : 0.0f;

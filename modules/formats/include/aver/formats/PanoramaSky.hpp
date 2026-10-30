@@ -1,10 +1,10 @@
 #pragma once
-// An equirectangular panorama (an HDRI) fitted onto Aver's authored sky dome. Godot's PanoramaSkyMaterial becomes a SKY record: the dome has a
+// An equirectangular panorama (an HDRI) fitted onto Aver's authored sky dome. A panorama sky becomes a SKY record: the dome has a
 // zenith colour, a horizon colour, a blend exponent and a ground albedo, so the fit takes band averages of the panorama by elevation. The renderers
-// do not sample the panorama itself (docs/plans/fabric/G4_RENDER.md R3: the ray-driven pass draws the primary sky and may not be touched), so this is
+// do not sample the panorama itself (the ray-driven pass draws the primary sky and may not be touched), so this is
 // an approximation of the sky's brightness and colour by height, not its detail.
 //
-// Convention: row 0 is straight up, the last row straight down, columns wrap around the vertical axis (Godot's, Y up; Aver's Z up is the same
+// Convention: row 0 is straight up, the last row straight down, columns wrap around the vertical axis (Y up in the source; Aver's Z up is the same
 // elevation). Pixels are linear, scene-referred radiance.
 #include "aver/core/Types.hpp"
 
@@ -33,7 +33,7 @@ struct SkyDomeFit {
                                        // (the dome reaches `horizon` only straight down, so it is not the colour seen at the horizon line)
 };
 
-// Fits the dome to `img` scaled by `energy` (Godot's PanoramaSkyMaterial.energy_multiplier). Rotation about the vertical axis does not change
+// Fits the dome to `img` scaled by `energy` (the energy multiplier). Rotation about the vertical axis does not change
 // a dome that depends on elevation only, so it is not a parameter.
 bool fitSkyDome(const PanoramaImage& img, f64 energy, SkyDomeFit& out);
 

@@ -10,7 +10,7 @@
 // The defines below mirror VoxiRenderer::createScenePipelines, PathTracer.cpp, WaterSurface.cpp, Nrd2.cpp
 // (AVER_NRD2_PASS, no prelude) and NeuRaC.cpp / NeuRaCGuide.cpp (SM 6.2, no defines).
 
-#include "GdGraphBridge.hpp"
+#include "EmbeddedHlslBridge.hpp"
 #include "aver/core/DynamicLibrary.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/pbr/PbrShaders.hpp"
@@ -170,49 +170,15 @@ int main() {
     // there is no AVER_MATERIAL_GRAPH block, same as a project without graphs.
     const std::string voxiSrc = std::string(rhi::sharedShaderPrelude()) + pbr::materialShaderPrelude() +
                                 rhi::shaderFile("voxi.hlsl");
-    // G6 SH2: the same Voxi source with two converted Godot shaders registered (the engine composes it the same way, VoxiRenderer.cpp voxiShaderPrelude). The
+    // The same Voxi source with two embedded HLSL shaders registered (the engine composes it the same way, VoxiRenderer.cpp voxiShaderPrelude). The
     // vertex() / fragment() / varying / texture / discard shader is the one that exercises every part of the generated code; the second brings NORMAL.
-    static const char* kGdA = R"(shader_type spatial;
-render_mode cull_disabled;
-uniform vec4 tint : source_color = vec4(0.8, 0.4, 0.2, 1.0);
-uniform float wave = 0.2;
-uniform sampler2D albedo_tex : source_color, repeat_enable;
-uniform sampler2D height_tex : filter_nearest;
-varying vec3 v_pos;
-varying flat int v_id;
-void vertex() {
-    VERTEX.y += textureLod(height_tex, UV, 0.0).r * wave + sin(TIME) * wave;
-    v_pos = VERTEX;
-    v_id = INSTANCE_ID;
-}
-void fragment() {
-    vec4 a = texture(albedo_tex, UV + v_pos.xz * 0.01);
-    ALBEDO = a.rgb * tint.rgb + float(v_id) * 0.0;
-    ALPHA = a.a;
-    ALPHA_SCISSOR_THRESHOLD = 0.5;
-    ROUGHNESS = 0.4;
-    RIM = 0.3;
-    if (a.a < 0.1) { discard; }
-}
-)";
-    static const char* kGdB = R"(shader_type spatial;
-uniform float k = 1.0;
-void fragment() {
-    NORMAL = normalize(NORMAL + vec3(0.0, 0.2 * k, 0.0));
-    ALBEDO = vec3(0.5, 0.6, 0.7);
-}
-)";
+    // Both are written by hand in EmbeddedHlslBridge.hpp, in the shape a translator emits.
     pbr::materialGraphs().clear();
-    for (const auto& gd : {std::make_pair(kGdA, "GdA"), std::make_pair(kGdB, "GdB")}) {
-        fmt::godot::GdEngineShader gs;
-        fmt::godot::GdEngineOptions go;
-        go.name = gd.second;
-        if (!fmt::godot::gdShaderForEngine(gd.first, std::string(gd.second) + ".gdshader", go, gs) || !gdtest::registerShader(gs, std::string(gd.second) + ".ocgraph")) {
-            AVER_ERROR("  FAIL  the Godot test shader {} did not register: {}", gd.second, gs.error);
-            return 1;
-        }
+    if (!embtest::registerPart(embtest::displaced(), "EmbA.ocgraph") || !embtest::registerPart(embtest::normalWriter(), "EmbB.ocgraph")) {
+        AVER_ERROR("  FAIL  the embedded test shaders did not register");
+        return 1;
     }
-    const std::string voxiGdSrc = gdtest::compose(rhi::shaderFile("voxi.hlsl"));
+    const std::string voxiEmbSrc = embtest::compose(rhi::shaderFile("voxi.hlsl"));
     pbr::materialGraphs().clear();
     const std::string ptSrc = std::string(rhi::sharedShaderPrelude()) + rhi::shaderFile("pt_pathtrace.hlsl");
     const std::string waterSrc = rhi::shaderFile("water_displace.hlsl");
@@ -279,25 +245,25 @@ void fragment() {
         {"Voxi PSMainVoxi RT material fx all G-buffer", voxiSrc, "PSMainVoxi", 'p', 65, vx("AVER_RT=1;AVER_GBUFFER=1;" + fxBase + fxAll), true},
         {"Voxi VSMainFx",                           voxiSrc, "VSMainFx", 'v', 51, vx(fxBase + ";AVER_MATX_VS=1")},
         {"Voxi VSMainFx mesh extra",                voxiSrc, "VSMainFx", 'v', 51, vx(fxBase + ";AVER_MATX_VS=1;AVER_MESH_EXTRA=1")},
-        // G6 SH2 (docs/plans/fabric/G6_SHADERS.md): the same entry points with converted Godot shaders registered. The raster rows are the material variant a
-        // Godot-shaded material draws through (plus the second-stream and local-light twins), VSMainGd runs vertex(), and the ray rows (RT hits, PSRayDriven,
+        // The same entry points with embedded HLSL shaders registered. The raster rows are the material variant an
+        // embedded-shader material draws through (plus the second-stream and local-light twins), VSMainEmb runs vertex(), and the ray rows (RT hits, PSRayDriven,
         // the compute stages) compile the derivative-free ray flavour of the same source. Read against the default rows above.
-        {"Voxi PSMainVoxi godot raster",             voxiGdSrc, "PSMainVoxi", 'p', 51, vx("AVER_HAIR_SHADING=1")},
-        {"Voxi PSMainVoxi godot material fx",        voxiGdSrc, "PSMainVoxi", 'p', 51, vx(fxBase + ";AVER_MATX_LATEZ=1;AVER_GD_VARYINGS_ON=1")},
-        {"Voxi PSMainVoxi godot material fx G-buffer", voxiGdSrc, "PSMainVoxi", 'p', 51, vx(fxBase + ";AVER_MATX_LATEZ=1;AVER_GD_VARYINGS_ON=1;AVER_GBUFFER=1")},
-        {"Voxi PSMainVoxi godot material fx mesh extra", voxiGdSrc, "PSMainVoxi", 'p', 51, vx(fxBase + ";AVER_MATX_LATEZ=1;AVER_GD_VARYINGS_ON=1;AVER_MESH_EXTRA=1")},
-        {"Voxi PSMainVoxi godot material fx local lights", voxiGdSrc, "PSMainVoxi", 'p', 51, vx(fxBase + ";AVER_MATX_LATEZ=1;AVER_GD_VARYINGS_ON=1;AVER_LOCAL_RASTER=1")},
-        {"Voxi PSMainVoxi RT godot material fx",     voxiGdSrc, "PSMainVoxi", 'p', 65, vx("AVER_RT=1;AVER_GD_VARYINGS_ON=1;" + fxBase + ";AVER_MATX_LATEZ=1"), true},
-        {"Voxi VSMainGd",                            voxiGdSrc, "VSMainGd", 'v', 51, vx(fxBase + ";AVER_MATX_GDVS=1;AVER_GD_NO_DERIVATIVES=1;AVER_GD_VARYINGS_ON=1")},
-        {"Voxi VSMainGd mesh extra",                 voxiGdSrc, "VSMainGd", 'v', 51, vx(fxBase + ";AVER_MATX_GDVS=1;AVER_GD_NO_DERIVATIVES=1;AVER_GD_VARYINGS_ON=1;AVER_MESH_EXTRA=1")},
-        {"Voxi PSMainVoxi RT godot",                 voxiGdSrc, "PSMainVoxi", 'p', 65, vx("AVER_RT=1"), true},
-        {"Voxi PSMainVoxi blended pass godot",       voxiGdSrc, "PSMainVoxi", 'p', 65, vx(bindless + ";AVER_BLENDED_PASS=1"), true},
-        {"Voxi PSRayDriven single pass godot",       voxiGdSrc, "PSRayDriven", 'p', 65, vx(bindless + singlePass), true},
-        {"Voxi PSRayDriven split godot",             voxiGdSrc, "PSRayDriven", 'p', 65, vx(bindless + ";AVER_RD_SPLIT=1"), true},
-        {"Voxi CSRdVisibility godot",                voxiGdSrc, "CSRdVisibility", 'c', 65, vx(bindless), true},
-        {"Voxi CSRdShadow godot",                    voxiGdSrc, "CSRdShadow", 'c', 66, vx(bindless), true},
-        {"Voxi CSRdGi godot",                        voxiGdSrc, "CSRdGi", 'c', 66, vx(bindless)},
-        {"Voxi CSRdManyLights godot",                voxiGdSrc, "CSRdManyLights", 'c', 65, vx(bindless), true},
+        {"Voxi PSMainVoxi embedded raster",          voxiEmbSrc, "PSMainVoxi", 'p', 51, vx("AVER_HAIR_SHADING=1")},
+        {"Voxi PSMainVoxi embedded material fx",     voxiEmbSrc, "PSMainVoxi", 'p', 51, vx(fxBase + ";AVER_MATX_LATEZ=1;AVER_CUSTOM_VARYINGS_ON=1")},
+        {"Voxi PSMainVoxi embedded material fx G-buffer", voxiEmbSrc, "PSMainVoxi", 'p', 51, vx(fxBase + ";AVER_MATX_LATEZ=1;AVER_CUSTOM_VARYINGS_ON=1;AVER_GBUFFER=1")},
+        {"Voxi PSMainVoxi embedded material fx mesh extra", voxiEmbSrc, "PSMainVoxi", 'p', 51, vx(fxBase + ";AVER_MATX_LATEZ=1;AVER_CUSTOM_VARYINGS_ON=1;AVER_MESH_EXTRA=1")},
+        {"Voxi PSMainVoxi embedded material fx local lights", voxiEmbSrc, "PSMainVoxi", 'p', 51, vx(fxBase + ";AVER_MATX_LATEZ=1;AVER_CUSTOM_VARYINGS_ON=1;AVER_LOCAL_RASTER=1")},
+        {"Voxi PSMainVoxi RT embedded material fx",  voxiEmbSrc, "PSMainVoxi", 'p', 65, vx("AVER_RT=1;AVER_CUSTOM_VARYINGS_ON=1;" + fxBase + ";AVER_MATX_LATEZ=1"), true},
+        {"Voxi VSMainEmb",                           voxiEmbSrc, "VSMainEmb", 'v', 51, vx(fxBase + ";AVER_MATX_EMBVS=1;AVER_CUSTOM_NO_DERIVATIVES=1;AVER_CUSTOM_VARYINGS_ON=1")},
+        {"Voxi VSMainEmb mesh extra",                voxiEmbSrc, "VSMainEmb", 'v', 51, vx(fxBase + ";AVER_MATX_EMBVS=1;AVER_CUSTOM_NO_DERIVATIVES=1;AVER_CUSTOM_VARYINGS_ON=1;AVER_MESH_EXTRA=1")},
+        {"Voxi PSMainVoxi RT embedded",              voxiEmbSrc, "PSMainVoxi", 'p', 65, vx("AVER_RT=1"), true},
+        {"Voxi PSMainVoxi blended pass embedded",    voxiEmbSrc, "PSMainVoxi", 'p', 65, vx(bindless + ";AVER_BLENDED_PASS=1"), true},
+        {"Voxi PSRayDriven single pass embedded",    voxiEmbSrc, "PSRayDriven", 'p', 65, vx(bindless + singlePass), true},
+        {"Voxi PSRayDriven split embedded",          voxiEmbSrc, "PSRayDriven", 'p', 65, vx(bindless + ";AVER_RD_SPLIT=1"), true},
+        {"Voxi CSRdVisibility embedded",             voxiEmbSrc, "CSRdVisibility", 'c', 65, vx(bindless), true},
+        {"Voxi CSRdShadow embedded",                 voxiEmbSrc, "CSRdShadow", 'c', 66, vx(bindless), true},
+        {"Voxi CSRdGi embedded",                     voxiEmbSrc, "CSRdGi", 'c', 66, vx(bindless)},
+        {"Voxi CSRdManyLights embedded",             voxiEmbSrc, "CSRdManyLights", 'c', 65, vx(bindless), true},
         {"Voxi PSMainVoxi RT",                  voxiSrc, "PSMainVoxi", 'p', 65, vx("AVER_RT=1"), true},
         {"Voxi PSMainVoxi blended pass",        voxiSrc, "PSMainVoxi", 'p', 65, vx(bindless + ";AVER_BLENDED_PASS=1"), true},
         {"Voxi PSMainVoxi RT G-buffer",         voxiSrc, "PSMainVoxi", 'p', 65, vx("AVER_RT=1;AVER_GBUFFER=1"), true},
@@ -310,7 +276,7 @@ void fragment() {
         {"Voxi CSRdGi",                         voxiSrc, "CSRdGi",     'c', 66, vx(bindless)},
         // MANY LIGHTS (docs/plans/wave4/MANY_LIGHTS.md 3.9): authored SM 6.5-clean, so the same source is the Vulkan pass.
         {"Voxi CSRdManyLights",                 voxiSrc, "CSRdManyLights", 'c', 65, vx(bindless), true},
-        // R3 (docs/plans/fabric/G4_RENDER.md): the post composite, ordinary and with the Godot tonemappers / display adjustments
+        // The post composite, ordinary and with the extended tonemappers / display adjustments
         // (AVER_POST_TONEMAP_EXT). The ordinary rows are what ships today; the EXT rows are read against them. D3D12 declares the lens
         // table in every composite; Vulkan only what a permutation uses, so both define sets are compiled.
         {"Post PSComposite (D3D12 defines)",             postSrc, "PSComposite", 'p', 60, "AVER_POST_DEPTHFX=1;AVER_POST_LUT=1;AVER_POST_BLOOM=1;AVER_POST_AUTOEXPOSURE=1"},
@@ -369,7 +335,7 @@ void fragment() {
         if (dxCreate && SUCCEEDED(dxCreate(CLSID_DxcUtils, IID_PPV_ARGS(&dxUtils))) && SUCCEEDED(dxCreate(CLSID_DxcCompiler, IID_PPV_ARGS(&dxCompiler)))) {
             int dxFailures = 0, dxCount = 0;
             for (const Variant& v : variants) {
-                const bool wanted = (v.name.find("godot") != std::string::npos && v.stage != 'v') || v.name.find("local lights") != std::string::npos || (v.name.find("material fx") != std::string::npos && v.stage == 'p') || v.name == "Voxi PSMainVoxi raster" || v.name == "Voxi PSMainVoxi RT" ||
+                const bool wanted = (v.name.find("embedded") != std::string::npos && v.stage != 'v') || v.name.find("local lights") != std::string::npos || (v.name.find("material fx") != std::string::npos && v.stage == 'p') || v.name == "Voxi PSMainVoxi raster" || v.name == "Voxi PSMainVoxi RT" ||
                                     v.name.find("(D3D12 defines)") != std::string::npos || v.name.rfind("Preview ", 0) == 0 || v.name.rfind("Froxel ", 0) == 0;
                 if (!wanted) continue;
                 ++dxCount;

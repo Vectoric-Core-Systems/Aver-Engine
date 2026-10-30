@@ -1,6 +1,6 @@
 #pragma once
-/* Aver.Net.Abi -- the plain-C seam onto modules/net (OS sockets and the reliable-UDP host/peer protocol), so Aver.Fabric's PacketPeerUDP,
- * UDPServer, StreamPeerTCP, TCPServer, IP, ENetConnection, ENetPacketPeer and ENetMultiplayerPeer drive it.
+/* Aver.Net.Abi -- the plain-C seam onto modules/net (OS sockets and the reliable-UDP host/peer protocol), so scripts and
+ * managed extensions can open UDP and TCP sockets and ENet-style hosts and peers.
  * Conventions as docs/ABI.md section 13: setters return 1 on success and 0 on a rejected request (stale handle, bad argument), getters return the
  * value or a neutral one (0, -1 for "none") for a stale handle. Socket and host handles are int32 (0 invalid); a peer is named by an int64 key
  * (generation << 16 | slot), valid until that peer disconnects or its slot is reused. SINGLE GAME THREAD; nothing here locks.
@@ -9,10 +9,10 @@
  * of the socket's family: only a caller that means to listen on every interface passes it. Nothing here binds a wildcard on its own: a host
  * created with no bind address opens its socket at its first connect, bound to the loopback address when the target is loopback.
  *
- * ENUMS (mirrored by hand in Aver.Fabric/Nodes/NetworkNative.cs and checked by AbiEnumTest):
+ * ENUMS (mirrored by hand in the extension's managed half, extensions/FabricConnector/managed/Aver.Fabric/Nodes/NetworkNative.cs, and checked by AbiEnumTest):
  *   event 0 none, 1 connect, 2 disconnect, 3 receive      reason (disconnect events) 0 none, 1 remote, 2 local, 3 timeout, 4 connect failed
  *   peer state: ENetPacketPeer.PeerState's numbering      send flags: 1 reliable, 2 unsequenced, neither = unreliable ordered
- *   disconnect mode 0 request, 1 later, 2 now             stat ids: Godot's PeerStatistic numbering, then Aver extras from 16
+ *   disconnect mode 0 request, 1 later, 2 now             stat ids: the PeerStatistic numbering, then Aver extras from 16
  */
 #include <stdint.h>
 
@@ -68,7 +68,7 @@
 #define AVER_NET_ERROR       -2
 #define AVER_NET_CLOSED      -3
 
-/* aver_net_peer_stat ids (the first twelve are Godot's ENetPacketPeer.PeerStatistic). */
+/* aver_net_peer_stat ids (the first twelve are the ENet peer statistics). */
 #define AVER_NET_PEERSTAT_PACKET_LOSS                 0
 #define AVER_NET_PEERSTAT_PACKET_LOSS_VARIANCE        1
 #define AVER_NET_PEERSTAT_PACKET_THROTTLE             2

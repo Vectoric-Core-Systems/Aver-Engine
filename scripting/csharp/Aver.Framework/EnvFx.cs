@@ -5,7 +5,7 @@
 
 namespace Aver.Framework;
 
-/// <summary>Godot's <c>RenderingServer.FogVolumeShape</c> numbers, the same as <c>AVER_FW_FOGVOL_*</c>.</summary>
+/// <summary>The fog volume shape numbers, the same as <c>AVER_FW_FOGVOL_*</c>.</summary>
 public enum FogVolumeShapeKind
 {
     Ellipsoid = 0,
@@ -28,7 +28,7 @@ public readonly struct ProbeBlend
 }
 
 /// <summary>
-/// Local fog volumes and reflection probes (Godot's FogVolume and ReflectionProbe). Units are the engine's: centimetres, +Z up, linear colours. A matrix is the
+/// Local fog volumes and reflection probes. Units are the engine's: centimetres, +Z up, linear colours. A matrix is the
 /// engine's 12-float instance matrix (three basis rows then the translation, row vectors); half extents are along the engine's local axes before the matrix's scale.
 /// </summary>
 /// <remarks>
@@ -48,7 +48,7 @@ public static class EnvFx
     public static bool DestroyFogVolume(int id) => id > 0 && FwEnvFx.aver_fw_fogvol_destroy(id) != 0;
     public static int FindFogVolume(string key) => string.IsNullOrEmpty(key) ? 0 : FwEnvFx.aver_fw_fogvol_find(key);
 
-    /// <summary>Everything about the volume in one call. Density is per metre (Godot's FogMaterial.density; negative carves), height falloff per metre, edge fade a
+    /// <summary>Everything about the volume in one call. Density is per metre (negative carves), height falloff per metre, edge fade a
     /// fraction of the half size. False for an unknown id, a non-finite value or a matrix that cannot be inverted.</summary>
     public static bool SetFogVolume(int id, FogVolumeShapeKind shape, float[] world12, float[] halfExtentCm3, float densityPerMetre, float[]? albedo3 = null,
                                     float[]? emission3 = null, float heightFalloff = 0f, float edgeFade = 0.1f) =>
@@ -57,7 +57,7 @@ public static class EnvFx
 
     public static bool SetFogVolumeEnabled(int id, bool on) => id > 0 && FwEnvFx.aver_fw_fogvol_set_enabled(id, on ? 1 : 0) != 0;
 
-    /// <summary>G6 SH3: a converted Godot fog shader (registered with <see cref="GodotEnv.Register"/> as <see cref="GodotEnvKind.Fog"/>) replaces the volume's
+    /// <summary>A custom fog program (registered with <see cref="CustomEnv.Register"/> as <see cref="CustomEnvKind.Fog"/>) replaces the volume's
     /// density, albedo and emission. Null or empty goes back to the volume's own values.</summary>
     public static bool SetFogVolumeShader(int id, string? shaderName) => id > 0 && FwEnvFx.aver_fw_fogvol_set_shader(id, shaderName) != 0;
 
@@ -79,7 +79,7 @@ public static class EnvFx
                                     int resolution) =>
         id > 0 && FwEnvFx.aver_fw_probe_set_look(id, intensity, blendDistanceCm, maxDistanceCm, boxProjection ? 1 : 0, interior ? 1 : 0, updateAlways ? 1 : 0, resolution) != 0;
 
-    /// <summary>Mode 0 disabled, 1 environment, 2 colour (Godot's ReflectionProbe.AmbientMode).</summary>
+    /// <summary>Mode 0 disabled, 1 environment, 2 colour.</summary>
     public static bool SetProbeAmbient(int id, int mode, float[]? colour3, float energy) => id > 0 && FwEnvFx.aver_fw_probe_set_ambient(id, mode, colour3, energy) != 0;
 
     public static bool SetProbeMasks(int id, uint cullMask, uint reflectionMask) => id > 0 && FwEnvFx.aver_fw_probe_set_masks(id, cullMask, reflectionMask) != 0;

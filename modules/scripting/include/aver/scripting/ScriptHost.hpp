@@ -15,6 +15,9 @@ struct HostDesc {
     std::string bridgeDir;
     // Directory scanned for user script assemblies. May be empty or may not exist.
     std::string scriptsDir;
+    // Directory holding the installed extensions (<dir>/<Name>/extension.json). Empty: <executable dir>/Extensions. The managed half of each
+    // Ready extension is loaded into the host before scriptsDir (docs/EXTENSIONS.md).
+    std::string extensionsDir;
 };
 
 // In-process CLR host. One per process. Declines rather than failing when .NET is unavailable.

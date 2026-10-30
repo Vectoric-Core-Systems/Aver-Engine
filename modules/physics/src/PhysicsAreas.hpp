@@ -1,5 +1,5 @@
-// PhysicsAreas.hpp -- per-body contact monitoring and Godot-style Areas (G2). SRC-LOCAL like PhysicsInternal.hpp. The design and the rules
-// are in docs/physics/GODOT_AREAS.md; the ABI is physics_areas_abi.h. Every hook is a pointer test when nothing uses the feature.
+// PhysicsAreas.hpp -- per-body contact monitoring and Areas. SRC-LOCAL like PhysicsInternal.hpp. The design and the rules
+// are in docs/physics/AREAS.md; the ABI is physics_areas_abi.h. Every hook is a pointer test when nothing uses the feature.
 #pragma once
 #include "PhysicsInternal.hpp"
 

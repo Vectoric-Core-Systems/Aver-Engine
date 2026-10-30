@@ -1,4 +1,4 @@
-# Aver.Anim.Abi -- the plain-C seam onto property-track animation (Godot AnimationPlayer parity), so Aver.Fabric drives it.
+# Aver.Anim.Abi -- the plain-C seam onto property-track animation, so managed layers (an extension's animation player) drive it.
 #
 # SHARED because the .NET host P/Invokes it. It links Aver.Anim, Aver.Formats and Aver.Core STATICALLY and nothing else: no scene,
 # no RHI, no window, so a managed test host loads it from a plain folder. The file is Aver.Anim.Abi and no managed assembly

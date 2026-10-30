@@ -632,7 +632,7 @@ void GameLevel::spawnClassPlacements() {
     //
     // A `snap` class placement asks the same ground query load() hands world::instantiate, as the
     // editor's spawnClassPlacements does.
-    // One spawn batch: every placed actor begins play after all of them exist, children first (Godot's _ready).
+    // One spawn batch: every placed actor begins play after all of them exist, children first.
     aver_fw_spawn_batch_begin();
     instances_.spawnPendingClasses();   // [wave3/level-instances] classes inside level instances, now that scripting is up
     scene::World& world = scene::World::instance();

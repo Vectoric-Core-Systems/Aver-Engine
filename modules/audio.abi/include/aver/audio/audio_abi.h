@@ -219,8 +219,8 @@ AVER_AUDIO_API int32_t aver_audio_stream_underruns(void);
 // Streams currently held by a playing voice.
 AVER_AUDIO_API int32_t aver_audio_active_streams(void);
 
-/* ---- bus graph, effects, Godot-style players (G5 S1; docs/AUDIO.md "Bus graph") ---------------------------------
- * Opt-in: nothing below changes the four legacy buses. The graph is Godot's AudioServer model (named buses, bus 0 is "Master", sends,
+/* ---- bus graph, effects, spatial-model players (docs/AUDIO.md "Bus graph") ------------------------------------
+ * Opt-in: nothing below changes the four legacy buses. The graph is a named-bus model (named buses, bus 0 is "Master", sends,
  * mute / solo / bypass, effect chains, peaks); voices started with aver_audio_play_ex / aver_audio_stream_play_ex / aver_audio_live_play
  * and a graphBus >= 0 sum into it. All calls are game-thread calls. Strings are UTF-8; a name written to a caller's buffer is truncated
  * to `cap` bytes and always terminated, and the call returns the full length.
@@ -258,8 +258,8 @@ AVER_AUDIO_API int32_t aver_audio_bus_apply_layout_text(const char* utf8Text);
 // The current layout as .ocbus text (length returned; truncated to cap).
 AVER_AUDIO_API int32_t aver_audio_bus_layout_text(uint8_t* textOut, int32_t cap);
 
-// Effects. `godotClass` is Godot's class name ("AudioEffectReverb"); the id is stable until the effect is removed.
-AVER_AUDIO_API int32_t aver_audio_effect_add(int32_t bus, const char* godotClass, int32_t at);
+// Effects. `effectClass` is the effect's class name ("AudioEffectReverb"); the id is stable until the effect is removed.
+AVER_AUDIO_API int32_t aver_audio_effect_add(int32_t bus, const char* effectClass, int32_t at);
 AVER_AUDIO_API int32_t aver_audio_effect_remove(int32_t bus, int32_t index);
 AVER_AUDIO_API int32_t aver_audio_effect_move(int32_t bus, int32_t from, int32_t to);
 AVER_AUDIO_API int32_t aver_audio_effect_count(int32_t bus);
@@ -270,10 +270,10 @@ AVER_AUDIO_API void    aver_audio_effect_set_enabled(int32_t bus, int32_t index,
 AVER_AUDIO_API int32_t aver_audio_effect_get_enabled(int32_t bus, int32_t index);
 AVER_AUDIO_API void    aver_audio_effect_set_sidechain(int32_t bus, int32_t index, const char* utf8BusName);
 AVER_AUDIO_API int32_t aver_audio_effect_sidechain(int32_t bus, int32_t index, uint8_t* textOut, int32_t cap);
-// Parameters by Godot property name; set returns 1 when the effect has it.
+// Parameters by property name; set returns 1 when the effect has it.
 AVER_AUDIO_API int32_t aver_audio_effect_set_param(int32_t id, const char* name, float value);
 AVER_AUDIO_API float   aver_audio_effect_get_param(int32_t id, const char* name);
-// Godot's class name of an effect ("AudioEffectReverb"); its length is returned, 0 for an unknown id.
+// The class name of an effect ("AudioEffectReverb"); its length is returned, 0 for an unknown id.
 AVER_AUDIO_API int32_t aver_audio_effect_class(int32_t id, uint8_t* textOut, int32_t cap);
 AVER_AUDIO_API int32_t aver_audio_effect_param_count(int32_t id);
 AVER_AUDIO_API int32_t aver_audio_effect_param_info(int32_t id, int32_t index, uint8_t* nameOut, int32_t cap, float* def, float* lo, float* hi);

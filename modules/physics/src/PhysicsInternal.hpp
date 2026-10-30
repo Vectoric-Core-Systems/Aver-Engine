@@ -288,10 +288,10 @@ struct StepStats {
 // A fresh id per World. A snapshot keeps its World's id, so a handle that outlives its world answers BAD_HANDLE after a new world appears.
 uint64_t nextWorldId();
 
-struct GodotFilterState;   // PhysicsGodotFilter.cpp
+struct LayerFilterState;   // PhysicsLayerFilter.cpp
 struct ContactMonitorState;   // PhysicsAreas.cpp
 struct AreaState;
-struct BodyGodotState;   // PhysicsBodyGodot.hpp
+struct RigidExtrasState;   // PhysicsRigidExtras.hpp
 struct RayVehicleState;  // PhysicsRaycastVehicle.cpp
 
 struct World {
@@ -322,16 +322,16 @@ struct World {
     std::unordered_map<int32_t, bool> sensors;
     // Bodies (the terrain) whose contacts take the host's surface friction. Set by aver_phys_body_set_surface_sampled between steps; read by the contact listener on workers.
     std::unordered_set<JPH::BodyID> surfaceSampled;
-    // Godot-style layer/mask, collision exceptions and joint exclusion (PhysicsGodotFilter.cpp). Null until first used; shared_ptr because the type is incomplete here.
-    std::shared_ptr<GodotFilterState> godot;
-    // Godot material combine (PhysicsSurface.cpp, physics_surface_abi.h): the mode (0 = Jolt's rules) and the per-body ROUGH/ABSORBENT bits by handle (absent = 0). Written between steps, read by the combine hook on workers.
+    // 32-bit layer/mask, collision exceptions and joint exclusion (PhysicsLayerFilter.cpp). Null until first used; shared_ptr because the type is incomplete here.
+    std::shared_ptr<LayerFilterState> layerFilter;
+    // Material combine rule (PhysicsSurface.cpp, physics_surface_abi.h): the mode (0 = Jolt's rules) and the per-body ROUGH/ABSORBENT bits by handle (absent = 0). Written between steps, read by the combine hook on workers.
     int32_t combineMode = 0;
     std::unordered_map<int32_t, uint8_t> combineFlags;
-    // Per-body contact monitors and Godot-style areas (PhysicsAreas.cpp, physics_areas_abi.h). Null until first used; not simulation state, so not in snapshots.
+    // Per-body contact monitors and areas (PhysicsAreas.cpp, physics_areas_abi.h). Null until first used; not simulation state, so not in snapshots.
     std::shared_ptr<ContactMonitorState> monitors;
     std::shared_ptr<AreaState> areas;
-    // Godot rigid-body extras (PhysicsBodyGodot.hpp, physics_body_ext_abi.h): _integrate_forces, custom integrator, conveyor velocity, disabled shapes. Null until first used; configuration, not simulation state.
-    std::shared_ptr<BodyGodotState> bodyGodot;
+    // Rigid-body extras (PhysicsRigidExtras.hpp, physics_body_ext_abi.h): integrate-forces callbacks, custom integrator, conveyor velocity, disabled shapes. Null until first used; configuration, not simulation state.
+    std::shared_ptr<RigidExtrasState> rigidExtras;
     // Raycast vehicles (PhysicsRaycastVehicle.cpp, physics_raycast_vehicle_abi.h). Null until first used; configuration and per-step input, not simulation state.
     std::shared_ptr<RayVehicleState> rayVehicles;
 

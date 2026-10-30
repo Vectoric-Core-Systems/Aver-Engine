@@ -3,7 +3,7 @@
   "name": "Aver.Anim.Abi",
   "dir": "anim.abi",
   "displayName": "Property animation ABI",
-  "description": "Plain-C seam onto property-track animation so Aver.Fabric's AnimationPlayer drives it.",
+  "description": "Plain-C seam onto property-track animation so scripts and managed extensions can drive it.",
   "category": "Animation",
   "option": null,
   "required": true,

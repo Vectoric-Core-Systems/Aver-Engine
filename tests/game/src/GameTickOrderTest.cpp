@@ -1,7 +1,7 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
-// GameTickOrderTest: one gameplay frame runs in Godot's order -- the frame pumps, then for each fixed
+// GameTickOrderTest: one gameplay frame runs in its fixed order -- the frame pumps, then for each fixed
 // physics step the PHYSICS pass before that step, then the PROCESS pass once -- with and without a
 // physics world. A recording stand-in for the managed dispatch; a real physics world; no device.
 

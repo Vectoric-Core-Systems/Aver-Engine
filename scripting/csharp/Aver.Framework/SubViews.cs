@@ -5,7 +5,7 @@
 
 namespace Aver.Framework;
 
-/// <summary>When a view is drawn. The numbers are Godot's <c>SubViewport.UpdateMode</c> and the C ABI's <c>AVER_FW_SUBVIEW_UPDATE_*</c>.</summary>
+/// <summary>When a view is drawn. The numbers are the C ABI's <c>AVER_FW_SUBVIEW_UPDATE_*</c>.</summary>
 public enum SubViewUpdate
 {
     /// <summary>Never (a render asked for with <see cref="SubViews.RequestRender"/> still happens once).</summary>
@@ -20,7 +20,7 @@ public enum SubViewUpdate
     Always = 4,
 }
 
-/// <summary>Whether the target is cleared before a picture. Godot's <c>SubViewport.ClearMode</c> numbers.</summary>
+/// <summary>Whether the target is cleared before a picture. The numbers are the C ABI's <c>AVER_FW_SUBVIEW_CLEAR_*</c>.</summary>
 public enum SubViewClear
 {
     Always = 0,
@@ -46,10 +46,10 @@ public readonly struct SubViewInfo
 }
 
 /// <summary>
-/// Sub-viewports: extra views of the world drawn into textures that materials and the UI show (Godot's SubViewport and ViewportTexture).
+/// Sub-viewports: extra views of the world drawn into textures that materials and the UI show.
 /// </summary>
 /// <remarks>
-/// <para>A view is named by a KEY, a string that is the same on every load (the Godot node path of the SubViewport in its scene is what the converter
+/// <para>A view is named by a KEY, a string that is the same on every load (the node path of the viewport in its scene is what an importer
 /// writes), so a material baked with <c>@rt:viewport.&lt;key&gt;</c> finds its texture. Creating a key that exists returns its id. The engine keeps a small
 /// budget (4 views alive, 2 drawn per frame unless the project's <c>RENDER.SUBVIEWPORTS</c> / <c>RENDER.SUBVIEWRENDERS</c> say otherwise); a refused
 /// create returns 0. A view is drawn by the cheap raster configuration, not the main renderer: no global illumination, shadows or post chain, flat

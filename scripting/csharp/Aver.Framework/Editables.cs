@@ -2,7 +2,7 @@
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 // Editables: an actor's [Editable] fields as text -- listed for the editor, set from a level's per-instance
-// values before OnBeginPlay (Godot's exported properties).
+// values before OnBeginPlay (exported properties).
 
 using System.Globalization;
 using System.Reflection;

@@ -870,7 +870,7 @@ Vec3 NavServer::randomPoint(u32 map, u32 layers, bool uniformly, f32 r1, f32 r2,
         f32 x = std::clamp(r1, 0.0f, 0.99999994f) * total, acc = 0;
         for (usize i = 0; i < tris.size(); ++i) { acc += tris[i].area; if (x < acc) { pick = i; break; } pick = i; }
     } else {
-        // one polygon, then one of its triangles: Godot's non-uniform mode weights every polygon the same
+        // one polygon, then one of its triangles: the non-uniform mode weights every polygon the same
         const u32 pi = ok[std::min<usize>(static_cast<usize>(std::clamp(r1, 0.0f, 0.99999994f) * ok.size()), ok.size() - 1)];
         std::vector<usize> mine;
         for (usize i = 0; i < tris.size(); ++i) if (tris[i].poly == pi) mine.push_back(i);

@@ -2,7 +2,7 @@
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 //
-// P/Invokes for physics_raycast_vehicle_abi.h: the raycast vehicle (Godot's VehicleBody3D). A further part of Native, so the parity test in
+// P/Invokes for physics_raycast_vehicle_abi.h: the raycast vehicle. A further part of Native, so the parity test in
 // tests/abi checks every name and parameter name below against the header; they are copied from it character for character.
 // RaycastVehicle.cs is the public surface.
 using System.Runtime.InteropServices;

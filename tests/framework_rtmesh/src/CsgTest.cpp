@@ -1,4 +1,4 @@
-// CsgTest -- G4 R7: the BSP constructive solid geometry the Godot converter bakes a CSG tree with (aver/formats/Csg.hpp). Volumes and bounds of simple solids and of
+// CsgTest -- the BSP constructive solid geometry an importer bakes a CSG tree with (aver/formats/Csg.hpp). Volumes and bounds of simple solids and of
 // their unions, intersections and differences (overlapping, disjoint, coplanar-face and nested), the generated primitives, a mirroring transform, and the welded
 // triangle soup. Pure arithmetic: no device. Exits 0 or 1.
 #include "aver/core/Log.hpp"
@@ -45,7 +45,7 @@ static void testPrimitives() {
     const Bounds sb = bounds(sph);
     check(near(sb.hi[1], 1.0, 1e-9) && near(sb.lo[1], -1.0, 1e-9), "its poles are at +-radius");
     Mesh coarse = makeSphere(0.5, 12, 6, true);
-    check(volume(coarse) > 0 && volume(coarse) < 4.0 / 3.0 * 3.14159265358979323846 * 0.125, "Godot's default 12 x 6 sphere is a solid inside the true one");
+    check(volume(coarse) > 0 && volume(coarse) < 4.0 / 3.0 * 3.14159265358979323846 * 0.125, "a 12 x 6 sphere is a solid inside the true one");
 
     Mesh cyl = makeCylinder(1.0, 2.0, 64, false, true);
     check(near(volume(cyl), 3.14159265358979323846 * 2.0, 0.07), "a 64-sided cylinder: pi r^2 h");

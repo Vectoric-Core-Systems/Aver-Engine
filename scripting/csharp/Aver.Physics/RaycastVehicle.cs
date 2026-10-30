@@ -2,9 +2,9 @@
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 //
-// Godot's VehicleBody3D / VehicleWheel3D as a raycast vehicle (G2). The native side is physics_raycast_vehicle_abi.h; docs/physics/GODOT_VEHICLE.md has the model and
-// the limits. A second vehicle model beside Jolt's wheeled one (Vehicle), which is unchanged. The defaults of RaycastWheelSettings are Aver's own neutral numbers, not
-// Godot's: Godot's values (and its metres, left-positive steering, brake impulses) come in through FromGodot and the *FromGodot helpers, called by the converter or Aver.Fabric.
+// A raycast vehicle. The native side is physics_raycast_vehicle_abi.h; docs/physics/RAYCAST_VEHICLE.md has the model and
+// the limits. A second vehicle model beside Jolt's wheeled one (Vehicle), which is unchanged. The defaults of RaycastWheelSettings are Aver's own neutral numbers;
+// values in other units (metres, left-positive steering, brake impulses) are converted by the importer.
 
 using System;
 
@@ -23,7 +23,7 @@ internal enum RaycastWheelStateIndex
     ForwardSpeed = 13, SideSpeed = 14, ContactBody = 15, SteerApplied = 16, Count = 17,
 }
 
-/// <summary>Everything a wheel is built from. Chassis-local vectors, centimetres, kg*cm/s^2. The defaults are Aver's, not Godot's.</summary>
+/// <summary>Everything a wheel is built from. Chassis-local vectors, centimetres, kg*cm/s^2. The defaults are Aver's own.</summary>
 public sealed record RaycastWheelSettings
 {
     /// <summary>Where the suspension ray starts, in the chassis body's local space (cm).</summary>
@@ -54,7 +54,7 @@ public sealed record RaycastWheelSettings
     public bool UseAsTraction { get; init; } = true;
     /// <summary>Steering counts for this wheel.</summary>
     public bool UseAsSteering { get; init; }
-    /// <summary>Godot layer bits the wheel's ray hits (default every layer).</summary>
+    /// <summary>Layer bits the wheel's ray hits (default every layer).</summary>
     public uint CollisionMask { get; init; } = 0xFFFFFFFFu;
 
     internal float[] ToBlock() => new[]
@@ -64,47 +64,8 @@ public sealed record RaycastWheelSettings
         FrictionSlip, RollInfluence, UseAsTraction ? 1f : 0f, UseAsSteering ? 1f : 0f,
     };
 
-    /// <summary>Godot's axes (+X right, +Y up, -Z forward) to Aver's (+Y right, +Z up, +X forward) for a direction or a position.</summary>
-    public static Float3 FromGodotAxes(Float3 g) => new(-g.Z, g.X, g.Y);
-
-    /// <summary>The settings of a Godot VehicleWheel3D. Vectors are chassis-local in Godot's axes; lengths in metres; <paramref name="maxForceN"/> in newtons;
-    /// stiffness and damping as the node holds them. No Godot default is built in: the caller passes what the scene says. If the Godot version in use scales
-    /// damping by a ratio, run it through <see cref="DampingFromRatio"/> first.</summary>
-    public static RaycastWheelSettings FromGodot(Float3 connectionPoint, Float3 suspensionDirection, Float3 axle, float restLength, float suspensionTravel,
-        float stiffness, float dampingCompression, float dampingRelaxation, float maxForceN, float radius, float frictionSlip, float rollInfluence,
-        bool useAsTraction, bool useAsSteering, uint collisionMask = 0xFFFFFFFFu)
-    {
-        const float cm = 100f;
-        var c = FromGodotAxes(connectionPoint);
-        return new RaycastWheelSettings
-        {
-            ConnectionPoint = new Float3(c.X * cm, c.Y * cm, c.Z * cm),
-            SuspensionDirection = FromGodotAxes(suspensionDirection),
-            Axle = FromGodotAxes(axle),
-            RestLength = restLength * cm,
-            MaxTravel = suspensionTravel * cm,
-            Stiffness = stiffness,
-            DampingCompression = dampingCompression,
-            DampingRelaxation = dampingRelaxation,
-            MaxForce = maxForceN * cm,
-            Radius = radius * cm,
-            FrictionSlip = frictionSlip,
-            RollInfluence = rollInfluence,
-            UseAsTraction = useAsTraction,
-            UseAsSteering = useAsSteering,
-            CollisionMask = collisionMask,
-        };
-    }
-
     /// <summary>A damping ratio (1 = critical for one wheel's share of the spring) to the mass-normalised damping (1/s): ratio x 2 x sqrt(stiffness).</summary>
     public static float DampingFromRatio(float ratio, float stiffness) => ratio * 2f * MathF.Sqrt(stiffness);
-
-    /// <summary>Godot's engine_force (newtons) to the ABI's kg*cm/s^2.</summary>
-    public static float EngineForceFromGodot(float newtons) => newtons * 100f;
-    /// <summary>Godot's brake is an IMPULSE applied every physics step; the ABI takes a force: impulse x ticks per second x 100 (cm).</summary>
-    public static float BrakeFromGodot(float brakeImpulsePerStep, float physicsTicksPerSecond) => brakeImpulsePerStep * physicsTicksPerSecond * 100f;
-    /// <summary>Godot's steering is positive to the LEFT; the ABI's is positive toward the axle side (right).</summary>
-    public static float SteeringFromGodot(float radians) => -radians;
 }
 
 /// <summary>What a wheel did in the last step's pre-solver phase. Cm, cm/s, kg*cm/s^2, radians.</summary>
@@ -129,7 +90,7 @@ public readonly struct RaycastWheelState
     public float SteerApplied { get; init; }
 }
 
-/// <summary>A raycast vehicle on a dynamic body (Godot VehicleBody3D). A handle (not a body handle); 0 is invalid. Removing the chassis body destroys it.</summary>
+/// <summary>A raycast vehicle on a dynamic body. A handle (not a body handle); 0 is invalid. Removing the chassis body destroys it.</summary>
 public readonly struct RaycastVehicle : IEquatable<RaycastVehicle>
 {
     /// <summary>Pass as a wheel index to set every wheel.</summary>

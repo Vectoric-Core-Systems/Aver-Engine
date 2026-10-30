@@ -8,7 +8,7 @@ GDScript is the F4 package: its tokenizer and parser (F4a) and its type inferenc
 
 ```
 Aver.Fabric.Convert scripts --project <godot-dir> --out <aver-project-dir>
-                            [--manifest scripts.json] [--refs <bin/Scripting>]
+                            [--manifest scripts.json] [--refs <managed-dir>;<bin/Scripting>]
                             [--report <FabricReport.jsonl>] [--engine <engine-checkout>]
 ```
 
@@ -17,9 +17,9 @@ Aver.Fabric.Convert scripts --project <godot-dir> --out <aver-project-dir>
 | `--project` | The Godot project folder (the one with `project.godot`). `res://x` is read from `<project>/x`. |
 | `--out` | The **Aver project folder** the scene converter wrote: `<out-dir>/<Name>` of `AverAssetC fabric <godot> <out-dir>`, the folder that holds `Fabric/scripts.json` and `Content/`. |
 | `--manifest` | The script list. Default `<out>/Fabric/scripts.json` (G3_SCENES.md). A bare name that is not a file is looked up under `<out>/Fabric/`. With no manifest at all the project is scanned for `.cs` files (not under `.godot`, `bin`, `obj`): class = the file's primary class, output `Content/Scripts/<Class>.cs`, duplicates numbered. |
-| `--refs` | The folder with `Aver.Fabric.dll` and `Aver.Framework.dll` (default `../Scripting` beside the tool, i.e. `bin/Scripting`). Every managed `Aver.*.dll` in it is referenced except the bridge and the tools. |
+| `--refs` | The folder with `Aver.Fabric.dll` and `Aver.Framework.dll`, or a list of folders separated by the platform's path separator (`;` on Windows); the first folder that has an assembly wins. Default: the extension's `managed` folder beside the tool's `tools` folder, then the engine's `Scripting` folder (`Extensions/FabricConnector/tools/../../../Scripting`). Every managed `Aver.*.dll` in them is referenced except the bridge and the tools. |
 | `--report` | The report to merge into. Default: `<out>/FabricReport.jsonl` if it exists, else `<out>/../FabricReport.jsonl` if it exists (where `AverAssetC fabric` puts it), else a new `<out>/FabricReport.jsonl`. `FabricReport.md` next to it gets a "Scripts" section when it exists. |
-| `--engine` | The engine checkout. When `<out>/Content/Scripts/Scripts.csproj` does not exist it is written with `ProjectReference`s (relative paths) to Aver.Scripting, Aver.Framework, Aver.UI, Aver.Materials and Aver.Fabric, `net10.0`, `Nullable` and `ImplicitUsings` enabled, as the editor's own template. An existing file is never touched. |
+| `--engine` | The engine checkout. When `<out>/Content/Scripts/Scripts.csproj` does not exist it is written with `ProjectReference`s (relative paths) to Aver.Scripting, Aver.Framework, Aver.UI and Aver.Materials and a `Reference` with a relative `HintPath` (`Private` false) to the `Aver.Fabric.dll` found in `--refs`, `net10.0`, `Nullable` and `ImplicitUsings` enabled, as the editor's own template. An existing file is never touched. |
 
 Exit code: `0` converted and compiled with no errors; `1` compile errors remain (the files are still written, the lines marked), or the project/manifest could not be read; `2` bad usage; `3` the reference folder is unusable (the scripts are written but were not compiled; the report rates them approximated). stdout has one JSON summary line, stderr one `Content/Scripts/X.cs(line,col): error CSxxxx: message` line per compile error.
 

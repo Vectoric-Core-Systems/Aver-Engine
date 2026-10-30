@@ -20,13 +20,13 @@
 #ifndef AVER_FX_SKY
 #define AVER_FX_SKY 0
 #endif
-// G4 R8: Godot FogVolumes. A separate variant of the two compute entries, built only when a fog volume exists (docs/plans/fabric/G4_RENDER.md R8).
+// G4 R8: local fog volumes. A separate variant of the two compute entries, built only when a fog volume exists (docs/plans/fabric/G4_RENDER.md R8).
 // The volumes are a tail of FroxelCB. AVER_FV_MAX / AVER_FV_VECS mirror kFogVolumeMax / kFogVolumeVecs (aver/core/FogVolume.hpp).
 #ifndef AVER_FOG_VOLUMES
 #define AVER_FOG_VOLUMES 0
 #endif
-// G6 SH3: Godot fog shaders on those volumes. Built only when a volume carries one; the converted code arrives in the prelude (godot_fog.hlsl, aver::rhi::godotFogProgram,
-// which defines AVER_GD_FOG_REG_COUNT) and the shader registers are a tail of FroxelCB after the volumes.
+// Custom fog programs on those volumes. Built only when a volume carries one; the translated code arrives in the prelude (custom_fog.hlsl, aver::rhi::customFogProgram,
+// which defines AVER_CUSTOM_FOG_REG_COUNT) and the shader registers are a tail of FroxelCB after the volumes.
 #ifndef AVER_FOG_SHADERS
 #define AVER_FOG_SHADERS 0
 #endif
@@ -55,7 +55,7 @@ cbuffer FroxelCB : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     float4   gFvHeader;              // x = volume count
     float4   gFvVol[AVER_FV_MAX * AVER_FV_VECS];
 #if AVER_FOG_SHADERS
-    float4   gFvGd[AVER_GD_FOG_REG_COUNT];   // the fog shaders' uniform registers, 16 per shader (a volume's shape word names its shader: shape + 8 * index)
+    float4   gFvCustom[AVER_CUSTOM_FOG_REG_COUNT];   // the fog shaders' uniform registers, 16 per shader (a volume's shape word names its shader: shape + 8 * index)
 #endif
 #endif
 };
@@ -177,9 +177,9 @@ void fxVolumes(float3 p, out float sigmaV, out float3 scat, out float3 emit) {
         float w = shape == 4u ? 1.0 : saturate(-sdf / prm.y);
 #if AVER_FOG_SHADERS
         if ((shapeWord >> 3) != 0u) {
-            // A Godot fog shader: density per metre, albedo and emission from the shader; the edge fade still shapes it.
+            // A custom fog program: density per metre, albedo and emission from the program; the edge fade still shapes it.
             float sDens; float3 sAlb, sEmi;
-            averGdFogEval(shapeWord >> 3, p, gFvVol[b + 4u].xyz, gFvVol[b + 5u].xyz, u, sDens, sAlb, sEmi);
+            averCustomFogEval(shapeWord >> 3, p, gFvVol[b + 4u].xyz, gFvVol[b + 5u].xyz, u, sDens, sAlb, sEmi);
             const float dens = sDens * 0.01 * w;
             sigmaV += dens;
             const float pos = max(dens, 0.0);
@@ -223,7 +223,7 @@ void CSFroxelScatter(uint3 id : SV_DispatchThreadID) {
     if (any(id >= dim)) return;
     const float nearCm = gFxDepth.x, logRange = gFxDepth.z;
 #if AVER_FOG_VOLUMES && AVER_FOG_SHADERS
-    [unroll] for (uint gi = 0u; gi < (uint)AVER_GD_FOG_REG_COUNT; ++gi) gGdFogRegs[gi] = gFvGd[gi];
+    [unroll] for (uint gi = 0u; gi < (uint)AVER_CUSTOM_FOG_REG_COUNT; ++gi) gCustomFogRegs[gi] = gFvCustom[gi];
 #endif
 
     float3 dir; float invCos;

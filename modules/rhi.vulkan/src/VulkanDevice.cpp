@@ -3970,7 +3970,7 @@ void VulkanDevice::releasePostTargets() {
 }
 
 // The composite pipeline for this frame: the ordinary permutation, or its AVER_POST_TONEMAP_EXT twin when the settings ask for a
-// Godot tonemapper or a display adjustment (built here, once, the first time). The default path never reaches the second branch.
+// extended tonemapper or a display adjustment (built here, once, the first time). The default path never reaches the second branch.
 VkPipeline VulkanDevice::compositePsoFor(bool lut, bool bloom, bool autoExp) {
     const int l = lut ? 1 : 0, b = bloom ? 1 : 0, a = autoExp ? 1 : 0;
     const VkPipeline plain = lut ? compositeLutPso_[b][a] : compositePso_[b][a];
@@ -4031,10 +4031,10 @@ VkPipeline VulkanDevice::compositePsoFor(bool lut, bool bloom, bool autoExp) {
     if (!ok) {
         compositeExtFailed_ = true;
         compositeExtPso_[l][b][a] = VK_NULL_HANDLE;
-        AVER_WARN("[RHI.Vulkan] the Godot tonemapper composite failed to build; the project's ordinary tonemapper is used");
+        AVER_WARN("[RHI.Vulkan] the extended tonemapper composite failed to build; the project's ordinary tonemapper is used");
         return plain;
     }
-    AVER_INFO("[RHI.Vulkan] Godot tonemapper composite built (lut {}, bloom {}, auto-exposure {})", l, b, a);
+    AVER_INFO("[RHI.Vulkan] extended tonemapper composite built (lut {}, bloom {}, auto-exposure {})", l, b, a);
     return compositeExtPso_[l][b][a];
 }
 

@@ -143,19 +143,19 @@ AVER_PHYS_API int32_t aver_phys_point_query(float x, float y, float z,
                                             uint32_t layerMask, int32_t ignoreBody, int32_t flags,
                                             int32_t* outBodies, int32_t maxCount);
 
-// ---- Godot-style space-state queries (G2, additive) ----------------------------------------------------------
+// ---- space-state queries (additive) ---------------------------------------------------------------------------
 //
-// Godot's PhysicsDirectSpaceState3D and body_test_motion, as explicit options. NOTHING ABOVE CHANGES: the
-// queries earlier in this header, and aver_phys_raycast / _ex / _mask, keep their exact behaviour. Godot's
-// DEFAULTS (hit back faces on, hit from inside off, collide with bodies on, areas off, margin 0.001 m) are not
+// Space-state queries and body test motion, as explicit options. NOTHING ABOVE CHANGES: the
+// queries earlier in this header, and aver_phys_raycast / _ex / _mask, keep their exact behaviour. No
+// DEFAULTS (hit back faces on, hit from inside off, collide with bodies on, areas off, margin 0.001 m) are
 // built in anywhere: the caller passes each option, so a flags value of 0 means "no bodies, no areas" and hits
-// nothing. The converter or Aver.Fabric chooses the values; docs/physics/GODOT_QUERIES.md lists Godot's.
+// nothing. An importer or the caller chooses the values; docs/physics/SPACE_QUERIES.md lists the usual ones.
 //
-// COMMON ARGUMENTS. `collisionMask` is Godot's 32-bit mask: a body is a candidate when (mask & its layer bits) != 0,
-// where a body without a Godot filter has the single bit of its 16-layer user layer (see physics_layers_abi.h).
-// `flags` are AVER_PHYS_SQ_*. `excludeBodies`/`excludeCount` is Godot's exclude array: body handles (or character
+// COMMON ARGUMENTS. `collisionMask` is a 32-bit mask: a body is a candidate when (mask & its layer bits) != 0,
+// where a body without a layer filter has the single bit of its 16-layer user layer (see physics_layers_abi.h).
+// `flags` are AVER_PHYS_SQ_*. `excludeBodies`/`excludeCount` is an exclude array: body handles (or character
 // handles) the query skips; null or a count <= 0 means none; a handle that does not resolve is skipped quietly.
-// A sensor is Godot's Area3D. Units and axes are the engine's. `pose7` is x, y, z, qx, qy, qz, qw: the shape's
+// A sensor is an area. Units and axes are the engine's. `pose7` is x, y, z, qx, qy, qz, qw: the shape's
 // ORIGIN (as aver_phys_body_from_shape places it, not its centre of mass); the quaternion is normalised here.
 // Shapes are physics_shape_builder_abi.h handles; a mesh, heightfield or plane cannot be the QUERY shape (refused,
 // error recorded) though any of them can be hit. Every out-pointer may be null.
@@ -163,11 +163,11 @@ AVER_PHYS_API int32_t aver_phys_point_query(float x, float y, float z,
 // A body-type query in this group never moves anything and takes no lock beyond the reads it needs.
 
 #define AVER_PHYS_SQ_NONE                  0   // collides with nothing
-#define AVER_PHYS_SQ_BODIES                1   // non-sensor bodies and characters count (Godot collide_with_bodies)
-#define AVER_PHYS_SQ_AREAS                 2   // sensors count (Godot collide_with_areas)
-#define AVER_PHYS_SQ_BACK_FACES            4   // ray: report the back side of triangles and the exit of a convex body (Godot hit_back_faces)
-#define AVER_PHYS_SQ_FROM_INSIDE           8   // ray: a ray starting inside a convex body hits it at distance 0, normal 0 (Godot hit_from_inside)
-#define AVER_PHYS_SQ_RECOVERY_AS_COLLISION 16  // test motion: depenetration counts as a collision (Godot recovery_as_collision)
+#define AVER_PHYS_SQ_BODIES                1   // non-sensor bodies and characters count
+#define AVER_PHYS_SQ_AREAS                 2   // sensors count
+#define AVER_PHYS_SQ_BACK_FACES            4   // ray: report the back side of triangles and the exit of a convex body
+#define AVER_PHYS_SQ_FROM_INSIDE           8   // ray: a ray starting inside a convex body hits it at distance 0, normal 0
+#define AVER_PHYS_SQ_RECOVERY_AS_COLLISION 16  // test motion: depenetration counts as a collision
 
 // A ray from origin3 along direction3 (any length, normalised here) up to maxDistCm. Returns the nearest body hit
 // or 0. outDistance is cm along the ray; outNormal the surface's outward normal at the hit (zero for a hit from
@@ -180,7 +180,7 @@ AVER_PHYS_API int32_t aver_phys_space_raycast(const float* origin3, const float*
                                               float* outDistance, float* outPoint, float* outNormal,
                                               int32_t* outEntity, int32_t* outSubShape);
 
-// Godot intersect_shape: every (body, sub-shape) the shape overlaps, deepest first (ties by handle, then sub-shape),
+// Intersect shape: every (body, sub-shape) the shape overlaps, deepest first (ties by handle, then sub-shape),
 // up to maxResults. `marginCm` inflates the shape: colliders closer than that count. outBodies[i] and outSubShapes[i]
 // (both optional) receive each hit. Returns the count.
 AVER_PHYS_API int32_t aver_phys_space_intersect_shape(int32_t shape, const float* pose7, float marginCm,
@@ -189,7 +189,7 @@ AVER_PHYS_API int32_t aver_phys_space_intersect_shape(int32_t shape, const float
                                                       int32_t maxResults,
                                                       int32_t* outBodies, int32_t* outSubShapes);
 
-// Godot collide_shape: the contact of every overlapping (body, sub-shape), deepest first, up to maxContacts. Per
+// Collide shape: the contact of every overlapping (body, sub-shape), deepest first, up to maxContacts. Per
 // contact i: outBodies[i], outPointsOnShape[3i..] (on the query shape), outPointsOnOther[3i..] (on the collider),
 // outNormals[3i..] (unit, away from the collider toward the shape), outDepths[i] (cm, signed: negative when the two
 // are separated by less than marginCm). Returns the count.
@@ -200,7 +200,7 @@ AVER_PHYS_API int32_t aver_phys_space_collide_shape(int32_t shape, const float* 
                                                     int32_t* outBodies, float* outPointsOnShape, float* outPointsOnOther,
                                                     float* outNormals, float* outDepths);
 
-// Godot get_rest_info: the single deepest contact. Returns the collider's handle, or 0 for none. outPoint is on the
+// Rest info: the single deepest contact. Returns the collider's handle, or 0 for none. outPoint is on the
 // collider, outNormal away from it, outVelocity (cm/s) the collider's velocity at that point (zero for a sensor or a
 // static body), outDepth cm as above.
 AVER_PHYS_API int32_t aver_phys_space_rest_info(int32_t shape, const float* pose7, float marginCm,
@@ -209,10 +209,10 @@ AVER_PHYS_API int32_t aver_phys_space_rest_info(int32_t shape, const float* pose
                                                 float* outPoint, float* outNormal, float* outVelocity, float* outDepth,
                                                 int32_t* outEntity, int32_t* outSubShape);
 
-// Godot cast_motion: how far the shape can move along motion3 (a displacement, cm). Returns 1 when the query ran, 0
+// Cast motion: how far the shape can move along motion3 (a displacement, cm). Returns 1 when the query ran, 0
 // when it was refused (bad shape or arguments). outUnsafe is the fraction (0..1) at which the shape first touches
 // something; outSafe the fraction at which it is still `marginCm` away (backed off by margin / cos of the contact
-// angle, clamped to [0, unsafe]); both 1 and outBody 0 when nothing is hit. As in Godot, a collider the shape ALREADY
+// angle, clamped to [0, unsafe]); both 1 and outBody 0 when nothing is hit. A collider the shape ALREADY
 // overlaps at the start (deeper than 0.05 cm) is ignored for a hit at fraction 0; use collide_shape for those.
 // outBody, outPoint, outNormal describe the first contact (point on the collider, normal away from it).
 AVER_PHYS_API int32_t aver_phys_space_cast_motion(int32_t shape, const float* pose7, const float* motion3, float marginCm,
@@ -223,12 +223,12 @@ AVER_PHYS_API int32_t aver_phys_space_cast_motion(int32_t shape, const float* po
 
 // ---- body_test_motion ----------------------------------------------------------------------------------------
 //
-// Godot's body_test_motion, the base of move_and_collide, test_move and move_and_slide: where would this body get to
+// Body test motion, the base of move_and_collide, test_move and move_and_slide: where would this body get to
 // if it moved by motion3? The body is NOT moved; the caller applies outF travel. Steps: (1) RECOVERY, push the
 // body's shape out of whatever it overlaps (up to 4 passes, to marginCm/2 away from each surface, so a body that
 // rests in contact is nudged off by half the margin); (2) a cast of the shape along motion3 from the recovered pose;
 // (3) the contacts at the point of contact. The pair filter is the body's own: its object layer (the 16-layer matrix),
-// its Godot layer/mask, collision exceptions and joint exclusion, exactly as the simulation applies them; plus
+// its 32-bit layer/mask, collision exceptions and joint exclusion, exactly as the simulation applies them; plus
 // `excludeBodies`. The body itself is never a candidate. A static body may be tested. Refused (-1, error recorded)
 // for a dead handle, a character, a soft body, or a mesh/heightfield body.
 //

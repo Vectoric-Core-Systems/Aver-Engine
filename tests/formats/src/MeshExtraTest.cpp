@@ -4,7 +4,7 @@
 //   - .ocmesh: a mesh without the streams writes the chunks it always wrote (no VXEX, content version 1) and loads unchanged; with them it
 //     round-trips colour (to 1/255), tangent and UV1, sets the MeshFlags bits, and refuses a damaged VXEX; a file whose VXEX was cut off is a
 //     plain old file to the reader.
-//   - the glTF importer on tests/fabric/data/ExtraGame/models/quad.gltf (COLOR_0, TANGENT, TEXCOORD_1 in an embedded base64 buffer): the
+//   - the glTF importer on tests/formats/data/quad.gltf (COLOR_0, TANGENT, TEXCOORD_1 in an embedded base64 buffer): the
 //     values through the axis map, the handedness re-derived for the engine's UVs, and a primitive without them leaving the streams empty.
 //   - the OBJ importer's `v x y z r g b`, and generateTangents / packTangent on their own contract.
 //   - the cluster simplifier keeping the streams in step with the vertices it compacts.
@@ -233,7 +233,7 @@ int main() {
 
     AVER_INFO("=== the glTF importer ===");
     {
-        const std::string path = std::string(AVER_FABRIC_DATA) + "/ExtraGame/models/quad.gltf";
+        const std::string path = std::string(AVER_FORMATS_TEST_DATA) + "/quad.gltf";
         fmt::GltfImportResult res;
         std::string why;
         check(fmt::importGltf(path, res, {}, &why), "imports the hand-written quad: " + why);

@@ -1,5 +1,6 @@
 // The log's stdio writer and the optional application sink.
 #include "aver/core/Log.hpp"
+#include "aver/core/LogConsole.hpp"
 #include "aver/core/CrashReport.hpp"
 
 #include <cstdio>
@@ -13,7 +14,13 @@ std::mutex& logMutex() { static std::mutex m; return m; }
 LogSinkFn   g_sink    = nullptr;
 void*       g_sinkCtx = nullptr;
 std::FILE*  g_file    = nullptr;
+bool        g_console = true;
 } // namespace
+
+void setLogConsole(bool enabled) {
+    std::lock_guard<std::mutex> lock(logMutex());
+    g_console = enabled;
+}
 
 bool setLogFile(const char* path) {
     std::lock_guard<std::mutex> lock(logMutex());
@@ -63,10 +70,12 @@ void logWrite(LogLevel level, std::string_view message) {
         // A THRESHOLD, not the two-value OR-chain this used to be. `level == Error || level == Warn`
         // silently routed the two levels added above it to stdout -- so a Fatal, the single most
         // important line the process will ever print, would not have gone to stderr at all.
-        std::FILE* out = level >= LogLevel::Warn ? stderr : stdout;
-        std::fprintf(out, "[%s] %.*s\n", levelTag(level),
-                     static_cast<int>(message.size()), message.data());
-        std::fflush(out);
+        if (g_console) {
+            std::FILE* out = level >= LogLevel::Warn ? stderr : stdout;
+            std::fprintf(out, "[%s] %.*s\n", levelTag(level),
+                         static_cast<int>(message.size()), message.data());
+            std::fflush(out);
+        }
         if (g_file) {
             std::fprintf(g_file, "[%s] %.*s\n", levelTag(level), static_cast<int>(message.size()), message.data());
             std::fflush(g_file);

@@ -27,7 +27,7 @@ internal static partial class Native
     [DllImport(Lib)] internal static extern int aver_phys_body_set_sensor(int body, int on);
     [DllImport(Lib)] internal static extern int aver_phys_body_sensor(int body, out int outOn);
 
-    // ---- Godot rigid-body extras (G2) ---------------------------------------------------------------------
+    // ---- rigid-body extras ---------------------------------------------------------------------
     // The delegate is named like the header's typedef so the parity test sees the same parameter type on both sides.
     internal delegate void aver_phys_integrate_forces_fn(ref DirectBodyState state, long user);
 

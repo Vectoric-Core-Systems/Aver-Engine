@@ -1380,9 +1380,84 @@ public static class HostBridge
         DeclareBase("GameMode", "Actor", ClassFlags.GameMode | ClassFlags.Abstract);
         DeclareBase("GameInstance", "Actor", ClassFlags.GameInstance | ClassFlags.Abstract);
         DeclareActorClass(typeof(AverCharacter));
-        // Aver.Fabric's node classes (Node3D, Timer, Area3D ...): the classes a converted Godot scene places.
-        try { DeclareActors(typeof(Aver.Fabric.Node).Assembly, "Aver.Fabric", static t => typeof(Aver.Fabric.Node).IsAssignableFrom(t)); }
-        catch (Exception ex) { Emit((int)Log.Level.Warn, $"[Scripting] Aver.Fabric node classes could not be declared: {Describe(ex)}"); }
+    }
+
+    /// <summary>Loads the managed half of each installed extension into the host context and declares its actor classes. The host calls
+    /// this once, after Bootstrap and before LoadScripts. <paramref name="utf8Spec"/> holds one extension per line, its fields
+    /// separated by TAB: name, actor base class (a full type name, or empty for every actor type), then each assembly's full path.
+    /// Returns the number of actor classes declared.</summary>
+    /// <remarks>Host context, not the script context: the script context resolves host-first, so a converted project's scripts see the
+    /// extension's types with the same identity the bridge declared them with.</remarks>
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static int LoadExtensions(IntPtr utf8Spec)
+    {
+        try
+        {
+            string? spec = Marshal.PtrToStringUTF8(utf8Spec);
+            if (string.IsNullOrEmpty(spec)) return 0;
+            int declared = 0;
+            foreach (string line in spec.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+            {
+                string[] f = line.Split('\t');
+                if (f.Length >= 3) declared += LoadExtension(f[0], f[1], f.Skip(2));
+            }
+            return declared;
+        }
+        catch (Exception ex)
+        {
+            Emit((int)Log.Level.Error, $"[Scripting] extension loading failed: {Describe(ex)}");
+            return 0;
+        }
+    }
+
+    // One extension: its assemblies into the host context, then DeclareActors for the types under its actor base. A missing assembly or a
+    // base type it does not hold logs one line and skips that extension; nothing else is affected.
+    private static int LoadExtension(string name, string actorBase, IEnumerable<string> paths)
+    {
+        if (!ManagedDispatch.Installed)
+        {
+            Emit((int)Log.Level.Warn, $"[Scripting] extension {name} skipped: managed actor support is not running");
+            return 0;
+        }
+        AssemblyLoadContext host = AssemblyLoadContext.GetLoadContext(typeof(HostBridge).Assembly) ?? AssemblyLoadContext.Default;
+        var loaded = new List<(Assembly Asm, string Label)>();
+        try
+        {
+            foreach (string path in paths)
+            {
+                if (!File.Exists(path))
+                {
+                    Emit((int)Log.Level.Warn, $"[Scripting] extension {name} skipped: {path} is missing");
+                    return 0;
+                }
+                loaded.Add((host.LoadFromAssemblyPath(path), Path.GetFileNameWithoutExtension(path)));
+            }
+        }
+        catch (Exception ex)
+        {
+            Emit((int)Log.Level.Warn, $"[Scripting] extension {name} skipped: {Describe(ex)}");
+            return 0;
+        }
+
+        Type? baseType = null;
+        if (actorBase.Length > 0)
+        {
+            foreach ((Assembly asm, _) in loaded)
+                if ((baseType = asm.GetType(actorBase, throwOnError: false)) != null) break;
+            if (baseType == null)
+            {
+                Emit((int)Log.Level.Warn, $"[Scripting] extension {name} skipped: its actor base {actorBase} is in none of its assemblies");
+                return 0;
+            }
+        }
+
+        int declared = 0;
+        foreach ((Assembly asm, string label) in loaded)
+        {
+            try { declared += DeclareActors(asm, label, baseType == null ? null : baseType.IsAssignableFrom); }
+            catch (Exception ex) { Emit((int)Log.Level.Warn, $"[Scripting] extension {name}: {label} actor classes could not be declared: {Describe(ex)}"); }
+        }
+        return declared;
     }
 
     // Declares and seals one base class row.
@@ -1742,7 +1817,7 @@ public static class HostBridge
         }
     }
 
-    // A tick that throws aborts only that call, as in Godot; the actor keeps ticking. Errors are logged
+    // A tick that throws aborts only that call; the actor keeps ticking. Errors are logged
     // at the 1st, 2nd, 4th, 8th... occurrence per actor and pass, so a broken tick cannot flood the log.
     private static void ReportTickError(ActorLive live, bool physics, Exception ex)
     {
@@ -1795,7 +1870,7 @@ public static class HostBridge
         s_inputOrder = SortedByTree(entities, new int[n]);
         Array.Reverse(s_inputOrder);   // input reaches the deepest, last-added actor first
         foreach (ActorLive a in s_tickActors) a.ResolvedPause = PauseRules.Resolve(PauseChain(a));
-        // The tree moved: tell each entered actor whose parent changed (Godot's NOTIFICATION_PARENTED).
+        // The tree moved: tell each entered actor whose parent changed.
         foreach (ActorLive a in s_tickActors)
         {
             if (!a.Entered || a.Disabled) continue;

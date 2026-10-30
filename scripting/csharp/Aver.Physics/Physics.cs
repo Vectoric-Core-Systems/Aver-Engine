@@ -330,11 +330,11 @@ public static partial class Physics
         return body == 0 ? default : new RaycastHit(body, 0, new Float3(p[0], p[1], p[2]), new Float3(n[0], n[1], n[2]));
     }
 
-    // ---- Godot-style 32-bit mask queries -------------------------------------------------------------
-    // A body is hit when (collisionMask & its layer bits) != 0. A body without a Godot filter
+    // ---- 32-bit mask queries -------------------------------------------------------------
+    // A body is hit when (collisionMask & its layer bits) != 0. A body without a layer filter
     // (Body.SetCollisionFilter) counts as the single bit of its 16-layer user layer. See physics_layers_abi.h.
 
-    /// <summary>As <see cref="RaycastEx"/>, but with a 32-bit Godot collision mask.</summary>
+    /// <summary>As <see cref="RaycastEx"/>, but with a 32-bit collision mask.</summary>
     public static RaycastHit RaycastMask(Float3 origin, Float3 direction, float maxDistanceCm, uint collisionMask, Body ignoreBody = default)
     {
         var p = new float[3]; var n = new float[3];
@@ -343,7 +343,7 @@ public static partial class Physics
         return body == 0 ? default : new RaycastHit(body, entity, new Float3(p[0], p[1], p[2]), new Float3(n[0], n[1], n[2]));
     }
 
-    /// <summary>As <see cref="OverlapSphereEx"/>, but with a 32-bit Godot collision mask.</summary>
+    /// <summary>As <see cref="OverlapSphereEx"/>, but with a 32-bit collision mask.</summary>
     public static Body[] OverlapSphereMask(Float3 centre, float radius, uint collisionMask, Body ignoreBody = default, int maxResults = 64)
     {
         if (maxResults <= 0) return Array.Empty<Body>();
@@ -354,7 +354,7 @@ public static partial class Physics
         return outv;
     }
 
-    /// <summary>As <see cref="SphereCastEx"/>, but with a 32-bit Godot collision mask.</summary>
+    /// <summary>As <see cref="SphereCastEx"/>, but with a 32-bit collision mask.</summary>
     public static RaycastHit SphereCastMask(Float3 origin, Float3 direction, float maxDistanceCm, float radius, uint collisionMask, Body ignoreBody = default)
     {
         var p = new float[3]; var n = new float[3];
@@ -364,6 +364,6 @@ public static partial class Physics
     }
 
     /// <summary>Whether the simulation would let these two bodies collide, from filtering alone (static-vs-static, the
-    /// 16-layer matrix, the Godot layer/mask rule, exceptions and joint exclusion).</summary>
+    /// 16-layer matrix, the 32-bit layer/mask rule, exceptions and joint exclusion).</summary>
     public static bool BodiesCanCollide(Body a, Body b) => Native.aver_phys_bodies_can_collide(a.Handle, b.Handle) != 0;
 }

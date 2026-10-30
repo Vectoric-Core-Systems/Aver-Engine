@@ -1,10 +1,9 @@
-// TonemapTest -- G4 R3, no device. Godot's tonemappers (Linear, Reinhard, filmic, ACES, AgX) and its display adjustments, as the CPU twin in rhi/Tonemap.hpp
+// TonemapTest -- no device. The extended tonemappers (Linear, Reinhard, filmic, ACES, AgX) and the display adjustments, as the CPU twin in rhi/Tonemap.hpp
 // computes them, against reference values from the published formulas written out again here in double precision and in a different layout (the AgX
 // matrices as column lists, the filmic bias as a scale of the input). Also: which settings select the AVER_POST_TONEMAP_EXT composite (the default must
 // stay the ordinary one), the post constant block's packing, the project keys, and the HLSL read back as text (the old tonemap line and function are
 // unchanged; the new code sits behind the define; the constants match the twin's). The GPU side is checked by the compile tests and, headed, by the owner.
 #include "aver/core/Log.hpp"
-#include "aver/formats/GodotEnvironment.hpp"
 #include "aver/platform/FileSystem.hpp"
 #include "aver/rhi/FrameConstants.hpp"
 #include "aver/rhi/RHI.hpp"
@@ -120,12 +119,12 @@ int main() {
     AVER_INFO("-- hand values --");
     check(near(tmap::reinhard(tmap::Vec3f{{0.5f, 0.5f, 0.5f}}, 2.0f).v[0], 0.375, 1e-6), "Reinhard(0.5, white 2) = 0.5 * (1 + 0.5 / 4) / 1.5 = 0.375");
     check(near(tmap::reinhard(tmap::Vec3f{{0.18f, 0.5f, 3.0f}}, 1.0f).v[1], 0.5, 1e-6) && near(tmap::reinhard(tmap::Vec3f{{0.18f, 0.5f, 3.0f}}, 1.0f).v[2], 3.0, 1e-5),
-          "Reinhard at Godot's default white 1 is the identity (so the default Reinhard is a clipped linear)");
-    check(near(tmap::godot(kTonemapGodotLinear, tmap::Vec3f{{0.18f, 0.5f, 3.0f}}, 1.0f).v[2], 3.0, 1e-6), "linear returns the colour untouched (the encode clips it)");
+          "Reinhard at the default white 1 is the identity (so the default Reinhard is a clipped linear)");
+    check(near(tmap::ext(kTonemapExtLinear, tmap::Vec3f{{0.18f, 0.5f, 3.0f}}, 1.0f).v[2], 3.0, 1e-6), "linear returns the colour untouched (the encode clips it)");
     for (double w : whites) {
         const tmap::Vec3f white{{static_cast<f32>(w), static_cast<f32>(w), static_cast<f32>(w)}};
         check(near(tmap::filmic(white, static_cast<f32>(w)).v[1], 1.0, 1e-5), "filmic maps its white point to 1 (white " + std::to_string(w) + ")");
-        check(near(tmap::acesGodot(white, static_cast<f32>(w)).v[1], 1.0, 2e-4), "ACES maps its white point to 1 (white " + std::to_string(w) + ")");
+        check(near(tmap::acesExt(white, static_cast<f32>(w)).v[1], 1.0, 2e-4), "ACES maps its white point to 1 (white " + std::to_string(w) + ")");
         check(near(tmap::reinhard(white, static_cast<f32>(w)).v[1], 1.0, 1e-5), "Reinhard maps its white point to 1 (white " + std::to_string(w) + ")");
     }
     check(near(tmap::filmic(tmap::Vec3f{{0, 0, 0}}, 1.0f).v[0], 0.0, 1e-6), "filmic(0) = 0");
@@ -145,27 +144,27 @@ int main() {
             std::snprintf(label, sizeof label, "(%.2f %.2f %.2f) white %.0f", in.c[0], in.c[1], in.c[2], w);
             check(worst(tmap::reinhard(c, wf), refReinhard(in, w)) < 1e-4 * std::max(1.0, in.c[0] + in.c[1] + in.c[2]), std::string("Reinhard ") + label);
             check(worst(tmap::filmic(c, wf), refFilmic(in, w)) < 2e-4, std::string("filmic ") + label);
-            check(worst(tmap::acesGodot(c, wf), refAces(in, w)) < 5e-4, std::string("ACES ") + label);
+            check(worst(tmap::acesExt(c, wf), refAces(in, w)) < 5e-4, std::string("ACES ") + label);
             if (w == 1.0) check(worst(tmap::agx(c, wf), refAgx(in)) < 5e-4, std::string("AgX ") + label);
         }
     }
     {
         // The dispatcher floors negatives, takes the white point from its argument, and ignores it for AgX.
         const tmap::Vec3f neg{{-1.0f, 0.5f, 0.5f}};
-        check(tmap::godot(kTonemapGodotFilmic, neg, 1.0f).v[0] == tmap::godot(kTonemapGodotFilmic, tmap::Vec3f{{0, 0.5f, 0.5f}}, 1.0f).v[0], "a negative channel is floored at zero before the curve");
-        check(near(tmap::godot(kTonemapGodotAgx, tmap::Vec3f{{0.5f, 0.5f, 0.5f}}, 1.0f).v[0], tmap::godot(kTonemapGodotAgx, tmap::Vec3f{{0.5f, 0.5f, 0.5f}}, 9.0f).v[0], 1e-7), "AgX has no white point");
-        check(tmap::godot(kTonemapGodotReinhard, tmap::Vec3f{{1, 1, 1}}, 0.0f).v[0] == tmap::godot(kTonemapGodotReinhard, tmap::Vec3f{{1, 1, 1}}, 1e-3f).v[0], "a zero white point is held at 0.001");
+        check(tmap::ext(kTonemapExtFilmic, neg, 1.0f).v[0] == tmap::ext(kTonemapExtFilmic, tmap::Vec3f{{0, 0.5f, 0.5f}}, 1.0f).v[0], "a negative channel is floored at zero before the curve");
+        check(near(tmap::ext(kTonemapExtAgx, tmap::Vec3f{{0.5f, 0.5f, 0.5f}}, 1.0f).v[0], tmap::ext(kTonemapExtAgx, tmap::Vec3f{{0.5f, 0.5f, 0.5f}}, 9.0f).v[0], 1e-7), "AgX has no white point");
+        check(tmap::ext(kTonemapExtReinhard, tmap::Vec3f{{1, 1, 1}}, 0.0f).v[0] == tmap::ext(kTonemapExtReinhard, tmap::Vec3f{{1, 1, 1}}, 1e-3f).v[0], "a zero white point is held at 0.001");
     }
     {
         // Monotone and bounded on a neutral ramp, per mode.
-        for (u32 mode = kTonemapGodotReinhard; mode <= kTonemapGodotAgx; ++mode) {
+        for (u32 mode = kTonemapExtReinhard; mode <= kTonemapExtAgx; ++mode) {
             bool mono = true, bounded = true;
             f32 prev = -1.0f;
             for (f32 x = 0.0f; x <= 16.0f; x += 0.05f) {
-                const f32 y = tmap::godot(mode, tmap::Vec3f{{x, x, x}}, 1.0f).v[1];
+                const f32 y = tmap::ext(mode, tmap::Vec3f{{x, x, x}}, 1.0f).v[1];
                 if (y < prev - 1e-5f) mono = false;
-                // Before the display clip, filmic and ACES overshoot 1 above their white point (Godot's do too); Reinhard at white 1 is the identity.
-                if (!(y >= -1e-3f) || (mode != kTonemapGodotReinhard && y > 2.0f)) bounded = false;
+                // Before the display clip, filmic and ACES overshoot 1 above their white point; Reinhard at white 1 is the identity.
+                if (!(y >= -1e-3f) || (mode != kTonemapExtReinhard && y > 2.0f)) bounded = false;
                 prev = y;
             }
             check(mono && bounded, "mode " + std::to_string(mode) + " is monotone and non-negative on a neutral ramp (bounded by 2 where it is not the identity)");
@@ -189,7 +188,7 @@ int main() {
         PostSettings p;
         check(!postNeedsExtComposite(p), "the default settings use the ordinary composite");
         for (u32 m = 0; m <= 2; ++m) { p.tonemap = m; check(!postNeedsExtComposite(p), "Aver tonemap " + std::to_string(m) + " uses the ordinary composite"); }
-        for (u32 m = 3; m <= 7; ++m) { p.tonemap = m; check(postNeedsExtComposite(p), "Godot tonemap " + std::to_string(m) + " selects the EXT composite"); }
+        for (u32 m = 3; m <= 7; ++m) { p.tonemap = m; check(postNeedsExtComposite(p), "extended tonemap " + std::to_string(m) + " selects the EXT composite"); }
         p = PostSettings{};
         p.adjustContrast = 1.1f;
         check(postNeedsExtComposite(p), "an adjustment off 1 selects the EXT composite");
@@ -203,8 +202,7 @@ int main() {
         r = q; r.adjustContrast = 2.0f; check(!postSettingsEqual(q, r), "postSettingsEqual sees contrast");
         r = q; r.adjustSaturation = 2.0f; check(!postSettingsEqual(q, r), "postSettingsEqual sees saturation");
         check(PostSettings{}.tonemap == 1 && PostSettings{}.tonemapWhite == 1.0f, "the default tonemap is still Aver's matrixed ACES (1)");
-        check(clampTonemapMode(9) == 7 && clampTonemapMode(-3) == 0 && tonemapModeFromGodot(0) == 3 && tonemapModeFromGodot(4) == 7 && tonemapModeFromGodot(9) == 7, "mode clamping and the Godot offset");
-        for (int g = 0; g <= 4; ++g) check(fmt::godotenv::tonemapMode(g) == static_cast<int>(tonemapModeFromGodot(g)), "the converter's mode " + std::to_string(g) + " is the engine's");
+        check(clampTonemapMode(9) == 7 && clampTonemapMode(-3) == 0 && tonemapModeFromExtIndex(0) == 3 && tonemapModeFromExtIndex(4) == 7 && tonemapModeFromExtIndex(9) == 7, "mode clamping and the extended offset");
     }
 
     AVER_INFO("-- the post constants --");
@@ -242,9 +240,9 @@ int main() {
         check(has(color, "float3 averTonemap(float3 x, float mode) {\n    if (mode > 1.5) return acesLumaTonemap(x);\n    return mode > 0.5 ? acesFittedTonemap(x) : acesTonemap(x);\n}"),
               "averTonemap is the function it always was");
         const size_t extBegin = color.find("#ifdef AVER_POST_TONEMAP_EXT");
-        const size_t godotAt = color.find("float3 averTonemapGodot(");
-        const size_t extEnd = color.find("#endif", godotAt == std::string::npos ? 0 : godotAt);
-        check(extBegin != std::string::npos && godotAt != std::string::npos && extEnd != std::string::npos && extBegin < godotAt, "the Godot tonemappers sit inside #ifdef AVER_POST_TONEMAP_EXT");
+        const size_t extAt = color.find("float3 averTonemapExt(");
+        const size_t extEnd = color.find("#endif", extAt == std::string::npos ? 0 : extAt);
+        check(extBegin != std::string::npos && extAt != std::string::npos && extEnd != std::string::npos && extBegin < extAt, "the extended tonemappers sit inside #ifdef AVER_POST_TONEMAP_EXT");
         check(color.find("float3 toGamma(") > extEnd && color.find("float3 acesTonemap(") < extBegin, "and every other function stays outside it");
         check(has(post, "#else\n    float3 outc = toGamma(averTonemap(c, gPostMisc.w));\n#endif"), "PSComposite's ordinary branch is the old line");
         const size_t cb0 = post.find("float4 gPostAccess;");
@@ -252,11 +250,11 @@ int main() {
         const size_t ext1 = post.find("float4 gPostExt;", cb0);
         const size_t end1 = post.find("#endif", ext1);
         check(cb0 != std::string::npos && ext0 != std::string::npos && ext0 < ext1 && ext1 < end1 && post.find("};", cb0) > end1, "gPostExt is declared only under the define, after gPostAccess, inside the cbuffer");
-        check(has(post, "gPostMisc.w > 2.5 ? averTonemapGodot(c, gPostMisc.w, gPostExt.x) : averTonemap(c, gPostMisc.w)"), "modes above 2 take the Godot path");
-        // The mode thresholds in averTonemapGodot are the enum.
-        check(kTonemapGodotLinear == 3 && kTonemapGodotReinhard == 4 && kTonemapGodotFilmic == 5 && kTonemapGodotAces == 6 && kTonemapGodotAgx == 7 &&
-                  has(color, "if (mode > 6.5) return saturate(averTonemapAgxGodot(c));") && has(color, "if (mode > 5.5) return saturate(averTonemapAcesGodot(c, white));") &&
-                  has(color, "if (mode > 4.5) return saturate(averTonemapFilmicGodot(c, white));") && has(color, "if (mode > 3.5) return saturate(averTonemapReinhardGodot(c, white));"),
+        check(has(post, "gPostMisc.w > 2.5 ? averTonemapExt(c, gPostMisc.w, gPostExt.x) : averTonemap(c, gPostMisc.w)"), "modes above 2 take the extended path");
+        // The mode thresholds in averTonemapExt are the enum.
+        check(kTonemapExtLinear == 3 && kTonemapExtReinhard == 4 && kTonemapExtFilmic == 5 && kTonemapExtAces == 6 && kTonemapExtAgx == 7 &&
+                  has(color, "if (mode > 6.5) return saturate(averTonemapAgxExt(c));") && has(color, "if (mode > 5.5) return saturate(averTonemapAcesExt(c, white));") &&
+                  has(color, "if (mode > 4.5) return saturate(averTonemapFilmicExt(c, white));") && has(color, "if (mode > 3.5) return saturate(averTonemapReinhardExt(c, white));"),
               "the HLSL dispatch thresholds are the enum values 4..7 (3 is linear)");
         for (const char* k : {"-12.4739311883324", "4.02606881166759", "0.856627153315983", "0.137318972929847", "0.11189821299995", "1.1271005818144368", "-0.1413297634984383",
                               "1.2519364065950405", "0.6274039", "1.6604910", "0.021 * v", "4.0111 * v2", "25.682", "70.359", "74.778", "27.069", "2.4", "0.0245786",

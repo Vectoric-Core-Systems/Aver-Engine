@@ -1,4 +1,4 @@
-// The .octheme resource: model, text form, lookup order and the built-in Godot-like default (UiThemeSheet.hpp).
+// The .octheme resource: model, text form, lookup order and the built-in default (UiThemeSheet.hpp).
 #include "aver/ui/UiThemeSheet.hpp"
 
 #include "aver/core/CharConv.hpp"
@@ -402,7 +402,7 @@ UiThemeStyleBox emptyBox(f32 cx = -1, f32 cy = -1) {
 
 UiThemeSheet buildDefault() {
     UiThemeSheet th;
-    th.name = "godot_default";
+    th.name = "builtin_default";
     th.defaultFontSize = 16;
     th.defaultBaseScale = 1.0f;
 
@@ -501,7 +501,7 @@ UiThemeSheet buildDefault() {
     bar.colors["font_color"] = rgba(0.875f, 0.875f, 0.875f);
     bar.constants["outline_size"] = 0;
 
-    // ---- the widgets of G5 U2 (docs/plans/fabric/G5_PARITY.md): Godot's default look as flat boxes and numbers, no images ----
+    // ---- the widgets: the default look as flat boxes and numbers, no images ----
     const u32 text = rgba(0.875f, 0.875f, 0.875f), textHover = rgba(0.95f, 0.95f, 0.95f), textDim = rgba(0.875f, 0.875f, 0.875f, 0.5f);
     const u32 panelBg = rgba(0.1f, 0.1f, 0.1f, 0.6f), hoverBg = rgba(0.225f, 0.225f, 0.225f, 0.6f), selBg = rgba(0.3f, 0.5f, 0.8f, 0.5f);
     const auto lineBox = [](u32 color, f32 thickness) {
@@ -691,13 +691,13 @@ UiThemeSheet buildDefault() {
 
 } // namespace
 
-const UiThemeSheet& uiGodotDefaultTheme() {
+const UiThemeSheet& uiBuiltinDefaultTheme() {
     static const UiThemeSheet th = buildDefault();
     return th;
 }
 
-const std::string& uiGodotDefaultThemeText() {
-    static const std::string text = uiThemeWrite(uiGodotDefaultTheme());
+const std::string& uiBuiltinDefaultThemeText() {
+    static const std::string text = uiThemeWrite(uiBuiltinDefaultTheme());
     return text;
 }
 

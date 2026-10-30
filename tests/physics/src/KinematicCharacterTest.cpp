@@ -1,5 +1,5 @@
-// KinematicCharacterTest -- Godot's CharacterBody3D.move_and_slide as a controller on a kinematic rigid body (physics_kinematic_abi.h, G2). Through the
-// ABI only. Scenes are built from static boxes, off-axis (walls on +X and +Y, slopes tilted about Y) and the character is driven the way a Godot script
+// KinematicCharacterTest -- move_and_slide as a controller on a kinematic rigid body (physics_kinematic_abi.h). Through the
+// ABI only. Scenes are built from static boxes, off-axis (walls on +X and +Y, slopes tilted about Y) and the character is driven the way a script
 // drives one: set the horizontal velocity, add gravity while not on the floor, call move_and_slide. Expected numbers are arithmetic on the scene.
 #include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
@@ -58,7 +58,7 @@ static bool onWall(const Char& c) { return (state(c) & AVER_PHYS_KCS_WALL) != 0;
 static bool onCeiling(const Char& c) { return (state(c) & AVER_PHYS_KCS_CEILING) != 0; }
 static void vel(const Char& c, float* v) { aver_phys_kc_velocity(c.kc, v); }
 
-// One Godot-style frame: horizontal input, gravity while airborne, move_and_slide.
+// One frame: horizontal input, gravity while airborne, move_and_slide.
 static void tick(const Char& c, float vx, float vy, bool gravity = true) {
     float v[3];
     vel(c, v);
@@ -69,7 +69,7 @@ static void tick(const Char& c, float vx, float vy, bool gravity = true) {
     aver_phys_kc_move_and_slide(c.kc, kDt, nullptr);
 }
 
-// A script that adds gravity every frame and never touches the horizontal velocity (the common Godot idiom).
+// A script that adds gravity every frame and never touches the horizontal velocity (the common idiom).
 static void idle(const Char& c, int n) {
     for (int i = 0; i < n; ++i) {
         float v[3];

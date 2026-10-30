@@ -51,7 +51,7 @@ static class PlatformTests
         T.Check("bool", d.GetValue("player", "alive", false));
         T.Check("Vec3", d.GetValue("world", "spawn") is Vec3 v && v.X == 1.5f && v.Y == -2f && v.Z == 0.25f);
         T.Check("a missing key gives the fallback", d.GetValue("player", "none", 42) == 42);
-        T.Check("godot's layout", c.ToText().StartsWith("[player]\n\nname=\"") && c.ToText().Contains("\nlevel=7\n"));
+        T.Check("INI-style layout", c.ToText().StartsWith("[player]\n\nname=\"") && c.ToText().Contains("\nlevel=7\n"));
     }
 
     private static void ConfigEdits()

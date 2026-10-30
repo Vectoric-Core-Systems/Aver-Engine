@@ -1,4 +1,4 @@
-// The bus graph, effects and Godot-style players through the plain-C seam Aver.Fabric calls (modules/audio.abi), in OFFLINE mode: the real mixer
+// The bus graph, effects and spatial-model players through the plain-C seam (modules/audio.abi), in OFFLINE mode: the real mixer
 // with no device behind it, rendered into buffers here. Also the .ocbus text format (parse, write, the layout applied through the ABI).
 #include "aver/audio/audio_abi.h"
 #include "aver/audio/BusLayout.hpp"
@@ -42,7 +42,7 @@ static void testFormat() {
     check(fmt::parseOcBusLayout(text, back, &why) && back.buses.size() == 2, "a written layout parses (" + why + ")");
     check(back.buses[0].name == "Master" && near(back.buses[0].volumeDb, -2.5f, 1.0e-6f), "volumes survive");
     check(back.buses[1].name == "Sound Effects" && back.buses[1].mute && back.buses[1].send == "Master", "names with spaces, mute and send survive");
-    check(back.buses[1].effects.size() == 2 && back.buses[1].effects[0].params.size() == 2 && back.buses[1].effects[0].params[1].first == "voice/1/delay_ms", "effects keep their order and Godot's parameter names");
+    check(back.buses[1].effects.size() == 2 && back.buses[1].effects[0].params.size() == 2 && back.buses[1].effects[0].params[1].first == "voice/1/delay_ms", "effects keep their order and parameter names");
     check(!back.buses[1].effects[1].enabled && back.buses[1].effects[1].sidechain == "Master" && near(back.buses[1].effects[1].params[0].second, -9.5f, 1.0e-6f), "enabled, sidechain and values survive");
     check(fmt::writeOcBusLayout(back) == text, "write(parse(write(x))) is stable");
     audio::BusLayout bad;
@@ -262,8 +262,8 @@ int main() {
     aver_audio_bus_set_volume_db(sfx, 0.0f);
 
     const int amp = aver_audio_effect_add(sfx, "AudioEffectAmplify", -1);
-    check(amp > 0 && aver_audio_effect_add(sfx, "AudioEffectNope", -1) == 0, "an effect is added by Godot class name; an unknown one is refused");
-    check(aver_audio_effect_set_param(amp, "volume_db", 6.0206f) == 1 && aver_audio_effect_set_param(amp, "bogus", 1.0f) == 0, "parameters are set by Godot name");
+    check(amp > 0 && aver_audio_effect_add(sfx, "AudioEffectNope", -1) == 0, "an effect is added by class name; an unknown one is refused");
+    check(aver_audio_effect_set_param(amp, "volume_db", 6.0206f) == 1 && aver_audio_effect_set_param(amp, "bogus", 1.0f) == 0, "parameters are set by name");
     renderBlocks(out, 3);
     check(near(out[200], 1.0f, 2.0e-3f), "the effect runs on the bus");
     int b = -1, e = -1;

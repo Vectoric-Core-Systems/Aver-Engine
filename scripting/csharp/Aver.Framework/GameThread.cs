@@ -1,15 +1,14 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
-// GameThread: deferred calls, end-of-frame destroys and an await that resumes on the game thread (Godot's
-// call_deferred, queue_free and await).
+// GameThread: deferred calls, end-of-frame destroys and an await that resumes on the game thread.
 
 using System.Collections.Concurrent;
 using Aver.Scripting;
 
 namespace Aver.Framework;
 
-/// <summary>Work for the game thread at the end of the current tick pass (Godot's <c>call_deferred</c>).</summary>
+/// <summary>Work for the game thread at the end of the current tick pass.</summary>
 public static class Deferred
 {
     /// <summary>Runs <paramref name="action"/> on the game thread when the current tick pass ends. Safe to call from
@@ -24,14 +23,14 @@ public static class Deferred
 /// <summary>Awaitable points in the frame. An <c>await</c> started on the game thread resumes there.</summary>
 public static class Frame
 {
-    /// <summary>Completes at the start of the next OnTick pass (Godot's <c>process_frame</c>).</summary>
+    /// <summary>Completes at the start of the next OnTick pass.</summary>
     public static Task Next() => GameThread.WaitFor(physics: false);
 
-    /// <summary>Completes at the start of the next OnPhysicsTick pass (Godot's <c>physics_frame</c>).</summary>
+    /// <summary>Completes at the start of the next OnPhysicsTick pass.</summary>
     public static Task NextPhysics() => GameThread.WaitFor(physics: true);
 
     /// <summary>Completes after <paramref name="seconds"/> of game time: scaled by the time scale and held while paused
-    /// (Godot's <c>create_timer(seconds).timeout</c>).</summary>
+    /// after a delay.</summary>
     public static Task Delay(float seconds)
     {
         var done = new TaskCompletionSource();
@@ -99,7 +98,7 @@ internal static class GameThread
         return n;
     }
 
-    // The end of the frame: deferred calls, then the destroys queued with QueueDestroy (Godot's queue_free).
+    // The end of the frame: deferred calls, then the destroys queued with QueueDestroy.
     internal static void EndFrame()
     {
         Flush();

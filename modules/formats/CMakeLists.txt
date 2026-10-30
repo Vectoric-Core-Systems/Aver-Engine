@@ -24,8 +24,8 @@ aver_add_module(Aver.Formats
     src/OcAnim.cpp
     src/OcBeam.cpp
     src/OcGraph.cpp
-    # Fabric G6 SH2: the GodotShader node of a material graph (a converted Godot shader carried as emitted HLSL).
-    src/OcGraphGodot.cpp
+    # The EmbeddedHlsl node of a material graph (a shader translated by a tool, carried as emitted HLSL).
+    src/OcGraphHlsl.cpp
     # .ocprefab and the prefab-instance records of .ocworld: text, by-name components, no Aver.Scene.
     src/OcPrefab.cpp
     # [wave3/level-instances begin] LEVELINST/EXTENT records and the .ocpack level-pack sidecar: text, no Aver.Scene.
@@ -207,7 +207,7 @@ if(TARGET Aver.Audio)
     SOURCES
       src/Wav.cpp
       src/OcAudio.cpp
-      # .ocbus -- an audio bus layout (Godot AudioBusLayout parity, G5 S1); the layout structs are plain data in aver/audio/BusLayout.hpp.
+      # .ocbus -- an audio bus layout (an audio bus layout); the layout structs are plain data in aver/audio/BusLayout.hpp.
       src/OcBusLayout.cpp
       # Ogg Vorbis, FLAC and MP3 on every platform: the shared plumbing, then each vendored decoder in
       # its own translation unit (its implementation macro is defined in exactly that one file).

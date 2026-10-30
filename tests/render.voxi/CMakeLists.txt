@@ -212,20 +212,20 @@ endif()
 # Skips (77) without the vendored dxcompiler.dll. AVER_REPO_ROOT: stages the module shader trees.
 if(TARGET Aver.Render.PBR.Materials)
   add_executable(VoxiSpirvCompileTest src/VoxiSpirvCompileTest.cpp)
-  # G6 SH2: converted Godot shaders are registered so the scene, ray-driven and compute variants are compiled WITH one (GdGraphBridge.hpp lives with the
-  # formats.godot tests); the Godot front-end and the graph node live in Aver.Formats.Godot / Aver.Formats.
-  target_link_libraries(VoxiSpirvCompileTest PRIVATE Aver.Render.PBR.Materials Aver.Formats.Godot Aver.Formats Aver.RHI Aver.Platform Aver.Core)
-  target_include_directories(VoxiSpirvCompileTest PRIVATE ${CMAKE_SOURCE_DIR}/tests/formats.godot/src)
+  # Embedded HLSL shaders are registered so the scene, ray-driven and compute variants are compiled WITH one (EmbeddedHlslBridge.hpp, hand-written sources:
+  # the test needs no translator); the graph node lives in Aver.Formats.
+  target_link_libraries(VoxiSpirvCompileTest PRIVATE Aver.Render.PBR.Materials Aver.Formats Aver.RHI Aver.Platform Aver.Core)
+  target_include_directories(VoxiSpirvCompileTest PRIVATE ${CMAKE_SOURCE_DIR}/tests/render.pbr/src)
   target_compile_definitions(VoxiSpirvCompileTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
   set_target_properties(VoxiSpirvCompileTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
 
-# RasterLightsTest -- the raster local lights' CPU half (aver/voxi/RasterLights.hpp, G4 R2): culling, ranking and the 32-light cap, Godot's
-# attenuation curves against its documented formulas (aver/formats/GodotLight.hpp), the energy calibration, the shadow-tile budget and atlas
+# RasterLightsTest -- the raster local lights' CPU half (aver/voxi/RasterLights.hpp): culling, ranking and the 32-light cap, the parametric
+# attenuation curves against their documented formulas, the energy calibration, the shadow-tile budget and atlas
 # packing, the tile matrices, and the HLSL's constants read back from voxi.hlsl / voxi_locallights_raster.hlsli. Header-only, no device.
 add_executable(RasterLightsTest src/RasterLightsTest.cpp)
 target_link_libraries(RasterLightsTest PRIVATE Aver.Core Aver.Platform)
-target_include_directories(RasterLightsTest PRIVATE ${CMAKE_SOURCE_DIR}/modules/render.voxi/include ${CMAKE_SOURCE_DIR}/modules/formats/include)
+target_include_directories(RasterLightsTest PRIVATE ${CMAKE_SOURCE_DIR}/modules/render.voxi/include)
 target_compile_definitions(RasterLightsTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
 set_target_properties(RasterLightsTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 

@@ -225,9 +225,20 @@ Every binary that must ship, with what actually pulls it in and whether it may b
 | `FSharp.Core.dll` | .NET SDK `library-packs` | **MIT** | yes **if** F# is used — and **still without a notice.** See the correction under the table. |
 | `Microsoft.CodeAnalysis(.CSharp).dll` + 26 satellites | `bin\Tools\` | **MIT** | **NO.** No game needs a compiler. Note in passing: these ship in the *engine* payload today and `THIRD-PARTY-NOTICES.txt` never mentioned Roslyn — MIT requires the copyright notice. **Fixed:** `stage-payload.ps1` now emits a Roslyn section whenever it finds `Microsoft.CodeAnalysis*.dll` in the staged tree, concatenating `third_party/nuget/LICENSE.roslyn.txt`. The licence file had to be written rather than vendored: the packages declare MIT by SPDX expression and carry no licence text of their own. |
 | `Aver.Audio.Abi.dll` | ours | ours | **yes, since 2026-09.** This row said NO on a "zero callers" reading that went stale; `game.allowlist` carries the entry unconditionally now. |
+| `Extensions\<Name>\` for each extension the project names (for the Fabric Connector: `extension.json`, `native\<platform>\Aver.Fabric.Native.*`, `managed\Aver.Fabric.dll`, `data\extension_api.json`) | the extension's | its own (**LGPL-2.1** for the Fabric Connector, `extension.json` `license`) | **yes, when the project's `.ocproject` has an `EXTENSION <Name>` line.** Neither allowlist names an extension: `stage-game.ps1` reads those lines (see "Extensions" below) and copies the extension's `extension.json` and its `runtimeFiles` only; its `tools\` (the script converter) never ships. This replaced `Aver.Fabric.GDExt.Abi.dll` and the bare `extension_api.json`. |
 | `Aver.Settings.dll` | ours | ours | **yes, since 2026-09-20 — the row the table was missing.** See below. |
 | `AverCrashReporter.exe` | ours | **LGPL-2.1-only** (`LICENSE`) | yes. Unconditional: it links nothing from the engine, and without it the runtime's crash handler writes a full report folder and then spawns an executable that is not there. |
 | `shaders\**` | ours | ours | yes. Not a redistribution question — a correctness one. The HLSL is read from `<exeDir>\shaders` at pipeline-build time, so a package without it ships the compiler and nothing to compile. |
+
+### Extensions
+
+A project that needs an extension (a converted Godot project needs the Fabric Connector) records it as `EXTENSION <Name> [<version>]` in its `.ocproject` ([EXTENSIONS.md](EXTENSIONS.md)). `stage-game.ps1` reads those lines after it copies the engine files and, for each name:
+
+- takes `<build>\bin\Extensions\<Name>\extension.json` (a name the build tree does not have is a `Fail`, not a game that reports the missing extension at run time);
+- copies `extension.json` and every file its `runtimeFiles` list to `<out>\Extensions\<Name>\` at the same relative paths. `{platform}` is `win-x64` (`win-arm64` on an ARM host) and a `*` in the last segment matches any file there. The linker's by-products (`.pdb`, `.ilk`, `.exp`, `.lib`) a `*` also matches are skipped;
+- refuses a `runtimeFiles` entry that leaves the extension's folder or points into `tools\`: conversion-time files never ship.
+
+The copied native library goes through the same import-closure check and VC++ runtime staging as the engine's own DLLs, and the packaged `AverEngineRuntime.exe` finds the folder through the loader (`<exe dir>\Extensions`). `game.allowlist` and `payload.allowlist` name no extension. `stage-payload.ps1 -WithExtension <Name>` puts a whole extension folder (tools included) into an engine payload; the payload carries none otherwise.
 
 ### The two seams no import scan can see
 

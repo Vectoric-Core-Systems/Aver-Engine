@@ -201,7 +201,7 @@ JPH::Ref<JPH::Shape> makeSeparationRay(float lengthCm, const float* dir, float r
     JPH::CapsuleShapeSettings s((cmToM(lengthCm) - 2.0f * rM) * 0.5f, rM);
     s.SetEmbedded();
     if (surface != 0) s.mMaterial = surfaceMaterial(surface);
-    s.SetDensity(0.001f);   // no weight worth the name: Godot's ray has none
+    s.SetDensity(0.001f);   // no weight worth the name: a ray has none
     const JPH::Ref<JPH::Shape> capsule = finish(s.Create(), "separation ray");
     if (!capsule) return nullptr;
     const JPH::Vec3 d = toJoltUnit(Vec3(dir[0] / len, dir[1] / len, dir[2] / len)).Normalized();

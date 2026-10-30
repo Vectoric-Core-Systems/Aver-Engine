@@ -91,10 +91,10 @@ add_executable(Sandbox WIN32
   src/RevisionControl.cpp
   src/NavBakeCommand.cpp
   src/ToolsMenu.cpp
-  # File > Import Godot Project...: runs `AverAssetC fabric` on a worker thread. Its headless half is compiled by tests/fabric's
-  # FabricImportTest too; FabricProcess.cpp is the converter's own child-process helper (tools/fabric), shared rather than copied.
-  src/FabricImport.cpp
-  ${CMAKE_SOURCE_DIR}/tools/fabric/FabricProcess.cpp
+  # File > the import entries installed extensions list in extension.json (docs/EXTENSIONS.md): runs `AverAssetC <command>` on a worker
+  # thread. Its headless half is compiled by ExtensionImportTest too.
+  src/ExtensionImport.cpp
+  src/ProcessStream.cpp
   src/Nrd2Session.cpp
   src/GraphEditorGeometry.cpp
   src/GraphNodeDefs.cpp
@@ -160,7 +160,7 @@ add_executable(Sandbox WIN32
   src/OcShapeEditor.cpp
   src/ThumbnailCache.cpp
   Sandbox.rc)
-target_link_libraries(Sandbox PRIVATE Aver.Runtime Aver.Formats)
+target_link_libraries(Sandbox PRIVATE Aver.Runtime Aver.Formats Aver.Extensions)
 
 # Dear ImGui: the editor's own UI. Aver.RHI.D3D12 no longer knows this exists -- see its own
 # CMakeLists.txt and include/aver/rhi/d3d12/UiBackend.hpp for the seam it exposes instead -- so the
@@ -443,7 +443,6 @@ if(TARGET Aver.Scripting.Host)
   target_link_libraries(Sandbox PRIVATE Aver.Scripting.Host)
 endif()
 target_include_directories(Sandbox PRIVATE ${CMAKE_SOURCE_DIR}/third_party/stb)
-target_include_directories(Sandbox PRIVATE ${CMAKE_SOURCE_DIR}/tools)   # fabric/FabricProcess.hpp (File > Import Godot Project...)
 set_target_properties(Sandbox PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 

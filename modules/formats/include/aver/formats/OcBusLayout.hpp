@@ -1,12 +1,12 @@
 #pragma once
-// .ocbus -- an audio bus layout (the engine's form of a Godot AudioBusLayout / default_bus_layout.tres). Text, one record per line:
+// .ocbus -- an audio bus layout (the engine's bus layout form, which an importer can write). Text, one record per line:
 //
 //   OCBUS 1
 //   BUS "Master" volume_db=0 mute=0 solo=0 bypass=0
 //   BUS "Music" send="Master" volume_db=-6 mute=0 solo=0 bypass=0
 //   EFFECT "AudioEffectReverb" enabled=1 sidechain="" room_size=0.3 wet=0.2
 //
-// An EFFECT belongs to the BUS above it and lists Godot's property names as name=value (any it does not know are ignored when the layout
+// An EFFECT belongs to the BUS above it and lists the effect's property names as name=value (any it does not know are ignored when the layout
 // is applied). The first BUS is Master whatever it is called. Lines starting with '#' are comments. Names are quoted and may not contain
 // a double quote.
 #include "aver/audio/BusLayout.hpp"

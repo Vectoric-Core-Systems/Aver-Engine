@@ -647,7 +647,7 @@ static std::vector<int32_t> treeOrdered(const std::vector<int32_t>& es, const st
     return out;
 }
 
-// Checks Godot's tick order: priority first, then depth-first tree order with siblings and roots in
+// Checks the tick order: priority first, then depth-first tree order with siblings and roots in
 // the order they were created or reparented, whatever order the entities are handed over in.
 static void testTreeOrder() {
     AVER_INFO("=== tree order: priority, then parent before child, siblings in the order added ===");
@@ -692,9 +692,9 @@ static void AVER_FW_CALL standInRecordEnter(aver_entity e) { g_entered.push_back
 static int32_t AVER_FW_CALL standInBindAll(int64_t, aver_entity) { return 1; }
 
 // Checks a spawn batch: nothing begins until the outermost end, then children before their parent and
-// siblings in the order added (Godot's _ready), skipping an actor destroyed inside the batch.
+// siblings in the order added (the ready order), skipping an actor destroyed inside the batch.
 static void testSpawnBatchReadyOrder() {
-    AVER_INFO("=== spawn batch: OnBeginPlay waits for the batch, then runs in Godot's _ready order ===");
+    AVER_INFO("=== spawn batch: OnBeginPlay waits for the batch, then runs in the ready order ===");
 
     const int32_t managedC = aver_fw_class_declare("BatchActor", "");
     aver_fw_class_set_flags(managedC, AVER_FW_CLASS_MANAGED);
@@ -724,7 +724,7 @@ static void testSpawnBatchReadyOrder() {
     check(g_begun.empty(), "nothing has begun before the outermost end");
     check(aver_fw_spawn_batch_end() == 4, "the outermost end begins four actors");
     check(g_entered == std::vector<int32_t>{p, c, g, c2},
-          "every actor enters first, parent before child: p, c, g, c2 (Godot's _enter_tree)");
+          "every actor enters first, parent before child: p, c, g, c2 (the enter-tree order)");
     check(g_begun == std::vector<int32_t>{g, c, c2, p},
           "then begins children first, siblings in order, the parent last: g, c, c2, p");
     check(aver_fw_spawn_batch_end() == 0, "an unmatched end is a no-op");

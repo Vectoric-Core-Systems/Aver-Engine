@@ -162,7 +162,7 @@ static void testMasks() {
     check(storeMask(0xFFFFFFFFu) == 0, "bits above 20 are dropped");
     check(masksOverlap(0, 0), "an entity that never heard of layers is drawn by a camera that never heard of them");
     check(masksOverlap(0, storeMask(2)), "an unmasked entity (every layer) is drawn by a camera that renders layer 2 only");
-    check(!masksOverlap(storeMask(1), storeMask(2)), "layer 1 is not drawn by a camera that renders layer 2 only (Godot default layers 1 against cull_mask 2)");
+    check(!masksOverlap(storeMask(1), storeMask(2)), "layer 1 is not drawn by a camera that renders layer 2 only (default layers 1 against cull mask 2)");
     check(masksOverlap(storeMask(1), storeMask(3)), "layer 1 is drawn by a camera that renders layers 1 and 2");
     check(!masksOverlap(storeMask(0), 0), "an instance on no layer is drawn by no camera");
     check(!masksOverlap(0, storeMask(0)), "a camera that renders no layer draws nothing");

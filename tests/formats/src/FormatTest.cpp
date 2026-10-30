@@ -327,6 +327,28 @@ static void checkOcproject() {
               nw.find("RENDER.AUTOEXPOSURE") == std::string::npos &&
               nw.find("RENDER.TONEMAP") == std::string::npos,
               "and writing it back adds no post line -- the compiled defaults stay the answer");
+
+        // EXTENSION <Name> [<version>]: the extensions a project needs (docs/EXTENSIONS.md). Order is kept, a repeated name keeps its first
+        // line, the version is optional, and a project with none writes none.
+        ProjectDesc ex;
+        check(parseOcproject("OCPROJECT 1\nNAME E\nEXTENSION FabricConnector 0.1.0\nEXTENSION Other\nEXTENSION FabricConnector 9.9.9\nextension lower 2\n", ex, &err),
+              "a manifest with EXTENSION lines parses");
+        check(ex.extensions.size() == 3 && ex.extensions[0].name == "FabricConnector" && ex.extensions[0].version == "0.1.0" &&
+              ex.extensions[1].name == "Other" && ex.extensions[1].version.empty() && ex.extensions[2].name == "lower" && ex.extensions[2].version == "2",
+              "each name and version is read in file order; a repeated name keeps its first line; the key is case-insensitive");
+        const std::string exw = writeOcproject(ex, "");
+        check(exw.find("EXTENSION FabricConnector 0.1.0\nEXTENSION Other\nEXTENSION lower 2\n") != std::string::npos &&
+              exw.find("9.9.9") == std::string::npos,
+              "writing puts one EXTENSION line per extension, with the version only when there is one");
+        ProjectDesc exb;
+        check(parseOcproject(exw, exb, &err) && exb.extensions.size() == 3, "and parses back");
+        check(writeOcproject(exb, exw) == exw, "a second write is byte-identical -- isOwnedKey covers EXTENSION");
+        const std::string exOld = "OCPROJECT 1\nNAME E\nEXTENSION Stale 1.0\n# kept\n";
+        ProjectDesc exNone;
+        exNone.name = "E";
+        check(writeOcproject(exNone, exOld).find("EXTENSION") == std::string::npos && writeOcproject(exNone, exOld).find("# kept") != std::string::npos,
+              "a save with no extensions drops the old EXTENSION line and keeps the comment");
+        check(none.extensions.empty() && nw.find("EXTENSION") == std::string::npos, "a project that names none writes no EXTENSION line");
     }
     {
         // GRAVITY POINTS DOWN, which is exactly why it needs a presence flag and not appendKey's
@@ -402,18 +424,19 @@ static void checkOcproject() {
               "an existing line is replaced, not duplicated");
     }
     {
-        // G2: PHYSICS.COMBINE, a word (jolt|godot) kept as a tri-state; a value that is neither is dropped.
-        ProjectDesc g, j, none, bad;
-        check(parseOcproject("OCPROJECT 1\nNAME C\nPHYSICS.COMBINE godot\n", g, &err) && g.physCombine == 1 && g.hasPhysicsSettings(), "PHYSICS.COMBINE godot parses");
+        // PHYSICS.COMBINE, a word (jolt|material; the old spelling godot is read too) kept as a tri-state; a value that is neither is dropped.
+        ProjectDesc g, j, none, bad, old;
+        check(parseOcproject("OCPROJECT 1\nNAME C\nPHYSICS.COMBINE material\n", g, &err) && g.physCombine == 1 && g.hasPhysicsSettings(), "PHYSICS.COMBINE material parses");
+        check(parseOcproject("OCPROJECT 1\nNAME C\nPHYSICS.COMBINE godot\n", old, &err) && old.physCombine == 1, "the old spelling godot is a read alias");
         check(parseOcproject("OCPROJECT 1\nNAME C\nphysics.combine JOLT\n", j, &err) && j.physCombine == 0, "jolt is a stated value, case-insensitively");
         check(parseOcproject("OCPROJECT 1\nNAME C\n", none, &err) && none.physCombine == -1, "unstated stays -1");
         check(parseOcproject("OCPROJECT 1\nNAME C\nPHYSICS.COMBINE unreal\n", bad, &err) && bad.physCombine == -1, "an unknown word is dropped, not read as jolt");
         const std::string w = writeOcproject(g, "");
-        check(w.find("PHYSICS.COMBINE godot") != std::string::npos && writeOcproject(none, "").find("COMBINE") == std::string::npos, "godot is written, unstated is not");
+        check(w.find("PHYSICS.COMBINE material") != std::string::npos && writeOcproject(none, "").find("COMBINE") == std::string::npos, "material is written, unstated is not");
         ProjectDesc reread;
         check(parseOcproject(w, reread, &err) && reread.physCombine == 1 && writeOcproject(reread, w) == w, "round trip, byte-stable");
         const std::string rw = writeOcproject(g, "OCPROJECT 1\nNAME C\nPHYSICS.COMBINE jolt\n");
-        check(rw.find("PHYSICS.COMBINE jolt") == std::string::npos && rw.find("PHYSICS.COMBINE godot") != std::string::npos, "an existing line is replaced, not duplicated");
+        check(rw.find("PHYSICS.COMBINE jolt") == std::string::npos && rw.find("PHYSICS.COMBINE material") != std::string::npos, "an existing line is replaced, not duplicated");
     }
     {
         // ZERO IS THE POINT for a mix: a project shipping with music muted has to be able to say

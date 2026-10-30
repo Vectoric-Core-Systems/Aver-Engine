@@ -1,5 +1,5 @@
-# Aver.Net.Abi -- the plain-C seam onto OS sockets and the reliable-UDP host/peer protocol, so Aver.Fabric's PacketPeerUDP, UDPServer,
-# StreamPeerTCP, TCPServer, IP, ENetConnection, ENetPacketPeer and ENetMultiplayerPeer drive them.
+# Aver.Net.Abi -- the plain-C seam onto OS sockets and the reliable-UDP host/peer protocol, so scripts and managed
+# extensions can open UDP and TCP sockets and ENet-style hosts and peers.
 #
 # SHARED because the .NET host P/Invokes it. It links Aver.Net (sockets and protocol: Core only, no scene, no device) statically and nothing
 # else, so a managed test host loads it from a plain folder. The file is Aver.Net.Abi and no managed assembly shares the name, so the shared

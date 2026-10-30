@@ -150,8 +150,8 @@ AVER_UI_API int32_t aver_ui_text_measure(const char* utf8, const char* family, f
 // Returns the block height; outWHL (may be NULL) receives width, height, line count.
 AVER_UI_API float aver_ui_text_block(float x, float y, const char* utf8, uint32_t rgba, const char* family, float px,
                                      int32_t flags, float maxWidth, int32_t align, float* outWHL);
-// aver_ui_text_block with an outline and a shadow (Godot's outline_size / font_outline_color / font_shadow_color / shadow_offset /
-// shadow_outline_size). The text is drawn as several passes through the same path: the shadow's outline, the shadow, the outline ring,
+// aver_ui_text_block with an outline and a shadow (outline size / outline colour / shadow colour / shadow offset /
+// shadow outline size). The text is drawn as several passes through the same path: the shadow's outline, the shadow, the outline ring,
 // then the fill in `rgba`. outlineSize 0 and a shadowRgba with alpha 0 draw exactly aver_ui_text_block. Colours are straight 0xAABBGGRR.
 // Returns the block height; outWHL (may be NULL) receives the block's width, height and line count (the outline is not counted).
 AVER_UI_API float aver_ui_text_block_fx(float x, float y, const char* utf8, uint32_t rgba, const char* family, float px,

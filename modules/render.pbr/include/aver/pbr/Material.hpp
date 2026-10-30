@@ -123,14 +123,14 @@ struct HairParams {
     f32 scatter = 0.5f;                        // [0,1] the multiple-scatter ambient: lifts the shadow floor of a thick head of hair
 };
 
-// G6 SH2: the uniform values of a converted Godot shader (docs/plans/fabric/G6_SHADERS.md). The shader itself is the material graph named by GRAPHREF;
-// this is the per-material half. Empty = an ordinary material. The registers are in the layout the converter's emitter fixed (std140-like, 16 bytes
+// The uniform values of an embedded HLSL shader (OcGraphHlsl.hpp). The shader itself is the material graph named by GRAPHREF;
+// this is the per-material half. Empty = an ordinary material. The registers are in the layout the translator's emitter fixed (std140-like, 16 bytes
 // each; ints and bools are the 32-bit pattern in the float slot): the normal block, then the instance block, then the global block. MaterialSystem
 // uploads them as a small RGBA32F texture bound to texture slot 7 (TextureSlot::Layer1Normal), which the generated shader reads with Load, so a
 // value changed at run time re-uploads one tiny texture and never recompiles anything. A material that sets regs must not use slot 7 itself.
-inline constexpr u32 kGdTableSlot = 7;
-inline constexpr u32 kGdMaxRegisters = 256;
-struct GdShaderParams {
+inline constexpr u32 kEmbeddedTableSlot = 7;
+inline constexpr u32 kEmbeddedMaxRegisters = 256;
+struct EmbeddedParams {
     std::vector<f32> regs;   // 4 floats per register
     bool active() const { return !regs.empty(); }
     u32 registerCount() const { return static_cast<u32>(regs.size() / 4u); }
@@ -281,7 +281,7 @@ struct MaterialDesc {
     f32       alphaCutoff = 0.5f;   // read only under AlphaMode::Mask
     bool      twoSided    = false;
     bool      castShadow  = true;
-    // Multiply the albedo (rgb) and opacity by the mesh's vertex colour (Godot's vertex_color_use_as_albedo). Read only on
+    // Multiply the albedo (rgb) and opacity by the mesh's vertex colour (the vertex-colour-as-albedo option). Read only on
     // a mesh that carries the colour stream (docs/plans/fabric/G4_RENDER.md R1); off is every material before this field.
     bool      vertexColor = false;
 
@@ -321,8 +321,8 @@ struct MaterialDesc {
     // The detail, heightmap and flowmap textures ride the Layer1 slots (5 detail albedo, 6 heightmap, 7 detail normal) of a material that is not slope blended.
     MaterialFx fx;
 
-    // G6 SH2: the uniform registers of the Godot shader this material runs (see GdShaderParams). Written by `.ocmat` GDREGS; texture slot 7 is the table.
-    GdShaderParams gd;
+    // The uniform registers of the embedded shader this material runs (see EmbeddedParams). Written by `.ocmat` EMBREGS (GDREGS reads as an alias); texture slot 7 is the table.
+    EmbeddedParams embedded;
 };
 
 // ------------------------------------------------------- the one translucency test, and its answer

@@ -1,8 +1,7 @@
 // PanoramaSkyTest -- G4 R3, no device. The Radiance .hdr reader (flat and run-length scanlines, both vertical orders, refusals), the equirectangular
-// panorama fitted onto Aver's authored sky dome (zenith, horizon, ground albedo and the blend exponent), and Godot's environment parameter mapping
-// (aver/formats/GodotEnvironment.hpp).
+// panorama fitted onto Aver's authored sky dome (zenith, horizon, ground albedo and the blend exponent), and the render project keys. (The
+// Godot environment parameter mapping is checked in the Fabric Connector's FabricEnvTest, extensions/FabricConnector/tests/fabric/src.)
 #include "aver/core/Log.hpp"
-#include "aver/formats/GodotEnvironment.hpp"
 #include "aver/formats/OcProject.hpp"
 #include "aver/formats/PanoramaSky.hpp"
 
@@ -157,21 +156,6 @@ int main() {
     {
         fmt::SkyDomeFit fit;
         check(!fmt::fitSkyDome(fmt::PanoramaImage{}, 1.0, fit), "an empty panorama is refused");
-    }
-
-    AVER_INFO("-- Godot's parameters --");
-    {
-        namespace ge = fmt::godotenv;
-        check(ge::tonemapMode(0) == 3 && ge::tonemapMode(3) == 6 && ge::tonemapMode(4) == 7 && ge::tonemapMode(-1) == 3 && ge::tonemapMode(12) == 7, "Godot's tonemap_mode m is Aver's 3 + m (clamped)");
-        check(near(ge::scaleAuthoredColour(0.5, 1.0), 0.5, 1e-12) && near(ge::scaleAuthoredColour(0.5, 0.0), 0.0, 1e-12) && near(std::pow(ge::scaleAuthoredColour(0.5, 4.0), 2.2), std::pow(0.5, 2.2) * 4.0, 1e-9),
-              "an energy multiplier scales a colour in linear light");
-        check(near(ge::exposure(2.0, 0.5), 1.0, 1e-12) && near(ge::exposure(-1.0, 2.0), 0.0, 1e-12), "exposure is tonemap_exposure times the camera multiplier, never negative");
-        check(near(ge::fogDensityPerCm(0.01), 0.0001, 1e-12) && near(ge::heightFog(3.0, -0.5).falloffPerCm, 0.005, 1e-12) && near(ge::heightFog(3.0, 0.5).heightCm, 300.0, 1e-9), "fog density and height fog units");
-        const ge::Dof p = ge::dofFromPractical(false, true, 2.0, 8.0, 0.2);
-        check(p.on && near(p.focusCm, 800.0, 1e-9) && near(p.fStop, 2.0, 1e-9) && near(p.focalMm, 35.0, 1e-9), "a far blur is a lens focused at the far distance, f/2 at amount 0.2");
-        check(!ge::dofFromPractical(false, false, 2.0, 8.0, 0.1).on && ge::dofFromPractical(true, false, 2.0, 8.0, 0.1).focusCm == 200.0, "no blur band is no DOF; a near-only blur focuses at the near distance");
-        const ge::Dof q = ge::dofFromPhysical(5.0, 50.0, 2.8);
-        check(q.on && near(q.focusCm, 500.0, 1e-9) && near(q.fStop, 2.8, 1e-9) && near(q.focalMm, 50.0, 1e-9), "a physical lens maps focus, aperture and focal length straight across");
     }
 
     AVER_INFO("-- the project keys --");

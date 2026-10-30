@@ -26,8 +26,8 @@ static void testVersionAndNumbers() {
     check(aver_fw_subview_abi_version() == 1 && AVER_FW_SUBVIEW_ABI_VERSION == 1, "the sub-viewport ABI is version 1");
     check(AVER_FW_SUBVIEW_UPDATE_DISABLED == 0 && AVER_FW_SUBVIEW_UPDATE_ONCE == 1 && AVER_FW_SUBVIEW_UPDATE_WHEN_VISIBLE == 2 &&
               AVER_FW_SUBVIEW_UPDATE_WHEN_PARENT_VISIBLE == 3 && AVER_FW_SUBVIEW_UPDATE_ALWAYS == 4,
-          "the update modes are Godot's");
-    check(AVER_FW_SUBVIEW_CLEAR_ALWAYS == 0 && AVER_FW_SUBVIEW_CLEAR_NEVER == 1 && AVER_FW_SUBVIEW_CLEAR_ONCE == 2, "the clear modes are Godot's");
+          "the update modes are the documented numbers");
+    check(AVER_FW_SUBVIEW_CLEAR_ALWAYS == 0 && AVER_FW_SUBVIEW_CLEAR_NEVER == 1 && AVER_FW_SUBVIEW_CLEAR_ONCE == 2, "the clear modes are the documented numbers");
     check(AVER_FW_SUBVIEW_DEFAULT_MAX_VIEWS == 4 && AVER_FW_SUBVIEW_DEFAULT_RENDERS == 2 && AVER_FW_SUBVIEW_ABSOLUTE_MAX == 16, "the budget numbers are pinned");
 }
 
@@ -48,7 +48,7 @@ static void testCreateAndFind() {
     check(aver_fw_subview_key(a, nullptr, 0) == 11 && aver_fw_subview_key(999, keyBuf, sizeof keyBuf) == 0, "no buffer asks for the length; an unknown id answers 0");
     check(aver_fw_subview_info(a, info) == 1 && info[4] == 320 && info[5] == 200, "and takes the new size");
     check(info[0] == AVER_FW_SUBVIEW_UPDATE_WHEN_VISIBLE && info[1] == AVER_FW_SUBVIEW_CLEAR_ALWAYS && info[2] == 0 && info[3] == 0 && info[6] == 0,
-          "a new view is Godot's default: when visible, clear always, opaque, no camera, never drawn");
+          "a new view's default: when visible, clear always, opaque, no camera, never drawn");
     check(aver_fw_subview_id_at(0) == a && aver_fw_subview_id_at(1) == 0 && aver_fw_subview_id_at(-1) == 0, "id_at lists in creation order");
     check(aver_fw_subview_destroy(a) == 1 && aver_fw_subview_destroy(a) == 0 && aver_fw_subview_count() == 0, "destroy removes once");
     check(aver_fw_subview_info(a, info) == 0 && aver_fw_subview_texture(a) == 0, "a destroyed id answers nothing");

@@ -44,10 +44,10 @@ AVER_PHYS_API int32_t aver_phys_shape_triangle(const float* abcXyz, int32_t surf
 AVER_PHYS_API int32_t aver_phys_shape_plane(const float* normalXyz, float offsetCm, float halfExtentCm, int32_t surface);
 /* No volume, collides with nothing: a placeholder, or a kinematic anchor for a joint. */
 AVER_PHYS_API int32_t aver_phys_shape_empty(const float* comXyz);
-/* Godot SeparationRayShape3D, added in ABI version 2: an APPROXIMATION. Jolt has no ray shape that pushes bodies apart, so this is a thin
+/* A separation ray shape, added in ABI version 2: an APPROXIMATION. Jolt has no ray shape that pushes bodies apart, so this is a thin
    capsule from the shape origin along dirXyz (any length, normalised here; NULL is refused) for lengthCm, the far cap's tip exactly at lengthCm.
    radiusCm <= 0 takes 0.1. It is solid, so a body whose compound holds it is stopped with the ray's tip on the surface (the end point
-   "moves to the collision point"), along the CONTACT normal: Godot's slide_on_slope = true behaviour; slide_on_slope = false (push along
+   "moves to the collision point"), along the CONTACT normal (slide on slope); the other mode (push along
    the ray whatever the slope) is not provided. Its density is 0.001 kg/m^3, so it adds no mass or centre-of-mass shift worth the name.
    `surface` is a physical-surface id. Put it in a compound (or a body) like any shape, and toggle it with aver_phys_body_set_shape_disabled. */
 AVER_PHYS_API int32_t aver_phys_shape_separation_ray(float lengthCm, const float* dirXyz, float radiusCm, int32_t surface);
@@ -157,7 +157,7 @@ AVER_PHYS_API int32_t aver_phys_body_compound_add(int32_t body, int32_t child, c
 AVER_PHYS_API int32_t aver_phys_body_compound_remove(int32_t body, int32_t index);
 AVER_PHYS_API int32_t aver_phys_body_compound_set_child(int32_t body, int32_t index, const float* posCm, const float* quatXyzw);
 AVER_PHYS_API int32_t aver_phys_body_compound_count(int32_t body);
-/* Per-shape disable (Godot CollisionShape3D.disabled), added in ABI version 2. The shape stays where it is and keeps its index and user data;
+/* Per-shape disable, added in ABI version 2. The shape stays where it is and keeps its index and user data;
    it just stops colliding, being hit by queries and weighing on the inertia (the body's MASS is kept). index >= 0 is a child of a MUTABLE
    compound this body owns (a static compound cannot be edited: build the body from a mutable one); index < 0, or 0 on a body whose shape is
    not a compound, disables the body's whole shape (it is swapped for an empty one with the same centre of mass, and aver_phys_shape_of_body

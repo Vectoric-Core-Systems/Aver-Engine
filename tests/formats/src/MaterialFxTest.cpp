@@ -220,6 +220,22 @@ int main() {
         pbr::MaterialFx viaPairs;
         fmt::parseOcmatFx("uv2scale=2,2 aniso=1 anisoamount=0.25 layers=2,9", viaPairs);
         check(near(viaPairs.uv2Scale[0], 2) && viaPairs.anisotropy && near(viaPairs.anisotropyAmount, 0.25) && viaPairs.minLayers == 2 && viaPairs.maxLayers == 9, "parseOcmatFx reads the pairs the converter composes");
+
+        // The embedded-shader keys: written as embvs / embdiscard / EMBREGS; the spellings files carried before the rename (gdvs, gddiscard, GDREGS) still load.
+        pbr::MaterialDesc emb;
+        emb.fx.embVertex = true;
+        emb.fx.embDiscard = true;
+        emb.embedded.regs = {1.0f, 2.0f, 3.0f, 4.0f};
+        const std::string embText = fmt::writeOcmat(emb);
+        check(embText.find("embvs=1") != std::string::npos && embText.find("embdiscard=1") != std::string::npos && embText.find("EMBREGS ") != std::string::npos &&
+                  embText.find("gdvs") == std::string::npos && embText.find("GDREGS") == std::string::npos, "the writer uses the new keywords");
+        pbr::MaterialDesc embBack;
+        check(fmt::parseOcmat(embText, embBack, nullptr, &err) && embBack.fx.embVertex && embBack.fx.embDiscard && embBack.embedded.regs == emb.embedded.regs && fmt::writeOcmat(embBack) == embText,
+              "and they round trip byte for byte");
+        pbr::MaterialDesc oldKeys;
+        check(fmt::parseOcmat("OCMAT 1\nFX gdvs=1 gddiscard=1\nGDREGS 3f800000 40000000 40400000 40800000\n", oldKeys, nullptr, &err) && oldKeys.fx.embVertex && oldKeys.fx.embDiscard &&
+                  oldKeys.embedded.regs == emb.embedded.regs, "the old gdvs / gddiscard / GDREGS keywords still load");
+        check(fmt::writeOcmat(oldKeys) == embText, "and the file is written back with the new ones");
     }
 
     AVER_INFO("=== the library sanitises the block ===");

@@ -11,6 +11,7 @@
 #include "aver/core/Log.hpp"
 #include "aver/platform/FileSystem.hpp"
 
+#include <cctype>
 #include <filesystem>
 #include <string>
 
@@ -218,11 +219,20 @@ int main() {
         // shipped editor would, from the identical staged layout (bin\ and templates\ as siblings).
         // That layout is not automatic -- it is what scripts/payload.allowlist's templates/** line
         // buys, and staging it anywhere else would leave it on disk and invisible here.
-        const auto walked = editor::listTemplates();
-        bool walkedSawFirstPerson = false;
-        for (const auto& t : walked) if (t.id == "FirstPerson") walkedSawFirstPerson = true;
-        check(walkedSawFirstPerson,
-              "listTemplates()'s executableDir()-walk ALSO finds it -- the shipped-editor discovery path");
+        // A build directory outside the repository (a second configuration kept elsewhere) has no templates\ beside it to find, so the
+        // walk is only asserted for a binary that sits under the repo root.
+        std::string exeDirNorm = executableDir(), repoNorm = AVER_REPO_ROOT;
+        for (char& c : exeDirNorm) c = c == '\\' ? '/' : static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        for (char& c : repoNorm) c = c == '\\' ? '/' : static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (exeDirNorm.rfind(repoNorm, 0) != 0) {
+            AVER_INFO("  skipped: this binary is outside the repository ({}), so the executableDir()-walk has no templates\\ to find", executableDir());
+        } else {
+            const auto walked = editor::listTemplates();
+            bool walkedSawFirstPerson = false;
+            for (const auto& t : walked) if (t.id == "FirstPerson") walkedSawFirstPerson = true;
+            check(walkedSawFirstPerson,
+                  "listTemplates()'s executableDir()-walk ALSO finds it -- the shipped-editor discovery path");
+        }
     }
 
     // ---- the Vehicle template (docs/VEHICLES.md): a drivable sedan and a tank in a test arena ----

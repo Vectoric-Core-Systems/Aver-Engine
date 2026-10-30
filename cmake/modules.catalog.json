@@ -23,7 +23,7 @@
       "name": "Aver.Anim.Abi",
       "dir": "anim.abi",
       "displayName": "Property animation ABI",
-      "description": "Plain-C seam onto property-track animation so Aver.Fabric's AnimationPlayer drives it.",
+      "description": "Plain-C seam onto property-track animation so scripts and managed extensions can drive it.",
       "category": "Animation",
       "option": null,
       "required": true,
@@ -231,19 +231,18 @@
     },
     {
       "schema": 1,
-      "name": "Aver.Fabric.GDExt",
-      "dir": "fabric.gdext",
-      "displayName": "GDExtension Host",
-      "description": "Hosts Godot GDExtension plugins (.gdextension) of a converted project: the interface, a minimal engine class registry and the aver_gdext C ABI.",
-      "category": "Content",
+      "name": "Aver.Extensions",
+      "dir": "extensions",
+      "displayName": "Extensions",
+      "description": "Finds installed extensions, checks their manifests and loads their native libraries on first use; the plain-C aver_ext.h contract.",
+      "category": "Tools",
       "option": null,
       "required": true,
       "default": true,
       "dependsOn": [
         "Aver.Core",
         "Aver.Platform",
-        "Aver.Formats",
-        "Aver.Formats.Godot"
+        "Aver.Formats"
       ],
       "consequence": ""
     },
@@ -284,22 +283,6 @@
       ],
       "optionalDependsOn": [
         "Aver.Render.PBR"
-      ],
-      "consequence": ""
-    },
-    {
-      "schema": 1,
-      "name": "Aver.Formats.Godot",
-      "dir": "formats.godot",
-      "displayName": "Godot Formats",
-      "description": "Reader for Godot 4's text formats (.tscn, .tres, project.godot, .import, .gdextension) for the Fabric converter.",
-      "category": "Content",
-      "option": null,
-      "required": true,
-      "default": true,
-      "dependsOn": [
-        "Aver.Core",
-        "Aver.Platform"
       ],
       "consequence": ""
     },
@@ -487,7 +470,7 @@
       "name": "Aver.Nav.Abi",
       "dir": "nav.abi",
       "displayName": "Polygon navigation ABI",
-      "description": "Plain-C seam onto polygon navigation maps, the navmesh baker and the A* graphs so Aver.Fabric's navigation nodes drive them.",
+      "description": "Plain-C seam onto polygon navigation maps, the navmesh baker and the A* graphs so scripts and managed extensions can drive them.",
       "category": "Gameplay",
       "option": null,
       "required": true,
@@ -513,14 +496,14 @@
       "dependsOn": [
         "Aver.Core"
       ],
-      "consequence": "A converted Godot project cannot use ENet multiplayer, UDP or TCP sockets."
+      "consequence": "An imported project cannot use ENet multiplayer, UDP or TCP sockets."
     },
     {
       "schema": 1,
       "name": "Aver.Net.Abi",
       "dir": "net.abi",
       "displayName": "Networking ABI",
-      "description": "Plain-C seam onto sockets and the reliable-UDP protocol so Aver.Fabric's multiplayer, UDP and TCP classes drive them.",
+      "description": "Plain-C seam onto sockets and the reliable-UDP protocol so scripts and managed extensions can open UDP and TCP sockets and ENet-style peers.",
       "category": "Networking",
       "option": null,
       "required": false,
@@ -1095,7 +1078,8 @@
       },
       "dependsOn": [
         "Aver.Core",
-        "Aver.Platform"
+        "Aver.Platform",
+        "Aver.Extensions"
       ],
       "consequence": "No C# scripts or script graphs run; actors have no script logic."
     },

@@ -40,17 +40,17 @@ static std::vector<u32> planIds(Reg& r, u64 frame, std::vector<bool>* clears = n
 }
 
 static void testNumbers() {
-    AVER_INFO("=== Godot's numbers ===");
+    AVER_INFO("=== the mode numbers ===");
     check(static_cast<int>(ViewUpdate::Disabled) == 0 && static_cast<int>(ViewUpdate::Once) == 1 && static_cast<int>(ViewUpdate::WhenVisible) == 2 &&
               static_cast<int>(ViewUpdate::WhenParentVisible) == 3 && static_cast<int>(ViewUpdate::Always) == 4,
-          "update modes are Godot's UPDATE_* values");
+          "update modes are the documented values");
     check(static_cast<int>(ViewClear::Always) == 0 && static_cast<int>(ViewClear::Never) == 1 && static_cast<int>(ViewClear::Once) == 2,
-          "clear modes are Godot's CLEAR_MODE_* values");
-    check(viewUpdateFromInt(9) == ViewUpdate::WhenVisible && viewUpdateFromInt(-1) == ViewUpdate::WhenVisible, "a bad update mode reads as Godot's default");
+          "clear modes are the documented values");
+    check(viewUpdateFromInt(9) == ViewUpdate::WhenVisible && viewUpdateFromInt(-1) == ViewUpdate::WhenVisible, "a bad update mode reads as the default");
     check(viewClearFromInt(7) == ViewClear::Always, "a bad clear mode reads as Always");
     SubViewDesc d;
     check(d.update == ViewUpdate::WhenVisible && d.clear == ViewClear::Always && !d.transparent && d.cameraEntity == 0 && d.parentVisible,
-          "a default description is Godot's: when visible, clear always, opaque, no camera");
+          "a default description: when visible, clear always, opaque, no camera");
 }
 
 static void testCreateAndBudget() {
@@ -146,7 +146,7 @@ static void testUpdateModes() {
         Reg r;
         const u32 id = r.create("once", camDesc(ViewUpdate::Once));
         check(planIds(r, 1) == std::vector<u32>{id}, "Once draws on the first frame");
-        check(r.get(id)->desc.update == ViewUpdate::Disabled, "and then reads as Disabled, as Godot's UPDATE_ONCE does");
+        check(r.get(id)->desc.update == ViewUpdate::Disabled, "and then reads as Disabled");
         check(planIds(r, 2).empty() && planIds(r, 3).empty(), "it does not draw again");
         r.get(id)->desc.update = ViewUpdate::Once;
         r.get(id)->pendingRender = true;

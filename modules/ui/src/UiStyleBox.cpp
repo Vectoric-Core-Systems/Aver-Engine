@@ -116,7 +116,7 @@ void fan(UiMesh& m, const std::vector<UiVec2>& P, UiVec2 centre, u32 rgba) {
     for (u32 i = 0; i < n; ++i) tri(m, c, first + i, first + (i + 1) % n);
 }
 
-// Scales the radii so neighbouring corners never overlap (Godot adapts them the same way).
+// Scales the radii so neighbouring corners never overlap (the usual way).
 void adaptRadii(const UiRect& r, f32 rad[4]) {
     f32 k = 1.0f;
     const f32 top = rad[0] + rad[1], bot = rad[3] + rad[2], lft = rad[0] + rad[3], rgt = rad[1] + rad[2];

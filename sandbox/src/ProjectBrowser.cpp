@@ -11,6 +11,7 @@
 #include "aver/upgrade/Upgrade.hpp"
 #endif
 #include "aver/core/Log.hpp"
+#include "aver/extensions/Extensions.hpp"   // warnMissingProjectExtensions
 
 #include <cstdio>
 #include <cstring>
@@ -216,6 +217,7 @@ bool ProjectBrowser::open(const std::string& manifestPath, std::string* err) {
     saveRecents();
 
     AVER_INFO("[Editor] project '{}' loaded from {}", project_.name, project_.manifestPath);
+    ext::warnMissingProjectExtensions(project_);   // an EXTENSION line whose extension is not installed
     return true;
 }
 

@@ -1,4 +1,4 @@
-// RaycastVehicleTest -- Godot's VehicleBody3D as a raycast vehicle (physics_raycast_vehicle_abi.h, G2), checked by driving a car on a floor.
+// RaycastVehicleTest -- the raycast vehicle (physics_raycast_vehicle_abi.h), checked by driving a car on a floor.
 //
 //   1. refusals and read-back: handles, the wheel block, params, the mask, the broadcast setters, removing the chassis,
 //   2. the suspension: a wheel in the air reports the rest length; under load it settles at rest - g / (N x stiffness), whatever the mass,
@@ -422,7 +422,7 @@ static void testGroundAndMask() {
     check(std::fabs(p) < 0.3f * 1000.0f * vc, "momentum is shared by the masses: " + f2s(p) + " of " + f2s(1000.0f * vc));
     aver_phys_shutdown();
 
-    // The wheel mask: the floor is user layer 0, whose Godot layer bit is 1.
+    // The wheel mask: the floor is user layer 0, whose layer bit is 1.
     aver_phys_init();
     floorBox();
     Car c = makeCar(0, 0, kSettledZ + 6.0f);

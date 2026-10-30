@@ -292,6 +292,8 @@ if(AVER_BUILD_GAME)
   if(TARGET Aver.Scripting.Host)
     target_link_libraries(Aver.Runtime.Game PUBLIC Aver.Scripting.Host)
   endif()
+  # A project's EXTENSION lines are checked against the installed extensions when it opens.
+  target_link_libraries(Aver.Runtime.Game PUBLIC Aver.Extensions)
   set_target_properties(Aver.Runtime.Game PROPERTIES FOLDER "Runtime")
 
   # The standalone host, AverEngineRuntime.exe.

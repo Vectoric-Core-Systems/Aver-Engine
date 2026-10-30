@@ -12,7 +12,7 @@ add_executable(UiWidgetTest src/UiWidgetTest.cpp)
 target_link_libraries(UiWidgetTest PRIVATE Aver.UI Aver.Core Aver.Platform)
 set_target_properties(UiWidgetTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-# Godot-parity control rendering (docs/plans/fabric/G5_PARITY.md U1): style box tessellation, stretch / letterbox maths and the
+# Control rendering: style box tessellation, stretch / letterbox maths and the
 # .octheme resource, all CPU-side; UiStyleAbiTest links the DLL Aver.Fabric loads (the style box seam, stretch, default theme).
 foreach(_t UiStyleBoxTest UiStretchTest UiThemeSheetTest)
   add_executable(${_t} src/${_t}.cpp)

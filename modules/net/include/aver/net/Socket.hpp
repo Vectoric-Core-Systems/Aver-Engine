@@ -1,6 +1,6 @@
 #pragma once
 // Non-blocking UDP and TCP sockets over the OS (ws2_32 on Windows, BSD sockets elsewhere). No third-party code.
-// Fabric G6 NET1 (docs/plans/fabric/G6_NETWORK.md).
+// G6 NET1 (docs/plans/fabric/G6_NETWORK.md).
 //
 // Return codes of the byte-moving calls: >= 0 is a byte count (a UDP datagram can be empty); the negatives below say why nothing moved.
 // A socket never binds a wildcard address unless the caller passes one: bind(Address::any4()) is the caller's explicit request.

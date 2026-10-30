@@ -5,6 +5,7 @@
 
 #include "aver/core/DynamicLibrary.hpp"
 #include "aver/core/Log.hpp"
+#include "aver/extensions/Extensions.hpp"
 #include "aver/platform/FileSystem.hpp"
 
 #include <filesystem>
@@ -87,6 +88,27 @@ using tick_graph_class_instances_fn = void(AVER_SCRIPT_CALL*)(float dt);
 using configure_input_fn = int32_t(AVER_SCRIPT_CALL*)(const char* utf8SchemePath, const char* utf8SettingsPath);
 using editable_list_fn = int32_t(AVER_SCRIPT_CALL*)(int32_t entity, char* out, int32_t cap);
 using editable_set_fn = int32_t(AVER_SCRIPT_CALL*)(int32_t entity, const char* utf8Name, const char* utf8Value);
+using load_extensions_fn = int32_t(AVER_SCRIPT_CALL*)(const char* utf8Spec);
+
+// What the bridge's LoadExtensions takes: one line per Ready extension that has a managed half, fields separated by TAB: its name, its actor
+// base class, then the full path of each managed.runtime assembly. A Refused extension logs its reason (one line) and is left out.
+std::string managedExtensionSpec(const std::string& root) {
+    ext::Registry registry;
+    if (root.empty()) registry.scanDefault();
+    else registry.scan(root);
+    std::string spec;
+    for (const ext::Extension& e : registry.extensions()) {
+        if (!e.ready()) {
+            AVER_WARN("[Scripting] extension {} is not loaded: {}", e.name, e.reason);
+            continue;
+        }
+        if (e.managedRuntime.empty()) continue;
+        spec += e.name + '\t' + e.actorBase;
+        for (const std::string& m : e.managedRuntime) spec += '\t' + e.dir + "/managed/" + m;
+        spec += '\n';
+    }
+    return spec;
+}
 
 // UTF-8 to hostfxr's char_t, and back. The identity everywhere but Windows.
 hstring toHost(const std::string& s) {
@@ -184,6 +206,7 @@ struct ScriptHost::Impl {
     declare_graph_classes_fn      declareGraphClasses    = nullptr;
     tick_graph_class_instances_fn tickGraphClassInstances = nullptr;
     configure_input_fn configureInput = nullptr;
+    load_extensions_fn loadExtensions = nullptr;
 };
 
 ScriptHost::ScriptHost() = default;
@@ -364,6 +387,12 @@ bool ScriptHost::init(const HostDesc& desc) {
         AVER_WARN("[Scripting] the bridge exports no ConfigureInput; rebindable input schemes are unavailable");
     }
 
+    // LoadExtensions (the installed extensions' managed halves) is optional too: a bridge built before it existed boots without them.
+    if (!bind(AVER_HOST_STR("LoadExtensions"), reinterpret_cast<void**>(&impl_->loadExtensions))) {
+        impl_->loadExtensions = nullptr;
+        AVER_WARN("[Scripting] the bridge exports no LoadExtensions; extension actor classes are unavailable");
+    }
+
     AverScriptHostApi api{};
     api.structBytes = static_cast<int32_t>(sizeof(AverScriptHostApi));
     api.contractVersion = AVER_SCRIPTING_CONTRACT_VERSION;
@@ -384,6 +413,12 @@ bool ScriptHost::init(const HostDesc& desc) {
 
     ready_ = true;
     declineReason_.clear();
+
+    // The installed extensions' managed halves, before any project script so their types are declared and shared first.
+    if (impl_->loadExtensions) {
+        const std::string spec = managedExtensionSpec(desc.extensionsDir);
+        if (!spec.empty()) impl_->loadExtensions(spec.c_str());
+    }
 
     behaviours_ = desc.scriptsDir.empty() ? 0 : impl_->load(desc.scriptsDir.c_str());
     if (behaviours_ < 0) behaviours_ = 0;

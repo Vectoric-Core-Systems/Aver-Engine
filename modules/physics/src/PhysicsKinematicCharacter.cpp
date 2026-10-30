@@ -1,13 +1,13 @@
-// PhysicsKinematicCharacter.cpp -- Godot's CharacterBody3D.move_and_slide as a controller on a kinematic rigid body (G2). The ABI is
-// physics_kinematic_abi.h; the rules, the order of the steps and the places this differs from Godot are in docs/physics/GODOT_KINEMATIC.md.
-// Written from Godot's documented behaviour. Every move is aver_phys_body_test_motion (recovery, cast, contacts) followed by a teleport of the
+// PhysicsKinematicCharacter.cpp -- a move-and-slide controller on a kinematic rigid body. The ABI is
+// physics_kinematic_abi.h; the rules and the order of the steps are in docs/physics/KINEMATIC.md.
+// Every move is aver_phys_body_test_motion (recovery, cast, contacts) followed by a teleport of the
 // body, so all filtering (layers, masks, exceptions) is the body's own. The controller table is configuration and results, not simulation state.
 #include "aver/physics/physics_kinematic_abi.h"
 #include "aver/physics/physics_abi.h"
 #include "aver/physics/physics_queries_abi.h"
 #include "aver/physics/physics_shape_builder_abi.h"
 #include "Convert.hpp"
-#include "PhysicsGodotFilter.hpp"
+#include "PhysicsLayerFilter.hpp"
 #include "PhysicsInternal.hpp"
 
 #include "aver/core/ErrorCodes.hpp"
@@ -29,8 +29,8 @@ using namespace aver::physics::detail;
 
 namespace {
 
-constexpr float kFloorAngleThreshold = 0.01f;   // radians added to every floor / ceiling angle test, as Godot does
-constexpr float kEpsCm = 1e-3f;                 // length comparisons (Godot's CMP_EPSILON is 1e-5 m)
+constexpr float kFloorAngleThreshold = 0.01f;   // radians added to every floor / ceiling angle test, as move-and-slide conventionally does
+constexpr float kEpsCm = 1e-3f;                 // length comparisons (1e-5 m)
 constexpr int   kMaxHits = 6;                   // 4 contacts between two walls plus 2 for the floor
 
 struct V3 { float x = 0, y = 0, z = 0; };
@@ -102,7 +102,7 @@ void moveBy(Kc& k, V3 d) {
     aver_phys_body_set_position(k.body, o.x, o.y, o.z);
 }
 
-// A platform's velocity at a point (Godot's get_velocity_at_local_position); zero for a static or dead body.
+// A platform's velocity at a point; zero for a static or dead body.
 V3 platformVelocityAt(int32_t handle, V3 pointCm) {
     const JPH::BodyID* id = findBody(handle);
     if (!id) return {};
@@ -118,7 +118,7 @@ uint32_t layerBitsOf(int32_t handle) {
     const JPH::BodyID* id = findBody(handle);
     if (!id) return 0;
     JPH::BodyLockRead lock(g_world->system.GetBodyLockInterface(), *id);
-    return lock.Succeeded() ? godotLayerBitsOf(lock.GetBody()) : 0u;
+    return lock.Succeeded() ? layerBitsOfBody(lock.GetBody()) : 0u;
 }
 
 // ---- move_and_collide ------------------------------------------------------------------------------------
@@ -129,7 +129,7 @@ struct Move {
     std::vector<Collision> hits;   // primary first, then deepest first
 };
 
-// Godot's move_and_collide: recovery, then the cast, then the body is moved by `travel` unless testOnly. cancelSliding drops the sideways part of
+// Move-and-collide: recovery, then the cast, then the body is moved by `travel` unless testOnly. cancelSliding drops the sideways part of
 // a recovery that is within the margin, so a body resting on a slope is not nudged downhill by the push out of the surface.
 bool moveAndCollide(Kc& k, V3 motion, bool testOnly, bool cancelSliding, bool recoveryAsCollision, int maxHits,
                     const int32_t* exclude, int excludeN, Move& r) {
@@ -200,7 +200,7 @@ void setPlatform(Kc& k, const Collision& h) {
 bool isFloorNormal(const Kc& k, V3 n) { return angleBetween(n, k.up) <= k.floorMaxAngle + kFloorAngleThreshold; }
 bool isCeilingNormal(const Kc& k, V3 n) { return angleBetween(n, -k.up) <= k.floorMaxAngle + kFloorAngleThreshold; }
 
-// Godot's _set_collision_direction over every contact of a move. The platform is the floor's, else a wall's; a ceiling gives its velocity.
+// Classifies every contact of a move as floor, wall or ceiling. The platform is the floor's, else a wall's; a ceiling gives its velocity.
 void setCollisionDirection(Kc& k, const Move& m) {
     const Collision* floorHit = nullptr;
     const Collision* wallHit = nullptr;

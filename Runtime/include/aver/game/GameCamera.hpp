@@ -259,7 +259,7 @@ inline scene::Entity drivePlayCamera(Vec3& pos, f32& yaw, f32& pitch, PlayView& 
     view = PlayView{};
     const detail::LegacyCamera legacy = detail::legacyPlayCamera(pos, yaw, pitch, standInPawn);
     if (!legacy.placed) return legacy.hide;
-    // G4 R4: a camera node that asked to drive the view (Aver.Fabric Camera3D) sets the lens, the cull mask and slides by its offsets. Every other
+    // G4 R4: a camera node that asked to drive the view (a managed extension's camera) sets the lens, the cull mask and slides by its offsets. Every other
     // view node, and every pawn, leaves the PlayView at its defaults, so nothing changes for a project that does not use it.
     if (legacy.viewNode != scene::kInvalidEntity) {
         if (const auto* cam = scene::World::instance().component<scene::CCamera>(legacy.viewNode, scene::kComponentCamera);

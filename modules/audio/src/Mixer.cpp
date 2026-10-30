@@ -371,12 +371,12 @@ VoiceHandle Mixer::activate(u32 index, const PlayDesc& desc, f64 startCursor, f6
     vo.shelfActive = false;
     vo.shL.reset();
     vo.shR.reset();
-    vo.godot3d.store(false, std::memory_order_relaxed);
-    if (desc.godotSpatial) {
+    vo.spatial3d.store(false, std::memory_order_relaxed);
+    if (desc.spatialModel) {
         f32 packed[Spatial3D::kFloats];
         desc.spatial.pack(packed);
         for (u32 i = 0; i < Spatial3D::kFloats; ++i) vo.sp[i].store(packed[i], std::memory_order_relaxed);
-        vo.godot3d.store(true, std::memory_order_relaxed);
+        vo.spatial3d.store(true, std::memory_order_relaxed);
     }
     vo.gainL = vo.gainR = 0.0f;
     vo.primed = false;
@@ -600,7 +600,7 @@ void Mixer::setVoiceSpatial(VoiceHandle v, const Spatial3D& s) {
     f32 packed[Spatial3D::kFloats];
     s.pack(packed);
     for (u32 i = 0; i < Spatial3D::kFloats; ++i) vo->sp[i].store(packed[i], std::memory_order_relaxed);
-    vo->godot3d.store(true, std::memory_order_release);
+    vo->spatial3d.store(true, std::memory_order_release);
 }
 
 void Mixer::setVoicePaused(VoiceHandle v, bool paused) {
@@ -832,7 +832,7 @@ void Mixer::voiceGains(const Voice& vo, f32& outL, f32& outR, f32* shelf, f32* d
 
     if (!vo.positional) { outL = outR = g; return; }
 
-    if (vo.godot3d.load(std::memory_order_acquire)) {
+    if (vo.spatial3d.load(std::memory_order_acquire)) {
         f32 packed[Spatial3D::kFloats];
         for (u32 i = 0; i < Spatial3D::kFloats; ++i) packed[i] = vo.sp[i].load(std::memory_order_relaxed);
         const Spatial3D s = Spatial3D::unpack(packed);
@@ -904,13 +904,13 @@ Mixer::Direction Mixer::voiceDirection(const Voice& vo) const {
     const f32 dx = sp[0] - lp[0], dy = sp[1] - lp[1], dz = sp[2] - lp[2];
     const f32 dist = std::sqrt(dx * dx + dy * dy + dz * dz);
 
-    if (vo.godot3d.load(std::memory_order_acquire)) {
+    if (vo.spatial3d.load(std::memory_order_acquire)) {
         f32 packed[Spatial3D::kFloats];
         for (u32 i = 0; i < Spatial3D::kFloats; ++i) packed[i] = vo.sp[i].load(std::memory_order_relaxed);
         const Spatial3D s = Spatial3D::unpack(packed);
         const SpatialResult sr = spatialize(s, vo.volume.load(std::memory_order_relaxed), lp, lf, lr, sp);
         r.level = sr.distanceGain * busGain * masterGain * fade;
-        r.panScale = clampf(s.panningStrength * s.globalPanningStrength * 2.0f, 0.0f, 1.0f);   // Godot's default 0.5 pans fully
+        r.panScale = clampf(s.panningStrength * s.globalPanningStrength * 2.0f, 0.0f, 1.0f);   // the default 0.5 pans fully
     } else {
         r.level = vo.volume.load(std::memory_order_relaxed) * busGain * masterGain * fade * attenuationAt(vo.attenuation, dist);
     }
@@ -1009,11 +1009,11 @@ bool Mixer::renderVoice(Voice& vo, f32* out, u32 frames, u32 outCh) {
                    * static_cast<f64>(vo.pitch.load(std::memory_order_relaxed))
                    * static_cast<f64>(speedScale_.load(std::memory_order_relaxed)) * static_cast<f64>(doppler);
 
-    // Godot's attenuation filter: a one-stage high shelf at the voice's cutoff, only while it has something to take off.
+    // The attenuation filter: a one-stage high shelf at the voice's cutoff, only while it has something to take off.
     const bool shelving = shelfGain < 0.999f;
     BiquadCoeffs shelf;
     if (shelving) {
-        shelf = godotFilterCoeffs(FilterMode::HighShelf, vo.sp[9].load(std::memory_order_relaxed), 1.0f, shelfGain, 1, static_cast<f32>(deviceRate));
+        shelf = filterCoeffs(FilterMode::HighShelf, vo.sp[9].load(std::memory_order_relaxed), 1.0f, shelfGain, 1, static_cast<f32>(deviceRate));
     } else if (vo.shelfActive) {
         vo.shL.reset();
         vo.shR.reset();

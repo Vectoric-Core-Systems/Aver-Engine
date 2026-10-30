@@ -1,11 +1,12 @@
 # Aver.Scripting.Host — in-process CLR host (see README.md).
 #
-# Core + Platform, and deliberately NOT the RHI: scripting is not a rendering concern, and a link
-# edge to Aver.RHI here would be the same mistake the Voxi/HAL refactor spent twelve steps undoing.
+# Core + Platform + the extension loader (which reads each extension's manifest), and deliberately NOT the RHI: scripting is not a rendering
+# concern, and a link edge to Aver.RHI here would be the same mistake the Voxi/HAL refactor spent twelve steps undoing.
 aver_add_module(Aver.Scripting.Host
   SOURCES
     src/ScriptHost.cpp
   DEPS
+    Aver.Extensions
     Aver.Core
     Aver.Platform
   PUBLIC_DEFS
@@ -92,11 +93,7 @@ set(AVER_BRIDGE_DIR ${CMAKE_BINARY_DIR}/bin/Scripting)
 # MissingMethodException for a member that plainly exists in the source -- which is exactly how adding
 # Physics.cs and EnhancedInput.cs broke this. CONFIGURE_DEPENDS makes CMake re-glob when the directories
 # change, so adding a file cannot silently fall out of the build again.
-file(GLOB_RECURSE AVER_FABRIC_SOURCES CONFIGURE_DEPENDS
-  ${AVER_CSHARP_DIR}/Aver.Fabric/*.cs
-  ${AVER_CSHARP_DIR}/Aver.Fabric/*.csproj)
-list(FILTER AVER_FABRIC_SOURCES EXCLUDE REGEX "/(obj|bin)/")
-
+#
 file(GLOB AVER_BRIDGE_SOURCES CONFIGURE_DEPENDS
   ${AVER_CSHARP_DIR}/Aver.Scripting.Bridge/*.cs
   ${AVER_CSHARP_DIR}/Aver.Scripting.Bridge/*.csproj
@@ -124,10 +121,6 @@ file(GLOB AVER_BRIDGE_SOURCES CONFIGURE_DEPENDS
   # the previous build with no sign anything was skipped.
   ${AVER_CSHARP_DIR}/Aver.UI/*.cs
   ${AVER_CSHARP_DIR}/Aver.UI/*.csproj
-  # Aver.Fabric (the Godot-compatible node layer): the bridge references it to declare its node classes,
-  # so editing it must re-stage the bridge like the other referenced projects. Its sources sit in
-  # subfolders, hence the recursive glob.
-  ${AVER_FABRIC_SOURCES}
   # Synapse AI binding (crowds/hearing/cover) and the prefab binding: both are referenced by the
   # framework / graph projects, so the same stale-staging rule applies.
   ${AVER_CSHARP_DIR}/Aver.Synapse/*.cs
@@ -170,7 +163,6 @@ set(AVER_BRIDGE_OUTPUTS
   ${AVER_BRIDGE_DIR}/Aver.Scene.dll
   ${AVER_BRIDGE_DIR}/Aver.Physics.dll
   ${AVER_BRIDGE_DIR}/Aver.UI.dll
-  ${AVER_BRIDGE_DIR}/Aver.Fabric.dll
   ${AVER_BRIDGE_DIR}/Aver.Synapse.dll
   ${AVER_BRIDGE_DIR}/Aver.Prefab.dll
   ${AVER_BRIDGE_DIR}/Aver.LevelInstance.dll   # [wave3/level-instances]
@@ -184,16 +176,10 @@ add_custom_command(
   COMMENT "Building the managed scripting bridge (staged to bin/Scripting)"
   VERBATIM)
 add_custom_target(Aver.Scripting.Bridge DEPENDS ${AVER_BRIDGE_OUTPUTS})
+# Read by an extension that builds managed code against the same projects (docs/EXTENSIONS.md): its build waits for these.
+set_property(GLOBAL PROPERTY AVER_BRIDGE_OUTPUTS "${AVER_BRIDGE_OUTPUTS}")
 set_target_properties(Aver.Scripting.Bridge PROPERTIES FOLDER "modules")
 add_dependencies(Aver.Scripting.Host Aver.Scripting.Bridge)
-# Aver.Fabric P/Invokes the GDExtension host library (docs/plans/fabric/G3_GDEXT.md); build it with the bridge so it sits beside the executables.
-if(TARGET Aver.Fabric.GDExt.Abi)
-  add_dependencies(Aver.Scripting.Host Aver.Fabric.GDExt.Abi)
-endif()
-# ... and the property-track animation seam of Aver.Fabric's AnimationPlayer (docs/plans/fabric/G5_PARITY.md, A1).
-if(TARGET Aver.Anim.Abi)
-  add_dependencies(Aver.Scripting.Host Aver.Anim.Abi)
-endif()
 
 # ---------------------------------------------------------------------------------------------------
 # WHY THE FOUR COMMANDS BELOW (SampleBehaviour, SampleActor, the F# sample, Aver.Pcg.Apply) ARE
@@ -429,36 +415,6 @@ add_custom_command(
 add_custom_target(Aver.Design DEPENDS ${AVER_DESIGN_OUTPUTS})
 set_target_properties(Aver.Design PROPERTIES FOLDER "modules")
 add_dependencies(Aver.Scripting.Host Aver.Design)
-
-# ---------------------------------------------------------------------------------------------------
-# Aver.Fabric.Convert - the GodotSharp to Aver.Fabric script converter (docs/plans/fabric/G3_SCRIPTS.md),
-# staged to bin/Tools beside averdesign and restored the same way (Roslyn 5.6.0 from third_party/nuget).
-#
-# It compiles the converted scripts against bin/Scripting/Aver.Fabric.dll at RUN time, so it has no
-# build dependency on the bridge. It DEPENDS on averdesign's outputs for ordering only: both tools stage
-# Microsoft.CodeAnalysis*.dll into bin/Tools, and two commands writing the same file at once is the
-# CS2012-style race the big comment above describes.
-set(AVER_FABRIC_CONVERT_PROJ ${AVER_CSHARP_DIR}/Aver.Fabric.Convert/Aver.Fabric.Convert.csproj)
-
-file(GLOB AVER_FABRIC_CONVERT_SOURCES CONFIGURE_DEPENDS
-  ${AVER_CSHARP_DIR}/Aver.Fabric.Convert/*.cs
-  ${AVER_CSHARP_DIR}/Aver.Fabric.Convert/GdScript/*.cs
-  ${AVER_CSHARP_DIR}/Aver.Fabric.Convert/*.csproj)
-
-set(AVER_FABRIC_CONVERT_OUTPUTS
-  ${AVER_DESIGN_DIR}/Aver.Fabric.Convert.dll
-  ${AVER_DESIGN_DIR}/Aver.Fabric.Convert.runtimeconfig.json)
-
-add_custom_command(
-  OUTPUT ${AVER_FABRIC_CONVERT_OUTPUTS}
-  COMMAND ${AVER_DOTNET_EXE} build ${AVER_FABRIC_CONVERT_PROJ} ${AVER_DOTNET_BUILD_FLAGS}
-          -o ${AVER_DESIGN_DIR}
-  DEPENDS ${AVER_FABRIC_CONVERT_SOURCES} ${AVER_DESIGN_OUTPUTS}
-  COMMENT "Building the GodotSharp script converter (staged to bin/Tools)"
-  VERBATIM)
-add_custom_target(Aver.Fabric.Convert DEPENDS ${AVER_FABRIC_CONVERT_OUTPUTS})
-set_target_properties(Aver.Fabric.Convert PROPERTIES FOLDER "modules")
-add_dependencies(Aver.Scripting.Host Aver.Fabric.Convert)
 
 # ---------------------------------------------------------------------------------------------------
 # The F# round trip, staged to bin/FSharpScripts/.

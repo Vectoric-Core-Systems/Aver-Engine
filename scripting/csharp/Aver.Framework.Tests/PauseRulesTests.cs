@@ -1,7 +1,7 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
-// PauseRulesTests: Godot's process_mode rules -- resolving Inherit up the tree, and who ticks when paused.
+// PauseRulesTests: the process-mode rules -- resolving Inherit up the tree, and who ticks when paused.
 
 using Aver.Framework;
 

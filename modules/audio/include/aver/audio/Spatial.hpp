@@ -1,7 +1,7 @@
 #pragma once
-// Godot's AudioStreamPlayer3D model as pure functions: the four attenuation models with unit_size and max_db, the max_distance fade,
+// The 3D player model as pure functions: the four attenuation models with unit_size and max_db, the max_distance fade,
 // the emission cone, the high-shelf "attenuation filter", the stereo panning law and the Doppler pitch. The mixer applies them per
-// block to voices flagged as Godot-spatial; tests call them directly. Distances here are METRES (the mixer converts from centimetres).
+// block to voices flagged with the spatial model; tests call them directly. Distances here are METRES (the mixer converts from centimetres).
 #include "aver/audio/Effects.hpp"
 
 namespace aver::audio {
@@ -14,7 +14,7 @@ struct Spatial3D {
     f32 maxDb = 3.0f;
     f32 maxDistance = 0.0f;            // metres; 0 = no limit
     f32 panningStrength = 1.0f;
-    f32 globalPanningStrength = 0.5f;  // Godot's project setting audio/general/3d_panning_strength
+    f32 globalPanningStrength = 0.5f;  // the project-wide 3D panning strength
     bool coneEnabled = false;
     f32 coneAngleDeg = 45.0f;
     f32 coneFilterDb = -12.0f;         // added to the filter attenuation outside the cone
@@ -39,8 +39,8 @@ struct SpatialResult {
 
 // Attenuation in dB for a distance (metres) and unit size, before the volume and the max_db clamp.
 f32 attenuationDb(AttenuationModel model, f32 distanceM, f32 unitSize);
-// Godot's stereo pan law: the left and right gains for cos(x) = lateral / horizontal radius in the listener's frame.
-void godotPanGains(f32 cosx, f32 panningStrength, f32 globalStrength, f32& left, f32& right);
+// The stereo pan law: the left and right gains for cos(x) = lateral / horizontal radius in the listener's frame.
+void spatialPanGains(f32 cosx, f32 panningStrength, f32 globalStrength, f32& left, f32& right);
 // The gains for a source at srcCm seen by a listener (all vectors engine space, positions in centimetres). volume is linear.
 SpatialResult spatialize(const Spatial3D& s, f32 volume, const f32 listenerCm[3], const f32 listenerForward[3], const f32 listenerRight[3],
                          const f32 srcCm[3]);

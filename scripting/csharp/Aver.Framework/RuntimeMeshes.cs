@@ -36,8 +36,8 @@ internal static class FwRtMesh
     [DllImport(Lib)] internal static extern int aver_fw_multimesh_mesh(int id);
 }
 
-/// <summary>Meshes built from arrays at run time. Everything is in engine space (centimetres, +Z up, the engine's triangle order); a Godot-facing layer
-/// (Aver.Fabric's ArrayMesh, SurfaceTool, ImmediateMesh) converts before it calls. A mesh is drawn by an entity whose mesh is <see cref="PathOf"/> the key.</summary>
+/// <summary>Meshes built from arrays at run time. Everything is in engine space (centimetres, +Z up, the engine's triangle order); a layer
+/// with another convention (an extension's array-mesh, surface-tool and immediate-mesh classes) converts before it calls. A mesh is drawn by an entity whose mesh is <see cref="PathOf"/> the key.</summary>
 public static class RuntimeMeshes
 {
     /// <summary>The asset path an entity's mesh renderer names for the runtime mesh <paramref name="key"/>: <c>@rtmesh/&lt;key&gt;</c>.</summary>
@@ -72,7 +72,7 @@ public static class RuntimeMeshes
     }
 }
 
-/// <summary>Instance tables drawn as one mesh (Godot's MultiMesh). The engine bakes the first N instances of the source mesh into a runtime mesh whenever the
+/// <summary>Instance tables drawn as one mesh (a multi-mesh). The engine bakes the first N instances of the source mesh into a runtime mesh whenever the
 /// table changes (at most once a frame); <see cref="MeshOf"/> names it.</summary>
 public static class MultiMeshes
 {

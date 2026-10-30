@@ -10,9 +10,9 @@
 #include "PhysicsShapeTable.hpp"  // the generic shape-handle table and the shared shape builders
 #include "PhysicsMeshBuild.hpp"   // the one triangle-mesh builder
 #include "PhysicsSurface.hpp"     // leaf materials: the combine hook, the contact detail, the body label
-#include "PhysicsGodotFilter.hpp" // Godot layer/mask and exceptions: godotOnBodyRemoved
-#include "PhysicsAreas.hpp"       // contact monitors and Godot-style areas: the listener and step hooks
-#include "PhysicsBodyGodot.hpp"   // _integrate_forces, custom integrator, conveyor velocity: the step and listener hooks
+#include "PhysicsLayerFilter.hpp" // layer/mask and exceptions: layerFilterOnBodyRemoved
+#include "PhysicsAreas.hpp"       // contact monitors and areas: the listener and step hooks
+#include "PhysicsRigidExtras.hpp" // integrate-forces, custom integrator, conveyor velocity: the step and listener hooks
 #include "PhysicsRaycastVehicle.hpp"   // raycast vehicles: the step hook and the body-removed hook
 
 #include "aver/core/Log.hpp"
@@ -111,7 +111,7 @@ public:
             return;
         }
         applySurfaceFriction(a, b, manifold, ioSettings);
-        if (g_world->bodyGodot) conveyorOnContact(a, b, ioSettings);   // constant velocity on a static body (opt-in)
+        if (g_world->rigidExtras) conveyorOnContact(a, b, ioSettings);   // constant velocity on a static body (opt-in)
         ContactEvent e;
         e.a = ha; e.b = hb;
         e.point  = fromJolt(manifold.GetWorldSpaceContactPointOn1(0));
@@ -127,7 +127,7 @@ public:
                             const JPH::ContactManifold& manifold, JPH::ContactSettings& ioSettings) override {
         if (!g_world || a.IsSensor() || b.IsSensor()) return;
         applySurfaceFriction(a, b, manifold, ioSettings);
-        if (g_world->bodyGodot) conveyorOnContact(a, b, ioSettings);
+        if (g_world->rigidExtras) conveyorOnContact(a, b, ioSettings);
     }
 
     // Appends a sensor-exit overlap. Two solid bodies ceasing to touch is not reported.
@@ -148,7 +148,7 @@ private:
     // ---- wave3 surface friction (physics_water_abi.h) ----
     // When exactly one of the pair is a surface-sampled body (the terrain), the other body's friction
     // is combined with the host's value at the contact point by the world's combine rule (Jolt's sqrt of
-    // the product and larger restitution by default; Godot's, aver_phys_set_combine_mode). Runs on worker threads and reads only
+    // the product and larger restitution by default; the material rule, aver_phys_set_combine_mode). Runs on worker threads and reads only
     // the flagged set and the host's pure sampler.
     static void applySurfaceFriction(const JPH::Body& a, const JPH::Body& b, const JPH::ContactManifold& manifold,
                                      JPH::ContactSettings& io) {
@@ -546,7 +546,7 @@ int32_t aver_phys_step(float dt) {
         { AVER_PHYS_SCOPE("VehicleStepBegin"); vehicleStepBegin(stepDt); }
         rayVehicleStepBegin(stepDt);   // raycast vehicles: suspension, friction and drive impulses (opt-in; no profiler row)
         areasStepBegin(stepDt);   // area gravity, damping and wind on the bodies inside (opt-in; no profiler row, so the table is unchanged)
-        bodyGodotStepBegin(stepDt);   // custom integrators and _integrate_forces callbacks (opt-in)
+        rigidExtrasStepBegin(stepDt);   // custom integrators and _integrate_forces callbacks (opt-in)
         if (!g_world) break;          // a callback shut physics down
         stepWorldOnce();   // system.Update with the collisionSteps setting; keeps the update error and times the step (PhysicsStats.cpp)
         // Vehicle telemetry and events, read back while Jolt's state is this step's.
@@ -608,10 +608,10 @@ int32_t aver_phys_remove_body(int32_t body) {
     const JPH::BodyID* id = findBody(body);
     if (!id) return 0;
     softbody::onBodyRemoved(body);
-    godotOnBodyRemoved(body, *id);   // its exceptions and filter slot, while the body still exists
+    layerFilterOnBodyRemoved(body, *id);   // its exceptions and filter slot, while the body still exists
     areasOnBodyRemoved(body);        // its monitored pairs end, its area is dropped
     rayVehicleOnBodyRemoved(body);   // a raycast vehicle on this chassis goes with it
-    bodyGodotOnBodyRemoved(body);    // its callback, custom integrator, conveyor and disabled-shape records
+    rigidExtrasOnBodyRemoved(body);    // its callback, custom integrator, conveyor and disabled-shape records
     g_world->combineFlags.erase(body);
     bi().RemoveBody(*id);
     bi().DestroyBody(*id);

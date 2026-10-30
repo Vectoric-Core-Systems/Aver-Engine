@@ -189,7 +189,7 @@ int main() {
 
     AVER_INFO("=== the default theme ===");
     {
-        const UiThemeSheet& d = uiGodotDefaultTheme();
+        const UiThemeSheet& d = uiBuiltinDefaultTheme();
         check(d.defaultFontSize == 16 && d.defaultBaseScale == 1.0f, "default font size 16, base scale 1");
         check(d.hasItem(UiThemeItemKind::StyleBox, "Button", "normal") && d.hasItem(UiThemeItemKind::StyleBox, "Button", "focus"), "buttons have their five styles");
         check(d.hasItem(UiThemeItemKind::StyleBox, "Panel", "panel") && d.hasItem(UiThemeItemKind::StyleBox, "PanelContainer", "panel"), "panels have theirs");
@@ -200,8 +200,8 @@ int main() {
         check(!(d.types.at("Button").styleBoxes.at("focus").box.flags & kSbDrawCenter), "the focus ring is hollow");
         UiThemeSheet back;
         std::string err;
-        check(uiThemeParse(uiGodotDefaultThemeText(), back, &err) && back.itemCount() == d.itemCount(), "the default theme text parses back to the same sheet");
-        check(uiThemeWrite(back) == uiGodotDefaultThemeText(), "and writes the same text");
+        check(uiThemeParse(uiBuiltinDefaultThemeText(), back, &err) && back.itemCount() == d.itemCount(), "the default theme text parses back to the same sheet");
+        check(uiThemeWrite(back) == uiBuiltinDefaultThemeText(), "and writes the same text");
     }
 
     if (g_failures == 0) AVER_INFO("UiThemeSheetTest: all checks passed");

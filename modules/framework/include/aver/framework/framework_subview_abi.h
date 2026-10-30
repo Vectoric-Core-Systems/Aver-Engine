@@ -7,9 +7,9 @@
  * Own version, separate from AVER_FW_ABI_VERSION_MINOR. int32_t/int64_t/uint64_t/float/const char* only; 1 on success and 0 on
  * refusal. All state lives in this DLL (aver/core/SubViewport.hpp), single game thread.
  *
- * A VIEW is named by a KEY, a string that is stable across loads: the Godot node path of the SubViewport inside its scene, which is
- * also what a converted material's texture reference names ("@rt:viewport.<key>"). Creating a key that already exists returns its id.
- * Modes use Godot's numbers: update 0 disabled, 1 once, 2 when visible, 3 when parent visible, 4 always; clear 0 always, 1 never, 2 once.
+ * A VIEW is named by a KEY, a string that is stable across loads: the node path of the viewport inside its scene, which is
+ * also what an imported material's texture reference names ("@rt:viewport.<key>"). Creating a key that already exists returns its id.
+ * Modes: update 0 disabled, 1 once, 2 when visible, 3 when parent visible, 4 always; clear 0 always, 1 never, 2 once.
  *
  * Cost guard: at most AVER_FW_SUBVIEW_DEFAULT_MAX_VIEWS views live at once and AVER_FW_SUBVIEW_DEFAULT_RENDERS drawn per frame unless the
  * project says otherwise (RENDER.SUBVIEWPORTS, RENDER.SUBVIEWRENDERS, RENDER.SUBVIEWPIXELS; the host calls aver_fw_subview_configure). */
@@ -52,7 +52,7 @@ AVER_FW_ABI int32_t aver_fw_subview_destroy(int32_t id);
 AVER_FW_ABI int32_t aver_fw_subview_find(const char* key);
 
 AVER_FW_ABI int32_t aver_fw_subview_set_size(int32_t id, int32_t width, int32_t height);
-/* Setting ONCE asks for one render now, whatever happened before (Godot's render_target_update_mode = UPDATE_ONCE). */
+/* Setting ONCE asks for one render now, whatever happened before. */
 AVER_FW_ABI int32_t aver_fw_subview_set_update(int32_t id, int32_t mode);
 AVER_FW_ABI int32_t aver_fw_subview_set_clear(int32_t id, int32_t mode);
 AVER_FW_ABI int32_t aver_fw_subview_set_transparent(int32_t id, int32_t on);

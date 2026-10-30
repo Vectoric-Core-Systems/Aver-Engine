@@ -19,7 +19,7 @@ inline constexpr usize kMaxPacketSize = 32u << 20;
 inline constexpr u32 kMaxChannelCount = 255;
 inline constexpr u32 kPacketLossScale = 65536;
 
-// Numbering is Godot's ENetPacketPeer.PeerState.
+// Numbering is the ENet peer state numbering.
 enum class PeerState : int {
     Disconnected = 0, Connecting = 1, AcknowledgingConnect = 2, ConnectionPending = 3, ConnectionSucceeded = 4,
     Connected = 5, DisconnectLater = 6, Disconnecting = 7, AcknowledgingDisconnect = 8, Zombie = 9,
@@ -134,7 +134,7 @@ public:
     int service(Event& ev, u64 nowMs);
     void flush(u64 nowMs);
     void broadcast(u8 channel, const u8* data, usize len, u32 flags);
-    // Sends a raw datagram from the host's socket (Godot's ENetConnection.socket_send).
+    // Sends a raw datagram from the host's socket.
     bool socketSend(const Address& to, const u8* data, usize len);
 
     void setBandwidthLimit(u32 inBytesPerSec, u32 outBytesPerSec);

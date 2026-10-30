@@ -139,7 +139,7 @@ inline void publishProjectPaths(const fmt::ProjectDesc& project, bool editor) {
     aver_fw_set_project(project.dir.c_str(), project.contentDir().c_str(), projectUserDir(project).c_str(), editor ? 1 : 0);
 }
 
-// Game time per real time (Godot's Engine.time_scale): the timer service's dilation, the one setting.
+// Game time per real time: the timer service's dilation, the one setting.
 inline f32 gameTimeScale() { return aver_fw_timers_dilation(); }
 
 // Steps the hook has seen this frame: from the second on, the step before has just finished.
@@ -181,7 +181,7 @@ inline void tickPausedFrame(f32 dt) {
     aver_fw_tick(AVER_FW_TICK_PROCESS, dt * scale);
 }
 
-// One gameplay frame in Godot's order: input, timers and events, the frame pumps, then for each fixed
+// One gameplay frame in this order: input, timers and events, the frame pumps, then for each fixed
 // physics step the PHYSICS pass (OnPhysicsTick) followed by the step, then the PROCESS pass (OnTick).
 // `dt` is REAL time: steps keep a real-time cadence, and the time scale shrinks what each pass and step
 // is handed (fixed step * scale, frame dt * scale). Returns how many fixed steps ran: 0-8, the catch-up

@@ -2,11 +2,11 @@
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 // RandomNumberGenerator: a PCG32 generator (O'Neill's pcg32: 64-bit LCG state, XSH-RR output), the shape of
-// Godot's RandomNumberGenerator. Written from the published algorithm; tested against its reference output.
+// A seedable random number generator. Written from the published algorithm; tested against its reference output.
 
 namespace Aver.Framework;
 
-/// <summary>A seedable PCG32 generator with Godot's RandomNumberGenerator methods. Instances are independent;
+/// <summary>A seedable PCG32 generator with the usual random-number-generator methods. Instances are independent;
 /// <see cref="AverRandom"/> holds the shared one.</summary>
 public sealed class RandomNumberGenerator
 {

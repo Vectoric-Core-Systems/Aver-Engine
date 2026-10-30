@@ -153,7 +153,7 @@ static void testLoc() {
 
 // ---- data tables --------------------------------------------------------------------------------
 
-// Gettext .po messages (Godot's tr): by source text, through the culture chain, the source when untranslated.
+// Gettext .po messages: by source text, through the culture chain, the source when untranslated.
 static void testPo() {
     std::printf("-- gettext .po messages\n");
     writeFile("LocPo/de/game.po",

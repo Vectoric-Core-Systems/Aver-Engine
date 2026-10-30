@@ -44,7 +44,7 @@ int main() {
         const int32_t map = aver_nav_map_create();
         check(map > 0 && aver_nav_kind(map) == AVER_NAV_KIND_MAP && aver_nav_map_exists(map) && aver_nav_map_is_active(map), "a new map is active");
         float prm[5];
-        check(aver_nav_map_params(map, prm) && near(prm[0], 25) && near(prm[2], 25) && near(prm[3], 100) && prm[4] == 1.0f, "Godot's map defaults (25 cm cells, 25 cm margin, 1 m link radius)");
+        check(aver_nav_map_params(map, prm) && near(prm[0], 25) && near(prm[2], 25) && near(prm[3], 100) && prm[4] == 1.0f, "the map defaults (25 cm cells, 25 cm margin, 1 m link radius)");
         check(aver_nav_map_set_params(map, 50, 50, 30, 150, 1) && aver_nav_map_params(map, prm) && near(prm[3], 150), "set_params");
         check(!aver_nav_map_set_params(map, 0, 50, 30, 150, 1), "a zero cell size is refused");
         aver_nav_map_set_params(map, 25, 25, 25, 100, 1);

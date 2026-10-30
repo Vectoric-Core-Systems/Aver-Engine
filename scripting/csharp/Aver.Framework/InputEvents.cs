@@ -1,8 +1,8 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
-// InputEvents: input as events routed through the actors (Godot's InputEvent, _input, _unhandled_input and
-// set_input_as_handled), built each frame from the polled state.
+// InputEvents: input as events routed through the actors (input, unhandled input and
+// mark-as-handled), built each frame from the polled state.
 
 namespace Aver.Framework;
 
@@ -16,7 +16,7 @@ public abstract class InputEvent
     /// <summary>Whether this is a press. Keys, buttons and actions only; false for motion.</summary>
     public virtual bool Pressed => false;
 
-    /// <summary>Whether the action was pressed this frame and this event is a press (Godot's is_action_pressed on an
+    /// <summary>Whether the action was pressed this frame and this event is a press (an action-pressed test on an
     /// event). An approximation: it does not check this event is one of the action's bindings.</summary>
     public bool IsActionPressed(string action) => Pressed && InputAction.ActionPressedThisFrame(action);
 
@@ -91,14 +91,14 @@ public sealed class InputEventJoypadMotion : InputEvent
     public override string ToString() => $"Pad{Pad} {Axis} {Value}";
 }
 
-// Routes events through the actors, then the UI, then the actors again (Godot's _input, GUI, _unhandled_input).
+// Routes events through the actors, then the UI, then the actors again (input, GUI, unhandled input).
 internal static class InputRouter
 {
     [ThreadStatic] private static InputEvent? s_current;
 
     internal static InputEvent? Current => s_current;
 
-    // `actors` in reverse scene-tree order (the deepest, last-added first, as Godot propagates). Returns who took it:
+    // `actors` in reverse scene-tree order (the deepest, last-added first, the usual propagation order). Returns who took it:
     // "input", "ui", "unhandled" or "" for nobody.
     internal static string Route(InputEvent ev, IReadOnlyList<AverActor> actors, bool uiWantsPointer, bool uiWantsKeyboard,
                                  Action<AverActor, string, Exception>? onError = null)

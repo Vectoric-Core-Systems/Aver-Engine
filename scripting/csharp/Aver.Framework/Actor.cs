@@ -16,20 +16,20 @@ public abstract partial class AverActor
     /// <summary>Runs once when this actor begins playing, for a spawn, a world start or a hot reload.</summary>
     public virtual void OnBeginPlay(BeginReason reason) { }
 
-    /// <summary>Runs once a frame, after the frame's physics steps (Godot's <c>_process</c>). <paramref name="dt"/> is
+    /// <summary>Runs once a frame, after the frame's physics steps.<paramref name="dt"/> is
     /// the frame time in seconds. On when the class overrides it; see <see cref="TickEnabled"/>.</summary>
     public virtual void OnTick(float dt) { }
 
-    /// <summary>Runs once per fixed physics step, before that step (Godot's <c>_physics_process</c>): 0 to 8 times a
+    /// <summary>Runs once per fixed physics step, before that step: 0 to 8 times a
     /// frame. <paramref name="dt"/> is the fixed step. On when the class overrides it; see <see cref="PhysicsTickEnabled"/>.</summary>
     public virtual void OnPhysicsTick(float dt) { }
 
-    /// <summary>Receives each input event first, deepest actor first (Godot's <c>_input</c>). Call
+    /// <summary>Receives each input event first, deepest actor first. Call
     /// <see cref="Input.SetInputAsHandled"/> to stop it there; otherwise it goes to the game UI, then
     /// <see cref="OnUnhandledInput"/>. Runs before the frame's ticks, while the game is not paused.</summary>
     public virtual void OnInput(InputEvent e) { }
 
-    /// <summary>Receives the input events nothing else handled (Godot's <c>_unhandled_input</c>): the place for gameplay
+    /// <summary>Receives the input events nothing else handled: the place for gameplay
     /// controls, so a click on a menu does not also fire a weapon.</summary>
     public virtual void OnUnhandledInput(InputEvent e) { }
 
@@ -84,7 +84,7 @@ public abstract partial class AverActor
         return a != null && type.IsInstanceOfType(a) ? a : null;
     }
 
-    // Set when the [Editable] values were written early (a Godot node reads its exported values in _EnterTree);
+    // Set when the [Editable] values were written early (a node reads its exported values on entering the tree);
     // the bridge's write before OnBeginPlay then skips this instance.
     internal bool EditablesApplied;
 
@@ -111,25 +111,25 @@ public abstract partial class AverActor
     private static bool Overrides(Type t, string method, Type arg) =>
         t.GetMethod(method, new[] { arg })?.DeclaringType != typeof(AverActor);
 
-    /// <summary>Runs when the actor enters the world, before <see cref="OnBeginPlay"/> (Godot's <c>_enter_tree</c>). Among
+    /// <summary>Runs when the actor enters the world, before <see cref="OnBeginPlay"/>. Among
     /// actors placed together a parent enters before its children, then they begin play children first.</summary>
     public virtual void OnEnterTree() { }
 
-    /// <summary>Runs when the actor leaves the world, before <see cref="OnEndPlay"/> (Godot's <c>_exit_tree</c>); children
+    /// <summary>Runs when the actor leaves the world, before <see cref="OnEndPlay"/>; children
     /// leave before their parent.</summary>
     public virtual void OnExitTree() { }
 
-    /// <summary>Runs when the actor's parent in the scene tree changed (Godot's NOTIFICATION_PARENTED / UNPARENTED).</summary>
+    /// <summary>Runs when the actor's parent in the scene tree changed.</summary>
     public virtual void OnParentChanged() { }
 
     /// <summary>Runs once a frame, after OnTick, when the actor's world transform moved, if <see cref="NotifyTransform"/>
-    /// is on (Godot's NOTIFICATION_TRANSFORM_CHANGED with set_notify_transform).</summary>
+    /// is on.</summary>
     public virtual void OnTransformChanged() { }
 
     /// <summary>Whether <see cref="OnTransformChanged"/> is called. Off by default.</summary>
     public bool NotifyTransform { get; set; }
 
-    /// <summary>Destroys this actor at the end of the frame, after every tick and deferred call (Godot's <c>queue_free</c>).
+    /// <summary>Destroys this actor at the end of the frame, after every tick and deferred call.
     /// It keeps ticking for the rest of this frame.</summary>
     public void QueueDestroy() => GameThread.QueueDestroy(this);
 

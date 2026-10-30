@@ -1,5 +1,5 @@
 #pragma once
-// PlacementProps: a placed actor's per-instance [Editable] values (Godot's exported properties) travel as a
+// PlacementProps: a placed actor's per-instance [Editable] values (exported properties) travel as a
 // `COMPONENT Props name=value ...` record on its placement. Loading hands them to the framework's per-entity
 // store, which the scripting bridge writes into the actor's fields before OnBeginPlay; saving reads the store
 // back. The format already round-trips the record untouched; this is the one place that knows its name.
@@ -42,7 +42,7 @@ inline void capturePlacementProps(int32_t entity, fmt::OcWorldPlacement& p) {
     p.components.push_back(std::move(c));
 }
 
-// ---- Groups: `COMPONENT Groups names=a,b` -- the entity's named groups (Godot's groups), in join order ----
+// ---- Groups: `COMPONENT Groups names=a,b` -- the entity's named groups, in join order ----
 
 inline constexpr const char* kGroupsComponent = "Groups";
 

@@ -325,7 +325,7 @@ private:
 
     // Converts glTF space (right-handed, +Y up, metres) to engine space (left-handed, +Z up, cm).
     Vec3 toEngine(f32 x, f32 y, f32 z, bool isDirection) const {
-        Vec3 v = o_.convertAxes ? axis::direction(x, y, z) : Vec3{x, y, z};   // AxisMap.hpp: the one map, shared with the Godot converter
+        Vec3 v = o_.convertAxes ? axis::direction(x, y, z) : Vec3{x, y, z};   // AxisMap.hpp: the one map, shared with every importer
         if (!isDirection) { v.x *= o_.scale; v.y *= o_.scale; v.z *= o_.scale; }
         return v;
     }

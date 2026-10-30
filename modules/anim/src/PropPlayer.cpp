@@ -1,4 +1,4 @@
-// PropPlayer: Godot's AnimationPlayer playback and AnimationMixer blending over property tracks (see PropAnim.hpp).
+// PropPlayer: animation-player playback and blending over property tracks (see PropAnim.hpp).
 
 #include "aver/anim/PropAnim.hpp"
 

@@ -14,7 +14,7 @@
 
 namespace aver {
 
-// Godot's Viewport.UpdateMode / ClearMode numbers, so a converted project stores them verbatim.
+// The update-mode / clear-mode numbers, so an imported project stores them verbatim.
 enum class ViewUpdate : i32 { Disabled = 0, Once = 1, WhenVisible = 2, WhenParentVisible = 3, Always = 4 };
 enum class ViewClear : i32 { Always = 0, Never = 1, Once = 2 };
 
@@ -203,7 +203,7 @@ public:
 
     // The views to draw this frame, at most `rendersPerFrame` and at most `max`. Order: views that have never been drawn, a requested render and
     // a Once view first (they are waiting for their first picture), then the least recently drawn; ties by id. Consumes the Once state (the view
-    // becomes Disabled, as Godot's UPDATE_ONCE does) and the pending request, and stamps the frame. `frame` must not go backwards.
+    // becomes Disabled) and the pending request, and stamps the frame. `frame` must not go backwards.
     u32 plan(u64 frame, Job* out, u32 max) {
         std::vector<Entry*> due_;
         due_.reserve(entries_.size());

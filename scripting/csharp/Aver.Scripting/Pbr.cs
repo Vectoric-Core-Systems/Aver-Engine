@@ -124,11 +124,11 @@ public static class Pbr
 
     [DllImport(Lib)] private static extern int aver_pbr_consume_dirty(int m);
 
-    // G6 SH2: a converted Godot shader's uniform registers (pbr_abi.h).
-    [DllImport(Lib)] private static extern int aver_pbr_get_gd_register_count(int m);
-    [DllImport(Lib)] private static extern int aver_pbr_get_gd_registers(int m, float[] output, int capacityFloats);
-    [DllImport(Lib)] private static extern int aver_pbr_set_gd_registers(int m, float[] values, int floatCount);
-    [DllImport(Lib)] private static extern int aver_pbr_set_gd_register_floats(int m, int firstFloat, float[] values, int count);
+    // An embedded HLSL shader's uniform registers (pbr_abi.h).
+    [DllImport(Lib)] private static extern int aver_pbr_get_embedded_register_count(int m);
+    [DllImport(Lib)] private static extern int aver_pbr_get_embedded_registers(int m, float[] output, int capacityFloats);
+    [DllImport(Lib)] private static extern int aver_pbr_set_embedded_registers(int m, float[] values, int floatCount);
+    [DllImport(Lib)] private static extern int aver_pbr_set_embedded_register_floats(int m, int firstFloat, float[] values, int count);
 
     /// <summary>Marshals a native string pointer, or "?" when it is null.</summary>
     // UTF-8, NOT ANSI. The ABI is explicit -- scripting_abi.h: "Strings are UTF-8 const char*
@@ -424,21 +424,21 @@ public static class Pbr
         /// <summary>True when this material owes the GPU an upload. Reading it clears it.</summary>
         public bool ConsumeDirty() => aver_pbr_consume_dirty(Handle) != 0;
 
-        // ---- G6 SH2: the uniform registers of a converted Godot shader (the material's GRAPHREF names the shader) ----
+        // ---- the uniform registers of an embedded HLSL shader (the material's GRAPHREF names the shader) ----
         /// <summary>How many 16-byte uniform registers the material carries; 0 for an ordinary material.</summary>
-        public int GdRegisterCount => aver_pbr_get_gd_register_count(Handle);
+        public int EmbeddedRegisterCount => aver_pbr_get_embedded_register_count(Handle);
         /// <summary>The uniform table, four floats a register (ints and bools are 32-bit patterns); empty for an ordinary material.</summary>
-        public float[] GetGdRegisters()
+        public float[] GetEmbeddedRegisters()
         {
-            int n = GdRegisterCount * 4;
+            int n = EmbeddedRegisterCount * 4;
             var v = new float[n];
-            int got = n == 0 ? 0 : aver_pbr_get_gd_registers(Handle, v, n);
+            int got = n == 0 ? 0 : aver_pbr_get_embedded_registers(Handle, v, n);
             return got == n ? v : System.Array.Empty<float>();
         }
         /// <summary>Replaces the whole table (an empty array clears it). Nothing is uploaded when the values did not change.</summary>
-        public bool SetGdRegisters(float[] values) => aver_pbr_set_gd_registers(Handle, values, values.Length) != 0;
+        public bool SetEmbeddedRegisters(float[] values) => aver_pbr_set_embedded_registers(Handle, values, values.Length) != 0;
         /// <summary>Overwrites a range of the table, starting at a float index.</summary>
-        public bool SetGdRegisterFloats(int firstFloat, float[] values) => aver_pbr_set_gd_register_floats(Handle, firstFloat, values, values.Length) != 0;
+        public bool SetEmbeddedRegisterFloats(int firstFloat, float[] values) => aver_pbr_set_embedded_register_floats(Handle, firstFloat, values, values.Length) != 0;
 
         public bool Equals(PbrMaterial other) => Handle == other.Handle;
         public override bool Equals(object? obj) => obj is PbrMaterial o && Equals(o);

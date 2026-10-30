@@ -2,10 +2,10 @@
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 //
-// Godot's CharacterBody3D.move_and_slide on a kinematic rigid body (G2). The native side is physics_kinematic_abi.h; docs/physics/GODOT_KINEMATIC.md has the
+// Move-and-slide on a kinematic rigid body. The native side is physics_kinematic_abi.h; docs/physics/KINEMATIC.md has the
 // rules. This is a second controller beside CharacterBody (the CharacterVirtual one), which is unchanged. Nothing is on by default: a body has no controller until
-// KinematicCharacter.Create, and the engine builds in no Godot default. Create applies the options it is given, KinematicCharacterOptions.Godot unless the
-// caller passes its own. Lengths are centimetres, angles radians, +Z up, left-handed (the engine's), so a metres-based Godot value is converted by the caller.
+// KinematicCharacter.Create, and the engine builds in no imported default. Create applies the options it is given, KinematicCharacterOptions.Default unless the
+// caller passes its own. Lengths are centimetres, angles radians, +Z up, left-handed (the engine's), so a metres-based value is converted by the caller.
 
 using System;
 using System.Collections.Generic;
@@ -51,8 +51,8 @@ internal enum KinematicInfoInt { State = 0, PlatformBody = 1, Collisions = 2, Co
 internal enum KinematicCollisionFloat { Point = 0, Normal = 3, ColliderVelocity = 6, Remainder = 9, Travel = 12, Depth = 15, Angle = 16, Count = 17 }
 internal enum KinematicCollisionInt { Collider = 0, Entity = 1, Subshape = 2, Count = 3 }
 
-/// <summary>Every option of a <see cref="KinematicCharacter"/>. <see cref="Godot"/> holds CharacterBody3D's defaults in centimetres; pass your own record
-/// (<c>Godot with { MaxSlides = 4 }</c>) to change some.</summary>
+/// <summary>Every option of a <see cref="KinematicCharacter"/>. <see cref="Default"/> holds the usual character-body defaults in centimetres; pass your own record
+/// (<c>Default with { MaxSlides = 4 }</c>) to change some.</summary>
 public sealed record KinematicCharacterOptions
 {
     public KinematicMotionMode MotionMode { get; init; } = KinematicMotionMode.Grounded;
@@ -72,15 +72,15 @@ public sealed record KinematicCharacterOptions
     public uint PlatformWallLayers { get; init; }
     public Float3 UpDirection { get; init; } = Float3.Up;
 
-    /// <summary>Godot's CharacterBody3D defaults (safe_margin 0.001 m = 0.1 cm, floor_snap_length 0.1 m = 10 cm).</summary>
-    public static KinematicCharacterOptions Godot { get; } = new();
+    /// <summary>The usual character-body defaults (safe margin 0.1 cm, floor snap length 10 cm).</summary>
+    public static KinematicCharacterOptions Default { get; } = new();
 }
 
-/// <summary>One collision of the last <see cref="KinematicCharacter.MoveAndSlide"/> (Godot KinematicCollision3D).</summary>
+/// <summary>One collision of the last <see cref="KinematicCharacter.MoveAndSlide"/>.</summary>
 public readonly record struct SlideCollision(Float3 Position, Float3 Normal, Body Collider, int Entity, int SubShape, Float3 ColliderVelocity,
                                               Float3 Remainder, Float3 Travel, float Depth, float Angle);
 
-/// <summary>A kinematic rigid body driven like Godot's CharacterBody3D. A handle (the controller's own); 0 is invalid.</summary>
+/// <summary>A kinematic rigid body driven by move-and-slide. A handle (the controller's own); 0 is invalid.</summary>
 public readonly struct KinematicCharacter : IEquatable<KinematicCharacter>
 {
     public int Handle { get; }
@@ -89,14 +89,14 @@ public readonly struct KinematicCharacter : IEquatable<KinematicCharacter>
     public Body Body => new(Native.aver_phys_kc_body(Handle));
     public static int Count => Native.aver_phys_kc_count();
 
-    /// <summary>Puts a controller on a kinematic body and applies <paramref name="options"/> (Godot's defaults when null). Invalid when the body is not kinematic,
+    /// <summary>Puts a controller on a kinematic body and applies <paramref name="options"/> (<see cref="KinematicCharacterOptions.Default"/> when null). Invalid when the body is not kinematic,
     /// is a mesh, heightfield or soft body, or already has a controller.</summary>
     public static KinematicCharacter Create(Body body, KinematicCharacterOptions? options = null)
     {
         int h = Native.aver_phys_kc_create(body.Handle);
         if (h == 0) return default;
         var c = new KinematicCharacter(h);
-        c.Apply(options ?? KinematicCharacterOptions.Godot);
+        c.Apply(options ?? KinematicCharacterOptions.Default);
         return c;
     }
 
@@ -155,7 +155,7 @@ public readonly struct KinematicCharacter : IEquatable<KinematicCharacter>
     public bool SetPlatformLayers(uint floorLayers, uint wallLayers) => Native.aver_phys_kc_set_platform_layers(Handle, floorLayers, wallLayers) != 0;
 
     // ---- the call ----
-    /// <summary>Godot's move_and_slide for a step of <paramref name="dt"/> seconds. Returns true when at least one collision was recorded.</summary>
+    /// <summary>Move-and-slide for a step of <paramref name="dt"/> seconds. Returns true when at least one collision was recorded.</summary>
     public bool MoveAndSlide(float dt) => Native.aver_phys_kc_move_and_slide(Handle, dt, out int collided) != 0 && collided != 0;
 
     /// <summary>Forgets the results and the platform (after a teleport). The velocity is kept.</summary>

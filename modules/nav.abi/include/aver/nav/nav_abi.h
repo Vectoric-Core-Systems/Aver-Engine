@@ -1,15 +1,15 @@
 #pragma once
 /* Aver.Nav.Abi -- the plain-C seam onto polygon navigation (aver/synapse/NavMesh.hpp), its baker (NavMeshBake.hpp) and the generic A*
- * graphs (NavGraph.hpp), so Aver.Fabric's NavigationServer3D, NavigationRegion3D, NavigationAgent3D, AStar3D and AStarGrid2D drive them.
+ * graphs (NavGraph.hpp), so scripts and managed extensions can drive navigation maps, regions, links, agents and A* graphs.
  * Conventions as docs/ABI.md section 13: setters return 1 on success and 0 on a rejected request (stale handle, bad argument), getters
  * return the value or a neutral one (0, -1 for "none") for a stale handle. Handles are int32, 0 invalid; maps, regions, links,
  * obstacles and agents share one id space (aver_nav_kind tells them apart). Single game thread, except aver_nav_bake*, which is pure
  * and may run on a worker thread.
  *
  * SPACE. Engine space (centimetres, +Z up). A polygon mesh crosses as world-space vertices (float x, y, z) and index lists.
- * NAVIGATION LAYERS are 32-bit masks (uint32 passed as int32 bit pattern). Costs are Godot's enter_cost / travel_cost multipliers.
+ * NAVIGATION LAYERS are 32-bit masks (uint32 passed as int32 bit pattern). Costs are enter-cost / travel-cost multipliers.
  *
- * ENUMS (mirrored by hand in Aver.Fabric/Nodes/NavigationNative.cs and checked by AbiEnumTest):
+ * ENUMS (mirrored by hand in the extension's managed half, extensions/FabricConnector/managed/Aver.Fabric/Nodes/NavigationNative.cs, and checked by AbiEnumTest):
  *   postprocess 0 corridor funnel, 1 edge centred, 2 none
  *   kind 0 none, 1 map, 2 region, 3 link, 4 obstacle, 5 agent
  *   point type 0 region, 1 link
@@ -139,7 +139,7 @@ AVER_NAV_API int32_t aver_nav_obstacle_set_motion(int32_t obstacle, const float*
 AVER_NAV_API int32_t aver_nav_obstacle_set_vertices(int32_t obstacle, const float* verts3, int32_t nVerts);
 AVER_NAV_API int32_t aver_nav_obstacle_get(int32_t obstacle, float* out6);   /* avoidance, paused, layers, radius, height, vertex count */
 
-/* agents (avoidance only: following the path is the agent node's job, as in Godot) */
+/* agents (avoidance only: following the path is the agent node's job) */
 #define AVER_NAV_AGENT_AVOIDANCE        0   /* the float slots of aver_nav_agent_set_params */
 #define AVER_NAV_AGENT_PAUSED           1
 #define AVER_NAV_AGENT_RADIUS           2

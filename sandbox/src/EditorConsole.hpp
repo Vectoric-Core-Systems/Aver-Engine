@@ -1280,7 +1280,7 @@ inline void registerPostVars(std::vector<ConsoleVar>& t) {
 
     // Not an f32, so clamped by hand, same [0,2] shape.
     t.push_back({"post.tonemap", VarType::U32, false,
-        "Which tone curve: 0 = per-channel Narkowicz/Hill (gentlest toe, keeps dim bounce light visible), 1 = ACES matrixed (the default: Unreal's filmic space, calibrated against a UE5 Lumen Sponza), 2 = ACES on luminance only so hue/saturation survive any exposure, 3..7 = Godot's linear, Reinhard, filmic, ACES, AgX (clamped to [0,7])",
+        "Which tone curve: 0 = per-channel Narkowicz/Hill (gentlest toe, keeps dim bounce light visible), 1 = ACES matrixed (the default: Unreal's filmic space, calibrated against a UE5 Lumen Sponza), 2 = ACES on luminance only so hue/saturation survive any exposure, 3..7 = the extended linear, Reinhard, filmic, ACES, AgX (clamped to [0,7])",
         []{ rhi::IDevice* d = consoleDevice(); return vU32(d ? d->postProcess().tonemap : 0u); },
         [](ConsoleBatch& b, VarValue v){
             if (!b.seededPost) { b.post = b.device ? b.device->postProcess() : rhi::PostSettings{}; b.seededPost = true; }

@@ -1,10 +1,9 @@
-// RasterLightsTest -- the CPU half of the raster local lights (aver/voxi/RasterLights.hpp, G4 R2): the capped, culled and ranked light list,
-// Godot's attenuation curves against its documented formulas, the energy calibration, the shadow-tile budget and atlas packing, and the tile
+// RasterLightsTest -- the CPU half of the raster local lights (aver/voxi/RasterLights.hpp): the capped, culled and ranked light list,
+// the parametric attenuation curves against their documented formulas, the energy calibration, the shadow-tile budget and atlas packing, and the tile
 // matrices (a point on a spot's axis lands in the middle of its tile at the depth the shader compares against). The HLSL is what runs; its text
 // is read at the end to check it still names the constants and fields this header packs for.
 #include "aver/core/Log.hpp"
 #include "aver/core/Math.hpp"
-#include "aver/formats/GodotLight.hpp"
 #include "aver/platform/FileSystem.hpp"
 #include "aver/voxi/RasterLights.hpp"
 
@@ -24,6 +23,29 @@ static void check(bool cond, const std::string& what) {
 }
 
 static bool near(f64 a, f64 b, f64 rel = 1e-4, f64 abs = 1e-6) { return std::fabs(a - b) <= std::max(abs, rel * std::fabs(b)); }
+
+// The reference formulas of the parametric light model, written again in double precision and metres (an energy-1 light is pi engine units).
+namespace ref {
+inline constexpr double kPi = 3.14159265358979323846;
+inline constexpr double kEngineUnitCdm2 = 100000.0 / 3.0;
+inline constexpr double kLuxPerEnergy = kPi * kEngineUnitCdm2;
+inline constexpr double kCandelaPerEnergy = kPi * kEngineUnitCdm2;
+inline double sunLux(double energy) { return energy * kLuxPerEnergy; }
+inline double candela(double energy) { return energy * kCandelaPerEnergy; }
+inline double specularScale(double lightSpecular) { return std::max(lightSpecular, 0.0) * 2.0; }
+// Linear window times distance^-decay, distance in metres.
+inline double omniAttenuation(double distanceM, double rangeM, double decay) {
+    const double nd = std::max(1.0 - distanceM / std::max(rangeM, 1e-3), 0.0);
+    return nd * std::pow(std::max(distanceM, 1e-4), -decay);
+}
+// 1 - rim^(1/angleAttenuation), rim = (1 - cos) / (1 - cos(spot angle)), cos clamped to the cone's edge.
+inline double spotCone(double cosToAxis, double spotAngleDeg, double angleAttenuation) {
+    const double coneCos = std::cos(spotAngleDeg * kPi / 180.0);
+    const double scos = std::max(cosToAxis, coneCos);
+    const double rim = std::max(1e-4, (1.0 - scos) / (1.0 - coneCos));
+    return 1.0 - std::pow(rim, 1.0 / std::max(angleAttenuation, 1e-3));
+}
+}  // namespace ref
 
 namespace {
 
@@ -73,19 +95,19 @@ int main() {
         check(offsetof(rl::Block, light) == 16 && offsetof(rl::Block, tileVP) == 16 + 32 * 7 * 16, "the arrays follow each other without padding");
     }
 
-    AVER_INFO("=== Godot's curves ===");
+    AVER_INFO("=== the parametric curves ===");
     {
-        namespace gl = fmt::godotlight;
-        // distanceFactor is Godot's get_omni_attenuation itself (distance in metres there, centimetres here), so the energy at 1 m means the same.
+        namespace gl = ref;
+        // distanceFactor is the reference omni attenuation (distance in metres there, centimetres here), so the energy at 1 m means the same.
         for (const f64 decay : {0.0, 1.0, 2.0, 3.5}) {
             for (const f64 dM : {0.25, 0.5, 1.0, 2.0, 4.0, 4.9}) {
                 const f64 rangeM = 5.0;
-                const f64 godot = gl::omniAttenuation(dM, rangeM, decay);
+                const f64 reference = gl::omniAttenuation(dM, rangeM, decay);
                 const f64 ours = rl::distanceFactor(static_cast<f32>(dM * 100), static_cast<f32>(rangeM * 100), 0.0f, true, static_cast<f32>(decay));
-                check(near(ours, godot, 2e-3), "omni decay " + std::to_string(decay) + " at " + std::to_string(dM) + " m matches get_omni_attenuation");
+                check(near(ours, reference, 2e-3), "omni decay " + std::to_string(decay) + " at " + std::to_string(dM) + " m matches the reference attenuation");
             }
         }
-        check(near(rl::distanceFactor(100.0f, 500.0f, 0.0f, true, 1.0f), 0.8, 1e-4), "Godot default (decay 1) at 1 m, range 5 m: the window alone, 1 - 1/5");
+        check(near(rl::distanceFactor(100.0f, 500.0f, 0.0f, true, 1.0f), 0.8, 1e-4), "default decay 1 at 1 m, range 5 m: the window alone, 1 - 1/5");
         check(near(rl::distanceFactor(200.0f, 500.0f, 0.0f, true, 2.0f), 0.6 / 4.0, 1e-4), "decay 2 at 2 m: window 0.6 over 4");
         check(near(rl::distanceFactor(250.0f, 500.0f, 0.0f, true, 0.0f), 0.5, 1e-4), "decay 0: brightness is only the window, 0.5 halfway");
         check(rl::distanceFactor(500.0f, 500.0f, 0.0f, true, 1.0f) == 0.0f && rl::distanceFactor(900.0f, 500.0f, 0.0f, false, 2.0f) == 0.0f,
@@ -110,23 +132,23 @@ int main() {
                 check(near(ours, ref, 2e-3, 2e-4), "spot cone at " + std::to_string(deg) + " deg, angle attenuation " + std::to_string(angAtt));
             }
         }
-        check(near(rl::coneFactor(1.0f, 0.5f, 0.9f, true, 1.0f), 1.0, 1e-3), "on the axis the Godot cone is 1");
+        check(near(rl::coneFactor(1.0f, 0.5f, 0.9f, true, 1.0f), 1.0, 1e-3), "on the axis the parametric cone is 1");
         check(rl::coneFactor(0.4f, 0.5f, 0.9f, false, 1.0f) == 0.0f && near(rl::coneFactor(0.95f, 0.5f, 0.9f, false, 1.0f), 1.0, 1e-5),
               "the Aver cone: 0 outside, 1 inside the inner angle");
     }
 
     AVER_INFO("=== calibration ===");
     {
-        namespace gl = fmt::godotlight;
-        check(near(gl::kEngineUnitCdm2, kEngineUnitCdm2, 1e-6), "the formats header and the renderer agree on the engine radiance unit");
-        check(near(gl::kLuxPerEnergy, 3.14159265358979 * 100000.0 / 3.0, 1e-9) && near(gl::kLuxPerEnergy, 104719.755, 1e-6), "Godot energy 1 is pi engine units = 104719.76 lux");
+        namespace gl = ref;
+        check(near(gl::kEngineUnitCdm2, kEngineUnitCdm2, 1e-6), "the reference and the renderer agree on the engine radiance unit");
+        check(near(gl::kLuxPerEnergy, 3.14159265358979 * 100000.0 / 3.0, 1e-9) && near(gl::kLuxPerEnergy, 104719.755, 1e-6), "energy 1 is pi engine units = 104719.76 lux");
         check(near(gl::sunLux(2.0), 2.0 * gl::kLuxPerEnergy, 1e-12) && near(gl::candela(0.5), 0.5 * gl::kCandelaPerEnergy, 1e-12), "linear in the energy");
-        // Irradiance at 1 m of an omni of energy E, white: pi * E engine units, so albedo / pi * that = albedo * E, which is what Godot draws.
+        // Irradiance at 1 m of an omni of energy E, white: pi * E engine units, so albedo / pi * that = albedo * E, which is what a pi-scaled light draws.
         const f32 e1m = pointIrradiance1m(static_cast<f32>(gl::candela(1.0)));
         check(near(e1m, 3.14159265, 1e-5), "an energy-1 omni delivers pi engine units at 1 m");
-        check(near(0.8 / 3.14159265358979 * e1m, 0.8, 1e-5), "a white-ish albedo 0.8 under it returns 0.8 * energy, like Godot's pi-scaled lights");
+        check(near(0.8 / 3.14159265358979 * e1m, 0.8, 1e-5), "a white-ish albedo 0.8 under it returns 0.8 * energy, like pi-scaled lights");
         // And the sun: 104719.755 lux over the 100000/3 unit is also pi engine units.
-        check(near(gl::sunLux(1.0) / (100000.0 / 3.0), 3.14159265358979, 1e-9), "Godot sun energy 1 is the same pi engine units");
+        check(near(gl::sunLux(1.0) / (100000.0 / 3.0), 3.14159265358979, 1e-9), "sun energy 1 is the same pi engine units");
         check(near(gl::specularScale(0.5), 1.0, 1e-12) && near(gl::specularScale(0.0), 0.0, 1e-12) && near(gl::specularScale(1.0), 2.0, 1e-12),
               "light_specular 0.5 (the default) is a factor 1; 0 removes the highlight");
     }
@@ -135,7 +157,7 @@ int main() {
     {
         check(rl::lightFade(5000.0f, 0.0f, 0.0f) == 1.0f, "no fade parameters: always 1");
         check(rl::lightFade(3999.0f, 4000.0f, 1000.0f) == 1.0f && near(rl::lightFade(4500.0f, 4000.0f, 1000.0f), 0.5, 1e-6) && rl::lightFade(5000.0f, 4000.0f, 1000.0f) == 0.0f,
-              "1 until begin, linear to 0 at begin + length (Godot 40 m / 10 m)");
+              "1 until begin, linear to 0 at begin + length (40 m / 10 m)");
         check(rl::shadowFade(1000.0f, 4000.0f, 1000.0f, 5000.0f) == 1.0f && rl::shadowFade(5000.0f, 4000.0f, 1000.0f, 5000.0f) == 1.0f
                   && near(rl::shadowFade(5500.0f, 4000.0f, 1000.0f, 5000.0f), 0.5, 1e-6) && rl::shadowFade(6000.0f, 4000.0f, 1000.0f, 5000.0f) == 0.0f,
               "the shadow holds to distance_fade_shadow, then fades out over the length");
@@ -199,10 +221,10 @@ int main() {
     AVER_INFO("=== packing ===");
     {
         SceneLight s = spot(10, 20, 30, 30.0f, false);
-        s.godot = true;
+        s.parametric = true;
         s.attenuation = 1.0f; s.spotAttenuation = 2.0f; s.specularScale = 0.0f; s.negative = true;
         s.colour[0] = 1; s.colour[1] = 0.5f; s.colour[2] = 0.25f;
-        s.intensityCd = static_cast<f32>(fmt::godotlight::candela(2.0));
+        s.intensityCd = static_cast<f32>(ref::candela(2.0));
         s.rangeCm = 800.0f;
         s.radiusCm = 5.0f;
         rl::Input in;
@@ -213,16 +235,16 @@ int main() {
         check(v[0][0] == 10 && v[0][1] == 20 && v[0][2] == 30 && v[0][3] == 5.0f, "position and emitter radius");
         check(near(v[1][0], 2.0 * 3.14159265, 1e-4) && near(v[1][1], v[1][0] * 0.5, 1e-5) && v[1][3] == 800.0f, "colour times the irradiance at 1 m (pi * energy), and the range");
         check(v[2][2] == -1.0f && v[2][3] == 1.0f, "axis and the spot kind");
-        check(v[3][0] == 1.0f && near(v[3][1], std::cos(30.0 * 0.017453292), 1e-5) && near(v[3][2], 0.5, 1e-6), "Godot: decay as stored, cos outer, 1 / angle attenuation");
+        check(v[3][0] == 1.0f && near(v[3][1], std::cos(30.0 * 0.017453292), 1e-5) && near(v[3][2], 0.5, 1e-6), "parametric: decay as stored, cos outer, 1 / angle attenuation");
         const u32 flags = static_cast<u32>(v[3][3]);
-        check((flags & rl::kFlagGodot) && (flags & rl::kFlagNegative) && !(flags & rl::kFlagShadowed), "flags: Godot, negative, not shadowed");
+        check((flags & rl::kFlagParametric) && (flags & rl::kFlagNegative) && !(flags & rl::kFlagShadowed), "flags: parametric, negative, not shadowed");
         check(v[4][0] == 0.0f, "specular scale 0 is a value");
         // The Aver mode keeps its own curve: decay 2 and the inner cone.
         SceneLight a = spot(0, 0, 0, 40.0f, false);
         in.lights = &a;
         rl::build(in, r);
         const f32 (*w)[4] = r.block.light[0];
-        check(w[3][0] == 2.0f && near(w[3][2], a.innerCos, 1e-6) && w[4][0] == 1.0f && !(static_cast<u32>(w[3][3]) & rl::kFlagGodot), "an Aver light: decay 2, its inner cone, specular 1");
+        check(w[3][0] == 2.0f && near(w[3][2], a.innerCos, 1e-6) && w[4][0] == 1.0f && !(static_cast<u32>(w[3][3]) & rl::kFlagParametric), "an Aver light: decay 2, its inner cone, specular 1");
     }
 
     AVER_INFO("=== the shadow budget and the atlas ===");
@@ -292,7 +314,7 @@ int main() {
         rl::build(in, r);
         check(r.stats.shadowed == 8 && r.tiles.size() == 8 && r.tiles[0].cells == 4 && r.tiles[1].cells == 4 && r.tiles[2].cells == 2, "eight spots shadowed; resolution falls with rank");
         check(near(r.block.light[0][5][0], 0.0, 1e-9) && near(r.block.light[1][5][0], 1.0, 1e-9) && r.block.light[0][5][1] == 1.0f, "each light's first tile and tile count");
-        check(near(r.block.light[0][5][2], 1.0, 1e-5) && near(r.block.light[0][5][3], 2.0, 1e-5), "Godot's default shadow_bias 0.1 is 1 cm, shadow_normal_bias 2 texels");
+        check(near(r.block.light[0][5][2], 1.0, 1e-5) && near(r.block.light[0][5][3], 2.0, 1e-5), "the default shadow bias 0.1 is 1 cm, the normal bias 2 texels");
         // A stored bias passes through.
         ss[0].shadowBias = 0.5f; ss[0].shadowNormalBias = 3.0f;
         rl::build(in, r);
@@ -351,12 +373,12 @@ int main() {
         check(has(voxi, "#ifndef AVER_LOCAL_RASTER\n#define AVER_LOCAL_RASTER 0") || has(voxi, "#ifndef AVER_LOCAL_RASTER\r\n#define AVER_LOCAL_RASTER 0"),
               "AVER_LOCAL_RASTER defaults to 0: the ordinary variants do not see the tail");
         check(has(voxi, "if (gRlHeader.x > 0.5) radiance += rlShade(s, i.wpos, N);"), "PSMainVoxi calls the raster lights");
-        check(has(rlh, "#define AVER_RL_F_GODOT    1u") && has(rlh, "#define AVER_RL_F_NEGATIVE 2u") && has(rlh, "#define AVER_RL_F_SHADOWED 4u") && has(rlh, "#define AVER_RL_F_CUBE     8u"),
-              "the flag bits equal kFlagGodot / Negative / Shadowed / Cube");
+        check(has(rlh, "#define AVER_RL_F_PARAMETRIC 1u") && has(rlh, "#define AVER_RL_F_NEGATIVE 2u") && has(rlh, "#define AVER_RL_F_SHADOWED 4u") && has(rlh, "#define AVER_RL_F_CUBE     8u"),
+              "the flag bits equal kFlagParametric / Negative / Shadowed / Cube");
         check(has(rlh, "if (a.x >= a.y && a.x >= a.z) return d.x >= 0.0 ? 0u : 1u;") && has(rlh, "if (a.y >= a.z) return d.y >= 0.0 ? 2u : 3u;") && has(rlh, "return d.z >= 0.0 ? 4u : 5u;"),
               "the shader's cube-face pick is rl::cubeFaceOf");
         check(has(rlh, "max(1.0 - x, 0.0) * pow(100.0 / max(d, max(radius, 0.01)), decay)") && has(rlh, "1.0 - pow(rim, cosInnerOrInvAtt)"),
-              "the shader's Godot curves are the ones tested above");
+              "the shader's parametric curves are the ones tested above");
         // Defaults unchanged: nothing outside the guards.
         usize outside = 0, pos = 0;
         while ((pos = voxi.find("rlShade", pos)) != std::string::npos) { ++outside; pos += 7; }

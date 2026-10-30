@@ -1,5 +1,5 @@
 #pragma once
-// The bus graph: Godot's AudioServer model on the mixer. Named buses in a list (index 0 is "Master"), each with a volume, mute, solo,
+// The bus graph on the mixer. Named buses in a list (index 0 is "Master"), each with a volume, mute, solo,
 // bypass, an effect chain and a send to another bus; voices that name a graph bus are summed into it, the buses are processed from the
 // last index down to Master, and the Master block is the graph's output. Opt-in: nothing here runs until the graph is activated, and
 // the four legacy buses (audio::Bus) are untouched.
@@ -42,17 +42,17 @@ public:
 
     // ---- structure (game thread) ----
     i32  busCount() const { return static_cast<i32>(buses_.size()); }
-    // Godot's add_bus: at < 0 or past the end appends; 0 is not an insertion point (it becomes 1 when there is more than Master). Returns the index.
+    // Adds a bus: at < 0 or past the end appends; 0 is not an insertion point (it becomes 1 when there is more than Master). Returns the index.
     i32  addBus(i32 at = -1);
     bool removeBus(i32 idx);                                 // never Master
-    // Godot's move_bus: the bus goes to `to` (-1 or bus_count appends), numbered before the move. Never Master, never to 0.
+    // Moves a bus: the bus goes to `to` (-1 or bus_count appends), numbered before the move. Never Master, never to 0.
     bool moveBus(i32 from, i32 to);
     // Adds or removes buses at the end until there are `count` (at least 1).
     void setBusCount(i32 count);
     i32  findBus(const std::string& name) const;             // -1 when none
     const std::string& busName(i32 idx) const;
     void setBusName(i32 idx, const std::string& name);       // Master keeps its name; a clash gets a numeric suffix
-    // Godot's set_bus_send: by name, unvalidated; resolved when mixing (an unknown name or a bus at or after this one sends to Master).
+    // Sets a bus's send: by name, unvalidated; resolved when mixing (an unknown name or a bus at or after this one sends to Master).
     void setSend(i32 idx, const std::string& sendName);
     const std::string& sendName(i32 idx) const;
     i32  sendIndex(i32 idx) const;                           // the bus the send resolves to now
@@ -85,7 +85,7 @@ public:
     void collect();
 
     // ---- meters ----
-    // Godot's get_bus_peak_volume_left/right_db: the peak of the bus's last block after effects and volume; -200 when silent.
+    // The left / right peak in dB: the peak of the bus's last block after effects and volume; -200 when silent.
     f32  peakDb(i32 idx, i32 channel) const;
 
     // ---- layouts ----

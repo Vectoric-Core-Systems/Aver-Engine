@@ -56,11 +56,6 @@ std::string uiProjectReference(const std::string& scriptsDir) {
     return engineProjectReference(scriptsDir, "scripting/csharp/Aver.UI/Aver.UI.csproj");
 }
 
-// Reference path to Aver.Fabric, the Godot-compatible node layer converted projects' scripts compile against.
-std::string fabricProjectReference(const std::string& scriptsDir) {
-    return engineProjectReference(scriptsDir, "scripting/csharp/Aver.Fabric/Aver.Fabric.csproj");
-}
-
 // Reference path to Aver.Materials, the material authoring surface.
 std::string materialsProjectReference(const std::string& scriptsDir) {
     return engineProjectReference(scriptsDir, "scripting/csharp/Aver.Materials/Aver.Materials.csproj");
@@ -390,8 +385,7 @@ struct EngineRefs {
     std::string framework;   // Actor / Pawn / GameMode, and Aver.Scene behind it
     std::string ui;          // the game's HUD
     std::string materials;   // [AverMaterial] surfaces
-    std::string fabric;      // Godot-compatible nodes (Aver.Fabric), for converted projects
-    bool any() const { return !scripting.empty() || !framework.empty() || !ui.empty() || !materials.empty() || !fabric.empty(); }
+    bool any() const { return !scripting.empty() || !framework.empty() || !ui.empty() || !materials.empty(); }
 };
 
 // Resolves all four engine references for a project's Scripts folder.
@@ -401,7 +395,6 @@ EngineRefs engineRefs(const std::string& scriptsDir) {
         frameworkProjectReference(scriptsDir),
         uiProjectReference(scriptsDir),
         materialsProjectReference(scriptsDir),
-        fabricProjectReference(scriptsDir),
     };
 }
 
@@ -445,11 +438,10 @@ std::string csprojText(const EngineRefs& refs) {
     s += "       The output directory is passed on the `dotnet build` command line rather than set\n";
     s += "       here: the editor has to know it too, and one of the two would drift.\n";
     s += "\n";
-    s += "       Five references: Aver.Scripting for behaviours, Aver.Framework for actors (which\n";
+    s += "       Four references: Aver.Scripting for behaviours, Aver.Framework for actors (which\n";
     s += "       pulls Aver.Scene in behind it), Aver.UI for the game's HUD, Aver.Materials for\n";
     // No `--` in any string that lands inside an XML comment: XML forbids it, MSBuild says MSB4025.
-    s += "       surfaces authored in C#, and Aver.Fabric for Godot-style nodes (a converted Godot\n";
-    s += "       project's scripts compile against it). All five by default, because an unused reference costs\n";
+    s += "       surfaces authored in C#. All four by default, because an unused reference costs\n";
     s += "       nothing and the alternative is a compile error naming an assembly the author has\n";
     s += "       never heard of, in a file the editor generated. -->\n";
     s += "  <PropertyGroup>\n";
@@ -468,7 +460,7 @@ std::string csprojText(const EngineRefs& refs) {
         s += "  </ItemGroup> -->\n\n";
     } else {
         s += "  <ItemGroup>\n";
-        for (const std::string* r : {&refs.scripting, &refs.framework, &refs.ui, &refs.materials, &refs.fabric})
+        for (const std::string* r : {&refs.scripting, &refs.framework, &refs.ui, &refs.materials})
             if (!r->empty()) s += "    <ProjectReference Include=\"" + *r + "\" />\n";
         s += "  </ItemGroup>\n\n";
     }
@@ -1067,8 +1059,8 @@ bool createScript(const fmt::ProjectDesc& proj, const std::string& name, CsKind 
 namespace {
 
 // One engine assembly a project should reference: its display label and its path under the engine.
-// `required` false: an existing project without the reference is not offered an upgrade for it (Aver.Fabric is only
-// for converted projects), but a reference it does have is still repointed when the engine moves.
+// `required` false: an existing project without the reference is not offered an upgrade for it, but a reference it does have
+// is still repointed when the engine moves.
 struct RefSpec { const char* label; const char* tail; bool required = true; };
 
 const RefSpec kEngineRefSpecs[] = {
@@ -1076,7 +1068,6 @@ const RefSpec kEngineRefSpecs[] = {
     {"Aver.Framework", "scripting/csharp/Aver.Framework/Aver.Framework.csproj"},
     {"Aver.UI",        "scripting/csharp/Aver.UI/Aver.UI.csproj"},
     {"Aver.Materials", "scripting/csharp/Aver.Materials/Aver.Materials.csproj"},
-    {"Aver.Fabric",    "scripting/csharp/Aver.Fabric/Aver.Fabric.csproj", false},
 };
 
 // Every ProjectReference Include="..." value in the file, in order.

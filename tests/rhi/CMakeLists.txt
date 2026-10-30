@@ -156,11 +156,10 @@ add_executable(PostLensTest src/PostLensTest.cpp)
 target_link_libraries(PostLensTest PRIVATE Aver.RHI Aver.Core Aver.Platform)
 set_target_properties(PostLensTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-# TonemapTest: G4 R3 -- Godot's tonemappers and display adjustments (rhi/Tonemap.hpp) against reference values from the published formulas, the
+# TonemapTest: the extended tonemappers and display adjustments (rhi/Tonemap.hpp) against reference values from the published formulas, the
 # composite-variant selection (the default stays the ordinary composite), the PostCB packing, and the HLSL read back as text. No device.
 add_executable(TonemapTest src/TonemapTest.cpp)
 target_link_libraries(TonemapTest PRIVATE Aver.RHI Aver.Core Aver.Platform)
-target_include_directories(TonemapTest PRIVATE ${CMAKE_SOURCE_DIR}/modules/formats/include)
 target_compile_definitions(TonemapTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
 set_target_properties(TonemapTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 

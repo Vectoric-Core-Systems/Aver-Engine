@@ -187,7 +187,7 @@ internal static partial class Native
     [DllImport(Lib)] internal static extern int  aver_phys_overlap_sphere_ex(float x, float y, float z, float radius, uint layerMask, int ignoreBody, int[] outBodies, int maxBodies);
     [DllImport(Lib)] internal static extern int  aver_phys_sphere_cast_ex(float ox, float oy, float oz, float dx, float dy, float dz, float maxDistCm, float radius, uint layerMask, int ignoreBody, float[] outPoint, float[] outNormal);
 
-    // Godot-style 32-bit layer/mask, collision exceptions and mask queries (physics_layers_abi.h, G2).
+    // 32-bit layer/mask, collision exceptions and mask queries (physics_layers_abi.h).
     [DllImport(Lib)] internal static extern int  aver_phys_body_set_collision_filter(int body, uint layerBits, uint maskBits);
     [DllImport(Lib)] internal static extern int  aver_phys_body_collision_filter(int body, out uint outLayerBits, out uint outMaskBits);
     [DllImport(Lib)] internal static extern int  aver_phys_body_clear_collision_filter(int body);

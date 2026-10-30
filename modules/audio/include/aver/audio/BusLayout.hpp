@@ -1,6 +1,6 @@
 #pragma once
-// A bus layout as plain data: what a Godot AudioBusLayout converts to, what BusGraph applies and exports, and what .ocbus
-// (aver/formats/OcBusLayout.hpp) reads and writes. Effects are named by Godot's class names and parameters by Godot's property names.
+// A bus layout as plain data: what an imported bus layout converts to, what BusGraph applies and exports, and what .ocbus
+// (aver/formats/OcBusLayout.hpp) reads and writes. Effects are named by their class names ("AudioEffectReverb" ...), parameters by property name.
 #include "aver/core/Types.hpp"
 
 #include <string>
@@ -13,7 +13,7 @@ struct BusLayoutEffect {
     std::string className;                                  // "AudioEffectReverb"
     bool enabled = true;
     std::string sidechain;                                  // a compressor's detector bus
-    std::vector<std::pair<std::string, f32>> params;        // Godot property names
+    std::vector<std::pair<std::string, f32>> params;        // property names
 };
 
 struct BusLayoutBus {

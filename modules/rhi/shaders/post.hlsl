@@ -48,7 +48,7 @@ cbuffer AverPost : register(b0) {
                          // (half-res px), w unused
     float4 gPostAccess;  // x packed colour-vision filter (mode + 4 simulate + 8 round(strength*100); 0 = off), yzw unused
 #ifdef AVER_POST_TONEMAP_EXT
-    // Godot tonemappers and display adjustments (PostCB::ext): x white point, yzw brightness / contrast / saturation.
+    // Extended tonemappers and display adjustments (PostCB::ext): x white point, yzw brightness / contrast / saturation.
     float4 gPostExt;
 #endif
 };
@@ -760,8 +760,8 @@ float4 PSComposite(AverPostVSOut i) : SV_TARGET {
     if (gPostGrade.z > 0.0) c = averPostGrade(c);
     if (gPostLens.x > 0.0) c *= averPostVignette(i.uv);
 #ifdef AVER_POST_TONEMAP_EXT
-    // Modes 3..7 are Godot's tonemappers (color.hlsli); the adjustments run on the display colour, before the LUT.
-    float3 toned = gPostMisc.w > 2.5 ? averTonemapGodot(c, gPostMisc.w, gPostExt.x) : averTonemap(c, gPostMisc.w);
+    // Modes 3..7 are the extended tonemappers (color.hlsli); the adjustments run on the display colour, before the LUT.
+    float3 toned = gPostMisc.w > 2.5 ? averTonemapExt(c, gPostMisc.w, gPostExt.x) : averTonemap(c, gPostMisc.w);
     float3 outc = toGamma(toned);
     if (gPostExt.y != 1.0 || gPostExt.z != 1.0 || gPostExt.w != 1.0) outc = averDisplayAdjust(outc, gPostExt.yzw);
 #else

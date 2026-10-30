@@ -2,14 +2,14 @@
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 // Platform: where the project's files are (res://, user://), its manifest's settings, the OS and the engine's
-// frame counters -- Godot's ProjectSettings, OS and Engine for scripts.
+// frame counters -- project settings, OS and engine information for scripts.
 
 using System.Runtime.InteropServices;
 using Aver.Scene;
 
 namespace Aver.Framework;
 
-/// <summary>The project's directories and Godot's <c>res://</c> and <c>user://</c> paths.</summary>
+/// <summary>The project's directories and the <c>res://</c> and <c>user://</c> paths.</summary>
 public static class Paths
 {
     /// <summary>The directory holding the project's manifest; "" before a project opens.</summary>
@@ -30,7 +30,7 @@ public static class Paths
     }
 
     /// <summary>An OS path for <paramref name="path"/>: <c>res://a/b</c> under <see cref="Content"/>, <c>user://a/b</c> under
-    /// <see cref="User"/>, anything else unchanged (Godot's <c>ProjectSettings.globalize_path</c>).</summary>
+    /// <see cref="User"/>, anything else unchanged.</summary>
     public static string Globalize(string path) => Globalize(path, Content, User);
 
     internal static string Globalize(string path, string content, string user)
@@ -44,7 +44,7 @@ public static class Paths
         Path.Combine(root, rest.Replace('/', Path.DirectorySeparatorChar).TrimStart(Path.DirectorySeparatorChar));
 }
 
-/// <summary>The project manifest's settings by key (Godot's <c>ProjectSettings.get_setting</c>), as the text the
+/// <summary>The project manifest's settings by key, as the text the
 /// manifest holds. The manifest is read once, when first asked.</summary>
 public static class ProjectSettings
 {
@@ -87,7 +87,7 @@ public static class ProjectSettings
     }
 }
 
-/// <summary>The operating system and build (Godot's <c>OS.get_name</c> and <c>OS.has_feature</c>).</summary>
+/// <summary>The operating system and build (name and features).</summary>
 public static class OS
 {
     /// <summary>"Windows", "Linux" or "macOS".</summary>
@@ -117,8 +117,8 @@ public static class OS
 #endif
 }
 
-/// <summary>The engine's frame counters (Godot's <c>Engine.get_frames_per_second</c>, <c>get_process_frames</c> and
-/// <c>get_physics_frames</c>). They count from when scripting loaded.</summary>
+/// <summary>The engine's frame counters (frames per second, process frames and
+/// physics frames). They count from when scripting loaded.</summary>
 public static class Engine
 {
     private static long s_frames, s_physicsFrames, s_windowStart;
@@ -153,7 +153,7 @@ public static class Engine
     internal static void NotePhysicsFrame() => ++s_physicsFrames;
 }
 
-/// <summary>World-space debug lines drawn on top of the frame (Godot's debug drawing). Colour is linear RGB in 0..1;
+/// <summary>World-space debug lines drawn on top of the frame. Colour is linear RGB in 0..1;
 /// a shape lasts <c>seconds</c> of real time, or exactly one frame when 0. Centimetres, engine axes.</summary>
 public static class DebugDraw
 {
@@ -198,7 +198,7 @@ public static class DebugDraw
     }
 }
 
-/// <summary>The display, for what a script may change at runtime (Godot's DisplayServer).</summary>
+/// <summary>The display, for what a script may change at runtime.</summary>
 public static class Display
 {
     /// <summary>Asks the shipped game to turn vsync on or off; it applies it next frame where the device allows turning
@@ -208,7 +208,7 @@ public static class Display
 
 public static partial class Game
 {
-    /// <summary>Replaces the level at the end of this frame (Godot's <c>change_scene_to_file</c>): every actor ends with
+    /// <summary>Replaces the level at the end of this frame: every actor ends with
     /// <see cref="EndReason.Travel"/> except the GameInstance and <see cref="AverActor.Persistent"/> ones, the new level loads
     /// and its actors begin, then a GameMode, controller and pawn begin as at the start of play. <paramref name="levelPath"/>
     /// is content-relative (or <c>res://</c>). In the editor's Play it is refused with a warning: it would replace the level
@@ -218,7 +218,7 @@ public static partial class Game
 
 public abstract partial class AverActor
 {
-    /// <summary>Survives level travel, with everything under it (Godot's autoload). It is lifted to the top of the scene
+    /// <summary>Survives level travel, with everything under it (an autoload). It is lifted to the top of the scene
     /// tree when the level changes, and ends with the play session.</summary>
     public bool Persistent
     {

@@ -2,9 +2,9 @@
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 //
-// Godot's contact_monitor and Area3D on Aver.Physics (G2). The native side is physics_areas_abi.h; docs/physics/GODOT_AREAS.md has the
-// rules. Nothing here is on by default: a body is not monitored and a sensor is not an area until asked, and no Godot default is built
-// in (the converter or Aver.Fabric passes monitoring, monitorable, the masks, the modes and the numbers).
+// Contact monitoring and areas on Aver.Physics. The native side is physics_areas_abi.h; docs/physics/AREAS.md has the
+// rules. Nothing here is on by default: a body is not monitored and a sensor is not an area until asked, and no imported default is built
+// in (the caller passes monitoring, monitorable, the masks, the modes and the numbers).
 
 using System.Collections.Generic;
 
@@ -25,7 +25,7 @@ public enum AreaOverrideMode
     ReplaceCombine = 4,
 }
 
-/// <summary>A monitored body started or stopped touching another body (Godot body_entered / body_exited).</summary>
+/// <summary>A monitored body started or stopped touching another body.</summary>
 public readonly struct BodyContactEvent
 {
     /// <summary>The monitored body.</summary>
@@ -42,7 +42,7 @@ public readonly struct BodyContactEvent
     { Body = new Body(body); Other = new Body(other); Began = began; Point = point; Normal = normal; }
 }
 
-/// <summary>A body or another area entered or left a monitoring area (Godot body_entered / area_entered and the exits).</summary>
+/// <summary>A body or another area entered or left a monitoring area.</summary>
 public readonly struct AreaEvent
 {
     public Area Area { get; }
@@ -56,7 +56,7 @@ public readonly struct AreaEvent
 
 public readonly partial struct Body
 {
-    /// <summary>Starts or stops monitoring this body's contacts (Godot contact_monitor with max_contacts_reported). Up to
+    /// <summary>Starts or stops monitoring this body's contacts. Up to
     /// <paramref name="maxContacts"/> partners are tracked; see <see cref="Physics.BodyContactEvents"/>.</summary>
     public bool SetContactMonitor(bool on, int maxContacts = 0) => Native.aver_phys_body_set_contact_monitor(Handle, on ? 1 : 0, maxContacts) != 0;
 
@@ -104,7 +104,7 @@ public readonly partial struct Body
         return true;
     }
 
-    /// <summary>What the areas and the world would give this body now: gravity in cm/s^2 before its gravity factor (Godot total_gravity).</summary>
+    /// <summary>What the areas and the world would give this body now: gravity in cm/s^2 before its gravity factor.</summary>
     public Float3 AreaGravity
     {
         get { var g = new float[3]; return Native.aver_phys_body_area_gravity(Handle, g) != 0 ? new Float3(g[0], g[1], g[2]) : Float3.Zero; }
@@ -115,7 +115,7 @@ public readonly partial struct Body
         => Native.aver_phys_body_area_damping(Handle, out float l, out float a) != 0 ? (l, a) : (0f, 0f);
 }
 
-/// <summary>A sensor body registered as a Godot-style area. A handle (the sensor's own); 0 is invalid.</summary>
+/// <summary>A sensor body registered as an area. A handle (the sensor's own); 0 is invalid.</summary>
 public readonly struct Area : System.IEquatable<Area>
 {
     public int Handle { get; }
