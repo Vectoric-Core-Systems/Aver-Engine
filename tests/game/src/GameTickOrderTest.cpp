@@ -8,6 +8,7 @@
 #include "aver/game/GameTick.hpp"
 #include "aver/framework/framework_abi.h"
 #include "aver/framework/framework_hooks.h"
+#include "aver/framework/framework_interp_abi.h"
 #include "aver/framework/framework_timers_abi.h"
 #include "aver/physics/physics_abi.h"
 #include "aver/physics/physics_shape_builder_abi.h"
@@ -31,12 +32,21 @@ static void check(bool ok, const char* what) {
 struct Call { int32_t group; float dt; float bodyZ; };
 static std::vector<Call> g_calls;
 static int32_t g_body = 0;
+static scene::Entity g_mover = scene::kInvalidEntity;   // moved 10 cm along x in every PHYSICS pass, like a platform a script drives
+static bool g_teleportInProcess = false;                // and sent to x = 1000 (with a reset) in the PROCESS pass
 
 // Records each tick_all with the body's height at that moment.
 static void AVER_FW_CALL recordTickAll(int32_t group, float dt) {
     float p[3] = {0, 0, 0};
     if (g_body) aver_phys_body_position(g_body, p);
     g_calls.push_back({group, dt, p[2]});
+    if (g_mover != scene::kInvalidEntity && (group == AVER_FW_TICK_PHYSICS || (group == AVER_FW_TICK_PROCESS && g_teleportInProcess))) {
+        scene::World& w = scene::World::instance();
+        Transform t = w.localTransform(g_mover);
+        if (group == AVER_FW_TICK_PHYSICS) t.position.x += 10.0f;
+        else { t.position.x = 1000.0f; aver_fw_interp_reset(static_cast<int32_t>(g_mover)); }
+        w.setLocalTransform(g_mover, t);
+    }
 }
 
 static int count(int32_t group) {
@@ -130,9 +140,79 @@ int main() {
         check(z > now[2] && z < o[2] + 1e-3f, "with interpolation the entity is drawn between the last two steps");
         game::bodyPoseSync().restore(w);   // what the next frame does before its gameplay
         check(w.localTransform(ent).position.z == now[2], "and stands on the real pose again before the next frame's gameplay");
+        // A mode of OFF keeps a body out, a script's switch overrides the project's.
+        aver_fw_interp_set_mode(static_cast<int32_t>(ent), AVER_FW_INTERP_OFF);
+        game::tickGameplayGroups(step * 1.5f);
+        aver_phys_body_origin(g_body, now);
+        check(w.localTransform(ent).position.z == now[2], "mode OFF: the entity is drawn on its real pose although the project switch is on");
+        aver_fw_interp_set_mode(static_cast<int32_t>(ent), AVER_FW_INTERP_INHERIT);
+        game::bodyPoseSync().interpolate = false;
+        aver_fw_interp_set_enabled(1);
+        game::bodyPoseSync().restore(w);
+        game::tickGameplayGroups(step * 1.5f);
+        aver_phys_body_origin(g_body, now);
+        check(w.localTransform(ent).position.z > now[2], "the script's switch on blends it although the project's is off");
+        aver_fw_interp_set_enabled(0);
+        game::bodyPoseSync().interpolate = true;
+        game::bodyPoseSync().restore(w);
+        game::tickGameplayGroups(step * 1.5f);
+        aver_phys_body_origin(g_body, now);
+        check(w.localTransform(ent).position.z == now[2], "and its switch off stops it although the project's is on");
+        aver_fw_interp_set_enabled(-1);
+        game::bodyPoseSync().restore(w);
         game::bodyPoseSync().interpolate = false;
         game::bodyPoseSync().clear();
         w.destroy(ent);
+        w.flush();
+    }
+
+    AVER_INFO("=== any entity: a script puts a mover on, resets it, reads the pose drawn ===");
+    {
+        scene::World& w = scene::World::instance();
+        g_mover = w.create("mover");
+        const int32_t id = static_cast<int32_t>(g_mover);
+        game::bodyPoseSync().interpolate = true;
+        game::bodyPoseSync().clear();
+        game::tickGameplayGroups(step * 2.0f);
+        const float inherit = w.localTransform(g_mover).position.x;
+        check(inherit >= 10.0f && inherit == std::floor(inherit / 10.0f) * 10.0f, "an entity that inherits is not blended: it stands where its ticks left it");
+
+        aver_fw_interp_set_mode(id, AVER_FW_INTERP_ON);
+        game::tickGameplayGroups(step * 2.0f);   // two samples for the blend
+        game::bodyPoseSync().restore(w);
+        game::tickGameplayGroups(step * 1.5f);
+        const float shown = w.localTransform(g_mover).position.x;
+        float pos[3] = {0, 0, 0}, rot[4] = {0, 0, 0, 1};
+        check(aver_fw_interp_pose(id, pos, rot) == 1 && pos[0] == shown, "mode ON: the pose drawn is published");
+        game::bodyPoseSync().restore(w);
+        const float real = w.localTransform(g_mover).position.x;
+        AVER_INFO("   real x {}, drawn x {}", real, shown);
+        check(shown < real && shown >= real - 10.0f - 1e-3f, "and it is between the last two steps' poses");
+
+        aver_fw_interp_set_mode(id, AVER_FW_INTERP_OFF);
+        game::tickGameplayGroups(step * 1.5f);
+        const float off = w.localTransform(g_mover).position.x;
+        game::bodyPoseSync().restore(w);
+        check(w.localTransform(g_mover).position.x == off && aver_fw_interp_pose(id, nullptr, nullptr) == 0, "mode OFF: drawn on the real pose and nothing published");
+
+        aver_fw_interp_set_mode(id, AVER_FW_INTERP_ON);
+        game::tickGameplayGroups(step * 2.0f);
+        game::bodyPoseSync().restore(w);
+        g_teleportInProcess = true;
+        game::tickGameplayGroups(step * 1.5f);
+        g_teleportInProcess = false;
+        check(w.localTransform(g_mover).position.x == 1000.0f, "after a reset the teleport is drawn at once, with no blend from where it was");
+        aver_fw_interp_pose(id, pos, rot);
+        check(pos[0] == 1000.0f, "and that is the pose published");
+
+        aver_fw_interp_set_mode(id, AVER_FW_INTERP_INHERIT);
+        check(aver_fw_interp_mode(id) == AVER_FW_INTERP_INHERIT, "INHERIT forgets the entity");
+        game::bodyPoseSync().restore(w);
+        game::bodyPoseSync().interpolate = false;
+        game::bodyPoseSync().clear();
+        const scene::Entity moverEnt = g_mover;
+        g_mover = scene::kInvalidEntity;
+        w.destroy(moverEnt);
         w.flush();
     }
 

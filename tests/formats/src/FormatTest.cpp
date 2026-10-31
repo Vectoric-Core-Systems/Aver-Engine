@@ -360,6 +360,9 @@ static void checkOcproject() {
         check(g.hasGravity && std::fabs(g.gravity[2] + 980.0f) < 1e-3f, "with a NEGATIVE gravity, which a sentinel could not express");
         check(std::fabs(g.fixedStep - 0.0083f) < 1e-6f, "and the fixed step");
         check(g.hasPhysicsSettings(), "and the section reports itself present");
+        ProjectDesc ms;
+        check(parseOcproject("OCPROJECT 1\nNAME M\nPHYSICS.MAXSTEPS 4\n", ms, &err) && ms.physMaxSteps == 4 && ms.hasPhysicsSettings(), "PHYSICS.MAXSTEPS parses");
+        check(writeOcproject(ms, "").find("PHYSICS.MAXSTEPS 4") != std::string::npos, "and is written");
 
         const std::string w = writeOcproject(g, "");
         check(w.find("PHYSICS.GRAVITY") != std::string::npos, "gravity is written");

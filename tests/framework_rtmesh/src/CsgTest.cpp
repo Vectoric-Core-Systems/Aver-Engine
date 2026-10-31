@@ -177,10 +177,64 @@ static void testTransformAndSoup() {
     check(tet.polys.size() == 4 && near(std::fabs(volume(tet)), 1.0 / 6.0, 1e-9), "fromTriangles builds a tetrahedron of volume 1/6");
 }
 
+static void testSweep() {
+    AVER_INFO("=== sweeping a polygon along a path ===");
+    const std::vector<double> rect = {-1, -0.5, 1, -0.5, 1, 0.5, -1, 0.5};   // 2 x 1, centred
+    const std::vector<double> none;
+
+    // Along -Z the fixed frame is extrudePolygon laid on the path.
+    Mesh straight = sweepPolygon(rect, {0, 0, 0, 0, 0, -4}, none, SweepFrame::Fixed, false);
+    check(near(volume(straight), 8.0, 1e-9), "a 2 x 1 polygon along 4 m of path: volume 8, outward wound");
+    Bounds b = bounds(straight);
+    check(near(b.lo[2], -4, 1e-9) && near(b.hi[2], 0, 1e-9) && near(b.hi[0], 1, 1e-9) && near(b.hi[1], 0.5, 1e-9), "and it spans the path with the polygon's own orientation");
+    check(near(volume(extrudePolygon(rect, 4.0)), volume(straight), 1e-9), "the same solid extrudePolygon gives");
+    const std::vector<double> cw = {-1, -0.5, -1, 0.5, 1, 0.5, 1, -0.5};
+    check(near(volume(sweepPolygon(cw, {0, 0, 0, 0, 0, -4}, none, SweepFrame::Fixed, false)), 8.0, 1e-9), "a clockwise polygon sweeps to the same solid");
+
+    // Along +X the path frame turns the polygon's x onto world Z and keeps its y up.
+    Mesh along = sweepPolygon(rect, {0, 0, 0, 5, 0, 0}, none, SweepFrame::Path, false);
+    b = bounds(along);
+    check(near(volume(along), 10.0, 1e-9) && near(b.lo[0], 0, 1e-9) && near(b.hi[0], 5, 1e-9), "path frame along +X: volume 10 over 5 m");
+    check(near(b.hi[2], 1, 1e-9) && near(b.lo[2], -1, 1e-9) && near(b.hi[1], 0.5, 1e-9), "with the polygon's x on world Z and its y up");
+    Mesh reversed = sweepPolygon(rect, {5, 0, 0, 0, 0, 0}, none, SweepFrame::Path, false);
+    check(near(volume(reversed), 10.0, 1e-9), "the path walked backwards is the same solid");
+
+    // A quarter turn: area times the length of the centre line, a little under for the mitred corners.
+    std::vector<double> arc;
+    const double pi = 3.14159265358979323846, R = 5.0;
+    for (int i = 0; i <= 32; ++i) { const double a = pi * 0.5 * i / 32; arc.insert(arc.end(), {R * std::sin(a), 0.0, -R * (1.0 - std::cos(a))}); }
+    const Mesh bend = sweepPolygon(rect, arc, none, SweepFrame::Path, false);
+    check(near(volume(bend), 2.0 * R * pi * 0.5, 2.0 * R * pi * 0.5 * 0.01), "a quarter-circle path of radius 5: area x arc length within 1 percent");
+
+    // A closed loop has no caps: 24 points x 4 edges x 2 triangles.
+    std::vector<double> loop;
+    for (int i = 0; i < 24; ++i) { const double a = 2 * pi * i / 24; loop.insert(loop.end(), {4.0 * std::cos(a), 0.0, 4.0 * std::sin(a)}); }
+    const std::vector<double> sq = {-0.5, -0.5, 0.5, -0.5, 0.5, 0.5, -0.5, 0.5};
+    const Mesh ring = sweepPolygon(sq, loop, none, SweepFrame::Path, true);
+    check(ring.polys.size() == 24 * 4 * 2, "a closed path is not capped");
+    check(near(volume(ring), 2 * pi * 4.0, 2 * pi * 4.0 * 0.02), "a closed 24-point loop of radius 4: area x circumference within 2 percent");
+    std::vector<double> loopRepeated = loop;
+    loopRepeated.insert(loopRepeated.end(), {loop[0], loop[1], loop[2]});
+    check(sweepPolygon(sq, loopRepeated, none, SweepFrame::Path, true).polys.size() == ring.polys.size(), "a last point equal to the first is the same loop");
+
+    // Follow with a chosen up: a path along -Z with +X as up turns the 2 x 1 polygon a quarter turn about the path.
+    const std::vector<double> upX = {1, 0, 0, 1, 0, 0};
+    b = bounds(sweepPolygon(rect, {0, 0, 0, 0, 0, -4}, upX, SweepFrame::Follow, false));
+    check(near(b.hi[0], 0.5, 1e-9) && near(b.hi[1], 1.0, 1e-9) && near(b.lo[2], -4, 1e-9), "path follow takes the up vector it is given");
+
+    check(sweepPolygon(rect, {0, 0, 0}, none, SweepFrame::Path, false).empty(), "one point is no path");
+    check(sweepPolygon(rect, {0, 0, 0, 1, 0, 0}, none, SweepFrame::Path, true).empty(), "nor is a closed path of two");
+    check(sweepPolygon(rect, {0, 0, 0, 0, 0, 0, 3, 0, 0}, none, SweepFrame::Path, false).polys.size() == sweepPolygon(rect, {0, 0, 0, 3, 0, 0}, none, SweepFrame::Path, false).polys.size(),
+          "a repeated point is dropped");
+    const Soup soup = toSoup(along, 0.001);
+    check(!soup.idx.empty() && soup.uv.size() / 2 == soup.pos.size() / 3, "and the sweep soups like any other solid");
+}
+
 int main() {
     testPrimitives();
     testBooleans();
     testTransformAndSoup();
+    testSweep();
     AVER_INFO("{} checks, {} failed", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

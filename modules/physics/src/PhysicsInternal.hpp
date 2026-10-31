@@ -344,6 +344,7 @@ struct World {
     std::vector<VehicleImpactRaw> vehicleImpacts;
 
     float fixedStep = 1.0f / 60.0f;
+    int32_t maxSteps = 8;       // the most fixed steps one aver_phys_step call catches up (aver_phys_set_max_steps)
     float accumulator = 0.0f;   // real time; steps run at the fixed cadence whatever timeScale is
     float timeScale = 1.0f;     // game time per real time: each step simulates fixedStep * timeScale
     float simStep() const { return fixedStep * timeScale; }

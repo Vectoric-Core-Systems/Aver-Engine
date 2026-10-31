@@ -92,6 +92,21 @@ public readonly partial struct Body
         }
     }
 
+    /// <summary>Sets the principal moments of inertia about the body's own axes (engine axes, kg cm^2, each above 0), replacing the shape's.
+    /// Absolute: <see cref="SetMass"/> and <see cref="SetLockedAxes"/> leave it alone. Null goes back to the shape's. Dynamic bodies only.</summary>
+    public bool SetInertia(Float3? inertiaKgCm2) =>
+        Native.aver_phys_body_set_inertia(Handle, inertiaKgCm2 is { } v ? v.ToArray() : null) != 0;
+
+    /// <summary>The principal moments now (kg cm^2, engine axes) and whether <see cref="SetInertia"/> fixed them; zeros for a body that is not dynamic.</summary>
+    public (Float3 Inertia, bool IsOverride) Inertia
+    {
+        get
+        {
+            var m = new float[3];
+            return Native.aver_phys_body_inertia(Handle, m, out int ov) != 0 ? (new Float3(m[0], m[1], m[2]), ov != 0) : (Float3.Zero, false);
+        }
+    }
+
     /// <summary>Per-shape disable: the shape stops colliding without leaving the body (its index and user data stay; the body's
     /// mass is kept). <paramref name="index"/> is a child of a MUTABLE compound this body owns; -1 (or 0 on a body that is not a compound) is
     /// the whole shape.</summary>

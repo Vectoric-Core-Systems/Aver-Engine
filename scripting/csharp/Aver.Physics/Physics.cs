@@ -103,6 +103,11 @@ public static partial class Physics
     /// <summary>Changes the fixed step. Set it before any bodies exist.</summary>
     public static bool SetFixedStep(float seconds) => Native.aver_phys_set_fixed_step(seconds) != 0;
 
+    /// <summary>The most fixed steps one frame runs to catch up (8 unless set); a longer stall drops the rest.</summary>
+    public static int MaxSteps => Native.aver_phys_max_steps();
+    /// <summary>Changes the catch-up cap, 1 to 64. False for anything else or with no world.</summary>
+    public static bool SetMaxSteps(int steps) => Native.aver_phys_set_max_steps(steps) != 0;
+
     /// <summary>Gravity in cm/s^2. Defaults to (0, 0, -980) -- one g, straight down +Z-up.</summary>
     public static void SetGravity(Float3 g) => Native.aver_phys_set_gravity(g.X, g.Y, g.Z);
     public static void SetGravity(float x, float y, float z) => Native.aver_phys_set_gravity(x, y, z);

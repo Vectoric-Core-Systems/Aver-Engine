@@ -146,6 +146,9 @@ inline void applyProjectPhysicsKeys(const fmt::ProjectDesc& project) {
         if (project.fixedStep > 0.0f && !aver_phys_set_fixed_step(project.fixedStep))
             AVER_WARN("[Project] PHYSICS.FIXEDSTEP {} refused -- must be within (0, 0.5] seconds",
                       project.fixedStep);
+        // The catch-up cap is world state too; a project that does not state it keeps the world's 8.
+        if (project.physMaxSteps > 0 && !aver_phys_set_max_steps(project.physMaxSteps))
+            AVER_WARN("[Project] PHYSICS.MAXSTEPS {} refused -- must be 1 to 64", project.physMaxSteps);
         // The material combine rule is world state: stated -> that rule; a project that does not state it puts Jolt's back if the last one changed it.
         PhysicsAppliedKeys& applied = physicsAppliedKeys();
         if (project.physCombine >= 0) {
@@ -159,7 +162,7 @@ inline void applyProjectPhysicsKeys(const fmt::ProjectDesc& project) {
         if (aver_phys_config_differs())
             AVER_INFO("[Project] PHYSICS.MAXBODIES / MAXBODYPAIRS / MAXCONTACTS / TEMPALLOCMB / THREADS "
                       "change when the world is next created");
-    } else if (project.hasGravity || project.fixedStep > 0.0f || project.physCombine >= 0) {
+    } else if (project.hasGravity || project.fixedStep > 0.0f || project.physMaxSteps > 0 || project.physCombine >= 0) {
         AVER_INFO("[Project] physics settings will apply once the world exists");
     }
 }

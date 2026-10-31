@@ -91,6 +91,9 @@ struct ProjectDesc {
     int subViewports       = -1; // RENDER.SUBVIEWPORTS     [0,16] (engine default 4)
     int subViewRenders     = -1; // RENDER.SUBVIEWRENDERS   [1,16] (engine default 2)
     f32 subViewPixels      = -1.0f; // RENDER.SUBVIEWPIXELS megapixels (engine default 8)
+    // RENDER.RUNTIMEMESHES = how many meshes scripts may have built at run time at once (the engine's guard is 256, at most 4096); a mesh costs only what
+    // its vertices do, so a project that builds many small ones (chunks) states a larger number.
+    int runtimeMeshes      = -1; // RENDER.RUNTIMEMESHES    [1,4096] (engine default 256)
     int ptBounces          = -1; // RENDER.PTBOUNCES        PATH tracing: bounces after the first hit, [1,8]
     int ptMode             = -1; // RENDER.PTMODE           0 = ReSTIR path tracing, 1 = reference (converging)
     int layeredBsdf        = -1; // RENDER.LAYEREDBSDF      0=Off 1=Low 2=Medium 3=High 4=Epic
@@ -183,7 +186,7 @@ struct ProjectDesc {
                giCones >= 0 || giMode >= 0 || denoiser >= 0 || restirVisibility >= 0 ||
                restirHistory >= 0 || rdStages >= 0 || fogOcclusion >= 0 || meshExtra >= 0 || materialFx >= 0 || localRaster >= 0 || localShadows >= 0 ||
                volFog >= 0 || volFogDensity >= 0.0f ||
-               subViewports >= 0 || subViewRenders >= 0 || subViewPixels >= 0.0f ||
+               subViewports >= 0 || subViewRenders >= 0 || subViewPixels >= 0.0f || runtimeMeshes >= 0 ||
                refractionMode >= 0 || refractionStrength >= 0.0f ||
                refractionEdgeFade >= 0.0f || lodSelect >= 0 || lodThresholdPx >= 0.0f ||
                occlusionCull >= 0 || depthPrepass >= 0 ||
@@ -248,6 +251,7 @@ struct ProjectDesc {
     bool hasGravity = false;
     f32  gravity[3] = {0.0f, 0.0f, -980.0f};   // cm/s^2, engine axes; one g down +Z-up
     f32  fixedStep  = -1.0f;                   // PHYSICS.FIXEDSTEP  seconds, strictly positive
+    int  physMaxSteps = -1;                    // PHYSICS.MAXSTEPS   most fixed steps one frame catches up, 1..64; -1 = unstated (8)
     // Jolt world ceilings from PhysicsWorld.cpp's system.Init; were hardcoded before.
     int physMaxBodies         = -1;  // PHYSICS.MAXBODIES
     int physMaxBodyPairs      = -1;  // PHYSICS.MAXBODYPAIRS
@@ -272,7 +276,7 @@ struct ProjectDesc {
     std::vector<std::pair<std::string, f32>> physicsSettings;
 
     bool hasPhysicsSettings() const {
-        return hasGravity || fixedStep > 0.0f ||
+        return hasGravity || fixedStep > 0.0f || physMaxSteps > 0 ||
                physMaxBodies > 0 || physMaxBodyPairs > 0 || physMaxContacts > 0 ||
                physTempAllocatorMb > 0 || physThreads > -2 || physShapeCache >= 0 || physCombine >= 0 || !physicsSettings.empty();
     }

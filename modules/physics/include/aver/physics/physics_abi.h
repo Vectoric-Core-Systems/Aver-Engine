@@ -56,6 +56,11 @@ AVER_PHYS_API float   aver_phys_step_alpha(void);
 AVER_PHYS_API float   aver_phys_fixed_step(void);
 // Change the fixed step. Set it before any bodies exist.
 AVER_PHYS_API int32_t aver_phys_set_fixed_step(float seconds);
+// The most fixed steps one aver_phys_step call runs, and so how long a stall it catches up on before it drops the rest: 8 unless
+// set (PHYSICS.MAXSTEPS). aver_phys_set_max_steps takes 1..64 and returns 0 for anything else or with no world. World state: a new
+// world starts at 8 again, like the fixed step.
+AVER_PHYS_API int32_t aver_phys_max_steps(void);
+AVER_PHYS_API int32_t aver_phys_set_max_steps(int32_t steps);
 
 // ---- Bodies --------------------------------------------------------------------------------------
 // Shapes are described in the engine's units: half-extents and radii in centimetres.

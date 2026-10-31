@@ -149,6 +149,20 @@ AVER_PHYS_API int32_t aver_phys_body_set_constant_velocity(int32_t body, const f
 // Writes float[3] each (zeros when none is set). Either pointer may be NULL.
 AVER_PHYS_API int32_t aver_phys_body_constant_velocity(int32_t body, float* outLinearCmS, float* outAngularRadS);
 
+// ---- inertia set by hand -------------------------------------------------------------------------------------------------
+//
+// The principal moments of inertia about the body's own axes (engine axes: x forward, y right, z up), kg cm^2, float[3], each above 0.
+// Replaces the inertia the shape implies, with the shape's principal axes dropped for the body's own. It is an ABSOLUTE number: a later
+// aver_phys_body_set_mass changes the mass and leaves it alone (without an override set_mass rescales the shape's inertia by the ratio of the
+// masses), and so does the locked-axes rebuild (a rotation that is locked still gets no inertia). NULL goes back to the shape's inertia at the
+// body's current mass (not for a body whose translation is frozen: its mass is gone, so it keeps what it has until that is unfrozen).
+// Dynamic bodies only; 0 for a dead handle (BadHandle), a body that is not dynamic (Unsupported) or a value that is not above 0 or not finite
+// (InvalidArgument). Configuration, not simulation state: physics snapshots do not capture the flag.
+AVER_PHYS_API int32_t aver_phys_body_set_inertia(int32_t body, const float* inertiaKgCm2);
+// The principal moments now, kg cm^2 in engine axes (0 for an axis nothing resists), and 1 in outOverride when set_inertia fixed them. Either
+// out-pointer may be NULL. A shape-derived value is the principal moment: its axes are the body's own for boxes, spheres and capsules.
+AVER_PHYS_API int32_t aver_phys_body_inertia(int32_t body, float* outInertiaKgCm2, int32_t* outOverride);
+
 #ifdef __cplusplus
 }
 #endif

@@ -418,6 +418,14 @@ int32_t aver_phys_set_fixed_step(float seconds) {
     return 1;
 }
 
+int32_t aver_phys_max_steps(void) { return g_world ? g_world->maxSteps : 8; }
+
+int32_t aver_phys_set_max_steps(int32_t steps) {
+    if (!g_world || steps < 1 || steps > 64) return 0;
+    g_world->maxSteps = steps;
+    return 1;
+}
+
 namespace {
 aver_phys_step_hook_fn g_stepHook = nullptr;
 void*                  g_stepHookUser = nullptr;
@@ -445,7 +453,7 @@ int32_t aver_phys_step(float dt) {
     vehicleBeginCall();   // last call's vehicle events go; what the caller drains describes only the steps run here
     areasBeginCall();     // likewise the contact-monitor and area events
 
-    const float maxCatchUp = g_world->fixedStep * 8.0f;
+    const float maxCatchUp = g_world->fixedStep * static_cast<float>(g_world->maxSteps);
     g_world->accumulator += dt < maxCatchUp ? dt : maxCatchUp;
 
     int32_t steps = 0;

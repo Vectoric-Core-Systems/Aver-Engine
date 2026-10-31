@@ -584,7 +584,7 @@ int64_t aver_phys_step_total(void) { return g_world ? g_world->stepsTotal : 0; }
 int32_t aver_phys_accumulator_set(float seconds) {
     if (!g_world) { setAbiError(AbiError::NotInitialised); return 0; }
     if (!(seconds == seconds)) { setAbiError(AbiError::InvalidArgument); return 0; }   // NaN
-    const float top = g_world->fixedStep * 8.0f;
+    const float top = g_world->fixedStep * static_cast<float>(g_world->maxSteps);
     g_world->accumulator = seconds < 0.0f ? 0.0f : (seconds > top ? top : seconds);
     setAbiError(AbiError::Ok);
     return 1;

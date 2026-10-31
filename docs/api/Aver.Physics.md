@@ -2,7 +2,7 @@
 
 # Aver.Physics public API
 
-117 public types and 1159 public members, read from `scripting/csharp/Aver.Physics/` (53 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+117 public types and 1163 public members, read from `scripting/csharp/Aver.Physics/` (53 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Physics
 
@@ -159,6 +159,8 @@ Values: `None = 0`, `Distance = 1`, `Dihedral = 2`
 - `public bool SetCustomIntegrator(bool on)`
 - `public bool SetConstantVelocity(Float3 linear, Float3 angular)` - Constant linear / angular velocity (a conveyor): bodies touching this static or kinematic body are driven as if its surface moved at linear (cm/s, world) and spun at angular (rad/s, world axes, about the body's origin).
 - `public (Float3 Linear, Float3 Angular) ConstantVelocity`
+- `public bool SetInertia(Float3? inertiaKgCm2)` - Sets the principal moments of inertia about the body's own axes (engine axes, kg cm^2, each above 0), replacing the shape's.
+- `public (Float3 Inertia, bool IsOverride) Inertia` - The principal moments now (kg cm^2, engine axes) and whether SetInertia fixed them; zeros for a body that is not dynamic.
 - `public bool SetShapeDisabled(int index, bool disabled = true)` - Per-shape disable: the shape stops colliding without leaving the body (its index and user data stay; the body's mass is kept).
 - `public bool IsShapeDisabled(int index = -1)`
 - `public MotionTestResult? TestMotion(Float3 motion, float marginCm, SpaceQueryFlags flags, IReadOnlyList<Body>? exclude = null, int maxContacts = 4, (Float3 Position, Quaternion Rotation)? originPose = null)` - Body test motion for this body: where would it get to if it moved by motion (centimetres)?
@@ -673,6 +675,8 @@ Values: `Off = 0`, `Velocity = 1`, `Position = 2`
 - `public static bool Ready { get; }` - True while a world exists.
 - `public static float FixedStep { get; }` - The fixed simulation step, in seconds (1/60 unless set).
 - `public static bool SetFixedStep(float seconds)` - Changes the fixed step.
+- `public static int MaxSteps { get; }` - The most fixed steps one frame runs to catch up (8 unless set); a longer stall drops the rest.
+- `public static bool SetMaxSteps(int steps)` - Changes the catch-up cap, 1 to 64.
 - `public static void SetGravity(Float3 g)` - Gravity in cm/s^2.
 - `public static void SetGravity(float x, float y, float z)`
 - `public static int Step(float dt)` - Advances by dt seconds of real time, in fixed steps; leftover time carries and a long stall is clamped.

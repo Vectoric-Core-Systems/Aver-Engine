@@ -28,6 +28,8 @@ internal static partial class Native
     [DllImport(Lib)] internal static extern int   aver_phys_step(float dt);
     [DllImport(Lib)] internal static extern float aver_phys_fixed_step();
     [DllImport(Lib)] internal static extern int   aver_phys_set_fixed_step(float seconds);
+    [DllImport(Lib)] internal static extern int   aver_phys_max_steps();
+    [DllImport(Lib)] internal static extern int   aver_phys_set_max_steps(int steps);
 
     // ---- Bodies -------------------------------------------------------------------------------------
 

@@ -7,6 +7,7 @@
 #include "aver/physics/physics_body_ext_abi.h"
 #include "Convert.hpp"
 #include "PhysicsInternal.hpp"
+#include "PhysicsRigidExtras.hpp"
 
 #include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
@@ -132,6 +133,13 @@ int32_t aver_phys_body_set_locked_axes(int32_t body, uint32_t mask) {
         props.ScaleToMass(massKg);
 
         mp.SetMassProperties(toJoltDofs(mask), props);
+        // Inertia set by hand outlives the rebuild; a rotation that is locked still has no inertia to resist with.
+        if (JPH::Vec3 fixedInverse; rigidExtrasInertiaOverride(body, fixedInverse)) {
+            const uint32_t allowed = static_cast<uint32_t>(toJoltDofs(mask));
+            for (int j = 0; j < 3; ++j)
+                if (!(allowed & (8u << j))) fixedInverse.SetComponent(j, 0.0f);
+            mp.SetInverseInertia(fixedInverse, JPH::Quat::sIdentity());
+        }
         // Whatever speed the body had along a newly locked axis would otherwise sit in the velocity
         // until the next integration masks it.
         mp.SetLinearVelocity(mp.LockTranslation(mp.GetLinearVelocity()));

@@ -6,6 +6,7 @@
 #include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "aver/rhi/Tonemap.hpp"
 #include "aver/game/GameTick.hpp"
+#include "aver/game/RuntimeMeshBudget.hpp"
 #include "aver/game/GameLocalization.hpp"   // [wave11/shapes] Content/Physics/Surfaces.ocsurf -> the physics surface registry
 #include "aver/game/PhysicalSurfaces.hpp"   // [wave11/shapes] Content/Physics/Surfaces.ocsurf -> the physics surface registry
 #include "aver/game/PhysicalSurfaces.hpp"
@@ -365,6 +366,7 @@ void SandboxApp::applyProjectRenderSettings() {
     // G4 R5: how many sub-viewports may exist and how many are drawn per frame; a mirror like the lines above (an unstated key is the default, not 'keep the last project's').
     game::SubViewportHost::configure(game::subViewportSettingsOf(project_.subViewports, project_.subViewRenders, project_.subViewPixels));
 #endif
+    game::configureRuntimeMeshBudget(project_);
 #if AVER_MODULE_SR
     // optimisation-wave-2, 3.3 A: MIRRORS, NOT A DELTA, for the SAME reason projectBackend_ and
     // frameBudgetMs_ are up here rather than below the hasRenderSettings() guard -- but unlike

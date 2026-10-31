@@ -23,7 +23,12 @@ struct RigidExtrasState {
     std::unordered_map<JPH::BodyID, Conveyor> conveyors;                           // read by workers, written between steps
     std::map<int32_t, std::map<uint32_t, JPH::RefConst<JPH::Shape>>> disabledChildren;   // body -> mutable-compound child index -> the shape that was there
     std::map<int32_t, JPH::RefConst<JPH::Shape>> disabledWhole;                    // body -> the whole shape it had before it was disabled
+    std::map<int32_t, JPH::Float3> inertia;                                        // body -> the principal moments set by hand, kg m^2, Jolt body axes
 };
+
+// The inverse of the moments aver_phys_body_set_inertia fixed for this body, in Jolt body axes; false when it has none. aver_phys_body_set_mass
+// and the locked-axes rebuild ask, so a body whose inertia was set keeps it instead of having the shape's rescaled over it.
+bool rigidExtrasInertiaOverride(int32_t handle, JPH::Vec3& inverseDiagonal);
 
 RigidExtrasState& rigidExtrasOrCreate();
 

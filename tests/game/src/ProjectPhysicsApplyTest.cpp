@@ -215,6 +215,29 @@ static void testCombineKey() {
     resetAll();
 }
 
+// PHYSICS.MAXSTEPS is world state like the fixed step: parsed, written back, applied once the world exists, and it bounds how much a stall catches up.
+static void testMaxStepsKey() {
+    AVER_INFO("=== PHYSICS.MAXSTEPS ===");
+    resetAll();
+    aver_phys_init();
+    check(aver_phys_max_steps() == 8, "8 by default");
+    const fmt::ProjectDesc m = parse("OCPROJECT 1\nNAME M\nPHYSICS.MAXSTEPS 3\n");
+    check(m.physMaxSteps == 3 && m.hasPhysicsSettings(), "the key parses and counts as a physics setting");
+    check(fmt::writeOcproject(m, "").find("PHYSICS.MAXSTEPS 3") != std::string::npos, "and is written back");
+    game::applyProjectPhysicsKeys(m);
+    check(aver_phys_max_steps() == 3, "applyProjectPhysicsKeys sets it on the live world");
+    const int64_t before = aver_phys_step_total();
+    aver_phys_step(10.0f);   // a stall of ten seconds
+    const int64_t ran = aver_phys_step_total() - before;   // float rounding of the accumulator can leave the last step a hair short
+    check(ran >= 2 && ran <= 3, "a stall catches up at most three fixed steps and drops the rest");
+    check(!aver_phys_set_max_steps(0) && !aver_phys_set_max_steps(65) && aver_phys_max_steps() == 3, "0 and 65 are refused and change nothing");
+    check(aver_phys_set_max_steps(64) && aver_phys_max_steps() == 64, "64 is the most");
+    resetAll();
+    aver_phys_init();
+    check(aver_phys_max_steps() == 8, "a new world starts at 8 again");
+    resetAll();
+}
+
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     AVER_INFO("==================================================");
@@ -225,6 +248,7 @@ int main() {
     testConfigureRebuilds();
     testShapeCacheKey();
     testCombineKey();
+    testMaxStepsKey();
 
     AVER_INFO("==================================================");
     if (g_failures == 0) AVER_INFO("=== {} assertions, 0 failed ===", g_checks);

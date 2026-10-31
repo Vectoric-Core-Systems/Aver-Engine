@@ -298,6 +298,12 @@ Chunk version 1, never marked Required; its presence raises the container `conte
 ### `.ocproject` keys `RENDER.SUBVIEWPORTS`, `RENDER.SUBVIEWRENDERS` and `RENDER.SUBVIEWPIXELS`
 The sub-viewport (render-to-texture view) cost guard. `RENDER.SUBVIEWPORTS <0..16>` (`ProjectDesc::subViewports`, `-1` = unstated = 4): views alive at once; `0` turns the feature off and every create is refused. `RENDER.SUBVIEWRENDERS <1..16>` (`subViewRenders`, default 2): views drawn per frame. `RENDER.SUBVIEWPIXELS <megapixels>` (`subViewPixels`, default 8): summed pixels of all views; over it every view shrinks by the same factor. Manifest keys read by the hosts (not `voxi::Settings`); owned by the writer. R5 of [G4_RENDER.md](https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G4_RENDER.md).
 
+### `.ocproject` key `RENDER.RUNTIMEMESHES`
+`RENDER.RUNTIMEMESHES <1..4096>` (`ProjectDesc::runtimeMeshes`, `-1` = unstated = 256): how many meshes scripts may have built at run time at once (`framework_rtmesh_abi.h`'s guard; `aver_fw_rtmesh_configure`). A mesh costs what its vertices do, so a project that builds a mesh per chunk states a larger number; an unstated key is the default, not "keep the last project's". Read by both hosts through `Runtime/include/aver/game/RuntimeMeshBudget.hpp`; owned by the writer.
+
+### `.ocproject` key `PHYSICS.MAXSTEPS`
+`PHYSICS.MAXSTEPS <1..64>` (`ProjectDesc::physMaxSteps`, `-1` = unstated = 8): the most fixed steps one `aver_phys_step` call runs to catch up after a stall; the rest is dropped. World state like `PHYSICS.FIXEDSTEP`: applied after the level loads (`aver_phys_set_max_steps`), not reverted by a project that does not state it. Counts as a physics setting for `hasPhysicsSettings`. Owned by the writer.
+
 ### `.ocproject` keys `RENDER.LOCALRASTER` and `RENDER.LOCALSHADOWS`
 `RENDER.LOCALRASTER <0|1|2>` (`ProjectDesc::localRaster`, `-1` = unstated, `voxi::Settings::localLightsRaster`): omni and spot lights from the raster path (no ray tracing needed, Vulkan). `0` auto (live where the ray-traced lights cannot serve), `1` on (also in raster-primary ray-traced frames; the ray-traced light list is then not published), `2` off. `RENDER.LOCALSHADOWS <0|1>` (`localShadows`, `Settings::localLightShadows`, engine default 1): shadow maps for those lights. Absent leaves the defaults; both are owned by the writer (`isOwnedKey`). R2 of [G4_RENDER.md](https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G4_RENDER.md).
 
