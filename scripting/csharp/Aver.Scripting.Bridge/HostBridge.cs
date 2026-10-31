@@ -88,6 +88,12 @@ public static class HostBridge
     // hands bind().
     private static readonly Dictionary<long, ClassInfo> s_classes = new();
 
+    // What the installed extensions put in the host context: their assembly names, and the classes they declared. A project assembly may
+    // reference only these (an actor deriving from an extension's type names no other engine assembly), and a script reload drops s_classes
+    // but must keep the extensions' rows, since LoadExtensions runs once.
+    private static readonly HashSet<string> s_extensionAssemblies = new(StringComparer.Ordinal);
+    private static readonly Dictionary<long, ClassInfo> s_extensionClasses = new();
+
     // ---- graph classes: a .ocgraph with a CLASS record, registered the SAME way a C# actor class
     // is (see DeclareGraphClasses, below) --------------------------------------------------------
 
@@ -309,6 +315,7 @@ public static class HostBridge
         s_tickActors.Clear();
         s_tickOrderDirty = true;
         s_classes.Clear();
+        foreach (var kv in s_extensionClasses) s_classes[kv.Key] = kv.Value;
         s_graphClasses.Clear();
         s_graphInstances.Clear();
         // Timers and event subscribers are callbacks into the context being unloaded: drop them first.
@@ -1155,7 +1162,7 @@ public static class HostBridge
             && sawFramework)
             return false;
 
-        return sawScripting || sawFramework;
+        return sawScripting || sawFramework || refs.Any(a => a.Name is not null && s_extensionAssemblies.Contains(a.Name));
     }
 
     // True unless the assembly references <name> at an incompatible version, which is logged. <saw>
@@ -1434,6 +1441,7 @@ public static class HostBridge
         }
         AssemblyLoadContext host = AssemblyLoadContext.GetLoadContext(typeof(HostBridge).Assembly) ?? AssemblyLoadContext.Default;
         var loaded = new List<(Assembly Asm, string Label)>();
+        var classesBefore = new HashSet<long>(s_classes.Keys);
         try
         {
             foreach (string path in paths)
@@ -1464,6 +1472,7 @@ public static class HostBridge
             }
         }
 
+        foreach ((Assembly asm, _) in loaded) s_extensionAssemblies.Add(asm.GetName().Name!);
         var context = new Aver.Framework.Hosting.ExtensionContext(name, version, dir, loaded.Select(l => l.Asm).ToList());
         if (entry.Length > 0)
         {
@@ -1502,6 +1511,8 @@ public static class HostBridge
             try { declared += DeclareActors(asm, label, wanted); }
             catch (Exception ex) { Emit((int)Log.Level.Warn, $"[Scripting] extension {name}: {label} actor classes could not be declared: {Describe(ex)}"); }
         }
+        foreach (var kv in s_classes)
+            if (!classesBefore.Contains(kv.Key)) s_extensionClasses[kv.Key] = kv.Value;
         return declared;
     }
 

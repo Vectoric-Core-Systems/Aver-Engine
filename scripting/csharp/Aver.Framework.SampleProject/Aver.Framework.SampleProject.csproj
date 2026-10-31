@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- A project assembly of the shape a converted project's Scripts.dll has: its only engine reference is an extension's assembly (here
+       Aver.Framework.SampleActor), because the actor derives from a type that assembly offers. Staged to bin/ProjectScripts/ for
+       tests/extensions' ManagedExtensionTest, which loads the extension first and this assembly after it. Private="false": the host has
+       the extension's assembly loaded already. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Aver.Framework.SampleProject</AssemblyName>
+    <RootNamespace>Aver.Framework.SampleProject</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Aver.Framework.SampleActor\Aver.Framework.SampleActor.csproj" Private="false" />
+  </ItemGroup>
+
+</Project>

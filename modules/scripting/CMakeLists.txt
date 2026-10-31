@@ -289,6 +289,7 @@ add_custom_command(
           ${AVER_CSHARP_DIR}/Aver.Framework.SampleActor/SphereActor.cs
           ${AVER_CSHARP_DIR}/Aver.Framework.SampleActor/PlayDemo.cs
           ${AVER_CSHARP_DIR}/Aver.Framework.SampleActor/ExtensionEntrySample.cs
+          ${AVER_CSHARP_DIR}/Aver.Framework.SampleActor/ExtensionBaseSample.cs
           ${AVER_BRIDGE_OUTPUTS}
           ${AVER_SAMPLE_OUT}
   COMMENT "Building the sample actor assembly"
@@ -296,6 +297,26 @@ add_custom_command(
 add_custom_target(Aver.Framework.SampleActor DEPENDS ${AVER_ACTOR_OUT})
 set_target_properties(Aver.Framework.SampleActor PROPERTIES FOLDER "modules")
 add_dependencies(Aver.Scripting.Host Aver.Framework.SampleActor)
+
+# A project-shaped assembly whose actor derives from a type the sample actor assembly offers (staged to bin/ProjectScripts/, loaded by no editor
+# run): ManagedExtensionTest loads SampleActor as an extension and this assembly as the project's scripts. After ${AVER_ACTOR_OUT} for the
+# same shared-obj ordering reason as above.
+set(AVER_SAMPLEPROJECT_PROJ ${AVER_CSHARP_DIR}/Aver.Framework.SampleProject/Aver.Framework.SampleProject.csproj)
+set(AVER_SAMPLEPROJECT_OUT ${CMAKE_BINARY_DIR}/bin/ProjectScripts/Aver.Framework.SampleProject.dll)
+add_custom_command(
+  OUTPUT ${AVER_SAMPLEPROJECT_OUT}
+  COMMAND ${AVER_DOTNET_EXE} build ${AVER_SAMPLEPROJECT_PROJ} ${AVER_DOTNET_BUILD_FLAGS}
+          -o ${CMAKE_BINARY_DIR}/bin/ProjectScripts
+  DEPENDS ${AVER_SAMPLEPROJECT_PROJ}
+          ${AVER_CSHARP_DIR}/Aver.Framework.SampleProject/ProjectActor.cs
+          ${AVER_CSHARP_DIR}/Aver.Framework.SampleActor/ExtensionBaseSample.cs
+          ${AVER_BRIDGE_OUTPUTS}
+          ${AVER_ACTOR_OUT}
+  COMMENT "Building the sample project assembly"
+  VERBATIM)
+add_custom_target(Aver.Framework.SampleProject DEPENDS ${AVER_SAMPLEPROJECT_OUT})
+set_target_properties(Aver.Framework.SampleProject PROPERTIES FOLDER "modules")
+add_dependencies(Aver.Scripting.Host Aver.Framework.SampleProject)
 
 # nethost, copied out of the .NET host pack. It is loaded by name at run time, so it has to sit
 # next to the executable; the natural-sorted last entry is the newest pack, and any nethost can

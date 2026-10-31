@@ -6,6 +6,8 @@
 //              predicate: those two are declared, the other actor types are not, and the entry's context names the extension.
 //   GoneExt    lists a managed file it does not have: the loader refuses it, ScriptHost logs the reason once and leaves it out.
 //   NoBaseExt  Aver.Scripting.SampleBehaviour.dll with an actorBase that no assembly holds: the bridge logs one line and declares nothing.
+// Then the project's scripts load after them (ScriptHost::loadScripts): an assembly whose actor derives from ActorExt's SampleExtensionBase and
+// references no other engine assembly (the shape of a converted project's) is declared.
 // ScriptHost::init is pointed at that folder (HostDesc::extensionsDir) with no scripts directory, so any class that exists afterwards came
 // through LoadExtensions. Headless: no device, no window, no audio.
 //
@@ -119,6 +121,25 @@ int main() {
     check(linesWith("GoneExt", "not loaded") == 1 && linesWith("GoneExt", "Missing.dll") == 1, "GoneExt: one line, with the loader's reason");
     check(linesWith("NoBaseExt", "skipped") == 1 && linesWith("NoBaseExt", "No.Such.Type") == 1, "NoBaseExt: one line, naming the base type it lacks");
     check(linesWith("ActorExt", "skipped") == 0 && linesWith("ActorExt", "not loaded") == 0, "ActorExt, which is fine, says nothing");
+
+    AVER_INFO("-- project scripts that derive from an extension's type load after it, and are declared --");
+    const fsys::path projectDll = exe / "ProjectScripts" / "Aver.Framework.SampleProject.dll";
+    if (!fsys::exists(projectDll, ec)) {
+        AVER_WARN("ManagedExtensionTest: the sample project assembly is not staged beside this executable; the project-script checks are skipped");
+    } else {
+        // Alone in its folder: the assembly names the extension's assembly and no other engine one, and the extension's own copy must not come with it.
+        const fsys::path scripts = fsys::path(AVER_MEXT_WORKDIR) / "ProjectScripts";
+        fsys::create_directories(scripts, ec);
+        fsys::copy_file(projectDll, scripts / projectDll.filename(), fsys::copy_options::overwrite_existing, ec);
+        check(aver_fw_class_find("ProjectOwnedActor") == 0, "the project's class is not declared before its scripts load");
+        g_lines.clear();
+        setLogSink(&capture, nullptr);
+        host.loadScripts(scripts.string());
+        setLogSink(nullptr, nullptr);
+        check(aver_fw_class_find("ProjectOwnedActor") != 0, "an actor deriving from the extension's base type is declared once the scripts load");
+        check(linesWith("Aver.Framework.SampleProject.dll: declared 1 actor class") == 1, "and the bridge says it declared it");
+        check(linesWith("could not be loaded") == 0 && linesWith("was rejected") == 0, "with nothing refused");
+    }
 
     host.shutdown();
     if (g_failures) { AVER_ERROR("ManagedExtensionTest: {} check(s) FAILED ===", g_failures); return 1; }
