@@ -26,7 +26,7 @@
 #  define AVER_PANIM_API
 #endif
 
-#define AVER_PANIM_ABI_VERSION 1
+#define AVER_PANIM_ABI_VERSION 2   /* 2: markers and sections (additive; version 1 callers are unaffected) */
 
 #define AVER_PANIM_KIND_NIL    0
 #define AVER_PANIM_KIND_BOOL   1
@@ -229,6 +229,29 @@ AVER_PANIM_API int32_t aver_pplayer_tree_mix(int32_t player, int32_t updateOnly)
 AVER_PANIM_API int32_t aver_pplayer_set_root_motion(int32_t player, const char* path);
 AVER_PANIM_API const char* aver_pplayer_root_motion_path(int32_t player);
 AVER_PANIM_API int32_t aver_pplayer_root_motion(int32_t player, double* out20);
+
+/* ---- markers and sections (version 2) ------------------------------------------------------------------------------
+ * A marker is a named time on a clip (saved with it). A section confines the player to [start, end] of the current clip: a negative start
+ * or end is open, end <= start is refused (0). The *_markers calls name the edges by markers of the clip (empty = open; a missing marker
+ * is refused). play_section starts the animation (or restarts a running one) at the section's edge; set_section changes the section of
+ * the current clip in place. stop and playing another animation drop the section. */
+AVER_PANIM_API int32_t aver_panim_marker_add(int32_t clip, const char* name, double time);   /* 0 for an empty or taken name */
+AVER_PANIM_API int32_t aver_panim_marker_remove(int32_t clip, const char* name);
+AVER_PANIM_API int32_t aver_panim_marker_count(int32_t clip);
+AVER_PANIM_API const char* aver_panim_marker_name(int32_t clip, int32_t index);              /* "" for a bad index */
+AVER_PANIM_API int32_t aver_panim_marker_time(int32_t clip, const char* name, double* outSeconds);
+AVER_PANIM_API int32_t aver_panim_marker_set_time(int32_t clip, const char* name, double seconds);
+AVER_PANIM_API int32_t aver_panim_marker_set_color(int32_t clip, const char* name, double r, double g, double b, double a);
+AVER_PANIM_API int32_t aver_panim_marker_color(int32_t clip, const char* name, double* outRgba4);
+
+AVER_PANIM_API int32_t aver_pplayer_play_section(int32_t player, const char* name, double start, double end, double customBlend, double customSpeed, int32_t fromEnd);
+AVER_PANIM_API int32_t aver_pplayer_play_section_markers(int32_t player, const char* name, const char* startMarker, const char* endMarker, double customBlend, double customSpeed, int32_t fromEnd);
+AVER_PANIM_API int32_t aver_pplayer_set_section(int32_t player, double start, double end);
+AVER_PANIM_API int32_t aver_pplayer_set_section_markers(int32_t player, const char* startMarker, const char* endMarker);
+AVER_PANIM_API int32_t aver_pplayer_reset_section(int32_t player);
+AVER_PANIM_API int32_t aver_pplayer_has_section(int32_t player);
+AVER_PANIM_API double  aver_pplayer_section_start(int32_t player);
+AVER_PANIM_API double  aver_pplayer_section_end(int32_t player);
 
 #ifdef __cplusplus
 }

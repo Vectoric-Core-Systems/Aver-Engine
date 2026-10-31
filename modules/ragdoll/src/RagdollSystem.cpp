@@ -201,9 +201,17 @@ bool RagdollSystem::build(scene::Entity e, State& s, const fmt::OcSkeleton& skel
     }
     for (u32 b = 0; b < def->boneCount; ++b) {
         if (!def->hasPart(b)) continue;
-        if (const i32 body = aver_phys_ragdoll_body_of_bone(s.handle, static_cast<i32>(b)))
+        if (const i32 body = aver_phys_ragdoll_body_of_bone(s.handle, static_cast<i32>(b))) {
             aver_phys_set_entity(body, static_cast<i32>(e));
+            // Authored per-part materials (an .ocragdoll override file); absent, the parts keep the world's. The authored
+            // masses wait for the first simulated mode: a kinematic body has no mass to set.
+            if (!def->massKg.empty()) {
+                if (def->friction[b] >= 0.0f) aver_phys_body_set_friction(body, def->friction[b]);
+                if (def->bounce[b] >= 0.0f) aver_phys_body_set_restitution(body, def->bounce[b]);
+            }
+        }
     }
+    s.massApplied = false;
     // Inherit the animated pose before any simulated mode, so going limp starts from where it stands.
     aver_phys_ragdoll_set_pose(s.handle, s.tpos.data(), s.trot.data());
     aver_phys_ragdoll_set_target(s.handle, s.tpos.data(), s.trot.data());
@@ -222,6 +230,15 @@ void RagdollSystem::syncPhysMode(State& s) {
     if (want == s.physMode) return;
     aver_phys_ragdoll_set_mode(s.handle, want);
     s.physMode = want;
+    // The parts are dynamic now: give them their authored masses (once; Jolt keeps them across later mode switches).
+    if (want > 0 && !s.massApplied && s.def && !s.def->massKg.empty()) {
+        s.massApplied = true;
+        for (u32 b = 0; b < s.def->boneCount; ++b) {
+            if (!s.def->hasPart(b) || s.def->massKg[b] <= 0.0f) continue;
+            if (const i32 body = aver_phys_ragdoll_body_of_bone(s.handle, static_cast<i32>(b)))
+                aver_phys_body_set_mass(body, s.def->massKg[b]);
+        }
+    }
 }
 
 void RagdollSystem::destroyPhysics(State& s) {

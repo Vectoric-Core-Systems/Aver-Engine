@@ -16,11 +16,12 @@
 // are dead code for a raw attach: `weight` would read 0 and the rig would silently do nothing, which
 // is the exact failure mode SYNAPSE.md records for an agent whose moveSpeedCm came back zero.
 //
-// ONE POSE MODIFIER, THREE LAYERS (docs/plans/wave5/IK_RETARGETING.md section 2). For an entity the order is:
-// its CControlRig's ops, then its CIkRig stack (IkRigSystem.hpp), then -- chained -- the ragdoll. Montages and
-// state machines run before all of it.
+// ONE POSE MODIFIER, FOUR LAYERS (docs/plans/wave5/IK_RETARGETING.md section 2, docs/ANIM_POSE_SEAM.md). For an entity the
+// order is: its CControlRig's ops, then its CIkRig stack (IkRigSystem.hpp), then the script pose seam's bone overrides
+// (PoseSeam.hpp), then -- chained -- the ragdoll. Montages and state machines run before all of it.
 #include "aver/anim/AnimSystem.hpp"
 #include "aver/anim/IkRigSystem.hpp"
+#include "aver/anim/PoseSeam.hpp"
 #include "aver/core/Types.hpp"
 #include "aver/formats/OcRig.hpp"
 
@@ -91,8 +92,11 @@ public:
     // Drops every loaded rig. Call when the level changes; the next tick reloads what it needs.
     void clear() { rigs_.clear(); loadFailed_.clear(); ik_.clear(); }
 
-    // Drops runtime state: rig inputs, IK goals, foot smoothing. `game::resetGameSystems` calls it.
+    // Drops runtime state: rig inputs, IK goals, foot smoothing, pose seam overrides. `game::resetGameSystems` calls it.
     void clearRuntime();
+
+    // The script pose seam, applied last in this modifier (PoseSeam.hpp).
+    PoseSeamSystem& poseSeam() { return seam_; }
 
     // How many entities this system actually applied a rig to on the last tick. Exists so a test --
     // and a person wondering why nothing is moving -- can tell "no rig ran" apart from "a rig ran and
@@ -134,6 +138,7 @@ private:
     };
     std::unordered_map<scene::Entity, Inputs> inputs_;
     IkRigRuntime ik_;
+    PoseSeamSystem seam_;
     u64 pruneTick_ = ~0ull;
 
     scene::World* world_ = nullptr;

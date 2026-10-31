@@ -251,6 +251,15 @@ struct OcPropTrack {
     std::vector<OcPropKey> keys;   // ascending by time
 };
 
+// A NAMED TIME on a clip: a place a property-track player can start or stop a section at, or a script can ask for
+// (`marker`). Optional in the way notifies are: a clip with none writes no MRKR chunk, so a file written now is
+// byte-identical to one written before markers existed. A marker is not a notify: nothing fires when the playhead passes it.
+struct OcMarker {
+    std::string name;
+    f64 time = 0.0;                            // seconds from the clip start
+    f32 color[4] = {1.0f, 1.0f, 1.0f, 1.0f};   // rgba, an editor hint
+};
+
 struct OcAnimation {
     f32  duration = 0.0f;                      // seconds
     OcAnimStorage storage = OcAnimStorage::Keyframed;
@@ -296,6 +305,11 @@ struct OcAnimation {
     bool propClip = false;
     OcPropLoop propLoop = OcPropLoop::None;
     f32 propStep = 1.0f / 30.0f;
+
+    // Named times (OcMarker), in no required order; names are unique (a write refuses a duplicate). No MRKR chunk when empty.
+    std::vector<OcMarker> markers;
+    // The marker of that name, or nullptr.
+    const OcMarker* marker(const std::string& name) const;
 
     // The curve of that name, or nullptr. Linear, for the reason OcSkeleton::socket is.
     const OcCurve* curve(const std::string& name) const;

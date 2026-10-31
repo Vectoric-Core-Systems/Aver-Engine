@@ -542,4 +542,81 @@ int32_t aver_pplayer_root_motion(int32_t player, double* out20) {
     return (r.hasPosition ? 1 : 0) | (r.hasRotation ? 2 : 0) | (r.hasScale ? 4 : 0);
 }
 
+// ---- markers and sections ----
+
+int32_t aver_panim_marker_add(int32_t clip, const char* name, double time) {
+    ClipPtr c = clipOf(clip);
+    if (!c || str(name)[0] == '\0' || !std::isfinite(time) || c->marker(name)) return 0;
+    OcMarker m;
+    m.name = name;
+    m.time = time;
+    c->markers.push_back(std::move(m));
+    return 1;
+}
+int32_t aver_panim_marker_remove(int32_t clip, const char* name) {
+    ClipPtr c = clipOf(clip);
+    if (!c) return 0;
+    for (auto it = c->markers.begin(); it != c->markers.end(); ++it)
+        if (it->name == str(name)) { c->markers.erase(it); return 1; }
+    return 0;
+}
+int32_t aver_panim_marker_count(int32_t clip) { ClipPtr c = clipOf(clip); return c ? int32_t(c->markers.size()) : 0; }
+const char* aver_panim_marker_name(int32_t clip, int32_t index) {
+    ClipPtr c = clipOf(clip);
+    return text(c && index >= 0 && usize(index) < c->markers.size() ? c->markers[usize(index)].name : std::string());
+}
+int32_t aver_panim_marker_time(int32_t clip, const char* name, double* outSeconds) {
+    ClipPtr c = clipOf(clip);
+    const OcMarker* m = c ? c->marker(str(name)) : nullptr;
+    if (!m || !outSeconds) return 0;
+    *outSeconds = m->time;
+    return 1;
+}
+int32_t aver_panim_marker_set_time(int32_t clip, const char* name, double seconds) {
+    ClipPtr c = clipOf(clip);
+    if (!c || !std::isfinite(seconds)) return 0;
+    for (OcMarker& m : c->markers)
+        if (m.name == str(name)) { m.time = seconds; return 1; }
+    return 0;
+}
+int32_t aver_panim_marker_set_color(int32_t clip, const char* name, double r, double g, double b, double a) {
+    ClipPtr c = clipOf(clip);
+    if (!c) return 0;
+    for (OcMarker& m : c->markers)
+        if (m.name == str(name)) {
+            m.color[0] = float(r); m.color[1] = float(g); m.color[2] = float(b); m.color[3] = float(a);
+            return 1;
+        }
+    return 0;
+}
+int32_t aver_panim_marker_color(int32_t clip, const char* name, double* outRgba4) {
+    ClipPtr c = clipOf(clip);
+    const OcMarker* m = c ? c->marker(str(name)) : nullptr;
+    if (!m || !outRgba4) return 0;
+    for (int i = 0; i < 4; ++i) outRgba4[i] = m->color[i];
+    return 1;
+}
+
+int32_t aver_pplayer_play_section(int32_t player, const char* name, double start, double end, double blend, double speed, int32_t fromEnd) {
+    PropPlayer* p = playerOf(player);
+    return p && p->playSection(str(name), start, end, blend, speed, fromEnd != 0) ? 1 : 0;
+}
+int32_t aver_pplayer_play_section_markers(int32_t player, const char* name, const char* startMarker, const char* endMarker, double blend,
+                                          double speed, int32_t fromEnd) {
+    PropPlayer* p = playerOf(player);
+    return p && p->playSectionWithMarkers(str(name), str(startMarker), str(endMarker), blend, speed, fromEnd != 0) ? 1 : 0;
+}
+int32_t aver_pplayer_set_section(int32_t player, double start, double end) {
+    PropPlayer* p = playerOf(player);
+    return p && p->setSection(start, end) ? 1 : 0;
+}
+int32_t aver_pplayer_set_section_markers(int32_t player, const char* startMarker, const char* endMarker) {
+    PropPlayer* p = playerOf(player);
+    return p && p->setSectionWithMarkers(str(startMarker), str(endMarker)) ? 1 : 0;
+}
+int32_t aver_pplayer_reset_section(int32_t player) { PropPlayer* p = playerOf(player); if (!p) return 0; p->resetSection(); return 1; }
+int32_t aver_pplayer_has_section(int32_t player) { PropPlayer* p = playerOf(player); return p && p->hasSection() ? 1 : 0; }
+double aver_pplayer_section_start(int32_t player) { PropPlayer* p = playerOf(player); return p ? p->sectionStart() : 0.0; }
+double aver_pplayer_section_end(int32_t player) { PropPlayer* p = playerOf(player); return p ? p->sectionEnd() : 0.0; }
+
 } // extern "C"

@@ -15,6 +15,10 @@ aver_add_module(Aver.Anim.Scene
     # than in Aver.Anim because it needs a World to find the component on -- the SOLVERS it
     # calls are pure and live one tier down, in Aver.Anim, with no scene at all.
     src/ControlRig.cpp
+    # The script pose seam: per-entity bone overrides and reads of the finished pose (docs/ANIM_POSE_SEAM.md).
+    src/PoseSeam.cpp
+    # Pose-to-pose retarget on entities (CPoseFollow): an entity takes another entity's pose across a .ocretarget.
+    src/PoseFollow.cpp
     # Animation state machines on entities (CAnimGraph), driving poses through AnimSystem's pose source.
     src/AnimGraphSystem.cpp
     # Montages (slots, sections, blend in/out) and the provider the framework relays to.

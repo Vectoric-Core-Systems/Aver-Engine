@@ -47,6 +47,8 @@ constexpr u32 kChunkNTFD = avrFourCC("NTFD");
 constexpr u32 kChunkCTAN = avrFourCC("CTAN");
 // OPTIONAL: the property tracks (OcAnimation::propTracks). A clip without them writes no chunk.
 constexpr u32 kChunkPROP = avrFourCC("PROP");
+// OPTIONAL: named times (OcAnimation::markers). u32 count, then per marker u32 name (string table), f64 time, f32 rgba[4].
+constexpr u32 kChunkMRKR = avrFourCC("MRKR");
 
 // Sets `why` and returns false.
 bool fail(std::string* why, std::string m) { if (why) *why = std::move(m); return false; }
@@ -235,6 +237,11 @@ const OcSocket* OcSkeleton::socket(const std::string& name) const {
 
 const OcCurve* OcAnimation::curve(const std::string& name) const {
     for (const OcCurve& c : curves) if (c.name == name) return &c;
+    return nullptr;
+}
+
+const OcMarker* OcAnimation::marker(const std::string& name) const {
+    for (const OcMarker& m : markers) if (m.name == name) return &m;
     return nullptr;
 }
 
@@ -570,6 +577,22 @@ bool writeOcAnim(const OcAnimation& in, std::vector<u8>& out, std::string* why) 
         }
     }
 
+    // Markers: names unique, times finite. Nothing is written for a clip without any.
+    std::vector<u8> mrkr;
+    if (!in.markers.empty()) {
+        W w{mrkr};
+        w.u32v(static_cast<u32>(in.markers.size()));
+        for (usize i = 0; i < in.markers.size(); ++i) {
+            const OcMarker& m = in.markers[i];
+            if (!std::isfinite(m.time)) return fail(why, ".ocanim: marker '" + m.name + "' has a non-finite time");
+            for (usize j = 0; j < i; ++j)
+                if (in.markers[j].name == m.name) return fail(why, ".ocanim: two markers are named '" + m.name + "'");
+            w.u32v(strt.add(m.name));
+            w.f64v(m.time);
+            for (int k = 0; k < 4; ++k) w.f32v(m.color[k]);
+        }
+    }
+
     Avr1File f;
     f.subtype = kAvrSubtypeAnim;
     f.contentVersion = 1;
@@ -585,6 +608,7 @@ bool writeOcAnim(const OcAnimation& in, std::vector<u8>& out, std::string* why) 
         writeProp(prop, in);
         f.add(kChunkPROP, std::move(prop));
     }
+    if (!mrkr.empty()) f.add(kChunkMRKR, std::move(mrkr));
     // AFTER the notify names have been interned, or the table would be written without them.
     f.add(kChunkSTRT, strt.bytes());
     return writeAvr1(f, out, why);
@@ -725,6 +749,23 @@ bool parseOcAnim(const u8* bytes, usize size, OcAnimation& out, std::string* why
     if (const AvrChunk* prop = f.find(kChunkPROP)) {
         if (!readProp(prop->data, out, why)) return false;
         out.propClip = true;
+    }
+    out.markers.clear();
+    if (const AvrChunk* mrkr = f.find(kChunkMRKR)) {
+        R m{mrkr->data.data(), mrkr->data.data() + mrkr->data.size()};
+        const u32 count = m.u32v();
+        if (count > mrkr->data.size() / 28) return fail(why, ".ocanim: MRKR says it holds more markers than it can");
+        out.markers.reserve(count);
+        for (u32 i = 0; i < count; ++i) {
+            OcMarker mk;
+            mk.name = std::string(strt.get(m.u32v()));
+            mk.time = m.f64v();
+            for (int k = 0; k < 4; ++k) mk.color[k] = m.f32v();
+            if (!m.ok) return fail(why, ".ocanim: truncated MRKR chunk");
+            if (!std::isfinite(mk.time)) return fail(why, ".ocanim: a marker has a non-finite time");
+            if (out.marker(mk.name)) return fail(why, ".ocanim: two markers are named '" + mk.name + "'");
+            out.markers.push_back(std::move(mk));
+        }
     }
     if (!r.ok) return fail(why, ".ocanim: truncated AHDR");
     if (n == 0 && out.curves.empty() && !out.propClip) return fail(why, ".ocanim: TrackCount is 0");
