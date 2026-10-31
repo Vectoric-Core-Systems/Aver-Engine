@@ -2,7 +2,7 @@
 
 # Aver.Fabric public API
 
-667 public types and 7053 public members, read from `extensions/FabricConnector/managed/Aver.Fabric/` (119 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+668 public types and 7060 public members, read from `extensions/FabricConnector/managed/Aver.Fabric/` (119 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Fabric
 
@@ -3927,6 +3927,7 @@ Values: `TopTo = 0`, `CenterTo = 1`, `BaselineTo = 3`, `BottomTo = 2`, `ToTop = 
 - `public static Collections.Array<int> GetConnectedJoypads()` - The connected gamepads' device numbers.
 - `public static void StartJoyVibration(int device, float weakMagnitude, float strongMagnitude, float duration = 0f)`
 - `public static void StopJoyVibration(int device)`
+- `public static void VibrateHandheld(int durationMs = 500, float amplitude = -1f)` - Approximated: Aver has no handheld haptics, so this does nothing; the first call says so in the log.
 - `public static MouseModeEnum MouseMode { get; set; }` - Whether the pointer is shown, hidden or captured by the game window.
 - `public static void ParseInputEvent(InputEvent @event)` - Feeds an event to the game as if it had come from a device (Godot's parse_input_event): input and action state change, and the event goes down the tree to _Input and _UnhandledInput.
 
@@ -4354,6 +4355,7 @@ Values: `None = 0`, `CodeMask = 8388607`, `ModifierMask = 532676608`, `Shift = 3
 - `public float ShadowBias { get; set; }`
 - `public float ShadowNormalBias { get; set; }`
 - `public float ShadowBlur { get; set; }`
+- `public bool ShadowReverseCullFace { get; set; }` - Kept, not applied: Godot's switch to draw back faces into the shadow map (a bias fix for the OpenGL renderer); Aver's shadows have no such mode.
 - `public bool DistanceFadeEnabled { get; set; }`
 - `public float DistanceFadeBegin { get; set; }`
 - `public float DistanceFadeShadow { get; set; }`
@@ -6474,6 +6476,9 @@ Values: `Once = 0`, `Always = 1`
 - `public static string GetCurrentRenderingDriverName()` - The graphics API name in Godot's spelling ("vulkan", "d3d12" or "metal"); Aver picks by platform.
 - `public static void DirectionalSoftShadowFilterSetQuality(ShadowQuality quality)` - Kept as set.
 - `public static void PositionalSoftShadowFilterSetQuality(ShadowQuality quality)` - Kept as set.
+- `public static GodotObject Singleton { get; }` - The object that carries RenderingServer's signals (Godot's RenderingServer is an object; here it is a static class).
+- `public static event Action FramePreDraw` - Emitted at the end of a process frame, before the frame is drawn.
+- `public static event Action FramePostDraw` - Emitted after a frame was drawn.
 - `public static void GlobalShaderParameterAdd(StringName name, GlobalShaderParameterType type, Variant defaultValue)`
 - `public static void GlobalShaderParameterRemove(StringName name)`
 - `public static void GlobalShaderParameterSet(StringName name, Variant value)` - Sets a global shader parameter and rewrites it in every live ShaderMaterial that declares it.
@@ -6498,6 +6503,13 @@ Values: `Bool = 0`, `Bvec2 = 1`, `Bvec3 = 2`, `Bvec4 = 3`, `Int = 4`, `Ivec2 = 5
 `public enum ShadowQuality` - Godot's RenderingServer.ShadowQuality (SHADOW_QUALITY_*).
 
 Values: `Hard = 0`, `SoftVeryLow = 1`, `SoftLow = 2`, `SoftMedium = 3`, `SoftHigh = 4`, `SoftUltra = 5`, `Max = 6`
+
+### RenderingServer.SignalName
+
+`public static class SignalName` - The names of RenderingServer's signals.
+
+- `public static readonly StringName FramePreDraw`
+- `public static readonly StringName FramePostDraw`
 
 ### Resource
 

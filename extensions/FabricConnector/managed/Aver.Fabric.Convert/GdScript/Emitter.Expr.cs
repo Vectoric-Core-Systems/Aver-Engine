@@ -355,6 +355,7 @@ internal sealed partial class GdEmitter
                     { Signal = new SignalRef { Owner = tcode, NameCode = sym.ToDisplayString(s_nameFormat) + ".SignalName." + sig, OwnerType = tt } };
                 // A Godot snake_case accessor the C# API names as a property is handled by the call path; a plain miss on an
                 // untyped (weak) receiver is a dynamic property read.
+                if (SubtypeWith(tt, name, false) is { } sub) return MemberOf(AsScriptType(target, sub), name, at, expected);
                 if (tt.Weak || tt.FromScene || sym == null || sym.Name is "Node" or "GodotObject") return DynamicMember(target, name, at);
                 Note(at, "member", name, Rating.Unsupported, $"Aver.Fabric has no member '{name}' on {tt.Cs}");
                 return new Ex(tcode + "." + Naming.Pascal(name), GdType.Variant);
@@ -425,7 +426,14 @@ internal sealed partial class GdEmitter
                 if (c != null) return new Ex("Colors." + c.CsName, GdType.Obj(sym)) { Api = c };
             }
             if (Api.IsSignal(sym, name, out string sig))
-                return new Ex($"{sym.ToDisplayString(s_nameFormat)}.SignalName.{sig}", GdType.StringName);
+            {
+                string cls = sym.ToDisplayString(s_nameFormat);
+                // A singleton that is a static class (RenderingServer) owns its signals through its Singleton object: the name is the signal itself.
+                if (sym.IsStatic && Api.Lookup(sym, "singleton") != null)
+                    return new Ex($"new Signal({cls}.Singleton, {cls}.SignalName.{sig})", GdType.Signal)
+                    { Signal = new SignalRef { Owner = cls + ".Singleton", NameCode = cls + ".SignalName." + sig, OwnerType = tt } };
+                return new Ex($"{cls}.SignalName.{sig}", GdType.StringName);
+            }
         }
         Note(at, "member", name, Rating.Unsupported, $"Aver.Fabric has no member '{name}' on {tt.Cs}");
         return new Ex(target.Code + "." + Naming.Pascal(name), GdType.Variant);

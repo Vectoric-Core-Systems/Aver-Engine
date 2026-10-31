@@ -26,6 +26,52 @@ public static partial class RenderingServer
     /// <summary>Kept as set. A local light's filter width follows its light_size.</summary>
     public static void PositionalSoftShadowFilterSetQuality(ShadowQuality quality) => s_positionalFilter = quality;
 
+    /// <summary>The names of RenderingServer's signals.</summary>
+    public static class SignalName
+    {
+        public static readonly StringName FramePreDraw = "frame_pre_draw";
+        public static readonly StringName FramePostDraw = "frame_post_draw";
+    }
+
+    private static Signals? s_signals;
+    private static long s_drawMark = -1;
+
+    /// <summary>The object that carries RenderingServer's signals (Godot's RenderingServer is an object; here it is a static class).</summary>
+    public static GodotObject Singleton => s_signals ??= new Signals();
+
+    private sealed class Signals : RefCounted
+    {
+        public new class SignalName : GodotObject.SignalName
+        {
+            public static readonly StringName FramePreDraw = "frame_pre_draw";
+            public static readonly StringName FramePostDraw = "frame_post_draw";
+        }
+    }
+
+    /// <summary>Emitted at the end of a process frame, before the frame is drawn.</summary>
+    public static event Action FramePreDraw { add => Singleton.Connect(SignalName.FramePreDraw, Callable.From(value)); remove => Singleton.Disconnect(SignalName.FramePreDraw, Callable.From(value)); }
+
+    /// <summary>Emitted after a frame was drawn. Aver draws after the engine's update, so it comes at the head of the next process frame; a
+    /// connection made since the last frame ended waits for the frame after that, so a script that changes the screen and awaits this sees it drawn.</summary>
+    public static event Action FramePostDraw { add => Singleton.Connect(SignalName.FramePostDraw, Callable.From(value)); remove => Singleton.Disconnect(SignalName.FramePostDraw, Callable.From(value)); }
+
+    // The tail of a process frame (SceneTree.EndPass): the draw follows. The mark is what a post-draw signal may reach.
+    internal static void FrameEnding()
+    {
+        if (s_signals == null) return;
+        s_signals.EmitSignal(SignalName.FramePreDraw);
+        s_drawMark = GodotObject.ConnectionSerial;
+    }
+
+    // The head of a process frame: the frame before it was drawn.
+    internal static void FrameStarting()
+    {
+        if (s_signals == null || s_drawMark < 0) return;
+        long mark = s_drawMark;
+        s_drawMark = -1;
+        s_signals.EmitSignalThrough(SignalName.FramePostDraw, mark, System.Array.Empty<Variant>());
+    }
+
     /// <summary>The value last given to <see cref="DirectionalSoftShadowFilterSetQuality"/> (Godot has no getter; tests and tools read it).</summary>
     internal static ShadowQuality DirectionalSoftShadowFilter => s_directionalFilter;
     internal static ShadowQuality PositionalSoftShadowFilter => s_positionalFilter;

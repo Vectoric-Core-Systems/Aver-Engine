@@ -420,6 +420,7 @@ internal sealed partial class GdEmitter
                 }
                 Ex? acc = ApiAccessorCall(sym, rc, name, c.Args, c);
                 if (acc != null) return acc;
+                if (SubtypeWith(tt, name, true) is { } sub && sub.Find(name) is { } subFunc) return CallScript(subFunc, Wrap(AsScriptType(t, sub), P.Primary), c.Args);
                 if (tt.Weak || tt.FromScene || sym == null || sym.Name is "Node" or "GodotObject") return DynamicCall(t, name, c);
                 // A member the runtime lacks: keep the name, let the compiler say so.
                 string args = string.Join(", ", c.Args.Select(a => VariantFromTyped(Expr(a, null))));
@@ -454,6 +455,12 @@ internal sealed partial class GdEmitter
                 return new Ex("new[] { " + string.Join(", ", tt.EnumDef.Values.Keys.Select(Naming.Quote)) + " }", GdType.PackedOf(GdType.String, "string[]"));
             if (name == "values")
                 return new Ex($"Enum.GetValues<{tt.Cs}>().Select(v => (long)v).ToArray()", GdType.PackedOf(GdType.Int, "long[]"));
+        }
+        // The number of names, which duplicate values do not change (the C# enum has one member per name).
+        if (tt.Kind == GK.Enum && tt.EnumDef != null && c.Args.Count == 0 && name == "size")
+        {
+            long n = tt.EnumDef.Values.Count;
+            return new Ex(n.ToString(System.Globalization.CultureInfo.InvariantCulture), GdType.Int) { Const = n, IsConstExpr = true };
         }
         if (tt.Kind == GK.ScriptClass)
         {

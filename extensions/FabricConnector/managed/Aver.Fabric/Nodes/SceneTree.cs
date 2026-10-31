@@ -547,7 +547,7 @@ public partial class SceneTree : GodotObject
     // Head of a pass: the frame signal. Runs before any node's _Process / _PhysicsProcess.
     internal void BeginPass(double dt, bool physics, double? realDelta = null)
     {
-        if (!physics) LastRealDelta = realDelta ?? RealDelta();
+        if (!physics) { LastRealDelta = realDelta ?? RealDelta(); RenderingServer.FrameStarting(); }
         PollMultiplayers(dt, physics);   // G6 NET2: Godot polls its multiplayer APIs at the head of the process frame, before the frame signal
         EmitSignal(physics ? SignalName.PhysicsFrame : SignalName.ProcessFrame);
     }
@@ -573,7 +573,11 @@ public partial class SceneTree : GodotObject
         }
         // Like Godot's physics_frames, the count of steps that have finished: a press made between steps is "just pressed" in the next one.
         if (physics) _managedPhysicsFrames++;
-        else Gui.FrameUpdate(dt);   // G5 U1: layout, tooltips and Control drawing at the end of the idle frame
+        else
+        {
+            Gui.FrameUpdate(dt);   // G5 U1: layout, tooltips and Control drawing at the end of the idle frame
+            RenderingServer.FrameEnding();
+        }
     }
 
     // Seconds of real time since the last call (the driver's clock for ignore_time_scale timers and tweens).

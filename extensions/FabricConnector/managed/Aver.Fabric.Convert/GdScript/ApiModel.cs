@@ -232,16 +232,24 @@ internal sealed class ApiModel
         return enumType != null;
     }
 
+    // Enums whose GDScript constants do not start with the enum's name (Tween.TRANS_SINE is TransitionType.Sine).
+    private static readonly Dictionary<string, string> s_constPrefix = new(StringComparer.Ordinal)
+    {
+        ["TransitionType"] = "Trans", ["EaseType"] = "Ease", ["TweenProcessMode"] = "TweenProcess", ["TweenPauseMode"] = "TweenPause",
+    };
+
     private static bool MatchEnum(INamedTypeSymbol e, string pascal, out string member, bool stripPrefix = true)
     {
         member = "";
         string prefix = e.Name.EndsWith("Enum", StringComparison.Ordinal) ? e.Name[..^4] : e.Name;
-        if (stripPrefix && pascal.StartsWith(prefix, StringComparison.Ordinal) && pascal.Length > prefix.Length)
-        {
-            string rest = pascal[prefix.Length..];
-            IFieldSymbol? f = e.GetMembers().OfType<IFieldSymbol>().FirstOrDefault(x => x.Name == rest);
-            if (f != null) { member = f.Name; return true; }
-        }
+        if (stripPrefix)
+            foreach (string p in s_constPrefix.TryGetValue(prefix, out string? alt) ? new[] { prefix, alt } : new[] { prefix })
+            {
+                if (!pascal.StartsWith(p, StringComparison.Ordinal) || pascal.Length <= p.Length) continue;
+                string rest = pascal[p.Length..];
+                IFieldSymbol? f = e.GetMembers().OfType<IFieldSymbol>().FirstOrDefault(x => x.Name == rest);
+                if (f != null) { member = f.Name; return true; }
+            }
         IFieldSymbol? exact = e.GetMembers().OfType<IFieldSymbol>().FirstOrDefault(x => x.Name == pascal && x.HasConstantValue);
         if (exact != null && !stripPrefix) { member = exact.Name; return true; }
         return false;

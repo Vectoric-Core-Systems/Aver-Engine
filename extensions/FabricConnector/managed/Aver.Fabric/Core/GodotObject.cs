@@ -285,7 +285,13 @@ public abstract partial class GodotObject : AverActor, IDisposable
         public Callable Callable;
         public uint Flags;
         public int RefCount = 1;
+        public long Serial = ++s_connectionSerial;
     }
+
+    private static long s_connectionSerial;
+
+    /// <summary>The serial of the newest connection of any object: a later <see cref="EmitSignalThrough"/> reaches the connections made up to now.</summary>
+    internal static long ConnectionSerial => s_connectionSerial;
 
     private Dictionary<string, List<Connection>>? _conns;
     private HashSet<string>? _userSignals;
@@ -400,7 +406,10 @@ public abstract partial class GodotObject : AverActor, IDisposable
 
     /// <summary>Emits a signal: every connected callable runs in connection order, a Deferred one when the tick pass ends.
     /// A handler that throws is logged and the rest still run. Connections to freed objects are dropped.</summary>
-    public Error EmitSignal(StringName signal, params Variant[] args)
+    public Error EmitSignal(StringName signal, params Variant[] args) => EmitSignalThrough(signal, long.MaxValue, args);
+
+    /// <summary>Like <see cref="EmitSignal"/>, but only to the connections whose serial is at most <paramref name="serial"/>: the ones made before a mark.</summary>
+    internal Error EmitSignalThrough(StringName signal, long serial, Variant[] args)
     {
         if (_freed) return Error.Unavailable;
         if (_blockSignals) return Error.Ok;
@@ -414,7 +423,7 @@ public abstract partial class GodotObject : AverActor, IDisposable
         args ??= System.Array.Empty<Variant>();
         foreach (Connection c in list.ToArray())
         {
-            if (!list.Contains(c)) continue;                    // disconnected by an earlier handler
+            if (!list.Contains(c) || c.Serial > serial) continue;   // disconnected by an earlier handler, or made after the mark
             if (!c.Callable.IsValid()) { list.Remove(c); continue; }
             if ((c.Flags & (uint)ConnectFlags.OneShot) != 0) list.Remove(c);
             Callable cb = c.Callable;

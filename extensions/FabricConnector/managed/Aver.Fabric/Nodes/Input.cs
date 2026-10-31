@@ -379,6 +379,16 @@ public static class Input
 
     public static void StopJoyVibration(int device) { }
 
+    private static bool s_vibrateLogged;
+
+    /// <summary>Approximated: Aver has no handheld haptics, so this does nothing; the first call says so in the log.</summary>
+    public static void VibrateHandheld(int durationMs = 500, float amplitude = -1f)
+    {
+        if (s_vibrateLogged) return;
+        s_vibrateLogged = true;
+        Aver.Scripting.Log.Info("[Fabric] Input.VibrateHandheld: this device has no handheld vibration; the call does nothing");
+    }
+
     /// <summary>Whether the pointer is shown, hidden or captured by the game window. The engine shows or hides it through the cursor request.</summary>
     public static MouseModeEnum MouseMode
     {

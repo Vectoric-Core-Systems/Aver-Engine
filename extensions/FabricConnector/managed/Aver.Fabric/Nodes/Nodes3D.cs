@@ -241,6 +241,8 @@ public class Light3D : VisualInstance3D
     public float ShadowBias { get => _bias; set { _bias = value; ApplyLight(); } }
     public float ShadowNormalBias { get => _normalBias; set { _normalBias = value; ApplyLight(); } }
     public float ShadowBlur { get; set; } = 1f;
+    /// <summary>Kept, not applied: Godot's switch to draw back faces into the shadow map (a bias fix for the OpenGL renderer); Aver's shadows have no such mode.</summary>
+    public bool ShadowReverseCullFace { get; set; }
     public bool DistanceFadeEnabled { get => _fade; set { _fade = value; ApplyLight(); } }
     public float DistanceFadeBegin { get => _fadeBegin; set { _fadeBegin = value; ApplyLight(); } }
     public float DistanceFadeShadow { get => _fadeShadow; set { _fadeShadow = value; ApplyLight(); } }

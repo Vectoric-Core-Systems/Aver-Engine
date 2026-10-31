@@ -26,6 +26,12 @@ static class Program
             Console.WriteLine(failures == 0 ? $"\nAll tests passed ({T.Checks} checks)." : $"\n{failures} check(s) failed.");
             return failures;
         }
+        if (args.Length == 1 && args[0] == "script-subtype") // only the derived-script member / API gap suite
+        {
+            failures = ScriptSubtypeTests.RunAll();
+            Console.WriteLine(failures == 0 ? $"\nAll tests passed ({T.Checks} checks)." : $"\n{failures} check(s) failed.");
+            return failures;
+        }
         if (args.Length == 1 && args[0] == "animation") // only the G5 A1 suite
         {
             failures = AnimationTests.RunAll();
@@ -112,6 +118,7 @@ static class Program
         failures += GdScriptParserTests.RunAll(); // F4a: the GDScript tokenizer and parser (typed AST, error recovery)
         failures += GdScriptConvertTests.RunAll(); // F4b: GDScript converted to C#, compiled against this runtime, run against GDScript's results
         failures += ScriptTypingTests.RunAll(); // scripts package: typed $Path / get_node / %Unique / instantiate, built-in constructors, the runtime classes two demos needed
+        failures += ScriptSubtypeTests.RunAll(); // members of a derived script through a declared base, enum size, Tween constants, frame_post_draw
         failures += GdextTests.RunAll();     // F5: the GDExtension host from C# (wire form always; the native host and test plugin when built)
 
         Console.WriteLine(failures == 0 ? $"\nAll tests passed ({T.Checks} checks)." : $"\n{failures} check(s) failed.");

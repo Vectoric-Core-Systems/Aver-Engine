@@ -145,6 +145,32 @@ internal sealed partial class GdEmitter
         return result != null;
     }
 
+    // ---- a member only a script of the project has ----
+    // `var town: Node3D` can still say `town.mood` in GDScript: the member is looked up on the object at run time, and the object is the scene whose root
+    // has the script. When one script of the project (or one chain of them, the member's topmost owner) derived from the declared class has the
+    // member, that script is the type the access goes through.
+
+    private ScriptInfo? SubtypeWith(GdType tt, string name, bool funcOnly)
+    {
+        if (tt.Kind != GK.Object || tt.Weak || tt.FromScene || tt.IsClassRef || tt.Sym == null || tt.Sym.Name is "Node" or "GodotObject") return null;
+        ScriptInfo? best = null;
+        foreach (ScriptInfo s in _m.Scripts)
+        {
+            if (s.ApiRoot is not { } root || !GdType.Derives(root, tt.Sym)) continue;
+            if (s.Find(name) is not { } mi || (funcOnly && mi.Kind != MK.Func)) continue;
+            ScriptInfo owner = mi.Owner;
+            if (best == null || best.DerivesFromScript(owner)) best = owner;
+            else if (!owner.DerivesFromScript(best)) return null;
+        }
+        return best;
+    }
+
+    private Ex AsScriptType(Ex target, ScriptInfo s)
+    {
+        GdType t = GdType.OfScript(s);
+        return new Ex($"(({t.Cs}){Wrap(target, P.Primary)})", t) { UsesInstance = target.UsesInstance };
+    }
+
     // ---- parameter types from the call sites ----
     // An untyped parameter is a Variant, and a member read on it (player_position.x) is a read by name. When the project calls the function with one
     // math type (a Vector3 every time), the parameter is that type: GDScript would fail on any other the first time the body used it as one.
