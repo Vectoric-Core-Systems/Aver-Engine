@@ -1122,6 +1122,12 @@ std::vector<std::string> hintPaths(const std::string& xml) {
     return out;
 }
 
+// An MSBuild path value resolved against the Scripts folder. MSBuild accepts '\' on every platform; std::filesystem only on Windows.
+std::filesystem::path resolveMsbuildPath(const std::string& scriptsDir, std::string value) {
+    std::replace(value.begin(), value.end(), '\\', '/');
+    return (std::filesystem::path(scriptsDir) / value).lexically_normal();
+}
+
 std::string fileStem(const std::string& path) {
     std::string s = path;
     std::replace(s.begin(), s.end(), '\\', '/');
@@ -1274,9 +1280,7 @@ ProjectUpgrade inspectProject(const fmt::ProjectDesc& proj, const std::vector<Ex
     for (const std::string& ref : projectReferences(xml)) {
         std::error_code ec;
         // Normalised before the test: an unresolved `..` run can exceed MAX_PATH and report absent.
-        const std::filesystem::path abs =
-            (std::filesystem::path(scriptsDir) / ref).lexically_normal();
-        if (std::filesystem::exists(abs, ec)) continue;
+        if (std::filesystem::exists(resolveMsbuildPath(scriptsDir, ref), ec)) continue;
         // A project written when an extension's assembly was built from a C# project in the engine tree: it now references the
         // extension's installed assembly instead.
         if (const ExtensionAssembly* a = findAssembly(installed, fileStem(ref))) {
@@ -1305,7 +1309,7 @@ ProjectUpgrade inspectProject(const fmt::ProjectDesc& proj, const std::vector<Ex
         if (!a) continue;
         noteUsed(a);
         std::error_code ec;
-        if (std::filesystem::exists((std::filesystem::path(scriptsDir) / hint).lexically_normal(), ec)) continue;
+        if (std::filesystem::exists(resolveMsbuildPath(scriptsDir, hint), ec)) continue;
         up.fixes.push_back({ProjectFix::Kind::RepointReference,
                             "Repoint " + a->assembly + " to the installed " + a->extension + " extension",
                             hint + "  ->  " + msbuildRelative(scriptsDir, a->path)});

@@ -705,7 +705,7 @@ static void testRealTime() {
         check(g_allocs.load() == 0, std::to_string(n) + " channels: 300 blocks of moving voices, LFE changes, reverb and occlusion allocate " + std::to_string(g_allocs.load()) + " times in mix()");
     }
     g_allocs = 0; g_counting = true;
-    { auto* p = new int(3); delete p; }
+    { int* volatile p = new int(3); delete p; }   // volatile: GCC and Clang may elide an unused new/delete pair
     g_counting = false;
     check(g_allocs.load() >= 1, "the counting hook sees an ordinary allocation (control)");
 }
