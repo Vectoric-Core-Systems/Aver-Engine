@@ -57,3 +57,8 @@ set_target_properties(SpeechTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BIN
 add_executable(CharConvTest src/CharConvTest.cpp)
 target_link_libraries(CharConvTest PRIVATE Aver.Core)
 set_target_properties(CharConvTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# FrameCapTest -- the frame rate cap's arithmetic (aver/core/Time.hpp frameCapWaitSeconds), with no clock.
+add_executable(FrameCapTest src/FrameCapTest.cpp)
+target_link_libraries(FrameCapTest PRIVATE Aver.Core)
+set_target_properties(FrameCapTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

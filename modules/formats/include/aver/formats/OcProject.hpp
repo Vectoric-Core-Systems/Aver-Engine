@@ -201,9 +201,11 @@ struct ProjectDesc {
     int windowHeight    = -1;
     int windowResizable = -1;       // WINDOW.RESIZABLE 0/1
     int windowFullscreen = -1;      // WINDOW.FULLSCREEN 0/1  borderless-fullscreen intent
+    int windowVsync = -1;           // WINDOW.VSYNC 0 off, 1 on, 2 adaptive, 3 mailbox (the shipped game's present mode; -1 keeps the default, on)
+    int windowMaxFps = -1;          // WINDOW.MAXFPS frames per second the shipped game's loop is capped to; 0 or -1 is no cap
     bool hasWindowSettings() const {
         return !windowTitle.empty() || windowWidth > 0 || windowHeight > 0 ||
-               windowResizable >= 0 || windowFullscreen >= 0;
+               windowResizable >= 0 || windowFullscreen >= 0 || windowVsync >= 0 || windowMaxFps >= 0;
     }
 
     // ---- IMPORT.* -- importer defaults (not actively used yet) --------------------------------

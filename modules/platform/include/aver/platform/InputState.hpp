@@ -31,7 +31,8 @@ namespace aver {
 class InputState {
 public:
     static constexpr usize kKeyCount = 256;   // Win32 virtual key codes are 0..255
-    static constexpr usize kMouseButtons = 3; // 0=L, 1=R, 2=M
+    static constexpr usize kMouseButtons = 5; // 0=L, 1=R, 2=M, 3=X1, 4=X2
+    static constexpr usize kTouchCount = 10;  // fingers tracked, by the index the window layer gives them
 
     // Feed one event. Safe to call with any event type; irrelevant ones are ignored.
     void onEvent(const Event& e);
@@ -65,13 +66,26 @@ public:
     i32 mouseDY() const { return mouseDY_; }
     // Wheel notches accumulated this frame; one detent is 1.0.
     f32 wheel() const { return wheel_; }
+    // The horizontal notches accumulated this frame, positive = right.
+    f32 wheelX() const { return wheelX_; }
 
     // True once any mouse position has been seen. Until then the position is meaningless.
     bool hasMouse() const { return hasMouse_; }
 
+    // --- touch: real fingers from the window layer (EventType::Touch), by finger index ---
+    bool touchHeld(i32 f) const { return inTouch(f) && tHeld_[static_cast<usize>(f)]; }
+    bool touchPressed(i32 f) const { return inTouch(f) && tPressed_[static_cast<usize>(f)]; }
+    bool touchReleased(i32 f) const { return inTouch(f) && tReleased_[static_cast<usize>(f)]; }
+    f32 touchX(i32 f) const { return inTouch(f) ? tX_[static_cast<usize>(f)] : 0.0f; }
+    f32 touchY(i32 f) const { return inTouch(f) ? tY_[static_cast<usize>(f)] : 0.0f; }
+    f32 touchPressure(i32 f) const { return inTouch(f) ? tPressure_[static_cast<usize>(f)] : 0.0f; }
+    // True once any finger event has arrived: this machine has a touch screen.
+    bool touchSeen() const { return touchSeen_; }
+
 private:
     static bool inRange(i32 vk)  { return vk >= 0 && vk < static_cast<i32>(kKeyCount); }
     static bool inButton(i32 b)  { return b >= 0 && b < static_cast<i32>(kMouseButtons); }
+    static bool inTouch(i32 f)   { return f >= 0 && f < static_cast<i32>(kTouchCount); }
 
     std::array<bool, kKeyCount> held_{};
     std::array<bool, kKeyCount> pressed_{};
@@ -84,7 +98,14 @@ private:
     i32 mouseX_ = 0, mouseY_ = 0;
     i32 mouseDX_ = 0, mouseDY_ = 0;
     f32 wheel_ = 0.0f;
+    f32 wheelX_ = 0.0f;
     bool hasMouse_ = false;
+
+    std::array<bool, kTouchCount> tHeld_{};
+    std::array<bool, kTouchCount> tPressed_{};
+    std::array<bool, kTouchCount> tReleased_{};
+    std::array<f32, kTouchCount> tX_{}, tY_{}, tPressure_{};
+    bool touchSeen_ = false;
 };
 
 } // namespace aver

@@ -82,6 +82,21 @@ void refreshSlots(u64 now) {
 
 } // namespace
 
+const char* gamepadName(u32 pad) {
+    if (pad >= kMaxGamepads || !g_slots[pad]) return "";
+    const char* n = SDL_GetGamepadName(g_slots[pad]);
+    return n ? n : "";
+}
+
+void rumbleGamepad(u32 pad, f32 weak, f32 strong, f32 seconds) {
+    if (pad >= kMaxGamepads || !g_slots[pad]) return;
+    const auto motor = [](f32 v) { return static_cast<Uint16>(std::min(std::max(v, 0.0f), 1.0f) * 65535.0f + 0.5f); };
+    // SDL's low-frequency motor is the strong one, its high-frequency motor the weak one. A duration of 0 would stop
+    // the effect at once, so "until stopped" is the longest SDL takes.
+    const Uint32 ms = seconds > 0.0f ? static_cast<Uint32>(seconds * 1000.0f) + 1u : 0xFFFFFFFFu;
+    SDL_RumbleGamepad(g_slots[pad], motor(strong), motor(weak), (weak > 0.0f || strong > 0.0f) ? ms : 0u);
+}
+
 void pollGamepads(GamepadState* out, u32 count) {
     for (u32 i = 0; i < count; ++i) out[i] = GamepadState{};
     if (!gamepadsUp()) return;
@@ -109,6 +124,13 @@ void pollGamepads(GamepadState* out, u32 count) {
         s.buttons[11] = btn(SDL_GAMEPAD_BUTTON_EAST);    // B
         s.buttons[12] = btn(SDL_GAMEPAD_BUTTON_WEST);    // X
         s.buttons[13] = btn(SDL_GAMEPAD_BUTTON_NORTH);   // Y
+        s.buttons[14] = btn(SDL_GAMEPAD_BUTTON_GUIDE);
+        s.buttons[15] = btn(SDL_GAMEPAD_BUTTON_MISC1);
+        s.buttons[16] = btn(SDL_GAMEPAD_BUTTON_RIGHT_PADDLE1);   // the order Godot numbers its paddles in
+        s.buttons[17] = btn(SDL_GAMEPAD_BUTTON_LEFT_PADDLE1);
+        s.buttons[18] = btn(SDL_GAMEPAD_BUTTON_RIGHT_PADDLE2);
+        s.buttons[19] = btn(SDL_GAMEPAD_BUTTON_LEFT_PADDLE2);
+        s.buttons[20] = btn(SDL_GAMEPAD_BUTTON_TOUCHPAD);
         auto axis = [g](SDL_GamepadAxis a) { return static_cast<f32>(SDL_GetGamepadAxis(g, a)); };
         shapeStick(axis(SDL_GAMEPAD_AXIS_LEFTX), -axis(SDL_GAMEPAD_AXIS_LEFTY), kLeftStickDeadzone, s.axes[0], s.axes[1]);
         shapeStick(axis(SDL_GAMEPAD_AXIS_RIGHTX), -axis(SDL_GAMEPAD_AXIS_RIGHTY), kRightStickDeadzone, s.axes[2], s.axes[3]);

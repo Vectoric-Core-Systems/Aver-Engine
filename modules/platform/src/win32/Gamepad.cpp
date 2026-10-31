@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 
 namespace aver {
 namespace {
@@ -53,7 +54,28 @@ bool g_wasConnected[kMaxGamepads] = {};
 u64  g_lastEmptyProbeMs[kMaxGamepads] = {};
 constexpr u64 kReprobeIntervalMs = 1000;   // about once a second, per this module's own header comment
 
+// A timed rumble: the tick it ends at (0 = none timed), checked each poll of a connected slot.
+u64 g_rumbleEndMs[kMaxGamepads] = {};
+char g_names[kMaxGamepads][24] = {};
+
+void setVibration(u32 pad, f32 weak, f32 strong) {
+    const auto motor = [](f32 v) { return static_cast<WORD>(std::min(std::max(v, 0.0f), 1.0f) * 65535.0f + 0.5f); };
+    XINPUT_VIBRATION vib{};
+    vib.wLeftMotorSpeed = motor(strong);    // XInput's left motor is the large, low-frequency one
+    vib.wRightMotorSpeed = motor(weak);
+    XInputSetState(static_cast<DWORD>(pad), &vib);
+}
+
 } // namespace
+
+const char* gamepadName(u32 pad) { return pad < kMaxGamepads ? g_names[pad] : ""; }
+
+void rumbleGamepad(u32 pad, f32 weak, f32 strong, f32 seconds) {
+    if (pad >= kMaxGamepads || !g_wasConnected[pad]) return;
+    setVibration(pad, weak, strong);
+    g_rumbleEndMs[pad] = (seconds > 0.0f && (weak > 0.0f || strong > 0.0f))
+                             ? GetTickCount64() + static_cast<u64>(seconds * 1000.0f) + 1 : 0;
+}
 
 void pollGamepads(GamepadState* out, u32 count) {
     const u64 now = GetTickCount64();
@@ -78,10 +100,14 @@ void pollGamepads(GamepadState* out, u32 count) {
         if (result != ERROR_SUCCESS) {
             g_wasConnected[i] = false;
             g_lastEmptyProbeMs[i] = now;
+            g_rumbleEndMs[i] = 0;
+            g_names[i][0] = '\0';
             continue;   // `s` stays disconnected/zeroed -- never read a field of `state` here
         }
         g_wasConnected[i] = true;
         g_lastEmptyProbeMs[i] = 0;
+        if (g_names[i][0] == '\0') std::snprintf(g_names[i], sizeof g_names[i], "XInput Gamepad %u", i + 1);
+        if (g_rumbleEndMs[i] != 0 && now >= g_rumbleEndMs[i]) { setVibration(i, 0.0f, 0.0f); g_rumbleEndMs[i] = 0; }
 
         s.connected = true;
         const XINPUT_GAMEPAD& pad = state.Gamepad;

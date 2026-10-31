@@ -67,6 +67,8 @@ aver_add_module(Aver.Runtime.Game.Core
     # [wave3/level-instances end]
     src/GameWater.cpp
     src/MouseCapture.cpp
+    # A script's pointer, cursor, window and present-mode requests, applied by the shipped game once a frame.
+    src/GameDisplay.cpp
     src/PlayMobility.cpp
     src/LevelSequence.cpp
     # [wave5/sequencer begin] the track appliers, base store and sub-sequence library; the director over many sequences.

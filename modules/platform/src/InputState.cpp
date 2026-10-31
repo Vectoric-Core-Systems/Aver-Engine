@@ -7,9 +7,12 @@ void InputState::newFrame() {
     released_.fill(false);
     mPressed_.fill(false);
     mReleased_.fill(false);
+    tPressed_.fill(false);
+    tReleased_.fill(false);
     mouseDX_ = 0;
     mouseDY_ = 0;
     wheel_   = 0.0f;
+    wheelX_  = 0.0f;
 }
 
 void InputState::clear() {
@@ -19,9 +22,13 @@ void InputState::clear() {
     mHeld_.fill(false);
     mPressed_.fill(false);
     mReleased_.fill(false);
+    tHeld_.fill(false);
+    tPressed_.fill(false);
+    tReleased_.fill(false);
     mouseDX_ = 0;
     mouseDY_ = 0;
     wheel_   = 0.0f;
+    wheelX_  = 0.0f;
     // mouseX_/mouseY_ and hasMouse_ survive deliberately: the cursor is still wherever it is, and
     // forgetting that would manufacture a large bogus delta on the next move after refocus.
 }
@@ -71,7 +78,24 @@ void InputState::onEvent(const Event& e) {
         }
         case EventType::MouseWheel:
             wheel_ += e.wheel;
+            wheelX_ += e.wheelX;
             return;
+        case EventType::Touch: {
+            if (!inTouch(e.finger)) return;
+            const usize f = static_cast<usize>(e.finger);
+            touchSeen_ = true;
+            if (e.pressed) {
+                if (!tHeld_[f]) tPressed_[f] = true;
+                tHeld_[f] = true;
+                tX_[f] = static_cast<f32>(e.mouseX);
+                tY_[f] = static_cast<f32>(e.mouseY);
+                tPressure_[f] = e.pressure;
+            } else {
+                if (tHeld_[f]) tReleased_[f] = true;
+                tHeld_[f] = false;
+            }
+            return;
+        }
         case EventType::FocusLost:
             clear();
             return;

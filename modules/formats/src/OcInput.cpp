@@ -4,7 +4,8 @@
 // THE GRAMMAR, IN FULL (one record per line; `#` starts a comment; one trailing `;` tolerated,
 // matching every other OC-dialect text format in this tree -- see TextScan.hpp):
 //
-//   OCINPUT 1                                     -- header, required, exactly once, version 1
+//   OCINPUT 1|2                                   -- header, required, exactly once. 2 is written only by a file that
+//                                                    uses the clamp modifier (added after version 1); both are read
 //   NAME <text to end of line>                    -- optional authoring label
 //   ACTION <name> digital|axis1|axis2 [trigger <spec>]... [modifier <spec>]...
 //                                                 -- declares one action; OcInputValueType
@@ -31,10 +32,14 @@
 //             | chord:ActionName | combo:window:Action,Action[,Action...]
 //   modifier := deadzone[:lo[:hi]][:radial|:axial] | scale:x[:y[:z]] | negate[:xyz-subset]
 //             | swizzle:(xyz|yxz|zyx|xzy|yzx|zxy) | smooth:tau | curve:ex[:ey[:ez]]
+//             | clamp[:lo[:hi]]
+//
+// `clamp` limits every channel to lo..hi (defaults 0 and 1): with a `scale -1` on the binding it makes
+// one half of a signed axis, the negative half of a stick that reads nothing when pushed the other way.
 //
 // Defaults: act 0.15, tap max 0.2, deadzone lo 0.2 hi 1 radial; a scale/curve given only x is
 // uniform, given x and y it takes z = 1. Validation (file rejected): sec/max >= 0, window > 0,
-// interval > 0, act >= 0, limit an integer >= 0, 0 <= lo < hi, tau >= 0, exponents > 0, a combo needs
+// interval > 0, act >= 0, limit an integer >= 0, 0 <= lo < hi, clamp lo < hi, tau >= 0, exponents > 0, a combo needs
 // >= 2 steps, chord/combo names must be declared ACTIONs and a chord may not name its own action. The
 // writer emits canonical text (formatTriggerSpec/formatModifierSpec), `trigger`s then `modifier`s
 // after scale/component, so a file with none of the new keywords is written exactly as before.
@@ -409,6 +414,12 @@ bool parseModifierSpec(std::string_view spec, OcModifierSpec& out, std::string* 
         if (a.nums.empty()) return specFail(err, "smooth needs a time constant: smooth:tau");
         if (a.nums[0] < 0.0f) return specFail(err, "smooth tau must be >= 0 in '" + sp + "'");
         m.v[0] = a.nums[0];
+    } else if (kind == "clamp") {
+        m.kind = OcModifierKind::Clamp;
+        if (!scanArgs(f, sp, {}, 2, a, err)) return false;
+        m.v[0] = num(0, 0.0f);
+        m.v[1] = num(1, 1.0f);
+        if (m.v[0] >= m.v[1]) return specFail(err, "clamp needs lower < upper in '" + sp + "'");
     } else {
         return specFail(err, "unknown modifier kind '" + std::string(f[0]) + "'");
     }
@@ -468,6 +479,10 @@ std::string formatModifierSpec(const OcModifierSpec& m) {
         case OcModifierKind::Swizzle:
             return std::string("swizzle:") + kSwizzleWords[m.mode >= 0 && m.mode < 6 ? m.mode : 0];
         case OcModifierKind::Smooth:  return "smooth:" + num(m.v[0]);
+        case OcModifierKind::Clamp: {
+            if (sameNum(m.v[1], 1.0f)) return sameNum(m.v[0], 0.0f) ? "clamp" : "clamp:" + num(m.v[0]);
+            return "clamp:" + num(m.v[0]) + ":" + num(m.v[1]);
+        }
         case OcModifierKind::DeadZone: default: {
             std::string s = "deadzone";
             if (!sameNum(m.v[1], 1.0f)) { s += ':'; s += num(m.v[0]); s += ':'; s += num(m.v[1]); }
@@ -519,8 +534,8 @@ bool parseOcinput(std::string_view text, OcInputData& outData, std::string* err)
 
         if (equalsCI(key, "OCINPUT")) {
             i32 version = 0;
-            if (t.size() < 2 || !strictI32(t[1], version) || version != 1) {
-                if (err) *err = "unsupported or missing OCINPUT version (want 'OCINPUT 1')";
+            if (t.size() < 2 || !strictI32(t[1], version) || version < 1 || version > 2) {
+                if (err) *err = "unsupported or missing OCINPUT version (want 'OCINPUT 1' or 'OCINPUT 2')";
                 return false;
             }
             sawHeader = true;
@@ -731,6 +746,13 @@ std::string writeOcinput(const OcInputData& d, std::string_view existing) {
     std::string bindBlock;
     for (const OcInputBinding& b : d.bindings) bindBlock += bindLine(b);
 
+    // Version 2 only for a file that needs it (a clamp modifier); everything else is written as before.
+    const auto isClamp = [](const std::string& m) { return m.rfind("clamp", 0) == 0; };
+    bool usesClamp = false;
+    for (const OcInputAction& a : d.actions) for (const std::string& m : a.modifiers) usesClamp = usesClamp || isClamp(m);
+    for (const OcInputBinding& b : d.bindings) for (const std::string& m : b.modifiers) usesClamp = usesClamp || isClamp(m);
+    const char* const headerLine = usesClamp ? "OCINPUT 2\n" : "OCINPUT 1\n";
+
     const std::string contextLine = d.contextName.empty() ? std::string() :
         ("CONTEXT " + d.contextName + " priority " + std::to_string(d.contextPriority) + "\n");
 
@@ -738,7 +760,7 @@ std::string writeOcinput(const OcInputData& d, std::string_view existing) {
     // the bind block, then CONTEXT -- matching this file's header comment's worked example and
     // .ocparticle's own fresh-write layout (a blank line ahead of each group).
     if (trim(existing).empty()) {
-        std::string out = "OCINPUT 1\n";
+        std::string out = headerLine;
         out += "# Input binding scheme, written by the Aver Engine editor.\n";
         out += nameLine;
         out += "\n";
@@ -785,7 +807,7 @@ std::string writeOcinput(const OcInputData& d, std::string_view existing) {
     for (usize i = 0; i < lines.size(); ++i) {
         switch (kinds[i]) {
         case OwnedLineKind::Header:
-            out += "OCINPUT 1\n";
+            out += headerLine;
             break;
         case OwnedLineKind::Name:
             if (!placedName) { placedName = true; out += nameLine; }   // empty nameLine = line removed

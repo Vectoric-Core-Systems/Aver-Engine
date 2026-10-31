@@ -13,6 +13,7 @@
 
 #include <chrono>
 #include <cstdlib>
+#include <thread>
 
 namespace aver {
 
@@ -253,6 +254,8 @@ void Engine::frameStep() {
     }
 
     const f64 dt = frameClock_.restart();
+    frameBeginNs_ = static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
     time_.dt = static_cast<f32>(dt);
     time_.total += time_.dt;
     time_.frame += 1;
@@ -312,6 +315,18 @@ void Engine::frameStep() {
         if (ms(t0, t5) > hitchMs)
             AVER_INFO("[FrameHitch] frame {} {:.1f} ms | update {:.1f} | beginFrame {:.1f} | render {:.1f} | endFrame {:.1f} | present {:.1f}",
                       time_.frame, ms(t0, t5), ms(t0, t1), ms(t1, t2), ms(t2, t3), ms(t3, t4), ms(t4, t5));
+    }
+
+    // The frame rate cap: wait out the rest of 1 / maxFps_ from where this frame's clock began.
+    if (maxFps_ > 0.0f) {
+        const u64 nowNs = static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count());
+        const f64 wait = frameCapWaitSeconds(static_cast<f64>(nowNs - frameBeginNs_) * 1e-9, static_cast<f64>(maxFps_));
+        if (wait > 0.0) {
+            const Clock::time_point until = Clock::now() + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<f64>(wait));
+            // Sleep the bulk and spin the last millisecond: a sleep alone overshoots by up to a scheduler tick.
+            if (wait > 0.002) std::this_thread::sleep_until(until - std::chrono::milliseconds(1));
+            while (Clock::now() < until) std::this_thread::yield();
+        }
     }
 
     inFrame_ = false;

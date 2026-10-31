@@ -92,6 +92,55 @@ static const wchar_t* kSingleInstanceMappingName = L"Local\\AverEngineEditor.Sin
 static HANDLE g_singleInstanceMutex = nullptr;
 static HANDLE g_singleInstanceMapping = nullptr;
 
+// The display controls' own state (Window::ext_), made by the first call that needs it.
+namespace {
+constexpr int kShapeCount = static_cast<int>(Window::CursorShape::Count);
+struct Ext {
+    HCURSOR custom[kShapeCount] = {};   // images a script set; null = the system shape
+    bool controlled = false;            // the window decides the cursor over its client area
+    bool hidden = false, confined = false;
+    int shape = 0;
+    u32 flags = 0;                      // Window::kFlag*, whatever the mode
+    bool fullscreen = false, haveSaved = false;
+    WINDOWPLACEMENT saved{};
+    u32 initW = 0, initH = 0;           // WindowDesc size, for leaving a window that began fullscreen
+};
+Ext& getExt(void*& slot) {
+    if (!slot) slot = new Ext();
+    return *static_cast<Ext*>(slot);
+}
+const Ext* extOrNull(void* slot) { return static_cast<const Ext*>(slot); }
+
+LPCWSTR systemCursorName(int shape) {
+    switch (static_cast<Window::CursorShape>(shape)) {
+        case Window::CursorShape::IBeam:        return IDC_IBEAM;
+        case Window::CursorShape::PointingHand: return IDC_HAND;
+        case Window::CursorShape::Cross:        return IDC_CROSS;
+        case Window::CursorShape::Wait:         return IDC_WAIT;
+        case Window::CursorShape::Busy:         return IDC_APPSTARTING;
+        case Window::CursorShape::Drag:         return IDC_SIZEALL;
+        case Window::CursorShape::CanDrop:      return IDC_HAND;
+        case Window::CursorShape::Forbidden:    return IDC_NO;
+        case Window::CursorShape::VSize:        return IDC_SIZENS;
+        case Window::CursorShape::HSize:        return IDC_SIZEWE;
+        case Window::CursorShape::BDiagSize:    return IDC_SIZENESW;
+        case Window::CursorShape::FDiagSize:    return IDC_SIZENWSE;
+        case Window::CursorShape::Move:         return IDC_SIZEALL;
+        case Window::CursorShape::VSplit:       return IDC_SIZENS;
+        case Window::CursorShape::HSplit:       return IDC_SIZEWE;
+        case Window::CursorShape::Help:         return IDC_HELP;
+        default:                                return IDC_ARROW;
+    }
+}
+
+// The style a window of these flags has when it is windowed (no VISIBLE/MAXIMIZE/MINIMIZE bits).
+DWORD styleForFlags(u32 flags) {
+    if (flags & Window::kFlagBorderless) return WS_POPUP;
+    return (flags & Window::kFlagResizable) ? WS_OVERLAPPEDWINDOW
+                                            : (WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX);
+}
+} // namespace
+
 // The window procedure: translates OS messages into Events and drives the modal-loop state.
 static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     if (msg == WM_NCCREATE) {
@@ -171,6 +220,10 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             e.key = static_cast<i32>(wParam);
             e.pressed = (msg == WM_KEYDOWN);
             self->dispatch(e);
+            // Numpad Enter is VK_RETURN with the extended-key bit; it also reports as 0x6C
+            // (VK_SEPARATOR, which no keyboard sends) so it can have a slot of its own. Enter still
+            // reports as Enter, as it always did.
+            if (wParam == VK_RETURN && (lParam & (1 << 24)) != 0) { e.key = 0x6C; self->dispatch(e); }
             return 0;
         }
         case WM_MOUSEMOVE: {
@@ -206,6 +259,39 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             e.wheel = static_cast<f32>(GET_WHEEL_DELTA_WPARAM(wParam)) / static_cast<f32>(WHEEL_DELTA);
             self->dispatch(e);
             return 0;
+        }
+        case WM_MOUSEHWHEEL: {
+            Event e; e.type = EventType::MouseWheel;
+            e.wheelX = static_cast<f32>(GET_WHEEL_DELTA_WPARAM(wParam)) / static_cast<f32>(WHEEL_DELTA);
+            self->dispatch(e);
+            return 0;
+        }
+        // The mouse's two side buttons. The message must answer TRUE, or the system turns the click into
+        // an app-command (browser back / forward).
+        case WM_XBUTTONDOWN: case WM_XBUTTONUP: {
+            const bool down = msg == WM_XBUTTONDOWN;
+            Event e; e.type = EventType::MouseButton;
+            e.button  = GET_XBUTTON_WPARAM(wParam) == XBUTTON1 ? 3 : 4;
+            e.pressed = down;
+            e.mouseX  = GET_X_LPARAM(lParam);
+            e.mouseY  = GET_Y_LPARAM(lParam);
+            if (down) {
+                if (self->mouseCapture()++ == 0) SetCapture(hwnd);
+            } else if (self->mouseCapture() > 0) {
+                if (--self->mouseCapture() == 0) ReleaseCapture();
+            }
+            self->dispatch(e);
+            return TRUE;
+        }
+        // The cursor over the client area, when the game controls it (a shape, an image, hidden).
+        // Otherwise the class cursor, as before.
+        case WM_SETCURSOR: {
+            void* hc = nullptr;
+            if (LOWORD(lParam) == HTCLIENT && self->controlledCursor(&hc)) {
+                SetCursor(static_cast<HCURSOR>(hc));
+                return TRUE;
+            }
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
         }
         // No WM_KEYUP is ever sent for a key that was held when focus left, so anything
         // accumulating key state has to be told to drop it here or the key stays held forever.
@@ -421,6 +507,12 @@ bool Window::create(const WindowDesc& desc) {
     width_ = desc.width;
     height_ = desc.height;
     dpiScale_ = queryDpiScale(hwnd);
+    {
+        Ext& x = getExt(ext_);
+        x.flags = desc.resizable ? kFlagResizable : 0u;
+        x.fullscreen = wantFullscreen;
+        x.initW = desc.width; x.initH = desc.height;
+    }
 
     // FULLSCREEN TAKES rcMonitor, NOT rcWork: the work area excludes the taskbar, which is exactly
     // what a borderless-fullscreen window must cover. Sized in PHYSICAL pixels straight from the
@@ -511,12 +603,232 @@ void Window::pumpEvents() {
 // Destroys the OS window.
 void Window::destroy() {
     if (nativeHandle_) {
+        if (static_cast<Ext*>(ext_) && static_cast<Ext*>(ext_)->confined) ClipCursor(nullptr);
         DestroyWindow(static_cast<HWND>(nativeHandle_));
         nativeHandle_ = nullptr;
+    }
+    if (ext_) {
+        Ext* x = static_cast<Ext*>(ext_);
+        for (HCURSOR c : x->custom) if (c) DestroyCursor(c);
+        delete x;
+        ext_ = nullptr;
     }
 }
 
 Window::~Window() { destroy(); }
+
+// ---- window state and control, see Window.hpp ----------------------------------------------------
+
+Window::Mode Window::mode() const {
+    if (!nativeHandle_) return Mode::Windowed;
+    HWND hwnd = static_cast<HWND>(nativeHandle_);
+    if (IsIconic(hwnd)) return Mode::Minimized;
+    if (const Ext* x = extOrNull(ext_); x && x->fullscreen) return Mode::Fullscreen;
+    if (IsZoomed(hwnd)) return Mode::Maximized;
+    return Mode::Windowed;
+}
+
+void Window::setMode(Mode m) {
+    if (!nativeHandle_) return;
+    HWND hwnd = static_cast<HWND>(nativeHandle_);
+    Ext& x = getExt(ext_);
+    const bool wasFullscreen = x.fullscreen;
+    if (m == Mode::Fullscreen) {
+        if (wasFullscreen) return;
+        x.saved.length = sizeof(x.saved);
+        x.haveSaved = GetWindowPlacement(hwnd, &x.saved) != 0;
+        MONITORINFO mi{}; mi.cbSize = sizeof(mi);
+        if (!GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi)) return;
+        x.fullscreen = true;
+        if (IsIconic(hwnd) || IsZoomed(hwnd)) ShowWindow(hwnd, SW_RESTORE);
+        SetWindowLongPtrW(hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
+        SetWindowPos(hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right - mi.rcMonitor.left,
+                     mi.rcMonitor.bottom - mi.rcMonitor.top, SWP_FRAMECHANGED | SWP_NOACTIVATE);
+        return;
+    }
+    if (wasFullscreen) {
+        // Back to a framed window: the style the flags ask for, and the place it was before (or, for a window
+        // that began fullscreen, its authored size in the middle of the monitor).
+        x.fullscreen = false;
+        SetWindowLongPtrW(hwnd, GWL_STYLE, static_cast<LONG_PTR>(styleForFlags(x.flags) | WS_VISIBLE));
+        if (x.haveSaved) {
+            SetWindowPlacement(hwnd, &x.saved);
+        } else {
+            MONITORINFO mi{}; mi.cbSize = sizeof(mi);
+            GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi);
+            RECT rc = {0, 0, static_cast<LONG>(x.initW * dpiScale_ + 0.5f), static_cast<LONG>(x.initH * dpiScale_ + 0.5f)};
+            AdjustWindowRect(&rc, styleForFlags(x.flags), FALSE);
+            const int w = rc.right - rc.left, h = rc.bottom - rc.top;
+            SetWindowPos(hwnd, nullptr, mi.rcWork.left + ((mi.rcWork.right - mi.rcWork.left) - w) / 2,
+                         mi.rcWork.top + ((mi.rcWork.bottom - mi.rcWork.top) - h) / 2, w, h,
+                         SWP_NOZORDER | SWP_FRAMECHANGED | SWP_NOACTIVATE);
+        }
+        SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    }
+    switch (m) {
+        case Mode::Minimized: ShowWindow(hwnd, SW_MINIMIZE); break;
+        case Mode::Maximized: ShowWindow(hwnd, SW_MAXIMIZE); break;
+        default:
+            if (IsIconic(hwnd) || IsZoomed(hwnd)) ShowWindow(hwnd, SW_RESTORE);
+            break;
+    }
+}
+
+bool Window::outerPosition(i32& x, i32& y) const {
+    RECT r{};
+    if (!nativeHandle_ || !GetWindowRect(static_cast<HWND>(nativeHandle_), &r)) return false;
+    x = r.left; y = r.top;
+    return true;
+}
+
+void Window::setOuterPosition(i32 x, i32 y) {
+    if (nativeHandle_ && mode() == Mode::Windowed)
+        SetWindowPos(static_cast<HWND>(nativeHandle_), nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+void Window::setClientSize(u32 w, u32 h) {
+    if (!nativeHandle_ || w == 0 || h == 0 || mode() != Mode::Windowed) return;
+    HWND hwnd = static_cast<HWND>(nativeHandle_);
+    RECT rc = {0, 0, static_cast<LONG>(w), static_cast<LONG>(h)};
+    AdjustWindowRectEx(&rc, static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE)), FALSE,
+                       static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_EXSTYLE)));
+    SetWindowPos(hwnd, nullptr, 0, 0, rc.right - rc.left, rc.bottom - rc.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+u32 Window::flags() const {
+    const Ext* x = extOrNull(ext_);
+    u32 f = x ? x->flags : 0u;
+    if (nativeHandle_ && (GetWindowLongPtrW(static_cast<HWND>(nativeHandle_), GWL_EXSTYLE) & WS_EX_TOPMOST)) f |= kFlagAlwaysOnTop;
+    return f;
+}
+
+void Window::setFlag(u32 flag, bool on) {
+    if (!nativeHandle_) return;
+    HWND hwnd = static_cast<HWND>(nativeHandle_);
+    Ext& x = getExt(ext_);
+    if (flag == kFlagAlwaysOnTop) {
+        SetWindowPos(hwnd, on ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        return;
+    }
+    if (flag != kFlagResizable && flag != kFlagBorderless) return;
+    if (on) x.flags |= flag; else x.flags &= ~flag;
+    if (x.fullscreen) return;   // takes effect when the window leaves fullscreen
+    const bool zoomed = IsZoomed(hwnd) != 0, iconic = IsIconic(hwnd) != 0;
+    RECT client{};
+    GetClientRect(hwnd, &client);
+    DWORD style = styleForFlags(x.flags) | WS_VISIBLE;
+    if (zoomed) style |= WS_MAXIMIZE;
+    if (iconic) style |= WS_MINIMIZE;
+    SetWindowLongPtrW(hwnd, GWL_STYLE, static_cast<LONG_PTR>(style));
+    SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    if (!zoomed && !iconic) setClientSize(static_cast<u32>(client.right - client.left), static_cast<u32>(client.bottom - client.top));
+}
+
+bool Window::monitorSize(i32& w, i32& h) const {
+    if (!nativeHandle_) return false;
+    MONITORINFO mi{}; mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(MonitorFromWindow(static_cast<HWND>(nativeHandle_), MONITOR_DEFAULTTONEAREST), &mi)) return false;
+    w = mi.rcMonitor.right - mi.rcMonitor.left;
+    h = mi.rcMonitor.bottom - mi.rcMonitor.top;
+    return true;
+}
+
+// The cursor goes live at once only when the pointer is over the window; WM_SETCURSOR sets it on the next move.
+static void refreshCursor(HWND hwnd) {
+    POINT p{};
+    if (GetCursorPos(&p) && WindowFromPoint(p) == hwnd) SendMessageW(hwnd, WM_SETCURSOR, reinterpret_cast<WPARAM>(hwnd), MAKELPARAM(HTCLIENT, WM_MOUSEMOVE));
+}
+
+void Window::setCursorShape(CursorShape s) {
+    if (!nativeHandle_ || static_cast<int>(s) < 0 || static_cast<int>(s) >= kShapeCount) return;
+    Ext& x = getExt(ext_);
+    x.controlled = true;
+    x.shape = static_cast<int>(s);
+    refreshCursor(static_cast<HWND>(nativeHandle_));
+}
+
+bool Window::setCursorImage(CursorShape s, const u8* rgba, i32 w, i32 h, i32 hotX, i32 hotY) {
+    if (!nativeHandle_ || static_cast<int>(s) < 0 || static_cast<int>(s) >= kShapeCount) return false;
+    Ext& x = getExt(ext_);
+    HCURSOR made = nullptr;
+    if (rgba && w > 0 && h > 0) {
+        BITMAPV5HEADER bi{};
+        bi.bV5Size = sizeof(bi);
+        bi.bV5Width = w;
+        bi.bV5Height = -h;                 // top row first
+        bi.bV5Planes = 1;
+        bi.bV5BitCount = 32;
+        bi.bV5Compression = BI_BITFIELDS;
+        bi.bV5RedMask = 0x00FF0000; bi.bV5GreenMask = 0x0000FF00; bi.bV5BlueMask = 0x000000FF; bi.bV5AlphaMask = 0xFF000000;
+        void* bits = nullptr;
+        HDC dc = GetDC(nullptr);
+        HBITMAP color = CreateDIBSection(dc, reinterpret_cast<BITMAPINFO*>(&bi), DIB_RGB_COLORS, &bits, nullptr, 0);
+        ReleaseDC(nullptr, dc);
+        HBITMAP mask = CreateBitmap(w, h, 1, 1, nullptr);
+        if (color && bits && mask) {
+            u8* dst = static_cast<u8*>(bits);
+            for (i64 i = 0, n = static_cast<i64>(w) * h; i < n; ++i) {
+                dst[i * 4 + 0] = rgba[i * 4 + 2];   // B
+                dst[i * 4 + 1] = rgba[i * 4 + 1];   // G
+                dst[i * 4 + 2] = rgba[i * 4 + 0];   // R
+                dst[i * 4 + 3] = rgba[i * 4 + 3];   // A
+            }
+            ICONINFO ii{};
+            ii.fIcon = FALSE; ii.xHotspot = static_cast<DWORD>(hotX); ii.yHotspot = static_cast<DWORD>(hotY);
+            ii.hbmMask = mask; ii.hbmColor = color;
+            made = static_cast<HCURSOR>(CreateIconIndirect(&ii));
+        }
+        if (color) DeleteObject(color);
+        if (mask) DeleteObject(mask);
+        if (!made) return false;
+    }
+    HCURSOR& slot = x.custom[static_cast<int>(s)];
+    if (slot) DestroyCursor(slot);
+    slot = made;
+    refreshCursor(static_cast<HWND>(nativeHandle_));
+    return true;
+}
+
+void Window::setCursorHidden(bool hidden) {
+    if (!nativeHandle_) return;
+    Ext& x = getExt(ext_);
+    x.controlled = true;
+    x.hidden = hidden;
+    refreshCursor(static_cast<HWND>(nativeHandle_));
+}
+
+void Window::setCursorConfined(bool confined) {
+    if (!nativeHandle_) return;
+    HWND hwnd = static_cast<HWND>(nativeHandle_);
+    Ext& x = getExt(ext_);
+    x.confined = confined;
+    if (!confined) { ClipCursor(nullptr); return; }
+    if (GetForegroundWindow() != hwnd) return;   // a background window has no business holding the pointer
+    RECT rc{};
+    GetClientRect(hwnd, &rc);
+    POINT tl{rc.left, rc.top}, br{rc.right, rc.bottom};
+    ClientToScreen(hwnd, &tl); ClientToScreen(hwnd, &br);
+    RECT screen{tl.x, tl.y, br.x, br.y};
+    ClipCursor(&screen);
+}
+
+void Window::warpCursor(i32 x, i32 y) {
+    if (!nativeHandle_ || !isForeground()) return;
+    POINT p{x, y};
+    ClientToScreen(static_cast<HWND>(nativeHandle_), &p);
+    SetCursorPos(p.x, p.y);
+}
+
+bool Window::controlledCursor(void** hcursor) const {
+    const Ext* x = extOrNull(ext_);
+    if (!x || !x->controlled || !hcursor) return false;
+    if (x->hidden) { *hcursor = nullptr; return true; }
+    const int s = x->shape;
+    HCURSOR c = (s >= 0 && s < kShapeCount) ? x->custom[s] : nullptr;
+    if (!c) c = LoadCursorW(nullptr, systemCursorName(s));
+    *hcursor = c;
+    return true;
+}
 
 // Win32 capture is done by Runtime/src/MouseCapture.cpp directly; see Window.hpp.
 void Window::setRelativeMouse(bool) {}

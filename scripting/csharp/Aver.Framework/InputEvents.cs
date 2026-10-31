@@ -21,7 +21,7 @@ public abstract class InputEvent
     public bool IsActionPressed(string action) => Pressed && InputAction.ActionPressedThisFrame(action);
 
     /// <summary>Whether the action was released this frame and this event is a release.</summary>
-    public bool IsActionReleased(string action) => !Pressed && this is not InputEventMouseMotion and not InputEventMouseWheel
+    public bool IsActionReleased(string action) => !Pressed && this is not InputEventMouseMotion and not InputEventMouseWheel and not InputEventTouchMotion
                                                    && InputAction.ActionReleasedThisFrame(action);
 
     // Mouse events go to the UI when it wants the pointer, keyboard events when it wants the keyboard.
@@ -40,7 +40,8 @@ public sealed class InputEventKey : InputEvent
     public override string ToString() => $"Key {Key} {(IsPressed ? "down" : "up")}";
 }
 
-/// <summary>A mouse button going down or up (<see cref="Key.MouseLeft"/>, <see cref="Key.MouseRight"/>, <see cref="Key.MouseMiddle"/>).</summary>
+/// <summary>A mouse button going down or up (<see cref="Key.MouseLeft"/>, <see cref="Key.MouseRight"/>, <see cref="Key.MouseMiddle"/>,
+/// and the two side buttons <see cref="Key.MouseX1"/> and <see cref="Key.MouseX2"/>).</summary>
 public sealed class InputEventMouseButton : InputEvent
 {
     public InputEventMouseButton(Key button, bool pressed) { Button = button; IsPressed = pressed; }
@@ -51,13 +52,45 @@ public sealed class InputEventMouseButton : InputEvent
     public override string ToString() => $"Mouse {Button} {(IsPressed ? "down" : "up")}";
 }
 
-/// <summary>The mouse wheel turning; positive is away from the user.</summary>
+/// <summary>The mouse wheel turning; positive is away from the user. <see cref="Horizontal"/> is a sideways notch, positive to the right.</summary>
 public sealed class InputEventMouseWheel : InputEvent
 {
-    public InputEventMouseWheel(float delta) => Delta = delta;
+    public InputEventMouseWheel(float delta, float horizontal = 0f) { Delta = delta; Horizontal = horizontal; }
     public float Delta { get; }
+    public float Horizontal { get; }
     internal override bool IsPointer => true;
-    public override string ToString() => $"Wheel {Delta}";
+    public override string ToString() => Horizontal != 0f ? $"Wheel {Delta},{Horizontal}" : $"Wheel {Delta}";
+}
+
+/// <summary>A finger touching down on, or lifting off, the screen.</summary>
+public sealed class InputEventTouch : InputEvent
+{
+    public InputEventTouch(int finger, bool pressed, float x, float y, float pressure = 1f)
+    { Finger = finger; IsPressed = pressed; X = x; Y = y; Pressure = pressure; }
+    public int Finger { get; }
+    public bool IsPressed { get; }
+    /// <summary>Window pixels.</summary>
+    public float X { get; }
+    public float Y { get; }
+    public float Pressure { get; }
+    public override bool Pressed => IsPressed;
+    internal override bool IsPointer => true;
+    public override string ToString() => $"Touch {Finger} {(IsPressed ? "down" : "up")} {X},{Y}";
+}
+
+/// <summary>A finger that is down moving.</summary>
+public sealed class InputEventTouchMotion : InputEvent
+{
+    public InputEventTouchMotion(int finger, float x, float y, float relativeX, float relativeY, float pressure = 1f)
+    { Finger = finger; X = x; Y = y; RelativeX = relativeX; RelativeY = relativeY; Pressure = pressure; }
+    public int Finger { get; }
+    public float X { get; }
+    public float Y { get; }
+    public float RelativeX { get; }
+    public float RelativeY { get; }
+    public float Pressure { get; }
+    internal override bool IsPointer => true;
+    public override string ToString() => $"TouchMotion {Finger} {X},{Y}";
 }
 
 /// <summary>The mouse moving, by this much since the last frame.</summary>
@@ -136,9 +169,18 @@ internal static class InputRouter
 // and wheel, and gamepad changes against what it saw last frame.
 internal static class InputEventSource
 {
-    private static readonly bool[] s_padButtons = new bool[Enum.GetValues<GamepadButton>().Length];
-    private static readonly float[] s_padAxes = new float[Enum.GetValues<GamepadAxis>().Length];
+    private static readonly bool[][] s_padButtons = NewPads(() => new bool[Enum.GetValues<GamepadButton>().Length]);
+    private static readonly float[][] s_padAxes = NewPads(() => new float[Enum.GetValues<GamepadAxis>().Length]);
+    private static readonly bool[] s_touchDown = new bool[Touch.MaxFingers];
+    private static readonly (float X, float Y)[] s_touchAt = new (float, float)[Touch.MaxFingers];
     private static readonly List<InputEvent> s_injected = new();
+
+    private static T[] NewPads<T>(Func<T> make)
+    {
+        var a = new T[Gamepads.MaxPads];
+        for (int i = 0; i < a.Length; i++) a[i] = make();
+        return a;
+    }
 
     internal static void Inject(InputEvent ev) { lock (s_injected) s_injected.Add(ev); }
 
@@ -147,22 +189,43 @@ internal static class InputEventSource
         var events = new List<InputEvent>();
         foreach (Key k in Enum.GetValues<Key>())
         {
-            bool mouse = k is Key.MouseLeft or Key.MouseRight or Key.MouseMiddle;
+            // A wheel notch arrives as the wheel event below; its key slots are for polling and action bindings.
+            if (k is Key.MouseWheelUp or Key.MouseWheelDown) continue;
+            if (k is Key.MouseWheelLeft or Key.MouseWheelRight)
+            {
+                if (Input.GetKeyDown(k)) events.Add(new InputEventMouseWheel(0f, k == Key.MouseWheelRight ? 1f : -1f));
+                continue;
+            }
+            bool mouse = k is Key.MouseLeft or Key.MouseRight or Key.MouseMiddle or Key.MouseX1 or Key.MouseX2;
             if (Input.GetKeyDown(k)) events.Add(mouse ? new InputEventMouseButton(k, true) : new InputEventKey(k, true));
             if (Input.GetKeyUp(k)) events.Add(mouse ? new InputEventMouseButton(k, false) : new InputEventKey(k, false));
         }
         float dx = Input.MouseDeltaX, dy = Input.MouseDeltaY, wheel = Input.MouseWheel;
         if (dx != 0f || dy != 0f) events.Add(new InputEventMouseMotion(dx, dy));
         if (wheel != 0f) events.Add(new InputEventMouseWheel(wheel));
-        foreach (GamepadButton b in Enum.GetValues<GamepadButton>())
+        for (int pad = 0; pad < Gamepads.MaxPads; pad++)
         {
-            bool down = Input.GetGamepadButton(b);
-            if (down != s_padButtons[(int)b]) { s_padButtons[(int)b] = down; events.Add(new InputEventJoypadButton(b, down)); }
+            // A pad that is not plugged in reads all up and zero, which is also what its remembered state ends at when it leaves.
+            foreach (GamepadButton b in Enum.GetValues<GamepadButton>())
+            {
+                bool down = Input.GetGamepadButton(b, pad);
+                if (down != s_padButtons[pad][(int)b]) { s_padButtons[pad][(int)b] = down; events.Add(new InputEventJoypadButton(b, down, pad)); }
+            }
+            foreach (GamepadAxis ax in Enum.GetValues<GamepadAxis>())
+            {
+                float v = Input.GetGamepadAxis(ax, pad);
+                if (MathF.Abs(v - s_padAxes[pad][(int)ax]) > 0.01f) { s_padAxes[pad][(int)ax] = v; events.Add(new InputEventJoypadMotion(ax, v, pad)); }
+            }
         }
-        foreach (GamepadAxis ax in Enum.GetValues<GamepadAxis>())
+        for (int f = 0; f < Touch.MaxFingers; f++)
         {
-            float v = Input.GetGamepadAxis(ax);
-            if (MathF.Abs(v - s_padAxes[(int)ax]) > 0.01f) { s_padAxes[(int)ax] = v; events.Add(new InputEventJoypadMotion(ax, v)); }
+            bool down = Touch.IsDown(f, out float x, out float y, out float pressure);
+            if (down && !s_touchDown[f]) events.Add(new InputEventTouch(f, true, x, y, pressure));
+            else if (down && (x != s_touchAt[f].X || y != s_touchAt[f].Y))
+                events.Add(new InputEventTouchMotion(f, x, y, x - s_touchAt[f].X, y - s_touchAt[f].Y, pressure));
+            else if (!down && s_touchDown[f]) events.Add(new InputEventTouch(f, false, s_touchAt[f].X, s_touchAt[f].Y, 0f));
+            s_touchDown[f] = down;
+            if (down) s_touchAt[f] = (x, y);
         }
         lock (s_injected) { events.AddRange(s_injected); s_injected.Clear(); }
         return events;

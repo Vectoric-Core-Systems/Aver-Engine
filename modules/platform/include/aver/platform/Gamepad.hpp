@@ -20,10 +20,11 @@ namespace aver {
 // order, spelled out once here so this file stays honest about the contract it mirrors without
 // including the header that defines it:
 //   buttons: DPAD_UP, DPAD_DOWN, DPAD_LEFT, DPAD_RIGHT, START, BACK, LEFT_THUMB, RIGHT_THUMB,
-//            LEFT_SHOULDER, RIGHT_SHOULDER, A, B, X, Y
+//            LEFT_SHOULDER, RIGHT_SHOULDER, A, B, X, Y, GUIDE, MISC1, PADDLE1..4, TOUCHPAD
+//            (the last seven only where the platform reports them: XInput has no GUIDE or paddles)
 //   axes:    LEFT_X, LEFT_Y, RIGHT_X, RIGHT_Y, LEFT_TRIGGER, RIGHT_TRIGGER
 struct GamepadState {
-    static constexpr usize kButtonCount = 14;  // mirrors AVER_FW_GAMEPAD_BUTTON_COUNT
+    static constexpr usize kButtonCount = 21;  // mirrors AVER_FW_GAMEPAD_BUTTON_COUNT
     static constexpr usize kAxisCount   = 6;   // mirrors AVER_FW_GAMEPAD_AXIS_COUNT
 
     bool connected = false;
@@ -64,5 +65,15 @@ constexpr u32 kMaxGamepads = 4;
 // empty; a slot that WAS connected last call is always re-polled immediately, so an unplug is seen on
 // the very next frame rather than up to a second late.
 void pollGamepads(GamepadState* out, u32 count);
+
+// The name the device gives itself ("Xbox 360 Controller", "XInput Gamepad 1" where the platform has no
+// better), "" for a slot that is not connected as of the last poll. The pointer is valid until the next
+// pollGamepads.
+const char* gamepadName(u32 pad);
+
+// Rumbles a pad: `weak` (the high-frequency motor) and `strong` (the low-frequency one) in 0..1 for
+// `seconds` (<= 0 means until stopped or replaced). A request for a pad that is not connected is dropped.
+// A timed rumble ends on its own, checked by pollGamepads. Call it from the thread that polls.
+void rumbleGamepad(u32 pad, f32 weak, f32 strong, f32 seconds);
 
 } // namespace aver

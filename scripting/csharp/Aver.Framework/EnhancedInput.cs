@@ -750,10 +750,15 @@ public static class EnhancedInput
     /// there, including a non-rebindable mouse-axis slot, so a caller that only wants to DISPLAY the
     /// current binding is not filtered the way <see cref="RebindAction"/> filters what it will
     /// change.</summary>
-    public static bool TryGetBindingKey(string actionName, int slot, out int rawKey, out InputSource source)
+    public static bool TryGetBindingKey(string actionName, int slot, out int rawKey, out InputSource source) =>
+        TryGetBinding(actionName, slot, out rawKey, out source, out _);
+
+    /// <summary><see cref="TryGetBindingKey"/> and the binding's scale too (a negative scale on an axis binding is the other direction of the axis).</summary>
+    public static bool TryGetBinding(string actionName, int slot, out int rawKey, out InputSource source, out float scale)
     {
         rawKey = -1;
         source = default;
+        scale = 1f;
         if (string.IsNullOrEmpty(actionName) || slot < 0) return false;
         for (int li = 0; li < s_layers.Count; li++)
         {
@@ -766,6 +771,7 @@ public static class EnhancedInput
                 if (seen != slot) { seen++; continue; }
                 rawKey = b.RawKey;
                 source = b.Source;
+                scale = b.Scale;
                 return true;
             }
         }

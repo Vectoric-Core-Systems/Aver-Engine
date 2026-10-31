@@ -93,10 +93,15 @@ void publishInput(const InputState& in, const InputPublishPolicy& policy, std::s
     // worst kind: it builds, and one key then works in the editor and not in a shipped game. The
     // -1 guard is the table's own "no such button" answer and must not be indexed with.
     if (m) {
-        for (i32 b = 0; b < 3; ++b) {
+        for (i32 b = 0; b < static_cast<i32>(InputState::kMouseButtons); ++b) {
             const i32 fw = aver::fw::frameworkKeyFromMouseButton(b);
             if (fw >= 0) held[fw] = in.mouseHeld(b);
         }
+        // A wheel notch is a press of the wheel slot for the frame it arrives in.
+        held[AVER_FW_KEY_MOUSE_WHEEL_UP]    = aver::fw::frameworkWheelUp(in.wheel());
+        held[AVER_FW_KEY_MOUSE_WHEEL_DOWN]  = aver::fw::frameworkWheelDown(in.wheel());
+        held[AVER_FW_KEY_MOUSE_WHEEL_RIGHT] = aver::fw::frameworkWheelRight(in.wheelX());
+        held[AVER_FW_KEY_MOUSE_WHEEL_LEFT]  = aver::fw::frameworkWheelLeft(in.wheelX());
     }
 
     // The raw Win32 VK twin (framework_abi.h's own RAW WIN32 VK section) gets the SAME "unfocused
@@ -148,6 +153,23 @@ void publishInput(const InputState& in, const InputPublishPolicy& policy, std::s
         aver_fw_input_set_mouse(0.0f, 0.0f, 0.0f);
     }
 
+    // TOUCH. Real fingers where the window layer has them; otherwise, with emulation on, the left mouse
+    // button as finger 0 at the pointer. Every finger slot is written every frame, up included, for the same
+    // stuck-input reason as the keys above.
+    {
+        const bool emulate = aver_fw_touch_emulation() != 0 && !in.touchSeen();
+        for (i32 f = 0; f < AVER_FW_TOUCH_MAX; ++f) {
+            if (m && f < static_cast<i32>(InputState::kTouchCount) && in.touchHeld(f)) {
+                aver_fw_input_set_touch(f, 1, in.touchX(f), in.touchY(f), in.touchPressure(f));
+            } else if (m && emulate && f == 0 && in.mouseHeld(0)) {
+                aver_fw_input_set_touch(0, 1, static_cast<f32>(in.mouseX()), static_cast<f32>(in.mouseY()), 1.0f);
+            } else {
+                aver_fw_input_set_touch(f, 0, 0.0f, 0.0f, 0.0f);
+            }
+        }
+        aver_fw_set_touch_available(in.touchSeen() ? 1 : 0);
+    }
+
     publishGamepad(pad);
 
     // Still keyed on the MASTER switch and not on `kb`: this string is what --input-echo prints,
@@ -168,12 +190,22 @@ void publishInput(const InputState& in, const InputPublishPolicy& policy, std::s
 // editor's own direct call is gone precisely because two callers a frame would poll the device
 // twice and publish the second answer over the first.
 void publishGamepad(bool active) {
-    GamepadState pad{};
-    pollGamepads(&pad, 1);
-    for (i32 b = 0; b < AVER_FW_GAMEPAD_BUTTON_COUNT; ++b)
-        aver_fw_input_set_gamepad_button(0, b, (active && pad.buttons[b]) ? 1 : 0);
-    for (i32 a = 0; a < AVER_FW_GAMEPAD_AXIS_COUNT; ++a)
-        aver_fw_input_set_gamepad_axis(0, a, active ? pad.axes[a] : 0.0f);
+    static_assert(kMaxGamepads == static_cast<u32>(AVER_FW_GAMEPAD_MAX), "the poller and the ABI disagree on the pad count");
+    GamepadState pads[kMaxGamepads]{};
+    pollGamepads(pads, kMaxGamepads);
+    for (u32 p = 0; p < kMaxGamepads; ++p) {
+        const GamepadState& pad = pads[p];
+        const i32 id = static_cast<i32>(p);
+        // That a pad is plugged in is a fact whatever the window's focus; only its INPUT is gated.
+        aver_fw_input_set_gamepad_connected(id, pad.connected ? 1 : 0, pad.connected ? gamepadName(p) : nullptr);
+        for (i32 b = 0; b < AVER_FW_GAMEPAD_BUTTON_COUNT; ++b)
+            aver_fw_input_set_gamepad_button(id, b, (active && pad.buttons[b]) ? 1 : 0);
+        for (i32 a = 0; a < AVER_FW_GAMEPAD_AXIS_COUNT; ++a)
+            aver_fw_input_set_gamepad_axis(id, a, active ? pad.axes[a] : 0.0f);
+        // A script's rumble request, taken once and handed to the device owner.
+        float r[3] = {0.0f, 0.0f, 0.0f};
+        if (aver_fw_take_gamepad_rumble(id, r)) rumbleGamepad(p, r[0], r[1], r[2]);
+    }
 }
 
 } // namespace aver::game

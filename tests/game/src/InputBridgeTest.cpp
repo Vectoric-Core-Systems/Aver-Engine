@@ -10,6 +10,7 @@
 // So the assertion is deliberately the whole chain rather than the mapping function alone. It feeds
 // synthetic window events, publishes, and reads the framework's own state back through the same C
 // ABI gameplay uses. No window, no device, no ImGui, no human.
+#include "aver/game/GameDisplay.hpp"
 #include "aver/game/GameInput.hpp"
 #include "aver/game/GameTick.hpp"
 #include "aver/platform/InputState.hpp"
@@ -92,6 +93,107 @@ int main() {
         in.newFrame(); in.onEvent(key(kVkW, false));
         check(publish(in) == "(none)", "releasing W leaves nothing held");
         check(aver_fw_input_key(AVER_FW_KEY_W) == 0, "the framework reads W as released");
+    }
+
+    // ---- the keys past the original 50, the mouse's side buttons, the wheel, touch ----
+    {
+        AVER_INFO("F-keys, navigation, numpad and punctuation reach the framework by name");
+        InputState in;
+        in.newFrame();
+        in.onEvent(key(0x79, true));    // VK_F10
+        in.onEvent(key(0x21, true));    // VK_PRIOR (Page Up)
+        in.onEvent(key(0x6C, true));    // the numpad Enter's own code
+        in.onEvent(key(0xBD, true));    // VK_OEM_MINUS
+        const std::string echo = publish(in);
+        check(echo == "F10+PAGEUP+MINUS+KPENTER" || (echo.find("F10") != std::string::npos && echo.find("PAGEUP") != std::string::npos &&
+              echo.find("MINUS") != std::string::npos && echo.find("KPENTER") != std::string::npos), "the echo names them: " + echo);
+        check(aver_fw_input_key(AVER_FW_KEY_F10) != 0 && aver_fw_input_key(AVER_FW_KEY_PAGEUP) != 0 &&
+              aver_fw_input_key(AVER_FW_KEY_KPENTER) != 0 && aver_fw_input_key(AVER_FW_KEY_MINUS) != 0, "the framework reads all four as held");
+        check(aver_fw_input_key(AVER_FW_KEY_ENTER) == 0 && aver_fw_input_key(AVER_FW_KEY_F1) == 0, "and neighbouring slots are not");
+        check(aver_fw_input_vk(0x79) != 0, "the raw-VK twin agrees about F10");
+        in.newFrame();
+        publish(in);
+        check(aver_fw_input_key(AVER_FW_KEY_F10) != 0, "they stay held while the keys do");
+        in.newFrame(); in.onEvent(key(0x79, false)); in.onEvent(key(0x21, false)); in.onEvent(key(0x6C, false)); in.onEvent(key(0xBD, false));
+        check(publish(in) == "(none)" && aver_fw_input_key(AVER_FW_KEY_F10) == 0, "and release");
+        // Not the keyboard's: an unfocused window publishes every one as up.
+        in.newFrame(); in.onEvent(key(0x79, true));
+        publish(in, false);
+        check(aver_fw_input_key(AVER_FW_KEY_F10) == 0, "an unfocused window publishes F10 as up");
+    }
+    {
+        AVER_INFO("side buttons and the wheel as presses");
+        InputState in;
+        in.newFrame();
+        Event b3; b3.type = EventType::MouseButton; b3.button = 3; b3.pressed = true;
+        in.onEvent(b3);
+        Event w; w.type = EventType::MouseWheel; w.wheel = 1.0f; w.wheelX = -2.0f;
+        in.onEvent(w);
+        publish(in);
+        check(aver_fw_input_key(AVER_FW_KEY_MOUSE_X1) != 0 && aver_fw_input_key(AVER_FW_KEY_MOUSE_X2) == 0, "mouse button 3 is X1");
+        check(aver_fw_input_key(AVER_FW_KEY_MOUSE_WHEEL_UP) != 0 && aver_fw_input_key(AVER_FW_KEY_MOUSE_WHEEL_DOWN) == 0 &&
+              aver_fw_input_key(AVER_FW_KEY_MOUSE_WHEEL_LEFT) != 0 && aver_fw_input_key(AVER_FW_KEY_MOUSE_WHEEL_RIGHT) == 0,
+              "a notch up and a notch left press the wheel slots");
+        check(aver_fw_input_key_pressed(AVER_FW_KEY_MOUSE_WHEEL_UP) != 0, "a notch is a press edge");
+        in.newFrame();
+        publish(in);
+        check(aver_fw_input_key(AVER_FW_KEY_MOUSE_WHEEL_UP) == 0 && aver_fw_input_key_released(AVER_FW_KEY_MOUSE_WHEEL_UP) != 0 &&
+              aver_fw_input_key(AVER_FW_KEY_MOUSE_X1) != 0, "the next frame the notch is released and the button still held");
+        game::InputPublishPolicy noMouse = gamePolicy(true);
+        noMouse.mouseToGame = false;
+        in.newFrame(); in.onEvent(w);
+        publish(in, noMouse);
+        check(aver_fw_input_key(AVER_FW_KEY_MOUSE_WHEEL_UP) == 0 && aver_fw_input_key(AVER_FW_KEY_MOUSE_X1) == 0, "a mouse the editor kept for itself publishes neither");
+    }
+    {
+        AVER_INFO("touch: real fingers, and the mouse as finger 0 only when emulation is on");
+        InputState in;
+        in.newFrame();
+        Event b0; b0.type = EventType::MouseButton; b0.button = 0; b0.pressed = true; b0.mouseX = 30; b0.mouseY = 40;
+        in.onEvent(b0);
+        publish(in);
+        float t[3] = {};
+        check(aver_fw_input_touch(0, t) == 0, "emulation off: the mouse is not a finger");
+        aver_fw_set_touch_emulation(1);
+        in.newFrame();
+        publish(in);
+        check(aver_fw_input_touch(0, t) == 1 && t[0] == 30.0f && t[1] == 40.0f, "emulation on: the held left button is finger 0 at the pointer");
+        check(aver_fw_touch_available() == 0, "...and that does not claim a touch screen");
+        Event f; f.type = EventType::Touch; f.finger = 1; f.pressed = true; f.mouseX = 7; f.mouseY = 8; f.pressure = 0.25f;
+        in.newFrame(); in.onEvent(f);
+        publish(in);
+        check(aver_fw_input_touch(1, t) == 1 && t[0] == 7.0f && t[2] == 0.25f && aver_fw_touch_available() == 1, "a real finger publishes with its pressure and marks the screen as present");
+        check(aver_fw_input_touch(0, t) == 0, "once real fingers exist the mouse stops standing in for one");
+        in.newFrame();
+        publish(in, false);
+        check(aver_fw_input_touch(1, t) == 0, "an unfocused window publishes every finger as up");
+        aver_fw_set_touch_emulation(0);
+        aver_fw_set_touch_available(0);
+    }
+    {
+        AVER_INFO("a pointer mode against the host's own capture rule");
+        using game::resolvePointerPlan;
+        check(resolvePointerPlan(AVER_FW_POINTER_AUTO, true, false).captured && !resolvePointerPlan(AVER_FW_POINTER_AUTO, false, false).captured,
+              "AUTO is the host's answer unchanged");
+        check(!resolvePointerPlan(AVER_FW_POINTER_VISIBLE, true, false).captured, "VISIBLE beats a playing session's capture");
+        check(resolvePointerPlan(AVER_FW_POINTER_CAPTURED, false, false).captured, "CAPTURED captures with no session playing");
+        check(resolvePointerPlan(AVER_FW_POINTER_HIDDEN, true, false).hidden && !resolvePointerPlan(AVER_FW_POINTER_HIDDEN, true, false).captured, "HIDDEN hides without capturing");
+        check(resolvePointerPlan(AVER_FW_POINTER_CONFINED, false, false).confined && !resolvePointerPlan(AVER_FW_POINTER_CONFINED, false, false).hidden, "CONFINED confines and shows");
+        const game::PointerPlan ch = resolvePointerPlan(AVER_FW_POINTER_CONFINED_HIDDEN, false, false);
+        check(ch.confined && ch.hidden && !ch.captured, "CONFINED_HIDDEN does both");
+        const game::PointerPlan freed = resolvePointerPlan(AVER_FW_POINTER_CAPTURED, true, true);
+        check(!freed.captured && !freed.hidden && !freed.confined, "a freed cursor (a menu is open) takes the pointer off the game in every mode");
+        check(!resolvePointerPlan(99, true, true).captured && resolvePointerPlan(99, true, false).captured, "an unknown mode behaves as AUTO");
+    }
+    {
+        AVER_INFO("publishing takes a waiting rumble request (zero strength: nothing may buzz on the machine running this)");
+        InputState in;
+        in.newFrame();
+        aver_fw_gamepad_rumble(0, 0.0f, 0.0f, 0.1f);
+        aver_fw_gamepad_rumble(3, 0.0f, 0.0f, 0.1f);
+        publish(in);
+        float r[3] = {};
+        check(aver_fw_take_gamepad_rumble(0, r) == 0 && aver_fw_take_gamepad_rumble(3, r) == 0, "a request on pad 0 and on pad 3 are both taken by one publish");
     }
 
     // ---- VK_SHIFT and not VK_LSHIFT ----

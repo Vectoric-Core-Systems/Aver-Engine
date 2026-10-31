@@ -1458,9 +1458,14 @@ public:
     void endFrame() override;
     bool runStandaloneCompute(const std::function<void(IRenderContext&)>& record) override;
     void setClearColor(f32 r, f32 g, f32 b, f32 a) override { clear_[0] = r; clear_[1] = g; clear_[2] = b; clear_[3] = a; }
-    void setVSync(bool on) override { vsync_ = on; }
-    bool vsync() const override { return vsync_; }
+    void setVSync(bool on) override { setPresentMode(on ? PresentMode::Fifo : PresentMode::Immediate); }
+    bool vsync() const override { return presentMode() != PresentMode::Immediate; }
     bool vsyncCanDisable() const override { return tearingSupported_; }
+    // The wanted mode is kept until the next swapchain is made; a change on a live swapchain rebuilds it at
+    // the next beginFrame (a present mode is fixed at creation). A mode the surface lacks falls to the nearest.
+    void setPresentMode(PresentMode m) override;
+    PresentMode presentMode() const override;
+    bool presentModeSupported(PresentMode m) const override;
     void setViewportRect(u32 x, u32 y, u32 w, u32 h) override;
     // D3D12Device's twin, same scene-space reasoning -- see IDevice::viewportAspect.
     f32  viewportAspect() const override {
@@ -2060,7 +2065,10 @@ public:
 private:
 
     bool hasSwapchain_ = false;
-    bool vsync_ = true;
+    PresentMode wantedPresent_ = PresentMode::Fifo;
+    bool presentModeDirty_ = false;   // presentMode_ changed on a live swapchain; beginFrame rebuilds it
+    bool mailboxSupported_ = false, relaxedSupported_ = false;   // MAILBOX / FIFO_RELAXED in the surface's list
+    VkPresentModeKHR pickPresentMode(PresentMode m) const;
     bool tearingSupported_ = false;   // VK_PRESENT_MODE_IMMEDIATE_KHR present in the surface's list; fixed for the swapchain's life
     f32 clear_[4] = {0.10f, 0.12f, 0.16f, 1.0f};
     f32 sceneClear_[4] = {0.0f, 0.0f, 0.0f, 1.0f};   // the same colour as the scene radiance that tonemaps back to it

@@ -455,6 +455,21 @@ public:
     virtual bool vsync() const { return true; }
     virtual bool vsyncCanDisable() const { return false; }
 
+    // How a finished frame reaches the display. A backend that has only the on/off switch above takes the
+    // defaults: every mode but Immediate is "vsync on", and presentMode() says which of Fifo / Immediate is
+    // really in force, so a request for a mode the device lacks reads back as the one it fell to.
+    enum class PresentMode : u8 {
+        Fifo,        // vsync: wait for the refresh, never tear
+        Immediate,   // vsync off: present at once, tears where the display allows
+        Adaptive,    // vsync, but a frame that is late presents at once (and may tear) instead of waiting a refresh
+        Mailbox,     // the newest finished frame replaces the one still queued at each refresh: no tearing, no backlog
+    };
+    virtual void setPresentMode(PresentMode m) { setVSync(m != PresentMode::Immediate); }
+    virtual PresentMode presentMode() const { return vsync() ? PresentMode::Fifo : PresentMode::Immediate; }
+    virtual bool presentModeSupported(PresentMode m) const {
+        return m == PresentMode::Fifo || (m == PresentMode::Immediate && vsyncCanDisable());
+    }
+
     // Confines scene rendering to a sub-rectangle of the backbuffer, in physical pixels with a
     // top-left origin. (0,0,0,0) = full backbuffer.
     virtual void setViewportRect(u32 x, u32 y, u32 w, u32 h) { (void)x; (void)y; (void)w; (void)h; }

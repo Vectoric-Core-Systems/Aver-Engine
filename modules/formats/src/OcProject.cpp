@@ -249,6 +249,10 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
             if (t.size() > 1) out.windowResizable = parseI32(t[1], -1);
         } else if (equalsCI(key, "WINDOW.FULLSCREEN")) {
             if (t.size() > 1) out.windowFullscreen = parseI32(t[1], -1);
+        } else if (equalsCI(key, "WINDOW.VSYNC")) {
+            if (t.size() > 1) out.windowVsync = parseI32(t[1], -1);
+        } else if (equalsCI(key, "WINDOW.MAXFPS")) {
+            if (t.size() > 1) out.windowMaxFps = parseI32(t[1], -1);
         } else if (equalsCI(key, "IMPORT.SCALE")) {
             if (t.size() > 1) out.importScale = static_cast<f32>(parseF64(t[1], -1.0));
         } else if (equalsCI(key, "IMPORT.CONVERTAXES")) {
@@ -435,7 +439,7 @@ bool isOwnedKey(std::string_view line) {
         "RENDER.MSAA", "RENDER.MESHSHADERS", "RENDER.GIUPDATEINTERVAL", "RENDER.GIVOLUME",
         "RENDER.EXPOSURE", "RENDER.BLOOM", "RENDER.AUTOEXPOSURE", "RENDER.TONEMAP",
         "RENDER.TONEMAPWHITE", "RENDER.ADJUSTBRIGHTNESS", "RENDER.ADJUSTCONTRAST", "RENDER.ADJUSTSATURATION",
-        "WINDOW.TITLE", "WINDOW.SIZE", "WINDOW.RESIZABLE", "WINDOW.FULLSCREEN",
+        "WINDOW.TITLE", "WINDOW.SIZE", "WINDOW.RESIZABLE", "WINDOW.FULLSCREEN", "WINDOW.VSYNC", "WINDOW.MAXFPS",
         "IMPORT.SCALE", "IMPORT.CONVERTAXES", "IMPORT.GENNORMALS", "IMPORT.GENMIPS",
         "IMPORT.MAXTEXTURE",
         "STREAM.LOADRADIUS", "STREAM.EVICTRADIUS", "STREAM.LOADBUDGET", "STREAM.EVICTBUDGET",
@@ -557,6 +561,8 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
     }
     appendKey(owned, "WINDOW.RESIZABLE", d.windowResizable);
     appendKey(owned, "WINDOW.FULLSCREEN", d.windowFullscreen);
+    appendKey(owned, "WINDOW.VSYNC", d.windowVsync);
+    appendKey(owned, "WINDOW.MAXFPS", d.windowMaxFps);
 
     appendKey(owned, "IMPORT.SCALE", d.importScale);
     appendKey(owned, "IMPORT.CONVERTAXES", d.importConvertAxes);

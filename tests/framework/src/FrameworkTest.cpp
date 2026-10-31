@@ -5,6 +5,7 @@
 #include "aver/core/Log.hpp"
 #include "aver/core/Math.hpp"
 #include "aver/framework/framework_abi.h"
+#include "aver/framework/InputKeys.hpp"
 #include "aver/framework/framework_hooks.h"
 #include "aver/framework/framework_terrain_abi.h"
 #include "aver/framework/framework_timers_abi.h"
@@ -1144,11 +1145,15 @@ static void testGamepad() {
     aver_fw_input_set_gamepad_axis(0, AVER_FW_GAMEPAD_AXIS_LEFT_X, -3.0f);
     check(aver_fw_input_gamepad_axis(0, AVER_FW_GAMEPAD_AXIS_LEFT_X) == -3.0f, "unclamped -- no dead zone of its own");
 
-    // Only pad 0 exists -- aver_fw_player_controller's own "player 0 only" precedent, applied here.
+    // Pads 0..AVER_FW_GAMEPAD_MAX-1 exist (minor 8); each keeps its own state.
     aver_fw_input_set_gamepad_button(1, AVER_FW_GAMEPAD_A, 1);
-    check(aver_fw_input_gamepad_button(1, AVER_FW_GAMEPAD_A) == 0, "pad != 0 is refused on both setter and getter");
-    aver_fw_input_set_gamepad_axis(1, AVER_FW_GAMEPAD_AXIS_LEFT_X, 1.0f);
-    check(aver_fw_input_gamepad_axis(1, AVER_FW_GAMEPAD_AXIS_LEFT_X) == 0.0f, "same for an axis on pad != 0");
+    check(aver_fw_input_gamepad_button(1, AVER_FW_GAMEPAD_A) == 1 && aver_fw_input_gamepad_button(0, AVER_FW_GAMEPAD_A) == 0,
+          "pad 1 holds its own button, pad 0 does not see it");
+    aver_fw_input_set_gamepad_button(1, AVER_FW_GAMEPAD_A, 0);
+    aver_fw_input_set_gamepad_axis(AVER_FW_GAMEPAD_MAX, AVER_FW_GAMEPAD_AXIS_LEFT_X, 1.0f);
+    check(aver_fw_input_gamepad_axis(AVER_FW_GAMEPAD_MAX, AVER_FW_GAMEPAD_AXIS_LEFT_X) == 0.0f, "a pad past the last is refused on both setter and getter");
+    aver_fw_input_set_gamepad_button(-1, AVER_FW_GAMEPAD_A, 1);
+    check(aver_fw_input_gamepad_button(-1, AVER_FW_GAMEPAD_A) == 0, "a negative pad is refused");
 
     aver_fw_input_set_gamepad_button(0, -1, 1);
     aver_fw_input_set_gamepad_button(0, AVER_FW_GAMEPAD_BUTTON_COUNT, 1);
@@ -1159,6 +1164,229 @@ static void testGamepad() {
     aver_fw_input_set_gamepad_axis(0, AVER_FW_GAMEPAD_AXIS_COUNT, 1.0f);
     check(aver_fw_input_gamepad_axis(0, -1) == 0.0f, "a negative axis index reads 0, not a crash");
     check(aver_fw_input_gamepad_axis(0, AVER_FW_GAMEPAD_AXIS_COUNT) == 0.0f, "an axis index at/past COUNT reads 0");
+}
+
+// Checks the minor 8 input and display additions: the appended key slots and their Win32 mapping, pads 1..3 with
+// connection/name/rumble, an action reading any pad, touch, the pointer, cursor and window requests, present
+// modes and the frame cap.
+static void testInputDisplay() {
+    AVER_INFO("=== input and display (minor 8) ===");
+
+    // ---- the key set: appended slots keep the old numbers and the VK table reaches them ----
+    check(AVER_FW_KEY_MOUSE_MIDDLE == 49 && AVER_FW_KEY_F1 == 50, "the original 50 slots keep their numbers; new ones start at 50");
+    check(fw::frameworkKeyFromVk('W') == AVER_FW_KEY_W && fw::frameworkKeyFromVk(0x25) == AVER_FW_KEY_LEFT, "an old key maps as before");
+    check(fw::frameworkKeyFromVk(0x70) == AVER_FW_KEY_F1 && fw::frameworkKeyFromVk(0x7B) == AVER_FW_KEY_F12, "F1..F12");
+    check(fw::frameworkKeyFromVk(0x7C) == -1, "F13 has no slot");
+    check(fw::frameworkKeyFromVk(0x21) == AVER_FW_KEY_PAGEUP && fw::frameworkKeyFromVk(0x22) == AVER_FW_KEY_PAGEDOWN, "Page Up / Down");
+    check(fw::frameworkKeyFromVk(0x24) == AVER_FW_KEY_HOME && fw::frameworkKeyFromVk(0x23) == AVER_FW_KEY_END, "Home / End");
+    check(fw::frameworkKeyFromVk(0x2D) == AVER_FW_KEY_INSERT && fw::frameworkKeyFromVk(0x2E) == AVER_FW_KEY_DELETE, "Insert / Delete");
+    check(fw::frameworkKeyFromVk(0x08) == AVER_FW_KEY_BACKSPACE, "Backspace");
+    check(fw::frameworkKeyFromVk(0xBD) == AVER_FW_KEY_MINUS && fw::frameworkKeyFromVk(0xBB) == AVER_FW_KEY_EQUAL, "minus and equal");
+    check(fw::frameworkKeyFromVk(0xDB) == AVER_FW_KEY_LBRACKET && fw::frameworkKeyFromVk(0xDD) == AVER_FW_KEY_RBRACKET, "brackets");
+    check(fw::frameworkKeyFromVk(0xBA) == AVER_FW_KEY_SEMICOLON && fw::frameworkKeyFromVk(0xDE) == AVER_FW_KEY_APOSTROPHE, "semicolon and apostrophe");
+    check(fw::frameworkKeyFromVk(0xBC) == AVER_FW_KEY_COMMA && fw::frameworkKeyFromVk(0xBE) == AVER_FW_KEY_PERIOD, "comma and period");
+    check(fw::frameworkKeyFromVk(0xBF) == AVER_FW_KEY_SLASH && fw::frameworkKeyFromVk(0xC0) == AVER_FW_KEY_GRAVE && fw::frameworkKeyFromVk(0xDC) == AVER_FW_KEY_BACKSLASH, "slash, grave, backslash");
+    check(fw::frameworkKeyFromVk(0x60) == AVER_FW_KEY_KP0 && fw::frameworkKeyFromVk(0x69) == AVER_FW_KEY_KP9, "numpad digits");
+    check(fw::frameworkKeyFromVk(0x6B) == AVER_FW_KEY_KPADD && fw::frameworkKeyFromVk(0x6D) == AVER_FW_KEY_KPSUBTRACT &&
+          fw::frameworkKeyFromVk(0x6A) == AVER_FW_KEY_KPMULTIPLY && fw::frameworkKeyFromVk(0x6F) == AVER_FW_KEY_KPDIVIDE &&
+          fw::frameworkKeyFromVk(0x6E) == AVER_FW_KEY_KPDECIMAL && fw::frameworkKeyFromVk(0x6C) == AVER_FW_KEY_KPENTER, "numpad operators, decimal, and enter (as 0x6C)");
+    check(fw::frameworkKeyFromVk(0x0D) == AVER_FW_KEY_ENTER, "Enter is still Enter");
+    check(fw::frameworkKeyFromVk(0x14) == AVER_FW_KEY_CAPSLOCK && fw::frameworkKeyFromVk(0x90) == AVER_FW_KEY_NUMLOCK &&
+          fw::frameworkKeyFromVk(0x91) == AVER_FW_KEY_SCROLLLOCK && fw::frameworkKeyFromVk(0x13) == AVER_FW_KEY_PAUSE &&
+          fw::frameworkKeyFromVk(0x2C) == AVER_FW_KEY_PRINTSCREEN, "lock keys, pause, print screen");
+    check(fw::frameworkKeyFromVk(0x5B) == AVER_FW_KEY_META && fw::frameworkKeyFromVk(0x5C) == AVER_FW_KEY_META && fw::frameworkKeyFromVk(0x5D) == AVER_FW_KEY_MENU, "meta and menu");
+    // Every slot past the original set is reachable from some VK, except the mouse and wheel ones, and every name is set.
+    {
+        bool seen[AVER_FW_KEY_COUNT] = {};
+        for (int vk = 0; vk < 256; ++vk) { const int k = fw::frameworkKeyFromVk(vk); if (k >= 0) seen[k] = true; }
+        int missing = 0;
+        for (int k = 0; k < AVER_FW_KEY_COUNT; ++k) {
+            const bool mouse = k == AVER_FW_KEY_MOUSE_LEFT || k == AVER_FW_KEY_MOUSE_RIGHT || k == AVER_FW_KEY_MOUSE_MIDDLE || k >= AVER_FW_KEY_MOUSE_X1;
+            if (!seen[k] && !mouse) ++missing;
+        }
+        check(missing == 0, "every keyboard slot is reachable from a Win32 VK");
+        check(std::strcmp(fw::frameworkKeyName(AVER_FW_KEY_F12), "F12") == 0 && std::strcmp(fw::frameworkKeyName(AVER_FW_KEY_KPENTER), "KPENTER") == 0 &&
+              std::strcmp(fw::frameworkKeyName(AVER_FW_KEY_MOUSE_WHEEL_RIGHT), "MOUSE_WHEEL_RIGHT") == 0 && std::strcmp(fw::frameworkKeyName(AVER_FW_KEY_COUNT), "?") == 0,
+              "key names line up with the slots");
+        check(fw::frameworkKeyFromMouseButton(3) == AVER_FW_KEY_MOUSE_X1 && fw::frameworkKeyFromMouseButton(4) == AVER_FW_KEY_MOUSE_X2 && fw::frameworkKeyFromMouseButton(5) == -1,
+              "mouse buttons 3 and 4 are the side buttons");
+    }
+    aver_fw_input_new_frame();
+    aver_fw_input_set_key(AVER_FW_KEY_F10, 1);
+    aver_fw_input_set_key(AVER_FW_KEY_MOUSE_WHEEL_UP, 1);
+    check(aver_fw_input_key(AVER_FW_KEY_F10) == 1 && aver_fw_input_key_pressed(AVER_FW_KEY_F10) == 1, "a new slot has edges like the old ones");
+    check(aver_fw_input_key(AVER_FW_KEY_MOUSE_WHEEL_UP) == 1, "the last slot works");
+    aver_fw_input_new_frame();
+    aver_fw_input_set_key(AVER_FW_KEY_F10, 0);
+    aver_fw_input_set_key(AVER_FW_KEY_MOUSE_WHEEL_UP, 0);
+    check(aver_fw_input_key_released(AVER_FW_KEY_F10) == 1 && aver_fw_input_key(AVER_FW_KEY_MOUSE_WHEEL_UP) == 0, "and release");
+
+    // ---- pads: connection, name, rumble, and an action that reads any pad ----
+    aver_fw_input_set_gamepad_connected(2, 1, "Test Pad");
+    check(aver_fw_input_gamepad_connected(2) == 1 && std::strcmp(aver_fw_input_gamepad_name(2), "Test Pad") == 0, "pad 2 reports connected with its name");
+    check(aver_fw_input_gamepad_connected(0) == 0 && aver_fw_input_gamepad_name(0)[0] == '\0', "pad 0 does not");
+    check(aver_fw_input_gamepad_connected(AVER_FW_GAMEPAD_MAX) == 0 && aver_fw_input_gamepad_name(-1)[0] == '\0', "an out-of-range pad is not connected and has no name");
+    aver_fw_input_set_gamepad_button(2, AVER_FW_GAMEPAD_TOUCHPAD, 1);
+    aver_fw_input_set_gamepad_axis(2, AVER_FW_GAMEPAD_AXIS_RIGHT_X, 0.5f);
+    check(aver_fw_input_gamepad_button(2, AVER_FW_GAMEPAD_TOUCHPAD) == 1, "the last of the 21 buttons works");
+    const int32_t padAct = aver_fw_action_register("AnyPadAction", AVER_FW_ACTION_DIGITAL);
+    const int32_t padAxis = aver_fw_action_register("AnyPadAxis", AVER_FW_ACTION_AXIS1D);
+    aver_fw_action_bind(padAct, AVER_FW_ACTION_SRC_GAMEPAD_BUTTON, AVER_FW_GAMEPAD_TOUCHPAD, 1.0f, 0, 0);
+    aver_fw_action_bind(padAxis, AVER_FW_ACTION_SRC_GAMEPAD_AXIS, AVER_FW_GAMEPAD_AXIS_RIGHT_X, 1.0f, 0, 0);
+    float v2[2] = {0, 0};
+    aver_fw_action_value2(padAxis, v2);
+    check(aver_fw_action_held(padAct) == 1 && v2[0] == 0.5f, "an action bound to a pad button/axis reads pad 2: it reads any pad");
+    aver_fw_input_set_gamepad_axis(0, AVER_FW_GAMEPAD_AXIS_RIGHT_X, -0.9f);
+    aver_fw_action_value2(padAxis, v2);
+    check(v2[0] == -0.9f, "of two pads the axis pushed further wins");
+    aver_fw_input_set_gamepad_connected(2, 0, nullptr);
+    check(aver_fw_input_gamepad_connected(2) == 0 && aver_fw_input_gamepad_button(2, AVER_FW_GAMEPAD_TOUCHPAD) == 0 &&
+          aver_fw_input_gamepad_axis(2, AVER_FW_GAMEPAD_AXIS_RIGHT_X) == 0.0f, "a pad that leaves is cleared, not frozen");
+    aver_fw_input_set_gamepad_axis(0, AVER_FW_GAMEPAD_AXIS_RIGHT_X, 0.0f);
+    aver_fw_action_clear_bindings();
+
+    float rumble[3] = {0, 0, 0};
+    check(aver_fw_take_gamepad_rumble(1, rumble) == 0, "no rumble waiting at first");
+    aver_fw_gamepad_rumble(1, 0.25f, 2.0f, 1.5f);
+    check(aver_fw_take_gamepad_rumble(1, rumble) == 1 && rumble[0] == 0.25f && rumble[1] == 1.0f && rumble[2] == 1.5f, "a rumble request is taken with its motors clamped to 0..1");
+    check(aver_fw_take_gamepad_rumble(1, rumble) == 0, "and only once");
+    aver_fw_gamepad_stop_rumble(1);
+    check(aver_fw_take_gamepad_rumble(1, rumble) == 1 && rumble[0] == 0.0f && rumble[1] == 0.0f, "stopping is a zero request");
+    aver_fw_gamepad_rumble(AVER_FW_GAMEPAD_MAX, 1.0f, 1.0f, 1.0f);
+    check(aver_fw_take_gamepad_rumble(AVER_FW_GAMEPAD_MAX, rumble) == 0, "a pad past the last takes no rumble");
+
+    // ---- half-axis bindings: scale -1 plus clamp keeps one direction of a signed axis ----
+    {
+        const int32_t left = aver_fw_action_register("HalfAxisLeft", AVER_FW_ACTION_DIGITAL);
+        const int32_t right = aver_fw_action_register("HalfAxisRight", AVER_FW_ACTION_DIGITAL);
+        const int32_t lb = aver_fw_action_bind_ex(left, AVER_FW_ACTION_SRC_GAMEPAD_AXIS, AVER_FW_GAMEPAD_AXIS_LEFT_X, -1.0f, 0, 0);
+        const int32_t rb = aver_fw_action_bind_ex(right, AVER_FW_ACTION_SRC_GAMEPAD_AXIS, AVER_FW_GAMEPAD_AXIS_LEFT_X, 1.0f, 0, 0);
+        check(aver_fw_action_add_modifier(left, lb, "clamp") == 1 && aver_fw_action_add_modifier(right, rb, "clamp") == 1, "the clamp modifier attaches to a binding");
+        aver_fw_input_new_frame();
+        aver_fw_input_set_gamepad_axis(0, AVER_FW_GAMEPAD_AXIS_LEFT_X, -0.8f);
+        float lv[3] = {}, rv[3] = {};
+        aver_fw_action_value3(left, lv); aver_fw_action_value3(right, rv);
+        check(aver_fw_action_held(left) == 1 && aver_fw_action_held(right) == 0 && std::fabs(lv[0] - 0.8f) < 1e-5f && rv[0] == 0.0f,
+              "stick pushed left: the left half reads 0.8, the right half nothing");
+        aver_fw_input_new_frame();
+        aver_fw_input_set_gamepad_axis(0, AVER_FW_GAMEPAD_AXIS_LEFT_X, 0.6f);
+        aver_fw_action_value3(left, lv); aver_fw_action_value3(right, rv);
+        check(aver_fw_action_held(left) == 0 && aver_fw_action_held(right) == 1 && lv[0] == 0.0f && std::fabs(rv[0] - 0.6f) < 1e-5f,
+              "stick pushed right: the right half reads 0.6, the left half nothing");
+        const int32_t plain = aver_fw_action_register("HalfAxisPlain", AVER_FW_ACTION_DIGITAL);
+        aver_fw_action_bind(plain, AVER_FW_ACTION_SRC_GAMEPAD_AXIS, AVER_FW_GAMEPAD_AXIS_LEFT_X, -1.0f, 0, 0);
+        check(aver_fw_action_held(plain) == 1, "without the clamp the same binding is held in both directions (the defect this mode fixes)");
+        aver_fw_input_set_gamepad_axis(0, AVER_FW_GAMEPAD_AXIS_LEFT_X, 0.0f);
+        aver_fw_action_clear_bindings();
+        aver_fw_action_clear_config(left);
+        aver_fw_action_clear_config(right);
+    }
+
+    // ---- touch ----
+    aver_fw_input_new_frame();
+    aver_fw_input_set_touch(3, 1, 12.0f, 34.0f, 2.0f);
+    float t[3] = {0, 0, 0};
+    check(aver_fw_input_touch(3, t) == 1 && t[0] == 12.0f && t[1] == 34.0f && t[2] == 1.0f, "a finger reads back, pressure clamped");
+    check(aver_fw_input_touch_pressed(3) == 1 && aver_fw_input_touch_pressed(2) == 0, "pressed on the frame it went down");
+    aver_fw_input_new_frame();
+    aver_fw_input_set_touch(3, 1, 13.0f, 34.0f, 1.0f);
+    check(aver_fw_input_touch_pressed(3) == 0, "no longer a press the next frame");
+    aver_fw_input_new_frame();
+    aver_fw_input_set_touch(3, 0, 99.0f, 99.0f, 1.0f);
+    check(aver_fw_input_touch(3, t) == 0 && t[0] == 0.0f && aver_fw_input_touch_released(3) == 1, "lifted: reads up with zeros and a released edge");
+    aver_fw_input_set_touch(AVER_FW_TOUCH_MAX, 1, 1.0f, 1.0f, 1.0f);
+    check(aver_fw_input_touch(AVER_FW_TOUCH_MAX, t) == 0, "a finger past the last is refused");
+    check(aver_fw_touch_emulation() == 0 && aver_fw_touch_available() == 0, "emulation and a touch screen are off by default");
+    aver_fw_set_touch_emulation(5);
+    aver_fw_set_touch_available(1);
+    check(aver_fw_touch_emulation() == 1 && aver_fw_touch_available() == 1, "both switches take any non-zero as on");
+    aver_fw_set_touch_emulation(0);
+    aver_fw_set_touch_available(0);
+
+    // ---- pointer and cursor ----
+    check(aver_fw_pointer_mode() == AVER_FW_POINTER_AUTO, "the pointer mode starts at AUTO");
+    aver_fw_set_pointer_mode(AVER_FW_POINTER_CONFINED_HIDDEN);
+    aver_fw_set_pointer_mode(99);
+    aver_fw_set_pointer_mode(-1);
+    check(aver_fw_pointer_mode() == AVER_FW_POINTER_CONFINED_HIDDEN, "a mode in range is kept, one out of range is ignored");
+    aver_fw_set_pointer_mode(AVER_FW_POINTER_AUTO);
+    aver_fw_set_cursor_shape(AVER_FW_CURSOR_HELP);
+    aver_fw_set_cursor_shape(AVER_FW_CURSOR_COUNT);
+    check(aver_fw_cursor_shape() == AVER_FW_CURSOR_HELP, "a cursor shape is kept, one out of range is ignored");
+    aver_fw_set_cursor_shape(AVER_FW_CURSOR_ARROW);
+    const int32_t serial0 = aver_fw_cursor_image_serial();
+    const uint8_t px[4 * 2 * 3] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24};
+    check(aver_fw_set_cursor_image(AVER_FW_CURSOR_CROSS, px, 2, 3, 9, -4) == 1, "a 2x3 cursor image is taken");
+    int32_t info[4] = {};
+    const uint8_t* got = aver_fw_cursor_image(AVER_FW_CURSOR_CROSS, info);
+    check(got && info[0] == 2 && info[1] == 3 && info[2] == 1 && info[3] == 0 && std::memcmp(got, px, sizeof px) == 0,
+          "it reads back with the hotspot clamped inside it");
+    check(aver_fw_cursor_image_serial() != serial0, "the serial moved");
+    check(aver_fw_cursor_image(AVER_FW_CURSOR_ARROW, info) == nullptr, "a shape with no image has none");
+    check(aver_fw_set_cursor_image(AVER_FW_CURSOR_CROSS, px, 257, 1, 0, 0) == 0 && aver_fw_cursor_image(AVER_FW_CURSOR_CROSS, info) != nullptr,
+          "an image over 256 is refused and the old one stays");
+    check(aver_fw_set_cursor_image(AVER_FW_CURSOR_COUNT, px, 2, 3, 0, 0) == 0, "a shape out of range is refused");
+    check(aver_fw_set_cursor_image(AVER_FW_CURSOR_CROSS, nullptr, 0, 0, 0, 0) == 1 && aver_fw_cursor_image(AVER_FW_CURSOR_CROSS, info) == nullptr, "a null image puts the system shape back");
+    float warp[2] = {0, 0};
+    check(aver_fw_take_pointer_warp(warp) == 0, "no warp waiting at first");
+    aver_fw_warp_pointer(100.5f, 20.0f);
+    check(aver_fw_take_pointer_warp(warp) == 1 && warp[0] == 100.5f && warp[1] == 20.0f && aver_fw_take_pointer_warp(warp) == 0, "a warp is taken once");
+
+    // ---- window ----
+    int32_t req[AVER_FW_WINDOW_STATE_COUNT] = {};
+    check(aver_fw_window_take_requests(req) == 0, "no window request at first");
+    aver_fw_window_set_mode(AVER_FW_WINDOW_FULLSCREEN + 1);
+    aver_fw_window_set_size(0, 100);
+    check(aver_fw_window_take_requests(req) == 0, "a mode out of range and a size under 1 are ignored");
+    aver_fw_window_set_mode(AVER_FW_WINDOW_MAXIMIZED);
+    aver_fw_window_set_size(800, 600);
+    aver_fw_window_set_position(-20, 40);
+    aver_fw_window_set_flag(AVER_FW_WINDOW_FLAG_BORDERLESS, 1);
+    aver_fw_window_set_flag(AVER_FW_WINDOW_FLAG_RESIZABLE, 0);
+    aver_fw_window_set_flag(0, 1);
+    aver_fw_window_set_flag(64, 1);
+    const int32_t mask = aver_fw_window_take_requests(req);
+    check(mask == (AVER_FW_WINDOW_REQ_MODE | AVER_FW_WINDOW_REQ_SIZE | AVER_FW_WINDOW_REQ_POSITION | AVER_FW_WINDOW_REQ_FLAGS), "all four kinds are flagged");
+    check(req[AVER_FW_WINDOW_MODE] == AVER_FW_WINDOW_MAXIMIZED && req[AVER_FW_WINDOW_WIDTH] == 800 && req[AVER_FW_WINDOW_HEIGHT] == 600 &&
+          req[AVER_FW_WINDOW_X] == -20 && req[AVER_FW_WINDOW_Y] == 40, "mode, size and position come through");
+    check(req[AVER_FW_WINDOW_FLAGS] == AVER_FW_WINDOW_FLAG_BORDERLESS && req[AVER_FW_WINDOW_FLAGS_OFF] == AVER_FW_WINDOW_FLAG_RESIZABLE,
+          "flags to turn on and off are kept apart; an unknown flag is dropped");
+    check(aver_fw_window_take_requests(req) == 0, "a take clears the mask");
+    aver_fw_window_set_flag(AVER_FW_WINDOW_FLAG_ALWAYS_ON_TOP, 1);
+    aver_fw_window_set_flag(AVER_FW_WINDOW_FLAG_ALWAYS_ON_TOP, 0);
+    aver_fw_window_take_requests(req);
+    check(req[AVER_FW_WINDOW_FLAGS] == 0 && req[AVER_FW_WINDOW_FLAGS_OFF] == AVER_FW_WINDOW_FLAG_ALWAYS_ON_TOP, "the last word on a flag wins");
+    uint8_t title[8] = {};
+    check(aver_fw_window_take_title(title, sizeof title) == 0, "no title waiting at first");
+    aver_fw_window_set_title("caf\xC3\xA9 window");
+    check(aver_fw_window_take_title(title, 5) == 3 && std::memcmp(title, "caf", 4) == 0, "a title cut short stops before half a character");
+    check(aver_fw_window_take_title(title, sizeof title) == 0, "and is taken once");
+    int32_t state[AVER_FW_WINDOW_STATE_COUNT] = {};
+    aver_fw_window_state(state);
+    check(state[AVER_FW_WINDOW_WIDTH] == 0, "state reads zeros before any publish");
+    int32_t pub[AVER_FW_WINDOW_STATE_COUNT] = {AVER_FW_WINDOW_FULLSCREEN, 1920, 1080, 0, 0, 3, 1920, 1080, 150, 1};
+    aver_fw_window_publish(pub);
+    aver_fw_window_state(state);
+    check(state[AVER_FW_WINDOW_MODE] == AVER_FW_WINDOW_FULLSCREEN && state[AVER_FW_WINDOW_WIDTH] == 1920 && state[AVER_FW_WINDOW_DPI_PERCENT] == 150 && state[AVER_FW_WINDOW_FOCUSED] == 1,
+          "published state reads back");
+
+    // ---- present modes and the frame cap ----
+    check(aver_fw_take_present_mode_request() == -1 && aver_fw_present_mode() == -1, "no present request and no published mode at first");
+    aver_fw_request_present_mode(AVER_FW_PRESENT_MAILBOX);
+    aver_fw_request_present_mode(77);
+    check(aver_fw_take_present_mode_request() == AVER_FW_PRESENT_MAILBOX && aver_fw_take_present_mode_request() == -1, "a present mode is taken once; one out of range is ignored");
+    aver_fw_request_vsync(0);
+    check(aver_fw_take_present_mode_request() == AVER_FW_PRESENT_IMMEDIATE, "request_vsync(0) is the Immediate mode");
+    aver_fw_request_vsync(1);
+    check(aver_fw_take_present_mode_request() == AVER_FW_PRESENT_FIFO, "request_vsync(1) is the Fifo mode");
+    aver_fw_take_vsync_request();
+    aver_fw_publish_present_mode(AVER_FW_PRESENT_ADAPTIVE);
+    check(aver_fw_present_mode() == AVER_FW_PRESENT_ADAPTIVE, "the published mode reads back");
+    check(aver_fw_max_fps() == 0, "no frame cap by default");
+    aver_fw_set_max_fps(144);
+    aver_fw_set_max_fps(-5);
+    check(aver_fw_max_fps() == 144, "a cap is kept, a negative one ignored");
+    aver_fw_set_max_fps(0);
 }
 
 // Checks the named-action layer ported from Aver.Framework's EnhancedInput.cs: registration
@@ -2063,6 +2291,7 @@ int main() {
     testInput();
     testRawVk();
     testGamepad();
+    testInputDisplay();
     testActions();
     testInputScheme();
     testActionTriggers();

@@ -80,6 +80,9 @@ V3 applyModifiers(const std::vector<fmt::OcModifierSpec>& mods, V3 v, float dt, 
                 }
                 break;
             }
+            case fmt::OcModifierKind::Clamp:
+                for (int k = 0; k < 3; ++k) v.c[k] = std::min(std::max(v.c[k], m.v[0]), m.v[1]);
+                break;
             case fmt::OcModifierKind::Curve:
                 for (int k = 0; k < 3; ++k)
                     v.c[k] = v.c[k] == 0.0f ? 0.0f : std::copysign(std::pow(std::fabs(v.c[k]), m.v[k]), v.c[k]);

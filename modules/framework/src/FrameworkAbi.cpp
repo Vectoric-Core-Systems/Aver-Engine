@@ -796,8 +796,160 @@ void aver_fw_debug_lines_advance(float realDt) {
 }
 
 static int32_t g_vsyncRequest = -1;
-void aver_fw_request_vsync(int32_t on) { g_vsyncRequest = on != 0 ? 1 : 0; }
-int32_t aver_fw_take_vsync_request(void) { const int32_t r = g_vsyncRequest; g_vsyncRequest = -1; return r; }
+static int32_t g_presentRequest = -1, g_presentMode = -1, g_maxFps = 0;
+static bool g_presentFromVsync = false;   // the waiting present request is the one request_vsync made
+void aver_fw_request_vsync(int32_t on) {
+    g_vsyncRequest = on != 0 ? 1 : 0;
+    g_presentRequest = on != 0 ? AVER_FW_PRESENT_FIFO : AVER_FW_PRESENT_IMMEDIATE;
+    g_presentFromVsync = true;
+}
+int32_t aver_fw_take_vsync_request(void) {
+    const int32_t r = g_vsyncRequest;
+    g_vsyncRequest = -1;
+    // The old and the new ask are the same ask: whoever takes it by the old name takes the present request it made too.
+    if (r >= 0 && g_presentFromVsync) { g_presentRequest = -1; g_presentFromVsync = false; }
+    return r;
+}
+void aver_fw_request_present_mode(int32_t mode) {
+    if (mode >= 0 && mode < AVER_FW_PRESENT_COUNT) { g_presentRequest = mode; g_presentFromVsync = false; }
+}
+int32_t aver_fw_take_present_mode_request(void) { const int32_t r = g_presentRequest; g_presentRequest = -1; g_presentFromVsync = false; return r; }
+void aver_fw_publish_present_mode(int32_t mode) { g_presentMode = mode; }
+int32_t aver_fw_present_mode(void) { return g_presentMode; }
+void aver_fw_set_max_fps(int32_t fps) { if (fps >= 0) g_maxFps = fps; }
+int32_t aver_fw_max_fps(void) { return g_maxFps; }
+
+// ---- POINTER AND CURSOR, WINDOW: requests in, published state out (framework_abi.h, minor 8) ----
+static int32_t g_pointerMode = AVER_FW_POINTER_AUTO, g_cursorShape = AVER_FW_CURSOR_ARROW, g_cursorSerial = 0;
+struct CursorImage { std::vector<uint8_t> rgba; int32_t w = 0, h = 0, hotX = 0, hotY = 0; };
+static CursorImage g_cursorImages[AVER_FW_CURSOR_COUNT];
+static bool g_warpPending = false;
+static float g_warp[2] = {0.0f, 0.0f};
+void aver_fw_set_pointer_mode(int32_t mode) {
+    if (mode >= AVER_FW_POINTER_AUTO && mode <= AVER_FW_POINTER_CONFINED_HIDDEN) g_pointerMode = mode;
+}
+int32_t aver_fw_pointer_mode(void) { return g_pointerMode; }
+void aver_fw_set_cursor_shape(int32_t shape) {
+    if (shape >= 0 && shape < AVER_FW_CURSOR_COUNT) g_cursorShape = shape;
+}
+int32_t aver_fw_cursor_shape(void) { return g_cursorShape; }
+int32_t aver_fw_set_cursor_image(int32_t shape, const uint8_t* rgba, int32_t w, int32_t h, int32_t hotX, int32_t hotY) {
+    if (shape < 0 || shape >= AVER_FW_CURSOR_COUNT) return 0;
+    CursorImage& c = g_cursorImages[shape];
+    if (!rgba || w <= 0 || h <= 0) {
+        c = CursorImage{};
+        ++g_cursorSerial;
+        return 1;
+    }
+    if (w > 256 || h > 256) return 0;
+    c.rgba.assign(rgba, rgba + static_cast<usize>(w) * static_cast<usize>(h) * 4u);
+    c.w = w; c.h = h;
+    c.hotX = hotX < 0 ? 0 : (hotX >= w ? w - 1 : hotX);
+    c.hotY = hotY < 0 ? 0 : (hotY >= h ? h - 1 : hotY);
+    ++g_cursorSerial;
+    return 1;
+}
+int32_t aver_fw_cursor_image_serial(void) { return g_cursorSerial; }
+const uint8_t* aver_fw_cursor_image(int32_t shape, int32_t* out4) {
+    if (shape < 0 || shape >= AVER_FW_CURSOR_COUNT || g_cursorImages[shape].rgba.empty()) return nullptr;
+    const CursorImage& c = g_cursorImages[shape];
+    if (out4) { out4[0] = c.w; out4[1] = c.h; out4[2] = c.hotX; out4[3] = c.hotY; }
+    return c.rgba.data();
+}
+void aver_fw_warp_pointer(float x, float y) {
+    if (x != x || y != y) return;
+    g_warp[0] = x; g_warp[1] = y; g_warpPending = true;
+}
+int32_t aver_fw_take_pointer_warp(float* out2) {
+    if (!g_warpPending) return 0;
+    g_warpPending = false;
+    if (out2) { out2[0] = g_warp[0]; out2[1] = g_warp[1]; }
+    return 1;
+}
+
+static int32_t g_winReq[AVER_FW_WINDOW_STATE_COUNT] = {};
+static int32_t g_winReqMask = 0, g_winOn = 0, g_winOff = 0;
+static std::string g_winTitle;
+static bool g_winTitlePending = false;
+static int32_t g_winState[AVER_FW_WINDOW_STATE_COUNT] = {};
+void aver_fw_window_set_mode(int32_t mode) {
+    if (mode < AVER_FW_WINDOW_WINDOWED || mode > AVER_FW_WINDOW_FULLSCREEN) return;
+    g_winReq[AVER_FW_WINDOW_MODE] = mode;
+    g_winReqMask |= AVER_FW_WINDOW_REQ_MODE;
+}
+void aver_fw_window_set_size(int32_t w, int32_t h) {
+    if (w < 1 || h < 1) return;
+    g_winReq[AVER_FW_WINDOW_WIDTH] = w; g_winReq[AVER_FW_WINDOW_HEIGHT] = h;
+    g_winReqMask |= AVER_FW_WINDOW_REQ_SIZE;
+}
+void aver_fw_window_set_position(int32_t x, int32_t y) {
+    g_winReq[AVER_FW_WINDOW_X] = x; g_winReq[AVER_FW_WINDOW_Y] = y;
+    g_winReqMask |= AVER_FW_WINDOW_REQ_POSITION;
+}
+void aver_fw_window_set_flag(int32_t flag, int32_t on) {
+    const int32_t all = AVER_FW_WINDOW_FLAG_RESIZABLE | AVER_FW_WINDOW_FLAG_BORDERLESS | AVER_FW_WINDOW_FLAG_ALWAYS_ON_TOP;
+    if (flag == 0 || (flag & ~all) != 0) return;
+    if (on) { g_winOn |= flag; g_winOff &= ~flag; } else { g_winOff |= flag; g_winOn &= ~flag; }
+    g_winReqMask |= AVER_FW_WINDOW_REQ_FLAGS;
+}
+void aver_fw_window_set_title(const char* utf8) {
+    g_winTitle = utf8 ? utf8 : "";
+    g_winTitlePending = true;
+}
+int32_t aver_fw_window_take_requests(int32_t* out10) {
+    const int32_t mask = g_winReqMask;
+    if (out10) {
+        for (int32_t i = 0; i < AVER_FW_WINDOW_STATE_COUNT; ++i) out10[i] = g_winReq[i];
+        out10[AVER_FW_WINDOW_FLAGS] = g_winOn;
+        out10[AVER_FW_WINDOW_FLAGS_OFF] = g_winOff;
+    }
+    g_winReqMask = 0; g_winOn = 0; g_winOff = 0;
+    return mask;
+}
+int32_t aver_fw_window_take_title(uint8_t* buf, int32_t cap) {
+    if (!g_winTitlePending || !buf || cap < 1) return 0;
+    g_winTitlePending = false;
+    // Cut at a whole character: a title is UTF-8, and half of a multi-byte one is not text.
+    usize n = std::min(g_winTitle.size(), static_cast<usize>(cap - 1));
+    while (n > 0 && n < g_winTitle.size() && (static_cast<unsigned char>(g_winTitle[n]) & 0xC0u) == 0x80u) --n;
+    std::memcpy(buf, g_winTitle.data(), n);
+    buf[n] = 0;
+    return static_cast<int32_t>(n);
+}
+void aver_fw_window_publish(const int32_t* in10) {
+    if (in10) for (int32_t i = 0; i < AVER_FW_WINDOW_STATE_COUNT; ++i) g_winState[i] = in10[i];
+}
+void aver_fw_window_state(int32_t* out10) {
+    if (out10) for (int32_t i = 0; i < AVER_FW_WINDOW_STATE_COUNT; ++i) out10[i] = g_winState[i];
+}
+
+// ---- TOUCH ----
+struct TouchSlot { unsigned char cur = 0, prev = 0; float x = 0, y = 0, pressure = 0; };
+static TouchSlot g_touch[AVER_FW_TOUCH_MAX];
+static int32_t g_touchEmulation = 0, g_touchAvailable = 0;
+void aver_fw_input_set_touch(int32_t index, int32_t down, float x, float y, float pressure) {
+    if (index < 0 || index >= AVER_FW_TOUCH_MAX) return;
+    TouchSlot& t = g_touch[index];
+    t.cur = down ? 1 : 0;
+    t.x = down ? x : 0.0f; t.y = down ? y : 0.0f;
+    t.pressure = down ? (pressure < 0.0f ? 0.0f : (pressure > 1.0f ? 1.0f : pressure)) : 0.0f;
+}
+int32_t aver_fw_input_touch(int32_t index, float* out3) {
+    if (index < 0 || index >= AVER_FW_TOUCH_MAX) return 0;
+    const TouchSlot& t = g_touch[index];
+    if (out3) { out3[0] = t.x; out3[1] = t.y; out3[2] = t.pressure; }
+    return t.cur;
+}
+int32_t aver_fw_input_touch_pressed(int32_t index) {
+    return index >= 0 && index < AVER_FW_TOUCH_MAX && g_touch[index].cur && !g_touch[index].prev ? 1 : 0;
+}
+int32_t aver_fw_input_touch_released(int32_t index) {
+    return index >= 0 && index < AVER_FW_TOUCH_MAX && !g_touch[index].cur && g_touch[index].prev ? 1 : 0;
+}
+void aver_fw_set_touch_emulation(int32_t on) { g_touchEmulation = on != 0 ? 1 : 0; }
+int32_t aver_fw_touch_emulation(void) { return g_touchEmulation; }
+void aver_fw_set_touch_available(int32_t available) { g_touchAvailable = available != 0 ? 1 : 0; }
+int32_t aver_fw_touch_available(void) { return g_touchAvailable; }
 
 // The open project's directories, as the host published them.
 static std::string g_projectDir, g_contentDir, g_userDir;
@@ -1548,6 +1700,7 @@ void aver_fw_input_new_frame(void) {
     // Gamepad buttons/axes are LEVEL state, not a delta like the mouse, so this is a straight roll --
     // see gamepadInputNewFrame's own comment for why it lives in the GAMEPAD section instead of here.
     gamepadInputNewFrame();
+    for (TouchSlot& t : g_touch) t.prev = t.cur;
 }
 // Sets the held state of a key. Out-of-range keys are ignored.
 void aver_fw_input_set_key(int32_t key, int32_t down) {
@@ -1626,40 +1779,79 @@ struct GamepadState {
     unsigned char prevButtons[AVER_FW_GAMEPAD_BUTTON_COUNT] = {};
     float         axes[AVER_FW_GAMEPAD_AXIS_COUNT]          = {};
     float         prevAxes[AVER_FW_GAMEPAD_AXIS_COUNT]      = {};
+    bool          connected = false;
+    char          name[64]  = {};
+    bool          rumblePending = false;
+    float         rumble[3] = {0.0f, 0.0f, 0.0f};   // weak, strong, seconds
 };
-// The process-wide gamepad state. Single pad (index 0) -- see aver_fw_input_set_gamepad_button's own
-// comment for why every function here rejects any other `pad` value.
-GamepadState& gamepadState() { static GamepadState g; return g; }
+// The process-wide gamepad state, one per local pad (AVER_FW_GAMEPAD_MAX).
+GamepadState (&gamepadPads())[AVER_FW_GAMEPAD_MAX] { static GamepadState g[AVER_FW_GAMEPAD_MAX]; return g; }
 // Rolls buttons/axes into prevButtons/prevAxes -- see aver_fw_input_new_frame's own forward
 // declaration of this function for why it is called from there rather than defined inline. Nothing
 // gets cleared afterwards, unlike prevMouse: a gamepad button/axis is LEVEL state republished once a
 // frame by whatever provider is wired up (modules/platform's poller, via Runtime/src/GameInput.cpp
 // and sandbox/src/SandboxPlay.cpp), the same as a key, not a per-frame delta like the mouse.
 void gamepadInputNewFrame() {
-    GamepadState& g = gamepadState();
-    std::memcpy(g.prevButtons, g.buttons, sizeof(g.buttons));
-    std::memcpy(g.prevAxes, g.axes, sizeof(g.axes));
+    for (GamepadState& g : gamepadPads()) {
+        std::memcpy(g.prevButtons, g.buttons, sizeof(g.buttons));
+        std::memcpy(g.prevAxes, g.axes, sizeof(g.axes));
+    }
 }
 
-// Sets one button's held state. `pad` must be 0; an out-of-range pad or button is ignored.
+bool padInRange(int32_t pad) { return pad >= 0 && pad < AVER_FW_GAMEPAD_MAX; }
+
+// Sets one button's held state. An out-of-range pad or button is ignored.
 void aver_fw_input_set_gamepad_button(int32_t pad, int32_t button, int32_t down) {
-    if (pad != 0 || button < 0 || button >= AVER_FW_GAMEPAD_BUTTON_COUNT) return;
-    gamepadState().buttons[button] = down ? 1 : 0;
+    if (!padInRange(pad) || button < 0 || button >= AVER_FW_GAMEPAD_BUTTON_COUNT) return;
+    gamepadPads()[pad].buttons[button] = down ? 1 : 0;
 }
 // Sets one axis's value. Unclamped -- no dead zone lives in this ABI.
 void aver_fw_input_set_gamepad_axis(int32_t pad, int32_t axis, float value) {
-    if (pad != 0 || axis < 0 || axis >= AVER_FW_GAMEPAD_AXIS_COUNT) return;
-    gamepadState().axes[axis] = value;
+    if (!padInRange(pad) || axis < 0 || axis >= AVER_FW_GAMEPAD_AXIS_COUNT) return;
+    gamepadPads()[pad].axes[axis] = value;
 }
-// 1 while the button is held. 0 for `pad` != 0 or an out-of-range button.
+// 1 while the button is held. 0 for an out-of-range pad or button.
 int32_t aver_fw_input_gamepad_button(int32_t pad, int32_t button) {
-    if (pad != 0 || button < 0 || button >= AVER_FW_GAMEPAD_BUTTON_COUNT) return 0;
-    return gamepadState().buttons[button];
+    if (!padInRange(pad) || button < 0 || button >= AVER_FW_GAMEPAD_BUTTON_COUNT) return 0;
+    return gamepadPads()[pad].buttons[button];
 }
-// The axis's last-set value. 0.0 for `pad` != 0 or an out-of-range axis.
+// The axis's last-set value. 0.0 for an out-of-range pad or axis.
 float aver_fw_input_gamepad_axis(int32_t pad, int32_t axis) {
-    if (pad != 0 || axis < 0 || axis >= AVER_FW_GAMEPAD_AXIS_COUNT) return 0.0f;
-    return gamepadState().axes[axis];
+    if (!padInRange(pad) || axis < 0 || axis >= AVER_FW_GAMEPAD_AXIS_COUNT) return 0.0f;
+    return gamepadPads()[pad].axes[axis];
+}
+void aver_fw_input_set_gamepad_connected(int32_t pad, int32_t connected, const char* name) {
+    if (!padInRange(pad)) return;
+    GamepadState& g = gamepadPads()[pad];
+    g.connected = connected != 0;
+    g.name[0] = '\0';
+    if (g.connected && name) {
+        std::strncpy(g.name, name, sizeof g.name - 1);
+        g.name[sizeof g.name - 1] = '\0';
+    }
+    if (!g.connected) {   // a pad that left reads released, not frozen at its last frame
+        std::memset(g.buttons, 0, sizeof g.buttons);
+        std::memset(g.axes, 0, sizeof g.axes);
+    }
+}
+int32_t aver_fw_input_gamepad_connected(int32_t pad) { return padInRange(pad) && gamepadPads()[pad].connected ? 1 : 0; }
+const char* aver_fw_input_gamepad_name(int32_t pad) { return padInRange(pad) ? gamepadPads()[pad].name : ""; }
+void aver_fw_gamepad_rumble(int32_t pad, float weak, float strong, float seconds) {
+    if (!padInRange(pad)) return;
+    const auto clamp01f = [](float v) { return v != v ? 0.0f : (v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v)); };
+    GamepadState& g = gamepadPads()[pad];
+    g.rumble[0] = clamp01f(weak);
+    g.rumble[1] = clamp01f(strong);
+    g.rumble[2] = seconds > 0.0f ? seconds : 0.0f;
+    g.rumblePending = true;
+}
+void aver_fw_gamepad_stop_rumble(int32_t pad) { aver_fw_gamepad_rumble(pad, 0.0f, 0.0f, 0.0f); }
+int32_t aver_fw_take_gamepad_rumble(int32_t pad, float* out3) {
+    if (!padInRange(pad) || !gamepadPads()[pad].rumblePending) return 0;
+    GamepadState& g = gamepadPads()[pad];
+    g.rumblePending = false;
+    if (out3) { out3[0] = g.rumble[0]; out3[1] = g.rumble[1]; out3[2] = g.rumble[2]; }
+    return 1;
 }
 
 // ---- NAMED ACTIONS (Enhanced Input) -------------------------------------------------------------
@@ -1736,7 +1928,6 @@ bool actionKeyConsumedByHigherPriority(int32_t key, int32_t priority) {
 // snapshotted a moment before recomputing.
 float actionBindingSample(const ActionBinding& b, bool useCurrent) {
     const InputState& s = inputState();
-    const GamepadState& g = gamepadState();
     float v = 0.0f;
     switch (b.source) {
         case AVER_FW_ACTION_SRC_KEY:
@@ -1764,15 +1955,26 @@ float actionBindingSample(const ActionBinding& b, bool useCurrent) {
             // and this change does not widen it to a second physical-input space. A context stack
             // that binds the same gamepad button at two priorities gets both, the same as it always
             // has for two MOUSE_* bindings sharing a channel.
-            const bool down = useCurrent ? g.buttons[b.key] != 0 : g.prevButtons[b.key] != 0;
+            // ANY pad: held when one is, so a binding that names no device (a Godot input map's
+            // device -1) answers for every controller, and a one-pad game reads exactly pad 0.
+            bool down = false;
+            for (const GamepadState& g : gamepadPads())
+                if (useCurrent ? g.buttons[b.key] != 0 : g.prevButtons[b.key] != 0) { down = true; break; }
             v = down ? b.scale : 0.0f;
             break;
         }
-        case AVER_FW_ACTION_SRC_GAMEPAD_AXIS:
+        case AVER_FW_ACTION_SRC_GAMEPAD_AXIS: {
             // Same shape as the MOUSE_* cases above: the raw axis value times scale. Any dead zone
-            // is a `deadzone` modifier, or the 0.15 actuation gate on held/pressed/released.
-            v = (useCurrent ? g.axes[b.key] : g.prevAxes[b.key]) * b.scale;
+            // is a `deadzone` modifier, or the 0.15 actuation gate on held/pressed/released. Of
+            // several pads, the one pushed furthest.
+            float raw = 0.0f;
+            for (const GamepadState& g : gamepadPads()) {
+                const float a = useCurrent ? g.axes[b.key] : g.prevAxes[b.key];
+                if (std::fabs(a) > std::fabs(raw)) raw = a;
+            }
+            v = raw * b.scale;
             break;
+        }
         default:
             break;
     }

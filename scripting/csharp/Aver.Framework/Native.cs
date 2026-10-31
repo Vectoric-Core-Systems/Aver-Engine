@@ -173,6 +173,38 @@ internal static class Fw
     [DllImport(Lib)] internal static extern int   aver_fw_input_gamepad_button(int pad, int button);
     [DllImport(Lib)] internal static extern float aver_fw_input_gamepad_axis(int pad, int axis);
 
+    // Minor 8: pads 0..3, their connection and names, rumble.
+    [DllImport(Lib)] internal static extern void   aver_fw_input_set_gamepad_connected(int pad, int connected, [MarshalAs(UnmanagedType.LPUTF8Str)] string? name);
+    [DllImport(Lib)] internal static extern int    aver_fw_input_gamepad_connected(int pad);
+    [DllImport(Lib)] internal static extern IntPtr aver_fw_input_gamepad_name(int pad);
+    [DllImport(Lib)] internal static extern void   aver_fw_gamepad_rumble(int pad, float weak, float strong, float seconds);
+    [DllImport(Lib)] internal static extern void   aver_fw_gamepad_stop_rumble(int pad);
+
+    // Touch, pointer, cursor, window, present mode, frame cap (minor 8).
+    [DllImport(Lib)] internal static extern void aver_fw_input_set_touch(int index, int down, float x, float y, float pressure);
+    [DllImport(Lib)] internal static extern int  aver_fw_input_touch(int index, float[] out3);
+    [DllImport(Lib)] internal static extern int  aver_fw_input_touch_pressed(int index);
+    [DllImport(Lib)] internal static extern int  aver_fw_input_touch_released(int index);
+    [DllImport(Lib)] internal static extern void aver_fw_set_touch_emulation(int on);
+    [DllImport(Lib)] internal static extern int  aver_fw_touch_emulation();
+    [DllImport(Lib)] internal static extern int  aver_fw_touch_available();
+    [DllImport(Lib)] internal static extern void aver_fw_set_pointer_mode(int mode);
+    [DllImport(Lib)] internal static extern int  aver_fw_pointer_mode();
+    [DllImport(Lib)] internal static extern void aver_fw_set_cursor_shape(int shape);
+    [DllImport(Lib)] internal static extern int  aver_fw_cursor_shape();
+    [DllImport(Lib)] internal static extern int  aver_fw_set_cursor_image(int shape, byte[]? rgba, int w, int h, int hotX, int hotY);
+    [DllImport(Lib)] internal static extern void aver_fw_warp_pointer(float x, float y);
+    [DllImport(Lib)] internal static extern void aver_fw_window_set_mode(int mode);
+    [DllImport(Lib)] internal static extern void aver_fw_window_set_size(int w, int h);
+    [DllImport(Lib)] internal static extern void aver_fw_window_set_position(int x, int y);
+    [DllImport(Lib)] internal static extern void aver_fw_window_set_flag(int flag, int on);
+    [DllImport(Lib)] internal static extern void aver_fw_window_set_title([MarshalAs(UnmanagedType.LPUTF8Str)] string utf8);
+    [DllImport(Lib)] internal static extern void aver_fw_window_state(int[] out10);
+    [DllImport(Lib)] internal static extern void aver_fw_request_present_mode(int mode);
+    [DllImport(Lib)] internal static extern int  aver_fw_present_mode();
+    [DllImport(Lib)] internal static extern void aver_fw_set_max_fps(int fps);
+    [DllImport(Lib)] internal static extern int  aver_fw_max_fps();
+
     [DllImport(Lib)] internal static extern void aver_fw_set_view(int mode, float eyeHeight, float boomLength);
     [DllImport(Lib)] internal static extern void aver_fw_set_view_entity(int entity);
 

@@ -71,8 +71,13 @@ extern "C" {
  * 2.5: aver_fw_set_project / aver_fw_project_dir / content_dir / user_dir / is_editor (res:// and user://).
  * 2.6: aver_fw_debug_line* (script debug drawing) and aver_fw_request_vsync / aver_fw_take_vsync_request.
  * 2.7: level travel (aver_fw_request_travel / take_travel_request / travel_begin / travel_end) and persistent
- *      actors (aver_fw_set_persistent / aver_fw_is_persistent). */
-#define AVER_FW_ABI_VERSION_MINOR 7
+ *      actors (aver_fw_set_persistent / aver_fw_is_persistent).
+ * 2.8: INPUT AND DISPLAY, appended only: 59 more AVER_FW_KEY_* slots (F-keys, navigation, punctuation, numpad,
+ *      mouse side buttons, wheel as press); AVER_FW_GAMEPAD_* grew to 21 buttons and pads 0..3 are real
+ *      (connection, name, rumble); touch state; pointer modes, cursor shapes and images, pointer warp;
+ *      window mode/size/position/flags/title requests and the published window state; present modes
+ *      (aver_fw_request_present_mode); the frame cap (aver_fw_set_max_fps). */
+#define AVER_FW_ABI_VERSION_MINOR 8
 #define AVER_FW_ABI_VERSION \
     ((AVER_FW_ABI_VERSION_MAJOR << 16) | AVER_FW_ABI_VERSION_MINOR)
 
@@ -490,7 +495,24 @@ enum {
     AVER_FW_KEY_SPACE, AVER_FW_KEY_LSHIFT, AVER_FW_KEY_LCTRL, AVER_FW_KEY_LALT,
     AVER_FW_KEY_ENTER, AVER_FW_KEY_ESCAPE, AVER_FW_KEY_TAB,
     AVER_FW_KEY_LEFT, AVER_FW_KEY_RIGHT, AVER_FW_KEY_UP, AVER_FW_KEY_DOWN,
-    AVER_FW_KEY_MOUSE_LEFT, AVER_FW_KEY_MOUSE_RIGHT, AVER_FW_KEY_MOUSE_MIDDLE,
+    AVER_FW_KEY_MOUSE_LEFT, AVER_FW_KEY_MOUSE_RIGHT, AVER_FW_KEY_MOUSE_MIDDLE,    /* 0..49 are the original set */
+    /* Appended in minor 8; saved graphs store these as literal ints, so the order below never changes. */
+    AVER_FW_KEY_F1, AVER_FW_KEY_F2, AVER_FW_KEY_F3, AVER_FW_KEY_F4, AVER_FW_KEY_F5, AVER_FW_KEY_F6,
+    AVER_FW_KEY_F7, AVER_FW_KEY_F8, AVER_FW_KEY_F9, AVER_FW_KEY_F10, AVER_FW_KEY_F11, AVER_FW_KEY_F12,
+    AVER_FW_KEY_PAGEUP, AVER_FW_KEY_PAGEDOWN, AVER_FW_KEY_HOME, AVER_FW_KEY_END,
+    AVER_FW_KEY_INSERT, AVER_FW_KEY_DELETE, AVER_FW_KEY_BACKSPACE,
+    AVER_FW_KEY_CAPSLOCK, AVER_FW_KEY_NUMLOCK, AVER_FW_KEY_SCROLLLOCK, AVER_FW_KEY_PAUSE,
+    AVER_FW_KEY_PRINTSCREEN, AVER_FW_KEY_MENU, AVER_FW_KEY_META,
+    AVER_FW_KEY_MINUS, AVER_FW_KEY_EQUAL,AVER_FW_KEY_LBRACKET, AVER_FW_KEY_RBRACKET,
+    AVER_FW_KEY_BACKSLASH, AVER_FW_KEY_SEMICOLON, AVER_FW_KEY_APOSTROPHE, AVER_FW_KEY_COMMA,
+    AVER_FW_KEY_PERIOD, AVER_FW_KEY_SLASH, AVER_FW_KEY_GRAVE,
+    AVER_FW_KEY_KP0, AVER_FW_KEY_KP1, AVER_FW_KEY_KP2, AVER_FW_KEY_KP3, AVER_FW_KEY_KP4,
+    AVER_FW_KEY_KP5, AVER_FW_KEY_KP6, AVER_FW_KEY_KP7, AVER_FW_KEY_KP8, AVER_FW_KEY_KP9,
+    AVER_FW_KEY_KPADD, AVER_FW_KEY_KPSUBTRACT, AVER_FW_KEY_KPMULTIPLY, AVER_FW_KEY_KPDIVIDE,
+    AVER_FW_KEY_KPDECIMAL, AVER_FW_KEY_KPENTER,
+    AVER_FW_KEY_MOUSE_X1, AVER_FW_KEY_MOUSE_X2,                     /* the two side buttons */
+    AVER_FW_KEY_MOUSE_WHEEL_UP, AVER_FW_KEY_MOUSE_WHEEL_DOWN,       /* a notch reads as a one-frame press */
+    AVER_FW_KEY_MOUSE_WHEEL_LEFT, AVER_FW_KEY_MOUSE_WHEEL_RIGHT,
     AVER_FW_KEY_COUNT
 };
 /* Rolls current key state into previous. Call once a frame, before the set_key calls. */
@@ -669,14 +691,21 @@ AVER_FW_ABI int32_t aver_fw_input_vk_released(int32_t vk);
  * Shipped SHAPE ONLY at minor 5 (no polling); minor 6 is its first consumer --
  * aver_fw_action_bind's GAMEPAD_BUTTON/AXIS sources read pad 0's state back through here. Buttons/
  * axes are modelled on XInput's XINPUT_GAMEPAD_* bitmask and XINPUT_STATE thumbstick/trigger
- * fields (14 buttons, 6 axes) so a provider is a mechanical unpack. `pad` is fixed at 0, the same
- * "only player 0 until split-screen" precedent as aver_fw_player_controller. */
+ * fields (14 buttons, 6 axes) so a provider is a mechanical unpack. MINOR 8: pads 0..AVER_FW_GAMEPAD_MAX-1 are
+ * real (a call naming another pad is ignored), the button set grew by 7 appended slots (GUIDE..TOUCHPAD; a
+ * pad that has no such button reads them up -- XInput has no GUIDE), and each pad reports whether it is
+ * connected and its name. An ACTION bound to a gamepad button or axis reads ANY connected pad (a button held
+ * on any, the axis with the larger magnitude), so a one-pad game behaves as before. */
+#define AVER_FW_GAMEPAD_MAX 4
 enum {
     AVER_FW_GAMEPAD_DPAD_UP = 0, AVER_FW_GAMEPAD_DPAD_DOWN, AVER_FW_GAMEPAD_DPAD_LEFT,
     AVER_FW_GAMEPAD_DPAD_RIGHT, AVER_FW_GAMEPAD_START, AVER_FW_GAMEPAD_BACK,
     AVER_FW_GAMEPAD_LEFT_THUMB, AVER_FW_GAMEPAD_RIGHT_THUMB,
     AVER_FW_GAMEPAD_LEFT_SHOULDER, AVER_FW_GAMEPAD_RIGHT_SHOULDER,
     AVER_FW_GAMEPAD_A, AVER_FW_GAMEPAD_B, AVER_FW_GAMEPAD_X, AVER_FW_GAMEPAD_Y,
+    AVER_FW_GAMEPAD_GUIDE, AVER_FW_GAMEPAD_MISC1,
+    AVER_FW_GAMEPAD_PADDLE1, AVER_FW_GAMEPAD_PADDLE2, AVER_FW_GAMEPAD_PADDLE3, AVER_FW_GAMEPAD_PADDLE4,
+    AVER_FW_GAMEPAD_TOUCHPAD,
     AVER_FW_GAMEPAD_BUTTON_COUNT
 };
 enum {
@@ -685,15 +714,175 @@ enum {
     AVER_FW_GAMEPAD_AXIS_LEFT_TRIGGER, AVER_FW_GAMEPAD_AXIS_RIGHT_TRIGGER,
     AVER_FW_GAMEPAD_AXIS_COUNT
 };
-/* Sets one button's held state. `pad` must be 0; an out-of-range pad or button is ignored. */
+/* Sets one button's held state. An out-of-range pad or button is ignored. */
 AVER_FW_ABI void    aver_fw_input_set_gamepad_button(int32_t pad, int32_t button, int32_t down);
 /* Sets one axis's value. Unclamped -- this ABI applies no dead zone (see this section's own header
  * comment), so a future provider's raw stick/trigger reading crosses exactly as read. */
 AVER_FW_ABI void    aver_fw_input_set_gamepad_axis(int32_t pad, int32_t axis, float value);
-/* 1 while the button is held. 0 for `pad` != 0 or an out-of-range button. */
+/* 1 while the button is held. 0 for an out-of-range pad or button. */
 AVER_FW_ABI int32_t aver_fw_input_gamepad_button(int32_t pad, int32_t button);
-/* The axis's last-set value. 0.0 for `pad` != 0 or an out-of-range axis. */
+/* The axis's last-set value. 0.0 for an out-of-range pad or axis. */
 AVER_FW_ABI float   aver_fw_input_gamepad_axis(int32_t pad, int32_t axis);
+/* The provider's once-a-frame report of whether `pad` is plugged in, and its name (UTF-8, null = none;
+ * kept to 63 bytes). A pad that goes from connected to not is also cleared: every button up, every axis 0. */
+AVER_FW_ABI void        aver_fw_input_set_gamepad_connected(int32_t pad, int32_t connected, const char* name);
+/* 1 while connected, 0 otherwise (and for an out-of-range pad). */
+AVER_FW_ABI int32_t     aver_fw_input_gamepad_connected(int32_t pad);
+/* The pad's name, "" when none; valid until the next set_gamepad_connected for the same pad. */
+AVER_FW_ABI const char* aver_fw_input_gamepad_name(int32_t pad);
+/* Asks `pad` to rumble: weak (high-frequency) and strong (low-frequency) motors in 0..1, for `seconds`
+ * (<= 0: until stopped). Replaces a rumble in progress. The device owner applies it: the provider takes the
+ * request once a frame with aver_fw_take_gamepad_rumble. Ignored for an out-of-range pad. */
+AVER_FW_ABI void    aver_fw_gamepad_rumble(int32_t pad, float weak, float strong, float seconds);
+/* Stops `pad`'s rumble (a request of weak 0, strong 0). */
+AVER_FW_ABI void    aver_fw_gamepad_stop_rumble(int32_t pad);
+/* 1 and {weak, strong, seconds} in out3 when a request is waiting for `pad`, which it clears; else 0. */
+AVER_FW_ABI int32_t aver_fw_take_gamepad_rumble(int32_t pad, float* out3);
+
+/* ---- TOUCH, STATE IN / STATE OUT (minor 8) -----------------------------------------------------------
+ *
+ * Up to AVER_FW_TOUCH_MAX fingers by a stable index (the host numbers them in order of arrival and keeps
+ * the number while a finger stays down). The window layer reports real fingers where the platform has them
+ * (SDL); on Windows a touch arrives as the mouse. EMULATION: with aver_fw_set_touch_emulation(1) the left
+ * mouse button publishes as finger 0 at the pointer (default off). x, y are window pixels. */
+#define AVER_FW_TOUCH_MAX 10
+/* Sets finger `index`: down != 0 for in contact, its position and pressure (0..1). Not down clears it. */
+AVER_FW_ABI void    aver_fw_input_set_touch(int32_t index, int32_t down, float x, float y, float pressure);
+/* 1 while finger `index` is down, with {x, y, pressure} in out3; 0 (and zeros) otherwise. */
+AVER_FW_ABI int32_t aver_fw_input_touch(int32_t index, float* out3);
+/* 1 on the frame finger `index` went down, 0 otherwise. */
+AVER_FW_ABI int32_t aver_fw_input_touch_pressed(int32_t index);
+/* 1 on the frame finger `index` went up. */
+AVER_FW_ABI int32_t aver_fw_input_touch_released(int32_t index);
+/* Mouse-to-touch emulation (on != 0) and its state. */
+AVER_FW_ABI void    aver_fw_set_touch_emulation(int32_t on);
+AVER_FW_ABI int32_t aver_fw_touch_emulation(void);
+/* 1 when the platform reported a real touch screen (a finger arrived), 0 otherwise. Host-set. */
+AVER_FW_ABI void    aver_fw_set_touch_available(int32_t available);
+AVER_FW_ABI int32_t aver_fw_touch_available(void);
+
+/* ---- POINTER AND CURSOR (minor 8) --------------------------------------------------------------------
+ *
+ * REQUESTS the shipped game's host (GameApp) applies once a frame; the editor ignores them (it owns its
+ * own cursor), as it ignores aver_fw_request_vsync. The pointer's POSITION is aver_ui_pointer's (the UI
+ * ABI), already in the UI frame's space every frame.
+ *
+ * MODE: AUTO is today's rule (captured while a session is playing, free while aver_fw_cursor_requested
+ * or a menu wants it). The other modes win over play state: VISIBLE shows the cursor and lets it leave
+ * the window, HIDDEN hides it while it is over the window, CAPTURED hides it and reports relative motion,
+ * CONFINED keeps it inside the window, CONFINED_HIDDEN does both. Default AUTO. */
+#define AVER_FW_POINTER_AUTO            0
+#define AVER_FW_POINTER_VISIBLE         1
+#define AVER_FW_POINTER_HIDDEN          2
+#define AVER_FW_POINTER_CAPTURED        3
+#define AVER_FW_POINTER_CONFINED        4
+#define AVER_FW_POINTER_CONFINED_HIDDEN 5
+AVER_FW_ABI void    aver_fw_set_pointer_mode(int32_t mode);   /* out of range is ignored */
+AVER_FW_ABI int32_t aver_fw_pointer_mode(void);
+/* Cursor shapes, the system ones a window offers. */
+#define AVER_FW_CURSOR_ARROW        0
+#define AVER_FW_CURSOR_IBEAM        1
+#define AVER_FW_CURSOR_POINTING_HAND 2
+#define AVER_FW_CURSOR_CROSS        3
+#define AVER_FW_CURSOR_WAIT         4
+#define AVER_FW_CURSOR_BUSY         5   /* arrow with a wait symbol */
+#define AVER_FW_CURSOR_DRAG         6
+#define AVER_FW_CURSOR_CAN_DROP     7
+#define AVER_FW_CURSOR_FORBIDDEN    8
+#define AVER_FW_CURSOR_VSIZE        9
+#define AVER_FW_CURSOR_HSIZE        10
+#define AVER_FW_CURSOR_BDIAGSIZE    11
+#define AVER_FW_CURSOR_FDIAGSIZE    12
+#define AVER_FW_CURSOR_MOVE         13
+#define AVER_FW_CURSOR_VSPLIT       14
+#define AVER_FW_CURSOR_HSPLIT       15
+#define AVER_FW_CURSOR_HELP         16
+#define AVER_FW_CURSOR_COUNT        17
+/* The shape shown while the pointer is over the window (out of range is ignored). */
+AVER_FW_ABI void    aver_fw_set_cursor_shape(int32_t shape);
+AVER_FW_ABI int32_t aver_fw_cursor_shape(void);
+/* Replaces `shape` with an image: rgba is w*h*4 bytes (straight alpha, top row first), w and h in 1..256,
+ * the hotspot inside it. A null rgba or w/h <= 0 puts the system shape back. 1 when taken, else 0. The
+ * bytes are copied. */
+AVER_FW_ABI int32_t aver_fw_set_cursor_image(int32_t shape, const uint8_t* rgba, int32_t w, int32_t h,
+                                             int32_t hotX, int32_t hotY);
+/* Counts every set_cursor_image, so the host rebuilds a cursor only when this moved. */
+AVER_FW_ABI int32_t aver_fw_cursor_image_serial(void);
+/* The image set for `shape` (pointer valid until the next set_cursor_image for it), with {w, h, hotX, hotY} in
+ * out4; null when the shape has none. */
+AVER_FW_ABI const uint8_t* aver_fw_cursor_image(int32_t shape, int32_t* out4);
+/* Moves the pointer to window pixel (x, y) at the host's next frame. */
+AVER_FW_ABI void    aver_fw_warp_pointer(float x, float y);
+/* 1 and {x, y} in out2 when a warp is waiting, which it clears; else 0. */
+AVER_FW_ABI int32_t aver_fw_take_pointer_warp(float* out2);
+
+/* ---- WINDOW AND DISPLAY (minor 8) ----------------------------------------------------------------------
+ *
+ * Same split as the pointer: a script's REQUESTS, applied by the shipped game's host once a frame, and
+ * the host's PUBLISHED STATE read back. Exclusive fullscreen does not exist: FULLSCREEN is the borderless
+ * window sized to the monitor (Window.hpp says why). Sizes are physical pixels of the client area,
+ * positions the outer window's top-left in screen pixels. */
+#define AVER_FW_WINDOW_WINDOWED  0
+#define AVER_FW_WINDOW_MINIMIZED 1
+#define AVER_FW_WINDOW_MAXIMIZED 2
+#define AVER_FW_WINDOW_FULLSCREEN 3
+#define AVER_FW_WINDOW_FLAG_RESIZABLE    1
+#define AVER_FW_WINDOW_FLAG_BORDERLESS   2
+#define AVER_FW_WINDOW_FLAG_ALWAYS_ON_TOP 4
+/* Bits of the mask aver_fw_window_take_requests returns. */
+#define AVER_FW_WINDOW_REQ_MODE     1
+#define AVER_FW_WINDOW_REQ_SIZE     2
+#define AVER_FW_WINDOW_REQ_POSITION 4
+#define AVER_FW_WINDOW_REQ_FLAGS    8
+/* Indices into the 10-int arrays of take_requests / publish / state. */
+#define AVER_FW_WINDOW_MODE       0
+#define AVER_FW_WINDOW_WIDTH      1
+#define AVER_FW_WINDOW_HEIGHT     2
+#define AVER_FW_WINDOW_X          3
+#define AVER_FW_WINDOW_Y          4
+#define AVER_FW_WINDOW_FLAGS      5   /* state: the flags on; requests: the flags to turn on */
+#define AVER_FW_WINDOW_FLAGS_OFF  6   /* requests only: the flags to turn off */
+#define AVER_FW_WINDOW_MONITOR_W  6   /* state only: the monitor the window is on, in pixels */
+#define AVER_FW_WINDOW_MONITOR_H  7
+#define AVER_FW_WINDOW_DPI_PERCENT 8  /* state only: the display scale, 100 = 96 DPI */
+#define AVER_FW_WINDOW_FOCUSED    9   /* state only: 1 while the window has the keyboard focus */
+#define AVER_FW_WINDOW_STATE_COUNT 10
+AVER_FW_ABI void aver_fw_window_set_mode(int32_t mode);                       /* out of range is ignored */
+AVER_FW_ABI void aver_fw_window_set_size(int32_t w, int32_t h);               /* w, h >= 1, else ignored */
+AVER_FW_ABI void aver_fw_window_set_position(int32_t x, int32_t y);
+AVER_FW_ABI void aver_fw_window_set_flag(int32_t flag, int32_t on);           /* one AVER_FW_WINDOW_FLAG_* */
+AVER_FW_ABI void aver_fw_window_set_title(const char* utf8);
+/* The host's once-a-frame take: returns the AVER_FW_WINDOW_REQ_* mask of what changed since the last take (0
+ * for nothing) and fills out10 with the wanted values; it clears the mask. */
+AVER_FW_ABI int32_t aver_fw_window_take_requests(int32_t* out10);
+/* Copies a waiting title request into buf (NUL-terminated, at most cap bytes) and clears it; returns the
+ * bytes written without the NUL, 0 when none is waiting. */
+AVER_FW_ABI int32_t aver_fw_window_take_title(uint8_t* buf, int32_t cap);
+/* The host publishes the window's real state each frame (the array layout above). */
+AVER_FW_ABI void aver_fw_window_publish(const int32_t* in10);
+/* Reads the last published state into out10 (zeros before any publish). */
+AVER_FW_ABI void aver_fw_window_state(int32_t* out10);
+
+/* Present modes. FIFO is vsync. IMMEDIATE is vsync off (tears where the display allows). ADAPTIVE
+ * is vsync that tears instead of stalling when a frame is late, and MAILBOX presents the newest finished frame
+ * at each refresh with no queue; a device that lacks a mode uses the nearest it has, and the published
+ * mode says which. Applies in the shipped game; the editor keeps its own vsync preference. */
+#define AVER_FW_PRESENT_FIFO      0
+#define AVER_FW_PRESENT_IMMEDIATE 1
+#define AVER_FW_PRESENT_ADAPTIVE  2
+#define AVER_FW_PRESENT_MAILBOX   3
+#define AVER_FW_PRESENT_COUNT     4
+/* Requests a present mode (aver_fw_request_vsync(on) is FIFO or IMMEDIATE). Out of range is ignored. */
+AVER_FW_ABI void    aver_fw_request_present_mode(int32_t mode);
+/* The host's take: the requested mode, once; -1 when nothing is waiting. */
+AVER_FW_ABI int32_t aver_fw_take_present_mode_request(void);
+/* The host publishes the mode in force; -1 before it has. */
+AVER_FW_ABI void    aver_fw_publish_present_mode(int32_t mode);
+AVER_FW_ABI int32_t aver_fw_present_mode(void);
+/* The frame rate cap in frames per second; 0 (default) is none. Negative is ignored. The host's frame loop paces
+ * to it, on top of whatever the present mode paces to. */
+AVER_FW_ABI void    aver_fw_set_max_fps(int32_t fps);
+AVER_FW_ABI int32_t aver_fw_max_fps(void);
 
 /* Play view: a possessed character publishes the camera it wants and the editor reads it back.
  * One request (one local player) until split-screen exists. */

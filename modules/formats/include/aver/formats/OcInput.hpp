@@ -126,10 +126,10 @@ struct OcTriggerSpec {
     std::vector<std::string> refs; // chord: 1 action name; combo: the step names
     bool operator==(const OcTriggerSpec&) const = default;
 };
-enum class OcModifierKind : i32 { DeadZone, Scale, Negate, Swizzle, Smooth, Curve };
+enum class OcModifierKind : i32 { DeadZone, Scale, Negate, Swizzle, Smooth, Curve, Clamp };
 struct OcModifierSpec {
     OcModifierKind kind = OcModifierKind::DeadZone;
-    f32 v[3] = {0.2f, 1.0f, 0.0f}; // deadzone lo,hi; scale/curve xyz; smooth tau in v[0]
+    f32 v[3] = {0.2f, 1.0f, 0.0f}; // deadzone lo,hi; scale/curve xyz; smooth tau in v[0]; clamp lo,hi
     u8  mask = 7;                  // negate: bit0 x, bit1 y, bit2 z
     i32 mode = 0;                  // deadzone 0 radial 1 axial; swizzle 0..5 = xyz,yxz,zyx,xzy,yzx,zxy
     bool operator==(const OcModifierSpec&) const = default;

@@ -114,6 +114,51 @@ public:
     void setNativeEventHook(NativeEventHook h) { nativeEventHook_ = h; }
     NativeEventHook nativeEventHook() const { return nativeEventHook_; }
 
+    // ---- window state and control: what a script's window requests become (the shipped game's host
+    // applies them; the editor, which owns its window, does not). A no-op on a window that does not
+    // exist. Sizes are physical pixels of the client area (width()/height()), positions the outer
+    // window's top-left in screen pixels.
+    enum class Mode : i32 { Windowed, Minimized, Maximized, Fullscreen };
+    // FULLSCREEN IS BORDERLESS and never the display's exclusive mode -- the reason is on
+    // WindowDesc::fullscreen.
+    Mode mode() const;
+    void setMode(Mode m);
+    // False without a window.
+    bool outerPosition(i32& x, i32& y) const;
+    void setOuterPosition(i32 x, i32 y);
+    // Sizes the client area to w x h; only a windowed window takes it (the others keep their size).
+    void setClientSize(u32 w, u32 h);
+    static constexpr u32 kFlagResizable = 1, kFlagBorderless = 2, kFlagAlwaysOnTop = 4;
+    // The flags that are on. A window starts with kFlagResizable if WindowDesc::resizable was set.
+    u32 flags() const;
+    void setFlag(u32 flag, bool on);
+    // The size in pixels of the monitor the window is on. False when it cannot be told.
+    bool monitorSize(i32& w, i32& h) const;
+
+    // ---- the pointer over this window. The mouse capture of the shipped game and the editor is
+    // separate (Runtime/src/MouseCapture.cpp); these are the cursor's look and confinement.
+    // Shapes, in the order of AVER_FW_CURSOR_* (framework_abi.h).
+    enum class CursorShape : i32 {
+        Arrow, IBeam, PointingHand, Cross, Wait, Busy, Drag, CanDrop, Forbidden, VSize, HSize, BDiagSize,
+        FDiagSize, Move, VSplit, HSplit, Help, Count
+    };
+    // Takes over the cursor's look inside the client area from now on (until then the window leaves it to
+    // the system, and in the editor to the UI toolkit).
+    void setCursorShape(CursorShape s);
+    // Replaces a shape with an image: rgba is w*h*4 straight-alpha bytes, top row first. A null rgba puts the
+    // system shape back. False when the image could not be made.
+    bool setCursorImage(CursorShape s, const u8* rgba, i32 w, i32 h, i32 hotX, i32 hotY);
+    // Hides the cursor while it is over the client area.
+    void setCursorHidden(bool hidden);
+    // Keeps the cursor inside the client area.
+    void setCursorConfined(bool confined);
+    // Moves the cursor to client pixel (x, y). Does nothing while the window is not the foreground one.
+    void warpCursor(i32 x, i32 y);
+    // For the Win32 window procedure's WM_SETCURSOR: true when this window controls the cursor over its
+    // client area, with the cursor to set (a null *hcursor hides it). False elsewhere and when the window
+    // has never been asked to control it.
+    bool controlledCursor(void** hcursor) const;
+
     // RELATIVE MOUSE MODE, for a game that captures the pointer. Off Windows the cursor is hidden and
     // held by the window system, and motion is reported as deltas -- the only form of capture Wayland
     // allows at all, since a client there cannot move the pointer. Runtime/src/MouseCapture.cpp's
@@ -248,6 +293,9 @@ private:
     bool modalResize_ = false;
     bool resizeGrab_ = false;
     i32 mouseCapture_ = 0;
+    // The backend's own state for the display controls above (saved window style, cursors); created
+    // by the first call that needs it, released in destroy().
+    void* ext_ = nullptr;
 };
 
 // Whether the key with Win32 virtual-key code `vk` is held RIGHT NOW, read from the OS and not from

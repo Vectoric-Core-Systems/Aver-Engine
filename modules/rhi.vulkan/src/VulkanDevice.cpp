@@ -1669,11 +1669,10 @@ bool VulkanDevice::createSwapchainResources(const SwapchainDesc& d) {
     std::vector<VkPresentModeKHR> modes(modeCount);
     api_.GetPhysicalDeviceSurfacePresentModesKHR(physicalDevice_, surface_, &modeCount, modes.data());
     tearingSupported_ = std::find(modes.begin(), modes.end(), VK_PRESENT_MODE_IMMEDIATE_KHR) != modes.end();
+    mailboxSupported_ = std::find(modes.begin(), modes.end(), VK_PRESENT_MODE_MAILBOX_KHR) != modes.end();
+    relaxedSupported_ = std::find(modes.begin(), modes.end(), VK_PRESENT_MODE_FIFO_RELAXED_KHR) != modes.end();
     AVER_INFO("[RHI.Vulkan] tearing (vsync-off) {}", tearingSupported_ ? "supported" : "unavailable");
-    presentMode_ = vsync_ ? VK_PRESENT_MODE_FIFO_KHR
-                 : tearingSupported_ ? VK_PRESENT_MODE_IMMEDIATE_KHR
-                 : std::find(modes.begin(), modes.end(), VK_PRESENT_MODE_MAILBOX_KHR) != modes.end() ? VK_PRESENT_MODE_MAILBOX_KHR
-                 : VK_PRESENT_MODE_FIFO_KHR;
+    presentMode_ = pickPresentMode(wantedPresent_);
 
     u32 minImages = caps.minImageCount > kFrameCount ? caps.minImageCount : kFrameCount;
     if (caps.maxImageCount != 0 && minImages > caps.maxImageCount) minImages = caps.maxImageCount;
@@ -3194,12 +3193,54 @@ void VulkanDevice::collectExposureReadout() {
 // 13. beginFrame / endFrame / present / resize. The frame-pacing core: see the header's own note on
 //     timeline_/frameTimelineValues_/imageAvailable_/renderFinished_ for the full scheme.
 // ================================================================================================
+// The surface's present mode for a wanted one. Immediate falls to Mailbox before FIFO (vsync off should
+// not wait for the refresh where a no-queue mode exists), the others to FIFO, which every surface has.
+VkPresentModeKHR VulkanDevice::pickPresentMode(PresentMode m) const {
+    switch (m) {
+        case PresentMode::Immediate:
+            return tearingSupported_ ? VK_PRESENT_MODE_IMMEDIATE_KHR
+                 : mailboxSupported_ ? VK_PRESENT_MODE_MAILBOX_KHR : VK_PRESENT_MODE_FIFO_KHR;
+        case PresentMode::Adaptive: return relaxedSupported_ ? VK_PRESENT_MODE_FIFO_RELAXED_KHR : VK_PRESENT_MODE_FIFO_KHR;
+        case PresentMode::Mailbox:  return mailboxSupported_ ? VK_PRESENT_MODE_MAILBOX_KHR : VK_PRESENT_MODE_FIFO_KHR;
+        case PresentMode::Fifo: default: return VK_PRESENT_MODE_FIFO_KHR;
+    }
+}
+
+void VulkanDevice::setPresentMode(PresentMode m) {
+    wantedPresent_ = m;
+    if (!hasSwapchain_) return;   // the swapchain made later picks it up
+    const VkPresentModeKHR next = pickPresentMode(m);
+    if (next == presentMode_) return;
+    presentMode_ = next;
+    presentModeDirty_ = true;     // a swapchain's present mode is fixed at creation: beginFrame rebuilds it
+}
+
+IDevice::PresentMode VulkanDevice::presentMode() const {
+    if (!hasSwapchain_) return wantedPresent_;
+    switch (presentMode_) {
+        case VK_PRESENT_MODE_IMMEDIATE_KHR:    return PresentMode::Immediate;
+        case VK_PRESENT_MODE_FIFO_RELAXED_KHR: return PresentMode::Adaptive;
+        case VK_PRESENT_MODE_MAILBOX_KHR:      return wantedPresent_ == PresentMode::Immediate ? PresentMode::Immediate : PresentMode::Mailbox;
+        default:                               return PresentMode::Fifo;
+    }
+}
+
+bool VulkanDevice::presentModeSupported(PresentMode m) const {
+    switch (m) {
+        case PresentMode::Immediate: return tearingSupported_;
+        case PresentMode::Adaptive:  return relaxedSupported_;
+        case PresentMode::Mailbox:   return mailboxSupported_;
+        default:                     return true;
+    }
+}
+
 void VulkanDevice::beginFrame() {
     if (!hasSwapchain_) return;
     frameOpen_ = true;
     // FIRST, BEFORE ANYTHING RECORDS: a render-scale change frees and recreates the depth buffer,
     // MSAA target and post chain, and doing that mid-recording is what lost the device at Present (C2-13, aver-render-scale-device-loss; see setRenderScale's comment for the full account).
     applyPendingRenderScale();
+    if (presentModeDirty_) { presentModeDirty_ = false; resize(width_, height_); }   // the new present mode, see setPresentMode
 
     ++frameSerial_;
     frameIndex_ = (frameIndex_ + 1) % kFrameCount;

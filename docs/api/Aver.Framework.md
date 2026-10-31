@@ -2,7 +2,7 @@
 
 # Aver.Framework public API
 
-241 public types and 2050 public members, read from `scripting/csharp/Aver.Framework/` (145 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+252 public types and 2197 public members, read from `scripting/csharp/Aver.Framework/` (146 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Framework
 
@@ -849,6 +849,12 @@ Values: `Local = 1`, `World = 2`, `Hierarchy = 3`, `Name = 4`, `Tags = 5`, `Mesh
 - `public Vec3 Normal { get; }` - The contact normal, unit length.
 - `public Body Other(Body one)` - The other body in this contact; invalid if one is neither.
 
+### CursorShape
+
+`public enum CursorShape` - The cursor shapes a window offers.
+
+Values: `Arrow = 0`, `IBeam`, `PointingHand`, `Cross`, `Wait`, `Busy`, `Drag`, `CanDrop`, `Forbidden`, `VSize`, `HSize`, `BDiagSize`, `FDiagSize`, `Move`, `VSplit`, `HSplit`, `Help`
+
 ### CustomEnv
 
 `public static class CustomEnv` - Custom sky, fog and particles programs.
@@ -969,6 +975,24 @@ Values: `Radial`, `Axial`
 `public static class Display` - The display, for what a script may change at runtime.
 
 - `public static void SetVSync(bool on)` - Asks the shipped game to turn vsync on or off; it applies it next frame where the device allows turning it off.
+- `public static PresentMode? PresentMode { get; set; }` - How a finished frame reaches the display.
+- `public static int MaxFps { get; set; }` - The cap on frames per second, 0 for none.
+
+### DisplayWindow
+
+`public static class DisplayWindow` - The game window: what it is now (as the host last published it) and what a script asks it to become.
+
+- `public static WindowMode Mode { get; set; }` - The mode now.
+- `public static (int Width, int Height) Size` - The client area in physical pixels (0 by 0 before the host has published).
+- `public static void SetSize(int width, int height)` - Asks for a client area of this many pixels (a windowed window takes it).
+- `public static (int X, int Y) Position` - The outer window's top-left in screen pixels.
+- `public static void SetPosition(int x, int y)`
+- `public static WindowFlags Flags { get; }` - The flags that are on now.
+- `public static void SetFlag(WindowFlags flag, bool on)`
+- `public static void SetTitle(string title)`
+- `public static (int Width, int Height) MonitorSize` - The monitor the window is on, in pixels (0 by 0 when it cannot be told).
+- `public static float DpiScale { get; }` - The display scale: 1 is 96 DPI.
+- `public static bool Focused { get; }` - Whether the window has the keyboard focus.
 
 ### Double3
 
@@ -1139,6 +1163,7 @@ Values: `Destroy = 0`, `Stop = 1`, `Reload = 2`, `Travel = 3`
 - `public static void ResetAllBindings()` - Restores every pushed context to the bindings its own constructor set up, in memory only -- see ResetToDefaults's own comment for why this does not touch Settings or persist by itself; a caller wanting the reset to stick calls SaveAllBindings afterwards.
 - `public static bool RebindAction(string actionName, int slot, int rawKey)` - Rebinds the slot-th binding of actionName, walking pushed contexts HIGHEST PRIORITY FIRST and, within each context, its bindings in the order SaveBindings would number them -- the slot count RESETS at each context, the same as SaveBindings's own per-context slotByAction dictionary does, so a slot this method rebinds is the exact slot a save/load round-trip would persist under that context's own settings key.
 - `public static bool TryGetBindingKey(string actionName, int slot, out int rawKey, out InputSource source)` - The slot-th binding of actionName's CURRENT Source and raw key, using the identical per-context slot walk RebindAction uses (see its own comment).
+- `public static bool TryGetBinding(string actionName, int slot, out int rawKey, out InputSource source, out float scale)` - TryGetBindingKey and the binding's scale too (a negative scale on an axis binding is the other direction of the axis).
 
 ### Entity
 
@@ -1658,7 +1683,17 @@ Values: `LeftX = 0`, `LeftY`, `RightX`, `RightY`, `LeftTrigger`, `RightTrigger`
 
 `public enum GamepadButton` - Gamepad buttons.
 
-Values: `DPadUp = 0`, `DPadDown`, `DPadLeft`, `DPadRight`, `Start`, `Back`, `LeftThumb`, `RightThumb`, `LeftShoulder`, `RightShoulder`, `A`, `B`, `X`, `Y`
+Values: `DPadUp = 0`, `DPadDown`, `DPadLeft`, `DPadRight`, `Start`, `Back`, `LeftThumb`, `RightThumb`, `LeftShoulder`, `RightShoulder`, `A`, `B`, `X`, `Y`, `Guide`, `Misc1`, `Paddle1`, `Paddle2`, `Paddle3`, `Paddle4`, `Touchpad`
+
+### Gamepads
+
+`public static class Gamepads` - Local gamepads: up to MaxPads, numbered from 0.
+
+- `public const int MaxPads = 4` - The most pads the engine reads.
+- `public static bool IsConnected(int pad)` - Whether pad pad is plugged in.
+- `public static string Name(int pad)` - The pad's name, "" when it is not connected.
+- `public static void Rumble(int pad, float weak, float strong, float seconds = 0f)` - Rumbles a pad: the weak (high-frequency) and strong (low-frequency) motors in 0..1, for seconds (0 or less: until stopped).
+- `public static void StopRumble(int pad)` - Stops a pad's rumble.
 
 ### GameplayAbilities
 
@@ -1917,7 +1952,7 @@ Values: `World = 0`, `Model = 1`
 
 ### InputEventMouseButton
 
-`public sealed class InputEventMouseButton : InputEvent` - A mouse button going down or up (MouseLeft, MouseRight, MouseMiddle).
+`public sealed class InputEventMouseButton : InputEvent` - A mouse button going down or up (MouseLeft, MouseRight, MouseMiddle, and the two side buttons MouseX1 and MouseX2).
 
 - `public InputEventMouseButton(Key button, bool pressed)`
 - `public Key Button { get; }`
@@ -1938,8 +1973,35 @@ Values: `World = 0`, `Model = 1`
 
 `public sealed class InputEventMouseWheel : InputEvent` - The mouse wheel turning; positive is away from the user.
 
-- `public InputEventMouseWheel(float delta)`
+- `public InputEventMouseWheel(float delta, float horizontal = 0f)`
 - `public float Delta { get; }`
+- `public float Horizontal { get; }`
+- `public override string ToString()`
+
+### InputEventTouch
+
+`public sealed class InputEventTouch : InputEvent` - A finger touching down on, or lifting off, the screen.
+
+- `public InputEventTouch(int finger, bool pressed, float x, float y, float pressure = 1f)`
+- `public int Finger { get; }`
+- `public bool IsPressed { get; }`
+- `public float X { get; }` - Window pixels.
+- `public float Y { get; }`
+- `public float Pressure { get; }`
+- `public override bool Pressed { get; }`
+- `public override string ToString()`
+
+### InputEventTouchMotion
+
+`public sealed class InputEventTouchMotion : InputEvent` - A finger that is down moving.
+
+- `public InputEventTouchMotion(int finger, float x, float y, float relativeX, float relativeY, float pressure = 1f)`
+- `public int Finger { get; }`
+- `public float X { get; }`
+- `public float Y { get; }`
+- `public float RelativeX { get; }`
+- `public float RelativeY { get; }`
+- `public float Pressure { get; }`
 - `public override string ToString()`
 
 ### InputMappingContext
@@ -2024,7 +2086,7 @@ Values: `Digital`, `Axis1D`, `Axis2D`
 
 `public enum Key` - Keyboard and mouse codes.
 
-Values: `A = 0`, `B`, `C`, `D`, `E`, `F`, `G`, `H`, `I`, `J`, `K`, `L`, `M`, `N`, `O`, `P`, `Q`, `R`, `S`, `T`, `U`, `V`, `W`, `X`, `Y`, `Z`, `D0 = 26`, `D1`, `D2`, `D3`, `D4`, `D5`, `D6`, `D7`, `D8`, `D9`, `Space = 36`, `LeftShift`, `LeftCtrl`, `LeftAlt`, `Enter`, `Escape`, `Tab`, `Left`, `Right`, `Up`, `Down`, `MouseLeft`, `MouseRight`, `MouseMiddle`
+Values: `A = 0`, `B`, `C`, `D`, `E`, `F`, `G`, `H`, `I`, `J`, `K`, `L`, `M`, `N`, `O`, `P`, `Q`, `R`, `S`, `T`, `U`, `V`, `W`, `X`, `Y`, `Z`, `D0 = 26`, `D1`, `D2`, `D3`, `D4`, `D5`, `D6`, `D7`, `D8`, `D9`, `Space = 36`, `LeftShift`, `LeftCtrl`, `LeftAlt`, `Enter`, `Escape`, `Tab`, `Left`, `Right`, `Up`, `Down`, `MouseLeft`, `MouseRight`, `MouseMiddle`, `F1`, `F2`, `F3`, `F4`, `F5`, `F6`, `F7`, `F8`, `F9`, `F10`, `F11`, `F12`, `PageUp`, `PageDown`, `Home`, `End`, `Insert`, `Delete`, `Backspace`, `CapsLock`, `NumLock`, `ScrollLock`, `Pause`, `PrintScreen`, `Menu`, `Meta`, `Minus`, `Equal`, `LBracket`, `RBracket`, `Backslash`, `Semicolon`, `Apostrophe`, `Comma`, `Period`, `Slash`, `Grave`, `Kp0`, `Kp1`, `Kp2`, `Kp3`, `Kp4`, `Kp5`, `Kp6`, `Kp7`, `Kp8`, `Kp9`, `KpAdd`, `KpSubtract`, `KpMultiply`, `KpDivide`, `KpDecimal`, `KpEnter`, `MouseX1`, `MouseX2`, `MouseWheelUp`, `MouseWheelDown`, `MouseWheelLeft`, `MouseWheelRight`
 
 ### Landscape
 
@@ -2304,6 +2366,21 @@ Values: `Inherit = 0`, `Pausable = 1`, `WhenPaused = 2`, `Always = 3`, `Disabled
 
 Values: `Editor = 0`, `Playing = 1`, `Paused = 2`
 
+### Pointer
+
+`public static class Pointer` - The pointer over the game window: its mode, the cursor's shape and images, and moving it.
+
+- `public static PointerMode Mode { get; set; }` - The pointer mode.
+- `public static CursorShape Shape { get; set; }` - The shape shown while the pointer is over the window.
+- `public static bool SetCursorImage(CursorShape shape, byte[]? rgba, int width, int height, int hotX = 0, int hotY = 0)` - Replaces a shape with an image: rgba is width x height x 4 straight-alpha bytes, top row first, each side 1 to 256, the hotspot inside it.
+- `public static void Warp(float x, float y)` - Moves the pointer to the window pixel (x, y) at the next frame.
+
+### PointerMode
+
+`public enum PointerMode` - How the pointer behaves over the game window.
+
+Values: `Auto = 0`, `Visible = 1`, `Hidden = 2`, `Captured = 3`, `Confined = 4`, `ConfinedHidden = 5`
+
 ### PostFx
 
 `public static class PostFx` - Script-driven post-process layers, blended over the level's own post volumes.
@@ -2320,6 +2397,12 @@ Values: `Editor = 0`, `Playing = 1`, `Paused = 2`
 ### PreAttributeChange
 
 `public delegate void PreAttributeChange(AbilitySystem system, AttributeRef attribute, ref float newValue)` - Lets a game adjust an attribute's new Current value before it is stored (a custom clamp).
+
+### PresentMode
+
+`public enum PresentMode` - Present modes.
+
+Values: `Fifo = 0`, `Immediate = 1`, `Adaptive = 2`, `Mailbox = 3`
 
 ### ProbeBlend
 
@@ -2743,6 +2826,17 @@ Values: `None = 0`, `IgnorePause = 2`, `IgnoreDilation = 4`
 - `public static void Update(float rawDt)` - Host call: advances the clock by the UNSCALED frame delta.
 - `public static void Shutdown()` - Detaches from the native service.
 
+### Touch
+
+`public static class Touch` - Fingers on a touch screen, by index.
+
+- `public const int MaxFingers = 10` - The most fingers tracked.
+- `public static bool IsDown(int index, out float x, out float y, out float pressure)` - True while finger index is down; its position in window pixels and pressure (0 to 1).
+- `public static bool Pressed(int index)` - True on the frame finger index went down.
+- `public static bool Released(int index)` - True on the frame finger index went up.
+- `public static bool Emulation { get; set; }` - Whether the left mouse button publishes as finger 0 (when no real finger has been seen).
+- `public static bool Available { get; }` - Whether the machine reported a real touch screen (a finger has arrived).
+
 ### TriggerState
 
 `public enum TriggerState` - Where an action is in its trigger cycle.
@@ -2877,6 +2971,18 @@ Values: `None = 0`, `Ocean = 1`, `Lake = 2`, `River = 3`
 ### WheelTelemetry
 
 `public readonly record struct WheelTelemetry( bool Contact, float SlipLongitudinal, float SlipLateralDeg, float LoadN, float CompressionCm, float AngularVelocityRadS, float SteerDeg, float SpinRad, Vec3 ContactPoint, Vec3 ContactNormal, float ForceLongitudinalN, float ForceLateralN, float SurfaceFriction, Entity SurfaceEntity, bool Skidding)` - One wheel's state as of the last fixed physics step.
+
+### WindowFlags
+
+`public enum WindowFlags` - Window flags.
+
+Values: `None = 0`, `Resizable = 1`, `Borderless = 2`, `AlwaysOnTop = 4`
+
+### WindowMode
+
+`public enum WindowMode` - A window's mode.
+
+Values: `Windowed = 0`, `Minimized = 1`, `Maximized = 2`, `Fullscreen = 3`
 
 ### WorldEnvKey
 
