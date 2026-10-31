@@ -73,6 +73,7 @@ Keyed on the job, not the module. If your job is here, the seam is decided.
 | Tune GI itself (resolution, intensity, reach) | Voxi | `aver_voxi_set_voxel_resolution`, `…_set_gi_intensity`, `…_set_gi_max_distance` |
 | Ask what the **GPU** actually supports | Voxi | `aver_voxi_ray_tracing_tier`, `…_max_msaa`, `…_mesh_shader_tier`, `…_shader_model` |
 | **Build a mesh from arrays at run time**; draw N instances of a mesh as one (G4 R7) | Framework (own header, own version) | `framework_rtmesh_abi.h`: `aver_fw_rtmesh_create` / `…_add_surface`, `aver_fw_multimesh_*`; an entity draws the mesh at the path `@rtmesh/<key>` |
+| **Build a texture from pixels at run time** and use it in a material slot or a UI draw (E8); decode an image file to RGBA8 | Framework (own header, own version) | `framework_rtex_abi.h`: `aver_fw_rtex_create` / `…_set_pixels` / `…_set_region` / `…_get_pixels` / `…_destroy`, `aver_fw_image_decode`; a material names the texture `@rt:rtex.<key>` in a slot, the UI reads `aver_fw_rtex_gpu_handle`; the host reads `aver_fw_rtex_take_dirty` / `…_take_removed` / `…_view` |
 | **Place a local fog volume** (inside the volumetric fog); record a reflection probe and ask which probes light a point (G4 R8) | Framework (own header, own version) | `framework_envfx_abi.h`: `aver_fw_fogvol_create` / `…_set`, `aver_fw_probe_create` / `…_set_box` / `…_select` / `…_project`; the host reads `aver_fw_fogvol_pack` |
 | **Register a custom sky, fog or particles HLSL program** (an `EmbeddedHlslEnv` graph a tool wrote), pick the sky, give a fog volume its program | Framework (own header, own version) | `framework_customenv_abi.h`: `aver_fw_cenv_register` / `aver_fw_cenv_set_registers` / `aver_fw_cenv_use_sky` / `aver_fw_cenv_unregister`, `aver_fw_fogvol_set_shader`; the host reads `aver_fw_cenv_revision`, `aver_fw_cenv_registers_revision`, `aver_fw_cenv_count`, `aver_fw_cenv_name`, `aver_fw_cenv_graph`, `aver_fw_cenv_registers`, `aver_fw_cenv_sky_index` |
 | **Animate named properties of any node** with animation-player rules (tracks, loop modes, queue, crossfade, method calls, signals order) | Anim.Abi (own header, own library) | `propanim_abi.h`: `aver_panim_*` for the clip (`.ocanim` property tracks), `aver_pplayer_*` for the player (A2 added tree mode: `aver_pplayer_tree_add` / `_tree_mix` take the animations a host-evaluated graph wants mixed, `aver_pplayer_set_root_motion` / `_root_motion` report a root-motion track); Aver.Fabric's `AnimationPlayer` and `AnimationTree` are the only callers |
@@ -856,6 +857,33 @@ AVER_PBR_ABI const char* aver_pbr_uv_mode_name(int32_t mode);
 ```
 
 `AVER_PBR_UV_WORLD_ALIGNED` projects world position onto the dominant axis of the surface normal instead of using the mesh's own UVs. Tiling is world **centimetres per tile** and is read only in that mode; a value `<= 0` is rejected rather than stored, because it would collapse the projection (`pbr_abi.h:131-135`). It is dominant-axis projection, not triplanar blending: a blockout is axis-aligned boxes, where projection is exact and seamless and blending would cost three samples per map instead of one (`Material.hpp:47-50`).
+
+### Finding an instance, sampler state, and the FX record's texture decode (P1, P14, F35)
+*You are a script changing a material that is already in the scene, or choosing how its textures are filtered and decoded.*
+
+```c
+AVER_PBR_ABI aver_pbr_material aver_pbr_find(const char* name);   /* first live material with this name ("M_Wood" for M_Wood.ocmat), or 0 */
+AVER_PBR_ABI int32_t aver_pbr_get_uv_transform(aver_pbr_material m, int32_t set, float* out4);   /* set 1 or 2: scale.xy, offset.xy */
+AVER_PBR_ABI int32_t aver_pbr_set_uv_transform(aver_pbr_material m, int32_t set, float scaleX, float scaleY, float offsetX, float offsetY);
+AVER_PBR_ABI int32_t aver_pbr_get_sampler_filter(aver_pbr_material m);    /* AVER_PBR_SAMPLER_*: anisotropic (the default), trilinear, bilinear, point-mip, point */
+AVER_PBR_ABI int32_t aver_pbr_set_sampler_filter(aver_pbr_material m, int32_t filter);
+AVER_PBR_ABI int32_t aver_pbr_get_sampler_address(aver_pbr_material m);   /* AVER_PBR_ADDRESS_*: wrap (the default), clamp, mirror */
+AVER_PBR_ABI int32_t aver_pbr_set_sampler_address(aver_pbr_material m, int32_t address);
+AVER_PBR_ABI float   aver_pbr_get_emissive_energy(aver_pbr_material m);   /* a scale on the glow, 1 = none, folded into the emissive factor when packed */
+AVER_PBR_ABI int32_t aver_pbr_set_emissive_energy(aver_pbr_material m, float v);
+AVER_PBR_ABI int32_t aver_pbr_get_roughness_channel(aver_pbr_material m); /* AVER_PBR_CHANNEL_*: which channel of the metal-rough map; defaults G and B */
+AVER_PBR_ABI int32_t aver_pbr_set_roughness_channel(aver_pbr_material m, int32_t channel);
+AVER_PBR_ABI int32_t aver_pbr_get_metallic_channel(aver_pbr_material m);
+AVER_PBR_ABI int32_t aver_pbr_set_metallic_channel(aver_pbr_material m, int32_t channel);
+AVER_PBR_ABI int32_t aver_pbr_get_vertex_color(aver_pbr_material m);      /* the mesh's vertex colour tints the albedo */
+AVER_PBR_ABI int32_t aver_pbr_set_vertex_color(aver_pbr_material m, int32_t on);
+AVER_PBR_ABI int32_t aver_pbr_get_vertex_color_srgb(aver_pbr_material m); /* ...and is sRGB-encoded (decoded to linear first) */
+AVER_PBR_ABI int32_t aver_pbr_set_vertex_color_srgb(aver_pbr_material m, int32_t on);
+AVER_PBR_ABI int32_t aver_pbr_get_alpha_extension(aver_pbr_material m);   /* AVER_PBR_ALPHAEXT_*: none, hash, antialias (the alpha-to-coverage stand-in) */
+AVER_PBR_ABI int32_t aver_pbr_set_alpha_extension(aver_pbr_material m, int32_t ext);
+```
+
+Every setter pushes to the GPU on the next frame (the material is dirty; the material system rewrites its constants and bindings). The sampler, the UV transform, the channels, the vertex-colour decode and the alpha extension live in the `.ocmat` FX record (`FLAGS`-line `FX texfilter=… texaddr=… roughchan=… metalchan=… vcsrgb=1 alphaext=…`; `emissiveEnergy` is `PARAM emissiveEnergy`). The first non-default FX value moves the material to its own pipeline variant, compiled on first use; until then the ordinary pipeline draws it. **Raster draws only.** The ray-traced hit path (reflections, GI, the ray-driven pass) fetches a material through the bindless table with the engine's own sampler (`gMaterialSampler`: anisotropic, wrap; mip 0, or ray gradients) and the glTF channel packing, never reads the FX record, and is not touched by these calls; a nearest-filtered or clamped material therefore looks different in a reflection of itself than on screen. The project-wide anisotropy level and mip bias are `RENDER.TEXTUREANISO` (1 to 16, default 8) and `RENDER.TEXTUREMIPBIAS` (-2 to 2, default 0) in the `.ocproject`, latched when the renderer starts.
 
 ### Texture references (path and opaque id)
 *You are pointing a slot at an image, by authoring path or by opaque asset id — this module interprets **neither**, which is exactly what keeps the DLL Core-only.*

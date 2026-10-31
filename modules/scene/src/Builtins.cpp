@@ -234,6 +234,17 @@ void registerBuiltinComponents(World& world) {
             .field("serial", FieldKind::I32, static_cast<u16>(offsetof(CDecal, serial)), 0, true);
         expect(b.verify(sizeof(CDecal)), b.typeId(), kComponentDecal, "CDecal");
     }
+    {
+        // Not a fixed-id built-in: registered by name right after them, the way every later module's component is (its id is per process; nothing in
+        // the ABI names it). Here rather than in a system because the draw walk of both hosts reads it and neither owns a system for it.
+        static constexpr const char* kSlotNames[kSurfaceOverrideSlots] = {
+            "slot0", "slot1", "slot2", "slot3", "slot4", "slot5", "slot6", "slot7",
+            "slot8", "slot9", "slot10", "slot11", "slot12", "slot13", "slot14", "slot15"};
+        auto b = world.registerComponent<CSurfaceMaterials>(kSurfaceMaterialsComponentName);
+        for (u32 i = 0; i < kSurfaceOverrideSlots; ++i)
+            b.field(kSlotNames[i], FieldKind::I32, static_cast<u16>(offsetof(CSurfaceMaterials, slot) + i * sizeof(i32)));
+        AVER_ASSERTM(b.verify(sizeof(CSurfaceMaterials)), "CSurfaceMaterials");
+    }
 }
 
 } // namespace aver::scene::detail

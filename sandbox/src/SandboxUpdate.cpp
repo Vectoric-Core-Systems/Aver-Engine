@@ -1236,6 +1236,12 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
     // Runtime meshes (G4 R7): meshes a Play session's scripts built, or a MultiMesh baked, since last frame are uploaded before the draw walk. None = nothing to do.
     content_.syncRuntimeMeshes(*e.device());
+    // Runtime textures (E8): the pixels a Play session's scripts built since last frame are uploaded and handed to the materials that name them.
+#if AVER_MODULE_PBR && AVER_MODULE_VOXI
+    content_.syncRuntimeTextures(*e.device(), &voxiRenderer_.materials());
+#else
+    content_.syncRuntimeTextures(*e.device(), nullptr);
+#endif
     // Sub-viewports (G4 R5): a Play session's render-to-texture views. Their draw lists and cameras are set here because the views' features draw in the device's
     // beginFrame, which follows. With no view in the registry (every editor session that is not playing one) this returns at once.
     {

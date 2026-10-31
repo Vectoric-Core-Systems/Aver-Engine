@@ -906,6 +906,16 @@ static const Group kGroups[] = {
      "scripting/csharp/Aver.Scripting/Pbr.cs",   "PbrAlphaMode", ""},
     {"PBR UV modes",          "modules/render.pbr/include/aver/pbr/pbr_abi.h",              "AVER_PBR_UV_",
      "scripting/csharp/Aver.Scripting/Pbr.cs",   "PbrUvMode",   ""},
+    // P1: the material sampler state ids. Material.cpp static_asserts the header against pbr::FxFilter / FxAddress; this pins the C# copy.
+    {"PBR sampler filters",   "modules/render.pbr/include/aver/pbr/pbr_abi.h",              "AVER_PBR_SAMPLER_",
+     "scripting/csharp/Aver.Scripting/Pbr.cs",   "PbrSamplerFilter", ""},
+    {"PBR sampler addresses", "modules/render.pbr/include/aver/pbr/pbr_abi.h",              "AVER_PBR_ADDRESS_",
+     "scripting/csharp/Aver.Scripting/Pbr.cs",   "PbrSamplerAddress", ""},
+    // F35: the metal-rough channel ids and the alpha extension ids. Material.cpp static_asserts the header against pbr::FxChannel / FxAlphaExt.
+    {"PBR channels",          "modules/render.pbr/include/aver/pbr/pbr_abi.h",              "AVER_PBR_CHANNEL_",
+     "scripting/csharp/Aver.Scripting/Pbr.cs",   "PbrChannel", ""},
+    {"PBR alpha extensions",  "modules/render.pbr/include/aver/pbr/pbr_abi.h",              "AVER_PBR_ALPHAEXT_",
+     "scripting/csharp/Aver.Scripting/Pbr.cs",   "PbrAlphaExtension", ""},
     // THE AUDIO BUSES. This pair could not be checked because the C# side did not exist -- scripts
     // wrote the bare integer. AudioAbi.cpp static_asserts the C macros against aver::audio::Bus and
     // its comment names the copy those asserts cannot reach: "every managed SetBusVolume(1, ...)

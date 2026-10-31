@@ -53,6 +53,8 @@ add_library(Aver.Framework SHARED
   src/CustomEnvAbi.cpp
   # Meshes a script builds from arrays and MultiMesh instance tables baked into one mesh; the host uploads what changed (G4 R7).
   src/RuntimeMeshAbi.cpp
+  # Textures a script builds from pixels at run time (E8); the host uploads what changed and hands the GPU texture to the materials and the UI.
+  src/RuntimeTextureAbi.cpp
   src/DataTableAbi.cpp
   src/EntityStateAbi.cpp
   # The floating origin (wave 11, docs/plans/wave11/LARGE_WORLD.md 2.5): a host-installed provider and the exact WorldPos conversions.

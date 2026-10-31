@@ -142,6 +142,10 @@ struct MaterialDesc {
 
     f32 baseColorFactor[4]  = {1.0f, 1.0f, 1.0f, 1.0f};
     f32 emissiveFactor[3]   = {0.0f, 0.0f, 0.0f};
+    // A scale on the glow (the emissive factor times the emissive map), applied where the material is packed, so the raster pass, ray hits, the emissive
+    // lamp light and the previews all see the product. 1 is every material before this field. Kept apart from emissiveFactor so a colour and its intensity
+    // can be authored (and calibrated by an importer) separately.
+    f32 emissiveEnergy      = 1.0f;
     f32 metallicFactor      = 1.0f;
     f32 roughnessFactor     = 1.0f;
     f32 normalScale         = 1.0f;

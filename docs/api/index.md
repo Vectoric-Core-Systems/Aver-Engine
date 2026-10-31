@@ -13,5 +13,5 @@ Generated from source by `scripts/csharp-api-index.py`. Hand-written guides: `do
 | [Aver.Synapse](Aver.Synapse.md) | 38 | 176 |
 | [Aver.LevelInstance](Aver.LevelInstance.md) | 4 | 46 |
 | [Aver.Prefab](Aver.Prefab.md) | 4 | 28 |
-| [Aver.Scripting](Aver.Scripting.md) | 14 | 126 |
+| [Aver.Scripting](Aver.Scripting.md) | 18 | 153 |
 | [Aver.Pcg.Apply](Aver.Pcg.Apply.md) | 2 | 8 |

@@ -346,6 +346,13 @@ struct Settings {
     // Off draws every material through the ordinary pipelines. No effect, and nothing compiled, without such a material. Project key RENDER.MATERIALFX.
     bool materialFx = true;
 
+    // ---- P1: material sampler quality ----
+    // The anisotropy level (1..16) and the mip bias (-2..2) of every material sampler, the engine's own and the per-material ones an .ocmat FX record
+    // asks for (texfilter / texaddr). Static samplers are baked into every pipeline layout, so these are LATCHED with the first setSettings (like layeredBsdf):
+    // a later change warns once and takes effect on the next project load. Project keys RENDER.TEXTUREANISO / RENDER.TEXTUREMIPBIAS.
+    u32 textureAnisotropy = 8;
+    f32 textureMipBias = 0.0f;
+
     // ---- R2: omni and spot lights without ray tracing ----
     // The raster local-light path (RasterLights.hpp, voxi_locallights_raster.hlsli): a capped light list shaded in the raster scene pass, with
     // PCF shadow maps from an atlas. 0 = auto: used where the ray-traced lights cannot serve (ray tracing off, no ray queries, Vulkan);

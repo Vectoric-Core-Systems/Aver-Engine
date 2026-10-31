@@ -672,7 +672,12 @@ D3D12_FILTER toFilter(Filter f) {
 }
 
 D3D12_TEXTURE_ADDRESS_MODE toAddress(AddressMode a) {
-    return a == AddressMode::Wrap ? D3D12_TEXTURE_ADDRESS_MODE_WRAP : D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    switch (a) {
+        case AddressMode::Wrap:   return D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        case AddressMode::Mirror: return D3D12_TEXTURE_ADDRESS_MODE_MIRROR;
+        case AddressMode::Clamp:  break;
+    }
+    return D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
 }
 
 // Per-subresource state tracking, debug builds only.
@@ -1982,7 +1987,8 @@ struct RetiredObject {
 
 // True when two sampler descriptions are identical.
 bool sameSampler(const SamplerDesc& a, const SamplerDesc& b) {
-    return a.filter == b.filter && a.address == b.address && a.compare == b.compare && a.maxLod == b.maxLod;
+    return a.filter == b.filter && a.address == b.address && a.compare == b.compare && a.maxLod == b.maxLod &&
+           a.maxAnisotropy == b.maxAnisotropy && a.mipBias == b.mipBias;
 }
 // True when two pipeline layouts are identical. Field by field: PipelineLayout has padding.
 bool sameLayout(const PipelineLayout& a, const PipelineLayout& b) {
@@ -1994,7 +2000,7 @@ bool sameLayout(const PipelineLayout& a, const PipelineLayout& b) {
     // Part of the key: constant buffer space difference requires different root signatures.
     if (a.constantSpace != b.constantSpace || a.samplerSpace != b.samplerSpace) return false;
     for (u32 i = 0; i < kMaxConstantSlots; ++i) if (a.constantDwords[i] != b.constantDwords[i]) return false;
-    for (u32 i = 0; i < a.samplerCount && i < 4; ++i) if (!sameSampler(a.samplers[i], b.samplers[i])) return false;
+    for (u32 i = 0; i < a.samplerCount && i < kMaxStaticSamplers; ++i) if (!sameSampler(a.samplers[i], b.samplers[i])) return false;
     return true;
 }
 
@@ -7427,10 +7433,11 @@ const RootSigEntry* D3D12ResourceFactory::rootSignature(const PipelineLayout& la
 
     for (u32 i = 0; i < n; ++i) params[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
-    D3D12_STATIC_SAMPLER_DESC samplers[4] = {};
-    const u32 sampCount = layout.samplerCount < 4 ? layout.samplerCount : 4;
+    D3D12_STATIC_SAMPLER_DESC samplers[kMaxStaticSamplers] = {};
+    const u32 sampCount = layout.samplerCount < kMaxStaticSamplers ? layout.samplerCount : kMaxStaticSamplers;
     for (u32 i = 0; i < sampCount; ++i) {
         samplers[i].Filter = toFilter(layout.samplers[i].filter);
+        samplers[i].MipLODBias = layout.samplers[i].mipBias;
         samplers[i].AddressU = samplers[i].AddressV = samplers[i].AddressW = toAddress(layout.samplers[i].address);
         samplers[i].ComparisonFunc = toComparison(layout.samplers[i].compare);
         samplers[i].MaxLOD = layout.samplers[i].maxLod;

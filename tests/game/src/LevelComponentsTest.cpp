@@ -394,6 +394,42 @@ int main() {
               "removing it also takes back the zero-size Rigid Body the record attached");
         w.destroy(e); w.flush();
     }
+    // ---- SurfaceMaterials (P2): COMPONENT SurfaceMaterials slotN=<material> -> scene::CSurfaceMaterials, and back ----
+    {
+        AVER_INFO("apply: SurfaceMaterials");
+        const u32 smType = w.componentId(scene::kSurfaceMaterialsComponentName);
+        check(smType != 0, "CSurfaceMaterials is registered by the scene's own component table");
+        const scene::Entity e = mesh(w, "Barrel");
+        const auto input = rec("SurfaceMaterials", {{"slot0", "M_Wood"}, {"slot3", "M_Rust"}});
+        check(game::applyPlacedComponent(w, e, input), "SurfaceMaterials applies");
+        const auto* c = w.component<scene::CSurfaceMaterials>(e, smType);
+        check(c && c->slot[0] == aver_scene_material(0, "M_Wood") && c->slot[3] == aver_scene_material(0, "M_Rust") && c->slot[0] != 0 && c->slot[3] != c->slot[0],
+              "...each named slot holds its material's token");
+        bool restZero = c != nullptr;
+        for (u32 i = 0; c && i < scene::kSurfaceOverrideSlots; ++i) if (i != 0 && i != 3 && c->slot[i] != 0) restZero = false;
+        check(restZero, "...and every other slot is 0 (no override)");
+        const auto got = game::capturePlacedComponent(w, e, "SurfaceMaterials", none);
+        check(got && *got == input, "capture returns the same record, slots in order");
+        // A second apply replaces the list rather than merging into it.
+        check(game::applyPlacedComponent(w, e, rec("SurfaceMaterials", {{"slot1", "M_Glass"}})), "applying again works");
+        c = w.component<scene::CSurfaceMaterials>(e, smType);
+        check(c && c->slot[0] == 0 && c->slot[3] == 0 && c->slot[1] == aver_scene_material(0, "M_Glass"), "...and replaces the earlier list");
+        // Hostile and degenerate records.
+        check(!game::applyPlacedComponent(w, e, rec("SurfaceMaterials", {{"slot16", "M_X"}})), "a slot past the last is refused");
+        check(!game::applyPlacedComponent(w, e, rec("SurfaceMaterials", {{"colour", "red"}})), "a record naming no slot is refused");
+        check(!game::applyPlacedComponent(w, e, rec("SurfaceMaterials", {{"slot2", ""}})), "an empty material name overrides nothing: refused as naming no slot");
+        check(game::applyPlacedComponent(w, e, rec("SurfaceMaterials", {{"SLOT2", "M_Upper"}, {"slotx", "M_Junk"}, {"slot-1", "M_Junk"}})), "keys are case-insensitive; a malformed slot key is skipped");
+        c = w.component<scene::CSurfaceMaterials>(e, smType);
+        check(c && c->slot[2] == aver_scene_material(0, "M_Upper"), "...slot 2 applied");
+        const scene::Entity bare = w.create("NoMesh", scene::kInvalidEntity, Transform{});
+        check(!game::applyPlacedComponent(w, bare, input), "an entity with no mesh refuses it, like every placed component");
+        // An all-zero component captures as nothing.
+        auto* z = w.component<scene::CSurfaceMaterials>(e, smType);
+        for (u32 i = 0; z && i < scene::kSurfaceOverrideSlots; ++i) z->slot[i] = 0;
+        check(!game::capturePlacedComponent(w, e, "SurfaceMaterials", none), "an all-zero component captures as no record");
+        check(game::removePlacedComponent(w, e, "SurfaceMaterials") && !w.hasComponent(e, smType), "remove takes the component back");
+        w.destroy(e); w.destroy(bare); w.flush();
+    }
     if (g_failures) { AVER_ERROR("LevelComponentsTest: {} check(s) failed", g_failures); return 1; }
     AVER_INFO("LevelComponentsTest: all checks passed");
     return 0;

@@ -157,6 +157,37 @@ public readonly partial struct Entity
         return SetInt("CMeshRenderer.material", SceneNative.aver_scene_material(0, materialName));
     }
 
+    /// <summary>How many mesh material slots an entity can override (CSurfaceMaterials.slot0..slot15).</summary>
+    public const int SurfaceOverrideSlots = 16;
+
+    private const string SurfaceMaterialsComponent = "CSurfaceMaterials";
+
+    private static bool ValidSurfaceSlot(int slot) => slot >= 0 && slot < SurfaceOverrideSlots;
+
+    /// <summary>Draws mesh material slot <paramref name="slot"/> of this entity with <paramref name="materialName"/> instead of the
+    /// material the mesh names. The slot is the .ocmesh material slot, 0-based. Applies where the mesh is drawn as one part per material
+    /// (static and skinned meshes with several slots) and to the one slot of a single-slot mesh; a level-of-detail or soft-body draw
+    /// keeps the entity's own material. The name is resolved like <see cref="SetMaterial"/>'s: it must be a material the project has loaded.
+    /// An empty name clears the slot. False for a slot out of range, or an entity without a mesh.</summary>
+    public bool SetSurfaceMaterial(int slot, string materialName)
+    {
+        if (!ValidSurfaceSlot(slot) || !HasComponent(Component.MeshRenderer)) return false;
+        if (!HasComponent(SurfaceMaterialsComponent) && !AddComponent(SurfaceMaterialsComponent)) return false;
+        int token = string.IsNullOrEmpty(materialName) ? 0 : SceneNative.aver_scene_material(0, materialName);
+        return SetInt(SurfaceMaterialsComponent + ".slot" + slot, token);
+    }
+
+    /// <summary>The material name overriding mesh slot <paramref name="slot"/>, or "" when it has no override.</summary>
+    public string GetSurfaceMaterial(int slot)
+    {
+        if (!ValidSurfaceSlot(slot) || !HasComponent(SurfaceMaterialsComponent)) return "";
+        int token = GetInt(SurfaceMaterialsComponent + ".slot" + slot);
+        return token > 0 ? Fw.Str(SceneNative.aver_scene_material_name(token)) : "";
+    }
+
+    /// <summary>Takes the override off one mesh slot (it draws the mesh's own material again).</summary>
+    public bool ClearSurfaceMaterial(int slot) => SetSurfaceMaterial(slot, "");
+
     /// <summary>The raw 32-bit tag mask (CTags.bits), or 0 if the entity has no tags.</summary>
     public uint Tags => unchecked((uint)GetInt("CTags.bits"));
 

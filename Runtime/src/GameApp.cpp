@@ -2515,7 +2515,15 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
 
 #if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
     // Runtime meshes (G4 R7): meshes a script built or a MultiMesh baked since last frame are uploaded before the draw walk. With none in the registry this does nothing.
-    if (rhi::IDevice* rtDev = e.device()) content_.syncRuntimeMeshes(*rtDev);
+    if (rhi::IDevice* rtDev = e.device()) {
+        content_.syncRuntimeMeshes(*rtDev);
+        // Runtime textures (E8): the pixels scripts built since last frame are uploaded and handed to the materials that name them.
+#if AVER_MODULE_PBR && AVER_MODULE_VOXI
+        content_.syncRuntimeTextures(*rtDev, voxiAttached_ ? &voxiRenderer_.materials() : nullptr);
+#else
+        content_.syncRuntimeTextures(*rtDev, nullptr);
+#endif
+    }
     // Sub-viewports (G4 R5): the views' draw lists and cameras are set here because their features draw in the device's beginFrame, which follows. With no
     // view in the registry this returns at once.
     {

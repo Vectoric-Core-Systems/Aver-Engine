@@ -23,6 +23,7 @@
 // Forward-declared to avoid widespread header inclusion.
 namespace aver::fmt { struct OcMeshData; }
 namespace aver::particles { struct ParticleMeshData; }
+namespace aver::pbr { class MaterialSystem; }
 
 namespace aver::game {
 
@@ -143,6 +144,9 @@ public:
     struct MeshPart {
         rhi::MeshHandle mesh = 0;
         i32             material = 0;
+        // The .ocmesh material slot this part was cut for: the index scene::CSurfaceMaterials overrides are addressed by. Stable when a submesh
+        // is skipped (the part's position in the list is not).
+        u32             slot = 0;
     };
 
     // Uploads every .ocmesh under the project's content root except lazy-folder meshes, which are only indexed.
@@ -160,6 +164,11 @@ public:
     // call, and unloads the ones scripts destroyed. A mesh is drawn through the id its path "@rtmesh/<key>" hashes to, like any asset. Returns how many were
     // uploaded; with no runtime mesh in the registry it does nothing. Call once a frame before the draw walk.
     u32 syncRuntimeMeshes(rhi::IDevice& device);
+    // E8: uploads the textures scripts built from pixels at run time (framework_rtex_abi.h) that changed since the last call, retires the ones scripts destroyed
+    // (and the GPU textures an update replaced, a few frames later, when no frame in flight can still read them), and hands each texture to the materials that
+    // name it ("@rt:rtex.<key>" in a texture slot, rewritten on the next MaterialSystem::update). `materials` may be null (no material system: the textures are
+    // still uploaded and their GPU handle published for the UI). Returns how many were uploaded; with no runtime texture in the registry it does nothing.
+    u32 syncRuntimeTextures(rhi::IDevice& device, pbr::MaterialSystem* materials);
     // Prepares a lazy mesh on a worker thread (read, vertices and parts, collision mesh and shape) so a
     // later acquireMesh only uploads. Workers take the lowest `priority` first (a streamer passes the
     // distance); asking again updates it. No-op for eager or loaded meshes.
@@ -357,6 +366,12 @@ private:
     };
     std::vector<PendingMesh> pendingMeshes_;
     u64 lastFlushFrame_ = 0;
+    // E8: the GPU side of the script-built textures. id (framework_rtex_abi.h) -> the texture made for it and the runtime-texture name the materials know it by.
+    struct RtexGpu { rhi::TextureHandle tex = 0; std::string name; };
+    std::unordered_map<i32, RtexGpu> rtexGpu_;
+    struct RtexRetired { rhi::TextureHandle tex = 0; u64 frame = 0; };
+    std::vector<RtexRetired> rtexRetired_;   // replaced or removed textures, destroyed once no frame in flight can read them
+    u64 rtexFrame_ = 0;                      // counts syncRuntimeTextures calls (one a frame)
     std::unordered_map<u64, std::string> lazyRel_;   // lazy mesh id -> content-relative path
     std::unordered_map<u64, u32>         meshRefs_;  // lazy mesh id -> acquire count
 

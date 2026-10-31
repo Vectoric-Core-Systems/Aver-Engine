@@ -216,6 +216,7 @@ Every binary that must ship, with what actually pulls it in and whether it may b
 | `Aver.Scene/Framework/Physics/Render.PBR/Render.Voxi/UI.Abi .dll` | ours | ours | yes — load-time imports of the exe |
 | *statically linked:* Jolt Physics | `modules/physics.jolt/LICENSE` | **MIT** | yes; **notice required** |
 | *statically linked:* stb | `third_party/stb/LICENSE.txt` | **MIT / public domain** | yes; **notice required** |
+| *statically linked:* libwebp (decoder), NanoSVG, TinyEXR | `third_party/libwebp/COPYING` + `PATENTS`, `third_party/nanosvg/LICENSE.txt`, `third_party/tinyexr/LICENSE` | **BSD-3-Clause** (libwebp with Google's patent grant), **zlib**, **BSD-3-Clause** | yes — in `Aver.Platform` (`aver::decodeImage`), so in the game runtime too; **notices required**, written by `stage-payload.ps1` and `stage-game.ps1` |
 | *statically linked:* Dear ImGui | `third_party/imgui/LICENSE.txt` | MIT | **must not be present** — `AVER_ENABLE_UI=OFF` |
 | Roboto `Regular` and `Medium` `.ttf`, `Roboto-Regular.ocfont/.png` | `third_party/fonts/LICENSE` | Apache-2.0 | **ships (default UI font)** — the game UI text engine's built-in font set and the baked bitmap fallback (`game.allowlist` `[bin]`; the notice row already exists). Other Roboto files stay excluded. |
 | `dxcompiler.dll` (14.3 MB), `dxil.dll` (1.5 MB) | Windows SDK, found by `find_file` from `${CMAKE_RC_COMPILER}`'s directory (`modules/rhi.d3d12/CMakeLists.txt:36-38`) | Windows SDK redistributable terms (DXC's source is NCSA) | yes; notice already written at `stage-payload.ps1:310-316` |

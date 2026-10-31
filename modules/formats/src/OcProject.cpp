@@ -152,6 +152,10 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
             if (t.size() > 1) out.localRaster = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.LOCALSHADOWS")) {
             if (t.size() > 1) out.localShadows = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.TEXTUREANISO")) {
+            if (t.size() > 1) out.textureAniso = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.TEXTUREMIPBIAS")) {
+            if (t.size() > 1) { out.textureMipBias = static_cast<f32>(parseF64(t[1], 0.0)); out.hasTextureMipBias = true; }
         } else if (equalsCI(key, "RENDER.VOLFOG")) {
             if (t.size() > 1) out.volFog = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.VOLFOGDENSITY")) {
@@ -432,7 +436,7 @@ bool isOwnedKey(std::string_view line) {
         "RENDER.GI", "RENDER.RAYTRACING", "RENDER.PATHTRACING",
         "RENDER.VOXELRES", "RENDER.GIINTENSITY", "RENDER.GIDISTANCE",
         "RENDER.RTSHADOWRAYS", "RENDER.RTPIXELSPERRAY", "RENDER.RTSHADOWDENOISE",
-        "RENDER.RTRENDERMODE", "RENDER.RDSTAGES", "RENDER.FOGOCCLUSION", "RENDER.MESHEXTRA", "RENDER.MATERIALFX", "RENDER.LOCALRASTER", "RENDER.LOCALSHADOWS", "RENDER.VOLFOG", "RENDER.VOLFOGDENSITY", "RENDER.SUBVIEWPORTS", "RENDER.SUBVIEWRENDERS", "RENDER.SUBVIEWPIXELS", "RENDER.RUNTIMEMESHES", "RENDER.PTBOUNCES", "RENDER.PTMODE", "RENDER.LAYEREDBSDF",
+        "RENDER.RTRENDERMODE", "RENDER.RDSTAGES", "RENDER.FOGOCCLUSION", "RENDER.MESHEXTRA", "RENDER.MATERIALFX", "RENDER.LOCALRASTER", "RENDER.LOCALSHADOWS", "RENDER.TEXTUREANISO", "RENDER.TEXTUREMIPBIAS", "RENDER.VOLFOG", "RENDER.VOLFOGDENSITY", "RENDER.SUBVIEWPORTS", "RENDER.SUBVIEWRENDERS", "RENDER.SUBVIEWPIXELS", "RENDER.RUNTIMEMESHES", "RENDER.PTBOUNCES", "RENDER.PTMODE", "RENDER.LAYEREDBSDF",
         "RENDER.GICONES", "RENDER.GIMODE", "RENDER.DENOISER", "RENDER.RESTIRVISIBILITY",
         "RENDER.RESTIRHISTORY",
         "RENDER.NEURALDENOISE",   // retired NRD v1 key: ignored on load, dropped on the next save
@@ -506,6 +510,12 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
     appendKey(owned, "RENDER.MATERIALFX", d.materialFx);
     appendKey(owned, "RENDER.LOCALRASTER", d.localRaster);
     appendKey(owned, "RENDER.LOCALSHADOWS", d.localShadows);
+    appendKey(owned, "RENDER.TEXTUREANISO", d.textureAniso);
+    if (d.hasTextureMipBias) {   // signed, so not appendKey(f32), which reads a negative as "unset"
+        char buf[48];
+        const auto r = std::to_chars(buf, buf + sizeof buf, d.textureMipBias);
+        if (r.ec == std::errc{}) { owned += "RENDER.TEXTUREMIPBIAS "; owned.append(buf, static_cast<usize>(r.ptr - buf)); owned += '\n'; }
+    }
     appendKey(owned, "RENDER.VOLFOG", d.volFog);
     appendKey(owned, "RENDER.VOLFOGDENSITY", d.volFogDensity);
     appendKey(owned, "RENDER.SUBVIEWPORTS", d.subViewports);

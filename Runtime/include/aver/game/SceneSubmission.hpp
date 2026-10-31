@@ -151,10 +151,16 @@ constexpr u32 kMaxPlannedDraws = 64;
 // rhi::MeshHandle is a plain u32 (RHIResources.hpp), so writing it into PlannedDraw::mesh needs no
 // rhi:: include either.
 //
+// PER-SURFACE OVERRIDES (P2): `slotOverrides` (null = none) holds a material token per mesh material slot, 0 = keep. A part whose `slot` (a Part
+// that has one; MeshPart does) indexes a non-zero entry draws with that token instead of its own material. The override reaches only the split
+// branch below and a mesh that has NO parts at all (one slot, slot 0 stands for it): a substituted draw (LOD, soft body) is a different geometry
+// whose slots are not these, so it keeps the entity's own material, as before. Null overrides plan exactly what this function always planned.
+//
 // Returns the number of entries written into `out` (capped at outCapacity, never exceeded).
 template <class Part>
 inline u32 planEntityDraws(u32 baseMesh, u32 chosenMesh, const Part* parts, u32 partCount,
-                            i32 entityMaterial, PlannedDraw* out, u32 outCapacity) {
+                            i32 entityMaterial, PlannedDraw* out, u32 outCapacity,
+                            const i32* slotOverrides = nullptr, u32 overrideCount = 0) {
     if (parts != nullptr && partCount > 0 && chosenMesh == baseMesh) {
         u32 n = 0;
         for (u32 i = 0; i < partCount && n < outCapacity; ++i) {
@@ -162,6 +168,10 @@ inline u32 planEntityDraws(u32 baseMesh, u32 chosenMesh, const Part* parts, u32 
             if (!p.mesh) continue;   // a part whose slot named nothing carries no geometry of its own
             out[n].mesh = static_cast<u32>(p.mesh);
             out[n].material = p.material ? p.material : entityMaterial;
+            if constexpr (requires { p.slot; }) {
+                const u32 s = static_cast<u32>(p.slot);
+                if (slotOverrides != nullptr && s < overrideCount && slotOverrides[s] != 0) out[n].material = slotOverrides[s];
+            }
             ++n;
         }
         return n;
@@ -175,6 +185,8 @@ inline u32 planEntityDraws(u32 baseMesh, u32 chosenMesh, const Part* parts, u32 
     if (chosenMesh != 0 && outCapacity > 0) {
         out[0].mesh = chosenMesh;
         out[0].material = entityMaterial;
+        // A mesh with no split is a single-slot mesh: slot 0's override is its surface override. (A split mesh whose draw was substituted is not.)
+        if (parts == nullptr && slotOverrides != nullptr && overrideCount > 0 && slotOverrides[0] != 0) out[0].material = slotOverrides[0];
         return 1;
     }
     return 0;

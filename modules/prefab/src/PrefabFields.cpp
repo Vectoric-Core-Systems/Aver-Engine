@@ -4,6 +4,7 @@
 #include "aver/scene/scene_abi.h"
 
 #include <cstring>
+#include <string>
 
 namespace aver::prefab::detail {
 
@@ -19,8 +20,11 @@ bool ignoredField(const std::string& component, const std::string& field) {
 }
 
 bool isMaterialField(const scene::FieldDesc& d) {
-    return d.component == scene::kComponentMeshRenderer && d.kind == FieldKind::I32 &&
-           std::strcmp(d.name, "material") == 0;
+    if (d.kind != FieldKind::I32) return false;
+    if (d.component == scene::kComponentMeshRenderer) return std::strcmp(d.name, "material") == 0;
+    // CSurfaceMaterials.slot0..15: material tokens too, stored by name for the same reason.
+    constexpr usize kLen = std::char_traits<char>::length(scene::kSurfaceMaterialsComponentName);
+    return std::strncmp(d.qualified, scene::kSurfaceMaterialsComponentName, kLen) == 0 && d.qualified[kLen] == '.';
 }
 
 namespace {

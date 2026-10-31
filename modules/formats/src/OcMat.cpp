@@ -81,7 +81,26 @@ std::string writeFx(const pbr::MaterialFx& f) {
         s += fxPair("diffuse", f.diffuseMode == pbr::FxDiffuse::Lambert ? "lambert" : (f.diffuseMode == pbr::FxDiffuse::LambertWrap ? "wrap" : "toon"));
     on("noambient", f.disableAmbient); on("noshadows", f.noReceiveShadows);
     on("embvs", f.embVertex); on("embdiscard", f.embDiscard);
+    if (f.texFilter != pbr::FxFilter::Anisotropic) {
+        static const char* const kFilter[] = {"aniso", "trilinear", "bilinear", "pointmip", "point"};
+        s += fxPair("texfilter", kFilter[static_cast<u32>(f.texFilter)]);
+    }
+    if (f.texAddress != pbr::FxAddress::Wrap) s += fxPair("texaddr", f.texAddress == pbr::FxAddress::Clamp ? "clamp" : "mirror");
+    static const char* const kChan[] = {"r", "g", "b", "a", "gray"};
+    if (f.roughSel() != pbr::FxChannel::G) s += fxPair("roughchan", kChan[static_cast<u32>(f.roughSel())]);
+    if (f.metalSel() != pbr::FxChannel::B) s += fxPair("metalchan", kChan[static_cast<u32>(f.metalSel())]);
+    on("vcsrgb", f.vertexColorSrgb);
     return s;
+}
+
+// A metal-rough channel word (r, g, b, a, gray); anything else is the engine's packing for that scalar.
+pbr::FxChannel chanWord(std::string_view w, pbr::FxChannel dflt) {
+    if (equalsCI(w, "r")) return pbr::FxChannel::R;
+    if (equalsCI(w, "g")) return pbr::FxChannel::G;
+    if (equalsCI(w, "b")) return pbr::FxChannel::B;
+    if (equalsCI(w, "a")) return pbr::FxChannel::A;
+    if (equalsCI(w, "gray") || equalsCI(w, "grey")) return pbr::FxChannel::Gray;
+    return dflt;
 }
 
 void readFx(const std::vector<std::string_view>& t, pbr::MaterialFx& f) {
@@ -150,6 +169,12 @@ void readFx(const std::vector<std::string_view>& t, pbr::MaterialFx& f) {
         else if (equalsCI(k, "noshadows")) f.noReceiveShadows = b;
         else if (equalsCI(k, "embvs") || equalsCI(k, "gdvs")) f.embVertex = b;   // gdvs, gddiscard: the spellings files written before the rename carry
         else if (equalsCI(k, "embdiscard") || equalsCI(k, "gddiscard")) f.embDiscard = b;
+        else if (equalsCI(k, "texfilter")) f.texFilter = word("trilinear") ? pbr::FxFilter::Trilinear : (word("bilinear") ? pbr::FxFilter::Bilinear
+                                                       : (word("pointmip") ? pbr::FxFilter::PointMip : (word("point") ? pbr::FxFilter::Point : pbr::FxFilter::Anisotropic)));
+        else if (equalsCI(k, "texaddr")) f.texAddress = word("clamp") ? pbr::FxAddress::Clamp : (word("mirror") ? pbr::FxAddress::Mirror : pbr::FxAddress::Wrap);
+        else if (equalsCI(k, "roughchan")) f.roughChannel = chanWord(kv[1], pbr::FxChannel::G);
+        else if (equalsCI(k, "metalchan")) f.metalChannel = chanWord(kv[1], pbr::FxChannel::B);
+        else if (equalsCI(k, "vcsrgb")) f.vertexColorSrgb = b;
         else AVER_WARN("[ocmat] unknown FX key '{}' -- ignored (a typo, or a file from a newer engine)", std::string(k));
     }
 }
@@ -434,7 +459,8 @@ bool parseOcmat(std::string_view text, pbr::MaterialDesc& out, OcMatExtras* extr
                 for (u32 i = 0; i < 4; ++i) out.baseColorFactor[i] = tokF(t, 2 + i, out.baseColorFactor[i]);
             } else if (equalsCI(p, "emissiveFactor")) {
                 for (u32 i = 0; i < 3; ++i) out.emissiveFactor[i] = tokF(t, 2 + i, out.emissiveFactor[i]);
-            } else if (equalsCI(p, "metallicFactor"))     out.metallicFactor    = tokF(t, 2, out.metallicFactor);
+            } else if (equalsCI(p, "emissiveEnergy"))     out.emissiveEnergy    = tokF(t, 2, out.emissiveEnergy);
+            else if (equalsCI(p, "metallicFactor"))       out.metallicFactor    = tokF(t, 2, out.metallicFactor);
             else if (equalsCI(p, "roughnessFactor"))      out.roughnessFactor   = tokF(t, 2, out.roughnessFactor);
             else if (equalsCI(p, "normalScale"))          out.normalScale       = tokF(t, 2, out.normalScale);
             else if (equalsCI(p, "occlusionStrength"))    out.occlusionStrength = tokF(t, 2, out.occlusionStrength);
@@ -703,6 +729,7 @@ std::string writeOcmat(const pbr::MaterialDesc& d, const OcMatExtras* extras) {
     s += "PARAM roughnessFactor "   + num(d.roughnessFactor)   + "\n";
     s += "PARAM emissiveFactor "    + num(d.emissiveFactor[0]) + " " + num(d.emissiveFactor[1]) + " "
        + num(d.emissiveFactor[2]) + "\n";
+    if (d.emissiveEnergy != 1.0f) s += "PARAM emissiveEnergy " + num(d.emissiveEnergy) + "\n";   // omitted at 1: every older file stays byte-identical
     s += "PARAM normalScale "       + num(d.normalScale)       + "\n";
     s += "PARAM occlusionStrength " + num(d.occlusionStrength) + "\n";
     s += "PARAM reflectance "       + num(d.reflectance)       + "\n";

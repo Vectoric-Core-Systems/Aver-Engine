@@ -200,7 +200,7 @@ int main() {
     // R6: what VoxiRenderer::createFxPipelines compiles a scene pixel shader with (the scene shaders also carry strand hair).
     const std::string fxBase = "AVER_MATX=1;AVER_HAIR_SHADING=1";
     const std::string fxAll = ";AVER_MATX_UVX=1;AVER_MATX_TRI=1;AVER_MATX_RIM=1;AVER_MATX_ANISO=1;AVER_MATX_PARALLAX=1;AVER_MATX_BACKLIGHT=1;"
-                              "AVER_MATX_DETAIL=1;AVER_MATX_SURF=1;AVER_MATX_MODES=1;AVER_MATX_HASH=1;AVER_MATX_FADE=1;AVER_MATX_UNSHADED=1;AVER_MATX_LATEZ=1";
+                              "AVER_MATX_DETAIL=1;AVER_MATX_SURF=1;AVER_MATX_MODES=1;AVER_MATX_HASH=1;AVER_MATX_FADE=1;AVER_MATX_UNSHADED=1;AVER_MATX_LATEZ=1;AVER_MATX_CHAN=1";
 
     std::vector<Variant> variants = {
         {"Voxi VSMain (bindless)",              voxiSrc, "VSMain",    'v', 51, vx(bindless)},
@@ -237,6 +237,14 @@ int main() {
         {"Voxi PSMainVoxi material fx fade",        voxiSrc, "PSMainVoxi", 'p', 51, vx(fxBase + ";AVER_MATX_FADE=1;AVER_MATX_LATEZ=1")},
         {"Voxi PSMainVoxi material fx unshaded",    voxiSrc, "PSMainVoxi", 'p', 51, vx(fxBase + ";AVER_MATX_UNSHADED=1")},
         {"Voxi PSMainVoxi material fx multiply",    voxiSrc, "PSMainVoxi", 'p', 51, vx(fxBase + ";AVER_MATX_MUL=1")},
+        // F35: the metal-rough channel choice and the sRGB vertex colour decode (the second row reads the colour stream, the third adds triplanar sampling).
+        {"Voxi PSMainVoxi material fx channels",    voxiSrc, "PSMainVoxi", 'p', 51, vx(fxBase + ";AVER_MATX_CHAN=1")},
+        {"Voxi PSMainVoxi material fx channels mesh extra", voxiSrc, "PSMainVoxi", 'p', 51, vx(fxBase + ";AVER_MATX_CHAN=1;AVER_MESH_EXTRA=1")},
+        {"Voxi PSMainVoxi material fx channels triplanar G-buffer", voxiSrc, "PSMainVoxi", 'p', 51, vx(fxBase + ";AVER_MATX_CHAN=1;AVER_MATX_TRI=1;AVER_GBUFFER=1")},
+        // P1: the material's own maps through another static sampler (s3 = id 1 ... s16 = id 14, VoxiRenderer.cpp giSamplers).
+        {"Voxi PSMainVoxi material sampler s3",     voxiSrc, "PSMainVoxi", 'p', 51, vx(fxBase + ";AVER_SURFACE_SAMPLER=3")},
+        {"Voxi PSMainVoxi material sampler s16",    voxiSrc, "PSMainVoxi", 'p', 51, vx(fxBase + ";AVER_SURFACE_SAMPLER=16;AVER_MATX_UVX=1;AVER_GBUFFER=1")},
+        {"Voxi PSMainVoxi RT material sampler",     voxiSrc, "PSMainVoxi", 'p', 65, vx("AVER_RT=1;" + fxBase + ";AVER_SURFACE_SAMPLER=9"), true},
         {"Voxi PSMainVoxi material fx all",         voxiSrc, "PSMainVoxi", 'p', 51, vx(fxBase + fxAll)},
         {"Voxi PSMainVoxi material fx all G-buffer", voxiSrc, "PSMainVoxi", 'p', 51, vx(fxBase + fxAll + ";AVER_GBUFFER=1")},
         {"Voxi PSMainVoxi material fx all mesh extra", voxiSrc, "PSMainVoxi", 'p', 51, vx(fxBase + fxAll + ";AVER_MESH_EXTRA=1")},

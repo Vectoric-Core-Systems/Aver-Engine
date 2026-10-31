@@ -166,7 +166,7 @@ enum class Filter : u8 {
     Anisotropic,
 };
 // How coordinates outside [0,1] are handled.
-enum class AddressMode : u8 { Clamp, Wrap };
+enum class AddressMode : u8 { Clamp, Wrap, Mirror };   // Mirror appended: no value above moves
 // Comparison used by depth tests and comparison samplers.
 enum class CompareOp : u8 { Never, Less, LessEqual, Always };
 
@@ -177,7 +177,11 @@ struct SamplerDesc {
     CompareOp   compare = CompareOp::Never;
     f32         maxLod  = 3.402823466e+38f;
     u8          maxAnisotropy = 1;
+    f32         mipBias = 0.0f;   // added to the computed mip level; 0 = none
 };
+
+// Static samplers one PipelineLayout can declare (s0..s19). Voxi declares 17: three of its own and one per material sampler state.
+constexpr u32 kMaxStaticSamplers = 20;
 
 // ---------------------------------------------------------------- shaders & pipelines
 
@@ -248,7 +252,7 @@ struct PipelineLayout {
     // Slot k maps to register b(k): non-zero word count makes it root constants, zero a root CBV.
     // Slot 0 is reserved for the engine per-frame block.
     u32 constantDwords[kMaxConstantSlots] = {};
-    SamplerDesc samplers[4] = {};
+    SamplerDesc samplers[kMaxStaticSamplers] = {};
     u32 samplerCount = 0;         // s0..s(n-1)
 
     // Kind of resource each declared slot holds; must agree with BindingSetDesc.
@@ -405,7 +409,20 @@ inline u32 drawMaterialFxWord(const void* constants, u32 bytes) {
     w = static_cast<u32>(p[0]) | (static_cast<u32>(p[1]) << 8) | (static_cast<u32>(p[2]) << 16) | (static_cast<u32>(p[3]) << 24);
     return w;
 }
-inline u32 drawMaterialFxKey(const void* constants, u32 bytes) { return drawMaterialFxWord(constants, bytes) >> 8; }
+// The variant key of a draw: the 24 bits behind the priority byte, with the material sampler state (pbr::MaterialSampler id, 4 bits) above them. It rides in
+// the top byte of the extension block's last dword (`frames`, bits 24..27), which the pixel shader masks off, so the pipeline choice needs no other read.
+constexpr u32 kDrawMaterialFxSamplerShift = 24;
+constexpr u32 kDrawMaterialFxSamplerDword = 15;
+inline u32 drawMaterialFxSampler(const void* constants, u32 bytes) {
+    if (!constants || bytes < kDrawMaterialBaseBytes + 4u * (kDrawMaterialFxSamplerDword + 1u)) return 0;
+    const u8* p = static_cast<const u8*>(constants) + kDrawMaterialBaseBytes + 4u * kDrawMaterialFxSamplerDword;
+    return static_cast<u32>(p[3]) & 0x0Fu;
+}
+inline u32 drawMaterialFxKey(const void* constants, u32 bytes) {
+    const u32 w = drawMaterialFxWord(constants, bytes);
+    if (!w) return 0;
+    return (w >> 8) | (drawMaterialFxSampler(constants, bytes) << kDrawMaterialFxSamplerShift);
+}
 inline i32 drawMaterialFxPriority(const void* constants, u32 bytes) {
     const u32 w = drawMaterialFxWord(constants, bytes);
     return w ? static_cast<i32>(w & 0xFFu) - 128 : 0;
@@ -791,7 +808,7 @@ public:
     virtual PipelineHandle scenePipelineExtra(bool depthPrepassed) const { (void)depthPrepassed; return 0; }
 
     // R6: the pipeline for a draw whose material carries BaseMaterial3D features (the 64-byte extension behind the 192-byte material block; see
-    // drawMaterialFxKey). `key` is that variant's 24-bit key, `meshExtra` says the mesh has the second vertex stream, `blended` selects the translucent
+    // drawMaterialFxKey). `key` is that variant's key (24 bits of features plus the 4-bit material sampler id above them), `meshExtra` says the mesh has the second vertex stream, `blended` selects the translucent
     // pass (never a G-buffer write). 0 = not built (yet): the draw then takes scenePipeline() as every draw did before R6. Never asked for a key of 0.
     virtual PipelineHandle scenePipelineFx(u32 key, bool meshExtra, bool blended) const {
         (void)key; (void)meshExtra; (void)blended; return 0;

@@ -124,8 +124,16 @@ static_assert(static_cast<u64>(kMaxFoliageInstances) + kMaxDraws <= rhi::kMaxTla
 // The material system's sampler register. materialShaderDefines() is told the same number.
 constexpr u32 kMaterialSamplerSlot = 2;
 
-// Fills a layout's static samplers: s0 the radiance volume, s1 the shadow comparison, s2 the
-// material system's surface sampler.
+// The material samplers' project-wide quality (Settings::textureAnisotropy / textureMipBias). Static samplers are part of every pipeline layout, so
+// these are latched by the first setSettings and read here whenever a layout is built.
+u32 gMaterialAnisotropy = 8;
+f32 gMaterialMipBias = 0.0f;
+
+static_assert(kMaterialSamplerSlot + pbr::kMaterialSamplerCount <= rhi::kMaxStaticSamplers, "every material sampler state needs a static sampler slot");
+
+// Fills a layout's static samplers: s0 the radiance volume, s1 the shadow comparison, s2 the material system's surface sampler (anisotropic, wrap:
+// every material before P1), then s3.. one per further material sampler state, register s(2 + pbr::materialSamplerId). The sampler of a state with
+// "no mips" is capped at level 0.
 void giSamplers(rhi::PipelineLayout& l) {
     l.samplers[0].filter  = rhi::Filter::Linear;
     l.samplers[0].address = rhi::AddressMode::Clamp;
@@ -133,10 +141,23 @@ void giSamplers(rhi::PipelineLayout& l) {
     l.samplers[1].filter  = rhi::Filter::ComparisonLinear;
     l.samplers[1].address = rhi::AddressMode::Clamp;
     l.samplers[1].compare = rhi::CompareOp::LessEqual;
-    l.samplers[kMaterialSamplerSlot].filter        = rhi::Filter::Anisotropic;
-    l.samplers[kMaterialSamplerSlot].address       = rhi::AddressMode::Wrap;
-    l.samplers[kMaterialSamplerSlot].maxAnisotropy = 8;
-    l.samplerCount = kMaterialSamplerSlot + 1;
+    for (u32 id = 0; id < pbr::kMaterialSamplerCount; ++id) {
+        rhi::SamplerDesc& s = l.samplers[kMaterialSamplerSlot + id];
+        switch (pbr::materialSamplerFilter(id)) {
+            case pbr::FxFilter::Anisotropic: s.filter = rhi::Filter::Anisotropic; s.maxAnisotropy = static_cast<u8>(gMaterialAnisotropy); break;
+            case pbr::FxFilter::Trilinear:   s.filter = rhi::Filter::Linear; break;
+            case pbr::FxFilter::Bilinear:    s.filter = rhi::Filter::Linear; s.maxLod = 0.0f; break;
+            case pbr::FxFilter::PointMip:    s.filter = rhi::Filter::Point; break;
+            case pbr::FxFilter::Point:       s.filter = rhi::Filter::Point; s.maxLod = 0.0f; break;
+        }
+        switch (pbr::materialSamplerAddress(id)) {
+            case pbr::FxAddress::Wrap:   s.address = rhi::AddressMode::Wrap; break;
+            case pbr::FxAddress::Clamp:  s.address = rhi::AddressMode::Clamp; break;
+            case pbr::FxAddress::Mirror: s.address = rhi::AddressMode::Mirror; break;
+        }
+        s.mipBias = gMaterialMipBias;
+    }
+    l.samplerCount = kMaterialSamplerSlot + pbr::kMaterialSamplerCount;
 }
 
 // Wider than kGiSrvCount/kGiUavCount (SandboxApp.cpp's GPU path depends on those constants).
@@ -687,6 +708,19 @@ void VoxiRenderer::setSettings(const Settings& in) {
         AVER_WARN("[Voxi] layeredBsdf changed after the pipelines were built; it takes effect on the "
                   "next project load. The shaders compiled for this session are unchanged. "
                   "(said once)");
+    }
+    // The material samplers' anisotropy and mip bias are baked into every pipeline layout (giSamplers): latched the same way.
+    {
+        const u32 aniso = std::clamp(s.textureAnisotropy, 1u, 16u);
+        const f32 bias = std::isfinite(s.textureMipBias) ? std::clamp(s.textureMipBias, -2.0f, 2.0f) : 0.0f;
+        if (!texSamplerLatched_) {
+            gMaterialAnisotropy = aniso;
+            gMaterialMipBias = bias;
+            texSamplerLatched_ = true;
+        } else if ((aniso != gMaterialAnisotropy || bias != gMaterialMipBias) && !texSamplerWarned_) {
+            texSamplerWarned_ = true;
+            AVER_WARN("[Voxi] the texture anisotropy / mip bias changed after the pipelines were built; it takes effect on the next project load. (said once)");
+        }
     }
     setGiUpdateInterval(s.giUpdateInterval);
 
@@ -9349,18 +9383,22 @@ bool VoxiRenderer::createExtraScenePipelines(bool rt, bool local) {
 
 namespace {
 // The compile-time defines of a variant key: the pixel-shader features (material_prelude.hlsl AVER_MATX_*), the late-Z switch and the vertex stage.
-std::string fxShaderDefines(u32 key) {
+std::string fxShaderDefines(u32 fullKey) {
+    const u32 key = fullKey & pbr::fxkey::kPipelineMask;
+    const u32 samplerId = (fullKey & pbr::fxkey::kSamplerMask) >> pbr::fxkey::kSamplerShift;
     struct Bit { u32 bit; const char* name; };
     static constexpr Bit kBits[] = {
         {pbr::fxkey::kUvx, "AVER_MATX_UVX"}, {pbr::fxkey::kTri, "AVER_MATX_TRI"}, {pbr::fxkey::kRim, "AVER_MATX_RIM"},
         {pbr::fxkey::kAniso, "AVER_MATX_ANISO"}, {pbr::fxkey::kParallax, "AVER_MATX_PARALLAX"}, {pbr::fxkey::kBacklight, "AVER_MATX_BACKLIGHT"},
         {pbr::fxkey::kDetail, "AVER_MATX_DETAIL"}, {pbr::fxkey::kSurf, "AVER_MATX_SURF"}, {pbr::fxkey::kModes, "AVER_MATX_MODES"},
         {pbr::fxkey::kHash, "AVER_MATX_HASH"}, {pbr::fxkey::kFade, "AVER_MATX_FADE"}, {pbr::fxkey::kUnshaded, "AVER_MATX_UNSHADED"},
-        {pbr::fxkey::kLateZ, "AVER_MATX_LATEZ"}, {pbr::fxkey::kVertex, "AVER_MATX_VS"},
+        {pbr::fxkey::kLateZ, "AVER_MATX_LATEZ"}, {pbr::fxkey::kVertex, "AVER_MATX_VS"}, {pbr::fxkey::kChannels, "AVER_MATX_CHAN"},
     };
     std::string d = "AVER_MATX=1";
     for (const Bit& b : kBits) if (key & b.bit) { d += ';'; d += b.name; d += "=1"; }
     if (((key >> pbr::fxkey::kBlendShift) & 7u) == 3u) d += ";AVER_MATX_MUL=1";   // blend_mode multiply writes the multiplier, not a colour
+    // P1: the material's own maps read through its static sampler (material_prelude.hlsl gSurfaceSampler); id 0 is the engine sampler and defines nothing.
+    if (samplerId != 0u && samplerId < pbr::kMaterialSamplerCount) d += ";AVER_SURFACE_SAMPLER=" + std::to_string(kMaterialSamplerSlot + samplerId);
     return d;
 }
 }  // namespace
@@ -9397,7 +9435,8 @@ void VoxiRenderer::destroyFxScenes() {
 bool VoxiRenderer::createFxPipelines(u64 mapKey) {
     FxScene& e = fxScenes_[mapKey];
     e.tried = true;
-    const u32 key = static_cast<u32>(mapKey & pbr::fxkey::kPipelineMask);
+    const u32 fullKey = static_cast<u32>(mapKey & pbr::fxkey::kFullMask);   // the 24 feature bits and the sampler id above them
+    const u32 key = fullKey & pbr::fxkey::kPipelineMask;
     const bool rt = ((mapKey >> 32) & 1ull) != 0;
     const bool extra = ((mapKey >> 33) & 1ull) != 0;
     const bool rtOk = caps_.rayTracingTier >= 11 && caps_.shaderModel >= 65 && caps_.dxcAvailable;
@@ -9410,7 +9449,7 @@ bool VoxiRenderer::createFxPipelines(u64 mapKey) {
     // An embedded shader's vertex() runs in VSMainEmb; its varyings ride the vertex output of both stages of this variant.
     const bool embVs = (key & pbr::fxkey::kEmbVertex) != 0;
     const bool embVary = embVs && pbr::materialGraphs().hasEmbeddedVaryings();
-    const std::string fxDefs = fxShaderDefines(key) + (extra ? ";AVER_MESH_EXTRA=1" : "") + (embVary ? ";AVER_CUSTOM_VARYINGS_ON=1" : "");
+    const std::string fxDefs = fxShaderDefines(fullKey) + (extra ? ";AVER_MESH_EXTRA=1" : "") + (embVary ? ";AVER_CUSTOM_VARYINGS_ON=1" : "");
     const auto rasterDefs = [&](const std::string& more) { return matDefs + ";" + fxDefs + (more.empty() ? std::string() : ";" + more); };
     const auto sceneDefs  = [&](const std::string& more) { return rasterDefs(more) + ";AVER_HAIR_SHADING=1"; };
 
@@ -9482,9 +9521,9 @@ bool VoxiRenderer::createFxPipelines(u64 mapKey) {
         p.vs = vs; p.ps = psGbuf;
         e.litGbuf = res_->createGraphicsPipeline(p);
     }
-    if (e.lit) AVER_INFO("[Voxi] material variant 0x{:06x} built ({}{}): BaseMaterial3D features are live for draws that use it", key,
+    if (e.lit) AVER_INFO("[Voxi] material variant 0x{:07x} built ({}{}): BaseMaterial3D features are live for draws that use it", fullKey,
                          rt ? "ray-traced raster" : "raster", extra ? ", second vertex stream" : "");
-    else       AVER_WARN("[Voxi] material variant 0x{:06x} ({}) unavailable; its materials draw through the ordinary pipeline", key,
+    else       AVER_WARN("[Voxi] material variant 0x{:07x} ({}) unavailable; its materials draw through the ordinary pipeline", fullKey,
                          rt ? "ray-traced raster" : "raster");
     return e.lit != 0;
 }

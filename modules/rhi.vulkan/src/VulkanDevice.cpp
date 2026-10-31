@@ -802,6 +802,11 @@ bool VulkanDevice::init(const DeviceDesc& desc) {
     v12.shaderStorageBufferArrayNonUniformIndexing = bindlessBuffersCapable_ ? VK_TRUE : VK_FALSE;
     maxSetStorageBuffers_ = std::min(physicalDeviceProps_.limits.maxPerStageDescriptorStorageBuffers,
                                      physicalDeviceProps_.limits.maxDescriptorSetStorageBuffers);
+    // Voxi's pipeline layouts declare kMaxStaticSamplers - 3 (17) immutable samplers (P1: one per material sampler state). Every desktop driver allows far more per
+    // stage; the Vulkan minimum is 16, which some layered implementations report. Said once so a pipeline-creation failure there has a visible cause.
+    if (physicalDeviceProps_.limits.maxPerStageDescriptorSamplers < 17u)
+        AVER_WARN("[Vulkan] the device allows only {} samplers per shader stage; the scene pipelines declare 17 (the material sampler states), so they may fail to build",
+                  physicalDeviceProps_.limits.maxPerStageDescriptorSamplers);
     if (bindlessCapable_) {
         v12.runtimeDescriptorArray                    = VK_TRUE;
         v12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;

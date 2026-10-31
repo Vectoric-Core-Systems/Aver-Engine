@@ -1332,6 +1332,10 @@ Values: `Destroy = 0`, `Stop = 1`, `Reload = 2`, `Travel = 3`
 - `public bool SetHiddenFromOwner(bool hidden)` - Sets or clears the owner-hide bit, adding a mesh renderer if absent.
 - `public bool SetMesh(string meshPath)` - Sets the drawn mesh by asset path, adding a mesh renderer if absent.
 - `public bool SetMaterial(string materialName)` - Sets the material by name, adding a mesh renderer if absent.
+- `public const int SurfaceOverrideSlots = 16` - How many mesh material slots an entity can override (CSurfaceMaterials.slot0..slot15).
+- `public bool SetSurfaceMaterial(int slot, string materialName)` - Draws mesh material slot slot of this entity with materialName instead of the material the mesh names.
+- `public string GetSurfaceMaterial(int slot)` - The material name overriding mesh slot slot, or "" when it has no override.
+- `public bool ClearSurfaceMaterial(int slot)` - Takes the override off one mesh slot (it draws the mesh's own material again).
 - `public uint Tags { get; }` - The raw 32-bit tag mask (CTags.bits), or 0 if the entity has no tags.
 - `public bool SetTags(uint mask)` - Replaces the whole tag mask, adding a Tags component if absent.
 - `public bool HasTag(uint mask)` - True if every bit in mask is set, and the mask is non-zero.
@@ -1890,6 +1894,64 @@ Values: `Sphere = 0`, `Capsule = 1`, `Box = 2`
 `public enum IkSpace` - The space an IK goal position is given in.
 
 Values: `World = 0`, `Model = 1`
+
+### Image
+
+`public sealed class Image` - A width x height grid of pixels in one ImageFormat, held in managed memory.
+
+- `public const int MaxSide = 8192` - The largest side an image may have (the runtime texture limit, so an image always fits one).
+- `public int Width { get; }` - Width in pixels.
+- `public int Height { get; }` - Height in pixels.
+- `public ImageFormat Format { get; }` - The pixel format.
+- `public static int BytesPerPixel(ImageFormat format)` - Bytes in one pixel of format.
+- `public int PixelSize { get; }` - The bytes in one pixel of this image's format.
+- `public Image(int width, int height, ImageFormat format)` - A zero-filled image (every channel 0: transparent black for the formats that have alpha).
+- `public static Image FromData(int width, int height, ImageFormat format, byte[] data)` - An image over a copy of data (exactly width x height x BytesPerPixel bytes).
+- `public static Image? Load(string path)` - The engine's decoder reads path (PNG, JPEG, TGA, BMP, GIF, PSD, WebP, SVG, OpenEXR clamped to 0..1) into an RGBA8 image; null when the file is missing, unreadable or past the size limit.
+- `public Image Clone()` - A copy of this image.
+- `public byte[] GetData()` - A copy of the pixel bytes, rows top first, tightly packed.
+- `public void SetData(byte[] data)` - Replaces the pixel bytes (same size and format as the image).
+- `public Span<byte> AsSpan()` - The pixel bytes themselves (no copy): a view the caller may read and write.
+- `public bool Contains(int x, int y)` - Whether (x, y) is inside the image.
+- `public ImageColor GetPixel(int x, int y)` - The pixel at (x, y).
+- `public void SetPixel(int x, int y, ImageColor color)` - Writes the pixel at (x, y), converting the colour to the image's format (byte formats clamp to 0..1; L8 stores luminance).
+- `public void Fill(ImageColor color)` - Sets every pixel.
+- `public void FillRect(int x, int y, int width, int height, ImageColor color)` - Sets the pixels of a rectangle; the part outside the image is ignored.
+- `public void Blit(Image source, int srcX, int srcY, int srcWidth, int srcHeight, int dstX, int dstY)` - Copies the rectangle (srcX, srcY, srcWidth, srcHeight) of source to (dstX, dstY) of this image, converting each pixel to this format.
+- `public void Blit(Image source, int dstX, int dstY)` - Copies the whole of source to (dstX, dstY).
+- `public Image? GetRegion(int x, int y, int width, int height)` - A new image of the rectangle (clipped to the image) in the same format; null when the clipped rectangle is empty.
+- `public void Convert(ImageFormat format)` - Turns this image into format in place.
+- `public Image ConvertedTo(ImageFormat format)` - A copy of this image in format.
+- `public void Resize(int width, int height, ImageInterpolation interpolation = ImageInterpolation.Bilinear)` - Resamples this image to width x height in place.
+- `public void FlipX()` - Mirrors the image left to right.
+- `public void FlipY()` - Mirrors the image top to bottom.
+
+### ImageColor
+
+`public readonly struct ImageColor : IEquatable<ImageColor>` - A colour with float channels, 0..1 for the byte formats and unclamped for the float ones.
+
+- `public float R { get; }` - Red.
+- `public float G { get; }` - Green.
+- `public float B { get; }` - Blue.
+- `public float A { get; }` - Alpha (1 is opaque).
+- `public ImageColor(float r, float g, float b, float a = 1f)` - Makes a colour; alpha defaults to opaque.
+- `public static ImageColor Clear { get; }` - Transparent black.
+- `public bool Equals(ImageColor o)` - Inherited documentation.
+- `public override bool Equals(object? obj)` - Inherited documentation.
+- `public override int GetHashCode()` - Inherited documentation.
+- `public override string ToString()` - Inherited documentation.
+
+### ImageFormat
+
+`public enum ImageFormat` - How an Image stores a pixel.
+
+Values: `L8 = 0`, `LA8 = 1`, `RGB8 = 2`, `RGBA8 = 3`, `RF = 4`, `RGBAF = 5`
+
+### ImageInterpolation
+
+`public enum ImageInterpolation` - How Resize reads the source.
+
+Values: `Nearest = 0`, `Bilinear = 1`
 
 ### Input
 
@@ -2558,6 +2620,26 @@ Values: `Start = 0`, `End = 1`
 - `public static int AddSurface(int id, float[] positions, float[]? normals, float[]? uv, float[]? colors, float[]? uv1, float[]? tangents, uint[]? indices, string? material)` - Appends a surface: positions is 3 floats per vertex; the optional arrays are 3 (normals), 2 (UV), 4 (colour), 2 (second UV) and 4 (tangent xyz and handedness) floats per vertex; indices is a triangle list (null draws the vertices in order).
 - `public static int SurfaceCount(int id)`
 - `public static bool TryGetInfo(int id, out int surfaces, out int vertices, out int triangles, out int generation)` - Surfaces, vertices, triangles and the generation counter of a mesh; false for an unknown id.
+
+### RuntimeTexture
+
+`public sealed class RuntimeTexture` - A texture whose pixels come from an Image and can be replaced at any time.
+
+- `public int Id { get; }` - The engine's id for this texture.
+- `public string Key { get; }` - The key it was made with.
+- `public string MaterialPath { get; }` - The texture-slot path a material names it by ("@rt:rtex.&lt;key&gt;").
+- `public ulong GpuHandle { get; }` - The GPU texture handle the host uploaded, what a UI draw command carries.
+- `public bool IsValid { get; }` - Whether the texture still exists (it does not after Destroy or the end of a play session).
+- `public int Width { get; }` - Width in pixels (0 when the texture is gone).
+- `public int Height { get; }` - Height in pixels (0 when the texture is gone).
+- `public bool Mipmaps { get; }` - Whether the host builds a full mip chain at upload (8-bit textures only).
+- `public int Generation { get; }` - Counts how many times the pixels changed.
+- `public static RuntimeTexture? Create(string key, Image image, bool srgb = false, bool mipmaps = false)` - Makes the texture key from image, or returns the one that already has the key (its pixels are then replaced by the image's).
+- `public static RuntimeTexture? Find(string key)` - The texture with this key, or null.
+- `public bool Update(Image image, bool srgb = false)` - Replaces the pixels (and the size and format) with the image's.
+- `public bool UpdateRegion(Image image, int srcX, int srcY, int width, int height, int x, int y, bool srgb = false)` - Writes the rectangle (srcX, srcY, width, height) of image to (x, y) of the texture.
+- `public Image? GetImage()` - A copy of the texture's current pixels as an image (null when the texture is gone).
+- `public bool Destroy()` - Removes the texture.
 
 ### SceneQueries
 

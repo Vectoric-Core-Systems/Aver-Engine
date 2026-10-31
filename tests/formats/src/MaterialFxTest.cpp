@@ -4,6 +4,7 @@
 #include "aver/core/Log.hpp"
 #include "aver/formats/OcMat.hpp"
 #include "aver/pbr/MaterialGpu.hpp"
+#include "aver/pbr/pbr_abi.h"
 #include "aver/platform/FileSystem.hpp"
 #include "aver/rhi/RHIResources.hpp"
 
@@ -57,6 +58,8 @@ static pbr::MaterialDesc busy() {
     f.emissionOp = 1; f.emissionOnUv2 = true; f.aoOnUv2 = true; f.aoLightAffect = 0.5f;
     f.specularMode = pbr::FxSpecular::Disabled; f.diffuseMode = pbr::FxDiffuse::LambertWrap;
     f.disableAmbient = true; f.noReceiveShadows = true;
+    f.texFilter = pbr::FxFilter::PointMip; f.texAddress = pbr::FxAddress::Mirror;
+    f.roughChannel = pbr::FxChannel::A; f.metalChannel = pbr::FxChannel::Gray; f.vertexColorSrgb = true;
     return d;
 }
 
@@ -75,7 +78,8 @@ static bool sameFx(const pbr::MaterialFx& a, const pbr::MaterialFx& b) {
            n(a.backlightColor[0], b.backlightColor[0]) && n(a.backlightColor[1], b.backlightColor[1]) && n(a.backlightColor[2], b.backlightColor[2]) && a.detail == b.detail &&
            a.detailBlend == b.detailBlend && a.detailUv == b.detailUv && a.emissionOp == b.emissionOp && a.emissionOnUv2 == b.emissionOnUv2 && a.aoOnUv2 == b.aoOnUv2 &&
            n(a.aoLightAffect, b.aoLightAffect) && a.specularMode == b.specularMode && a.diffuseMode == b.diffuseMode && a.disableAmbient == b.disableAmbient &&
-           a.noReceiveShadows == b.noReceiveShadows;
+           a.noReceiveShadows == b.noReceiveShadows && a.texFilter == b.texFilter && a.texAddress == b.texAddress && a.roughChannel == b.roughChannel &&
+           a.metalChannel == b.metalChannel && a.vertexColorSrgb == b.vertexColorSrgb;
 }
 
 int main() {
@@ -137,7 +141,7 @@ int main() {
               "blend add / sub / mul are 1 / 2 / 3, mix is no change");
         check(((key([](pbr::MaterialFx& f) { f.depthDraw = pbr::FxDepthDraw::Always; }) >> kDepthDrawShift) & 3u) == 1u && (key([](pbr::MaterialFx& f) { f.noDepthTest = true; }) & kNoDepthTest),
               "depth draw always is 1; no depth test has its bit");
-        check((pbr::fxVariantKey(busy().fx) & ~kPipelineMask) == 0, "no key bit above 24");
+        check((pbr::fxVariantKey(busy().fx) & ~kFullMask) == 0 && (pbr::fxVariantKey(busy().fx) & kPipelineMask) != 0, "no key bit above 28 (24 features and the 4-bit sampler id)");
         check(pbr::kFxNoPrepassKeys & kVertex && pbr::kFxNoPrepassKeys & kShaderMask && pbr::kFxNoPrepassKeys & kLateZ, "vertex, shader and late-Z variants are kept out of the depth prepass");
     }
 
@@ -146,7 +150,7 @@ int main() {
         const pbr::MaterialDesc d = busy();
         const pbr::MaterialExtConstants e = pbr::packMaterialFx(d.fx);
         check((e.variant & 0xFFu) == static_cast<u32>(-7 + 128), "the low byte of dword 0 is the render priority, biased by 128");
-        check((e.variant >> 8) == pbr::fxVariantKey(d.fx), "the rest is the variant key");
+        check((e.variant >> 8) == (pbr::fxVariantKey(d.fx) & pbr::fxkey::kPipelineMask), "the rest is the variant key's 24 feature bits (the sampler id rides dword 15)");
         // The RHI reads exactly these two things from the draw block, 192 bytes in.
         struct Block { pbr::MaterialConstants base; pbr::MaterialExtConstants ext; } blk{pbr::packMaterial(d), e};
         check(rhi::drawMaterialFxKey(&blk, sizeof blk) == pbr::fxVariantKey(d.fx) && rhi::drawMaterialFxPriority(&blk, sizeof blk) == -7, "drawMaterialFxKey / Priority read the block as the devices do");
@@ -278,7 +282,7 @@ int main() {
         check(has(prelude, "#define AVER_MAT_FX             (1u << 20)") && pbr::MaterialFlag_Fx == (1u << 20), "AVER_MAT_FX mirrors MaterialFlag_Fx");
         // Every key bit has a define the renderer passes and a use in the shaders.
         for (const char* d : {"AVER_MATX_UVX", "AVER_MATX_TRI", "AVER_MATX_RIM", "AVER_MATX_ANISO", "AVER_MATX_PARALLAX", "AVER_MATX_BACKLIGHT", "AVER_MATX_DETAIL", "AVER_MATX_SURF",
-                              "AVER_MATX_MODES", "AVER_MATX_HASH", "AVER_MATX_FADE", "AVER_MATX_UNSHADED"})
+                              "AVER_MATX_MODES", "AVER_MATX_HASH", "AVER_MATX_FADE", "AVER_MATX_UNSHADED", "AVER_MATX_CHAN"})
             check(has(prelude, std::string("#if ") + d), std::string("the prelude has a block for ") + d);
         check(has(voxi, "AVER_MATX_LATEZ") && has(voxi, "VSMainFx") && has(voxi, "AVER_MATX_MUL") && has(voxi, "AVER_MATX_SURF"), "voxi.hlsl has the late-Z switch, the vertex stage, the multiply blend and the shadow switch");
         check(has(voxi, "#define AVER_EARLYZ [earlydepthstencil]"), "the default scene shader still forces early depth");
@@ -289,6 +293,174 @@ int main() {
         // Modes bit masks the shader names match pbr::modes.
         check(has(prelude, "#define AVER_FX_KEEP_SCALE   (1u << 2)") && pbr::modes::kKeepScale == (1u << 2) && has(prelude, "#define AVER_FX_NO_AMBIENT   (1u << 31)") && pbr::modes::kNoAmbient == (1u << 31),
               "the shader's mode masks match pbr::modes");
+    }
+
+    AVER_INFO("=== P1: per-material sampler state ===");
+    {
+        using namespace pbr;
+        check(kMaterialSamplerCount == 15 && materialSamplerId(FxFilter::Anisotropic, FxAddress::Wrap) == 0, "15 sampler states; the engine's own (anisotropic, wrap) is id 0");
+        bool roundTrip = true;
+        for (u32 a = 0; a < kMaterialSamplerAddresses; ++a)
+            for (u32 f = 0; f < kMaterialSamplerFilters; ++f) {
+                const u32 id = materialSamplerId(static_cast<FxFilter>(f), static_cast<FxAddress>(a));
+                roundTrip = roundTrip && id < kMaterialSamplerCount && materialSamplerFilter(id) == static_cast<FxFilter>(f) && materialSamplerAddress(id) == static_cast<FxAddress>(a);
+            }
+        check(roundTrip, "every (filter, address) pair has its own id below 15 and the id decodes back");
+        check(fxkey::kSamplerMask == (15u << 24) && (fxkey::kPipelineMask & fxkey::kSamplerMask) == 0 && fxkey::kFullMask == 0x0FFFFFFFu, "the sampler id sits in the 4 bits above the 24 feature bits");
+
+        MaterialFx nearest;
+        nearest.texFilter = FxFilter::Point;
+        check(nearest.active() && nearest.samplerId() == 4 && fxVariantKey(nearest) == (4u << fxkey::kSamplerShift), "point filtering alone is a feature; its key is the sampler id and nothing else");
+        MaterialFx clamped;
+        clamped.texAddress = FxAddress::Clamp;
+        check(clamped.active() && clamped.samplerId() == 5 && fxVariantKey(clamped) == (5u << fxkey::kSamplerShift), "so is a clamp address (id 5: address 1 * 5 + anisotropic)");
+        check(!MaterialFx{}.usesSampler() && fxVariantKey(MaterialFx{}) == 0, "the defaults ask for no sampler and key 0");
+
+        // The pack: the pipeline bits stay 24 wide in dword 0; the sampler rides the top byte of dword 15, and the devices read both.
+        MaterialFx both;
+        both.rim = true;
+        both.texFilter = FxFilter::Bilinear; both.texAddress = FxAddress::Mirror;   // id 2 + 10 = 12
+        const MaterialExtConstants e = packMaterialFx(both);
+        check((e.variant >> 8) == fxkey::kRim && ((e.frames >> fxkey::kSamplerShift) & 15u) == 12u, "dword 0 keeps only the feature bits; dword 15 carries sampler id 12");
+        struct Block { MaterialConstants base; MaterialExtConstants ext; } blk{};
+        blk.ext = e;
+        check(rhi::drawMaterialFxSampler(&blk, sizeof blk) == 12u && rhi::drawMaterialFxKey(&blk, sizeof blk) == fxVariantKey(both) && (rhi::drawMaterialFxKey(&blk, sizeof blk) >> 24) == 12u,
+              "rhi::drawMaterialFxKey returns the full key, sampler included, equal to fxVariantKey");
+        check(rhi::drawMaterialFxSampler(&blk, sizeof blk.base + 4) == 0, "a block too short to hold dword 15 has no sampler");
+        const MaterialExtConstants none = packMaterialFx(MaterialFx{});
+        blk.ext = none;
+        check(rhi::drawMaterialFxKey(&blk, sizeof blk) == 0, "a default ext block yields key 0 (no pipeline change)");
+        check((none.frames >> fxkey::kSamplerShift) == 0, "and its frames dword is what it was before P1");
+        check((packMaterialFx(busy().fx).frames >> 24) == 0u + materialSamplerId(FxFilter::PointMip, FxAddress::Mirror), "the busy material packs its sampler id (PointMip, Mirror = 13)");
+        check((kFxNoPrepassKeys & fxkey::kSamplerMask) == fxkey::kSamplerMask, "a sampler variant is kept out of the depth prepass (a cut-out read through another sampler cuts other pixels)");
+
+        // The .ocmat record.
+        MaterialDesc d;
+        d.fx.texFilter = FxFilter::Point; d.fx.texAddress = FxAddress::Clamp;
+        const std::string text = fmt::writeOcmat(d);
+        check(has(text, "texfilter=point") && has(text, "texaddr=clamp"), "the FX record names the filter and the address");
+        MaterialDesc back; std::string err;
+        check(fmt::parseOcmat(text, back, nullptr, &err) && sameFx(d.fx, back.fx) && fmt::writeOcmat(back) == text, "and it round-trips byte for byte");
+        const struct { const char* word; FxFilter filter; } words[] = {{"aniso", FxFilter::Anisotropic}, {"trilinear", FxFilter::Trilinear}, {"bilinear", FxFilter::Bilinear},
+                                                                       {"pointmip", FxFilter::PointMip}, {"point", FxFilter::Point}};
+        for (const auto& w : words) {
+            MaterialFx f;
+            fmt::parseOcmatFx(std::string("texfilter=") + w.word, f);
+            check(f.texFilter == w.filter, std::string("texfilter=") + w.word + " reads as filter " + std::to_string(static_cast<u32>(w.filter)));
+        }
+        MaterialFx wrapOnly;
+        fmt::parseOcmatFx("texaddr=wrap texfilter=aniso", wrapOnly);
+        check(!wrapOnly.active(), "wrap and anisotropic spelled out are the defaults: no feature, no record");
+        MaterialFx bogus;
+        fmt::parseOcmatFx("texaddr=sideways texfilter=cubic", bogus);
+        check(bogus.texAddress == FxAddress::Wrap && bogus.texFilter == FxFilter::Anisotropic, "an unknown word falls back to the default");
+
+        // The library repairs an out-of-range enum.
+        MaterialDesc hostile;
+        hostile.fx.texFilter = static_cast<FxFilter>(200);
+        hostile.fx.texAddress = static_cast<FxAddress>(9);
+        const MaterialHandle h = MaterialLibrary::get().create(hostile);
+        const MaterialDesc* s = MaterialLibrary::get().desc(h);
+        check(s && s->fx.texFilter == FxFilter::Anisotropic && s->fx.texAddress == FxAddress::Wrap, "the library repairs an out-of-range filter and address");
+        MaterialLibrary::get().destroy(h);
+
+        // The shader text: the surface reads through gSurfaceSampler, the engine sampler stays for everything else.
+        const std::string prelude = slurp(AVER_PRELUDE_PATH);
+        check(has(prelude, "#ifdef AVER_SURFACE_SAMPLER") && has(prelude, "#define gSurfaceSampler gMaterialSampler") && has(prelude, "SamplerState gSurfaceSampler : register(AVER_MAT_JOIN(s, AVER_SURFACE_SAMPLER))"),
+              "the prelude declares gSurfaceSampler under AVER_SURFACE_SAMPLER and otherwise aliases the engine sampler");
+        usize uses = 0;
+        for (usize at = prelude.find("gMaterialSampler"); at != std::string::npos; at = prelude.find("gMaterialSampler", at + 1)) ++uses;
+        check(uses <= 6, "the prelude names gMaterialSampler only to declare and alias it (" + std::to_string(uses) + " mentions, comments included)");
+        check(has(prelude, "gBaseColorMap.Sample(gSurfaceSampler, uv)") && !has(prelude, "gBaseColorMap.Sample(gMaterialSampler"), "the base colour fetch uses the surface sampler");
+    }
+
+    AVER_INFO("=== F35: neutral material capabilities (emission energy, metal-rough channels, sRGB vertex colour) ===");
+    {
+        using namespace pbr;
+        // Defaults: nothing changes for a material that sets none of it.
+        MaterialDesc plain;
+        check(plain.emissiveEnergy == 1.0f && plain.fx.roughSel() == FxChannel::G && plain.fx.metalSel() == FxChannel::B && !plain.fx.vertexColorSrgb && !plain.fx.usesChannels(),
+              "the defaults are energy 1, roughness G, metallic B, linear vertex colour");
+        check(!plain.fx.active() && fxVariantKey(plain.fx) == 0, "and they are not an FX feature: no variant, key 0");
+        plain.emissiveFactor[0] = 0.5f; plain.emissiveFactor[1] = 2.0f; plain.emissiveFactor[2] = 0.0f;
+        const MaterialConstants c0 = packMaterial(plain);
+        check(c0.emissiveFactor[0] == 0.5f && c0.emissiveFactor[1] == 2.0f && c0.emissiveFactor[2] == 0.0f, "an energy of 1 packs the emissive factor bit for bit");
+        plain.emissiveEnergy = 4.0f;
+        const MaterialConstants c4 = packMaterial(plain);
+        check(c4.emissiveFactor[0] == 2.0f && c4.emissiveFactor[1] == 8.0f && c4.emissiveFactor[2] == 0.0f, "an energy of 4 multiplies the packed emissive factor");
+        check(!plain.fx.active(), "and needs no pipeline variant (it is folded at pack time)");
+
+        // Channels: each alone is a feature with its own key bit; the pack carries them in the alpha-hash dword.
+        MaterialFx rough;
+        rough.roughChannel = FxChannel::R;
+        check(rough.active() && rough.usesChannels() && (fxVariantKey(rough) & fxkey::kPipelineMask) == fxkey::kChannels, "a roughness channel alone is a feature keyed kChannels");
+        check((packMaterialFx(rough).hash >> hashbits::kRoughShift & 7u) == 0u && (packMaterialFx(rough).hash >> hashbits::kMetalShift & 7u) == 2u, "...and packs R for roughness, B (the default) for metallic");
+        MaterialFx vc;
+        vc.vertexColorSrgb = true;
+        check(vc.active() && (fxVariantKey(vc) & fxkey::kPipelineMask) == fxkey::kChannels && (packMaterialFx(vc).hash & hashbits::kVertexSrgb) != 0, "vertex colour sRGB is a feature with the same key bit");
+        const MaterialExtConstants def = packMaterialFx(MaterialFx{});
+        check(((def.hash >> hashbits::kRoughShift) & 7u) == static_cast<u32>(FxChannel::G) && ((def.hash >> hashbits::kMetalShift) & 7u) == static_cast<u32>(FxChannel::B) &&
+              (def.hash & hashbits::kVertexSrgb) == 0 && (def.hash & hashbits::kAntialias) == 0,
+              "a default block packs the engine channels, a linear vertex colour and no alpha-to-coverage");
+        const MaterialExtConstants bz = packMaterialFx(busy().fx);
+        check(((bz.hash >> hashbits::kRoughShift) & 7u) == static_cast<u32>(FxChannel::A) && ((bz.hash >> hashbits::kMetalShift) & 7u) == static_cast<u32>(FxChannel::Gray) &&
+              (bz.hash & hashbits::kVertexSrgb) != 0 && (bz.hash & hashbits::kAntialias) != 0 && fxHalfToFloat(bz.hash & 0xFFFFu) == 2.5f, "the busy block packs both channels, the colour decode, the antialias bit and the hash scale side by side");
+        check((fxkey::kChannels & fxkey::kPipelineMask) == fxkey::kChannels && (fxkey::kShaderMask & fxkey::kChannels) != 0 && (kFxNoPrepassKeys & fxkey::kChannels) != 0,
+              "the channel bit is inside the 24-bit pipeline key and keeps the draw out of the depth prepass");
+
+        // The .ocmat spelling.
+        MaterialDesc d;
+        d.emissiveEnergy = 3.5f;
+        d.fx.roughChannel = FxChannel::R; d.fx.metalChannel = FxChannel::A; d.fx.vertexColorSrgb = true;
+        const std::string text = fmt::writeOcmat(d);
+        check(has(text, "PARAM emissiveEnergy 3.5") && has(text, "roughchan=r") && has(text, "metalchan=a") && has(text, "vcsrgb=1"), "the file names the energy, both channels and the colour decode");
+        MaterialDesc back; std::string err;
+        check(fmt::parseOcmat(text, back, nullptr, &err) && back.emissiveEnergy == 3.5f && sameFx(d.fx, back.fx) && fmt::writeOcmat(back) == text, "and round-trips byte for byte");
+        check(!has(fmt::writeOcmat(MaterialDesc{}), "emissiveEnergy") && !has(fmt::writeOcmat(MaterialDesc{}), "roughchan"), "a default material writes none of it: older files stay byte-identical");
+        MaterialFx words;
+        fmt::parseOcmatFx("roughchan=GRAY metalchan=g", words);
+        check(words.roughChannel == FxChannel::Gray && words.metalChannel == FxChannel::G, "channel words are case-insensitive");
+        MaterialFx bogus;
+        fmt::parseOcmatFx("roughchan=purple metalchan=", bogus);
+        check(bogus.roughChannel == FxChannel::G && bogus.metalChannel == FxChannel::B, "an unknown channel word falls back to the engine packing");
+
+        // The library repairs hostile values.
+        MaterialDesc hostile;
+        hostile.emissiveEnergy = std::nanf("");
+        hostile.fx.roughChannel = static_cast<FxChannel>(77);
+        hostile.fx.metalChannel = static_cast<FxChannel>(9);
+        const MaterialHandle h = MaterialLibrary::get().create(hostile);
+        const MaterialDesc* s = MaterialLibrary::get().desc(h);
+        check(s && s->emissiveEnergy == 1.0f && s->fx.roughChannel == FxChannel::G && s->fx.metalChannel == FxChannel::B, "the library repairs a NaN energy and out-of-range channels");
+        MaterialLibrary::get().destroy(h);
+        MaterialDesc huge;
+        huge.emissiveEnergy = 1.0e9f;
+        const MaterialHandle h2 = MaterialLibrary::get().create(huge);
+        const MaterialDesc* s2 = MaterialLibrary::get().desc(h2);
+        check(s2 && s2->emissiveEnergy == 10000.0f, "and caps an absurd energy");
+        MaterialLibrary::get().destroy(h2);
+
+        // The ABI.
+        const aver_pbr_material m = aver_pbr_create("F35ABI");
+        check(m != 0 && aver_pbr_get_emissive_energy(m) == 1.0f && aver_pbr_get_roughness_channel(m) == AVER_PBR_CHANNEL_G && aver_pbr_get_metallic_channel(m) == AVER_PBR_CHANNEL_B &&
+              aver_pbr_get_vertex_color_srgb(m) == 0 && aver_pbr_get_vertex_color(m) == 0 && aver_pbr_get_alpha_extension(m) == AVER_PBR_ALPHAEXT_NONE, "a new material reads the defaults through the ABI");
+        check(aver_pbr_set_emissive_energy(m, 2.0f) && aver_pbr_get_emissive_energy(m) == 2.0f && !aver_pbr_set_emissive_energy(m, std::nanf("")) && aver_pbr_get_emissive_energy(m) == 2.0f,
+              "emissive energy sets, and a NaN is refused");
+        check(aver_pbr_set_roughness_channel(m, AVER_PBR_CHANNEL_GRAY) && aver_pbr_get_roughness_channel(m) == AVER_PBR_CHANNEL_GRAY && !aver_pbr_set_roughness_channel(m, 5) && !aver_pbr_set_metallic_channel(m, -1) &&
+              aver_pbr_set_metallic_channel(m, AVER_PBR_CHANNEL_R) && aver_pbr_get_metallic_channel(m) == AVER_PBR_CHANNEL_R, "channels set and an unknown id is refused");
+        check(aver_pbr_set_vertex_color(m, 1) && aver_pbr_get_vertex_color(m) == 1 && aver_pbr_set_vertex_color_srgb(m, 1) && aver_pbr_get_vertex_color_srgb(m) == 1, "vertex colour and its decode set");
+        check(aver_pbr_set_alpha_extension(m, AVER_PBR_ALPHAEXT_ANTIALIAS) && aver_pbr_get_alpha_extension(m) == AVER_PBR_ALPHAEXT_ANTIALIAS && !aver_pbr_set_alpha_extension(m, 3), "the alpha extension sets and an unknown id is refused");
+        aver_pbr_destroy(m);
+        check(aver_pbr_get_emissive_energy(m) == 1.0f && aver_pbr_get_roughness_channel(m) == AVER_PBR_CHANNEL_G && !aver_pbr_set_vertex_color(m, 1), "a stale handle answers the defaults and refuses writes");
+        const aver_pbr_material a = aver_pbr_create("F35Find");
+        check(aver_pbr_find("F35Find") == a && aver_pbr_find("NoSuchMaterial") == 0 && aver_pbr_find(nullptr) == 0, "aver_pbr_find returns the named live material, 0 otherwise");
+        aver_pbr_destroy(a);
+
+        // The shader text.
+        const std::string prelude = slurp(AVER_PRELUDE_PATH);
+        check(has(prelude, "#if AVER_MATX_CHAN") && has(prelude, "averFxMetalRough") && has(prelude, "(gFxHash >> 17) & 7u") && has(prelude, "(gFxHash >> 20) & 7u") && has(prelude, "gFxHash & 0x800000u"),
+              "the prelude reads the channels and the colour decode from the alpha-hash dword at the bit positions pbr::hashbits packs them to");
+        check(hashbits::kRoughShift == 17 && hashbits::kMetalShift == 20 && hashbits::kVertexSrgb == 0x800000u, "...which are 17, 20 and 0x800000");
     }
 
     AVER_INFO("MaterialFxTest: {} checks, {} failures", g_checks, g_failures);

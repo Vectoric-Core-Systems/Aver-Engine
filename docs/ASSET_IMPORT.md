@@ -465,7 +465,7 @@ cook their textures through it), and the panorama sky.
 | PNG, JPEG, TGA, BMP, GIF, PSD, PIC, PNM, Radiance `.hdr` | `stb_image` (`third_party/stb`) | As before. |
 | WebP | libwebp's decoder (`third_party/libwebp`, BSD-3-Clause) | Lossy, lossless, with or without alpha. An **animated** file gives its first frame, drawn on a transparent canvas of the file's canvas size. Straight (not premultiplied) alpha. |
 | SVG | NanoSVG (`third_party/nanosvg`, zlib) | Rasterised at the document's own size (`width`/`height`, else `viewBox`, 96 dpi), or at `ImageDecodeOptions::svgWidth/svgHeight` (one side keeps the aspect ratio; both fit the drawing in that box, centred). Paths, shapes, gradients, strokes and dashes; **no text, filters, masks or external references**. |
-| OpenEXR | tinyexr (`third_party/tinyexr`, BSD-3-Clause) | Half and float colour channels (`R G B`, optionally `A`; or `Y`), scanline and tiled, level 0 of a mipmapped file; deep, multipart and integer-colour files are refused. |
+| OpenEXR | tinyexr (`third_party/tinyexr`, BSD-3-Clause) | Half and float colour channels (`R G B`, optionally `A`; or `Y`; a lone `R` is read as grey), scanline and one-level tiled; mipmapped or ripmapped, deep, multipart and integer-colour files are refused. A tiled file is read only when its whole tile table is consistent (tinyexr trusts it, with signed-int arithmetic on file values), and an image whose samples would need more than 1 GB is refused. |
 
 The container is chosen by what the **bytes** are, so a WebP saved as `.png` still opens. DDS, KTX, TIFF, AVIF and HEIF
 stay refused by `undecodableContainer`.
@@ -478,7 +478,8 @@ image file today.
 
 **Hostile input.** Headers are checked before anything is allocated: at most 16384 pixels on a side, 2^27 pixels for WebP and
 SVG output (512 MB), 2^25 for an EXR (an 8192 x 4096 panorama), 256 MB for a file read whole, 8 MB for an SVG. A header
-that claims more is refused with a reason. `ImageDecodeTest` truncates and bit-flips every vector.
+that claims more is refused with a reason. The `stb_image` formats keep stb's own checks plus 2^28 pixels (1 GB of RGBA), read
+from the header (`stbi_info`) before the pixels are decoded. `ImageDecodeTest` truncates and bit-flips every vector.
 
 **Not covered:** AVIF, HEIF, DDS, KTX and TIFF are not read (`undecodableContainer` names them). An SVG's text and filters are
 dropped without a message. No shader or render pass changed (`PSRayDriven` is untouched); a decoded image is an ordinary
