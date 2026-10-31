@@ -1,4 +1,4 @@
-/* The native contract between the engine and an extension (docs/plans/fabric/EXTENSION.md section 3.2).
+/* The native contract between the engine and an extension (docs/EXTENSIONS.md).
  *
  * Plain C: structs, UTF-8 `const char*` and function pointers cross the boundary, nothing else. An extension links its own copy
  * of the engine's static libraries, so no C++ object, allocation or std type may be exchanged.

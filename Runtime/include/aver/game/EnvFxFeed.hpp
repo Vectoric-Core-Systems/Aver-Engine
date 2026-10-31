@@ -38,7 +38,7 @@ public:
         }
         if (!probeLogged_ && aver_fw_probe_count() > 0) {
             probeLogged_ = true;
-            AVER_INFO("[EnvFx] {} reflection probe(s) registered; the renderer samples no captured environment yet, so reflections stay Aver's own (G4_RENDER.md R8)",
+            AVER_INFO("[EnvFx] {} reflection probe(s) registered; the renderer samples no captured environment yet, so reflections stay Aver's own (R8, https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G4_RENDER.md)",
                       aver_fw_probe_count());
         }
     }

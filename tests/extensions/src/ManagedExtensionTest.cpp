@@ -1,5 +1,5 @@
-// ManagedExtensionTest -- the managed half of an extension reaches the engine through its manifest and nothing else (docs/EXTENSIONS.md,
-// docs/plans/fabric/EXTENSION.md section 3.6), with a real .NET runtime in the process and no engine run.
+// ManagedExtensionTest -- the managed half of an extension reaches the engine through its manifest and nothing else (docs/EXTENSIONS.md),
+// with a real .NET runtime in the process and no engine run.
 //
 // Three fake extensions are written under a scratch Extensions folder, each carrying a real managed assembly the build already stages:
 //   ActorExt   Aver.Framework.SampleActor.dll with actorBase = its TestActor: only the types under that base are declared.

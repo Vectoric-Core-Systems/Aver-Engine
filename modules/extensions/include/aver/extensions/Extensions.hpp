@@ -1,5 +1,5 @@
 #pragma once
-// The extension loader (docs/plans/fabric/EXTENSION.md section 3.3): finds the extensions installed beside the executable, checks each
+// The extension loader (docs/EXTENSIONS.md): finds the extensions installed beside the executable, checks each
 // manifest, and loads an extension's native library the first time one of its commands runs. The native contract is aver_ext.h.
 #include "aver/core/Types.hpp"
 #include "aver/extensions/aver_ext.h"

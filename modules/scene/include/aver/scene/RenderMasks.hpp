@@ -1,4 +1,4 @@
-// Render layers, cull masks and visibility ranges (G4 R4, docs/plans/fabric/G4_RENDER.md). Pure logic, no engine state, so the walk, the
+// Render layers, cull masks and visibility ranges (R4, https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G4_RENDER.md). Pure logic, no engine state, so the walk, the
 // converter's runtime and the tests all use one definition.
 //
 // ZERO-SAFE ENCODING. World::addComponent hands back zero-filled storage, so every mask is stored INVERTED (the layers it excludes):

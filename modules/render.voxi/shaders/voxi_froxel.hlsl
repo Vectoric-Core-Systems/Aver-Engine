@@ -20,7 +20,7 @@
 #ifndef AVER_FX_SKY
 #define AVER_FX_SKY 0
 #endif
-// G4 R8: local fog volumes. A separate variant of the two compute entries, built only when a fog volume exists (docs/plans/fabric/G4_RENDER.md R8).
+// G4 R8: local fog volumes. A separate variant of the two compute entries, built only when a fog volume exists (R8 of https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G4_RENDER.md).
 // The volumes are a tail of FroxelCB. AVER_FV_MAX / AVER_FV_VECS mirror kFogVolumeMax / kFogVolumeVecs (aver/core/FogVolume.hpp).
 #ifndef AVER_FOG_VOLUMES
 #define AVER_FOG_VOLUMES 0

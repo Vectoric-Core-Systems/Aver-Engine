@@ -18,7 +18,7 @@ inline constexpr u32 kOcMeshIndex32   = 1u << 3;
 inline constexpr u32 kOcMeshHasSkin   = 1u << 5;
 inline constexpr u32 kOcMeshTwoSided  = 1u << 9;
 inline constexpr u32 kOcMeshHasMorph  = 1u << 11;   // an MRPH chunk is present (MORPH_TARGETS.md 2.2)
-inline constexpr u32 kOcMeshHasTangent = 1u << 12;  // the VXEX chunk carries an authored tangent (docs/plans/fabric/G4_RENDER.md R1)
+inline constexpr u32 kOcMeshHasTangent = 1u << 12;  // the VXEX chunk carries an authored tangent (R1 of https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G4_RENDER.md)
 // HasColor and HasUV1 above are set by the writer exactly when the VXEX chunk carries that stream.
 
 inline constexpr u32 kOcMeshMaxMorphTargets = 512;

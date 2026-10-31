@@ -1018,7 +1018,7 @@ The gameplay object model above is complete. What follows is what a script, or a
   breaking (`docs/GAME_UI.md`, `docs/GAME_UI_TEXT.md`). Still missing: typing other than the US key layout (no `WM_CHAR`
   plumbing, no IME) and Indic and Thai shaping.
 - **Coroutines.** Use `async`/`await` with `Frame.Next()`, `Frame.NextPhysics()` and `Frame.Delay(seconds)` (§4); there is no `yield`-based coroutine.
-- **Networking.** `modules/net` (sockets and a reliable-UDP host) is reachable from C# through `Aver.Fabric`'s Godot-named classes (`ENetMultiplayerPeer`, `PacketPeerUDP`, `StreamPeerTCP`, ...; `docs/plans/fabric/G6_NETWORK.md`); there is no engine-native replication or RPC layer yet.
+- **Networking.** `modules/net` (sockets and a reliable-UDP host) is reachable from C# through `Aver.Fabric`'s Godot-named classes (`ENetMultiplayerPeer`, `PacketPeerUDP`, `StreamPeerTCP`, ...; [G6_NETWORK.md](https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G6_NETWORK.md)); there is no engine-native replication or RPC layer yet.
 - **Hot-reload state migration** beyond `[Editable]` fields.
 - **Travel and streaming.** No `OpenLevel`/travel call (only the `AVER_FW_END_TRAVEL` hook), no level-streaming residency queries from script, no save slots (`SaveGame`/`LoadGame` take a path), no procedural audio (Aver Sound) binding, no runtime landscape sculpt, paint or carve, no PCG regenerate, and no material-parameter nodes (`docs/plans/wave4/MATERIAL_INSTANCES_FUNCTIONS.md` owns them).
 - **Graph pin types.** String, `Vec3` and array pins, event dispatchers with typed payloads and interfaces would change the `.ocgraph` grammar in both readers; strings stay node attributes.

@@ -1,10 +1,12 @@
 # Extensions
 
-An extension adds a feature to the engine without being part of it. The first is the Fabric Connector (`extensions/FabricConnector/`, [FABRIC.md](FABRIC.md)), which converts a Godot 4 project. Engine code reaches an extension only through the loader (`modules/extensions`, `Aver.Extensions`) and the plain-C contract in `aver_ext.h`; it never links an extension's target. The design, the phases and what is still to come are in [plans/fabric/EXTENSION.md](plans/fabric/EXTENSION.md).
+An extension adds a feature to the engine without being part of it. The example is the Fabric Connector ([FABRIC.md](FABRIC.md)), which converts a Godot 4 project and lives in [its own repository](https://github.com/Vectoric-Core-Systems/Fabric-Connector), not in this tree. Engine code reaches an extension only through the loader (`modules/extensions`, `Aver.Extensions`) and the plain-C contract in `aver_ext.h`; it never links an extension's target. The extension's own design and phases are in [docs/plans/EXTENSION.md](https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/EXTENSION.md) in that repository.
 
 ## On disk
 
 An installed extension is a directory beside the executable: `<exe dir>/Extensions/<Name>/`. A build tree has it under `build/bin/Extensions/<Name>/`.
+
+The Fabric Connector's layout:
 
 ```
 FabricConnector/
@@ -55,7 +57,7 @@ int32_t aver_extension_entry(const AverExtHost* host, AverExtApi* out);   /* 0 o
 - `AverExtApi` (the extension fills it in): `runCommand(name, argc, argv)`, which returns the exit code (`argv[0]` is the command's name), and `shutdown()`.
 - Every struct starts with its size, and everything that crosses is a struct, a UTF-8 `const char*` or a function pointer. No C++ type, allocation or ownership crosses the boundary: the host allocates what it returns and takes it back through `freeModelResult`.
 
-An extension links its own copy of the engine's static libraries. At entry it points its copy of Core's log at the host: `aver::setLogSink` forwards each line to `host->log`, and `aver::setLogConsole(false)` (`aver/core/LogConsole.hpp`) stops it writing the line a second time itself. The Fabric Connector's entry is `extensions/FabricConnector/native/src/FabricExtension.cpp`.
+An extension links its own copy of the engine's static libraries. At entry it points its copy of Core's log at the host: `aver::setLogSink` forwards each line to `host->log`, and `aver::setLogConsole(false)` (`aver/core/LogConsole.hpp`) stops it writing the line a second time itself. The Fabric Connector does this in its `aver_extension_entry` (`native/src` in its repository).
 
 ## The managed half
 
@@ -83,7 +85,7 @@ A reference that no installed extension explains is reported as before ("cannot 
 
 ## The editor
 
-Each `importers` entry of a Ready extension adds a **File** menu item (`menu`) and a dialog (`sandbox/src/ExtensionImport.*`). The dialog asks for the input, warns when the `detect` file is missing (or, with `detectVersion`, too old), shows the output folder (`<input folder><outputSuffix>` beside it by default), offers the `options`, and runs `AverAssetC <command> <in> <out> [flags]` as a child process on a worker thread. It shows the lines the command prints, ends with the summary, and, when `opensResult` is set, offers to open the converted project. No extension code runs in the editor's process. The item is greyed out when `AverAssetC` is not beside the editor. There is no Extensions panel yet (install, uninstall, status): that is phase 3 of the plan.
+Each `importers` entry of a Ready extension adds a **File** menu item (`menu`) and a dialog (`sandbox/src/ExtensionImport.*`). The dialog asks for the input, warns when the `detect` file is missing (or, with `detectVersion`, too old), shows the output folder (`<input folder><outputSuffix>` beside it by default), offers the `options`, and runs `AverAssetC <command> <in> <out> [flags]` as a child process on a worker thread. It shows the lines the command prints, ends with the summary, and, when `opensResult` is set, offers to open the converted project. No extension code runs in the editor's process. The item is greyed out when `AverAssetC` is not beside the editor. There is no Extensions panel yet (install, uninstall, status): that is phase 3 of the Fabric Connector's plan.
 
 The command's last line is `{"schemaVersion":1,"summary":true,"kind":"<command>", ...}`. The dialog reads `output` (the result's folder), `project` (its name; the file to open is `<output>/<project>.ocproject`), `report` and `dryRun`, and keeps every other key for the wording. Everything below is optional in the manifest (the default is in brackets) and sits in the importer entry:
 
@@ -99,7 +101,7 @@ The command's last line is `{"schemaVersion":1,"summary":true,"kind":"<command>"
 | `notify` | `{"running", "done", "checked", "failed"}`: the notification's titles (`checked` is for a `dryRun` result). |
 | `summary` | `text`: the line under the log, `brief`: the notification's body, `warnIfNonZero`: a summary key whose non-zero value makes the notification a warning, `notes`: `[{"text", "when", "unless"}]`, extra lines that show when the key `when` is true or non-zero and `unless` is not. `{key}` in any text is that key's value from the summary line. |
 
-`ExtensionImportTest` (`tests/extensions`) covers this against fake manifests and a fake tool (the test executable run as `fakecmd`); `FabricImportTest` covers the Fabric Connector's manifest through the loader and the real `AverAssetC`. The dialog itself has not been run (engine-run ban).
+`ExtensionImportTest` (`tests/extensions`) covers this against fake manifests and a fake tool (the test executable run as `fakecmd`); the Fabric Connector's repository covers its own manifest through the loader and the real `AverAssetC`. The dialog itself has not been run (engine-run ban).
 
 ## Packaging
 
@@ -107,12 +109,12 @@ The command's last line is `{"schemaVersion":1,"summary":true,"kind":"<command>"
 
 ## Building
 
-The root CMake option `AVER_WITH_FABRIC` (default ON) adds `extensions/FabricConnector`. Its library is built to `build/bin/Extensions/FabricConnector/native/<platform>/`, with `extension.json` and `data/extension_api.json` beside it, and its managed half to `managed/Aver.Fabric.dll` and `tools/` (`extensions/FabricConnector/managed`; needs the .NET SDK, without which the manifest lists a file that is not there and the loader refuses the extension). With the option OFF the engine configures and builds without the extension (and `AverAssetC fabric` is then an unknown command). Nothing outside `extensions/FabricConnector` references its targets.
+No extension is in this tree: the engine configures and builds without one (and `AverAssetC fabric` is then an unknown command). An extension in its own repository is built into the engine's build with `-DAVER_EXTERNAL_EXTENSIONS=<its source directory>` (a `;`-separated list; empty by default): the root CMake adds each after every module, binary directory `extensions/<directory name>`, and the extension's `CMakeLists.txt` sees the engine's `CMAKE_SOURCE_DIR` and `CMAKE_BINARY_DIR`. The Fabric-Connector repository does this from its own top-level CMake (it configures the engine as a project of its own, with the editor, the runtime host and the engine's tests off). `AverAssetC`, which every extension's commands run through, is built whether or not `AVER_BUILD_TESTS` is on (`tools/CMakeLists.txt`).
 
-An extension in its own repository is built into the engine's build with `-DAVER_EXTERNAL_EXTENSIONS=<its source directory>` (a `;`-separated list; empty by default): the root CMake adds each after every module, binary directory `extensions/<directory name>`, and the extension's `CMakeLists.txt` sees the engine's `CMAKE_SOURCE_DIR` and `CMAKE_BINARY_DIR`. The Fabric-Connector repository does this from its own top-level CMake (it configures the engine as a project of its own, with the editor, the runtime host and the engine's tests off). `AverAssetC`, which every extension's commands run through, is built whether or not `AVER_BUILD_TESTS` is on (`tools/CMakeLists.txt`).
+The Fabric Connector's build leaves the extension in the `FabricConnector` folder under `Extensions/` in its own engine build. To use it with your own engine build, give its configure `-DFABRIC_DEPLOY_TO=<engine build>/bin`: after each build it copies the extension folder into `<engine build>/bin/Extensions/`, beside the editor and `AverAssetC` ([FABRIC.md](FABRIC.md), "Build and install").
 
 ## Tests
 
-`ExtensionImportTest` and `FabricImportTest` are described under "The editor". `AbiEnumTest` pins the C side of the anim, nav, net, UI-style and audio seams; the check that their C# mirrors in the extension's managed half agree runs only with `AVER_WITH_FABRIC` on (otherwise it logs one `skipped: no Fabric` line).
+`ExtensionImportTest` is described under "The editor". `AbiEnumTest` pins the C side of the anim, nav, net, UI-style and audio seams; their C# mirrors are in the Fabric Connector's managed half, checked by that repository's tests (the engine's test logs one line counting those rows).
 
 `ManagedExtensionTest` (`tests/extensions`) runs `ScriptHost::init` with the real CLR against three fake extensions that carry sample assemblies: the actor types under `actorBase` are declared and the others are not, and a refused extension and an `actorBase` that no assembly holds each produce one log line. `ExtensionsTest` (`tests/extensions`) runs the loader against fake extension directories and a tiny extension library written in C against `aver_ext.h` alone: a valid extension, each refusal with its reason, lazy loading, command dispatch and exit codes, log forwarding, the host's directories and progress, the model-import round trip, an extension whose entry refuses the host, and shutdown.

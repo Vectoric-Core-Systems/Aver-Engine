@@ -1,6 +1,0 @@
-[gd_resource type="StandardMaterial3D" format=3 uid="uid://c2redmat0000"]
-
-[resource]
-albedo_color = Color(1, 0, 0, 1)
-roughness = 0.4
-shading_mode = 0

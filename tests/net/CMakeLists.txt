@@ -1,4 +1,4 @@
-# Fabric G6 NET1 (docs/plans/fabric/G6_NETWORK.md).
+# Fabric G6 NET1 (https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G6_NETWORK.md).
 #
 # NetProtocolTest -- the reliable-UDP host/peer protocol on SimNetwork (an in-memory network with seeded loss, delay, duplication and reordering,
 # on a virtual clock): no sockets, no wall time, the same result every run.

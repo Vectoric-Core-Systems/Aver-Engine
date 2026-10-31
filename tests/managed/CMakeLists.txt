@@ -1,5 +1,5 @@
 # The managed suites that were run only by hand: Aver.Graph.Tests (Aver Node compiler, nodes, host),
-# Aver.DataLoc.Tests (data tables, localisation) and Aver.Fabric.Tests (the Godot-compatible runtime). All exit with their failure count, the same contract as
+# and Aver.DataLoc.Tests (data tables, localisation). All exit with their failure count, the same contract as
 # GasManagedTests (tests/gas). Graph.Tests resolves fixtures from its own folder, so it runs there.
 # Not registered without a .NET SDK on PATH (a skip, never a failure).
 #
@@ -20,18 +20,7 @@ if(AVER_DOTNET)
     COMMAND "${AVER_DOTNET}" run --project "${CMAKE_SOURCE_DIR}/scripting/csharp/Aver.DataLoc.Tests/Aver.DataLoc.Tests.csproj"
             --configuration Release --nologo
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-  # Aver.Fabric (the Godot-compatible runtime): math, Variant, signals, node tree and lifecycle, run by the managed node host.
-  # Its AnimationTests copy build/bin/Aver.Anim.Abi beside the test assembly (like the GDExtension host) and skip, saying so, when it was not built.
-  # Its AudioTests do the same with Aver.Audio.Abi and render the mixer offline (no output device is ever opened).
-  # Its NavigationTests do the same with Aver.Nav.Abi (pure arithmetic: maps, queries, the baker, A* graphs; no device).
   set(_aver_managed_suites DataLocManagedTests)
-  if(AVER_WITH_FABRIC)
-    add_test(NAME FabricManagedTests
-      COMMAND "${AVER_DOTNET}" run --project "${CMAKE_SOURCE_DIR}/extensions/FabricConnector/managed/Aver.Fabric.Tests/Aver.Fabric.Tests.csproj"
-              --configuration Release --nologo
-      WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-    list(APPEND _aver_managed_suites FabricManagedTests)
-  endif()
   if(WIN32)
     list(APPEND _aver_managed_suites GraphManagedTests)
   endif()

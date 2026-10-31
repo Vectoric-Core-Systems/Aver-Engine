@@ -1,7 +1,7 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
-// Meshes a script builds from arrays, and MultiMesh instance tables drawn as one mesh. Design: docs/plans/fabric/G4_RENDER.md R7.
+// Meshes a script builds from arrays, and MultiMesh instance tables drawn as one mesh. Design: R7 of https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G4_RENDER.md.
 
 using System.Runtime.InteropServices;
 

@@ -205,7 +205,7 @@ int main() {
     std::vector<Variant> variants = {
         {"Voxi VSMain (bindless)",              voxiSrc, "VSMain",    'v', 51, vx(bindless)},
         {"Voxi VSky (bindless)",                voxiSrc, "VSky",      'v', 51, vx(bindless)},
-        // R1 (docs/plans/fabric/G4_RENDER.md): the raster scene variants a mesh with the second vertex stream draws through. The plain raster
+        // R1 (G4_RENDER.md of https://github.com/Vectoric-Core-Systems/Fabric-Connector, docs/plans): the raster scene variants a mesh with the second vertex stream draws through. The plain raster
         // PSMainVoxi row is the default pipeline's twin, so the extra rows are read against a variant known to compile.
         {"Voxi PSMainVoxi raster",              voxiSrc, "PSMainVoxi", 'p', 51, vx("AVER_HAIR_SHADING=1")},
         {"Voxi PSDepthPrepass",                 voxiSrc, "PSDepthPrepass", 'p', 51, vx("")},
@@ -215,14 +215,14 @@ int main() {
         {"Voxi PSMainVoxi mesh extra G-buffer", voxiSrc, "PSMainVoxi", 'p', 51, vx("AVER_MESH_EXTRA=1;AVER_HAIR_SHADING=1;AVER_GBUFFER=1")},
         {"Voxi PSMainVoxi RT mesh extra",       voxiSrc, "PSMainVoxi", 'p', 65, vx("AVER_RT=1;AVER_MESH_EXTRA=1;AVER_HAIR_SHADING=1"), true},
         {"Voxi PSMainVoxi RT mesh extra G-buffer", voxiSrc, "PSMainVoxi", 'p', 65, vx("AVER_RT=1;AVER_GBUFFER=1;AVER_MESH_EXTRA=1;AVER_HAIR_SHADING=1"), true},
-        // R2 (docs/plans/fabric/G4_RENDER.md): the raster local-light twins of the scene pixel shader -- the path Vulkan takes, plus the mesh-extra
+        // R2 (G4_RENDER.md as above): the raster local-light twins of the scene pixel shader -- the path Vulkan takes, plus the mesh-extra
         // and ray-traced-raster (RENDER.LOCALRASTER 1) combinations. Read against the default rows above.
         {"Voxi PSMainVoxi raster local lights",            voxiSrc, "PSMainVoxi", 'p', 51, vx("AVER_HAIR_SHADING=1;AVER_LOCAL_RASTER=1")},
         {"Voxi PSMainVoxi raster local lights G-buffer",   voxiSrc, "PSMainVoxi", 'p', 51, vx("AVER_HAIR_SHADING=1;AVER_LOCAL_RASTER=1;AVER_GBUFFER=1")},
         {"Voxi PSMainVoxi mesh extra local lights",        voxiSrc, "PSMainVoxi", 'p', 51, vx("AVER_MESH_EXTRA=1;AVER_HAIR_SHADING=1;AVER_LOCAL_RASTER=1")},
         {"Voxi PSMainVoxi RT local lights",                voxiSrc, "PSMainVoxi", 'p', 65, vx("AVER_RT=1;AVER_HAIR_SHADING=1;AVER_LOCAL_RASTER=1"), true},
         {"Voxi PSMainVoxi RT local lights G-buffer",       voxiSrc, "PSMainVoxi", 'p', 65, vx("AVER_RT=1;AVER_GBUFFER=1;AVER_HAIR_SHADING=1;AVER_LOCAL_RASTER=1"), true},
-        // R6 (docs/plans/fabric/G4_RENDER.md): the material variants, one row per BaseMaterial3D feature group beside the default row above, then every
+        // R6 (G4_RENDER.md as above): the material variants, one row per BaseMaterial3D feature group beside the default row above, then every
         // feature at once, the G-buffer / ray-traced-raster / second-stream / local-light combinations, blend multiply and the vertex stage.
         {"Voxi PSMainVoxi material fx uv",          voxiSrc, "PSMainVoxi", 'p', 51, vx(fxBase + ";AVER_MATX_UVX=1")},
         {"Voxi PSMainVoxi material fx triplanar",   voxiSrc, "PSMainVoxi", 'p', 51, vx(fxBase + ";AVER_MATX_TRI=1")},
@@ -284,7 +284,7 @@ int main() {
         {"Post PSComposite (Vulkan, plain)",             postSrc, "PSComposite", 'p', 60, ""},
         {"Post PSComposite tonemap ext (Vulkan, plain)", postSrc, "PSComposite", 'p', 60, "AVER_POST_TONEMAP_EXT=1"},
         {"Post PSComposite tonemap ext (Vulkan, LUT)",   postSrc, "PSComposite", 'p', 60, "AVER_POST_TONEMAP_EXT=1;AVER_POST_LUT=1;AVER_POST_BLOOM=1;AVER_POST_AUTOEXPOSURE=1"},
-        // R8 (docs/plans/fabric/G4_RENDER.md): the volumetric-fog compute passes, ordinary and with local fog volumes (AVER_FOG_VOLUMES, built only when a
+        // R8 (G4_RENDER.md as above): the volumetric-fog compute passes, ordinary and with local fog volumes (AVER_FOG_VOLUMES, built only when a
         // FogVolume exists). The ordinary rows are what ships today; the volume rows are read against them. VoxiFroxelFog compiles with AVER_RT 0 or 1.
         {"Froxel CSFroxelScatter",                  froxelSrc, "CSFroxelScatter",  'c', 60, "AVER_RT=0"},
         {"Froxel CSFroxelScatter RT",               froxelSrc, "CSFroxelScatter",  'c', 65, "AVER_RT=1", true},
@@ -292,7 +292,7 @@ int main() {
         {"Froxel CSFroxelScatter fog volumes",      froxelSrc, "CSFroxelScatter",  'c', 60, "AVER_RT=0;AVER_FOG_VOLUMES=1"},
         {"Froxel CSFroxelScatter RT fog volumes",   froxelSrc, "CSFroxelScatter",  'c', 65, "AVER_RT=1;AVER_FOG_VOLUMES=1", true},
         {"Froxel CSFroxelIntegrate fog volumes",    froxelSrc, "CSFroxelIntegrate", 'c', 60, "AVER_RT=0;AVER_FOG_VOLUMES=1"},
-        // R5 (docs/plans/fabric/G4_RENDER.md): the sub-viewport's pixel shader, a new entry point beside the studio preview's PreviewPS (its default twin).
+        // R5 (G4_RENDER.md as above): the sub-viewport's pixel shader, a new entry point beside the studio preview's PreviewPS (its default twin).
         {"Preview PreviewPS (studio)",          previewSrc, "PreviewPS",   'p', 51, ""},
         {"Preview SceneViewPS (sub-viewport)",  previewSrc, "SceneViewPS", 'p', 51, ""},
         {"Water CSWaterDisplace",               waterSrc, "CSWaterDisplace", 'c', 60, "AVER_MAX_WAVES=" + std::to_string(kMaxWaves)},

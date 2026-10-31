@@ -1,7 +1,7 @@
 # Aver.Extensions
 
 The extension loader. An extension is a directory, `<engine>/Extensions/<Name>/`, with an `extension.json` manifest and a native library
-under `native/<platform>/`. The design is `docs/plans/fabric/EXTENSION.md`.
+under `native/<platform>/`. The guide is `docs/EXTENSIONS.md`.
 
 - `include/aver/extensions/aver_ext.h` is the native contract, plain C: `AverExtHost` (what the engine provides), `AverExtApi` (what the
   extension fills in) and the one export `aver_extension_entry`. An extension builds against this header alone.

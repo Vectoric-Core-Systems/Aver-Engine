@@ -7,7 +7,7 @@
  * VALUES. A value crosses as double v[5] = {kind, n0, n1, n2, n3} plus a string: kind is aver::fmt::OcPropKind (0 nil, 1 bool,
  * 2 int, 3 float, 4 vec2, 5 vec3, 6 vec4, 7 quat, 8 color, 9 string, 10 text); the string is the value for kinds 9 and 10 (text
  * is a variant in its text form).
- * ENUMS (mirrored by hand in the extension's managed half, extensions/FabricConnector/managed/Aver.Fabric/Nodes/AnimationNative.cs, and checked by AbiEnumTest):
+ * ENUMS (mirrored by hand in the Fabric Connector's managed half, Aver.Fabric/Nodes/AnimationNative.cs in https://github.com/Vectoric-Core-Systems/Fabric-Connector; AbiEnumTest checks the C side):
  *   track type 0 value, 1 position3d, 2 rotation3d, 3 scale3d, 4 blend_shape, 5 method, 6 bezier, 7 audio, 8 animation
  *   interpolation 0 nearest, 1 linear, 2 cubic, 3 linear_angle, 4 cubic_angle
  *   update 0 continuous, 1 discrete, 2 capture;  loop 0 none, 1 linear, 2 ping-pong;  discrete mode 0 dominant, 1 recessive, 2 force

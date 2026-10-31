@@ -1,2 +1,0 @@
-RSRC
-fixture: stands for Godot's binary lightmap data; the converter does not read it.

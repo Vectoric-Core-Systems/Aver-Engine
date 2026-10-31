@@ -1,6 +1,6 @@
 // PanoramaSkyTest -- G4 R3, no device. The Radiance .hdr reader (flat and run-length scanlines, both vertical orders, refusals), the equirectangular
 // panorama fitted onto Aver's authored sky dome (zenith, horizon, ground albedo and the blend exponent), and the render project keys. (The
-// Godot environment parameter mapping is checked in the Fabric Connector's FabricEnvTest, extensions/FabricConnector/tests/fabric/src.)
+// Godot environment parameter mapping is checked in the Fabric Connector's FabricEnvTest, in https://github.com/Vectoric-Core-Systems/Fabric-Connector.)
 #include "aver/core/Log.hpp"
 #include "aver/formats/OcProject.hpp"
 #include "aver/formats/PanoramaSky.hpp"

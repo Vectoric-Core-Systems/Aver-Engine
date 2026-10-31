@@ -1,6 +1,6 @@
 #pragma once
 // Meshes built at run time from arrays, and instance tables baked into one mesh (G4 R7). Engine space (centimetres, +Z up), no device: the Aver.Framework
-// runtime-mesh ABI and the converter share this. Contract: docs/plans/fabric/G4_RENDER.md R7.
+// runtime-mesh ABI and the converter share this. Contract: R7 of https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G4_RENDER.md.
 #include "aver/formats/OcMesh.hpp"
 
 #include <string>

@@ -1,5 +1,5 @@
 #pragma once
-// File menu import entries that extensions add (docs/plans/fabric/EXTENSION.md section 3.5). Each `importers` entry of an installed extension's
+// File menu import entries that extensions add (docs/EXTENSIONS.md, "The editor"). Each `importers` entry of an installed extension's
 // extension.json becomes a menu item and a dialog: pick a folder, warn when its `detect` file is missing, run `AverAssetC <command> <in> <out>`
 // as a child process on a worker thread (so the editor stays responsive, and no extension code runs in the editor's process), show its
 // progress lines, and offer to open the result.

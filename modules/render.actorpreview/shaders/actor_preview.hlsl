@@ -92,7 +92,7 @@ float4 PreviewPS(PreviewOut i) : SV_TARGET {
 // ---- G4 R5: the scene view (a sub-viewport's picture of the world) ----
 //
 // A NEW entry point beside PreviewPS, which stays as it was. One sun and a sky fill on the draw's flat colour -- no textures, no shadows, no GI:
-// a secondary view is the cheap raster configuration, see docs/plans/fabric/G4_RENDER.md R5. The sun's radiance (colour times intensity) rides
+// a secondary view is the cheap raster configuration, see R5 of https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G4_RENDER.md. The sun's radiance (colour times intensity) rides
 // in gPreviewGrid.xyz, the output encoding in gPreviewMode.y (0 = tonemapped display values, 1 = linear, for a target a material reads).
 float4 SceneViewPS(PreviewOut i) : SV_TARGET {
     float3 n = normalize(i.nrmWS);

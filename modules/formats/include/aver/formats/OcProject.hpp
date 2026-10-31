@@ -288,7 +288,7 @@ struct ProjectDesc {
     int  audioSpeakers = 0;                    // AUDIO.SPEAKERS
     bool audioBinaural = false;                // AUDIO.BINAURAL
 
-    // ---- UI.* -- the Control runtime's project settings (docs/plans/fabric/G5_PARITY.md U1). Empty / negative = unstated: today's behaviour.
+    // ---- UI.* -- the Control runtime's project settings (U1 of https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G5_PARITY.md). Empty / negative = unstated: today's behaviour.
     std::string uiTheme;                       // UI.THEME <content path>: the project's .octheme
     std::string uiStretch;                     // UI.STRETCH disabled|canvas_items|viewport (display/window/stretch/mode)
     std::string uiAspect;                      // UI.ASPECT ignore|keep|keep_width|keep_height|expand

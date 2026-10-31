@@ -2,17 +2,17 @@
 
 Status: plan, nothing implemented. Branch 08-gdint. Written 2026-10-31 from the classified gaps of five domain reviews (rendering, physics and geometry, animation and skeleton, UI and text and input, scripting and core and audio).
 
-Paths in this file are relative to the engine root unless they start with a drive letter. Fabric is `extensions/FabricConnector`. The parity data is in `C:/Users/User/AverBuilds/parity`.
+Paths in this file are relative to the engine root unless they start with a drive letter. Fabric is the Fabric Connector extension, in its own repository ([Fabric-Connector](https://github.com/Vectoric-Core-Systems/Fabric-Connector); local clone `C:/Users/User/AverBuilds/Fabric-Connector`), built against this engine ([FABRIC.md](../FABRIC.md)). Its plans (G3 to G6) are in that repository's `docs/plans`. The parity data is in `C:/Users/User/AverBuilds/parity`.
 
 ## 1. Scope and principles
 
 1. Scope is Godot 4 3D and UI (Control) features. 2D (CanvasItem drawing beyond what UI needs, TileMap, 2D physics, 2D lights) is out.
-2. Engine features are added under neutral names in engine core (`modules/`, `Runtime/`, `scripting/csharp/Aver.Framework`). Fabric (`extensions/FabricConnector`) maps Godot's API onto them. No Godot names appear in engine core.
+2. Engine features are added under neutral names in engine core (`modules/`, `Runtime/`, `scripting/csharp/Aver.Framework`). Fabric maps Godot's API onto them. No Godot names appear in engine core.
 3. Aver keeps its own renderer and Jolt. Pixel-identical rendering is not a goal. Godot's own physics engine is not ported. A feature counts as a gap when it is absent or unreachable, not when it only looks different.
 4. WebP is decoded by a vendored libwebp (decoder only, BSD-3). The owner has approved this one dependency. Every other new dependency is an owner decision (section 6). Vendoring is done in the main session, not by a subagent.
 5. Every wave keeps defaults unchanged. A new setting defaults to today's behaviour. Ordinary shader permutations stay byte-identical. `PSRayDriven` and the RT shadow code are not touched unless the owner lifts that rule (G4).
 6. Every engine change keeps D3D12 and Vulkan in step (standing rule). ABI changes bump the ABI version and update the enum/row tests.
-7. Verification is headless: build, `ctest` with the GPU device suites excluded (`ctest -E`, the list is in the no-engine-run memory), managed tests (`Aver.Fabric.Tests`), `tests/fabric`, `tests/formats`, and a re-conversion of the 32 demos with a diff of `gaps.json` and the script compile errors. Nothing starts the editor, the game or a GPU test while the no-engine rule holds. Each wave lists headed checks for the owner.
+7. Verification is headless: build, `ctest` with the GPU device suites excluded (`ctest -E`, the list is in the no-engine-run memory), `tests/formats`, in the Fabric repository its managed tests (`Aver.Fabric.Tests`) and `tests/fabric` (its `ctest`), and a re-conversion of the 32 demos with a diff of `gaps.json` and the script compile errors. Nothing starts the editor, the game or a GPU test while the no-engine rule holds. Each wave lists headed checks for the owner.
 8. Counts of demos blocked overlap between rows. Do not add them up.
 9. Sizes are rough and assume headless work only: S is about a day or less, M a few days, L a week or more, XL more than that.
 
@@ -289,7 +289,7 @@ Listed with reasons in section 5.
 
 Order rule: cheap fixes that unblock the most scripts first, then engine features by demos blocked per unit of effort, with dependencies respected. Each wave ends with a re-conversion of the 32 demos and a comparison with the baseline in section 2.
 
-Standard headless check for every wave (called "standard" below): build; `ctest -E <GPU suite list>`; `Aver.Fabric.Tests`; `tests/fabric`; `tests/formats`; reconvert the 32 demos; diff `gaps.json` and the script compile errors against the previous wave. Engine ABI changes also run the ABI enum/row tests. Vulkan code is compiled and, where there are CPU-side tests, tested; shader changes compile for both HLSL and SPIR-V.
+Standard headless check for every wave (called "standard" below): build; `ctest -E <GPU suite list>` (engine, then the Fabric repository: `Aver.Fabric.Tests`, `tests/fabric`); `tests/formats`; reconvert the 32 demos; diff `gaps.json` and the script compile errors against the previous wave. Engine ABI changes also run the ABI enum/row tests. Vulkan code is compiled and, where there are CPU-side tests, tested; shader changes compile for both HLSL and SPIR-V.
 
 ### Wave 1: converter and Fabric API completions
 

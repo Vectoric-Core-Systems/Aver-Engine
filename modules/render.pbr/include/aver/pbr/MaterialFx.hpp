@@ -1,7 +1,7 @@
 #pragma once
 #include "aver/core/Types.hpp"
 
-// G4 R6: the BaseMaterial3D features a converted project expects (docs/plans/fabric/G4_RENDER.md R6). Core-only, header-only, no RHI.
+// G4 R6: the BaseMaterial3D features a converted project expects (R6 of https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G4_RENDER.md). Core-only, header-only, no RHI.
 //
 // A material that uses none of this has `fx.active() == false`: it packs to exactly the 192-byte MaterialConstants block it always did, draws
 // through the pipelines it always did and is shaded by the shader code it always was. A material that uses any of it gets

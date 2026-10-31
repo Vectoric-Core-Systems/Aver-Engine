@@ -389,7 +389,7 @@ private:
     rhi::PipelineHandle extraDepthPso_ = 0;   // VSMain + PSDepthPrepass with AVER_MESH_EXTRA, shared by both sets (layout = the plain one, like depthPrepassPso_)
     bool extraTried_[2] = {false, false};
     mutable bool extraWanted_ = false;   // set by the first scenePipelineExtra call
-    // ---- R6: material variants (docs/plans/fabric/G4_RENDER.md R6) ----
+    // ---- R6: material variants (R6 of https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G4_RENDER.md) ----
     // One entry per (variant key, ray-traced raster set, second-vertex-stream mesh). `lit` / `litGbuf` are the opaque pipelines, `blended` the translucent one
     // (no G-buffer write). A key is built the first prePass after a draw asked for it; until then, and if the build fails, the draw takes the ordinary pipeline.
     struct FxScene { rhi::PipelineHandle lit = 0, litGbuf = 0, blended = 0; bool tried = false; };
@@ -403,7 +403,7 @@ private:
     ExtraScene extraSceneLocal_[2];
     bool extraLocalTried_[2] = {false, false};
 
-    // ---- R2: raster local lights (omni and spot, no ray tracing; docs/plans/fabric/G4_RENDER.md R2) ----
+    // ---- R2: raster local lights (omni and spot, no ray tracing; R2 of https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G4_RENDER.md) ----
     // The AVER_LOCAL_RASTER twins of the raster scene set, [0] plain raster and [1] ray-traced raster. Built the first frame the path is live.
     struct LocalScene { rhi::PipelineHandle lit = 0, litGbuf = 0, prepassed = 0, prepassedGbuf = 0; };
     LocalScene localScene_[2];

@@ -1,7 +1,7 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
-// Local fog volumes and reflection probes a script or a converted level places. Design: docs/plans/fabric/G4_RENDER.md R8.
+// Local fog volumes and reflection probes a script or a converted level places. Design: R8 of https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G4_RENDER.md.
 
 namespace Aver.Framework;
 
@@ -34,7 +34,7 @@ public readonly struct ProbeBlend
 /// <remarks>
 /// <para>FOG VOLUMES add extinction, scattering and emission inside the renderer's volumetric fog (<c>RENDER.VOLFOG 1</c>); with it off they are recorded and draw
 /// nothing. At most 16 are drawn in a frame, the nearest the camera. REFLECTION PROBES are recorded and answer <see cref="SelectProbes"/> and
-/// <see cref="ProjectProbeDirection"/>; the renderer does not sample a captured environment yet (docs/plans/fabric/G4_RENDER.md R8). Calls return false instead of
+/// <see cref="ProjectProbeDirection"/>; the renderer does not sample a captured environment yet (R8 of https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G4_RENDER.md). Calls return false instead of
 /// throwing, and without a host they do nothing. A key is stable across loads; creating one that exists returns its id.</para>
 /// </remarks>
 public static class EnvFx

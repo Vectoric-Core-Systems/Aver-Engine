@@ -150,7 +150,7 @@ constant block in the `AVER_LOCAL_RASTER` pixel-shader variants, with PCF shadow
 list cannot serve (ray tracing off, no ray queries, Vulkan), or in raster-primary ray-traced frames with `RENDER.LOCALRASTER 1`; `RENDER.LOCALRASTER 2` turns it off and `RENDER.LOCALSHADOWS 0` drops the shadow maps. With ray tracing on
 and the defaults nothing changes. The `CLight` fields `attenuation`, `spotAttenuation`, `specularScale`, `shadowBias`, `shadowNormalBias`, `fadeBeginCm`, `fadeLengthCm`, `fadeShadowCm` and the flags `kLightParametric` / `kLightNegative`
 give a light Godot's falloff curves, specular multiplier, negative light, biases and distance fade (all zero = the Aver behaviour described above; set with the component field ABI). Limits: blended draws and mesh-shader draws are not
-lit by it, rectangles, IES and cookies are skipped, no indirect light. Design, units, calibration and the Vulkan note: `docs/plans/fabric/G4_RENDER.md` R2.
+lit by it, rectangles, IES and cookies are skipped, no indirect light. Design, units, calibration and the Vulkan note: R2 of [G4_RENDER.md](https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G4_RENDER.md).
 
 ## Path tracer agreement
 
@@ -183,7 +183,7 @@ records (`docs/formats/FORMAT_SPECS.md` section 11).
 ## Layer masks (G4 R4)
 
 `CLight::cullInv` and `shadowCasterInv` are Godot's `light_cull_mask` and `shadow_caster_mask`, stored inverted so that 0 (every layer) is the zero-fill default. Only the raster
-local-light path (docs/plans/fabric/G4_RENDER.md R2, R4) honours them: an instance's layers travel with its draw, a light skips instances it excludes, and the shadow pass leaves out
+local-light path (R2, R4 of [G4_RENDER.md](https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G4_RENDER.md)) honours them: an instance's layers travel with its draw, a light skips instances it excludes, and the shadow pass leaves out
 casters the shadow mask excludes. The ray-traced light list, the sun and the GI ignore them.
 
 ## Verification

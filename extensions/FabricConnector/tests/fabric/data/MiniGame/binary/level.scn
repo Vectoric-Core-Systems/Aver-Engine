@@ -1,1 +1,0 @@
-RSRC damaged binary scene stand-in: it has the magic and no valid header, so the binary reader must refuse it without crashing.

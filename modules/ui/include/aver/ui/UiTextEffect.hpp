@@ -1,5 +1,5 @@
 #pragma once
-// Text outline and shadow as draw passes (docs/plans/fabric/G5_PARITY.md U2). A glyph run is drawn several times: the shadow (and its
+// Text outline and shadow as draw passes (U2 of https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G5_PARITY.md). A glyph run is drawn several times: the shadow (and its
 // outline) shifted by the shadow offset, the outline as a ring of copies round the origin, then the fill. The geometry is CPU arithmetic
 // so a test can decide it without a GPU; the ABI (aver_ui_text_block_fx) walks the passes through the ordinary text path, so the glyph
 // atlas, kerning and clipping are the existing ones. Nothing here runs unless a caller asks for an outline or a shadow.

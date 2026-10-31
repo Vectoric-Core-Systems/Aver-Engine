@@ -557,7 +557,7 @@ struct Abi {
     const char* label;
     const char* headers[32];  // NULL-terminated; most rows name exactly one (the physics row was full at 12)
     const char* apiMacro;
-    const char* csFile;
+    const char* csFile;     // repo-relative .cs; nullptr: the C# mirror is in the Fabric Connector's repository, so only the C side is checked here
     const char* prefix;
 };
 
@@ -609,24 +609,24 @@ static const Abi kAbis[] = {
     // G5 A1: property-track animation (clips, then the player), names and types against Aver.Fabric/Nodes/AnimationNative.cs.
     {"property animation clip ABI",
      {"modules/anim.abi/include/aver/anim/propanim_abi.h", nullptr},
-     "AVER_PANIM_API", "extensions/FabricConnector/managed/Aver.Fabric/Nodes/AnimationNative.cs", "aver_panim_"},
+     "AVER_PANIM_API", nullptr, "aver_panim_"},
     {"property animation player ABI",
      {"modules/anim.abi/include/aver/anim/propanim_abi.h", nullptr},
-     "AVER_PANIM_API", "extensions/FabricConnector/managed/Aver.Fabric/Nodes/AnimationNative.cs", "aver_pplayer_"},
+     "AVER_PANIM_API", nullptr, "aver_pplayer_"},
     // G5 N1: polygon navigation, the A* point graphs and the A* grids, against Aver.Fabric/Nodes/NavigationNative.cs.
     {"navigation ABI",
      {"modules/nav.abi/include/aver/nav/nav_abi.h", nullptr},
-     "AVER_NAV_API", "extensions/FabricConnector/managed/Aver.Fabric/Nodes/NavigationNative.cs", "aver_nav_"},
+     "AVER_NAV_API", nullptr, "aver_nav_"},
     {"A* graph ABI",
      {"modules/nav.abi/include/aver/nav/nav_abi.h", nullptr},
-     "AVER_NAV_API", "extensions/FabricConnector/managed/Aver.Fabric/Nodes/NavigationNative.cs", "aver_astar_"},
+     "AVER_NAV_API", nullptr, "aver_astar_"},
     {"A* grid ABI",
      {"modules/nav.abi/include/aver/nav/nav_abi.h", nullptr},
-     "AVER_NAV_API", "extensions/FabricConnector/managed/Aver.Fabric/Nodes/NavigationNative.cs", "aver_agrid_"},
+     "AVER_NAV_API", nullptr, "aver_agrid_"},
     // G6 NET1: sockets, hosts and peers, names and types against Aver.Fabric/Nodes/NetworkNative.cs.
     {"networking ABI",
      {"modules/net.abi/include/aver/net/net_abi.h", nullptr},
-     "AVER_NET_API", "extensions/FabricConnector/managed/Aver.Fabric/Nodes/NetworkNative.cs", "aver_net_"},
+     "AVER_NET_API", nullptr, "aver_net_"},
     {"audio ABI",
      {"modules/audio.abi/include/aver/audio/audio_abi.h", nullptr},
      "AVER_AUDIO_API", "scripting/csharp/Aver.Framework/Audio.cs", "aver_audio_"},
@@ -637,11 +637,11 @@ static const Abi kAbis[] = {
     // The bus graph, effects and spatial-model players, names and types against Aver.Fabric/Nodes/AudioNative.cs.
     {"audio ABI (Aver.Fabric)",
      {"modules/audio.abi/include/aver/audio/audio_abi.h", nullptr},
-     "AVER_AUDIO_API", "extensions/FabricConnector/managed/Aver.Fabric/Nodes/AudioNative.cs", "aver_audio_"},
+     "AVER_AUDIO_API", nullptr, "aver_audio_"},
     // G5 U1: the style box, stretch and default-theme seam plus the HUD draw calls the GUI uses, against Aver.Fabric/Nodes/UiNative.cs.
     {"UI style ABI (Aver.Fabric)",
      {"modules/ui.abi/include/aver/ui/ui_abi.h", "modules/ui.abi/include/aver/ui/ui_style_abi.h", nullptr},
-     "AVER_UI_API", "extensions/FabricConnector/managed/Aver.Fabric/Nodes/UiNative.cs", "aver_ui_"},
+     "AVER_UI_API", nullptr, "aver_ui_"},
     {"soft field ABI", {"modules/framework/include/aver/framework/framework_softfield_abi.h", nullptr}, "AVER_FW_ABI", "scripting/csharp/Aver.Framework/SoftFieldNative.cs", "aver_fw_softfield_"},
 
     {"soft shape ABI", {"modules/framework/include/aver/framework/framework_softshape_abi.h", nullptr}, "AVER_FW_ABI", "scripting/csharp/Aver.Framework/FwSoftShape.cs", "aver_fw_softshape_"},
@@ -677,7 +677,7 @@ struct Group {
     const char* label;       // what to call it in the log
     const char* header;      // repo-relative C header
     const char* prefix;      // the #define prefix that selects this group
-    const char* csFile;      // repo-relative .cs
+    const char* csFile;      // repo-relative .cs; nullptr: mirrored in the Fabric Connector's repository (csType names the mirror there), C side only here
     const char* csType;      // the enum or static class that mirrors it
     const char* skip;        // one normalised C name to ignore, or "" -- see below
     // A prefix carried by the C# spelling and not the C one, stripped before comparing. Exactly one
@@ -762,65 +762,65 @@ static const Group kGroups[] = {
      "scripting/csharp/Aver.UI/TextStyle.cs",    "TextFlags",   ""},
     // G5 A1: the property-track animation seam (modules/anim.abi), mirrored by Aver.Fabric/Nodes/AnimationNative.cs.
     {"property animation kinds",    "modules/anim.abi/include/aver/anim/propanim_abi.h", "AVER_PANIM_KIND_",
-     "extensions/FabricConnector/managed/Aver.Fabric/Nodes/AnimationNative.cs", "PanimKind", ""},
+     nullptr, "PanimKind", ""},
     {"property animation tracks",   "modules/anim.abi/include/aver/anim/propanim_abi.h", "AVER_PANIM_TRACK_",
-     "extensions/FabricConnector/managed/Aver.Fabric/Nodes/AnimationNative.cs", "PanimTrackType", ""},
+     nullptr, "PanimTrackType", ""},
     {"property animation interps",  "modules/anim.abi/include/aver/anim/propanim_abi.h", "AVER_PANIM_INTERP_",
-     "extensions/FabricConnector/managed/Aver.Fabric/Nodes/AnimationNative.cs", "PanimInterp", ""},
+     nullptr, "PanimInterp", ""},
     {"property animation updates",  "modules/anim.abi/include/aver/anim/propanim_abi.h", "AVER_PANIM_UPDATE_",
-     "extensions/FabricConnector/managed/Aver.Fabric/Nodes/AnimationNative.cs", "PanimUpdate", ""},
+     nullptr, "PanimUpdate", ""},
     {"property animation loops",    "modules/anim.abi/include/aver/anim/propanim_abi.h", "AVER_PANIM_LOOP_",
-     "extensions/FabricConnector/managed/Aver.Fabric/Nodes/AnimationNative.cs", "PanimLoop", ""},
+     nullptr, "PanimLoop", ""},
     {"property animation discrete", "modules/anim.abi/include/aver/anim/propanim_abi.h", "AVER_PANIM_DISCRETE_",
-     "extensions/FabricConnector/managed/Aver.Fabric/Nodes/AnimationNative.cs", "PanimDiscrete", ""},
+     nullptr, "PanimDiscrete", ""},
     {"property animation events",   "modules/anim.abi/include/aver/anim/propanim_abi.h", "AVER_PANIM_EVENT_",
-     "extensions/FabricConnector/managed/Aver.Fabric/Nodes/AnimationNative.cs", "PanimEvent", ""},
+     nullptr, "PanimEvent", ""},
     // G5 N1: the polygon navigation seam (modules/nav.abi), mirrored by Aver.Fabric/Nodes/NavigationNative.cs.
     {"navigation post-processing", "modules/nav.abi/include/aver/nav/nav_abi.h", "AVER_NAV_POST_",
-     "extensions/FabricConnector/managed/Aver.Fabric/Nodes/NavigationNative.cs", "NavPost", ""},
+     nullptr, "NavPost", ""},
     {"navigation object kinds",    "modules/nav.abi/include/aver/nav/nav_abi.h", "AVER_NAV_KIND_",
-     "extensions/FabricConnector/managed/Aver.Fabric/Nodes/NavigationNative.cs", "NavKind", ""},
+     nullptr, "NavKind", ""},
     {"navigation point types",     "modules/nav.abi/include/aver/nav/nav_abi.h", "AVER_NAV_POINT_",
-     "extensions/FabricConnector/managed/Aver.Fabric/Nodes/NavigationNative.cs", "NavPoint", ""},
+     nullptr, "NavPoint", ""},
     {"navigation heuristics",      "modules/nav.abi/include/aver/nav/nav_abi.h", "AVER_NAV_HEURISTIC_",
-     "extensions/FabricConnector/managed/Aver.Fabric/Nodes/NavigationNative.cs", "NavHeuristic", ""},
+     nullptr, "NavHeuristic", ""},
     {"navigation diagonal modes",  "modules/nav.abi/include/aver/nav/nav_abi.h", "AVER_NAV_DIAGONAL_",
-     "extensions/FabricConnector/managed/Aver.Fabric/Nodes/NavigationNative.cs", "NavDiagonal", ""},
+     nullptr, "NavDiagonal", ""},
     {"navigation bake slots",      "modules/nav.abi/include/aver/nav/nav_abi.h", "AVER_NAV_BAKE_",
-     "extensions/FabricConnector/managed/Aver.Fabric/Nodes/NavigationNative.cs", "NavBake", ""},
+     nullptr, "NavBake", ""},
     {"navigation agent slots",     "modules/nav.abi/include/aver/nav/nav_abi.h", "AVER_NAV_AGENT_",
-     "extensions/FabricConnector/managed/Aver.Fabric/Nodes/NavigationNative.cs", "NavAgent", ""},
+     nullptr, "NavAgent", ""},
     // G6 NET1: sockets and the reliable-UDP host (modules/net.abi), mirrored by Aver.Fabric/Nodes/NetworkNative.cs.
     {"networking events",           "modules/net.abi/include/aver/net/net_abi.h", "AVER_NET_EVENT_",
-     "extensions/FabricConnector/managed/Aver.Fabric/Nodes/NetworkNative.cs", "NetEvent", ""},
+     nullptr, "NetEvent", ""},
     {"networking disconnect reasons", "modules/net.abi/include/aver/net/net_abi.h", "AVER_NET_REASON_",
-     "extensions/FabricConnector/managed/Aver.Fabric/Nodes/NetworkNative.cs", "NetReason", ""},
+     nullptr, "NetReason", ""},
     {"networking peer states",      "modules/net.abi/include/aver/net/net_abi.h", "AVER_NET_PEER_STATE_",
-     "extensions/FabricConnector/managed/Aver.Fabric/Nodes/NetworkNative.cs", "NetPeerState", ""},
+     nullptr, "NetPeerState", ""},
     {"networking send flags",       "modules/net.abi/include/aver/net/net_abi.h", "AVER_NET_SEND_FLAG_",
-     "extensions/FabricConnector/managed/Aver.Fabric/Nodes/NetworkNative.cs", "NetSendFlag", ""},
+     nullptr, "NetSendFlag", ""},
     {"networking disconnect modes", "modules/net.abi/include/aver/net/net_abi.h", "AVER_NET_DISCONNECT_MODE_",
-     "extensions/FabricConnector/managed/Aver.Fabric/Nodes/NetworkNative.cs", "NetDisconnectMode", ""},
+     nullptr, "NetDisconnectMode", ""},
     {"networking peer statistics",  "modules/net.abi/include/aver/net/net_abi.h", "AVER_NET_PEERSTAT_",
-     "extensions/FabricConnector/managed/Aver.Fabric/Nodes/NetworkNative.cs", "NetPeerMetric", ""},
+     nullptr, "NetPeerMetric", ""},
     {"networking host statistics",  "modules/net.abi/include/aver/net/net_abi.h", "AVER_NET_HOSTSTAT_",
-     "extensions/FabricConnector/managed/Aver.Fabric/Nodes/NetworkNative.cs", "NetHostStat", ""},
+     nullptr, "NetHostStat", ""},
     // G5 U1: the style box kinds and flags, the 9-patch axis modes and the stretch settings (modules/ui.abi), mirrored by Aver.Fabric/Nodes/UiNative.cs.
     {"UI style box kinds",         "modules/ui.abi/include/aver/ui/ui_style_abi.h", "AVER_UI_SB_",
-     "extensions/FabricConnector/managed/Aver.Fabric/Nodes/UiNative.cs", "UiSbKind", ""},
+     nullptr, "UiSbKind", ""},
     {"UI style box flags",          "modules/ui.abi/include/aver/ui/ui_style_abi.h", "AVER_UI_SBF_",
-     "extensions/FabricConnector/managed/Aver.Fabric/Nodes/UiNative.cs", "UiSbFlags", ""},
+     nullptr, "UiSbFlags", ""},
     {"UI 9-patch axis modes",       "modules/ui.abi/include/aver/ui/ui_style_abi.h", "AVER_UI_AXIS_",
-     "extensions/FabricConnector/managed/Aver.Fabric/Nodes/UiNative.cs", "UiAxisStretch", ""},
+     nullptr, "UiAxisStretch", ""},
     {"UI stretch modes",            "modules/ui.abi/include/aver/ui/ui_style_abi.h", "AVER_UI_STRETCH_",
-     "extensions/FabricConnector/managed/Aver.Fabric/Nodes/UiNative.cs", "UiStretchModeId", ""},
+     nullptr, "UiStretchModeId", ""},
     {"UI stretch aspects",          "modules/ui.abi/include/aver/ui/ui_style_abi.h", "AVER_UI_ASPECT_",
-     "extensions/FabricConnector/managed/Aver.Fabric/Nodes/UiNative.cs", "UiStretchAspectId", ""},
+     nullptr, "UiStretchAspectId", ""},
     {"UI stretch scale modes",      "modules/ui.abi/include/aver/ui/ui_style_abi.h", "AVER_UI_SCALEMODE_",
-     "extensions/FabricConnector/managed/Aver.Fabric/Nodes/UiNative.cs", "UiStretchScaleModeId", ""},
+     nullptr, "UiStretchScaleModeId", ""},
     // G5 S1: the audio bus flags (modules/audio.abi), mirrored by Aver.Fabric/Nodes/AudioNative.cs.
     {"audio bus flags",             "modules/audio.abi/include/aver/audio/audio_abi.h", "AVER_AUDIO_BUSFLAG_",
-     "extensions/FabricConnector/managed/Aver.Fabric/Nodes/AudioNative.cs", "AudioBusFlag", ""},
+     nullptr, "AudioBusFlag", ""},
     // THE LOG LEVELS, which are mirrored THREE times and were checked zero. Log.hpp says the order
     // "is load-bearing", names both mirrors by path, and warns that a value inserted in the middle
     // "would silently renumber every one of those without a single compile error" -- and then
@@ -1106,15 +1106,9 @@ static const Group kGroups[] = {
      "scripting/csharp/Aver.Physics/PhysicsStats.cs", "PhysicsStat", ""},
 };
 
-// A C# mirror that lives in an extension's managed half (extensions/<Name>/managed/...): only the C side of such a row exists in a tree built
-// without the extension (AVER_WITH_FABRIC off), so its C#-side comparison is skipped and counted.
-static bool csMirrorIsExtension(const char* csFile) { return std::string(csFile).rfind("extensions/", 0) == 0; }
-
-#ifdef AVER_ABI_WITH_FABRIC
-static constexpr bool kHaveExtensionSources = true;
-#else
-static constexpr bool kHaveExtensionSources = false;
-#endif
+// A C# mirror in an extension's managed half is not in this tree (the Fabric Connector's repository checks its own mirrors against these headers),
+// so the row's C-side checks run here and its C#-side comparison is skipped and counted.
+static bool csMirrorIsExtension(const char* csFile) { return csFile == nullptr; }
 
 int main() {
     AVER_INFO("=== the C ABI's constants, signatures and their C# mirrors ===");
@@ -1127,7 +1121,7 @@ int main() {
     int skippedNoFabric = 0;
 
     for (const Group& g : kGroups) {
-        if (!kHaveExtensionSources && csMirrorIsExtension(g.csFile)) {
+        if (csMirrorIsExtension(g.csFile)) {
             // The C side still has to parse: a renamed prefix or a moved enum must not turn the row into a silent nothing.
             ++skippedNoFabric;
             std::string chdr;
@@ -1202,7 +1196,7 @@ int main() {
 
     // ------------------------------------------------ function signatures
     for (const Abi& a : kAbis) {
-        if (!kHaveExtensionSources && csMirrorIsExtension(a.csFile)) {
+        if (csMirrorIsExtension(a.csFile)) {
             ++skippedNoFabric;
             std::map<std::string, Signature> cOnly;
             bool readAllC = true;
@@ -1432,7 +1426,7 @@ int main() {
     }
 
     if (skippedNoFabric > 0)
-        AVER_INFO("=== skipped: no Fabric ({} C#-side row(s) whose mirror is in the extension's managed half; the C-side rows ran) ===", skippedNoFabric);
+        AVER_INFO("=== {} row(s) whose C# mirror is in the Fabric Connector's repository: the C side ran, the C# side is checked there ===", skippedNoFabric);
     if (g_failures == 0) AVER_INFO("=== every ABI constant and signature matches its C# mirror ===");
     else                 AVER_ERROR("=== {} ABI mirror assertion(s) failed ===", g_failures);
     return g_failures == 0 ? 0 : 1;

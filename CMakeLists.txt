@@ -96,9 +96,6 @@ option(AVER_BUILD_SANDBOX "Build the sandbox sample app" ON)
 # its old name on purpose -- renaming it would silently invalidate every existing CMake cache that set it.
 option(AVER_BUILD_GAME "Build the runtime (Aver.Runtime.Game + AverEngineRuntime.exe)" ON)
 option(AVER_BUILD_TESTS "Build test executables" ON)
-# The Fabric Connector extension (extensions/FabricConnector): the converter for Godot 4 projects, built into bin/Extensions/FabricConnector. The
-# engine reaches it only through the extension loader, so OFF configures and builds the engine without it.
-option(AVER_WITH_FABRIC "Build the Fabric Connector extension (extensions/FabricConnector)" ON)
 # CTest, so the suites are runnable by ONE command from a terminal or a build server.
 #
 # They were not, until now. The only two things that ran them were tools/mcp/aver_mcp.py's
@@ -470,15 +467,9 @@ endif()
 # built out of tree (docs/EXTENSIONS.md) gets it. After every module, whose optional ones it tests for.
 add_subdirectory(tools)
 
-# EXTENSIONS built from this tree. Each is a directory the engine finds at run time under bin/Extensions (modules/extensions); nothing above
-# reaches one except through that loader. Fabric Connector converts Godot 4 projects (docs/FABRIC.md); it is meant to move to its own repository
-# (docs/plans/fabric/EXTENSION.md), and with this option OFF the engine configures and builds without it. After every module and the editor, so
-# the optional modules its targets link are already known.
-if(AVER_WITH_FABRIC)
-  add_subdirectory(extensions/FabricConnector)
-endif()
-# Extensions that live in their own repositories (docs/EXTENSIONS.md): AVER_EXTERNAL_EXTENSIONS lists their source directories, each added the same way,
-# after every module and tool. Empty by default, so nothing changes for a build that has none.
+# EXTENSIONS live in their own repositories (docs/EXTENSIONS.md, e.g. the Fabric Connector, docs/FABRIC.md). Each is a directory the engine finds at run
+# time under bin/Extensions (modules/extensions); nothing above reaches one except through that loader. AVER_EXTERNAL_EXTENSIONS lists their source
+# directories, each added here after every module and tool. Empty by default, so nothing changes for a build that has none.
 set(AVER_EXTERNAL_EXTENSIONS "" CACHE STRING "Source directories of extensions built from outside this tree (a ;-separated list)")
 foreach(_aver_ext_dir IN LISTS AVER_EXTERNAL_EXTENSIONS)
   cmake_path(GET _aver_ext_dir FILENAME _aver_ext_name)

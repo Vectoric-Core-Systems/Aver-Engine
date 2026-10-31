@@ -43,7 +43,7 @@ add_library(Aver.Framework SHARED
   src/AccessAbi.cpp
   # Script overrides for sun, fog and sky light, and named post-process layers (wave 9, docs/plans/wave9/VISUAL_SCRIPTING_CSHARP_SYNC.md 2.4).
   src/WorldFxAbi.cpp
-  # Render-to-texture views a script or a converted level asks for; the host draws what the registry plans (G4 R5, docs/plans/fabric/G4_RENDER.md).
+  # Render-to-texture views a script or a converted level asks for; the host draws what the registry plans (R5, https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G4_RENDER.md).
   src/SubViewAbi.cpp
   # Local fog volumes and reflection probes a script or a converted level places; the host reads what changed (G4 R8).
   src/EnvFxAbi.cpp

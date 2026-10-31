@@ -11,9 +11,4 @@
 add_executable(AbiEnumTest src/AbiEnumTest.cpp)
 target_link_libraries(AbiEnumTest PRIVATE Aver.Core)
 target_compile_definitions(AbiEnumTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
-# The anim / nav / net / UI-style / audio ABIs are mirrored in C# only by the Fabric Connector's managed half (extensions/FabricConnector/managed).
-# Without the extension in the tree those C#-side rows are skipped with one line; the C side of every row still runs.
-if(AVER_WITH_FABRIC)
-  target_compile_definitions(AbiEnumTest PRIVATE AVER_ABI_WITH_FABRIC=1)
-endif()
 set_target_properties(AbiEnumTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

@@ -2,7 +2,7 @@
 // Constructive solid geometry on convex polygons: union, intersection and subtraction by BSP trees, the way an imported level's CSG tree is baked
 // into a static mesh at convert time. Plain doubles, no engine type, no axis: the caller picks the space (an importer may work in metres, +Y up) and
 // maps the result. A solid is a closed set of polygons wound counter-clockwise seen from outside; an open surface is carried but gives no meaningful boolean.
-// Contract: docs/plans/fabric/G4_RENDER.md R7.
+// Contract: R7 of https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G4_RENDER.md.
 #include <cstdint>
 #include <vector>
 

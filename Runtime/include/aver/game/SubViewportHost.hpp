@@ -1,4 +1,4 @@
-// The host half of sub-viewports (G4 R5, docs/plans/fabric/G4_RENDER.md): reads the views a script or a converted level created (framework_subview_abi.h),
+// The host half of sub-viewports (R5, https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G4_RENDER.md): reads the views a script or a converted level created (framework_subview_abi.h),
 // draws the ones the registry plans each frame into their own colour targets, and hands each target to the materials and the UI that name it.
 //
 // THE CHEAP CONFIGURATION, on purpose. A secondary view is NOT a second Voxi: Voxi's global illumination, ray-traced shadows, ReSTIR and NRD2 history are one set of

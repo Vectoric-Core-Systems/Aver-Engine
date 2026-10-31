@@ -282,7 +282,7 @@ struct MaterialDesc {
     bool      twoSided    = false;
     bool      castShadow  = true;
     // Multiply the albedo (rgb) and opacity by the mesh's vertex colour (the vertex-colour-as-albedo option). Read only on
-    // a mesh that carries the colour stream (docs/plans/fabric/G4_RENDER.md R1); off is every material before this field.
+    // a mesh that carries the colour stream (R1 of https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G4_RENDER.md); off is every material before this field.
     bool      vertexColor = false;
 
     UvMode uvMode   = UvMode::Mesh;

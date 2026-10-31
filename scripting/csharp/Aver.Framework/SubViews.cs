@@ -1,7 +1,7 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
-// Render-to-texture views a script or a converted level asks for. Design: docs/plans/fabric/G4_RENDER.md R5.
+// Render-to-texture views a script or a converted level asks for. Design: R5 of https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G4_RENDER.md.
 
 namespace Aver.Framework;
 

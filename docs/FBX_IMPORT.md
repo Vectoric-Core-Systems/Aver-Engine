@@ -46,8 +46,7 @@ more under a node that mirrors its mesh), `V` flipped. Z-up, Y-up, any unit.
 **Meshes.** Faces are triangulated by ear clipping (concave n-gons are fine). One mesh per distinct
 (geometry, node basis, material set); nodes sharing a geometry with the same basis become placements of one
 mesh, a rotated one gets a `_2` copy. A hard edge stays split, a smooth surface welds. Hidden nodes are skipped.
-Two UV sets, vertex colour and the file's own tangents (tangent + bitangent) are kept in the `.ocmesh` VXEX chunk (`docs/plans/fabric/G4_RENDER.md`
-R1); a third UV set is reported.
+Two UV sets, vertex colour and the file's own tangents (tangent + bitangent) are kept in the `.ocmesh` VXEX chunk (R1 of [G4_RENDER.md](https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G4_RENDER.md)); a third UV set is reported.
 
 **Skeletons.** Bones are the skin clusters' bones, the chain nodes between them, and bone-typed descendants (end
 bones). One skeleton per topmost bone. The rest pose is the bind pose. Influences are the top 4 by weight,

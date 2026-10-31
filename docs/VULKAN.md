@@ -212,7 +212,7 @@ problem.
 
 ## The known open defect: the shadow cascade map is never written
 
-> **G4 R2 note.** The raster local-light shadow pass (`docs/plans/fabric/G4_RENDER.md` R2) needed depth-only draws to reach their own target on this backend, so it calls `IRenderContext::setTargetsIsolated(true)`:
+> **G4 R2 note.** The raster local-light shadow pass (R2 of [G4_RENDER.md](https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G4_RENDER.md)) needed depth-only draws to reach their own target on this backend, so it calls `IRenderContext::setTargetsIsolated(true)`:
 > `pushRenderScope(..., isolated)` suspends the scene scope and opens a temporary one over the targets named by `setRenderTargets`. That is the retarget this section describes, applied to those draws only; the sun's cascade
 > pass and the GI-only map still join the scene scope and are **still unwritten** on Vulkan. Unrun; the first Vulkan frame with a shadowed light is the check.
 

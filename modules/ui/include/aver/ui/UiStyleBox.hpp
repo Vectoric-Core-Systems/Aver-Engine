@@ -24,7 +24,7 @@ inline constexpr u32 kSbVertical   = 8;    // Line
 enum class UiAxisStretch : i32 { Stretch = 0, Tile = 1, TileFit = 2 };
 
 // One struct for all four kinds so the C seam can pass it by pointer (aver_ui_stylebox_*). Every field is 32 bits
-// except `texture`; the layout is mirrored by extensions/FabricConnector/managed/Aver.Fabric/Nodes/UiNative.cs and pinned by
+// except `texture`; the layout is mirrored by Aver.Fabric/Nodes/UiNative.cs in https://github.com/Vectoric-Core-Systems/Fabric-Connector and pinned by
 // UiStyleAbiTest. Fields a kind does not use are ignored.
 struct UiStyleBox {
     u64 texture = 0;                     // Texture: the engine texture handle (0 = none, nothing is drawn)

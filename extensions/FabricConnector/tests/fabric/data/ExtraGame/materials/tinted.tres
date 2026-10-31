@@ -1,7 +1,0 @@
-[gd_resource type="StandardMaterial3D" format=3 uid="uid://cextratinted01"]
-
-[resource]
-albedo_color = Color(1, 1, 1, 1)
-vertex_color_use_as_albedo = true
-vertex_color_is_srgb = true
-roughness = 0.5

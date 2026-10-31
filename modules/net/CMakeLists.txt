@@ -2,7 +2,7 @@
 # network with seeded loss, delay, duplication and reordering that the protocol is tested on. Core only; no third-party code.
 #
 # OPT-IN. Nothing links it except Aver.Net.Abi (modules/net.abi, the seam managed extensions drive) and the tests; a game that
-# does not ask for it does not carry it. Design and contract: docs/plans/fabric/G6_NETWORK.md.
+# does not ask for it does not carry it. Design and contract: https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G6_NETWORK.md.
 aver_add_module(Aver.Net
   SOURCES
     src/Address.cpp

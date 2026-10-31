@@ -9,7 +9,7 @@
  * SPACE. Engine space (centimetres, +Z up). A polygon mesh crosses as world-space vertices (float x, y, z) and index lists.
  * NAVIGATION LAYERS are 32-bit masks (uint32 passed as int32 bit pattern). Costs are enter-cost / travel-cost multipliers.
  *
- * ENUMS (mirrored by hand in the extension's managed half, extensions/FabricConnector/managed/Aver.Fabric/Nodes/NavigationNative.cs, and checked by AbiEnumTest):
+ * ENUMS (mirrored by hand in the Fabric Connector's managed half, Aver.Fabric/Nodes/NavigationNative.cs in https://github.com/Vectoric-Core-Systems/Fabric-Connector; AbiEnumTest checks the C side):
  *   postprocess 0 corridor funnel, 1 edge centred, 2 none
  *   kind 0 none, 1 map, 2 region, 3 link, 4 obstacle, 5 agent
  *   point type 0 region, 1 link

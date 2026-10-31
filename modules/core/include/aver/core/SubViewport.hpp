@@ -1,4 +1,4 @@
-// SubViewport registry (G4 R5, docs/plans/fabric/G4_RENDER.md): the render-to-texture views a level asks for, their update-mode
+// SubViewport registry (R5, https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G4_RENDER.md): the render-to-texture views a level asks for, their update-mode
 // scheduling, the per-frame render budget and the texture-handle bookkeeping. Header-only and pure -- no device, no scene -- so the
 // framework ABI, the hosts and the tests share one set of rules. Nothing is drawn here.
 //

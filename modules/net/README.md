@@ -9,4 +9,4 @@ ENet-like semantics (channels, reliable / unreliable-ordered / unsequenced packe
 limits), plus `SimNetwork`, an in-memory network with seeded loss, delay, duplication and reordering that the protocol is tested on.
 
 Not wire compatible with ENet or with the old OCServer protocol (`docs/recon/networking.md`). Design, the wire format and the contract
-for the layers above: [docs/plans/fabric/G6_NETWORK.md](../../docs/plans/fabric/G6_NETWORK.md).
+for the layers above: [G6_NETWORK.md](https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G6_NETWORK.md) in the Fabric Connector's repository.

@@ -797,7 +797,7 @@ float3 averSkyIrradiance(float3 N) {
 #endif
 // Scene vertex as the input assembler delivers it.
 #if AVER_MESH_EXTRA
-// AVER_MESH_EXTRA: the mesh also has a second vertex stream (rhi::MeshVertexExtra, input slot 1; G4_RENDER.md R1). Compiled only for the
+// AVER_MESH_EXTRA: the mesh also has a second vertex stream (rhi::MeshVertexExtra, input slot 1; R1 of https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G4_RENDER.md). Compiled only for the
 // scene pipelines a mesh with that stream draws through; every other variant sees the three-attribute VSIn below unchanged.
 //   col  linear RGBA (UNORM8)
 //   tng  xyz = tangent * 0.5 + 0.5, w = 1 (+1 handedness), 0 (-1), ~0.5 (none: the pixel shader derives the frame)

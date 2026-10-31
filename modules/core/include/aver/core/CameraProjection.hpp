@@ -1,4 +1,4 @@
-// Camera projections beyond the symmetric perspective one (G4 R4, docs/plans/fabric/G4_RENDER.md): orthographic, off-centre frustum, and
+// Camera projections beyond the symmetric perspective one (R4, https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G4_RENDER.md): orthographic, off-centre frustum, and
 // keep-aspect. Header-only and pure so the host, the renderers and the tests share one set of formulas.
 //
 // Row-vector, left-handed, depth [0,1] like Mat4::perspectiveLH. The default CameraProjection (perspective, keep height) builds

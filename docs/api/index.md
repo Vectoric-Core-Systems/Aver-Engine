@@ -15,4 +15,3 @@ Generated from source by `scripts/csharp-api-index.py`. Hand-written guides: `do
 | [Aver.Prefab](Aver.Prefab.md) | 4 | 28 |
 | [Aver.Scripting](Aver.Scripting.md) | 14 | 126 |
 | [Aver.Pcg.Apply](Aver.Pcg.Apply.md) | 2 | 8 |
-| [Aver.Fabric](Aver.Fabric.md) | 668 | 7060 |

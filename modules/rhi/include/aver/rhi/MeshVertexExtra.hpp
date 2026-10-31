@@ -2,7 +2,7 @@
 // The optional SECOND vertex stream of a mesh (input slot 1): vertex colour, authored tangent and UV2.
 // MeshVertex (slot 0, 32 B) is the HLSL MeshVtx / input-layout / DXR BLAS ABI and does not change; a mesh
 // that has none of these binds no second buffer and draws through today's pipelines.
-// Layout contract and shader semantics: docs/plans/fabric/G4_RENDER.md section R1.
+// Layout contract and shader semantics: section R1 of https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G4_RENDER.md.
 #include "aver/core/Types.hpp"
 
 #include <cmath>

@@ -9,7 +9,7 @@
  * of the socket's family: only a caller that means to listen on every interface passes it. Nothing here binds a wildcard on its own: a host
  * created with no bind address opens its socket at its first connect, bound to the loopback address when the target is loopback.
  *
- * ENUMS (mirrored by hand in the extension's managed half, extensions/FabricConnector/managed/Aver.Fabric/Nodes/NetworkNative.cs, and checked by AbiEnumTest):
+ * ENUMS (mirrored by hand in the Fabric Connector's managed half, Aver.Fabric/Nodes/NetworkNative.cs in https://github.com/Vectoric-Core-Systems/Fabric-Connector; AbiEnumTest checks the C side):
  *   event 0 none, 1 connect, 2 disconnect, 3 receive      reason (disconnect events) 0 none, 1 remote, 2 local, 3 timeout, 4 connect failed
  *   peer state: ENetPacketPeer.PeerState's numbering      send flags: 1 reliable, 2 unsequenced, neither = unreliable ordered
  *   disconnect mode 0 request, 1 later, 2 now             stat ids: the PeerStatistic numbering, then Aver extras from 16

@@ -1,6 +1,6 @@
 #pragma once
 // A network endpoint (IPv4 or IPv6 plus a port), numeric parsing, name resolution and the local interface addresses.
-// G6 NET1 (docs/plans/fabric/G6_NETWORK.md).
+// G6 NET1 (https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G6_NETWORK.md).
 #include "aver/core/Types.hpp"
 
 #include <string>

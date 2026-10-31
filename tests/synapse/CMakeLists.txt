@@ -52,7 +52,7 @@ if(TARGET Aver.Synapse.Scene)
   set_target_properties(BtSystemTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
 
-# Polygon navigation (docs/plans/fabric/G5_PARITY.md N1): maps with floors, links, layers and costs, the geometry baker, and the generic
+# Polygon navigation (N1 of https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G5_PARITY.md): maps with floors, links, layers and costs, the geometry baker, and the generic
 # A* graphs. All pure, like NavTest.
 foreach(t NavMesh NavMeshBake NavGraph)
   add_executable(${t}Test src/${t}Test.cpp)

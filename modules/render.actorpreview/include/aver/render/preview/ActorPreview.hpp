@@ -68,7 +68,7 @@ struct PreviewDraw {
 
 // G4 R5: the same targets and draw path used as a SUB-VIEWPORT -- a game camera's picture of the world instead of the studio preview. A view
 // that is active draws its draw list with the camera and lighting given here: no backdrop, grid or bounds, one sun, a sky fill, a clear colour of
-// the caller's choosing (alpha 0 for a transparent view), flat per-draw colours (no material textures; see docs/plans/fabric/G4_RENDER.md R5).
+// the caller's choosing (alpha 0 for a transparent view), flat per-draw colours (no material textures; see R5 of https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G4_RENDER.md).
 // An inactive view (the default) is the studio preview, unchanged.
 struct SceneViewParams {
     bool active = false;

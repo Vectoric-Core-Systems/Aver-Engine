@@ -135,7 +135,7 @@ cbuffer AverMaterial : register(b2) {
 // or flag-gated slots under it (see averHairInit). Clear for every material that is not hair, so nothing else changes.
 #define AVER_MAT_HAIR           (1u << 18)
 // pbr::MaterialFlag_VertexColor: multiply albedo and opacity by the mesh's vertex colour. Read only where AVER_MESH_EXTRA is defined
-// (the pipelines a mesh with the second vertex stream draws through, G4_RENDER.md R1); ignored everywhere else.
+// (the pipelines a mesh with the second vertex stream draws through, R1 of https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G4_RENDER.md); ignored everywhere else.
 #define AVER_MAT_VERTEX_COLOR   (1u << 19)
 // pbr::MaterialFlag_Fx: the draw constants carry the R6 extension block. Read only under AVER_MATX (the material-variant pipelines).
 #define AVER_MAT_FX             (1u << 20)
@@ -1201,7 +1201,7 @@ AverSurface averBuildSurface(AverVertex v, AverLight l, AverAuthored a, float2 u
 // (grep it: the three call sites are all in renderer sources, outside this prelude), so nothing
 // else here has to change and the stock path is never deleted, only not compiled.
 #if AVER_MATX
-// ================= G4 R6: BaseMaterial3D features (docs/plans/fabric/G4_RENDER.md R6) =================
+// ================= G4 R6: BaseMaterial3D features (R6 of https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G4_RENDER.md) =================
 // Compiled ONLY into the material-variant scene pipelines (VoxiRenderer::createFxPipelines); every other shader sees none of this, and the stock
 // averEvalMaterial below is unchanged. Each feature is its own AVER_MATX_* define, so a variant carries only what its material uses.
 // The parameters are the extension block behind the 192-byte material block (gFx* in the AverMaterial cbuffer, pbr::MaterialExtConstants).

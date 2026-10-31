@@ -1,5 +1,5 @@
 #pragma once
-// A reliable-UDP host/peer protocol with ENet-like semantics (docs/plans/fabric/G6_NETWORK.md, NET1). Not wire compatible with ENet.
+// A reliable-UDP host/peer protocol with ENet-like semantics (NET1, https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G6_NETWORK.md). Not wire compatible with ENet.
 //
 // A Host owns one datagram socket and up to maxPeers Peers. connect() makes a client peer; a datagram from an unknown address with a
 // CONNECT makes a server peer. Packets travel on numbered channels, reliable (acknowledged, resent, delivered in order per channel),

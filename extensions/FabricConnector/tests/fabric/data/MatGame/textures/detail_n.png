@@ -1,1 +1,0 @@
-stand-in for a PNG: the reader never decodes images, it only needs the file to exist.

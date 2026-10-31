@@ -25,7 +25,7 @@ constexpr u32 kChunkMLET = avrFourCC("MLET");
 // heard of it loads the base mesh.
 constexpr u32 kChunkMRPH = avrFourCC("MRPH");
 constexpr u16 kMrphChunkVersion = 1;
-// Optional extra vertex streams (colour, tangent, UV1), docs/plans/fabric/G4_RENDER.md R1. Never
+// Optional extra vertex streams (colour, tangent, UV1), R1 of https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G4_RENDER.md. Never
 // Required: an older reader skips the chunk and loads the base mesh exactly as before.
 constexpr u32 kChunkVXEX = avrFourCC("VXEX");
 constexpr u16 kVxexChunkVersion = 1;
