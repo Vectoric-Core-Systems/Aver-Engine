@@ -109,11 +109,13 @@ static class GdextTests
     private static string HostPath(string bin) =>
         Path.Combine(ExtensionDir(bin), "native", PlatformDir(), HostFile());
 
-    private static void Host()
+    // The host library (and the material system's DLL it links) go beside this assembly, where the default DllImport probing looks. The runner calls
+    // this before the first test: whether the host is available is asked by more than this suite and remembered, so the copy must already be there on
+    // a run in a fresh output folder.
+    internal static void StageNative()
     {
         string? bin = FindBin();
-        if (bin == null) { Console.WriteLine("  SKIP: the native host (build/bin/Extensions/FabricConnector/native) or the test plugin (build/bin/gdext_test) is not built"); return; }
-        // the host library goes beside this assembly, where the default DllImport probing looks
+        if (bin == null) return;
         string beside = Path.Combine(AppContext.BaseDirectory, HostFile());
         try { if (!File.Exists(beside) || File.GetLastWriteTimeUtc(beside) < File.GetLastWriteTimeUtc(HostPath(bin))) File.Copy(HostPath(bin), beside, true); }
         catch (IOException) { /* a copy from an earlier run is in use */ }
@@ -123,6 +125,13 @@ static class GdextTests
         catch (IOException) { /* in use by an earlier run */ }
         // A dependency is searched for beside the process's executable (dotnet), not beside this assembly: load it first so the loader finds it by name.
         System.Runtime.InteropServices.NativeLibrary.TryLoad(Path.Combine(AppContext.BaseDirectory, pbr), out _);
+    }
+
+    private static void Host()
+    {
+        string? bin = FindBin();
+        if (bin == null) { Console.WriteLine("  SKIP: the native host (build/bin/Extensions/FabricConnector/native) or the test plugin (build/bin/gdext_test) is not built"); return; }
+        StageNative();
         if (!GDExtensionManager.IsNativeAvailable) { T.Check("the native host loads", false, GDExtensionManager.LastError); return; }
         T.Check("the native host loads and speaks ABI 1", true);
         string dir = Path.Combine(bin, "gdext_test");

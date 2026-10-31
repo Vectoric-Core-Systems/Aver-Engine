@@ -109,6 +109,8 @@ The command's last line is `{"schemaVersion":1,"summary":true,"kind":"<command>"
 
 The root CMake option `AVER_WITH_FABRIC` (default ON) adds `extensions/FabricConnector`. Its library is built to `build/bin/Extensions/FabricConnector/native/<platform>/`, with `extension.json` and `data/extension_api.json` beside it, and its managed half to `managed/Aver.Fabric.dll` and `tools/` (`extensions/FabricConnector/managed`; needs the .NET SDK, without which the manifest lists a file that is not there and the loader refuses the extension). With the option OFF the engine configures and builds without the extension (and `AverAssetC fabric` is then an unknown command). Nothing outside `extensions/FabricConnector` references its targets.
 
+An extension in its own repository is built into the engine's build with `-DAVER_EXTERNAL_EXTENSIONS=<its source directory>` (a `;`-separated list; empty by default): the root CMake adds each after every module, binary directory `extensions/<directory name>`, and the extension's `CMakeLists.txt` sees the engine's `CMAKE_SOURCE_DIR` and `CMAKE_BINARY_DIR`. The Fabric-Connector repository does this from its own top-level CMake (it configures the engine as a project of its own, with the editor, the runtime host and the engine's tests off). `AverAssetC`, which every extension's commands run through, is built whether or not `AVER_BUILD_TESTS` is on (`tools/CMakeLists.txt`).
+
 ## Tests
 
 `ExtensionImportTest` and `FabricImportTest` are described under "The editor". `AbiEnumTest` pins the C side of the anim, nav, net, UI-style and audio seams; the check that their C# mirrors in the extension's managed half agree runs only with `AVER_WITH_FABRIC` on (otherwise it logs one `skipped: no Fabric` line).

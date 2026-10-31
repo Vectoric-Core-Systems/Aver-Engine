@@ -8,6 +8,7 @@ static class Program
     static int Main(string[] args)
     {
         int failures = 0;
+        GdextTests.StageNative(); // before any suite asks whether the native host is available
         if (args.Length == 1 && args[0] == "gdscript") // dotnet run -c Debug -- gdscript: only the F4a suite
         {
             failures = GdScriptParserTests.RunAll();

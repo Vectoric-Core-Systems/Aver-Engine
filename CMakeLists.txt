@@ -466,6 +466,10 @@ if(AVER_BUILD_SANDBOX)
   add_subdirectory(sandbox)
 endif()
 
+# AverAssetC, the asset compiler (and the process extension commands run through). A tool, not a test: built with the tests off too, so an extension
+# built out of tree (docs/EXTENSIONS.md) gets it. After every module, whose optional ones it tests for.
+add_subdirectory(tools)
+
 # EXTENSIONS built from this tree. Each is a directory the engine finds at run time under bin/Extensions (modules/extensions); nothing above
 # reaches one except through that loader. Fabric Connector converts Godot 4 projects (docs/FABRIC.md); it is meant to move to its own repository
 # (docs/plans/fabric/EXTENSION.md), and with this option OFF the engine configures and builds without it. After every module and the editor, so
@@ -473,6 +477,13 @@ endif()
 if(AVER_WITH_FABRIC)
   add_subdirectory(extensions/FabricConnector)
 endif()
+# Extensions that live in their own repositories (docs/EXTENSIONS.md): AVER_EXTERNAL_EXTENSIONS lists their source directories, each added the same way,
+# after every module and tool. Empty by default, so nothing changes for a build that has none.
+set(AVER_EXTERNAL_EXTENSIONS "" CACHE STRING "Source directories of extensions built from outside this tree (a ;-separated list)")
+foreach(_aver_ext_dir IN LISTS AVER_EXTERNAL_EXTENSIONS)
+  cmake_path(GET _aver_ext_dir FILENAME _aver_ext_name)
+  add_subdirectory("${_aver_ext_dir}" "${CMAKE_BINARY_DIR}/extensions/${_aver_ext_name}")
+endforeach()
 
 # THE MODULE DAG CHECK, here rather than inside aver_add_module.
 #
