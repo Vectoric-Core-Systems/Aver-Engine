@@ -289,6 +289,12 @@ Listed with reasons in section 5.
 
 Order rule: cheap fixes that unblock the most scripts first, then engine features by demos blocked per unit of effort, with dependencies respected. Each wave ends with a re-conversion of the 32 demos and a comparison with the baseline in section 2.
 
+**How they run (owner, 2026-11-01).** Wave 1 is done. The waves that change the renderer run one after another in the main session: 2, 4, 6, then 8. Waves 3 (input, window, display), 5 (physics, geometry, navigation) and 7 (skeleton, animation, ragdoll) run in parallel, each in its own session, git worktree and branch (`parity/wave-3`, `parity/wave-5`, `parity/wave-7` in both repositories), and are merged back as they finish. Every wave runs on Sonnet.
+
+**Moved to a later project (owner, 2026-11-01), not in waves 2-8:** XR / OpenXR (N5, F68 beyond the carriers that keep scenes loading), baked lightmaps and the GI bakers (N3), the panorama sky (E4), cube texture dimensions (E5), ReflectionProbe capture (P12), stencil (E10), video playback (E19) and spring bones (E24).
+
+**Look calibration lives in Fabric (owner, 2026-11-01).** Where matching Godot's look needs a different value (emission, exposure, units, tonemap, light falloff, fog density), the engine gains only the neutral capability, with its defaults unchanged; the Godot values and the mapping are the Fabric Connector's, applied when it converts or runs a Godot project.
+
 Standard headless check for every wave (called "standard" below): build; `ctest -E <GPU suite list>` (engine, then the Fabric repository: `Aver.Fabric.Tests`, `tests/fabric`); `tests/formats`; reconvert the 32 demos; diff `gaps.json` and the script compile errors against the previous wave. Engine ABI changes also run the ABI enum/row tests. Vulkan code is compiled and, where there are CPU-side tests, tested; shader changes compile for both HLSL and SPIR-V.
 
 ### Wave 1: converter and Fabric API completions
