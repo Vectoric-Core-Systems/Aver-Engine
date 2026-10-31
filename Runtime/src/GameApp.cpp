@@ -2,6 +2,7 @@
 #include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "aver/game/GameCamera.hpp"
 #include "aver/game/GameTick.hpp"
+#include "aver/game/RuntimeMeshBudget.hpp"
 #include "aver/game/GameSystemsWiring.hpp"   // [wave11/shapes] Content/Physics/Surfaces.ocsurf -> the physics surface registry
 #include "aver/game/PhysicalSurfaces.hpp"   // [wave11/shapes] Content/Physics/Surfaces.ocsurf -> the physics surface registry
 #include "aver/game/SoftBodyEffects.hpp"
@@ -1260,6 +1261,7 @@ void GameApp::openProject(Engine& e) {
     // G4 R5: how many sub-viewports may exist and how many are drawn per frame (the defaults when the manifest is silent).
     game::SubViewportHost::configure(game::subViewportSettingsOf(project_.subViewports, project_.subViewRenders, project_.subViewPixels));
 #endif
+    game::configureRuntimeMeshBudget(project_);
     // Load order is critical: index -> meshes -> levels
     content_.adopt(project_);
     // The project's physical-surface table, before any level builds a shape: a material slot's PHYSSURFACE, a landscape layer or a

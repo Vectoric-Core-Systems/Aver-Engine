@@ -579,6 +579,63 @@ static void testRestore() {
     aver_phys_shutdown();
 }
 
+// ---- 8: inertia set by hand ------------------------------------------------------------------------------
+
+static void inertiaOf(int32_t b, float out[3], int32_t* over = nullptr) {
+    int32_t o = -1;
+    out[0] = out[1] = out[2] = -1.0f;
+    aver_phys_body_inertia(b, out, &o);
+    if (over) *over = o;
+}
+
+static void testInertia() {
+    AVER_INFO("=== inertia set by hand: absolute, survives set_mass and the locked-axes rebuild ===");
+    aver_phys_init();
+    const int32_t a = aver_phys_add_dynamic_box(0, 0, 500.0f, 20, 30, 40, 10.0f);
+    const int32_t b = aver_phys_add_dynamic_box(500.0f, 0, 500.0f, 20, 30, 40, 10.0f);
+    aver_phys_body_set_gravity_factor(a, 0.0f);
+    float shape[3];
+    int32_t over = -1;
+    inertiaOf(a, shape, &over);
+    check(over == 0 && shape[0] > 0 && shape[1] > 0 && shape[2] > 0, "a body starts with the inertia its shape implies and no override");
+
+    const float want[3] = {1000.0f, 2000.0f, 3000.0f};
+    check(aver_phys_body_set_inertia(a, want) == 1, "set_inertia takes three moments");
+    float got[3];
+    inertiaOf(a, got, &over);
+    check(over == 1 && near(got[0], 1000.0f, 1.0f) && near(got[1], 2000.0f, 2.0f) && near(got[2], 3000.0f, 3.0f), "and reads them back in engine axes: " + f2s(got[0]) + " " + f2s(got[1]) + " " + f2s(got[2]));
+
+    aver_phys_body_add_angular_impulse(a, 0, 0, 6000.0f);
+    aver_phys_step(kDt);
+    float w[3] = {0, 0, 0};
+    aver_phys_body_angular_velocity(a, w);
+    check(near(std::fabs(w[2]), 2.0f, 0.05f) && near(w[0], 0.0f, 0.01f) && near(w[1], 0.0f, 0.01f), "an angular impulse spins it by impulse over the moment about that axis: " + f2s(w[2]));
+
+    aver_phys_body_set_mass(a, 20.0f);
+    inertiaOf(a, got, &over);
+    check(over == 1 && near(got[0], 1000.0f, 1.0f) && near(got[2], 3000.0f, 3.0f), "set_mass leaves it alone");
+    aver_phys_body_set_mass(b, 20.0f);
+    float scaled[3];
+    inertiaOf(b, scaled);
+    check(near(scaled[0], 2.0f * shape[0], 0.01f * shape[0]), "while a body without an override has the shape's inertia rescaled by the mass");
+
+    check(aver_phys_body_set_locked_axes(a, AVER_PHYS_LOCK_ROTATION_X) == 1, "locking a rotation rebuilds the mass properties");
+    inertiaOf(a, got, &over);
+    check(over == 1 && near(got[0], 0.0f, 0.001f) && near(got[1], 2000.0f, 2.0f) && near(got[2], 3000.0f, 3.0f), "the override survives it and the locked axis has no inertia to give: " + f2s(got[0]) + " " + f2s(got[1]));
+    aver_phys_body_set_locked_axes(a, 0);
+
+    check(aver_phys_body_set_inertia(a, nullptr) == 1, "NULL clears it");
+    inertiaOf(a, got, &over);
+    check(over == 0 && near(got[0], scaled[0], 0.01f * scaled[0]), "and the shape's inertia is back at the body's mass");
+
+    const float bad[3] = {1000.0f, 0.0f, 3000.0f};
+    check(aver_phys_body_set_inertia(a, bad) == 0 && aver_phys_last_error() == kInvalidArgument, "a moment of 0 is refused");
+    const int32_t floor = floorBox();
+    check(aver_phys_body_set_inertia(floor, want) == 0, "a static body has none to set");
+    check(aver_phys_body_set_inertia(9999, want) == 0 && aver_phys_last_error() == kBadHandle, "and a dead handle fails");
+    aver_phys_shutdown();
+}
+
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     AVER_INFO("==================================================");
@@ -596,6 +653,7 @@ int main() {
     testDisableWhole();
     testDisableIndices();
     testRestore();
+    testInertia();
 
     AVER_INFO("==================================================");
     if (g_failures == 0) AVER_INFO("=== {} assertions, 0 failed ===", g_checks);

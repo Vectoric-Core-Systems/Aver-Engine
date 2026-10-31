@@ -12,6 +12,7 @@
 #include "aver/physics/physics_abi.h"
 #include "Convert.hpp"
 #include "PhysicsInternal.hpp"
+#include "PhysicsRigidExtras.hpp"
 
 #include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
@@ -378,7 +379,11 @@ int32_t aver_phys_body_set_mass(int32_t body, float massKg) {
     return withMotionProperties(body, [&](JPH::MotionProperties& mp, JPH::Body&) {
         const float oldMass = mp.GetInverseMass() > 0.0f ? 1.0f / mp.GetInverseMass() : 0.0f;
         mp.SetInverseMass(1.0f / massKg);
-        if (oldMass > 0.0f) {
+        JPH::Vec3 fixedInverse;
+        if (rigidExtrasInertiaOverride(body, fixedInverse)) {
+            // Inertia set by hand is an absolute number, not a share of the mass.
+            mp.SetInverseInertia(fixedInverse, JPH::Quat::sIdentity());
+        } else if (oldMass > 0.0f) {
             const float ratio = oldMass / massKg;   // inverse inertia scales the OTHER way
             mp.SetInverseInertia(mp.GetInverseInertiaDiagonal() * ratio,
                                  mp.GetInertiaRotation());

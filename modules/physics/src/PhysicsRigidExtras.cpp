@@ -192,7 +192,17 @@ void rigidExtrasOnBodyRemoved(int32_t handle) {
     st->custom.erase(handle);
     st->disabledChildren.erase(handle);
     st->disabledWhole.erase(handle);
+    st->inertia.erase(handle);
     if (const JPH::BodyID* id = idOf(handle)) st->conveyors.erase(*id);
+}
+
+bool rigidExtrasInertiaOverride(int32_t handle, JPH::Vec3& inverseDiagonal) {
+    const RigidExtrasState* st = g_world ? g_world->rigidExtras.get() : nullptr;
+    if (!st) return false;
+    const auto it = st->inertia.find(handle);
+    if (it == st->inertia.end()) return false;
+    inverseDiagonal = JPH::Vec3(1.0f / it->second.x, 1.0f / it->second.y, 1.0f / it->second.z);
+    return true;
 }
 
 } // namespace aver::physics::detail
@@ -278,6 +288,57 @@ int32_t aver_phys_body_constant_velocity(int32_t body, float* outLinearCmS, floa
     }
     if (outLinearCmS) { outLinearCmS[0] = lin.x; outLinearCmS[1] = lin.y; outLinearCmS[2] = lin.z; }
     if (outAngularRadS) { outAngularRadS[0] = ang.x; outAngularRadS[1] = ang.y; outAngularRadS[2] = ang.z; }
+    return 1;
+}
+
+// Engine axis (x forward, y right, z up) -> the Jolt body axis it lies along; the same map readState uses for the inverse inertia.
+static const int kJoltAxisOf[3] = {2, 0, 1};
+static const float kCm2PerM2 = kCmPerMetre * kCmPerMetre;
+
+int32_t aver_phys_body_set_inertia(int32_t body, const float* inertiaKgCm2) {
+    const JPH::BodyID* id = findBody(body);
+    if (!id) return 0;
+    if (inertiaKgCm2 && !(finite3(inertiaKgCm2) && inertiaKgCm2[0] > 0.0f && inertiaKgCm2[1] > 0.0f && inertiaKgCm2[2] > 0.0f)) return refuse(AbiError::InvalidArgument);
+    JPH::BodyLockWrite lock(g_world->system.GetBodyLockInterface(), *id);
+    if (!lock.Succeeded()) return refuse(AbiError::BadHandle);
+    JPH::Body& b = lock.GetBody();
+    JPH::MotionProperties* mp = b.GetMotionPropertiesUnchecked();
+    if (!mp || !b.IsDynamic()) return refuse(AbiError::Unsupported);
+    if (!inertiaKgCm2) {
+        // Back to the shape's own: only while the mass is live (a body with its translation frozen has no mass to scale the shape's by).
+        if (g_world->rigidExtras) g_world->rigidExtras->inertia.erase(body);
+        if (mp->GetInverseMassUnchecked() > 0.0f) {
+            JPH::MassProperties props = b.GetShape()->GetMassProperties();
+            if (props.mMass > 0.0f) {
+                props.ScaleToMass(1.0f / mp->GetInverseMassUnchecked());
+                mp->SetMassProperties(mp->GetAllowedDOFs(), props);
+            }
+        }
+        return 1;
+    }
+    JPH::Float3 jolt(0, 0, 0);
+    float* j = &jolt.x;
+    for (int e = 0; e < 3; ++e) j[kJoltAxisOf[e]] = inertiaKgCm2[e] / kCm2PerM2;
+    rigidExtrasOrCreate().inertia[body] = jolt;
+    mp->SetInverseInertia(JPH::Vec3(1.0f / jolt.x, 1.0f / jolt.y, 1.0f / jolt.z), JPH::Quat::sIdentity());
+    return 1;
+}
+
+int32_t aver_phys_body_inertia(int32_t body, float* outInertiaKgCm2, int32_t* outOverride) {
+    const JPH::BodyID* id = findBody(body);
+    if (!id) return 0;
+    JPH::BodyLockRead lock(g_world->system.GetBodyLockInterface(), *id);
+    if (!lock.Succeeded()) return refuse(AbiError::BadHandle);
+    const JPH::MotionProperties* mp = lock.GetBody().GetMotionPropertiesUnchecked();
+    if (!mp || !lock.GetBody().IsDynamic()) return refuse(AbiError::Unsupported);
+    if (outInertiaKgCm2) {
+        const JPH::Vec3 inv = mp->GetInverseInertiaDiagonal();
+        for (int e = 0; e < 3; ++e) {
+            const float k = inv[kJoltAxisOf[e]];
+            outInertiaKgCm2[e] = k > 0.0f ? kCm2PerM2 / k : 0.0f;
+        }
+    }
+    if (outOverride) *outOverride = g_world->rigidExtras && g_world->rigidExtras->inertia.count(body) ? 1 : 0;
     return 1;
 }
 

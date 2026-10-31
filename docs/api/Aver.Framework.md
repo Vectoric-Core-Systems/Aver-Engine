@@ -2,7 +2,7 @@
 
 # Aver.Framework public API
 
-241 public types and 2050 public members, read from `scripting/csharp/Aver.Framework/` (145 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+243 public types and 2058 public members, read from `scripting/csharp/Aver.Framework/` (146 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Framework
 
@@ -2005,6 +2005,12 @@ Values: `Key`, `MouseX`, `MouseY`, `MouseWheel`, `GamepadButton`, `GamepadAxis`
 
 Values: `Digital`, `Axis1D`, `Axis2D`
 
+### InterpolationMode
+
+`public enum InterpolationMode` - How an entity takes part in pose interpolation.
+
+Values: `Inherit = 0`, `On = 1`, `Off = 2`
+
 ### IRawTable
 
 `public interface IRawTable` - A table as the binder reads it: named columns, named rows, text cells.
@@ -2303,6 +2309,16 @@ Values: `Inherit = 0`, `Pausable = 1`, `WhenPaused = 2`, `Always = 3`, `Disabled
 `public enum PlayState` - The world's play state, as read from aver_fw_play_state.
 
 Values: `Editor = 0`, `Playing = 1`, `Paused = 2`
+
+### PoseInterpolation
+
+`public static class PoseInterpolation` - Draws entities between their last two physics steps.
+
+- `public static bool? Enabled { get; set; }` - The switch every entity that inherits follows: null leaves it to the project, true or false overrides it.
+- `public static InterpolationMode GetMode(int entity)`
+- `public static void SetMode(int entity, InterpolationMode mode)`
+- `public static void Reset(int entity)` - The next pose of the entity is a teleport: it is drawn there at once, with no blend from where it was.
+- `public static bool TryGetDrawnPose(int entity, out Vec3 position, out Quat rotation)` - The pose last drawn for a blended entity: world position (engine cm) and rotation (x y z w).
 
 ### PostFx
 

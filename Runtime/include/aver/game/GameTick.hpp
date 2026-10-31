@@ -161,11 +161,13 @@ inline f32& physicsTickCarry() { static f32 carry = 0.0f; return carry; }
 // step and catch-up clamp as the physics world.
 inline void physicsTicksOnClock(f32 dt, f32 scale) {
     f32 step = 1.0f / 60.0f;
+    f32 steps = 8.0f;
 #if AVER_MODULE_PHYSICS
     step = aver_phys_fixed_step();
+    steps = static_cast<f32>(aver_phys_max_steps());
 #endif
     f32& carry = physicsTickCarry();
-    carry += dt > 0.0f ? (dt < step * 8.0f ? dt : step * 8.0f) : 0.0f;
+    carry += dt > 0.0f ? (dt < step * steps ? dt : step * steps) : 0.0f;
     while (carry >= step) { carry -= step; aver_fw_tick(AVER_FW_TICK_PHYSICS, step * scale); }
 }
 

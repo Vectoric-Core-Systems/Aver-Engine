@@ -594,6 +594,132 @@ Mesh spinPolygon(const std::vector<double>& xyIn, double degrees, int steps, int
     return m;
 }
 
+Mesh sweepPolygon(const std::vector<double>& xyIn, const std::vector<double>& pathIn, const std::vector<double>& upIn, SweepFrame frame, bool closed,
+                  double uDistance, int material) {
+    using V3 = std::array<double, 3>;
+    Mesh m;
+    const size_t n = xyIn.size() / 2;
+    if (n < 3) return m;
+    std::vector<double> xy = xyIn;
+    double area = 0;
+    for (size_t i = 0; i < n; ++i) { const size_t j = (i + 1) % n; area += xy[i * 2] * xy[j * 2 + 1] - xy[j * 2] * xy[i * 2 + 1]; }
+    if (area < 0)
+        for (size_t i = 0; i < n / 2; ++i) { std::swap(xy[i * 2], xy[(n - 1 - i) * 2]); std::swap(xy[i * 2 + 1], xy[(n - 1 - i) * 2 + 1]); }
+
+    const auto sub = [](const V3& a, const V3& b) { return V3{a[0] - b[0], a[1] - b[1], a[2] - b[2]}; };
+    const auto dotv = [](const V3& a, const V3& b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; };
+    const auto crossv = [](const V3& a, const V3& b) { return V3{a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]}; };
+    const auto unit = [](V3 a) { const double l = std::sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]); if (l > 1e-300) { a[0] /= l; a[1] /= l; a[2] /= l; } return a; };
+    const auto lenv = [](const V3& a) { return std::sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]); };
+
+    std::vector<V3> pts, ups;
+    const bool haveUp = !upIn.empty() && upIn.size() >= pathIn.size();
+    for (size_t i = 0; i + 2 < pathIn.size(); i += 3) {
+        const V3 p{pathIn[i], pathIn[i + 1], pathIn[i + 2]};
+        if (!pts.empty() && lenv(sub(p, pts.back())) < 1e-9) continue;
+        pts.push_back(p);
+        ups.push_back(haveUp ? V3{upIn[i], upIn[i + 1], upIn[i + 2]} : V3{0, 0, 0});
+    }
+    if (closed && pts.size() > 2 && lenv(sub(pts.back(), pts.front())) < 1e-9) { pts.pop_back(); ups.pop_back(); }
+    const size_t N = pts.size();
+    if (N < 2 || (closed && N < 3)) return m;
+
+    // The direction of travel at each point: the way the segments on either side meet (the bisector at a corner), or the one segment at an end.
+    std::vector<V3> heading(N);
+    for (size_t i = 0; i < N; ++i) {
+        const bool hasPrev = i > 0 || closed, hasNext = i + 1 < N || closed;
+        V3 t{0, 0, 0};
+        if (hasPrev) { const V3 d = unit(sub(pts[i], pts[(i + N - 1) % N])); for (int k = 0; k < 3; ++k) t[static_cast<size_t>(k)] += d[static_cast<size_t>(k)]; }
+        if (hasNext) { const V3 d = unit(sub(pts[(i + 1) % N], pts[i])); for (int k = 0; k < 3; ++k) t[static_cast<size_t>(k)] += d[static_cast<size_t>(k)]; }
+        if (lenv(t) < 1e-9) t = hasNext ? sub(pts[(i + 1) % N], pts[i]) : sub(pts[i], pts[(i + N - 1) % N]);   // a path that doubles back on itself
+        heading[i] = unit(t);
+    }
+
+    // The frame of each cross-section: x right, y up, z back (travel is -z), right-handed like the polygon's own XY plane.
+    std::vector<V3> fx(N), fy(N), fz(N);
+    V3 carried{0, 1, 0};
+    for (size_t i = 0; i < N; ++i) {
+        if (frame == SweepFrame::Fixed) { fx[i] = {1, 0, 0}; fy[i] = {0, 1, 0}; fz[i] = {0, 0, 1}; continue; }
+        const V3 z{-heading[i][0], -heading[i][1], -heading[i][2]};
+        V3 yref = {0, 1, 0};
+        if (frame == SweepFrame::Follow) {
+            V3 want = haveUp && lenv(ups[i]) > 1e-9 ? ups[i] : carried;
+            want = sub(want, V3{z[0] * dotv(want, z), z[1] * dotv(want, z), z[2] * dotv(want, z)});
+            if (lenv(want) < 1e-6) want = sub(carried, V3{z[0] * dotv(carried, z), z[1] * dotv(carried, z), z[2] * dotv(carried, z)});
+            if (lenv(want) < 1e-6) want = std::fabs(z[1]) < 0.9 ? V3{0, 1, 0} : V3{0, 0, 1};
+            yref = unit(want);
+            carried = yref;
+        } else if (std::fabs(z[1]) > 0.9999) {
+            yref = {0, 0, -1};   // straight up or down: any fixed direction will do
+        }
+        V3 x = unit(crossv(yref, z));
+        fx[i] = x;
+        fz[i] = z;
+        fy[i] = crossv(z, x);
+    }
+
+    std::vector<double> cum(N + 1, 0.0);
+    for (size_t i = 0; i < N; ++i) cum[i + 1] = cum[i] + lenv(sub(pts[(i + 1) % N], pts[i]));
+    const double total = closed ? cum[N] : cum[N - 1];
+    const double uScale = uDistance > 0 ? 1.0 / uDistance : (total > 1e-12 ? 1.0 / total : 0.0);
+
+    const auto vert = [&](size_t ring, size_t j, double u, double v) {
+        const size_t r = ring % N;
+        Vertex w;
+        for (size_t k = 0; k < 3; ++k) w.p[k] = pts[r][k] + fx[r][k] * xy[j * 2] + fy[r][k] * xy[j * 2 + 1];
+        w.uv[0] = u * uScale;
+        w.uv[1] = v;
+        return w;
+    };
+    const auto same = [](const Vertex& a, const Vertex& b) {
+        return std::fabs(a.p[0] - b.p[0]) < 1e-9 && std::fabs(a.p[1] - b.p[1]) < 1e-9 && std::fabs(a.p[2] - b.p[2]) < 1e-9;
+    };
+
+    const size_t segments = closed ? N : N - 1;
+    for (size_t s = 0; s < segments; ++s) {
+        const size_t i2 = (s + 1) % N;
+        const double u0 = cum[s], u1 = cum[s + 1];
+        for (size_t j = 0; j < n; ++j) {
+            const size_t j2 = (j + 1) % n;
+            const Vertex a = vert(s, j, u0, double(j) / double(n)), b = vert(s, j2, u0, double(j + 1) / double(n));
+            const Vertex c = vert(i2, j2, u1, double(j + 1) / double(n)), d = vert(i2, j, u1, double(j) / double(n));
+            const double ex = xy[j2 * 2] - xy[j * 2], ey = xy[j2 * 2 + 1] - xy[j * 2 + 1];
+            double out[3];
+            for (size_t k = 0; k < 3; ++k) out[k] = (fx[s][k] + fx[i2][k]) * 0.5 * ey - (fy[s][k] + fy[i2][k]) * 0.5 * ex;   // the 2D outward (dy, -dx) in the frame
+            const Vertex tris[2][3] = {{a, b, c}, {a, c, d}};
+            for (const auto& t : tris) {
+                if (same(t[0], t[1]) || same(t[1], t[2]) || same(t[0], t[2])) continue;
+                Polygon p;
+                p.material = material;
+                p.v = {t[0], t[1], t[2]};
+                orientAlong(p, out);
+                m.polys.push_back(std::move(p));
+            }
+        }
+    }
+
+    if (!closed) {
+        const std::vector<unsigned> tris = earClip(xy);
+        for (size_t t = 0; t + 2 < tris.size(); t += 3) {
+            Polygon head, tail;
+            head.material = tail.material = material;
+            for (size_t k = 0; k < 3; ++k) {
+                const unsigned i = tris[t + k];
+                head.v.push_back(vert(0, i, 0, 0));
+                tail.v.push_back(vert(N - 1, i, 0, 0));
+                for (Vertex* w : {&head.v.back(), &tail.v.back()}) { w->uv[0] = xy[i * 2]; w->uv[1] = xy[i * 2 + 1]; }
+            }
+            const double back[3] = {fz[0][0], fz[0][1], fz[0][2]};   // out of the first cap: against the travel
+            const double fwd[3] = {-fz[N - 1][0], -fz[N - 1][1], -fz[N - 1][2]};
+            orientAlong(head, back);
+            orientAlong(tail, fwd);
+            m.polys.push_back(std::move(head));
+            m.polys.push_back(std::move(tail));
+        }
+    }
+    return m;
+}
+
 Mesh fromTriangles(const std::vector<float>& pos, const std::vector<float>& nrm, const std::vector<float>& uv, const std::vector<uint32_t>& idx,
                    const std::vector<int>& groups) {
     Mesh m;

@@ -53,6 +53,16 @@ Mesh makeTorus(double innerRadius, double outerRadius, int sides, int ringSides,
 Mesh extrudePolygon(const std::vector<double>& xy, double depth, int material = 0);
 // The same polygon spun about Y by `degrees` in `steps` steps (CSGPolygon3D spin mode); 360 closes the ring.
 Mesh spinPolygon(const std::vector<double>& xy, double degrees, int steps, int material = 0);
+// How a cross-section is turned at each point of a sweep: Fixed keeps the polygon's own orientation and only moves it (CSGPolygon3D path rotation
+// "polygon"); Path points its -Z along the path with +Y kept toward world +Y, no roll (rotation "path"); Follow points -Z along the path and carries
+// the up vector along it with the least twist, or takes the one the caller gives per point (rotation "path follow").
+enum class SweepFrame { Fixed = 0, Path = 1, Follow = 2 };
+// The polygon (XY plane, any winding, simple) swept along a path (CSGPolygon3D path mode): `path` is 3 doubles per point, `up` is 3 per point or empty
+// (Follow only: the direction each cross-section's +Y leans toward, made perpendicular to the path). A closed path joins its last point to its first and
+// has no end caps; an open one is capped. Repeated points are dropped. UVs run along the path at 1 per `uDistance` of path length (0: the whole path is
+// 0..1) and around the polygon from 0 to 1. A straight path gives the solid extrudePolygon does, laid along the path.
+Mesh sweepPolygon(const std::vector<double>& xy, const std::vector<double>& path, const std::vector<double>& up, SweepFrame frame, bool closed,
+                  double uDistance = 0.0, int material = 0);
 // A triangle list (positions 3 per vertex, optional normals 3 and uvs 2 per vertex) as polygons; groups[k] gives triangle k's material (empty = all 0).
 Mesh fromTriangles(const std::vector<float>& pos, const std::vector<float>& nrm, const std::vector<float>& uv, const std::vector<uint32_t>& idx,
                    const std::vector<int>& groups = {});

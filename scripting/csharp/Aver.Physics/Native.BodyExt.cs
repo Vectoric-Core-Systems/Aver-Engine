@@ -36,4 +36,6 @@ internal static partial class Native
     [DllImport(Lib)] internal static extern int aver_phys_body_custom_integrator(int body, out int outOn);
     [DllImport(Lib)] internal static extern int aver_phys_body_set_constant_velocity(int body, float[]? linearCmS, float[]? angularRadS);
     [DllImport(Lib)] internal static extern int aver_phys_body_constant_velocity(int body, float[]? outLinearCmS, float[]? outAngularRadS);
+    [DllImport(Lib)] internal static extern int aver_phys_body_set_inertia(int body, float[]? inertiaKgCm2);
+    [DllImport(Lib)] internal static extern int aver_phys_body_inertia(int body, float[]? outInertiaKgCm2, out int outOverride);
 }

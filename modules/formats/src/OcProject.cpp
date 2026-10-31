@@ -162,6 +162,8 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
             if (t.size() > 1) out.subViewRenders = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.SUBVIEWPIXELS")) {
             if (t.size() > 1) out.subViewPixels = static_cast<f32>(parseF64(t[1], -1.0));
+        } else if (equalsCI(key, "RENDER.RUNTIMEMESHES")) {
+            if (t.size() > 1) out.runtimeMeshes = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.PTBOUNCES")) {
             if (t.size() > 1) out.ptBounces = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.PTMODE")) {
@@ -295,6 +297,8 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
             }
         } else if (equalsCI(key, "PHYSICS.FIXEDSTEP")) {
             if (t.size() > 1) out.fixedStep = static_cast<f32>(parseF64(t[1]));
+        } else if (equalsCI(key, "PHYSICS.MAXSTEPS")) {
+            if (t.size() > 1) out.physMaxSteps = parseI32(t[1], -1);
         } else if (equalsCI(key, "PHYSICS.THREADS")) {
             if (t.size() > 1) out.physThreads = parseI32(t[1], -2);
         } else if (equalsCI(key, "PHYSICS.SHAPECACHE")) {
@@ -424,7 +428,7 @@ bool isOwnedKey(std::string_view line) {
         "RENDER.GI", "RENDER.RAYTRACING", "RENDER.PATHTRACING",
         "RENDER.VOXELRES", "RENDER.GIINTENSITY", "RENDER.GIDISTANCE",
         "RENDER.RTSHADOWRAYS", "RENDER.RTPIXELSPERRAY", "RENDER.RTSHADOWDENOISE",
-        "RENDER.RTRENDERMODE", "RENDER.RDSTAGES", "RENDER.FOGOCCLUSION", "RENDER.MESHEXTRA", "RENDER.MATERIALFX", "RENDER.LOCALRASTER", "RENDER.LOCALSHADOWS", "RENDER.VOLFOG", "RENDER.VOLFOGDENSITY", "RENDER.SUBVIEWPORTS", "RENDER.SUBVIEWRENDERS", "RENDER.SUBVIEWPIXELS", "RENDER.PTBOUNCES", "RENDER.PTMODE", "RENDER.LAYEREDBSDF",
+        "RENDER.RTRENDERMODE", "RENDER.RDSTAGES", "RENDER.FOGOCCLUSION", "RENDER.MESHEXTRA", "RENDER.MATERIALFX", "RENDER.LOCALRASTER", "RENDER.LOCALSHADOWS", "RENDER.VOLFOG", "RENDER.VOLFOGDENSITY", "RENDER.SUBVIEWPORTS", "RENDER.SUBVIEWRENDERS", "RENDER.SUBVIEWPIXELS", "RENDER.RUNTIMEMESHES", "RENDER.PTBOUNCES", "RENDER.PTMODE", "RENDER.LAYEREDBSDF",
         "RENDER.GICONES", "RENDER.GIMODE", "RENDER.DENOISER", "RENDER.RESTIRVISIBILITY",
         "RENDER.RESTIRHISTORY",
         "RENDER.NEURALDENOISE",   // retired NRD v1 key: ignored on load, dropped on the next save
@@ -442,7 +446,7 @@ bool isOwnedKey(std::string_view line) {
         "STREAM.VERTICALRADIUS", "STREAM.LEADSECONDS",
         "WORLD.FLOATINGORIGIN", "WORLD.REBASEMARGIN", "WORLD.ALLOWSHIFTREQUEST",
         "PHYSICS.MAXBODIES", "PHYSICS.MAXBODYPAIRS", "PHYSICS.MAXCONTACTS", "PHYSICS.TEMPALLOCMB",
-        "PHYSICS.GRAVITY", "PHYSICS.FIXEDSTEP", "PHYSICS.THREADS", "PHYSICS.SHAPECACHE", "PHYSICS.INTERPOLATION", "PHYSICS.COMBINE",
+        "PHYSICS.GRAVITY", "PHYSICS.FIXEDSTEP", "PHYSICS.MAXSTEPS", "PHYSICS.THREADS", "PHYSICS.SHAPECACHE", "PHYSICS.INTERPOLATION", "PHYSICS.COMBINE",
         "AUDIO.MASTER", "AUDIO.BUS", "AUDIO.BUSLAYOUT", "AUDIO.SPEAKERS", "AUDIO.BINAURAL",
         "UI.THEME", "UI.STRETCH", "UI.ASPECT", "UI.STRETCHSCALEMODE", "UI.STRETCHSCALE", "UI.TOOLTIPDELAY", "UI.BASESIZE",
     };
@@ -503,6 +507,7 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
     appendKey(owned, "RENDER.SUBVIEWPORTS", d.subViewports);
     appendKey(owned, "RENDER.SUBVIEWRENDERS", d.subViewRenders);
     appendKey(owned, "RENDER.SUBVIEWPIXELS", d.subViewPixels);
+    appendKey(owned, "RENDER.RUNTIMEMESHES", d.runtimeMeshes);
     appendKey(owned, "RENDER.PTBOUNCES", d.ptBounces);
     appendKey(owned, "RENDER.PTMODE", d.ptMode);
     appendKey(owned, "RENDER.LAYEREDBSDF", d.layeredBsdf);
@@ -607,6 +612,7 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
         owned += b;
     }
     appendKey(owned, "PHYSICS.FIXEDSTEP", d.fixedStep);
+    appendKey(owned, "PHYSICS.MAXSTEPS", d.physMaxSteps);
     if (d.hasAudioMix) {
         char b[200];
         std::snprintf(b, sizeof b, "AUDIO.MASTER %g\nAUDIO.BUS %g %g %g %g\n",

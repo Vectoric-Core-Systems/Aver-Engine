@@ -56,7 +56,9 @@ add_library(Aver.Framework SHARED
   # The floating origin (wave 11, docs/plans/wave11/LARGE_WORLD.md 2.5): a host-installed provider and the exact WorldPos conversions.
   src/FrameworkOriginAbi.cpp
   # Terrain and water queries relayed from the host (wave 3, landscape layers and rivers).
-  src/TerrainAbi.cpp)
+  src/TerrainAbi.cpp
+  # Which entities are drawn between their last two fixed steps: the per-entity mode, the switch and the pose last drawn (wave 5, docs/PHYSICS_INTERPOLATION.md).
+  src/InterpAbi.cpp)
 
 target_include_directories(Aver.Framework PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 # FrameworkOriginAbi.cpp includes aver/world/WorldPos.hpp only: header-only and Core-only, so there is no link to Aver.World (which sits above Scene).

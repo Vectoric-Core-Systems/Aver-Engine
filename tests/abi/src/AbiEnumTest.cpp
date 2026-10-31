@@ -643,6 +643,8 @@ static const Abi kAbis[] = {
      {"modules/ui.abi/include/aver/ui/ui_abi.h", "modules/ui.abi/include/aver/ui/ui_style_abi.h", nullptr},
      "AVER_UI_API", nullptr, "aver_ui_"},
     {"soft field ABI", {"modules/framework/include/aver/framework/framework_softfield_abi.h", nullptr}, "AVER_FW_ABI", "scripting/csharp/Aver.Framework/SoftFieldNative.cs", "aver_fw_softfield_"},
+    // wave 5: the pose interpolation store (the C# declares the script-facing half; the host half is read by Runtime's BodyPoseSync).
+    {"pose interpolation ABI", {"modules/framework/include/aver/framework/framework_interp_abi.h", nullptr}, "AVER_FW_ABI", "scripting/csharp/Aver.Framework/Interpolation.cs", "aver_fw_interp_"},
 
     {"soft shape ABI", {"modules/framework/include/aver/framework/framework_softshape_abi.h", nullptr}, "AVER_FW_ABI", "scripting/csharp/Aver.Framework/FwSoftShape.cs", "aver_fw_softshape_"},
     // wave 11 SOFTBODY_HAIR phase I: the hair relay (names, parameter names and types against FwHair.cs).
