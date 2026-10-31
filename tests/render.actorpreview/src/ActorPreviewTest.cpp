@@ -524,6 +524,28 @@ int main() {
         }
         check(f.pipelines.size() == 5, "and still just the five from init");
 
+        // A REAL MATERIAL WITH NO GRAPH REGISTERED builds the material pipeline too, and must keep the stock averEvalMaterial: defining
+        // AVER_MATERIAL_GRAPH over an empty registry left the function undeclared, and the compile failed on every frame.
+        {
+            const usize before = f.shaders.size();
+            std::vector<PreviewDraw> real;
+            PreviewDraw d;
+            d.mesh = 1;
+            d.materialHandle = 1;   // unknown to the fallback library: it degrades to the fallback set, which is all this needs
+            real.push_back(d);
+            MockContext ctx;
+            p->setDrawList(real);
+            p->prePass(ctx);
+            check(f.shaders.size() == before + 2, "a real-material draw with no graph builds the material vertex and pixel shaders");
+            if (f.shaders.size() == before + 2) {
+                const std::string pre = f.shaders[before + 1].prelude ? f.shaders[before + 1].prelude : "";
+                check(pre.find("#define AVER_MATERIAL_GRAPH") == std::string::npos,
+                      "and with no graph registered its prelude does not replace the stock material function");
+                check(pre.find("averEvalMaterial") != std::string::npos, "so the stock averEvalMaterial is still in it");
+            }
+            p->setDrawList({});
+        }
+
         const usize shadersBefore = f.shaders.size();
         const usize pipelinesBefore = f.pipelines.size();
 

@@ -115,10 +115,13 @@ const char* actorPreviewMaterialPrelude() {
     static u64 built = ~0ull;
     const u64 rev = pbr::materialGraphs().revision();
     if (built != rev) {
+        // The stock averEvalMaterial is replaced only by a generated one. With no graph registered the registry's text is empty, and a
+        // real-material draw (which builds this pipeline too) must keep the stock function, or the compile fails on every frame.
+        const std::string& graphs = pbr::materialGraphs().hlsl();
         s = std::string(rhi::sharedShaderPrelude());
-        s += "\n#define AVER_MATERIAL_GRAPH 1\n";
+        if (!graphs.empty()) s += "\n#define AVER_MATERIAL_GRAPH 1\n";
         s += pbr::materialShaderPrelude();
-        s += pbr::materialGraphs().hlsl();
+        s += graphs;
         built = rev;
     }
     return s.c_str();

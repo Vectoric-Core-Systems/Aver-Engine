@@ -412,9 +412,10 @@ LevelInstance instantiate(const fmt::OcWorldData& w, const InstantiateOptions& o
         if (!isChild && opt.attach) parentEnt = opt.attach->parent;   // [wave3/level-instances]
         if (isChild) {
             parentEnt = entityFor[static_cast<usize>(p.parent)];
-            if (parentEnt == scene::kInvalidEntity)
-                AVER_WARN("[Level] placement '{}' names a parent that produced no entity (a class "
-                          "placement, or one that failed to create); loading it as a root",
+            // A child of a class placement is expected to find no entity: the host's PlacementTree moves it under the actor once that exists (a converted
+            // Godot scene hangs every mesh below its node this way), so only a parent that is NOT a class placement is worth a line.
+            if (parentEnt == scene::kInvalidEntity && w.placements[static_cast<usize>(p.parent)].className.empty())
+                AVER_WARN("[Level] placement '{}' names a parent that produced no entity (one that failed to create); loading it as a root",
                           p.asset);
         }
 
