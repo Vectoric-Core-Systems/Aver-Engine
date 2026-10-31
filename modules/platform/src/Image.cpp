@@ -70,9 +70,18 @@ bool readFile(const std::string& path, usize cap, std::vector<u8>& out, std::str
     return true;
 }
 
+// A header that states more pixels than the 8-bit output may hold is refused before stb allocates for it.
+bool stbSizeOk(bool haveInfo, int w, int h, std::string* err) {
+    if (haveInfo && w > 0 && h > 0 && static_cast<u64>(w) * static_cast<u64>(h) > kMaxStbImagePixels)
+        return fail(err, "the image has more pixels than the decoder allows");
+    return true;
+}
+
 bool decodeStb(const u8* bytes, usize size, ImageData& out, std::string* err) {
     if (size > static_cast<usize>(std::numeric_limits<int>::max())) return fail(err, "the image is too large");
     int w = 0, h = 0, comp = 0;
+    const bool haveInfo = stbi_info_from_memory(bytes, static_cast<int>(size), &w, &h, &comp) != 0;
+    if (!stbSizeOk(haveInfo, w, h, err)) return false;
     stbi_uc* px = stbi_load_from_memory(bytes, static_cast<int>(size), &w, &h, &comp, 4);
     if (!px) {
         if (err) { const char* why = stbi_failure_reason(); *err = why ? why : "decode failed"; }
@@ -149,6 +158,8 @@ bool decodeImage(const std::string& path, ImageData& out, const ImageDecodeOptio
         return decodeImage(bytes.data(), bytes.size(), out, opt, err);
     }
     int w = 0, h = 0, comp = 0;
+    const bool haveInfo = stbi_info(path.c_str(), &w, &h, &comp) != 0;
+    if (!stbSizeOk(haveInfo, w, h, err)) return false;
     stbi_uc* px = stbi_load(path.c_str(), &w, &h, &comp, 4);
     if (!px) {
         if (err) { const char* why = stbi_failure_reason(); *err = why ? why : "decode failed"; }
@@ -227,7 +238,7 @@ std::string findDecodableSibling(const std::string& absPath) {
 
     // THE STEM COMES OFF DISK, not from any sanitised display name an importer may already have
     // derived -- those have had their punctuation replaced and would no longer name a real file.
-    for (const char* ext : {".png", ".PNG", ".tga", ".TGA", ".jpg", ".JPG", ".jpeg", ".JPEG"}) {
+    for (const char* ext : {".png", ".PNG", ".tga", ".TGA", ".webp", ".WEBP", ".jpg", ".JPG", ".jpeg", ".JPEG"}) {
         const std::string cand = base + ext;
         if (cand == absPath) continue;                   // never "substitute" the file for itself
         std::ifstream f(cand, std::ios::binary);

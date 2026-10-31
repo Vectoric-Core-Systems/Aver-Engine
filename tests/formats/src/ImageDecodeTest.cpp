@@ -201,7 +201,15 @@ static void fuzz(const char* name, const std::vector<u8>& bytes, const ImageDeco
             m[i] = u8(m[i] ^ (1u << bit));
             run(m);
         }
-    check(bad == 0, std::string(name) + ": " + std::to_string(bytes.size() * 9) + " truncated / bit-flipped copies, " +
+    // Whole-byte substitutions: the extremes that turn a count, size or enum field into something absurd.
+    for (usize i = 0; i < bytes.size(); ++i)
+        for (const u8 v : {u8(0x00), u8(0x7f), u8(0x80), u8(0xff)}) {
+            if (bytes[i] == v) continue;
+            std::vector<u8> m = bytes;
+            m[i] = v;
+            run(m);
+        }
+    check(bad == 0, std::string(name) + ": " + std::to_string(ok + refused) + " truncated / bit-flipped / byte-substituted copies, " +
                         std::to_string(refused) + " refused, " + std::to_string(ok) + " decoded, none inconsistent");
 }
 
@@ -216,6 +224,8 @@ struct ExrSpec {
     int compression = 0;                            // 0 none, 2 ZIPS
     bool tiled = false;
     u32 tile = 2;
+    u8 tileMode = 0;                                // 0 one level, 1 mipmap, 2 ripmap
+    bool badTileCoords = false;                     // the second tile names an absurd column
     i32 minX = 0, minY = 0;
     i32 declaredMaxX = -1, declaredMaxY = -1;       // override the data window (hostile headers); -1 = honest
 };
@@ -280,7 +290,7 @@ static std::vector<u8> buildExr(const ExrSpec& s) {
     putAttr(f, "screenWindowCenter", "v2f", ctr);
     putAttr(f, "screenWindowWidth", "float", one);
     if (s.tiled) {
-        std::vector<u8> td; put32(td, s.tile); put32(td, s.tile); td.push_back(0);
+        std::vector<u8> td; put32(td, s.tile); put32(td, s.tile); td.push_back(s.tileMode);
         putAttr(f, "tiles", "tiledesc", td);
     }
     f.push_back(0);   // end of header
@@ -312,7 +322,7 @@ static std::vector<u8> buildExr(const ExrSpec& s) {
                     for (usize c = 0; c < s.names.size(); ++c) sampleRow(raw, c, y, x0, x1);
                 const std::vector<u8> data = s.compression == 2 ? zipsPack(raw) : raw;
                 std::vector<u8> chk;
-                put32(chk, i); put32(chk, j); put32(chk, 0); put32(chk, 0);
+                put32(chk, (s.badTileCoords && chunks.size() == 1) ? 0x40000000u : i); put32(chk, j); put32(chk, 0); put32(chk, 0);
                 put32(chk, u32(data.size()));
                 chk.insert(chk.end(), data.begin(), data.end());
                 chunks.push_back(chk);
@@ -340,6 +350,14 @@ static ExrSpec rgbaSpec(u32 w, u32 h, bool withAlpha, bool half) {
             else           { s.planes[0][i] = b; s.planes[1][i] = g; s.planes[2][i] = r; }
         }
     return s;
+}
+
+// The decode runs first, so the reason in the message is this decode's (argument order is unspecified).
+static void expectExrRefusal(const std::vector<u8>& bytes, const char* needle, const std::string& what) {
+    FloatImageData f;
+    std::string err;
+    const bool decoded = decodeFloatImage(bytes.data(), bytes.size(), f, &err);
+    check(!decoded && err.find(needle) != std::string::npos, what + ": " + err);
 }
 
 static void expectRgbaSpec(const FloatImageData& f, u32 w, u32 h, bool withAlpha, const std::string& what) {
@@ -570,6 +588,14 @@ int main() {
         g.planes = {{0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f}, {0.25f, 0.5f, 2.0f, 1.0f, 0.0f, 8.0f}};
         gb = buildExr(g);
         check(decodeFloatImage(gb.data(), gb.size(), f, &err) && f.channels == 2 && f.rgba[3] == 0.5f && f.rgba[4 * 4] == 0.0f, "Y + A keeps the alpha");
+        g.names = {"R"};
+        g.planes = {{0.25f, 0.5f, 2.0f, 1.0f, 0.0f, 8.0f}};
+        gb = buildExr(g);
+        check(decodeFloatImage(gb.data(), gb.size(), f, &err) && f.channels == 1 && f.rgba[2 * 4 + 1] == 2.0f && f.rgba[2 * 4 + 2] == 2.0f, "a lone R channel is read as grey");
+        g.names = {"G", "R"};
+        g.planes = {{0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f}, {0.25f, 0.5f, 2.0f, 1.0f, 0.0f, 8.0f}};
+        gb = buildExr(g);
+        check(!decodeFloatImage(gb.data(), gb.size(), f, &err), "R and G without B is refused");
 
         // A data window that does not start at the origin.
         ExrSpec o = rgbaSpec(4, 3, true, false);
@@ -637,6 +663,26 @@ int main() {
         nocol.w = 2; nocol.h = 2; nocol.names = {"Z"}; nocol.planes = {{1, 2, 3, 4}};
         hb = buildExr(nocol);
         check(!decodeFloatImage(hb.data(), hb.size(), f, &err) && err.find("channel") != std::string::npos, "a file with no colour channel is refused: " + err);
+
+        // tinyexr trusts a tiled file's table; the wrapper checks it first.
+        ExrSpec badTile = rgbaSpec(5, 3, true, false);
+        badTile.tiled = true; badTile.badTileCoords = true;
+        hb = buildExr(badTile);
+        expectExrRefusal(hb, "table", "a tile that names a column of 2^30 is refused");
+        ExrSpec mip = rgbaSpec(5, 3, true, false);
+        mip.tiled = true; mip.tileMode = 1;
+        hb = buildExr(mip);
+        expectExrRefusal(hb, "mipmapped", "a mipmapped tiled file is refused by name");
+        ExrSpec bigTile = rgbaSpec(5, 3, true, false);
+        bigTile.tiled = true; bigTile.tile = 20000;
+        hb = buildExr(bigTile);
+        expectExrRefusal(hb, "tile size", "a 20000 pixel tile is refused");
+        // 67 channels over a 4096 x 4096 window: 16 million pixels is inside the pixel budget, 4.5 GB of samples is not.
+        ExrSpec wide = rgbaSpec(2, 2, true, false);
+        for (int k = 0; k < 64; ++k) { wide.names.push_back("X" + std::to_string(k)); wide.planes.emplace_back(4, 0.0f); }
+        wide.declaredMaxX = 4095; wide.declaredMaxY = 4095;
+        hb = buildExr(wide);
+        expectExrRefusal(hb, "memory", "a window times its channels over the memory budget is refused");
 
         fuzz("EXR float RGBA", buildExr(rgbaSpec(3, 2, true, false)));
         fuzz("EXR half RGB ZIPS", [] { ExrSpec s = rgbaSpec(3, 2, false, true); s.compression = 2; return buildExr(s); }());
@@ -759,6 +805,22 @@ int main() {
         check(writeFileBytes(dir + "/t.bmp", bmp.data(), bmp.size()) && decodeImage(dir + "/t.bmp", img, &err) && img.width == 2, "and from a path");
         std::error_code ec;
         std::filesystem::remove_all(dir, ec);
+
+        // A header that claims far more pixels than the 8-bit output may hold is refused by name before stb allocates.
+        std::vector<u8> bigBmp = {'B', 'M'};
+        put32(bigBmp, 14 + 40); put32(bigBmp, 0); put32(bigBmp, 14 + 40);
+        put32(bigBmp, 40); put32(bigBmp, 20000); put32(bigBmp, 20000); put16(bigBmp, 1); put16(bigBmp, 24);
+        put32(bigBmp, 0); put32(bigBmp, 0); put32(bigBmp, 2835); put32(bigBmp, 2835); put32(bigBmp, 0); put32(bigBmp, 0);
+        err.clear();
+        const bool bigOk = decodeImage(bigBmp.data(), bigBmp.size(), img, &err);
+        check(!bigOk && err.find("more pixels") != std::string::npos,
+              "a BMP header claiming 20000 x 20000 is refused before allocation: '" + err + "'");
+        const std::string bigDir = (std::filesystem::temp_directory_path() / "aver_imgdec_bigbmp").string();
+        createDirectories(bigDir);
+        err.clear();
+        const bool bigPathOk = writeFileBytes(bigDir + "/big.bmp", bigBmp.data(), bigBmp.size()) && decodeImage(bigDir + "/big.bmp", img, &err);
+        check(!bigPathOk && err.find("more pixels") != std::string::npos, "and the same from a path: '" + err + "'");
+        std::filesystem::remove_all(bigDir, ec);
 
         // The refusal list: WebP and OpenEXR left it, the rest stayed.
         const std::vector<u8> webp = vec(kLossless);

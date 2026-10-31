@@ -33,9 +33,11 @@ struct FloatImageData {
 };
 
 // Limits the decoders below apply to what a HEADER claims, before they allocate for it. Hostile or
-// corrupt files state any size they like; stb_image's own formats keep stb's checks.
+// corrupt files state any size they like. stb_image's own formats keep stb's checks and one pixel count
+// on top (kMaxStbImagePixels), read from the header before the pixels are decoded.
 inline constexpr u32 kMaxImageDimension = 16384;            // either side
 inline constexpr u64 kMaxImagePixels = u64(1) << 27;        // 8-bit output: 512 MB (WebP, SVG)
+inline constexpr u64 kMaxStbImagePixels = u64(1) << 28;     // 8-bit output: 1 GB (a 16384 x 16384 image)
 inline constexpr u64 kMaxFloatImagePixels = u64(1) << 25;   // float output: 512 MB (an 8192 x 4096 HDRI)
 inline constexpr usize kMaxImageFileBytes = usize(256) << 20;   // a WebP / OpenEXR file read whole
 inline constexpr usize kMaxSvgBytes = usize(8) << 20;       // an SVG document
@@ -62,7 +64,7 @@ bool decodeImage(const u8* bytes, usize size, ImageData& out, std::string* err =
 bool decodeImage(const u8* bytes, usize size, ImageData& out, const ImageDecodeOptions& opt, std::string* err = nullptr);
 
 // Decodes an image that can carry values outside [0,1] into float RGBA. Today that is OpenEXR (half and
-// float channels, scanline and tiled, level 0 of a mipmapped file; deep and multipart files are refused).
+// float channels, scanline and one-level tiled; mipmapped / ripmapped, deep and multipart files are refused).
 // False on any other container, or a corrupt file, with the reason in `err`.
 bool decodeFloatImage(const std::string& path, FloatImageData& out, std::string* err = nullptr);
 bool decodeFloatImage(const u8* bytes, usize size, FloatImageData& out, std::string* err = nullptr);
@@ -94,7 +96,7 @@ const char* undecodableContainer(const std::vector<u8>& bytes);
 // never work: re-importing reads the .tif path back out of the source document, so the converted
 // file was never looked at. This is that advice, automated.
 //
-// ORDER IS DELIBERATE: .png and .tga carry alpha, .jpg cannot, and a base colour's alpha is where
+// ORDER IS DELIBERATE: .png, .tga and .webp carry alpha, .jpg cannot, and a base colour's alpha is where
 // this engine keeps a cutout -- so a JPEG sibling is a last resort, not a peer.
 std::string findDecodableSibling(const std::string& absPath);
 
