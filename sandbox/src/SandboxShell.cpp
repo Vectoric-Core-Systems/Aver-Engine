@@ -8,6 +8,7 @@
 #include "aver/rhi/PrimitiveMeshes.hpp"
 #include "CollisionShapeOverlay.hpp"   // Show > Collision Shapes
 #include "ExtensionImport.hpp"         // File > the import entries extensions add
+#include "ExtensionsWindow.hpp"        // Window > Extensions
 
 namespace aver {
 // Restarts profiler stats when Play starts/stops (called from startPlay/stopPlay in SandboxPlay.cpp).
@@ -2114,6 +2115,11 @@ void SandboxApp::buildUI(Engine& e) {
                 ImGui::SetTooltip("What git says about this project: the branch, what changed, and\n"
                                   "each file's history and diff. It READS the repository and cannot\n"
                                   "alter one -- there is no commit, revert or push here.");
+            ImGui::MenuItem("Extensions", nullptr, editor::extensionsWindow().openFlag());
+            uiReg_.track("window.extensions");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("The extensions installed beside the editor: status, source and licence.\n"
+                                  "Install an .avext package from a file, or uninstall one.");
             ImGui::Separator();
             ImGui::BeginDisabled(gameUi_ == nullptr);
             if (ImGui::MenuItem("Game UI Demo", nullptr, showUiDemo_)) showUiDemo_ = !showUiDemo_;
@@ -2629,6 +2635,7 @@ ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
     assetEditors_.draw(e, centralDock_, dpi_);
     tools_.drawModals(project_, dpi_);
     editor::extensionImporter().drawModal(dpi_);
+    editor::extensionsWindow().draw(dpi_);
     // The converted project an import dialog was told to open: the same switch the project browser makes.
     if (const std::string converted = editor::extensionImporter().takeOpenRequest(); !converted.empty()) {
         std::string openErr;

@@ -1,7 +1,9 @@
-/* A tiny extension written in C against aver_ext.h only (no engine library): the library ExtensionsTest loads.
- * Commands: echo (returns the number of arguments), exit7, log (one line per level), dirs, model (asks the host to import a model).
+/* A tiny extension written in C against aver_ext.h and aver_ext_services.h only (no engine library): the library ExtensionsTest loads.
+ * Commands: echo (returns the number of arguments), exit7, log (one line per level), dirs, model (asks the host's import-model service to
+ * import a model), services (asks for services that do and do not exist).
  * Built twice: as is, and with AVER_TEST_EXT_REFUSE, whose entry refuses every host (the "does not support this ABI" answer). */
 #include "aver/extensions/aver_ext.h"
+#include "aver/extensions/aver_ext_services.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -40,12 +42,20 @@ static int32_t runCommand(const char* name, int32_t argc, const char* const* arg
         g_host->progress(0.5, "halfway");
         return 0;
     }
+    if (strcmp(name, "services") == 0) {
+        snprintf(line, sizeof(line), "services import=%d import2=%d unknown=%d", g_host->getService(AVER_EXT_SERVICE_IMPORT_MODEL, 1) != 0,
+                 g_host->getService(AVER_EXT_SERVICE_IMPORT_MODEL, 2) != 0, g_host->getService("aver.nothing.here", 1) != 0);
+        say(AVER_EXT_LOG_INFO, line);
+        return 0;
+    }
     if (strcmp(name, "model") == 0) {
+        const AverExtImportModelService* svc = (const AverExtImportModelService*)g_host->getService(AVER_EXT_SERVICE_IMPORT_MODEL, 1);
         AverExtModelArgs args;
         AverExtModelResult res;
         uint32_t i;
         int32_t rc;
         if (argc < 5) return 2;
+        if (!svc || svc->size < sizeof(AverExtImportModelService)) { say(AVER_EXT_LOG_INFO, "model: the host offers no import-model service"); return 3; }
         memset(&args, 0, sizeof(args));
         memset(&res, 0, sizeof(res));
         args.size = sizeof(args);
@@ -54,13 +64,13 @@ static int32_t runCommand(const char* name, int32_t argc, const char* const* arg
         args.outSubdir = argv[3];
         args.base = argv[4];
         res.size = sizeof(res);
-        rc = g_host->importModel(&args, &res);
+        rc = svc->importModel(&args, &res);
         snprintf(line, sizeof(line), "model rc=%d ok=%d error=%s parts=%u notes=%u", (int)rc, (int)res.ok, res.error ? res.error : "(null)",
                  (unsigned)res.partCount, (unsigned)res.noteCount);
         say(AVER_EXT_LOG_INFO, line);
         for (i = 0; i < res.partCount; ++i) {
             snprintf(line, sizeof(line), "part %s|%s|%g|%g|%g|%d", res.parts[i].meshAsset, res.parts[i].name, res.parts[i].x, res.parts[i].y,
-                     res.parts[i].z, (int)res.parts[i].node);
+                     res.parts[i].z, (int)res.parts[i].sourceIndex);
             say(AVER_EXT_LOG_INFO, line);
         }
         for (i = 0; i < res.noteCount; ++i) {
@@ -68,7 +78,7 @@ static int32_t runCommand(const char* name, int32_t argc, const char* const* arg
             say(AVER_EXT_LOG_INFO, line);
         }
         rc = res.ok;
-        g_host->freeModelResult(&res);
+        svc->freeResult(&res);
         return rc ? 0 : 1;
     }
     return 99;

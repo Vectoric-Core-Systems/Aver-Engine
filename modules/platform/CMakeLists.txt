@@ -30,6 +30,8 @@ aver_add_module(Aver.Platform
     src/DirectoryWatcher.cpp
     src/FileSystem.cpp
     src/Image.cpp
+    # Raw deflate over stb_image's inflater (the zip reader of Aver.Extensions).
+    src/Inflate.cpp
     # WebP (libwebp), SVG (NanoSVG) and OpenEXR (tinyexr) behind aver::decodeImage; each vendored library
     # is compiled in a translation unit of its own, and the wrappers are ordinary warning-clean code.
     src/ImageWebp.cpp

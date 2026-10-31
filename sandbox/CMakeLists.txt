@@ -94,6 +94,8 @@ add_executable(Sandbox WIN32
   # File > the import entries installed extensions list in extension.json (docs/EXTENSIONS.md): runs `AverAssetC <command>` on a worker
   # thread. Its headless half is compiled by ExtensionImportTest too.
   src/ExtensionImport.cpp
+  # Window > Extensions: the installed extensions, Install from file... (.avext) and Uninstall; the work is Aver.Extensions' Avext.cpp.
+  src/ExtensionsWindow.cpp
   src/ProcessStream.cpp
   src/Nrd2Session.cpp
   src/GraphEditorGeometry.cpp

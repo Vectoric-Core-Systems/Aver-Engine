@@ -1339,6 +1339,28 @@ int main() {
         }
     }
 
+    // The extension contract (aver_ext.h): its log levels are the engine's LogLevel by position, like the scripting ones above, and its version is
+    // the one the docs and the extension manifests name. An extension built for another version is refused, so the number is part of the contract.
+    {
+        std::string log, extHeader, abiDoc;
+        const bool ok = readText(root + "modules/core/include/aver/core/Log.hpp", log) &
+                        readText(root + "modules/extensions/include/aver/extensions/aver_ext.h", extHeader) &
+                        readText(root + "docs/ABI.md", abiDoc);
+        check(ok, "extension abi: can read Log.hpp, aver_ext.h and ABI.md");
+        if (ok) {
+            const std::map<std::string, long long> c = cDefines(extHeader, "AVER_EXT_LOG_");
+            const std::vector<std::string> names = enumOrder(log, "LogLevel");
+            check(names.size() == c.size(), "extension abi: " + std::to_string(names.size()) + " LogLevel(s) and " + std::to_string(c.size()) + " AVER_EXT_LOG_ constant(s)");
+            for (usize i = 0; i < names.size(); ++i) {
+                const auto it = c.find(normalise(names[i]));
+                check(it != c.end() && it->second == static_cast<long long>(i), "extension abi: LogLevel::" + names[i] + " is " + std::to_string(i) + " in AVER_EXT_LOG_");
+            }
+            const size_t abiAt = extHeader.find("#define AVER_EXT_ABI 2");
+            check(abiAt != std::string::npos && !std::isdigit(static_cast<unsigned char>(extHeader[abiAt + 22])), "extension abi: aver_ext.h is version 2");
+            check(abiDoc.find("`AVER_EXT_ABI` 2") != std::string::npos, "extension abi: docs/ABI.md names version 2");
+        }
+    }
+
     // AbiError is mirrored in C# ONCE PER MODULE that exposes the channel, because each module's
     // slot is its own (Aver.Core is a static library linked into each ABI DLL). Five copies of one
     // numbering is exactly the shape this whole suite exists for, so they are compared here rather

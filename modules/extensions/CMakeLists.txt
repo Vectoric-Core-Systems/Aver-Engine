@@ -6,6 +6,8 @@
 aver_add_module(Aver.Extensions
   SOURCES
     src/Extensions.cpp
+    # .avext packages: the zip reader, the check of a package before it is copied, and install / uninstall (the Extensions window drives it).
+    src/Avext.cpp
   DEPS
     Aver.Formats
     Aver.Platform

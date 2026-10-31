@@ -6,6 +6,12 @@
  * An extension exports one function, aver_extension_entry. The engine calls it once, the first time one of the extension's
  * commands runs, passing the host it provides; the extension fills in the API it offers. Every struct starts with its own size so
  * a field appended later is recognised by the side that knows it; a reader never looks past `size`.
+ *
+ * What the host offers beyond the fields below is a named, versioned service (AverExtHost::getService, aver_ext_services.h); what an
+ * extension offers beyond its commands is a named, versioned interface (AverExtApi::getInterface). Names are reverse-DNS-style:
+ * lower-case segments of [a-z0-9-] joined by '.', at least two segments, the engine's own under "aver.". A version is a positive
+ * integer that changes only when the table's existing fields change meaning; a field appended to the end keeps the version, and the
+ * reader tells it by the table's `size`.
  */
 #ifndef AVER_EXTENSIONS_AVER_EXT_H
 #define AVER_EXTENSIONS_AVER_EXT_H
@@ -16,8 +22,9 @@
 extern "C" {
 #endif
 
-/* The version of this header's contract. An extension's manifest names the one it was built for; the engine refuses others. */
-#define AVER_EXT_ABI 1
+/* The version of this header's contract. An extension's manifest names the one it was built for; the engine refuses others.
+ * 2: services and interfaces replace the fixed model-import fields of the host (1 is not loaded any more). */
+#define AVER_EXT_ABI 2
 
 #if defined(_WIN32)
 #define AVER_EXT_EXPORT __declspec(dllexport)
@@ -35,36 +42,6 @@ extern "C" {
 #define AVER_EXT_LOG_CRITICAL 4
 #define AVER_EXT_LOG_FATAL    5
 
-/* What the host is asked to import: one model file (glTF, GLB, FBX, OBJ) written as meshes, materials, textures, skeletons and clips under
- * <contentDir>/<outSubdir>. All strings are UTF-8 and valid for the call only. */
-typedef struct AverExtModelArgs {
-    uint32_t size;            /* sizeof(AverExtModelArgs) */
-    const char* input;        /* absolute path of the model file */
-    const char* contentDir;   /* the project's Content folder */
-    const char* outSubdir;    /* content-relative folder for the meshes */
-    const char* base;         /* name stem for the materials the import writes */
-} AverExtModelArgs;
-
-/* One mesh the import wrote, with where it sits in the model (engine centimetres). */
-typedef struct AverExtModelPart {
-    const char* meshAsset;    /* content-relative path of the .ocmesh */
-    const char* name;         /* the source node's name */
-    double x, y, z;
-    int32_t node;             /* the source node's index in a glTF file; -1 when the importer has none */
-} AverExtModelPart;
-
-/* The import's outcome. The host allocates every pointer in it; the caller gives the whole struct back to freeModelResult. */
-typedef struct AverExtModelResult {
-    uint32_t size;            /* sizeof(AverExtModelResult); the caller sets it before the call */
-    int32_t ok;               /* non-zero when the import produced meshes */
-    const char* error;        /* why not, when !ok; never null */
-    const AverExtModelPart* parts;
-    uint32_t partCount;
-    const char* const* notes; /* anything the importer dropped, for the report */
-    uint32_t noteCount;
-    void* hostData;           /* the host's own, untouched by the extension */
-} AverExtModelResult;
-
 /* Provided by the engine. Valid from aver_extension_entry until shutdown returns. */
 typedef struct AverExtHost {
     uint32_t size;            /* sizeof(AverExtHost) */
@@ -75,11 +52,12 @@ typedef struct AverExtHost {
 
     /* One line to the engine's log (and so the Output Log). May be called from any thread. Null host functions are never passed. */
     void (*log)(int32_t level, const char* msg);
-    /* 0 when the import produced meshes; the details are in `out` either way. */
-    int32_t (*importModel)(const AverExtModelArgs* args, AverExtModelResult* out);
-    void (*freeModelResult)(AverExtModelResult* result);
-    /* Progress of a long command: fraction in [0, 1], or -1 when unknown. */
+    /* Progress of a long command: fraction in [0, 1], or -1 when unknown. A command that runs under a tool also prints progress lines
+     * (aver_ext_protocol.h); this is for a host that shows progress itself. */
     void (*progress)(double fraction, const char* text);
+    /* The service `name` at `version` (aver_ext_services.h): a table that starts with its own size, owned by the host and valid until
+     * shutdown returns. Null when the host does not offer that name at that version. May be called from any thread. */
+    const void* (*getService)(const char* name, uint32_t version);
 } AverExtHost;
 
 /* Filled in by the extension. */
@@ -89,6 +67,9 @@ typedef struct AverExtApi {
     int32_t (*runCommand)(const char* name, int32_t argc, const char* const* argv);
     /* Called once before the library is unloaded. May be null. */
     void (*shutdown)(void);
+    /* The interface `name` at `version` this extension offers: a table that starts with its own size, owned by the extension and valid
+     * until shutdown returns. Null when it offers none by that name and version. The function itself may be null. */
+    const void* (*getInterface)(const char* name, uint32_t version);
 } AverExtApi;
 
 /* The extension's only required export, declared by the extension with AVER_EXT_EXPORT:

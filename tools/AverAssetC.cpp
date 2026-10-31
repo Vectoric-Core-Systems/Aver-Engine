@@ -1707,7 +1707,7 @@ int convertImportedModel(const ModelConvertArgs& args, fmt::GltfImportResult& re
     return exitCode(anyFailed ? ExitCode::Failed : ExitCode::Ok);
 }
 
-// ---- the model importer an extension calls (AverExtHost::importModel) ----
+// ---- the model importer an extension calls (the service "aver.asset.import-model") ----
 //
 // One model file (glTF, GLB, FBX, OBJ) written as meshes, materials, textures, skeletons and clips under
 // <contentDir>/<outSubdir>, returning each mesh's content path and where it sits in the model. The JSON artifact
@@ -1716,7 +1716,7 @@ struct ImportedModelPart {
     std::string meshAsset;   // content-relative path of the .ocmesh
     std::string name;        // the source node's name
     double x = 0, y = 0, z = 0;
-    int node = -1;           // the source node's index in a glTF file; -1 when there is none (FBX, OBJ)
+    int node = -1;           // the source file's node index; -1 when the format has none (FBX, OBJ)
 };
 
 struct ImportedModel {
@@ -1855,12 +1855,13 @@ void hostFreeModelResult(AverExtModelResult* r) {
     r->parts = nullptr; r->partCount = 0; r->notes = nullptr; r->noteCount = 0; r->error = "";
 }
 
-// The extensions installed beside the executable, with the model importer on offer. Scanned when a subcommand is not one of ours, or for --help.
+// The extensions installed beside the executable, with this tool's services on offer (aver_ext_services.h). Scanned when a subcommand is not
+// one of ours, or for --help.
 void openExtensions(ext::Registry& registry) {
-    ext::HostServices services;
-    services.importModel = hostImportModel;
-    services.freeModelResult = hostFreeModelResult;
-    registry.setHostServices(services);
+    static const AverExtImportModelService importModelService = {sizeof(AverExtImportModelService), hostImportModel, hostFreeModelResult};
+    ext::ServiceRegistry& services = ext::ServiceRegistry::instance();
+    services.remove(AVER_EXT_SERVICE_IMPORT_MODEL, AVER_EXT_SERVICE_IMPORT_MODEL_VERSION);
+    services.add(AVER_EXT_SERVICE_IMPORT_MODEL, AVER_EXT_SERVICE_IMPORT_MODEL_VERSION, &importModelService);
     registry.scanDefault();
 }
 

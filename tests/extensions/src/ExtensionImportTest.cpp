@@ -1,7 +1,8 @@
 // ExtensionImportTest -- the part of the File menu's extension import dialog that needs no UI (sandbox/src/ExtensionImport.cpp, compiled here
-// without ImGui): the importers read from extension.json through the loader, the input checks, the command line, the command's closing summary,
-// and the importer running a tool on a worker thread and reporting through the editor's notification queue. The "tool" is this executable
-// started as `ExtensionImportTest fakecmd <in> <out> [flags]`, so no extension, no AverAssetC and no .NET are needed. The editor is not run.
+// without ImGui): the importers read from extension.json through the loader, the input checks, the command line, the command protocol's
+// progress and result lines (aver_ext_protocol.h), and the importer running a tool on a worker thread and reporting through the editor's
+// notification queue. The "tool" is this executable started as `ExtensionImportTest fakecmd <in> <out> [flags]`, so no extension, no AverAssetC
+// and no .NET are needed. The editor is not run.
 #include "EditorNotifications.hpp"
 #include "ExtensionImport.hpp"
 #include "aver/core/ErrorCodes.hpp"
@@ -31,49 +32,61 @@ static void check(bool cond, const std::string& what) {
 
 static bool contains(const std::string& hay, const std::string& needle) { return hay.find(needle) != std::string::npos; }
 
-static std::string jsonEscape(const std::string& s) {
-    std::string r;
-    for (const char c : s) { if (c == '\\' || c == '"') r.push_back('\\'); r.push_back(c); }
-    return r;
+static void printMessage(const ext::CommandMessage& m) {
+    std::printf("%s\n", ext::formatCommandMessage(m).c_str());
+    std::fflush(stdout);
 }
 
-// The fake command: what an extension's tool prints.
+// The fake command: what an extension's tool prints. Its input names the behaviour: "bad" fails with exit 1, "refuse" reports ok:false with exit 0,
+// "silent" prints no result line.
 static int fakeCommand(int argc, char** argv) {
     const std::string in = argc > 2 ? argv[2] : "";
     const std::string out = argc > 3 ? argv[3] : "";
     bool dry = false;
     for (int i = 4; i < argc; ++i) dry = dry || std::strcmp(argv[i], "--dry-run") == 0;
     std::printf("[INFO ] fake: %s -> %s\n", in.c_str(), out.c_str());
-    std::printf("{\"schemaVersion\":1,\"input\":\"x\",\"kind\":\"other\",\"ok\":true}\n");
+    ext::CommandMessage progress;
+    progress.kind = ext::MessageKind::Progress;
+    progress.fraction = 0.5;
+    progress.text = "halfway";
+    printMessage(progress);
+    ext::CommandMessage result;
+    result.kind = ext::MessageKind::Result;
+    if (in.find("silent") != std::string::npos) return 0;
     if (in.find("bad") != std::string::npos) {
         std::printf("[ERROR] fake: it is bad\n");
+        result.ok = false;
+        result.errors = 1;
+        result.message = "it is bad";
+        printMessage(result);
         return 1;
     }
-    std::printf("{\"schemaVersion\":1,\"summary\":true,\"kind\":\"fakecmd\",\"input\":\"%s\",\"output\":\"%s\",\"project\":\"Proj\",\"levels\":3,\"converted\":10,"
-                "\"unsupported\":2,\"scripts\":5,\"scriptsConverted\":false,\"report\":\"%s\",\"dryRun\":%s,\"exitCode\":0}\n",
-                jsonEscape(in).c_str(), jsonEscape(out + "/Proj").c_str(), jsonEscape(out + "/Report.md").c_str(), dry ? "true" : "false");
+    if (in.find("refuse") != std::string::npos) {
+        result.ok = false;
+        result.message = "this input is from an unsupported version";
+        printMessage(result);
+        return 0;
+    }
+    result.ok = true;
+    result.open = dry ? std::string() : out + "/Proj/Proj.ocproject";
+    result.report = out + "/Report.md";
+    result.warnings = 2;
+    result.message = "10 done, 2 left";
+    printMessage(result);
     return 0;
 }
 
-static const char* kManifest = R"JSON({
-  "name": "Fake", "displayName": "Fake Ext", "version": "1.0.0", "abi": 1, "engine": ">=0.1.0",
-  "importers": [ {
-    "menu": "Import Fake Thing...", "command": "fakecmd", "input": "folder", "detect": "fake.project",
-    "detectVersion": { "key": "version=", "min": 3, "message": "Too old: version {value}." },
-    "opensResult": true, "tooltip": "Tip", "description": "Describes it.", "inputLabel": "Fake thing", "outputSuffix": "_Out", "logTag": "Fk",
-    "openLabel": "Open it", "busyText": "Busy...",
-    "options": [ { "flag": "--overwrite", "label": "Replace" }, { "flag": "--dry-run", "label": "Check only", "default": true } ],
-    "notify": { "running": "Importing fake", "done": "Fake imported", "checked": "Fake checked", "failed": "Fake failed" },
-    "summary": { "text": "{converted} done, {unsupported} left", "brief": "{converted} done", "warnIfNonZero": "unsupported",
-                 "notes": [ { "text": "Scripts skipped ({scripts})", "when": "scripts", "unless": "scriptsConverted" },
-                            { "text": "never", "when": "nothing" } ] }
-  } ]
-})JSON";
+static std::string manifest(const std::string& name, int abi, const std::string& importers) {
+    return "{\n  \"name\": \"" + name + "\", \"displayName\": \"" + name + " Ext\", \"version\": \"1.0.0\", \"abi\": " + std::to_string(abi) +
+           ", \"engine\": \">=0.1.0\",\n  \"importers\": " + importers + "\n}";
+}
 
-static const char* kBadManifest = R"JSON({
-  "name": "Wrong", "displayName": "Wrong", "version": "1.0.0", "abi": 99, "engine": ">=0.1.0",
-  "importers": [ { "menu": "Import Wrong...", "command": "wrongcmd", "input": "folder" } ]
-})JSON";
+static const char* kFakeImporters = R"JSON([
+  { "id": "fake", "menu": "Import Fake Thing...", "command": "fakecmd", "tooltip": "Tip", "description": "Describes it.",
+    "input": { "kind": "folder", "detect": "fake.project" }, "outputDefault": "{input}_Out",
+    "options": [ { "flag": "--overwrite", "label": "Replace" }, { "flag": "--dry-run", "label": "Check only", "default": true } ] },
+  { "menu": "Import Fake File...", "command": "fakefile", "input": { "kind": "file", "patterns": ["*.fake", "*.fk"] } }
+])JSON";
 
 int main(int argc, char** argv) {
     if (argc > 1 && std::strcmp(argv[1], "fakecmd") == 0) return fakeCommand(argc, argv);
@@ -84,60 +97,65 @@ int main(int argc, char** argv) {
     fsys::remove_all(root, ec);
     fsys::create_directories(root / "Extensions" / "Fake", ec);
     fsys::create_directories(root / "Extensions" / "Wrong", ec);
-    writeFileText((root / "Extensions" / "Fake" / "extension.json").string(), kManifest);
-    writeFileText((root / "Extensions" / "Wrong" / "extension.json").string(), kBadManifest);
+    fsys::create_directories(root / "Extensions" / "Old", ec);
+    writeFileText((root / "Extensions" / "Fake" / "extension.json").string(), manifest("Fake", AVER_EXT_ABI, kFakeImporters));
+    writeFileText((root / "Extensions" / "Wrong" / "extension.json").string(),
+                  manifest("Wrong", 99, R"JSON([ { "menu": "Import Wrong...", "command": "wrongcmd" } ])JSON"));
+    writeFileText((root / "Extensions" / "Old" / "extension.json").string(),
+                  manifest("Old", 1, R"JSON([ { "menu": "Import Old...", "command": "oldcmd" } ])JSON"));
 
     // ---- the importers the loader lists ------------------------------------------------------------------------------------------
     AVER_INFO("-- the manifest --");
     ExtensionImporter importer;
     importer.scan((root / "Extensions").string());
-    check(importer.entries().size() == 1, "one importer: the refused extension adds none (" + std::to_string(importer.entries().size()) + ")");
-    if (importer.entries().size() != 1) { AVER_INFO("=== {} checks, {} failed ===", g_checks, g_failures); return exitCode(ExitCode::Failed); }
+    check(importer.entries().size() == 2, "two importers: the extensions with another ABI add none (" + std::to_string(importer.entries().size()) + ")");
+    if (importer.entries().size() != 2) { AVER_INFO("=== {} checks, {} failed ===", g_checks, g_failures); return exitCode(ExitCode::Failed); }
     const ImporterEntry& entry = importer.entries()[0];
+    const ImporterEntry& fileEntry = importer.entries()[1];
     const ext::ImporterInfo& info = entry.info;
-    check(entry.extension == "Fake Ext" && info.menu == "Import Fake Thing..." && info.command == "fakecmd" && info.input == "folder" && info.detect == "fake.project" &&
-              info.opensResult,
-          "menu, command, input, detect and opensResult");
-    check(info.detectKey == "version=" && info.detectMin == 3 && info.options.size() == 2 && info.options[0].flag == "--overwrite" && !info.options[0].onByDefault &&
-              info.options[1].onByDefault && info.notes.size() == 2 && info.summaryWarnKey == "unsupported",
-          "version check, options and notes");
-    check(entry.text.title == "Import Fake Thing" && entry.text.inputLabel == "Fake thing" && entry.text.logTag == "Fk" && entry.text.done == "Fake imported",
-          "the title is the menu text without its dots; the wording comes from the manifest");
+    check(entry.extension == "Fake Ext" && info.id == "fake" && info.menu == "Import Fake Thing..." && info.command == "fakecmd" && info.input.kind == "folder" &&
+              info.input.detect == "fake.project" && info.input.patterns.empty() && info.outputDefault == "{input}_Out",
+          "id, menu, command, input and output default");
+    check(info.options.size() == 2 && info.options[0].flag == "--overwrite" && !info.options[0].onByDefault && info.options[1].onByDefault, "options");
+    check(entry.text.title == "Import Fake Thing" && entry.text.tooltip == "Tip" && entry.text.description == "Describes it.",
+          "the title is the menu text without its dots; the tooltip and description come from the manifest");
+    check(fileEntry.info.id == "fakefile" && fileEntry.info.input.kind == "file" && fileEntry.info.input.patterns.size() == 2 && fileEntry.text.tooltip.empty(),
+          "a file importer: the id defaults to the command, the patterns are listed");
     {
         ext::ImporterInfo bare;
         bare.menu = "Import Bare...";
-        bare.command = "x";
-        const ImporterText t = importerText(bare, "Ext Name");
-        check(t.title == "Import Bare" && t.inputLabel == "Input" && t.outputSuffix == "_Imported" && t.logTag == "Ext Name" && t.busyText == "Working..." && t.failed == "Import failed",
-              "an importer that names no wording gets the defaults");
+        bare.description = "Words.";
+        const ImporterText t = importerText(bare);
+        check(t.title == "Import Bare" && t.tooltip == "Words." && importPickerSpec(bare) == "*.*" && importPickerSpec(info) == "fake.project" &&
+                  importPickerSpec(fileEntry.info) == "*.fake;*.fk",
+              "the tooltip defaults to the description; the picker offers the patterns, else the detect file, else everything");
     }
 
     // ---- choosing the input -------------------------------------------------------------------------------------------------------
     AVER_INFO("-- choosing the input --");
     const fsys::path good = root / "good";
-    const fsys::path old = root / "old";
     fsys::create_directories(good / "sub", ec);
-    fsys::create_directories(old, ec);
     writeFileText((good / "fake.project").string(), "version=4\n");
-    writeFileText((old / "fake.project").string(), "name=x\nversion=2\n");
+    writeFileText((root / "thing.fake").string(), "x");
+    writeFileText((root / "thing.other").string(), "x");
     std::string why;
     check(importInputValid(info, good.string(), &why), "a folder with the detect file is accepted: " + why);
-    check(!importInputValid(info, "", &why) && why == "Choose the folder of a Fake thing.", "an empty path is refused with a reason: " + why);
+    check(!importInputValid(info, "", &why) && why == "Choose the input folder.", "an empty path is refused with a reason: " + why);
     check(!importInputValid(info, root.string(), &why) && contains(why, "fake.project"), "a folder without the detect file is refused: " + why);
-    check(!importInputValid(info, old.string(), &why) && why == "Too old: version 2.", "a file below the minimum is refused with the manifest's message: " + why);
+    check(!importInputValid(info, (root / "nowhere").string(), &why) && contains(why, "no folder"), "a folder that does not exist is refused: " + why);
     check(fsys::path(importInputFrom(info, (good / "fake.project").string())) == good, "the detect file gives its folder");
     check(fsys::path(importInputFrom(info, (good / "sub").string())) == good, "a folder inside the input gives the input folder");
     check(importInputFrom(info, (root / "nowhere" / "file.txt").string()).empty(), "a path outside any input gives nothing");
     check(fsys::path(importDefaultOutDir(info, "C:/games/My Game")).filename() == "My Game_Out" && fsys::path(importDefaultOutDir(info, "C:/games/My Game/")).filename() == "My Game_Out",
-          "the default output is a sibling named <folder><suffix>");
+          "the default output is a sibling named by outputDefault");
     {
-        ext::ImporterInfo file;
-        file.menu = "Import File...";
-        file.command = "f";
-        file.input = "file";
-        check(importInputValid(file, (good / "fake.project").string(), &why), "a file importer accepts an existing file");
+        const ext::ImporterInfo& file = fileEntry.info;
+        check(importInputValid(file, (root / "thing.fake").string(), &why), "a file importer accepts an existing file that matches a pattern: " + why);
+        check(!importInputValid(file, (root / "thing.other").string(), &why) && contains(why, "*.fake, *.fk"), "and refuses one that matches none: " + why);
         check(!importInputValid(file, good.string(), &why) && !why.empty(), "and refuses a folder: " + why);
-        check(importInputFrom(file, "C:/a/b.txt") == "C:/a/b.txt", "its picked path is the input");
+        check(!importInputValid(file, "", &why) && why == "Choose the input file.", "and an empty path: " + why);
+        check(importInputFrom(file, "C:/a/b.fake") == "C:/a/b.fake", "its picked path is the input");
+        check(fsys::path(importDefaultOutDir(file, "C:/models/ship.fake")).filename() == "ship_out", "the default output of a file is named from its stem; the default pattern is {input}_out");
     }
 
     // ---- the command line --------------------------------------------------------------------------------------------------------
@@ -153,24 +171,29 @@ int main(int argc, char** argv) {
     }
 
     // ---- reading the command's output ---------------------------------------------------------------------------------------------
-    AVER_INFO("-- the closing summary --");
+    AVER_INFO("-- the protocol lines --");
     {
         const std::string out =
             "[INFO ] x: a -> b\n"
             "{\"schemaVersion\":1,\"input\":\"x.gltf\",\"kind\":\"mesh\",\"ok\":true}\n"
-            "{\"schemaVersion\":1,\"summary\":true,\"kind\":\"fakecmd\",\"input\":\"in\",\"output\":\"C:\\\\Out\\\\Game\",\"project\":\"Game\",\"levels\":3,\"converted\":10,"
-            "\"unsupported\":2,\"scripts\":5,\"scriptsConverted\":true,\"report\":\"C:\\\\Out\\\\Report.md\",\"dryRun\":false,\"exitCode\":0}\n";
-        const ImportResult r = parseImportOutput("fakecmd", out, 0);
-        check(r.ok() && r.projectName == "Game" && r.projectDir == "C:\\Out\\Game" && r.reportPath == "C:\\Out\\Report.md", "the project, folder and report path are read (escapes decoded)");
-        check(r.value("converted") == "10" && r.value("levels") == "3" && r.truthy("scriptsConverted") && !r.truthy("dryRun") && r.value("nothing").empty(), "and every key as text");
-        check(r.manifestPath == "C:\\Out\\Game/Game.ocproject", "the manifest to open is <project>/<Name>.ocproject");
-        check(expandSummary("{converted} done, {unsupported} left; {missing}.", r) == "10 done, 2 left; .", "{key} in the wording becomes the summary's value");
-        check(summaryNotes(info, r).empty(), "no note when the scripts were converted");
-        check(!parseImportOutput("othercmd", out, 0).ok(), "a summary of another command is not this command's summary");
-        const ImportResult f = parseImportOutput("fakecmd", "[INFO ] x\n[ERROR] x: it already holds a project; pass --overwrite\n", 1);
-        check(!f.ok() && contains(f.error, "pass --overwrite") && f.manifestPath.empty(), "a failed run carries the command's last error line");
-        const ImportResult n = parseImportOutput("fakecmd", "nothing useful\n", 0);
-        check(!n.ok() && !n.error.empty(), "a clean exit without a summary is not a success");
+            "{\"aver\":\"progress\",\"fraction\":0.25,\"text\":\"scenes\"}\n"
+            "{\"aver\":\"progress\",\"fraction\":0.75,\"text\":\"scripts\"}\n"
+            "{\"aver\":\"result\",\"ok\":true,\"open\":\"C:\\\\Out\\\\Game\\\\Game.ocproject\",\"report\":\"C:\\\\Out\\\\Report.md\",\"warnings\":3,\"errors\":0,\"message\":\"71 converted\"}\r\n";
+        const ImportResult r = parseImportOutput(out, 0);
+        check(r.ok() && r.openPath == "C:\\Out\\Game\\Game.ocproject" && r.reportPath == "C:\\Out\\Report.md" && r.warnings == 3 && r.errors == 0 && r.message == "71 converted",
+              "the result's open and report paths, counts and message are read (escapes decoded)");
+        check(r.fraction == 0.75 && r.progressText == "scripts", "the last progress line is kept");
+        check(r.error.empty() && r.log == out, "no error on success; the whole output is kept");
+        const ImportResult f = parseImportOutput("[INFO ] x\n[ERROR] x: it already holds a project; pass --overwrite\n", 1);
+        check(!f.ok() && contains(f.error, "pass --overwrite") && f.openPath.empty(), "a failed run without a result carries the command's last error line");
+        const ImportResult g = parseImportOutput("{\"aver\":\"result\",\"ok\":false,\"errors\":1,\"message\":\"unsupported version\"}\n", 1);
+        check(!g.ok() && g.error == "unsupported version","a failed run with a result carries the result's message");
+        const ImportResult h = parseImportOutput("{\"aver\":\"result\",\"ok\":false,\"message\":\"refused\"}\n", 0);
+        check(!h.ok() && h.error == "refused", "ok:false is a failure even when the exit code is 0");
+        const ImportResult n = parseImportOutput("nothing useful\n", 0);
+        check(!n.ok() && !n.error.empty(), "a clean exit without a result line is not a success");
+        const ImportResult s = parseImportOutput("{\"schemaVersion\":1,\"summary\":true,\"kind\":\"fakecmd\"}\n", 0);
+        check(!s.ok(), "the old summary line is not a result");
     }
 
     // ---- the tool -----------------------------------------------------------------------------------------------------------------
@@ -183,20 +206,22 @@ int main(int argc, char** argv) {
     req.outDir = (root / "out").string();
     std::vector<std::string> seen;
     const ImportResult direct = runImport(req, self, [&](const std::string& line) { seen.push_back(line); });
-    check(direct.ok() && direct.projectName == "Proj" && direct.value("levels") == "3", "runImport reads the summary: " + direct.error);
+    check(direct.ok() && direct.message == "10 done, 2 left" && direct.warnings == 2 && !direct.openPath.empty(), "runImport reads the result: " + direct.error);
     check(!seen.empty() && contains(seen.front(), "fake:") && seen.size() == 3, "its lines were handed over as they arrived (" + std::to_string(seen.size()) + ")");
-    {
-        const std::vector<std::string> notes = summaryNotes(info, direct);
-        check(notes.size() == 1 && notes[0] == "Scripts skipped (5)", "the note shows when scripts exist and were not converted");
-        check(expandSummary(info.summaryText, direct) == "10 done, 2 left", "the summary line is built from the manifest's text");
-    }
     req.flags = {"--dry-run"};
     const ImportResult dry = runImport(req, self);
-    check(dry.ok() && dry.dryRun && dry.manifestPath.empty(), "a dry run has nothing to open");
+    check(dry.ok() && dry.openPath.empty() && !dry.reportPath.empty(), "a result with nothing to open names none");
     ImportRequest bad = req;
     bad.inDir = (root / "bad").string();
     const ImportResult failed = runImport(bad, self);
-    check(!failed.ok() && contains(failed.error, "it is bad"), "a failing run reports the tool's error: " + failed.error);
+    check(!failed.ok() && failed.error == "it is bad", "a failing run reports the result's message: " + failed.error);
+    ImportRequest refuse = req;
+    refuse.inDir = (root / "refuse").string();
+    const ImportResult refused = runImport(refuse, self);
+    check(!refused.ok() && refused.error == "this input is from an unsupported version","a command can refuse its input itself, with a message: " + refused.error);
+    ImportRequest silent = req;
+    silent.inDir = (root / "silent").string();
+    check(!runImport(silent, self).ok(), "a command that prints no result line has not succeeded");
     check(!runImport(req, (root / "no-such-tool").string()).started, "a missing tool is reported as not started");
 
     // ---- the importer on its worker thread -----------------------------------------------------------------------------------------
@@ -211,14 +236,15 @@ int main(int argc, char** argv) {
     check(notifications().size() >= 1, "a progress notification is up while it runs");
     for (int i = 0; i < 600 && importer.running(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(100));
     importer.drawModal(1.0f);   // reaps the finished import
-    check(!importer.running() && importer.lastResult().ok() && importer.lastResult().manifestPath.size() > 0, "it finishes and the result names the project to open");
+    check(!importer.running() && importer.lastResult().ok() && importer.lastResult().openPath.size() > 0, "it finishes and the result names the file to open");
     std::vector<Notification> shown;
     usize hidden = 0;
     notifications().tick(1.0, shown, hidden);
     bool finished = false;
-    for (const Notification& n : shown) finished = finished || (n.title == "Fake imported" && !n.hasProgress && n.severity == NotifySeverity::Warning && contains(n.body, "10 done"));
-    check(finished, "and the notification became 'Fake imported' (a warning: the summary has unsupported items)");
-    check(importer.takeOpenRequest().empty(), "nothing asks the editor to open the project until the user presses the button");
+    for (const Notification& n : shown)
+        finished = finished || (n.title == "Import Fake Thing finished" && !n.hasProgress && n.severity == NotifySeverity::Warning && contains(n.body, "10 done, 2 left") && contains(n.body, "2 warning(s)"));
+    check(finished, "and the notification became 'Import Fake Thing finished' (a warning: the result counts warnings)");
+    check(importer.takeOpenRequest().empty(), "nothing asks the editor to open the result until the user presses the button");
     check(!importer.start(5, req, &startWhy), "an importer index that is gone is refused");
 
     importer.setToolPath((root / "no-such-tool").string());
@@ -230,8 +256,8 @@ int main(int argc, char** argv) {
     hidden = 0;
     notifications().tick(1.0, shown, hidden);
     bool failedNote = false;
-    for (const Notification& n : shown) failedNote = failedNote || (n.title == "Fake failed" && n.severity == NotifySeverity::Error);
-    check(!importer.lastResult().ok() && failedNote, "and the notification became 'Fake failed'");
+    for (const Notification& n : shown) failedNote = failedNote || (n.title == "Import Fake Thing failed" && n.severity == NotifySeverity::Error);
+    check(!importer.lastResult().ok() && failedNote, "and the notification became 'Import Fake Thing failed'");
 
     AVER_INFO("=== {} checks, {} failed ===", g_checks, g_failures);
     if (!g_failures) fsys::remove_all(root, ec);

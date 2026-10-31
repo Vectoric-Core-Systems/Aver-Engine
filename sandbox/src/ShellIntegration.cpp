@@ -183,6 +183,25 @@ bool openWithShell(const std::string& path) {
 #endif
 }
 
+bool openUrl(const std::string& url) {
+    const bool web = url.rfind("https://", 0) == 0 || url.rfind("http://", 0) == 0;
+    // A web address only: no space, quote or control character, which a shell could split an argument at.
+    if (!web || url.size() > 2048) return false;
+    for (const char c : url)
+        if (static_cast<unsigned char>(c) <= 0x20 || c == '"' || c == '\'' || c == '`' || c == '\\' || c == '<' || c == '>' || c == '^' || c == '|') return false;
+#if defined(_WIN32)
+    const auto r = reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", widen(url).c_str(), nullptr, nullptr, SW_SHOWNORMAL));
+    return r > 32;
+#else
+#if defined(__APPLE__)
+    const char* opener = "open ";
+#else
+    const char* opener = "xdg-open ";
+#endif
+    return launchDetached(widen(opener + shQuote(url)), std::wstring());
+#endif
+}
+
 // Moves `path` to the recycle bin. Works on directories too.
 bool moveToRecycleBin(const std::string& path) {
 #if defined(_WIN32)

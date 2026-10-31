@@ -12,6 +12,9 @@ bool revealInFileManager(const std::string& path);
 // Hands `path` to whatever the shell has registered for its extension.
 bool openWithShell(const std::string& path);
 
+// Opens an http:// or https:// address in the default browser. Anything else is refused (a manifest's "source" is not trusted to name a program).
+bool openUrl(const std::string& url);
+
 // Moves `path` to the OS recycle bin. Works on directories too. Fails rather than falling back to a
 // permanent delete.
 bool moveToRecycleBin(const std::string& path);

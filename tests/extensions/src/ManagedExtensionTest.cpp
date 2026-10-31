@@ -2,7 +2,8 @@
 // with a real .NET runtime in the process and no engine run.
 //
 // Three fake extensions are written under a scratch Extensions folder, each carrying a real managed assembly the build already stages:
-//   ActorExt   Aver.Framework.SampleActor.dll with actorBase = its TestActor: only the types under that base are declared.
+//   ActorExt   Aver.Framework.SampleActor.dll with actorBase = its TestActor and an entry type (IAverExtension) that declares Sphere with a
+//              predicate: those two are declared, the other actor types are not, and the entry's context names the extension.
 //   GoneExt    lists a managed file it does not have: the loader refuses it, ScriptHost logs the reason once and leaves it out.
 //   NoBaseExt  Aver.Scripting.SampleBehaviour.dll with an actorBase that no assembly holds: the bridge logs one line and declares nothing.
 // ScriptHost::init is pointed at that folder (HostDesc::extensionsDir) with no scripts directory, so any class that exists afterwards came
@@ -50,10 +51,10 @@ static void put(const fsys::path& path, const std::string& text) {
     f << text;
 }
 
-static std::string manifest(const std::string& name, const std::string& assembly, const std::string& actorBase) {
+static std::string manifest(const std::string& name, const std::string& assembly, const std::string& actorBase, const std::string& entry = {}) {
     return "{\n  \"name\": \"" + name + "\",\n  \"version\": \"1.0.0\",\n  \"abi\": " + std::to_string(AVER_EXT_ABI) +
-           ",\n  \"engine\": \">=0.7.0 <0.9.0\",\n  \"license\": \"MIT\",\n  \"managed\": { \"runtime\": [\"" + assembly + "\"], \"actorBase\": \"" + actorBase +
-           "\" }\n}\n";
+           ",\n  \"engine\": \">=0.7.0 <0.9.0\",\n  \"license\": \"MIT\",\n  \"managed\": { \"runtime\": [\"" + assembly + "\"]" +
+           (entry.empty() ? std::string() : ", \"entry\": \"" + entry + "\"") + ", \"actorBase\": \"" + actorBase + "\" }\n}\n";
 }
 
 int main() {
@@ -69,7 +70,8 @@ int main() {
 
     const fsys::path root = fsys::path(AVER_MEXT_WORKDIR) / "Extensions";
     fsys::remove_all(root.parent_path(), ec);
-    put(root / "ActorExt" / "extension.json", manifest("ActorExt", "Aver.Framework.SampleActor.dll", "Aver.Framework.SampleActor.TestActor"));
+    put(root / "ActorExt" / "extension.json",
+        manifest("ActorExt", "Aver.Framework.SampleActor.dll", "Aver.Framework.SampleActor.TestActor", "Aver.Framework.SampleActor.SampleExtensionEntry"));
     fsys::create_directories(root / "ActorExt" / "managed", ec);
     fsys::copy_file(actorDll, root / "ActorExt" / "managed" / "Aver.Framework.SampleActor.dll", fsys::copy_options::overwrite_existing, ec);
     put(root / "GoneExt" / "extension.json", manifest("GoneExt", "Missing.dll", "Gone.Base"));
@@ -86,8 +88,9 @@ int main() {
         registry.scan(root.string());
         const ext::Extension* actor = registry.find("ActorExt");
         const ext::Extension* gone = registry.find("GoneExt");
-        check(actor && actor->ready() && actor->managedRuntime.size() == 1 && actor->actorBase == "Aver.Framework.SampleActor.TestActor",
-              "ActorExt is Ready with its managed assembly and actor base from the manifest");
+        check(actor && actor->ready() && actor->managedRuntime.size() == 1 && actor->actorBase == "Aver.Framework.SampleActor.TestActor" &&
+                  actor->managedEntry == "Aver.Framework.SampleActor.SampleExtensionEntry",
+              "ActorExt is Ready with its managed assembly, entry type and actor base from the manifest");
         check(gone && !gone->ready() && gone->reason.find("Missing.dll") != std::string::npos, "GoneExt is Refused, naming the missing file");
     }
 
@@ -105,9 +108,12 @@ int main() {
 
     AVER_INFO("-- actor classes declared through the manifest --");
     check(aver_fw_class_find("AN_TestActor") != 0, "the actor type under actorBase is declared (AN_TestActor)");
-    check(aver_fw_class_find("Sphere") == 0 && aver_fw_class_find("SphereSpawner") == 0 && aver_fw_class_find("AN_Pawn") == 0,
-          "the assembly's other actor types, which are not under actorBase, are not");
-    check(linesWith("Aver.Framework.SampleActor: declared 1 actor class") == 1, "and the bridge says it declared one");
+    check(aver_fw_class_find("Sphere") != 0, "and so is the one the entry declared with a predicate (Sphere)");
+    check(aver_fw_class_find("SphereSpawner") == 0 && aver_fw_class_find("AN_Pawn") == 0,
+          "the assembly's other actor types, which neither the actor base nor the entry asked for, are not");
+    check(linesWith("Aver.Framework.SampleActor: declared 2 actor class") == 1, "and the bridge says it declared two");
+    check(linesWith("[ActorExt] entry ran: name=ActorExt version=1.0.0 assemblies=1") == 1 && linesWith("[ActorExt] entry ran", "Extensions") == 1,
+          "the entry ran once and its context named the extension, its version, its assembly count and its folder");
 
     AVER_INFO("-- a refused or unusable extension is one log line and is skipped --");
     check(linesWith("GoneExt", "not loaded") == 1 && linesWith("GoneExt", "Missing.dll") == 1, "GoneExt: one line, with the loader's reason");

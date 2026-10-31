@@ -4,12 +4,11 @@
 #include "EditorNotifications.hpp"
 #include "ProcessStream.hpp"
 #include "aver/core/Log.hpp"
-#include "aver/formats/Json.hpp"
 #include "aver/platform/FileSystem.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
-#include <cstdlib>
 #include <filesystem>
 #include <sstream>
 
@@ -28,82 +27,59 @@ std::string trimmed(std::string s) {
     return s;
 }
 
-std::string orDefault(const std::string& value, const char* fallback) { return value.empty() ? std::string(fallback) : value; }
+// '*' matches any run of characters; case-insensitive, as a file dialog's patterns are.
+bool wildcardMatch(const std::string& pattern, const std::string& text) {
+    const auto lower = [](char c) { return char(std::tolower(static_cast<unsigned char>(c))); };
+    size_t p = 0, t = 0, star = std::string::npos, mark = 0;
+    while (t < text.size()) {
+        if (p < pattern.size() && pattern[p] == '*') { star = p++; mark = t; }
+        else if (p < pattern.size() && lower(pattern[p]) == lower(text[t])) { ++p; ++t; }
+        else if (star != std::string::npos) { p = star + 1; t = ++mark; }
+        else return false;
+    }
+    while (p < pattern.size() && pattern[p] == '*') ++p;
+    return p == pattern.size();
+}
 
 std::string replaceAll(std::string s, const std::string& from, const std::string& to) {
     for (size_t at = 0; (at = s.find(from, at)) != std::string::npos; at += to.size()) s.replace(at, from.size(), to);
     return s;
 }
 
-// A number as the summary prints it: whole numbers without a fraction.
-std::string numberText(double v) {
-    char buf[40];
-    if (v == static_cast<double>(static_cast<long long>(v))) std::snprintf(buf, sizeof buf, "%lld", static_cast<long long>(v));
-    else std::snprintf(buf, sizeof buf, "%g", v);
-    return buf;
+std::string joinPatterns(const std::vector<std::string>& patterns, const char* separator) {
+    std::string out;
+    for (const std::string& p : patterns) out += (out.empty() ? "" : separator) + p;
+    return out;
 }
 
 }  // namespace
 
-std::string ImportResult::value(const std::string& key) const {
-    const auto it = values.find(key);
-    return it == values.end() ? std::string() : it->second;
-}
-
-bool ImportResult::truthy(const std::string& key) const {
-    const std::string v = value(key);
-    if (v.empty() || v == "false") return false;
-    if (v == "true") return true;
-    return std::strtod(v.c_str(), nullptr) != 0.0;
-}
-
-ImporterText importerText(const ext::ImporterInfo& info, const std::string& extensionName) {
+ImporterText importerText(const ext::ImporterInfo& info) {
     ImporterText t;
     std::string menu = info.menu;
     while (!menu.empty() && menu.back() == '.') menu.pop_back();
-    t.title = info.title.empty() ? menu : info.title;
+    t.title = menu;
     t.tooltip = info.tooltip.empty() ? info.description : info.tooltip;
     t.description = info.description;
-    t.inputLabel = orDefault(info.inputLabel, "Input");
-    t.outputLabel = orDefault(info.outputLabel, "Output folder");
-    t.outputSuffix = orDefault(info.outputSuffix, "_Imported");
-    t.openLabel = orDefault(info.openLabel, "Open result");
-    t.busyText = orDefault(info.busyText, "Working...");
-    t.logTag = info.logTag.empty() ? extensionName : info.logTag;
-    t.running = orDefault(info.notifyRunning, "Importing");
-    t.done = orDefault(info.notifyDone, "Import finished");
-    t.checked = orDefault(info.notifyChecked, "Import checked");
-    t.failed = orDefault(info.notifyFailed, "Import failed");
     return t;
 }
 
-bool importInputValid(const ext::ImporterInfo& info, const std::string& dir, std::string* why) {
+bool importInputValid(const ext::ImporterInfo& info, const std::string& input, std::string* why) {
     const auto fail = [&](const std::string& m) { if (why) *why = m; return false; };
-    const ImporterText text = importerText(info, {});
     std::error_code ec;
-    if (info.input == "file") {
-        if (dir.empty()) return fail("Choose the file of a " + text.inputLabel + ".");
-        if (!fsys::is_regular_file(fsys::path(dir), ec)) return fail("There is no file " + dir + ".");
-        return true;
-    }
-    if (dir.empty()) return fail("Choose the folder of a " + text.inputLabel + ".");
-    if (info.detect.empty()) {
-        if (!fsys::is_directory(fsys::path(dir), ec)) return fail("There is no folder " + dir + ".");
-        return true;
-    }
-    const fsys::path file = fsys::path(dir) / info.detect;
-    if (!fsys::exists(file, ec)) return fail("There is no " + info.detect + " in " + dir + ".");
-    if (info.detectKey.empty()) return true;
-    std::string body;
-    if (!readFileText(file.string(), body)) return fail(info.detect + " cannot be read.");
-    const size_t at = body.find(info.detectKey);
-    if (at != std::string::npos) {
-        const long version = std::strtol(body.c_str() + at + info.detectKey.size(), nullptr, 10);
-        if (version < info.detectMin) {
-            std::string message = info.detectMessage.empty() ? info.detect + " is too old (" + info.detectKey + "{value})." : info.detectMessage;
-            return fail(replaceAll(message, "{value}", std::to_string(version)));
+    if (info.input.kind == "file") {
+        if (input.empty()) return fail("Choose the input file.");
+        if (!fsys::is_regular_file(fsys::path(input), ec)) return fail("There is no file " + input + ".");
+        if (!info.input.patterns.empty()) {
+            const std::string leaf = fsys::path(input).filename().string();
+            const bool match = std::any_of(info.input.patterns.begin(), info.input.patterns.end(), [&](const std::string& p) { return wildcardMatch(p, leaf); });
+            if (!match) return fail(leaf + " is not one of " + joinPatterns(info.input.patterns, ", ") + ".");
         }
+        return true;
     }
+    if (input.empty()) return fail("Choose the input folder.");
+    if (!fsys::is_directory(fsys::path(input), ec)) return fail("There is no folder " + input + ".");
+    if (!info.input.detect.empty() && !fsys::exists(fsys::path(input) / info.input.detect, ec)) return fail("There is no " + info.input.detect + " in " + input + ".");
     return true;
 }
 
@@ -111,25 +87,29 @@ std::string importInputFrom(const ext::ImporterInfo& info, const std::string& pi
     if (picked.empty()) return {};
     std::error_code ec;
     fsys::path p(picked);
-    if (info.input == "file") return picked;
+    if (info.input.kind == "file") return picked;
     if (!fsys::is_directory(p, ec)) p = p.parent_path();
-    if (info.detect.empty()) return p.string();
+    if (info.input.detect.empty()) return p.string();
     for (; !p.empty(); p = p.parent_path()) {
-        if (fsys::exists(p / info.detect, ec)) return p.string();
+        if (fsys::exists(p / info.input.detect, ec)) return p.string();
         if (p == p.parent_path()) break;
     }
     return {};
 }
 
-std::string importDefaultOutDir(const ext::ImporterInfo& info, const std::string& inDir) {
-    fsys::path p(inDir);
+std::string importPickerSpec(const ext::ImporterInfo& info) {
+    if (!info.input.patterns.empty()) return joinPatterns(info.input.patterns, ";");
+    if (!info.input.detect.empty()) return info.input.detect;
+    return "*.*";
+}
+
+std::string importDefaultOutDir(const ext::ImporterInfo& info, const std::string& input) {
+    fsys::path p(input);
     while (p.has_relative_path() && p.filename().empty()) p = p.parent_path();
-    std::string folder = p.filename().string();
-    if (info.input == "file") folder = p.stem().string();
-    if (folder.empty()) {
-        for (const char c : importerText(info, {}).inputLabel) if (c != ' ') folder.push_back(c);
-    }
-    return (p.parent_path() / (folder + importerText(info, {}).outputSuffix)).string();
+    std::string name = info.input.kind == "file" ? p.stem().string() : p.filename().string();
+    if (name.empty()) name = "input";
+    const std::string pattern = info.outputDefault.empty() ? "{input}_out" : info.outputDefault;
+    return (p.parent_path() / replaceAll(pattern, "{input}", name)).string();
 }
 
 std::string importToolPath() {
@@ -143,57 +123,34 @@ std::vector<std::string> importArgs(const ImportRequest& r) {
     return args;
 }
 
-ImportResult parseImportOutput(const std::string& command, const std::string& output, int exitCode) {
+ImportResult parseImportOutput(const std::string& output, int exitCode) {
     ImportResult r;
     r.started = true;
     r.exitCode = exitCode;
     r.log = output;
-    const std::string prefix = "{\"schemaVersion\":1,\"summary\":true,\"kind\":\"" + command + "\"";
     std::istringstream in(output);
     std::string line, lastError;
     while (std::getline(in, line)) {
         line = trimmed(line);
         if (line.rfind("[ERROR]", 0) == 0) lastError = line.size() > 8 ? line.substr(8) : line;
-        if (line.rfind(prefix, 0) != 0) continue;
-        fmt::JsonValue json;
-        if (!fmt::parseJson(line, json) || !json.isObject()) continue;
-        r.haveSummary = true;
-        r.values.clear();
-        for (const fmt::JsonMember& m : json.members()) {
-            if (m.value.isString()) r.values[m.key] = std::string(m.value.asString());
-            else if (m.value.isBool()) r.values[m.key] = m.value.asBool() ? "true" : "false";
-            else if (m.value.isNumber()) r.values[m.key] = numberText(m.value.asDouble());
+        const ext::CommandMessage m = ext::parseCommandMessage(line);
+        if (m.kind == ext::MessageKind::Progress) {
+            r.fraction = m.fraction;
+            r.progressText = m.text;
+        } else if (m.kind == ext::MessageKind::Result) {
+            r.haveResult = true;
+            r.succeeded = m.ok;
+            r.openPath = m.open;
+            r.reportPath = m.report;
+            r.message = m.message;
+            r.warnings = m.warnings;
+            r.errors = m.errors;
         }
-        r.projectDir = r.value("output");
-        r.projectName = r.value("project");
-        r.reportPath = r.value("report");
-        r.dryRun = r.truthy("dryRun");
     }
-    if (r.haveSummary && !r.dryRun && !r.projectDir.empty() && !r.projectName.empty()) r.manifestPath = r.projectDir + "/" + r.projectName + ".ocproject";
-    if (exitCode != 0) r.error = lastError.empty() ? "The converter exited with code " + std::to_string(exitCode) + "." : lastError;
-    else if (!r.haveSummary) r.error = "The converter finished without a summary.";
+    if (exitCode != 0) r.error = !r.message.empty() && r.haveResult ? r.message : lastError.empty() ? "The command exited with code " + std::to_string(exitCode) + "." : lastError;
+    else if (!r.haveResult) r.error = "The command finished without a result.";
+    else if (!r.succeeded) r.error = r.message.empty() ? "The command reported a failure." : r.message;
     return r;
-}
-
-std::string expandSummary(const std::string& text, const ImportResult& result) {
-    std::string out;
-    for (size_t i = 0; i < text.size();) {
-        const size_t close = text[i] == '{' ? text.find('}', i) : std::string::npos;
-        if (close == std::string::npos) { out.push_back(text[i++]); continue; }
-        out += result.value(text.substr(i + 1, close - i - 1));
-        i = close + 1;
-    }
-    return out;
-}
-
-std::vector<std::string> summaryNotes(const ext::ImporterInfo& info, const ImportResult& result) {
-    std::vector<std::string> notes;
-    for (const ext::ImporterInfo::Note& n : info.notes) {
-        if (!n.when.empty() && !result.truthy(n.when)) continue;
-        if (!n.unless.empty() && result.truthy(n.unless)) continue;
-        notes.push_back(expandSummary(n.text, result));
-    }
-    return notes;
 }
 
 ImportResult runImport(const ImportRequest& request, const std::string& toolPath, const std::function<void(const std::string&)>& onLine) {
@@ -203,7 +160,7 @@ ImportResult runImport(const ImportRequest& request, const std::string& toolPath
         r.error = "Could not start " + toolPath + ".";
         return r;
     }
-    return parseImportOutput(request.command, out.text, out.exitCode);
+    return parseImportOutput(out.text, out.exitCode);
 }
 
 // ---- the editor half ------------------------------------------------------------------------------------------------------
@@ -226,11 +183,10 @@ void ExtensionImporter::scan(const std::string& root) {
     for (const ext::Extension& e : registry.extensions()) {
         if (!e.ready()) continue;
         for (const ext::ImporterInfo& i : e.importers) {
-            if (i.menu.empty() || i.command.empty()) continue;
             ImporterEntry entry;
             entry.extension = e.displayName;
             entry.info = i;
-            entry.text = importerText(i, e.displayName);
+            entry.text = importerText(i);
             entries_.push_back(std::move(entry));
         }
     }
@@ -264,20 +220,28 @@ bool ExtensionImporter::start(usize index, const ImportRequest& request, std::st
     job_ = job;
     lastEntry_ = index;
     haveLast_ = false;
-    const std::string tag = job->entry.text.logTag;
+    const std::string tag = job->entry.extension;
     {
         Notification n;
         n.severity = NotifySeverity::Info;
-        n.title = job->entry.text.running;
+        n.title = job->entry.text.title;
         n.body = request.inDir;
-        n.hasProgress = true;   // no expiry while it runs; a command reports no percentage
+        n.hasProgress = true;   // no expiry while it runs; the command's progress lines move the bar
         n.progress = -1.0f;
         job->notification = notifications().push(std::move(n));
     }
     AVER_INFO("[{}] importing {} into {}", tag, request.inDir, request.outDir);
     thread_ = std::thread([job, request, tool, tag] {
         job->result = runImport(request, tool, [&](const std::string& line) {
-            if (line.empty() || line.rfind("{\"schemaVersion\"", 0) == 0) return;   // the machine-readable lines are not for people
+            if (line.empty()) return;
+            const ext::CommandMessage m = ext::parseCommandMessage(line);
+            if (m.kind == ext::MessageKind::Progress) {   // the protocol lines are not for people: they move the bar
+                std::lock_guard<std::mutex> g(job->lock);
+                job->fraction = m.fraction;
+                job->progressText = m.text;
+                return;
+            }
+            if (m.kind == ext::MessageKind::Result) return;
             AVER_INFO("[{}] {}", tag, line);
             std::lock_guard<std::mutex> g(job->lock);
             job->lines.push_back(line);
@@ -296,16 +260,14 @@ void ExtensionImporter::reap() {
     const ImportResult& r = last_;
     const ImporterEntry& entry = job_->entry;
     if (r.ok()) {
-        std::string body = expandSummary(entry.info.summaryBrief, r);
-        if (r.dryRun) body += " (report only)";
+        std::string body = r.message;
+        if (r.warnings > 0) body += std::string(body.empty() ? "" : ". ") + std::to_string(r.warnings) + " warning(s)";
         if (!r.reportPath.empty()) body += (body.empty() ? "Report: " : ". Report: ") + r.reportPath;
-        const bool warn = !entry.info.summaryWarnKey.empty() && r.truthy(entry.info.summaryWarnKey);
-        notifications().finish(job_->notification, warn ? NotifySeverity::Warning : NotifySeverity::Success,
-                               r.dryRun ? entry.text.checked : entry.text.done, body, 15.0);
-        AVER_INFO("[{}] {}", entry.text.logTag, body);
+        notifications().finish(job_->notification, r.warnings > 0 ? NotifySeverity::Warning : NotifySeverity::Success, entry.text.title + " finished", body, 15.0);
+        AVER_INFO("[{}] {}", entry.extension, body);
     } else {
-        notifications().finish(job_->notification, NotifySeverity::Error, entry.text.failed, r.error, 20.0);
-        AVER_ERROR("[{}] import failed: {}", entry.text.logTag, r.error);
+        notifications().finish(job_->notification, NotifySeverity::Error, entry.text.title + " failed", r.error, 20.0);
+        AVER_ERROR("[{}] import failed: {}", entry.extension, r.error);
     }
 }
 
@@ -319,6 +281,11 @@ std::string ExtensionImporter::takeOpenRequest() {
 
 namespace {
 void setBuf(char* buf, usize size, const std::string& s) { std::snprintf(buf, size, "%s", s.c_str()); }
+
+bool isProjectFile(const std::string& path) {
+    const std::string ext = fsys::path(path).extension().string();
+    return ext.size() == 10 && std::equal(ext.begin(), ext.end(), ".ocproject", [](char a, char b) { return std::tolower(static_cast<unsigned char>(a)) == b; });
+}
 }  // namespace
 
 void ExtensionImporter::drawMenuItems(const std::function<void(const char* id)>& track) {
@@ -329,7 +296,7 @@ void ExtensionImporter::drawMenuItems(const std::function<void(const char* id)>&
         ImGui::BeginDisabled(!haveTool);
         if (ImGui::MenuItem(en.info.menu.c_str())) open(i);
         ImGui::EndDisabled();
-        if (track) track(("file.import." + en.info.command).c_str());
+        if (track) track(("file.import." + en.info.id).c_str());
         if (!haveTool && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip("AverAssetC is not beside the editor - build the AverAssetC target.");
         else if (ImGui::IsItemHovered() && !en.text.tooltip.empty())
@@ -358,13 +325,14 @@ void ExtensionImporter::drawModal(f32 dpi) {
 
     const bool busy = running();
     const bool showLast = haveLast_ && lastEntry_ == active_;
+    const bool isFile = info.input.kind == "file";
     if (!text.description.empty()) {
         ImGui::TextWrapped("%s", text.description.c_str());
         ImGui::Spacing();
     }
 
     ImGui::BeginDisabled(busy);
-    ImGui::TextUnformatted(text.inputLabel.c_str());
+    ImGui::TextUnformatted(isFile ? "Input file" : "Input folder");
     ImGui::PushItemWidth(-(110.0f * dpi));
     if (ImGui::InputText("##importIn", form.inBuf, sizeof form.inBuf) && !form.outEdited && form.inBuf[0])
         setBuf(form.outBuf, sizeof form.outBuf, importDefaultOutDir(info, form.inBuf));
@@ -372,12 +340,9 @@ void ExtensionImporter::drawModal(f32 dpi) {
     ImGui::SameLine();
     if (ImGui::Button("Browse...##importIn", ImVec2(100.0f * dpi, 0))) {
         std::string picked;
-        const bool isFile = info.input == "file";
-        const std::string title = info.detect.empty() ? (isFile ? "Pick the " + text.inputLabel : "Pick any file in the " + text.inputLabel + " folder")
-                                                      : "Pick the " + info.detect + " of the " + text.inputLabel;
-        const std::string filter = info.detect.empty() ? "All files (*.*)" : text.inputLabel + " (" + info.detect + ")";
-        const std::string spec = info.detect.empty() ? "*.*" : info.detect;
-        if (openFileDialog(title, filter, spec, std::string(form.inBuf), picked)) {
+        const std::string spec = importPickerSpec(info);
+        const std::string title = isFile ? "Pick the input file" : info.input.detect.empty() ? "Pick any file in the input folder" : "Pick the " + info.input.detect + " of the input";
+        if (openFileDialog(title, "Input (" + spec + ")", spec, std::string(form.inBuf), picked)) {
             const std::string dir = importInputFrom(info, picked);
             setBuf(form.inBuf, sizeof form.inBuf, dir.empty() ? fsys::path(picked).parent_path().string() : dir);
             if (!form.outEdited) setBuf(form.outBuf, sizeof form.outBuf, importDefaultOutDir(info, form.inBuf));
@@ -385,7 +350,7 @@ void ExtensionImporter::drawModal(f32 dpi) {
     }
 
     ImGui::Spacing();
-    ImGui::TextUnformatted(text.outputLabel.c_str());
+    ImGui::TextUnformatted("Output folder");
     ImGui::PushItemWidth(-(110.0f * dpi));
     if (ImGui::InputText("##importOut", form.outBuf, sizeof form.outBuf)) form.outEdited = true;
     ImGui::PopItemWidth();
@@ -428,18 +393,23 @@ void ExtensionImporter::drawModal(f32 dpi) {
     ImGui::EndDisabled();
     ImGui::SameLine();
     if (ImGui::Button("Close", ImVec2(100.0f * dpi, 0))) ImGui::CloseCurrentPopup();   // a running import carries on; its notification reports the end
-    if (busy) {
-        ImGui::SameLine();
-        ImGui::TextDisabled("%s", text.busyText.c_str());
-    }
 
-    // the log
+    // the progress bar and the log
     ImGui::Separator();
+    double fraction = -1.0;
+    std::string progressText;
     if (job_ && lastEntry_ == active_) {
         std::lock_guard<std::mutex> g(job_->lock);
         shownLog_ = job_->lines;
+        fraction = job_->fraction;
+        progressText = job_->progressText;
     } else {
         shownLog_.clear();
+    }
+    if (busy) {
+        const float width = -1.0f;
+        if (fraction >= 0.0) ImGui::ProgressBar(float(fraction), ImVec2(width, 0), progressText.c_str());
+        else ImGui::ProgressBar(-1.0f * float(ImGui::GetTime()), ImVec2(width, 0), progressText.c_str());
     }
     if (ImGui::BeginChild("##importLog", ImVec2(0, showLast ? -(80.0f * dpi) : 0), ImGuiChildFlags_Borders)) {
         for (const std::string& line : shownLog_) ImGui::TextUnformatted(line.c_str());
@@ -449,16 +419,18 @@ void ExtensionImporter::drawModal(f32 dpi) {
 
     if (showLast) {
         if (last_.ok()) {
-            const std::string summary = expandSummary(info.summaryText, last_);
-            if (!summary.empty()) ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1), "%s", summary.c_str());
-            for (const std::string& note : summaryNotes(info, last_)) ImGui::TextColored(ImVec4(0.95f, 0.72f, 0.25f, 1), "%s", note.c_str());
-            if (info.opensResult) {
-                ImGui::BeginDisabled(last_.manifestPath.empty());
-                if (ImGui::Button(text.openLabel.c_str(), ImVec2(200.0f * dpi, 0))) {
-                    openRequest_ = last_.manifestPath;
+            if (!last_.message.empty()) ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1), "%s", last_.message.c_str());
+            if (last_.warnings > 0 || last_.errors > 0)
+                ImGui::TextColored(ImVec4(0.95f, 0.72f, 0.25f, 1), "%d warning(s), %d error(s)", last_.warnings, last_.errors);
+            if (!last_.openPath.empty()) {
+                const bool openable = isProjectFile(last_.openPath);
+                ImGui::BeginDisabled(!openable);
+                if (ImGui::Button("Open result", ImVec2(200.0f * dpi, 0))) {
+                    openRequest_ = last_.openPath;
                     ImGui::CloseCurrentPopup();
                 }
                 ImGui::EndDisabled();
+                if (!openable && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("The editor opens projects; this result is %s.", last_.openPath.c_str());
                 ImGui::SameLine();
             }
             if (!last_.reportPath.empty()) {

@@ -18,14 +18,33 @@ set_target_properties(AverTestExtRefuse PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/ext_test
   ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/ext_test_import)
 
+# AverTestExt2 -- a second extension that uses a host service, offers an interface and reports through the command protocol (testext/aver_test_ext2.c).
+add_library(AverTestExt2 SHARED testext/aver_test_ext2.c)
+target_include_directories(AverTestExt2 PRIVATE ${CMAKE_SOURCE_DIR}/modules/extensions/include)
+set_target_properties(AverTestExt2 PROPERTIES
+  FOLDER "tests"
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/ext_test
+  LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/ext_test
+  ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/ext_test_import)
+
 add_executable(ExtensionsTest src/ExtensionsTest.cpp)
 target_link_libraries(ExtensionsTest PRIVATE Aver.Extensions Aver.Formats Aver.Platform Aver.Core)
-add_dependencies(ExtensionsTest AverTestExt AverTestExtRefuse)
+add_dependencies(ExtensionsTest AverTestExt AverTestExtRefuse AverTestExt2)
 target_compile_definitions(ExtensionsTest PRIVATE
   AVER_EXT_TEST_DLL="$<TARGET_FILE:AverTestExt>"
   AVER_EXT_TEST_REFUSE_DLL="$<TARGET_FILE:AverTestExtRefuse>"
+  AVER_EXT_TEST2_DLL="$<TARGET_FILE:AverTestExt2>"
   AVER_EXT_TEST_WORKDIR="${CMAKE_BINARY_DIR}/Testing/extensions_work")
 set_target_properties(ExtensionsTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# AvextTest -- .avext packages (modules/extensions/src/Avext.cpp): digests, the zip reader on valid and hostile archives, the manifest read from a
+# package before anything is copied, install (Replace, the trash, a refused package leaving nothing behind) and uninstall. Headless, no engine run.
+# `AvextTest --avext <file> <exe dir>` installs a real package and prints what the loader says (the Fabric repository's check of its packed .avext).
+add_executable(AvextTest src/AvextTest.cpp)
+target_link_libraries(AvextTest PRIVATE Aver.Extensions Aver.Formats Aver.Platform Aver.Core)
+target_compile_definitions(AvextTest PRIVATE AVER_AVEXT_TEST_WORKDIR="${CMAKE_BINARY_DIR}/Testing/avext_work")
+set_target_properties(AvextTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # ExtensionImportTest -- the headless half of the File menu's extension import dialog (sandbox/src/ExtensionImport.cpp, compiled without ImGui): the
@@ -49,5 +68,14 @@ if(TARGET Aver.Scripting.Host AND TARGET Aver.Framework)
   add_dependencies(ManagedExtensionTest Aver.Scripting.Host)
   target_compile_definitions(ManagedExtensionTest PRIVATE AVER_MEXT_WORKDIR="${CMAKE_BINARY_DIR}/Testing/managed_extension_work")
   set_target_properties(ManagedExtensionTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+  # ManagedExtensionEntryTest -- the managed entries that cannot start (one that throws, one that does not exist): skipped with one log line. Its own
+  # process, because two extensions cannot load the same assembly into one host context.
+  add_executable(ManagedExtensionEntryTest src/ManagedExtensionEntryTest.cpp)
+  target_link_libraries(ManagedExtensionEntryTest PRIVATE Aver.Extensions Aver.Framework Aver.Scripting.Host Aver.Formats Aver.Platform Aver.Core)
+  add_dependencies(ManagedExtensionEntryTest Aver.Scripting.Host)
+  target_compile_definitions(ManagedExtensionEntryTest PRIVATE AVER_MEXT_WORKDIR="${CMAKE_BINARY_DIR}/Testing/managed_extension_entry_work")
+  set_target_properties(ManagedExtensionEntryTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()

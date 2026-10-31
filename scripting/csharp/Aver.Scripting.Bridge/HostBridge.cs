@@ -1382,10 +1382,11 @@ public static class HostBridge
         DeclareActorClass(typeof(AverCharacter));
     }
 
-    /// <summary>Loads the managed half of each installed extension into the host context and declares its actor classes. The host calls
-    /// this once, after Bootstrap and before LoadScripts. <paramref name="utf8Spec"/> holds one extension per line, its fields
-    /// separated by TAB: name, actor base class (a full type name, or empty for every actor type), then each assembly's full path.
-    /// Returns the number of actor classes declared.</summary>
+    /// <summary>Loads the managed half of each installed extension into the host context, runs its entry and declares its actor classes. The
+    /// host calls this once, after Bootstrap and before LoadScripts. <paramref name="utf8Spec"/> is the host's extension list: a first
+    /// line <c>#aver-extensions 2</c>, then one extension per line, its fields separated by TAB: name, version, folder, entry type (or
+    /// empty), actor base type (or empty), then each assembly's full path. Another list version is refused with one log line. Returns the
+    /// number of actor classes declared.</summary>
     /// <remarks>Host context, not the script context: the script context resolves host-first, so a converted project's scripts see the
     /// extension's types with the same identity the bridge declared them with.</remarks>
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
@@ -1395,11 +1396,19 @@ public static class HostBridge
         {
             string? spec = Marshal.PtrToStringUTF8(utf8Spec);
             if (string.IsNullOrEmpty(spec)) return 0;
+            string[] lines = spec.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            const string header = "#aver-extensions ";
+            if (lines.Length == 0 || !lines[0].StartsWith(header, StringComparison.Ordinal) ||
+                !int.TryParse(lines[0].AsSpan(header.Length), out int specVersion) || specVersion != ExtensionSpecVersion)
+            {
+                Emit((int)Log.Level.Warn, $"[Scripting] the extension list is not version {ExtensionSpecVersion} ({(lines.Length > 0 ? lines[0] : "empty")}); no extension managed half is loaded");
+                return 0;
+            }
             int declared = 0;
-            foreach (string line in spec.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+            foreach (string line in lines.Skip(1))
             {
                 string[] f = line.Split('\t');
-                if (f.Length >= 3) declared += LoadExtension(f[0], f[1], f.Skip(2));
+                if (f.Length >= 6) declared += LoadExtension(f[0], f[1], f[2], f[3], f[4], f.Skip(5));
             }
             return declared;
         }
@@ -1410,9 +1419,13 @@ public static class HostBridge
         }
     }
 
-    // One extension: its assemblies into the host context, then DeclareActors for the types under its actor base. A missing assembly or a
-    // base type it does not hold logs one line and skips that extension; nothing else is affected.
-    private static int LoadExtension(string name, string actorBase, IEnumerable<string> paths)
+    // The version of the extension list LoadExtensions reads (ScriptHost.cpp writes it; docs/EXTENSIONS.md, "The managed half").
+    private const int ExtensionSpecVersion = 2;
+
+    // One extension: its assemblies into the host context, its entry (managed.entry) run with an ExtensionContext, then the actor types the
+    // entry and the actor base asked for declared. A missing assembly, an entry that cannot start or a base type it does not hold logs one
+    // line and skips that extension; nothing else is affected. With neither an entry nor an actor base every actor type is declared.
+    private static int LoadExtension(string name, string version, string dir, string entry, string actorBase, IEnumerable<string> paths)
     {
         if (!ManagedDispatch.Installed)
         {
@@ -1451,10 +1464,42 @@ public static class HostBridge
             }
         }
 
+        var context = new Aver.Framework.Hosting.ExtensionContext(name, version, dir, loaded.Select(l => l.Asm).ToList());
+        if (entry.Length > 0)
+        {
+            Type? entryType = null;
+            foreach ((Assembly asm, _) in loaded)
+                if ((entryType = asm.GetType(entry, throwOnError: false)) != null) break;
+            if (entryType == null || !typeof(Aver.Framework.Hosting.IAverExtension).IsAssignableFrom(entryType) || entryType.IsAbstract ||
+                entryType.GetConstructor(Type.EmptyTypes) == null)
+            {
+                Emit((int)Log.Level.Warn, $"[Scripting] extension {name} skipped: its entry {entry} is not a public IAverExtension with a parameterless constructor in any of its assemblies");
+                return 0;
+            }
+            try { ((Aver.Framework.Hosting.IAverExtension)Activator.CreateInstance(entryType)!).Load(context); }
+            catch (Exception ex)
+            {
+                Emit((int)Log.Level.Warn, $"[Scripting] extension {name} skipped: its entry {entry} failed: {Describe(ex)}");
+                return 0;
+            }
+        }
+        if (baseType != null) context.DeclareActors(baseType);
+        else if (entry.Length == 0) context.DeclareAllActors();
+
         int declared = 0;
+        Func<Type, bool> wanted = type =>
+        {
+            foreach (Func<Type, bool> filter in context.ActorFilters)
+            {
+                try { if (filter(type)) return true; }
+                catch (Exception ex) { Emit((int)Log.Level.Warn, $"[Scripting] extension {name}: an actor filter threw for {type.FullName}: {Describe(ex)}"); }
+            }
+            return false;
+        };
+        if (context.ActorFilters.Count == 0) return 0;
         foreach ((Assembly asm, string label) in loaded)
         {
-            try { declared += DeclareActors(asm, label, baseType == null ? null : baseType.IsAssignableFrom); }
+            try { declared += DeclareActors(asm, label, wanted); }
             catch (Exception ex) { Emit((int)Log.Level.Warn, $"[Scripting] extension {name}: {label} actor classes could not be declared: {Describe(ex)}"); }
         }
         return declared;

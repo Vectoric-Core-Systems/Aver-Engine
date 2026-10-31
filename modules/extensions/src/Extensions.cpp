@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <filesystem>
 #include <map>
 #include <mutex>
@@ -92,43 +93,25 @@ bool parseManifest(const std::string& text, Extension& e, std::string& why) {
     e.nativeName = str(root["native"]);
     const fmt::JsonValue& managed = root["managed"];
     readStringList(managed["runtime"], e.managedRuntime);
+    e.managedEntry = str(managed["entry"]);
     e.actorBase = str(managed["actorBase"]);
     for (const fmt::JsonValue& c : root["commands"].elements())
         if (c.isObject() && !str(c["name"]).empty()) e.commands.push_back({str(c["name"]), str(c["summary"]), str(c["usage"])});
     for (const fmt::JsonValue& i : root["importers"].elements()) {
         if (!i.isObject()) continue;
         ImporterInfo m;
-        m.menu = str(i["menu"]);
         m.command = str(i["command"]);
-        m.input = str(i["input"]);
-        m.detect = str(i["detect"]);
-        m.opensResult = i["opensResult"].asBool();
-        const fmt::JsonValue& dv = i["detectVersion"];
-        m.detectKey = str(dv["key"]);
-        m.detectMin = i32(dv["min"].asInt());
-        m.detectMessage = str(dv["message"]);
-        m.title = str(i["title"]);
+        m.id = i["id"].isString() ? str(i["id"]) : m.command;
+        m.menu = str(i["menu"]);
         m.tooltip = str(i["tooltip"]);
         m.description = str(i["description"]);
-        m.inputLabel = str(i["inputLabel"]);
-        m.outputLabel = str(i["outputLabel"]);
-        m.outputSuffix = str(i["outputSuffix"]);
-        m.openLabel = str(i["openLabel"]);
-        m.busyText = str(i["busyText"]);
-        m.logTag = str(i["logTag"]);
-        const fmt::JsonValue& nt = i["notify"];
-        m.notifyRunning = str(nt["running"]);
-        m.notifyDone = str(nt["done"]);
-        m.notifyChecked = str(nt["checked"]);
-        m.notifyFailed = str(nt["failed"]);
+        const fmt::JsonValue& in = i["input"];
+        if (in["kind"].isString()) m.input.kind = str(in["kind"]);
+        readStringList(in["patterns"], m.input.patterns);
+        m.input.detect = str(in["detect"]);
+        m.outputDefault = str(i["outputDefault"]);
         for (const fmt::JsonValue& o : i["options"].elements())
             if (o.isObject() && !str(o["flag"]).empty()) m.options.push_back({str(o["flag"]), str(o["label"]), o["default"].asBool()});
-        const fmt::JsonValue& sm = i["summary"];
-        m.summaryText = str(sm["text"]);
-        m.summaryBrief = str(sm["brief"]);
-        m.summaryWarnKey = str(sm["warnIfNonZero"]);
-        for (const fmt::JsonValue& n : sm["notes"].elements())
-            if (n.isObject()) m.notes.push_back({str(n["text"]), str(n["when"]), str(n["unless"])});
         e.importers.push_back(std::move(m));
     }
     readStringList(root["runtimeFiles"], e.runtimeFiles);
@@ -136,15 +119,29 @@ bool parseManifest(const std::string& text, Extension& e, std::string& why) {
     return true;
 }
 
+// True when a path listed in a manifest could leave the extension's directory: absolute, a drive, a backslash or a ".." segment.
+bool escapesDirectory(std::string_view rel) {
+    if (rel.empty() || rel.front() == '/' || rel.find('\\') != std::string_view::npos || rel.find(':') != std::string_view::npos) return true;
+    for (usize at = 0; at <= rel.size();) {
+        usize end = rel.find('/', at);
+        if (end == std::string_view::npos) end = rel.size();
+        const std::string_view segment = rel.substr(at, end - at);
+        if (segment == ".." || (segment.empty() && end != rel.size())) return true;
+        at = end + 1;
+    }
+    return false;
+}
+
 // Why this manifest cannot be used on this engine and platform, or empty.
 std::string refusalReason(Extension& e, std::string_view engineVersion) {
     if (e.name.empty()) return "extension.json has no name";
     if (e.name != e.dirName) return "the name \"" + e.name + "\" does not match the directory \"" + e.dirName + "\"";
-    if (e.abi != kSupportedAbi)
-        return "it was built for extension ABI " + std::to_string(e.abi) + "; this engine supports ABI " + std::to_string(kSupportedAbi);
-    if (e.engineRange.empty()) return "extension.json names no engine range";
-    std::string why;
-    if (!versionInRange(engineVersion, e.engineRange, &why)) return why;
+    if (std::string why = manifestIncompatibility(e, engineVersion); !why.empty()) return why;
+    if (e.nativeName.find_first_of("/\\") != std::string::npos) return "native \"" + e.nativeName + "\" must be a library name, not a path";
+    for (const std::string& m : e.managedRuntime)
+        if (escapesDirectory(m)) return "managed.runtime \"" + m + "\" leaves the extension's directory";
+    for (const std::string& f : e.runtimeFiles)
+        if (escapesDirectory(f)) return "runtimeFiles \"" + f + "\" leaves the extension's directory";
 
     if (!e.nativeName.empty()) {
         const std::string rel = std::string("native/") + platformDirName() + "/" + nativeFileName(e.nativeName);
@@ -155,6 +152,11 @@ std::string refusalReason(Extension& e, std::string_view engineVersion) {
     }
     for (const std::string& m : e.managedRuntime)
         if (!fileExists(e.dir + "/managed/" + m)) return "missing file managed/" + m;
+    if (!e.managedEntry.empty() && e.managedRuntime.empty()) return "managed.entry names a type but managed.runtime lists no assembly";
+    for (const ImporterInfo& i : e.importers) {
+        if (i.command.empty() || i.menu.empty()) return "an importer needs a menu text and a command";
+        if (i.input.kind != "folder" && i.input.kind != "file") return "importer \"" + i.id + "\": input.kind must be \"folder\" or \"file\", not \"" + i.input.kind + "\"";
+    }
     for (const std::string& f : e.runtimeFiles) {
         const std::string rel = replaceAll(f, "{platform}", platformDirName());
         if (!listedFileExists(e.dir, rel)) return "missing file " + rel;
@@ -167,14 +169,134 @@ void defaultLog(i32 level, const char* msg) {
     logMsg(static_cast<LogLevel>(clamped), "{}", msg ? msg : "");
 }
 
-i32 refuseImport(const AverExtModelArgs*, AverExtModelResult* out) {
-    if (out) { out->ok = 0; out->error = "the host offers no model importer"; out->parts = nullptr; out->partCount = 0; out->notes = nullptr; out->noteCount = 0; }
-    return 1;
-}
-void freeNothing(AverExtModelResult*) {}
 void dropProgress(double, const char*) {}
 
+const void* hostGetService(const char* name, uint32_t version) {
+    return name ? ServiceRegistry::instance().find(name, version) : nullptr;
+}
+
+std::string jsonQuote(std::string_view s) {
+    std::string r = "\"";
+    for (const char c : s) {
+        const unsigned char u = static_cast<unsigned char>(c);
+        if (c == '"' || c == '\\') { r.push_back('\\'); r.push_back(c); }
+        else if (c == '\n') r += "\\n";
+        else if (c == '\r') r += "\\r";
+        else if (c == '\t') r += "\\t";
+        else if (u < 0x20) { char buf[8]; std::snprintf(buf, sizeof buf, "\\u%04x", u); r += buf; }
+        else r.push_back(c);
+    }
+    return r + "\"";
+}
+
 }  // namespace
+
+bool parseExtensionManifest(const std::string& text, Extension& out, std::string& why) { return parseManifest(text, out, why); }
+
+std::string manifestIncompatibility(const Extension& e, std::string_view engineVersion) {
+    if (e.abi != kSupportedAbi) {
+        const std::string built = "it was built for extension ABI " + std::to_string(e.abi);
+        if (e.abi > 0 && e.abi < kSupportedAbi)
+            return built + ", which this engine no longer loads; it needs ABI " + std::to_string(kSupportedAbi) + " (rebuild the extension against this engine's aver_ext.h)";
+        return built + "; this engine supports ABI " + std::to_string(kSupportedAbi);
+    }
+    if (e.engineRange.empty()) return "extension.json names no engine range";
+    std::string why;
+    if (!versionInRange(engineVersion, e.engineRange, &why)) return why;
+    return {};
+}
+
+bool isValidInterfaceName(std::string_view name) {
+    if (name.empty() || name.size() > 128) return false;
+    usize segments = 1, segmentLength = 0;
+    for (const char c : name) {
+        if (c == '.') {
+            if (segmentLength == 0) return false;
+            ++segments;
+            segmentLength = 0;
+            continue;
+        }
+        const bool word = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
+        if (!word && !(c == '-' && segmentLength > 0)) return false;
+        ++segmentLength;
+    }
+    return segmentLength > 0 && segments >= 2;
+}
+
+struct ServiceRegistry::Impl {
+    mutable std::mutex mu;
+    std::map<std::pair<std::string, u32>, const void*> tables;
+};
+
+ServiceRegistry::ServiceRegistry() : impl_(std::make_unique<Impl>()) {}
+ServiceRegistry::~ServiceRegistry() = default;
+
+ServiceRegistry& ServiceRegistry::instance() {
+    static ServiceRegistry registry;
+    return registry;
+}
+
+bool ServiceRegistry::add(std::string_view name, u32 version, const void* table) {
+    if (!isValidInterfaceName(name) || version == 0 || !table) return false;
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    return impl_->tables.emplace(std::make_pair(std::string(name), version), table).second;
+}
+
+bool ServiceRegistry::remove(std::string_view name, u32 version) {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    return impl_->tables.erase(std::make_pair(std::string(name), version)) != 0;
+}
+
+const void* ServiceRegistry::find(std::string_view name, u32 version) const {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    const auto it = impl_->tables.find(std::make_pair(std::string(name), version));
+    return it == impl_->tables.end() ? nullptr : it->second;
+}
+
+void ServiceRegistry::clear() {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    impl_->tables.clear();
+}
+
+CommandMessage parseCommandMessage(std::string_view line) {
+    CommandMessage m;
+    while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.remove_suffix(1);
+    if (line.size() < 2 || line.front() != '{') return m;
+    fmt::JsonValue json;
+    if (!fmt::parseJson(line, json) || !json.isObject()) return m;
+    const std::string kind = str(json[AVER_EXT_MSG_KEY]);
+    if (kind == AVER_EXT_MSG_PROGRESS) {
+        m.kind = MessageKind::Progress;
+        m.fraction = json["fraction"].isNumber() ? json["fraction"].asDouble() : -1.0;
+        if (m.fraction > 1.0) m.fraction = 1.0;
+        if (m.fraction < 0.0) m.fraction = -1.0;
+        m.text = str(json["text"]);
+    } else if (kind == AVER_EXT_MSG_RESULT) {
+        m.kind = MessageKind::Result;
+        m.ok = json["ok"].asBool();
+        m.open = str(json["open"]);
+        m.report = str(json["report"]);
+        m.warnings = json["warnings"].isNumber() ? i32(json["warnings"].asInt()) : 0;
+        m.errors = json["errors"].isNumber() ? i32(json["errors"].asInt()) : 0;
+        m.message = str(json["message"]);
+    }
+    return m;
+}
+
+std::string formatCommandMessage(const CommandMessage& m) {
+    char num[48];
+    switch (m.kind) {
+    case MessageKind::Progress:
+        std::snprintf(num, sizeof num, "%.4g", m.fraction);
+        return std::string("{\"" AVER_EXT_MSG_KEY "\":\"" AVER_EXT_MSG_PROGRESS "\",\"fraction\":") + num + ",\"text\":" + jsonQuote(m.text) + "}";
+    case MessageKind::Result:
+        return std::string("{\"" AVER_EXT_MSG_KEY "\":\"" AVER_EXT_MSG_RESULT "\",\"ok\":") + (m.ok ? "true" : "false") + ",\"open\":" + jsonQuote(m.open) +
+               ",\"report\":" + jsonQuote(m.report) + ",\"warnings\":" + std::to_string(m.warnings) + ",\"errors\":" + std::to_string(m.errors) +
+               ",\"message\":" + jsonQuote(m.message) + "}";
+    default:
+        return {};
+    }
+}
 
 const char* platformDirName() {
 #if defined(_WIN32)
@@ -304,9 +426,8 @@ struct Registry::Impl {
         h.executableDir = l->exeDir.c_str();
         h.extensionDir = l->extDir.c_str();
         h.log = services.log ? services.log : defaultLog;
-        h.importModel = services.importModel ? services.importModel : refuseImport;
-        h.freeModelResult = services.freeModelResult ? services.freeModelResult : freeNothing;
         h.progress = services.progress ? services.progress : dropProgress;
+        h.getService = hostGetService;
         l->api.size = sizeof(AverExtApi);
         const i32 rc = entry(&h, &l->api);
         if (rc != 0) {
@@ -430,6 +551,13 @@ bool Registry::run(std::string_view command, int argc, const char* const* argv, 
     }
     exitCode = api.runCommand(std::string(command).c_str(), argc, argv);
     return true;
+}
+
+const void* Registry::interfaceOf(std::string_view extension, std::string_view name, u32 version, std::string* why) {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    if (!impl_->loadLocked(extension, why)) return nullptr;
+    const AverExtApi& api = impl_->loaded[std::string(extension)]->api;
+    return api.getInterface ? api.getInterface(std::string(name).c_str(), version) : nullptr;
 }
 
 std::vector<std::string> missingProjectExtensions(const fmt::ProjectDesc& project, const Registry& registry) {

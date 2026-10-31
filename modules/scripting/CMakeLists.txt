@@ -288,6 +288,7 @@ add_custom_command(
           ${AVER_CSHARP_DIR}/Aver.Framework.SampleActor/TestActor.cs
           ${AVER_CSHARP_DIR}/Aver.Framework.SampleActor/SphereActor.cs
           ${AVER_CSHARP_DIR}/Aver.Framework.SampleActor/PlayDemo.cs
+          ${AVER_CSHARP_DIR}/Aver.Framework.SampleActor/ExtensionEntrySample.cs
           ${AVER_BRIDGE_OUTPUTS}
           ${AVER_SAMPLE_OUT}
   COMMENT "Building the sample actor assembly"

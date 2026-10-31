@@ -2,7 +2,7 @@
 
 # Aver.Framework public API
 
-241 public types and 2050 public members, read from `scripting/csharp/Aver.Framework/` (145 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+243 public types and 2059 public members, read from `scripting/csharp/Aver.Framework/` (145 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Framework
 
@@ -2926,6 +2926,19 @@ Values: `SunDir = 1`, `SunLux = 2`, `SunColor = 3`, `SunTemp = 4`, `FogDensity =
 
 ## namespace Aver.Framework.Hosting
 
+### ExtensionContext
+
+`public sealed class ExtensionContext` - What the engine tells an extension at Load, and what it lets the extension ask for.
+
+- `public string Name { get; }` - The extension's name (its folder and the name of its manifest).
+- `public string Version { get; }` - The version of its manifest; empty when it names none.
+- `public string Directory { get; }` - The extension's installed folder, &lt;executable dir&gt;/Extensions/&lt;Name&gt;.
+- `public IReadOnlyList<Assembly> Assemblies { get; }` - The assemblies of the manifest's managed.runtime, loaded into the host context.
+- `public void DeclareActors(Type baseType)` - Declares every non-abstract actor type in Assemblies that derives from baseType.
+- `public void DeclareActors(Func<Type, bool> predicate)` - Declares every non-abstract actor type in Assemblies for which predicate is true.
+- `public void DeclareAllActors()` - Declares every non-abstract actor type in Assemblies.
+- `public void Log(string message, global::Aver.Scripting.Log.Level level = global::Aver.Scripting.Log.Level.Info)` - Writes one line to the engine's log, prefixed with the extension's name.
+
 ### ExtensionHost
 
 `public static class ExtensionHost` - For extensions, not for game scripts.
@@ -2937,10 +2950,16 @@ Values: `SunDir = 1`, `SunLux = 2`, `SunColor = 3`, `SunTemp = 4`, `FogDensity =
 - `public static List<(string Key, string Text)> ReadProperties(Entity entity)` - The level-authored property values of entity (the key/value pairs of its placement), in file order.
 - `public static void SetViewEntity(Entity entity)` - Makes entity the entity the renderer views from.
 - `public static List<string> RegisteredActionNames()` - The names of the input actions the project registered natively, in handle order.
+- `public static void MarkHandled(InputEvent e)` - Marks an input event handled, so it goes no further down the chain.
 - `public static void SetSelf(AverActor actor, Entity entity)` - Binds an actor instance to an entity without a spawn (a wrapper around an entity that already exists).
 - `public static void MarkEditablesApplied(AverActor actor)` - Tells the bridge the actor's [Editable] values were written early, so its write before begin-play skips it.
-- `public static void MarkHandled(InputEvent e)` - Marks an input event handled, so it goes no further down the chain.
 - `public static void BeginPass(bool physics)` - Starts a tick pass on the game thread: wakes what awaited the next frame and runs the continuations.
 - `public static void EndFrame()` - Ends a frame on the game thread: flushes the deferred calls and the end-of-frame destroys.
 - `public static int FlushDeferred()` - Runs the queued deferred calls now, including ones queued while it runs.
 - `public static void ResetDeferred()` - Drops every queued deferred call and pending frame wait.
+
+### IAverExtension
+
+`public interface IAverExtension` - The entry point of an extension's managed half: the type named by managed.entry in the extension's manifest.
+
+- `void Load(ExtensionContext context)` - Starts the extension.

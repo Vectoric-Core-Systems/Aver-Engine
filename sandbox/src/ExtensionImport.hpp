@@ -1,10 +1,11 @@
 #pragma once
 // File menu import entries that extensions add (docs/EXTENSIONS.md, "The editor"). Each `importers` entry of an installed extension's
-// extension.json becomes a menu item and a dialog: pick a folder, warn when its `detect` file is missing, run `AverAssetC <command> <in> <out>`
-// as a child process on a worker thread (so the editor stays responsive, and no extension code runs in the editor's process), show its
-// progress lines, and offer to open the result.
+// extension.json becomes a menu item and a dialog: pick the input, run `AverAssetC <command> <in> <out> [flags]` as a child process on a worker
+// thread (so the editor stays responsive, and no extension code runs in the editor's process), and show what the command reports through the
+// command protocol (aver_ext_protocol.h): a progress bar, its log lines, and its result message with the warning count and the Open and Report
+// buttons. The dialog knows no command: everything it shows is the manifest's menu text and tooltip or the command's own lines.
 //
-// The part that needs no UI (checking an input, building the command line, reading the command's closing summary, running it and collecting
+// The part that needs no UI (checking an input, building the command line, reading the command's protocol lines, running it and collecting
 // its output) is plain functions over plain data, so ExtensionImportTest runs it headless. The modal that drives it lives at the bottom of
 // ExtensionImport.cpp and is the only part that includes ImGui.
 #include "aver/core/Types.hpp"
@@ -12,7 +13,6 @@
 
 #include <atomic>
 #include <functional>
-#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -31,42 +31,42 @@ struct ImportRequest {
 struct ImportResult {
     bool started = false;               // the AverAssetC process could be launched
     int exitCode = -1;
-    bool haveSummary = false;           // the command's closing JSON line was seen
-    std::string projectDir;             // the summary's "output"
-    std::string projectName;            // "project"
-    std::string manifestPath;           // <projectDir>/<projectName>.ocproject (what "opens the result")
-    std::string reportPath;             // "report"
-    bool dryRun = false;                // "dryRun"
-    std::map<std::string, std::string> values;   // every key of the summary line, as text ("true", "12", the string)
+    bool haveResult = false;            // the command's result line was seen
+    bool succeeded = false;             // that line's ok
+    std::string openPath;               // its "open": the file the Open button opens
+    std::string reportPath;             // its "report"
+    std::string message;                // its "message"
+    int warnings = 0;
+    int errors = 0;
+    double fraction = -1.0;             // the last progress line's fraction (-1: unknown) and text
+    std::string progressText;
     std::string log;                    // everything the command wrote
     std::string error;                  // one line saying why it failed ("" on success)
 
-    bool ok() const { return started && exitCode == 0 && haveSummary; }
-    // The summary value `key`, "" when absent.
-    std::string value(const std::string& key) const;
-    // True when the value is "true" or a non-zero number.
-    bool truthy(const std::string& key) const;
+    bool ok() const { return started && exitCode == 0 && haveResult && succeeded; }
 };
 
-// The wording of one importer with every default filled in (the manifest names only what differs).
+// The wording of one importer with every default filled in.
 struct ImporterText {
-    std::string title, tooltip, description, inputLabel, outputLabel, outputSuffix, openLabel, busyText, logTag;
-    std::string running, done, checked, failed;
+    std::string title, tooltip, description;
 };
-ImporterText importerText(const ext::ImporterInfo& info, const std::string& extensionName);
+ImporterText importerText(const ext::ImporterInfo& info);
 
 // ---- the headless half ---------------------------------------------------------------------------------------------------
 
-// True when `dir` is a valid input for the importer: a folder holding its `detect` file (whose `detectVersion` key, if it has one, reaches the
-// minimum), or an existing file for a "file" importer. `why` gets the reason when not.
-bool importInputValid(const ext::ImporterInfo& info, const std::string& dir, std::string* why = nullptr);
+// True when `input` is valid for the importer: a folder (holding its `input.detect` file, if it names one), or an existing file for a "file"
+// importer whose name matches `input.patterns` (when it lists any). `why` gets the reason when not.
+bool importInputValid(const ext::ImporterInfo& info, const std::string& input, std::string* why = nullptr);
 
-// The input for whatever the file dialog returned: the `detect` file, or any file or folder inside the input. Empty when none of the parents
-// holds the detect file.
+// The input for whatever the file dialog returned: for a "file" importer the file itself, else the folder holding it (the nearest parent that
+// holds the `detect` file when there is one; empty when none does).
 std::string importInputFrom(const ext::ImporterInfo& info, const std::string& picked);
 
-// Where the result goes by default: a sibling of the input folder named "<folder><outputSuffix>".
-std::string importDefaultOutDir(const ext::ImporterInfo& info, const std::string& inDir);
+// The pattern list the file dialog is given: `input.patterns`, else the `detect` file, else everything ("*.*").
+std::string importPickerSpec(const ext::ImporterInfo& info);
+
+// Where the result goes by default: beside the input, named by `outputDefault` ("{input}_out") with {input} the input's folder or file stem.
+std::string importDefaultOutDir(const ext::ImporterInfo& info, const std::string& input);
 
 // AverAssetC beside the running executable; empty when it is not there.
 std::string importToolPath();
@@ -74,15 +74,8 @@ std::string importToolPath();
 // The arguments after the program name: <command> <inDir> <outDir> [flags...].
 std::vector<std::string> importArgs(const ImportRequest& request);
 
-// Reads the command's output (its closing summary line `{"schemaVersion":1,"summary":true,"kind":"<command>",...}`, its last error) into a
-// result. `exitCode` is the process's.
-ImportResult parseImportOutput(const std::string& command, const std::string& output, int exitCode);
-
-// `text` with each {key} replaced by the summary's value.
-std::string expandSummary(const std::string& text, const ImportResult& result);
-
-// The notes of the importer that apply to this result.
-std::vector<std::string> summaryNotes(const ext::ImporterInfo& info, const ImportResult& result);
+// Reads the command's output (its protocol lines, its last error) into a result. `exitCode` is the process's.
+ImportResult parseImportOutput(const std::string& output, int exitCode);
 
 // Runs the command to completion. `onLine` sees each line of its output as it arrives (it may be called from the calling thread only). A
 // result with started == false means the tool could not be launched.
@@ -117,13 +110,13 @@ public:
 
     bool running() const;
 
-    // The File menu items, one per importer. `track` is told each item's id ("file.import.<command>").
+    // The File menu items, one per importer. `track` is told each item's id ("file.import.<importer id>").
     void drawMenuItems(const std::function<void(const char* id)>& track);
 
     // Draws the modal (when open) and reaps a finished import. Call every frame, outside the menu bar.
     void drawModal(f32 dpi);
 
-    // The project the user chose to open, once (empty otherwise). The editor opens it.
+    // The file the user chose to open from the result, once (empty otherwise). The editor opens it.
     std::string takeOpenRequest();
 
     const ImportResult& lastResult() const { return last_; }
@@ -133,6 +126,8 @@ private:
         std::atomic<bool> done{false};
         std::mutex lock;
         std::vector<std::string> lines;
+        double fraction = -1.0;       // the last progress line, under `lock`
+        std::string progressText;
         ImportResult result;
         u64 notification = 0;
         ImporterEntry entry;
