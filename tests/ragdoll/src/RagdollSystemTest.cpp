@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <string>
 
 using namespace aver;
@@ -39,7 +40,13 @@ static std::string f2s(f32 v) { char b[64]; std::snprintf(b, sizeof b, "%.2f", v
 static std::string g_dir;
 static const u64 kSkelId = 0x4A6D0111ull;
 
-static std::string resolvePath(u64 id, void*) { return id == kSkelId ? g_dir + "/body.ocskel" : std::string{}; }
+static const u64 kAuthoredId = 0x4A6D0112ull;   // the same body with an .ocragdoll override file beside it
+
+static std::string resolvePath(u64 id, void*) {
+    if (id == kSkelId) return g_dir + "/body.ocskel";
+    if (id == kAuthoredId) return g_dir + "/authored.ocskel";
+    return std::string{};
+}
 
 enum Bone : int { Root, Pelvis, Spine, Chest, Neck, Head, ThighL, KneeL, FootL, UpperArmL, ForearmL, HandL, BoneCount };
 
@@ -112,6 +119,9 @@ int main() {
     {
         std::string why;
         check(fmt::saveOcSkel(g_dir + "/body.ocskel", skel, &why), "the skeleton writes: " + why);
+        check(fmt::saveOcSkel(g_dir + "/authored.ocskel", skel, &why), "and the authored twin: " + why);
+        std::ofstream f(g_dir + "/authored.ocragdoll", std::ios::binary);
+        f << "mass 70\nbone Chest shape sphere mass 9 friction 0.75 bounce 0.3\nbone KneeL joint fixed\n";
     }
 
     check(aver_phys_init() == 1, "physics started");
@@ -269,6 +279,29 @@ int main() {
         rd.stop(e, 0.0f);
         w.destroy(e); w.flush();
         aver_phys_set_gravity(0, 0, -980);
+    }
+
+    AVER_INFO("=== authored per-part data reaches the bodies ===");
+    {
+        const scene::Entity e = w.create("authored");
+        auto* sm = static_cast<scene::CSkeletalMesh*>(w.addComponent(e, scene::kComponentSkeletalMesh));
+        w.addComponent(e, scene::kComponentAnimator);
+        if (sm) sm->skeleton = kAuthoredId;
+        w.setLocalTransform(e, Transform{Vec3{0, 0, 300}, Quat::identity(), Vec3{1, 1, 1}});
+        w.flush();
+        sys.tick(w, 1.0f / 60.0f);
+        check(rd.start(e, ragdoll::RagdollMode::Limp, 0.0f), "the authored body starts");
+        const i32 handle = rd.physicsHandle(e);
+        const i32 head = aver_phys_ragdoll_body_of_bone(handle, Chest);    // the part with the authored data
+        const i32 chest = aver_phys_ragdoll_body_of_bone(handle, Spine);   // and a neighbour without
+        float m = 0, fr = 0, re = 0, mc = 0, frc = 0;
+        check(head != 0 && aver_phys_body_mass(head, &m) && std::fabs(m - 9.0f) < 1e-3f, "the chest weighs what the file says: " + f2s(m));
+        check(aver_phys_body_friction(head, &fr) && std::fabs(fr - 0.75f) < 1e-4f && aver_phys_body_restitution(head, &re) && std::fabs(re - 0.3f) < 1e-4f,
+              "with its own friction and bounce");
+        check(chest != 0 && aver_phys_body_mass(chest, &mc) && std::fabs(mc - 9.0f) > 0.5f && aver_phys_body_friction(chest, &frc) && std::fabs(frc - 0.75f) > 1e-3f,
+              "and the spine is untouched (mass " + f2s(mc) + ")");
+        rd.stop(e, 0.0f);
+        w.destroy(e); w.flush();
     }
 
     AVER_INFO("=== a ragdoll does not outlive its entity ===");

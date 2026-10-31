@@ -80,6 +80,7 @@ private:
         u64 skeleton = 0;
         const RagdollDef* def = nullptr;
         std::vector<f32> tpos, trot, ppos, prot;
+        bool massApplied = false;    // the authored per-part masses are in (they wait for the first simulated mode)
     };
 
     static void modifierThunk(scene::Entity e, const fmt::OcSkeleton& skel, anim::Pose& pose, void* user);

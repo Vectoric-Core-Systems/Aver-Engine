@@ -252,6 +252,7 @@ u32 ControlRigSystem::registerComponents(scene::World& world) {
     AVER_ASSERTM(b.verify(sizeof(CControlRig)), "CControlRig");
     g_type = b.typeId();
     IkRigRuntime::registerComponent(world);       // CIkRig rides along: both hosts already call this
+    PoseSeamSystem::registerComponent(world);     // and so does CPoseSeam
     return g_type;
 }
 
@@ -325,6 +326,7 @@ void ControlRigSystem::clearInput(scene::Entity e, u64 nameHash) {
 void ControlRigSystem::clearRuntime() {
     inputs_.clear();
     ik_.clearRuntime();
+    seam_.clearRuntime();
 }
 
 namespace {
@@ -356,6 +358,7 @@ void ControlRigSystem::applyTo(scene::Entity e, const fmt::OcSkeleton& skel, Pos
     if (anim_->tickIndex() != pruneTick_) {
         pruneTick_ = anim_->tickIndex();
         ik_.beginTick(pruneTick_);
+        seam_.prune();
         for (auto it = inputs_.begin(); it != inputs_.end();) {
             if (!world_->valid(it->first) || world_->destroyPending(it->first)) it = inputs_.erase(it);
             else ++it;
@@ -395,6 +398,9 @@ void ControlRigSystem::applyTo(scene::Entity e, const fmt::OcSkeleton& skel, Pos
         if (const auto* ik = world_->component<CIkRig>(e, IkRigRuntime::typeId()))
             if (ik->weight > 0.0f) any = ik_.apply(e, skel, pose, *ik, maxFootProbesPerTick) || any;
     }
+
+    // Last, the script's bone overrides (PoseSeam.hpp): a script has the last word over authored motion.
+    any = seam_.apply(e, skel, pose) || any;
     if (any) ++applied_;
 }
 
@@ -403,6 +409,7 @@ void ControlRigSystem::install(AnimSystem& anim, scene::World& world) {
     anim_ = &anim;
     applied_ = 0;
     ik_.init(world, anim);
+    seam_.init(world, anim);
     anim.setPoseModifier(&ControlRigSystem::modifierThunk, this);
 }
 

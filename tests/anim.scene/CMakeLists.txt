@@ -93,6 +93,17 @@ foreach(t IkRigSystem RetargetSystem)
   set_target_properties(${t}Test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endforeach()
 
+# PoseSeamTest -- the script pose seam (docs/ANIM_POSE_SEAM.md): bone overrides applied after the control rig and before a
+# chained modifier (the ragdoll's slot), reads of the finished pose, the provider the framework relays to. No GPU.
+add_executable(PoseSeamTest src/PoseSeamTest.cpp)
+target_link_libraries(PoseSeamTest PRIVATE Aver.Anim.Scene Aver.Anim Aver.Scene Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(PoseSeamTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# PoseFollowTest -- pose-to-pose retarget on entities (CPoseFollow): one entity takes another's pose across a .ocretarget. No GPU.
+add_executable(PoseFollowTest src/PoseFollowTest.cpp)
+target_link_libraries(PoseFollowTest PRIVATE Aver.Anim.Scene Aver.Anim Aver.Scene Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(PoseFollowTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # [wave9/morph begin] MorphSystemTest -- CMorphTargets on entities (docs/plans/wave9/MORPH_TARGETS.md): the weight layers, blend
 # ramps, declared targets, inheriting children, lip-sync, face-rig poses reaching bones, the provider the framework relays to,
 # and the entity-death guarantees. No scripting host, no GPU.

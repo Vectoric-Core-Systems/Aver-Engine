@@ -358,6 +358,7 @@ Unblocks: platformer player (clips and skin), ragdoll_physics, ik (also needs E2
 Notes: glTF import bakes the skeleton into engine space, so bone names and rests must round-trip against the converter's Skeleton3D. F14 needs glTF channel decoding in the converter; Godot's 30 fps import resample and CUBICSPLINE will differ.
 Verification: standard, plus a pose seam round trip test (set a bone pose, read the final pose, check the chain order), and a platformer reconversion that now writes the clips. Rendering of skinned meshes cannot be judged headless.
 Headed check for the owner: platformer player animation, ragdoll start/stop, a bone attachment.
+Status (2026-11-01, branch `parity/wave-7` in both repositories): P23, F13, F14, F12, P24, F16, F17 (the base class and helpers only), F18, P26, P25 and F15 are built and tested headless; the engine side is in [ANIM_POSE_SEAM.md](../ANIM_POSE_SEAM.md), the Fabric side in the Fabric repository's `docs/plans/WAVE7_SKELETON.md`. Not built: E24 spring bones (moved to a later project) and E23 COLLADA (the `ik` demo still needs it; reported). Nothing was run with a GPU or the editor: skinned rendering, a ragdoll in a running game and the bone attachment are headed checks.
 
 ### Wave 8: text, UI, and the gated long tail
 

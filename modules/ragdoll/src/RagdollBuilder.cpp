@@ -93,6 +93,34 @@ bool parseRagdollOverrides(std::string_view text, RagdollOverrides& out, std::st
                     o.hasLimits = true;
                     o.swing1 = v[0]; o.swing2 = v[1]; o.twist = v[2];
                     i += 4;
+                } else if (k == "shape" || k == "joint") {
+                    if (i + 1 >= tok.size()) return fail(k + " needs a name");
+                    const std::string& w = tok[i + 1];
+                    if (k == "shape") {
+                        if (w == "capsule") o.shape = kShapeCapsule;
+                        else if (w == "sphere") o.shape = kShapeSphere;
+                        else return fail("unknown shape '" + w + "' (capsule or sphere)");
+                    } else {
+                        if (w == "swingtwist") o.joint = kJointSwingTwist;
+                        else if (w == "hinge") o.joint = kJointHinge;
+                        else if (w == "fixed") o.joint = kJointFixed;
+                        else if (w == "ball") o.joint = kJointBall;
+                        else return fail("unknown joint '" + w + "' (swingtwist, hinge, fixed or ball)");
+                    }
+                    i += 2;
+                } else if (k == "offset") {
+                    if (!numbersAfter(tok, i, 3, v)) return fail("offset needs three numbers");
+                    o.hasOffset = true;
+                    o.offset = Vec3{v[0], v[1], v[2]};
+                    i += 4;
+                } else if (k == "mass") {
+                    if (!numbersAfter(tok, i, 1, v) || v[0] <= 0.0f) return fail("mass needs a positive number");
+                    o.massKg = v[0];
+                    i += 2;
+                } else if (k == "friction" || k == "bounce") {
+                    if (!numbersAfter(tok, i, 1, v) || v[0] < 0.0f) return fail(k + " needs a non-negative number");
+                    (k == "friction" ? o.friction : o.bounce) = v[0];
+                    i += 2;
                 } else {
                     return fail("unknown setting '" + k + "'");
                 }
@@ -215,8 +243,10 @@ RagdollDef buildRagdoll(const fmt::OcSkeleton& skel, const BuildOptions& opt, co
         if (o && o->radius > 0.0f) r = o->radius;
 
         const f32 inset = std::min(0.5f * r, 0.25f * len);
-        const Vec3 a = dir * inset;
-        const Vec3 e = dir * (len - inset);
+        Vec3 a = dir * inset;
+        Vec3 e = dir * (len - inset);
+        if (o && o->shape == kShapeSphere) a = e = (a + e) * 0.5f;       // a sphere at the middle of the segment
+        if (o && o->hasOffset) { a = a + o->offset; e = e + o->offset; }
         f32* c = &d.capsules[i * 7];
         c[0] = a.x; c[1] = a.y; c[2] = a.z;
         c[3] = e.x; c[4] = e.y; c[5] = e.z;
@@ -225,6 +255,24 @@ RagdollDef buildRagdoll(const fmt::OcSkeleton& skel, const BuildOptions& opt, co
             d.limitsDeg[i * 3 + 0] = o->swing1;
             d.limitsDeg[i * 3 + 1] = o->swing2;
             d.limitsDeg[i * 3 + 2] = o->twist;
+        }
+        if (o && (o->massKg > 0.0f || o->friction >= 0.0f || o->bounce >= 0.0f || o->joint >= 0)) {
+            if (d.massKg.empty()) {
+                d.massKg.assign(n, -1.0f);
+                d.friction.assign(n, -1.0f);
+                d.bounce.assign(n, -1.0f);
+                d.joint.assign(n, kJointSwingTwist);
+            }
+            if (o->massKg > 0.0f) d.massKg[i] = o->massKg;
+            if (o->friction >= 0.0f) d.friction[i] = o->friction;
+            if (o->bounce >= 0.0f) d.bounce[i] = o->bounce;
+            if (o->joint >= 0) {
+                d.joint[i] = o->joint;
+                f32* lim = &d.limitsDeg[i * 3];
+                if (o->joint == kJointHinge) { lim[1] = 0.0f; lim[2] = 0.0f; }
+                else if (o->joint == kJointFixed) { lim[0] = lim[1] = lim[2] = 0.0f; }
+                else if (o->joint == kJointBall) { lim[0] = lim[1] = lim[2] = 180.0f; }
+            }
         }
         ++d.partCount;
         if (d.rootPart < 0) d.rootPart = static_cast<i32>(i);

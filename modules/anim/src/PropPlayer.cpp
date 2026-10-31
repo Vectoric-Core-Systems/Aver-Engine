@@ -52,12 +52,12 @@ Q qv(const PropValue& v) { return {v.n[0], v.n[1], v.n[2], v.n[3]}; }
 
 // Moves a playhead by `d` seconds under the clip's loop mode: the new position, the segments crossed (a wrap adds the part after the
 // loop point with incStart), and how many ping-pong bounces happened. Returns true when it wrapped or bounced.
-bool stepClip(const OcAnimation& c, double prev, double d, double& next, std::vector<PropSegment>& segs, int& bounces) {
-    const double len = c.duration;
+// `len` is the length of the range being played (the clip, or a section of it) and positions are relative to its start.
+bool stepRange(OcPropLoop loop, double len, double prev, double d, double& next, std::vector<PropSegment>& segs, int& bounces) {
     bool looped = false;
     next = prev + d;
     bounces = 0;
-    switch (c.propLoop) {
+    switch (loop) {
     case OcPropLoop::None:
         next = std::clamp(next, 0.0, std::max(len, 0.0));
         segs.push_back({prev, next, false});
@@ -107,6 +107,19 @@ bool stepClip(const OcAnimation& c, double prev, double d, double& next, std::ve
         break;
     }
     }
+    return looped;
+}
+
+// The same over the section [lo, hi] of the clip (hi < 0 = the clip's end). The default section is the whole clip, where the shift is exact.
+bool stepClip(const OcAnimation& c, double prev, double d, double& next, std::vector<PropSegment>& segs, int& bounces,
+              double lo = 0.0, double hi = -1.0) {
+    if (hi < 0) hi = c.duration;
+    if (lo < 0) lo = 0;
+    if (lo == 0.0) return stepRange(c.propLoop, hi, prev, d, next, segs, bounces);
+    const usize before = segs.size();
+    const bool looped = stepRange(c.propLoop, std::max(hi - lo, 0.0), prev - lo, d, next, segs, bounces);
+    next += lo;
+    for (usize i = before; i < segs.size(); ++i) { segs[i].a += lo; segs[i].b += lo; }
     return looped;
 }
 
@@ -221,12 +234,20 @@ bool PropPlayer::play(const std::string& nameIn, double customBlend, double cust
             blends_.erase(std::remove_if(blends_.begin(), blends_.end(), [](const Blend& b) { return !b.snapshot; }), blends_.end());
         }
         const bool changed = assigned_ != name;
-        cur_ = Playing{c, fromEnd ? len : 0.0, 1.0, name};
+        const double sLo = secReq_ ? reqLo_ : 0.0, sHi = secReq_ && reqHi_ >= 0 ? std::min(reqHi_, len) : len;
+        cur_ = Playing{c, fromEnd ? sHi : sLo, 1.0, name, sLo, secReq_ && reqHi_ >= 0 ? sHi : -1.0};
         assigned_ = name;
         if (changed || !playing_) push(PropEvent::CurrentChanged, name);
+    } else if (secReq_) {
+        // The same animation, played over a section: the section replaces the old one and the playhead starts at its edge.
+        cur_.lo = reqLo_;
+        cur_.hi = reqHi_ >= 0 ? std::min(reqHi_, len) : -1.0;
+        cur_.pos = fromEnd ? (cur_.hi < 0 ? len : cur_.hi) : cur_.lo;
+        cur_.clip = c;
     } else {
-        if (fromEnd && approxEq(cur_.pos, 0.0)) cur_.pos = len;
-        else if (!fromEnd && approxEq(cur_.pos, len)) cur_.pos = 0.0;
+        const double lo = cur_.lo, hi = cur_.hi < 0 ? len : cur_.hi;
+        if (fromEnd && approxEq(cur_.pos, lo)) cur_.pos = hi;
+        else if (!fromEnd && approxEq(cur_.pos, hi)) cur_.pos = lo;
         else if (playing_) return true;     // already playing it: nothing restarts
         cur_.clip = c;
     }
@@ -294,6 +315,79 @@ void PropPlayer::setAssigned(const std::string& name) {
 }
 
 void PropPlayer::advance(double delta) { process(delta, false); }
+
+// ---- sections and markers ----
+
+// The edges of a section of `c` from a request (negative = open): clamped into the clip, hi == the clip's end stored as open (-1).
+bool PropPlayer::sectionRange(const Clip& c, double start, double end, double& lo, double& hi) const {
+    if (!c || !std::isfinite(start) || !std::isfinite(end)) return false;
+    const double len = c->duration;
+    lo = start < 0 ? 0.0 : std::min(start, len);
+    const double e = end < 0 ? len : std::min(end, len);
+    if (!(e > lo)) return false;
+    hi = (e >= len) ? -1.0 : e;
+    return true;
+}
+
+bool PropPlayer::markerRange(const Clip& c, const std::string& startMarker, const std::string& endMarker, double& start, double& end) const {
+    start = -1.0;
+    end = -1.0;
+    if (!c) return false;
+    if (!startMarker.empty()) {
+        const OcMarker* m = c->marker(startMarker);
+        if (!m) return false;
+        start = m->time;
+    }
+    if (!endMarker.empty()) {
+        const OcMarker* m = c->marker(endMarker);
+        if (!m) return false;
+        end = m->time;
+    }
+    return true;
+}
+
+bool PropPlayer::playSection(const std::string& name, double start, double end, double customBlend, double customSpeed, bool fromEnd) {
+    const Clip c = clip(name.empty() ? assigned_ : name);
+    double lo = 0, hi = -1;
+    if (!sectionRange(c, start, end, lo, hi)) return false;
+    secReq_ = true;
+    reqLo_ = lo;
+    reqHi_ = hi;
+    const bool ok = play(name, customBlend, customSpeed, fromEnd);
+    secReq_ = false;
+    reqLo_ = 0.0;
+    reqHi_ = -1.0;
+    return ok;
+}
+
+bool PropPlayer::playSectionWithMarkers(const std::string& name, const std::string& startMarker, const std::string& endMarker,
+                                        double customBlend, double customSpeed, bool fromEnd) {
+    double s = -1, e = -1;
+    if (!markerRange(clip(name.empty() ? assigned_ : name), startMarker, endMarker, s, e)) return false;
+    return playSection(name, s, e, customBlend, customSpeed, fromEnd);
+}
+
+bool PropPlayer::setSection(double start, double end) {
+    double lo = 0, hi = -1;
+    if (!cur_.clip || !sectionRange(cur_.clip, start, end, lo, hi)) return false;
+    cur_.lo = lo;
+    cur_.hi = hi;
+    const double top = hi < 0 ? double(cur_.clip->duration) : hi;
+    cur_.pos = std::clamp(cur_.pos, lo, top);
+    return true;
+}
+
+bool PropPlayer::setSectionWithMarkers(const std::string& startMarker, const std::string& endMarker) {
+    double s = -1, e = -1;
+    if (!markerRange(cur_.clip, startMarker, endMarker, s, e)) return false;
+    return setSection(s, e);
+}
+
+void PropPlayer::resetSection() {
+    if (!cur_.clip) return;
+    cur_.lo = 0.0;
+    cur_.hi = -1.0;
+}
 
 std::vector<std::pair<OcPropTrackType, std::string>> PropPlayer::captureTracks(const std::string& name) const {
     std::vector<std::pair<OcPropTrackType, std::string>> r;
@@ -381,7 +475,7 @@ void PropPlayer::process(double delta, bool updateOnly) {
 void PropPlayer::playbackData(Playing& p, double delta, double weight, bool seeked, bool internalSeeked, bool started, bool isCurrent,
                               std::vector<Inst>& out) {
     const OcAnimation& c = *p.clip;
-    const double len = c.duration;
+    const double lo = p.lo, len = p.hi < 0 ? c.duration : p.hi;   // the section, or the whole clip
     const double speed = speedScale * p.speed;
     const bool backwards = std::signbit(speed);
     const double raw = delta * speed;
@@ -396,7 +490,7 @@ void PropPlayer::playbackData(Playing& p, double delta, double weight, bool seek
     in.backward = std::signbit(raw);
 
     int bounces = 0;
-    const bool looped = stepClip(c, prev, d, next, in.segs, bounces);
+    const bool looped = stepClip(c, prev, d, next, in.segs, bounces, p.lo, p.hi);
     if (bounces & 1) p.speed *= -1.0;
     if (looped && isCurrent) push(PropEvent::Looped, p.name);
 
@@ -407,10 +501,10 @@ void PropPlayer::playbackData(Playing& p, double delta, double weight, bool seek
             endNotify_ = prev < len && !approxEq(prev, len);
             next = len;
             w = 1.0;
-        } else if (backwards && (prev > 0 || approxEq(prev, 0.0)) && approxEq(next, 0.0)) {
+        } else if (backwards && (prev > lo || approxEq(prev, lo)) && approxEq(next, lo)) {
             endReached_ = true;
-            endNotify_ = prev > 0 && !approxEq(prev, 0.0);
-            next = 0;
+            endNotify_ = prev > lo && !approxEq(prev, lo);
+            next = lo;
             w = 1.0;
         }
     }

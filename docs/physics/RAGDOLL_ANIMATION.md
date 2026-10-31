@@ -103,7 +103,20 @@ bone LeftHand on radius 5 limits 60 60 30
 `on` forces a part even for a bone the rule skips; `length` sets the segment length (for a leaf it is
 required, because a leaf has no child to point at). A name that matches no bone is ignored, which is
 the ordinary case for a file shared between similar rigs. Later lines for the same bone win.
-There is no per-bone mass share: the physics ABI shares `totalMassKg` by capsule volume.
+Without a `mass` setting the physics ABI shares `totalMassKg` by capsule volume.
+
+Authored per-part data (wave 7, [ANIM_POSE_SEAM.md](../ANIM_POSE_SEAM.md) section 3), all optional, on the same `bone` line:
+
+```
+bone Head shape sphere mass 5.5 friction 0.9 bounce 0.2     # a sphere at the middle of the segment; this part weighs 5.5 kg
+bone LeftThigh offset 1 2 3 joint hinge limits 60 0 0       # the part moved (bone-local cm); a hinge keeping swing1
+bone LeftKnee joint fixed                                   # all three limits locked
+bone UpperArm joint ball                                    # all three limits free (180 degrees)
+```
+
+`mass` is that part's own mass (the other parts share the rest of the total by volume) and is applied the first time the parts turn dynamic; `friction` and
+`bounce` are that body's. A joint kind sets the limit triple of the same swing-twist joint; `limits` gives the hinge its angle. A box, convex or trimesh
+shape is not available: the physics ABI builds capsules and spheres.
 
 ## Hosts
 

@@ -579,7 +579,7 @@ the first time something attaches.
 **Imported from glTF as an Empty parented to a bone** — see `docs/ASSET_IMPORT.md`.
 ## 9. `.ocanim` — animation clip
 
-Subtype `'ANIM'`. Fixes the three fidelity losses from recon `assets §7/§9`: **no forced 30 fps resample**, **cubicspline tangents preserved**, **step curves preserved**. Chunks: `AHDR` (required), `TRKS` (track data), `NOTF` (notifies, optional), `NTFD` (notify durations, optional), `CRVE` (curves, optional), `CTAN` (curve tangents, optional), `PROP` (property tracks, optional, 9.4c), `STRT`.
+Subtype `'ANIM'`. Fixes the three fidelity losses from recon `assets §7/§9`: **no forced 30 fps resample**, **cubicspline tangents preserved**, **step curves preserved**. Chunks: `AHDR` (required), `TRKS` (track data), `NOTF` (notifies, optional), `NTFD` (notify durations, optional), `CRVE` (curves, optional), `CTAN` (curve tangents, optional), `PROP` (property tracks, optional, 9.4c), `MRKR` (markers, optional, 9.4d), `STRT`.
 
 ### 9.1 `AHDR`
 | Off | Size | Type | Field |
@@ -682,6 +682,15 @@ per track: u8 type (0 value, 1 position_3d, 2 rotation_3d, 3 scale_3d, 4 blend_s
 value: u8 kind (0 nil, 1 bool, 2 int, 3 float, 4 vec2, 5 vec3, 6 vec4, 7 quat, 8 color, 9 string, 10 text)   f64 n[4]   str s
 ```
 `path` is Godot's track path (`Node/Child:property:subproperty`, relative to the player's `root_node`). A key's `value` is the key's data: the property value (value track), a method name (`s`, arguments in `args`), the stream path (audio; offsets in `startOffset`/`endOffset`), an animation name (animation track; `[stop]` stops the sub-player) or a float (bezier, blend shape). `text` is a Godot Variant in its text form, for values with no numeric form; it never blends. **Space:** `position_3d`, `rotation_3d` and `scale_3d` values are engine space (centimetres, +Z up, left-handed, through `aver/formats/AxisMap.hpp`); every other value is the Godot number the property takes. `transition` is Godot's easing of the segment that starts at the key (1 linear, 0 hold, below 0 in-out). Playback rules: `modules/anim/include/aver/anim/PropAnim.hpp`.
+
+### 9.4d `MRKR` — markers (optional; wave 7)
+Named times a property-track player can start or stop a section at (`PropPlayer::playSectionWithMarkers`). A clip without markers writes no chunk, so it is
+byte-identical to one written before markers existed.
+```
+u32 markerCount
+per marker: u32 name (string table offset)   f64 time (seconds from the clip start)   f32 rgba[4] (an editor hint)
+```
+Names are unique and times finite (a write refuses a duplicate or a non-finite time; a read does too). Nothing fires when the playhead passes a marker.
 
 ### 9.4b Curve naming for facial animation
 By convention a curve named `morph.<target>` is the weight of that blend shape and `pose.<name>` the weight of a named face pose; the prefix-stripped name is hashed (fnv1a64) at runtime and not stored. A clip with curves and zero tracks is valid (a curve-only clip: blend-shape weights on a face with no rig); its `SkeletonRef` may be empty. No byte layout changes. docs/ANIM_MORPH_FACE.md.

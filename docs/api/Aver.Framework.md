@@ -2,7 +2,7 @@
 
 # Aver.Framework public API
 
-241 public types and 2050 public members, read from `scripting/csharp/Aver.Framework/` (145 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+244 public types and 2076 public members, read from `scripting/csharp/Aver.Framework/` (147 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Framework
 
@@ -600,6 +600,32 @@ Values: `None = 0`, `Bool = 1`, `Int = 2`, `Float = 3`, `Vec3 = 4`, `String = 5`
 - `public override bool Equals(object? o)`
 - `public override int GetHashCode()`
 - `public override string ToString()`
+
+### BoneChannels
+
+`public enum BoneChannels` - Which channels of a bone a pose write sets; the others keep what the animation produced.
+
+Values: `Position = FwPose.Position`, `Rotation = FwPose.Rotation`, `Scale = FwPose.Scale`, `All = FwPose.All`
+
+### BoneInfo
+
+`public readonly struct BoneInfo` - A bone of an entity's skeleton: its name, parent and rest transform (parent-local).
+
+- `public int Index { get; }`
+- `public string Name { get; }`
+- `public int Parent { get; }`
+- `public BonePose Rest { get; }`
+- `public BoneInfo(int index, string name, int parent, BonePose rest)`
+
+### BonePose
+
+`public readonly struct BonePose` - A bone's transform: engine units (centimetres, the skeleton's own axes).
+
+- `public Vec3 Position { get; }`
+- `public Quat Rotation { get; }`
+- `public Vec3 Scale { get; }`
+- `public BonePose(Vec3 position, Quat rotation, Vec3 scale)`
+- `public static BonePose Identity { get; }`
 
 ### Brain
 
@@ -1367,6 +1393,18 @@ Values: `Destroy = 0`, `Stop = 1`, `Reload = 2`, `Travel = 3`
 - `public bool IsMotionClip(string clipPath)` - True while the matcher plays this clip (the path as written in the .ocmotion's clip list).
 - `public float MotionCost { get; }` - Cost of the playing frame against the wanted trajectory at the last search.
 - `public int MotionSwitches { get; }` - How many times the matcher has switched frames.
+- `public int PosedBoneCount { get; }` - How many bones the entity's skeleton has once it has been posed (0 before the first animation tick, or with no skeleton).
+- `public int FindBone(string name)` - The bone with that name, or -1.
+- `public BoneInfo? GetBoneInfo(int bone)` - A bone's name, parent (-1 for a root) and rest transform (parent-local), or null for an index the skeleton does not have.
+- `public BonePose? GetBonePose(int bone, bool beforeOverrides = false)` - The bone's pose after the whole chain of the last tick (animation, rig, IK, script overrides, ragdoll), parent-local, or null.
+- `public BonePose? GetBoneModelPose(int bone, bool beforeOverrides = false)` - The same in the skeleton's model space (the entity's own frame).
+- `public bool SetBonePose(int bone, BonePose pose, float amount = 1f, BoneChannels channels = BoneChannels.All, bool oneTick = false)` - Sets a bone's pose (parent-local) from the next animation tick on and until cleared, over the animation and the rig.
+- `public bool SetBoneModelPose(int bone, BonePose pose, float amount = 1f, BoneChannels channels = BoneChannels.All, bool oneTick = false)` - Sets a bone's pose in the skeleton's model space; its children keep their local transforms and follow.
+- `public bool SetBonePoses(int firstBone, IReadOnlyList<BonePose> poses)` - Sets consecutive bones from firstBone in one call (parent-local, every channel, amount 1).
+- `public bool ClearBonePose(int bone = -1)` - Drops one bone's override, or every bone's for -1.
+- `public bool SetBonePoseWeight(float weight)` - The master weight of this entity's overrides (default 1).
+- `public bool SetBonePosesEnabled(bool enabled)` - Switches the entity's overrides off and on without clearing them.
+- `public int BonePoseOverrideCount { get; }` - How many bones currently carry an override.
 - `public bool StartRagdoll(RagdollMode mode = RagdollMode.Limp, float blendSeconds = 0.1f)` - Turns this entity's skeleton into a physics ragdoll, built from its current animated pose, and blends the simulated pose over the animation across blendSeconds.
 - `public bool StopRagdoll(float blendSeconds = 0.4f)` - Blends back to the animation over blendSeconds, then removes the ragdoll (RagdollState reads null from then on).
 - `public RagdollMode? RagdollState { get; }` - The ragdoll's mode, or null when this entity has none (including after a StopRagdoll blend has finished).

@@ -28,6 +28,7 @@
 #  include "aver/anim/AnimGraphSystem.hpp"
 #  include "aver/anim/ControlRig.hpp"
 #  include "aver/anim/MotionMatchSystem.hpp"
+#  include "aver/anim/PoseFollow.hpp"
 #  include "aver/game/ColliderShapes.hpp"   // registerCollisionShapeComponent (wave 11 SHAPES_MATERIALS)
 #endif
 #if AVER_MODULE_SCENE && AVER_MODULE_SOFTBODY_SCENE
@@ -404,6 +405,8 @@ inline void registerGameSystems() {
     anim::animGraphSystem().install(anim::animSystem(), world);
     anim::MotionMatchSystem::registerComponents(world);                        // motion matching: wave 5 #25
     anim::motionMatchSystem().install(anim::animSystem(), world);              // after the graph: it chains behind it
+    anim::PoseFollowSystem::registerComponent(world);                          // CPoseFollow: a pose carried across a bone map (wave 7 P25)
+    anim::poseFollowSystem().install(anim::animSystem(), world);               // last: a following entity's pose wins over a graph's
     registerCollisionShapeComponent(world);                                    // CCollisionShape: an .ocshape collision beside a CRigidBody (wave 11 SHAPES_MATERIALS)
 #endif
 #if AVER_MODULE_SCENE && AVER_MODULE_SOFTBODY_SCENE
@@ -567,6 +570,7 @@ inline void resetGameSystems() {
     anim::animSystem().montages().stopAll();
     anim::controlRigSystem().clearRuntime();   // [wave5/ik-retarget] rig inputs, IK goals, foot smoothing
     anim::controlRigSystem().clear();          // and the loaded rigs, so an edited .ocrig / .ocikrig is read afresh
+    anim::poseFollowSystem().clear();          // and the bound bone maps
     anim::animSystem().morphs().clearRuntime();   // [wave9/morph] script and sequencer weight overrides, lip-sync
 #endif
 

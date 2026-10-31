@@ -41,7 +41,21 @@ struct BoneOverride {
     f32 length = -1.0f;              // cm; only used for a bone with no child (extends along parent->bone)
     bool hasLimits = false;
     f32 swing1 = 0, swing2 = 0, twist = 0;   // degrees
+    // Authored per-bone data (all optional; the default is the rule above and the shared mass).
+    i32 shape = -1;                  // kShape*: the part's shape, -1 rule (a capsule)
+    bool hasOffset = false;
+    Vec3 offset{0, 0, 0};            // cm, bone-local: moves the whole part (a sphere sits at the middle of its segment)
+    f32 massKg = -1.0f;              // this part's own mass; the others share the rest of the total by volume
+    f32 friction = -1.0f;            // body friction / restitution of this part; -1 keeps the world's default
+    f32 bounce = -1.0f;
+    i32 joint = -1;                  // kJoint*: how the part is joined to its parent part, -1 swing-twist (the rule)
 };
+
+// BoneOverride::shape and RagdollDef::shape.
+inline constexpr i32 kShapeCapsule = 0, kShapeSphere = 1;
+// BoneOverride::joint and RagdollDef::joint. Swing-twist is the rule; the others are limit triples of the same joint:
+// a hinge keeps swing1 and locks the rest, fixed locks everything, a ball is free to 180 degrees on all three.
+inline constexpr i32 kJointSwingTwist = 0, kJointHinge = 1, kJointFixed = 2, kJointBall = 3;
 
 struct RagdollOverrides {
     f32 totalMassKg = 0.0f;          // 0 = not set
@@ -51,6 +65,8 @@ struct RagdollOverrides {
 // Text format, one directive per line, '#' starts a comment:
 //   mass <kg>
 //   bone <name> [on|off] [radius <cm>] [length <cm>] [limits <swing1> <swing2> <twist>]
+//               [shape capsule|sphere] [offset <x> <y> <z>] [mass <kg>] [friction <f>] [bounce <r>]
+//               [joint swingtwist|hinge|fixed|ball]
 // Names have no spaces. False with `why` on a malformed line; `out` then holds what parsed before it.
 bool parseRagdollOverrides(std::string_view text, RagdollOverrides& out, std::string* why = nullptr);
 bool loadRagdollOverrides(const std::string& path, RagdollOverrides& out, std::string* why = nullptr);
@@ -62,6 +78,11 @@ struct RagdollDef {
     std::vector<f32> capsules;       // 7 per bone: ax ay az bx by bz radius (bone-local cm); radius <= 0 = no part
     std::vector<f32> limitsDeg;      // 3 per bone: swing1 swing2 twist
     std::vector<u64> nameHash;       // fnv1a64 of each bone name
+    // Authored per-bone data, parallel to the bones; empty when no override file set any (then every part is as the rule makes it).
+    std::vector<f32> massKg;         // < 0: by volume
+    std::vector<f32> friction;       // < 0: the default
+    std::vector<f32> bounce;         // < 0: the default
+    std::vector<i32> joint;          // kJoint*
     f32 totalMassKg = 70.0f;
     f32 extent = 0.0f;               // the skeleton's largest bind-pose extent, cm
     u32 partCount = 0;

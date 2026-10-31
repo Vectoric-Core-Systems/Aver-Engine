@@ -132,6 +132,21 @@ public:
     void advance(double delta);                              // one mixer pass
     void setAssigned(const std::string& name);
 
+    // ---- sections and markers ----
+    // A section confines playback to [start, end] of the current clip: the playhead starts at its edge, a looping clip wraps (or bounces)
+    // inside it, a non-looping one ends at its edge. A negative start or end is open (the clip's start / end); end <= start is refused.
+    // play() of another animation, and stop(), drop the section; play() of the one that is current keeps it.
+    bool playSection(const std::string& name, double start, double end, double customBlend = -1.0, double customSpeed = 1.0, bool fromEnd = false);
+    // The same with the section's edges named by markers of the clip (OcAnimation::markers); an empty name is open. False for a marker the clip lacks.
+    bool playSectionWithMarkers(const std::string& name, const std::string& startMarker, const std::string& endMarker,
+                                double customBlend = -1.0, double customSpeed = 1.0, bool fromEnd = false);
+    bool setSection(double start, double end);                // on the current clip; the playhead is brought inside
+    bool setSectionWithMarkers(const std::string& startMarker, const std::string& endMarker);
+    void resetSection();
+    bool hasSection() const { return cur_.clip && (cur_.lo > 0.0 || cur_.hi >= 0.0); }
+    double sectionStart() const { return cur_.clip ? cur_.lo : 0.0; }
+    double sectionEnd() const { return cur_.clip ? (cur_.hi < 0.0 ? double(cur_.clip->duration) : cur_.hi) : 0.0; }
+
     // State.
     bool isPlaying() const { return playing_ && cur_.clip != nullptr; }
     bool hasCurrent() const { return cur_.clip != nullptr; }
@@ -174,7 +189,7 @@ public:
     const PropRootMotion& rootMotion() const { return rootMotion_; }
 
 private:
-    struct Playing { Clip clip; double pos = 0; double speed = 1; std::string name; };
+    struct Playing { Clip clip; double pos = 0; double speed = 1; std::string name; double lo = 0, hi = -1; };   // hi < 0: the clip's end
     struct Blend { Playing data; double left = 0, time = 1; bool snapshot = false; };   // snapshot: a capture(), which a play() keeps
     struct Inst {
         Clip clip; std::string name; double weight = 0, time = 0, delta = 0;
@@ -184,6 +199,11 @@ private:
         double trackWeight(usize i) const { return i < tw.size() ? tw[i] : 1.0; }
     };
     struct TrackReg { OcPropTrackType type; std::string path; bool hasInit = false; PropValue init; };
+
+    bool sectionRange(const Clip& c, double start, double end, double& lo, double& hi) const;
+    bool markerRange(const Clip& c, const std::string& startMarker, const std::string& endMarker, double& start, double& end) const;
+    bool secReq_ = false;               // play() is being called for a section: reqLo_ / reqHi_ (hi < 0 = open)
+    double reqLo_ = 0.0, reqHi_ = -1.0;
 
     void process(double delta, bool updateOnly);
     void playbackData(Playing& p, double delta, double weight, bool seeked, bool internalSeeked, bool started, bool isCurrent, std::vector<Inst>& out);

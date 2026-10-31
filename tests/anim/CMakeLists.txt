@@ -83,3 +83,9 @@ set_target_properties(PropAnimTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_B
 add_executable(PropAnimAbiTest src/PropAnimAbiTest.cpp)
 target_link_libraries(PropAnimAbiTest PRIVATE Aver.Anim.Abi Aver.Core)
 set_target_properties(PropAnimAbiTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# PropSectionTest -- markers on a clip (the .ocanim MRKR chunk) and sections of the player (play_section, markers as edges, wrap inside a
+# section, set_section on a running clip), through the same C seam.
+add_executable(PropSectionTest src/PropSectionTest.cpp)
+target_link_libraries(PropSectionTest PRIVATE Aver.Anim.Abi Aver.Formats Aver.Core)
+set_target_properties(PropSectionTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

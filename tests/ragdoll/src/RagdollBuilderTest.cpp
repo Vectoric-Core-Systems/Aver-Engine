@@ -189,6 +189,43 @@ int main() {
         check(ragdoll::overridePathFor("a.b/noext") == "a.b/noext.ocragdoll", "a dot in a directory is not an extension");
     }
 
+    AVER_INFO("=== authored per-part data: shape, offset, mass, material, joint ===");
+    {
+        const char* text =
+            "bone Head shape sphere mass 5.5 friction 0.9 bounce 0.2\n"
+            "bone ThighL offset 1 2 3 joint hinge limits 60 40 20\n"
+            "bone KneeL joint fixed\n"
+            "bone UpperArmL joint ball\n";
+        ragdoll::RagdollOverrides ov;
+        std::string why;
+        check(ragdoll::parseRagdollOverrides(text, ov, &why), "it parses: " + why);
+        const ragdoll::RagdollDef plain = ragdoll::buildRagdoll(skel);
+        check(plain.massKg.empty() && plain.friction.empty() && plain.joint.empty(), "without data the per-part arrays stay empty");
+        const ragdoll::RagdollDef d = ragdoll::buildRagdoll(skel, {}, &ov);
+        check(d.massKg.size() == d.boneCount && d.massKg[Head] == 5.5f && d.massKg[KneeL] < 0.0f, "a part's own mass, the others by volume");
+        check(d.friction[Head] == 0.9f && d.bounce[Head] == 0.2f && d.friction[ThighL] < 0.0f, "friction and bounce of one part");
+        const f32* hc = &d.capsules[Head * 7];
+        check(std::fabs(hc[0] - hc[3]) < 1e-5f && std::fabs(hc[1] - hc[4]) < 1e-5f && std::fabs(hc[2] - hc[5]) < 1e-5f && hc[6] > 0.0f,
+              "a sphere part has both ends at one point");
+        const f32* pc = &plain.capsules[ThighL * 7];
+        const f32* tc = &d.capsules[ThighL * 7];
+        check(std::fabs(tc[0] - pc[0] - 1.0f) < 1e-4f && std::fabs(tc[1] - pc[1] - 2.0f) < 1e-4f && std::fabs(tc[5] - pc[5] - 3.0f) < 1e-4f,
+              "an offset moves both ends of the segment");
+        check(d.joint[ThighL] == ragdoll::kJointHinge && d.limitsDeg[ThighL * 3 + 0] == 60.0f && d.limitsDeg[ThighL * 3 + 1] == 0.0f &&
+                  d.limitsDeg[ThighL * 3 + 2] == 0.0f,
+              "a hinge keeps swing1 and locks the other two");
+        check(d.limitsDeg[KneeL * 3] == 0.0f && d.limitsDeg[KneeL * 3 + 1] == 0.0f && d.limitsDeg[KneeL * 3 + 2] == 0.0f, "a fixed joint locks all three");
+        check(d.limitsDeg[UpperArmL * 3] == 180.0f && d.limitsDeg[UpperArmL * 3 + 2] == 180.0f, "a ball joint is free");
+        check(d.partCount == plain.partCount, "none of it adds or removes a part");
+
+        ragdoll::RagdollOverrides bad;
+        check(!ragdoll::parseRagdollOverrides("bone Head shape cube\n", bad, &why), "an unknown shape is an error: " + why);
+        check(!ragdoll::parseRagdollOverrides("bone Head joint spring\n", bad, &why), "an unknown joint is an error");
+        check(!ragdoll::parseRagdollOverrides("bone Head offset 1 2\n", bad, &why), "a short offset is an error");
+        check(!ragdoll::parseRagdollOverrides("bone Head mass -2\n", bad, &why), "a negative mass is an error");
+        check(!ragdoll::parseRagdollOverrides("bone Head friction -1\n", bad, &why), "a negative friction is an error");
+    }
+
     AVER_INFO("==================================================");
     if (g_failures == 0) AVER_INFO("=== {} assertions, 0 failed ===", g_checks);
     else                 AVER_ERROR("=== {} assertions, {} FAILED ===", g_checks, g_failures);
