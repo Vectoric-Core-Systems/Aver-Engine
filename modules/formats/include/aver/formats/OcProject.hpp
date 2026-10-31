@@ -81,6 +81,12 @@ struct ProjectDesc {
     // 1 on (also in raster-primary ray-traced frames), 2 off. RENDER.LOCALSHADOWS: shadow maps for them, 0/1 (default 1).
     int localRaster        = -1; // RENDER.LOCALRASTER      0/1/2 (engine default 0)
     int localShadows       = -1; // RENDER.LOCALSHADOWS     0/1 (engine default 1)
+    // RENDER.TEXTUREANISO: the anisotropy level of the material samplers, 1..16 (engine default 8). RENDER.TEXTUREMIPBIAS: a bias added to every material
+    // texture's mip level, -2..2 (default 0; negative sharpens). The samplers are baked into the pipelines, so both are read when the renderer starts
+    // and a change takes effect on the next project load.
+    int textureAniso       = -1; // RENDER.TEXTUREANISO     1..16 (engine default 8)
+    bool hasTextureMipBias = false;
+    f32 textureMipBias     = 0.0f; // RENDER.TEXTUREMIPBIAS  -2..2 (engine default 0); meaningful only with hasTextureMipBias
     // RENDER.VOLFOG switches Voxi's volumetric fog (light shafts; the home of fog volumes) on or off; RENDER.VOLFOGDENSITY is its uniform
     // medium in extinction per CENTIMETRE (engine default 0.00002). Off by default; importers write both for a project with volumetric fog.
     int volFog             = -1;    // RENDER.VOLFOG         0/1 (engine default 0)
@@ -182,6 +188,7 @@ struct ProjectDesc {
                rtRenderMode >= 0 || ptBounces >= 0 || ptMode >= 0 || layeredBsdf >= 0 ||
                giCones >= 0 || giMode >= 0 || denoiser >= 0 || restirVisibility >= 0 ||
                restirHistory >= 0 || rdStages >= 0 || fogOcclusion >= 0 || meshExtra >= 0 || materialFx >= 0 || localRaster >= 0 || localShadows >= 0 ||
+               textureAniso >= 0 || hasTextureMipBias ||
                volFog >= 0 || volFogDensity >= 0.0f ||
                subViewports >= 0 || subViewRenders >= 0 || subViewPixels >= 0.0f ||
                refractionMode >= 0 || refractionStrength >= 0.0f ||

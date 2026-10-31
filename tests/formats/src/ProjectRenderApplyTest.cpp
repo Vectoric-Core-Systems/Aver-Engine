@@ -876,6 +876,52 @@ static void testMaterialFxKey() {
     check(cap2.materialFx == -1, "capture: on does not add the key to a project that never mentioned it");
 }
 
+// RENDER.TEXTUREANISO / RENDER.TEXTUREMIPBIAS (P1): absent keeps 8 and 0, a stated value lands clamped, both round-trip (the bias may be negative), and
+// capture writes them only when they differ from the defaults or the project already stated them.
+static void testTextureSamplerKeys() {
+    AVER_INFO("=== RENDER.TEXTUREANISO / RENDER.TEXTUREMIPBIAS: the material samplers' quality ===");
+    voxi::Settings s{};
+    check(s.textureAnisotropy == 8u && s.textureMipBias == 0.0f, "the engine defaults are anisotropy 8, bias 0 (what the one static sampler always was)");
+    fmt::ProjectDesc absent;
+    check(absent.textureAniso == -1 && !absent.hasTextureMipBias && !absent.hasRenderSettings(), "absent: not stated, so no render setting");
+    voxi::applyManifestKnobs(absent, s);
+    check(s.textureAnisotropy == 8u && s.textureMipBias == 0.0f, "an absent key leaves both alone");
+    fmt::ProjectDesc p;
+    p.name = "Samplers";
+    p.textureAniso = 16;
+    p.hasTextureMipBias = true;
+    p.textureMipBias = -0.5f;
+    check(p.hasRenderSettings(), "a stated key counts as a render setting");
+    voxi::applyManifestKnobs(p, s);
+    check(s.textureAnisotropy == 16u && s.textureMipBias == -0.5f, "stated values land in Settings");
+    fmt::ProjectDesc wild;
+    wild.textureAniso = 400;
+    wild.hasTextureMipBias = true;
+    wild.textureMipBias = -90.0f;
+    voxi::applyManifestKnobs(wild, s);
+    check(s.textureAnisotropy == 16u && s.textureMipBias == -2.0f, "out-of-range values clamp (anisotropy 1..16, bias -2..2)");
+    const std::string text = fmt::writeOcproject(p, "");
+    check(text.find("RENDER.TEXTUREANISO 16") != std::string::npos && text.find("RENDER.TEXTUREMIPBIAS -0.5") != std::string::npos, "both keys are written, the negative bias included");
+    fmt::ProjectDesc back;
+    std::string err;
+    check(fmt::parseOcproject(text, back, &err) && back.textureAniso == 16 && back.hasTextureMipBias && back.textureMipBias == -0.5f, "and parse back: " + err);
+    fmt::ProjectDesc none;
+    none.name = "NoSamplers";
+    const std::string plain = fmt::writeOcproject(none, "");
+    check(plain.find("RENDER.TEXTURE") == std::string::npos, "an absent key writes no line");
+    const voxi::DeviceInfo d = fullyCapableDevice();
+    voxi::Settings live{};
+    voxi::Settings requested = live;
+    fmt::ProjectDesc cap;
+    voxi::captureVoxiSettings(cap, requested, live, d, 0);
+    check(cap.textureAniso == -1 && !cap.hasTextureMipBias, "capture: the defaults add neither key to a project that never mentioned them");
+    requested.textureAnisotropy = 4;
+    requested.textureMipBias = 0.25f;
+    fmt::ProjectDesc cap2;
+    voxi::captureVoxiSettings(cap2, requested, live, d, 0);
+    check(cap2.textureAniso == 4 && cap2.hasTextureMipBias && cap2.textureMipBias == 0.25f, "capture: a changed value is written");
+}
+
 // RENDER.MESHEXTRA (G4 R1): absent leaves the default (on), 0/1 land in Settings::meshExtraStreams, the key round-trips and a manifest that
 // never mentions it stays free of it.
 static void testMeshExtraKey() {
@@ -1079,6 +1125,7 @@ int main() {
     testLocalRasterKeys();
     testMeshExtraKey();
     testMaterialFxKey();
+    testTextureSamplerKeys();
     testEveryKeyReachesSettings();
     testN6AbsentDerivedKnobResetsToLadder();
     testN6RestirVisibilityFollowsTier();

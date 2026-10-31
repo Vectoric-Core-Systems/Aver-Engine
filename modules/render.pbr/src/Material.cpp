@@ -24,12 +24,23 @@ struct MaterialLibrary::Impl {
     u64 changes = 0;   // bumped wherever a slot's dirty flag is set or the live set changes
 };
 
+static_assert(AVER_PBR_SAMPLER_ANISOTROPIC == static_cast<int>(FxFilter::Anisotropic) && AVER_PBR_SAMPLER_TRILINEAR == static_cast<int>(FxFilter::Trilinear) &&
+              AVER_PBR_SAMPLER_BILINEAR == static_cast<int>(FxFilter::Bilinear) && AVER_PBR_SAMPLER_POINT_MIP == static_cast<int>(FxFilter::PointMip) &&
+              AVER_PBR_SAMPLER_POINT == static_cast<int>(FxFilter::Point), "the ABI's sampler filter ids are FxFilter's");
+static_assert(AVER_PBR_ADDRESS_WRAP == static_cast<int>(FxAddress::Wrap) && AVER_PBR_ADDRESS_CLAMP == static_cast<int>(FxAddress::Clamp) &&
+              AVER_PBR_ADDRESS_MIRROR == static_cast<int>(FxAddress::Mirror), "the ABI's sampler address ids are FxAddress'");
+static_assert(AVER_PBR_CHANNEL_R == static_cast<int>(FxChannel::R) && AVER_PBR_CHANNEL_G == static_cast<int>(FxChannel::G) && AVER_PBR_CHANNEL_B == static_cast<int>(FxChannel::B) &&
+              AVER_PBR_CHANNEL_A == static_cast<int>(FxChannel::A) && AVER_PBR_CHANNEL_GRAY == static_cast<int>(FxChannel::Gray), "the ABI's channel ids are FxChannel's");
+static_assert(AVER_PBR_ALPHAEXT_NONE == static_cast<int>(FxAlphaExt::None) && AVER_PBR_ALPHAEXT_HASH == static_cast<int>(FxAlphaExt::Hash) &&
+              AVER_PBR_ALPHAEXT_ANTIALIAS == static_cast<int>(FxAlphaExt::Antialias), "the ABI's alpha extension ids are FxAlphaExt's");
+
 namespace {
 
 // Clamps every scalar the shading model divides by or raises to a power.
 void sanitise(MaterialDesc& d) {
     for (f32& c : d.baseColorFactor) c = std::clamp(c, 0.0f, 1.0f);
     for (f32& c : d.emissiveFactor)  c = std::max(c, 0.0f);   // emissive is radiance, not a ratio
+    d.emissiveEnergy    = std::isfinite(d.emissiveEnergy) ? std::clamp(d.emissiveEnergy, 0.0f, 10000.0f) : 1.0f;
     d.metallicFactor    = std::clamp(d.metallicFactor, 0.0f, 1.0f);
     // Not clamped to 0: a perfect mirror collapses the GGX denominator. The floor matches
     // shadeSurface's, so the authored value and the shaded value agree.
@@ -103,6 +114,10 @@ void sanitise(MaterialDesc& d) {
         if (static_cast<u32>(f.detailBlend) > static_cast<u32>(FxBlendOp::Mul)) f.detailBlend = FxBlendOp::Mix;
         if (static_cast<u32>(f.specularMode) > static_cast<u32>(FxSpecular::Disabled)) f.specularMode = FxSpecular::Schlick;
         if (static_cast<u32>(f.diffuseMode) > static_cast<u32>(FxDiffuse::Toon)) f.diffuseMode = FxDiffuse::Burley;
+        if (static_cast<u32>(f.texFilter) > static_cast<u32>(FxFilter::Point)) f.texFilter = FxFilter::Anisotropic;
+        if (static_cast<u32>(f.texAddress) > static_cast<u32>(FxAddress::Mirror)) f.texAddress = FxAddress::Wrap;
+        if (static_cast<u32>(f.roughChannel) > static_cast<u32>(FxChannel::Gray)) f.roughChannel = FxChannel::G;
+        if (static_cast<u32>(f.metalChannel) > static_cast<u32>(FxChannel::Gray)) f.metalChannel = FxChannel::B;
         f.renderPriority = std::clamp(f.renderPriority, -128, 127);
         f.alphaHashScale = fin(f.alphaHashScale, 0.05f, 20.0f, 1.0f);
         f.growCm = fin(f.growCm, -10000.0f, 10000.0f, 0.0f);
@@ -457,6 +472,18 @@ int32_t aver_pbr_set_name(aver_pbr_material m, const char* name) {
     return commit(m);
 }
 
+aver_pbr_material aver_pbr_find(const char* name) {
+    if (!name) return 0;
+    MaterialLibrary& lib = MaterialLibrary::get();
+    const aver::u32 n = lib.count();
+    for (aver::u32 i = 0; i < n; ++i) {
+        const MaterialHandle h = lib.at(i);
+        const MaterialDesc* d = h ? lib.desc(h) : nullptr;
+        if (d && d->name == name) return static_cast<aver_pbr_material>(h);
+    }
+    return 0;
+}
+
 // ---- factors ----
 int32_t aver_pbr_get_base_color_factor(aver_pbr_material m, float* out4) {
     const MaterialDesc* d = read(m);
@@ -480,6 +507,15 @@ int32_t aver_pbr_set_emissive_factor(aver_pbr_material m, float r, float g, floa
     MaterialDesc* d = edit(m);
     if (!d) return 0;
     d->emissiveFactor[0] = r; d->emissiveFactor[1] = g; d->emissiveFactor[2] = b;
+    return commit(m);
+}
+float aver_pbr_get_emissive_energy(aver_pbr_material m) {
+    const MaterialDesc* d = read(m); return d ? d->emissiveEnergy : 1.0f;
+}
+int32_t aver_pbr_set_emissive_energy(aver_pbr_material m, float v) {
+    MaterialDesc* d = edit(m);
+    if (!d || !std::isfinite(v)) return 0;
+    d->emissiveEnergy = v;
     return commit(m);
 }
 
@@ -637,6 +673,84 @@ int32_t aver_pbr_set_uv_tiling(aver_pbr_material m, float cmPerTile) {
     MaterialDesc* d = edit(m);
     if (!d || !(cmPerTile > 0.0f)) return 0;
     d->uvTiling = cmPerTile;
+    return commit(m);
+}
+int32_t aver_pbr_get_uv_transform(aver_pbr_material m, int32_t set, float* out4) {
+    const MaterialDesc* d = read(m);
+    if (!d || !out4 || (set != 1 && set != 2)) return 0;
+    const float* scale = set == 1 ? d->fx.uv1Scale : d->fx.uv2Scale;
+    const float* offset = set == 1 ? d->fx.uv1Offset : d->fx.uv2Offset;
+    out4[0] = scale[0]; out4[1] = scale[1]; out4[2] = offset[0]; out4[3] = offset[1];
+    return 1;
+}
+int32_t aver_pbr_set_uv_transform(aver_pbr_material m, int32_t set, float sx, float sy, float ox, float oy) {
+    MaterialDesc* d = edit(m);
+    if (!d || (set != 1 && set != 2) || !std::isfinite(sx) || !std::isfinite(sy) || !std::isfinite(ox) || !std::isfinite(oy)) return 0;
+    float* scale = set == 1 ? d->fx.uv1Scale : d->fx.uv2Scale;
+    float* offset = set == 1 ? d->fx.uv1Offset : d->fx.uv2Offset;
+    scale[0] = sx; scale[1] = sy; offset[0] = ox; offset[1] = oy;
+    return commit(m);
+}
+int32_t aver_pbr_get_sampler_filter(aver_pbr_material m) {
+    const MaterialDesc* d = read(m);
+    return d ? static_cast<int32_t>(d->fx.texFilter) : 0;
+}
+int32_t aver_pbr_set_sampler_filter(aver_pbr_material m, int32_t filter) {
+    MaterialDesc* d = edit(m);
+    if (!d || filter < AVER_PBR_SAMPLER_ANISOTROPIC || filter > AVER_PBR_SAMPLER_POINT) return 0;
+    d->fx.texFilter = static_cast<aver::pbr::FxFilter>(filter);
+    return commit(m);
+}
+int32_t aver_pbr_get_sampler_address(aver_pbr_material m) {
+    const MaterialDesc* d = read(m);
+    return d ? static_cast<int32_t>(d->fx.texAddress) : 0;
+}
+int32_t aver_pbr_set_sampler_address(aver_pbr_material m, int32_t address) {
+    MaterialDesc* d = edit(m);
+    if (!d || address < AVER_PBR_ADDRESS_WRAP || address > AVER_PBR_ADDRESS_MIRROR) return 0;
+    d->fx.texAddress = static_cast<aver::pbr::FxAddress>(address);
+    return commit(m);
+}
+// ---- texture decode and alpha (F35) ----
+int32_t aver_pbr_get_roughness_channel(aver_pbr_material m) {
+    const MaterialDesc* d = read(m);
+    return d ? static_cast<int32_t>(d->fx.roughSel()) : AVER_PBR_CHANNEL_G;
+}
+int32_t aver_pbr_set_roughness_channel(aver_pbr_material m, int32_t channel) {
+    MaterialDesc* d = edit(m);
+    if (!d || channel < AVER_PBR_CHANNEL_R || channel > AVER_PBR_CHANNEL_GRAY) return 0;
+    d->fx.roughChannel = static_cast<aver::pbr::FxChannel>(channel);
+    return commit(m);
+}
+int32_t aver_pbr_get_metallic_channel(aver_pbr_material m) {
+    const MaterialDesc* d = read(m);
+    return d ? static_cast<int32_t>(d->fx.metalSel()) : AVER_PBR_CHANNEL_B;
+}
+int32_t aver_pbr_set_metallic_channel(aver_pbr_material m, int32_t channel) {
+    MaterialDesc* d = edit(m);
+    if (!d || channel < AVER_PBR_CHANNEL_R || channel > AVER_PBR_CHANNEL_GRAY) return 0;
+    d->fx.metalChannel = static_cast<aver::pbr::FxChannel>(channel);
+    return commit(m);
+}
+int32_t aver_pbr_get_vertex_color(aver_pbr_material m) {
+    const MaterialDesc* d = read(m); return d && d->vertexColor ? 1 : 0;
+}
+int32_t aver_pbr_set_vertex_color(aver_pbr_material m, int32_t on) {
+    MaterialDesc* d = edit(m); if (!d) return 0; d->vertexColor = on != 0; return commit(m);
+}
+int32_t aver_pbr_get_vertex_color_srgb(aver_pbr_material m) {
+    const MaterialDesc* d = read(m); return d && d->fx.vertexColorSrgb ? 1 : 0;
+}
+int32_t aver_pbr_set_vertex_color_srgb(aver_pbr_material m, int32_t on) {
+    MaterialDesc* d = edit(m); if (!d) return 0; d->fx.vertexColorSrgb = on != 0; return commit(m);
+}
+int32_t aver_pbr_get_alpha_extension(aver_pbr_material m) {
+    const MaterialDesc* d = read(m); return d ? static_cast<int32_t>(d->fx.alphaExt) : AVER_PBR_ALPHAEXT_NONE;
+}
+int32_t aver_pbr_set_alpha_extension(aver_pbr_material m, int32_t ext) {
+    MaterialDesc* d = edit(m);
+    if (!d || ext < AVER_PBR_ALPHAEXT_NONE || ext > AVER_PBR_ALPHAEXT_ANTIALIAS) return 0;
+    d->fx.alphaExt = static_cast<aver::pbr::FxAlphaExt>(ext);
     return commit(m);
 }
 const char* aver_pbr_uv_mode_name(int32_t mode) {

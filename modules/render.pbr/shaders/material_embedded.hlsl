@@ -245,14 +245,14 @@ float4 embSlotNearestAt(uint slot, uint mode, float2 uv, int level) {
 #ifndef AVER_CUSTOM_NO_DERIVATIVES
 float embSlotCalcLod(uint slot, float2 uv) {
     switch (slot) {
-    case 0u: return gBaseColorMap.CalculateLevelOfDetail(gMaterialSampler, uv);
-    case 1u: return gMetalRoughMap.CalculateLevelOfDetail(gMaterialSampler, uv);
-    case 2u: return gNormalMap.CalculateLevelOfDetail(gMaterialSampler, uv);
-    case 3u: return gOcclusionMap.CalculateLevelOfDetail(gMaterialSampler, uv);
-    case 4u: return gEmissiveMap.CalculateLevelOfDetail(gMaterialSampler, uv);
-    case 5u: return gL1BaseColorMap.CalculateLevelOfDetail(gMaterialSampler, uv);
-    case 6u: return gL1MetalRoughMap.CalculateLevelOfDetail(gMaterialSampler, uv);
-    default: return gL1NormalMap.CalculateLevelOfDetail(gMaterialSampler, uv);
+    case 0u: return gBaseColorMap.CalculateLevelOfDetail(gSurfaceSampler, uv);
+    case 1u: return gMetalRoughMap.CalculateLevelOfDetail(gSurfaceSampler, uv);
+    case 2u: return gNormalMap.CalculateLevelOfDetail(gSurfaceSampler, uv);
+    case 3u: return gOcclusionMap.CalculateLevelOfDetail(gSurfaceSampler, uv);
+    case 4u: return gEmissiveMap.CalculateLevelOfDetail(gSurfaceSampler, uv);
+    case 5u: return gL1BaseColorMap.CalculateLevelOfDetail(gSurfaceSampler, uv);
+    case 6u: return gL1MetalRoughMap.CalculateLevelOfDetail(gSurfaceSampler, uv);
+    default: return gL1NormalMap.CalculateLevelOfDetail(gSurfaceSampler, uv);
     }
 }
 #else
@@ -268,10 +268,10 @@ float4 embSlotSample(uint slot, uint mode, float2 uv, float bias) {
     }
     uv = embSlotUv(mode, uv, sz);
 #ifdef AVER_CUSTOM_NO_DERIVATIVES
-    EMB_SLOT_SWITCH(SampleLevel(gMaterialSampler, uv, 0.0))
+    EMB_SLOT_SWITCH(SampleLevel(gSurfaceSampler, uv, 0.0))
 #else
-    if (bias != 0.0) { EMB_SLOT_SWITCH(SampleBias(gMaterialSampler, uv, bias)) }
-    EMB_SLOT_SWITCH(Sample(gMaterialSampler, uv))
+    if (bias != 0.0) { EMB_SLOT_SWITCH(SampleBias(gSurfaceSampler, uv, bias)) }
+    EMB_SLOT_SWITCH(Sample(gSurfaceSampler, uv))
 #endif
 }
 float4 embSlotSampleLod(uint slot, uint mode, float2 uv, float lod) {
@@ -279,21 +279,21 @@ float4 embSlotSampleLod(uint slot, uint mode, float2 uv, float lod) {
     const int2 sz = embSlotSize(slot, 0);
     if ((mode & 1u) != 0u) return embSlotNearestAt(slot, mode, uv, (mode & 4u) != 0u ? clamp((int)round(lod), 0, embSlotLevels(slot) - 1) : 0);
     uv = embSlotUv(mode, uv, sz);
-    EMB_SLOT_SWITCH(SampleLevel(gMaterialSampler, uv, lod))
+    EMB_SLOT_SWITCH(SampleLevel(gSurfaceSampler, uv, lod))
 }
 float4 embSlotSampleGrad(uint slot, uint mode, float2 uv, float2 dx, float2 dy) {
     if (!embSlotBound(slot)) return embSlotDefault(mode);
     const int2 sz = embSlotSize(slot, 0);
     if ((mode & 1u) != 0u) return embSlotNearestAt(slot, mode, uv, 0);
     uv = embSlotUv(mode, uv, sz);
-    EMB_SLOT_SWITCH(SampleGrad(gMaterialSampler, uv, dx, dy))
+    EMB_SLOT_SWITCH(SampleGrad(gSurfaceSampler, uv, dx, dy))
 }
 float2 embSlotQueryLod(uint slot, float2 uv) { const float l = embSlotCalcLod(slot, uv); return float2(l, l); }
 float4 embSlotGather(uint slot, float2 uv, int comp) {
-    if (comp == 1) { EMB_SLOT_SWITCH(GatherGreen(gMaterialSampler, uv)) }
-    if (comp == 2) { EMB_SLOT_SWITCH(GatherBlue(gMaterialSampler, uv)) }
-    if (comp == 3) { EMB_SLOT_SWITCH(GatherAlpha(gMaterialSampler, uv)) }
-    EMB_SLOT_SWITCH(GatherRed(gMaterialSampler, uv))
+    if (comp == 1) { EMB_SLOT_SWITCH(GatherGreen(gSurfaceSampler, uv)) }
+    if (comp == 2) { EMB_SLOT_SWITCH(GatherBlue(gSurfaceSampler, uv)) }
+    if (comp == 3) { EMB_SLOT_SWITCH(GatherAlpha(gSurfaceSampler, uv)) }
+    EMB_SLOT_SWITCH(GatherRed(gSurfaceSampler, uv))
 }
 
 // The ray flavour: the same contract over the bindless table (voxi_rt.hlsli). Without RT_BINDLESS nothing calls these.

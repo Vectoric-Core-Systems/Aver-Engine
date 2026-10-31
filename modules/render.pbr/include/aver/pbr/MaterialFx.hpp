@@ -20,6 +20,18 @@ enum class FxDistanceFade : u8 { Off = 0, PixelAlpha, PixelDither, ObjectDither 
 enum class FxBlendOp : u8 { Mix = 0, Add, Sub, Mul };                      // detail blend
 enum class FxSpecular : u8 { Schlick = 0, Toon, Disabled };
 enum class FxDiffuse : u8 { Burley = 0, Lambert, LambertWrap, Toon };
+// How the material's own textures are filtered and addressed (raster draws only; see MaterialSampler). Anisotropic is today's one sampler.
+enum class FxFilter : u8 { Anisotropic = 0, Trilinear, Bilinear, PointMip, Point };
+enum class FxAddress : u8 { Wrap = 0, Clamp, Mirror };
+// Which channel of the metal-rough texture a scalar is read from. Gray is the Rec. 709 luminance of the texel. The engine's own packing (glTF) is roughness G, metallic B.
+enum class FxChannel : u8 { R = 0, G, B, A, Gray };
+
+// The sampler state a material asks for, as one id: address * 5 + filter, 0..14, 0 = the engine's own (anisotropic, wrap). The renderer declares one
+// static sampler per id (Voxi: register s(2 + id)), so a draw picks its sampler by pipeline variant, never by a per-draw descriptor.
+inline constexpr u32 kMaterialSamplerFilters = 5, kMaterialSamplerAddresses = 3, kMaterialSamplerCount = kMaterialSamplerFilters * kMaterialSamplerAddresses;
+inline constexpr u32 materialSamplerId(FxFilter f, FxAddress a) { return static_cast<u32>(a) * kMaterialSamplerFilters + static_cast<u32>(f); }
+inline constexpr FxFilter materialSamplerFilter(u32 id) { return static_cast<FxFilter>(id % kMaterialSamplerFilters); }
+inline constexpr FxAddress materialSamplerAddress(u32 id) { return static_cast<FxAddress>((id / kMaterialSamplerFilters) % kMaterialSamplerAddresses); }
 
 struct MaterialFx {
     // ---- UV transforms (uv1 drives the base maps, uv2 the maps that ask for it; UV2 needs the R1 second vertex stream, else uv1 is used)
@@ -67,6 +79,17 @@ struct MaterialFx {
     FxDiffuse  diffuseMode = FxDiffuse::Burley;
     bool disableAmbient = false, noReceiveShadows = false;
 
+    // ---- texture sampling (P1): the filter, mip use and address mode of the material's textures. The project-wide anisotropy level and mip bias
+    // (RENDER.TEXTUREANISO / RENDER.TEXTUREMIPBIAS) apply to every one of these samplers. Raster draws only: ray hits fetch through the engine sampler.
+    FxFilter    texFilter = FxFilter::Anisotropic;
+    FxAddress   texAddress = FxAddress::Wrap;
+
+    // ---- texture decode (F35): which channel of the metal-rough map each scalar reads (the defaults are the engine's packing: roughness G, metallic B), and
+    // whether the mesh's vertex colour is sRGB-encoded (decoded to linear before it tints the albedo; read only where MaterialDesc::vertexColor is on). Raster
+    // draws only: ray hits and GI read the glTF packing and the colour as stored. The slope-blend layer's metal-rough map keeps the default packing.
+    FxChannel   roughChannel = FxChannel::G, metalChannel = FxChannel::B;
+    bool        vertexColorSrgb = false;
+
     // ---- an embedded HLSL shader (the graph named by the .ocmat GRAPHREF; OcGraphHlsl.hpp)
     bool embVertex = false;    // the shader has a vertex(): VSMainEmb runs it (a raster variant; ray hits and shadow maps see the unmoved mesh)
     bool embDiscard = false;   // fragment() can discard or writes ALPHA_SCISSOR_THRESHOLD: the variant is compiled without forced early depth
@@ -80,15 +103,25 @@ struct MaterialFx {
         return disableAmbient || noReceiveShadows || aoLightAffect != 0.0f || emissionOp != 0 || emissionOnUv2 || aoOnUv2 ||
                specularMode != FxSpecular::Schlick || diffuseMode != FxDiffuse::Burley;
     }
+    // An out-of-range enum (a raw byte written through the ABI) reads as the engine sampler, never as an id past the table.
+    u32  samplerId() const {
+        return static_cast<u32>(texFilter) < kMaterialSamplerFilters && static_cast<u32>(texAddress) < kMaterialSamplerAddresses ? materialSamplerId(texFilter, texAddress) : 0u;
+    }
+    bool usesSampler() const { return samplerId() != 0; }
+    // An out-of-range channel reads as the engine packing, like an out-of-range sampler enum.
+    FxChannel roughSel() const { return static_cast<u32>(roughChannel) <= static_cast<u32>(FxChannel::Gray) ? roughChannel : FxChannel::G; }
+    FxChannel metalSel() const { return static_cast<u32>(metalChannel) <= static_cast<u32>(FxChannel::Gray) ? metalChannel : FxChannel::B; }
+    bool usesChannels() const { return roughSel() != FxChannel::G || metalSel() != FxChannel::B || vertexColorSrgb; }
     bool usesVertex() const { return billboard != FxBillboard::Off || fixedSize || (grow && growCm != 0.0f); }
     bool active() const {
         return usesUv() || usesTriplanar() || usesSurface() || usesVertex() || cull == FxCull::Back || cull == FxCull::Front || blend == FxBlend::Add || blend == FxBlend::Sub || blend == FxBlend::Mul ||
                depthDraw != FxDepthDraw::Default || noDepthTest || renderPriority != 0 || unshaded || alphaExt != FxAlphaExt::None ||
-               shadowToOpacity || distanceFade != FxDistanceFade::Off || rim || anisotropy || heightmap || backlight || detail || embVertex || embDiscard;
+               shadowToOpacity || distanceFade != FxDistanceFade::Off || rim || anisotropy || heightmap || backlight || detail || embVertex || embDiscard || usesSampler() || usesChannels();
     }
 };
 
-// ---- the variant key: 24 bits, stored in the upper bits of MaterialExtConstants::variant (the low byte is the render priority, biased by 128).
+// ---- the variant key: 24 feature bits, stored in the upper bits of MaterialExtConstants::variant (the low byte is the render priority, biased by 128),
+// and above them the 4-bit sampler id (kSamplerShift), stored in the top byte of MaterialExtConstants::frames and joined to the key by rhi::drawMaterialFxKey.
 namespace fxkey {
 inline constexpr u32 kCullShift = 0;          // 2 bits: FxCull
 inline constexpr u32 kBlendShift = 2;         // 3 bits: FxBlend
@@ -109,13 +142,17 @@ inline constexpr u32 kHash = 1u << 19;        // alpha hash and alpha-to-coverag
 inline constexpr u32 kFade = 1u << 20;        // distance fade
 inline constexpr u32 kUnshaded = 1u << 21;
 inline constexpr u32 kEmbVertex = 1u << 22;   // VSMainEmb (an embedded shader's vertex()) instead of VSMain; also compiles the stage's varyings in
-inline constexpr u32 kShaderMask = kUvx | kTri | kRim | kAniso | kParallax | kBacklight | kDetail | kSurf | kModes | kHash | kFade | kUnshaded;
+inline constexpr u32 kChannels = 1u << 23;    // metal-rough channel selection, vertex colour decode (the alpha-hash dword carries them)
+inline constexpr u32 kShaderMask = kUvx | kTri | kRim | kAniso | kParallax | kBacklight | kDetail | kSurf | kModes | kHash | kFade | kUnshaded | kChannels;
 inline constexpr u32 kPipelineMask = (1u << 24) - 1u;
+inline constexpr u32 kSamplerShift = 24;                       // 4 bits: pbr::materialSamplerId
+inline constexpr u32 kSamplerMask = 15u << kSamplerShift;
+inline constexpr u32 kFullMask = kPipelineMask | kSamplerMask;
 }  // namespace fxkey
 
 // Which of the engine's passes a draw with this key must not join: the frame-wide depth prepass and the per-draw depth-only draw write depth
 // through the ordinary vertex and pixel shaders, which disagree with a variant that moves vertices, transforms UVs or discards by noise.
-inline constexpr u32 kFxNoPrepassKeys = fxkey::kVertex | fxkey::kShaderMask | fxkey::kLateZ | fxkey::kEmbVertex;
+inline constexpr u32 kFxNoPrepassKeys = fxkey::kVertex | fxkey::kShaderMask | fxkey::kLateZ | fxkey::kEmbVertex | fxkey::kSamplerMask;   // a cut-out read through another sampler cuts other pixels
 
 // What the ray tracer's material table and everything else keyed on the first 192 bytes must not see.
 inline constexpr u32 kFxBaseBytes = 192;
@@ -130,7 +167,9 @@ inline constexpr u32 kFxBaseBytes = 192;
 //  2..5 uv1 scale.xy, offset.xy (f32)
 //  6 uv2 scale (half2)   7 uv2 offset (half2)   8 triplanar sharpness uv1, uv2 (half2)   9 rim amount, tint (half2)
 //  10 anisotropy, ao light affect (half2)   11 height scale, grow cm (half2)   12 backlight rgb unorm8, byte 3 unused
-//  13 fade min, max cm (half2)   14 alpha hash scale (half, low) , spare   15 frames: bits 0-5 h, 6-11 v, 12 loop, 13-17 min layers, 18-23 max layers
+//  13 fade min, max cm (half2)   14 hash: bits 0-15 alpha hash scale (half), 16 alpha-to-coverage stand-in, 17-19 roughness channel, 20-22 metallic channel,
+//     23 vertex colour is sRGB (hashbits)   15 frames: bits 0-5 h, 6-11 v, 12 loop, 13-17 min layers, 18-23 max layers,
+//     24-27 sampler id (the pipeline reads it; the shader masks every field of this dword)
 struct MaterialExtConstants {
     u32 variant;
     u32 modes;
@@ -146,6 +185,11 @@ inline constexpr u32 kBillboardMask = 3u, kKeepScale = 1u << 2, kFixedSize = 1u 
                      kFlipB = 1u << 24, kInvert = 1u << 25, kRim = 1u << 26, kAniso = 1u << 27, kBacklight = 1u << 28, kDetail = 1u << 29,
                      kNoShadows = 1u << 30, kNoAmbient = 1u << 31;
 }  // namespace modes
+
+// The alpha-hash dword (dword 14): bits 0-15 the hash scale (half), 16 alpha-to-coverage stand-in, then the F35 fields (the shader masks each).
+namespace hashbits {
+inline constexpr u32 kAntialias = 1u << 16, kRoughShift = 17, kMetalShift = 20, kVertexSrgb = 1u << 23;   // channels: 3 bits each, FxChannel
+}  // namespace hashbits
 
 // float -> IEEE half (round to nearest, saturating at the largest finite half); the HLSL side reads it with f16tof32.
 inline u32 fxHalf(f32 f) {
@@ -204,14 +248,15 @@ inline u32 fxVariantKey(const MaterialFx& fx) {
     if (fx.unshaded) k |= fxkey::kUnshaded;
     if (fx.embVertex) k |= fxkey::kEmbVertex;
     if (fx.embDiscard) k |= fxkey::kLateZ;
-    return k & fxkey::kPipelineMask;
+    if (fx.usesChannels()) k |= fxkey::kChannels;
+    return (k & fxkey::kPipelineMask) | (fx.samplerId() << fxkey::kSamplerShift);
 }
 
 // alphaMasked: the material also clips (AlphaMode::Mask), which the forced early depth of PSMainVoxi cannot take back, so its variant is compiled late-Z.
 inline MaterialExtConstants packMaterialFx(const MaterialFx& fx, bool alphaMasked = false) {
     MaterialExtConstants e{};
     const i32 pr = fx.renderPriority < -128 ? -128 : (fx.renderPriority > 127 ? 127 : fx.renderPriority);
-    e.variant = static_cast<u32>(pr + 128) | ((fxVariantKey(fx) | (alphaMasked ? fxkey::kLateZ : 0u)) << 8);
+    e.variant = static_cast<u32>(pr + 128) | (((fxVariantKey(fx) & fxkey::kPipelineMask) | (alphaMasked ? fxkey::kLateZ : 0u)) << 8);
     u32 m = static_cast<u32>(fx.billboard) & modes::kBillboardMask;
     if (fx.billboardKeepScale) m |= modes::kKeepScale;
     if (fx.fixedSize) m |= modes::kFixedSize;
@@ -250,10 +295,11 @@ inline MaterialExtConstants packMaterialFx(const MaterialFx& fx, bool alphaMaske
     const auto u8c = [](f32 v) { return static_cast<u32>((v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v)) * 255.0f + 0.5f); };
     e.backlight = u8c(fx.backlightColor[0]) | (u8c(fx.backlightColor[1]) << 8) | (u8c(fx.backlightColor[2]) << 16);
     e.fade = fxHalf2(fx.fadeMinCm, fx.fadeMaxCm);
-    e.hash = fxHalf(fx.alphaHashScale) | (fx.alphaExt == FxAlphaExt::Antialias ? 0x10000u : 0u);
+    e.hash = fxHalf(fx.alphaHashScale) | (fx.alphaExt == FxAlphaExt::Antialias ? 0x10000u : 0u) | (static_cast<u32>(fx.roughSel()) << hashbits::kRoughShift) |
+             (static_cast<u32>(fx.metalSel()) << hashbits::kMetalShift) | (fx.vertexColorSrgb ? hashbits::kVertexSrgb : 0u);
     const auto cl = [](u32 v, u32 lo, u32 hi) { return v < lo ? lo : (v > hi ? hi : v); };
     e.frames = cl(fx.particlesH, 1, 63) | (cl(fx.particlesV, 1, 63) << 6) | ((fx.particlesLoop ? 1u : 0u) << 12) | (cl(fx.minLayers, 1, 31) << 13) |
-               (cl(fx.maxLayers, 1, 63) << 18);
+               (cl(fx.maxLayers, 1, 63) << 18) | ((fx.samplerId() & 15u) << fxkey::kSamplerShift);
     return e;
 }
 

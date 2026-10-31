@@ -293,6 +293,23 @@ void GameLevel::load(const std::string& path, GameContent& content) {
             }
         }
     }
+    // P2: the materials a placement's COMPONENT SurfaceMaterials record names (one per overridden mesh slot), bound like a placement's own override.
+    // Without this the override token finds no authored handle at draw time and the surface draws the flat fallback. A streamed level's chunk-owned
+    // placements are not covered here.
+    if (!streamed) {
+        std::unordered_set<std::string> overridesBound;
+        for (const fmt::OcWorldPlacement& p : w.placements)
+            for (const fmt::OcPlacedComponent& c : p.components) {
+                std::string type = c.type;
+                for (char& ch : type) if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
+                if (type != "surfacematerials") continue;
+                for (const auto& kv : c.kv) {
+                    if (kv.second.empty() || !overridesBound.insert(kv.second).second) continue;
+                    const pbr::MaterialHandle h = content.materialForSurface(kv.second);
+                    if (h) content.bindSurfaceMaterial(aver_scene_material(0, kv.second.c_str()), h);
+                }
+            }
+    }
 #endif
     // STAGE 3 OF 3: placements, 15%..75% of load()'s own span -- world::InstantiateOptions::progress
     // is called at least every 256 placements and once at the end (its own contract), so a level of

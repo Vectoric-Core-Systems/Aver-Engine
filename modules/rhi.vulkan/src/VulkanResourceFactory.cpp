@@ -765,8 +765,8 @@ u32 buildRegisterBinds(const PipelineLayout& layout, VkRegisterBind* out, u32 ma
     for (u32 i = 0; i < layout.uavCount1 && i < kMaxBindingSlots; ++i) put('u', layout.uavCount + i, kVkSetTable1, kVkUavBindingBase + i);
 
     // Samplers: their own set, immutable, binding == register. descriptorLayout() builds exactly
-    // this, capped at 4 by PipelineLayout::samplers.
-    const u32 samplers = layout.samplerCount < 4 ? layout.samplerCount : 4;
+    // this, capped at kMaxStaticSamplers by PipelineLayout::samplers.
+    const u32 samplers = layout.samplerCount < kMaxStaticSamplers ? layout.samplerCount : kMaxStaticSamplers;
     for (u32 i = 0; i < samplers; ++i) put('s', i, kVkSetSamplers, i);
 
     // DESCRIPTOR constant buffers: THE MAP HAS TO BE COMPLETE. Once any -fvk-bind-register is
@@ -806,12 +806,13 @@ u32 shaderVariantKey(const PipelineLayout& layout, bool mesh, bool instanced) {
     key |= 1u << kObjectConstantRegister;      // pushConstantLayout always places b1, declared or not
     for (u32 k = 0; k < kMaxConstantSlots; ++k)
         if (layout.constantDwords[k]) key |= 1u << k;
-    // samplerCount is capped at 4, so needs only 3 bits.
+    // samplerCount gets 3 bits: 0..6 as they are, 7 for any count of 7 or more. Only Voxi's layouts declare more than 4 (always the same 17),
+    // so the one shared bucket cannot alias two different shapes today; give it a wider field before a second such layout exists.
     key |= (layout.srvCount  & 31u) << 5;
     key |= (layout.uavCount  & 31u) << 10;
     key |= (layout.srvCount1 & 31u) << 15;
     key |= (layout.uavCount1 & 31u) << 20;
-    key |= (layout.samplerCount & 7u) << 25;
+    key |= (layout.samplerCount < 7u ? layout.samplerCount : 7u) << 25;
     if (mesh) key |= 1u << 31;
     // Bit 30 (28..30 were free): an instanced pipeline compiles a DIFFERENT module from the same
     // source/layout (one extra -fvk-bind-register); without this the two would alias to one cached
@@ -1506,6 +1507,7 @@ VkSampler VulkanResourceFactory::getOrCreateSampler(const SamplerDesc& d) {
     ci.minFilter = toVkFilter(d.filter);
     ci.mipmapMode = toVkMipmapMode(d.filter);
     ci.addressModeU = ci.addressModeV = ci.addressModeW = toVkAddressMode(d.address);
+    ci.mipLodBias = d.mipBias;
     ci.minLod = 0.0f;
     ci.maxLod = d.maxLod;
     // compareEnable/compareOp are meaningful exactly when the caller asked for ComparisonLinear --
@@ -1722,9 +1724,9 @@ const DescriptorLayoutEntry* VulkanResourceFactory::descriptorLayout(const Pipel
         // No samplersSet is allocated: an empty layout has nothing to allocate, and nothing binds
         // set 3 on this pipeline (see where samplersSet is bound -- it is guarded on the handle).
     } else if (layout.samplerCount > 0) {
-        const u32 n = layout.samplerCount < 4 ? layout.samplerCount : 4;
-        VkDescriptorSetLayoutBinding bindings[4];
-        VkSampler immutable[4];
+        const u32 n = layout.samplerCount < kMaxStaticSamplers ? layout.samplerCount : kMaxStaticSamplers;
+        VkDescriptorSetLayoutBinding bindings[kMaxStaticSamplers];
+        VkSampler immutable[kMaxStaticSamplers];
         for (u32 i = 0; i < n; ++i) {
             immutable[i] = getOrCreateSampler(layout.samplers[i]);
             bindings[i] = VkDescriptorSetLayoutBinding{};
@@ -1849,7 +1851,7 @@ bool VulkanResourceFactory::createSharedPool(VkDescriptorPool& out) {
         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 16384},
         // No dynamic buffers: constants sets and per-draw instance sets have their own per-frame pools
         // (allocConstantsSet).
-        {VK_DESCRIPTOR_TYPE_SAMPLER, 256},
+        {VK_DESCRIPTOR_TYPE_SAMPLER, 4096},   // one samplers set per distinct layout; Voxi's declare 17 each
         {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 256},
     };
     VkDescriptorPoolCreateInfo pi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};

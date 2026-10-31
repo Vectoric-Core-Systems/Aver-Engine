@@ -525,6 +525,9 @@ private:
     bool layeredBsdfLatched_ = false;
     // Once per process, not per frame. Logging it every applySettings would be noise.
     bool layeredBsdfWarned_ = false;
+    // Settings::textureAnisotropy / textureMipBias, latched at the first setSettings the same way (they are baked into the static samplers).
+    bool texSamplerLatched_ = false;
+    bool texSamplerWarned_ = false;
     // Settings::ptBounces. Spent only while pathTracingWanted().
     u32 ptBounces_ = 1;
     // Frames apart GI volume rebuilds. 1 rebuilds every frame.

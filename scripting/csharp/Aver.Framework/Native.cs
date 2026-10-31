@@ -282,6 +282,8 @@ internal static class SceneNative
 
     // material: name0 is the content-pack id (0 == the default/project pack).
     [DllImport(Lib)] internal static extern int aver_scene_material(int name0, [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
+    // The name a material token was interned from ("" for 0 or an unknown token).
+    [DllImport(Lib)] internal static extern IntPtr aver_scene_material_name(int token);
 }
 
 /// <summary>The Aver.Settings C ABI -- durable key/value a shipped game can read and write

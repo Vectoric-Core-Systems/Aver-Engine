@@ -2,7 +2,7 @@
 
 # Aver.Scripting public API
 
-14 public types and 126 public members, read from `scripting/csharp/Aver.Scripting/` (4 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+18 public types and 153 public members, read from `scripting/csharp/Aver.Scripting/` (4 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Scripting
 
@@ -50,6 +50,7 @@ Values: `Trace = 0`, `Info = 1`, `Warn = 2`, `Error = 3`, `Critical = 4`, `Fatal
 - `public static PbrMaterial Create(string name)` - Creates a material with the glTF default surface.
 - `public static int Count { get; }` - Live materials.
 - `public static PbrMaterial At(int index)` - The material at an enumeration index.
+- `public static PbrMaterial Find(string name)` - The live material with this name (a material loaded from M_Wood.ocmat is named "M_Wood"): the instance a surface of that name draws with, so a property set on it reaches the screen on the next frame.
 - `public static PbrMaterial FromHandle(int handle)` - Wraps a raw ABI handle read earlier (Handle).
 
 ### Pbr.PbrMaterial
@@ -62,6 +63,7 @@ Values: `Trace = 0`, `Info = 1`, `Warn = 2`, `Error = 3`, `Critical = 4`, `Fatal
 - `public string Name { get; set; }`
 - `public (float R, float G, float B, float A) BaseColorFactor` - Base colour tint, rgba.
 - `public (float R, float G, float B) EmissiveFactor` - Emissive radiance, rgb.
+- `public float EmissiveEnergy { get; set; }` - A scale on the glow, multiplied into EmissiveFactor where the material is packed.
 - `public float MetallicFactor { get; set; }`
 - `public float RoughnessFactor { get; set; }` - Clamped away from 0: a perfect mirror collapses the GGX denominator.
 - `public float NormalScale { get; set; }`
@@ -82,6 +84,15 @@ Values: `Trace = 0`, `Info = 1`, `Warn = 2`, `Error = 3`, `Critical = 4`, `Fatal
 - `public bool CastShadow { get; set; }`
 - `public PbrUvMode UvMode { get; set; }` - See PbrUvMode.
 - `public float UvTiling { get; set; }` - World CENTIMETRES per texture tile.
+- `public (float ScaleX, float ScaleY, float OffsetX, float OffsetY) Uv1Transform` - First-UV scale (x, y) and offset (x, y).
+- `public (float ScaleX, float ScaleY, float OffsetX, float OffsetY) Uv2Transform` - Second-UV scale and offset, read by the maps that ask for UV2 (needs a mesh with a second UV set).
+- `public PbrSamplerFilter SamplerFilter { get; set; }` - How this material's textures are filtered.
+- `public PbrSamplerAddress SamplerAddress { get; set; }` - What a lookup outside 0..1 does.
+- `public PbrChannel RoughnessChannel { get; set; }` - The channel of the metal-rough texture roughness is read from (default G).
+- `public PbrChannel MetallicChannel { get; set; }` - The channel of the metal-rough texture metallic is read from (default B).
+- `public bool VertexColor { get; set; }` - Whether the mesh's vertex colour tints the albedo and the opacity (only on a mesh that carries the colour stream).
+- `public bool VertexColorSrgb { get; set; }` - Whether the vertex colour is sRGB-encoded and is decoded to linear before it tints.
+- `public PbrAlphaExtension AlphaExtension { get; set; }` - Hashed or alpha-to-coverage-style coverage instead of blend or scissor.
 - `public string GetTexturePath(PbrTextureSlot slot)` - The authoring path bound to a slot.
 - `public bool SetTexturePath(PbrTextureSlot slot, string path)` - Binds an authoring path to a slot.
 - `public long GetTextureId(PbrTextureSlot slot)` - Opaque asset id (an ObjectId or an .octex GUID).
@@ -97,17 +108,41 @@ Values: `Trace = 0`, `Info = 1`, `Warn = 2`, `Error = 3`, `Critical = 4`, `Fatal
 - `public override int GetHashCode()`
 - `public override string ToString()`
 
+### PbrAlphaExtension
+
+`public enum PbrAlphaExtension` - How a material's coverage is discarded in raster draws (.ocmat FX alphaext).
+
+Values: `None = 0`, `Hash = 1`, `Antialias = 2`
+
 ### PbrAlphaMode
 
 `public enum PbrAlphaMode` - How base colour alpha is interpreted (.ocmat BLEND).
 
 Values: `Opaque = 0`, `Mask = 1`, `Blend = 2`
 
+### PbrChannel
+
+`public enum PbrChannel` - Which channel of the metal-rough texture a scalar reads (.ocmat FX roughchan / metalchan).
+
+Values: `R = 0`, `G = 1`, `B = 2`, `A = 3`, `Gray = 4`
+
 ### PbrFeature
 
 `public enum PbrFeature` - The parts of a material, reported individually.
 
 Values: `Factors = 0`, `BaseColorMap = 1`, `MetalRoughMap = 2`, `NormalMap = 3`, `OcclusionMap = 4`, `EmissiveMap = 5`, `AlphaMask = 6`, `AlphaBlend = 7`
+
+### PbrSamplerAddress
+
+`public enum PbrSamplerAddress` - What a texture lookup outside 0..1 does (.ocmat FX texaddr).
+
+Values: `Wrap = 0`, `Clamp = 1`, `Mirror = 2`
+
+### PbrSamplerFilter
+
+`public enum PbrSamplerFilter` - How a material's textures are filtered (.ocmat FX texfilter).
+
+Values: `Anisotropic = 0`, `Trilinear = 1`, `Bilinear = 2`, `PointMip = 3`, `Point = 4`
 
 ### PbrStatus
 

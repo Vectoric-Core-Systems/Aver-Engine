@@ -457,7 +457,12 @@ inline VkSamplerMipmapMode toVkMipmapMode(Filter f) {
     return (f == Filter::Point) ? VK_SAMPLER_MIPMAP_MODE_NEAREST : VK_SAMPLER_MIPMAP_MODE_LINEAR;
 }
 inline VkSamplerAddressMode toVkAddressMode(AddressMode a) {
-    return a == AddressMode::Wrap ? VK_SAMPLER_ADDRESS_MODE_REPEAT : VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    switch (a) {
+        case AddressMode::Wrap:   return VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        case AddressMode::Mirror: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+        case AddressMode::Clamp:  break;
+    }
+    return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
 }
 inline VkSampleCountFlagBits toVkSampleCount(u32 n) {
     switch (n) {
@@ -610,7 +615,8 @@ inline u32 buildVertexInputAttributes(const VertexLayout& l,
 // True when two pipeline layouts declare identical bindings/constants/samplers -- Vulkan-side
 // twin of D3D12Device.cpp's sameLayout/sameSampler, used by the descriptor/pipeline-layout cache.
 inline bool sameSampler(const SamplerDesc& a, const SamplerDesc& b) {
-    return a.filter == b.filter && a.address == b.address && a.compare == b.compare && a.maxLod == b.maxLod;
+    return a.filter == b.filter && a.address == b.address && a.compare == b.compare && a.maxLod == b.maxLod &&
+           a.maxAnisotropy == b.maxAnisotropy && a.mipBias == b.mipBias;
 }
 inline bool sameLayout(const PipelineLayout& a, const PipelineLayout& b) {
     if (a.srvCount != b.srvCount || a.uavCount != b.uavCount || a.samplerCount != b.samplerCount) return false;
@@ -619,7 +625,7 @@ inline bool sameLayout(const PipelineLayout& a, const PipelineLayout& b) {
     if (a.bindlessGeometryCount != b.bindlessGeometryCount) return false;
     if (a.bindlessTextureCount != b.bindlessTextureCount) return false;   // in the key even though a non-zero space is REFUSED (descriptorLayout), so a later layout differing only there can't skip that refusal via a cached entry
     for (u32 i = 0; i < kMaxConstantSlots; ++i) if (a.constantDwords[i] != b.constantDwords[i]) return false;
-    for (u32 i = 0; i < a.samplerCount && i < 4; ++i) if (!sameSampler(a.samplers[i], b.samplers[i])) return false;
+    for (u32 i = 0; i < a.samplerCount && i < kMaxStaticSamplers; ++i) if (!sameSampler(a.samplers[i], b.samplers[i])) return false;
     return true;
 }
 inline bool sameTableShape(u32 srvA, u32 uavA, const SlotKind* srvKindsA, const SlotKind* uavKindsA,

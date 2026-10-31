@@ -9,6 +9,7 @@
 #include "aver/prefab/PrefabSystem.hpp"
 #include "aver/scene/Components.hpp"
 #include "aver/scene/World.hpp"
+#include "aver/scene/scene_abi.h"
 
 #include <cmath>
 #include <string>
@@ -477,6 +478,36 @@ int main() {
         edited.find(2)->components[1].fields[0].i = 1;
         sys.updatePrefab("Prefabs/Crate.ocprefab", edited);
         check(meshOf(w, lid) == 123, "and later edits to the prefab no longer reach it");
+    }
+
+    AVER_INFO("per-surface material overrides travel in a prefab by material name (P2)");
+    {
+        clearWorld(w);
+        PrefabLibrary lib;
+        fmt::OcPrefabData p;
+        p.name = "Barrel";
+        fmt::OcSaveField s0; s0.name = "slot0"; s0.kind = fmt::kOcPrefabKindString; s0.s = "M_Wood";
+        fmt::OcSaveField s2; s2.name = "slot2"; s2.kind = fmt::kOcPrefabKindString; s2.s = "M_Rust";
+        p.nodes.push_back(node(1, 0, "Barrel", {comp("CMeshRenderer", {fI64("mesh", 9)}), comp("CSurfaceMaterials", {s0, s2})}));
+        p.nextUid = 2;
+        lib.set("Prefabs/Barrel.ocprefab", p);
+        PrefabSystem sys(w, lib);
+        const Entity root = sys.instantiate("Prefabs/Barrel.ocprefab", at(0, 0, 0));
+        const u32 type = w.componentId(scene::kSurfaceMaterialsComponentName);
+        check(root != scene::kInvalidEntity && type != 0, "the instance spawns with the component registered");
+        auto* c = w.component<scene::CSurfaceMaterials>(root, type);
+        check(c && c->slot[0] == aver_scene_material(0, "M_Wood") && c->slot[2] == aver_scene_material(0, "M_Rust") && c->slot[1] == 0 && c->slot[15] == 0,
+              "the named slots hold their material tokens and every other slot is 0");
+        std::vector<fmt::OcPrefabOverride> ov;
+        check(sys.computeOverrides(root, ov) && ov.empty(), "a fresh instance has no overrides (the names read back as they were written)");
+        if (c) c->slot[1] = aver_scene_material(0, "M_Glass");
+        ov.clear();
+        check(sys.computeOverrides(root, ov) && ov.size() == 1 && ov[0].component == "CSurfaceMaterials" && ov[0].value.name == "slot1" &&
+                  ov[0].value.kind == fmt::kOcPrefabKindString && ov[0].value.s == "M_Glass",
+              "an extra slot on the instance is one override, saved as the material's name");
+        check(sys.revertAll(root), "reverting");
+        c = w.component<scene::CSurfaceMaterials>(root, type);
+        check(c && c->slot[1] == 0 && c->slot[0] == aver_scene_material(0, "M_Wood"), "puts the slot back to 0 and keeps the prefab's slots");
     }
 
     clearWorld(w);

@@ -9,6 +9,7 @@
 #include "aver/formats/OcProject.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <type_traits>
 
 // THE ONE PLACE A .ocproject's RENDER.* KEYS BECOME A voxi::Settings, SHARED BY BOTH HOSTS. Before
@@ -147,6 +148,9 @@ inline void applyManifestKnobs(const fmt::ProjectDesc& project, Settings& s) {
     // RENDER.LOCALRASTER (0 auto / 1 on / 2 off) and RENDER.LOCALSHADOWS: absent keeps the engine defaults; an out-of-range mode is ignored.
     if (project.localRaster >= 0 && project.localRaster <= 2) s.localLightsRaster = static_cast<u32>(project.localRaster);
     if (project.localShadows >= 0) s.localLightShadows = project.localShadows != 0;
+    // RENDER.TEXTUREANISO / RENDER.TEXTUREMIPBIAS: the material samplers' anisotropy and mip bias; absent keeps the engine defaults (8, 0), out-of-range values clamp.
+    if (project.textureAniso >= 0) s.textureAnisotropy = static_cast<u32>(std::clamp(project.textureAniso, 1, 16));
+    if (project.hasTextureMipBias && std::isfinite(project.textureMipBias)) s.textureMipBias = std::clamp(project.textureMipBias, -2.0f, 2.0f);
     // G4 R8 RENDER.VOLFOG (volumetric fog on / off) and RENDER.VOLFOGDENSITY (its uniform medium, per cm): plain knobs, absent keeps the engine defaults.
     if (project.volFog >= 0) s.volumetricFog = project.volFog != 0;
     if (project.volFogDensity >= 0.0f) s.volumetricFogDensity = std::clamp(project.volFogDensity, 0.0f, 0.01f);
@@ -598,6 +602,9 @@ inline void captureVoxiSettings(fmt::ProjectDesc& project, const Settings& reque
     if (requested.localLightsRaster != 0 || project.localRaster >= 0) project.localRaster = static_cast<int>(requested.localLightsRaster);
     if (!requested.localLightShadows) project.localShadows = 0;
     else if (project.localShadows >= 0) project.localShadows = 1;
+    // RENDER.TEXTUREANISO / TEXTUREMIPBIAS: written only when they differ from the defaults, or when the project already stated them.
+    if (requested.textureAnisotropy != 8u || project.textureAniso >= 0) project.textureAniso = static_cast<int>(requested.textureAnisotropy);
+    if (requested.textureMipBias != 0.0f || project.hasTextureMipBias) { project.hasTextureMipBias = true; project.textureMipBias = requested.textureMipBias; }
     // RENDER.VOLFOG / VOLFOGDENSITY: written only when on, or when the project already stated them (the console can switch the fog; a project that never
     // mentions it stays free of the keys).
     if (requested.volumetricFog) project.volFog = 1;

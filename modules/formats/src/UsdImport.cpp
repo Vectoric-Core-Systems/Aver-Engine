@@ -1059,7 +1059,7 @@ std::string findTranslucencySibling(const std::string& colourPath) {
         if (s != prefix + "_translucency" && s != prefix + "_transmission") continue;
         const std::string ext = lowerAscii(it->path().extension().string());
         const int rank = (ext == ".png") ? 0 : (ext == ".jpg" || ext == ".jpeg") ? 1
-                       : (ext == ".tga") ? 2 : (ext == ".tif" || ext == ".tiff") ? 3 : 99;
+                       : (ext == ".tga" || ext == ".webp") ? 2 : (ext == ".tif" || ext == ".tiff") ? 3 : 99;
         if (rank < bestRank) { bestRank = rank; best = it->path().generic_string(); }
     }
     return best;

@@ -45,6 +45,13 @@ struct TestPart {
     i32 material;
 };
 
+// GameContent::MeshPart's shape with the P2 `slot` field: the mesh's material slot the part was cut for.
+struct SlotPart {
+    u32 mesh;
+    i32 material;
+    u32 slot;
+};
+
 } // namespace
 
 int main() {
@@ -302,6 +309,61 @@ int main() {
         const SurfaceLook look;
         check(deliver(draw, look, route).hiddenFromOwner,
               "0d3bcf1 regression case: frustum-culled + owner-hidden still hides from its own owner");
+    }
+
+    // ---- P2: per-surface material overrides ----
+    std::printf("[INFO ] === per-surface material overrides (P2) ===\n");
+    {
+        // The slot is the mesh's material slot, not the part's position: slot 2 here is the SECOND part, because submesh 1 was empty and skipped.
+        const SlotPart parts[3] = {{101, 11, 0}, {102, 12, 2}, {103, 0, 3}};
+        PlannedDraw out[8];
+        i32 over[16] = {};
+        over[2] = 77;
+        u32 n = planEntityDraws(50, 50, parts, 3, 99, out, 8, over, 16);
+        check(n == 3 && out[0].material == 11 && out[1].material == 77 && out[2].material == 99, "an override replaces exactly its slot's part; the others keep their own / the entity's material");
+        over[3] = 88;
+        n = planEntityDraws(50, 50, parts, 3, 99, out, 8, over, 16);
+        check(out[2].material == 88, "an override also replaces the entity-material fallback of a part whose slot named nothing");
+        over[0] = 66;
+        n = planEntityDraws(50, 50, parts, 3, 99, out, 8, over, 16);
+        check(out[0].material == 66 && out[1].material == 77, "slot 0 and slot 2 together");
+        i32 none[16] = {};
+        n = planEntityDraws(50, 50, parts, 3, 99, out, 8, none, 16);
+        check(out[0].material == 11 && out[1].material == 12 && out[2].material == 99, "an all-zero list plans the same draws as no list");
+        n = planEntityDraws(50, 50, parts, 3, 99, out, 8);
+        check(n == 3 && out[0].material == 11 && out[1].material == 12 && out[2].material == 99, "no list (the default arguments) plans what it always did");
+        i32 shortList[1] = {55};
+        n = planEntityDraws(50, 50, parts, 3, 99, out, 8, shortList, 1);
+        check(out[0].material == 55 && out[1].material == 12, "a slot past the list's length is not overridden");
+        const SlotPart far[1] = {{104, 14, 9999}};
+        n = planEntityDraws(50, 50, far, 1, 99, out, 8, over, 16);
+        check(n == 1 && out[0].material == 14, "a part whose slot is out of range keeps its material");
+    }
+    {
+        // Not covered: a substituted draw (LOD, soft body) is other geometry, so slot overrides do not reach it.
+        const SlotPart parts[2] = {{101, 11, 0}, {102, 12, 1}};
+        PlannedDraw out[8];
+        i32 over[16] = {};
+        over[0] = 66; over[1] = 77;
+        const u32 n = planEntityDraws(50, 777, parts, 2, 99, out, 8, over, 16);
+        check(n == 1 && out[0].mesh == 777 && out[0].material == 99, "a substituted draw of a split mesh keeps the entity's material (documented: not covered)");
+    }
+    {
+        // A mesh with one slot has no parts: slot 0 is its override.
+        PlannedDraw out[8];
+        i32 over[16] = {};
+        over[0] = 66;
+        u32 n = planEntityDraws<SlotPart>(50, 50, nullptr, 0, 99, out, 8, over, 16);
+        check(n == 1 && out[0].mesh == 50 && out[0].material == 66, "no parts: slot 0's override is the single draw's material");
+        over[0] = 0; over[1] = 77;
+        n = planEntityDraws<SlotPart>(50, 50, nullptr, 0, 99, out, 8, over, 16);
+        check(out[0].material == 99, "and only slot 0");
+        over[0] = 66;
+        n = planEntityDraws<SlotPart>(50, 777, nullptr, 0, 99, out, 8, over, 16);
+        check(n == 1 && out[0].mesh == 777 && out[0].material == 66, "no parts, a LOD stand-in: still one slot, still its override");
+        const TestPart plain[2] = {{101, 11}, {102, 12}};
+        n = planEntityDraws(50, 50, plain, 2, 99, out, 8, over, 16);
+        check(n == 2 && out[0].material == 11 && out[1].material == 12, "a Part type with no slot field is never overridden (the template stays usable for it)");
     }
 
     std::printf("[INFO ] === %d assertions, %d failed ===\n", g_checks, g_failures);

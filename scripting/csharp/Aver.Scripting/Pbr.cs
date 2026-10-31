@@ -47,10 +47,74 @@ public enum PbrAlphaMode { Opaque = 0, Mask = 1, Blend = 2 }
 /// <summary>Where texture coordinates come from: the mesh's UV set, or a world-axis projection.</summary>
 public enum PbrUvMode { Mesh = 0, WorldAligned = 1 }
 
+/// <summary>How a material's textures are filtered (<c>.ocmat</c> FX <c>texfilter</c>). Raster draws only; ray hits keep the engine sampler.</summary>
+public enum PbrSamplerFilter
+{
+    /// <summary>The engine's own sampler: anisotropic, mipmapped (the level is the project's <c>RENDER.TEXTUREANISO</c>).</summary>
+    Anisotropic = 0,
+    /// <summary>Linear, with linear blending between mip levels.</summary>
+    Trilinear = 1,
+    /// <summary>Linear, mip level 0 only.</summary>
+    Bilinear = 2,
+    /// <summary>Nearest, with nearest mip selection.</summary>
+    PointMip = 3,
+    /// <summary>Nearest, mip level 0 only (pixel art).</summary>
+    Point = 4,
+}
+
+/// <summary>What a texture lookup outside 0..1 does (<c>.ocmat</c> FX <c>texaddr</c>).</summary>
+public enum PbrSamplerAddress { Wrap = 0, Clamp = 1, Mirror = 2 }
+
+/// <summary>Which channel of the metal-rough texture a scalar reads (<c>.ocmat</c> FX <c>roughchan</c> / <c>metalchan</c>). Raster draws only.</summary>
+public enum PbrChannel
+{
+    /// <summary>Red.</summary>
+    R = 0,
+    /// <summary>Green: where the engine reads roughness.</summary>
+    G = 1,
+    /// <summary>Blue: where the engine reads metallic.</summary>
+    B = 2,
+    /// <summary>Alpha.</summary>
+    A = 3,
+    /// <summary>The Rec. 709 luminance of the texel.</summary>
+    Gray = 4,
+}
+
+/// <summary>How a material's coverage is discarded in raster draws (<c>.ocmat</c> FX <c>alphaext</c>).</summary>
+public enum PbrAlphaExtension
+{
+    /// <summary>The alpha mode alone decides (opaque, scissor or blend).</summary>
+    None = 0,
+    /// <summary>Stable noise against the alpha.</summary>
+    Hash = 1,
+    /// <summary>The alpha-to-coverage stand-in: the noise against a coverage that follows the alpha's edge.</summary>
+    Antialias = 2,
+}
+
 /// <summary>Creates and addresses PBR materials over the <c>aver_pbr_*</c> C ABI.</summary>
 public static class Pbr
 {
     private const string Lib = "Aver.Render.PBR";
+
+    [DllImport(Lib)] private static extern int aver_pbr_find([MarshalAs(UnmanagedType.LPUTF8Str)] string name);
+    [DllImport(Lib)] private static extern int aver_pbr_get_uv_transform(int m, int set, float[] out4);
+    [DllImport(Lib)] private static extern int aver_pbr_set_uv_transform(int m, int set, float sx, float sy, float ox, float oy);
+    [DllImport(Lib)] private static extern int aver_pbr_get_sampler_filter(int m);
+    [DllImport(Lib)] private static extern int aver_pbr_set_sampler_filter(int m, int filter);
+    [DllImport(Lib)] private static extern int aver_pbr_get_sampler_address(int m);
+    [DllImport(Lib)] private static extern int aver_pbr_set_sampler_address(int m, int address);
+    [DllImport(Lib)] private static extern float aver_pbr_get_emissive_energy(int m);
+    [DllImport(Lib)] private static extern int aver_pbr_set_emissive_energy(int m, float v);
+    [DllImport(Lib)] private static extern int aver_pbr_get_roughness_channel(int m);
+    [DllImport(Lib)] private static extern int aver_pbr_set_roughness_channel(int m, int channel);
+    [DllImport(Lib)] private static extern int aver_pbr_get_metallic_channel(int m);
+    [DllImport(Lib)] private static extern int aver_pbr_set_metallic_channel(int m, int channel);
+    [DllImport(Lib)] private static extern int aver_pbr_get_vertex_color(int m);
+    [DllImport(Lib)] private static extern int aver_pbr_set_vertex_color(int m, int on);
+    [DllImport(Lib)] private static extern int aver_pbr_get_vertex_color_srgb(int m);
+    [DllImport(Lib)] private static extern int aver_pbr_set_vertex_color_srgb(int m, int on);
+    [DllImport(Lib)] private static extern int aver_pbr_get_alpha_extension(int m);
+    [DllImport(Lib)] private static extern int aver_pbr_set_alpha_extension(int m, int ext);
 
     // ---- interop ----
     [DllImport(Lib)] private static extern int aver_pbr_feature_count();
@@ -165,6 +229,10 @@ public static class Pbr
     /// <summary>The material at an enumeration index.</summary>
     public static PbrMaterial At(int index) => new(aver_pbr_at(index));
 
+    /// <summary>The live material with this name (a material loaded from <c>M_Wood.ocmat</c> is named "M_Wood"): the instance a surface of that name draws
+    /// with, so a property set on it reaches the screen on the next frame. Invalid (handle 0) when there is none.</summary>
+    public static PbrMaterial Find(string name) => new(aver_pbr_find(name));
+
     /// <summary>Wraps a raw ABI handle read earlier (<see cref="PbrMaterial.Handle"/>). A stale handle answers every call with its neutral value.</summary>
     public static PbrMaterial FromHandle(int handle) => new(handle);
 
@@ -207,6 +275,13 @@ public static class Pbr
                 return aver_pbr_get_emissive_factor(Handle, v) != 0 ? (v[0], v[1], v[2]) : (0, 0, 0);
             }
             set => aver_pbr_set_emissive_factor(Handle, value.R, value.G, value.B);
+        }
+
+        /// <summary>A scale on the glow, multiplied into <see cref="EmissiveFactor"/> where the material is packed. 1 is none; 0 to 10000.</summary>
+        public float EmissiveEnergy
+        {
+            get => aver_pbr_get_emissive_energy(Handle);
+            set => aver_pbr_set_emissive_energy(Handle, value);
         }
 
         public float MetallicFactor
@@ -407,6 +482,76 @@ public static class Pbr
         {
             get => aver_pbr_get_uv_tiling(Handle);
             set => aver_pbr_set_uv_tiling(Handle, value);
+        }
+
+        // ---- the FX record: UV transforms and the sampler (raster draws only) ----
+        /// <summary>First-UV scale (x, y) and offset (x, y). (1, 1, 0, 0) is no transform. The first non-default value moves the material to its own pipeline variant.</summary>
+        public (float ScaleX, float ScaleY, float OffsetX, float OffsetY) Uv1Transform
+        {
+            get => GetUvTransform(1);
+            set => aver_pbr_set_uv_transform(Handle, 1, value.ScaleX, value.ScaleY, value.OffsetX, value.OffsetY);
+        }
+
+        /// <summary>Second-UV scale and offset, read by the maps that ask for UV2 (needs a mesh with a second UV set).</summary>
+        public (float ScaleX, float ScaleY, float OffsetX, float OffsetY) Uv2Transform
+        {
+            get => GetUvTransform(2);
+            set => aver_pbr_set_uv_transform(Handle, 2, value.ScaleX, value.ScaleY, value.OffsetX, value.OffsetY);
+        }
+
+        private (float, float, float, float) GetUvTransform(int set)
+        {
+            var v = new float[4];
+            return aver_pbr_get_uv_transform(Handle, set, v) != 0 ? (v[0], v[1], v[2], v[3]) : (1f, 1f, 0f, 0f);
+        }
+
+        /// <summary>How this material's textures are filtered. Raster draws only.</summary>
+        public PbrSamplerFilter SamplerFilter
+        {
+            get => (PbrSamplerFilter)aver_pbr_get_sampler_filter(Handle);
+            set => aver_pbr_set_sampler_filter(Handle, (int)value);
+        }
+
+        /// <summary>What a lookup outside 0..1 does. Raster draws only.</summary>
+        public PbrSamplerAddress SamplerAddress
+        {
+            get => (PbrSamplerAddress)aver_pbr_get_sampler_address(Handle);
+            set => aver_pbr_set_sampler_address(Handle, (int)value);
+        }
+
+        /// <summary>The channel of the metal-rough texture roughness is read from (default <see cref="PbrChannel.G"/>). Raster draws only.</summary>
+        public PbrChannel RoughnessChannel
+        {
+            get => (PbrChannel)aver_pbr_get_roughness_channel(Handle);
+            set => aver_pbr_set_roughness_channel(Handle, (int)value);
+        }
+
+        /// <summary>The channel of the metal-rough texture metallic is read from (default <see cref="PbrChannel.B"/>). Raster draws only.</summary>
+        public PbrChannel MetallicChannel
+        {
+            get => (PbrChannel)aver_pbr_get_metallic_channel(Handle);
+            set => aver_pbr_set_metallic_channel(Handle, (int)value);
+        }
+
+        /// <summary>Whether the mesh's vertex colour tints the albedo and the opacity (only on a mesh that carries the colour stream).</summary>
+        public bool VertexColor
+        {
+            get => aver_pbr_get_vertex_color(Handle) != 0;
+            set => aver_pbr_set_vertex_color(Handle, value ? 1 : 0);
+        }
+
+        /// <summary>Whether the vertex colour is sRGB-encoded and is decoded to linear before it tints. Raster draws only.</summary>
+        public bool VertexColorSrgb
+        {
+            get => aver_pbr_get_vertex_color_srgb(Handle) != 0;
+            set => aver_pbr_set_vertex_color_srgb(Handle, value ? 1 : 0);
+        }
+
+        /// <summary>Hashed or alpha-to-coverage-style coverage instead of blend or scissor. Raster draws only.</summary>
+        public PbrAlphaExtension AlphaExtension
+        {
+            get => (PbrAlphaExtension)aver_pbr_get_alpha_extension(Handle);
+            set => aver_pbr_set_alpha_extension(Handle, (int)value);
         }
 
         // ---- texture references: an authoring path AND an opaque id, neither interpreted here ----

@@ -40,7 +40,7 @@ MaterialConstants packMaterial(const MaterialDesc& d) {
     // their meaning -- only what the importers write changed.
     for (u32 i = 0; i < 3; ++i) c.baseColorFactor[i] = srgbToLinear(d.baseColorFactor[i]);
     c.baseColorFactor[3] = d.baseColorFactor[3];
-    std::memcpy(c.emissiveFactor,  d.emissiveFactor,  sizeof(c.emissiveFactor));
+    for (u32 i = 0; i < 3; ++i) c.emissiveFactor[i] = d.emissiveFactor[i] * d.emissiveEnergy;   // the energy is 1 unless authored, so the product is the factor
     c.metallicFactor    = d.metallicFactor;
     c.roughnessFactor   = d.roughnessFactor;
     c.normalScale       = d.normalScale;

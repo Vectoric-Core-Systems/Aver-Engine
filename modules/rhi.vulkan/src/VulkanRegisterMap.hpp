@@ -38,7 +38,7 @@ struct VkRegisterBind {
 // per table (24 + 24 as of optimisation-wave-2, up from 16), 4 samplers, and every constant slot
 // (the map has to be COMPLETE -- see buildRegisterBinds). Sized so
 // buildRegisterBinds is never asked to truncate, which it would do silently.
-constexpr u32 kMaxRegisterBinds = 4 * kMaxBindingSlots + 4 + kMaxConstantSlots + 1;   // +1: the instanced pipeline gInstanceWorlds register
+constexpr u32 kMaxRegisterBinds = 4 * kMaxBindingSlots + kMaxStaticSamplers + kMaxConstantSlots + 1;   // +1: the instanced pipeline gInstanceWorlds register
 
 // Fills `out` with one VkRegisterBind per SRV / UAV / SAMPLER register a PipelineLayout declares,
 // mapping each to the set and binding section 4's scheme puts it in. Returns how many were written.

@@ -57,6 +57,30 @@ extern "C" {
 #define AVER_PBR_ALPHA_MASK   1
 #define AVER_PBR_ALPHA_BLEND  2
 
+/* Sampler filter ids — must match aver::pbr::FxFilter (MaterialFx.hpp). 0 is the engine's own sampler. */
+#define AVER_PBR_SAMPLER_ANISOTROPIC 0   /* anisotropic, mipmapped (the level is the project's RENDER.TEXTUREANISO) */
+#define AVER_PBR_SAMPLER_TRILINEAR   1   /* linear, linear between mips */
+#define AVER_PBR_SAMPLER_BILINEAR    2   /* linear, mip 0 only */
+#define AVER_PBR_SAMPLER_POINT_MIP   3   /* nearest, nearest mip */
+#define AVER_PBR_SAMPLER_POINT       4   /* nearest, mip 0 only (pixel art) */
+
+/* Sampler address ids — must match aver::pbr::FxAddress. */
+#define AVER_PBR_ADDRESS_WRAP   0
+#define AVER_PBR_ADDRESS_CLAMP  1
+#define AVER_PBR_ADDRESS_MIRROR 2
+
+/* Texture channel ids — must match aver::pbr::FxChannel (MaterialFx.hpp): which channel of the metal-rough map a scalar reads. */
+#define AVER_PBR_CHANNEL_R    0
+#define AVER_PBR_CHANNEL_G    1   /* the engine's own packing for roughness */
+#define AVER_PBR_CHANNEL_B    2   /* ... and for metallic */
+#define AVER_PBR_CHANNEL_A    3
+#define AVER_PBR_CHANNEL_GRAY 4   /* Rec. 709 luminance of the texel */
+
+/* Alpha extension ids — must match aver::pbr::FxAlphaExt. Raster draws only: the coverage is discarded against noise instead of blended or scissored. */
+#define AVER_PBR_ALPHAEXT_NONE       0
+#define AVER_PBR_ALPHAEXT_HASH       1   /* stable noise against the alpha */
+#define AVER_PBR_ALPHAEXT_ANTIALIAS  2   /* the alpha-to-coverage stand-in: noise against a coverage that follows the alpha's edge */
+
 /* A material handle. 0 is invalid; a valid one is always positive. */
 typedef int32_t aver_pbr_material;
 
@@ -81,12 +105,18 @@ AVER_PBR_ABI aver_pbr_material aver_pbr_at(int32_t index);
 /* ---- identity ---- */
 AVER_PBR_ABI const char* aver_pbr_get_name(aver_pbr_material m);   /* "" for a stale handle */
 AVER_PBR_ABI int32_t     aver_pbr_set_name(aver_pbr_material m, const char* name);
+/* The first live material whose name is `name` (case-sensitive; a material loaded from "M_Wood.ocmat" is named "M_Wood"), or 0. This is how a script
+ * reaches the instance a surface name draws with: every setter below pushes to the GPU on the next frame. */
+AVER_PBR_ABI aver_pbr_material aver_pbr_find(const char* name);
 
 /* ---- factors (names match the `.ocmat` PARAM names) ---- */
 AVER_PBR_ABI int32_t aver_pbr_get_base_color_factor(aver_pbr_material m, float* out4);
 AVER_PBR_ABI int32_t aver_pbr_set_base_color_factor(aver_pbr_material m, float r, float g, float b, float a);
 AVER_PBR_ABI int32_t aver_pbr_get_emissive_factor(aver_pbr_material m, float* out3);
 AVER_PBR_ABI int32_t aver_pbr_set_emissive_factor(aver_pbr_material m, float r, float g, float b);
+/* A scale on the glow, multiplied into the emissive factor where the material is packed (1 = none; 0..10000, a non-finite value is refused). */
+AVER_PBR_ABI float   aver_pbr_get_emissive_energy(aver_pbr_material m);
+AVER_PBR_ABI int32_t aver_pbr_set_emissive_energy(aver_pbr_material m, float v);
 AVER_PBR_ABI float   aver_pbr_get_metallic_factor(aver_pbr_material m);
 AVER_PBR_ABI int32_t aver_pbr_set_metallic_factor(aver_pbr_material m, float v);
 AVER_PBR_ABI float   aver_pbr_get_roughness_factor(aver_pbr_material m);
@@ -168,6 +198,35 @@ AVER_PBR_ABI int32_t aver_pbr_set_uv_mode(aver_pbr_material m, int32_t mode);
 AVER_PBR_ABI float   aver_pbr_get_uv_tiling(aver_pbr_material m);
 AVER_PBR_ABI int32_t aver_pbr_set_uv_tiling(aver_pbr_material m, float cmPerTile);
 AVER_PBR_ABI const char* aver_pbr_uv_mode_name(int32_t mode);
+
+/* ---- the .ocmat FX record's UV transform and sampler (raster draws only; ray hits and GI read the first 192 bytes of the material and ignore both) ----
+ * `set` is 1 or 2 (the first or second UV channel). The transform is scale.x, scale.y, offset.x, offset.y; out4 gets those four floats. A material
+ * that sets none of the FX features draws exactly as before; the first non-default value switches it to its own pipeline variant (compiled on first use,
+ * the ordinary pipeline draws it until then). Scale and offset are clamped to +-1000 on load/pack, not here. Setters return 0 for a stale handle, a
+ * `set` other than 1 or 2, a non-finite value or an unknown id. */
+AVER_PBR_ABI int32_t aver_pbr_get_uv_transform(aver_pbr_material m, int32_t set, float* out4);
+AVER_PBR_ABI int32_t aver_pbr_set_uv_transform(aver_pbr_material m, int32_t set, float scaleX, float scaleY, float offsetX, float offsetY);
+/* Per-material sampler state: filter (AVER_PBR_SAMPLER_*) and address mode (AVER_PBR_ADDRESS_*). The anisotropy level and mip bias are project-wide
+ * (RENDER.TEXTUREANISO / RENDER.TEXTUREMIPBIAS). Getters return the engine default (0) for a stale handle. */
+AVER_PBR_ABI int32_t aver_pbr_get_sampler_filter(aver_pbr_material m);
+AVER_PBR_ABI int32_t aver_pbr_set_sampler_filter(aver_pbr_material m, int32_t filter);
+AVER_PBR_ABI int32_t aver_pbr_get_sampler_address(aver_pbr_material m);
+AVER_PBR_ABI int32_t aver_pbr_set_sampler_address(aver_pbr_material m, int32_t address);
+
+/* ---- texture decode and alpha (the .ocmat FX record; raster draws only: ray hits and GI read the glTF packing and the colour as stored) ----
+ * Which channel of the metal-rough map roughness and metallic read (AVER_PBR_CHANNEL_*; the defaults G and B are the engine's packing), whether the mesh's
+ * vertex colour is sRGB-encoded, whether the vertex colour tints the albedo at all, and the alpha extension. Getters return the default for a stale handle,
+ * setters 0 for a stale handle or an unknown id. */
+AVER_PBR_ABI int32_t aver_pbr_get_roughness_channel(aver_pbr_material m);
+AVER_PBR_ABI int32_t aver_pbr_set_roughness_channel(aver_pbr_material m, int32_t channel);
+AVER_PBR_ABI int32_t aver_pbr_get_metallic_channel(aver_pbr_material m);
+AVER_PBR_ABI int32_t aver_pbr_set_metallic_channel(aver_pbr_material m, int32_t channel);
+AVER_PBR_ABI int32_t aver_pbr_get_vertex_color(aver_pbr_material m);
+AVER_PBR_ABI int32_t aver_pbr_set_vertex_color(aver_pbr_material m, int32_t on);
+AVER_PBR_ABI int32_t aver_pbr_get_vertex_color_srgb(aver_pbr_material m);
+AVER_PBR_ABI int32_t aver_pbr_set_vertex_color_srgb(aver_pbr_material m, int32_t on);
+AVER_PBR_ABI int32_t aver_pbr_get_alpha_extension(aver_pbr_material m);
+AVER_PBR_ABI int32_t aver_pbr_set_alpha_extension(aver_pbr_material m, int32_t ext);
 
 /* ---- texture references (path AND opaque id; this module interprets neither) ---- */
 AVER_PBR_ABI const char* aver_pbr_get_texture_path(aver_pbr_material m, int32_t slot); /* "" if unset */

@@ -50,7 +50,7 @@ namespace aver::game {
 namespace {
 
 enum TypeIx : int {
-    kSkeletalMesh, kAnimator, kRootMotion, kMotionMatcher, kControlRig, kIkRig, kBrain, kSmartObject, kSoftBody, kCloth, kDestructible, kMorphTargets, kCameraRig, kVehicle, kParticleEmitter, kSoftField, kJelly, kRope, kCollisionShape, kHair, kTypeCount,
+    kSkeletalMesh, kAnimator, kRootMotion, kMotionMatcher, kControlRig, kIkRig, kBrain, kSmartObject, kSoftBody, kCloth, kDestructible, kMorphTargets, kCameraRig, kVehicle, kParticleEmitter, kSoftField, kJelly, kRope, kCollisionShape, kHair, kSurfaceMaterials, kTypeCount,
     kUnknownType = -1
 };
 static_assert(std::size(kPlacedComponentTypes) == kTypeCount, "kPlacedComponentTypes and TypeIx must stay in step");
@@ -199,6 +199,7 @@ u32 typeId(scene::World& w, int ix) {
 
         case kCameraRig: return w.componentId("CCameraRig");
         case kCollisionShape: return collisionShapeType(w);
+        case kSurfaceMaterials: return w.componentId(scene::kSurfaceMaterialsComponentName);
         default: return 0;
     }
 }
@@ -864,6 +865,31 @@ bool applyHair(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent& r
     return true;
 }
 #endif
+// COMPONENT SurfaceMaterials (P2): slotN=<material name> for N in 0..kSurfaceOverrideSlots-1; an absent or empty slot keeps the mesh's own material.
+// The name is interned to the process token (aver_scene_material); binding it to a loaded .ocmat is the level loader's job (GameLevel::load).
+bool applySurfaceMaterials(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent& r, std::string& why) {
+    const u32 type = typeId(w, kSurfaceMaterials);
+    if (type == 0) { why = "unknown to this build"; return false; }
+    bool any = false;
+    i32 tokens[scene::kSurfaceOverrideSlots] = {};
+    for (const auto& [k, v] : r.kv) {
+        const std::string key = lowered(k);
+        if (key.size() < 5 || key.compare(0, 4, "slot") != 0) continue;   // unknown keys are skipped, like every record
+        u32 n = 0;
+        const auto res = std::from_chars(key.data() + 4, key.data() + key.size(), n);
+        if (res.ec != std::errc{} || res.ptr != key.data() + key.size()) continue;
+        if (n >= scene::kSurfaceOverrideSlots) { why = "slot" + std::to_string(n) + " is past the last slot (" + std::to_string(scene::kSurfaceOverrideSlots - 1) + ")"; return false; }
+        if (v.empty()) continue;
+        tokens[n] = aver_scene_material(0, v.c_str());
+        any = true;
+    }
+    if (!any) { why = "names no slot"; return false; }
+    auto* c = w.hasComponent(e, type) ? w.component<scene::CSurfaceMaterials>(e, type) : static_cast<scene::CSurfaceMaterials*>(w.addComponent(e, type));
+    if (!c) { why = "the component could not be attached"; return false; }
+    // Zero-filled storage: write every slot, so a re-apply replaces rather than merges.
+    for (u32 i = 0; i < scene::kSurfaceOverrideSlots; ++i) c->slot[i] = tokens[i];
+    return true;
+}
 bool applyOne(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent& r, const fmt::OcWorldPlacement* placement, std::string& why) {
 #if AVER_MODULE_FRAMEWORK
     if (isGroupsComponent(r.type)) {
@@ -920,6 +946,7 @@ bool applyOne(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent& r,
 
         case kParticleEmitter: return applyParticleEmitter(w, e, r, why);
         case kCollisionShape: return applyCollisionShape(w, e, r, why);
+        case kSurfaceMaterials: return applySurfaceMaterials(w, e, r, why);
 #if AVER_MODULE_HAIR_SCENE
         case kHair: return applyHair(w, e, r, why);
 #endif
@@ -1181,6 +1208,16 @@ std::optional<fmt::OcPlacedComponent> captureOne(scene::World& w, scene::Entity 
 #endif
         case kCollisionShape:
             return captureCollisionShape(w, e, pathOf);   // builds its own record: asset, surface, motion, noscale; the OUT fields are never read
+        case kSurfaceMaterials: {
+            const auto* c = w.component<scene::CSurfaceMaterials>(e, type);
+            for (u32 i = 0; i < scene::kSurfaceOverrideSlots; ++i) {
+                if (c->slot[i] <= 0) continue;
+                const char* name = aver_scene_material_name(c->slot[i]);
+                if (name && *name) put(rec, "slot" + std::to_string(i), name);
+            }
+            if (rec.kv.empty()) return std::nullopt;   // all zeros overrides nothing: no record, as if the component were absent
+            break;
+        }
         case kParticleEmitter: {
             const auto* c = w.component<scene::CParticleEmitter>(e, type);
             putAsset(rec, "effect", c->effect, pathOf);

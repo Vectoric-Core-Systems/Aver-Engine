@@ -588,6 +588,7 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
     // DrawWorldOptions::visitOrder). Null means 0..n-1, the order this walk has always used and the
     // only order a game host has ever wanted.
     const u32 visitCount = options.visitOrder ? options.visitOrderCount : n;
+    const u32 surfaceMaterialsId = w.componentId(scene::kSurfaceMaterialsComponentName);   // 0 when this world never registered it
     for (u32 oi = 0; oi < visitCount; ++oi) {
         // Re-opens WalkEntity, closing whichever phase the previous iteration left open (a
         // WalkEmit* route, WalkOther, or -- on the first iteration -- WalkEntity itself, from
@@ -988,12 +989,16 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
                 planFrom = posedMesh;
             }
         }
+        // Per-surface material overrides (CSurfaceMaterials): one component probe per entity, and only in a world that registered the component.
+        const scene::CSurfaceMaterials* surfaceOverrides =
+            surfaceMaterialsId ? w.component<scene::CSurfaceMaterials>(ent, surfaceMaterialsId) : nullptr;
         // Fills the walk-wide pdraws[] (declared above the loop) from slot 0 and reports how many.
         const u32 pdrawCount = planEntityDraws(
             planFrom, dec.chosenMesh,
             planParts ? planParts->data() : nullptr,
             planParts ? static_cast<u32>(planParts->size()) : 0u,
-            mat, pdraws, kMaxPlannedDraws);
+            mat, pdraws, kMaxPlannedDraws,
+            surfaceOverrides ? surfaceOverrides->slot : nullptr, surfaceOverrides ? scene::kSurfaceOverrideSlots : 0u);
 
         if (depthPass) {
             // WalkEmitDepth: mutually exclusive with the raster/direct routes below since

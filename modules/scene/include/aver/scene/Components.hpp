@@ -114,6 +114,20 @@ inline constexpr u32 kMeshRendererVisible = 0x1;
 // "does this mesh draw", not a second one an author has to remember to attach alongside it.
 inline constexpr u32 kMeshRendererHiddenFromOwner = 0x2;
 
+// PER-SURFACE MATERIAL OVERRIDES (P2). Slot i holds the material token (aver_scene_material) drawn in place of mesh material slot i of this entity's
+// mesh; 0 = no override, the slot keeps the material its mesh names (or the entity's own CMeshRenderer::material). The slot is the .ocmesh material
+// slot (MeshPart::slot), not the part's position, so it does not move when an empty submesh is skipped.
+//
+// Applies where the mesh is split into one draw per material (GameContent::partsFor), static and posed (skinned) parts alike, and to a mesh with one
+// slot, where slot 0 stands for it. A LOD-substituted or soft-body-substituted draw, the GPU cluster path and instanced foliage are single draws of
+// the whole mesh and are NOT covered: they keep the entity's own material. Registered BY NAME ("CSurfaceMaterials", not a fixed id), zero-filled
+// = no override on any slot, so an entity without the component and one with all zeros draw the same.
+inline constexpr u32 kSurfaceOverrideSlots = 16;
+inline constexpr const char* kSurfaceMaterialsComponentName = "CSurfaceMaterials";
+struct CSurfaceMaterials {
+    i32 slot[kSurfaceOverrideSlots];
+};
+
 // Light kinds (CLight::kind). 0-2 predate the renderers reading the component and keep their values.
 inline constexpr i32 kLightPoint       = 0;
 inline constexpr i32 kLightSpot        = 1;

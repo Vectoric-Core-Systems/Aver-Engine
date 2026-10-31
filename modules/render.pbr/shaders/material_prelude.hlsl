@@ -15,6 +15,14 @@ Texture2D gL1MetalRoughMap : register(AVER_MAT_JOIN(t, AVER_MATERIAL_SRV_6));
 Texture2D gL1NormalMap     : register(AVER_MAT_JOIN(t, AVER_MATERIAL_SRV_7));
 // The one sampler all five maps are read through; the consuming layout declares it and says where.
 SamplerState gMaterialSampler : register(AVER_MAT_JOIN(s, AVER_MATERIAL_SAMPLER));
+// What the material's OWN maps are read through (this file's sampling and the embedded shaders'): gMaterialSampler, unless a material variant asked
+// for another static sampler (AVER_SURFACE_SAMPLER = its register, pbr::MaterialFx sampler state). Ray hits, decals and the backdrop fetch keep
+// gMaterialSampler, so a variant changes how the surface is filtered and nothing else. Without the define this is a rename and the output is unchanged.
+#ifdef AVER_SURFACE_SAMPLER
+SamplerState gSurfaceSampler : register(AVER_MAT_JOIN(s, AVER_SURFACE_SAMPLER));
+#else
+#define gSurfaceSampler gMaterialSampler
+#endif
 #endif
 
 // MIRRORS pbr::MaterialConstants (aver/pbr/MaterialGpu.hpp) FIELD FOR FIELD.
@@ -391,18 +399,36 @@ float2 averSurfaceUV(AverVertex v) {
     return v.uv;
 }
 
+#if AVER_MATX_CHAN
+// F35: the channel of a metal-rough texel a scalar reads (pbr::FxChannel: 0 R, 1 G, 2 B, 3 A, 4 luminance); the material variant with a non-default packing.
+float averFxChan(float4 t, uint c) {
+    switch (c) {
+    case 0u: return t.r;
+    case 1u: return t.g;
+    case 2u: return t.b;
+    case 3u: return t.a;
+    default: return dot(t.rgb, float3(0.2126, 0.7152, 0.0722));
+    }
+}
+float2 averFxMetalRough(float4 t) { return float2(averFxChan(t, (gFxHash >> 17) & 7u), averFxChan(t, (gFxHash >> 20) & 7u)); }   // x roughness, y metallic
+#endif
+
 // Samples the five material maps, or returns the identity values where there is no material table.
 AverMaps averSampleMaps(float2 uv) {
     AverMaps m;
 #ifdef AVER_MATERIAL_SRV
-    m.baseColor  = gBaseColorMap.Sample(gMaterialSampler, uv);
-    float4 mr    = gMetalRoughMap.Sample(gMaterialSampler, uv);
+    m.baseColor  = gBaseColorMap.Sample(gSurfaceSampler, uv);
+    float4 mr    = gMetalRoughMap.Sample(gSurfaceSampler, uv);
+#if AVER_MATX_CHAN
+    m.metalRough = averFxMetalRough(mr);
+#else
     m.metalRough = float2(mr.g, mr.b);
-    float3 n     = gNormalMap.Sample(gMaterialSampler, uv).xyz * 2.0 - 1.0;
+#endif
+    float3 n     = gNormalMap.Sample(gSurfaceSampler, uv).xyz * 2.0 - 1.0;
     m.normalTS   = float3(n.xy * gNormalScale, n.z);
     m.normalLen  = (gMaterialFlags & AVER_MAT_NORMAL_MAP) ? length(n) : 1.0;
-    m.occlusion  = gOcclusionMap.Sample(gMaterialSampler, uv).r;
-    m.emissive   = gEmissiveMap.Sample(gMaterialSampler, uv).rgb;
+    m.occlusion  = gOcclusionMap.Sample(gSurfaceSampler, uv).r;
+    m.emissive   = gEmissiveMap.Sample(gSurfaceSampler, uv).rgb;
 #else
     m.baseColor  = float4(1, 1, 1, 1);
     m.metalRough = float2(1, 1);
@@ -456,13 +482,13 @@ AverMaps averBlendLayers(AverMaps m, float2 uv, float3 geoN) {
 
     float2 uv1 = uv * gL1UvScale;
     if (gMaterialFlags & AVER_MAT_L1_BASECOLOR)
-        m.baseColor = lerp(m.baseColor, gL1BaseColorMap.Sample(gMaterialSampler, uv1), w);
+        m.baseColor = lerp(m.baseColor, gL1BaseColorMap.Sample(gSurfaceSampler, uv1), w);
     if (gMaterialFlags & AVER_MAT_L1_METALROUGH) {
-        float4 mr1 = gL1MetalRoughMap.Sample(gMaterialSampler, uv1);
+        float4 mr1 = gL1MetalRoughMap.Sample(gSurfaceSampler, uv1);
         m.metalRough = lerp(m.metalRough, float2(mr1.g, mr1.b), w);
     }
     if (gMaterialFlags & AVER_MAT_L1_NORMAL) {
-        float3 n1 = gL1NormalMap.Sample(gMaterialSampler, uv1).xyz * 2.0 - 1.0;
+        float3 n1 = gL1NormalMap.Sample(gSurfaceSampler, uv1).xyz * 2.0 - 1.0;
         // Blended in tangent space then renormalised -- cheap, and correct enough for two layers
         // that share a tangent frame, which they do here because they share the mesh.
         m.normalTS = normalize(lerp(m.normalTS, float3(n1.xy * gNormalScale, n1.z), w));
@@ -491,14 +517,14 @@ AverMaps averBlendLayers(AverMaps m, float2 uv, float3 geoN) {
 float4 averSampleSlot(uint slot, float2 uv) {
 #ifdef AVER_MATERIAL_SRV
     switch (slot) {
-    case 0u: return gBaseColorMap.Sample(gMaterialSampler, uv);
-    case 1u: return gMetalRoughMap.Sample(gMaterialSampler, uv);
-    case 2u: return gNormalMap.Sample(gMaterialSampler, uv);
-    case 3u: return gOcclusionMap.Sample(gMaterialSampler, uv);
-    case 4u: return gEmissiveMap.Sample(gMaterialSampler, uv);
-    case 5u: return gL1BaseColorMap.Sample(gMaterialSampler, uv);
-    case 6u: return gL1MetalRoughMap.Sample(gMaterialSampler, uv);
-    case 7u: return gL1NormalMap.Sample(gMaterialSampler, uv);
+    case 0u: return gBaseColorMap.Sample(gSurfaceSampler, uv);
+    case 1u: return gMetalRoughMap.Sample(gSurfaceSampler, uv);
+    case 2u: return gNormalMap.Sample(gSurfaceSampler, uv);
+    case 3u: return gOcclusionMap.Sample(gSurfaceSampler, uv);
+    case 4u: return gEmissiveMap.Sample(gSurfaceSampler, uv);
+    case 5u: return gL1BaseColorMap.Sample(gSurfaceSampler, uv);
+    case 6u: return gL1MetalRoughMap.Sample(gSurfaceSampler, uv);
+    case 7u: return gL1NormalMap.Sample(gSurfaceSampler, uv);
     default: break;
     }
 #endif
@@ -790,11 +816,11 @@ float4 averTerrainSample(uint slot, float2 uv, float2 gx, float2 gy) {
 #endif
 #ifdef AVER_MATERIAL_SRV
     switch (slot) {
-    case 0u: return gBaseColorMap.SampleGrad(gMaterialSampler, uv, gx, gy);
-    case 1u: return gMetalRoughMap.SampleGrad(gMaterialSampler, uv, gx, gy);
-    case 2u: return gNormalMap.SampleGrad(gMaterialSampler, uv, gx, gy);
-    case 3u: return gOcclusionMap.SampleGrad(gMaterialSampler, uv, gx, gy);
-    case 4u: return gEmissiveMap.SampleGrad(gMaterialSampler, uv, gx, gy);
+    case 0u: return gBaseColorMap.SampleGrad(gSurfaceSampler, uv, gx, gy);
+    case 1u: return gMetalRoughMap.SampleGrad(gSurfaceSampler, uv, gx, gy);
+    case 2u: return gNormalMap.SampleGrad(gSurfaceSampler, uv, gx, gy);
+    case 3u: return gOcclusionMap.SampleGrad(gSurfaceSampler, uv, gx, gy);
+    case 4u: return gEmissiveMap.SampleGrad(gSurfaceSampler, uv, gx, gy);
     default: break;
     }
 #endif
@@ -1253,7 +1279,7 @@ bool averFxFrame(float3 N, float3 wpos, float2 uv, out float3 T, out float3 B) {
 // Heightmap parallax (heightmap_*): the heightmap is the second layer-1 slot (R channel). Offset mapping, or steep parallax with
 // heightmap_deep_parallax. heightmap_scale is in the source's units (a depth of scale / 100 of the UV).
 float averFxHeight(float2 uv, float2 dx, float2 dy) {
-    const float h = gL1MetalRoughMap.SampleGrad(gMaterialSampler, uv, dx, dy).r;
+    const float h = gL1MetalRoughMap.SampleGrad(gSurfaceSampler, uv, dx, dy).r;
     return averFxMode(AVER_FX_INVERT) ? 1.0 - h : h;
 }
 float2 averFxParallax(AverVertex v, float2 uv) {
@@ -1299,13 +1325,13 @@ float3 averFxTriPos(AverVertex v, bool world) {
     return p * 0.01 * float3(gFxUv1ScaleX, gFxUv1ScaleY, gFxUv1ScaleX) + float3(gFxUv1OffsetX, gFxUv1OffsetY, gFxUv1OffsetX);
 }
 float4 averFxTriSample(Texture2D tex, float3 p, float3 w) {
-    return tex.Sample(gMaterialSampler, p.zy) * w.x + tex.Sample(gMaterialSampler, p.xz) * w.y + tex.Sample(gMaterialSampler, p.xy) * w.z;
+    return tex.Sample(gSurfaceSampler, p.zy) * w.x + tex.Sample(gSurfaceSampler, p.xz) * w.y + tex.Sample(gSurfaceSampler, p.xy) * w.z;
 }
 // The blended world normal of a triplanar normal map (the axis-swizzled "UDN" blend); N and the result are in the projection frame.
 float3 averFxTriNormal(Texture2D tex, float3 p, float3 w, float3 N, float scale) {
-    float3 tx = tex.Sample(gMaterialSampler, p.zy).xyz * 2.0 - 1.0;
-    float3 ty = tex.Sample(gMaterialSampler, p.xz).xyz * 2.0 - 1.0;
-    float3 tz = tex.Sample(gMaterialSampler, p.xy).xyz * 2.0 - 1.0;
+    float3 tx = tex.Sample(gSurfaceSampler, p.zy).xyz * 2.0 - 1.0;
+    float3 ty = tex.Sample(gSurfaceSampler, p.xz).xyz * 2.0 - 1.0;
+    float3 tz = tex.Sample(gSurfaceSampler, p.xy).xyz * 2.0 - 1.0;
     tx = float3(tx.xy * scale + N.zy, abs(tx.z) * N.x);
     ty = float3(ty.xy * scale + N.xz, abs(ty.z) * N.y);
     tz = float3(tz.xy * scale + N.xy, abs(tz.z) * N.z);
@@ -1359,7 +1385,14 @@ AverSurface averEvalMaterial(AverVertex v, AverLight l) {
         float3 w = pow(abs(nObj), max(sharp, 0.01).xxx);
         w /= max(w.x + w.y + w.z, 1e-5);
         if (gMaterialFlags & AVER_MAT_BASECOLOR_MAP) map.baseColor = averFxTriSample(gBaseColorMap, p, w);
-        if (gMaterialFlags & AVER_MAT_METALROUGH_MAP) { const float4 mr = averFxTriSample(gMetalRoughMap, p, w); map.metalRough = float2(mr.g, mr.b); }
+        if (gMaterialFlags & AVER_MAT_METALROUGH_MAP) {
+            const float4 mr = averFxTriSample(gMetalRoughMap, p, w);
+#if AVER_MATX_CHAN
+            map.metalRough = averFxMetalRough(mr);
+#else
+            map.metalRough = float2(mr.g, mr.b);
+#endif
+        }
         if (gMaterialFlags & AVER_MAT_OCCLUSION_MAP) map.occlusion = averFxTriSample(gOcclusionMap, p, w).r;
         if (gMaterialFlags & AVER_MAT_EMISSIVE_MAP) map.emissive = averFxTriSample(gEmissiveMap, p, w).rgb;
         if (gMaterialFlags & AVER_MAT_NORMAL_MAP) {
@@ -1377,24 +1410,31 @@ AverSurface averEvalMaterial(AverVertex v, AverLight l) {
         const float2 uvD = averFxMode(AVER_FX_DETAIL_UV2) ? uvB : uvA;
         const uint op = (gFxModes >> 4) & 3u;
         if (gMaterialFlags & AVER_MAT_L1_BASECOLOR) {
-            const float3 d = gL1BaseColorMap.Sample(gMaterialSampler, uvD).rgb;
+            const float3 d = gL1BaseColorMap.Sample(gSurfaceSampler, uvD).rgb;
             const float3 b = map.baseColor.rgb;
             map.baseColor.rgb = op == 0u ? d : (op == 1u ? b + d : (op == 2u ? max(b - d, 0.0) : b * d));
         }
         if ((gMaterialFlags & AVER_MAT_L1_NORMAL) && !triNormal) {
-            const float3 n2 = gL1NormalMap.Sample(gMaterialSampler, uvD).xyz * 2.0 - 1.0;
+            const float3 n2 = gL1NormalMap.Sample(gSurfaceSampler, uvD).xyz * 2.0 - 1.0;
             map.normalTS = normalize(float3(map.normalTS.xy + n2.xy * gNormalScale, map.normalTS.z * max(n2.z, 0.05)));
         }
     }
 #endif
 #if AVER_MATX_SURF && defined(AVER_MATERIAL_SRV)
-    if (averFxMode(AVER_FX_AO_UV2) && (gMaterialFlags & AVER_MAT_OCCLUSION_MAP)) map.occlusion = gOcclusionMap.Sample(gMaterialSampler, uvB).r;
-    if (averFxMode(AVER_FX_EMIT_UV2) && (gMaterialFlags & AVER_MAT_EMISSIVE_MAP)) map.emissive = gEmissiveMap.Sample(gMaterialSampler, uvB).rgb;
+    if (averFxMode(AVER_FX_AO_UV2) && (gMaterialFlags & AVER_MAT_OCCLUSION_MAP)) map.occlusion = gOcclusionMap.Sample(gSurfaceSampler, uvB).r;
+    if (averFxMode(AVER_FX_EMIT_UV2) && (gMaterialFlags & AVER_MAT_EMISSIVE_MAP)) map.emissive = gEmissiveMap.Sample(gSurfaceSampler, uvB).rgb;
 #endif
 
     AverAuthored a = averAuthoredFrom(m, map);
 #if AVER_MESH_EXTRA
-    if (gMaterialFlags & AVER_MAT_VERTEX_COLOR) { a.baseColor *= v.color.rgb; a.opacity *= v.color.a; }
+    if (gMaterialFlags & AVER_MAT_VERTEX_COLOR) {
+        float3 vc = v.color.rgb;
+#if AVER_MATX_CHAN
+        // F35 vertex colour is sRGB: decoded to linear before it tints the albedo (the alpha is coverage, not decoded).
+        if ((gFxHash & 0x800000u) != 0u) vc = lerp(pow(max((vc + 0.055) / 1.055, 0.0), 2.4), vc / 12.92, step(vc, 0.04045));
+#endif
+        a.baseColor *= vc; a.opacity *= v.color.a;
+    }
 #endif
 #if AVER_MATX_SURF
     if (averFxMode(AVER_FX_EMIT_MUL)) a.emissive *= a.baseColor;

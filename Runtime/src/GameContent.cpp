@@ -29,6 +29,8 @@
 #include "aver/assets/AssetId.hpp"
 #if AVER_MODULE_FRAMEWORK
 #include "aver/framework/framework_customenv_abi.h"   // a particles effect's custom program is registered when the effect loads
+#include "aver/framework/framework_rtex_abi.h"        // syncRuntimeTextures
+#include "aver/formats/Texture.hpp"                   // ...and the mip chain of a script-built texture
 #endif
 #include "aver/rhi/PrimitiveMeshes.hpp"
 #include "aver/platform/FileSystem.hpp"   // toNativeSeparators
@@ -685,6 +687,146 @@ u32 GameContent::syncRuntimeMeshes(rhi::IDevice& device) {
     return uploaded;
 }
 
+// E8: script-built textures (framework_rtex_abi.h). A changed texture is uploaded as a NEW GPU texture (with its mip chain when it asked for one) and the old one
+// retires after kRtexRetireFrames, longer than any frame in flight and than the material binding sets still pointing at it. Materials name a texture by the
+// runtime-texture name "rtex.<key>" (their slot path is "@rt:rtex.<key>").
+namespace {
+constexpr u64 kRtexRetireFrames = 6;
+
+#if AVER_MODULE_FRAMEWORK && AVER_MODULE_PBR
+// Rewrites (on the next MaterialSystem::update) every material that names the runtime texture `path` in a slot.
+void touchMaterialsNaming(const std::string& path) {
+    pbr::MaterialLibrary& lib = pbr::MaterialLibrary::get();
+    std::vector<pbr::MaterialHandle> hit;
+    for (u32 i = 0, n = lib.count(); i < n; ++i) {
+        const pbr::MaterialHandle h = lib.at(i);
+        const pbr::MaterialDesc* d = h ? lib.desc(h) : nullptr;
+        if (!d) continue;
+        for (u32 s = 0; s < pbr::kTextureSlotCount; ++s)
+            if (d->textures[s].path == path) { hit.push_back(h); break; }
+    }
+    for (pbr::MaterialHandle h : hit) lib.touch(h);
+}
+#endif
+}  // namespace
+
+u32 GameContent::syncRuntimeTextures(rhi::IDevice& device, pbr::MaterialSystem* materials) {
+    u32 uploaded = 0;
+#if AVER_MODULE_FRAMEWORK
+    ++rtexFrame_;
+    if (aver_fw_rtex_count() == 0 && rtexGpu_.empty() && rtexRetired_.empty()) return 0;   // the ordinary frame: nothing registered, nothing held
+    rhi::IResourceFactory* res = device.resources();
+    if (!res) return 0;
+
+    const auto retire = [&](rhi::TextureHandle t) { if (t) rtexRetired_.push_back({t, rtexFrame_}); };
+    const auto touch = [&](const std::string& name) {
+#  if AVER_MODULE_PBR
+        touchMaterialsNaming("@rt:" + name);
+#  else
+        (void)name;
+#  endif
+    };
+
+    i32 ids[32];
+    while (const i32 n = aver_fw_rtex_take_removed(ids, 32)) {
+        for (i32 k = 0; k < n; ++k) {
+            const auto it = rtexGpu_.find(ids[k]);
+            if (it == rtexGpu_.end()) continue;
+#  if AVER_MODULE_PBR
+            if (materials) materials->clearRuntimeTexture(it->second.name);
+#  endif
+            retire(it->second.tex);
+            touch(it->second.name);
+            rtexGpu_.erase(it);
+        }
+    }
+    while (const i32 n = aver_fw_rtex_take_dirty(ids, 32)) {
+        for (i32 k = 0; k < n; ++k) {
+            AverFwRtexView v{};
+            if (!aver_fw_rtex_view(ids[k], &v) || v.width < 1 || v.height < 1) continue;
+            const bool srgb = v.format == AVER_FW_RTEX_FORMAT_RGBA8_SRGB;
+            rhi::Format fmtGpu = rhi::Format::RGBA8Unorm;
+            switch (v.format) {
+                case AVER_FW_RTEX_FORMAT_RGBA8: fmtGpu = rhi::Format::RGBA8Unorm; break;
+                case AVER_FW_RTEX_FORMAT_RGBA8_SRGB: fmtGpu = rhi::Format::RGBA8UnormSrgb; break;
+                case AVER_FW_RTEX_FORMAT_R8: fmtGpu = rhi::Format::R8Unorm; break;
+                case AVER_FW_RTEX_FORMAT_RGBA16F: fmtGpu = rhi::Format::RGBA16F; break;
+                default: continue;
+            }
+            // The levels to upload: level 0 is the script's bytes; a requested chain is built in RGBA8 (R8 rides in all three colour channels) by the same
+            // generator textures from files use, then R8 is narrowed back.
+            std::vector<std::vector<u8>> owned;
+            std::vector<const void*> levelPtrs;
+            if (v.mips && v.format != AVER_FW_RTEX_FORMAT_RGBA16F) {
+                fmt::TextureData td;
+                td.width = static_cast<u32>(v.width);
+                td.height = static_cast<u32>(v.height);
+                td.srgb = srgb;
+                ImageData base;
+                base.width = td.width; base.height = td.height; base.channels = v.format == AVER_FW_RTEX_FORMAT_R8 ? 1u : 4u; base.srgb = srgb;
+                const usize px = static_cast<usize>(v.width) * static_cast<usize>(v.height);
+                base.pixels.resize(px * 4);
+                if (v.format == AVER_FW_RTEX_FORMAT_R8) {
+                    for (usize i = 0; i < px; ++i) { const u8 r = v.pixels[i]; base.pixels[i * 4 + 0] = base.pixels[i * 4 + 1] = base.pixels[i * 4 + 2] = r; base.pixels[i * 4 + 3] = 255; }
+                } else {
+                    std::memcpy(base.pixels.data(), v.pixels, px * 4);
+                }
+                td.levels.push_back(std::move(base));
+                fmt::generateMipChain(td, /*normalMap=*/false);
+                owned.reserve(td.levels.size());
+                for (const ImageData& lvl : td.levels) {
+                    if (v.format == AVER_FW_RTEX_FORMAT_R8) {
+                        std::vector<u8> one(static_cast<usize>(lvl.width) * lvl.height);
+                        for (usize i = 0; i < one.size(); ++i) one[i] = lvl.pixels[i * 4];
+                        owned.push_back(std::move(one));
+                    } else {
+                        owned.push_back(lvl.pixels);
+                    }
+                }
+                for (const auto& lvl : owned) levelPtrs.push_back(lvl.data());
+            } else {
+                levelPtrs.push_back(v.pixels);
+            }
+            rhi::TextureDesc d;
+            d.width = static_cast<u32>(v.width);
+            d.height = static_cast<u32>(v.height);
+            d.mips = static_cast<u32>(levelPtrs.size());
+            d.format = fmtGpu;
+            d.initialState = rhi::ResourceState::ShaderResource;
+            d.initialData = levelPtrs.data();
+            d.initialDataCount = static_cast<u32>(levelPtrs.size());
+            d.debugName = "runtime texture";
+            const rhi::TextureHandle t = res->createTexture(d);
+            if (!t) { AVER_WARN("[RuntimeTexture] '{}' ({}x{}) was not uploaded: the device refused the texture", v.key, v.width, v.height); continue; }
+            RtexGpu& rec = rtexGpu_[ids[k]];
+            const bool first = rec.name.empty();
+            if (first) rec.name = std::string("rtex.") + v.key;
+            retire(rec.tex);
+            rec.tex = t;
+#  if AVER_MODULE_PBR
+            if (materials) materials->setRuntimeTexture(rec.name, t);
+#  endif
+            touch(rec.name);
+            aver_fw_rtex_host_set_gpu_handle(ids[k], static_cast<u64>(t));
+            ++uploaded;
+        }
+    }
+    // Destroy what has waited long enough.
+    usize w = 0;
+    for (usize i = 0; i < rtexRetired_.size(); ++i) {
+        if (rtexFrame_ - rtexRetired_[i].frame >= kRtexRetireFrames) res->destroyTexture(rtexRetired_[i].tex);
+        else rtexRetired_[w++] = rtexRetired_[i];
+    }
+    rtexRetired_.resize(w);
+#  if !AVER_MODULE_PBR
+    (void)materials;
+#  endif
+#else
+    (void)device; (void)materials;
+#endif
+    return uploaded;
+}
+
 // Forgets every table entry for `id` at once (nothing can draw it) and queues its handles; the GPU
 // frees wait in flushMeshReleases because D3D12Device::destroyMesh frees the mesh's own resources now.
 void GameContent::unloadToPending(u64 id) {
@@ -803,6 +945,7 @@ void GameContent::buildMeshParts(rhi::IDevice& device, u64 id, const fmt::OcMesh
             AVER_WARN("[Mesh] the device refused submesh '{}' of '{}'", pc.name, rel);
             continue;
         }
+        part.slot = pc.slot;
         // Slot names the material, resolving through the same path as an authored material.
         if (pc.slot < md.materialSlots.size()) {
             const std::string& slot = md.materialSlots[pc.slot];
@@ -863,6 +1006,7 @@ const std::vector<GameContent::MeshPart>* GameContent::posedPartsFor(rhi::IDevic
     for (usize i = 0; i < pit->second.size(); ++i) {
         MeshPart pp;
         pp.material = pit->second[i].material;
+        pp.slot = pit->second[i].slot;
         const std::vector<u32>& idx = bit->second[i];
         if (pit->second[i].mesh && !idx.empty()) {
             pp.mesh = device.createPosedPartMesh(posedMesh, idx.data(), static_cast<u32>(idx.size()));
