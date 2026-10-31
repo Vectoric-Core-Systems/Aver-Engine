@@ -21,8 +21,9 @@ struct PanoramaImage {
 
 // Radiance .hdr (RGBE, flat or run-length encoded) from memory. False with `err` on anything it cannot read.
 bool decodeRadianceHdr(const u8* bytes, usize size, PanoramaImage& out, std::string* err = nullptr);
-// A panorama file: .hdr through decodeRadianceHdr, anything the image decoder reads (png, jpg, tga) as 8-bit sRGB decoded to linear.
-// OpenEXR is not read. False with `err` when the file cannot be read.
+// A panorama file: .hdr through decodeRadianceHdr, .exr through decodeFloatImage (half or float, kept as linear radiance, values above 1
+// intact; negatives and NaN become 0), anything else the image decoder reads (png, jpg, tga, webp) as 8-bit sRGB decoded to linear.
+// False with `err` when the file cannot be read.
 bool loadPanorama(const std::string& path, PanoramaImage& out, std::string* err = nullptr);
 
 struct SkyDomeFit {

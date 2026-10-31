@@ -172,6 +172,8 @@ endif()
 if(EXISTS "${CMAKE_SOURCE_DIR}/third_party/ufbx/ufbx.c" AND NOT TARGET ufbx)
   add_subdirectory(third_party/ufbx)
 endif()
+# libwebp's decoder (BSD-3-Clause) behind aver::decodeImage's WebP support (modules/platform/src/ImageWebp.cpp).
+add_subdirectory(third_party/libwebp)
 
 # ---- Tier 0-6 implemented modules ----
 add_subdirectory(modules/core)

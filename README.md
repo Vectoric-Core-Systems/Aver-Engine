@@ -35,6 +35,9 @@ LGPL:
 | `third_party/imgui` | Dear ImGui | MIT |
 | `third_party/stb` | stb single-file libraries | Public domain / MIT |
 | `third_party/meshoptimizer` | meshoptimizer | MIT |
+| `third_party/libwebp` | libwebp (decoder only) | BSD-3-Clause, with Google's patent grant |
+| `third_party/nanosvg` | NanoSVG | zlib |
+| `third_party/tinyexr` | TinyEXR | BSD-3-Clause |
 | `third_party/fonts` | Roboto, Material Icons | Apache-2.0 |
 | `third_party/vulkan-headers` | Vulkan-Headers (Khronos) | Apache-2.0 |
 | `third_party/fidelityfx-fsr` | AMD FidelityFX FSR 1 | MIT |

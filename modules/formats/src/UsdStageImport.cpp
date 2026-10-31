@@ -25,6 +25,7 @@
 #include "UsdImportInternal.hpp"
 
 #include "aver/core/Math.hpp"
+#include "aver/platform/Image.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -1038,6 +1039,20 @@ bool loadRadianceLuminance(const std::string& path, u32& w, u32& h, std::vector<
     return true;
 }
 
+// An OpenEXR (half or float) reduced to per-texel luminance, top row first.
+bool loadExrLuminance(const std::string& path, u32& w, u32& h, std::vector<f32>& lum, std::string& why) {
+    FloatImageData f;
+    std::string err;
+    if (!decodeFloatImage(path, f, &err)) { why = path + ": " + err; return false; }
+    w = f.width; h = f.height;
+    lum.assign(static_cast<usize>(w) * h, 0.0f);
+    for (usize i = 0; i < lum.size(); ++i) {
+        const f32 l = 0.2126f * f.rgba[i * 4] + 0.7152f * f.rgba[i * 4 + 1] + 0.0722f * f.rgba[i * 4 + 2];
+        lum[i] = l > 0.0f ? l : 0.0f;   // negatives and NaN carry no light
+    }
+    return true;
+}
+
 // The unit direction, in the DOME's own frame (Y is its pole), of latlong texel (x, y) -- see
 // UsdSun for why this orientation.
 void latLongDir(u32 x, u32 y, u32 w, u32 h, f32 out[3]) {
@@ -1071,14 +1086,14 @@ void domeSun(Stage& st, const std::string& path, const M4& world, const std::str
     const std::string full = (std::filesystem::path(layerDir) / textureFile).lexically_normal().string();
     std::string ext = std::filesystem::path(full).extension().string();
     for (char& ch : ext) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-    if (ext != ".hdr") {
-        st.note("a DomeLight's texture (" + textureFile + ") is not a Radiance .hdr, the one format a sun is read from; no sun was taken from it");
+    if (ext != ".hdr" && ext != ".exr") {
+        st.note("a DomeLight's texture (" + textureFile + ") is not a Radiance .hdr or an OpenEXR, the two formats a sun is read from; no sun was taken from it");
         return;
     }
     u32 w = 0, h = 0;
     std::vector<f32> lum;
     std::string why;
-    if (!loadRadianceLuminance(full, w, h, lum, why)) { st.note("a DomeLight's texture could not be read (" + why + "); no sun was taken from it"); return; }
+    if (!(ext == ".hdr" ? loadRadianceLuminance(full, w, h, lum, why) : loadExrLuminance(full, w, h, lum, why))) { st.note("a DomeLight's texture could not be read (" + why + "); no sun was taken from it"); return; }
     f64 sum = 0.0;
     f32 peak = 0.0f;
     for (const f32 l : lum) { sum += l; peak = std::max(peak, l); }

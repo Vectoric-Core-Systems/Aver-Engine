@@ -45,6 +45,9 @@ const char* containerName(const std::string& ext) {
     if (ext == ".tga") return "TGA";
     if (ext == ".bmp") return "BMP";
     if (ext == ".hdr") return "Radiance HDR";
+    if (ext == ".webp") return "WebP";
+    if (ext == ".svg") return "SVG (rasterised)";
+    if (ext == ".exr") return "OpenEXR (shown clamped to 8-bit)";
     return "Unknown";
 }
 
@@ -91,7 +94,7 @@ TextureEditor::TextureEditor(std::string path) : path_(std::move(path)) { loadFr
 TextureEditor::~TextureEditor() { releaseTexture(); }
 
 // Decodes the file and gathers its stats. See the header for why this has no ImGui or device
-// dependency: aver::decodeImage is stb_image, pure CPU, and runs the same whether or not there is a
+// dependency: aver::decodeImage is pure CPU, and runs the same whether or not there is a
 // window to show the result in.
 void TextureEditor::loadFromDisk() {
     releaseTexture();     // a reload replaces whatever GPU copy the previous version had
@@ -344,20 +347,20 @@ void TextureEditor::resetLayout() {}
 
 #endif  // AVER_WITH_IMGUI
 
-// Editor factory: only the extensions aver::decodeImage (stb_image, Image.hpp) actually decodes.
+// Editor factory: only the extensions aver::decodeImage (Image.hpp) actually decodes: stb_image's, plus
+// WebP, SVG and OpenEXR (an EXR is shown clamped to 8 bits; the file keeps its float data).
 //
 // .DDS IS DELIBERATELY NOT HERE despite being a texture container this engine ships cooked ones in
-// elsewhere. stb_image cannot read it -- Image.hpp's own undecodableContainer() explicitly refuses
-// the "DDS " magic -- and there is no second, DDS-capable loader in this tree (checked: no other
-// decoder exists outside Image.cpp's one stb_image translation unit). Registering this factory for
-// .dds would open a tab that unconditionally fails to load every file it claims to handle. The list
-// below is kept in step with SandboxApp::isTextureSource (SandboxAutosave.cpp) restricted to the
-// container types actually named in this feature's brief; isTextureSource itself additionally
-// accepts psd/gif/pic/ppm/pgm/octex, which nothing has asked this tab to claim.
+// elsewhere. Image.hpp's undecodableContainer() explicitly refuses the "DDS " magic, and there is no
+// DDS-capable loader in this tree. Registering this factory for .dds would open a tab that
+// unconditionally fails to load every file it claims to handle. The list below is kept in step with
+// SandboxApp::isTextureSource (SandboxAutosave.cpp) restricted to the container types actually named
+// in this feature's brief; isTextureSource itself additionally accepts psd/gif/pic/ppm/pgm/octex,
+// which nothing has asked this tab to claim.
 std::unique_ptr<AssetEditor> makeTextureEditor(const std::string& path) {
     const std::string ext = extensionLower(path);
     if (ext != ".png" && ext != ".tga" && ext != ".jpg" && ext != ".jpeg" && ext != ".bmp" &&
-        ext != ".hdr")
+        ext != ".hdr" && ext != ".webp" && ext != ".svg" && ext != ".exr")
         return nullptr;
     return std::make_unique<TextureEditor>(path);
 }

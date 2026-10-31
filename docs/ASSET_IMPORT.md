@@ -453,6 +453,37 @@ before ufbx sees it, because ufbx also reads OBJ and `ObjImport` owns that.
 `modules/platform/src/Image.cpp` is the single `STB_IMAGE_IMPLEMENTATION` translation unit in the
 engine.
 
+### Image formats `aver::decodeImage` reads
+
+`decodeImage` (`modules/platform/include/aver/platform/Image.hpp`) hands back 8-bit RGBA. Every place that loads an
+image goes through it: the texture upload and cook, the Content Browser thumbnails and the Texture tab, light cookies,
+decals, the soft-body paint masks, `AverAssetC` (`material` packs roughness and metal maps through it; the model importers
+cook their textures through it), and the panorama sky.
+
+| Format | Decoder | Notes |
+|---|---|---|
+| PNG, JPEG, TGA, BMP, GIF, PSD, PIC, PNM, Radiance `.hdr` | `stb_image` (`third_party/stb`) | As before. |
+| WebP | libwebp's decoder (`third_party/libwebp`, BSD-3-Clause) | Lossy, lossless, with or without alpha. An **animated** file gives its first frame, drawn on a transparent canvas of the file's canvas size. Straight (not premultiplied) alpha. |
+| SVG | NanoSVG (`third_party/nanosvg`, zlib) | Rasterised at the document's own size (`width`/`height`, else `viewBox`, 96 dpi), or at `ImageDecodeOptions::svgWidth/svgHeight` (one side keeps the aspect ratio; both fit the drawing in that box, centred). Paths, shapes, gradients, strokes and dashes; **no text, filters, masks or external references**. |
+| OpenEXR | tinyexr (`third_party/tinyexr`, BSD-3-Clause) | Half and float colour channels (`R G B`, optionally `A`; or `Y`), scanline and tiled, level 0 of a mipmapped file; deep, multipart and integer-colour files are refused. |
+
+The container is chosen by what the **bytes** are, so a WebP saved as `.png` still opens. DDS, KTX, TIFF, AVIF and HEIF
+stay refused by `undecodableContainer`.
+
+**HDR values.** The texture path is 8-bit (the `.octex` cache is BC7), so an EXR used as a material texture is clamped to
+[0,1] and encoded with the 1/2.2 power curve `stb_image` gives a Radiance `.hdr`: anything above 1 clips. The float data is
+kept where the engine can use it: `decodeFloatImage` returns linear float RGBA, `loadPanorama` (a panorama sky, and so the
+USD DomeLight sun finder) reads `.exr` through it with values above 1 intact. Nothing else in the renderer samples a float
+image file today.
+
+**Hostile input.** Headers are checked before anything is allocated: at most 16384 pixels on a side, 2^27 pixels for WebP and
+SVG output (512 MB), 2^25 for an EXR (an 8192 x 4096 panorama), 256 MB for a file read whole, 8 MB for an SVG. A header
+that claims more is refused with a reason. `ImageDecodeTest` truncates and bit-flips every vector.
+
+**Not covered:** AVIF, HEIF, DDS, KTX and TIFF are not read (`undecodableContainer` names them). An SVG's text and filters are
+dropped without a message. No shader or render pass changed (`PSRayDriven` is untouched); a decoded image is an ordinary
+RGBA8 texture from there on. Animated WebP plays no animation.
+
 ### The slot decides the colour space, never the filename
 
 | Slot | Usage | Uploaded as |

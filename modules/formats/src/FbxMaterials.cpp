@@ -8,6 +8,7 @@
 #if AVER_HAVE_UFBX
 
 #include "aver/core/Types.hpp"
+#include "aver/platform/Image.hpp"   // imageExtensionFor
 
 #include <algorithm>
 #include <cmath>
@@ -55,12 +56,13 @@ bool readFileBytes(const fs::path& p, std::vector<u8>& out) {
     return bool(f);
 }
 
-// ".png" or ".jpeg" from the first bytes, else "".
+// ".png", ".jpeg", ".bmp", ".dds", ".webp", ".exr" or ".svg" from the first bytes, else "".
 std::string sniffExt(const std::vector<u8>& b) {
     if (b.size() >= 8 && b[0] == 0x89 && b[1] == 'P' && b[2] == 'N' && b[3] == 'G') return ".png";
     if (b.size() >= 3 && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF) return ".jpeg";
     if (b.size() >= 2 && b[0] == 'B' && b[1] == 'M') return ".bmp";
     if (b.size() >= 4 && b[0] == 'D' && b[1] == 'D' && b[2] == 'S' && b[3] == ' ') return ".dds";
+    if (const char* e = imageExtensionFor(b.data(), b.size())) return e;   // .webp, .exr or .svg
     return std::string();
 }
 

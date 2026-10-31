@@ -28,6 +28,8 @@ AssetType assetTypeFromPath(std::string_view path) {
     if (e == "ocmesh") return AssetType::Mesh;
     if (e == "octex")  return AssetType::Texture;
     if (e == "png" || e == "jpg" || e == "jpeg" || e == "tga" || e == "bmp") return AssetType::Texture;
+    // Decoded by content in aver::decodeImage (platform/Image.hpp): WebP, SVG (rasterised at its own size) and OpenEXR.
+    if (e == "webp" || e == "svg" || e == "exr") return AssetType::Texture;
     if (e == "ocmat")  return AssetType::Material;
     if (e == "ocskel") return AssetType::Skeletal;
     if (e == "ocanim") return AssetType::Anim;

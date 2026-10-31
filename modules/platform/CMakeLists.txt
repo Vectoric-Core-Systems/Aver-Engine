@@ -30,6 +30,13 @@ aver_add_module(Aver.Platform
     src/DirectoryWatcher.cpp
     src/FileSystem.cpp
     src/Image.cpp
+    # WebP (libwebp), SVG (NanoSVG) and OpenEXR (tinyexr) behind aver::decodeImage; each vendored library
+    # is compiled in a translation unit of its own, and the wrappers are ordinary warning-clean code.
+    src/ImageWebp.cpp
+    src/ImageSvg.cpp
+    src/ImageExr.cpp
+    src/ThirdPartyNanoSvg.cpp
+    src/ThirdPartyTinyExr.cpp
     src/InputState.cpp
     ${_aver_platform_os_sources}
   DEPS
@@ -37,6 +44,18 @@ aver_add_module(Aver.Platform
 )
 
 target_include_directories(Aver.Platform PRIVATE ${CMAKE_SOURCE_DIR}/third_party/stb)
+# The two header-only decoders. SYSTEM so their headers do not warn in our wrappers.
+target_include_directories(Aver.Platform SYSTEM PRIVATE
+  ${CMAKE_SOURCE_DIR}/third_party/nanosvg
+  ${CMAKE_SOURCE_DIR}/third_party/tinyexr)
+# PRIVATE: no public header names a libwebp type, and a static library's link needs travel with it.
+target_link_libraries(Aver.Platform PRIVATE webpdecoder)
+# Warnings off for the vendored implementation TUs only.
+if(MSVC)
+  set_source_files_properties(src/ThirdPartyNanoSvg.cpp src/ThirdPartyTinyExr.cpp PROPERTIES COMPILE_OPTIONS "/w")
+else()
+  set_source_files_properties(src/ThirdPartyNanoSvg.cpp src/ThirdPartyTinyExr.cpp PROPERTIES COMPILE_OPTIONS "-w")
+endif()
 
 if(WIN32)
   # shell32/ole32 are for the known-folder lookups and IFileOpenDialog in FileSystem.cpp —

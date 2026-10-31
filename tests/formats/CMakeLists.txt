@@ -498,6 +498,13 @@ add_executable(ExrWriteTest src/ExrWriteTest.cpp)
 target_link_libraries(ExrWriteTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(ExrWriteTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# ImageDecodeTest -- aver::decodeImage / decodeFloatImage for WebP (libwebp), SVG (NanoSVG) and OpenEXR
+# (tinyexr): hand-built and reference-encoder vectors, size rules, the 8-bit form of a float image, what
+# stb_image still does, and truncated / bit-flipped / oversized input for all three. No device.
+add_executable(ImageDecodeTest src/ImageDecodeTest.cpp)
+target_link_libraries(ImageDecodeTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(ImageDecodeTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # CubeLutTest -- .cube 3D LUT parsing (data order, DOMAIN resampling, refusals with a reason) and the
 # .ocworld POSTVOLUME record (round trip, byte stability, tolerance, defaults). No device.
 add_executable(CubeLutTest src/CubeLutTest.cpp)

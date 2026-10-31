@@ -103,7 +103,20 @@ bool loadPanorama(const std::string& path, PanoramaImage& out, std::string* err)
     std::string lower = path;
     std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     const bool isHdr = lower.size() > 4 && lower.compare(lower.size() - 4, 4, ".hdr") == 0;
-    if (lower.size() > 4 && lower.compare(lower.size() - 4, 4, ".exr") == 0) return fail(err, "OpenEXR panoramas are not read; resave as Radiance .hdr");
+    const bool isExr = lower.size() > 4 && lower.compare(lower.size() - 4, 4, ".exr") == 0;
+    if (isExr) {
+        FloatImageData f;
+        if (!decodeFloatImage(path, f, err) || !f.valid()) return false;
+        out.width = f.width;
+        out.height = f.height;
+        out.rgb.resize(static_cast<usize>(f.width) * f.height * 3);
+        for (usize i = 0, n = static_cast<usize>(f.width) * f.height; i < n; ++i)
+            for (usize c = 0; c < 3; ++c) {
+                const f32 v = f.rgba[i * 4 + c];
+                out.rgb[i * 3 + c] = v > 0.0f ? v : 0.0f;   // negatives and NaN are not radiance
+            }
+        return true;
+    }
     if (isHdr) {
         std::vector<u8> bytes;
         if (!readFileBytes(path, bytes)) return fail(err, "the file could not be read");

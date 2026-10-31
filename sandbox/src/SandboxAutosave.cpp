@@ -490,8 +490,9 @@ void SandboxApp::pumpContentWatch() {
 }
 
 // True for an image the texture loader can actually decode. Kept in step with
-// modules/platform/src/Image.cpp, which is stb_image: a format listed here that stb cannot read
-// costs one wasted retry, and one it CAN read that is missing here never triggers a retry.
+// modules/platform/src/Image.cpp (stb_image, plus WebP, SVG and OpenEXR): a format listed here that
+// the decoder cannot read costs one wasted retry, and one it CAN read that is missing here never
+// triggers a retry.
  bool SandboxApp::isTextureSource(const std::string& rel) {
     const usize dot = rel.find_last_of('.');
     if (dot == std::string::npos) return false;
@@ -499,7 +500,7 @@ void SandboxApp::pumpContentWatch() {
     for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return ext == "png" || ext == "jpg" || ext == "jpeg" || ext == "tga" || ext == "bmp" ||
            ext == "psd" || ext == "gif" || ext == "hdr" || ext == "pic" || ext == "ppm" ||
-           ext == "pgm" || ext == "octex";
+           ext == "pgm" || ext == "octex" || ext == "webp" || ext == "svg" || ext == "exr";
 }
 
 // True for a hand-written .cs under the content root. Excludes bin/ and obj/ path segments.

@@ -411,6 +411,12 @@ $components = @(
     @{ Name = 'stb (stb_image, stb_image_write)'; Licence = 'MIT / public domain'; File = 'third_party\stb\LICENSE.txt' }
     # ufbx reads .fbx in the editor and AverAssetC (Aver.Formats.Fbx); it is not in the game runtime.
     @{ Name = 'ufbx';                  Licence = 'MIT';             File = 'third_party\ufbx\LICENSE' }
+    # Image decoders behind aver::decodeImage (Aver.Platform), so they are in every binary that links it, the game runtime included.
+    # libwebp's PATENTS file (Google's patent grant) is concatenated with its licence.
+    @{ Name = 'libwebp (WebP decoder)'; Licence = 'BSD-3-Clause';   File = 'third_party\libwebp\COPYING' }
+    @{ Name = 'libwebp patent grant';   Licence = 'Google patent grant'; File = 'third_party\libwebp\PATENTS' }
+    @{ Name = 'NanoSVG';               Licence = 'zlib';            File = 'third_party\nanosvg\LICENSE.txt' }
+    @{ Name = 'TinyEXR';               Licence = 'BSD-3-Clause';    File = 'third_party\tinyexr\LICENSE' }
 )
 foreach ($c in $components) {
     $p = Join-Path $root $c.File

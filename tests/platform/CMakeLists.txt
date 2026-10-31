@@ -41,6 +41,12 @@ if(NOT WIN32)
   set_target_properties(SdlKeyMapTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
 
+# ImageDecodeCorpus -- decodes every .webp / .svg / .exr under a directory it is given and prints counts (the
+# owner's Godot corpus, kept outside the repo). With no argument it does nothing, so the ctest walk passes it.
+add_executable(ImageDecodeCorpus src/ImageDecodeCorpus.cpp)
+target_link_libraries(ImageDecodeCorpus PRIVATE Aver.Platform Aver.Core)
+set_target_properties(ImageDecodeCorpus PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # SpeechTest -- createSpeechSynth() never null and every call safe; on Windows a real SAPI voice at volume 0.
 add_executable(SpeechTest src/SpeechTest.cpp)
 target_link_libraries(SpeechTest PRIVATE Aver.Platform Aver.Core)

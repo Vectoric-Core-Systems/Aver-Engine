@@ -1871,7 +1871,7 @@ void Gltf::importImages() {
 
         const std::string declaredName = img.has("name") ? std::string(img["name"].asString()) : std::string();
         const std::string mime = img.has("mimeType") ? std::string(img["mimeType"].asString()) : std::string();
-        out.ext = (mime == "image/jpeg") ? ".jpeg" : ".png";
+        out.ext = (mime == "image/jpeg") ? ".jpeg" : (mime == "image/webp") ? ".webp" : ".png";
 
         if (img.has("uri")) {
             const std::string uri(img["uri"].asString());
@@ -1881,6 +1881,7 @@ void Gltf::importImages() {
                 constexpr std::string_view kB64 = "base64,";
                 const usize marker = uri.find(kB64);
                 if (uri.find("image/jpeg") != std::string::npos) out.ext = ".jpeg";
+                if (uri.find("image/webp") != std::string::npos) out.ext = ".webp";
                 if (marker == std::string::npos) {
                     note("an image data: URI that is not base64 (image " + std::to_string(i) + ")");
                     continue;
@@ -1969,7 +1970,10 @@ GltfMaterial::TexRef Gltf::readTexRef(const JsonValue& info, const char* slot, c
     // answer to this and repeating it per material would bury everything else.
     if (tex.has("sampler")) note("texture samplers (wrap and filter modes; engine defaults apply)");
 
-    const i64 src = tex["source"].asInt(-1);
+    i64 src = tex["source"].asInt(-1);
+    // EXT_texture_webp: a texture may carry only the WebP image, under its own extension.
+    if (src < 0 && tex.has("extensions") && tex["extensions"].has("EXT_texture_webp"))
+        src = tex["extensions"]["EXT_texture_webp"]["source"].asInt(-1);
     if (src < 0 || usize(src) >= r_.images.size()) {
         note(std::string("a texture with no readable image on ") + matName + "." + slot);
         return ref;

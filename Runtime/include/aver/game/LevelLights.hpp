@@ -43,7 +43,7 @@ inline bool lightHasExt(const std::filesystem::path& p, bool ies) {
     std::string e = p.extension().string();
     std::transform(e.begin(), e.end(), e.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     if (ies) return e == ".ies";
-    return e == ".png" || e == ".jpg" || e == ".jpeg" || e == ".tga" || e == ".bmp";
+    return e == ".png" || e == ".jpg" || e == ".jpeg" || e == ".tga" || e == ".bmp" || e == ".webp" || e == ".svg" || e == ".exr";
 }
 
 // Every .ies (or cookie-capable image) under `contentDir`, sorted by path. Capped so a huge texture

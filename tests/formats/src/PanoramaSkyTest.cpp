@@ -116,7 +116,7 @@ int main() {
         const std::vector<u8> bad = header("garbage");
         check(!fmt::decodeRadianceHdr(bad.data(), bad.size(), img, &err), "an unreadable resolution line is refused");
         check(!fmt::loadPanorama("no/such/file.hdr", img, &err) && !err.empty(), "a missing file is refused");
-        check(!fmt::loadPanorama("sky.exr", img, &err) && err.find("EXR") != std::string::npos, "OpenEXR is named as unsupported");
+        check(!fmt::loadPanorama("no/such/sky.exr", img, &err) && !err.empty(), "a missing OpenEXR panorama is refused with a reason (the reader itself is in ImageDecodeTest)");
     }
 
     AVER_INFO("-- the dome fit --");

@@ -607,6 +607,11 @@ $components = @(
     @{ Name = 'Jolt Physics'; Licence = 'MIT'; File = 'modules\physics.jolt\LICENSE'; When = { $options['AVER_MODULE_PHYSICS'] } }
     @{ Name = 'stb (stb_image, stb_image_write)'; Licence = 'MIT / public domain'; File = 'third_party\stb\LICENSE.txt'; When = { $true } }
     @{ Name = 'AMD FidelityFX Denoiser'; Licence = 'MIT'; File = 'third_party\fidelityfx-denoiser\LICENSE.txt'; When = { $options['AVER_MODULE_VOXI'] } }
+    # The image decoders live in Aver.Platform (aver::decodeImage), which every game links.
+    @{ Name = 'libwebp (WebP decoder)'; Licence = 'BSD-3-Clause'; File = 'third_party\libwebp\COPYING'; When = { $true } }
+    @{ Name = 'libwebp patent grant'; Licence = 'Google patent grant'; File = 'third_party\libwebp\PATENTS'; When = { $true } }
+    @{ Name = 'NanoSVG'; Licence = 'zlib'; File = 'third_party\nanosvg\LICENSE.txt'; When = { $true } }
+    @{ Name = 'TinyEXR'; Licence = 'BSD-3-Clause'; File = 'third_party\tinyexr\LICENSE'; When = { $true } }
 )
 foreach ($c in $components) {
     if (-not (& $c.When)) { continue }

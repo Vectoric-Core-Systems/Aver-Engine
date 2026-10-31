@@ -1,6 +1,6 @@
 #pragma once
 // The Texture editor tab: a read-only viewer for a source image file (.png/.tga/.jpg/.jpeg/.bmp/
-// .hdr -- see makeTextureEditor's own comment for why .dds is not on that list even though it is a
+// .hdr/.webp/.svg/.exr -- see makeTextureEditor's own comment for why .dds is not on that list even though it is a
 // texture container). Shown centred on a checkerboard so alpha reads correctly, with Fit/100% zoom,
 // wheel-zoom and drag-pan, R/G/B toggles and a Details panel (resolution, format, file size, GPU
 // memory).
@@ -49,7 +49,7 @@ public:
     u64 fileBytes() const { return fileBytes_; }
 
 private:
-    // Decodes the file and gathers its stats. Pure CPU (aver::decodeImage is stb_image), so this
+    // Decodes the file and gathers its stats. Pure CPU (aver::decodeImage), so this
     // runs from the constructor and from onFileChanged() with no device and no ImGui context.
     // Leaves `pixels_` populated on success; ensureTexture() below consumes and clears it once the
     // bytes are on the GPU.
