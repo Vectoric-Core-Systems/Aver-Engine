@@ -1081,6 +1081,9 @@ void SandboxApp::buildWindowSettings() {
     settingInt("Resizable", &project_.windowResizable, 0, 1, 1, "0 or 1.");
     settingInt("Fullscreen", &project_.windowFullscreen, 0, 1, 0,
                "Borderless fullscreen, applied when the game window is created.");
+    settingInt("V-Sync mode", &project_.windowVsync, 0, 3, 0,
+               "The shipped game's present mode: 0 vsync, 1 off, 2 adaptive, 3 mailbox. A device without the mode uses the nearest it has. The editor keeps its own V-Sync preference.");
+    settingInt("Max FPS", &project_.windowMaxFps, 0, 1000, 0, "The shipped game's frame rate cap; 0 is none.");
     ImGui::Spacing();
     ImGui::TextDisabled("Title, size, resizable and fullscreen reach platform::WindowDesc through");
     ImGui::TextDisabled("the game's BootConfig, at window creation.");

@@ -67,6 +67,13 @@ int main() {
     expect(SDL_SCANCODE_END,       0x23, "VK_END");
     expect(SDL_SCANCODE_PAGEUP,    0x21, "VK_PRIOR");
     expect(SDL_SCANCODE_PAGEDOWN,  0x22, "VK_NEXT");
+    // The lock keys, Pause, Print Screen and the application (menu) key: the framework's CAPSLOCK .. MENU slots read these VKs.
+    expect(SDL_SCANCODE_CAPSLOCK,     0x14, "VK_CAPITAL");
+    expect(SDL_SCANCODE_NUMLOCKCLEAR, 0x90, "VK_NUMLOCK");
+    expect(SDL_SCANCODE_SCROLLLOCK,   0x91, "VK_SCROLL");
+    expect(SDL_SCANCODE_PAUSE,        0x13, "VK_PAUSE");
+    expect(SDL_SCANCODE_PRINTSCREEN,  0x2C, "VK_SNAPSHOT");
+    expect(SDL_SCANCODE_APPLICATION,  0x5D, "VK_APPS");
 
     // US-layout punctuation, by physical position (a scancode is a position, as a VK_OEM_* code is).
     expect(SDL_SCANCODE_GRAVE,        0xC0, "VK_OEM_3 (the console key, `)");

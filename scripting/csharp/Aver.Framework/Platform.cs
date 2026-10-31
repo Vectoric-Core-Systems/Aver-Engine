@@ -204,6 +204,34 @@ public static class Display
     /// <summary>Asks the shipped game to turn vsync on or off; it applies it next frame where the device allows turning
     /// it off. The editor keeps its own vsync preference and ignores the request.</summary>
     public static void SetVSync(bool on) => Fw.aver_fw_request_vsync(on ? 1 : 0);
+
+    /// <summary>How a finished frame reaches the display. Asks the shipped game for a mode; a device that lacks it uses the nearest
+    /// it has and reading this back says which. Reads <c>null</c> before the host has published one.</summary>
+    public static PresentMode? PresentMode
+    {
+        get { int m = Fw.aver_fw_present_mode(); return m < 0 ? null : (PresentMode)m; }
+        set { if (value is { } v) Fw.aver_fw_request_present_mode((int)v); }
+    }
+
+    /// <summary>The cap on frames per second, 0 for none. The shipped game paces to it on top of the present mode.</summary>
+    public static int MaxFps
+    {
+        get => Fw.aver_fw_max_fps();
+        set => Fw.aver_fw_set_max_fps(Math.Max(0, value));
+    }
+}
+
+/// <summary>Present modes. Matches the framework's AVER_FW_PRESENT_* values (framework_abi.h).</summary>
+public enum PresentMode
+{
+    /// <summary>Vsync: wait for the refresh, never tear.</summary>
+    Fifo = 0,
+    /// <summary>Vsync off: present at once, tearing where the display allows.</summary>
+    Immediate = 1,
+    /// <summary>Vsync, but a late frame presents at once instead of waiting a whole refresh.</summary>
+    Adaptive = 2,
+    /// <summary>The newest finished frame replaces the queued one at each refresh: no tearing, no backlog.</summary>
+    Mailbox = 3,
 }
 
 public static partial class Game

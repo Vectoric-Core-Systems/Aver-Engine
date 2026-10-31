@@ -359,7 +359,9 @@ static void testMalformedInput() {
     check(!fmt::parseOcinput("NAME Test\n", d, &err), "input without an OCINPUT header is rejected");
     check(err.find("OCINPUT") != std::string::npos, "...error message mentions the missing header");
 
-    check(!fmt::parseOcinput("OCINPUT 2\n", d, &err), "an unknown OCINPUT version is rejected");
+    check(!fmt::parseOcinput("OCINPUT 3\n", d, &err), "an unknown OCINPUT version is rejected");
+    check(!fmt::parseOcinput("OCINPUT 0\n", d, &err), "version 0 is rejected");
+    check(fmt::parseOcinput("OCINPUT 2\n", d, &err), "OCINPUT 2 (the clamp modifier's version) is accepted");
     check(!fmt::parseOcinput("OCINPUT\n", d, &err), "a header with no version number is rejected");
     check(!fmt::parseOcinput("", d, &err), "a completely empty file is rejected");
     check(err.find("OCINPUT") != std::string::npos, "...and the empty-file error also names the header");
@@ -517,6 +519,9 @@ static void testTriggerModifierGrammar() {
     check(parseModifierSpec("curve:2", m, &err) && m.kind == OcModifierKind::Curve && near(m.v[2], 2),
           "a single curve exponent is uniform");
     check(parseModifierSpec("smooth:0.04", m, &err) && m.kind == OcModifierKind::Smooth && near(m.v[0], 0.04f), "smooth:0.04");
+    check(parseModifierSpec("clamp", m, &err) && m.kind == OcModifierKind::Clamp && near(m.v[0], 0.0f) && near(m.v[1], 1.0f), "clamp defaults to 0..1");
+    check(parseModifierSpec("clamp:-1:0", m, &err) && near(m.v[0], -1.0f) && near(m.v[1], 0.0f), "clamp:-1:0");
+    check(parseModifierSpec("clamp:0.25", m, &err) && near(m.v[0], 0.25f) && near(m.v[1], 1.0f), "clamp:0.25 takes the upper bound 1");
 
     // parse(format(x)) == x and format(parse(s)) == s over canonical text.
     const char* const kTriggers[] = {
@@ -527,7 +532,7 @@ static void testTriggerModifierGrammar() {
     const char* const kModifiers[] = {
         "deadzone", "deadzone:0.1", "deadzone:0.1:0.9", "deadzone:0.1:0.9:axial", "deadzone:axial", "scale:2",
         "scale:1:2:3", "negate", "negate:y", "negate:xz", "swizzle:yxz", "swizzle:zxy", "smooth:0.04",
-        "smooth:0", "curve:2", "curve:1.4:2:1"};
+        "smooth:0", "curve:2", "curve:1.4:2:1", "clamp", "clamp:-1:0", "clamp:0.25", "clamp:0:0.5"};
     bool allCanonical = true, allRound = true;
     for (const char* s : kTriggers) {
         OcTriggerSpec a, b;
@@ -556,7 +561,8 @@ static void testTriggerModifierGrammar() {
     }
     const char* const badModifiers[] = {
         "deadzone:0.5:0.5", "deadzone:0.9:0.1", "deadzone:-1", "deadzone:radial:axial", "scale", "curve:0", "curve:-2",
-        "negate:xq", "negate:x:y", "swizzle", "swizzle:xxx", "smooth", "smooth:-1", "nope", "scale:1:", "scale 2"};
+        "negate:xq", "negate:x:y", "swizzle", "swizzle:xxx", "smooth", "smooth:-1", "nope", "scale:1:", "scale 2",
+        "clamp:1:0", "clamp:0.5:0.5", "clamp:0:1:2", "clamp:x"};
     for (const char* s : badModifiers) {
         OcModifierSpec x; err.clear();
         if (parseModifierSpec(s, x, &err) || err.empty()) { allRejected = false; AVER_ERROR("   modifier '{}' was not rejected with a message", s); }
@@ -645,6 +651,26 @@ static void testTriggerModifierGrammar() {
     check(fresh.find("trigger") == std::string::npos && fresh.find("modifier") == std::string::npos &&
           fresh.find("ACTION Move axis2\nACTION Look axis2\n") != std::string::npos,
           "...and a fresh write adds no trigger/modifier text");
+    check(fresh.rfind("OCINPUT 1\n", 0) == 0, "...and still says OCINPUT 1");
+
+    // A half axis: scale -1 and clamp keep one direction of a signed axis. A scheme using clamp is version 2,
+    // reads back the same, and a version 1 file still loads.
+    {
+        const std::string half = "OCINPUT 2\nACTION Left digital\nBIND Left gamepadaxis LeftX scale -1 modifier clamp\n";
+        OcInputData h;
+        check(parseOcinput(half, h, &err), "a version 2 file with a clamp modifier parses: " + err);
+        check(h.bindings.size() == 1 && h.bindings[0].modifiers.size() == 1 && h.bindings[0].modifiers[0] == "clamp" && h.bindings[0].scale == -1.0f,
+              "the clamp is kept on the binding as canonical text");
+        const std::string out = writeOcinput(h);
+        check(out.rfind("OCINPUT 2\n", 0) == 0 && out.find("modifier clamp\n") != std::string::npos, "the writer says version 2 for it");
+        OcInputData again;
+        check(parseOcinput(out, again, &err) && writeOcinput(again) == out, "write -> parse -> write is stable");
+        const std::string merged2 = writeOcinput(h, "OCINPUT 1\n# mine\nACTION Left digital\n");
+        check(merged2.rfind("OCINPUT 2\n", 0) == 0 && merged2.find("# mine\n") != std::string::npos, "merging into a version 1 file raises the header and keeps the comment");
+        OcInputData old;
+        check(parseOcinput("OCINPUT 1\nACTION Left digital\nBIND Left key A\n", old, &err), "a version 1 file still loads");
+        check(writeOcinput(old).rfind("OCINPUT 1\n", 0) == 0, "and is written back as version 1");
+    }
 }
 
 int main() {

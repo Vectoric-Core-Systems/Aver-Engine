@@ -68,6 +68,7 @@
 #include "aver/game/GameRender.hpp"
 #include "aver/game/GameInput.hpp"
 #include "aver/game/MouseCapture.hpp"
+#include "aver/game/GameDisplay.hpp"
 #include "aver/game/PlayMobility.hpp"
 #include "aver/game/OriginParticipants.hpp"
 #include "aver/game/LevelSequence.hpp"
@@ -307,6 +308,10 @@ private:
 
     // ---- mouse capture ---- cursor is hidden, confined and re-centred every frame.
     game::MouseCapture mouse_;
+#if AVER_MODULE_FRAMEWORK
+    // The window cursor's shape, images, hiding and confinement, as a script asks for them.
+    game::CursorHost cursorHost_;
+#endif
 
     // ---- camera ----
     Vec3 camPos_{7.0f, 7.0f, 4.5f};

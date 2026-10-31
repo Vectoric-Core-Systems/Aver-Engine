@@ -14,6 +14,16 @@ public enum Key
     D0 = 26, D1, D2, D3, D4, D5, D6, D7, D8, D9,
     Space = 36, LeftShift, LeftCtrl, LeftAlt, Enter, Escape, Tab,
     Left, Right, Up, Down, MouseLeft, MouseRight, MouseMiddle,
+    // Appended after the original 50, never reordered: a saved graph's InputKey node stores the number.
+    F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12,
+    PageUp, PageDown, Home, End, Insert, Delete, Backspace,
+    CapsLock, NumLock, ScrollLock, Pause, PrintScreen, Menu, Meta,
+    Minus, Equal, LBracket, RBracket, Backslash, Semicolon, Apostrophe, Comma, Period, Slash, Grave,
+    Kp0, Kp1, Kp2, Kp3, Kp4, Kp5, Kp6, Kp7, Kp8, Kp9, KpAdd, KpSubtract, KpMultiply, KpDivide, KpDecimal, KpEnter,
+    /// <summary>The mouse's two side buttons.</summary>
+    MouseX1, MouseX2,
+    /// <summary>A wheel notch, which reads as pressed for one frame.</summary>
+    MouseWheelUp, MouseWheelDown, MouseWheelLeft, MouseWheelRight,
 }
 
 /// <summary>Gamepad buttons. Matches the framework's AVER_FW_GAMEPAD_* enum (framework_abi.h), itself
@@ -23,6 +33,8 @@ public enum GamepadButton
 {
     DPadUp = 0, DPadDown, DPadLeft, DPadRight, Start, Back,
     LeftThumb, RightThumb, LeftShoulder, RightShoulder, A, B, X, Y,
+    // Appended: a pad with no such button reads them up (an XInput pad has no Guide).
+    Guide, Misc1, Paddle1, Paddle2, Paddle3, Paddle4, Touchpad,
 }
 
 /// <summary>Gamepad axes. Matches the framework's AVER_FW_GAMEPAD_AXIS_* enum (framework_abi.h),

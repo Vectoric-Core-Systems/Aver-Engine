@@ -24,6 +24,12 @@ public:
 
     void requestExit() { exit_ = true; }
 
+    // A cap on the frame rate in frames per second: after presenting, the loop waits out the rest of
+    // 1 / fps. 0 (the default) is no cap. It paces on top of whatever the present mode paces to, and is
+    // the host's to set -- the editor never does.
+    void setMaxFps(f32 fps) { maxFps_ = fps > 0.0f ? fps : 0.0f; }
+    f32 maxFps() const { return maxFps_; }
+
     Window* window() const { return window_; }
     rhi::IDevice* device() const { return device_; }
     const Timestep& time() const { return time_; }
@@ -65,6 +71,8 @@ private:
     Timestep time_;
     bool exit_ = false;
     bool inFrame_ = false;
+    f32 maxFps_ = 0.0f;
+    u64 frameBeginNs_ = 0;   // when this frame's clock restarted, for the cap
     // Whether the one-time device-lost report has been made. See frameStep: the condition is
     // permanent, so without this the log and the retitle would repeat for every message pump.
     bool deviceLostHandled_ = false;

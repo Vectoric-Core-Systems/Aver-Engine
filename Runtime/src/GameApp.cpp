@@ -1256,6 +1256,12 @@ void GameApp::openProject(Engine& e) {
     // Read frame budget from manifest (<=0 disables it)
     frameBudget_.budgetMs = project_.frameBudgetMs;
 #endif
+#if AVER_MODULE_FRAMEWORK
+    // WINDOW.VSYNC and WINDOW.MAXFPS: the project's present mode and frame cap, the same requests a script makes (taken in onUpdate).
+    // (--no-vsync, a measurement flag, wins over the manifest.)
+    if (!cfg_.vsyncOff && project_.windowVsync >= 0 && project_.windowVsync < AVER_FW_PRESENT_COUNT) aver_fw_request_present_mode(project_.windowVsync);
+    if (project_.windowMaxFps > 0) aver_fw_set_max_fps(project_.windowMaxFps);
+#endif
 #if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
     // G4 R5: how many sub-viewports may exist and how many are drawn per frame (the defaults when the manifest is silent).
     game::SubViewportHost::configure(game::subViewportSettingsOf(project_.subViewports, project_.subViewRenders, project_.subViewPixels));
@@ -2237,9 +2243,11 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
         char travel[1024];
         if (aver_fw_take_travel_request(travel, static_cast<int32_t>(sizeof travel)) > 0) travelTo(travel);
     }
-    // A script's vsync choice (Display.VSync), applied where the device allows it.
-    if (const int32_t vs = aver_fw_take_vsync_request(); vs >= 0)
-        if (rhi::IDevice* dev = e.device(); dev && (vs == 1 || dev->vsyncCanDisable())) dev->setVSync(vs == 1);
+    // A script's present mode (Display.VSync / Display.PresentMode), the frame cap, and its window requests, applied where the device and
+    // the window allow it. The state is published back for the script to read.
+    if (rhi::IDevice* dev = e.device()) game::applyPresentMode(*dev);
+    e.setMaxFps(static_cast<f32>(aver_fw_max_fps()));
+    if (window_) game::applyWindowRequests(*window_);
     // Foreground: asked once for cursor confinement and player drive input. Falls back to "a window exists" (no portable Win32 query).
     bool foreground = e.window() != nullptr;
 #if defined(_WIN32)
@@ -2258,9 +2266,16 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
         // Framework ABI: free cursor when aver_fw_cursor_requested()==1 regardless of play state.
         if (aver_fw_cursor_requested()) wantCapture = false;
         // An open menu frees the cursor so the player can reach it (retained widgets, docs/GAME_UI.md).
-        if (game::uiWantsCursor()) wantCapture = false;
-        setMouseCaptured(wantCapture);
+        const bool cursorFreed = aver_fw_cursor_requested() != 0 || game::uiWantsCursor();
+        if (cursorFreed) wantCapture = false;
+        // A script's pointer mode replaces the rule above (AUTO keeps it): the same gates -- a foreground window, no
+        // bounded run, no --no-mouse-capture -- and the same two things that free the cursor.
+        const bool pointerGate = foreground && window_ && cfg_.maxFrames == 0 && !cfg_.noMouseCapture;
+        const game::PointerPlan plan = pointerGate ? game::resolvePointerPlan(aver_fw_pointer_mode(), wantCapture, cursorFreed)
+                                                   : game::PointerPlan{};
+        setMouseCaptured(pointerGate ? plan.captured : wantCapture);
         pollCapturedMouse();
+        if (window_) cursorHost_.apply(*window_, plan);
     }
     // Before gameplay tick: PrePhysics actors read THIS frame's input. Bounded run keeps old answer (window opens unactivated).
     //

@@ -36,7 +36,34 @@ static class InputRouterTests
         T.Run("input: the UI takes pointer events when it wants the pointer, keys when it wants the keyboard", UiTakes);
         T.Run("input: an actor without input hooks is not called; InputEnabled turns one off", Enablement);
         T.Run("input: a hook that throws does not stop the rest", Throws);
+        T.Run("input: touch and sideways wheel events are pointer events; the key and pad numbers are stable", WiderSet);
     });
+
+    private static void WiderSet()
+    {
+        s_log.Clear();
+        var actors = Two(out _, out _);
+        T.Check("a finger down goes to the UI when it wants the pointer",
+                InputRouter.Route(new InputEventTouch(0, true, 10f, 20f), actors, true, false) == "ui");
+        T.Check("so does a finger moving",
+                InputRouter.Route(new InputEventTouchMotion(0, 12f, 20f, 2f, 0f), actors, true, false) == "ui");
+        T.Check("a sideways wheel notch too", InputRouter.Route(new InputEventMouseWheel(0f, 1f), actors, true, false) == "ui");
+        T.Check("a touch passes a UI that wants only the keyboard", InputRouter.Route(new InputEventTouch(0, false, 0f, 0f), actors, false, true) == "");
+        T.Check("a finger lifting is not a press", !new InputEventTouch(1, false, 0f, 0f).Pressed && new InputEventTouch(1, true, 0f, 0f).Pressed);
+        T.Check("a touch motion is never a release", !new InputEventTouchMotion(0, 1f, 1f, 0f, 0f).IsActionReleased("x"));
+        T.Check("the wheel carries both directions", new InputEventMouseWheel(2f, -1f) is { Delta: 2f, Horizontal: -1f } && new InputEventMouseWheel(3f).Horizontal == 0f);
+
+        // The original 50 keys keep their numbers (saved graphs store them); the appended ones follow.
+        T.Check("the original key numbers", (int)Key.A == 0 && (int)Key.Z == 25 && (int)Key.D0 == 26 && (int)Key.Space == 36 && (int)Key.Down == 46 && (int)Key.MouseMiddle == 49);
+        T.Check("the appended keys start at 50 and run to 108", (int)Key.F1 == 50 && (int)Key.F12 == 61 && (int)Key.Kp0 == 87 && (int)Key.KpEnter == 102 &&
+                                                                  (int)Key.MouseX1 == 103 && (int)Key.MouseWheelRight == 108);
+        T.Check("109 keys in all", Enum.GetValues<Key>().Length == 109);
+        T.Check("the original 14 pad buttons keep their numbers", (int)GamepadButton.Y == 13 && (int)GamepadButton.Guide == 14 && (int)GamepadButton.Touchpad == 20);
+        T.Check("21 pad buttons and 6 axes", Enum.GetValues<GamepadButton>().Length == 21 && Enum.GetValues<GamepadAxis>().Length == 6);
+        T.Check("four pads and ten fingers", Gamepads.MaxPads == 4 && Touch.MaxFingers == 10);
+        T.Check("present mode numbers", (int)PresentMode.Fifo == 0 && (int)PresentMode.Immediate == 1 && (int)PresentMode.Adaptive == 2 && (int)PresentMode.Mailbox == 3);
+        T.Check("window mode numbers and flags", (int)WindowMode.Fullscreen == 3 && (int)WindowFlags.AlwaysOnTop == 4 && (int)PointerMode.ConfinedHidden == 5 && (int)CursorShape.Help == 16);
+    }
 
     private static List<AverActor> Two(out Listener a, out Listener b)
     {

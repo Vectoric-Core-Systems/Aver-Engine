@@ -184,8 +184,13 @@ becomes events -- `InputEventKey`, `InputEventMouseButton`, `InputEventMouseWhee
 `InputEventJoypadButton`, `InputEventJoypadMotion` -- and each goes to every actor's `OnInput` (deepest, last-added
 first), then to the game UI if it wants that device (the pointer, or the keyboard), then to `OnUnhandledInput`.
 `Input.SetInputAsHandled()` stops it; `Input.ParseInputEvent(e)` routes a made-up one next frame; `e.IsActionPressed(name)`
-is true for a press in a frame the action was pressed. Polling (`Input.GetKey`, actions) is unchanged. Not yet: touch,
-absolute mouse position, more than one gamepad, and input to `WhenPaused` actors while paused.
+is true for a press in a frame the action was pressed. Polling (`Input.GetKey`, actions) is unchanged. Touch
+(`InputEventTouch`, `InputEventTouchMotion`, the `Touch` class), up to four gamepads (`Input.GetGamepadButton(b, pad)`,
+`Gamepads.IsConnected/Name/Rumble`), the wider key set (`Key.F1` to `F12`, the navigation, punctuation and numpad keys,
+`Key.MouseX1`/`MouseX2`, `Key.MouseWheelUp` and the other three wheel directions as one-frame presses) and the
+shipped game's pointer, cursor and window (`Pointer.Mode/Shape/SetCursorImage/Warp`, `DisplayWindow.Mode/SetSize/...`,
+`Display.PresentMode`, `Display.MaxFps`; the editor ignores these) are in. Not yet: absolute mouse position
+(`aver_ui_pointer` has it in the UI frame's space) and input to `WhenPaused` actors while paused.
 
 Level travel (Godot's `change_scene_to_file`): `Game.ChangeLevel("Maps/Next.ocworld")` replaces the level at the end
 of the frame. Every actor ends with `EndReason.Travel` except the GameInstance and actors with `Persistent = true`
@@ -198,7 +203,7 @@ Files and platform (Godot's ProjectSettings, OS, Engine, DisplayServer): `Paths.
 the editor and the shipped game); `ConfigFile` reads and writes Godot's ConfigFile text; `ProjectSettings.Get(key)`
 reads the manifest; `OS.Name` and `OS.HasFeature("windows"|"debug"|"editor"|...)`; `Engine.FramesPerSecond`,
 `ProcessFrames` and `PhysicsFrames`; `DebugDraw.Line/Box/Sphere` draw on top of the frame for one frame or a time;
-`Display.SetVSync` (the shipped game only). File I/O itself is .NET's `System.IO` on the resolved paths.
+`Display.SetVSync`, `Display.PresentMode` and `Display.MaxFps` (the shipped game only). File I/O itself is .NET's `System.IO` on the resolved paths.
 
 Random numbers: `AverRandom` is the shared generator (Godot's global `randf`/`randi_range`/`seed`/`randomize`),
 and `new RandomNumberGenerator(seed)` makes an independent one with `Randi`, `Randf`, `RandiRange`, `RandfRange`,

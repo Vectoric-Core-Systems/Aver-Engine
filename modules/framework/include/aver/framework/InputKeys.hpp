@@ -25,17 +25,52 @@ namespace aver::fw {
 // UNSIDED code unless the receiver does the extended-key dance, so mapping the sided ones would
 // produce a Shift key that never registers. The framework's slot is named LSHIFT but means "shift".
 //
-// MOST OF THE VK RANGE FALLS THROUGH TO -1, and that is a real limitation rather than an oversight:
-// the framework enum has AVER_FW_KEY_COUNT slots -- 50 at this writing, and spelled as the symbol
-// because the last count written out here said 46 and went stale the day the four arrow keys were
-// added -- against Win32's 256 codes, so F-keys, the numpad and every OEM key
-// are simply unreachable by gameplay today. The enum cannot be renumbered to fix it -- the InputKey
-// graph node takes a literal integer, so saved graphs depend on the current numbering -- which is
-// why the raw-VK ABI exists alongside this rather than replacing it.
+// THE REST OF THE VK RANGE FALLS THROUGH TO -1: the framework enum has AVER_FW_KEY_COUNT slots
+// against Win32's 256 codes, and the keys past the original 50 (F-keys, navigation, punctuation,
+// numpad) were appended, never inserted -- the InputKey graph node takes a literal integer, so saved
+// graphs depend on the numbering. A VK this table does not name (the OEM keys of one layout, the
+// media keys) is still reachable by value through the raw-VK ABI that runs beside this.
+//
+// NUMPAD ENTER has no VK of its own on Win32: it is VK_RETURN with the extended-key bit. The window
+// layers report it as Enter (unchanged) AND as 0x6C (VK_SEPARATOR, which no keyboard sends), and 0x6C
+// is what maps to AVER_FW_KEY_KPENTER here.
 inline i32 frameworkKeyFromVk(i32 vk) {
     if (vk >= 'A' && vk <= 'Z') return AVER_FW_KEY_A + (vk - 'A');
     if (vk >= '0' && vk <= '9') return AVER_FW_KEY_0 + (vk - '0');
+    if (vk >= 0x70 && vk <= 0x7B) return AVER_FW_KEY_F1 + (vk - 0x70);        // VK_F1..VK_F12
+    if (vk >= 0x60 && vk <= 0x69) return AVER_FW_KEY_KP0 + (vk - 0x60);       // VK_NUMPAD0..9
     switch (vk) {
+        case 0x08: return AVER_FW_KEY_BACKSPACE;
+        case 0x13: return AVER_FW_KEY_PAUSE;
+        case 0x14: return AVER_FW_KEY_CAPSLOCK;
+        case 0x21: return AVER_FW_KEY_PAGEUP;
+        case 0x22: return AVER_FW_KEY_PAGEDOWN;
+        case 0x23: return AVER_FW_KEY_END;
+        case 0x24: return AVER_FW_KEY_HOME;
+        case 0x2C: return AVER_FW_KEY_PRINTSCREEN;
+        case 0x2D: return AVER_FW_KEY_INSERT;
+        case 0x2E: return AVER_FW_KEY_DELETE;
+        case 0x5B: case 0x5C: return AVER_FW_KEY_META;   // VK_LWIN, VK_RWIN
+        case 0x5D: return AVER_FW_KEY_MENU;              // VK_APPS
+        case 0x6A: return AVER_FW_KEY_KPMULTIPLY;
+        case 0x6B: return AVER_FW_KEY_KPADD;
+        case 0x6C: return AVER_FW_KEY_KPENTER;
+        case 0x6D: return AVER_FW_KEY_KPSUBTRACT;
+        case 0x6E: return AVER_FW_KEY_KPDECIMAL;
+        case 0x6F: return AVER_FW_KEY_KPDIVIDE;
+        case 0x90: return AVER_FW_KEY_NUMLOCK;
+        case 0x91: return AVER_FW_KEY_SCROLLLOCK;
+        case 0xBA: return AVER_FW_KEY_SEMICOLON;         // VK_OEM_1
+        case 0xBB: return AVER_FW_KEY_EQUAL;             // VK_OEM_PLUS
+        case 0xBC: return AVER_FW_KEY_COMMA;
+        case 0xBD: return AVER_FW_KEY_MINUS;
+        case 0xBE: return AVER_FW_KEY_PERIOD;
+        case 0xBF: return AVER_FW_KEY_SLASH;             // VK_OEM_2
+        case 0xC0: return AVER_FW_KEY_GRAVE;             // VK_OEM_3
+        case 0xDB: return AVER_FW_KEY_LBRACKET;          // VK_OEM_4
+        case 0xDC: return AVER_FW_KEY_BACKSLASH;         // VK_OEM_5
+        case 0xDD: return AVER_FW_KEY_RBRACKET;          // VK_OEM_6
+        case 0xDE: return AVER_FW_KEY_APOSTROPHE;        // VK_OEM_7
         case 0x20: return AVER_FW_KEY_SPACE;    // VK_SPACE
         case 0x10: return AVER_FW_KEY_LSHIFT;   // VK_SHIFT
         case 0x11: return AVER_FW_KEY_LCTRL;    // VK_CONTROL
@@ -56,18 +91,26 @@ inline i32 frameworkKeyFromVk(i32 vk) {
 // button into a framework slot -- it spelled the three lines out by hand for a while, beside this
 // table, which is the second-copy-of-one-mapping shape this header's top comment exists to close.
 //
-// Buttons live at the END of the same enum, which is what lets a graph's InputKey node read one
+// Buttons live in the same enum as the keys, which is what lets a graph's InputKey node read one
 // with no new node: its `key` pin is a plain int (GraphNodeDefs' InputKey, sandbox/src), and
-// AVER_FW_KEY_MOUSE_LEFT is simply another value of it. That is a fact about the enum's layout
-// rather than anything either side says, so do not move the mouse slots off the tail.
+// AVER_FW_KEY_MOUSE_LEFT is simply another value of it. Indices 3 and 4 are the side buttons.
 inline i32 frameworkKeyFromMouseButton(i32 b) {
     switch (b) {
         case 0:  return AVER_FW_KEY_MOUSE_LEFT;
         case 1:  return AVER_FW_KEY_MOUSE_RIGHT;
         case 2:  return AVER_FW_KEY_MOUSE_MIDDLE;
+        case 3:  return AVER_FW_KEY_MOUSE_X1;
+        case 4:  return AVER_FW_KEY_MOUSE_X2;
         default: return -1;
     }
 }
+
+// The four wheel slots a notch of scroll presses: vertical (positive = away from the user = UP) and
+// horizontal (positive = right). Zero presses none of the pair.
+inline bool frameworkWheelUp(f32 vertical)      { return vertical > 0.0f; }
+inline bool frameworkWheelDown(f32 vertical)    { return vertical < 0.0f; }
+inline bool frameworkWheelRight(f32 horizontal) { return horizontal > 0.0f; }
+inline bool frameworkWheelLeft(f32 horizontal)  { return horizontal < 0.0f; }
 
 // Human-readable name for a framework key, for --input-echo and for any diagnostic that has to name
 // the offending slot rather than just its index.
@@ -78,7 +121,15 @@ inline const char* frameworkKeyName(i32 k) {
         "0","1","2","3","4","5","6","7","8","9",
         "SPACE","LSHIFT","LCTRL","LALT","ENTER","ESCAPE","TAB",
         "LEFT","RIGHT","UP","DOWN","MOUSE_LEFT","MOUSE_RIGHT","MOUSE_MIDDLE",
+        "F1","F2","F3","F4","F5","F6","F7","F8","F9","F10","F11","F12",
+        "PAGEUP","PAGEDOWN","HOME","END","INSERT","DELETE","BACKSPACE",
+        "CAPSLOCK","NUMLOCK","SCROLLLOCK","PAUSE","PRINTSCREEN","MENU","META",
+        "MINUS","EQUAL","LBRACKET","RBRACKET","BACKSLASH","SEMICOLON","APOSTROPHE","COMMA","PERIOD","SLASH","GRAVE",
+        "KP0","KP1","KP2","KP3","KP4","KP5","KP6","KP7","KP8","KP9",
+        "KPADD","KPSUBTRACT","KPMULTIPLY","KPDIVIDE","KPDECIMAL","KPENTER",
+        "MOUSE_X1","MOUSE_X2","MOUSE_WHEEL_UP","MOUSE_WHEEL_DOWN","MOUSE_WHEEL_LEFT","MOUSE_WHEEL_RIGHT",
     };
+    static_assert(sizeof(kNames) / sizeof(kNames[0]) == AVER_FW_KEY_COUNT, "a key was added without its name");
     if (k < 0 || k >= AVER_FW_KEY_COUNT) return "?";
     return kNames[k];
 }

@@ -28,6 +28,7 @@
 #include <SDL3/SDL_vulkan.h>
 
 #include <algorithm>
+#include <array>
 #include <clocale>
 #include <cstring>
 #include <string>
@@ -92,6 +93,12 @@ Window* ownerOf(const SDL_Event& ev) {
     return nullptr;
 }
 
+// The SDL finger id held by each framework finger index; 0 = the index is free.
+std::array<u64, 10>& fingerSlots() {
+    static std::array<u64, 10> s{};
+    return s;
+}
+
 // Points (SDL's window coordinates) to the physical pixels every engine coordinate is in.
 f32 pixelDensity(SDL_Window* sw) {
     const f32 d = SDL_GetWindowPixelDensity(sw);
@@ -129,6 +136,8 @@ void route(Window& self, const SDL_Event& ev) {
             e.key = vk;
             e.pressed = ev.type == SDL_EVENT_KEY_DOWN;
             self.dispatch(e);
+            // Numpad Enter reports as Enter and, for its own slot, as 0x6C -- see InputKeys.hpp.
+            if (ev.key.scancode == SDL_SCANCODE_KP_ENTER) { e.key = 0x6C; self.dispatch(e); }
             break;
         }
         case SDL_EVENT_MOUSE_MOTION: {
@@ -143,7 +152,8 @@ void route(Window& self, const SDL_Event& ev) {
         case SDL_EVENT_MOUSE_BUTTON_DOWN:
         case SDL_EVENT_MOUSE_BUTTON_UP: {
             const int b = ev.button.button == SDL_BUTTON_LEFT ? 0 : ev.button.button == SDL_BUTTON_RIGHT ? 1
-                        : ev.button.button == SDL_BUTTON_MIDDLE ? 2 : -1;
+                        : ev.button.button == SDL_BUTTON_MIDDLE ? 2 : ev.button.button == SDL_BUTTON_X1 ? 3
+                        : ev.button.button == SDL_BUTTON_X2 ? 4 : -1;
             if (b < 0) break;
             const bool down = ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
             // Counted exactly as on Win32 so Window::mouseCapture() means the same thing. The capture
@@ -166,7 +176,37 @@ void route(Window& self, const SDL_Event& ev) {
             // and is left as made, the way Windows' own reversed-scroll settings are.
             Event e; e.type = EventType::MouseWheel;
             e.wheel = ev.wheel.y;
+            e.wheelX = ev.wheel.x;
             self.dispatch(e);
+            break;
+        }
+        // A finger. SDL numbers fingers by an opaque 64-bit id; the framework wants a small stable index,
+        // so a finger takes the lowest free index while it is down.
+        case SDL_EVENT_FINGER_DOWN:
+        case SDL_EVENT_FINGER_MOTION:
+        case SDL_EVENT_FINGER_UP:
+        case SDL_EVENT_FINGER_CANCELED: {
+            auto& live = fingerSlots();
+            const u64 id = static_cast<u64>(ev.tfinger.fingerID);
+            int slot = -1;
+            for (usize i = 0; i < live.size(); ++i) if (live[i] == id && id != 0) { slot = static_cast<int>(i); break; }
+            const bool up = ev.type == SDL_EVENT_FINGER_UP || ev.type == SDL_EVENT_FINGER_CANCELED;
+            if (slot < 0) {
+                if (up) break;
+                for (usize i = 0; i < live.size(); ++i) if (live[i] == 0) { slot = static_cast<int>(i); break; }
+                if (slot < 0) break;                     // more fingers than the framework tracks
+                live[static_cast<usize>(slot)] = id ? id : ~static_cast<u64>(0);
+            }
+            int pw = 0, ph = 0;
+            SDL_GetWindowSizeInPixels(sw, &pw, &ph);
+            Event e; e.type = EventType::Touch;
+            e.finger = slot;
+            e.pressed = !up;
+            e.mouseX = static_cast<i32>(ev.tfinger.x * static_cast<f32>(pw));
+            e.mouseY = static_cast<i32>(ev.tfinger.y * static_cast<f32>(ph));
+            e.pressure = ev.tfinger.pressure;
+            self.dispatch(e);
+            if (up) live[static_cast<usize>(slot)] = 0;
             break;
         }
         // Key state held across a focus change must be dropped -- see EventType::FocusLost.
@@ -303,10 +343,13 @@ void Window::pumpEvents() {
     }
 }
 
+namespace { void releaseExt(void*& slot); }   // defined with the display controls below
+
 void Window::destroy() {
     if (!nativeHandle_) return;
     auto& live = liveWindows();
     live.erase(std::remove(live.begin(), live.end(), this), live.end());
+    releaseExt(ext_);   // the cursors go before the window they were shown over
     SDL_DestroyWindow(sdlWindow(this));
     nativeHandle_ = nullptr;
     // WM_DESTROY's PostQuitMessage: the app ends when its main window does.
@@ -342,6 +385,189 @@ void Window::setRelativeMouse(bool on) {
         AVER_WARN("[Platform] relative mouse mode {} failed ({})", on ? "on" : "off", SDL_GetError());
     relDx_ = relDy_ = 0.0f;
 }
+
+// ---- window state and control, see Window.hpp ----------------------------------------------------
+
+namespace {
+constexpr int kShapeCount = static_cast<int>(Window::CursorShape::Count);
+// Window::ext_ for this backend: the cursors made so far and the cursor state asked for.
+struct Ext {
+    SDL_Cursor* system[kShapeCount] = {};
+    SDL_Cursor* custom[kShapeCount] = {};
+    bool controlled = false, hidden = false;
+    int shape = 0;
+};
+Ext& getExt(void*& slot) {
+    if (!slot) slot = new Ext();
+    return *static_cast<Ext*>(slot);
+}
+
+SDL_SystemCursor systemCursorId(int shape) {
+    switch (static_cast<Window::CursorShape>(shape)) {
+        case Window::CursorShape::IBeam:        return SDL_SYSTEM_CURSOR_TEXT;
+        case Window::CursorShape::PointingHand: return SDL_SYSTEM_CURSOR_POINTER;
+        case Window::CursorShape::Cross:        return SDL_SYSTEM_CURSOR_CROSSHAIR;
+        case Window::CursorShape::Wait:         return SDL_SYSTEM_CURSOR_WAIT;
+        case Window::CursorShape::Busy:         return SDL_SYSTEM_CURSOR_PROGRESS;
+        case Window::CursorShape::Drag:         return SDL_SYSTEM_CURSOR_MOVE;
+        case Window::CursorShape::CanDrop:      return SDL_SYSTEM_CURSOR_POINTER;
+        case Window::CursorShape::Forbidden:    return SDL_SYSTEM_CURSOR_NOT_ALLOWED;
+        case Window::CursorShape::VSize:        return SDL_SYSTEM_CURSOR_NS_RESIZE;
+        case Window::CursorShape::HSize:        return SDL_SYSTEM_CURSOR_EW_RESIZE;
+        case Window::CursorShape::BDiagSize:    return SDL_SYSTEM_CURSOR_NESW_RESIZE;
+        case Window::CursorShape::FDiagSize:    return SDL_SYSTEM_CURSOR_NWSE_RESIZE;
+        case Window::CursorShape::Move:         return SDL_SYSTEM_CURSOR_MOVE;
+        case Window::CursorShape::VSplit:       return SDL_SYSTEM_CURSOR_NS_RESIZE;
+        case Window::CursorShape::HSplit:       return SDL_SYSTEM_CURSOR_EW_RESIZE;
+        default:                                return SDL_SYSTEM_CURSOR_DEFAULT;
+    }
+}
+
+void releaseExt(void*& slot) {
+    if (!slot) return;
+    Ext* x = static_cast<Ext*>(slot);
+    for (SDL_Cursor* c : x->system) if (c) SDL_DestroyCursor(c);
+    for (SDL_Cursor* c : x->custom) if (c) SDL_DestroyCursor(c);
+    delete x;
+    slot = nullptr;
+}
+
+// Puts the cursor the extension's state asks for on screen.
+void applyCursor(Ext& x) {
+    if (!x.controlled) return;
+    if (x.hidden) { SDL_HideCursor(); return; }
+    SDL_Cursor* c = (x.shape >= 0 && x.shape < kShapeCount) ? x.custom[x.shape] : nullptr;
+    if (!c && x.shape >= 0 && x.shape < kShapeCount) {
+        if (!x.system[x.shape]) x.system[x.shape] = SDL_CreateSystemCursor(systemCursorId(x.shape));
+        c = x.system[x.shape];
+    }
+    if (c) SDL_SetCursor(c);
+    SDL_ShowCursor();
+}
+} // namespace
+
+Window::Mode Window::mode() const {
+    if (!nativeHandle_) return Mode::Windowed;
+    const SDL_WindowFlags f = SDL_GetWindowFlags(sdlWindow(this));
+    if (f & SDL_WINDOW_FULLSCREEN) return Mode::Fullscreen;
+    if (f & SDL_WINDOW_MINIMIZED) return Mode::Minimized;
+    if (f & SDL_WINDOW_MAXIMIZED) return Mode::Maximized;
+    return Mode::Windowed;
+}
+
+void Window::setMode(Mode m) {
+    if (!nativeHandle_) return;
+    SDL_Window* sw = sdlWindow(this);
+    const bool full = (SDL_GetWindowFlags(sw) & SDL_WINDOW_FULLSCREEN) != 0;
+    if (m == Mode::Fullscreen) {
+        if (!full) { SDL_SetWindowFullscreen(sw, true); SDL_SyncWindow(sw); }   // no display mode set: borderless desktop
+        return;
+    }
+    if (full) { SDL_SetWindowFullscreen(sw, false); SDL_SyncWindow(sw); }
+    switch (m) {
+        case Mode::Minimized: SDL_MinimizeWindow(sw); break;
+        case Mode::Maximized: SDL_MaximizeWindow(sw); break;
+        default: SDL_RestoreWindow(sw); break;
+    }
+}
+
+bool Window::outerPosition(i32& x, i32& y) const {
+    if (!nativeHandle_) return false;
+    int px = 0, py = 0;
+    if (!SDL_GetWindowPosition(sdlWindow(this), &px, &py)) return false;
+    x = px; y = py;
+    return true;
+}
+
+void Window::setOuterPosition(i32 x, i32 y) {
+    if (nativeHandle_ && mode() == Mode::Windowed) SDL_SetWindowPosition(sdlWindow(this), x, y);
+}
+
+void Window::setClientSize(u32 w, u32 h) {
+    if (!nativeHandle_ || w == 0 || h == 0 || mode() != Mode::Windowed) return;
+    SDL_Window* sw = sdlWindow(this);
+    const f32 d = pixelDensity(sw);
+    SDL_SetWindowSize(sw, std::max(1, static_cast<int>(static_cast<f32>(w) / d + 0.5f)),
+                      std::max(1, static_cast<int>(static_cast<f32>(h) / d + 0.5f)));
+}
+
+u32 Window::flags() const {
+    if (!nativeHandle_) return 0;
+    const SDL_WindowFlags f = SDL_GetWindowFlags(sdlWindow(this));
+    u32 r = 0;
+    if (f & SDL_WINDOW_RESIZABLE) r |= kFlagResizable;
+    if (f & SDL_WINDOW_BORDERLESS) r |= kFlagBorderless;
+    if (f & SDL_WINDOW_ALWAYS_ON_TOP) r |= kFlagAlwaysOnTop;
+    return r;
+}
+
+void Window::setFlag(u32 flag, bool on) {
+    if (!nativeHandle_) return;
+    SDL_Window* sw = sdlWindow(this);
+    if (flag == kFlagResizable) SDL_SetWindowResizable(sw, on);
+    else if (flag == kFlagBorderless) SDL_SetWindowBordered(sw, !on);
+    else if (flag == kFlagAlwaysOnTop) SDL_SetWindowAlwaysOnTop(sw, on);
+}
+
+bool Window::monitorSize(i32& w, i32& h) const {
+    if (!nativeHandle_) return false;
+    SDL_Window* sw = sdlWindow(this);
+    const SDL_DisplayID display = SDL_GetDisplayForWindow(sw);
+    SDL_Rect r{};
+    if (!display || !SDL_GetDisplayBounds(display, &r)) return false;
+    const f32 d = pixelDensity(sw);
+    w = static_cast<i32>(static_cast<f32>(r.w) * d + 0.5f);
+    h = static_cast<i32>(static_cast<f32>(r.h) * d + 0.5f);
+    return true;
+}
+
+void Window::setCursorShape(CursorShape s) {
+    if (!nativeHandle_ || static_cast<int>(s) < 0 || static_cast<int>(s) >= kShapeCount) return;
+    Ext& x = getExt(ext_);
+    x.controlled = true;
+    x.shape = static_cast<int>(s);
+    applyCursor(x);
+}
+
+bool Window::setCursorImage(CursorShape s, const u8* rgba, i32 w, i32 h, i32 hotX, i32 hotY) {
+    if (!nativeHandle_ || static_cast<int>(s) < 0 || static_cast<int>(s) >= kShapeCount) return false;
+    Ext& x = getExt(ext_);
+    SDL_Cursor* made = nullptr;
+    if (rgba && w > 0 && h > 0) {
+        SDL_Surface* surf = SDL_CreateSurfaceFrom(w, h, SDL_PIXELFORMAT_RGBA32, const_cast<u8*>(rgba), w * 4);
+        if (surf) {
+            made = SDL_CreateColorCursor(surf, hotX, hotY);
+            SDL_DestroySurface(surf);
+        }
+        if (!made) return false;
+    }
+    SDL_Cursor*& slot = x.custom[static_cast<int>(s)];
+    SDL_Cursor* old = slot;
+    slot = made;
+    applyCursor(x);                       // the replacement is on screen before the old cursor goes
+    if (old) SDL_DestroyCursor(old);
+    return true;
+}
+
+void Window::setCursorHidden(bool hidden) {
+    if (!nativeHandle_) return;
+    Ext& x = getExt(ext_);
+    x.controlled = true;
+    x.hidden = hidden;
+    applyCursor(x);
+}
+
+void Window::setCursorConfined(bool confined) {
+    if (nativeHandle_) SDL_SetWindowMouseGrab(sdlWindow(this), confined);
+}
+
+void Window::warpCursor(i32 x, i32 y) {
+    if (!nativeHandle_ || !isForeground()) return;
+    const f32 d = pixelDensity(sdlWindow(this));
+    SDL_WarpMouseInWindow(sdlWindow(this), static_cast<f32>(x) / d, static_cast<f32>(y) / d);
+}
+
+bool Window::controlledCursor(void**) const { return false; }
 
 bool keyDownNow(i32 vk) {
     if (vk <= 0 || !SDL_WasInit(SDL_INIT_VIDEO)) return false;

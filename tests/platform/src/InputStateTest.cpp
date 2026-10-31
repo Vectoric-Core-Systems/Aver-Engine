@@ -164,6 +164,55 @@ int main() {
         check(in.wheel() == 0.0f, "wheel resets each frame");
     }
 
+    // ---- the mouse's side buttons, the sideways wheel, touch ----
+    {
+        AVER_INFO("side buttons are buttons 3 and 4");
+        InputState in;
+        in.newFrame();
+        in.onEvent(buttonEvent(3, true, 10, 10));
+        check(in.mouseHeld(3) && in.mousePressed(3), "X1 held and pressed on the frame of the press");
+        check(!in.mouseHeld(4), "X2 is not X1");
+        in.newFrame();
+        in.onEvent(buttonEvent(3, false));
+        check(!in.mouseHeld(3) && in.mouseReleased(3), "X1 released");
+        in.onEvent(buttonEvent(4, true));
+        check(in.mouseHeld(4), "X2 held");
+        check(!in.mouseHeld(5), "a sixth button does not exist");
+    }
+    {
+        AVER_INFO("horizontal wheel accumulates apart from the vertical one");
+        InputState in;
+        in.newFrame();
+        Event h; h.type = EventType::MouseWheel; h.wheelX = 2.0f;
+        in.onEvent(h);
+        in.onEvent(wheelEvent(1.0f));
+        check(in.wheelX() == 2.0f && in.wheel() == 1.0f, "sideways and vertical notches stay apart");
+        in.newFrame();
+        check(in.wheelX() == 0.0f, "sideways wheel resets each frame");
+    }
+    {
+        AVER_INFO("touch: down, move, up, edges, focus loss");
+        InputState in;
+        check(!in.touchSeen(), "no touch seen at first");
+        in.newFrame();
+        Event t; t.type = EventType::Touch; t.finger = 2; t.pressed = true; t.mouseX = 40; t.mouseY = 50; t.pressure = 0.5f;
+        in.onEvent(t);
+        check(in.touchHeld(2) && in.touchPressed(2) && !in.touchHeld(0), "finger 2 down, finger 0 not");
+        check(in.touchX(2) == 40.0f && in.touchY(2) == 50.0f && in.touchPressure(2) == 0.5f, "its position and pressure are kept");
+        check(in.touchSeen(), "a touch screen is now known");
+        in.newFrame();
+        check(in.touchHeld(2) && !in.touchPressed(2), "still held next frame, without the press edge");
+        t.mouseX = 60; in.onEvent(t);
+        check(in.touchX(2) == 60.0f && !in.touchPressed(2), "a move updates the position and is not a new press");
+        t.pressed = false; in.onEvent(t);
+        check(!in.touchHeld(2) && in.touchReleased(2), "lifted: released edge");
+        t.pressed = true; in.onEvent(t);
+        in.onEvent(focusLostEvent());
+        check(!in.touchHeld(2) && in.touchSeen(), "focus loss lifts every finger but remembers the screen exists");
+        t.finger = 10; in.onEvent(t);
+        check(!in.touchHeld(10), "finger 10 is out of range");
+    }
+
     // ---- bounds ----
     {
         AVER_INFO("out-of-range codes are ignored, not crashes");
