@@ -926,7 +926,7 @@ static void testTextureSamplerKeys() {
 // the engine defaults (4 cascades, lambda 0.85, automatic distance, 2048, filter 1; fog 20000 / 0.6 / 0.85), stated values land clamped, every key round-trips
 // through the project file (the fog anisotropy may be negative), and capture writes them only when they differ or the project already stated them.
 static void testShadowAndFogKeys() {
-    AVER_INFO("=== RENDER.SHADOW* and RENDER.VOLFOG{LENGTH,ANISO,TEMPORAL}: cascades, filter and light-shaft fog ===");
+    AVER_INFO("=== RENDER.SHADOW* and RENDER.VOLFOGLENGTH, ANISO, TEMPORAL: cascades, filter and light-shaft fog ===");
     voxi::Settings s{};
     check(s.shadowCascades == 4u && s.shadowSplitLambda == 0.85f && s.shadowMaxDistance == 0.0f && s.shadowCascadeSize == 2048u && s.shadowFilterScale == 1.0f,
           "the engine defaults are what the renderer did before these fields: 4 cascades, lambda 0.85, automatic distance, 2048 texels, the 3x3 kernel");

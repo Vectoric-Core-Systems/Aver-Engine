@@ -112,7 +112,7 @@ inline void blendAmbientSh(AtmosphereSkySH& sh, const f32 colour[3], f32 energy,
     constexpr f32 kUniformL00 = 0.282095f * 12.566371f;   // Y00 * 4 PI
     for (int i = 0; i < 3; ++i) {
         const f32 constant = (colour[i] < 0.0f ? 0.0f : colour[i]) * e * kUniformL00;
-        sh.c[0][i] = constant + (sh.c[0][i] - constant) * k;
+        sh.c[0][i] = sh.c[0][i] * k + constant * (1.0f - k);
         for (int j = 1; j < 9; ++j) sh.c[j][i] *= k;
     }
 }

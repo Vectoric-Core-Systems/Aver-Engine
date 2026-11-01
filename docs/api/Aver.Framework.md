@@ -2,7 +2,7 @@
 
 # Aver.Framework public API
 
-265 public types and 2305 public members, read from `scripting/csharp/Aver.Framework/` (151 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+270 public types and 2347 public members, read from `scripting/csharp/Aver.Framework/` (153 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Framework
 
@@ -1287,6 +1287,16 @@ Values: `Destroy = 0`, `Stop = 1`, `Reload = 2`, `Travel = 3`
 - `public bool StopEmitter(bool killParticles = false)` - Stops emission (like SetEmitterEnabled(false)); with killParticles the live particles go too, otherwise they finish their lives.
 - `public bool SetEmitterModifiers(float rateScale = 1f, float sizeScale = 1f, float speedScale = 1f)` - Scales the emitter's rate, new particles' size and initial speed (1 = authored).
 - `public bool TryGetEmitterState(out int aliveParticles, out bool onGpu)` - Reads how many particles the entity's emitters hold and which tier simulates them.
+- `public bool SetShadowMode(MeshShadowMode mode)` - Sets whether the mesh casts shadows, or only shadows.
+- `public MeshShadowMode GetShadowMode()` - The mesh's shadow mode (On when it has no mesh).
+- `public bool SetGiMode(MeshGiMode mode)` - Sets how the mesh takes part in the voxel GI.
+- `public MeshGiMode GetGiMode()` - The mesh's GI mode (Static when it has no mesh).
+- `public bool SetCullMargin(float marginCm)` - Grows the box the frustum and occlusion tests use by this many centimetres, so a mesh whose vertices a shader moves is not culled early.
+- `public float GetCullMargin()` - The cull margin in centimetres (0 when the entity has no mesh).
+- `public bool SetIgnoreOcclusion(bool ignore)` - Opts the mesh out of the occlusion test (editor Play; the shipped runtime has no occlusion culling).
+- `public bool GetIgnoreOcclusion()` - True when the mesh skips the occlusion test.
+- `public bool SetLodBias(float stops)` - Biases the mesh's LOD choice, in stops: +1 halves the pixel-error threshold (a finer level is picked sooner), -1 doubles it.
+- `public float GetLodBias()` - The LOD bias in stops (0 when the entity has no mesh).
 - `public bool HasLight { get; }` - True when this entity carries a light.
 - `public bool SetLightIntensity(float lux)` - Sets the light's intensity in lux (candela for a point or spot light).
 - `public bool TryGetLightIntensity(out float lux)` - Reads the light's intensity in lux.
@@ -2279,6 +2289,18 @@ Values: `A = 0`, `B`, `C`, `D`, `E`, `F`, `G`, `H`, `I`, `J`, `K`, `L`, `M`, `N`
 
 Values: `Constant`, `SetByCaller`, `AttributeBased`
 
+### MeshGiMode
+
+`public enum MeshGiMode` - How a mesh takes part in the voxel GI (SetGiMode).
+
+Values: `Static = 0`, `Dynamic = 1`, `Disabled = 2`
+
+### MeshShadowMode
+
+`public enum MeshShadowMode` - How a mesh takes part in the sun's shadows (SetShadowMode).
+
+Values: `On = 0`, `Off = 1`, `ShadowsOnly = 2`
+
 ### ModelAttribute
 
 `public sealed class ModelAttribute : Attribute` - Marks a property in the generated region as one model slot the viewport gizmo drives.
@@ -2575,6 +2597,29 @@ Values: `Kinematic = 0`, `Limp = 1`, `Powered = 2`
 - `public Vec3 Normal { get; }` - The surface normal at that point, unit length.
 - `public bool Hit { get; }` - True when the ray hit something.
 
+### RenderKey
+
+`public enum RenderKey` - Which render setting a script has taken over.
+
+Values: `Scale = 1`, `Sharpness = 2`, `Taa = 3`, `Msaa = 4`, `LodThreshold = 5`, `Occlusion = 6`, `ShadowCascades = 7`, `ShadowSplit = 8`, `ShadowDistance = 9`, `ShadowFilter = 10`, `VolFogAniso = 11`, `VolFogLength = 12`, `VolFogTemporal = 13`, `VolFogIntensity = 14`
+
+### RenderSettings
+
+`public static class RenderSettings` - Render settings a script can change at run time.
+
+- `public static bool Set(RenderKey key, float value)` - Overrides one setting.
+- `public static float? Get(RenderKey key)` - The value a script has set for the key, or null when it holds none.
+- `public static bool Clear(RenderKey key)` - Releases one setting, so the project's value returns.
+- `public static void ClearAll()` - Releases every setting.
+- `public static bool SetScale(float scale)` - 3D render scale (Godot's scaling_3d_scale), 0.25 to 2.
+- `public static bool SetMsaa(int samples)` - MSAA samples: 1, 2, 4 or 8 (anything between snaps down to a power of two).
+- `public static bool SetSunShadows(int cascades, float split, float maxDistanceCm, float filterWidth)` - The sun's shadow cascades: how many (1 to 4), the split scheme (0 even to 1 logarithmic), the farthest shadowed distance in centimetres (0 is automatic) and the filter width in shadow texels (1 is the engine's own 3x3 kernel, 0 a hard edge).
+- `public static RenderStats? GetStats()` - What the last frame submitted.
+
+### RenderStats
+
+`public readonly record struct RenderStats(int Objects, int Triangles, int DrawCalls, int Translucent, int ShadowDraws, int Frame)` - What the last frame submitted (GetStats).
+
 ### RootMotionAxes
 
 `public enum RootMotionAxes` - Which root components are extracted.
@@ -2688,9 +2733,10 @@ Values: `Start = 0`, `End = 1`
 - `public static bool SetFogColor(float r, float g, float b)` - Fog tint as linear rgb; white is clear air.
 - `public static bool SetFogShape(float falloff, float heightZ, float startCm, float maxOpacity = 1f)` - The shape of the fog: how fast it thins going up (0 is uniform), the world Z at which the density is exactly the fog density, the distance in front of the camera before it starts (cm), and the most opaque it gets.
 - `public static bool SetSkyLight(float multiplier)` - Multiplier on the light the sky hemisphere gives the scene (1 is the level's own).
-- `public static void ClearOverrides()` - Releases every sun, fog and sky-light override, so the level's authored values return.
+- `public static bool SetAmbient(float r, float g, float b, float energy = 1f, float skyContribution = 0f)` - A constant ambient light instead of (or blended with) the sky's own: linear rgb times energy, with skyContribution of the sky's ambient mixed in (0 gives the colour alone, 1 the sky alone).
+- `public static void ClearOverrides()` - Releases every sun, fog, sky-light and ambient override, so the level's authored values return.
 - `public static bool ClearOverride(WorldEnvKey key)` - Releases one override.
-- `public static bool ClearOverride(string? name)` - Releases one override by its dotted name (sun.dir, sun.lux, sun.color, sun.temp, fog.density, fog.color, fog.falloff, fog.height, fog.start, fog.maxopacity, sky.light); null or empty releases all of them.
+- `public static bool ClearOverride(string? name)` - Releases one override by its dotted name (sun.dir, sun.lux, sun.color, sun.temp, fog.density, fog.color, fog.falloff, fog.height, fog.start, fog.maxopacity, sky.light, ambient.color, ambient.energy, ambient.sky); null or empty releases all of them.
 - `public static bool IsOverridden(WorldEnvKey key)` - True while a script holds this setting.
 
 ### SoftBodies
@@ -3131,7 +3177,7 @@ Values: `Windowed = 0`, `Minimized = 1`, `Maximized = 2`, `Fullscreen = 3`
 
 `public enum WorldEnvKey` - Which sun, fog or sky-light setting a script has taken over.
 
-Values: `SunDir = 1`, `SunLux = 2`, `SunColor = 3`, `SunTemp = 4`, `FogDensity = 5`, `FogColor = 6`, `FogFalloff = 7`, `FogHeight = 8`, `FogStart = 9`, `FogMaxOpac = 10`, `SkyLight = 11`
+Values: `SunDir = 1`, `SunLux = 2`, `SunColor = 3`, `SunTemp = 4`, `FogDensity = 5`, `FogColor = 6`, `FogFalloff = 7`, `FogHeight = 8`, `FogStart = 9`, `FogMaxOpac = 10`, `SkyLight = 11`, `Ambient = 12`, `AmbientEnergy = 13`, `AmbientSky = 14`
 
 ### WorldOrigin
 
