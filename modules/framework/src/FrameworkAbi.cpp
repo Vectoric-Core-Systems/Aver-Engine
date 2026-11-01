@@ -1966,11 +1966,17 @@ float actionBindingSample(const ActionBinding& b, bool useCurrent) {
         case AVER_FW_ACTION_SRC_GAMEPAD_AXIS: {
             // Same shape as the MOUSE_* cases above: the raw axis value times scale. Any dead zone
             // is a `deadzone` modifier, or the 0.15 actuation gate on held/pressed/released. Of
-            // several pads, the one pushed furthest.
-            float raw = 0.0f;
-            for (const GamepadState& g : gamepadPads()) {
-                const float a = useCurrent ? g.axes[b.key] : g.prevAxes[b.key];
-                if (std::fabs(a) > std::fabs(raw)) raw = a;
+            // several pads, the one pushed furthest (the first wins a tie). Seeded from pad 0 and
+            // compared by SQUARE, not by `fabs(a) > fabs(raw)` from a zero seed: that form lost every
+            // negative reading in the macOS arm64 Release build (positives were fine; Debug and
+            // x64 were fine too), so it is a compiler fold of that select, not a logic error.
+            const GamepadState (&pads)[AVER_FW_GAMEPAD_MAX] = gamepadPads();
+            float raw = useCurrent ? pads[0].axes[b.key] : pads[0].prevAxes[b.key];
+            float best = raw * raw;
+            for (int32_t p = 1; p < AVER_FW_GAMEPAD_MAX; ++p) {
+                const float a = useCurrent ? pads[p].axes[b.key] : pads[p].prevAxes[b.key];
+                const float m = a * a;
+                if (m > best) { best = m; raw = a; }
             }
             v = raw * b.scale;
             break;
