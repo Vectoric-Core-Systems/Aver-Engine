@@ -2689,11 +2689,35 @@ ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
     playProf_.endFrame(dt, false);
 #endif
     const f64 smoothMs = playProf_.frameEmaMs();
+
+    // The right-hand cluster's width comes first: the readouts on the left stop short of it, dropping from the end (selection, actor
+    // count, DEBUG, VRAM, frame rate) when the bar is too narrow, rather than drawing under the buttons.
+    const bool rcBusy = rcStatusJob_ != nullptr;
+    const editor::StatusBarSummary rcSummary = editor::summariseForStatusBar(
+        project_.valid(), rcAnswered_, rcGitPresent_, rcRoot_, rcStatus_, rcWhy_);
+    const std::string rcFace = rcStatusFace(rcBusy, rcSummary);
+    const ImGuiStyle& barStyle = ImGui::GetStyle();
+    const f32 barBtnPad = barStyle.FramePadding.x * 2.0f;
+    const auto faceWidth = [&](const char* s) { return ImGui::CalcTextSize(s).x + barBtnPad; };
+    f32 clusterW = faceWidth("Content Browser") + barStyle.ItemSpacing.x +
+                   faceWidth("Output Log") + barStyle.ItemSpacing.x +
+                   faceWidth("Console") + barStyle.ItemSpacing.x +
+                   faceWidth(rcFace.c_str());
+#if AVER_MODULE_MCP
+    clusterW += barStyle.ItemSpacing.x + faceWidth(ICON_LINK " MCP :65535");
+#endif
+    const f32 clusterX = wsize.x - clusterW - 8.0f * dpi_;
+    const char* kBarSep = "  |  ";
+    // Starts the next readout on the same line when it (and its separator) ends before the cluster.
+    const auto barRoom = [&](f32 width) {
+        ImGui::SameLine(0.0f, 0.0f);
+        return ImGui::GetCursorPosX() + ImGui::CalcTextSize(kBarSep).x + width <= clusterX - 12.0f * dpi_;
+    };
+
     ImGui::SetCursorPosY((statusH - ImGui::GetTextLineHeight()) * 0.5f);
-    ImGui::Text("%s  |  %s  |  %s  |  DPI %.0f%%  |  ",
-                project_.valid() ? project_.name.c_str() : "No project",
-                rhi::backendName(e.device()->backend()), e.device()->adapterName(), dpi_*100.f);
-    ImGui::SameLine(0.0f, 0.0f);
+    ImGui::TextUnformatted(project_.valid() ? project_.name.c_str() : "No project");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s on %s\nDPI %.0f%%", rhi::backendName(e.device()->backend()), e.device()->adapterName(), dpi_ * 100.f);
     // Frame rate (clickable): with interpolation, shows real or real+interpolated. Real FPS only.
     {
         const bool interpolating = e.device()->frameInterpolated();
@@ -2708,8 +2732,13 @@ ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
             std::snprintf(fpsLabel, sizeof fpsLabel, "%.0f FPS (%.2f ms)###fps", realFps, smoothMs);
         const char* shown = fpsLabel;
         const ImVec2 size = ImGui::CalcTextSize(shown, std::strstr(shown, "###"));
-        if (ImGui::Selectable(fpsLabel, false, ImGuiSelectableFlags_None, size)) ImGui::OpenPopup("##fpsMode");
-        if (ImGui::IsItemHovered())
+        const bool fpsShown = barRoom(size.x);
+        if (fpsShown) {
+            ImGui::TextUnformatted(kBarSep);
+            ImGui::SameLine(0.0f, 0.0f);
+            if (ImGui::Selectable(fpsLabel, false, ImGuiSelectableFlags_None, size)) ImGui::OpenPopup("##fpsMode");
+        }
+        if (fpsShown && ImGui::IsItemHovered())
             ImGui::SetTooltip("%s"
                               "Smoothed over about half a second.\n"
                               "This real frame: %.0f FPS (%.2f ms)\n"
@@ -2757,10 +2786,15 @@ ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
             const ImVec4 col = over ? ImVec4(0.95f, 0.35f, 0.30f, 1.0f)
                              : frac > 0.9 ? ImVec4(0.95f, 0.72f, 0.25f, 1.0f)
                                           : ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
-            ImGui::SameLine(0.0f, 0.0f);
-            // Short label; right-hand buttons are nearby.
-            ImGui::TextColored(col, over ? "  |  VRAM! %.1f/%.1f GB" : "  |  VRAM %.1f/%.1f GB", usedGb, budgetGb);
-            if (ImGui::IsItemHovered())
+            char vramLabel[64];
+            std::snprintf(vramLabel, sizeof vramLabel, over ? "VRAM! %.1f/%.1f GB" : "VRAM %.1f/%.1f GB", usedGb, budgetGb);
+            const bool vramShown = barRoom(ImGui::CalcTextSize(vramLabel).x);
+            if (vramShown) {
+                ImGui::TextUnformatted(kBarSep);
+                ImGui::SameLine(0.0f, 0.0f);
+                ImGui::TextColored(col, "%s", vramLabel);
+            }
+            if (vramShown && ImGui::IsItemHovered())
                 ImGui::SetTooltip("%s"
                                   "GPU memory this editor uses, against the budget Windows gives it (the card's\n"
                                   "memory minus what other programs and the desktop hold).\n\n"
@@ -2777,14 +2811,30 @@ ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
 
 #ifndef NDEBUG
     // A Debug editor runs several times slower; say so where the frame rate is read.
-    ImGui::SameLine(0.0f, 0.0f);
-    ImGui::TextColored(ImVec4(0.95f, 0.72f, 0.25f, 1.0f), "  |  DEBUG BUILD");
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("This editor was compiled in Debug: frame rates are not representative.\n"
-                          "Build and run the Release configuration (build-release) to measure.");
+    if (barRoom(ImGui::CalcTextSize("DEBUG").x)) {
+        ImGui::TextUnformatted(kBarSep);
+        ImGui::SameLine(0.0f, 0.0f);
+        ImGui::TextColored(ImVec4(0.95f, 0.72f, 0.25f, 1.0f), "DEBUG");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("This editor was compiled in Debug: frame rates are not representative.\n"
+                              "Build and run the Release configuration (build-release) to measure.");
+    }
 #endif
-    ImGui::SameLine(0.0f, 0.0f);
-    ImGui::Text("  |  %zu actors  |  %s", objects_.size(), selectionLabel().c_str());
+    {
+        char actorsLabel[48];
+        std::snprintf(actorsLabel, sizeof actorsLabel, "%zu actors", objects_.size());
+        if (barRoom(ImGui::CalcTextSize(actorsLabel).x)) {
+            ImGui::TextUnformatted(kBarSep);
+            ImGui::SameLine(0.0f, 0.0f);
+            ImGui::TextUnformatted(actorsLabel);
+            const std::string selection = selectionLabel();
+            if (barRoom(ImGui::CalcTextSize(selection.c_str()).x)) {
+                ImGui::TextUnformatted(kBarSep);
+                ImGui::SameLine(0.0f, 0.0f);
+                ImGui::TextUnformatted(selection.c_str());
+            }
+        }
+    }
 
     // Upgrade outcome: 12s is readable but not permanent. Failure in error color.
     auto drawerButton = [&](const char* label, Drawer d, const char* tip) {
@@ -2794,24 +2844,7 @@ ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
         if (on) ImGui::PopStyleColor();
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
     };
-    // Cluster width not hardcoded; sum actual button widths per ImGui's layout.
-    const bool rcBusy = rcStatusJob_ != nullptr;
-    const editor::StatusBarSummary rcSummary = editor::summariseForStatusBar(
-        project_.valid(), rcAnswered_, rcGitPresent_, rcRoot_, rcStatus_, rcWhy_);
-    const std::string rcFace = rcStatusFace(rcBusy, rcSummary);
-
-    const ImGuiStyle& barStyle = ImGui::GetStyle();
-    const f32 barBtnPad = barStyle.FramePadding.x * 2.0f;
-    const auto faceWidth = [&](const char* s) { return ImGui::CalcTextSize(s).x + barBtnPad; };
-    f32 clusterW = faceWidth("Content Browser") + barStyle.ItemSpacing.x +
-                   faceWidth("Output Log") + barStyle.ItemSpacing.x +
-                   faceWidth("Console") + barStyle.ItemSpacing.x +
-                   faceWidth(rcFace.c_str());
-#if AVER_MODULE_MCP
-    clusterW += barStyle.ItemSpacing.x + faceWidth(ICON_LINK " MCP :65535");
-#endif
-    // Small margin: cluster runs off edge rather than overlap text.
-    ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), wsize.x - clusterW - 8.0f*dpi_));
+    ImGui::SameLine(clusterX);
     drawerButton("Content Browser", Drawer::Content, "Show the Content Browser  (Ctrl+Space)");
     ImGui::SameLine();
     drawerButton("Output Log", Drawer::Log, "Show the Output Log");
