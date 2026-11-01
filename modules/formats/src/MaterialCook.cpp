@@ -150,6 +150,7 @@ bool cookMaterials(const std::vector<ImportedMaterial>& materials,
                                                             : gm.baseColorFactor[k];
         d.baseColorFactor[3] = gm.baseColorFactor[3];
         for (int k = 0; k < 3; ++k) d.emissiveFactor[k]  = gm.emissiveFactor[k];
+        d.emissiveEnergy    = gm.emissiveEnergy;
         d.metallicFactor    = gm.metallicFactor;
         d.roughnessFactor   = gm.roughnessFactor;
         d.normalScale       = gm.normalScale;

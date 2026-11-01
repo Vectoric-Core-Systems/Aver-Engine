@@ -126,6 +126,7 @@ struct ImportedMaterial {
     f32 reflectance = -1.0f;      // the specular input * 0.08
     f32 coatWeight = 0.0f, coatRoughness = 0.0f;   // clearcoat
     f32 transmission = 0.0f, ior = 0.0f;           // refraction (ior 0 = leave the default)
+    f32 emissiveEnergy = 1.0f;                     // pbr::MaterialDesc::emissiveEnergy, a scale on the glow (1 = none); the .ocmat's `PARAM emissiveEnergy`
 };
 
 } // namespace aver::fmt
