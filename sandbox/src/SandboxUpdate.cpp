@@ -406,6 +406,8 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         ic.pointerInViewport = levelHovered_ && inViewport(oio.MousePos.x, oio.MousePos.y);
         ic.drawerOpen        = drawer_ != Drawer::None;
         ic.landscapeMode     = mode_ == EditorMode::Landscape;
+        ic.pointerOnScene    = levelImageHovered_;
+        ic.sceneFocused      = levelFocused_;
         // ImGui sees only the editor window: the play window's keys and mouse are the game's.
         if (playWindowFocused()) {
             ic.textInput = ic.uiWantsKeyboard = ic.uiWantsMouse = false;

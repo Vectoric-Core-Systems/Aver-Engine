@@ -4023,6 +4023,7 @@ private:
 #endif
     bool detailsFocused_  = false;
     bool levelHovered_ = true;    // the cursor is over the Level tab and it is topmost there
+    bool levelImageHovered_ = false;   // ... and on the scene picture, not on a viewport toolbar or popup
     bool inputProbe_ = false;
     bool levelVisible_ = true;    // the Level tab is the selected tab
     bool openLegacy_ = false;   // --open-legacy

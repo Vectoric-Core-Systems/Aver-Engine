@@ -2504,6 +2504,9 @@ ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
                 }
             }
         }
+        // The pointer is on the scene picture itself: not on the viewport's toolbars (windows of their own) or a popup over it.
+        levelImageHovered_ = !playWindow_ && levelVisible_ && ImGui::IsWindowHovered() &&
+                             ImGui::IsMouseHoveringRect(at, ImVec2(at.x + w, at.y + h), false);
         ImGui::End();
         ImGui::PopStyleVar();
     }

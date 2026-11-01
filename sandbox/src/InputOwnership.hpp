@@ -75,6 +75,8 @@ struct InputConditions {
     bool defaultPawnPlay   = false;  // no GameMode: Play is standing in the engine's spectator pawn
     bool mouseCaptured     = false;  // the OS cursor is hidden and confined to the window
     bool pointerInViewport = false;  // levelHovered_ && inViewport(mouse)
+    bool pointerOnScene    = false;  // on the scene picture itself, not a viewport toolbar or popup over it
+    bool sceneFocused      = false;  // the Level viewport has keyboard focus
     bool drawerOpen        = false;  // a content/console drawer is open
     bool landscapeMode     = false;  // the editor is in Landscape mode rather than Object mode
 };

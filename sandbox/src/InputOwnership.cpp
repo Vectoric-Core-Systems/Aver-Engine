@@ -30,11 +30,20 @@ InputOwnership resolveInputOwnership(const InputConditions& c) {
     // A TEXT FIELD IS STILL SAFE, and is not what this weakens: WantTextInput is handled on its own
     // below and forces both keyboard consumers off regardless of capture. That is ImGui's actual
     // answer to "is the user typing", and it is the one that should win.
-    o.keyboardToGame = !suppressed && (c.mouseCaptured || !c.uiWantsKeyboard);
+    //
+    // THE GAME'S OWN FREE CURSOR (a menu, a game that captures on its first click) is not the user's
+    // release: the scene picture is then the game's window, as in the shipped game. The pointer on it
+    // is the game's whatever ImGui says (the viewport is itself an ImGui window, so both WantCapture
+    // flags are true there), and so are the keys while the viewport has focus. The toolbars over the
+    // picture are windows of their own, and a text field still beats both below. Without this a game
+    // that frees its cursor never saw the click that captures it again.
+    const bool freeGameCursor = c.playing && !c.releasedByUser && !c.mouseCaptured && !c.defaultPawnPlay;
+    o.keyboardToGame = !suppressed && (c.mouseCaptured || (freeGameCursor && c.sceneFocused) || !c.uiWantsKeyboard);
     // The mouse asks for both flags, and captures override both. Captured means the OS cursor is
     // hidden and confined to this window, so there is no ImGui widget it could be interacting with --
     // WantCaptureMouse is then a stale answer to a question that no longer applies.
-    o.mouseToGame = !suppressed && (c.mouseCaptured || (!c.uiWantsMouse && !c.uiWantsKeyboard));
+    o.mouseToGame = !suppressed &&
+                    (c.mouseCaptured || (freeGameCursor && c.pointerOnScene) || (!c.uiWantsMouse && !c.uiWantsKeyboard));
 
     // ---- THE TOOLS' HALF, lifted from the fly-camera block's gate ----------------------------------
     //

@@ -243,6 +243,33 @@ int main() {
               "editor tools never both own a device");
     }
 
+    // ---- the game's own free cursor: the scene picture is the game's window ----
+    {
+        InputConditions c = editing();
+        c.playing = true;
+        c.uiWantsMouse = c.uiWantsKeyboard = true;   // the viewport is an ImGui window
+        c.pointerOnScene = true;
+        c.sceneFocused = true;
+        const InputOwnership o = resolveInputOwnership(c);
+        check(o.mouseToGame,     "free cursor on the picture: the click that captures reaches the game");
+        check(o.keyboardToGame,  "free cursor, viewport focused: the keys reach the game (a menu's Enter, Esc)");
+        check(!o.mouseToTool,    "...and the tools still get nothing");
+        c.pointerOnScene = false;
+        c.sceneFocused = false;
+        const InputOwnership off = resolveInputOwnership(c);
+        check(!off.mouseToGame && !off.keyboardToGame, "on a toolbar or a panel: the editor's, not the game's");
+        c.pointerOnScene = c.sceneFocused = true;
+        c.releasedByUser = true;
+        const InputOwnership released = resolveInputOwnership(c);
+        check(!released.mouseToGame && !released.keyboardToGame, "the user's own release still takes everything from the game");
+        c.releasedByUser = false;
+        c.textInput = true;
+        check(!resolveInputOwnership(c).keyboardToGame, "a text field still beats the game's free cursor");
+        c.textInput = false;
+        c.defaultPawnPlay = true;
+        check(!resolveInputOwnership(c).mouseToGame, "spectator play keeps its old rule: no gameplay code asked for a cursor");
+    }
+
     // ---- the scope mask ----
     {
         InputConditions c = editing();
