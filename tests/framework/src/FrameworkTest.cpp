@@ -1238,7 +1238,7 @@ static void testInputDisplay() {
     check(aver_fw_action_held(padAct) == 1 && v2[0] == 0.5f, "an action bound to a pad button/axis reads pad 2: it reads any pad");
     aver_fw_input_set_gamepad_axis(0, AVER_FW_GAMEPAD_AXIS_RIGHT_X, -0.9f);
     aver_fw_action_value2(padAxis, v2);
-    check(v2[0] == -0.9f, "of two pads the axis pushed further wins");
+    check(v2[0] == -0.9f, "of two pads the axis pushed further wins (got " + std::to_string(v2[0]) + ", want -0.9)");
     aver_fw_input_set_gamepad_connected(2, 0, nullptr);
     check(aver_fw_input_gamepad_connected(2) == 0 && aver_fw_input_gamepad_button(2, AVER_FW_GAMEPAD_TOUCHPAD) == 0 &&
           aver_fw_input_gamepad_axis(2, AVER_FW_GAMEPAD_AXIS_RIGHT_X) == 0.0f, "a pad that leaves is cleared, not frozen");
@@ -1267,7 +1267,8 @@ static void testInputDisplay() {
         float lv[3] = {}, rv[3] = {};
         aver_fw_action_value3(left, lv); aver_fw_action_value3(right, rv);
         check(aver_fw_action_held(left) == 1 && aver_fw_action_held(right) == 0 && std::fabs(lv[0] - 0.8f) < 1e-5f && rv[0] == 0.0f,
-              "stick pushed left: the left half reads 0.8, the right half nothing");
+              "stick pushed left: the left half reads 0.8, the right half nothing (left held " + std::to_string(aver_fw_action_held(left)) +
+              " value " + std::to_string(lv[0]) + ", right held " + std::to_string(aver_fw_action_held(right)) + " value " + std::to_string(rv[0]) + ")");
         aver_fw_input_new_frame();
         aver_fw_input_set_gamepad_axis(0, AVER_FW_GAMEPAD_AXIS_LEFT_X, 0.6f);
         aver_fw_action_value3(left, lv); aver_fw_action_value3(right, rv);
@@ -1763,7 +1764,7 @@ static void testActionModifiers() {
     check(approx(v[0], 1.0f), "radial: full deflection stays 1.0");
     aver_fw_input_set_gamepad_axis(0, AVER_FW_GAMEPAD_AXIS_LEFT_X, -0.6f);
     aver_fw_action_value2(stick, v);
-    check(approx(v[0], -0.5f), "radial: the sign is kept");
+    check(approx(v[0], -0.5f), "radial: the sign is kept (got " + std::to_string(v[0]) + ", want -0.5)");
 
     // ---- axial dead zone: each channel on its own ----
     aver_fw_action_clear_config(stick);
@@ -1811,7 +1812,7 @@ static void testActionModifiers() {
     check(approx(v[0], 0.25f), "curve:2 on 0.5 is 0.25");
     aver_fw_input_set_gamepad_axis(0, AVER_FW_GAMEPAD_AXIS_LEFT_TRIGGER, -0.5f);
     aver_fw_action_value2(cv, v);
-    check(approx(v[0], -0.25f), "curve keeps the sign");
+    check(approx(v[0], -0.25f), "curve keeps the sign (got " + std::to_string(v[0]) + ", want -0.25)");
 
     // Modifier ORDER matters: scale then negate vs swizzle then scale.
     resetActions();
