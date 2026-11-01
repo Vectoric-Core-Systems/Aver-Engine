@@ -26,6 +26,7 @@
 #include "aver/game/GameSystemsWiring.hpp"
 #include "aver/game/SequenceHost.hpp"   // [wave5/sequencer] the ABI provider
 #include "aver/game/GameUiInput.hpp"
+#include "aver/game/GameDisplay.hpp"   // resolvePointerPlan: the game's pointer request in Play
 #include "aver/game/GameUiText.hpp"
 #include "aver/platform/FileSystem.hpp"   // userDataDir: where the trajectory network's weights live
 #if AVER_MODULE_VOXI
@@ -642,8 +643,12 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
                 }
             }
         }
-        // A game-UI menu that wants the cursor frees it, exactly like releasing the mouse by hand.
-        const bool wantCapture = playSessionActive() && !releasedByUser_ && !playEjected() && !game::uiWantsCursor();
+        // A game-UI menu that wants the cursor frees it, exactly like releasing the mouse by hand. So does the game's own pointer request,
+        // as in the shipped game (GameApp): a free cursor asked for, or a pointer mode other than AUTO and CAPTURED. Play knows only
+        // captured or free, so the hidden and confined modes are free here.
+        const bool cursorFreed = aver_fw_cursor_requested() != 0 || game::uiWantsCursor();
+        const bool wantCapture = playSessionActive() && !releasedByUser_ && !playEjected() &&
+                                 game::resolvePointerPlan(aver_fw_pointer_mode(), true, cursorFreed).captured;
         // Alt+P/Alt+S start Play (same anyPlayActive() precondition the toolbar Play button uses).
         if (!ImGui::GetIO().WantTextInput && !anyPlayActive() &&
             keybinds_.pressed(editor::CommandId::PlayStart, ImGui::GetIO()))

@@ -880,6 +880,8 @@ void SandboxApp::respawnClassFromEdit(const EditCmd& c) {
 // pre-Play pose. Not a user edit, so no undo entry.
 void SandboxApp::respawnLostClassInstances() {
     scene::World& w = scene::World::instance();
+    // One spawn batch, as at level load: each actor's placement properties are on it before it begins play.
+    aver_fw_spawn_batch_begin();
     for (const PlayClassSaved& s : playClassSnapshot_) {
         const auto it = std::find_if(levelClassInstances_.begin(), levelClassInstances_.end(),
                                      [&](const ClassInstance& ci) { return ci.placement == s.slot && !ci.removed; });
@@ -895,6 +897,7 @@ void SandboxApp::respawnLostClassInstances() {
         if (selEntity_ == old) selEntity_ = e;
         multiRebuildSet();
     }
+    aver_fw_spawn_batch_end();
     playClassSnapshot_.clear();
 }
 
