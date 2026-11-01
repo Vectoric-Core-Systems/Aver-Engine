@@ -405,7 +405,7 @@ backticks are where the knowledge applies. Measurements are as originally record
 - scenePipeline() never needs prepassed sceneMsPso_/sceneMsRtPso_ variant
 
 ####### Blended pipeline twins
-- Blended twins (sceneBlendedPso_, sceneMsBlendedPso_, sceneRtBlendedPso_, sceneMsRtBlendedPso_): same compiled vsMain/msMain/psVoxi/psRt binaries
+- Blended twins (sceneBlendedPso_, sceneMsBlendedPso_): same compiled vsMain/msMain/psVoxi binaries. There are no ray-queried blended twins any more (11-02): rasterised glass through the full ray-traced pixel shader hung the RX 7800 XT beyond recovery (a lamp-glass pane; Caldera's sea twice, freezing the PC), both as the ray-driven path's replay and in raster + RT
 - GraphicsPipelineDesc identical to opaque variant except blend = PremultipliedAlpha, depth.write = false
 - Premultiplied so PSMainVoxi's blended branch returns full-strength specular + coverage-weighted diffuse instead of attenuating both by same alpha (see that branch VoxiShaders.hpp)
 - Shading (shadow lookup, cone-traced indirect) same code path opaque draw gets
@@ -1191,7 +1191,7 @@ Cached mode (giRestirVisibility_=4) wires as mode 2 (HalfResolution) to shader, 
 
 - **Staged variant purposes**: CSRdGiTrace is the trace candidate that CSRdGi used to run inline. CSRdShadowProbe tests one 8x8 tile at a time, querying the same surface and rtShadow footprint as csShadow. CSRdReflSplit writes a PENDING marker instead of composing; CSRdReflFilter finishes the compose same frame via rtReflectionSpatial. CSRdLocalLights reprojects like csShadow (same SM 6.6/layout); optional: a failure leaves lamps unlit (rdStagedActive() ignores if missing).
 
-- **Textured ray-driven for glass**: Glass (blended) is routed through PSMainVoxi (scenePipeline with blended=true), not PSRayDriven. Without textured bindings in the ray-driven pipeline, gRtTextures doesn't exist, so rtReflection #ifdef compiles to the flat path and glass reflections stay Lambertian against a textured world. The textured RT-blended variant (sceneRtBlendedTexPso_) adds bindless to PSMainVoxi to fix this.
+- **Textured ray-driven for glass**: Glass (blended) is routed through PSMainVoxi (scenePipeline with blended=true), not PSRayDriven. Without textured bindings in the ray-driven pipeline, gRtTextures doesn't exist, so rtReflection #ifdef compiles to the flat path and glass reflections stay Lambertian against a textured world. The textured RT-blended variant (sceneRtBlendedTexPso_) added bindless to PSMainVoxi to fix this; it was removed on 11-02 with the other ray-queried blended twins (a GPU hang), so glass the rasteriser draws is not ray-traced. In ray-driven mode Stage B composites translucent surfaces itself (translucencyInPath).
 
 - **Blended depth state**: PSRayDriven's G-buffer twin (rayDrivenGbufPso_) uses Always/write-on like rayDrivenPso_, not derived from sceneGbuf's depth state, because a fullscreen pass has no prior depth to test against.
 

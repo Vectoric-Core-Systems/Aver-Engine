@@ -369,8 +369,8 @@ private:
 
     rhi::PipelineHandle scenePso_ = 0, sceneMsPso_ = 0, sceneRtPso_ = 0, sceneMsRtPso_ = 0;
     // Blended twins: PremultipliedAlpha, depth.write=false. PSMainVoxi returns full-strength specular + coverage-weighted diffuse.
-    rhi::PipelineHandle sceneBlendedPso_ = 0, sceneMsBlendedPso_ = 0, sceneRtBlendedPso_ = 0,
-                        sceneMsRtBlendedPso_ = 0;
+    // No ray-queried blended twins: rasterised glass through the full ray-traced pixel shader hung the RX 7800 XT (scenePipeline).
+    rhi::PipelineHandle sceneBlendedPso_ = 0, sceneMsBlendedPso_ = 0;
     // Ray-driven primary visibility: fullscreen triangle. Null unless device has ray queries.
     rhi::PipelineHandle rayDrivenPso_ = 0;
     // Depth prepass + two prepassed scene-colour twins. No mesh-shader twins (prepass only for plain drawMesh()).
@@ -663,7 +663,6 @@ private:
     // TEXTURED ray-driven pipeline and variants.
     rhi::PipelineHandle rayDrivenTexPso_ = 0;
     rhi::PipelineHandle rayDrivenTexGbufPso_ = 0;
-    rhi::PipelineHandle sceneRtBlendedTexPso_ = 0;
 
     // ---- STAGED RAY-DRIVEN PASSES ----
     rhi::PipelineHandle rdVisCsPso_    = 0;

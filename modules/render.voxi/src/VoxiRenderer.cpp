@@ -360,12 +360,12 @@ bool VoxiRenderer::init(rhi::IDevice& device) {
 
     AVER_INFO("[Voxi] init: shadow tex={} volume={} accum={} ({}^3, {} mips) bindings={}/{}/{}/+{} "
               "pipelines shadow={}/{} voxel={} clear={} resolve={} mip={} debug={} "
-              "scene={}/{}/{}/{} blended={}/{}/{}/{} airVis={}/{} ({}^3)",
+              "scene={}/{}/{}/{} blended={}/{} airVis={}/{} ({}^3)",
               shadowTex_, voxelTex_, voxelAccumTex_, voxelResBuilt_, voxelMips_,
               bindings_, clearBindings_, resolveBindings_, static_cast<u32>(mipBindings_.size()),
               shadowPso_, shadowInstancedPso_, voxelPso_, clearPso_, resolvePso_, mipPso_, debugPso_,
               scenePso_, sceneMsPso_, sceneRtPso_, sceneMsRtPso_,
-              sceneBlendedPso_, sceneMsBlendedPso_, sceneRtBlendedPso_, sceneMsRtBlendedPso_,
+              sceneBlendedPso_, sceneMsBlendedPso_,
               airVisPso_, airVisTex_, kAirVisResolution);
 
     if (missing) {
@@ -425,12 +425,12 @@ void VoxiRenderer::shutdown() {
                                         giShadowInstancedPso_, voxelPso_, mipPso_,
                                         clearPso_, resolvePso_, debugPso_, scenePso_, sceneMsPso_,
                                         sceneRtPso_, sceneMsRtPso_, sceneBlendedPso_,
-                                        sceneMsBlendedPso_, sceneRtBlendedPso_, sceneMsRtBlendedPso_,
+                                        sceneMsBlendedPso_,
                                         depthPrepassPso_, scenePsoPrepassed_, sceneRtPsoPrepassed_,
                                         rayDrivenPso_,
                                         sceneGbufPso_, sceneMsGbufPso_, sceneRtGbufPso_, sceneMsRtGbufPso_,
                                         scenePsoPrepassedGbuf_, sceneRtPsoPrepassedGbuf_,
-                                        rayDrivenTexPso_, sceneRtBlendedTexPso_,
+                                        rayDrivenTexPso_,
                                         rayDrivenTexGbufPso_,
                                         rayDrivenGbufPso_,
                                         rdVisCsPso_, rdShadowCsPso_, rdGiCsPso_, rdGiCbCsPso_,
@@ -469,10 +469,9 @@ void VoxiRenderer::shutdown() {
     shadowPso_ = shadowInstancedPso_ = giShadowPso_ = giShadowInstancedPso_ = 0;
     voxelPso_ = mipPso_ = clearPso_ = resolvePso_ = debugPso_ = airVisPso_ = 0;
     scenePso_ = sceneMsPso_ = sceneRtPso_ = sceneMsRtPso_ = 0;
-    sceneBlendedPso_ = sceneMsBlendedPso_ = sceneRtBlendedPso_ = sceneMsRtBlendedPso_ = 0;
+    sceneBlendedPso_ = sceneMsBlendedPso_ = 0;
     depthPrepassPso_ = scenePsoPrepassed_ = sceneRtPsoPrepassed_ = 0;
     rayDrivenPso_ = rayDrivenTexPso_ = 0;
-    sceneRtBlendedTexPso_ = 0;
     sceneGbufPso_ = sceneMsGbufPso_ = sceneRtGbufPso_ = sceneMsRtGbufPso_ = 0;
     scenePsoPrepassedGbuf_ = sceneRtPsoPrepassedGbuf_ = 0;
     rayDrivenGbufPso_ = rayDrivenTexGbufPso_ = 0;
@@ -8052,8 +8051,9 @@ rhi::PipelineHandle VoxiRenderer::scenePipeline(bool meshShaders, bool depthPrep
     // Blended is answered first: glass outranks a prepass. If blended fails to create, drops the draw.
     if (blended) {
         // Blended draws never write the G-buffer: opaque surface behind is the denoiser's geometry.
-        if (rtActive_ && sceneRtBlendedTexPso_ && !meshShaders) return sceneRtBlendedTexPso_;
-        if (rtActive_) return meshShaders && sceneMsRtBlendedPso_ ? sceneMsRtBlendedPso_ : sceneRtBlendedPso_;
+        // Never the ray-queried twins (sceneRtBlended*): rasterised glass and water through the full ray-traced pixel shader hung the
+        // RX 7800 XT beyond recovery (a lamp-glass pane; Caldera's sea, twice, freezing the PC on 11-02), whether as the ray-driven
+        // path's replay or in raster + RT. Glass drawn by the rasteriser keeps its cascade shadows and loses ray-traced shading.
         return meshShaders && sceneMsBlendedPso_ ? sceneMsBlendedPso_ : sceneBlendedPso_;
     }
     // R2: while the raster local lights are live the plain and prepassed raster twins are the AVER_LOCAL_RASTER ones (same vertex shader, so a
@@ -8632,13 +8632,12 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     const bool rtOk = caps_.rayTracingTier >= 11 && caps_.shaderModel >= 65 && caps_.dxcAvailable;
 
     const rhi::PipelineHandle stale[] = {debugPso_, scenePso_, sceneMsPso_, sceneRtPso_, sceneMsRtPso_,
-                                         sceneBlendedPso_, sceneMsBlendedPso_, sceneRtBlendedPso_,
-                                         sceneMsRtBlendedPso_,
+                                         sceneBlendedPso_, sceneMsBlendedPso_,
                                          depthPrepassPso_, scenePsoPrepassed_, sceneRtPsoPrepassed_,
                                          rayDrivenPso_,
                                          sceneGbufPso_, sceneMsGbufPso_, sceneRtGbufPso_, sceneMsRtGbufPso_,
                                          scenePsoPrepassedGbuf_, sceneRtPsoPrepassedGbuf_,
-                                         rayDrivenTexPso_, sceneRtBlendedTexPso_,
+                                         rayDrivenTexPso_,
                                          rayDrivenTexGbufPso_, rayDrivenGbufPso_,
                                          rdVisCsPso_, rdShadowCsPso_, rdGiCsPso_, rdGiCbCsPso_,
                                          rdSkyOccCsPso_, rdReflCsPso_,
@@ -8675,10 +8674,9 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     extraDepthPso_ = 0;
     extraTried_[0] = extraTried_[1] = false;
     debugPso_ = scenePso_ = sceneMsPso_ = sceneRtPso_ = sceneMsRtPso_ = 0;
-    sceneBlendedPso_ = sceneMsBlendedPso_ = sceneRtBlendedPso_ = sceneMsRtBlendedPso_ = 0;
+    sceneBlendedPso_ = sceneMsBlendedPso_ = 0;
     depthPrepassPso_ = scenePsoPrepassed_ = sceneRtPsoPrepassed_ = 0;
     rayDrivenPso_ = rayDrivenTexPso_ = 0;
-    sceneRtBlendedTexPso_ = 0;
     sceneGbufPso_ = sceneMsGbufPso_ = sceneRtGbufPso_ = sceneMsRtGbufPso_ = 0;
     scenePsoPrepassedGbuf_ = sceneRtPsoPrepassedGbuf_ = 0;
     rayDrivenGbufPso_ = rayDrivenTexGbufPso_ = 0;
@@ -9110,29 +9108,6 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
                       rdVisCsPso_ ? "ready" : "missing", rdShadowCsPso_ ? "ready" : "missing",
                       rayDrivenSplitTexPso_ ? "ready" : "missing");
 
-        // Blended variant with textured bindless table (for glass reflections).
-        const rhi::ShaderHandle vsMainTex = compile("VSMain", rhi::ShaderStage::Vertex, kBaseSm,
-                                                    rasterDefs(bindlessDefs.c_str()).c_str());
-        // AVER_BLENDED_PASS: this variant leaves out decals (they skip translucent surfaces anyway); with
-        // them compiled in it hung the RX 7800 XT at NewSponza Night's default view (docs/rendering/DECALS.md).
-        const std::string blendedDefs = bindlessDefs + ";AVER_BLENDED_PASS=1";
-        const rhi::ShaderHandle psMainTex = compile("PSMainVoxi", rhi::ShaderStage::Pixel, 65,
-                                                    rasterDefs(blendedDefs.c_str()).c_str());   // glass: hair is opaque
-        if (vsMainTex && psMainTex) {
-            rhi::GraphicsPipelineDesc p = scene;
-            p.vs = vsMainTex; p.ps = psMainTex;
-            p.layout = giTex;
-            p.blend = rhi::BlendMode::PremultipliedAlpha;   // see sceneBlendedPso_ for why
-            p.depth.test = true;
-            p.depth.write = false;
-            sceneRtBlendedTexPso_ = res_->createGraphicsPipeline(p);
-        }
-        if (!sceneRtBlendedTexPso_)
-            AVER_WARN("[Voxi] textured blended (glass) variant unavailable; reflections in glass "
-                      "will stay flat");
-        else
-            AVER_INFO("[Voxi] textured blended (glass) variant ready");
-
         // Radiance cache twins, only when Cached mode is already requested.
         if (giRestirVisibility_ == 4u) createNeuRaCTwins();
     }
@@ -9200,32 +9175,6 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     }
     if (msOk && !sceneMsBlendedPso_)
         AVER_WARN("[Voxi] mesh-shader blended scene variant unavailable");
-
-
-    if (vsMain && psRt) {
-        rhi::GraphicsPipelineDesc p = scene;
-        p.vs = vsMain; p.ps = psRt;
-        p.layout = giRt;
-        p.blend = rhi::BlendMode::PremultipliedAlpha;   // see sceneBlendedPso_ above for why
-        p.depth.test = true;    // same test-on/write-off state as sceneBlendedPso_ above
-        p.depth.write = false;
-        sceneRtBlendedPso_ = res_->createGraphicsPipeline(p);
-    }
-    if (rtOk && !sceneRtBlendedPso_)
-        AVER_WARN("[Voxi] ray-traced blended scene variant unavailable");
-
-
-    if (msMain && psRt) {
-        rhi::GraphicsPipelineDesc p = scene;
-        p.ms = msMain; p.ps = psRt;
-        p.layout = giRt;
-        p.blend = rhi::BlendMode::PremultipliedAlpha;   // see sceneBlendedPso_ above for why
-        p.depth.test = true;    // same test-on/write-off state as sceneBlendedPso_ above
-        p.depth.write = false;
-        sceneMsRtBlendedPso_ = res_->createGraphicsPipeline(p);
-    }
-    if (msOk && rtOk && !sceneMsRtBlendedPso_)
-        AVER_WARN("[Voxi] mesh-shader + ray-traced blended scene variant unavailable");
 
 
     // Depth prepass and two scene variants that trust it.
