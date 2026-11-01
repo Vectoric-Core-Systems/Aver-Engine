@@ -35,7 +35,7 @@ static bool near(double a, double b, double tol) { return std::fabs(a - b) <= to
 static std::string slurp(const char* rel) {
     std::string out;
     readFileText(std::string(AVER_REPO_ROOT) + "/" + rel, out);
-    out.erase(std::remove(out.begin(), out.end(), ''), out.end());
+    out.erase(std::remove(out.begin(), out.end(), '\r'), out.end());
     return out;
 }
 static bool has(const std::string& hay, const char* needle) { return hay.find(needle) != std::string::npos; }
