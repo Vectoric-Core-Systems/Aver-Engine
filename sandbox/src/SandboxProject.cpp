@@ -11,6 +11,7 @@
 #include "aver/game/PhysicalSurfaces.hpp"   // [wave11/shapes] Content/Physics/Surfaces.ocsurf -> the physics surface registry
 #include "aver/game/PhysicalSurfaces.hpp"
 #include "aver/game/GameUiText.hpp"
+#include "aver/game/GameUiImages.hpp"
 #if AVER_MODULE_FRAMEWORK
 #  include "aver/framework/framework_loc_abi.h"
 #endif
@@ -158,6 +159,7 @@ void SandboxApp::applyProject(Engine& e) {
         game::initLocalization(li);
         game::uiTextInit(project_.contentDir());   // the Play/preview font set: Content/UI/Fonts.ocfonts or the built-in one, following the preview culture
         game::uiTextBindRenderer(gameUi_);
+        game::uiImagesSetContent(project_.contentDir());   // a Play session's UI images are read from this project's Content
 #if AVER_WITH_UI_ABI && AVER_MODULE_FRAMEWORK
         aver_ui_set_text_resolver(&aver_fw_loc_resolve, &aver_fw_loc_epoch);
 #endif

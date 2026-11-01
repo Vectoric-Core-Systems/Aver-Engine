@@ -8,6 +8,7 @@
 #include "aver/game/GameInput.hpp"
 #include "aver/game/GameSystemsWiring.hpp"
 #include "aver/game/GameUiInput.hpp"
+#include "aver/game/GameUiImages.hpp"
 #include "aver/game/GamePawn.hpp"
 #include "aver/game/GameLocalization.hpp"
 #include "aver/game/SequenceHost.hpp"   // [wave5/sequencer] hooks for the preview and Play
@@ -721,6 +722,8 @@ void SandboxApp::stopPlay() {
         aver_fw_end_play();
         AVER_INFO("[Sandbox] Stop: play session ended");
     }
+    // The session's UI images: the game released its own on its way out; this drops what it did not.
+    game::uiImagesReleaseAll();
     // AFTER the session ends, not before: end_play is what stops gameplay writing transforms,
     // and restoring while it can still move things would put the level back and then let the
     // last tick shove it again.

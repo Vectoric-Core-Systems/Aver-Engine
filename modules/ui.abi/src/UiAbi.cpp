@@ -33,6 +33,12 @@ uint32_t g_buttons    = 0;
 // The localization resolver the host installed (framework aver_fw_loc_resolve); null = text drawn as given.
 aver::ui::abi::TextResolveFn g_resolve = nullptr;
 
+// The host's image table (aver_ui_set_image_host); all null until one is installed.
+AverUiImageAcquireFn g_imgAcquire = nullptr;
+AverUiImageReleaseFn g_imgRelease = nullptr;
+AverUiImageSizeFn    g_imgSize = nullptr;
+AverUiImageUseFn     g_imgUse = nullptr;
+
 // The font only if it is worth drawing with. `valid()` is glyphs plus a line height, so a font that
 // parsed but carries nothing reads as absent rather than as a font that draws nothing.
 const aver::ui::UiFont* usableFont() {
@@ -105,6 +111,10 @@ bool frameStarted() { return g_started; }
 
 void setTextResolver(TextResolveFn fn) { g_resolve = fn; }
 
+std::uint64_t imageForPath(const std::string& contentPath) {
+    return g_imgUse && !contentPath.empty() ? g_imgUse(contentPath.c_str()) : 0;
+}
+
 bool resolveUiText(const char* raw, std::string& out) {
     if (!raw || raw[0] != '@') return false;
     if (raw[1] == '@') { out = raw + 1; return true; }   // "@@x" shows "@x"
@@ -175,6 +185,39 @@ void aver_ui_rect(float x, float y, float w, float h, uint32_t rgba) {
 void aver_ui_textured_rect(float x, float y, float w, float h, uint64_t texture,
                            float u0, float v0, float u1, float v1, uint32_t rgba) {
     g_list.addTexturedRect(x, y, w, h, texture, u0, v0, u1, v1, rgba);
+}
+
+// ---- images ----
+
+void aver_ui_set_image_host(AverUiImageAcquireFn acquire, AverUiImageReleaseFn release, AverUiImageSizeFn size,
+                            AverUiImageUseFn use) {
+    // NULL acquire clears the whole table: a half-installed one would hand out ids nothing can release.
+    g_imgAcquire = acquire;
+    g_imgRelease = acquire ? release : nullptr;
+    g_imgSize = acquire ? size : nullptr;
+    g_imgUse = acquire ? use : nullptr;
+}
+
+int32_t aver_ui_image_available(void) { return g_imgAcquire ? 1 : 0; }
+
+uint64_t aver_ui_image_acquire(const char* utf8Path) {
+    return (g_imgAcquire && utf8Path && *utf8Path) ? g_imgAcquire(utf8Path) : 0;
+}
+
+void aver_ui_image_release(uint64_t id) {
+    if (g_imgRelease && id != 0) g_imgRelease(id);
+}
+
+int32_t aver_ui_image_size(uint64_t id, int32_t* outWH) {
+    if (outWH) outWH[0] = outWH[1] = 0;
+    if (!g_imgSize || id == 0 || !outWH) return 0;
+    return g_imgSize(id, outWH) != 0 ? 1 : 0;
+}
+
+uint64_t aver_ui_image_use(const char* utf8Path) {
+    if (!utf8Path || !*utf8Path) return 0;
+    if (g_imgUse) return g_imgUse(utf8Path);
+    return 0;
 }
 
 // ---- text -------------------------------------------------------------------------------------

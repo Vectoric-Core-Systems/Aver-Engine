@@ -7,3 +7,9 @@
 add_executable(UiRenderTest src/UiRenderTest.cpp)
 target_link_libraries(UiRenderTest PRIVATE Aver.Render.UI Aver.UI Aver.RHI Aver.Core Aver.Platform)
 set_target_properties(UiRenderTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# UiImageCacheTest — UI images by content path: path rules, refcounts, delayed destruction and the
+# premultiplied mip chain, with a fake loader. No device either.
+add_executable(UiImageCacheTest src/UiImageCacheTest.cpp)
+target_link_libraries(UiImageCacheTest PRIVATE Aver.Render.UI Aver.UI Aver.RHI Aver.Core Aver.Platform)
+set_target_properties(UiImageCacheTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

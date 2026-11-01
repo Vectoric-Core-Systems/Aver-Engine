@@ -29,6 +29,7 @@
 #include "aver/game/SequenceHost.hpp"   // [wave5/sequencer] the ABI provider
 #include "aver/game/GameUiInput.hpp"
 #include "aver/game/GameUiText.hpp"
+#include "aver/game/GameUiImages.hpp"
 #include "aver/platform/FileSystem.hpp"   // userDataDir: where the trajectory network's weights live
 #if AVER_MODULE_VOXI
 #include "ModeSwitchNotice.hpp"
@@ -925,6 +926,7 @@ void SandboxApp::onInit(Engine& e)  {
     gameUi_ = aver::render::ui::UiRenderer::create(*e.device());
     if (gameUi_) e.device()->addRenderFeature(gameUi_);
     game::uiTextBindRenderer(gameUi_);   // the glyph atlas for Play/preview text (the font set itself loads when a project opens)
+    game::uiImagesBind(e.device(), gameUi_);   // UI images by content path (the Content folder is given when a project opens)
 #if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
     // Sub-viewports (G4 R5): nothing is created until a Play session asks for a view. The UI forgets its cached binding when a view's texture is rebuilt.
     subViews_.attach(*e.device(), [](rhi::TextureHandle t, void* self) {

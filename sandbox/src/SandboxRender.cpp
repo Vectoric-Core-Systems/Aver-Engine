@@ -18,6 +18,7 @@
 // types (the decide/warn sinks are captureless lambdas local to onRender) -- so only this TU pays
 // for it.
 #include "aver/game/GameRender.hpp"
+#include "aver/game/GameUiImages.hpp"
 // CpuSpan/CpuLap/CpuNest, formatCpuTiming: CPU-side twin of rhi::GpuTimingReport, used below to
 // wrap the cluster-dispatch timing in a CpuNest and print the per-bucket breakdown. Same
 // include-here-not-in-header reasoning as GameRender.hpp above -- both headers are
@@ -2383,8 +2384,8 @@ void SandboxApp::submitGameUi(Engine& e) {
     if (showUiDemo_) drawUiDemo();
 
     const auto* dl = static_cast<const aver::ui::UiDrawList*>(aver_ui_draw_list());
-    if (!dl) return;
-    gameUi_->submit(*dl);
+    if (dl) gameUi_->submit(*dl);
+    game::uiImagesTick();   // images nobody names any more go a few frames after their last use
 }
 
 // Draws the placeholder HUD demo through the UI C ABI: bars, crosshair, clipped list, tooltip.

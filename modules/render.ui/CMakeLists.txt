@@ -10,10 +10,12 @@
 aver_add_module(Aver.Render.UI
   SOURCES
     src/UiRenderer.cpp
+    src/UiImageCache.cpp   # content-path images: decode, premultiply, upload, refcount
   DEPS
     Aver.Core
     Aver.UI
     Aver.RHI
+    Aver.Platform
 )
 
 # HLSL beside the executable, redeployed when a shader changes -- the same stamp mechanism

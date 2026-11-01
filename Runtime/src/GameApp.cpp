@@ -9,6 +9,7 @@
 #include "aver/game/SoftBodySave.hpp"   // soft-body damage on the $State channel
 #include "aver/game/GameUiInput.hpp"
 #include "aver/game/GameUiText.hpp"
+#include "aver/game/GameUiImages.hpp"
 #include "aver/game/PhysicalSurfaces.hpp"
 #include "aver/game/LevelDecals.hpp"
 #include "aver/game/LevelLights.hpp"   // [wave3/level-instances]
@@ -853,6 +854,7 @@ void GameApp::attachGameUi(Engine& e) {
     gameUi_ = render::ui::UiRenderer::create(*dev);
     if (gameUi_) {
         dev->addRenderFeature(gameUi_);
+        game::uiImagesBind(dev, gameUi_);   // UI images by content path (the Content folder is given with the project)
         AVER_INFO("[Game] game UI attached");
     } else {
         AVER_WARN("[Game] game UI render feature failed to create -- the HUD will not draw");
@@ -1300,6 +1302,7 @@ void GameApp::openProject(Engine& e) {
 #if AVER_WITH_UI_ABI
         game::uiTextInit(project_.contentDir());   // loads Content/UI/Fonts.ocfonts (or the built-in set); follows the culture just initialised
         game::uiTextBindRenderer(gameUi_);         // lends the UI renderer the glyph atlas
+        game::uiImagesSetContent(project_.contentDir());   // UI images are read from this Content folder
 #endif
 #if AVER_WITH_UI_ABI && AVER_MODULE_FRAMEWORK
         aver_ui_set_text_resolver(&aver_fw_loc_resolve, &aver_fw_loc_epoch);
@@ -2534,8 +2537,8 @@ void GameApp::submitGameUi(Engine&) {
     if (!gameUi_) return;
 
     const auto* dl = static_cast<const aver::ui::UiDrawList*>(aver_ui_draw_list());
-    if (!dl) return;
-    gameUi_->submit(*dl);
+    if (dl) gameUi_->submit(*dl);
+    game::uiImagesTick();   // images nobody names any more go a few frames after their last use
 }
 #endif
 
@@ -2674,6 +2677,7 @@ void GameApp::onShutdown(Engine& e) {
 #if AVER_WITH_UI_ABI
     // Font out first: ui_abi.h comment on aver_ui_set_font: a font outliving its atlas textures draws glyphs sampling dead descriptor.
     aver_ui_set_font(nullptr);
+    game::uiImagesShutdown();   // the UI images (their textures and bindings) before the renderer and device go
     game::uiTextShutdown();   // unbind the atlas from the renderer and close the fonts before the device goes
     if (dev && uiFontTexture_) {
         // waitIdle: destroying a texture a still-in-flight command list references is GPU use-after-free.

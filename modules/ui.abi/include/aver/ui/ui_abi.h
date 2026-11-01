@@ -73,10 +73,44 @@ AVER_UI_API void aver_ui_pop_clip(void);
 // Draws a solid rectangle. `rgba` is straight (non-premultiplied) 0xAABBGGRR.
 AVER_UI_API void aver_ui_rect(float x, float y, float w, float h, uint32_t rgba);
 
-// Draws a textured rectangle. `texture` is 0 for the built-in white texel and must be
-// premultiplied, like the colour.
+// Draws a textured rectangle. `texture` is 0 for the built-in white texel; the texels must be
+// premultiplied (the colour is premultiplied on the way in). aver_ui_image_acquire below makes a
+// texture of a content image, premultiplied.
 AVER_UI_API void aver_ui_textured_rect(float x, float y, float w, float h, uint64_t texture,
                                        float u0, float v0, float u1, float v1, uint32_t rgba);
+
+// ---- images (a content path as a UI texture) ----------------------------------------------------------
+//
+// The id aver_ui_textured_rect and a style box take is a GPU texture, and this DLL links no RHI, so the HOST
+// loads the file, uploads it and lends the result through these callbacks (the same arrangement as the font
+// loader). The host keeps one table: a path is decoded and uploaded once, premultiplied, and shared by every
+// caller. `path` is relative to the project's Content folder, with forward or back slashes ("Textures/ui/a.png");
+// an absolute path, a drive or scheme, or ".." is refused. Any image the engine decodes (PNG, JPEG, TGA, BMP,
+// WebP, ...). Main thread only, like the rest of this header.
+//
+// An id is valid until it is released and a few frames have passed (the host never destroys a texture a frame in
+// flight still names), and until the host ends the session (Play stop), which drops every reference: a game that
+// outlives that re-acquires.
+typedef uint64_t (*AverUiImageAcquireFn)(const char* utf8Path);          /* id with one more reference, 0 on failure */
+typedef void     (*AverUiImageReleaseFn)(uint64_t id);
+typedef int32_t  (*AverUiImageSizeFn)(uint64_t id, int32_t* outWH);      /* 1 and the source size in pixels, 0 unknown id */
+typedef uint64_t (*AverUiImageUseFn)(const char* utf8Path);              /* id WITHOUT a reference, kept alive while asked for */
+
+// Installs the host's image table (host only). NULL acquire clears it; the other callbacks may be NULL.
+AVER_UI_API void aver_ui_set_image_host(AverUiImageAcquireFn acquire, AverUiImageReleaseFn release,
+                                        AverUiImageSizeFn size, AverUiImageUseFn use);
+// 1 when a host installed an image table.
+AVER_UI_API int32_t aver_ui_image_available(void);
+// The texture id for a content path with one more reference, loading it on first use. 0 when there is no host table,
+// the path is refused or the image does not load (the host logs why once). Pair with aver_ui_image_release.
+AVER_UI_API uint64_t aver_ui_image_acquire(const char* utf8Path);
+// Drops one reference. An unknown id, or one with none left, is ignored.
+AVER_UI_API void aver_ui_image_release(uint64_t id);
+// Writes the image's width and height in pixels to outWH (2 ints). 1 on success, 0 (outWH zeroed) for an unknown id.
+AVER_UI_API int32_t aver_ui_image_size(uint64_t id, int32_t* outWH);
+// The id for a path without taking a reference, for something that draws the same path every frame and never
+// lets go. The texture lives while it keeps being asked for. 0 as acquire.
+AVER_UI_API uint64_t aver_ui_image_use(const char* utf8Path);
 
 // ---- text -------------------------------------------------------------------------------------------
 //

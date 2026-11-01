@@ -34,7 +34,7 @@ Roots draw back to front by `layer`, then `zOrder`, then creation order.
 |---|---|---|
 | `panel` | Container with a background and border (give it `style clear` for none). | none |
 | `text` | A label; `wrap` word-wraps to its width. | none |
-| `image` | A texture (`image` path, resolved by the host) or a tinted rectangle. | none |
+| `image` | A texture (`image` path, a file under Content, loaded by the host's image table: `aver_ui_image_use`, see ABI.md "Images by content path") or a tinted rectangle. A path that does not load keeps a grey placeholder. | none |
 | `button` | Click, or Accept when focused. | `Clicked`, then `Command` if `command` is set |
 | `toggle` | Check box with a label. | `Toggled` |
 | `slider` | Horizontal value; drag, or Left/Right when focused; `step` snaps. | `ValueChanged` |

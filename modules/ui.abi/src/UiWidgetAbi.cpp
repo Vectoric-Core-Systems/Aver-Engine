@@ -72,6 +72,8 @@ void aver_ui_widgets_frame(float dt) {
     float vp[4];
     abi::viewport(vp);
     g_tree.setViewport(UiRect{vp[0], vp[1], vp[2], vp[3]});
+    // An Image widget's path becomes the host's texture (aver_ui_set_image_host); borrowed, so asking each draw keeps it alive.
+    g_tree.setImageResolver([](const std::string& path) { return abi::imageForPath(path); });
 
     float px = 0, py = 0;
     std::uint32_t buttons = 0;

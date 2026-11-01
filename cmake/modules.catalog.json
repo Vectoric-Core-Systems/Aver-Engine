@@ -968,6 +968,7 @@
       "default": true,
       "dependsOn": [
         "Aver.Core",
+        "Aver.Platform",
         "Aver.RHI",
         "Aver.UI"
       ],

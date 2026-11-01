@@ -2,6 +2,7 @@
 // reuse, the scissor, which buffer of the ring a frame writes, growth, and the bytes uploaded.
 // Exit code = failure count.
 #include "aver/render/ui/UiRenderer.hpp"
+#include "aver/render/ui/UiImageCache.hpp"
 #include "aver/core/Log.hpp"
 
 #include <cstring>
@@ -43,6 +44,7 @@ struct MockFactory final : public rhi::IResourceFactory {
     std::vector<std::string>               textureNames;       // parallel to `textures` (the desc's name pointer does not outlive the call)
     std::vector<rhi::TextureHandle>        destroyedTextures;
     u32 destroyedBuffers = 0;
+    u32 destroyedBindingSets = 0;
 
     rhi::TextureHandle createTexture(const rhi::TextureDesc& d) override {
         textures.push_back(d);
@@ -79,7 +81,7 @@ struct MockFactory final : public rhi::IResourceFactory {
     void destroyBuffer(rhi::BufferHandle h) override { if (h) ++destroyedBuffers; }
     void destroyShader(rhi::ShaderHandle) override {}
     void destroyPipeline(rhi::PipelineHandle) override {}
-    void destroyBindingSet(rhi::BindingSetHandle) override {}
+    void destroyBindingSet(rhi::BindingSetHandle h) override { if (h) ++destroyedBindingSets; }
 
     void setSrv(rhi::BindingSetHandle set, u32 slot, rhi::TextureHandle t, u32) override {
         if (set && set <= srvSlot0.size() && slot == 0) srvSlot0[set - 1] = t;
@@ -534,6 +536,41 @@ int main() {
             r->prePass(ctx);
             check(ctx.calls.empty(), "setTextAtlas(nullptr) is safe and prePass does nothing again");
         }
+    }
+
+    AVER_INFO("=== a UI image (a content path's texture) ===");
+    {
+        MockFactory& f = dev.factory;
+        ImageData img;
+        img.width = 4; img.height = 4; img.channels = 4;
+        img.pixels.assign(4 * 4 * 4, 0);
+        for (usize i = 0; i < img.pixels.size(); i += 4) { img.pixels[i] = 200; img.pixels[i + 1] = 100; img.pixels[i + 2] = 50; img.pixels[i + 3] = 128; }
+        aver::render::ui::UiImageLevels lv;
+        check(aver::render::ui::buildUiImageLevels(img, lv), "the image builds");
+        const usize before = f.textures.size();
+        const rhi::TextureHandle tex = aver::render::ui::uploadUiImageLevels(f, lv, "Textures/ui/a.png");
+        check(tex != 0 && f.textures.size() == before + 1, "one texture is created");
+        const rhi::TextureDesc& d = f.textures.back();
+        check(d.format == rhi::Format::RGBA8Unorm, "UNORM, not sRGB: the UI blends in display space");
+        check(d.width == 4 && d.height == 4 && d.mips == 3 && d.initialDataCount == 3, "4x4 with a full chain (4, 2, 1) uploaded at creation");
+        check(d.initialRowPitch == 0 && d.initialState == rhi::ResourceState::ShaderResource, "tightly packed, ready to sample");
+        check(f.textureNames.back() == "Textures/ui/a.png", "named after its path");
+        check(lv.levels[0][0] == 100 && lv.levels[0][3] == 128, "the texels it was given are premultiplied (200 * 128 / 255 = 100)");
+
+        // Drawn once, then forgotten before it goes: the way the host's destroy callback uses the renderer.
+        aver::ui::UiDrawList dl;
+        dl.addTexturedRect(0, 0, 10, 10, aver::render::ui::UiRenderer::textureId(tex), 0, 0, 1, 1, 0xFFFFFFFF);
+        MockContext ctx;
+        r->submit(dl);
+        r->overlayPass(ctx, 1280, 720);
+        check(ctx.count(Call::Kind::DrawIndexed) == 1, "a UI image draws like any texture handle");
+        const usize destroyedSets = f.destroyedBindingSets;
+        r->dropBinding(tex);
+        check(f.destroyedBindingSets == destroyedSets + 1, "dropBinding forgets its binding set");
+        r->submit(aver::ui::UiDrawList{});
+        MockContext idle;
+        r->overlayPass(idle, 1280, 720);
+        check(idle.count(Call::Kind::DrawIndexed) == 0, "an emptied submit draws nothing, so a destroyed image is never named");
     }
 
     delete r;

@@ -114,8 +114,10 @@ void UiTree::drawWidget(UiPainter& p, const UiWidget& w, f32 parentOpacity, bool
                 const f32 fitH = fitW / aspect;
                 dst = {r.x + (r.w - fitW) * 0.5f, r.y + (r.h - fitH) * 0.5f, fitW, fitH};
             }
-            if (w.texture != 0) {
-                p.image(dst, w.texture, w.uv, C(w.tint));
+            u64 tex = w.texture;
+            if (tex == 0 && !w.image.empty() && imageResolver_) tex = imageResolver_(w.image);
+            if (tex != 0) {
+                p.image(dst, tex, w.uv, C(w.tint));
             } else if (w.image.empty()) {
                 p.fillRect(dst, C(w.tint));                       // a plain tinted rectangle
             } else {

@@ -28,6 +28,7 @@
 #include "aver/game/SequenceHost.hpp"   // [wave5/sequencer] the ABI provider
 #include "aver/game/GameUiInput.hpp"
 #include "aver/game/GameUiText.hpp"
+#include "aver/game/GameUiImages.hpp"
 #include "aver/platform/FileSystem.hpp"   // userDataDir: where the trajectory network's weights live
 #if AVER_MODULE_VOXI
 #include "ModeSwitchNotice.hpp"
@@ -596,6 +597,7 @@ editor::shutdownAnimEditors();
     taaUpscaler_.reset();
     neuraa_.reset();   // holds the device's factory: must go while the device lives (it crashed in ~SandboxApp)
 #endif
+    game::uiImagesShutdown();   // the UI images (their textures and bindings) before the renderer and device go
     game::uiTextShutdown();   // unbind the atlas from gameUi_ and close the fonts before the renderer and device go
     subViews_.detach();       // the sub-viewport features and their targets: before the UI renderer that may hold a binding to one, and the device
     // Same order: clear device pointer before destroying the object.

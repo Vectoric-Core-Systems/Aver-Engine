@@ -22,6 +22,8 @@ bool frameStarted();
 // The host's text resolver (aver_ui_set_text_resolver), shared with aver_ui_text / aver_ui_text_width.
 using TextResolveFn = std::int32_t (*)(const char* raw, char* out, std::int32_t cap);
 void setTextResolver(TextResolveFn fn);
+// The host's texture for a content path, borrowed (aver_ui_image_use): 0 with no image host or no such image.
+std::uint64_t imageForPath(const std::string& contentPath);
 // True with the resolved text when `raw` is a reference the resolver handles; grows its buffer when truncated.
 bool resolveUiText(const char* raw, std::string& out);
 

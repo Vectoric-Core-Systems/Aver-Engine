@@ -74,9 +74,16 @@ struct UiInputState {
 // True with the resolved text when `raw` is a localization reference the resolver can resolve.
 using UiTextResolveFn = std::function<bool(std::string_view raw, std::string& out)>;
 
+// The texture id for an Image widget's content path, or 0 when the host has none (the widget then draws its
+// placeholder). Called every draw, so a resolver that borrows (keeps a texture alive while it is asked for) works.
+using UiImageResolveFn = std::function<u64(const std::string& path)>;
+
 class UiTree {
 public:
     UiTree();
+
+    // An Image widget with a path and no host-set texture asks this each draw. Without one it keeps the placeholder.
+    void setImageResolver(UiImageResolveFn fn) { imageResolver_ = std::move(fn); }
 
     // ---- structure --------------------------------------------------------------------------
     // parent == 0 creates a root. Roots default to stretching over the viewport.
@@ -246,6 +253,7 @@ private:
     mutable bool hcValid_ = false;
     const UiTextMetrics* metrics_ = nullptr;
     UiTextResolveFn textResolver_;
+    UiImageResolveFn imageResolver_;
     std::function<u32()> textEpoch_;
     u32 textEpochSeen_ = 0;
     mutable std::unordered_map<std::string, std::string> shownCache_;

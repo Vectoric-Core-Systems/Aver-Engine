@@ -103,3 +103,9 @@ set_target_properties(UiAccessTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_B
 add_executable(UiCaptionViewTest src/UiCaptionViewTest.cpp)
 target_link_libraries(UiCaptionViewTest PRIVATE Aver.UI Aver.Core Aver.Platform)
 set_target_properties(UiCaptionViewTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# UiImageAbiTest — the image host callbacks on ui_abi.h and an Image widget's path reaching the draw list
+# (a fake host; no renderer). Links the DLL the C# side loads.
+add_executable(UiImageAbiTest src/UiImageAbiTest.cpp)
+target_link_libraries(UiImageAbiTest PRIVATE Aver.UI.Abi Aver.UI Aver.Core Aver.Platform)
+set_target_properties(UiImageAbiTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

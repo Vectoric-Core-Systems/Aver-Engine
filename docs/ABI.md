@@ -1034,6 +1034,10 @@ The module's whole state is a single `aver::ui::UiDrawList` and a viewport rect.
 
 A texture bound through `aver_ui_textured_rect` is **required to be premultiplied** as well. Stated rather than detected: a straight-alpha texture multiplied by a premultiplied colour produces a halo that reads as a filtering artefact and is not one.
 
+### Images by content path (P39)
+
+The texture id `aver_ui_textured_rect` and a style box take is a GPU texture, and this DLL links no RHI, so a picture reaches it through a table the **host** installs, the same arrangement as the font loader: `aver_ui_set_image_host(acquire, release, size, use)`. A game then calls `aver_ui_image_acquire(path)` (a path relative to the project's Content folder; absolute paths, drives, schemes and `..` are refused) and gets an id, or 0 when the image does not load; `aver_ui_image_release(id)` gives the reference back, `aver_ui_image_size(id, outWH)` reads the source size in pixels, `aver_ui_image_available()` says whether a host installed a table, and `aver_ui_image_use(path)` is the borrowing form (no reference; the texture lives while it keeps being asked for), which is how an `image` widget's `image` path is drawn. Both hosts install one (`GameUiImages.hpp`, over `Aver.Render.UI`'s `UiImageCache`): the file is decoded, **premultiplied**, given a mip chain and uploaded as `RGBA8Unorm` (the UI blends in display space), once per path however many callers share it. The id is the `rhi::TextureHandle` the UI renderer draws with on D3D12 and Vulkan alike. A texture nobody holds is destroyed `UiImageCache::kGraceFrames` (8) ticks later, never while a frame in flight or the renderer's copy of the last list may name it; Play stop drops every reference. Main thread only.
+
 ### The one C++ type that crosses
 
 `aver_ui_draw_list()` returns the `UiDrawList` as an opaque `const void*` for the host to cast back. Every other DLL in this tree deliberately avoids that (`modules/scene/include/aver/scene/World.hpp:23`; `modules/render.pbr/include/aver/pbr/Material.hpp:199`), so the reason this one is admissible is worth stating rather than assuming.

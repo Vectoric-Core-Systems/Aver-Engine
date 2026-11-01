@@ -8,6 +8,6 @@
   "option": null,
   "required": true,
   "default": true,
-  "dependsOn": ["Aver.Core", "Aver.RHI", "Aver.UI"],
+  "dependsOn": ["Aver.Core", "Aver.Platform", "Aver.RHI", "Aver.UI"],
   "consequence": ""
 }
