@@ -1886,6 +1886,14 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
                                     : kRtMaskOpaque;
         // ForceNonOpaque only for translucent: geometry is marked OPAQUE by createBlas().
         i.flags = d.translucent ? rhi::TlasInstanceFlag_ForceNonOpaque : rhi::TlasInstanceFlag_None;
+        // The primary ray culls back faces as the rasteriser does. Ray facing is decided in object space, so a mirrored transform
+        // would turn the mesh inside out: it, a two-sided material and a draw with no material constants keep both faces.
+        {
+            const f32* w = d.world;
+            const f32 det = w[0] * (w[5] * w[10] - w[6] * w[9]) - w[1] * (w[4] * w[10] - w[6] * w[8]) + w[2] * (w[4] * w[9] - w[5] * w[8]);
+            const auto* mc = d.matBytes >= sizeof(pbr::MaterialConstants) ? reinterpret_cast<const pbr::MaterialConstants*>(d.mat) : nullptr;
+            if (det < 0.0f || !mc || (mc->flags & pbr::MaterialFlag_TwoSided)) i.flags |= rhi::TlasInstanceFlag_TriangleCullDisable;
+        }
         if (d.translucent) ++tlasTranslucentThisBuild_;
         i.blas = b;
         // Index into rtInstanceData_ for reflection ray hits.

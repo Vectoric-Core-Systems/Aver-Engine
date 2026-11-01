@@ -2110,8 +2110,9 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     const uint rdPrimIndex     = rdRec.y;
 #else
     RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
-    // Opaque lane (AVER_RT_MASK_OPAQUE, not _OPAQUE_ALL).
-    q.TraceRayInline(gScene, RAY_FLAG_NONE, AVER_RT_MASK_OPAQUE, r);
+    // Opaque lane (AVER_RT_MASK_OPAQUE, not _OPAQUE_ALL). Back faces culled like the rasteriser's: a camera inside a single-sided mesh
+    // sees through it; two-sided and mirrored instances carry TriangleCullDisable.
+    q.TraceRayInline(gScene, RAY_FLAG_CULL_BACK_FACING_TRIANGLES, AVER_RT_MASK_OPAQUE, r);
     averRtProceedSolid(q);
 
     if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) {
@@ -2642,8 +2643,8 @@ void CSRdVisibility(uint3 tid : SV_DispatchThreadID) {
     averRtCutoutPolicy(AVER_RD_CUTOUTS_PRIMARY, false);
 
     RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
-    // Same lane as PSRayDriven's primary ray (AVER_RT_MASK_OPAQUE, leaves viewer's head).
-    q.TraceRayInline(gScene, RAY_FLAG_NONE, AVER_RT_MASK_OPAQUE, r);
+    // Same lane and back-face cull as PSRayDriven's primary ray (AVER_RT_MASK_OPAQUE, leaves viewer's head).
+    q.TraceRayInline(gScene, RAY_FLAG_CULL_BACK_FACING_TRIANGLES, AVER_RT_MASK_OPAQUE, r);
     averRtProceedSolid(q);
 
     if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) {
