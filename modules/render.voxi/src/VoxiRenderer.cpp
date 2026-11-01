@@ -1353,7 +1353,7 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
     orthoView_ = viewIsOrthographicNow();
     if (orthoView_ && !orthoLogged_) {
         orthoLogged_ = true;
-        AVER_INFO("[Voxi] orthographic camera: the rasteriser draws the primary view (no ray-driven pass); sky, fog and screen-space terms still assume a perspective view ray");
+        AVER_INFO("[Voxi] orthographic camera: the rasteriser draws the primary view (no ray-driven pass, no ray tracing in the raster scene); sky, fog and screen-space terms still assume a perspective view ray");
     }
     if (!giReady_) return;
     // Material graph appeared since pipelines were built.
@@ -1737,6 +1737,11 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     cb_.shadowParams[2] = 0.0f;
     rtAccelListKeyValid_ = false;
     if (!rtSupported_ || settings_.rayTracing == Quality::Off || (drawsPrev_.empty() && foliageInstances_ == 0)) return;
+    // An orthographic view draws through the rasteriser (rayDrivenActive() is false), and the raster scene pixel shaders compiled with ray queries
+    // (sceneRtPso_ and its twins, the rtRenderMode 0 combination) hung the RX 7800 XT on the first frame of Squash the Creeps (2026-11-01, sq-base.log).
+    // Until that combination is bisected on a perspective level, an orthographic view takes the raster scene without ray tracing, the configuration
+    // that is known to run (shadow-map sun, cone-traced GI, raster local lights). Perspective views never reach this line.
+    if (orthoView_) return;
 
     // ---- The unchanged gate (Settings::rtSkipUnchangedTlas) ----
     // See rtAccelSnapshotUnchanged() for what "unchanged" checks. A match means tlas_,
