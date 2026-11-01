@@ -848,6 +848,24 @@ static void testDebugLines() {
     check(aver_fw_take_vsync_request() == 0 && aver_fw_take_vsync_request() == -1, "a request is taken once");
 }
 
+// Content preload: requests queue in order, a repeat is dropped, a bad one refused, and the host takes them one by one.
+static void testPrefetchRequests() {
+    AVER_INFO("=== content preload: queued in order, taken once ===");
+    int32_t kind = -1;
+    char buf[64];
+    check(aver_fw_take_prefetch(&kind, buf, sizeof buf) == 0, "nothing waits at first");
+    check(aver_fw_prefetch_content(AVER_FW_PREFETCH_MESH, "Meshes/a.ocmesh") == 1, "a mesh request queues");
+    check(aver_fw_prefetch_content(AVER_FW_PREFETCH_MATERIAL, "Brick") == 1, "a material request queues");
+    check(aver_fw_prefetch_content(AVER_FW_PREFETCH_MESH, "Meshes/a.ocmesh") == 1, "a repeat of a waiting one is accepted");
+    check(aver_fw_prefetch_content(AVER_FW_PREFETCH_MESH, "") == 0 && aver_fw_prefetch_content(AVER_FW_PREFETCH_MESH, nullptr) == 0 &&
+          aver_fw_prefetch_content(7, "x") == 0, "an empty name or a bad kind is refused");
+    check(aver_fw_take_prefetch(&kind, buf, sizeof buf) == 15 && kind == AVER_FW_PREFETCH_MESH &&
+          std::string(buf) == "Meshes/a.ocmesh", "the first request comes out first, with its kind");
+    check(aver_fw_take_prefetch(&kind, buf, 3) == 2 && kind == AVER_FW_PREFETCH_MATERIAL && std::string(buf) == "Br",
+          "the second is truncated to the buffer");
+    check(aver_fw_take_prefetch(&kind, buf, sizeof buf) == 0, "the repeat was dropped, so nothing is left");
+}
+
 static std::vector<std::pair<int32_t, int32_t>> g_travelEnds;
 static void AVER_FW_CALL standInTravelEnd(aver_entity e, int32_t reason) { g_travelEnds.emplace_back(static_cast<int32_t>(e), reason); }
 
@@ -2286,6 +2304,7 @@ int main() {
     testAdopt();
     testGroups();
     testDebugLines();
+    testPrefetchRequests();
     testPossessReentrancy();
     testPlayLifecycle();
     testTravel();   // after the lifecycle test: it declares a GameMode and a GameInstance of its own

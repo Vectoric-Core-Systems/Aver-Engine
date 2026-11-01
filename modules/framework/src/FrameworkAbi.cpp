@@ -795,6 +795,28 @@ void aver_fw_debug_lines_advance(float realDt) {
     d.resize(keep * 12);
 }
 
+// ---- content preload (2.9) ----
+static std::deque<std::pair<int32_t, std::string>> g_prefetchRequests;
+int32_t aver_fw_prefetch_content(int32_t kind, const char* name) {
+    if ((kind != AVER_FW_PREFETCH_MESH && kind != AVER_FW_PREFETCH_MATERIAL) || !name || !*name) return 0;
+    constexpr usize kMaxWaiting = 4096;
+    for (const auto& r : g_prefetchRequests)
+        if (r.first == kind && r.second == name) return 1;   // already waiting
+    if (g_prefetchRequests.size() >= kMaxWaiting) g_prefetchRequests.pop_front();
+    g_prefetchRequests.emplace_back(kind, name);
+    return 1;
+}
+int32_t aver_fw_take_prefetch(int32_t* kind, char* out, int32_t cap) {
+    if (g_prefetchRequests.empty() || !kind || !out || cap <= 0) return 0;
+    const auto& r = g_prefetchRequests.front();
+    const usize n = std::min(r.second.size(), static_cast<usize>(cap - 1));
+    std::memcpy(out, r.second.data(), n);
+    out[n] = '\0';
+    *kind = r.first;
+    g_prefetchRequests.pop_front();
+    return static_cast<int32_t>(n);
+}
+
 static int32_t g_vsyncRequest = -1;
 static int32_t g_presentRequest = -1, g_presentMode = -1, g_maxFps = 0;
 static bool g_presentFromVsync = false;   // the waiting present request is the one request_vsync made

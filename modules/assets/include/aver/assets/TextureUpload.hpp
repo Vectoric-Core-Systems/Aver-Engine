@@ -59,6 +59,49 @@ void forgetUploadedTextures();
 // Bytes held now.
 u64 prefetchedTextureBytes();
 
+
+// ---- background loading: no frame waits on a decode or a BC7 encode ----
+//
+// A texture's CPU work (the derived-data cache read, or the decode, mip chain and BC7 encode on a first visit)
+// runs on a small pool of worker threads; only the GPU copy is left for the calling thread, which takes it
+// when it has upload budget. Workers never touch the RHI. Results are keyed by (path, usage), so any number of
+// materials asking for one file share one job.
+enum class TextureState : u32 {
+    Pending,   // queued or being prepared; ask again later
+    Ready,     // takeTexture() now costs only the GPU copy
+    Failed,    // the file does not decode (reported once; the next request tries again)
+};
+// Who is waiting: a prefetch fills the queue behind everything a draw has asked for.
+enum class TexturePriority : u32 { Demand = 0, Prefetch = 1 };
+
+// Queues `path` for preparation if it is not already, and says where it stands. Idempotent; a Demand request
+// moves a queued Prefetch one to the front. A Failed answer is given once (with `err`) and forgets the entry.
+TextureState requestTexture(const std::string& path, TextureUsage usage, TexturePriority priority,
+                            std::string* err = nullptr);
+// The GPU texture for a Ready request, consuming it. 0 (with `err`) when it is not Ready or the RHI refuses.
+rhi::TextureHandle takeTexture(rhi::IResourceFactory& res, const std::string& path, TextureUsage usage,
+                               std::string* err = nullptr, TextureUploadInfo* info = nullptr);
+// A project or level change: queued requests are dropped, running ones are discarded when they finish, and
+// every prepared result is freed. A later request starts again (and hits the derived-data cache).
+void cancelTextureRequests();
+
+struct TextureLoadStats {
+    u64 requested = 0;     // distinct jobs queued
+    u64 prepared = 0;      // jobs finished
+    u64 cacheHits = 0;     // ... that read the derived-data cache (no decode)
+    u64 compressed = 0;    // ... that decoded and BC7-encoded
+    u64 failed = 0;
+    u64 uploaded = 0;      // takeTexture() successes
+    u32 queued = 0, running = 0, ready = 0;   // right now
+    u64 readyBytes = 0;
+};
+TextureLoadStats textureLoadStats();
+// Shrinks the pool for a test or a tool that wants none (0 = run nothing in the background; requests stay Pending
+// until runTextureJobsHere()). Call before the first request.
+void setTextureWorkerCount(u32 count);
+// Runs up to `maxJobs` queued jobs on the calling thread, most urgent first; for tests with no workers. Returns how many ran.
+u32 runTextureJobsHere(u32 maxJobs = ~0u);
+
 // Decodes `path` and uploads it. Returns 0 on failure, with the reason in `err`.
 rhi::TextureHandle uploadTexture(rhi::IResourceFactory& res, const std::string& path,
                                  TextureUsage usage, std::string* err = nullptr,

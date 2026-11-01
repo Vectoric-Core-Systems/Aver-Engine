@@ -23,6 +23,7 @@
 #include "aver/platform/FileSystem.hpp"
 #if AVER_MODULE_FRAMEWORK
 #  include "aver/game/ScriptDebugLines.hpp"
+#  include "aver/game/ContentPrefetch.hpp"
 #endif
 #include "aver/core/Log.hpp"
 #include "aver/extensions/Extensions.hpp"   // warnMissingProjectExtensions
@@ -829,7 +830,13 @@ void GameApp::attachVoxi(Engine& e) {
         // Keep adjacent: factory and resolver installed together
         content_.setTextureFactory(dev->resources());
         content_.setMaterialSystem(&voxiRenderer_.materials());
-        voxiRenderer_.materials().setTextureResolver(&GameContent::resolveMaterialTexture, &content_);
+        // Phased residency: no frame waits on a decode. A bounded run (--frames) keeps the blocking loads so its frame N is the finished picture.
+        if (GameContent::asyncTexturesWanted(cfg_.maxFrames != 0)) {
+            content_.enableAsyncTextures(true);
+            voxiRenderer_.materials().setAsyncTextureResolver(&GameContent::resolveMaterialTextureAsync, &content_);
+        } else {
+            voxiRenderer_.materials().setTextureResolver(&GameContent::resolveMaterialTexture, &content_);
+        }
         voxiRenderer_.materials().setTerrainResolver(&GameContent::resolveTerrainAtlas, &content_);   // wave3 terrain layers
 #endif
         // Depth proxy for LOD-based shadow/voxel optimization
@@ -2251,6 +2258,7 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
         char travel[1024];
         if (aver_fw_take_travel_request(travel, static_cast<int32_t>(sizeof travel)) > 0) travelTo(travel);
     }
+    game::pumpContentPrefetch(content_);   // a script's "this is about to be shown": its textures start decoding now
     // A script's present mode (Display.VSync / Display.PresentMode), the frame cap, and its window requests, applied where the device and
     // the window allow it. The state is published back for the script to read.
     if (rhi::IDevice* dev = e.device()) game::applyPresentMode(*dev);

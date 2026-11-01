@@ -28,6 +28,7 @@
 #include "aver/game/GameUiInput.hpp"
 #include "aver/game/GameDisplay.hpp"   // resolvePointerPlan: the game's pointer request in Play
 #include "aver/game/GameUiText.hpp"
+#include "aver/game/ContentPrefetch.hpp"
 #include "aver/platform/FileSystem.hpp"   // userDataDir: where the trajectory network's weights live
 #if AVER_MODULE_VOXI
 #include "ModeSwitchNotice.hpp"
@@ -820,6 +821,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
             AVER_WARN("[Play] a script asked to change level to '{}': level travel runs in the packaged game; the editor "
                       "keeps the level it is editing", travel);
     }
+    game::pumpContentPrefetch(content_);   // a script's "this is about to be shown": its textures start decoding now
 #endif
 #if AVER_MODULE_FLUIDS
     // After physics step, before any prePass (not gated on Play).

@@ -76,8 +76,9 @@ extern "C" {
  *      mouse side buttons, wheel as press); AVER_FW_GAMEPAD_* grew to 21 buttons and pads 0..3 are real
  *      (connection, name, rumble); touch state; pointer modes, cursor shapes and images, pointer warp;
  *      window mode/size/position/flags/title requests and the published window state; present modes
- *      (aver_fw_request_present_mode); the frame cap (aver_fw_set_max_fps). */
-#define AVER_FW_ABI_VERSION_MINOR 8
+ *      (aver_fw_request_present_mode); the frame cap (aver_fw_set_max_fps).
+ * 2.9: CONTENT PRELOAD, appended only: aver_fw_prefetch_content / aver_fw_take_prefetch (see that section). */
+#define AVER_FW_ABI_VERSION_MINOR 9
 #define AVER_FW_ABI_VERSION \
     ((AVER_FW_ABI_VERSION_MAJOR << 16) | AVER_FW_ABI_VERSION_MINOR)
 
@@ -178,6 +179,21 @@ AVER_FW_ABI const char* aver_fw_project_dir(void);
 AVER_FW_ABI const char* aver_fw_content_dir(void);
 AVER_FW_ABI const char* aver_fw_user_dir(void);
 AVER_FW_ABI int32_t     aver_fw_is_editor(void);
+
+/* Content preload (2.9): a script that is about to show something new -- a scene instantiated, a mesh assigned, a
+ * material about to be applied -- tells the host so, and the host's background workers decode and compress the
+ * textures before the first draw instead of the frame that shows it. A hint, never a requirement: nothing waits on
+ * it, an unknown or missing asset is ignored, and a host that does not preload drops the request.
+ *   kind AVER_FW_PREFETCH_MESH:     `name` is the mesh's content-relative asset path ("Meshes/a.ocmesh"); its slot
+ *                                   materials and their textures are queued.
+ *   kind AVER_FW_PREFETCH_MATERIAL: `name` is a material's name ("Brick"), as Entity.SetMaterial takes it.
+ * Requests queue in order, a repeat of one still waiting is dropped, and at most 4096 wait (the oldest go first).
+ * The host takes them once a frame: take returns the name's length (0: none waiting) and writes it NUL-terminated
+ * into out, truncated to cap - 1, with its kind in *kind. Returns 1 queued, 0 refused (an empty name, a bad kind). */
+#define AVER_FW_PREFETCH_MESH     0
+#define AVER_FW_PREFETCH_MATERIAL 1
+AVER_FW_ABI int32_t aver_fw_prefetch_content(int32_t kind, const char* name);
+AVER_FW_ABI int32_t aver_fw_take_prefetch(int32_t* kind, char* out, int32_t cap);
 
 /* Script debug drawing: world-space lines a host draws on top of the frame. A line lasts `seconds` of real time,
  * or exactly one drawn frame when 0. data() is count lines of 12 floats -- from xyz rgb, to xyz rgb, the

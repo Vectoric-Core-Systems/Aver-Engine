@@ -908,7 +908,13 @@ void SandboxApp::onInit(Engine& e)  {
 #if AVER_MODULE_PBR
             content_.setTextureFactory(e.device()->resources());
             content_.setMaterialSystem(&voxiRenderer_.materials());
-            voxiRenderer_.materials().setTextureResolver(&game::GameContent::resolveMaterialTexture, &content_);
+            // Phased residency: no frame waits on a decode. A bounded run (--frames) keeps the blocking loads so its frame N is the finished picture.
+            if (game::GameContent::asyncTexturesWanted(maxFrames_ != 0)) {
+                content_.enableAsyncTextures(true);
+                voxiRenderer_.materials().setAsyncTextureResolver(&game::GameContent::resolveMaterialTextureAsync, &content_);
+            } else {
+                voxiRenderer_.materials().setTextureResolver(&game::GameContent::resolveMaterialTexture, &content_);
+            }
             voxiRenderer_.materials().setTerrainResolver(&game::GameContent::resolveTerrainAtlas, &content_);   // wave3 terrain layers
             // Same resolver for asset tabs' preview (consistent look across tabs and level).
             editor::setPreviewTextureResolver(&game::GameContent::resolveMaterialTexture, &content_);

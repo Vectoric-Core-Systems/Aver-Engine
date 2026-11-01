@@ -40,7 +40,32 @@ public:
         // honest answer to information this system was never given. Never read for anything that
         // sizes an allocation; nothing here has ever needed that number.
         usize bytes = 0;
+        // Only an AsyncTextureResolver sets this: the texture is being prepared on a worker. Nothing is cached; the slot
+        // shows its stand-in (standInFor) and is asked again every update().
+        bool pending = false;
     };
+
+    // What an async resolver is being asked to do.
+    enum class TextureAsk : u32 {
+        Prefetch,   // queue it behind everything demanded; never upload
+        Wait,       // a draw needs it, but this frame's upload budget is spent: queue it first, never upload
+        Take,       // a draw needs it: upload it if it is already prepared
+    };
+    // The non-blocking resolver. It must return at once: `pending` with the work queued (a worker decodes and
+    // compresses), the texture when `ask` is Take and it is prepared (only the GPU copy is left), or a zero handle
+    // for a texture that cannot be had (remembered like a blocking resolver's failure).
+    using AsyncTextureResolver = ResolvedTexture (*)(const TextureRef& ref, TextureSlot slot, TextureAsk ask, void* user);
+
+    // What a slot shows while its texture is pending. A pure function of the slot and the material, so the rule is
+    // the same in every host and testable without a GPU.
+    enum class StandIn : u32 {
+        Identity,     // the slot's usual fallback (flat normal, white occlusion): what it shows with no map at all
+        Grey,         // base colour: mid grey times baseColorFactor, so a surface is dim rather than blown out white
+        Hidden,       // base colour of a masked or blended material: alpha 0, the surface appears with its texture
+        Dielectric,   // metal-rough: fully rough, non-metal, times the factors
+        Dark,         // emissive: no glow until the map says where it glows
+    };
+    static StandIn standInFor(TextureSlot slot, const MaterialDesc& d);
 
     // Turns a texture reference into a GPU texture; a zero handle leaves the slot on its fallback.
     // The slot says what the pixels MEAN. The handle returned becomes this system's and is
@@ -55,6 +80,21 @@ public:
     bool ready() const { return res_ != nullptr; }
 
     void setTextureResolver(TextureResolver fn, void* user) { resolve_ = fn; resolveUser_ = user; }
+    // The non-blocking resolver, used instead of the blocking one when set. A material is built at once with a stand-in
+    // in every slot whose texture is not resident, and update() swaps the real textures in as they become ready,
+    // spending at most uploadBudget() bytes of GPU copies a frame. Nothing here ever waits on a decode.
+    void setAsyncTextureResolver(AsyncTextureResolver fn, void* user) { asyncResolve_ = fn; resolveUser_ = user; }
+    // Bytes of texture uploaded per update() before the rest wait for the next one; the first upload of a frame
+    // always goes, so a large texture is late, never stuck. Default 8 MiB.
+    void setUploadBudget(usize bytes) { uploadBudgetBytes_ = bytes; }
+    usize uploadBudget() const { return uploadBudgetBytes_; }
+
+    // Queues the textures of material `h` for background preparation, building nothing: the call before the first
+    // draw (a level's placements, a mesh about to be spawned). A texture already resident or already queued costs a lookup.
+    void prefetch(MaterialHandle h);
+    // Materials with at least one texture still pending, and whether `h` shows all of its own textures.
+    u32 pendingMaterialCount() const { return static_cast<u32>(pendingOrder_.size()); }
+    bool fullyResident(MaterialHandle h) const;
 
     // ---- wave3 terrain layers ----
     // Fills the three atlas textures of a layered terrain material (slots 0..2 under
@@ -214,6 +254,7 @@ private:
         MaterialConstants      constants{};
         // R6: must stay directly behind `constants` (a draw hands the device &constants and constantBytes()).
         MaterialExtConstants   ext{};
+        u32                    pending = 0;   // bit per TextureSlot still showing its stand-in
     };
     static_assert(sizeof(MaterialConstants) % alignof(MaterialExtConstants) == 0, "ext follows the base block without padding");
 
@@ -223,7 +264,8 @@ private:
     // `retryFailed` re-resolves references whose last attempt failed, instead of trusting the
     // remembered 0. Set when a material is REDRAWN because it changed, which is the moment the
     // texture it names may finally exist.
-    void writeSlots(const MaterialDesc& d, rhi::BindingSetHandle set, bool retryFailed = false);
+    // Returns the bit mask of slots left on a stand-in because their texture is still pending.
+    u32 writeSlots(const MaterialDesc& d, rhi::BindingSetHandle set, bool retryFailed = false);
     // Resolves and caches one texture reference. 0 when there is no resolver or it declined.
     ResolvedTexture resolveTexture(const TextureRef& ref, TextureSlot slot, bool retryFailed = false);
     // The entry for `h`, built on first use.
@@ -260,6 +302,13 @@ private:
     rhi::TextureHandle white_ = 0;       // base colour, occlusion and emissive
     rhi::TextureHandle flatNormal_ = 0;  // (128,128,255) — +Z in tangent space
     rhi::TextureHandle metalRough_ = 0;
+    rhi::TextureHandle grey_ = 0;        // StandIn::Grey: sRGB 128 (0.216 linear)
+    rhi::TextureHandle dielectric_ = 0;  // StandIn::Dielectric: occlusion 1, roughness 1, metallic 0
+    static constexpr f32 kGreyLinear = 0.2158605f;
+    bool isFallbackTexture(rhi::TextureHandle h) const {
+        return h == white_ || h == flatNormal_ || h == metalRough_ || h == zero_ || h == grey_ || h == dielectric_;
+    }
+    rhi::TextureHandle standInHandle(StandIn s) const;
 
     rhi::BindingSetHandle fallbackSet_ = 0;
     MaterialConstants     fallbackConstants_{};
@@ -312,7 +361,20 @@ private:
     u32 failedResolves_ = 0;
 
     TextureResolver resolve_ = nullptr;
+    AsyncTextureResolver asyncResolve_ = nullptr;
     void*           resolveUser_ = nullptr;
+
+    // ---- phased residency (async resolver) ----
+    // Entries with a slot still on its stand-in, oldest first; update() retries them within the frame's upload budget.
+    std::vector<MaterialHandle> pendingOrder_;
+    std::unordered_set<MaterialHandle> pendingSet_;
+    void markPending(MaterialHandle h, u32 mask);
+    void advancePending();
+    usize uploadBudgetBytes_ = 8u << 20;
+    usize uploadBudget_ = 8u << 20;      // what is left of it this frame
+    // One residency burst: from the first pending material to none left, reported once.
+    u32 burstUploads_ = 0, burstFrames_ = 0, burstMaterials_ = 0;
+    f64 burstUploadMs_ = 0.0;
 
     // ---- wave3 terrain layers ----
     TerrainResolver terrainResolve_ = nullptr;

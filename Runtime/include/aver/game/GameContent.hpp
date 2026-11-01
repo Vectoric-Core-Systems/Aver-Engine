@@ -69,6 +69,22 @@ public:
     static pbr::MaterialSystem::ResolvedTexture resolveMaterialTexture(const pbr::TextureRef& ref, pbr::TextureSlot slot,
                                                      void* user);
 
+    // The non-blocking twin (pbr::MaterialSystem::setAsyncTextureResolver): the decode and BC7 encode run on the
+    // texture workers (assets::requestTexture) and this only asks, or copies a prepared chain to the GPU. `user` is a
+    // GameContent*.
+    static pbr::MaterialSystem::ResolvedTexture resolveMaterialTextureAsync(const pbr::TextureRef& ref, pbr::TextureSlot slot,
+                                                     pbr::MaterialSystem::TextureAsk ask, void* user);
+    // Queues the textures of material `name` for background preparation (loading the material if the project has one),
+    // so its first draw finds them ready. Every material a level, a mesh or a spawn loads is queued this way as it loads;
+    // this is for asking earlier. Returns how many textures it queued. 0 with no texture factory.
+    usize prefetchMaterial(const std::string& name);
+    // Whether a host installs the non-blocking resolver and queues textures as materials load. False for a bounded run
+    // (--frames: a capture or a gate must show the finished picture at its frame N, as it always did) and when the
+    // environment says AVER_ASYNC_TEXTURES=0 (the switch back to blocking loads). Off in a GameContent until a host calls
+    // enableAsyncTextures, so a test or a tool with no device starts no threads.
+    static bool asyncTexturesWanted(bool boundedRun);
+    void enableAsyncTextures(bool on) { asyncTextures_ = on; }
+
     // wave3 terrain layers: the host resolver for a layered terrain material (pbr::MaterialSystem::setTerrainResolver).
     // Packs the layers' albedo (+ height in alpha), normal and ORM maps into three atlases and uploads them. `user` is a
     // GameContent*. False (slots keep their fallbacks) with no texture factory or no layers.
@@ -103,6 +119,10 @@ public:
     // Queues a loaded mesh's slot materials (queueSurfaceMaterial), once per load. The mesh counts as a user of
     // each until it unloads, so a streamed level's materials and textures go with the cells that used them.
     void queueMeshMaterials(u64 meshId);
+    // Prefetches the materials of the mesh at content-relative `meshPath` ("Meshes/a.ocmesh"): its slot materials are
+    // loaded and their textures queued; a mesh not loaded yet (a lazy folder) is read ahead on the mesh workers, which
+    // queue the textures of its slots. Returns the textures queued now.
+    usize prefetchMeshMaterials(const std::string& meshPath);
 #endif
 
 #if AVER_MODULE_SCENE
@@ -368,6 +388,9 @@ private:
     std::deque<MaterialBind> materialBinds_;
     std::unordered_map<std::string, pbr::MaterialHandle> materialAssets_;
     pbr::MaterialHandle loadSurfaceMaterial(const std::string& name);   // materialForSurface, not kept
+    bool asyncTextures_ = false;
+    usize queueMaterialTextures(pbr::MaterialHandle h);   // Prefetch asks for each texture of `h`
+    std::unordered_map<std::string, std::string> assetPathMemo_;   // relative texture path -> the file found (main thread)
     std::unordered_set<i32> unresolvedSurfaces_;   // tokens authoredOrResolve found no material for
     struct MaterialUse { u32 meshes = 0; bool kept = false; u64 idleSince = 0; };
     std::unordered_map<std::string, MaterialUse> materialUse_;

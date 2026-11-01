@@ -43,6 +43,14 @@ void averageLinearFromLastMip(const fmt::TextureData& tex, f32 out[3]) {
     }
 }
 
+// What an upload of `cached` reports, without touching the GPU.
+TextureUploadInfo infoOf(const CachedTexture& cached) {
+    TextureUploadInfo i{cached.width, cached.height, cached.mips, 0};
+    for (const std::vector<u8>& mip : cached.mipBlocks) i.bytes += mip.size();
+    for (int c = 0; c < 3; ++c) i.averageLinear[c] = cached.averageLinear[c];
+    return i;
+}
+
 // "Any failure falls back to today's RGBA8 path, logged once per file": a texture that fails to
 // compress on every resolve (a material preview re-requesting the same fallback icon, say) must
 // not spam the log once per resolve. Keyed on the raw path string, which is exactly what the
@@ -120,16 +128,6 @@ void compressToCache(const std::string& path, TextureUsage usage, const fmt::Tex
 
     if (!saveCachedTexture(path, usage, cached))
         AVER_WARN("[Texture] {} compressed but could not be written to the derived-data cache", path);
-}
-
-// The miss path: encodes, caches, then uploads. 0 on failure -- the caller falls back to the RGBA8
-// chain it already decoded, so nothing here needs to be undone.
-rhi::TextureHandle uploadCompressed(rhi::IResourceFactory& res, const std::string& path,
-                                    TextureUsage usage, const fmt::TextureData& tex, bool cutout,
-                                    TextureUploadInfo* info) {
-    CachedTexture cached;
-    compressToCache(path, usage, tex, cutout, cached);
-    return uploadCachedTexture(res, path, cached, info);
 }
 
 // ---- streaming prefetch (prefetchTexture) ----
@@ -275,35 +273,36 @@ void resizeBox(const ImageData& src, u32 w, u32 h, TextureUsage usage, ImageData
 
 } // namespace detail
 
-// Decodes `path` and uploads it. Returns 0 on failure, with the reason in `err`.
-rhi::TextureHandle uploadTexture(rhi::IResourceFactory& res, const std::string& path,
-                                 TextureUsage usage, std::string* err, TextureUploadInfo* info) {
+// The CPU half of an upload: the cache read, or the decode, mips and BC7 encode. Touches no GPU object,
+// so a worker thread can run it (TextureLoader.cpp does).
+namespace detail {
+
+bool prepareTexture(const std::string& path, TextureUsage usage, PreparedTexture& out, std::string* err,
+                    bool allowCompressed) {
     if (path.empty()) {
         if (err) *err = "empty texture path";
-        return 0;
+        return false;
     }
+    out = PreparedTexture{};
+    out.usage = usage;
 
     // Both gates read once: a project must have pointed the cache somewhere (setTextureCacheDir)
     // AND the A/B switch must be on, or nothing below this file even looks for an entry -- the
     // legacy, always-uncompressed behaviour for a host that never calls setTextureCacheDir at all.
-    const bool cacheReady = textureCompressionEnabled() && !textureCacheDir().empty();
+    const bool cacheReady = allowCompressed && textureCompressionEnabled() && !textureCacheDir().empty();
 
     // ---- CACHE HIT: no image decode at all -- see TextureCache.hpp for the whole point of this. ----
     if (cacheReady) {
-        CachedTexture cached;
         const auto t0 = std::chrono::steady_clock::now();
-        const bool held = takeHeld(path, usage, cached);
-        if (held || loadCachedTexture(path, usage, cached)) {
-            if (const rhi::TextureHandle h = uploadCachedTexture(res, path, cached, info)) {
-                noteUploaded(path, usage);
-                if (hitchVerbose())
-                    AVER_INFO("[Texture] {} {} in {:.1f} ms", held ? "prefetched" : "read here", path,
-                              std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - t0).count());
-                return h;
-            }
-            // A cached entry the RHI refuses (a stale format from an older build, say) is not
-            // repaired here -- fall through and decode as if it had been a miss.
-            logCompressionFailureOnce(path, "the cached BC7 chain was rejected by the GPU");
+        const bool held = takeHeld(path, usage, out.cached);
+        if (held || loadCachedTexture(path, usage, out.cached)) {
+            out.bc7 = true;
+            out.fromCache = true;
+            out.info = infoOf(out.cached);
+            if (hitchVerbose())
+                AVER_INFO("[Texture] {} {} in {:.1f} ms", held ? "prefetched" : "read here", path,
+                          std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - t0).count());
+            return true;
         }
     }
 
@@ -313,10 +312,10 @@ rhi::TextureHandle uploadTexture(rhi::IResourceFactory& res, const std::string& 
     const bool normalMap = usage == TextureUsage::NormalMap;
 
     fmt::TextureData tex;
-    if (!detail::decodeTexture(path, usage, tex, err)) return 0;
+    if (!decodeTexture(path, usage, tex, err)) return false;
     if (!tex.valid()) {
         if (err) *err = "decoded texture is empty: " + path;
-        return 0;
+        return false;
     }
 
     // ELIGIBILITY IS DECIDED BEFORE A SINGLE MIP IS BUILT, deliberately: with compression off or
@@ -335,22 +334,35 @@ rhi::TextureHandle uploadTexture(rhi::IResourceFactory& res, const std::string& 
     fmt::generateMipChain(tex, normalMap, cutout ? kCoverageReferenceAlpha : -1.0f);
 
     if (willCompress) {
-        if (const rhi::TextureHandle h = uploadCompressed(res, path, usage, tex, cutout, info)) {
-            noteUploaded(path, usage);
-            return h;
-        }
-        logCompressionFailureOnce(path, "the compressed GPU texture could not be created");
+        compressToCache(path, usage, tex, cutout, out.cached);
+        out.bc7 = true;
+        out.info = infoOf(out.cached);
+        return true;
     }
 
     // ---- the RGBA8 path: unchanged from before this feature existed. ----
+    out.info.width = tex.width;
+    out.info.height = tex.height;
+    out.info.mips = static_cast<u32>(tex.levels.size());
+    for (const ImageData& lvl : tex.levels) out.info.bytes += lvl.pixels.size();
+    averageLinearFromLastMip(tex, out.info.averageLinear);
+    out.rgba = std::move(tex);
+    return true;
+}
+
+rhi::TextureHandle uploadPrepared(rhi::IResourceFactory& res, const std::string& path, PreparedTexture& p,
+                                  std::string* err, TextureUploadInfo* info) {
+    if (p.bc7) {
+        const rhi::TextureHandle h = uploadCachedTexture(res, path, p.cached, info);
+        if (h) noteUploaded(path, p.usage);
+        else if (err) *err = "the compressed GPU texture could not be created: " + path;
+        return h;
+    }
     // One CPU pointer per mip, in level order, which is the subresource order TextureDesc documents.
+    const fmt::TextureData& tex = p.rgba;
     std::vector<const void*> levels;
     levels.reserve(tex.levels.size());
-    usize bytes = 0;
-    for (const ImageData& lvl : tex.levels) {
-        levels.push_back(lvl.pixels.data());
-        bytes += lvl.pixels.size();
-    }
+    for (const ImageData& lvl : tex.levels) levels.push_back(lvl.pixels.data());
 
     rhi::TextureDesc d;
     d.width  = tex.width;
@@ -369,11 +381,24 @@ rhi::TextureHandle uploadTexture(rhi::IResourceFactory& res, const std::string& 
         if (err) *err = "the GPU texture could not be created: " + path;
         return 0;
     }
-    if (info) {
-        *info = TextureUploadInfo{tex.width, tex.height, d.mips, bytes};
-        averageLinearFromLastMip(tex, info->averageLinear);
-    }
+    if (info) *info = p.info;
     return h;
+}
+
+} // namespace detail
+
+// Decodes `path` and uploads it. Returns 0 on failure, with the reason in `err`.
+rhi::TextureHandle uploadTexture(rhi::IResourceFactory& res, const std::string& path,
+                                 TextureUsage usage, std::string* err, TextureUploadInfo* info) {
+    detail::PreparedTexture p;
+    if (!detail::prepareTexture(path, usage, p, err)) return 0;
+    if (const rhi::TextureHandle h = detail::uploadPrepared(res, path, p, err, info)) return h;
+    if (!p.bc7) return 0;
+    // A BC7 chain the RHI refuses (a stale format from an older build, say): the plain RGBA8 path instead.
+    logCompressionFailureOnce(path, "the compressed GPU texture could not be created");
+    detail::PreparedTexture plain;
+    if (!detail::prepareTexture(path, usage, plain, err, false)) return 0;
+    return detail::uploadPrepared(res, path, plain, err, info);
 }
 
 bool prefetchTexture(const std::string& path, TextureUsage usage) {

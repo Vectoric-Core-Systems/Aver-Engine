@@ -444,6 +444,19 @@ Minor 8 of major 2 (the header's own changelog, `framework_abi.h`) adds the inpu
 
 Pinned by `FrameworkTest` (`testInputDisplay`), `InputBridgeTest`, `InputStateTest`, `FrameCapTest`, `OcInputTest` and `AbiEnumTest`. What no test can reach (a window changing mode, a cursor changing shape, a pad rumbling, a finger on glass, the SDL paths, which only CI compiles) is on the owner's headed list.
 
+### Content preload, framework ABI 2.9
+
+Minor 9 adds one request pair, additive. A script that is about to show something new tells the host, and the host's texture workers decode and compress the textures before the first draw (`docs/MATERIALS.md`, phased residency):
+
+```c
+#define AVER_FW_PREFETCH_MESH     0   /* name = content-relative mesh asset path, "Meshes/a.ocmesh" */
+#define AVER_FW_PREFETCH_MATERIAL 1   /* name = a material's name, as Entity.SetMaterial takes it   */
+int32_t aver_fw_prefetch_content(int32_t kind, const char* name);          /* 1 queued, 0 refused (empty name, bad kind) */
+int32_t aver_fw_take_prefetch(int32_t* kind, char* out, int32_t cap);      /* host: the name's length (0: none waiting) */
+```
+
+A hint: nothing waits on it, an asset the project lacks is ignored, a repeat of a request still waiting is dropped, at most 4096 wait (the oldest go first), and a host that does not preload may drop it. The editor (Play) and the shipped game take the queue once a frame (`game::pumpContentPrefetch`, `ContentPrefetch.hpp`). C#: `Aver.Framework.Preload.Mesh` / `.Material`. The names are the engine's, not any converter's: the Fabric Connector calls it from `ResourceLoader.Load` of a scene, mesh or material, `PackedScene.Instantiate` and a mesh or material assignment. Pinned by `FrameworkTest` (`testPrefetchRequests`).
+
 ### Input triggers and modifiers (minor 11)
 
 Additive on top of NAMED ACTIONS; an action with no triggers and no modifiers answers `held`/`pressed`/`released`/`value2` exactly as before. A trigger (when the action fires) or modifier (how its value is shaped) is one whitespace-free **spec token** (`hold:0.5:once`, `deadzone:0.2:1:radial`), parsed by the single `aver::fmt::parseTriggerSpec`/`parseModifierSpec` (`OcInput.hpp`; grammar in `OcInput.cpp`'s header comment), and attaches to a binding or to the action. C# builds specs with typed factories and never parses them.

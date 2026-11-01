@@ -12,6 +12,7 @@
 #include <cctype>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <filesystem>
@@ -1928,6 +1929,86 @@ std::string GameContent::resolveAssetPath(const pbr::TextureRef& ref) const {
     return {};
 }
 
+pbr::MaterialSystem::ResolvedTexture GameContent::resolveMaterialTextureAsync(const pbr::TextureRef& ref,
+                                                                              pbr::TextureSlot slot,
+                                                                              pbr::MaterialSystem::TextureAsk ask,
+                                                                              void* user) {
+    using Ask = pbr::MaterialSystem::TextureAsk;
+    auto* self = static_cast<GameContent*>(user);
+    if (!self || !self->textureFactory_) return {};
+
+    // A relative path is stat-ed to find its file; asked every frame while pending, that is remembered.
+    std::string path;
+    if (!ref.path.empty() && ref.id == 0) {
+        const auto m = self->assetPathMemo_.find(ref.path);
+        if (m != self->assetPathMemo_.end()) path = m->second;
+    }
+    if (path.empty()) {
+        path = self->resolveAssetPath(ref);
+        std::error_code ec;
+        if (!ref.path.empty() && ref.id == 0 && !path.empty() && std::filesystem::exists(path, ec))
+            self->assetPathMemo_.emplace(ref.path, path);
+    }
+    if (path.empty()) {
+        AVER_WARN("[Material] texture id 0x{:016X} is not in the content index; slot '{}' keeps its fallback",
+                  ref.id, pbr::MaterialLibrary::textureSlotName(slot));
+        return {};
+    }
+
+    const assets::TextureUsage usage = textureUsageFor(slot);
+    std::string err;
+    pbr::MaterialSystem::ResolvedTexture out;
+    switch (assets::requestTexture(path, usage, ask == Ask::Prefetch ? assets::TexturePriority::Prefetch
+                                                                     : assets::TexturePriority::Demand, &err)) {
+        case assets::TextureState::Pending: out.pending = true; return out;
+        case assets::TextureState::Failed:
+            AVER_WARN("[Material] {} - slot '{}' keeps its fallback", err, pbr::MaterialLibrary::textureSlotName(slot));
+            return {};
+        case assets::TextureState::Ready: break;
+    }
+    if (ask != Ask::Take) { out.pending = true; return out; }   // prepared; waits for upload budget
+
+    assets::TextureUploadInfo info;
+    const rhi::TextureHandle h = assets::takeTexture(*self->textureFactory_, path, usage, &err, &info);
+    if (!h) {
+        AVER_WARN("[Material] {} - slot '{}' keeps its fallback", err, pbr::MaterialLibrary::textureSlotName(slot));
+        return {};
+    }
+    AVER_INFO("[Material] {} -> {}x{}, {} mips ({} KB) for slot '{}'", path, info.width, info.height,
+              info.mips, info.bytes / 1024, pbr::MaterialLibrary::textureSlotName(slot));
+    out.handle = h;
+    for (int c = 0; c < 3; ++c) out.averageLinear[c] = info.averageLinear[c];
+    out.bytes = info.bytes;
+    return out;
+}
+
+bool GameContent::asyncTexturesWanted(bool boundedRun) {
+    if (boundedRun) return false;
+    const char* v = std::getenv("AVER_ASYNC_TEXTURES");
+    return !(v && v[0] == '0');
+}
+
+usize GameContent::prefetchMaterial(const std::string& name) {
+    if (!asyncTextures_ || !textureFactory_ || name.empty()) return 0;
+    const pbr::MaterialHandle h = loadSurfaceMaterial(name);
+    return h ? queueMaterialTextures(h) : 0;
+}
+
+usize GameContent::queueMaterialTextures(pbr::MaterialHandle h) {
+    const pbr::MaterialDesc* d = asyncTextures_ && textureFactory_ ? pbr::MaterialLibrary::get().desc(h) : nullptr;
+    if (!d || d->terrain.enabled()) return 0;   // a terrain material's atlas is built whole, on demand
+    usize queued = 0;
+    for (u32 i = 0; i < pbr::kTextureSlotCount; ++i) {
+        const pbr::TextureRef& ref = d->textures[i];
+        if (ref.empty() || ref.path.rfind("@rt:", 0) == 0) continue;
+        if (i == pbr::kEmbeddedTableSlot && d->embedded.active()) continue;
+        const pbr::MaterialSystem::ResolvedTexture r = resolveMaterialTextureAsync(
+            ref, static_cast<pbr::TextureSlot>(i), pbr::MaterialSystem::TextureAsk::Prefetch, this);
+        if (r.pending) ++queued;
+    }
+    return queued;
+}
+
 pbr::MaterialSystem::ResolvedTexture GameContent::resolveMaterialTexture(const pbr::TextureRef& ref,
                                                                          pbr::TextureSlot slot, void* user) {
     auto* self = static_cast<GameContent*>(user);
@@ -2082,8 +2163,11 @@ pbr::MaterialHandle GameContent::loadSurfaceMaterial(const std::string& name) {
             if (!fmt::loadOcmat(path, d, &extras, &err)) { AVER_WARN("[Material] {}", err); break; }
             d.graphId = resolveMaterialGraph(extras.graphRef);
             h = pbr::MaterialLibrary::get().create(d);
-            if (h) AVER_INFO("[Material] '{}' loaded from {}{}", d.name, path,
-                              d.graphId ? " (graph " + std::to_string(d.graphId) + ")" : "");
+            if (h) {
+                AVER_INFO("[Material] '{}' loaded from {}{}", d.name, path,
+                          d.graphId ? " (graph " + std::to_string(d.graphId) + ")" : "");
+                queueMaterialTextures(h);   // the workers start on its textures now, before anything draws it
+            }
             break;
         }
     }
@@ -2132,6 +2216,8 @@ bool GameContent::buildNextMaterial() {
 void GameContent::releaseProjectMaterials(bool clearGraphRegistry) {
     materialBinds_.clear();
     assets::dropPrefetchedTextures();
+    assets::cancelTextureRequests();
+    assetPathMemo_.clear();
     // Destroy materials (library owns them, map only names).
     for (const auto& kv : materialAssets_) if (kv.second) pbr::MaterialLibrary::get().destroy(kv.second);
     materialAssets_.clear();
@@ -2148,6 +2234,7 @@ void GameContent::releaseProjectMaterials(bool clearGraphRegistry) {
 // Release all materials except those in keep set.
 usize GameContent::releaseMaterialsExcept(const std::unordered_set<std::string>& keep) {
     assets::dropPrefetchedTextures();   // what it releases may be needed again
+    assets::cancelTextureRequests();    // a kept material still waiting asks again at its next update
     unresolvedSurfaces_.clear();
     usize released = 0;
     for (auto it = materialAssets_.begin(); it != materialAssets_.end();) {
@@ -2204,6 +2291,26 @@ void GameContent::queueMeshMaterials(u64 meshId) {
             if (partName && *partName) queue(part.material, partName);
         }
     }
+}
+
+usize GameContent::prefetchMeshMaterials(const std::string& meshPath) {
+    if (!asyncTextures_ || !textureFactory_ || meshPath.empty()) return 0;
+    std::string rel = meshPath;
+    for (char& c : rel) if (c == '\\') c = '/';
+    const u64 meshId = fnv1a64(std::string_view(rel));
+    usize queued = 0;
+    const auto one = [&](const std::string& name) {
+        if (!name.empty()) queued += prefetchMaterial(name);
+    };
+    one(meshSlot0Name(meshId));
+    if (const std::vector<MeshPart>* parts = partsFor(meshId))
+        for (const MeshPart& part : *parts) {
+            const char* partName = part.material ? aver_scene_material_name(part.material) : nullptr;
+            if (partName && *partName) one(partName);
+        }
+    // A mesh not uploaded yet names its slots only in its file: the mesh workers read it and queue their textures.
+    if (lazyRel_.count(meshId) && !sceneMeshes_.count(meshId)) prefetchMesh(meshId, 0.0f);
+    return queued;
 }
 
 pbr::MaterialHandle GameContent::authoredFor(i32 token) const {

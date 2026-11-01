@@ -2,7 +2,7 @@
 
 # Aver.Framework public API
 
-259 public types and 2240 public members, read from `scripting/csharp/Aver.Framework/` (149 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+260 public types and 2242 public members, read from `scripting/csharp/Aver.Framework/` (149 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Framework
 
@@ -2451,6 +2451,13 @@ Values: `Auto = 0`, `Visible = 1`, `Hidden = 2`, `Captured = 3`, `Confined = 4`,
 ### PreAttributeChange
 
 `public delegate void PreAttributeChange(AbilitySystem system, AttributeRef attribute, ref float newValue)` - Lets a game adjust an attribute's new Current value before it is stored (a custom clamp).
+
+### Preload
+
+`public static class Preload` - Tells the host what is about to be shown, so its background workers decode and compress the textures before the frame that draws it.
+
+- `public static bool Mesh(string meshAssetPath)` - Queues the slot materials of the mesh at content-relative meshAssetPath ("Meshes/a.ocmesh").
+- `public static bool Material(string materialName)` - Queues the textures of the material named materialName (what Entity.SetMaterial takes).
 
 ### PresentMode
 

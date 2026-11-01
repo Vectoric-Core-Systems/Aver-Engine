@@ -14,6 +14,8 @@ aver_add_module(Aver.Assets
 aver_add_module(Aver.Assets.Gpu
   SOURCES
     src/TextureUpload.cpp
+    # Worker pool for the CPU half of an upload (requestTexture / takeTexture).
+    src/TextureLoader.cpp
     # Packs a terrain material's layers into one atlas per map kind (wave 3, landscape layers).
     src/TextureAtlas.cpp
     # The BC7 derived-data cache (TextureCache.hpp). HERE, NOT IN Aver.Assets ABOVE, for the same

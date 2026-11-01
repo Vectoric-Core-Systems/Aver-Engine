@@ -98,11 +98,16 @@ bool MaterialSystem::createFallbackTextures() {
     const u8 mr[4]     = {0, 255, 255, 255};
     const u8 zero[4]   = {0, 0, 0, 0};
 
+    const u8 grey[4]   = {128, 128, 128, 255};
+    const u8 dielectric[4] = {255, 255, 0, 255};
+
     zero_       = makePixel(*res_, zero,   rhi::Format::RGBA8Unorm,     "pbr fallback zero");
+    grey_       = makePixel(*res_, grey,   rhi::Format::RGBA8UnormSrgb, "pbr stand-in grey");
+    dielectric_ = makePixel(*res_, dielectric, rhi::Format::RGBA8Unorm, "pbr stand-in dielectric");
     white_      = makePixel(*res_, white,  rhi::Format::RGBA8UnormSrgb, "pbr fallback white");
     flatNormal_ = makePixel(*res_, normal, rhi::Format::RGBA8Unorm,     "pbr fallback normal");
     metalRough_ = makePixel(*res_, mr,     rhi::Format::RGBA8Unorm,     "pbr fallback metalrough");
-    if (white_ && flatNormal_ && metalRough_ && zero_) return true;
+    if (white_ && flatNormal_ && metalRough_ && zero_ && grey_ && dielectric_) return true;
     AVER_ERROR("[PBR] the fallback textures could not be created");
     return false;
 }
@@ -141,7 +146,11 @@ void MaterialSystem::shutdown() {
     rtTextures_.clear();
     rtHandles_.clear();
     terrainInfo_.clear();
-    for (rhi::TextureHandle* t : {&white_, &flatNormal_, &metalRough_, &zero_}) {
+    pendingOrder_.clear();
+    pendingSet_.clear();
+    burstUploads_ = burstFrames_ = burstMaterials_ = 0;
+    burstUploadMs_ = 0.0;
+    for (rhi::TextureHandle* t : {&white_, &flatNormal_, &metalRough_, &zero_, &grey_, &dielectric_}) {
         if (*t) res_->destroyTexture(*t);
         *t = 0;
     }
@@ -170,7 +179,7 @@ MaterialSystem::ResolvedTexture MaterialSystem::resolveTexture(const TextureRef&
         rt.handle = runtimeTexture(ref.path.substr(4));
         return rt;
     }
-    if (ref.empty() || !resolve_) return {};
+    if (ref.empty() || (!resolve_ && !asyncResolve_)) return {};
     // THE COLOUR CLASS IS PART OF THE KEY. One file bound to two slots is still one upload when both
     // read it the same way -- but a PNG bound to BOTH base colour and occlusion is decoded sRGB for
     // one and linear for the other, and a key that ignored that would hand the second slot whichever
@@ -191,7 +200,20 @@ MaterialSystem::ResolvedTexture MaterialSystem::resolveTexture(const TextureRef&
         cacheAverage_.erase(key);
         if (failedResolves_) --failedResolves_;
     }
-    const ResolvedTexture r = resolve_(ref, slot, resolveUser_);
+    ResolvedTexture r;
+    if (asyncResolve_) {
+        // An exhausted budget still asks (Wait), so the worker is told this texture is wanted now.
+        const auto t0 = std::chrono::steady_clock::now();
+        r = asyncResolve_(ref, slot, uploadBudget_ > 0 ? TextureAsk::Take : TextureAsk::Wait, resolveUser_);
+        if (r.pending) return r;   // not cached: asked again at the next update()
+        if (r.handle) {
+            uploadBudget_ = r.bytes >= uploadBudget_ ? 0 : uploadBudget_ - r.bytes;
+            ++burstUploads_;
+            burstUploadMs_ += std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        }
+    } else {
+        r = resolve_(ref, slot, resolveUser_);
+    }
     const rhi::TextureHandle t = r.handle;
     // A FAILURE IS REMEMBERED, BUT NOT FOREVER. Caching the 0 is deliberate: without it a material
     // naming a texture that does not exist re-hits the filesystem on every dirty drain. But holding
@@ -231,7 +253,7 @@ u32 MaterialSystem::forgetFailedResolves() {
 }
 
 // Writes every SRV of `set`, using the identity texture wherever the material sets nothing.
-void MaterialSystem::writeSlots(const MaterialDesc& d, rhi::BindingSetHandle set, bool retryFailed) {
+u32 MaterialSystem::writeSlots(const MaterialDesc& d, rhi::BindingSetHandle set, bool retryFailed) {
     // ONE ENTRY PER SLOT, and the static_assert is why this list is worth reading twice: a short
     // initialiser list zero-fills the tail rather than failing to compile, so adding a TextureSlot
     // and forgetting this array binds handle 0 into the new SRVs -- an invalid descriptor under
@@ -252,6 +274,7 @@ void MaterialSystem::writeSlots(const MaterialDesc& d, rhi::BindingSetHandle set
     static_assert(sizeof(fallback) / sizeof(fallback[0]) == kTextureSlotCount,
                   "every TextureSlot needs a fallback; a short list zero-fills and binds nothing");
     std::array<rhi::TextureHandle, kTextureSlotCount> effective{};
+    u32 pendingMask = 0;
     // wave3 terrain layers: slots 0..2 come from the atlas resolver and 3..5 are the section's weightmaps
     // and parameters ("@rt:" refs), so a terrain material is valid on any mesh with no section data.
     const bool terrain = d.terrain.enabled();
@@ -272,7 +295,9 @@ void MaterialSystem::writeSlots(const MaterialDesc& d, rhi::BindingSetHandle set
         } else {
             r = resolveTexture(d.textures[i], static_cast<TextureSlot>(i), retryFailed);
         }
-        const rhi::TextureHandle bound = r.handle ? r.handle : fallback[i];
+        if (r.pending) pendingMask |= 1u << i;
+        const StandIn standIn = r.pending ? standInFor(static_cast<TextureSlot>(i), d) : StandIn::Identity;
+        const rhi::TextureHandle bound = r.pending ? (standIn == StandIn::Identity ? fallback[i] : standInHandle(standIn)) : (r.handle ? r.handle : fallback[i]);
         res_->setSrv(set, i, bound);
         // Recorded from the SAME expression that binds it, on the same line of reasoning, so the two
         // cannot drift into disagreeing about what this slot holds.
@@ -289,6 +314,7 @@ void MaterialSystem::writeSlots(const MaterialDesc& d, rhi::BindingSetHandle set
         const MaterialConstants packed = packMaterial(d);
         std::array<f32, 3> avg{packed.baseColorFactor[0], packed.baseColorFactor[1], packed.baseColorFactor[2]};
         if (r.handle) for (int c = 0; c < 3; ++c) avg[c] *= r.averageLinear[c];
+        else if (r.pending) for (int c = 0; c < 3; ++c) avg[c] *= standIn == StandIn::Hidden ? 0.0f : kGreyLinear;
         setAverage_[set] = avg;
     }
 
@@ -312,6 +338,28 @@ void MaterialSystem::writeSlots(const MaterialDesc& d, rhi::BindingSetHandle set
         // eviction loop) is what this system's "MiB freed" line exists to report.
     }
     setTextures_[set] = effective;
+    return pendingMask;
+}
+
+MaterialSystem::StandIn MaterialSystem::standInFor(TextureSlot slot, const MaterialDesc& d) {
+    switch (slot) {
+        case TextureSlot::BaseColor:       return d.alphaMode == AlphaMode::Opaque ? StandIn::Grey : StandIn::Hidden;
+        case TextureSlot::Layer1BaseColor: return StandIn::Grey;
+        case TextureSlot::MetalRough:
+        case TextureSlot::Layer1MetalRough: return StandIn::Dielectric;
+        case TextureSlot::Emissive:        return StandIn::Dark;
+        default:                           return StandIn::Identity;
+    }
+}
+
+rhi::TextureHandle MaterialSystem::standInHandle(StandIn s) const {
+    switch (s) {
+        case StandIn::Grey:       return grey_;
+        case StandIn::Hidden:     return zero_;
+        case StandIn::Dielectric: return dielectric_;
+        case StandIn::Dark:       return zero_;
+        default:                  return white_;
+    }
 }
 
 // The registers as an RGBA32F texture `registerCount` texels wide. Rebuilt (the old one destroyed, deferred by contract) only when the values differ.
@@ -447,7 +495,7 @@ MaterialSystem::TerrainBound MaterialSystem::resolveTerrain(const MaterialDesc& 
 // fallback every OTHER material also falls back to.
 void MaterialSystem::retainSlotTextures(const std::array<rhi::TextureHandle, kTextureSlotCount>& effective) {
     for (const rhi::TextureHandle h : effective) {
-        if (!h || h == white_ || h == flatNormal_ || h == metalRough_ || h == zero_ || isRuntimeTexture(h) || embeddedHandles_.count(h)) continue;
+        if (!h || isFallbackTexture(h) || isRuntimeTexture(h) || embeddedHandles_.count(h)) continue;
         ++textureRefs_[h];
     }
 }
@@ -455,7 +503,7 @@ void MaterialSystem::retainSlotTextures(const std::array<rhi::TextureHandle, kTe
 void MaterialSystem::releaseSlotTextures(const std::array<rhi::TextureHandle, kTextureSlotCount>& effective,
                                           u32& outTextures, usize& outBytes) {
     for (const rhi::TextureHandle h : effective) {
-        if (!h || h == white_ || h == flatNormal_ || h == metalRough_ || h == zero_) continue;
+        if (!h || isFallbackTexture(h)) continue;
         const auto rit = textureRefs_.find(h);
         if (rit == textureRefs_.end()) continue;   // counted by nothing live -- already released
         if (--rit->second > 0) continue;           // another material still holds it
@@ -505,7 +553,7 @@ MaterialSystem::Entry& MaterialSystem::entryFor(MaterialHandle h) {
     if (e.set) {
         liveSets_.insert(e.set);   // see liveSets_: ownsBindingSet()'s O(1) index
         const MaterialDesc* d = MaterialLibrary::get().desc(h);
-        if (d) { e.constants = packMaterial(*d); e.ext = packMaterialFx(d->fx, d->alphaMode == AlphaMode::Mask); writeSlots(*d, e.set); }
+        if (d) { e.constants = packMaterial(*d); e.ext = packMaterialFx(d->fx, d->alphaMode == AlphaMode::Mask); e.pending = writeSlots(*d, e.set); }
     } else {
         AVER_ERROR("[PBR] binding set for material {} could not be created", h);
     }
@@ -515,7 +563,61 @@ MaterialSystem::Entry& MaterialSystem::entryFor(MaterialHandle h) {
     ++buildsPending_;
     if (inUpdate_) ++buildsInUpdate_; else ++buildsOnDraw_;
 
-    return entries_.emplace(h, e).first->second;
+    Entry& built = entries_.emplace(h, e).first->second;
+    if (built.pending) markPending(h, built.pending);
+    return built;
+}
+
+void MaterialSystem::markPending(MaterialHandle h, u32 mask) {
+    if (!mask) return;
+    if (!pendingSet_.insert(h).second) return;
+    if (pendingOrder_.empty()) { burstFrames_ = 0; burstMaterials_ = 0; }
+    pendingOrder_.push_back(h);
+    ++burstMaterials_;
+}
+
+// Retries every entry with a slot on its stand-in, oldest first, until this frame's upload budget is spent.
+// A retry is a writeSlots(): textures still being prepared answer pending again at the cost of a lookup, the
+// ones that landed are copied to the GPU and bound, and the stand-in goes.
+void MaterialSystem::advancePending() {
+    if (pendingOrder_.empty()) return;
+    MaterialLibrary& lib = MaterialLibrary::get();
+    ++burstFrames_;
+    std::vector<MaterialHandle> keep;
+    keep.reserve(pendingOrder_.size());
+    for (const MaterialHandle h : pendingOrder_) {
+        const auto it = entries_.find(h);
+        const MaterialDesc* d = lib.valid(h) ? lib.desc(h) : nullptr;
+        if (it == entries_.end() || !d || !it->second.set) { pendingSet_.erase(h); continue; }
+        if (uploadBudget_ > 0) it->second.pending = writeSlots(*d, it->second.set);
+        if (it->second.pending) keep.push_back(h); else pendingSet_.erase(h);
+    }
+    pendingOrder_.swap(keep);
+    if (!pendingOrder_.empty()) return;
+    AVER_INFO("[PBR] {} material(s) fully resident: {} texture upload(s), {:.1f} ms of GPU copies over {} frame(s)",
+              burstMaterials_, burstUploads_, burstUploadMs_, burstFrames_);
+    burstUploads_ = 0;
+    burstUploadMs_ = 0.0;
+}
+
+bool MaterialSystem::fullyResident(MaterialHandle h) const {
+    const auto it = entries_.find(h);
+    return it != entries_.end() && it->second.pending == 0;
+}
+
+void MaterialSystem::prefetch(MaterialHandle h) {
+    if (!res_ || !asyncResolve_) return;
+    const MaterialLibrary& lib = MaterialLibrary::get();
+    const MaterialDesc* d = lib.valid(h) ? lib.desc(h) : nullptr;
+    if (!d || d->terrain.enabled()) return;
+    for (u32 i = 0; i < kTextureSlotCount; ++i) {
+        const TextureRef& ref = d->textures[i];
+        if (ref.empty() || (ref.path.size() > 4 && ref.path.compare(0, 4, "@rt:") == 0)) continue;
+        if (i == kEmbeddedTableSlot && d->embedded.active()) continue;
+        const TextureSlot slot = static_cast<TextureSlot>(i);
+        if (cache_.count(cacheKey(ref) + "|" + colourClass(slot))) continue;   // resident, or a remembered failure
+        asyncResolve_(ref, slot, TextureAsk::Prefetch, resolveUser_);
+    }
 }
 
 // Re-uploads every dirty material, retires the sets of destroyed ones, and rebuilds the dense GPU
@@ -528,6 +630,8 @@ void MaterialSystem::update() {
     releasedSets_.clear();
     const auto t0 = std::chrono::steady_clock::now();
     MaterialLibrary& lib = MaterialLibrary::get();
+    uploadBudget_ = uploadBudgetBytes_;
+    advancePending();
 
     const u32 n = lib.count();
     const u64 libChanges = lib.changeCount();
@@ -589,7 +693,10 @@ void MaterialSystem::update() {
                 // retryFailed: this material CHANGED, which is exactly when a texture it names that
                 // was missing before may now exist -- a fresh import, a file copied in, a corrected
                 // path.
-                if (it->second.set) writeSlots(*d, it->second.set, true);
+                if (it->second.set) {
+                    it->second.pending = writeSlots(*d, it->second.set, true);
+                    markPending(h, it->second.pending);
+                }
             }
         }
         if (!tableChanged) {

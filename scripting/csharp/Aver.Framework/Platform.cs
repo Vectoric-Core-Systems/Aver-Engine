@@ -44,6 +44,19 @@ public static class Paths
         Path.Combine(root, rest.Replace('/', Path.DirectorySeparatorChar).TrimStart(Path.DirectorySeparatorChar));
 }
 
+/// <summary>Tells the host what is about to be shown, so its background workers decode and compress the textures before the
+/// frame that draws it. A hint: nothing waits on it, an asset the project lacks is ignored, and a host without preloading drops it.</summary>
+public static class Preload
+{
+    /// <summary>Queues the slot materials of the mesh at content-relative <paramref name="meshAssetPath"/> ("Meshes/a.ocmesh").</summary>
+    public static bool Mesh(string meshAssetPath) =>
+        !string.IsNullOrEmpty(meshAssetPath) && Fw.aver_fw_prefetch_content(0, meshAssetPath) != 0;
+
+    /// <summary>Queues the textures of the material named <paramref name="materialName"/> (what <c>Entity.SetMaterial</c> takes).</summary>
+    public static bool Material(string materialName) =>
+        !string.IsNullOrEmpty(materialName) && Fw.aver_fw_prefetch_content(1, materialName) != 0;
+}
+
 /// <summary>The project manifest's settings by key, as the text the
 /// manifest holds. The manifest is read once, when first asked.</summary>
 public static class ProjectSettings

@@ -10,6 +10,11 @@ triggering inputs for anything summarised below.
 
 ## [Unreleased]
 
+### Materials appear without a stall (phased residency)
+
+- **No frame waits on a decode, a BC7 encode or a material build.** A level, a runtime-spawned mesh or a first-drawn material used to decode and compress its textures on the render thread (a 21-material level: one 1.9 s frame). A worker pool now runs the cache read or the decode and encode (`assets::requestTexture` / `takeTexture`); the render thread only copies a finished chain to the GPU, 8 MiB a frame. A surface whose textures are not resident draws at once with a stand-in made of the material's own factors (mid grey base colour, rough non-metal, no glow; a masked or blended surface is not drawn until its texture arrives) and refines as the textures land. Geometry never pops. The derived-data cache works as before: a second run compresses nothing. `docs/MATERIALS.md` "Phased residency".
+- **Preloading.** Every material a level, a mesh or a spawn loads queues its textures as it is created; `GameContent::prefetchMaterial` / `prefetchMeshMaterials`, `MaterialSystem::prefetch` and the framework ABI 2.9 pair `aver_fw_prefetch_content` / `aver_fw_take_prefetch` (C#: `Preload.Mesh`, `Preload.Material`) ask ahead of time. Project switches and level changes cancel the queue. Layered terrain atlases still build on the render thread. Not yet seen on a screen.
+
 ### Extensions (contract 2)
 
 - **A neutral extension contract.** `AVER_EXT_ABI` is 2 (an extension built for 1 is refused with a reason that says to rebuild it). The host no longer has fixed model-import fields: it offers named, versioned services (`AverExtHost::getService`; `aver.asset.import-model` v1 is the model import, in `aver_ext_services.h`) and an extension can offer interfaces (`AverExtApi::getInterface`, `Registry::interfaceOf`). Names are reverse-DNS-style and versions only change when a table's existing fields do (`docs/EXTENSIONS.md`).

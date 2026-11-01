@@ -41,6 +41,7 @@ internal static class Fw
     [DllImport(Lib)] internal static extern int aver_fw_is_editor();
     [DllImport(Lib)] internal static extern void aver_fw_debug_line(float[] from3, float[] to3, float[] rgb3, float seconds);
     [DllImport(Lib)] internal static extern void aver_fw_request_vsync(int on);
+    [DllImport(Lib)] internal static extern int aver_fw_prefetch_content(int kind, [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
     [DllImport(Lib)] internal static extern void aver_fw_request_travel([MarshalAs(UnmanagedType.LPUTF8Str)] string levelPath);
     [DllImport(Lib)] internal static extern int aver_fw_set_persistent(int entity, int on);
     [DllImport(Lib)] internal static extern int aver_fw_is_persistent(int entity);
