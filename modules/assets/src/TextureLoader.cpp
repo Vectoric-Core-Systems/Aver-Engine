@@ -11,6 +11,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <deque>
+#include <exception>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -81,7 +82,11 @@ struct Loader {
     void execute(const std::shared_ptr<Job>& j) {
         detail::PreparedTexture p;
         std::string err;
-        const bool ok = detail::prepareTexture(j->path, j->usage, p, &err);
+        // A throw from a detached thread would end the process: a decoder's bad_alloc on a huge image fails the texture instead.
+        bool ok = false;
+        try { ok = detail::prepareTexture(j->path, j->usage, p, &err); }
+        catch (const std::exception& e) { err = e.what(); }
+        catch (...) { err = "the texture could not be prepared"; }
         std::lock_guard<std::mutex> l(m);
         --running;
         if (j->cancelled) {                       // a project or level change while it ran
