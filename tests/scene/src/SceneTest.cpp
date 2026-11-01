@@ -1017,6 +1017,26 @@ static void testSceneAbiErrors(World& world) {
     world.flush();
 }
 
+// ---------------------------------------------------------------------------------------------- mesh visibility
+
+// Zero-filled storage (the attached-directly trap) is told apart from a mesh something hid through the visibility API.
+static void testMeshVisibilityDecided() {
+    AVER_INFO("=== mesh visibility decided ===");
+    CMeshRenderer zeroFilled{};
+    zeroFilled.flags = 0;
+    check(meshVisibilityUndecided(zeroFilled.flags), "zero-filled flags are undecided: the trap the warning is for");
+
+    CMeshRenderer hidden{};
+    setMeshRendererVisible(hidden, false);
+    check((hidden.flags & kMeshRendererVisible) == 0, "hiding through the API clears the visible bit");
+    check(!meshVisibilityUndecided(hidden.flags), "and marks the visibility decided, so a hidden mesh is not the trap");
+
+    setMeshRendererVisible(hidden, true);
+    check((hidden.flags & kMeshRendererVisible) != 0 && !meshVisibilityUndecided(hidden.flags), "showing sets the bit and stays decided");
+    check(!meshVisibilityUndecided(kMeshRendererVisible), "a visible mesh is never reported");
+    check(meshVisibilityUndecided(kMeshRendererHiddenFromOwner), "an unrelated bit alone does not count as a decision");
+}
+
 // ---------------------------------------------------------------------------------------------- lights
 
 // CLight's rect/IES/cookie fields and scene::gatherLights: what the renderer is handed.
@@ -1145,6 +1165,7 @@ int main() {
     testSceneAbiQuery(world);
     testSceneAbiErrors(world);
     testLights(world);
+    testMeshVisibilityDecided();
 
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
     return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);

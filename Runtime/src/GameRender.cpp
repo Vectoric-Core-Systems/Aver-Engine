@@ -433,7 +433,9 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
         SurfaceInputs in;
         u32 authored = 0;
 #if AVER_MODULE_PBR && AVER_MODULE_SCENE
-        authored = content.authoredFor(m);
+        // Resolving, not only reading: a mesh spawned at run time has no placement that bound its
+        // materials, and only the first sight of a token reaches this body.
+        authored = content.authoredOrResolve(m);
         in.authored = authored != 0;
         // The host's half, not a second copy of the rule: SceneSubmission.hpp knows nothing of
         // pbr::MaterialDesc or pbr::isTranslucent (a pure header, unit-testable with no device/RHI),

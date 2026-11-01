@@ -176,6 +176,13 @@ add_executable(CollisionMeshSurfaceTest src/CollisionMeshSurfaceTest.cpp)
 target_link_libraries(CollisionMeshSurfaceTest PRIVATE Aver.Runtime.Game.Core Aver.Scene Aver.Formats Aver.Platform Aver.Core)
 set_target_properties(CollisionMeshSurfaceTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# RuntimeMaterialResolveTest -- GameContent::authoredOrResolve: a surface no level placement bound (a mesh spawned at run time) is found
+# by name in the project's materials and bound, and a name with no .ocmat is remembered as a miss until the materials are released.
+# A temp project; no device, no window.
+add_executable(RuntimeMaterialResolveTest src/RuntimeMaterialResolveTest.cpp)
+target_link_libraries(RuntimeMaterialResolveTest PRIVATE Aver.Runtime.Game.Core Aver.Scene Aver.Formats Aver.Platform Aver.Core)
+set_target_properties(RuntimeMaterialResolveTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # ColliderShapesTest -- an .ocshape tree built into physics shapes (the chair, surfaces by leaf / default / mesh slot, hull mesh and mesh
 # leaves through the injected mesh seam, decorators, a mutable compound, a refusal that leaves nothing allocated) and the CollisionShape
 # component's apply / capture with golden keys (SHAPES_MATERIALS phase E). A real physics world and scene::World; no device.

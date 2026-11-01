@@ -66,7 +66,7 @@ struct CMeshRenderer {
     f32 aabbMin[3]  = {0, 0, 0};
     f32 aabbMax[3]  = {0, 0, 0};
     i32 material    = 0;
-    u32 flags       = 1;   // bit 0: visible, bit 1: hidden from owner (see kMeshRendererHiddenFromOwner)
+    u32 flags       = 1;   // bit 0: visible, bit 1: hidden from owner (see kMeshRendererHiddenFromOwner), bit 2: visibility decided
     u32 dirty       = 1;   // upload bookkeeping, set by a write and cleared by the GPU path
     // ---- render masks and visibility ranges (appended; zero = off, the pool zero-fills). See aver/scene/RenderMasks.hpp for the encodings. ----
     u32 layersInv   = 0;   // render layers, stored inverted: 0 = every layer (20 bits)
@@ -79,6 +79,18 @@ struct CMeshRenderer {
 };
 
 inline constexpr u32 kMeshRendererVisible = 0x1;
+
+// A visibility API decided the Visible bit (Entity.SetVisible and its seed in EnsureMeshRenderer, a sequence's
+// visibility track). Zero-filled storage never has it, so "Visible clear and this clear" is the attached-directly
+// trap, while "Visible clear and this set" is a mesh something hid on purpose (Godot visible = false).
+inline constexpr u32 kMeshRendererVisibilitySet = 0x4;
+
+inline constexpr bool meshVisibilityUndecided(u32 flags) {
+    return (flags & (kMeshRendererVisible | kMeshRendererVisibilitySet)) == 0;
+}
+inline void setMeshRendererVisible(CMeshRenderer& mr, bool visible) {
+    mr.flags = (visible ? (mr.flags | kMeshRendererVisible) : (mr.flags & ~kMeshRendererVisible)) | kMeshRendererVisibilitySet;
+}
 
 // DRAWN FOR EVERY CAMERA EXCEPT THE ONE BELONGING TO WHATEVER ENTITY OWNS THIS MESH -- what a
 // first-person character needs for its own skinned body. A camera sitting at the character's eye

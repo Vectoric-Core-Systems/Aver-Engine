@@ -2136,6 +2136,7 @@ void GameContent::releaseProjectMaterials(bool clearGraphRegistry) {
     for (const auto& kv : materialAssets_) if (kv.second) pbr::MaterialLibrary::get().destroy(kv.second);
     materialAssets_.clear();
     materialUse_.clear();
+    unresolvedSurfaces_.clear();
     meshMaterialNames_.clear();
     // Material graphs cached process-wide by path; clear to prevent id collisions on project reload.
     if (clearGraphRegistry) pbr::materialGraphs().clear();
@@ -2147,6 +2148,7 @@ void GameContent::releaseProjectMaterials(bool clearGraphRegistry) {
 // Release all materials except those in keep set.
 usize GameContent::releaseMaterialsExcept(const std::unordered_set<std::string>& keep) {
     assets::dropPrefetchedTextures();   // what it releases may be needed again
+    unresolvedSurfaces_.clear();
     usize released = 0;
     for (auto it = materialAssets_.begin(); it != materialAssets_.end();) {
         if (keep.count(it->first)) { ++it; continue; }
@@ -2207,6 +2209,16 @@ void GameContent::queueMeshMaterials(u64 meshId) {
 pbr::MaterialHandle GameContent::authoredFor(i32 token) const {
     const auto it = surfaceMaterials_.find(token);
     return it == surfaceMaterials_.end() ? 0 : it->second;
+}
+
+pbr::MaterialHandle GameContent::authoredOrResolve(i32 token) {
+    if (const pbr::MaterialHandle bound = authoredFor(token)) return bound;
+    if (!token || unresolvedSurfaces_.count(token)) return 0;
+    const char* name = aver_scene_material_name(token);
+    const pbr::MaterialHandle h = name && *name ? materialForSurface(name) : 0;
+    if (h) bindSurfaceMaterial(token, h);
+    else unresolvedSurfaces_.insert(token);
+    return h;
 }
 #endif
 

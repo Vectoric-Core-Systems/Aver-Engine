@@ -611,7 +611,7 @@ void SequencePlayer::applyVisibility(scene::World& w, const OcSeqTrack& tr, f64 
         auto* mr = w.component<scene::CMeshRenderer>(x, scene::kComponentMeshRenderer);
         if (!mr) return;
         store.capture(w, x, scene::kComponentMeshRenderer, static_cast<u16>(offsetof(scene::CMeshRenderer, flags)), 4);
-        if (visible) mr->flags |= scene::kMeshRendererVisible; else mr->flags &= ~scene::kMeshRendererVisible;
+        scene::setMeshRendererVisible(*mr, visible);
     };
     apply(e);
     if (k.v[1] == 0.0) return;

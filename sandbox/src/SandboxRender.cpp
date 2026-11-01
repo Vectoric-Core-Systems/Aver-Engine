@@ -1547,7 +1547,13 @@ void SandboxApp::onRender(Engine& e)  {
                 if (slot >= self.undrawnInvisibleGen_.size()) self.undrawnInvisibleGen_.resize(slot + 1u, 0);
                 if (self.undrawnInvisibleGen_[slot] != gen) {
                     self.undrawnInvisibleGen_[slot] = gen;
-                    if (self.entityLabels_.find(static_cast<u32>(ent)) != self.entityLabels_.end()) {
+                    // Hidden through the visibility API (Entity.SetVisible; Fabric's Godot visible = false) leaves
+                    // kMeshRendererVisibilitySet on the renderer: hidden on purpose, so neither warned about nor counted.
+                    const scene::CMeshRenderer* hmr = scene::World::instance().component<scene::CMeshRenderer>(
+                        ent, scene::kComponentMeshRenderer);
+                    const bool hiddenOnPurpose = hmr && !scene::meshVisibilityUndecided(hmr->flags);
+                    if (hiddenOnPurpose) {
+                    } else if (self.entityLabels_.find(static_cast<u32>(ent)) != self.entityLabels_.end()) {
                         if (c.authoredHiddenNew < 3) c.authoredHiddenIds[c.authoredHiddenNew] = static_cast<u64>(ent);
                         ++c.authoredHiddenNew;
                     } else
@@ -2467,7 +2473,8 @@ SandboxApp::ResolvedSurface SandboxApp::resolveSurface(i32 mat) {
     ResolvedSurface rs;
     aver::game::SurfaceInputs in;
 #if AVER_MODULE_PBR && AVER_MODULE_SCENE
-    if (const pbr::MaterialHandle authoredHandle = content_.authoredFor(mat)) rs.authored = authoredHandle;
+    // Resolves a surface no level placement bound (a mesh spawned at run time) from the project's materials.
+    if (const pbr::MaterialHandle authoredHandle = content_.authoredOrResolve(mat)) rs.authored = authoredHandle;
     in.authored = rs.authored != 0;
     const pbr::MaterialDesc* d = rs.authored ? pbr::MaterialLibrary::get().desc(rs.authored) : nullptr;
     in.authoredLive = d != nullptr;

@@ -104,13 +104,14 @@ public readonly partial struct Entity
     public bool SetString(string field, string value) => SceneNative.aver_scene_set_str(Handle, SceneIds.Field(field), value) != 0;
 
     private const int MeshVisibleBit = 0x1;   // CMeshRenderer.flags bit 0 == kMeshRendererVisible
+    private const int MeshVisibilitySetBit = 0x4;   // bit 2 == kMeshRendererVisibilitySet: a visibility API decided the bit, so a hidden mesh is not the zero-fill trap
 
     // Attaches a mesh renderer if the entity has none, seeding the visible bit that add_component zero-fills.
     private void EnsureMeshRenderer()
     {
         if (HasComponent(Component.MeshRenderer)) return;
         AddComponent(Component.MeshRenderer);
-        SetInt("CMeshRenderer.flags", MeshVisibleBit);
+        SetInt("CMeshRenderer.flags", MeshVisibleBit | MeshVisibilitySetBit);
     }
 
     /// <summary>Whether this entity's mesh is drawn. False if it has no mesh.</summary>
@@ -121,7 +122,7 @@ public readonly partial struct Entity
     {
         EnsureMeshRenderer();
         int flags = GetInt("CMeshRenderer.flags");
-        return SetInt("CMeshRenderer.flags", visible ? (flags | MeshVisibleBit) : (flags & ~MeshVisibleBit));
+        return SetInt("CMeshRenderer.flags", (visible ? (flags | MeshVisibleBit) : (flags & ~MeshVisibleBit)) | MeshVisibilitySetBit);
     }
 
     private const int HiddenFromOwnerBit = 0x2;   // CMeshRenderer.flags bit 1 == kMeshRendererHiddenFromOwner

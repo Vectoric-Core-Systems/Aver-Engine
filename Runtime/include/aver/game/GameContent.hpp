@@ -94,6 +94,10 @@ public:
     // Remembers that an interned surface token has an authored material behind it.
     void bindSurfaceMaterial(i32 token, pbr::MaterialHandle h) { surfaceMaterials_[token] = h; }
     pbr::MaterialHandle authoredFor(i32 token) const;
+    // authoredFor, but a token nothing bound yet (a mesh spawned at run time, which no level placement bound
+    // the material of) is looked up by name in the project's materials, bound, and returned. A token with no
+    // .ocmat is remembered, so it costs one lookup until the project's materials are released.
+    pbr::MaterialHandle authoredOrResolve(i32 token);
     // Every bound surface token, for a material picker.
     const std::unordered_map<i32, pbr::MaterialHandle>& surfaceMaterials() const { return surfaceMaterials_; }
     // Queues a loaded mesh's slot materials (queueSurfaceMaterial), once per load. The mesh counts as a user of
@@ -364,6 +368,7 @@ private:
     std::deque<MaterialBind> materialBinds_;
     std::unordered_map<std::string, pbr::MaterialHandle> materialAssets_;
     pbr::MaterialHandle loadSurfaceMaterial(const std::string& name);   // materialForSurface, not kept
+    std::unordered_set<i32> unresolvedSurfaces_;   // tokens authoredOrResolve found no material for
     struct MaterialUse { u32 meshes = 0; bool kept = false; u64 idleSince = 0; };
     std::unordered_map<std::string, MaterialUse> materialUse_;
     std::unordered_map<u64, std::vector<std::string>> meshMaterialNames_;   // loaded mesh -> its queued materials
