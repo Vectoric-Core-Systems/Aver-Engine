@@ -335,6 +335,17 @@ Entity PrefabSystem::realize(Entity existingRoot, const Resolved& base,
                 if (detail::writeField(world_, e, fid, f, {}) == detail::Write::Changed)
                     changedSet.insert(static_cast<u32>(e));
             }
+            // CSurfaceMaterials is saved sparsely (only the slots a prefab names): the others are 0, which is also what the diff above reads for a slot the prefab leaves out.
+            if (comp.type == scene::kSurfaceMaterialsComponentName) {
+                for (u32 s = 0; s < scene::kSurfaceOverrideSlots; ++s) {
+                    const std::string name = "slot" + std::to_string(s);
+                    if (findField(comp, name)) continue;
+                    const u32 fid = world_.fieldId(comp.type + "." + name);
+                    const scene::FieldDesc* d = fid ? world_.field(fid) : nullptr;
+                    if (d && detail::writeField(world_, e, fid, detail::zeroField(*d), {}) == detail::Write::Changed)
+                        changedSet.insert(static_cast<u32>(e));
+                }
+            }
         }
     }
 

@@ -1604,6 +1604,8 @@ static void testImportedColour() {
     kd.name = "Kd";
     kd.baseColorFactor[0] = kd.baseColorFactor[1] = kd.baseColorFactor[2] = 0.5f;
     kd.baseColorFactorLinear = false;
+    kd.emissiveFactor[0] = 1.0f;
+    kd.emissiveEnergy = 3.0f;   // F35: the energy rides beside the factor into the file
     mats.push_back(kd);
 
     const std::filesystem::path dir =
@@ -1633,6 +1635,8 @@ static void testImportedColour() {
           "and the shader gets the 0.5 the glTF stated -- not 0.22");
     check(near(gc.baseColorFactor[3], 0.25f), "with alpha still 0.25");
 
+    check(near(kdDesc.emissiveEnergy, 3.0f) && near(kdDesc.emissiveFactor[0], 1.0f) && near(grey.emissiveEnergy, 1.0f),
+          "the emissive energy of an imported material crosses into the .ocmat, and stays 1 where none was stated");
     check(near(kdDesc.baseColorFactor[0], 0.5f, 1e-5f),
           "a factor already in sRGB (OBJ's Kd) is written unconverted");
     const pbr::MaterialConstants kc = pbr::packMaterial(kdDesc);

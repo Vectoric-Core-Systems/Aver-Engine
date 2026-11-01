@@ -268,7 +268,11 @@ public sealed class Image
     }
 
     /// <summary>Copies the whole of <paramref name="source"/> to (dstX, dstY).</summary>
-    public void Blit(Image source, int dstX, int dstY) => Blit(source, 0, 0, source.Width, source.Height, dstX, dstY);
+    public void Blit(Image source, int dstX, int dstY)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        Blit(source, 0, 0, source.Width, source.Height, dstX, dstY);
+    }
 
     /// <summary>A new image of the rectangle (clipped to the image) in the same format; null when the clipped rectangle is empty.</summary>
     public Image? GetRegion(int x, int y, int width, int height)
