@@ -26,7 +26,7 @@ Example/
 | `native` | The library's name without folder or suffix. It is `native/<platform>/<name>.dll` (`.so`, `.dylib`); the platform is `win-x64`, `win-arm64`, `linux-x64`, `linux-arm64`, `osx-x64` or `osx-arm64`. There is no `lib` prefix. |
 | `managed` | `runtime`: assemblies under `managed/` a game loads. `entry`: the full name of a type implementing `Aver.Framework.Hosting.IAverExtension`. `actorBase`: shorthand for "declare every actor type that derives from this one". See "The managed half". |
 | `commands` | `name`, `summary` and `usage` of each command `AverAssetC <name> ...` runs. |
-| `importers` | File menu entries for the editor, see "The editor". |
+| `importers` | File menu entries (and, optionally, start-screen buttons) for the editor, see "The editor". |
 | `runtimeFiles` | What a packaged game copies. `{platform}` and a `*` in the last segment are understood. |
 
 ## Installing
@@ -156,6 +156,7 @@ Each `importers` entry of a Ready extension adds a **File** menu item and a dial
 "importers": [ {
   "id": "convert-thing",
   "menu": "Import Thing...",
+  "startButton": "Import a Thing Project...",
   "tooltip": "Hover text of the menu item.",
   "description": "The paragraph at the top of the dialog.",
   "command": "thing",
@@ -169,6 +170,7 @@ Each `importers` entry of a Ready extension adds a **File** menu item and a dial
 |---|---|
 | `id` | A stable name for the entry (the default is `command`); the editor's usage tracking is `file.import.<id>`. |
 | `menu`, `tooltip`, `description` | The menu text (its trailing dots dropped is the dialog's title), the hover text (default: the description) and the paragraph at the top of the dialog. |
+| `startButton` | Optional. The text of a button on the start screen (the project browser), under **Open Project...**, that opens the same dialog; for an importer whose result is a new project, which has no File menu to reach before one is open. **Open result** there opens the converted project through the browser's upgrade check. Absent or empty: no button. |
 | `command` | The extension command to run; list it in `commands`, which is how `AverAssetC` finds the extension. |
 | `input` | `kind`: `folder` (the default) or `file`. `patterns`: file name patterns (`*.gltf`) the Browse button offers, and for a `file` input the names that are accepted. `detect`: for a `folder` input, a file whose presence marks a valid folder (Browse picks that file and the dialog uses its folder); empty for any folder. |
 | `outputDefault` | The default output, beside the input: `{input}` is the input's folder name, or a file's name without its extension (default `{input}_out`). |

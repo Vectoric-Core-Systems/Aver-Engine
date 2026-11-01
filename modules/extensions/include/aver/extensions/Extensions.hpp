@@ -27,6 +27,7 @@ struct CommandInfo {
 struct ImporterInfo {
     std::string id;           // stable name of the entry (default: the command)
     std::string menu;         // "Import Thing..."
+    std::string startButton;  // a button on the start screen, under "Open Project...", that opens the same dialog; empty: no button
     std::string tooltip;      // the menu item's hover text (default: `description`)
     std::string description;  // the paragraph at the top of the dialog
     std::string command;      // the extension command AverAssetC runs as: <command> <input> <output> [flags]

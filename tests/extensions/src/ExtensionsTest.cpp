@@ -216,7 +216,7 @@ int main() {
         ",\n  \"importers\": [ {\"id\": \"good\", \"menu\": \"Import Good...\", \"command\": \"echo\", \"tooltip\": \"Tip\", \"description\": \"Imports good things.\","
         " \"input\": {\"kind\": \"file\", \"patterns\": [\"*.good\", \"*.fine\"]}, \"outputDefault\": \"{input}_out\","
         " \"options\": [ {\"flag\": \"--all\", \"label\": \"All of it\", \"default\": true}, {\"flag\": \"--dry\", \"label\": \"Dry\"} ]},"
-        " {\"menu\": \"Import Folder...\", \"command\": \"echo\", \"input\": {\"detect\": \"good.project\"}} ]"
+        " {\"menu\": \"Import Folder...\", \"startButton\": \"Import a Good Folder\", \"command\": \"echo\", \"input\": {\"detect\": \"good.project\"}} ]"
         ",\n  \"runtimeFiles\": [\"native/{platform}/TestExt.*\", \"managed/Good.dll\", \"data/info.json\"]");
     makeExtension(rootA, "GoodExt", good);
     put(rootA + "/GoodExt/managed/Good.dll", "x");
@@ -310,6 +310,8 @@ int main() {
                   "an importer: id, menu, command, wording, input kind and patterns, output default and options");
             check(b.id == "echo" && b.input.kind == "folder" && b.input.detect == "good.project" && b.input.patterns.empty() && b.outputDefault.empty(),
                   "another importer: the id defaults to the command, the input to a folder, the rest to empty");
+            check(a.startButton.empty() && b.startButton == "Import a Good Folder",
+                  "startButton: the start-screen button's text when the importer asks for one, empty otherwise");
         }
         check(g->runtimeFiles.size() == 3, "runtime files");
         check(contains(g->nativePath, std::string("native/") + ext::platformDirName()) && fileExists(g->nativePath), "its native path is this platform's library");

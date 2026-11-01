@@ -103,6 +103,7 @@ bool parseManifest(const std::string& text, Extension& e, std::string& why) {
         m.command = str(i["command"]);
         m.id = i["id"].isString() ? str(i["id"]) : m.command;
         m.menu = str(i["menu"]);
+        m.startButton = str(i["startButton"]);
         m.tooltip = str(i["tooltip"]);
         m.description = str(i["description"]);
         const fmt::JsonValue& in = i["input"];

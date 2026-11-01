@@ -12,6 +12,7 @@
 #endif
 #include "aver/core/Log.hpp"
 #include "aver/extensions/Extensions.hpp"   // warnMissingProjectExtensions
+#include "ExtensionImport.hpp"                // the importers' start-screen buttons
 
 #include <cstdio>
 #include <cstring>
@@ -371,6 +372,8 @@ BrowserAction ProjectBrowser::draw(f32 dpi, ImFont* medium, u64 logoTex, f32 log
             if (openOrOfferUpgrade(picked)) action = BrowserAction::Open;
         }
     }
+    // Installed extensions' importers that ask for a start-screen button (their `startButton`); the shell draws the dialog they open.
+    extensionImporter().drawStartButtons(wide.x, wide.y);
     ImGui::Dummy(ImVec2(0, 10.0f * dpi));
     ImGui::TextDisabled("...or type a path");
     ImGui::PushItemWidth(-1);

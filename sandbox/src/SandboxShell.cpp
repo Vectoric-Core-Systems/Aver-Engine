@@ -1880,7 +1880,15 @@ void SandboxApp::buildUI(Engine& e) {
             browserActive_ = false;
             return;
         }
-        switch (browser_.draw(dpi_, fontMedium_, logoUiId_, logoAspect_)) {
+        editor::BrowserAction action = browser_.draw(dpi_, fontMedium_, logoUiId_, logoAspect_);
+        // An importer's start-screen button opens its dialog here; the project it converted opens through the browser's upgrade gate.
+        editor::extensionImporter().drawModal(dpi_);
+        if (const std::string converted = editor::extensionImporter().takeOpenRequest(); !converted.empty() && action == editor::BrowserAction::Stay) {
+            std::string openErr;
+            if (browser_.openOrOfferUpgrade(converted, &openErr)) action = editor::BrowserAction::Open;
+            else if (!browser_.upgradePending()) AVER_ERROR("[Editor] cannot open the imported project {}: {}", converted, openErr);
+        }
+        switch (action) {
             case editor::BrowserAction::Open: applyProject(e); browserActive_ = false; break;
             case editor::BrowserAction::Skip: browserActive_ = false; break;
             case editor::BrowserAction::Quit: requestExitChecked(e); break;

@@ -113,6 +113,9 @@ public:
     // The File menu items, one per importer. `track` is told each item's id ("file.import.<importer id>").
     void drawMenuItems(const std::function<void(const char* id)>& track);
 
+    // The start screen's buttons, one per importer that names a `startButton`, each `width` wide.
+    void drawStartButtons(f32 width, f32 height);
+
     // Draws the modal (when open) and reaps a finished import. Call every frame, outside the menu bar.
     void drawModal(f32 dpi);
 

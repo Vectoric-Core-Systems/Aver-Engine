@@ -304,6 +304,24 @@ void ExtensionImporter::drawMenuItems(const std::function<void(const char* id)>&
     }
 }
 
+void ExtensionImporter::drawStartButtons(f32 width, f32 height) {
+    const std::vector<ImporterEntry>& list = entries();
+    const bool haveTool = !toolPath().empty();
+    for (usize i = 0; i < list.size(); ++i) {
+        const ImporterEntry& en = list[i];
+        if (en.info.startButton.empty()) continue;
+        ImGui::PushID(static_cast<int>(i));
+        ImGui::BeginDisabled(!haveTool);
+        if (ImGui::Button(en.info.startButton.c_str(), ImVec2(width, height))) open(i);
+        ImGui::EndDisabled();
+        if (!haveTool && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("AverAssetC is not beside the editor - build the AverAssetC target.");
+        else if (ImGui::IsItemHovered() && !en.text.tooltip.empty())
+            ImGui::SetTooltip("%s (%s)", en.text.tooltip.c_str(), en.extension.c_str());
+        ImGui::PopID();
+    }
+}
+
 void ExtensionImporter::drawModal(f32 dpi) {
     reap();
     if (wantOpen_ != static_cast<usize>(-1)) {
