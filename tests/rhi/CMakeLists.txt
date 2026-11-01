@@ -163,6 +163,13 @@ target_link_libraries(TonemapTest PRIVATE Aver.RHI Aver.Core Aver.Platform)
 target_compile_definitions(TonemapTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
 set_target_properties(TonemapTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# GlowTest: the glow blend modes and the debanding offset (rhi/Glow.hpp) against hand-computed values, the composite selection (defaults stay ordinary),
+# the PostCB packing, and the HLSL read back as text. No device.
+add_executable(GlowTest src/GlowTest.cpp)
+target_link_libraries(GlowTest PRIVATE Aver.RHI Aver.Core Aver.Platform)
+target_compile_definitions(GlowTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
+set_target_properties(GlowTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # ColourVisionTest: the accessibility colour filter's CPU twin (matrices, packing, the post constants), no device.
 add_executable(ColourVisionTest src/ColourVisionTest.cpp)
 target_link_libraries(ColourVisionTest PRIVATE Aver.RHI Aver.Core Aver.Platform)

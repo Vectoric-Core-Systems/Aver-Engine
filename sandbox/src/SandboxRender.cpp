@@ -31,6 +31,20 @@
 
 namespace aver {
 
+namespace {
+// The mesh-LOD pixel-error threshold for one instance: CMeshRenderer::lodBias is in stops, +1 halves the threshold (a finer level is picked sooner).
+// CMeshRenderer::renderFlags bit kRenderIgnoreOcclusion: this instance skips the occlusion verdict.
+bool occlusionOptOut(scene::Entity e) {
+    const scene::CMeshRenderer* mr = scene::World::instance().component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer);
+    return mr && (mr->renderFlags & scene::kRenderIgnoreOcclusion) != 0u;
+}
+f32 lodThresholdFor(f32 basePx, scene::Entity e) {
+    const scene::CMeshRenderer* mr = scene::World::instance().component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer);
+    if (!mr || mr->lodBias == 0.0f || !std::isfinite(mr->lodBias)) return basePx;
+    return basePx * std::exp2(-std::clamp(mr->lodBias, -8.0f, 8.0f));
+}
+}  // namespace
+
 // --no-walk-cache's storage, gating DrawWorldOptions::useMeshLookupCache (GameRender.hpp) at both
 // drawWorld call sites below (depth-prepass and colour walk).
 //
@@ -402,7 +416,7 @@ void SandboxApp::onRender(Engine& e)  {
                             pview.verticalFovRadians = self.playView_.fovYRad;
                             const u32 plevel = trifactor::chooseLevelCached(
                                 ladder.errorCm, sphereCenter, sphereRadius,
-                                self.lodErrorThresholdPx_, pview);
+                                lodThresholdFor(self.lodErrorThresholdPx_, d.entity), pview);
                             d.chosenMesh = ladder.handles[plevel];
                         }
                     }
@@ -928,7 +942,7 @@ void SandboxApp::onRender(Engine& e)  {
             // boundary was cut in -- DrawWorldOptions hands the hooks that index for exactly this
             // reason.
             d.occlusionCulled = c.occlusionRuns && d.visitIndex >= c.pass1Count && d.haveWorldBox &&
-                                !self.occlusionWasVisible(d.entity);
+                                !self.occlusionWasVisible(d.entity) && !occlusionOptOut(d.entity);
 #endif
             // 3B's by-hand false-cull finder: an otherwise-culled, non-owner-hidden entity draws
             // through the RASTER route anyway, tinted -- chooseRoute owns that pairing, so this is
@@ -1358,7 +1372,7 @@ void SandboxApp::onRender(Engine& e)  {
                     view.viewportHeightPx = self.vpH_;
                     view.verticalFovRadians = self.playView_.fovYRad;   // matches this frame's proj build, above
                     const u32 level = trifactor::chooseLevelCached(
-                        ladder.errorCm, sphereCenter, sphereRadius, self.lodErrorThresholdPx_, view);
+                        ladder.errorCm, sphereCenter, sphereRadius, lodThresholdFor(self.lodErrorThresholdPx_, d.entity), view);
                     mesh = ladder.handles[level];
 
                     ++self.lodStats_.instancesTested;

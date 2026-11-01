@@ -14,7 +14,7 @@
 
 namespace {
 
-constexpr int kEnvKeys = 12;   // index 0 unused: the keys are 1..11
+constexpr int kEnvKeys = 15;   // index 0 unused: the keys are 1..14
 
 struct EnvSlot {
     bool set = false;
@@ -107,7 +107,7 @@ int32_t aver_fw_worldfx_abi_version(void) { return AVER_FW_WORLDFX_ABI_VERSION; 
 // ---- environment ----
 
 int32_t aver_fw_env_set(int32_t key, float v0, float v1, float v2) {
-    if (key < AVER_FW_ENV_SUN_DIR || key > AVER_FW_ENV_SKY_LIGHT) return 0;
+    if (key < AVER_FW_ENV_SUN_DIR || key > AVER_FW_ENV_LAST) return 0;
     if (!finite3(v0, v1, v2)) return 0;
     float v[3] = {v0, v1, v2};
     switch (key) {
@@ -119,12 +119,14 @@ int32_t aver_fw_env_set(int32_t key, float v0, float v1, float v2) {
     }
     case AVER_FW_ENV_SUN_COLOR:
     case AVER_FW_ENV_FOG_COLOR:
+    case AVER_FW_ENV_AMBIENT:
         for (float& c : v) c = std::max(c, 0.0f);
         break;
     case AVER_FW_ENV_SUN_TEMP:
         v[0] = std::clamp(v0, 0.0f, 40000.0f); v[1] = v[2] = 0.0f;
         break;
     case AVER_FW_ENV_FOG_MAXOPAC:
+    case AVER_FW_ENV_AMBIENT_SKY:
         v[0] = std::clamp(v0, 0.0f, 1.0f); v[1] = v[2] = 0.0f;
         break;
     case AVER_FW_ENV_FOG_HEIGHT:
@@ -145,13 +147,13 @@ int32_t aver_fw_env_clear(int32_t key) {
         for (EnvSlot& s : store().env) s = EnvSlot{};
         return 1;
     }
-    if (key < AVER_FW_ENV_SUN_DIR || key > AVER_FW_ENV_SKY_LIGHT) return 0;
+    if (key < AVER_FW_ENV_SUN_DIR || key > AVER_FW_ENV_LAST) return 0;
     store().env[key] = EnvSlot{};
     return 1;
 }
 
 int32_t aver_fw_env_get(int32_t key, float* outV3) {
-    if (key < AVER_FW_ENV_SUN_DIR || key > AVER_FW_ENV_SKY_LIGHT) return 0;
+    if (key < AVER_FW_ENV_SUN_DIR || key > AVER_FW_ENV_LAST) return 0;
     const EnvSlot& s = store().env[key];
     if (!s.set) return 0;
     if (outV3) for (int i = 0; i < 3; ++i) outV3[i] = s.v[i];

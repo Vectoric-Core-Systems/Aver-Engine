@@ -49,6 +49,10 @@ The code sits in a separate composite: `PSComposite` compiled with `AVER_POST_TO
 pipelines are untouched, and so is `averTonemap`; `PostCB` gained one row (`ext`) that only the EXT variant declares. Unlike the grade stage
 above, the adjustments are in display space, as Godot's are.
 
+### Glow blending and debanding (wave 4, P10 and E7)
+
+The same EXT composite carries two more things, each with its CPU twin in `rhi/Glow.hpp` and its HLSL in `color.hlsli` / `post.hlsl`. **Glow blend**: the bloom pyramid's result joins the frame by `PostSettings::glowBlend` (0 add, the ordinary composite's own line; 1 screen `c + g - c g`; 2 soft light, the W3C curve with the glow mapped to `g * 0.5 + 0.5` as Godot does; 3 replace; 4 mix, a lerp of the frame toward the glow by `bloomIntensity`). `glowStrength` scales the glow before it is blended and `glowLumCap` limits its luminance (scene-linear, after exposure; 0 = none). The glow's per-level weights (Godot's `glow_levels`) are not implemented: the pyramid is summed by the blender and has no per-level multiplier. **Debanding**: `deband` adds half an 8-bit step of interleaved-gradient noise per channel as the last thing before the quantise. Post-volume keys `glowblend`, `glowstrength`, `glowcap`, `deband`; `PostCB` gained a second row (`ext2`, 320 bytes in all) declared only under the define. Any of them off its default selects the EXT composite; every default keeps the ordinary one, whose bloom line is the old line.
+
 ## Depth of field
 
 `c(d) = f^2 / (N (S - f)) * (d - S) / d` on a 36 mm sensor (3.6 cm), with `f` the focal length, `N` the f-stop, `S`

@@ -91,6 +91,21 @@ struct ProjectDesc {
     // medium in extinction per CENTIMETRE (engine default 0.00002). Off by default; importers write both for a project with volumetric fog.
     int volFog             = -1;    // RENDER.VOLFOG         0/1 (engine default 0)
     f32 volFogDensity      = -1.0f; // RENDER.VOLFOGDENSITY  per cm, [0, 0.01]
+    // RENDER.VOLFOGLENGTH: how far the light-shaft volume reaches, cm (100..500000, engine default 20000). RENDER.VOLFOGANISO: the Henyey-Greenstein g,
+    // -0.95..0.95 (default 0.6; signed, so hasVolFogAniso says it was stated). RENDER.VOLFOGTEMPORAL: weight of the reprojected previous frame, 0..0.98 (default 0.85).
+    f32 volFogLength       = -1.0f; // RENDER.VOLFOGLENGTH
+    bool hasVolFogAniso    = false;
+    f32 volFogAniso        = 0.0f;  // RENDER.VOLFOGANISO
+    f32 volFogTemporal     = -1.0f; // RENDER.VOLFOGTEMPORAL
+    // The sun's shadow cascades (the rasterised sun shadow; with ray-traced shadows on they are the fallback). RENDER.SHADOWCASCADES 1..4 (default 4),
+    // RENDER.SHADOWSPLIT 0..1 (0 = even slices, 1 = logarithmic; default 0.85), RENDER.SHADOWDIST the farthest shadowed distance in cm (0 = automatic, a
+    // multiple of the camera's near plane), RENDER.SHADOWRES one cascade's edge in texels (512, 1024, 2048, 4096; default 2048; read when the renderer
+    // starts), RENDER.SHADOWFILTER the width of the filter kernel in shadow texels (0 = hard, default 1, 4 at most).
+    int shadowCascades     = -1;    // RENDER.SHADOWCASCADES
+    f32 shadowSplit        = -1.0f; // RENDER.SHADOWSPLIT
+    f32 shadowDist         = -1.0f; // RENDER.SHADOWDIST
+    int shadowRes          = -1;    // RENDER.SHADOWRES
+    f32 shadowFilter       = -1.0f; // RENDER.SHADOWFILTER
     // G4 R5, sub-viewports (render-to-texture views): the cost guard. RENDER.SUBVIEWPORTS = how many views may be live at once (0 turns the feature
     // off, default 4, at most 16); RENDER.SUBVIEWRENDERS = how many are drawn per frame (default 2); RENDER.SUBVIEWPIXELS = the summed pixel cap in
     // megapixels (default 8). A project with no view in any level pays nothing whatever these say.
@@ -193,6 +208,8 @@ struct ProjectDesc {
                restirHistory >= 0 || rdStages >= 0 || fogOcclusion >= 0 || meshExtra >= 0 || materialFx >= 0 || localRaster >= 0 || localShadows >= 0 ||
                textureAniso >= 0 || hasTextureMipBias ||
                volFog >= 0 || volFogDensity >= 0.0f ||
+               volFogLength >= 0.0f || hasVolFogAniso || volFogTemporal >= 0.0f ||
+               shadowCascades >= 0 || shadowSplit >= 0.0f || shadowDist >= 0.0f || shadowRes >= 0 || shadowFilter >= 0.0f ||
                subViewports >= 0 || subViewRenders >= 0 || subViewPixels >= 0.0f || runtimeMeshes >= 0 ||
                refractionMode >= 0 || refractionStrength >= 0.0f ||
                refractionEdgeFade >= 0.0f || lodSelect >= 0 || lodThresholdPx >= 0.0f ||

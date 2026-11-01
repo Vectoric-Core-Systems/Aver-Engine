@@ -33,6 +33,12 @@ public enum WorldEnvKey
     FogMaxOpac = 10,
     /// <summary>Multiplier on the sky-hemisphere irradiance.</summary>
     SkyLight = 11,
+    /// <summary>Linear rgb of a constant ambient light (Physical sky only). Setting it turns the ambient override on.</summary>
+    Ambient = 12,
+    /// <summary>Multiplier on the ambient colour (default 1).</summary>
+    AmbientEnergy = 13,
+    /// <summary>How much of the sky's own ambient is blended in, 0 to 1 (default 1: the sky alone; 0 gives the colour alone).</summary>
+    AmbientSky = 14,
 }
 
 /// <summary>The world effects C ABI (framework_worldfx_abi.h). Declared here for the same reason as <see cref="Fw"/>:
@@ -74,6 +80,9 @@ internal static class EnvKeyNames
             case "fog.start": key = WorldEnvKey.FogStart; return true;
             case "fog.maxopacity": case "fog.maxopac": key = WorldEnvKey.FogMaxOpac; return true;
             case "sky.light": case "sky.lightintensity": key = WorldEnvKey.SkyLight; return true;
+            case "ambient.color": case "ambient.colour": key = WorldEnvKey.Ambient; return true;
+            case "ambient.energy": key = WorldEnvKey.AmbientEnergy; return true;
+            case "ambient.sky": case "ambient.skycontribution": key = WorldEnvKey.AmbientSky; return true;
             default: key = 0; return false;
         }
     }

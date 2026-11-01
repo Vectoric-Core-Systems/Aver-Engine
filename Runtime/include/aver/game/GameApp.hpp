@@ -378,6 +378,8 @@ private:
     AverSrInstaller averSrInstaller_ = nullptr;
     // True once TAAU is the installed upscaler; keeps the G-buffer (velocity, view Z) on every frame.
     bool temporalAa_ = false;
+    f32 baseRenderScale_ = 1.0f;       // the scale the project start chose; a script's AVER_FW_RENDER_SCALE overrides it and releasing the key restores it
+    bool scriptScaleTaken_ = false;
 
     // Frame interpolation. Detached from the device in onShutdown before it resets.
     std::unique_ptr<neurafi::NeuraFI> frameInterpolator_;

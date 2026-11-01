@@ -481,6 +481,10 @@ struct OcWorldEnv {
     f64 skyGroundAlbedo[3] = {0.24, 0.23, 0.21};
     f64 skyGroundBlend = 1.0;
     f64 skyLight = 1.0;                    // multiplier on the sky-hemisphere irradiance
+    // The ambient override (rhi::SkyAtmosphere::ambientOverride; Physical sky only). Energy below 0 is "no override"; the colour is LINEAR rgb.
+    f64 skyAmbientColor[3] = {0.0, 0.0, 0.0};
+    f64 skyAmbientEnergy = -1.0;
+    f64 skyAmbientSky = 1.0;               // 0 = the colour alone, 1 = the sky alone
     // The air. Negative means "leave the engine's default alone" -- see the note above.
     f64 skyMieScatter = -1.0;              // per km; raise for haze, dust or a coastal day
     f64 skyMieExtinction = -1.0;
@@ -668,6 +672,10 @@ inline constexpr OcPostKeyInfo kOcPostKeys[] = {
     {"wbk",             "White Balance (K)",     1, 0, 1500.0f, 15000.0f},
     {"wbtint",          "White Balance Tint",    1, 0, -1, 1},
     {"lutintensity",    "Grading LUT Intensity", 1, 0, 0, 1},
+    {"glowblend",       "Glow Blend",            1, 2, 0, 4},
+    {"glowstrength",    "Glow Strength",         1, 0, 0, 4.0f},
+    {"glowcap",         "Glow Luminance Cap",    1, 0, 0, 64.0f},
+    {"deband",          "Debanding",             1, 1, 0, 1},
 };
 
 inline const OcPostKeyInfo* ocPostKeyInfo(std::string_view key) {

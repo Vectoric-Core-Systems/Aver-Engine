@@ -76,7 +76,28 @@ struct CMeshRenderer {
     f32 visEndMarginCm   = 0.0f;  // hysteresis at the end threshold
     u32 visFade     = 0;   // fade mode: 0 disabled, 1 self, 2 dependencies (the engine hard-cuts all three)
     u32 rangeState  = 0;   // runtime: the last range verdict (kRangeHidden / kRangeKnown), written by the scene walk
+    // ---- per-instance render flags (P5, F32; appended, zero = the ordinary mesh). Encodings: kRender* below. ----
+    u32 renderFlags = 0;   // shadow mode, GI mode, occlusion opt-out
+    f32 cullMarginCm = 0.0f;   // grows the world box the frustum and occlusion tests use, so a vertex shader that moves geometry is not culled early
+    f32 lodBias = 0.0f;    // LOD selection, in stops: +1 halves the pixel-error threshold (a more detailed level is picked sooner), -1 doubles it
+    f32 fadeAmount = 0.0f; // runtime: how far the visibility fade has taken the instance (0 = shown, 1 = gone), written by the scene walk
 };
+
+// CMeshRenderer::renderFlags. Bits 0-1, the shadow mode: 0 casts shadows (default), 1 casts none, 2 casts only (the mesh is invisible to the camera and kept for
+// shadows, GI and ray tracing, like a mesh hidden from its owner). Bits 2-3, the GI mode: 0 static (default), 1 dynamic, 2 disabled; 1 and 2 keep the mesh out of
+// the voxel GI bake exactly as a mover is. Bit 4: skip the occlusion test for this instance. Shadow mode 1 acts on the cascade and GI shadow maps; the ray-traced sun
+// shadow keeps the mesh (its instance masks are not changed here).
+inline constexpr u32 kRenderShadowMask = 0x3u;
+inline constexpr u32 kRenderShadowsOff = 1u;
+inline constexpr u32 kRenderShadowsOnly = 2u;
+inline constexpr u32 kRenderGiShift = 2u;
+inline constexpr u32 kRenderGiMask = 0x3u << kRenderGiShift;
+inline constexpr u32 kRenderGiDynamic = 1u;
+inline constexpr u32 kRenderGiDisabled = 2u;
+inline constexpr u32 kRenderIgnoreOcclusion = 0x10u;
+inline constexpr u32 kRenderFlagsKnown = kRenderShadowMask | kRenderGiMask | kRenderIgnoreOcclusion;
+inline constexpr u32 renderShadowMode(u32 flags) { return flags & kRenderShadowMask; }
+inline constexpr u32 renderGiMode(u32 flags) { return (flags & kRenderGiMask) >> kRenderGiShift; }
 
 inline constexpr u32 kMeshRendererVisible = 0x1;
 

@@ -103,6 +103,20 @@ struct AtmosphereSkySH { f32 c[9][3]; };
 void atmoSkyRadianceSH(const AtmosphereProfile& a, f32 altitudeKm, const f32 sunDir[3],
                        const f32 sunIrradiance[3], f32 sunAngularRadiusRad, AtmosphereSkySH& out);
 
+// P8: the coefficients for an ambient that is a constant radiance `colour` * `energy` blended toward `sh` by `skyContribution` (0 = the constant alone, 1 = the
+// sky alone). A uniform radiance L projects to c[0] = L * 0.282095 * 4 PI and nothing else (the self-check in averShIrradiance), so only the first coefficient
+// takes the constant. Both backends call it after atmoSkyRadianceSH.
+inline void blendAmbientSh(AtmosphereSkySH& sh, const f32 colour[3], f32 energy, f32 skyContribution) {
+    const f32 k = skyContribution < 0.0f ? 0.0f : skyContribution > 1.0f ? 1.0f : skyContribution;
+    const f32 e = energy < 0.0f ? 0.0f : energy;
+    constexpr f32 kUniformL00 = 0.282095f * 12.566371f;   // Y00 * 4 PI
+    for (int i = 0; i < 3; ++i) {
+        const f32 constant = (colour[i] < 0.0f ? 0.0f : colour[i]) * e * kUniformL00;
+        sh.c[0][i] = constant + (sh.c[0][i] - constant) * k;
+        for (int j = 1; j < 9; ++j) sh.c[j][i] *= k;
+    }
+}
+
 // The fog/dome-veil reference colour: ambient (straight up) blended with a horizontal march toward
 // the sun's own azimuth. Mirrors RHIShaders.cpp's averFogInscatterRef() function for function -- see
 // its own comment for why two terms and why that blend. `sunDir` need not be normalised.

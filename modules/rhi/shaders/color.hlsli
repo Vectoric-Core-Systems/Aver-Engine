@@ -151,6 +151,28 @@ float3 averTonemap(float3 x, float mode) {
 // Compiled only into the post composite's AVER_POST_TONEMAP_EXT variant. CPU twin and reference values: rhi/Tonemap.hpp.
 // mode 3 linear, 4 Reinhard, 5 filmic, 6 ACES, 7 AgX (the extended curve index + 3).
 
+// ---- glow blending (CPU twin: rhi/Glow.hpp) ----
+// g is the bloom pyramid's rgb; p = (mode, luminance cap, strength, intensity). mode 0 add, 1 screen, 2 soft light, 3 replace, 4 mix.
+float averSoftLightCh(float cb, float cs) {
+    if (cs <= 0.5) return cb - (1.0 - 2.0 * cs) * cb * (1.0 - cb);
+    float d = cb <= 0.25 ? ((16.0 * cb - 12.0) * cb + 4.0) * cb : sqrt(cb);
+    return cb + (2.0 * cs - 1.0) * (d - cb);
+}
+float3 averGlowBlend(float3 c, float3 g, float4 p) {
+    g *= p.z;
+    if (p.y > 0.0) {
+        float l = dot(g, float3(0.2126, 0.7152, 0.0722));
+        g *= l > p.y ? p.y / l : 1.0;
+    }
+    if (p.x > 3.5) return lerp(c, g, saturate(p.w));
+    g *= p.w;
+    float3 cb = max(c, 0.0);
+    if (p.x > 2.5) return g;
+    if (p.x > 1.5) return float3(averSoftLightCh(cb.r, g.r * 0.5 + 0.5), averSoftLightCh(cb.g, g.g * 0.5 + 0.5), averSoftLightCh(cb.b, g.b * 0.5 + 0.5));
+    if (p.x > 0.5) return max((cb + g) - cb * g, 0.0);
+    return c + g;
+}
+
 float3 averTonemapReinhardExt(float3 c, float white) { return c * (1.0 + c / (white * white)) / (1.0 + c); }
 
 float3 averFilmicCurveExt(float3 x) {

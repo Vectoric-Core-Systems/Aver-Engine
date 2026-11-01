@@ -191,8 +191,10 @@ struct PostCB {
     // x tonemap white point, yzw display-space brightness / contrast / saturation. Declared in post.hlsl as `gPostExt` only
     // under AVER_POST_TONEMAP_EXT, so the ordinary composite variants never see it.
     f32 ext[4];
+    // x glow blend mode, y glow luminance cap (0 = none), z glow strength, w debanding (0/1). Same rule as `ext`: `gPostExt2` exists only under AVER_POST_TONEMAP_EXT.
+    f32 ext2[4];
 };
-static_assert(sizeof(PostCB) == 304, "the HLSL cbuffer mirrors this byte for byte");
+static_assert(sizeof(PostCB) == 320, "the HLSL cbuffer mirrors this byte for byte");
 
 // The linear-sRGB multiplier that makes a source of colour temperature `kelvin` read as the 6500 K
 // reference, with `tint` (+ = magenta, - = green) on the green channel. Planckian xy from Kim et al.
@@ -283,6 +285,10 @@ inline void fillPostLens(PostCB& cb, const PostSettings& p, u32 srcW, u32 srcH, 
     cb.ext[1] = std::max(p.adjustBrightness, 0.0f);
     cb.ext[2] = std::max(p.adjustContrast, 0.0f);
     cb.ext[3] = std::max(p.adjustSaturation, 0.0f);
+    cb.ext2[0] = static_cast<f32>(p.glowBlend > 4u ? 4u : p.glowBlend);
+    cb.ext2[1] = std::max(p.glowLumCap, 0.0f);
+    cb.ext2[2] = std::max(p.glowStrength, 0.0f);
+    cb.ext2[3] = p.deband != 0 ? 1.0f : 0.0f;
 }
 
 } // namespace aver::rhi

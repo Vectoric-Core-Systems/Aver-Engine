@@ -55,6 +55,8 @@ add_library(Aver.Framework SHARED
   src/RuntimeMeshAbi.cpp
   # Textures a script builds from pixels at run time (E8); the host uploads what changed and hands the GPU texture to the materials and the UI.
   src/RuntimeTextureAbi.cpp
+  # Render settings a script asks for (scale, MSAA, shadow cascades, light-shaft fog) and the last frame's statistics (P17, P18).
+  src/RenderSettingsAbi.cpp
   src/DataTableAbi.cpp
   src/EntityStateAbi.cpp
   # The floating origin (wave 11, docs/plans/wave11/LARGE_WORLD.md 2.5): a host-installed provider and the exact WorldPos conversions.

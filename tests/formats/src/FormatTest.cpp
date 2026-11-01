@@ -793,6 +793,17 @@ static void checkOcworld() {
         check(w.sunAngularDeg == 0.545, "an absent angular size keeps the real sun's disk");
         check(w.fogMaxOpacity == 1.0, "an absent max opacity does not become zero and erase the fog");
         check(w.skyLight == 1.0, "an absent sky light does not put the ambient term at zero");
+        check(w.skyAmbientEnergy < 0.0 && w.skyAmbientSky == 1.0, "an absent ambient override is off (energy below 0), not black");
+        OcWorldData amb;
+        check(parseOcworld("OCWORLD 1\nNAME A\nSKY model physical skylight 1 ambient 0.2 0.25 0.3 ambientenergy 1.5 ambientsky 0.25\n", amb, &err) &&
+                  amb.skyAmbientColor[0] == 0.2 && amb.skyAmbientColor[2] == 0.3 && amb.skyAmbientEnergy == 1.5 && amb.skyAmbientSky == 0.25,
+              "the ambient override parses");
+        const std::string ambText = writeOcworld(amb);
+        OcWorldData ambBack;
+        check(parseOcworld(ambText, ambBack, &err) && ambBack.skyAmbientColor[1] == 0.25 && ambBack.skyAmbientEnergy == 1.5 && ambBack.skyAmbientSky == 0.25, "and round trips");
+        OcWorldData plainAmb;
+        plainAmb.hasSky = true;
+        check(writeOcworld(plainAmb).find("ambient") == std::string::npos, "a level with no override writes no ambient token (older files stay byte-identical)");
         check(!w.hasClouds, "and no CLOUDS record means no opinion about clouds");
     }
 }

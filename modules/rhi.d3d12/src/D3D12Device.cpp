@@ -5005,6 +5005,7 @@ void D3D12Device::packAtmosphere(const SkyAtmosphere& s) {
     // Sky as nine SH coefficients for ambient (no view/world position dependence).
     AtmosphereSkySH sh{};
     atmoSkyRadianceSH(fit, altKm, s.sunDirection, e0, sunRadius, sh);
+    if (s.ambientOverride) blendAmbientSh(sh, s.ambientColor, s.ambientEnergy, s.ambientSkyContribution);
     // Scale = 1 (atmosphere's source term is sigma*phase*sunTransmittance*E0).
     constexpr f32 kSkyIrradianceCalibration = 1.0f;
     for (int k = 0; k < 9; ++k) {

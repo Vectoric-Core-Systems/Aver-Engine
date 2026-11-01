@@ -389,6 +389,19 @@ struct Settings {
     f32 volumetricFogAnisotropy = 0.6f;
     // Weight of the reprojected previous frame (0 = none, 0.98 = very smooth and laggy).
     f32 volumetricFogTemporal = 0.85f;
+
+    // ---- the sun's shadow cascades (the rasterised sun shadow; with ray-traced shadows on, the fallback) ----
+    // Every default is what the renderer did before these fields existed. Project keys RENDER.SHADOWCASCADES, SHADOWSPLIT, SHADOWDIST, SHADOWRES, SHADOWFILTER.
+    // How many cascades are fitted and drawn (1-4); the atlas is always 2x2, a cascade that is not used stays empty.
+    u32 shadowCascades = 4;
+    // Split scheme: 0 slices the view depth evenly, 1 logarithmically (equal ratios).
+    f32 shadowSplitLambda = 0.85f;
+    // The farthest distance the cascades cover, cm. 0 = automatic (4000 times the camera's near plane, 300 m orthographic).
+    f32 shadowMaxDistance = 0.0f;
+    // One cascade's edge in texels: 512, 1024, 2048 or 4096. LATCHED when the renderer starts (the atlas is created then); a later change is read on the next start.
+    u32 shadowCascadeSize = 2048;
+    // The width of the PCF kernel in shadow texels. 1 is the fixed 3x3 filter of old; 0 collapses it to a single hard comparison; up to 4.
+    f32 shadowFilterScale = 1.0f;
 };
 
 // The denoiser as one value: 0 off, 1 AMD FidelityFX, 2 NRD2. Setting 0 keeps the kind, so switching

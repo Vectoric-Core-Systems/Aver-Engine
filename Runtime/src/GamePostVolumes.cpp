@@ -85,6 +85,10 @@ void applyPostVolumeFields(rhi::PostSettings& s, const fmt::OcPostVolume& v, f32
         else if (k == "gain")   for (int c = 0; c < 3; ++c) s.gain[c]  = lerpF(s.gain[c],  ovF(ov, *ki, c), w);
         else if (k == "wbk")             s.whiteBalanceK = lerpF(s.whiteBalanceK, ovF(ov, *ki), w);
         else if (k == "wbtint")          s.whiteBalanceTint = lerpF(s.whiteBalanceTint, ovF(ov, *ki), w);
+        else if (k == "glowblend")       { if (flip) s.glowBlend = static_cast<u32>(std::lround(ovF(ov, *ki))); }
+        else if (k == "glowstrength")    s.glowStrength = lerpF(s.glowStrength, ovF(ov, *ki), w);
+        else if (k == "glowcap")         s.glowLumCap = lerpF(s.glowLumCap, ovF(ov, *ki), w);
+        else if (k == "deband")          { if (flip) s.deband = ov.v[0] >= 0.5 ? 1u : 0u; }
         // lutintensity: the LUT stage of blendPostVolumes owns it.
     }
 }
@@ -125,6 +129,10 @@ bool readPostField(const rhi::PostSettings& s, std::string_view k, f64 out[3]) {
     else if (k == "wbk")             out[0] = s.whiteBalanceK;
     else if (k == "wbtint")          out[0] = s.whiteBalanceTint;
     else if (k == "lutintensity")    out[0] = s.gradingLutIntensity;
+    else if (k == "glowblend")       out[0] = s.glowBlend;
+    else if (k == "glowstrength")    out[0] = s.glowStrength;
+    else if (k == "glowcap")         out[0] = s.glowLumCap;
+    else if (k == "deband")          out[0] = s.deband != 0 ? 1.0 : 0.0;
     else return false;
     return true;
 }

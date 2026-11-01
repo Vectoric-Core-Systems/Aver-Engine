@@ -77,7 +77,11 @@ void registerBuiltinComponents(World& world) {
             .field("visBeginMarginCm", FieldKind::F32, static_cast<u16>(offsetof(CMeshRenderer, visBeginMarginCm)))
             .field("visEndMarginCm", FieldKind::F32, static_cast<u16>(offsetof(CMeshRenderer, visEndMarginCm)))
             .field("visFade", FieldKind::I32, static_cast<u16>(offsetof(CMeshRenderer, visFade)))
-            .field("rangeState", FieldKind::I32, static_cast<u16>(offsetof(CMeshRenderer, rangeState)), 0, /*readOnly*/ true);
+            .field("rangeState", FieldKind::I32, static_cast<u16>(offsetof(CMeshRenderer, rangeState)), 0, /*readOnly*/ true)
+            .field("renderFlags", FieldKind::I32, static_cast<u16>(offsetof(CMeshRenderer, renderFlags)))
+            .field("cullMarginCm", FieldKind::F32, static_cast<u16>(offsetof(CMeshRenderer, cullMarginCm)))
+            .field("lodBias", FieldKind::F32, static_cast<u16>(offsetof(CMeshRenderer, lodBias)))
+            .field("fadeAmount", FieldKind::F32, static_cast<u16>(offsetof(CMeshRenderer, fadeAmount)), 0, /*readOnly*/ true);
         expect(b.verify(sizeof(CMeshRenderer)), b.typeId(), kComponentMeshRenderer, "CMeshRenderer");
     }
     {

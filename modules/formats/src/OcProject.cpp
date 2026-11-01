@@ -48,6 +48,23 @@ int physicsSettingIndex(std::string_view key) {
     return -1;
 }
 
+// The light-shaft fog and sun-shadow RENDER keys. True when `key` is one of them (whatever its value), so the parser's chain stops there. Its own
+// function because the chain in parseOcproject is at the compiler's block-nesting limit.
+bool parseShadowFogKey(std::string_view key, const std::vector<std::string_view>& t, ProjectDesc& out) {
+    if (!startsWithCI(key, "RENDER.")) return false;
+    const bool has = t.size() > 1;
+    if (equalsCI(key, "RENDER.VOLFOGLENGTH")) { if (has) out.volFogLength = static_cast<f32>(parseF64(t[1], -1.0)); }
+    else if (equalsCI(key, "RENDER.VOLFOGANISO")) { if (has) { out.volFogAniso = static_cast<f32>(parseF64(t[1], 0.0)); out.hasVolFogAniso = true; } }
+    else if (equalsCI(key, "RENDER.VOLFOGTEMPORAL")) { if (has) out.volFogTemporal = static_cast<f32>(parseF64(t[1], -1.0)); }
+    else if (equalsCI(key, "RENDER.SHADOWCASCADES")) { if (has) out.shadowCascades = parseI32(t[1], -1); }
+    else if (equalsCI(key, "RENDER.SHADOWSPLIT")) { if (has) out.shadowSplit = static_cast<f32>(parseF64(t[1], -1.0)); }
+    else if (equalsCI(key, "RENDER.SHADOWDIST")) { if (has) out.shadowDist = static_cast<f32>(parseF64(t[1], -1.0)); }
+    else if (equalsCI(key, "RENDER.SHADOWRES")) { if (has) out.shadowRes = parseI32(t[1], -1); }
+    else if (equalsCI(key, "RENDER.SHADOWFILTER")) { if (has) out.shadowFilter = static_cast<f32>(parseF64(t[1], -1.0)); }
+    else return false;
+    return true;
+}
+
 } // namespace
 
 int physicsSettingCount() { return kPhysicsSettingCount; }
@@ -80,6 +97,8 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
         const std::vector<std::string_view> t = splitWhitespace(line);
         if (t.empty()) continue;
         const std::string_view key = t[0];
+
+        if (parseShadowFogKey(key, t, out)) continue;   // RENDER.VOLFOGLENGTH ... RENDER.SHADOWFILTER: kept out of the chain below, which is at the compiler's nesting limit
 
         if (equalsCI(key, "OCPROJECT")) {
             sawHeader = true;
@@ -436,7 +455,7 @@ bool isOwnedKey(std::string_view line) {
         "RENDER.GI", "RENDER.RAYTRACING", "RENDER.PATHTRACING",
         "RENDER.VOXELRES", "RENDER.GIINTENSITY", "RENDER.GIDISTANCE",
         "RENDER.RTSHADOWRAYS", "RENDER.RTPIXELSPERRAY", "RENDER.RTSHADOWDENOISE",
-        "RENDER.RTRENDERMODE", "RENDER.RDSTAGES", "RENDER.FOGOCCLUSION", "RENDER.MESHEXTRA", "RENDER.MATERIALFX", "RENDER.LOCALRASTER", "RENDER.LOCALSHADOWS", "RENDER.TEXTUREANISO", "RENDER.TEXTUREMIPBIAS", "RENDER.VOLFOG", "RENDER.VOLFOGDENSITY", "RENDER.SUBVIEWPORTS", "RENDER.SUBVIEWRENDERS", "RENDER.SUBVIEWPIXELS", "RENDER.RUNTIMEMESHES", "RENDER.PTBOUNCES", "RENDER.PTMODE", "RENDER.LAYEREDBSDF",
+        "RENDER.RTRENDERMODE", "RENDER.RDSTAGES", "RENDER.FOGOCCLUSION", "RENDER.MESHEXTRA", "RENDER.MATERIALFX", "RENDER.LOCALRASTER", "RENDER.LOCALSHADOWS", "RENDER.TEXTUREANISO", "RENDER.TEXTUREMIPBIAS", "RENDER.VOLFOG", "RENDER.VOLFOGDENSITY", "RENDER.VOLFOGLENGTH", "RENDER.VOLFOGANISO", "RENDER.VOLFOGTEMPORAL", "RENDER.SHADOWCASCADES", "RENDER.SHADOWSPLIT", "RENDER.SHADOWDIST", "RENDER.SHADOWRES", "RENDER.SHADOWFILTER", "RENDER.SUBVIEWPORTS", "RENDER.SUBVIEWRENDERS", "RENDER.SUBVIEWPIXELS", "RENDER.RUNTIMEMESHES", "RENDER.PTBOUNCES", "RENDER.PTMODE", "RENDER.LAYEREDBSDF",
         "RENDER.GICONES", "RENDER.GIMODE", "RENDER.DENOISER", "RENDER.RESTIRVISIBILITY",
         "RENDER.RESTIRHISTORY",
         "RENDER.NEURALDENOISE",   // retired NRD v1 key: ignored on load, dropped on the next save
@@ -518,6 +537,18 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
     }
     appendKey(owned, "RENDER.VOLFOG", d.volFog);
     appendKey(owned, "RENDER.VOLFOGDENSITY", d.volFogDensity);
+    appendKey(owned, "RENDER.VOLFOGLENGTH", d.volFogLength);
+    if (d.hasVolFogAniso) {   // signed, like the mip bias
+        char buf[48];
+        const auto r = std::to_chars(buf, buf + sizeof buf, d.volFogAniso);
+        if (r.ec == std::errc{}) { owned += "RENDER.VOLFOGANISO "; owned.append(buf, static_cast<usize>(r.ptr - buf)); owned += '\n'; }
+    }
+    appendKey(owned, "RENDER.VOLFOGTEMPORAL", d.volFogTemporal);
+    appendKey(owned, "RENDER.SHADOWCASCADES", d.shadowCascades);
+    appendKey(owned, "RENDER.SHADOWSPLIT", d.shadowSplit);
+    appendKey(owned, "RENDER.SHADOWDIST", d.shadowDist);
+    appendKey(owned, "RENDER.SHADOWRES", d.shadowRes);
+    appendKey(owned, "RENDER.SHADOWFILTER", d.shadowFilter);
     appendKey(owned, "RENDER.SUBVIEWPORTS", d.subViewports);
     appendKey(owned, "RENDER.SUBVIEWRENDERS", d.subViewRenders);
     appendKey(owned, "RENDER.SUBVIEWPIXELS", d.subViewPixels);

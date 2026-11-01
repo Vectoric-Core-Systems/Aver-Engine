@@ -207,7 +207,7 @@ int main() {
 
     AVER_INFO("-- the post constants --");
     {
-        check(sizeof(PostCB) == 304 && sizeof(PostSettings) == 196, "PostCB grew by the one ext row");
+        check(sizeof(PostCB) == 320 && sizeof(PostSettings) == 212, "PostCB grew by the one ext row");
         PostCB cb{};
         fillPostLens(cb, PostSettings{}, 1920, 1080, false, 0, 0);
         check(cb.ext[0] == 1.0f && cb.ext[1] == 1.0f && cb.ext[2] == 1.0f && cb.ext[3] == 1.0f, "the defaults pack to white 1 and identity adjustments");

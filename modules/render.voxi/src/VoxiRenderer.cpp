@@ -38,7 +38,6 @@ namespace {
 // Shadow map: four cascades in one 2x2 atlas texture.
 constexpr u32 kShadowCascades   = 4;
 constexpr u32 kShadowCascadeSize = 2048;
-constexpr u32 kShadowSize        = kShadowCascadeSize * 2;   // 2x2 atlas
 static_assert(kShadowCascades == 4, "the atlas below is laid out as 2x2");
 
 // GI volume's own shadow map, separate from camera cascades.
@@ -3300,7 +3299,9 @@ u32 VoxiRenderer::fitCascades() {
 
     const f32 zNear = camNear;
     // An orthographic view has no "far is thousands of times near" geometry to scale from: 300 m of depth, or the far plane if nearer (G4 R4).
-    const f32 reach = isOrthographicViewProj(curViewProj_) ? std::fmin(camFar, 30000.0f) : camNear * kShadowRangeFromNear;
+    f32 reach = isOrthographicViewProj(curViewProj_) ? std::fmin(camFar, 30000.0f) : camNear * kShadowRangeFromNear;
+    // Settings::shadowMaxDistance replaces the automatic reach (a distance from the camera, so the slab starts at the near plane's depth).
+    if (settings_.shadowMaxDistance > 0.0f && std::isfinite(settings_.shadowMaxDistance)) reach = std::fmax(settings_.shadowMaxDistance, zNear * 1.01f);
     const f32 zFar  = camFar < reach ? camFar : reach;
     if (!(zFar > zNear)) return 0;
 
@@ -3311,12 +3312,15 @@ u32 VoxiRenderer::fitCascades() {
     }
     const Vec3 up = std::fabs(dir.z) > 0.95f ? Vec3{1, 0, 0} : Vec3{0, 0, 1};
 
+    const u32 cascadeCount = std::clamp(settings_.shadowCascades, 1u, kShadowCascades);
+    const f32 lambda = std::isfinite(settings_.shadowSplitLambda) ? std::clamp(settings_.shadowSplitLambda, 0.0f, 1.0f) : kCascadeSplitLambda;
+    const f32 filterScale = std::isfinite(settings_.shadowFilterScale) ? std::clamp(settings_.shadowFilterScale, 0.0f, 4.0f) : 1.0f;
     f32 sliceNear = zNear;
-    for (u32 c = 0; c < kShadowCascades; ++c) {
-        const f32 p = static_cast<f32>(c + 1) / static_cast<f32>(kShadowCascades);
+    for (u32 c = 0; c < cascadeCount; ++c) {
+        const f32 p = static_cast<f32>(c + 1) / static_cast<f32>(cascadeCount);
         const f32 logSplit = zNear * std::pow(zFar / zNear, p);
         const f32 uniSplit = zNear + (zFar - zNear) * p;
-        f32 sliceFar = kCascadeSplitLambda * logSplit + (1.0f - kCascadeSplitLambda) * uniSplit;
+        f32 sliceFar = lambda * logSplit + (1.0f - lambda) * uniSplit;
 
         // Corners of this slice, interpolated along the frustum's edges, relative to the eye.
         const f32 tN = (sliceNear - camNear) / (camFar - camNear);
@@ -3345,7 +3349,7 @@ u32 VoxiRenderer::fitCascades() {
         cascadeRadius_[c] = radius;
 
         // Snap centre to a whole texel in light space.
-        const f32 texel = 2.0f * radius / static_cast<f32>(kShadowCascadeSize);
+        const f32 texel = 2.0f * radius / static_cast<f32>(shadowCascadeSize_);
         Mat4 view = Mat4::lookAtLH(centre + dir * (radius * 2.0f), centre, up);
         Vec3 cLs = xformPoint(centre, view);
         cLs.x = std::floor(cLs.x / texel) * texel;
@@ -3365,12 +3369,12 @@ u32 VoxiRenderer::fitCascades() {
         // Radial distance for sphere-fitted cascade.
         cb_.cascadeSplit[c][0] = centreRel.size() + radius;
         cb_.cascadeSplit[c][1] = texel * 1.5f;   // normal-offset bias, world units
-        cb_.cascadeSplit[c][2] = 0.0f;
+        cb_.cascadeSplit[c][2] = filterScale;   // the PCF kernel width in texels (voxi.hlsl shadowSampleCascade); 1 is the 3x3 filter of old
         cb_.cascadeSplit[c][3] = 0.0f;
 
         sliceNear = sliceFar;
     }
-    return kShadowCascades;
+    return cascadeCount;
 }
 
 // Fits the GI-only shadow map to the GI volume's bounding box.
@@ -5367,6 +5371,7 @@ VoxiRenderer::ShadowInstanceGroup& VoxiRenderer::shadowGroupFor(std::vector<Shad
 // ~2,114 drawMesh calls per cascade collapse to at most ~30 (this scene's distinct mesh count). Falls
 // back to one-draw-per-instance (shadowPso_) if the instanced pipeline failed to build.
 void VoxiRenderer::shadowPass(rhi::IRenderContext& ctx) {
+    lastShadowDraws_ = 0;
     const bool useInstancing = shadowInstancedPso_ != 0;
     if ((!shadowPso_ && !shadowInstancedPso_) || drawsPrev_.empty()) { cb_.shadowParams[1] = 0.0f; return; }
     u32 cascades = fitCascades();
@@ -5379,7 +5384,7 @@ void VoxiRenderer::shadowPass(rhi::IRenderContext& ctx) {
     // Atlas has no reader while ray tracing is on; shadowParams[1] = 0 prevents stale atlas reads.
     if (rtActive_) { cb_.shadowParams[1] = 0.0f; return; }
 
-    cb_.shadowParams[0] = 1.0f / static_cast<f32>(kShadowSize);
+    cb_.shadowParams[0] = 1.0f / static_cast<f32>(shadowCascadeSize_ * 2u);
     cb_.shadowParams[1] = 1.0f;
     cb_.shadowParams[3] = static_cast<f32>(cascades);
 
@@ -5402,17 +5407,17 @@ void VoxiRenderer::shadowPass(rhi::IRenderContext& ctx) {
         cb_.shadowDraw[0] = static_cast<f32>(c);
         ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
 
-        const u32 qx = (c & 1u) * kShadowCascadeSize;
-        const u32 qy = (c >> 1) * kShadowCascadeSize;
+        const u32 qx = (c & 1u) * shadowCascadeSize_;
+        const u32 qy = (c >> 1) * shadowCascadeSize_;
         // Viewport and scissor both: the scissor confines the cascade to its own quadrant.
-        ctx.setViewport(qx, qy, kShadowCascadeSize, kShadowCascadeSize);
-        ctx.setScissor(qx, qy, kShadowCascadeSize, kShadowCascadeSize);
+        ctx.setViewport(qx, qy, shadowCascadeSize_, shadowCascadeSize_);
+        ctx.setScissor(qx, qy, shadowCascadeSize_, shadowCascadeSize_);
 
         const Vec3 cascCentre{cascadeCentre_[c][0], cascadeCentre_[c][1], cascadeCentre_[c][2]};
         const f32 cascRadius = cascadeRadius_[c];
 
         // Each cascade resolves differently: far cascades have metre-wide texels, near ones centimetres.
-        const f32 cascTexelWorld = 2.0f * cascRadius / static_cast<f32>(kShadowCascadeSize);
+        const f32 cascTexelWorld = 2.0f * cascRadius / static_cast<f32>(shadowCascadeSize_);
         const f32 minShadowDiameter = cascTexelWorld * kMinShadowTexels;
 
         u32 submitted = 0;
@@ -5466,6 +5471,8 @@ void VoxiRenderer::shadowPass(rhi::IRenderContext& ctx) {
         censusPerCascade[c] = submitted;
     }
 
+    lastShadowDraws_ = 0;
+    for (u32 c = 0; c < kShadowCascades; ++c) lastShadowDraws_ += censusPerCascade[c];
     if (!sShadowCensusLogged) {
         u32 total = 0;
         for (u32 c = 0; c < kShadowCascades; ++c) total += censusPerCascade[c];
@@ -5865,6 +5872,22 @@ bool VoxiRenderer::overridesScenePipeline() const { return giReady_; }
 // The table the blended pipeline expects bound. The device asks during its replay, since this
 // feature is not on the stack then -- see IRenderFeature::sceneBindlessTable.
 rhi::BindlessTableHandle VoxiRenderer::sceneBindlessTable() const { return rtTexTable_; }
+
+VoxiRenderer::RenderStats VoxiRenderer::renderStats() const {
+    RenderStats r;
+    r.objects = static_cast<u32>(drawsPrev_.size());
+    r.translucent = static_cast<u32>(translucentDrawsPrev_.size());
+    r.shadowDraws = lastShadowDraws_;
+    if (dev_) {
+        for (const Draw& d : drawsPrev_) {
+            rhi::BufferHandle vb = 0, ib = 0;
+            u32 vc = 0, ic = 0;
+            if (dev_->meshGeometry(d.mesh, &vb, &ib, &vc, &ic)) r.triangles += ic / 3u;
+        }
+    }
+    r.drawCalls = suppressesScene() ? 0u : r.objects;
+    return r;
+}
 
 bool VoxiRenderer::suppressesScene() const { return graphStale() || debugViewActive() || rayDrivenActive(); }
 
@@ -8139,8 +8162,10 @@ rhi::PipelineHandle VoxiRenderer::depthPrepassPipelineExtra() const {
 bool VoxiRenderer::createShadowResources() {
     rhi::TextureDesc d;
     d.dim    = rhi::TextureDim::Tex2D;
-    d.width  = kShadowSize;
-    d.height = kShadowSize;
+    shadowCascadeSize_ = settings_.shadowCascadeSize == 512u || settings_.shadowCascadeSize == 1024u || settings_.shadowCascadeSize == 4096u
+                             ? settings_.shadowCascadeSize : kShadowCascadeSize;   // latched here; any other value is the default
+    d.width  = shadowCascadeSize_ * 2u;
+    d.height = shadowCascadeSize_ * 2u;
     // Typeless so DSV sees D32Float while SRV sees R32Float.
     d.format = rhi::Format::R32Typeless;
     d.bind   = rhi::ResourceBind::ShaderResource | rhi::ResourceBind::DepthStencil;
@@ -8149,7 +8174,7 @@ bool VoxiRenderer::createShadowResources() {
     d.clearDepth    = 1.0f;
     d.debugName     = "Voxi shadow map";
     shadowTex_ = res_->createTexture(d);
-    if (!shadowTex_) AVER_ERROR("[Voxi] shadow map {}^2 could not be created", kShadowSize);
+    if (!shadowTex_) AVER_ERROR("[Voxi] shadow map {}^2 could not be created", shadowCascadeSize_ * 2u);
 
     // GI-only map: smaller single box.
     d.width  = kGiShadowSize;

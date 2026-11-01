@@ -2731,6 +2731,7 @@ void VulkanDevice::packAtmosphere(const SkyAtmosphere& s) {
     // Mirrors D3D12Device::packAtmosphere field for field; see its comment.
     AtmosphereSkySH sh{};
     atmoSkyRadianceSH(fit, altKm, s.sunDirection, e0, sunRadius, sh);
+    if (s.ambientOverride) blendAmbientSh(sh, s.ambientColor, s.ambientEnergy, s.ambientSkyContribution);
     // Same calibration D3D12Device applies (must match, or the two backends disagree on sky
     // brightness) -- see that copy for why it's 1 (SH is already in the sun's units) and where
     // the old 8 came from. Change one, change both.

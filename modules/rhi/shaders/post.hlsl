@@ -50,6 +50,8 @@ cbuffer AverPost : register(b0) {
 #ifdef AVER_POST_TONEMAP_EXT
     // Extended tonemappers and display adjustments (PostCB::ext): x white point, yzw brightness / contrast / saturation.
     float4 gPostExt;
+    // Glow blending and debanding (PostCB::ext2): x blend mode, y glow luminance cap, z glow strength, w debanding.
+    float4 gPostExt2;
 #endif
 };
 
@@ -754,7 +756,11 @@ float4 PSComposite(AverPostVSOut i) : SV_TARGET {
 
 #ifdef AVER_POST_BLOOM
     // srcUv again: the bloom pyramid, like the local-exposure grid, is built over the whole scene.
+#ifdef AVER_POST_TONEMAP_EXT
+    c = averGlowBlend(c, gPostBloomTex.SampleLevel(gPostSamp, srcUv, 0).rgb, float4(gPostExt2.xyz, gPostTone.y));
+#else
     c += gPostBloomTex.SampleLevel(gPostSamp, srcUv, 0).rgb * gPostTone.y;
+#endif
     if (gPostLens.w > 0.0) c += averPostLensFlare(i.uv) * gPostLens.w;
 #endif
     if (gPostGrade.z > 0.0) c = averPostGrade(c);
@@ -784,5 +790,10 @@ float4 PSComposite(AverPostVSOut i) : SV_TARGET {
         float l = saturate(averLuminance(outc));
         outc = saturate(outc + n * gPostLens.y * 0.1 * lerp(0.4, 1.0, 4.0 * l * (1.0 - l)));
     }
+#ifdef AVER_POST_TONEMAP_EXT
+    // Debanding: half an 8-bit step of per-channel noise, the last thing before the quantise (CPU twin: rhi/Glow.hpp debandOffset).
+    if (gPostExt2.w > 0.5)
+        outc += (float3(averPostIgn(i.pos.xy), averPostIgn(i.pos.xy + 37.1), averPostIgn(i.pos.xy + 71.3)) - 0.5) / 255.0;
+#endif
     return float4(outc, 1.0);
 }

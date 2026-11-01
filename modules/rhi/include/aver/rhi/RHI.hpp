@@ -230,12 +230,21 @@ struct PostSettings {
     // display space after the tonemap, before the grading LUT (brightness / contrast / saturation).
     f32  tonemapWhite = 1;
     f32  adjustBrightness = 1, adjustContrast = 1, adjustSaturation = 1;
+
+    // ---- glow blending and debanding (rhi/Glow.hpp), also the AVER_POST_TONEMAP_EXT composite only ----
+    // The bloom pyramid's result joins the frame by `glowBlend` (0 add, the ordinary composite's own; 1 screen, 2 soft light, 3 replace, 4 mix).
+    // glowStrength scales the glow before it is blended; glowLumCap > 0 limits the glow's luminance to that value (scene-linear, after exposure).
+    // deband != 0 adds one display step of noise before the 8-bit quantise. Every default leaves the composite choice unchanged.
+    u32  glowBlend = 0;
+    f32  glowStrength = 1;
+    f32  glowLumCap = 0;
+    u32  deband = 0;
 };
 
 // Field by field, not memcmp: the bool leaves padding whose bytes a copy need not preserve. The size
 // check is the reminder -- a new PostSettings field changes it, and must be added here too.
 inline bool postSettingsEqual(const PostSettings& a, const PostSettings& b) {
-    static_assert(sizeof(PostSettings) == 196, "a PostSettings field was added: compare it below too");
+    static_assert(sizeof(PostSettings) == 212, "a PostSettings field was added: compare it below too");
     return a.exposure == b.exposure && a.bloomIntensity == b.bloomIntensity &&
            a.bloomThreshold == b.bloomThreshold && a.bloomKnee == b.bloomKnee &&
            a.autoExposure == b.autoExposure && a.exposureMin == b.exposureMin &&
@@ -260,7 +269,8 @@ inline bool postSettingsEqual(const PostSettings& a, const PostSettings& b) {
            a.gradingLut == b.gradingLut && a.gradingLutIntensity == b.gradingLutIntensity &&
            a.colourVision == b.colourVision && a.colourVisionStrength == b.colourVisionStrength &&
            a.tonemapWhite == b.tonemapWhite && a.adjustBrightness == b.adjustBrightness &&
-           a.adjustContrast == b.adjustContrast && a.adjustSaturation == b.adjustSaturation;
+           a.adjustContrast == b.adjustContrast && a.adjustSaturation == b.adjustSaturation &&
+           a.glowBlend == b.glowBlend && a.glowStrength == b.glowStrength && a.glowLumCap == b.glowLumCap && a.deband == b.deband;
 }
 
 // Which sky the engine draws. Authored is a two-colour dome; Physical derives the dome, the direct
@@ -285,6 +295,13 @@ struct SkyAtmosphere {
     f32 groundBlend     = 1.0f;   // how much of the ground replaces the sky below the horizon
     // Multiplier on the sky-hemisphere irradiance every surface receives.
     f32 skyLightIntensity = 1.0f;
+    // AMBIENT OVERRIDE (P8; the Physical model only: it replaces the sky-irradiance coefficients, the Authored dome has none to replace). Off: the ambient is the
+    // sky's. On: the ambient is a constant radiance ambientColor (LINEAR rgb) times ambientEnergy, blended toward the sky's own by ambientSkyContribution
+    // (0 = the colour alone, 1 = the sky alone). skyLightIntensity still scales the result.
+    bool ambientOverride = false;
+    f32  ambientColor[3] = {0.0f, 0.0f, 0.0f};
+    f32  ambientEnergy = 1.0f;
+    f32  ambientSkyContribution = 1.0f;
 
     // ---- the sun ----
     f32 sunDirection[3] = {-0.5481f, 0.3838f, 0.7431f};   // toward the light

@@ -47,4 +47,13 @@ inline bool rangeShown(f32 distCm, f32 beginCm, f32 endCm, f32 beginMarginCm, f3
     return shown;
 }
 
+// How far a visibility fade (CMeshRenderer::visFade != 0) has taken an instance at `distCm`: 0 shown, 1 gone. Past the end threshold the fade runs over the end margin
+// (the instance is drawn until it reaches 1), before the begin threshold over the begin margin. A bound that is off, or has no margin, never fades (a hard cut).
+inline f32 rangeFadeAmount(f32 distCm, f32 beginCm, f32 endCm, f32 beginMarginCm, f32 endMarginCm) {
+    f32 fade = 0.0f;
+    if (endCm > 0.0f && endMarginCm > 0.0f && distCm > endCm) fade = (distCm - endCm) / endMarginCm;
+    if (beginCm > 0.0f && beginMarginCm > 0.0f && distCm < beginCm) fade = fade > (beginCm - distCm) / beginMarginCm ? fade : (beginCm - distCm) / beginMarginCm;
+    return fade < 0.0f ? 0.0f : fade > 1.0f ? 1.0f : fade;
+}
+
 } // namespace aver::scene

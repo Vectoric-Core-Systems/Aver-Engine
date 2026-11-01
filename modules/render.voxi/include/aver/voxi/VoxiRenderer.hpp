@@ -320,6 +320,7 @@ private:
     Settings settings_{};
 
     rhi::TextureHandle shadowTex_ = 0;
+    u32 shadowCascadeSize_ = 2048;   // one cascade's edge in texels, latched by createShadowResources from Settings::shadowCascadeSize
     rhi::PipelineHandle shadowPso_ = 0;
     // Via drawMeshInstanced; 0 if compile failed, shadowPass() falls back.
     rhi::PipelineHandle shadowInstancedPso_ = 0;
@@ -1013,6 +1014,7 @@ private:
     void latePatchMovers(rhi::IRenderContext& ctx);
     // Two facts about the list recorded as each draw appends and swapped by beginScene().
     std::vector<u32> translucentDraws_, translucentDrawsPrev_;
+    u32 lastShadowDraws_ = 0;   // shadow-map draws the last shadow pass submitted, summed over cascades (RenderStats)
     // Indices into draws_ / drawsPrev_ of light-flagged draws, in list order.
     std::vector<u32> lampDraws_, lampDrawsPrev_;
 
@@ -1675,6 +1677,12 @@ public:
                                             rayDrivenPso_ != 0 && !viewIsOrthographicNow();
         return debugViewActive() || rayDrivenWillBeActive;
     }
+
+    // What the last frame submitted (P18, framework_render_abi.h). Counted from the draw list the renderer replays, so it holds when ray tracing or the
+    // ray-driven renderer paints the picture; drawCalls is the raster scene draws (0 while the scene is suppressed by a ray-driven frame). Walks the list
+    // once per call: ask only when something wants it.
+    struct RenderStats { u32 objects = 0, triangles = 0, drawCalls = 0, translucent = 0, shadowDraws = 0; };
+    RenderStats renderStats() const;
 
 private:
     // Whether the ray-traced history textures will be read and written this frame.

@@ -1299,13 +1299,15 @@ float shadowSampleCascade(float3 wpos, uint c) {
 
     // 2x2 atlas layout: quadrant x = c&1, y = c>>1. Must match the C++ side.
     float2 quad = float2(c & 1u, c >> 1u) * 0.5;
-    float inset = gShadowParams.x;
+    // The kernel width in texels rides gCascadeSplit[c].z (Settings::shadowFilterScale; 1 = the 3x3 filter of old, 0 = one hard comparison). The inset keeps a wide kernel inside its quadrant.
+    float kw = gShadowParams.x * gCascadeSplit[c].z;
+    float inset = max(gShadowParams.x, kw);
     uv = quad + clamp(uv * 0.5, float2(inset, inset), float2(0.5 - inset, 0.5 - inset));
 
     float s = 0.0;
     [unroll] for (int y = -1; y <= 1; ++y)
     [unroll] for (int x = -1; x <= 1; ++x)
-        s += gShadowTex.SampleCmpLevelZero(gShadowSamp, uv + float2(x, y) * gShadowParams.x, p.z);
+        s += gShadowTex.SampleCmpLevelZero(gShadowSamp, uv + float2(x, y) * kw, p.z);
     return s / 9.0;
 }
 

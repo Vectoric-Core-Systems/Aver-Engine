@@ -180,6 +180,24 @@ static void testMasks() {
     std::memset(&zeroCam, 0, sizeof zeroCam);
     check((zeroCam.flags & kCameraDrivesView) == 0 && zeroCam.projection == 0 && zeroCam.cullInv == 0, "a zero-filled CCamera does not drive the view and is perspective");
     check(sizeof(CMeshRenderer) % 8 == 0 && sizeof(CCamera) == 48, "component sizes: CMeshRenderer a multiple of 8, CCamera 48");
+    // P5 / F32 / P20: the appended per-instance flags are zero-safe (a zero-filled renderer casts shadows, is static for GI, tests occlusion, adds no margin or bias).
+    check(zeroMr.renderFlags == 0 && renderShadowMode(zeroMr.renderFlags) == 0 && renderGiMode(zeroMr.renderFlags) == 0 && zeroMr.cullMarginCm == 0.0f && zeroMr.lodBias == 0.0f &&
+              zeroMr.fadeAmount == 0.0f,
+          "a zero-filled CMeshRenderer is the ordinary mesh: casts shadows, static GI, no margin, no LOD bias, no fade");
+    const u32 packed = kRenderShadowsOnly | (kRenderGiDisabled << kRenderGiShift) | kRenderIgnoreOcclusion;
+    check(renderShadowMode(packed) == kRenderShadowsOnly && renderGiMode(packed) == kRenderGiDisabled && (packed & kRenderIgnoreOcclusion) != 0 && (packed & ~kRenderFlagsKnown) == 0,
+          "the render flag fields pack and read back independently");
+    check(renderShadowMode(kRenderShadowsOff) == kRenderShadowsOff && renderGiMode(kRenderShadowsOff) == 0, "a shadow mode leaves the GI mode alone");
+}
+
+static void testRangeFade() {
+    AVER_INFO("=== visibility fade amount (P20) ===");
+    using namespace aver::scene;
+    check(rangeFadeAmount(50.0f, 0, 0, 0, 0) == 0.0f, "no range: never fades");
+    check(rangeFadeAmount(600.0f, 0, 500, 0, 0) == 0.0f, "an end with no margin is a hard cut: no fade amount");
+    check(rangeFadeAmount(499.0f, 0, 500, 0, 100) == 0.0f && rangeFadeAmount(500.0f, 0, 500, 0, 100) == 0.0f, "up to the end threshold: shown");
+    check(rangeFadeAmount(550.0f, 0, 500, 0, 100) == 0.5f && rangeFadeAmount(600.0f, 0, 500, 0, 100) == 1.0f && rangeFadeAmount(900.0f, 0, 500, 0, 100) == 1.0f, "past the end it ramps over the margin and stays 1");
+    check(rangeFadeAmount(95.0f, 100, 0, 10, 0) == 0.5f && rangeFadeAmount(100.0f, 100, 0, 10, 0) == 0.0f && rangeFadeAmount(50.0f, 100, 0, 10, 0) == 1.0f, "before the begin it ramps over the begin margin");
 }
 
 static void testRanges() {
@@ -252,6 +270,7 @@ int main() {
     testViewProjRoundTrips();
     testMasks();
     testRanges();
+    testRangeFade();
     testShaderText();
     AVER_INFO("{} checks, {} failures", g_checks, g_failures);
     if (g_failures) { AVER_ERROR("=== FAILED ==="); return 1; }

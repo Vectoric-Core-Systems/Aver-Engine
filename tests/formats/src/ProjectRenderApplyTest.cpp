@@ -922,6 +922,73 @@ static void testTextureSamplerKeys() {
     check(cap2.textureAniso == 4 && cap2.hasTextureMipBias && cap2.textureMipBias == 0.25f, "capture: a changed value is written");
 }
 
+// RENDER.SHADOWCASCADES / SHADOWSPLIT / SHADOWDIST / SHADOWRES / SHADOWFILTER (P3, P4) and RENDER.VOLFOGLENGTH / VOLFOGANISO / VOLFOGTEMPORAL (F24): absent keeps
+// the engine defaults (4 cascades, lambda 0.85, automatic distance, 2048, filter 1; fog 20000 / 0.6 / 0.85), stated values land clamped, every key round-trips
+// through the project file (the fog anisotropy may be negative), and capture writes them only when they differ or the project already stated them.
+static void testShadowAndFogKeys() {
+    AVER_INFO("=== RENDER.SHADOW* and RENDER.VOLFOG{LENGTH,ANISO,TEMPORAL}: cascades, filter and light-shaft fog ===");
+    voxi::Settings s{};
+    check(s.shadowCascades == 4u && s.shadowSplitLambda == 0.85f && s.shadowMaxDistance == 0.0f && s.shadowCascadeSize == 2048u && s.shadowFilterScale == 1.0f,
+          "the engine defaults are what the renderer did before these fields: 4 cascades, lambda 0.85, automatic distance, 2048 texels, the 3x3 kernel");
+    check(s.volumetricFogMaxDistance == 20000.0f && s.volumetricFogAnisotropy == 0.6f && s.volumetricFogTemporal == 0.85f, "the fog defaults are unchanged");
+    fmt::ProjectDesc absent;
+    check(!absent.hasRenderSettings() && absent.shadowCascades == -1 && !absent.hasVolFogAniso, "absent: not stated");
+    const voxi::Settings before = s;
+    voxi::applyManifestKnobs(absent, s);
+    check(s.shadowCascades == before.shadowCascades && s.shadowSplitLambda == before.shadowSplitLambda && s.shadowCascadeSize == before.shadowCascadeSize &&
+              s.volumetricFogAnisotropy == before.volumetricFogAnisotropy,
+          "an absent key leaves every field alone");
+
+    fmt::ProjectDesc p;
+    p.name = "Shadows";
+    p.shadowCascades = 2; p.shadowSplit = 0.5f; p.shadowDist = 15000.0f; p.shadowRes = 4096; p.shadowFilter = 2.5f;
+    p.volFogLength = 50000.0f; p.hasVolFogAniso = true; p.volFogAniso = -0.3f; p.volFogTemporal = 0.5f;
+    check(p.hasRenderSettings(), "a stated key counts as a render setting");
+    voxi::applyManifestKnobs(p, s);
+    check(s.shadowCascades == 2u && s.shadowSplitLambda == 0.5f && s.shadowMaxDistance == 15000.0f && s.shadowCascadeSize == 4096u && s.shadowFilterScale == 2.5f,
+          "stated shadow values land in Settings");
+    check(s.volumetricFogMaxDistance == 50000.0f && s.volumetricFogAnisotropy == -0.3f && s.volumetricFogTemporal == 0.5f, "stated fog values land, a negative anisotropy included");
+
+    fmt::ProjectDesc wild;
+    wild.shadowCascades = 99; wild.shadowSplit = 9.0f; wild.shadowRes = 3000; wild.shadowFilter = 99.0f;
+    wild.volFogLength = 1.0f; wild.hasVolFogAniso = true; wild.volFogAniso = 5.0f; wild.volFogTemporal = 5.0f;
+    voxi::applyManifestKnobs(wild, s);
+    check(s.shadowCascades == 4u && s.shadowSplitLambda == 1.0f && s.shadowCascadeSize == 4096u && s.shadowFilterScale == 4.0f, "out-of-range shadow values clamp (cascades 1..4, lambda 0..1, size snaps up to a power of two, filter 0..4)");
+    check(s.volumetricFogMaxDistance == 100.0f && s.volumetricFogAnisotropy == 0.95f && s.volumetricFogTemporal == 0.98f, "and the fog ones (100..500000, -0.95..0.95, 0..0.98)");
+    check(voxi::snapShadowCascadeSize(0) == 512u && voxi::snapShadowCascadeSize(513) == 1024u && voxi::snapShadowCascadeSize(2048) == 2048u && voxi::snapShadowCascadeSize(2049) == 4096u, "the cascade size snaps up to 512, 1024, 2048 or 4096");
+
+    const std::string text = fmt::writeOcproject(p, "");
+    check(text.find("RENDER.SHADOWCASCADES 2") != std::string::npos && text.find("RENDER.SHADOWRES 4096") != std::string::npos && text.find("RENDER.VOLFOGANISO -0.3") != std::string::npos,
+          "the keys are written, the negative anisotropy included");
+    fmt::ProjectDesc back;
+    std::string err;
+    const bool parsed = fmt::parseOcproject(text, back, &err);
+    check(parsed && back.shadowCascades == 2 && back.shadowSplit == 0.5f && back.shadowDist == 15000.0f && back.shadowRes == 4096 && back.shadowFilter == 2.5f &&
+              back.volFogLength == 50000.0f && back.hasVolFogAniso && back.volFogAniso == -0.3f && back.volFogTemporal == 0.5f,
+          "and parse back: " + err);
+    fmt::ProjectDesc zero;
+    zero.name = "ZeroDistance";
+    zero.shadowDist = 0.0f;
+    fmt::ProjectDesc zeroBack;
+    check(fmt::parseOcproject(fmt::writeOcproject(zero, ""), zeroBack, &err) && zeroBack.shadowDist == 0.0f, "a stated distance of 0 (automatic) is written and read, not lost as unstated");
+    fmt::ProjectDesc none;
+    none.name = "NoShadows";
+    const std::string plain = fmt::writeOcproject(none, "");
+    check(plain.find("RENDER.SHADOW") == std::string::npos && plain.find("RENDER.VOLFOGLENGTH") == std::string::npos && plain.find("RENDER.VOLFOGANISO") == std::string::npos, "an absent key writes no line");
+
+    const voxi::DeviceInfo d = fullyCapableDevice();
+    voxi::Settings live{};
+    voxi::Settings requested = live;
+    fmt::ProjectDesc cap;
+    voxi::captureVoxiSettings(cap, requested, live, d, 0);
+    check(cap.shadowCascades == -1 && cap.shadowSplit < 0.0f && cap.shadowDist < 0.0f && cap.shadowRes == -1 && cap.shadowFilter < 0.0f && !cap.hasVolFogAniso && cap.volFogLength < 0.0f,
+          "capture: the defaults add no key to a project that never mentioned them");
+    requested.shadowCascades = 3; requested.shadowFilterScale = 0.0f; requested.volumetricFogAnisotropy = -0.2f;
+    fmt::ProjectDesc cap2;
+    voxi::captureVoxiSettings(cap2, requested, live, d, 0);
+    check(cap2.shadowCascades == 3 && cap2.shadowFilter == 0.0f && cap2.hasVolFogAniso && cap2.volFogAniso == -0.2f, "capture: a changed value is written (a filter of 0 included)");
+}
+
 // RENDER.MESHEXTRA (G4 R1): absent leaves the default (on), 0/1 land in Settings::meshExtraStreams, the key round-trips and a manifest that
 // never mentions it stays free of it.
 static void testMeshExtraKey() {
@@ -1126,6 +1193,7 @@ int main() {
     testMeshExtraKey();
     testMaterialFxKey();
     testTextureSamplerKeys();
+    testShadowAndFogKeys();
     testEveryKeyReachesSettings();
     testN6AbsentDerivedKnobResetsToLadder();
     testN6RestirVisibilityFollowsTier();

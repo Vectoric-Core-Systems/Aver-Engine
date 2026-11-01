@@ -1461,6 +1461,9 @@ public:
     void setVSyncOff(bool off);               // --no-vsync
     void setVSyncOn(bool on) { vsyncOnRequested_ = on; }   // --vsync
     void setLodSelect(bool on, f32 thresholdPx);
+#if AVER_MODULE_FRAMEWORK && AVER_MODULE_VOXI
+    void applyScriptRender(voxi::Renderer& vx);   // framework_render_abi.h at the frame boundary (SandboxUpdate.cpp)
+#endif
     void setLodClusterStats(bool on);
     void setLodPerCluster(bool on, f32 thresholdPx);
     void setLodMeshShader(bool on, f32 thresholdPx);

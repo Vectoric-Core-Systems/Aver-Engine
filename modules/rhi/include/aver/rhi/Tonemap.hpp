@@ -24,10 +24,12 @@ inline u32 clampTonemapMode(i64 mode) { return static_cast<u32>(std::clamp<i64>(
 // An extended-curve index (0..4: linear, Reinhard, filmic, ACES, AgX) as an Aver mode.
 inline u32 tonemapModeFromExtIndex(i64 extIndex) { return kTonemapExtLinear + static_cast<u32>(std::clamp<i64>(extIndex, 0, 4)); }
 
-// True when the post chain needs the AVER_POST_TONEMAP_EXT composite: an extended tonemapper, or any display-space adjustment off identity.
+// True when the post chain needs the AVER_POST_TONEMAP_EXT composite: an extended tonemapper, any display-space adjustment off identity, a glow blend
+// other than add, or debanding.
 // False is the default path: the ordinary composite pipelines, compiled with today's defines and nothing else.
 inline bool postNeedsExtComposite(const PostSettings& p) {
-    return tonemapIsExt(p.tonemap) || p.adjustBrightness != 1.0f || p.adjustContrast != 1.0f || p.adjustSaturation != 1.0f;
+    return tonemapIsExt(p.tonemap) || p.adjustBrightness != 1.0f || p.adjustContrast != 1.0f || p.adjustSaturation != 1.0f ||
+           p.glowBlend != 0 || p.glowStrength != 1.0f || p.glowLumCap > 0.0f || p.deband != 0;   // Glow.hpp's postUsesGlowExt
 }
 
 // The project's RENDER.TONEMAP* keys onto `p` (each < 0 = unstated and left alone). `mode` is applied only when `modeAllowed`

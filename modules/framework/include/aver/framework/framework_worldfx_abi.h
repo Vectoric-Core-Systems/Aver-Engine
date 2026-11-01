@@ -21,7 +21,7 @@
 extern "C" {
 #endif
 
-#define AVER_FW_WORLDFX_ABI_VERSION 1
+#define AVER_FW_WORLDFX_ABI_VERSION 2   /* 2: the ambient keys 12..14 (P8), appended */
 AVER_FW_ABI int32_t aver_fw_worldfx_abi_version(void);
 
 /* Post layers and volume scales are bounded; a request beyond either is refused. */
@@ -45,6 +45,10 @@ AVER_FW_ABI int32_t aver_fw_worldfx_abi_version(void);
 #define AVER_FW_ENV_FOG_START    9  /* v0 cm */
 #define AVER_FW_ENV_FOG_MAXOPAC 10  /* v0 */
 #define AVER_FW_ENV_SKY_LIGHT   11  /* v0 multiplier on the sky-hemisphere irradiance */
+#define AVER_FW_ENV_AMBIENT     12  /* v0..v2 linear rgb of a constant ambient (Physical sky only); setting it turns the override on */
+#define AVER_FW_ENV_AMBIENT_ENERGY 13  /* v0 multiplier on that colour (default 1) */
+#define AVER_FW_ENV_AMBIENT_SKY 14  /* v0 0..1, how much of the sky's own ambient is blended in (default 1: the sky alone, so set this to 0 for the colour alone) */
+#define AVER_FW_ENV_LAST        14
 
 /* 1 stored, 0 for an unknown key or a refused value. */
 AVER_FW_ABI int32_t aver_fw_env_set(int32_t key, float v0, float v1, float v2);

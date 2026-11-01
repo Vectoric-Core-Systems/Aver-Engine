@@ -100,6 +100,10 @@ inline void applyLevelEnv(const fmt::OcWorldEnv& w, rhi::SkyAtmosphere& sky) {
         sky.atmosphereHeight  = static_cast<f32>(w.skyDomeExponent);
         sky.groundBlend       = static_cast<f32>(w.skyGroundBlend);
         sky.skyLightIntensity = static_cast<f32>(w.skyLight);
+        sky.ambientOverride = w.skyAmbientEnergy >= 0.0;
+        for (int i = 0; i < 3; ++i) sky.ambientColor[i] = static_cast<f32>(w.skyAmbientColor[i]);
+        sky.ambientEnergy = static_cast<f32>(w.skyAmbientEnergy >= 0.0 ? w.skyAmbientEnergy : 1.0);
+        sky.ambientSkyContribution = static_cast<f32>(w.skyAmbientSky);
         // THE AIR IS THE ONE PLACE A SENTINEL SURVIVES, and it is guarded here as well as in the
         // writer: every one of these is a strictly positive physical quantity, so a negative means
         // the level declined to override and the engine's calibrated profile must stand. Assigning
@@ -165,6 +169,9 @@ inline void captureLevelEnv(const rhi::SkyAtmosphere& sky, fmt::OcWorldEnv& w) {
         w.skyDomeExponent = static_cast<f64>(sky.atmosphereHeight);
         w.skyGroundBlend  = static_cast<f64>(sky.groundBlend);
         w.skyLight        = static_cast<f64>(sky.skyLightIntensity);
+        w.skyAmbientEnergy = sky.ambientOverride ? static_cast<f64>(sky.ambientEnergy) : -1.0;
+        for (int i = 0; i < 3; ++i) w.skyAmbientColor[i] = static_cast<f64>(sky.ambientColor[i]);
+        w.skyAmbientSky   = static_cast<f64>(sky.ambientSkyContribution);
         // WRITTEN AS REAL VALUES, never back as the -1 they may have been read as. Once a level
         // carries a SKY record the editor has shown these on screen and the author has had the
         // chance to move them, so what is live IS the authored value; keeping the sentinel here
@@ -216,7 +223,8 @@ inline void captureLevelEnv(const rhi::SkyAtmosphere& sky, fmt::OcWorldEnv& w) {
 // The framework's AVER_FW_ENV_* numbers, restated so the mapping below reads without the header.
 inline constexpr int kScriptEnvSunDir = 1, kScriptEnvSunLux = 2, kScriptEnvSunColor = 3, kScriptEnvSunTemp = 4,
                      kScriptEnvFogDensity = 5, kScriptEnvFogColor = 6, kScriptEnvFogFalloff = 7, kScriptEnvFogHeight = 8,
-                     kScriptEnvFogStart = 9, kScriptEnvFogMaxOpacity = 10, kScriptEnvSkyLight = 11;
+                     kScriptEnvFogStart = 9, kScriptEnvFogMaxOpacity = 10, kScriptEnvSkyLight = 11, kScriptEnvAmbient = 12, kScriptEnvAmbientEnergy = 13,
+                     kScriptEnvAmbientSky = 14;
 
 #ifdef AVER_LEVELSKY_HAS_WORLDFX_ABI
 static_assert(kScriptEnvSunDir == AVER_FW_ENV_SUN_DIR && kScriptEnvSunLux == AVER_FW_ENV_SUN_LUX &&
@@ -224,7 +232,8 @@ static_assert(kScriptEnvSunDir == AVER_FW_ENV_SUN_DIR && kScriptEnvSunLux == AVE
                   kScriptEnvFogDensity == AVER_FW_ENV_FOG_DENSITY && kScriptEnvFogColor == AVER_FW_ENV_FOG_COLOR &&
                   kScriptEnvFogFalloff == AVER_FW_ENV_FOG_FALLOFF && kScriptEnvFogHeight == AVER_FW_ENV_FOG_HEIGHT &&
                   kScriptEnvFogStart == AVER_FW_ENV_FOG_START && kScriptEnvFogMaxOpacity == AVER_FW_ENV_FOG_MAXOPAC &&
-                  kScriptEnvSkyLight == AVER_FW_ENV_SKY_LIGHT,
+                  kScriptEnvSkyLight == AVER_FW_ENV_SKY_LIGHT && kScriptEnvAmbient == AVER_FW_ENV_AMBIENT && kScriptEnvAmbientEnergy == AVER_FW_ENV_AMBIENT_ENERGY &&
+                  kScriptEnvAmbientSky == AVER_FW_ENV_AMBIENT_SKY && kScriptEnvAmbientSky == AVER_FW_ENV_LAST,
               "LevelSky.hpp's script environment keys drifted from framework_worldfx_abi.h");
 
 // The reads a host makes, straight over the C ABI.
@@ -271,6 +280,13 @@ inline bool applyScriptEnv(rhi::SkyAtmosphere& sky) {
     if (get(kScriptEnvFogStart)) sky.fogStart = v[0];
     if (get(kScriptEnvFogMaxOpacity)) sky.fogMaxOpacity = v[0];
     if (get(kScriptEnvSkyLight)) sky.skyLightIntensity *= v[0];
+    // The ambient override: the colour turns it on; the energy and the sky share refine it (their defaults are the SkyAtmosphere ones until set).
+    if (get(kScriptEnvAmbient)) {
+        sky.ambientOverride = true;
+        for (int i = 0; i < 3; ++i) sky.ambientColor[i] = v[i];
+    }
+    if (get(kScriptEnvAmbientEnergy)) sky.ambientEnergy = v[0];
+    if (get(kScriptEnvAmbientSky)) sky.ambientSkyContribution = v[0];
     return any;
 }
 
@@ -280,7 +296,7 @@ template <class Api>
 inline const rhi::SkyAtmosphere& withScriptEnv(const rhi::SkyAtmosphere& sky, rhi::SkyAtmosphere& scratch) {
     float probe[3];
     bool any = false;
-    for (int key = kScriptEnvSunDir; key <= kScriptEnvSkyLight && !any; ++key) any = Api::envGet(key, probe);
+    for (int key = kScriptEnvSunDir; key <= kScriptEnvAmbientSky && !any; ++key) any = Api::envGet(key, probe);
     if (!any) return sky;
     scratch = sky;
     applyScriptEnv<Api>(scratch);

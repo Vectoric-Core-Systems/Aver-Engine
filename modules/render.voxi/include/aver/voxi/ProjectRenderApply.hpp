@@ -41,6 +41,11 @@ namespace aver::voxi {
 
 // ---- APPLY: manifest -> Settings ------------------------------------------------------------------
 
+// A requested cascade edge as one the atlas can be: the nearest of 512, 1024, 2048, 4096 at or above it (4096 for anything larger, 512 for 0).
+inline u32 snapShadowCascadeSize(u32 v) {
+    return v <= 512u ? 512u : v <= 1024u ? 1024u : v <= 2048u ? 2048u : 4096u;
+}
+
 // Applies the manifest's four TIER keys (GI, RT, PT, LayeredBsdf) to `s`, and nothing else. Split out
 // from applyManifestKnobs for the same reason SandboxApp.cpp's own two-call apply is split: a knob
 // asked for at the value it already holds is indistinguishable, to setSettings' own change-gated
@@ -154,6 +159,16 @@ inline void applyManifestKnobs(const fmt::ProjectDesc& project, Settings& s) {
     // G4 R8 RENDER.VOLFOG (volumetric fog on / off) and RENDER.VOLFOGDENSITY (its uniform medium, per cm): plain knobs, absent keeps the engine defaults.
     if (project.volFog >= 0) s.volumetricFog = project.volFog != 0;
     if (project.volFogDensity >= 0.0f) s.volumetricFogDensity = std::clamp(project.volFogDensity, 0.0f, 0.01f);
+    // RENDER.VOLFOGLENGTH / VOLFOGANISO / VOLFOGTEMPORAL: plain knobs, absent keeps the engine defaults; out-of-range values clamp as VoxiFroxelFog::fromSettings does.
+    if (project.volFogLength >= 0.0f && std::isfinite(project.volFogLength)) s.volumetricFogMaxDistance = std::clamp(project.volFogLength, 100.0f, 500000.0f);
+    if (project.hasVolFogAniso && std::isfinite(project.volFogAniso)) s.volumetricFogAnisotropy = std::clamp(project.volFogAniso, -0.95f, 0.95f);
+    if (project.volFogTemporal >= 0.0f && std::isfinite(project.volFogTemporal)) s.volumetricFogTemporal = std::clamp(project.volFogTemporal, 0.0f, 0.98f);
+    // RENDER.SHADOWCASCADES / SHADOWSPLIT / SHADOWDIST / SHADOWRES / SHADOWFILTER: plain knobs, absent keeps the engine defaults. The size snaps to a power of two in 512..4096.
+    if (project.shadowCascades >= 0) s.shadowCascades = static_cast<u32>(std::clamp(project.shadowCascades, 1, 4));
+    if (project.shadowSplit >= 0.0f && std::isfinite(project.shadowSplit)) s.shadowSplitLambda = std::clamp(project.shadowSplit, 0.0f, 1.0f);
+    if (project.shadowDist >= 0.0f && std::isfinite(project.shadowDist)) s.shadowMaxDistance = project.shadowDist;
+    if (project.shadowRes >= 0) s.shadowCascadeSize = snapShadowCascadeSize(static_cast<u32>(project.shadowRes));
+    if (project.shadowFilter >= 0.0f && std::isfinite(project.shadowFilter)) s.shadowFilterScale = std::clamp(project.shadowFilter, 0.0f, 4.0f);
 
     // THE TENTH TIER-DERIVED KNOB (N6): absent RENDER.RESTIRVISIBILITY follows the GI tier that was
     // just committed above, exactly like voxelResolution/giCones/giUpdateInterval do -- not whatever
@@ -610,6 +625,15 @@ inline void captureVoxiSettings(fmt::ProjectDesc& project, const Settings& reque
     if (requested.volumetricFog) project.volFog = 1;
     else if (project.volFog >= 0) project.volFog = 0;
     if (project.volFogDensity >= 0.0f) project.volFogDensity = requested.volumetricFogDensity;
+    if (project.volFogLength >= 0.0f || requested.volumetricFogMaxDistance != 20000.0f) project.volFogLength = requested.volumetricFogMaxDistance;
+    if (project.hasVolFogAniso || requested.volumetricFogAnisotropy != 0.6f) { project.hasVolFogAniso = true; project.volFogAniso = requested.volumetricFogAnisotropy; }
+    if (project.volFogTemporal >= 0.0f || requested.volumetricFogTemporal != 0.85f) project.volFogTemporal = requested.volumetricFogTemporal;
+    // The shadow keys: written only when they differ from the defaults, or when the project already stated them.
+    if (requested.shadowCascades != 4u || project.shadowCascades >= 0) project.shadowCascades = static_cast<int>(requested.shadowCascades);
+    if (requested.shadowSplitLambda != 0.85f || project.shadowSplit >= 0.0f) project.shadowSplit = requested.shadowSplitLambda;
+    if (requested.shadowMaxDistance != 0.0f || project.shadowDist >= 0.0f) project.shadowDist = requested.shadowMaxDistance;
+    if (requested.shadowCascadeSize != 2048u || project.shadowRes >= 0) project.shadowRes = static_cast<int>(requested.shadowCascadeSize);
+    if (requested.shadowFilterScale != 1.0f || project.shadowFilter >= 0.0f) project.shadowFilter = requested.shadowFilterScale;
     project.refractionStrength = requested.refractionStrength;
     project.refractionEdgeFade = requested.refractionEdgeFade;
 }

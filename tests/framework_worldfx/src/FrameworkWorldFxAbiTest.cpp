@@ -33,10 +33,10 @@ static void clearAll() {
 
 static void testVersionAndKeys() {
     AVER_INFO("=== version and key numbers ===");
-    check(aver_fw_worldfx_abi_version() == 1 && AVER_FW_WORLDFX_ABI_VERSION == 1, "the world effects ABI is version 1");
+    check(aver_fw_worldfx_abi_version() == 2 && AVER_FW_WORLDFX_ABI_VERSION == 2, "the world effects ABI is version 2 (the ambient keys 12..14 were appended)");
     check(AVER_FW_ENV_SUN_DIR == 1 && AVER_FW_ENV_SUN_LUX == 2 && AVER_FW_ENV_SUN_COLOR == 3 && AVER_FW_ENV_SUN_TEMP == 4 &&
               AVER_FW_ENV_FOG_DENSITY == 5 && AVER_FW_ENV_FOG_COLOR == 6 && AVER_FW_ENV_FOG_FALLOFF == 7 &&
-              AVER_FW_ENV_FOG_HEIGHT == 8 && AVER_FW_ENV_FOG_START == 9 && AVER_FW_ENV_FOG_MAXOPAC == 10 && AVER_FW_ENV_SKY_LIGHT == 11,
+              AVER_FW_ENV_FOG_HEIGHT == 8 && AVER_FW_ENV_FOG_START == 9 && AVER_FW_ENV_FOG_MAXOPAC == 10 && AVER_FW_ENV_SKY_LIGHT == 11 && AVER_FW_ENV_AMBIENT == 12 && AVER_FW_ENV_AMBIENT_ENERGY == 13 && AVER_FW_ENV_AMBIENT_SKY == 14,
           "the environment keys are pinned");
 }
 
@@ -45,7 +45,7 @@ static void testEnvironment() {
     float out[3] = {-9, -9, -9};
 
     // Nothing is overridden at first, and a get leaves its output alone.
-    for (int k = AVER_FW_ENV_SUN_DIR; k <= AVER_FW_ENV_SKY_LIGHT; ++k)
+    for (int k = AVER_FW_ENV_SUN_DIR; k <= AVER_FW_ENV_LAST; ++k)
         check(aver_fw_env_get(k, out) == 0 && out[0] == -9 && out[1] == -9 && out[2] == -9, "key " + std::to_string(k) + " starts unset");
 
     // Every key stores and reads back (values already inside every clamp).
@@ -62,6 +62,9 @@ static void testEnvironment() {
         {AVER_FW_ENV_FOG_START,   {300, 0, 0},       {300, 0, 0}},
         {AVER_FW_ENV_FOG_MAXOPAC, {0.7f, 0, 0},      {0.7f, 0, 0}},
         {AVER_FW_ENV_SKY_LIGHT,   {2.5f, 0, 0},      {2.5f, 0, 0}},
+        {AVER_FW_ENV_AMBIENT,     {0.1f, 0.2f, 0.3f}, {0.1f, 0.2f, 0.3f}},
+        {AVER_FW_ENV_AMBIENT_ENERGY, {1.5f, 9, 9},   {1.5f, 0, 0}},
+        {AVER_FW_ENV_AMBIENT_SKY, {7.0f, 0, 0},      {1.0f, 0, 0}},   // clamped to 0..1
     };
     for (const Case& c : cases) {
         const std::string n = "key " + std::to_string(c.key);
@@ -78,7 +81,7 @@ static void testEnvironment() {
     check(aver_fw_env_clear(AVER_FW_ENV_SUN_LUX) == 1, "clearing a key that is already clear still answers 1");
     check(aver_fw_env_clear(0) == 1, "key 0 clears all");
     bool any = false;
-    for (int k = AVER_FW_ENV_SUN_DIR; k <= AVER_FW_ENV_SKY_LIGHT; ++k) any = any || aver_fw_env_get(k, nullptr) == 1;
+    for (int k = AVER_FW_ENV_SUN_DIR; k <= AVER_FW_ENV_LAST; ++k) any = any || aver_fw_env_get(k, nullptr) == 1;
     check(!any, "nothing stays overridden after clear-all");
 
     // Sanitising.
@@ -107,9 +110,9 @@ static void testEnvironment() {
 
     // Unknown keys.
     out[0] = out[1] = out[2] = -9;
-    check(aver_fw_env_set(0, 1, 1, 1) == 0 && aver_fw_env_set(12, 1, 1, 1) == 0 && aver_fw_env_set(-1, 1, 1, 1) == 0, "unknown keys are refused by set");
-    check(aver_fw_env_clear(12) == 0 && aver_fw_env_clear(-1) == 0, "and by clear");
-    check(aver_fw_env_get(0, out) == 0 && aver_fw_env_get(12, out) == 0 && out[0] == -9, "and by get, which leaves its output alone");
+    check(aver_fw_env_set(0, 1, 1, 1) == 0 && aver_fw_env_set(15, 1, 1, 1) == 0 && aver_fw_env_set(-1, 1, 1, 1) == 0, "unknown keys are refused by set");
+    check(aver_fw_env_clear(15) == 0 && aver_fw_env_clear(-1) == 0, "and by clear");
+    check(aver_fw_env_get(0, out) == 0 && aver_fw_env_get(15, out) == 0 && out[0] == -9, "and by get, which leaves its output alone");
     clearAll();
 }
 

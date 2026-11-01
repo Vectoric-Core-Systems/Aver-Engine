@@ -89,7 +89,18 @@ public static class Sky
     /// <summary>Multiplier on the light the sky hemisphere gives the scene (1 is the level's own).</summary>
     public static bool SetSkyLight(float multiplier) => Env(WorldEnvKey.SkyLight, multiplier, 0f, 0f);
 
-    /// <summary>Releases every sun, fog and sky-light override, so the level's authored values return.</summary>
+    /// <summary>A constant ambient light instead of (or blended with) the sky's own: linear rgb times <paramref name="energy"/>, with
+    /// <paramref name="skyContribution"/> of the sky's ambient mixed in (0 gives the colour alone, 1 the sky alone). It replaces the sky's
+    /// irradiance coefficients, so it applies to the Physical sky model; an authored two-colour dome has none to replace. <see cref="SetSkyLight"/>
+    /// still scales the result.</summary>
+    public static bool SetAmbient(float r, float g, float b, float energy = 1f, float skyContribution = 0f)
+    {
+        bool ok = Env(WorldEnvKey.Ambient, r, g, b);
+        ok &= Env(WorldEnvKey.AmbientEnergy, energy, 0f, 0f);
+        return Env(WorldEnvKey.AmbientSky, skyContribution, 0f, 0f) && ok;
+    }
+
+    /// <summary>Releases every sun, fog, sky-light and ambient override, so the level's authored values return.</summary>
     public static void ClearOverrides() => FwWorldFx.aver_fw_env_clear(0);
 
     /// <summary>Releases one override.</summary>
@@ -97,7 +108,7 @@ public static class Sky
 
     /// <summary>Releases one override by its dotted name (<c>sun.dir</c>, <c>sun.lux</c>, <c>sun.color</c>, <c>sun.temp</c>,
     /// <c>fog.density</c>, <c>fog.color</c>, <c>fog.falloff</c>, <c>fog.height</c>, <c>fog.start</c>, <c>fog.maxopacity</c>,
-    /// <c>sky.light</c>); null or empty releases all of them. False for a name that is not one of those.</summary>
+    /// <c>sky.light</c>, <c>ambient.color</c>, <c>ambient.energy</c>, <c>ambient.sky</c>); null or empty releases all of them. False for a name that is not one of those.</summary>
     public static bool ClearOverride(string? name)
     {
         if (string.IsNullOrWhiteSpace(name)) { ClearOverrides(); return true; }

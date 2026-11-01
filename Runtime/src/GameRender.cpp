@@ -631,7 +631,12 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
             u32 st = mr->rangeState;
             const bool shown = scene::rangeShown(d.size(), mr->visBeginCm, mr->visEndCm, mr->visBeginMarginCm, mr->visEndMarginCm, st);
             // The hysteresis memory belongs to the primary walk; a secondary camera reads it and leaves it as it found it.
-            if (!viewPass) const_cast<scene::CMeshRenderer*>(mr)->rangeState = st;
+            if (!viewPass) {
+                scene::CMeshRenderer* mw = const_cast<scene::CMeshRenderer*>(mr);
+                mw->rangeState = st;
+                // The fade amount is computed and published; the draw is not yet dithered by it (docs/plans/GODOT_PARITY.md, P20).
+                mw->fadeAmount = mr->visFade != 0 ? scene::rangeFadeAmount(d.size(), mr->visBeginCm, mr->visEndCm, mr->visBeginMarginCm, mr->visEndMarginCm) : 0.0f;
+            }
             if (!shown) continue;
         }
 
@@ -683,7 +688,7 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
         // Moving during Play (PlayMobility.hpp): its draws stay out of Voxi's GI bake. Asked on
         // every walk, the depth prepass included, so the first walk of a frame is the one that
         // updates the tracker and the colour walk reads the same answer back.
-        const bool movableHere = options.mobility && options.mobility->movable(w, ent, wm);
+        const bool movableHere = (options.mobility && options.mobility->movable(w, ent, wm)) || scene::renderGiMode(mr->renderFlags) != 0;
 
         // The seam, in one line: a skinned entity's posed vertices live in a DIFFERENT MeshHandle
         // sharing this one's index buffer, so substituting the handle reaches every pass at once.
@@ -708,8 +713,12 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
             hairNoShadow = posedMesh != 0 && !options.hair->castsShadow(ent);
         }
 #endif
+        // Per-instance flags (P5): shadow mode 1 keeps the draw out of the cascades and the GI shadow map like a no-shadow hair; GI mode dynamic or disabled puts it
+        // in the mover lane (out of the voxel bake); shadows-only (mode 2) is folded into the owner-hide below, so it stays a caster without being seen.
+        const u32 renderShadowMode = scene::renderShadowMode(mr->renderFlags);
+        const bool noShadowHere = hairNoShadow || renderShadowMode == scene::kRenderShadowsOff;
         (void)hairNoRay;   // read only by the Voxi routes below, and only in a build that has the flags
-        (void)hairNoShadow;
+        (void)noShadowHere;
         const bool skinned = posedMesh != 0;
 
         // A static entity gets its bounds from the asset; a skinned one already has them written
@@ -782,6 +791,8 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
         }
         // The camera's cull mask (G4 R4) hides the same way: out of the primary view, still a shadow caster and GI/RT geometry.
         if (options.cameraCullInv != 0 && !scene::masksOverlap(mr->layersInv, options.cameraCullInv)) ownerHiddenHere = true;
+        // Shadows-only (CMeshRenderer::renderFlags): hidden from every camera, still a caster and GI/RT geometry.
+        if (scene::renderShadowMode(mr->renderFlags) == scene::kRenderShadowsOnly) ownerHiddenHere = true;
 
         // Frustum cull on the world-space extent of the entity's own box. A DEGENERATE box is DRAWN
         // rather than culled: an entity whose bounds were never filled in must not vanish, and being
@@ -846,7 +857,7 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
                                 + pl[pi][1] * (pl[pi][1] > 0 ? whi.y : wlo.y)
                                 + pl[pi][2] * (pl[pi][2] > 0 ? whi.z : wlo.z)
                                 + pl[pi][3];
-                    if (d < 0.0f) outside = true;
+                    if (d < -mr->cullMarginCm) outside = true;   // cullMarginCm grows the box: only a box wholly past the margin is out
                 }
                 frustumCulled = outside;
             }
@@ -1075,7 +1086,7 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
             // Same ride as the movable flag: drawMesh reaches Voxi through submitDraw, which has no parameter for it. Defined by VoxiRenderer.hpp.
             if (options.voxiRenderer) {
                 options.voxiRenderer->setSubmitNoRay(hairNoRay);
-                options.voxiRenderer->setSubmitNoShadow(hairNoShadow);
+                options.voxiRenderer->setSubmitNoShadow(noShadowHere);
             }
 #  endif
 #endif
@@ -1204,7 +1215,7 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
                 if (options.voxiRenderer) {
 #  if defined(AVER_VOXI_SUBMIT_NO_RAY)
                     options.voxiRenderer->setSubmitNoRay(hairNoRay);
-                    options.voxiRenderer->setSubmitNoShadow(hairNoShadow);
+                    options.voxiRenderer->setSubmitNoShadow(noShadowHere);
 #  endif
                     if (mr->layersInv) options.voxiRenderer->setSubmitLayers(mr->layersInv);
                     options.voxiRenderer->submit(del.mesh, &wm.m[0][0], col, dl.look.metallic,

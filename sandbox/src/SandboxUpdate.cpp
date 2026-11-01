@@ -11,6 +11,11 @@
 #  include "aver/framework/framework_worldfx_abi.h"   // [wave9/worldfx] aver_fw_worldfx_tick
 #endif
 #if AVER_MODULE_FRAMEWORK
+#  include "aver/framework/framework_render_abi.h"   // P17: script render settings and statistics
+#  if AVER_MODULE_VOXI
+#    define AVER_SCRIPTRENDER_HAS_ABI 1
+#    include "aver/voxi/ScriptRenderSettings.hpp"
+#  endif
 #  include "aver/framework/framework_loc_abi.h"    // the UI layout editor's culture preview
 #endif
 #if AVER_MODULE_RAGDOLL
@@ -37,6 +42,44 @@
 namespace aver {
 
 // Advances one frame: MCP commands, camera, gameplay tick, physics, and the render state.
+#if AVER_MODULE_FRAMEWORK && AVER_MODULE_VOXI
+// A script's render keys (framework_render_abi.h) at the frame boundary. The Settings keys go through the singleton (the MSAA push and the per-frame forward
+// below read it); the LOD threshold and the occlusion switch are this host's own state; the render scale is the editor viewport's and is not taken. A released
+// key restores what the editor held. Everything is dropped when a Play session ends (aver_fw_render_revision).
+void SandboxApp::applyScriptRender(voxi::Renderer& vx) {
+    static voxi::ScriptRenderState st;
+    voxi::Settings s = vx.settings();
+    if (voxi::applyScriptRenderSettings<voxi::FrameworkRenderApi>(s, st)) vx.setSettings(s);
+    float v = 0.0f;
+    static bool lodTaken = false, occTaken = false;
+    static f32 lodSaved = 0.0f;
+    static bool occSaved = false;
+    if (aver_fw_render_get(AVER_FW_RENDER_LOD_THRESHOLD, &v)) {
+        if (!lodTaken) { lodTaken = true; lodSaved = lodErrorThresholdPx_; }
+        lodErrorThresholdPx_ = v;
+    } else if (lodTaken) {
+        lodTaken = false;
+        lodErrorThresholdPx_ = lodSaved;
+    }
+#  if AVER_MODULE_OCCLUSION
+    if (aver_fw_render_get(AVER_FW_RENDER_OCCLUSION, &v)) {
+        if (!occTaken) { occTaken = true; occSaved = occlusionCullEnabled_; }
+        occlusionCullEnabled_ = v >= 0.5f;
+    } else if (occTaken) {
+        occTaken = false;
+        occlusionCullEnabled_ = occSaved;
+    }
+#  endif
+    (void)occTaken; (void)occSaved;
+    if (aver_fw_render_stats_wanted()) {
+        const voxi::VoxiRenderer::RenderStats rs = voxiRenderer_.renderStats();
+        const int32_t out[AVER_FW_RENDER_STAT_COUNT] = {static_cast<int32_t>(rs.objects), static_cast<int32_t>(rs.triangles), static_cast<int32_t>(rs.drawCalls),
+                                                        static_cast<int32_t>(rs.translucent), static_cast<int32_t>(rs.shadowDraws), static_cast<int32_t>(frameNo_)};
+        aver_fw_render_publish_stats(out);
+    }
+}
+#endif
+
 void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     HitchMarks hm("update");
 #if AVER_MODULE_SCENE
@@ -1073,6 +1116,9 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     e.device()->setMeshShaders(msOverride_);
 #endif
 #if AVER_MODULE_VOXI
+#  if AVER_MODULE_FRAMEWORK
+    applyScriptRender(vx);   // P17/P18: a Play session's render keys land before the settings below are read; the statistics go out
+#  endif
     // Voxi owns the AA setting; push it when it changes (rebuilds targets+PSOs). Ray-driven frames run
     // at 1x whatever MSAA says (voxi::Resolution::sampleCount).
     {

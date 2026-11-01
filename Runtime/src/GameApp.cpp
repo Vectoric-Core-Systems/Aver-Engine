@@ -94,6 +94,11 @@
 
 #  include "aver/framework/framework_morph_abi.h"   // [wave9/morph] aver_fw_set_morph_provider
 #  include "aver/framework/framework_worldfx_abi.h"   // [wave9/worldfx] script sun / fog / post layers
+#  include "aver/framework/framework_render_abi.h"    // P17: script render settings and statistics
+#  if AVER_MODULE_VOXI
+#    define AVER_SCRIPTRENDER_HAS_ABI 1
+#    include "aver/voxi/ScriptRenderSettings.hpp"
+#  endif
 #endif
 // GamePawn.hpp (game::placePossessedPawn): placePawnAtSpawn's pawn lookup and placement.
 #include "aver/game/GamePawn.hpp"
@@ -2141,6 +2146,7 @@ void GameApp::onInit(Engine& e) {
         if ((dec.level != voxi::ladder::kAverSrOff || wantTaa) && averSrInstaller_ &&
             averSrInstaller_(*dev, dec.level, wantTaa, averSrUpscaler_, scale)) {
             dev->setRenderScale(scale);
+            baseRenderScale_ = scale;
             dev->setUpscaler(averSrUpscaler_.get());
             temporalAa_ = wantTaa;
         }
@@ -2498,6 +2504,33 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     // Never on bounded (--frames N) run: automated capture/gate must not retune quality.
     if (voxiAttached_) {
         voxi::Settings vs = voxi::Renderer::get().settings();
+#  if AVER_MODULE_FRAMEWORK
+        // P17: a script's render keys, at the frame boundary. Settings keys go through the renderer; the render scale is the device's.
+        {
+            static voxi::ScriptRenderState scriptRender;
+            if (voxi::applyScriptRenderSettings<voxi::FrameworkRenderApi>(vs, scriptRender)) {
+                voxi::Renderer::get().setSettings(vs);
+                vs = voxi::Renderer::get().settings();
+            }
+            float scriptScale = 1.0f;
+            if (rhi::IDevice* sdev = e.device()) {
+                if (aver_fw_render_get(AVER_FW_RENDER_SCALE, &scriptScale)) {
+                    sdev->setRenderScale(scriptScale);
+                    scriptScaleTaken_ = true;
+                } else if (scriptScaleTaken_) {
+                    sdev->setRenderScale(baseRenderScale_);
+                    scriptScaleTaken_ = false;
+                }
+            }
+            // P18: the last frame's counters, counted only once a script has asked.
+            if (aver_fw_render_stats_wanted()) {
+                const voxi::VoxiRenderer::RenderStats rs = voxiRenderer_.renderStats();
+                const int32_t out[AVER_FW_RENDER_STAT_COUNT] = {static_cast<int32_t>(rs.objects), static_cast<int32_t>(rs.triangles), static_cast<int32_t>(rs.drawCalls),
+                                                                static_cast<int32_t>(rs.translucent), static_cast<int32_t>(rs.shadowDraws), static_cast<int32_t>(frames_)};
+                aver_fw_render_publish_stats(out);
+            }
+        }
+#  endif
         if (cfg_.maxFrames == 0 && voxi::frameBudgetTick(frameBudget_, t.dt, vs)) {
             AVER_INFO("[Game] frame budget {:.1f}ms: {:.1f}ms average -> rung {} "
                       "(GI every {} frame(s), {} cone(s))",

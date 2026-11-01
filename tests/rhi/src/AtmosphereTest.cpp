@@ -1,5 +1,6 @@
 // The atmosphere model, checked against numeric integrals and closed forms of the same physics.
 #include "aver/rhi/Atmosphere.hpp"
+#include "aver/rhi/RHI.hpp"
 #include "aver/core/Log.hpp"
 
 #include <cmath>
@@ -556,6 +557,38 @@ int main() {
                           "(informational: evidence about the atmosphere model's diffuse share, not a failure)",
                           elevDeg, d1);
         }
+    }
+
+    // ---- P8: the ambient override on the sky's SH coefficients ----
+    {
+        rhi::AtmosphereSkySH base{};
+        for (int k = 0; k < 9; ++k) for (int i = 0; i < 3; ++i) base.c[k][i] = 0.1f * static_cast<f32>(k + 1) + 0.01f * static_cast<f32>(i);
+        const f32 colour[3] = {0.2f, 0.3f, 0.4f};
+        // skyContribution 1: the sky alone, whatever the colour and energy
+        rhi::AtmosphereSkySH sky = base;
+        rhi::blendAmbientSh(sky, colour, 3.0f, 1.0f);
+        bool same = true;
+        for (int k = 0; k < 9; ++k) for (int i = 0; i < 3; ++i) same = same && sky.c[k][i] == base.c[k][i];
+        check(same, "ambient override: a sky contribution of 1 leaves the sky's coefficients as they were");
+        // skyContribution 0: the constant alone, which projects to c[0] = L * 0.282095 * 4 PI and nothing else
+        rhi::AtmosphereSkySH flat = base;
+        rhi::blendAmbientSh(flat, colour, 2.0f, 0.0f);
+        bool rest = true;
+        for (int k = 1; k < 9; ++k) for (int i = 0; i < 3; ++i) rest = rest && flat.c[k][i] == 0.0f;
+        check(rest, "ambient override: a sky contribution of 0 zeroes every coefficient but the first");
+        // the shader's averShIrradiance of a uniform sky returns L: c[0] * 0.282095 == L
+        for (int i = 0; i < 3; ++i) checkNear(static_cast<f64>(flat.c[0][i]) * 0.282095, static_cast<f64>(colour[i]) * 2.0, 1e-5, "ambient override: the constant colour times energy is what the irradiance reads back");
+        // halfway: every coefficient is the mean of the sky's and the constant's
+        rhi::AtmosphereSkySH half = base;
+        rhi::blendAmbientSh(half, colour, 1.0f, 0.5f);
+        checkNear(half.c[3][1], base.c[3][1] * 0.5, 1e-6, "ambient override: the higher bands scale by the sky contribution");
+        checkNear(half.c[0][0], 0.5 * (0.2 * 0.282095 * 12.566371) + 0.5 * base.c[0][0], 1e-5, "ambient override: the first coefficient is the lerp of the constant and the sky");
+        // out-of-range inputs clamp: a negative energy is 0, a contribution past 1 is 1
+        rhi::AtmosphereSkySH bad = base;
+        rhi::blendAmbientSh(bad, colour, -5.0f, 7.0f);
+        check(bad.c[0][0] == base.c[0][0], "ambient override: a contribution past 1 is 1 (the sky alone), whatever the energy");
+        rhi::SkyAtmosphere def;
+        check(!def.ambientOverride && def.ambientEnergy == 1.0f && def.ambientSkyContribution == 1.0f, "the SkyAtmosphere defaults leave the ambient override off");
     }
 
     AVER_INFO(g_failures ? "AtmosphereTest: {} FAILURES" : "AtmosphereTest: all checks passed ({})",

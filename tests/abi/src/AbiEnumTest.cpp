@@ -955,7 +955,10 @@ static const Group kGroups[] = {
      "scripting/csharp/Aver.Framework/Ai/Brain.cs", "BrainStatus", "", "", "", "none,bt,statetree,abiversion"},
     // wave 9: the sun / fog / sky-light override keys a script sets (framework_worldfx_abi.h).
     {"world effects keys",    "modules/framework/include/aver/framework/framework_worldfx_abi.h", "AVER_FW_ENV_",
-     "scripting/csharp/Aver.Framework/WorldFxNative.cs", "WorldEnvKey", ""},
+     "scripting/csharp/Aver.Framework/WorldFxNative.cs", "WorldEnvKey", "", "", "", "last"},
+    // P17: the render settings a script sets (framework_render_abi.h). The ABI version, the key count and the statistics indices share the prefix.
+    {"render settings keys",  "modules/framework/include/aver/framework/framework_render_abi.h", "AVER_FW_RENDER_",
+     "scripting/csharp/Aver.Framework/RenderSettings.cs", "RenderKey", "", "", "", "abi,key,stat"},
     // Sub-viewport update and clear modes (framework_subview_abi.h).
     {"sub-viewport update modes", "modules/framework/include/aver/framework/framework_subview_abi.h", "AVER_FW_SUBVIEW_UPDATE_",
      "scripting/csharp/Aver.Framework/SubViews.cs", "SubViewUpdate", ""},

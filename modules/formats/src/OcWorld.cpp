@@ -423,6 +423,12 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
                     out.skyGroundBlend = parseF64(t[i+1]);
                 } else if (equalsCI(t[i], "skylight") && i + 1 < t.size()) {
                     out.skyLight = parseF64(t[i+1]);
+                } else if (equalsCI(t[i], "ambient") && i + 3 < t.size()) {
+                    out.skyAmbientColor[0] = parseF64(t[i+1]); out.skyAmbientColor[1] = parseF64(t[i+2]); out.skyAmbientColor[2] = parseF64(t[i+3]);
+                } else if (equalsCI(t[i], "ambientenergy") && i + 1 < t.size()) {
+                    out.skyAmbientEnergy = parseF64(t[i+1]);
+                } else if (equalsCI(t[i], "ambientsky") && i + 1 < t.size()) {
+                    out.skyAmbientSky = parseF64(t[i+1]);
                 } else if (equalsCI(t[i], "mieextinction") && i + 1 < t.size()) {
                     out.skyMieExtinction = parseF64(t[i+1]);
                 } else if (equalsCI(t[i], "miephase") && i + 1 < t.size()) {
@@ -1022,6 +1028,10 @@ std::string writeOcworld(const OcWorldData& w) {
         s += " ground " + num(w.skyGroundAlbedo[0]) + " " + num(w.skyGroundAlbedo[1]) + " " + num(w.skyGroundAlbedo[2]);
         s += " groundblend " + num(w.skyGroundBlend);
         s += " skylight " + num(w.skyLight);
+        if (w.skyAmbientEnergy >= 0.0) {
+            s += " ambient " + num(w.skyAmbientColor[0]) + " " + num(w.skyAmbientColor[1]) + " " + num(w.skyAmbientColor[2]);
+            s += " ambientenergy " + num(w.skyAmbientEnergy) + " ambientsky " + num(w.skyAmbientSky);
+        }
         if (w.skyMieScatter    >= 0.0) s += " mie " + num(w.skyMieScatter);
         if (w.skyMieExtinction >= 0.0) s += " mieextinction " + num(w.skyMieExtinction);
         if (w.skyMiePhaseG     >= 0.0) s += " miephase " + num(w.skyMiePhaseG);
