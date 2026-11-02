@@ -257,6 +257,28 @@ flags any traced open outside the package.
 
 The editor's own chrome (menus, inspector) still uses the editor font and is unchanged.
 
+## Text in the world, distance fields and WOFF (parity wave 8a)
+
+* **World text (Label3D).** `aver_text3d_draw` lays a string out with the same engine and draws it as glyph quads in a
+  plane placed by a matrix: billboarded (to the camera, or about the up axis only), at a constant screen size, with an
+  outline (ring copies of the glyphs), depth tested or over the scene, blended or added. The glyphs come from a **world
+  atlas** of their own (`UiTextEngine::worldAtlas()`, `UiTextConfig::worldPageSize` / `worldMaxPages`, 512 and 8 by
+  default), so the HUD's atlas churn never recycles a page a label uses. `UiTextMesh` (CPU only) builds the quads and
+  remembers the atlas epoch and the generation of each page it names; a recycled page makes it stale and
+  `UiTextMeshCache` rebuilds it, and drawing a label stamps its pages as used so the recycler leaves them alone.
+  `UiRenderer::transparentPass` draws them with `world_text.hlsl`, a plain raster shader (no ray query, no loop, no
+  lighting), and **not in ray-driven mode** unless the host opts in. Never looked at on a GPU: see the wave 8a status in
+  `docs/plans/GODOT_PARITY.md`.
+* **Distance-field glyphs (E14).** `aver_text3d_configure(1, 48, 6, ...)` rasterises world glyphs once at 48 px as signed
+  distance fields (an exact Euclidean transform with 6 px of spread, `uiBitmapToSdf`) and every size scales from that:
+  the pixel shader turns the field into coverage with a smoothstep around 0.5, one pixel wide unless the label sets a
+  softness. The UI's own atlas is unchanged (coverage glyphs; no new shader entry for it). Mip chains for glyph pages
+  are not built.
+* **Spacing (P38).** `UiTextStyle::spaceSpacing` and `lineExtra` (pixels after each space, pixels per line) join
+  `letterSpacing` and `lineSpacing`; the `_ex` ABI calls carry them. A style that sets none lays out and caches exactly as before.
+* **WOFF 1.0 (P37).** A `.woff` file in a font set loads once the host lent an inflate (`aver_ui_text_set_inflate`); the
+  tables are rebuilt into the sfnt they hold and checked like any font. WOFF2 needs Brotli and is refused.
+
 ## Safety and licences
 
 The font rasteriser is the `stb_truetype` header that ships with Dear ImGui, which states that it is not safe for
@@ -276,8 +298,10 @@ Noto bundle is shipped: CJK and Arabic on Windows come from the OS, and elsewher
 * The bidi implementation has no bracket-pair resolution and treats isolates as embeddings. Korean wraps at
   spaces. Vertical text, colour emoji, variable-font axes, synthetic bold, hinting, sub-pixel positioning and
   justified text are not supported.
-* Text inputs move the caret in logical order (arrow keys do not follow visual order in mixed-direction text),
-  typed characters still come from the host's key table, and there is no IME.
+* Text inputs move the caret in logical order (arrow keys do not follow visual order in mixed-direction text).
+  Typed characters come from the window's character events once the host has seen one (layout, dead keys and the IME's
+  committed text applied; wave 8a) and from the host's US key table until then; the IME's composition (the
+  underlined text before it is committed) is not shown.
 * OS fonts exist on Windows only for now; other hosts use project fonts.
 * Sizes are rounded to whole pixels (4 to 160); larger text is drawn from a 160 px raster, scaled.
 
@@ -288,4 +312,8 @@ fonts whose glyphs are rectangles, so order, kerning, shaping and fallback are c
 `UiUnicodeTest` (decoding, tables), `UiBidiTest`, `UiShapingTest`, `UiLineBreakTest`, `UiFontTest` (validation,
 metrics, kerning, font sets, fallback), `UiGlyphAtlasTest` (packing, recycling, overflow), `UiTextLayoutTest` (the
 pipeline end to end), `UiTextTreeTest` (widgets measure and draw from one layout), `UiTextAbiTest` (the C ABI),
-`UiRenderTest` (page upload and tokens), `FontSetEditorTest`, and the Aver Node tests in `UiTextNodeTests.cs`.
+`UiRenderTest` (page upload and tokens, the sampler / blend pipelines, the world text pass against a recording device),
+`UiTransformTest` (the transform stack, per-draw state, the mesh export, spacing), `UiTextMeshTest` (the plane mesh,
+atlas page lifetime, distance fields, the draw list's world text caps), `WorldTextPlaceTest` (billboards and fixed size),
+`UiShaderCompileTest` (the UI and world text shaders to SPIR-V and DXIL, and the default UI pipeline byte-identical),
+`UiWoffTest`, `UiHostTextTest`, `FontSetEditorTest`, and the Aver Node tests in `UiTextNodeTests.cs`.
