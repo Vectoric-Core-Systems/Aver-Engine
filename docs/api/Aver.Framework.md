@@ -2,7 +2,7 @@
 
 # Aver.Framework public API
 
-270 public types and 2347 public members, read from `scripting/csharp/Aver.Framework/` (153 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+270 public types and 2349 public members, read from `scripting/csharp/Aver.Framework/` (153 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Framework
 
@@ -1322,6 +1322,8 @@ Values: `Destroy = 0`, `Stop = 1`, `Reload = 2`, `Travel = 3`
 - `public IEnumerable<Entity> Children { get; }` - The immediate children, in link order.
 - `public bool SetParent(Entity parent)` - Reparents under parent.
 - `public bool Detach()` - Detaches from any parent, making this a root.
+- `public bool SetTransformAbsolute(bool on)` - On: the entity keeps its parent (its children, lookups, destruction with the parent) but its world transform is its local transform alone, not composed with its parents' (Godot's top_level).
+- `public bool IsTransformAbsolute { get; }` - True while SetTransformAbsolute is on.
 - `public bool HasComponent(Component component)` - True if this entity currently carries component.
 - `public bool AddComponent(Component component)` - Attaches component (idempotent).
 - `public bool HasComponent(string name)` - True if this entity carries the component registered under name (e.g.

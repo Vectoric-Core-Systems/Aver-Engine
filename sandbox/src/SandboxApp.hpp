@@ -2011,7 +2011,7 @@ private:
     int  inputStuckFrames_ = 0, inputStuckFrame_ = 0, inputStuckLatched_ = 0, inputStuckFirstKey_ = -1;
     bool inputStuckSawDown_ = false;
 
-    void maybePlayTest();
+    void maybePlayTest(Engine& e);
 
     void pushInput(bool uiActive);
 
@@ -3817,6 +3817,8 @@ private:
     u32 playTestSettle_ = 0;   // frames the requested level has been loaded (play-test waits ~1 s)
     int  playTestWait_=0;            // frames spent waiting for a GameMode class before giving up
     int  playTestFrames_=0;          // frames since begin_play, so the Stop is one-shot too
+    int  playTestRound_=0;           // Plays finished (AVER_PLAYTEST_PLAYS runs more than one)
+    int  playTestShotFrame_=-1;      // the frame a mid-Play capture was requested on (AVER_PLAYTEST_SHOT)
     editor::ProjectBrowser browser_;
     fmt::ProjectDesc project_;
     std::string projectPath_;        // <path>.ocproject given on the command line

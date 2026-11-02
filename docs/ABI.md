@@ -189,6 +189,13 @@ themselves are unchanged and still return 1/0 — a negative code on *their* ret
 under `if (aver_scene_set_...)` and invert every existing call site. See `docs/DIAGNOSTICS.md` for
 the full table and why the channel is a separate entry point.
 
+**Scene ABI minor 6: an entity can keep its parent but not its parent's transform.**
+`aver_scene_set_transform_absolute(e, 1)` (C#: `Entity.SetTransformAbsolute(true)`, `World::setTransformAbsolute`) leaves `e` in
+the hierarchy — its children, a lookup by path and its destruction with the parent are unchanged — but composes its world matrix
+from its own local transform alone, and a floating-origin shift moves it as it moves a root. It is Godot's `top_level` and the rule
+for a `Node3D` whose parent is not a `Node3D` (a camera under a SubViewport below a CanvasLayer of a moving player); detaching the
+entity instead lost the path to it after a level reload. `aver_scene_transform_absolute(e)` reads it back.
+
 There is still no entry point that reports whether a field is read-only *before* you try to write it.
 The reason is available only after the rejection, which is enough to stop a binding misreporting a
 read-only field as a stale handle — the mistake this section exists to prevent.

@@ -2528,7 +2528,9 @@ ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
 #else
     const bool runClean = false;
 #endif
-    if (levelVisible_ && !runClean) buildViewportOverlay();
+    // While a game plays (not ejected) the view is the game's: the toolbars would sit over its HUD (a label in the top-left corner). F8 brings them back.
+    const bool gameView = playSessionActive() && !playEjected_;
+    if (levelVisible_ && !runClean && !gameView) buildViewportOverlay();
     drawDrawer(e);
     // drawNotifications after drawDrawer (needs drawerPixelH_ from this frame).
     if (!runClean) drawNotifications();

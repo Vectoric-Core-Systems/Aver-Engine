@@ -930,9 +930,20 @@ void SandboxApp::maybeInputStuckTest() {
 #endif
 }
 
-// Run --play-test: begin play, drive synthetic input 150 frames, stop.
-void SandboxApp::maybePlayTest() {
+// Run --play-test: begin play, drive synthetic input 150 frames, stop. For a developer looking at a game, three environment variables:
+// AVER_PLAYTEST_LENGTH (frames per Play, 150), AVER_PLAYTEST_PLAYS (Plays in a row, 1: the next waits for the level's reload) and
+// AVER_PLAYTEST_SHOT=<prefix> (writes <prefix>-play<N>.png of the window at AVER_PLAYTEST_SHOT_AT frames into each Play, default 30 before its end).
+void SandboxApp::maybePlayTest(Engine& e) {
     if (!playTest_) return;
+    const auto envInt = [](const char* name, int fallback) {
+        const char* v = std::getenv(name);
+        return v && *v ? std::atoi(v) : fallback;
+    };
+    const int length = std::max(envInt("AVER_PLAYTEST_LENGTH", 150), 2);
+    const int plays = std::max(envInt("AVER_PLAYTEST_PLAYS", 1), 1);
+    const char* shotPrefix = std::getenv("AVER_PLAYTEST_SHOT");
+    const int shotAt = envInt("AVER_PLAYTEST_SHOT_AT", length - 30);
+    if (playTestRound_ >= plays) return;
     if (!playTestBegun_) {
         // Wait for an --open-level request to finish loading (and ~1 s more): otherwise Play begins on the
         // startup level, which is what the play-test then reports on.
@@ -958,9 +969,29 @@ void SandboxApp::maybePlayTest() {
         aver_fw_input_set_key(AVER_FW_KEY_W, 1);
         if (playTestFrames_ > 60) aver_fw_input_set_key(AVER_FW_KEY_MOUSE_LEFT, 1);
         if (playTestFrames_ == 100) aver_fw_input_set_key(AVER_FW_KEY_SPACE, 1);
+#if AVER_WITH_IMGUI
+        // The key state alone reaches no game's event handlers (_input / OnInput): a real press and release does, as the mouse would.
+        if (playTestFrames_ == 61) injectMouseButton(input_, 0, true);
+        if (playTestFrames_ == std::max(62, length - 40)) injectMouseButton(input_, 0, false);
+#endif
     }
     {
-        if (++playTestFrames_ == 150) {
+        ++playTestFrames_;
+        if (shotPrefix && *shotPrefix && e.device()) {
+            // One frame of lag is inherent to the capture: requested now, read a few frames later.
+            if (playTestFrames_ == shotAt) {
+                e.device()->requestCapture(static_cast<u32>(vpX_ + vpW_ / 2), static_cast<u32>(vpY_ + vpH_ / 2));
+                playTestShotFrame_ = playTestFrames_;
+            } else if (playTestShotFrame_ >= 0 && playTestFrames_ == playTestShotFrame_ + 3) {
+                std::vector<u8> img;
+                u32 iw = 0, ih = 0;
+                const std::string path = std::string(shotPrefix) + "-play" + std::to_string(playTestRound_ + 1) + ".png";
+                if (e.device()->getFrameImage(img, iw, ih) && iw && ih && stbi_write_png(path.c_str(), static_cast<int>(iw), static_cast<int>(ih), 4, img.data(), static_cast<int>(iw) * 4))
+                    AVER_INFO("[play-test] screenshot: {} ({}x{}) at Play frame {}", path, iw, ih, playTestShotFrame_);
+                playTestShotFrame_ = -1;
+            }
+        }
+        if (playTestFrames_ == length) {
             const int32_t pawn = fwPlaying ? aver_fw_controlled_pawn(aver_fw_player_controller(0)) : 0;
             if (pawn) {
                 const scene::Entity pe = static_cast<scene::Entity>(static_cast<uint32_t>(pawn));
@@ -971,6 +1002,14 @@ void SandboxApp::maybePlayTest() {
             AVER_INFO("[play-test] stopping - watch for OnEndPlay(reason=Stop) lines");
             // Use stopPlay(), not aver_fw_end_play() directly; test the button path, not a bypass.
             stopPlay();
+            // The next Play (AVER_PLAYTEST_PLAYS) begins like the first, once the level has reloaded and settled.
+            if (++playTestRound_ < plays) {
+                playTestBegun_ = false;
+                playTestSettle_ = 0;
+                playTestWait_ = 0;
+                playTestFrames_ = 0;
+                AVER_INFO("[play-test] Play {} of {} next", playTestRound_ + 1, plays);
+            }
         }
     }
 }

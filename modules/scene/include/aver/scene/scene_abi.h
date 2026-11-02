@@ -31,8 +31,10 @@ extern "C" {
  * binding is unchanged. */
 /* MINOR 5 adds aver_scene_last_error, the reason channel. Additive only -- every existing
  * entry point keeps its 1/0 return exactly, which is the whole design; see that function. */
+/* MINOR 6 adds aver_scene_set_transform_absolute / aver_scene_transform_absolute (World::setTransformAbsolute):
+ * an entity that keeps its parent but not its parent's transform. Additive only. */
 #define AVER_SCENE_ABI_VERSION_MAJOR 1
-#define AVER_SCENE_ABI_VERSION_MINOR 5
+#define AVER_SCENE_ABI_VERSION_MINOR 6
 #define AVER_SCENE_ABI_VERSION \
     ((AVER_SCENE_ABI_VERSION_MAJOR << 16) | AVER_SCENE_ABI_VERSION_MINOR)
 
@@ -142,6 +144,11 @@ AVER_SCENE_ABI int32_t aver_scene_component(const char* name);
 AVER_SCENE_ABI int32_t aver_scene_add_component(int32_t e, int32_t component);
 /* Reparent; parent 0 makes `child` a root. Refuses a cycle, a self-parent, or a doomed parent. */
 AVER_SCENE_ABI int32_t aver_scene_set_parent(int32_t child, int32_t parent);
+/* Minor 6. on 1: `e` keeps its parent (children, lookups, destruction) but its world matrix is its local transform alone -- Godot's
+ * top_level, and a Node3D under a non-3D parent. 0 composes with the parents again. 1 on success, 0 for a stale handle. */
+AVER_SCENE_ABI int32_t aver_scene_set_transform_absolute(int32_t e, int32_t on);
+/* Minor 6. 1 when `e`'s transform is absolute, 0 otherwise or for a stale handle. */
+AVER_SCENE_ABI int32_t aver_scene_transform_absolute(int32_t e);
 
 /* ---- persisted identity ---- */
 /* Read/write CName.objectId. The world's u64 crosses as int64_t. */

@@ -281,6 +281,8 @@ internal static class SceneNative
     [DllImport(Lib)] internal static extern int aver_scene_add_component(int e, int component);
     [DllImport(Lib)] internal static extern int aver_scene_has_component(int e, int component);
     [DllImport(Lib)] internal static extern int aver_scene_set_parent(int child, int parent);
+    [DllImport(Lib)] internal static extern int aver_scene_set_transform_absolute(int e, int on);
+    [DllImport(Lib)] internal static extern int aver_scene_transform_absolute(int e);
 
     // Hierarchy queries and enumeration.
     [DllImport(Lib)] internal static extern int aver_scene_parent(int e);

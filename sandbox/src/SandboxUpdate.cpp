@@ -830,7 +830,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     if (playSessionActive()) game::uiFeedInput(input_, t.dt, !mouse_.captured());
     aver_ui_widgets_frame(t.dt);
     maybeSpawnTestActor();
-    maybePlayTest();
+    maybePlayTest(e);
     maybePieCameraTest();
     maybeInputStuckTest();
     maybeInputSourceTest();

@@ -94,6 +94,12 @@ struct World::Impl {
     std::vector<u64> orderStamp{0}; // tree position among siblings (and roots): stamped at create and reparent
     std::deque<u32>  freeIndices;   // FIFO: an index gets maximum distance before it is reused
     std::vector<u32> retired;
+    std::vector<u8>  absolute;      // entity index -> 1: its world matrix is its local transform (setTransformAbsolute); grown on first set
+
+    bool isAbsolute(Entity e) const {
+        const u32 idx = entityIndex(e);
+        return idx < absolute.size() && absolute[idx] != 0;
+    }
 
     std::vector<Entity> live;
     std::vector<Entity> destroyQueue;
@@ -189,7 +195,7 @@ struct World::Impl {
         CLocal* l = loc(e);
         if (!w || !l) return false;
 
-        const Entity  p         = parentOf(e);
+        const Entity  p         = isAbsolute(e) ? kInvalidEntity : parentOf(e);
         const CWorld* pw        = (p != kInvalidEntity) ? wor(p) : nullptr;
         const u32     parentRev = pw ? pw->rev : 0;
         if (w->composedLocalRev == l->rev && w->composedParentRev == parentRev) return false;
@@ -216,7 +222,7 @@ struct World::Impl {
         const CWorld* w = wor(e);
         const CLocal* l = loc(e);
         if (!w || !l) return false;
-        const Entity  p  = parentOf(e);
+        const Entity  p  = isAbsolute(e) ? kInvalidEntity : parentOf(e);
         const CWorld* pw = (p != kInvalidEntity) ? wor(p) : nullptr;
         return w->composedLocalRev != l->rev || w->composedParentRev != (pw ? pw->rev : 0);
     }
@@ -294,6 +300,7 @@ struct World::Impl {
             liveSlot[idx] = 0;
         }
         pending[idx] = 0;
+        if (idx < absolute.size()) absolute[idx] = 0;
 
         const u32 gen = generation[idx];
         if (gen >= kEntityMaxGen) {
@@ -842,13 +849,25 @@ bool World::touchLocal(Entity e) {
     return true;
 }
 
-// Subtracts a floating-origin shift from every root's local position.
+bool World::setTransformAbsolute(Entity e, bool on) {
+    if (!valid(e)) return false;
+    Impl& d = *impl_;
+    const u32 idx = entityIndex(e);
+    if (d.isAbsolute(e) == on) return true;
+    if (idx >= d.absolute.size()) d.absolute.resize(std::max<usize>(idx + 1, d.absolute.size() * 2), 0);
+    d.absolute[idx] = on ? 1 : 0;
+    return touchLocal(e);   // its world matrix, and its children's, compose again
+}
+
+bool World::transformAbsolute(Entity e) const { return valid(e) && impl_->isAbsolute(e); }
+
+// Subtracts a floating-origin shift from every root's local position, and from every entity whose transform is absolute (also in world space).
 u32 World::shiftRoots(const Vec3& deltaCm) {
     Impl& d = *impl_;
     u32 moved = 0;
     for (const Entity e : d.live) {
         const CHierarchy* h = d.hier(e);
-        if (h && h->parent != kInvalidEntity) continue;
+        if (h && h->parent != kInvalidEntity && !d.isAbsolute(e)) continue;
         CLocal* l = d.loc(e);
         if (!l) continue;
         l->xf.position.x -= deltaCm.x;

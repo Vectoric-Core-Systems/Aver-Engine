@@ -362,6 +362,15 @@ int32_t aver_scene_set_parent(int32_t child, int32_t parent) {
     return world().setParent(toEntity(child), toEntity(parent)) ? 1 : 0;
 }
 
+// Keeps the parent, not the parent's transform (World::setTransformAbsolute).
+int32_t aver_scene_set_transform_absolute(int32_t e, int32_t on) {
+    return world().setTransformAbsolute(toEntity(e), on != 0) ? 1 : 0;
+}
+
+int32_t aver_scene_transform_absolute(int32_t e) {
+    return world().transformAbsolute(toEntity(e)) ? 1 : 0;
+}
+
 // ---- persisted identity ----------------------------------------------------------------------------
 
 // The entity's persisted identity. 0 for a stale handle.

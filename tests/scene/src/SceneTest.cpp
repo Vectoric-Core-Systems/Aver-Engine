@@ -1145,6 +1145,47 @@ static void testLights(World& world) {
     world.flush();
 }
 
+// A camera under a SubViewport under a CanvasLayer of a moving player (Godot4-FPS-Template): it keeps its parent but not its parent's transform.
+static void testTransformAbsolute(World& world) {
+    AVER_INFO("=== absolute transforms (keeps the parent, not its transform) ===");
+    Transform tp;
+    tp.position = {500.0f, 0.0f, 0.0f};
+    Transform tc;
+    tc.position = {10.0f, 20.0f, 30.0f};
+    Transform tg;
+    tg.position = {1.0f, 0.0f, 0.0f};
+    const Entity player = world.create("abs-player", kInvalidEntity, tp);
+    const Entity cam = world.create("abs-camera", player, tc);
+    const Entity gun = world.create("abs-gun", cam, tg);
+    world.flush();
+    checkMat(world.worldMatrix(cam), tc.toMatrix() * tp.toMatrix(), "composed with the parent before the flag");
+
+    check(world.setTransformAbsolute(cam, true) && world.transformAbsolute(cam), "the flag is set");
+    world.flush();
+    check(world.parent(cam) == player, "and the entity keeps its parent");
+    checkMat(world.worldMatrix(cam), tc.toMatrix(), "its world matrix is its local transform");
+    checkMat(world.worldMatrix(gun), tg.toMatrix() * tc.toMatrix(), "its children compose with it");
+    world.setLocalPosition(player, {900.0f, 0.0f, 0.0f});
+    world.flush();
+    checkMat(world.worldMatrix(cam), tc.toMatrix(), "a moving parent does not carry it");
+
+    const Vec3 before = world.localTransform(cam).position;
+    world.shiftRoots({100.0f, 0.0f, 0.0f});
+    world.flush();
+    check(world.localTransform(cam).position.x == before.x - 100.0f, "a floating-origin shift moves it as it moves a root");
+
+    check(world.setTransformAbsolute(cam, false) && !world.transformAbsolute(cam), "the flag clears");
+    world.flush();
+    Transform movedParent = world.localTransform(player);
+    checkMat(world.worldMatrix(cam), world.localTransform(cam).toMatrix() * movedParent.toMatrix(), "and it composes with the parent again");
+
+    world.setTransformAbsolute(cam, true);
+    world.destroy(player);
+    world.flush();
+    check(!world.valid(cam) && !world.valid(gun), "it is destroyed with its parent");
+    check(!world.setTransformAbsolute(cam, true), "a stale handle is refused");
+}
+
 // ---------------------------------------------------------------------------------------------- main
 
 // Runs every scene test in order. Returns the failure count.
@@ -1160,6 +1201,7 @@ int main() {
     testChurn(world);
     testFields(world);
     testHierarchy(world);
+    testTransformAbsolute(world);
     testSceneAbi(world);
     testSceneAbiRepairs(world);
     testSceneAbiQuery(world);

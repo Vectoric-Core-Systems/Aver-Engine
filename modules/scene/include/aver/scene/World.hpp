@@ -130,6 +130,11 @@ public:
     u32    childCount(Entity e) const;
     // Distance from the root; 0 for a root.
     u32    depth(Entity e) const;
+    // Godot's top_level, and a Node3D below a non-3D parent: `e` keeps its place in the hierarchy (its children, lookups by path,
+    // destruction with its parent) but its world matrix is its own local transform, not composed with its parents'. A floating-origin
+    // shift moves it as it moves a root. False for a stale handle.
+    bool   setTransformAbsolute(Entity e, bool on);
+    bool   transformAbsolute(Entity e) const;
 
     // Length of the topological order. Parents always precede their children.
     u32    topologicalCount() const;

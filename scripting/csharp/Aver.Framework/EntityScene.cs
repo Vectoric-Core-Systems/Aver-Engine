@@ -35,6 +35,13 @@ public readonly partial struct Entity
     /// <summary>Detaches from any parent, making this a root.</summary>
     public bool Detach() => SceneNative.aver_scene_set_parent(Handle, 0) != 0;
 
+    /// <summary>On: the entity keeps its parent (its children, lookups, destruction with the parent) but its world transform is its local
+    /// transform alone, not composed with its parents' (Godot's top_level). False for a stale handle. Needs scene ABI minor 6.</summary>
+    public bool SetTransformAbsolute(bool on) => SceneNative.aver_scene_set_transform_absolute(Handle, on ? 1 : 0) != 0;
+
+    /// <summary>True while <see cref="SetTransformAbsolute"/> is on.</summary>
+    public bool IsTransformAbsolute => SceneNative.aver_scene_transform_absolute(Handle) != 0;
+
     /// <summary>True if this entity currently carries <paramref name="component"/>.</summary>
     public bool HasComponent(Component component) => SceneNative.aver_scene_has_component(Handle, (int)component) != 0;
 
