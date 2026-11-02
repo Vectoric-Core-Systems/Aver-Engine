@@ -93,6 +93,32 @@ int main() {
     check(aver_decal_spawn(&d) == 0, "a pool of zero spawns nothing");
     check(aver_scene_last_error() == static_cast<int32_t>(AbiError::Unsupported), "and records Unsupported (-5)");
     aver_decal_pool_set_capacity(256);
+
+    // Version 2: the extended descriptor carries the wave 6 properties; the v1 spawn leaves them zero.
+    check(AVER_DECAL_ABI_VERSION == 2, "the ABI is at version 2");
+    AverDecalSpawnDescEx ex;
+    std::memset(&ex, 0, sizeof ex);
+    ex.base = d;
+    ex.base.lifetimeSec = 0.0f;
+    ex.emissionTexture = 777; ex.emissionEnergy = 2.5f; ex.albedoMix = 0.4f;
+    ex.upperFade = 0.3f; ex.lowerFade = 0.6f; ex.normalFade = 0.5f;
+    ex.flags = AVER_DECAL_DEPTH_FADE | AVER_DECAL_ALBEDO_MIX | 0x10 /* pooled must not be settable here either */;
+    const int32_t x1 = aver_decal_spawn_ex(&ex);
+    const CDecal* cx = x1 > 0 ? w.component<CDecal>(static_cast<Entity>(x1), kComponentDecal) : nullptr;
+    check(cx && cx->emissionTexture == 777 && approx(cx->emissionEnergy, 2.5f) && approx(cx->albedoMix, 0.4f) &&
+              approx(cx->upperFade, 0.3f) && approx(cx->lowerFade, 0.6f) && approx(cx->normalFade, 0.5f),
+          "aver_decal_spawn_ex lands the new properties on the component");
+    check(cx && (cx->flags & kDecalDepthFade) && (cx->flags & kDecalAlbedoMix) && (cx->flags & kDecalNoNormal) && (cx->flags & kDecalPooled),
+          "its flags come through (pooled is the pool's own)");
+    const int32_t v1 = aver_decal_spawn(&d);
+    const CDecal* c1 = v1 > 0 ? w.component<CDecal>(static_cast<Entity>(v1), kComponentDecal) : nullptr;
+    check(c1 && c1->emissionTexture == 0 && c1->emissionEnergy == 0.0f && c1->upperFade == 0.0f && !(c1->flags & (kDecalDepthFade | kDecalAlbedoMix)),
+          "the v1 spawn leaves them zero: a decal as it was");
+    AverDecalSpawnDescEx bad = ex;
+    bad.upperFade = std::nanf("");
+    check(aver_decal_spawn_ex(&bad) == 0 && aver_scene_last_error() == static_cast<int32_t>(AbiError::InvalidArgument), "a non-finite fade records InvalidArgument");
+    check(aver_decal_spawn_ex(nullptr) == 0 && aver_scene_last_error() == static_cast<int32_t>(AbiError::NullPointer), "a null extended descriptor records NullPointer");
+    aver_decal_clear();
     w.flush();
 
     AVER_INFO("==================================================");

@@ -25,6 +25,9 @@ inline constexpr u32 kDecalPackHasBase   = 0x08;   // reads a base colour image
 inline constexpr u32 kDecalPackHasNormal = 0x10;   // reads a normal image
 inline constexpr u32 kDecalPackHasOrm    = 0x20;   // reads a roughness/metallic image
 inline constexpr u32 kDecalPackTextured  = 0x40;   // any image: skipped where no bindless table is bound
+inline constexpr u32 kDecalPackHasEmission = 0x80;   // reads an emission image and adds it to the surface's emission
+inline constexpr u32 kDecalPackDepthFade   = 0x100;  // the fade along the projection axis is a pow curve (upper / lower), not the soft edge
+inline constexpr u32 kDecalPackAlbedoMix   = 0x200;  // the base colour weighs by fade.w, not fully
 
 inline constexpr u32 kDecalUnboundTexture = 0xFFFFFFFFu;
 
@@ -47,11 +50,18 @@ struct SceneDecal {
     u64 baseId = 0, normalId = 0, ormId = 0;   // registerDecalTexture ids; 0 = none
     f32 uvScale[2] = {1, 1};
     f32 uvOffset[2] = {0, 0};
+    // P13 (drawn by the plain raster pipeline only, see voxi_decal.hlsli). The defaults are the decal as it was.
+    u64 emissionId = 0;                    // an sRGB image added to the surface's emission
+    f32 emissionEnergy = 1.0f;
+    f32 albedoMix = 1.0f;                  // < 1 weighs the base colour down; normal and roughness keep the full weight
+    bool depthFade = false;                // the projection axis fades by (1 - |x|/half)^exponent instead of the soft edge
+    f32 upperFade = 0.0f, lowerFade = 0.0f;   // exponents; upper is the box side the projector looks from (local -X)
+    f32 normalFade = 0.0f;                 // > 0: smoothstep(normalFade, 1, dot(N, -projection) * 0.5 + 0.5) scales the weight
 };
 
 // The bindless indices a decal's images resolved to (kDecalUnboundTexture = not resident).
 struct DecalTextureIndices {
-    u32 base = kDecalUnboundTexture, normal = kDecalUnboundTexture, orm = kDecalUnboundTexture;
+    u32 base = kDecalUnboundTexture, normal = kDecalUnboundTexture, orm = kDecalUnboundTexture, emission = kDecalUnboundTexture;
 };
 
 // One decal as the GPU reads it (AverDecalRec in voxi_decal.hlsli). The first four float4s are all a
@@ -62,11 +72,12 @@ struct PackedDecal {
     f32 tint[4];               // rgb tint (linear), a opacity
     f32 shade[4];              // normal strength, roughness, metallic, edge fade
     f32 ang[4];                // x cos(full-strength angle), y cos(zero angle), zw uv scale
-    f32 uvo[4];                // xy uv offset
-    u32 tex[4];                // bindless indices: base, normal, orm
+    f32 uvo[4];                // xy uv offset, z emission energy, w unused
+    u32 tex[4];                // bindless indices: base, normal, orm, emission
     f32 ax[4], ay[4], az[4];   // unit world axes of box-local X (projection), Y (u), Z (v up)
+    f32 fade[4];               // wave 6: x upper fade exponent, y lower fade exponent, z normal fade start, w albedo mix
 };
-static_assert(sizeof(PackedDecal) == 192, "PackedDecal is the HLSL AverDecalRec ABI");
+static_assert(sizeof(PackedDecal) == 208, "PackedDecal is the HLSL AverDecalRec ABI (192 bytes until wave 6 appended `fade`)");
 
 inline f32 decalBitsToFloat(u32 v) { f32 f; std::memcpy(&f, &v, sizeof f); return f; }
 inline u32 decalFloatToBits(f32 f) { u32 v; std::memcpy(&v, &f, sizeof v); return v; }
@@ -141,13 +152,17 @@ inline bool packSceneDecal(const SceneDecal& d, const f32 eye[3], const DecalTex
     const bool hasBase = d.baseId != 0 && tx.base != kDecalUnboundTexture;
     const bool hasNormal = d.normal && d.normalId != 0 && tx.normal != kDecalUnboundTexture;
     const bool hasOrm = d.ormId != 0 && tx.orm != kDecalUnboundTexture;
+    const bool hasEmission = d.emissionId != 0 && tx.emission != kDecalUnboundTexture;
+    if (hasEmission) flags |= kDecalPackHasEmission;
+    if (d.depthFade) flags |= kDecalPackDepthFade;
+    if (d.albedoMix < 1.0f) flags |= kDecalPackAlbedoMix;
     if (d.colour) flags |= kDecalPackColour;
     if (hasNormal) flags |= kDecalPackNormal | kDecalPackHasNormal;
     if (d.roughnessMetal) flags |= kDecalPackRough;
     if (hasBase) flags |= kDecalPackHasBase;
     if (hasOrm) flags |= kDecalPackHasOrm;
-    if (hasBase || hasNormal || hasOrm) flags |= kDecalPackTextured;
-    if (!(flags & (kDecalPackColour | kDecalPackNormal | kDecalPackRough))) return false;
+    if (hasBase || hasNormal || hasOrm || hasEmission) flags |= kDecalPackTextured;
+    if (!(flags & (kDecalPackColour | kDecalPackNormal | kDecalPackRough | kDecalPackHasEmission))) return false;
 
     for (int i = 0; i < 3; ++i) p.ext[i] = d.halfExtentsCm[i];
     p.ext[3] = decalBitsToFloat(flags);
@@ -165,10 +180,15 @@ inline bool packSceneDecal(const SceneDecal& d, const f32 eye[3], const DecalTex
     p.ang[3] = d.uvScale[1];
     p.uvo[0] = d.uvOffset[0];
     p.uvo[1] = d.uvOffset[1];
+    p.uvo[2] = std::max(d.emissionEnergy, 0.0f);
     p.tex[0] = hasBase ? tx.base : kDecalUnboundTexture;
     p.tex[1] = hasNormal ? tx.normal : kDecalUnboundTexture;
     p.tex[2] = hasOrm ? tx.orm : kDecalUnboundTexture;
-    p.tex[3] = 0;
+    p.tex[3] = hasEmission ? tx.emission : kDecalUnboundTexture;
+    p.fade[0] = std::min(std::max(d.upperFade, 0.0f), 64.0f);
+    p.fade[1] = std::min(std::max(d.lowerFade, 0.0f), 64.0f);
+    p.fade[2] = d.normalFade > 0.0f ? std::min(d.normalFade, 0.999f) : 0.0f;
+    p.fade[3] = std::min(std::max(d.albedoMix, 0.0f), 1.0f);
     f32* axes[3] = {p.ax, p.ay, p.az};
     for (int i = 0; i < 3; ++i) {
         const f32* row = &d.world[i * 4];
@@ -184,10 +204,16 @@ inline bool packSceneDecal(const SceneDecal& d, const f32 eye[3], const DecalTex
 
 struct DecalProjection {
     bool inside = false;     // the point is inside the box
-    f32  weight = 0.0f;      // edge fade * angle fade (before opacity and image alpha)
+    f32  weight = 0.0f;      // edge fade * angle fade (* depth fade * normal fade when set), before opacity and image alpha
+    f32  albedoMix = 1.0f;   // extra weight of the base colour only (1 unless kDecalPackAlbedoMix)
     f32  u = 0.0f, v = 0.0f; // image coordinates after scale and offset
     Vec3 local{0, 0, 0};     // box-local position
 };
+
+inline f32 decalSmoothstep(f32 e0, f32 e1, f32 x) {
+    const f32 t = std::min(std::max((x - e0) / std::max(e1 - e0, 1e-6f), 0.0f), 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
 
 // `prel` is the surface point minus the eye, `geoN` the unit geometric normal facing the viewer.
 inline DecalProjection decalProject(const PackedDecal& d, const Vec3& prel, const Vec3& geoN) {
@@ -202,9 +228,14 @@ inline DecalProjection decalProject(const PackedDecal& d, const Vec3& prel, cons
     o.inside = true;
     const f32 edge = std::max(d.shade[3], 1e-4f);
     auto sat = [](f32 x) { return std::min(std::max(x, 0.0f), 1.0f); };
-    f32 w = std::min(sat((1.0f - qx) / edge), std::min(sat((1.0f - qy) / edge), sat((1.0f - qz) / edge)));
+    const u32 flags = decalFloatToBits(d.ext[3]);
+    const bool depthFade = (flags & kDecalPackDepthFade) != 0;
+    f32 w = std::min(depthFade ? 1.0f : sat((1.0f - qx) / edge), std::min(sat((1.0f - qy) / edge), sat((1.0f - qz) / edge)));
+    if (depthFade) w *= std::pow(std::max(sat(1.0f - qx), 1e-6f), o.local.x < 0.0f ? d.fade[0] : d.fade[1]);
     const f32 c = -(geoN.x * d.ax[0] + geoN.y * d.ax[1] + geoN.z * d.ax[2]);
     w *= sat((c - d.ang[1]) / std::max(d.ang[0] - d.ang[1], 1e-4f));
+    if (d.fade[2] > 0.0f) w *= decalSmoothstep(d.fade[2], 1.0f, c * 0.5f + 0.5f);
+    if (flags & kDecalPackAlbedoMix) o.albedoMix = d.fade[3];
     o.weight = w;
     o.u = (o.local.y / d.ext[1] * 0.5f + 0.5f) * d.ang[2] + d.uvo[0];
     o.v = (0.5f - o.local.z / d.ext[2] * 0.5f) * d.ang[3] + d.uvo[1];

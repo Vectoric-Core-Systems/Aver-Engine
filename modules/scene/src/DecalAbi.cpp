@@ -17,6 +17,9 @@ static_assert(AVER_DECAL_NO_COLOUR    == kDecalNoColour,    "AVER_DECAL_NO_COLOU
 static_assert(AVER_DECAL_NO_NORMAL    == kDecalNoNormal,    "AVER_DECAL_NO_NORMAL drift");
 static_assert(AVER_DECAL_NO_ROUGHNESS == kDecalNoRoughness, "AVER_DECAL_NO_ROUGHNESS drift");
 static_assert(sizeof(AverDecalSpawnDesc) % 8 == 0, "AverDecalSpawnDesc must be padding-free for the C# mirror");
+static_assert(AVER_DECAL_DEPTH_FADE == kDecalDepthFade, "AVER_DECAL_DEPTH_FADE drift");
+static_assert(AVER_DECAL_ALBEDO_MIX == kDecalAlbedoMix, "AVER_DECAL_ALBEDO_MIX drift");
+static_assert(sizeof(AverDecalSpawnDescEx) == sizeof(AverDecalSpawnDesc) + 40, "AverDecalSpawnDescEx must be padding-free for the C# mirror");
 
 namespace {
 
@@ -49,7 +52,7 @@ int32_t aver_decal_pool_set_capacity(int32_t capacity) {
     return static_cast<int32_t>(n);
 }
 
-int32_t aver_decal_spawn(const AverDecalSpawnDesc* d) {
+static int32_t spawnDecal(const AverDecalSpawnDesc* d, const AverDecalSpawnDescEx* ex) {
     if (!d) { setAbiError(AbiError::NullPointer); return 0; }
     if (active().capacity() == 0) { setAbiError(AbiError::Unsupported); return 0; }   // spawning is switched off
     const bool hasNormal = Vec3{d->normal[0], d->normal[1], d->normal[2]}.sizeSquared() > 1e-8f;
@@ -78,9 +81,24 @@ int32_t aver_decal_spawn(const AverDecalSpawnDesc* d) {
     c.lifetimeSec = d->lifetimeSec; c.fadeOutSec = d->fadeOutSec;
     c.sortOrder = d->sortOrder;
     c.flags = d->flags & (kDecalNoColour | kDecalNoNormal | kDecalNoRoughness);
+    if (ex) {
+        const float fin[5] = {ex->emissionEnergy, ex->albedoMix, ex->upperFade, ex->lowerFade, ex->normalFade};
+        if (!finite(fin, 5)) { setAbiError(AbiError::InvalidArgument); return 0; }
+        c.emissionTexture = ex->emissionTexture;
+        c.emissionEnergy = ex->emissionEnergy; c.albedoMix = ex->albedoMix;
+        c.upperFade = ex->upperFade; c.lowerFade = ex->lowerFade; c.normalFade = ex->normalFade;
+        c.flags |= ex->flags & (kDecalDepthFade | kDecalAlbedoMix);
+    }
     const Entity e = active().spawn(World::instance(), sp);
     setAbiError(e == kInvalidEntity ? AbiError::AllocationFailed : AbiError::Ok);
     return static_cast<int32_t>(e);
+}
+
+int32_t aver_decal_spawn(const AverDecalSpawnDesc* d) { return spawnDecal(d, nullptr); }
+
+int32_t aver_decal_spawn_ex(const AverDecalSpawnDescEx* d) {
+    if (!d) { setAbiError(AbiError::NullPointer); return 0; }
+    return spawnDecal(&d->base, d);
 }
 
 int32_t aver_decal_release(int32_t entity) {

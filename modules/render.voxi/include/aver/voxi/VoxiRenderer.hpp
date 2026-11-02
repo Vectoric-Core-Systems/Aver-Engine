@@ -840,7 +840,7 @@ private:
     void appendSceneLightCandidates(const f32 eye[3]);
 
     // ---- DECALS: per-frame record list at t24 (gDecals), count in cb_.decalParams[0] ----
-    static_assert(sizeof(PackedDecal) == 192, "PackedDecal is the HLSL AverDecalRec ABI");
+    static_assert(sizeof(PackedDecal) == 208, "PackedDecal is the HLSL AverDecalRec ABI");
     // Upload-heap ring, as the local-light list: rotate before writing, never touch the bound copy.
     rhi::BufferHandle decalBuf_[kRtInstanceRing] = {};
     u32 decalBufSlot_ = 0;

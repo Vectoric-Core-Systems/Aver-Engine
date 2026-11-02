@@ -44,6 +44,18 @@ public struct DecalDesc
     public DecalChannels Disable;
     /// <summary>Texture ObjectIds: <see cref="Assets.ObjectIdOf"/> of the content-relative path. 0 = none.</summary>
     public long BaseTexture, NormalTexture, OrmTexture;
+    /// <summary>An sRGB image added to the surface's emission (drawn by the plain raster pipeline). 0 = none.</summary>
+    public long EmissionTexture;
+    /// <summary>Multiplies the emission image; zero reads as 1.</summary>
+    public float EmissionEnergy;
+    /// <summary>With <see cref="UseAlbedoMix"/>: the base colour's weight against the surface's, 0 to 1. Normal and roughness keep their own weight.</summary>
+    public float AlbedoMix;
+    public bool UseAlbedoMix;
+    /// <summary>With <see cref="UseDepthFade"/>: the exponent of (1 - |depth| / half) on the side the projector looks from (<see cref="UpperFade"/>) and on the far side. 0 fades nothing there.</summary>
+    public float UpperFade, LowerFade;
+    public bool UseDepthFade;
+    /// <summary>Above 0: the smoothstep start (0 to under 1) of the fade where the surface faces away from the projector.</summary>
+    public float NormalFade;
 
     /// <summary>A decal at <paramref name="position"/> on a surface with normal <paramref name="normal"/>.</summary>
     public static DecalDesc OnSurface(Vec3 position, Vec3 normal, Vec3 sizeCm) =>
@@ -95,7 +107,14 @@ public static class Decals
             lifetimeSec = d.LifetimeSeconds, fadeOutSec = d.FadeOutSeconds,
             sortOrder = d.SortOrder, flags = (uint)d.Disable,
         };
-        return DecalNative.aver_decal_spawn(ref n);
+        var ex = new DecalNative.DescEx
+        {
+            baseDesc = n,
+            emissionTexture = d.EmissionTexture, emissionEnergy = d.EmissionEnergy, albedoMix = d.AlbedoMix,
+            upperFade = d.UpperFade, lowerFade = d.LowerFade, normalFade = d.NormalFade,
+            flags = (d.UseDepthFade ? 0x20u : 0u) | (d.UseAlbedoMix ? 0x40u : 0u),
+        };
+        return DecalNative.aver_decal_spawn_ex(ref ex);
     }
 
     /// <summary>Gives one decal back now. True when it was an active pooled decal.</summary>
@@ -139,6 +158,17 @@ internal static class DecalNative
         public uint flags;
     }
 
+    // AverDecalSpawnDescEx: the v1 desc, then the wave 6 properties.
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct DescEx
+    {
+        public Desc baseDesc;
+        public long emissionTexture;
+        public float emissionEnergy, albedoMix, upperFade, lowerFade, normalFade;
+        public uint flags, reserved0, reserved1;
+    }
+
+    [DllImport(Lib)] internal static extern int aver_decal_spawn_ex(ref DescEx desc);
     [DllImport(Lib)] internal static extern int aver_decal_abi_version();
     [DllImport(Lib)] internal static extern int aver_decal_pool_set_capacity(int capacity);
     [DllImport(Lib)] internal static extern int aver_decal_spawn(ref Desc desc);

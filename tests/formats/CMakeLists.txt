@@ -78,6 +78,14 @@ if(TARGET Aver.Formats.Particles)
     Aver.Formats.Particles Aver.Formats Aver.Particles Aver.Core Aver.Platform)
   set_target_properties(OcParticleTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+  # ParticleRegressionTest -- the shipped .ocparticle files still simulate as before (CPU executor sums against values captured before wave 6).
+  add_executable(ParticleRegressionTest src/ParticleRegressionTest.cpp)
+  target_link_libraries(ParticleRegressionTest PRIVATE
+    Aver.Formats.Particles Aver.Formats Aver.Particles Aver.Core Aver.Platform)
+  target_compile_definitions(ParticleRegressionTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
+  set_target_properties(ParticleRegressionTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
 
 # MeshTest — the AVR1 container and .ocmesh. A THIRD executable rather than more cases in FormatTest

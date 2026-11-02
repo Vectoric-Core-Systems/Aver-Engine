@@ -4536,6 +4536,7 @@ void VoxiRenderer::buildDecals() {
             if (d.baseId)   { tx.base   = decalTextureIndex(d.baseId);   resident = resident && tx.base   != kDecalUnboundTexture; }
             if (d.normalId) { tx.normal = decalTextureIndex(d.normalId); resident = resident && tx.normal != kDecalUnboundTexture; }
             if (d.ormId)    { tx.orm    = decalTextureIndex(d.ormId);    resident = resident && tx.orm    != kDecalUnboundTexture; }
+            if (d.emissionId) { tx.emission = decalTextureIndex(d.emissionId); resident = resident && tx.emission != kDecalUnboundTexture; }
             if (!resident) continue;
 
             DecalCand cand{};

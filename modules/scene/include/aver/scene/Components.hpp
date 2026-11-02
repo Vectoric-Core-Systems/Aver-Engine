@@ -518,6 +518,8 @@ inline constexpr u32 kDecalNoColour    = 0x2;   // leave the surface's base colo
 inline constexpr u32 kDecalNoNormal    = 0x4;   // leave the surface's normal alone
 inline constexpr u32 kDecalNoRoughness = 0x8;   // leave roughness and metallic alone
 inline constexpr u32 kDecalPooled      = 0x10;  // owned by a DecalPool: never saved with the level
+inline constexpr u32 kDecalDepthFade   = 0x20;  // upperFade / lowerFade shape the fade along the projection axis (pow curve) instead of the soft edge there
+inline constexpr u32 kDecalAlbedoMix   = 0x40;  // albedoMix is honoured as written (0 = leave the albedo alone); without it the colour weighs fully
 
 // A projected decal: a box that paints base colour, normal and roughness onto whatever surface is
 // inside it (docs/rendering/DECALS.md). Projects along the entity's local +X; local Y is the
@@ -549,6 +551,14 @@ struct CDecal {
     f32 fadeOutSec    = 0.0f;        // fade-out at the end of the lifetime; 0 = vanish at once
     f32 age           = 0.0f;        // seconds since spawn; advanced by the pool's tick, never saved
     u32 serial        = 0;           // spawn order stamped by a DecalPool (oldest recycles first); never saved
+    // ---- appended in wave 6 (P13): all zero = the decal as it was ----
+    i64 emissionTexture = 0;         // ObjectId of an emission image (rgb, added to the surface's emission); 0 = none
+    f32 emissionEnergy = 0.0f;       // multiplies the emission image; 0 = 1
+    f32 albedoMix = 0.0f;            // weight of the base colour against the surface's, with kDecalAlbedoMix; normal and roughness keep their own weight
+    f32 upperFade = 0.0f;            // kDecalDepthFade: the fade exponent on the side of the box the projector looks from (0 = no fade there)
+    f32 lowerFade = 0.0f;            // ... and on the far side
+    f32 normalFade = 0.0f;           // > 0: fades where the surface faces away from the projector; the value is the smoothstep start in [0, 1)
+    u32 reserved = 0;                // keeps the struct padding-free
 };
 
 // Field order is chosen so neither struct gets padding: World::verifyComponent is byte-exact and
@@ -561,7 +571,7 @@ static_assert(sizeof(CAnimator) == 24, "CAnimator must be padding-free");
 static_assert(sizeof(CParticleEmitter) == 24, "CParticleEmitter must be padding-free");
 static_assert(sizeof(CRigidBody) == 56, "CRigidBody must be padding-free");
 static_assert(sizeof(CJoint) == 64, "CJoint must be padding-free");
-static_assert(sizeof(CDecal) == 120, "CDecal must be padding-free");
+static_assert(sizeof(CDecal) == 152, "CDecal must be padding-free");
 
 class World;
 

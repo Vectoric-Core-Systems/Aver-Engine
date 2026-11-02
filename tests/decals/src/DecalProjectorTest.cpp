@@ -10,6 +10,7 @@
 #include "aver/voxi/SceneDecal.hpp"
 
 #include <cmath>
+#include <cstddef>
 #include <cstdlib>
 #include <string>
 
@@ -194,6 +195,65 @@ int main() {
         check(!packSceneDecal(collapsed, eye, none, p), "a matrix with a collapsed axis does not pack");
     }
 
+    AVER_INFO("=== wave 6: emission, depth and normal fade, albedo mix ===");
+    {
+        check(sizeof(PackedDecal) == 208 && offsetof(PackedDecal, fade) == 192, "the record is 208 bytes and `fade` is the appended row");
+        const SceneDecal plain = makeDecal({0, 0, 0}, 0.0f, {1, 1, 1}, {50, 50, 50});
+        const f32 eye[3] = {0, 0, 0};
+        const DecalTextureIndices none;
+        PackedDecal p{};
+        check(packSceneDecal(plain, eye, none, p), "a plain decal packs");
+        const u32 fl = decalFloatToBits(p.ext[3]);
+        check((fl & (kDecalPackHasEmission | kDecalPackDepthFade | kDecalPackAlbedoMix)) == 0 && p.fade[0] == 0.0f && p.fade[1] == 0.0f &&
+                  p.fade[2] == 0.0f && p.fade[3] == 1.0f && p.tex[3] == kDecalUnboundTexture,
+              "defaults leave the new flags clear and the new fields neutral");
+        const Vec3 facing{-1, 0, 0};
+        // The soft edge still rules the depth axis by default: 5% from the +X face is half weight.
+        check(approx(decalProject(p, {47.5f, 0, 0}, facing).weight, 0.5f, 0.02f), "by default the projection axis keeps its soft edge");
+
+        // Depth fade: (1 - |x|/half)^exponent, upper (local -X, the side the projector looks from) and lower (+X) apart.
+        SceneDecal df = plain;
+        df.depthFade = true; df.upperFade = 2.0f; df.lowerFade = 0.5f;
+        PackedDecal pd = pack(df, {0, 0, 0});
+        check(approx(decalProject(pd, {0, 0, 0}, facing).weight, 1.0f), "the centre is full weight under a depth fade");
+        check(approx(decalProject(pd, {-25.0f, 0, 0}, facing).weight, 0.25f, 1e-3f), "upper: (1 - 0.5)^2 on the -X side");
+        check(approx(decalProject(pd, {25.0f, 0, 0}, facing).weight, std::sqrt(0.5f), 1e-3f), "lower: (1 - 0.5)^0.5 on the +X side");
+        df.upperFade = 0.0f; df.lowerFade = 0.0f;
+        pd = pack(df, {0, 0, 0});
+        check(approx(decalProject(pd, {-45.0f, 0, 0}, facing).weight, 1.0f) && approx(decalProject(pd, {45.0f, 0, 0}, facing).weight, 1.0f),
+              "exponent 0 does not fade on that side (and the base is floored, so there is no NaN at the face)");
+        check(std::isfinite(decalProject(pd, {49.999f, 0, 0}, facing).weight), "a point at the face stays finite");
+
+        // Normal fade: smoothstep(start, 1, cos * 0.5 + 0.5). A surface square to the projector is 1, one at 60 degrees (cos 0.5 -> 0.75) is partial.
+        SceneDecal nf = plain;
+        nf.angleFadeStartDeg = 89.0f; nf.angleFadeEndDeg = 90.0f;
+        nf.normalFade = 0.5f;
+        const PackedDecal pn = pack(nf, {0, 0, 0});
+        const f32 square = decalProject(pn, {0, 0, 0}, facing).weight;
+        const f32 tilted = decalProject(pn, {0, 0, 0}, Vec3{-0.5f, 0.0f, 0.8660254f}).weight;
+        check(approx(square, 1.0f), "a surface square to the projector is not faded by the normal fade");
+        check(approx(tilted, decalSmoothstep(0.5f, 1.0f, 0.75f), 1e-3f) && tilted < 0.95f && tilted > 0.3f, "a tilted one is the smoothstep of its cosine");
+
+        // Albedo mix scales the colour only: the projector's weight is untouched.
+        SceneDecal am = plain;
+        am.albedoMix = 0.25f;
+        const PackedDecal pm = pack(am, {0, 0, 0});
+        const DecalProjection mixed = decalProject(pm, {0, 0, 0}, facing);
+        check(approx(mixed.albedoMix, 0.25f) && approx(mixed.weight, 1.0f) && (decalFloatToBits(pm.ext[3]) & kDecalPackAlbedoMix), "albedo mix is a separate weight on the colour");
+        check(approx(decalProject(p, {0, 0, 0}, facing).albedoMix, 1.0f), "and 1 when it is not set");
+
+        // Emission needs its image resident; an emission-only decal still packs, and its flags say so.
+        SceneDecal em = plain;
+        em.colour = false; em.roughnessMetal = false;
+        em.emissionId = 11; em.emissionEnergy = 3.0f;
+        DecalTextureIndices etx; etx.emission = 9;
+        PackedDecal pe{};
+        check(!packSceneDecal(em, eye, none, pe), "an emission image that is not resident leaves nothing to paint");
+        check(packSceneDecal(em, eye, etx, pe), "an emission-only decal packs once its image is resident");
+        const u32 ef = decalFloatToBits(pe.ext[3]);
+        check((ef & kDecalPackHasEmission) && (ef & kDecalPackTextured) && pe.tex[3] == 9 && approx(pe.uvo[2], 3.0f), "it carries the index and the energy");
+    }
+
     AVER_INFO("=== culling helpers and paint order ===");
     {
         check(approx(decalDistanceFade(100.0f, 0.0f), 1.0f), "no fade distance never fades");
@@ -252,8 +312,17 @@ int main() {
 
         check(in(hlsl, "struct AverDecalRec") && in(hlsl, "float4 r0, r1, r2;") && in(hlsl, "float4 ext;") &&
                   in(hlsl, "float4 tint;") && in(hlsl, "float4 shade;") && in(hlsl, "float4 ang;") && in(hlsl, "float4 uvo;") &&
-                  in(hlsl, "uint4  tex;") && in(hlsl, "float4 ax, ay, az;"),
-              "the 192-byte record has the fields PackedDecal packs, in order");
+                  in(hlsl, "uint4  tex;") && in(hlsl, "float4 ax, ay, az;") && in(hlsl, "float4 fade;"),
+              "the 208-byte record has the fields PackedDecal packs, in order");
+        check(hlsl.find("float4 ax, ay, az;") < hlsl.find("float4 fade;"), "the wave 6 `fade` row is appended after the axes");
+        check(in(hlsl, "#define AVER_DECAL_HAS_EMISSION 0x80u") && in(hlsl, "#define AVER_DECAL_DEPTH_FADE 0x100u") &&
+                  in(hlsl, "#define AVER_DECAL_ALBEDO_MIX 0x200u") &&
+                  kDecalPackHasEmission == 0x80 && kDecalPackDepthFade == 0x100 && kDecalPackAlbedoMix == 0x200,
+              "the wave 6 flag bits match the header");
+        // The new shading is compiled into the plain raster variants only: voxi.hlsl opts in, voxi_rt.hlsli (the ray-driven stages) never does.
+        check(in(voxi, "#define AVER_DECAL_EXT 1") && voxi.find("#define AVER_DECAL_EXT 1") < voxi.find("#include \"voxi_decal.hlsli\""),
+              "voxi.hlsl turns AVER_DECAL_EXT on before it includes the decals, in the !AVER_RT branch");
+        check(!in(rt, "AVER_DECAL_EXT") && in(hlsl, "#ifndef AVER_DECAL_EXT"), "the ray-traced include path never defines AVER_DECAL_EXT (it stays 0)");
         const size_t at = hlsl.find("float4 r0, r1, r2;");
         check(at != std::string::npos && at < hlsl.find("float4 ext;") && hlsl.find("float4 ext;") < hlsl.find("float4 tint;") &&
                   hlsl.find("float4 tint;") < hlsl.find("float4 shade;") && hlsl.find("float4 shade;") < hlsl.find("float4 ang;") &&

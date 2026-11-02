@@ -14,7 +14,7 @@
 extern "C" {
 #endif
 
-#define AVER_DECAL_ABI_VERSION 1
+#define AVER_DECAL_ABI_VERSION 2
 
 /* Mirrors CDecal's kDecal* flag bits (Components.hpp); checked in DecalAbi.cpp. */
 #define AVER_DECAL_NO_COLOUR    0x2
@@ -53,6 +53,25 @@ typedef struct AverDecalSpawnDesc {
     uint32_t flags;           /* AVER_DECAL_NO_* */
 } AverDecalSpawnDesc;
 
+/* Version 2 (wave 6): the AverDecalSpawnDescEx spawn below. The v1 desc and aver_decal_spawn are unchanged. */
+
+/* AverDecalSpawnDescEx::flags bits; mirror CDecal's kDecalDepthFade / kDecalAlbedoMix (checked in DecalAbi.cpp). */
+#define AVER_DECAL_DEPTH_FADE 0x20  /* upperFade / lowerFade are fade exponents along the projection axis, replacing the soft edge there */
+#define AVER_DECAL_ALBEDO_MIX 0x40  /* albedoMix is the weight of the base colour (0 leaves the albedo alone) */
+
+/* The v1 desc plus the extra decal properties. Zero in a field means the same as on CDecal: no emission image, energy 1, nothing faded. */
+typedef struct AverDecalSpawnDescEx {
+    AverDecalSpawnDesc base;
+    int64_t emissionTexture;  /* ObjectId of an sRGB image added to the surface's emission; 0 = none */
+    float   emissionEnergy;   /* multiplies the image; 0 = 1 */
+    float   albedoMix;        /* with AVER_DECAL_ALBEDO_MIX: the base colour's weight against the surface's, 0..1 */
+    float   upperFade;        /* with AVER_DECAL_DEPTH_FADE: exponent of (1 - |x|/half) on the side the projector looks from */
+    float   lowerFade;        /* ... and on the far side */
+    float   normalFade;       /* > 0: smoothstep start of the fade where the surface faces away from the projector, [0, 1) */
+    uint32_t flags;           /* AVER_DECAL_DEPTH_FADE | AVER_DECAL_ALBEDO_MIX */
+    uint32_t reserved[2];     /* zero; keeps the struct padding-free */
+} AverDecalSpawnDescEx;
+
 /* Returns AVER_DECAL_ABI_VERSION as the DLL was built with. */
 AVER_SCENE_ABI int32_t aver_decal_abi_version(void);
 
@@ -66,6 +85,9 @@ AVER_SCENE_ABI int32_t aver_decal_pool_set_capacity(int32_t capacity);
  * refused an entity.
  * Reason on aver_scene_last_error (same DLL); see ErrorCodes.hpp. */
 AVER_SCENE_ABI int32_t aver_decal_spawn(const AverDecalSpawnDesc* desc);
+
+/* aver_decal_spawn with the wave 6 properties. A non-finite value is InvalidArgument. */
+AVER_SCENE_ABI int32_t aver_decal_spawn_ex(const AverDecalSpawnDescEx* desc);
 
 /* Gives one decal back now. 1 when `entity` was an active pooled decal.
  * Reason on aver_scene_last_error (same DLL); see ErrorCodes.hpp. */

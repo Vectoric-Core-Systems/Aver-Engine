@@ -50,7 +50,13 @@ public:
             s.colour = w.colour; s.normal = w.normal; s.roughnessMetal = w.roughnessMetal;
             s.uvScale[0] = w.uvScale[0]; s.uvScale[1] = w.uvScale[1];
             s.uvOffset[0] = w.uvOffset[0]; s.uvOffset[1] = w.uvOffset[1];
+            s.emissionEnergy = w.emissionEnergy;
+            s.albedoMix = w.albedoMix;
+            s.depthFade = w.depthFade;
+            s.upperFade = w.upperFade; s.lowerFade = w.lowerFade;
+            s.normalFade = w.normalFade;
             bool ok = true;
+            ok = image(w.emissionTexture, voxi::DecalImageKind::Colour, voxi, load, s.emissionId) && ok;
             ok = image(w.baseTexture, voxi::DecalImageKind::Colour, voxi, load, s.baseId) && ok;
             ok = image(w.normalTexture, voxi::DecalImageKind::Normal, voxi, load, s.normalId) && ok;
             ok = image(w.ormTexture, voxi::DecalImageKind::Data, voxi, load, s.ormId) && ok;

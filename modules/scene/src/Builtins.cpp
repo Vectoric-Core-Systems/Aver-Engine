@@ -235,7 +235,14 @@ void registerBuiltinComponents(World& world) {
             // READ-ONLY runtime state (docs/CHUNKS.md 5.1): a pool's clock and ordering mean nothing
             // in another run, so they must never reach a serialised chunk.
             .field("age", FieldKind::F32, static_cast<u16>(offsetof(CDecal, age)), 0, /*readOnly*/ true)
-            .field("serial", FieldKind::I32, static_cast<u16>(offsetof(CDecal, serial)), 0, true);
+            .field("serial", FieldKind::I32, static_cast<u16>(offsetof(CDecal, serial)), 0, true)
+            .field("emissionTexture", FieldKind::I64, static_cast<u16>(offsetof(CDecal, emissionTexture)))
+            .field("emissionEnergy", FieldKind::F32, static_cast<u16>(offsetof(CDecal, emissionEnergy)))
+            .field("albedoMix", FieldKind::F32, static_cast<u16>(offsetof(CDecal, albedoMix)))
+            .field("upperFade", FieldKind::F32, static_cast<u16>(offsetof(CDecal, upperFade)))
+            .field("lowerFade", FieldKind::F32, static_cast<u16>(offsetof(CDecal, lowerFade)))
+            .field("normalFade", FieldKind::F32, static_cast<u16>(offsetof(CDecal, normalFade)))
+            .field("reserved", FieldKind::I32, static_cast<u16>(offsetof(CDecal, reserved)), 0, true);
         expect(b.verify(sizeof(CDecal)), b.typeId(), kComponentDecal, "CDecal");
     }
     {

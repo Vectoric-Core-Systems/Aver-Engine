@@ -64,6 +64,13 @@ struct WorldDecal {
     i64 baseTexture = 0, normalTexture = 0, ormTexture = 0;
     f32 uvScale[2] = {1, 1};
     f32 uvOffset[2] = {0, 0};
+    // P13. emissionTexture 0 = none; depthFade false = the soft edge covers the projection axis too; albedoMix 1 = the colour weighs fully.
+    i64 emissionTexture = 0;
+    f32 emissionEnergy = 1.0f;
+    f32 albedoMix = 1.0f;
+    bool depthFade = false;
+    f32 upperFade = 0.0f, lowerFade = 0.0f;
+    f32 normalFade = 0.0f;
 };
 
 // Resolves one CDecal against its world matrix. False for a decal that cannot paint: disabled, fully
@@ -76,7 +83,7 @@ inline bool makeWorldDecal(const CDecal& c, const Mat4& m, WorldDecal& out) {
     const bool colour = (c.flags & kDecalNoColour) == 0;
     const bool normal = (c.flags & kDecalNoNormal) == 0 && c.normalTexture != 0;
     const bool rough  = (c.flags & kDecalNoRoughness) == 0 && (c.ormTexture != 0 || c.roughness > 0.0f || c.metallic > 0.0f);
-    if (!colour && !normal && !rough) return false;
+    if (!colour && !normal && !rough && c.emissionTexture == 0) return false;
     for (int r = 0; r < 3; ++r) {   // a collapsed axis has no inverse
         const f32 l2 = m.m[r][0] * m.m[r][0] + m.m[r][1] * m.m[r][1] + m.m[r][2] * m.m[r][2];
         if (!(l2 > 1e-10f) || !std::isfinite(l2)) return false;
@@ -98,6 +105,13 @@ inline bool makeWorldDecal(const CDecal& c, const Mat4& m, WorldDecal& out) {
     w.baseTexture = c.baseTexture; w.normalTexture = c.normalTexture; w.ormTexture = c.ormTexture;
     w.uvScale[0] = decalUvScale(c, 0); w.uvScale[1] = decalUvScale(c, 1);
     w.uvOffset[0] = c.uvOffset[0]; w.uvOffset[1] = c.uvOffset[1];
+    w.emissionTexture = c.emissionTexture;
+    w.emissionEnergy = c.emissionEnergy > 0.0f ? c.emissionEnergy : 1.0f;
+    w.albedoMix = (c.flags & kDecalAlbedoMix) ? std::min(std::max(c.albedoMix, 0.0f), 1.0f) : 1.0f;
+    w.depthFade = (c.flags & kDecalDepthFade) != 0;
+    w.upperFade = std::min(std::max(c.upperFade, 0.0f), 64.0f);
+    w.lowerFade = std::min(std::max(c.lowerFade, 0.0f), 64.0f);
+    w.normalFade = c.normalFade > 0.0f ? std::min(c.normalFade, 0.999f) : 0.0f;
     out = w;
     return true;
 }

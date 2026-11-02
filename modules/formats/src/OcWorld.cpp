@@ -708,6 +708,12 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
                 else if (equalsCI(t[i], "nonormal"))      dc.noNormal = true;
                 else if (equalsCI(t[i], "noroughness"))   dc.noRoughness = true;
                 else if (equalsCI(t[i], "disabled"))      dc.disabled = true;
+                else if (equalsCI(t[i], "emission")    && i + 1 < t.size()) dc.emission = std::string(t[++i]);
+                else if (equalsCI(t[i], "emissionenergy") && i + 1 < t.size()) dc.emissionEnergy = parseF64(t[++i], dc.emissionEnergy);
+                else if (equalsCI(t[i], "albedomix")   && i + 1 < t.size()) { dc.hasAlbedoMix = true; dc.albedoMix = parseF64(t[++i], dc.albedoMix); }
+                else if (equalsCI(t[i], "depthfade")   && i + 2 < t.size()) {
+                    dc.depthFade = true; dc.upperFade = parseF64(t[i+1]); dc.lowerFade = parseF64(t[i+2]); i += 2;
+                } else if (equalsCI(t[i], "normalfade") && i + 1 < t.size()) dc.normalFade = parseF64(t[++i]);
             }
             out.decals.push_back(std::move(dc));
         } else if (equalsCI(key, "POSTVOLUME")) {
@@ -1290,6 +1296,13 @@ std::string writeOcworld(const OcWorldData& w) {
             if (dc.noNormal)    s += " nonormal";
             if (dc.noRoughness) s += " noroughness";
             if (dc.disabled)    s += " disabled";
+            if (!dc.emission.empty()) {
+                s += " emission " + dc.emission;
+                if (dc.emissionEnergy != 1.0) s += " emissionenergy " + num(dc.emissionEnergy);
+            }
+            if (dc.hasAlbedoMix) s += " albedomix " + num(dc.albedoMix);
+            if (dc.depthFade)    s += " depthfade " + num(dc.upperFade) + " " + num(dc.lowerFade);
+            if (dc.normalFade > 0.0) s += " normalfade " + num(dc.normalFade);
             s += "\n";
         }
     }

@@ -258,6 +258,7 @@ bool averDrawIsTranslucent() { return (gMaterialFlags & AVER_MAT_ALPHA_BLEND) !=
 #define AVER_BLENDED_PASS 0
 #endif
 #if !AVER_RT
+#define AVER_DECAL_EXT 1      // emission, depth / normal fade and albedo mix: plain raster only, never in the ray-traced variants (voxi_decal.hlsli)
 #include "voxi_decal.hlsli"   // the RT build gets it through voxi_rt.hlsli, ahead of rtHitSurface
 #endif
 #if AVER_RT

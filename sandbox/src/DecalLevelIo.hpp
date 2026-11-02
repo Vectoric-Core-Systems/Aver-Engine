@@ -54,6 +54,14 @@ inline fmt::OcDecal recordFromDecal(const scene::CDecal& c, const Transform& wor
     r.noNormal = (c.flags & scene::kDecalNoNormal) != 0;
     r.noRoughness = (c.flags & scene::kDecalNoRoughness) != 0;
     r.disabled = (c.flags & scene::kDecalDisabled) != 0;
+    r.emission = assets.find(c.emissionTexture);
+    r.emissionEnergy = c.emissionEnergy > 0.0f ? c.emissionEnergy : 1.0;
+    r.hasAlbedoMix = (c.flags & scene::kDecalAlbedoMix) != 0;
+    r.albedoMix = c.albedoMix;
+    r.depthFade = (c.flags & scene::kDecalDepthFade) != 0;
+    r.upperFade = c.upperFade;
+    r.lowerFade = c.lowerFade;
+    r.normalFade = c.normalFade;
     return r;
 }
 

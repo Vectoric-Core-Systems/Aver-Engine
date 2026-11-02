@@ -22,17 +22,28 @@
 #define AVER_DECAL_HAS_NORMAL 0x10u
 #define AVER_DECAL_HAS_ORM    0x20u
 #define AVER_DECAL_TEXTURED   0x40u
+#define AVER_DECAL_HAS_EMISSION 0x80u
+#define AVER_DECAL_DEPTH_FADE 0x100u
+#define AVER_DECAL_ALBEDO_MIX 0x200u
 
-// SceneDecal.hpp's PackedDecal, field for field (192 bytes).
+// Wave 6 (P13): emission, the depth and normal fades and the albedo mix are compiled only where the includer sets AVER_DECAL_EXT to 1. voxi.hlsl does that for the plain raster
+// pipeline and nowhere else: this function is also called from rtHitSurface (the ray-driven stages), where decals once hung the RX 7800 XT, and those variants compile exactly the
+// code they did before (the record is wider, the instructions are the same).
+#ifndef AVER_DECAL_EXT
+#define AVER_DECAL_EXT 0
+#endif
+
+// SceneDecal.hpp's PackedDecal, field for field (208 bytes).
 struct AverDecalRec {
     float4 r0, r1, r2;     // local = prel.x*r0.xyz + prel.y*r1.xyz + prel.z*r2.xyz + float3(r0.w, r1.w, r2.w)
     float4 ext;            // xyz half extents, w flag bits
     float4 tint;           // rgb tint (linear), a opacity
     float4 shade;          // normal strength, roughness, metallic, edge fade
     float4 ang;            // x cos(full angle), y cos(zero angle), zw uv scale
-    float4 uvo;            // xy uv offset
-    uint4  tex;            // bindless indices: base, normal, orm
+    float4 uvo;            // xy uv offset, z emission energy
+    uint4  tex;            // bindless indices: base, normal, orm, emission
     float4 ax, ay, az;     // unit world axes of box-local X (projection), Y (u), Z (v up)
+    float4 fade;           // x upper fade exponent, y lower fade exponent, z normal fade start, w albedo mix
 };
 
 StructuredBuffer<AverDecalRec> gDecals : register(t24);
@@ -73,6 +84,9 @@ void averApplyDecals(inout AverSurface s, float3 wpos, float3 geoN, bool full) {
     float  met = s.metallic;
     float3 nrm = s.N;
     bool touched = false;
+#if AVER_DECAL_EXT
+    float3 emi = float3(0.0, 0.0, 0.0);
+#endif
 
     [loop] for (uint k = 0; k < count; ++k) {
         const float4 r0 = gDecals[k].r0, r1 = gDecals[k].r1, r2 = gDecals[k].r2;
@@ -91,11 +105,32 @@ void averApplyDecals(inout AverSurface s, float3 wpos, float3 geoN, bool full) {
 
         // Soft box edge, then how squarely the surface faces the projector.
         const float3 inner = saturate((1.0 - q) / max(shade.w, 1e-4));
+#if AVER_DECAL_EXT
+        // Depth fade: (1 - |x|/half)^exponent along the projection axis in place of the soft edge there (upper = the side the projector looks from, local -X);
+        // normal fade: smoothstep over how squarely the surface faces the projector. The pow base is floored so an exponent of 0 gives 1, not NaN.
+        const float4 dfade = gDecals[k].fade;
+        const float cosA = dot(geoN, -axisX);
+        float w = min(inner.y, inner.z);
+        if ((flags & AVER_DECAL_DEPTH_FADE) != 0u) w *= pow(max(saturate(1.0 - q.x), 1e-6), lp.x < 0.0 ? dfade.x : dfade.y);
+        else w = min(w, inner.x);
+        w *= saturate((cosA - ang.y) / max(ang.x - ang.y, 1e-4));
+        if (dfade.z > 0.0) w *= smoothstep(dfade.z, 1.0, cosA * 0.5 + 0.5);
+#else
         float w = min(inner.x, min(inner.y, inner.z));
         w *= saturate((dot(geoN, -axisX) - ang.y) / max(ang.x - ang.y, 1e-4));
+#endif
         const float4 tint = gDecals[k].tint;
         float cover = tint.a * w;
         if (cover <= 0.0) continue;
+#if AVER_DECAL_EXT && defined(AVER_RT_BINDLESS)
+        // Emission is added to the surface's own, weighted by the placement fades but not by the base image's alpha.
+        if ((flags & AVER_DECAL_HAS_EMISSION) != 0u) {
+            const uint ei = gDecals[k].tex.w;
+            const float2 euv = float2(lp.y / ext.y * 0.5 + 0.5, 0.5 - lp.z / ext.z * 0.5) * ang.zw + gDecals[k].uvo.xy;
+            emi += averDecalSample(ei, euv, averDecalMip(ei, footCm, ext.yz, ang.zw), float4(0.0, 0.0, 0.0, 0.0)).rgb * (gDecals[k].uvo.z * cover);
+            touched = true;
+        }
+#endif
 
         const float2 uv = float2(lp.y / ext.y * 0.5 + 0.5, 0.5 - lp.z / ext.z * 0.5) * ang.zw + gDecals[k].uvo.xy;
         float3 colour = tint.rgb;
@@ -115,7 +150,11 @@ void averApplyDecals(inout AverSurface s, float3 wpos, float3 geoN, bool full) {
             nTS = averDecalSample(ti.y, uv, averDecalMip(ti.y, footCm, ext.yz, ang.zw), float4(0.5, 0.5, 1.0, 1.0)).xyz * 2.0 - 1.0;
 #endif
 
+#if AVER_DECAL_EXT
+        if ((flags & AVER_DECAL_COLOUR) && full) alb = lerp(alb, colour, cover * (((flags & AVER_DECAL_ALBEDO_MIX) != 0u) ? dfade.w : 1.0));
+#else
         if ((flags & AVER_DECAL_COLOUR) && full) alb = lerp(alb, colour, cover);
+#endif
         if (flags & AVER_DECAL_ROUGH) {
             rgh = lerp(rgh, saturate(orm.g * shade.y), cover);
             met = lerp(met, saturate(orm.b * shade.z), cover);
@@ -147,6 +186,9 @@ void averApplyDecals(inout AverSurface s, float3 wpos, float3 geoN, bool full) {
         s.F0 = lerp(s.reflectance.xxx, s.albedo, s.metallic);
         s.kdAlbedo = (1.0 - s.metallic) * s.albedo;
         s.F = fresnelSchlick(saturate(dot(s.H, s.V)), s.F0, s.f90);
+#if AVER_DECAL_EXT
+        s.emissive += emi;
+#endif
     }
 }
 

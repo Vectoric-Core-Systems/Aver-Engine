@@ -39,7 +39,7 @@ inline scene::CDecal makeNewDecal() {
 // Draws the Decal section body. Returns true when any field changed (the caller marks the level
 // unsaved). `contentDir` is the project's absolute content folder.
 inline bool drawDecalDetails(scene::CDecal& c, const std::string& contentDir) {
-    static LightAssetPicker basePicker, normalPicker, ormPicker;
+    static LightAssetPicker basePicker, normalPicker, ormPicker, emissionPicker;
     bool changed = false;
 
     if (c.flags & scene::kDecalPooled)
@@ -121,6 +121,33 @@ inline bool drawDecalDetails(scene::CDecal& c, const std::string& contentDir) {
                           "that run along the projection.");
     changed |= ImGui::DragFloat("Fade distance (cm)", &c.fadeDistanceCm, 10.0f, 0.0f, 1.0e6f,
                                 c.fadeDistanceCm > 0.0f ? "%.0f" : "never");
+
+    ImGui::SeparatorText("Emission and depth fade");
+    changed |= lightAssetField("Emission map", emissionPicker, contentDir, false, c.emissionTexture);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("sRGB image added to the surface's emission, weighted by the fades above.\n"
+                          "Drawn by the plain raster pipeline only (not ray-driven mode).");
+    f32 energy = c.emissionEnergy > 0.0f ? c.emissionEnergy : 1.0f;
+    if (ImGui::DragFloat("Emission energy", &energy, 0.05f, 0.0f, 100.0f)) { c.emissionEnergy = std::max(energy, 0.001f); changed = true; }
+    bool depth = (c.flags & scene::kDecalDepthFade) != 0;
+    if (ImGui::Checkbox("Depth fade curve", &depth)) {
+        c.flags = depth ? (c.flags | scene::kDecalDepthFade) : (c.flags & ~scene::kDecalDepthFade);
+        changed = true;
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Fades along the projection by (1 - distance from the centre / half depth) ^ exponent,\n"
+                          "in place of the soft edge on that axis. Exponent 0 does not fade on that side.");
+    if (depth) {
+        changed |= ImGui::DragFloat("Upper exponent", &c.upperFade, 0.01f, 0.0f, 64.0f);
+        changed |= ImGui::DragFloat("Lower exponent", &c.lowerFade, 0.01f, 0.0f, 64.0f);
+    }
+    changed |= ImGui::SliderFloat("Normal fade", &c.normalFade, 0.0f, 0.99f, c.normalFade > 0.0f ? "%.2f" : "off");
+    bool mix = (c.flags & scene::kDecalAlbedoMix) != 0;
+    if (ImGui::Checkbox("Albedo mix", &mix)) {
+        c.flags = mix ? (c.flags | scene::kDecalAlbedoMix) : (c.flags & ~scene::kDecalAlbedoMix);
+        changed = true;
+    }
+    if (mix) changed |= ImGui::SliderFloat("Albedo mix weight", &c.albedoMix, 0.0f, 1.0f);
 
     ImGui::SeparatorText("Image placement");
     f32 uvs[2] = {scene::decalUvScale(c, 0), scene::decalUvScale(c, 1)};

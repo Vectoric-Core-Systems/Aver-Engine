@@ -600,6 +600,14 @@ struct OcDecal {
     f64 uvOffset[2] = {0, 0};
     bool noColour = false, noNormal = false, noRoughness = false;
     bool disabled = false;                  // present but not projected
+    // P13, all optional: a record without these tokens is the decal as it was.
+    std::string emission;                   // sRGB image added to the surface's emission; empty = none
+    f64 emissionEnergy = 1.0;
+    bool hasAlbedoMix = false;              // `albedomix` present: albedoMix is honoured as written
+    f64 albedoMix = 1.0;
+    bool depthFade = false;                 // `depthfade` present: upper / lower are exponents along the projection axis
+    f64 upperFade = 0.0, lowerFade = 0.0;
+    f64 normalFade = 0.0;                   // 0 = off
 };
 
 // One POSTVOLUME record: a box (or the whole level) that overrides camera post-processing while the view is in

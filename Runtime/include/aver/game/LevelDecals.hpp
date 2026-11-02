@@ -43,6 +43,11 @@ inline scene::CDecal decalFromRecord(const fmt::OcDecal& r) {
     for (int i = 0; i < 2; ++i) { c.uvScale[i] = static_cast<f32>(r.uvScale[i]); c.uvOffset[i] = static_cast<f32>(r.uvOffset[i]); }
     c.flags = (r.noColour ? scene::kDecalNoColour : 0u) | (r.noNormal ? scene::kDecalNoNormal : 0u) |
               (r.noRoughness ? scene::kDecalNoRoughness : 0u) | (r.disabled ? scene::kDecalDisabled : 0u);
+    c.emissionTexture = r.emission.empty() ? 0 : static_cast<i64>(decalImageId(r.emission));
+    c.emissionEnergy = static_cast<f32>(r.emissionEnergy);
+    if (r.hasAlbedoMix) { c.flags |= scene::kDecalAlbedoMix; c.albedoMix = static_cast<f32>(r.albedoMix); }
+    if (r.depthFade) { c.flags |= scene::kDecalDepthFade; c.upperFade = static_cast<f32>(r.upperFade); c.lowerFade = static_cast<f32>(r.lowerFade); }
+    c.normalFade = static_cast<f32>(r.normalFade);
     return c;
 }
 

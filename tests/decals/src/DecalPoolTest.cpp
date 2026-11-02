@@ -55,7 +55,7 @@ int main() {
     {
         check(kComponentDecal == 16 && w.componentId("CDecal") == kComponentDecal, "CDecal is built-in component 16");
         check(w.componentVerified(kComponentDecal), "its field table covers the struct byte for byte");
-        check(w.componentSize(kComponentDecal) == sizeof(CDecal) && sizeof(CDecal) == 120, "its stride is 120 bytes");
+        check(w.componentSize(kComponentDecal) == sizeof(CDecal) && sizeof(CDecal) == 152, "its stride is 152 bytes (120 until wave 6 appended the emission and fade fields)");
         const u32 age = w.fieldId("CDecal.age"), serial = w.fieldId("CDecal.serial"), tint = w.fieldId("CDecal.tint");
         check(age && serial && tint, "age, serial and tint resolve by qualified name");
         check(w.field(age) && w.field(age)->readOnly && w.field(serial) && w.field(serial)->readOnly,

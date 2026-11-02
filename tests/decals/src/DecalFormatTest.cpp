@@ -123,6 +123,40 @@ int main() {
         fmt::OcWorldData shortLine;
         check(fmt::parseOcworld("OCWORLD 1\nDECAL pos 1 2\n", shortLine, &err) && shortLine.decals.size() == 1 && shortLine.decals[0].x == 0,
               "a truncated pos is ignored rather than half-read");
+
+        // Wave 6 (P13): optional tokens; a record without them is the decal as it was, and a decal that sets them writes them and reads them back.
+        const std::string plainLine = decalLines(fmt::writeOcworld(none));
+        fmt::OcWorldData w6;
+        fmt::OcDecal d6;
+        d6.emission = "Decals/glow.png"; d6.emissionEnergy = 2.5;
+        d6.hasAlbedoMix = true; d6.albedoMix = 0.0;
+        d6.depthFade = true; d6.upperFade = 0.3; d6.lowerFade = 0.0;
+        d6.normalFade = 0.4;
+        w6.decals = {d6, fmt::OcDecal{}};
+        const std::string t6 = fmt::writeOcworld(w6);
+        const std::string l6 = decalLines(t6);
+        const usize nl6 = l6.find('\n');
+        const std::string first6 = l6.substr(0, nl6), second6 = l6.substr(nl6 + 1);
+        check(hasToken(first6, "emission") && hasToken(first6, "emissionenergy") && hasToken(first6, "albedomix") && hasToken(first6, "depthfade") && hasToken(first6, "normalfade"),
+              "the wave 6 properties are written when set");
+        check(!hasToken(second6, "emission") && !hasToken(second6, "albedomix") && !hasToken(second6, "depthfade") && !hasToken(second6, "normalfade") && plainLine.empty(),
+              "and a default decal writes none of them");
+        fmt::OcWorldData r6;
+        check(fmt::parseOcworld(t6, r6, &err) && r6.decals.size() == 2, "the file reads back: " + err);
+        if (r6.decals.size() == 2) {
+            const fmt::OcDecal& x = r6.decals[0];
+            check(x.emission == "Decals/glow.png" && x.emissionEnergy == 2.5 && x.hasAlbedoMix && x.albedoMix == 0.0 && x.depthFade &&
+                      x.upperFade == 0.3 && x.lowerFade == 0.0 && x.normalFade == 0.4,
+                  "every wave 6 property survives, an authored albedo mix and fade of 0 included");
+            const fmt::OcDecal& y = r6.decals[1];
+            check(y.emission.empty() && !y.hasAlbedoMix && !y.depthFade && y.normalFade == 0.0 && y.emissionEnergy == 1.0, "the default decal reads as defaults");
+            const scene::CDecal c6 = editor::decalFromRecord(x);
+            check(c6.emissionTexture != 0 && c6.emissionEnergy == 2.5f && (c6.flags & scene::kDecalAlbedoMix) && c6.albedoMix == 0.0f &&
+                      (c6.flags & scene::kDecalDepthFade) && c6.upperFade == 0.3f && c6.normalFade == 0.4f,
+                  "the record becomes a component with the flags set");
+            const scene::CDecal c7 = editor::decalFromRecord(y);
+            check(c7.emissionTexture == 0 && !(c7.flags & (scene::kDecalAlbedoMix | scene::kDecalDepthFade)) && c7.normalFade == 0.0f, "and the default record sets none");
+        }
     }
 
     AVER_INFO("=== CDecal <-> record ===");
