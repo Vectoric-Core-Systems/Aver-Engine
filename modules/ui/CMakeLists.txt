@@ -53,6 +53,7 @@ aver_add_module(Aver.UI
     # World text (E6, E14): signed-distance glyphs and the plane mesh a Label3D draws.
     src/UiSdf.cpp
     src/UiTextMesh.cpp
+    src/UiWoff.cpp         # WOFF 1.0 web fonts (P37): the host lends the inflate, this module stays Core-only
   DEPS
     Aver.Core
 )

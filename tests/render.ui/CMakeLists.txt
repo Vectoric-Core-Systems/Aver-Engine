@@ -19,3 +19,10 @@ set_target_properties(UiImageCacheTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMA
 add_executable(WorldTextPlaceTest src/WorldTextPlaceTest.cpp)
 target_link_libraries(WorldTextPlaceTest PRIVATE Aver.Render.UI Aver.UI Aver.RHI Aver.Core Aver.Platform)
 set_target_properties(WorldTextPlaceTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# UiShaderCompileTest — ui.hlsl and world_text.hlsl compile to SPIR-V and DXIL through DXC with no device, and (AVER_UI_SHADER_BASE naming an older ui.hlsl)
+# UiVS / UiPS stay byte-identical. Links the generic RHI only. Skips (77) without the vendored SPIR-V dxcompiler.dll.
+add_executable(UiShaderCompileTest src/UiShaderCompileTest.cpp)
+target_link_libraries(UiShaderCompileTest PRIVATE Aver.RHI Aver.Platform Aver.Core)
+target_compile_definitions(UiShaderCompileTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
+set_target_properties(UiShaderCompileTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

@@ -3,10 +3,13 @@
 // ImGui's own copy in the Sandbox. UiFontFace's methods live here for the same reason: stb's types and
 // functions are not visible anywhere else.
 #include "aver/ui/UiFontFace.hpp"
+#include "aver/ui/UiWoff.hpp"
 
 #include <cmath>
 #include <cstdlib>
+#include <memory>
 #include <unordered_map>
+#include <vector>
 
 #if defined(_MSC_VER)
 #pragma warning(push)
@@ -43,8 +46,22 @@ UiFontFace::~UiFontFace() = default;
 UiFontFace::UiFontFace(UiFontFace&&) noexcept = default;
 UiFontFace& UiFontFace::operator=(UiFontFace&&) noexcept = default;
 
-bool UiFontFace::open(const UiFontBlob& blob, i32 index, std::string* err) {
+bool UiFontFace::open(const UiFontBlob& file, i32 index, std::string* err) {
     impl_.reset();
+    // A WOFF 1.0 web font is rebuilt into the sfnt it holds first; the face keeps the rebuilt bytes alive. WOFF2 needs Brotli.
+    UiFontBlob rebuilt;
+    if (uiIsWoff2(file.data, file.size)) {
+        if (err) *err = "WOFF2 fonts need Brotli, which the engine does not carry for fonts; convert the font to WOFF or TTF";
+        return false;
+    }
+    if (uiIsWoff(file.data, file.size)) {
+        auto sfnt = std::make_shared<std::vector<u8>>();
+        if (!uiWoffToSfnt(file.data, file.size, *sfnt, err)) return false;
+        rebuilt.data = sfnt->data();
+        rebuilt.size = sfnt->size();
+        rebuilt.owner = sfnt;
+    }
+    const UiFontBlob& blob = rebuilt.data ? rebuilt : file;
     if (!uiValidateSfnt(blob.data, blob.size, index, err)) return false;
 
     auto m = std::make_unique<Impl>();

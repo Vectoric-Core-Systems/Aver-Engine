@@ -193,6 +193,11 @@ typedef const char* (*AverUiLanguageFn)(void);
 
 // Installs the font loader (host). NULLs clear it AND close every font opened through it.
 AVER_UI_API void aver_ui_text_set_loader(AverUiFontOpenFn open, AverUiFontCloseFn close);
+// A raw deflate decoder (RFC 1951, no zlib header) the host lends, so WOFF 1.0 web fonts (".woff", wrapping zlib-compressed sfnt
+// tables) load: decompresses `in` into `out`, which the stream must fill with exactly outSize bytes; 1 on success, 0 otherwise.
+// Without one a WOFF is refused (aver_ui_text_error says so). WOFF2 needs Brotli and is refused either way. NULL clears it.
+typedef int32_t (*AverUiInflateFn)(const uint8_t* in, uint64_t inSize, uint8_t* out, uint64_t outSize);
+AVER_UI_API void aver_ui_text_set_inflate(AverUiInflateFn inflate);
 // Parses and loads an .ocfonts document, replacing the font set. 1 ok, 0 failed (aver_ui_text_error).
 AVER_UI_API int32_t aver_ui_text_load_fontset(const char* ocfontsUtf8);
 AVER_UI_API const char* aver_ui_text_error(void);

@@ -7,6 +7,7 @@
 #include "aver/ui/UiTextEffect.hpp"
 #include "aver/ui/UiTextEngine.hpp"
 #include "aver/ui/UiTextMesh.hpp"
+#include "aver/ui/UiWoff.hpp"
 
 #include <cstddef>
 #include <cstring>
@@ -43,6 +44,12 @@ AverUiImageAcquireFn g_imgAcquire = nullptr;
 AverUiImageReleaseFn g_imgRelease = nullptr;
 AverUiImageSizeFn    g_imgSize = nullptr;
 AverUiImageUseFn     g_imgUse = nullptr;
+
+// The host's raw-deflate decoder for WOFF 1.0 fonts (aver_ui_text_set_inflate).
+AverUiInflateFn g_inflate = nullptr;
+bool inflateThunk(const std::uint8_t* in, std::size_t inSize, std::uint8_t* out, std::size_t outSize) {
+    return g_inflate && g_inflate(in, inSize, out, outSize) != 0;
+}
 
 // The font only if it is worth drawing with. `valid()` is glyphs plus a line height, so a font that
 // parsed but carries nothing reads as absent rather than as a font that draws nothing.
@@ -334,8 +341,14 @@ void aver_ui_text_set_loader(AverUiFontOpenFn open, AverUiFontCloseFn close) {
         // Clearing the loader closes every font opened through it, so no blob outlives the host's callbacks.
         g_engine.fontSet().clear();
         g_engine.atlas().clear();
+        g_engine.worldAtlas().clear();
         g_engine.clearLayouts();
     }
+}
+
+void aver_ui_text_set_inflate(AverUiInflateFn inflate) {
+    g_inflate = inflate;
+    aver::ui::uiSetInflate(inflate ? &inflateThunk : nullptr);
 }
 
 int32_t aver_ui_text_load_fontset(const char* ocfontsUtf8) {

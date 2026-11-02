@@ -121,3 +121,8 @@ set_target_properties(UiTransformTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAK
 add_executable(UiTextMeshTest src/UiTextMeshTest.cpp)
 target_link_libraries(UiTextMeshTest PRIVATE Aver.UI Aver.Core Aver.Platform)
 set_target_properties(UiTextMeshTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# UiWoffTest — parity P37: WOFF 1.0 web fonts (rebuild to sfnt, open as a face, malformed files). Uses Aver.Platform's inflate as a host would.
+add_executable(UiWoffTest src/UiWoffTest.cpp)
+target_link_libraries(UiWoffTest PRIVATE Aver.UI Aver.Core Aver.Platform)
+set_target_properties(UiWoffTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

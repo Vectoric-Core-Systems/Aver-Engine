@@ -29,6 +29,7 @@ namespace aver::render::ui { class UiRenderer; }
 #if AVER_WITH_UI_ABI
 #  include "aver/core/Log.hpp"
 #  include "aver/platform/FileSystem.hpp"
+#  include "aver/platform/Inflate.hpp"
 #  include "aver/render/ui/UiRenderer.hpp"
 #  include "aver/ui/ui_abi.h"
 #  if AVER_MODULE_FRAMEWORK
@@ -124,6 +125,11 @@ inline void closeFont(void* token) {
     delete held;
 }
 
+// AverUiInflateFn: the engine's raw-deflate decoder (stb_image's), lent for WOFF 1.0 fonts.
+inline int32_t inflateFont(const uint8_t* in, uint64_t inSize, uint8_t* out, uint64_t outSize) {
+    return inflateRaw(in, static_cast<usize>(inSize), out, static_cast<usize>(outSize)) ? 1 : 0;
+}
+
 inline bool loadSet() {
     State& s = state();
     std::string text;
@@ -152,6 +158,7 @@ inline bool uiTextInit(const std::string& contentDir) {
     uitext_detail::State& s = uitext_detail::state();
     s.contentDir = contentDir;
     aver_ui_text_set_loader(&uitext_detail::openFont, &uitext_detail::closeFont);
+    aver_ui_text_set_inflate(&uitext_detail::inflateFont);   // WOFF 1.0 fonts (P37)
     s.installed = true;
 #  if AVER_MODULE_FRAMEWORK
     aver_ui_text_set_language_fn(&aver_fw_loc_culture);
@@ -192,7 +199,7 @@ inline bool uiTextReloadIfChanged(const std::vector<FileEvent>& events) {
     };
     bool changed = false;
     for (const FileEvent& e : events)
-        if (ends(e.path, ".ocfonts") || ends(e.path, ".ttf") || ends(e.path, ".otf") || ends(e.path, ".ttc")) changed = true;
+        if (ends(e.path, ".ocfonts") || ends(e.path, ".ttf") || ends(e.path, ".otf") || ends(e.path, ".ttc") || ends(e.path, ".woff")) changed = true;
     if (!changed) return false;
     return uitext_detail::loadSet();
 #else
@@ -210,7 +217,10 @@ inline void uiTextShutdown() {
         s.renderer->setWorldAtlas(nullptr);
     }
     s.renderer = nullptr;
-    if (s.installed) aver_ui_text_set_loader(nullptr, nullptr);
+    if (s.installed) {
+        aver_ui_text_set_loader(nullptr, nullptr);
+        aver_ui_text_set_inflate(nullptr);
+    }
     s.installed = false;
 #endif
 }
