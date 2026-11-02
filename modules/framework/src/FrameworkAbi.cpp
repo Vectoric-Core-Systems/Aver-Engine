@@ -1612,11 +1612,12 @@ int32_t aver_fw_end_play(void) {
     if (gameInstanceRef()) destroyActor(gameInstanceRef(), AVER_FW_END_STOP);
     playPawnRef() = playerCtrlRef() = gameModeRef() = gameInstanceRef() = 0;
 
-    // Then sweep every other actor the session spawned from a hook. Destroy is deferred to flush, so
-    // the dense walk does not shift under us.
+    // Then sweep every other actor the session spawned from a hook, newest first: a child after its parent
+    // was spawned, and a later sibling before an earlier one, end first -- Godot's exit order, so a script's
+    // OnEndPlay still finds what was there before it (an autoload the others read). Destroy is deferred to
+    // flush, so the dense walk does not shift under us.
     World& w = world();
-    const u32 count = w.count();
-    for (u32 i = 0; i < count; ++i) {
+    for (u32 i = w.count(); i-- > 0;) {
         const Entity e = w.at(i);
         if (classOfEntity(e) != 0 && !w.destroyPending(e))
             destroyActor(static_cast<int32_t>(e), AVER_FW_END_STOP);

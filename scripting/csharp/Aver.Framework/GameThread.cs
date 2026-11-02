@@ -83,6 +83,22 @@ internal static class GameThread
         Flush();   // those continuations, and anything a timer or event queued since the last pass
     }
 
+    // The game's method a deferred call threw in (an awaited continuation names none of its own): the first frame outside .NET and the engine.
+    private static string Where(Exception ex)
+    {
+        foreach (System.Diagnostics.StackFrame f in new System.Diagnostics.StackTrace(ex).GetFrames())
+        {
+            if (f.GetMethod() is not { DeclaringType: { } t } m) continue;
+            string ns = t.Namespace ?? "";
+            if (ns.StartsWith("System", StringComparison.Ordinal) || ns.StartsWith("Microsoft", StringComparison.Ordinal) || ns.StartsWith("Aver", StringComparison.Ordinal)) continue;
+            // An async method's body is MoveNext of a nested state machine (<LoadPlayerState>d__12): name the method it came from.
+            string type = t.DeclaringType is { } outer && t.Name.StartsWith('<') ? outer.Name : t.Name;
+            string method = t.Name.StartsWith('<') && t.Name.IndexOf('>') is > 1 and var end ? t.Name[1..end] : m.Name;
+            return $" in {type}.{method}";
+        }
+        return "";
+    }
+
     // Runs every queued call, including ones queued while flushing, up to MaxPerFlush. Returns how many ran.
     internal static int Flush()
     {
@@ -91,7 +107,7 @@ internal static class GameThread
         {
             ++n;
             try { item.Fn(item.State); }
-            catch (Exception ex) { Log.Error($"[Deferred] a deferred call threw: {ex.GetType().Name}: {ex.Message}"); }
+            catch (Exception ex) { Log.Error($"[Deferred] a deferred call threw{Where(ex)}: {ex.GetType().Name}: {ex.Message}"); }
         }
         if (n == MaxPerFlush && !s_queue.IsEmpty)
             Log.Warn($"[Deferred] {MaxPerFlush} calls in one flush; the rest wait for the next (a call re-queuing itself?)");
