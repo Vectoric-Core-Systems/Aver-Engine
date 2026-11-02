@@ -11,6 +11,7 @@
 #  include "aver/framework/framework_worldfx_abi.h"   // [wave9/worldfx] aver_fw_worldfx_tick
 #endif
 #if AVER_MODULE_FRAMEWORK
+#  include "aver/framework/framework_abi.h"          // aver_fw_window_publish: the Play viewport as the game's window
 #  include "aver/framework/framework_render_abi.h"   // P17: script render settings and statistics
 #  if AVER_MODULE_VOXI
 #    define AVER_SCRIPTRENDER_HAS_ABI 1
@@ -753,6 +754,19 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     }
     if (hudTest_ >= 0 && hudTest_ < scripts_.hudCount())
         setHudPreview(hudTest_, vpX_, vpY_, vpW_, vpH_);
+#endif
+#if AVER_MODULE_FRAMEWORK
+    // What a game reads as its window during Play: the level viewport's size, the display's scale and the focus. Published only (the editor owns its
+    // window and takes no requests); the shipped game publishes its real window (GameDisplay.cpp). Before this a game read zeros: no size, a scale of 1.
+    {
+        i32 s[AVER_FW_WINDOW_STATE_COUNT] = {};
+        s[AVER_FW_WINDOW_WIDTH] = static_cast<i32>(vpW_);
+        s[AVER_FW_WINDOW_HEIGHT] = static_cast<i32>(vpH_);
+        const f32 dpi = e.window() && e.window()->dpiScale() > 0.0f ? e.window()->dpiScale() : 1.0f;
+        s[AVER_FW_WINDOW_DPI_PERCENT] = static_cast<i32>(dpi * 100.0f + 0.5f);
+        s[AVER_FW_WINDOW_FOCUSED] = levelFocused_ ? 1 : 0;
+        aver_fw_window_publish(s);
+    }
 #endif
     if (hudPreviewActive()) aver_ui_begin_frame(hudRectX_, hudRectY_, hudRectW_, hudRectH_);
     else                    aver_ui_begin_frame(vpX_, vpY_, vpW_, vpH_);
