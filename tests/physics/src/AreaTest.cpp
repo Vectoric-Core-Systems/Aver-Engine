@@ -495,6 +495,62 @@ static void testRestore() {
     aver_phys_shutdown();
 }
 
+// Godot4-FPS-Template's weapon pickup: an area on NO layer (collision_layer 0) with mask 8, carried by the moving player (its sensor is
+// moved by setting its position each step), touches a dynamic weapon on layer 8 that rests on the floor.
+static void testLayerZeroAreaMovedOntoBody() {
+    AVER_INFO("=== an area on layer 0, moved onto a body its mask names ===");
+    aver_phys_init();
+    floorBox();
+    const int32_t gun = aver_phys_add_dynamic_box(0, 0, 20.0f, 30, 10, 10, 2.0f);
+    aver_phys_body_set_collision_filter(gun, 8u, 13u);
+    const int32_t pick = aver_phys_add_sensor_box(1000.0f, 0, 80.0f, 100, 90, 75);
+    check(aver_phys_area_create(pick) == 1, "the sensor becomes an area");
+    aver_phys_area_set_collision(pick, 0u, 8u);
+    Log lg;
+    lg.step(300);   // the gun settles and falls asleep; the area is 10 m away
+    check(lg.count(pick, gun, 1) == 0, "far away: nothing");
+    check(aver_phys_body_is_active(gun) == 0, "the gun is asleep on the floor");
+    for (int i = 0; i < 30; ++i) {   // walked over, a step at a time, as a moving player carries it
+        aver_phys_body_set_position(pick, 1000.0f - 34.0f * static_cast<float>(i + 1), 0, 80.0f);
+        lg.step(1);
+    }
+    check(lg.count(pick, gun, 1) == 1, "carried onto the gun: entered once");
+
+    // The guns on the template's shelf are frozen (RigidBody3D freeze, static mode): a static body on layer 8.
+    const int32_t frozen = aver_phys_add_static_box(-2000.0f, 0, 20.0f, 30, 10, 10);
+    aver_phys_body_set_collision_filter(frozen, 8u, 13u);
+    lg.clear();
+    for (int i = 0; i < 70; ++i) {
+        aver_phys_body_set_position(pick, -20.0f - 34.0f * static_cast<float>(i + 1), 0, 80.0f);
+        lg.step(1);
+    }
+    check(lg.count(pick, frozen, 1) == 1, "carried onto a static body on layer 8: entered once");
+
+    // As Fabric makes a frozen RigidBody3D: dynamic, its filter set, then switched to static.
+    const int32_t switched = aver_phys_add_dynamic_box(-5000.0f, 0, 20.0f, 30, 10, 10, 2.0f);
+    aver_phys_body_set_collision_filter(switched, 8u, 13u);
+    check(aver_phys_body_set_motion_type(switched, AVER_PHYS_MOTION_STATIC) == 1, "switched to static");
+    lg.clear();
+    for (int i = 0; i < 90; ++i) {
+        aver_phys_body_set_position(pick, -2400.0f - 34.0f * static_cast<float>(i + 1), 0, 80.0f);
+        lg.step(1);
+    }
+    check(lg.count(pick, switched, 1) == 1, "carried onto a body switched dynamic -> static: entered once");
+
+    // A static convex hull (the guns' ConvexPolygonShape3D), the size of a pistol.
+    const float hullPts[] = {-3, -20, 15, 3, -20, 15, -3, -20, 20, -5, -9, -2, -3, -19, -25, 3, -19, -25, 5, -9, -2, -3, -18, 25, -7, 0, 28, 7, 0, 28, -7, 5, -30, 7, 5, -30};
+    const int32_t hull = aver_phys_add_convex_hull(hullPts, 12, -8000.0f, 0, 30.0f, 0, 0.0f);
+    check(hull != 0, "a static hull");
+    aver_phys_body_set_collision_filter(hull, 8u, 13u);
+    lg.clear();
+    for (int i = 0; i < 100; ++i) {
+        aver_phys_body_set_position(pick, -5400.0f - 34.0f * static_cast<float>(i + 1), 0, 80.0f);
+        lg.step(1);
+    }
+    check(lg.count(pick, hull, 1) == 1, "carried onto a static convex hull on layer 8: entered once");
+    aver_phys_shutdown();
+}
+
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     AVER_INFO("==================================================");
@@ -503,6 +559,7 @@ int main() {
     testUnchangedAndRefusals();
     testEnterExit();
     testMasksAndAreas();
+    testLayerZeroAreaMovedOntoBody();
     testGravity();
     testGravityDynamics();
     testDamping();

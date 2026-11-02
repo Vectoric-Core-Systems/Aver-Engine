@@ -3,6 +3,9 @@
 #include "SandboxApp.hpp"
 #include "aver/core/Types.hpp"   // AVER_PATH_SEP
 
+#include <cctype>
+#include <cstdlib>
+
 namespace aver {
 // --lod-select [px]: virtualized-geometry LOD selection; thresholdPx is pixel budget for screenSpaceErrorPx.
 void SandboxApp::setLodSelect(bool on, f32 thresholdPx) {
@@ -932,7 +935,8 @@ void SandboxApp::maybeInputStuckTest() {
 
 // Run --play-test: begin play, drive synthetic input 150 frames, stop. For a developer looking at a game, three environment variables:
 // AVER_PLAYTEST_LENGTH (frames per Play, 150), AVER_PLAYTEST_PLAYS (Plays in a row, 1: the next waits for the level's reload) and
-// AVER_PLAYTEST_SHOT=<prefix> (writes <prefix>-play<N>.png of the window at AVER_PLAYTEST_SHOT_AT frames into each Play, default 30 before its end).
+// AVER_PLAYTEST_SHOT=<prefix> (writes <prefix>-play<N>.png of the window at AVER_PLAYTEST_SHOT_AT frames into each Play, default 30 before its end),
+// AVER_PLAYTEST_KEYS (letters held instead of W), AVER_PLAYTEST_JUMP=0 (no jump at frame 100).
 void SandboxApp::maybePlayTest(Engine& e) {
     if (!playTest_) return;
     const auto envInt = [](const char* name, int fallback) {
@@ -966,9 +970,17 @@ void SandboxApp::maybePlayTest(Engine& e) {
     // Countdown runs regardless of input receptivity; don't let spectator fallback run forever.
     const bool fwPlaying = aver_fw_play_state() == AVER_FW_PLAY_PLAYING;
     if (fwPlaying) {
-        aver_fw_input_set_key(AVER_FW_KEY_W, 1);
+        // AVER_PLAYTEST_KEYS: the letters to hold instead of W ("SA" walks back and left), to reach something in a level.
+        const char* keys = std::getenv("AVER_PLAYTEST_KEYS");
+        if (keys && *keys) {
+            for (const char* k = keys; *k; ++k)
+                if (std::isalpha(static_cast<unsigned char>(*k)))
+                    aver_fw_input_set_key(AVER_FW_KEY_A + (std::toupper(static_cast<unsigned char>(*k)) - 'A'), 1);
+        } else {
+            aver_fw_input_set_key(AVER_FW_KEY_W, 1);
+        }
         if (playTestFrames_ > 60) aver_fw_input_set_key(AVER_FW_KEY_MOUSE_LEFT, 1);
-        if (playTestFrames_ == 100) aver_fw_input_set_key(AVER_FW_KEY_SPACE, 1);
+        if (playTestFrames_ == 100 && envInt("AVER_PLAYTEST_JUMP", 1) != 0) aver_fw_input_set_key(AVER_FW_KEY_SPACE, 1);
 #if AVER_WITH_IMGUI
         // The key state alone reaches no game's event handlers (_input / OnInput): a real press and release does, as the mouse would.
         if (playTestFrames_ == 61) injectMouseButton(input_, 0, true);
