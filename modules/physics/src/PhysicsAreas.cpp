@@ -21,6 +21,9 @@
 #include <Jolt/Physics/Body/BodyLock.h>
 #include <Jolt/Physics/Body/MotionProperties.h>
 #include <Jolt/Physics/Collision/CollideShape.h>
+#include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
+#include <Jolt/Physics/Collision/TransformedShape.h>
+#include <Jolt/Physics/Collision/BroadPhase/BroadPhaseQuery.h>
 #include <Jolt/Physics/Collision/CollisionGroup.h>
 #include <Jolt/Physics/Collision/Shape/Shape.h>
 #include <Jolt/Physics/PhysicsSystem.h>
@@ -356,15 +359,6 @@ private:
     const AreaState& st_;
 };
 
-class UniqueBodies final : public JPH::CollideShapeCollector {
-public:
-    void AddHit(const JPH::CollideShapeResult& r) override {
-        const auto it = g_world->byId.find(r.mBodyID2);
-        if (it != g_world->byId.end()) handles.insert(it->second);
-    }
-    std::set<int32_t> handles;
-};
-
 // Everything `area` overlaps now (handle -> is an area), and where the area is. False if the sensor is gone.
 bool queryArea(const AreaState& st, int32_t handle, const Area& a, std::map<int32_t, bool>& out, AreaPose* pose) {
     const JPH::BodyID* id = idOf(handle);
@@ -383,11 +377,27 @@ bool queryArea(const AreaState& st, int32_t handle, const Area& a, std::map<int3
             pose->rot = b.GetRotation();
         }
     }
-    UniqueBodies coll;
+    // Which bodies are inside, each by its first hit: the broad phase names the candidates, and the narrow phase stops at a candidate's first
+    // contact. One CollideShape over the whole world computed the penetration depth (EPA) of every triangle of every level mesh the area
+    // touched, every step -- most of a converted game's physics step when light zones and triggers sit inside the building's mesh.
+    std::set<int32_t> inside;
     const AreaTargetFilter filter(*id, a.maskBits, st);
-    g_world->system.GetNarrowPhaseQuery().CollideShape(shape.GetPtr(), JPH::Vec3::sReplicate(1.0f), xf, JPH::CollideShapeSettings{},
-                                                       JPH::RVec3::sZero(), coll, {}, {}, filter);
-    for (const int32_t h : coll.handles) {
+    JPH::AllHitCollisionCollector<JPH::CollideShapeBodyCollector> candidates;
+    g_world->system.GetBroadPhaseQuery().CollideAABox(shape->GetWorldSpaceBounds(xf, JPH::Vec3::sReplicate(1.0f)), candidates);
+    for (const JPH::BodyID& other : candidates.mHits) {
+        if (!filter.ShouldCollide(other)) continue;
+        JPH::TransformedShape ts;
+        {
+            JPH::BodyLockRead lock(g_world->system.GetBodyLockInterface(), other);
+            if (!lock.Succeeded() || !filter.ShouldCollideLocked(lock.GetBody())) continue;
+            ts = lock.GetBody().GetTransformedShape();
+        }
+        JPH::AnyHitCollisionCollector<JPH::CollideShapeCollector> hit;
+        ts.CollideShape(shape.GetPtr(), JPH::Vec3::sReplicate(1.0f), xf, JPH::CollideShapeSettings{}, JPH::RVec3::sZero(), hit);
+        if (!hit.HadHit()) continue;
+        if (const auto it = g_world->byId.find(other); it != g_world->byId.end()) inside.insert(it->second);
+    }
+    for (const int32_t h : inside) {
         const JPH::BodyID* oid = idOf(h);
         bool isArea = false;
         if (oid) {

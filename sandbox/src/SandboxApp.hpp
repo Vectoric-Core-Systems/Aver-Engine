@@ -4245,6 +4245,7 @@ private:
 
 #if AVER_MODULE_FRAMEWORK
     void spawnClassPlacements();
+    void reportSlowGameplay(f64 ms);   // SandboxUpdate.cpp
     // Place Class (docs/plans/parity_demo/PLACE_CLASS.md): bodies are in SandboxLevelLoad.cpp / SandboxViewport.cpp.
     scene::Entity spawnClassSlot(usize slot, const Transform* worldXf);
     scene::Entity placeClassInstance(fmt::OcWorldPlacement p, std::string* why);

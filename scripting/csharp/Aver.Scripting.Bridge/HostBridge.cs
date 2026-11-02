@@ -1843,16 +1843,17 @@ public static class HostBridge
         }
         if (group != TickPhysics && group != TickProcess) return;
 
-        RefreshTickOrder();
+        long passStart = Stopwatch.GetTimestamp();
+        if (RefreshTickOrder()) AddPassCost("(tick order rebuilt: the tree changed)", Stopwatch.GetTimestamp() - passStart);
         bool physics = group == TickPhysics;
         bool paused = Game.IsPaused;
         if (physics) Aver.Framework.Engine.NotePhysicsFrame(); else Aver.Framework.Engine.NoteProcessFrame();
+        long b0 = Stopwatch.GetTimestamp();
         GameThread.BeginPass(physics);
+        AddPassCost("(pass start)", Stopwatch.GetTimestamp() - b0);
         // The order array is replaced, never mutated, so a bind or unbind inside a callback leaves this
         // walk alone: a destroyed actor is skipped below, a spawned one ticks from the next pass.
         ActorLive[] order = physics ? s_physicsOrder : s_processOrder;
-        long passStart = Stopwatch.GetTimestamp();
-        s_passCost.Clear();
         foreach (ActorLive live in order)
         {
             if (live.Disabled) continue;
@@ -1878,13 +1879,22 @@ public static class HostBridge
             GameThread.EndFrame();   // deferred calls, then QueueDestroy's destroys
         }
         AddPassCost(physics ? "(physics-pass flush)" : "(deferred calls, transforms, destroys)", Stopwatch.GetTimestamp() - t1);
-        ReportSlowPass(physics, Stopwatch.GetTimestamp() - passStart);
+        s_frameScriptTicks += Stopwatch.GetTimestamp() - passStart;
+        if (physics) s_framePhysicsPasses++;
+        else
+        {
+            ReportSlowFrame(s_frameScriptTicks, s_framePhysicsPasses);
+            s_passCost.Clear();
+            s_frameScriptTicks = 0;
+            s_framePhysicsPasses = 0;
+        }
     }
 
-    // What each actor class cost in the current pass. A pass over 100 ms names its five costliest at most every 5 s, so a
-    // frame that takes seconds says which script it was.
+    // What each actor class cost over the frame's passes (every physics step's, then the process pass). A frame whose scripts took over
+    // 100 ms names its five costliest classes at most every 5 s, so a frame that takes seconds says which script it was.
     private static readonly Dictionary<string, (long Ticks, int Calls)> s_passCost = new(StringComparer.Ordinal);
-    private static long s_lastSlowReport;
+    private static long s_lastSlowReport, s_frameScriptTicks;
+    private static int s_framePhysicsPasses;
 
     private static void AddPassCost(string name, long ticks)
     {
@@ -1892,7 +1902,7 @@ public static class HostBridge
         s_passCost[name] = (c.Ticks + ticks, c.Calls + 1);
     }
 
-    private static void ReportSlowPass(bool physics, long ticks)
+    private static void ReportSlowFrame(long ticks, int physicsPasses)
     {
         double ms = ticks * 1000.0 / Stopwatch.Frequency;
         long now = Stopwatch.GetTimestamp();
@@ -1900,7 +1910,7 @@ public static class HostBridge
         s_lastSlowReport = now;
         string top = string.Join(", ", s_passCost.OrderByDescending(kv => kv.Value.Ticks).Take(5)
             .Select(kv => $"{kv.Key} {kv.Value.Ticks * 1000.0 / Stopwatch.Frequency:0.0} ms over {kv.Value.Calls}"));
-        Emit((int)Log.Level.Warn, $"[Scripting] slow {(physics ? "physics" : "process")} pass: {ms:0.0} ms; costliest: {top}");
+        Emit((int)Log.Level.Warn, $"[Scripting] slow frame: scripts took {ms:0.0} ms over {physicsPasses} physics pass(es) and the process pass; costliest: {top}");
     }
 
     // A tick that throws aborts only that call; the actor keeps ticking. Errors are logged
@@ -1933,10 +1943,11 @@ public static class HostBridge
     }
 
     // Rebuilds both walk orders when the actor set, a priority or the scene tree has changed.
-    private static void RefreshTickOrder()
+    // True when it rebuilt the order.
+    private static bool RefreshTickOrder()
     {
         long rev = Fw.aver_fw_tree_revision();
-        if (!s_tickOrderDirty && rev == s_tickTreeRevision) return;
+        if (!s_tickOrderDirty && rev == s_tickTreeRevision) return false;
         s_tickOrderDirty = false;
         s_tickTreeRevision = rev;
 
@@ -1966,6 +1977,7 @@ public static class HostBridge
             try { a.Instance.OnParentChanged(); }
             catch (Exception ex) { Emit((int)Log.Level.Error, $"[Scripting] {a.Name}.OnParentChanged threw: {Describe(ex)}"); }
         }
+        return true;
     }
 
     // Once a frame: an actor that asked for NotifyTransform hears when its world transform moved.

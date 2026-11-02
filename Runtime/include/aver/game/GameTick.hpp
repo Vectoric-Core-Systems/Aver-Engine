@@ -19,6 +19,7 @@
 // Both pass their own host tag ("Sandbox" or "Game") through so the log lines below stay
 // distinguishable in a shared log.
 #pragma once
+#include <chrono>
 #include "aver/core/Types.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/formats/OcProject.hpp"
@@ -147,11 +148,20 @@ inline int& physicsStepsThisFrame() { static int n = 0; return n; }
 
 // The physics tick pass, run by aver_phys_step at the start of each fixed step, after the previous step's
 // body poses reach their entities.
+// Where a frame's fixed steps spent their time outside the solver (the pose capture between steps, the PHYSICS pass), for a slow-frame report.
+struct PhysicsHookCost { f64 captureMs = 0.0, physicsPassMs = 0.0; };
+inline PhysicsHookCost& physicsHookCost() { static PhysicsHookCost c; return c; }
+
 inline void physicsTickHook(float fixedStep, void*) {
+    using Clock = std::chrono::steady_clock;
+    const auto t0 = Clock::now();
 #if AVER_MODULE_PHYSICS && AVER_MODULE_SCENE
     if (physicsStepsThisFrame()++ > 0) bodyPoseSync().capture(scene::World::instance());
 #endif
+    const auto t1 = Clock::now();
     aver_fw_tick(AVER_FW_TICK_PHYSICS, fixedStep);
+    physicsHookCost().captureMs += std::chrono::duration<f64, std::milli>(t1 - t0).count();
+    physicsHookCost().physicsPassMs += std::chrono::duration<f64, std::milli>(Clock::now() - t1).count();
 }
 
 // Physics-pass time carried between frames when no physics world steps (no world, or a paused game).
@@ -197,6 +207,7 @@ inline i32 tickGameplayGroups(f32 dt) {
     aver_fw_tick(AVER_FW_PUMP_FRAME, dt);
     aver_fw_tick(AVER_FW_PUMP_PLAY, dt);
     i32 steps = 0;
+    physicsHookCost() = {};
 #if AVER_MODULE_PHYSICS
     if (aver_phys_ready()) {
 #if AVER_MODULE_SCENE

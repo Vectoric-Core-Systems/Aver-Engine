@@ -1,6 +1,7 @@
 // SandboxApp::onUpdate: one editor frame (MCP commands, camera, gameplay tick, physics, render state). Split from
 // SandboxApp.cpp, which was nearing the COFF section cap in Debug (sandbox/CMakeLists.txt: split, never /bigobj).
 #include "aver/core/HitchMarks.hpp"
+#include <chrono>
 #include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "SandboxApp.hpp"
 #if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
@@ -29,6 +30,9 @@
 #include "aver/game/GameRender.hpp"   // DrawWorldOptions, for the sub-viewports' walk
 #include "aver/game/GameIkProbe.hpp"   // [wave5/ik-retarget] the foot-IK ground probe
 #include "aver/game/GameTick.hpp"
+#if AVER_MODULE_PHYSICS
+#  include "aver/physics/physics_world_abi.h"
+#endif
 #include "aver/game/GameSystemsWiring.hpp"
 #include "aver/game/SequenceHost.hpp"   // [wave5/sequencer] the ABI provider
 #include "aver/game/GameUiInput.hpp"
@@ -47,6 +51,37 @@ namespace aver {
 // A script's render keys (framework_render_abi.h) at the frame boundary. The Settings keys go through the singleton (the MSAA push and the per-frame forward
 // below read it); the LOD threshold and the occlusion switch are this host's own state; the render scale is the editor viewport's and is not taken. A released
 // key restores what the editor held. Everything is dropped when a Play session ends (aver_fw_render_revision).
+#if AVER_MODULE_FRAMEWORK
+// A gameplay tick (scripts, then every fixed physics step) over 250 ms says what physics did, at most every 5 s: the scripts name
+// themselves ([Scripting] slow frame), so the rest of a slow frame is here (steps, the step's own cost, bodies, contacts).
+void SandboxApp::reportSlowGameplay(f64 ms) {
+    static auto last = std::chrono::steady_clock::time_point{};
+    const auto now = std::chrono::steady_clock::now();
+    if (ms < 250.0 || (last.time_since_epoch().count() != 0 && now - last < std::chrono::seconds(5))) return;
+    last = now;
+#if AVER_MODULE_PHYSICS
+    // The first report turns the physics profiler on; the later ones say where the steps went (the largest scopes, "FixedStep" being the
+    // stages that have no scope of their own: areas, contact monitors, custom integrators).
+    char scopes[256] = {};
+    if (aver_phys_profile_is_enabled()) aver_phys_profile_summary(reinterpret_cast<uint8_t*>(scopes), static_cast<int32_t>(sizeof scopes));
+    else aver_phys_profile_enable(1);
+    if (scopes[0]) AVER_WARN("[Play] slow physics, the largest scopes per step: {}", scopes);
+    double st[AVER_PHYS_ST_COUNT] = {};
+    aver_phys_stats(st, AVER_PHYS_ST_COUNT);
+    const game::PhysicsHookCost& hook = game::physicsHookCost();
+    AVER_WARN("[Play] slow gameplay tick: {:.1f} ms; physics ran {:.0f} step(s) in {:.1f} ms (last step {:.1f} ms, average {:.1f}; between steps: "
+              "PHYSICS pass {:.1f} ms, pose capture {:.1f} ms); {:.0f} bodies ({:.0f} dynamic, {:.0f} awake; {:.0f} kinematic, {:.0f} static), "
+              "{:.0f} contact(s), {:.0f} character(s)",
+              ms, st[AVER_PHYS_ST_STEPS_LAST_CALL], st[AVER_PHYS_ST_CALL_MS_LAST], st[AVER_PHYS_ST_STEP_MS_LAST], st[AVER_PHYS_ST_STEP_MS_AVG],
+              hook.physicsPassMs, hook.captureMs,
+              st[AVER_PHYS_ST_BODIES], st[AVER_PHYS_ST_DYNAMIC], st[AVER_PHYS_ST_ACTIVE_DYNAMIC], st[AVER_PHYS_ST_KINEMATIC], st[AVER_PHYS_ST_STATIC],
+              st[AVER_PHYS_ST_CONTACTS_LAST_CALL], st[AVER_PHYS_ST_CHARACTERS]);
+#else
+    AVER_WARN("[Play] slow gameplay tick: {:.1f} ms", ms);
+#endif
+}
+#endif
+
 void SandboxApp::applyScriptRender(voxi::Renderer& vx) {
     static voxi::ScriptRenderState st;
     voxi::Settings s = vx.settings();
@@ -860,7 +895,9 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         playProf_.end(editor::PlayPhase::Vehicles);
 #endif
         playProf_.begin(editor::PlayPhase::Gameplay);
+        const auto gameplayStart = std::chrono::steady_clock::now();
         playProf_.addPhysicsSteps(game::tickGameplayGroups(t.dt));
+        reportSlowGameplay(std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - gameplayStart).count());
         playProf_.end(editor::PlayPhase::Gameplay);
 #if AVER_MODULE_SCENE && AVER_MODULE_PHYSICS
         playProf_.begin(editor::PlayPhase::Vehicles);
