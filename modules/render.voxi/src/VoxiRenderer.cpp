@@ -1388,8 +1388,12 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
         AVER_INFO("[Voxi] orthographic camera: the rasteriser draws the primary view (no ray-driven pass, no ray tracing in the raster scene); sky, fog and screen-space terms still assume a perspective view ray");
     }
     if (!giReady_) return;
+    // Held (holdGraphRebuild): a material-graph change waits, and so does every compile below, which would build against the new graphs
+    // too. Nothing is drawn meanwhile (graphStale blanks the frame, and the GPU work below is skipped as for a paused view): pipelines
+    // that lack a graph must not draw or voxelise its materials. The host releases once the background warm-up has filled the cache.
+    const bool heldForGraphs = holdGraphRebuild_ && graphRebuildPending();
     // Material graph appeared since pipelines were built.
-    if (scenePipelineGraphRev_ != pbr::materialGraphs().revision()) {
+    if (!heldForGraphs && scenePipelineGraphRev_ != pbr::materialGraphs().revision()) {
         scenePipelineGraphRev_ = pbr::materialGraphs().revision();
         AVER_INFO("[Voxi] rebuilding scene pipelines for {} material graph(s)",
                   pbr::materialGraphs().count());
@@ -1397,14 +1401,14 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
             AVER_ERROR("[Voxi] scene pipelines could not be rebuilt for the material graphs");
     }
     // A custom sky program was set, replaced or cleared; the sky code lives in the prelude every Voxi shader compiles against.
-    if (scenePipelineSkyRev_ != gCustomSkyRev) {
+    if (!heldForGraphs && scenePipelineSkyRev_ != gCustomSkyRev) {
         scenePipelineSkyRev_ = gCustomSkyRev;
         AVER_INFO("[Voxi] rebuilding scene pipelines for the {} sky", gCustomSkyProgram.empty() ? "engine's own" : "custom");
         if (!createScenePipelines(dev_->sampleCount(), dev_->backbufferFormat(), dev_->depthFormat()))
             AVER_ERROR("[Voxi] scene pipelines could not be rebuilt for the sky shader");
     }
     // Shader file changed on disk; only safe to rebuild here.
-    if (scenePipelineShaderRev_ != rhi::shaderFileRevision()) {
+    if (!heldForGraphs && scenePipelineShaderRev_ != rhi::shaderFileRevision()) {
         scenePipelineShaderRev_ = rhi::shaderFileRevision();
         AVER_INFO("[Voxi] rebuilding scene pipelines: shader files changed (revision {})",
                   scenePipelineShaderRev_);
@@ -1413,10 +1417,10 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
                        "the previous pipelines are still bound, so the last good shader keeps drawing");
     }
     // R1: the first frame after a mesh with the second vertex stream was drawn, compile the scene variants that read it (once per set).
-    if (extraWanted_ && settings_.meshExtraStreams && scenePso_ && !extraTried_[rtActive_ ? 1 : 0])
+    if (!heldForGraphs && extraWanted_ && settings_.meshExtraStreams && scenePso_ && !extraTried_[rtActive_ ? 1 : 0])
         createExtraScenePipelines(rtActive_);
     // R6: compile the material variants draws asked for since the last frame (nothing here runs for a scene without fx materials).
-    if (!fxWanted_.empty()) {
+    if (!heldForGraphs && !fxWanted_.empty()) {
         std::vector<u64> wanted;
         wanted.swap(fxWanted_);
         for (const u64 mk : wanted) {
@@ -1425,7 +1429,7 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
         }
     }
     // R2: compile the raster local-light twins (and the second-stream twins that carry them) the first frame the path has a light to draw.
-    if (localRasterWanted() && scenePso_) {
+    if (!heldForGraphs && localRasterWanted() && scenePso_) {
         if (!localTried_[rtActive_ ? 1 : 0]) createLocalRasterPipelines(rtActive_);
         if (extraWanted_ && settings_.meshExtraStreams && !extraLocalTried_[rtActive_ ? 1 : 0]) createExtraScenePipelines(rtActive_, true);
     }
@@ -1465,8 +1469,8 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
         break;
     }
     refreshFoliageBindings();
-    // Wireframe view: nothing below is on screen.
-    if (paused_) return;
+    // Wireframe view, or a held graph rebuild: nothing below is on screen.
+    if (paused_ || heldForGraphs) return;
     const f32 size = extent_ * 2.0f;
     cb_.voxelOrigin[0] = center_[0] - extent_;
     cb_.voxelOrigin[1] = center_[1] - extent_;
@@ -5896,6 +5900,11 @@ bool VoxiRenderer::suppressesScene() const { return graphStale() || debugViewAct
 bool VoxiRenderer::suppressesWholeFrame() const { return graphStale() || debugViewActive(); }
 
 bool VoxiRenderer::graphStale() const {
+    // Also for the whole of a held rebuild (holdGraphRebuild): pipelines that lack a graph must not draw its materials (36763f57, a3dc3df1).
+    return scenePso_ != 0 && scenePipelineGraphRev_ != pbr::materialGraphs().revision();
+}
+
+bool VoxiRenderer::graphRebuildPending() const {
     return scenePso_ != 0 && scenePipelineGraphRev_ != pbr::materialGraphs().revision();
 }
 

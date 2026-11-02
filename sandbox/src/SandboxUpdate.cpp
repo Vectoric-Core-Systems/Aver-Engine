@@ -157,6 +157,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     }
     nrd2Session_.tick(e.device());
     shaderWarmup_.poll();
+    tickGraphShaderWarm(e);
     hm.mark("head");
     // --nrd2-capture: handed over once the renderer is attached and the level asked for (--open-level) is the
     // one loaded, plus ~10 s for streaming to bring in the scene (the startup level used to be captured

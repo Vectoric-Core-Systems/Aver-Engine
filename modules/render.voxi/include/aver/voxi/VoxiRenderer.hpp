@@ -95,6 +95,13 @@ public:
 
     void setPaused(bool on) { paused_ = on; }
 
+    // A host that can fill the shader cache in the background (the editor's --warm-shaders run) holds the rebuild a material-graph
+    // change causes, so it does not compile on the render thread: until released the scene is not drawn (as for the one frame an unheld
+    // rebuild takes) while the editor stays responsive. Released, the next frame rebuilds, from the cache.
+    void holdGraphRebuild(bool on) { holdGraphRebuild_ = on; }
+    // The material graphs moved since the scene pipelines were built.
+    bool graphRebuildPending() const;
+
     bool rayDrivenAvailable() const { return rtActive_ && rayDrivenPso_ != 0; }
     // MANY LIGHTS: CSRdManyLights built (VoxiShaderCompileTest asserts it), and whether the last staged frame ran it.
     bool manyLightsCompiled() const { return rdManyLightsCsPso_ != 0; }
@@ -1600,6 +1607,7 @@ private:
     u32  rtHistWantW_ = 0, rtHistWantH_ = 0;
     // The pbr::MaterialGraphRegistry revision the scene pipelines were last compiled against.
     u64  scenePipelineGraphRev_ = ~0ull;
+    bool holdGraphRebuild_ = false;   // holdGraphRebuild()
     // The shader-file revision these pipelines were compiled from.
     u64  scenePipelineShaderRev_ = 0;
     // Whether anything will EVER write the ray-traced histories under the current settings.

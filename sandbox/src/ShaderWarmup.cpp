@@ -45,6 +45,10 @@ struct ShaderWarmup::Impl {
     long long total = 0;      // shader requests of the last finished run (warm_total.txt), 0 = not known yet
     long long requests = 0;
     bool boosted = false;     // raised to normal priority because a mode switch waits on it
+    bool started = false;
+    bool forGraphs = false;   // a --graphs run: a level's material graphs, the view waiting on it
+    bool haveFingerprint = false;
+    unsigned long long fingerprint = 0;
 
     // The total persists next to the shader blob cache: the request count barely changes between runs.
     static std::filesystem::path totalPath() {
@@ -117,6 +121,21 @@ bool ShaderWarmup::running() const {
 #endif
 }
 
+bool ShaderWarmup::finished() const { return impl_->started && impl_->done; }
+
+bool ShaderWarmup::graphFingerprint(unsigned long long& out) const {
+    out = impl_->fingerprint;
+    return impl_->haveFingerprint;
+}
+
+void ShaderWarmup::cancel() {
+    if (!impl_->started || impl_->done) return;
+    impl_->close();
+    if (impl_->toast) notifications().close(impl_->toast);
+    impl_->toast = 0;
+    impl_->done = true;
+}
+
 float ShaderWarmup::progress(std::string& note) const {
     note = impl_->lastNote;
     return impl_->total > 0 ? std::min(static_cast<float>(impl_->requests) / static_cast<float>(impl_->total), 0.99f)
@@ -133,7 +152,7 @@ void ShaderWarmup::boost() {
 #endif
 }
 
-void ShaderWarmup::start(const std::string& projectManifest) {
+void ShaderWarmup::start(const std::string& projectManifest, const std::string& graphList) {
 #ifdef _WIN32
     if (running()) return;
     impl_->close();
@@ -142,6 +161,10 @@ void ShaderWarmup::start(const std::string& projectManifest) {
     impl_->toast = 0;
     impl_->requests = 0;
     impl_->boosted = false;
+    impl_->started = true;
+    impl_->forGraphs = !graphList.empty();
+    impl_->haveFingerprint = false;
+    impl_->fingerprint = 0;
     impl_->loadTotal();
     impl_->t0 = std::chrono::steady_clock::now();
     {
@@ -149,14 +172,14 @@ void ShaderWarmup::start(const std::string& projectManifest) {
         impl_->lines.clear();
     }
     wchar_t self[MAX_PATH] = {};
-    if (!GetModuleFileNameW(nullptr, self, MAX_PATH)) return;
+    if (!GetModuleFileNameW(nullptr, self, MAX_PATH)) { impl_->done = true; return; }
     // This same executable in --warm-shaders mode: the driver's pipeline cache is per executable.
     const std::filesystem::path tool = self;
     const std::filesystem::path dir = tool.parent_path();
 
     SECURITY_ATTRIBUTES sa{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
     HANDLE rd = nullptr, wr = nullptr;
-    if (!CreatePipe(&rd, &wr, &sa, 0)) return;
+    if (!CreatePipe(&rd, &wr, &sa, 0)) { impl_->done = true; return; }
     SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
     STARTUPINFOW si{};
     si.cb = sizeof si;
@@ -166,22 +189,28 @@ void ShaderWarmup::start(const std::string& projectManifest) {
     si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
     std::wstring cmd = L"\"" + tool.wstring() + L"\" --warm-shaders";
     if (!projectManifest.empty()) cmd += L" --project \"" + std::filesystem::path(projectManifest).wstring() + L"\"";
+    if (!graphList.empty()) cmd += L" --graphs \"" + std::filesystem::path(graphList).wstring() + L"\"";
+    // A graph run has the view waiting on it: below normal, not idle, so a busy editor does not starve it.
+    const DWORD priority = impl_->forGraphs ? BELOW_NORMAL_PRIORITY_CLASS : IDLE_PRIORITY_CLASS;
     PROCESS_INFORMATION pi{};
     const BOOL ok = CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE,
-                                   CREATE_NO_WINDOW | IDLE_PRIORITY_CLASS, nullptr, dir.c_str(), &si, &pi);
+                                   CREATE_NO_WINDOW | priority, nullptr, dir.c_str(), &si, &pi);
     CloseHandle(wr);
     if (!ok) {
         CloseHandle(rd);
         AVER_WARN("[ShaderWarm] could not start the shader warm-up (error {})", GetLastError());
+        impl_->done = true;   // finished(): a caller waiting on it goes on without
         return;
     }
     CloseHandle(pi.hThread);
     impl_->process = pi.hProcess;
     impl_->readPipe = rd;
     impl_->reader = std::thread([this] { impl_->readLoop(); });
-    AVER_INFO("[ShaderWarm] filling the shader caches in the background (--warm-shaders, idle priority)");
+    AVER_INFO("[ShaderWarm] filling the shader caches in the background (--warm-shaders{}, {} priority)",
+              impl_->forGraphs ? " --graphs" : "", impl_->forGraphs ? "below normal" : "idle");
 #else
     (void)projectManifest;
+    (void)graphList;
 #endif
 }
 
@@ -200,17 +229,23 @@ void ShaderWarmup::poll() {
         if (impl_->toast) return;
         Notification n;
         n.severity = NotifySeverity::Info;
-        n.title = "Preparing shaders";
-        n.body = "Compiling renderer shaders in the background, so switching between ReSTIR RT, "
-                 "Path Tracing and the denoisers loads from the cache.";
+        n.title = impl_->forGraphs ? "Compiling material shaders" : "Preparing shaders";
+        n.body = impl_->forGraphs ? "This level brought a material graph the renderer has not compiled yet. It compiles in the "
+                                    "background and the view comes back when it is ready; the editor stays usable meanwhile."
+                                  : "Compiling renderer shaders in the background, so switching between ReSTIR RT, "
+                                    "Path Tracing and the denoisers loads from the cache.";
         n.sticky = true;
         n.hasProgress = true;
         n.progress = -1.0f;
-        n.dedupKey = "shader-warmup";
+        n.dedupKey = impl_->forGraphs ? "shader-warmup-graphs" : "shader-warmup";
         impl_->toast = q.push(std::move(n));
     };
+    if (impl_->forGraphs) showToast();   // the view is blank until this run ends: say why from the start
     for (const std::string& l : got) {
-        if (l.rfind("warm: shaders ", 0) == 0) {
+        if (l.rfind("warm: graphs ", 0) == 0) {
+            impl_->fingerprint = std::strtoull(l.c_str() + 13, nullptr, 10);
+            impl_->haveFingerprint = true;
+        } else if (l.rfind("warm: shaders ", 0) == 0) {
             // "warm: shaders <requests> <compiled>": the toast appears with the first real compile.
             const std::string rest = l.substr(14);
             const usize sp = rest.find(' ');

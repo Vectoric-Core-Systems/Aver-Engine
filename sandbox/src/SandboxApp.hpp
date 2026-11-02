@@ -3869,6 +3869,12 @@ private:
     editor::ToolsMenu tools_;
     editor::Nrd2Session nrd2Session_;   // Tools > Train Neural Denoiser, --nrd2-train
     editor::ShaderWarmup shaderWarmup_; // Sandbox.exe --warm-shaders after a project opens
+    // A level's new material graphs compile in a --warm-shaders --graphs run while Voxi holds its rebuild (GraphShaderWarm.cpp).
+    editor::ShaderWarmup graphWarmup_;
+    u64 graphWarmRev_ = 0;               // the registry revision the running graph warm-up was started for
+    bool graphWarmHeld_ = false;
+    std::chrono::steady_clock::time_point graphWarmT0_{};
+    void tickGraphShaderWarm(Engine& e);
     // "Preparing <level>" after the loading screen while ray-tracing structures still build (SandboxRender.cpp).
     bool levelPrepArmed_ = false;
     u64 levelPrepToast_ = 0;

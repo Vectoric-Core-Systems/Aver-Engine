@@ -78,6 +78,7 @@ add_executable(Sandbox WIN32
   src/EditorNotifications.cpp
   src/ShaderWarmup.cpp
   src/ShaderWarmRun.cpp
+  src/GraphShaderWarm.cpp
   src/InputOwnership.cpp
   src/ViewportIconRenderer.cpp
   src/EngineScaffold.cpp

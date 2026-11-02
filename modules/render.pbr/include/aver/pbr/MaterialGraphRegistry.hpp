@@ -18,6 +18,7 @@
 #include "aver/formats/OcGraphHlsl.hpp"
 
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace aver::fmt { struct OcGraphData; }
@@ -58,6 +59,15 @@ public:
 
     // How many graphs are registered and compiled.
     usize count() const { return entries_.size(); }
+
+    // The registered graphs as (id, key), in id order: what a second process needs to register the same set
+    // (the editor's background shader warm-up), with setNextId() keeping each id where this process put it.
+    std::vector<std::pair<u32, std::string>> keys() const;
+    // The id the next new graph gets. Only moves forward: an id once handed out is never reused.
+    void setNextId(u32 id) { if (id > nextId_) nextId_ = id; }
+    // A hash of everything the registered graphs put into a shader (the generated function, the embedded shaders and
+    // their varyings). Two processes with the same fingerprint compile the same shader text, so share cache entries.
+    u64 fingerprint() const;
 
     // Forgets everything. For a project close, and for tests, which must not inherit each other's
     // ids through a process-wide table.

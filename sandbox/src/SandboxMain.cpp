@@ -72,9 +72,22 @@ void keepDeviceLostLog(const std::string& log, const std::string& logsDir) {
 }
 
 // Parse command line and build the editor. Flags run in separate loops due to MSVC C1061 nesting limit.
-int runShaderWarm(const std::string& projectPath);   // ShaderWarmRun.cpp
+int runShaderWarm(const std::string& projectPath, const std::string& graphList);   // ShaderWarmRun.cpp
 
 Application* createApplication(int argc, char** argv) {
+    // --warm-shaders: the background shader-cache fill the editor starts (ShaderWarmup.cpp); no window. Before the log file below:
+    // the editor that started it is still writing Sandbox.log, which this process must not rotate or reopen.
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--warm-shaders") != 0) continue;
+        std::string project, graphs;
+        for (int j = 1; j + 1 < argc; ++j) {
+            if (std::strcmp(argv[j], "--project") == 0) project = argv[j + 1];
+            if (std::strcmp(argv[j], "--graphs") == 0) graphs = argv[j + 1];
+        }
+        const int rc = runShaderWarm(project, graphs);
+        aver::crash::shutdown();
+        std::exit(rc);
+    }
     // The editor's log, also on disk: <user data>\Logs\Sandbox.log, the previous session kept as -prev.
     if (const std::string dir = aver::userDataDir(); !dir.empty()) {
         std::error_code ec;
@@ -83,16 +96,6 @@ Application* createApplication(int argc, char** argv) {
         keepDeviceLostLog(log, dir + AVER_PATH_SEP "Logs");
         std::filesystem::rename(log, dir + AVER_PATH_SEP "Logs" AVER_PATH_SEP "Sandbox-prev.log", ec);
         aver::setLogFile(log.c_str());
-    }
-    // --warm-shaders: the background shader-cache fill the editor starts (ShaderWarmup.cpp); no window.
-    for (int i = 1; i < argc; ++i) {
-        if (std::strcmp(argv[i], "--warm-shaders") != 0) continue;
-        std::string project;
-        for (int j = 1; j + 1 < argc; ++j)
-            if (std::strcmp(argv[j], "--project") == 0) project = argv[j + 1];
-        const int rc = runShaderWarm(project);
-        aver::crash::shutdown();
-        std::exit(rc);
     }
     // --sequence-play [--sequence-capture <dir>] [--sequence-every N] [--sequence-warmup N] and
     // --render-queue <job.ocrender> (docs/RENDER_QUEUE.md): taken out of argv here, so the flag chain below never reads the directory as a bare path.

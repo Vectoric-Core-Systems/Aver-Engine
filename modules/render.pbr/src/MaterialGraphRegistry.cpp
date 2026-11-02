@@ -94,6 +94,32 @@ void MaterialGraphRegistry::rebuild() {
     ++revision_;
 }
 
+std::vector<std::pair<u32, std::string>> MaterialGraphRegistry::keys() const {
+    std::vector<std::pair<u32, std::string>> out;
+    out.reserve(entries_.size());
+    for (const Entry& e : entries_) out.emplace_back(e.id, e.key);
+    return out;
+}
+
+u64 MaterialGraphRegistry::fingerprint() const {
+    // FNV-1a over each part with its length, so two processes agree (std::hash is not specified across builds).
+    u64 h = 1469598103934665603ull;
+    const auto mix = [&h](const std::string& s) {
+        const u64 n = s.size();
+        for (int i = 0; i < 8; ++i) { h ^= (n >> (i * 8)) & 0xffu; h *= 1099511628211ull; }
+        for (const char c : s) { h ^= static_cast<unsigned char>(c); h *= 1099511628211ull; }
+    };
+    mix(hlsl_);
+    mix(vsOutMembers_);
+    mix(embedded_ ? "1" : "0");
+    for (const Entry& e : entries_) {
+        if (!e.isEmbedded) continue;
+        mix(e.emb.fragmentSource);
+        mix(e.emb.vertexSource);
+    }
+    return h;
+}
+
 MaterialGraphRegistry& materialGraphs() {
     static MaterialGraphRegistry r;
     return r;

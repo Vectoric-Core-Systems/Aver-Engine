@@ -9,9 +9,15 @@
 // GI volume is forced small: it is not a shader input, and the editor already holds the real one in VRAM.
 // Cache writes are atomic (D3D12Device.cpp), so both processes can fill the same cache.
 //
-// stdout, one line each, for the editor to read: "warm: start", "warm: shaders <requests> <compiled>",
+// --graphs <list>: the material graphs a level just brought (one "<id> <path>" a line, the editor's ids), registered before anything
+// compiles so the scene variants are the ones the editor will rebuild; "warm: graphs <fingerprint>" tells the editor whether this
+// process composed the same shader text (MaterialGraphRegistry::fingerprint). The editor holds its own rebuild meanwhile.
+//
+// stdout, one line each, for the editor to read: "warm: start", "warm: graphs <fingerprint>", "warm: shaders <requests> <compiled>",
 // "warm: done <ms>" or "warm: fail <reason>". Returns 0 done, 1 failed, 77 no capable device.
+#include "aver/formats/OcGraph.hpp"
 #include "aver/formats/OcProject.hpp"
+#include "aver/pbr/MaterialGraphRegistry.hpp"
 #include "aver/render/denoise/Nrd2.hpp"
 #include "aver/rhi/RHI.hpp"
 #include "aver/rhi/RHIResources.hpp"
@@ -20,7 +26,9 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <string>
 #include <string_view>
 
@@ -46,11 +54,31 @@ void onShaderRequest(u32 requests, u32 cacheHits, void*) {
     say("warm: shaders " + std::to_string(requests) + " " + std::to_string(requests - cacheHits));
 }
 
+// Registers the graphs the list names, each under the id the editor gave it, and says the fingerprint they compose to.
+void registerGraphs(const std::string& listPath) {
+    std::ifstream f(listPath, std::ios::binary);
+    std::string line;
+    while (std::getline(f, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        const usize sp = line.find(' ');
+        if (sp == std::string::npos) continue;
+        const u32 id = static_cast<u32>(std::strtoul(line.c_str(), nullptr, 10));
+        const std::string path = line.substr(sp + 1);
+        fmt::OcGraphData g;
+        std::string err;
+        if (id == 0 || !fmt::loadOcgraph(path, g, &err)) continue;   // the fingerprint then differs and the editor compiles as before
+        pbr::materialGraphs().setNextId(id);
+        pbr::materialGraphs().add(path, g.name, g);
+    }
+    say("warm: graphs " + std::to_string(pbr::materialGraphs().fingerprint()));
+}
+
 }  // namespace
 
-int runShaderWarm(const std::string& projectPath) {
+int runShaderWarm(const std::string& projectPath, const std::string& graphList) {
     const auto t0 = std::chrono::steady_clock::now();
     say("warm: start");
+    if (!graphList.empty()) registerGraphs(graphList);
 
     rhi::DeviceDesc desc;
     desc.preferred[0] = rhi::Backend::D3D12;

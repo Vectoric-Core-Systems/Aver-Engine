@@ -260,6 +260,41 @@ static void testClearEmptiesButNeverRecyclesIds() {
                                   "before the clear, not id 1 again");
 }
 
+// The editor's background shader warm-up registers the same graphs in a second process (ShaderWarmRun.cpp --graphs): keys() in id
+// order plus setNextId() must rebuild the same ids, and fingerprint() must agree exactly when the shader text does.
+static void testReplayInASecondRegistryMatchesTheFingerprint() {
+    AVER_INFO("=== keys, setNextId and fingerprint (the background warm-up's replay) ===");
+    pbr::MaterialGraphRegistry editor;
+    editor.add("mat/old.ocgraph", "Old", flatColorGraph("Old", "1,0,0"));
+    editor.clear();   // a project closed: ids keep counting, so the next graphs start above 1
+    editor.add("mat/a.ocgraph", "A", flatColorGraph("A", "0,1,0"));
+    editor.add("mat/b.ocgraph", "B", flatColorGraph("B", "0,0,1"));
+    const auto keys = editor.keys();
+    check(keys.size() == 2 && keys[0].second == "mat/a.ocgraph" && keys[1].second == "mat/b.ocgraph" && keys[0].first < keys[1].first,
+          "keys() lists the graphs in id order");
+
+    pbr::MaterialGraphRegistry warm;
+    check(warm.fingerprint() != editor.fingerprint(), "an empty registry does not match one with graphs");
+    for (const auto& [id, key] : keys) {
+        warm.setNextId(id);
+        warm.add(key, key == "mat/a.ocgraph" ? "A" : "B", flatColorGraph(key == "mat/a.ocgraph" ? "A" : "B", key == "mat/a.ocgraph" ? "0,1,0" : "0,0,1"));
+    }
+    check(warm.idOf("mat/a.ocgraph") == editor.idOf("mat/a.ocgraph") && warm.idOf("mat/b.ocgraph") == editor.idOf("mat/b.ocgraph"),
+          "setNextId() puts each graph at the editor's id");
+    check(warm.hlsl() == editor.hlsl() && warm.fingerprint() == editor.fingerprint(), "the same graphs at the same ids: the same text and fingerprint");
+
+    pbr::MaterialGraphRegistry fresh;   // ids from 1, as a replay without setNextId would give
+    fresh.add("mat/a.ocgraph", "A", flatColorGraph("A", "0,1,0"));
+    fresh.add("mat/b.ocgraph", "B", flatColorGraph("B", "0,0,1"));
+    check(fresh.fingerprint() != editor.fingerprint(), "other ids compose other text: the fingerprint differs");
+
+    warm.add("mat/b.ocgraph", "B", flatColorGraph("B", "1,1,0"));   // edited and not saved, in one of the two processes
+    check(warm.fingerprint() != editor.fingerprint(), "a graph that differs changes the fingerprint");
+    const u32 before = warm.idOf("mat/b.ocgraph");
+    warm.setNextId(1);
+    check(warm.add("mat/c.ocgraph", "C", flatColorGraph("C", "1,1,1")) > before, "setNextId() never moves the next id back");
+}
+
 int main() {
     // UNBUFFERED, matching MaterialGraphTest.cpp's own reasoning: redirected to a file, the CRT
     // full-buffers stdout, and a run that stops mid-way reports its progress well behind where it
@@ -276,6 +311,7 @@ int main() {
     testNonCompilingGraphReturnsZeroAndChangesNothing();
     testHlslHasACaseArmPerGraphAndAlwaysADefault();
     testClearEmptiesButNeverRecyclesIds();
+    testReplayInASecondRegistryMatchesTheFingerprint();
 
     AVER_INFO("==================================================");
     if (g_failures == 0) AVER_INFO("=== all material graph registry tests passed ===");
