@@ -120,8 +120,24 @@ pool.tick(world, dt);                                                   // once 
 
 C ABI (`modules/scene/include/aver/scene/decal_abi.h`, in `Aver.Scene.dll`): `aver_decal_pool_set_capacity`,
 `aver_decal_spawn(const AverDecalSpawnDesc*)` (a surface normal or an explicit rotation),
+`aver_decal_spawn_ex(const AverDecalSpawnDescEx*)` (version 2: the same descriptor plus the wave 6 properties below),
 `aver_decal_release`, `aver_decal_clear`, `aver_decal_tick`, `aver_decal_active_count`. C#:
 `Aver.Scene.Decals` (`scripting/csharp/Aver.Scene/Decals.cs`): `Decals.Spawn(DecalDesc.OnSurface(pos, normal, size) with {...})`.
+
+### Emission, depth and normal fade, albedo mix (wave 6, P13)
+
+Appended to `CDecal` (152 bytes, 120 before), the `DECAL` record, `aver_decal_spawn_ex` and the GPU record; every default is the decal as it was.
+
+| Field | Meaning |
+|---|---|
+| `emissionTexture`, `emissionEnergy` | an sRGB image added to the surface's emission, times the energy (0 = 1), weighted by the opacity, the soft edge, the depth fade and the angle fade but not by the base image's alpha |
+| `kDecalDepthFade` + `upperFade`, `lowerFade` | the weight along the projection becomes `(1 - \|x\| / half)^exponent` in place of the soft edge on that axis; upper is the side the projector looks from (local -X), lower the far side; an exponent of 0 does not fade on that side (the base is floored, so there is no NaN at the face) |
+| `normalFade` | above 0: the weight is also scaled by `smoothstep(normalFade, 1, dot(N, -projection) * 0.5 + 0.5)` |
+| `kDecalAlbedoMix` + `albedoMix` | the base colour's own weight (0 leaves the albedo alone); normal and roughness keep the opacity weight, as Godot's `albedo_mix` does |
+
+The 192-byte `PackedDecal` grew by one `float4 fade` row to 208 bytes (`SceneDecal.hpp`, the static_asserts in `SceneDecal.hpp` and `VoxiRenderer.hpp`, `AverDecalRec` in `voxi_decal.hlsli`); the emission image index rides in `tex.w` and its energy in `uvo.z`. **The new shading is compiled into the plain raster pipeline only** (`AVER_DECAL_EXT`, defined in `voxi.hlsl` in the `!AVER_RT` branch): `averApplyDecals` is also called from `rtHitSurface` for the ray-driven stages, where decals once hung the RX 7800 XT, and those variants compile the instructions they did before. So the emission, the two fades and the albedo mix do not show in ray-driven mode, and a decal there looks as it did.
+
+The Godot Decal node's axes (Fabric): Godot's shader maps the surface into the box's 0..1 and reads the image at (x, z) with the depth along y, and the projector looks down -Y; the image's u is +X, its v (down the picture) +Z. Mapped by the axis map of `FabricSpace` ((x, y, z) -> (-z, x, y)) the engine's decal frame is: projection (+X) = Godot -Y, u (+Y) = Godot +X, up (+Z) = Godot -Z.
 
 Visual-script nodes (not yet registered; the exact entries are in "Wiring" below): `AN_SpawnDecal`
 (position, normal, size, images, lifetime), `AN_ClearDecals`, `AN_SetDecalCapacity`.
@@ -136,7 +152,8 @@ DECAL name Wall%20stain pos 120.5 -40 75 rot 30 -15 90 size 60 120 80 base Decal
 
 Optional tokens, written only when not at their default: `scale sx sy sz`, `tint r g b`, `opacity`,
 `normalstrength`, `roughness`, `metallic`, `fadedist cm`, `order n`, `normalmap path`, `orm path`,
-`uvscale u v`, `uvoffset u v`, and the bare `nocolour`, `nonormal`, `noroughness`, `disabled`. Always
+`uvscale u v`, `uvoffset u v`, and the bare `nocolour`, `nonormal`, `noroughness`, `disabled`; wave 6 added `emission path`,
+`emissionenergy e`, `albedomix m`, `depthfade upper lower` and `normalfade f`. Always
 written: `pos`, `rot`, `size`, `edge`, `angle`. A level with no decals writes no record and loads and
 writes exactly as before; an older parser skips the whole record. Lifetime is not carried: an authored
 decal is permanent. Format code: `OcDecal` and `OcWorldData::decals` in

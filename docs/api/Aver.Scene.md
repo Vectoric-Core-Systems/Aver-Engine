@@ -2,7 +2,7 @@
 
 # Aver.Scene public API
 
-10 public types and 116 public members, read from `scripting/csharp/Aver.Scene/` (4 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+10 public types and 123 public members, read from `scripting/csharp/Aver.Scene/` (4 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Scene
 
@@ -43,6 +43,13 @@ Values: `None = 0`, `Colour = 0x2`, `Normal = 0x4`, `Roughness = 0x8`
 - `public int SortOrder`
 - `public DecalChannels Disable`
 - `public long BaseTexture, NormalTexture, OrmTexture` - Texture ObjectIds: ObjectIdOf of the content-relative path.
+- `public long EmissionTexture` - An sRGB image added to the surface's emission (drawn by the plain raster pipeline).
+- `public float EmissionEnergy` - Multiplies the emission image; zero reads as 1.
+- `public float AlbedoMix` - With UseAlbedoMix: the base colour's weight against the surface's, 0 to 1.
+- `public bool UseAlbedoMix`
+- `public float UpperFade, LowerFade` - With UseDepthFade: the exponent of (1 - |depth| / half) on the side the projector looks from (UpperFade) and on the far side.
+- `public bool UseDepthFade`
+- `public float NormalFade` - Above 0: the smoothstep start (0 to under 1) of the fade where the surface faces away from the projector.
 - `public static DecalDesc OnSurface(Vec3 position, Vec3 normal, Vec3 sizeCm)` - A decal at position on a surface with normal normal.
 
 ### Decals
