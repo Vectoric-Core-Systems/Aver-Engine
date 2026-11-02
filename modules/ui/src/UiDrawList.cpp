@@ -2,7 +2,34 @@
 #include "aver/ui/UiDrawList.hpp"
 #include "aver/ui/UiUnicode.hpp"
 
+#include <algorithm>
+#include <cmath>
+
 namespace aver::ui {
+namespace {
+
+bool finite(const UiAffine& m) {
+    return std::isfinite(m.a) && std::isfinite(m.b) && std::isfinite(m.c) && std::isfinite(m.d) &&
+           std::isfinite(m.tx) && std::isfinite(m.ty);
+}
+
+// The integer box that covers a rectangle's four transformed corners. Clamped so a huge scale cannot overflow i32.
+UiClip transformedBox(const UiAffine& m, const UiClip& c) {
+    const f32 xs[4] = {static_cast<f32>(c.left), static_cast<f32>(c.right), static_cast<f32>(c.right), static_cast<f32>(c.left)};
+    const f32 ys[4] = {static_cast<f32>(c.top), static_cast<f32>(c.top), static_cast<f32>(c.bottom), static_cast<f32>(c.bottom)};
+    f32 minX = 1e30f, minY = 1e30f, maxX = -1e30f, maxY = -1e30f;
+    for (int i = 0; i < 4; ++i) {
+        f32 x, y;
+        m.apply(xs[i], ys[i], x, y);
+        minX = std::min(minX, x); maxX = std::max(maxX, x);
+        minY = std::min(minY, y); maxY = std::max(maxY, y);
+    }
+    constexpr f32 kLim = static_cast<f32>(1 << 24);
+    return UiClip{static_cast<i32>(std::clamp(std::floor(minX), -kLim, kLim)), static_cast<i32>(std::clamp(std::floor(minY), -kLim, kLim)),
+                  static_cast<i32>(std::clamp(std::ceil(maxX), -kLim, kLim)), static_cast<i32>(std::clamp(std::ceil(maxY), -kLim, kLim))};
+}
+
+} // namespace
 
 // Returns the intersection of this clip and another; may be empty.
 UiClip UiClip::intersect(const UiClip& o) const {
@@ -30,15 +57,66 @@ u32 uiPremultiply(u32 rgba) {
 void UiDrawList::clear() {
     verts_.clear();
     idx_.clear();
+    worldTexts_.clear();
+    worldRuns_.clear();
+    worldVerts_.clear();
+    worldIdx_.clear();
     for (auto& c : cmds_) c.clear();
     clipStack_.clear();
+    xformStack_.clear();
     hits_.clear();
     layer_ = UiLayer::Content;
+    filter_ = UiFilter::Linear;
+    address_ = UiAddress::Clamp;
+    blend_ = UiBlend::Mix;
 }
 
-// Pushes a clip rect, intersected with the one already in force.
-void UiDrawList::pushClip(const UiClip& c) {
+bool UiDrawList::addWorldText(const UiWorldText& h, const UiVertex* verts, usize vertCount, const u32* indices,
+                              usize indexCount, const UiWorldTextRun* runs, usize runCount) {
+    if (!verts || !runs || !indices || vertCount == 0 || indexCount == 0 || runCount == 0) return false;
+    if (worldTexts_.size() >= kUiMaxWorldTexts || worldVerts_.size() + vertCount > kUiMaxWorldVertices ||
+        worldRuns_.size() + runCount > kUiMaxWorldRuns)
+        return false;
+    for (f32 f : h.world) if (!std::isfinite(f)) return false;
+    if (!std::isfinite(h.alphaCut) || !std::isfinite(h.intensity) || !std::isfinite(h.fixedPxPerUnit) || !std::isfinite(h.sdfSoftness)) return false;
+    // Everything is checked before anything is copied, so a refused label leaves the list as it was.
+    usize used = 0;
+    for (usize r = 0; r < runCount; ++r) {
+        const UiWorldTextRun& run = runs[r];
+        if (run.indexCount == 0 || run.indexCount % 3 != 0) return false;
+        if (static_cast<u64>(run.indexOffset) + run.indexCount > indexCount) return false;
+        used += run.indexCount;
+    }
+    if (worldIdx_.size() + indexCount > kUiMaxWorldIndices || used > indexCount) return false;
+    for (usize i = 0; i < indexCount; ++i)
+        if (indices[i] >= vertCount) return false;
+
+    UiWorldText t = h;
+    t.vertexOffset = static_cast<u32>(worldVerts_.size());
+    t.vertexCount = static_cast<u32>(vertCount);
+    t.runBegin = static_cast<u32>(worldRuns_.size());
+    t.runCount = static_cast<u32>(runCount);
+    const u32 indexBase = static_cast<u32>(worldIdx_.size());
+    worldVerts_.insert(worldVerts_.end(), verts, verts + vertCount);
+    worldIdx_.insert(worldIdx_.end(), indices, indices + indexCount);
+    for (usize r = 0; r < runCount; ++r) worldRuns_.push_back(UiWorldTextRun{indexBase + runs[r].indexOffset, runs[r].indexCount, runs[r].page});
+    worldTexts_.push_back(t);
+    return true;
+}
+
+// Pushes a clip rect, intersected with the one already in force. Under a transform the rect is the box of its corners.
+void UiDrawList::pushClip(const UiClip& in) {
+    const UiClip c = hasTransform() ? transformedBox(transform(), in) : in;
     clipStack_.push_back(clipStack_.empty() ? c : clipStack_.back().intersect(c));
+}
+
+void UiDrawList::pushTransform(const UiAffine& local) {
+    const UiAffine& top = transform();
+    xformStack_.push_back(finite(local) ? top * local : top);
+}
+
+void UiDrawList::popTransform() {
+    if (!xformStack_.empty()) xformStack_.pop_back();
 }
 
 // Pops the innermost clip rect.
@@ -62,7 +140,8 @@ void UiDrawList::append(u32 indexCount, u64 texture) {
         UiDrawCmd& back = list.back();
         if (back.texture == texture &&
             back.clip.left == c.left && back.clip.top == c.top &&
-            back.clip.right == c.right && back.clip.bottom == c.bottom) {
+            back.clip.right == c.right && back.clip.bottom == c.bottom &&
+            back.filter == filter_ && back.address == address_ && back.blend == blend_) {
             back.indexCount += indexCount;
             return;
         }
@@ -72,6 +151,9 @@ void UiDrawList::append(u32 indexCount, u64 texture) {
     cmd.indexCount  = indexCount;
     cmd.texture     = texture;
     cmd.clip        = c;
+    cmd.filter      = filter_;
+    cmd.address     = address_;
+    cmd.blend       = blend_;
     list.push_back(cmd);
 }
 
@@ -88,10 +170,16 @@ void UiDrawList::addTexturedRect(f32 x, f32 y, f32 w, f32 h, u64 texture,
 
     const u32 c = uiPremultiply(rgba);
     const u32 base = static_cast<u32>(verts_.size());
-    verts_.push_back(UiVertex{x,     y,     u0, v0, c});
-    verts_.push_back(UiVertex{x + w, y,     u1, v0, c});
-    verts_.push_back(UiVertex{x + w, y + h, u1, v1, c});
-    verts_.push_back(UiVertex{x,     y + h, u0, v1, c});
+    if (hasTransform()) {
+        const UiAffine& m = transform();
+        UiVertex q[4] = {{x, y, u0, v0, c}, {x + w, y, u1, v0, c}, {x + w, y + h, u1, v1, c}, {x, y + h, u0, v1, c}};
+        for (UiVertex& v : q) { m.apply(v.x, v.y, v.x, v.y); verts_.push_back(v); }
+    } else {
+        verts_.push_back(UiVertex{x,     y,     u0, v0, c});
+        verts_.push_back(UiVertex{x + w, y,     u1, v0, c});
+        verts_.push_back(UiVertex{x + w, y + h, u1, v1, c});
+        verts_.push_back(UiVertex{x,     y + h, u0, v1, c});
+    }
 
     idx_.push_back(base + 0); idx_.push_back(base + 1); idx_.push_back(base + 2);
     idx_.push_back(base + 0); idx_.push_back(base + 2); idx_.push_back(base + 3);
@@ -105,9 +193,11 @@ void UiDrawList::addMesh(const UiVertex* verts, usize vertCount, const u32* indi
     for (usize i = 0; i < whole; ++i)
         if (indices[i] >= vertCount) return;
     const u32 base = static_cast<u32>(verts_.size());
+    const bool xf = hasTransform();
     for (usize i = 0; i < vertCount; ++i) {
         UiVertex v = verts[i];
         v.rgba = uiPremultiply(v.rgba);
+        if (xf) transform().apply(v.x, v.y, v.x, v.y);
         verts_.push_back(v);
     }
     for (usize i = 0; i < whole; ++i) idx_.push_back(base + indices[i]);
@@ -153,10 +243,12 @@ void UiDrawList::addGlyphQuad(f32 x, f32 y, f32 w, f32 h, u64 texture, f32 u0, f
     const f32 dxBot = skew * (shearBaselineY - (y + h));
     const u32 c = uiPremultiply(rgba);
     const u32 base = static_cast<u32>(verts_.size());
-    verts_.push_back(UiVertex{x + dxTop,     y,     u0, v0, c});
-    verts_.push_back(UiVertex{x + w + dxTop, y,     u1, v0, c});
-    verts_.push_back(UiVertex{x + w + dxBot, y + h, u1, v1, c});
-    verts_.push_back(UiVertex{x + dxBot,     y + h, u0, v1, c});
+    UiVertex q[4] = {{x + dxTop, y, u0, v0, c}, {x + w + dxTop, y, u1, v0, c}, {x + w + dxBot, y + h, u1, v1, c}, {x + dxBot, y + h, u0, v1, c}};
+    const bool xf = hasTransform();
+    for (UiVertex& v : q) {
+        if (xf) transform().apply(v.x, v.y, v.x, v.y);
+        verts_.push_back(v);
+    }
 
     idx_.push_back(base + 0); idx_.push_back(base + 1); idx_.push_back(base + 2);
     idx_.push_back(base + 0); idx_.push_back(base + 2); idx_.push_back(base + 3);
@@ -165,6 +257,14 @@ void UiDrawList::addGlyphQuad(f32 x, f32 y, f32 w, f32 h, u64 texture, f32 u0, f
 
 void UiDrawList::addHitRect(u64 id, f32 x, f32 y, f32 w, f32 h) {
     if (id == 0 || w <= 0.0f || h <= 0.0f) return;   // 0 is the "nothing" answer hitTest returns
+    if (hasTransform()) {
+        // The hit box of a transformed rect is the box of its corners (the clip stack is already in screen space).
+        const UiClip b = transformedBox(transform(), UiClip{static_cast<i32>(std::floor(x)), static_cast<i32>(std::floor(y)),
+                                                              static_cast<i32>(std::ceil(x + w)), static_cast<i32>(std::ceil(y + h))});
+        hits_.push_back(UiHitRect{id, static_cast<f32>(b.left), static_cast<f32>(b.top), static_cast<f32>(b.right - b.left),
+                                  static_cast<f32>(b.bottom - b.top), clip(), layer_});
+        return;
+    }
     // THE CLIP IS CAPTURED HERE, not at query time: a widget inside a scrolled panel is only
     // clickable where it is actually visible, and the stack that decides that is this one, now.
     hits_.push_back(UiHitRect{id, x, y, w, h, clip(), layer_});

@@ -109,3 +109,15 @@ set_target_properties(UiCaptionViewTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CM
 add_executable(UiImageAbiTest src/UiImageAbiTest.cpp)
 target_link_libraries(UiImageAbiTest PRIVATE Aver.UI.Abi Aver.UI Aver.Core Aver.Platform)
 set_target_properties(UiImageAbiTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# UiTransformTest — parity P40 / P41 / P38: the draw list's transform stack, per-draw sampler and blend state, the mesh export and
+# the text spacing block, through the C ABI. Links the DLL the C# side loads.
+add_executable(UiTransformTest src/UiTransformTest.cpp)
+target_link_libraries(UiTransformTest PRIVATE Aver.UI.Abi Aver.UI Aver.Core Aver.Platform)
+set_target_properties(UiTransformTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# UiTextMeshTest — parity E6 / E14: the plane mesh a Label3D draws (layout, alignment, outline, caps), the world atlas page
+# lifetime (a mesh whose page was recycled is stale and rebuilt), signed-distance glyphs and the draw list's world text checks.
+add_executable(UiTextMeshTest src/UiTextMeshTest.cpp)
+target_link_libraries(UiTextMeshTest PRIVATE Aver.UI Aver.Core Aver.Platform)
+set_target_properties(UiTextMeshTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

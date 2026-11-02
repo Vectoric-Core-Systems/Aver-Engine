@@ -35,6 +35,14 @@ struct UiTextConfig {
     f32 coverageGamma = 1.0f;    // applied by the renderer when it expands A8 to RGBA8
     f32 legacyPx = 16.0f;        // the size aver_ui_text / aver_ui_text_width draw at
     u32 cacheEntries = 1024;     // cached layouts
+    // World text (E6): its own atlas, so a HUD that churns the UI atlas never recycles a page a label in the world is
+    // using. With worldSdf on, world glyphs are rasterised ONCE at worldSdfPx as distance fields (spread worldSdfSpread
+    // px) and every size scales from that; off, they are rasterised at the size asked for as ordinary coverage.
+    u32 worldPageSize = 512;     // 256..2048
+    u32 worldMaxPages = 8;       // 1..64
+    bool worldSdf = false;
+    u32 worldSdfPx = 48;         // 16..160
+    u32 worldSdfSpread = 6;      // 2..16
 };
 
 struct UiTextStats {
@@ -77,6 +85,17 @@ public:
 
     // ---- layout ----
     std::shared_ptr<const UiTextLayout> layout(std::string_view text, const UiTextStyle& style, const UiTextBox& box);
+    // ---- world text (E6) ----
+    // The atlas the world text draws from (separate from atlas()).
+    UiGlyphAtlas& worldAtlas() { return worldAtlas_; }
+    const UiGlyphAtlas& worldAtlas() const { return worldAtlas_; }
+    // The em size a world layout is built at for a requested size: the request (clamped to the raster range) for coverage
+    // glyphs, worldSdfPx for distance-field glyphs, whose quads then scale by request / this.
+    f32 worldLayoutPx(f32 requestedPx) const;
+    // Like layout() but the glyphs are rasterised into the world atlas (as distance fields when configured), and the cache
+    // is the world's own. `style.px` is taken as given: callers pass worldLayoutPx(...) and scale the quads themselves.
+    std::shared_ptr<const UiTextLayout> layoutWorld(std::string_view text, const UiTextStyle& style, const UiTextBox& box);
+
     // Like layout() but ignores the per-frame budget and always completes (loading screens).
     void prewarm(std::string_view text, const UiTextStyle& style, const UiTextBox& box = UiTextBox{});
     // Writes one line's glyph quads. (originX, baselineY) is the line's left edge on the baseline.
@@ -98,18 +117,31 @@ private:
         u64 evictionsSeen = 0;
     };
 
+    // Where glyphs go: the UI atlas and cache, or the world's.
+    struct Target {
+        UiGlyphAtlas& atlas;
+        std::unordered_map<u64, Entry>& cache;
+        bool sdf;
+    };
+    Target uiTarget() { return Target{atlas_, cache_, false}; }
+    Target worldTarget() { return Target{worldAtlas_, worldCache_, cfg_.worldSdf}; }
+    std::shared_ptr<const UiTextLayout> layoutIn(Target t, std::string_view text, const UiTextStyle& style, const UiTextBox& box);
+    void trimCache(std::unordered_map<u64, Entry>& cache);
+
     struct Build;
     std::shared_ptr<UiTextLayout> build(std::string_view text, const UiTextStyle& style, const UiTextBox& box,
                                         bool ignoreBudget);
     // Rasterises every glyph of `l` that is not resident; false when any could not be (budget, overflow).
-    bool ensureGlyphs(const UiTextLayout& l, bool ignoreBudget);
-    bool ensureGlyph(u16 face, u32 glyph, u32 rasterPx, bool ignoreBudget);
+    bool ensureGlyphs(const UiTextLayout& l, bool ignoreBudget, Target t);
+    bool ensureGlyph(u16 face, u32 glyph, u32 rasterPx, bool ignoreBudget, Target t);
     u64 keyFor(std::string_view text, const UiTextStyle& style, const UiTextBox& box) const;
     void trimCache();
 
     UiTextConfig cfg_;
     UiFontSet fonts_;
     UiGlyphAtlas atlas_;
+    UiGlyphAtlas worldAtlas_;
+    std::unordered_map<u64, Entry> worldCache_;
     u64 frame_ = 1;
     u32 rasterThisFrame_ = 0;
     u64 rasterTotal_ = 0, hits_ = 0, misses_ = 0, incomplete_ = 0;

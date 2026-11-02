@@ -167,8 +167,10 @@ inline bool uiTextInit(const std::string& contentDir) {
 inline void uiTextBindRenderer(render::ui::UiRenderer* renderer) {
 #if AVER_WITH_UI_ABI
     uitext_detail::state().renderer = renderer;
-    if (renderer)
+    if (renderer) {
         renderer->setTextAtlas(static_cast<ui::UiGlyphAtlas*>(const_cast<void*>(aver_ui_text_atlas())));
+        renderer->setWorldAtlas(static_cast<ui::UiGlyphAtlas*>(const_cast<void*>(aver_text3d_atlas())));   // world labels (E6)
+    }
 #else
     (void)renderer;
 #endif
@@ -203,7 +205,10 @@ inline bool uiTextReloadIfChanged(const std::vector<FileEvent>& events) {
 inline void uiTextShutdown() {
 #if AVER_WITH_UI_ABI
     uitext_detail::State& s = uitext_detail::state();
-    if (s.renderer) s.renderer->setTextAtlas(nullptr);
+    if (s.renderer) {
+        s.renderer->setTextAtlas(nullptr);
+        s.renderer->setWorldAtlas(nullptr);
+    }
     s.renderer = nullptr;
     if (s.installed) aver_ui_text_set_loader(nullptr, nullptr);
     s.installed = false;

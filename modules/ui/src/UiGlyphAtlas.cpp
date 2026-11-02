@@ -14,6 +14,11 @@ void UiGlyphAtlas::configure(const Config& cfg) {
     cfg_.maxPages = std::clamp<u32>(cfg.maxPages, 1, 64);
     pages_.clear();
     map_.clear();
+    ++epoch_;
+}
+
+void UiGlyphAtlas::touchPage(u32 page, u64 frame) {
+    if (page < pages_.size() && pages_[page].lastUsed < frame) pages_[page].lastUsed = frame;
 }
 
 const UiAtlasGlyph* UiGlyphAtlas::lookup(const UiGlyphKey& key, u64 frame) {
@@ -123,6 +128,7 @@ const UiAtlasGlyph* UiGlyphAtlas::insert(const UiGlyphKey& key, const UiGlyphBit
 
 void UiGlyphAtlas::clear() {
     map_.clear();
+    ++epoch_;
     for (u32 i = 0; i < pages_.size(); ++i) {
         Page& p = pages_[i];
         std::fill(p.pixels.begin(), p.pixels.end(), static_cast<u8>(0));

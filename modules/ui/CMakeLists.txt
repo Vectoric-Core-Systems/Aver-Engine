@@ -50,6 +50,9 @@ aver_add_module(Aver.UI
     src/UiGlyphAtlas.cpp
     src/UiTextLayout.cpp
     src/UiTextEngine.cpp
+    # World text (E6, E14): signed-distance glyphs and the plane mesh a Label3D draws.
+    src/UiSdf.cpp
+    src/UiTextMesh.cpp
   DEPS
     Aver.Core
 )

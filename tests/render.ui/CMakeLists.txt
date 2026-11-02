@@ -13,3 +13,9 @@ set_target_properties(UiRenderTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_B
 add_executable(UiImageCacheTest src/UiImageCacheTest.cpp)
 target_link_libraries(UiImageCacheTest PRIVATE Aver.Render.UI Aver.UI Aver.RHI Aver.Core Aver.Platform)
 set_target_properties(UiImageCacheTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# WorldTextPlaceTest — parity E6: billboards, constant screen size and placement of a world label for a camera built the engine's
+# way. Pure maths, no device.
+add_executable(WorldTextPlaceTest src/WorldTextPlaceTest.cpp)
+target_link_libraries(WorldTextPlaceTest PRIVATE Aver.Render.UI Aver.UI Aver.RHI Aver.Core Aver.Platform)
+set_target_properties(WorldTextPlaceTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

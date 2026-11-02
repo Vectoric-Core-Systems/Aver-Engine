@@ -6,14 +6,19 @@
 #include "aver/ui/UiText.hpp"
 #include "aver/ui/UiTextEffect.hpp"
 #include "aver/ui/UiTextEngine.hpp"
+#include "aver/ui/UiTextMesh.hpp"
 
+#include <cstddef>
 #include <cstring>
 #include <memory>
+#include <vector>
 
 namespace {
 
 aver::ui::UiDrawList g_list;
 aver::ui::UiTextEngine g_engine;
+aver::ui::UiTextMeshCache g_meshCache;   // world labels' meshes (aver_text3d_*), rebuilt when an atlas page is recycled
+float g_worldQuads = 0.0f;               // quads added since the frame began (a stat)
 AverUiFontOpenFn g_fontOpen = nullptr;
 AverUiFontCloseFn g_fontClose = nullptr;
 AverUiLanguageFn g_languageFn = nullptr;
@@ -91,6 +96,17 @@ void styleFrom(const char* family, float px, int32_t flags, float maxWidth, aver
     box.rich = (flags & AVER_UI_TEXT_FLAG_RICH) != 0;
 }
 
+// The optional spacing block of the _ex text calls: line height multiplier (<= 0 keeps 1), pixels after every glyph, extra
+// pixels after every space, extra pixels per line. NULL changes nothing.
+void applySpacing(const float* s, aver::ui::UiTextStyle& st) {
+    if (!s) return;
+    const auto sane = [](float v, float lo, float hi) { return v != v ? 0.0f : (v < lo ? lo : (v > hi ? hi : v)); };
+    if (s[0] > 0.0f) st.lineSpacing = sane(s[0], 0.1f, 10.0f);
+    st.letterSpacing = sane(s[1], -64.0f, 256.0f);
+    st.spaceSpacing = sane(s[2], -64.0f, 256.0f);
+    st.lineExtra = sane(s[3], -256.0f, 1024.0f);
+}
+
 // The text after localization-reference resolution.
 std::string shownText(const char* utf8) {
     std::string resolved;
@@ -151,6 +167,8 @@ void aver_ui_begin_frame(float x, float y, float w, float h) {
         if (const char* lang = g_languageFn()) g_engine.setLanguage(lang);
     }
     g_engine.beginFrame();
+    g_worldQuads = 0.0f;
+    g_meshCache.trim(g_engine.frame());
 }
 
 // Writes the frame's viewport rectangle as x, y, width, height.
@@ -175,6 +193,31 @@ void aver_ui_push_clip(int32_t left, int32_t top, int32_t right, int32_t bottom)
 
 // Pops the innermost clip rect.
 void aver_ui_pop_clip(void) { g_list.popClip(); }
+
+void aver_ui_push_transform(float a, float b, float c, float d, float tx, float ty) {
+    g_list.pushTransform(aver::ui::UiAffine{a, b, c, d, tx, ty});
+}
+
+void aver_ui_pop_transform(void) { g_list.popTransform(); }
+
+void aver_ui_set_sampler(int32_t filter, int32_t address) {
+    if (filter < 0 || filter > 1 || address < 0 || address > 2) return;
+    g_list.setSampler(static_cast<aver::ui::UiFilter>(filter), static_cast<aver::ui::UiAddress>(address));
+}
+
+void aver_ui_set_blend(int32_t mode) {
+    if (mode < 0 || mode >= static_cast<int32_t>(aver::ui::UiBlend::Count)) return;
+    g_list.setBlend(static_cast<aver::ui::UiBlend>(mode));
+}
+
+void aver_ui_mesh(const float* xyuv, const uint32_t* rgba, int32_t vertexCount, const uint32_t* indices, int32_t indexCount,
+                  uint64_t texture) {
+    constexpr int32_t kMaxVerts = 65536, kMaxIdx = 262144;
+    if (!xyuv || !rgba || !indices || vertexCount <= 0 || indexCount < 3 || vertexCount > kMaxVerts || indexCount > kMaxIdx) return;
+    std::vector<aver::ui::UiVertex> v(static_cast<std::size_t>(vertexCount));
+    for (std::size_t i = 0; i < v.size(); ++i) v[i] = aver::ui::UiVertex{xyuv[i * 4], xyuv[i * 4 + 1], xyuv[i * 4 + 2], xyuv[i * 4 + 3], rgba[i]};
+    g_list.addMesh(v.data(), v.size(), indices, static_cast<std::size_t>(indexCount), texture);
+}
 
 // Draws a solid rectangle. `rgba` is straight (non-premultiplied) 0xAABBGGRR.
 void aver_ui_rect(float x, float y, float w, float h, uint32_t rgba) {
@@ -344,12 +387,18 @@ int32_t aver_ui_text_has_glyph(const char* family, uint32_t codepoint) {
 }
 
 int32_t aver_ui_text_measure(const char* utf8, const char* family, float px, int32_t flags, float maxWidth, float* outWHL) {
+    return aver_ui_text_measure_ex(utf8, family, px, flags, maxWidth, nullptr, outWHL);
+}
+
+int32_t aver_ui_text_measure_ex(const char* utf8, const char* family, float px, int32_t flags, float maxWidth,
+                                const float* spacing4, float* outWHL) {
     if (outWHL) outWHL[0] = outWHL[1] = outWHL[2] = 0.0f;
     if (!utf8) return 0;
     const std::string shown = shownText(utf8);
     aver::ui::UiTextStyle st;
     aver::ui::UiTextBox box;
     styleFrom(family, px, flags, maxWidth, st, box);
+    applySpacing(spacing4, st);
     aver::ui::UiDrawListPainter painter(g_list, &g_engine, usableFont());
     if (!g_engine.usable() && !usableFont()) return 0;
     const std::shared_ptr<const aver::ui::UiTextLayout> l = painter.layoutText(shown, st, box);
@@ -363,6 +412,11 @@ int32_t aver_ui_text_measure(const char* utf8, const char* family, float px, int
 
 float aver_ui_text_block(float x, float y, const char* utf8, uint32_t rgba, const char* family, float px, int32_t flags,
                          float maxWidth, int32_t align, float* outWHL) {
+    return aver_ui_text_block_ex(x, y, utf8, rgba, family, px, flags, maxWidth, align, nullptr, outWHL);
+}
+
+float aver_ui_text_block_ex(float x, float y, const char* utf8, uint32_t rgba, const char* family, float px, int32_t flags,
+                            float maxWidth, int32_t align, const float* spacing4, float* outWHL) {
     if (outWHL) outWHL[0] = outWHL[1] = outWHL[2] = 0.0f;
     if (!utf8) return 0.0f;
     if (!g_engine.usable() && !usableFont()) return 0.0f;
@@ -370,6 +424,7 @@ float aver_ui_text_block(float x, float y, const char* utf8, uint32_t rgba, cons
     aver::ui::UiTextStyle st;
     aver::ui::UiTextBox box;
     styleFrom(family, px, flags, maxWidth, st, box);
+    applySpacing(spacing4, st);
     aver::ui::UiDrawListPainter painter(g_list, &g_engine, usableFont());
     const std::shared_ptr<const aver::ui::UiTextLayout> l = painter.layoutText(shown, st, box);
     const float areaW = maxWidth > 0.0f ? maxWidth : l->width;
@@ -386,6 +441,13 @@ float aver_ui_text_block(float x, float y, const char* utf8, uint32_t rgba, cons
 float aver_ui_text_block_fx(float x, float y, const char* utf8, uint32_t rgba, const char* family, float px, int32_t flags,
                             float maxWidth, int32_t align, float outlineSize, uint32_t outlineRgba, uint32_t shadowRgba,
                             float shadowOffX, float shadowOffY, float shadowOutlineSize, float* outWHL) {
+    return aver_ui_text_block_fx_ex(x, y, utf8, rgba, family, px, flags, maxWidth, align, outlineSize, outlineRgba, shadowRgba,
+                                    shadowOffX, shadowOffY, shadowOutlineSize, nullptr, outWHL);
+}
+
+float aver_ui_text_block_fx_ex(float x, float y, const char* utf8, uint32_t rgba, const char* family, float px, int32_t flags,
+                               float maxWidth, int32_t align, float outlineSize, uint32_t outlineRgba, uint32_t shadowRgba,
+                               float shadowOffX, float shadowOffY, float shadowOutlineSize, const float* spacing4, float* outWHL) {
     aver::ui::UiTextFxStyle fx;
     fx.outlineSize = outlineSize;
     fx.outlineRgba = outlineRgba;
@@ -395,8 +457,8 @@ float aver_ui_text_block_fx(float x, float y, const char* utf8, uint32_t rgba, c
     fx.shadowOutlineSize = shadowOutlineSize;
     float height = 0.0f;
     for (const aver::ui::UiTextFxPass& p : aver::ui::uiTextFxPasses(fx, rgba))
-        height = aver_ui_text_block(x + p.dx, y + p.dy, utf8, p.fill ? rgba : p.rgba, family, px, flags, maxWidth, align,
-                                    p.fill ? outWHL : nullptr);
+        height = aver_ui_text_block_ex(x + p.dx, y + p.dy, utf8, p.fill ? rgba : p.rgba, family, px, flags, maxWidth, align,
+                                       spacing4, p.fill ? outWHL : nullptr);
     return height;
 }
 
@@ -407,6 +469,120 @@ void aver_ui_text_prewarm(const char* utf8, const char* family, float px, int32_
     aver::ui::UiTextBox box;
     styleFrom(family, px, flags, 0.0f, st, box);
     g_engine.prewarm(shown, st, box);
+}
+
+// ---- world text -----------------------------------------------------------------------------------
+
+} // extern "C"
+
+namespace {
+
+// The descriptor's fields as a mesh style; false for a null or too small descriptor. `d` is a zeroed copy of the caller's.
+bool text3dStyle(const AverText3dDesc* in, AverText3dDesc& d, aver::ui::UiTextMeshStyle& s) {
+    if (!in || in->size < static_cast<int32_t>(offsetof(AverText3dDesc, family))) return false;
+    std::memset(&d, 0, sizeof d);
+    std::memcpy(&d, in, static_cast<std::size_t>(in->size < static_cast<int32_t>(sizeof d) ? in->size : static_cast<int32_t>(sizeof d)));
+    d.family[sizeof d.family - 1] = '\0';
+    s.family = d.family;
+    s.px = d.px > 0.0f ? d.px : 32.0f;
+    s.pixelSize = d.pixelSize > 0.0f ? d.pixelSize : 0.01f;
+    s.width = d.width > 0.0f ? d.width : 0.0f;
+    s.bold = (d.flags & AVER_UI_TEXT_FLAG_BOLD) != 0;
+    s.italic = (d.flags & AVER_UI_TEXT_FLAG_ITALIC) != 0;
+    s.rich = (d.flags & AVER_UI_TEXT_FLAG_RICH) != 0;
+    s.ellipsis = (d.flags & AVER_UI_TEXT_FLAG_ELLIPSIS) != 0;
+    s.wrap = (d.flags & AVER_UI_TEXT_FLAG_WRAP) != 0 && s.width > 0.0f;
+    s.maxLines = d.maxLines > 0 ? static_cast<std::uint32_t>(d.maxLines) : 0u;
+    s.hAlign = d.hAlign == AVER_TEXT3D_H_LEFT ? aver::ui::UiTextHAlign::Left : (d.hAlign == AVER_TEXT3D_H_RIGHT ? aver::ui::UiTextHAlign::Right : aver::ui::UiTextHAlign::Center);
+    s.vAlign = d.vAlign == AVER_TEXT3D_V_TOP ? aver::ui::UiTextVAlign::Top : (d.vAlign == AVER_TEXT3D_V_BOTTOM ? aver::ui::UiTextVAlign::Bottom : aver::ui::UiTextVAlign::Center);
+    if (d.spacing[0] > 0.0f) s.lineSpacing = d.spacing[0];
+    s.letterSpacing = d.spacing[1];
+    s.spaceSpacing = d.spacing[2];
+    s.lineExtra = d.spacing[3];
+    s.rgba = d.rgba;
+    s.outlineSize = d.outlineSize > 0.0f ? d.outlineSize : 0.0f;
+    s.outlineRgba = d.outlineRgba;
+    s.offsetX = d.offsetX;
+    s.offsetY = d.offsetY;
+    return true;
+}
+
+} // namespace
+
+extern "C" {
+
+int32_t aver_text3d_draw(const char* utf8, const AverText3dDesc* desc, float* outWHL) {
+    if (outWHL) outWHL[0] = outWHL[1] = outWHL[2] = 0.0f;
+    if (!utf8 || !*utf8 || !g_engine.usable()) return 0;
+    AverText3dDesc d;
+    aver::ui::UiTextMeshStyle style;
+    if (!text3dStyle(desc, d, style)) return 0;
+    const std::string shown = shownText(utf8);
+    const aver::ui::UiTextMesh* mesh = g_meshCache.get(g_engine, shown, style);
+    if (!mesh) return 0;
+    if (outWHL) {
+        outWHL[0] = mesh->width;
+        outWHL[1] = mesh->height;
+        outWHL[2] = static_cast<float>(mesh->lines);
+    }
+    if (mesh->empty()) return 0;
+
+    aver::ui::UiWorldText h;
+    std::memcpy(h.world, d.world, sizeof h.world);
+    h.flags = static_cast<std::uint32_t>(d.drawFlags) & 31u;
+    h.alphaCut = d.alphaCut > 0.0f ? (d.alphaCut < 1.0f ? d.alphaCut : 1.0f) : 0.0f;
+    h.intensity = d.intensity > 0.0f ? (d.intensity < 1000.0f ? d.intensity : 1000.0f) : 1.0f;
+    h.fixedPxPerUnit = d.fixedPxPerUnit > 0.0f ? d.fixedPxPerUnit : 0.0f;
+    h.sdfSoftness = d.sdfSoftness > 0.0f ? d.sdfSoftness : 0.0f;
+    std::vector<aver::ui::UiWorldTextRun> runs;
+    runs.reserve(mesh->runs.size());
+    for (const aver::ui::UiTextMesh::Run& r : mesh->runs) runs.push_back({r.indexOffset, r.indexCount, r.page});
+    if (!g_list.addWorldText(h, mesh->verts.data(), mesh->verts.size(), mesh->indices.data(), mesh->indices.size(), runs.data(), runs.size())) return 0;
+    g_worldQuads += static_cast<float>(mesh->verts.size() / 4);
+    return 1;
+}
+
+int32_t aver_text3d_measure(const char* utf8, const AverText3dDesc* desc, float* outWHL) {
+    if (outWHL) outWHL[0] = outWHL[1] = outWHL[2] = 0.0f;
+    if (!utf8 || !g_engine.usable()) return 0;
+    AverText3dDesc d;
+    aver::ui::UiTextMeshStyle style;
+    if (!text3dStyle(desc, d, style)) return 0;
+    const std::string shown = shownText(utf8);
+    const aver::ui::UiTextMesh* mesh = g_meshCache.get(g_engine, shown, style);
+    if (!mesh) return 0;
+    if (outWHL) {
+        outWHL[0] = mesh->width;
+        outWHL[1] = mesh->height;
+        outWHL[2] = static_cast<float>(mesh->lines);
+    }
+    return 1;
+}
+
+const void* aver_text3d_atlas(void) { return &g_engine.worldAtlas(); }
+
+void aver_text3d_configure(int32_t sdf, int32_t sdfPx, int32_t sdfSpread, int32_t pageSize, int32_t maxPages) {
+    aver::ui::UiTextConfig c = g_engine.config();
+    if (sdf >= 0) c.worldSdf = sdf != 0;
+    if (sdfPx > 0) c.worldSdfPx = static_cast<std::uint32_t>(sdfPx);
+    if (sdfSpread > 0) c.worldSdfSpread = static_cast<std::uint32_t>(sdfSpread);
+    if (pageSize > 0) c.worldPageSize = static_cast<std::uint32_t>(pageSize);
+    if (maxPages > 0) c.worldMaxPages = static_cast<std::uint32_t>(maxPages);
+    g_engine.configure(c);
+    g_meshCache.clear();
+}
+
+void aver_text3d_stats(float* out8) {
+    if (!out8) return;
+    const aver::ui::UiGlyphAtlas& a = g_engine.worldAtlas();
+    out8[0] = static_cast<float>(g_list.worldTexts().size());
+    out8[1] = g_worldQuads;
+    out8[2] = static_cast<float>(a.pageCount());
+    out8[3] = static_cast<float>(a.glyphsResident());
+    out8[4] = static_cast<float>(a.evictedPages());
+    out8[5] = static_cast<float>(a.overflow());
+    out8[6] = static_cast<float>(g_meshCache.builds());
+    out8[7] = static_cast<float>(g_meshCache.rebuildsStale());
 }
 
 // ---- hit testing --------------------------------------------------------------------------------

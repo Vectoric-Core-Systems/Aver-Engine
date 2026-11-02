@@ -2403,6 +2403,13 @@ void SandboxApp::submitGameUi(Engine& e) {
 
     if (showUiDemo_) drawUiDemo();
 
+#if AVER_MODULE_VOXI
+    // World labels (Label3D) are not drawn while ray-driven primary visibility owns the frame, unless the game opts in.
+    {
+        const voxi::Renderer& vxr = voxi::Renderer::get();
+        gameUi_->setRayDrivenActive(voxi::resolve(vxr.settings(), vxr.deviceInfo()).rtRenderMode.effective == 1u);
+    }
+#endif
     const auto* dl = static_cast<const aver::ui::UiDrawList*>(aver_ui_draw_list());
     if (dl) gameUi_->submit(*dl);
     game::uiImagesTick();   // images nobody names any more go a few frames after their last use

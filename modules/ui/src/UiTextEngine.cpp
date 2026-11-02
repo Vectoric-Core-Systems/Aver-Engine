@@ -7,6 +7,7 @@
 #include "aver/ui/UiBidi.hpp"
 #include "aver/ui/UiLineBreak.hpp"
 #include "aver/ui/UiRichText.hpp"
+#include "aver/ui/UiSdf.hpp"
 #include "aver/ui/UiShaping.hpp"
 #include "aver/ui/UiUnicode.hpp"
 
@@ -441,6 +442,7 @@ void Builder::buildCluster(Para& P, const std::vector<UiShapedCp>& units, usize 
     c.width = advance;
     // Letter spacing follows the glyph; not inside Arabic, where it would break the joins.
     if (!zeroWidth && !arabic) c.width += style_.letterSpacing;
+    if (!zeroWidth && (cp == 0x20 || tab)) c.width += style_.spaceSpacing;
 
     // Marks: zero advance, placed from boxes.
     f32 aboveTop = -1.0e9f, belowBottom = 1.0e9f;
@@ -698,7 +700,7 @@ void Builder::finishLines(UiTextLayout& L) {
         const f32 ascR = std::round(asc), descR = std::round(desc), gapR = std::round(gap * P.gapScale);
         const f32 natural = ascR - descR + gapR;
         const f32 spacing = style_.lineSpacing > 0.0f ? style_.lineSpacing : 1.0f;
-        const f32 height = std::max(1.0f, std::round(natural * spacing));
+        const f32 height = std::max(1.0f, std::round(natural * spacing + style_.lineExtra));
         const f32 extra = height - natural;
         line.ascent = ascR;
         line.descent = descR;
@@ -805,20 +807,35 @@ u64 fnvValue(u64 h, T v) { return fnvBytes(h, &v, sizeof v); }
 
 // ---- engine -------------------------------------------------------------------------------------
 
-UiTextEngine::UiTextEngine() { atlas_.configure({cfg_.pageSize, cfg_.maxPages}); }
+UiTextEngine::UiTextEngine() {
+    atlas_.configure({cfg_.pageSize, cfg_.maxPages});
+    worldAtlas_.configure({cfg_.worldPageSize, cfg_.worldMaxPages});
+}
 
 void UiTextEngine::configure(const UiTextConfig& cfg) {
     const bool geometry = cfg.pageSize != cfg_.pageSize || cfg.maxPages != cfg_.maxPages;
+    const bool worldGeometry = cfg.worldPageSize != cfg_.worldPageSize || cfg.worldMaxPages != cfg_.worldMaxPages ||
+                               cfg.worldSdf != cfg_.worldSdf || cfg.worldSdfPx != cfg_.worldSdfPx || cfg.worldSdfSpread != cfg_.worldSdfSpread;
     cfg_ = cfg;
     atlas_.setCoverageGamma(cfg_.coverageGamma > 0.0f ? cfg_.coverageGamma : 1.0f);
     if (cfg_.legacyPx < 4.0f) cfg_.legacyPx = 4.0f;
     if (cfg_.cacheEntries < 16) cfg_.cacheEntries = 16;
+    cfg_.worldSdfPx = std::clamp<u32>(cfg_.worldSdfPx, 16, kMaxRaster);
+    cfg_.worldSdfSpread = std::clamp<u32>(cfg_.worldSdfSpread, 2, kUiSdfMaxSpread);
     if (geometry) {
         atlas_.configure({cfg_.pageSize, cfg_.maxPages});
         cfg_.pageSize = atlas_.config().pageSize;
         cfg_.maxPages = atlas_.config().maxPages;
         cache_.clear();
     }
+    if (worldGeometry) {
+        worldAtlas_.configure({cfg_.worldPageSize, cfg_.worldMaxPages});
+        cfg_.worldPageSize = worldAtlas_.config().pageSize;
+        cfg_.worldMaxPages = worldAtlas_.config().maxPages;
+        worldCache_.clear();
+    }
+    worldAtlas_.setSdf(cfg_.worldSdf);
+    worldAtlas_.setCoverageGamma(cfg_.worldSdf ? 1.0f : (cfg_.coverageGamma > 0.0f ? cfg_.coverageGamma : 1.0f));
 }
 
 bool UiTextEngine::loadFontSet(std::string_view ocfonts, const UiFontLoader& loader, std::string* err) {
@@ -831,6 +848,8 @@ bool UiTextEngine::loadFontSet(const UiFontSetDoc& doc, const UiFontLoader& load
     const bool ok = fonts_.load(doc, loader, err);
     atlas_.clear();
     cache_.clear();
+    worldAtlas_.clear();
+    worldCache_.clear();
     return ok;
 }
 
@@ -856,7 +875,10 @@ u32 UiTextEngine::pendingUploads() const {
     return n;
 }
 
-void UiTextEngine::clearLayouts() { cache_.clear(); }
+void UiTextEngine::clearLayouts() {
+    cache_.clear();
+    worldCache_.clear();
+}
 
 u64 UiTextEngine::keyFor(std::string_view text, const UiTextStyle& style, const UiTextBox& box) const {
     u64 h = 0xCBF29CE484222325ull;
@@ -872,29 +894,36 @@ u64 UiTextEngine::keyFor(std::string_view text, const UiTextStyle& style, const 
     h = fnvValue<u32>(h, fonts_.epoch());
     h = fnvValue<f32>(h, style.lineSpacing);
     h = fnvValue<f32>(h, style.letterSpacing);
+    if (style.spaceSpacing != 0.0f) h = fnvValue<f32>(h, style.spaceSpacing);   // keys of unspaced text are unchanged
+    if (style.lineExtra != 0.0f) h = fnvValue<f32>(h, style.lineExtra + 0.5f);
     if (box.rich) h = fnvValue<f32>(h, style.scale);
     if (box.wrap || box.ellipsis) h = fnvValue<i32>(h, static_cast<i32>(std::lround(box.maxWidth * 4.0f)));
     return h;
 }
 
-bool UiTextEngine::ensureGlyph(u16 face, u32 glyph, u32 rasterPx, bool ignoreBudget) {
+bool UiTextEngine::ensureGlyph(u16 face, u32 glyph, u32 rasterPx, bool ignoreBudget, Target t) {
     const UiGlyphKey key{face, static_cast<u16>(rasterPx), glyph};
-    if (atlas_.lookup(key, frame_)) return true;
+    if (t.atlas.lookup(key, frame_)) return true;
     if (!ignoreBudget && cfg_.glyphBudget != 0 && rasterThisFrame_ >= cfg_.glyphBudget) return false;
     UiFontFace* f = fonts_.face(face);
     if (!f) return true;
     UiGlyphBitmap bmp;
     if (!f->rasterize(glyph, rasterPx, bmp)) bmp = UiGlyphBitmap{};   // unrasterisable: remembered as blank
+    if (t.sdf && bmp.w > 0 && bmp.h > 0) {
+        UiGlyphBitmap field;
+        if (uiBitmapToSdf(bmp, cfg_.worldSdfSpread, field)) bmp = std::move(field);
+        else bmp = UiGlyphBitmap{};
+    }
     ++rasterThisFrame_;
     ++rasterTotal_;
-    return atlas_.insert(key, bmp, frame_) != nullptr;
+    return t.atlas.insert(key, bmp, frame_) != nullptr;
 }
 
-bool UiTextEngine::ensureGlyphs(const UiTextLayout& l, bool ignoreBudget) {
+bool UiTextEngine::ensureGlyphs(const UiTextLayout& l, bool ignoreBudget, Target t) {
     bool ok = true;
     for (const UiGlyphRef& g : l.glyphs) {
         if (g.face == kUiFaceNone || g.face == kUiFaceBitmap || (g.flags & kGlyphBox)) continue;
-        if (!ensureGlyph(g.face, g.glyph, g.rasterPx, ignoreBudget)) ok = false;
+        if (!ensureGlyph(g.face, g.glyph, g.rasterPx, ignoreBudget, t)) ok = false;
     }
     return ok;
 }
@@ -911,35 +940,52 @@ std::shared_ptr<UiTextLayout> UiTextEngine::build(std::string_view text, const U
     return l;
 }
 
-void UiTextEngine::trimCache() {
-    if (cache_.size() <= cfg_.cacheEntries) return;
+void UiTextEngine::trimCache() { trimCache(cache_); }
+
+void UiTextEngine::trimCache(std::unordered_map<u64, Entry>& cache) {
+    if (cache.size() <= cfg_.cacheEntries) return;
     std::vector<std::pair<u64, u64>> order;   // (lastFrame, key)
-    order.reserve(cache_.size());
-    for (const auto& kv : cache_) order.emplace_back(kv.second.lastFrame, kv.first);
+    order.reserve(cache.size());
+    for (const auto& kv : cache) order.emplace_back(kv.second.lastFrame, kv.first);
     std::sort(order.begin(), order.end());
-    const usize drop = std::max<usize>(1, cache_.size() / 4);
-    for (usize i = 0; i < drop && i < order.size(); ++i) cache_.erase(order[i].second);
+    const usize drop = std::max<usize>(1, cache.size() / 4);
+    for (usize i = 0; i < drop && i < order.size(); ++i) cache.erase(order[i].second);
 }
 
 std::shared_ptr<const UiTextLayout> UiTextEngine::layout(std::string_view text, const UiTextStyle& style,
                                                          const UiTextBox& box) {
+    return layoutIn(uiTarget(), text, style, box);
+}
+
+f32 UiTextEngine::worldLayoutPx(f32 requestedPx) const {
+    if (cfg_.worldSdf) return static_cast<f32>(cfg_.worldSdfPx);
+    return std::clamp(requestedPx, static_cast<f32>(kMinRaster), static_cast<f32>(kMaxRaster));
+}
+
+std::shared_ptr<const UiTextLayout> UiTextEngine::layoutWorld(std::string_view text, const UiTextStyle& style,
+                                                              const UiTextBox& box) {
+    return layoutIn(worldTarget(), text, style, box);
+}
+
+std::shared_ptr<const UiTextLayout> UiTextEngine::layoutIn(Target t, std::string_view text, const UiTextStyle& style,
+                                                           const UiTextBox& box) {
     const u64 key = keyFor(text, style, box);
-    const auto it = cache_.find(key);
-    if (it != cache_.end()) {
+    const auto it = t.cache.find(key);
+    if (it != t.cache.end()) {
         Entry& e = it->second;
         e.lastFrame = frame_;
-        if (e.evictionsSeen == atlas_.evictedPages()) { ++hits_; return e.layout; }
+        if (e.evictionsSeen == t.atlas.evictedPages()) { ++hits_; return e.layout; }
         // A page was recycled since this was cached: check its glyphs are still resident.
-        if (ensureGlyphs(*e.layout, false)) {
-            e.evictionsSeen = atlas_.evictedPages();
+        if (ensureGlyphs(*e.layout, false, t)) {
+            e.evictionsSeen = t.atlas.evictedPages();
             ++hits_;
             return e.layout;
         }
-        cache_.erase(it);
+        t.cache.erase(it);
     }
     ++misses_;
     std::shared_ptr<UiTextLayout> l = build(text, style, box, false);
-    if (!ensureGlyphs(*l, false)) {
+    if (!ensureGlyphs(*l, false, t)) {
         l->incomplete = true;
         ++incomplete_;
         return l;
@@ -947,15 +993,15 @@ std::shared_ptr<const UiTextLayout> UiTextEngine::layout(std::string_view text, 
     Entry e;
     e.layout = l;
     e.lastFrame = frame_;
-    e.evictionsSeen = atlas_.evictedPages();
-    cache_[key] = std::move(e);
-    trimCache();
+    e.evictionsSeen = t.atlas.evictedPages();
+    t.cache[key] = std::move(e);
+    trimCache(t.cache);
     return l;
 }
 
 void UiTextEngine::prewarm(std::string_view text, const UiTextStyle& style, const UiTextBox& box) {
     std::shared_ptr<UiTextLayout> l = build(text, style, box, true);
-    if (!ensureGlyphs(*l, true)) { l->incomplete = true; return; }
+    if (!ensureGlyphs(*l, true, uiTarget())) { l->incomplete = true; return; }
     Entry e;
     e.layout = l;
     e.lastFrame = frame_;

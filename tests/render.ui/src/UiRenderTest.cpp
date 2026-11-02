@@ -1,6 +1,8 @@
 // The UI renderer, verified against a recording device rather than a GPU: layer order, binding
 // reuse, the scissor, which buffer of the ring a frame writes, growth, and the bytes uploaded.
 // Exit code = failure count.
+#include "TestCamera.hpp"
+
 #include "aver/render/ui/UiRenderer.hpp"
 #include "aver/render/ui/UiImageCache.hpp"
 #include "aver/core/Log.hpp"
@@ -127,6 +129,7 @@ struct Call {
 // Render context that appends every call it receives to one flat log, in order.
 struct MockContext final : public rhi::IRenderContext {
     std::vector<Call> calls;
+    std::vector<f32> lastConstants;   // the dwords of the last setConstants, read as floats
 
     void setPipeline(rhi::PipelineHandle p) override { calls.push_back({Call::Kind::Pipeline, p}); }
     void setViewport(u32 x, u32 y, u32 w, u32 h) override { calls.push_back({Call::Kind::Viewport, x, y, w, h}); }
@@ -136,7 +139,10 @@ struct MockContext final : public rhi::IRenderContext {
     void clearColor(rhi::TextureHandle, const f32[4]) override {}
     void setBindingSet(rhi::BindingSetHandle s, u32 table) override { calls.push_back({Call::Kind::BindingSet, s, table}); }
     void setBindlessTable(rhi::BindlessTableHandle) override {}
-    void setConstants(u32 slot, const void*, u32 dwords) override { calls.push_back({Call::Kind::Constants, slot, dwords}); }
+    void setConstants(u32 slot, const void* data, u32 dwords) override {
+        calls.push_back({Call::Kind::Constants, slot, dwords});
+        lastConstants.assign(static_cast<const f32*>(data), static_cast<const f32*>(data) + dwords);
+    }
     void setConstantBuffer(u32, const void*, u32) override {}
     void drawMesh(rhi::MeshHandle) override {}
     void dispatchMeshFor(rhi::MeshHandle) override {}
@@ -181,6 +187,18 @@ struct MockDevice final : public rhi::IDevice {
     rhi::ISwapchain* createSwapchain(const rhi::SwapchainDesc&) override { return nullptr; }
     void beginFrame() override {}
     void endFrame() override {}
+
+    // The scene camera and targets the world text pass reads.
+    bool haveCamera = false;
+    f32 vp[16] = {}, ivp[16] = {}, eyePos[3] = {};
+    bool camera(f32 viewProj[16], f32 invViewProjRel[16], f32 cameraPos[3]) const override {
+        if (!haveCamera) return false;
+        for (int i = 0; i < 16; ++i) { viewProj[i] = vp[i]; invViewProjRel[i] = ivp[i]; }
+        for (int i = 0; i < 3; ++i) cameraPos[i] = eyePos[i];
+        return true;
+    }
+    rhi::Format backbufferFormat() const override { return rhi::Format::RGBA16F; }
+    rhi::Format depthFormat() const override { return rhi::Format::D32Float; }
 };
 
 } // namespace
@@ -573,7 +591,218 @@ int main() {
         check(idle.count(Call::Kind::DrawIndexed) == 0, "an emptied submit draws nothing, so a destroyed image is never named");
     }
 
+    AVER_INFO("=== P41: sampler and blend are other pipelines, built when asked for ===");
+    {
+        MockFactory& f = dev.factory;
+        const usize pipesBefore = f.pipelines.size();
+        const usize shadersBefore = f.shaders.size();
+        aver::ui::UiDrawList dl;
+        dl.addRect(0, 0, 10, 10, 0xFFFFFFFF);
+        MockContext plain;
+        r->submit(dl);
+        r->overlayPass(plain, 1280, 720);
+        check(f.pipelines.size() == pipesBefore && f.shaders.size() == shadersBefore, "a default-state list builds nothing new");
+        check(plain.count(Call::Kind::Pipeline) == 1, "and sets the one pipeline once");
+
+        dl.clear();
+        dl.addRect(0, 0, 10, 10, 0xFFFFFFFF);
+        dl.setSampler(aver::ui::UiFilter::Nearest, aver::ui::UiAddress::Repeat);
+        dl.addRect(20, 0, 10, 10, 0xFFFFFFFF);
+        dl.setBlend(aver::ui::UiBlend::Add);
+        dl.addRect(40, 0, 10, 10, 0xFFFFFFFF);
+        dl.setSampler(aver::ui::UiFilter::Linear, aver::ui::UiAddress::Clamp);
+        dl.setBlend(aver::ui::UiBlend::Mul);
+        dl.addRect(60, 0, 10, 10, 0xFFFFFFFF);
+        MockContext ctx;
+        r->submit(dl);
+        r->overlayPass(ctx, 1280, 720);
+        check(f.pipelines.size() == pipesBefore + 3, "three new pipelines (nearest+repeat, add, multiply)");
+        const rhi::GraphicsPipelineDesc& nr = f.pipelines[pipesBefore];
+        check(nr.layout.samplers[0].filter == rhi::Filter::Point && nr.layout.samplers[0].address == rhi::AddressMode::Wrap &&
+              nr.blend == rhi::BlendMode::PremultipliedAlpha, "the first bakes a point, wrapping sampler and keeps the premultiplied blend");
+        check(f.pipelines[pipesBefore + 1].blend == rhi::BlendMode::Additive, "add is the additive blend");
+        check(f.pipelines[pipesBefore + 2].blend == rhi::BlendMode::Multiplicative, "multiply is the multiplicative blend");
+        check(f.shaders.size() == shadersBefore + 1 && f.shaders.back().entry && std::string(f.shaders.back().entry) == "UiPSMul",
+              "and multiply compiles its own pixel entry, once");
+        check(f.pipelines[pipesBefore + 2].ps == f.shaders.size() && f.pipelines[pipesBefore].ps == 2, "the other pipelines keep UiPS");
+        check(ctx.count(Call::Kind::DrawIndexed) == 4, "four draws");
+        check(ctx.count(Call::Kind::Pipeline) == 4, "the pipeline is switched at each state change");
+        check(ctx.count(Call::Kind::Constants) == 4, "and the root constants are set again after each switch");
+
+        MockContext again;
+        r->submit(dl);
+        r->overlayPass(again, 1280, 720);
+        check(f.pipelines.size() == pipesBefore + 3 && f.shaders.size() == shadersBefore + 1, "a second frame builds nothing");
+    }
+
+    AVER_INFO("=== E6: world text (labels in the scene's transparent pass) ===");
+    {
+        MockFactory& f = dev.factory;
+        aver::ui::UiGlyphAtlas world({512, 2});
+        aver::ui::UiGlyphBitmap bmp;
+        bmp.w = bmp.h = 8; bmp.offX = 0; bmp.offY = -8;
+        bmp.pixels.assign(64, 255);
+        world.insert(aver::ui::UiGlyphKey{1, 20, 1}, bmp, 1);
+        r->setWorldAtlas(&world);
+        MockContext pre;
+        r->prePass(pre);
+        const rhi::TextureHandle pageTex = r->worldPageTexture(0);
+        check(pageTex != 0 && pre.count(Call::Kind::CopyBufferToTexture) >= 1, "the world atlas page is uploaded by prePass");
+        check(f.textureNames.back() == "Aver.UI world glyph page 0", "as its own texture, named for the world atlas");
+        check(world.pageDirty(0) == false, "and marked uploaded");
+
+        const f32 eye[3] = {0, 0, 0}, target[3] = {10, 0, 0}, upv[3] = {0, 0, 1};
+        const render::ui::WorldTextCamera cam = testcam::makeCamera(eye, target, upv, 1.0f, 16.0f / 9.0f, 720);
+        for (int i = 0; i < 16; ++i) { dev.vp[i] = cam.viewProj[i]; dev.ivp[i] = cam.invViewProjRel[i]; }
+        dev.haveCamera = true;
+        r->onRenderTargetsChanged(1, rhi::Format::RGBA16F, rhi::Format::D32Float, 1280, 720);
+
+        const auto quad = [](aver::ui::UiDrawList& dl, f32 x, u32 flags, u32 page, f32 alphaCut, f32 intensity) {
+            const aver::ui::UiVertex v[4] = {{0, 0, 0, 0, 0xFFFFFFFF}, {1, 0, 1, 0, 0xFFFFFFFF}, {1, 1, 1, 1, 0xFFFFFFFF}, {0, 1, 0, 1, 0xFFFFFFFF}};
+            const u32 idx[6] = {0, 1, 2, 0, 2, 3};
+            const aver::ui::UiWorldTextRun run{0, 6, page};
+            aver::ui::UiWorldText h;
+            h.world[12] = x;
+            h.flags = flags;
+            h.alphaCut = alphaCut;
+            h.intensity = intensity;
+            return dl.addWorldText(h, v, 4, idx, 6, &run, 1);
+        };
+        const auto floatsOf = [&](usize bytes) -> const BufferRecord* {
+            // The buffer the pass wrote `bytes` of: found by size, the pass being the only writer of that size here.
+            for (auto it = f.buffers.rbegin(); it != f.buffers.rend(); ++it)
+                if (it->contents.size() == bytes) return &*it;
+            return nullptr;
+        };
+
+        aver::ui::UiDrawList dl;
+        check(quad(dl, 10.0f, 0, 0, 0.2f, 2.0f), "a label is added to the list");
+        const usize shadersBefore = f.shaders.size(), pipesBefore = f.pipelines.size();
+        r->submit(dl);
+        MockContext ctx;
+        r->transparentPass(ctx);
+        check(f.shaders.size() == shadersBefore + 2 && std::string(f.shaders[shadersBefore].entry) == "WorldTextVS" &&
+              std::string(f.shaders[shadersBefore + 1].entry) == "WorldTextPS", "the world shaders are compiled on first use, not at init");
+        check(f.pipelines.size() == pipesBefore + 1, "one pipeline");
+        const rhi::GraphicsPipelineDesc& pd = f.pipelines.back();
+        check(pd.blend == rhi::BlendMode::PremultipliedAlpha && pd.depth.test && !pd.depth.write && pd.cull == rhi::CullMode::None,
+              "premultiplied, depth tested, no depth write, two sided");
+        check(pd.renderTargets[0] == rhi::Format::RGBA16F && pd.depthFormat == rhi::Format::D32Float && pd.sampleCount == 1,
+              "built for the scene's colour and depth formats");
+        check(pd.layout.constantDwords[3] == 20 && pd.layout.srvCount == 1 && pd.layout.samplerCount == 1, "20 root constants at b3, one texture, one sampler");
+        check(pd.vertexLayout.stride == 24 && pd.vertexLayout.attribCount == 4, "a 24-byte vertex of four attributes");
+        check(pd.vertexLayout.attribs[1].semanticIndex == 1 && pd.vertexLayout.attribs[1].format == rhi::Format::R32Float && pd.vertexLayout.attribs[2].offset == 12 &&
+              pd.vertexLayout.attribs[3].offset == 20, "position is split 2 + 1 as the particle mesh path, then uv at 12 and colour at 20");
+        check(ctx.count(Call::Kind::DrawIndexed) == 1 && ctx.ofKind(Call::Kind::DrawIndexed)[0].a == 6, "one draw of six indices");
+        check(ctx.count(Call::Kind::Pipeline) == 1 && ctx.count(Call::Kind::Constants) == 1 && ctx.count(Call::Kind::BindingSet) == 1, "one pipeline, one constants block, one binding");
+        check(ctx.lastConstants.size() == 20 && ctx.lastConstants[16] == 0.2f && ctx.lastConstants[17] == 2.0f && ctx.lastConstants[18] == 0.0f,
+              "the constants are the view-projection then alpha cut 0.2, intensity 2, not SDF");
+        bool vpSame = true;
+        for (int i = 0; i < 16; ++i) vpSame = vpSame && ctx.lastConstants[i] == cam.viewProj[i];
+        check(vpSame, "the first sixteen are the camera's view-projection");
+        const BufferRecord* vbRec = floatsOf(4 * 24);
+        check(vbRec != nullptr, "four 24-byte vertices were written");
+        if (vbRec) {
+            const f32* p = reinterpret_cast<const f32*>(vbRec->contents.data());
+            check(p[12] == 11.0f && p[13] == 1.0f && p[14] == 0.0f, "the third vertex is the plane's (1, 1) placed at the label's origin x = 10");
+        }
+        const BufferRecord* ibRec = floatsOf(6 * 4);
+        check(ibRec != nullptr && reinterpret_cast<const u32*>(ibRec->contents.data())[2] == 2, "and the six indices");
+        check(r->worldTextsDrawn() == 1 && r->worldTextsSkipped() == 0, "counted as drawn");
+
+        // Ray-driven: skipped unless the host opts in.
+        r->setRayDrivenActive(true);
+        MockContext rd;
+        r->transparentPass(rd);
+        check(rd.calls.empty() && r->worldTextsSkipped() == 1, "in ray-driven mode a label draws nothing and is counted as skipped");
+        r->setWorldTextInRayDriven(true);
+        MockContext rd2;
+        r->transparentPass(rd2);
+        check(rd2.count(Call::Kind::DrawIndexed) == 1, "unless the host opted in");
+        r->setRayDrivenActive(false);
+        r->setWorldTextInRayDriven(false);
+        r->setWorldTextEnabled(false);
+        MockContext off;
+        r->transparentPass(off);
+        check(off.calls.empty(), "and the whole feature can be switched off");
+        r->setWorldTextEnabled(true);
+
+        // No camera: nothing is guessed.
+        dev.haveCamera = false;
+        MockContext nocam;
+        r->transparentPass(nocam);
+        check(nocam.calls.empty(), "with no camera nothing is drawn");
+        dev.haveCamera = true;
+
+        // The flags choose the pipeline.
+        aver::ui::UiDrawList flagged;
+        quad(flagged, 10.0f, aver::ui::kWorldTextNoDepth | aver::ui::kWorldTextAdditive | aver::ui::kWorldTextOneSided, 0, 0, 1);
+        const usize pipes1 = f.pipelines.size();
+        r->submit(flagged);
+        MockContext fc;
+        r->transparentPass(fc);
+        check(f.pipelines.size() == pipes1 + 1, "a different state is another pipeline");
+        const rhi::GraphicsPipelineDesc& fd = f.pipelines.back();
+        check(!fd.depth.test && fd.blend == rhi::BlendMode::Additive && fd.cull == rhi::CullMode::Back, "no depth test, additive, back faces culled");
+        check(fd.depthFormat == rhi::Format::D32Float, "the depth format still matches the bound target");
+        MockContext fc2;
+        r->transparentPass(fc2);
+        check(f.pipelines.size() == pipes1 + 1, "and built once");
+
+        // Far to near.
+        aver::ui::UiDrawList two;
+        quad(two, 10.0f, 0, 0, 0, 1);
+        quad(two, 30.0f, 0, 0, 0, 1);
+        r->submit(two);
+        MockContext sc;
+        r->transparentPass(sc);
+        const BufferRecord* two8 = floatsOf(8 * 24);
+        check(two8 != nullptr && reinterpret_cast<const f32*>(two8->contents.data())[0] == 30.0f &&
+              reinterpret_cast<const f32*>(two8->contents.data())[4 * 6] == 10.0f, "two labels are written far first (30 m, then 10 m)");
+        check(sc.count(Call::Kind::DrawIndexed) == 2, "and drawn in that order");
+
+        // Pages and indices are clamped.
+        aver::ui::UiDrawList badPage;
+        quad(badPage, 10.0f, 0, 5, 0, 1);
+        r->submit(badPage);
+        MockContext bp;
+        r->transparentPass(bp);
+        check(bp.count(Call::Kind::DrawIndexed) == 0 && r->worldTextsSkipped() == 1, "a run on a page the world atlas does not have is not drawn");
+        aver::ui::UiDrawList noTex;
+        quad(noTex, 10.0f, 0, 1, 0, 1);   // page 1 exists in the cap but the atlas has one page
+        r->submit(noTex);
+        MockContext nt;
+        r->transparentPass(nt);
+        check(nt.count(Call::Kind::DrawIndexed) == 0, "nor on a page with no texture yet");
+
+        // A billboard behind the camera and one in front.
+        aver::ui::UiDrawList bb;
+        quad(bb, -10.0f, aver::ui::kWorldTextBillboard, 0, 0, 1);
+        quad(bb, 10.0f, aver::ui::kWorldTextBillboard, 0, 0, 1);
+        r->submit(bb);
+        MockContext bc;
+        r->transparentPass(bc);
+        check(bc.count(Call::Kind::DrawIndexed) == 1 && r->worldTextsDrawn() == 1 && r->worldTextsSkipped() == 1, "a billboard behind the camera is skipped, the one in front drawn");
+
+        // A distance-field atlas tells the shader.
+        world.setSdf(true);
+        r->submit(dl);
+        MockContext sdfc;
+        r->transparentPass(sdfc);
+        check(sdfc.lastConstants.size() == 20 && sdfc.lastConstants[18] == 1.0f, "a distance-field world atlas sets the SDF constant");
+        world.setSdf(false);
+
+        // The renderer does not keep the atlas: nulling it before teardown stops page uploads and draws.
+        r->setWorldAtlas(nullptr);
+        MockContext gone;
+        r->transparentPass(gone);
+        check(gone.count(Call::Kind::DrawIndexed) == 0, "with the atlas withdrawn no label draws");
+        r->setWorldAtlas(&world);
+        r->submit(aver::ui::UiDrawList{});
+    }
+
     delete r;
+    // The atlas above outlived `delete r` only because the renderer held a pointer, never an owner.
 
     if (g_failures == 0) AVER_INFO("=== all UI renderer tests passed ===");
     else                 AVER_ERROR("=== {} FAILED ===", g_failures);

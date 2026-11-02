@@ -76,6 +76,15 @@ public:
     // Bumps whenever a page's contents were replaced wholesale (recycle, clear): a texture older than
     // this generation shows the wrong glyphs.
     u32 pageGeneration(u32 page) const;
+    // Counts configure() and clear() calls, which drop pages (configure forgets them, so a page index and its
+    // generation come back from zero): a mesh that remembers (epoch, page, generation) can tell its UVs are stale.
+    u64 epoch() const { return epoch_; }
+    // Stamps a page as used in `frame` without looking a glyph up (a mesh built earlier keeps its page from being recycled).
+    void touchPage(u32 page, u64 frame);
+    // The page holds signed-distance glyphs (docs/GAME_UI_TEXT.md "SDF"), so the renderer uploads them linearly, with no
+    // coverage gamma, and the world-text shader reads the edge from them. Set once by the owner.
+    void setSdf(bool on) { sdf_ = on; }
+    bool sdf() const { return sdf_; }
     void markUploaded(u32 page);
     u64 pageLastUsed(u32 page) const;
     // Pixels taken by glyph rectangles on a page, for the editor's occupancy bar.
@@ -112,8 +121,10 @@ private:
     std::vector<Page> pages_;
     std::unordered_map<UiGlyphKey, UiAtlasGlyph, UiGlyphKeyHash> map_;
     u64 evicted_ = 0, overflow_ = 0;
+    u64 epoch_ = 0;
     u32 uploadBytes_ = 0;
     f32 gamma_ = 1.0f;
+    bool sdf_ = false;
 };
 
 } // namespace aver::ui

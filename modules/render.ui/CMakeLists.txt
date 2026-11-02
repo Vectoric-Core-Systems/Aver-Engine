@@ -11,6 +11,8 @@ aver_add_module(Aver.Render.UI
   SOURCES
     src/UiRenderer.cpp
     src/UiImageCache.cpp   # content-path images: decode, premultiply, upload, refcount
+    src/UiWorldText.cpp    # world labels (Label3D): placed for the camera, drawn in the transparent pass
+    src/WorldTextPlace.cpp # billboard and fixed-size maths
   DEPS
     Aver.Core
     Aver.UI

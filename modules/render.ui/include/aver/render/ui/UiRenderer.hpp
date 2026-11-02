@@ -3,6 +3,7 @@
 // into draw calls. A render feature whose draw hook is overlayPass, after the camera post chain with
 // the backbuffer bound, so a HUD is never tonemapped, exposed or bloomed with the world. Its other hook,
 // prePass, uploads the glyph atlas pages (docs/GAME_UI_TEXT.md).
+#include "aver/render/ui/WorldTextPlace.hpp"
 #include "aver/rhi/RHI.hpp"
 #include "aver/ui/UiDrawList.hpp"
 #include "aver/ui/UiGlyphAtlas.hpp"
@@ -60,6 +61,32 @@ public:
     // Draws the submitted list into the bound backbuffer.
     void overlayPass(rhi::IRenderContext& ctx, u32 width, u32 height) override;
 
+    // ---- world text (E6): the labels the list carries (UiDrawList::worldTexts) ----
+    //
+    // Drawn in the scene's transparent pass, depth-tested against the scene (or over it), from the world glyph atlas, with
+    // the module's own plain raster shader (world_text.hlsl): vertex colour times glyph coverage, no lighting, no ray query,
+    // no loop. Hosts lend the atlas (aver_text3d_atlas) the way they lend the UI atlas, and null it before teardown.
+    void setWorldAtlas(aver::ui::UiGlyphAtlas* atlas);
+    // The GPU texture of a world atlas page (RGBA8, premultiplied white coverage or a distance field), 0 before its first upload.
+    // This is the texture a material reads to draw glyphs of its own.
+    rhi::TextureHandle worldPageTexture(u32 page) const;
+    // World text on or off (default on).
+    void setWorldTextEnabled(bool on) { worldEnabled_ = on; }
+    bool worldTextEnabled() const { return worldEnabled_; }
+    // The host says when the ray-driven renderer owns the frame. Labels are NOT drawn then unless setWorldTextInRayDriven(true):
+    // that mode replaces the pass they draw in and has not been checked with them on a GPU.
+    void setRayDrivenActive(bool on) { rayDriven_ = on; }
+    void setWorldTextInRayDriven(bool on) { worldInRayDriven_ = on; }
+    bool worldTextInRayDriven() const { return worldInRayDriven_; }
+    // Distance-field edge softness used when a label does not set one (0 = from the screen-space derivative).
+    void setWorldSdfSoftness(f32 s) { worldSoftness_ = s; }
+    // Labels and quads drawn by the last transparent pass.
+    u32 worldTextsDrawn() const { return worldDrawn_; }
+    u32 worldTextsSkipped() const { return worldSkipped_; }
+
+    void transparentPass(rhi::IRenderContext& ctx) override;
+    void onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rhi::Format depth, u32 width, u32 height) override;
+
 private:
     UiRenderer() = default;
     // Creates the white texel, the shaders, the pipeline and the first buffers.
@@ -73,8 +100,15 @@ private:
     rhi::IDevice*          device_ = nullptr;
     rhi::IResourceFactory* res_    = nullptr;
 
-    rhi::PipelineHandle pipeline_ = 0;
-    rhi::ShaderHandle   vs_ = 0, ps_ = 0;
+    // One pipeline per (blend, filter, address), the default (Mix, Linear, Clamp) made at init and the rest on first use
+    // (P41). Only the fixed-function blend and the baked sampler differ; Mul also takes the UiPSMul pixel shader.
+    rhi::PipelineHandle pipelineFor(aver::ui::UiBlend blend, aver::ui::UiFilter filter, aver::ui::UiAddress address);
+    rhi::PipelineHandle makePipeline(aver::ui::UiBlend blend, aver::ui::UiFilter filter, aver::ui::UiAddress address);
+    static constexpr u32 kPipelineSlots = static_cast<u32>(aver::ui::UiBlend::Count) * 2 * 3;
+    rhi::PipelineHandle pipelines_[kPipelineSlots] = {};
+    bool pipelineTried_[kPipelineSlots] = {};
+    rhi::PipelineHandle pipeline_ = 0;      // the default one
+    rhi::ShaderHandle   vs_ = 0, ps_ = 0, psMul_ = 0;
     rhi::TextureHandle  white_ = 0;         // 1x1 opaque
 
     // Rotated per overlayPass. Five deep: a backend keeps two frames in flight, and with frame
@@ -96,6 +130,9 @@ private:
         u32 indexOffset = 0, indexCount = 0;
         u64 texture = 0;
         aver::ui::UiClip clip{};
+        aver::ui::UiFilter filter = aver::ui::UiFilter::Linear;
+        aver::ui::UiAddress address = aver::ui::UiAddress::Clamp;
+        aver::ui::UiBlend blend = aver::ui::UiBlend::Mix;
     };
     std::vector<Draw> draws_;
 
@@ -110,6 +147,38 @@ private:
         u32 size = 0;
     };
     std::vector<PageTexture> pages_;
+
+    // Uploads the dirty pages of one atlas into its page textures (the UI's and the world's share this). `tag` names them.
+    void uploadAtlas(rhi::IRenderContext& ctx, aver::ui::UiGlyphAtlas& atlas, std::vector<PageTexture>& pages, const char* tag);
+
+    // ---- world text ----
+    bool initWorld();
+    rhi::PipelineHandle worldPipelineFor(u32 flags);
+    void destroyWorldPipelines();
+    bool ensureWorldCapacity(u32 vertexCount, u32 indexCount);
+    aver::ui::UiGlyphAtlas* worldAtlas_ = nullptr;
+    std::vector<PageTexture> worldPages_;
+    // A copy of the submitted labels, held between submit() and transparentPass().
+    std::vector<aver::ui::UiWorldText> worldTexts_;
+    std::vector<aver::ui::UiWorldTextRun> worldRuns_;
+    std::vector<aver::ui::UiVertex> worldVerts_;
+    std::vector<u32> worldIdx_;
+    rhi::ShaderHandle worldVs_ = 0, worldPs_ = 0;
+    bool worldShadersTried_ = false;
+    rhi::PipelineHandle worldPipes_[8] = {};
+    bool worldPipeTried_[8] = {};
+    u32 worldSampleCount_ = 1;
+    rhi::Format worldColor_ = rhi::Format::Unknown, worldDepth_ = rhi::Format::Unknown;
+    u32 sceneHeight_ = 0;
+    rhi::BufferHandle wvb_[kFramesInFlight] = {};
+    rhi::BufferHandle wib_[kFramesInFlight] = {};
+    u32 wvbCapacity_ = 0, wibCapacity_ = 0;
+    u32 worldFrame_ = 0;
+    bool worldEnabled_ = true;
+    bool rayDriven_ = false;
+    bool worldInRayDriven_ = false;
+    f32 worldSoftness_ = 0.0f;
+    u32 worldDrawn_ = 0, worldSkipped_ = 0;
 };
 
 } // namespace aver::render::ui

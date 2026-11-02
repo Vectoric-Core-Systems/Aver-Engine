@@ -82,8 +82,10 @@ struct UiTextStyle {
     f32 scale = 1.0f;                // UI scale: rich <size=N> is in design pixels
     bool bold = false, italic = false;
     UiTextDir dir = UiTextDir::Auto;
-    f32 lineSpacing = 1.0f;
-    f32 letterSpacing = 0.0f;
+    f32 lineSpacing = 1.0f;          // a multiplier of the font's line height
+    f32 letterSpacing = 0.0f;        // pixels added after every glyph
+    f32 spaceSpacing = 0.0f;         // P38: pixels added after every U+0020 and tab, on top of letterSpacing
+    f32 lineExtra = 0.0f;            // P38: pixels added to every line advance after lineSpacing
 };
 
 struct UiTextBox {

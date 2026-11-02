@@ -68,7 +68,40 @@ AVER_UI_API void aver_ui_push_clip(int32_t left, int32_t top, int32_t right, int
 // Pops the innermost clip rect.
 AVER_UI_API void aver_ui_pop_clip(void);
 
+// ---- transform and draw state (parity P40, P41) ------------------------------------------------------
+//
+// A 2D affine transform applied to every draw added after it: x' = a*x + c*y + tx, y' = b*x + d*y + ty, composed on
+// the one in force (the new matrix is applied first). Rectangles, glyph quads, style boxes and meshes are transformed
+// vertex by vertex; a clip rect and a hit rect become the axis-aligned box of their transformed corners. A matrix with a
+// NaN or infinity is ignored, and its pop still pairs. The stack is emptied by aver_ui_begin_frame.
+AVER_UI_API void aver_ui_push_transform(float a, float b, float c, float d, float tx, float ty);
+AVER_UI_API void aver_ui_pop_transform(void);
+
+// How draws added after this sample their texture. filter: 0 linear (default), 1 nearest. address: 0 clamp (default),
+// 1 repeat, 2 mirror. Out-of-range is ignored. Reset to the defaults by aver_ui_begin_frame.
+AVER_UI_API void aver_ui_set_sampler(int32_t filter, int32_t address);
+// How draws added after this combine with the backbuffer: 0 mix (default), 1 add, 2 subtract, 3 multiply, 4 disabled
+// (the colour is written as it is). Out-of-range is ignored. Reset by aver_ui_begin_frame.
+AVER_UI_API void aver_ui_set_blend(int32_t mode);
+#define AVER_UI_FILTER_LINEAR  0
+#define AVER_UI_FILTER_NEAREST 1
+#define AVER_UI_ADDRESS_CLAMP  0
+#define AVER_UI_ADDRESS_REPEAT 1
+#define AVER_UI_ADDRESS_MIRROR 2
+#define AVER_UI_BLEND_MIX      0
+#define AVER_UI_BLEND_ADD      1
+#define AVER_UI_BLEND_SUB      2
+#define AVER_UI_BLEND_MUL      3
+#define AVER_UI_BLEND_DISABLED 4
+
 // ---- geometry ---------------------------------------------------------------------------------------
+
+// Draws triangles built by the caller. xyuv is x, y, u, v per vertex (4 floats), rgba is straight 0xAABBGGRR per vertex
+// (premultiplied on the way in), indices are relative to the first vertex. `texture` as aver_ui_textured_rect. Nothing is
+// drawn for a count that is not positive, an index past the vertices, or an empty clip. At most 65536 vertices and 262144
+// indices per call.
+AVER_UI_API void aver_ui_mesh(const float* xyuv, const uint32_t* rgba, int32_t vertexCount, const uint32_t* indices,
+                              int32_t indexCount, uint64_t texture);
 
 // Draws a solid rectangle. `rgba` is straight (non-premultiplied) 0xAABBGGRR.
 AVER_UI_API void aver_ui_rect(float x, float y, float w, float h, uint32_t rgba);
@@ -192,8 +225,78 @@ AVER_UI_API float aver_ui_text_block_fx(float x, float y, const char* utf8, uint
                                         int32_t flags, float maxWidth, int32_t align, float outlineSize, uint32_t outlineRgba,
                                         uint32_t shadowRgba, float shadowOffX, float shadowOffY, float shadowOutlineSize,
                                         float* outWHL);
+// P38: the same three calls with a spacing block, `spacing4` = {line height multiplier (<= 0 keeps 1), pixels added after
+// every glyph, pixels added after every space or tab (on top of the glyph spacing), pixels added to every line advance}.
+// NULL is all defaults, and the calls above are these with NULL. Values are clamped, NaN reads as 0.
+AVER_UI_API int32_t aver_ui_text_measure_ex(const char* utf8, const char* family, float px, int32_t flags, float maxWidth,
+                                            const float* spacing4, float* outWHL);
+AVER_UI_API float aver_ui_text_block_ex(float x, float y, const char* utf8, uint32_t rgba, const char* family, float px,
+                                        int32_t flags, float maxWidth, int32_t align, const float* spacing4, float* outWHL);
+AVER_UI_API float aver_ui_text_block_fx_ex(float x, float y, const char* utf8, uint32_t rgba, const char* family, float px,
+                                           int32_t flags, float maxWidth, int32_t align, float outlineSize, uint32_t outlineRgba,
+                                           uint32_t shadowRgba, float shadowOffX, float shadowOffY, float shadowOutlineSize,
+                                           const float* spacing4, float* outWHL);
 // Rasterises the glyphs of a string ahead of use, ignoring the per-frame budget (loading screens).
 AVER_UI_API void aver_ui_text_prewarm(const char* utf8, const char* family, float px, int32_t flags);
+
+// ---- text in the world (parity E6, Label3D's engine half) ---------------------------------------------
+//
+// A label is text laid out by the same engine as the UI, drawn as glyph quads in a plane that a matrix places in the
+// world. Immediate mode like the rest of this header: call aver_text3d_draw every frame a label should show; the list is
+// emptied by aver_ui_begin_frame. The quads come from a WORLD glyph atlas of their own (aver_text3d_atlas), so a HUD that
+// churns the UI atlas never recycles a page a label is using, and the pages are plain textures a material may read.
+//
+// DRAWING. The renderer draws labels in the scene's transparent pass with its own plain raster shader: no lighting, no ray
+// query, no loop. It is NOT drawn in ray-driven mode unless the host opts in (UiRenderer::setWorldTextInRayDriven), because
+// that mode replaces the pass labels would draw in.
+#define AVER_TEXT3D_NO_DEPTH    1   /* drawn over the scene instead of depth-tested against it */
+#define AVER_TEXT3D_ADDITIVE    2   /* added to the scene instead of premultiplied alpha */
+#define AVER_TEXT3D_BILLBOARD   4   /* the plane turns to face the camera */
+#define AVER_TEXT3D_BILLBOARD_Y 8   /* the plane turns about the world's up axis only */
+#define AVER_TEXT3D_ONE_SIDED   16  /* the back of the plane is culled */
+#define AVER_TEXT3D_H_LEFT   0
+#define AVER_TEXT3D_H_CENTER 1
+#define AVER_TEXT3D_H_RIGHT  2
+#define AVER_TEXT3D_V_TOP    0
+#define AVER_TEXT3D_V_CENTER 1
+#define AVER_TEXT3D_V_BOTTOM 2
+
+typedef struct AverText3dDesc {
+    int32_t size;          /* sizeof(AverText3dDesc), so the struct can grow; a smaller size reads only what it holds */
+    float world[16];       /* row-major, row vectors: plane (x, y, 0, 1) * world is the position in the scene frame */
+    char family[64];       /* UTF-8 font family, "" = the default */
+    float px;              /* em size in layout pixels (0 = 32); glyphs are rasterised at this size unless the world atlas is SDF */
+    float pixelSize;       /* plane units per layout pixel (0 = 0.01) */
+    float width;           /* wrap / ellipsis width in layout pixels, 0 = none */
+    int32_t flags;         /* AVER_UI_TEXT_FLAG_* */
+    int32_t hAlign;        /* AVER_TEXT3D_H_* of the text about the plane's origin */
+    int32_t vAlign;        /* AVER_TEXT3D_V_* */
+    float spacing[4];      /* as aver_ui_text_block_ex: line multiplier (0 = 1), per glyph, per space, per line (layout pixels) */
+    uint32_t rgba;         /* straight 0xAABBGGRR */
+    uint32_t outlineRgba;
+    float outlineSize;     /* layout pixels, 0 = none */
+    float offsetX, offsetY;/* layout pixels, +y up, from the anchor */
+    int32_t drawFlags;     /* AVER_TEXT3D_* */
+    float alphaCut;        /* pixels with less alpha are dropped; 0 = none */
+    float intensity;       /* colour multiplier in scene units, 0 = 1 */
+    float fixedPxPerUnit;  /* > 0: constant on-screen size, one plane unit drawn as this many pixels */
+    float sdfSoftness;     /* edge softness of distance-field glyphs, 0 = the renderer's default */
+    int32_t maxLines;      /* 0 = unlimited */
+} AverText3dDesc;
+
+/* 1 when the label was added to this frame's list; 0 with no usable font, empty text, a bad descriptor or a full list.
+   outWHL (may be NULL) receives the text box's width and height in plane units and the line count. */
+AVER_UI_API int32_t aver_text3d_draw(const char* utf8, const AverText3dDesc* desc, float* outWHL);
+/* The same layout without adding anything: width, height (plane units), line count. 1 when measured. */
+AVER_UI_API int32_t aver_text3d_measure(const char* utf8, const AverText3dDesc* desc, float* outWHL);
+/* The world glyph atlas as an opaque aver::ui::UiGlyphAtlas*, for the renderer (UiRenderer::setWorldAtlas). */
+AVER_UI_API const void* aver_text3d_atlas(void);
+/* World glyphs as distance fields (sdf != 0): rasterised once at sdfPx with sdfSpread pixels of padding, scaling to any size.
+   A value < 0 keeps the current one. Takes effect at once and drops the world atlas. */
+AVER_UI_API void aver_text3d_configure(int32_t sdf, int32_t sdfPx, int32_t sdfSpread, int32_t pageSize, int32_t maxPages);
+/* labels this frame, quads this frame, pages, glyphs resident, evicted pages, overflow, mesh builds, mesh rebuilds after a
+   page was recycled. */
+AVER_UI_API void aver_text3d_stats(float* out8);
 
 // ---- hit testing ------------------------------------------------------------------------------------
 //

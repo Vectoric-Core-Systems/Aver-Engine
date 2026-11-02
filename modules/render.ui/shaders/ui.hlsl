@@ -53,3 +53,11 @@ float4 UiPS(UiVSOut i) : SV_Target {
     if (gUiCv > 0.5 && s.a > 0.0) s.rgb = averColourVision(s.rgb / s.a, gUiCv) * s.a;
     return s;
 }
+
+// The same for a multiply blend (UiBlend::Mul), whose fixed-function stage is dst.rgb * src.rgb: the colour a draw
+// multiplies by is lerp(1, colour, coverage), which for a premultiplied sample is 1 - a + rgb. The alpha channel keeps dst.
+float4 UiPSMul(UiVSOut i) : SV_Target {
+    float4 s = i.col * gUiTexture.Sample(gUiSampler, i.uv);
+    if (gUiCv > 0.5 && s.a > 0.0) s.rgb = averColourVision(s.rgb / s.a, gUiCv) * s.a;
+    return float4(1.0 - s.a + s.rgb, s.a);
+}
