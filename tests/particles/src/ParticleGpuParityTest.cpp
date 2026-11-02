@@ -2,7 +2,8 @@
 //
 //   1. layout probe       every GpuSimHeader field, a user value, a module row and a request row read back by index
 //   2. RNG golden table   the 32 pinned (seed, stream) draws, hashed on the GPU
-//   3. parity             60 fixed frames of an effect using all 13 modules, EmitterSim vs the kernels, matched by particle id
+//   3. parity             60 fixed frames of an effect using the first 13 modules, EmitterSim vs the kernels, matched by particle id;
+//                         then the same with a ring emitter and the eight wave 6 modules (a hue turn and a start frame are compared exactly)
 //   4. dead-list overflow spawns past capacity drop, nothing is corrupted
 //   5. sort               5,000 random depths sorted by the bitonic kernels equal std::sort
 //   6. events             a death event spawns child particles exactly one frame later
@@ -183,17 +184,52 @@ ParticleSystemDef parityDef(SimTier tier) {
     return def;
 }
 
-void testParity(Rig& rig, scene::World& world) {
-    AVER_INFO("--- 60 frames, every module: EmitterSim vs the kernels ---");
+// Wave 6 (P15): a ring emitter and the eight appended modules. The GPU half of the math ParticleModulesTest pins on the CPU.
+ParticleSystemDef parityDefWave6(SimTier tier) {
+    ParticleSystemDef def;
+    ParticleEffect fx;
+    fx.simTier = tier;
+    fx.shape = EmitterShape::Ring;
+    fx.shapeSize = {60, 30, 20};
+    fx.shapeAxis = {1, 0, 1};
+    fx.emissionRate = 1200.0f;
+    fx.burstCount = 600;
+    fx.maxParticles = 4096;
+    fx.lifetimeMin = 1.0f; fx.lifetimeMax = 2.0f;
+    fx.direction = {0, 0, 1};
+    fx.spreadDeg = 60.0f;
+    fx.speedMin = 60.0f; fx.speedMax = 140.0f;
+    fx.gravity = {0, 0, -80.0f};
+    fx.subuvCols = 4; fx.subuvRows = 4; fx.subuvFrames = 16; fx.subuvFps = 6.0f;
+    auto add = [&](ModuleKind k, std::initializer_list<std::pair<const char*, f32>> params) {
+        Module m = makeDefaultModule(k);
+        const ModuleInfo& info = moduleInfo(k);
+        for (const auto& kv : params) { const int i = findModuleParam(info, kv.first); if (i >= 0) m.p[i].value = kv.second; }
+        fx.modules.push_back(m);
+    };
+    add(ModuleKind::SpawnHueVariation, {{"min", -0.3f}, {"max", 0.4f}});
+    add(ModuleKind::SpawnAnimStart, {{"min", 0.25f}, {"max", 0.75f}, {"frames", 16}});
+    add(ModuleKind::UpdateLinearAccel, {{"min", -40}, {"max", 80}});
+    add(ModuleKind::UpdateRadialAccel, {{"min", -30}, {"max", 60}});
+    add(ModuleKind::UpdateTangentialAccel, {{"min", 10}, {"max", 40}, {"ax", 0}, {"ay", 1}, {"az", 1}});
+    add(ModuleKind::UpdateDamping, {{"min", 5}, {"max", 25}});
+    add(ModuleKind::UpdateOrbit, {{"min", 0.05f}, {"max", 0.2f}, {"ax", 0}, {"ay", 0}, {"az", 1}});
+    add(ModuleKind::UpdateCollideBox, {{"cx", 0}, {"cy", 0}, {"cz", -40}, {"hx", 70}, {"hy", 70}, {"hz", 30}, {"restitution", 0.5f}, {"friction", 0.1f}});
+    def.emitters.push_back(fx);
+    return def;
+}
+
+void testParity(Rig& rig, scene::World& world, u64 effect, ParticleSystemDef (*make)(SimTier), bool compareSpawnInfo) {
+    AVER_INFO("--- 60 frames, effect {}: EmitterSim vs the kernels ---", effect);
     ParticleEffectLibrary libCpu, libGpu;
-    libCpu.setSystem(10, parityDef(SimTier::Cpu));
-    libGpu.setSystem(10, parityDef(SimTier::Gpu));
+    libCpu.setSystem(effect, make(SimTier::Cpu));
+    libGpu.setSystem(effect, make(SimTier::Gpu));
     ParticleSystem cpu, gpuSys;
     cpu.setEffectLibrary(&libCpu);
     gpuSys.setEffectLibrary(&libGpu);
     gpuSys.setGpuTier(&rig.gpu);
-    const scene::Entity ec = makeEmitter(world, 10, 4242);
-    makeEmitter(world, 10, 4242);   // a second entity ticked by the GPU system only; the CPU system sees both, so give it a twin
+    const scene::Entity ec = makeEmitter(world, effect, 4242);
+    makeEmitter(world, effect, 4242);   // a second entity ticked by the GPU system only; the CPU system sees both, so give it a twin
     (void)ec;
 
     // Two entities share the world, so each system sees both; compare totals by id within one emitter instance instead:
@@ -208,7 +244,7 @@ void testParity(Rig& rig, scene::World& world) {
     if (scene::ComponentPool* pool = world.pool(scene::kComponentParticleEmitter))
         for (usize i = 0; i < pool->size(); ++i) {
             auto* c = static_cast<scene::CParticleEmitter*>(pool->dataAt(i));
-            if (c && c->effect == 10) clocks.push_back({c, 0.0f, 0.0f});
+            if (c && c->effect == effect) clocks.push_back({c, 0.0f, 0.0f});
         }
     for (int f = 0; f < 60; ++f) {
         for (Clock& k : clocks) { k.age = k.c->age; k.accum = k.c->emitAccum; }
@@ -229,7 +265,7 @@ void testParity(Rig& rig, scene::World& world) {
     if (cpuSets.size() != 2 || gpuHandles.size() != 2) return;
 
     f32 worst = 0.0f;
-    u32 matched = 0, cpuTotal = 0, gpuTotal = 0;
+    u32 matched = 0, cpuTotal = 0, gpuTotal = 0, infoDiffers = 0;
     for (usize k = 0; k < 2; ++k) {
         std::vector<Particle> gp;
         std::vector<u32> counters, survivors;
@@ -256,6 +292,8 @@ void testParity(Rig& rig, scene::World& world) {
             const Vec3 d = g.position - c.position;
             const f32 tol = std::fmax(1e-3f * c.position.size(), 0.01f);
             worst = std::fmax(worst, d.size() / tol);
+            // The start frame (bits 0..15) and the hue turn (17..31) are drawn at spawn and never change; the collided flag (16) may flip at a boundary.
+            if (compareSpawnInfo && (g.spawnInfo & ~(kParticleFlagCollided << 16)) != (c.spawnInfo & ~(kParticleFlagCollided << 16))) ++infoDiffers;
         }
     }
     AVER_INFO("  CPU alive {}, GPU alive {}, matched by id {}, worst position error {:.3f} x tolerance", cpuTotal, gpuTotal, matched, static_cast<f64>(worst));
@@ -264,6 +302,7 @@ void testParity(Rig& rig, scene::World& world) {
     check(countDiff <= 0.01f, "alive counts agree within 1% (kill-volume boundary cases may flip on floating-point differences)");
     check(static_cast<f32>(matched) >= 0.99f * static_cast<f32>(std::min(cpuTotal, gpuTotal)), "at least 99% of particles exist on both sides by id");
     check(worst <= 1.0f, "positions agree within max(1e-3 |p|, 0.01) cm");
+    if (compareSpawnInfo) check(infoDiffers == 0, "the start frame and the hue turn of every matched particle are the CPU's exactly (" + std::to_string(infoDiffers) + " differ)");
 }
 
 // ---------------------------------------------------------------------------------------------------------- 4
@@ -442,7 +481,8 @@ int main(int argc, char** argv) {
         if (ready) {
             scene::World& world = scene::World::instance();
             testProbes(rig, world);
-            testParity(rig, world);
+            testParity(rig, world, 10, parityDef, false);
+            testParity(rig, world, 11, parityDefWave6, true);
             testOverflow(rig, world);
             testSort(rig, world);
             testEvents(rig, world);

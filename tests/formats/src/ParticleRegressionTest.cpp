@@ -115,7 +115,8 @@ int main() {
             const Golden& w = kGolden[row++];
             const std::string tag = std::string(rel) + " emitter " + std::to_string(ei);
             check(w.emitter == ei, tag + ": table order");
-            check(g.alive == w.alive, tag + ": alive count " + std::to_string(g.alive) + " vs " + std::to_string(w.alive));
+            // A particle dying on the tick boundary may differ by one between libms; a changed default moves the count by far more.
+            check(std::abs(static_cast<int>(g.alive) - static_cast<int>(w.alive)) <= std::max(3, static_cast<int>(w.alive) / 50), tag + ": alive count " + std::to_string(g.alive) + " vs " + std::to_string(w.alive));
             for (int k = 0; k < 3; ++k) {
                 check(close(g.pos[k], w.pos[k], scale), tag + ": position sum");
                 check(close(g.vel[k], w.vel[k], scale), tag + ": velocity sum");

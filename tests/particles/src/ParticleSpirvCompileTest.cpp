@@ -126,6 +126,9 @@ int main() {
     int failures = 0;
     for (const Variant& v : variants) {
         for (const bool spirv : {true, false}) {
+#if !defined(_WIN32)
+            if (!spirv) continue;   // the DXIL half is Windows only, as in VoxiSpirvCompileTest (the D3D12 backend is)
+#endif
             std::string err;
             size_t bytes = 0;
             const std::string label = v.name + (spirv ? " (SPIR-V)" : " (DXIL)");
