@@ -3917,6 +3917,7 @@ private:
     bool  waterEnabled_  = false;
     f32   waterHeightCm_ = 0.0f;
 #if AVER_MODULE_SCRIPTING
+    void configureProjectInput(const char* when);   // the project's INPUT.SCHEME, at Play and level spawn (SandboxPlay.cpp)
     static i32 animCurve(i32 entity, i64 nameHash, f32* outValue, void*);
 
 #if AVER_MODULE_SYNAPSE_SCENE

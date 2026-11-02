@@ -22,7 +22,7 @@
 //   GRAVITY <x> <y> <z>                            -- Vec3 cm/s^2
 //   DAMPING <value>                                -- f32, fraction/second
 //   SIZE <start> <end>                             -- f32 centimetres
-//   COLOR start <r> <g> <b> <a>                    -- f32x4, straight alpha, birth
+//   COLOR start <r> <g> <b> <a>                    -- f32x4, straight alpha, birth; rgb >= 0 (above 1 is HDR), a in [0,1]
 //   COLOR end <r> <g> <b> <a>                      -- f32x4, straight alpha, death
 //   SIZECURVE <t v>{2..4}                          -- overrides SIZE
 //   COLORCURVE <t r g b a>{2..4}                   -- overrides COLOR start/end
@@ -736,10 +736,12 @@ bool parseOcparticleSystem(std::string_view text, particles::ParticleSystemDef& 
             if (err) *err = "DAMPING must be in [0,1); got " + std::to_string(out.damping);
             return false;
         }
+        // RGB above 1 is an HDR colour (a spark that blooms); the shader carries it as float. Alpha is a coverage, so [0,1].
         for (int i = 0; i < 4; ++i) {
-            if (!(out.colorStart[i] >= 0.0f && out.colorStart[i] <= 1.0f) ||
-                !(out.colorEnd[i]   >= 0.0f && out.colorEnd[i]   <= 1.0f)) {
-                if (err) *err = "COLOR components must be in [0,1]";
+            const f32 hi = i == 3 ? 1.0f : 3.0e38f;
+            if (!(out.colorStart[i] >= 0.0f && out.colorStart[i] <= hi) ||
+                !(out.colorEnd[i]   >= 0.0f && out.colorEnd[i]   <= hi)) {
+                if (err) *err = "COLOR components must be >= 0, with alpha in [0,1]";
                 return false;
             }
         }

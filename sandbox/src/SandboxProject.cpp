@@ -19,7 +19,20 @@
 #  include "aver/ui/ui_widget_abi.h"
 #endif
 
+#include <filesystem>
+
 namespace aver {
+#if AVER_MODULE_SCRIPTING
+namespace {
+bool anyFileWithExtension(const std::string& dir, const char* ext) {
+    std::error_code ec;
+    for (const auto& f : std::filesystem::directory_iterator(dir, ec))
+        if (f.path().extension() == ext) return true;
+    return false;
+}
+}  // namespace
+#endif
+
 void SandboxApp::applyProject(Engine& e) {
     // Never in a capture or headless run: e.window() IS the test, since a headless run has no
     // window and a --frames capture opens one unactivated -- a top-most splash must not land in a
@@ -272,7 +285,8 @@ void SandboxApp::applyProject(Engine& e) {
         const std::string bin = editor::scriptsBinaryDir(project_);
         const i32 n = scripts_.loadScripts(bin);
         if (n > 0) AVER_INFO("[Scripting] {} project behaviour(s) live from {}", n, bin);
-        else AVER_INFO("[Scripting] no built scripts in {} - use Tools > Reload Scripts", bin);
+        else if (!anyFileWithExtension(bin, ".dll"))   // a DLL of actor classes only (a converted project) holds no behaviours, and the bridge has said what it loaded
+            AVER_INFO("[Scripting] no built scripts in {} - use Tools > Reload Scripts", bin);
     }
     // GRAPH-AS-CLASS: registration, for composition-root parity with GameApp.cpp's own
     // initScripting() call -- a seam wired in one root and not the other is the exact defect

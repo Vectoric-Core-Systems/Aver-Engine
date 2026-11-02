@@ -256,6 +256,32 @@ bool SandboxApp::placePawnAtPlayerStart(const char* who) {
 #endif
 }
 
+#if AVER_MODULE_SCRIPTING
+// Loads the project's INPUT.SCHEME through ScriptHost::configureInput (InputScheme.Load re-parses the
+// file every time; see that method's header for the return contract). At Play start, and before a
+// level's class actors spawn, since they begin play in the editor too and may ask for the project's actions.
+void SandboxApp::configureProjectInput(const char* when) {
+    std::string schemePath = project_.inputScheme.empty()
+        ? std::string() : project_.contentDir() + AVER_PATH_SEP + project_.inputScheme;
+    if (!schemePath.empty() && !fileExists(schemePath)) {
+        AVER_WARN("[Sandbox] {}: INPUT.SCHEME '{}' does not exist -- no input scheme will be loaded",
+                  when, schemePath);
+        schemePath.clear();
+    }
+    // <project dir>\Saved\Settings.ini. Settings' own flush creates the directory the first time it writes.
+    const std::string settingsPath = project_.dir + AVER_PATH_SEP "Saved" AVER_PATH_SEP "Settings.ini";
+    const int32_t actions = scripts_.configureInput(schemePath, settingsPath);
+    if (actions > 0)
+        AVER_INFO("[Sandbox] {}: input scheme ready ({} action(s) from '{}')", when, actions, schemePath);
+    else if (actions == -2)
+        AVER_WARN("[Sandbox] {}: this build's scripting bridge predates ConfigureInput -- "
+                  "rebindable input is unavailable", when);
+    else if (actions < 0)
+        AVER_WARN("[Sandbox] {}: input scheme '{}' failed to load", when, schemePath);
+    // actions == 0 (no INPUT.SCHEME) is the ordinary case for a content-only project and not worth a line.
+}
+#endif
+
 void SandboxApp::startPlay() {
     // The profiler's GPU average and CPU phases start from nothing: a Play-only cost would
     // otherwise be divided by every edit frame since boot.
@@ -326,33 +352,8 @@ void SandboxApp::startPlay() {
     // the project's own GameMode both follow this point) so a GameMode's OnBeginPlay -- and
     // whatever pawn/controller it possesses -- already sees the scheme's pushed context.
     // RE-RESOLVED AT EVERY PLAY START, not cached from project open: this is what makes an
-    // .ocinput edit saved between two Play presses take effect on the second one, since
-    // InputScheme.Load (Aver.Framework, called through ScriptHost::configureInput) re-parses the
-    // file fresh every time. See that method's own header comment for the full return contract.
-    {
-        std::string schemePath = project_.inputScheme.empty()
-            ? std::string() : project_.contentDir() + AVER_PATH_SEP + project_.inputScheme;
-        if (!schemePath.empty() && !fileExists(schemePath)) {
-            AVER_WARN("[Sandbox] Play: INPUT.SCHEME '{}' does not exist -- no input scheme will be loaded",
-                      schemePath);
-            schemePath.clear();
-        }
-        // <project dir>\Saved\Settings.ini. No createDirectories() call needed here: Settings'
-        // own flush creates its target directory itself the first time it writes
-        // (modules/settings/src/Settings.cpp's aver_settings_flush), the same way an .ocsave or a
-        // .editorprefs write does.
-        const std::string settingsPath = project_.dir + AVER_PATH_SEP "Saved" AVER_PATH_SEP "Settings.ini";
-        const int32_t actions = scripts_.configureInput(schemePath, settingsPath);
-        if (actions > 0)
-            AVER_INFO("[Sandbox] Play: input scheme ready ({} action(s) from '{}')", actions, schemePath);
-        else if (actions == -2)
-            AVER_WARN("[Sandbox] Play: this build's scripting bridge predates ConfigureInput -- "
-                      "rebindable input is unavailable");
-        else if (actions < 0)
-            AVER_WARN("[Sandbox] Play: input scheme '{}' failed to load", schemePath);
-        // actions == 0 (no INPUT.SCHEME, or one that resolved to nothing) is the ordinary case for
-        // a content-only or not-yet-authored project and not worth a line on every Play press.
-    }
+    // .ocinput edit saved between two Play presses take effect on the second one.
+    configureProjectInput("Play");
 #endif
 
 #if AVER_MODULE_FRAMEWORK

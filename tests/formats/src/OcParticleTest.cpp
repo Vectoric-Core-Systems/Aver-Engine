@@ -402,6 +402,11 @@ static void testRangesRefused() {
     std::string e0;
     check(fmt::parseOcparticle("OCPARTICLE 1\nNAME R\nDAMPING 0.0\nDIRECTION 0 0 -1 180\n", ok0, nullptr, &e0),
           "the legal boundaries (DAMPING 0, spread 180) still parse");
+    particles::ParticleEffect hdr{};
+    std::string e1;
+    check(fmt::parseOcparticle("OCPARTICLE 1\nNAME R\nCOLOR start 5 2 1 1\nCOLOR end 2.5 1 0.5 0\n", hdr, nullptr, &e1) &&
+              near(hdr.colorStart[0], 5.0f) && near(hdr.colorEnd[0], 2.5f),
+          "an HDR colour (rgb above 1, the glow of a spark) parses and keeps its values");
 }
 
 
