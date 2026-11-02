@@ -70,12 +70,12 @@ internal static class Program
         {
             // Keep the types that did load, and name the ones that did not.
             types = e.Types.Where(t => t is not null).Cast<Type>().ToArray();
-            foreach (Exception? le in e.LoaderExceptions)
-                if (le is not null) Console.Error.WriteLine($"avermatc: (partial load) {le.Message}");
+            foreach (string message in e.LoaderExceptions.Where(le => le is not null).Select(le => le!.Message).Distinct())
+                Console.Error.WriteLine($"avermatc: (partial load) {message}");
         }
 
         var found = types
-            .Select(t => (Type: t, Attr: t.GetCustomAttribute<AverMaterialAttribute>()))
+            .Select(t => (Type: t, Attr: MaterialAttributeOf(t)))
             .Where(x => x.Attr is not null)
             .OrderBy(x => x.Attr!.Name, StringComparer.Ordinal)
             .ToList();
@@ -147,5 +147,16 @@ internal static class Program
         if (failed > 0) return 1;
         if (verify && stale > 0) return 1;
         return 0;
+    }
+
+    // A type whose attributes name an assembly this load context cannot find (an extension's library, which is not beside the
+    // game's scripts) cannot be a material class: skip it instead of letting the lookup end the run.
+    private static AverMaterialAttribute? MaterialAttributeOf(Type t)
+    {
+        try { return t.GetCustomAttribute<AverMaterialAttribute>(); }
+        catch (Exception e) when (e is FileNotFoundException or FileLoadException or TypeLoadException)
+        {
+            return null;
+        }
     }
 }
