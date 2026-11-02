@@ -880,6 +880,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
                       "keeps the level it is editing", travel);
     }
     game::pumpContentPrefetch(content_);   // a script's "this is about to be shown": its textures start decoding now
+    hm.mark("gameplay");
 #endif
 #if AVER_MODULE_FLUIDS
     // After physics step, before any prePass (not gated on Play).

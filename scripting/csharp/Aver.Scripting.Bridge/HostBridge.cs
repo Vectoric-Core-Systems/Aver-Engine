@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 // The managed side of the CLR host: bootstrap, script loading, actor dispatch thunks and the log bridge.
 
+using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -1850,6 +1851,8 @@ public static class HostBridge
         // The order array is replaced, never mutated, so a bind or unbind inside a callback leaves this
         // walk alone: a destroyed actor is skipped below, a spawned one ticks from the next pass.
         ActorLive[] order = physics ? s_physicsOrder : s_processOrder;
+        long passStart = Stopwatch.GetTimestamp();
+        s_passCost.Clear();
         foreach (ActorLive live in order)
         {
             if (live.Disabled) continue;
@@ -1858,19 +1861,46 @@ public static class HostBridge
             AverActor a = live.Instance;
             if (physics ? !a.PhysicsTickEnabled : !a.TickEnabled) continue;
             if (!PauseRules.Ticks(live.ResolvedPause, paused)) continue;
+            long t0 = Stopwatch.GetTimestamp();
             try
             {
                 if (physics) a.OnPhysicsTick(dt);
                 else a.OnTick(dt);
             }
             catch (Exception ex) { ReportTickError(live, physics, ex); }
+            AddPassCost(a.GetType().Name, Stopwatch.GetTimestamp() - t0);
         }
+        long t1 = Stopwatch.GetTimestamp();
         if (physics) GameThread.Flush();
         else
         {
             NotifyTransforms();
             GameThread.EndFrame();   // deferred calls, then QueueDestroy's destroys
         }
+        AddPassCost(physics ? "(physics-pass flush)" : "(deferred calls, transforms, destroys)", Stopwatch.GetTimestamp() - t1);
+        ReportSlowPass(physics, Stopwatch.GetTimestamp() - passStart);
+    }
+
+    // What each actor class cost in the current pass. A pass over 100 ms names its five costliest at most every 5 s, so a
+    // frame that takes seconds says which script it was.
+    private static readonly Dictionary<string, (long Ticks, int Calls)> s_passCost = new(StringComparer.Ordinal);
+    private static long s_lastSlowReport;
+
+    private static void AddPassCost(string name, long ticks)
+    {
+        s_passCost.TryGetValue(name, out (long Ticks, int Calls) c);
+        s_passCost[name] = (c.Ticks + ticks, c.Calls + 1);
+    }
+
+    private static void ReportSlowPass(bool physics, long ticks)
+    {
+        double ms = ticks * 1000.0 / Stopwatch.Frequency;
+        long now = Stopwatch.GetTimestamp();
+        if (ms < 100.0 || (s_lastSlowReport != 0 && now - s_lastSlowReport < 5 * Stopwatch.Frequency)) return;
+        s_lastSlowReport = now;
+        string top = string.Join(", ", s_passCost.OrderByDescending(kv => kv.Value.Ticks).Take(5)
+            .Select(kv => $"{kv.Key} {kv.Value.Ticks * 1000.0 / Stopwatch.Frequency:0.0} ms over {kv.Value.Calls}"));
+        Emit((int)Log.Level.Warn, $"[Scripting] slow {(physics ? "physics" : "process")} pass: {ms:0.0} ms; costliest: {top}");
     }
 
     // A tick that throws aborts only that call; the actor keeps ticking. Errors are logged
