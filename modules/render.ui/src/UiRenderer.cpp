@@ -197,9 +197,12 @@ bool UiRenderer::ensureCapacity(u32 vertexCount, u32 indexCount) {
     return true;
 }
 
-// The binding set for a texture, created on first use and cached. 0 when creation failed.
+// The binding set for a texture, created on first use and cached. 0 when creation failed or the texture is gone: a list submitted
+// earlier in the frame can still name a sub-viewport target retired since (rebuilt at a new size, or its session stopped).
 rhi::BindingSetHandle UiRenderer::bindingFor(rhi::TextureHandle t) {
     for (const TexBinding& b : bindings_) if (b.texture == t) return b.set;
+    rhi::TextureDesc alive;
+    if (!res_->textureInfo(t, alive)) return 0;
 
     rhi::BindingSetDesc bd;
     bd.srvCount = 1;

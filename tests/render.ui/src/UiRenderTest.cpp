@@ -104,7 +104,13 @@ struct MockFactory final : public rhi::IResourceFactory {
         for (u64 i = 0; i < bytes; ++i) b.contents[static_cast<usize>(offset + i)] = s[static_cast<usize>(i)];
         return true;
     }
-    bool textureInfo(rhi::TextureHandle, rhi::TextureDesc&) const override { return false; }
+    // Any handle lives until destroyed (the tests also draw with handles they never created).
+    bool textureInfo(rhi::TextureHandle t, rhi::TextureDesc& out) const override {
+        if (t == 0) return false;
+        for (const rhi::TextureHandle d : destroyedTextures) if (d == t) return false;
+        out = t <= textures.size() ? textures[t - 1] : rhi::TextureDesc{};
+        return true;
+    }
     // The copy layout of a 4-byte-per-texel texture with D3D12's 256-byte row alignment.
     bool textureCopyFootprint(rhi::TextureHandle t, u32, rhi::TextureCopyFootprint& out) const override {
         if (t == 0 || t > textures.size()) return false;
@@ -589,6 +595,15 @@ int main() {
         MockContext idle;
         r->overlayPass(idle, 1280, 720);
         check(idle.count(Call::Kind::DrawIndexed) == 0, "an emptied submit draws nothing, so a destroyed image is never named");
+
+        // A list submitted before the texture went (a sub-viewport rebuilt or stopped later in the frame) still names it.
+        f.destroyTexture(tex);
+        const usize setsBefore = f.sets.size();
+        r->submit(dl);
+        MockContext stale;
+        r->overlayPass(stale, 1280, 720);
+        check(stale.count(Call::Kind::DrawIndexed) == 0 && f.sets.size() == setsBefore,
+              "a draw naming a destroyed texture is skipped, with no binding set made for it");
     }
 
     AVER_INFO("=== P41: sampler and blend are other pipelines, built when asked for ===");
