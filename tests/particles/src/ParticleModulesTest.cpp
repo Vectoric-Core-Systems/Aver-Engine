@@ -5,6 +5,7 @@
 #include "aver/core/Log.hpp"
 #include "aver/particles/ParticleModules.hpp"
 #include "aver/particles/ParticleRandom.hpp"
+#include "aver/platform/FileSystem.hpp"
 
 #include <cmath>
 #include <initializer_list>
@@ -99,9 +100,11 @@ static void testNoise() {
 
 static void testTable() {
     AVER_INFO("--- the module table ---");
-    check(static_cast<u32>(ModuleKind::Count) == 13, "13 module kinds");
+    check(static_cast<u32>(ModuleKind::Count) == 21, "21 module kinds (13 until wave 6)");
+    check(ModuleKind::UpdateKillVolume == static_cast<ModuleKind>(12) && ModuleKind::UpdateLinearAccel == static_cast<ModuleKind>(13),
+          "the first 13 kept their ids; the wave 6 modules were appended");
     std::set<std::string> keys;
-    for (u32 k = 0; k < 13; ++k) {
+    for (u32 k = 0; k < 21; ++k) {
         const ModuleInfo& info = moduleInfo(static_cast<ModuleKind>(k));
         check(info.kind == static_cast<ModuleKind>(k), std::string("table row ") + std::to_string(k) + " is in enum order");
         check(keys.insert(info.key).second, std::string("unique key ") + info.key);
@@ -120,7 +123,7 @@ static void testDefaultsAreNoOps() {
     AVER_INFO("--- an unconfigured module changes nothing (except the two that default to a world feature) ---");
     ModuleEnv env;
     env.dt = 0.1f; env.time = 1.0f;
-    for (u32 k = 0; k < 13; ++k) {
+    for (u32 k = 0; k < 21; ++k) {
         const ModuleKind kind = static_cast<ModuleKind>(k);
         // curlnoise defaults to strength 100 and collideplane to the z = 0 plane: authored on purpose, see the README.
         if (kind == ModuleKind::UpdateCurlNoise || kind == ModuleKind::UpdateCollidePlane) continue;
@@ -130,7 +133,7 @@ static void testDefaultsAreNoOps() {
         if (m.stage == ModuleStage::Spawn) runSpawnModule(m, p, {100, 100, 100});
         else if (m.stage == ModuleStage::Velocity) runVelocityModule(m, env, p);
         else runPositionModule(m, env, p);
-        check(p.position.x == before.position.x && p.position.y == before.position.y && p.position.z == before.position.z &&
+        check(p.spawnInfo == before.spawnInfo && p.position.x == before.position.x && p.position.y == before.position.y && p.position.z == before.position.z &&
               p.velocity.x == before.velocity.x && p.velocity.y == before.velocity.y && p.velocity.z == before.velocity.z &&
               p.sizeScale == before.sizeScale && p.tint == before.tint && p.rotation == before.rotation && p.age == before.age,
               std::string(moduleInfo(kind).key) + " at its defaults is a no-op");
@@ -366,6 +369,171 @@ static void testCurves() {
     check(packRgba8(1, 0.5f, 0, 1) == (255u | (128u << 8) | (0u << 16) | (255u << 24)), "packRgba8 rounds to bytes, R in the low byte");
 }
 
+// Wave 6 (P15): the eight modules appended to the table, the hue turn and the shared HLSL's ids. The GPU parity of the same math is ParticleGpuParityTest's (a device).
+static void testWave6Modules() {
+    AVER_INFO("--- wave 6 modules ---");
+    ModuleEnv env;
+    env.dt = 0.1f;
+    env.origin = {10, 0, 0};
+
+    {   // linear acceleration: along the velocity, drawn from [min, max]
+        Particle p = particleAt({0, 0, 0}, {10, 0, 0});
+        runVelocityModule(mod(ModuleKind::UpdateLinearAccel, {{"min", 20}, {"max", 20}}), env, p);
+        checkNear(p.velocity.x, 12.0f, 1e-5f, "linearaccel 20 for 0.1 s adds 2 along the velocity");
+        Particle still = particleAt({0, 0, 0}, {0, 0, 0});
+        runVelocityModule(mod(ModuleKind::UpdateLinearAccel, {{"min", 20}, {"max", 20}}), env, still);
+        check(still.velocity.size() == 0.0f, "a particle at rest has no direction to accelerate along");
+        bool inRange = true;
+        f32 lo = 1e9f, hi = -1e9f;
+        for (u32 i = 0; i < 2000; ++i) {
+            Particle q = particleAt({0, 0, 0}, {10, 0, 0}, particleSeed(7, i));
+            runVelocityModule(mod(ModuleKind::UpdateLinearAccel, {{"min", 10}, {"max", 50}}), env, q);
+            inRange = inRange && q.velocity.x >= 11.0f - 1e-4f && q.velocity.x <= 15.0f + 1e-4f;
+            lo = std::fmin(lo, q.velocity.x); hi = std::fmax(hi, q.velocity.x);
+        }
+        check(inRange && hi - lo > 3.0f, "the per-particle acceleration spans [min, max]");
+    }
+    {   // radial and tangential: about the emitter origin
+        Particle p = particleAt({20, 0, 0}, {0, 0, 0});
+        runVelocityModule(mod(ModuleKind::UpdateRadialAccel, {{"min", 30}, {"max", 30}}), env, p);
+        checkNear(p.velocity.x, 3.0f, 1e-5f, "radialaccel pushes away from the origin");
+        Particle on = particleAt({10, 0, 0}, {0, 0, 0});
+        runVelocityModule(mod(ModuleKind::UpdateRadialAccel, {{"min", 30}, {"max", 30}}), env, on);
+        check(on.velocity.size() == 0.0f, "at the origin there is no direction");
+        Particle t = particleAt({20, 0, 0}, {0, 0, 0});
+        runVelocityModule(mod(ModuleKind::UpdateTangentialAccel, {{"min", 10}, {"max", 10}, {"ax", 0}, {"ay", 0}, {"az", 1}}), env, t);
+        checkNear(t.velocity.x, 0.0f, 1e-5f, "tangentialaccel is perpendicular to the radius");
+        checkNear(t.velocity.y, -1.0f, 1e-5f, "...along cross(radius, axis) (here -Y for +Z about +X)");
+        Particle degenerate = particleAt({20, 0, 0}, {0, 0, 0});
+        runVelocityModule(mod(ModuleKind::UpdateTangentialAccel, {{"min", 10}, {"max", 10}, {"ax", 0}, {"ay", 0}, {"az", 0}}), env, degenerate);
+        check(degenerate.velocity.size() == 0.0f, "a zero axis does nothing");
+        Particle along = particleAt({10, 0, 5}, {0, 0, 0});
+        runVelocityModule(mod(ModuleKind::UpdateTangentialAccel, {{"min", 10}, {"max", 10}, {"ax", 0}, {"ay", 0}, {"az", 1}}), env, along);
+        check(along.velocity.size() == 0.0f, "on the axis the tangent is undefined, so nothing");
+    }
+    {   // constant damping stops at zero speed and never reverses
+        Particle p = particleAt({}, {10, 0, 0});
+        runVelocityModule(mod(ModuleKind::UpdateDamping, {{"min", 50}, {"max", 50}}), env, p);
+        checkNear(p.velocity.x, 5.0f, 1e-5f, "damping 50 for 0.1 s takes 5 off the speed");
+        runVelocityModule(mod(ModuleKind::UpdateDamping, {{"min", 500}, {"max", 500}}), env, p);
+        check(p.velocity.x == 0.0f, "a large damping stops the particle at zero");
+        Particle neg = particleAt({}, {10, 0, 0});
+        runVelocityModule(mod(ModuleKind::UpdateDamping, {{"min", -50}, {"max", -50}}), env, neg);
+        checkNear(neg.velocity.x, 10.0f, 1e-5f, "a negative damping is clamped (it never speeds a particle up)");
+    }
+    {   // orbit: a position module that turns the offset from the origin about the axis
+        ModuleEnv one = env;
+        one.dt = 1.0f;
+        Particle p = particleAt({20, 0, 0}, {1, 2, 3});
+        runPositionModule(mod(ModuleKind::UpdateOrbit, {{"min", 0.25f}, {"max", 0.25f}, {"ax", 0}, {"ay", 0}, {"az", 1}}), one, p);
+        checkNear(p.position.x, 10.0f, 1e-4f, "a quarter turn about +Z around (10,0,0): x");
+        checkNear(p.position.y, 10.0f, 1e-4f, "...y");
+        check(p.velocity.x == 1.0f && p.velocity.y == 2.0f && p.velocity.z == 3.0f, "the velocity is not turned");
+        Particle q = particleAt({20, 0, 7}, {});
+        runPositionModule(mod(ModuleKind::UpdateOrbit, {{"min", 1.0f}, {"max", 1.0f}, {"ax", 0}, {"ay", 0}, {"az", 1}}), one, q);
+        checkNear(q.position.x, 20.0f, 1e-3f, "a full turn comes back");
+        checkNear(q.position.z, 7.0f, 1e-5f, "motion along the axis is untouched");
+        Particle z = particleAt({20, 0, 0}, {});
+        check(runPositionModule(mod(ModuleKind::UpdateOrbit, {{"min", 1.0f}, {"max", 1.0f}, {"ax", 0}, {"ay", 0}, {"az", 0}}), one, z) == 0 && z.position.x == 20.0f, "a zero axis does nothing");
+    }
+    {   // solid box: pushed out through the nearest face, reflected like the plane and the sphere
+        ModuleEnv e2;
+        e2.dt = 0.016f;
+        const ResolvedModule box = mod(ModuleKind::UpdateCollideBox, {{"hx", 10}, {"hy", 10}, {"hz", 10}, {"restitution", 0.5f}, {"friction", 0}});
+        Particle p = particleAt({9, 1, 0}, {-50, 0, 0});   // came in through the +X face, still heading deeper
+        const u32 bits = runPositionModule(box, e2, p);
+        check((bits & kModuleCollided) != 0 && (bits & kModuleKilled) == 0, "inside the box: collides and survives");
+        checkNear(p.position.x, 10.0f, 1e-5f, "pushed out through the nearest face (+X)");
+        checkNear(p.velocity.x, 25.0f, 1e-4f, "the velocity into the box reflects scaled by restitution");
+        Particle outside = particleAt({11, 0, 0}, {-50, 0, 0});
+        check(runPositionModule(box, e2, outside) == 0 && outside.velocity.x == -50.0f, "outside: nothing");
+        Particle top = particleAt({0, 0, 9.5f}, {0, 0, -10});
+        runPositionModule(box, e2, top);
+        checkNear(top.position.z, 10.0f, 1e-5f, "through the top face");
+        Particle leaving = particleAt({9, 0, 0}, {50, 0, 0});
+        leaving.spawnInfo |= kParticleFlagCollided << 16;
+        check((runPositionModule(box, e2, leaving) & kModuleCollided) == 0, "the collide event fires once per particle here too");
+        Particle thin = particleAt({0, 0, 0}, {10, 0, 0});
+        check(runPositionModule(mod(ModuleKind::UpdateCollideBox, {{"hx", 10}, {"hy", 0}, {"hz", 10}}), e2, thin) == 0, "a box with a flat axis collides with nothing");
+    }
+    {   // hue variation: a turn stored in spawnInfo bits 17..31, the rest of spawnInfo kept
+        bool inRange = true, varied = false;
+        u32 first = 0;
+        for (u32 i = 0; i < 4000; ++i) {
+            Particle p = particleAt({}, {}, particleSeed(99, i));
+            p.spawnInfo = 5u | (kParticleFlagCollided << 16);
+            runSpawnModule(mod(ModuleKind::SpawnHueVariation, {{"min", 0.25f}, {"max", 0.5f}}), p, {});
+            const f32 turns = particleHueTurns(p.spawnInfo);
+            inRange = inRange && turns >= 0.25f - 1e-4f && turns <= 0.5f + 1e-4f && (p.spawnInfo & 0x1FFFFu) == (5u | 0x10000u);
+            if (i == 0) first = p.spawnInfo; else varied = varied || p.spawnInfo != first;
+        }
+        check(inRange, "the hue turn spans [min, max] and leaves the frame and the collided flag alone");
+        check(varied, "and differs between particles");
+        Particle w = particleAt({}, {}, 5u);
+        runSpawnModule(mod(ModuleKind::SpawnHueVariation, {{"min", -0.25f}, {"max", -0.25f}}), w, {});
+        checkNear(particleHueTurns(w.spawnInfo), 0.75f, 1e-4f, "a negative turn wraps into [0, 1)");
+        f32 out[3];
+        const f32 red[3] = {1, 0, 0};
+        hueRotate(red, 1.0f / 3.0f, out);
+        check(std::fabs(out[0]) < 1e-5f && std::fabs(out[1] - 1.0f) < 1e-5f && std::fabs(out[2]) < 1e-5f, "a third of a turn takes red to green");
+        hueRotate(red, 0.0f, out);
+        check(out[0] == 1.0f && std::fabs(out[1]) < 1e-6f && std::fabs(out[2]) < 1e-6f, "no turn is the identity");
+        const f32 grey[3] = {0.4f, 0.4f, 0.4f};
+        hueRotate(grey, 0.37f, out);
+        check(std::fabs(out[0] - 0.4f) < 1e-5f && std::fabs(out[1] - 0.4f) < 1e-5f && std::fabs(out[2] - 0.4f) < 1e-5f, "a grey stays grey");
+        const f32 col[3] = {0.8f, 0.3f, 0.1f};
+        hueRotate(col, 0.2f, out);
+        checkNear(out[0] + out[1] + out[2], 1.2f, 0.05f, "a hue turn keeps about the same total (clamped negatives aside)");
+    }
+    {   // animation start frame
+        Particle p = particleAt({}, {}, 77u);
+        p.spawnInfo = (0x1234u << 16) | 3u;
+        runSpawnModule(mod(ModuleKind::SpawnAnimStart, {{"min", 0.5f}, {"max", 0.5f}, {"frames", 8}}), p, {});
+        check((p.spawnInfo & 0xFFFFu) == 4u && (p.spawnInfo >> 16) == 0x1234u, "min = max = 0.5 of an 8 frame sheet starts at frame 4 and keeps the high bits");
+        Particle z = particleAt({}, {}, 77u);
+        runSpawnModule(mod(ModuleKind::SpawnAnimStart, {{"min", 0}, {"max", 0}, {"frames", 8}}), z, {});
+        check((z.spawnInfo & 0xFFFFu) == 0u, "0 starts at the first frame");
+        bool inRange = true;
+        for (u32 i = 0; i < 2000; ++i) {
+            Particle q = particleAt({}, {}, particleSeed(3, i));
+            runSpawnModule(mod(ModuleKind::SpawnAnimStart, {{"min", 0.25f}, {"max", 0.75f}, {"frames", 16}}), q, {});
+            const u32 f = q.spawnInfo & 0xFFFFu;
+            inRange = inRange && f >= 4u && f <= 12u;
+        }
+        check(inRange, "the start frame spans [min, max] of the sheet");
+        Particle big = particleAt({}, {}, 5u);
+        runSpawnModule(mod(ModuleKind::SpawnAnimStart, {{"min", 0}, {"max", 1}, {"frames", 1e9f}}), big, {});
+        check((big.spawnInfo & 0xFFFFu) < 65535u + 1u, "a huge frame count is clamped to what spawnInfo holds");
+    }
+    {   // the shared HLSL carries the same ids, streams and the hue constants
+        std::string hlsl, sim, draw;
+        const std::string root = AVER_REPO_ROOT;
+        check(readFileText(root + "/modules/particles/shaders/particles_common.hlsli", hlsl), "particles_common.hlsli is readable");
+        check(readFileText(root + "/modules/particles/shaders/particles_sim.hlsl", sim), "particles_sim.hlsl is readable");
+        check(readFileText(root + "/modules/particles/shaders/particles.hlsl", draw), "particles.hlsl is readable");
+        const auto in = [](const std::string& hay, const std::string& s) { return hay.find(s) != std::string::npos; };
+        const struct { const char* name; ModuleKind kind; } ids[] = {
+            {"PMOD_LINEARACCEL", ModuleKind::UpdateLinearAccel}, {"PMOD_RADIALACCEL", ModuleKind::UpdateRadialAccel},
+            {"PMOD_TANGENTACCEL", ModuleKind::UpdateTangentialAccel}, {"PMOD_DAMPING", ModuleKind::UpdateDamping},
+            {"PMOD_ORBIT", ModuleKind::UpdateOrbit}, {"PMOD_HUEVARIATION", ModuleKind::SpawnHueVariation},
+            {"PMOD_ANIMSTART", ModuleKind::SpawnAnimStart}, {"PMOD_COLLIDEBOX", ModuleKind::UpdateCollideBox},
+        };
+        for (const auto& id : ids)
+            check(in(hlsl, std::string("#define ") + id.name + " " + std::to_string(static_cast<u32>(id.kind)) + "u"), std::string(id.name) + " is the C++ ModuleKind value");
+        const struct { const char* name; u32 value; } streams[] = {
+            {"PSTREAM_ACCEL_LINEAR", kStreamAccelLinear}, {"PSTREAM_ACCEL_RADIAL", kStreamAccelRadial}, {"PSTREAM_ACCEL_TANGENT", kStreamAccelTangent},
+            {"PSTREAM_DAMP", kStreamDamp}, {"PSTREAM_ORBIT", kStreamOrbit}, {"PSTREAM_HUE", kStreamHue}, {"PSTREAM_ANIM_START", kStreamAnimStart},
+        };
+        for (const auto& s : streams)
+            check(in(hlsl, std::string("#define ") + s.name + " " + std::to_string(s.value) + "u"), std::string(s.name) + " is the C++ stream id");
+        check(in(hlsl, "#define PHUE_SHIFT " + std::to_string(kParticleHueShift) + "u") && in(hlsl, "#define PHUE_MASK 0x7FFFu") && kParticleHueMask == 0x7FFFu &&
+                  in(hlsl, "#define PHUE_STEPS 32768.0") && kParticleHueSteps == 32768u, "the hue bits are the same in both");
+        check(in(sim, "pRunPositionModule(m, gS.origin, gS.dt, p)") && in(draw, "float4 col = pParticleColor(t, p);") && in(draw, "float4 col = pParticleColor(t, e);"),
+              "the update kernel passes the origin and step to the position modules; the draw applies the hue to every kind");
+        check(in(hlsl, "if (h.shape == 5u)") && static_cast<u32>(EmitterShape::Ring) == 5u, "the ring is shape 5 in both");
+    }
+}
+
 int main() {
     AVER_INFO("ParticleModulesTest");
     testRandom();
@@ -375,6 +543,7 @@ int main() {
     testVelocityModules();
     testPositionModules();
     testSpawnModules();
+    testWave6Modules();
     testBindingAndOrder();
     testCurves();
     AVER_INFO("ParticleModulesTest: {}/{} checks passed", g_checks - g_failures, g_checks);

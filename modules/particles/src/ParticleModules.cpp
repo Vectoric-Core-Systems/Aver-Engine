@@ -1,4 +1,4 @@
-// The 13 modules' arithmetic on the CPU. particles_common.hlsli repeats it line for line; change one, change both.
+// The 21 modules' arithmetic on the CPU. particles_common.hlsli repeats it line for line; change one, change both.
 #include "aver/particles/ParticleModules.hpp"
 
 #include "aver/particles/ParticleRandom.hpp"
@@ -37,6 +37,22 @@ const ModuleInfo kModules[] = {
      {"x", "y", "z", "r", "restitution", "friction", "kill"}, {0, 0, 0, 0, 0.4f, 0.2f, 0}},
     {ModuleKind::UpdateKillVolume, "update.killvolume", ModuleStage::Position, 8,
      {"shape", "cx", "cy", "cz", "hx", "hy", "hz", "invert"}, {0, 0, 0, 0, 0, 0, 0, 0}},
+    {ModuleKind::UpdateLinearAccel, "update.linearaccel", ModuleStage::Velocity, 2,
+     {"min", "max"}, {0, 0}},
+    {ModuleKind::UpdateRadialAccel, "update.radialaccel", ModuleStage::Velocity, 2,
+     {"min", "max"}, {0, 0}},
+    {ModuleKind::UpdateTangentialAccel, "update.tangentialaccel", ModuleStage::Velocity, 5,
+     {"min", "max", "ax", "ay", "az"}, {0, 0, 0, 0, 1}},
+    {ModuleKind::UpdateDamping, "update.damping", ModuleStage::Velocity, 2,
+     {"min", "max"}, {0, 0}},
+    {ModuleKind::UpdateOrbit, "update.orbit", ModuleStage::Position, 5,
+     {"min", "max", "ax", "ay", "az"}, {0, 0, 0, 0, 1}},
+    {ModuleKind::SpawnHueVariation, "spawn.huevariation", ModuleStage::Spawn, 2,
+     {"min", "max"}, {0, 0}},
+    {ModuleKind::SpawnAnimStart, "spawn.animstart", ModuleStage::Spawn, 3,
+     {"min", "max", "frames"}, {0, 1, 1}},
+    {ModuleKind::UpdateCollideBox, "update.collidebox", ModuleStage::Position, 8,
+     {"cx", "cy", "cz", "hx", "hy", "hz", "restitution", "friction"}, {0, 0, 0, 0, 0, 0, 0.4f, 0.2f}},
 };
 static_assert(sizeof(kModules) / sizeof(kModules[0]) == static_cast<usize>(ModuleKind::Count),
               "one ModuleInfo per ModuleKind, in enum order");
@@ -150,9 +166,34 @@ void runSpawnModule(const ResolvedModule& m, Particle& p, const Vec3& emitterVel
     case ModuleKind::SpawnInheritVelocity:
         p.velocity += emitterVelocity * m.p[0];
         break;
+    case ModuleKind::SpawnHueVariation: {
+        f32 turns = lerpf(m.p[0], m.p[1], rand01(p.seed, kStreamHue));
+        turns -= std::floor(turns);
+        const u32 q = static_cast<u32>(turns * static_cast<f32>(kParticleHueSteps)) & kParticleHueMask;
+        p.spawnInfo = (p.spawnInfo & ((1u << kParticleHueShift) - 1u)) | (q << kParticleHueShift);
+        break;
+    }
+    case ModuleKind::SpawnAnimStart: {
+        const f32 frames = static_cast<f32>(static_cast<u32>(std::min(std::max(m.p[2], 1.0f), 65535.0f)));
+        const f32 f = std::min(std::max(lerpf(m.p[0], m.p[1], rand01(p.seed, kStreamAnimStart)), 0.0f), 0.99999f);
+        const u32 frame = std::min(static_cast<u32>(std::floor(f * frames)), static_cast<u32>(frames) - 1u);
+        p.spawnInfo = (p.spawnInfo & 0xFFFF0000u) | frame;
+        break;
+    }
     default:
         break;
     }
+}
+
+void hueRotate(const f32 rgb[3], f32 turns, f32 out[3]) {
+    const f32 a = turns * kTwoPi;
+    const f32 c = std::cos(a), s = std::sin(a);
+    const f32 k = (1.0f - c) * (1.0f / 3.0f);
+    const f32 sq = 0.57735026918962576f * s;
+    const f32 d = c + k, up = k + sq, dn = k - sq;
+    out[0] = std::max(rgb[0] * d + rgb[1] * dn + rgb[2] * up, 0.0f);
+    out[1] = std::max(rgb[0] * up + rgb[1] * d + rgb[2] * dn, 0.0f);
+    out[2] = std::max(rgb[0] * dn + rgb[1] * up + rgb[2] * d, 0.0f);
 }
 
 Vec3 curlNoiseField(const Vec3& worldPos, f32 freq, f32 time, f32 scroll, int octaves, u32 seed) {
@@ -221,14 +262,78 @@ void runVelocityModule(const ResolvedModule& m, const ModuleEnv& env, Particle& 
         }
         break;
     }
+    case ModuleKind::UpdateLinearAccel: {
+        const f32 speed = p.velocity.size();
+        if (speed > 1e-6f) {
+            const f32 a = lerpf(m.p[0], m.p[1], rand01(p.seed, kStreamAccelLinear));
+            p.velocity += p.velocity * (a / speed * env.dt);
+        }
+        break;
+    }
+    case ModuleKind::UpdateRadialAccel: {
+        const Vec3 d = p.position - env.origin;
+        const f32 len = d.size();
+        if (len > 1e-4f) {
+            const f32 a = lerpf(m.p[0], m.p[1], rand01(p.seed, kStreamAccelRadial));
+            p.velocity += d * (a / len * env.dt);
+        }
+        break;
+    }
+    case ModuleKind::UpdateTangentialAccel: {
+        const Vec3 axis = Vec3{m.p[2], m.p[3], m.p[4]}.getSafeNormal();
+        if (axis.sizeSquared() < 0.5f) break;
+        const Vec3 d = p.position - env.origin;
+        const f32 len = d.size();
+        if (len > 1e-4f) {
+            const Vec3 t = cross(d * (1.0f / len), axis);
+            const f32 tl = t.size();
+            if (tl > 1e-4f) {
+                const f32 a = lerpf(m.p[0], m.p[1], rand01(p.seed, kStreamAccelTangent));
+                p.velocity += t * (a / tl * env.dt);
+            }
+        }
+        break;
+    }
+    case ModuleKind::UpdateDamping: {
+        const f32 speed = p.velocity.size();
+        if (speed > 1e-6f) {
+            const f32 d = std::max(lerpf(m.p[0], m.p[1], rand01(p.seed, kStreamDamp)), 0.0f);
+            p.velocity *= std::max(speed - d * env.dt, 0.0f) / speed;
+        }
+        break;
+    }
     default:
         break;
     }
 }
 
 u32 runPositionModule(const ResolvedModule& m, const ModuleEnv& env, Particle& p) {
-    (void)env;
     switch (m.kind) {
+    case ModuleKind::UpdateOrbit: {
+        const Vec3 axis = Vec3{m.p[2], m.p[3], m.p[4]}.getSafeNormal();
+        if (axis.sizeSquared() < 0.5f) return 0;
+        const f32 rev = lerpf(m.p[0], m.p[1], rand01(p.seed, kStreamOrbit));
+        if (rev == 0.0f) return 0;
+        const f32 ang = rev * kTwoPi * env.dt;
+        const f32 c = std::cos(ang), s = std::sin(ang);
+        const Vec3 r = p.position - env.origin;
+        p.position = env.origin + r * c + cross(axis, r) * s + axis * (dot(axis, r) * (1.0f - c));
+        return 0;
+    }
+    case ModuleKind::UpdateCollideBox: {
+        const Vec3 c{m.p[0], m.p[1], m.p[2]};
+        const Vec3 h{m.p[3], m.p[4], m.p[5]};
+        if (!(h.x > 0.0f && h.y > 0.0f && h.z > 0.0f)) return 0;
+        const Vec3 d = p.position - c;
+        const f32 qx = h.x - std::fabs(d.x), qy = h.y - std::fabs(d.y), qz = h.z - std::fabs(d.z);
+        if (!(qx > 0.0f && qy > 0.0f && qz > 0.0f)) return 0;   // outside the solid
+        Vec3 n{0, 0, 0};
+        if (qx <= qy && qx <= qz)      { n.x = d.x < 0.0f ? -1.0f : 1.0f; p.position.x = c.x + n.x * h.x; }
+        else if (qy <= qz)             { n.y = d.y < 0.0f ? -1.0f : 1.0f; p.position.y = c.y + n.y * h.y; }
+        else                           { n.z = d.z < 0.0f ? -1.0f : 1.0f; p.position.z = c.z + n.z * h.z; }
+        bounce(p, n, m.p[6], m.p[7]);
+        return collideResult(p, false);
+    }
     case ModuleKind::UpdateCollidePlane: {
         const Vec3 n = Vec3{m.p[0], m.p[1], m.p[2]}.getSafeNormal();
         if (n.sizeSquared() < 0.5f) return 0;

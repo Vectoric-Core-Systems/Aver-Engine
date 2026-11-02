@@ -99,6 +99,14 @@ float4 pEvalColor(float t) {
 
 float pLifeFraction(PParticle p) { return p.lifetime > 0.0 ? saturate(p.age / p.lifetime) : 1.0; }
 
+// The colour curve times the particle's tint, with its hue turn (spawn.huevariation, spawnInfo bits 17..31) applied to the rgb. Zero turn: the colour as before.
+float4 pParticleColor(float t, PParticle p) {
+    float4 col = pEvalColor(t) * pUnpackColor(p.tint);
+    uint hue = (p.spawnInfo >> PHUE_SHIFT) & PHUE_MASK;
+    if (hue != 0u) col.rgb = pHueRotate(col.rgb, (float)hue * (1.0 / PHUE_STEPS));
+    return col;
+}
+
 // SubUV: the two frames' coordinates and the blend between them.
 void pSubUv(PParticle p, float t, float2 uvl, out float4 uvAB, out float blend) {
     float cols = max(gSubuv.x, 1.0), rows = max(gSubuv.y, 1.0), frames = max(gSubuv.z, 1.0);
@@ -139,7 +147,7 @@ PVSOut ParticleSpriteVS(PQuadIn vin, uint inst : SV_InstanceID) {
     PParticle p = gParticles[slot];
     float t = pLifeFraction(p);
     float size = pEvalSize(t) * p.sizeScale;
-    float4 col = pEvalColor(t) * pUnpackColor(p.tint);
+    float4 col = pParticleColor(t, p);
     float2 c = vin.corner;
     uint mode = (uint)gCamRight.w;
     float3 right = gCamRight.xyz, up = gCamUp.xyz;
@@ -208,7 +216,7 @@ PVSOut pTrailRibbon(PQuadIn vin, uint inst) {
     float size = pEvalSize(t) * p.sizeScale;
     float along = (float)j / (float)ring;
     float fade = saturate(1.0 - gTrailInfo.y * along);
-    float4 col = pEvalColor(t) * pUnpackColor(p.tint);
+    float4 col = pParticleColor(t, p);
     col.a *= fade;
     float3 world = P + side * (vin.corner.y * size * 0.5);
     float2 uvl = float2(along, -vin.corner.y * 0.5 + 0.5);
@@ -244,7 +252,7 @@ PVSOut pLinkedRibbon(PQuadIn vin, uint inst) {
     side = sl > 1e-4 ? side / sl : gCamRight.xyz;
     float t = pLifeFraction(e);
     float size = pEvalSize(t) * e.sizeScale;
-    float4 col = pEvalColor(t) * pUnpackColor(e.tint);
+    float4 col = pParticleColor(t, e);
     float3 world = P + side * (vin.corner.y * size * 0.5);
     float2 uvl = float2(head ? 1.0 : 0.0, -vin.corner.y * 0.5 + 0.5);
     return pFinish(world, -view, col, uvl, e, t);
@@ -261,7 +269,7 @@ PVSOut ParticleMeshVS(PMeshIn vin, uint inst : SV_InstanceID) {
     PParticle p = gParticles[slot];
     float t = pLifeFraction(p);
     float scale = pEvalSize(t) * p.sizeScale * gSize.w;
-    float4 col = pEvalColor(t) * pUnpackColor(p.tint);
+    float4 col = pParticleColor(t, p);
 
     uint orient = (uint)gMisc.y;
     float3 X, Y, Z;

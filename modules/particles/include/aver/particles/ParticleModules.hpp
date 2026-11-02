@@ -1,4 +1,4 @@
-// The module stack: a closed set of 13 data-driven modules (spawn and update stages), evaluated by the CPU
+// The module stack: a closed set of 21 data-driven modules (spawn and update stages), evaluated by the CPU
 // executor (EmitterSim) from this file's functions and by the GPU kernels from particles_common.hlsli, which
 // evaluates the same table with the same arithmetic. ParticleModulesTest and ParticleGpuParityTest pin the two.
 //
@@ -60,6 +60,14 @@ u32  runPositionModule(const ResolvedModule& m, const ModuleEnv& env, Particle& 
 
 // Curl of the module's 3D noise potential at `p` (noise-space units); update.curlnoise multiplies it by strength.
 Vec3 curlNoiseField(const Vec3& worldPos, f32 freq, f32 time, f32 scroll, int octaves, u32 seed);
+
+// ---- hue variation (spawn.huevariation) ----
+// A particle's hue turn as a fraction of a full turn, from its spawnInfo (0 when none was drawn).
+inline f32 particleHueTurns(u32 spawnInfo) {
+    return static_cast<f32>((spawnInfo >> kParticleHueShift) & kParticleHueMask) * (1.0f / static_cast<f32>(kParticleHueSteps));
+}
+// The colour rotated about the grey axis (1,1,1) by `turns` of a full turn; negative results clamp to 0. The draw shader (particles.hlsl, pHueRotate) is the twin.
+void hueRotate(const f32 rgb[3], f32 turns, f32 out[3]);
 
 // ---- curves ----
 // True and fills out[0..3] when the curve has >= 2 stops; clamps outside [t0, tLast].

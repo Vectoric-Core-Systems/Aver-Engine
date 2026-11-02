@@ -13,6 +13,7 @@
 //   SIM auto|cpu|gpu
 //   SHAPE point|sphere|box <x> <y> <z>             -- v1 spelling, always three numbers
 //   SHAPE sphere <r> | cylinder <r> <h> | disc <r> -- short forms; `shell` after the numbers = surface only
+//   SHAPE ring <r> [<h> [<inner>]] [axis <x> <y> <z>] [shell]   -- an annulus: outer radius, full height, inner radius, the axis it turns about (default +Z)
 //   BLEND opaque|alphablend|premultiplied|additive -- rhi::BlendMode
 //   EMISSION <rate> <burstCount> <maxParticles>    -- f32, u32, u32
 //   LIFETIME <min> <max>                           -- f32 seconds
@@ -159,6 +160,7 @@ const char* shapeWord(particles::EmitterShape s) {
         case particles::EmitterShape::Box:      return "box";
         case particles::EmitterShape::Cylinder: return "cylinder";
         case particles::EmitterShape::Disc:     return "disc";
+        case particles::EmitterShape::Ring:     return "ring";
         case particles::EmitterShape::Point:    default: return "point";
     }
 }
@@ -397,10 +399,19 @@ bool parseOcparticleSystem(std::string_view text, particles::ParticleSystemDef& 
             else if (equalsCI(t[1], "box"))      { shape = particles::EmitterShape::Box;      minNums = 3; maxNums = 3; }
             else if (equalsCI(t[1], "cylinder")) { shape = particles::EmitterShape::Cylinder; minNums = 2; maxNums = 3; }
             else if (equalsCI(t[1], "disc"))     { shape = particles::EmitterShape::Disc;     minNums = 1; maxNums = 3; }
-            else return fail("unknown SHAPE kind '" + std::string(t[1]) + "' (want point, sphere, box, cylinder or disc)");
+            else if (equalsCI(t[1], "ring"))     { shape = particles::EmitterShape::Ring;     minNums = 1; maxNums = 3; }
+            else return fail("unknown SHAPE kind '" + std::string(t[1]) + "' (want point, sphere, box, cylinder, disc or ring)");
             bool shell = false;
             usize last = t.size();
             if (last > 2 && equalsCI(t[last - 1], "shell")) { shell = true; --last; }
+            Vec3 axis{0, 0, 1};
+            if (shape == particles::EmitterShape::Ring && last >= 6 && equalsCI(t[last - 4], "axis")) {
+                f32 a[3];
+                for (usize k = 0; k < 3; ++k)
+                    if (!strictF32(t[last - 3 + k], a[k])) return fail("SHAPE ring has a malformed axis");
+                axis = Vec3{a[0], a[1], a[2]};
+                last -= 4;
+            }
             const usize nums = last - 2;
             if (nums < minNums || nums > maxNums || ((shape == particles::EmitterShape::Point || shape == particles::EmitterShape::Box) && nums != 3)) {
                 return fail(std::string("SHAPE ") + std::string(t[1]) + " has the wrong number of fields (v1 spelling: SHAPE kind x y z)");
@@ -411,7 +422,8 @@ bool parseOcparticleSystem(std::string_view text, particles::ParticleSystemDef& 
             particles::ParticleEffect& e = emitter();
             e.shape = shape;
             e.shapeShell = shell;
-            if (nums == 3) e.shapeSize = Vec3{v[0], v[1], v[2]};
+            e.shapeAxis = axis;
+            if (nums == 3 || shape == particles::EmitterShape::Ring) e.shapeSize = Vec3{v[0], v[1], v[2]};
             else if (shape == particles::EmitterShape::Cylinder) e.shapeSize = Vec3{v[0], v[1], 0.0f};
             else e.shapeSize = Vec3{v[0], 0.0f, 0.0f};
         } else if (equalsCI(key, "BLEND")) {
@@ -794,7 +806,7 @@ bool ocparticleFitsV1(const particles::ParticleSystemDef& def) {
     if (def.emitters.size() != 1 || !def.params.empty()) return false;
     const ParticleEffect& e = def.emitters[0];
     const ParticleEffect d{};
-    if (e.shape == EmitterShape::Cylinder || e.shape == EmitterShape::Disc || e.shapeShell) return false;
+    if (e.shape == EmitterShape::Cylinder || e.shape == EmitterShape::Disc || e.shape == EmitterShape::Ring || e.shapeShell) return false;
     if (e.simTier != d.simTier || e.render != d.render || e.align != d.align) return false;
     if (e.alignAxis.x != d.alignAxis.x || e.alignAxis.y != d.alignAxis.y || e.alignAxis.z != d.alignAxis.z) return false;
     if (e.stretch != d.stretch || e.subuvCols != d.subuvCols || e.subuvRows != d.subuvRows ||
@@ -863,6 +875,8 @@ EmitterText buildEmitterText(const particles::ParticleSystemDef& def, usize inde
         if (e.shape == EmitterShape::Cylinder) s += " " + num(e.shapeSize.x) + " " + num(e.shapeSize.y);
         else if (e.shape == EmitterShape::Disc) s += " " + num(e.shapeSize.x);
         else s += " " + num(e.shapeSize.x) + " " + num(e.shapeSize.y) + " " + num(e.shapeSize.z);
+        if (e.shape == EmitterShape::Ring && (e.shapeAxis.x != 0.0f || e.shapeAxis.y != 0.0f || e.shapeAxis.z != 1.0f))
+            s += " axis " + num(e.shapeAxis.x) + " " + num(e.shapeAxis.y) + " " + num(e.shapeAxis.z);
         if (e.shapeShell) s += " shell";
         R(Rec::Shape) = s + "\n";
     }

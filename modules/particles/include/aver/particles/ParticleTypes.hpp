@@ -24,6 +24,7 @@ enum class EmitterShape : u32 {
     Box      = 2,   // uniformly inside a box of half-extents shapeSize
     Cylinder = 3,   // radius shapeSize.x, full height shapeSize.y centred on the origin, axis +Z
     Disc     = 4,   // radius shapeSize.x in the XY plane
+    Ring     = 5,   // an annulus about shapeAxis: outer radius shapeSize.x, full height shapeSize.y centred on the origin, inner radius shapeSize.z (shell = the outer rim)
 };
 
 // Where a given emitter instance simulates. Auto picks per instance when it is created and never changes.
@@ -34,7 +35,7 @@ enum class SpriteAlign : u8 { Camera = 0, Velocity = 1, Axis = 2 };
 enum class Lighting : u8 { Unlit = 0, Ambient = 1, Lit = 2 };
 enum class SortMode : u8 { Auto = 0, None = 1, Depth = 2 };   // Auto: Depth for AlphaBlend / PremultipliedAlpha
 
-// The closed set of 13 data-driven modules (ParticleModules.hpp has the table).
+// The closed set of 21 data-driven modules (ParticleModules.hpp has the table). Wave 6 appended the last eight; ids never change.
 enum class ModuleKind : u8 {
     SpawnSizeScale = 0,
     SpawnColorTint,
@@ -49,6 +50,14 @@ enum class ModuleKind : u8 {
     UpdateCollidePlane,
     UpdateCollideSphere,
     UpdateKillVolume,
+    UpdateLinearAccel,       // along the velocity, a per-particle acceleration drawn from [min, max]
+    UpdateRadialAccel,       // away from the emitter origin, per-particle [min, max]
+    UpdateTangentialAccel,   // around an axis through the emitter origin, per-particle [min, max]
+    UpdateDamping,           // a constant per-particle deceleration [min, max] that stops at zero speed
+    UpdateOrbit,             // turns the position about an axis through the emitter origin, per-particle revolutions per second [min, max]
+    SpawnHueVariation,       // a per-particle hue turn drawn from [min, max], applied to the drawn colour
+    SpawnAnimStart,          // the sprite sheet's first frame drawn from [min, max] of the sheet
+    UpdateCollideBox,        // an axis-aligned solid box in world space
     Count
 };
 
@@ -152,7 +161,8 @@ struct ParticleEffect {
     f32 boundsRadiusCm = 0;             // 0: unbounded (the editor's Compute bounds fills it)
     f32 cullDistanceCm = 0;             // 0: never
     bool spawnAtTarget = true;          // takes part in spawnAt requests
-    bool shapeShell = false;            // sphere / cylinder / disc: spawn on the surface only
+    bool shapeShell = false;            // sphere / cylinder / disc / ring: spawn on the surface only
+    Vec3 shapeAxis{0, 0, 1};            // ring: the axis it turns about (any length; a zero vector reads as +Z)
     Curve4 sizeCurve, colorCurve;       // override sizeStart/End and colorStart/End when n >= 2
     std::vector<Module> modules;        // authored order is execution order within a phase
     std::vector<EventSpawn> events;
@@ -190,6 +200,10 @@ static_assert(sizeof(Particle) == 64, "Particle must stay four float4s: the HLSL
 static_assert(offsetof(Particle, seed) == 32 && offsetof(Particle, sizeScale) == 48, "Particle layout drifted from particles_common.hlsli");
 
 inline constexpr u32 kParticleFlagCollided = 1u;   // in spawnInfo >> 16: the collide event has fired for this particle
+// spawnInfo bits 17..31: the particle's hue turn, 0..32767 for [0, 1) of a full turn (spawn.huevariation). 0 draws the colour as authored.
+inline constexpr u32 kParticleHueShift = 17;
+inline constexpr u32 kParticleHueMask = 0x7FFFu;
+inline constexpr u32 kParticleHueSteps = 32768u;
 
 inline bool particleAlive(const Particle& p) { return p.age < p.lifetime; }
 

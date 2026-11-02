@@ -69,10 +69,10 @@ struct GpuSimHeader {
     f32 shapeSize[3];  f32 spreadDeg;
     f32 direction[3];  f32 speedMin;
     f32 speedMax;  f32 lifeMin;  f32 lifeMax;  u32 trailRing;
-    f32 trailSegment;  u32 subuvFrames;  f32 subuvFps;  u32 pad8;
+    f32 trailSegment;  u32 subuvFrames;  f32 subuvFps;  f32 shapeAxisX;    // shapeAxis*: the ring's axis (wave 6; these three were padding, so the block stays 192 bytes)
     u32 evType;  u32 evCount;  f32 evInherit;  u32 evActive;            // evActive: this emitter consumes its parent's events
     u32 drawMult;  u32 indexCount;  u32 sortEnabled;  u32 evWriteBase;  // evWriteBase: this frame's event region (uint offset)
-    u32 sortedBase;  u32 evReadBase;  u32 pad11a;  u32 pad11b;          // sortedBase: sorted-order region; evReadBase: the parent's region this emitter consumes
+    u32 sortedBase;  u32 evReadBase;  f32 shapeAxisY;  f32 shapeAxisZ;  // sortedBase: sorted-order region; evReadBase: the parent's region this emitter consumes
 };
 static_assert(sizeof(GpuSimHeader) == 192, "GpuSimHeader is twelve float4 rows");
 static_assert(offsetof(GpuSimHeader, gravity) == 32 && offsetof(GpuSimHeader, origin) == 48 &&

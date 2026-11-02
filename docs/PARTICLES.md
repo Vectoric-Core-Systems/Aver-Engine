@@ -16,6 +16,7 @@ The registered effect id is `fnv1a64` of the content-relative path (`particles::
 | `EMITTER <name>` | starts the next emitter block; records before the first one belong to emitter 0 |
 | `SIM auto\|cpu\|gpu` | tier request (see Selection) |
 | `SHAPE sphere <r>`, `cylinder <r> <h>`, `disc <r>`, optional `shell` | short forms; the v1 `SHAPE kind x y z` spelling still works |
+| `SHAPE ring <r> [<h> [<inner>]] [axis <x y z>] [shell]` | an annulus: outer radius, full height along the axis (centred), inner radius, the axis it turns about (default +Z); `shell` = the outer rim only |
 | `SIZECURVE`, `COLORCURVE` | 2 to 4 stops, override `SIZE` and `COLOR start/end` |
 | `RENDER sprite`, `ribbon trail <points> <segmentCm> fade <f>`, `ribbon linked <capacity>`, `mesh <path> velocity\|spin\|fixed` | what a particle draws as |
 | `SPRITE camera`, `velocity stretch <k>`, `axis <x y z>` | sprite alignment |
@@ -29,9 +30,24 @@ Parse errors carry `line N:`. The format spec is `docs/formats/FORMAT_SPECS.md` 
 
 ## The module stack
 
-13 modules, the same on both tiers (`ParticleModules.hpp`, `EmitterSim.cpp`, `particles_common.hlsli`). Order per tick: age, die, gravity, damping, velocity modules in authored order, move, position modules in authored order, rotate, trail, events.
+21 modules, the same on both tiers (`ParticleModules.hpp`, `EmitterSim.cpp`, `particles_common.hlsli`). Order per tick: age, die, gravity, damping, velocity modules in authored order, move, position modules in authored order, rotate, trail, events.
 
 `spawn.sizescale`, `spawn.colortint`, `spawn.rotation`, `spawn.inheritvelocity`, `update.force`, `update.drag`, `update.attractor`, `update.vortex`, `update.curlnoise` (octaves 1 to 4), `update.speedlimit`, `update.collideplane`, `update.collidesphere`, `update.killvolume`. Every parameter is a literal or a user-parameter reference. Collision planes and spheres are in world space.
+
+Wave 6 appended eight (ids 13 to 20, nothing before them moved). The `min`/`max` pairs are drawn once per particle from a fixed random stream, so a particle keeps its own value for its whole life:
+
+| Key | Stage | Parameters | What it does |
+|---|---|---|---|
+| `update.linearaccel` | velocity | `min`, `max` | accelerates along the particle's own velocity (cm/s^2) |
+| `update.radialaccel` | velocity | `min`, `max` | accelerates away from the emitter's origin (negative pulls in) |
+| `update.tangentialaccel` | velocity | `min`, `max`, `ax ay az` | accelerates along `cross(direction from the origin, axis)`; nothing on the axis |
+| `update.damping` | velocity | `min`, `max` | a constant deceleration (cm/s^2) that stops at zero speed and never reverses; negative values are clamped to 0 |
+| `update.orbit` | position | `min`, `max` (revolutions/s), `ax ay az` | turns the position about an axis through the emitter's origin; the velocity is not turned |
+| `spawn.huevariation` | spawn | `min`, `max` (turns) | a per-particle hue turn, kept in `spawnInfo` bits 17 to 31 and applied to the drawn colour by the draw shader (a rotation about the grey axis; grey stays grey) |
+| `spawn.animstart` | spawn | `min`, `max`, `frames` | the sprite sheet's first frame, drawn from `[min, max]` of the sheet (the default emitter behaviour, a random frame over the whole sheet, applies only without this module) |
+| `update.collidebox` | position | `cx cy cz`, `hx hy hz`, `restitution`, `friction` | an axis-aligned solid box in world space: a particle inside is pushed out through the nearest face and reflected like the plane and sphere; the collide event fires once |
+
+Not built: height-field, signed-distance-field and vector-field modules. They need a texture or buffer on the simulation's compute layout (9 UAVs and one constant buffer today); that layout is shared by every kernel, so it is a separate, GPU-tested change.
 
 Randomness is counter-based (`hash32(seed, particleId, stream)`), so a spawn does not depend on thread order. Noise is a from-scratch lattice gradient noise; curl noise is its analytic curl.
 
@@ -93,7 +109,7 @@ Emitters are placed in levels with `COMPONENT ParticleEmitter effect=Particles/E
 
 ## Tests
 
-`ParticleModulesTest`, `EmitterSimTest`, `ParticleSpawnAtTest`, `ParticleSortNetworkTest`, `ParticleLightingTest`, `ParticleSystemTest` (tiers, ops, events, budgets), `ParticleGpuParityTest` (the GPU kernels against `EmitterSim`, on every available backend, within stated tolerances because atomic ordering differs), `IndirectRhiTest` (indirect draw and dispatch, and a vertex shader reading a table-0 `StructuredBuffer`), `OcParticleTest` (v1 byte identity, v2 round trip, every error), `FrameworkParticlesAbiTest`, `ParticleStackModelTest`, `ParticleEditorLoadSaveTest`, `ParticlesNodeTests` (C#).
+`ParticleModulesTest`, `EmitterSimTest`, `ParticleSpawnAtTest`, `ParticleSortNetworkTest`, `ParticleLightingTest`, `ParticleSystemTest` (tiers, ops, events, budgets), `ParticleGpuParityTest` (the GPU kernels against `EmitterSim`, on every available backend, within stated tolerances because atomic ordering differs), `IndirectRhiTest` (indirect draw and dispatch, and a vertex shader reading a table-0 `StructuredBuffer`), `OcParticleTest` (v1 byte identity, v2 round trip, every error), `FrameworkParticlesAbiTest`, `ParticleStackModelTest`, `ParticleEditorLoadSaveTest`, `ParticlesNodeTests` (C#). Wave 6 added `ParticleRegressionTest` (the shipped `.ocparticle` files simulate on the CPU executor as they did before the new shape and modules: sums against values captured on the previous build), `ParticleSpirvCompileTest` (every kernel and draw shader compiles to SPIR-V and DXIL with no device) and the wave 6 cases in `ParticleModulesTest` (each new module, the hue rotation, the shared HLSL's ids), `EmitterSimTest` (ring, orbit, box) and `OcParticleTest` (ring and module round trip).
 
 ## Limits, said plainly
 

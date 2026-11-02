@@ -24,6 +24,13 @@
 #define PSTREAM_TINT      9u
 #define PSTREAM_ROTATION  10u
 #define PSTREAM_SPIN      11u
+#define PSTREAM_ACCEL_LINEAR 12u
+#define PSTREAM_ACCEL_RADIAL 13u
+#define PSTREAM_ACCEL_TANGENT 14u
+#define PSTREAM_DAMP 15u
+#define PSTREAM_ORBIT 16u
+#define PSTREAM_HUE 17u
+#define PSTREAM_ANIM_START 18u
 
 // ModuleKind (ParticleTypes.hpp) and ModuleStage.
 #define PMOD_SIZESCALE 0u
@@ -39,6 +46,19 @@
 #define PMOD_COLLIDEPLANE 10u
 #define PMOD_COLLIDESPHERE 11u
 #define PMOD_KILLVOLUME 12u
+#define PMOD_LINEARACCEL 13u
+#define PMOD_RADIALACCEL 14u
+#define PMOD_TANGENTACCEL 15u
+#define PMOD_DAMPING 16u
+#define PMOD_ORBIT 17u
+#define PMOD_HUEVARIATION 18u
+#define PMOD_ANIMSTART 19u
+#define PMOD_COLLIDEBOX 20u
+
+// Particle.spawnInfo bits 17..31: the hue turn (ParticleTypes.hpp kParticleHue*).
+#define PHUE_SHIFT 17u
+#define PHUE_MASK 0x7FFFu
+#define PHUE_STEPS 32768.0
 
 #define PFLAG_COLLIDED 1u
 
@@ -90,10 +110,10 @@ struct PSimHeader {
     float3 shapeSize; float spreadDeg;
     float3 direction; float speedMin;
     float speedMax; float lifeMin; float lifeMax; uint trailRing;
-    float trailSegment; uint subuvFrames; float subuvFps; uint pad8;
+    float trailSegment; uint subuvFrames; float subuvFps; float shapeAxisX;
     uint evType; uint evCount; float evInherit; uint evActive;
     uint drawMult; uint indexCount; uint sortEnabled; uint evWriteBase;
-    uint sortedBase; uint evReadBase; uint pad11a; uint pad11b;
+    uint sortedBase; uint evReadBase; float shapeAxisY; float shapeAxisZ;
 };
 
 // ---------------------------------------------------------------------------------------------------------- RNG
@@ -198,6 +218,23 @@ float3 pShapeOffset(PSimHeader h, uint seed) {
         float r = ((h.shell != 0u) ? 1.0 : sqrt(b)) * h.shapeSize.x;
         return float3(cos(phi) * r, sin(phi) * r, 0.0);
     }
+    if (h.shape == 5u) {   // Ring
+        float outer = max(h.shapeSize.x, 0.0);
+        float inner = min(max(h.shapeSize.z, 0.0), outer);
+        float phi = P_TWO_PI * a;
+        float r = (h.shell != 0u) ? outer : sqrt(lerp(inner * inner, outer * outer, b));
+        float ht = (2.0 * c - 1.0) * 0.5 * h.shapeSize.y;
+        float3 ax = float3(h.shapeAxisX, h.shapeAxisY, h.shapeAxisZ);
+        float al = length(ax);
+        float3 axis = (al * al > 1e-8) ? ax / al : float3(0, 0, 1);
+        if (dot(axis, axis) < 0.5) axis = float3(0, 0, 1);
+        float3 hint = abs(axis.z) < 0.999 ? float3(0, 0, 1) : float3(1, 0, 0);
+        float3 rt = cross(hint, axis);
+        float rl = length(rt);
+        float3 right = (rl * rl > 1e-8) ? rt / rl : float3(0, 0, 0);
+        float3 up = cross(axis, right);
+        return right * (cos(phi) * r) + up * (sin(phi) * r) + axis * ht;
+    }
     return float3(0, 0, 0);
 }
 
@@ -229,7 +266,29 @@ void pRunSpawnModule(PMod m, inout PParticle p, float3 emitterVelocity) {
         p.angularVelocity = lerp(m.p[2], m.p[3], pRand01(p.seed, PSTREAM_SPIN)) * (float)P_DEG2RAD;
     } else if (m.kind == PMOD_INHERITVEL) {
         p.velocity += emitterVelocity * m.p[0];
+    } else if (m.kind == PMOD_HUEVARIATION) {
+        float turns = lerp(m.p[0], m.p[1], pRand01(p.seed, PSTREAM_HUE));
+        turns -= floor(turns);
+        uint q = ((uint)(turns * (float)PHUE_STEPS)) & PHUE_MASK;
+        p.spawnInfo = (p.spawnInfo & ((1u << PHUE_SHIFT) - 1u)) | (q << PHUE_SHIFT);
+    } else if (m.kind == PMOD_ANIMSTART) {
+        float frames = (float)((uint)min(max(m.p[2], 1.0), 65535.0));
+        float f = min(max(lerp(m.p[0], m.p[1], pRand01(p.seed, PSTREAM_ANIM_START)), 0.0), 0.99999);
+        uint frame = min((uint)floor(f * frames), (uint)frames - 1u);
+        p.spawnInfo = (p.spawnInfo & 0xFFFF0000u) | frame;
     }
+}
+
+// The colour rotated about the grey axis by `turns` of a full turn (ParticleModules.cpp hueRotate).
+float3 pHueRotate(float3 rgb, float turns) {
+    float a = turns * (float)P_TWO_PI;
+    float c = cos(a), s = sin(a);
+    float k = (1.0 - c) * (1.0 / 3.0);
+    float sq = 0.57735026918962576 * s;
+    float d = c + k, up = k + sq, dn = k - sq;
+    return max(float3(rgb.x * d + rgb.y * dn + rgb.z * up,
+                      rgb.x * up + rgb.y * d + rgb.z * dn,
+                      rgb.x * dn + rgb.y * up + rgb.z * d), 0.0);
 }
 
 void pRunVelocityModule(PMod m, float3 origin, float time, float dt, inout PParticle p) {
@@ -273,6 +332,41 @@ void pRunVelocityModule(PMod m, float3 origin, float time, float dt, inout PPart
             if (m.p[0] > 0.0 && speed > m.p[0]) p.velocity *= m.p[0] / speed;
             else if (m.p[1] > 0.0 && speed < m.p[1]) p.velocity *= m.p[1] / speed;
         }
+    } else if (m.kind == PMOD_LINEARACCEL) {
+        float speed = length(p.velocity);
+        if (speed > 1e-6) {
+            float a = lerp(m.p[0], m.p[1], pRand01(p.seed, PSTREAM_ACCEL_LINEAR));
+            p.velocity += p.velocity * (a / speed * dt);
+        }
+    } else if (m.kind == PMOD_RADIALACCEL) {
+        float3 d = p.position - origin;
+        float len = length(d);
+        if (len > 1e-4) {
+            float a = lerp(m.p[0], m.p[1], pRand01(p.seed, PSTREAM_ACCEL_RADIAL));
+            p.velocity += d * (a / len * dt);
+        }
+    } else if (m.kind == PMOD_TANGENTACCEL) {
+        float3 ax = float3(m.p[2], m.p[3], m.p[4]);
+        float al = length(ax);
+        if (al * al > 1e-8) {
+            float3 axis = ax / al;
+            float3 d = p.position - origin;
+            float len = length(d);
+            if (len > 1e-4) {
+                float3 t = cross(d * (1.0 / len), axis);
+                float tl = length(t);
+                if (tl > 1e-4) {
+                    float a = lerp(m.p[0], m.p[1], pRand01(p.seed, PSTREAM_ACCEL_TANGENT));
+                    p.velocity += t * (a / tl * dt);
+                }
+            }
+        }
+    } else if (m.kind == PMOD_DAMPING) {
+        float speed = length(p.velocity);
+        if (speed > 1e-6) {
+            float d = max(lerp(m.p[0], m.p[1], pRand01(p.seed, PSTREAM_DAMP)), 0.0);
+            p.velocity *= max(speed - d * dt, 0.0) / speed;
+        }
     }
 }
 
@@ -295,7 +389,34 @@ uint pCollideResult(inout PParticle p, bool kill) {
     return r;
 }
 
-uint pRunPositionModule(PMod m, inout PParticle p) {
+uint pRunPositionModule(PMod m, float3 origin, float dt, inout PParticle p) {
+    if (m.kind == PMOD_ORBIT) {
+        float3 ax = float3(m.p[2], m.p[3], m.p[4]);
+        float al = length(ax);
+        if (al * al <= 1e-8) return 0u;
+        float3 axis = ax / al;
+        float rev = lerp(m.p[0], m.p[1], pRand01(p.seed, PSTREAM_ORBIT));
+        if (rev == 0.0) return 0u;
+        float ang = rev * (float)P_TWO_PI * dt;
+        float c = cos(ang), s = sin(ang);
+        float3 r = p.position - origin;
+        p.position = origin + r * c + cross(axis, r) * s + axis * (dot(axis, r) * (1.0 - c));
+        return 0u;
+    }
+    if (m.kind == PMOD_COLLIDEBOX) {
+        float3 c = float3(m.p[0], m.p[1], m.p[2]);
+        float3 h = float3(m.p[3], m.p[4], m.p[5]);
+        if (!(h.x > 0.0 && h.y > 0.0 && h.z > 0.0)) return 0u;
+        float3 d = p.position - c;
+        float qx = h.x - abs(d.x), qy = h.y - abs(d.y), qz = h.z - abs(d.z);
+        if (!(qx > 0.0 && qy > 0.0 && qz > 0.0)) return 0u;
+        float3 n = float3(0, 0, 0);
+        if (qx <= qy && qx <= qz)      { n.x = d.x < 0.0 ? -1.0 : 1.0; p.position.x = c.x + n.x * h.x; }
+        else if (qy <= qz)             { n.y = d.y < 0.0 ? -1.0 : 1.0; p.position.y = c.y + n.y * h.y; }
+        else                           { n.z = d.z < 0.0 ? -1.0 : 1.0; p.position.z = c.z + n.z * h.z; }
+        pBounce(p, n, m.p[6], m.p[7]);
+        return pCollideResult(p, false);
+    }
     if (m.kind == PMOD_COLLIDEPLANE) {
         float3 nv = float3(m.p[0], m.p[1], m.p[2]);
         float nl = length(nv);

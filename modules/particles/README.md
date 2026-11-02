@@ -6,7 +6,7 @@ Data-driven particles on two tiers: fire, smoke, steam, dust, rain, snow, sparks
 
 * `scene::CParticleEmitter` (`modules/scene/.../Components.hpp`) -- the ECS-visible half: an opaque effect id plus this emitter's own playback clock and flags (`kParticleEmitterStopped`, `AutoDestroy`, `ForceCpu`, `ForceGpu`). A scene built-in, so the inspector and the C# surface come for free.
 * `ParticleTypes.hpp` -- `ParticleEffect` (one emitter definition), `ParticleSystemDef` (emitters + user parameters), `Module`, `Curve4`, `EventSpawn`, and the 64-byte `Particle` that is identical in C++ and `particles_common.hlsli`.
-* `ParticleModules.hpp` / `.cpp` -- the closed table of 13 modules (key, stage, parameter names and defaults) and the CPU evaluation of each.
+* `ParticleModules.hpp` / `.cpp` -- the closed table of 21 modules (key, stage, parameter names and defaults) and the CPU evaluation of each.
 * `ParticleRandom.hpp` -- counter-based RNG (`hash32`, `rand01`) and lattice gradient / curl noise, shared by both tiers.
 * `EmitterSim` -- the CPU executor: spawn, step, compaction in stable order, trail points, events. RHI-free; the editor preview owns its own.
 * `ParticleEffectLibrary` -- effect id (`fnv1a64` of the content-relative path) to system: `set`, `setSystem`, `find`, `findSystem`, `clear`, `revision`. This module never opens a file.

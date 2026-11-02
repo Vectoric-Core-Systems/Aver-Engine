@@ -38,6 +38,13 @@ enum RandStream : u32 {
     kStreamTint = 9,        // spawn.colortint
     kStreamRotation = 10,   // spawn.rotation, initial angle
     kStreamSpin = 11,       // spawn.rotation, angular velocity
+    kStreamAccelLinear = 12,    // update.linearaccel, the particle's own acceleration drawn from [min, max]
+    kStreamAccelRadial = 13,    // update.radialaccel
+    kStreamAccelTangent = 14,   // update.tangentialaccel
+    kStreamDamp = 15,           // update.damping
+    kStreamOrbit = 16,          // update.orbit
+    kStreamHue = 17,            // spawn.huevariation
+    kStreamAnimStart = 18,      // spawn.animstart
 };
 
 // 32 pinned (seed, stream, top 24 bits) triples: ParticleModulesTest asserts them on the CPU, ParticleGpuParityTest reads

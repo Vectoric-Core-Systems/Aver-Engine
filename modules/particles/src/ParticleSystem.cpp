@@ -397,6 +397,7 @@ void ParticleSystem::emitGpuJob(SystemInstance& si, const ParticleSystemDef& def
     h.shape = static_cast<u32>(fx.shape);
     h.shell = fx.shapeShell ? 1u : 0u;
     h.shapeSize[0] = fx.shapeSize.x; h.shapeSize[1] = fx.shapeSize.y; h.shapeSize[2] = fx.shapeSize.z;
+    h.shapeAxisX = fx.shapeAxis.x; h.shapeAxisY = fx.shapeAxis.y; h.shapeAxisZ = fx.shapeAxis.z;
     h.spreadDeg = fx.spreadDeg;
     h.direction[0] = fx.direction.x; h.direction[1] = fx.direction.y; h.direction[2] = fx.direction.z;
     h.speedMin = fx.speedMin; h.speedMax = fx.speedMax;

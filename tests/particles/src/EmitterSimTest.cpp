@@ -395,6 +395,121 @@ static void testSpawnModulesApplied() {
     checkNear(s.particles()[0].sizeScale, 6.0f, 1e-5f, "spawn modules do not rerun");
 }
 
+// Wave 6 (P15): the ring shape and the modules that act over a run (orbit, box collision, accelerations) through the executor, not one call at a time.
+static void testWave6Shapes() {
+    AVER_INFO("--- ring shape and the wave 6 modules in a run ---");
+    ParticleEffect fx = baseEffect();
+    fx.shape = EmitterShape::Ring;
+    fx.shapeSize = {100, 20, 40};   // outer radius, height, inner radius
+    fx.speedMin = fx.speedMax = 0;
+    {
+        EmitterSim s;
+        s.init(fx, {}, 5);
+        SpawnRequest r; r.count = 4000;
+        s.spawn(r);
+        bool inBand = true;
+        f64 r2 = 0;
+        f32 zLo = 1e9f, zHi = -1e9f;
+        for (const Particle& p : s.particles()) {
+            const f32 rr = std::sqrt(p.position.x * p.position.x + p.position.y * p.position.y);
+            inBand = inBand && rr >= 40.0f - 1e-3f && rr <= 100.0f + 1e-3f;
+            r2 += static_cast<f64>(rr) * rr;
+            zLo = std::fmin(zLo, p.position.z); zHi = std::fmax(zHi, p.position.z);
+        }
+        check(inBand, "ring: every particle is between the inner and the outer radius");
+        checkNear(static_cast<f32>(r2 / s.particles().size()), 5800.0f, 250.0f, "ring: uniform over the area (mean r^2 = (inner^2 + outer^2) / 2)");
+        check(zLo >= -10.001f && zHi <= 10.001f && zHi - zLo > 15.0f, "ring: spread over the height about the axis");
+    }
+    {
+        ParticleEffect shell = fx;
+        shell.shapeShell = true;
+        EmitterSim s;
+        s.init(shell, {}, 5);
+        SpawnRequest r; r.count = 500;
+        s.spawn(r);
+        bool onRim = true;
+        for (const Particle& p : s.particles()) onRim = onRim && std::fabs(std::sqrt(p.position.x * p.position.x + p.position.y * p.position.y) - 100.0f) < 1e-2f;
+        check(onRim, "ring + shell: on the outer rim");
+    }
+    {
+        ParticleEffect tilted = fx;
+        tilted.shapeAxis = {1, 0, 0};
+        EmitterSim s;
+        s.init(tilted, {}, 5);
+        SpawnRequest r; r.count = 1000;
+        s.spawn(r);
+        bool ok = true;
+        for (const Particle& p : s.particles()) {
+            const f32 rr = std::sqrt(p.position.y * p.position.y + p.position.z * p.position.z);
+            ok = ok && std::fabs(p.position.x) <= 10.001f && rr >= 40.0f - 1e-3f && rr <= 100.0f + 1e-3f;
+        }
+        check(ok, "ring with axis +X: the ring lies in the YZ plane and the height runs along X");
+        ParticleEffect zero = fx;
+        zero.shapeAxis = {0, 0, 0};
+        EmitterSim a, b;
+        a.init(zero, {}, 5); b.init(fx, {}, 5);
+        SpawnRequest rr; rr.count = 50;
+        a.spawn(rr); b.spawn(rr);
+        bool same = a.particles().size() == b.particles().size();
+        for (usize i = 0; same && i < a.particles().size(); ++i)
+            same = a.particles()[i].position.x == b.particles()[i].position.x && a.particles()[i].position.z == b.particles()[i].position.z;
+        check(same, "ring with a zero axis reads as +Z");
+        EmitterSim c;
+        c.init(fx, {}, 5);
+        EmitterSim d;
+        d.init(fx, {}, 5);
+        c.spawn(rr); d.spawn(rr);
+        same = true;
+        for (usize i = 0; i < c.particles().size(); ++i) same = same && std::memcmp(&c.particles()[i], &d.particles()[i], sizeof(Particle)) == 0;
+        check(same, "ring: the same seed gives the same particles");
+    }
+    {   // a swirl: orbit about +Z turns the cloud, radial accel pushes it out
+        ParticleEffect o = baseEffect();
+        o.shape = EmitterShape::Disc; o.shapeSize = {50, 0, 0};
+        o.speedMin = o.speedMax = 0;
+        Module orbit = makeDefaultModule(ModuleKind::UpdateOrbit);
+        orbit.p[0].value = 0.25f; orbit.p[1].value = 0.25f;   // a quarter turn a second
+        o.modules.push_back(orbit);
+        EmitterSim s;
+        s.init(o, {}, 9);
+        s.setOrigin({0, 0, 0});
+        SpawnRequest r; r.count = 100;
+        s.spawn(r);
+        const std::vector<Particle> before = s.particles();
+        for (int i = 0; i < 60; ++i) s.step(1.0f / 60.0f, i / 60.0f, nullptr);
+        bool turned = true;
+        for (usize i = 0; i < before.size(); ++i) {
+            const Particle& a = before[i];
+            const Particle& b = s.particles()[i];
+            // (x, y) -> (-y, x) after a quarter turn; the radius is kept
+            turned = turned && std::fabs(b.position.x + a.position.y) < 0.2f && std::fabs(b.position.y - a.position.x) < 0.2f;
+        }
+        check(turned, "orbit: one second at a quarter turn per second turns every particle by 90 degrees about +Z");
+    }
+    {   // box collision: a fountain landing on a box top stays above it
+        ParticleEffect f = baseEffect();
+        f.speedMin = f.speedMax = 200;
+        f.direction = {0, 0, 1};
+        f.spreadDeg = 20;
+        f.gravity = {0, 0, -600};
+        f.lifetimeMin = f.lifetimeMax = 5;
+        Module box = makeDefaultModule(ModuleKind::UpdateCollideBox);
+        box.p[0].value = 0; box.p[1].value = 0; box.p[2].value = -50;   // centre
+        box.p[3].value = 400; box.p[4].value = 400; box.p[5].value = 50;   // half extents: the top face is z = 0
+        f.modules.push_back(box);
+        EmitterSim s;
+        s.init(f, {}, 3);
+        SpawnRequest r; r.count = 200;
+        s.spawn(r);
+        f32 lowest = 1e9f;
+        for (int i = 0; i < 240; ++i) {
+            s.step(1.0f / 120.0f, i / 120.0f, nullptr);
+            for (const Particle& p : s.particles()) lowest = std::fmin(lowest, p.position.z);
+        }
+        check(lowest >= -1.0f, "box: particles falling onto a solid box do not sink into it");
+    }
+}
+
 int main() {
     AVER_INFO("EmitterSimTest");
     testDeterminism();
@@ -406,6 +521,7 @@ int main() {
     testEvents();
     testUserParamBinding();
     testSpawnModulesApplied();
+    testWave6Shapes();
     AVER_INFO("EmitterSimTest: {}/{} checks passed", g_checks - g_failures, g_checks);
     return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

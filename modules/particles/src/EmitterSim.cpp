@@ -49,6 +49,19 @@ Vec3 shapeOffset(const ParticleEffect& fx, u32 seed) {
         const f32 r = (fx.shapeShell ? 1.0f : std::sqrt(b)) * fx.shapeSize.x;
         return {std::cos(phi) * r, std::sin(phi) * r, 0.0f};
     }
+    case EmitterShape::Ring: {
+        const f32 outer = std::max(fx.shapeSize.x, 0.0f);
+        const f32 inner = std::min(std::max(fx.shapeSize.z, 0.0f), outer);
+        const f32 phi = kTwoPi * a;
+        const f32 r = fx.shapeShell ? outer : std::sqrt(lerpf(inner * inner, outer * outer, b));
+        const f32 h = (2.0f * c - 1.0f) * 0.5f * fx.shapeSize.y;
+        Vec3 axis = fx.shapeAxis.getSafeNormal();
+        if (axis.sizeSquared() < 0.5f) axis = Vec3{0, 0, 1};
+        const Vec3 hint = std::fabs(axis.z) < 0.999f ? Vec3{0, 0, 1} : Vec3{1, 0, 0};
+        const Vec3 right = cross(hint, axis).getSafeNormal();
+        const Vec3 up = cross(axis, right);
+        return right * (std::cos(phi) * r) + up * (std::sin(phi) * r) + axis * h;
+    }
     case EmitterShape::Point:
     default:
         return {0, 0, 0};

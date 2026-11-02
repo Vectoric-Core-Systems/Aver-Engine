@@ -342,7 +342,7 @@ void CSUpdate(uint3 dtid : SV_DispatchThreadID) {
         for (uint mj = 0u; mj < gS.moduleCount; ++mj) {
             PMod m = pLoadModule(mj);
             if (m.stage != 2u) continue;
-            uint bits = pRunPositionModule(m, p);
+            uint bits = pRunPositionModule(m, gS.origin, gS.dt, p);
             if ((bits & 2u) != 0u && (gS.flags & PGPU_FLAG_COLLIDE_EVT) != 0u) pRaiseEvent(1u, p);
             if ((bits & 1u) != 0u) {
                 if ((gS.flags & PGPU_FLAG_DEATH_EVT) != 0u) pRaiseEvent(0u, p);
@@ -444,10 +444,10 @@ void CSProbe(uint3 dtid : SV_DispatchThreadID) {
     gDead[o++] = asuint(gS.shapeSize.x); gDead[o++] = asuint(gS.shapeSize.y); gDead[o++] = asuint(gS.shapeSize.z); gDead[o++] = asuint(gS.spreadDeg);
     gDead[o++] = asuint(gS.direction.x); gDead[o++] = asuint(gS.direction.y); gDead[o++] = asuint(gS.direction.z); gDead[o++] = asuint(gS.speedMin);
     gDead[o++] = asuint(gS.speedMax); gDead[o++] = asuint(gS.lifeMin); gDead[o++] = asuint(gS.lifeMax); gDead[o++] = gS.trailRing;
-    gDead[o++] = asuint(gS.trailSegment); gDead[o++] = gS.subuvFrames; gDead[o++] = asuint(gS.subuvFps); gDead[o++] = gS.pad8;
+    gDead[o++] = asuint(gS.trailSegment); gDead[o++] = gS.subuvFrames; gDead[o++] = asuint(gS.subuvFps); gDead[o++] = asuint(gS.shapeAxisX);
     gDead[o++] = gS.evType; gDead[o++] = gS.evCount; gDead[o++] = asuint(gS.evInherit); gDead[o++] = gS.evActive;
     gDead[o++] = gS.drawMult; gDead[o++] = gS.indexCount; gDead[o++] = gS.sortEnabled; gDead[o++] = gS.evWriteBase;
-    gDead[o++] = gS.sortedBase; gDead[o++] = gS.evReadBase; gDead[o++] = gS.pad11a; gDead[o++] = gS.pad11b;
+    gDead[o++] = gS.sortedBase; gDead[o++] = gS.evReadBase; gDead[o++] = asuint(gS.shapeAxisY); gDead[o++] = asuint(gS.shapeAxisZ);
     // 48 uints so far. Then the first and last user value, the first and last module row and the first and last request row.
     gDead[o++] = asuint(gUser[0].x); gDead[o++] = asuint(gUser[0].w); gDead[o++] = asuint(gUser[15].x); gDead[o++] = asuint(gUser[15].w);
     gDead[o++] = gMod[0].x; gDead[o++] = gMod[0].w; gDead[o++] = gMod[47].x; gDead[o++] = gMod[47].w;

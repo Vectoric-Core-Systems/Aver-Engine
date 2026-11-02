@@ -24,8 +24,16 @@ set_target_properties(ParticleShiftTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CM
 foreach(_t ParticleModulesTest EmitterSimTest ParticleSpawnAtTest ParticleSortNetworkTest ParticleLightingTest)
   add_executable(${_t} src/${_t}.cpp)
   target_link_libraries(${_t} PRIVATE Aver.Particles Aver.Scene Aver.Core Aver.Platform)
+  target_compile_definitions(${_t} PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")   # ParticleModulesTest reads the shared HLSL
   set_target_properties(${_t} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endforeach()
+
+# ParticleSpirvCompileTest -- every particle kernel and draw shader compiles to SPIR-V and to DXIL through DXC with no device (the Vulkan and D3D12 compile
+# arguments). Links the generic RHI only (the shader file lookup and the shared prelude). Skips (77) without the vendored SPIR-V dxcompiler.dll.
+add_executable(ParticleSpirvCompileTest src/ParticleSpirvCompileTest.cpp)
+target_link_libraries(ParticleSpirvCompileTest PRIVATE Aver.RHI Aver.Platform Aver.Core)
+target_compile_definitions(ParticleSpirvCompileTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
+set_target_properties(ParticleSpirvCompileTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # ParticleGpuParityTest -- the GPU kernels against EmitterSim on a real device (WARP when asked for D3D12; `vulkan` for the
 # Vulkan row, which AVER_CTEST_VULKAN_TARGETS in the root CMakeLists.txt adds). Its own composition root, exactly as

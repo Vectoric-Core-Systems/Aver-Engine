@@ -635,6 +635,56 @@ static void testCustomShader() {
     check(!fmt::parseOcparticleSystem("OCPARTICLE 2\nGDSHADER\n", back, nullptr, &err), "the alias keeps the one-name rule");
 }
 
+// Wave 6 (P15): the ring shape and the eight appended modules read and write like the older ones; a file written before them reads and writes the same bytes.
+static void testWave6Format() {
+    AVER_INFO("=== .ocparticle: ring shape and the wave 6 modules ===");
+    const char* head =
+        "OCPARTICLE 2\nEMITTER fountain\nSIM cpu\n";
+    const char* tail =
+        "BLEND premultiplied\nEMISSION 32 0 64\nLIFETIME 2 2\nDIRECTION 0 0 1 0\nSPEED 0 0\nGRAVITY 0 0 0\nDAMPING 0\nSIZE 50 50\nCOLOR start 1 1 1 1\nCOLOR end 1 1 1 1\n";
+    const std::string text = std::string(head) + "SHAPE ring 100 20 40 axis 1 0 0 shell\n" + tail +
+        "MODULE update.linearaccel min=10 max=20\nMODULE update.radialaccel min=-5 max=5\n"
+        "MODULE update.tangentialaccel min=1 max=2 ax=0 ay=1 az=0\nMODULE update.damping min=3 max=4\n"
+        "MODULE update.orbit min=0.5 max=0.75 ax=0 ay=0 az=-1\nMODULE spawn.huevariation min=-0.1 max=0.1\n"
+        "MODULE spawn.animstart min=0 max=0.5 frames=16\nMODULE update.collidebox cx=1 cy=2 cz=3 hx=4 hy=5 hz=6 restitution=0.7 friction=0.1\n";
+    particles::ParticleSystemDef def;
+    std::string err;
+    check(fmt::parseOcparticleSystem(text, def, nullptr, &err), "parse: " + err);
+    if (def.emitters.empty()) def.emitters.emplace_back();
+    const particles::ParticleEffect& e = def.emitters[0];
+    check(e.shape == particles::EmitterShape::Ring && e.shapeShell && near(e.shapeSize.x, 100) && near(e.shapeSize.y, 20) && near(e.shapeSize.z, 40) &&
+              near(e.shapeAxis.x, 1) && near(e.shapeAxis.y, 0) && near(e.shapeAxis.z, 0), "SHAPE ring reads radius, height, inner radius, axis and shell");
+    check(e.modules.size() == 8 && e.modules[0].kind == particles::ModuleKind::UpdateLinearAccel && e.modules[7].kind == particles::ModuleKind::UpdateCollideBox, "the eight modules read in authored order");
+    check(e.modules.size() == 8 && near(e.modules[4].p[4].value, -1.0f) && near(e.modules[6].p[2].value, 16.0f) && near(e.modules[7].p[6].value, 0.7f), "their parameters read");
+    const std::string t1 = fmt::writeOcparticleSystem(def);
+    check(t1.find("SHAPE ring 100 20 40 axis 1 0 0 shell") != std::string::npos, "the ring is written with its axis and shell");
+    particles::ParticleSystemDef def2;
+    check(fmt::parseOcparticleSystem(t1, def2, nullptr, &err), "the written text parses: " + err);
+    check(fmt::writeOcparticleSystem(def2) == t1 && fmt::writeOcparticleSystem(def2, t1) == t1, "write -> parse -> write is byte-identical, merging changes nothing");
+
+    // A ring with the default axis writes no axis; the short forms read.
+    particles::ParticleSystemDef d3;
+    check(fmt::parseOcparticleSystem(std::string(head) + "SHAPE ring 50\n" + tail, d3, nullptr, &err), "SHAPE ring <r> parses: " + err);
+    check(!d3.emitters.empty() && d3.emitters[0].shape == particles::EmitterShape::Ring && near(d3.emitters[0].shapeSize.x, 50) && near(d3.emitters[0].shapeSize.y, 0) &&
+              near(d3.emitters[0].shapeAxis.z, 1), "the missing height and inner radius are 0, the axis +Z");
+    check(fmt::writeOcparticleSystem(d3).find("axis") == std::string::npos, "a +Z ring writes no axis");
+    check(!fmt::ocparticleFitsV1(d3), "a ring forces version 2");
+    check(!fmt::parseOcparticleSystem(std::string(head) + "SHAPE ring\n" + tail, d3, nullptr, &err), "SHAPE ring with no radius is refused");
+    check(!fmt::parseOcparticleSystem(std::string(head) + "SHAPE ring 1 2 3 4\n" + tail, d3, nullptr, &err), "SHAPE ring with four numbers is refused");
+    check(!fmt::parseOcparticleSystem(std::string(head) + "SHAPE ring 5 axis 1 0\n" + tail, d3, nullptr, &err), "a truncated axis is refused");
+    check(!fmt::parseOcparticleSystem(std::string(head) + "SHAPE ring 5 axis a b c\n" + tail, d3, nullptr, &err), "a malformed axis is refused");
+
+    // A shipped v1 effect keeps its bytes, and an old v2 file with the old module set is untouched by the table growing.
+    particles::ParticleEffect v1;
+    fmt::OcParticleExtras ex;
+    check(fmt::parseOcparticle(kFull, v1, &ex, &err), "kFull parses: " + err);
+    check(v1.shapeAxis.x == 0 && v1.shapeAxis.y == 0 && v1.shapeAxis.z == 1, "a v1 effect has the default axis");
+    check(fmt::writeOcparticle(v1, &ex, kFull).rfind("OCPARTICLE 1", 0) == 0, "and is written back as version 1");
+    particles::ParticleSystemDef old;
+    check(fmt::parseOcparticleSystem(kSystemV2, old, nullptr, &err), "the version 2 sample parses: " + err);
+    check(!old.emitters.empty() && !old.emitters[0].modules.empty() && old.emitters[0].modules[0].kind == particles::ModuleKind::SpawnSizeScale, "its modules keep their kinds");
+}
+
 // A register holding an int or bool is a bit pattern: 0x<hex> reads as the raw word, and the writer keeps every word exact.
 static u32 wordOf(f32 f) { u32 w; std::memcpy(&w, &f, sizeof w); return w; }
 static void testParamWords() {
@@ -684,6 +734,7 @@ int main() {
     testV1StaysV1();
     testV2Refusals();
     testDefaultsAreV1();
+    testWave6Format();
 
     AVER_INFO("==================================================");
     AVER_INFO("OcParticle tests done: {} failure(s)", g_failures);

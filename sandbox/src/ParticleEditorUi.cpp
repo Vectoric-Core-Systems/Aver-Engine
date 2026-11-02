@@ -134,9 +134,9 @@ void ParticleEditor::drawParams() {
             ImGui::SetTooltip("Auto puts an emitter on the GPU when its max particles is 2048 or more and the device supports it.\n"
                               "The preview always runs on the CPU; the result is the same.");
 
-        static const char* kShapeNames[] = {"Point", "Sphere", "Box", "Cylinder", "Disc"};
+        static const char* kShapeNames[] = {"Point", "Sphere", "Box", "Cylinder", "Disc", "Ring"};
         int idx = static_cast<int>(e.shape);
-        if (ImGui::Combo("Shape", &idx, kShapeNames, 5)) setShape(static_cast<EmitterShape>(idx));
+        if (ImGui::Combo("Shape", &idx, kShapeNames, 6)) setShape(static_cast<EmitterShape>(idx));
         Vec3 size = e.shapeSize;
         bool changed = false;
         switch (e.shape) {
@@ -153,13 +153,22 @@ void ParticleEditor::drawParams() {
         case EmitterShape::Disc:
             changed |= ImGui::DragFloat("Radius (cm)", &size.x, 1.0f, 0.0f, 100000.0f, "%.1f");
             break;
+        case EmitterShape::Ring: {
+            changed |= ImGui::DragFloat("Outer radius (cm)", &size.x, 1.0f, 0.0f, 100000.0f, "%.1f");
+            changed |= ImGui::DragFloat("Height (cm)", &size.y, 1.0f, 0.0f, 100000.0f, "%.1f");
+            changed |= ImGui::DragFloat("Inner radius (cm)", &size.z, 1.0f, 0.0f, 100000.0f, "%.1f");
+            Vec3 axis = e.shapeAxis;
+            if (ImGui::DragFloat3("Axis", &axis.x, 0.01f, -1.0f, 1.0f, "%.2f"))
+                editEffect([&](ParticleEffect& x) { x.shapeAxis = axis; return true; });
+            break;
+        }
         case EmitterShape::Point:
         default:
             ImGui::TextDisabled("A point emitter has no spawn offset.");
             break;
         }
         if (changed) setShapeSize(size);
-        if (e.shape == EmitterShape::Sphere || e.shape == EmitterShape::Cylinder || e.shape == EmitterShape::Disc) {
+        if (e.shape == EmitterShape::Sphere || e.shape == EmitterShape::Cylinder || e.shape == EmitterShape::Disc || e.shape == EmitterShape::Ring) {
             bool shell = e.shapeShell;
             if (ImGui::Checkbox("Surface only (shell)", &shell))
                 editEffect([&](ParticleEffect& x) { x.shapeShell = shell; return true; });

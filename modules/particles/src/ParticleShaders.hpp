@@ -1,6 +1,6 @@
 // The HLSL for the particle module is FILES, deployed beside the executable (cmake aver_deploy_shaders):
 //   particles.hlsl         the draw shaders: ParticleSpriteVS / ParticleRibbonVS / ParticleMeshVS and ParticlePS
-//   particles_common.hlsli the RNG, noise, shape / cone sampling and the 13 modules (shared by the two compute files)
+//   particles_common.hlsli the RNG, noise, shape / cone sampling and the 21 modules (shared by the two compute files)
 //   particles_sim.hlsl     the GPU simulation kernels (CSInit, CSBegin, CSSpawn, CSArgsUpdate, CSUpdate, CSFinish, CSProbe)
 //   particles_sort.hlsl    the bitonic sort kernels
 //
