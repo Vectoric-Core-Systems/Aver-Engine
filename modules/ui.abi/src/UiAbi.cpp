@@ -45,6 +45,10 @@ AverUiImageReleaseFn g_imgRelease = nullptr;
 AverUiImageSizeFn    g_imgSize = nullptr;
 AverUiImageUseFn     g_imgUse = nullptr;
 
+// The host's clipboard (aver_ui_set_clipboard_host); both null until one is installed.
+AverUiClipboardGetFn g_clipGet = nullptr;
+AverUiClipboardSetFn g_clipSet = nullptr;
+
 // The host's raw-deflate decoder for WOFF 1.0 fonts (aver_ui_text_set_inflate).
 AverUiInflateFn g_inflate = nullptr;
 bool inflateThunk(const std::uint8_t* in, std::size_t inSize, std::uint8_t* out, std::size_t outSize) {
@@ -268,6 +272,27 @@ uint64_t aver_ui_image_use(const char* utf8Path) {
     if (!utf8Path || !*utf8Path) return 0;
     if (g_imgUse) return g_imgUse(utf8Path);
     return 0;
+}
+
+// ---- the clipboard ----
+
+void aver_ui_set_clipboard_host(AverUiClipboardGetFn get, AverUiClipboardSetFn set) {
+    // Both or neither: a half-installed clipboard would let a control copy and never paste.
+    g_clipGet = get && set ? get : nullptr;
+    g_clipSet = get && set ? set : nullptr;
+}
+
+int32_t aver_ui_clipboard_available(void) { return g_clipGet ? 1 : 0; }
+
+int32_t aver_ui_clipboard_get(char* out, int32_t cap) {
+    if (out && cap > 0) out[0] = '\0';
+    if (!g_clipGet || cap < 0 || (!out && cap != 0)) return -1;
+    const int32_t n = g_clipGet(out, cap);
+    return n < 0 ? -1 : n;
+}
+
+int32_t aver_ui_clipboard_set(const char* utf8) {
+    return (g_clipSet && utf8) ? (g_clipSet(utf8) != 0 ? 1 : 0) : 0;
 }
 
 // ---- text -------------------------------------------------------------------------------------

@@ -214,11 +214,35 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             self->dispatch(e);
             break;   // NOT return 0 -- the OS still needs this message
         }
+        // Typed text (E16): WM_CHAR carries a UTF-16 unit after the layout, dead keys and the IME have had their say. A high surrogate waits for its low half; control
+        // characters (backspace, tab, enter, escape, delete) are keys, not text. The message is passed on to the default procedure as before (the hook above, ImGui's,
+        // has already seen it).
+        case WM_CHAR: {
+            static wchar_t s_high = 0;
+            const wchar_t c = static_cast<wchar_t>(wParam);
+            u32 cp = 0;
+            if (c >= 0xD800 && c <= 0xDBFF) { s_high = c; break; }
+            if (c >= 0xDC00 && c <= 0xDFFF) {
+                if (s_high) cp = 0x10000u + ((static_cast<u32>(s_high) - 0xD800u) << 10) + (static_cast<u32>(c) - 0xDC00u);
+                s_high = 0;
+            } else {
+                s_high = 0;
+                cp = c;
+            }
+            if (cp >= 0x20 && cp != 0x7F && !(cp >= 0x80 && cp < 0xA0)) {
+                Event e; e.type = EventType::Char;
+                e.codepoint = cp;
+                e.repeat = (lParam & (1 << 30)) != 0;
+                self->dispatch(e);
+            }
+            break;
+        }
         case WM_KEYDOWN:
         case WM_KEYUP: {
             Event e; e.type = EventType::Key;
             e.key = static_cast<i32>(wParam);
             e.pressed = (msg == WM_KEYDOWN);
+            e.repeat = e.pressed && (lParam & (1 << 30)) != 0;
             self->dispatch(e);
             // Numpad Enter is VK_RETURN with the extended-key bit; it also reports as 0x6C
             // (VK_SEPARATOR, which no keyboard sends) so it can have a slot of its own. Enter still

@@ -3,6 +3,7 @@
 #include "Event.hpp"
 
 #include <array>
+#include <vector>
 
 namespace aver {
 
@@ -82,7 +83,13 @@ public:
     // True once any finger event has arrived: this machine has a touch screen.
     bool touchSeen() const { return touchSeen_; }
 
+    // --- typed text (E16): the code points the window delivered as EventType::Char since the last newFrame(), in order. At most kMaxTyped
+    // are kept in a frame (a stuck key or a paste storm cannot grow the list). Layout, dead keys and the IME's committed text are already applied.
+    static constexpr usize kMaxTyped = 64;
+    const std::vector<u32>& typedChars() const { return typed_; }
+
 private:
+    std::vector<u32> typed_;
     static bool inRange(i32 vk)  { return vk >= 0 && vk < static_cast<i32>(kKeyCount); }
     static bool inButton(i32 b)  { return b >= 0 && b < static_cast<i32>(kMouseButtons); }
     static bool inTouch(i32 f)   { return f >= 0 && f < static_cast<i32>(kTouchCount); }

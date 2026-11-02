@@ -62,3 +62,8 @@ set_target_properties(CharConvTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_B
 add_executable(FrameCapTest src/FrameCapTest.cpp)
 target_link_libraries(FrameCapTest PRIVATE Aver.Core)
 set_target_properties(FrameCapTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# ClipboardTest -- the clipboard seam's refusals (invalid UTF-8, over the cap). Never touches the real clipboard.
+add_executable(ClipboardTest src/ClipboardTest.cpp)
+target_link_libraries(ClipboardTest PRIVATE Aver.Platform Aver.Core)
+set_target_properties(ClipboardTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

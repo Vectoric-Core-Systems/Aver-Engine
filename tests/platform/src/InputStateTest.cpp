@@ -229,6 +229,34 @@ int main() {
         check(true, "a non-input event is ignored without incident");
     }
 
+    // ---- typed text (E16) ----
+    {
+        AVER_INFO("typed characters: in order, per frame, filtered, bounded");
+        InputState in;
+        in.newFrame();
+        const auto ch = [](u32 cp) { Event e; e.type = EventType::Char; e.codepoint = cp; return e; };
+        in.onEvent(ch('h'));
+        in.onEvent(ch(0x00E9));       // e acute
+        in.onEvent(ch(0x1F600));      // outside the BMP
+        check(in.typedChars().size() == 3 && in.typedChars()[0] == 'h' && in.typedChars()[1] == 0xE9 && in.typedChars()[2] == 0x1F600, "characters arrive in order, beyond the BMP too");
+        in.onEvent(ch(0x08)); in.onEvent(ch(0x0D)); in.onEvent(ch(0x7F)); in.onEvent(ch(0x1B));
+        in.onEvent(ch(0xD800)); in.onEvent(ch(0xDFFF)); in.onEvent(ch(0x110000)); in.onEvent(ch(0));
+        check(in.typedChars().size() == 3, "control characters, surrogates, out-of-range values and zero are dropped");
+        in.onEvent(keyEvent(kW, true));
+        check(in.typedChars().size() == 3 && in.keyHeld(kW), "a key event is a key, not text");
+        in.newFrame();
+        check(in.typedChars().empty(), "the list lasts one frame");
+        for (u32 i = 0; i < 500; ++i) in.onEvent(ch('a' + (i % 26)));
+        check(in.typedChars().size() == InputState::kMaxTyped, "a frame keeps at most kMaxTyped characters");
+        in.onEvent(focusLostEvent());
+        check(in.typedChars().empty(), "focus loss drops them");
+        Event rep = keyEvent(kA, true); rep.repeat = true;
+        in.newFrame();
+        in.onEvent(keyEvent(kA, true));
+        in.onEvent(rep);
+        check(in.keyPressed(kA) && in.keyHeld(kA), "a repeated key is still one press and one held key (the repeat flag does not change that)");
+    }
+
     if (g_failures == 0) { AVER_INFO("InputStateTest: ALL PASS"); return 0; }
     AVER_ERROR("InputStateTest: {} failure(s)", g_failures);
     return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);

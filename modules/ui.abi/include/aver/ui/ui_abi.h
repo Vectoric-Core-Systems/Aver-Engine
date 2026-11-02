@@ -145,6 +145,25 @@ AVER_UI_API int32_t aver_ui_image_size(uint64_t id, int32_t* outWH);
 // lets go. The texture lives while it keeps being asked for. 0 as acquire.
 AVER_UI_API uint64_t aver_ui_image_use(const char* utf8Path);
 
+// ---- the clipboard (parity E16) ---------------------------------------------------------------------------
+//
+// Like the image table, the DLL links no platform layer, so the HOST lends the operating system's text clipboard through two callbacks and the editing
+// controls (a LineEdit's copy and paste) call these. Without a host the calls fail and a control keeps its own in-process buffer.
+//  get: writes the clipboard's text as UTF-8 to `out` (at most cap - 1 bytes and a NUL; `out` may be NULL with cap 0 to ask the size) and returns the
+//       text's full length in bytes without the NUL, or -1 when the clipboard holds no text.
+//  set: replaces the clipboard's text; 1 on success, 0 on failure.
+typedef int32_t (*AverUiClipboardGetFn)(char* out, int32_t cap);
+typedef int32_t (*AverUiClipboardSetFn)(const char* utf8);
+
+// Installs the host's clipboard (host only). NULL clears it.
+AVER_UI_API void aver_ui_set_clipboard_host(AverUiClipboardGetFn get, AverUiClipboardSetFn set);
+// 1 when a host installed a clipboard.
+AVER_UI_API int32_t aver_ui_clipboard_available(void);
+// See `get` above. -1 with no host or no text.
+AVER_UI_API int32_t aver_ui_clipboard_get(char* out, int32_t cap);
+// See `set` above. 0 with no host, a NULL string, or a failure.
+AVER_UI_API int32_t aver_ui_clipboard_set(const char* utf8);
+
 // ---- text -------------------------------------------------------------------------------------------
 //
 // WHY THIS IS AN OPAQUE POINTER AND NOT A PATH. modules/ui is Core-only on purpose -- UiFont.hpp's

@@ -3,6 +3,7 @@
 namespace aver {
 
 void InputState::newFrame() {
+    typed_.clear();
     pressed_.fill(false);
     released_.fill(false);
     mPressed_.fill(false);
@@ -16,6 +17,7 @@ void InputState::newFrame() {
 }
 
 void InputState::clear() {
+    typed_.clear();
     held_.fill(false);
     pressed_.fill(false);
     released_.fill(false);
@@ -96,6 +98,11 @@ void InputState::onEvent(const Event& e) {
             }
             return;
         }
+        case EventType::Char:
+            // One scalar value that is not a surrogate and not a control character; anything else the window layer should never send is dropped here too.
+            if (e.codepoint >= 0x20 && e.codepoint != 0x7F && e.codepoint <= 0x10FFFF && !(e.codepoint >= 0xD800 && e.codepoint <= 0xDFFF) && typed_.size() < kMaxTyped)
+                typed_.push_back(e.codepoint);
+            return;
         case EventType::FocusLost:
             clear();
             return;

@@ -135,9 +135,38 @@ void route(Window& self, const SDL_Event& ev) {
             Event e; e.type = EventType::Key;
             e.key = vk;
             e.pressed = ev.type == SDL_EVENT_KEY_DOWN;
+            e.repeat = e.pressed && ev.key.repeat;
             self.dispatch(e);
             // Numpad Enter reports as Enter and, for its own slot, as 0x6C -- see InputKeys.hpp.
             if (ev.key.scancode == SDL_SCANCODE_KP_ENTER) { e.key = 0x6C; self.dispatch(e); }
+            break;
+        }
+        case SDL_EVENT_TEXT_INPUT: {
+            // Committed text, UTF-8, possibly several characters (an IME's result): one Char event per code point, control characters dropped.
+            const char* s = ev.text.text;
+            while (s && *s) {
+                const unsigned char c0 = static_cast<unsigned char>(*s);
+                u32 cp = 0;
+                int len = 1;
+                if (c0 < 0x80) cp = c0;
+                else if ((c0 & 0xE0) == 0xC0) { cp = c0 & 0x1F; len = 2; }
+                else if ((c0 & 0xF0) == 0xE0) { cp = c0 & 0x0F; len = 3; }
+                else if ((c0 & 0xF8) == 0xF0) { cp = c0 & 0x07; len = 4; }
+                else { ++s; continue; }
+                bool ok = true;
+                for (int i = 1; i < len && ok; ++i) {
+                    const unsigned char cn = static_cast<unsigned char>(s[i]);
+                    if ((cn & 0xC0) != 0x80) ok = false;   // truncated sequence (the NUL ends the string too)
+                    else cp = (cp << 6) | (cn & 0x3F);
+                }
+                if (!ok) { ++s; continue; }
+                s += len;
+                if (cp >= 0x20 && cp != 0x7F && !(cp >= 0x80 && cp < 0xA0) && cp <= 0x10FFFF) {
+                    Event e; e.type = EventType::Char;
+                    e.codepoint = cp;
+                    self.dispatch(e);
+                }
+            }
             break;
         }
         case SDL_EVENT_MOUSE_MOTION: {
@@ -260,6 +289,7 @@ bool Window::create(const WindowDesc& desc) {
     nativeHandle_ = sw;
     quitOnDestroy_ = desc.quitOnDestroy;
     liveWindows().push_back(this);
+    SDL_StartTextInput(sw);   // SDL3 sends SDL_EVENT_TEXT_INPUT (typed characters, E16) only to a window that asked for it
 
     // desc.width/height are logical 96-DPI sizes: scale, clamp to 92% of the work area, centre --
     // the Win32 window's rule. SDL sizes are in points, so the scale applied is the display scale

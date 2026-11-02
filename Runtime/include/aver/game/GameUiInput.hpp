@@ -72,6 +72,12 @@ inline void uiFeedInput(const InputState& in, f32 dt, bool pointerValid) {
     pollGamepads(&pad, 1);
     uint8_t buttons[GamepadState::kButtonCount] = {};
     for (usize i = 0; i < GamepadState::kButtonCount; ++i) buttons[i] = pad.buttons[i] ? 1 : 0;
+    // E16: typed text arrives from the window as characters (layout, dead keys and IME text applied), so the key-table characters stop. They stop only once a Char
+    // event has been seen, so a host whose event path does not forward them keeps typing from the key table exactly as before.
+    static bool sawChars = false;
+    if (!in.typedChars().empty()) sawChars = true;
+    aver_ui_input_host_typed(sawChars ? 1 : 0);
+    for (const u32 c : in.typedChars()) aver_ui_input_char(c);
     aver_ui_input_host_frame(dt, pressed, held, slot, pad.connected ? 1 : 0, buttons, pad.axes);
     aver_ui_input_wheel(in.wheel());
     aver_ui_input_pointer_valid(pointerValid ? 1 : 0);

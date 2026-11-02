@@ -99,7 +99,12 @@ void aver_ui_widgets_frame(float dt) {
 void aver_ui_input_nav(int32_t nav) {
     if (nav >= 0 && nav <= AVER_UI_NAV_PAGE_DOWN) g_in.nav |= 1u << static_cast<unsigned>(nav);
 }
-void aver_ui_input_char(uint32_t cp) { g_in.chars.push_back(cp); }
+void aver_ui_input_char(uint32_t cp) {
+    // Only scalar values a text field can hold, and a bounded queue: a host that stalls cannot grow it without end.
+    if (cp < 0x20 || cp == 0x7F || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF) || g_in.chars.size() >= 256) return;
+    g_in.chars.push_back(cp);
+}
+void aver_ui_input_host_typed(int32_t on) { g_mapper.hostTypes = on != 0; }
 void aver_ui_input_edit_key(int32_t key) {
     if (key >= 0 && key <= AVER_UI_EDIT_ENTER) g_in.editKeys.push_back(static_cast<UiEditKey>(key));
 }

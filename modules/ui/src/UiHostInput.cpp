@@ -90,7 +90,7 @@ i32 UiHostInputMapper::map(const UiHostSnapshot& s, f32 dt, UiInputFrame& out) {
     if (s.keyPressed[kVkEscape]) out.nav |= uiNavBit(UiNav::Cancel);
     if (s.keyPressed[kVkTab]) out.nav |= uiNavBit(shift ? UiNav::PrevTab : UiNav::NextTab);
 
-    for (int vk = 0; vk < 256; ++vk) {
+    for (int vk = 0; vk < 256 && !hostTypes; ++vk) {
         if (!isTypingKey(vk)) continue;
         if (!rep(vk) || ctrl) continue;
         if (const u32 c = uiVkToChar(vk, shift)) out.chars.push_back(c);

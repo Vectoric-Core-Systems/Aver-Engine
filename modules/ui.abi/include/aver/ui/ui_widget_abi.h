@@ -76,6 +76,9 @@ AVER_UI_API void aver_ui_widgets_frame(float dt);
 // are edges ("happened since the last frame") and are cleared by the frame.
 AVER_UI_API void aver_ui_input_nav(int32_t nav);
 AVER_UI_API void aver_ui_input_char(uint32_t codepoint);
+/* E16: 1 when the host feeds typed text itself through aver_ui_input_char (from the window's Char events: the layout, dead keys and the IME's committed text
+ * are applied), so aver_ui_input_host_frame stops making characters from key presses on a US layout. 0 (the default) keeps that. */
+AVER_UI_API void aver_ui_input_host_typed(int32_t on);
 AVER_UI_API void aver_ui_input_edit_key(int32_t key);
 AVER_UI_API void aver_ui_input_wheel(float notches);     /* positive = scroll up */
 AVER_UI_API void aver_ui_input_raw_key(int32_t slot);    /* a key pressed this frame (framework slot), for rebinding */

@@ -26,6 +26,10 @@ public:
     // virtual key pressed this frame (for rebinding capture), or -1.
     i32 map(const UiHostSnapshot& s, f32 dt, UiInputFrame& out);
 
+    // True when the host feeds typed characters itself (aver_ui_input_char, from the window's Char events, E16): letters, digits and punctuation are then
+    // NOT made from key presses on a US layout. Off by default, which is how every host behaved before the window forwarded text.
+    bool hostTypes = false;
+
     static constexpr f32 kRepeatDelay = 0.40f;     // seconds a key is held before it repeats
     static constexpr f32 kRepeatInterval = 0.06f;  // seconds between repeats
     static constexpr f32 kStickThreshold = 0.60f;  // stick deflection that counts as a direction

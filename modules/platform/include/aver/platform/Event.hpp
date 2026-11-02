@@ -21,6 +21,9 @@ enum class EventType {
     // stable small index while the finger stays down, `pressed` true for down and moves, false for up,
     // mouseX/mouseY the position in window pixels, `pressure` 0..1.
     Touch,
+    // A typed character (E16): `codepoint` is one Unicode scalar value, already through the keyboard layout, dead keys and the IME's committed
+    // text, never a control character. Auto-repeated while the key is held, like the key events. Key events still report the key; this reports the text.
+    Char,
 };
 
 // One window or input event. Which fields are meaningful depends on `type`.
@@ -39,6 +42,10 @@ struct Event {
     // Touch only.
     i32 finger = 0;
     f32 pressure = 1.0f;
+    // Char only: the code point.
+    u32 codepoint = 0;
+    // Key and Char: true for an auto-repeat of a key that was already down (E16; Win32 reports it, SDL builds set it from the OS repeat flag).
+    bool repeat = false;
 };
 
 // Event sink, set on the window and called from pumpEvents.

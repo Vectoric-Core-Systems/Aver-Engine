@@ -8,6 +8,7 @@ if(WIN32)
     src/win32/Win32Console.cpp
     src/win32/Win32Speech.cpp
     src/win32/Win32DirectoryWatcher.cpp
+    src/win32/Win32Clipboard.cpp
     src/win32/Gamepad.cpp)
 else()
   set(_aver_platform_os_sources
@@ -17,6 +18,7 @@ else()
     src/sdl/SdlWindow.cpp
     src/sdl/SdlSplash.cpp
     src/sdl/SdlGamepad.cpp
+    src/sdl/SdlClipboard.cpp
     src/sdl/SdlFileDialog.cpp)
   if(APPLE)
     list(APPEND _aver_platform_os_sources src/posix/FsEventsWatchBackend.cpp)

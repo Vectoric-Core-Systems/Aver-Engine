@@ -126,3 +126,8 @@ set_target_properties(UiTextMeshTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE
 add_executable(UiWoffTest src/UiWoffTest.cpp)
 target_link_libraries(UiWoffTest PRIVATE Aver.UI Aver.Core Aver.Platform)
 set_target_properties(UiWoffTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# UiHostTextTest — parity E16: the host-fed typed characters (and the key-table characters that stop) and the clipboard seam, through the DLL the C# side loads.
+add_executable(UiHostTextTest src/UiHostTextTest.cpp)
+target_link_libraries(UiHostTextTest PRIVATE Aver.UI.Abi Aver.UI Aver.Core Aver.Platform)
+set_target_properties(UiHostTextTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
