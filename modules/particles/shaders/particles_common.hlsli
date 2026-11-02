@@ -1,5 +1,5 @@
 // Aver.Particles: the simulation's shared HLSL. A line-for-line twin of ParticleRandom.hpp (the counter-based RNG and the
-// lattice noise), EmitterSim.cpp (shape, cone, spawn) and ParticleModules.cpp (the 13 modules). Change one, change the
+// lattice noise), EmitterSim.cpp (shape, cone, spawn) and ParticleModules.cpp (the 21 modules). Change one, change the
 // other: ParticleModulesTest pins the C++ and ParticleGpuParityTest steps both on a device and compares them.
 //
 // Everything here is 32-bit integer and float math, groupshared and plain structured buffers (no wave intrinsics, no

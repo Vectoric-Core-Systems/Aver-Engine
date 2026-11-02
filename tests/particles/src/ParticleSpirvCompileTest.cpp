@@ -4,6 +4,7 @@
 // Skips (77) when the SPIR-V-capable dxcompiler.dll (third_party/dxc-spirv) is absent.
 #include "aver/core/DynamicLibrary.hpp"
 #include "aver/core/Log.hpp"
+#include "aver/platform/FileSystem.hpp"
 #include "aver/rhi/DxcShaderInclude.hpp"
 #include "aver/rhi/RHIResources.hpp"
 #include "aver/rhi/ShaderFiles.hpp"
