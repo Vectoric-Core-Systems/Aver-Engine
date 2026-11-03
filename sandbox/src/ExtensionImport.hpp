@@ -9,6 +9,7 @@
 // its output) is plain functions over plain data, so ExtensionImportTest runs it headless. The modal that drives it lives at the bottom of
 // ExtensionImport.cpp and is the only part that includes ImGui.
 #include "aver/core/Types.hpp"
+#include "ProcessStream.hpp"
 #include "aver/extensions/Extensions.hpp"
 
 #include <atomic>
@@ -79,8 +80,9 @@ std::vector<std::string> importArgs(const ImportRequest& request);
 ImportResult parseImportOutput(const std::string& output, int exitCode);
 
 // Runs the command to completion. `onLine` sees each line of its output as it arrives (it may be called from the calling thread only). A
-// result with started == false means the tool could not be launched.
-ImportResult runImport(const ImportRequest& request, const std::string& toolPath, const std::function<void(const std::string&)>& onLine = {});
+// result with started == false means the tool could not be launched. `control` can cancel it from another thread; the result then says so.
+ImportResult runImport(const ImportRequest& request, const std::string& toolPath, const std::function<void(const std::string&)>& onLine = {},
+                       ProcessControl* control = nullptr);
 
 // ---- the editor half ----------------------------------------------------------------------------------------------------
 
@@ -111,6 +113,9 @@ public:
 
     bool running() const;
 
+    // Ends the running import, with everything it started (Cancel in the window). Nothing when none is running.
+    void cancel();
+
     // The File menu items, one per importer. `track` is told each item's id ("file.import.<importer id>").
     void drawMenuItems(const std::function<void(const char* id)>& track);
 
@@ -135,6 +140,7 @@ private:
         // When it started and when the command last printed anything, under `lock`: a long silence is shown, so a slow step and a hang can be told apart.
         std::chrono::steady_clock::time_point started, lastOutput;
         std::string logPath;          // <output folder>/<extension>-import.log: every line the command printed, kept after the editor closes
+        ProcessControl control;
         ImportResult result;
         u64 notification = 0;
         ImporterEntry entry;

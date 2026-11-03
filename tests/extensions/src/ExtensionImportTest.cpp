@@ -9,7 +9,10 @@
 #include "aver/core/Log.hpp"
 #include "aver/platform/FileSystem.hpp"
 
+#include <atomic>
 #include <chrono>
+#include <fstream>
+#include <sstream>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -50,6 +53,11 @@ static int fakeCommand(int argc, char** argv) {
     progress.fraction = 0.5;
     progress.text = "halfway";
     printMessage(progress);
+    if (in.find("hang") != std::string::npos) {   // a step that takes far longer than the test: only a cancel ends it
+        std::fflush(stdout);
+        std::this_thread::sleep_for(std::chrono::seconds(120));
+        return 0;
+    }
     ext::CommandMessage result;
     result.kind = ext::MessageKind::Result;
     if (in.find("silent") != std::string::npos) return 0;
@@ -74,6 +82,13 @@ static int fakeCommand(int argc, char** argv) {
     result.message = "10 done, 2 left";
     printMessage(result);
     return 0;
+}
+
+static std::string slurpText(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    return ss.str();
 }
 
 static std::string manifest(const std::string& name, int abi, const std::string& importers) {
@@ -258,6 +273,40 @@ int main(int argc, char** argv) {
     bool failedNote = false;
     for (const Notification& n : shown) failedNote = failedNote || (n.title == "Import Fake Thing failed" && n.severity == NotifySeverity::Error);
     check(!importer.lastResult().ok() && failedNote, "and the notification became 'Import Fake Thing failed'");
+
+    // ---- cancelling -----------------------------------------------------------------------------------------------------------------
+    AVER_INFO("-- cancelling --");
+    ImportRequest hang = req;
+    hang.inDir = (root / "hang").string();
+    {
+        ProcessControl control;
+        std::atomic<bool> sawLine{false};
+        ImportResult cancelled;
+        const auto t0 = std::chrono::steady_clock::now();
+        std::thread worker([&] { cancelled = runImport(hang, self, [&](const std::string&) { sawLine.store(true); }, &control); });
+        for (int i = 0; i < 200 && !sawLine.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        control.cancel();
+        worker.join();
+        const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        check(sawLine.load() && !cancelled.ok() && cancelled.error == "Cancelled." && took < 30.0,
+              "a cancel ends a command that would run two minutes, and the result says so (" + std::to_string(took) + " s): " + cancelled.error);
+    }
+    importer.setToolPath(self);
+    notifications().clear();
+    check(importer.start(0, hang, &startWhy), "the importer starts the long command: " + startWhy);
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    importer.cancel();
+    for (int i = 0; i < 300 && importer.running(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    importer.drawModal(1.0f);
+    shown.clear();
+    hidden = 0;
+    notifications().tick(1.0, shown, hidden);
+    bool cancelledNote = false;
+    for (const Notification& n : shown) cancelledNote = cancelledNote || (n.title == "Import Fake Thing cancelled" && n.severity == NotifySeverity::Warning);
+    check(!importer.running() && cancelledNote, "Cancel ends it and the notification says 'cancelled', not 'failed'");
+    const std::string importLog = slurpText((fsys::path(hang.outDir) / "Fake Ext-import.log").string());
+    check(importLog.find("fake:") != std::string::npos && importLog.find("[50%] halfway") != std::string::npos,
+          "the import's log is in the output folder, its progress lines as [50%] text");
 
     AVER_INFO("=== {} checks, {} failed ===", g_checks, g_failures);
     if (!g_failures) fsys::remove_all(root, ec);

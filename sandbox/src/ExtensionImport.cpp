@@ -154,11 +154,18 @@ ImportResult parseImportOutput(const std::string& output, int exitCode) {
     return r;
 }
 
-ImportResult runImport(const ImportRequest& request, const std::string& toolPath, const std::function<void(const std::string&)>& onLine) {
-    const ProcessOutput out = runProcess(toolPath, importArgs(request), onLine);
+ImportResult runImport(const ImportRequest& request, const std::string& toolPath, const std::function<void(const std::string&)>& onLine,
+                       ProcessControl* control) {
+    const ProcessOutput out = runProcess(toolPath, importArgs(request), onLine, control);
     if (!out.started) {
         ImportResult r;
         r.error = "Could not start " + toolPath + ".";
+        return r;
+    }
+    if (out.cancelled) {
+        ImportResult r;
+        r.started = true;
+        r.error = "Cancelled.";
         return r;
     }
     return parseImportOutput(out.text, out.exitCode);
@@ -206,6 +213,10 @@ const std::vector<ImporterEntry>& ExtensionImporter::entries() {
 void ExtensionImporter::open(usize index) { if (index < entries().size()) wantOpen_ = index; }
 
 bool ExtensionImporter::running() const { return job_ && !job_->done.load(); }
+
+void ExtensionImporter::cancel() {
+    if (running()) job_->control.cancel();
+}
 
 bool ExtensionImporter::start(usize index, const ImportRequest& request, std::string* why) {
     if (index >= entries().size()) { if (why) *why = "That import is no longer installed."; return false; }
@@ -264,7 +275,7 @@ bool ExtensionImporter::start(usize index, const ImportRequest& request, std::st
             std::lock_guard<std::mutex> g(job->lock);
             job->lines.push_back(line);
             if (job->lines.size() > 400) job->lines.erase(job->lines.begin(), job->lines.begin() + 100);
-        });
+        }, &job->control);
         job->done.store(true);   // last: the UI thread reads the result once this is set
     });
     return true;
@@ -283,6 +294,9 @@ void ExtensionImporter::reap() {
         if (!r.reportPath.empty()) body += (body.empty() ? "Report: " : ". Report: ") + r.reportPath;
         notifications().finish(job_->notification, r.warnings > 0 ? NotifySeverity::Warning : NotifySeverity::Success, entry.text.title + " finished", body, 15.0);
         AVER_INFO("[{}] {}", entry.extension, body);
+    } else if (job_->control.cancelled()) {
+        notifications().finish(job_->notification, NotifySeverity::Warning, entry.text.title + " cancelled", "The output folder may hold part of the result.", 10.0);
+        AVER_WARN("[{}] import cancelled", entry.extension);
     } else {
         notifications().finish(job_->notification, NotifySeverity::Error, entry.text.title + " failed", r.error, 20.0);
         AVER_ERROR("[{}] import failed: {}", entry.extension, r.error);
@@ -427,6 +441,10 @@ void ExtensionImporter::drawModal(f32 dpi) {
         }
     }
     ImGui::EndDisabled();
+    if (busy) {
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(100.0f * dpi, 0))) cancel();   // ends the command and what it started
+    }
     ImGui::SameLine();
     if (ImGui::Button("Close", ImVec2(100.0f * dpi, 0))) ImGui::CloseCurrentPopup();   // a running import carries on; its notification reports the end
 

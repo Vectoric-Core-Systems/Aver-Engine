@@ -10,6 +10,7 @@
 #include <windows.h>
 #else
 #include <cerrno>
+#include <csignal>
 #include <fcntl.h>
 #include <spawn.h>
 #include <sys/wait.h>
@@ -18,6 +19,35 @@ extern char** environ;
 #endif
 
 namespace aver::editor {
+
+void ProcessControl::attach(void* handle, int group) {
+    std::lock_guard<std::mutex> g(lock_);
+    handle_ = handle;
+    group_ = group;
+    if (cancelled_.load()) {   // cancelled while it was starting
+#if defined(_WIN32)
+        if (handle_) TerminateJobObject(static_cast<HANDLE>(handle_), 1);
+#else
+        if (group_ > 0) ::kill(-group_, SIGTERM);
+#endif
+    }
+}
+
+void ProcessControl::detach() {
+    std::lock_guard<std::mutex> g(lock_);
+    handle_ = nullptr;
+    group_ = 0;
+}
+
+void ProcessControl::cancel() {
+    std::lock_guard<std::mutex> g(lock_);
+    cancelled_.store(true);
+#if defined(_WIN32)
+    if (handle_) TerminateJobObject(static_cast<HANDLE>(handle_), 1);
+#else
+    if (group_ > 0) ::kill(-group_, SIGTERM);
+#endif
+}
 
 namespace {
 
@@ -67,8 +97,15 @@ std::wstring quoteArg(const std::wstring& a) {
 #if defined(_WIN32)
 
 ProcessOutput runProcess(const std::string& program, const std::vector<std::string>& args,
-                         const std::function<void(const std::string&)>& onLine) {
+                         const std::function<void(const std::string&)>& onLine, ProcessControl* control) {
     ProcessOutput result;
+    // The child and whatever it starts share one job, ended together on cancel, and when the editor exits (its handle closes).
+    HANDLE job = CreateJobObjectW(nullptr, nullptr);
+    if (job) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof limits);
+    }
     SECURITY_ATTRIBUTES sa{};
     sa.nLength = sizeof sa;
     sa.bInheritHandle = TRUE;
@@ -88,10 +125,14 @@ ProcessOutput runProcess(const std::string& program, const std::vector<std::stri
     std::wstring cmd = quoteArg(widenUtf8(program));
     for (const std::string& a : args) cmd += L" " + quoteArg(widenUtf8(a));
     PROCESS_INFORMATION pi{};
-    const BOOL ok = CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+    // Suspended until it is in the job, so nothing it starts escapes the job.
+    const BOOL ok = CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &si, &pi);
     CloseHandle(wr);   // ours is closed before the drain, for the same EOF reason
     if (nul) CloseHandle(nul);
-    if (!ok) { CloseHandle(rd); return result; }
+    if (!ok) { CloseHandle(rd); if (job) CloseHandle(job); return result; }
+    if (job && !AssignProcessToJobObject(job, pi.hProcess)) { CloseHandle(job); job = nullptr; }
+    if (control) control->attach(job, 0);
+    ResumeThread(pi.hThread);
 
     result.started = true;
     std::string pending;
@@ -109,6 +150,11 @@ ProcessOutput runProcess(const std::string& program, const std::vector<std::stri
     GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
+    if (control) {
+        control->detach();
+        result.cancelled = control->cancelled();
+    }
+    if (job) CloseHandle(job);   // KILL_ON_JOB_CLOSE: anything the child left running ends here
     result.exitCode = static_cast<int>(code);
     return result;
 }
@@ -116,7 +162,7 @@ ProcessOutput runProcess(const std::string& program, const std::vector<std::stri
 #else
 
 ProcessOutput runProcess(const std::string& program, const std::vector<std::string>& args,
-                         const std::function<void(const std::string&)>& onLine) {
+                         const std::function<void(const std::string&)>& onLine, ProcessControl* control) {
     ProcessOutput result;
     int fds[2];
     if (::pipe(fds) != 0) return result;
@@ -135,11 +181,18 @@ ProcessOutput runProcess(const std::string& program, const std::vector<std::stri
     for (std::string& s : storage) argv.push_back(s.data());
     argv.push_back(nullptr);
 
+    // Its own process group, so a cancel reaches what it starts too.
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
+    posix_spawnattr_setpgroup(&attr, 0);
     pid_t pid = 0;
-    const int rc = posix_spawnp(&pid, program.c_str(), &fa, nullptr, argv.data(), environ);
+    const int rc = posix_spawnp(&pid, program.c_str(), &fa, &attr, argv.data(), environ);
+    posix_spawnattr_destroy(&attr);
     posix_spawn_file_actions_destroy(&fa);
     ::close(fds[1]);
     if (rc != 0) { ::close(fds[0]); return result; }
+    if (control) control->attach(nullptr, static_cast<int>(pid));
 
     result.started = true;
     std::string pending;
@@ -159,6 +212,10 @@ ProcessOutput runProcess(const std::string& program, const std::vector<std::stri
     drainLines(pending, onLine, true);
     int status = 0;
     while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    if (control) {
+        control->detach();
+        result.cancelled = control->cancelled();
+    }
     result.exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
     return result;
 }
