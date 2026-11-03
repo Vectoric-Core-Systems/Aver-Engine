@@ -95,6 +95,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -714,10 +715,14 @@ void applyLodAndClustering(fmt::OcMeshData& m, f32 lodRatio, const std::string& 
                       before, m.indices.size() / 3);
         }
     }
+    // Said before it starts: a dense mesh (scanned foliage, a photogrammetry rock) takes minutes here, and a run that prints nothing reads as hung.
+    AVER_INFO("clustering '{}': {} tris, building meshlets and LODs", label, m.indices.size() / 3);
+    const auto t0 = std::chrono::steady_clock::now();
     if (!addMeshlets(m, &why)) {
         AVER_WARN("clustering '{}': {} (saving without meshlets)", label, why);
     } else {
-        AVER_INFO("clustered '{}': {} LOD(s), {} meshlets at LOD 0", label, m.lodCount(), m.meshlets.size());
+        AVER_INFO("clustered '{}': {} LOD(s), {} meshlets at LOD 0, {:.1f} s", label, m.lodCount(), m.meshlets.size(),
+                  std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
     }
 }
 #endif

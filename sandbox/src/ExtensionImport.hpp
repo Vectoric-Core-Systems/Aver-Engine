@@ -12,6 +12,7 @@
 #include "aver/extensions/Extensions.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -131,6 +132,9 @@ private:
         std::vector<std::string> lines;
         double fraction = -1.0;       // the last progress line, under `lock`
         std::string progressText;
+        // When it started and when the command last printed anything, under `lock`: a long silence is shown, so a slow step and a hang can be told apart.
+        std::chrono::steady_clock::time_point started, lastOutput;
+        std::string logPath;          // <output folder>/<extension>-import.log: every line the command printed, kept after the editor closes
         ImportResult result;
         u64 notification = 0;
         ImporterEntry entry;

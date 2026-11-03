@@ -10,6 +10,7 @@
 #include <cctype>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <sstream>
 
 #if AVER_WITH_IMGUI
@@ -230,12 +231,29 @@ bool ExtensionImporter::start(usize index, const ImportRequest& request, std::st
         n.progress = -1.0f;
         job->notification = notifications().push(std::move(n));
     }
-    AVER_INFO("[{}] importing {} into {}", tag, request.inDir, request.outDir);
+    job->started = job->lastOutput = std::chrono::steady_clock::now();
+    {
+        std::error_code ec;
+        fsys::create_directories(request.outDir, ec);
+        job->logPath = (fsys::path(request.outDir) / (tag + "-import.log")).string();
+    }
+    AVER_INFO("[{}] importing {} into {} (log: {})", tag, request.inDir, request.outDir, job->logPath);
     thread_ = std::thread([job, request, tool, tag] {
+        std::ofstream log(job->logPath, std::ios::trunc);
         job->result = runImport(request, tool, [&](const std::string& line) {
             if (line.empty()) return;
             const ext::CommandMessage m = ext::parseCommandMessage(line);
-            if (m.kind == ext::MessageKind::Progress) {   // the protocol lines are not for people: they move the bar
+            if (log) {
+                if (m.kind == ext::MessageKind::Progress) log << "[" << static_cast<int>(m.fraction * 100.0 + 0.5) << "%] " << m.text << '\n';
+                else log << line << '\n';
+                log.flush();   // read while it runs, and whole after a crash
+            }
+            {
+                std::lock_guard<std::mutex> g(job->lock);
+                job->lastOutput = std::chrono::steady_clock::now();
+            }
+            if (m.kind == ext::MessageKind::Progress) {   // the protocol lines are not for people: they move the bar, here and on the notification
+                notifications().setProgress(job->notification, static_cast<f32>(m.fraction), m.text);
                 std::lock_guard<std::mutex> g(job->lock);
                 job->fraction = m.fraction;
                 job->progressText = m.text;
@@ -415,12 +433,17 @@ void ExtensionImporter::drawModal(f32 dpi) {
     // the progress bar and the log
     ImGui::Separator();
     double fraction = -1.0;
-    std::string progressText;
+    std::string progressText, logPath;
+    double runningSec = 0.0, quietSec = 0.0;
     if (job_ && lastEntry_ == active_) {
         std::lock_guard<std::mutex> g(job_->lock);
         shownLog_ = job_->lines;
         fraction = job_->fraction;
         progressText = job_->progressText;
+        logPath = job_->logPath;
+        const auto now = std::chrono::steady_clock::now();
+        runningSec = std::chrono::duration<double>(now - job_->started).count();
+        quietSec = std::chrono::duration<double>(now - job_->lastOutput).count();
     } else {
         shownLog_.clear();
     }
@@ -428,6 +451,16 @@ void ExtensionImporter::drawModal(f32 dpi) {
         const float width = -1.0f;
         if (fraction >= 0.0) ImGui::ProgressBar(float(fraction), ImVec2(width, 0), progressText.c_str());
         else ImGui::ProgressBar(-1.0f * float(ImGui::GetTime()), ImVec2(width, 0), progressText.c_str());
+        // How long it has run and how long since it last printed: a dense mesh can be quiet for minutes, a hang stays quiet.
+        const auto mmss = [](double s) { char b[16]; std::snprintf(b, sizeof b, "%d:%02d", int(s) / 60, int(s) % 60); return std::string(b); };
+        const std::string status = "Running " + mmss(runningSec) + (quietSec >= 10.0 ? ", no output for " + mmss(quietSec) : "");
+        if (quietSec >= 120.0) ImGui::TextColored(ImVec4(0.95f, 0.72f, 0.25f, 1), "%s (a large asset, or stuck: the last line above is what it is on)", status.c_str());
+        else ImGui::TextDisabled("%s", status.c_str());
+    }
+    if (!logPath.empty()) {
+        ImGui::TextDisabled("Log: %s", logPath.c_str());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Copy path##importLogPath")) ImGui::SetClipboardText(logPath.c_str());
     }
     if (ImGui::BeginChild("##importLog", ImVec2(0, showLast ? -(80.0f * dpi) : 0), ImGuiChildFlags_Borders)) {
         for (const std::string& line : shownLog_) ImGui::TextUnformatted(line.c_str());
