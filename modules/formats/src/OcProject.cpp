@@ -118,13 +118,13 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
         } else if (equalsCI(key, "CREATEDWITH")) {
             if (t.size() > 1) out.createdWith = std::string(t[1]);
         } else if (equalsCI(key, "CONTENT")) {
-            if (t.size() > 1) out.contentRoot = std::string(t[1]);
+            if (t.size() > 1) out.contentRoot = std::string(restOfLine(line, key));   // a path: spaces are part of it
         } else if (equalsCI(key, "STARTMAP")) {
-            if (t.size() > 1) out.startMap = std::string(t[1]);
+            if (t.size() > 1) out.startMap = std::string(restOfLine(line, key));   // a path: spaces are part of it
         } else if (equalsCI(key, "DRONE.GRAPH")) {
-            if (t.size() > 1) out.droneGraph = std::string(t[1]);
+            if (t.size() > 1) out.droneGraph = std::string(restOfLine(line, key));   // a path: spaces are part of it
         } else if (equalsCI(key, "INPUT.SCHEME")) {
-            if (t.size() > 1) out.inputScheme = std::string(t[1]);
+            if (t.size() > 1) out.inputScheme = std::string(restOfLine(line, key));   // a path: spaces are part of it
         } else if (equalsCI(key, "GAME.MODE")) {
             if (t.size() > 1) out.gameMode = std::string(t[1]);
         } else if (equalsCI(key, "LOCALE.DEFAULT")) {
@@ -352,7 +352,7 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
         } else if (equalsCI(key, "AUDIO.MASTER")) {
             if (t.size() > 1) { out.masterVolume = static_cast<f32>(parseF64(t[1])); out.hasAudioMix = true; }
         } else if (equalsCI(key, "AUDIO.BUSLAYOUT")) {
-            if (t.size() > 1) out.audioBusLayout = std::string(t[1]);
+            if (t.size() > 1) out.audioBusLayout = std::string(restOfLine(line, key));   // a path: spaces are part of it
         } else if (equalsCI(key, "AUDIO.SPEAKERS")) {
             if (t.size() > 1) {
                 const int n = static_cast<int>(parseF64(t[1], 0.0));
@@ -361,7 +361,7 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
         } else if (equalsCI(key, "AUDIO.BINAURAL")) {
             if (t.size() > 1) out.audioBinaural = parseF64(t[1], 0.0) != 0.0;
         } else if (equalsCI(key, "UI.THEME")) {
-            if (t.size() > 1) out.uiTheme = std::string(t[1]);
+            if (t.size() > 1) out.uiTheme = std::string(restOfLine(line, key));   // a path: spaces are part of it
         } else if (equalsCI(key, "UI.STRETCH")) {
             if (t.size() > 1) out.uiStretch = std::string(t[1]);
         } else if (equalsCI(key, "UI.ASPECT")) {
@@ -720,6 +720,39 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
     if (!sawHeader)
         out.insert(0, "OCPROJECT " + std::to_string(d.version > 0 ? d.version : 1) + "\n");
     return out;
+}
+
+// The render settings every new project starts with: the PTTest reference project's, minus Path
+// Tracing (it takes over the viewport) and temporal AA. Written explicitly rather than left to engine
+// defaults, so a project's look does not drift across engine versions and every value has a line to edit.
+void applyNewProjectRenderDefaults(ProjectDesc& d) {
+    d.giQuality          = 4;      // Epic (0=Off 1=Low 2=Medium 3=High 4=Epic)
+    d.rayTracing         = 4;
+    d.pathTracing        = 0;      // Global Illumination > Method: Ray traced (ReSTIR GI)
+    d.ptMode             = 0;
+    d.giMode             = 1;      // ReSTIR GI
+    d.giIntensity        = 1.0f;
+    d.giMaxDistance      = 4000.0f;
+    d.restirVisibility   = 4;      // cached (NeuRaC)
+    d.restirHistory      = 8;      // ReSTIR temporal reuse on (0 turns reuse off)
+    d.denoiser           = 1;
+    d.rdStages           = 2;      // staged + half-rate GI
+    d.fogOcclusion       = 1;
+    d.layeredBsdf        = 0;
+    d.refractionStrength = 1.0f;
+    d.refractionEdgeFade = 0.15f;
+    d.lodSelect          = 0;
+    d.lodThresholdPx     = 1.0f;
+    d.occlusionCull      = 1;
+    d.depthPrepass       = 0;
+    d.backend            = "d3d12";
+    d.averSr             = 3;      // Performance: render scale 0.5
+    d.frameInterp        = 1;
+    d.taa                = 0;
+    d.neuraa             = 0;      // NeuRAA edge AA: off until measured
+    d.msaa               = 1;
+    d.meshShaders        = 1;
+    d.postAutoExposure   = 1;
 }
 
 } // namespace aver::fmt

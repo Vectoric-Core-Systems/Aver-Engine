@@ -110,7 +110,7 @@ bool parseTemplateManifest(const std::string& manifestPath, const std::string& d
         } else if (equalsCI(t[0], "PREVIEW") && t.size() >= 2) {
             out.previewPath = (std::filesystem::path(dir) / std::string(t[1])).string();
         } else if (equalsCI(t[0], "STARTMAP") && t.size() >= 2) {
-            out.startMap = std::string(t[1]);
+            out.startMap = std::string(trim(line.substr(t[0].size())));   // a path: spaces are part of it
         } else if (equalsCI(t[0], "GAMEMODE") && t.size() >= 2) {
             out.gameMode = std::string(t[1]);
         } else if (equalsCI(t[0], "INPUTSCHEME") && t.size() >= 2) {
@@ -148,39 +148,6 @@ std::string templatesRoot() {
     return cached;
 }
 
-// The render settings every new project starts with: the PTTest reference project's, minus Path
-// Tracing (it takes over the viewport) and temporal AA. Written explicitly rather than left to engine
-// defaults, so a project's look does not drift across engine versions and every value has a line to edit.
-void applyNewProjectRenderDefaults(fmt::ProjectDesc& d) {
-    d.giQuality          = 4;      // Epic (0=Off 1=Low 2=Medium 3=High 4=Epic)
-    d.rayTracing         = 4;
-    d.pathTracing        = 0;      // Global Illumination > Method: Ray traced (ReSTIR GI)
-    d.ptMode             = 0;
-    d.giMode             = 1;      // ReSTIR GI
-    d.giIntensity        = 1.0f;
-    d.giMaxDistance      = 4000.0f;
-    d.restirVisibility   = 4;      // cached (NeuRaC)
-    d.restirHistory      = 8;      // ReSTIR temporal reuse on (0 turns reuse off)
-    d.denoiser           = 1;
-    d.rdStages           = 2;      // staged + half-rate GI
-    d.fogOcclusion       = 1;
-    d.layeredBsdf        = 0;
-    d.refractionStrength = 1.0f;
-    d.refractionEdgeFade = 0.15f;
-    d.lodSelect          = 0;
-    d.lodThresholdPx     = 1.0f;
-    d.occlusionCull      = 1;
-    d.depthPrepass       = 0;
-    d.backend            = "d3d12";
-    d.averSr             = 3;      // Performance: render scale 0.5
-    d.frameInterp        = 1;
-    d.taa                = 0;
-    d.neuraa             = 0;      // NeuRAA edge AA: off until measured
-    d.msaa               = 1;
-    d.meshShaders        = 1;
-    d.postAutoExposure   = 1;
-}
-
 // Builds the .ocproject manifest text through fmt::writeOcproject, never by hand: one grammar, one
 // writer. writeOcproject copies every line of `existing` it does not own, which keeps the comments.
 std::string manifestText(const std::string& name) {
@@ -193,7 +160,7 @@ std::string manifestText(const std::string& name) {
     d.createdWith      = kEngineVersion;
     d.contentRoot      = "Content";
     d.startMap         = "Maps/Default.ocmap";
-    applyNewProjectRenderDefaults(d);
+    fmt::applyNewProjectRenderDefaults(d);
 
     // The lines writeOcproject does not own, and therefore preserves verbatim.
     const std::string comments =
@@ -386,17 +353,38 @@ struct EngineRefs {
     std::string framework;   // Actor / Pawn / GameMode, and Aver.Scene behind it
     std::string ui;          // the game's HUD
     std::string materials;   // [AverMaterial] surfaces
+    // An installed editor has no engine source tree beside it: the compiled assemblies it ships instead, (name, HintPath).
+    std::vector<std::pair<std::string, std::string>> installed;
     bool any() const { return !scripting.empty() || !framework.empty() || !ui.empty() || !materials.empty(); }
 };
 
-// Resolves all four engine references for a project's Scripts folder.
+// MSBuild path from the Scripts folder to an assembly the editor ships (bin\Scripting, or bin\Tools for Aver.Materials), or empty.
+std::string installedEngineAssembly(const std::string& scriptsDir, const std::string& name) {
+    std::error_code ec;
+    for (const char* sub : {"Scripting", "Tools"}) {
+        const std::filesystem::path dll = std::filesystem::path(executableDir()) / sub / (name + ".dll");
+        if (!std::filesystem::exists(dll, ec)) continue;
+        const std::filesystem::path rel = std::filesystem::relative(dll, scriptsDir, ec);
+        std::string out = ec || rel.empty() ? dll.string() : rel.string();
+        std::replace(out.begin(), out.end(), '/', '\\');
+        return out;
+    }
+    return {};
+}
+
+// Resolves all four engine references for a project's Scripts folder. With no engine source tree, the shipped assemblies are
+// referenced instead, with the ones Aver.Framework's project references would have brought in (a DLL reference brings none).
 EngineRefs engineRefs(const std::string& scriptsDir) {
-    return EngineRefs{
+    EngineRefs r{
         scriptingProjectReference(scriptsDir),
         frameworkProjectReference(scriptsDir),
         uiProjectReference(scriptsDir),
         materialsProjectReference(scriptsDir),
     };
+    if (!r.any())
+        for (const char* name : {"Aver.Scripting", "Aver.Framework", "Aver.Scene", "Aver.Physics", "Aver.UI", "Aver.Synapse", "Aver.Materials"})
+            if (std::string hint = installedEngineAssembly(scriptsDir, name); !hint.empty()) r.installed.emplace_back(name, std::move(hint));
+    return r;
 }
 
 // Builds the starter Content\Materials\Surfaces.cs text: one complete, plain material.
@@ -450,7 +438,14 @@ std::string csprojText(const EngineRefs& refs) {
     s += "    <Nullable>enable</Nullable>\n";
     s += "    <ImplicitUsings>enable</ImplicitUsings>\n";
     s += "  </PropertyGroup>\n\n";
-    if (!refs.any()) {
+    if (!refs.any() && !refs.installed.empty()) {
+        // Private=false: the editor loads its own copies; a second one in Binaries\Scripts would be another assembly identity.
+        s += "  <!-- The engine's C# projects are not beside this editor (an installed build): its shipped assemblies. -->\n";
+        s += "  <ItemGroup>\n";
+        for (const auto& [name, hint] : refs.installed)
+            s += "    <Reference Include=\"" + name + "\">\n      <HintPath>" + hint + "</HintPath>\n      <Private>false</Private>\n    </Reference>\n";
+        s += "  </ItemGroup>\n\n";
+    } else if (!refs.any()) {
         s += "  <!-- The engine's C# projects could not be located from the editor's install path.\n";
         s += "       Point these at <engine>\\scripting\\csharp\\<name>. -->\n";
         s += "  <!-- <ItemGroup>\n";
@@ -997,7 +992,7 @@ bool scaffoldProjectFromTemplate(const std::string& location, const std::string&
     desc.gameMode = tmpl.gameMode;
 
     desc.inputScheme = tmpl.inputScheme;
-    applyNewProjectRenderDefaults(desc);
+    fmt::applyNewProjectRenderDefaults(desc);
 
     const std::string manifest = root + AVER_PATH_SEP + name + ".ocproject";
     if (!writeFileText(manifest, fmt::writeOcproject(desc, ""))) {

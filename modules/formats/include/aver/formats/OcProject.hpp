@@ -349,4 +349,8 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing);
 // newer than this build.
 bool loadOcproject(const std::string& path, ProjectDesc& out, std::string* err = nullptr);
 
+// The render settings every new project starts with (GI, ray tracing, denoiser, upscaler, exposure): the editor's
+// New Project and an importer that makes a project (Fabric) start from these, then set what their source states.
+void applyNewProjectRenderDefaults(ProjectDesc& d);
+
 } // namespace aver::fmt

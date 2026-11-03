@@ -165,6 +165,17 @@ static void checkOcproject() {
               "while the current version still parses");
     }
 
+    // A path names the whole rest of the line: an imported project's maps keep their folders' spaces ("Example World").
+    {
+        ProjectDesc sp;
+        std::string serr;
+        check(parseOcproject("OCPROJECT 1\nNAME S\nSTARTMAP Maps/Example World/world.ocworld\nINPUT.SCHEME Input/My Game.ocinput\n", sp, &serr) &&
+                  sp.startMap == "Maps/Example World/world.ocworld" && sp.inputScheme == "Input/My Game.ocinput",
+              "STARTMAP and INPUT.SCHEME keep the spaces in their paths: '" + sp.startMap + "'");
+        ProjectDesc again;
+        check(parseOcproject(writeOcproject(sp, ""), again, &serr) && again.startMap == sp.startMap, "and write and parse back the same");
+    }
+
     {
         ProjectDesc r;
         check(parseOcproject("OCPROJECT 1\nNAME R\n"
