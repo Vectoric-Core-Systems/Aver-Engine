@@ -80,6 +80,7 @@ static u32 logTextRows(std::string_view t) {
     if (self->logLines_.size() > kMaxLogLines) {
         if (self->logLines_.front().rows > 1) --self->logMultiRowCount_;
         self->logLines_.pop_front();
+        ++self->logFirstSerial_;
     }
 
     // Forwards Info+ lines to loading screen (main thread only; Jolt job pool may log too).

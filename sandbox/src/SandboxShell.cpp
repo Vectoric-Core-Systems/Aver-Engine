@@ -2953,18 +2953,37 @@ void SandboxApp::drawGraphPrintOverlay(ImVec2 vpMin, ImVec2 vpMax) {
 }
 
 void SandboxApp::drawOutputLog() {
-    if (ImGui::SmallButton("Clear")) { std::lock_guard<std::mutex> lk(logMutex_); logLines_.clear(); logMultiRowCount_ = 0; }
-    ImGui::SameLine();
-    // Text is not selectable; log is frequently needed.
-    if (ImGui::SmallButton("Copy")) {
-        std::string all;
-        {
-            std::lock_guard<std::mutex> lk(logMutex_);
-            for (const LogLine& ln : logLines_) { all += ln.text; all += char(10); }
+    const int minLevel = logLevelFilter_ == 4 ? (int)LogLevel::Critical
+                      : logLevelFilter_ == 3 ? (int)LogLevel::Error
+                      : logLevelFilter_ == 2 ? (int)LogLevel::Warn
+                      : logLevelFilter_ == 1 ? (int)LogLevel::Info : (int)LogLevel::Trace;
+    const bool hasSel = logSelAnchor_ >= 0;
+    const i64 selLo = std::min(logSelAnchor_, logSelEnd_), selHi = std::max(logSelAnchor_, logSelEnd_);
+    // The lines the level filter shows, or only the selected ones among them, one per line.
+    const auto collect = [&](bool selectedOnly) {
+        std::string out;
+        std::lock_guard<std::mutex> lk(logMutex_);
+        for (usize i = 0; i < logLines_.size(); ++i) {
+            const i64 serial = static_cast<i64>(logFirstSerial_ + i);
+            if ((int)logLines_[i].level < minLevel || (selectedOnly && (serial < selLo || serial > selHi))) continue;
+            out += logLines_[i].text;
+            out += char(10);
         }
-        ImGui::SetClipboardText(all.c_str());
+        return out;
+    };
+
+    if (ImGui::SmallButton("Clear")) {
+        std::lock_guard<std::mutex> lk(logMutex_);
+        logFirstSerial_ += logLines_.size();
+        logLines_.clear();
+        logMultiRowCount_ = 0;
+        logSelAnchor_ = logSelEnd_ = -1;
     }
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copy the whole log to the clipboard");
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Copy")) ImGui::SetClipboardText(collect(hasSel).c_str());
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(hasSel ? "Copy the selected lines (Ctrl+C)"
+                                 : "Copy the lines the level filter shows.\nClick a line to select it, Shift+click to extend, Ctrl+A for all shown.");
     ImGui::SameLine();
     ImGui::SetNextItemWidth(110.0f * dpi_);
     // Appended only; order is persisted in editor.ini.
@@ -2974,18 +2993,39 @@ void SandboxApp::drawOutputLog() {
     ImGui::Separator();
 
     ImGui::BeginChild("##logscroll", ImVec2(0, 0), false, ImGuiWindowFlags_HorizontalScrollbar);
+    bool copySelected = false, copyShown = false, selectAll = false;
+    i64 firstShown = -1, lastShown = -1;
     {
         std::lock_guard<std::mutex> lk(logMutex_);
-        const int minLevel = logLevelFilter_ == 4 ? (int)LogLevel::Critical
-                          : logLevelFilter_ == 3 ? (int)LogLevel::Error
-                          : logLevelFilter_ == 2 ? (int)LogLevel::Warn
-                          : logLevelFilter_ == 1 ? (int)LogLevel::Info : (int)LogLevel::Trace;
         // Only visible rows submitted: ImGuiListClipper, or spacers over summed row heights once
         // any multi-row line exists.
         std::vector<u32> shown;
         shown.reserve(logLines_.size());
         for (usize i = 0; i < logLines_.size(); ++i)
             if ((int)logLines_[i].level >= minLevel) shown.push_back(static_cast<u32>(i));
+        if (!shown.empty()) {
+            firstShown = static_cast<i64>(logFirstSerial_ + shown.front());
+            lastShown = static_cast<i64>(logFirstSerial_ + shown.back());
+        }
+        // One row: the selection behind it, a click selects it (Shift extends), a right click on an unselected row selects it.
+        ImDrawList* rowDl = ImGui::GetWindowDrawList();
+        const auto drawRow = [&](u32 idx) {
+            const LogLine& ln = logLines_[idx];
+            const i64 serial = static_cast<i64>(logFirstSerial_ + idx);
+            const bool selected = hasSel && serial >= selLo && serial <= selHi;
+            const ImVec2 p = ImGui::GetCursorScreenPos();
+            const ImVec2 q(p.x + ImGui::GetContentRegionAvail().x, p.y + static_cast<f32>(ln.rows) * ImGui::GetTextLineHeight());
+            if (selected) rowDl->AddRectFilled(p, q, ImGui::GetColorU32(ImGuiCol_Header));
+            if (ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(p, q)) {
+                if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                    if (ImGui::GetIO().KeyShift && logSelAnchor_ >= 0) logSelEnd_ = serial;
+                    else logSelAnchor_ = logSelEnd_ = serial;
+                } else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) && !selected) {
+                    logSelAnchor_ = logSelEnd_ = serial;
+                }
+            }
+            drawLogLine(ln.level, ln.text.c_str());
+        };
         if (logMultiRowCount_ != 0) {
             const f32 lineH = ImGui::GetTextLineHeight();
             const f32 spacing = ImGui::GetStyle().ItemSpacing.y;
@@ -3003,8 +3043,7 @@ void SandboxApp::drawOutputLog() {
             const usize last = std::max(first, static_cast<usize>(
                 std::lower_bound(top.begin(), top.begin() + static_cast<std::ptrdiff_t>(n), visBot) - top.begin()));
             if (first > 0) ImGui::Dummy(ImVec2(0.0f, top[first] - spacing));
-            for (usize k = first; k < last; ++k)
-                drawLogLine(logLines_[shown[k]].level, logLines_[shown[k]].text.c_str());
+            for (usize k = first; k < last; ++k) drawRow(shown[k]);
             if (last < n) ImGui::Dummy(ImVec2(0.0f, top[n] - top[last] - spacing));
         } else {
             // Floor of line height with spacing (for DPI scale agreement).
@@ -3012,12 +3051,26 @@ void SandboxApp::drawOutputLog() {
             clipper.Begin(static_cast<int>(shown.size()),
                           std::floor(ImGui::GetTextLineHeightWithSpacing()));
             while (clipper.Step())
-                for (int k = clipper.DisplayStart; k < clipper.DisplayEnd; ++k) {
-                    const LogLine& ln = logLines_[shown[static_cast<usize>(k)]];
-                    drawLogLine(ln.level, ln.text.c_str());
-                }
+                for (int k = clipper.DisplayStart; k < clipper.DisplayEnd; ++k) drawRow(shown[static_cast<usize>(k)]);
         }
     }
+    // Outside the lock: copying takes it again.
+    if (ImGui::IsWindowFocused()) {
+        if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_C) && hasSel) copySelected = true;
+        if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_A)) selectAll = true;
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) logSelAnchor_ = logSelEnd_ = -1;
+    }
+    if (ImGui::BeginPopupContextWindow("##logmenu")) {
+        const bool sel = logSelAnchor_ >= 0;
+        if (ImGui::MenuItem("Copy selected", "Ctrl+C", false, sel)) copySelected = true;
+        if (ImGui::MenuItem("Copy all shown")) copyShown = true;
+        if (ImGui::MenuItem("Select all shown", "Ctrl+A")) selectAll = true;
+        if (ImGui::MenuItem("Clear selection", "Esc", false, sel)) logSelAnchor_ = logSelEnd_ = -1;
+        ImGui::EndPopup();
+    }
+    if (selectAll && firstShown >= 0) { logSelAnchor_ = firstShown; logSelEnd_ = lastShown; }
+    if (copySelected) ImGui::SetClipboardText(collect(true).c_str());
+    if (copyShown) ImGui::SetClipboardText(collect(false).c_str());
     if (logAutoScroll_ && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4.0f)
         ImGui::SetScrollHereY(1.0f);
     ImGui::EndChild();

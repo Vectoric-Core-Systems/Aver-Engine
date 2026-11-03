@@ -4505,6 +4505,9 @@ private:
     std::mutex          logMutex_;
     std::deque<LogLine> logLines_;
     usize               logMultiRowCount_ = 0;   // Lines in logLines_ with rows > 1.
+    u64                 logFirstSerial_ = 0;     // Serial of logLines_.front(): a line keeps its number while older ones drop off.
+    i64                 logSelAnchor_ = -1;      // Output Log selection: the serials of the clicked line and the shift-clicked end
+    i64                 logSelEnd_ = -1;         // (inclusive, either order); -1 when nothing is selected.
     struct GraphPrint { std::string text; f64 at; u32 count; };
     std::deque<GraphPrint> graphPrints_;
     bool                logAutoScroll_ = true;
