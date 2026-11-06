@@ -430,16 +430,7 @@ void SandboxApp::startPlay() {
                 placeDefaultPawnAtCamera(camPos_, yaw_, pitch_);
                 atCamera = true;
             } else if (!defaultPawnWalk_) {
-                // A Player Start marks feet; the flying drone IS the camera, so it starts at eye height.
-                const int32_t pn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
-                scene::World& pw = scene::World::instance();
-                const scene::Entity pe = static_cast<scene::Entity>(static_cast<uint32_t>(pn));
-                if (pn && pw.valid(pe)) {
-                    const Transform& t = pw.localTransform(pe);
-                    const Vec3 f = t.rotation.rotate(Vec3{1, 0, 0});   // and faces the way it does
-                    if (f.x * f.x + f.y * f.y > 1e-6f) { yaw_ = std::atan2(f.y, f.x); pitch_ = 0.0f; }
-                    placeDefaultPawnAtCamera(t.position + Vec3{0.0f, 0.0f, kWalkEye}, yaw_, pitch_);
-                }
+                raiseFlyingPawnToEye();
             }
             if (defaultPawnWalk_) startDefaultPawnWalk(atCamera);
             else                  startDefaultPawnFly();
@@ -733,6 +724,18 @@ void SandboxApp::stopPlay() {
     // captured bases and stops it writing CLocal, so the restore below is the last word.
     anim::animSystem().setObjectAnimationLive(false);
 #endif
+    // After a level travel those records name the travelled-to level's entities: the Play-start copy reloaded
+    // next frame puts the edited level back instead.
+    if (pieTravelled_) {
+        playWorldSnapshot_.clear();
+        playWorldCaptured_ = false;
+#if AVER_MODULE_SCENE && AVER_WITH_IMGUI
+        placedBaseline_.clear();
+#endif
+#if AVER_MODULE_FRAMEWORK
+        playClassSnapshot_.clear();
+#endif
+    }
     restorePlayWorld();
 #if AVER_MODULE_FRAMEWORK
     respawnLostClassInstances();
@@ -803,8 +806,10 @@ void SandboxApp::reloadAfterPlay(Engine& eng) {
     const std::string snapshot = std::move(pieSnapshotPath_);
     pieSnapshotPath_.clear();
     if (snapshot.empty()) return;
-    const std::string path = levelPath_.empty() ? snapshot : levelPath_;
-    const std::string keepPath = levelPath_;
+    // The level Play began on, which after a level travel is not the one open now.
+    const std::string keepPath = pieTravelled_ ? pieEditedLevelPath_ : levelPath_;
+    const std::string path = keepPath.empty() ? snapshot : keepPath;
+    levelPath_ = keepPath;   // before the load too, so the view unloadLevel stores is the edited level's
     const Vec3 cam = camPos_; const f32 yaw = yaw_, pitch = pitch_, speed = flySpeed_;
     const world::OriginCm camOrigin = origin_.origin();   // the camera is origin-relative; the reload resets the origin
     const bool wasUnsaved = pieWasUnsaved_;
@@ -832,6 +837,106 @@ void SandboxApp::reloadAfterPlay(Engine& eng) {
     std::error_code ec;
     std::filesystem::remove(snapshot, ec);
     AVER_INFO("[Sandbox] Stop: level reloaded as it was when Play began{}", wasUnsaved ? " (unsaved edits kept)" : "");
+}
+#endif
+
+#if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
+// A Player Start marks feet; the flying drone IS the camera, so it starts at eye height, facing the way the start does.
+void SandboxApp::raiseFlyingPawnToEye() {
+    const int32_t pn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
+    scene::World& pw = scene::World::instance();
+    const scene::Entity pe = static_cast<scene::Entity>(static_cast<uint32_t>(pn));
+    if (!pn || !pw.valid(pe)) return;
+    const Transform& t = pw.localTransform(pe);
+    const Vec3 f = t.rotation.rotate(Vec3{1, 0, 0});
+    if (f.x * f.x + f.y * f.y > 1e-6f) { yaw_ = std::atan2(f.y, f.x); pitch_ = 0.0f; }
+    placeDefaultPawnAtCamera(t.position + Vec3{0.0f, 0.0f, kWalkEye}, yaw_, pitch_);
+}
+
+// LEVEL TRAVEL IN PLAY, the way the packaged game runs it (GameApp::travelTo): the session's actors end (the
+// GameInstance and persistent actors stay), the requested level replaces the open one, its placed actors spawn, and
+// the GameMode, controller and pawn begin again at its Player Start. The edited level is never written: Stop reloads
+// the Play-start copy under the level Play began on. Without that copy there is nothing to bring it back from, so the
+// request is refused.
+void SandboxApp::travelDuringPlay(Engine& eng, const std::string& requested) {
+    if (aver_fw_play_state() == AVER_FW_PLAY_EDITOR) return;
+    if (pieSnapshotPath_.empty()) {
+        AVER_WARN("[Play] a script asked to change level to '{}': this session has no copy of the edited level to "
+                  "restore at Stop, so the editor keeps the level it is editing", requested);
+        return;
+    }
+    std::string path = requested;
+    if (path.rfind("res://", 0) == 0) path = path.substr(6);
+    if (!std::filesystem::path(path).is_absolute()) path = project_.contentDir() + AVER_PATH_SEP + path;
+    if (!fileExists(path)) {
+        AVER_ERROR("[Play] level travel to '{}': no such level; staying", requested);
+        return;
+    }
+    AVER_INFO("[Play] level travel to '{}'", path);
+    if (!pieTravelled_) {
+        pieTravelled_ = true;
+        pieEditedLevelPath_ = levelPath_;
+    }
+
+    // What the session built for the level being left, rebuilt for the new one below as Play start builds it.
+#if AVER_MODULE_RAGDOLL
+    ragdoll::ragdollSystem().clear();
+#endif
+#if AVER_MODULE_PHYSICS
+    editor::clearPhysicsFromScene();
+    vehicles_.end();
+    if (walkCapsule_) { aver_phys_character_destroy(walkCapsule_); walkCapsule_ = 0; }
+    if (flyCapsule_) { aver_phys_character_destroy(flyCapsule_); flyCapsule_ = 0; }
+#endif
+    anim::animSystem().setObjectAnimationLive(false);
+    seqEditor_.endPlay();
+    if (playMobility_.active()) playMobility_.end();
+    playWorldSnapshot_.clear();
+    playWorldCaptured_ = false;
+#if AVER_WITH_IMGUI
+    placedBaseline_.clear();
+#endif
+
+    aver_fw_travel_begin();
+    pieTravelling_ = true;
+    loadLevel(eng, path);
+    pieTravelling_ = false;
+#if AVER_MODULE_SCRIPTING
+    if (scripts_.ready())
+#endif
+        spawnClassPlacements();
+    capturePlayWorld();
+    anim::animSystem().setObjectAnimationLive(true);
+
+    // The GameMode and pawn the new level asks for, chosen as startPlay chooses them.
+    const int32_t engineGm = engineDefaultGameMode();
+    const int32_t dronePawn = aver_fw_class_find("AverDefaultPawn");
+    auto named = [](const std::string& n, int32_t flag) -> int32_t {
+        const int32_t c = n.empty() ? 0 : aver_fw_class_find(n.c_str());
+        return (c && (aver_fw_class_get_flags(c) & flag) != 0) ? c : 0;
+    };
+    int32_t gm = named(!levelHeader_.gameMode.empty() ? levelHeader_.gameMode : project_.gameMode, AVER_FW_CLASS_GAME_MODE);
+    if (!gm) gm = engineGm;
+    const int32_t pawnOverride = named(levelHeader_.defaultPawn, AVER_FW_CLASS_PAWN);
+    const bool drone = pawnOverride ? pawnOverride == dronePawn : gm == engineGm;
+    if (!aver_fw_travel_end(gm, drone ? dronePawn : pawnOverride)) {
+        AVER_WARN("[Play] level travel: no GameMode could begin in '{}'", path);
+        return;
+    }
+    defaultPawnPlay_ = drone;
+    if (!drone) {
+        placePawnAtPlayerStart(aver_fw_class_name(gm));
+        return;
+    }
+    bool atCamera = false;
+    if (!placePawnAtPlayerStart("the engine's default pawn")) {
+        placeDefaultPawnAtCamera(camPos_, yaw_, pitch_);
+        atCamera = true;
+    } else if (!defaultPawnWalk_) {
+        raiseFlyingPawnToEye();
+    }
+    if (defaultPawnWalk_) startDefaultPawnWalk(atCamera);
+    else                  startDefaultPawnFly();
 }
 #endif
 

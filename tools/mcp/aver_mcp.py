@@ -35,9 +35,10 @@ WHAT IT WILL NOT DO, and these are refusals rather than omissions:
 
   * It never runs `gates.ps1 -Record`. Re-recording overwrites the only record of what the renderer
     used to do; it is the user's call, and scripts/record-gates.ps1 is how they make it.
-  * It never launches an interactive Sandbox.exe. --frames is always passed, so every run terminates on
-    its own. A windowed editor left running holds bin/*.dll open and the next build fails LNK1168 --
-    and the user may have their own editor open, which this must not disturb.
+  * The batch tools never launch an interactive Sandbox.exe. --frames is always passed, so every run
+    terminates on its own. A windowed editor left running holds bin/*.dll open and the next build fails
+    LNK1168 -- and the user may have their own editor open, which this must not disturb. aver_session is
+    the one exception: it starts an editor with --mcp, never beside another one, and ends only that pid.
   * It never kills a process it did not start.
   * aver_level edits only the level the running editor has open, and refuses while it is playing.
 
@@ -1241,6 +1242,232 @@ def tool_level(args):
     return out
 
 
+# ---- aver_session: an editor this server starts, drives through the channel, and stops ----
+#
+# THE ONE INTERACTIVE EDITOR THIS SERVER WILL START, and only on these terms: never while any other
+# Sandbox.exe is running (the user's own editor shares the GPU, the shader cache and the channel's port),
+# one at a time, always with --mcp so aver_editor / aver_level can drive it, and stopped only by pid -- the
+# pid this server got back from starting it. Everything it prints goes to a log file, which `log` and `wait`
+# read, so a caller can see what a click did.
+#
+# THE PROCESS INHERITS THIS SERVER'S PACKAGE IDENTITY when one hosts it (see the editor.ini comment above
+# tool_run): its %LOCALAPPDATA% is the package's shadow, so its preferences and Saved files are its own.
+
+_SESSION_OPS = ("start", "status", "log", "wait", "stop")
+_session = {"proc": None, "pid": None, "log": None, "port": None, "exe": None, "argv": None, "offset": 0}
+_SESSION_STATE = os.path.join(os.environ.get("TEMP") or os.path.expanduser("~"), "aver-mcp", "session.json")
+
+
+def _session_save():
+    os.makedirs(os.path.dirname(_SESSION_STATE), exist_ok=True)
+    with open(_SESSION_STATE, "w", encoding="utf-8") as f:
+        json.dump({k: _session[k] for k in ("pid", "log", "port", "exe", "argv")}, f)
+
+
+def _session_load():
+    """Picks up a session a previous run of this server started (no Popen then: liveness by pid)."""
+    if _session["pid"] or not os.path.isfile(_SESSION_STATE):
+        return
+    try:
+        with open(_SESSION_STATE, encoding="utf-8") as f:
+            saved = json.load(f)
+    except (OSError, ValueError):
+        return
+    if saved.get("pid") and _pid_alive(saved["pid"]):
+        _session.update({k: saved.get(k) for k in ("pid", "log", "port", "exe", "argv")})
+
+
+def _sandbox_pids():
+    """Every running Sandbox.exe, by pid."""
+    try:
+        out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq Sandbox.exe", "/FO", "CSV", "/NH"],
+                             capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    return [int(m.group(1)) for m in re.finditer(r'^"Sandbox\.exe","(\d+)"', out, re.M)]
+
+
+def _pid_alive(pid):
+    p = _session["proc"]
+    if p is not None and p.pid == pid:
+        return p.poll() is None
+    return pid in _sandbox_pids()
+
+
+def _session_exe(args):
+    """The Sandbox.exe to start: `exe_dir` (a bin folder in this checkout or under %LOCALAPPDATA%\\Aver, e.g. the
+    test editor the user runs), else the tree aver_run would use."""
+    exe_dir = args.get("exe_dir")
+    if exe_dir:
+        exe_dir = os.path.abspath(os.path.expandvars(exe_dir))
+        local = os.environ.get("LOCALAPPDATA", "")
+        # A packaged app's %LOCALAPPDATA% writes land in Packages\<package>\LocalCache\Local: a build made from
+        # inside one (this server's host, say) is there, and a process outside the package sees only that path.
+        shadows = []
+        packages = os.path.join(local, "Packages")
+        if local and os.path.isdir(packages):
+            shadows = [os.path.join(packages, p, "LocalCache", "Local") for p in sorted(os.listdir(packages))]
+        allowed = [ROOT] + [os.path.join(base, "Aver") for base in [local] + shadows if base]
+        if not any(os.path.normcase(exe_dir).startswith(os.path.normcase(a) + os.sep) for a in allowed):
+            return None, "exe_dir must be inside %s or %%LOCALAPPDATA%%\\Aver" % ROOT
+        if not os.path.isfile(os.path.join(exe_dir, "Sandbox.exe")) and local and \
+                os.path.normcase(exe_dir).startswith(os.path.normcase(local) + os.sep):
+            rest = os.path.relpath(exe_dir, local)
+            for base in shadows:
+                if os.path.isfile(os.path.join(base, rest, "Sandbox.exe")):
+                    exe_dir = os.path.join(base, rest)
+                    break
+    else:
+        tree, err = resolve_tree(args)
+        if err:
+            return None, err
+        exe_dir = os.path.join(ROOT, tree, "bin")
+    exe = os.path.join(exe_dir, "Sandbox.exe")
+    if not os.path.isfile(exe):
+        return None, "%s does not exist" % exe
+    return exe, None
+
+
+def _read_log(since, grep=None, limit=200):
+    path = _session["log"]
+    if not path or not os.path.isfile(path):
+        return [], since
+    with open(path, encoding="utf-8", errors="replace") as f:
+        lines = f.read().splitlines()
+    new = lines[since:]
+    if grep:
+        new = [l for l in new if re.search(grep, l)]
+    return [l.rstrip() for l in new][-limit:], len(lines)
+
+
+def _session_summary():
+    lines, total = _read_log(0, limit=100000)
+    return {
+        "pid": _session["pid"], "port": _session["port"], "exe": _session["exe"], "log": _session["log"],
+        "running": bool(_session["pid"]) and _pid_alive(_session["pid"]),
+        "log_lines": total,
+        "errors": [l for l in lines if "[ERROR" in l or "[CRIT" in l or "[FATAL" in l][-20:],
+    }
+
+
+def tool_session(args):
+    op = args.get("op")
+    if op not in _SESSION_OPS:
+        return {"ok": False, "error": "op must be one of %s" % ", ".join(_SESSION_OPS)}
+    _session_load()
+
+    if op == "start":
+        if _session["pid"] and _pid_alive(_session["pid"]):
+            return {"ok": False, "error": "a session is already running (pid %d); stop it first" % _session["pid"],
+                    **_session_summary()}
+        others = _sandbox_pids()
+        if others:
+            return {"ok": False, "error": "another editor is running (pid %s): this tool never starts one beside "
+                                          "it -- the user's editor would share the GPU and the channel's port"
+                                          % ", ".join(map(str, others))}
+        exe, err = _session_exe(args)
+        if err:
+            return {"ok": False, "error": err}
+        port = int(args.get("port") or read_conf_port(ROOT, "editor_bridge.port", _EDITOR_PORT_DEFAULT)[0])
+        argv = [exe]
+        for key in ("project", "level"):
+            if args.get(key):
+                p = os.path.abspath(args[key])
+                if not os.path.isfile(p):
+                    return {"ok": False, "error": "%s %s does not exist" % (key, p)}
+                argv.append(p)
+        flags = list(args.get("flags") or [])
+        for f in flags:
+            if f in _REFUSED_FLAGS or f in ("--frames", "--mcp"):
+                return {"ok": False, "error": "%s is not passed here: a session is interactive and always "
+                                              "has --mcp" % f}
+        argv += ["--mcp", str(port)] + flags
+        log_dir = os.path.dirname(_SESSION_STATE)
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, "session-%d.log" % int(time.time()))
+        logf = open(log_path, "w", encoding="utf-8", errors="replace")
+        proc = subprocess.Popen(argv, cwd=os.path.dirname(exe), stdout=logf, stderr=subprocess.STDOUT,
+                                stdin=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+        logf.close()
+        _session.update({"proc": proc, "pid": proc.pid, "log": log_path, "port": port, "exe": exe,
+                         "argv": argv, "offset": 0})
+        _session_save()
+        # Ready means the channel answers, which is after the window, device and project exist.
+        deadline = time.time() + float(args.get("timeout", 600))
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                return {"ok": False, "error": "the editor exited (code %s) before its channel opened"
+                        % proc.returncode, **_session_summary(),
+                        "tail": _read_log(0)[0][-40:]}
+            try:
+                if editor_send(port, {"cmd": "ping"}, 5.0).get("ok"):
+                    out = {"ok": True, "started": True, **_session_summary()}
+                    return out
+            except EditorError:
+                pass
+            time.sleep(2.0)
+        return {"ok": False, "error": "the channel did not open in time; the editor is still running "
+                                      "(stop it with op=stop)", **_session_summary()}
+
+    if not _session["pid"]:
+        return {"ok": False, "error": "no session: start one with op=start"}
+
+    if op == "status":
+        return {"ok": True, **_session_summary()}
+
+    if op == "log":
+        since = int(args.get("since", _session["offset"]))
+        lines, nxt = _read_log(since, args.get("grep"), int(args.get("max", 200)))
+        _session["offset"] = nxt
+        return {"ok": True, "lines": lines, "next": nxt, "running": _pid_alive(_session["pid"])}
+
+    if op == "wait":
+        pattern = args.get("pattern")
+        if not pattern:
+            return {"ok": False, "error": "wait needs a pattern (a regex over log lines)"}
+        since = int(args.get("since", _session["offset"]))
+        deadline = time.time() + float(args.get("timeout", 120))
+        while True:
+            lines, nxt = _read_log(since, pattern, 20)
+            if lines:
+                _session["offset"] = nxt
+                return {"ok": True, "matched": lines, "next": nxt}
+            if not _pid_alive(_session["pid"]):
+                return {"ok": False, "error": "the editor exited before the pattern appeared", "next": nxt,
+                        **_session_summary()}
+            if time.time() >= deadline:
+                return {"ok": False, "error": "no line matched %r in time" % pattern, "next": nxt}
+            time.sleep(1.0)
+
+    # stop: editor::quit over the channel, as File > Exit (it stops Play first). An unsaved level refuses it; force
+    # exits without saving, and ends the process if the editor still has not gone.
+    pid = _session["pid"]
+    if _pid_alive(pid):
+        why = None
+        try:
+            reply = editor_abi(_session["port"], "editor", "quit", [1 if args.get("force") else 0], timeout=10.0)
+            if not reply.get("ok"):
+                why = reply.get("error")
+        except EditorError as e:
+            why = str(e)
+        deadline = time.time() + float(args.get("timeout", 60))
+        while time.time() < deadline and _pid_alive(pid):
+            time.sleep(1.0)
+        if _pid_alive(pid):
+            if not args.get("force"):
+                return {"ok": False, "error": "the editor did not exit%s; pass force:true to exit without saving "
+                                              "and end process %d if it stays" % ((" (%s)" % why) if why else "", pid),
+                        **_session_summary()}
+            subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True, timeout=30)
+    out = {"ok": True, "stopped": True, **_session_summary()}
+    _session.update({"proc": None, "pid": None})
+    try:
+        os.remove(_SESSION_STATE)
+    except OSError:
+        pass
+    return out
+
+
 TOOLS = [
     {
         "name": "aver_build",
@@ -1489,6 +1716,40 @@ TOOLS = [
                                                          "waits for the load)"},
         }, "required": ["op"]},
         "fn": tool_level,
+    },
+    {
+        "name": "aver_session",
+        "description": "Start an interactive editor this server owns, with its control channel open, so aver_editor "
+                       "and aver_level can drive it (play, click, key, screenshot) -- then read its log and stop it. "
+                       "Refused while any other Sandbox.exe runs (never beside the user's editor); one session at a "
+                       "time; stop ends only the pid it started.\n"
+                       "OPS: start {exe_dir? | build_dir?/release?, project?, level?, flags?, port?, timeout?} -> "
+                       "waits until the channel answers (a project load included). exe_dir is a bin folder in this "
+                       "checkout or under %LOCALAPPDATA%\\Aver (e.g. %LOCALAPPDATA%\\Aver\\EngineDev\\08-gdint\\bin). "
+                       "status {} -> {running, pid, port, log, errors}. log {since?, grep?, max?} -> {lines, next}: "
+                       "lines after `since` (default: where the last log/wait ended). wait {pattern, since?, timeout?} "
+                       "-> the first lines matching the regex. stop {force?, timeout?} -> Stops Play, closes the "
+                       "window; force ends the process when a dialog keeps it open.\n"
+                       "Driving Play: aver_editor abi editor::play / editor::stop / editor::play_state (state, the "
+                       "open level, the level Play began on after a level travel) / editor::viewport (the 3D view in "
+                       "client pixels: click and move take client pixels, and cmd=shot saves the window to look at).",
+        "inputSchema": {"type": "object", "properties": {
+            "op": {"type": "string", "enum": list(_SESSION_OPS)},
+            "exe_dir": {"type": "string", "description": "start: the bin folder holding Sandbox.exe"},
+            "build_dir": {"type": "string", "description": "start: a tree under this checkout, as aver_run takes it"},
+            "release": {"type": "boolean"},
+            "project": {"type": "string", "description": "start: a .ocproject to open"},
+            "level": {"type": "string", "description": "start: a level file to open"},
+            "flags": {"type": "array", "items": {"type": "string"}, "description": "start: more editor flags"},
+            "port": {"type": "integer", "description": "start: the channel's port; default mcp.conf's, else 45123"},
+            "since": {"type": "integer", "description": "log/wait: the line to read from"},
+            "grep": {"type": "string", "description": "log: only lines matching this regex"},
+            "max": {"type": "integer", "description": "log: at most this many lines (the last ones), default 200"},
+            "pattern": {"type": "string", "description": "wait: the regex to wait for"},
+            "force": {"type": "boolean", "description": "stop: end the process if it does not close"},
+            "timeout": {"type": "number", "description": "seconds: start 600, wait 120, stop 60"},
+        }, "required": ["op"]},
+        "fn": tool_session,
     },
 ]
 

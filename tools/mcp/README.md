@@ -10,10 +10,12 @@ aver_package         stage the engine payload (stage-payload.ps1), optionally ve
 aver_flags           each host's CLI flags, read from source so the list cannot go stale
 aver_editor          one raw command to a running editor's control channel (abi calls, ping, modules, ...)
 aver_level           assemble a level in a running editor: open, place, move, animate, remove, save
+aver_session         start an editor this server owns, with the channel on; read its log, wait for a line, stop it
 ```
 
-The first seven start a process, run it and exit. The last two talk to an editor somebody already has
-open. See [Driving a running editor](#driving-a-running-editor).
+The first seven start a process, run it and exit. `aver_editor` and `aver_level` talk to an editor with its
+control channel on, either one somebody already has open or one `aver_session` started. See
+[Driving a running editor](#driving-a-running-editor).
 
 ## Two hosts
 
@@ -87,6 +89,37 @@ or `cmd` = `ping`, `modules`, `widgets`, `move`, `click`, `key`, `text`, `shot` 
 `extra`. Ask `cmd: "modules"` for the ABIs this build registered (`editor`, `physics`, `world`, `graph`,
 `level`). `text` may hold newlines, quotes and non-ASCII: the bridge undoes every JSON escape.
 
+`move`, `click` and `shot` work in window client pixels, the same pixels as the screenshot: click what you
+see in it. `shot` (and `editor::screenshot`) captures the next frame. Before, both re-saved the one image
+captured at frame 4, so every shot of a running editor was the same stale picture.
+
+Play from the channel uses the `editor` ABI:
+
+| fn | what it does |
+|---|---|
+| `play` | Play in the selected viewport, as the toolbar does |
+| `stop` | Stop; the level reloads as it was when Play began, on the next frame |
+| `play_state` | `{state, level, edited_level, travelled, reload_pending}`; after a script changes level, `level` is the one playing and `edited_level` the one Stop brings back |
+| `viewport` | the 3D view's rect in client pixels |
+| `quit` | exits as File > Exit does (stopping Play first); refused while something is unsaved unless `args: [1]` |
+
+### `aver_session`
+
+The one interactive editor this server starts. `start` refuses while any other `Sandbox.exe` runs (the
+user's editor shares the GPU, the shader cache and the channel's port), passes `--mcp`, writes everything
+the editor prints to a log file, and returns once the channel answers. `log` and `wait` read that file
+(`wait` polls for a regex); `stop` sends `editor::quit`, and `force` exits without saving and ends the
+process if it stays. Only the pid it started is ever ended.
+
+`exe_dir` names the bin folder to run from, in this checkout or under `%LOCALAPPDATA%\Aver`. A build made
+from inside a packaged app (the Claude desktop app, for one) writes `%LOCALAPPDATA%` into
+`Packages\<package>\LocalCache\Local`, and a process outside the package sees only that path, so
+`start` looks there too when the folder named is not where it says.
+
+A session that tests a game menu end to end: `start` (`exe_dir`, `project`), `wait` for
+`class instance\(s\) placed`, `editor::play`, `shot`, `click` what the shot shows, `wait` for the line
+the click should cause, then `stop`.
+
 ### `aver_level`
 
 Assembles a level out of the editor's own code: the same spawn, transform, delete, visibility and save
@@ -156,13 +189,14 @@ These are refusals, not gaps:
 
 - **`gates.ps1 -Record` is unreachable.** Re-recording overwrites the only record of what the renderer
   used to do. It is the user's call, made with `./scripts/record-gates.ps1`.
-- **No interactive run.** `--frames` is always passed, so every launch terminates. A windowed editor
-  left behind holds `bin/*.dll` open and the next build fails `LNK1168` — and the user may have their
-  own editor open, which this must not disturb.
+- **No interactive run from the batch tools.** They always pass `--frames`, so every launch terminates. A
+  windowed editor left behind holds `bin/*.dll` open and the next build fails `LNK1168` — and the user
+  may have their own editor open, which this must not disturb. `aver_session` is the one exception, and
+  it refuses to start while any other editor runs.
 - **It never kills a process it did not start.**
 - **Gate configuration names are pattern-checked**, because they reach a shell.
-- **`aver_editor` and `aver_level` never start an editor or its control channel**, and `aver_level`
-  edits only the level that editor has open, and not while it is playing.
+- **`aver_editor` and `aver_level` never start an editor or its control channel** (`aver_session` does
+  that), and `aver_level` edits only the level that editor has open, and not while it is playing.
 
 ## Notes from building it
 

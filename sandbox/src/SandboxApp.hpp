@@ -3461,6 +3461,9 @@ private:
     rhi::SkyAtmosphere sky_{};
     f32 cloudTime_ = 0.0f;   // seconds of accumulated wind
     bool capDone_=false;
+    // A screenshot asked for over MCP: captureCheck requests a new capture for it instead of re-reading frame sf's.
+    bool mcpShotRequest_=false;
+    u64 capFrame_=~0ull;   // the frame the pending capture was requested on
     // The pixel requested and the viewport rect it was requested against, latched at request time.
     u32 capX_=0, capY_=0;
     f32 capVpX_=0, capVpY_=0, capVpW_=0, capVpH_=0;
@@ -4307,6 +4310,17 @@ private:
     std::vector<scene::Entity> piePreEntities_;   // every live entity at Play start, sorted
     bool pieReloadPending_ = false;
     bool pieWasUnsaved_ = false;
+    // LEVEL TRAVEL IN PLAY (Godot's change_scene_to_file, Unreal's OpenLevel in PIE): the requested level replaces the
+    // open one for the rest of the session, and Stop reloads the Play-start copy under the level Play began on
+    // (pieEditedLevelPath_). pieTravelling_ is set while the swap runs, so unloadLevel neither stops the session nor
+    // stores a view for the level being left.
+#if AVER_MODULE_FRAMEWORK
+    void travelDuringPlay(Engine& eng, const std::string& requested);
+    void raiseFlyingPawnToEye();
+#endif
+    bool pieTravelled_ = false;
+    bool pieTravelling_ = false;
+    std::string pieEditedLevelPath_;
 
     // Snapshot of transforms/visibility/spawned entities at Play start; restored on Stop.
     bool defaultPawnPlay_ = false;  // True while engine's default GameMode is active.

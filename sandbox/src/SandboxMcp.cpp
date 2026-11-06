@@ -221,6 +221,13 @@ void SandboxApp::applyMcpCommand(const mcp::Command& c) {
             AVER_WARN("[Mcp] {}::{} refused: {}", c.abi.module, c.abi.fn, why);
         return;
     }
+    // The window as it is now, written to the path on the next frame (the same capture editor::screenshot asks for).
+    if (c.name == "shot") {
+        shot_ = c.arg;
+        capDone_ = false;
+        mcpShotRequest_ = true;
+        return;
+    }
 
     for (const mcp::InputEvent& e : c.events) {
         const LPARAM lp = MAKELPARAM(e.x, e.y);
@@ -280,6 +287,7 @@ void SandboxApp::registerMcpAbis() {
             if (a.text.empty()) { w = "screenshot needs a path in \"text\""; return false; }
             shot_ = a.text;
             capDone_ = false;
+            mcpShotRequest_ = true;
             r = a.text;
             return true;
         }
@@ -308,6 +316,60 @@ void SandboxApp::registerMcpAbis() {
         r = "{\"widgets\":[],\"note\":\"this build has no editor UI\"}";
 #endif
             if (r.empty()) { w = "nothing tracked yet -- no UI frame has completed"; return false; }
+            return true;
+        }
+#if AVER_MODULE_FRAMEWORK
+        // Play in the selected viewport and Stop, as the toolbar does them, so a client can drive a session end to end.
+        if (a.fn == "play") {
+            if (anyPlayActive()) { w = "already playing"; return false; }
+            playMode_ = PlayMode::SelectedViewport;
+            AVER_INFO("[Sandbox] Play: Selected Viewport (MCP)");
+            startPlay();
+            if (!anyPlayActive()) { w = "Play did not start -- see the [Sandbox] Play lines in the log"; return false; }
+            r = "playing";
+            return true;
+        }
+        if (a.fn == "stop") {
+            if (!anyPlayActive()) { w = "not playing"; return false; }
+            stopPlay();
+            r = "stopped";
+            return true;
+        }
+        // The session and the open level; after a level travel the level Play began on is `edited_level`.
+        if (a.fn == "play_state") {
+            const int32_t s = aver_fw_play_state();
+            r = std::string("{\"state\":") +
+                jq(!anyPlayActive() ? "editor" : s == AVER_FW_PLAY_PAUSED ? "paused" : "playing") +
+                ",\"level\":" + jq(levelPath_) +
+                ",\"edited_level\":" + jq(pieTravelled_ ? pieEditedLevelPath_ : levelPath_) +
+                ",\"travelled\":" + (pieTravelled_ ? "true" : "false") +
+                ",\"reload_pending\":" + (pieReloadPending_ ? "true" : "false") + "}";
+            return true;
+        }
+#endif
+        // Exit as File > Exit does. Refused while something is unsaved, unless args[0] is 1: exit without saving it.
+        if (a.fn == "quit") {
+            if (!engineForSplash_) { w = "the editor has no engine yet"; return false; }
+            const bool discard = !a.args.empty() && a.args[0] != 0.0;
+#if AVER_WITH_IMGUI
+            if (!discard && (assetEditors_.anyDirty() || levelHasUnsavedEdits())) {
+                w = "something is unsaved: pass 1 to exit without saving it";
+                return false;
+            }
+#endif
+#if AVER_MODULE_FRAMEWORK
+            if (anyPlayActive()) stopPlay();
+#endif
+            AVER_INFO("[Mcp] exit requested{}", discard ? " (unsaved changes discarded)" : "");
+            engineForSplash_->requestExit();
+            r = "exiting";
+            return true;
+        }
+        // The 3D viewport in window client pixels, the space click and move take.
+        if (a.fn == "viewport") {
+            char b[128];
+            std::snprintf(b, sizeof b, "{\"x\":%.0f,\"y\":%.0f,\"w\":%.0f,\"h\":%.0f}", vpX_, vpY_, vpW_, vpH_);
+            r = b;
             return true;
         }
         w = "editor has no entry point '" + a.fn + "'";

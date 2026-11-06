@@ -2614,11 +2614,13 @@ void SandboxApp::captureCheck(Engine& e) {
                   : (probeX_ ? probeX_ : (u32)(vpX_ + vpW_*0.5f));
     const u32 py_ = probeV_ >= 0.0f ? (u32)(vpY_ + vpH_ * probeV_)
                   : (probeY_ ? probeY_ : (u32)(vpY_ + vpH_*0.5f));
-    if (f==sf) {
+    if (f==sf || mcpShotRequest_) {
         e.device()->requestCapture(px_, py_);
         capX_=px_; capY_=py_; capVpX_=vpX_; capVpY_=vpY_; capVpW_=vpW_; capVpH_=vpH_;
+        capFrame_=f;
+        mcpShotRequest_=false;
     }
-    if (f>sf && !capDone_){
+    if (f>capFrame_ && !capDone_){
         const bool insideReq = (f32)capX_ >= capVpX_ && (f32)capX_ < capVpX_+capVpW_ &&
                                (f32)capY_ >= capVpY_ && (f32)capY_ < capVpY_+capVpH_;
         const bool rectStable = capVpX_==vpX_ && capVpY_==vpY_ && capVpW_==vpW_ && capVpH_==vpH_;

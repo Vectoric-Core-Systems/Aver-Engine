@@ -1131,15 +1131,20 @@ void SandboxApp::unloadLevel(Engine& eng) {
     (void)eng;   // only read under AVER_MODULE_LANDSCAPE, at the end of this function
 #if AVER_MODULE_FRAMEWORK
     // Every way out of a level (open, New, a project switch) ends a running session first, so object
-    // animation stops and the Play snapshot is restored before the entities it names go away.
-    if (anyPlayActive()) stopPlay();
+    // animation stops and the Play snapshot is restored before the entities it names go away. A level
+    // travel in Play is the one exception: the session goes on into the next level (travelDuringPlay).
+    if (anyPlayActive() && !pieTravelling_) stopPlay();
 #endif
 #if AVER_MODULE_SCENE
     pieReloadPending_ = false;   // leaving the level (or reloading it): a pending Play reload is moot
 #endif
-    // FIRST, while levelPath_ still names the level being left: every way out of a level (another
-    // level, New Level) comes through here. Closing the editor does not; onShutdown calls it too.
-    storeLevelView();
+    if (!pieTravelling_) {
+        pieTravelled_ = false;
+        pieEditedLevelPath_.clear();
+        // FIRST, while levelPath_ still names the level being left: every way out of a level (another
+        // level, New Level) comes through here. Closing the editor does not; onShutdown calls it too.
+        storeLevelView();
+    }
 #if AVER_MODULE_FRAMEWORK
     // BEFORE the raw-entity loop below, and through aver_fw_destroy rather than world.destroy() --
     // see GameLevel::unload's identical comment for why (the managed-dispatch unbind hook is what
