@@ -2,7 +2,7 @@
 
 # Aver.Framework public API
 
-270 public types and 2353 public members, read from `scripting/csharp/Aver.Framework/` (153 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+283 public types and 2424 public members, read from `scripting/csharp/Aver.Framework/` (154 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Framework
 
@@ -734,6 +734,24 @@ Values: `Chase = 0`, `VehicleChase = 1`, `Orbit = 2`, `FirstPerson = 3`, `Seat =
 `public enum CameraView` - Which view the camera uses while a character is possessed.
 
 Values: `FirstPerson`, `ThirdPerson`
+
+### CanvasScaleMode
+
+`public enum CanvasScaleMode` - Whether the stretch scale may be fractional.
+
+Values: `Fractional = 0`, `Integer = 1`
+
+### CanvasStretchAspect
+
+`public enum CanvasStretchAspect` - What the canvas does when the window's shape differs from the base size's.
+
+Values: `Ignore = 0`, `Keep = 1`, `KeepWidth = 2`, `KeepHeight = 3`, `Expand = 4`
+
+### CanvasStretchMode
+
+`public enum CanvasStretchMode` - The viewport stretch mode of the canvas.
+
+Values: `Disabled = 0`, `CanvasItems = 1`, `Viewport = 2`
 
 ### CaptionKind
 
@@ -2223,6 +2241,22 @@ Values: `A = 0`, `B`, `C`, `D`, `E`, `F`, `G`, `H`, `I`, `J`, `K`, `L`, `M`, `N`
 - `public static float LayerWeight(float xCm, float yCm, string layer)` - The paint weight of the layer called layer at a world XY; 0 for an unknown name.
 - `public static bool Weights(float xCm, float yCm, Span<float> dst)` - Writes the weights of every layer (material order, summing to 1) into dst, which must hold at least 8 floats.
 
+### Layer2D
+
+`public struct Layer2D` - A canvas layer: everything below it (the nearest ancestor-or-self layer) sorts by Index and takes its transform.
+
+- `public int Index` - The layer index; higher draws over lower.
+- `public Layer2DFlags Flags` - Behaviour bits.
+- `public Vector2 Offset` - Translation of everything in the layer.
+- `public float Rotation` - Rotation in radians.
+- `public Vector2 Scale` - Scale; 0 reads as 1.
+
+### Layer2DFlags
+
+`public enum Layer2DFlags : uint` - Flags of Layer2D.
+
+Values: `None = 0`, `Hidden = 1`, `FollowViewport = 2`
+
 ### LevelSequences
 
 `public static class LevelSequences` - The level's sequences, addressed by name.
@@ -2692,6 +2726,42 @@ Values: `Start = 0`, `End = 1`
 - `public Image? GetImage()` - A copy of the texture's current pixels as an image (null when the texture is gone).
 - `public bool Destroy()` - Removes the texture.
 
+### Scene2D
+
+`public static class Scene2D` - 2D scenes: sprites, 2D transforms and layers as entity components, the stretch transform and the ordered canvas that sprites and external draws (a UI control's) share.
+
+- `public const int AbiVersion = 1` - The ABI version this binding was written against.
+- `public static bool Available { get; }` - True when the native library is the version this binding speaks and its structs match the managed ones.
+- `public static bool Register()` - Registers the three components with the scene (idempotent).
+- `public static int ComponentId(Scene2DComponent which)` - The scene component id of one of the three, for the generic field API; 0 when not registered.
+- `public static bool Set(Entity e, in Transform2D t)` - Adds the component if the entity lacks it and writes the state.
+- `public static bool Set(Entity e, in Sprite2D s)` - Adds the component if the entity lacks it and writes the state.
+- `public static bool Set(Entity e, in Layer2D l)` - Adds the component if the entity lacks it and writes the state.
+- `public static bool TryGet(Entity e, out Transform2D t)` - Reads the transform.
+- `public static bool TryGet(Entity e, out Sprite2D s)` - Reads the sprite.
+- `public static bool TryGet(Entity e, out Layer2D l)` - Reads the layer.
+- `public static bool Remove(Entity e, Scene2DComponent which)` - Removes one of the components.
+- `public static int UpdateTransforms()` - Recomposes the 2D transforms now (the canvas frame does it too).
+- `public static bool TryGetWorld(Entity e, out Matrix3x2 world, out int z)` - The composed world transform (canvas units; x' = M11 x + M21 y + M31) and effective z of a 2D entity.
+- `public static bool TryGetSpriteBounds(Entity e, out Vector4 bounds)` - The sprite's axis-aligned bounds (x, y, width, height) in world 2D space.
+- `public static void SetCanvas(CanvasStretchMode mode, CanvasStretchAspect aspect, CanvasScaleMode scaleMode, float baseWidth, float baseHeight, float scale, Vector4 view)` - Sets the viewport stretch and the window rectangle (x, y, width, height) the game is drawn in.
+- `public static bool TryGetCanvasTransform(out Matrix3x2 toWindow)` - The canvas transform, content units to window pixels.
+- `public static void SetTextureResolver(Scene2DTextureResolver? resolver)` - Installs the host's image lookup (null clears it, and sprites draw nothing).
+- `public static bool SubmitExternal(int layer, int z, long order, Action draw, bool inCanvas = false)` - Queues an external draw into the canvas's ordered list.
+- `public static int Pending { get; }` - Items waiting for the next flush.
+- `public static void Flush(IntPtr drawList)` - Sorts the queue and draws it into the UI draw list (the pointer aver_ui_draw_list returns); a zero pointer drops the queue.
+- `public static int Frame(IntPtr drawList)` - Recomposes the 2D transforms, queues every visible sprite and flushes.
+
+### Scene2DComponent
+
+`public enum Scene2DComponent` - Which of the three components.
+
+Values: `Transform = 0`, `Sprite = 1`, `Layer = 2`
+
+### Scene2DTextureResolver
+
+`public delegate bool Scene2DTextureResolver(long assetId, out ulong texture, out int width, out int height)` - Resolves a sprite's asset id to the texture the UI draw list knows and its size in pixels.
+
 ### SceneQueries
 
 `public static class SceneQueries` - Counted access to sets of entities: by tag, by actor class, and a parent's children.
@@ -2884,6 +2954,32 @@ Values: `Stereo = 2`, `Surround51 = 6`, `Surround71 = 8`
 - `public static void Stop()` - Cuts off everything being said and queued.
 - `public static bool IsSpeaking { get; }` - Whether speech is in progress or queued.
 
+### Sprite2D
+
+`public struct Sprite2D` - A sprite: a texture, or a region or frame of it, drawn at the entity's transform.
+
+- `public long Texture` - Asset id of the image (Assets.ObjectIdOf of its content path); 0 draws nothing.
+- `public Vector4 Region` - Source rectangle in pixels (x, y, width, height); a zero width or height means the whole image.
+- `public Vector2 Offset` - Offset of the image from the entity's origin.
+- `public uint Modulate` - Straight RGBA multiplier, 0xAABBGGRR; 0 means white.
+- `public Sprite2DFlags Flags` - Behaviour bits.
+- `public int HFrames` - Columns of the frame grid inside the region; 0 means 1.
+- `public int VFrames` - Rows of the frame grid; 0 means 1.
+- `public int Frame` - Which cell of the grid to draw; wraps.
+- `public Sprite2DBlend Blend` - How it combines with what is behind it.
+
+### Sprite2DBlend
+
+`public enum Sprite2DBlend` - How a sprite combines with what is behind it.
+
+Values: `Mix = 0`, `Add = 1`, `Sub = 2`, `Mul = 3`
+
+### Sprite2DFlags
+
+`public enum Sprite2DFlags : uint` - Flags of Sprite2D.
+
+Values: `None = 0`, `FlipH = 1`, `FlipV = 2`, `NotCentered = 4`, `Hidden = 8`, `Nearest = 16`
+
 ### StackExpire
 
 `public enum StackExpire` - What happens to the stacks when the duration runs out.
@@ -3031,6 +3127,23 @@ Values: `None = 0`, `IgnorePause = 2`, `IgnoreDilation = 4`
 - `public static bool Released(int index)` - True on the frame finger index went up.
 - `public static bool Emulation { get; set; }` - Whether the left mouse button publishes as finger 0 (when no real finger has been seen).
 - `public static bool Available { get; }` - Whether the machine reported a real touch screen (a finger has arrived).
+
+### Transform2D
+
+`public struct Transform2D` - Position, rotation, scale and z-index of a 2D entity.
+
+- `public Vector2 Position` - Local position, in canvas units.
+- `public float Rotation` - Local rotation in radians, clockwise on screen (y points down).
+- `public Vector2 Scale` - Local scale; 0 reads as 1.
+- `public int ZIndex` - Draw order within the canvas layer, -4096 to 4096; relative to the parent's unless ZAbsolute.
+- `public Transform2DFlags Flags` - Behaviour bits.
+- `public uint TreeOrder` - 0 derives the tree order from the hierarchy; otherwise the caller's own tree index (the shared sort key's last part).
+
+### Transform2DFlags
+
+`public enum Transform2DFlags : uint` - Flags of Transform2D.
+
+Values: `None = 0`, `ZAbsolute = 1`, `TopLevel = 2`, `Hidden = 4`
 
 ### TriggerState
 

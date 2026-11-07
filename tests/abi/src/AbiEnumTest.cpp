@@ -655,6 +655,8 @@ static const Abi kAbis[] = {
      {"modules/physics/include/aver/physics/physics_origin_abi.h", nullptr},
      "AVER_PHYS_API", "scripting/csharp/Aver.Physics/Native.Origin.cs", "aver_phys_origin_"},
     {"framework origin ABI", {"modules/framework/include/aver/framework/framework_origin_abi.h", nullptr}, "AVER_FW_ABI", "scripting/csharp/Aver.Framework/Native.Origin.cs", "aver_fw_"},
+    // 2D scenes: sprites, 2D transforms, layers and the ordered canvas (docs/plans/RENDER_2D.md); the struct layouts are pinned by Scene2dAbiTest.
+    {"2D scene ABI", {"modules/scene/include/aver/scene/scene2d_abi.h", nullptr}, "AVER_SCENE_ABI", "scripting/csharp/Aver.Framework/Scene2D.cs", "aver_scene2d_"},
 };
 
 // A DOCUMENTED, DELIBERATE DIVERGENCE. Parameter NAMES are compared because types alone cannot see

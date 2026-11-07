@@ -18,3 +18,10 @@ set_target_properties(Scene2dSubmitTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CM
 add_executable(Scene2dStretchTest src/Scene2dStretchTest.cpp)
 target_link_libraries(Scene2dStretchTest PRIVATE Aver.Scene Aver.UI Aver.UI.Abi Aver.Core)
 set_target_properties(Scene2dStretchTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# Scene2dAbiTest -- scene2d_abi.h: version, struct layouts (against the C++ components and the managed mirror read as source),
+# set/get round trips, rejections and reasons, world affine and sprite bounds.
+add_executable(Scene2dAbiTest src/Scene2dAbiTest.cpp)
+target_link_libraries(Scene2dAbiTest PRIVATE Aver.Scene Aver.UI Aver.Core)
+target_compile_definitions(Scene2dAbiTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
+set_target_properties(Scene2dAbiTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

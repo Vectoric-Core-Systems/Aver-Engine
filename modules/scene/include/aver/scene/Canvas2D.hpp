@@ -83,4 +83,8 @@ struct SpriteQuad {
 };
 AVER_SCENE_API SpriteQuad spriteQuad(const CSprite2D& s, i32 texW, i32 texH);
 
+// The sprite's axis-aligned bounds {x, y, w, h} in world 2D space (the entity affine, before any layer or the canvas). Uses the
+// texture resolver for the image size unless the sprite has a region. False when it has no sprite or the size is unknown.
+AVER_SCENE_API bool spriteBounds(scene::World& world, Entity e, f32 out[4]);
+
 } // namespace aver::scene2d

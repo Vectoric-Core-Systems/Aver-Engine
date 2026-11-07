@@ -195,6 +195,32 @@ u32 submitSprites(scene::World& w) {
     return queued;
 }
 
+bool spriteBounds(scene::World& w, Entity e, f32 out[4]) {
+    const Ids id = ids();
+    const auto* sp = id.sprite ? w.component<CSprite2D>(e, id.sprite) : nullptr;
+    if (!sp) return false;
+    TextureInfo ti;
+    const bool hasRegion = sp->regionW > 0.0f && sp->regionH > 0.0f;
+    const State& s = st();
+    const bool resolved = s.resolver && s.resolver(sp->texture, &ti, s.resolverUser) && ti.w > 0 && ti.h > 0;
+    if (!resolved) {
+        if (!hasRegion) return false;
+        ti.w = ti.h = 1;   // the region sets the size; the image's own is not needed for a rectangle
+    }
+    const SpriteQuad q = spriteQuad(*sp, ti.w, ti.h);
+    if (!q.ok) return false;
+    updateTransforms(w);
+    const Affine2 m = worldAffine(w, e);
+    f32 x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
+    for (int i = 0; i < 4; ++i) {
+        const f32 px = q.x + ((i & 1) ? q.w : 0.0f), py = q.y + ((i & 2) ? q.h : 0.0f);
+        const f32 wx = m.a * px + m.c * py + m.tx, wy = m.b * px + m.d * py + m.ty;
+        x0 = std::min(x0, wx); y0 = std::min(y0, wy); x1 = std::max(x1, wx); y1 = std::max(y1, wy);
+    }
+    out[0] = x0; out[1] = y0; out[2] = x1 - x0; out[3] = y1 - y0;
+    return true;
+}
+
 u32 pendingCount() { return static_cast<u32>(st().items.size()); }
 
 void dropQueue() {
