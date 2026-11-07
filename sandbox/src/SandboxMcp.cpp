@@ -1454,8 +1454,8 @@ void SandboxApp::mcpStop() {
 void SandboxApp::drawMcpStatusWidget() {
     const bool live = mcp_.listening();
     char face[40];
-    if (live) std::snprintf(face, sizeof face, ICON_LINK " MCP :%u", static_cast<unsigned>(mcp_.port()));
-    else      std::snprintf(face, sizeof face, ICON_LINK " MCP");
+    if (live) std::snprintf(face, sizeof face, ICON_MCP " MCP :%u", static_cast<unsigned>(mcp_.port()));
+    else      std::snprintf(face, sizeof face, ICON_MCP " MCP");
 
     // NOT AN ALARM COLOUR WHEN OFF. Idle is the normal state for this widget, so painting it red or
     // amber would tell somebody something is wrong when nothing is -- it reads as live when live,

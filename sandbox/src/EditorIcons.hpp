@@ -67,3 +67,70 @@ inline constexpr unsigned short kIconRangeLast  = 0xF8FF;
 #define ICON_VOLUME      "\xEE\x81\x90"   // U+E050 volume_up
 #define ICON_TERRAIN     "\xEE\x95\xA4"   // U+E564 terrain
 #define ICON_TREE        "\xEE\xA5\xBA"   // U+E97A account_tree
+
+// ---- files and assets (additions) ------------------------------------------------------
+#define ICON_FOLDER_OPEN       "\xEE\x8B\x88"   // U+E2C8 folder_open
+#define ICON_NEW_FILE          "\xEE\xA2\x9C"   // U+E89C note_add
+#define ICON_SAVE_ALL          "\xEE\x85\xB1"   // U+E171 save_alt
+#define ICON_SCREENSHOT        "\xEE\x90\x92"   // U+E412 photo_camera
+#define ICON_LAUNCH            "\xEE\xA2\x95"   // U+E895 launch
+#define ICON_PACKAGE           "\xEE\x86\xA1"   // U+E1A1 inventory_2
+#define ICON_EXIT              "\xEE\xA1\xB9"   // U+E879 exit_to_app
+#define ICON_IMAGE             "\xEE\x8F\xB4"   // U+E3F4 image
+#define ICON_MOVIE             "\xEE\x80\xAC"   // U+E02C movie
+
+// ---- editing (additions) ---------------------------------------------------------------
+#define ICON_COPY              "\xEE\x85\x8D"   // U+E14D content_copy
+#define ICON_PASTE             "\xEE\x85\x8F"   // U+E14F content_paste
+#define ICON_DUPLICATE         "\xEE\x8E\xBB"   // U+E3BB control_point_duplicate
+#define ICON_SELECT_ALL        "\xEE\x85\xA2"   // U+E162 select_all
+#define ICON_DESELECT          "\xEE\xAE\xB6"   // U+EBB6 deselect
+#define ICON_RESET             "\xEE\xA2\x89"   // U+E889 history
+
+// ---- windows, panels and drawers -------------------------------------------------------
+#define ICON_OUTLINER          "\xEE\xA5\xBA"   // U+E97A account_tree
+#define ICON_DETAILS           "\xEE\x83\xAE"   // U+E0EE list_alt
+#define ICON_LOG               "\xEE\xBD\x82"   // U+EF42 article
+#define ICON_CONSOLE           "\xEE\xAE\x8E"   // U+EB8E terminal
+#define ICON_PROJECT           "\xEE\xA2\xB9"   // U+E8B9 settings_applications
+#define ICON_WORLD             "\xEE\xA0\x8B"   // U+E80B public
+#define ICON_LAYERS            "\xEE\x94\xBB"   // U+E53B layers
+#define ICON_PROFILER          "\xEE\xA7\xA4"   // U+E9E4 speed
+#define ICON_NEURAL            "\xEE\xA7\xB4"   // U+E9F4 hub
+#define ICON_EXTENSION         "\xEE\xA1\xBB"   // U+E87B extension
+#define ICON_REVISION          "\xEE\x82\xB6"   // U+E0B6 call_split
+#define ICON_WIDGETS           "\xEE\x86\xBD"   // U+E1BD widgets
+#define ICON_LAYOUT            "\xEE\xA1\xB1"   // U+E871 dashboard
+#define ICON_HELP              "\xEE\xA3\xBD"   // U+E8FD help_outline
+#define ICON_ACCESSIBILITY     "\xEE\xA4\xAC"   // U+E92C accessibility_new
+#define ICON_MCP               "\xEE\xBF\xA6"   // U+EFE6 cable
+#define ICON_MAP               "\xEE\x95\x9B"   // U+E55B map
+#define ICON_BOT               "\xEF\x81\xAC"   // U+F06C smart_toy
+#define ICON_LIGHTBULB_OUTLINE "\xEE\xA4\x8F"   // U+E90F lightbulb_outline
+
+// ---- actor types (World Outliner rows and the Add menu) --------------------------------
+#define ICON_ACTOR_MESH        "\xEE\xA7\xBE"   // U+E9FE view_in_ar
+#define ICON_ACTOR             "\xEE\x95\xB4"   // U+E574 category
+#define ICON_LIGHT             "\xEE\x83\xB0"   // U+E0F0 lightbulb
+#define ICON_SPOT_LIGHT        "\xEE\x90\xAE"   // U+E42E wb_incandescent
+#define ICON_RECT_LIGHT        "\xEE\x8F\x86"   // U+E3C6 crop_square
+#define ICON_CAMERA            "\xEE\x81\x8B"   // U+E04B videocam
+#define ICON_SUN               "\xEE\x90\xB0"   // U+E430 wb_sunny
+#define ICON_SKY               "\xEE\x8A\xBD"   // U+E2BD cloud
+#define ICON_POST_PROCESS      "\xEE\x8E\xA5"   // U+E3A5 blur_on
+#define ICON_PLAYER_START      "\xEE\x95\xAA"   // U+E56A person_pin_circle
+#define ICON_CLASS             "\xEE\xA1\xAF"   // U+E86F code
+#define ICON_PARTICLES         "\xEE\x8F\xAA"   // U+E3EA grain
+#define ICON_DECAL             "\xEE\x90\xA1"   // U+E421 texture
+#define ICON_SKELETAL          "\xEE\x95\xA6"   // U+E566 directions_run
+#define ICON_SPHERE            "\xEE\xA0\xB6"   // U+E836 radio_button_unchecked
+#define ICON_SHAPES            "\xEE\x95\xB4"   // U+E574 category
+
+// ---- details categories ----------------------------------------------------------------
+#define ICON_TRANSFORM         "\xEE\xA2\x9F"   // U+E89F open_with
+#define ICON_MATERIAL          "\xEE\x90\x8A"   // U+E40A palette
+#define ICON_BRUSH             "\xEE\x8E\xAE"   // U+E3AE brush
+#define ICON_PHYSICS           "\xEE\xA8\x8B"   // U+EA0B bolt
+#define ICON_ANIMATION         "\xEE\x9C\x9C"   // U+E71C animation
+#define ICON_HAIR              "\xEE\xBF\x98"   // U+EFD8 air
+#define ICON_WATER             "\xEE\x9E\x98"   // U+E798 water_drop

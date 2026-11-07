@@ -416,7 +416,7 @@ void SandboxApp::materialPanel(pbr::MaterialHandle handle) {
 // previously absent or buried in a popup behind a numbered button. A panel shows its whole
 // surface at once.
 void SandboxApp::buildModePanel(Engine& e) {
-    ImGui::Begin("Mode");
+    ImGui::Begin(AVER_WIN_MODE);
 
     ImGui::PushStyleColor(ImGuiCol_Text, kAverOrange);
     ImGui::TextUnformatted(kEditorModeNames[static_cast<int>(mode_)]);
@@ -1019,6 +1019,27 @@ void SandboxApp::drawOutlinerDropTarget(scene::Entity ent) {
     ImGui::EndDragDropTarget();
 }
 
+// The icon an Outliner row leads with, from what the actor is. A row with children is a folder, whatever
+// else it carries; the rest are told apart by component, with a class actor (a script-spawned one) and the
+// Player Start recognised ahead of the generic mesh.
+const char* SandboxApp::outlinerIconFor(scene::Entity ent, bool hasKids) const {
+    if (hasKids) return ICON_FOLDER;
+    const scene::World& w = scene::World::instance();
+    if (std::string_view(w.name(ent)) == "PlayerStart") return ICON_PLAYER_START;
+#if AVER_MODULE_FRAMEWORK
+    if (aver_fw_class_of(static_cast<i32>(ent)) != 0) return ICON_CLASS;
+#endif
+    if (w.hasComponent(ent, scene::kComponentLight)) {
+        return ICON_LIGHT;
+    }
+    if (w.hasComponent(ent, scene::kComponentCamera)) return ICON_CAMERA;
+    if (w.hasComponent(ent, scene::kComponentParticleEmitter)) return ICON_PARTICLES;
+    if (w.hasComponent(ent, scene::kComponentDecal)) return ICON_DECAL;
+    if (w.hasComponent(ent, scene::kComponentSkeletalMesh)) return ICON_SKELETAL;
+    if (w.hasComponent(ent, scene::kComponentMeshRenderer)) return ICON_ACTOR_MESH;
+    return ICON_ACTOR;
+}
+
 // Draws one row and, when it is open, its children beneath it. `recordOrder` is false for a row
 // whose place in outlinerOrder_ the caller has already recorded (see below).
 void SandboxApp::drawOutlinerRow(const OutlinerRow& row,
@@ -1079,7 +1100,8 @@ void SandboxApp::drawOutlinerRow(const OutlinerRow& row,
     // recordOrder = false.
     if (recordOrder) outlinerOrder_.push_back(row.ent);
 
-    const std::string label = "  " + row.shown + "##e" + std::to_string((u32)row.ent);
+    const std::string label = editor::iconLabel(outlinerIconFor(row.ent, hasKids), row.shown.c_str()) +
+                              "##e" + std::to_string((u32)row.ent);
     // A selected row keeps the selection colour under the cursor (hover is a neutral lift otherwise).
     const bool rowSelected = (flags & ImGuiTreeNodeFlags_Selected) != 0;
     if (rowSelected) ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImGui::GetStyleColorVec4(ImGuiCol_HeaderActive));
@@ -1559,7 +1581,7 @@ void SandboxApp::rebuildOutlinerCache() {
 
 #if AVER_WITH_IMGUI
 void SandboxApp::buildOutlinerPanel() {
-    const bool visible = ImGui::Begin("World Outliner", &showOutliner_);
+    const bool visible = ImGui::Begin(AVER_WIN_OUTLINER, &showOutliner_);
     // So the edit verbs work on a selection made HERE -- see the dispatch in handleManip.
     outlinerFocused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
     // COLLAPSED, OR BEHIND ANOTHER DOCK TAB: Begin returned false, so nothing below would be seen
@@ -1596,7 +1618,7 @@ void SandboxApp::buildOutlinerPanel() {
 #endif
     if (!hideEditorScene_)
         for (int i=0;i<(int)objects_.size();++i) {
-            if (ImGui::Selectable((std::string("  ")+objects_[i].name).c_str(), sel_==i)) { sel_=i; selEntity_=kInvalidId; }
+            if (ImGui::Selectable(editor::iconLabel(ICON_ACTOR_MESH, objects_[i].name.c_str()).c_str(), sel_==i)) { sel_=i; selEntity_=kInvalidId; }
             uiReg_.track(("outliner.placeholder." + std::to_string(i)).c_str());
         }
 #if AVER_MODULE_SCENE
@@ -1687,15 +1709,15 @@ void SandboxApp::buildOutlinerPanel() {
 #endif
     ImGui::Separator();
     // Unguarded: the sun/sky/post-process pseudo-entries exist whether or not there is a scene.
-    if (ImGui::Selectable("  Directional Light (Sun)", sel_==-2)) { sel_=-2; selEntity_=kInvalidId; }
+    if (ImGui::Selectable(ICON_SUN " Directional Light (Sun)", sel_==-2)) { sel_=-2; selEntity_=kInvalidId; }
     uiReg_.track("outliner.sun");
-    if (ImGui::Selectable("  Sky + Atmosphere", sel_==-3))        { sel_=-3; selEntity_=kInvalidId; }
+    if (ImGui::Selectable(ICON_SKY " Sky + Atmosphere", sel_==-3))        { sel_=-3; selEntity_=kInvalidId; }
     uiReg_.track("outliner.sky");
-    if (ImGui::Selectable("  Post Process", sel_==-4))            { sel_=-4; selEntity_=kInvalidId; }
+    if (ImGui::Selectable(ICON_POST_PROCESS " Post Process", sel_==-4))            { sel_=-4; selEntity_=kInvalidId; }
     uiReg_.track("outliner.postProcess");
     {
         char pvLabel[64];
-        std::snprintf(pvLabel, sizeof pvLabel, "  Post Process Volumes (%zu)", levelHeader_.postVolumes.size());
+        std::snprintf(pvLabel, sizeof pvLabel, ICON_POST_PROCESS " Post Process Volumes (%zu)", levelHeader_.postVolumes.size());
         if (ImGui::Selectable(pvLabel, sel_==kSelPostVolume)) { sel_=kSelPostVolume; selEntity_=kInvalidId; }
         uiReg_.track("outliner.postVolumes");
     }
@@ -1703,7 +1725,7 @@ void SandboxApp::buildOutlinerPanel() {
 }
 
 void SandboxApp::buildDetailsPanel(Engine& e) {
-    ImGui::Begin("Details", &showDetails_);
+    ImGui::Begin(AVER_WIN_DETAILS, &showDetails_);
     detailsFocused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
     if (sel_>=0 && sel_<(int)objects_.size()){
         MeshObj& o=objects_[sel_]; ImGui::TextUnformatted(o.name.c_str()); ImGui::Separator();

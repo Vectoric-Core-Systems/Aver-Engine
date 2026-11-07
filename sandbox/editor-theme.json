@@ -18,6 +18,8 @@
     "overlayAlpha": 0.62,
     "rounding": 4,
     "grabRounding": 3,
+    "tabRounding": 2.5,
+    "splitterSize": 6,
     "windowPaddingX": 10,
     "windowPaddingY": 8,
     "framePaddingX": 8,

@@ -446,7 +446,7 @@ int folderRank(editor::FileStatus s) {
 
 // Status bar: icon + branch + change count. Cheap operation over latched data (called twice/frame).
 std::string rcStatusFace(bool busy, const editor::StatusBarSummary& summary) {
-    std::string face = ICON_TREE " ";
+    std::string face = ICON_REVISION " ";
     face += busy ? "Refreshing..." : summary.label;
     if (!busy && summary.changed > 0) face += " (" + std::to_string(summary.changed) + ")";
     return face;
@@ -951,7 +951,7 @@ void SandboxApp::drawRevisionControlStatusWidget() {
     if (ImGui::BeginPopup("rcStatusMenu")) {
         // Same toggle the window menu offers (see "window.revisionControl" above) -- this widget
         // exists so the panel isn't the only door.
-        ImGui::MenuItem("Revision Control", nullptr, &showRevisionControl_);
+        ImGui::MenuItem(ICON_REVISION " Revision Control", nullptr, &showRevisionControl_);
         uiReg_.track("statusbar.revisionControl.togglePanel");
 
         // Disabled while busy, not hidden: a running query already answers what a second git
@@ -1664,23 +1664,26 @@ void SandboxApp::drawPlayToolbar(Engine& e) {
     // dropButton returns only the click.
     const f32 dropW = btnW(" ") + 16.0f * dpi_;
 
+    // Not playing: an orange pill, then the options arrow on a plate. Playing: one plate holding the
+    // transport buttons, a thin divider between each.
+    const f32 divW = editor::capsuleDivider(dpi_), padW = editor::capsulePad(dpi_);
+    const f32 pillW = btnW(playLabel.c_str()) + 12.0f * dpi_;
     f32 grpW = 0.0f;
-    u32 buttons = 0;
-    const auto add = [&](f32 w) { grpW += w; ++buttons; };
     if (!anyPlay) {
-        add(btnW(playLabel.c_str()));
-        add(dropW);
+        grpW = pillW + 4.0f * dpi_ + dropW + 2.0f * padW;
     } else {
+        u32 buttons = 0;
+        const auto add = [&](f32 w) { grpW += w; ++buttons; };
         if (session) add(btnW(pauseLabel));
         if (session && paused) add(btnW(kFrameSkipLabel));
         if (session) add(btnW(ejectLabel));
         add(btnW(kStopLabel));
+        grpW += 2.0f * padW + divW * static_cast<f32>(buttons - 1);
     }
-    grpW += style.ItemSpacing.x * static_cast<f32>(buttons > 0 ? buttons - 1 : 0);
     ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), (wsizeX - grpW) * 0.5f));
 
     if (!anyPlay) {
-        if (ImGui::Button(playLabel.c_str())) launchPlay(e, playMode_);
+        if (editor::primaryPill(playLabel.c_str(), pillW)) launchPlay(e, playMode_);
         uiReg_.track("toolbar.play");
         if (ImGui::IsItemHovered()) {
             if (playMode_ == PlayMode::Standalone) {
@@ -1694,11 +1697,13 @@ void SandboxApp::drawPlayToolbar(Engine& e) {
                                   editor::chordToString(keybinds_.chordFor(modeCmd)).c_str());
             }
         }
-        ImGui::SameLine(0.0f, 0.0f);
-
-        if (dropButton(" ")) ImGui::OpenPopup("playOptions");
-        uiReg_.track("toolbar.play.options");
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Play options");
+        ImGui::SameLine(0.0f, 4.0f * dpi_);
+        {
+            editor::ToolbarCapsule dropCap(dpi_);
+            if (dropButton(" ")) ImGui::OpenPopup("playOptions");
+            uiReg_.track("toolbar.play.options");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Play options");
+        }
         if (ImGui::BeginPopup("playOptions")) {
             ImGui::TextDisabled("MODES");
             if (ImGui::MenuItem(ICON_PLAY " Selected Viewport",
@@ -1775,13 +1780,14 @@ void SandboxApp::drawPlayToolbar(Engine& e) {
         return;
     }
 
+    editor::ToolbarCapsule cap(dpi_);
     if (session) {
         if (ImGui::Button(pauseLabel)) aver_fw_set_paused(paused ? 0 : 1);
         uiReg_.track("toolbar.play.pause");
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("%s (%s)", paused ? "Resume" : "Pause",
                               editor::chordToString(keybinds_.chordFor(editor::CommandId::PlayPause)).c_str());
-        ImGui::SameLine();
+        cap.divider();
         if (paused) {
             if (ImGui::Button(kFrameSkipLabel)) requestPlayFrameStep();
             uiReg_.track("toolbar.play.frameSkip");
@@ -1793,7 +1799,7 @@ void SandboxApp::drawPlayToolbar(Engine& e) {
                 else
                     ImGui::SetTooltip("Advance one gameplay tick, then pause again");
             }
-            ImGui::SameLine();
+            cap.divider();
         }
         if (ImGui::Button(ejectLabel)) togglePlayEject();
         uiReg_.track("toolbar.play.eject");
@@ -1812,7 +1818,7 @@ void SandboxApp::drawPlayToolbar(Engine& e) {
                                   "camera, selection and gizmos come back (%s)",
                                   ejectChord.c_str());
         }
-        ImGui::SameLine();
+        cap.divider();
     }
     if (ImGui::Button(kStopLabel)) stopPlay();
     uiReg_.track("toolbar.stop");
@@ -1925,6 +1931,9 @@ void SandboxApp::buildUI(Engine& e) {
         }
     }
 
+    // The four panel windows were renamed (a tab icon in the title); carry a saved layout across.
+    { static bool migrated = false; if (!migrated) { migrated = true; editor::migrateWindowSettings(); } }
+
     // ---- menu bar ----
     if (ImGui::BeginMainMenuBar()) {
         if (fontMedium_) ImGui::PushFont(fontMedium_, 0.0f);
@@ -1936,30 +1945,30 @@ void SandboxApp::buildUI(Engine& e) {
             const bool haveProject = project_.valid();
             ImGui::BeginDisabled(!haveProject);
             // Asks first; prevents silently discarding unsaved edits.
-            if (ImGui::MenuItem("New Level")) {
+            if (ImGui::MenuItem(ICON_NEW_FILE " New Level")) {
                 if (levelHasUnsavedEdits()) pendingNewLevel_ = true;
                 else                        startNewLevel(e);
             }
             uiReg_.track("file.newLevel");
             // Opens a picker; shows all levels, not just the start level.
-            if (ImGui::MenuItem("Open Level...")) openLevelPickerNow();
+            if (ImGui::MenuItem(ICON_FOLDER_OPEN " Open Level...")) openLevelPickerNow();
             uiReg_.track("file.openLevel");
             // Reload: reopens the start level to discard edits.
             ImGui::BeginDisabled(project_.startMap.empty());
-            if (ImGui::MenuItem("Reload Start Level")) {
+            if (ImGui::MenuItem(ICON_REFRESH " Reload Start Level")) {
                 const std::string start = project_.contentDir() + AVER_PATH_SEP + project_.startMap;
                 if (!requestOpenLevel(start, "reloaded from the project's start level"))
                     AVER_WARN("[Level] reload: {}", openLevelError_);
             }
             ImGui::EndDisabled();
             uiReg_.track("file.reloadStartLevel");
-            if (ImGui::MenuItem("Save Level", "Ctrl+S")) saveLevelInteractive();
+            if (ImGui::MenuItem(ICON_SAVE " Save Level", "Ctrl+S")) saveLevelInteractive();
             uiReg_.track("file.saveLevel");
-            if (ImGui::MenuItem("Save All", editor::chordToString(keybinds_.chordFor(editor::CommandId::SaveAll)).c_str()))
+            if (ImGui::MenuItem(ICON_SAVE_ALL " Save All", editor::chordToString(keybinds_.chordFor(editor::CommandId::SaveAll)).c_str()))
                 saveAll();
             uiReg_.track("file.saveAll");
             // Save Level As: saveLevel takes an arbitrary path; this provides the UI.
-            if (ImGui::MenuItem("Save Level As...")) {
+            if (ImGui::MenuItem(ICON_SAVE " Save Level As...")) {
                 saveLevelAsName_[0] = '\0';
                 const std::string stem = levelPath_.empty()
                     ? levelName_
@@ -1974,14 +1983,14 @@ void SandboxApp::buildUI(Engine& e) {
             if (!haveProject && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                 ImGui::SetTooltip("Open or create a project first - a level belongs to one.");
 #else
-            ImGui::MenuItem("New Level"); ImGui::MenuItem("Open Level..."); ImGui::MenuItem("Save Level");
+            ImGui::MenuItem(ICON_NEW_FILE " New Level"); ImGui::MenuItem(ICON_FOLDER_OPEN " Open Level..."); ImGui::MenuItem(ICON_SAVE " Save Level");
 #endif
 #if AVER_MODULE_LANDSCAPE
             // Sculpt changes the resident section in memory; save separately.
             {
                 const bool canSave = landscape_.loaded() && !landscape_.path().empty();
                 ImGui::BeginDisabled(!canSave);
-                if (ImGui::MenuItem(landscape_.dirty() ? "Save Landscape *" : "Save Landscape")) saveLandscape();
+                if (ImGui::MenuItem(landscape_.dirty() ? ICON_TERRAIN " Save Landscape *" : ICON_TERRAIN " Save Landscape")) saveLandscape();
                 ImGui::EndDisabled();
                 uiReg_.track("file.saveLandscape");
                 if (!canSave && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
@@ -1993,7 +2002,7 @@ void SandboxApp::buildUI(Engine& e) {
             ImGui::Separator();
             // The import entries installed extensions add (child process `AverAssetC <command>` on a worker thread; the modal shows its log).
             editor::extensionImporter().drawMenuItems([this](const char* id) { uiReg_.track(id); });
-            if (ImGui::MenuItem("Take Screenshot", editor::chordToString(keybinds_.chordFor(editor::CommandId::Screenshot)).c_str()))
+            if (ImGui::MenuItem(ICON_SCREENSHOT " Take Screenshot", editor::chordToString(keybinds_.chordFor(editor::CommandId::Screenshot)).c_str()))
                 requestViewportScreenshot();
             uiReg_.track("file.takeScreenshot");
 #if AVER_MODULE_SCENE
@@ -2003,7 +2012,7 @@ void SandboxApp::buildUI(Engine& e) {
                 const bool haveLevel = !levelPath_.empty();
                 const std::string runtimeExe = editor::runtimeExecutablePath();
                 ImGui::BeginDisabled(!haveProj || !haveLevel || runtimeExe.empty());
-                if (ImGui::MenuItem("Launch in Aver Engine Runtime")) launchInRuntime(e);
+                if (ImGui::MenuItem(ICON_LAUNCH " Launch in Aver Engine Runtime")) launchInRuntime(e);
                 ImGui::EndDisabled();
                 uiReg_.track("file.launchRuntime");
                 if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
@@ -2022,7 +2031,7 @@ void SandboxApp::buildUI(Engine& e) {
                 const bool haveScripts = haveProj &&
                     std::filesystem::exists(editor::scriptsBinaryDir(project_));
                 ImGui::BeginDisabled(!haveProj || tools_.compiling());
-                if (ImGui::MenuItem("Package Project...")) tools_.openPackageProject();
+                if (ImGui::MenuItem(ICON_PACKAGE " Package Project...")) tools_.openPackageProject();
                 ImGui::EndDisabled();
                 uiReg_.track("file.packageProject");
                 if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
@@ -2032,28 +2041,28 @@ void SandboxApp::buildUI(Engine& e) {
                     else                         ImGui::SetTooltip("Stage this project into a standalone, runnable game directory.\nRuns scripts/stage-game.ps1, which you can also run from a shell.");
                 }
             }
-            ImGui::Separator(); if(ImGui::MenuItem("Exit")) requestExitChecked(e); ImGui::EndMenu(); }
+            ImGui::Separator(); if(ImGui::MenuItem(ICON_EXIT " Exit")) requestExitChecked(e); ImGui::EndMenu(); }
                     const bool open_edit = ImGui::BeginMenu("Edit");
         uiReg_.track("menu.edit");
         if (open_edit){
-            if (ImGui::MenuItem("Undo", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditUndo)).c_str(), false, canUndo())) undo();
+            if (ImGui::MenuItem(ICON_UNDO " Undo", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditUndo)).c_str(), false, canUndo())) undo();
             uiReg_.track("edit.undo");
-            if (ImGui::MenuItem("Redo", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditRedo)).c_str(), false, canRedo())) redo();
+            if (ImGui::MenuItem(ICON_REDO " Redo", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditRedo)).c_str(), false, canRedo())) redo();
             uiReg_.track("edit.redo");
             ImGui::Separator();
             // Shortcut hints from the same registry as handleManip(), so menu and keyboard agree.
-            if (ImGui::MenuItem("Copy", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditCopy)).c_str(), false, anySelected())) copySelection();
+            if (ImGui::MenuItem(ICON_COPY " Copy", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditCopy)).c_str(), false, anySelected())) copySelection();
             uiReg_.track("edit.copy");
-            if (ImGui::MenuItem("Paste", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditPaste)).c_str(), false, !clipboard_.entities.empty() || clipboard_.hasObject)) pasteClipboard();
+            if (ImGui::MenuItem(ICON_PASTE " Paste", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditPaste)).c_str(), false, !clipboard_.entities.empty() || clipboard_.hasObject)) pasteClipboard();
             uiReg_.track("edit.paste");
-            if (ImGui::MenuItem("Duplicate", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditDuplicate)).c_str(), false, anySelected())) duplicateSelection();
+            if (ImGui::MenuItem(ICON_DUPLICATE " Duplicate", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditDuplicate)).c_str(), false, anySelected())) duplicateSelection();
             uiReg_.track("edit.duplicate");
-            if (ImGui::MenuItem("Delete", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditDelete)).c_str(), false, anySelected())) deleteSelection();
+            if (ImGui::MenuItem(ICON_DELETE " Delete", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditDelete)).c_str(), false, anySelected())) deleteSelection();
             uiReg_.track("edit.delete");
             ImGui::Separator();
-            if (ImGui::MenuItem("Editor Preferences...")) showEditorPrefs_ = true;
+            if (ImGui::MenuItem(ICON_TUNE " Editor Preferences...")) showEditorPrefs_ = true;
             uiReg_.track("edit.editorPreferences");
-            if (ImGui::MenuItem("Project Settings...")) showProjectSettings_ = true;
+            if (ImGui::MenuItem(ICON_PROJECT " Project Settings...")) showProjectSettings_ = true;
             uiReg_.track("edit.projectSettings");
             ImGui::EndMenu();
         }
@@ -2061,22 +2070,22 @@ void SandboxApp::buildUI(Engine& e) {
         uiReg_.track("menu.window");
         if (open_window){
             // MenuItem now captures return value so panels can be reopened.
-            ImGui::MenuItem("World Outliner", nullptr, &showOutliner_);
+            ImGui::MenuItem(ICON_OUTLINER " World Outliner", nullptr, &showOutliner_);
             uiReg_.track("window.worldOutliner");
-            ImGui::MenuItem("Details", nullptr, &showDetails_);
+            ImGui::MenuItem(ICON_DETAILS " Details", nullptr, &showDetails_);
             uiReg_.track("window.details");
 #if AVER_MODULE_SCENE
-            ImGui::MenuItem("Render Queue", nullptr, &showRenderQueue_);
+            ImGui::MenuItem(ICON_MOVIE " Render Queue", nullptr, &showRenderQueue_);
             uiReg_.track("window.renderQueue");
 #endif
-            if (ImGui::MenuItem("Content Browser", "Ctrl+Space", drawer_ == Drawer::Content)) toggleDrawer(Drawer::Content);
+            if (ImGui::MenuItem(ICON_FOLDER " Content Browser", "Ctrl+Space", drawer_ == Drawer::Content)) toggleDrawer(Drawer::Content);
             uiReg_.track("window.contentBrowser");
-            if (ImGui::MenuItem("Output Log", nullptr, drawer_ == Drawer::Log)) toggleDrawer(Drawer::Log);
+            if (ImGui::MenuItem(ICON_LOG " Output Log", nullptr, drawer_ == Drawer::Log)) toggleDrawer(Drawer::Log);
             // track() names the LAST item; keep it immediately after the widget.
             uiReg_.track("window.outputLog");
-            if (ImGui::MenuItem("Console", "`", drawer_ == Drawer::Console)) toggleDrawer(Drawer::Console);
+            if (ImGui::MenuItem(ICON_CONSOLE " Console", "`", drawer_ == Drawer::Console)) toggleDrawer(Drawer::Console);
             uiReg_.track("window.console");
-            if (ImGui::MenuItem("World Settings", nullptr, showWorldSettings_))
+            if (ImGui::MenuItem(ICON_WORLD " World Settings", nullptr, showWorldSettings_))
                 showWorldSettings_ = !showWorldSettings_;
             uiReg_.track("window.worldSettings");
             ImGui::Separator();
@@ -2084,15 +2093,15 @@ void SandboxApp::buildUI(Engine& e) {
             {
                 const bool streamOn = streaming_.enabled();
                 ImGui::BeginDisabled(!project_.valid());
-                if (ImGui::MenuItem("Chunk Streaming", nullptr, streamOn)) setChunkStreamingEnabled(!streamOn);
+                if (ImGui::MenuItem(ICON_LAYERS " Chunk Streaming", nullptr, streamOn)) setChunkStreamingEnabled(!streamOn);
                 ImGui::EndDisabled();
                 uiReg_.track("window.chunkStreaming");
-                ImGui::MenuItem("GPU Profiler", nullptr, &showProfiler_);
+                ImGui::MenuItem(ICON_PROFILER " GPU Profiler", nullptr, &showProfiler_);
                 uiReg_.track("window.gpuProfiler");
-                ImGui::MenuItem("Neural Visualiser", nullptr, &showNeuralViz_);
+                ImGui::MenuItem(ICON_NEURAL " Neural Visualiser", nullptr, &showNeuralViz_);
                 uiReg_.track("window.neuralVisualiser");
                 // Which files name an asset; reachable from Content Browser context menu too.
-                ImGui::MenuItem("References", nullptr, &showReferences_);
+                ImGui::MenuItem(ICON_LINK " References", nullptr, &showReferences_);
                 uiReg_.track("window.references");
                 if (!project_.valid() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                     ImGui::SetTooltip("Open or create a project first - a streamed world belongs to one.");
@@ -2104,7 +2113,7 @@ void SandboxApp::buildUI(Engine& e) {
             {
                 const bool droneOn = droneEntity_ != scene::kInvalidEntity;
                 ImGui::BeginDisabled(!project_.valid());
-                if (ImGui::MenuItem("Drone", nullptr, droneOn)) setDroneEnabled(!droneOn);
+                if (ImGui::MenuItem(ICON_BOT " Drone", nullptr, droneOn)) setDroneEnabled(!droneOn);
                 ImGui::EndDisabled();
                 uiReg_.track("window.drone");
                 if (!project_.valid() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
@@ -2117,20 +2126,20 @@ void SandboxApp::buildUI(Engine& e) {
             ImGui::Separator();
 #endif
             // Outside AVER_MODULE_SCENE; git info is independent of ECS.
-            ImGui::MenuItem("Revision Control", nullptr, &showRevisionControl_);
+            ImGui::MenuItem(ICON_REVISION " Revision Control", nullptr, &showRevisionControl_);
             uiReg_.track("window.revisionControl");
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("What git says about this project: the branch, what changed, and\n"
                                   "each file's history and diff. It READS the repository and cannot\n"
                                   "alter one -- there is no commit, revert or push here.");
-            ImGui::MenuItem("Extensions", nullptr, editor::extensionsWindow().openFlag());
+            ImGui::MenuItem(ICON_EXTENSION " Extensions", nullptr, editor::extensionsWindow().openFlag());
             uiReg_.track("window.extensions");
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("The extensions installed beside the editor: status, source and licence.\n"
                                   "Install an .avext package from a file, or uninstall one.");
             ImGui::Separator();
             ImGui::BeginDisabled(gameUi_ == nullptr);
-            if (ImGui::MenuItem("Game UI Demo", nullptr, showUiDemo_)) showUiDemo_ = !showUiDemo_;
+            if (ImGui::MenuItem(ICON_WIDGETS " Game UI Demo", nullptr, showUiDemo_)) showUiDemo_ = !showUiDemo_;
             uiReg_.track("window.gameUiDemo");
             ImGui::EndDisabled();
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
@@ -2139,7 +2148,7 @@ void SandboxApp::buildUI(Engine& e) {
             ImGui::Separator();
             // Reset Layout applies to the focused tab.
             const bool assetTabActive = !levelVisible_ && assetEditors_.anyOpen();
-            if (ImGui::MenuItem(assetTabActive ? "Reset Tab Layout" : "Reset Layout")) {
+            if (ImGui::MenuItem(assetTabActive ? ICON_LAYOUT " Reset Tab Layout" : ICON_LAYOUT " Reset Layout")) {
                 if (assetTabActive) assetEditors_.resetFocusedLayout();
                 else              { dockBuilt_ = false; dockResetRequested_ = true; }
             }
@@ -2280,7 +2289,7 @@ ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
             // Select All now works; disabled only when nothing to select.
 #if AVER_MODULE_SCENE
             ImGui::BeginDisabled(outlinerOrder_.empty());
-            if (ImGui::MenuItem("Select All",
+            if (ImGui::MenuItem(ICON_SELECT_ALL " Select All",
                                 editor::chordToString(
                                     keybinds_.chordFor(editor::CommandId::EditSelectAll)).c_str()))
                 selectAllInOutliner();
@@ -2290,13 +2299,13 @@ ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
                 ImGui::SetTooltip("Nothing is listed in the World Outliner to select.");
 #endif
             // Clears both sel_ and selEntity_ to avoid stale data.
-            if(ImGui::MenuItem("Select None")) { sel_=-1; selEntity_=kInvalidId; }
+            if(ImGui::MenuItem(ICON_DESELECT " Select None")) { sel_=-1; selEntity_=kInvalidId; }
             uiReg_.track("select.none");
             ImGui::EndMenu();
         }
         uiReg_.track("menu.select");
         if (ImGui::BeginMenu("Help")){
-            if (ImGui::MenuItem("About Aver Engine")) showAbout_ = true;
+            if (ImGui::MenuItem(ICON_INFO " About Aver Engine")) showAbout_ = true;
             uiReg_.track("help.about");
             ImGui::EndMenu();
         }
@@ -2316,6 +2325,10 @@ ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
     ImGui::Begin("##maintoolbar", nullptr, kChromeFlags);
     ImGui::SetCursorPosY((toolbarH - ImGui::GetFrameHeight()) * 0.5f);
+    // Buttons sit on capsule plates (EditorChrome.hpp): file actions, the script build, play, settings.
+    // Popups are begun after their capsule closes, so they do not inherit its transparent buttons.
+    std::optional<editor::ToolbarCapsule> cap;
+    cap.emplace(dpi_);
     // levelPath_ and saveLevel() are under AVER_MODULE_SCENE only.
 #if AVER_MODULE_SCENE
     // Opens Save As if level has no path; otherwise saves.
@@ -2330,42 +2343,43 @@ ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
     uiReg_.track("toolbar.save");
     ImGui::EndDisabled();
 #endif
-    ImGui::SameLine();
-    if (dropButton("Add")) {
+    cap->divider();
+    if (dropButton(ICON_ADD " Add")) {
         ImGui::OpenPopup("addActor");
 #if AVER_MODULE_FRAMEWORK
         classPickDirty_ = true;   // Actor From Graph rescans Content each time the popup opens
 #endif
     }
     uiReg_.track("toolbar.add");
+    cap.reset();
     if (ImGui::BeginPopup("addActor")) {
         ImGui::TextDisabled("Place Actor"); ImGui::Separator();
-        if (ImGui::Selectable("Cube"))     spawnCube(e);
-        if (ImGui::Selectable("Player Start")) addPlayerStart(e);
+        if (ImGui::Selectable(ICON_ACTOR_MESH " Cube"))     spawnCube(e);
+        if (ImGui::Selectable(ICON_PLAYER_START " Player Start")) addPlayerStart(e);
         uiReg_.track("toolbar.add.playerStart");
-        if (ImGui::Selectable("Sphere")) spawnPrimitive(e, "Meshes/sphere.ocmesh", "Sphere");
+        if (ImGui::Selectable(ICON_SPHERE " Sphere")) spawnPrimitive(e, "Meshes/sphere.ocmesh", "Sphere");
         uiReg_.track("toolbar.add.sphere");
-        if (ImGui::BeginMenu("Shapes")) {   // the other built-in primitives (aver/rhi/PrimitiveMeshes.hpp)
+        if (ImGui::BeginMenu(ICON_ACTOR " Shapes")) {   // the other built-in primitives (aver/rhi/PrimitiveMeshes.hpp)
             for (const rhi::primitives::BuiltinPrimitive& p : rhi::primitives::kBuiltinPrimitives)
                 if (ImGui::Selectable(p.label)) spawnPrimitive(e, p.path, p.label);
             ImGui::EndMenu();
         }
         uiReg_.track("toolbar.add.shapes");
 #if AVER_MODULE_SCENE
-        if (ImGui::Selectable("Point Light")) spawnLightAtCamera(scene::kLightPoint);
+        if (ImGui::Selectable(ICON_LIGHT " Point Light")) spawnLightAtCamera(scene::kLightPoint);
         uiReg_.track("toolbar.add.pointLight");
-        if (ImGui::Selectable("Spot Light")) spawnLightAtCamera(scene::kLightSpot);
+        if (ImGui::Selectable(ICON_SPOT_LIGHT " Spot Light")) spawnLightAtCamera(scene::kLightSpot);
         uiReg_.track("toolbar.add.spotLight");
-        if (ImGui::Selectable("Rect Light")) spawnLightAtCamera(scene::kLightRect);
+        if (ImGui::Selectable(ICON_RECT_LIGHT " Rect Light")) spawnLightAtCamera(scene::kLightRect);
         uiReg_.track("toolbar.add.rectLight");
-        if (ImGui::Selectable("Decal")) spawnDecalAtCamera();
+        if (ImGui::Selectable(ICON_DECAL " Decal")) spawnDecalAtCamera();
         uiReg_.track("toolbar.add.decal");
 #if AVER_MODULE_FRAMEWORK
-        if (ImGui::BeginMenu("Actor From Graph")) { drawGraphActorMenu(); ImGui::EndMenu(); }
+        if (ImGui::BeginMenu(ICON_CLASS " Actor From Graph")) { drawGraphActorMenu(); ImGui::EndMenu(); }
         uiReg_.track("toolbar.add.actorFromGraph");
 #endif
 #endif
-        if (ImGui::Selectable("Post Process Volume")) {
+        if (ImGui::Selectable(ICON_POST_PROCESS " Post Process Volume")) {
             postVolumeTools_.addAtCamera(levelHeader_.postVolumes, viewPos());
             sel_ = kSelPostVolume; selEntity_ = kInvalidId;
             markLevelUnsaved();
@@ -2373,13 +2387,17 @@ ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
         uiReg_.track("toolbar.add.postProcessVolume");
         ImGui::EndPopup();
     }
-    ImGui::SameLine(); ImGui::TextDisabled("|"); ImGui::SameLine();
+    ImGui::SameLine();
+    cap.emplace(dpi_);
     tools_.drawCompileButton(project_, dpi_, compileIconUiId_);
     uiReg_.track("toolbar.compileCs");
+    cap.reset();
     ImGui::SameLine();
     drawPlayToolbar(e);
-    ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), wsize.x - 130.0f*dpi_));
+    ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), wsize.x - 150.0f*dpi_));
+    cap.emplace(dpi_);
     if (dropButton(ICON_SETTINGS " Settings")) ImGui::OpenPopup("settingsMenu");
+    cap.reset();
     if (ImGui::BeginPopup("settingsMenu")) {
         ImGui::Checkbox("Show Grid", &showGrid_);
         ImGui::Checkbox("Wireframe", &wireframe_);
@@ -2418,27 +2436,29 @@ ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
         ImGui::DockBuilderAddNode(dockId, ImGuiDockNodeFlags_DockSpace); // private flag, required here
         ImGui::DockBuilderSetNodeSize(dockId, dockSize); // must precede the splits
         ImGuiID centre = dockId, right = 0, rightTop = 0, rightBottom = 0, left = 0;
-        ImGui::DockBuilderSplitNode(centre, ImGuiDir_Right, 0.22f, &right,  &centre);
+        // The right column is a quarter of the width and a bit more: Details' labels clip below that.
+        ImGui::DockBuilderSplitNode(centre, ImGuiDir_Right, 0.26f, &right,  &centre);
         ImGui::DockBuilderSplitNode(right,  ImGuiDir_Down,  0.60f, &rightBottom, &rightTop);
         // Mode panel left (opposite details); left "what am I doing", right "what is this object".
         ImGui::DockBuilderSplitNode(centre, ImGuiDir_Left, 0.20f, &left, &centre);
-        ImGui::DockBuilderDockWindow("World Outliner",  rightTop);
-        ImGui::DockBuilderDockWindow("Details",         rightBottom);
-        ImGui::DockBuilderDockWindow("Mode",            left);
-        ImGui::DockBuilderDockWindow("Level",           centre);
+        ImGui::DockBuilderDockWindow(AVER_WIN_OUTLINER,  rightTop);
+        ImGui::DockBuilderDockWindow(AVER_WIN_DETAILS,         rightBottom);
+        ImGui::DockBuilderDockWindow(AVER_WIN_MODE,            left);
+        ImGui::DockBuilderDockWindow(AVER_WIN_LEVEL,           centre);
         ImGui::DockBuilderFinish(dockId);
     }
     if (const ImGuiDockNode* cn = ImGui::DockBuilderGetCentralNode(dockId)) centralDock_ = cn->ID;
+    editor::drawDockSplitterLines(dockId);
     ImGui::End(); // ##dockhost
 
     // ---- the level, as a tab drawing the scene texture ----
     {
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
         if (focusLevelAt_ > 0 && ImGui::GetFrameCount() == focusLevelAt_) {
-            ImGui::SetWindowFocus("Level");
+            ImGui::SetWindowFocus(AVER_WIN_LEVEL);
             AVER_INFO("[Editor] --focus-level-at: bringing the Level tab forward");
         }
-        levelVisible_ = ImGui::Begin("Level", nullptr,
+        levelVisible_ = ImGui::Begin(AVER_WIN_LEVEL, nullptr,
                                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
                                      ImGuiWindowFlags_NoCollapse);
         const ImVec2 at = ImGui::GetCursorScreenPos();
@@ -2707,12 +2727,12 @@ ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
     const ImGuiStyle& barStyle = ImGui::GetStyle();
     const f32 barBtnPad = barStyle.FramePadding.x * 2.0f;
     const auto faceWidth = [&](const char* s) { return ImGui::CalcTextSize(s).x + barBtnPad; };
-    f32 clusterW = faceWidth("Content Browser") + barStyle.ItemSpacing.x +
-                   faceWidth("Output Log") + barStyle.ItemSpacing.x +
-                   faceWidth("Console") + barStyle.ItemSpacing.x +
+    f32 clusterW = faceWidth(ICON_FOLDER " Content Browser") + barStyle.ItemSpacing.x +
+                   faceWidth(ICON_LOG " Output Log") + barStyle.ItemSpacing.x +
+                   faceWidth(ICON_CONSOLE " Console") + barStyle.ItemSpacing.x +
                    faceWidth(rcFace.c_str());
 #if AVER_MODULE_MCP
-    clusterW += barStyle.ItemSpacing.x + faceWidth(ICON_LINK " MCP :65535");
+    clusterW += barStyle.ItemSpacing.x + faceWidth(ICON_MCP " MCP :65535");
 #endif
     const f32 clusterX = wsize.x - clusterW - 8.0f * dpi_;
     const char* kBarSep = "  |  ";
@@ -2853,11 +2873,11 @@ ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
     };
     ImGui::SameLine(clusterX);
-    drawerButton("Content Browser", Drawer::Content, "Show the Content Browser  (Ctrl+Space)");
+    drawerButton(ICON_FOLDER " Content Browser", Drawer::Content, "Show the Content Browser  (Ctrl+Space)");
     ImGui::SameLine();
-    drawerButton("Output Log", Drawer::Log, "Show the Output Log");
+    drawerButton(ICON_LOG " Output Log", Drawer::Log, "Show the Output Log");
     ImGui::SameLine();
-    drawerButton("Console", Drawer::Console, "Show the Console  (`)");
+    drawerButton(ICON_CONSOLE " Console", Drawer::Console, "Show the Console  (`)");
     // RC at far right; MCP drawn first (SameLine lays left to right).
 #if AVER_MODULE_MCP
     ImGui::SameLine();

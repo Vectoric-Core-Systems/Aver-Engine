@@ -623,7 +623,10 @@ void SandboxApp::drawPlacedComponentSections() {
     for (const editor::PlacedKind& k : editor::kPlacedKinds) {
         const u32 cid = kindComponentId(w, k);
         if (cid == 0 || !w.hasComponent(e, cid)) continue;
-        if (!::aver::editor::sectionHeader(k.header, ImGuiTreeNodeFlags_DefaultOpen)) continue;
+        // A kind with no named icon of its own still gets the generic one, so the headers line up.
+        const std::string kindHeader = ::aver::editor::startsWithIcon(k.header) || ::aver::editor::sectionIcon(k.header)
+            ? std::string(k.header) : ::aver::editor::iconLabel(ICON_TUNE, k.header) + "###" + k.header;
+        if (!::aver::editor::sectionHeader(kindHeader.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) continue;
         ImGui::PushID(k.type);
         if (playing) ImGui::TextDisabled("Stop Play to edit.");
         const std::string_view t = k.type;

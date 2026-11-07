@@ -101,6 +101,29 @@ bool samePath(const std::string& a, const std::string& b) {
 }
 } // namespace
 
+
+#if AVER_WITH_IMGUI
+// The icon an asset editor's dock tab leads with, from the file it edits.
+const char* assetTabIcon(const std::string& path) {
+    std::string ext = std::filesystem::path(path).extension().string();
+    for (char& c : ext) c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
+    struct Row { const char* ext; const char* icon; };
+    static const Row kRows[] = {
+        {".ocmesh", ICON_ACTOR_MESH}, {".ocmat", ICON_MATERIAL}, {".ocparticle", ICON_PARTICLES},
+        {".ocworld", ICON_TERRAIN}, {".ocmap", ICON_TERRAIN}, {".ocanim", ICON_ANIMATION},
+        {".ocasm", ICON_ANIMATION}, {".ocmontage", ICON_ANIMATION}, {".ocblend", ICON_ANIMATION},
+        {".ocskel", ICON_SKELETAL}, {".ocrig", ICON_SKELETAL}, {".ocikrig", ICON_SKELETAL},
+        {".ocgraph", ICON_CLASS}, {".ocbt", ICON_OUTLINER}, {".ocst", ICON_OUTLINER},
+        {".ocsnd", ICON_AUDIO}, {".ocaudio", ICON_AUDIO}, {".ocui", ICON_WIDGETS},
+        {".ocseq", ICON_MOVIE}, {".ochair", ICON_HAIR}, {".ocsoft", ICON_PHYSICS},
+        {".ocshape", ICON_PHYSICS}, {".ocvehicle", ICON_PHYSICS}, {".ocinput", ICON_CONSOLE},
+        {".png", ICON_IMAGE}, {".jpg", ICON_IMAGE}, {".tga", ICON_IMAGE},
+    };
+    for (const Row& r : kRows) if (ext == r.ext) return r.icon;
+    return ICON_FILE;
+}
+#endif
+
 // Tells the editor holding this path that the file changed on disk. False if none does.
 bool AssetEditorHost::notifyFileChanged(const std::string& path) {
     for (const auto& ed : editors_) {
@@ -147,7 +170,8 @@ bool AssetEditorHost::draw(Engine& e, unsigned dockInto, float dpi) {
         bool open = true;
 
         // Window ID is the path, not the title: a changing ImGui ID loses size, position and docking.
-        const std::string label = ed.title() + "###assetEditor:" + ed.path();
+        const std::string label = editor::iconLabel(assetTabIcon(ed.path()), ed.title().c_str()) +
+                                  "###assetEditor:" + ed.path();
         if (ed.path() == focusRequest_) { ImGui::SetNextWindowFocus(); focusRequest_.clear(); }
         ImGui::SetNextWindowSize(ImVec2(760.0f * dpi, 560.0f * dpi), ImGuiCond_FirstUseEver);
         if (dockInto) ImGui::SetNextWindowDockID(static_cast<ImGuiID>(dockInto), ImGuiCond_FirstUseEver);

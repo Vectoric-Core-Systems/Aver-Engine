@@ -934,7 +934,7 @@ static inline void applyEditorMetrics() {
 
     // Unscaled; applyDpi applies DPI scaling after.
     s.WindowRounding    = t.rounding;  s.ChildRounding  = t.rounding;  s.FrameRounding  = t.rounding;
-    s.PopupRounding     = t.rounding;  s.GrabRounding   = t.grabRounding; s.TabRounding = t.rounding;
+    s.PopupRounding     = t.rounding;  s.GrabRounding   = t.grabRounding; s.TabRounding = t.tabRounding;
     s.ScrollbarRounding = t.rounding;
     s.WindowBorderSize  = 1;  s.FrameBorderSize = 0; s.PopupBorderSize = 1;
     s.ChildBorderSize   = 1;
@@ -951,6 +951,15 @@ static inline void applyEditorMetrics() {
     s.IndentSpacing     = t.indentSpacing;
     s.WindowTitleAlign  = ImVec2(0.0f, 0.5f);
     s.SeparatorTextBorderSize = 1;
+    // One close button per tab: the dock node's own X (it closes the whole node) and the window-menu
+    // arrow (a collapse triangle that does nothing useful on a docked panel) are both off.
+    s.DockingNodeHasCloseButton = false;
+    s.WindowMenuButtonPosition  = ImGuiDir_None;
+    // A wide splitter gap with a 1px line drawn in it (editor::drawDockSplitterLines); the gap is the hit area.
+    s.DockingSeparatorSize = t.splitterSize;
+    // A 1px rule under the tab bar rather than ImGui's default; the selected tab's overline stays.
+    s.TabBarBorderSize = 1;
+    s.TabBarOverlineSize = 2;
 }
 
 // Editor colour palette (safe to re-run outside widget draw). Orange is for selection, checkmarks, the
@@ -3097,6 +3106,9 @@ private:
     struct OutlinerRow { scene::Entity ent; scene::Entity par; std::string shown; };
 
     static std::string lowerCopy(std::string v);
+
+    // The icon an Outliner row leads with (folder, light, camera, mesh ...).
+    const char* outlinerIconFor(scene::Entity ent, bool hasKids) const;
 
     std::string outlinerLabelFor(scene::Entity e) const;
 

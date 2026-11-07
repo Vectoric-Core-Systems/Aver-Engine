@@ -105,6 +105,8 @@ bool applyThemeJson(std::string_view json, EditorTheme& t, std::string* why) {
         readNum(m, "overlayAlpha", n.overlayAlpha, 0.0f, 1.0f, why);
         readNum(m, "rounding", n.rounding, 0.0f, 16.0f, why);
         readNum(m, "grabRounding", n.grabRounding, 0.0f, 16.0f, why);
+        readNum(m, "tabRounding", n.tabRounding, 0.0f, 16.0f, why);
+        readNum(m, "splitterSize", n.splitterSize, 1.0f, 20.0f, why);
         readNum(m, "windowPaddingX", n.windowPaddingX, 0.0f, 40.0f, why);
         readNum(m, "windowPaddingY", n.windowPaddingY, 0.0f, 40.0f, why);
         readNum(m, "framePaddingX", n.framePaddingX, 0.0f, 40.0f, why);

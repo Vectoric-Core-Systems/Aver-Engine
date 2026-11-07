@@ -37,6 +37,8 @@ struct EditorTheme {
     // Metrics, unscaled (DPI scaling is applied after). FramePadding.y is NOT here: the --probe-rel
     // gates depend on the tab-bar height it sets.
     f32 rounding = 4, grabRounding = 3;
+    f32 tabRounding = 2.5f;       // flat tabs: barely rounded, like a toolbar rather than a folder
+    f32 splitterSize = 6;         // dock splitter: the gap between panels, and so its hit area (the line drawn in it is 1px)
     f32 windowPaddingX = 10, windowPaddingY = 8;
     f32 framePaddingX = 8;
     f32 itemSpacingX = 8, itemSpacingY = 6;
