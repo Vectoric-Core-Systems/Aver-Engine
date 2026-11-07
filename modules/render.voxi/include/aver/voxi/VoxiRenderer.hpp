@@ -156,6 +156,23 @@ public:
     // Draws submitted while these are on are left out of the acceleration structure / the shadow cascades (see Draw::noRay). Sticky like setSubmitMovable.
     void setSubmitNoRay(bool on) { submitNoRay_ = on; }
     void setSubmitNoShadow(bool on) { submitNoShadow_ = on; }
+    // First-person rendering (docs/plans/FIRST_PERSON.md): the draws submitted next are first-person meshes, drawn through the first-person projection by the
+    // device. Sticky like setSubmitMovable. Voxi derives the rest from it: the draw is a mover (out of voxelisation and the GI shadow map, it moves with the
+    // camera) and, unless `casts`, leaves the shadow cascades and the acceleration structure. A casting one is in the owner-hidden lane: secondary rays see it,
+    // primary rays do not. Ray-driven mode therefore hides every first-person mesh from primary rays until the overlay of step 6 draws them.
+    void setSubmitFirstPerson(bool on, bool casts = false) { submitFirstPerson_ = on; submitFirstPersonCasts_ = on && casts; }
+    // What the passes make of one draw submitted this frame, for tests: the cascades, voxelisation and the acceleration-structure lane each read exactly
+    // these fields (shadowPass, voxelizePass, the TLAS build), so a test reads the verdicts here instead of running a GPU frame.
+    enum class RtLane { None, Opaque, OwnerHidden, Translucent };
+    struct SubmittedDraw {
+        rhi::MeshHandle mesh = 0;
+        bool firstPerson = false, noRay = false, noShadow = false, movable = false, translucent = false, hiddenFromOwner = false;
+        bool inShadowCascades() const { return !translucent && !noShadow; }
+        bool voxelised() const { return !translucent && !movable; }
+        RtLane rtLane() const { return noRay ? RtLane::None : translucent ? RtLane::Translucent : hiddenFromOwner ? RtLane::OwnerHidden : RtLane::Opaque; }
+    };
+    usize submittedDrawCount() const { return draws_.size(); }
+    SubmittedDraw submittedDraw(usize i) const;
     // G4 R4: the render layers (inverted, scene::storeMask; 0 = every layer) of the draws submitted next. Sticky like setSubmitMovable; the scene walk
     // sets it only for an entity whose layers are not the default and puts it back to 0 after. Read by the raster local-light shadow pass.
     void setSubmitLayers(u32 layersInv) { submitLayersInv_ = layersInv; }
@@ -964,6 +981,7 @@ private:
         // frame is a BLAS refit nobody asked for, and CHair kHairRayTraced / kHairNoShadow opt in or out. Set by setSubmitNoRay / setSubmitNoShadow.
         bool noRay = false;
         bool noShadow = false;
+        bool firstPerson = false;   // drawn with the first-person projection; see setSubmitFirstPerson
         // MOVABLE: moves during play (game::PlayMobility decides); out of voxelisation and GI rebuild gate.
         bool movable = false;
         u32 layersInv = 0;   // G4 R4: render layers, inverted (0 = every layer); see setSubmitLayers
@@ -972,6 +990,8 @@ private:
     u32 submitLayersInv_ = 0;
     bool submitNoRay_ = false;
     bool submitNoShadow_ = false;
+    bool submitFirstPerson_ = false;
+    bool submitFirstPersonCasts_ = false;
 
     // Material system answers (is authored, textures); remembered for ONE key computation. Not a member.
     struct DrawMaterialMemoSlot {

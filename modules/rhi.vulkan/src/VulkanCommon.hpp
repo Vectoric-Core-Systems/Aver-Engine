@@ -1857,6 +1857,7 @@ private:
         f32 world[16] = {};
         f32 color[4] = {};
         f32 metallic = 0.0f, roughness = 0.0f;
+        u32 objPad = 0;   // the object block's _objPad word (layers + first-person bit) at capture, written again on replay
         DrawBinding binding{};
     };
     std::vector<BlendedDraw> blendedDraws_;   // filled by drawMesh, sorted and drained by endFrame, cleared at beginFrame

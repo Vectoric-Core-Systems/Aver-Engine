@@ -224,3 +224,12 @@ if(TARGET Aver.Framework AND TARGET Aver.Scene AND TARGET Aver.Render.PBR.Materi
   target_link_libraries(SubViewportHostTest PRIVATE Aver.Runtime.Game.Core Aver.Render.ActorPreview Aver.Render.PBR.Materials Aver.Framework Aver.Scene Aver.Formats Aver.Core)
   set_target_properties(SubViewportHostTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# FirstPersonWalkTest -- the scene walk's half of first-person rendering (docs/plans/FIRST_PERSON.md): flagged and first-person-root meshes reach the device with
+# the first-person bit and are drawn out of the main frustum, no shadow / no ray / not voxelised unless the cast flag (then the owner-hidden lane), the prepass
+# skips them, unflagged meshes are unchanged. A recording device forwards draws to a real VoxiRenderer's draw list; no window, no GPU.
+if(TARGET Aver.Scene AND TARGET Aver.Render.Voxi.Renderer)
+  add_executable(FirstPersonWalkTest src/FirstPersonWalkTest.cpp)
+  target_link_libraries(FirstPersonWalkTest PRIVATE Aver.Runtime.Game.Core Aver.Render.Voxi.Renderer Aver.Scene Aver.Formats Aver.Core)
+  set_target_properties(FirstPersonWalkTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()

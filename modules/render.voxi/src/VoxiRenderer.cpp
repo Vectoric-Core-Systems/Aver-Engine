@@ -1313,6 +1313,12 @@ void VoxiRenderer::submit(rhi::MeshHandle mesh, const f32 world[16], const f32 b
     d.noRay = submitNoRay_;
     d.noShadow = submitNoShadow_;
     d.layersInv = submitLayersInv_;
+    if (submitFirstPerson_) {
+        d.firstPerson = true;
+        d.movable = true;                 // out of voxelisation and the GI shadow map
+        d.hiddenFromOwner = true;         // a caster is in the secondary-ray lane only (see setSubmitFirstPerson)
+        if (!submitFirstPersonCasts_) { d.noRay = true; d.noShadow = true; }
+    }
 
     // World-space bounding sphere for per-cascade cull.
     // Only local-space bounds are cached; world-space transforms per entity (differs per instance).
@@ -1350,6 +1356,15 @@ void VoxiRenderer::submit(rhi::MeshHandle mesh, const f32 world[16], const f32 b
         std::memcpy(&matFlags, d.mat + offsetof(pbr::MaterialConstants, flags), sizeof(matFlags));
         if (matFlags & pbr::MaterialFlag_Light) lampDraws_.push_back(drawIndex);
     }
+}
+
+VoxiRenderer::SubmittedDraw VoxiRenderer::submittedDraw(usize i) const {
+    SubmittedDraw s;
+    if (i >= draws_.size()) return s;
+    const Draw& d = draws_[i];
+    s.mesh = d.mesh; s.firstPerson = d.firstPerson; s.noRay = d.noRay; s.noShadow = d.noShadow; s.movable = d.movable;
+    s.translucent = d.translucent; s.hiddenFromOwner = d.hiddenFromOwner;
+    return s;
 }
 
 // IRenderFeature entry point for every draw. Blended draws filtered here: unfiltered,

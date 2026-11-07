@@ -1567,6 +1567,7 @@ private:
         f32 color[4] = {};
         f32 metallic = 0.0f;
         f32 roughness = 0.0f;
+        u32 objPad = 0;   // the object block's _objPad word (layers + first-person bit) at capture, written again on replay
         DrawBinding binding{};
     };
     // Filled by drawMesh(), drained (sorted back-to-front) by endFrame(), cleared at next beginFrame.
@@ -4688,6 +4689,7 @@ bool D3D12Device::depthOnlyDraw(MeshHandle mesh, const f32 world[16], const f32 
         std::memcpy(fc, world, 16 * sizeof(f32));
         // gBaseColor.a used in alpha test; defaults to zero (IDevice::drawMeshDepthPrepass).
         if (color) std::memcpy(fc + 16, color, 4 * sizeof(f32));
+        if (const u32 pad = packObjectPad(drawLayersInv_, drawFirstPerson_)) std::memcpy(fc + 27, &pad, sizeof(u32));   // a first-person draw's depth projects like its colour
         rhiContext_->setConstants(kObjectConstantRegister, fc, kObjectConstantDwords);
         rhiContext_->drawMesh(mesh);
         boundRootSig_ = nullptr;
@@ -4729,6 +4731,7 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
         std::memcpy(bd.color, color, 4 * sizeof(f32));
         bd.metallic = metallic;
         bd.roughness = roughness;
+        bd.objPad = packObjectPad(drawLayersInv_, drawFirstPerson_);
         storeDrawBinding(bd.binding, drawBinding_.set, drawBinding_.constants, drawBinding_.bytes);
         return;
     }
@@ -6256,6 +6259,7 @@ void D3D12Device::endFrame() {
                 // fc[22] stays 0: unlit blended mesh not plumbed speculatively.
                 fc[20] = bd.metallic; fc[21] = bd.roughness; fc[22] = 0.0f; fc[23] = 0.0f;
                 writeShadingConstants(fc);
+                std::memcpy(fc + 27, &bd.objPad, sizeof(u32));   // layers and the first-person bit, as the captured draw had them
                 rhiContext_->setConstants(kObjectConstantRegister, fc, kObjectConstantDwords);
                 if (drawMs) rhiContext_->dispatchMeshFor(bd.mesh);
                 else        rhiContext_->drawMesh(bd.mesh);

@@ -390,6 +390,22 @@ static void testShaderText() {
           "rl::build packs the light and shadow-caster masks into the light record");
 }
 
+// The blended replay re-issues a draw long after drawMesh returned, when the sticky layers and first-person bit are gone: the record must carry the pad word.
+static void testBlendedReplayKeepsThePad() {
+    AVER_INFO("=== blended replay record ===");
+    for (const char* file : {"/modules/rhi.d3d12/src/D3D12Device.cpp", "/modules/rhi.vulkan/src/VulkanDevice.cpp"}) {
+        std::string src;
+        check(readFileText(std::string(AVER_REPO_ROOT) + file, src), std::string(file) + " is readable");
+        check(src.find("bd.objPad = packObjectPad(drawLayersInv_, drawFirstPerson_);") != std::string::npos,
+              std::string(file) + ": drawMesh stores the layers and the first-person bit in the blended record");
+        check(src.find("std::memcpy(fc + 27, &bd.objPad, sizeof(u32));") != std::string::npos,
+              std::string(file) + ": the replay writes them back into the object block");
+    }
+    std::string vk;
+    check(readFileText(std::string(AVER_REPO_ROOT) + "/modules/rhi.vulkan/src/VulkanCommon.hpp", vk) && vk.find("u32 objPad = 0;") != std::string::npos,
+          "the Vulkan blended record has the pad word (D3D12's is declared beside its own)");
+}
+
 int main() {
     AVER_INFO("CameraProjectionTest (G4 R4)");
     testMatrices();
@@ -398,6 +414,7 @@ int main() {
     testRanges();
     testRangeFade();
     testFirstPerson();
+    testBlendedReplayKeepsThePad();
     testObjectPad();
     testShaderText();
     AVER_INFO("{} checks, {} failures", g_checks, g_failures);

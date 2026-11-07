@@ -449,6 +449,7 @@ void SandboxApp::onRender(Engine& e)  {
                 popt.ownerHideRoot = firstPersonPawn_;
 
                 popt.ownerHideAll = playView_.ownerHideAll;   // the collision fade, in the depth prepass too
+                popt.firstPersonRoot = playView_.firstPersonRoot;   // both passes must agree on which meshes are first person
                 popt.cameraCullInv = playView_.cullInv;       // G4 R4: both passes must agree on what is drawn
                 popt.viewerPos = eye_; popt.haveViewerPos = true;
                 popt.mobility = &playMobility_;
@@ -942,7 +943,7 @@ void SandboxApp::onRender(Engine& e)  {
             // boundary was cut in -- DrawWorldOptions hands the hooks that index for exactly this
             // reason.
             d.occlusionCulled = c.occlusionRuns && d.visitIndex >= c.pass1Count && d.haveWorldBox &&
-                                !self.occlusionWasVisible(d.entity) && !occlusionOptOut(d.entity);
+                                !self.occlusionWasVisible(d.entity) && !occlusionOptOut(d.entity) && !d.firstPerson;
 #endif
             // 3B's by-hand false-cull finder: an otherwise-culled, non-owner-hidden entity draws
             // through the RASTER route anyway, tinted -- chooseRoute owns that pairing, so this is
@@ -1079,8 +1080,9 @@ void SandboxApp::onRender(Engine& e)  {
             // paths, or the unmodified mesh -- the only place that draws glass correctly.
             // NOR IN WIREFRAME: this path shades straight into the scene target, and the wireframe
             // view draws only what reaches drawMesh (IDevice::setWireframe).
+            // NOR A FIRST-PERSON MESH: the cluster dispatch projects through the main matrix and carries no first-person bit; it draws through drawMesh.
             if (self.lodMeshShaderEnabled_ && self.lodMeshPipelineReady_ && !d.skinned &&
-                d.haveWorldBox && !blended && !self.wireframe_) {
+                d.haveWorldBox && !blended && !self.wireframe_ && !d.firstPerson) {
                 if (const auto git = self.meshClusterGpu_.find(d.meshId); git != self.meshClusterGpu_.end()) {
                     const auto& gpu = git->second;
                     if (rhi::IRenderContext* ctx = c.engine->device()->renderContext();
@@ -1598,6 +1600,7 @@ void SandboxApp::onRender(Engine& e)  {
         copt.ownerHideRoot = firstPersonPawn_;
 
         copt.ownerHideAll = playView_.ownerHideAll;   // the collision fade hides every mesh under the target, not only the flagged ones
+        copt.firstPersonRoot = playView_.firstPersonRoot;
         copt.cameraCullInv = playView_.cullInv;       // G4 R4: Camera3D.cull_mask and visibility ranges, as in the prepass
         copt.viewerPos = eye_; copt.haveViewerPos = true;
         copt.mobility = &playMobility_;

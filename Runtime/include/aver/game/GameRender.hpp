@@ -190,6 +190,7 @@ struct EntityDecision {
     bool skinned = false;        // SkinnedScene claimed this entity (its bounds are its POSED ones)
     bool frustumCulled = false;
     bool ownerHidden = false;
+    bool firstPerson = false;       // drawn through the first-person projection: it arrives with frustumCulled false, and occlusionCulled is forced false after decide()
     rhi::MeshHandle baseMesh = 0;   // GameContent::meshFor(meshId), the unsubstituted geometry the
                                     // per-material split was cut from
     rhi::MeshHandle posedMesh = 0;  // SkinnedScene's substituted handle, or 0
@@ -350,6 +351,11 @@ struct DrawWorldOptions {
     // fade, when the arm is squashed against the pivot and the camera would sit inside the target's body (shadows, GI and RT
     // geometry still receive the meshes, as for the flagged ones). False changes nothing.
     bool ownerHideAll = false;
+
+    // First-person rendering (docs/plans/FIRST_PERSON.md, PlayView::firstPersonRoot): every mesh under this entity counts as flagged
+    // kRenderFirstPerson, found with the same ancestor walk as ownerHideRoot. scene::kInvalidEntity = none; a mesh's own flag works without it.
+    // Not applied by the secondary-camera pass (DrawWorldPass::View): a viewmodel belongs to the player's view.
+    scene::Entity firstPersonRoot = scene::kInvalidEntity;
 
     // G4 R4. The camera's cull mask, stored inverted (scene::storeMask; 0 = render every layer). An entity whose CMeshRenderer::layersInv shares no
     // layer with it is treated as hidden from the viewer exactly like an owner-hidden mesh: no raster draw, but it still casts shadows and stays in
