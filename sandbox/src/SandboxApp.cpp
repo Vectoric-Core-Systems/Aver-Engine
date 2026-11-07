@@ -159,6 +159,7 @@ void SandboxApp::applyDpi(f32 dpi) {
     dpi_ = dpi;
     // Push dpi through editor::setGraphEditorDpi (not pulled from AssetEditor::draw()).
     editor::setGraphEditorDpi(dpi_);
+    editor::reloadEditorTheme(executableDir());
     applyEditorMetrics();
     applyEditorColors();
     if (dpi_ > 1.01f) ImGui::GetStyle().ScaleAllSizes(dpi_);
@@ -166,11 +167,13 @@ void SandboxApp::applyDpi(f32 dpi) {
     ImGuiIO& io = ImGui::GetIO();
     io.Fonts->Clear();
     fontMedium_ = nullptr;
+    editor::editorFonts() = {};
 
     const std::string dir = executableDir();
     const std::string regular = dir + AVER_PATH_SEP "Roboto-Regular.ttf";
     const std::string medium  = dir + AVER_PATH_SEP "Roboto-Medium.ttf";
-    const f32 px = 16.0f * dpi_;
+    const editor::EditorTheme& theme = editor::editorTheme();
+    const f32 px = theme.fontBody * dpi_;
 
     ImFont* body = fileExists(regular) ? io.Fonts->AddFontFromFileTTF(regular.c_str(), px) : nullptr;
     if (!body) {
@@ -185,7 +188,19 @@ void SandboxApp::applyDpi(f32 dpi) {
         // Medium weight needs its own icon copy: fonts are separate atlas entries, else icons
         // under fontMedium_ show as notdef boxes.
         if (fontMedium_) mergeIconFont(px);
+        // Header: the same Medium face at the header size, for panel and section titles.
+        const f32 hpx = theme.fontHeader * dpi_;
+        editor::editorFonts().header = io.Fonts->AddFontFromFileTTF(medium.c_str(), hpx);
+        editor::editorFonts().headerPx = hpx;
+        if (editor::editorFonts().header) mergeIconFont(hpx);
     }
+    // Small: status bar, secondary hints and readouts. The atlas is dynamic (glyphs rasterise on first
+    // use), so three faces and their icon merges cost a few more glyph entries, not a bigger texture.
+    const f32 spx = theme.fontSmall * dpi_;
+    editor::editorFonts().secondary = io.Fonts->AddFontFromFileTTF(regular.c_str(), spx);
+    editor::editorFonts().secondaryPx = spx;
+    if (editor::editorFonts().secondary) mergeIconFont(spx);
+    io.FontDefault = body;
 }
 
 // Merge icon font into the last added font for inline rendering. Missing file is non-fatal.

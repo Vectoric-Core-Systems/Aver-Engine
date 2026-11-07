@@ -7,6 +7,7 @@
 // skinning was impossible ("the RHI...cannot"), a claim commit 9fbe761 disproved 17 minutes after
 // commit 1735709 landed this box-per-bone preview.
 #include "AnimEditor.hpp"
+#include "EditorChrome.hpp"
 #include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "AnimEdit.hpp"
 #include "EditorIcons.hpp"
@@ -2092,7 +2093,7 @@ void AnimEditor::clampTrackKeySelection() {
 // visibly does nothing (see materialPanel's "PUSHED ON RELEASE" comment).
 void AnimEditor::drawClipRetime() {
 #if AVER_WITH_IMGUI
-    if (!ImGui::CollapsingHeader("Retime")) return;
+    if (!::aver::editor::sectionHeader("Retime")) return;
     // Lazily defaulted to the full clip: an End of 0.0 always fails trimClip's `end > start` check, so
     // the first look at this panel would find Trim refusing until Full Range is pressed. Re-applied
     // only while End is still its unset default, so a deliberate 0.0 isn't fought.

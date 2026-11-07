@@ -1,5 +1,6 @@
 // The .ocvehicle editor tab. See the header for the SandboxApp hook and VehicleEditorModel.hpp for the rules the widgets draw.
 #include "VehicleEditor.hpp"
+#include "EditorChrome.hpp"
 
 #include "VehicleDebugOverlay.hpp"
 #include "VehicleEditorModel.hpp"
@@ -328,7 +329,7 @@ void VehicleEditor::drawIssues() {
     const std::vector<ve::Issue> issues = ve::validationList(spec_);
     char header[64];
     std::snprintf(header, sizeof header, "Validation (%zu)###issues", issues.size());
-    if (!ImGui::CollapsingHeader(header, issues.empty() ? 0 : ImGuiTreeNodeFlags_DefaultOpen)) return;
+    if (!::aver::editor::sectionHeader(header, issues.empty() ? 0 : ImGuiTreeNodeFlags_DefaultOpen)) return;
     if (issues.empty()) { ImGui::TextDisabled("No problems."); return; }
     for (const ve::Issue& i : issues) ImGui::TextColored(i.error ? kRed : kAmber, "%s %s", i.error ? "error:" : "note:", i.text.c_str());
     if (ve::hasErrors(issues)) ImGui::TextColored(kRed, "Save is refused until the errors are fixed.");
@@ -788,7 +789,7 @@ void VehicleEditor::draw(Engine& e) {
     };
     for (usize i = 0; i < ve::kSectionCount; ++i) {
         ImGui::PushID(ve::kSections[i].key);
-        if (ImGui::CollapsingHeader(ve::kSections[i].label, i < 2 ? ImGuiTreeNodeFlags_DefaultOpen : 0)) {
+        if (::aver::editor::sectionHeader(ve::kSections[i].label, i < 2 ? ImGuiTreeNodeFlags_DefaultOpen : 0)) {
             for (const Section& s : kDraw)
                 if (std::strcmp(s.key, ve::kSections[i].key) == 0) (this->*s.draw)();
         }

@@ -1,5 +1,6 @@
 // The .occaptions editor tab. See the header for the two-line SandboxApp hook and why the save merges onto the file.
 #include "CaptionEditor.hpp"
+#include "EditorChrome.hpp"
 
 #include "aver/core/Log.hpp"
 #include "aver/platform/FileSystem.hpp"
@@ -383,7 +384,7 @@ bool commitText(const char* id, std::string& value, float width) {
 } // namespace
 
 void CaptionEditor::drawSpeakers() {
-    if (!ImGui::CollapsingHeader("Speakers", ImGuiTreeNodeFlags_DefaultOpen)) return;
+    if (!::aver::editor::sectionHeader("Speakers", ImGuiTreeNodeFlags_DefaultOpen)) return;
     if (ImGui::BeginTable("capSpeakers", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingStretchProp)) {
         ImGui::TableSetupColumn("Id", ImGuiTableColumnFlags_WidthFixed, 130.0f);
         ImGui::TableSetupColumn("Name (text or reference)", ImGuiTableColumnFlags_WidthStretch);

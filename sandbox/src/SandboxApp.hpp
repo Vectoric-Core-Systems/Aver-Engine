@@ -125,6 +125,8 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #endif
 #include "ToolGlyphs.hpp"
 #include "EditorWidgets.hpp"
+#include "EditorTheme.hpp"
+#include "EditorChrome.hpp"
 #include "FoliageAlign.hpp"
 #include "LandscapePaintTool.hpp"   // wave3: the Landscape mode's Paint tab
 #include "WaterSplineTool.hpp"      // wave3: the Landscape mode's Water tab
@@ -922,52 +924,61 @@ struct MeshObj {
 static constexpr ImVec4 kAverOrange   (242.0f/255.0f, 101.0f/255.0f, 34.0f/255.0f, 1.00f);
 static constexpr ImVec4 kAverOrangeDim(242.0f/255.0f, 101.0f/255.0f, 34.0f/255.0f, 0.55f);
 
-// Editor dark scheme colours and metrics (split from applyDpi for DPI scaling order).
+// Editor dark scheme colours and metrics (split from applyDpi for DPI scaling order). The values come
+// from editor::editorTheme() -- EditorTheme.hpp's defaults, overridden by editor-theme.json.
+static inline ImVec4 toVec4(const editor::Rgba& c) { return ImVec4(c.r, c.g, c.b, c.a); }
+
 static inline void applyEditorMetrics() {
     ImGuiStyle& s = ImGui::GetStyle();
+    const editor::EditorTheme& t = editor::editorTheme();
 
     // Unscaled; applyDpi applies DPI scaling after.
-    s.WindowRounding    = 4;  s.ChildRounding  = 4;  s.FrameRounding  = 4;
-    s.PopupRounding     = 4;  s.GrabRounding   = 3;  s.TabRounding    = 4;
-    s.ScrollbarRounding = 4;
+    s.WindowRounding    = t.rounding;  s.ChildRounding  = t.rounding;  s.FrameRounding  = t.rounding;
+    s.PopupRounding     = t.rounding;  s.GrabRounding   = t.grabRounding; s.TabRounding = t.rounding;
+    s.ScrollbarRounding = t.rounding;
     s.WindowBorderSize  = 1;  s.FrameBorderSize = 0; s.PopupBorderSize = 1;
     s.ChildBorderSize   = 1;
-    s.WindowPadding     = ImVec2(10, 8);
+    s.WindowPadding     = ImVec2(t.windowPaddingX, t.windowPaddingY);
     // FramePadding.y stays at 4 -- gates constraint: docked tab bar height = FontSize + FramePadding.y*2,
     // and --probe-rel (vpX_/vpY_/vpW_/vpH_) survives a resize but not an aspect change. The x half is free.
-    s.FramePadding      = ImVec2(8, 4);
-    s.ItemSpacing       = ImVec2(8, 6);
+    // It is deliberately not a theme entry.
+    s.FramePadding      = ImVec2(t.framePaddingX, 4);
+    s.ItemSpacing       = ImVec2(t.itemSpacingX, t.itemSpacingY);
     s.ItemInnerSpacing  = ImVec2(6, 4);
     s.CellPadding       = ImVec2(6, 4);
-    s.ScrollbarSize     = 12;
+    s.ScrollbarSize     = t.scrollbarSize;
     s.GrabMinSize       = 10;
-    s.IndentSpacing     = 18;
+    s.IndentSpacing     = t.indentSpacing;
     s.WindowTitleAlign  = ImVec2(0.0f, 0.5f);
     s.SeparatorTextBorderSize = 1;
 }
 
-// Editor colour palette (safe to re-run outside widget draw).
+// Editor colour palette (safe to re-run outside widget draw). Orange is for selection, checkmarks, the
+// active tab's top edge and Play; hover and press are neutral lifts of the item colour.
 static inline void applyEditorColors() {
     ImGuiStyle& s = ImGui::GetStyle();
     ImVec4* c = s.Colors;
+    const editor::EditorTheme& th = editor::editorTheme();
 
-    // One ladder of neutrals, deepest to lightest, so depth is one consistent set rather than each
-    // widget family inventing its own near-black.
-    const ImVec4 sunken   (0.071f, 0.075f, 0.082f, 1.00f);   // behind content: viewports, child frames
-    const ImVec4 panel    (0.109f, 0.114f, 0.125f, 1.00f);   // window bodies
-    const ImVec4 raised   (0.145f, 0.152f, 0.165f, 1.00f);   // title bars, menu bar, inactive tabs
-    const ImVec4 item     (0.180f, 0.188f, 0.204f, 1.00f);   // buttons, frames, headers at rest
-    const ImVec4 itemHot  (0.235f, 0.245f, 0.265f, 1.00f);
-    const ImVec4 itemOn   (0.275f, 0.287f, 0.310f, 1.00f);
-    const ImVec4 line     (0.043f, 0.047f, 0.055f, 1.00f);   // borders and separators
-    const ImVec4 text     (0.882f, 0.894f, 0.910f, 1.00f);
-    const ImVec4 textDim  (0.478f, 0.494f, 0.522f, 1.00f);
+    const ImVec4 sunken  = toVec4(th.sunken);      // behind content: viewports, child frames
+    const ImVec4 panel   = toVec4(th.panel);       // window bodies
+    const ImVec4 raised  = toVec4(th.raised);      // title bars, menu bar, inactive tabs
+    const ImVec4 item    = toVec4(th.item);        // buttons, frames, headers at rest
+    const ImVec4 itemHot = toVec4(editor::itemHot(th));
+    const ImVec4 itemOn  = toVec4(editor::itemOn(th));
+    const ImVec4 line    = toVec4(th.line);        // borders and separators
+    const ImVec4 text    = toVec4(th.text);
+    const ImVec4 textDim = toVec4(th.textDim);
+    const ImVec4 accent  = toVec4(th.accent);
+    const ImVec4 select  = toVec4(editor::selection(th));
+    const ImVec4 accentDim = toVec4(editor::withAlpha(th.accent, 0.55f));
+    const ImVec4 gripHot = toVec4(editor::mixToWhite(th.item, th.activeLift * 2.0f));   // scrollbar grab hovered, a step above itemOn
 
     c[ImGuiCol_Text]                  = text;
     c[ImGuiCol_TextDisabled]          = textDim;
     c[ImGuiCol_WindowBg]              = panel;
     c[ImGuiCol_ChildBg]               = sunken;
-    c[ImGuiCol_PopupBg]               = ImVec4(0.094f, 0.098f, 0.110f, 0.98f);
+    c[ImGuiCol_PopupBg]               = toVec4(th.popup);
     c[ImGuiCol_Border]                = line;
     c[ImGuiCol_BorderShadow]          = ImVec4(0, 0, 0, 0);
 
@@ -977,64 +988,70 @@ static inline void applyEditorColors() {
 
     c[ImGuiCol_TitleBg]               = raised;
     c[ImGuiCol_TitleBgActive]         = raised;
-    c[ImGuiCol_TitleBgCollapsed]      = ImVec4(0.071f, 0.075f, 0.082f, 0.85f);
+    c[ImGuiCol_TitleBgCollapsed]      = ImVec4(sunken.x, sunken.y, sunken.z, 0.85f);
     c[ImGuiCol_MenuBarBg]             = raised;
 
-    // Scrollbars were default blue-grey and are on screen constantly -- easily the most visible of
-    // the entries that had been left unset.
-    c[ImGuiCol_ScrollbarBg]           = ImVec4(0.071f, 0.075f, 0.082f, 0.60f);
-    c[ImGuiCol_ScrollbarGrab]         = ImVec4(0.235f, 0.245f, 0.265f, 1.00f);
-    c[ImGuiCol_ScrollbarGrabHovered]  = ImVec4(0.310f, 0.325f, 0.350f, 1.00f);
-    c[ImGuiCol_ScrollbarGrabActive]   = kAverOrangeDim;
+    c[ImGuiCol_ScrollbarBg]           = ImVec4(sunken.x, sunken.y, sunken.z, 0.60f);
+    c[ImGuiCol_ScrollbarGrab]         = itemHot;
+    c[ImGuiCol_ScrollbarGrabHovered]  = gripHot;
+    c[ImGuiCol_ScrollbarGrabActive]   = textDim;
 
-    c[ImGuiCol_CheckMark]             = kAverOrange;
-    c[ImGuiCol_SliderGrab]            = kAverOrange;
-    c[ImGuiCol_SliderGrabActive]      = ImVec4(1.000f, 0.478f, 0.208f, 1.00f);   // orange, lifted
+    c[ImGuiCol_CheckMark]             = accent;
+    c[ImGuiCol_SliderGrab]            = textDim;
+    c[ImGuiCol_SliderGrabActive]      = text;
 
     c[ImGuiCol_Button]                = item;
     c[ImGuiCol_ButtonHovered]         = itemHot;
-    c[ImGuiCol_ButtonActive]          = kAverOrangeDim;
+    c[ImGuiCol_ButtonActive]          = itemOn;
 
-    c[ImGuiCol_Header]                = item;
-    c[ImGuiCol_HeaderHovered]         = itemHot;
-    c[ImGuiCol_HeaderActive]          = kAverOrangeDim;
+    // Header is the SELECTED row for Selectable and TreeNode: orange at selectionAlpha. Hover is a
+    // translucent white lift, so it reads as neutral over any row. CollapsingHeader also paints Header
+    // at rest, which is why every section header goes through editor::sectionHeader (EditorChrome.hpp),
+    // which keeps them neutral.
+    c[ImGuiCol_Header]                = select;
+    c[ImGuiCol_HeaderHovered]         = ImVec4(1, 1, 1, th.hoverLift + 0.01f);
+    c[ImGuiCol_HeaderActive]          = toVec4(editor::withAlpha(th.accent, th.selectionAlpha + 0.15f));
 
     c[ImGuiCol_Separator]             = line;
-    c[ImGuiCol_SeparatorHovered]      = kAverOrangeDim;
-    c[ImGuiCol_SeparatorActive]       = kAverOrange;
+    c[ImGuiCol_SeparatorHovered]      = textDim;
+    c[ImGuiCol_SeparatorActive]       = text;
 
-    c[ImGuiCol_ResizeGrip]            = ImVec4(0.235f, 0.245f, 0.265f, 0.60f);
-    c[ImGuiCol_ResizeGripHovered]     = kAverOrangeDim;
-    c[ImGuiCol_ResizeGripActive]      = kAverOrange;
+    c[ImGuiCol_ResizeGrip]            = ImVec4(itemHot.x, itemHot.y, itemHot.z, 0.60f);
+    c[ImGuiCol_ResizeGripHovered]     = textDim;
+    c[ImGuiCol_ResizeGripActive]      = text;
 
-    // Active tab was ImGui default blue; orange top edge on a panel-coloured body reads as "this
-    // one" without shouting (a fully orange tab would).
+    // Orange top edge on a panel-coloured body reads as "this one" without shouting (a fully orange
+    // tab would).
     c[ImGuiCol_Tab]                   = raised;
     c[ImGuiCol_TabHovered]            = itemHot;
     c[ImGuiCol_TabActive]             = panel;
-    c[ImGuiCol_TabUnfocused]          = ImVec4(0.094f, 0.098f, 0.110f, 1.00f);
-    c[ImGuiCol_TabUnfocusedActive]    = ImVec4(0.130f, 0.136f, 0.148f, 1.00f);
+    c[ImGuiCol_TabSelectedOverline]   = accent;
+    c[ImGuiCol_TabUnfocused]          = sunken;
+    c[ImGuiCol_TabUnfocusedActive]    = raised;
+    c[ImGuiCol_TabDimmedSelectedOverline] = accentDim;
 
-    c[ImGuiCol_DockingPreview]        = kAverOrangeDim;
+    c[ImGuiCol_DockingPreview]        = select;
     c[ImGuiCol_DockingEmptyBg]        = sunken;
 
-    c[ImGuiCol_PlotLines]             = ImVec4(0.640f, 0.660f, 0.700f, 1.00f);
-    c[ImGuiCol_PlotLinesHovered]      = kAverOrange;
-    c[ImGuiCol_PlotHistogram]         = kAverOrange;
+    c[ImGuiCol_PlotLines]             = textDim;
+    c[ImGuiCol_PlotLinesHovered]      = text;
+    c[ImGuiCol_PlotHistogram]         = accent;      // progress bars: the one non-selection use, kept so progress reads at a glance
     c[ImGuiCol_PlotHistogramHovered]  = ImVec4(1.000f, 0.478f, 0.208f, 1.00f);
 
     c[ImGuiCol_TableHeaderBg]         = raised;
     c[ImGuiCol_TableBorderStrong]     = line;
-    c[ImGuiCol_TableBorderLight]      = ImVec4(0.078f, 0.082f, 0.094f, 1.00f);
+    c[ImGuiCol_TableBorderLight]      = ImVec4(line.x + 0.03f, line.y + 0.03f, line.z + 0.03f, 1.0f);
     c[ImGuiCol_TableRowBg]            = ImVec4(0, 0, 0, 0);
     c[ImGuiCol_TableRowBgAlt]         = ImVec4(1, 1, 1, 0.022f);   // banding, barely there on purpose
 
-    c[ImGuiCol_TextSelectedBg]        = ImVec4(kAverOrange.x, kAverOrange.y, kAverOrange.z, 0.35f);
-    c[ImGuiCol_DragDropTarget]        = kAverOrange;
-    c[ImGuiCol_NavHighlight]          = kAverOrange;
+    c[ImGuiCol_TextLink]              = text;
+    c[ImGuiCol_InputTextCursor]       = text;
+    c[ImGuiCol_TextSelectedBg]        = ImVec4(accent.x, accent.y, accent.z, 0.35f);
+    c[ImGuiCol_DragDropTarget]        = accent;
+    c[ImGuiCol_NavHighlight]          = accent;
     c[ImGuiCol_NavWindowingHighlight] = ImVec4(1, 1, 1, 0.70f);
-    c[ImGuiCol_NavWindowingDimBg]     = ImVec4(0.071f, 0.075f, 0.082f, 0.60f);
-    c[ImGuiCol_ModalWindowDimBg]      = ImVec4(0.020f, 0.022f, 0.026f, 0.65f);
+    c[ImGuiCol_NavWindowingDimBg]     = ImVec4(sunken.x, sunken.y, sunken.z, 0.60f);
+    c[ImGuiCol_ModalWindowDimBg]      = ImVec4(0.0f, 0.0f, 0.0f, 0.65f);
 }
 #endif
 

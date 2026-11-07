@@ -6,6 +6,7 @@
 // This TU also holds the phys.* console registration (PhysicsConsoleVars.hpp), so the translation units that include
 // EditorConsole.hpp do not grow.
 #include "PhysicsSettingsModel.hpp"
+#include "EditorChrome.hpp"
 #include "PhysicsConsoleVars.hpp"
 
 #if AVER_WITH_IMGUI && AVER_MODULE_PHYSICS
@@ -125,7 +126,7 @@ void drawPhysicsSettingsGroups(fmt::ProjectDesc& project, bool& dirty, float dpi
     }
 
     for (const Group& g : groups()) {
-        if (!ImGui::CollapsingHeader(g.title, ImGuiTreeNodeFlags_DefaultOpen)) continue;
+        if (!::aver::editor::sectionHeader(g.title, ImGuiTreeNodeFlags_DefaultOpen)) continue;
         for (const char* n : g.names)
             if (const PhysicsSettingRow* r = find(n)) settingRowUi(project, dirty, *r, dpi);
         if (std::strcmp(g.title, "Determinism") == 0) {
@@ -152,12 +153,12 @@ void drawPhysicsSettingsGroups(fmt::ProjectDesc& project, bool& dirty, float dpi
         }
     }
 
-    if (ImGui::CollapsingHeader("More solver settings")) {
+    if (::aver::editor::sectionHeader("More solver settings")) {
         for (const PhysicsSettingRow& r : rows)
             if (!listed(r.name.c_str())) settingRowUi(project, dirty, r, dpi);
     }
 
-    if (ImGui::CollapsingHeader("Limits and threads", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (::aver::editor::sectionHeader("Limits and threads", ImGuiTreeNodeFlags_DefaultOpen)) {
         for (const PhysicsLimitRow& r : limits) limitRowUi(project, dirty, r, dpi);
         if (physicsRestartBadge()) {
             ImGui::TextColored(ImVec4(0.95f, 0.3f, 0.25f, 1.0f), "restart world");

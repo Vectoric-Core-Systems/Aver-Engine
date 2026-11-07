@@ -4,6 +4,7 @@
 #include "ProjectBrowser.hpp"
 #include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "ProjectScaffold.hpp"
+#include "EditorTheme.hpp"
 
 #include "aver/platform/FileSystem.hpp"
 #include "aver/core/Version.hpp"
@@ -230,14 +231,15 @@ BrowserAction ProjectBrowser::draw(f32 dpi, ImFont* medium, u64 logoTex, f32 log
 #else
     BrowserAction action = BrowserAction::Stay;
     const ImGuiViewport* vp = ImGui::GetMainViewport();
-    const ImVec4 accent(0.95f, 0.42f, 0.13f, 1.0f);
+    const editor::EditorTheme& theme = editor::editorTheme();
+    const ImVec4 accent(theme.accent.r, theme.accent.g, theme.accent.b, theme.accent.a);
 
     ImGui::SetNextWindowPos(vp->Pos);
     ImGui::SetNextWindowSize(vp->Size);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(30.0f * dpi, 24.0f * dpi));
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.086f, 0.086f, 0.094f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(theme.sunken.r, theme.sunken.g, theme.sunken.b, 1.0f));
     ImGui::Begin("##projectbrowser", nullptr,
                  ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                  ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar |
@@ -454,7 +456,7 @@ BrowserAction ProjectBrowser::draw(f32 dpi, ImFont* medium, u64 logoTex, f32 log
                 }
                 ImGui::PushID(sel);
                 const bool selected = newTemplateSel_ == sel;
-                if (selected) ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.95f, 0.42f, 0.13f, 0.35f));
+                if (selected) ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(accent.x, accent.y, accent.z, 0.35f));
                 if (ImGui::Selectable("##tmplcard", selected, ImGuiSelectableFlags_None,
                                       ImVec2(cardW, cardH)))
                     newTemplateSel_ = sel;

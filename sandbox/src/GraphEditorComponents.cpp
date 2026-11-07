@@ -5,6 +5,7 @@
 #include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "EditorKeybinds.hpp"
 #include "EditorPrefs.hpp"
+#include "EditorChrome.hpp"
 #include "GraphEditor.hpp"
 #include "GraphNodeDefs.hpp"
 #if AVER_MODULE_FLUIDS
@@ -439,15 +440,13 @@ bool drawMaterialShapeSelector(ImVec2 imageMin, ImVec2 imageMax, f32 dpi, Materi
 
     const LayoutSnapshot saved(*win);
     ImGui::SetCursorScreenPos(ImVec2(imageMax.x - inset - size.x, imageMin.y + inset));
-    ImVec4 bg = st.Colors[ImGuiCol_WindowBg];
-    bg.w = 0.62f;   // the level viewport overlay's background alpha
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, bg);
+    editor::pushOverlayChildStyle();   // the same box as the level viewport's overlay bars
     ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, st.WindowRounding);
-    const bool open = ImGui::BeginChild("##matShapeDrop", size, ImGuiChildFlags_AlwaysUseWindowPadding,
+    const bool open = ImGui::BeginChild("##matShapeDrop", size, ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_Borders,
                                         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
                                             ImGuiWindowFlags_NoNav);
     ImGui::PopStyleVar();
-    ImGui::PopStyleColor();
+    editor::popOverlayChildStyle();
 
     bool changed = false;
     if (open) {

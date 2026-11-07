@@ -1,0 +1,34 @@
+{
+  "colors": {
+    "sunken": "#131313",
+    "panel": "#1C1C1C",
+    "raised": "#252525",
+    "item": "#2E2E2E",
+    "popup": "#181818FA",
+    "line": "#0B0B0B",
+    "text": "#E6E6E6",
+    "textDim": "#9E9E9E",
+    "accent": "#F26522",
+    "overlayBorder": "#FFFFFF1A"
+  },
+  "metrics": {
+    "hoverLift": 0.07,
+    "activeLift": 0.14,
+    "selectionAlpha": 0.25,
+    "overlayAlpha": 0.62,
+    "rounding": 4,
+    "grabRounding": 3,
+    "windowPaddingX": 10,
+    "windowPaddingY": 8,
+    "framePaddingX": 8,
+    "itemSpacingX": 8,
+    "itemSpacingY": 6,
+    "scrollbarSize": 12,
+    "indentSpacing": 18
+  },
+  "fonts": {
+    "header": 18,
+    "body": 16,
+    "small": 13.5
+  }
+}

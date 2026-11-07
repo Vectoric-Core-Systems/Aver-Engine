@@ -195,7 +195,7 @@ void SandboxApp::resolvePreferredIdeFromPrefs() {
 void SandboxApp::buildPlayPrefsSection() {
     // Same one-shot pattern as scrollPrefsToKeybinds_: lands here, on the header, then clears.
     if (scrollPrefsToPlay_) { ImGui::SetScrollHereY(0.0f); scrollPrefsToPlay_ = false; }
-    if (!ImGui::CollapsingHeader("Play", ImGuiTreeNodeFlags_DefaultOpen)) return;
+    if (!::aver::editor::sectionHeader("Play", ImGuiTreeNodeFlags_DefaultOpen)) return;
 
     static const char* kModeNames[] = {"Selected Viewport", "Simulate", "Standalone Game", "New Window"};
     const int modeIdx = static_cast<int>(playMode_);
@@ -253,7 +253,7 @@ void SandboxApp::buildEditorPrefs() {
     ImGui::SetNextWindowPos(ImVec2(mv->GetCenter().x, mv->GetCenter().y), ImGuiCond_FirstUseEver, ImVec2(0.5f,0.5f));
     if (!ImGui::Begin("Editor Preferences", &showEditorPrefs_, ImGuiWindowFlags_NoDocking)) { ImGui::End(); return; }
 
-    if (ImGui::CollapsingHeader("Content Browser", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (::aver::editor::sectionHeader("Content Browser", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Checkbox("Open in gallery (tiles) view", &cbGallery_);
         ImGui::SliderFloat("Tile size", &cbTileSize_, 56.0f, 168.0f, "%.0f dp");
         ImGui::Checkbox("Double-click a folder to enter it", &cbDoubleClickEnter_);
@@ -272,19 +272,19 @@ void SandboxApp::buildEditorPrefs() {
         if (!editor::ideDetectionFinished())
             ImGui::TextDisabled("Still scanning for installed IDEs...");
     }
-    if (ImGui::CollapsingHeader("Drawers", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (::aver::editor::sectionHeader("Drawers", ImGuiTreeNodeFlags_DefaultOpen)) {
         f32 pct = drawerFrac_ * 100.0f;
         if (ImGui::SliderFloat("Height", &pct, 14.0f, 88.0f, "%.0f%% of the window"))
             drawerFrac_ = pct / 100.0f;
         ImGui::SliderFloat("Slide speed", &drawerRate_, 4.0f, 40.0f, "%.0f");
         ImGui::TextDisabled("Ctrl+Space opens the Content Browser; Esc dismisses a drawer.");
     }
-    if (ImGui::CollapsingHeader("Output Log", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (::aver::editor::sectionHeader("Output Log", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Checkbox("Auto-scroll to the newest line", &logAutoScroll_);
         // Same entries as Output Log drawer's combo.
         ImGui::Combo("Level filter", &logLevelFilter_, "All\0Info+\0Warn+\0Error+\0Critical+\0");
     }
-    if (ImGui::CollapsingHeader("Display", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (::aver::editor::sectionHeader("Display", ImGuiTreeNodeFlags_DefaultOpen)) {
         const bool canDisable = prefsDevice_ && prefsDevice_->vsyncCanDisable();
         bool vs = prefsDevice_ ? prefsDevice_->vsync() : true;
         ImGui::BeginDisabled(!canDisable);
@@ -438,7 +438,7 @@ void SandboxApp::buildEditorPrefs() {
                               "Only applies while the scene is upscaled or edge AA is on.");
 #endif
     }
-    if (ImGui::CollapsingHeader("Viewport", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (::aver::editor::sectionHeader("Viewport", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Checkbox("Show grid", &showGrid_);
         uiReg_.track("prefs.viewport.showGrid");
         ImGui::Checkbox("Wireframe", &wireframe_);
@@ -484,7 +484,7 @@ void SandboxApp::buildEditorPrefs() {
         uiReg_.track("prefs.snap.scaleStep");
     }
     // --scroll-prefs-to-keybinds: one-shot verification aid; consumes its flag once.
-    if (ImGui::CollapsingHeader("Derived Data Cache", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (::aver::editor::sectionHeader("Derived Data Cache", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::TextDisabled("Baked global illumination, cached beside the project under");
         ImGui::TextDisabled("DerivedDataCache" AVER_PATH_SEP "GI. Derived data: deleting it costs one rebuild.");
 #if AVER_MODULE_VOXI
@@ -528,7 +528,7 @@ void SandboxApp::buildEditorPrefs() {
     // Scroll landing point: one-shot via scrollPrefsToKeybinds_ flag.
     if (scrollPrefsToKeybinds_) { ImGui::SetScrollHereY(0.0f); scrollPrefsToKeybinds_ = false; }
     // Registry owns clearing listening_ on header collapse.
-    const bool keybindsOpen = ImGui::CollapsingHeader("Keybinds", ImGuiTreeNodeFlags_DefaultOpen);
+    const bool keybindsOpen = ::aver::editor::sectionHeader("Keybinds", ImGuiTreeNodeFlags_DefaultOpen);
     keybinds_.drawPreferencesSection(dpi_, keybindsOpen, &uiReg_);
     ImGui::Separator();
     ImGui::TextDisabled("Preferences apply immediately and are saved for next time.");

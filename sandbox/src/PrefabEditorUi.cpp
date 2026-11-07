@@ -1,4 +1,5 @@
 #include "PrefabEditorUi.hpp"
+#include "EditorChrome.hpp"
 
 #if AVER_MODULE_SCENE
 #include <cstdio>
@@ -40,7 +41,7 @@ void status(const PrefabUiCallbacks& cb, const std::string& s) { if (cb.status) 
 
 bool prefabDetailsDraw(PrefabEditorModel& m, scene::Entity e, const PrefabUiCallbacks& cb) {
     if (!m.isInstance(e)) return false;
-    if (!ImGui::CollapsingHeader("Prefab", ImGuiTreeNodeFlags_DefaultOpen)) return false;
+    if (!::aver::editor::sectionHeader("Prefab", ImGuiTreeNodeFlags_DefaultOpen)) return false;
 
     bool changed = false;
     RowCache& c = cache();

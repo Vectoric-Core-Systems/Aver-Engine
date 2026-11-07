@@ -18,6 +18,7 @@ std::string formatCount(u64 n) {
 
 #if AVER_WITH_IMGUI
 #include "imgui_internal.h"   // LayoutSnapshot
+#include "EditorChrome.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -112,16 +113,14 @@ bool drawPreviewToolbar(const char* id, ImVec2 imageMin, ImVec2 imageMax, f32 dp
 
     const LayoutSnapshot saved(*win);
     ImGui::SetCursorScreenPos(ImVec2(imageMin.x + overlayInset(dpi), imageMin.y + overlayInset(dpi)));
-    ImVec4 bg = st.Colors[ImGuiCol_WindowBg];
-    bg.w = 0.62f;   // the level viewport overlay's background alpha
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, bg);
+    editor::pushOverlayChildStyle();   // the same box as the level viewport's overlay bars
     ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, st.WindowRounding);
-    const bool open = ImGui::BeginChild(id, size, ImGuiChildFlags_AlwaysUseWindowPadding,
+    const bool open = ImGui::BeginChild(id, size, ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_Borders,
                                         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
                                             ImGuiWindowFlags_NoNav);
     // Popped before any popup opens, so the dropdowns keep the editor's own style.
     ImGui::PopStyleVar();
-    ImGui::PopStyleColor();
+    editor::popOverlayChildStyle();
 
     bool changed = false;
     if (open) {

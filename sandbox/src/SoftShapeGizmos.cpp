@@ -3,6 +3,7 @@
 // SoftBodyDetailsModel.hpp (ImGui-free, tested); this file draws them and reads the live SoftShapeSystem. One translation unit for all of it
 // because SandboxComponentDetails.cpp and SandboxRender.cpp are at the Debug COFF section cap: each reaches this file through a one-line call.
 #include "SoftBodyDebugOverlay.hpp"
+#include "EditorChrome.hpp"
 #include "SoftShapeDetailsModel.hpp"
 
 #if AVER_MODULE_SOFTBODY_SCENE
@@ -248,7 +249,7 @@ void drawJelly(const SoftShapeEnv& env, scene::World& w, scene::Entity e) {
     const u32 type = softbody::SoftShapeSystem::volumeType();
     auto* c = type ? w.component<softbody::CSoftVolume>(e, type) : nullptr;
     if (!c) return;
-    if (!ImGui::CollapsingHeader("Jelly", ImGuiTreeNodeFlags_DefaultOpen)) return;
+    if (!::aver::editor::sectionHeader("Jelly", ImGuiTreeNodeFlags_DefaultOpen)) return;
 
     if (env.drawAssetRow) env.drawAssetRow(c->asset);
     const std::string assetRel = env.pathOfId ? env.pathOfId(c->asset) : std::string();
@@ -347,7 +348,7 @@ void drawRope(const SoftShapeEnv& env, scene::World& w, scene::Entity e) {
     const u32 type = softbody::SoftShapeSystem::ropeType();
     auto* c = type ? w.component<softbody::CSoftRope>(e, type) : nullptr;
     if (!c) return;
-    if (!ImGui::CollapsingHeader("Rope", ImGuiTreeNodeFlags_DefaultOpen)) return;
+    if (!::aver::editor::sectionHeader("Rope", ImGuiTreeNodeFlags_DefaultOpen)) return;
 
     if (env.drawAssetRow) env.drawAssetRow(c->asset);
     const std::string assetRel = env.pathOfId ? env.pathOfId(c->asset) : std::string();

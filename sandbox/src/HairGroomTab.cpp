@@ -1,5 +1,6 @@
 // The Groom tab and the Hair Details section. See HairGroomTab.hpp.
 #include "HairGroomTab.hpp"
+#include "EditorChrome.hpp"
 
 #include "aver/core/Log.hpp"
 
@@ -459,7 +460,7 @@ void HairGroomEditor::drawAdvice() {
 }
 
 void HairGroomEditor::drawPreview() {
-    if (!ImGui::CollapsingHeader("Preview", ImGuiTreeNodeFlags_DefaultOpen)) return;
+    if (!::aver::editor::sectionHeader("Preview", ImGuiTreeNodeFlags_DefaultOpen)) return;
     static const char* const names[3] = {"Front", "Side", "Top"};
     for (int i = 0; i < 3; ++i) {
         if (i) ImGui::SameLine();
@@ -497,7 +498,7 @@ void HairGroomEditor::drawPreview() {
 }
 
 void HairGroomEditor::drawScalp() {
-    if (!ImGui::CollapsingHeader("Scalp", ImGuiTreeNodeFlags_DefaultOpen)) return;
+    if (!::aver::editor::sectionHeader("Scalp", ImGuiTreeNodeFlags_DefaultOpen)) return;
     if (hasScalp_) ImGui::TextDisabled("This groom embeds its scalp (SCLP); the mesh path below is ignored.");
     bool changed = ImGui::InputText("Scalp mesh (.ocmesh)", scalpBuf_, sizeof scalpBuf_);
     ItemState item = probe();
@@ -511,7 +512,7 @@ void HairGroomEditor::drawScalp() {
 }
 
 void HairGroomEditor::drawGenerate() {
-    if (!ImGui::CollapsingHeader("Generator (GENERATE)")) return;
+    if (!::aver::editor::sectionHeader("Generator (GENERATE)")) return;
     using D = fmt::OcHairData;
     const fmt::OcHairGenerate& n = state_.generate;
     checkbox("Generate strands", n.present, [](D& g, bool v) { g.generate.present = v; },
@@ -555,7 +556,7 @@ void HairGroomEditor::drawGenerate() {
 }
 
 void HairGroomEditor::drawSim() {
-    if (!ImGui::CollapsingHeader("Simulation (SIM)")) return;
+    if (!::aver::editor::sectionHeader("Simulation (SIM)")) return;
     using D = fmt::OcHairData;
     const fmt::OcHairSim& s = state_.sim;
     dragFloat("Iterations per second", s.iterationsPerSecond, 1.0f, 1.0f, 4096.0f, "%.0f", [](D& g, f32 v) { g.sim.iterationsPerSecond = v; }, "Jolt's solver rate. Higher is stiffer and costlier.");
@@ -579,7 +580,7 @@ void HairGroomEditor::drawSim() {
 }
 
 void HairGroomEditor::drawMaterials() {
-    if (!ImGui::CollapsingHeader("Strand materials (MATERIAL)")) return;
+    if (!::aver::editor::sectionHeader("Strand materials (MATERIAL)")) return;
     using D = fmt::OcHairData;
     if (state_.materials.empty()) return;
     selMaterial_ = std::clamp<int>(selMaterial_, 0, static_cast<int>(state_.materials.size()) - 1);
@@ -640,7 +641,7 @@ void HairGroomEditor::drawMaterials() {
 }
 
 void HairGroomEditor::drawLooks() {
-    if (!ImGui::CollapsingHeader("Looks (LOOK)")) return;
+    if (!::aver::editor::sectionHeader("Looks (LOOK)")) return;
     using D = fmt::OcHairData;
     if (state_.looks.empty()) return;
     selLook_ = std::clamp<int>(selLook_, 0, static_cast<int>(state_.looks.size()) - 1);
@@ -710,7 +711,7 @@ void HairGroomEditor::drawLooks() {
 }
 
 void HairGroomEditor::drawLod() {
-    if (!ImGui::CollapsingHeader("Level of detail (LOD)")) return;
+    if (!::aver::editor::sectionHeader("Level of detail (LOD)")) return;
     using D = fmt::OcHairData;
     const fmt::OcHairLod& lod = state_.lod;
     for (int i = 0; i < 3; ++i) {
@@ -729,7 +730,7 @@ void HairGroomEditor::drawLod() {
 }
 
 void HairGroomEditor::drawProxies() {
-    if (!ImGui::CollapsingHeader("Collision proxies (PROXY)")) return;
+    if (!::aver::editor::sectionHeader("Collision proxies (PROXY)")) return;
     using D = fmt::OcHairData;
     ImGui::TextWrapped("Jolt's hair collides with convex hulls only, so the head, neck and shoulders are stood in for by hulls that follow bones. "
                        "With none listed here the engine derives a humanoid set from the skeleton's joint names.");
@@ -788,7 +789,7 @@ void HairGroomEditor::drawProxies() {
 }
 
 void HairGroomEditor::drawStrands() {
-    if (!ImGui::CollapsingHeader("Stored strands and curve import")) return;
+    if (!::aver::editor::sectionHeader("Stored strands and curve import")) return;
     if (strands_.empty()) ImGui::TextDisabled("No stored strands: the groom is grown from GENERATE when it loads.");
     else ImGui::TextDisabled("%zu stored strands, %zu points. They win over GENERATE.", strands_.strandCount(), strands_.pointCount());
 #if AVER_MODULE_HAIR
@@ -872,7 +873,7 @@ void drawHairSection(const HairSectionEnv& env, void* worldPtr, u32 entity) {
     const u32 type = hair::HairSystem::hairType();
     auto* c = type && w.valid(e) ? w.component<hair::CHair>(e, type) : nullptr;
     if (!c) return;
-    if (!ImGui::CollapsingHeader("Hair", ImGuiTreeNodeFlags_DefaultOpen)) return;
+    if (!::aver::editor::sectionHeader("Hair", ImGuiTreeNodeFlags_DefaultOpen)) return;
 
     if (env.assetRow) env.assetRow("asset", "Groom (.ochair)", c->asset);
 

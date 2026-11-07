@@ -1,5 +1,6 @@
 // The .ocshape editor tab. See the header for the SandboxApp hook and OcShapeEditorModel.hpp for the rules the widgets draw.
 #include "OcShapeEditor.hpp"
+#include "EditorChrome.hpp"
 
 #include "CollisionShapeOverlay.hpp"
 #include "ProjectScaffold.hpp"
@@ -263,7 +264,7 @@ void OcShapeEditor::drawIssues() {
     const std::vector<std::string> issues = fmt::validateOcShape(shape_);
     char header[64];
     std::snprintf(header, sizeof header, "Validation (%zu)###issues", issues.size());
-    if (!ImGui::CollapsingHeader(header, issues.empty() ? 0 : ImGuiTreeNodeFlags_DefaultOpen)) return;
+    if (!::aver::editor::sectionHeader(header, issues.empty() ? 0 : ImGuiTreeNodeFlags_DefaultOpen)) return;
     if (issues.empty()) { ImGui::TextDisabled("No problems."); return; }
     for (const std::string& i : issues) ImGui::TextColored(kRed, "error: %s", i.c_str());
     ImGui::TextColored(kRed, "Save is refused until the errors are fixed.");

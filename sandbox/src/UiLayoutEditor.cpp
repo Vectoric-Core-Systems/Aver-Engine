@@ -2,6 +2,7 @@
 // maths are free functions.
 
 #include "UiLayoutEditor.hpp"
+#include "EditorChrome.hpp"
 #include "EditorKeybinds.hpp"
 
 #include "aver/core/Log.hpp"
@@ -864,7 +865,7 @@ void UiLayoutEditor::drawInspector() {
         }
         if (shown.empty()) continue;
         const bool open = std::strcmp(g, "Placement") == 0 || std::strcmp(g, "Content") == 0 || std::strcmp(g, "Value") == 0;
-        if (ImGui::CollapsingHeader(g, open ? ImGuiTreeNodeFlags_DefaultOpen : 0))
+        if (::aver::editor::sectionHeader(g, open ? ImGuiTreeNodeFlags_DefaultOpen : 0))
             for (const UiPropDesc* d : shown) drawProperty(*d);
     }
 }

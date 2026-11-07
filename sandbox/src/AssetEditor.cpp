@@ -2,6 +2,7 @@
 // .ocmesh viewer.
 
 #include "AssetEditor.hpp"
+#include "EditorChrome.hpp"
 
 #include "aver/core/Log.hpp"
 #include "aver/formats/OcMesh.hpp"
@@ -381,7 +382,7 @@ public:
             ImGui::Separator();
 
             char buf[96];
-            if (ImGui::CollapsingHeader("Geometry", ImGuiTreeNodeFlags_DefaultOpen) &&
+            if (::aver::editor::sectionHeader("Geometry", ImGuiTreeNodeFlags_DefaultOpen) &&
                 beginPropertyGrid("##geometry")) {
                 std::snprintf(buf, sizeof buf, "%u", mesh_.vertexCount());
                 propertyRow("Vertices", buf);
@@ -393,11 +394,11 @@ public:
                 ImGui::EndTable();
             }
 
-            if (ImGui::CollapsingHeader("LODs", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (::aver::editor::sectionHeader("LODs", ImGuiTreeNodeFlags_DefaultOpen)) {
                 drawLods();
             }
 
-            if (ImGui::CollapsingHeader("Bounds", ImGuiTreeNodeFlags_DefaultOpen) &&
+            if (::aver::editor::sectionHeader("Bounds", ImGuiTreeNodeFlags_DefaultOpen) &&
                 beginPropertyGrid("##bounds")) {
                 const Vec3 lo = mesh_.boundsMin, hi = mesh_.boundsMax;
                 std::snprintf(buf, sizeof buf, "%.1f  %.1f  %.1f", lo.x, lo.y, lo.z);
@@ -409,15 +410,15 @@ public:
                 ImGui::EndTable();
             }
 
-            if (ImGui::CollapsingHeader("Material Slots", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (::aver::editor::sectionHeader("Material Slots", ImGuiTreeNodeFlags_DefaultOpen)) {
                 drawMaterialSlots();
             }
 
-            if (ImGui::CollapsingHeader("UV Layout")) {
+            if (::aver::editor::sectionHeader("UV Layout")) {
                 drawUvWireframe();
             }
 
-            if (ImGui::CollapsingHeader("Submeshes", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (::aver::editor::sectionHeader("Submeshes", ImGuiTreeNodeFlags_DefaultOpen)) {
                 if (ImGui::BeginTable("submeshes", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
                     ImGui::TableSetupColumn("Name");
                     ImGui::TableSetupColumn("Material slot");

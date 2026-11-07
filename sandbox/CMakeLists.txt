@@ -76,6 +76,7 @@ add_executable(Sandbox WIN32
   src/ProjectScaffold.cpp
   src/EditorPrefs.cpp
   src/EditorNotifications.cpp
+  src/EditorTheme.cpp
   src/ShaderWarmup.cpp
   src/ShaderWarmRun.cpp
   src/GraphShaderWarm.cpp
@@ -572,6 +573,20 @@ endforeach()
 add_custom_target(Sandbox.Fonts DEPENDS ${AVER_UI_FONT_OUTPUTS})
 add_dependencies(Sandbox Sandbox.Fonts)
 set_target_properties(Sandbox.Fonts PROPERTIES FOLDER "sandbox")
+
+# The editor theme (colours, metrics, type scale) as data, beside the binary. Optional: the built-in
+# defaults in EditorTheme.hpp ARE this file's content, so a missing copy changes nothing. EditorThemeTest
+# asserts the two agree.
+add_custom_command(
+  OUTPUT ${CMAKE_BINARY_DIR}/bin/editor-theme.json
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          ${CMAKE_SOURCE_DIR}/sandbox/editor-theme.json ${CMAKE_BINARY_DIR}/bin/editor-theme.json
+  DEPENDS ${CMAKE_SOURCE_DIR}/sandbox/editor-theme.json
+  COMMENT "Staging editor-theme.json"
+  VERBATIM)
+add_custom_target(Sandbox.Theme DEPENDS ${CMAKE_BINARY_DIR}/bin/editor-theme.json)
+add_dependencies(Sandbox Sandbox.Theme)
+set_target_properties(Sandbox.Theme PROPERTIES FOLDER "sandbox")
 
 # The resource script embeds the icon, but nothing tells the generator that it reads the .ico -- so
 # replacing the icon would not re-run the resource compiler and the exe would keep the old one.

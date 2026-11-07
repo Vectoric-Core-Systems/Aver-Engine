@@ -1,6 +1,7 @@
 // The .ocgraph editor's Event Graph tab: the node canvas, its popups and the details column (drawEventGraph).
 // Split from GraphEditor.cpp, which crossed the COFF section cap in Debug. Same class, same includes.
 #include "EditorTransform.hpp"
+#include "EditorChrome.hpp"
 #include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "EditorKeybinds.hpp"
 #include "EditorPrefs.hpp"
@@ -1081,7 +1082,7 @@ void GraphEditor::drawEventGraph(float dpi) {
     // opening a graph (nothing selected) is exactly when an author needs to declare one. This is also
     // the fix for the bug the task brief leads with: a freshly palette-spawned SetVar has no variable
     // to name yet, and this panel -- not a free-text field -- is where one gets created.
-    if (ImGui::CollapsingHeader("Variables", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (::aver::editor::sectionHeader("Variables", ImGuiTreeNodeFlags_DefaultOpen)) {
         if (graph_.variables.empty()) {
             ImGui::TextDisabled("No variables declared.");
         }

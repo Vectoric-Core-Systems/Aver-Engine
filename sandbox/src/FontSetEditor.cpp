@@ -1,6 +1,7 @@
 // The Font Set editor tab and the editors' shared text preview. See the header.
 
 #include "FontSetEditor.hpp"
+#include "EditorChrome.hpp"
 
 #include "aver/core/Log.hpp"
 #include "aver/platform/FileSystem.hpp"
@@ -1126,7 +1127,7 @@ void FontSetEditor::drawCoverage() {
             continue;
         }
         const std::string head = "slot " + std::to_string(id) + "  " + name + "##cov" + std::to_string(id);
-        if (!ImGui::CollapsingHeader(head.c_str())) continue;
+        if (!::aver::editor::sectionHeader(head.c_str())) continue;
         ImGui::Text("%u glyphs, kerning: %s", c->glyphs,
                     c->kern == UiKernSource::Gpos ? "GPOS" : c->kern == UiKernSource::Kern ? "kern table" : "none");
         ImGui::Text("Arabic presentation forms (FE70-FEFC): %u of %u%s", c->arabicFormsPresent, c->arabicFormsTotal,

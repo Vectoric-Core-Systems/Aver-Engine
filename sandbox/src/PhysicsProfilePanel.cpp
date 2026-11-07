@@ -2,6 +2,7 @@
 // from aver_phys_profile_* -- Jolt's own stages and the engine's fixed-step stages as one tree. Physics stays one row, "Gameplay
 // tick + physics step", in the CPU phases table; this is the breakdown of that row. See PhysicsDebugOverlay.hpp.
 #include "PhysicsDebugOverlay.hpp"
+#include "EditorChrome.hpp"
 
 #if AVER_WITH_IMGUI && AVER_MODULE_PHYSICS
 #  include "aver/physics/physics_abi.h"
@@ -16,7 +17,7 @@ namespace aver::editor {
 #if AVER_WITH_IMGUI && AVER_MODULE_PHYSICS
 
 void drawPhysicsProfileSection(float dpi) {
-    if (!ImGui::CollapsingHeader("Physics (Jolt)")) return;
+    if (!::aver::editor::sectionHeader("Physics (Jolt)")) return;
     ImGui::PushID("physprof");
     if (!aver_phys_ready()) {
         ImGui::TextDisabled("No physics world.");

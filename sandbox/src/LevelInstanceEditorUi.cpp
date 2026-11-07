@@ -1,4 +1,5 @@
 #include "LevelInstanceEditorUi.hpp"
+#include "EditorChrome.hpp"
 
 #if AVER_MODULE_SCENE
 #include <cstdio>
@@ -39,7 +40,7 @@ void status(const LevelInstanceUiCallbacks& cb, const std::string& s) { if (cb.s
 bool levelInstanceDetailsDraw(LevelInstanceEditorModel& m, scene::Entity e, const LevelInstanceUiCallbacks& cb) {
     const scene::Entity root = m.topRootOf(e);
     if (root == scene::kInvalidEntity) return false;
-    if (!ImGui::CollapsingHeader("Level Instance", ImGuiTreeNodeFlags_DefaultOpen)) return false;
+    if (!::aver::editor::sectionHeader("Level Instance", ImGuiTreeNodeFlags_DefaultOpen)) return false;
     ImGui::PushID(static_cast<int>(root));
 
     bool changed = false;

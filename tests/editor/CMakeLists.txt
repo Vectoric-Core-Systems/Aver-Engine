@@ -929,3 +929,14 @@ if(TARGET Aver.Runtime.Game.Core AND TARGET Aver.World AND TARGET Aver.Scene)
   endforeach()
   set_target_properties(EditorOriginTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# EditorThemeTest -- the editor theme as data: the built-in defaults, a file override, a malformed file
+# falling back, bad entries skipped, that the shipped sandbox/editor-theme.json equals the defaults, and the
+# WCAG contrast of the default palette. ImGui-free: EditorTheme.hpp is plain data.
+add_executable(EditorThemeTest
+  src/EditorThemeTest.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/EditorTheme.cpp)
+target_include_directories(EditorThemeTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_compile_definitions(EditorThemeTest PRIVATE AVER_THEME_FILE="${CMAKE_SOURCE_DIR}/sandbox/editor-theme.json")
+target_link_libraries(EditorThemeTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(EditorThemeTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

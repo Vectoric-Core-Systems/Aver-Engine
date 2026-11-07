@@ -2,6 +2,7 @@
 // read-only.
 
 #include "TextureEditor.hpp"
+#include "EditorChrome.hpp"
 
 #include "aver/core/Log.hpp"
 #include "aver/platform/Image.hpp"
@@ -288,7 +289,7 @@ void TextureEditor::drawDetails() {
     ImGui::TextDisabled("%s", path_.c_str());
     ImGui::Separator();
 
-    if (ImGui::CollapsingHeader("Image", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (::aver::editor::sectionHeader("Image", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Text("Resolution        %u x %u", width_, height_);
         ImGui::Text("Container         %s", containerName(extensionLower(path_)));
         ImGui::Text("Source channels   %u", srcChannels_);
@@ -296,7 +297,7 @@ void TextureEditor::drawDetails() {
     }
     ImGui::TextDisabled("(this engine expands every source image to RGBA8 on decode)");
 
-    if (ImGui::CollapsingHeader("Storage", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (::aver::editor::sectionHeader("Storage", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Text("File size         %s", formatBytes(fileBytes_).c_str());
         ImGui::Text("Mip levels        1 (not mipmapped)");
         const u64 gpuBytes = static_cast<u64>(width_) * static_cast<u64>(height_) * 4ull;

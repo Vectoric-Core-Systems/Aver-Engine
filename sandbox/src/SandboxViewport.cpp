@@ -2954,6 +2954,19 @@ void SandboxApp::teleportCamera(const Vec3& p) {
 #endif
 }
 
+// An overlay box over the viewport: the theme's `raised` colour at overlayAlpha with a 1px low-alpha
+// neutral border. The colours are popped right after Begin -- the window is decorated inside it -- so
+// popups opened from the bar keep the editor's own popup border.
+static void beginOverlayBar(const char* id, ImGuiWindowFlags flags) {
+    const editor::EditorTheme& th = editor::editorTheme();
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(th.raised.r, th.raised.g, th.raised.b, th.overlayAlpha));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(th.overlayBorder.r, th.overlayBorder.g, th.overlayBorder.b, th.overlayBorder.a));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+    ImGui::Begin(id, nullptr, flags);
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor(2);
+}
+
 // Draws the viewport's overlay bars: view options on the left, transform tools, snapping and
 // camera speed on the right.
 void SandboxApp::buildViewportOverlay() {
@@ -2965,8 +2978,7 @@ void SandboxApp::buildViewportOverlay() {
                                ImGuiWindowFlags_NoFocusOnAppearing|ImGuiWindowFlags_NoNavFocus;
 
     ImGui::SetNextWindowPos(ImVec2(vpX_+pad, vpY_+pad), ImGuiCond_Always, ImVec2(0,0));
-    ImGui::SetNextWindowBgAlpha(0.62f);
-    ImGui::Begin("##vpbar_left", nullptr, f);
+    beginOverlayBar("##vpbar_left", f);
 #if AVER_MODULE_SCENE
     // [wave3/level-instances] Open Level on an instance left a way back: this button.
     if (const editor::LevelReturnPoint* rp = levelInstanceModel_.returnTop()) {
@@ -3204,6 +3216,7 @@ void SandboxApp::buildViewportOverlay() {
         const Vec3 p = viewPos();
         f32 yawDeg = std::fmod(yaw_ * kDeg, 360.0f);
         if (yawDeg < 0.0f) yawDeg += 360.0f;
+        editor::FontScope readoutFont(editor::editorFonts().secondary, editor::editorFonts().secondaryPx);   // a readout, not content
         ImGui::Text("X %.0f  Y %.0f  Z %.0f cm   yaw %.0f  pitch %.0f deg", p.x, p.y, p.z, yawDeg, pitch_ * kDeg);
         ImGui::SameLine();
         if (ImGui::SmallButton("Copy")) {
@@ -3220,8 +3233,7 @@ void SandboxApp::buildViewportOverlay() {
 
     const f32 icon = 20.0f*dpi_, caretW = 11.0f*dpi_, tiny = 2.0f*dpi_, gap = 5.0f*dpi_;
     ImGui::SetNextWindowPos(ImVec2(vpX_+vpW_-pad, vpY_+pad), ImGuiCond_Always, ImVec2(1,0));
-    ImGui::SetNextWindowBgAlpha(0.62f);
-    ImGui::Begin("##vpbar_right", nullptr, f);
+    beginOverlayBar("##vpbar_right", f);
     ImDrawList* dl = ImGui::GetWindowDrawList();
     auto toolBtn = [&](const char* id, int kind, bool active)->bool {
         return editor::toolButton(id, kind, active, icon, dpi_);

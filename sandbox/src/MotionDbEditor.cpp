@@ -2,6 +2,7 @@
 // functions rather than members.
 
 #include "MotionDbEditor.hpp"
+#include "EditorChrome.hpp"
 #include "EditorKeybinds.hpp"
 
 #include "aver/anim/MotionMatcher.hpp"
@@ -586,7 +587,7 @@ void MotionDbEditor::drawHeader() {
     if (ImGui::DragInt("Sample rate", &rate, 1.0f, 5, 120, "%d Hz")) { asset_.sampleRate = static_cast<u32>(rate); }
     touch(ImGui::IsItemEdited());
 
-    if (ImGui::CollapsingHeader("Search, trajectory, inertialization")) {
+    if (::aver::editor::sectionHeader("Search, trajectory, inertialization")) {
         anim::MotionSearchDefaults& s = asset_.search;
         ImGui::SetNextItemWidth(90.0f * dpi);
         touch(ImGui::DragFloat("Interval", &s.interval, 0.005f, 0.01f, 5.0f, "%.3f s"));
@@ -790,7 +791,7 @@ void MotionDbEditor::drawClips() {
         std::string head = fs::path(e.clip).stem().string();
         if (head.empty()) head = "(clip)";
         head += dur > 0.0f ? "  " + std::to_string(dur).substr(0, 4) + " s" : "  (not found)";
-        const bool open = ImGui::CollapsingHeader((head + "###entry").c_str(), ImGuiTreeNodeFlags_DefaultOpen);
+        const bool open = ::aver::editor::sectionHeader((head + "###entry").c_str(), ImGuiTreeNodeFlags_DefaultOpen);
         if (ImGui::IsItemClicked()) selClip_ = static_cast<i32>(i);
         if (open) {
             std::snprintf(buf, sizeof buf, "%s", e.clip.c_str());

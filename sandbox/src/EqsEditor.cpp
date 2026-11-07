@@ -1,6 +1,7 @@
 // The environment-query editor tab. See the header for the wiring.
 
 #include "EqsEditor.hpp"
+#include "EditorChrome.hpp"
 #include "EditorKeybinds.hpp"
 
 #include "aver/core/Log.hpp"
@@ -758,7 +759,7 @@ void EqsEditor::drawOptions() {
         const EqsTest& t = query_.options[oi].tests[ti];
         ImGui::PushID(static_cast<int>(ti));
         const std::string head = std::to_string(ti + 1) + ". " + eqsTestName(t.kind) + (t.name.empty() ? "" : " (" + t.name + ")");
-        if (ImGui::CollapsingHeader(head.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (::aver::editor::sectionHeader(head.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
             drawTestForm(oi, ti);
             if (ImGui::SmallButton("up")) { moveAt = static_cast<int>(ti); moveDelta = -1; }
             ImGui::SameLine();

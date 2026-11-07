@@ -2,6 +2,7 @@
 // are free functions rather than members.
 
 #include "AnimStateMachineEditor.hpp"
+#include "EditorChrome.hpp"
 #include "EditorKeybinds.hpp"
 
 #include "aver/anim/AnimGraphAsset.hpp"
@@ -1087,7 +1088,7 @@ void AnimStateMachineEditor::drawDetails() {
 }
 
 void AnimStateMachineEditor::drawPipeline() {
-    if (!ImGui::CollapsingHeader("Pipeline (slots, layered and additive blends, curves)")) return;
+    if (!::aver::editor::sectionHeader("Pipeline (slots, layered and additive blends, curves)")) return;
     const f32 dpi = ImGui::GetFontSize() / 16.0f;
     const AnimStateMachineAsset before = asset_;
     bool ended = false;

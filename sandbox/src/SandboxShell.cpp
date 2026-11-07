@@ -194,7 +194,7 @@ void SandboxApp::buildProfilerPanel(Engine& e) {
     ImGui::Separator();
 
     // ---- CPU phases: what Play adds to onUpdate ----
-    if (ImGui::CollapsingHeader("CPU phases (Play)", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (::aver::editor::sectionHeader("CPU phases (Play)", ImGuiTreeNodeFlags_DefaultOpen)) {
         if (playProf_.playFrames() == 0) {
             ImGui::TextDisabled("Nothing yet: these are timed only while a Play session runs.");
         } else {
@@ -236,7 +236,7 @@ void SandboxApp::buildProfilerPanel(Engine& e) {
     }
 
     // ---- scene walk (CPU) and Voxi's acceleration-structure loop ----
-    if (ImGui::CollapsingHeader("Scene walk and Voxi (CPU)", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (::aver::editor::sectionHeader("Scene walk and Voxi (CPU)", ImGuiTreeNodeFlags_DefaultOpen)) {
         const CpuTimingReport w = collectCpuTiming();
         if (!w.supported) {
             ImGui::TextDisabled("CPU span timing is not available in this build.");
@@ -282,7 +282,7 @@ void SandboxApp::buildProfilerPanel(Engine& e) {
     editor::drawPhysicsProfileSection(dpi_);   // the "Physics (Jolt)" header: stats line and the scope tree
 #endif
     // ---- GPU passes ----
-    if (!ImGui::CollapsingHeader("GPU passes", ImGuiTreeNodeFlags_DefaultOpen)) { ImGui::End(); return; }
+    if (!::aver::editor::sectionHeader("GPU passes", ImGuiTreeNodeFlags_DefaultOpen)) { ImGui::End(); return; }
     const rhi::GpuTimingReport r = e.device()->gpuTiming();
     if (!r.supported) {
         // Two different "no data" cases, reported separately rather than as one empty tree.
@@ -2683,6 +2683,9 @@ ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
     ImGui::Begin("##statusbar", nullptr, kChromeFlags);
+    // The whole bar is secondary text. Popped before End: ImGui checks the font stack per window.
+    std::optional<editor::FontScope> statusFont;
+    statusFont.emplace(editor::editorFonts().secondary, editor::editorFonts().secondaryPx);
     const f32 dt = e.time().dt;
     // Smooth FPS for profiler/Play CPU table; fold Play frame only if measured.
 #if AVER_MODULE_FRAMEWORK
@@ -2862,6 +2865,7 @@ ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
 #endif
     ImGui::SameLine();
     drawRevisionControlStatusWidget();
+    statusFont.reset();
     ImGui::End();
     ImGui::PopStyleVar(2);
 #else
@@ -3450,13 +3454,17 @@ void SandboxApp::drawDrawer(Engine& e) {
                                         ImVec2(wpos.x + wsize.x, ImGui::GetWindowPos().y),
                                         ImGui::GetColorU32(ImGuiCol_Separator), 1.0f);
 
-    if (fontMedium_) ImGui::PushFont(fontMedium_, 0.0f);
-    ImGui::TextUnformatted(drawerShown_ == Drawer::Log ? "Output Log" :
-                            drawerShown_ == Drawer::Console ? "Console" : "Content Browser");
-    if (fontMedium_) ImGui::PopFont();
+    {
+        editor::FontScope title(editor::editorFonts().header, editor::editorFonts().headerPx);
+        ImGui::TextUnformatted(drawerShown_ == Drawer::Log ? "Output Log" :
+                                drawerShown_ == Drawer::Console ? "Console" : "Content Browser");
+    }
     ImGui::SameLine();
-    ImGui::TextDisabled(drawerShown_ == Drawer::Content ? "(Ctrl+Space or Esc to dismiss)" :
-                         drawerShown_ == Drawer::Console ? "(` or Esc to dismiss)" : "(Esc to dismiss)");
+    {
+        editor::FontScope hintFont(editor::editorFonts().secondary, editor::editorFonts().secondaryPx);
+        ImGui::TextDisabled(drawerShown_ == Drawer::Content ? "(Ctrl+Space or Esc to dismiss)" :
+                             drawerShown_ == Drawer::Console ? "(` or Esc to dismiss)" : "(Esc to dismiss)");
+    }
     ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), wsize.x - 34.0f * dpi_));
     if (ImGui::Button("X")) drawer_ = Drawer::None;
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Close the drawer");

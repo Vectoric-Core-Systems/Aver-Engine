@@ -1,5 +1,6 @@
 // The localization string-table editor tab. See the header for the SandboxApp hook and the empty-means-missing rule.
 #include "StringTableEditor.hpp"
+#include "EditorChrome.hpp"
 
 #include "EditorKeybinds.hpp"
 #include "aver/core/Log.hpp"
@@ -449,7 +450,7 @@ void StringTableEditor::drawGrid() {
 void StringTableEditor::drawReport() {
     if (!hasRun_) return;
     const fmt::LocReport& r = lastRun_.report;
-    if (!ImGui::CollapsingHeader(("Report: " + std::to_string(r.missing.size()) + " missing, " + std::to_string(r.unused.size()) +
+    if (!::aver::editor::sectionHeader(("Report: " + std::to_string(r.missing.size()) + " missing, " + std::to_string(r.unused.size()) +
                                   " unused, " + std::to_string(r.conflicts.size()) + " conflicting, " +
                                   std::to_string(r.untranslated.size()) + " untranslated###report").c_str(), ImGuiTreeNodeFlags_DefaultOpen))
         return;

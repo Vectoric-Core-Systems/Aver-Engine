@@ -3,6 +3,7 @@
 // tested); this file only draws them. In its own translation unit because SandboxComponentDetails.cpp is near the Debug COFF
 // section cap. docs/SOFTBODY.md "Authoring".
 #include "SoftBodyDetailsModel.hpp"
+#include "EditorChrome.hpp"
 #include "SoftFieldDetailsModel.hpp"
 #include "SoftProxyTool.hpp"
 
@@ -43,7 +44,7 @@ void drawSoftFieldSection(const SoftSectionEnv& env, void* worldPtr, u32 entity)
     const u32 type = softbody::SoftBodySystem::softFieldType();
     auto* c = type ? w.component<softbody::CSoftField>(e, type) : nullptr;
     if (!c) return;
-    if (!ImGui::CollapsingHeader("Soft Field", ImGuiTreeNodeFlags_DefaultOpen)) return;
+    if (!::aver::editor::sectionHeader("Soft Field", ImGuiTreeNodeFlags_DefaultOpen)) return;
     using softbody::FieldKind;
     using softbody::FieldShape;
 

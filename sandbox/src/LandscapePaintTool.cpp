@@ -358,7 +358,7 @@ bool SandboxApp::buildTerrainLayersSection(pbr::MaterialDesc& d, const std::func
         pbr::TerrainLayerDesc& l = t.layers[i];
         ImGui::PushID(static_cast<int>(i));
         const std::string title = std::to_string(i) + "  " + l.name + (i == 0 ? "  (base)" : "");
-        if (ImGui::CollapsingHeader(title.c_str())) {
+        if (::aver::editor::sectionHeader(title.c_str())) {
             char nameBuf[40];
             std::snprintf(nameBuf, sizeof nameBuf, "%s", l.name.c_str());
             if (ImGui::InputText("Name", nameBuf, sizeof nameBuf)) {

@@ -1080,7 +1080,11 @@ void SandboxApp::drawOutlinerRow(const OutlinerRow& row,
     if (recordOrder) outlinerOrder_.push_back(row.ent);
 
     const std::string label = "  " + row.shown + "##e" + std::to_string((u32)row.ent);
+    // A selected row keeps the selection colour under the cursor (hover is a neutral lift otherwise).
+    const bool rowSelected = (flags & ImGuiTreeNodeFlags_Selected) != 0;
+    if (rowSelected) ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImGui::GetStyleColorVec4(ImGuiCol_HeaderActive));
     const bool open = ImGui::TreeNodeEx(label.c_str(), flags);
+    if (rowSelected) ImGui::PopStyleColor();
     // IsItemToggledOpen separates "clicked the arrow" from "clicked the label" on one node, so
     // expanding a parent does not also select it.
     if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
@@ -1703,7 +1707,7 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
     detailsFocused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
     if (sel_>=0 && sel_<(int)objects_.size()){
         MeshObj& o=objects_[sel_]; ImGui::TextUnformatted(o.name.c_str()); ImGui::Separator();
-        if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (::aver::editor::sectionHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
             // Bracketed for undo, as the scene-entity branch below does: these three drags were
             // the only transform edits pushing nothing (selectedXform/endTransformEdit already
             // branch for placeholder objects via the gizmo, so dragging was undoable but typing
@@ -1719,7 +1723,7 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
             objDone = objDone || ImGui::IsItemDeactivatedAfterEdit();
             if (objDone) endTransformEdit();
         }
-        if (ImGui::CollapsingHeader("Material", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (::aver::editor::sectionHeader("Material", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::ColorEdit3("Base Color", o.color);
             // GUARDED BECAUSE BOTH SIDES ARE: MeshObj::material only exists under this same #if,
             // and so does materialPanel. Base Color is the object's own float[3] and stays.
@@ -1768,7 +1772,7 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
             // Its per-instance [Editable] values (a C# actor's fields): set on the live actor, saved with the level.
             if (scripts_.editablesAvailable()) {
                 const std::string wire = scripts_.editableList(static_cast<i32>(selEntity_));
-                if (!wire.empty() && ImGui::CollapsingHeader("Editable", ImGuiTreeNodeFlags_DefaultOpen)) {
+                if (!wire.empty() && ::aver::editor::sectionHeader("Editable", ImGuiTreeNodeFlags_DefaultOpen)) {
                     usize at = 0;
                     while (at < wire.size()) {
                         usize end = wire.find('\n', at);
@@ -1827,7 +1831,7 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
             editor::levelInstanceDetailsDraw(levelInstanceModel_, selEntity_, levelInstanceUiCallbacks());
         }
         if (const auto* loc = w.component<scene::CLocal>(selEntity_, scene::kComponentLocal)) {
-            if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (::aver::editor::sectionHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
               if (multiSelected.size() <= 1) {
                 Transform xf = loc->xf;
                 Vec3 euler = eulerDegFromQuat(xf.rotation);
@@ -1942,7 +1946,7 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
             }
         }
         if (auto* mr = w.component<scene::CMeshRenderer>(selEntity_, scene::kComponentMeshRenderer)) {
-            if (ImGui::CollapsingHeader("Mesh", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (::aver::editor::sectionHeader("Mesh", ImGuiTreeNodeFlags_DefaultOpen)) {
                 bool vis = authoredVisible(selEntity_);
                 if (ImGui::Checkbox("Visible", &vis)) {
                     // Applies to the whole selection (same rule as the Mesh/Material pickers
@@ -2248,7 +2252,7 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
             // same sliders (the material system working as designed, not a bug) -- which the
             // panel should say rather than let someone discover.
 #if AVER_MODULE_PBR
-            if (ImGui::CollapsingHeader("Material", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (::aver::editor::sectionHeader("Material", ImGuiTreeNodeFlags_DefaultOpen)) {
                 // Same fallback the draw uses: without it, an entity drawn fine via the mesh's
                 // own material would report "(none)" here -- the panel disagreeing with the picture.
                 const i32 shown = mr->material ? mr->material : content_.meshDefaultMaterial(mr->mesh);
@@ -2347,7 +2351,7 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
         // Visible/editable the same way CMeshRenderer is above; no picker beyond drag-drop exists
         // for CMeshRenderer::mesh either, so the emitter's effect id follows the same shape.
         if (auto* pe = w.component<scene::CParticleEmitter>(selEntity_, scene::kComponentParticleEmitter)) {
-            if (ImGui::CollapsingHeader("Particle Emitter", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (::aver::editor::sectionHeader("Particle Emitter", ImGuiTreeNodeFlags_DefaultOpen)) {
                 bool stopped = (pe->flags & scene::kParticleEmitterStopped) != 0;
                 if (ImGui::Checkbox("Stopped", &stopped)) {
                     if (stopped) pe->flags |=  scene::kParticleEmitterStopped;
@@ -2440,7 +2444,7 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
         // Reads the SIMULATION, not just the component: whether it's simulating, particle count,
         // skinned path, and whether it's drawn are answerable only from the live body/render feature.
         if (auto* sb = w.component<scene::CSoftBody>(selEntity_, scene::kComponentSoftBody)) {
-            if (ImGui::CollapsingHeader(ICON_TUNE " Soft Body", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (::aver::editor::sectionHeader(ICON_TUNE " Soft Body", ImGuiTreeNodeFlags_DefaultOpen)) {
                 bool disabled = (sb->flags & scene::kSoftBodyDisabled) != 0;
                 if (ImGui::Checkbox("Simulated", &disabled)) {
                     // The checkbox reads POSITIVELY and the flag is stored negatively -- see
@@ -2523,14 +2527,14 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
 
         // ---- Light (CLight): type, intensity, IES profile, cookie ----
         if (auto* lt = w.component<scene::CLight>(selEntity_, scene::kComponentLight)) {
-            if (ImGui::CollapsingHeader("Light", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (::aver::editor::sectionHeader("Light", ImGuiTreeNodeFlags_DefaultOpen)) {
                 if (editor::drawLightDetails(*lt, project_.contentDir())) markLevelUnsaved();
             }
         }
 
         // ---- Decal (CDecal): the projector box, appearance, which channels it paints ----
         if (auto* dc = w.component<scene::CDecal>(selEntity_, scene::kComponentDecal)) {
-            if (ImGui::CollapsingHeader("Decal", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (::aver::editor::sectionHeader("Decal", ImGuiTreeNodeFlags_DefaultOpen)) {
                 if (editor::drawDecalDetails(*dc, project_.contentDir())) markLevelUnsaved();
             }
         }

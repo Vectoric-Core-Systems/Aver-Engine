@@ -623,7 +623,7 @@ void SandboxApp::drawPlacedComponentSections() {
     for (const editor::PlacedKind& k : editor::kPlacedKinds) {
         const u32 cid = kindComponentId(w, k);
         if (cid == 0 || !w.hasComponent(e, cid)) continue;
-        if (!ImGui::CollapsingHeader(k.header, ImGuiTreeNodeFlags_DefaultOpen)) continue;
+        if (!::aver::editor::sectionHeader(k.header, ImGuiTreeNodeFlags_DefaultOpen)) continue;
         ImGui::PushID(k.type);
         if (playing) ImGui::TextDisabled("Stop Play to edit.");
         const std::string_view t = k.type;

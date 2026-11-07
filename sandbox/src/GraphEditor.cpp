@@ -10,6 +10,7 @@
 //      docs/VISUAL_SCRIPTING.md). Always go through save() below, which threads originalText_ through
 //      writeOcgraph so unrecognised lines survive untouched (testUnknownRecords, OcGraphTest.cpp:183).
 #include "EditorTransform.hpp"
+#include "EditorChrome.hpp"
 #include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "EditorKeybinds.hpp"
 #include "EditorPrefs.hpp"
@@ -917,7 +918,7 @@ std::string GraphEditor::addCallNode(const std::string& funcName, Vec2 canvasPos
 // makes rather than a hand-simulated approximation of them.
 void GraphEditor::drawFunctionsPanel(float dpi) {
 #if AVER_WITH_IMGUI
-    if (!ImGui::CollapsingHeader("Functions", ImGuiTreeNodeFlags_DefaultOpen)) return;
+    if (!::aver::editor::sectionHeader("Functions", ImGuiTreeNodeFlags_DefaultOpen)) return;
 
     if (graph_.functions.empty()) ImGui::TextDisabled("No functions declared.");
 
