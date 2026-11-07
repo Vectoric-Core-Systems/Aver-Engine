@@ -168,6 +168,15 @@ AVER_UI_API uint32_t aver_ui_hit_widget(float x, float y);   /* topmost widget u
 // root, or 0 with aver_ui_layout_error describing why.
 AVER_UI_API uint32_t    aver_ui_layout_open(const char* utf8Text, int32_t applyEnvironment);
 AVER_UI_API const char* aver_ui_layout_error(void);
+/* A layout may nest others (v2 USE records). The host reads them too: given the path as written in the file, copy that
+ * layout's UTF-8 text into `out` (at most cap bytes, NUL included) and return its length in bytes, or -1 when it cannot
+ * be read. A length of cap or more makes the call repeat with a bigger buffer. NULL clears (a nested layout then opens
+ * as a visible placeholder). Cycles and nesting past 16 levels fail aver_ui_layout_open with an error. */
+typedef int32_t (*AverUiLayoutReadFn)(const char* utf8Path, char* out, int32_t cap);
+AVER_UI_API void aver_ui_set_layout_reader(AverUiLayoutReadFn read);
+/* What went wrong in the last successful aver_ui_layout_open without stopping it (a nested layout that is missing or
+ * has no such slot or exposed name), one per line; empty when nothing did. */
+AVER_UI_API const char* aver_ui_layout_warnings(void);
 // The subtree at `root` as .ocui text, for saving a layout built in code.
 AVER_UI_API const char* aver_ui_layout_capture(uint32_t root);
 

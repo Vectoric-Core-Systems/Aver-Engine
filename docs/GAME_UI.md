@@ -23,7 +23,7 @@ layout, input, focus, events and drawing, is tested with no GPU and no window.
 | C ABI | `modules/ui.abi/ui_widget_abi.h` (beside the draw ABI `ui_abi.h`) |
 | C# | `scripting/csharp/Aver.UI` (`Widgets.cs`, `SettingsScreen.cs`, `UiGraph.cs`), `Aver.Framework/UiGameSettings.cs`, `UiGraphInterop.cs` |
 | Editor tab | `sandbox/src/UiLayoutEditor.{hpp,cpp}` |
-| Tests | `tests/ui`: `UiWidgetTest`, `UiPanelsTest`, `UiLayoutAssetTest`, `UiLayoutEditorTest` (and the existing `UiTest`) |
+| Tests | `tests/ui`: `UiWidgetTest`, `UiPanelsTest`, `UiLayoutAssetTest`, `UiLayoutAbiTest`, `UiLayoutEditorTest` (and the existing `UiTest`) |
 
 ## The model
 
@@ -156,6 +156,9 @@ SET PlayButton text "Play"
 SET PlayButton command play
 ```
 
+* Version 2 adds `USE` (a nested layout), `OVERRIDE`, `EXPOSE`, `SLOT`, `ANIM`, `BIND` and `EVENT`; see "Nested
+  layouts" below and the format in [formats/FORMAT_SPECS.md](formats/FORMAT_SPECS.md) section 11n. A layout that
+  uses none of them is still written as `OCUI 1`.
 * One root, parents before children, unique names. `WIDGET <name> <kind> <parent|->`.
 * Only properties that differ from the kind's defaults are written, so files stay small and diffs readable.
 * Unknown records and unknown `SET` keys are skipped (a newer build's file loads); a bad value, a missing
@@ -164,13 +167,27 @@ SET PlayButton command play
   bit-exact.
 * The module does no file I/O (like `UiFont`): the host reads the text.
 
+### Nested layouts (user widgets)
+
+A `USE` node instantiates another `.ocui` as a subtree. The used layout says what it lets others change
+(`EXPOSE <name> <widget> <key>`) and where children go (`SLOT <name> <widget>`); the user sets the exposed values
+with `OVERRIDE` and puts its own children into slots with their `slot` property. The used widgets are named
+`<instance>/<name>`. `UiSystem.OpenLayout` (C#) finds the used files beside the opened file, in its parent folders
+(so a content-relative `UI/Row.ocui` works) and in `UiSystem.LayoutRoots`; a C host installs
+`aver_ui_set_layout_reader`. Missing files become placeholders (`UiSystem.LastWarnings`, `aver_ui_layout_warnings`);
+a cycle or nesting past 16 levels fails the open (`UiSystem.LastError`). In the designer a used layout is one item in
+the hierarchy; the palette's **Layouts** section lists the project's other `.ocui` files (double-click or drag),
+and the inspector shows the layout path and its exposed properties. A layout that would make a cycle is refused
+with the chain in the toolbar.
+
 ### Property reference
 
 Colours are `#RRGGBB` or `#RRGGBBAA`, or `none`. Insets/anchors/uv take 4 numbers (insets also 1 or 2, a point
 anchor 2). Enum names are lower case.
 
 * **Placement:** `anchors`, `offsets`, `pivot`, `width`, `height` (`-1` auto), `minWidth`, `minHeight`,
-  `maxWidth`, `maxHeight` (`0` none), `margin`, `alignH`, `alignV`, `fillW`, `fillH`.
+  `maxWidth`, `maxHeight` (`0` none), `margin`, `alignH`, `alignV`, `fillW`, `fillH`, `slot` (a child of a `USE`:
+  the used layout's slot it fills).
 * **Layout:** `padding`, `layout` (`none vstack hstack grid overlay wrap switcher`), `spacing`, `spacingY`,
   `columns`, `cellWidth`, `cellHeight`, `justify` (`start center end spacebetween`), `uniform`, `activeIndex`,
   `scaleFit` (`none contain cover down width height`), `contentScale`.
@@ -351,7 +368,10 @@ frame before the graphs tick.
 * `UiPanelsTest`: the panel containers: overlay alignment, uniform and plain grids, wrap breaking and justify, size
   box clamps, scale box fits and scaled text, border drawing, the switcher's hit/draw/focus filtering, the
   palette presets and the file round trip of the new modes.
-* `UiLayoutAssetTest`: tokenising and float round trip, the property table (every property's get/set agree for
+* `UiLayoutAbiTest`: nested layouts through the C ABI (reader, overrides, slots, warnings, missing file, cycle, a
+  layout larger than the first buffer).
+* `UiLayoutAssetTest`: the v2 records (byte-identical round trip, v1 unchanged, errors), instantiate with overrides,
+  slots, a missing file, cycles and depth; tokenising and float round trip, the property table (every property's get/set agree for
   every kind), `.ocui` round trip, parse errors with line numbers, forward compatibility, the structural edits,
   instantiate and capture.
 * Text engine tests (`tests/ui/src`, all headless; fonts come from the synthetic builder in `TestFont.hpp`, so no

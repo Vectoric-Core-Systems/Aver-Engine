@@ -2,7 +2,7 @@
 
 # Aver.UI public API
 
-25 public types and 213 public members, read from `scripting/csharp/Aver.UI/` (8 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+25 public types and 215 public members, read from `scripting/csharp/Aver.UI/` (8 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.UI
 
@@ -199,6 +199,8 @@ Values: `Clicked = 0`, `Toggled = 1`, `ValueChanged = 2`, `SelectionChanged = 3`
 - `public static float Scale { get; }` - The scale applied to design pixels as of the last frame.
 - `public static Widget OpenLayoutText(string ocui, bool applyEnvironment = true)` - Creates the widgets of an .ocui layout given as text.
 - `public static Widget OpenLayout(string path, bool applyEnvironment = true)` - Reads an .ocui file and opens it.
+- `public static List<string> LayoutRoots { get; }` - Folders, besides the opened file's folder and its parents, where a nested layout's path (a USE record in a layout) is looked up.
+- `public static string LastWarnings { get; }` - What went wrong in the last open without stopping it, one per line: a nested layout that could not be found, or an unknown slot or exposed name.
 - `public static string? CaptureLayout(Widget root)` - The widget subtree at root as .ocui text, for saving a layout built in code.
 - `public static void ResolveImages(Widget root)` - Asks ImageResolver for a texture for every image widget under root that names one.
 - `public static void Show(Widget root, bool visible = true)` - Opens or closes a layout's root.

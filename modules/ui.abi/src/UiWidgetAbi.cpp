@@ -34,6 +34,8 @@ UiRebindModel g_rebind;
 std::unique_ptr<UiSettingsScreen> g_screen;   // after g_tree: destroyed first, it unhooks from the tree
 std::string g_str;
 std::string g_error;
+std::string g_warnings;
+AverUiLayoutReadFn g_layoutRead = nullptr;
 UiCaptionView g_captions;
 std::vector<UiCaptionLine> g_captionLines;
 UiCaptionStyle g_captionStyle;
@@ -253,18 +255,51 @@ uint32_t aver_ui_hit_widget(float x, float y) { return g_tree.hitTest(x, y); }
 
 // ---- layouts ----------------------------------------------------------------------------------------------
 
+namespace {
+
+std::string joinLines(const std::vector<std::string>& v) {
+    std::string s;
+    for (usize i = 0; i < v.size(); ++i) { if (i) s += '\n'; s += v[i]; }
+    return s;
+}
+
+// A nested layout's text comes from the host's reader; it is asked again with a bigger buffer when the first was too small.
+bool readNestedLayout(const std::string& path, std::string& text) {
+    if (!g_layoutRead) return false;
+    std::string buf(16384, '\0');
+    int32_t n = g_layoutRead(path.c_str(), buf.data(), static_cast<int32_t>(buf.size()));
+    if (n < 0) return false;
+    if (static_cast<usize>(n) >= buf.size()) {
+        buf.assign(static_cast<usize>(n) + 1, '\0');
+        n = g_layoutRead(path.c_str(), buf.data(), static_cast<int32_t>(buf.size()));
+        if (n < 0 || static_cast<usize>(n) >= buf.size()) return false;
+    }
+    text.assign(buf.data(), static_cast<usize>(n));
+    return true;
+}
+
+} // namespace
+
+void aver_ui_set_layout_reader(AverUiLayoutReadFn read) { g_layoutRead = read; }
+
+const char* aver_ui_layout_warnings(void) { return keep(g_warnings); }
+
 uint32_t aver_ui_layout_open(const char* utf8Text, int32_t applyEnvironment) {
     UiLayoutDoc doc;
     std::string err;
+    g_warnings.clear();
     if (!uiParseLayout(utf8Text ? utf8Text : "", doc, &err)) {
         g_error = err;
         return 0;
     }
-    const UiWidgetId root = uiInstantiateLayout(doc, g_tree, 0);
+    const UiLayoutLoader loader = readNestedLayout;
+    const UiInstantiateResult built = uiInstantiateLayoutEx(doc, g_tree, 0, loader);
+    const UiWidgetId root = built.root;
     if (!root) {
-        g_error = "the layout's widgets could not be created";
+        g_error = built.errors.empty() ? std::string("the layout's widgets could not be created") : joinLines(built.errors);
         return 0;
     }
+    g_warnings = joinLines(built.errors);
     if (applyEnvironment) {
         g_tree.setTheme(uiBuiltinTheme(doc.theme));
         UiDpi d = doc.dpi;

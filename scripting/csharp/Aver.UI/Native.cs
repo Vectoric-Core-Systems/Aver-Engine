@@ -111,6 +111,10 @@ internal static class Native
 
     [DllImport(Lib)] internal static extern uint aver_ui_layout_open([MarshalAs(UnmanagedType.LPUTF8Str)] string text, int applyEnvironment);
     [DllImport(Lib)] internal static extern IntPtr aver_ui_layout_error();
+    [DllImport(Lib)] internal static extern IntPtr aver_ui_layout_warnings();
+    [DllImport(Lib)] internal static extern void aver_ui_set_layout_reader(LayoutReadFn? read);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate int LayoutReadFn([MarshalAs(UnmanagedType.LPUTF8Str)] string path, IntPtr output, int capacity);
     [DllImport(Lib)] internal static extern IntPtr aver_ui_layout_capture(uint root);
 
     [DllImport(Lib)] internal static extern int aver_ui_event_poll(out int type, out uint widget, out float value,

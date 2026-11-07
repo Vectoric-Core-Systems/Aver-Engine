@@ -5,6 +5,7 @@
 #include "aver/ui/UiProps.hpp"
 
 #include <cmath>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -260,6 +261,235 @@ int main() {
         check(parent == 0 && d.valid(&why) && d.nodes.size() < beforeDelete && uiLayoutFind(d, "Title_2") < 0, "delete removes the whole subtree");
         check(uiLayoutDelete(d, 0) == -1, "the root cannot be deleted");
         check(uiUniqueWidgetName(d, "Window") == "Window_2" && uiUniqueWidgetName(d, "") == "Widget", "unique names");
+    }
+
+    AVER_INFO("=== v2: the format ===");
+    {
+        // A canonical v2 file reads and writes back byte for byte.
+        const std::string canonical =
+            "OCUI 2\n"
+            "NAME Main\n"
+            "THEME dark\n"
+            "SCALE height 1920 1080\n"
+            "\n"
+            "WIDGET Root panel -\n"
+            "\n"
+            "WIDGET Label text Root\n"
+            "SET Label text Title\n"
+            "\n"
+            "WIDGET Body panel Root\n"
+            "\n"
+            "USE Row1 UI/Row.ocui Root\n"
+            "SET Row1 width 300\n"
+            "OVERRIDE Row1 Title \"Hello World\"\n"
+            "\n"
+            "EXPOSE Title Label text\n"
+            "SLOT Content Body\n"
+            "\n"
+            "ANIM Pulse Row1 opacity 0 1 0.5 0.4\n"
+            "\n"
+            "BIND Row1 visible player.alive\n"
+            "\n"
+            "EVENT Row1 clicked command play\n";
+        UiLayoutDoc d;
+        std::string err;
+        check(uiParseLayout(canonical, d, &err), "a v2 file parses: " + err);
+        check(uiWriteLayout(d) == canonical, "and writes back byte for byte");
+        check(d.version == 2 && d.nodes.size() == 4 && d.nodes[3].use && d.nodes[3].use->path == "UI/Row.ocui" &&
+                  d.nodes[3].use->overrides.size() == 1 && d.nodes[3].use->overrides[0].values[0] == "Hello World",
+              "the USE keeps its path and OVERRIDE");
+        check(d.exposed.size() == 1 && d.slots.size() == 1 && d.anims.size() == 1 && d.anims[0].keys.size() == 4 &&
+                  d.binds.size() == 1 && d.events.size() == 1 && d.events[0].target == "play",
+              "EXPOSE, SLOT, ANIM, BIND and EVENT are kept");
+        check(d.valid(&err), "it is valid");
+
+        // v1 stays exactly v1.
+        const std::string v1 = uiWriteLayout(uiStarterLayout());
+        UiLayoutDoc d1;
+        check(uiParseLayout(v1, d1) && d1.version == 1 && uiWriteLayout(d1) == v1 && v1.find("OCUI 1") == 0,
+              "a v1 document round-trips unchanged and stays version 1");
+        const std::string v1withV2Records = "OCUI 1\nWIDGET Root panel -\nUSE X a.ocui Root\nANIM A Root opacity\nEXPOSE T Root text\n";
+        UiLayoutDoc d1b;
+        check(uiParseLayout(v1withV2Records, d1b) && d1b.nodes.size() == 1 && d1b.anims.empty() && d1b.exposed.empty() &&
+                  uiWriteLayout(d1b) == "OCUI 1\nTHEME dark\nSCALE height 1920 1080\n\nWIDGET Root panel -\n",
+              "v2 records in a v1 file stay unknown records, as before");
+        UiLayoutDoc built = uiStarterLayout();
+        uiLayoutAddUse(built, 0, "UI/Row.ocui");
+        check(built.usesV2() && uiWriteLayout(built).find("OCUI 2") == 0, "using a v2 record writes the header as version 2");
+        uiLayoutDelete(built, uiLayoutFind(built, "Row"));
+        check(!built.usesV2() && uiWriteLayout(built) == v1, "and removing it goes back to version 1");
+
+        check(failsWith("OCUI 2\nWIDGET Root panel -\nUSE X a.ocui -\n", "cannot be the root"), "a USE cannot be the root");
+        check(failsWith("OCUI 2\nWIDGET Root panel -\nOVERRIDE Root T v\n", "not a USE"), "OVERRIDE needs a USE");
+        check(failsWith("OCUI 2\nWIDGET Root panel -\nEXPOSE A Root text\nEXPOSE A Root text\n", "duplicate EXPOSE"), "a duplicate EXPOSE name");
+        check(failsWith("OCUI 2\nWIDGET Root panel -\nEXPOSE A Ghost text\n", "unknown widget"), "an EXPOSE of a missing widget");
+        check(failsWith("OCUI 2\nWIDGET Root panel -\nSLOT A Ghost\n", "unknown widget"), "a SLOT of a missing widget");
+        check(failsWith("OCUI 2\nWIDGET Root panel -\nANIM A Root\n", "ANIM needs"), "ANIM arity");
+        check(failsWith("OCUI 2\nWIDGET Root panel -\nBIND Root text\n", "BIND needs"), "BIND arity");
+        check(failsWith("OCUI 2\nWIDGET Root panel -\nEVENT Root clicked command\n", "EVENT needs"), "EVENT arity");
+        check(failsWith("OCUI 3\nWIDGET Root panel -\n", "unsupported layout version"), "version 3 is still refused");
+
+        // Structural edits keep the records honest.
+        UiLayoutDoc e;
+        uiParseLayout(canonical, e);
+        uiLayoutRename(e, uiLayoutFind(e, "Label"), "Caption");
+        check(e.exposed[0].widget == "Caption" && e.valid(&err), "renaming a widget updates the EXPOSE that names it");
+        uiLayoutRename(e, uiLayoutFind(e, "Row1"), "Line");
+        check(e.anims[0].widget == "Line" && e.binds[0].widget == "Line" && e.events[0].widget == "Line", "and the ANIM, BIND and EVENT");
+        uiLayoutDelete(e, uiLayoutFind(e, "Caption"));
+        check(e.exposed.empty() && e.valid(&err), "deleting a widget drops its EXPOSE");
+        uiLayoutDelete(e, uiLayoutFind(e, "Line"));
+        check(e.anims.empty() && e.binds.empty() && e.events.empty(), "and its ANIM, BIND and EVENT");
+        check(uiLayoutAddUse(e, 0, "") == -1 && uiLayoutAddUse(e, 9, "a.ocui") == -1, "a USE needs a path and a parent");
+        const i32 u1 = uiLayoutAddUse(e, 0, "UI\\Row.ocui");
+        const i32 u2 = uiLayoutAddUse(e, 0, "UI/Row.ocui");
+        check(e.nodes[static_cast<usize>(u1)].props.name == "Row" && e.nodes[static_cast<usize>(u2)].props.name == "Row_2", "a USE is named after its file");
+        check(uiLayoutSetOverride(e, u2, "Title", {"x"}) && uiLayoutSetOverride(e, u2, "Title", {"y"}) &&
+                  e.nodes[static_cast<usize>(u2)].use->overrides.size() == 1 && e.nodes[static_cast<usize>(u2)].use->overrides[0].values[0] == "y",
+              "an OVERRIDE is replaced, not added twice");
+        check(uiLayoutClearOverride(e, u2, "Title") && !uiLayoutClearOverride(e, u2, "Title") && !uiLayoutSetOverride(e, 0, "T", {"x"}),
+              "and cleared; a non-USE takes none");
+        const i32 dup = uiLayoutDuplicate(e, u2);
+        check(dup > 0 && e.nodes[static_cast<usize>(dup)].use && e.nodes[static_cast<usize>(dup)].use->path == "UI/Row.ocui", "duplicating a USE keeps the reference");
+    }
+
+    AVER_INFO("=== v2: nested layouts ===");
+    {
+        std::map<std::string, std::string> files;
+        files["UI/Row.ocui"] =
+            "OCUI 2\n"
+            "WIDGET RowRoot panel -\n"
+            "SET RowRoot layout hstack\n"
+            "SET RowRoot defaultFocus Label\n"
+            "WIDGET Label text RowRoot\n"
+            "SET Label text Default\n"
+            "SET Label navDown Body\n"
+            "WIDGET Body panel RowRoot\n"
+            "EXPOSE Title Label text\n"
+            "SLOT Content Body\n";
+        const UiLayoutLoader loader = [&](const std::string& path, std::string& text) {
+            const auto it = files.find(path);
+            if (it == files.end()) return false;
+            text = it->second;
+            return true;
+        };
+
+        UiLayoutDoc host = uiStarterLayout();
+        const i32 r1 = uiLayoutAddUse(host, 0, "UI/Row.ocui", "Row1");
+        const i32 r2 = uiLayoutAddUse(host, 0, "UI/Row.ocui", "Row2");
+        host.nodes[static_cast<usize>(r1)].props.width = 300;
+        uiLayoutSetOverride(host, r1, "Title", {"Hello"});
+        const i32 extra = uiLayoutAdd(host, r1, UiWidgetKind::Button, "Extra");
+        host.nodes[static_cast<usize>(extra)].props.slot = "Content";
+        (void)uiLayoutAdd(host, uiLayoutFind(host, "Row2"), UiWidgetKind::Button, "Loose");
+        std::string why;
+        check(host.valid(&why), "the host is valid: " + why);
+
+        UiTree t;
+        const UiInstantiateResult res = uiInstantiateLayoutEx(host, t, 0, loader);
+        check(res.root != 0 && res.errors.empty(), "a layout with nested layouts instantiates");
+        check(res.nodeIds.size() == host.nodes.size() && res.nodeIds[static_cast<usize>(r1)] == t.find("Row1"), "each document node has its widget; a USE has the instance root");
+        const UiWidget* row1 = t.get(t.find("Row1"));
+        check(row1 && row1->layout == UiLayoutMode::HStack && row1->width == 300, "the instance root is the used layout's root with the instance's placement laid over it");
+        const UiWidget* label = t.get(t.find("Row1/Label"));
+        check(label && label->text == "Hello", "an OVERRIDE sets the exposed property");
+        const UiWidget* label2 = t.get(t.find("Row2/Label"));
+        check(label2 && label2->text == "Default", "another instance keeps the default");
+        const UiWidgetId body = t.find("Row1/Body");
+        const UiWidget* ex = t.get(t.find("Extra"));
+        check(body && ex && ex->parent == body, "a child with a slot goes into that SLOT");
+        const UiWidget* lo = t.get(t.find("Loose"));
+        check(lo && lo->parent == t.find("Row2"), "a child with no slot goes under the instance root");
+        check(label && label->navDown == "Row1/Body" && row1->defaultFocus == "Row1/Label", "names the used layout refers to follow the prefix");
+        check(t.find("Row1") != 0 && t.get(t.find("Row1"))->parent == res.root, "the instance sits under its parent");
+
+        // an unknown slot or override is reported, not fatal
+        host.nodes[static_cast<usize>(extra)].props.slot = "Nope";
+        uiLayoutSetOverride(host, uiLayoutFind(host, "Row2"), "Ghost", {"x"});
+        UiTree t2;
+        const UiInstantiateResult res2 = uiInstantiateLayoutEx(host, t2, 0, loader);
+        check(res2.root != 0 && res2.errors.size() == 2, "an unknown slot and an unknown override are errors that do not stop the build");
+        check(t2.get(t2.find("Extra"))->parent == t2.find("Row1"), "an unknown slot puts the child under the instance root");
+
+        // exposed properties for the inspector
+        std::vector<UiExposedProp> props;
+        check(uiLayoutExposedProps(host, r1, loader, props, &why) && props.size() == 1 && props[0].name == "Title" &&
+                  props[0].overridden && props[0].value[0] == "Hello",
+              "the exposed properties list their overrides");
+        check(uiLayoutExposedProps(host, uiLayoutFind(host, "Row2"), loader, props, &why) && props[0].value[0] == "Default",
+              "or the used layout's own value");
+        check(!uiLayoutExposedProps(host, 0, loader, props, &why), "a non-USE has none");
+
+        // round trip with a slot and an override
+        const std::string text = uiWriteLayout(host);
+        UiLayoutDoc back;
+        check(uiParseLayout(text, back, &why) && uiWriteLayout(back) == text, "a host with USEs round-trips");
+
+        // a file that cannot be found
+        UiLayoutDoc missing = uiStarterLayout();
+        uiLayoutAddUse(missing, 0, "UI/Gone.ocui", "Gone");
+        UiTree t3;
+        const UiInstantiateResult res3 = uiInstantiateLayoutEx(missing, t3, 0, loader);
+        check(res3.root != 0 && res3.errors.size() == 1 && res3.errors[0].find("cannot find") != std::string::npos,
+              "a missing file is an error, not a failure");
+        check(t3.find("Gone") != 0 && t3.find("Gone/Missing") != 0 && t3.get(t3.find("Gone/Missing"))->text.find("Gone.ocui") != std::string::npos,
+              "and leaves a placeholder that names it");
+        UiTree t4;
+        check(uiInstantiateLayout(missing, t4, 0) != 0 && t4.find("Gone") != 0, "with no loader at all a USE is a placeholder too");
+        files["UI/Bad.ocui"] = "not a layout";
+        UiLayoutDoc bad = uiStarterLayout();
+        uiLayoutAddUse(bad, 0, "UI/Bad.ocui", "Bad");
+        UiTree t5;
+        const UiInstantiateResult res5 = uiInstantiateLayoutEx(bad, t5, 0, loader);
+        check(res5.root != 0 && res5.errors.size() == 1 && t5.find("Bad") != 0, "an unreadable file is a placeholder too");
+    }
+
+    AVER_INFO("=== v2: cycles ===");
+    {
+        std::map<std::string, std::string> files;
+        files["A.ocui"] = "OCUI 2\nWIDGET RootA panel -\nUSE ToB B.ocui RootA\n";
+        files["B.ocui"] = "OCUI 2\nWIDGET RootB panel -\nUSE ToA A.ocui RootB\n";
+        files["Self.ocui"] = "OCUI 2\nWIDGET RootS panel -\nUSE Again Self.ocui RootS\n";
+        const UiLayoutLoader loader = [&](const std::string& path, std::string& text) {
+            const auto it = files.find(path);
+            if (it == files.end()) return false;
+            text = it->second;
+            return true;
+        };
+        UiLayoutDoc a;
+        uiParseLayout(files["A.ocui"], a);
+        std::string err;
+        check(!uiLayoutCheckUses(a, "A.ocui", loader, &err) && err.find("cycle") != std::string::npos && err.find("B.ocui") != std::string::npos,
+              "A uses B uses A is found without building: " + err);
+        UiTree t;
+        const UiInstantiateResult r = uiInstantiateLayoutEx(a, t, 0, loader, "A.ocui");
+        check(r.root == 0 && !r.errors.empty() && r.errors[0].find("cycle") != std::string::npos, "and instantiate fails with a clear error");
+        check(t.sortedRoots().empty(), "leaving no half-built widgets");
+        UiTree t2;
+        check(uiInstantiateLayoutEx(a, t2, 0, loader).root == 0, "even when the document's own path is not known");
+        UiLayoutDoc s;
+        uiParseLayout(files["Self.ocui"], s);
+        UiTree t3;
+        check(uiInstantiateLayoutEx(s, t3, 0, loader, "self.ocui").root == 0 && !uiLayoutCheckUses(s, "Self.ocui", loader), "a layout that uses itself is a cycle (paths compare without case or slash style)");
+        check(uiInstantiateLayout(s, t3, 0) != 0, "and without a loader it is just a placeholder");
+
+        // the same layout used twice side by side is not a cycle
+        files["Leaf.ocui"] = "OCUI 2\nWIDGET LeafRoot panel -\n";
+        files["Twice.ocui"] = "OCUI 2\nWIDGET T panel -\nUSE One Leaf.ocui T\nUSE Two Leaf.ocui T\n";
+        UiLayoutDoc tw;
+        uiParseLayout(files["Twice.ocui"], tw);
+        UiTree t4;
+        check(uiLayoutCheckUses(tw, "Twice.ocui", loader) && uiInstantiateLayoutEx(tw, t4, 0, loader, "Twice.ocui").root != 0, "the same layout twice is fine");
+
+        // depth
+        for (int i = 0; i < 20; ++i)
+            files["D" + std::to_string(i) + ".ocui"] = "OCUI 2\nWIDGET R panel -\nUSE N D" + std::to_string(i + 1) + ".ocui R\n";
+        files["D20.ocui"] = "OCUI 2\nWIDGET R panel -\n";
+        UiLayoutDoc deep;
+        uiParseLayout(files["D0.ocui"], deep);
+        UiTree t5;
+        const UiInstantiateResult rd = uiInstantiateLayoutEx(deep, t5, 0, loader);
+        check(rd.root == 0 && !rd.errors.empty() && rd.errors[0].find("deep") != std::string::npos, "nesting past 16 levels fails with an error");
     }
 
     if (g_failures) {

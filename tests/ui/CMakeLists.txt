@@ -116,6 +116,12 @@ add_executable(UiImageAbiTest src/UiImageAbiTest.cpp)
 target_link_libraries(UiImageAbiTest PRIVATE Aver.UI.Abi Aver.UI Aver.Core Aver.Platform)
 set_target_properties(UiImageAbiTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# UiLayoutAbiTest — nested layouts (.ocui USE) through the C ABI: the host's layout reader, overrides and slots,
+# warnings, a missing file and a cycle. Links the DLL the C# side loads.
+add_executable(UiLayoutAbiTest src/UiLayoutAbiTest.cpp)
+target_link_libraries(UiLayoutAbiTest PRIVATE Aver.UI.Abi Aver.UI Aver.Core Aver.Platform)
+set_target_properties(UiLayoutAbiTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # UiTransformTest — parity P40 / P41 / P38: the draw list's transform stack, per-draw sampler and blend state, the mesh export and
 # the text spacing block, through the C ABI. Links the DLL the C# side loads.
 add_executable(UiTransformTest src/UiTransformTest.cpp)

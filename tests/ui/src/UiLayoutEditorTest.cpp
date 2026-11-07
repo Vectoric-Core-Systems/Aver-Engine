@@ -300,6 +300,61 @@ int main() {
         setUiLayoutEditorLoc({});
     }
 
+    AVER_INFO("=== nested layouts ===");
+    {
+        const std::filesystem::path dir = std::filesystem::temp_directory_path() / "aver_ui_editor_use";
+        std::filesystem::remove_all(dir);
+        std::filesystem::create_directories(dir / "Parts");
+        const auto put = [&](const char* rel, const std::string& text) { writeFileText((dir / rel).string(), text); };
+        put("Main.ocui", uiStarterLayoutText());
+        put("Parts/Row.ocui",
+            "OCUI 2\nWIDGET RowRoot panel -\nSET RowRoot layout hstack\nWIDGET Label text RowRoot\nSET Label text Default\n"
+            "WIDGET Body panel RowRoot\nEXPOSE Title Label text\nSLOT Content Body\n");
+        put("Loop.ocui", "OCUI 2\nWIDGET LoopRoot panel -\nUSE Back Main.ocui LoopRoot\n");
+
+        UiLayoutEditor ed((dir / "Main.ocui").string());
+        const std::vector<std::string> layouts = ed.projectLayouts();
+        check(layouts.size() == 2 && layouts[0] == "Loop.ocui" && layouts[1] == "Parts/Row.ocui", "the palette lists the project's other layouts as USE paths");
+
+        const i32 row = ed.addUse("Parts/Row.ocui");
+        check(row > 0 && ed.doc().nodes[static_cast<usize>(row)].use && ed.dirty() && ed.canUndo(), "adding a layout is an undoable USE node");
+        check(ed.doc().nodes[static_cast<usize>(row)].props.name == "Row", "named after its file");
+        check(ed.previewErrors().empty(), "and its file is found under the content root");
+        const UiWidgetId label = ed.preview().find("Row/Label");
+        check(label != 0 && ed.nodeOf(label) == row, "the preview holds the used widgets, which belong to the USE node when picked");
+        check(ed.previewWidget(row) == ed.preview().find("Row"), "the USE node is the instance root");
+
+        std::string err;
+        const std::vector<UiExposedProp> ex = ed.exposedOf(row, &err);
+        check(ex.size() == 1 && ex[0].name == "Title" && ex[0].value[0] == "Default" && !ex[0].overridden, "its exposed properties are listed with their defaults");
+        check(ed.setOverride(row, "Title", "Hello") && ed.preview().get(ed.preview().find("Row/Label"))->text == "Hello", "an override reaches the preview");
+        check(ed.exposedOf(row)[0].overridden && ed.exposedOf(row)[0].value[0] == "Hello", "and the inspector's list");
+        ed.undo();
+        check(ed.preview().get(ed.preview().find("Row/Label"))->text == "Default", "undo takes it back");
+        ed.redo();
+        check(ed.clearOverride(row, "Title") && ed.preview().get(ed.preview().find("Row/Label"))->text == "Default", "clearing returns to the layout's value");
+
+        ed.select(row);
+        const i32 fill = ed.addWidget(UiWidgetKind::Button);
+        check(ed.setProperty(fill, "slot", "Content") && ed.preview().get(ed.preview().find("Button"))->parent == ed.preview().find("Row/Body"),
+              "a child with a slot lands in the used layout's slot");
+
+        check(ed.addUse("Loop.ocui") == -1 && ed.statusMessage().find("cycle") != std::string::npos, "a layout that uses this one is refused: a cycle");
+        const usize nodes = ed.doc().nodes.size();
+        check(ed.doc().nodes.size() == nodes, "and nothing was added");
+        check(ed.setUsePath(row, "Parts/Gone.ocui") && !ed.previewErrors().empty() && ed.preview().find("Row/Missing") != 0,
+              "a missing file is a placeholder with a message, not a failure");
+        check(ed.setUsePath(row, "Parts/Row.ocui") && ed.previewErrors().empty(), "and pointing back repairs it");
+
+        const i32 placed = ed.placeUseAt("Parts/Row.ocui", 10, 10);
+        check(placed > 0 && ed.doc().valid(), "a layout can be dropped on the canvas");
+
+        check(ed.save(&err), "it saves: " + err);
+        UiLayoutEditor again((dir / "Main.ocui").string());
+        check(again.loaded() && again.doc().usesV2() && uiLayoutFind(again.doc(), "Row") > 0 && again.previewErrors().empty(), "and reloads with the nested layout");
+        std::filesystem::remove_all(dir);
+    }
+
     AVER_INFO("=== palette panels ===");
     {
         const std::string file = tempFile("panels.ocui");

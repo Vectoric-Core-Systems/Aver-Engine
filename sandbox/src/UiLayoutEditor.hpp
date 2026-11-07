@@ -118,6 +118,23 @@ public:
     // there, positioned there when its parent places by anchors. Returns the new index or -1.
     i32 placeWidgetAt(ui::UiWidgetKind kind, f32 previewX, f32 previewY);
     i32 placePresetAt(usize preset, f32 previewX, f32 previewY);
+    i32 placeUseAt(const std::string& usePath, f32 previewX, f32 previewY);
+
+    // ---- nested layouts (USE) ----------------------------------------------------------------------
+    // Paths are relative to the project's content root (the nearest "Content" folder above this file, else this
+    // file's folder). A USE that would make a cycle is refused and the reason is in statusMessage().
+    i32 addUse(const std::string& usePath);                  // under the selection
+    bool setUsePath(i32 index, const std::string& usePath);
+    // Sets / clears an OVERRIDE of a USE node; one undo entry each. `valueText` is tokenised like a file record.
+    bool setOverride(i32 index, const std::string& name, std::string_view valueText);
+    bool clearOverride(i32 index, const std::string& name);
+    // The exposed properties of the layout a USE node names, with this instance's values.
+    std::vector<ui::UiExposedProp> exposedOf(i32 index, std::string* err = nullptr) const;
+    // The other .ocui files of the project, as USE paths.
+    std::vector<std::string> projectLayouts() const;
+    // What went wrong building the preview (a missing nested layout, a cycle) and the last refusal; empty when fine.
+    const std::vector<std::string>& previewErrors() const { return previewErrors_; }
+    const std::string& statusMessage() const { return status_; }
     // Moves the selection by a canvas drag of (dx, dy) PREVIEW pixels. Inside a stack or grid it
     // reorders among its siblings instead. `begin` records one undo entry for a whole drag.
     void dragSelected(f32 dx, f32 dy, bool begin);
@@ -144,7 +161,10 @@ private:
     void applyPreviewLoc();
     ui::UiRect designRectOfParent(i32 index) const;
     // Shared by the two drops: kind (or, when preset >= 0, that palette panel) at a preview point.
-    i32 placeAt(ui::UiWidgetKind kind, i64 preset, f32 previewX, f32 previewY);
+    i32 placeAt(ui::UiWidgetKind kind, i64 preset, const std::string* usePath, f32 previewX, f32 previewY);
+    ui::UiLayoutLoader loader() const;
+    std::string selfUsePath() const;          // this file as a USE path, "" when it is outside the content root
+    bool useAllowed(const std::string& usePath, i32 replacing);
 
     std::string path_;
     ui::UiLayoutDoc doc_;
@@ -156,6 +176,8 @@ private:
 
     ui::UiTree preview_;
     std::vector<ui::UiWidgetId> previewIds_;
+    std::vector<std::string> previewErrors_;
+    std::string status_;
     f32 previewW_ = 1920.0f, previewH_ = 1080.0f;
     const ui::UiTextMetrics* metrics_ = nullptr;   // last metrics given to layoutPreview
     ui::UiEstimatedMetrics estimate_;
@@ -174,12 +196,18 @@ private:
     void drawHierarchyRow(i32 index);
     void drawCanvas();
     void drawInspector();
-    bool drawProperty(const ui::UiPropDesc& d);
+    // `target` edits a scratch copy instead of the selected widget (an exposed property of a USE); `applied` then
+    // stores the result. `label` replaces the property's key as the caption.
+    bool drawProperty(const ui::UiPropDesc& d, ui::UiWidgetProps* target = nullptr,
+                      const std::function<void(const ui::UiWidgetProps&)>& applied = {}, const char* label = nullptr);
+    void drawUseInspector();
     // Under a text / placeholder / items field: the resolved "Shown:" line for a reference, else a Localize button.
     void drawLocalizeRow(const ui::UiPropDesc& d);
     void propEditBegin();
     void propEditEnd();
 
+    std::vector<std::string> layouts_;   // the palette's project layouts
+    int layoutsScanFrame_ = 0;
     bool interact_ = false;          // run the preview as a player would instead of editing it
     i32 zoomPercent_ = 0;            // 0 = fit
     i32 canvasDrag_ = 0;             // bits: 1 left, 2 right, 4 top, 8 bottom edge; 16 move; 0 none

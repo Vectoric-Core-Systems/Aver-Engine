@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 // The retained widget system as a game script sees it: widgets, layouts, events, input state.
 using System.Collections;
+using System.Runtime.InteropServices;
 
 namespace Aver.UI;
 
@@ -524,13 +525,16 @@ public static class UiSystem
     /// with <see cref="LastError"/> set.</summary>
     public static Widget OpenLayoutText(string ocui, bool applyEnvironment = true)
     {
+        Native.aver_ui_set_layout_reader(s_layoutReader);
         uint id = Native.aver_ui_layout_open(ocui ?? string.Empty, applyEnvironment ? 1 : 0);
         if (id == 0)
         {
             LastError = Native.Utf8(Native.aver_ui_layout_error());
+            LastWarnings = string.Empty;
             return Widget.None;
         }
         LastError = string.Empty;
+        LastWarnings = Native.Utf8(Native.aver_ui_layout_warnings());
         var root = new Widget(id);
         ResolveImages(root);
         return root;
@@ -547,7 +551,53 @@ public static class UiSystem
             LastError = $"cannot read '{path}': {ex.Message}";
             return Widget.None;
         }
+        try { s_openDir = Path.GetDirectoryName(Path.GetFullPath(path)); } catch (Exception) { s_openDir = null; }
         return OpenLayoutText(text, applyEnvironment);
+    }
+
+    /// <summary>Folders, besides the opened file's folder and its parents, where a nested layout's path (a <c>USE</c>
+    /// record in a layout) is looked up. A project's content folder goes here.</summary>
+    public static List<string> LayoutRoots { get; } = new();
+
+    /// <summary>What went wrong in the last open without stopping it, one per line: a nested layout that could not be
+    /// found, or an unknown slot or exposed name. Empty when nothing did.</summary>
+    public static string LastWarnings { get; private set; } = string.Empty;
+
+    private static readonly Native.LayoutReadFn s_layoutReader = ReadNestedLayout;   // static: the native side keeps the pointer
+    private static string? s_openDir;
+
+    private static string? ResolveLayoutPath(string path)
+    {
+        if (string.IsNullOrEmpty(path)) return null;
+        if (Path.IsPathRooted(path)) return File.Exists(path) ? path : null;
+        for (string? dir = s_openDir; !string.IsNullOrEmpty(dir); dir = Path.GetDirectoryName(dir))
+        {
+            string candidate = Path.Combine(dir, path);
+            if (File.Exists(candidate)) return candidate;
+        }
+        foreach (string root in LayoutRoots)
+        {
+            string candidate = Path.Combine(root, path);
+            if (File.Exists(candidate)) return candidate;
+        }
+        return File.Exists(path) ? path : null;
+    }
+
+    private static int ReadNestedLayout(string path, IntPtr output, int capacity)
+    {
+        string? full = ResolveLayoutPath(path);
+        if (full == null) return -1;
+        byte[] bytes;
+        try { bytes = File.ReadAllBytes(full); }
+        catch (Exception) { return -1; }
+        int offset = bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF ? 3 : 0;
+        int length = bytes.Length - offset;
+        if (length < capacity)
+        {
+            Marshal.Copy(bytes, offset, output, length);
+            Marshal.WriteByte(output, length, 0);
+        }
+        return length;
     }
 
     /// <summary>The widget subtree at <paramref name="root"/> as <c>.ocui</c> text, for saving a layout

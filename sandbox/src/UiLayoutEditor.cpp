@@ -47,6 +47,28 @@ UiWidgetId pickIn(const UiTree& t, const UiWidget& w, f32 x, f32 y) {
     return inside ? w.id : 0;
 }
 
+// The project's content root for an asset: the last "Content" folder above it, else the asset's own folder.
+std::string contentRoot(const std::string& assetPath) {
+    std::string p = assetPath;
+    std::replace(p.begin(), p.end(), '\\', '/');
+    usize found = std::string::npos;
+    usize at = 0;
+    while (at < p.size()) {
+        const usize s = p.find('/', at);
+        const usize end = s == std::string::npos ? p.size() : s;
+        if (s != std::string::npos && end - at == 7) {
+            std::string seg = p.substr(at, 7);
+            std::transform(seg.begin(), seg.end(), seg.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (seg == "content") found = end;
+        }
+        if (s == std::string::npos) break;
+        at = s + 1;
+    }
+    if (found != std::string::npos) return p.substr(0, found);
+    const usize slash = p.find_last_of('/');
+    return slash == std::string::npos ? std::string(".") : p.substr(0, slash);
+}
+
 } // namespace
 
 // ---- canvas maths ---------------------------------------------------------------------------------
@@ -156,6 +178,108 @@ UiLayoutEditorLoc g_loc;
 void setUiLayoutEditorLoc(UiLayoutEditorLoc loc) { g_loc = std::move(loc); }
 
 UiLayoutEditor::UiLayoutEditor(std::string path) : path_(std::move(path)) { loadFromDisk(); }
+
+// A USE path is looked up under the content root, then beside this file and in the folders above it.
+UiLayoutLoader UiLayoutEditor::loader() const {
+    const std::string self = path_;
+    return [self](const std::string& usePath, std::string& text) {
+        namespace fs = std::filesystem;
+        std::vector<fs::path> bases{fs::path(contentRoot(self))};
+        for (fs::path dir = fs::path(self).parent_path(); !dir.empty() && dir != dir.root_path(); dir = dir.parent_path())
+            bases.push_back(dir);
+        for (const fs::path& b : bases) {
+            std::error_code ec;
+            const fs::path candidate = b / usePath;
+            if (fs::is_regular_file(candidate, ec) && readFileText(candidate.string(), text)) return true;
+        }
+        return false;
+    };
+}
+
+std::string UiLayoutEditor::selfUsePath() const {
+    std::string self = path_, root = contentRoot(path_);
+    std::replace(self.begin(), self.end(), '\\', '/');
+    if (self.size() > root.size() + 1 && self.compare(0, root.size(), root) == 0 && self[root.size()] == '/') return self.substr(root.size() + 1);
+    return std::string();
+}
+
+bool UiLayoutEditor::useAllowed(const std::string& usePath, i32 replacing) {
+    UiLayoutDoc tmp = doc_;
+    if (replacing >= 0 && inRange(tmp, replacing) && tmp.nodes[static_cast<usize>(replacing)].use) tmp.nodes[static_cast<usize>(replacing)].use->path = usePath;
+    else if (uiLayoutAddUse(tmp, 0, usePath) < 0) { status_ = "That is not a layout path."; return false; }
+    std::string why;
+    if (!uiLayoutCheckUses(tmp, selfUsePath(), loader(), &why)) { status_ = why; return false; }
+    status_.clear();
+    return true;
+}
+
+std::vector<std::string> UiLayoutEditor::projectLayouts() const {
+    namespace fs = std::filesystem;
+    std::vector<std::string> out;
+    const fs::path root = contentRoot(path_);
+    const std::string self = selfUsePath();
+    std::error_code ec;
+    usize seen = 0;
+    for (fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec), end; !ec && it != end && seen < 5000; it.increment(ec), ++seen) {
+        if (!it->is_regular_file(ec)) continue;
+        std::string ext = it->path().extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (ext != ".ocui") continue;
+        std::string rel = fs::relative(it->path(), root, ec).generic_string();
+        if (rel.empty() || rel == self) continue;
+        out.push_back(std::move(rel));
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+std::vector<UiExposedProp> UiLayoutEditor::exposedOf(i32 index, std::string* err) const {
+    std::vector<UiExposedProp> out;
+    uiLayoutExposedProps(doc_, index, loader(), out, err);
+    return out;
+}
+
+i32 UiLayoutEditor::addUse(const std::string& usePath) {
+    if (!loaded_ || !useAllowed(usePath, -1)) return -1;
+    pushUndo();
+    const i32 added = uiLayoutAddUse(doc_, inRange(doc_, selected_) ? selected_ : 0, usePath);
+    if (added < 0) { history_.cancelPush(); return -1; }
+    selected_ = added;
+    dirty_ = true;
+    rebuildPreview();
+    return added;
+}
+
+bool UiLayoutEditor::setUsePath(i32 index, const std::string& usePath) {
+    if (!loaded_ || !inRange(doc_, index) || !doc_.nodes[static_cast<usize>(index)].use || usePath.empty()) return false;
+    if (doc_.nodes[static_cast<usize>(index)].use->path == usePath) return true;
+    if (!useAllowed(usePath, index)) return false;
+    pushUndo();
+    doc_.nodes[static_cast<usize>(index)].use->path = usePath;
+    dirty_ = true;
+    rebuildPreview();
+    return true;
+}
+
+bool UiLayoutEditor::setOverride(i32 index, const std::string& name, std::string_view valueText) {
+    if (!loaded_ || !inRange(doc_, index) || !doc_.nodes[static_cast<usize>(index)].use) return false;
+    std::vector<std::string> tokens;
+    if (!uiTokenize(valueText, tokens) || tokens.empty()) return false;
+    pushUndo();
+    if (!uiLayoutSetOverride(doc_, index, name, std::move(tokens))) { history_.cancelPush(); return false; }
+    dirty_ = true;
+    rebuildPreview();
+    return true;
+}
+
+bool UiLayoutEditor::clearOverride(i32 index, const std::string& name) {
+    if (!loaded_ || !inRange(doc_, index)) return false;
+    pushUndo();
+    if (!uiLayoutClearOverride(doc_, index, name)) { history_.cancelPush(); return false; }
+    dirty_ = true;
+    rebuildPreview();
+    return true;
+}
 
 // The preview shows the preview culture: its own tree resolves references through the host's store.
 void UiLayoutEditor::applyPreviewLoc() {
@@ -366,18 +490,22 @@ void UiLayoutEditor::applyAnchorPreset(UiAnchorPreset preset) {
     rebuildPreview();
 }
 
-i32 UiLayoutEditor::placeWidgetAt(UiWidgetKind kind, f32 px, f32 py) { return placeAt(kind, -1, px, py); }
+i32 UiLayoutEditor::placeWidgetAt(UiWidgetKind kind, f32 px, f32 py) { return placeAt(kind, -1, nullptr, px, py); }
 
-i32 UiLayoutEditor::placePresetAt(usize preset, f32 px, f32 py) { return placeAt(UiWidgetKind::Panel, static_cast<i64>(preset), px, py); }
+i32 UiLayoutEditor::placePresetAt(usize preset, f32 px, f32 py) { return placeAt(UiWidgetKind::Panel, static_cast<i64>(preset), nullptr, px, py); }
 
-i32 UiLayoutEditor::placeAt(UiWidgetKind kind, i64 preset, f32 px, f32 py) {
+i32 UiLayoutEditor::placeUseAt(const std::string& usePath, f32 px, f32 py) { return placeAt(UiWidgetKind::Panel, -1, &usePath, px, py); }
+
+i32 UiLayoutEditor::placeAt(UiWidgetKind kind, i64 preset, const std::string* usePath, f32 px, f32 py) {
     if (!loaded_) return -1;
+    if (usePath && !useAllowed(*usePath, -1)) return -1;
     i32 parent = nodeOf(uiEditorPick(preview_, px, py));
     if (parent < 0) parent = 0;
     while (parent > 0 && !isContainer(doc_.nodes[static_cast<usize>(parent)].props.kind))
         parent = doc_.nodes[static_cast<usize>(parent)].parent;
     pushUndo();
-    const i32 added = preset >= 0 ? uiLayoutAddPreset(doc_, parent, static_cast<usize>(preset)) : uiLayoutAdd(doc_, parent, kind);
+    const i32 added = usePath ? uiLayoutAddUse(doc_, parent, *usePath)
+                              : (preset >= 0 ? uiLayoutAddPreset(doc_, parent, static_cast<usize>(preset)) : uiLayoutAdd(doc_, parent, kind));
     if (added < 0) { history_.cancelPush(); return -1; }
     const UiWidgetProps& pp = doc_.nodes[static_cast<usize>(parent)].props;
     if (pp.layout == UiLayoutMode::None) {
@@ -459,17 +587,21 @@ void UiLayoutEditor::layoutPreview(const UiTextMetrics& m) { preview_.layout(m);
 
 void UiLayoutEditor::rebuildPreview() {
     ++structureVersion_;
+    status_.clear();
     preview_.clear();
     applyPreviewLoc();
     preview_.setTheme(uiBuiltinTheme(doc_.theme));
     preview_.setDpi(doc_.dpi);
     preview_.setViewport({0, 0, previewW_, previewH_});
-    previewIds_.assign(doc_.nodes.size(), 0);
-    for (usize i = 0; i < doc_.nodes.size(); ++i) {
-        const UiLayoutNode& n = doc_.nodes[i];
-        const UiWidgetId par = n.parent < 0 ? 0 : previewIds_[static_cast<usize>(n.parent)];
-        previewIds_[i] = preview_.createFrom(n.props, par);
+    // Nested layouts are loaded for the preview; on a cycle the preview shows placeholders instead of nothing.
+    UiInstantiateResult built = uiInstantiateLayoutEx(doc_, preview_, 0, loader(), selfUsePath());
+    previewErrors_ = built.errors;
+    if (!built.root) {
+        preview_.clear();
+        built = uiInstantiateLayoutEx(doc_, preview_, 0, UiLayoutLoader{});
     }
+    previewIds_ = built.nodeIds;
+    previewIds_.resize(doc_.nodes.size(), 0);
     preview_.layout(metrics_ ? *metrics_ : static_cast<const UiTextMetrics&>(estimate_));
 }
 
@@ -496,10 +628,11 @@ UiRect UiLayoutEditor::designRectOfParent(i32 index) const {
     return {r.x / s, r.y / s, r.w / s, r.h / s};
 }
 
+// A widget inside a used layout belongs to the USE node that made it.
 i32 UiLayoutEditor::nodeOf(UiWidgetId id) const {
-    if (id == 0) return -1;
-    for (usize i = 0; i < previewIds_.size(); ++i)
-        if (previewIds_[i] == id) return static_cast<i32>(i);
+    for (const UiWidget* w = preview_.get(id); w; w = w->parent ? preview_.get(w->parent) : nullptr)
+        for (usize i = 0; i < previewIds_.size(); ++i)
+            if (previewIds_[i] == w->id) return static_cast<i32>(i);
     return -1;
 }
 
@@ -632,8 +765,9 @@ void UiLayoutEditor::propEditEnd() {
     propEditing_ = false;
 }
 
-bool UiLayoutEditor::drawProperty(const UiPropDesc& d) {
-    UiWidgetProps& p = doc_.nodes[static_cast<usize>(selected_)].props;
+bool UiLayoutEditor::drawProperty(const UiPropDesc& d, UiWidgetProps* target,
+                                  const std::function<void(const UiWidgetProps&)>& applied, const char* label) {
+    UiWidgetProps& p = target ? *target : doc_.nodes[static_cast<usize>(selected_)].props;
     std::vector<std::string> tokens;
     d.get(p, tokens);
 
@@ -642,8 +776,8 @@ bool UiLayoutEditor::drawProperty(const UiPropDesc& d) {
     bool immediate = false;    // a click rather than a drag: the edit begins and ends this frame
     const auto fl = [](const std::string& s) { f32 v = 0; uiParseFloat(s, v); return v; };
 
-    ImGui::PushID(d.key);
-    ImGui::TextUnformatted(d.key);
+    ImGui::PushID(label ? label : d.key);
+    ImGui::TextUnformatted(label ? label : d.key);
     ImGui::SetNextItemWidth(-1);
     switch (d.type) {
         case UiPropType::Float: {
@@ -758,12 +892,13 @@ bool UiLayoutEditor::drawProperty(const UiPropDesc& d) {
         if (uiSetProp(p, d.key, newText)) {
             propEdited_ = true;
             dirty_ = true;
+            if (applied) applied(p);
             rebuildPreview();
         }
     }
     if (immediate && changed) propEditEnd();
     if (ImGui::IsItemDeactivated()) propEditEnd();
-    if (std::strcmp(d.key, "text") == 0 || std::strcmp(d.key, "placeholder") == 0 || std::strcmp(d.key, "items") == 0)
+    if (!target && (std::strcmp(d.key, "text") == 0 || std::strcmp(d.key, "placeholder") == 0 || std::strcmp(d.key, "items") == 0))
         drawLocalizeRow(d);
     ImGui::PopID();
     return changed;
@@ -872,8 +1007,13 @@ void UiLayoutEditor::drawInspector() {
         }
     }
 
+    const bool isUse = doc_.nodes[static_cast<usize>(selected_)].use.has_value();
+    if (isUse) drawUseInspector();
+
     const char* const groups[] = {"Placement", "Layout", "Appearance", "Content", "Value", "Navigation", "Accessibility", "Root"};
     for (const char* g : groups) {
+        // A used layout brings its own content: the instance only places it.
+        if (isUse && std::strcmp(g, "Placement") != 0 && std::strcmp(g, "Appearance") != 0) continue;
         std::vector<const UiPropDesc*> shown;
         for (const UiPropDesc& d : uiProperties()) {
             if (std::strcmp(d.group, g) != 0) continue;
@@ -888,6 +1028,51 @@ void UiLayoutEditor::drawInspector() {
     }
 }
 
+// A USE node: the layout it instantiates and the properties that layout exposes.
+void UiLayoutEditor::drawUseInspector() {
+    const i32 index = selected_;
+    const std::string usePath = doc_.nodes[static_cast<usize>(index)].use->path;
+    ImGui::Separator();
+    ImGui::TextUnformatted("Layout");
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::BeginCombo("##usepath", usePath.c_str())) {
+        for (const std::string& l : projectLayouts())
+            if (ImGui::Selectable(l.c_str(), l == usePath)) setUsePath(index, l);
+        ImGui::EndCombo();
+    }
+    if (!status_.empty()) ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.45f, 1.0f), "%s", status_.c_str());
+    for (const std::string& e : previewErrors_)
+        if (e.find(usePath) != std::string::npos) ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.45f, 1.0f), "%s", e.c_str());
+
+    std::string err;
+    const std::vector<UiExposedProp> exposed = exposedOf(index, &err);
+    if (exposed.empty()) {
+        ImGui::TextDisabled("%s", err.empty() ? "This layout exposes no properties (EXPOSE records)." : err.c_str());
+    } else {
+        ImGui::Separator();
+        ImGui::TextUnformatted("Exposed properties");
+        for (const UiExposedProp& ep : exposed) {
+            const UiPropDesc* d = uiFindProperty(ep.key);
+            if (!d) continue;
+            UiWidgetProps scratch = uiDefaultProps(UiWidgetKind::Panel);
+            d->set(scratch, ep.value);
+            const std::string name = ep.name;
+            drawProperty(*d, &scratch, [this, index, name, d](const UiWidgetProps& p) {
+                std::vector<std::string> tokens;
+                d->get(p, tokens);
+                uiLayoutSetOverride(doc_, index, name, std::move(tokens));
+            }, ep.name.c_str());
+            if (ep.overridden) {
+                ImGui::PushID(("reset" + name).c_str());
+                if (ImGui::SmallButton("reset to the layout's value")) clearOverride(index, name);
+                ImGui::PopID();
+            }
+        }
+    }
+    ImGui::TextDisabled("Children of this node fill the layout's slots (set their 'slot').");
+    ImGui::Separator();
+}
+
 void UiLayoutEditor::drawHierarchyRow(i32 index) {
     const std::vector<i32> children = uiLayoutChildren(doc_, index);
     const UiWidgetProps& p = doc_.nodes[static_cast<usize>(index)].props;
@@ -898,7 +1083,9 @@ void UiLayoutEditor::drawHierarchyRow(i32 index) {
     if (selected_ == index) flags |= ImGuiTreeNodeFlags_Selected;
 
     ImGui::PushID(index);
-    const bool open = ImGui::TreeNodeEx("##row", flags, "%s  (%s)", p.name.c_str(), uiKindName(p.kind));
+    const UiLayoutNode& node = doc_.nodes[static_cast<usize>(index)];
+    const bool open = node.use ? ImGui::TreeNodeEx("##row", flags, "%s  (layout: %s)", p.name.c_str(), node.use->path.c_str())
+                               : ImGui::TreeNodeEx("##row", flags, "%s  (%s)", p.name.c_str(), uiKindName(p.kind));
     if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) select(index);
     if (index != 0 && ImGui::BeginDragDropSource()) {
         ImGui::SetDragDropPayload("AVER_UI_NODE", &index, sizeof index);
@@ -918,6 +1105,10 @@ void UiLayoutEditor::drawHierarchyRow(i32 index) {
         if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("AVER_UI_PRESET")) {
             select(index);
             addPreset(static_cast<usize>(*static_cast<const i32*>(pl->Data)));
+        }
+        if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("AVER_UI_USE")) {
+            select(index);
+            addUse(std::string(static_cast<const char*>(pl->Data)));
         }
         ImGui::EndDragDropTarget();
     }
@@ -969,6 +1160,27 @@ void UiLayoutEditor::drawPalette() {
             if (ImGui::BeginDragDropSource()) {
                 ImGui::SetDragDropPayload("AVER_UI_PRESET", &index, sizeof index);
                 ImGui::Text("New %s", presets[k].label);
+                ImGui::EndDragDropSource();
+            }
+            ImGui::PopID();
+        }
+    }
+    if (ImGui::CollapsingHeader("Layouts", ImGuiTreeNodeFlags_DefaultOpen)) {
+        // The project's other .ocui files, rescanned when the palette is not busy; a few hundred paths at most.
+        if (layoutsScanFrame_ == 0 || ImGui::GetFrameCount() - layoutsScanFrame_ > 120) {
+            layouts_ = projectLayouts();
+            layoutsScanFrame_ = ImGui::GetFrameCount();
+        }
+        if (layouts_.empty()) ImGui::TextDisabled("No other .ocui files in the project.");
+        for (usize k = 0; k < layouts_.size(); ++k) {
+            ImGui::PushID(2000 + static_cast<int>(k));
+            ImGui::Selectable(layouts_[k].c_str());
+            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) addUse(layouts_[k]);
+            if (ImGui::BeginDragDropSource()) {
+                char buf[512];
+                std::snprintf(buf, sizeof buf, "%s", layouts_[k].c_str());
+                ImGui::SetDragDropPayload("AVER_UI_USE", buf, std::strlen(buf) + 1);
+                ImGui::Text("Use %s", layouts_[k].c_str());
                 ImGui::EndDragDropSource();
             }
             ImGui::PopID();
@@ -1212,6 +1424,9 @@ void UiLayoutEditor::drawCanvas() {
             if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("AVER_UI_PRESET")) {
                 placePresetAt(static_cast<usize>(*static_cast<const i32*>(pl->Data)), mouse.x, mouse.y);
             }
+            if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("AVER_UI_USE")) {
+                placeUseAt(std::string(static_cast<const char*>(pl->Data)), mouse.x, mouse.y);
+            }
             ImGui::EndDragDropTarget();
         }
 
@@ -1242,6 +1457,10 @@ void UiLayoutEditor::draw(Engine& e) {
         return;
     }
     drawToolbar();
+    if (!status_.empty()) ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.45f, 1.0f), "%s", status_.c_str());
+    else if (!previewErrors_.empty())
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.4f, 1.0f), "%s%s", previewErrors_[0].c_str(),
+                           previewErrors_.size() > 1 ? (" (+" + std::to_string(previewErrors_.size() - 1) + " more)").c_str() : "");
     ImGui::Separator();
 
     const f32 dpi = ImGui::GetFontSize() / 16.0f;

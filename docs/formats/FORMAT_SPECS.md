@@ -1717,6 +1717,40 @@ ROOT top
 - **Decorators** (one child): `NODE <id> rt <child> [at x y z] [rot qx qy qz qw]`, `NODE <id> com <child> at x y z` (the centre of mass moves, the geometry does not), `NODE <id> scale <child> sx sy sz`. **Compounds**: `NODE <id> compound static|mutable`; a mutable compound belongs to one body, so it may be referenced once.
 - **Validation** (on parse and in the editor): numbers finite and in the physics ABI's ranges, every reference defined, no cycle, a compound has 1 to 65536 children, at most 4096 nodes. A leaf or decorator used by several parents is built once and shared.
 - **Forward compatibility**: an unknown record or option key is skipped with one warning per file; a newer `OCSHAPE` version is refused. Written canonically: only the options that are set, `at`/`rot`/`user` only when not at their defaults, so write-then-parse-then-write is byte-identical (`OcShapeTest`).
+## 11n. `.ocui` — UI layout (text, versions 1 and 2)
+
+The widget tree of one screen, written by the layout designer and read by `Aver.UI` (`modules/ui/UiLayoutAsset.hpp`, the C ABI `aver_ui_layout_open` and C# `UiSystem.OpenLayout`). The OC text dialect: `#` comments, `KEY value` records, `"quoted strings"` with `\"` `\\` `\n`. The model and property list are in [../GAME_UI.md](../GAME_UI.md).
+
+**Version 1** (unchanged): `OCUI 1`, `NAME`, `THEME`, `SCALE <mode> <refW> <refH>`, then `WIDGET <name> <kind> <parent|->` (one root, parents first, unique names) each followed by `SET <name> <key> <values...>` for every property that differs from the kind's default. Unknown records and unknown `SET` keys are skipped. The writer prints `write(parse(write(doc))) == write(doc)`.
+
+**Version 2** adds records for nested layouts and the later UI runtime. A document that uses none of them is written as `OCUI 1`, byte for byte as before (the header is `OCUI 2` only when a record below is present). A version 1 file is read exactly as before: the records below, if one appears in a file that says `OCUI 1`, are unknown records and skipped. A reader that only knows version 1 refuses `OCUI 2` (`unsupported layout version`).
+
+| Record | Meaning |
+|---|---|
+| `USE <name> <path> <parent>` | A nested layout: a node of the tree standing for the whole `.ocui` at `<path>` (the host resolves it; the designer writes it relative to the content root). It cannot be the root. `SET <name> ...` after it is the instance's placement, laid over the used layout's root widget (every property that differs from a new panel). The instance root takes `<name>`; the used layout's other widgets are named `<name>/<their name>`, and names they refer to (`navUp`, `defaultFocus`, ...) follow. |
+| `OVERRIDE <instance> <exposed> <values...>` | Sets the property the used layout exposes under `<exposed>` (the values are the property's tokens, as in `SET`). One per exposed name; a later one replaces. |
+| `EXPOSE <name> <widget> <key>` | In the used layout: `<name>` stands for property `<key>` of `<widget>`, which a `USE` may override. Names are unique; `<widget>` must exist. |
+| `SLOT <name> <widget>` | In the used layout: the children of a `USE` of it go under `<widget>`. A child of the `USE` node picks a slot with `SET <child> slot <name>`; with none it is appended to the instance root. |
+| `ANIM <name> <widget> <property> [<time> <value>]...` | One animation track (tracks sharing a `<name>` make an animation). Parsed and kept; the runtime is a later step. |
+| `BIND <widget> <property> <path> [mode...]` | A property binding. Parsed and kept. |
+| `EVENT <widget> <event> <action> <target> [args...]` | A designer event hookup (`<action>` is `command`, `graph` or `method`). Parsed and kept. |
+
+Written order: header, widgets (a `USE` in tree order, followed by its `SET` and `OVERRIDE` lines), a blank line, `EXPOSE` then `SLOT`, a blank line then `ANIM`, then `BIND`, then `EVENT` (each group after a blank line, only if non-empty). Reading accepts any order after the widgets they name.
+
+Loading a `USE`: the file is read through the host's loader; a file that is missing or unreadable leaves a visible placeholder panel and an error (the rest of the layout builds); an unknown slot or exposed name is an error that skips that item. A cycle (`A` uses `B` uses `A`, or a layout that uses itself, compared without case or slash style) or nesting past 16 levels fails the whole open with an error naming the chain. Capturing a built tree (`aver_ui_layout_capture`) writes the used widgets flattened, as plain widgets.
+
+```
+OCUI 2
+THEME dark
+SCALE height 1920 1080
+
+WIDGET Root panel -
+
+USE Row1 UI/Row.ocui Root
+SET Row1 width 300
+OVERRIDE Row1 Title "Hello"
+```
+
 ## 12. Versioning & compatibility
 
 - **Two version axes:** `ContainerVersion` (the `AVR1` framework) and `ContentVersion` (per-subtype schema). Text formats carry a single `OC<NAME> <n>` line.

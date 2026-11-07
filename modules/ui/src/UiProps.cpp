@@ -239,6 +239,7 @@ std::vector<UiPropDesc> build() {
     v.push_back(eprop("alignV", kPlace, &P::alignV, {"start", "center", "end", "stretch"}));
     v.push_back(fprop("fillW", kPlace, &P::fillW, 0, 10));
     v.push_back(fprop("fillH", kPlace, &P::fillH, 0, 10));
+    v.push_back(sprop("slot", kPlace, &P::slot));
 
     // ---- children layout ----
     v.push_back(insetsProp("padding", kLay, &P::padding));

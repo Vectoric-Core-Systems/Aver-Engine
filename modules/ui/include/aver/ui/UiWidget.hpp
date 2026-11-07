@@ -29,6 +29,7 @@ struct UiWidgetProps {
     UiInsets padding{};
     UiAlign alignH = UiAlign::Stretch, alignV = UiAlign::Stretch;
     f32 fillW = 0, fillH = 0;   // flex weights in a stack parent
+    std::string slot;           // a child of a USE: the used layout's SLOT it fills (empty = the instance root)
 
     // ---- layout of the children ---------------------------------------------------------------
     UiLayoutMode layout = UiLayoutMode::None;
