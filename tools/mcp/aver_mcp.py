@@ -1340,6 +1340,20 @@ def _read_log(since, grep=None, limit=200):
     return [l.rstrip() for l in new][-limit:], len(lines)
 
 
+def _first_match(since, pattern):
+    """The first line after `since` matching `pattern`, and the line after it: a wait goes on from there, so a second
+    line that arrived in the same read is still ahead of the next wait."""
+    path = _session["log"]
+    if not path or not os.path.isfile(path):
+        return None, since
+    with open(path, encoding="utf-8", errors="replace") as f:
+        lines = f.read().splitlines()
+    for i in range(since, len(lines)):
+        if re.search(pattern, lines[i]):
+            return lines[i].rstrip(), i + 1
+    return None, len(lines)
+
+
 def _session_summary():
     lines, total = _read_log(0, limit=100000)
     return {
@@ -1386,8 +1400,14 @@ def tool_session(args):
         os.makedirs(log_dir, exist_ok=True)
         log_path = os.path.join(log_dir, "session-%d.log" % int(time.time()))
         logf = open(log_path, "w", encoding="utf-8", errors="replace")
-        proc = subprocess.Popen(argv, cwd=os.path.dirname(exe), stdout=logf, stderr=subprocess.STDOUT,
-                                stdin=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+        # Out of this server's job where Windows allows it, so a restart of the server does not take the editor with it.
+        flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        try:
+            proc = subprocess.Popen(argv, cwd=os.path.dirname(exe), stdout=logf, stderr=subprocess.STDOUT,
+                                    stdin=subprocess.DEVNULL, creationflags=flags | getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0))
+        except OSError:
+            proc = subprocess.Popen(argv, cwd=os.path.dirname(exe), stdout=logf, stderr=subprocess.STDOUT,
+                                    stdin=subprocess.DEVNULL, creationflags=flags)
         logf.close()
         _session.update({"proc": proc, "pid": proc.pid, "log": log_path, "port": port, "exe": exe,
                          "argv": argv, "offset": 0})
@@ -1428,10 +1448,10 @@ def tool_session(args):
         since = int(args.get("since", _session["offset"]))
         deadline = time.time() + float(args.get("timeout", 120))
         while True:
-            lines, nxt = _read_log(since, pattern, 20)
-            if lines:
+            line, nxt = _first_match(since, pattern)
+            if line is not None:
                 _session["offset"] = nxt
-                return {"ok": True, "matched": lines, "next": nxt}
+                return {"ok": True, "matched": [line], "next": nxt}
             if not _pid_alive(_session["pid"]):
                 return {"ok": False, "error": "the editor exited before the pattern appeared", "next": nxt,
                         **_session_summary()}
@@ -1728,7 +1748,7 @@ TOOLS = [
                        "checkout or under %LOCALAPPDATA%\\Aver (e.g. %LOCALAPPDATA%\\Aver\\EngineDev\\08-gdint\\bin). "
                        "status {} -> {running, pid, port, log, errors}. log {since?, grep?, max?} -> {lines, next}: "
                        "lines after `since` (default: where the last log/wait ended). wait {pattern, since?, timeout?} "
-                       "-> the first lines matching the regex. stop {force?, timeout?} -> Stops Play, closes the "
+                       "-> the first line matching the regex; the next log/wait starts after it. stop {force?, timeout?} -> Stops Play, closes the "
                        "window; force ends the process when a dialog keeps it open.\n"
                        "Driving Play: aver_editor abi editor::play / editor::stop / editor::play_state (state, the "
                        "open level, the level Play began on after a level travel) / editor::viewport (the 3D view in "
