@@ -31,6 +31,7 @@ public enum MeshGiMode
 public readonly partial struct Entity
 {
     private const int RenderShadowMask = 0x3, RenderGiShift = 2, RenderGiMask = 0x3 << RenderGiShift, RenderIgnoreOcclusionBit = 0x10;   // kRender* in Components.hpp
+    private const int RenderFirstPersonBit = 0x20, RenderFirstPersonCastsBit = 0x40;
 
     /// <summary>Sets whether the mesh casts shadows, or only shadows. False for a dead entity or one without a mesh.</summary>
     public bool SetShadowMode(MeshShadowMode mode)
@@ -71,6 +72,29 @@ public readonly partial struct Entity
 
     /// <summary>True when the mesh skips the occlusion test.</summary>
     public bool GetIgnoreOcclusion() => HasComponent(Component.MeshRenderer) && (GetInt("CMeshRenderer.renderFlags") & RenderIgnoreOcclusionBit) != 0;
+
+    /// <summary>Draws the mesh with the player view's first-person lens, in front of the world (a held weapon, arms): never culled by the main view,
+    /// shadowed where it really is, casting no shadow unless <see cref="SetFirstPersonCastsShadow"/>. Turning it off clears that too.</summary>
+    public bool SetFirstPerson(bool on)
+    {
+        if (!HasComponent(Component.MeshRenderer)) return false;
+        int flags = GetInt("CMeshRenderer.renderFlags");
+        return SetInt("CMeshRenderer.renderFlags", on ? flags | RenderFirstPersonBit : flags & ~(RenderFirstPersonBit | RenderFirstPersonCastsBit));
+    }
+
+    /// <summary>True when the mesh draws as first person.</summary>
+    public bool GetFirstPerson() => HasComponent(Component.MeshRenderer) && (GetInt("CMeshRenderer.renderFlags") & RenderFirstPersonBit) != 0;
+
+    /// <summary>Lets a first-person mesh cast shadows from its true position. Ignored by a mesh that is not first person.</summary>
+    public bool SetFirstPersonCastsShadow(bool casts)
+    {
+        if (!HasComponent(Component.MeshRenderer)) return false;
+        int flags = GetInt("CMeshRenderer.renderFlags");
+        return SetInt("CMeshRenderer.renderFlags", casts ? flags | RenderFirstPersonCastsBit : flags & ~RenderFirstPersonCastsBit);
+    }
+
+    /// <summary>True when the mesh's first-person cast flag is set.</summary>
+    public bool GetFirstPersonCastsShadow() => HasComponent(Component.MeshRenderer) && (GetInt("CMeshRenderer.renderFlags") & RenderFirstPersonCastsBit) != 0;
 
     /// <summary>Biases the mesh's LOD choice, in stops: +1 halves the pixel-error threshold (a finer level is picked sooner), -1 doubles it. Clamped to -8..8.</summary>
     public bool SetLodBias(float stops) =>

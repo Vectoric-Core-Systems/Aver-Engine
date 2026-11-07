@@ -457,6 +457,7 @@ LevelInstance instantiate(const fmt::OcWorldData& w, const InstantiateOptions& o
             // set and then cleared -- the two read the same, but only one matches p.visible being
             // the single source of truth a save later reads back out of this same bit.
             if (p.visible) mr->flags |= scene::kMeshRendererVisible;
+            mr->renderFlags = p.renderFlags & scene::kRenderFlagsKnown;   // `renderflags`: shadow/GI modes, occlusion opt-out, first person
             if (mr->material && opt.bindMaterial) opt.bindMaterial(mr->material, p.material);
         }
 

@@ -418,6 +418,15 @@ void SandboxApp::applyCollideTo(const EditCmd& c, bool undoing) {
     }
 }
 
+void SandboxApp::applyRenderFlagsTo(const EditCmd& c, bool undoing) {
+    scene::World& w = scene::World::instance();
+    for (const EditCmd::RenderFlagsChange& rc : c.renderFlags) {
+        const scene::Entity e = entityForEdit(rc.id);
+        if (e == scene::kInvalidEntity || !w.valid(e)) continue;
+        if (auto* mr = w.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer)) mr->renderFlags = undoing ? rc.before : rc.after;
+    }
+}
+
 // OBJECT ANIMATION, THE WRITE HALF: entityAnim_ is what saveLevel writes back as the anim/animspeed/
 // animtime/animonce tokens, and the CAnimator is made to match it -- clip id = fnv1a64 of the path (the
 // spelling every content id uses), and the authored time/speed/flags, so a clock Play advanced never
@@ -1283,6 +1292,7 @@ void SandboxApp::undo() {
         case EditCmd::Kind::PlacedComponent: applyPlacedComponentState(c.id, c.pcType, c.pcBefore); break;
         case EditCmd::Kind::Visibility: applyVisibilityTo(c, /*undoing=*/true); break;
         case EditCmd::Kind::Collision:  applyCollideTo(c, /*undoing=*/true); break;
+        case EditCmd::Kind::RenderFlags: applyRenderFlagsTo(c, /*undoing=*/true); break;
         case EditCmd::Kind::Animation:  applyAnimationTo(c, /*undoing=*/true); break;
         case EditCmd::Kind::Prefab:     if (c.prefab) prefabModel_.undo(*c.prefab);
                                         sel_ = -1; selEntity_ = scene::kInvalidEntity; break;
@@ -1353,6 +1363,7 @@ void SandboxApp::redo() {
         case EditCmd::Kind::PlacedComponent: applyPlacedComponentState(c.id, c.pcType, c.pcAfter); break;
         case EditCmd::Kind::Visibility: applyVisibilityTo(c, /*undoing=*/false); break;
         case EditCmd::Kind::Collision:  applyCollideTo(c, /*undoing=*/false); break;
+        case EditCmd::Kind::RenderFlags: applyRenderFlagsTo(c, /*undoing=*/false); break;
         case EditCmd::Kind::Animation:  applyAnimationTo(c, /*undoing=*/false); break;
         case EditCmd::Kind::Prefab:     if (c.prefab) prefabModel_.redo(*c.prefab);
                                         sel_ = -1; selEntity_ = scene::kInvalidEntity; break;
