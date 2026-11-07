@@ -821,8 +821,9 @@ struct VSOut { float4 pos : SV_POSITION; float3 nrmWS : NORMAL; float3 wpos : TE
 // The clip position of a scene vertex. A draw flagged first person (bit 31 of _objPad, IDevice::setDrawFirstPerson) projects through the first-person
 // view-projection, whose depth is squeezed into the front slab; everything else is gViewProj. ONLY the position moves: wpos and the normals stay true
 // world values, so lighting, shadows, fog and GI see the real place. With no first-person camera set gFpViewProj equals gViewProj.
+bool averDrawIsFirstPerson() { return (asuint(_objPad) & 0x80000000u) != 0u; }
 float4 averScenePos(float4 wp) {
-    return (asuint(_objPad) & 0x80000000u) != 0u ? mul(wp, gFpViewProj) : mul(wp, gViewProj);
+    return averDrawIsFirstPerson() ? mul(wp, gFpViewProj) : mul(wp, gViewProj);
 }
 
 // Transforms one scene vertex to clip space, keeping world position and normal.

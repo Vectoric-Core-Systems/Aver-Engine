@@ -254,7 +254,7 @@ public:
     // First-person step 6: in a ray-driven frame the first-person meshes (kept out of the primary rays) are drawn over the result by the device,
     // through the raster scene shader (never the ray-queried one), sun-shadowed by the nearest cascade that shadowPass renders for them.
     bool wantsFirstPersonOverlay() const override { return rayDrivenActive() && !graphStale() && !debugViewActive(); }
-    rhi::PipelineHandle firstPersonOverlayPipeline(u32 fxKey) const override;
+    rhi::PipelineHandle firstPersonOverlayPipeline(u32 fxKey, bool gbuffer) const override;
     bool firstPersonOverlayConstants(const void** data, u32* bytes) const override;
     // The cascades shadowPass renders: `fitted` normally, none with ray tracing on (rays shadow everything), except one (the nearest) for a
     // ray-driven frame drawing a first-person overlay. `mainReads` says whether the frame's own readers (raster scene, particles, fog) may

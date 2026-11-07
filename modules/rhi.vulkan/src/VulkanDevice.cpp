@@ -2789,7 +2789,7 @@ void VulkanDevice::replayFirstPersonDraws(VkCommandBuffer cmd) {
     PipelineHandle bound = 0;
     for (const BlendedDraw& fd : firstPersonDraws_) {
         if (fd.mesh == 0 || fd.mesh > meshes_.size() || !meshes_[fd.mesh - 1].alive) continue;
-        const PipelineHandle pso = owner->firstPersonOverlayPipeline(drawMaterialFxKey(fd.binding.constants, fd.binding.bytes));
+        const PipelineHandle pso = owner->firstPersonOverlayPipeline(drawMaterialFxKey(fd.binding.constants, fd.binding.bytes), /*gbuffer=*/false);   // no Vulkan G-buffer yet
         if (!pso) continue;
         if (pso != bound) {
             rhiContext_->setPipeline(pso);

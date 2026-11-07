@@ -857,10 +857,11 @@ public:
 
     // First-person overlay (docs/plans/FIRST_PERSON.md step 6). True when this feature suppresses the scene but wants the opaque draws flagged first
     // person (IDevice::setDrawFirstPerson) captured and replayed over its scene pass, after the sky and before the blended replay, through
-    // firstPersonOverlayPipeline with firstPersonOverlayConstants. The pipeline draws one colour target with depth test and write on.
+    // firstPersonOverlayPipeline with firstPersonOverlayConstants, depth test and write on.
     virtual bool wantsFirstPersonOverlay() const { return false; }
-    // The overlay's pipeline for a draw whose material variant key is `fxKey` (0 = none), or 0 to drop the draw.
-    virtual PipelineHandle firstPersonOverlayPipeline(u32 fxKey) const { (void)fxKey; return 0; }
+    // The overlay's pipeline for a draw whose material variant key is `fxKey` (0 = none), or 0 to drop the draw. `gbuffer`: the scene's G-buffer
+    // targets are bound with the colour (velocity, view Z, normal), so the overlay writes them too and the resolve after it sees the meshes.
+    virtual PipelineHandle firstPersonOverlayPipeline(u32 fxKey, bool gbuffer) const { (void)fxKey; (void)gbuffer; return 0; }
     virtual bool firstPersonOverlayConstants(const void** data, u32* bytes) const { return sceneConstants(data, bytes); }
 
     // Draws depth-tested, blended geometry into the scene after opaque drawMesh and sky.

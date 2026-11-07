@@ -6093,7 +6093,7 @@ void D3D12Device::replayFirstPersonDraws(const D3D12_VIEWPORT& vp, const D3D12_R
     PipelineHandle bound = 0;
     for (const BlendedDraw& fd : firstPersonDraws_) {
         if (fd.mesh == 0 || fd.mesh > meshes_.size() || !meshes_[fd.mesh - 1].alive) continue;
-        const PipelineHandle pso = owner->firstPersonOverlayPipeline(drawMaterialFxKey(fd.binding.constants, fd.binding.bytes));
+        const PipelineHandle pso = owner->firstPersonOverlayPipeline(drawMaterialFxKey(fd.binding.constants, fd.binding.bytes), sceneRtvCount_ == 4);
         if (!pso) continue;
         if (pso != bound) {
             rhiContext_->setPipeline(pso);

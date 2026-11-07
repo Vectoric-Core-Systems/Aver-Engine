@@ -9475,9 +9475,9 @@ rhi::PipelineHandle VoxiRenderer::scenePipelineFx(u32 key, bool meshExtra, bool 
 }
 
 // First-person step 6: the overlay's pipeline. Always a raster scene pipeline (gi layout, no AVER_RT): a material variant's plain twin when it is
-// built (createFxPipelines compiles raster shaders in every frame), else the ordinary raster scene pipeline. Never the G-buffer twin: the overlay
-// draws after the ray-driven resolve into the scene colour alone.
-rhi::PipelineHandle VoxiRenderer::firstPersonOverlayPipeline(u32 fxKey) const {
+// built (createFxPipelines compiles raster shaders in every frame), else the ordinary raster scene pipeline; the G-buffer twin when the device has
+// the G-buffer bound, so TAA and the post chain read the mesh's own velocity (camera-locked: jitter only) and view Z, not the world's behind it.
+rhi::PipelineHandle VoxiRenderer::firstPersonOverlayPipeline(u32 fxKey, bool gbuffer) const {
     if (!giReady_) return 0;
     if (fxKey && settings_.materialFx) {
         const u64 mk = fxMapKey(fxKey, rtActive_, false);
@@ -9485,10 +9485,10 @@ rhi::PipelineHandle VoxiRenderer::firstPersonOverlayPipeline(u32 fxKey) const {
         if (it == fxScenes_.end() || !it->second.tried) {
             if (std::find(fxWanted_.begin(), fxWanted_.end(), mk) == fxWanted_.end()) fxWanted_.push_back(mk);
         } else if (it->second.lit) {
-            return it->second.lit;
+            return gbuffer && it->second.litGbuf ? it->second.litGbuf : it->second.lit;
         }
     }
-    return scenePso_;
+    return gbuffer && sceneGbufPso_ ? sceneGbufPso_ : scenePso_;
 }
 
 // The frame block with the cascade switch on when shadowPass rendered the nearest cascade for the overlay (the frame's own readers keep it off).

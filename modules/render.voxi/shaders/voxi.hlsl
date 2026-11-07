@@ -1767,8 +1767,12 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
 #endif
 #if AVER_GBUFFER
     // Velocity and packed normal/roughness computed once, shared by all return sites.
-    const float2 gbufVelocity    = averGBufferVelocity(i.wpos);
-    const float4 gbufNormalRough = averPackNormalRoughness(averShadingNormal(s), s.rough);
+    // A first-person mesh moves with the camera: no screen motion, only this frame's jitter (the velocity convention carries +jitter). Its pixels
+    // are marked in the spare channel (docs/plans/FIRST_PERSON.md). Per-vertex animation motion needs a previous world matrix: not yet.
+    const bool   gbufFirstPerson = averDrawIsFirstPerson();
+    const float2 gbufVelocity    = gbufFirstPerson ? gTaaJitter.xy : averGBufferVelocity(i.wpos);
+    float4 gbufNormalRough = averPackNormalRoughness(averShadingNormal(s), s.rough);
+    if (gbufFirstPerson) gbufNormalRough.w = 1.0;
 #endif
     float4 display;
     if (averDisplayColour(s, display)) AVER_GBUF_RETURN(display);
