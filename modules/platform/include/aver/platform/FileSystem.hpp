@@ -44,6 +44,9 @@ bool fileExists(const std::string& path);
 bool directoryExists(const std::string& path);
 // Creates the directory and every missing parent. True if it exists afterwards.
 bool createDirectories(const std::string& path);
+// Creates the directory a file would live in (every missing parent of `filePath`). True if it exists afterwards
+// or the path has no directory part. Takes the file path as given, UTF-8, long-path safe on Windows.
+bool createParentDirectories(const std::string& filePath);
 // Observes every path the engine reads through readFileBytes/readFileText.
 //
 // EXISTS FOR ONE PURPOSE: letting a packaged game prove it is not reading the tree that built it.

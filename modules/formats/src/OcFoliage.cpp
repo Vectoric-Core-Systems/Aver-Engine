@@ -152,9 +152,7 @@ bool loadOcFoliage(const std::string& path, OcFoliageData& out, std::string* why
 bool saveOcFoliage(const std::string& path, const OcFoliageData& in, std::string* why) {
     std::vector<u8> bytes;
     if (!writeOcFoliage(in, bytes, why)) return false;
-    std::error_code ec;
-    const std::filesystem::path p(path);
-    if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
+    createParentDirectories(path);
     // NOT atomic, matching .ocbt's own choice (OcBt.cpp) and for the identical reason: a foliage type
     // is authored from its own editor tab, which is the one place that regenerates it, not a player's
     // save file.

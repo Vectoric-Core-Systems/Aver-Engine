@@ -596,9 +596,10 @@ int runMaterial(int argc, char** argv) {
         const std::string fname = filenameOf(in);
         const std::string dest = outDir + "/" + fname;
         std::error_code ec;
-        std::filesystem::copy_file(in, dest, std::filesystem::copy_options::overwrite_existing, ec);
-        if (ec) {
-            emitArtifact(in, dest, "material", false, false, ec.message(), stats);
+        // Through FileSystem rather than std::filesystem::copy_file, which has no long-path handling.
+        std::vector<u8> copyBytes;
+        if (!readFileBytes(in, copyBytes) || !writeFileBytes(dest, copyBytes.data(), copyBytes.size())) {
+            emitArtifact(in, dest, "material", false, false, "could not copy " + in + " to " + dest, stats);
             anyFailed = true;
             continue;
         }

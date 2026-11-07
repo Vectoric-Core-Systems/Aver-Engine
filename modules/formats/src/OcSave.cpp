@@ -280,9 +280,7 @@ bool saveOcSave(const std::string& path, const OcSaveData& in, std::string* why)
     if (!writeOcSave(in, bytes, why)) return false;
 
     // Matching saveOcworld (OcWorld.cpp:377-381), which creates the parent directory the same way.
-    std::error_code ec;
-    const std::filesystem::path fsPath(path);
-    if (fsPath.has_parent_path()) std::filesystem::create_directories(fsPath.parent_path(), ec);
+    createParentDirectories(path);
 
     // WRITE TO A TEMPORARY AND SWAP. Every other writer in this engine opens the destination with
     // ios::trunc and writes into it, which means a crash or a full disk part-way through leaves the

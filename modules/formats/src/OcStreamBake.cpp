@@ -6,6 +6,7 @@
 #include "aver/formats/OcInstances.hpp"
 #include "aver/formats/OcMesh.hpp"
 #include "aver/world/LevelTransform.hpp"   // header-only: the Euler convention world::instantiate uses
+#include "aver/platform/FileSystem.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -191,8 +192,7 @@ bool bakeOcStream(OcWorldData& w, const std::string& levelStem, const std::strin
         std::replace(flat.begin(), flat.end(), '/', '_');
         const std::string cells = streamDir(levelStem) + "/" + flat;
         const std::filesystem::path out = std::filesystem::path(projectDir) / cells;
-        std::error_code ec;
-        std::filesystem::create_directories(out.parent_path(), ec);
+        createParentDirectories(out.string());
         if (!saveOcInstances(out.string(), in, &err)) { if (why) *why = cells + ": " + err; return false; }
         foliage.push_back(OcStreamFoliage{slashes(rel), cells});
         ++report.foliageTables;

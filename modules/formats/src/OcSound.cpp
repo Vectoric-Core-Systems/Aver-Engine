@@ -226,9 +226,7 @@ bool loadOcSound(const std::string& path, OcSoundData& out, std::string* why) {
 bool saveOcSound(const std::string& path, const OcSoundData& in, std::string* why) {
     std::vector<u8> bytes;
     if (!writeOcSound(in, bytes, why)) return false;
-    std::error_code ec;
-    const std::filesystem::path p(path);
-    if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
+    createParentDirectories(path);
     // NOT atomic, matching .ocnav and .ocbt for the reason those give: a procedural sound is
     // authored build output, not the one artefact a player asked the game to keep.
     if (!writeFileBytes(path, bytes.data(), bytes.size()))

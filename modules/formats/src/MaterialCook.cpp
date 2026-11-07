@@ -1,6 +1,7 @@
 #include "aver/formats/MaterialCook.hpp"
 
 #include "aver/formats/OcMat.hpp"
+#include "aver/platform/FileSystem.hpp"
 #include "aver/platform/Image.hpp"
 
 #include <cmath>
@@ -114,20 +115,14 @@ bool cookMaterials(const std::vector<ImportedMaterial>& materials,
             }
 
         const std::filesystem::path dst = texDir / (stem + img.ext);
-        std::filesystem::create_directories(texDir, ec);
-        if (std::filesystem::exists(dst, ec) && !opt.overwriteExisting) {
+        createDirectories(texDir.string());
+        if (fileExists(dst.string()) && !opt.overwriteExisting) {
             out.texturePaths[i] = contentRel(base, stem + img.ext);
             ++out.skippedExisting;
             continue;   // already there and we were told not to replace it -- still a usable path
         }
-        std::ofstream f(dst, std::ios::binary);
-        if (!f) {
+        if (!writeFileBytes(dst.string(), img.bytes.data(), img.bytes.size())) {
             warn(warnings, "could not write texture " + dst.string());
-            continue;
-        }
-        f.write(reinterpret_cast<const char*>(img.bytes.data()), std::streamsize(img.bytes.size()));
-        if (!f) {
-            warn(warnings, "the write of texture " + dst.string() + " did not complete");
             continue;
         }
         out.texturePaths[i] = contentRel(base, stem + img.ext);
@@ -136,7 +131,7 @@ bool cookMaterials(const std::vector<ImportedMaterial>& materials,
 
     // ---- 2. the materials ------------------------------------------------------------------
     const std::filesystem::path matDir = std::filesystem::path(opt.contentDir) / "Materials";
-    std::filesystem::create_directories(matDir, ec);
+    createDirectories(matDir.string());
 
     for (usize i = 0; i < materials.size(); ++i) {
         const ImportedMaterial& gm = materials[i];

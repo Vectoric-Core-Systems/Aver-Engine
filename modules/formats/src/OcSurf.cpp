@@ -153,9 +153,7 @@ bool loadOcSurf(const std::string& path, OcSurfData& out, std::string* err) {
 }
 
 bool saveOcSurf(const std::string& path, const OcSurfData& in, std::string* err) {
-    std::error_code ec;
-    const std::filesystem::path p(path);
-    if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
+    createParentDirectories(path);
     if (!writeFileTextAtomic(path, writeOcSurf(in))) return fail(err, "could not write " + path);
     return true;
 }

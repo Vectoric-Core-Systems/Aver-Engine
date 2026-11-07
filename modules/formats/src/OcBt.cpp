@@ -139,9 +139,7 @@ bool loadOcBt(const std::string& path, OcBtData& out, std::string* why) {
 bool saveOcBt(const std::string& path, const OcBtData& in, std::string* why) {
     std::vector<u8> bytes;
     if (!writeOcBt(in, bytes, why)) return false;
-    std::error_code ec;
-    const std::filesystem::path p(path);
-    if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
+    createParentDirectories(path);
     // NOT atomic, matching .ocnav's own choice and for the identical reason stated there: a baked
     // behaviour tree is build output an author regenerates from the editor tab, not the one save a
     // player asked the game to keep.

@@ -857,9 +857,7 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
 
 // Writes a graph to disk, creating parent directories.
 bool saveOcgraph(const std::string& path, const OcGraphData& g, std::string* err) {
-    std::error_code ec;
-    const std::filesystem::path p(path);
-    if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
+    createParentDirectories(path);
 
     // Read whatever is already at `path` and hand it to writeOcgraph as the merge base.
     //

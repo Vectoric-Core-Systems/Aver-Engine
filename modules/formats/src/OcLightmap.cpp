@@ -1,6 +1,7 @@
 #include "aver/formats/OcLightmap.hpp"
 
 #include "aver/formats/Avr1.hpp"
+#include "aver/platform/FileSystem.hpp"
 
 #include <cmath>
 #include <cstring>
@@ -133,9 +134,7 @@ bool writeOcLightmap(const std::string& path, const OcLightmap& lm, std::string*
         return false;
     }
 
-    std::error_code ec;
-    const std::filesystem::path parent = std::filesystem::path(path).parent_path();
-    if (!parent.empty()) std::filesystem::create_directories(parent, ec);
+    createParentDirectories(path);
 
     std::vector<u8> head;
     head.reserve(kFixedHeaderBytes + lm.sourceMesh.size());

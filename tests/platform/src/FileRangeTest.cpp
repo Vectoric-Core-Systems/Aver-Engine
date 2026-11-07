@@ -16,6 +16,7 @@
 #include "aver/core/Log.hpp"
 #include "aver/platform/FileSystem.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -365,6 +366,88 @@ int main() {
         check(!isTransientFileError(2), "ERROR_FILE_NOT_FOUND is not -- a missing path will not appear");
         check(!isTransientFileError(3), "ERROR_PATH_NOT_FOUND is not, for the same reason");
         check(!isTransientFileError(0), "0 (no error) is not transient -- it is not an error at all");
+    }
+
+    // ---- long paths: a tree whose full path is over 300 characters ---------------------------------
+    //
+    // Windows' MAX_PATH (260, and 248 for a directory) applies to the plain forms of every call. The
+    // import of a converted game wrote to 276-326 character paths and every write failed, so every
+    // path-taking function in FileSystem.cpp must take such a path. The path is built by appending
+    // 50-character components to the temp directory until it is over 300, whatever length that is,
+    // so this holds where the temp dir is short too. The test's own listing and cleanup use std::filesystem
+    // directly, so on Windows they spell the extended-length prefix themselves.
+    {
+        std::string longDir = dir.string();
+        int level = 0;
+        while (longDir.size() <= 300) longDir += "/" + std::string(40, 'a') + std::to_string(level++);
+        const std::string longTop = (dir / (std::string(40, 'a') + "0")).string();
+        auto fsLong = [](const std::string& s) {
+#if defined(_WIN32)
+            std::wstring w = std::filesystem::path(s).lexically_normal().wstring();
+            return std::filesystem::path(std::wstring(L"\\\\?\\") + w);
+#else
+            return std::filesystem::path(s);
+#endif
+        };
+        check(longDir.size() > 300, "the long directory path is over 300 characters (" + std::to_string(longDir.size()) + ")");
+
+        check(createDirectories(longDir), "createDirectories makes a tree over 300 characters deep");
+        check(directoryExists(longDir), "...and directoryExists sees it");
+        check(createDirectories(longDir), "...and creating it again is still a success");
+
+        const std::string file = longDir + "/payload.bin";
+        const std::vector<u8> payload = {1, 2, 3, 4, 5, 250, 251, 252};
+        check(writeFileBytes(file, payload.data(), payload.size()), "writeFileBytes writes at the long path");
+        check(fileExists(file) && !directoryExists(file), "...fileExists sees it, and it is not a directory");
+        std::vector<u8> back;
+        check(readFileBytes(file, back) && back == payload, "...readFileBytes reads the same bytes back");
+        std::string text;
+        check(readFileText(file, text) && text.size() == payload.size(), "...readFileText reads it too");
+
+        // The path the caller passed is never changed, and the same file is reachable by a spelling
+        // with backslashes, a "." and a ".." in it.
+#if defined(_WIN32)
+        std::string alt = file;
+        for (char& c : alt) if (c == '/') c = '\\';
+        alt.insert(alt.rfind('\\'), "\\.\\zz\\..");
+        check(readFileBytes(alt, back) && back == payload, "...and a spelling with backslashes, '.' and '..' reaches the same file");
+#endif
+
+        const std::string atomicFile = longDir + "/atomic.txt";
+        check(writeFileTextAtomic(atomicFile, "one"), "writeFileTextAtomic creates a file at the long path");
+        check(writeFileTextAtomic(atomicFile, "two, longer"), "...and replaces it");
+        check(readFileText(atomicFile, text) && text == "two, longer", "...with the new content");
+        check(!fileExists(atomicFile + ".tmp"), "...and leaves no '.tmp' behind");
+
+        const std::string renamed = longDir + "/renamed.bin";
+        check(renameFile(file, renamed), "renameFile moves the file at the long path");
+        check(!fileExists(file) && fileExists(renamed), "...the old name is gone and the new one is there");
+        check(writeFileText(file, "replacement") && renameFile(file, renamed), "...and a rename over an existing file replaces it");
+        check(readFileText(renamed, text) && text == "replacement", "...with the renamed content");
+
+        File handle;
+        check(handle.open(renamed, File::Mode::ReadWrite), "aver::File opens a file at the long path");
+        check(handle.size() == 11 && handle.writeAt(0, "R", 1), "...reports its size and writes in place");
+        handle.close();
+        MappedFile map;
+        check(mapFileReadOnly(renamed, map) && map.size == 11 && map.data[0] == 'R', "mapFileReadOnly maps it");
+        unmap(map);
+
+        check(createParentDirectories(longDir + "/sub/deeper/x.bin") && directoryExists(longDir + "/sub/deeper"),
+              "createParentDirectories makes the directory a long-path file would live in");
+
+        std::vector<std::string> names;
+        for (const auto& e : std::filesystem::directory_iterator(fsLong(longDir), ec)) names.push_back(e.path().filename().string());
+        std::sort(names.begin(), names.end());
+        const std::vector<std::string> wantNames = {"atomic.txt", "renamed.bin", "sub"};
+        check(names == wantNames, "listing the long directory shows exactly atomic.txt, renamed.bin and sub");
+
+        check(deleteFile(renamed) && !fileExists(renamed), "deleteFile removes a file at the long path");
+        check(deleteFile(renamed), "...and deleting it again is still a success");
+        check(deleteFile(atomicFile) && !fileExists(atomicFile), "...as for the atomically written one");
+
+        std::filesystem::remove_all(fsLong(longTop), ec);
+        check(!directoryExists(longDir), "the long tree is cleaned up");
     }
 
     std::filesystem::remove_all(dir, ec);

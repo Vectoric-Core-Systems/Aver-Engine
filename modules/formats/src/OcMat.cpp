@@ -899,9 +899,7 @@ std::string writeOcmat(const pbr::MaterialDesc& d, const OcMatExtras* extras) {
 // Writes a material to an .ocmat file, creating parent directories. Returns false with `err` set.
 bool saveOcmat(const std::string& path, const pbr::MaterialDesc& d, const OcMatExtras* extras,
                std::string* err) {
-    std::error_code ec;
-    const std::filesystem::path p(path);
-    if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
+    createParentDirectories(path);
     const std::string text = writeOcmat(d, extras);
 
     // WRITE TO A TEMPORARY AND SWAP, via writeFileTextAtomic (aver/platform/FileSystem.hpp) -- the

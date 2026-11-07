@@ -2,6 +2,7 @@
 #include "aver/core/Types.hpp"   // AVER_PATH_SEP
 
 #include "aver/formats/Avr1.hpp"
+#include "aver/platform/FileSystem.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -152,9 +153,7 @@ bool saveGiCache(const std::string& path, const GiCacheEntry& in, std::string* w
         return false;
     }
 
-    std::error_code ec;
-    const std::filesystem::path parent = std::filesystem::path(path).parent_path();
-    if (!parent.empty()) std::filesystem::create_directories(parent, ec);
+    createParentDirectories(path);
 
     std::vector<u8> keyBytes;
     keyBytes.reserve(kKeyBytes);

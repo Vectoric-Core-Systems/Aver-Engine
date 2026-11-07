@@ -1,6 +1,8 @@
 // .ocimport: the import record. See ImportRecord.hpp.
 #include "aver/formats/ImportRecord.hpp"
 
+#include "aver/platform/FileSystem.hpp"
+
 #include <cctype>
 #include <cstdlib>
 #include <fstream>
@@ -125,19 +127,13 @@ std::string writeImportRecordText(const ImportRecord& in) {
 }
 
 bool loadImportRecord(const std::string& path, ImportRecord& out, std::string* why) {
-    std::ifstream f(path, std::ios::binary);
-    if (!f) return fail(why, ".ocimport: cannot open " + path);
-    std::ostringstream ss;
-    ss << f.rdbuf();
-    return parseImportRecord(ss.str(), out, why);
+    std::string text;
+    if (!readFileText(path, text)) return fail(why, ".ocimport: cannot open " + path);
+    return parseImportRecord(text, out, why);
 }
 
 bool saveImportRecord(const std::string& path, const ImportRecord& in, std::string* why) {
-    std::ofstream f(path, std::ios::binary | std::ios::trunc);
-    if (!f) return fail(why, ".ocimport: cannot write " + path);
-    const std::string text = writeImportRecordText(in);
-    f.write(text.data(), static_cast<std::streamsize>(text.size()));
-    if (!f) return fail(why, ".ocimport: short write on " + path);
+    if (!writeFileText(path, writeImportRecordText(in))) return fail(why, ".ocimport: cannot write " + path);
     return true;
 }
 

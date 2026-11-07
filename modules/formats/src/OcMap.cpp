@@ -244,9 +244,7 @@ std::string writeOcmap(const OcMapData& m) {
 
 // Writes a map to disk, creating parent directories.
 bool saveOcmap(const std::string& path, const OcMapData& m, std::string* err) {
-    std::error_code ec;
-    const std::filesystem::path p(path);
-    if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
+    createParentDirectories(path);
     const std::string text = writeOcmap(m);
 
     // WRITE TO A TEMPORARY AND SWAP, via writeFileTextAtomic (aver/platform/FileSystem.hpp) -- the

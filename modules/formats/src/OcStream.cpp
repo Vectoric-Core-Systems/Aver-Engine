@@ -53,9 +53,7 @@ bool saveOcStream(const std::string& path, const OcStreamData& in, std::string* 
                       b.min[0], b.min[1], b.min[2], b.max[0], b.max[1], b.max[2]);
         s += buf;
     }
-    std::error_code ec;
-    const std::filesystem::path p(path);
-    if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
+    createParentDirectories(path);
     if (!writeFileBytesAtomic(path, s.data(), s.size())) {
         if (why) *why = "cannot write " + path;
         return false;

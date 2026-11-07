@@ -100,9 +100,7 @@ std::string writeOcPack(const OcPack& p) {
 }
 
 bool saveOcPack(const std::string& path, const OcPack& p, std::string* why) {
-    std::error_code ec;
-    const std::filesystem::path fp(path);
-    if (fp.has_parent_path()) std::filesystem::create_directories(fp.parent_path(), ec);
+    createParentDirectories(path);
     if (!writeFileTextAtomic(path, writeOcPack(p))) {
         if (why) *why = "could not write " + path;
         return false;

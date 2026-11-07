@@ -1428,9 +1428,7 @@ std::string writeOcworld(const OcWorldData& w) {
 
 // Writes a world to disk, creating parent directories.
 bool saveOcworld(const std::string& path, const OcWorldData& w, std::string* err) {
-    std::error_code ec;
-    const std::filesystem::path p(path);
-    if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
+    createParentDirectories(path);
     const std::string text = writeOcworld(w);
 
     // WRITE TO A TEMPORARY AND SWAP, via writeFileTextAtomic (aver/platform/FileSystem.hpp) -- the

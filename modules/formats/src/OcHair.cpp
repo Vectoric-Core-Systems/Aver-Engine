@@ -824,9 +824,7 @@ bool loadOcHair(const std::string& path, OcHairData& out, std::string* why) {
 bool saveOcHair(const std::string& path, const OcHairData& in, std::string* why) {
     std::vector<u8> bytes;
     if (!writeOcHair(in, bytes, why)) return false;
-    std::error_code ec;
-    const std::filesystem::path p(path);
-    if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
+    createParentDirectories(path);
     if (!writeFileBytes(path, bytes.data(), bytes.size())) return fail(why, ".ochair: cannot write " + path);
     return true;
 }

@@ -570,9 +570,7 @@ bool loadOcShape(const std::string& path, OcShapeData& out, std::string* err) {
 }
 
 bool saveOcShape(const std::string& path, const OcShapeData& in, std::string* err) {
-    std::error_code ec;
-    const std::filesystem::path p(path);
-    if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
+    createParentDirectories(path);
     if (!writeFileTextAtomic(path, writeOcShape(in))) return fail(err, "could not write " + path);
     return true;
 }

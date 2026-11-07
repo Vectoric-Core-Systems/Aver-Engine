@@ -169,9 +169,7 @@ bool loadOcNav(const std::string& path, OcNavData& out, std::string* why) {
 bool saveOcNav(const std::string& path, const OcNavData& in, std::string* why) {
     std::vector<u8> bytes;
     if (!writeOcNav(in, bytes, why)) return false;
-    std::error_code ec;
-    const std::filesystem::path p(path);
-    if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
+    createParentDirectories(path);
     // NOT atomic, unlike .ocsave, and the difference is deliberate: a nav grid is BUILD OUTPUT that
     // an author regenerates with one command, not the one artefact a player asked the game to keep.
     // The same distinction .ocworld already makes.

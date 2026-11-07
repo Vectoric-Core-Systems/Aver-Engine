@@ -334,9 +334,7 @@ std::string writeOcPrefab(const OcPrefabData& p) {
 }
 
 bool saveOcPrefab(const std::string& path, const OcPrefabData& p, std::string* err) {
-    std::error_code ec;
-    const std::filesystem::path fp(path);
-    if (fp.has_parent_path()) std::filesystem::create_directories(fp.parent_path(), ec);
+    createParentDirectories(path);
     if (!writeFileTextAtomic(path, writeOcPrefab(p))) {
         if (err) *err = "could not write " + path;
         return false;

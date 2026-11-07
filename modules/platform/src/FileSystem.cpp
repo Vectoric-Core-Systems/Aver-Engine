@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <vector>
 
 #if defined(_WIN32)
 #include <Windows.h>
@@ -48,6 +49,60 @@ std::wstring widen(const std::string& s) {
     std::wstring w(static_cast<usize>(len), L'\0');
     MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), w.data(), len);
     return w;
+}
+
+// The path the OS is actually given. Windows' MAX_PATH (260; 248 for a directory) applies to the
+// narrow, un-prefixed forms, so a long ABSOLUTE path is rewritten to the extended-length form:
+//   C:\a\b          -> \\?\C:\a\b
+//   \\srv\share\x   -> \\?\UNC\srv\share\x
+// The prefix switches the OS's own path parsing off, so this does that parsing first: '/' becomes
+// '\', repeated separators collapse, "." drops, ".." pops (never above the root). Left exactly as
+// given: relative paths, root-relative (\x) and drive-relative (C:x) paths -- their meaning depends
+// on process state the prefix would discard -- and paths already starting \\?\ or \\.\.
+// Only paths of kLongPathThreshold wide chars or more are rewritten: below it the plain form works,
+// and \\?\ would change behaviour for nothing (trailing dots/spaces are no longer trimmed, device
+// names like NUL stop being devices). The prefix is internal: nothing here is returned to a caller.
+constexpr size_t kLongPathThreshold = 240;
+
+std::wstring osPath(const std::string& utf8) {
+    std::wstring w = widen(utf8);
+    if (w.size() < kLongPathThreshold) return w;
+    auto isSep = [](wchar_t c) { return c == L'\\' || c == L'/'; };
+    if (w.size() >= 4 && isSep(w[0]) && isSep(w[1]) && (w[2] == L'?' || w[2] == L'.') && isSep(w[3])) return w;
+
+    std::wstring prefix, root;   // root: the drive or "server\share", no trailing separator
+    size_t i = 0;
+    const bool drive = w.size() >= 3 && iswalpha(w[0]) && w[1] == L':' && isSep(w[2]);
+    if (drive) {
+        prefix = L"\\\\?\\";
+        root = w.substr(0, 2);
+        i = 3;
+    } else if (w.size() >= 3 && isSep(w[0]) && isSep(w[1]) && !isSep(w[2])) {
+        // \\server\share\...: the server and the share together are the root; both must be there.
+        const size_t a = 2;
+        size_t b = a; while (b < w.size() && !isSep(w[b])) ++b;
+        size_t c = b; while (c < w.size() && isSep(w[c])) ++c;
+        size_t d = c; while (d < w.size() && !isSep(w[d])) ++d;
+        if (c >= d) return w;
+        prefix = L"\\\\?\\UNC\\";
+        root = w.substr(a, b - a) + L"\\" + w.substr(c, d - c);
+        i = d;
+    } else {
+        return w;
+    }
+
+    std::vector<std::wstring> parts;
+    while (i < w.size()) {
+        size_t j = i; while (j < w.size() && !isSep(w[j])) ++j;
+        const std::wstring part = w.substr(i, j - i);
+        if (part == L"..") { if (!parts.empty()) parts.pop_back(); }
+        else if (!part.empty() && part != L".") parts.push_back(part);
+        i = j + 1;
+    }
+    std::wstring out = prefix + root;
+    for (const auto& p : parts) { out += L'\\'; out += p; }
+    if (parts.empty() || isSep(w.back())) out += L'\\';   // a trailing separator is kept; a bare root gets one
+    return out;
 }
 
 // Asks the shell for a known folder's path. Empty on failure.
@@ -102,6 +157,18 @@ bool swapWithRetry(const std::wstring& wTmp, const std::wstring& wPath,
 
 } // namespace
 #endif
+
+namespace {
+// Every std::filesystem / stream call in this file takes its path through here, so the long-path
+// handling above applies to all of them. Off Windows it is the string unchanged.
+std::filesystem::path fsPath(const std::string& p) {
+#if defined(_WIN32)
+    return std::filesystem::path(osPath(p));
+#else
+    return std::filesystem::path(p);
+#endif
+}
+}
 
 // See the header: which platform error codes are worth a bounded retry. Defined here, outside the
 // Windows-only block above, so it needs no Windows header to compile or to test -- the three codes
@@ -187,7 +254,7 @@ std::string xdgDocumentsDir(const std::string& home) {
 std::string userDataDir() {
     if (const char* env = std::getenv("AVER_USER_DATA_DIR"); env && *env) {
         std::error_code ec;
-        std::filesystem::create_directories(env, ec);
+        std::filesystem::create_directories(fsPath(env), ec);
         return env;
     }
 #if defined(_WIN32)
@@ -223,20 +290,27 @@ std::string documentsDir() {
 // True if the path exists.
 bool fileExists(const std::string& path) {
     std::error_code ec;
-    return std::filesystem::exists(path, ec) && !ec;
+    return std::filesystem::exists(fsPath(path), ec) && !ec;
 }
 
 // True if the path exists and is a directory.
 bool directoryExists(const std::string& path) {
     std::error_code ec;
-    return std::filesystem::is_directory(path, ec) && !ec;
+    return std::filesystem::is_directory(fsPath(path), ec) && !ec;
 }
 
 // Creates the directory and every missing parent. True if it exists afterwards.
 bool createDirectories(const std::string& path) {
     std::error_code ec;
-    std::filesystem::create_directories(path, ec);
-    return !ec && std::filesystem::is_directory(path, ec);
+    const std::filesystem::path p = fsPath(path);
+    std::filesystem::create_directories(p, ec);
+    return !ec && std::filesystem::is_directory(p, ec);
+}
+
+bool createParentDirectories(const std::string& filePath) {
+    const auto cut = filePath.find_last_of("/\\");
+    if (cut == std::string::npos || cut == 0) return true;
+    return createDirectories(filePath.substr(0, cut));
 }
 
 // Reads a whole file into `out`. False if it cannot be read.
@@ -251,7 +325,7 @@ void traceFileOpen(const std::string& path) { if (g_trace) g_trace(path.c_str(),
 
 bool readFileBytes(const std::string& path, std::vector<u8>& out) {
     if (g_trace) g_trace(path.c_str(), g_traceUser);
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    std::ifstream f(fsPath(path), std::ios::binary | std::ios::ate);
     if (!f) return false;
     const std::streamoff size = f.tellg();
     if (size < 0) return false;
@@ -267,7 +341,7 @@ bool readFileText(const std::string& path, std::string& out) {
     // reported. A fallback that misses is exactly as informative as one that hits: it says the
     // package looked outside itself.
     if (g_trace) g_trace(path.c_str(), g_traceUser);
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    std::ifstream f(fsPath(path), std::ios::binary | std::ios::ate);
     if (!f) return false;
     const std::streamoff size = f.tellg();
     if (size < 0) return false;
@@ -279,7 +353,7 @@ bool readFileText(const std::string& path, std::string& out) {
 
 // Writes `size` bytes to the file, truncating it. False on failure.
 bool writeFileBytes(const std::string& path, const void* data, usize size) {
-    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    std::ofstream f(fsPath(path), std::ios::binary | std::ios::trunc);
     if (!f) return false;
     if (size > 0) f.write(static_cast<const char*>(data), static_cast<std::streamsize>(size));
     return static_cast<bool>(f);
@@ -293,10 +367,11 @@ bool writeFileText(const std::string& path, const std::string& text) {
 // Deletes a file. True if it is gone afterwards, including if it never existed.
 bool deleteFile(const std::string& path) {
     std::error_code ec;
-    std::filesystem::remove(path, ec);
+    const std::filesystem::path p = fsPath(path);
+    std::filesystem::remove(p, ec);
     // remove() returns false for "was not there", which is a SUCCESS by this function's contract --
     // so the answer is the resulting state, not the return value.
-    return !std::filesystem::exists(path, ec);
+    return !std::filesystem::exists(p, ec);
 }
 
 // Renames `from` to `to`, replacing `to` if present.
@@ -312,10 +387,10 @@ bool renameFile(const std::string& from, const std::string& to) {
     // this for free with no change on their part: it only improves the odds a swap that COULD
     // succeed does, and behaves exactly as before when it genuinely cannot.
     std::string op; DWORD err = 0;
-    return swapWithRetry(widen(from), widen(to), op, err);
+    return swapWithRetry(osPath(from), osPath(to), op, err);
 #else
     std::error_code ec;
-    std::filesystem::rename(from, to, ec);
+    std::filesystem::rename(fsPath(from), fsPath(to), ec);
     return !ec;
 #endif
 }
@@ -343,7 +418,7 @@ bool writeFileBytesAtomic(const std::string& path, const void* data, usize size,
 
 #if defined(_WIN32)
     std::string op; DWORD err = 0;
-    if (!swapWithRetry(widen(tmp), widen(path), op, err)) {
+    if (!swapWithRetry(osPath(tmp), osPath(path), op, err)) {
         if (outError) { outError->op = op; outError->errorCode = static_cast<u32>(err); }
         // The temporary is removed on a failed swap so a later attempt does not inherit a stale
         // one and the save directory does not accumulate ".tmp" debris. `path` is untouched
@@ -445,7 +520,7 @@ bool File::open(const std::string& path, Mode mode) {
     const DWORD disp = mode == Mode::Create ? OPEN_ALWAYS : OPEN_EXISTING;
     // FILE_SHARE_READ so a second reader (a tool, the editor) can look while this handle is open;
     // deliberately NOT FILE_SHARE_WRITE, so two writers cannot interleave into one region file.
-    const HANDLE h = CreateFileW(widen(path).c_str(), access, FILE_SHARE_READ, nullptr, disp,
+    const HANDLE h = CreateFileW(osPath(path).c_str(), access, FILE_SHARE_READ, nullptr, disp,
                                  FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) { writable_ = false; return false; }
     handle_ = h;
@@ -577,7 +652,7 @@ bool File::sync() {
 bool mapFileReadOnly(const std::string& path, MappedFile& out) {
     unmap(out);
 #if defined(_WIN32)
-    const HANDLE file = CreateFileW(widen(path).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+    const HANDLE file = CreateFileW(osPath(path).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                                     OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) return false;
     LARGE_INTEGER size{};
