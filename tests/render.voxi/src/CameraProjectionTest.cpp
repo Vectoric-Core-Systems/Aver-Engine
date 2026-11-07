@@ -326,9 +326,15 @@ static void testFirstPerson() {
     check((0x80u & ~kRenderFlagsKnown) != 0, "a bit above the first-person flags is still unknown");
     // PlayView defaults: the lens a held weapon draws through.
     const game::PlayView pv;
-    check(near(pv.fpFovRad, radians(70.0f)) && pv.fpNearCm == 0.0f && near(pv.fpFarCm, 300.0f) && near(pv.fpDepthSlab, 0.01) && pv.firstPersonRoot == 0,
-          "PlayView first-person defaults: 70 degrees, near 0, far 300, slab 0.01, no root");
-    check(near(pv.fpLens().nearCm, pv.nearCm) && near(pv.fpLens().fovRad, radians(70.0f)), "a zero fpNearCm uses the main near");
+    check(pv.fpFovRad == 0.0f && pv.fpNearCm == 0.0f && near(pv.fpFarCm, 300.0f) && near(pv.fpDepthSlab, 0.01) && pv.firstPersonRoot == 0,
+          "PlayView first-person defaults: the main FOV and near, far 300, slab 0.01, no root");
+    check(near(pv.fpLens().fovRad, pv.lens().fovRad), "a zero fpFovRad uses the main FOV");
+    {
+        game::PlayView wide = pv;
+        wide.fpFovRad = radians(90.0f);
+        check(near(wide.fpLens().fovRad, radians(90.0f)), "a set fpFovRad is the first-person lens's own");
+    }
+    check(near(pv.fpLens().nearCm, pv.nearCm), "a zero fpNearCm uses the main near");
     // pushCamera sends the device the main camera first, then the first-person matrix built from the PlayView.
     {
         RecordingDevice dev;

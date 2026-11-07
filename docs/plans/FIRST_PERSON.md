@@ -16,7 +16,7 @@ Meshes flagged first person, such as a held weapon and arms, draw with their own
   - The viewmodel then occupies `z_ndc` in [0, slab]. The default slab is 0.01; with a 2 cm near plane, everything farther than about 2.02 cm is behind it.
   - With no first-person view set, the matrix equals the main view-projection, so the flag does nothing.
 - **Per-view settings** (`PlayView` and SubViewport lenses):
-  - `fpFovRad`, default 70 degrees, the same axis as the main FOV;
+  - `fpFovRad`, default 0 = the main camera's FOV (as a Godot viewmodel keeps it), the same axis as the main FOV;
   - `fpNearCm`, default the main near;
   - `fpFarCm`, default 300;
   - `fpDepthSlab`, default 0.01.

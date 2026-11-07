@@ -69,7 +69,7 @@ struct PlayView {
     bool keepWidth = false;      // fovYRad / sizeCm describe the width
     u32 cullInv = 0;             // the camera's cull mask, stored inverted (scene/RenderMasks.hpp); 0 = every layer
     // First-person rendering (docs/plans/FIRST_PERSON.md): meshes flagged first person draw through this lens, depth squeezed into [0, fpDepthSlab].
-    f32 fpFovRad = radians(70.0f);   // same axis as fovYRad
+    f32 fpFovRad = 0.0f;             // 0 = the main FOV (a viewmodel keeps the camera's); same axis as fovYRad
     f32 fpNearCm = 0.0f;             // 0 = the main near
     f32 fpFarCm = 300.0f;
     f32 fpDepthSlab = 0.01f;
@@ -87,7 +87,7 @@ struct PlayView {
     CameraProjection fpLens() const {
         CameraProjection c = lens();
         c.kind = ProjectionKind::Perspective;
-        c.fovRad = fpFovRad;
+        if (fpFovRad > 0.0f) c.fovRad = fpFovRad;
         c.nearCm = fpNearCm > 0.0f ? fpNearCm : nearCm;
         c.farCm = fpFarCm > c.nearCm ? fpFarCm : c.nearCm * 2.0f;
         return c;
