@@ -10,6 +10,7 @@
 #include "aver/core/Log.hpp"
 #include "aver/game/ColliderShapes.hpp"   // CollisionShape: registration, apply, capture, remove (wave 11 SHAPES_MATERIALS)
 #include "aver/scene/Components.hpp"
+#include "aver/scene/Scene2D.hpp"
 #include "aver/scene/scene_abi.h"
 #if AVER_MODULE_SYNAPSE_SCENE
 #  include "aver/synapse/SynapseBt.hpp"
@@ -40,6 +41,8 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cmath>
+#include <initializer_list>
 #include <cstddef>
 #include <cstring>
 #include <cstdio>
@@ -50,7 +53,7 @@ namespace aver::game {
 namespace {
 
 enum TypeIx : int {
-    kSkeletalMesh, kAnimator, kRootMotion, kMotionMatcher, kControlRig, kIkRig, kBrain, kSmartObject, kSoftBody, kCloth, kDestructible, kMorphTargets, kCameraRig, kVehicle, kParticleEmitter, kSoftField, kJelly, kRope, kCollisionShape, kHair, kSurfaceMaterials, kTypeCount,
+    kSkeletalMesh, kAnimator, kRootMotion, kMotionMatcher, kControlRig, kIkRig, kBrain, kSmartObject, kSoftBody, kCloth, kDestructible, kMorphTargets, kCameraRig, kVehicle, kParticleEmitter, kSoftField, kJelly, kRope, kCollisionShape, kHair, kSurfaceMaterials, kC2DTransform, kCSprite2D, kC2DLayer, kTypeCount,
     kUnknownType = -1
 };
 static_assert(std::size(kPlacedComponentTypes) == kTypeCount, "kPlacedComponentTypes and TypeIx must stay in step");
@@ -200,6 +203,9 @@ u32 typeId(scene::World& w, int ix) {
         case kCameraRig: return w.componentId("CCameraRig");
         case kCollisionShape: return collisionShapeType(w);
         case kSurfaceMaterials: return w.componentId(scene::kSurfaceMaterialsComponentName);
+        case kC2DTransform: return w.componentId("C2DTransform");
+        case kCSprite2D: return w.componentId("CSprite2D");
+        case kC2DLayer: return w.componentId("C2DLayer");
         default: return 0;
     }
 }
@@ -212,7 +218,9 @@ bool hasSkeleton(scene::World& w, scene::Entity e) {
 // Everything a record needs from the entity before any component is touched, so a refusal never leaves half of one.
 bool requirementsMet(scene::World& w, scene::Entity e, int ix, const fmt::OcWorldPlacement* placement, std::string& why) {
     if (!w.valid(e)) { why = "the entity is gone"; return false; }
-    if (!w.hasComponent(e, scene::kComponentMeshRenderer)) { why = "the entity has no mesh"; return false; }
+    // The 2D components live on any entity: a sprite or a canvas layer has no mesh.
+    const bool is2d = ix == kC2DTransform || ix == kCSprite2D || ix == kC2DLayer;
+    if (!is2d && !w.hasComponent(e, scene::kComponentMeshRenderer)) { why = "the entity has no mesh"; return false; }
     switch (ix) {
         case kSkeletalMesh:
             // CAnimator means an object clip when there is no skeleton: the two meanings cannot share an entity.
@@ -890,6 +898,93 @@ bool applySurfaceMaterials(scene::World& w, scene::Entity e, const fmt::OcPlaced
     for (u32 i = 0; i < scene::kSurfaceOverrideSlots; ++i) c->slot[i] = tokens[i];
     return true;
 }
+// ---- 2D scenes (docs/plans/RENDER_2D.md): C2DTransform, CSprite2D, C2DLayer. Zero is every field's default, so a record names only what differs. ----
+
+bool finiteAll(std::initializer_list<f32> v) {
+    for (const f32 f : v)
+        if (!std::isfinite(f)) return false;
+    return true;
+}
+
+// RRGGBB or RRGGBBAA (red first, hex, no '#': that starts a comment in this format) -> the stored 0xAABBGGRR.
+bool parseModulate(const std::string& s, u32& out) {
+    if (s.size() != 6 && s.size() != 8) return false;
+    u32 v = 0;
+    const auto res = std::from_chars(s.data(), s.data() + s.size(), v, 16);
+    if (res.ec != std::errc{} || res.ptr != s.data() + s.size()) return false;
+    if (s.size() == 6) v = (v << 8) | 0xFFu;
+    out = ((v & 0xFFu) << 24) | (((v >> 8) & 0xFFu) << 16) | (((v >> 16) & 0xFFu) << 8) | ((v >> 24) & 0xFFu);
+    return true;
+}
+
+std::string modulateText(u32 abgr) {
+    char b[12];
+    std::snprintf(b, sizeof b, "%02x%02x%02x%02x", abgr & 0xFFu, (abgr >> 8) & 0xFFu, (abgr >> 16) & 0xFFu, abgr >> 24);
+    return b;
+}
+
+bool applyC2DTransform(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent& r, std::string& why) {
+    if (typeId(w, kC2DTransform) == 0) { why = "C2DTransform is not registered"; return false; }
+    const f32 x = numKey(r, "x", 0.0f), y = numKey(r, "y", 0.0f), rot = numKey(r, "rotation", 0.0f);
+    const f32 sx = numKey(r, "sx", 0.0f), sy = numKey(r, "sy", 0.0f), z = numKey(r, "z", 0.0f), order = numKey(r, "order", 0.0f);
+    if (!finiteAll({x, y, rot, sx, sy, z, order})) { why = "a value is not finite"; return false; }
+    if (z < static_cast<f32>(scene2d::kZMin) || z > static_cast<f32>(scene2d::kZMax)) { why = "z is outside -4096..4096"; return false; }
+    if (order < 0.0f) { why = "order is negative"; return false; }
+    scene2d::C2DTransform* c = scene2d::attachTransform(w, e);
+    if (!c) { why = "the world refused the component"; return false; }
+    c->posX = x; c->posY = y; c->rotation = rot; c->scaleX = sx; c->scaleY = sy;
+    c->zIndex = static_cast<i32>(z);
+    c->flags = (boolKey(r, "zabsolute", false) ? scene2d::kT2DZAbsolute : 0u) | (boolKey(r, "toplevel", false) ? scene2d::kT2DTopLevel : 0u) |
+               (boolKey(r, "hidden", false) ? scene2d::kT2DHidden : 0u);
+    c->treeOrder = static_cast<u32>(order);
+    return true;
+}
+
+bool applyCSprite2D(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent& r, std::string& why) {
+    if (typeId(w, kCSprite2D) == 0) { why = "CSprite2D is not registered"; return false; }
+    u64 tex = 0;
+    if (readAsset(r, "texture", tex) == AssetKey::Bad) { why = "malformed texture#"; return false; }
+    const f32 rx = numKey(r, "rx", 0.0f), ry = numKey(r, "ry", 0.0f), rw = numKey(r, "rw", 0.0f), rh = numKey(r, "rh", 0.0f);
+    const f32 ox = numKey(r, "ox", 0.0f), oy = numKey(r, "oy", 0.0f);
+    const f32 hf = numKey(r, "hframes", 0.0f), vf = numKey(r, "vframes", 0.0f), fr = numKey(r, "frame", 0.0f);
+    if (!finiteAll({rx, ry, rw, rh, ox, oy, hf, vf, fr})) { why = "a value is not finite"; return false; }
+    if (rw < 0.0f || rh < 0.0f) { why = "the region has a negative size"; return false; }
+    if (hf < 0.0f || vf < 0.0f) { why = "hframes and vframes cannot be negative"; return false; }
+    u32 mod = 0;
+    if (const std::string* m = r.find("modulate"); m && !parseModulate(*m, mod)) { why = "modulate must be RRGGBB or RRGGBBAA hex"; return false; }
+    u32 flags = (boolKey(r, "fliph", false) ? scene2d::kSpriteFlipH : 0u) | (boolKey(r, "flipv", false) ? scene2d::kSpriteFlipV : 0u) |
+                (boolKey(r, "centered", true) ? 0u : scene2d::kSpriteNotCentered) | (boolKey(r, "hidden", false) ? scene2d::kSpriteHidden : 0u);
+    if (const std::string f = lowered(textKey(r, "filter")); f == "nearest") flags |= scene2d::kSpriteNearest;
+    else if (!f.empty() && f != "linear") { why = "unknown filter '" + f + "' (linear, nearest)"; return false; }
+    i32 blend = scene2d::kBlendMix;
+    if (const std::string b = lowered(textKey(r, "blend")); b == "add") blend = scene2d::kBlendAdd;
+    else if (b == "sub") blend = scene2d::kBlendSub;
+    else if (b == "mul") blend = scene2d::kBlendMul;
+    else if (!b.empty() && b != "mix") { why = "unknown blend '" + b + "' (mix, add, sub, mul)"; return false; }
+    scene2d::CSprite2D* c = scene2d::attachSprite(w, e, static_cast<i64>(tex));
+    if (!c) { why = "the world refused the component"; return false; }
+    c->regionX = rx; c->regionY = ry; c->regionW = rw; c->regionH = rh;
+    c->offsetX = ox; c->offsetY = oy;
+    c->modulate = mod;
+    c->flags = flags;
+    c->hframes = static_cast<i32>(hf); c->vframes = static_cast<i32>(vf); c->frame = static_cast<i32>(fr);
+    c->blend = blend;
+    return true;
+}
+
+bool applyC2DLayer(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent& r, std::string& why) {
+    if (typeId(w, kC2DLayer) == 0) { why = "C2DLayer is not registered"; return false; }
+    const f32 index = numKey(r, "index", 0.0f), x = numKey(r, "x", 0.0f), y = numKey(r, "y", 0.0f), rot = numKey(r, "rotation", 0.0f);
+    const f32 sx = numKey(r, "sx", 0.0f), sy = numKey(r, "sy", 0.0f);
+    if (!finiteAll({index, x, y, rot, sx, sy})) { why = "a value is not finite"; return false; }
+    scene2d::C2DLayer* c = scene2d::attachLayer(w, e, static_cast<i32>(index));
+    if (!c) { why = "the world refused the component"; return false; }
+    c->flags = (boolKey(r, "hidden", false) ? scene2d::kLayerHidden : 0u) | (boolKey(r, "followviewport", false) ? scene2d::kLayerFollowViewport : 0u);
+    c->offsetX = x; c->offsetY = y; c->rotation = rot; c->scaleX = sx; c->scaleY = sy;
+    c->reserved = 0;
+    return true;
+}
+
 bool applyOne(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent& r, const fmt::OcWorldPlacement* placement, std::string& why) {
 #if AVER_MODULE_FRAMEWORK
     if (isGroupsComponent(r.type)) {
@@ -947,6 +1042,9 @@ bool applyOne(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent& r,
         case kParticleEmitter: return applyParticleEmitter(w, e, r, why);
         case kCollisionShape: return applyCollisionShape(w, e, r, why);
         case kSurfaceMaterials: return applySurfaceMaterials(w, e, r, why);
+        case kC2DTransform: return applyC2DTransform(w, e, r, why);
+        case kCSprite2D: return applyCSprite2D(w, e, r, why);
+        case kC2DLayer: return applyC2DLayer(w, e, r, why);
 #if AVER_MODULE_HAIR_SCENE
         case kHair: return applyHair(w, e, r, why);
 #endif
@@ -1216,6 +1314,55 @@ std::optional<fmt::OcPlacedComponent> captureOne(scene::World& w, scene::Entity 
                 if (name && *name) put(rec, "slot" + std::to_string(i), name);
             }
             if (rec.kv.empty()) return std::nullopt;   // all zeros overrides nothing: no record, as if the component were absent
+            break;
+        }
+        case kC2DTransform: {
+            const auto* c = w.component<scene2d::C2DTransform>(e, type);
+            if (c->posX != 0.0f) putNum(rec, "x", c->posX);
+            if (c->posY != 0.0f) putNum(rec, "y", c->posY);
+            if (c->rotation != 0.0f) putNum(rec, "rotation", c->rotation);
+            if (c->scaleX != 0.0f && c->scaleX != 1.0f) putNum(rec, "sx", c->scaleX);   // 0 and 1 are the same scale
+            if (c->scaleY != 0.0f && c->scaleY != 1.0f) putNum(rec, "sy", c->scaleY);
+            if (c->zIndex != 0) put(rec, "z", std::to_string(c->zIndex));
+            if (c->flags & scene2d::kT2DZAbsolute) put(rec, "zabsolute", "1");
+            if (c->flags & scene2d::kT2DTopLevel) put(rec, "toplevel", "1");
+            if (c->flags & scene2d::kT2DHidden) put(rec, "hidden", "1");
+            if (c->treeOrder != 0) put(rec, "order", std::to_string(c->treeOrder));
+            break;   // the composed affine and the revisions are derived and never captured
+        }
+        case kCSprite2D: {
+            const auto* c = w.component<scene2d::CSprite2D>(e, type);
+            putAsset(rec, "texture", static_cast<u64>(c->texture), pathOf);
+            if (c->regionX != 0.0f) putNum(rec, "rx", c->regionX);
+            if (c->regionY != 0.0f) putNum(rec, "ry", c->regionY);
+            if (c->regionW != 0.0f) putNum(rec, "rw", c->regionW);
+            if (c->regionH != 0.0f) putNum(rec, "rh", c->regionH);
+            if (c->offsetX != 0.0f) putNum(rec, "ox", c->offsetX);
+            if (c->offsetY != 0.0f) putNum(rec, "oy", c->offsetY);
+            if (c->modulate != 0 && c->modulate != 0xFFFFFFFFu) put(rec, "modulate", modulateText(c->modulate));
+            if (c->flags & scene2d::kSpriteFlipH) put(rec, "fliph", "1");
+            if (c->flags & scene2d::kSpriteFlipV) put(rec, "flipv", "1");
+            if (c->flags & scene2d::kSpriteNotCentered) put(rec, "centered", "0");
+            if (c->flags & scene2d::kSpriteHidden) put(rec, "hidden", "1");
+            if (c->flags & scene2d::kSpriteNearest) put(rec, "filter", "nearest");
+            if (c->blend == scene2d::kBlendAdd) put(rec, "blend", "add");
+            else if (c->blend == scene2d::kBlendSub) put(rec, "blend", "sub");
+            else if (c->blend == scene2d::kBlendMul) put(rec, "blend", "mul");
+            if (c->hframes > 1) put(rec, "hframes", std::to_string(c->hframes));
+            if (c->vframes > 1) put(rec, "vframes", std::to_string(c->vframes));
+            if (c->frame != 0) put(rec, "frame", std::to_string(c->frame));
+            break;
+        }
+        case kC2DLayer: {
+            const auto* c = w.component<scene2d::C2DLayer>(e, type);
+            if (c->index != 0) put(rec, "index", std::to_string(c->index));
+            if (c->flags & scene2d::kLayerHidden) put(rec, "hidden", "1");
+            if (c->flags & scene2d::kLayerFollowViewport) put(rec, "followviewport", "1");
+            if (c->offsetX != 0.0f) putNum(rec, "x", c->offsetX);
+            if (c->offsetY != 0.0f) putNum(rec, "y", c->offsetY);
+            if (c->rotation != 0.0f) putNum(rec, "rotation", c->rotation);
+            if (c->scaleX != 0.0f && c->scaleX != 1.0f) putNum(rec, "sx", c->scaleX);
+            if (c->scaleY != 0.0f && c->scaleY != 1.0f) putNum(rec, "sy", c->scaleY);
             break;
         }
         case kParticleEmitter: {

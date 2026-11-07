@@ -24,6 +24,7 @@
 
 #if AVER_MODULE_SCENE
 #  include "aver/scene/World.hpp"
+#  include "aver/scene/Scene2D.hpp"
 #  include "aver/anim/AnimSystem.hpp"
 #  include "aver/anim/AnimGraphSystem.hpp"
 #  include "aver/anim/ControlRig.hpp"
@@ -408,6 +409,7 @@ inline void registerGameSystems() {
     anim::PoseFollowSystem::registerComponent(world);                          // CPoseFollow: a pose carried across a bone map (wave 7 P25)
     anim::poseFollowSystem().install(anim::animSystem(), world);               // last: a following entity's pose wins over a graph's
     registerCollisionShapeComponent(world);                                    // CCollisionShape: an .ocshape collision beside a CRigidBody (wave 11 SHAPES_MATERIALS)
+    scene2d::registerComponents(world);                                        // C2DTransform, CSprite2D, C2DLayer: 2D scenes (docs/plans/RENDER_2D.md)
 #endif
 #if AVER_MODULE_SCENE && AVER_MODULE_SOFTBODY_SCENE
     softbody::SoftBodySystem::registerComponents(scene::World::instance());   // CCloth, CDestructible: cloth and destruction

@@ -1,0 +1,24 @@
+OCWORLD 1
+# Written by the Aver Engine editor. Centimetres, +X forward, +Y right, +Z up.
+ID 0x0AD9BFA212988494
+NAME Menu2D
+BUILD 0
+ALGO 3
+
+PLACE Menu/Canvas 0 0 0 0 0 0 1 nocollide
+  COMPONENT C2DLayer index=1 x=10 y=20 rotation=0.25 sx=2 sy=1.5
+BEGIN
+  CHILD Menu/Background 640 360 0 0 0 0 1 nocollide
+    COMPONENT C2DTransform x=640 y=360 sx=1.5 z=-5
+    COMPONENT CSprite2D texture=UI/menu_bg.png
+  CHILD Menu/Button 0 -60 0 0 0 0 1 nocollide
+    COMPONENT C2DTransform y=-60 rotation=-0.5 sy=2 z=3 zabsolute=1 order=12
+    COMPONENT CSprite2D texture=UI/buttons.png rx=8 ry=16 rw=64 rh=32 ox=4 oy=-2 modulate=ff8040c0 fliph=1 centered=0 filter=nearest blend=add hframes=2 vframes=3 frame=4
+  CHILD Menu/Hidden 0 0 0 0 0 0 1 nocollide
+    COMPONENT C2DTransform toplevel=1 hidden=1
+    COMPONENT CSprite2D texture%23=00000000deadbeef flipv=1 hidden=1 blend=mul
+END
+PLACE Menu/Empty 0 0 0 0 0 0 1 nocollide
+  COMPONENT C2DTransform
+  COMPONENT CSprite2D
+  COMPONENT C2DLayer

@@ -25,3 +25,12 @@ add_executable(Scene2dAbiTest src/Scene2dAbiTest.cpp)
 target_link_libraries(Scene2dAbiTest PRIVATE Aver.Scene Aver.UI Aver.Core)
 target_compile_definitions(Scene2dAbiTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
 set_target_properties(Scene2dAbiTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# Scene2dLevelTest -- the .ocworld COMPONENT C2DTransform / CSprite2D / C2DLayer records: a golden file (data/menu2d.ocworld) that writes
+# back byte for byte, apply to live entities with no mesh, capture back to the same records, refusals. A real scene::World; no device.
+if(TARGET Aver.Runtime.Game.Core)
+  add_executable(Scene2dLevelTest src/Scene2dLevelTest.cpp)
+  target_link_libraries(Scene2dLevelTest PRIVATE Aver.Runtime.Game.Core Aver.Anim.Scene Aver.Scene Aver.Formats Aver.Core)
+  target_compile_definitions(Scene2dLevelTest PRIVATE AVER_SCENE2D_DATA="${CMAKE_CURRENT_SOURCE_DIR}/data")
+  set_target_properties(Scene2dLevelTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()

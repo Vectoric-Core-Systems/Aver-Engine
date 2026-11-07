@@ -36,3 +36,15 @@ Engine 2D is sprites and 2D transforms as engine components. Native games can us
 6. `.ocworld` round trip of the 2D components (golden file).
 7. Fabric converter and runtime mapping. Convert a neutral fixture and assert the records and the runtime state, then convert the real menu scene.
 8. Headed check: a Node2D menu's background behind its buttons in editor Play and in the packaged runtime, at two aspect ratios.
+
+## Status (2026-11-08, steps 1-6)
+
+Done in the engine, headless-tested: the three components and the 2D transform pass (`Scene2D.hpp`), the ordered canvas and its shared-key submit (`Canvas2D.hpp`), the canvas transform against `uiComputeStretch`, `scene2d_abi.h` v1 with the C# wrappers (`Aver.Framework/Scene2D.cs`), and the `COMPONENT C2DTransform` / `CSprite2D` / `C2DLayer` records with a golden file (`tests/scene2d/data/menu2d.ocworld`). All of it lives in `Aver.Scene.dll` (which now links `Aver.UI` privately); the tests are `Scene2d*Test` under `tests/scene2d`.
+
+Decisions taken while building it, for the owner to veto:
+
+- `C2DLayer` also has an `.ocworld` record (the plan named two): a saved level would lose its canvas layers otherwise.
+- The tree order of a sprite is derived from the hierarchy unless `C2DTransform::treeOrder` is set. Fabric should set it to its own node-tree index, so its Controls and the sprites share one number space.
+- Frames: the region (or the whole image) is divided by `hframes` x `vframes` and `frame` picks a cell, wrapping. Godot ignores the frame when a region is set; here they combine.
+- Anything drawn into the UI draw list directly (not submitted) lands before the flushed canvas, so it is under every sprite.
+- `Viewport` stretch mode scales like `canvas_items` (the draw list cannot render to a lower-resolution target).

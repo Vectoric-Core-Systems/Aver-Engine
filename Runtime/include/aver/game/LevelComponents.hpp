@@ -27,7 +27,8 @@ namespace aver::game {
 inline constexpr std::string_view kPlacedComponentTypes[] = {
     "SkeletalMesh","Animator","RootMotion","MotionMatcher","ControlRig","IkRig","Brain","SmartObject","SoftBody",
     "Cloth","Destructible","MorphTargets","CameraRig","Vehicle","ParticleEmitter","SoftField","Jelly","Rope","CollisionShape","Hair",
-    "SurfaceMaterials"};   // SurfaceMaterials (P2): slot0=<material> ... slot15=<material>, scene::CSurfaceMaterials; no Details-panel kind (the record is authored by hand, a converter or script)
+    "SurfaceMaterials",    // SurfaceMaterials (P2): slot0=<material> ... slot15=<material>, scene::CSurfaceMaterials; no Details-panel kind (the record is authored by hand, a converter or script)
+    "C2DTransform","CSprite2D","C2DLayer"};   // 2D scenes (docs/plans/RENDER_2D.md): scene2d components; they need no mesh on the entity, and no Details-panel kind yet
 
 using PathOfIdFn = std::function<std::string(u64 id)>;   // content-relative path, "" when unknown
 
