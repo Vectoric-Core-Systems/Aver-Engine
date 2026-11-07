@@ -442,6 +442,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #if AVER_MODULE_MCP
     // One event per frame (click needs press and release).
     if (mcp_.listening()) mcp_.pump([this](const mcp::Command& c) { applyMcpCommand(c); });
+    holdMcpPointer();
 #endif
     if (sky_.cloudsEnabled) cloudTime_ += t.dt;
 #if AVER_MODULE_FRAMEWORK

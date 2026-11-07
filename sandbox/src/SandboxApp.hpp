@@ -4466,6 +4466,11 @@ private:
 #endif
 
     void applyMcpCommand(const mcp::Command& c);
+    // The pointer an MCP move or click put down, held in ImGui for a moment: with the editor behind another window, the posted move's
+    // mouse-leave tracking fires at once and ImGui would forget the position before the click lands.
+    void holdMcpPointer();
+    f32 mcpPointerX_ = 0.0f, mcpPointerY_ = 0.0f;
+    int mcpPointerHold_ = 0;   // frames left
 
     void registerMcpAbis();
 

@@ -232,20 +232,29 @@ void SandboxApp::applyMcpCommand(const mcp::Command& c) {
     for (const mcp::InputEvent& e : c.events) {
         const LPARAM lp = MAKELPARAM(e.x, e.y);
         switch (e.kind) {
-            case mcp::InputEvent::Kind::MouseMove: {
-                POINT pt{ e.x, e.y };
-                ::ClientToScreen(hwnd, &pt);
-                ::SetCursorPos(pt.x, pt.y);
-                ::PostMessageW(hwnd, WM_MOUSEMOVE, 0, lp);
-                if (::GetForegroundWindow() != hwnd) ::SetForegroundWindow(hwnd);
+            // The pointer goes to ImGui directly and is held there (holdMcpPointer), not through a posted WM_MOUSEMOVE: with the editor behind
+            // another window the move's mouse-leave tracking fires at once and ImGui drops the position, so a click landed nowhere. Neither the
+            // real cursor nor the foreground window is touched. Buttons go to ImGui directly too, and are still posted for the game's input.
+            case mcp::InputEvent::Kind::MouseMove:
+                mcpPointerX_ = static_cast<f32>(e.x);
+                mcpPointerY_ = static_cast<f32>(e.y);
+                mcpPointerHold_ = 60;
+#if AVER_WITH_IMGUI
+                ImGui::GetIO().AddMousePosEvent(mcpPointerX_, mcpPointerY_);
+#endif
                 break;
-            }
             case mcp::InputEvent::Kind::MouseDown:
+#if AVER_WITH_IMGUI
+                ImGui::GetIO().AddMouseButtonEvent(e.button == 1 ? 1 : e.button == 2 ? 2 : 0, true);
+#endif
                 ::PostMessageW(hwnd,
                     e.button == 1 ? WM_RBUTTONDOWN : e.button == 2 ? WM_MBUTTONDOWN : WM_LBUTTONDOWN,
                     e.button == 1 ? MK_RBUTTON : e.button == 2 ? MK_MBUTTON : MK_LBUTTON, lp);
                 break;
             case mcp::InputEvent::Kind::MouseUp:
+#if AVER_WITH_IMGUI
+                ImGui::GetIO().AddMouseButtonEvent(e.button == 1 ? 1 : e.button == 2 ? 2 : 0, false);
+#endif
                 ::PostMessageW(hwnd,
                     e.button == 1 ? WM_RBUTTONUP : e.button == 2 ? WM_MBUTTONUP : WM_LBUTTONUP,
                     0, lp);
@@ -263,6 +272,15 @@ void SandboxApp::applyMcpCommand(const mcp::Command& c) {
                 break;
         }
     }
+}
+
+// Puts the MCP pointer back each frame for a second after the last move: a leave or move the window saw in the meantime would otherwise win.
+void SandboxApp::holdMcpPointer() {
+    if (mcpPointerHold_ <= 0) return;
+    --mcpPointerHold_;
+#if AVER_WITH_IMGUI
+    ImGui::GetIO().AddMousePosEvent(mcpPointerX_, mcpPointerY_);
+#endif
 }
 
 // Registers every built module's plain-C seam with the MCP bridge, under its own name.
