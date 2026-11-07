@@ -41,7 +41,7 @@ bool UiTree::hittable(const UiWidget& w) const {
 }
 
 UiWidgetId UiTree::hitIn(const UiWidget& w, f32 x, f32 y) const {
-    if (!w.visible) return 0;
+    if (!w.visible || w.inactive) return 0;
     const bool inside = w.rect.contains(x, y);
     if ((w.clip || isScrollable(w)) && !inside) return 0;
     for (usize i = w.children.size(); i-- > 0;) {
@@ -75,7 +75,7 @@ bool UiTree::focusableNow(UiWidgetId id) const {
 }
 
 void UiTree::collectFocus(const UiWidget& w, std::vector<UiFocusItem>& out) const {
-    if (!w.visible || !w.enabled) return;
+    if (!w.visible || w.inactive || !w.enabled) return;
     if (w.focusable && !w.rect.empty()) out.push_back(UiFocusItem{w.id, w.rect, w.tabIndex});
     for (const UiWidgetId c : w.children) if (const UiWidget* k = get(c)) collectFocus(*k, out);
 }
@@ -211,7 +211,7 @@ void UiTree::adjustSlider(UiWidget& w, int dir) {
 
 bool UiTree::setSliderFromX(UiWidget& w, f32 x) {
     const UiRect track = sliderTrack(w);
-    const f32 half = kThumbDp * scale_ * 0.5f;
+    const f32 half = kThumbDp * scaleOf(w) * 0.5f;
     const f32 usable = track.w - 2.0f * half;
     if (usable <= 0.0f || w.maxValue <= w.minValue) return false;
     const f32 t = std::clamp((x - (track.x + half)) / usable, 0.0f, 1.0f);
@@ -326,7 +326,7 @@ std::shared_ptr<const UiTextLayout> UiTree::inputLayout(const UiWidget& w, const
 
 f32 UiTree::textShift(const UiWidget& w, const UiTextLayout& layout) const {
     const f32 caretX = layout.caretX(static_cast<usize>(std::max(0, w.caret)));
-    return std::max(0.0f, caretX - (textArea(w).w - 2.0f * scale_));
+    return std::max(0.0f, caretX - (textArea(w).w - 2.0f * scaleOf(w)));
 }
 
 i32 UiTree::caretFromX(const UiWidget& w, f32 x) const {
@@ -458,7 +458,7 @@ void UiTree::processPointer(const UiInputFrame& in) {
                 h->pressed = true;
                 const UiRect inner = textArea(*h);
                 const bool overflow = h->contentSize.y > inner.h + 0.5f;
-                const bool onGrip = pointerX_ >= h->rect.right() - kScrollGripDp * scale_;
+                const bool onGrip = pointerX_ >= h->rect.right() - kScrollGripDp * scaleOf(*h);
                 if (isScrollable(*h) && overflow && onGrip) {
                     captured_ = hit;
                     scrollDrag_ = true;
@@ -499,7 +499,7 @@ void UiTree::processPointer(const UiInputFrame& in) {
 
     if (in.wheel != 0.0f && hit) {
         if (UiWidget* s = get(nearestScrollable(hit))) {
-            const f32 step = s->kind == UiWidgetKind::List ? rowHeightOf(*s) * 3.0f : kWheelStepDp * scale_;
+            const f32 step = s->kind == UiWidgetKind::List ? rowHeightOf(*s) * 3.0f : kWheelStepDp * scaleOf(*s);
             scrollBy(*s, -in.wheel * step);
         }
     }

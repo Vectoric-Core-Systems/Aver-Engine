@@ -30,6 +30,12 @@ add_executable(UiLayoutAssetTest src/UiLayoutAssetTest.cpp)
 target_link_libraries(UiLayoutAssetTest PRIVATE Aver.UI Aver.Core Aver.Platform)
 set_target_properties(UiLayoutAssetTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# UiPanelsTest — the panel containers (Overlay, UniformGrid, WrapBox, SizeBox, ScaleBox, Border, Spacer, WidgetSwitcher):
+# layout modes and per-widget properties on a Panel, their layout maths and the palette presets.
+add_executable(UiPanelsTest src/UiPanelsTest.cpp)
+target_link_libraries(UiPanelsTest PRIVATE Aver.UI Aver.Core Aver.Platform)
+set_target_properties(UiPanelsTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # UiLayoutEditorTest — the layout editor tab's headless core (load / save / dirty / undo, the tab's
 # own edits, drag and nudge maths). Same arrangement as BtEditorTest: Sandbox is add_executable-only,
 # so this compiles sandbox/src/UiLayoutEditor.cpp directly with AVER_WITH_IMGUI left undefined; the

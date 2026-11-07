@@ -60,6 +60,19 @@ UiLayoutDoc uiStarterLayout();
 // The properties a newly added widget of `kind` starts with (sensible size and sample text).
 UiWidgetProps uiNewWidgetProps(UiWidgetKind kind);
 
+// Palette presets named like UMG's panels. Each is a plain Panel with a layout mode and properties set: there
+// is no kind per container (Overlay = layout overlay, Size Box = overlay with width/height, Scale Box =
+// overlay with scaleFit, Border = a padded panel with a border, Spacer = an empty panel that takes no input,
+// Widget Switcher = layout switcher).
+struct UiWidgetPreset {
+    const char* label;      // as the palette shows it
+    const char* name;       // the widget name it starts with
+    UiWidgetProps props;
+};
+const std::vector<UiWidgetPreset>& uiWidgetPresets();
+// Adds a preset under `parent`, last among its siblings. Returns the new index, -1 for a bad parent or preset.
+i32 uiLayoutAddPreset(UiLayoutDoc& doc, i32 parent, usize preset, std::string_view name = {});
+
 // ---- structural edits (the editor's operations; all keep valid() true) -----------------------------
 // Indices move across these calls; each returns the new index of what it acted on, or -1.
 

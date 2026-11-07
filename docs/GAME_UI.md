@@ -23,7 +23,7 @@ layout, input, focus, events and drawing, is tested with no GPU and no window.
 | C ABI | `modules/ui.abi/ui_widget_abi.h` (beside the draw ABI `ui_abi.h`) |
 | C# | `scripting/csharp/Aver.UI` (`Widgets.cs`, `SettingsScreen.cs`, `UiGraph.cs`), `Aver.Framework/UiGameSettings.cs`, `UiGraphInterop.cs` |
 | Editor tab | `sandbox/src/UiLayoutEditor.{hpp,cpp}` |
-| Tests | `tests/ui`: `UiWidgetTest`, `UiLayoutAssetTest`, `UiLayoutEditorTest` (and the existing `UiTest`) |
+| Tests | `tests/ui`: `UiWidgetTest`, `UiPanelsTest`, `UiLayoutAssetTest`, `UiLayoutEditorTest` (and the existing `UiTest`) |
 
 ## The model
 
@@ -62,6 +62,25 @@ Every widget has two ways to be placed, chosen by its **parent's** `layout`:
   `columns`, optional fixed `cellWidth`/`cellHeight`, and `spacingY` for rows.
 
 Sizes are **design pixels**: authored against a reference resolution and scaled at runtime.
+
+### Panels (UMG-style containers)
+
+There is no widget kind per container. Each is a layout mode or a property on a `panel`, and the designer's
+palette lists them by UMG's names (**Panels** section; each is a `panel` with those properties set):
+
+| Palette name | Is |
+|---|---|
+| Canvas Panel, Vertical Box, Horizontal Box, Grid Panel | `layout none / vstack / hstack / grid` |
+| Uniform Grid Panel | `layout grid` with `uniform true`: every cell as big as the largest, spare space shared equally |
+| Overlay | `layout overlay`: every child shares the content box, placed by its `alignH`/`alignV`, `margin`, and size |
+| Wrap Box | `layout wrap`: children flow in rows and break at the width (`width`, else the width the parent gives); `spacing` between children, `spacingY` between rows, `justify` per row. A wrap box with no width learns it on the second layout pass, like a wrapped label |
+| Size Box | an overlay with `width`/`height` (override) and `minWidth`..`maxHeight` (clamps); any widget takes these |
+| Scale Box | an overlay with `scaleFit` (`none contain cover down width height`) or a fixed `contentScale`: the children's whole subtree is laid out at the scaled design-pixel scale, so text, padding and borders scale too |
+| Border | a padded overlay panel; `borderWidth` (design px, `-1` = the style's) and `borderColor` on any widget |
+| Spacer | an empty panel with `hit never` and a size |
+| Widget Switcher | `layout switcher`: only the child at `activeIndex` is laid out, drawn, hit-tested and focusable |
+
+Enum values are append-only (`layout` numbers 4, 5 and 6 are overlay, wrap and switcher).
 
 ### DPI scaling
 
@@ -152,10 +171,11 @@ anchor 2). Enum names are lower case.
 
 * **Placement:** `anchors`, `offsets`, `pivot`, `width`, `height` (`-1` auto), `minWidth`, `minHeight`,
   `maxWidth`, `maxHeight` (`0` none), `margin`, `alignH`, `alignV`, `fillW`, `fillH`.
-* **Layout:** `padding`, `layout` (`none vstack hstack grid`), `spacing`, `spacingY`, `columns`, `cellWidth`,
-  `cellHeight`, `justify` (`start center end spacebetween`).
+* **Layout:** `padding`, `layout` (`none vstack hstack grid overlay wrap switcher`), `spacing`, `spacingY`,
+  `columns`, `cellWidth`, `cellHeight`, `justify` (`start center end spacebetween`), `uniform`, `activeIndex`,
+  `scaleFit` (`none contain cover down width height`), `contentScale`.
 * **Appearance:** `visible`, `enabled`, `opacity`, `clip`, `hit` (`auto always never`), `style`, `bgColor`,
-  `textColor`, `accentColor`.
+  `textColor`, `accentColor`, `borderWidth`, `borderColor`.
 * **Content:** `text`, `textAlign` (`left center right start end`), `fontSize`, `wrap`, `fontFamily`, `bold`,
   `italic`, `textDir` (`auto ltr rtl`), `lineSpacing`, `letterSpacing`, `ellipsis`, `maxLines`, `rich`, `image`,
   `uv`, `imageMode` (`stretch fit`), `tint`, `placeholder`, `maxLength`, `masked`. The text properties are
@@ -328,6 +348,9 @@ frame before the graphs tick.
   drag and snapping, text input editing, list selection, scrolling, keyboard/gamepad navigation and cancel,
   key-bind capture (including the same-frame guard), the settings/controls screens and the command menu,
   host input mapping with key repeat, drawing.
+* `UiPanelsTest`: the panel containers: overlay alignment, uniform and plain grids, wrap breaking and justify, size
+  box clamps, scale box fits and scaled text, border drawing, the switcher's hit/draw/focus filtering, the
+  palette presets and the file round trip of the new modes.
 * `UiLayoutAssetTest`: tokenising and float round trip, the property table (every property's get/set agree for
   every kind), `.ocui` round trip, parse errors with line numbers, forward compatibility, the structural edits,
   instantiate and capture.

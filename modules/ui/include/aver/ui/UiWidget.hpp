@@ -37,6 +37,10 @@ struct UiWidgetProps {
     i32 columns = 2;
     f32 cellWidth = -1, cellHeight = -1;   // grid; <0 = fit the content
     UiJustify justify = UiJustify::Start;
+    bool uniform = false;       // Grid: every cell the size of the largest, sharing the space equally
+    i32  activeIndex = 0;       // Switcher: the child shown
+    UiScaleFit scaleFit = UiScaleFit::None;   // scale the children's subtree to fit the content box
+    f32  contentScale = 1.0f;   // extra multiplier on the children's scale (design px, text and all)
 
     // ---- visuals ------------------------------------------------------------------------------
     bool visible = true;
@@ -46,6 +50,8 @@ struct UiWidgetProps {
     UiHitMode hit = UiHitMode::Auto;
     std::string style;                       // named style in the theme; empty = the kind's default
     u32 bgColor = 0, textColor = 0, accentColor = 0;   // 0 = use the theme (alpha-zero is "unset")
+    f32 borderWidth = -1.0f;                 // design px; <0 = the style's
+    u32 borderColor = 0;                     // 0 = the style's
 
     // ---- content ------------------------------------------------------------------------------
     std::string text;
@@ -111,6 +117,9 @@ struct UiWidget : UiWidgetProps {
     // ---- computed by layout (device pixels) ---------------------------------------------------
     UiRect rect{};
     UiVec2 desired{};            // content-based size, before min/max and stretching
+    UiVec2 contentDesired{};     // the children's natural extent, before padding and content scaling
+    f32 scale = 0;               // design-pixel scale this widget was laid out at (0 = the tree's); differs inside a scale box
+    bool inactive = false;       // hidden by a Switcher parent
     f32 scrollX = 0, scrollY = 0;
     UiVec2 contentSize{};        // Scroll: extent of the children
 

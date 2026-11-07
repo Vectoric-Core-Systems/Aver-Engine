@@ -38,7 +38,7 @@ bool stretched(f32 lo, f32 hi) { return hi - lo > 1e-5f; }
 bool isContainer(UiWidgetKind k) { return k == UiWidgetKind::Panel || k == UiWidgetKind::Scroll; }
 
 UiWidgetId pickIn(const UiTree& t, const UiWidget& w, f32 x, f32 y) {
-    if (!w.visible) return 0;
+    if (!w.visible || w.inactive) return 0;
     const bool inside = w.rect.contains(x, y);
     if ((w.clip || w.kind == UiWidgetKind::Scroll || w.kind == UiWidgetKind::List) && !inside) return 0;
     for (usize i = w.children.size(); i-- > 0;)
@@ -249,6 +249,17 @@ i32 UiLayoutEditor::addWidget(UiWidgetKind kind) {
     return added;
 }
 
+i32 UiLayoutEditor::addPreset(usize preset) {
+    if (!loaded_) return -1;
+    pushUndo();
+    const i32 added = uiLayoutAddPreset(doc_, inRange(doc_, selected_) ? selected_ : 0, preset);
+    if (added < 0) { history_.cancelPush(); return -1; }
+    selected_ = added;
+    dirty_ = true;
+    rebuildPreview();
+    return added;
+}
+
 void UiLayoutEditor::deleteSelected() {
     if (!loaded_ || selected_ == 0) return;
     pushUndo();
@@ -355,14 +366,18 @@ void UiLayoutEditor::applyAnchorPreset(UiAnchorPreset preset) {
     rebuildPreview();
 }
 
-i32 UiLayoutEditor::placeWidgetAt(UiWidgetKind kind, f32 px, f32 py) {
+i32 UiLayoutEditor::placeWidgetAt(UiWidgetKind kind, f32 px, f32 py) { return placeAt(kind, -1, px, py); }
+
+i32 UiLayoutEditor::placePresetAt(usize preset, f32 px, f32 py) { return placeAt(UiWidgetKind::Panel, static_cast<i64>(preset), px, py); }
+
+i32 UiLayoutEditor::placeAt(UiWidgetKind kind, i64 preset, f32 px, f32 py) {
     if (!loaded_) return -1;
     i32 parent = nodeOf(uiEditorPick(preview_, px, py));
     if (parent < 0) parent = 0;
     while (parent > 0 && !isContainer(doc_.nodes[static_cast<usize>(parent)].props.kind))
         parent = doc_.nodes[static_cast<usize>(parent)].parent;
     pushUndo();
-    const i32 added = uiLayoutAdd(doc_, parent, kind);
+    const i32 added = preset >= 0 ? uiLayoutAddPreset(doc_, parent, static_cast<usize>(preset)) : uiLayoutAdd(doc_, parent, kind);
     if (added < 0) { history_.cancelPush(); return -1; }
     const UiWidgetProps& pp = doc_.nodes[static_cast<usize>(parent)].props;
     if (pp.layout == UiLayoutMode::None) {
@@ -393,7 +408,10 @@ void UiLayoutEditor::dragSelected(f32 dx, f32 dy, bool begin) {
         return;
     }
 
-    // Inside a stack or grid the position is not the widget's to choose: dragging reorders instead.
+    // Overlay and switcher children share one box: there is no order to drag.
+    if (parent.layout == UiLayoutMode::Overlay || parent.layout == UiLayoutMode::Switcher) return;
+
+    // Inside a stack, wrap or grid the position is not the widget's to choose: dragging reorders instead.
     dragAccumX_ += dx;
     dragAccumY_ += dy;
     const UiRect r = previewRect(selected_);
@@ -897,6 +915,10 @@ void UiLayoutEditor::drawHierarchyRow(i32 index) {
             select(index);
             addWidget(*static_cast<const UiWidgetKind*>(pl->Data));
         }
+        if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("AVER_UI_PRESET")) {
+            select(index);
+            addPreset(static_cast<usize>(*static_cast<const i32*>(pl->Data)));
+        }
         ImGui::EndDragDropTarget();
     }
     if (ImGui::BeginPopupContextItem("##rowmenu")) {
@@ -923,14 +945,33 @@ void UiLayoutEditor::drawHierarchy() { drawHierarchyRow(0); }
 
 void UiLayoutEditor::drawPalette() {
     ImGui::TextDisabled("Drag onto the canvas or the hierarchy");
-    for (u32 k = 0; k < static_cast<u32>(UiWidgetKind::Count); ++k) {
-        const UiWidgetKind kind = static_cast<UiWidgetKind>(k);
-        ImGui::Selectable(kKindLabels[k]);
-        if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) addWidget(kind);
-        if (ImGui::BeginDragDropSource()) {
-            ImGui::SetDragDropPayload("AVER_UI_KIND", &kind, sizeof kind);
-            ImGui::Text("New %s", kKindLabels[k]);
-            ImGui::EndDragDropSource();
+    if (ImGui::CollapsingHeader("Widgets", ImGuiTreeNodeFlags_DefaultOpen)) {
+        for (u32 k = 0; k < static_cast<u32>(UiWidgetKind::Count); ++k) {
+            const UiWidgetKind kind = static_cast<UiWidgetKind>(k);
+            ImGui::PushID(static_cast<int>(k));
+            ImGui::Selectable(kKindLabels[k]);
+            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) addWidget(kind);
+            if (ImGui::BeginDragDropSource()) {
+                ImGui::SetDragDropPayload("AVER_UI_KIND", &kind, sizeof kind);
+                ImGui::Text("New %s", kKindLabels[k]);
+                ImGui::EndDragDropSource();
+            }
+            ImGui::PopID();
+        }
+    }
+    if (ImGui::CollapsingHeader("Panels", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const std::vector<UiWidgetPreset>& presets = uiWidgetPresets();
+        for (usize k = 0; k < presets.size(); ++k) {
+            const i32 index = static_cast<i32>(k);
+            ImGui::PushID(1000 + index);
+            ImGui::Selectable(presets[k].label);
+            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) addPreset(k);
+            if (ImGui::BeginDragDropSource()) {
+                ImGui::SetDragDropPayload("AVER_UI_PRESET", &index, sizeof index);
+                ImGui::Text("New %s", presets[k].label);
+                ImGui::EndDragDropSource();
+            }
+            ImGui::PopID();
         }
     }
 }
@@ -960,6 +1001,10 @@ void UiLayoutEditor::drawToolbar() {
     if (ImGui::BeginCombo("##add", "Add child")) {
         for (u32 k = 0; k < static_cast<u32>(UiWidgetKind::Count); ++k)
             if (ImGui::Selectable(kKindLabels[k])) addWidget(static_cast<UiWidgetKind>(k));
+        ImGui::Separator();
+        const std::vector<UiWidgetPreset>& presets = uiWidgetPresets();
+        for (usize k = 0; k < presets.size(); ++k)
+            if (ImGui::Selectable(presets[k].label)) addPreset(k);
         ImGui::EndCombo();
     }
     ImGui::SameLine();
@@ -1163,6 +1208,9 @@ void UiLayoutEditor::drawCanvas() {
         if (ImGui::BeginDragDropTarget()) {
             if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("AVER_UI_KIND")) {
                 placeWidgetAt(*static_cast<const UiWidgetKind*>(pl->Data), mouse.x, mouse.y);
+            }
+            if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("AVER_UI_PRESET")) {
+                placePresetAt(static_cast<usize>(*static_cast<const i32*>(pl->Data)), mouse.x, mouse.y);
             }
             ImGui::EndDragDropTarget();
         }

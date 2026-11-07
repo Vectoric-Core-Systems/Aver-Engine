@@ -300,6 +300,40 @@ int main() {
         setUiLayoutEditorLoc({});
     }
 
+    AVER_INFO("=== palette panels ===");
+    {
+        const std::string file = tempFile("panels.ocui");
+        writeFileText(file, uiStarterLayoutText());
+        UiLayoutEditor ed(file);
+        const std::vector<UiWidgetPreset>& presets = uiWidgetPresets();
+        usize sizeBox = presets.size();
+        for (usize i = 0; i < presets.size(); ++i) if (std::string(presets[i].label) == "Size Box") sizeBox = i;
+        check(sizeBox < presets.size(), "the palette offers a Size Box");
+        const i32 added = ed.addPreset(sizeBox);
+        check(added > 0 && ed.dirty() && ed.canUndo(), "adding a panel preset is an undoable edit");
+        const UiWidgetProps& p = ed.doc().nodes[static_cast<usize>(added)].props;
+        check(p.layout == UiLayoutMode::Overlay && p.kind == UiWidgetKind::Panel && approx(p.width, 200), "it is a plain panel in overlay mode with a size");
+        ed.layoutPreview(est);
+        check(approx(ed.designRect(added).w, 200) && approx(ed.designRect(added).h, 100), "and the preview lays it out at that size");
+        const i32 placed = ed.placePresetAt(sizeBox, 5, 5);
+        check(placed > 0 && ed.doc().valid(), "a preset can be dropped on the canvas too");
+        ed.undo();
+        ed.undo();
+        check(uiLayoutFind(ed.doc(), "SizeBox") < 0, "undo removes them");
+        ed.select(0);
+        const i32 sw = ed.addPreset(presets.size() - 1);
+        ed.layoutPreview(est);
+        const UiWidget* w = ed.preview().get(ed.previewWidget(sw));
+        check(w && w->layout == UiLayoutMode::Switcher, "the widget switcher preset is a switcher");
+        const i32 a = ed.addWidget(UiWidgetKind::Button);
+        ed.select(sw);
+        ed.addWidget(UiWidgetKind::Button);
+        ed.select(a);
+        const std::string before = uiWriteLayout(ed.doc());
+        ed.dragSelected(40, 40, true);
+        check(uiWriteLayout(ed.doc()) == before, "dragging inside an overlay or switcher does not reorder");
+    }
+
     if (g_failures) {
         AVER_ERROR("{} check(s) failed", g_failures);
         return 1;

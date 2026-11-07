@@ -93,8 +93,13 @@ enum class UiWidgetKind : u8 {
     Count
 };
 
-// How a widget arranges its CHILDREN.
-enum class UiLayoutMode : u8 { None, VStack, HStack, Grid };
+// How a widget arranges its CHILDREN. Values are file and ABI numbers: append only.
+// Overlay stacks every child in the content box (aligned by its alignH/alignV); Wrap flows children in rows
+// and breaks lines at the width; Switcher shows only the child at `activeIndex`.
+enum class UiLayoutMode : u8 { None, VStack, HStack, Grid, Overlay, Wrap, Switcher };
+
+// How a widget scales its children's whole subtree (a scale box). None uses `contentScale` as is.
+enum class UiScaleFit : u8 { None, Contain, Cover, Down, FitWidth, FitHeight };
 
 // Cross-axis (and grid cell) alignment of a child inside its slot.
 enum class UiAlign : u8 { Start, Center, End, Stretch };

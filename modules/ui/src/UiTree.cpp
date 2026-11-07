@@ -143,7 +143,7 @@ void UiTree::visit(UiWidgetId under, const std::function<void(UiWidget&)>& fn) {
 
 bool UiTree::isVisible(UiWidgetId id) const {
     for (const UiWidget* w = get(id); w; w = w->parent ? get(w->parent) : nullptr)
-        if (!w->visible) return false;
+        if (!w->visible || w->inactive) return false;
     return get(id) != nullptr;
 }
 

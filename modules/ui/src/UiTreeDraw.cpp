@@ -38,24 +38,24 @@ void UiTree::drawScrollbar(UiPainter& p, const UiWidget& w, const UiStyle& st, f
     const UiRect inner = w.rect.deflate(paddingOf(w, st));
     if (w.contentSize.y <= inner.h + 0.5f || inner.h <= 0.0f) return;
     const f32 span = w.contentSize.y - inner.h;
-    const f32 thumbH = std::max(24.0f * scale_, inner.h * inner.h / w.contentSize.y);
+    const f32 thumbH = std::max(24.0f * scaleOf(w), inner.h * inner.h / w.contentSize.y);
     const f32 t = span > 0.0f ? std::clamp(w.scrollY / span, 0.0f, 1.0f) : 0.0f;
-    const f32 bw = theme_.scrollbarWidth * scale_;
+    const f32 bw = theme_.scrollbarWidth * scaleOf(w);
     const bool hc = access_.highContrast;
     const u32 base = hc || !st.text ? uiRgba(255, 255, 255) : st.text;
-    p.fillRect({w.rect.right() - bw - 2.0f * scale_, inner.y + t * (inner.h - thumbH), bw, thumbH},
+    p.fillRect({w.rect.right() - bw - 2.0f * scaleOf(w), inner.y + t * (inner.h - thumbH), bw, thumbH},
                uiWithOpacity(hc ? base : uiWithOpacity(base, 0.35f), opacity));
 }
 
 void UiTree::drawWidget(UiPainter& p, const UiWidget& w, f32 parentOpacity, bool parentEnabled) {
-    if (!w.visible) return;
+    if (!w.visible || w.inactive) return;
     const f32 op = parentOpacity * w.opacity;
     if (op <= 0.003f) return;
     const bool enabled = parentEnabled && w.enabled;
     const bool hc = access_.highContrast;   // ignores per-widget colour overrides (images and tints are untouched)
 
     const UiStyle st = styleOf(w);
-    const f32 s = scale_;
+    const f32 s = scaleOf(w);
     const f32 px = fontPx(w, st);
     const UiRect r = w.rect;
     const UiRect inner = r.deflate(paddingOf(w, st));
@@ -87,8 +87,10 @@ void UiTree::drawWidget(UiPainter& p, const UiWidget& w, f32 parentOpacity, bool
         p.drawText(*l, area, align, centreV, colour);
     };
     const auto fillBg = [&](const UiRect& rect) { if (uiAlphaOf(bg) > 0) p.fillRect(rect, C(bg)); };
+    const f32 borderW = w.borderWidth >= 0.0f ? w.borderWidth : st.borderWidth;
+    const u32 borderCol = (w.borderColor && !hc) ? w.borderColor : st.border;
     const auto border = [&](const UiRect& rect) {
-        if (st.borderWidth > 0.0f && uiAlphaOf(st.border) > 0) p.strokeRect(rect, st.borderWidth * s, C(st.border));
+        if (borderW > 0.0f && uiAlphaOf(borderCol) > 0) p.strokeRect(rect, borderW * s, C(borderCol));
     };
 
     bool clipChildren = w.clip;

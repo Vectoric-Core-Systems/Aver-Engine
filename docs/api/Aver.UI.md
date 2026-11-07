@@ -2,7 +2,7 @@
 
 # Aver.UI public API
 
-23 public types and 193 public members, read from `scripting/csharp/Aver.UI/` (8 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+25 public types and 213 public members, read from `scripting/csharp/Aver.UI/` (8 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.UI
 
@@ -75,6 +75,12 @@
 
 Values: `Background = 0`, `Content = 1`, `Overlay = 2`, `Tooltip = 3`, `Debug = 4`
 
+### LayoutMode
+
+`public enum LayoutMode` - How a widget arranges its children.
+
+Values: `None = 0`, `VStack = 1`, `HStack = 2`, `Grid = 3`, `Overlay = 4`, `Wrap = 5`, `Switcher = 6`
+
 ### RebindRow
 
 `public readonly record struct RebindRow(string Action, int Slot, string Label, bool Rebindable = true)` - One row of the controls page: which binding of which action.
@@ -87,6 +93,12 @@ Values: `Background = 0`, `Content = 1`, `Overlay = 2`, `Tooltip = 3`, `Debug = 
 - `public float Bottom { get; }` - Bottom edge.
 - `public Rect Inset(float by)` - The same rectangle shrunk by by on every side.
 - `public static Rect Anchored(Rect container, float ax, float ay, float w, float h, float offsetX = 0f, float offsetY = 0f)` - A rectangle of this size placed relative to a container, by fractional anchor.
+
+### ScaleFit
+
+`public enum ScaleFit` - How a widget scales its children to its content box.
+
+Values: `None = 0`, `Contain = 1`, `Cover = 2`, `Down = 3`, `FitWidth = 4`, `FitHeight = 5`
 
 ### SettingsScreen
 
@@ -248,6 +260,13 @@ Values: `Clicked = 0`, `Toggled = 1`, `ValueChanged = 2`, `SelectionChanged = 3`
 - `public bool RichText { get; set; }` - Read &lt;b&gt; &lt;i&gt; &lt;color=#RRGGBB&gt; &lt;size=N&gt; &lt;font=Name&gt; &lt;br&gt; tags in the text.
 - `public Colour TextColour { set; }` - The text colour (overrides the theme's).
 - `public TextMetrics TextSize { get; }` - The size of the widget's text as laid out by the last frame (zero before the first frame, and for a widget with no text).
+- `public LayoutMode Layout { get; set; }` - How this widget arranges its children.
+- `public bool Uniform { get; set; }` - A grid whose cells are all the size of the largest and share the space equally.
+- `public int ActiveIndex { get; set; }` - The child a Switcher shows (by position among its children).
+- `public ScaleFit Fit { get; set; }` - Scales the children's whole subtree (text and padding included) to fit this widget's content box.
+- `public float ContentScale { get; set; }` - A fixed multiplier on the children's scale when Fit is none.
+- `public float BorderWidth { get; set; }` - Border thickness in design pixels; negative uses the style's.
+- `public Colour BorderColour { set; }` - The border colour (overrides the style's).
 - `public float Value { get; set; }` - A slider's or progress bar's value, clamped to its range when set.
 - `public bool Checked { get; set; }` - A toggle's state.
 - `public int Selected { get; set; }` - A choice's or list's selected index.

@@ -242,13 +242,17 @@ std::vector<UiPropDesc> build() {
 
     // ---- children layout ----
     v.push_back(insetsProp("padding", kLay, &P::padding));
-    v.push_back(eprop("layout", kLay, &P::layout, {"none", "vstack", "hstack", "grid"}));
+    v.push_back(eprop("layout", kLay, &P::layout, {"none", "vstack", "hstack", "grid", "overlay", "wrap", "switcher"}));
     v.push_back(fprop("spacing", kLay, &P::spacing, 0, 200));
     v.push_back(fprop("spacingY", kLay, &P::spacingY, -1, 200));
     v.push_back(iprop("columns", kLay, &P::columns, 1, 32));
     v.push_back(fprop("cellWidth", kLay, &P::cellWidth, -1, 2000));
     v.push_back(fprop("cellHeight", kLay, &P::cellHeight, -1, 2000));
     v.push_back(eprop("justify", kLay, &P::justify, {"start", "center", "end", "spacebetween"}));
+    v.push_back(bprop("uniform", kLay, &P::uniform));
+    v.push_back(iprop("activeIndex", kLay, &P::activeIndex, 0, 64));
+    v.push_back(eprop("scaleFit", kLay, &P::scaleFit, {"none", "contain", "cover", "down", "width", "height"}));
+    v.push_back(fprop("contentScale", kLay, &P::contentScale, 0.1f, 10.0f));
 
     // ---- appearance ----
     v.push_back(bprop("visible", kLook, &P::visible));
@@ -260,6 +264,8 @@ std::vector<UiPropDesc> build() {
     v.push_back(cprop("bgColor", kLook, &P::bgColor));
     v.push_back(cprop("textColor", kLook, &P::textColor));
     v.push_back(cprop("accentColor", kLook, &P::accentColor));
+    v.push_back(fprop("borderWidth", kLook, &P::borderWidth, -1, 50));
+    v.push_back(cprop("borderColor", kLook, &P::borderColor));
 
     // ---- content ----
     v.push_back(sprop("text", kCont, &P::text, kLabelled));

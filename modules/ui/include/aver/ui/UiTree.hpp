@@ -199,6 +199,10 @@ private:
     void arrange(UiWidget& w, const UiRect& rect);
     void arrangeStack(UiWidget& w, const UiRect& inner, bool vertical, const std::vector<UiWidget*>& kids);
     void arrangeGrid(UiWidget& w, const UiRect& inner, const std::vector<UiWidget*>& kids);
+    void arrangeOverlay(const UiRect& inner, const std::vector<UiWidget*>& kids);
+    void arrangeWrap(UiWidget& w, const UiRect& inner, const std::vector<UiWidget*>& kids);
+    f32 contentFactor(const UiWidget& w, const UiRect& inner) const;   // scale a widget gives its children's subtree
+    f32 scaleOf(const UiWidget& w) const { return w.scale > 0.0f ? w.scale : scale_; }
     UiRect placeAnchored(const UiWidget& child, const UiRect& parent) const;
     void finishScroll(UiWidget& w, const UiRect& inner, const std::vector<UiWidget*>& kids);
     void translate(UiWidget& w, f32 dx, f32 dy);

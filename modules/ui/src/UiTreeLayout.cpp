@@ -29,9 +29,41 @@ GridTracks gridTracks(const UiWidget& w, const std::vector<UiWidget*>& kids, f32
         r.desired = std::max(r.desired, k.desired.y + k.margin.vertical() * s);
         r.fill = std::max(r.fill, k.fillH);
     }
+    if (w.uniform) {
+        f32 mc = 0.0f, mr = 0.0f;
+        for (const UiAxisItem& c : t.cols) mc = std::max(mc, c.desired);
+        for (const UiAxisItem& r : t.rows) mr = std::max(mr, r.desired);
+        for (UiAxisItem& c : t.cols) { c.desired = mc; c.fill = std::max(c.fill, 1.0f); }
+        for (UiAxisItem& r : t.rows) { r.desired = mr; r.fill = std::max(r.fill, 1.0f); }
+    }
     if (w.cellWidth >= 0.0f) for (UiAxisItem& c : t.cols) c.desired = w.cellWidth * s;
     if (w.cellHeight >= 0.0f) for (UiAxisItem& r : t.rows) r.desired = w.cellHeight * s;
     return t;
+}
+
+struct WrapLine {
+    usize first = 0, count = 0;
+    f32 width = 0, height = 0;
+};
+
+// Greedy line breaking for a Wrap: a child goes on the current line while it fits `availW` (<= 0 = unbounded).
+std::vector<WrapLine> wrapLines(const std::vector<UiWidget*>& kids, f32 availW, f32 spX, f32 s) {
+    std::vector<WrapLine> lines;
+    WrapLine cur;
+    for (usize i = 0; i < kids.size(); ++i) {
+        const UiWidget& k = *kids[i];
+        const f32 iw = k.desired.x + k.margin.horizontal() * s, ih = k.desired.y + k.margin.vertical() * s;
+        if (cur.count > 0 && availW > 0.0f && cur.width + spX + iw > availW + 0.01f) {
+            lines.push_back(cur);
+            cur = WrapLine{};
+        }
+        if (cur.count == 0) cur.first = i;
+        cur.width += (cur.count > 0 ? spX : 0.0f) + iw;
+        cur.height = std::max(cur.height, ih);
+        ++cur.count;
+    }
+    if (cur.count > 0) lines.push_back(cur);
+    return lines;
 }
 
 // The height of a layout's first line: what one-line widgets size to. A legacy layout reports the
@@ -59,19 +91,19 @@ UiStyle UiTree::styleOf(const UiWidget& w) const { return activeTheme().resolve(
 // Text scale is text only: row heights, padding and widths stay on the UI scale.
 f32 UiTree::fontPx(const UiWidget& w, const UiStyle& st) const {
     const f32 dp = w.fontSize > 0.0f ? w.fontSize : (st.fontSize > 0.0f ? st.fontSize : theme_.baseFontSize);
-    return dp * scale_ * access_.textScale;
+    return dp * scaleOf(w) * access_.textScale;
 }
 
 UiTextStyle UiTree::textStyleOf(const UiWidget& w, const UiStyle& st) const {
     UiTextStyle s;
     s.family = !w.fontFamily.empty() ? std::string_view(w.fontFamily) : std::string_view(st.fontFamily);
     s.px = fontPx(w, st);
-    s.scale = scale_;
+    s.scale = scaleOf(w);
     s.bold = w.bold || st.bold > 0;
     s.italic = w.italic;
     s.dir = w.textDir;
     s.lineSpacing = w.lineSpacing > 0.0f ? w.lineSpacing : 1.0f;
-    s.letterSpacing = w.letterSpacing * scale_;
+    s.letterSpacing = w.letterSpacing * scaleOf(w);
     return s;
 }
 
@@ -95,12 +127,13 @@ bool UiTree::lastTextSize(UiWidgetId id, UiVec2& size, i32& lines) const {
 }
 
 UiInsets UiTree::paddingOf(const UiWidget& w, const UiStyle& st) const {
-    return {(w.padding.left + st.padding.left) * scale_, (w.padding.top + st.padding.top) * scale_,
-            (w.padding.right + st.padding.right) * scale_, (w.padding.bottom + st.padding.bottom) * scale_};
+    const f32 s = scaleOf(w);
+    return {(w.padding.left + st.padding.left) * s, (w.padding.top + st.padding.top) * s,
+            (w.padding.right + st.padding.right) * s, (w.padding.bottom + st.padding.bottom) * s};
 }
 
 f32 UiTree::rowHeightOf(const UiWidget& w) const {
-    return (w.rowHeight > 0.0f ? w.rowHeight : theme_.rowHeight) * scale_;
+    return (w.rowHeight > 0.0f ? w.rowHeight : theme_.rowHeight) * scaleOf(w);
 }
 
 UiRect UiTree::contentRect(UiWidgetId id) const {
@@ -118,14 +151,20 @@ UiRect UiTree::sliderTrack(const UiWidget& w) const {
 std::vector<UiWidget*> UiTree::visibleChildren(UiWidget& w) {
     std::vector<UiWidget*> out;
     out.reserve(w.children.size());
+    const bool switcher = w.layout == UiLayoutMode::Switcher;
+    i32 index = 0;
     for (const UiWidgetId c : w.children) {
         UiWidget* k = get(c);
-        if (k && k->visible) out.push_back(k);
+        const i32 at = index++;
+        if (!k) continue;
+        k->inactive = switcher && at != w.activeIndex;
+        if (k->visible && !k->inactive) out.push_back(k);
     }
     return out;
 }
 
 UiVec2 UiTree::measure(UiWidget& w) {
+    w.scale = scale_;
     const UiStyle st = styleOf(w);
     const f32 s = scale_;
     const f32 px = fontPx(w, st);
@@ -217,6 +256,32 @@ UiVec2 UiTree::measure(UiWidget& w) {
         const f32 spY = (w.spacingY >= 0.0f ? w.spacingY : w.spacing) * s;
         cw = std::max(cw, uiAxisContent(t.cols, w.spacing * s));
         ch = std::max(ch, uiAxisContent(t.rows, spY));
+    } else if (w.layout == UiLayoutMode::Overlay || w.layout == UiLayoutMode::Switcher) {
+        for (UiWidget* k : kids) {
+            cw = std::max(cw, k->desired.x + k->margin.horizontal() * s);
+            ch = std::max(ch, k->desired.y + k->margin.vertical() * s);
+        }
+    } else if (w.layout == UiLayoutMode::Wrap && !kids.empty()) {
+        // Rows break at the fixed width, else at the width the last arrangement gave (second layout pass).
+        f32 availW = 0.0f;
+        if (w.width >= 0.0f) availW = std::max(0.0f, w.width * s - pad.horizontal());
+        else if (w.wrapHint > 0.0f) availW = w.wrapHint;
+        if (w.maxWidth > 0.0f) {
+            const f32 cap = std::max(0.0f, w.maxWidth * s - pad.horizontal());
+            availW = availW > 0.0f ? std::min(availW, cap) : cap;
+        }
+        const std::vector<WrapLine> lines = wrapLines(kids, availW, w.spacing * s, s);
+        const f32 spY = (w.spacingY >= 0.0f ? w.spacingY : w.spacing) * s;
+        f32 maxLine = 0.0f, total = 0.0f;
+        for (const WrapLine& l : lines) { maxLine = std::max(maxLine, l.width); total += l.height; }
+        if (!lines.empty()) total += spY * static_cast<f32>(lines.size() - 1);
+        cw = std::max(cw, maxLine);
+        ch = std::max(ch, total);
+    }
+    w.contentDesired = {cw, ch};
+    if (!kids.empty() && w.scaleFit == UiScaleFit::None && w.contentScale > 0.0f && w.contentScale != 1.0f) {
+        cw *= w.contentScale;
+        ch *= w.contentScale;
     }
 
     f32 dw = w.width >= 0.0f ? w.width * s : cw + pad.horizontal();
@@ -329,19 +394,91 @@ void UiTree::finishScroll(UiWidget& w, const UiRect& inner, const std::vector<Ui
         for (UiWidget* k : kids) translate(*k, -w.scrollX, -w.scrollY);
 }
 
+void UiTree::arrangeOverlay(const UiRect& inner, const std::vector<UiWidget*>& kids) {
+    const f32 s = scale_;
+    for (UiWidget* kp : kids) {
+        UiWidget& k = *kp;
+        const f32 mL = k.margin.left * s, mR = k.margin.right * s, mT = k.margin.top * s, mB = k.margin.bottom * s;
+        const UiAlign ah = (k.alignH == UiAlign::Stretch && k.width >= 0.0f) ? UiAlign::Start : k.alignH;
+        const UiAlign av = (k.alignV == UiAlign::Stretch && k.height >= 0.0f) ? UiAlign::Start : k.alignV;
+        const UiSpan x = uiAlignInSlot(inner.x + mL, std::max(0.0f, inner.w - mL - mR), k.desired.x, ah, k.minWidth * s, k.maxWidth * s);
+        const UiSpan y = uiAlignInSlot(inner.y + mT, std::max(0.0f, inner.h - mT - mB), k.desired.y, av, k.minHeight * s, k.maxHeight * s);
+        arrange(k, UiRect{x.pos, y.pos, x.size, y.size});
+    }
+}
+
+void UiTree::arrangeWrap(UiWidget& w, const UiRect& inner, const std::vector<UiWidget*>& kids) {
+    const f32 s = scale_;
+    const f32 spX = w.spacing * s, spY = (w.spacingY >= 0.0f ? w.spacingY : w.spacing) * s;
+    const std::vector<WrapLine> lines = wrapLines(kids, inner.w, spX, s);
+    f32 y = inner.y;
+    for (const WrapLine& line : lines) {
+        const f32 leftover = std::max(0.0f, inner.w - line.width);
+        f32 cursor = inner.x, gap = spX;
+        if (w.justify == UiJustify::Center) cursor += leftover * 0.5f;
+        else if (w.justify == UiJustify::End) cursor += leftover;
+        else if (w.justify == UiJustify::SpaceBetween && line.count > 1) gap += leftover / static_cast<f32>(line.count - 1);
+        for (usize j = 0; j < line.count; ++j) {
+            UiWidget& k = *kids[line.first + j];
+            const f32 mL = k.margin.left * s, mR = k.margin.right * s, mT = k.margin.top * s, mB = k.margin.bottom * s;
+            const UiAlign av = (k.alignV == UiAlign::Stretch && k.height >= 0.0f) ? UiAlign::Start : k.alignV;
+            const UiSpan sy = uiAlignInSlot(y + mT, std::max(0.0f, line.height - mT - mB), k.desired.y, av, k.minHeight * s, k.maxHeight * s);
+            arrange(k, UiRect{cursor + mL, sy.pos, k.desired.x, sy.size});
+            cursor += mL + k.desired.x + mR + gap;
+        }
+        y += line.height + spY;
+    }
+}
+
+f32 UiTree::contentFactor(const UiWidget& w, const UiRect& inner) const {
+    const f32 user = w.contentScale > 0.0f ? w.contentScale : 1.0f;
+    if (w.scaleFit == UiScaleFit::None) return user;
+    const f32 cw = w.contentDesired.x, ch = w.contentDesired.y;
+    if (cw <= 0.0f || ch <= 0.0f) return 1.0f;
+    const f32 fx = inner.w / cw, fy = inner.h / ch;
+    f32 f = 1.0f;
+    switch (w.scaleFit) {
+        case UiScaleFit::Contain: f = std::min(fx, fy); break;
+        case UiScaleFit::Cover: f = std::max(fx, fy); break;
+        case UiScaleFit::Down: f = std::min(1.0f, std::min(fx, fy)); break;
+        case UiScaleFit::FitWidth: f = fx; break;
+        case UiScaleFit::FitHeight: f = fy; break;
+        case UiScaleFit::None: break;
+    }
+    return std::clamp(f, 0.01f, 100.0f);
+}
+
 void UiTree::arrange(UiWidget& w, const UiRect& rect) {
     w.rect = rect;
+    w.scale = scale_;
     const UiRect inner = rect.deflate(paddingOf(w, styleOf(w)));
     std::vector<UiWidget*> kids = visibleChildren(w);
+
+    // A scaled subtree is re-measured and laid out at the new design-pixel scale, so text, padding and borders scale too.
+    const f32 outerScale = scale_;
+    UiRect area = inner;
+    const f32 f = kids.empty() ? 1.0f : contentFactor(w, inner);
+    if (std::fabs(f - 1.0f) > 1e-4f) {
+        scale_ = outerScale * f;
+        for (UiWidget* k : kids) measure(*k);
+    }
+    if (!kids.empty() && w.scaleFit != UiScaleFit::None && w.contentDesired.x > 0.0f && w.contentDesired.y > 0.0f) {
+        const f32 aw = w.contentDesired.x * f, ah = w.contentDesired.y * f;
+        area = UiRect{inner.x + (inner.w - aw) * 0.5f, inner.y + (inner.h - ah) * 0.5f, aw, ah};
+    }
     switch (w.layout) {
-        case UiLayoutMode::VStack: arrangeStack(w, inner, true, kids); break;
-        case UiLayoutMode::HStack: arrangeStack(w, inner, false, kids); break;
-        case UiLayoutMode::Grid: arrangeGrid(w, inner, kids); break;
+        case UiLayoutMode::VStack: arrangeStack(w, area, true, kids); break;
+        case UiLayoutMode::HStack: arrangeStack(w, area, false, kids); break;
+        case UiLayoutMode::Grid: arrangeGrid(w, area, kids); break;
+        case UiLayoutMode::Overlay:
+        case UiLayoutMode::Switcher: arrangeOverlay(area, kids); break;
+        case UiLayoutMode::Wrap: arrangeWrap(w, area, kids); break;
         case UiLayoutMode::None:
-            for (UiWidget* k : kids) arrange(*k, placeAnchored(*k, inner));
+            for (UiWidget* k : kids) arrange(*k, placeAnchored(*k, area));
             break;
     }
     if (w.kind == UiWidgetKind::Scroll || w.kind == UiWidgetKind::List) finishScroll(w, inner, kids);
+    scale_ = outerScale;
 }
 
 void UiTree::layout(const UiTextMetrics& m) {
@@ -361,7 +498,9 @@ void UiTree::layout(const UiTextMetrics& m) {
         bool moved = false;
         for (auto& kv : widgets_) {
             UiWidget& w = *kv.second;
-            if (w.kind != UiWidgetKind::Text || !w.wrap || w.width >= 0.0f || w.fillW <= 0.0f || !w.visible) continue;
+            if (!w.visible || w.inactive || w.width >= 0.0f) continue;
+            const bool wrappedText = w.kind == UiWidgetKind::Text && w.wrap && w.fillW > 0.0f;
+            if (!wrappedText && w.layout != UiLayoutMode::Wrap) continue;
             const f32 inner = std::max(0.0f, w.rect.w - paddingOf(w, styleOf(w)).horizontal());
             if (std::fabs(inner - w.wrapHint) > 0.5f) { w.wrapHint = inner; moved = true; }
         }

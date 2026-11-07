@@ -104,6 +104,7 @@ public:
     // The edits as the TAB performs them: push undo, apply, keep the selection on what was acted on,
     // mark dirty, refresh the preview. -1 / false when the edit refused (and nothing was recorded).
     i32 addWidget(ui::UiWidgetKind kind);                    // under the selection
+    i32 addPreset(usize preset);                             // a palette panel (ui::uiWidgetPresets()), under the selection
     void deleteSelected();
     void duplicateSelected();
     void reparentSelected(i32 newParent);
@@ -116,6 +117,7 @@ public:
     // Drops a new widget of `kind` at a point in the preview (preview pixels): under the container
     // there, positioned there when its parent places by anchors. Returns the new index or -1.
     i32 placeWidgetAt(ui::UiWidgetKind kind, f32 previewX, f32 previewY);
+    i32 placePresetAt(usize preset, f32 previewX, f32 previewY);
     // Moves the selection by a canvas drag of (dx, dy) PREVIEW pixels. Inside a stack or grid it
     // reorders among its siblings instead. `begin` records one undo entry for a whole drag.
     void dragSelected(f32 dx, f32 dy, bool begin);
@@ -141,6 +143,8 @@ private:
     void rebuildPreview();
     void applyPreviewLoc();
     ui::UiRect designRectOfParent(i32 index) const;
+    // Shared by the two drops: kind (or, when preset >= 0, that palette panel) at a preview point.
+    i32 placeAt(ui::UiWidgetKind kind, i64 preset, f32 previewX, f32 previewY);
 
     std::string path_;
     ui::UiLayoutDoc doc_;

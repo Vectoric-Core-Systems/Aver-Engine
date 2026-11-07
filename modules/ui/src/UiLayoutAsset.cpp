@@ -272,6 +272,51 @@ UiWidgetProps uiNewWidgetProps(UiWidgetKind kind) {
     return p;
 }
 
+const std::vector<UiWidgetPreset>& uiWidgetPresets() {
+    static const std::vector<UiWidgetPreset> presets = [] {
+        std::vector<UiWidgetPreset> v;
+        const auto add = [&](const char* label, const char* name, auto&& fill) {
+            UiWidgetProps p = uiNewWidgetProps(UiWidgetKind::Panel);
+            p.style = "clear";
+            fill(p);
+            v.push_back({label, name, std::move(p)});
+        };
+        add("Canvas Panel", "CanvasPanel", [](UiWidgetProps&) {});
+        add("Vertical Box", "VerticalBox", [](UiWidgetProps& p) { p.layout = UiLayoutMode::VStack; p.spacing = 6; p.width = -1; p.height = -1; });
+        add("Horizontal Box", "HorizontalBox", [](UiWidgetProps& p) { p.layout = UiLayoutMode::HStack; p.spacing = 6; p.width = -1; p.height = -1; });
+        add("Grid Panel", "GridPanel", [](UiWidgetProps& p) { p.layout = UiLayoutMode::Grid; p.columns = 2; p.spacing = 6; p.width = -1; p.height = -1; });
+        add("Uniform Grid Panel", "UniformGridPanel", [](UiWidgetProps& p) {
+            p.layout = UiLayoutMode::Grid; p.uniform = true; p.columns = 2; p.spacing = 6; p.width = -1; p.height = -1;
+        });
+        add("Overlay", "Overlay", [](UiWidgetProps& p) { p.layout = UiLayoutMode::Overlay; });
+        add("Wrap Box", "WrapBox", [](UiWidgetProps& p) { p.layout = UiLayoutMode::Wrap; p.spacing = 6; p.width = 300; p.height = -1; });
+        add("Size Box", "SizeBox", [](UiWidgetProps& p) { p.layout = UiLayoutMode::Overlay; p.width = 200; p.height = 100; });
+        add("Scale Box", "ScaleBox", [](UiWidgetProps& p) {
+            p.layout = UiLayoutMode::Overlay; p.scaleFit = UiScaleFit::Contain; p.width = 240; p.height = 120;
+        });
+        add("Border", "Border", [](UiWidgetProps& p) {
+            p.style.clear(); p.layout = UiLayoutMode::Overlay; p.padding = UiInsets{8, 8, 8, 8}; p.width = -1; p.height = -1;
+        });
+        add("Spacer", "Spacer", [](UiWidgetProps& p) { p.hit = UiHitMode::Never; p.width = 16; p.height = 16; });
+        add("Widget Switcher", "WidgetSwitcher", [](UiWidgetProps& p) { p.layout = UiLayoutMode::Switcher; });
+        return v;
+    }();
+    return presets;
+}
+
+i32 uiLayoutAddPreset(UiLayoutDoc& doc, i32 parent, usize preset, std::string_view name) {
+    const std::vector<UiWidgetPreset>& all = uiWidgetPresets();
+    if (!inRange(doc, parent) || preset >= all.size()) return -1;
+    const UiWidgetPreset& pr = all[preset];
+    const i32 idx = uiLayoutAdd(doc, parent, UiWidgetKind::Panel, name.empty() ? std::string_view(pr.name) : name);
+    if (idx < 0) return -1;
+    UiWidgetProps& p = doc.nodes[static_cast<usize>(idx)].props;
+    const std::string keep = p.name;
+    p = pr.props;
+    p.name = keep;
+    return idx;
+}
+
 std::vector<i32> uiLayoutChildren(const UiLayoutDoc& doc, i32 parent) {
     std::vector<i32> out;
     for (usize i = 0; i < doc.nodes.size(); ++i)

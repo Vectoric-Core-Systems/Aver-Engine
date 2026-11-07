@@ -35,6 +35,43 @@ public enum WidgetKind
     KeyBind = 11,
 }
 
+/// <summary>How a widget arranges its children. Mirrors the native <c>UiLayoutMode</c>; the file and property
+/// names are the lower-case ones ("vstack", "overlay", ...).</summary>
+public enum LayoutMode
+{
+    /// <summary>Children place themselves by their anchors.</summary>
+    None = 0,
+    /// <summary>One column.</summary>
+    VStack = 1,
+    /// <summary>One row.</summary>
+    HStack = 2,
+    /// <summary>Rows of <c>columns</c> cells; <see cref="Widget.Uniform"/> makes every cell equal.</summary>
+    Grid = 3,
+    /// <summary>Every child fills (or aligns in) the same box: an overlay, size box or scale box.</summary>
+    Overlay = 4,
+    /// <summary>Children flow in rows and break lines at the width.</summary>
+    Wrap = 5,
+    /// <summary>Only the child at <see cref="Widget.ActiveIndex"/> shows.</summary>
+    Switcher = 6,
+}
+
+/// <summary>How a widget scales its children to its content box. Mirrors the native <c>UiScaleFit</c>.</summary>
+public enum ScaleFit
+{
+    /// <summary>No fitting: <see cref="Widget.ContentScale"/> is used as it is.</summary>
+    None = 0,
+    /// <summary>Largest uniform scale that still fits inside.</summary>
+    Contain = 1,
+    /// <summary>Smallest uniform scale that covers the box.</summary>
+    Cover = 2,
+    /// <summary>Like contain, but never enlarges.</summary>
+    Down = 3,
+    /// <summary>Scale so the width fits.</summary>
+    FitWidth = 4,
+    /// <summary>Scale so the height fits.</summary>
+    FitHeight = 5,
+}
+
 /// <summary>What happened to a widget. Mirrors the native <c>UiEventType</c>.</summary>
 public enum UiEventKind
 {
@@ -238,6 +275,51 @@ public readonly struct Widget : IEquatable<Widget>
         {
             if (Native.aver_ui_widget_text_size(Id, s_textSize) == 0) return default;
             return new TextMetrics(s_textSize[0], s_textSize[1], (int)s_textSize[2]);
+        }
+    }
+
+    // ---- panels: layout modes and per-widget properties (no kind per container) -----------------
+
+    private static readonly string[] s_layoutNames = { "none", "vstack", "hstack", "grid", "overlay", "wrap", "switcher" };
+    private static readonly string[] s_fitNames = { "none", "contain", "cover", "down", "width", "height" };
+
+    /// <summary>How this widget arranges its children.</summary>
+    public LayoutMode Layout
+    {
+        get { int i = Array.IndexOf(s_layoutNames, Get("layout")); return i < 0 ? LayoutMode.None : (LayoutMode)i; }
+        set => Set("layout", s_layoutNames[Math.Clamp((int)value, 0, s_layoutNames.Length - 1)]);
+    }
+
+    /// <summary>A grid whose cells are all the size of the largest and share the space equally.</summary>
+    public bool Uniform { get => GetBool("uniform"); set => SetBool("uniform", value); }
+
+    /// <summary>The child a <see cref="LayoutMode.Switcher"/> shows (by position among its children).</summary>
+    public int ActiveIndex
+    {
+        get => (int)GetFloat("activeIndex", 0f);
+        set => Set("activeIndex", (float)value);
+    }
+
+    /// <summary>Scales the children's whole subtree (text and padding included) to fit this widget's content box.</summary>
+    public ScaleFit Fit
+    {
+        get { int i = Array.IndexOf(s_fitNames, Get("scaleFit")); return i < 0 ? ScaleFit.None : (ScaleFit)i; }
+        set => Set("scaleFit", s_fitNames[Math.Clamp((int)value, 0, s_fitNames.Length - 1)]);
+    }
+
+    /// <summary>A fixed multiplier on the children's scale when <see cref="Fit"/> is none.</summary>
+    public float ContentScale { get => GetFloat("contentScale", 1f); set => Set("contentScale", value); }
+
+    /// <summary>Border thickness in design pixels; negative uses the style's.</summary>
+    public float BorderWidth { get => GetFloat("borderWidth", -1f); set => Set("borderWidth", value); }
+
+    /// <summary>The border colour (overrides the style's).</summary>
+    public Colour BorderColour
+    {
+        set
+        {
+            uint c = value.Packed;
+            Set("borderColor", $"#{(c & 0xFF):X2}{((c >> 8) & 0xFF):X2}{((c >> 16) & 0xFF):X2}{(c >> 24):X2}");
         }
     }
 
