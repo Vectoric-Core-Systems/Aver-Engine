@@ -298,9 +298,15 @@ static void testFirstPerson() {
               "squeezing the depth leaves the screen position alone");
         check(near(az * slab, bz, 1e-4), "z_ndc scales by exactly the slab");
     }
-    // Lens equal to the main one with slab 1: the main view-projection, byte for byte.
-    check(std::memcmp(firstPersonViewProj(view, mainLens, aspect, 1.0f).m, mainVp.m, sizeof mainVp.m) == 0,
+    // Lens equal to the main one with slab 1: the main view-projection, entry for entry (compared as values: -0 equals 0).
+    {
+        const Mat4 same = firstPersonViewProj(view, mainLens, aspect, 1.0f);
+        bool equal = true;
+        for (int r = 0; r < 4; ++r)
+            for (int c = 0; c < 4; ++c) equal = equal && same.m[r][c] == mainVp.m[r][c];
+        check(equal,
           "with the first-person lens equal to the main lens and slab 1, the matrix is the main view-projection");
+    }
     // A slab that starts later: [zmin, zmin + slab].
     {
         const Mat4 s2 = firstPersonViewProj(view, fpLens, aspect, 0.1f, 0.2f);

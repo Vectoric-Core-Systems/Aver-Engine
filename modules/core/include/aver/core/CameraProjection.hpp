@@ -98,7 +98,11 @@ inline Mat4 projectionMatrix(const CameraProjection& p, f32 aspect) {
 // lens, slab 1 and zmin 0 this is the main view-projection byte for byte.
 inline Mat4 firstPersonViewProj(const Mat4& view, const CameraProjection& fpLens, f32 aspect, f32 slab, f32 zmin = 0.0f) {
     Mat4 p = projectionMatrix(fpLens, aspect);
-    for (int r = 0; r < 4; ++r) p.m[r][2] = p.m[r][2] * slab + (zmin != 0.0f ? zmin * p.m[r][3] : 0.0f);
+    // No "+ 0": it would turn a -0 entry into +0, and slab 1 with zmin 0 must be the lens's own matrix exactly.
+    for (int r = 0; r < 4; ++r) {
+        p.m[r][2] *= slab;
+        if (zmin != 0.0f) p.m[r][2] += zmin * p.m[r][3];
+    }
     return view * p;
 }
 
