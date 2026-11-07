@@ -1582,7 +1582,11 @@ public:
     // ---- translucency: sticky like setDrawBinding; drawMesh captures, endFrame replays (IDevice::setDrawBlended) ----
     void setDrawBlended(bool blended) override { drawBlended_ = blended; }
     void setDrawLayers(u32 layersInv) override { drawLayersInv_ = layersInv; }
-    void setDrawFirstPerson(bool on) override { drawFirstPerson_ = on; }
+    void setDrawFirstPerson(bool on) override {
+        if (on == drawFirstPerson_) return;
+        drawFirstPerson_ = on;
+        for (IRenderFeature* f : features_) f->onDrawFirstPerson(on);
+    }
     void setFirstPersonCamera(const f32 fpViewProj[16]) override;
     bool drawBlended() const override { return drawBlended_; }
     TextureHandle sceneColorBackdropTexture() override;

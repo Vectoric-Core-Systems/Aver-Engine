@@ -859,6 +859,9 @@ public:
     // person (IDevice::setDrawFirstPerson) captured and replayed over its scene pass, after the sky and before the blended replay, through
     // firstPersonOverlayPipeline with firstPersonOverlayConstants, depth test and write on.
     virtual bool wantsFirstPersonOverlay() const { return false; }
+    // The device's IDevice::setDrawFirstPerson state, told to every feature when it changes: the submitDraw calls that follow are first-person draws
+    // while it is on. A host feeding a feature directly brackets those calls with setDrawFirstPerson too, so both routes agree.
+    virtual void onDrawFirstPerson(bool on) { (void)on; }
     // The overlay's pipeline for a draw whose material variant key is `fxKey` (0 = none), or 0 to drop the draw. `gbuffer`: the scene's G-buffer
     // targets are bound with the colour (velocity, view Z, normal), so the overlay writes them too and the resolve after it sees the meshes.
     virtual PipelineHandle firstPersonOverlayPipeline(u32 fxKey, bool gbuffer) const { (void)fxKey; (void)gbuffer; return 0; }

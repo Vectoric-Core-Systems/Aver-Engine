@@ -1194,7 +1194,11 @@ public:
     // Blended-mesh path (sticky across frames).
     void setDrawBlended(bool blended) override { drawBlended_ = blended; }
     void setDrawLayers(u32 layersInv) override { drawLayersInv_ = layersInv; }
-    void setDrawFirstPerson(bool on) override { drawFirstPerson_ = on; }
+    void setDrawFirstPerson(bool on) override {
+        if (on == drawFirstPerson_) return;
+        drawFirstPerson_ = on;
+        for (IRenderFeature* f : features_) f->onDrawFirstPerson(on);
+    }
     bool drawBlended() const override { return drawBlended_; }
 
     void setLineDepth(bool testDepth) override { editorLines_.setDepthTest(testDepth); }

@@ -1569,6 +1569,7 @@ public:
     void setSunAngle(f32 deg);
     void setPtFurnaceTest();        // --pt-furnace
     void setPtSceneView();   // --pt-scene
+    void setPtIncludeFirstPerson(bool on) { ptIncludeFirstPerson_ = on; if (ptSceneView_) ptSceneView_->setIncludeFirstPerson(on); }   // --pt-include-first-person
     void setPtQualityRamp(int everyFrames);
     void setGiMethodCycle(int everyFrames) { giMethodCycleEvery_ = everyFrames; giMethodCycleCountdown_ = everyFrames; }
     void setPtSceneToggleOnAuto(int framesIn);
@@ -4025,6 +4026,7 @@ private:
     bool ptSceneViewWantEnabled_ = false;
     // --pt-scene WAS GIVEN ON THE COMMAND LINE. Sticky for the session, separate from the want flag above.
     bool ptSceneViewFromCli_ = false;
+    bool ptIncludeFirstPerson_ = false;   // setPtIncludeFirstPerson, applied to each PtSceneView this app creates
     bool ptSceneViewUnavailable_ = false;   // init() refused once this session -- stop re-asking
     // A1: true while syncPtSceneView() holds ptSceneViewWantEnabled_ down because ray-driven primary visibility is painting the scene.
     bool ptSceneViewSuppressedByRayDriven_ = false;

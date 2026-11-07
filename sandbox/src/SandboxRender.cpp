@@ -2988,6 +2988,7 @@ void SandboxApp::syncPtSceneView(rhi::IDevice* dev) {
 
     if (ptSceneViewWantEnabled_) {
         ptSceneView_ = std::make_unique<aver::pt::PtSceneView>();
+        ptSceneView_->setIncludeFirstPerson(ptIncludeFirstPerson_);
 #if AVER_MODULE_PBR && AVER_MODULE_VOXI
         // The HOST resolves the material -- only the host knows it bound one, which is why
         // Aver.Render.PathTracer can link just Aver.RHI and Aver.Core. ownsBindingSet() is the

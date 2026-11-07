@@ -126,6 +126,7 @@ void PtSceneView::submitDraw(rhi::MeshHandle mesh, const f32 world[16], const f3
                              const void* drawConstants, u32 drawConstantBytes, bool blended) {
     (void)metallic; (void)roughness;
     if (mesh == 0) return;
+    if (drawFirstPerson_ && !includeFirstPerson_) return;   // setIncludeFirstPerson
     // STATIC ONLY -- see the class comment's GEOMETRY point. Same predicate
     // VoxiRenderer::buildAccelerationStructures already applies (gated on IDevice::meshVertexBuffer):
     // non-zero means this mesh's vertices are written by compute (skinned, or any future per-frame
@@ -295,6 +296,14 @@ void PtSceneView::setIncludeDynamicMeshes(bool include, u64 revision) {
     // The draw list a frame behind was filtered under the old setting; the key alone would not move
     // when only the toggle flips and no dynamic mesh is present yet, so re-arm explicitly.
     sceneReady_ = false;
+    sampleCursor_ = 0;
+    convergedLogged_ = false;
+}
+
+void PtSceneView::setIncludeFirstPerson(bool include) {
+    if (include == includeFirstPerson_) return;
+    includeFirstPerson_ = include;
+    sceneReady_ = false;   // the draw list a frame behind was filtered under the old setting (setIncludeDynamicMeshes)
     sampleCursor_ = 0;
     convergedLogged_ = false;
 }

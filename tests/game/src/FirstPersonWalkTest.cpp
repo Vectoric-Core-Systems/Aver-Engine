@@ -9,6 +9,9 @@
 #include "aver/scene/Components.hpp"
 #include "aver/scene/World.hpp"
 #include "aver/voxi/VoxiRenderer.hpp"
+#if AVER_TEST_HAS_PT
+#include "aver/pt/PtSceneView.hpp"
+#endif
 
 #include <memory>
 #include <string>
@@ -251,6 +254,25 @@ static void testHooks() {
         check(dev.drawn.empty() && fpDirect && plainDirect, "on the direct route Voxi gets the same verdicts, and the device sees no draw");
     }
     {
+        // Step 7: the direct route's host sink runs inside setDrawFirstPerson, as the raster route's draw does, so a feature fed there knows.
+        MockDevice dev;
+        struct Sink { MockDevice* dev; bool fpSeen = false, fpFlag = false, plainSeen = false, plainFlag = true; } sink{&dev};
+        game::DrawWorldOptions opt;
+        opt.suppressLog = true;
+        opt.viewerPos = vc.eye; opt.haveViewerPos = true;
+        opt.user = &sink;
+        opt.decide = [](game::EntityDecision& d, void*) { d.colourAlreadyDrawn = true; };
+        opt.onDirectDraw = [](rhi::MeshHandle m, const f32[16], const f32[4], f32, f32, rhi::BindingSetHandle, const void*, u32, bool, bool, void* user) {
+            auto* k = static_cast<Sink*>(user);
+            if (m == kFpBehind) { k->fpSeen = true; k->fpFlag = k->dev->fp; }
+            if (m == kPlain) { k->plainSeen = true; k->plainFlag = k->dev->fp; }
+        };
+        game::SceneDrawStats stats;
+        game::drawWorld(dev, vc.viewProj, s.content, stats, nullptr, nullptr, opt);
+        check(sink.fpSeen && sink.fpFlag && sink.plainSeen && !sink.plainFlag && !dev.fp,
+              "the direct sink sees the device's first-person state on for the first-person mesh only, and off afterwards");
+    }
+    {
         // A secondary camera's walk is not the player's view: the first-person mesh behind it is culled like any other.
         MockDevice dev;
         struct Sink { std::vector<rhi::MeshHandle> meshes; } sink;
@@ -286,10 +308,30 @@ static void testCascadePlan() {
     check(none.count == 0, "no fitted cascade, nothing to render");
 }
 
+// Step 7: the path-traced reference leaves first-person draws out unless asked to include them.
+static void testPathTracerExclusion() {
+#if AVER_TEST_HAS_PT
+    pt::PtSceneView view;
+    const f32 world[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    const f32 col[4] = {1, 1, 1, 1};
+    view.submitDraw(kPlain, world, col, 0, 0.5f, 0, nullptr, 0, false);
+    view.onDrawFirstPerson(true);
+    view.submitDraw(kFp, world, col, 0, 0.5f, 0, nullptr, 0, false);
+    view.onDrawFirstPerson(false);
+    check(view.submittedDrawCount() == 1, "the path-traced view takes the plain draw and leaves the first-person one out");
+    view.setIncludeFirstPerson(true);
+    view.onDrawFirstPerson(true);
+    view.submitDraw(kFp, world, col, 0, 0.5f, 0, nullptr, 0, false);
+    view.onDrawFirstPerson(false);
+    check(view.includesFirstPerson() && view.submittedDrawCount() == 2, "with setIncludeFirstPerson it traces the first-person draw too");
+#endif
+}
+
 int main() {
     testWalk();
     testHooks();
     testCascadePlan();
+    testPathTracerExclusion();
     if (g_failures) { AVER_ERROR("FirstPersonWalkTest: {} check(s) failed", g_failures); return 1; }
     AVER_INFO("FirstPersonWalkTest: all checks passed");
     return 0;

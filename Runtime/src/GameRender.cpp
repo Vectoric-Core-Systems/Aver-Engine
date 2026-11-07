@@ -1252,9 +1252,12 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
                 }
 #endif
                 if (options.onDirectDraw) {
+                    // Bracketed like the raster route's draw, so a feature the host feeds here (the path-traced view) knows it is first person.
+                    if (firstPersonHere) device.setDrawFirstPerson(true);
                     options.onDirectDraw(del.mesh, &wm.m[0][0], col, dl.look.metallic,
                                          dl.look.roughness, dl.matSet, directConstants, dl.matBytes,
                                          del.translucent, del.hiddenFromOwner, options.user);
+                    if (firstPersonHere) device.setDrawFirstPerson(false);
                 }
             }
         }
