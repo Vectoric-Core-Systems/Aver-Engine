@@ -654,6 +654,7 @@ if(AVER_BUILD_TESTS)
     # The placement -> entity loop the editor and the game runtime now share. Guarded on the scene
     # for the same reason the module's own source is: without it there is nothing to instantiate into.
     add_subdirectory(tests/world)
+    add_subdirectory(tests/scene2d)
   endif()
   if(TARGET Aver.Settings)
     add_subdirectory(tests/settings)

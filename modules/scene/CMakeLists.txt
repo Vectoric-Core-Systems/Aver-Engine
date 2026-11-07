@@ -15,7 +15,8 @@ add_library(Aver.Scene SHARED
   src/Fields.cpp
   src/Builtins.cpp
   src/SceneAbi.cpp
-  src/DecalAbi.cpp)
+  src/DecalAbi.cpp
+  src/Scene2D.cpp)    # 2D components and the 2D transform pass (docs/plans/RENDER_2D.md)
 
 target_include_directories(Aver.Scene PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(Aver.Scene PUBLIC cxx_std_20)
