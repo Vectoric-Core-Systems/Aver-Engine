@@ -12,3 +12,9 @@ set_target_properties(Scene2dTransformTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY $
 add_executable(Scene2dSubmitTest src/Scene2dSubmitTest.cpp)
 target_link_libraries(Scene2dSubmitTest PRIVATE Aver.Scene Aver.UI Aver.Core)
 set_target_properties(Scene2dSubmitTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# Scene2dStretchTest -- the canvas transform against uiComputeStretch / aver_ui_stretch_compute (the rule Fabric's Controls use) over
+# every mode, aspect and scale mode, and the canvas half of scene2d_abi.h.
+add_executable(Scene2dStretchTest src/Scene2dStretchTest.cpp)
+target_link_libraries(Scene2dStretchTest PRIVATE Aver.Scene Aver.UI Aver.UI.Abi Aver.Core)
+set_target_properties(Scene2dStretchTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

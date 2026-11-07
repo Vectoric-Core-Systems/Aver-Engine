@@ -53,8 +53,9 @@ struct SortKey {
     u64 order = 0;
 };
 
-// An external item draws itself into `list` when its turn comes. It must draw into that list.
-using ExternalDrawFn = void (*)(ui::UiDrawList* list, void* user);
+// An external item draws itself when its turn comes. `list` is the ui::UiDrawList being flushed into (a void* so the C ABI's
+// callback type is this one); the item must draw into that list.
+using ExternalDrawFn = void (*)(void* list, void* user);
 enum : u32 {
     kExternalInCanvas = 1,   // the canvas transform is pushed around the callback: draw in content units
 };
@@ -65,6 +66,8 @@ AVER_SCENE_API bool submitExternal(const SortKey& key, ExternalDrawFn fn, void* 
 AVER_SCENE_API u32 submitSprites(scene::World& world);
 // Items waiting for flush().
 AVER_SCENE_API u32 pendingCount();
+// Empties the queue without drawing.
+AVER_SCENE_API void dropQueue();
 // Sorts the queue by SortKey (submission order breaks ties), emits it into `list` and empties the queue.
 AVER_SCENE_API void flush(ui::UiDrawList& list);
 // submitSprites + flush: the once-a-frame call a host makes after the game's UI scripts have run.

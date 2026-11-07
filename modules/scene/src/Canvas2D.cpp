@@ -197,6 +197,11 @@ u32 submitSprites(scene::World& w) {
 
 u32 pendingCount() { return static_cast<u32>(st().items.size()); }
 
+void dropQueue() {
+    st().items.clear();
+    st().nextSeq = 0;
+}
+
 void flush(ui::UiDrawList& list) {
     State& s = st();
     std::vector<Item> items;

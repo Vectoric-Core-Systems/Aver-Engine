@@ -87,7 +87,8 @@ static void clearAll(World& w) {
 
 // An external item that draws one 10x10 rect with texture `tag` at (x, y).
 struct Ext { f32 x, y; u64 tag; };
-static void drawExt(ui::UiDrawList* l, void* user) {
+static void drawExt(void* list, void* user) {
+    auto* l = static_cast<ui::UiDrawList*>(list);
     const Ext* e = static_cast<const Ext*>(user);
     l->addTexturedRect(e->x, e->y, 10, 10, e->tag, 0, 0, 1, 1, 0xFFFFFFFF);
 }
@@ -407,7 +408,8 @@ int main() {
         static Re re{920, false};
         static const SortKey again{0, 0, 9};
         static Ext inner{0, 0, 921};
-        static const auto reenter = [](ui::UiDrawList* l, void*) {
+        static const auto reenter = [](void* list, void*) {
+            auto* l = static_cast<ui::UiDrawList*>(list);
             l->addTexturedRect(0, 0, 10, 10, re.tag, 0, 0, 1, 1, 0xFFFFFFFF);
             submitExternal(again, &drawExt, &inner);
         };
