@@ -1602,7 +1602,7 @@ VSOut VSMainFx(VSIn i) {
     if ((gFxModes & (1u << 16)) != 0u) wpos += nrm * averFxHalf2(gFxHeightGrow).y;   // grow
     o.wpos = wpos;
     o.nrmWS = nrm;
-    o.pos = mul(float4(wpos, 1.0), gViewProj);
+    o.pos = averScenePos(float4(wpos, 1.0));
     return o;
 }
 #endif

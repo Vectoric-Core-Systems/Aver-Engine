@@ -58,6 +58,10 @@ cbuffer PerFrame : register(AVER_CB_JOIN(b, AVER_FRAME_CB)) {
     // Both are zero until the origin first shifts.
     float4   gWorldOrigin;
     float4   gWavePhase;
+    // First-person rendering (PerFrameCB::fpViewProj): what a draw with the first-person bit projects through. Equal to the
+    // main matrices while no first-person camera is set. The previous one is unjittered, like the other history.
+    float4x4 gFpViewProj;
+    float4x4 gFpPrevViewProj;
 };
 
 // The unit world-space view ray through one viewport-relative NDC point (y up). gInvViewProjRel
@@ -814,12 +818,19 @@ struct VSIn  { float3 pos : POSITION; float3 nrm : NORMAL; float2 uv : TEXCOORD0
 struct VSOut { float4 pos : SV_POSITION; float3 nrmWS : NORMAL; float3 wpos : TEXCOORD0; float2 uv : TEXCOORD1; AVER_CUSTOM_VSOUT_EXTRA };
 #endif
 
+// The clip position of a scene vertex. A draw flagged first person (bit 31 of _objPad, IDevice::setDrawFirstPerson) projects through the first-person
+// view-projection, whose depth is squeezed into the front slab; everything else is gViewProj. ONLY the position moves: wpos and the normals stay true
+// world values, so lighting, shadows, fog and GI see the real place. With no first-person camera set gFpViewProj equals gViewProj.
+float4 averScenePos(float4 wp) {
+    return (asuint(_objPad) & 0x80000000u) != 0u ? mul(wp, gFpViewProj) : mul(wp, gViewProj);
+}
+
 // Transforms one scene vertex to clip space, keeping world position and normal.
 VSOut VSMain(VSIn i) {
     VSOut o;
     float4 wp = mul(float4(i.pos, 1.0), gWorld);
     o.wpos = wp.xyz;
-    o.pos = mul(wp, gViewProj);
+    o.pos = averScenePos(wp);
     o.nrmWS = averTransformNormal(i.nrm, gWorld);
     o.uv = i.uv;
 #if AVER_MESH_EXTRA
@@ -967,7 +978,7 @@ void MSMain(uint gid : SV_GroupID, uint gtid : SV_GroupThreadID,
     const float4 wp = mul(float4(v.pos, 1.0), gWorld);
     VSOut ov;
     ov.wpos  = wp.xyz;
-    ov.pos   = mul(wp, gViewProj);
+    ov.pos   = averScenePos(wp);
     ov.nrmWS = averTransformNormal(v.nrm, gWorld);
     ov.uv    = v.uv;
     verts[gtid] = ov;
@@ -1142,7 +1153,7 @@ void MSClusterMain(uint gid : SV_GroupID, uint gtid : SV_GroupThreadID,
         float4 wp = mul(float4(v.pos, 1.0), gWorld);
         VSOut ov;
         ov.wpos  = wp.xyz;
-        ov.pos   = mul(wp, gViewProj);
+        ov.pos   = averScenePos(wp);
         ov.nrmWS = averTransformNormal(v.nrm, gWorld);
         ov.uv    = v.uv;
         verts[gtid] = ov;

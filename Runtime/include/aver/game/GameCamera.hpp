@@ -68,6 +68,12 @@ struct PlayView {
     f32 offsetYCm = 0.0f;
     bool keepWidth = false;      // fovYRad / sizeCm describe the width
     u32 cullInv = 0;             // the camera's cull mask, stored inverted (scene/RenderMasks.hpp); 0 = every layer
+    // First-person rendering (docs/plans/FIRST_PERSON.md): meshes flagged first person draw through this lens, depth squeezed into [0, fpDepthSlab].
+    f32 fpFovRad = radians(70.0f);   // same axis as fovYRad
+    f32 fpNearCm = 0.0f;             // 0 = the main near
+    f32 fpFarCm = 300.0f;
+    f32 fpDepthSlab = 0.01f;
+    u32 firstPersonRoot = 0;         // entity whose subtree counts as flagged (0 = none); read by the scene walk
 
     // True for the camera every host built before G4 R4.
     bool isDefaultLens() const { return projection == ProjectionKind::Perspective && !keepWidth; }
@@ -75,6 +81,15 @@ struct PlayView {
         CameraProjection c;
         c.kind = projection; c.fovRad = fovYRad; c.sizeCm = sizeCm; c.offsetXCm = offsetXCm; c.offsetYCm = offsetYCm;
         c.keepWidth = keepWidth; c.nearCm = nearCm; c.farCm = farCm;
+        return c;
+    }
+    // The lens first-person meshes draw through: the main lens with the first-person FOV and clip planes.
+    CameraProjection fpLens() const {
+        CameraProjection c = lens();
+        c.kind = ProjectionKind::Perspective;
+        c.fovRad = fpFovRad;
+        c.nearCm = fpNearCm > 0.0f ? fpNearCm : nearCm;
+        c.farCm = fpFarCm > c.nearCm ? fpFarCm : c.nearCm * 2.0f;
         return c;
     }
 };
@@ -110,6 +125,9 @@ inline CameraMatrices pushCamera(rhi::IDevice& device, const Vec3& pos, const Ve
     viewRot.m[3][0] = viewRot.m[3][1] = viewRot.m[3][2] = 0.0f;
     const Mat4 invViewProjRel = (viewRot * proj).inverse();
     device.setCamera(&viewProj.m[0][0], &invViewProjRel.m[0][0], &pos.x);
+    // The matrix first-person meshes draw through; setCamera just reset the device's to the main one.
+    const Mat4 fpViewProj = firstPersonViewProj(view, pv.fpLens(), aspect, pv.fpDepthSlab);
+    device.setFirstPersonCamera(&fpViewProj.m[0][0]);
 
     // The absolute inverse the hosts keep for mouse picking, COMPOSED rather than inverted: offset
     // from the eye, then translated by it, so the eye's magnitude enters only as an addition and

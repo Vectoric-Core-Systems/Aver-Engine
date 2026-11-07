@@ -2556,10 +2556,17 @@ void VulkanDevice::setViewportRect(u32 x, u32 y, u32 w, u32 h) {
     if (vpH_ == 0) vpH_ = 1;
 }
 void VulkanDevice::setCamera(const f32 viewProj[16], const f32 invViewProjRel[16], const f32 camPos[3]) {
+    // The first-person history moves with the camera; this frame's first-person matrix is the main one until setFirstPersonCamera replaces it.
+    std::memcpy(frameCB_.fpPrevViewProj, fpPrimed_ ? frameCB_.fpViewProj : viewProj, sizeof(frameCB_.fpPrevViewProj));
+    fpPrimed_ = true;
     std::memcpy(frameCB_.viewProj, viewProj, sizeof(frameCB_.viewProj));
     std::memcpy(frameCB_.viewProjNoJitter, viewProj, sizeof(frameCB_.viewProjNoJitter));   // no TAA jitter on Vulkan yet
+    std::memcpy(frameCB_.fpViewProj, viewProj, sizeof(frameCB_.fpViewProj));
     std::memcpy(frameCB_.invViewProjRel, invViewProjRel, sizeof(frameCB_.invViewProjRel));
     frameCB_.camPos[0] = camPos[0]; frameCB_.camPos[1] = camPos[1]; frameCB_.camPos[2] = camPos[2]; frameCB_.camPos[3] = 1;
+}
+void VulkanDevice::setFirstPersonCamera(const f32 fpViewProj[16]) {
+    std::memcpy(frameCB_.fpViewProj, fpViewProj, sizeof(frameCB_.fpViewProj));
 }
 bool VulkanDevice::camera(f32 viewProj[16], f32 invViewProjRel[16], f32 cameraPos[3]) const {
     if (viewProj) std::memcpy(viewProj, frameCB_.viewProj, sizeof(frameCB_.viewProj));
@@ -3009,7 +3016,7 @@ void VulkanDevice::drawMesh(MeshHandle mesh, const f32 world[16], const f32 colo
         // UNLIT reaches the material shader too, not just gMaterial.z (D3D12Device.cpp's twin call;
         // see writeShadingConstants there for why both fields are written).
         writeShadingConstants(fc, unlit_);
-        if (drawLayersInv_) std::memcpy(fc + 27, &drawLayersInv_, sizeof(u32));
+        if (const u32 pad = packObjectPad(drawLayersInv_, drawFirstPerson_)) std::memcpy(fc + 27, &pad, sizeof(u32));
         rhiContext_->setConstants(kObjectConstantRegister, fc, kObjectConstantDwords);
         // The draw call has to match the pipeline actually returned: a feature whose mesh-shader
         // variant failed to build hands back its vertex pipeline even when asked for featureMs.
@@ -3039,6 +3046,7 @@ void VulkanDevice::drawMesh(MeshHandle mesh, const f32 world[16], const f32 colo
     std::memcpy(consts + 16, color, 4 * sizeof(f32));
     consts[20] = metallic; consts[21] = roughness; consts[22] = unlit_ ? 1.0f : 0.0f; consts[23] = 0.0f;
     writeShadingConstants(consts, unlit_);
+    if (const u32 pad = packObjectPad(drawLayersInv_, drawFirstPerson_)) std::memcpy(consts + 27, &pad, sizeof(u32));
     api_.CmdPushConstants(cmd, layout, VK_SHADER_STAGE_ALL, PushConstantLayout::kObjectOffset, sizeof(consts), consts);
 
     ensureRenderScope(cmd);

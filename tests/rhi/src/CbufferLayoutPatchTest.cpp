@@ -275,7 +275,7 @@ static void testCommentedCbufferIsNotMatched() {
     check(src == before, "the source is byte-identical -- neither comment was touched");
 }
 
-// ---- PerFrame at 784 bytes: the floating origin's two rows (LARGE_WORLD 2.2.6) ------------------------
+// ---- PerFrame at 912 bytes: the floating origin's two rows (LARGE_WORLD 2.2.6), then the first-person matrices ----------------------
 //
 // PerFrameCB is one C++ struct and one HLSL cbuffer, and until now only a size assert tied them. This
 // counts the cbuffer's rows from the shipped prelude text, so a row added on one side only fails here.
@@ -292,12 +292,15 @@ static std::string stripComments(const std::string& s) {
 }
 
 static void testPerFrameIsSevenEightyFour() {
-    AVER_INFO("-- PerFrameCB and cbuffer PerFrame agree at 784 bytes, origin rows last --");
-    check(sizeof(PerFrameCB) == 784, "sizeof(PerFrameCB) == 784");
+    AVER_INFO("-- PerFrameCB and cbuffer PerFrame agree at 912 bytes, first-person matrices last --");
+    check(sizeof(PerFrameCB) == 912, "sizeof(PerFrameCB) == 912");
+    check(offsetof(PerFrameCB, fpViewProj) == 784 && offsetof(PerFrameCB, fpPrevViewProj) == 848, "the first-person matrices sit at 784 and 848");
     check(offsetof(PerFrameCB, worldOrigin) == 752, "worldOrigin at 752");
     check(offsetof(PerFrameCB, wavePhase) == 768, "wavePhase at 768");
     check(offsetof(PerFrameCB, jitter) + sizeof(PerFrameCB::jitter) == offsetof(PerFrameCB, worldOrigin),
           "the origin rows are appended: nothing before them moved");
+    check(offsetof(PerFrameCB, wavePhase) + sizeof(PerFrameCB::wavePhase) == offsetof(PerFrameCB, fpViewProj),
+          "the first-person matrices are appended: nothing before them moved");
 
     const std::string text = stripComments(shaderFile("shared_prelude.hlsl"));
     const size_t head = text.find("cbuffer PerFrame");
@@ -335,7 +338,7 @@ static void testPerFrameIsSevenEightyFour() {
         lastNames[1] = name;
     }
     check(rows * 16 == sizeof(PerFrameCB), "the HLSL cbuffer is exactly sizeof(PerFrameCB) bytes of rows");
-    check(lastNames[0] == "gWorldOrigin" && lastNames[1] == "gWavePhase", "the last two rows are gWorldOrigin, gWavePhase");
+    check(lastNames[0] == "gFpViewProj" && lastNames[1] == "gFpPrevViewProj", "the last two fields are gFpViewProj, gFpPrevViewProj");
 
     // The lowering never reads fields, so the grown block passes through byte for byte.
     std::string src =

@@ -966,12 +966,18 @@ public:
     void setCamera(const f32 viewProj[16], const f32 invViewProjRel[16], const f32 camPos[3]) override {
         // Snapshot previous viewProj before overwrite (gbufCameraPrimed_ guards from zero state).
         if (gbufCameraPrimed_) std::memcpy(prevViewProj_, frameCB_.viewProj, sizeof(prevViewProj_));
+        // The first-person history moves with it; this frame's first-person matrix is the main one until setFirstPersonCamera replaces it.
+        std::memcpy(frameCB_.fpPrevViewProj, gbufCameraPrimed_ ? frameCB_.fpViewProj : viewProj, sizeof(frameCB_.fpPrevViewProj));
         gbufCameraPrimed_ = true;
 
         std::memcpy(frameCB_.viewProj, viewProj, sizeof(frameCB_.viewProj));
         std::memcpy(frameCB_.viewProjNoJitter, viewProj, sizeof(frameCB_.viewProjNoJitter));
+        std::memcpy(frameCB_.fpViewProj, viewProj, sizeof(frameCB_.fpViewProj));
         std::memcpy(frameCB_.invViewProjRel, invViewProjRel, sizeof(frameCB_.invViewProjRel));
         frameCB_.camPos[0] = camPos[0]; frameCB_.camPos[1] = camPos[1]; frameCB_.camPos[2] = camPos[2]; frameCB_.camPos[3] = 1;
+    }
+    void setFirstPersonCamera(const f32 fpViewProj[16]) override {
+        std::memcpy(frameCB_.fpViewProj, fpViewProj, sizeof(frameCB_.fpViewProj));
     }
     // TEMPORAL AA JITTER, applied to the UPLOADED copy only: frameCB_ (and so camera(), picking,
     // culling and every renderer's own previous-frame chain) stays unjittered. An 8-step Halton(2,3)
@@ -999,6 +1005,10 @@ public:
         for (u32 r = 0; r < 4; ++r) {                                    // viewProj * T
             cb.viewProj[r * 4 + 0] += cb.viewProj[r * 4 + 3] * nx;
             cb.viewProj[r * 4 + 1] += cb.viewProj[r * 4 + 3] * ny;
+        }
+        for (u32 r = 0; r < 4; ++r) {                                    // the first-person matrix gets the same jitter
+            cb.fpViewProj[r * 4 + 0] += cb.fpViewProj[r * 4 + 3] * nx;
+            cb.fpViewProj[r * 4 + 1] += cb.fpViewProj[r * 4 + 3] * ny;
         }
         for (u32 c = 0; c < 4; ++c)                                      // T^-1 * invViewProjRel
             cb.invViewProjRel[12 + c] -= nx * cb.invViewProjRel[c] + ny * cb.invViewProjRel[4 + c];
@@ -1066,6 +1076,8 @@ public:
     void shiftWorld(const ShiftWorldInfo& info) override {
         composePrevViewProjInPlace(frameCB_.viewProj, info.deltaCm);          // the old camera, in the new frame:
         composePrevViewProjInPlace(frameCB_.viewProjNoJitter, info.deltaCm);  // setCamera snapshots it as prevViewProj_
+        composePrevViewProjInPlace(frameCB_.fpViewProj, info.deltaCm);        // and the first-person pair the same way
+        composePrevViewProjInPlace(frameCB_.fpPrevViewProj, info.deltaCm);
         composePrevViewProjInPlace(prevViewProj_, info.deltaCm);
         composePrevViewProjInPlace(taaLastViewProj_, info.deltaCm);           // equal inputs stay equal: no false "camera moved"
         f32 cam[3] = {frameCB_.camPos[0], frameCB_.camPos[1], frameCB_.camPos[2]};
@@ -1182,6 +1194,7 @@ public:
     // Blended-mesh path (sticky across frames).
     void setDrawBlended(bool blended) override { drawBlended_ = blended; }
     void setDrawLayers(u32 layersInv) override { drawLayersInv_ = layersInv; }
+    void setDrawFirstPerson(bool on) override { drawFirstPerson_ = on; }
     bool drawBlended() const override { return drawBlended_; }
 
     void setLineDepth(bool testDepth) override { editorLines_.setDepthTest(testDepth); }
@@ -1587,6 +1600,7 @@ private:
     // See IDevice::setUnlit. Sticky like wireframe_.
     bool unlit_ = false;
     u32 drawLayersInv_ = 0;   // setDrawLayers: written to the object block's _objPad word
+    bool drawFirstPerson_ = false;   // setDrawFirstPerson: bit 31 of the same word
     ComPtr<ID3D12Resource> frameCBs_[kFrameCount];
     u8* frameCBPtr_[kFrameCount] = {nullptr, nullptr};
 
@@ -4770,7 +4784,7 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
         std::memcpy(fc + 16, color, 4 * sizeof(f32));
         fc[20] = metallic; fc[21] = roughness; fc[22] = unlit_ ? 1.0f : 0.0f; fc[23] = 0.0f;
         writeShadingConstants(fc, unlit_);
-        if (drawLayersInv_) std::memcpy(fc + 27, &drawLayersInv_, sizeof(u32));
+        if (const u32 pad = packObjectPad(drawLayersInv_, drawFirstPerson_)) std::memcpy(fc + 27, &pad, sizeof(u32));
         rhiContext_->setConstants(kObjectConstantRegister, fc, kObjectConstantDwords);
         // featureMs: draw call must match pipeline chosen (prepassed = IA path).
         if (featureMs) rhiContext_->dispatchMeshFor(mesh);
@@ -4796,6 +4810,7 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
     std::memcpy(consts + 16, color, 4 * sizeof(f32));
     consts[20] = metallic; consts[21] = roughness; consts[22] = unlit_ ? 1.0f : 0.0f; consts[23] = 0.0f;
     writeShadingConstants(consts, unlit_);
+    if (const u32 pad = packObjectPad(drawLayersInv_, drawFirstPerson_)) std::memcpy(consts + 27, &pad, sizeof(u32));
     cmdList_->SetGraphicsRoot32BitConstants(kSceneObjectParam, kObjectConstantDwords, consts, 0);
     if (useMs) { dispatchMesh(m); return; }
     cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);

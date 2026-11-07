@@ -92,6 +92,16 @@ inline Mat4 projectionMatrix(const CameraProjection& p, f32 aspect) {
     }
 }
 
+// First-person rendering (docs/plans/FIRST_PERSON.md): the view-projection of `view` through the first-person lens with clip z squeezed into
+// [zmin, zmin + slab] of the depth range. Depth is not reversed (compare LESS, near is 0), so a slab at 0 puts the viewmodel in front of everything
+// the main camera can see. Clip z' = slab * z + zmin * w, which for a row vector is column 2 times slab plus zmin times column 3. With the main
+// lens, slab 1 and zmin 0 this is the main view-projection byte for byte.
+inline Mat4 firstPersonViewProj(const Mat4& view, const CameraProjection& fpLens, f32 aspect, f32 slab, f32 zmin = 0.0f) {
+    Mat4 p = projectionMatrix(fpLens, aspect);
+    for (int r = 0; r < 4; ++r) p.m[r][2] = p.m[r][2] * slab + (zmin != 0.0f ? zmin * p.m[r][3] : 0.0f);
+    return view * p;
+}
+
 // True for a view-projection whose last column carries no view depth: an orthographic camera (clip w stays 1). A perspective one has the
 // view's forward axis in the first three entries of that column (a unit vector); an unset (all-zero) matrix is neither.
 inline bool isOrthographicViewProj(const f32 vp[16]) {

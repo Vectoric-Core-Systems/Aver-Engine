@@ -317,7 +317,7 @@ static void testRowsAndLayout() {
     check(info.deltaCm.x == 0 && info.deltaCm.y == 0 && info.deltaCm.z == 0 && info.newOrigin.x == 0 && info.newOrigin.y == 0 && info.generation == 0,
           "a default ShiftWorldInfo is the identity shift");
 
-    check(sizeof(PerFrameCB) == 784, "PerFrameCB is 784 bytes");
+    check(sizeof(PerFrameCB) == 912, "PerFrameCB is 912 bytes");
     check(offsetof(PerFrameCB, worldOrigin) == 752 && offsetof(PerFrameCB, wavePhase) == 768, "worldOrigin at 752, wavePhase at 768");
     check(offsetof(PerFrameCB, viewProjNoJitter) == 672 && offsetof(PerFrameCB, jitter) == 736, "no earlier offset moved");
 }

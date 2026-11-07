@@ -1544,6 +1544,8 @@ public:
     void shiftWorld(const ShiftWorldInfo& info) override {
         composePrevViewProjInPlace(frameCB_.viewProj, info.deltaCm);          // the old camera in the new frame, for camera() readers
         composePrevViewProjInPlace(frameCB_.viewProjNoJitter, info.deltaCm);
+        composePrevViewProjInPlace(frameCB_.fpViewProj, info.deltaCm);
+        composePrevViewProjInPlace(frameCB_.fpPrevViewProj, info.deltaCm);
         f32 cam[3] = {frameCB_.camPos[0], frameCB_.camPos[1], frameCB_.camPos[2]};
         shiftPoint(cam, info.deltaCm);
         frameCB_.camPos[0] = cam[0]; frameCB_.camPos[1] = cam[1]; frameCB_.camPos[2] = cam[2];
@@ -1580,6 +1582,8 @@ public:
     // ---- translucency: sticky like setDrawBinding; drawMesh captures, endFrame replays (IDevice::setDrawBlended) ----
     void setDrawBlended(bool blended) override { drawBlended_ = blended; }
     void setDrawLayers(u32 layersInv) override { drawLayersInv_ = layersInv; }
+    void setDrawFirstPerson(bool on) override { drawFirstPerson_ = on; }
+    void setFirstPersonCamera(const f32 fpViewProj[16]) override;
     bool drawBlended() const override { return drawBlended_; }
     TextureHandle sceneColorBackdropTexture() override;
 
@@ -1898,6 +1902,8 @@ private:
     // See IDevice::setUnlit. Sticky exactly as wireframe_ is.
     bool unlit_ = false;
     u32 drawLayersInv_ = 0;   // setDrawLayers: written to the object block's _objPad word
+    bool drawFirstPerson_ = false;   // setDrawFirstPerson: bit 31 of the same word
+    bool fpPrimed_ = false;          // a first-person history exists to snapshot
     // Editor chrome (grid, gizmos, selection outlines, collider/nav overlays), replayed in endFrame's
     // overlay stage after the post chain -- see aver/rhi/EditorLines.hpp. Owns its own meshes/queue/
     // pipelines; createLineMesh/destroyLineMesh/drawLines/setLineDepth/setLineWidth all delegate here.

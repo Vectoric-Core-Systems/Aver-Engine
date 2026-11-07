@@ -3,7 +3,9 @@
 #include "aver/core/CameraProjection.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/Math.hpp"
+#include "aver/game/GameCamera.hpp"
 #include "aver/platform/FileSystem.hpp"
+#include "aver/rhi/RHI.hpp"
 #include "aver/scene/Components.hpp"
 #include "aver/scene/RenderMasks.hpp"
 #include "aver/voxi/RasterLights.hpp"
@@ -244,6 +246,110 @@ static void testRanges() {
     check(!rangeShown(95.0f, 100, 0, -5, 0, st) && rangeShown(100.0f, 100, 0, -5, 0, st), "a negative margin is no margin");
 }
 
+// Records what pushCamera hands the device, in order.
+namespace {
+struct RecordingDevice final : rhi::IDevice {
+    f32 vp[16] = {}, fpVp[16] = {};
+    int cameraCalls = 0, fpCalls = 0;
+    bool fpAfterCamera = false;
+    rhi::Backend backend() const override { return rhi::Backend::D3D12; }
+    const char* adapterName() const override { return "recording"; }
+    rhi::ISwapchain* createSwapchain(const rhi::SwapchainDesc&) override { return nullptr; }
+    void beginFrame() override {}
+    void endFrame() override {}
+    void setCamera(const f32 viewProj[16], const f32[16], const f32[3]) override { std::memcpy(vp, viewProj, sizeof vp); ++cameraCalls; }
+    void setFirstPersonCamera(const f32 m[16]) override { std::memcpy(fpVp, m, sizeof fpVp); fpAfterCamera = cameraCalls > 0; ++fpCalls; }
+};
+} // namespace
+
+static void testFirstPerson() {
+    AVER_INFO("=== first-person view-projection (docs/plans/FIRST_PERSON.md) ===");
+    const Mat4 view = Mat4::lookAtDirLH(Vec3{100, -50, 30}, Vec3{1, 0, 0}, Vec3{0, 0, 1});
+    CameraProjection mainLens;
+    mainLens.fovRad = radians(60.0f); mainLens.nearCm = 2.0f; mainLens.farCm = 200000.0f;
+    CameraProjection fpLens = mainLens;
+    fpLens.fovRad = radians(70.0f); fpLens.farCm = 300.0f;
+    const f32 aspect = 16.0f / 9.0f, slab = 0.01f;
+    const Mat4 fp = firstPersonViewProj(view, fpLens, aspect, slab);
+    const Mat4 mainVp = view * projectionMatrix(mainLens, aspect);
+    // A point `d` cm along the view direction, slightly off axis (the view looks along +X from (100, -50, 30)).
+    auto at = [](f32 d) { return Vec3{100.0f + d, -50.0f + d * 0.1f, 30.0f - d * 0.05f}; };
+    bool inSlab = true;
+    for (f32 d : {2.0f, 2.5f, 10.0f, 40.0f, 150.0f, 299.0f}) {
+        f32 x, y, z;
+        if (!projectToNdc(fp, at(d), x, y, z) || z < -1e-6f || z > slab) inSlab = false;
+    }
+    check(inSlab, "a point between the first-person near and far lands in z_ndc [0, slab]");
+    f32 x, y, z;
+    check(projectToNdc(fp, at(2.0f), x, y, z) && near(z, 0.0, 1e-5), "a point on the first-person near plane lands at z_ndc 0");
+    check(projectToNdc(fp, at(299.9f), x, y, z) && z <= slab && z > slab * 0.99f, "a point at the first-person far plane lands at the back of the slab");
+    // The slab sits in front of everything the main camera draws: from the near plane out, a main-camera point is behind it.
+    bool behind = true;
+    for (f32 d : {2.03f, 2.5f, 5.0f, 100.0f, 5000.0f}) {
+        f32 mx, my, mz;
+        if (!projectToNdc(mainVp, at(d), mx, my, mz) || !(mz > slab)) behind = false;
+    }
+    check(behind, "main-camera points from 2.03 cm out have z_ndc past the slab");
+    // The slab does not touch x or y: the first-person lens's own projection decides the screen position.
+    {
+        const Mat4 full = view * projectionMatrix(fpLens, aspect);
+        f32 ax, ay, az, bx, by, bz;
+        check(projectToNdc(full, at(40.0f), ax, ay, az) && projectToNdc(fp, at(40.0f), bx, by, bz) && near(ax, bx) && near(ay, by),
+              "squeezing the depth leaves the screen position alone");
+        check(near(az * slab, bz, 1e-4), "z_ndc scales by exactly the slab");
+    }
+    // Lens equal to the main one with slab 1: the main view-projection, byte for byte.
+    check(std::memcmp(firstPersonViewProj(view, mainLens, aspect, 1.0f).m, mainVp.m, sizeof mainVp.m) == 0,
+          "with the first-person lens equal to the main lens and slab 1, the matrix is the main view-projection");
+    // A slab that starts later: [zmin, zmin + slab].
+    {
+        const Mat4 s2 = firstPersonViewProj(view, fpLens, aspect, 0.1f, 0.2f);
+        f32 a, b, c0, c1;
+        check(projectToNdc(s2, at(2.0f), a, b, c0) && projectToNdc(s2, at(299.9f), a, b, c1) && near(c0, 0.2, 1e-4) && c1 > 0.2f && c1 <= 0.3f + 1e-4f,
+              "a slab with zmin 0.2 occupies [0.2, 0.3]");
+    }
+    // Flags: the two new bits pack beside the old ones and are known.
+    using namespace aver::scene;
+    check(kRenderFirstPerson == 0x20u && kRenderFirstPersonCasts == 0x40u, "kRenderFirstPerson is 0x20 and kRenderFirstPersonCasts is 0x40");
+    const u32 packed = kRenderShadowsOff | (kRenderGiDynamic << kRenderGiShift) | kRenderIgnoreOcclusion | kRenderFirstPerson | kRenderFirstPersonCasts;
+    check((packed & ~kRenderFlagsKnown) == 0 && renderShadowMode(packed) == kRenderShadowsOff && renderGiMode(packed) == kRenderGiDynamic,
+          "the first-person flags are in the known mask and leave the shadow and GI modes alone");
+    check((kRenderFirstPerson & (kRenderShadowMask | kRenderGiMask | kRenderIgnoreOcclusion)) == 0 && (kRenderFirstPersonCasts & kRenderFirstPerson) == 0,
+          "the first-person flags overlap no other flag");
+    check((0x80u & ~kRenderFlagsKnown) != 0, "a bit above the first-person flags is still unknown");
+    // PlayView defaults: the lens a held weapon draws through.
+    const game::PlayView pv;
+    check(near(pv.fpFovRad, radians(70.0f)) && pv.fpNearCm == 0.0f && near(pv.fpFarCm, 300.0f) && near(pv.fpDepthSlab, 0.01) && pv.firstPersonRoot == 0,
+          "PlayView first-person defaults: 70 degrees, near 0, far 300, slab 0.01, no root");
+    check(near(pv.fpLens().nearCm, pv.nearCm) && near(pv.fpLens().fovRad, radians(70.0f)), "a zero fpNearCm uses the main near");
+    // pushCamera sends the device the main camera first, then the first-person matrix built from the PlayView.
+    {
+        RecordingDevice dev;
+        game::PlayView v;
+        v.fpNearCm = 3.0f;
+        const Vec3 pos{100, -50, 30}, fwd{1, 0, 0};
+        const game::CameraMatrices m = game::pushCamera(dev, pos, fwd, aspect, v);
+        const Mat4 want = firstPersonViewProj(Mat4::lookAtDirLH(pos, fwd, Vec3{0, 0, 1}), v.fpLens(), aspect, v.fpDepthSlab);
+        Mat4 got{};
+        std::memcpy(got.m, dev.fpVp, sizeof got.m);
+        check(dev.cameraCalls == 1 && dev.fpCalls == 1 && dev.fpAfterCamera, "pushCamera calls setCamera, then setFirstPersonCamera once");
+        check(std::memcmp(dev.vp, m.viewProj.m, sizeof dev.vp) == 0 && sameMatrix(got, want), "the matrices it sends are the main one and the first-person one");
+        f32 ax, ay, az;
+        check(projectToNdc(got, pos + fwd * 3.0f, ax, ay, az) && near(az, 0.0, 1e-5), "the PlayView's own fpNearCm puts its near plane at z_ndc 0");
+    }
+}
+
+static void testObjectPad() {
+    AVER_INFO("=== object block pad word: layers and the first-person bit ===");
+    using namespace aver::rhi;
+    check(packObjectPad(0, false) == 0u, "no layers and not first person is zero, so the block is written exactly as before");
+    check(packObjectPad(0xABCDEu, false) == 0xABCDEu, "the layer bits pass through unchanged");
+    check(packObjectPad(0xABCDEu, true) == (0xABCDEu | 0x80000000u), "the first-person bit sits above the layer bits and does not disturb them");
+    check(packObjectPad(0, true) == 0x80000000u, "first person alone is bit 31");
+    check(packObjectPad(0xFFFFFFFFu, false) == 0xFFFFFu, "a stray high bit in the layers cannot fake the first-person flag");
+    check(((~packObjectPad(0x12345u, true)) & 0xFFFFFu) == ((~0x12345u) & 0xFFFFFu), "the raster light loop's 0xFFFFF mask sees only the layers");
+}
+
 static void testShaderText() {
     AVER_INFO("=== shader text ===");
     std::string hl;
@@ -252,6 +358,20 @@ static void testShaderText() {
     std::string pre;
     check(readFileText(std::string(AVER_REPO_ROOT) + "/modules/rhi/shaders/shared_prelude.hlsl", pre) && pre.find("float    _objPad;") != std::string::npos,
           "the per-object block still has the _objPad word the layers travel in");
+    // First person: every scene vertex entry point routes its clip position through averScenePos; nothing in the prelude multiplies scene geometry by gViewProj.
+    check(pre.find("float4 averScenePos(float4 wp)") != std::string::npos && pre.find("gFpViewProj") != std::string::npos && pre.find("0x80000000u") != std::string::npos,
+          "the prelude defines averScenePos over gFpViewProj and bit 31 of _objPad");
+    check(pre.find("mul(wp, gViewProj)") == pre.rfind("mul(wp, gViewProj)") &&
+              pre.find("o.pos = averScenePos(wp)") != std::string::npos &&
+              pre.find("ov.pos   = averScenePos(wp)") != std::string::npos,
+          "no prelude vertex stage multiplies a scene vertex by gViewProj directly (only the helper does)");
+    std::string voxi, emb;
+    check(readFileText(std::string(AVER_REPO_ROOT) + "/modules/render.voxi/shaders/voxi.hlsl", voxi) && voxi.find("o.pos = averScenePos(") != std::string::npos &&
+              voxi.find("o.pos = mul(") == std::string::npos,
+          "VSMainFx projects through averScenePos");
+    check(readFileText(std::string(AVER_REPO_ROOT) + "/modules/render.pbr/shaders/material_embedded.hlsl", emb) && emb.find("o.pos = averScenePos(") != std::string::npos &&
+              emb.find("o.pos = mul(") == std::string::npos,
+          "the embedded vertex stage projects through averScenePos");
     // The pack: v[4][2] = cull mask, v[4][3] = shadow caster mask.
     voxi::SceneLight s;
     s.kind = 0; s.pos[2] = 200; s.intensityCd = 33333.0f; s.rangeCm = 1000.0f; s.castShadows = false;
@@ -271,6 +391,8 @@ int main() {
     testMasks();
     testRanges();
     testRangeFade();
+    testFirstPerson();
+    testObjectPad();
     testShaderText();
     AVER_INFO("{} checks, {} failures", g_checks, g_failures);
     if (g_failures) { AVER_ERROR("=== FAILED ==="); return 1; }
