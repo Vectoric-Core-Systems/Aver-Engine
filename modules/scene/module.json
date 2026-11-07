@@ -9,6 +9,6 @@
   "required": false,
   "default": true,
   "editions": {"standard": true, "slim": true, "full": true},
-  "dependsOn": ["Aver.Assets", "Aver.Core"],
+  "dependsOn": ["Aver.Assets", "Aver.Core", "Aver.UI"],
   "consequence": "No entities, components or world; everything built on the scene goes with it."
 }
