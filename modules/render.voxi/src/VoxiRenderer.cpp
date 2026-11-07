@@ -9503,17 +9503,11 @@ bool VoxiRenderer::createFxPipelines(u64 mapKey) {
     const auto rasterDefs = [&](const std::string& more) { return matDefs + ";" + fxDefs + (more.empty() ? std::string() : ";" + more); };
     const auto sceneDefs  = [&](const std::string& more) { return rasterDefs(more) + ";AVER_HAIR_SHADING=1"; };
 
-    rhi::PipelineLayout layout = gi;
-    std::string rtFlat;
-    if (rt) {
-        ensureTextureTable();
-        layout = rtGeomBindless_ ? rtLayout() : gi;
-        rtFlat = std::string("AVER_RT=1") + rtGeomDefs();
-    }
-    const u32 sm = rt ? 65u : kBaseSm;
-
+    // Raster shading even when the frame is ray traced, as rasterised glass is (scenePipeline): the full ray-traced pixel shader with the
+    // AVER_MATX_* features on top hung the RX 7800 XT in raster + RT (DRED: the G-buffer pass's first draw), and one repro froze the whole PC.
+    // The variant's surfaces keep their features and cascade shadows and lose ray-traced shading. The rt bit still keys the cache.
     rhi::GraphicsPipelineDesc scene;
-    scene.layout = layout;
+    scene.layout = gi;
     if (extra) {   // slot 0 rhi::MeshVertex, slot 1 rhi::MeshVertexExtra, in createExtraScenePipelines' order
         rhi::VertexLayout vl;
         const auto attrib = [&](rhi::VertexSemantic sem, u8 index, rhi::Format f, u32 offset, u8 slot) {
@@ -9548,10 +9542,8 @@ bool VoxiRenderer::createFxPipelines(u64 mapKey) {
     const char* const vsEntry = embVs ? "VSMainEmb" : ((key & pbr::fxkey::kVertex) ? "VSMainFx" : "VSMain");
     const std::string vsDefs = rasterDefs(embVs ? std::string("AVER_MATX_EMBVS=1;AVER_CUSTOM_NO_DERIVATIVES=1") : std::string());
     const rhi::ShaderHandle vs = compile(vsEntry, rhi::ShaderStage::Vertex, kBaseSm, vsDefs.c_str());
-    const std::string psDefs     = rt ? sceneDefs(rtFlat) : sceneDefs({});
-    const std::string psGbufDefs = rt ? sceneDefs(rtFlat + ";AVER_GBUFFER=1") : sceneDefs("AVER_GBUFFER=1");
-    const rhi::ShaderHandle ps     = compile("PSMainVoxi", rhi::ShaderStage::Pixel, sm, psDefs.c_str());
-    const rhi::ShaderHandle psGbuf = compile("PSMainVoxi", rhi::ShaderStage::Pixel, sm, psGbufDefs.c_str());
+    const rhi::ShaderHandle ps     = compile("PSMainVoxi", rhi::ShaderStage::Pixel, kBaseSm, sceneDefs({}).c_str());
+    const rhi::ShaderHandle psGbuf = compile("PSMainVoxi", rhi::ShaderStage::Pixel, kBaseSm, sceneDefs("AVER_GBUFFER=1").c_str());
     if (vs && ps) {
         rhi::GraphicsPipelineDesc p = scene;
         p.vs = vs; p.ps = ps;
@@ -9572,7 +9564,7 @@ bool VoxiRenderer::createFxPipelines(u64 mapKey) {
         e.litGbuf = res_->createGraphicsPipeline(p);
     }
     if (e.lit) AVER_INFO("[Voxi] material variant 0x{:07x} built ({}{}): BaseMaterial3D features are live for draws that use it", fullKey,
-                         rt ? "ray-traced raster" : "raster", extra ? ", second vertex stream" : "");
+                         rt ? "raster shading in a ray-traced frame" : "raster", extra ? ", second vertex stream" : "");
     else       AVER_WARN("[Voxi] material variant 0x{:07x} ({}) unavailable; its materials draw through the ordinary pipeline", fullKey,
                          rt ? "ray-traced raster" : "raster");
     return e.lit != 0;
