@@ -1402,6 +1402,12 @@ std::string placementLabel(const fmt::OcWorldPlacement& p, i64 index) {
     return index >= 0 ? std::to_string(index) : "'" + p.asset + "'";
 }
 
+// The records applyPlacedComponents2D takes (a class placement's actor gets them as it spawns).
+bool is2DComponent(std::string_view type) {
+    const int ix = typeIndex(type);
+    return ix == kC2DTransform || ix == kCSprite2D || ix == kC2DLayer;
+}
+
 // Canonical order = dependency order, so a level written by hand in any order applies the same.
 void applyAll(scene::World& w, scene::Entity e, const fmt::OcWorldPlacement& p, i64 index, Tally& t) {
     std::vector<std::pair<int, const fmt::OcPlacedComponent*>> order;
@@ -1463,6 +1469,19 @@ u32 applyPlacedComponents(scene::World& w, scene::Entity e, const fmt::OcWorldPl
     return t.applied;
 }
 
+u32 applyPlacedComponents2D(scene::World& w, scene::Entity e, const fmt::OcWorldPlacement& p, i64 placementIndex) {
+    Tally t;
+    for (const fmt::OcPlacedComponent& r : p.components) {
+        const int ix = typeIndex(r.type);
+        if (ix != kC2DTransform && ix != kCSprite2D && ix != kC2DLayer) continue;
+        std::string why;
+        if (applyOne(w, e, r, &p, why)) ++t.applied;
+        else refuse(t, r.type, placementLabel(p, placementIndex), why);
+    }
+    if (t.suppressed) AVER_WARN("[Level] {} more COMPONENT record(s) refused (not listed)", t.suppressed);
+    return t.applied;
+}
+
 void applyLevelComponents(scene::World& w, const fmt::OcWorldData& level, const world::LevelInstance& inst) {
     Tally t;
     u32 touched = 0;
@@ -1480,12 +1499,12 @@ void applyLevelComponents(scene::World& w, const fmt::OcWorldData& level, const 
     for (usize i = 0; i < level.placements.size(); ++i) {
         const fmt::OcWorldPlacement& p = level.placements[i];
         if (p.className.empty()) continue;
-        // Props and Groups are applied by the host as it spawns the actor; anything else is not.
+        // Props, Groups and the 2D records are applied by the host as it spawns the actor; anything else is not.
         usize unused = 0;
 #if AVER_MODULE_FRAMEWORK
-        for (const fmt::OcPlacedComponent& c : p.components) unused += !isPropsComponent(c.type) && !isGroupsComponent(c.type);
+        for (const fmt::OcPlacedComponent& c : p.components) unused += !isPropsComponent(c.type) && !isGroupsComponent(c.type) && !is2DComponent(c.type);
 #else
-        unused = p.components.size();
+        for (const fmt::OcPlacedComponent& c : p.components) unused += !is2DComponent(c.type);
 #endif
         if (unused > 0)
             AVER_WARN("[Level] placement {} is a class placement: {} of its COMPONENT records are not applied", i, unused);

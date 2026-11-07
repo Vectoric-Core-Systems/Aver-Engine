@@ -42,6 +42,9 @@ std::optional<fmt::OcPlacedComponent> capturePlacedComponent(scene::World&, scen
 std::vector<fmt::OcPlacedComponent> capturePlacedComponents(scene::World&, scene::Entity, const PathOfIdFn&);   // canonical order
 // Applies p.components (sorted into canonical order). Returns the number applied. `placementIndex` only labels the warnings.
 u32 applyPlacedComponents(scene::World&, scene::Entity, const fmt::OcWorldPlacement&, i64 placementIndex = -1);
+// Applies only the 2D records (C2DTransform, CSprite2D, C2DLayer) of p: a class placement's actor takes them as it spawns, because the level
+// pass skips class placements. Returns the number applied.
+u32 applyPlacedComponents2D(scene::World&, scene::Entity, const fmt::OcWorldPlacement&, i64 placementIndex = -1);
 // The post-pass: for k in inst.entities, applies w.placements[inst.placementIndex[k]].components.
 // Logs ONE `AVER_INFO("[Level] {} placed component(s) on {} placement(s)", applied, placementsTouched)` when applied > 0 (the line the demo and the
 // acceptance checks grep for), and one AVER_WARN per refused record: "[Level] COMPONENT {Type} refused on placement {index}: {reason}".

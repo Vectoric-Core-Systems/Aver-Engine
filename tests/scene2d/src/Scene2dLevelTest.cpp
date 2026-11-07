@@ -202,6 +202,26 @@ int main() {
         check(game::applyPlacedComponent(w, e, rec("CSprite2D", {{"filter", "Linear"}, {"blend", "MIX"}})), "linear and mix are spelled out and case-insensitive");
     }
 
+    // ---- a class placement (Fabric's Sprite2D, Node2D, CanvasLayer) takes only its 2D records, as its actor spawns ----
+    {
+        const auto cid = scene2d::ids();
+        fmt::OcWorldPlacement p;
+        p.className = "Sprite2D";
+        p.components.push_back(rec("Props", {{"_native", "x"}}));
+        p.components.push_back(rec("C2DTransform", {{"x", "12"}, {"y", "7"}, {"z", "3"}, {"order", "9"}}));
+        p.components.push_back(rec("CSprite2D", {{"fliph", "1"}, {"hframes", "4"}}));
+        const scene::Entity e = w.create("classSprite");
+        check(game::applyPlacedComponents2D(w, e, p) == 2, "applyPlacedComponents2D applies the two 2D records and leaves Props alone");
+        const auto* t = w.component<scene2d::C2DTransform>(e, cid.transform);
+        const auto* sp = w.component<scene2d::CSprite2D>(e, cid.sprite);
+        check(t && t->posX == 12.0f && t->zIndex == 3 && t->treeOrder == 9u && sp && (sp->flags & scene2d::kSpriteFlipH) && sp->hframes == 4, "...with their values");
+        const scene::Entity bad = w.create("badClassSprite");
+        fmt::OcWorldPlacement q;
+        q.className = "Sprite2D";
+        q.components.push_back(rec("C2DTransform", {{"x", "inf"}}));
+        check(game::applyPlacedComponents2D(w, bad, q) == 0 && !w.hasComponent(bad, cid.transform), "a bad record is refused and attaches nothing");
+    }
+
     AVER_INFO("==================================================");
     if (g_failures == 0) AVER_INFO("=== {} assertions, 0 failed ===", g_checks);
     else                 AVER_ERROR("=== {} assertions, {} FAILED ===", g_checks, g_failures);

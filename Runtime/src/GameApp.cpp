@@ -9,6 +9,7 @@
 #include "aver/game/SoftBodySave.hpp"   // soft-body damage on the $State channel
 #include "aver/game/GameUiInput.hpp"
 #include "aver/game/GameUiText.hpp"
+#include "aver/game/GameScene2D.hpp"
 #include "aver/game/GameUiImages.hpp"
 #include "aver/game/PhysicalSurfaces.hpp"
 #include "aver/game/LevelDecals.hpp"
@@ -867,6 +868,7 @@ void GameApp::attachGameUi(Engine& e) {
     if (gameUi_) {
         dev->addRenderFeature(gameUi_);
         game::uiImagesBind(dev, gameUi_);   // UI images by content path (the Content folder is given with the project)
+        game::scene2dBind([this](u64 id) { return game::scene2dRelativePath(content_.pathFor(id), project_.contentDir()); });   // 2D sprites
         AVER_INFO("[Game] game UI attached");
     } else {
         AVER_WARN("[Game] game UI render feature failed to create -- the HUD will not draw");
@@ -2583,6 +2585,11 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
 
 #if AVER_WITH_UI_ABI
 void GameApp::submitGameUi(Engine&) {
+#if AVER_MODULE_SCENE
+    // 2D sprites and the queued Control draws join the UI list (docs/plans/RENDER_2D.md), under the game UI's own direct draws.
+    if (gameUi_) game::scene2dSubmit(scene::World::instance());
+    else game::scene2dDrop();
+#endif
     if (!gameUi_) return;
 
 #if AVER_MODULE_VOXI
@@ -2734,6 +2741,7 @@ void GameApp::onShutdown(Engine& e) {
 #if AVER_WITH_UI_ABI
     // Font out first: ui_abi.h comment on aver_ui_set_font: a font outliving its atlas textures draws glyphs sampling dead descriptor.
     aver_ui_set_font(nullptr);
+    game::scene2dUnbind();      // the sprite resolver names UI images
     game::uiImagesShutdown();   // the UI images (their textures and bindings) before the renderer and device go
     game::uiTextShutdown();   // unbind the atlas from the renderer and close the fonts before the device goes
     if (dev && uiFontTexture_) {

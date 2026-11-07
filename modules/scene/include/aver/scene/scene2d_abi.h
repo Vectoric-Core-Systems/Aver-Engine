@@ -21,7 +21,7 @@
 extern "C" {
 #endif
 
-#define AVER_SCENE2D_ABI_VERSION 1
+#define AVER_SCENE2D_ABI_VERSION 2
 
 /* Returns AVER_SCENE2D_ABI_VERSION as the DLL was built with. */
 AVER_SCENE_ABI int32_t aver_scene2d_abi_version(void);
@@ -119,6 +119,10 @@ AVER_SCENE_ABI int32_t aver_scene2d_sprite_bounds(int32_t entity, float* outRect
  * scaleMode 0 fractional / 1 integer). NULL in6 = no stretch (the content is the view's size). A view with no size clears
  * the canvas transform to the identity. */
 AVER_SCENE_ABI void aver_scene2d_set_canvas(const float* in6, float viewX, float viewY, float viewW, float viewH);
+
+/* Moves the rectangle (window pixels) the game is drawn in and keeps the stretch rules in force. A host calls it every frame with the
+ * real viewport. A rectangle with no size, or a non-finite number, clears the canvas transform to the identity. */
+AVER_SCENE_ABI void aver_scene2d_set_canvas_view(float viewX, float viewY, float viewW, float viewH);
 
 /* The canvas transform in force. out6 = {a, b, c, d, tx, ty}: content units -> window pixels (x' = a x + c y + tx,
  * y' = b x + d y + ty). out11 (may be NULL) = the stretch result in aver_ui_stretch_compute's layout, for the view's size

@@ -686,6 +686,7 @@ void GameLevel::spawnClassPlacements() {
         placementTree_.setEntity(index, static_cast<scene::Entity>(e));
         applyPlacementProps(e, p);   // before the batch ends, so OnBeginPlay sees them
         applyPlacementGroups(e, p);
+        applyPlacedComponents2D(world, static_cast<scene::Entity>(e), p);   // a Node2D / Sprite2D / CanvasLayer carries its 2D records
         levelClassInstances_.push_back(e);
     }
     placementTree_.attachUnderClassPlacements(world);

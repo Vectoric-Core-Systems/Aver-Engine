@@ -26,6 +26,7 @@
 // see the header for the contract three packages implement parts of.
 #if AVER_MODULE_VOXI
 #include "aver/game/GameFoliage.hpp"
+#include "aver/game/LevelComponents.hpp"
 #endif
 
 namespace aver {
@@ -774,6 +775,7 @@ scene::Entity SandboxApp::spawnClassSlot(usize slot, const Transform* worldXf) {
     // respawn after undo or Stop gets them back.
     game::applyPlacementProps(e, p);
     game::applyPlacementGroups(e, p);
+    game::applyPlacedComponents2D(scene::World::instance(), static_cast<scene::Entity>(e), p);   // a Node2D / Sprite2D / CanvasLayer carries its 2D records
     if (prior) { prior->entity = e; prior->removed = false; }
     else levelClassInstances_.push_back(ClassInstance{slot, e});
     return static_cast<scene::Entity>(e);

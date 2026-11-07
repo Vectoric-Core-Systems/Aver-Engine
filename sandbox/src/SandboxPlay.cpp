@@ -8,6 +8,7 @@
 #include "aver/game/GameInput.hpp"
 #include "aver/game/GameSystemsWiring.hpp"
 #include "aver/game/GameUiInput.hpp"
+#include "aver/game/GameScene2D.hpp"
 #include "aver/game/GameUiImages.hpp"
 #include "aver/game/GamePawn.hpp"
 #include "aver/game/GameLocalization.hpp"
@@ -715,6 +716,7 @@ void SandboxApp::stopPlay() {
         AVER_INFO("[Sandbox] Stop: play session ended");
     }
     // The session's UI images: the game released its own on its way out; this drops what it did not.
+    game::scene2dDrop();
     game::uiImagesReleaseAll();
     // AFTER the session ends, not before: end_play is what stops gameplay writing transforms,
     // and restoring while it can still move things would put the level back and then let the

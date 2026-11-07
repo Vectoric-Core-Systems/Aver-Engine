@@ -2,7 +2,7 @@
 
 # Aver.Framework public API
 
-283 public types and 2424 public members, read from `scripting/csharp/Aver.Framework/` (154 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+283 public types and 2425 public members, read from `scripting/csharp/Aver.Framework/` (154 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Framework
 
@@ -2730,7 +2730,7 @@ Values: `Start = 0`, `End = 1`
 
 `public static class Scene2D` - 2D scenes: sprites, 2D transforms and layers as entity components, the stretch transform and the ordered canvas that sprites and external draws (a UI control's) share.
 
-- `public const int AbiVersion = 1` - The ABI version this binding was written against.
+- `public const int AbiVersion = 2` - The ABI version this binding was written against.
 - `public static bool Available { get; }` - True when the native library is the version this binding speaks and its structs match the managed ones.
 - `public static bool Register()` - Registers the three components with the scene (idempotent).
 - `public static int ComponentId(Scene2DComponent which)` - The scene component id of one of the three, for the generic field API; 0 when not registered.
@@ -2745,6 +2745,7 @@ Values: `Start = 0`, `End = 1`
 - `public static bool TryGetWorld(Entity e, out Matrix3x2 world, out int z)` - The composed world transform (canvas units; x' = M11 x + M21 y + M31) and effective z of a 2D entity.
 - `public static bool TryGetSpriteBounds(Entity e, out Vector4 bounds)` - The sprite's axis-aligned bounds (x, y, width, height) in world 2D space.
 - `public static void SetCanvas(CanvasStretchMode mode, CanvasStretchAspect aspect, CanvasScaleMode scaleMode, float baseWidth, float baseHeight, float scale, Vector4 view)` - Sets the viewport stretch and the window rectangle (x, y, width, height) the game is drawn in.
+- `public static void SetCanvasView(Vector4 view)` - Moves the window rectangle (x, y, width, height) the game is drawn in and keeps the stretch rules.
 - `public static bool TryGetCanvasTransform(out Matrix3x2 toWindow)` - The canvas transform, content units to window pixels.
 - `public static void SetTextureResolver(Scene2DTextureResolver? resolver)` - Installs the host's image lookup (null clears it, and sprites draw nothing).
 - `public static bool SubmitExternal(int layer, int z, long order, Action draw, bool inCanvas = false)` - Queues an external draw into the canvas's ordered list.

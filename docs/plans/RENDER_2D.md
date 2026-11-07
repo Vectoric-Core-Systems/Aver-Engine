@@ -48,3 +48,9 @@ Decisions taken while building it, for the owner to veto:
 - Frames: the region (or the whole image) is divided by `hframes` x `vframes` and `frame` picks a cell, wrapping. Godot ignores the frame when a region is set; here they combine.
 - Anything drawn into the UI draw list directly (not submitted) lands before the flushed canvas, so it is under every sprite.
 - `Viewport` stretch mode scales like `canvas_items` (the draw list cannot render to a lower-resolution target).
+
+## Status (2026-11-08, host wiring)
+
+Both hosts now flush the canvas. `Runtime/include/aver/game/GameScene2D.hpp` is the shared helper (header-only, like `GameUiImages.hpp`): `scene2dBind` installs the sprite texture resolver (asset id -> content path through the project's content index -> `aver_ui_image_use`), and `scene2dSubmit` sets the canvas view rectangle from `aver_ui_viewport` (`setCanvasViewRect`, ABI v2 `aver_scene2d_set_canvas_view`; the stretch rules a script set stay) and flushes sprites and queued external draws into the UI draw list. The packaged runtime calls it from `GameApp::submitGameUi`. The editor calls it from `SandboxApp::submitGameUi` only while a Play session is active, and drops the queue otherwise, so edit mode draws no sprites, as it draws no game UI. Both run it before the UI renderer takes the list, so anything drawn straight into the list sits under every sprite.
+
+A class placement (Fabric's Node2D, Sprite2D, CanvasLayer) takes its `COMPONENT C2DTransform` / `CSprite2D` / `C2DLayer` records as its actor spawns (`applyPlacedComponents2D`); the level pass skips class placements. Tested by `Scene2dHostTest` and `Scene2dLevelTest`.

@@ -68,6 +68,7 @@ internal static class Scene2DNative
     [DllImport(Lib)] internal static extern int aver_scene2d_world_affine(int entity, float[] outAffine6, out int outZ);
     [DllImport(Lib)] internal static extern int aver_scene2d_sprite_bounds(int entity, float[] outRect4);
     [DllImport(Lib)] internal static extern void aver_scene2d_set_canvas(float[]? in6, float viewX, float viewY, float viewW, float viewH);
+    [DllImport(Lib)] internal static extern void aver_scene2d_set_canvas_view(float viewX, float viewY, float viewW, float viewH);
     [DllImport(Lib)] internal static extern int aver_scene2d_canvas_transform(float[] out6, float[]? out11);
     [DllImport(Lib)] internal static extern void aver_scene2d_set_texture_resolver(IntPtr fn, IntPtr user);
     [DllImport(Lib)] internal static extern int aver_scene2d_submit_external(int layer, int z, long order, IntPtr fn, IntPtr user, uint flags);
@@ -242,7 +243,7 @@ public delegate bool Scene2DTextureResolver(long assetId, out ulong texture, out
 public static class Scene2D
 {
     /// <summary>The ABI version this binding was written against.</summary>
-    public const int AbiVersion = 1;
+    public const int AbiVersion = 2;
 
     private static int s_state;   // 0 unknown, 1 usable, -1 not (an older DLL or a layout mismatch)
 
@@ -383,6 +384,12 @@ public static class Scene2D
         if (!Available) return;
         Scene2DNative.aver_scene2d_set_canvas(new float[] { (float)mode, (float)aspect, (float)scaleMode, baseWidth, baseHeight, scale },
                                               view.X, view.Y, view.Z, view.W);
+    }
+
+    /// <summary>Moves the window rectangle (x, y, width, height) the game is drawn in and keeps the stretch rules. Hosts call it each frame with the real viewport.</summary>
+    public static void SetCanvasView(Vector4 view)
+    {
+        if (Available) Scene2DNative.aver_scene2d_set_canvas_view(view.X, view.Y, view.Z, view.W);
     }
 
     /// <summary>The canvas transform, content units to window pixels. False (identity) until a canvas with a size is set.</summary>

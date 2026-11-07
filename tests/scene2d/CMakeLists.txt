@@ -34,3 +34,12 @@ if(TARGET Aver.Runtime.Game.Core)
   target_compile_definitions(Scene2dLevelTest PRIVATE AVER_SCENE2D_DATA="${CMAKE_CURRENT_SOURCE_DIR}/../../test-content/Scene2D")
   set_target_properties(Scene2dLevelTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# Scene2dHostTest -- GameScene2D.hpp, what both hosts call each frame: the sprite resolver over a fake image table, the viewport reaching the
+# canvas, sprites and queued external draws leaving as one sorted list. A real UiDrawList; no device.
+if(TARGET Aver.Runtime.Game.Core AND TARGET Aver.UI.Abi)
+  add_executable(Scene2dHostTest src/Scene2dHostTest.cpp)
+  target_link_libraries(Scene2dHostTest PRIVATE Aver.Runtime.Game.Core Aver.Scene Aver.UI Aver.UI.Abi Aver.Core)
+  target_compile_definitions(Scene2dHostTest PRIVATE AVER_WITH_UI_ABI=1)
+  set_target_properties(Scene2dHostTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()

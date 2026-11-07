@@ -37,6 +37,9 @@ struct CanvasView {
     f32 x = 0, y = 0, w = 0, h = 0;
 };
 AVER_SCENE_API void setCanvasView(const ui::UiStretchSettings& stretch, const CanvasView& view);
+// Moves the rectangle and keeps the stretch rules. The host calls it each frame with the real viewport, so a script that set the rules
+// needs no view of its own.
+AVER_SCENE_API void setCanvasViewRect(const CanvasView& view);
 
 struct CanvasTransform {
     ui::UiStretchResult stretch;   // as uiComputeStretch returns it for the view's size (screen is view-relative)

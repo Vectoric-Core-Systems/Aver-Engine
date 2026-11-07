@@ -62,6 +62,8 @@ void setCanvasView(const ui::UiStretchSettings& stretch, const CanvasView& view)
     st().view = view;
 }
 
+void setCanvasViewRect(const CanvasView& view) { st().view = view; }
+
 CanvasTransform canvasTransform() {
     const State& s = st();
     CanvasTransform out;

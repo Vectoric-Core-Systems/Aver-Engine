@@ -127,7 +127,7 @@ static std::string bodyOf(const std::string& text, const std::string& marker) {
 
 int main() {
     // ---- version and layout ----
-    check(aver_scene2d_abi_version() == AVER_SCENE2D_ABI_VERSION && AVER_SCENE2D_ABI_VERSION == 1, "the ABI version is 1 and is what the header says");
+    check(aver_scene2d_abi_version() == AVER_SCENE2D_ABI_VERSION && AVER_SCENE2D_ABI_VERSION == 2, "the ABI version is 2 and is what the header says");
     check(sizeof(AverScene2dTransform) == 32 && sizeof(AverScene2dSprite) == 56 && sizeof(AverScene2dLayer) == 32, "struct sizes: 32, 56, 32");
     check(aver_scene2d_struct_size(0) == 32 && aver_scene2d_struct_size(1) == 56 && aver_scene2d_struct_size(2) == 32 && aver_scene2d_struct_size(3) == 0,
           "the DLL reports the same sizes (the managed handshake) and 0 for anything else");
@@ -158,7 +158,7 @@ int main() {
             check(!c.empty() && c == m, std::string(r.c) + ": the managed mirror has the same scalars in the same order");
             check(sizeOfSeq(m) == static_cast<int>(r.size), std::string(r.c) + ": and lays out to the same size under Sequential");
         }
-        check(cs.find("AbiVersion = 1") != std::string::npos, "the managed binding names ABI version 1");
+        check(cs.find("AbiVersion = 2") != std::string::npos, "the managed binding names ABI version 2");
         check(cs.find("aver_scene2d_struct_size") != std::string::npos, "and checks the struct sizes before it calls anything");
     }
 #endif

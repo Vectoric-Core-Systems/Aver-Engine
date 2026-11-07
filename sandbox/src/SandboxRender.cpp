@@ -18,6 +18,7 @@
 // types (the decide/warn sinks are captureless lambdas local to onRender) -- so only this TU pays
 // for it.
 #include "aver/game/GameRender.hpp"
+#include "aver/game/GameScene2D.hpp"
 #include "aver/game/GameUiImages.hpp"
 // CpuSpan/CpuLap/CpuNest, formatCpuTiming: CPU-side twin of rhi::GpuTimingReport, used below to
 // wrap the cluster-dispatch timing in a CpuNest and print the per-bucket breakdown. Same
@@ -2402,6 +2403,11 @@ void SandboxApp::skinDrawCheck(Engine& e) {
 // Hands the ABI's retained UI draw list to the game UI render feature, once per frame.
 void SandboxApp::submitGameUi(Engine& e) {
     (void)e;
+#if AVER_MODULE_SCENE
+    // 2D sprites and the queued Control draws join the UI list in Play only, as the game UI itself does (docs/plans/RENDER_2D.md).
+    if (gameUi_ && anyPlayActive()) game::scene2dSubmit(scene::World::instance());
+    else game::scene2dDrop();
+#endif
     if (!gameUi_) return;
 
     if (showUiDemo_) drawUiDemo();

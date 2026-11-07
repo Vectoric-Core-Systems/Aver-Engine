@@ -242,6 +242,12 @@ void aver_scene2d_set_canvas(const float* in6, float viewX, float viewY, float v
     setAbiError(finite ? AbiError::Ok : AbiError::InvalidArgument);
 }
 
+void aver_scene2d_set_canvas_view(float viewX, float viewY, float viewW, float viewH) {
+    const bool finite = std::isfinite(viewX) && std::isfinite(viewY) && std::isfinite(viewW) && std::isfinite(viewH);
+    setCanvasViewRect(finite ? CanvasView{viewX, viewY, viewW, viewH} : CanvasView{});
+    setAbiError(finite ? AbiError::Ok : AbiError::InvalidArgument);
+}
+
 int32_t aver_scene2d_canvas_transform(float* out6, float* out11) {
     const CanvasTransform c = canvasTransform();
     if (out6) {
