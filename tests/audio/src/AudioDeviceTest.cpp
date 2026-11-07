@@ -600,10 +600,14 @@ int main() {
         fk->loseNext = true;
         check(waitFor([&] { return dev.state() == audio::OutputState::NoDevice; }, 3000), "losing the device with no replacement is survived");
         check(dev.running() && !dev.deviceOpen(), "the render thread is alive without a device");
+        // Against the time that really passed: a loaded runner (macOS CI) sleeps well past the 0.3 s asked for.
         const f64 p0 = dev.mixer().voicePositionSeconds(v);
+        const auto slept = std::chrono::steady_clock::now();
         std::this_thread::sleep_for(std::chrono::milliseconds(300));
         const f64 p1 = dev.mixer().voicePositionSeconds(v);
-        check(p1 - p0 > 0.2 && p1 - p0 < 0.45, "and real time keeps passing in the mixer (" + std::to_string(p1 - p0) + " s in 0.3 s)");
+        const f64 elapsed = std::chrono::duration<f64>(std::chrono::steady_clock::now() - slept).count();
+        check(p1 - p0 > elapsed - 0.1 && p1 - p0 < elapsed + 0.1,
+              "and real time keeps passing in the mixer (" + std::to_string(p1 - p0) + " s in " + std::to_string(elapsed) + " s)");
 
         { std::lock_guard<std::mutex> g(fk->mu); fk->fmt = device("Back", 96000, 2, 960); }
         fk->exists = true;
