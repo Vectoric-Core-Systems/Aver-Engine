@@ -854,7 +854,7 @@ void UiLayoutEditor::drawInspector() {
         }
     }
 
-    const char* const groups[] = {"Placement", "Layout", "Appearance", "Content", "Value", "Navigation", "Root"};
+    const char* const groups[] = {"Placement", "Layout", "Appearance", "Content", "Value", "Navigation", "Accessibility", "Root"};
     for (const char* g : groups) {
         std::vector<const UiPropDesc*> shown;
         for (const UiPropDesc& d : uiProperties()) {

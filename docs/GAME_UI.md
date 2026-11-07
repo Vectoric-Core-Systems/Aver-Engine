@@ -1,8 +1,10 @@
 # Game UI: widgets, menus and the layout editor
 
-Status: built in the `feat/game-systems` worktree. Every C++ file was syntax-checked with `cl /Zs` (the editor tab
-both with and without ImGui) and every C# file compiled with `csc` into a scratch assembly, but **nothing was linked,
-tested or run** (the integration step builds and runs it). Plan: [plans/GAME_SYSTEMS_PLAN.md](plans/GAME_SYSTEMS_PLAN.md), feature 6.
+Status: merged and built. The headless suites (`UiTest`, `UiWidgetTest`, `UiLayoutAssetTest`, `UiLayoutEditorTest` and the
+text, style and ABI tests under `tests/ui`) are in ctest and pass (526 of 526 on 2026-11-08). The designer's ImGui half
+(palette, canvas, inspector) is not covered by ctest; it is checked by hand in the editor. Plan:
+[plans/GAME_SYSTEMS_PLAN.md](plans/GAME_SYSTEMS_PLAN.md), feature 6; editor roadmap:
+[plans/EDITOR_UE_PARITY.md](plans/EDITOR_UE_PARITY.md) track B.
 
 `Aver.UI` is the retained game UI. It is not Dear ImGui (that stays the editor's): a shipped game has no editor
 toolkit, and a menu authored as data is something a designer can open, diff and hand to an artist. Everything
@@ -306,133 +308,15 @@ nodes have a `success` out.
 `AN_UiWasClicked` and `AN_UiCommandFired` read what the last `UiSystem.Pump()` delivered, so Pump must run once a
 frame before the graphs tick.
 
-## Wiring the integration step must add
+## Where it is wired
 
-None of these were made: they touch files other agents own.
-
-1. **Sandbox build**: `sandbox/CMakeLists.txt` source list: `src/UiLayoutEditor.cpp` (beside `src/BtEditor.cpp`).
-2. **Editor tab**: `SandboxApp.hpp` `#include "UiLayoutEditor.hpp"` (beside `BtEditor.hpp`);
-   `SandboxApp.cpp` `assetEditors_.registerFactory(&editor::makeUiLayoutEditor);` (appended after the Bt line).
-3. **Content Browser**: `SandboxApp.hpp` declare `void cbCreateUiLayout();`; `SandboxContentBrowser.cpp`:
-   ```cpp
-   void SandboxApp::cbCreateUiLayout() {
-       const std::filesystem::path target = cbFreeAssetPath("NewLayout", ".ocui");
-       if (target.empty()) return;
-       std::string why;
-       if (!editor::writeNewFile(target.string(), editor::uiStarterLayoutText(), &why)) {
-           cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
-           return;
-       }
-       cbAdoptNewAsset(target);
-   }
-   ```
-   a menu item beside the others (`if (ImGui::MenuItem("New UI Layout")) cbCreateUiLayout(); uiReg_.track("cb.add.uiLayout");`)
-   and an icon row `{".ocui", {ICON_TUNE, IM_COL32(120, 200, 255, 255), "UI Layout"}},`.
-4. **Host input (both hosts)**: after publishing input each frame call `aver_ui_input_host_frame` (fill the two
-   256-byte arrays from `InputState::keyPressed/keyHeld`, mouse buttons into VK 1/2/4, `vkToSlot` from
-   `frameworkKeyFromVk` plus `AVER_FW_KEY_MOUSE_*`; the pad from `GamepadState`), `aver_ui_input_wheel(in.wheel())`,
-   then after the HUD draw (`Runtime/src/GameApp.cpp` near `scripts_.hudDraw`; the editor's Play path in
-   `SandboxApp.cpp`/`SandboxRender.cpp` beside its `aver_ui_begin_frame`) call `aver_ui_widgets_frame(dt)`.
-5. **Pausing game input**: before `publishInput` (`GameApp.cpp`; `SandboxPlay.cpp`) read `wants = aver_ui_wants_input()`
-   and AND `inputPolicy.keyboardToGame/mouseToGame/gamepadActive` with `!(wants & AVER_UI_WANTS_PAUSE)`; free the
-   mouse-capture while `wants & AVER_UI_WANTS_CURSOR`; call `aver_ui_input_pointer_valid(captured ? 0 : 1)`.
-6. **Pump**: call `Aver.UI.UiSystem.Pump()` once a frame, before graphs tick: top of `HostBridge.DispTickAll`
-   when `group == 0`, and from `HudDraw`.
-7. **C# projects**: `Aver.Framework.csproj` add `<ProjectReference Include="..\Aver.UI\Aver.UI.csproj" />`
-   (Aver.UI references nothing, so no cycle). The Aver.UI sources are already globbed by `modules/scripting`.
-8. **Graph nodes** (below).
-9. **Docs**: `docs/ARCHITECTURE.md` mention `ui.abi` widget ABI and `docs/GAME_UI.md`.
-
-### Graph node wiring
-
-*Catalog* (`sandbox/src/GraphNodeDefs.hpp`, in `buildCatalog()`), category `"UI"`:
-
-```cpp
-// Game UI nodes: widgets and layouts are ints, all exec; one dispatcher (UiGraphInterop.UiNodeForGraph).
-t.push_back({"AN_OpenUiLayout", "Open UI Layout", "UI", {pin("exec","exec",false), pin("then","exec",true),
-    pin("layout","int",true), pin("success","bool",true)}, {attr("path","Layout file")}});
-t.push_back({"AN_CloseUiLayout", "Close UI Layout", "UI", {pin("exec","exec",false), pin("layout","int",false),
-    pin("then","exec",true), pin("success","bool",true)}});
-t.push_back({"AN_FindUiWidget", "Find UI Widget", "UI", {pin("exec","exec",false), pin("layout","int",false),
-    pin("then","exec",true), pin("widget","int",true), pin("success","bool",true)}, {attr("name","Widget name")}});
-t.push_back({"AN_CreateUiWidget", "Create UI Widget", "UI", {pin("exec","exec",false), pin("parent","int",false),
-    pin("kind","int",false), pin("then","exec",true), pin("widget","int",true), pin("success","bool",true)},
-    {attr("name","Widget name")}});
-t.push_back({"AN_SetUiText", "Set UI Text", "UI", {pin("exec","exec",false), pin("widget","int",false),
-    pin("then","exec",true), pin("success","bool",true)}, {attr("text","Text")}});
-t.push_back({"AN_SetUiValue", "Set UI Value", "UI", {pin("exec","exec",false), pin("widget","int",false),
-    pin("value","float",false), pin("then","exec",true), pin("success","bool",true)}});
-t.push_back({"AN_SetUiChecked", "Set UI Checked", "UI", {pin("exec","exec",false), pin("widget","int",false),
-    pin("checked","bool",false), pin("then","exec",true), pin("success","bool",true)}});
-t.push_back({"AN_SetUiVisible", "Set UI Visible", "UI", {pin("exec","exec",false), pin("widget","int",false),
-    pin("visible","bool",false), pin("then","exec",true), pin("success","bool",true)}});
-t.push_back({"AN_SetUiEnabled", "Set UI Enabled", "UI", {pin("exec","exec",false), pin("widget","int",false),
-    pin("enabled","bool",false), pin("then","exec",true), pin("success","bool",true)}});
-t.push_back({"AN_GetUiValue", "Get UI Value", "UI", {pin("exec","exec",false), pin("widget","int",false),
-    pin("then","exec",true), pin("value","float",true), pin("checked","bool",true), pin("selected","int",true),
-    pin("success","bool",true)}});
-t.push_back({"AN_UiWasClicked", "UI Was Clicked", "UI", {pin("exec","exec",false), pin("widget","int",false),
-    pin("then","exec",true), pin("clicked","bool",true)}});
-t.push_back({"AN_UiCommandFired", "UI Command Fired", "UI", {pin("exec","exec",false), pin("then","exec",true),
-    pin("fired","bool",true)}, {attr("name","Command")}});
-t.push_back({"AN_SetUiFocus", "Set UI Focus", "UI", {pin("exec","exec",false), pin("widget","int",false),
-    pin("then","exec",true), pin("success","bool",true)}});
-t.push_back({"AN_OpenUiSettings", "Open UI Settings", "UI", {pin("exec","exec",false), pin("then","exec",true),
-    pin("layout","int",true), pin("success","bool",true)}});
-```
-
-*Parser* (`OcGraphParser.AddDefaultPins`): one `case` per node, the same pins as the catalog rows (see
-`playsound` for the shape). `path=` / `name=` / `text=` reuse `Node.SavePath` / `Node.NameValue` /
-`Node.PrintText`, so the attribute parsing needs no change.
-
-*Compiler* (`GraphCompiler.cs`): in the exec dispatch (next to `IsExecCapableAudioType`) add
-`else if (IsExecCapableUiType(node.Type)) EmitExecUi(node);`, add the 14 types to the "side effect, refused by
-`Compile()`" group beside `playsound`, and add:
-
-```csharp
-private static readonly HashSet<string> s_uiTypes = new() {
-    "an_openuilayout","an_closeuilayout","an_finduiwidget","an_createuiwidget","an_setuitext","an_setuivalue",
-    "an_setuichecked","an_setuivisible","an_setuienabled","an_getuivalue","an_uiwasclicked","an_uicommandfired",
-    "an_setuifocus","an_openuisettings" };
-private static bool IsExecCapableUiType(string type) => s_uiTypes.Contains(type.ToLowerInvariant());
-
-private void EmitExecUi(Node node)
-{
-    if (_il == null) return;
-    // Pushes the first of these input pins the node has, else the default.
-    void Arg(Type t, params string[] names)
-    {
-        foreach (string n in names)
-            if (node.Pins.Any(p => !p.IsOutput && p.Name == n)) { EmitPullInput(node, n); return; }
-        if (t == typeof(float)) _il.Emit(OpCodes.Ldc_R4, 0f); else _il.Emit(OpCodes.Ldc_I4_0);
-    }
-    _il.Emit(OpCodes.Ldstr, node.Type.ToLowerInvariant());
-    _il.Emit(OpCodes.Ldstr, node.SavePath ?? node.NameValue ?? node.PrintText ?? string.Empty);
-    Arg(typeof(int), "layout", "widget", "parent");
-    Arg(typeof(int), "kind");
-    Arg(typeof(float), "value");
-    Arg(typeof(bool), "checked", "visible", "enabled");
-    var oi = _il.DeclareLocal(typeof(int)); var of = _il.DeclareLocal(typeof(float)); var ob = _il.DeclareLocal(typeof(bool));
-    _il.Emit(OpCodes.Ldloca, oi); _il.Emit(OpCodes.Ldloca, of); _il.Emit(OpCodes.Ldloca, ob);
-    _il.Emit(OpCodes.Call, UiNodeMethod);
-    if (node.Pins.Any(p => p.IsOutput && p.Name == "success"))
-        _il.Emit(OpCodes.Stloc, GetOrCreateExecLocal(node.Id, "success", typeof(bool)));
-    else _il.Emit(OpCodes.Pop);
-    foreach (var (pin, local, type) in new[] {
-        ("layout", oi, typeof(int)), ("widget", oi, typeof(int)), ("selected", oi, typeof(int)),
-        ("value", of, typeof(float)),
-        ("checked", ob, typeof(bool)), ("clicked", ob, typeof(bool)), ("fired", ob, typeof(bool)) })
-        if (node.Pins.Any(p => p.IsOutput && p.Name == pin))
-        { _il.Emit(OpCodes.Ldloc, local); _il.Emit(OpCodes.Stloc, GetOrCreateExecLocal(node.Id, pin, type)); }
-}
-
-private static readonly MethodInfo UiNodeMethod =
-    typeof(UiGraphInterop).GetMethod("UiNodeForGraph", BindingFlags.NonPublic | BindingFlags.Static)
-    ?? throw new InvalidOperationException("Aver.Framework.UiGraphInterop.UiNodeForGraph was not found by reflection");
-```
-
-(`GraphCompiler.cs` needs `using Aver.Framework;` for `UiGraphInterop` as it already has for `GraphInterop`.)
-Add the 14 rows to `docs/AVER_NODE_NODES.md` (a "UI" section) from the table above.
+| Piece | Where |
+|---|---|
+| Editor tab, "New UI Layout" in the Content Browser | `SandboxInit.cpp` (`makeUiLayoutEditor`), `SandboxContentBrowser.cpp` (`cbCreateUiLayout`) |
+| Per-frame UI update and draw | `SandboxUpdate.cpp` (Play), `Runtime/src/GameApp.cpp` (shipped game): `aver_ui_widgets_frame` |
+| Host input mapping, pausing game input | `Runtime/include/aver/game/GameUiInput.hpp`, `GameAccessibility.hpp` |
+| `UiSystem.Pump()` | `HostBridge.cs` (once a frame, before graphs tick) |
+| Visual-script nodes (`AN_*Ui*`) | catalog in `sandbox/src/GraphNodeDefsGameSystems.hpp`, compiled through `Aver.Framework/UiGraphInterop.cs` |
 
 ## Tests
 
@@ -456,15 +340,13 @@ Add the 14 rows to `docs/AVER_NODE_NODES.md` (a "UI" section) from the table abo
 
 ## What is not done
 
-* Nothing was linked, tested or run. Expect link-level fixes and, in tests, possible off-by-epsilon
-  expectations; the integration step builds and reports.
-* **Typed text uses a US key table** (`uiVkToChar`) because the platform window does not forward `WM_CHAR`; add
-  a `Char` event to `Window`/`InputState` and feed `aver_ui_input_char` for other layouts and IME.
+* **Typed text**: a host that feeds the window's characters through `aver_ui_input_char` gets the real layout,
+  dead keys and committed IME text; without that the tree falls back to a US key table (`uiVkToChar`).
 * **Text limits** are listed in [GAME_UI_TEXT.md](GAME_UI_TEXT.md) (no Indic or Thai shaping, no vertical text, no
   IME, OS fonts on Windows only). A baked bitmap font is still lent by the host (`aver_ui_set_font`); it is the
   last fallback face and the whole path when no TrueType font can be opened.
-* **Images**: a layout's `image` path is only a name; `UiSystem.ImageResolver` (C#) or `aver_ui_widget_set_texture`
-  (C) must supply the texture. The editor preview shows a placeholder.
+* **Images**: a layout's `image` path resolves through the host's image table (`aver_ui_image_use`), or
+  `UiSystem.ImageResolver` (C#) / `aver_ui_widget_set_texture` (C). The editor preview shows a placeholder.
 * **Graphics settings** are stored and raised as events (`GraphicsChanged`); no engine system applies them yet.
 * **Gamepad rebinding** is not offered (the capture is keyboard and mouse); gamepad rows are greyed out.
 * **Animation/transitions** (fades, slides) are not built; `opacity` can be driven from code.
