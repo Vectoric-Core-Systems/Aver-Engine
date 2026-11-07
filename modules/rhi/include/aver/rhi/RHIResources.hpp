@@ -855,6 +855,14 @@ public:
     // the backend must not replay them over the result. Asked after the scene pass.
     virtual bool blendedDrawsResolvedInScene() const { return false; }
 
+    // First-person overlay (docs/plans/FIRST_PERSON.md step 6). True when this feature suppresses the scene but wants the opaque draws flagged first
+    // person (IDevice::setDrawFirstPerson) captured and replayed over its scene pass, after the sky and before the blended replay, through
+    // firstPersonOverlayPipeline with firstPersonOverlayConstants. The pipeline draws one colour target with depth test and write on.
+    virtual bool wantsFirstPersonOverlay() const { return false; }
+    // The overlay's pipeline for a draw whose material variant key is `fxKey` (0 = none), or 0 to drop the draw.
+    virtual PipelineHandle firstPersonOverlayPipeline(u32 fxKey) const { (void)fxKey; return 0; }
+    virtual bool firstPersonOverlayConstants(const void** data, u32* bytes) const { return sceneConstants(data, bytes); }
+
     // Draws depth-tested, blended geometry into the scene after opaque drawMesh and sky.
     virtual void transparentPass(IRenderContext& ctx) { (void)ctx; }
 

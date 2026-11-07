@@ -251,6 +251,20 @@ public:
     bool wantsLateScenePass() const override;
     // This frame's translucent draws were composited inside the ray-driven frame; skip their replay.
     bool blendedDrawsResolvedInScene() const override { return translucentInPath_; }
+    // First-person step 6: in a ray-driven frame the first-person meshes (kept out of the primary rays) are drawn over the result by the device,
+    // through the raster scene shader (never the ray-queried one), sun-shadowed by the nearest cascade that shadowPass renders for them.
+    bool wantsFirstPersonOverlay() const override { return rayDrivenActive() && !graphStale() && !debugViewActive(); }
+    rhi::PipelineHandle firstPersonOverlayPipeline(u32 fxKey) const override;
+    bool firstPersonOverlayConstants(const void** data, u32* bytes) const override;
+    // The cascades shadowPass renders: `fitted` normally, none with ray tracing on (rays shadow everything), except one (the nearest) for a
+    // ray-driven frame drawing a first-person overlay. `mainReads` says whether the frame's own readers (raster scene, particles, fog) may
+    // sample the atlas; the overlay reads it through its own constants. Static for tests.
+    struct CascadePlan { u32 count = 0; bool mainReads = false; };
+    static CascadePlan planCascades(u32 fitted, bool rtActive, bool firstPersonOverlay) {
+        if (fitted == 0) return {};
+        if (!rtActive) return {fitted, true};
+        return firstPersonOverlay ? CascadePlan{1u, false} : CascadePlan{};
+    }
 
     // Builds the variants otherwise compiled on first use (NRD2 Stage B, Path Tracing and NeuRaC
     // twins). For tests and loading screens; call after onRenderTargetsChanged.
@@ -1042,6 +1056,8 @@ private:
     // Two facts about the list recorded as each draw appends and swapped by beginScene().
     std::vector<u32> translucentDraws_, translucentDrawsPrev_;
     u32 lastShadowDraws_ = 0;   // shadow-map draws the last shadow pass submitted, summed over cascades (RenderStats)
+    bool fpCascadeLive_ = false;           // shadowPass rendered the nearest cascade for the first-person overlay (planCascades)
+    mutable std::vector<u8> fpCbBlob_;     // firstPersonOverlayConstants: the frame block with the cascade switch on
     // Indices into draws_ / drawsPrev_ of light-flagged draws, in list order.
     std::vector<u32> lampDraws_, lampDrawsPrev_;
 

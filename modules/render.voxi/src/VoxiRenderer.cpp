@@ -5392,6 +5392,7 @@ VoxiRenderer::ShadowInstanceGroup& VoxiRenderer::shadowGroupFor(std::vector<Shad
 // back to one-draw-per-instance (shadowPso_) if the instanced pipeline failed to build.
 void VoxiRenderer::shadowPass(rhi::IRenderContext& ctx) {
     lastShadowDraws_ = 0;
+    fpCascadeLive_ = false;
     const bool useInstancing = shadowInstancedPso_ != 0;
     if ((!shadowPso_ && !shadowInstancedPso_) || drawsPrev_.empty()) { cb_.shadowParams[1] = 0.0f; return; }
     u32 cascades = fitCascades();
@@ -5399,13 +5400,18 @@ void VoxiRenderer::shadowPass(rhi::IRenderContext& ctx) {
     if (cascades > static_cast<u32>(AVER_VOXI_SHADOW_CASCADE_LIMIT))
         cascades = static_cast<u32>(AVER_VOXI_SHADOW_CASCADE_LIMIT);
 #endif
-    if (cascades == 0) { cb_.shadowParams[1] = 0.0f; return; }
-
-    // Atlas has no reader while ray tracing is on; shadowParams[1] = 0 prevents stale atlas reads.
-    if (rtActive_) { cb_.shadowParams[1] = 0.0f; return; }
+    // With ray tracing on the frame's own readers never sample the atlas (shadowParams[1] = 0 keeps them off stale data); a ray-driven frame with
+    // first-person meshes still renders the nearest cascade for the overlay, which reads it through firstPersonOverlayConstants.
+    bool firstPerson = false;
+    if (rtActive_ && wantsFirstPersonOverlay())
+        firstPerson = std::any_of(drawsPrev_.begin(), drawsPrev_.end(), [](const Draw& d) { return d.firstPerson && !d.translucent; });
+    const CascadePlan plan = planCascades(cascades, rtActive_, firstPerson);
+    fpCascadeLive_ = firstPerson && plan.count > 0;
+    if (plan.count == 0) { cb_.shadowParams[1] = 0.0f; return; }
+    cascades = plan.count;
 
     cb_.shadowParams[0] = 1.0f / static_cast<f32>(shadowCascadeSize_ * 2u);
-    cb_.shadowParams[1] = 1.0f;
+    cb_.shadowParams[1] = plan.mainReads ? 1.0f : 0.0f;
     cb_.shadowParams[3] = static_cast<f32>(cascades);
 
     rhi::ScopedGpuStat gpuStat(ctx, "Voxi shadow");
@@ -5476,6 +5482,7 @@ void VoxiRenderer::shadowPass(rhi::IRenderContext& ctx) {
             for (const Draw& d : drawsPrev_) {
                 // Translucent draws excluded (depth-only pass) -- see the note above, first branch.
                 if (d.translucent) continue;
+                if (d.noShadow) continue;
                 if (d.boundsRadius >= 0.0f) {
                     const Vec3 dc{d.boundsCentre[0], d.boundsCentre[1], d.boundsCentre[2]};
                     if (dist(dc, cascCentre) > cascRadius + d.boundsRadius) continue;
@@ -9465,6 +9472,36 @@ rhi::PipelineHandle VoxiRenderer::scenePipelineFx(u32 key, bool meshExtra, bool 
     const FxScene& e = it->second;
     if (blended) return e.blended;
     return e.lit ? pickGbuf(e.lit, e.litGbuf) : 0;
+}
+
+// First-person step 6: the overlay's pipeline. Always a raster scene pipeline (gi layout, no AVER_RT): a material variant's plain twin when it is
+// built (createFxPipelines compiles raster shaders in every frame), else the ordinary raster scene pipeline. Never the G-buffer twin: the overlay
+// draws after the ray-driven resolve into the scene colour alone.
+rhi::PipelineHandle VoxiRenderer::firstPersonOverlayPipeline(u32 fxKey) const {
+    if (!giReady_) return 0;
+    if (fxKey && settings_.materialFx) {
+        const u64 mk = fxMapKey(fxKey, rtActive_, false);
+        const auto it = fxScenes_.find(mk);
+        if (it == fxScenes_.end() || !it->second.tried) {
+            if (std::find(fxWanted_.begin(), fxWanted_.end(), mk) == fxWanted_.end()) fxWanted_.push_back(mk);
+        } else if (it->second.lit) {
+            return it->second.lit;
+        }
+    }
+    return scenePso_;
+}
+
+// The frame block with the cascade switch on when shadowPass rendered the nearest cascade for the overlay (the frame's own readers keep it off).
+bool VoxiRenderer::firstPersonOverlayConstants(const void** data, u32* bytes) const {
+    if (!giReady_) return false;
+    fpCbBlob_.resize(sizeof(cb_));
+    std::memcpy(fpCbBlob_.data(), &cb_, sizeof(cb_));
+    if (fpCascadeLive_) {
+        const f32 on = 1.0f;
+        std::memcpy(fpCbBlob_.data() + offsetof(FrameConstants, shadowParams) + sizeof(f32), &on, sizeof(on));
+    }
+    *data = fpCbBlob_.data(); *bytes = static_cast<u32>(fpCbBlob_.size());
+    return true;
 }
 
 void VoxiRenderer::destroyFxScenes() {

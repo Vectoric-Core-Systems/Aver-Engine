@@ -2777,6 +2777,39 @@ bool VulkanDevice::isMeshPipeline(PipelineHandle h) const {
     return p && p->mesh;
 }
 
+// First-person overlay (IRenderFeature::wantsFirstPersonOverlay): the opaque first-person draws a suppressing scene feature left out, drawn over its
+// result inside the open scene scope through the feature's overlay pipeline. D3D12Device::replayFirstPersonDraws's twin.
+void VulkanDevice::replayFirstPersonDraws(VkCommandBuffer cmd) {
+    IRenderFeature* owner = nullptr;
+    for (IRenderFeature* f : features_) if (f->overridesScenePipeline() && f->wantsFirstPersonOverlay()) { owner = f; break; }
+    if (!owner) return;
+    ensureRenderScope(cmd);   // a mid-scene dispatch may have suspended it
+    const void* cb = nullptr; u32 cbBytes = 0;
+    const bool haveCb = owner->firstPersonOverlayConstants(&cb, &cbBytes) && cb && cbBytes;
+    PipelineHandle bound = 0;
+    for (const BlendedDraw& fd : firstPersonDraws_) {
+        if (fd.mesh == 0 || fd.mesh > meshes_.size() || !meshes_[fd.mesh - 1].alive) continue;
+        const PipelineHandle pso = owner->firstPersonOverlayPipeline(drawMaterialFxKey(fd.binding.constants, fd.binding.bytes));
+        if (!pso) continue;
+        if (pso != bound) {
+            rhiContext_->setPipeline(pso);
+            rhiContext_->setBindlessTable(owner->sceneBindlessTable());
+            if (const BindingSetHandle bs = owner->sceneBindingSet()) rhiContext_->setBindingSet(bs, 0);
+            if (haveCb) rhiContext_->setConstantBuffer(kFeatureFrameConstantRegister, cb, cbBytes);
+            bound = pso;
+        }
+        rhiContext_->setDrawBinding(fd.binding.set, fd.binding.constants, fd.binding.bytes);
+        f32 fc[kObjectConstantDwords];
+        std::memcpy(fc, fd.world, 16 * sizeof(f32));
+        std::memcpy(fc + 16, fd.color, 4 * sizeof(f32));
+        fc[20] = fd.metallic; fc[21] = fd.roughness; fc[22] = 0.0f; fc[23] = 0.0f;
+        writeShadingConstants(fc);
+        std::memcpy(fc + 27, &fd.objPad, sizeof(u32));   // carries the first-person bit: the vertex stage projects through gFpViewProj
+        rhiContext_->setConstants(kObjectConstantRegister, fc, kObjectConstantDwords);
+        rhiContext_->drawMesh(fd.mesh);
+    }
+}
+
 void VulkanDevice::replayBlendedDraws(VkCommandBuffer cmd) {
     IRenderFeature* owner = nullptr;
     for (IRenderFeature* f : features_) {
@@ -2979,7 +3012,21 @@ void VulkanDevice::drawMesh(MeshHandle mesh, const f32 world[16], const f32 colo
     }
     for (IRenderFeature* f : features_)
         f->submitDraw(mesh, world, color, metallic, roughness, drawBinding_.set, drawBinding_.constants, drawBinding_.bytes, /*blended=*/false);
-    for (IRenderFeature* f : features_) if (f->suppressesScene()) return;
+    for (IRenderFeature* f : features_) {
+        if (!f->suppressesScene()) continue;
+        // A first-person draw the suppressing feature leaves to the device: kept for the overlay after the sky (D3D12Device's twin).
+        if (drawFirstPerson_ && f->wantsFirstPersonOverlay()) {
+            BlendedDraw& fd = firstPersonDraws_.emplace_back();
+            fd.mesh = mesh;
+            std::memcpy(fd.world, world, 16 * sizeof(f32));
+            std::memcpy(fd.color, color, 4 * sizeof(f32));
+            fd.metallic = metallic;
+            fd.roughness = roughness;
+            fd.objPad = packObjectPad(drawLayersInv_, drawFirstPerson_);
+            storeDrawBinding(fd.binding, drawBinding_.set, drawBinding_.constants, drawBinding_.bytes);
+        }
+        return;
+    }
 
     // The backend's own scenePso_/meshPso_ below are opaque only: translucency needs an
     // overridesScenePipeline feature offering scenePipeline(..., blended=true) (see endFrame's replay).
@@ -3289,6 +3336,7 @@ void VulkanDevice::beginFrame() {
     drawBinding_ = defaultDrawBinding_;
     drawBlended_ = false;   // sticky per-draw state resets like drawBinding_
     blendedDraws_.clear();
+    firstPersonDraws_.clear();
     blendedPipelineMissingWarned_ = false;
     depthOnlyMesh_ = 0;   // backstop; drawMesh consumes it -- see D3D12Device's beginFrame
     wireframeFrame_ = wireframe_;   // re-latched by this frame's own setWireframe(true), if any
@@ -3514,6 +3562,13 @@ void VulkanDevice::endFrame() {
                                    &sceneFrameSet_[frameIndex_], 1, &zeroOffset);
         ensureRenderScope(cmd);   // a mid-scene dispatch may have suspended it
         api_.CmdDraw(cmd, 3, 1, 0, 0);
+    }
+
+    // First-person overlay: before the blended replay, so glass behind the viewmodel depth-tests against it (D3D12Device's twin).
+    if (!firstPersonDraws_.empty() && rhiContext_ && sceneScopeOpened_ && !frameSuppressed_ && !wireframeFrame_) {
+        api_.CmdSetViewport(cmd, 0, 1, &sceneVp);
+        api_.CmdSetScissor(cmd, 0, 1, &sceneSc);
+        replayFirstPersonDraws(cmd);
     }
 
     // Blended mesh flush, between the sky (its depth-EQUAL fill would paint over translucency) and the

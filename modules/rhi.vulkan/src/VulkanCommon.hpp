@@ -1861,6 +1861,8 @@ private:
         DrawBinding binding{};
     };
     std::vector<BlendedDraw> blendedDraws_;   // filled by drawMesh, sorted and drained by endFrame, cleared at beginFrame
+    std::vector<BlendedDraw> firstPersonDraws_;   // IRenderFeature::wantsFirstPersonOverlay: opaque first-person draws a suppressed scene left out
+    void replayFirstPersonDraws(VkCommandBuffer cmd);
     bool blendedPipelineMissingWarned_ = false;
     bool blendedSeen_ = false;   // a blended draw has been submitted: only then is the backdrop allocated (scene-sized HDR)
     // Opens the scene scope over msaaColorView_/depthView_ (+ the MSAA resolve target): CLEAR at beginFrame,

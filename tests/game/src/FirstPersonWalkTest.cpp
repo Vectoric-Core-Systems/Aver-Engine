@@ -270,9 +270,26 @@ static void testHooks() {
     }
 }
 
+// Step 6: the cascades shadowPass renders. Raster: all of them, read by the frame. Ray tracing on: none, unless a ray-driven frame draws a
+// first-person overlay, which gets the nearest one and reads it through its own constants (the frame's readers stay off).
+static void testCascadePlan() {
+    using V = voxi::VoxiRenderer;
+    const V::CascadePlan raster = V::planCascades(4, false, false);
+    check(raster.count == 4 && raster.mainReads, "raster frames render every fitted cascade and read them");
+    const V::CascadePlan rasterFp = V::planCascades(4, false, true);
+    check(rasterFp.count == 4 && rasterFp.mainReads, "a first-person mesh changes nothing in a raster frame");
+    const V::CascadePlan rt = V::planCascades(4, true, false);
+    check(rt.count == 0 && !rt.mainReads, "ray-traced frames without an overlay render no cascade");
+    const V::CascadePlan rtFp = V::planCascades(4, true, true);
+    check(rtFp.count == 1 && !rtFp.mainReads, "a first-person overlay gets the nearest cascade only, unread by the frame");
+    const V::CascadePlan none = V::planCascades(0, true, true);
+    check(none.count == 0, "no fitted cascade, nothing to render");
+}
+
 int main() {
     testWalk();
     testHooks();
+    testCascadePlan();
     if (g_failures) { AVER_ERROR("FirstPersonWalkTest: {} check(s) failed", g_failures); return 1; }
     AVER_INFO("FirstPersonWalkTest: all checks passed");
     return 0;
