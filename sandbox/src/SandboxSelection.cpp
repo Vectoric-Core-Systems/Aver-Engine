@@ -1202,9 +1202,160 @@ void SandboxApp::destroyEntity(scene::Entity e) {
 
 #endif
 
-// The serial at the top of the undo stack, or 0 for an untouched document. This IS the
-// document's state as far as saving is concerned.
-u64 SandboxApp::currentEditMark() const { return undoStack_.empty() ? 0ull : undoStack_.back().serial; }
+#if AVER_MODULE_SCENE
+// ---- the Outliner's eye, lock and folders --------------------------------------------------------------
+// Visibility goes through the same authored-visible command as the Details checkbox (it IS level data).
+// Lock and folders are editor-only: EditCmd::OutlinerMeta, undoable, and invisible to currentEditMark.
+
+std::string SandboxApp::outlinerFolderOf(scene::Entity e) const {
+    const auto it = outlinerFolderOf_.find(static_cast<u32>(e));
+    return it == outlinerFolderOf_.end() ? std::string() : it->second;
+}
+
+void SandboxApp::applyOutlinerMeta(const EditCmd& c, bool undoing) {
+    for (const EditCmd::OutlinerMetaChange& ch : c.outlinerMeta) {
+        const scene::Entity e = entityForEdit(ch.id);
+        if (e == scene::kInvalidEntity || !scene::World::instance().valid(e)) continue;
+        if (undoing ? ch.lockBefore : ch.lockAfter) outlinerLocked_.insert(static_cast<u32>(e));
+        else                                         outlinerLocked_.erase(static_cast<u32>(e));
+        const std::string& f = undoing ? ch.folderBefore : ch.folderAfter;
+        if (f.empty()) outlinerFolderOf_.erase(static_cast<u32>(e));
+        else           outlinerFolderOf_[static_cast<u32>(e)] = f;
+    }
+    if (c.foldersChanged) outlinerFolders_ = undoing ? c.foldersBefore : c.foldersAfter;
+    ++outlinerFolderRev_;
+}
+
+void SandboxApp::outlinerSetVisible(const std::vector<scene::Entity>& ents, bool visible) {
+    scene::World& w = scene::World::instance();
+    EditCmd c;
+    c.kind = EditCmd::Kind::Visibility;
+    for (const scene::Entity ent : ents) {
+        if (!w.valid(ent) || !w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer)) continue;
+        const bool before = authoredVisible(ent);
+        if (before == visible) continue;   // already there: no dead entry for it
+        setAuthoredVisible(ent, visible);
+        c.visibility.push_back({editIdFor(ent), before, visible});
+    }
+    if (!c.visibility.empty()) pushEdit(std::move(c));
+}
+
+void SandboxApp::outlinerSetLocked(const std::vector<scene::Entity>& ents, bool lock) {
+    scene::World& w = scene::World::instance();
+    EditCmd c;
+    c.kind = EditCmd::Kind::OutlinerMeta;
+    for (const scene::Entity ent : ents) {
+        if (!w.valid(ent) || entityLocked(ent) == lock) continue;
+        EditCmd::OutlinerMetaChange ch;
+        ch.id = editIdFor(ent);
+        ch.lockBefore = !lock;
+        ch.lockAfter = lock;
+        ch.folderBefore = ch.folderAfter = outlinerFolderOf(ent);
+        c.outlinerMeta.push_back(std::move(ch));
+    }
+    if (c.outlinerMeta.empty()) return;
+    applyOutlinerMeta(c, false);
+    pushEdit(std::move(c));
+}
+
+void SandboxApp::outlinerMoveToFolder(const std::vector<scene::Entity>& ents, const std::string& folder) {
+    if (!folder.empty() && !editor::folderExists(outlinerFolders_, folder)) return;
+    scene::World& w = scene::World::instance();
+    EditCmd c;
+    c.kind = EditCmd::Kind::OutlinerMeta;
+    for (const scene::Entity ent : ents) {
+        // Only roots are filed: a child stays under its parent wherever the parent is.
+        if (!w.valid(ent) || w.parent(ent) != scene::kInvalidEntity || outlinerFolderOf(ent) == folder) continue;
+        EditCmd::OutlinerMetaChange ch;
+        ch.id = editIdFor(ent);
+        ch.lockBefore = ch.lockAfter = entityLocked(ent);
+        ch.folderBefore = outlinerFolderOf(ent);
+        ch.folderAfter = folder;
+        c.outlinerMeta.push_back(std::move(ch));
+    }
+    if (c.outlinerMeta.empty()) return;
+    applyOutlinerMeta(c, false);
+    pushEdit(std::move(c));
+}
+
+// A new folder under `parent`, holding the root entities in `members`. Returns its path.
+std::string SandboxApp::outlinerNewFolder(const std::string& parent, const std::vector<scene::Entity>& members) {
+    EditCmd c;
+    c.kind = EditCmd::Kind::OutlinerMeta;
+    c.foldersChanged = true;
+    c.foldersBefore = outlinerFolders_;
+    const std::string path = editor::folderUniquePath(outlinerFolders_, parent);
+    c.foldersAfter = outlinerFolders_;
+    editor::folderAdd(c.foldersAfter, path);
+    scene::World& w = scene::World::instance();
+    for (const scene::Entity ent : members) {
+        if (!w.valid(ent) || w.parent(ent) != scene::kInvalidEntity) continue;
+        EditCmd::OutlinerMetaChange ch;
+        ch.id = editIdFor(ent);
+        ch.lockBefore = ch.lockAfter = entityLocked(ent);
+        ch.folderBefore = outlinerFolderOf(ent);
+        ch.folderAfter = path;
+        c.outlinerMeta.push_back(std::move(ch));
+    }
+    applyOutlinerMeta(c, false);
+    pushEdit(std::move(c));
+    return path;
+}
+
+// Renames `from` to the path `to` (subfolders and members follow). Refused for an invalid or taken name.
+void SandboxApp::outlinerRenameFolder(const std::string& from, const std::string& to) {
+    if (from.empty() || to == from || !editor::folderNameValid(editor::folderLeaf(to))) return;
+    if (editor::folderExists(outlinerFolders_, to) || editor::folderIsWithin(to, from)) return;
+    EditCmd c;
+    c.kind = EditCmd::Kind::OutlinerMeta;
+    c.foldersChanged = true;
+    c.foldersBefore = outlinerFolders_;
+    for (const std::string& f : outlinerFolders_) editor::folderAdd(c.foldersAfter, editor::folderRebased(f, from, to));
+    editor::folderAdd(c.foldersAfter, to);
+    for (const auto& [ent, f] : outlinerFolderOf_) {
+        if (!editor::folderIsWithin(f, from)) continue;
+        EditCmd::OutlinerMetaChange ch;
+        ch.id = editIdFor(static_cast<scene::Entity>(ent));
+        ch.lockBefore = ch.lockAfter = entityLocked(static_cast<scene::Entity>(ent));
+        ch.folderBefore = f;
+        ch.folderAfter = editor::folderRebased(f, from, to);
+        c.outlinerMeta.push_back(std::move(ch));
+    }
+    applyOutlinerMeta(c, false);
+    pushEdit(std::move(c));
+}
+
+// Removes `path` and its subfolders; everything in them moves up to the parent of `path`.
+void SandboxApp::outlinerDeleteFolder(const std::string& path) {
+    if (path.empty() || !editor::folderExists(outlinerFolders_, path)) return;
+    const std::string up = editor::folderParent(path);
+    EditCmd c;
+    c.kind = EditCmd::Kind::OutlinerMeta;
+    c.foldersChanged = true;
+    c.foldersBefore = outlinerFolders_;
+    for (const std::string& f : outlinerFolders_)
+        if (!editor::folderIsWithin(f, path)) c.foldersAfter.push_back(f);
+    for (const auto& [ent, f] : outlinerFolderOf_) {
+        if (!editor::folderIsWithin(f, path)) continue;
+        EditCmd::OutlinerMetaChange ch;
+        ch.id = editIdFor(static_cast<scene::Entity>(ent));
+        ch.lockBefore = ch.lockAfter = entityLocked(static_cast<scene::Entity>(ent));
+        ch.folderBefore = f;
+        ch.folderAfter = up;
+        c.outlinerMeta.push_back(std::move(ch));
+    }
+    applyOutlinerMeta(c, false);
+    pushEdit(std::move(c));
+}
+#endif
+
+// The serial of the newest command that changes the level: lock and folder commands are editor-only, so
+// they never move it (and never make the document look unsaved).
+u64 SandboxApp::currentEditMark() const {
+    for (auto it = undoStack_.rbegin(); it != undoStack_.rend(); ++it)
+        if (it->kind != EditCmd::Kind::OutlinerMeta) return it->serial;
+    return 0ull;
+}
 
 bool SandboxApp::canUndo() const { return !undoStack_.empty(); }
 
@@ -1283,6 +1434,7 @@ void SandboxApp::undo() {
         case EditCmd::Kind::PlacedComponent: applyPlacedComponentState(c.id, c.pcType, c.pcBefore); break;
         case EditCmd::Kind::Visibility: applyVisibilityTo(c, /*undoing=*/true); break;
         case EditCmd::Kind::Collision:  applyCollideTo(c, /*undoing=*/true); break;
+        case EditCmd::Kind::OutlinerMeta: applyOutlinerMeta(c, /*undoing=*/true); break;
         case EditCmd::Kind::Animation:  applyAnimationTo(c, /*undoing=*/true); break;
         case EditCmd::Kind::Prefab:     if (c.prefab) prefabModel_.undo(*c.prefab);
                                         sel_ = -1; selEntity_ = scene::kInvalidEntity; break;
@@ -1353,6 +1505,7 @@ void SandboxApp::redo() {
         case EditCmd::Kind::PlacedComponent: applyPlacedComponentState(c.id, c.pcType, c.pcAfter); break;
         case EditCmd::Kind::Visibility: applyVisibilityTo(c, /*undoing=*/false); break;
         case EditCmd::Kind::Collision:  applyCollideTo(c, /*undoing=*/false); break;
+        case EditCmd::Kind::OutlinerMeta: applyOutlinerMeta(c, /*undoing=*/false); break;
         case EditCmd::Kind::Animation:  applyAnimationTo(c, /*undoing=*/false); break;
         case EditCmd::Kind::Prefab:     if (c.prefab) prefabModel_.redo(*c.prefab);
                                         sel_ = -1; selEntity_ = scene::kInvalidEntity; break;

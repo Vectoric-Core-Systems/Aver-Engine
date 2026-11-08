@@ -1768,7 +1768,7 @@ void SandboxApp::handleManip(Engine& e) {
                     for (u32 i = 0; i < n; ++i) {
                         const scene::Entity ent = w.at(i);
                         if (!w.valid(ent) || w.destroyPending(ent)) continue;
-                        if (anyChunkWorldOwns(ent)) continue;
+                        if (anyChunkWorldOwns(ent) || entityLocked(ent)) continue;
                         const auto* mr = w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer);
                         if (!mr || !(mr->flags & scene::kMeshRendererVisible) || mr->mesh == 0) continue;
                         if (content_.meshFor(mr->mesh) == 0) continue;
@@ -2618,6 +2618,8 @@ bool SandboxApp::pick(Engine& e, const ImGuiIO& io) {
     }
 #endif
 #if AVER_MODULE_SCENE
+    // A locked actor is not clickable from the viewport (the Outliner's lock column).
+    if (bestEnt != kInvalidId && entityLocked(static_cast<scene::Entity>(bestEnt))) bestEnt = kInvalidId;
     // [wave3/level-instances] A click on a level instance's member selects the instance (Alt+click: the member).
     if (bestEnt != kInvalidId)
         bestEnt = levelInstanceModel_.pickTarget(static_cast<scene::Entity>(bestEnt), ImGui::GetIO().KeyAlt);

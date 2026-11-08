@@ -163,6 +163,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 // Unconditional, unlike ParticleEditor.hpp above: .ocfoliage is not gated behind any module -- see
 // OcFoliage.hpp's own comment on why the format needs neither Aver.Scene nor Aver.Landscape.
 #include "FoliageTypeEditor.hpp"
+#include "OutlinerModel.hpp"      // Outliner type filter and folder paths
 #include "HairGroomTab.hpp"       // Groom tab (.ochair) and the Hair Details section
 #include "HairDebugOverlay.hpp"   // Show > Hair
 // Unconditional for the identical reason: OcInput.hpp's own comment states it needs no engine
@@ -2096,7 +2097,7 @@ private:
 
     // One undoable edit (transform, create/destroy). Components captured via EntitySnapshot.
     struct EditCmd {
-        enum class Kind { Transform, Create, Destroy, CreateObj, DestroyObj, LandscapeStroke, FoliageStroke, Reparent, Material, Rename, RemoveComponent, Visibility, Collision, Animation, Prefab, LevelInstance, LandscapeWeights, WaterBodies, PlacedComponent };
+        enum class Kind { Transform, Create, Destroy, CreateObj, DestroyObj, LandscapeStroke, FoliageStroke, Reparent, Material, Rename, RemoveComponent, Visibility, Collision, Animation, Prefab, LevelInstance, LandscapeWeights, WaterBodies, PlacedComponent, OutlinerMeta };
         Kind kind = Kind::Transform;
         // Monotonic serial for save points; never reused so undo/redo cross saves correctly.
         u64 serial = 0;
@@ -2118,6 +2119,11 @@ private:
         struct AnimChange { EditId id = 0; EntityAnim before, after; };
         std::vector<AnimChange> animation;
         std::string label;        // outliner display name; editor-owned bookkeeping, not World's
+        // OUTLINERMETA: lock and folder changes (editor-only state, never saved with the level; currentEditMark skips them).
+        struct OutlinerMetaChange { EditId id = 0; bool lockBefore = false, lockAfter = false; std::string folderBefore, folderAfter; };
+        std::vector<OutlinerMetaChange> outlinerMeta;
+        std::vector<std::string> foldersBefore, foldersAfter;   // the whole folder list, when foldersChanged
+        bool foldersChanged = false;
 #if AVER_MODULE_SCENE
         editor::EntitySnapshot snap;    // scene entity: asset name, persisted id, every other component
 #endif
@@ -3107,8 +3113,33 @@ private:
 
     static std::string lowerCopy(std::string v);
 
-    // The icon an Outliner row leads with (folder, light, camera, mesh ...).
-    const char* outlinerIconFor(scene::Entity ent, bool hasKids) const;
+    // What an Outliner row is, for its icon and the type filter; the icon that type leads its row with.
+    editor::OutlinerType outlinerTypeFor(scene::Entity ent) const;
+    const char* outlinerIconFor(scene::Entity ent) const;
+
+    // ---- eye, lock and folders (editor-only; see OutlinerModel.hpp) ----
+    std::unordered_set<u32> outlinerLocked_;                  // entities viewport picking skips
+    std::unordered_map<u32, std::string> outlinerFolderOf_;   // root entity -> folder path
+    std::vector<std::string> outlinerFolders_;                // sorted folder paths, empty ones included
+    u32 outlinerFolderRev_ = 0;                               // bumps when folders change, so the row cache rebuilds
+    u32 outlinerTypeMask_ = editor::kOutlinerAllTypes;        // type filter
+    std::unordered_map<std::string, std::vector<const OutlinerRow*>> outlinerFolderRows_;   // root rows per folder
+    std::string outlinerFolderRenaming_;                      // folder being renamed inline
+    char outlinerFolderRenameBuf_[96] = {};
+    bool outlinerFolderRenameFocus_ = false;
+    bool entityLocked(scene::Entity e) const { return !outlinerLocked_.empty() && outlinerLocked_.count(static_cast<u32>(e)) != 0; }
+    std::string outlinerFolderOf(scene::Entity e) const;
+    void applyOutlinerMeta(const EditCmd& c, bool undoing);
+    void outlinerSetLocked(const std::vector<scene::Entity>& ents, bool lock);
+    void outlinerSetVisible(const std::vector<scene::Entity>& ents, bool visible);
+    void outlinerMoveToFolder(const std::vector<scene::Entity>& ents, const std::string& folder);
+    std::string outlinerNewFolder(const std::string& parent, const std::vector<scene::Entity>& members);
+    void outlinerRenameFolder(const std::string& from, const std::string& to);
+    void outlinerDeleteFolder(const std::string& path);
+    void drawOutlinerFilterBar();
+    void drawOutlinerFolders(const std::string& parent);
+    void drawOutlinerRowIcons(scene::Entity ent, float y0, float y1, bool selected, bool rowHovered);
+    float outlinerIconZone() const;
 
     std::string outlinerLabelFor(scene::Entity e) const;
 

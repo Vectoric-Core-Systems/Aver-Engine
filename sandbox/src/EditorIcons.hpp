@@ -134,3 +134,10 @@ inline constexpr unsigned short kIconRangeLast  = 0xF8FF;
 #define ICON_ANIMATION         "\xEE\x9C\x9C"   // U+E71C animation
 #define ICON_HAIR              "\xEE\xBF\x98"   // U+EFD8 air
 #define ICON_WATER             "\xEE\x9E\x98"   // U+E798 water_drop
+
+// ---- outliner ---------------------------------------------------------------------------
+#define ICON_VISIBILITY_OFF    "\xEE\xA3\xB5"   // U+E8F5 visibility_off
+#define ICON_LOCK              "\xEE\xA2\x97"   // U+E897 lock
+#define ICON_LOCK_OPEN         "\xEE\xA2\x98"   // U+E898 lock_open
+#define ICON_FILTER            "\xEE\x85\x92"   // U+E152 filter_list
+#define ICON_NEW_FOLDER        "\xEE\x8B\x8C"   // U+E2CC create_new_folder

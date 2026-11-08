@@ -947,3 +947,9 @@ add_executable(DetailsTableTest src/DetailsTableTest.cpp)
 target_include_directories(DetailsTableTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
 target_link_libraries(DetailsTableTest PRIVATE Aver.Core)
 set_target_properties(DetailsTableTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# OutlinerModelTest -- the World Outliner's type filter and virtual-folder paths (sandbox/src/OutlinerModel.hpp).
+add_executable(OutlinerModelTest src/OutlinerModelTest.cpp)
+target_include_directories(OutlinerModelTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(OutlinerModelTest PRIVATE Aver.Core)
+set_target_properties(OutlinerModelTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
