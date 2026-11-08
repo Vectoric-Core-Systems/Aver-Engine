@@ -4,8 +4,10 @@
 //
 //   scene2dBind(pathOf)      once the content index exists: installs the sprite texture resolver (asset id -> content path -> UI image)
 //   scene2dUnbind()          before the UI image table goes
-//   scene2dFrame(w, list, v) the testable core: view rectangle, then sprites + queued external items sorted into `list`
-//   scene2dSubmit(w)         the host's call, after the game's scripts ran and before the UI renderer takes the list
+//   scene2dFrame(w, list, v) the testable core: view rectangle, the time step (animations, parallax, camera), then sprites + queued
+//                            external items sorted into `list`
+//   scene2dSubmit(w)         the host's call, after the game's scripts ran and before the UI renderer takes the list; steps time by the wall
+//                            clock between its calls (at most a tenth of a second, so a stall does not skip a camera across the level)
 //
 // Sprites go through the same draw list as the game UI, so they draw only when the host draws the game UI (Play, not the editor's
 // edit mode): a host calls scene2dSubmit only then, and scene2dDrop otherwise so nothing queues forever.
@@ -14,6 +16,8 @@
 #pragma once
 #include "aver/core/Types.hpp"
 
+#include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <functional>
 #include <string>
@@ -99,15 +103,17 @@ inline void scene2dUnbind() {
 #endif
 }
 
-// The viewport is {x, y, w, h} in backbuffer pixels (aver_ui_viewport). Returns the sprites queued.
-inline u32 scene2dFrame(scene::World& world, ui::UiDrawList& list, const float viewport[4]) {
+// The viewport is {x, y, w, h} in backbuffer pixels (aver_ui_viewport); dt seconds of animation and camera time (0 steps none, but
+// transforms and a new camera still settle). Returns the sprites queued.
+inline u32 scene2dFrame(scene::World& world, ui::UiDrawList& list, const float viewport[4], float dt = 0.0f) {
 #if AVER_WITH_UI_ABI && AVER_MODULE_SCENE
     scene2d::setCanvasViewRect({viewport[0], viewport[1], viewport[2], viewport[3]});
+    scene2d::tick(world, dt);
     const u32 queued = scene2d::submitSprites(world);
     scene2d::flush(list);
     return queued;
 #else
-    (void)world; (void)list; (void)viewport;
+    (void)world; (void)list; (void)viewport; (void)dt;
     return 0;
 #endif
 }
@@ -119,7 +125,11 @@ inline u32 scene2dSubmit(scene::World& world) {
     if (!dl) { scene2d::dropQueue(); return 0; }
     float vp[4] = {};
     aver_ui_viewport(vp);
-    return scene2dFrame(world, *dl, vp);
+    static std::chrono::steady_clock::time_point last{};
+    const auto now = std::chrono::steady_clock::now();
+    const float dt = last == std::chrono::steady_clock::time_point{} ? 0.0f : std::min(0.1f, std::chrono::duration<float>(now - last).count());
+    last = now;
+    return scene2dFrame(world, *dl, vp, dt);
 #else
     (void)world;
     return 0;

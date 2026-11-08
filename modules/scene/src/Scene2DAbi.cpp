@@ -22,6 +22,18 @@ static_assert(AVER_SCENE2D_S_FLIP_H == kSpriteFlipH && AVER_SCENE2D_S_FLIP_V == 
 static_assert(AVER_SCENE2D_L_HIDDEN == kLayerHidden && AVER_SCENE2D_L_FOLLOW_VIEWPORT == kLayerFollowViewport, "AVER_SCENE2D_L_* drift");
 static_assert(AVER_SCENE2D_BLEND_MIX == kBlendMix && AVER_SCENE2D_BLEND_ADD == kBlendAdd && AVER_SCENE2D_BLEND_SUB == kBlendSub &&
               AVER_SCENE2D_BLEND_MUL == kBlendMul, "AVER_SCENE2D_BLEND_* drift");
+static_assert(AVER_SCENE2D_A_PLAYING == kAnimPlaying && AVER_SCENE2D_ANIM_MAX_CLIPS == kMaxAnimClips && AVER_SCENE2D_ANIM_MAX_FRAMES == kMaxAnimFrames &&
+              AVER_SCENE2D_ANIM_NAME_BYTES == kClipNameBytes, "AVER_SCENE2D_A_* / ANIM_* drift");
+static_assert(AVER_SCENE2D_ANIM_EVENT_FRAME_CHANGED == kAnimEventFrameChanged && AVER_SCENE2D_ANIM_EVENT_FINISHED == kAnimEventFinished &&
+              AVER_SCENE2D_ANIM_EVENT_LOOPED == kAnimEventLooped && AVER_SCENE2D_ANIM_EVENT_ANIMATION_CHANGED == kAnimEventAnimationChanged, "AVER_SCENE2D_ANIM_EVENT_* drift");
+static_assert(AVER_SCENE2D_C_DISABLED == kCamDisabled && AVER_SCENE2D_C_CURRENT == kCamCurrent && AVER_SCENE2D_C_FOLLOW_ROTATION == kCamFollowRotation &&
+              AVER_SCENE2D_C_SMOOTHING == kCamSmoothing && AVER_SCENE2D_C_DRAG_H == kCamDragH && AVER_SCENE2D_C_DRAG_V == kCamDragV &&
+              AVER_SCENE2D_C_ANCHOR_TOP_LEFT == kCamAnchorTopLeft && AVER_SCENE2D_C_LIMIT_LEFT == kCamLimitLeft && AVER_SCENE2D_C_LIMIT_TOP == kCamLimitTop &&
+              AVER_SCENE2D_C_LIMIT_RIGHT == kCamLimitRight && AVER_SCENE2D_C_LIMIT_BOTTOM == kCamLimitBottom, "AVER_SCENE2D_C_* drift");
+static_assert(AVER_SCENE2D_P_NO_FOLLOW == kParallaxNoFollow && AVER_SCENE2D_P_LIMIT_BEGIN == kParallaxLimitBegin && AVER_SCENE2D_P_LIMIT_END == kParallaxLimitEnd,
+              "AVER_SCENE2D_P_* drift");
+static_assert(sizeof(AverScene2dAnimFrame) == sizeof(AnimFrame2D) && sizeof(AverScene2dAnimEvent) == sizeof(AnimEvent), "frame and event structs mirror the C++ ones");
+static_assert(sizeof(AverScene2dAnimState) == 32 && sizeof(AverScene2dCamera) == 56 && sizeof(AverScene2dParallax) == 56, "the ABI structs are padding-free");
 static_assert(sizeof(AverScene2dTransform) == 32 && sizeof(AverScene2dSprite) == 56 && sizeof(AverScene2dLayer) == 32, "the ABI structs are padding-free");
 static_assert(offsetof(C2DTransform, treeOrder) - offsetof(C2DTransform, posX) + sizeof(u32) == sizeof(AverScene2dTransform),
               "AverScene2dTransform mirrors the authored words of C2DTransform");
@@ -57,6 +69,13 @@ bool live(int32_t entity) {
     return ok;
 }
 
+const CSpriteAnim2D* animOfEntity(int32_t entity) {
+    if (!live(entity)) return nullptr;
+    const CSpriteAnim2D* a = ids().anim ? scene::World::instance().component<CSpriteAnim2D>(static_cast<Entity>(entity), ids().anim) : nullptr;
+    if (!a) setAbiError(AbiError::BadHandle);
+    return a;
+}
+
 }   // namespace
 
 extern "C" {
@@ -65,19 +84,22 @@ int32_t aver_scene2d_abi_version(void) { return AVER_SCENE2D_ABI_VERSION; }
 
 int32_t aver_scene2d_register(void) {
     const Ids id = registerComponents(scene::World::instance());
-    const bool ok = id.transform && id.sprite && id.layer;
+    const bool ok = id.transform && id.sprite && id.layer && id.anim && id.camera && id.parallax;
     setAbiError(ok ? AbiError::Ok : AbiError::AllocationFailed);
     return ok ? 1 : 0;
 }
 
 int32_t aver_scene2d_component_id(int32_t which) {
     const Ids id = ids();
-    return static_cast<int32_t>(which == 0 ? id.transform : which == 1 ? id.sprite : which == 2 ? id.layer : 0);
+    const u32 all[6] = {id.transform, id.sprite, id.layer, id.anim, id.camera, id.parallax};
+    return which >= 0 && which < 6 ? static_cast<int32_t>(all[which]) : 0;
 }
 
 int32_t aver_scene2d_struct_size(int32_t which) {
     return which == 0 ? static_cast<int32_t>(sizeof(AverScene2dTransform)) : which == 1 ? static_cast<int32_t>(sizeof(AverScene2dSprite))
-         : which == 2 ? static_cast<int32_t>(sizeof(AverScene2dLayer)) : 0;
+         : which == 2 ? static_cast<int32_t>(sizeof(AverScene2dLayer)) : which == 3 ? static_cast<int32_t>(sizeof(AverScene2dAnimState))
+         : which == 4 ? static_cast<int32_t>(sizeof(AverScene2dCamera)) : which == 5 ? static_cast<int32_t>(sizeof(AverScene2dParallax))
+         : which == 6 ? static_cast<int32_t>(sizeof(AverScene2dAnimFrame)) : which == 7 ? static_cast<int32_t>(sizeof(AverScene2dAnimEvent)) : 0;
 }
 
 int32_t aver_scene2d_set_transform(int32_t entity, const AverScene2dTransform* d) {
@@ -187,6 +209,226 @@ int32_t aver_scene2d_get_layer(int32_t entity, AverScene2dLayer* out) {
     setAbiError(AbiError::Ok);
     return 1;
 }
+
+int32_t aver_scene2d_set_camera(int32_t entity, const AverScene2dCamera* d) {
+    if (!d) { setAbiError(AbiError::NullPointer); return 0; }
+    if (!live(entity)) return 0;
+    if (!finiteAll(d->zoom, 2) || !finiteAll(d->offset, 2) || !finiteAll(d->limit, 4) || !std::isfinite(d->smoothSpeed) || !finiteAll(d->drag, 4)) {
+        setAbiError(AbiError::InvalidArgument);
+        return 0;
+    }
+    scene::World& w = scene::World::instance();
+    if (!ids().camera) registerComponents(w);
+    CCamera2D* c = attachCamera(w, static_cast<Entity>(entity));
+    if (!c) { setAbiError(AbiError::AllocationFailed); return 0; }
+    const u32 mask = kCamDisabled | kCamCurrent | kCamFollowRotation | kCamSmoothing | kCamDragH | kCamDragV | kCamAnchorTopLeft | kCamLimitLeft |
+                     kCamLimitTop | kCamLimitRight | kCamLimitBottom;
+    c->zoomX = d->zoom[0]; c->zoomY = d->zoom[1];
+    c->offsetX = d->offset[0]; c->offsetY = d->offset[1];
+    c->limitLeft = d->limit[0]; c->limitTop = d->limit[1]; c->limitRight = d->limit[2]; c->limitBottom = d->limit[3];
+    c->smoothSpeed = d->smoothSpeed;
+    c->dragLeft = d->drag[0]; c->dragTop = d->drag[1]; c->dragRight = d->drag[2]; c->dragBottom = d->drag[3];
+    c->flags = d->flags & mask;
+    setAbiError(AbiError::Ok);
+    return 1;
+}
+
+int32_t aver_scene2d_get_camera(int32_t entity, AverScene2dCamera* out) {
+    if (!out) { setAbiError(AbiError::NullPointer); return 0; }
+    if (!live(entity)) return 0;
+    const CCamera2D* c = ids().camera ? scene::World::instance().component<CCamera2D>(static_cast<Entity>(entity), ids().camera) : nullptr;
+    if (!c) { setAbiError(AbiError::BadHandle); return 0; }
+    out->zoom[0] = c->zoomX; out->zoom[1] = c->zoomY;
+    out->offset[0] = c->offsetX; out->offset[1] = c->offsetY;
+    out->limit[0] = c->limitLeft; out->limit[1] = c->limitTop; out->limit[2] = c->limitRight; out->limit[3] = c->limitBottom;
+    out->smoothSpeed = c->smoothSpeed;
+    out->drag[0] = c->dragLeft; out->drag[1] = c->dragTop; out->drag[2] = c->dragRight; out->drag[3] = c->dragBottom;
+    out->flags = c->flags;
+    setAbiError(AbiError::Ok);
+    return 1;
+}
+
+int32_t aver_scene2d_set_parallax(int32_t entity, const AverScene2dParallax* d) {
+    if (!d) { setAbiError(AbiError::NullPointer); return 0; }
+    if (!live(entity)) return 0;
+    if (!finiteAll(d->scrollScale, 2) || !finiteAll(d->scrollOffset, 2) || !finiteAll(d->repeatSize, 2) || d->repeatSize[0] < 0 || d->repeatSize[1] < 0 ||
+        d->repeatTimes < 0 || !finiteAll(d->autoscroll, 2) || !finiteAll(d->limitBegin, 2) || !finiteAll(d->limitEnd, 2)) {
+        setAbiError(AbiError::InvalidArgument);
+        return 0;
+    }
+    scene::World& w = scene::World::instance();
+    if (!ids().parallax) registerComponents(w);
+    CParallax2D* p = attachParallax(w, static_cast<Entity>(entity));
+    if (!p) { setAbiError(AbiError::AllocationFailed); return 0; }
+    p->pinX = 1.0f - d->scrollScale[0]; p->pinY = 1.0f - d->scrollScale[1];
+    p->offsetX = d->scrollOffset[0]; p->offsetY = d->scrollOffset[1];
+    p->repeatX = d->repeatSize[0]; p->repeatY = d->repeatSize[1];
+    p->repeatTimes = d->repeatTimes;
+    p->autoX = d->autoscroll[0]; p->autoY = d->autoscroll[1];
+    p->limitBeginX = d->limitBegin[0]; p->limitBeginY = d->limitBegin[1]; p->limitEndX = d->limitEnd[0]; p->limitEndY = d->limitEnd[1];
+    p->flags = d->flags & (kParallaxNoFollow | kParallaxLimitBegin | kParallaxLimitEnd);
+    setAbiError(AbiError::Ok);
+    return 1;
+}
+
+int32_t aver_scene2d_get_parallax(int32_t entity, AverScene2dParallax* out) {
+    if (!out) { setAbiError(AbiError::NullPointer); return 0; }
+    if (!live(entity)) return 0;
+    const CParallax2D* p = ids().parallax ? scene::World::instance().component<CParallax2D>(static_cast<Entity>(entity), ids().parallax) : nullptr;
+    if (!p) { setAbiError(AbiError::BadHandle); return 0; }
+    out->scrollScale[0] = 1.0f - p->pinX; out->scrollScale[1] = 1.0f - p->pinY;
+    out->scrollOffset[0] = p->offsetX; out->scrollOffset[1] = p->offsetY;
+    out->repeatSize[0] = p->repeatX; out->repeatSize[1] = p->repeatY;
+    out->repeatTimes = p->repeatTimes;
+    out->autoscroll[0] = p->autoX; out->autoscroll[1] = p->autoY;
+    out->limitBegin[0] = p->limitBeginX; out->limitBegin[1] = p->limitBeginY; out->limitEnd[0] = p->limitEndX; out->limitEnd[1] = p->limitEndY;
+    out->flags = p->flags;
+    setAbiError(AbiError::Ok);
+    return 1;
+}
+
+int32_t aver_scene2d_camera_make_current(int32_t entity) {
+    if (!live(entity)) return 0;
+    const bool ok = makeCameraCurrent(scene::World::instance(), static_cast<Entity>(entity));
+    setAbiError(ok ? AbiError::Ok : AbiError::BadHandle);
+    return ok ? 1 : 0;
+}
+
+int32_t aver_scene2d_camera_current(void) {
+    const Entity e = currentCamera(scene::World::instance());
+    return e == scene::kInvalidEntity ? 0 : static_cast<int32_t>(e);
+}
+
+int32_t aver_scene2d_camera_center(int32_t entity, float* out) {
+    if (!out) { setAbiError(AbiError::NullPointer); return 0; }
+    out[0] = out[1] = 0.0f;
+    if (!live(entity)) return 0;
+    scene::World& w = scene::World::instance();
+    if (!ids().camera || !w.component<CCamera2D>(static_cast<Entity>(entity), ids().camera)) { setAbiError(AbiError::BadHandle); return 0; }
+    updateTransforms(w);
+    const CanvasTransform ct = canvasTransform();
+    cameraCenter(w, static_cast<Entity>(entity), ct.valid ? ct.stretch.contentSize.x : 0.0f, ct.valid ? ct.stretch.contentSize.y : 0.0f, out);
+    setAbiError(AbiError::Ok);
+    return 1;
+}
+
+int32_t aver_scene2d_camera_view(float* out6) {
+    if (!out6) { setAbiError(AbiError::NullPointer); return 0; }
+    scene::World& w = scene::World::instance();
+    const CanvasTransform ct = canvasTransform();
+    const Affine2 m = ct.valid ? cameraView(w, ct.stretch.contentSize.x, ct.stretch.contentSize.y) : Affine2{};
+    const float v[6] = {m.a, m.b, m.c, m.d, m.tx, m.ty};
+    std::memcpy(out6, v, sizeof v);
+    setAbiError(AbiError::Ok);
+    return ct.valid && currentCamera(w) != scene::kInvalidEntity ? 1 : 0;
+}
+
+int32_t aver_scene2d_set_anim(int32_t entity, const AverScene2dAnimState* d) {
+    if (!d) { setAbiError(AbiError::NullPointer); return 0; }
+    if (!live(entity)) return 0;
+    if (!std::isfinite(d->speedScale) || d->autoplay < 0 || d->autoplay > kMaxAnimClips) { setAbiError(AbiError::InvalidArgument); return 0; }
+    scene::World& w = scene::World::instance();
+    if (!ids().anim) registerComponents(w);
+    CSpriteAnim2D* a = attachAnim(w, static_cast<Entity>(entity));
+    if (!a) { setAbiError(AbiError::AllocationFailed); return 0; }
+    a->speedScale = d->speedScale;
+    a->autoplay = d->autoplay;
+    setAbiError(AbiError::Ok);
+    return 1;
+}
+
+int32_t aver_scene2d_get_anim(int32_t entity, AverScene2dAnimState* out) {
+    if (!out) { setAbiError(AbiError::NullPointer); return 0; }
+    const CSpriteAnim2D* a = animOfEntity(entity);
+    if (!a) return 0;
+    out->speedScale = a->speedScale;
+    out->flags = a->flags & kAnimPlaying;
+    out->clip = a->clipCount > 0 ? a->current : -1;
+    out->autoplay = a->autoplay;
+    out->frame = a->frame;
+    out->progress = a->progress;
+    out->clipCount = a->clipCount;
+    out->frameCount = a->frameCount;
+    setAbiError(AbiError::Ok);
+    return 1;
+}
+
+int32_t aver_scene2d_anim_set_clip(int32_t entity, int32_t index, const char* name, float fps, int32_t loop, const AverScene2dAnimFrame* frames, int32_t count) {
+    if (!name || (count > 0 && !frames)) { setAbiError(AbiError::NullPointer); return 0; }
+    if (!live(entity)) return 0;
+    for (int32_t i = 0; i < count; ++i) {
+        const AverScene2dAnimFrame& f = frames[i];
+        if (!finiteAll(f.region, 4) || !std::isfinite(f.weight) || f.weight < 0 || f.region[2] < 0 || f.region[3] < 0) { setAbiError(AbiError::InvalidArgument); return 0; }
+    }
+    scene::World& w = scene::World::instance();
+    if (!ids().anim) registerComponents(w);
+    CSpriteAnim2D* a = attachAnim(w, static_cast<Entity>(entity));
+    if (!a) { setAbiError(AbiError::AllocationFailed); return 0; }
+    const bool ok = setClip(*a, index, name, fps, loop != 0, reinterpret_cast<const AnimFrame2D*>(frames), count);
+    setAbiError(ok ? AbiError::Ok : AbiError::InvalidArgument);
+    return ok ? 1 : 0;
+}
+
+int32_t aver_scene2d_anim_get_clip(int32_t entity, int32_t index, uint8_t* outName, float* outFps, int32_t* outLoop, int32_t* outFrameCount) {
+    const CSpriteAnim2D* a = animOfEntity(entity);
+    if (!a) return 0;
+    if (index < 0 || index >= a->clipCount) { setAbiError(AbiError::InvalidArgument); return 0; }
+    const AnimClip2D& c = a->clips[index];
+    if (outName) std::memcpy(outName, c.name, kClipNameBytes);
+    if (outFps) *outFps = c.fps;
+    if (outLoop) *outLoop = (c.flags & kClipNoLoop) ? 0 : 1;
+    if (outFrameCount) *outFrameCount = c.count;
+    setAbiError(AbiError::Ok);
+    return 1;
+}
+
+int32_t aver_scene2d_anim_get_frames(int32_t entity, int32_t index, AverScene2dAnimFrame* outFrames, int32_t max) {
+    const CSpriteAnim2D* a = animOfEntity(entity);
+    if (!a) return -1;
+    if (index < 0 || index >= a->clipCount) { setAbiError(AbiError::InvalidArgument); return -1; }
+    const AnimClip2D& c = a->clips[index];
+    const int32_t n = outFrames && max > 0 ? (c.count < max ? c.count : max) : 0;
+    if (n > 0) std::memcpy(outFrames, &a->frames[c.first], sizeof(AnimFrame2D) * static_cast<size_t>(n));
+    setAbiError(AbiError::Ok);
+    return n;
+}
+
+int32_t aver_scene2d_anim_find(int32_t entity, const char* name) {
+    const CSpriteAnim2D* a = animOfEntity(entity);
+    return a ? findClip(*a, name) : -1;
+}
+
+int32_t aver_scene2d_anim_play(int32_t entity, const char* name, int32_t restart) {
+    if (!animOfEntity(entity)) return 0;
+    const bool ok = playClip(scene::World::instance(), static_cast<Entity>(entity), name, restart != 0);
+    setAbiError(ok ? AbiError::Ok : AbiError::InvalidArgument);
+    return ok ? 1 : 0;
+}
+
+int32_t aver_scene2d_anim_stop(int32_t entity) {
+    if (!animOfEntity(entity)) return 0;
+    stopClip(scene::World::instance(), static_cast<Entity>(entity));
+    return 1;
+}
+
+int32_t aver_scene2d_anim_pause(int32_t entity) {
+    if (!animOfEntity(entity)) return 0;
+    pauseClip(scene::World::instance(), static_cast<Entity>(entity));
+    return 1;
+}
+
+int32_t aver_scene2d_anim_set_frame(int32_t entity, int32_t frame, float progress) {
+    if (!animOfEntity(entity)) return 0;
+    setClipFrame(scene::World::instance(), static_cast<Entity>(entity), frame, progress);
+    return 1;
+}
+
+int32_t aver_scene2d_anim_poll(AverScene2dAnimEvent* outEvents, int32_t max) {
+    if (!outEvents || max <= 0) return 0;
+    return static_cast<int32_t>(drainAnimEvents(reinterpret_cast<AnimEvent*>(outEvents), static_cast<u32>(max)));
+}
+
+void aver_scene2d_tick(float dt) { tick(scene::World::instance(), dt); }
 
 int32_t aver_scene2d_remove(int32_t entity, int32_t which) {
     if (!live(entity)) return 0;

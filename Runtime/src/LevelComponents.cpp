@@ -47,13 +47,14 @@
 #include <cstring>
 #include <cstdio>
 #include <iterator>
+#include <memory>
 
 namespace aver::game {
 
 namespace {
 
 enum TypeIx : int {
-    kSkeletalMesh, kAnimator, kRootMotion, kMotionMatcher, kControlRig, kIkRig, kBrain, kSmartObject, kSoftBody, kCloth, kDestructible, kMorphTargets, kCameraRig, kVehicle, kParticleEmitter, kSoftField, kJelly, kRope, kCollisionShape, kHair, kSurfaceMaterials, kC2DTransform, kCSprite2D, kC2DLayer, kTypeCount,
+    kSkeletalMesh, kAnimator, kRootMotion, kMotionMatcher, kControlRig, kIkRig, kBrain, kSmartObject, kSoftBody, kCloth, kDestructible, kMorphTargets, kCameraRig, kVehicle, kParticleEmitter, kSoftField, kJelly, kRope, kCollisionShape, kHair, kSurfaceMaterials, kC2DTransform, kCSprite2D, kC2DLayer, kCSpriteAnim2D, kCCamera2D, kCParallax2D, kTypeCount,
     kUnknownType = -1
 };
 static_assert(std::size(kPlacedComponentTypes) == kTypeCount, "kPlacedComponentTypes and TypeIx must stay in step");
@@ -206,6 +207,9 @@ u32 typeId(scene::World& w, int ix) {
         case kC2DTransform: return w.componentId("C2DTransform");
         case kCSprite2D: return w.componentId("CSprite2D");
         case kC2DLayer: return w.componentId("C2DLayer");
+        case kCSpriteAnim2D: return w.componentId("CSpriteAnim2D");
+        case kCCamera2D: return w.componentId("CCamera2D");
+        case kCParallax2D: return w.componentId("CParallax2D");
         default: return 0;
     }
 }
@@ -219,7 +223,7 @@ bool hasSkeleton(scene::World& w, scene::Entity e) {
 bool requirementsMet(scene::World& w, scene::Entity e, int ix, const fmt::OcWorldPlacement* placement, std::string& why) {
     if (!w.valid(e)) { why = "the entity is gone"; return false; }
     // The 2D components live on any entity: a sprite or a canvas layer has no mesh.
-    const bool is2d = ix == kC2DTransform || ix == kCSprite2D || ix == kC2DLayer;
+    const bool is2d = ix >= kC2DTransform && ix <= kCParallax2D;
     if (!is2d && !w.hasComponent(e, scene::kComponentMeshRenderer)) { why = "the entity has no mesh"; return false; }
     switch (ix) {
         case kSkeletalMesh:
@@ -985,6 +989,179 @@ bool applyC2DLayer(scene::World& w, scene::Entity e, const fmt::OcPlacedComponen
     return true;
 }
 
+// ---- sprite animation, camera, parallax. A frame is `texture|rx,ry,rw,rh|weight|cell` (trailing defaults left off; an id with no path is `id:<16 hex>`). ----
+
+std::vector<std::string_view> splitOn(std::string_view s, char sep) {
+    std::vector<std::string_view> out;
+    usize pos = 0;
+    for (;;) {
+        const usize end = s.find(sep, pos);
+        out.push_back(s.substr(pos, end == std::string_view::npos ? std::string_view::npos : end - pos));
+        if (end == std::string_view::npos) break;
+        pos = end + 1;
+    }
+    return out;
+}
+
+bool frameTexture(std::string_view t, i64& out) {
+    out = 0;
+    if (t.empty()) return true;
+    if (t.substr(0, 3) == "id:") {
+        if (t.size() != 19) return false;
+        u64 h = 0;
+        const auto res = std::from_chars(t.data() + 3, t.data() + t.size(), h, 16);
+        if (res.ec != std::errc{} || res.ptr != t.data() + t.size()) return false;
+        out = static_cast<i64>(h);
+        return true;
+    }
+    out = static_cast<i64>(fnv1a64(std::string_view(slashed(t))));
+    return true;
+}
+
+bool parseFrame(std::string_view v, scene2d::AnimFrame2D& f, std::string& why) {
+    f = {};
+    const auto parts = splitOn(v, '|');
+    if (parts.size() > 4) { why = "a frame has at most four parts: texture|region|weight|cell"; return false; }
+    if (!frameTexture(parts[0], f.texture)) { why = "a frame's texture id is malformed"; return false; }
+    double d = 0.0;
+    if (parts.size() > 1 && !parts[1].empty()) {
+        const auto r = splitOn(parts[1], ',');
+        f32* dst[4] = {&f.regionX, &f.regionY, &f.regionW, &f.regionH};
+        if (r.size() != 4) { why = "a frame's region is x,y,w,h"; return false; }
+        for (int i = 0; i < 4; ++i) {
+            if (!parseNum(std::string(r[static_cast<usize>(i)]), d) || !std::isfinite(d)) { why = "a frame's region has a bad number"; return false; }
+            *dst[i] = static_cast<f32>(d);
+        }
+        if (f.regionW < 0.0f || f.regionH < 0.0f) { why = "a frame's region has a negative size"; return false; }
+    }
+    if (parts.size() > 2 && !parts[2].empty()) {
+        if (!parseNum(std::string(parts[2]), d) || !std::isfinite(d) || d < 0.0) { why = "a frame's weight must be a number >= 0"; return false; }
+        f.weight = static_cast<f32>(d);
+    }
+    if (parts.size() > 3 && !parts[3].empty()) {
+        if (!parseNum(std::string(parts[3]), d) || !std::isfinite(d) || d < 0.0 || d > 1.0e6) { why = "a frame's cell must be a whole number >= 0"; return false; }
+        f.cell = static_cast<i32>(d);
+    }
+    return true;
+}
+
+bool applyCSpriteAnim2D(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent& r, std::string& why) {
+    if (typeId(w, kCSpriteAnim2D) == 0) { why = "CSpriteAnim2D is not registered"; return false; }
+    const f32 speed = numKey(r, "speed", 0.0f), frame = numKey(r, "frame", 0.0f);
+    if (!finiteAll({speed, frame}) || frame < 0.0f) { why = "speed or frame is not a usable number"; return false; }
+    auto tmp = std::make_unique<scene2d::CSpriteAnim2D>();
+    std::memset(tmp.get(), 0, sizeof(scene2d::CSpriteAnim2D));
+    for (int n = 0; n < scene2d::kMaxAnimClips; ++n) {
+        const std::string ck = "clip" + std::to_string(n);
+        const std::string* name = r.find(ck);
+        if (!name) break;
+        std::vector<scene2d::AnimFrame2D> frames;
+        for (int m = 0;; ++m) {
+            const std::string* fv = r.find(ck + "f" + std::to_string(m));
+            if (!fv) break;
+            scene2d::AnimFrame2D f;
+            if (!parseFrame(*fv, f, why)) { why = ck + ": " + why; return false; }
+            frames.push_back(f);
+        }
+        const f32 fps = numKey(r, ck + "fps", 0.0f);
+        if (!std::isfinite(fps) || fps < 0.0f) { why = ck + ": fps must be a number >= 0"; return false; }
+        if (!scene2d::setClip(*tmp, n, name->c_str(), fps, boolKey(r, ck + "loop", true), frames.data(), static_cast<i32>(frames.size()))) {
+            why = ck + ": the name is empty, too long or taken, or the clips exceed " + std::to_string(scene2d::kMaxAnimClips) + " clips / " +
+                  std::to_string(scene2d::kMaxAnimFrames) + " frames";
+            return false;
+        }
+    }
+    if (const std::string* cl = r.find("clip" + std::to_string(scene2d::kMaxAnimClips)); cl) { why = "more than 16 clips"; return false; }
+    i32 current = 0;
+    if (const std::string* an = r.find("animation"); an && !an->empty()) {
+        current = scene2d::findClip(*tmp, an->c_str());
+        if (current < 0) { why = "animation '" + *an + "' is not a clip"; return false; }
+    }
+    i32 autoplay = 0;
+    if (const std::string* ap = r.find("autoplay"); ap && !ap->empty()) {
+        const i32 k = scene2d::findClip(*tmp, ap->c_str());
+        if (k < 0) { why = "autoplay '" + *ap + "' is not a clip"; return false; }
+        autoplay = k + 1;
+    }
+    scene2d::CSpriteAnim2D* c = scene2d::attachAnim(w, e);
+    if (!c) { why = "the world refused the component"; return false; }
+    std::memcpy(c, tmp.get(), sizeof(scene2d::CSpriteAnim2D));
+    c->speedScale = speed;
+    c->current = current;
+    c->autoplay = autoplay;
+    c->frame = c->clipCount > 0 ? std::min(static_cast<i32>(frame), std::max(0, c->clips[current].count - 1)) : 0;
+    if (boolKey(r, "playing", false)) c->flags |= scene2d::kAnimPlaying | scene2d::kAnimStarted;
+    return true;
+}
+
+bool applyCCamera2D(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent& r, std::string& why) {
+    if (typeId(w, kCCamera2D) == 0) { why = "CCamera2D is not registered"; return false; }
+    const f32 zx = numKey(r, "zx", 0.0f), zy = numKey(r, "zy", 0.0f), ox = numKey(r, "ox", 0.0f), oy = numKey(r, "oy", 0.0f);
+    const f32 smooth = numKey(r, "smooth", 0.0f);
+    constexpr f32 kDefMargin = 0.2f;
+    const f32 dl = numKey(r, "dragleft", kDefMargin), dt = numKey(r, "dragtop", kDefMargin), dr = numKey(r, "dragright", kDefMargin), db = numKey(r, "dragbottom", kDefMargin);
+    if (!finiteAll({zx, zy, ox, oy, smooth, dl, dt, dr, db})) { why = "a value is not finite"; return false; }
+    if (zx < 0.0f || zy < 0.0f || smooth < 0.0f) { why = "zoom and smooth cannot be negative"; return false; }
+    u32 flags = 0;
+    f32 lim[4] = {0, 0, 0, 0};
+    const char* const limKeys[4] = {"left", "top", "right", "bottom"};
+    const u32 limFlags[4] = {scene2d::kCamLimitLeft, scene2d::kCamLimitTop, scene2d::kCamLimitRight, scene2d::kCamLimitBottom};
+    for (int i = 0; i < 4; ++i)
+        if (r.find(limKeys[i])) {
+            lim[i] = numKey(r, limKeys[i], 0.0f);
+            if (!std::isfinite(lim[i])) { why = std::string("limit ") + limKeys[i] + " is not finite"; return false; }
+            flags |= limFlags[i];
+        }
+    if (const std::string a = lowered(textKey(r, "anchor")); a == "topleft") flags |= scene2d::kCamAnchorTopLeft;
+    else if (!a.empty() && a != "center") { why = "unknown anchor '" + a + "' (center, topleft)"; return false; }
+    if (!boolKey(r, "enabled", true)) flags |= scene2d::kCamDisabled;
+    if (boolKey(r, "current", false)) flags |= scene2d::kCamCurrent;
+    if (boolKey(r, "rotation", false)) flags |= scene2d::kCamFollowRotation;
+    if (r.find("smooth")) flags |= scene2d::kCamSmoothing;
+    if (boolKey(r, "draghorizontal", false)) flags |= scene2d::kCamDragH;
+    if (boolKey(r, "dragvertical", false)) flags |= scene2d::kCamDragV;
+    scene2d::CCamera2D* c = scene2d::attachCamera(w, e);
+    if (!c) { why = "the world refused the component"; return false; }
+    c->zoomX = zx; c->zoomY = zy; c->offsetX = ox; c->offsetY = oy;
+    c->limitLeft = lim[0]; c->limitTop = lim[1]; c->limitRight = lim[2]; c->limitBottom = lim[3];
+    c->smoothSpeed = smooth;
+    c->dragLeft = dl; c->dragTop = dt; c->dragRight = dr; c->dragBottom = db;
+    c->flags = flags;
+    c->centerValid = 0;
+    return true;
+}
+
+bool applyCParallax2D(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent& r, std::string& why) {
+    if (typeId(w, kCParallax2D) == 0) { why = "CParallax2D is not registered"; return false; }
+    const f32 sx = numKey(r, "sx", 1.0f), sy = numKey(r, "sy", 1.0f), ox = numKey(r, "ox", 0.0f), oy = numKey(r, "oy", 0.0f);
+    const f32 rx = numKey(r, "rx", 0.0f), ry = numKey(r, "ry", 0.0f), times = numKey(r, "repeat", 0.0f);
+    const f32 ax = numKey(r, "ax", 0.0f), ay = numKey(r, "ay", 0.0f);
+    if (!finiteAll({sx, sy, ox, oy, rx, ry, times, ax, ay})) { why = "a value is not finite"; return false; }
+    if (rx < 0.0f || ry < 0.0f || times < 0.0f) { why = "repeat sizes and repeat cannot be negative"; return false; }
+    u32 flags = 0;
+    f32 begin[2] = {-1.0e9f, -1.0e9f}, end[2] = {1.0e9f, 1.0e9f};
+    if (r.find("beginx") || r.find("beginy")) {
+        begin[0] = numKey(r, "beginx", begin[0]); begin[1] = numKey(r, "beginy", begin[1]);
+        flags |= scene2d::kParallaxLimitBegin;
+    }
+    if (r.find("endx") || r.find("endy")) {
+        end[0] = numKey(r, "endx", end[0]); end[1] = numKey(r, "endy", end[1]);
+        flags |= scene2d::kParallaxLimitEnd;
+    }
+    if (!finiteAll({begin[0], begin[1], end[0], end[1]})) { why = "a limit is not finite"; return false; }
+    if (!boolKey(r, "follow", true)) flags |= scene2d::kParallaxNoFollow;
+    scene2d::CParallax2D* c = scene2d::attachParallax(w, e);
+    if (!c) { why = "the world refused the component"; return false; }
+    c->pinX = 1.0f - sx; c->pinY = 1.0f - sy;
+    c->offsetX = ox; c->offsetY = oy;
+    c->repeatX = rx; c->repeatY = ry;
+    c->repeatTimes = static_cast<i32>(times);
+    c->autoX = ax; c->autoY = ay;
+    c->limitBeginX = begin[0]; c->limitBeginY = begin[1]; c->limitEndX = end[0]; c->limitEndY = end[1];
+    c->flags = flags;
+    return true;
+}
+
 bool applyOne(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent& r, const fmt::OcWorldPlacement* placement, std::string& why) {
 #if AVER_MODULE_FRAMEWORK
     if (isGroupsComponent(r.type)) {
@@ -1045,6 +1222,9 @@ bool applyOne(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent& r,
         case kC2DTransform: return applyC2DTransform(w, e, r, why);
         case kCSprite2D: return applyCSprite2D(w, e, r, why);
         case kC2DLayer: return applyC2DLayer(w, e, r, why);
+        case kCSpriteAnim2D: return applyCSpriteAnim2D(w, e, r, why);
+        case kCCamera2D: return applyCCamera2D(w, e, r, why);
+        case kCParallax2D: return applyCParallax2D(w, e, r, why);
 #if AVER_MODULE_HAIR_SCENE
         case kHair: return applyHair(w, e, r, why);
 #endif
@@ -1365,6 +1545,77 @@ std::optional<fmt::OcPlacedComponent> captureOne(scene::World& w, scene::Entity 
             if (c->scaleY != 0.0f && c->scaleY != 1.0f) putNum(rec, "sy", c->scaleY);
             break;
         }
+        case kCSpriteAnim2D: {
+            const auto* c = w.component<scene2d::CSpriteAnim2D>(e, type);
+            if (c->speedScale != 0.0f && c->speedScale != 1.0f) putNum(rec, "speed", c->speedScale);
+            for (i32 n = 0; n < c->clipCount; ++n) {
+                const scene2d::AnimClip2D& k = c->clips[n];
+                const std::string ck = "clip" + std::to_string(n);
+                put(rec, ck, std::string(k.name, strnlen(k.name, scene2d::kClipNameBytes)));
+                if (k.fps != 0.0f) putNum(rec, ck + "fps", k.fps);
+                if (k.flags & scene2d::kClipNoLoop) put(rec, ck + "loop", "0");
+                for (i32 m = 0; m < k.count; ++m) {
+                    const scene2d::AnimFrame2D& f = c->frames[k.first + m];
+                    std::string tex;
+                    if (f.texture != 0) {
+                        const std::string path = pathOf ? pathOf(static_cast<u64>(f.texture)) : std::string{};
+                        tex = path.empty() ? "id:" + hex16(static_cast<u64>(f.texture)) : path;
+                    }
+                    std::string v = tex;
+                    const bool hasRegion = f.regionX != 0.0f || f.regionY != 0.0f || f.regionW != 0.0f || f.regionH != 0.0f;
+                    const bool hasWeight = f.weight != 0.0f, hasCell = f.cell != 0;
+                    if (hasRegion || hasWeight || hasCell)
+                        v += "|" + (hasRegion ? numStr(f.regionX) + "," + numStr(f.regionY) + "," + numStr(f.regionW) + "," + numStr(f.regionH) : std::string{});
+                    if (hasWeight || hasCell) v += "|" + (hasWeight ? numStr(f.weight) : std::string{});
+                    if (hasCell) v += "|" + std::to_string(f.cell);
+                    put(rec, ck + "f" + std::to_string(m), v);
+                }
+            }
+            if (c->clipCount > 0 && c->current > 0 && c->current < c->clipCount) put(rec, "animation", c->clips[c->current].name);
+            if (c->autoplay > 0 && c->autoplay <= c->clipCount) put(rec, "autoplay", c->clips[c->autoplay - 1].name);
+            if (c->frame != 0) put(rec, "frame", std::to_string(c->frame));
+            if (c->flags & scene2d::kAnimPlaying) put(rec, "playing", "1");
+            break;   // progress, the started bit and the event queue are runtime state
+        }
+        case kCCamera2D: {
+            const auto* c = w.component<scene2d::CCamera2D>(e, type);
+            if (c->zoomX != 0.0f && c->zoomX != 1.0f) putNum(rec, "zx", c->zoomX);
+            if (c->zoomY != 0.0f && c->zoomY != 1.0f) putNum(rec, "zy", c->zoomY);
+            if (c->offsetX != 0.0f) putNum(rec, "ox", c->offsetX);
+            if (c->offsetY != 0.0f) putNum(rec, "oy", c->offsetY);
+            if (c->flags & scene2d::kCamLimitLeft) putNum(rec, "left", c->limitLeft);
+            if (c->flags & scene2d::kCamLimitTop) putNum(rec, "top", c->limitTop);
+            if (c->flags & scene2d::kCamLimitRight) putNum(rec, "right", c->limitRight);
+            if (c->flags & scene2d::kCamLimitBottom) putNum(rec, "bottom", c->limitBottom);
+            if (c->flags & scene2d::kCamSmoothing) putNum(rec, "smooth", c->smoothSpeed);
+            if (c->flags & scene2d::kCamDragH) put(rec, "draghorizontal", "1");
+            if (c->flags & scene2d::kCamDragV) put(rec, "dragvertical", "1");
+            if (c->dragLeft != 0.2f) putNum(rec, "dragleft", c->dragLeft);
+            if (c->dragTop != 0.2f) putNum(rec, "dragtop", c->dragTop);
+            if (c->dragRight != 0.2f) putNum(rec, "dragright", c->dragRight);
+            if (c->dragBottom != 0.2f) putNum(rec, "dragbottom", c->dragBottom);
+            if (c->flags & scene2d::kCamAnchorTopLeft) put(rec, "anchor", "topleft");
+            if (c->flags & scene2d::kCamDisabled) put(rec, "enabled", "0");
+            if (c->flags & scene2d::kCamCurrent) put(rec, "current", "1");
+            if (c->flags & scene2d::kCamFollowRotation) put(rec, "rotation", "1");
+            break;   // the eased centre is derived
+        }
+        case kCParallax2D: {
+            const auto* c = w.component<scene2d::CParallax2D>(e, type);
+            if (c->pinX != 0.0f) putNum(rec, "sx", 1.0f - c->pinX);
+            if (c->pinY != 0.0f) putNum(rec, "sy", 1.0f - c->pinY);
+            if (c->offsetX != 0.0f) putNum(rec, "ox", c->offsetX);
+            if (c->offsetY != 0.0f) putNum(rec, "oy", c->offsetY);
+            if (c->repeatX != 0.0f) putNum(rec, "rx", c->repeatX);
+            if (c->repeatY != 0.0f) putNum(rec, "ry", c->repeatY);
+            if (c->repeatTimes > 1) put(rec, "repeat", std::to_string(c->repeatTimes));
+            if (c->autoX != 0.0f) putNum(rec, "ax", c->autoX);
+            if (c->autoY != 0.0f) putNum(rec, "ay", c->autoY);
+            if (c->flags & scene2d::kParallaxLimitBegin) { putNum(rec, "beginx", c->limitBeginX); putNum(rec, "beginy", c->limitBeginY); }
+            if (c->flags & scene2d::kParallaxLimitEnd) { putNum(rec, "endx", c->limitEndX); putNum(rec, "endy", c->limitEndY); }
+            if (c->flags & scene2d::kParallaxNoFollow) put(rec, "follow", "0");
+            break;   // the autoscroll time is runtime state
+        }
         case kParticleEmitter: {
             const auto* c = w.component<scene::CParticleEmitter>(e, type);
             putAsset(rec, "effect", c->effect, pathOf);
@@ -1405,7 +1656,7 @@ std::string placementLabel(const fmt::OcWorldPlacement& p, i64 index) {
 // The records applyPlacedComponents2D takes (a class placement's actor gets them as it spawns).
 bool is2DComponent(std::string_view type) {
     const int ix = typeIndex(type);
-    return ix == kC2DTransform || ix == kCSprite2D || ix == kC2DLayer;
+    return ix >= kC2DTransform && ix <= kCParallax2D;
 }
 
 // Canonical order = dependency order, so a level written by hand in any order applies the same.
@@ -1473,7 +1724,7 @@ u32 applyPlacedComponents2D(scene::World& w, scene::Entity e, const fmt::OcWorld
     Tally t;
     for (const fmt::OcPlacedComponent& r : p.components) {
         const int ix = typeIndex(r.type);
-        if (ix != kC2DTransform && ix != kCSprite2D && ix != kC2DLayer) continue;
+        if (ix < kC2DTransform || ix > kCParallax2D) continue;
         std::string why;
         if (applyOne(w, e, r, &p, why)) ++t.applied;
         else refuse(t, r.type, placementLabel(p, placementIndex), why);

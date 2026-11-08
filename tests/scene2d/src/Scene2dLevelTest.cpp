@@ -69,8 +69,8 @@ int main() {
     fmt::OcWorldData level;
     std::string err;
     check(fmt::parseOcworld(golden, level, &err), "it parses: " + err);
-    check(level.placements.size() == 5, "five placements: canvas, background, button, hidden, empty");
-    if (level.placements.size() != 5) return exitCode(ExitCode::Failed);
+    check(level.placements.size() == 10, "ten placements: canvas, background, button, hidden, empty, then hero, camera, spare camera, sky, plain");
+    if (level.placements.size() != 10) return exitCode(ExitCode::Failed);
     check(level.placements[0].components.size() == 1 && level.placements[0].components[0].type == "C2DLayer", "the canvas carries a C2DLayer record");
     check(level.placements[2].components.size() == 2 && level.placements[2].components[1].type == "CSprite2D" &&
               level.placements[2].components[1].kv.size() == 15,
@@ -94,7 +94,7 @@ int main() {
     // ---- apply: build the entities the way the level loader does (a placement per entity, parents by index) ----
     std::vector<scene::Entity> ents;
     std::map<u64, std::string> known;
-    for (const char* p : {"UI/menu_bg.png", "UI/buttons.png"}) known[idOf(p)] = p;
+    for (const char* p : {"UI/menu_bg.png", "UI/buttons.png", "Sprites/hero.png", "Sprites/hero_a.png", "Sprites/hero_b.png", "Sprites/die_0.png"}) known[idOf(p)] = p;
     const game::PathOfIdFn pathOf = [&](u64 id) { const auto it = known.find(id); return it == known.end() ? std::string{} : it->second; };
     for (size_t i = 0; i < level.placements.size(); ++i) {
         const auto& p = level.placements[i];
@@ -131,6 +131,65 @@ int main() {
         check(ht && ht->flags == (scene2d::kT2DTopLevel | scene2d::kT2DHidden), "toplevel and hidden");
     }
 
+    // ---- animation, camera, parallax ----
+    {
+        const auto* an = w.component<scene2d::CSpriteAnim2D>(ents[5], id.anim);
+        check(an && an->speedScale == 1.5f && an->clipCount == 2 && an->frameCount == 6 && an->autoplay == 1 && an->current == 1 && !(an->flags & scene2d::kAnimPlaying),
+              "CSpriteAnim2D: speed, two clips, six frames, autoplay idle, current die, not playing");
+        if (!an) return exitCode(ExitCode::Failed);
+        check(std::string(an->clips[0].name) == "idle" && an->clips[0].fps == 6 && an->clips[0].count == 4 && !(an->clips[0].flags & scene2d::kClipNoLoop) &&
+                  std::string(an->clips[1].name) == "die" && an->clips[1].fps == 12 && (an->clips[1].flags & scene2d::kClipNoLoop) && an->clips[1].first == 4,
+              "the clips: names, fps, loop, and the frames packed in order");
+        const auto& f1 = an->frames[1];
+        check(f1.texture == static_cast<i64>(idOf("Sprites/hero_b.png")) && f1.regionW == 16 && f1.regionH == 16 && f1.weight == 2 && f1.cell == 3, "a frame: texture, region, weight, cell");
+        check(an->frames[0].texture == static_cast<i64>(idOf("Sprites/hero_a.png")) && an->frames[0].regionW == 0 && an->frames[2].texture == 0 && an->frames[2].cell == 5 &&
+                  an->frames[3].weight == 0.5f && an->frames[5].texture == 0xcafebabeLL && an->frames[5].regionX == 1 && an->frames[5].regionH == 4,
+              "frames with fewer parts leave the rest unset; id:HEX names an id with no path");
+        const auto* cam = w.component<scene2d::CCamera2D>(ents[6], id.camera);
+        check(cam && cam->zoomX == 2 && cam->zoomY == 2 && cam->offsetX == 10 && cam->offsetY == -5 && cam->limitRight == 1280 && cam->limitBottom == 720 && cam->smoothSpeed == 6 &&
+                  cam->dragLeft == 0.1f && cam->dragRight == 0.3f && cam->dragTop == 0.2f && cam->dragBottom == 0.2f,
+              "CCamera2D: zoom, offset, limits, smoothing and the drag margins (an unnamed margin is Godot's 0.2)");
+        check(cam && cam->flags == (scene2d::kCamLimitLeft | scene2d::kCamLimitTop | scene2d::kCamLimitRight | scene2d::kCamLimitBottom | scene2d::kCamSmoothing | scene2d::kCamDragH |
+                                    scene2d::kCamAnchorTopLeft | scene2d::kCamCurrent | scene2d::kCamFollowRotation),
+              "...and its flags");
+        const auto* spare = w.component<scene2d::CCamera2D>(ents[7], id.camera);
+        check(spare && (spare->flags & scene2d::kCamDisabled) && (spare->flags & scene2d::kCamDragV), "a disabled camera");
+        check(scene2d::currentCamera(w) == ents[6], "the flagged camera is the current one");
+        const auto* par = w.component<scene2d::CParallax2D>(ents[8], id.parallax);
+        check(par && par->pinX == 0.5f && par->pinY == 0.75f && par->offsetX == 3 && par->offsetY == -4 && par->repeatX == 512 && par->repeatY == 256 && par->repeatTimes == 2 &&
+                  par->autoX == -20 && par->autoY == 5 && par->limitBeginX == -100 && par->limitEndY == 700 &&
+                  par->flags == (scene2d::kParallaxLimitBegin | scene2d::kParallaxLimitEnd | scene2d::kParallaxNoFollow),
+              "CParallax2D: scroll scale is stored as 1 - scale; offset, tiling, autoscroll, limits, follow off");
+        const auto* plain = w.component<scene2d::CParallax2D>(ents[9], id.parallax);
+        check(plain && plain->pinX == 0 && plain->pinY == 0 && plain->repeatX == 0 && plain->flags == 0, "a bare parallax scrolls with the world and does not tile");
+        const auto* bareAnim = w.component<scene2d::CSpriteAnim2D>(ents[9], id.anim);
+        check(bareAnim && bareAnim->clipCount == 0 && bareAnim->speedScale == 0, "a bare animation has no clips");
+    }
+
+    // ---- bad animation, camera and parallax records ----
+    {
+        const scene::Entity e = w.create("refuseAnim");
+        check(!game::applyPlacedComponent(w, e, rec("CSpriteAnim2D", {{"clip0", "a"}, {"clip0f0", "x|1,2,3"}})), "a frame region needs four numbers");
+        check(!game::applyPlacedComponent(w, e, rec("CSpriteAnim2D", {{"clip0", "a"}, {"clip0f0", "|-1,0,-4,4"}})), "a negative region size is refused");
+        check(!game::applyPlacedComponent(w, e, rec("CSpriteAnim2D", {{"clip0", "a"}, {"clip0f0", "id:zz"}})), "a malformed id: texture is refused");
+        check(!game::applyPlacedComponent(w, e, rec("CSpriteAnim2D", {{"clip0", "a"}, {"clip1", "a"}})), "two clips with one name are refused");
+        check(!game::applyPlacedComponent(w, e, rec("CSpriteAnim2D", {{"clip0", "a"}, {"autoplay", "b"}})), "autoplay must name a clip");
+        check(!game::applyPlacedComponent(w, e, rec("CSpriteAnim2D", {{"clip0", "a"}, {"animation", "b"}})), "and so must animation");
+        check(!game::applyPlacedComponent(w, e, rec("CSpriteAnim2D", {{"clip0", "a"}, {"clip0fps", "-3"}})), "a negative fps is refused");
+        check(!game::applyPlacedComponent(w, e, rec("CSpriteAnim2D", {{"speed", "inf"}})), "a non-finite speed is refused");
+        check(!w.hasComponent(e, id.anim), "...and a refused animation attaches nothing");
+        check(!game::applyPlacedComponent(w, e, rec("CCamera2D", {{"zx", "-1"}})), "a negative zoom is refused");
+        check(!game::applyPlacedComponent(w, e, rec("CCamera2D", {{"anchor", "bottom"}})), "an unknown anchor is refused");
+        check(!game::applyPlacedComponent(w, e, rec("CCamera2D", {{"left", "nan"}})), "a non-finite limit is refused");
+        check(!game::applyPlacedComponent(w, e, rec("CParallax2D", {{"rx", "-8"}})), "a negative repeat size is refused");
+        check(!game::applyPlacedComponent(w, e, rec("CParallax2D", {{"ax", "inf"}})), "a non-finite autoscroll is refused");
+        check(!w.hasComponent(e, id.camera) && !w.hasComponent(e, id.parallax), "...and nothing is attached");
+        fmt::OcPlacedComponent big;
+        big.type = "CSpriteAnim2D";
+        for (int i = 0; i < 17; ++i) big.kv.emplace_back("clip" + std::to_string(i), "c" + std::to_string(i));
+        check(!game::applyPlacedComponent(w, e, big), "seventeen clips are refused");
+    }
+
     // ---- the loaded menu composes ----
     scene2d::updateTransforms(w);
     {
@@ -148,9 +207,9 @@ int main() {
         const auto caps = game::capturePlacedComponents(w, ents[i], pathOf);
         std::vector<fmt::OcPlacedComponent> want;
         for (const auto& c : level.placements[i].components) want.push_back(c);
-        // capture returns the canonical type order: transform, sprite, layer
+        // capture returns the canonical type order: transform, sprite, layer, animation, camera, parallax
         std::vector<fmt::OcPlacedComponent> ordered;
-        for (const char* t : {"C2DTransform", "CSprite2D", "C2DLayer"})
+        for (const char* t : {"C2DTransform", "CSprite2D", "C2DLayer", "CSpriteAnim2D", "CCamera2D", "CParallax2D"})
             for (const auto& c : want)
                 if (c.type == t) ordered.push_back(c);
         if (caps != ordered) {

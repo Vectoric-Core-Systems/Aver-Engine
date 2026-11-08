@@ -22,3 +22,18 @@ PLACE Menu/Empty 0 0 0 0 0 0 1 nocollide
   COMPONENT C2DTransform
   COMPONENT CSprite2D
   COMPONENT C2DLayer
+PLACE Menu/Hero 0 0 0 0 0 0 1 nocollide
+  COMPONENT C2DTransform x=64 y=96
+  COMPONENT CSprite2D texture=Sprites/hero.png hframes=4
+  COMPONENT CSpriteAnim2D speed=1.5 clip0=idle clip0fps=6 clip0f0=Sprites/hero_a.png clip0f1=Sprites/hero_b.png|0,0,16,16|2|3 clip0f2=|||5 clip0f3=||0.5 clip1=die clip1fps=12 clip1loop=0 clip1f0=Sprites/die_0.png clip1f1=id:00000000cafebabe|1,2,3,4 animation=die autoplay=idle
+PLACE Menu/Camera 0 0 0 0 0 0 1 nocollide
+  COMPONENT C2DTransform x=320 y=180
+  COMPONENT CCamera2D zx=2 zy=2 ox=10 oy=-5 left=0 top=0 right=1280 bottom=720 smooth=6 draghorizontal=1 dragleft=0.1 dragright=0.3 anchor=topleft current=1 rotation=1
+PLACE Menu/SpareCamera 0 0 0 0 0 0 1 nocollide
+  COMPONENT CCamera2D dragvertical=1 enabled=0
+PLACE Menu/Sky 0 0 0 0 0 0 1 nocollide
+  COMPONENT CParallax2D sx=0.5 sy=0.25 ox=3 oy=-4 rx=512 ry=256 repeat=2 ax=-20 ay=5 beginx=-100 beginy=-50 endx=900 endy=700 follow=0
+PLACE Menu/Plain 0 0 0 0 0 0 1 nocollide
+  COMPONENT CSpriteAnim2D
+  COMPONENT CCamera2D
+  COMPONENT CParallax2D

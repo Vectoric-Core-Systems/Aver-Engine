@@ -128,8 +128,20 @@ u32 submitSprites(scene::World& w) {
         Item item;
         std::vector<u64> path;   // order stamps, root first
         bool derived = true;
+        std::vector<ui::UiAffine> copies;   // one per tile of a repeating parallax; else one
     };
     std::vector<Pending> pend;
+
+    // The current camera's view (world -> content units) and centre, for the layers that follow it and for the parallax maths.
+    const CanvasTransform canvas = canvasTransform();
+    const f32 contentW = canvas.valid ? canvas.stretch.contentSize.x : 0.0f, contentH = canvas.valid ? canvas.stretch.contentSize.y : 0.0f;
+    const Entity camEntity = currentCamera(w);
+    Affine2 camView;
+    f32 camCenter[2] = {0.0f, 0.0f};
+    if (camEntity != scene::kInvalidEntity && canvas.valid) {
+        camView = cameraView(w, contentW, contentH);
+        cameraCenter(w, camEntity, contentW, contentH, camCenter);
+    }
     for (usize i = 0; i < pool->size(); ++i) {
         const Entity e = pool->entityAt(i);
         const auto& sp = *static_cast<const CSprite2D*>(pool->dataAt(i));
@@ -139,6 +151,7 @@ u32 submitSprites(scene::World& w) {
 
         bool hidden = false;
         const C2DLayer* layer = nullptr;
+        const CParallax2D* par = nullptr;
         std::vector<u64> path;
         for (Entity a = e; a != scene::kInvalidEntity; a = w.parent(a)) {
             if (id.transform) {
@@ -146,6 +159,7 @@ u32 submitSprites(scene::World& w) {
                 if (t && (t->flags & kT2DHidden)) { hidden = true; break; }
             }
             if (!layer && id.layer) layer = w.component<C2DLayer>(a, id.layer);
+            if (!par && id.parallax) par = w.component<CParallax2D>(a, id.parallax);
             path.push_back(w.orderStamp(a));
         }
         if (hidden || (layer && (layer->flags & kLayerHidden))) continue;
@@ -164,8 +178,20 @@ u32 submitSprites(scene::World& w) {
         p.item.blend = static_cast<ui::UiBlend>(std::clamp<i32>(sp.blend, kBlendMix, kBlendMul));
         i32 z = 0;
         Affine2 world = worldAffine(w, e, &z);
-        if (layer) world = layerAffine(*layer) * world;
-        p.item.xf = toUi(world);
+        // Parallax shifts the sprite in world space before the layer; the camera's view goes on last, for the layers that follow it.
+        ParallaxShift shift;
+        if (par) shift = parallaxShift(*par, camCenter[0], camCenter[1]);
+        const bool followsCamera = (!layer || (layer->flags & kLayerFollowViewport)) && (!par || shift.followsCamera);
+        const Affine2 view = followsCamera ? camView : Affine2{};
+        const Affine2 layerM = layer ? layerAffine(*layer) : Affine2{};
+        const Affine2 plain = view * layerM * Affine2{1, 0, 0, 1, shift.dx, shift.dy} * world;
+        p.item.xf = toUi(plain);
+        for (i32 iy = -shift.timesY; iy <= shift.timesY; ++iy)
+            for (i32 ix = -shift.timesX; ix <= shift.timesX; ++ix) {
+                const Affine2 m = view * layerM * Affine2{1, 0, 0, 1, shift.dx + static_cast<f32>(ix) * shift.repeatX, shift.dy + static_cast<f32>(iy) * shift.repeatY} * world;
+                p.copies.push_back(toUi(m));
+            }
+        if (p.copies.empty()) p.copies.push_back(p.item.xf);
         p.item.key.layer = layer ? layer->index : 0;
         p.item.key.z = z;
         if (id.transform) {
@@ -189,9 +215,12 @@ u32 submitSprites(scene::World& w) {
 
     u32 queued = 0;
     for (Pending& p : pend) {
-        if (s.items.size() >= kMaxQueue) break;
-        p.item.seq = s.nextSeq++;
-        s.items.push_back(p.item);
+        for (const ui::UiAffine& xf : p.copies) {
+            if (s.items.size() >= kMaxQueue) return queued;
+            p.item.xf = xf;
+            p.item.seq = s.nextSeq++;
+            s.items.push_back(p.item);
+        }
         ++queued;
     }
     return queued;

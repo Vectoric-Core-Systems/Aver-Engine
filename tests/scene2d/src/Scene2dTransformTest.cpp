@@ -35,11 +35,11 @@ int main() {
     const u32 builtins = w.componentCount();
 
     const Ids id = registerComponents(w);
-    check(id.transform && id.sprite && id.layer, "the three components register");
-    check(id.transform > 16 && id.sprite > 16 && id.layer > 16, "they take dynamic ids above the built-ins");
-    check(w.componentCount() == builtins + 3, "and add exactly three components");
+    check(id.transform && id.sprite && id.layer && id.anim && id.camera && id.parallax, "the six components register");
+    check(id.transform > 16 && id.sprite > 16 && id.layer > 16 && id.anim > 16 && id.camera > 16 && id.parallax > 16, "they take dynamic ids above the built-ins");
+    check(w.componentCount() == builtins + 6, "and add exactly six components");
     const Ids again = registerComponents(w);
-    check(again.transform == id.transform && again.sprite == id.sprite && again.layer == id.layer && w.componentCount() == builtins + 3,
+    check(again.transform == id.transform && again.sprite == id.sprite && again.layer == id.layer && again.anim == id.anim && again.camera == id.camera && again.parallax == id.parallax && w.componentCount() == builtins + 6,
           "registering again is idempotent");
     check(w.componentVerified(id.transform) && w.componentVerified(id.sprite) && w.componentVerified(id.layer), "the field tables verify");
     check(w.componentSize(id.transform) == sizeof(C2DTransform) && w.componentSize(id.sprite) == sizeof(CSprite2D) &&

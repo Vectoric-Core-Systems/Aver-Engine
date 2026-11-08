@@ -190,7 +190,7 @@ std::vector<EmitStep> placementEmitSteps(const std::vector<OcWorldPlacement>& pl
 constexpr std::string_view kKnownComponentTypes[] = {
     "SkeletalMesh", "Animator", "RootMotion", "MotionMatcher", "ControlRig", "IkRig", "Brain", "SmartObject", "SoftBody",
     "Cloth", "Destructible", "MorphTargets", "CameraRig", "Vehicle", "ParticleEmitter", "SoftField", "Jelly", "Rope", "CollisionShape", "Hair",
-    "C2DTransform", "CSprite2D", "C2DLayer"};
+    "C2DTransform", "CSprite2D", "C2DLayer", "CSpriteAnim2D", "CCamera2D", "CParallax2D"};
 
 std::string canonicalComponentType(std::string_view t) {
     for (const std::string_view k : kKnownComponentTypes)

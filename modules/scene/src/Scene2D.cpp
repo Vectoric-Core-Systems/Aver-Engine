@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
 
 namespace aver::scene2d {
@@ -60,7 +61,9 @@ void refresh(scene::World& w, Entity e, u32 type, int depth, u32& count) {
 
 Ids registerComponents(scene::World& world) {
     if (g_ids.transform != 0 && world.componentId("C2DTransform") == g_ids.transform &&
-        world.componentId("CSprite2D") == g_ids.sprite && world.componentId("C2DLayer") == g_ids.layer)
+        world.componentId("CSprite2D") == g_ids.sprite && world.componentId("C2DLayer") == g_ids.layer &&
+        world.componentId("CSpriteAnim2D") == g_ids.anim && world.componentId("CCamera2D") == g_ids.camera &&
+        world.componentId("CParallax2D") == g_ids.parallax)
         return g_ids;
     using scene::FieldKind;
     Ids out;
@@ -120,6 +123,87 @@ Ids registerComponents(scene::World& world) {
         AVER_ASSERTM(b.verify(sizeof(C2DLayer)), "C2DLayer");
         out.layer = b.typeId();
     }
+    {
+        auto b = world.registerComponent<CSpriteAnim2D>("CSpriteAnim2D");
+        b.field("speedScale", FieldKind::F32, off(offsetof(CSpriteAnim2D, speedScale)))
+            .field("flags", FieldKind::I32, off(offsetof(CSpriteAnim2D, flags)))
+            .field("clipCount", FieldKind::I32, off(offsetof(CSpriteAnim2D, clipCount)))
+            .field("frameCount", FieldKind::I32, off(offsetof(CSpriteAnim2D, frameCount)))
+            .field("current", FieldKind::I32, off(offsetof(CSpriteAnim2D, current)))
+            .field("autoplay", FieldKind::I32, off(offsetof(CSpriteAnim2D, autoplay)))
+            .field("frame", FieldKind::I32, off(offsetof(CSpriteAnim2D, frame)))
+            .field("progress", FieldKind::F32, off(offsetof(CSpriteAnim2D, progress)));
+        char nm[40];
+        for (i32 c = 0; c < kMaxAnimClips; ++c) {
+            const usize base = offsetof(CSpriteAnim2D, clips) + static_cast<usize>(c) * sizeof(AnimClip2D);
+            for (usize k = 0; k < kClipNameBytes / 4; ++k) {
+                std::snprintf(nm, sizeof nm, "c%dname%zu", c, k);
+                b.field(nm, FieldKind::I32, off(base + offsetof(AnimClip2D, name) + k * 4));
+            }
+            std::snprintf(nm, sizeof nm, "c%dfirst", c);  b.field(nm, FieldKind::I32, off(base + offsetof(AnimClip2D, first)));
+            std::snprintf(nm, sizeof nm, "c%dcount", c);  b.field(nm, FieldKind::I32, off(base + offsetof(AnimClip2D, count)));
+            std::snprintf(nm, sizeof nm, "c%dfps", c);    b.field(nm, FieldKind::F32, off(base + offsetof(AnimClip2D, fps)));
+            std::snprintf(nm, sizeof nm, "c%dflags", c);  b.field(nm, FieldKind::I32, off(base + offsetof(AnimClip2D, flags)));
+        }
+        for (i32 f = 0; f < kMaxAnimFrames; ++f) {
+            const usize base = offsetof(CSpriteAnim2D, frames) + static_cast<usize>(f) * sizeof(AnimFrame2D);
+            std::snprintf(nm, sizeof nm, "f%dtexture", f); b.field(nm, FieldKind::I64, off(base + offsetof(AnimFrame2D, texture)));
+            std::snprintf(nm, sizeof nm, "f%drx", f);      b.field(nm, FieldKind::F32, off(base + offsetof(AnimFrame2D, regionX)));
+            std::snprintf(nm, sizeof nm, "f%dry", f);      b.field(nm, FieldKind::F32, off(base + offsetof(AnimFrame2D, regionY)));
+            std::snprintf(nm, sizeof nm, "f%drw", f);      b.field(nm, FieldKind::F32, off(base + offsetof(AnimFrame2D, regionW)));
+            std::snprintf(nm, sizeof nm, "f%drh", f);      b.field(nm, FieldKind::F32, off(base + offsetof(AnimFrame2D, regionH)));
+            std::snprintf(nm, sizeof nm, "f%dweight", f);  b.field(nm, FieldKind::F32, off(base + offsetof(AnimFrame2D, weight)));
+            std::snprintf(nm, sizeof nm, "f%dcell", f);    b.field(nm, FieldKind::I32, off(base + offsetof(AnimFrame2D, cell)));
+        }
+        AVER_ASSERTM(b.verify(sizeof(CSpriteAnim2D)), "CSpriteAnim2D");
+        out.anim = b.typeId();
+    }
+    {
+        auto b = world.registerComponent<CCamera2D>("CCamera2D");
+        b.field("zoomX", FieldKind::F32, off(offsetof(CCamera2D, zoomX)))
+            .field("zoomY", FieldKind::F32, off(offsetof(CCamera2D, zoomY)))
+            .field("offsetX", FieldKind::F32, off(offsetof(CCamera2D, offsetX)))
+            .field("offsetY", FieldKind::F32, off(offsetof(CCamera2D, offsetY)))
+            .field("limitLeft", FieldKind::F32, off(offsetof(CCamera2D, limitLeft)))
+            .field("limitTop", FieldKind::F32, off(offsetof(CCamera2D, limitTop)))
+            .field("limitRight", FieldKind::F32, off(offsetof(CCamera2D, limitRight)))
+            .field("limitBottom", FieldKind::F32, off(offsetof(CCamera2D, limitBottom)))
+            .field("smoothSpeed", FieldKind::F32, off(offsetof(CCamera2D, smoothSpeed)))
+            .field("dragLeft", FieldKind::F32, off(offsetof(CCamera2D, dragLeft)))
+            .field("dragTop", FieldKind::F32, off(offsetof(CCamera2D, dragTop)))
+            .field("dragRight", FieldKind::F32, off(offsetof(CCamera2D, dragRight)))
+            .field("dragBottom", FieldKind::F32, off(offsetof(CCamera2D, dragBottom)))
+            .field("flags", FieldKind::I32, off(offsetof(CCamera2D, flags)))
+            .field("centerX", FieldKind::F32, off(offsetof(CCamera2D, centerX)), 0, true)
+            .field("centerY", FieldKind::F32, off(offsetof(CCamera2D, centerY)), 0, true)
+            .field("centerValid", FieldKind::I32, off(offsetof(CCamera2D, centerValid)), 0, true)
+            .field("reserved", FieldKind::I32, off(offsetof(CCamera2D, reserved)), 0, true);
+        AVER_ASSERTM(b.verify(sizeof(CCamera2D)), "CCamera2D");
+        out.camera = b.typeId();
+    }
+    {
+        auto b = world.registerComponent<CParallax2D>("CParallax2D");
+        b.field("pinX", FieldKind::F32, off(offsetof(CParallax2D, pinX)))
+            .field("pinY", FieldKind::F32, off(offsetof(CParallax2D, pinY)))
+            .field("offsetX", FieldKind::F32, off(offsetof(CParallax2D, offsetX)))
+            .field("offsetY", FieldKind::F32, off(offsetof(CParallax2D, offsetY)))
+            .field("repeatX", FieldKind::F32, off(offsetof(CParallax2D, repeatX)))
+            .field("repeatY", FieldKind::F32, off(offsetof(CParallax2D, repeatY)))
+            .field("repeatTimes", FieldKind::I32, off(offsetof(CParallax2D, repeatTimes)))
+            .field("autoX", FieldKind::F32, off(offsetof(CParallax2D, autoX)))
+            .field("autoY", FieldKind::F32, off(offsetof(CParallax2D, autoY)))
+            .field("limitBeginX", FieldKind::F32, off(offsetof(CParallax2D, limitBeginX)))
+            .field("limitBeginY", FieldKind::F32, off(offsetof(CParallax2D, limitBeginY)))
+            .field("limitEndX", FieldKind::F32, off(offsetof(CParallax2D, limitEndX)))
+            .field("limitEndY", FieldKind::F32, off(offsetof(CParallax2D, limitEndY)))
+            .field("flags", FieldKind::I32, off(offsetof(CParallax2D, flags)))
+            .field("timeX", FieldKind::F32, off(offsetof(CParallax2D, timeX)), 0, true)
+            .field("timeY", FieldKind::F32, off(offsetof(CParallax2D, timeY)), 0, true)
+            .field("reserved", FieldKind::I32, off(offsetof(CParallax2D, reserved)), 0, true)
+            .field("spare", FieldKind::I32, off(offsetof(CParallax2D, spare)), 0, true);
+        AVER_ASSERTM(b.verify(sizeof(CParallax2D)), "CParallax2D");
+        out.parallax = b.typeId();
+    }
     g_ids = out;
     return g_ids;
 }
@@ -140,6 +224,18 @@ C2DLayer* attachLayer(scene::World& w, Entity e, i32 index) {
     auto* l = g_ids.layer ? static_cast<C2DLayer*>(w.addComponent(e, g_ids.layer)) : nullptr;
     if (l) l->index = index;
     return l;
+}
+
+CSpriteAnim2D* attachAnim(scene::World& w, Entity e) {
+    return g_ids.anim ? static_cast<CSpriteAnim2D*>(w.addComponent(e, g_ids.anim)) : nullptr;
+}
+
+CCamera2D* attachCamera(scene::World& w, Entity e) {
+    return g_ids.camera ? static_cast<CCamera2D*>(w.addComponent(e, g_ids.camera)) : nullptr;
+}
+
+CParallax2D* attachParallax(scene::World& w, Entity e) {
+    return g_ids.parallax ? static_cast<CParallax2D*>(w.addComponent(e, g_ids.parallax)) : nullptr;
 }
 
 u32 updateTransforms(scene::World& w) {

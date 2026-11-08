@@ -43,3 +43,15 @@ if(TARGET Aver.Runtime.Game.Core AND TARGET Aver.UI.Abi)
   target_compile_definitions(Scene2dHostTest PRIVATE AVER_WITH_UI_ABI=1)
   set_target_properties(Scene2dHostTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# Scene2dAnimTest -- sprite animation: the clip table, playback both ways, loop and finish, weights, speed scale, autoplay, the frame reaching
+# the CSprite2D, the event queue and the animation half of scene2d_abi.h. Headless.
+add_executable(Scene2dAnimTest src/Scene2dAnimTest.cpp)
+target_link_libraries(Scene2dAnimTest PRIVATE Aver.Scene Aver.Core)
+set_target_properties(Scene2dAnimTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# Scene2dCameraTest -- the 2D camera and Parallax2D against a real UiDrawList: view, zoom, limits, drag, smoothing, which layers follow,
+# the current camera, parallax scale / autoscroll / tiling / limits, and the camera half of scene2d_abi.h.
+add_executable(Scene2dCameraTest src/Scene2dCameraTest.cpp)
+target_link_libraries(Scene2dCameraTest PRIVATE Aver.Scene Aver.UI Aver.Core)
+set_target_properties(Scene2dCameraTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

@@ -127,10 +127,18 @@ static std::string bodyOf(const std::string& text, const std::string& marker) {
 
 int main() {
     // ---- version and layout ----
-    check(aver_scene2d_abi_version() == AVER_SCENE2D_ABI_VERSION && AVER_SCENE2D_ABI_VERSION == 2, "the ABI version is 2 and is what the header says");
+    check(aver_scene2d_abi_version() == AVER_SCENE2D_ABI_VERSION && AVER_SCENE2D_ABI_VERSION == 3, "the ABI version is 3 and is what the header says");
     check(sizeof(AverScene2dTransform) == 32 && sizeof(AverScene2dSprite) == 56 && sizeof(AverScene2dLayer) == 32, "struct sizes: 32, 56, 32");
-    check(aver_scene2d_struct_size(0) == 32 && aver_scene2d_struct_size(1) == 56 && aver_scene2d_struct_size(2) == 32 && aver_scene2d_struct_size(3) == 0,
+    check(aver_scene2d_struct_size(0) == 32 && aver_scene2d_struct_size(1) == 56 && aver_scene2d_struct_size(2) == 32 && aver_scene2d_struct_size(8) == 0,
           "the DLL reports the same sizes (the managed handshake) and 0 for anything else");
+    check(sizeof(AverScene2dAnimFrame) == 32 && sizeof(AverScene2dAnimState) == 32 && sizeof(AverScene2dAnimEvent) == 16 && sizeof(AverScene2dCamera) == 56 &&
+              sizeof(AverScene2dParallax) == 56,
+          "the animation, camera and parallax struct sizes: 32, 32, 16, 56, 56");
+    check(offsetof(AverScene2dAnimFrame, region) == 8 && offsetof(AverScene2dAnimFrame, weight) == 24 && offsetof(AverScene2dAnimFrame, cell) == 28 &&
+              offsetof(AverScene2dAnimState, clip) == 8 && offsetof(AverScene2dAnimState, frameCount) == 28 && offsetof(AverScene2dCamera, limit) == 16 &&
+              offsetof(AverScene2dCamera, drag) == 36 && offsetof(AverScene2dCamera, flags) == 52 && offsetof(AverScene2dParallax, repeatTimes) == 24 &&
+              offsetof(AverScene2dParallax, flags) == 52,
+          "and their field offsets are pinned");
     check(offsetof(AverScene2dTransform, position) == 0 && offsetof(AverScene2dTransform, rotation) == 8 && offsetof(AverScene2dTransform, scale) == 12 &&
               offsetof(AverScene2dTransform, zIndex) == 20 && offsetof(AverScene2dTransform, flags) == 24 && offsetof(AverScene2dTransform, treeOrder) == 28,
           "AverScene2dTransform field offsets are pinned");
@@ -151,14 +159,19 @@ int main() {
         struct Row { const char* c; const char* cs; size_t size; };
         const Row rows[] = {{"AverScene2dTransform", "struct AverScene2dTransform", sizeof(AverScene2dTransform)},
                             {"AverScene2dSprite", "struct AverScene2dSprite", sizeof(AverScene2dSprite)},
-                            {"AverScene2dLayer", "struct AverScene2dLayer", sizeof(AverScene2dLayer)}};
+                            {"AverScene2dLayer", "struct AverScene2dLayer", sizeof(AverScene2dLayer)},
+                            {"AverScene2dAnimFrame", "struct AverScene2dAnimFrame", sizeof(AverScene2dAnimFrame)},
+                            {"AverScene2dAnimState", "struct AverScene2dAnimState", sizeof(AverScene2dAnimState)},
+                            {"AverScene2dAnimEvent", "struct AverScene2dAnimEvent", sizeof(AverScene2dAnimEvent)},
+                            {"AverScene2dCamera", "struct AverScene2dCamera", sizeof(AverScene2dCamera)},
+                            {"AverScene2dParallax", "struct AverScene2dParallax", sizeof(AverScene2dParallax)}};
         for (const Row& r : rows) {
             const auto c = flatC(bodyOf(hdr, std::string("typedef struct ") + r.c));
             const auto m = flatCs(bodyOf(cs, r.cs));
             check(!c.empty() && c == m, std::string(r.c) + ": the managed mirror has the same scalars in the same order");
             check(sizeOfSeq(m) == static_cast<int>(r.size), std::string(r.c) + ": and lays out to the same size under Sequential");
         }
-        check(cs.find("AbiVersion = 2") != std::string::npos, "the managed binding names ABI version 2");
+        check(cs.find("AbiVersion = 3") != std::string::npos, "the managed binding names ABI version 3");
         check(cs.find("aver_scene2d_struct_size") != std::string::npos, "and checks the struct sizes before it calls anything");
     }
 #endif
@@ -168,9 +181,11 @@ int main() {
     check(aver_scene2d_register() == 1, "register succeeds");
     const Ids id = ids();
     check(aver_scene2d_component_id(0) == static_cast<int>(id.transform) && aver_scene2d_component_id(1) == static_cast<int>(id.sprite) &&
-              aver_scene2d_component_id(2) == static_cast<int>(id.layer) && aver_scene2d_component_id(3) == 0,
-          "component_id returns the three dynamic ids, 0 for anything else");
-    check(w.componentId("C2DTransform") == id.transform && w.componentId("CSprite2D") == id.sprite && w.componentId("C2DLayer") == id.layer,
+              aver_scene2d_component_id(2) == static_cast<int>(id.layer) && aver_scene2d_component_id(3) == static_cast<int>(id.anim) &&
+              aver_scene2d_component_id(4) == static_cast<int>(id.camera) && aver_scene2d_component_id(5) == static_cast<int>(id.parallax) && aver_scene2d_component_id(6) == 0,
+          "component_id returns the six dynamic ids, 0 for anything else");
+    check(w.componentId("C2DTransform") == id.transform && w.componentId("CSprite2D") == id.sprite && w.componentId("C2DLayer") == id.layer &&
+              w.componentId("CSpriteAnim2D") == id.anim && w.componentId("CCamera2D") == id.camera && w.componentId("CParallax2D") == id.parallax,
           "and they are the names the generic scene ABI resolves");
     check(aver_scene2d_register() == 1 && aver_scene2d_component_id(0) == static_cast<int>(id.transform), "registering again changes nothing");
 

@@ -166,6 +166,33 @@ int main() {
         check(g_useCalls == 2, "the image table is asked once per indexed path per frame; an unindexed id costs no call");
     }
 
+    // ---- the frame steps time: an animation advances by dt, and the camera moves the sprites ----
+    {
+        clearWorld(w);
+        const scene::Entity e = sprite(w, "anim", kBg, 0, 0);
+        scene2d::CSpriteAnim2D* an = scene2d::attachAnim(w, e);
+        scene2d::AnimFrame2D fr[2] = {};
+        fr[1].cell = 3;
+        scene2d::setClip(*an, 0, "a", 10, true, fr, 2);
+        scene2d::playClip(w, e, "a");
+        ui::UiDrawList l;
+        const float vp[4] = {0, 0, 800, 600};
+        game::scene2dFrame(w, l, vp, 0.15f);
+        check(an->frame == 1 && w.component<scene2d::CSprite2D>(e, scene2d::ids().sprite)->frame == 3, "scene2dFrame(dt) advances the animation");
+        game::scene2dFrame(w, l, vp);
+        check(an->frame == 1, "and a zero dt advances nothing");
+        const scene::Entity cam = w.create("cam");
+        scene2d::attachTransform(w, cam)->posX = 500;
+        scene2d::attachCamera(w, cam);
+        scene2d::setCanvasView({}, {});
+        ui::UiDrawList l2;
+        game::scene2dFrame(w, l2, vp, 0.016f);
+        const auto& c = l2.commands(ui::UiLayer::Content)[0];
+        f32 x0 = 1e9f;
+        for (u32 i = 0; i < c.indexCount; ++i) x0 = std::min(x0, l2.vertices()[l2.indices()[c.indexOffset + i]].x);
+        check(approx(x0, -200), "a camera 100 right of the middle moves the 200 wide sprite 100 left of where it would be");
+    }
+
     // ---- a host that is not drawing the game UI drops the queue; unbinding stops sprites ----
     {
         Ext e{0, 900};

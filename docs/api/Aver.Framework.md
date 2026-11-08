@@ -2,7 +2,7 @@
 
 # Aver.Framework public API
 
-283 public types and 2421 public members, read from `scripting/csharp/Aver.Framework/` (154 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+291 public types and 2492 public members, read from `scripting/csharp/Aver.Framework/` (154 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Framework
 
@@ -657,6 +657,23 @@ Values: `Idle = 0`, `Running = 1`, `Succeeded = 2`, `Failed = 3`
 `public enum Bus` - The four mixer buses, mirroring AVER_AUDIO_BUS_* in modules/audio.abi/include/aver/audio/audio_abi.h and aver::audio::Bus in Sound.hpp.
 
 Values: `Sfx = 0`, `Music = 1`, `Voice = 2`, `Ui = 3`
+
+### Camera2D
+
+`public struct Camera2D` - A 2D camera on an entity that has a Transform2D.
+
+- `public Vector2 Zoom` - Zoom; 0 reads as 1, larger shows less.
+- `public Vector2 Offset` - Added to the entity's position to get the view centre.
+- `public Vector4 Limit` - Left, top, right, bottom in world units; each applies only with its limit flag.
+- `public float SmoothSpeed` - Easing rate with Smoothing; 0 reads as 5.
+- `public Vector4 Drag` - Left, top, right, bottom drag margins as fractions of the half view; used with the drag flags.
+- `public Camera2DFlags Flags` - Behaviour bits.
+
+### Camera2DFlags
+
+`public enum Camera2DFlags : uint` - Flags of Camera2D.
+
+Values: `None = 0`, `Disabled = 1`, `Current = 2`, `FollowRotation = 4`, `Smoothing = 8`, `DragHorizontal = 16`, `DragVertical = 32`, `AnchorTopLeft = 64`, `LimitLeft = 128`, `LimitTop = 256`, `LimitRight = 512`, `LimitBottom = 1024`
 
 ### CameraBlendCurve
 
@@ -2457,6 +2474,25 @@ Values: `Velocity = 0`, `Yaw = 1`
 - `public Body Other { get; }` - What entered or left.
 - `public bool Entered { get; }` - True on entering, false on leaving.
 
+### Parallax2D
+
+`public struct Parallax2D` - Parallax scrolling for the sprites below an entity (Godot's Parallax2D).
+
+- `public Vector2 ScrollScale` - 1 scrolls with the world, 0 stays on screen, between is farther away.
+- `public Vector2 ScrollOffset` - Added to the scroll.
+- `public Vector2 RepeatSize` - Tile size per axis; 0 means no tiling on that axis.
+- `public int RepeatTimes` - Tiles on each side of the original; 0 reads as 1.
+- `public Vector2 Autoscroll` - World units per second the layer drifts.
+- `public Vector2 LimitBegin` - With LimitBegin: the camera position the scroll uses is not lower than this.
+- `public Vector2 LimitEnd` - With LimitEnd: the camera position the scroll uses is not higher than this.
+- `public Parallax2DFlags Flags` - Behaviour bits.
+
+### Parallax2DFlags
+
+`public enum Parallax2DFlags : uint` - Flags of Parallax2D.
+
+Values: `None = 0`, `NoFollow = 1`, `LimitBegin = 2`, `LimitEnd = 4`
+
 ### ParticleParamKind
 
 `public enum ParticleParamKind` - The kind of a particle user parameter, as an effect declares it with PARAM.
@@ -2726,16 +2762,38 @@ Values: `Start = 0`, `End = 1`
 
 `public static class Scene2D` - 2D scenes: sprites, 2D transforms and layers as entity components, the stretch transform and the ordered canvas that sprites and external draws (a UI control's) share.
 
-- `public const int AbiVersion = 2` - The ABI version this binding was written against.
+- `public const int AbiVersion = 3` - The ABI version this binding was written against.
 - `public static bool Available { get; }` - True when the native library is the version this binding speaks and its structs match the managed ones.
-- `public static bool Register()` - Registers the three components with the scene (idempotent).
-- `public static int ComponentId(Scene2DComponent which)` - The scene component id of one of the three, for the generic field API; 0 when not registered.
+- `public static bool Register()` - Registers the six components with the scene (idempotent).
+- `public static int ComponentId(Scene2DComponent which)` - The scene component id of one of the six, for the generic field API; 0 when not registered.
 - `public static bool Set(Entity e, in Transform2D t)` - Adds the component if the entity lacks it and writes the state.
 - `public static bool Set(Entity e, in Sprite2D s)` - Adds the component if the entity lacks it and writes the state.
 - `public static bool Set(Entity e, in Layer2D l)` - Adds the component if the entity lacks it and writes the state.
 - `public static bool TryGet(Entity e, out Transform2D t)` - Reads the transform.
 - `public static bool TryGet(Entity e, out Sprite2D s)` - Reads the sprite.
 - `public static bool TryGet(Entity e, out Layer2D l)` - Reads the layer.
+- `public static Parallax2D DefaultParallax { get; }` - Parallax settings that scroll with the world, as Godot's defaults: scroll scale 1, no tiling.
+- `public static bool Set(Entity e, in Camera2D c)` - Adds the component if the entity lacks it and writes the state.
+- `public static bool TryGet(Entity e, out Camera2D c)` - Reads the camera.
+- `public static bool Set(Entity e, in Parallax2D p)` - Adds the component if the entity lacks it and writes the state.
+- `public static bool TryGet(Entity e, out Parallax2D p)` - Reads the parallax.
+- `public static bool MakeCurrent(Entity e)` - Makes the entity's camera the current one (clearing the others).
+- `public static Entity CurrentCamera { get; }` - The entity of the camera that applies, or None.
+- `public static bool TryGetCameraCenter(Entity e, out Vector2 center)` - The view centre of the entity's camera in world units after easing and limits.
+- `public static bool TryGetCameraView(out Matrix3x2 view)` - The current camera's world to content-units transform.
+- `public static bool Set(Entity e, in SpriteAnim2D a)` - Writes the playback settings (speed scale and autoplay), adding the component if needed.
+- `public static bool TryGet(Entity e, out SpriteAnim2D a)` - Reads the playback settings and state.
+- `public const int MaxClips = 16` - The most clips one entity can hold.
+- `public const int MaxClipFrames = 128` - The most frames one entity can hold, across its clips.
+- `public static bool SetClip(Entity e, int index, string name, float fps, bool loop, ReadOnlySpan<SpriteAnimFrame2D> frames)` - Defines clip index (an index equal to the clip count appends), adding the component if needed.
+- `public static bool TryGetClip(Entity e, int index, out string name, out float fps, out bool loop, out SpriteAnimFrame2D[] frames)` - Reads clip index.
+- `public static int FindClip(Entity e, string name)` - The index of the clip named name, or -1.
+- `public static bool Play(Entity e, string? name = null, bool restart = false)` - Plays the clip name (null or empty continues the current one); restart rewinds one that is already playing.
+- `public static bool Stop(Entity e)` - Stops the animation and rewinds it to its first frame.
+- `public static bool Pause(Entity e)` - Stops the animation where it is.
+- `public static bool SetFrame(Entity e, int frame, float progress = 0f)` - Shows frame frame of the current clip (clamped), progress of the way through it.
+- `public static SpriteAnimEvent2D[] PollAnimationEvents(int max = 256)` - Drains the queued animation events (frame changed, finished, looped, clip changed), oldest first.
+- `public static void Tick(float dt)` - One step of everything time-driven: transforms, animations (and their events), parallax autoscroll, camera drag and easing.
 - `public static bool Remove(Entity e, Scene2DComponent which)` - Removes one of the components.
 - `public static int UpdateTransforms()` - Recomposes the 2D transforms now (the canvas frame does it too).
 - `public static bool TryGetWorld(Entity e, out Matrix3x2 world, out int z)` - The composed world transform (canvas units; x' = M11 x + M21 y + M31) and effective z of a 2D entity.
@@ -2751,9 +2809,9 @@ Values: `Start = 0`, `End = 1`
 
 ### Scene2DComponent
 
-`public enum Scene2DComponent` - Which of the three components.
+`public enum Scene2DComponent` - Which of the six components.
 
-Values: `Transform = 0`, `Sprite = 1`, `Layer = 2`
+Values: `Transform = 0`, `Sprite = 1`, `Layer = 2`, `SpriteAnim = 3`, `Camera = 4`, `Parallax = 5`
 
 ### Scene2DTextureResolver
 
@@ -2976,6 +3034,38 @@ Values: `Mix = 0`, `Add = 1`, `Sub = 2`, `Mul = 3`
 `public enum Sprite2DFlags : uint` - Flags of Sprite2D.
 
 Values: `None = 0`, `FlipH = 1`, `FlipV = 2`, `NotCentered = 4`, `Hidden = 8`, `Nearest = 16`
+
+### SpriteAnim2D
+
+`public struct SpriteAnim2D` - Playback settings and state of the sprite animation on an entity.
+
+- `public float SpeedScale` - Playback speed; 0 reads as 1, negative plays backwards.
+- `public int Autoplay` - Clip index + 1 that starts playing on the first frame; 0 for none.
+- `public bool Playing` - Read only: the clip is advancing.
+- `public int Clip` - Read only: index of the current clip, -1 when there are none.
+- `public int Frame` - Read only: frame within the current clip.
+- `public float Progress` - Read only: 0 to 1 through that frame.
+- `public int ClipCount` - Read only: clips defined.
+- `public int FrameCount` - Read only: frames defined across all the clips.
+
+### SpriteAnimEvent2D
+
+`public readonly record struct SpriteAnimEvent2D(Entity Entity, SpriteAnimEventKind Kind, int Clip, int Frame)` - A sprite animation event: Entity had Kind happen at Clip, Frame.
+
+### SpriteAnimEventKind
+
+`public enum SpriteAnimEventKind` - What a sprite animation reported.
+
+Values: `FrameChanged = 0`, `Finished = 1`, `Looped = 2`, `AnimationChanged = 3`
+
+### SpriteAnimFrame2D
+
+`public struct SpriteAnimFrame2D` - One frame of a sprite animation.
+
+- `public long Texture` - Asset id of the image; 0 keeps the sprite's own texture (a frame that is a cell of its sheet).
+- `public Vector4 Region` - Source rectangle in pixels (x, y, width, height); a zero width or height means the whole image.
+- `public float Weight` - Relative length, 0 reads as 1: the frame lasts Weight / (fps * speed scale) seconds.
+- `public int Cell` - The sprite's HFrames x VFrames cell while this frame shows.
 
 ### StackExpire
 

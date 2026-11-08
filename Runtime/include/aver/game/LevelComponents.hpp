@@ -28,7 +28,7 @@ inline constexpr std::string_view kPlacedComponentTypes[] = {
     "SkeletalMesh","Animator","RootMotion","MotionMatcher","ControlRig","IkRig","Brain","SmartObject","SoftBody",
     "Cloth","Destructible","MorphTargets","CameraRig","Vehicle","ParticleEmitter","SoftField","Jelly","Rope","CollisionShape","Hair",
     "SurfaceMaterials",    // SurfaceMaterials (P2): slot0=<material> ... slot15=<material>, scene::CSurfaceMaterials; no Details-panel kind (the record is authored by hand, a converter or script)
-    "C2DTransform","CSprite2D","C2DLayer"};   // 2D scenes (docs/plans/RENDER_2D.md): scene2d components; they need no mesh on the entity, and no Details-panel kind yet
+    "C2DTransform","CSprite2D","C2DLayer","CSpriteAnim2D","CCamera2D","CParallax2D"};   // 2D scenes (docs/plans/RENDER_2D.md): scene2d components; they need no mesh on the entity, and no Details-panel kind yet
 
 using PathOfIdFn = std::function<std::string(u64 id)>;   // content-relative path, "" when unknown
 
@@ -42,7 +42,7 @@ std::optional<fmt::OcPlacedComponent> capturePlacedComponent(scene::World&, scen
 std::vector<fmt::OcPlacedComponent> capturePlacedComponents(scene::World&, scene::Entity, const PathOfIdFn&);   // canonical order
 // Applies p.components (sorted into canonical order). Returns the number applied. `placementIndex` only labels the warnings.
 u32 applyPlacedComponents(scene::World&, scene::Entity, const fmt::OcWorldPlacement&, i64 placementIndex = -1);
-// Applies only the 2D records (C2DTransform, CSprite2D, C2DLayer) of p: a class placement's actor takes them as it spawns, because the level
+// Applies only the 2D records (C2DTransform, CSprite2D, C2DLayer, CSpriteAnim2D, CCamera2D, CParallax2D) of p: a class placement's actor takes them as it spawns, because the level
 // pass skips class placements. Returns the number applied.
 u32 applyPlacedComponents2D(scene::World&, scene::Entity, const fmt::OcWorldPlacement&, i64 placementIndex = -1);
 // The post-pass: for k in inst.entities, applies w.placements[inst.placementIndex[k]].components.
