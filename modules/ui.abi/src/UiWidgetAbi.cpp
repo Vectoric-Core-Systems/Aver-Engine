@@ -7,6 +7,7 @@
 #include "aver/ui/UiLayoutAsset.hpp"
 #include "aver/ui/UiProps.hpp"
 #include "aver/ui/UiScreens.hpp"
+#include "aver/ui/UiThemeSheet.hpp"
 #include "aver/ui/UiTree.hpp"
 
 #include <algorithm>
@@ -304,7 +305,15 @@ uint32_t aver_ui_layout_open(const char* utf8Text, int32_t applyEnvironment) {
     }
     g_warnings = joinLines(built.errors);
     if (applyEnvironment) {
-        g_tree.setTheme(uiBuiltinTheme(doc.theme));
+        {
+            UiTheme th;
+            std::string themeErr;
+            if (!uiResolveTheme(doc.theme, readNestedLayout, th, &themeErr)) {
+                if (!g_warnings.empty()) g_warnings += '\n';
+                g_warnings += themeErr;
+            }
+            g_tree.setTheme(std::move(th));
+        }
         UiDpi d = doc.dpi;
         d.userScale = g_tree.dpi().userScale;
         d.platformScale = g_tree.dpi().platformScale;

@@ -19,6 +19,7 @@ struct UiStyle {
     u32 background[4] = {0, 0, 0, 0};   // indexed by UiVisualState
     u32 border = 0;
     f32 borderWidth = 0;
+    f32 radius = 0;                     // corner radius of the background and border (design px); 0 = square
     u32 text = 0;
     u32 textDisabled = 0;
     u32 accent = 0;                     // slider fill, checkmark, progress fill, caret

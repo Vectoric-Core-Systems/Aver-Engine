@@ -112,6 +112,7 @@ UiStyle UiTheme::resolve(UiWidgetKind kind, std::string_view namedStyle) const {
         for (u32& b : s.background) b = 0;
         s.border = 0;
         s.borderWidth = 0.0f;
+        s.radius = 0.0f;
         return s;
     }
     for (const auto& [n, o] : named) {
@@ -119,6 +120,7 @@ UiStyle UiTheme::resolve(UiWidgetKind kind, std::string_view namedStyle) const {
         for (int i = 0; i < 4; ++i) if (o.background[i]) s.background[i] = o.background[i];
         if (o.border) s.border = o.border;
         if (o.borderWidth > 0.0f) s.borderWidth = o.borderWidth;
+        if (o.radius > 0.0f) s.radius = o.radius;
         if (o.text) s.text = o.text;
         if (o.textDisabled) s.textDisabled = o.textDisabled;
         if (o.accent) s.accent = o.accent;

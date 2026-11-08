@@ -47,6 +47,25 @@ void UiTree::drawScrollbar(UiPainter& p, const UiWidget& w, const UiStyle& st, f
                uiWithOpacity(hc ? base : uiWithOpacity(base, 0.35f), opacity));
 }
 
+// p' = pivot + translate + R * S * (p - pivot), in the parent's space; identity when the widget has no render transform.
+UiAffine UiTree::renderAffine(const UiWidget& w) const {
+    const UiWidgetFx& fx = w.fx;
+    const UiVec2 xlate = (fx.mask & kFxTranslate) ? fx.translate : w.renderTranslate;
+    const f32 rot = (fx.mask & kFxRotation) ? fx.rotation : w.renderRotation;
+    const UiVec2 xscale = (fx.mask & kFxScale) ? fx.scale : w.renderScale;
+    UiAffine a;
+    if (xlate.x == 0.0f && xlate.y == 0.0f && rot == 0.0f && xscale.x == 1.0f && xscale.y == 1.0f) return a;
+    const f32 rad = rot * 0.017453292519943295f;
+    const f32 cs = std::cos(rad), sn = std::sin(rad);
+    const f32 s = scaleOf(w);
+    const f32 cx = w.rect.x + w.renderPivot.x * w.rect.w, cy = w.rect.y + w.renderPivot.y * w.rect.h;
+    a.a = cs * xscale.x;  a.b = sn * xscale.x;
+    a.c = -sn * xscale.y; a.d = cs * xscale.y;
+    a.tx = cx + xlate.x * s - (a.a * cx + a.c * cy);
+    a.ty = cy + xlate.y * s - (a.b * cx + a.d * cy);
+    return a;
+}
+
 void UiTree::drawWidget(UiPainter& p, const UiWidget& w, f32 parentOpacity, bool parentEnabled) {
     if (!w.visible || w.inactive) return;
     const UiWidgetFx& fx = w.fx;
@@ -59,22 +78,9 @@ void UiTree::drawWidget(UiPainter& p, const UiWidget& w, f32 parentOpacity, bool
     const f32 s = scaleOf(w);
 
     // Render transform: the authored one, or the animated value over it, around the pivot in the widget's rectangle.
-    const UiVec2 xlate = (fx.mask & kFxTranslate) ? fx.translate : w.renderTranslate;
-    const f32 rot = (fx.mask & kFxRotation) ? fx.rotation : w.renderRotation;
-    const UiVec2 xscale = (fx.mask & kFxScale) ? fx.scale : w.renderScale;
-    const bool transformed = xlate.x != 0.0f || xlate.y != 0.0f || rot != 0.0f || xscale.x != 1.0f || xscale.y != 1.0f;
-    if (transformed) {
-        const f32 rad = rot * 0.017453292519943295f;
-        const f32 cs = std::cos(rad), sn = std::sin(rad);
-        const f32 cx = w.rect.x + w.renderPivot.x * w.rect.w, cy = w.rect.y + w.renderPivot.y * w.rect.h;
-        // p' = pivot + translate + R * S * (p - pivot)
-        UiAffine a;
-        a.a = cs * xscale.x;  a.b = sn * xscale.x;
-        a.c = -sn * xscale.y; a.d = cs * xscale.y;
-        a.tx = cx + xlate.x * s - (a.a * cx + a.c * cy);
-        a.ty = cy + xlate.y * s - (a.b * cx + a.d * cy);
-        p.pushTransform(a);
-    }
+    const UiAffine xf = renderAffine(w);
+    const bool transformed = !xf.identity();
+    if (transformed) p.pushTransform(xf);
     const f32 px = fontPx(w, st);
     const UiRect r = w.rect;
     const UiRect inner = r.deflate(paddingOf(w, st));
@@ -117,11 +123,16 @@ void UiTree::drawWidget(UiPainter& p, const UiWidget& w, f32 parentOpacity, bool
         const std::shared_ptr<const UiTextLayout> l = p.layoutText(txt, textStyleOf(w, st), box);
         p.drawText(*l, area, align, centreV, colour);
     };
-    const auto fillBg = [&](const UiRect& rect) { if (uiAlphaOf(bg) > 0) p.fillRect(rect, C(bg)); };
+    const f32 radius = st.radius * s;
+    const auto fillBg = [&](const UiRect& rect) {
+        if (uiAlphaOf(bg) <= 0) return;
+        if (radius > 0.0f) p.fillRoundRect(rect, radius, C(bg)); else p.fillRect(rect, C(bg));
+    };
     const f32 borderW = w.borderWidth >= 0.0f ? w.borderWidth : st.borderWidth;
     const u32 borderCol = (w.borderColor && !hc) ? w.borderColor : st.border;
     const auto border = [&](const UiRect& rect) {
-        if (borderW > 0.0f && uiAlphaOf(borderCol) > 0) p.strokeRect(rect, borderW * s, C(borderCol));
+        if (borderW <= 0.0f || uiAlphaOf(borderCol) <= 0) return;
+        if (radius > 0.0f) p.strokeRoundRect(rect, radius, borderW * s, C(borderCol)); else p.strokeRect(rect, borderW * s, C(borderCol));
     };
 
     bool clipChildren = w.clip;

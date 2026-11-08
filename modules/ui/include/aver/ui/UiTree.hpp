@@ -183,6 +183,11 @@ public:
     UiWidgetId navScope() const;
     // Focusable widgets under `root` in document order (what Tab and arrows choose between).
     std::vector<UiFocusItem> focusItems(UiWidgetId root) const;
+    // Render transforms (UiTreeDraw.cpp): one widget's (identity when it has none), the accumulated one of its ancestors, and the screen point
+    // mapped back into the widget's layout space (false when a transform is singular).
+    UiAffine renderAffine(const UiWidget& w) const;
+    UiAffine ancestorAffine(const UiWidget& w) const;
+    bool toLayoutSpace(const UiWidget& w, f32 x, f32 y, f32& lx, f32& ly) const;
     // Roots back to front: layer, then zOrder, then creation order.
     std::vector<UiWidgetId> sortedRoots() const;
 
@@ -287,7 +292,7 @@ private:
     bool hittable(const UiWidget& w) const;
     UiWidgetId hitIn(const UiWidget& w, f32 x, f32 y) const;
     bool focusCandidate(const UiWidget& w) const;
-    void collectFocus(const UiWidget& w, std::vector<UiFocusItem>& out) const;
+    void collectFocus(const UiWidget& w, const UiAffine& parentXf, std::vector<UiFocusItem>& out) const;
     UiWidgetId nearestFocusable(UiWidgetId id) const;
     UiWidgetId nearestScrollable(UiWidgetId id) const;
     void scrollBy(UiWidget& w, f32 dy);

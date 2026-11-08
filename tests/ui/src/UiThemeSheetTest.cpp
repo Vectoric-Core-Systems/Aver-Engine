@@ -204,6 +204,52 @@ int main() {
         check(uiThemeWrite(back) == uiBuiltinDefaultThemeText(), "and writes the same text");
     }
 
+    AVER_INFO("=== the widget tree's theme as a sheet ===");
+    {
+        UiTheme t = uiBuiltinTheme("light");
+        t.name = "Mine";
+        t.kinds[static_cast<usize>(UiWidgetKind::Button)].radius = 6;
+        t.kinds[static_cast<usize>(UiWidgetKind::Button)].background[1] = 0xFF123456;
+        t.kinds[static_cast<usize>(UiWidgetKind::Button)].padding = {20, 9, 21, 10};
+        t.kinds[static_cast<usize>(UiWidgetKind::Text)].fontSize = 21;
+        t.kinds[static_cast<usize>(UiWidgetKind::Text)].fontFamily = "Body";
+        t.kinds[static_cast<usize>(UiWidgetKind::Text)].bold = 1;
+        t.baseFontSize = 20;
+        t.focusColor = 0xFF00FF00;
+        t.named[0].second.fontSize = 40;                   // "title"
+        UiStyle extra;
+        extra.text = 0xFF0000FF;
+        extra.radius = 3;
+        t.named.emplace_back("accent", extra);
+
+        const UiThemeSheet sh = uiThemeToSheet(t, "light");
+        check(sh.types.count("Aver.button") && sh.types.at("Aver.button").constants.at("radius") == 6, "a changed item is written under its kind");
+        check(!sh.types.count("Aver.panel") && !sh.types.count("Aver.slider"), "what equals the base is not written");
+        const std::string text = uiThemeWrite(sh);
+        check(text.find("BASETHEME light") != std::string::npos, "the sheet names its base");
+        UiThemeSheet back;
+        std::string err;
+        check(uiThemeParse(text, back, &err), "the text parses: " + err);
+        const UiTheme r = uiThemeFromSheet(back);
+        const UiStyle& b = r.kinds[static_cast<usize>(UiWidgetKind::Button)];
+        check(r.name == "Mine" && r.baseFontSize == 20 && r.focusColor == 0xFF00FF00, "global items round trip");
+        check(b.radius == 6 && b.background[1] == 0xFF123456 && b.padding == UiInsets{20, 9, 21, 10}, "radius, state colour and padding round trip");
+        check(b.background[0] == uiBuiltinTheme("light").kinds[static_cast<usize>(UiWidgetKind::Button)].background[0], "unwritten items keep the base");
+        const UiStyle& tx = r.kinds[static_cast<usize>(UiWidgetKind::Text)];
+        check(tx.fontSize == 21 && tx.fontFamily == "Body" && tx.bold == 1, "font size, family and weight round trip");
+        check(r.named.size() == t.named.size() && r.named[0].second.fontSize == 40, "an edited built-in variant round trips");
+        check(r.named.back().first == "accent" && r.named.back().second.text == 0xFF0000FF && r.named.back().second.radius == 3, "and a new variant");
+        check(uiThemeWrite(uiThemeToSheet(r, "light")) == text, "write, read, write is stable");
+
+        UiThemeSheet godot;
+        check(uiThemeParse("OCTHEME 1\nNAME G\nBASETHEME dark\nCOLOR Button font_color #FFFFFFFF\nCOLOR Aver.button text #112233FF\nWIDGET unknown record\n", godot, &err), "Godot items and unknown records sit beside the Aver ones");
+        check(godot.types.count("Button") && uiThemeFromSheet(godot).kinds[static_cast<usize>(UiWidgetKind::Button)].text == 0xFF332211, "and the Aver item is read");
+        UiTheme th;
+        check(uiResolveTheme("contrast", {}, th) && th.name == "contrast", "a built-in name resolves");
+        check(!uiResolveTheme("UI/missing.octheme", [](const std::string&, std::string&) { return false; }, th, &err) && th.name == "dark" && !err.empty(), "a sheet that cannot be read falls back to dark");
+        check(uiResolveTheme("UI/Mine.OCTHEME", [&](const std::string&, std::string& out) { out = text; return true; }, th) && th.name == "Mine", "a sheet path reads through the host");
+    }
+
     if (g_failures == 0) AVER_INFO("UiThemeSheetTest: all checks passed");
     else AVER_ERROR("UiThemeSheetTest: {} check(s) failed", g_failures);
     return g_failures == 0 ? 0 : 1;

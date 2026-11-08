@@ -94,10 +94,29 @@ be opened, is scaled per glyph. Offsets, sizes, margins, padding, spacing and bo
 
 ### Themes and styles
 
-`dark` (default), `light`, `contrast`. A theme has one style per widget kind plus named variants a widget picks
-with `style`: `title`, `heading`, `muted`, `danger`, `tab`, `clear`. Per-widget `bgColor`, `textColor`,
+`dark` (default), `light`, `contrast`, or the content path of an `.octheme` sheet (`THEME UI/Main.octheme`, see below). A theme
+has one style per widget kind plus named variants a widget picks with `style`: `title`, `heading`, `muted`, `danger`, `tab`,
+`clear`. A style also has a corner `radius` (design px, 0 = square): the background and the border are drawn as a rounded
+flat style box, anti-aliased, when it is set. Per-widget `bgColor`, `textColor`,
 `accentColor` override the style (alpha-zero means "unset"). Hover, pressed and disabled looks derive from the
 style. Padding in the style is *added* to the widget's own `padding`.
+
+#### Theme sheets (`.octheme`)
+
+A layout's `THEME` is a built-in name or the content path of an `.octheme`. The sheet is the format Fabric already uses for
+Godot themes (`docs/formats/FORMAT_SPECS.md`, ".octheme"), with a new `BASETHEME` record and its own namespaced types
+(`Aver`, `Aver.<kind>`, `Aver.style.<name>`), so Godot items and Aver items live in one file and neither reader trips on the other.
+A sheet is a diff against its base built-in: only what differs is written, the rest keeps the base. `uiThemeToSheet` /
+`uiThemeFromSheet` convert, `uiResolveTheme` resolves a layout's `THEME` through the host's reader (the native layout reader at
+runtime, the file system in the editor); a sheet that cannot be read falls back to `dark` and reports why. Lengths in a sheet
+are whole design pixels.
+
+The designer picks the layout's theme from the **Theme** entry in the toolbar (built-ins, the project's sheets, or New theme
+sheet), and the **Theme** tab of the bottom panel creates a sheet from the theme in force and edits it with live preview and the
+designer's undo: base font size, focus ring, modal veil, list row height, scrollbar width, and per widget kind or named
+variant (add and delete variants) the four background states, border, text, disabled text, accent, track and placeholder
+colours, corner radius, border width, the four paddings, font size, weight and family. The sheet is written by Save together
+with the layout; items other tools keep in the same file are preserved.
 
 ### Input routing (pausing game input while a menu has focus)
 
@@ -198,8 +217,13 @@ until released. `aver_ui_anim_*` (C), `UiAnimation.Play/Stop/Seek/Reverse/Pause/
 
 The render transform (`renderTranslate` design px, `renderRotation` degrees, `renderScale`, `renderPivot` as a fraction
 of the widget's rectangle, default the centre) is a 2D affine pushed on the draw list around the widget and its
-children (`UiPainter::pushTransform`). It is draw-only: layout, hit testing and focus ignore it, so a widget that moves
-a long way should not be clicked while it does.
+children (`UiPainter::pushTransform`). Layout ignores it, but hit testing and focus do not: the pointer is mapped through the
+inverse of each widget's accumulated render transform (its ancestors', then its own, about each pivot) before it is tested,
+so a translated, rotated or scaled widget (and its children) is clicked, hovered and dragged where it is drawn, and an
+animated offset moves the hit area with it. A slider, list row, scrollbar grip or caret reads the pointer in the widget's own
+space. `UiTree::focusItems` reports the bounding box of the drawn quad, so arrow-key navigation follows what is on screen.
+The editor canvas picks the same way. In the designer's preview, text turns with a rotated widget (the engine text path and
+the ImGui fallback).
 
 ### Bindings and event routes
 
@@ -386,8 +410,8 @@ Other designer work in this step: **palette search** (words in any order), **dev
 hierarchy; the inspector, drag, arrow keys and Delete apply to all selected; a property edit goes to every selected
 widget it applies to as one undo entry) and **per-state colours**: the inspector's **States** section previews the selected
 widget as normal / hovered / pressed / disabled and edits `bgHoverColor`, `bgPressedColor`, `bgDisabledColor`,
-`textHoverColor`, `textPressedColor`, `textDisabledColor` (none = the derived shade as before). Not done: a theme editor
-(themes are still the built-in dark / light / contrast and `.octheme` sheets edited as files).
+`textHoverColor`, `textPressedColor`, `textDisabledColor` (none = the derived shade as before).
+The theme editor (above) completes the designer track.
 
 ## Visual-script nodes
 

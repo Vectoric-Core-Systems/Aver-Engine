@@ -317,6 +317,66 @@ int main() {
         check(t.hitTest(10, 10) == lowBtn, "closing the modal frees the root beneath");
     }
 
+    AVER_INFO("=== hit testing under render transforms ===");
+    {
+        UiTree t;
+        UiWidget& root = box(t, 0, "Root", UiLayoutMode::None);
+        root.anchors = UiAnchors{0, 0, 1, 1};
+        root.inputMode = UiInputMode::Blocking;
+        const UiWidgetId rid = root.id;
+        const UiWidgetId tr = fixed(t, UiWidgetKind::Button, rid, "Tr", 0, 0, 100, 100).id;
+        const UiWidgetId ro = fixed(t, UiWidgetKind::Button, rid, "Ro", 0, 300, 200, 50).id;
+        const UiWidgetId sc = fixed(t, UiWidgetKind::Button, rid, "Sc", 400, 400, 100, 100).id;
+        UiWidget& par = fixed(t, UiWidgetKind::Panel, rid, "Par", 0, 600, 200, 200);
+        par.style = "clear";
+        const UiWidgetId parId = par.id;
+        const UiWidgetId kid = fixed(t, UiWidgetKind::Button, parId, "Kid", 10, 10, 50, 50).id;
+        t.get(tr)->renderTranslate = {200, 0};
+        t.get(ro)->renderRotation = 90;
+        t.get(sc)->renderScale = {2, 2};
+        t.get(parId)->renderTranslate = {300, 0};
+        t.layout(g_metrics);
+        check(t.hitTest(250, 50) == tr && t.hitTest(50, 50) == 0, "a translated widget is hit where it is drawn, not where it is laid out");
+        check(t.hitTest(100, 400) == ro && t.hitTest(10, 325) == 0, "a rotated widget is hit on its turned quad (200x50 turned 90 degrees stands upright)");
+        check(t.hitTest(360, 360) == sc && t.hitTest(300, 300) == 0, "a scaled widget is hit over its scaled bounds");
+        check(t.hitTest(320, 630) == kid && t.hitTest(20, 630) == 0, "a child follows its transformed parent");
+        t.get(tr)->fx.mask |= kFxTranslate;
+        t.get(tr)->fx.translate = {500, 0};
+        check(t.hitTest(550, 50) == tr && t.hitTest(250, 50) == 0, "an animated offset moves the hit area");
+        t.get(tr)->fx.translate = {0, 0};
+        check(t.hitTest(50, 50) == tr && t.hitTest(250, 50) == 0, "and back");
+        t.get(tr)->fx.mask = 0;
+        t.get(tr)->focusable = true;
+        t.get(kid)->focusable = true;
+        t.get(ro)->focusable = true;
+        const std::vector<UiFocusItem> items = t.focusItems(rid);
+        UiRect trR, roR, kidR;
+        for (const UiFocusItem& i : items) { if (i.id == tr) trR = i.rect; if (i.id == ro) roR = i.rect; if (i.id == kid) kidR = i.rect; }
+        check(approx(trR.x, 200) && approx(trR.w, 100), "focus navigation uses the translated bounds");
+        check(approx(roR.x, 75) && approx(roR.w, 50) && approx(roR.h, 200), "and the bounds of the turned quad");
+        check(approx(kidR.x, 310), "and a child's bounds under its parent's transform");
+    }
+
+    AVER_INFO("=== a theme's corner radius ===");
+    {
+        UiTree t;
+        UiWidget& root = box(t, 0, "Root", UiLayoutMode::None);
+        root.anchors = UiAnchors{0, 0, 1, 1};
+        fixed(t, UiWidgetKind::Button, root.id, "B", 10, 10, 120, 40);
+        t.layout(g_metrics);
+        UiDrawList square;
+        UiDrawListPainter p1(square, nullptr);
+        t.draw(p1);
+        UiTheme th = t.theme();
+        th.kinds[static_cast<usize>(UiWidgetKind::Button)].radius = 8;
+        t.setTheme(th);
+        t.layout(g_metrics);
+        UiDrawList round;
+        UiDrawListPainter p2(round, nullptr);
+        t.draw(p2);
+        check(round.vertices().size() > square.vertices().size() + 16, "a radius draws rounded geometry instead of a quad");
+    }
+
     AVER_INFO("=== focus order ===");
     {
         std::vector<UiFocusItem> items;
@@ -376,6 +436,31 @@ int main() {
         check(firstOf(drain(t), UiEventType::Clicked) == nullptr, "releasing elsewhere cancels the click");
         step(t, at(900, 900));
         check(!t.inputState().pointerOverUi, "the pointer is off the UI again");
+    }
+    {
+        // A transformed widget is clicked where it is drawn, and a slider reads the pointer in its own space.
+        UiTree t;
+        UiWidget& root = box(t, 0, "Root", UiLayoutMode::None);
+        root.inputMode = UiInputMode::Blocking;
+        const UiWidgetId rid = root.id;
+        UiWidget& btn = fixed(t, UiWidgetKind::Button, rid, "Go", 100, 100, 200, 50);
+        btn.command = "go";
+        btn.renderTranslate = {0, 300};
+        const UiWidgetId btnId = btn.id;
+        UiWidget& sl = fixed(t, UiWidgetKind::Slider, rid, "Vol", 100, 600, 200, 30);
+        sl.minValue = 0;
+        sl.maxValue = 1;
+        sl.renderTranslate = {400, 0};
+        const UiWidgetId slId = sl.id;
+        step(t, at(150, 420, 1));
+        step(t, at(150, 420, 0));
+        check(command(drain(t), "go") != nullptr, "a click at the drawn position activates a translated button");
+        step(t, at(150, 120, 1));
+        step(t, at(150, 120, 0));
+        check(command(drain(t), "go") == nullptr, "and a click at its laid-out position does not");
+        step(t, at(500 + 190, 615, 1));
+        check(t.get(slId)->value > 0.8f, "a translated slider reads the pointer in its own space");
+        step(t, at(500 + 190, 615, 0));
     }
     {
         UiTree t;

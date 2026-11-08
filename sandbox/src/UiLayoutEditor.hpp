@@ -19,6 +19,7 @@
 #include "aver/ui/UiAnimation.hpp"
 #include "aver/ui/UiLayoutAsset.hpp"
 #include "aver/ui/UiProps.hpp"
+#include "aver/ui/UiThemeSheet.hpp"
 #include "aver/ui/UiTree.hpp"
 
 #include <algorithm>
@@ -133,6 +134,8 @@ public:
     void moveSelected(i32 delta);
     bool renameSelected(const std::string& name);
     bool setProperty(i32 index, std::string_view key, std::string_view text);
+    // The layout's theme: a built-in name ("dark", "light", "contrast") or the content path of an .octheme. A sheet that cannot be
+    // read leaves the dark theme in the preview and the reason in themeError(); the name is kept.
     void setTheme(const std::string& name);
     void setScaling(const ui::UiDpi& dpi);
     void applyAnchorPreset(UiAnchorPreset preset);           // keeps the widget where it is
@@ -141,6 +144,22 @@ public:
     i32 placeWidgetAt(ui::UiWidgetKind kind, f32 previewX, f32 previewY);
     i32 placePresetAt(usize preset, f32 previewX, f32 previewY);
     i32 placeUseAt(const std::string& usePath, f32 previewX, f32 previewY);
+
+    // ---- theme editing -----------------------------------------------------------------------------------------
+    // The theme the preview draws with. When the layout names a sheet it is the sheet's, edited here with live preview and the
+    // designer's undo (every edit is one entry; a drag passes newUndoEntry=false after its first call). The sheet is written by
+    // save() together with the layout; the Godot items other tools keep in the same file are kept.
+    const ui::UiTheme& theme() const { return theme_; }
+    bool themeIsSheet() const { return ui::uiThemeIsSheetPath(doc_.theme); }
+    bool themeDirty() const { return themeDirty_; }
+    const std::string& themeError() const { return themeError_; }
+    // The other .octheme files of the project, as theme paths.
+    std::vector<std::string> projectThemes() const;
+    // Writes a new sheet from the current theme (a built-in one is written as a diff against itself, i.e. empty), at a path
+    // under the content root ("UI/Main.octheme"; the extension is added), and selects it. False when the file exists or cannot be written.
+    bool createThemeSheet(std::string relPath);
+    // Applies `edit` to a copy of the theme; false (nothing recorded) when the theme is not a sheet or nothing changed.
+    bool editTheme(const std::function<void(ui::UiTheme&)>& edit, bool newUndoEntry = true);
 
     // ---- nested layouts (USE) ----------------------------------------------------------------------
     // Paths are relative to the project's content root (the nearest "Content" folder above this file, else this
@@ -262,7 +281,21 @@ private:
     std::string loadError_;
     bool dirty_ = false;
     i32 selected_ = 0;
-    SnapshotUndo<ui::UiLayoutDoc> history_;
+    // What undo restores: the document and the theme being edited beside it.
+    struct Snapshot {
+        ui::UiLayoutDoc doc;
+        ui::UiTheme theme;
+    };
+    SnapshotUndo<Snapshot> history_;
+    ui::UiTheme theme_;                  // what the preview draws with
+    ui::UiThemeSheet themeSheet_;        // the sheet as read: its non-Aver items survive a save
+    std::string themeBase_ = "dark";     // the built-in the sheet is a diff against
+    std::string themeError_;
+    bool themeDirty_ = false;
+    bool themeEditing_ = false;          // a theme drag in progress (ImGui)
+    void restore(Snapshot s);
+    void reloadTheme();                  // theme_ from doc_.theme
+    bool writeTheme(std::string* why);
 
     ui::UiTree preview_;
     std::vector<ui::UiWidgetId> previewIds_;
@@ -305,6 +338,10 @@ private:
     void drawUseInspector();
     // Under a text / placeholder / items field: the resolved "Shown:" line for a reference, else a Localize button.
     void drawLocalizeRow(const ui::UiPropDesc& d);
+    void drawThemeSection();
+    void drawThemePicker();
+    i32 themeSel_ = 0;               // the theme tab: a widget kind, or kinds + n for the n-th named variant
+    std::string newThemePath_ = "UI/Theme.octheme", newVariant_;
     void propEditBegin();
     void propEditEnd();
 

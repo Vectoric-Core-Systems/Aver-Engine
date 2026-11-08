@@ -12,6 +12,16 @@ constexpr f32 kThumbDp = 14.0f;       // slider thumb width
 constexpr f32 kScrollGripDp = 14.0f;  // width of the draggable scrollbar strip
 constexpr f32 kWheelStepDp = 60.0f;   // Scroll pixels per wheel notch
 
+// Maps (x, y) through the inverse of `m`; false when `m` is singular.
+bool invertApply(const UiAffine& m, f32 x, f32 y, f32& ox, f32& oy) {
+    const f32 det = m.a * m.d - m.b * m.c;
+    if (!(std::fabs(det) > 1e-12f)) return false;
+    const f32 dx = x - m.tx, dy = y - m.ty;
+    ox = (m.d * dx - m.c * dy) / det;
+    oy = (m.a * dy - m.b * dx) / det;
+    return true;
+}
+
 bool isScrollable(const UiWidget& w) { return w.kind == UiWidgetKind::Scroll || w.kind == UiWidgetKind::List; }
 
 } // namespace
@@ -40,8 +50,27 @@ bool UiTree::hittable(const UiWidget& w) const {
     }
 }
 
+UiAffine UiTree::ancestorAffine(const UiWidget& w) const {
+    UiAffine m;
+    std::vector<const UiWidget*> chain;
+    for (const UiWidget* a = w.parent ? get(w.parent) : nullptr; a; a = a->parent ? get(a->parent) : nullptr) chain.push_back(a);
+    for (usize i = chain.size(); i-- > 0;) {
+        const UiAffine l = renderAffine(*chain[i]);
+        if (!l.identity()) m = m * l;
+    }
+    return m;
+}
+
+bool UiTree::toLayoutSpace(const UiWidget& w, f32 x, f32 y, f32& lx, f32& ly) const {
+    return invertApply(ancestorAffine(w) * renderAffine(w), x, y, lx, ly);
+}
+
+// (x, y) is in the parent's layout space; the widget's own render transform is undone before it and its children
+// are tested, so a widget is hit where it is drawn.
 UiWidgetId UiTree::hitIn(const UiWidget& w, f32 x, f32 y) const {
     if (!w.visible || w.inactive) return 0;
+    const UiAffine xf = renderAffine(w);
+    if (!xf.identity() && !invertApply(xf, x, y, x, y)) return 0;
     const bool inside = w.rect.contains(x, y);
     if ((w.clip || isScrollable(w)) && !inside) return 0;
     for (usize i = w.children.size(); i-- > 0;) {
@@ -74,15 +103,29 @@ bool UiTree::focusableNow(UiWidgetId id) const {
     return w && w->focusable && isVisible(id) && isEnabled(id);
 }
 
-void UiTree::collectFocus(const UiWidget& w, std::vector<UiFocusItem>& out) const {
+void UiTree::collectFocus(const UiWidget& w, const UiAffine& parentXf, std::vector<UiFocusItem>& out) const {
     if (!w.visible || w.inactive || !w.enabled) return;
-    if (w.focusable && !w.rect.empty()) out.push_back(UiFocusItem{w.id, w.rect, w.tabIndex});
-    for (const UiWidgetId c : w.children) if (const UiWidget* k = get(c)) collectFocus(*k, out);
+    const UiAffine xf = parentXf * renderAffine(w);
+    if (w.focusable && !w.rect.empty()) {
+        UiRect r = w.rect;
+        if (!xf.identity()) {   // the bounds of the drawn quad
+            f32 xs[4], ys[4];
+            xf.apply(w.rect.x, w.rect.y, xs[0], ys[0]);
+            xf.apply(w.rect.right(), w.rect.y, xs[1], ys[1]);
+            xf.apply(w.rect.right(), w.rect.bottom(), xs[2], ys[2]);
+            xf.apply(w.rect.x, w.rect.bottom(), xs[3], ys[3]);
+            const f32 x0 = std::min(std::min(xs[0], xs[1]), std::min(xs[2], xs[3])), x1 = std::max(std::max(xs[0], xs[1]), std::max(xs[2], xs[3]));
+            const f32 y0 = std::min(std::min(ys[0], ys[1]), std::min(ys[2], ys[3])), y1 = std::max(std::max(ys[0], ys[1]), std::max(ys[2], ys[3]));
+            r = {x0, y0, x1 - x0, y1 - y0};
+        }
+        out.push_back(UiFocusItem{w.id, r, w.tabIndex});
+    }
+    for (const UiWidgetId c : w.children) if (const UiWidget* k = get(c)) collectFocus(*k, xf, out);
 }
 
 std::vector<UiFocusItem> UiTree::focusItems(UiWidgetId root) const {
     std::vector<UiFocusItem> out;
-    if (const UiWidget* r = get(root)) collectFocus(*r, out);
+    if (const UiWidget* r = get(root)) collectFocus(*r, ancestorAffine(*r), out);
     return out;
 }
 
@@ -416,6 +459,13 @@ void UiTree::processPointer(const UiInputFrame& in) {
     const bool leftUp = !left && (prevButtons_ & 1u);
     prevButtons_ = in.buttons;
 
+    // The pointer in a widget's layout space (its own and its ancestors' render transforms undone).
+    const auto localPointer = [this](const UiWidget& w, f32 x, f32 y) {
+        UiVec2 l{x, y};
+        toLayoutSpace(w, x, y, l.x, l.y);
+        return l;
+    };
+
     state_.pointerOverUi = false;
     UiWidgetId hit = 0;
     if (in.pointerValid) {
@@ -430,8 +480,9 @@ void UiTree::processPointer(const UiInputFrame& in) {
         if (h->kind == UiWidgetKind::List) {
             const UiRect inner = textArea(*h);
             const f32 rh = rowHeightOf(*h);
-            if (inner.contains(pointerX_, pointerY_) && rh > 0.0f) {
-                const i32 row = static_cast<i32>(std::floor((pointerY_ - inner.y + h->scrollY) / rh));
+            const UiVec2 lp = localPointer(*h, pointerX_, pointerY_);
+            if (inner.contains(lp.x, lp.y) && rh > 0.0f) {
+                const i32 row = static_cast<i32>(std::floor((lp.y - inner.y + h->scrollY) / rh));
                 if (row >= 0 && row < static_cast<i32>(h->items.size())) h->hotItem = row;
             }
         }
@@ -440,7 +491,7 @@ void UiTree::processPointer(const UiInputFrame& in) {
     if (captured_) {
         UiWidget* c = get(captured_);
         if (!c || !left) { captured_ = 0; scrollDrag_ = false; }
-        else if (in.pointerValid) dragTo(*c, pointerX_, pointerY_);
+        else if (in.pointerValid) { const UiVec2 lp = localPointer(*c, pointerX_, pointerY_); dragTo(*c, lp.x, lp.y); }
     }
 
     if (leftDown) {
@@ -458,18 +509,19 @@ void UiTree::processPointer(const UiInputFrame& in) {
                 h->pressed = true;
                 const UiRect inner = textArea(*h);
                 const bool overflow = h->contentSize.y > inner.h + 0.5f;
-                const bool onGrip = pointerX_ >= h->rect.right() - kScrollGripDp * scaleOf(*h);
+                const UiVec2 lp = localPointer(*h, pointerX_, pointerY_);
+                const bool onGrip = lp.x >= h->rect.right() - kScrollGripDp * scaleOf(*h);
                 if (isScrollable(*h) && overflow && onGrip) {
                     captured_ = hit;
                     scrollDrag_ = true;
                     pressed_ = 0;
                     h->pressed = false;
-                    dragTo(*h, pointerX_, pointerY_);
+                    dragTo(*h, lp.x, lp.y);
                 } else if (h->kind == UiWidgetKind::Slider) {
                     captured_ = hit;
-                    setSliderFromX(*h, pointerX_);
+                    setSliderFromX(*h, lp.x);
                 } else if (h->kind == UiWidgetKind::TextInput) {
-                    h->caret = caretFromX(*h, pointerX_);
+                    h->caret = caretFromX(*h, lp.x);
                 } else if (h->kind == UiWidgetKind::List && h->hotItem >= 0 && h->hotItem != h->selected) {
                     h->selected = h->hotItem;
                     UiEvent e;
@@ -490,7 +542,7 @@ void UiTree::processPointer(const UiInputFrame& in) {
             p->pressed = false;
             const bool sameTarget = hit == pressed_;
             const bool rowOk = p->kind != UiWidgetKind::List || (p->hotItem >= 0 && p->hotItem == p->selected);
-            if (sameTarget && rowOk && isEnabled(pressed_)) activate(*p, true, pointerX_);
+            if (sameTarget && rowOk && isEnabled(pressed_)) activate(*p, true, localPointer(*p, pointerX_, pointerY_).x);
         }
         pressed_ = 0;
         captured_ = 0;

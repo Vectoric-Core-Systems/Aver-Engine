@@ -37,9 +37,9 @@ Note: `FramePadding.y` is pinned by the `--probe-rel` gates (the tab-bar height)
 2. `.ocui` v2: nested-layout reference (`USE`), plus `ANIM`, `BIND` and `EVENT` records. The v1 loader is kept, and unknown records are already skipped.
 3. Panel widgets: Overlay, UniformGrid, WrapBox, SizeBox, ScaleBox, Border, Spacer, WidgetSwitcher. Port the useful container maths from Fabric's Godot containers.
 4. User widgets: instantiate referenced layouts with exposed properties and named slots, with cycle detection.
-5. Widget animation: tracks over opacity, colour, offset and transform; play, reverse, loop, a finish event. Widget transforms may need draw-list support (check first). **Done** (the draw list already had a transform stack; the transform is draw-only, hit testing ignores it).
+5. Widget animation: tracks over opacity, colour, offset and transform; play, reverse, loop, a finish event. Widget transforms may need draw-list support (check first). **Done** (the draw list already had a transform stack). Hit testing, hover, drag and focus navigation honour the render transform too (2026-11-09).
 6. Bindings and events: property paths against a C# view-model or a graph variable. Events go to a command, a graph event or a C# method. **Done.**
-7. Designer: animation timeline, bindings column, events tab, palette search, device presets and safe zones, multi-select, per-state style editing, theme editor. **Done except the theme editor** (needs a headed check).
+7. Designer: animation timeline, bindings column, events tab, palette search, device presets and safe zones, multi-select, per-state style editing, theme editor. **Done**, including the theme editor (`.octheme` sheets with live preview; needs a headed check).
 8. Runtime: player-scoped viewport stacks, an activatable-widget stack, gamepad rebinding.
 9. 3D widget component: a tree rendered to a texture or quad, with ray-picked input. Heaviest, last.
 

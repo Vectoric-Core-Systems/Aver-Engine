@@ -590,6 +590,67 @@ int main() {
         check(ed.setProperty(btn, "bgHoverColor", "#112233") && ed.doc().nodes[static_cast<usize>(btn)].props.bgHoverColor == uiRgba(0x11, 0x22, 0x33), "per-state colours are properties");
     }
 
+    AVER_INFO("=== theme sheets ===");
+    {
+        const std::filesystem::path dir = std::filesystem::temp_directory_path() / "aver_ui_editor_theme";
+        std::filesystem::remove_all(dir);
+        std::filesystem::create_directories(dir / "Content" / "UI");
+        const std::string f = (dir / "Content" / "UI" / "Menu.ocui").string();
+        writeFileText(f, uiStarterLayoutText());
+        const usize btnKind = static_cast<usize>(UiWidgetKind::Button);
+        {
+            UiLayoutEditor ed(f);
+            ed.layoutPreview(est);
+            check(!ed.themeIsSheet() && !ed.editTheme([](UiTheme& t) { t.baseFontSize = 30; }), "a built-in theme cannot be edited");
+            check(!ed.createThemeSheet("../Escape.octheme") && !ed.createThemeSheet("/abs.octheme"), "a sheet path must stay under the content folder");
+            check(ed.createThemeSheet("UI/Main") && ed.themeIsSheet() && ed.doc().theme == "UI/Main.octheme", "creating a sheet selects it (the extension is added)");
+            check(std::filesystem::exists(dir / "Content" / "UI" / "Main.octheme") && !ed.createThemeSheet("UI/Main.octheme"), "the file exists and is not overwritten");
+            check(ed.canUndo() && ed.dirty(), "selecting it is an undoable edit");
+            const f32 before = ed.preview().theme().kinds[btnKind].radius;
+            check(ed.editTheme([&](UiTheme& t) { t.kinds[btnKind].radius = 9; t.kinds[btnKind].background[1] = 0xFF445566; }), "an edit applies");
+            check(ed.preview().theme().kinds[btnKind].radius == 9 && before == 0 && ed.preview().theme().kinds[btnKind].background[1] == 0xFF445566, "to the preview tree at once");
+            check(!ed.editTheme([](UiTheme&) {}), "an edit that changes nothing records nothing");
+            check(ed.editTheme([&](UiTheme& t) { t.kinds[btnKind].radius = 11; }, true) && ed.editTheme([&](UiTheme& t) { t.kinds[btnKind].radius = 12; }, false), "a drag continues its entry");
+            ed.undo();
+            check(ed.theme().kinds[btnKind].radius == 9 && ed.preview().theme().kinds[btnKind].radius == 9, "undo takes the whole drag back");
+            ed.redo();
+            check(ed.theme().kinds[btnKind].radius == 12, "redo restores it");
+            std::string why;
+            check(ed.save(&why) && !ed.themeDirty(), "save writes the layout and the sheet: " + why);
+            std::string sheetText;
+            readFileText((dir / "Content" / "UI" / "Main.octheme").string(), sheetText);
+            check(sheetText.find("CONSTANT Aver.button radius 12") != std::string::npos && sheetText.find("BASETHEME dark") != std::string::npos, "the sheet holds the change as a diff");
+            std::string layoutText;
+            readFileText(f, layoutText);
+            check(layoutText.find("UI/Main.octheme") != std::string::npos, "and the layout names it");
+            check(ed.projectThemes().size() == 1 && ed.projectThemes()[0] == "UI/Main.octheme", "the project lists its sheets");
+        }
+        {
+            UiLayoutEditor again(f);
+            check(again.themeIsSheet() && again.themeError().empty() && again.theme().kinds[btnKind].radius == 12, "reopened, the sheet is read back");
+            check(again.preview().theme().kinds[btnKind].background[1] == 0xFF445566, "and the preview draws with it");
+            again.setTheme("light");
+            check(!again.themeIsSheet() && again.preview().theme().name == "light", "switching to a built-in theme");
+            again.undo();
+            check(again.themeIsSheet() && again.theme().kinds[btnKind].radius == 12, "and back by undo");
+            again.setTheme("UI/Nope.octheme");
+            check(!again.themeError().empty() && again.preview().theme().name == "dark" && again.doc().theme == "UI/Nope.octheme", "a missing sheet keeps its name, shows dark and says why");
+        }
+        {
+            // Items another tool keeps in the sheet survive an edit.
+            writeFileText((dir / "Content" / "UI" / "Shared.octheme").string(), "OCTHEME 1\nNAME Shared\nCOLOR Button font_color #FFFFFFFF\nFUTURE thing\n");
+            UiLayoutEditor ed(f);
+            ed.setTheme("UI/Shared.octheme");
+            check(ed.editTheme([&](UiTheme& t) { t.kinds[btnKind].radius = 4; }), "a sheet from elsewhere can be edited");
+            std::string why;
+            ed.save(&why);
+            std::string sheetText;
+            readFileText((dir / "Content" / "UI" / "Shared.octheme").string(), sheetText);
+            check(sheetText.find("COLOR Button font_color #FFFFFFFF") != std::string::npos && sheetText.find("CONSTANT Aver.button radius 4") != std::string::npos, "its Godot items are kept beside the edit");
+        }
+        std::filesystem::remove_all(dir);
+    }
+
     if (g_failures) {
         AVER_ERROR("{} check(s) failed", g_failures);
         return 1;

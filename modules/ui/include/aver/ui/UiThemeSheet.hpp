@@ -16,8 +16,10 @@
 //   FONTSIZE HeaderLabel font_size 28
 //   ICON CheckBox checked "Textures/checked.png"
 //   STYLEBOX Button normal flat bg=#2E2E2EFF border=2,2,2,2 border_color=#80C0FFFF radius=4,4,4,4 content=8,4,8,4
+#include "aver/ui/UiStyle.hpp"
 #include "aver/ui/UiStyleBox.hpp"
 
+#include <functional>
 #include <map>
 #include <string>
 #include <string_view>
@@ -48,6 +50,7 @@ struct UiThemeSheet {
     std::string defaultFont;     // "" = unset
     i32 defaultFontSize = -1;    // < 0 = unset
     f32 defaultBaseScale = 0;    // 0 = unset
+    std::string baseTheme;       // BASETHEME: the built-in widget theme ("dark", "light", "contrast") a UiTheme sheet is written against; "" = dark
     std::map<std::string, UiThemeType> types;
     std::map<std::string, std::string> variations;   // variation type -> base type
 
@@ -76,6 +79,22 @@ const UiThemeSheet* uiThemeFindStyleBox(const std::vector<const UiThemeSheet*>& 
 // The default font and size when no font item answered: the first theme in the chain that set them.
 bool uiThemeDefaultFont(const std::vector<const UiThemeSheet*>& themes, std::string& out);
 i32 uiThemeDefaultFontSize(const std::vector<const UiThemeSheet*>& themes, i32 fallback);
+
+// ---- the widget tree's theme as a sheet -----------------------------------------------------------------------------------
+// A UiTheme (UiStyle.hpp: what a game's widgets draw with) in the same file. Types are namespaced so they never meet a
+// Godot class: "Aver" (focus_color / dim colours, focus_width / row_height / scrollbar_width / base_font_size constants), "Aver.<kind>" for each widget kind ("Aver.button") and "Aver.style.<name>" for a named variant. A style's
+// items: colours bg, bg_hover, bg_pressed, bg_disabled, border, text, text_disabled, accent, track, placeholder; constants
+// border_width, radius, pad_left / pad_top / pad_right / pad_bottom, bold (0 / 1); font_size (FONTSIZE); font (FONT, a
+// family name). Only what differs from the BASETHEME built-in is written and anything unwritten keeps the base, so a sheet
+// is a diff. Lengths are whole design pixels (constants are integers). Godot readers never see these types.
+UiThemeSheet uiThemeToSheet(const UiTheme& theme, std::string_view baseBuiltin = "dark");
+UiTheme uiThemeFromSheet(const UiThemeSheet& sheet);
+
+// A layout's THEME name to a theme: a built-in name, or the content path of an .octheme (name ends in ".octheme"), read
+// through `read` (the host's file access). A missing or unreadable sheet yields the dark theme and false, with `err`.
+bool uiThemeIsSheetPath(std::string_view name);
+bool uiResolveTheme(std::string_view name, const std::function<bool(const std::string& path, std::string& text)>& read, UiTheme& out,
+                    std::string* err = nullptr);
 
 // The metrics of the built-in theme, for projects that name no theme: the fallback at the
 // end of every lookup. A dark default look; no third-party theme assets are used.

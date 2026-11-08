@@ -98,6 +98,9 @@ public:
 
     // Four filled edges inside `r`.
     void strokeRect(const UiRect& r, f32 thickness, u32 rgba);
+    // The same with rounded corners (a theme's radius). A painter that cannot round draws the square rectangle.
+    virtual void fillRoundRect(const UiRect& r, f32 radius, u32 rgba) { (void)radius; fillRect(r, rgba); }
+    virtual void strokeRoundRect(const UiRect& r, f32 radius, f32 thickness, u32 rgba) { (void)radius; strokeRect(r, thickness, rgba); }
 };
 
 // Paints into a UiDrawList. `font` may be null: text is then skipped and measured with estimates.
@@ -114,6 +117,8 @@ public:
     void pushClip(const UiRect& r) override;
     void popClip() override { list_.popClip(); }
     void fillRect(const UiRect& r, u32 rgba) override { list_.addRect(r.x, r.y, r.w, r.h, rgba); }
+    void fillRoundRect(const UiRect& r, f32 radius, u32 rgba) override;
+    void strokeRoundRect(const UiRect& r, f32 radius, f32 thickness, u32 rgba) override;
     void image(const UiRect& r, u64 texture, const UiUvRect& uv, u32 tint) override;
     void text(f32 x, f32 baselineY, std::string_view s, f32 px, u32 rgba) override;
 

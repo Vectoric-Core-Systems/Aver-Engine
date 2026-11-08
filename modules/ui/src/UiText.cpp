@@ -1,5 +1,6 @@
 // Text measurement, wrapping and the draw-list painter.
 #include "aver/ui/UiText.hpp"
+#include "aver/ui/UiStyleBox.hpp"
 #include "aver/ui/UiTextEngine.hpp"
 #include "aver/ui/UiUnicode.hpp"
 
@@ -253,6 +254,30 @@ UiDrawListPainter::UiDrawListPainter(UiDrawList& list, UiTextEngine* engine, con
     : list_(list), font_(bitmap), engine_(engine), fontMetrics_(bitmap) {}
 
 bool UiDrawListPainter::engineOn() const { return engine_ && engine_->usable(); }
+
+// A rounded rectangle is a flat style box (UiStyleBox.hpp): the fill, or only the border ring.
+void UiDrawListPainter::fillRoundRect(const UiRect& r, f32 radius, u32 rgba) {
+    radius = std::min(radius, 0.5f * std::min(r.w, r.h));
+    if (radius <= 0.5f) { list_.addRect(r.x, r.y, r.w, r.h, rgba); return; }
+    UiStyleBox b;
+    b.bgColor = rgba;
+    b.radiusTL = b.radiusTR = b.radiusBR = b.radiusBL = radius;
+    b.flags |= kSbAntiAlias;
+    uiStyleBoxDraw(list_, b, r);
+}
+
+void UiDrawListPainter::strokeRoundRect(const UiRect& r, f32 radius, f32 thickness, u32 rgba) {
+    radius = std::min(radius, 0.5f * std::min(r.w, r.h));
+    if (radius <= 0.5f) { strokeRect(r, thickness, rgba); return; }
+    UiStyleBox b;
+    b.flags = 0;   // no centre
+    b.bgColor = 0;
+    b.borderL = b.borderT = b.borderR = b.borderB = thickness;
+    b.borderColorL = b.borderColorT = b.borderColorR = b.borderColorB = rgba;
+    b.radiusTL = b.radiusTR = b.radiusBR = b.radiusBL = radius;
+    b.flags |= kSbAntiAlias;
+    uiStyleBoxDraw(list_, b, r);
+}
 
 void UiDrawListPainter::pushClip(const UiRect& r) {
     list_.pushClip(UiClip{static_cast<i32>(std::floor(r.x)), static_cast<i32>(std::floor(r.y)),

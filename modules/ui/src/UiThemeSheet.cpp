@@ -4,6 +4,8 @@
 #include "aver/core/CharConv.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <set>
@@ -280,6 +282,7 @@ bool uiThemeParse(std::string_view text, UiThemeSheet& out, std::string* err) {
         if (rec == "NAME") { if (t.size() >= 2) th.name = t[1]; }
         else if (rec == "DEFAULTFONT") { if (t.size() >= 2) th.defaultFont = t[1]; }
         else if (rec == "DEFAULTFONTSIZE") { i32 v; if (t.size() < 2 || !parseI(t[1], v)) return fail("bad DEFAULTFONTSIZE"); th.defaultFontSize = v; }
+        else if (rec == "BASETHEME") { if (t.size() >= 2) th.baseTheme = t[1]; }
         else if (rec == "BASESCALE") { f32 v; if (t.size() < 2 || !parseF(t[1], v)) return fail("bad BASESCALE"); th.defaultBaseScale = v; }
         else if (rec == "VARIATION") { if (t.size() < 3) return fail("VARIATION needs a name and a base"); th.variations[t[1]] = t[2]; }
         else if (rec == "COLOR") { u32 c; if (t.size() < 4 || !parseColor(t[3], c)) return fail("bad COLOR"); th.types[t[1]].colors[t[2]] = c; }
@@ -307,6 +310,7 @@ std::string uiThemeWrite(const UiThemeSheet& sheet) {
     if (!sheet.defaultFont.empty()) out += "DEFAULTFONT " + quoteIf(sheet.defaultFont) + "\n";
     if (sheet.defaultFontSize >= 0) out += "DEFAULTFONTSIZE " + std::to_string(sheet.defaultFontSize) + "\n";
     if (sheet.defaultBaseScale > 0) out += "BASESCALE " + numStr(sheet.defaultBaseScale) + "\n";
+    if (!sheet.baseTheme.empty()) out += "BASETHEME " + quoteIf(sheet.baseTheme) + "\n";
     for (const auto& [v, b] : sheet.variations) out += "VARIATION " + quoteIf(v) + " " + quoteIf(b) + "\n";
     for (const auto& [ty, items] : sheet.types) {
         for (const auto& [k, v] : items.colors) out += "COLOR " + quoteIf(ty) + " " + quoteIf(k) + " " + colorStr(v) + "\n";
@@ -699,6 +703,153 @@ const UiThemeSheet& uiBuiltinDefaultTheme() {
 const std::string& uiBuiltinDefaultThemeText() {
     static const std::string text = uiThemeWrite(uiBuiltinDefaultTheme());
     return text;
+}
+
+// ---- the widget tree's theme as a sheet ---------------------------------------------------------------------------------------
+
+namespace {
+
+constexpr const char* kGlobalType = "Aver";
+constexpr const char* kKindPrefix = "Aver.";
+constexpr const char* kNamedPrefix = "Aver.style.";
+
+i32 whole(f32 v) { return static_cast<i32>(std::lround(v)); }
+
+u32& colourRef(UiStyle& s, int slot) {
+    switch (slot) {
+        case 0: return s.background[0];
+        case 1: return s.background[1];
+        case 2: return s.background[2];
+        case 3: return s.background[3];
+        case 4: return s.border;
+        case 5: return s.text;
+        case 6: return s.textDisabled;
+        case 7: return s.accent;
+        case 8: return s.track;
+        default: return s.placeholder;
+    }
+}
+constexpr const char* kColourItems[10] = {"bg", "bg_hover", "bg_pressed", "bg_disabled", "border", "text", "text_disabled", "accent", "track", "placeholder"};
+
+f32& lengthRef(UiStyle& s, int slot) {
+    switch (slot) {
+        case 0: return s.borderWidth;
+        case 1: return s.radius;
+        case 2: return s.padding.left;
+        case 3: return s.padding.top;
+        case 4: return s.padding.right;
+        default: return s.padding.bottom;
+    }
+}
+constexpr const char* kLengthItems[6] = {"border_width", "radius", "pad_left", "pad_top", "pad_right", "pad_bottom"};
+
+// Writes what differs from `base` (null: every non-zero field).
+void writeStyle(UiStyle s, const UiStyle* base, UiThemeType& ty) {
+    UiStyle b = base ? *base : UiStyle{};
+    for (int i = 0; i < 10; ++i) {
+        const u32 v = colourRef(s, i), bv = colourRef(b, i);
+        if (v != bv && (base || v != 0)) ty.colors[kColourItems[i]] = v;
+    }
+    for (int i = 0; i < 6; ++i) {
+        const i32 v = whole(lengthRef(s, i)), bv = whole(lengthRef(b, i));
+        if (v != bv) ty.constants[kLengthItems[i]] = v;
+    }
+    if (s.bold != b.bold && s.bold >= 0) ty.constants["bold"] = s.bold;
+    if (whole(s.fontSize) != whole(b.fontSize)) ty.fontSizes["font_size"] = whole(s.fontSize);
+    if (s.fontFamily != b.fontFamily) ty.fonts["font"] = s.fontFamily;
+}
+
+void readStyle(const UiThemeType& ty, UiStyle& s) {
+    for (int i = 0; i < 10; ++i) {
+        const auto it = ty.colors.find(kColourItems[i]);
+        if (it != ty.colors.end()) colourRef(s, i) = it->second;
+    }
+    for (int i = 0; i < 6; ++i) {
+        const auto it = ty.constants.find(kLengthItems[i]);
+        if (it != ty.constants.end()) lengthRef(s, i) = static_cast<f32>(std::max(0, it->second));
+    }
+    if (const auto it = ty.constants.find("bold"); it != ty.constants.end()) s.bold = static_cast<i8>(std::clamp(it->second, -1, 1));
+    if (const auto it = ty.fontSizes.find("font_size"); it != ty.fontSizes.end()) s.fontSize = static_cast<f32>(std::max(0, it->second));
+    if (const auto it = ty.fonts.find("font"); it != ty.fonts.end()) s.fontFamily = it->second;
+}
+
+} // namespace
+
+UiThemeSheet uiThemeToSheet(const UiTheme& theme, std::string_view baseBuiltin) {
+    const UiTheme base = uiBuiltinTheme(baseBuiltin);
+    UiThemeSheet sh;
+    sh.name = theme.name;
+    sh.baseTheme = std::string(baseBuiltin);
+    UiThemeType g;
+    if (whole(theme.baseFontSize) != whole(base.baseFontSize)) g.constants["base_font_size"] = whole(theme.baseFontSize);
+    if (theme.focusColor != base.focusColor) g.colors["focus_color"] = theme.focusColor;
+    if (theme.dim != base.dim) g.colors["dim"] = theme.dim;
+    if (whole(theme.focusWidth) != whole(base.focusWidth)) g.constants["focus_width"] = whole(theme.focusWidth);
+    if (whole(theme.rowHeight) != whole(base.rowHeight)) g.constants["row_height"] = whole(theme.rowHeight);
+    if (whole(theme.scrollbarWidth) != whole(base.scrollbarWidth)) g.constants["scrollbar_width"] = whole(theme.scrollbarWidth);
+    if (!g.colors.empty() || !g.constants.empty()) sh.types[kGlobalType] = std::move(g);
+    for (usize k = 0; k < static_cast<usize>(UiWidgetKind::Count); ++k) {
+        UiThemeType ty;
+        writeStyle(theme.kinds[k], &base.kinds[k], ty);
+        if (ty.colors.size() + ty.constants.size() + ty.fonts.size() + ty.fontSizes.size())
+            sh.types[std::string(kKindPrefix) + uiKindName(static_cast<UiWidgetKind>(k))] = std::move(ty);
+    }
+    for (const auto& [name, st] : theme.named) {
+        const UiStyle* bs = nullptr;
+        for (const auto& [bn, b] : base.named) if (bn == name) { bs = &b; break; }
+        UiThemeType ty;
+        writeStyle(st, bs, ty);
+        sh.types[std::string(kNamedPrefix) + name] = std::move(ty);   // always declared, so an unchanged variant survives
+    }
+    return sh;
+}
+
+UiTheme uiThemeFromSheet(const UiThemeSheet& sheet) {
+    UiTheme t = uiBuiltinTheme(sheet.baseTheme.empty() ? "dark" : sheet.baseTheme);
+    if (!sheet.name.empty()) t.name = sheet.name;
+    if (const auto it = sheet.types.find(kGlobalType); it != sheet.types.end()) {
+        const UiThemeType& g = it->second;
+        if (const auto c = g.constants.find("base_font_size"); c != g.constants.end()) t.baseFontSize = static_cast<f32>(std::max(1, c->second));
+        if (const auto c = g.colors.find("focus_color"); c != g.colors.end()) t.focusColor = c->second;
+        if (const auto c = g.colors.find("dim"); c != g.colors.end()) t.dim = c->second;
+        if (const auto c = g.constants.find("focus_width"); c != g.constants.end()) t.focusWidth = static_cast<f32>(std::max(0, c->second));
+        if (const auto c = g.constants.find("row_height"); c != g.constants.end()) t.rowHeight = static_cast<f32>(std::max(1, c->second));
+        if (const auto c = g.constants.find("scrollbar_width"); c != g.constants.end()) t.scrollbarWidth = static_cast<f32>(std::max(1, c->second));
+    }
+    for (usize k = 0; k < static_cast<usize>(UiWidgetKind::Count); ++k) {
+        const auto it = sheet.types.find(std::string(kKindPrefix) + uiKindName(static_cast<UiWidgetKind>(k)));
+        if (it != sheet.types.end()) readStyle(it->second, t.kinds[k]);
+    }
+    const std::string_view named = kNamedPrefix;
+    for (const auto& [type, ty] : sheet.types) {
+        if (type.size() <= named.size() || type.compare(0, named.size(), named) != 0) continue;
+        const std::string name = type.substr(named.size());
+        UiStyle* target = nullptr;
+        for (auto& [n, s] : t.named) if (n == name) { target = &s; break; }
+        if (!target) { t.named.emplace_back(name, UiStyle{}); target = &t.named.back().second; }
+        readStyle(ty, *target);
+    }
+    return t;
+}
+
+bool uiThemeIsSheetPath(std::string_view name) {
+    constexpr std::string_view ext = ".octheme";
+    if (name.size() < ext.size()) return false;
+    for (usize i = 0; i < ext.size(); ++i)
+        if (std::tolower(static_cast<unsigned char>(name[name.size() - ext.size() + i])) != ext[i]) return false;
+    return true;
+}
+
+bool uiResolveTheme(std::string_view name, const std::function<bool(const std::string&, std::string&)>& read, UiTheme& out, std::string* err) {
+    if (!uiThemeIsSheetPath(name)) { out = uiBuiltinTheme(name); return true; }
+    std::string text, why;
+    UiThemeSheet sheet;
+    if (!read || !read(std::string(name), text)) why = "theme '" + std::string(name) + "' could not be read";
+    else if (!uiThemeParse(text, sheet, &why)) why = "theme '" + std::string(name) + "': " + why;
+    else { out = uiThemeFromSheet(sheet); return true; }
+    out = uiBuiltinTheme("dark");
+    if (err) *err = why;
+    return false;
 }
 
 } // namespace aver::ui
