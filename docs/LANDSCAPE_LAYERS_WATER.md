@@ -49,6 +49,7 @@ WaterSample w = Water.Sample(position);            // Over, Submerged, SurfaceZ,
 - Weight textures are re-uploaded whole (about 4 MB each at 1025 samples), at most every 100 ms while painting; very large sections (2049, 4097) will hitch while painting. Atlas memory is about 36 MB per material at 512 tiles.
 - Underwater fog still belongs to the ocean only; a camera in a lake does not get the underwater look.
 - The derived `<material>#sec` / `#ring` materials appear in the material list (a `#` in the name).
+- **Several sections.** Every `LANDSCAPE` record of a level loads: the first is the primary section (the one the editor sculpts, paints, carves and saves, and the one the procedural ring grid follows); the others are read-only extras, each with its own collision body, its own paint weights (derived `<material>#sec.N` materials, runtime textures `land.w0.N` ...) and the shared terrain material. Height, ground and friction queries answer from whichever section contains the point; ring tiles over an authored section are not built. Drawing is distance-culled: only the 16 nearest sections and tiles inside the frustum and 3 km draw, sharing one 192-draw budget, and one out of view for 300 frames drops its GPU meshes. The editor's brush picks the primary section only.
 - Level instances: an instanced `.ocworld` that carries rivers or lakes must have its transform applied to their points; this feature does not do it (flagged to the level-instances feature).
 
 ## Tests

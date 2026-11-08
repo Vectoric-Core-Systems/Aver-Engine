@@ -331,6 +331,134 @@ int main() {
         std::error_code ec;
         std::filesystem::remove_all(dir, ec);
     }
+
+    // ---- (7) GameLandscape: several LANDSCAPE records ----
+    {
+        using game::GameLandscape;
+        const std::filesystem::path dir = std::filesystem::temp_directory_path() / "aver_landscape_multi_test";
+        std::filesystem::create_directories(dir);
+        // A 65-sample section whose height rises 10 cm per sample along +X from `base`.
+        const auto writeSection = [&](const std::string& name, f32 base) {
+            fmt::OcLandData d;
+            d.sampleCount = 65;
+            d.spacingCm = 100.0f;
+            d.heights.resize(65u * 65u);
+            for (u32 y = 0; y < 65; ++y)
+                for (u32 x = 0; x < 65; ++x) d.heights[y * 65 + x] = base + static_cast<f32>(x) * 10.0f;
+            std::string why;
+            return fmt::saveOcLand((dir / name).string(), d, &why);
+        };
+        check(writeSection("a.ocland", 0.0f) && writeSection("b.ocland", 500.0f) && writeSection("c.ocland", 1000.0f),
+              "wrote three small sections");
+        const auto record = [](const char* section, f64 x, f64 y) {
+            fmt::OcLandscapePlacement lp;
+            lp.section = section;
+            lp.x = x; lp.y = y;
+            return lp;
+        };
+        fmt::OcWorldData w;
+        w.landscapes.push_back(record("a.ocland", 0, 0));
+        w.landscapes.push_back(record("b.ocland", 6400, 0));       // tiles edge to edge east of a
+        w.landscapes.push_back(record("missing.ocland", 0, 6400));  // skipped with a warning
+        w.landscapes.push_back(record("c.ocland", 12800, 0));
+
+        GameLandscape land;
+        land.loadForLevel(nullptr, dir.string(), (dir / "none.ocworld").string(), w);
+        check(land.loaded() && land.extraSectionCount() == 2, "the primary and two extras loaded (the missing file skipped)");
+
+        f64 z = 0.0;
+        check(land.groundHeightAt(3200.0, 3200.0, z) && std::fabs(z - 320.0) < 0.1, "primary section height");
+        check(land.groundHeightAt(6400.0 + 3200.0, 3200.0, z) && std::fabs(z - 820.0) < 0.1, "second section height");
+        check(land.groundHeightAt(12800.0 + 3200.0, 3200.0, z) && std::fabs(z - 1320.0) < 0.1, "third section height");
+        check(!land.groundHeightAt(-500.0, 0.0, z) && !land.groundHeightAt(3200.0, 7000.0, z) && !land.groundHeightAt(20000.0, 0.0, z),
+              "no height in none of them");
+        GameLandscape::GroundInfo g;
+        check(land.sampleGround(9600.0f, 3200.0f, g) && std::fabs(g.z - 820.0f) < 0.1f && g.normal[0] < -0.05f,
+              "sampleGround answers from the second section with its slope");
+        f32 sc = 0.0f;
+        check(land.scatterHeightAt(16000.0f, 3200.0f, sc) && std::fabs(sc - 1320.0f) < 0.1f, "scatterHeightAt follows the third section");
+
+        // The camera is over the second section: the tiles over the second and third sections are not built.
+        land.updateRingTiles(nullptr, 9600.0f, 3200.0f);
+        check(!land.ringTileResident(1, 0) && !land.ringTileResident(2, 0), "no ring tile over an authored section");
+        check(land.ringTileResident(0, 1) && land.ringTileResident(1, 1) && land.ringTileResident(2, 1) &&
+                  land.ringTileResident(0, -1) && land.ringTileResident(1, -1) && land.ringTileResident(2, -1),
+              "the ring still fills around them");
+        check(land.ringTileCount() == 6, "six ring tiles (" + std::to_string(land.ringTileCount()) + ")");
+
+        // Floating origin: every section moves, absolute queries do not.
+        rhi::ShiftWorldInfo ev;
+        ev.deltaCm = rhi::ShiftVec3d{static_cast<f64>(kStep), 0.0, 0.0};
+        ev.newOrigin = rhi::ShiftOrigin{kStep, 0};
+        ev.generation = 1;
+        land.onOriginShift(ev);
+        check(land.extraData(0).originCm[0] == 6400.0f - static_cast<f32>(kStep) &&
+                  land.extraData(1).originCm[0] == 12800.0f - static_cast<f32>(kStep),
+              "the extras followed the rebase");
+        check(land.groundHeightAt(6400.0 + 3200.0, 3200.0, z) && std::fabs(z - 820.0) < 0.1 &&
+                  land.groundHeightAt(12800.0 + 3200.0, 3200.0, z) && std::fabs(z - 1320.0) < 0.1 &&
+                  land.groundHeightAt(3200.0, 3200.0, z) && std::fabs(z - 320.0) < 0.1,
+              "absolute queries unchanged after the rebase");
+        check(land.ringTileCount() == 6, "the ring followed too");
+        land.setFrameOrigin(rhi::ShiftOrigin{0, 0});
+        check(land.extraData(0).originCm[0] == 6400.0f, "back at origin zero: the exact original origin");
+
+#if AVER_LANDSCAPE_TEST_RENDERER
+        struct CountDevice final : public rhi::IDevice {
+            rhi::Backend backend() const override { return rhi::Backend::Null; }
+            const char* adapterName() const override { return "counting device"; }
+            rhi::IResourceFactory* resources() override { return nullptr; }
+            rhi::ISwapchain* createSwapchain(const rhi::SwapchainDesc&) override { return nullptr; }
+            void beginFrame() override {}
+            void endFrame() override {}
+            u32 draws = 0;
+            u32 next = 0;
+            rhi::MeshHandle createMesh(const rhi::MeshVertex*, u32 vcount, const u32*, u32 icount) override {
+                return (vcount == 0 || icount == 0) ? 0 : ++next;
+            }
+            bool destroyMesh(rhi::MeshHandle) override { return true; }
+            void drawMesh(rhi::MeshHandle, const f32*, const f32*, f32, f32) override { ++draws; }
+        };
+        // x, y in [0, 40000] cm map to [0, 1]; z in [0, 100000] to [0, 1]: a viewer that sees every section below.
+        Mat4 vp;
+        vp.m[0][0] = vp.m[1][1] = 1.0f / 40000.0f;
+        vp.m[2][2] = 1.0f / 100000.0f;
+        CountDevice dev;
+        land.draw(dev, Vec3{20000.0f, 3200.0f, 20000.0f}, vp, 1080.0f);
+        check(dev.draws > 0 && dev.draws <= 192, "the sections draw within the one budget (" + std::to_string(dev.draws) + ")");
+        CountDevice far;
+        land.draw(far, Vec3{4'000'000.0f, 3200.0f, 20000.0f}, vp, 1080.0f);
+        check(far.draws == 0, "nothing draws beyond the draw radius");
+#endif
+
+        land.unload(nullptr);
+        check(!land.loaded() && land.extraSectionCount() == 0 && land.ringTileCount() == 0 &&
+                  !land.groundHeightAt(9600.0, 3200.0, z),
+              "unload frees every section and the ring");
+
+        // Many sections share the one draw budget.
+        fmt::OcWorldData many;
+        for (int i = 0; i < 20; ++i) {
+            const std::string name = "m" + std::to_string(i) + ".ocland";
+            writeSection(name, static_cast<f32>(i));
+            fmt::OcLandscapePlacement lp;
+            lp.section = name;
+            lp.x = static_cast<f64>(i % 5) * 6400.0;
+            lp.y = static_cast<f64>(i / 5) * 6400.0;
+            many.landscapes.push_back(lp);
+        }
+        GameLandscape big;
+        big.loadForLevel(nullptr, dir.string(), (dir / "none.ocworld").string(), many);
+        check(big.extraSectionCount() == 19, "twenty sections loaded");
+#if AVER_LANDSCAPE_TEST_RENDERER
+        CountDevice bd;
+        big.draw(bd, Vec3{16000.0f, 12000.0f, 20000.0f}, vp, 1080.0f);
+        check(bd.draws > 0 && bd.draws <= 192, "twenty sections stay within the draw budget (" + std::to_string(bd.draws) + ")");
+#endif
+        big.unload(nullptr);
+        std::error_code ec;
+        std::filesystem::remove_all(dir, ec);
+    }
 #endif
 
     AVER_INFO("LandscapeShiftTest: {} checks, {} failures", g_checks, g_failures);

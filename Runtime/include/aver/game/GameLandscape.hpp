@@ -1,7 +1,7 @@
-// GameLandscape: one resident .ocland section (render + collision) plus a small ring of
-// procedural tiles kept resident around the camera, plus the authoring operations an in-process
-// level editor needs to sculpt, generate and save one. Both the editor and a shipped game host
-// this same class.
+// GameLandscape: the level's resident .ocland sections (render + collision) -- a primary section plus any
+// further LANDSCAPE records, each placed at its own `at` -- plus a small ring of procedural tiles kept resident
+// around the camera past their rim, plus the authoring operations an in-process level editor needs to sculpt,
+// generate and save the primary one. Both the editor and a shipped game host this same class.
 //
 // NOT A GOD OBJECT: takes a device, a content directory and the level's world data as arguments
 // rather than reaching into GameApp for them. GameApp owns one of these by value, the same way it
@@ -55,7 +55,7 @@ class GameContent;
 
 class GameLandscape {
 public:
-    // ---- one resident section, per level ----
+    // ---- the resident sections, per level ----
 
     // Resolves and loads this level's terrain:
     //   0. setPathOverride()'s path, if non-empty -- used as-is, with the LANDSCAPE record below
@@ -65,6 +65,10 @@ public:
     //      originCm);
     //   2. failing that (or with no record at all), the <levelname>.ocland convention beside
     //      `levelPath`.
+    // The first resolved section is the PRIMARY one (authoring, data(), path()). With branch 1, every further LANDSCAPE
+    // record loads too as an extra section at its own `at`: rendered, collided and queried like the primary, sharing the
+    // level's terrain material (each extra has its own paint weights); a record whose file is missing is skipped with a
+    // warning. Extras are read-only: sculpt/paint/carve/save act on the primary.
     // Silent when none resolves -- most levels have no terrain. `device` may be null (a section
     // still loads with no device; forgetAll/draw simply have nothing to free/create yet).
     //
@@ -77,7 +81,7 @@ public:
                        const fmt::OcWorldData& w, GameContent* content = nullptr,
                        pbr::MaterialSystem* materials = nullptr);
 
-    // Frees the resident section's meshes (when `device` is non-null), its collision body, and every
+    // Frees every resident section's meshes (when `device` is non-null), its collision body, and every
     // ring tile, plus every bit of authoring state: dirty(), a stroke in progress, and any pending
     // GPU invalidate. Safe to call on an already-unloaded instance.
     void unload(rhi::IDevice* device);
@@ -85,21 +89,22 @@ public:
     bool loaded() const { return loaded_; }
     const std::string& path() const { return landscapePath_; }
 
-    // The ground height at world (x, y): a straight bilinear lookup into the resident section
-    // (landscape::surfaceHeightAt), false outside its footprint or with nothing loaded. Wired into
+    // The ground height at world (x, y): a straight bilinear lookup into whichever resident section contains the
+    // point (landscape::surfaceHeightAt), false outside every footprint or with nothing loaded. Wired into
     // world::InstantiateOptions::groundHeightAt and into a `snap` class placement's own z resolution
     // (`z = groundHeightAt(x,y) + authored z`).
     bool groundHeightAt(f64 worldXCm, f64 worldYCm, f64& outWorldZCm) const;
 
-    // The height chunk-streamed scatter follows: the resident section where it exists, and past its
+    // The height chunk-streamed scatter follows: the resident sections where they exist, and past their
     // rim the same continuous noise the ring tiles use. Always answers; only meaningful while
     // loaded().
     bool scatterHeightAt(f32 worldXCm, f32 worldYCm, f32& outWorldZCm) const;
 
-    // ---- the ring: procedural tiles past the authored section's own rim ----
+    // ---- the ring: procedural tiles past the authored sections' rim ----
 
     // Keeps a small window of procedural tiles resident around (cameraXCm, cameraYCm), so the
-    // terrain extends past the authored section's own rim. Cheap to call every frame -- real work
+    // terrain extends past the authored sections' rim (the grid follows the primary section; a tile mostly covered by
+    // an authored section is not built). Cheap to call every frame -- real work
     // only happens the frame the camera's own tile coordinate changes. A no-op when no section is
     // loaded. `content`/`materials` (both required together) bind the LANDSCAPE material onto any
     // newly-synthesized tile -- a tile born mid-session otherwise renders with the renderer's flat
@@ -107,8 +112,9 @@ public:
     void updateRingTiles(rhi::IDevice* device, f32 cameraXCm, f32 cameraYCm, GameContent* content = nullptr,
                           pbr::MaterialSystem* materials = nullptr);
 
-    // Draws the resident section and every ring tile: LOD select, then draw with an identity
-    // transform, each tile taking one share of the draw budget. Retries the surface binding first
+    // Draws the resident sections and ring tiles: LOD select, then draw with an identity transform. Only the nearest
+    // kMaxDrawnSections of those inside the frustum and kDrawRadiusCm draw; they share one draw budget, nearest first,
+    // and a section out of view for a while drops its GPU meshes. Retries the surface binding first
     // until it holds, when `content` and `materials` are given. `viewportHeightPx` sets the LOD
     // projection scale from `fovYRad`, the vertical field of view the host built the camera with (60 degrees unless a
     // gameplay camera rig changed it: pass PlayView::fovYRad).
@@ -130,7 +136,7 @@ public:
     // participant) calls it BEFORE loadForLevel, so the section is loaded into that frame. Same as an event otherwise.
     void setFrameOrigin(const rhi::ShiftOrigin& o) { moveFrameTo(o); }
     const rhi::ShiftOrigin& frameOrigin() const { return frame_; }
-    // The section's sample (0,0) in ABSOLUTE cm, exact (data().originCm is the scene-frame f32). What a LANDSCAPE record's
+    // The primary section's sample (0,0) in ABSOLUTE cm, exact (data().originCm is the scene-frame f32). What a LANDSCAPE record's
     // `at` and anything else that is written to a level or a save must carry; equals data().originCm at origin zero.
     void homeOriginAbsCm(f64 out[3]) const { out[0] = homeAbs_[0]; out[1] = homeAbs_[1]; out[2] = landscapeData_.originCm[2]; }
 
@@ -151,9 +157,15 @@ public:
     // itself afterward.
     bool loadSection(rhi::IDevice* device, const std::string& path) { return loadLandscape(device, path); }
 
-    // The resident section's own data: heights, sampleCount, spacingCm, originCm, bounds. Empty
+    // The primary section's own data: heights, sampleCount, spacingCm, originCm, bounds. Empty
     // (sampleCount 0) when nothing is loaded.
     const fmt::OcLandData& data() const { return landscapeData_; }
+
+    // The extra sections (further LANDSCAPE records) and the resident ring tiles, for hosts and tests.
+    u32 extraSectionCount() const { return static_cast<u32>(extras_.size()); }
+    const fmt::OcLandData& extraData(u32 i) const { return extras_[i].data; }
+    usize ringTileCount() const { return landscapeRingTiles_.size(); }
+    bool ringTileResident(i32 tx, i32 ty) const { return landscapeRingTiles_.count(landscape::TileCoord{tx, ty}) != 0; }
 
     // The ring/noise parameters an authoring UI edits in place -- also what the ring tiles and
     // scatterHeightAt's past-the-rim fallback read.
@@ -245,6 +257,7 @@ public:
         fmt::OcLandData data;
         landscape::LandscapeTree tree;
         std::unique_ptr<landscape::LandscapeRenderer> renderer;
+        u64 lastDrawn = 0;   // GameLandscape::drawFrame_ it last drew on (0 = no meshes held)
     };
 
 #if AVER_MODULE_PBR
@@ -259,7 +272,7 @@ public:
 #endif
 
     // ---- wave3 layers ----
-    // Weightmap paint on the resident section, the terrain material's layer table, physical-surface queries and the
+    // Weightmap paint on the primary section (extras are drawn and queried with their stored paint), the terrain material's layer table, physical-surface queries and the
     // GPU weight textures (docs/LANDSCAPE_LAYERS_WATER.md). Paint is stored in the .ocland by layer NAME; the material's
     // layers are matched to it by name, so reordering the material never scrambles paint. Everything but the GPU upload
     // (flushWeights) is CPU only and works headless.
@@ -314,7 +327,7 @@ public:
     bool applyWeightRect(u32 x0, u32 y0, u32 x1, u32 y1, u32 planes, const std::vector<u8>& src);
     bool weightsDirty() const { return weightsDirty_; }
 
-    // Height, slope, paint weights and physical surface at a world XY (CPU, headless). False outside the section.
+    // Height, slope, paint weights and physical surface at a world XY (CPU, headless). False outside every section.
     bool sampleGround(f32 xCm, f32 yCm, GroundInfo& out) const;
     // Weight-averaged friction and restitution only; allocation-free and a pure read, because the physics surface sampler
     // calls it on worker threads (paint is not edited while a Play session or Simulate runs).
@@ -334,7 +347,9 @@ public:
     // The two materials a layered terrain draws through, derived from the authored one: the section's copy names the
     // runtime weightmaps ("@rt:land.w0" / "land.w1") and parameter texture ("@rt:land.params") in slots 3..5; the ring
     // tiles' copy has no "@rt:" refs at all, so every pixel of a ring tile is the base layer.
-    static void makeTerrainSectionDescs(const pbr::MaterialDesc& base, pbr::MaterialDesc& section, pbr::MaterialDesc& ring);
+    // `rtSuffix` is appended to the three runtime names, so each extra section binds its own weightmaps.
+    static void makeTerrainSectionDescs(const pbr::MaterialDesc& base, pbr::MaterialDesc& section, pbr::MaterialDesc& ring,
+                                        const std::string& rtSuffix = std::string());
 #endif
 
     // Changes the LANDSCAPE material by name (the editor's material picker); the next draw rebinds. The caller records the name
@@ -358,6 +373,17 @@ private:
     // pending to save.
     bool loadLandscape(rhi::IDevice* device, const std::string& path);
 
+    // One extra section: the .ocland at `path`, placed at `at` (absolute) when `haveAt`.
+    bool loadExtra(rhi::IDevice* device, const std::string& path, bool haveAt, const f64 at[3]);
+    // Puts a section at absolute (x, y) [and z when given]: its scene-frame origin and xy bounds.
+    void placeSection(fmt::OcLandData& d, const f64 absXY[2], const f64* atZ) const;
+    // The section holding scene-frame (x, y): the primary or an extra. False outside all of them.
+    struct Hit { const fmt::OcLandData* data = nullptr; const std::array<i32, 8>* remap = nullptr; f32 z = 0.0f; };
+    bool findSection(f32 xCm, f32 yCm, Hit& out) const;
+    // A static heightfield body for `d` (<= 0 on failure), its paint layers mapped through `remap`.
+    i32 buildBody(const fmt::OcLandData& d, const std::array<i32, 8>& remap) const;
+    void rebuildExtraCollision();
+
     // Rebuilds the resident section's static collision body from scratch (Jolt's heightfield shape
     // is immutable once created -- there is no partial update). Called from loadForLevel and save()
     // only -- NEVER per sculpt tick, per undo/redo, or on generating fresh noise, which would rebuild
@@ -378,13 +404,22 @@ private:
     // own readiness and the level load race each other with no guaranteed order; the tiling has to be
     // re-asked for with pbr::MaterialLibrary::get().valid(h) rather than trusted on the first
     // constants() call, since constants() itself returns a fallback for any handle not yet valid.
-    void applySurface(landscape::LandscapeRenderer& r, GameContent& content, pbr::MaterialSystem& materials, bool ring = false);
+    // `sectionMat` (extras) replaces the primary's derived material for a section draw.
+    void applySurface(landscape::LandscapeRenderer& r, GameContent& content, pbr::MaterialSystem& materials, bool ring = false,
+                      u32 sectionMat = 0);
     // wave3 layers: finds the LANDSCAPE material, and for a layered terrain material keeps its derived section / ring
     // materials, layer table and remap current. True when anything changed (the renderers must rebind).
     bool syncTerrain(GameContent& content, pbr::MaterialSystem& materials);
     // Gives the derived materials and runtime textures back (textures are destroyed now when `device` is given, else
     // retired and destroyed by a later flushWeights).
     void releaseTerrain(rhi::IDevice* device);
+    // Builds one section's weight textures (and its parameter texture unless kept) and swaps them in under the runtime
+    // names "land.w0<suffix>" ...; the replaced ones are retired. Shared by the primary and every painted extra.
+    void uploadSectionWeights(rhi::IResourceFactory& res, pbr::MaterialSystem& materials, const pbr::MaterialDesc& base,
+                              const pbr::TerrainTextures& info, const fmt::OcLandData& data, const std::array<i32, 8>& remap,
+                              const std::string& rtSuffix, u32& texA, u32& texB, u32& texParams, bool& paramsDirty);
+    // Creates or updates the derived material of every painted extra section from the base terrain desc.
+    void syncExtraMaterials(const pbr::MaterialDesc& base);
 #endif
 
     // The material name the level's LANDSCAPE record named, held as TEXT rather than a resolved
@@ -405,6 +440,25 @@ private:
     // guarded) so the declaration cannot go out of scope from under a call site guarded differently --
     // rebuildCollision/unload guard every USE instead.
     i32 landscapeBody_ = -1;
+
+    // A further LANDSCAPE record's section: what rendering, collision and queries need of the primary.
+    struct Section {
+        fmt::OcLandData data;
+        landscape::LandscapeTree tree;
+        std::unique_ptr<landscape::LandscapeRenderer> renderer;
+        std::string path;
+        f64 homeAbs[2] = {0.0, 0.0};
+        i32 body = -1;
+        std::array<i32, 8> remap{};   // this section's paint layer i -> material layer, like sectionToMaterial_
+        u64 lastDrawn = 0;            // drawFrame_ it last drew on
+#if AVER_MODULE_PBR
+        u32 mat = 0, texA = 0, texB = 0, texParams = 0;   // derived material and runtime textures (painted sections)
+        bool paramsDirty = true, weightsDirty = true;
+#endif
+    };
+    std::vector<Section> extras_;
+    u64 drawFrame_ = 0;
+    u64 primaryLastDrawn_ = 0;
 
     // ---- authoring state ----
     std::string pathOverride_;   // see setPathOverride
@@ -449,11 +503,19 @@ private:
     // blocker 9).
     static constexpr u32 kMaxDrawsPerTile = 192u / kMaxSectionsResident;
     static constexpr u32 kMaxResidentNodesPerTile = 512u / kMaxSectionsResident;
+    // Many sections: the nearest few in view draw, sharing one total nearest first (each gets at least
+    // kMinDrawsPerSection), so the mesh cache stays near kMaxDrawnSections * kMaxResidentNodesPerTile.
+    static constexpr u32 kMaxDrawnSections = 16;
+    static constexpr u32 kTotalDraws = 192;
+    static constexpr u32 kMinDrawsPerSection = kTotalDraws / kMaxDrawnSections;
+    static constexpr f32 kDrawRadiusCm = 300000.0f;      // horizontal distance from the camera to a footprint
+    static constexpr u64 kIdleFramesBeforeForget = 300;  // not drawn for this long: its GPU meshes are dropped
     landscape::TileCoord lastCameraTile_{};
     bool lastCameraTileValid_ = false;
 
     // ---- wave3 layers ----
     void rebuildRemap();
+    void remapFor(const fmt::OcLandData& d, std::array<i32, 8>& out) const;
     void updateSurfaceSampler();
     // The tail of a height edit that is not a brush tick (carve): tree rebuild, GPU meshes, collision, dirty.
     void heightsEdited(rhi::IDevice* device, const landscape::BrushRect& touched);
@@ -471,7 +533,7 @@ private:
     u32 baseMat_ = 0, secMat_ = 0, ringMat_ = 0;
     u64 baseSig_ = 0;
     bool terrainActive_ = false;
-    bool paramsDirty_ = true;                          // the section's parameter texture must be rebuilt (layers or section changed)
+    bool paramsDirty_ = true;                          // the primary's parameter texture must be rebuilt (layers or section changed)
     pbr::MaterialSystem* lastMaterials_ = nullptr;
     u32 texA_ = 0, texB_ = 0, texParams_ = 0;          // rhi::TextureHandle of the live runtime textures (0 = none)
     struct Retired { u32 texture; u64 frame; };
