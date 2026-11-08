@@ -101,6 +101,13 @@ two-pass HiZ behind `geom.hiz`, fixed-LOD `rtProxy`, reuse of `PSMainVoxi` (G-bu
 
 Risks specific to the owner's setup: all GPU steps need a headed Vulkan *and* D3D12 run; instance/cluster cull kernels must have bounded loops and be tried on a small scene first (standing no-TDR rule).
 
+**Status 2026-11-09 (W1, CPU steps).**
+- Done: T-CPU-1 (`deriveLodSpheres`/`validateLodSpheres`, `ClusterAdapt.hpp`; no format change), T-CPU-2 (`ClusterView::lodCenter/lodRadius`, `buildClusterDagViews`, `selectCutIds`; the cut now measures error at the producing group's shared sphere, and error 0 never hits the near-camera sentinel), T-CPU-3 (builder v3, MLET v4, real `SubmeshRange` meshlet spans).
+- Proof: `ClusterCutOracleTest` over random cameras finds no overlap, hole or split group with shared spheres; the old per-cluster-sphere rule gives hundreds of overlaps and split groups on the same meshes. Note the plan's "every LOD-0 triangle covered exactly once" is checked at cluster/group granularity (a re-split group's outputs are all parents of every member, so descendant counting cannot say "once").
+- Not done: the legacy `inLocalCut`/`MeshClusterView` path is unchanged because `MeshClusterView` is uploaded raw to the D3D12 amplification shader (a layout change needs the shader and a headed run); it is replaced when T-GPU-2 lands. No GPU, sandbox or Vulkan wiring. T-CPU-4..5 and T-GPU-1..5 untouched.
+- Measured (Debug, `ClusterBuildBench`): one-material fixtures are cluster-for-cluster identical to v2 with the same build time (grid 44,402 tris: 461 L0 clusters, 1,088 total, coarsest 606, ~160 ms). Multi-material meshes get a slightly deeper-locked ladder because material borders are now locked (4-stripe grid coarsest 606 -> 1,490 tris, 3-band sphere 952 -> 1,704; build time unchanged). The five named corpus meshes (dead_tree_trunk, rock_07/_09, rock_moss_set_02) are not on this machine, so the protected-mesh comparison is not measured; they are one-material, so v3 should leave them unchanged.
+- Existing cooked meshes read builder version 2 and show as stale until re-cooked; they keep loading.
+
 ---
 
 ## W2. Dynamic HLOD
