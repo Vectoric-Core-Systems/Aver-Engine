@@ -50,3 +50,10 @@ if(TARGET Aver.Trifactor)
   set_target_properties(ClusterCutOracleTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# MeshReportTest -- builder-staleness model, virtualization eligibility, group-seam measurement. Pure CPU.
+if(TARGET Aver.Trifactor)
+  add_executable(MeshReportTest src/MeshReportTest.cpp)
+  target_link_libraries(MeshReportTest PRIVATE Aver.Trifactor Aver.Formats Aver.Core)
+  set_target_properties(MeshReportTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()

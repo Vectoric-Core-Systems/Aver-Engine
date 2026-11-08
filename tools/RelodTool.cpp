@@ -20,7 +20,7 @@
 // doc comment for why it belongs in Trifactor rather than Formats or here. This tool calls it, the
 // same way ConvertTool does, rather than keeping a third copy.
 //
-//     RelodTool.exe <file-or-directory> [--write <output-directory>]
+//     RelodTool.exe <file-or-directory> [--report] [--write <output-directory>]
 //
 // --write <dir>: pack and save a re-cooked copy of every mesh RelodTool would otherwise only report
 // on, into `dir`, one new file per input, under the SAME filename -- never touching the input. Only
@@ -36,6 +36,7 @@
 #include "aver/core/Log.hpp"
 #include "aver/formats/OcMesh.hpp"
 #include "aver/trifactor/ClusterBuilder.hpp"
+#include "aver/trifactor/MeshReport.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -66,17 +67,23 @@ u64 levelTris(const trifactor::LodDag& dag, u32 level) {
     return n;
 }
 
-// Classifies a mesh's ON-DISK builderVersion (whatever fmt::loadOcMesh just handed back, BEFORE this
-// run re-cooks anything) against the version this build of Trifactor would stamp a fresh cook with.
-// "unknown" and "stale" are both, in the end, "needs re-cooking" -- but they are named separately
-// because they mean different things to a human deciding whether to trust a ladder: "unknown" is a
-// file from before this field existed (Reserved was always 0 -- see OcMeshData::builderVersion's own
-// comment on why 0 can never mean "current"), "stale" is a file that WAS cooked by a version-aware
-// builder, just an older one than this binary.
-const char* stalenessLabel(u32 stored) {
-    if (stored == trifactor::kBuilderVersion) return "current";
-    if (stored == 0) return "unknown";
-    return "stale";
+// --report: per-mesh table of the ladder as it is on disk (eligibility, builder staleness) and as it
+// would be rebuilt (clusters, triangles, group-seam cost per level).
+bool g_report = false;
+
+void printReport(const std::string& name, const fmt::OcMeshData& md, const trifactor::LodDag& dag) {
+    const trifactor::Eligibility el = trifactor::virtualizable(md);
+    const trifactor::LodReport lr = trifactor::measureLodDag(dag, md);
+    const trifactor::BuilderStaleness st = trifactor::classifyBuilder(md.builderVersion);
+    AVER_INFO("[Relod]   {} | builder {} (v{}) | virtualizable: {}{}{}", name, trifactor::stalenessLabel(st),
+              md.builderVersion, el.ok ? "yes" : "no", el.ok ? "" : " -- ", el.why);
+    if (st != trifactor::BuilderStaleness::Current)
+        AVER_WARN("[Relod]   {} | {}", name, trifactor::stalenessWarning(md.builderVersion));
+    for (u32 l = 0; l < lr.levels.size(); ++l) {
+        const trifactor::LevelReport& r = lr.levels[l];
+        AVER_INFO("[Relod]     L{:<2} clusters {:>6} groups {:>5} tris {:>8} edges {:>8} locked {:>7} ({:>4.1f}%) open {:>6}",
+                  l, r.clusters, r.groups, r.triangles, r.edges, r.lockedEdges, r.lockedRatio() * 100.0, r.openEdges);
+    }
 }
 
 void relod(const std::filesystem::path& path, const std::filesystem::path* writeDir, bool force, Totals& t) {
@@ -169,13 +176,15 @@ void relod(const std::filesystem::path& path, const std::filesystem::path* write
               newCoarsest, newLevels,
               newCoarsest ? static_cast<f64>(lod0Tris) / static_cast<f64>(newCoarsest) : 0.0);
 
+    if (g_report) printReport(path.filename().string(), md, dag);
+
     // EVERYTHING BELOW THIS LINE ONLY RUNS WHEN --write WAS PASSED (writeDir != nullptr) -- the per-
     // mesh line just printed above is the ENTIRE default-mode output for this mesh, unchanged from
     // before this stage, which is what keeps a plain `RelodTool <dir>` run byte-for-byte identical to
     // what it always produced (see this file's own header comment).
     if (!writeDir) return;
 
-    const char* label = stalenessLabel(md.builderVersion);
+    const char* label = trifactor::stalenessLabel(trifactor::classifyBuilder(md.builderVersion));
     if (md.builderVersion == trifactor::kBuilderVersion) ++t.currentCount;
     else if (md.builderVersion == 0)                     ++t.unknownCount;
     else                                                  ++t.staleCount;
@@ -247,7 +256,7 @@ void relod(const std::filesystem::path& path, const std::filesystem::path* write
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        AVER_ERROR("usage: RelodTool <file-or-directory> [--write <output-directory>]");
+        AVER_ERROR("usage: RelodTool <file-or-directory> [--report] [--write <output-directory>]");
         return exitCode(ExitCode::Usage);
     }
     const std::filesystem::path root = argv[1];
@@ -272,6 +281,7 @@ int main(int argc, char** argv) {
         // Only meaningful with --write, and deliberately NOT implied by it: replacing files someone
         // already has is a separate decision from writing files at all.
         else if (std::strcmp(argv[i], "--force") == 0) force = true;
+        else if (std::strcmp(argv[i], "--report") == 0) g_report = true;
     }
 
     std::error_code ec;

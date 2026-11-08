@@ -38,6 +38,7 @@ aver_add_module(Aver.Trifactor
     src/ClusterBuilder.cpp
     src/ClusterSelect.cpp
     src/ClusterAdapt.cpp
+    src/MeshReport.cpp
   DEPS
     Aver.Core
     Aver.Formats
