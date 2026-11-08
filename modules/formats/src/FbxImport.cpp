@@ -13,6 +13,7 @@
 #include <cstring>
 #include <fstream>
 #include <unordered_set>
+#include "aver/platform/FileSystem.hpp"
 
 namespace aver::fmt {
 namespace {
@@ -744,7 +745,7 @@ bool importFbxFromMemory(const u8* bytes, usize size, const std::string& baseDir
 }
 
 bool importFbx(const std::string& path, FbxImportResult& out, const FbxImportOptions& opt, std::string* why) {
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    std::ifstream f(aver::nativePath(path), std::ios::binary | std::ios::ate);
     if (!f) return fail(why, "FBX: cannot open " + path);
     const std::streamoff n = f.tellg();
     if (n <= 0) return fail(why, "FBX: empty file " + path);

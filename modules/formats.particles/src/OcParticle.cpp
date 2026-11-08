@@ -1352,7 +1352,7 @@ bool writeFileText(const std::string& path, const std::string& text, std::string
     std::error_code ec;
     const std::filesystem::path p(path);
     if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
-    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    std::ofstream f(aver::nativePath(path), std::ios::binary | std::ios::trunc);
     if (!f) { if (err) *err = "could not open " + path + " for writing"; return false; }
     f.write(text.data(), static_cast<std::streamsize>(text.size()));
     if (!f) { if (err) *err = "write failed for " + path; return false; }
@@ -1360,7 +1360,7 @@ bool writeFileText(const std::string& path, const std::string& text, std::string
 }
 std::string readExisting(const std::string& path) {
     std::string existing;
-    std::ifstream in(path, std::ios::binary);
+    std::ifstream in(aver::nativePath(path), std::ios::binary);
     if (in) existing.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
     return existing;
 }

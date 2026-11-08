@@ -872,7 +872,7 @@ bool saveOcgraph(const std::string& path, const OcGraphData& g, std::string* err
     // graph. An empty base makes writeOcgraph behave exactly as it did before.
     std::string existing;
     {
-        std::ifstream in(path, std::ios::binary);
+        std::ifstream in(aver::nativePath(path), std::ios::binary);
         if (in) existing.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
     }
 

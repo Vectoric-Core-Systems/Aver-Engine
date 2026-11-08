@@ -14,6 +14,7 @@
 #include <fstream>
 #include <map>
 #include <unordered_set>
+#include "aver/platform/FileSystem.hpp"
 
 namespace aver::fmt {
 namespace {
@@ -1905,7 +1906,7 @@ void Gltf::importImages() {
                 continue;
             }
             const std::string full = baseDir_ + AVER_PATH_SEP + rel;
-            std::ifstream f(full, std::ios::binary | std::ios::ate);
+            std::ifstream f(aver::nativePath(full), std::ios::binary | std::ios::ate);
             if (!f) {
                 note("an image the file names but does not ship: '" + rel + "'");
                 continue;
@@ -2261,7 +2262,7 @@ bool loadBuffers(const JsonValue& d, const std::vector<u8>& glbBin, const std::s
         }
         if (baseDir.empty()) return fail(why, "glTF: the file references '" + uri + "' but no directory context was given");
         const std::string full = baseDir + AVER_PATH_SEP + percentDecode(uri);
-        std::ifstream f(full, std::ios::binary | std::ios::ate);
+        std::ifstream f(aver::nativePath(full), std::ios::binary | std::ios::ate);
         if (!f) return fail(why, "glTF: cannot open referenced buffer " + full);
         const std::streamoff n = f.tellg();
         out.data[i].resize(usize(n > 0 ? n : 0));
@@ -2330,7 +2331,7 @@ bool importGltfFromMemory(const u8* bytes, usize size, const std::string& baseDi
 // Imports a glTF or GLB file from disk. Returns false with `why` set.
 bool importGltf(const std::string& path, GltfImportResult& out,
                 const GltfImportOptions& opt, std::string* why) {
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    std::ifstream f(aver::nativePath(path), std::ios::binary | std::ios::ate);
     if (!f) return fail(why, "glTF: cannot open " + path);
     const std::streamoff n = f.tellg();
     if (n <= 0) return fail(why, "glTF: empty file " + path);

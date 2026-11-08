@@ -2064,7 +2064,7 @@ int runHairText(int argc, char** argv) {
         emitSummary(input, stats, 1);
         return exitCode(ExitCode::Failed);
     };
-    std::ifstream in(input, std::ios::binary);
+    std::ifstream in(aver::nativePath(input), std::ios::binary);
     if (!in) return failWith("cannot read the text file");
     std::ostringstream text;
     text << in.rdbuf();
@@ -2350,7 +2350,7 @@ int main(int argc, char** argv) {
         std::string why;
         const bool parsed = fmt::importFbx(input, res, fopt, &why);
         if (!importReportPath.empty()) {
-            std::ofstream rf(importReportPath, std::ios::binary);
+            std::ofstream rf(aver::nativePath(importReportPath), std::ios::binary);
             if (rf) {
                 if (!parsed) rf << "IMPORT FAILED: " << why << '\n';
                 rf << res.report;
@@ -2433,7 +2433,7 @@ int main(int argc, char** argv) {
             // What the composer saw is the diagnosis of a failed import, so it is reported too.
             for (const std::string& u : res.unsupported) AVER_WARN("unsupported: {}", u);
             if (!importReportPath.empty()) {
-                std::ofstream rf(importReportPath, std::ios::binary);
+                std::ofstream rf(aver::nativePath(importReportPath), std::ios::binary);
                 if (rf) rf << "IMPORT FAILED: " << why << '\n' << fmt::usdImportReportText(res);
             }
             emitArtifact(input, {}, "mesh", false, false, why, stats);
@@ -2442,7 +2442,7 @@ int main(int argc, char** argv) {
         }
         for (const std::string& u : res.unsupported) AVER_WARN("unsupported: {}", u);
         if (!importReportPath.empty()) {
-            std::ofstream rf(importReportPath, std::ios::binary);
+            std::ofstream rf(aver::nativePath(importReportPath), std::ios::binary);
             if (rf) {
                 rf << fmt::usdImportReportText(res);
                 AVER_INFO("--import-report: wrote {}", importReportPath);
@@ -2495,7 +2495,7 @@ int main(int argc, char** argv) {
             const fmt::MaterialMapStats mmStats = fmt::applyMaterialMap(res.meshes, res.meshNames, mmap, &mmReport);
             const std::string mmReportPath = outDir + "/" + base + ".materialmap.report.txt";
             createDirectories(outDir);
-            std::ofstream rf(mmReportPath, std::ios::binary);
+            std::ofstream rf(aver::nativePath(mmReportPath), std::ios::binary);
             if (rf) {
                 rf << fmt::materialMapReportText(mmap, mmReport, mmStats, input);
                 AVER_INFO("--material-map: report written to {}", mmReportPath);

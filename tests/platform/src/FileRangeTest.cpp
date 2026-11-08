@@ -19,6 +19,8 @@
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -403,6 +405,17 @@ int main() {
         check(readFileBytes(file, back) && back == payload, "...readFileBytes reads the same bytes back");
         std::string text;
         check(readFileText(file, text) && text.size() == payload.size(), "...readFileText reads it too");
+        {
+            // A loader's own stream, opened through nativePath (OcMesh and the other loaders did a plain ifstream and failed past MAX_PATH).
+            std::ifstream in(nativePath(file), std::ios::binary);
+            std::vector<u8> viaStream((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            check(in.good() || in.eof(), "std::ifstream(nativePath(...)) opens a file at the long path");
+            check(viaStream == payload, "...and reads the same bytes");
+            const std::string streamed = longDir + "/streamed.bin";
+            { std::ofstream out(nativePath(streamed), std::ios::binary | std::ios::trunc); out.write("abc", 3); }
+            check(readFileText(streamed, text) && text == "abc", "std::ofstream(nativePath(...)) writes a file at the long path");
+            check(deleteFile(streamed), "...which deletes cleanly");
+        }
 
         // The path the caller passed is never changed, and the same file is reachable by a spelling
         // with backslashes, a "." and a ".." in it.

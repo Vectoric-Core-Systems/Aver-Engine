@@ -15,6 +15,7 @@
 #include <map>
 #include <sstream>
 #include <string_view>
+#include "aver/platform/FileSystem.hpp"
 
 namespace aver::fmt {
 // Named rather than anonymous since UsdStageImport.cpp shares these (UsdImportInternal.hpp).
@@ -1098,7 +1099,7 @@ i32 loadUsdTexture(Ctx& c, const std::string& rel) {
     img.suggestedName = stem;
 
     const auto readAll = [](const std::string& path, std::vector<u8>& into) {
-        std::ifstream f(path, std::ios::binary | std::ios::ate);
+        std::ifstream f(aver::nativePath(path), std::ios::binary | std::ios::ate);
         if (!f) return false;
         const std::streamoff n = f.tellg();
         into.resize(usize(n > 0 ? n : 0));
@@ -1941,7 +1942,7 @@ std::string usdImportReportText(const UsdImportResult& r) {
 
 bool importUsd(const std::string& path, UsdImportResult& out,
                const UsdImportOptions& opt, std::string* why) {
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    std::ifstream f(aver::nativePath(path), std::ios::binary | std::ios::ate);
     if (!f) return fail(why, "USD: cannot open " + path);
     const std::streamoff n = f.tellg();
     if (n <= 0) return fail(why, "USD: empty file " + path);

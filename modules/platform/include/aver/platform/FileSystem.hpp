@@ -1,6 +1,7 @@
 #pragma once
 #include "aver/core/Types.hpp"
 
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -74,6 +75,15 @@ void setFileTrace(FileTraceFn fn, void* user);
 // happily pass a package that reaches into the dev tree for its geometry. Measured: a packaged
 // game reported 2 traced opens before these loaders called it.
 void traceFileOpen(const std::string& path);
+
+// The path to give a std::ifstream / std::ofstream / std::filesystem call: UTF-8 decoded and, on Windows, in the
+// extended-length form when it is long, so it opens past MAX_PATH (260) like the functions here do. Use it for every
+// stream a loader or writer opens itself.
+std::filesystem::path nativePath(const std::string& utf8Path);
+inline std::filesystem::path nativePath(const std::filesystem::path& p) {
+    const std::u8string u = p.u8string();
+    return nativePath(std::string(u.begin(), u.end()));
+}
 
 // Reads a whole file into `out`. False if it cannot be read.
 bool readFileBytes(const std::string& path, std::vector<u8>& out);

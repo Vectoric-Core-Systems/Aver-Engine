@@ -125,7 +125,7 @@ bool parseOcBt(const u8* bytes, usize size, OcBtData& out, std::string* why) {
 
 bool loadOcBt(const std::string& path, OcBtData& out, std::string* why) {
     aver::traceFileOpen(path);
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    std::ifstream f(aver::nativePath(path), std::ios::binary | std::ios::ate);
     if (!f) return fail(why, ".ocbt: cannot open " + path);
     const std::streamoff n = f.tellg();
     if (n <= 0) return fail(why, ".ocbt: empty file " + path);

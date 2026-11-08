@@ -1222,7 +1222,7 @@ u64 shapeSourceKey(const std::string& meshPath, u64 fileSize, i64 mtimeTicks, co
 // Reads and validates cache entry against source mesh's current path/size/mtime.
 bool readCollisionCacheFile(const std::string& cachePath, const std::string& meshPath, u64 fileSize,
                             i64 mtimeTicks, GameContent::CollisionMesh& out, const SlotQuery& slots) {
-    std::ifstream in(cachePath, std::ios::binary);
+    std::ifstream in(aver::nativePath(cachePath), std::ios::binary);
     if (!in) return false;
     const auto get = [&in](void* p, usize n) { in.read(static_cast<char*>(p), static_cast<std::streamsize>(n)); return static_cast<bool>(in); };
 
@@ -1294,7 +1294,7 @@ bool writeCollisionCacheFile(const std::string& cachePath, const std::string& me
 
     const std::string tmpPath = cachePath + ".tmp";
     {
-        std::ofstream out(tmpPath, std::ios::binary | std::ios::trunc);
+        std::ofstream out(aver::nativePath(tmpPath), std::ios::binary | std::ios::trunc);
         if (!out) { if (why) *why = "could not open " + tmpPath; return false; }
         const auto put = [&out](const void* p, usize n) { out.write(static_cast<const char*>(p), static_cast<std::streamsize>(n)); };
         put(&kCollisionCacheMagic, sizeof(kCollisionCacheMagic));

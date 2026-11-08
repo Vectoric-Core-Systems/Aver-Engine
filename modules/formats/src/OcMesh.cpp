@@ -1592,7 +1592,7 @@ bool loadOcMesh(const std::string& path, OcMeshData& out, std::string* why) {
     // OUTSIDE a package would not appear in --trace-opens and verify-game.ps1 would pass a
     // package that reaches into the dev tree for its geometry.
     aver::traceFileOpen(path);
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    std::ifstream f(aver::nativePath(path), std::ios::binary | std::ios::ate);
     if (!f) return fail(why, ".ocmesh: cannot open " + path);
     const std::streamoff n = f.tellg();
     if (n <= 0) return fail(why, ".ocmesh: empty file " + path);

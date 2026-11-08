@@ -7,6 +7,7 @@
 #include <fstream>
 #include <map>
 #include <sstream>
+#include "aver/platform/FileSystem.hpp"
 
 namespace aver::fmt {
 
@@ -86,7 +87,7 @@ void parseMaterialMap(const std::string& text, bool legacy, MaterialMap& out) {
 }
 
 bool loadMaterialMap(const std::string& path, bool legacy, MaterialMap& out) {
-    std::ifstream f(path, std::ios::binary);
+    std::ifstream f(aver::nativePath(path), std::ios::binary);
     if (!f) return false;
     std::stringstream ss;
     ss << f.rdbuf();

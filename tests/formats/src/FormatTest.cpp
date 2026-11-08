@@ -3,6 +3,8 @@
 #include "aver/formats/Avr1.hpp"
 #include "aver/formats/OcBeam.hpp"
 #include "aver/formats/OcMap.hpp"
+#include "aver/formats/OcMesh.hpp"
+#include "aver/platform/FileSystem.hpp"
 #include "aver/formats/OcProject.hpp"
 #include "aver/formats/OcSave.hpp"
 #include "aver/formats/OcWorld.hpp"
@@ -2232,8 +2234,36 @@ static void checkOcSaveOrigin() {
     check(!parseOcSave(badBytes.data(), badBytes.size(), badRead, &why), "but an 8-byte ORIG is refused");
 }
 
+// A mesh saved and loaded at a path over 300 characters: the .ocmesh loader opened a plain ifstream, which Windows refuses past
+// MAX_PATH, so a converted model in a deep project folder imported but could not be read back.
+static void checkOcmeshLongPath() {
+    AVER_INFO("=== .ocmesh at a path over 300 characters ===");
+    std::filesystem::path dir = std::filesystem::temp_directory_path() / "aver-format-longpath";
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::string longDir = dir.string();
+    for (int i = 0; longDir.size() <= 300; ++i) longDir += "/" + std::string(40, 'm') + std::to_string(i);
+    check(createDirectories(longDir), "the long folder is created");
+    const std::string path = longDir + "/tri.ocmesh";
+    fmt::OcMeshData m;
+    m.positions = {0, 0, 0, 100, 0, 0, 0, 100, 0};
+    m.normals = {0, 0, 1, 0, 0, 1, 0, 0, 1};
+    m.uvs = {0, 0, 1, 0, 0, 1};
+    m.indices = {0, 1, 2};
+    m.submeshes.push_back({});
+    m.submeshes.back().indexCount = 3;
+    m.submeshes.back().vertexCount = 3;
+    m.materialSlots = {"default"};
+    std::string why;
+    check(fmt::saveOcMesh(path, m, &why), "saveOcMesh writes at a " + std::to_string(path.size()) + "-character path: " + why);
+    fmt::OcMeshData back;
+    check(fmt::loadOcMesh(path, back, &why) && back.indices == m.indices && back.positions.size() == 9, "loadOcMesh reads it back: " + why);
+    std::filesystem::remove_all(dir, ec);
+}
+
 int main(int argc, char** argv) {
     checkFnv();
+    checkOcmeshLongPath();
     checkOcproject();
     checkOcworld();
     checkOcworldNesting();

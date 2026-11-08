@@ -177,7 +177,7 @@ bool loadOcInstances(const std::string& path, OcInstanceData& out, std::string* 
     // `out.transforms` -- exactly what this header's own "no per-instance allocation" fast-path
     // comment is asking a multi-million-instance file to avoid.
     aver::traceFileOpen(path);
-    std::ifstream in(path, std::ios::binary | std::ios::ate);
+    std::ifstream in(aver::nativePath(path), std::ios::binary | std::ios::ate);
     if (!in) return fail(why, ".ocinst: cannot open " + path);
     const std::streamoff n = in.tellg();
     if (n <= 0) return fail(why, ".ocinst: empty file " + path);

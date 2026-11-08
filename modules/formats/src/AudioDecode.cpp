@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include "aver/platform/FileSystem.hpp"
 
 #if defined(_WIN32)
 #  ifndef NOMINMAX
@@ -22,8 +23,7 @@ namespace detail {
 bool ByteInput::openFile(const std::string& utf8Path) {
     memory_ = false;
     if (utf8Path.empty()) return false;
-    const std::u8string u8(reinterpret_cast<const char8_t*>(utf8Path.c_str()));
-    file_.open(std::filesystem::path(u8), std::ios::binary);
+    file_.open(aver::nativePath(utf8Path), std::ios::binary);
     if (!file_) return false;
     file_.seekg(0, std::ios::end);
     const std::streamoff end = file_.tellg();
@@ -75,11 +75,7 @@ bool ByteInput::tell(i64& out) { out = static_cast<i64>(pos_); return true; }
 std::FILE* openFileUtf8(const std::string& utf8Path) {
     if (utf8Path.empty()) return nullptr;
 #if defined(_WIN32)
-    const int wide = MultiByteToWideChar(CP_UTF8, 0, utf8Path.c_str(), -1, nullptr, 0);
-    if (wide <= 0) return nullptr;
-    std::wstring w(static_cast<usize>(wide), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, utf8Path.c_str(), -1, w.data(), wide);
-    return _wfopen(w.c_str(), L"rb");
+    return _wfopen(aver::nativePath(utf8Path).c_str(), L"rb");
 #else
     return std::fopen(utf8Path.c_str(), "rb");
 #endif

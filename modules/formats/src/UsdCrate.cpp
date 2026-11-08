@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include "aver/platform/FileSystem.hpp"
 
 namespace aver::fmt {
 namespace {
@@ -289,7 +290,7 @@ f64 UsdCrateValue::number(usize k, f64 fallback) const {
 // ---- UsdCrate -----------------------------------------------------------------------------------
 
 bool UsdCrate::loadFile(const std::string& path, std::string* why) {
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    std::ifstream f(aver::nativePath(path), std::ios::binary | std::ios::ate);
     if (!f) return fail(why, "USDC: cannot open " + path);
     const std::streamoff n = f.tellg();
     if (n <= 0) return fail(why, "USDC: empty file " + path);

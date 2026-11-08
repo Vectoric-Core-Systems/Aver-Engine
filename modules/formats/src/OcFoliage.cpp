@@ -138,7 +138,7 @@ bool parseOcFoliage(const u8* bytes, usize size, OcFoliageData& out, std::string
 
 bool loadOcFoliage(const std::string& path, OcFoliageData& out, std::string* why) {
     aver::traceFileOpen(path);
-    std::ifstream in(path, std::ios::binary | std::ios::ate);
+    std::ifstream in(aver::nativePath(path), std::ios::binary | std::ios::ate);
     if (!in) return fail(why, ".ocfoliage: cannot open " + path);
     const std::streamoff n = in.tellg();
     if (n <= 0) return fail(why, ".ocfoliage: empty file " + path);

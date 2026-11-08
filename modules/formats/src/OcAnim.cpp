@@ -182,7 +182,7 @@ bool readWholeFile(const std::string& path, std::vector<u8>& out, std::string* w
     // OUTSIDE a package would not appear in --trace-opens and verify-game.ps1 would pass a
     // package that reaches into the dev tree for its geometry.
     aver::traceFileOpen(path);
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    std::ifstream f(aver::nativePath(path), std::ios::binary | std::ios::ate);
     if (!f) return fail(why, std::string(what) + ": cannot open " + path);
     const std::streamoff n = f.tellg();
     if (n <= 0) return fail(why, std::string(what) + ": empty file " + path);

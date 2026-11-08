@@ -41,6 +41,7 @@
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
+#include "aver/platform/FileSystem.hpp"
 
 namespace aver::fmt {
 namespace {
@@ -192,7 +193,7 @@ i32 loadSource(Stage& st, const std::string& path, std::string* why) {
     s->dir = std::filesystem::path(path).parent_path().string();
     s->prefix = "S" + std::to_string(st.sources.size()) + "|";
 
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    std::ifstream f(aver::nativePath(path), std::ios::binary | std::ios::ate);
     if (!f) { fail(why, "USD: cannot open " + path); return -1; }
     const std::streamoff n = f.tellg();
     if (n <= 0) { fail(why, "USD: empty file " + path); return -1; }
@@ -968,7 +969,7 @@ bool excluded(Stage& st, const std::string& path) {
 
 // A Radiance .hdr (RGBE, flat or new-style run-length scanlines) reduced to per-texel luminance.
 bool loadRadianceLuminance(const std::string& path, u32& w, u32& h, std::vector<f32>& lum, std::string& why) {
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    std::ifstream f(aver::nativePath(path), std::ios::binary | std::ios::ate);
     if (!f) { why = "cannot open " + path; return false; }
     const std::streamoff n = f.tellg();
     std::vector<u8> d(static_cast<usize>(std::max<std::streamoff>(n, 0)));

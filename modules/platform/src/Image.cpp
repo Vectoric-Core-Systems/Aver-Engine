@@ -11,6 +11,7 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include "aver/platform/FileSystem.hpp"
 
 namespace aver {
 
@@ -59,7 +60,7 @@ bool endsWithSvg(const std::string& path) {
 
 // Reads a whole file, refusing one larger than `cap`.
 bool readFile(const std::string& path, usize cap, std::vector<u8>& out, std::string* err) {
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    std::ifstream f(aver::nativePath(path), std::ios::binary | std::ios::ate);
     if (!f) return fail(err, "the file could not be opened");
     const std::streamoff n = f.tellg();
     if (n < 0) return fail(err, "the file could not be read");
@@ -144,7 +145,7 @@ bool decodeImage(const std::string& path, ImageData& out, const ImageDecodeOptio
     u8 head[8192] = {};
     usize headLen = 0;
     {
-        std::ifstream f(path, std::ios::binary);
+        std::ifstream f(aver::nativePath(path), std::ios::binary);
         if (f) {
             f.read(reinterpret_cast<char*>(head), sizeof head);
             headLen = static_cast<usize>(f.gcount());
@@ -190,7 +191,7 @@ bool decodeFloatImage(const std::string& path, FloatImageData& out, std::string*
     u8 head[16] = {};
     usize headLen = 0;
     {
-        std::ifstream f(path, std::ios::binary);
+        std::ifstream f(aver::nativePath(path), std::ios::binary);
         if (!f) return fail(err, "the file could not be opened");
         f.read(reinterpret_cast<char*>(head), sizeof head);
         headLen = static_cast<usize>(f.gcount());
@@ -241,7 +242,7 @@ std::string findDecodableSibling(const std::string& absPath) {
     for (const char* ext : {".png", ".PNG", ".tga", ".TGA", ".webp", ".WEBP", ".jpg", ".JPG", ".jpeg", ".JPEG"}) {
         const std::string cand = base + ext;
         if (cand == absPath) continue;                   // never "substitute" the file for itself
-        std::ifstream f(cand, std::ios::binary);
+        std::ifstream f(aver::nativePath(cand), std::ios::binary);
         if (!f) continue;
         // OPENING IS NOT ENOUGH: a zero-byte placeholder beside a real .tif would otherwise be
         // chosen and then fail to decode, turning one stated limit into a different silent one.

@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <fstream>
 #include <unordered_set>
+#include "aver/platform/FileSystem.hpp"
 
 namespace aver::fmt::fbx {
 namespace {
@@ -46,7 +47,7 @@ std::string stemOfName(const std::string& name) {
 }
 
 bool readFileBytes(const fs::path& p, std::vector<u8>& out) {
-    std::ifstream f(p, std::ios::binary | std::ios::ate);
+    std::ifstream f(aver::nativePath(p), std::ios::binary | std::ios::ate);
     if (!f) return false;
     const std::streamoff n = f.tellg();
     if (n < 0) return false;

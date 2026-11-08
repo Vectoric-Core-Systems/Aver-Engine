@@ -9,6 +9,7 @@
 #include <fstream>
 #include <string_view>
 #include <unordered_map>
+#include "aver/platform/FileSystem.hpp"
 
 namespace aver::fmt {
 namespace {
@@ -543,7 +544,7 @@ bool importObjFromMemory(const char* text, usize size, const std::string& baseDi
 
 bool importObj(const std::string& path, ObjImportResult& out,
                const ObjImportOptions& opt, std::string* why) {
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    std::ifstream f(aver::nativePath(path), std::ios::binary | std::ios::ate);
     if (!f) return fail(why, "OBJ: cannot open " + path);
     const std::streamoff n = f.tellg();
     if (n <= 0) return fail(why, "OBJ: empty file " + path);
@@ -558,7 +559,7 @@ bool importObj(const std::string& path, ObjImportResult& out,
 }
 
 bool importMtl(const std::string& path, std::vector<ObjMaterial>& out, std::string* why) {
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    std::ifstream f(aver::nativePath(path), std::ios::binary | std::ios::ate);
     if (!f) return fail(why, "cannot open " + path);
     const std::streamoff n = f.tellg();
     if (n < 0) return fail(why, "cannot size " + path);
@@ -598,7 +599,7 @@ i32 loadObjTexture(const std::string& baseDir, const std::string& rel,
     img.suggestedName = stem;
 
     const std::string full = baseDir.empty() ? rel : baseDir + AVER_PATH_SEP + rel;
-    std::ifstream f(full, std::ios::binary | std::ios::ate);
+    std::ifstream f(aver::nativePath(full), std::ios::binary | std::ios::ate);
     if (!f) {
         if (warnings) warnings->push_back("a texture the .mtl names but which is not there: '" + rel + "'");
         images.push_back(std::move(img));           // remembered as unread, so it is not retried

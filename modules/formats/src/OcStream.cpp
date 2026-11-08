@@ -13,7 +13,7 @@ namespace aver::fmt {
 
 bool loadOcStream(const std::string& path, OcStreamData& out, std::string* why) {
     out = OcStreamData{};
-    std::ifstream f(path);
+    std::ifstream f(aver::nativePath(path));
     if (!f) { if (why) *why = "cannot open " + path; return false; }
     std::string line;
     if (!std::getline(f, line) || line.rfind("OCSTREAM", 0) != 0) {

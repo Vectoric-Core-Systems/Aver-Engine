@@ -810,7 +810,7 @@ bool parseOcHair(const u8* bytes, usize size, OcHairData& out, std::string* why)
 
 bool loadOcHair(const std::string& path, OcHairData& out, std::string* why) {
     aver::traceFileOpen(path);
-    std::ifstream in(path, std::ios::binary | std::ios::ate);
+    std::ifstream in(aver::nativePath(path), std::ios::binary | std::ios::ate);
     if (!in) return fail(why, ".ochair: cannot open " + path);
     const std::streamoff n = in.tellg();
     if (n <= 0) return fail(why, ".ochair: empty file " + path);

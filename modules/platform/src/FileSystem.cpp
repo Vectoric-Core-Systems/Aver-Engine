@@ -168,6 +168,11 @@ std::filesystem::path fsPath(const std::string& p) {
     return std::filesystem::path(p);
 #endif
 }
+} // namespace
+
+std::filesystem::path nativePath(const std::string& utf8Path) { return fsPath(utf8Path); }
+
+namespace {
 }
 
 // See the header: which platform error codes are worth a bounded retry. Defined here, outside the

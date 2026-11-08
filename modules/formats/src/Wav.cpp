@@ -3,6 +3,7 @@
 
 #include <cstring>
 #include <cstdio>
+#include "aver/platform/FileSystem.hpp"
 
 namespace aver::fmt {
 namespace {
@@ -98,7 +99,11 @@ WavResult wavRead(const std::vector<u8>& bytes, audio::SoundData& out) {
 
 // Reads a .wav from disk and decodes it.
 WavResult wavReadFile(const std::string& path, audio::SoundData& out) {
+#if defined(_WIN32)
+    std::FILE* f = _wfopen(aver::nativePath(path).c_str(), L"rb");
+#else
     std::FILE* f = std::fopen(path.c_str(), "rb");
+#endif
     if (!f) return fail("could not open the file");
     std::fseek(f, 0, SEEK_END);
     const long n = std::ftell(f);

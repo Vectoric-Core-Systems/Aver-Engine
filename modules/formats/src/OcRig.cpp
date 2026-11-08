@@ -412,7 +412,7 @@ bool parseOcRig(std::string_view text, OcRigData& out, std::string* err) {
 }
 
 bool loadOcRig(const std::string& path, OcRigData& out, std::string* err) {
-    std::ifstream f(path, std::ios::binary);
+    std::ifstream f(aver::nativePath(path), std::ios::binary);
     if (!f) return fail(err, "cannot open " + path);
     std::ostringstream ss;
     ss << f.rdbuf();

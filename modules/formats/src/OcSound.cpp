@@ -212,7 +212,7 @@ bool parseOcSound(const u8* bytes, usize size, OcSoundData& out, std::string* wh
 
 bool loadOcSound(const std::string& path, OcSoundData& out, std::string* why) {
     aver::traceFileOpen(path);
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    std::ifstream f(aver::nativePath(path), std::ios::binary | std::ios::ate);
     if (!f) return fail(why, ".ocsnd: cannot open " + path);
     const std::streamoff n = f.tellg();
     if (n <= 0) return fail(why, ".ocsnd: empty file " + path);
