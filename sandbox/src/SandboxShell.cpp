@@ -2735,11 +2735,21 @@ ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
     clusterW += barStyle.ItemSpacing.x + faceWidth(ICON_MCP " MCP :65535");
 #endif
     const f32 clusterX = wsize.x - clusterW - 8.0f * dpi_;
+    // Background tasks: every running progress notification (shader compiles, level prep, imports, autosave, training).
+    static std::vector<editor::Notification> bgTasks;
+    editor::notifications().progressTasks(bgTasks);
+    const editor::TaskSummary taskSum = editor::summariseTasks(bgTasks);
+    std::string taskLabel = std::string(ICON_REFRESH " ") + taskSum.label;
+    if (taskSum.extra) taskLabel += "  +" + std::to_string(taskSum.extra);
+    const f32 taskBarW = 72.0f * dpi_;
+    const f32 tasksW = bgTasks.empty() ? 0.0f : ImGui::CalcTextSize(taskLabel.c_str()).x + taskBarW + barStyle.ItemSpacing.x;
+    const f32 tasksX = clusterX - tasksW - 16.0f * dpi_;
+    const f32 leftLimit = bgTasks.empty() ? clusterX : tasksX;
     const char* kBarSep = "  |  ";
     // Starts the next readout on the same line when it (and its separator) ends before the cluster.
     const auto barRoom = [&](f32 width) {
         ImGui::SameLine(0.0f, 0.0f);
-        return ImGui::GetCursorPosX() + ImGui::CalcTextSize(kBarSep).x + width <= clusterX - 12.0f * dpi_;
+        return ImGui::GetCursorPosX() + ImGui::CalcTextSize(kBarSep).x + width <= leftLimit - 12.0f * dpi_;
     };
 
     ImGui::SetCursorPosY((statusH - ImGui::GetTextLineHeight()) * 0.5f);
@@ -2872,6 +2882,34 @@ ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
         if (on) ImGui::PopStyleColor();
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
     };
+    if (!bgTasks.empty()) {
+        ImGui::SameLine(tasksX);
+        const f32 labelW = ImGui::CalcTextSize(taskLabel.c_str()).x;
+        if (ImGui::Selectable((taskLabel + "###bgtasks").c_str(), false, ImGuiSelectableFlags_None, ImVec2(labelW, 0.0f)))
+            ImGui::OpenPopup("##bgTasksPopup");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Running in the background. Click for the list.");
+        ImGui::SameLine();
+        ImGui::ProgressBar(taskSum.fraction, ImVec2(taskBarW, ImGui::GetTextLineHeight() * 0.55f), "");
+        if (ImGui::BeginPopup("##bgTasksPopup")) {
+            ImGui::TextDisabled("Background tasks");
+            for (const editor::Notification& t : bgTasks) {
+                ImGui::PushID(static_cast<int>(t.id));
+                ImGui::TextUnformatted(t.title.c_str());
+                ImGui::ProgressBar(t.progress, ImVec2(240.0f * dpi_, 6.0f * dpi_), "");
+                if (!t.progressNote.empty()) ImGui::TextDisabled("%s", t.progressNote.c_str());
+                for (int a = 0; a < 2; ++a) {
+                    if (t.actions[a] == editor::NotifyAction::None) continue;
+                    if (a) ImGui::SameLine();
+                    ImGui::PushID(a);
+                    if (ImGui::SmallButton(t.actionLabels[a].c_str())) editor::notifications().activate(t.id, t.actions[a]);
+                    ImGui::PopID();
+                }
+                ImGui::PopID();
+                ImGui::Separator();
+            }
+            ImGui::EndPopup();
+        }
+    }
     ImGui::SameLine(clusterX);
     drawerButton(ICON_FOLDER " Content Browser", Drawer::Content, "Show the Content Browser  (Ctrl+Space)");
     ImGui::SameLine();
@@ -3548,8 +3586,6 @@ void SandboxApp::drawNotifications() {
     static std::unordered_map<u64, f32> heights;
     for (usize i = shown.size(); i-- > 0;) {
         const editor::Notification& n = shown[i];
-        const bool interactive = n.actions[0] != editor::NotifyAction::None;
-
         ImGui::SetNextWindowPos(ImVec2(anchorX, y), ImGuiCond_Always, ImVec2(1.0f, 1.0f));
         ImGui::SetNextWindowSize(ImVec2(width, 0.0f), ImGuiCond_Always);
         // Opaque (legibility over Details panel).
@@ -3557,23 +3593,42 @@ void SandboxApp::drawNotifications() {
 
         char id[32];
         std::snprintf(id, sizeof id, "##notify_%llu", static_cast<unsigned long long>(n.id));
-        if (ImGui::Begin(id, nullptr, interactive ? base : (base | ImGuiWindowFlags_NoInputs))) {
+        if (ImGui::Begin(id, nullptr, base)) {
+            // Icon per severity, then the title; a close button at the right edge.
+            const char* icon = n.severity == editor::NotifySeverity::Success  ? ICON_CHECK_CIRCLE
+                             : n.severity == editor::NotifySeverity::Warning  ? ICON_WARNING
+                             : n.severity == editor::NotifySeverity::Error ||
+                               n.severity == editor::NotifySeverity::Critical ? ICON_ERROR
+                                                                              : ICON_INFO;
+            const f32 closeW = ImGui::GetFrameHeight();
+            ImGui::TextColored(notifyColour(n.severity), "%s", icon);
+            ImGui::SameLine();
             if (fontMedium_) ImGui::PushFont(fontMedium_, 0.0f);
+            ImGui::PushTextWrapPos(width - closeW - ImGui::GetStyle().WindowPadding.x);
             ImGui::TextColored(notifyColour(n.severity), "%s", n.title.c_str());
+            ImGui::PopTextWrapPos();
             if (fontMedium_) ImGui::PopFont();
             if (n.count > 1) {
                 ImGui::SameLine();
                 ImGui::TextDisabled("x%u", n.count);
             }
-            if (!n.body.empty()) {
-                ImGui::PushTextWrapPos(0.0f);
-                ImGui::TextUnformatted(n.body.c_str());
-                ImGui::PopTextWrapPos();
-            }
-            if (n.hasProgress) {
-                // Negative progress = indeterminate; no text overlay.
-                ImGui::ProgressBar(n.progress, ImVec2(-FLT_MIN, 6.0f * dpi_), "");
-                if (!n.progressNote.empty()) ImGui::TextDisabled("%s", n.progressNote.c_str());
+            ImGui::SameLine(width - closeW - ImGui::GetStyle().WindowPadding.x);
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+            if (ImGui::SmallButton(ICON_CLOSE "##x")) q.activate(n.id, editor::NotifyAction::Dismiss);
+            ImGui::PopStyleColor();
+            {
+                std::optional<editor::FontScope> sec;
+                sec.emplace(editor::editorFonts().secondary, editor::editorFonts().secondaryPx);
+                if (!n.body.empty()) {
+                    ImGui::PushTextWrapPos(0.0f);
+                    ImGui::TextUnformatted(n.body.c_str());
+                    ImGui::PopTextWrapPos();
+                }
+                if (n.hasProgress) {
+                    // Negative progress = indeterminate; no text overlay.
+                    ImGui::ProgressBar(n.progress, ImVec2(-FLT_MIN, 6.0f * dpi_), "");
+                    if (!n.progressNote.empty()) ImGui::TextDisabled("%s", n.progressNote.c_str());
+                }
             }
             for (int a = 0; a < 2; ++a) {
                 if (n.actions[a] == editor::NotifyAction::None) continue;
@@ -3582,6 +3637,8 @@ void SandboxApp::drawNotifications() {
                 if (ImGui::SmallButton(n.actionLabels[a].c_str())) q.activate(n.id, n.actions[a]);
                 ImGui::PopID();
             }
+            // Hover holds the toast open (re-armed every tick while the pointer is over it).
+            q.setHeld(n.id, ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem));
             heights[n.id] = ImGui::GetWindowSize().y;
         }
         ImGui::End();

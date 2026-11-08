@@ -79,7 +79,27 @@ struct Notification {
 
     NotifyAction actions[2] = {NotifyAction::None, NotifyAction::None};
     std::string  actionLabels[2];
+
+    // The pointer is over the toast. tick() neither reaps a held entry nor lets it age: its stamp is
+    // re-armed every tick, so on release it gets its full ttl again (hover-to-hold).
+    bool held = false;
 };
+
+// What the status bar's background-task area shows, from the live progress entries.
+struct TaskSummary {
+    std::string label;       // the most recent task's title, clipped to maxChars
+    f32         fraction = -1.0f;   // that task's progress, 0..1; negative = indeterminate
+    usize       extra = 0;   // how many more tasks are running
+};
+inline TaskSummary summariseTasks(const std::vector<Notification>& tasks, usize maxChars = 32) {
+    TaskSummary s;
+    if (tasks.empty()) return s;
+    const Notification& n = tasks.back();
+    s.label = n.title.size() > maxChars ? n.title.substr(0, maxChars - 3) + "..." : n.title;
+    s.fraction = n.progress;
+    s.extra = tasks.size() - 1;
+    return s;
+}
 
 // A bounded, thread-safe, self-expiring stack of recent outcomes.
 //
@@ -116,6 +136,8 @@ public:
     // gets a fresh full ttl starting from the frame that draws it.
     void finish(u64 id, NotifySeverity sev, std::string title, std::string body, f64 ttlSec);
     void close(u64 id);
+    // The draw layer reports whether the pointer is over a toast, every frame. See Notification::held.
+    void setHeld(u64 id, bool held);
 
     // The log sink's one entry point. See the contract comment on its definition -- it runs with the
     // core log mutex held and MUST NOT log, touch ImGui, touch the filesystem, or block.
@@ -129,6 +151,10 @@ public:
     // TIME IS A PARAMETER, not ImGui::GetTime(). That single choice is what makes every rule in this
     // class testable without a graphics context.
     void tick(f64 now, std::vector<Notification>& out, usize& hidden);
+
+    // Every live entry that is a running task (hasProgress), oldest first; includes ones queued
+    // behind kMaxVisible. Does not stamp or reap.
+    void progressTasks(std::vector<Notification>& out) const;
 
     void activate(u64 id, NotifyAction action);
     // Pops one pending activation. False when there is none.

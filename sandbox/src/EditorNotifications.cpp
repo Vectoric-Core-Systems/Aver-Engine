@@ -197,6 +197,7 @@ void NotificationQueue::tick(f64 now, std::vector<Notification>& out, usize& hid
     // makes the unstamped convention work.
     for (auto it = live_.begin(); it != live_.end();) {
         const bool immortal = it->sticky || it->hasProgress;
+        if (it->held && it->createdAt >= 0.0) it->createdAt = now;
         const bool stamped  = it->createdAt >= 0.0;
         if (!immortal && stamped && (now - it->createdAt) >= it->ttlSec) it = live_.erase(it);
         else ++it;
@@ -211,6 +212,18 @@ void NotificationQueue::tick(f64 now, std::vector<Notification>& out, usize& hid
         if (live_[i].createdAt < 0.0) live_[i].createdAt = now;
         out.push_back(live_[i]);
     }
+}
+
+void NotificationQueue::setHeld(u64 id, bool held) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (Notification* n = find(id)) n->held = held;
+}
+
+void NotificationQueue::progressTasks(std::vector<Notification>& out) const {
+    out.clear();
+    std::lock_guard<std::mutex> lk(mutex_);
+    for (const Notification& n : live_)
+        if (n.hasProgress) out.push_back(n);
 }
 
 void NotificationQueue::activate(u64 id, NotifyAction action) {

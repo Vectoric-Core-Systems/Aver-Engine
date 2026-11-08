@@ -298,6 +298,36 @@ int main() {
               "300 identical errors are ONE row with a count of 300");
     }
 
+    // ---- hover-to-hold ------------------------------------------------------------------------
+    {
+        NotificationQueue q;
+        const u64 id = q.push(make("held", 4.0));
+        visibleCount(q, 0.0);
+        q.setHeld(id, true);
+        check(visibleCount(q, 3.0) == 1 && visibleCount(q, 50.0) == 1, "a held toast does not expire");
+        q.setHeld(id, false);
+        check(visibleCount(q, 53.9) == 1, "released, it gets its full ttl again from the last held tick");
+        check(visibleCount(q, 54.5) == 0, "and then expires");
+    }
+
+    // ---- background tasks (status bar) --------------------------------------------------------
+    {
+        NotificationQueue q;
+        Notification a = make("Compiling shaders"); a.hasProgress = true; a.progress = 0.25f;
+        Notification b = make("Cooking level with a very long descriptive title indeed"); b.hasProgress = true; b.progress = -1.0f;
+        q.push(a); q.push(make("plain toast")); q.push(b);
+        std::vector<Notification> tasks;
+        q.progressTasks(tasks);
+        check(tasks.size() == 2, "progressTasks lists only entries with progress");
+        const editor::TaskSummary s = editor::summariseTasks(tasks, 20);
+        check(s.extra == 1 && s.fraction < 0.0f, "the summary shows the newest task and counts the rest");
+        check(s.label.size() == 20 && s.label.substr(17) == "...", "and clips a long title");
+        q.finish(tasks[0].id, NotifySeverity::Success, "done", "", 5.0);
+        q.progressTasks(tasks);
+        check(tasks.size() == 1, "a finished task leaves the list");
+        check(editor::summariseTasks({}).label.empty(), "no tasks, empty summary");
+    }
+
     if (g_failures == 0) AVER_INFO("=== all {} notification checks passed ===", g_checks);
     else                 AVER_ERROR("=== {} of {} notification check(s) FAILED ===", g_failures, g_checks);
     return g_failures == 0 ? 0 : 1;

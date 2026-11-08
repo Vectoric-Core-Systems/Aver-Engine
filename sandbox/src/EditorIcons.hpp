@@ -146,3 +146,12 @@ inline constexpr unsigned short kIconRangeLast  = 0xF8FF;
 #define ICON_STAR              "\xEE\xA0\xB8"   // U+E838 star
 #define ICON_STAR_BORDER       "\xEE\xA0\xBA"   // U+E83A star_border
 #define ICON_COLLECTION        "\xEE\x90\xB1"   // U+E431 collections_bookmark
+
+// ---- toasts, status bar, panels, viewport options (editor polish 8-10) ----------------------
+#define ICON_CHECK_CIRCLE       "\xEE\xA1\xAC"   // U+E86C check_circle
+#define ICON_GRID_ON            "\xEE\x8F\xAC"   // U+E3EC grid_on
+#define ICON_ROTATE             "\xEE\x90\x9A"   // U+E41A rotate_right
+#define ICON_SCALE              "\xEE\xA1\x9B"   // U+E85B aspect_ratio
+#define ICON_VIEW_SPLIT         "\xEE\xA5\x89"   // U+E949 vertical_split
+#define ICON_VIEW_QUAD          "\xEE\xA3\xB0"   // U+E8F0 view_module
+#define ICON_CLEAR_ALL          "\xEE\x85\xAC"   // U+E16C delete_sweep
