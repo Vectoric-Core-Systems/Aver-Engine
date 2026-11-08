@@ -83,25 +83,19 @@
 //      invariant (modules/trifactor/src/ClusterBuilder.cpp) and validateLodDag checks it explicitly.
 //      Not re-derived or re-checked here; this file trusts its caller the same way the task brief says
 //      to trust it ("preserve that reasoning", not re-prove it).
-//   2. Projected (screen-space) error is monotonic child -> parent TOO, not just the raw geometric
-//      error. This is the step that actually makes the local rule crack-free, and it needs one MORE
-//      thing than (1) alone: that a parent's bounding sphere is not, for some camera position, closer
-//      or smaller than its children's -- informally, "coarser also means at-least-as-enclosing".
-//      buildLodHierarchy computes each level's bounding sphere fresh from that level's own simplified
-//      geometry (meshopt_computeMeshletBounds); nothing in ClusterBuilder.cpp or validateLodDag
-//      currently PROVES sphere containment across a DAG edge, only error monotonicity. In practice a
-//      simplified group's footprint tracks its children's footprint closely (same locked outer
-//      boundary, see ClusterBuilder.cpp's top-of-file comment), so this is expected to hold, but it is
-//      NOT a checked invariant today. THIS IS A REAL GAP, not a hedge: if an adapter or a future
-//      builder change ever produces a parent whose sphere sits unusually close to the camera relative
-//      to a child's, this predicate can pick two clusters along one path (an overlap: costs overdraw,
-//      not a crack) or, in a more contrived case, zero (a genuine gap). Flagging this explicitly rather
-//      than asserting correctness un-earned is the point of the brief's HONESTY section; the fix, if
-//      this ever bites, belongs in the builder (make parent bounds conservatively contain children's),
-//      not here. The tests in tests/trifactor exercise this file's rule against synthetic DAGs built
-//      WITH sphere containment (the expected case) and demonstrate the rule is at least correctly
-//      implemented against its own contract; they cannot and do not prove the general case, because
-//      that property is the builder's to guarantee, not this file's to assume.
+//   2. Projected (screen-space) error is monotonic child -> parent TOO, and every parent of one group
+//      decides identically. Both need the error to be measured at a sphere SHARED by the group and
+//      containing its children's: ClusterView::lodCenter/lodRadius. A cluster's lod sphere is the
+//      sphere of the group that produced it (deriveLodSpheres, ClusterAdapt.hpp; its own bounds at
+//      LOD 0), and every output of one group carries the same sphere and the same error, so they all
+//      pass or fail together -- evaluated at each output's OWN bounds they could disagree, and a
+//      child whose siblings' parents split (one passes, one fails) left a hole. Because each group
+//      sphere contains its children's lod spheres, a parent is never farther from the camera than
+//      its child, so projected error stays monotonic. validateLodSpheres checks that numerically and
+//      tests/trifactor/ClusterCutOracleTest proves the resulting cut is an antichain covering every
+//      LOD-0 cluster over random cameras. A ClusterView with lodRadius < 0 (the default) falls back
+//      to its own sphere, the old behaviour, for hand-built or pre-topology DAGs.
+//
 //   3. LOD 0 clusters always have error 0.0 (ClusterBuilder.cpp never sets error on level-0 clusters;
 //      the field's default is 0.0f). That is what stops the recursion needing an explicit "leaf, so
 //      draw regardless of budget" special case the way modules/landscape's descend() has one for its
@@ -203,6 +197,11 @@ struct ClusterView {
     Vec3 coneAxis{0, 0, 1};
     f32  coneCutoff = 1.0f;
 
+    // The sphere this cluster's error is measured at for the cut (see the file header, point 2).
+    // lodRadius < 0 means "not set": the cut then uses sphereCenter/sphereRadius.
+    Vec3 lodCenter{0, 0, 0};
+    f32  lodRadius = -1.0f;
+
     // Monotonic parent >= max(children) -- see ClusterBuilder.hpp's Cluster::error. Units are
     // whatever the builder's simplifier produced (NOT yet screen-space pixels); screenSpaceErrorPx
     // above is what converts it.
@@ -228,6 +227,12 @@ struct ClusterView {
     std::vector<u32> children;
 };
 
+// The sphere ClusterView's cut test measures error at.
+inline void lodSphereOf(const ClusterView& c, Vec3& center, f32& radius) {
+    if (c.lodRadius >= 0.0f) { center = c.lodCenter; radius = c.lodRadius; }
+    else { center = c.sphereCenter; radius = c.sphereRadius; }
+}
+
 // -------------------------------------------------------------------------------------- Backface cull
 // True if EVERY triangle in `c`'s normal cone faces away from `eye` -- i.e. `c` is safe to skip
 // entirely. Exact formula from third_party/meshoptimizer/src/meshoptimizer.h's
@@ -251,6 +256,10 @@ bool coneCull(const ClusterView& c, const Vec3& eye);
 // (yet) prove.
 bool inCut(const ClusterView& c, const std::vector<ClusterView>& clusters, f32 thresholdPx,
            const View& view);
+
+// Ids of every cluster in today's cut, ignoring visibility (no frustum, no cone): the pure LOD cut,
+// the thing the antichain/coverage property tests and the GPU kernel check compare against.
+std::vector<u32> selectCutIds(const std::vector<ClusterView>& clusters, f32 thresholdPx, const View& view);
 
 // The full per-cluster decision this slice exists to answer: draw `c` this frame, or not. `inCut(...)`
 // AND frustum-visible AND not backface-culled -- see the file header's "culling composes" note for why

@@ -33,3 +33,20 @@ if(TARGET Aver.Trifactor)
   set_target_properties(ClusterSelectTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# ClusterBuildBench -- builder time and cluster/triangle counts on fixture meshes, for before/after
+# comparison of cook changes. Prints a table; not a ctest target (no "Test" suffix).
+if(TARGET Aver.Trifactor)
+  add_executable(ClusterBuildBench src/ClusterBuildBench.cpp)
+  target_link_libraries(ClusterBuildBench PRIVATE Aver.Trifactor Aver.Formats Aver.Core)
+  set_target_properties(ClusterBuildBench PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
+# ClusterCutOracleTest -- group-shared LOD spheres, the antichain-cover property of the cut over random
+# cameras, and the material-pure cook (builder v3 / MLET v4). Pure CPU.
+if(TARGET Aver.Trifactor)
+  add_executable(ClusterCutOracleTest src/ClusterCutOracleTest.cpp)
+  target_link_libraries(ClusterCutOracleTest PRIVATE Aver.Trifactor Aver.Formats Aver.Core)
+  set_target_properties(ClusterCutOracleTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()

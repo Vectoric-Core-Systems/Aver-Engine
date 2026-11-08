@@ -46,6 +46,7 @@
 #include "aver/trifactor/ClusterSelect.hpp"
 #include "aver/trifactor/ClusterBuilder.hpp"   // kReferenceProjScale; see the note below
 
+#include <string>
 #include <vector>
 
 namespace aver::trifactor {
@@ -363,5 +364,40 @@ void buildMeshClusterLevelBounds(const std::vector<MeshClusterView>& clusters,
 bool provablySingleLevelCut(const std::vector<MeshClusterLevelBounds>& levels, u32 candidateLevel,
                              const Vec3& instanceSphereCenter, f32 instanceSphereRadius,
                              f32 maxClusterSphereRadius, f32 thresholdPx, const View& view);
+
+// ---------------------------------------------------------------------------------------- group LOD spheres
+// The sphere each cluster's error is measured at for the cut (ClusterSelect.hpp, point 2 of the header).
+// Derived from the group topology already in the file (chunk version 3), so no format change.
+struct LodSphere {
+    Vec3 center{0, 0, 0};
+    f32  radius = 0.0f;
+};
+
+struct LodSphereTable {
+    // True iff the mesh carries group nodes for every coarser level. False (a v1/v2 file, or a mesh
+    // with one level): every entry below is the cluster's own bounds and there are no groups.
+    bool hasTopology = false;
+    // [level][level-local cluster id]: the producing group's lod sphere, or the cluster's own bounds
+    // at LOD 0 / when its ownerGroupId is unset.
+    std::vector<std::vector<LodSphere>> cluster;
+    // [level][level-local group id]: contains every child's bounds and lod sphere and every output's
+    // bounds. Empty at level 0.
+    std::vector<std::vector<LodSphere>> group;
+};
+
+// Fills `out`. Returns false (and sets `why`) only for topology that points outside its own arrays.
+bool deriveLodSpheres(const fmt::OcMeshData& mesh, LodSphereTable& out, std::string* why = nullptr);
+
+// Checks the invariants the cut relies on, numerically: every group sphere contains its children's
+// bounds and lod spheres and its outputs' bounds; every cluster's lod sphere contains its own bounds;
+// every output of one group shares one error; and no child's error exceeds its group's. `why` names
+// the first violation.
+bool validateLodSpheres(const fmt::OcMeshData& mesh, const LodSphereTable& table, std::string* why = nullptr);
+
+// The whole DAG of `mesh` as ClusterViews (all levels, flat, level-major, id == position), with
+// parents/children from the group topology, error in world cm, and lodCenter/lodRadius set from
+// deriveLodSpheres. Returns false (out untouched) when the mesh has no group topology, in which case
+// a caller keeps the per-level path. Feeds selectCutIds / selectVisibleClustersWithStats.
+bool buildClusterDagViews(const fmt::OcMeshData& mesh, std::vector<ClusterView>& out, std::string* why = nullptr);
 
 } // namespace aver::trifactor

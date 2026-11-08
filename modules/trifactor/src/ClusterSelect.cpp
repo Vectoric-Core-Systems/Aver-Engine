@@ -106,28 +106,39 @@ bool coneCull(const ClusterView& c, const Vec3& eye) {
     return dot(dir, axis) >= c.coneCutoff;
 }
 
+namespace {
+// Error 0 is exactly representable at any distance, so it never needs refining: without this a
+// camera inside a LOD-0 cluster's sphere got the 1e30 sentinel and the cluster dropped out of the cut.
+f32 clusterErrorPx(const ClusterView& c, const View& view) {
+    if (c.error <= 0.0f) return 0.0f;
+    Vec3 center; f32 radius;
+    lodSphereOf(c, center, radius);
+    return screenSpaceErrorPx(center, radius, c.error, view);
+}
+} // namespace
+
 bool inCut(const ClusterView& c, const std::vector<ClusterView>& clusters, f32 thresholdPx,
            const View& view) {
-    const f32 ownErrorPx = screenSpaceErrorPx(c.sphereCenter, c.sphereRadius, c.error, view);
-    // Too coarse on its own: something finer (this cluster's children, or -- at LOD 0, where error is
-    // always 0.0 and this branch can never trigger -- nothing, since LOD 0 needs no finer fallback)
-    // must stand in instead.
+    const f32 ownErrorPx = clusterErrorPx(c, view);
+    // Too coarse on its own: something finer (this cluster's children) must stand in instead.
     if (ownErrorPx > thresholdPx) return false;
 
     // A coarser ancestor that ALSO already meets budget is cheaper and wins -- excluding `c` here is
     // what keeps exactly one cluster per root-to-leaf path selected, not one per level.
     for (u32 parentId : c.parents) {
-        // An out-of-range parent id is treated as absent rather than as a hard error: this file's
-        // contract is "clusters indexed by id" (see ClusterView's comment), but failing safe on a
-        // malformed adapter output means AT WORST an extra cluster gets drawn alongside a valid
-        // ancestor (overdraw), never a gap.
+        // An out-of-range parent id is treated as absent: at worst an extra cluster is drawn
+        // alongside a valid ancestor (overdraw), never a gap.
         if (parentId >= clusters.size()) continue;
-        const ClusterView& parent = clusters[parentId];
-        const f32 parentErrorPx =
-            screenSpaceErrorPx(parent.sphereCenter, parent.sphereRadius, parent.error, view);
-        if (parentErrorPx <= thresholdPx) return false;
+        if (clusterErrorPx(clusters[parentId], view) <= thresholdPx) return false;
     }
     return true;
+}
+
+std::vector<u32> selectCutIds(const std::vector<ClusterView>& clusters, f32 thresholdPx, const View& view) {
+    std::vector<u32> ids;
+    for (u32 i = 0; i < static_cast<u32>(clusters.size()); ++i)
+        if (inCut(clusters[i], clusters, thresholdPx, view)) ids.push_back(i);
+    return ids;
 }
 
 bool selectCluster(const ClusterView& c, const std::vector<ClusterView>& clusters, f32 thresholdPx,

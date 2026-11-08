@@ -310,4 +310,169 @@ bool provablySingleLevelCut(const std::vector<MeshClusterLevelBounds>& levels, u
     return true;
 }
 
+// ---------------------------------------------------------------------------------------- group LOD spheres
+
+namespace {
+
+// Grows `a` to also contain (c2, r2): the standard two-sphere enclosure.
+void encloseSphere(LodSphere& a, const Vec3& c2, f32 r2) {
+    const Vec3 diff = c2 - a.center;
+    const f32 d = diff.size();
+    if (d + r2 <= a.radius) return;
+    if (d + a.radius <= r2) { a.center = c2; a.radius = r2; return; }
+    const f32 r = (d + a.radius + r2) * 0.5f;
+    if (d > 1e-8f) a.center = a.center + diff * ((r - a.radius) / d);
+    a.radius = r;
+}
+
+// A hair of slack so float rounding in the containment checks cannot flip a boundary case.
+void inflate(LodSphere& s) { s.radius = s.radius * 1.00001f + 1e-5f; }
+
+bool contains(const LodSphere& outer, const Vec3& c, f32 r) {
+    const f32 tol = 1e-4f * (outer.radius + r) + 1e-4f;
+    return dist(outer.center, c) + r <= outer.radius + tol;
+}
+
+const std::vector<fmt::OcMeshMeshlet>& meshletsAt(const fmt::OcMeshData& m, u32 level) {
+    return level == 0 ? m.meshlets : m.coarserLods[level - 1].meshlets;
+}
+
+} // namespace
+
+bool deriveLodSpheres(const fmt::OcMeshData& mesh, LodSphereTable& out, std::string* why) {
+    out = LodSphereTable{};
+    const u32 levels = mesh.lodCount();
+    out.cluster.resize(levels);
+    out.group.resize(levels);
+    for (u32 L = 0; L < levels; ++L)
+        for (const fmt::OcMeshMeshlet& m : meshletsAt(mesh, L))
+            out.cluster[L].push_back({m.sphereCenter, m.sphereRadius});
+
+    bool topology = levels > 1 && !mesh.meshlets.empty();
+    for (u32 L = 1; L < levels && topology; ++L)
+        if (mesh.coarserLods[L - 1].groupNodes.empty()) topology = false;
+    if (!topology) return true;
+    out.hasTopology = true;
+
+    for (u32 L = 1; L < levels; ++L) {
+        const fmt::OcMeshLod& lod = mesh.coarserLods[L - 1];
+        const std::vector<fmt::OcMeshMeshlet>& own = lod.meshlets;
+        const std::vector<fmt::OcMeshMeshlet>& kids = meshletsAt(mesh, L - 1);
+        std::vector<LodSphere>& groups = out.group[L];
+        groups.resize(lod.groupNodes.size());
+        for (usize g = 0; g < lod.groupNodes.size(); ++g) {
+            const fmt::OcMeshClusterGroup& n = lod.groupNodes[g];
+            if (u64(n.ownClusterStart) + n.ownClusterCount > own.size() ||
+                u64(n.childClusterStart) + n.childClusterCount > lod.groupChildren.size()) {
+                if (why) *why = "LOD " + std::to_string(L) + " group " + std::to_string(g) + " has a range outside its arrays";
+                return false;
+            }
+            LodSphere s{n.sphereCenter, n.sphereRadius};
+            for (u32 k = 0; k < n.childClusterCount; ++k) {
+                const u32 child = lod.groupChildren[n.childClusterStart + k];
+                if (child >= kids.size()) {
+                    if (why) *why = "LOD " + std::to_string(L) + " group " + std::to_string(g) + " names a child past its level";
+                    return false;
+                }
+                encloseSphere(s, kids[child].sphereCenter, kids[child].sphereRadius);
+                const LodSphere& cl = out.cluster[L - 1][child];
+                encloseSphere(s, cl.center, cl.radius);
+            }
+            for (u32 k = 0; k < n.ownClusterCount; ++k) {
+                const fmt::OcMeshMeshlet& o = own[n.ownClusterStart + k];
+                encloseSphere(s, o.sphereCenter, o.sphereRadius);
+            }
+            inflate(s);
+            groups[g] = s;
+        }
+        for (usize i = 0; i < own.size(); ++i) {
+            const u32 gid = own[i].ownerGroupId;
+            if (gid != fmt::kInvalidClusterId && gid < groups.size()) out.cluster[L][i] = groups[gid];
+        }
+    }
+    return true;
+}
+
+bool validateLodSpheres(const fmt::OcMeshData& mesh, const LodSphereTable& t, std::string* why) {
+    auto fail = [&](std::string m) { if (why) *why = std::move(m); return false; };
+    const u32 levels = mesh.lodCount();
+    if (t.cluster.size() != levels) return fail("table has the wrong level count");
+    for (u32 L = 0; L < levels; ++L) {
+        const auto& ms = meshletsAt(mesh, L);
+        if (t.cluster[L].size() != ms.size()) return fail("table cluster count mismatch at LOD " + std::to_string(L));
+        for (usize i = 0; i < ms.size(); ++i)
+            if (!contains(t.cluster[L][i], ms[i].sphereCenter, ms[i].sphereRadius))
+                return fail("LOD " + std::to_string(L) + " cluster " + std::to_string(i) + "'s lod sphere does not contain its own bounds");
+    }
+    if (!t.hasTopology) return true;
+    for (u32 L = 1; L < levels; ++L) {
+        const fmt::OcMeshLod& lod = mesh.coarserLods[L - 1];
+        const auto& kids = meshletsAt(mesh, L - 1);
+        for (usize g = 0; g < lod.groupNodes.size(); ++g) {
+            const fmt::OcMeshClusterGroup& n = lod.groupNodes[g];
+            const LodSphere& gs = t.group[L][g];
+            const std::string at = "LOD " + std::to_string(L) + " group " + std::to_string(g);
+            f32 groupErr = -1.0f;
+            for (u32 k = 0; k < n.ownClusterCount; ++k) {
+                const u32 oi = n.ownClusterStart + k;
+                const fmt::OcMeshMeshlet& o = lod.meshlets[oi];
+                if (!contains(gs, o.sphereCenter, o.sphereRadius)) return fail(at + " does not contain output " + std::to_string(oi));
+                if (o.ownerGroupId != g) return fail(at + " output " + std::to_string(oi) + " names another owner group");
+                if (groupErr < 0.0f) groupErr = o.ownError;
+                else if (std::fabs(o.ownError - groupErr) > 1e-4f * std::fabs(groupErr) + 1e-6f)
+                    return fail(at + " outputs disagree on error");
+            }
+            for (u32 k = 0; k < n.childClusterCount; ++k) {
+                const u32 ci = lod.groupChildren[n.childClusterStart + k];
+                const fmt::OcMeshMeshlet& c = kids[ci];
+                const LodSphere& cl = t.cluster[L - 1][ci];
+                if (!contains(gs, c.sphereCenter, c.sphereRadius)) return fail(at + " does not contain child " + std::to_string(ci));
+                if (!contains(gs, cl.center, cl.radius)) return fail(at + " does not contain child " + std::to_string(ci) + "'s lod sphere");
+                if (groupErr >= 0.0f && c.ownError > groupErr * (1.0f + 1e-4f) + 1e-6f)
+                    return fail(at + " has a child with larger error than the group");
+            }
+        }
+    }
+    return true;
+}
+
+bool buildClusterDagViews(const fmt::OcMeshData& mesh, std::vector<ClusterView>& out, std::string* why) {
+    LodSphereTable t;
+    if (!deriveLodSpheres(mesh, t, why)) return false;
+    if (!t.hasTopology) return false;
+    const u32 levels = mesh.lodCount();
+
+    std::vector<u32> base(levels + 1, 0);
+    for (u32 L = 0; L < levels; ++L) base[L + 1] = base[L] + static_cast<u32>(meshletsAt(mesh, L).size());
+
+    std::vector<ClusterView> v(base[levels]);
+    for (u32 L = 0; L < levels; ++L) {
+        const auto& ms = meshletsAt(mesh, L);
+        for (usize i = 0; i < ms.size(); ++i) {
+            ClusterView& cv = v[base[L] + i];
+            cv.id = base[L] + static_cast<u32>(i);
+            decodeMeshletBounds(ms[i], cv);
+            cv.level = L;
+            cv.lodCenter = t.cluster[L][i].center;
+            cv.lodRadius = t.cluster[L][i].radius;
+            cv.error = L == 0 ? 0.0f : ms[i].ownError / kReferenceProjScale;
+        }
+    }
+    for (u32 L = 1; L < levels; ++L) {
+        const fmt::OcMeshLod& lod = mesh.coarserLods[L - 1];
+        for (const fmt::OcMeshClusterGroup& n : lod.groupNodes) {
+            for (u32 k = 0; k < n.childClusterCount; ++k) {
+                const u32 child = base[L - 1] + lod.groupChildren[n.childClusterStart + k];
+                for (u32 o = 0; o < n.ownClusterCount; ++o) {
+                    const u32 parent = base[L] + n.ownClusterStart + o;
+                    v[child].parents.push_back(parent);
+                    v[parent].children.push_back(child);
+                }
+            }
+        }
+    }
+    out = std::move(v);
+    return true;
+}
+
 } // namespace aver::trifactor
