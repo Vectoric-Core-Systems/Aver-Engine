@@ -1,6 +1,7 @@
 #include "aver/synapse/EqsAsset.hpp"
 
 #include "aver/synapse/TextRecords.hpp"
+#include "aver/platform/FileSystem.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -719,7 +720,7 @@ std::string writeEqsQuery(const EqsQuery& q) {
 
 bool loadEqsQuery(const std::string& path, EqsQuery& out, std::string* why) {
     out = EqsQuery{};
-    std::ifstream f(path, std::ios::binary);
+    std::ifstream f(aver::nativePath(path), std::ios::binary);
     if (!f) {
         if (why) *why = path + ": cannot open";
         return false;
@@ -730,7 +731,7 @@ bool loadEqsQuery(const std::string& path, EqsQuery& out, std::string* why) {
 }
 
 bool saveEqsQuery(const std::string& path, const EqsQuery& in, std::string* why) {
-    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    std::ofstream f(aver::nativePath(path), std::ios::binary | std::ios::trunc);
     if (!f) {
         if (why) *why = path + ": cannot write";
         return false;

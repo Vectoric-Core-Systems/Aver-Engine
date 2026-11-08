@@ -1,6 +1,7 @@
 // .ocblend / .ocasm read and write. See AnimGraphAsset.hpp.
 #include "aver/anim/AnimGraphAsset.hpp"
 #include "aver/formats/Json.hpp"
+#include "aver/platform/FileSystem.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -142,7 +143,7 @@ const char* curveName(BlendCurve c) { return c == BlendCurve::Smooth ? "smooth" 
 BlendCurve curveFrom(std::string_view s) { return s == "linear" ? BlendCurve::Linear : BlendCurve::Smooth; }
 
 bool readFile(const std::string& path, std::string& out, std::string* why) {
-    std::ifstream f(path, std::ios::binary);
+    std::ifstream f(aver::nativePath(path), std::ios::binary);
     if (!f) { if (why) *why = "cannot open " + path; return false; }
     std::ostringstream ss;
     ss << f.rdbuf();
@@ -151,7 +152,7 @@ bool readFile(const std::string& path, std::string& out, std::string* why) {
 }
 
 bool writeFile(const std::string& path, const std::string& text, std::string* why) {
-    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    std::ofstream f(aver::nativePath(path), std::ios::binary | std::ios::trunc);
     if (!f) { if (why) *why = "cannot write " + path; return false; }
     f.write(text.data(), static_cast<std::streamsize>(text.size()));
     return static_cast<bool>(f);

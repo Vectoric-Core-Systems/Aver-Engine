@@ -44,4 +44,5 @@ aver_add_module(Aver.Anim
   DEPS
     Aver.Core
     Aver.Formats
+    Aver.Platform   # nativePath: the JSON assets open past MAX_PATH
 )

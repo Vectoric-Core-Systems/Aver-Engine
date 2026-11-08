@@ -2,6 +2,7 @@
 // that is not ours (or is newer than us) is refused instead of misread. No GPU, no scene.
 #include "aver/anim/AnimGraphAsset.hpp"
 #include "aver/core/Log.hpp"
+#include "aver/platform/FileSystem.hpp"
 
 #include <filesystem>
 #include <string>
@@ -133,6 +134,17 @@ int main() {
         std::error_code ec;
         std::filesystem::remove(path, ec);
         check(!anim::loadBlendSpace(path, c), "a missing file is refused");
+
+        // A path past MAX_PATH (260) opens: the asset streams go through nativePath.
+        std::filesystem::path deep = std::filesystem::temp_directory_path() / "aver-longpath-anim";
+        for (int i = 0; i < 12; ++i) deep /= "a_directory_name_of_some_length";
+        const std::string longPath = (deep / "loco.ocblend").string();
+        check(longPath.size() > 300, "the test path is longer than MAX_PATH");
+        check(createParentDirectories(longPath), "its directories are created");
+        check(anim::saveBlendSpace(longPath, a, &why), "saves to a path past MAX_PATH " + why);
+        anim::BlendSpaceAsset deepRead;
+        check(anim::loadBlendSpace(longPath, deepRead, &why) && anim::writeBlendSpace(deepRead) == text, "and loads it back unchanged");
+        std::filesystem::remove_all(nativePath(std::filesystem::temp_directory_path() / "aver-longpath-anim"), ec);
 
         anim::BlendSpaceAsset d;
         check(!anim::parseBlendSpace("{\"format\": \"ocasm\", \"version\": 1}", d), "the wrong format tag is refused");

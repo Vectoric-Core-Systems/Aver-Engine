@@ -14,7 +14,8 @@
       "default": true,
       "dependsOn": [
         "Aver.Core",
-        "Aver.Formats"
+        "Aver.Formats",
+        "Aver.Platform"
       ],
       "consequence": ""
     },
@@ -1167,7 +1168,8 @@
       "default": true,
       "dependsOn": [
         "Aver.Core",
-        "Aver.Formats"
+        "Aver.Formats",
+        "Aver.Platform"
       ],
       "consequence": ""
     },
@@ -1300,7 +1302,8 @@
         "full": true
       },
       "dependsOn": [
-        "Aver.Core"
+        "Aver.Core",
+        "Aver.Platform"
       ],
       "consequence": "Projects made by an older engine version cannot be migrated when opened."
     },

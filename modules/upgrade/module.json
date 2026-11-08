@@ -9,6 +9,6 @@
   "required": false,
   "default": true,
   "editions": {"standard": true, "slim": true, "full": true},
-  "dependsOn": ["Aver.Core"],
+  "dependsOn": ["Aver.Core", "Aver.Platform"],
   "consequence": "Projects made by an older engine version cannot be migrated when opened."
 }

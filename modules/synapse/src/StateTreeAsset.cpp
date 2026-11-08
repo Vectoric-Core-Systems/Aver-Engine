@@ -1,6 +1,7 @@
 #include "aver/synapse/StateTreeAsset.hpp"
 
 #include "aver/synapse/TextRecords.hpp"
+#include "aver/platform/FileSystem.hpp"
 
 #include <algorithm>
 #include <fstream>
@@ -414,7 +415,7 @@ std::string writeStateTree(const StateTreeAsset& a) {
 
 bool loadStateTree(const std::string& path, StateTreeAsset& out, std::string* why) {
     out = StateTreeAsset{};
-    std::ifstream f(path, std::ios::binary);
+    std::ifstream f(aver::nativePath(path), std::ios::binary);
     if (!f) {
         if (why) *why = path + ": cannot open";
         return false;
@@ -427,7 +428,7 @@ bool loadStateTree(const std::string& path, StateTreeAsset& out, std::string* wh
 }
 
 bool saveStateTree(const std::string& path, const StateTreeAsset& in, std::string* why) {
-    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    std::ofstream f(aver::nativePath(path), std::ios::binary | std::ios::trunc);
     if (!f) {
         if (why) *why = path + ": cannot write";
         return false;

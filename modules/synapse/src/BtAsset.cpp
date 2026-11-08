@@ -1,6 +1,7 @@
 #include "aver/synapse/BtAsset.hpp"
 
 #include "aver/formats/Avr1.hpp"
+#include "aver/platform/FileSystem.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -72,7 +73,7 @@ bool isLeafKind(fmt::OcBtNodeKind k) {
 }
 
 bool readFile(const std::string& path, std::vector<u8>& bytes, std::string* why) {
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    std::ifstream f(aver::nativePath(path), std::ios::binary | std::ios::ate);
     if (!f) return fail(why, ".ocbt: cannot open " + path);
     const std::streamoff n = f.tellg();
     if (n <= 0) return fail(why, ".ocbt: empty file " + path);

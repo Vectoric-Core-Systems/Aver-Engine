@@ -3,6 +3,7 @@
 
 #include "aver/core/Log.hpp"
 #include "aver/core/Version.hpp"
+#include "aver/platform/FileSystem.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -17,7 +18,7 @@ ResourceFn gResourceFn = nullptr;
 void*      gResourceUser = nullptr;
 
 bool readText(const std::string& path, std::string& out) {
-    std::ifstream f(path, std::ios::binary);
+    std::ifstream f(aver::nativePath(path), std::ios::binary);
     if (!f) return false;
     std::ostringstream ss;
     ss << f.rdbuf();
@@ -26,9 +27,8 @@ bool readText(const std::string& path, std::string& out) {
 }
 
 bool writeText(const std::string& path, const std::string& text, std::string* err) {
-    std::error_code ec;
-    std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
-    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    aver::createParentDirectories(path);
+    std::ofstream f(aver::nativePath(path), std::ios::binary | std::ios::trunc);
     if (!f) { if (err) *err = "could not write " + path; return false; }
     f << text;
     if (!f) { if (err) *err = "could not finish writing " + path; return false; }

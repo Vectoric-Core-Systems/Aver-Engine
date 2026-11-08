@@ -1,6 +1,7 @@
 #include "aver/synapse/SmartObjectAsset.hpp"
 
 #include "aver/synapse/TextRecords.hpp"
+#include "aver/platform/FileSystem.hpp"
 
 #include <cmath>
 #include <fstream>
@@ -217,7 +218,7 @@ std::string writeSoDef(const SoDef& d) {
 
 bool loadSoDef(const std::string& path, SoDef& out, std::string* why) {
     out = SoDef{};
-    std::ifstream f(path, std::ios::binary);
+    std::ifstream f(aver::nativePath(path), std::ios::binary);
     if (!f) {
         if (why) *why = path + ": cannot open";
         return false;
@@ -230,7 +231,7 @@ bool loadSoDef(const std::string& path, SoDef& out, std::string* why) {
 }
 
 bool saveSoDef(const std::string& path, const SoDef& in, std::string* why) {
-    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    std::ofstream f(aver::nativePath(path), std::ios::binary | std::ios::trunc);
     if (!f) {
         if (why) *why = path + ": cannot write";
         return false;

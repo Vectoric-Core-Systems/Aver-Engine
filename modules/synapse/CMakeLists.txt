@@ -38,6 +38,7 @@ aver_add_module(Aver.Synapse
   DEPS
     Aver.Formats
     Aver.Core
+    Aver.Platform   # nativePath: the assets open past MAX_PATH
 )
 
 
