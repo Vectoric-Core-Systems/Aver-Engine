@@ -343,6 +343,16 @@ inline bool setCurvePoint(Curve4& c, int idx, f32 t, const f32 v[4]) {
     return true;
 }
 
+// ---- Per-module isolate (preview only) ----
+// The effect with every module off except `idx`, so the author hears one module on its own. The saved effect is untouched: the
+// preview simulates this copy. An index out of range returns the effect unchanged.
+inline ParticleEffect isolatedModule(const ParticleEffect& e, int idx) {
+    ParticleEffect out = e;
+    if (idx < 0 || static_cast<usize>(idx) >= out.modules.size()) return out;
+    for (usize i = 0; i < out.modules.size(); ++i) out.modules[i].enabled = static_cast<int>(i) == idx;
+    return out;
+}
+
 // ---- Statistics (the stats panel) ----
 // What the runtime would do with an emitter, from the same rule ParticleSystem::wantGpu applies (SIM request, then Auto at
 // 2048 particles). The preview always simulates on the CPU; the badge says where the emitter lands in a game.

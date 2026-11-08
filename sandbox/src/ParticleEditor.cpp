@@ -343,8 +343,14 @@ void ParticleEditor::ensureSims() {
             sims_[i].init(def_.emitters[i], def_.params, 12345u + static_cast<u32>(i));
             simSignature_[i] = sig;
         }
-        sims_[i].bind(def_.emitters[i]);
     }
+    // The sims run a preview-only copy of the emitters (isolate today), rebuilt every tick so edits show at once.
+    if (isoModule_ >= 0 && (static_cast<usize>(isoEmitter_) >= n || static_cast<usize>(isoModule_) >= def_.emitters[static_cast<usize>(isoEmitter_)].modules.size())) {
+        isoEmitter_ = isoModule_ = -1;
+    }
+    previewFx_ = def_.emitters;
+    if (isoModule_ >= 0) previewFx_[static_cast<usize>(isoEmitter_)] = pxmodel::isolatedModule(def_.emitters[static_cast<usize>(isoEmitter_)], isoModule_);
+    for (usize i = 0; i < n; ++i) sims_[i].bind(previewFx_[i]);
 }
 
 void ParticleEditor::tickPreview(f32 dt) {
@@ -445,6 +451,19 @@ u32 ParticleEditor::previewTotal() const {
     u32 n = 0;
     for (const particles::EmitterSim& s : sims_) n += s.aliveCount();
     return n;
+}
+
+void ParticleEditor::isolateModule(int emitter, int module) {
+    if (module < 0 || emitter < 0 || static_cast<usize>(emitter) >= def_.emitters.size() ||
+        static_cast<usize>(module) >= def_.emitters[static_cast<usize>(emitter)].modules.size()) {
+        if (isoModule_ < 0) return;
+        isoEmitter_ = isoModule_ = -1;
+    } else {
+        if (isoEmitter_ == emitter && isoModule_ == module) return;
+        isoEmitter_ = emitter;
+        isoModule_ = module;
+    }
+    restartPreview();
 }
 
 void ParticleEditor::setMuted(int emitter, bool muted) {

@@ -133,6 +133,11 @@ public:
     bool muted(int emitter) const;
     void setSolo(int emitter);   // -1 clears
     int solo() const { return solo_; }
+    // Per-module isolate (preview only, not saved): the preview simulates the emitter with every module but this one off. The
+    // saved effect and its enable flags are untouched. Setting it restarts the preview; it clears itself when the module goes away.
+    void isolateModule(int emitter, int module);   // module < 0 clears
+    int isolatedEmitter() const { return isoEmitter_; }
+    int isolatedModule() const { return isoModule_; }
     // The preview's simulations, for the drawing half.
     const std::vector<particles::EmitterSim>& previewSims() const { return sims_; }
     bool previewPlaying() const { return previewPlaying_; }
@@ -186,6 +191,8 @@ private:
     std::vector<std::vector<particles::SpawnRequest>> inbox_, nextInbox_;
     std::vector<u8> muted_;
     int solo_ = -1;
+    int isoEmitter_ = -1, isoModule_ = -1;
+    std::vector<particles::ParticleEffect> previewFx_;   // what the sims are bound to: def_ with the preview-only transforms applied
     bool previewBurstFired_ = false;
     bool previewPlaying_ = true;
     u32 lastCoalesceKey_ = 0;

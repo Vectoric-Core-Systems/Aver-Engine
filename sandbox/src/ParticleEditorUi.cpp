@@ -143,6 +143,13 @@ void ParticleEditor::drawTransport() {
     }
     ImGui::SameLine();
     ImGui::Text("%.2f s  f%u", previewTime_, previewFrame());
+    if (isoModule_ >= 0 && static_cast<usize>(isoEmitter_) < def_.emitters.size() &&
+        static_cast<usize>(isoModule_) < def_.emitters[static_cast<usize>(isoEmitter_)].modules.size()) {
+        const particles::Module& m = def_.emitters[static_cast<usize>(isoEmitter_)].modules[static_cast<usize>(isoModule_)];
+        ImGui::TextColored(ImVec4(0.95f, 0.6f, 0.2f, 1.0f), ICON_VISIBILITY " Isolating %s on emitter %d (preview only)", particles::moduleInfo(m.kind).key, isoEmitter_);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Clear isolate")) isolateModule(-1, -1);
+    }
 }
 
 // ================================================================================== curves ===
@@ -542,6 +549,14 @@ void ParticleEditor::drawParams() {
             if (ImGui::SmallButton("^")) editEffect([&](ParticleEffect& x) { return pxmodel::moveModule(x, static_cast<int>(mi), static_cast<int>(mi) - 1); });
             ImGui::SameLine();
             if (ImGui::SmallButton("v")) editEffect([&](ParticleEffect& x) { return pxmodel::moveModule(x, static_cast<int>(mi), static_cast<int>(mi) + 1); });
+            ImGui::SameLine();
+            {
+                const bool iso = isoEmitter_ == sel_ && isoModule_ == static_cast<int>(mi);
+                if (iso) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.45f, 0.10f, 1.0f));
+                if (ImGui::SmallButton("iso")) isolateModule(sel_, iso ? -1 : static_cast<int>(mi));
+                if (iso) ImGui::PopStyleColor();
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Isolate: the preview runs this module alone (not saved).\nClick again to clear.");
+            }
             ImGui::SameLine();
             const bool removeIt = ImGui::SmallButton(ICON_CLOSE);
             if (open) {

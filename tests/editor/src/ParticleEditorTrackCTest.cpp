@@ -192,6 +192,48 @@ int main() {
         check(frameCurve(tall, 1u).v1 > 50.0f, "framing fits the tallest key");
     }
 
+    // ---- 4. per-module isolate ------------------------------------------------------------------------------
+    AVER_INFO("isolate");
+    {
+        ParticleSystemDef d = smallSystem();
+        ParticleEffect& e = d.emitters[0];
+        e.spreadDeg = 0.0f;
+        e.speedMin = e.speedMax = 100.0f;
+        const int fx = px::addModule(e, particles::ModuleKind::UpdateForce);
+        const int fy = px::addModule(e, particles::ModuleKind::UpdateForce);
+        px::setModuleParam(e, fx, 0, 1000.0f);   // x
+        px::setModuleParam(e, fy, 1, 1000.0f);   // y
+        const std::string path = writeFixture(d, "pxTrackC_isolate.ocparticle");
+        editor::ParticleEditor ed(path);
+        ed.seekPreview(1.0f);
+        f32 maxX = 0, maxY = 0;
+        for (const particles::Particle& p : ed.previewParticles()) { maxX = std::max(maxX, std::fabs(p.position.x)); maxY = std::max(maxY, std::fabs(p.position.y)); }
+        check(maxX > 1.0f && maxY > 1.0f, "with both modules on, the particles drift in x and y");
+
+        ed.isolateModule(0, fx);
+        check(ed.isolatedModule() == fx && ed.isolatedEmitter() == 0, "isolate is recorded");
+        ed.seekPreview(1.0f);
+        maxX = maxY = 0;
+        for (const particles::Particle& p : ed.previewParticles()) { maxX = std::max(maxX, std::fabs(p.position.x)); maxY = std::max(maxY, std::fabs(p.position.y)); }
+        check(maxX > 1.0f && maxY < 1e-3f, "isolating the x force removes the y drift");
+        ed.isolateModule(0, fy);
+        ed.seekPreview(1.0f);
+        maxX = maxY = 0;
+        for (const particles::Particle& p : ed.previewParticles()) { maxX = std::max(maxX, std::fabs(p.position.x)); maxY = std::max(maxY, std::fabs(p.position.y)); }
+        check(maxY > 1.0f && maxX < 1e-3f, "and isolating the y force the reverse");
+        check(ed.effect().modules[0].enabled && ed.effect().modules[1].enabled, "the saved enable flags are untouched");
+        check(!ed.dirty(), "isolate is not an edit");
+        const ParticleEffect iso = px::isolatedModule(ed.effect(), 1);
+        check(!iso.modules[0].enabled && iso.modules[1].enabled, "isolatedModule keeps only the chosen one");
+        check(px::isolatedModule(ed.effect(), 9).modules[0].enabled, "an index out of range changes nothing");
+        ed.isolateModule(-1, -1);
+        check(ed.isolatedModule() < 0, "clearing works");
+        ed.isolateModule(0, fy);
+        ed.editEffect([&](ParticleEffect& x) { return px::removeModule(x, fy); });
+        ed.seekPreview(0.2f);
+        check(ed.isolatedModule() < 0, "removing the isolated module clears the isolate by itself");
+    }
+
     AVER_INFO("{} failure(s)", g_failures);
     return g_failures == 0 ? 0 : 1;
 }
