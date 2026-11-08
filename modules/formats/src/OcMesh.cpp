@@ -68,6 +68,8 @@ constexpr u16 kMlChunkVersionErrors  = 2;   // MeshletBounds 40 B, + OwnError, P
 constexpr u16 kMlChunkVersionTopology = 3;  // MeshletBounds 48 B, + FallbackAncestorId/OwnerGroupId,
                                              // + a per-LOD GroupTable and ClusterGroupNode[]/
                                              // ClusterGroupChildren[] sub-arrays (see the writer)
+constexpr u16 kMlChunkVersionMaterial = 4;  // same layout as 3; MeshletDesc.Pad carries the cluster's
+                                             // material slot and SubmeshRange meshlet start/count are real
 constexpr u32 kMeshletBoundsBytesV1 = 32;
 constexpr u32 kMeshletBoundsBytesV2 = 40;
 constexpr u32 kMeshletBoundsBytesV3 = 48;
@@ -400,6 +402,11 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
             return fail(why, ".ocmesh: " + partWhy + " (re-import the source to rebuild the table)");
     }
 
+    if (m.meshletsMaterialPure)
+        for (const OcMeshSubmesh& sm : m.submeshes)
+            if (u64(sm.meshletStart) + sm.meshletCount > m.meshlets.size())
+                return fail(why, ".ocmesh: submesh '" + sm.name + "'s meshlet range runs past LOD 0's meshlets");
+
     const u32 vcount = m.vertexCount();
     const bool index32 = vcount > 0xFFFF;
     const bool skinned = m.hasSkin();
@@ -657,7 +664,7 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
                 w.u32v(placement[i].triangleOffset);
                 w.u8v(static_cast<u8>(ml.vertices.size()));
                 w.u8v(static_cast<u8>(ml.triangleCount()));
-                w.u16v(0);   // Pad
+                w.u16v(m.meshletsMaterialPure ? ml.materialSlot : u16(0));   // Pad: material slot (v4)
             }
             // Sub-array 2: MeshletBounds[] (48 B each, chunk version 3: the 32 B Sphere + ConeApex +
             // ConeAxis/Cutoff, then OwnError/ParentError (version 2), then FallbackAncestorId/
@@ -889,27 +896,18 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
             w.u32v(nameRefs[i]);
             w.u32v(0);                               // Flags
         }
-        // SubmeshRange (§5.6). Spec-literal layout is [LODCount*SubmeshCount], one 40 B block per
-        // (LOD, submesh) pair -- but this writer emits exactly SubmeshCount blocks, describing LOD
-        // 0's partition ONLY, regardless of LODCount. Deliberate, for the same reason
-        // MeshletStart/MeshletCount stay 0,0 below: buildLodHierarchy (Aver.Trifactor) simplifies the
-        // mesh's WHOLE merged index buffer as one unit per group, with no regard to submesh/material
-        // boundaries, so there is no honest per-submesh [start,count) range to report for LOD >= 1 --
-        // fabricating one (e.g. by copying LOD 0's ranges, or scaling them) would be worse than
-        // omitting it. Fixing this needs submesh-aware clustering upstream in Trifactor, out of this
-        // slice's scope. The reader below reads exactly SubmeshCount entries to match, so this is
-        // self-consistent rather than a spec violation waiting to desync a reader -- see parseOcMesh.
-        //
-        // MeshletStart/MeshletCount stay 0,0 here EVEN WHEN m.meshlets is non-empty, for the same
-        // "no honest per-submesh range" reason: buildClusters (Aver.Trifactor) partitions the mesh's
-        // WHOLE merged index buffer into meshlets without regard to submesh/material boundaries, so a
-        // meshlet can straddle two submeshes. A renderer that wants "meshlets for submesh N" cannot
-        // yet get that from this file; it can only draw a whole LOD's meshlet set.
+        // SubmeshRange (FORMAT_SPECS.md 5.6). Spec-literal layout is [LODCount*SubmeshCount], one 40 B
+        // block per (LOD, submesh) pair; this writer emits SubmeshCount blocks describing LOD 0 only,
+        // and the reader reads exactly that many. MeshletStart/MeshletCount are LOD 0's meshlet span
+        // of the submesh and are real only for a material-pure cook (MLET v4: every cluster of every
+        // level carries one material slot in MeshletDesc.Pad). For an older ladder, whose clusters may
+        // straddle submeshes, there is no honest per-submesh range, so they stay 0,0.
         for (const OcMeshSubmesh& s : m.submeshes) {
             w.u32v(s.indexStart); w.u32v(s.indexCount);
             w.u32v(s.baseVertex); w.u32v(s.vertexCount);
             w.f32v(0); w.f32v(0); w.f32v(0); w.f32v(0);   // per-submesh bounds sphere: not computed
-            w.u32v(0); w.u32v(0);                          // meshlet start/count: see comment above
+            w.u32v(anyMeshlets && m.meshletsMaterialPure ? s.meshletStart : 0u);   // real only for a v4 cook
+            w.u32v(anyMeshlets && m.meshletsMaterialPure ? s.meshletCount : 0u);
         }
     }
 
@@ -928,7 +926,8 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
     // this feature existing at all, and is the backward-compat contract §3.2's "unknown chunks
     // skipped" is built to support (never marked kAvrChunkRequired, so an old reader that doesn't
     // look for MLET is unaffected by its presence in a NEW file either).
-    if (anyMeshlets) f.add(kChunkMLET, std::move(mlet), kAvrChunkGpuUploadable, kMlChunkVersionTopology);
+    if (anyMeshlets) f.add(kChunkMLET, std::move(mlet), kAvrChunkGpuUploadable,
+                                  m.meshletsMaterialPure ? kMlChunkVersionMaterial : kMlChunkVersionTopology);
     if (morphed) f.add(kChunkMRPH, std::move(mrph), 0, kMrphChunkVersion);
     if (extras) f.add(kChunkVXEX, std::move(vxex), 0, kVxexChunkVersion);   // parsed on the CPU into OcMeshData, like MRPH
     return writeAvr1(f, out, why);
@@ -1043,9 +1042,18 @@ bool parseOcMesh(const u8* bytes, usize size, OcMeshData& out, std::string* why)
         out.submeshes[i].baseVertex  = r.u32v();
         out.submeshes[i].vertexCount = r.u32v();
         r.f32v(); r.f32v(); r.f32v(); r.f32v();
-        r.u32v(); r.u32v();
+        out.submeshes[i].meshletStart = r.u32v();
+        out.submeshes[i].meshletCount = r.u32v();
     }
     if (!r.ok) return fail(why, ".ocmesh: truncated submesh tables");
+    // The ranges are real only in a v4 MLET; older writers left 0,0 there.
+    out.meshletsMaterialPure = false;
+    if ((out.flags & kOcMeshMeshlets) != 0) {
+        const AvrChunk* mletV = f.find(kChunkMLET);
+        out.meshletsMaterialPure = mletV && mletV->version >= kMlChunkVersionMaterial;
+    }
+    if (!out.meshletsMaterialPure)
+        for (OcMeshSubmesh& sm : out.submeshes) sm.meshletStart = sm.meshletCount = 0;
 
     // ---- vertices ----
     const u64 posBytes = u64(vcount) * posStride;
@@ -1250,7 +1258,7 @@ bool parseOcMesh(const u8* bytes, usize size, OcMeshData& out, std::string* why)
                                   "'s MeshletDesc[]/MeshletBounds[] require");
 
         // ---- sub-array 1: MeshletDesc[] ----
-        struct DescIn { u32 vtxOff = 0, triOff = 0; u8 vtxCount = 0, triCount = 0; };
+        struct DescIn { u32 vtxOff = 0, triOff = 0; u8 vtxCount = 0, triCount = 0; u16 slot = 0; };
         std::vector<DescIn> descs(meshletCount);
         {
             R dr{base + meshletOffset, base + meshletOffset + descBytes};
@@ -1259,7 +1267,7 @@ bool parseOcMesh(const u8* bytes, usize size, OcMeshData& out, std::string* why)
                 descs[i].triOff   = dr.u32v();
                 descs[i].vtxCount = dr.u8v();
                 descs[i].triCount = dr.u8v();
-                dr.u16v();   // Pad
+                descs[i].slot     = dr.u16v();   // Pad: the material slot in a v4 chunk
             }
             if (!dr.ok) return fail(why, ".ocmesh: truncated MeshletDesc[] for LOD " + std::to_string(level));
         }
@@ -1365,6 +1373,7 @@ bool parseOcMesh(const u8* bytes, usize size, OcMeshData& out, std::string* why)
         for (u32 i = 0; i < meshletCount; ++i) {
             OcMeshMeshlet& ml = dst[i];
             const DescIn& d2 = descs[i];
+            if (mlet->version >= kMlChunkVersionMaterial) ml.materialSlot = d2.slot;
 
             const u64 vOff = u64(d2.vtxOff) * 4;
             if (vOff + u64(d2.vtxCount) * 4 > vertsBytes)

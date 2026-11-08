@@ -45,7 +45,10 @@ inline constexpr u32 kMaxClusterTriangles = fmt::kMaxMeshletTriangles;
 // means "no version-aware builder touched this ladder". Version 1 is commit 14ba2b7's
 // shell-routing-aware algorithm (corpus coarsest 1,195,431 -> 140,489; five protected meshes
 // unmoved) -- the first version this field can record.
-inline constexpr u32 kBuilderVersion = 2;
+inline constexpr u32 kBuilderVersion = 3;
+// Version 3: material-pure clusters. buildClusters partitions each submesh on its own, groups never
+// mix material slots, every cluster carries its slot, and packLodDag fills SubmeshRange meshlet
+// ranges (MLET chunk-version 4). A mesh with one material comes out cluster-for-cluster as in v2.
 
 // ---- Stage 4: streaming topology (fallbackAncestorId, ownerGroupId, ClusterGroupNode) ----------
 //
@@ -98,6 +101,12 @@ struct Cluster {
     //
     // BUILD-TIME ONLY: re-derivable from mesh.positions/indices; never serialized.
     u32 shellId = 0;
+
+    // The material slot every triangle of this cluster uses (a cluster never spans two), and at level
+    // 0 the index into OcMeshData::submeshes it was built from (0 when the mesh has no table).
+    // BUILD-TIME for `submesh`; `materialSlot` is serialized (OcMeshMeshlet::materialSlot).
+    u32 materialSlot = 0;
+    u32 submesh = 0;
 
     // TRUE iff this cluster is, or descends ENTIRELY from, small-shell geometry -- consulted at
     // EVERY level, not just level 0. Separate from shellId (not a `dag.isSmallShell(shellId)`
@@ -224,6 +233,10 @@ struct LodDag {
     // each triangle and set Cluster::smallShellLineage -- buildLodHierarchy's own routing reads
     // smallShellLineage instead, since a level >= 1 group can span several small shells at once.
     std::vector<u8> smallShells;
+
+    // How many submesh ranges buildClusters partitioned the mesh into (1 when it has no table or a
+    // single submesh). packLodDag refuses a mesh whose table has a different length.
+    u32 submeshCount = 1;
 
     // Bounds-checked so a stale/out-of-range shellId (should never happen, but this is where a
     // routing bug would show as an out-of-bounds read) reads as "not small" -- the SAFE direction:

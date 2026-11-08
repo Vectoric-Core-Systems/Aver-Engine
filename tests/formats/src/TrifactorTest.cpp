@@ -1140,7 +1140,7 @@ int main() {
             check(fmt::parseAvr1(bytesV3.data(), bytesV3.size(), container, &why), "parses the v3 container: " + why);
             fmt::AvrChunk* mlet = findMlet(container);
             check(mlet != nullptr, "the v3 file has an MLET chunk");
-            check(mlet && mlet->version == 3, "the writer stamped MLET chunk version 3");
+            check(mlet && mlet->version == 4, "the writer stamped MLET chunk version 4 (a packLodDag cook is material-pure)");
             check(mlet && mlet->data.size() >= 84, "MLET holds at least the GroupTable + one MeshletDesc + one v3 MeshletBounds");
             if (mlet && mlet->data.size() >= 84) {
                 mlet->data.erase(mlet->data.begin() + 76, mlet->data.begin() + 84);

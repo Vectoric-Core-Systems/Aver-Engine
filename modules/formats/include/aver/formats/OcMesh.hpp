@@ -33,6 +33,10 @@ struct OcMeshSubmesh {
     u32 indexCount   = 0;
     u32 baseVertex   = 0;
     u32 vertexCount  = 0;
+    // This submesh's span of LOD 0's `meshlets` (FORMAT_SPECS.md 5.6 SubmeshRange MeshletStart/Count).
+    // Meaningful only when OcMeshData::meshletsMaterialPure is set; 0,0 otherwise (an older file).
+    u32 meshletStart = 0;
+    u32 meshletCount = 0;
 };
 
 // A decoded mesh: one vertex array and one index array, as rhi::IDevice::createMesh takes them.
@@ -107,6 +111,10 @@ struct OcMeshMeshlet {
     // local cut test, rather than defaulting to "never draw" (0, 0) or "undefined" (uninitialized).
     f32 ownError    = 0.0f;
     f32 parentError = std::numeric_limits<f32>::max();
+
+    // The material slot every triangle of this cluster uses (MLET chunk-version 4, in
+    // MeshletDesc.Pad). Meaningful only when OcMeshData::meshletsMaterialPure is set.
+    u16 materialSlot = 0;
 
     // MLET chunk-version 3 (FORMAT_SPECS.md 5.7): the streaming topology a page-residency-aware
     // traversal needs, which Stage 4's own task deliberately does NOT ask a runtime to reconstruct
@@ -290,6 +298,12 @@ struct OcMeshData {
     // ladder's provenance is unknown, and therefore not provably current" rather than lucking into a
     // false "matches" by accident of an old field defaulting to the same number a new one starts at.
     u32 builderVersion = 0;
+
+    // True when every meshlet at every level holds triangles of one material slot only
+    // (OcMeshMeshlet::materialSlot, OcMeshSubmesh::meshletStart/Count). Stored as MLET chunk-version 4;
+    // false for every older file, whose meshlets may straddle submeshes. Absent and zero differ: a v3
+    // file's slot fields read 0 but say nothing about the material.
+    bool meshletsMaterialPure = false;
 
     // 1 (just LOD 0) + however many coarser levels are present.
     u32 lodCount() const { return 1u + static_cast<u32>(coarserLods.size()); }

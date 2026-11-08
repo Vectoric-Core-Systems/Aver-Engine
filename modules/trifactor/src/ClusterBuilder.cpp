@@ -370,8 +370,8 @@ std::vector<std::vector<u32>> partitionClusterIds(const std::vector<u32>& ids,
 //
 // `mesh` is needed (the old grouper did not take it) for the spatial fallback's vertex positions, not
 // just the topology dag.clusters[].vertices already carries.
-std::vector<std::vector<u32>> groupClusters(const LodDag& dag, const std::vector<u32>& levelClusterIds,
-                                             const fmt::OcMeshData& mesh) {
+std::vector<std::vector<u32>> groupClustersOfOneSlot(const LodDag& dag, const std::vector<u32>& levelClusterIds,
+                                                      const fmt::OcMeshData& mesh) {
     if (levelClusterIds.empty()) return {};
 
     std::vector<u32> largeIds, smallIds;
@@ -434,6 +434,28 @@ std::vector<std::vector<u32>> groupClusters(const LodDag& dag, const std::vector
         groups.insert(groups.end(), smallGroups.begin(), smallGroups.end());
     }
 
+    return groups;
+}
+
+// Material-pure grouping: the clusters are split by material slot first and each slot is grouped on
+// its own (small/large lineage buckets inside it, as before), so a group never mixes two materials.
+// A single-slot level reduces to exactly one call of the grouper above.
+std::vector<std::vector<u32>> groupClusters(const LodDag& dag, const std::vector<u32>& levelClusterIds,
+                                             const fmt::OcMeshData& mesh) {
+    std::vector<u32> slots;
+    for (u32 cid : levelClusterIds) slots.push_back(dag.clusters[cid].materialSlot);
+    std::sort(slots.begin(), slots.end());
+    slots.erase(std::unique(slots.begin(), slots.end()), slots.end());
+    if (slots.size() <= 1) return groupClustersOfOneSlot(dag, levelClusterIds, mesh);
+
+    std::vector<std::vector<u32>> groups;
+    for (u32 slot : slots) {
+        std::vector<u32> ids;
+        for (u32 cid : levelClusterIds)
+            if (dag.clusters[cid].materialSlot == slot) ids.push_back(cid);
+        auto g = groupClustersOfOneSlot(dag, ids, mesh);
+        groups.insert(groups.end(), g.begin(), g.end());
+    }
     return groups;
 }
 
@@ -601,88 +623,120 @@ bool buildClusters(const fmt::OcMeshData& mesh, LodDag& dag, std::string* why) {
     // line per cooked mesh (RelodTool surfaces it for free): a future asset change silently making one
     // of the five previously-regressed meshes (file header) multi-shell, or shrinking a large shell to
     // small, would reopen this feature's safety argument -- this is the cheapest tripwire for it.
-    const ShellIds shellIds = computeShellIds(mesh);
+    ShellIds shellIds = computeShellIds(mesh);
+
+    // The submesh ranges clusters are cut from. No table, or a single submesh, is one range over the
+    // whole index buffer (the loader draws a lone submesh whole whatever its range says); a larger
+    // table must partition the indices exactly once.
+    struct Range { u32 start, count, slot; };
+    std::vector<Range> ranges;
+    if (mesh.submeshes.size() <= 1) {
+        ranges.push_back({0, static_cast<u32>(mesh.indices.size()), mesh.submeshes.empty() ? 0u : mesh.submeshes[0].materialSlot});
+    } else {
+        std::string partWhy;
+        if (!fmt::submeshesPartitionIndices(mesh, &partWhy)) {
+            if (why) *why = "buildClusters: " + partWhy;
+            return false;
+        }
+        for (const fmt::OcMeshSubmesh& sm : mesh.submeshes) ranges.push_back({sm.indexStart, sm.indexCount, sm.materialSlot});
+    }
+    for (const Range& r : ranges)
+        if (r.slot > 0xFFFFu) {
+            if (why) *why = "buildClusters: material slot past 65535";
+            return false;
+        }
+    dag.submeshCount = static_cast<u32>(ranges.size());
+
+    // A small shell is exempt from LockBorder because no group boundary can cut it; that stops being
+    // true if its triangles sit in two submeshes (two clusters, two groups, one open seam), so such a
+    // shell is treated as large and keeps its borders locked.
+    if (ranges.size() > 1) {
+        std::vector<u32> shellRange(shellIds.isSmall.size(), 0xFFFFFFFFu);
+        for (u32 ri = 0; ri < ranges.size(); ++ri)
+            for (u32 t = ranges[ri].start; t + 2 < ranges[ri].start + ranges[ri].count; t += 3) {
+                const u32 shell = shellIds.vertexShell[mesh.indices[t]];
+                if (shellRange[shell] == 0xFFFFFFFFu) shellRange[shell] = ri;
+                else if (shellRange[shell] != ri) shellIds.isSmall[shell] = 0;
+            }
+    }
+
     dag.smallShells = shellIds.isSmall;
     u32 smallShellCount = 0;
-    for (u8 s : dag.smallShells) smallShellCount += s ? 1 : 0;
+    for (u8 sm : dag.smallShells) smallShellCount += sm ? 1 : 0;
     u64 openEdges = 0, totalEdges = 0;
     const f32 openFrac = openEdgeFraction(mesh, openEdges, totalEdges);
     AVER_INFO("[Trifactor] shells: {} ({} small, {} large) | open edges: {}/{} = {:.1f}%",
               dag.smallShells.size(), smallShellCount, dag.smallShells.size() - smallShellCount,
               openEdges, totalEdges, openFrac * 100.0f);
 
-    // TASK STEP 5: route LOD-0 triangles by their shell's size, BEFORE any clustering call sees them.
-    // A triangle's shell is its first vertex's shell -- computeShellIds unions all three into one
-    // shell as its first step, so any one vertex is a valid representative.
-    //
-    // `largeIndices` walks mesh.indices ONCE, in order, keeping only triangles whose shell is NOT
-    // small -- so a zero-small-shell mesh (the five previously-regressed meshes; file header) leaves
-    // largeIndices byte-identical to mesh.indices, and splitIntoClusters makes the identical
-    // meshopt_buildMeshlets call it always made: the order-preservation guarantee ClusterBuilder.hpp's
-    // buildClusters doc comment promises.
-    const usize triangleCount = mesh.indices.size() / 3;
+    // Route each range's triangles by their shell's size, BEFORE any clustering call sees them. A
+    // triangle's shell is its first vertex's shell. `largeIndices` keeps mesh order, so a one-range
+    // mesh with no small shells makes the identical meshopt_buildMeshlets call it always made.
     const u32 shellCount = static_cast<u32>(shellIds.isSmall.size());
-    std::vector<u32> largeIndices;
-    largeIndices.reserve(mesh.indices.size());
-    // Indexed by shellId; holds a small shell's own triangles (global vertex ids, in mesh order) until
-    // buildDirectCluster consumes them. Empty for every LARGE shell and for a small shell with no
-    // triangles of its own (stray unreferenced position, per computeShellIds) -- both skipped by the
-    // `continue` in the consuming loop below.
-    std::vector<std::vector<u32>> smallShellTriangles(shellCount);
-    for (usize t = 0; t < triangleCount; ++t) {
-        const u32 i0 = mesh.indices[t * 3 + 0], i1 = mesh.indices[t * 3 + 1], i2 = mesh.indices[t * 3 + 2];
-        const u32 shell = shellIds.vertexShell[i0];
-        if (shellIds.isSmall[shell]) {
-            std::vector<u32>& tris = smallShellTriangles[shell];
-            tris.push_back(i0);
-            tris.push_back(i1);
-            tris.push_back(i2);
-        } else {
-            largeIndices.push_back(i0);
-            largeIndices.push_back(i1);
-            largeIndices.push_back(i2);
-        }
-    }
+    std::vector<std::vector<u32>> smallShellTriangles(shellCount);   // emptied after each range
+    for (u32 ri = 0; ri < ranges.size(); ++ri) {
+        const Range& range = ranges[ri];
+        const u32 firstCluster = static_cast<u32>(dag.clusters.size());
 
-    // Large-shell stream: the ordinary meshopt_buildMeshlets path, completely unaware that a routing
-    // decision was ever made -- it never sees a small-shell triangle, because largeIndices never
-    // contains one.
-    const std::vector<u32> largeIds = splitIntoClusters(mesh, largeIndices, /*level=*/0, dag);
-    for (u32 id : largeIds) {
-        Cluster& c = dag.clusters[id];
-        // A representative, not necessarily this cluster's ONLY shell (meshopt_buildMeshlets may merge
-        // several distinct LARGE shells into one meshlet -- Cluster::shellId). smallShellLineage stays
-        // at its default (false), which is exact: every triangle came from largeIndices, which never
-        // holds a small-shell triangle.
-        c.shellId = shellIds.vertexShell[c.vertices[c.triangles[0]]];
-    }
-
-    // Small-shell stream: one direct cluster PER small shell, in increasing shellId order (not hash-
-    // container arrival order), so buildClusters' output is a deterministic function of `mesh` alone.
-    for (u32 shell = 0; shell < shellCount; ++shell) {
-        const std::vector<u32>& triIndices = smallShellTriangles[shell];
-        if (triIndices.empty()) continue;
-
-        // A small shell has at most kMaxClusterVertices (64) distinct referenced vertices by
-        // definition, so a linear de-dup scan is cheap and keeps this loop free of another hash
-        // container -- this function's output must depend on nothing but `mesh` itself (see above).
-        std::vector<u32> shellVertices;
-        std::vector<u8> localTriangles;
-        localTriangles.reserve(triIndices.size());
-        for (u32 v : triIndices) {
-            u8 local = 0;
-            bool found = false;
-            for (usize i = 0; i < shellVertices.size(); ++i) {
-                if (shellVertices[i] == v) { local = static_cast<u8>(i); found = true; break; }
+        std::vector<u32> largeIndices;
+        largeIndices.reserve(range.count);
+        std::vector<u32> touchedSmall;
+        for (u32 t = range.start; t + 2 < range.start + range.count; t += 3) {
+            const u32 i0 = mesh.indices[t + 0], i1 = mesh.indices[t + 1], i2 = mesh.indices[t + 2];
+            const u32 shell = shellIds.vertexShell[i0];
+            if (shellIds.isSmall[shell]) {
+                std::vector<u32>& tris = smallShellTriangles[shell];
+                if (tris.empty()) touchedSmall.push_back(shell);
+                tris.push_back(i0);
+                tris.push_back(i1);
+                tris.push_back(i2);
+            } else {
+                largeIndices.push_back(i0);
+                largeIndices.push_back(i1);
+                largeIndices.push_back(i2);
             }
-            if (!found) {
-                local = static_cast<u8>(shellVertices.size());
-                shellVertices.push_back(v);
-            }
-            localTriangles.push_back(local);
         }
 
-        buildDirectCluster(mesh, std::move(shellVertices), std::move(localTriangles), shell, dag);
+        // Large-shell stream: the ordinary meshopt_buildMeshlets path.
+        const std::vector<u32> largeIds = splitIntoClusters(mesh, largeIndices, /*level=*/0, dag);
+        for (u32 id : largeIds) {
+            Cluster& c = dag.clusters[id];
+            // A representative, not necessarily this cluster's ONLY shell (meshopt_buildMeshlets may
+            // merge several LARGE shells into one meshlet). smallShellLineage stays false: every
+            // triangle came from largeIndices.
+            c.shellId = shellIds.vertexShell[c.vertices[c.triangles[0]]];
+        }
+
+        // Small-shell stream: one direct cluster PER small shell, in increasing shellId order, so the
+        // output is a deterministic function of `mesh` alone.
+        std::sort(touchedSmall.begin(), touchedSmall.end());
+        for (u32 shell : touchedSmall) {
+            const std::vector<u32>& triIndices = smallShellTriangles[shell];
+
+            // At most kMaxClusterVertices distinct vertices by definition, so a linear de-dup scan.
+            std::vector<u32> shellVertices;
+            std::vector<u8> localTriangles;
+            localTriangles.reserve(triIndices.size());
+            for (u32 v : triIndices) {
+                u8 local = 0;
+                bool found = false;
+                for (usize i = 0; i < shellVertices.size(); ++i) {
+                    if (shellVertices[i] == v) { local = static_cast<u8>(i); found = true; break; }
+                }
+                if (!found) {
+                    local = static_cast<u8>(shellVertices.size());
+                    shellVertices.push_back(v);
+                }
+                localTriangles.push_back(local);
+            }
+            buildDirectCluster(mesh, std::move(shellVertices), std::move(localTriangles), shell, dag);
+            smallShellTriangles[shell].clear();
+        }
+
+        for (u32 id = firstCluster; id < dag.clusters.size(); ++id) {
+            dag.clusters[id].materialSlot = range.slot;
+            dag.clusters[id].submesh = ri;
+        }
     }
 
     return true;
@@ -720,7 +774,18 @@ bool buildLodHierarchy(const fmt::OcMeshData& mesh, LodDag& dag, std::string* wh
 
     for (u32 level = 0; level < kMaxLevels; ++level) {
         const std::vector<u32> current = dag.levels[level]; // copy: dag.levels grows below
-        if (current.size() <= 1) break;                     // already a single root cluster
+        // Done once every material slot is down to a single root cluster (one cluster in all, for a
+        // one-material mesh): groups never cross slots, so a slot cannot shrink below its own root.
+        {
+            std::vector<u32> perSlot;
+            bool more = false;
+            for (u32 cid : current) {
+                const u32 slot = dag.clusters[cid].materialSlot;
+                if (slot >= perSlot.size()) perSlot.resize(slot + 1, 0);
+                if (++perSlot[slot] > 1) more = true;
+            }
+            if (!more) break;
+        }
 
         const auto tGroup = tick();
         const auto groups = groupClusters(dag, current, mesh);
@@ -737,6 +802,7 @@ bool buildLodHierarchy(const fmt::OcMeshData& mesh, LodDag& dag, std::string* wh
             // level-0-only). True iff EVERY member is small-shell lineage (also decides LockBorder,
             // step 7). Two-bucket grouping keeps members homogeneous, so "every"/"any" agree anyway.
             bool allLargeShell = true;
+            u32 materialSlot = 0;
         };
         std::vector<PendingGroup> pending;
         pending.reserve(groups.size());
@@ -858,7 +924,8 @@ bool buildLodHierarchy(const fmt::OcMeshData& mesh, LodDag& dag, std::string* wh
             phase.extent += msSince(tExtent);
             const f32 rescaledError = (meshScale > 0.0f) ? resultError * (groupScale / meshScale) : resultError;
 
-            pending.push_back({group, std::move(simplified), rescaledError, allLargeShell});
+            pending.push_back({group, std::move(simplified), rescaledError, allLargeShell,
+                               dag.clusters[group[0]].materialSlot});
         }
 
         if (!anyReduction) break;
@@ -898,6 +965,7 @@ bool buildLodHierarchy(const fmt::OcMeshData& mesh, LodDag& dag, std::string* wh
 
             for (u32 parentId : newIds) {
                 dag.clusters[parentId].error = propagatedError;
+                dag.clusters[parentId].materialSlot = pg.materialSlot;
                 // TASK STEP 8: carry lineage forward so groupClusters buckets this output correctly
                 // one level up -- without it, smallShellLineage defaults to false/large past level 0.
                 dag.clusters[parentId].smallShellLineage = !pg.allLargeShell;
@@ -1065,6 +1133,47 @@ ValidationReport validateLodDag(const fmt::OcMeshData& mesh, const LodDag& dag) 
                                             ") has parent " + std::to_string(parentId) + " at level " +
                                             std::to_string(p.level) + " (not coarser)");
         }
+    }
+
+    // ---- material purity: no cluster spans two slots, and no group mixes two ------------------------
+    {
+        // LOD 0: every triangle of a cluster must come from the submesh range the cluster claims.
+        // Compared as sorted vertex triples, so it needs no triangle-to-submesh side table.
+        const bool tabled = mesh.submeshes.size() > 1;
+        if (tabled && dag.submeshCount != mesh.submeshes.size())
+            report.fail("material-purity", "dag was built from " + std::to_string(dag.submeshCount) +
+                                                " submesh ranges, mesh has " + std::to_string(mesh.submeshes.size()));
+        else if (tabled) {
+            std::vector<std::vector<std::array<u32, 3>>> bySub(mesh.submeshes.size());
+            for (usize si = 0; si < mesh.submeshes.size(); ++si) {
+                const fmt::OcMeshSubmesh& sm = mesh.submeshes[si];
+                for (u32 t = sm.indexStart; t + 2 < sm.indexStart + sm.indexCount; t += 3)
+                    bySub[si].push_back({mesh.indices[t], mesh.indices[t + 1], mesh.indices[t + 2]});
+                std::sort(bySub[si].begin(), bySub[si].end());
+            }
+            for (u32 cid : dag.levels[0]) {
+                const Cluster& c = dag.clusters[cid];
+                if (c.submesh >= bySub.size()) { report.fail("material-purity", "cluster " + std::to_string(cid) + " names a missing submesh"); continue; }
+                if (c.materialSlot != mesh.submeshes[c.submesh].materialSlot)
+                    report.fail("material-purity", "cluster " + std::to_string(cid) + " carries slot " +
+                                                        std::to_string(c.materialSlot) + " but its submesh uses " +
+                                                        std::to_string(mesh.submeshes[c.submesh].materialSlot));
+                for (usize t = 0; t + 2 < c.triangles.size(); t += 3) {
+                    const std::array<u32, 3> tri{c.vertices[c.triangles[t]], c.vertices[c.triangles[t + 1]], c.vertices[c.triangles[t + 2]]};
+                    if (!std::binary_search(bySub[c.submesh].begin(), bySub[c.submesh].end(), tri)) {
+                        report.fail("material-purity", "cluster " + std::to_string(cid) + " holds a triangle outside submesh " + std::to_string(c.submesh));
+                        break;
+                    }
+                }
+            }
+        }
+        // Every level: a cluster takes its children's slot, so no group (children + outputs) mixes slots.
+        for (const Cluster& c : dag.clusters)
+            for (u32 child : c.children)
+                if (dag.clusters[child].materialSlot != c.materialSlot)
+                    report.fail("material-purity", "cluster " + std::to_string(c.id) + " (slot " + std::to_string(c.materialSlot) +
+                                                        ") has child " + std::to_string(child) + " of slot " +
+                                                        std::to_string(dag.clusters[child].materialSlot));
     }
 
     const u32 topLevel = dag.levelCount() - 1;
@@ -1371,6 +1480,7 @@ std::vector<fmt::OcMeshMeshlet> toMeshlets(const LodDag& dag, u32 level,
         ml.coneAxis[2]  = c.bounds.coneAxis[2];
         ml.coneCutoff   = c.bounds.coneCutoff;
         ml.ownError     = errorBounds[cid].ownError;
+        ml.materialSlot = static_cast<u16>(c.materialSlot);
         ml.parentError  = errorBounds[cid].parentError;
         // Stage 4: fmt::kInvalidClusterId passes through UNTRANSLATED -- it is not a real cluster/group id
         // to look up a level for, it is the sentinel itself, and toLevelLocalIndex/toGroupLocalIndex
@@ -1476,6 +1586,27 @@ bool packLodDag(const LodDag& dag, fmt::OcMeshData& mesh, std::string* why) {
 
     const GroupLevelIndex groupIdx = indexGroupsByLevel(dag);
 
+    // SubmeshRange meshlet spans: LOD 0's clusters are contiguous per submesh (buildClusters cuts them
+    // range by range), so a span is the first id and the count. A mesh whose table does not match the
+    // one the dag was built from is refused rather than given ranges that point at the wrong clusters.
+    const usize subCount = mesh.submeshes.size();
+    if (subCount > 1 && dag.submeshCount != subCount) {
+        if (why) *why = "packLodDag: the dag was built from " + std::to_string(dag.submeshCount) +
+                        " submesh ranges but the mesh has " + std::to_string(subCount);
+        return false;
+    }
+    std::vector<u32> subStart(subCount, 0), subCountOut(subCount, 0);
+    if (subCount > 0) {
+        const u32 level0First = dag.levels[0].front();
+        for (u32 cid : dag.levels[0]) {
+            const Cluster& c = dag.clusters[cid];
+            const usize si = subCount > 1 ? c.submesh : 0;
+            if (si >= subCount) continue;
+            if (subCountOut[si] == 0) subStart[si] = cid - level0First;
+            ++subCountOut[si];
+        }
+    }
+
     mesh.meshlets = toMeshlets(dag, 0, errorBounds, groupIdx);
     mesh.coarserLods.clear();
     for (u32 level = 1; level < dag.levelCount(); ++level) {
@@ -1495,6 +1626,11 @@ bool packLodDag(const LodDag& dag, fmt::OcMeshData& mesh, std::string* why) {
     // PART B: stamp which builder cooked this ladder. Only reached once everything above succeeded --
     // a failed pack leaves builderVersion exactly as it found it, same as every other stream.
     mesh.builderVersion = kBuilderVersion;
+    for (usize si = 0; si < subCount; ++si) {
+        mesh.submeshes[si].meshletStart = subStart[si];
+        mesh.submeshes[si].meshletCount = subCountOut[si];
+    }
+    mesh.meshletsMaterialPure = true;
     return true;
 }
 
