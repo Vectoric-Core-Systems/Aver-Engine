@@ -10,6 +10,7 @@
 #include "EditorKeybinds.hpp"
 #include "ParticleCurveModel.hpp"
 #include "ParticleStackModel.hpp"
+#include "ParticleTemplates.hpp"
 
 #include "aver/core/Hash.hpp"
 #include "aver/core/Log.hpp"
@@ -617,6 +618,21 @@ void ParticleEditor::drawParams() {
             ImGui::PopID();
             if (removeIt) { editEffect([&](ParticleEffect& x) { return pxmodel::removeModule(x, static_cast<int>(mi)); }); break; }
         }
+
+        // Module presets: a few modules with tuned parameters in one undo step.
+        if (ImGui::Button("Presets")) ImGui::OpenPopup("modulepresets");
+        if (ImGui::BeginPopup("modulepresets")) {
+            const auto& presets = pxtemplates::presets();
+            for (usize pi = 0; pi < presets.size(); ++pi) {
+                if (ImGui::Selectable(presets[pi].name)) {
+                    editEffect([&](ParticleEffect& x) { return pxtemplates::applyPreset(x, pi); });
+                    ImGui::CloseCurrentPopup();
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", presets[pi].description);
+            }
+            ImGui::EndPopup();
+        }
+        ImGui::SameLine();
 
         // The searchable Add module popup: all 13, filtered by what is typed.
         if (ImGui::Button(ICON_ADD " Add module")) { moduleFilter_[0] = '\0'; ImGui::OpenPopup("addmodule"); }

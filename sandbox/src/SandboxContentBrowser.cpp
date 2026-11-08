@@ -13,6 +13,9 @@
 #include "VehicleEditor.hpp"   // New Vehicle
 #endif
 #include "OcShapeEditor.hpp"   // New Collision Shape (the starter file)
+#if AVER_MODULE_PARTICLES
+#include "ParticleTemplates.hpp"   // New Particle Effect from a template
+#endif
 
 namespace aver {
 
@@ -370,6 +373,23 @@ void SandboxApp::cbCreateParticleEffect() {
     if (!fmt::saveOcparticle(target.string(), fx, &extras, &why)) {
         cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
         AVER_ERROR("[Editor] new particle effect failed: {}", why);
+        return;
+    }
+    cbAdoptNewAsset(target);
+}
+
+// Writes one of the neutral starters (smoke, sparks, rain, ...) as the new .ocparticle, text as authored, and opens it.
+void SandboxApp::cbCreateParticleFromTemplate(usize index) {
+    const auto& all = editor::pxtemplates::templates();
+    if (index >= all.size()) return;
+    std::string base = "New";
+    for (const char* c = all[index].name; *c; ++c) if (*c != ' ') base += *c;
+    const std::filesystem::path target = cbFreeAssetPath(base.c_str(), ".ocparticle");
+    if (target.empty()) return;
+    std::string why;
+    if (!editor::writeNewFile(target.string(), all[index].text, &why)) {
+        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        AVER_ERROR("[Editor] new particle effect from template failed: {}", why);
         return;
     }
     cbAdoptNewAsset(target);
@@ -1408,6 +1428,15 @@ void SandboxApp::drawContentBrowser() {
 #if AVER_MODULE_PARTICLES
         if (ImGui::MenuItem("New Particle Effect")) cbCreateParticleEffect();
         uiReg_.track("cb.add.particleEffect");
+        if (ImGui::BeginMenu("New Particle Effect from Template")) {
+            const auto& tpl = editor::pxtemplates::templates();
+            for (usize ti = 0; ti < tpl.size(); ++ti) {
+                if (ImGui::MenuItem(tpl[ti].name)) cbCreateParticleFromTemplate(ti);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tpl[ti].description);
+            }
+            ImGui::EndMenu();
+        }
+        uiReg_.track("cb.add.particleTemplate");
 #endif
         if (ImGui::MenuItem("New Foliage Type"))    cbCreateFoliageType();
         uiReg_.track("cb.add.foliageType");

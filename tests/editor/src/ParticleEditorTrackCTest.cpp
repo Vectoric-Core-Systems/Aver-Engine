@@ -3,6 +3,7 @@
 #include "ParticleCurveModel.hpp"
 #include "ParticleEditor.hpp"
 #include "ParticlePreviewModel.hpp"
+#include "ParticleTemplates.hpp"
 #include "ParticleStackModel.hpp"
 
 #include "aver/core/Log.hpp"
@@ -10,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <filesystem>
 #include <string>
 
@@ -289,6 +291,88 @@ int main() {
         check(allOnAxis, "a still emitter keeps every particle on the axis");
         ed.setMotion(PreviewMotion::Circle, 1.0f, 99999.0f);
         check(ed.motionRadius() == 10.0f && ed.motionSpeed() == 5000.0f, "motion settings are clamped");
+    }
+
+    // ---- 6. templates and module presets -------------------------------------------------------------------
+    AVER_INFO("templates");
+    {
+        namespace tp = editor::pxtemplates;
+        const auto& all = tp::templates();
+        check(all.size() >= 10, "at least ten templates ship");
+        for (const char* want : {"Smoke", "Sparks", "Rain", "Snow", "Embers", "Dust", "Mist", "Trail", "Debris", "Flipbook burst"}) {
+            bool found = false;
+            for (const auto& t : all) found = found || std::string(t.name) == want;
+            check(found, std::string("the ") + want + " starter exists");
+        }
+        for (usize i = 0; i < all.size(); ++i) {
+            const std::string name = all[i].name;
+            particles::ParticleSystemDef d;
+            std::string err;
+            const bool parsed = tp::instantiate(i, d, &err);
+            check(parsed, name + " parses: " + err);
+            if (!parsed) continue;
+            check(*all[i].description != '\0', name + " has a description");
+            bool builtinOnly = true;
+            for (const auto& e : d.emitters) {
+                builtinOnly = builtinOnly && e.textureId == 0 && e.customShader.empty() &&
+                              (e.meshPath.empty() || e.meshPath == "Meshes/cube.ocmesh" || e.meshPath == "Meshes/sphere.ocmesh");
+            }
+            check(builtinOnly, name + " uses only built-in assets (the soft dot, the cube and sphere meshes)");
+            std::string again = fmt::writeOcparticleSystem(d);
+            particles::ParticleSystemDef back;
+            const bool rt = fmt::parseOcparticleSystem(again, back, nullptr, &err);
+            check(rt && back.emitters.size() == d.emitters.size() && back.emitters[0].modules.size() == d.emitters[0].modules.size(),
+                  name + " survives a write and parse: " + err);
+
+            // it runs: write the authored text to disk, load it into a tab and let it play half a second
+            const std::filesystem::path file = std::filesystem::temp_directory_path() / ("pxTrackC_tpl_" + std::to_string(i) + ".ocparticle");
+            { std::FILE* f = std::fopen(file.string().c_str(), "wb"); if (f) { std::fputs(all[i].text, f); std::fclose(f); } }
+            editor::ParticleEditor ed(file.string());
+            check(ed.loaded(), name + " loads in the editor: " + ed.loadError());
+            ed.seekPreview(0.5f);
+            bool finite = true;
+            for (usize s = 0; s < ed.previewSims().size(); ++s)
+                for (const particles::Particle& q : ed.previewSims()[s].particles())
+                    finite = finite && std::isfinite(q.position.x) && std::isfinite(q.position.y) && std::isfinite(q.position.z);
+            check(ed.previewTotal() > 0 && finite, name + " has live, finite particles after half a second: " + std::to_string(ed.previewTotal()));
+        }
+        for (usize i = 0; i < all.size(); ++i)
+            for (usize j = i + 1; j < all.size(); ++j) check(std::string(all[i].name) != all[j].name, std::string("unique name ") + all[i].name);
+
+        const auto& presets = tp::presets();
+        check(presets.size() >= 8, "module presets ship");
+        for (usize i = 0; i < presets.size(); ++i) {
+            ParticleEffect e;
+            const bool added = tp::applyPreset(e, i);
+            check(added && e.modules.size() == presets[i].modules.size(), std::string(presets[i].name) + " adds its modules");
+            bool allNamed = true;
+            for (const auto& pm : presets[i].modules) {
+                std::string_view rest = pm.params;
+                const auto& info = particles::moduleInfo(pm.kind);
+                while (!rest.empty()) {
+                    const usize sp = rest.find(' ');
+                    const std::string_view tok = rest.substr(0, sp);
+                    rest = sp == std::string_view::npos ? std::string_view{} : rest.substr(sp + 1);
+                    allNamed = allNamed && tok.find('=') != std::string_view::npos && particles::findModuleParam(info, tok.substr(0, tok.find('='))) >= 0;
+                }
+            }
+            check(allNamed, std::string(presets[i].name) + " names only real parameters");
+            ParticleSystemDef d = smallSystem();
+            d.emitters[0].modules = e.modules;
+            ParticleSystemDef back;
+            std::string err;
+            check(fmt::parseOcparticleSystem(fmt::writeOcparticleSystem(d), back, nullptr, &err) && back.emitters[0].modules.size() == e.modules.size(),
+                  std::string(presets[i].name) + " round-trips: " + err);
+        }
+        {
+            ParticleEffect e;
+            tp::applyPreset(e, 1);   // Wind: a force then a drag
+            check(e.modules.size() == 2 && e.modules[0].p[0].value == 80.0f && e.modules[1].p[0].value == 0.3f, "preset parameters are applied");
+            while (e.modules.size() + 2 <= particles::kMaxModulesPerEmitter) tp::applyPreset(e, 1);
+            const usize before = e.modules.size();
+            check(!tp::applyPreset(e, 1) || e.modules.size() == before, "a preset that would pass 16 modules is refused whole");
+            check(e.modules.size() <= particles::kMaxModulesPerEmitter, "the stack never passes 16");
+        }
     }
 
     AVER_INFO("{} failure(s)", g_failures);

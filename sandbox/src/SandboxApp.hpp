@@ -2838,6 +2838,7 @@ private:
     // Writes a starter .ocparticle and opens it.
 #if AVER_MODULE_PARTICLES
     void cbCreateParticleEffect();
+    void cbCreateParticleFromTemplate(usize index);   // a starter from ParticleTemplates.hpp
 #endif
 
     void cbCreateFoliageType();
