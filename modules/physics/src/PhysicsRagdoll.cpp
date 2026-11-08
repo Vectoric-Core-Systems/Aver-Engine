@@ -64,6 +64,9 @@ struct Entry {
     JPH::Ref<JPH::Ragdoll> ragdoll;
     int   mode = AVER_PHYS_RAGDOLL_KINEMATIC;
     float strength = kDefaultStrength;
+    // Per part overrides of the ragdoll-wide drive; < 0 inherits (strength, kMotorDamping), torque scale is a multiplier.
+    std::vector<float>   partStrength, partDamping, partTorque;
+    std::vector<char>    pinned;       // part -> kept kinematic (follows the target) while the ragdoll is simulated
     std::vector<JPH::Vec3> tPos;       // target pose per bone, Jolt space
     std::vector<JPH::Quat> tRot;
 };
@@ -110,10 +113,11 @@ bool readPose(int n, const float* pos, const float* rot, std::vector<JPH::Vec3>&
 // since MoveKinematic divides by it.
 static float kinematicStep() { return g_world->simStep() > 0.0f ? g_world->simStep() : g_world->fixedStep; }
 
-// Moves every part toward its bone's target so it arrives in `dt`.
-void driveKinematic(Entry& e, float dt, bool locking) {
+// Moves every part (or, with `pinnedOnly`, every pinned part) toward its bone's target so it arrives in `dt`.
+void driveKinematic(Entry& e, float dt, bool locking, bool pinnedOnly = false) {
     JPH::BodyInterface& b = bodiesOf(locking);
     for (int k = 0; k < static_cast<int>(e.partBone.size()); ++k) {
+        if (pinnedOnly && !e.pinned[k]) continue;
         const JPH::BodyID id = e.ragdoll->GetBodyID(k);
         // Waking a sleeper changes the active list, which a step has frozen; set_target does it between steps.
         if (!locking && !b.IsActive(id)) continue;
@@ -140,10 +144,11 @@ void setMotorsOff(Entry& e) {
 
 // Spring frequency and torque ceiling from strength; the ceiling follows what the joint must carry.
 void applyMotorSettings(Entry& e) {
-    const float freq = 2.0f + 8.0f * e.strength;
     forEachJoint(e, [&](int k, JPH::SwingTwistConstraint* c) {
-        JPH::MotorSettings ms(freq, kMotorDamping);
-        ms.SetTorqueLimit(e.partHold[k] * kTorqueAtFullStrength * e.strength);
+        const float str = e.partStrength[k] >= 0.0f ? e.partStrength[k] : e.strength;
+        const float damp = e.partDamping[k] >= 0.0f ? e.partDamping[k] : kMotorDamping;
+        JPH::MotorSettings ms(2.0f + 8.0f * str, damp);
+        ms.SetTorqueLimit(e.partHold[k] * kTorqueAtFullStrength * str * e.partTorque[k]);
         c->GetSwingMotorSettings() = ms;
         c->GetTwistMotorSettings() = ms;
     });
@@ -163,6 +168,22 @@ void driveMotors(Entry& e) {
 
 void activateParts(Entry& e) {
     for (JPH::BodyID id : e.ragdoll->GetBodyIDs()) bi().ActivateBody(id);
+}
+
+// In a simulated mode a pinned part stays kinematic (carried to the target each step) and the rest are dynamic.
+// A joint between two kinematic parts has nothing to solve, so it is switched off.
+void applyPins(Entry& e) {
+    JPH::BodyInterface& b = bi();
+    for (int k = 0; k < static_cast<int>(e.partBone.size()); ++k) {
+        const JPH::BodyID id = e.ragdoll->GetBodyID(k);
+        const JPH::EMotionType want = e.pinned[k] ? JPH::EMotionType::Kinematic : JPH::EMotionType::Dynamic;
+        if (b.GetMotionType(id) != want) b.SetMotionType(id, want, JPH::EActivation::Activate);
+    }
+    forEachJoint(e, [&](int k, JPH::SwingTwistConstraint* c) {
+        const int p = e.partParent[k];
+        c->SetEnabled(!(e.pinned[k] && (p < 0 || e.pinned[p])));
+    });
+    e.ragdoll->ResetWarmStart();
 }
 
 void applyMode(Entry& e, int mode) {
@@ -187,10 +208,8 @@ void applyMode(Entry& e, int mode) {
 
     if (prev == AVER_PHYS_RAGDOLL_KINEMATIC) {
         // The parts keep the velocity MoveKinematic last gave them: the animation's momentum.
-        for (JPH::BodyID id : e.ragdoll->GetBodyIDs())
-            b.SetMotionType(id, JPH::EMotionType::Dynamic, JPH::EActivation::Activate);
-        forEachJoint(e, [](int, JPH::SwingTwistConstraint* c) { c->SetEnabled(true); });
-        e.ragdoll->ResetWarmStart();
+        applyPins(e);
+        driveKinematic(e, kinematicStep(), true, true);
     }
     if (mode == AVER_PHYS_RAGDOLL_LIMP) {
         setMotorsOff(e);
@@ -210,7 +229,7 @@ class Stepper final : public JPH::PhysicsStepListener {
 public:
     void OnStep(const JPH::PhysicsStepListenerContext& ctx) override {
         for (auto& [id, e] : g_ragdolls)
-            if (e.mode == AVER_PHYS_RAGDOLL_KINEMATIC) driveKinematic(e, ctx.mDeltaTime, false);
+            driveKinematic(e, ctx.mDeltaTime, false, e.mode != AVER_PHYS_RAGDOLL_KINEMATIC);
     }
 };
 
@@ -460,6 +479,10 @@ int32_t aver_phys_ragdoll_create(int32_t boneCount, const int32_t* parents,
     e.partBone = std::move(partBone);
     e.partParent = std::move(partParent);
     e.partHold = std::move(hold);
+    e.partStrength.assign(P, -1.0f);
+    e.partDamping.assign(P, -1.0f);
+    e.partTorque.assign(P, 1.0f);
+    e.pinned.assign(P, 0);
     e.settings = rs;
     e.ragdoll = rd;
     e.tPos = std::move(tp);
@@ -534,6 +557,7 @@ int32_t aver_phys_ragdoll_set_target(int32_t ragdoll, const float* worldPos, con
         driveMotors(*e);
         if (changed) activateParts(*e);
     }
+    if (e->mode != AVER_PHYS_RAGDOLL_KINEMATIC) driveKinematic(*e, kinematicStep(), true, true);
     return 1;
 }
 
@@ -610,6 +634,65 @@ int32_t aver_phys_ragdoll_add_impulse(int32_t ragdoll, int32_t bone, float ix, f
     if (o < 0 || e->mode == AVER_PHYS_RAGDOLL_KINEMATIC) return 0;
     bi().AddImpulse(e->ragdoll->GetBodyID(o), toJoltDir(Vec3(ix, iy, iz)), toJolt(Vec3(px, py, pz)));
     return 1;
+}
+
+// The part a bone is or rides on; -1 on a bad handle, bone, or a bone with no part (the ABI error says which).
+static int partForBone(Entry*& e, int32_t ragdoll, int32_t bone) {
+    e = findRagdoll(ragdoll);
+    if (!e) return -1;
+    if (bone < 0 || bone >= e->boneCount) { setAbiError(AbiError::OutOfRange); return -1; }
+    const int o = e->ownerPart[bone];
+    if (o < 0) setAbiError(AbiError::InvalidArgument);
+    return o;
+}
+
+int32_t aver_phys_ragdoll_set_part_strength(int32_t ragdoll, int32_t bone, float strength) {
+    Entry* e = nullptr;
+    const int k = partForBone(e, ragdoll, bone);
+    if (k < 0) return 0;
+    if (!std::isfinite(strength)) return refuse(AbiError::InvalidArgument);
+    e->partStrength[k] = strength < 0.0f ? -1.0f : std::min(strength, 1.0f);
+    if (e->mode == AVER_PHYS_RAGDOLL_POWERED) { applyMotorSettings(*e); activateParts(*e); }
+    return 1;
+}
+
+int32_t aver_phys_ragdoll_set_part_damping(int32_t ragdoll, int32_t bone, float damping) {
+    Entry* e = nullptr;
+    const int k = partForBone(e, ragdoll, bone);
+    if (k < 0) return 0;
+    if (!std::isfinite(damping)) return refuse(AbiError::InvalidArgument);
+    e->partDamping[k] = damping < 0.0f ? -1.0f : std::min(damping, 20.0f);
+    if (e->mode == AVER_PHYS_RAGDOLL_POWERED) { applyMotorSettings(*e); activateParts(*e); }
+    return 1;
+}
+
+int32_t aver_phys_ragdoll_set_part_torque_scale(int32_t ragdoll, int32_t bone, float scale) {
+    Entry* e = nullptr;
+    const int k = partForBone(e, ragdoll, bone);
+    if (k < 0) return 0;
+    if (!std::isfinite(scale)) return refuse(AbiError::InvalidArgument);
+    e->partTorque[k] = std::clamp(scale, 0.0f, 100.0f);
+    if (e->mode == AVER_PHYS_RAGDOLL_POWERED) { applyMotorSettings(*e); activateParts(*e); }
+    return 1;
+}
+
+int32_t aver_phys_ragdoll_set_part_pinned(int32_t ragdoll, int32_t bone, int32_t pinned) {
+    Entry* e = nullptr;
+    const int k = partForBone(e, ragdoll, bone);
+    if (k < 0) return 0;
+    e->pinned[k] = pinned != 0;
+    if (e->mode != AVER_PHYS_RAGDOLL_KINEMATIC) {
+        applyPins(*e);
+        driveKinematic(*e, kinematicStep(), true, true);
+        if (e->mode == AVER_PHYS_RAGDOLL_POWERED) applyMotorSettings(*e);
+    }
+    return 1;
+}
+
+int32_t aver_phys_ragdoll_part_pinned(int32_t ragdoll, int32_t bone) {
+    Entry* e = nullptr;
+    const int k = partForBone(e, ragdoll, bone);
+    return k < 0 ? -1 : (e->pinned[k] ? 1 : 0);
 }
 
 int32_t aver_phys_ragdoll_body_of_bone(int32_t ragdoll, int32_t bone) {

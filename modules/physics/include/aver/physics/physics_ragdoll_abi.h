@@ -123,6 +123,31 @@ AVER_PHYS_API int32_t aver_phys_ragdoll_get_pose(int32_t ragdoll, float* outWorl
 AVER_PHYS_API int32_t aver_phys_ragdoll_add_impulse(int32_t ragdoll, int32_t bone, float ix, float iy, float iz,
                                                     float px, float py, float pz);
 
+// ---- Per part drive and partial-body simulation (additive) -----------------------------------------------
+//
+// The calls above set one value for the whole ragdoll; these override it for the part a bone is or rides
+// on (a bone with no part and no ancestor part answers 0). The ragdoll-wide set_strength stays the default
+// every part inherits until it is given its own.
+
+// POWERED-mode strength of this part's joint, 0..1; a negative value goes back to the ragdoll-wide strength.
+AVER_PHYS_API int32_t aver_phys_ragdoll_set_part_strength(int32_t ragdoll, int32_t bone, float strength);
+
+// Motor damping ratio of this part's joint (default 1, clamped to 0..20); negative goes back to the default.
+AVER_PHYS_API int32_t aver_phys_ragdoll_set_part_damping(int32_t ragdoll, int32_t bone, float damping);
+
+// Multiplies the torque ceiling of this part's motor (default 1, clamped to 0..100).
+AVER_PHYS_API int32_t aver_phys_ragdoll_set_part_torque_scale(int32_t ragdoll, int32_t bone, float scale);
+
+// PARTIAL-BODY SIMULATION. A pinned part stays kinematic in LIMP and POWERED mode: it is carried to its target
+// every step like in KINEMATIC mode, while the unpinned parts are simulated and their joints still attach
+// to it. Pin everything outside a region and only the region is simulated. A joint between two pinned parts
+// is switched off. Pins have no effect in KINEMATIC mode (everything follows the target there) and survive a
+// mode change. Default: nothing pinned.
+AVER_PHYS_API int32_t aver_phys_ragdoll_set_part_pinned(int32_t ragdoll, int32_t bone, int32_t pinned);
+
+// 1 if the bone's part is pinned, 0 if not, -1 for a dead handle, a bad bone or a bone with no part.
+AVER_PHYS_API int32_t aver_phys_ragdoll_part_pinned(int32_t ragdoll, int32_t bone);
+
 // ---- Parts ---------------------------------------------------------------------------------------------
 
 // The body handle of the bone's part, or of the ancestor part it rides on; 0 if it has neither.

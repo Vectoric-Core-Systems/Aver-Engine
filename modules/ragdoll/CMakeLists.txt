@@ -7,6 +7,9 @@
 aver_add_module(Aver.Ragdoll
   SOURCES
     src/RagdollBuilder.cpp
+    src/PhysAnimProfile.cpp
+    src/HitReaction.cpp
+    src/RagdollLife.cpp
     src/RagdollSystem.cpp
   DEPS
     Aver.Anim.Scene

@@ -13,3 +13,17 @@ add_executable(RagdollSystemTest src/RagdollSystemTest.cpp)
 target_link_libraries(RagdollSystemTest PRIVATE Aver.Ragdoll Aver.Anim.Scene Aver.Anim Aver.Scene Aver.Formats
                                                 Aver.Physics Aver.Core Aver.Platform)
 set_target_properties(RagdollSystemTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# PhysAnimProfileTest -- physical animation without a world: the .ocphysanim profile (round trip, validation,
+# resolution onto a skeleton), the hit-reaction envelope, and the death / get-up logic.
+add_executable(PhysAnimProfileTest src/PhysAnimProfileTest.cpp)
+target_link_libraries(PhysAnimProfileTest PRIVATE Aver.Ragdoll Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(PhysAnimProfileTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# PhysicalAnimationTest -- physical animation on a headless Jolt ragdoll: per-part drive and pins in the ABI,
+# partial-body simulation, hit reactions that hand the body back by themselves, the whole-body blend, death and
+# getting up. A small skeleton, CPU physics, no GPU.
+add_executable(PhysicalAnimationTest src/PhysicalAnimationTest.cpp)
+target_link_libraries(PhysicalAnimationTest PRIVATE Aver.Ragdoll Aver.Anim.Scene Aver.Anim Aver.Scene Aver.Formats
+                                                    Aver.Physics Aver.Core Aver.Platform)
+set_target_properties(PhysicalAnimationTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
