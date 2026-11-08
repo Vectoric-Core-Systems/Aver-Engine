@@ -942,6 +942,87 @@ void ParticleEditor::drawParams() {
     }
 }
 
+// ================================================================================== preview helpers ===
+
+// The row above the picture: ground grid, bounds spheres, and the moving test emitter. All preview-only, none of it saved.
+void ParticleEditor::drawPreviewToolbar() {
+    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    ImGui::Checkbox("Ground", &showGround_);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("The floor grid under the particles");
+    ImGui::SameLine();
+    ImGui::Checkbox("Bounds", &showBounds_);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Each emitter's BOUNDS sphere (orange: the selected emitter), at the emitter's position");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(88.0f * dpi);
+    static const char* kMotion[] = {"Still", "Circle", "Line"};
+    int mk = static_cast<int>(motion_);
+    f32 radius = motionRadius_, speed = motionSpeed_;
+    bool changed = ImGui::Combo("##pxmotion", &mk, kMotion, 3);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Move the emitter along a path, for trails and inherited velocity");
+    if (mk != 0) {
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(70.0f * dpi);
+        changed |= ImGui::DragFloat("##pxmradius", &radius, 1.0f, 10.0f, 5000.0f, "r %.0f");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(78.0f * dpi);
+        changed |= ImGui::DragFloat("##pxmspeed", &speed, 1.0f, 1.0f, 5000.0f, "%.0f cm/s");
+        ImGui::SameLine();
+        ImGui::Checkbox("Path", &showPath_);
+    }
+    if (changed) setMotion(static_cast<pxmodel::PreviewMotion>(mk), radius, speed);
+}
+
+// Lines drawn over the picture with the preview camera's own matrix: the bounds spheres (three great circles each) and the path.
+void ParticleEditor::drawPreviewOverlay(const f32 viewProj[16], const f32 rectMin[2], const f32 rectSize[2]) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->PushClipRect(ImVec2(rectMin[0], rectMin[1]), ImVec2(rectMin[0] + rectSize[0], rectMin[1] + rectSize[1]), true);
+    const auto ring = [&](const Vec3& c, f32 r, int axis, ImU32 col) {
+        constexpr int kN = 48;
+        ImVec2 prev{};
+        bool havePrev = false;
+        for (int i = 0; i <= kN; ++i) {
+            const f32 a = 6.2831853f * static_cast<f32>(i) / kN, ca = std::cos(a) * r, sa = std::sin(a) * r;
+            const Vec3 p = axis == 0 ? Vec3{c.x, c.y + ca, c.z + sa} : (axis == 1 ? Vec3{c.x + ca, c.y, c.z + sa} : Vec3{c.x + ca, c.y + sa, c.z});
+            f32 sx, sy;
+            const bool ok = pxmodel::projectToRect(viewProj, p, rectMin[0], rectMin[1], rectSize[0], rectSize[1], sx, sy);
+            if (ok && havePrev) dl->AddLine(prev, ImVec2(sx, sy), col, 1.0f);
+            prev = ImVec2(sx, sy);
+            havePrev = ok;
+        }
+    };
+    if (showBounds_) {
+        for (usize i = 0; i < def_.emitters.size(); ++i) {
+            const f32 r = def_.emitters[i].boundsRadiusCm;
+            if (!(r > 0.0f)) continue;
+            const ImU32 col = static_cast<int>(i) == sel_ ? IM_COL32(255, 150, 40, 200) : IM_COL32(150, 170, 210, 110);
+            for (int axis = 0; axis < 3; ++axis) ring(emitterPos_, r, axis, col);
+        }
+    }
+    if (motion_ != pxmodel::PreviewMotion::None) {
+        if (showPath_) {
+            constexpr int kN = 96;
+            const f32 period = motion_ == pxmodel::PreviewMotion::Circle ? 6.2831853f * motionRadius_ / motionSpeed_ : 4.0f * motionRadius_ / motionSpeed_;
+            ImVec2 prev{};
+            bool havePrev = false;
+            for (int i = 0; i <= kN; ++i) {
+                Vec3 p, v;
+                pxmodel::emitterMotion(motion_, motionRadius_, motionSpeed_, period * static_cast<f32>(i) / kN, p, v);
+                f32 sx, sy;
+                const bool ok = pxmodel::projectToRect(viewProj, p, rectMin[0], rectMin[1], rectSize[0], rectSize[1], sx, sy);
+                if (ok && havePrev) dl->AddLine(prev, ImVec2(sx, sy), IM_COL32(120, 200, 255, 140), 1.0f);
+                prev = ImVec2(sx, sy);
+                havePrev = ok;
+            }
+        }
+        f32 sx, sy;
+        if (pxmodel::projectToRect(viewProj, emitterPos_, rectMin[0], rectMin[1], rectSize[0], rectSize[1], sx, sy)) {
+            dl->AddCircleFilled(ImVec2(sx, sy), 4.0f, IM_COL32(120, 200, 255, 255));
+            dl->AddCircle(ImVec2(sx, sy), 6.0f, IM_COL32(20, 30, 40, 255));
+        }
+    }
+    dl->PopClipRect();
+}
+
 // ================================================================================== the preview ===
 
 // Draws the live preview into the SAME shared ActorPreview surface Mesh/Actor/Anim/Graph tabs use (sharedPreview(),
@@ -981,7 +1062,7 @@ void ParticleEditor::drawPreviewPane(Engine& e) {
                 particles::InstanceView v;
                 v.emitterIndex = static_cast<u32>(i);
                 v.effect = &def_.emitters[i];
-                v.center = Vec3{0, 0, 0};
+                v.center = emitterPos_;
                 v.particles = &sims_[i].particles();
                 v.trail = &sims_[i].trail();
                 v.trailRing = sims_[i].trailRing();
@@ -1046,6 +1127,13 @@ void ParticleEditor::drawPreviewPane(Engine& e) {
         return;
     }
 
+    drawPreviewToolbar();
+    {
+        render::preview::PreviewShowFlags flags;
+        flags.grid = showGround_;
+        flags.bounds = false;
+        preview->setShowFlags(flags);
+    }
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     const u32 w = static_cast<u32>(std::max(64.0f, avail.x));
     const u32 h = static_cast<u32>(std::max(64.0f, avail.y));
@@ -1058,6 +1146,13 @@ void ParticleEditor::drawPreviewPane(Engine& e) {
         preview->resize(previewPendingW_, previewPendingH_);
     }
     ImGui::Image(static_cast<ImTextureID>(preview->uiTextureId()), avail);
+    {
+        f32 viewProj[16], invRel[16], eye[3];
+        preview->cameraMatrices(viewProj, invRel, eye);
+        const ImVec2 lo = ImGui::GetItemRectMin(), sz = ImGui::GetItemRectSize();
+        const f32 rmin[2] = {lo.x, lo.y}, rsz[2] = {sz.x, sz.y};
+        drawPreviewOverlay(viewProj, rmin, rsz);
+    }
     if (ImGui::IsItemHovered()) {
         const ImGuiIO& io = ImGui::GetIO();
         if (ImGui::IsMouseDragging(ImGuiMouseButton_Left))

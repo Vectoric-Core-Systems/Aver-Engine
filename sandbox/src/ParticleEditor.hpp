@@ -22,6 +22,7 @@
 #include "AssetEditor.hpp"
 #include "EditorWidgets.hpp"
 #include "ParticleCurveModel.hpp"
+#include "ParticlePreviewModel.hpp"
 #include "SnapshotUndo.hpp"
 
 #include "aver/formats/OcParticle.hpp"
@@ -133,6 +134,14 @@ public:
     bool muted(int emitter) const;
     void setSolo(int emitter);   // -1 clears
     int solo() const { return solo_; }
+    // A test emitter that moves (preview only, not saved): a circle or a back-and-forth line, so trails and
+    // spawn.inheritvelocity have something to follow. Changing it needs no restart.
+    void setMotion(pxmodel::PreviewMotion kind, f32 radiusCm, f32 speedCmPerSec);
+    pxmodel::PreviewMotion motion() const { return motion_; }
+    f32 motionRadius() const { return motionRadius_; }
+    f32 motionSpeed() const { return motionSpeed_; }
+    Vec3 emitterPosition() const { return emitterPos_; }   // where the moving emitter is now
+
     // Per-module isolate (preview only, not saved): the preview simulates the emitter with every module but this one off. The
     // saved effect and its enable flags are untouched. Setting it restarts the preview; it clears itself when the module goes away.
     void isolateModule(int emitter, int module);   // module < 0 clears
@@ -192,6 +201,10 @@ private:
     std::vector<u8> muted_;
     int solo_ = -1;
     int isoEmitter_ = -1, isoModule_ = -1;
+    pxmodel::PreviewMotion motion_ = pxmodel::PreviewMotion::None;
+    f32 motionRadius_ = 150.0f, motionSpeed_ = 200.0f;
+    Vec3 emitterPos_{0, 0, 0};
+    bool showGround_ = true, showBounds_ = false, showPath_ = true;   // preview overlays (UI only)
     std::vector<particles::ParticleEffect> previewFx_;   // what the sims are bound to: def_ with the preview-only transforms applied
     bool previewBurstFired_ = false;
     bool previewPlaying_ = true;
@@ -234,6 +247,8 @@ private:
     void drawParams();
     void drawStats();
     void drawCurveEditor(bool isColor);
+    void drawPreviewToolbar();
+    void drawPreviewOverlay(const f32 viewProj[16], const f32 rectMin[2], const f32 rectSize[2]);
     void drawTransport();
     void drawPreviewPane(Engine& e);
 };

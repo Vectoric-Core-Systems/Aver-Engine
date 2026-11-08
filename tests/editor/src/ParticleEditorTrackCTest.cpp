@@ -2,6 +2,7 @@
 // module isolate, the moving-emitter path, templates, live parameters and scalability. Headless: the tab is built without ImGui.
 #include "ParticleCurveModel.hpp"
 #include "ParticleEditor.hpp"
+#include "ParticlePreviewModel.hpp"
 #include "ParticleStackModel.hpp"
 
 #include "aver/core/Log.hpp"
@@ -232,6 +233,62 @@ int main() {
         ed.editEffect([&](ParticleEffect& x) { return px::removeModule(x, fy); });
         ed.seekPreview(0.2f);
         check(ed.isolatedModule() < 0, "removing the isolated module clears the isolate by itself");
+    }
+
+    // ---- 5. preview: moving emitter and overlay projection ---------------------------------------------------
+    AVER_INFO("preview motion");
+    {
+        using px::PreviewMotion;
+        Vec3 p, v;
+        px::emitterMotion(PreviewMotion::None, 100.0f, 50.0f, 3.0f, p, v);
+        check(p.size() == 0.0f && v.size() == 0.0f, "Still stays at the origin");
+        px::emitterMotion(PreviewMotion::Circle, 100.0f, 200.0f, 0.0f, p, v);
+        check(std::fabs(p.x - 100.0f) < 1e-3f && std::fabs(v.y - 200.0f) < 1e-3f, "a circle starts on +X heading +Y at the asked speed");
+        px::emitterMotion(PreviewMotion::Circle, 100.0f, 200.0f, 1.2345f, p, v);
+        check(std::fabs(std::sqrt(p.x * p.x + p.y * p.y) - 100.0f) < 1e-2f && std::fabs(v.size() - 200.0f) < 1e-2f, "and stays on the circle at constant speed");
+        px::emitterMotion(PreviewMotion::Line, 100.0f, 100.0f, 1.0f, p, v);
+        check(std::fabs(p.x - 100.0f) < 1e-3f, "a line reaches its end after radius / speed");
+        px::emitterMotion(PreviewMotion::Line, 100.0f, 100.0f, 3.0f, p, v);
+        check(std::fabs(p.x + 100.0f) < 1e-3f && v.x > 0.0f, "then the far end, turning round");
+        px::emitterMotion(PreviewMotion::Line, 100.0f, 100.0f, 4.0f, p, v);
+        check(std::fabs(p.x) < 1e-2f, "and is back at the start after one period");
+        px::emitterMotion(PreviewMotion::Circle, 0.0f, 100.0f, 1.0f, p, v);
+        check(p.size() == 0.0f, "a zero radius does not divide by zero");
+
+        // identity-ish view-projection: x_clip = x, y_clip = y, w = 1 -> the rectangle's centre is the origin
+        const f32 vp[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        f32 sx = 0, sy = 0;
+        check(px::projectToRect(vp, Vec3{0, 0, 0}, 10, 20, 200, 100, sx, sy) && std::fabs(sx - 110) < 1e-3f && std::fabs(sy - 70) < 1e-3f, "the origin lands mid-rectangle");
+        check(px::projectToRect(vp, Vec3{1, 1, 0}, 10, 20, 200, 100, sx, sy) && std::fabs(sx - 210) < 1e-3f && std::fabs(sy - 20) < 1e-3f, "+x right and +y UP the screen");
+        const f32 behind[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -1};
+        check(!px::projectToRect(behind, Vec3{0, 0, 0}, 0, 0, 10, 10, sx, sy), "a point behind the camera is not drawn");
+
+        // The moving emitter: spawn positions follow it and spawn.inheritvelocity carries its velocity.
+        ParticleSystemDef d = smallSystem();
+        ParticleEffect& e = d.emitters[0];
+        e.spreadDeg = 0.0f;
+        e.speedMin = e.speedMax = 10.0f;
+        e.lifetimeMin = e.lifetimeMax = 5.0f;
+        const int inh = px::addModule(e, particles::ModuleKind::SpawnInheritVelocity);
+        px::setModuleParam(e, inh, 0, 1.0f);
+        const std::string path = writeFixture(d, "pxTrackC_motion.ocparticle");
+        editor::ParticleEditor ed(path);
+        ed.setMotion(PreviewMotion::Line, 200.0f, 100.0f);
+        ed.seekPreview(1.0f);
+        check(std::fabs(ed.emitterPosition().x - 100.0f) < 1.0f, "the editor tracks the emitter position: " + std::to_string(ed.emitterPosition().x));
+        f32 newestX = -1e9f, newestVx = 0;
+        u32 newestId = 0;
+        for (const particles::Particle& q : ed.previewParticles())
+            if (q.id >= newestId && particles::particleAlive(q)) { newestId = q.id; newestX = q.position.x; newestVx = q.velocity.x; }
+        check(std::fabs(newestX - 100.0f) < 8.0f, "the newest particle was born at the emitter, not the origin: " + std::to_string(newestX));
+        check(std::fabs(newestVx - 100.0f) < 5.0f, "carrying its velocity: " + std::to_string(newestVx));
+        editor::ParticleEditor still(path);
+        still.seekPreview(1.0f);
+        bool allOnAxis = true;
+        for (const particles::Particle& q : still.previewParticles()) allOnAxis = allOnAxis && std::fabs(q.position.x) < 1e-3f;
+        check(allOnAxis, "a still emitter keeps every particle on the axis");
+        ed.setMotion(PreviewMotion::Circle, 1.0f, 99999.0f);
+        check(ed.motionRadius() == 10.0f && ed.motionSpeed() == 5000.0f, "motion settings are clamped");
     }
 
     AVER_INFO("{} failure(s)", g_failures);

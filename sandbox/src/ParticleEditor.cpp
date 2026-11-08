@@ -317,6 +317,7 @@ void ParticleEditor::restartPreview() {
     nextInbox_.clear();
     previewBurstFired_ = false;
     previewTime_ = 0.0f;
+    emitterPos_ = Vec3{0, 0, 0};
 }
 
 void ParticleEditor::ensureSims() {
@@ -357,6 +358,8 @@ void ParticleEditor::tickPreview(f32 dt) {
     if (!loaded_ || dt <= 0.0f) return;
     ensureSims();
     previewTime_ += dt;
+    Vec3 emitterVel{0, 0, 0};
+    pxmodel::emitterMotion(motion_, motionRadius_, motionSpeed_, previewTime_, emitterPos_, emitterVel);
     const bool fireBurst = !previewBurstFired_;
     previewBurstFired_ = true;
     const usize n = def_.emitters.size();
@@ -371,7 +374,7 @@ void ParticleEditor::tickPreview(f32 dt) {
         particles::EmitterSim& sim = sims_[i];
         const bool silent = (solo_ >= 0 && static_cast<int>(i) != solo_) || muted_[i] != 0;
         for (usize s = 0; s < def_.params.size() && s < particles::kMaxUserParams; ++s) sim.setUser(static_cast<u32>(s), def_.params[s].v);
-        sim.setOrigin(Vec3{0, 0, 0});
+        sim.setOrigin(emitterPos_);
 
         u32 toSpawn = 0;
         if (!silent) {
@@ -389,6 +392,8 @@ void ParticleEditor::tickPreview(f32 dt) {
         inbox_[i].clear();
         if (toSpawn > 0) {
             particles::SpawnRequest r;
+            r.xf = Mat4::translation(emitterPos_);
+            r.velocity = emitterVel;
             r.count = toSpawn;
             sim.spawn(r);
         }
@@ -451,6 +456,13 @@ u32 ParticleEditor::previewTotal() const {
     u32 n = 0;
     for (const particles::EmitterSim& s : sims_) n += s.aliveCount();
     return n;
+}
+
+void ParticleEditor::setMotion(pxmodel::PreviewMotion kind, f32 radiusCm, f32 speedCmPerSec) {
+    motion_ = kind;
+    motionRadius_ = std::isfinite(radiusCm) ? std::clamp(radiusCm, 10.0f, 5000.0f) : 150.0f;
+    motionSpeed_ = std::isfinite(speedCmPerSec) ? std::clamp(speedCmPerSec, 1.0f, 5000.0f) : 200.0f;
+    if (motion_ == pxmodel::PreviewMotion::None) emitterPos_ = Vec3{0, 0, 0};
 }
 
 void ParticleEditor::isolateModule(int emitter, int module) {
