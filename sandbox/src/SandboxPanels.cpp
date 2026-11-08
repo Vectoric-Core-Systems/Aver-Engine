@@ -972,6 +972,9 @@ void SandboxApp::buildPanels(Engine& e) {
     // Takes the Engine now (previously `(void)e`, since nothing here needed one): the Level
     // branch edits the WATER record, and applying it to the live surface needs a device.
     if (showDetails_)  buildDetailsPanel(e);
+    if (showPlaceActors_)  buildPlaceActorsPanel(e);
+    if (showMessageLog_)   buildMessageLogPanel();
+    if (showUndoHistory_)  buildUndoHistoryPanel();
 #if AVER_MODULE_SCENE
     if (showRenderQueue_) {
         editor::RenderQueueHost host = renderQueueHost();

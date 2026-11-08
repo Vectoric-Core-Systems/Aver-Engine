@@ -39,6 +39,9 @@ void SandboxApp::loadEditorPreferences() {
     // viewport.showColliders not restored on purpose: debug view, toggled from Window menu.
     showOutliner_       = prefBool ("panels.worldOutliner",          showOutliner_);
     showDetails_        = prefBool ("panels.details",                showDetails_);
+    showPlaceActors_    = prefBool ("panels.placeActors",            showPlaceActors_);
+    showMessageLog_     = prefBool ("panels.messageLog",             showMessageLog_);
+    showUndoHistory_    = prefBool ("panels.undoHistory",            showUndoHistory_);
     flySpeed_           = prefFloat("viewport.flySpeed",             flySpeed_);
     lookSpeed_          = prefFloat("viewport.lookSensitivity",      lookSpeed_);
     // View flags gated to interactive runs only (not --frames). Snap is ungated: doesn't alter pixels.
@@ -2397,6 +2400,9 @@ void SandboxApp::saveEditorPreferences() {
 #endif
     setPrefBool ("panels.worldOutliner",         showOutliner_);
     setPrefBool ("panels.details",               showDetails_);
+    setPrefBool ("panels.placeActors",           showPlaceActors_);
+    setPrefBool ("panels.messageLog",            showMessageLog_);
+    setPrefBool ("panels.undoHistory",           showUndoHistory_);
     setPrefFloat("viewport.flySpeed",            flySpeed_);
     setPrefFloat("viewport.lookSensitivity",     lookSpeed_);
     setPrefFloat("ddc.ramBudgetMb",              ddcRamBudgetMb_);

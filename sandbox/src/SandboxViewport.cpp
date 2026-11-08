@@ -781,7 +781,7 @@ void SandboxApp::addPlayerStart(Engine&) {
         AVER_INFO("[Editor] Player Start already exists; selected it rather than adding a second");
         return;
     }
-    Vec3 at = camPos_ + camForward() * kAddDistance;
+    Vec3 at = spawnPoint();
     if (snapMove_) for (int k = 0; k < 3; ++k) (&at.x)[k] = snapf((&at.x)[k], moveSnap_);
     // Faces the camera's direction: atan2 of forward, in the +X-forward/+Y-right frame the level
     // format's yaw is authored in.
@@ -811,7 +811,7 @@ void SandboxApp::addPlayerStart(Engine&) {
 // record and unloadLevel destroys it by the CLight pool.
 void SandboxApp::spawnLightAtCamera(i32 kind) {
     scene::World& world = scene::World::instance();
-    Vec3 at = camPos_ + camForward() * kAddDistance;
+    Vec3 at = spawnPoint();
     if (snapMove_) for (int k = 0; k < 3; ++k) (&at.x)[k] = snapf((&at.x)[k], moveSnap_);
     const Vec3 f = camForward();
     const f32 yaw = degrees(std::atan2(f.y, f.x));
@@ -841,7 +841,7 @@ void SandboxApp::spawnLightAtCamera(i32 kind) {
 // destroys it by the CDecal pool.
 void SandboxApp::spawnDecalAtCamera() {
     scene::World& world = scene::World::instance();
-    Vec3 at = camPos_ + camForward() * kAddDistance;
+    Vec3 at = spawnPoint();
     if (snapMove_) for (int k = 0; k < 3; ++k) (&at.x)[k] = snapf((&at.x)[k], moveSnap_);
     const Vec3 f = camForward();
     const scene::Entity e = editor::createEditorDecal(world, at, degrees(std::atan2(f.y, f.x)));
@@ -865,7 +865,7 @@ void SandboxApp::spawnDecalAtCamera() {
 // registered built-in.
 void SandboxApp::spawnPrimitive(Engine& engine, const char* assetPath, const char* label) {
     (void)engine;
-    const Vec3 at = camPos_ + camForward() * kAddDistance;
+    const Vec3 at = spawnPoint();
     // The other built-ins carry their own Add scale (the banana is real size) and look.
     const rhi::primitives::BuiltinPrimitive* prim = rhi::primitives::findBuiltinPrimitive(assetPath);
     const f32 half = prim ? prim->spawnScale : kEditorCubeHalf;

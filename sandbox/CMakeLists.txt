@@ -32,6 +32,7 @@ add_executable(Sandbox WIN32
   src/ModelImportDialog.cpp
   src/ModelImportProvider.cpp
   src/SandboxPanels.cpp
+  src/SandboxToolPanels.cpp
   src/SandboxComponentDetails.cpp
   src/SoftBodyPaintTool.cpp
   src/SoftBodyDebugOverlay.cpp

@@ -2074,6 +2074,12 @@ void SandboxApp::buildUI(Engine& e) {
             uiReg_.track("window.worldOutliner");
             ImGui::MenuItem(ICON_DETAILS " Details", nullptr, &showDetails_);
             uiReg_.track("window.details");
+            ImGui::MenuItem(ICON_ADD " Place Actors", nullptr, &showPlaceActors_);
+            uiReg_.track("window.placeActors");
+            ImGui::MenuItem(ICON_LOG " Message Log", nullptr, &showMessageLog_);
+            uiReg_.track("window.messageLog");
+            ImGui::MenuItem(ICON_RESET " Undo History", nullptr, &showUndoHistory_);
+            uiReg_.track("window.undoHistory");
 #if AVER_MODULE_SCENE
             ImGui::MenuItem(ICON_MOVIE " Render Queue", nullptr, &showRenderQueue_);
             uiReg_.track("window.renderQueue");
@@ -2491,6 +2497,18 @@ ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
                     ImGui::Image(static_cast<ImTextureID>(tex), ImVec2(w, h), uv0, uv1);
                     // Drop target for content-browser assets.
                     if (ImGui::BeginDragDropTarget()) {
+#if AVER_MODULE_SCENE
+                        // A Place Actors palette entry: spawned at the point under the cursor through the Add menu's own path.
+                        if (const ImGuiPayload* pa = ImGui::AcceptDragDropPayload(kPlaceActorDragDropType)) {
+                            if (pa->Data && pa->DataSize > 1) {
+                                const std::string kind(static_cast<const char*>(pa->Data), static_cast<usize>(pa->DataSize - 1));
+                                const ImVec2 mp = ImGui::GetMousePos();
+                                bool onSurface = false;
+                                const Vec3 at = dropWorldPoint(mp.x, mp.y, &onSurface);
+                                placeActorKind(e, kind, &at, onSurface);
+                            }
+                        }
+#endif
                         const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(kCbMoveDragDropType);
                         if (!payload) payload = ImGui::AcceptDragDropPayload(kAssetDragDropType);
                         if (payload && payload->Data) {

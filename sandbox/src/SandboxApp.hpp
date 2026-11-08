@@ -895,6 +895,8 @@ inline constexpr f32 kDuplicateOffset = 50.0f;     // cm
 // Drag-drop payload carrying a content-browser item's full path as bytes (content browser ->
 // viewport asset placement). Under ImGui's 32-char payload-type limit; not prefixed with '_'.
 static constexpr const char* kAssetDragDropType = "AVER_ASSET_PATH";
+// A Place Actors palette entry dragged into the viewport: the NUL-terminated PlaceItem::kind.
+static constexpr const char* kPlaceActorDragDropType = "AVER_PLACE_ACTOR";
 // World Outliner's reparent drag. Fixed 4-byte scene::Entity, so every target guards on size
 // EQUALITY (kAssetDragDropType's payload is a variable-length path and cannot).
 static constexpr const char* kOutlinerReparentDragDropType = "AVER_OUTLINER_ENTITY";
@@ -2519,6 +2521,21 @@ private:
 
     void spawnCube(Engine& engine);
 
+    // ---- Place Actors / Message Log / Undo History panels (SandboxToolPanels.cpp) ----
+    // Where the next Add lands: a drop point while one is set, else in front of the camera.
+    std::optional<Vec3> spawnAtOverride_;
+    Vec3 spawnPoint() const { return spawnAtOverride_ ? *spawnAtOverride_ : camPos_ + camForward() * kAddDistance; }
+    // Spawns one palette kind through the same functions as the toolbar's Add menu (and so the same undo entry).
+    void placeActorKind(Engine& e, const std::string& kind, const Vec3* dropAt, bool onSurface);
+    void buildPlaceActorsPanel(Engine& e);
+    void buildMessageLogPanel();
+    void buildUndoHistoryPanel();
+    bool showPlaceActors_ = false, showMessageLog_ = false, showUndoHistory_ = false;
+    char placeQuery_[64] = {};
+    int  msgLogLevel_ = 0;              // the Output Log's filter indices: All, Info+, Warn+, Error+, Critical+
+    std::string msgLogCategory_;
+    char msgLogQuery_[96] = {};
+
 #if AVER_WITH_IMGUI
 // Drag-and-drop from the Content Browser, hence UI-only: spawnFromAssetDrop's sole caller is the
 // viewport's ImGui drop target; dropWorldPoint exists only to serve it. Both lean on viewportRay/lowerExt.
@@ -3605,6 +3622,7 @@ private:
     f32 prevMouseX_=0, prevMouseY_=0;
     // snapping (off by default; toggled from the toolbar carets)
     bool snapMove_=false, snapRot_=false, snapScale_=false;
+
     f32 moveSnap_=1.0f, rotSnap_=15.0f, scaleSnap_=0.25f;
     // frame state
     f32 dpi_=1.0f;

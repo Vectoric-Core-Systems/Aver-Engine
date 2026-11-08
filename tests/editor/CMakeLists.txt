@@ -959,3 +959,9 @@ add_executable(ContentCollectionsTest src/ContentCollectionsTest.cpp)
 target_include_directories(ContentCollectionsTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
 target_link_libraries(ContentCollectionsTest PRIVATE Aver.Core)
 set_target_properties(ContentCollectionsTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# EditorPanelModelsTest -- Place Actors filtering, Message Log filtering, Undo History jump arithmetic (sandbox/src/PanelModels.hpp).
+add_executable(EditorPanelModelsTest src/EditorPanelModelsTest.cpp)
+target_include_directories(EditorPanelModelsTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(EditorPanelModelsTest PRIVATE Aver.Core)
+set_target_properties(EditorPanelModelsTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
