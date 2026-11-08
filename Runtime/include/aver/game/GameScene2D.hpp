@@ -7,7 +7,8 @@
 //   scene2dFrame(w, list, v) the testable core: view rectangle, the time step (animations, parallax, camera), then sprites + queued
 //                            external items sorted into `list`
 //   scene2dSubmit(w)         the host's call, after the game's scripts ran and before the UI renderer takes the list; steps time by the wall
-//                            clock between its calls (at most a tenth of a second, so a stall does not skip a camera across the level)
+//                            clock between its calls (at most a tenth of a second, so a stall does not skip a camera across the level),
+//                            held while Play is paused and scaled by the time dilation
 //
 // Sprites go through the same draw list as the game UI, so they draw only when the host draws the game UI (Play, not the editor's
 // edit mode): a host calls scene2dSubmit only then, and scene2dDrop otherwise so nothing queues forever.
@@ -29,6 +30,10 @@ namespace aver::scene { class World; }
 #  include "aver/scene/Canvas2D.hpp"
 #  include "aver/ui/UiDrawList.hpp"
 #  include "aver/ui/ui_abi.h"
+#endif
+#if AVER_MODULE_FRAMEWORK
+#  include "aver/framework/framework_abi.h"
+#  include "aver/framework/framework_timers_abi.h"
 #endif
 
 namespace aver::game {
@@ -127,8 +132,11 @@ inline u32 scene2dSubmit(scene::World& world) {
     aver_ui_viewport(vp);
     static std::chrono::steady_clock::time_point last{};
     const auto now = std::chrono::steady_clock::now();
-    const float dt = last == std::chrono::steady_clock::time_point{} ? 0.0f : std::min(0.1f, std::chrono::duration<float>(now - last).count());
+    float dt = last == std::chrono::steady_clock::time_point{} ? 0.0f : std::min(0.1f, std::chrono::duration<float>(now - last).count());
     last = now;
+#  if AVER_MODULE_FRAMEWORK
+    dt = scene2d::gameStepDt(dt, aver_fw_play_state() == AVER_FW_PLAY_PAUSED, aver_fw_timers_dilation());   // paused and slowed like the rest of gameplay
+#  endif
     return scene2dFrame(world, *dl, vp, dt);
 #else
     (void)world;

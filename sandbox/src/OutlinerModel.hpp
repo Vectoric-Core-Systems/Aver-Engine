@@ -2,9 +2,9 @@
 // The World Outliner's editor-side model: the type filter and the virtual folders. Plain data and string
 // arithmetic, no ImGui or scene, so tests/editor/OutlinerModelTest runs it headless.
 //
-// Folders are EDITOR-ONLY, session state: the .ocworld format has no folder or group field and entities
-// have no id that survives a reload, so they are neither saved with the level nor remembered between
-// sessions. A folder is a '/'-separated path ("Lights/Indoor"); only root entities are assigned to one.
+// Folders are editor-only organisation, kept in the .ocworld as OUTFOLDER / OUTITEM records (placements and
+// lights, by slot; see captureOutlinerMeta). A folder is a '/'-separated path ("Lights/Indoor"); only root
+// entities are assigned to one.
 #include "aver/core/Types.hpp"
 
 #include <algorithm>

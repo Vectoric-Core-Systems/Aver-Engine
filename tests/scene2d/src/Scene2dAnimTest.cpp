@@ -239,6 +239,29 @@ int main() {
         check(aver_scene2d_component_id(3) == static_cast<int>(id.anim), "component 3 is the animation");
     }
 
+    // ---- Play's pause and time dilation reach the animation step ----
+    {
+        check(gameStepDt(0.1f, true, 1.0f) == 0.0f, "a paused host steps no time");
+        check(approx(gameStepDt(0.1f, false, 0.5f), 0.05f), "slow motion scales the step");
+        check(gameStepDt(0.1f, false, 0.0f) == 0.0f && gameStepDt(0.1f, false, -1.0f) == 0.0f && gameStepDt(0.1f, false, NAN) == 0.0f,
+              "a zero, negative or NaN scale steps no time");
+        check(gameStepDt(-0.1f, false, 1.0f) == 0.0f, "so does a negative wall step");
+        const Entity e = w.create("paused");
+        attachSprite(w, e, 77);
+        auto* sp = w.component<CSprite2D>(e, id.sprite);
+        sp->hframes = 4;
+        auto* a = attachAnim(w, e);
+        const AnimFrame2D walk[4] = {frame(0, 0), frame(0, 1), frame(0, 2), frame(0, 3)};
+        setClip(*a, 0, "walk", 10, true, walk, 4);
+        playClip(w, e, "walk");
+        clearAnimEvents();
+        tick(w, gameStepDt(0.5f, true, 1.0f));
+        check(a->frame == 0 && approx(a->progress, 0.0f) && sp->frame == 0 && drain().empty(), "a paused tick does not advance the frame, the sprite or queue events");
+        tick(w, gameStepDt(0.25f, false, 1.0f));
+        check(a->frame == 2, "the same tick unpaused does");
+        stopClip(w, e);
+    }
+
     AVER_INFO("==================================================");
     if (g_failures == 0) AVER_INFO("=== {} assertions, 0 failed ===", g_checks);
     else                 AVER_ERROR("=== {} assertions, {} FAILED ===", g_checks, g_failures);

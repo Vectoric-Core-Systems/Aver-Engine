@@ -253,6 +253,12 @@ AVER_SCENE_API void clearAnimEvents();
 // current camera's drag and smoothing. dt <= 0 steps no time but still snaps an uninitialised camera. The hosts call it from the
 // canvas frame; tests call it with their own dt.
 AVER_SCENE_API void tick(scene::World&, f32 dt);
+// The dt a host hands tick: the wall-clock step in game time. Zero while Play is paused, scaled by the time dilation otherwise
+// (a non-finite or negative scale steps no time), so sprite animation, parallax and camera follow the rest of gameplay.
+inline f32 gameStepDt(f32 wallDt, bool paused, f32 timeScale) {
+    if (paused || !(wallDt > 0.0f) || !(timeScale > 0.0f) || timeScale > 1.0e6f) return 0.0f;
+    return wallDt * timeScale;
+}
 // The sprite-animation part of tick, alone: advances every playing CSpriteAnim2D by dt and writes the shown frame to its CSprite2D.
 AVER_SCENE_API void stepAnimations(scene::World&, f32 dt);
 
