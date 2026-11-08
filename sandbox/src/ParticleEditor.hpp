@@ -222,6 +222,7 @@ private:
     pxmodel::PreviewMotion motion_ = pxmodel::PreviewMotion::None;
     f32 motionRadius_ = 150.0f, motionSpeed_ = 200.0f;
     Vec3 emitterPos_{0, 0, 0};
+    pxmodel::PreviewBackdrop backdrop_ = pxmodel::PreviewBackdrop::Studio;   // UI only
     bool showGround_ = true, showBounds_ = false, showPath_ = true;   // preview overlays (UI only)
     std::vector<particles::ParticleEffect> previewFx_;   // what the sims are bound to: def_ with the preview-only transforms applied
     bool previewBurstFired_ = false;

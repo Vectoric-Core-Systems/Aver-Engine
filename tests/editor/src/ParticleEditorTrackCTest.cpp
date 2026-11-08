@@ -564,6 +564,13 @@ int main() {
         check(!ed.system().scalability.tier[3].set, "undo takes it back");
     }
 
+    {
+        using px::PreviewBackdrop;
+        f32 c[3] = {};
+        check(!px::previewBackdropColor(PreviewBackdrop::Studio, c), "Studio keeps the gradient");
+        check(px::previewBackdropColor(PreviewBackdrop::Dark, c) && c[0] < 0.1f && px::previewBackdropColor(PreviewBackdrop::Light, c) && c[1] > 0.5f, "Dark and Light are flat colours");
+    }
+
     AVER_INFO("{} failure(s)", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

@@ -109,6 +109,13 @@ struct PreviewShowFlags {
     bool bounds = false;  // the draw list's world AABB as a thin box
 };
 
+// A flat colour in place of the studio backdrop gradient (display values). Applies to the NEXT studio render only and is then
+// dropped, so a tab that wants it sets it every frame it draws and the shared preview falls back to the studio for everyone else.
+struct PreviewBackground {
+    bool flat = false;
+    f32 color[4] = {0.10f, 0.10f, 0.11f, 1.0f};
+};
+
 // The preview's orbit camera: yaw, pitch and distance about a pivot.
 struct PreviewCamera {
     f32 yawDeg = 35.0f;
@@ -199,6 +206,8 @@ public:
     // Grid on, bounds off by default. The preview is shared, so an editor sets these when it claims it.
     void setShowFlags(const PreviewShowFlags& f) { show_ = f; }
     const PreviewShowFlags& showFlags() const { return show_; }
+    // One-frame background override for the studio pass (see PreviewBackground). Lit meshes and the transparent hook draw as usual.
+    void setBackground(const PreviewBackground& b) { background_ = b; }
 
     // The draw list's world-space AABB (plus any external bounds), from each mesh's own AABB where the
     // backend measured one and its boundsRadius sphere otherwise. False when nothing in the list has a
@@ -305,6 +314,7 @@ private:
     rhi::MeshHandle gridQuad_ = 0, boundsBox_ = 0;
     PreviewViewMode viewMode_ = PreviewViewMode::Lit;
     PreviewShowFlags show_{};
+    PreviewBackground background_{};
 
     // Instanced batches. Pipelines are lazy so a preview that never draws one builds nothing extra.
     rhi::GraphicsPipelineDesc meshDesc_{};   // pipeline_'s desc, the base for the instanced twins

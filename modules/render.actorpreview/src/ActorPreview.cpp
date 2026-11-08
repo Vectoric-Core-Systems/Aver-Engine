@@ -817,9 +817,11 @@ void ActorPreview::prePass(rhi::IRenderContext& ctx) {
     // THE COLOUR TARGET MUST BE CLEARED, or whatever the meshes do not cover keeps earlier frames'
     // pixels. The backdrop pass paints over this; the clear is its fallback, the gradient's floor
     // colour in display values.
-    ctx.clearColor(color_, kBackdropFloor);
+    const bool flatBackground = background_.flat;
+    ctx.clearColor(color_, flatBackground ? background_.color : kBackdropFloor);
+    background_.flat = false;   // one frame; the claiming tab sets it again next frame
 
-    if (backdropPipeline_) {
+    if (backdropPipeline_ && !flatBackground) {
         ctx.setPipeline(backdropPipeline_);
         ctx.drawFullscreen();
     }

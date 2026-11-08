@@ -32,6 +32,20 @@ inline void emitterMotion(PreviewMotion kind, f32 radius, f32 speed, f32 t, Vec3
     else                 { pos.x = radius * (ph * 4.0f - 4.0f);   vel.x = speed; }
 }
 
+// The preview background choices: the studio gradient or a flat display-value colour.
+enum class PreviewBackdrop : u8 { Studio = 0, Dark = 1, Grey = 2, Light = 3 };
+inline constexpr int kPreviewBackdropCount = 4;
+inline const char* previewBackdropName(PreviewBackdrop b) {
+    switch (b) { case PreviewBackdrop::Dark: return "Dark"; case PreviewBackdrop::Grey: return "Grey"; case PreviewBackdrop::Light: return "Light"; default: return "Studio"; }
+}
+// False for Studio (the gradient); otherwise fills `rgb` with the flat colour.
+inline bool previewBackdropColor(PreviewBackdrop b, f32 rgb[3]) {
+    f32 v;
+    switch (b) { case PreviewBackdrop::Dark: v = 0.02f; break; case PreviewBackdrop::Grey: v = 0.35f; break; case PreviewBackdrop::Light: v = 0.80f; break; default: return false; }
+    rgb[0] = rgb[1] = rgb[2] = v;
+    return true;
+}
+
 // World point -> pixel inside a rectangle, with the preview's row-vector view-projection (clip = [x y z 1] * M, y up in NDC).
 // False for a point behind the camera.
 inline bool projectToRect(const f32 viewProj[16], const Vec3& p, f32 x0, f32 y0, f32 w, f32 h, f32& sx, f32& sy) {

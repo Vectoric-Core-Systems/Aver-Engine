@@ -1067,6 +1067,17 @@ void ParticleEditor::drawPreviewToolbar() {
     ImGui::Checkbox("Ground", &showGround_);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("The floor grid under the particles");
     ImGui::SameLine();
+    ImGui::SetNextItemWidth(80.0f * dpi);
+    {
+        int bd = static_cast<int>(backdrop_);
+        if (ImGui::BeginCombo("##pxbackdrop", pxmodel::previewBackdropName(backdrop_))) {
+            for (int i = 0; i < pxmodel::kPreviewBackdropCount; ++i)
+                if (ImGui::Selectable(pxmodel::previewBackdropName(static_cast<pxmodel::PreviewBackdrop>(i)), i == bd)) backdrop_ = static_cast<pxmodel::PreviewBackdrop>(i);
+            ImGui::EndCombo();
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Preview background: the studio gradient or a flat colour (a dark or light one shows additive and dark particles). Not saved.");
+    }
+    ImGui::SameLine();
     ImGui::Checkbox("Bounds", &showBounds_);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Each emitter's BOUNDS sphere (orange: the selected emitter), at the emitter's position");
     ImGui::SameLine();
@@ -1250,6 +1261,10 @@ void ParticleEditor::drawPreviewPane(Engine& e) {
         flags.grid = showGround_;
         flags.bounds = false;
         preview->setShowFlags(flags);
+        render::preview::PreviewBackground bg;
+        f32 rgb[3];
+        if (pxmodel::previewBackdropColor(backdrop_, rgb)) { bg.flat = true; bg.color[0] = rgb[0]; bg.color[1] = rgb[1]; bg.color[2] = rgb[2]; }
+        preview->setBackground(bg);
     }
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     const u32 w = static_cast<u32>(std::max(64.0f, avail.x));
