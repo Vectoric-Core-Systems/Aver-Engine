@@ -1773,11 +1773,10 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     cb_.shadowParams[2] = 0.0f;
     rtAccelListKeyValid_ = false;
     if (!rtSupported_ || settings_.rayTracing == Quality::Off || (drawsPrev_.empty() && foliageInstances_ == 0)) return;
-    // An orthographic view draws through the rasteriser (rayDrivenActive() is false), and the raster scene pixel shaders compiled with ray queries
-    // (sceneRtPso_ and its twins, the rtRenderMode 0 combination) hung the RX 7800 XT on the first frame of Squash the Creeps (2026-11-01, sq-base.log).
-    // Until that combination is bisected on a perspective level, an orthographic view takes the raster scene without ray tracing, the configuration
-    // that is known to run (shadow-map sun, cone-traced GI, raster local lights). Perspective views never reach this line.
-    if (orthoView_) return;
+    // Ray tracing runs only under ray-driven primary visibility. A raster-primary frame (rtRenderMode 0, an orthographic view, the editor's raster
+    // view modes, or no ray-driven pipeline) draws the raster scene WITHOUT ray tracing: shadow-map sun, cone-traced GI, raster local lights. The
+    // raster + RT combination (scene pixel shaders with ray queries as the primary pass) hung the GPU (10-11, 11-01, 11-07) and was removed (11-08).
+    if (orthoView_ || rtRenderMode_ != 1u || rayDrivenPso_ == 0) return;
 
     // ---- The unchanged gate (Settings::rtSkipUnchangedTlas) ----
     // See rtAccelSnapshotUnchanged() for what "unchanged" checks. A match means tlas_,

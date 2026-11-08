@@ -1212,15 +1212,9 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         }
         // A heavy mode switch is announced a frame before it is applied (ModeSwitchNotice.hpp).
         static editor::ModeSwitchNotice modeNotice;
-        static i32 appliedRtRenderMode = -1;
-        if (modeNotice.shouldApply(vs, e.window() != nullptr && maxFrames_ == 0, &shaderWarmup_)) {
+        // A held switch keeps last frame's mode; a raster frame never ray-traces (VoxiRenderer::buildAccelerationStructures).
+        if (modeNotice.shouldApply(vs, e.window() != nullptr && maxFrames_ == 0, &shaderWarmup_))
             voxiRenderer_.setSettings(vs);
-            appliedRtRenderMode = static_cast<i32>(vs.rtRenderMode);
-        } else if (appliedRtRenderMode == 0 && vs.rtRenderMode != 0) {
-            // A held switch out of a raster view mode (Wireframe -> Lit): un-paused, this frame would run the old raster mode with ray
-            // tracing on, the raster + RT combination that has hung the RX 7800 XT (Caldera, 11-02). Paused for the frame, it draws raster only.
-            voxiRenderer_.setPaused(true);
-        }
         // Consume-and-forward: console reset commands routed through singleton flags to the renderer instance.
         if (voxi::Renderer::get().consumeGiHistoryResetRequest())  voxiRenderer_.resetGiHistory();
         if (voxi::Renderer::get().consumeRtHistoryResetRequest())  voxiRenderer_.resetRtHistory();

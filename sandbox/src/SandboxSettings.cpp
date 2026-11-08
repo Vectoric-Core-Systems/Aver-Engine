@@ -1763,23 +1763,21 @@ void SandboxApp::buildRenderingSettings(int page) {
         ImGui::Spacing();
         ImGui::TextUnformatted("Primary visibility");
         ImGui::SameLine();
-        ImGui::TextDisabled("(default at Medium and above; Low rasterises)");
+        ImGui::TextDisabled("(default on every ray-tracing tier)");
         ImGui::Separator();
         int mode = static_cast<int>(s.rtRenderMode);
         if (ImGui::Combo("Finds the first surface", &mode,
-                          "Rasteriser\0Primary rays\0")) {
+                          "Rasteriser (no ray tracing)\0Primary rays\0")) {
             s.rtRenderMode = static_cast<u32>(mode); changed = true;
         }
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Rasteriser is what every version of this engine has shipped, and\n"
-                               "is Ray Tracing Low's own tier default (D3): the user's explicit\n"
-                               "decision to keep Low on it, not a hardware limit. Primary rays\n"
-                               "trace one ray per pixel to find the first surface instead, then\n"
-                               "shade it exactly as the raster path does -- the default from\n"
-                               "Medium up.\n\n"
-                               "Measured baseline to beat: raster primary visibility plus\n"
-                               "material shading is 9.2ms on ElectricDreams at 4x MSAA,\n"
-                               "2750x1639; one extra shadow ray costs 1.6ms at the same size.");
+            ImGui::SetTooltip("Primary rays trace one ray per pixel to find the first surface,\n"
+                               "then shade it with ray-traced shadows, GI and reflections. It is\n"
+                               "the default on every ray-tracing tier.\n\n"
+                               "Rasteriser draws the scene WITHOUT ray tracing (shadow maps,\n"
+                               "cone-traced GI): raster + ray tracing was removed because it\n"
+                               "hung GPUs. The ray-tracing settings below do nothing while it\n"
+                               "is selected.");
 
         // Staged ray-driven passes (A/B over the combo above); default is staged + half-rate GI.
         const bool stagesGreyed = greysControl(er.rayDrivenStages.reason);

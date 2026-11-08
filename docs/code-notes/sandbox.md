@@ -634,7 +634,7 @@ Spatial filter (below) averages neighbours with no history (motion can't poison 
 They compose.
 
 ### Ray-driven visibility vs rasteriser (part02, lines ~328-356)
-Shipped default Medium and above. Low is deliberate exception kept rasteriser by product decision (D3), not hardware gap. Low/Medium/High/Epic: rtShadowRays 1/1/4/8, rtPixelsPerRayTile 1 flat, rtShadowDenoise 2/2/1/1, rtRenderMode 0/1/1/1.
+Shipped default on every RT tier (Low included since 11-08: raster + RT was removed, so a rasterising tier would trace nothing). Low/Medium/High/Epic: rtShadowRays 1/1/4/8, rtPixelsPerRayTile 1 flat, rtShadowDenoise 2/2/1/1, rtRenderMode 1/1/1/1.
 
 ### Staged ray-driven (part02, lines ~358-387)
 Single pass baseline kept as fallback. Staged: 40-45% faster. Staged+half-rate GI (default): further ~1.4ms faster, within 0.4% of Staged at rest, noisier in motion. Needs ReSTIR GI and denoiser; without them behaves as Staged. D3D12-only; others fall back to Single pass.

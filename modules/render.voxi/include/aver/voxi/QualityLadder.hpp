@@ -120,11 +120,12 @@ constexpr u32 rtShadowDenoise(Quality q) {
 }
 
 // WHICH THING FINDS THE FIRST SURFACE: 0 = rasteriser, 1 = a primary ray per pixel. See
-// Settings::rtRenderMode (Voxi.hpp). 1 from Medium up; 0 at Off (no acceleration structure) and Low.
+// Settings::rtRenderMode (Voxi.hpp). 1 on every ray-tracing tier: ray tracing runs only under ray-driven
+// primary visibility since raster + RT was removed (11-08), so a rasterising Low would trace nothing.
 constexpr u32 rtRenderMode(Quality q) {
     switch (q) {
         case Quality::Off:    return 0;   // no acceleration structure to trace against
-        case Quality::Low:    return 0;   // deliberately excluded from the ray-driven default
+        case Quality::Low:    return 1;
         case Quality::Medium: return 1;
         case Quality::High:   return 1;
         case Quality::Epic:   return 1;

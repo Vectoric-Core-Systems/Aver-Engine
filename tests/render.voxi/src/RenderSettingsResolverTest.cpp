@@ -97,7 +97,7 @@ int main() {
     checkLadder("rtShadowRays",      ladder::rtShadowRays,       1,  1,   1,   4,   8);
     checkLadder("rtPixelsPerRayTile",ladder::rtPixelsPerRayTile, 1,  1,   1,   1,   1);
     checkLadder("rtShadowDenoise",   ladder::rtShadowDenoise,    0,  2,   2,   1,   1);
-    checkLadder("rtRenderMode",      ladder::rtRenderMode,       0,  0,   1,   1,   1);
+    checkLadder("rtRenderMode",      ladder::rtRenderMode,       0,  1,   1,   1,   1);
     checkLadder("giSkyOcclusionRays",ladder::giSkyOcclusionRays, 0,  0,   1,   1,   1);
     checkLadder("giSkyOcclusionTile",ladder::giSkyOcclusionTile, 1,  1,   1,   1,   1);
     checkLadder("ptBounces",         ladder::ptBounces,          1,  2,   2,   3,   4);
@@ -286,8 +286,8 @@ int main() {
         s = Renderer::get().settings();
         s.rayTracing = Quality::Low;
         Renderer::get().setSettings(s);
-        check(Renderer::get().settings().rtRenderMode == 0,
-              "an Off -> Low tier change derives rtRenderMode 0 (ladder::rtRenderMode(Low), D3)");
+        check(Renderer::get().settings().rtRenderMode == 1,
+              "an Off -> Low tier change derives rtRenderMode 1 (ray tracing runs only ray-driven since 11-08)");
 
         s = Renderer::get().settings();
         s.rayTracing = Quality::Off;
@@ -359,9 +359,13 @@ int main() {
             s4.rtRenderMode = 0;   // the rasteriser finds the first surface, so MSAA really applies
             const Resolution r = resolve(s4, fullDevice());
             check(r.sampleCount == 4, "the device runs the requested 4x under raster primary");
-            check(r.denoiser.reason == DisableReason::None, "4x MSAA no longer stops the denoiser: the G-buffer is resolved");
-            check(r.denoiser.effective == 1, "denoiser.effective is 1 at 4x MSAA under raster primary");
-            check(r.denoiserGBufferWanted, "denoiserGBufferWanted is true at 4x MSAA");
+            check(r.denoiser.reason == DisableReason::RequiresRayDrivenPrimary, "raster primary ray-traces nothing, so nothing is denoised");
+            check(r.denoiser.effective == 0 && !r.denoiserGBufferWanted, "denoiser off and no denoiser G-buffer under raster primary");
+            check(r.giMode.reason == DisableReason::RequiresRayDrivenPrimary && r.giMode.effective == 0, "ReSTIR GI needs ray-driven primary");
+            check(r.refractionMode.reason == DisableReason::RequiresRayDrivenPrimary, "ray-traced refraction needs ray-driven primary");
+            Settings s4pt = s4;
+            s4pt.pathTracing = Quality::Medium;
+            check(resolve(s4pt, fullDevice()).giMode.reason == DisableReason::None, "Path Tracing forces ray-driven primary, so the raster gate does not apply");
         }
         {
             Settings s5 = s;
@@ -514,8 +518,8 @@ int main() {
               "RequiresStagedRayDriven is SOFT: it warns, it does not grey the combo");
         s.rayDrivenStages = 2;
         s.rtRenderMode = 0;      // raster primary
-        check(resolve(s, fullDevice()).giRestirVisibility.reason == DisableReason::RequiresStagedRayDriven,
-              "Cached with raster primary visibility (rtRenderMode 0) reads RequiresStagedRayDriven");
+        check(resolve(s, fullDevice()).giRestirVisibility.reason == DisableReason::RequiresRayDrivenPrimary,
+              "Cached with raster primary visibility (rtRenderMode 0) reads RequiresRayDrivenPrimary: raster frames trace nothing");
         s.rtRenderMode = 1;
         DeviceInfo notD3d12 = fullDevice();
         notD3d12.denoiserSupported = false;   // the D3D12 test (DeviceInfo::denoiserSupported)

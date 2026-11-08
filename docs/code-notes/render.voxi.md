@@ -208,7 +208,7 @@ backticks are where the knowledge applies. Measurements are as originally record
 ### rtRenderMode field
 - WHICH THING FINDS FIRST SURFACE: 0 = rasteriser (every version before setting existed), 1 = primary ray per pixel. Everything downstream unchanged -- PSMainVoxi already traces shadow evaluates material traces reflection in ONE invocation (VoxiShaders.hpp:781-826) so swaps out one stage still fixed-function.
 - MEASURED BEFORE IT WAS BUILT: ElectricDreams, 4x MSAA, 2750x1639, Release -- raster primary visibility + shading 9.2 ms of `scene draw` RT/GI off, one extra shadow ray 1.6 ms same resolution; primary ray had fit inside gap worth having.
-- 1 FROM MEDIUM UP; LOW RASTERISES (D3, retuned) -- BY EXPLICIT PRODUCT DECISION ("Wavefront Primary rays model") not leftover experiment. Evidence for Low partial: overview cameras raster slower (ElectricDreams 20.55 vs 8.05 ms; PTTest w/ Path Tracing off 13.51 vs 8.04 ms); close-up case once favouring raster (9.02 vs 24.04 ms) is UNCONFIRMED -- run also had Path Tracing on silently taking over. D3 stands regardless decision made with this evidence not claim raster faster at Low. See ladder::rtRenderMode/rtRenderModeForQuality (QualityLadder.hpp) why Off and Low both answer 0 different reasons: Off because no RT hardware path assume, Low because product decision deliberately excludes.
+- 1 ON EVERY RT TIER (11-08): raster + RT was REMOVED after repeated GPU hangs (10-11, 11-01, 11-07), so a raster-primary frame (rtRenderMode 0, ortho views, raster view modes) ray-traces nothing (`buildAccelerationStructures` returns early) and the resolver reports RT features as RequiresRayDrivenPrimary. D3 (Low rasterises) is retired: Low is ray-driven too.
 - WHAT DEFAULTING TO IT TRADES AWAY: HARDWARE EARLY-Z rasterisation discards occluded fragment before shader runs free. Ray pays full BVH traversal discover same hit hidden every pixel every frame. MSAA: ray pass one fullscreen triangle -- no per-triangle coverage so always runs single-sample vs raster path's 4x default; visibly noisier independent RT sun-shadow speckle documented elsewhere. TEXTURE: primary ray returns flat albedo per instance; rasterised frame samples one.
 
 ### rayDrivenStages field
@@ -296,7 +296,7 @@ backticks are where the knowledge applies. Measurements are as originally record
 - rtShadowRaysForQuality: RT sun-shadow rungs mirroring giUpdateIntervalForQuality applied setSettings rayTracing tier changes field arrives unchanged.
 - giSkyOcclusionRaysForQuality: sky-visibility rays per pixel ray-tracing tier. High and Epic not Epic alone.
 - giSkyOcclusionTileForQuality: sky-occlusion ray coherence tile ray-tracing tier.
-- rtRenderModeForQuality: 1 every RT-capable tier except Low rasterises explicit product decision (D3) -- 0 Off/Low 1 Medium/High/Epic. See ladder::rtRenderMode why Off and Low share value different reasons.
+- rtRenderModeForQuality: 0 at Off, 1 on every RT tier (Low included since 11-08, when raster + RT was removed).
 - ptBouncesForQuality: derived PATH TRACING tier not ray-tracing one.
 
 ## modules/render.voxi/include/aver/voxi/VoxiRenderer.hpp

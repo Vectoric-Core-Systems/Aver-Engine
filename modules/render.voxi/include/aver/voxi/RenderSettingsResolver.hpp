@@ -148,11 +148,15 @@ inline Resolution resolve(const Settings& s, const DeviceInfo& d) {
         !rtHardware ? DisableReason::RequiresRayTracingHardware
                     : (s.rayTracing == Quality::Off ? DisableReason::RequiresRayTracingEnabled
                                                      : DisableReason::None);
+    // Ray tracing runs only under ray-driven primary visibility (or Path Tracing, which forces it): raster + RT was removed (11-08).
+    const bool rasterPrimary = s.rtRenderMode == 0u && s.pathTracing == Quality::Off;
+    const DisableReason rtFrameGate =
+        (rtGate == DisableReason::None && rasterPrimary) ? DisableReason::RequiresRayDrivenPrimary : rtGate;
 
-    // ---- giMode = 1 (ReSTIR GI): RT hardware, RT tier not Off, GI tier not Off, in that order ----
+    // ---- giMode = 1 (ReSTIR GI): RT hardware, RT tier not Off, ray-driven primary, GI tier not Off, in that order ----
     r.giMode.requested = s.giMode;
-    r.giMode.reason = (rtGate != DisableReason::None)
-                           ? rtGate
+    r.giMode.reason = (rtFrameGate != DisableReason::None)
+                           ? rtFrameGate
                            : (s.globalIllumination == Quality::Off
                                   ? DisableReason::RequiresGlobalIllumination
                                   : DisableReason::None);
@@ -211,9 +215,9 @@ inline Resolution resolve(const Settings& s, const DeviceInfo& d) {
 
     // ---- refractionMode = 2 (RayTraced): RT hardware, RT tier not Off. Falls back to ScreenSpace (1), not Off. ----
     r.refractionMode.requested = s.refractionMode;
-    r.refractionMode.reason    = rtGate;
+    r.refractionMode.reason    = rtFrameGate;
     r.refractionMode.effective =
-        (s.refractionMode >= 2u && rtGate != DisableReason::None) ? 1u : s.refractionMode;
+        (s.refractionMode >= 2u && rtFrameGate != DisableReason::None) ? 1u : s.refractionMode;
 
     // ---- the device's sample count: one sample a pixel whenever a ray finds the first surface ----
     // A ray-driven frame shades once per pixel whatever MSAA says, so the hosts push 1 then
@@ -225,7 +229,7 @@ inline Resolution resolve(const Settings& s, const DeviceInfo& d) {
     // ---- denoiser: RT hardware, RT tier not Off, denoiserSupported, something to denoise ----
     // MSAA no longer blocks it: the D3D12 backend (the only one with a G-buffer) resolves its
     // multisampled G-buffer to one sample a pixel (gbuffer_msaa_resolve.hlsl).
-    DisableReason denoiseReason = rtGate;
+    DisableReason denoiseReason = rtFrameGate;
     if (denoiseReason == DisableReason::None && !d.denoiserSupported)
         denoiseReason = DisableReason::RequiresDenoiserBackend;
     // NRD2 (denoiserKind 2) denoises the whole composed lighting, so it always has a signal.
@@ -243,7 +247,7 @@ inline Resolution resolve(const Settings& s, const DeviceInfo& d) {
         (denoiseReason == DisableReason::None || denoiseReason == DisableReason::RequiresMsaaOne);
 
     // ---- the RT/PT page rows below their Quality combos ----
-    r.rtSubControls = rtGate;
+    r.rtSubControls = rtGate;   // not rtFrameGate: the Primary visibility combo sits under it
     // PT sub-rows: only one observable state (tier Off), so reuse RequiresPathTracingHardware.
     r.ptSubControls =
         (s.pathTracing == Quality::Off) ? DisableReason::RequiresPathTracingHardware : DisableReason::None;
