@@ -130,4 +130,56 @@ private:
     std::unordered_map<std::string, Entry> entries_;
 };
 
+// ---- Mesh thumbnails: the readback half. Pure bookkeeping so it runs without a GPU.
+
+// Strips the row padding a texture-to-buffer copy leaves (D3D12 pads rows to 256 bytes) into tightly packed rows.
+inline void thumbnailUnpadRows(const u8* src, u32 rowPitch, u32 rowBytes, u32 rows, std::vector<u8>& out) {
+    out.resize(static_cast<usize>(rowBytes) * rows);
+    for (u32 r = 0; r < rows; ++r)
+        std::copy(src + static_cast<usize>(r) * rowPitch, src + static_cast<usize>(r) * rowPitch + rowBytes,
+                  out.begin() + static_cast<std::ptrdiff_t>(static_cast<usize>(r) * rowBytes));
+}
+
+// The source name a mesh thumbnail is keyed on: the mesh file plus its slot-0 material, so retargeting the
+// material re-renders. (Editing the material's own file does not -- only its name is part of the key.)
+inline std::string meshThumbnailSource(const std::string& meshPath, const std::string& slot0Material) {
+    return meshPath + "|mat:" + slot0Material;
+}
+
+// A small ring of readback slots. A GPU copy is issued into a slot, and the slot's bytes are safe to read once
+// `delay` frames have passed (the copy has certainly retired; nothing ever waits on the GPU). A slot is busy from
+// acquire() until due() hands it back, and acquire() returns -1 when all are busy (the asset just misses the cache).
+class ThumbnailReadbackRing {
+public:
+    struct Job { int slot = -1; u64 assetId = 0; std::string key; u64 issued = 0; };
+
+    explicit ThumbnailReadbackRing(u32 slots = 3, u32 delay = 6) : busy_(slots, false), delay_(delay) {}
+
+    int acquire(u64 assetId, const std::string& key, u64 frame) {
+        for (usize i = 0; i < busy_.size(); ++i) {
+            if (busy_[i]) continue;
+            busy_[i] = true;
+            jobs_.push_back(Job{static_cast<int>(i), assetId, key, frame});
+            return static_cast<int>(i);
+        }
+        return -1;
+    }
+    // Jobs whose copy is old enough to read; their slots stay busy until release().
+    std::vector<Job> due(u64 frame) {
+        std::vector<Job> out, keep;
+        for (Job& j : jobs_) (frame >= j.issued + delay_ ? out : keep).push_back(std::move(j));
+        jobs_ = std::move(keep);
+        return out;
+    }
+    void release(int slot) { if (slot >= 0 && static_cast<usize>(slot) < busy_.size()) busy_[static_cast<usize>(slot)] = false; }
+    void clear() { std::fill(busy_.begin(), busy_.end(), false); jobs_.clear(); }
+    usize slots() const { return busy_.size(); }
+    usize pending() const { return jobs_.size(); }
+
+private:
+    std::vector<bool> busy_;
+    std::vector<Job> jobs_;
+    u32 delay_;
+};
+
 } // namespace aver::editor

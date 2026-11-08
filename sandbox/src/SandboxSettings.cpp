@@ -261,7 +261,7 @@ void SandboxApp::buildEditorPrefs() {
         ImGui::Checkbox("Open in gallery (tiles) view", &cbGallery_);
         ImGui::SliderFloat("Tile size", &cbTileSize_, 56.0f, 168.0f, "%.0f dp");
         ImGui::DragInt("Thumbnail cache (MB)", &thumbDiskCapMB_, 8.0f, 0, 8192, "%d MB");
-        ImGui::TextDisabled("Texture thumbnails kept under the project's Saved/ThumbnailCache; 0 turns it off.");
+        ImGui::TextDisabled("Texture and mesh thumbnails kept under the project's Saved/ThumbnailCache; 0 turns it off.");
         ImGui::Checkbox("Double-click a folder to enter it", &cbDoubleClickEnter_);
         ImGui::TextDisabled("Single-click always selects; the tree navigates either way.");
         const std::vector<editor::IdeInfo>& ides = editor::detectedIdes();

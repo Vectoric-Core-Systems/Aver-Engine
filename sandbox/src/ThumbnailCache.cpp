@@ -18,6 +18,7 @@
 #include "stb_image_write.h"
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <system_error>
 
@@ -196,6 +197,13 @@ void ThumbnailCache::CopyPass::prePass(rhi::IRenderContext& ctx) {
     ctx.textureBarrier(previewColor, rhi::ResourceState::ShaderResource, rhi::ResourceState::CopySource);
     ctx.textureBarrier(entry->second.tex, rhi::ResourceState::ShaderResource, rhi::ResourceState::CopyDest);
     ctx.copyTexture(entry->second.tex, previewColor);
+    if (const auto kit = owner_.meshDiskKey_.find(assetId); kit != owner_.meshDiskKey_.end()) {
+        if (owner_.readbackOk_) {
+            const int slot = owner_.ring_.acquire(assetId, kit->second, owner_.frame_);
+            if (slot >= 0) ctx.copyTextureToBuffer(owner_.readback_[slot], 0, previewColor, 0);
+        }
+        owner_.meshDiskKey_.erase(kit);
+    }
     ctx.textureBarrier(entry->second.tex, rhi::ResourceState::CopyDest, rhi::ResourceState::ShaderResource);
     ctx.textureBarrier(previewColor, rhi::ResourceState::CopySource, rhi::ResourceState::ShaderResource);
 
@@ -264,6 +272,10 @@ void ThumbnailCache::shutdown() {
         if (pass_) dev_->removeRenderFeature(pass_);
         if (preview_) dev_->removeRenderFeature(preview_);
     }
+    writes_.clear();   // futures from std::async join here; a half-written .tmp is never named .png
+    releaseReadbacks();
+    diskHits_.clear();
+    meshDiskKey_.clear();
     delete pass_;
     pass_ = nullptr;
     delete preview_;
@@ -284,7 +296,8 @@ void ThumbnailCache::shutdown() {
     ready_ = false;
 }
 
-void ThumbnailCache::request(u64 assetId, rhi::MeshHandle mesh, u32 material) {
+void ThumbnailCache::request(u64 assetId, rhi::MeshHandle mesh, u32 material, const std::string& srcPath,
+                             const std::string& materialTag) {
     if (!ready_) return;
     // RESIDENT MEANS FINISHED, NOT MERELY PRESENT. update() creates the entry before the copy runs,
     // so "in entries_" used to include "attempted once and failed" -- and because nothing ever
@@ -303,6 +316,8 @@ void ThumbnailCache::request(u64 assetId, rhi::MeshHandle mesh, u32 material) {
     }
     for (const auto& p : pending_)
         if (p.first == assetId) return;   // already queued
+    for (const auto& h : diskHits_)
+        if (h.assetId == assetId) return;
 
     if (entries_.size() >= kMaxThumbnails && !evictColdest(assetId)) {
         // Only reachable when every resident entry was touched this same frame -- i.e. more tiles
@@ -316,8 +331,21 @@ void ThumbnailCache::request(u64 assetId, rhi::MeshHandle mesh, u32 material) {
         }
         return;
     }
-    pending_.emplace_back(assetId, mesh);
     pendingMaterial_[assetId] = material;
+    if (disk_.enabled() && !srcPath.empty()) {
+        std::error_code sec;
+        const u64 sz = static_cast<u64>(std::filesystem::file_size(srcPath, sec));
+        if (!sec) {
+            const std::string key = thumbnailDiskKey(meshThumbnailSource(srcPath, materialTag), fileMtime(srcPath), sz);
+            std::string cached;
+            if (disk_.lookup(key, cached)) {
+                diskHits_.push_back(DiskHit{assetId, mesh, cached, key});
+                return;
+            }
+            meshDiskKey_[assetId] = key;
+        }
+    }
+    pending_.emplace_back(assetId, mesh);
 }
 
 u64 ThumbnailCache::textureId(u64 assetId) const {
@@ -410,7 +438,8 @@ void ThumbnailCache::update() {
     // INDEPENDENT OF EACH OTHER: a texture never touches inFlight_/CopyPass, so there is no reason
     // a frame with nothing in pending_ should skip texPending_, or vice versa -- see the header's
     // own comment on why this split exists.
-    updateMeshPending();
+    pollReadbacks();
+    if (!updateMeshDiskHit()) updateMeshPending();   // a stored picture costs no GPU, so it never delays a render for long
     // A texture served from the disk cache costs a small PNG decode, so a few go per frame; a miss
     // (full decode + downscale + PNG write) stays one per frame.
     for (int i = 0; i < 4 && updateTexturePending(); ++i) {}
@@ -472,6 +501,28 @@ void ThumbnailCache::updateMeshPending() {
     }
     preview_->setDrawList(std::move(draws));
     preview_->frameAll();
+
+    // The readback buffers, once, the first time a render could be persisted. The device has to report a copy
+    // layout (the D3D11 backend does not) and the rows must be the picture's width, else nothing is stored.
+    if (!readbackTried_ && disk_.enabled() && preview_->colorTexture()) {
+        readbackTried_ = true;
+        rhi::TextureCopyFootprint fp;
+        if (res_->textureCopyFootprint(preview_->colorTexture(), 0, fp) && fp.rowBytes == kThumbnailPx * 4 &&
+            fp.rows == kThumbnailPx) {
+            bool all = true;
+            for (rhi::BufferHandle& b : readback_) {
+                rhi::BufferDesc bd;
+                bd.bytes = fp.totalBytes;
+                bd.kind = rhi::BufferKind::Readback;
+                bd.debugName = "ThumbnailCache.Readback";
+                b = res_->createBuffer(bd);
+                all = all && b != 0;
+            }
+            readbackFp_ = fp;
+            readbackOk_ = all;
+            if (!all) { releaseReadbacks(); readbackTried_ = true; }
+        }
+    }
 
     // NOT NECESSARILY FRESH ANY MORE: request() now re-queues an entry whose copy did not
     // finish, which is the whole point -- it keeps the destination texture it already created.
@@ -594,10 +645,16 @@ bool ThumbnailCache::updateTexturePending() {
         }
     }
 
-    // REPLACED, NOT REUSED: unlike the mesh path's copyTexture, there is no in-place "write new
-    // pixels into an existing texture" on this RHI (IResourceFactory only creates-with-initialData
-    // or destroys) -- so a re-decode after an mtime change destroys the old GPU copy before making
-    // a new one, same as evictColdest already does for a cold entry.
+    if (!uploadPixels(e, pixels, "ThumbnailCache.TextureEntry")) {
+        AVER_ERROR("[ThumbnailCache] '{}' could not be uploaded", path);
+        entries_.erase(assetId);
+        return false;
+    }
+    e.srcMtime = fileMtime(path);
+    return fromDisk;
+}
+
+bool ThumbnailCache::uploadPixels(Entry& e, const std::vector<u8>& pixels, const char* debugName) {
     if (e.tex) { res_->destroyTexture(e.tex); e.tex = 0; e.ready = false; e.uiId = 0; }
 
     rhi::TextureDesc td;
@@ -608,25 +665,86 @@ bool ThumbnailCache::updateTexturePending() {
     td.format = rhi::Format::RGBA8Unorm;   // matches decodeImage's straight (non-sRGB) bytes
     td.bind = rhi::ResourceBind::ShaderResource;
     td.initialState = rhi::ResourceState::ShaderResource;
-    td.debugName = "ThumbnailCache.TextureEntry";
+    td.debugName = debugName;
     const void* levels[1] = {pixels.data()};
     td.initialData = levels;
     td.initialDataCount = 1;
     td.initialRowPitch = kThumbnailPx * 4;
     e.tex = res_->createTexture(td);
-    if (!e.tex) {
-        AVER_ERROR("[ThumbnailCache] '{}' could not be uploaded", path);
-        entries_.erase(assetId);
-        return false;
-    }
+    if (!e.tex) return false;
 
-    // READY THE SAME FRAME IT WAS DECODED: unlike the mesh path there is no render feature to wait
-    // on -- createTexture's initialData is already on the GPU by the time it returns -- so there is
-    // no inFlight_-shaped handshake for this to defer through.
     e.uiId = dev_->uiTextureId(e.tex);
     e.ready = e.uiId != 0;
-    e.srcMtime = fileMtime(path);
-    return fromDisk;
+    return true;
+}
+
+bool ThumbnailCache::updateMeshDiskHit() {
+    if (diskHits_.empty()) return false;
+    const DiskHit hit = diskHits_.front();
+    diskHits_.erase(diskHits_.begin());
+
+    if (entries_.size() >= kMaxThumbnails && !evictColdest(hit.assetId)) return false;
+
+    ImageData png;
+    if (!decodeImage(hit.path, png) || !png.valid() || png.width != kThumbnailPx || png.height != kThumbnailPx) {
+        meshDiskKey_[hit.assetId] = hit.key;   // stale or corrupt: render it again and overwrite the file
+        pending_.emplace_back(hit.assetId, hit.mesh);
+        return false;
+    }
+    Entry& e = entries_[hit.assetId];
+    e.lastSeen = frame_;
+    ++e.attempts;
+    pendingMaterial_.erase(hit.assetId);
+    if (!uploadPixels(e, png.pixels, "ThumbnailCache.MeshDiskEntry")) {
+        AVER_ERROR("[ThumbnailCache] could not upload the stored thumbnail of asset {}", hit.assetId);
+        entries_.erase(hit.assetId);
+        return false;
+    }
+    return true;
+}
+
+void ThumbnailCache::releaseReadbacks() {
+    if (res_)
+        for (rhi::BufferHandle& b : readback_) { if (b) res_->destroyBuffer(b); }
+    for (rhi::BufferHandle& b : readback_) b = 0;
+    ring_.clear();
+    readbackTried_ = readbackOk_ = false;
+}
+
+void ThumbnailCache::pollReadbacks() {
+    // Books the PNGs the workers have finished; a file written for a folder we have since left is ignored.
+    for (usize i = 0; i < writes_.size();) {
+        if (writes_[i].wait_for(std::chrono::seconds(0)) != std::future_status::ready) { ++i; continue; }
+        const Written w = writes_[i].get();
+        writes_.erase(writes_.begin() + static_cast<std::ptrdiff_t>(i));
+        if (w.ok && disk_.enabled() && w.path == disk_.pathFor(w.key)) disk_.recordWritten(w.key, w.bytes);
+    }
+
+    for (const ThumbnailReadbackRing::Job& job : ring_.due(frame_)) {
+        std::vector<u8> raw(static_cast<usize>(readbackFp_.totalBytes));
+        const bool got = disk_.enabled() && res_->readBuffer(readback_[job.slot], raw.data(), readbackFp_.totalBytes, 0);
+        ring_.release(job.slot);
+        if (!got) continue;
+        std::vector<u8> pixels;
+        thumbnailUnpadRows(raw.data(), readbackFp_.rowPitch, readbackFp_.rowBytes, readbackFp_.rows, pixels);
+
+        const std::string out = disk_.pathFor(job.key);
+        std::error_code dec;
+        std::filesystem::create_directories(std::filesystem::path(out).parent_path(), dec);
+        writes_.push_back(std::async(std::launch::async, [out, key = job.key, px = std::move(pixels)]() {
+            Written w{out, key, 0, false};
+            const std::string tmp = out + ".tmp";
+            if (!stbi_write_png(tmp.c_str(), static_cast<int>(kThumbnailPx), static_cast<int>(kThumbnailPx), 4,
+                                px.data(), static_cast<int>(kThumbnailPx) * 4))
+                return w;
+            std::error_code ec;
+            std::filesystem::rename(tmp, out, ec);   // atomic: a half-written file is never named .png
+            if (ec) { std::filesystem::remove(tmp, ec); return w; }
+            w.bytes = static_cast<u64>(std::filesystem::file_size(out, ec));
+            w.ok = !ec;
+            return w;
+        }));
+    }
 }
 
 rhi::IRenderFeature* ThumbnailCache::copyFeature() { return pass_; }

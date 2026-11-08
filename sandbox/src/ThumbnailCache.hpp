@@ -32,7 +32,9 @@
 #include "aver/rhi/RHIResources.hpp"
 #include "aver/render/preview/ActorPreview.hpp"
 
+#include <future>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -77,7 +79,13 @@ public:
     // Asks for `assetId`'s thumbnail, rendering `mesh` if it is not cached yet. Cheap and idempotent
     // -- the browser calls it for every visible tile, every frame. `material` is the mesh's own
     // pbr::MaterialHandle (0 = the plain preview shader).
-    void request(u64 assetId, rhi::MeshHandle mesh, u32 material = 0);
+    //
+    // `srcPath` (the .ocmesh's absolute path) and `materialTag` (its slot-0 material name) key the mesh's picture on
+    // disk when setDiskCache is on: a hit uploads the stored PNG instead of rendering, a miss renders as before and
+    // then reads the finished picture back (a few frames later, never waiting on the GPU) and stores it. Empty
+    // srcPath = not persisted.
+    void request(u64 assetId, rhi::MeshHandle mesh, u32 material = 0, const std::string& srcPath = {},
+                 const std::string& materialTag = {});
 
     // The ImGui texture id for a finished thumbnail, or 0 when it is not ready. Zero is the normal
     // answer for the first few frames after a request and means "draw the typed glyph instead", not
@@ -103,7 +111,7 @@ public:
 
     // Where texture thumbnails are kept between sessions (a folder under the project's Saved/) and the
     // folder's size cap in megabytes; an empty dir or 0 turns it off. Cheap to call every frame.
-    // TEXTURES ONLY: a mesh thumbnail is a GPU render target and would need a texture readback to persist.
+    // Mesh thumbnails join in through a texture-to-buffer readback of the preview (see request()).
     void setDiskCache(const std::string& dir, u64 capMB);
 
     // Drives both queues: picks at most ONE pending mesh request and points the preview at it, and
@@ -193,9 +201,30 @@ private:
     // skip the other -- a frame with a texture to decode but no mesh to render must still decode it,
     // and the old single-body shape returned out of the whole function the moment pending_ was empty.
     void updateMeshPending();
+    // Uploads one stored mesh thumbnail; a stale or unreadable file falls back to rendering it.
+    bool updateMeshDiskHit();
+    // Reads back finished copies, hands them to a background PNG encode, and books the files that landed.
+    void pollReadbacks();
+    // Creates a 512x512 RGBA8 texture holding `pixels` into the entry.
+    bool uploadPixels(Entry& e, const std::vector<u8>& pixels, const char* debugName);
+    void releaseReadbacks();
     // Returns true when it finished a texture from the disk cache (cheap enough to do a few per frame).
     bool updateTexturePending();
     ThumbnailDiskCache disk_;
+
+    // Mesh persistence. Mesh thumbnails found on disk wait here for their one-per-frame upload.
+    struct DiskHit { u64 assetId; rhi::MeshHandle mesh; std::string path; std::string key; };
+    std::vector<DiskHit> diskHits_;
+    std::unordered_map<u64, std::string> meshDiskKey_;   // asset -> key, while it waits to be rendered
+    // Readback of the preview's colour target: a few buffers, each read back `delay` frames after its copy.
+    static constexpr u32 kReadbackSlots = 3;
+    rhi::BufferHandle readback_[kReadbackSlots] = {};
+    rhi::TextureCopyFootprint readbackFp_;
+    bool readbackTried_ = false;
+    bool readbackOk_ = false;
+    ThumbnailReadbackRing ring_{kReadbackSlots, 6};
+    struct Written { std::string path; std::string key; u64 bytes = 0; bool ok = false; };
+    std::vector<std::future<Written>> writes_;   // PNG encodes in flight on worker threads
 };
 
 } // namespace aver::editor

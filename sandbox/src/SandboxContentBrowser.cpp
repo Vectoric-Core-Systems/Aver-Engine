@@ -2564,14 +2564,15 @@ void SandboxApp::drawFolderGallery(const std::vector<const DirEntry*>& shown) {
                         const u64 meshId = fnv1a64(std::string_view(rel));
                         if (const rhi::MeshHandle meshHandle = content_.meshFor(meshId)) {
                             u32 thumbMaterial = 0;
+                            std::string thumbMaterialName;
 #if AVER_MODULE_PBR
                             // The mesh's own slot-0 material, looked up only until the tile exists.
                             if (!thumbnails_.textureId(meshId)) {
                                 const std::string& slot0 = content_.meshSlot0Name(meshId);
-                                if (!slot0.empty()) thumbMaterial = content_.materialForSurface(slot0);
+                                if (!slot0.empty()) { thumbMaterial = content_.materialForSurface(slot0); thumbMaterialName = slot0; }
                             }
 #endif
-                            thumbnails_.request(meshId, meshHandle, thumbMaterial);
+                            thumbnails_.request(meshId, meshHandle, thumbMaterial, e.full, thumbMaterialName);
                             if (const u64 tex = thumbnails_.textureId(meshId)) {
                                 // Whole-texture, square (kThumbnailPx is fixed on both axes): blitTile
                                 // with one tile of one, nearly filling the preview -- the content, not a badge.

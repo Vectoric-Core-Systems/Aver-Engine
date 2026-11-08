@@ -565,6 +565,7 @@ instead of writing C#.
   starting a second process.
 - **The Content Browser shows real thumbnails**, rendered rather than placeheld, with a per-type icon
   and colour identity.
+- **Mesh thumbnails persist too.** After a mesh thumbnail renders, the preview target is read back a few frames later (no GPU wait) and a worker thread writes the PNG into the same capped `Saved/ThumbnailCache` the texture thumbnails use; a later session uploads the stored picture instead of rendering. Keyed on the mesh file, its mtime and size, and its slot-0 material name. Not yet seen on a screen.
 
 ### Rendering and stability
 
