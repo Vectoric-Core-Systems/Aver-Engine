@@ -396,7 +396,7 @@ void SandboxApp::handleWaterSpline(Engine& e, const ImGuiIO& io, bool overScene,
     viewportRay(mx, my, ro, rd);
     const f32 roA[3] = {ro.x, ro.y, ro.z}, rdA[3] = {rd.x, rd.y, rd.z};
     landscape::HeightfieldHit hit;
-    const bool haveHit = overScene && landscape::raycastHeightfield(landscape_.data(), roA, rdA, hit);
+    const bool haveHit = overScene && landscape_.raycast(roA, rdA, hit);
 
     std::vector<f32> sxy(static_cast<usize>(count()) * 2);
     std::vector<u8> valid(static_cast<usize>(count()), 0);

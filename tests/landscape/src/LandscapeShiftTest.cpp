@@ -461,6 +461,150 @@ int main() {
     }
 #endif
 
+#ifdef AVER_LANDSCAPESHIFT_GAME
+    // ---- (8) GameLandscape: authoring on every section ----
+    {
+        using game::GameLandscape;
+        const std::filesystem::path dir = std::filesystem::temp_directory_path() / "aver_landscape_author_test";
+        std::filesystem::create_directories(dir);
+        // Two flat 65-sample sections tiling edge to edge: A's column 64 and B's column 0 are the same world line (x = 6400).
+        const auto writeFlat = [&](const std::string& name) {
+            fmt::OcLandData d;
+            d.sampleCount = 65;
+            d.spacingCm = 100.0f;
+            d.heights.assign(65u * 65u, 0.0f);
+            std::string why;
+            return fmt::saveOcLand((dir / name).string(), d, &why);
+        };
+        check(writeFlat("a.ocland") && writeFlat("b.ocland"), "wrote two flat sections");
+        fmt::OcWorldData w;
+        for (const auto& [name, x] : {std::pair<const char*, f64>{"a.ocland", 0.0}, {"b.ocland", 6400.0}}) {
+            fmt::OcLandscapePlacement lp;
+            lp.section = name; lp.x = x; lp.y = 0.0;
+            w.landscapes.push_back(lp);
+        }
+        GameLandscape land;
+        land.loadForLevel(nullptr, dir.string(), (dir / "none.ocworld").string(), w);
+        check(land.sectionCount() == 2 && !land.dirty(), "two sections resident, nothing dirty");
+
+        const auto maxH = [](const fmt::OcLandData& d) { f32 m = -1e30f; for (f32 h : d.heights) m = std::fmax(m, h); return m; };
+        const auto seamEqual = [&]() {
+            const fmt::OcLandData& a = land.sectionData(0);
+            const fmt::OcLandData& b = land.sectionData(1);
+            for (u32 y = 0; y < 65; ++y)
+                if (!bitEqual(a.heights[y * 65 + 64], b.heights[y * 65 + 0])) return false;
+            return true;
+        };
+
+        // (a) a stroke wholly on the extra
+        BrushParams bp;
+        bp.centerCm[0] = 9600.0f; bp.centerCm[1] = 3200.0f;
+        bp.radiusCm = 800.0f; bp.strength = 200.0f; bp.mode = BrushMode::Raise;
+        land.beginStroke();
+        land.sculpt(nullptr, bp, 1.0f);
+        std::vector<GameLandscape::HeightEdit> edits;
+        check(land.endStroke(edits) && edits.size() == 1 && edits[0].section == 1, "a stroke on the extra makes one edit, for section 1");
+        f64 z = 0.0;
+        check(maxH(land.sectionData(1)) > 100.0f && land.groundHeightAt(9600.0, 3200.0, z) && z > 100.0,
+              "the extra's heights rose and groundHeightAt reads it (" + std::to_string(z) + ")");
+        check(maxH(land.sectionData(0)) == 0.0f && land.sectionDirty(1) && !land.sectionDirty(0) && land.dirty(),
+              "the primary is untouched and clean; the extra is dirty");
+        land.applyHeightRect(edits[0].section, edits[0].x0, edits[0].y0, edits[0].x1, edits[0].y1, edits[0].before);
+        check(maxH(land.sectionData(1)) == 0.0f && land.groundHeightAt(9600.0, 3200.0, z) && z == 0.0, "undo restored the extra");
+
+        // (b) strokes across the seam, for brush modes that read neighbours or the position too
+        BrushParams rp;
+        rp.centerCm[0] = 6400.0f; rp.centerCm[1] = 3200.0f; rp.radiusCm = 900.0f; rp.strength = 300.0f;
+        for (const BrushMode mode : {BrushMode::Raise, BrushMode::Smooth, BrushMode::Noise}) {
+            BrushParams sp = rp;
+            sp.mode = mode;
+            sp.noiseSeed = 7;
+            const std::string tag = " (mode " + std::to_string(static_cast<int>(mode)) + ")";
+            land.beginStroke();
+            land.sculpt(nullptr, sp, 1.0f);
+            land.sculpt(nullptr, bp, 1.0f);   // a tick elsewhere, still the same stroke
+            land.sculpt(nullptr, sp, 1.0f);
+            edits.clear();
+            const bool made = land.endStroke(edits);
+            check(made && (mode == BrushMode::Smooth ? edits.size() >= 1 : edits.size() == 2),
+                  "a stroke across the seam edits both sections (Smooth over flat ground can leave one)" + tag);
+            check(seamEqual(), "the shared edge samples are equal after the stroke" + tag);
+            for (const auto& e : edits) land.applyHeightRect(e.section, e.x0, e.y0, e.x1, e.y1, e.before);
+            check(maxH(land.sectionData(0)) == 0.0f && maxH(land.sectionData(1)) == 0.0f, "undo restored both sections" + tag);
+        }
+        land.beginStroke();
+        land.sculpt(nullptr, rp, 1.0f);
+        edits.clear();
+        land.endStroke(edits);
+        check(edits.size() == 2 && land.sectionData(0).heights[32 * 65 + 64] > 100.0f && land.sectionData(1).heights[32 * 65] > 100.0f,
+              "the seam stroke raised both sides of the line");
+        const std::vector<f32> keptA = land.sectionData(0).heights, keptB = land.sectionData(1).heights;
+        for (const auto& e : edits) land.applyHeightRect(e.section, e.x0, e.y0, e.x1, e.y1, e.before);
+        for (const auto& e : edits) land.applyHeightRect(e.section, e.x0, e.y0, e.x1, e.y1, e.after);
+        check(land.sectionData(0).heights == keptA && land.sectionData(1).heights == keptB, "redo restores both sections exactly");
+        for (const auto& e : edits) land.applyHeightRect(e.section, e.x0, e.y0, e.x1, e.y1, e.before);
+
+        // (c) a carve across the seam
+        const f32 poly[8] = {5600.0f, 2400.0f, 7200.0f, 2400.0f, 7200.0f, 4000.0f, 5600.0f, 4000.0f};
+        CarveParams cp;
+        land.beginStroke();
+        land.carveBasin(nullptr, poly, 4, -300.0f, cp);
+        edits.clear();
+        land.endStroke(edits);
+        check(edits.size() == 2 && land.sectionData(0).heights[32 * 65 + 64] < 0.0f && seamEqual(),
+              "a basin across the seam carves both sections and leaves the seam equal");
+        for (const auto& e : edits) land.applyHeightRect(e.section, e.x0, e.y0, e.x1, e.y1, e.before);
+
+        // (d) save writes both files, a reload reads the edits back
+        land.beginStroke();
+        land.sculpt(nullptr, bp, 1.0f);   // on the extra
+        land.sculpt(nullptr, rp, 1.0f);   // and across the seam
+        edits.clear();
+        land.endStroke(edits);
+        const std::vector<f32> editedA = land.sectionData(0).heights, editedB = land.sectionData(1).heights;
+        std::string why;
+        check(land.save(&why) && !land.dirty(), "save wrote every dirty section (" + why + ")");
+        fmt::OcLandData ra, rb;
+        check(fmt::loadOcLand((dir / "a.ocland").string(), ra, &why) && fmt::loadOcLand((dir / "b.ocland").string(), rb, &why),
+              "both files read back");
+        f32 worst = 0.0f;
+        for (usize i = 0; i < editedA.size(); ++i)
+            worst = std::fmax(worst, std::fmax(std::fabs(ra.heights[i] - editedA[i]), std::fabs(rb.heights[i] - editedB[i])));
+        check(worst < 1.0f && maxH(rb) > 100.0f && ra.originCm[0] == 0.0f && rb.originCm[0] == 6400.0f,
+              "the reload carries the edits in both files and the absolute origins (worst " + std::to_string(worst) + " cm)");
+
+        // (e) paint on an extra, then across the seam
+        std::vector<GameLandscape::LayerInfo> layers(2);
+        layers[0].name = "grass"; layers[1].name = "rock";
+        land.setLayerTable(layers);
+        PaintParams pp;
+        pp.centerCm[0] = 9600.0f; pp.centerCm[1] = 3200.0f; pp.radiusCm = 800.0f;
+        land.beginWeightStroke();
+        land.paint(nullptr, pp, 1.0f, "rock");
+        std::vector<GameLandscape::WeightEdit> wedits;
+        check(land.endWeightStroke(wedits) && wedits.size() == 1 && wedits[0].section == 1, "a paint stroke on the extra makes one weight edit");
+        check(land.sectionData(1).hasLayers() && !land.sectionData(0).hasLayers() && land.sectionData(1).weightAt(1, 32, 32) > 200,
+              "the extra's weights took the layer; the primary stays unpainted");
+        land.applyWeightRect(wedits[0].section, wedits[0].x0, wedits[0].y0, wedits[0].x1, wedits[0].y1, wedits[0].planes, wedits[0].before);
+        check(land.sectionData(1).weightAt(1, 32, 32) == 0, "undo restored the extra's weights");
+
+        PaintParams sp2 = pp;
+        sp2.centerCm[0] = 6400.0f;
+        land.beginWeightStroke();
+        land.paint(nullptr, sp2, 1.0f, "rock");
+        wedits.clear();
+        land.endWeightStroke(wedits);
+        bool weightSeam = wedits.size() == 2;
+        for (u32 y = 0; y < 65; ++y)
+            weightSeam = weightSeam && land.sectionData(0).weightAt(1, 64, y) == land.sectionData(1).weightAt(1, 0, y);
+        check(weightSeam && land.sectionData(0).weightAt(1, 64, 32) > 200, "a paint stroke across the seam paints both sides equally");
+
+        land.unload(nullptr);
+        std::error_code ec;
+        std::filesystem::remove_all(dir, ec);
+    }
+#endif
+
     AVER_INFO("LandscapeShiftTest: {} checks, {} failures", g_checks, g_failures);
     return g_failures;
 }

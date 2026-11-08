@@ -67,7 +67,7 @@ void SandboxApp::endPaintStroke(const char* label) {
     EditCmd c;
     c.kind = EditCmd::Kind::LandscapeWeights;
     c.label = label ? label : "Paint terrain";
-    if (!landscape_.endWeightStroke(c.landWBefore, c.landWAfter, c.landX0, c.landY0, c.landX1, c.landY1, c.landPlanes)) return;
+    if (!landscape_.endWeightStroke(c.landWeights)) return;   // one entry for every section the stroke touched
     pushEdit(std::move(c));
 }
 
@@ -91,20 +91,16 @@ void SandboxApp::handlePaint(Engine& e, const ImGuiIO& io, bool overScene, f32 m
     viewportRay(mx, my, ro, rd);
     const f32 roA[3] = {ro.x, ro.y, ro.z}, rdA[3] = {rd.x, rd.y, rd.z};
     landscape::HeightfieldHit hit;
-    const bool haveHit = overScene && landscape::raycastHeightfield(landscape_.data(), roA, rdA, hit);
+    const bool haveHit = overScene && landscape_.raycast(roA, rdA, hit);
     if (haveHit) {
         sculptCursorValid_ = true;   // the same brush ring the sculpt tool draws
         sculptCursor_ = Vec3{hit.posCm[0], hit.posCm[1], hit.posCm[2]};
     }
 
     if (ImGui::IsMouseClicked(0) && overScene && haveHit) {
-        u32 idx = 0;
-        // The layer joins the section's table BEFORE the stroke: a stroke records a fixed plane count.
-        if (landscape_.ensureLayer(landscape_.materialLayerName(static_cast<u32>(paintLayer_)), idx)) {
-            paintSectionLayer_ = idx;
-            landscape_.beginWeightStroke();
-            painting_ = true;
-        }
+        // Each section the brush reaches gets the layer added on the spot, before its share of the stroke is captured.
+        landscape_.beginWeightStroke();
+        painting_ = true;
     }
     if (!io.MouseDown[0] && landscape_.weightStrokeActive()) endPaintStroke();
 
@@ -116,12 +112,11 @@ void SandboxApp::handlePaint(Engine& e, const ImGuiIO& io, bool overScene, f32 m
         p.strength = paintStrength_;
         p.falloff = paintFalloff_;
         p.target = paintOpacity_;
-        p.layer = paintSectionLayer_;
         p.mode = paintMode_ == 1 ? landscape::PaintMode::Erase : paintMode_ == 2 ? landscape::PaintMode::Smooth
                                                                                  : landscape::PaintMode::Paint;
         // dt-scaled like the sculpt brush, so holding paints at a rate that does not depend on the frame rate.
         const f32 dt = std::fmin(e.time().dt, 0.05f);
-        landscape_.paint(e.device(), p, std::fmin(1.0f, dt * 6.0f));
+        landscape_.paint(e.device(), p, std::fmin(1.0f, dt * 6.0f), landscape_.materialLayerName(static_cast<u32>(paintLayer_)));
     }
     if (!io.MouseDown[0]) painting_ = false;
 }
@@ -212,14 +207,11 @@ void SandboxApp::buildLandscapePaintTab(Engine& e) {
     ImGui::TextDisabled("COMMANDS");
     const std::string layerName = landscape_.materialLayerName(static_cast<u32>(paintLayer_));
     if (ImGui::Button("Fill Layer", ImVec2(-1, 0))) {
-        u32 idx = 0;
-        if (landscape_.ensureLayer(layerName, idx)) {
-            landscape_.beginWeightStroke();
-            landscape_.fillLayer(idx);
-            endPaintStroke("Fill terrain layer");
-        }
+        landscape_.beginWeightStroke();
+        landscape_.fillLayerAll(layerName);
+        endPaintStroke("Fill terrain layer");
     }
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Paints the whole section with the selected layer. One undo step.");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Paints every section with the selected layer. One undo step.");
     if (ImGui::Button("Auto-fill By Slope / Height...", ImVec2(-1, 0))) ImGui::OpenPopup("##autoFill");
     if (ImGui::BeginPopup("##autoFill")) {
         ImGui::TextUnformatted("Paint the selected layer where...");
@@ -229,24 +221,23 @@ void SandboxApp::buildLandscapePaintTab(Engine& e) {
         ImGui::DragFloat("Min height (cm)", &autoZMinCm_, 10.0f);
         ImGui::DragFloat("Max height (cm)", &autoZMaxCm_, 10.0f);
         if (ImGui::Button("Apply")) {
-            u32 idx = 0;
-            if (landscape_.ensureLayer(layerName, idx)) {
-                landscape_.beginWeightStroke();
-                landscape_.autoFillBySlope(idx, autoSlopeMinDeg_, autoSlopeMaxDeg_, autoZMinCm_, autoZMaxCm_, autoFeatherDeg_, 1.0f);
-                endPaintStroke("Auto-fill terrain layer");
-            }
+            landscape_.beginWeightStroke();
+            landscape_.autoFillBySlopeAll(layerName, autoSlopeMinDeg_, autoSlopeMaxDeg_, autoZMinCm_, autoZMaxCm_, autoFeatherDeg_, 1.0f);
+            endPaintStroke("Auto-fill terrain layer");
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
     }
     if (ImGui::Button("Remove Unused Layers", ImVec2(-1, 0))) {
-        const fmt::OcLandData& d = landscape_.data();
-        const usize nn = static_cast<usize>(d.sampleCount) * d.sampleCount;
         u32 removed = 0;
-        for (u32 s = static_cast<u32>(d.layerNames.size()); s-- > 1;) {
-            bool used = false;
-            for (usize i = 0; i < nn && !used; ++i) used = d.weights[(s - 1) * nn + i] != 0;
-            if (!used && landscape_.removeLayer(s)) ++removed;
+        for (u32 sec = 0; sec < landscape_.sectionCount(); ++sec) {
+            const fmt::OcLandData& d = landscape_.sectionData(sec);
+            const usize nn = static_cast<usize>(d.sampleCount) * d.sampleCount;
+            for (u32 s = static_cast<u32>(d.layerNames.size()); s-- > 1;) {
+                bool used = false;
+                for (usize i = 0; i < nn && !used; ++i) used = d.weights[(s - 1) * nn + i] != 0;
+                if (!used && landscape_.removeLayer(sec, s)) ++removed;
+            }
         }
         if (removed) { purgeWeightUndo(); setUpgradeStatus("Removed " + std::to_string(removed) + " unused terrain layer(s)"); }
     }

@@ -2171,13 +2171,12 @@ private:
         std::optional<fmt::OcPlacedComponent> pcBefore, pcAfter;
 #endif
 
-        // LandscapeStroke: rect diff, not snapshot (512x512 section = 1 MB, touched rect = KB). One entry per stroke, unioned.
-        u32 landX0 = 0, landY0 = 0, landX1 = 0, landY1 = 0;   // inclusive sample bounds
-        std::vector<f32> landBefore, landAfter;
+        // LandscapeStroke: rect diff, not snapshot (512x512 section = 1 MB, touched rect = KB). One entry per stroke: one rect per
+        // section the stroke touched (inclusive sample bounds, before / after).
+        std::vector<game::GameLandscape::HeightEdit> landHeights;
 
-        // wave3 LandscapeWeights: `landPlanes` stored paint planes over the same rect (landX0..landY1), plane-major, before / after.
-        u32 landPlanes = 0;
-        std::vector<u8> landWBefore, landWAfter;
+        // wave3 LandscapeWeights: per touched section, its stored paint planes over a rect, plane-major, before / after.
+        std::vector<game::GameLandscape::WeightEdit> landWeights;
         // wave3 WaterBodies: the level's RIVER / LAKE records before and after one edit gesture (a few records, so whole copies).
         std::vector<fmt::OcRiver> riversBefore, riversAfter;
         std::vector<fmt::OcLake> lakesBefore, lakesAfter;
@@ -3431,7 +3430,6 @@ private:
     f32  paintRadiusCm_ = 600.0f, paintStrength_ = 0.6f, paintFalloff_ = 1.0f, paintOpacity_ = 1.0f;
     int  paintMode_ = 0;                  // 0 Paint, 1 Erase, 2 Smooth (landscape::PaintMode)
     int  paintLayer_ = 0;                 // the selected MATERIAL layer
-    u32  paintSectionLayer_ = 0;          // that layer's index in the section's table, fixed for a stroke
     bool painting_ = false;               // LMB down with the paint tool
     f32  autoSlopeMinDeg_ = 25.0f, autoSlopeMaxDeg_ = 90.0f, autoFeatherDeg_ = 5.0f;
     f32  autoZMinCm_ = -100000.0f, autoZMaxCm_ = 100000.0f;

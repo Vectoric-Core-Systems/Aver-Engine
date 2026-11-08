@@ -28,6 +28,7 @@
 #include "aver/landscape/Sculpt.hpp"
 #include "aver/landscape/Paint.hpp"
 #include "aver/landscape/Carve.hpp"
+#include "aver/landscape/HeightfieldRay.hpp"
 
 #if AVER_MODULE_PBR
 #include "aver/pbr/MaterialSystem.hpp"
@@ -65,10 +66,10 @@ public:
     //      originCm);
     //   2. failing that (or with no record at all), the <levelname>.ocland convention beside
     //      `levelPath`.
-    // The first resolved section is the PRIMARY one (authoring, data(), path()). With branch 1, every further LANDSCAPE
-    // record loads too as an extra section at its own `at`: rendered, collided and queried like the primary, sharing the
-    // level's terrain material (each extra has its own paint weights); a record whose file is missing is skipped with a
-    // warning. Extras are read-only: sculpt/paint/carve/save act on the primary.
+    // The first resolved section is the PRIMARY one (data(), path(); section index 0). With branch 1, every further LANDSCAPE
+    // record loads too as an extra section (index 1..) at its own `at`: rendered, collided, queried and AUTHORED like the primary
+    // (the brush, paint, carve and save act on every section they reach, see "sections" below), sharing the level's terrain
+    // material (each extra has its own paint weights); a record whose file is missing is skipped with a warning.
     // Silent when none resolves -- most levels have no terrain. `device` may be null (a section
     // still loads with no device; forgetAll/draw simply have nothing to free/create yet).
     //
@@ -164,6 +165,46 @@ public:
     // The extra sections (further LANDSCAPE records) and the resident ring tiles, for hosts and tests.
     u32 extraSectionCount() const { return static_cast<u32>(extras_.size()); }
     const fmt::OcLandData& extraData(u32 i) const { return extras_[i].data; }
+    // ---- sections: the primary (index 0) and the extras (1..) as one list ----
+    // Authoring acts on whichever sections it reaches. A brush, carve or fill edits every section whose footprint it overlaps;
+    // where two sections share edge samples (same world position) the stroke leaves them equal. One drag is one undo entry
+    // that lists every section it touched (HeightEdit / WeightEdit, one per section). save() writes every dirty section to its
+    // own file; a LANDSCAPE record's `at` is never touched by any of it.
+    u32 sectionCount() const { return loaded_ ? 1u + static_cast<u32>(extras_.size()) : 0u; }
+    const fmt::OcLandData& sectionData(u32 i) const { return i == 0 ? landscapeData_ : extras_[i - 1].data; }
+    const std::string& sectionPath(u32 i) const { return i == 0 ? landscapePath_ : extras_[i - 1].path; }
+    bool sectionDirty(u32 i) const;
+    // The nearest hit of a ray (scene frame) among all sections; `section` (optional) receives which one.
+    bool raycast(const f32 ro[3], const f32 rd[3], landscape::HeightfieldHit& out, u32* section = nullptr,
+                 f32 maxDistCm = 200000.0f) const;
+    // The section holding scene-frame (x, y), or null. surfaceHeightAtScene is the same lookup answering the height.
+    const fmt::OcLandData* sectionAt(f32 xCm, f32 yCm) const;
+    bool surfaceHeightAtScene(f32 xCm, f32 yCm, f32& outZ) const;
+
+    // What one section's share of a stroke changed: a rect of samples before / after (undo / redo write them back).
+    struct HeightEdit {
+        u32 section = 0, x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+        std::vector<f32> before, after;
+    };
+    // The same for paint: `planes` stored weight planes over the rect, plane-major.
+    struct WeightEdit {
+        u32 section = 0, x0 = 0, y0 = 0, x1 = 0, y1 = 0, planes = 0;
+        std::vector<u8> before, after;
+    };
+    // Ends the stroke and lists every section that changed (empty = nothing to undo, false). One undo entry carries the list.
+    bool endStroke(std::vector<HeightEdit>& out);
+    bool endWeightStroke(std::vector<WeightEdit>& out);
+    // Undo / redo of one section's rect; same contract as the primary-only forms below.
+    bool applyHeightRect(u32 section, u32 x0, u32 y0, u32 x1, u32 y1, const std::vector<f32>& src);
+    bool applyWeightRect(u32 section, u32 x0, u32 y0, u32 x1, u32 y1, u32 planes, const std::vector<u8>& src);
+    // Paint the material layer `layerName` on every section the brush reaches (p.layer is ignored): each such section gets the
+    // layer added on the spot (before its share of the stroke is captured). Returns the first touched section's rect.
+    landscape::BrushRect paint(rhi::IDevice* device, const landscape::PaintParams& p, f32 amount, const std::string& layerName);
+    // Whole-terrain edits over every section (inside a weight stroke they are one undo entry).
+    void fillLayerAll(const std::string& layerName);
+    void autoFillBySlopeAll(const std::string& layerName, f32 minSlopeDeg, f32 maxSlopeDeg, f32 minZCm, f32 maxZCm, f32 featherDeg, f32 amount);
+    // Drops layer `index` of one section (as removeLayer does for the primary).
+    bool removeLayer(u32 section, u32 index);
     usize ringTileCount() const { return landscapeRingTiles_.size(); }
     bool ringTileResident(i32 tx, i32 ty) const { return landscapeRingTiles_.count(landscape::TileCoord{tx, ty}) != 0; }
 
@@ -172,8 +213,8 @@ public:
     landscape::TerrainNoiseParams& noiseParams() { return landscapeNoiseParams_; }
     const landscape::TerrainNoiseParams& noiseParams() const { return landscapeNoiseParams_; }
 
-    // True once heights or origin have been edited since the last load or save.
-    bool dirty() const { return dirty_; }
+    // True once heights, paint or origin of ANY section have been edited since its last load or save.
+    bool dirty() const;
 
     // Rebuilds ONLY if the heights have moved since the last build, and does nothing otherwise.
     //
@@ -206,6 +247,7 @@ public:
     // boundsMin/boundsMax[2] (writing samples directly bypasses applyBrush's own bounds update),
     // rebuilds the tree (false, logged, if that fails), widens skirts, resets hysteresis, latches a
     // pending GPU invalidate of the rect (see flushPendingInvalidate), marks dirty, and returns true.
+    // Primary section only; see applyHeightRect(section, ...) for the others.
     bool applyHeightRect(u32 x0, u32 y0, u32 x1, u32 y1, const std::vector<f32>& src);
 
     // Drains the invalidate applyHeightRect latches: when pending, clears it and, with both a
@@ -215,7 +257,7 @@ public:
     // the change immediately; only the cached GPU meshes lag by a frame, invisibly.
     void flushPendingInvalidate(rhi::IDevice* device);
 
-    // Starts a sculpt stroke: nothing touched yet. The pre-stroke heights are captured lazily as the
+    // Starts a sculpt stroke (on every section): nothing touched yet. The pre-stroke heights are captured lazily as the
     // rect grows (see growStroke), not up front -- at stroke start the rect a drag will end up
     // covering is not known yet.
     void beginStroke();
@@ -227,7 +269,8 @@ public:
 
     bool strokeActive() const { return strokeActive_; }
 
-    // Ends a stroke and reports what changed. Returns false (and clears the captured buffer) when no
+    // Ends a stroke and reports what changed in the PRIMARY section (endStroke(std::vector<HeightEdit>&) reports every section).
+    // Returns false (and clears the captured buffer) when no
     // stroke was active, when nothing was ever touched, or when nothing is loaded. Otherwise fills
     // `after` from the section over the touched rect, moves the captured pre-stroke heights into
     // `before`, sets [x0,y0]-[x1,y1] to the touched rect, and returns true -- unless `before` and
@@ -236,7 +279,7 @@ public:
     // owns turning a true return into an undo entry.
     bool endStroke(std::vector<f32>& before, std::vector<f32>& after, u32& x0, u32& y0, u32& x1, u32& y1);
 
-    // One sculpt tick: grows the active stroke over the brush's footprint, applies it at `amount`
+    // One sculpt tick on every section the brush reaches (the returned rect is the first touched section's): grows the active stroke over the brush's footprint, applies it at `amount`
     // (0..1, how much of the mode's per-tick strength to spend this tick), and -- if anything was
     // touched -- rebuilds the tree, widens skirts, resets hysteresis, and (with both a renderer and a
     // device) forgets the touched GPU meshes immediately, unlike applyHeightRect: a live brush has a
@@ -245,7 +288,8 @@ public:
     // nothing else above runs).
     landscape::BrushRect sculpt(rhi::IDevice* device, const landscape::BrushParams& p, f32 amount);
 
-    // Writes the resident section back to path(). Returns false when nothing is loaded, path() is
+    // Writes the primary section back to path() and every extra that is dirty to its own file (a failing file does not stop the
+    // others; false and `why` then name the first failure). Returns false when nothing is loaded, path() is
     // empty, or the write fails (with `why` filled, when given) -- logging either way is the caller's
     // job. On success clears dirty() and rebuilds collision: saving is the one deliberate commit
     // point for a sculpt's collision snapshot (never rebuilt per stroke, per undo, or on create --
@@ -272,7 +316,7 @@ public:
 #endif
 
     // ---- wave3 layers ----
-    // Weightmap paint on the primary section (extras are drawn and queried with their stored paint), the terrain material's layer table, physical-surface queries and the
+    // Weightmap paint (the primary-only forms below, and the section-aware ones in "sections"), the terrain material's layer table, physical-surface queries and the
     // GPU weight textures (docs/LANDSCAPE_LAYERS_WATER.md). Paint is stored in the .ocland by layer NAME; the material's
     // layers are matched to it by name, so reordering the material never scrambles paint. Everything but the GPU upload
     // (flushWeights) is CPU only and works headless.
@@ -319,13 +363,13 @@ public:
 
     // The weight stroke mirrors the height stroke: before-planes captured lazily over the unioned rect, one undo entry per
     // drag. endWeightStroke returns false (nothing to undo) when nothing changed. `planes` = stored layers at stroke time.
-    void beginWeightStroke();
+    void beginWeightStroke();   // on every section
     void growWeightStroke(const landscape::BrushRect& r);
     bool weightStrokeActive() const { return wStrokeActive_; }
     bool endWeightStroke(std::vector<u8>& before, std::vector<u8>& after, u32& x0, u32& y0, u32& x1, u32& y1, u32& planes);
     // Undo/redo: writes `planes` stored planes of a rect back. False for no section, a bad rect or more planes than exist.
     bool applyWeightRect(u32 x0, u32 y0, u32 x1, u32 y1, u32 planes, const std::vector<u8>& src);
-    bool weightsDirty() const { return weightsDirty_; }
+    bool weightsDirty() const { return edit_.weightsDirty; }
 
     // Height, slope, paint weights and physical surface at a world XY (CPU, headless). False outside every section.
     bool sampleGround(f32 xCm, f32 yCm, GroundInfo& out) const;
@@ -366,6 +410,60 @@ private:
     void moveFrameTo(const rhi::ShiftOrigin& o);
     // Puts a section just read from disk (absolute f32 originCm, == homeAbs_) into the current frame.
     void placeInFrame(fmt::OcLandData& d) const;
+
+    // ---- authoring state, one per section ----
+    // Everything an edit needs to remember about a section besides its data: unsaved work, stale collision, the GPU meshes an undo
+    // still has to drop, and the section's share of the height / weight stroke in progress.
+    struct SectionEdit {
+        bool dirty = false;            // see dirty()
+        // Heights have moved since the collision body was last built. SEPARATE FROM dirty on purpose: dirty answers "does the
+        // user have unsaved work" and is cleared by saving, this answers "does the physics shape still describe the mesh" and
+        // is cleared by rebuilding. See rebuildCollisionIfStale().
+        bool collisionStale = false;
+        bool weightsDirty = false;     // the weight textures must be rebuilt
+        // Latched by applyHeightRect, drained by flushPendingInvalidate.
+        bool pendingInvalidate = false;
+        u32  pendingX0 = 0, pendingY0 = 0, pendingX1 = 0, pendingY1 = 0;
+        // This section's share of the sculpt stroke (the stroke itself, strokeActive_, is shared by all sections).
+        bool strokeEmpty = true;
+        u32  strokeX0 = 0, strokeY0 = 0, strokeX1 = 0, strokeY1 = 0;
+        std::vector<f32> strokeBefore;
+        // ... and of the weight stroke.
+        bool wEmpty = true;
+        u32  wX0 = 0, wY0 = 0, wX1 = 0, wY1 = 0, wPlanes = 0;
+        std::vector<u8> wBefore;
+    };
+    // Pointers to the parts of one section, so the authoring code is written once for the primary and the extras.
+    struct SecRef {
+        fmt::OcLandData* data;
+        landscape::LandscapeTree* tree;
+        std::unique_ptr<landscape::LandscapeRenderer>* renderer;
+        SectionEdit* edit;
+        std::array<i32, 8>* remap;
+        f64* homeAbs;
+        const std::string* path;
+    };
+    SecRef ref(u32 section);   // 0 = primary
+    void growHeightStroke(SecRef s, const landscape::BrushRect& r);
+    void growWeightStrokeIn(SecRef s, const landscape::BrushRect& r);
+    bool applyHeightRectIn(SecRef s, u32 x0, u32 y0, u32 x1, u32 y1, const std::vector<f32>& src);
+    bool applyWeightRectIn(SecRef s, u32 x0, u32 y0, u32 x1, u32 y1, u32 planes, const std::vector<u8>& src);
+    // The tail of a height edit on one section: bounds, tree rebuild, GPU meshes, dirty and stale collision.
+    void sectionHeightsChanged(SecRef s, rhi::IDevice* device, const landscape::BrushRect& touched);
+    // One edit over every section: `rectOf` is the footprint (grown into the stroke before `apply` writes), `apply` the edit.
+    // Shared seam samples are then made equal. Returns the first touched section's rect.
+    landscape::BrushRect editHeights(rhi::IDevice* device,
+                                     const std::function<landscape::BrushRect(const fmt::OcLandData&)>& rectOf,
+                                     const std::function<landscape::BrushRect(fmt::OcLandData&)>& apply);
+    // Makes samples that two sections share (same world position) equal, for the ones a stroke touched; `touched` (per section)
+    // grows to cover what this changed. Heights average; weights average per layer name.
+    void matchSeams(std::vector<landscape::BrushRect>& touched, bool weights);
+    // Adds layer `name` to a section (also mid-stroke, for a section that has captured nothing yet). False without a layer table.
+    bool ensureLayerOn(SecRef s, const std::string& name, u32& outIndex);
+    void refreshWeightPlanes(SecRef s);
+    bool saveSection(u32 section, std::string* why);
+    struct Section;
+    void rebuildExtraBody(Section& e);
 
     // Loads one .ocland section and builds its quadtree over it. Pure CPU. Calls unload() first, so
     // `device` frees whatever section is currently resident before this one replaces it (null is only
@@ -453,8 +551,9 @@ private:
         u64 lastDrawn = 0;            // drawFrame_ it last drew on
 #if AVER_MODULE_PBR
         u32 mat = 0, texA = 0, texB = 0, texParams = 0;   // derived material and runtime textures (painted sections)
-        bool paramsDirty = true, weightsDirty = true;
+        bool paramsDirty = true;
 #endif
+        SectionEdit edit;
     };
     std::vector<Section> extras_;
     u64 drawFrame_ = 0;
@@ -462,22 +561,9 @@ private:
 
     // ---- authoring state ----
     std::string pathOverride_;   // see setPathOverride
-    bool dirty_ = false;         // see dirty()
-    // Heights have moved since the collision body was last built. SEPARATE FROM dirty_ on purpose:
-    // dirty_ answers "does the user have unsaved work" and is cleared by saving, while this answers
-    // "does the physics shape still describe the mesh" and is cleared by rebuilding. Saving happens
-    // to do both today, which is exactly why one flag could not serve -- a future save that skipped
-    // the rebuild would silently take collision with it. See rebuildCollisionIfStale().
-    bool collisionStale_ = false;
-
-    // Latched by applyHeightRect, drained by flushPendingInvalidate -- see each one's own comment.
-    bool pendingInvalidate_ = false;
-    u32  pendingX0_ = 0, pendingY0_ = 0, pendingX1_ = 0, pendingY1_ = 0;
-
-    // The in-progress sculpt stroke -- see beginStroke/growStroke/endStroke.
-    bool strokeActive_ = false, strokeEmpty_ = true;
-    u32  strokeX0_ = 0, strokeY0_ = 0, strokeX1_ = 0, strokeY1_ = 0;
-    std::vector<f32> strokeBefore_;
+    SectionEdit edit_;           // the primary's; each extra holds its own
+    // The shared stroke flags (a stroke spans sections); each section's captured share is in its SectionEdit.
+    bool strokeActive_ = false;
 
     fmt::OcLandData landscapeData_;
     // The scene origin the section, the ring tiles and their renderers are expressed in (zero until a host names one).
@@ -523,10 +609,7 @@ private:
 
     std::vector<LayerInfo> layerTable_;                // the material's layers (empty = no layered terrain)
     std::array<i32, 8> sectionToMaterial_{};           // section layer i -> material layer (-1 = folds into the base)
-    bool weightsDirty_ = false;
-    bool wStrokeActive_ = false, wStrokeEmpty_ = true;
-    u32  wStrokeX0_ = 0, wStrokeY0_ = 0, wStrokeX1_ = 0, wStrokeY1_ = 0, wStrokePlanes_ = 0;
-    std::vector<u8> wStrokeBefore_;
+    bool wStrokeActive_ = false;
 #if AVER_MODULE_PBR
     // Derived materials: the base terrain material copied with the section's weightmaps ("@rt:land.*") and a plain copy
     // for the ring tiles (no weightmaps: every pixel is the base layer). Handles are pbr::MaterialHandle.

@@ -229,7 +229,7 @@ Five bits of consoleLightingLegacySlot(), all default OFF (fixed behaviour):
 
 - **MaterialDesc whole payload**: EditCmd stores entire MaterialDesc before/after, not just the changed field. Controls interact (ior/reflectance, alpha/transmission), so replaying one field could restore invalid state that never existed. Undo depth 64 bounds the storage cost.
 
-- **LandscapeStroke rect diff**: stores only touched sub-rectangle before/after, not whole 512x512 section (1 MB each). One entry per stroke, not per frame; rect unioned across stroke to collapse 60-second drag into one Ctrl+Z instead of 60 Ctrl+Z.
+- **LandscapeStroke rect diff**: stores only touched sub-rectangle before/after, not whole 512x512 section (1 MB each). One entry per stroke, not per frame, carrying one rect per landscape section the stroke touched (`landHeights` / `landWeights`); rect unioned across stroke to collapse 60-second drag into one Ctrl+Z instead of 60 Ctrl+Z.
 
 - **FoliageStroke batch**: every entity created/erased in one stroke as one entry, not per-instance. Brush places dozens/second; per-instance Create would cost a hundred Ctrl+Z per drag. recreateFrom() undoes erase from snapshots.
 

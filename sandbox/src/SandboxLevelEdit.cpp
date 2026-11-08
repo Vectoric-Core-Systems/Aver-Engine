@@ -108,7 +108,9 @@ void SandboxApp::recordLandscapeInLevel() {
     lp.x = homeAbs[0];
     lp.y = homeAbs[1];
     lp.z = homeAbs[2];
-    levelHeader_.landscapes.assign(1, std::move(lp));
+    // Only the first record is the resident primary; the level's further LANDSCAPE records (extra sections) stay as they are.
+    if (levelHeader_.landscapes.empty()) levelHeader_.landscapes.push_back(std::move(lp));
+    else levelHeader_.landscapes.front() = std::move(lp);
 }
 
 // Writes the in-memory section back to the path it was loaded from. A sculpt is fully functional
@@ -119,8 +121,9 @@ void SandboxApp::saveLandscape() {
     std::string why;
     // Saving is the natural commit point for a sculpt, so it is where the collision snapshot
     // catches up with the heights -- see GameLandscape::save on why this is not done per stroke.
+    // Every dirty section goes to its own .ocland; the LANDSCAPE records (and their `at`) are left alone.
     if (landscape_.save(&why)) {
-        AVER_INFO("[Landscape] saved '{}'", landscape_.path());
+        AVER_INFO("[Landscape] saved '{}' ({} section(s) resident)", landscape_.path(), landscape_.sectionCount());
     } else {
         AVER_ERROR("[Landscape] could not save '{}': {}", landscape_.path(), why);
     }

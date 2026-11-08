@@ -389,21 +389,24 @@ void SandboxApp::generateLandscapeNoise(Engine& e) {
     EditCmd c;
     c.kind = EditCmd::Kind::LandscapeStroke;
     c.label = "Generate terrain";
-    c.landX0 = 0; c.landY0 = 0; c.landX1 = n - 1; c.landY1 = n - 1;
-    c.landBefore = landscape_.data().heights;
+    game::GameLandscape::HeightEdit he;   // the primary section: the noise params describe one section
+    he.section = 0;
+    he.x0 = 0; he.y0 = 0; he.x1 = n - 1; he.y1 = n - 1;
+    he.before = landscape_.data().heights;
 
-    c.landAfter.resize(static_cast<size_t>(n) * n);
+    he.after.resize(static_cast<size_t>(n) * n);
     for (u32 y = 0; y < n; ++y) {
         for (u32 x = 0; x < n; ++x) {
             const f32 wx = landscape_.data().originCm[0] + static_cast<f32>(x) * landscape_.data().spacingCm;
             const f32 wy = landscape_.data().originCm[1] + static_cast<f32>(y) * landscape_.data().spacingCm;
-            c.landAfter[static_cast<size_t>(y) * n + x] =
+            he.after[static_cast<size_t>(y) * n + x] =
                 landscape::terrainHeightAt(wx, wy, landscape_.noiseParams());
         }
     }
-    if (c.landBefore == c.landAfter) return;
+    if (he.before == he.after) return;
 
-    landscape_.applyHeightRect(0, 0, n - 1, n - 1, c.landAfter);
+    landscape_.applyHeightRect(0, 0, n - 1, n - 1, he.after);
+    c.landHeights.push_back(std::move(he));
     pushEdit(std::move(c));
     AVER_INFO("[Landscape] generated {}x{} samples from noise (seed {}, {} octaves)",
               n, n, landscape_.noiseParams().seed, landscape_.noiseParams().octaves);
@@ -427,7 +430,7 @@ void SandboxApp::endSculptStroke() {
     // A no-op stroke (terrain already at the flatten target, a Smooth pass over a plane) pushes no
     // entry, else every stray click would cost a Ctrl+Z that appears to do nothing; endStroke()
     // returns false for that case too.
-    if (!landscape_.endStroke(c.landBefore, c.landAfter, c.landX0, c.landY0, c.landX1, c.landY1)) return;
+    if (!landscape_.endStroke(c.landHeights)) return;   // one entry for every section the stroke touched
     pushEdit(std::move(c));
 }
 
@@ -502,7 +505,7 @@ void SandboxApp::handleFoliage(Engine& e, const ImGuiIO& io, bool overScene, f32
     viewportRay(mx, my, ro, rd);
     const f32 roA[3] = {ro.x, ro.y, ro.z}, rdA[3] = {rd.x, rd.y, rd.z};
     landscape::HeightfieldHit hit;
-    const bool haveHit = overScene && landscape::raycastHeightfield(landscape_.data(), roA, rdA, hit);
+    const bool haveHit = overScene && landscape_.raycast(roA, rdA, hit);
     if (haveHit) {
         sculptCursorValid_ = true;   // the same cursor ring the sculpt brush draws
         sculptCursor_ = Vec3{hit.posCm[0], hit.posCm[1], hit.posCm[2]};
@@ -556,7 +559,7 @@ void SandboxApp::foliagePlaceOne(Engine& e, f32 cx, f32 cy) {
     const f32 y = cy + std::sin(ang) * rad;
 
     f32 z = 0.0f;
-    if (!landscape::surfaceHeightAt(landscape_.data(), x, y, z)) return;   // off the section
+    if (!landscape_.surfaceHeightAtScene(x, y, z)) return;   // off every section
 
     // Weighted by type.weight, mirroring ChunkGenerator.cpp's pickSpecies minus the density-band
     // test (meaningless here, see OcFoliage.hpp). Weight <= 0 is never picked (matches
@@ -586,7 +589,7 @@ void SandboxApp::foliagePlaceOne(Engine& e, f32 cx, f32 cy) {
 // (LandscapePaintTool.cpp) places exactly as the brush does -- same collision test, rotation, entity and undo bookkeeping.
 void SandboxApp::foliagePlaceAt(Engine& e, const FoliageSpecies& sp, f32 x, f32 y, u32& rng) {
     f32 z = 0.0f;
-    if (!landscape::surfaceHeightAt(landscape_.data(), x, y, z)) return;   // off the section
+    if (!landscape_.surfaceHeightAtScene(x, y, z)) return;   // off every section
 
     const u64 meshId = fnv1a64(std::string_view(sp.type.meshPath));
     if (content_.meshFor(meshId) == 0) return;
@@ -615,7 +618,9 @@ void SandboxApp::foliagePlaceAt(Engine& e, const FoliageSpecies& sp, f32 x, f32 
     // eps=10cm sits inside a section's sample spacing (OcLandData::spacingCm), keeping the four
     // probes local to this instance's patch rather than blurring across samples.
     const f32 yaw = sp.type.randomizeYaw ? foliageRand(rng) * 6.2831853f : 0.0f;
-    xf.rotation = editor::foliagePlacementRotation(landscape_.data(), x, y, /*epsCm=*/10.0f, yaw,
+    const fmt::OcLandData* ground = landscape_.sectionAt(x, y);
+    if (!ground) return;
+    xf.rotation = editor::foliagePlacementRotation(*ground, x, y, /*epsCm=*/10.0f, yaw,
                                                     sp.type.alignToNormal);
     xf.scale = Vec3{sc, sc, sc};
 
@@ -1046,7 +1051,7 @@ bool SandboxApp::pickSurfacePoint(f32 screenX, f32 screenY, Vec3& out) {
         const f32 roA[3] = {ro.x, ro.y, ro.z}, rdA[3] = {rd.x, rd.y, rd.z};
         landscape::HeightfieldHit lh;
         const f32 rr = dot(rd, rd);
-        if (rr > 0.0f && landscape::raycastHeightfield(landscape_.data(), roA, rdA, lh)) {
+        if (rr > 0.0f && landscape_.raycast(roA, rdA, lh)) {
             // The heightfield reports a point (and a distance along the NORMALISED ray); the tests below
             // compare in rd's own parameter, so the point is converted back.
             const f32 t = dot(Vec3{lh.posCm[0], lh.posCm[1], lh.posCm[2]} - ro, rd) / rr;
@@ -1934,7 +1939,7 @@ void SandboxApp::handleSculpt(Engine& e, const ImGuiIO& io, bool overScene, f32 
     viewportRay(mx, my, ro, rd);
     const f32 roA[3] = {ro.x, ro.y, ro.z}, rdA[3] = {rd.x, rd.y, rd.z};
     landscape::HeightfieldHit hit;
-    const bool haveHit = overScene && landscape::raycastHeightfield(landscape_.data(), roA, rdA, hit);
+    const bool haveHit = overScene && landscape_.raycast(roA, rdA, hit);   // nearest hit among all sections
     if (haveHit) {
         sculptCursorValid_ = true;
         sculptCursor_ = Vec3{hit.posCm[0], hit.posCm[1], hit.posCm[2]};
@@ -2737,7 +2742,7 @@ void SandboxApp::snapSelectionToFloor() {
         // case, not raycastHeightfield's march.
         if (landscape_.loaded()) {
             f32 z;
-            if (landscape::surfaceHeightAt(landscape_.data(), ro.x, ro.y, z) && z < ro.z) {
+            if (landscape_.surfaceHeightAtScene(ro.x, ro.y, z) && z < ro.z) {
                 bestT = ro.z - z; hit = true; hitZ = z;
             }
         }

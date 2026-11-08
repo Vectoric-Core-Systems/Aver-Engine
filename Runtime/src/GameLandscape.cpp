@@ -59,7 +59,7 @@ bool GameLandscape::loadLandscape(rhi::IDevice* device, const std::string& path)
     landscapeRenderer_->setOrigin(frame_.x, frame_.y);
     loaded_ = true;
     landscapePath_ = path;
-    dirty_ = false;
+    edit_.dirty = false;
     // NEW HEIGHTS MEAN THE OLD SHAPE IS WRONG, and for one caller there is no shape at all.
     //
     // loadForLevel calls rebuildCollision() immediately after this returns, so for that path this
@@ -72,7 +72,7 @@ bool GameLandscape::loadLandscape(rhi::IDevice* device, const std::string& path)
     // the first thing anyone does with a new terrain is press Play and walk on it. Marking it here
     // rather than at that call site is what makes the guarantee survive the next caller of
     // loadSection, who will be just as unlikely to read that comment.
-    collisionStale_ = true;
+    edit_.collisionStale = true;
     AVER_INFO("[Landscape] '{}' loaded: {} node(s) across {} level(s), {}x{} samples",
               path, landscapeTree_.nodes().size(), landscapeTree_.levelCount(),
               landscapeData_.sampleCount, landscapeData_.sampleCount);
@@ -141,26 +141,42 @@ void GameLandscape::rebuildCollision() {
     // "the shape no longer describes the mesh, so ask again at the next moment that matters", and in
     // both of those cases asking again would fail identically -- latching it true would turn one
     // refused heightfield into a rebuild attempt on every single Play for the rest of the session.
-    collisionStale_ = false;
+    edit_.collisionStale = false;
 }
 
-// The extra sections' bodies: built at level load only (they are not editable, so nothing makes them stale).
+// The extra sections' bodies, all of them: at level load. An edited extra rebuilds only its own (rebuildExtraBody).
 void GameLandscape::rebuildExtraCollision() {
 #if AVER_MODULE_PHYSICS
     for (Section& e : extras_)
         if (e.body >= 0) { aver_phys_remove_body(e.body); e.body = -1; }
-    if (!loaded_ || extras_.empty() || !aver_phys_ready()) return;
-    registerLayerSurfaces();
-    for (Section& e : extras_) e.body = buildBody(e.data, e.remap);
-    updateSurfaceSampler();
+    if (loaded_ && !extras_.empty() && aver_phys_ready()) {
+        registerLayerSurfaces();
+        for (Section& e : extras_) e.body = buildBody(e.data, e.remap);
+        updateSurfaceSampler();
+    }
 #endif
+    for (Section& e : extras_) e.edit.collisionStale = false;   // cleared even when nothing could be built, as for the primary
+}
+
+void GameLandscape::rebuildExtraBody(Section& e) {
+#if AVER_MODULE_PHYSICS
+    if (e.body >= 0) { aver_phys_remove_body(e.body); e.body = -1; }
+    if (loaded_ && aver_phys_ready()) {
+        registerLayerSurfaces();
+        e.body = buildBody(e.data, e.remap);
+        updateSurfaceSampler();
+    }
+#endif
+    e.edit.collisionStale = false;
 }
 
 void GameLandscape::rebuildCollisionIfStale() {
     // The whole point is that this is CHEAP WHEN NOTHING MOVED: the common Play, on terrain nobody
     // has touched since it loaded, costs one branch. Only an actual edit pays for a rebuild, and
     // then exactly once rather than once per stroke.
-    if (!collisionStale_) return;
+    for (Section& e : extras_)
+        if (e.edit.collisionStale) rebuildExtraBody(e);
+    if (!edit_.collisionStale) return;
     AVER_INFO("[Landscape] heights changed since the collision body was built -- rebuilding so what "
               "you walk on matches what you sculpted");
     rebuildCollision();
@@ -187,19 +203,13 @@ void GameLandscape::unload(rhi::IDevice* device) {
     landscapeRingTiles_.clear();
     lastCameraTileValid_ = false;
 
-    dirty_ = false;
+    edit_ = SectionEdit{};
     strokeActive_ = false;
-    strokeEmpty_ = true;
-    strokeBefore_.clear();
-    pendingInvalidate_ = false;
 
     // ---- wave3 layers ----
     layerTable_.clear();
     sectionToMaterial_.fill(-1);
-    weightsDirty_ = false;
     wStrokeActive_ = false;
-    wStrokeEmpty_ = true;
-    wStrokeBefore_.clear();
 #if AVER_MODULE_PHYSICS
     aver_phys_clear_surface_sampler();
 #endif
@@ -634,7 +644,7 @@ void GameLandscape::moveFrameTo(const rhi::ShiftOrigin& o) {
         landscapeTree_.translate(moveX, moveY);
         // A painted section's parameter texture carries the section's origin (the weightmap lookup): upload it again.
         if (landscapeData_.hasLayers()) {
-            weightsDirty_ = true;
+            edit_.weightsDirty = true;
 #if AVER_MODULE_PBR
             paramsDirty_ = true;
 #endif
@@ -648,7 +658,7 @@ void GameLandscape::moveFrameTo(const rhi::ShiftOrigin& o) {
         e.tree.translate(moveX, moveY);
         if (e.renderer) e.renderer->setOrigin(frame_.x, frame_.y);
 #if AVER_MODULE_PBR
-        if (e.data.hasLayers()) e.paramsDirty = e.weightsDirty = true;   // its parameter texture carries the origin
+        if (e.data.hasLayers()) e.paramsDirty = e.edit.weightsDirty = true;   // its parameter texture carries the origin
 #endif
     }
     // Ring tiles were synthesised in the old frame; each follows by the same delta.
@@ -668,175 +678,368 @@ void GameLandscape::setOriginCm(f32 x, f32 y, f32 z) {
     landscapeData_.originCm[0] = x;
     landscapeData_.originCm[1] = y;
     landscapeData_.originCm[2] = z;
-    dirty_ = true;
+    edit_.dirty = true;
 }
 
-// Writes one stored rect of samples back into the section and rebuilds what it touched. SHARED BY
-// UNDO AND REDO, which differ only in which of the two stored buffers the caller passes as `src`.
-// The rebuild afterwards is the same work sculpt() does per tick: the quadtree's per-level error
-// and skirt values are maxima over the level, so any height change can move them.
-bool GameLandscape::applyHeightRect(u32 x0, u32 y0, u32 x1, u32 y1, const std::vector<f32>& src) {
-    if (!loaded_ || src.empty()) return false;
-    const u32 n = landscapeData_.sampleCount;
-    if (x1 >= n || y1 >= n) return false;   // section was reloaded at a different size
-    const u32 w = x1 - x0 + 1;
-    for (u32 y = y0; y <= y1; ++y)
-        for (u32 x = x0; x <= x1; ++x)
-            landscapeData_.heights[y * n + x] = src[(y - y0) * w + (x - x0)];
+// ---- sections: the primary (0) and the extras (1..) edited through one code path ----
 
-    // Bounds are derived, not stored, and applyBrush is what normally recomputes them -- writing
-    // samples directly bypasses that, so a stroke undone at the section's high point would leave
-    // boundsMax describing terrain that no longer exists, and the quadtree's culling with it.
-    landscapeData_.boundsMin[2] = landscapeData_.boundsMax[2] = landscapeData_.heights.empty() ? 0.0f
-                                                                             : landscapeData_.heights[0];
-    for (f32 h : landscapeData_.heights) {
-        landscapeData_.boundsMin[2] = std::fmin(landscapeData_.boundsMin[2], h);
-        landscapeData_.boundsMax[2] = std::fmax(landscapeData_.boundsMax[2], h);
-    }
+GameLandscape::SecRef GameLandscape::ref(u32 i) {
+    if (i == 0) return SecRef{&landscapeData_, &landscapeTree_, &landscapeRenderer_, &edit_, &sectionToMaterial_, homeAbs_, &landscapePath_};
+    Section& e = extras_[i - 1];
+    return SecRef{&e.data, &e.tree, &e.renderer, &e.edit, &e.remap, e.homeAbs, &e.path};
+}
 
-    std::string why;
-    if (!landscapeTree_.build(landscapeData_, landscapeTree_.nodeQuads(), &why)) {
-        AVER_ERROR("[Landscape] undo left the section unbuildable: {}", why);
-        return false;
-    }
-    landscapeTree_.widenRimSkirts(2.0f * landscapeNoiseParams_.amplitudeCm);
-    landscapeTree_.resetHysteresis();
+bool GameLandscape::dirty() const {
+    if (edit_.dirty) return true;
+    for (const Section& e : extras_) if (e.edit.dirty) return true;
+    return false;
+}
 
-    // THE GPU HALF IS DEFERRED ONE FRAME, why this takes no device: undo()/redo() are reachable
-    // from places with no device to hand. The heightfield and quadtree update HERE, synchronously,
-    // so queries see the undone state immediately; only the cached GPU meshes lag by a frame,
-    // invisibly (see flushPendingInvalidate).
-    pendingInvalidate_ = true;
-    pendingX0_ = x0; pendingY0_ = y0;
-    pendingX1_ = x1; pendingY1_ = y1;
-    dirty_ = true;
-    collisionStale_ = true;   // see rebuildCollisionIfStale
+bool GameLandscape::sectionDirty(u32 i) const { return i == 0 ? edit_.dirty : extras_[i - 1].edit.dirty; }
+
+const fmt::OcLandData* GameLandscape::sectionAt(f32 xCm, f32 yCm) const {
+    Hit h;
+    return findSection(xCm, yCm, h) ? h.data : nullptr;
+}
+
+bool GameLandscape::surfaceHeightAtScene(f32 xCm, f32 yCm, f32& outZ) const {
+    Hit h;
+    if (!findSection(xCm, yCm, h)) return false;
+    outZ = h.z;
     return true;
 }
 
-// Drains the invalidation applyHeightRect latches. Called once per frame from the host's own
-// render, which has the device forgetOverlapping needs.
-void GameLandscape::flushPendingInvalidate(rhi::IDevice* device) {
-    if (!pendingInvalidate_) return;
-    pendingInvalidate_ = false;
-    if (landscapeRenderer_ && device)
-        landscapeRenderer_->forgetOverlapping(*device, landscapeTree_,
-                                              pendingX0_, pendingY0_, pendingX1_, pendingY1_);
+bool GameLandscape::raycast(const f32 ro[3], const f32 rd[3], landscape::HeightfieldHit& out, u32* section, f32 maxDistCm) const {
+    bool any = false;
+    for (u32 i = 0; i < sectionCount(); ++i) {
+        landscape::HeightfieldHit h;
+        if (!landscape::raycastHeightfield(sectionData(i), ro, rd, h, maxDistCm)) continue;
+        if (!any || h.distCm < out.distCm) { out = h; any = true; if (section) *section = i; }
+    }
+    return any;
 }
 
-// Starts a stroke: remembers that nothing has been touched yet. The BEFORE samples are captured
-// lazily as the rect grows (see growStroke) rather than up front, because at stroke start the rect
-// is not known -- a drag can wander anywhere.
+// Writes one stored rect of samples back into a section and rebuilds what it touched. SHARED BY UNDO AND REDO, which differ
+// only in which of the two stored buffers the caller passes as `src`. The tree rebuild is the same work a sculpt tick does:
+// its per-level error and skirt values are maxima over the level, so any height change can move them.
+bool GameLandscape::applyHeightRectIn(SecRef s, u32 x0, u32 y0, u32 x1, u32 y1, const std::vector<f32>& src) {
+    fmt::OcLandData& d = *s.data;
+    if (src.empty() || x0 > x1 || y0 > y1) return false;
+    const u32 n = d.sampleCount;
+    if (x1 >= n || y1 >= n) return false;   // section was reloaded at a different size
+    const u32 w = x1 - x0 + 1;
+    if (src.size() != static_cast<usize>(w) * (y1 - y0 + 1)) return false;
+    for (u32 y = y0; y <= y1; ++y)
+        for (u32 x = x0; x <= x1; ++x)
+            d.heights[y * n + x] = src[(y - y0) * w + (x - x0)];
+
+    // Bounds are derived, and applyBrush is what normally recomputes them: a stroke undone at the high point would otherwise
+    // leave boundsMax describing terrain that no longer exists.
+    d.boundsMin[2] = d.boundsMax[2] = d.heights.empty() ? 0.0f : d.heights[0];
+    for (f32 h : d.heights) {
+        d.boundsMin[2] = std::fmin(d.boundsMin[2], h);
+        d.boundsMax[2] = std::fmax(d.boundsMax[2], h);
+    }
+
+    std::string why;
+    if (!s.tree->build(d, s.tree->nodeQuads(), &why)) {
+        AVER_ERROR("[Landscape] undo left the section unbuildable: {}", why);
+        return false;
+    }
+    s.tree->widenRimSkirts(2.0f * landscapeNoiseParams_.amplitudeCm);
+    s.tree->resetHysteresis();
+
+    // THE GPU HALF IS DEFERRED ONE FRAME, which is why this takes no device: undo()/redo() are reachable from places with none.
+    // The heightfield and quadtree update here so queries see the undone state at once; only the cached meshes lag.
+    SectionEdit& ed = *s.edit;
+    ed.pendingInvalidate = true;
+    ed.pendingX0 = x0; ed.pendingY0 = y0;
+    ed.pendingX1 = x1; ed.pendingY1 = y1;
+    ed.dirty = true;
+    ed.collisionStale = true;   // see rebuildCollisionIfStale
+    return true;
+}
+
+bool GameLandscape::applyHeightRect(u32 x0, u32 y0, u32 x1, u32 y1, const std::vector<f32>& src) {
+    return applyHeightRect(0, x0, y0, x1, y1, src);
+}
+
+bool GameLandscape::applyHeightRect(u32 section, u32 x0, u32 y0, u32 x1, u32 y1, const std::vector<f32>& src) {
+    if (!loaded_ || section >= sectionCount()) return false;
+    return applyHeightRectIn(ref(section), x0, y0, x1, y1, src);
+}
+
+// Drains the invalidation applyHeightRect latches. Called once per frame from the host's own render, which has the device.
+void GameLandscape::flushPendingInvalidate(rhi::IDevice* device) {
+    for (u32 i = 0; i < sectionCount(); ++i) {
+        SecRef s = ref(i);
+        SectionEdit& ed = *s.edit;
+        if (!ed.pendingInvalidate) continue;
+        ed.pendingInvalidate = false;
+        if (*s.renderer && device)
+            (*s.renderer)->forgetOverlapping(*device, *s.tree, ed.pendingX0, ed.pendingY0, ed.pendingX1, ed.pendingY1);
+    }
+}
+
+// Starts a stroke: nothing touched yet. The BEFORE samples are captured lazily as the rect grows (see growHeightStroke),
+// because at stroke start the rect is not known -- a drag can wander anywhere, and across sections.
 void GameLandscape::beginStroke() {
     strokeActive_ = true;
-    strokeEmpty_ = true;
-    strokeBefore_.clear();
+    for (u32 i = 0; i < sectionCount(); ++i) {
+        SectionEdit& ed = *ref(i).edit;
+        ed.strokeEmpty = true;
+        ed.strokeBefore.clear();
+    }
 }
 
-// Unions this tick's touched rect into the stroke's, capturing the pre-stroke heights of anything
-// newly covered.
-// THE ORDER MATTERS: this must run BEFORE the tick's own brush write, or the "before" it captures
-// is already the "after".
-void GameLandscape::growStroke(const landscape::BrushRect& r) {
+// Unions this tick's touched rect into a section's share of the stroke, capturing the pre-stroke heights of anything newly
+// covered. THE ORDER MATTERS: this must run BEFORE the tick's own write, or the "before" it captures is already the "after".
+void GameLandscape::growHeightStroke(SecRef s, const landscape::BrushRect& r) {
+    SectionEdit& ed = *s.edit;
     if (r.empty || !strokeActive_) return;
-    const u32 n = landscapeData_.sampleCount;
+    const fmt::OcLandData& d = *s.data;
+    const u32 n = d.sampleCount;
     u32 nx0 = r.x0, ny0 = r.y0, nx1 = r.x1, ny1 = r.y1;
-    if (!strokeEmpty_) {
-        nx0 = std::min(nx0, strokeX0_); ny0 = std::min(ny0, strokeY0_);
-        nx1 = std::max(nx1, strokeX1_); ny1 = std::max(ny1, strokeY1_);
+    if (!ed.strokeEmpty) {
+        nx0 = std::min(nx0, ed.strokeX0); ny0 = std::min(ny0, ed.strokeY0);
+        nx1 = std::max(nx1, ed.strokeX1); ny1 = std::max(ny1, ed.strokeY1);
     }
     if (nx1 >= n || ny1 >= n) return;
 
-    // The rect grew, so the captured buffer has to be rebuilt at the new size. Samples already
-    // inside the old rect keep their ORIGINAL pre-stroke value -- copied across from the old
-    // buffer, not re-read from the section, which by now holds painted values.
+    // The rect grew, so the captured buffer is rebuilt at the new size. Samples already inside the old rect keep their ORIGINAL
+    // pre-stroke value (copied across from the old buffer, not re-read from the section, which holds painted values by now).
     const u32 nw = nx1 - nx0 + 1, nh = ny1 - ny0 + 1;
     std::vector<f32> grown(static_cast<size_t>(nw) * nh);
     for (u32 y = ny0; y <= ny1; ++y) {
         for (u32 x = nx0; x <= nx1; ++x) {
-            const bool inOld = !strokeEmpty_ && x >= strokeX0_ && x <= strokeX1_ &&
-                               y >= strokeY0_ && y <= strokeY1_;
+            const bool inOld = !ed.strokeEmpty && x >= ed.strokeX0 && x <= ed.strokeX1 &&
+                               y >= ed.strokeY0 && y <= ed.strokeY1;
             grown[(y - ny0) * nw + (x - nx0)] =
-                inOld ? strokeBefore_[(y - strokeY0_) * (strokeX1_ - strokeX0_ + 1) + (x - strokeX0_)]
-                      : landscapeData_.heights[y * n + x];
+                inOld ? ed.strokeBefore[(y - ed.strokeY0) * (ed.strokeX1 - ed.strokeX0 + 1) + (x - ed.strokeX0)]
+                      : d.heights[y * n + x];
         }
     }
-    strokeBefore_ = std::move(grown);
-    strokeX0_ = nx0; strokeY0_ = ny0; strokeX1_ = nx1; strokeY1_ = ny1;
-    strokeEmpty_ = false;
+    ed.strokeBefore = std::move(grown);
+    ed.strokeX0 = nx0; ed.strokeY0 = ny0; ed.strokeX1 = nx1; ed.strokeY1 = ny1;
+    ed.strokeEmpty = false;
 }
 
-// Ends a stroke and reports what changed, for the caller to turn into one undo entry.
-bool GameLandscape::endStroke(std::vector<f32>& before, std::vector<f32>& after,
-                               u32& x0, u32& y0, u32& x1, u32& y1) {
+void GameLandscape::growStroke(const landscape::BrushRect& r) {
+    if (loaded_) growHeightStroke(ref(0), r);
+}
+
+// Ends a stroke and lists what changed, per section, for the caller to turn into ONE undo entry.
+bool GameLandscape::endStroke(std::vector<HeightEdit>& out) {
+    out.clear();
     if (!strokeActive_) return false;
     strokeActive_ = false;
-    if (strokeEmpty_ || !loaded_) { strokeBefore_.clear(); return false; }
+    for (u32 i = 0; i < sectionCount(); ++i) {
+        SecRef s = ref(i);
+        SectionEdit& ed = *s.edit;
+        if (ed.strokeEmpty) { ed.strokeBefore.clear(); continue; }
+        const u32 n = s.data->sampleCount;
+        HeightEdit he;
+        he.section = i;
+        he.x0 = ed.strokeX0; he.y0 = ed.strokeY0; he.x1 = ed.strokeX1; he.y1 = ed.strokeY1;
+        const u32 w = he.x1 - he.x0 + 1, h = he.y1 - he.y0 + 1;
+        he.after.resize(static_cast<size_t>(w) * h);
+        for (u32 y = he.y0; y <= he.y1; ++y)
+            for (u32 x = he.x0; x <= he.x1; ++x)
+                he.after[(y - he.y0) * w + (x - he.x0)] = s.data->heights[y * n + x];
+        he.before = std::move(ed.strokeBefore);
+        ed.strokeBefore.clear();
+        ed.strokeEmpty = true;
+        // A stroke that changed nothing (clicking on terrain already at the flatten target, a Smooth pass over a plane) makes
+        // no entry; otherwise every stray click would cost a Ctrl+Z that appears to do nothing.
+        if (he.before != he.after) out.push_back(std::move(he));
+    }
+    return !out.empty();
+}
 
-    const u32 n = landscapeData_.sampleCount;
-    const u32 w = strokeX1_ - strokeX0_ + 1, h = strokeY1_ - strokeY0_ + 1;
-    after.resize(static_cast<size_t>(w) * h);
-    for (u32 y = strokeY0_; y <= strokeY1_; ++y)
-        for (u32 x = strokeX0_; x <= strokeX1_; ++x)
-            after[(y - strokeY0_) * w + (x - strokeX0_)] = landscapeData_.heights[y * n + x];
-    before = std::move(strokeBefore_);
-    x0 = strokeX0_; y0 = strokeY0_; x1 = strokeX1_; y1 = strokeY1_;
+// The primary's share only (the older, single-section form).
+bool GameLandscape::endStroke(std::vector<f32>& before, std::vector<f32>& after, u32& x0, u32& y0, u32& x1, u32& y1) {
+    std::vector<HeightEdit> all;
+    endStroke(all);
+    for (HeightEdit& he : all) {
+        if (he.section != 0) continue;
+        before = std::move(he.before); after = std::move(he.after);
+        x0 = he.x0; y0 = he.y0; x1 = he.x1; y1 = he.y1;
+        return true;
+    }
+    return false;
+}
 
-    // A stroke that changed nothing -- clicking on terrain already at the flatten target, or a
-    // Smooth pass over a plane -- reports no entry. Otherwise every stray click would cost the
-    // user a Ctrl+Z that appears to do nothing.
-    if (before == after) { strokeBefore_.clear(); return false; }
-    strokeBefore_.clear();
+// The tail of a height edit on one section.
+void GameLandscape::sectionHeightsChanged(SecRef s, rhi::IDevice* device, const landscape::BrushRect& touched) {
+    fmt::OcLandData& d = *s.data;
+    // applyBrush recomputes the bounds itself; a seam match or a carve writes samples directly.
+    d.boundsMin[2] = d.boundsMax[2] = d.heights.empty() ? 0.0f : d.heights[0];
+    for (f32 h : d.heights) {
+        d.boundsMin[2] = std::fmin(d.boundsMin[2], h);
+        d.boundsMax[2] = std::fmax(d.boundsMax[2], h);
+    }
+    // REBUILDS THE WHOLE TREE, not just the touched nodes: LandscapeTree::build() has no incremental form (a coarser node's
+    // errorCm/skirtCm/radius are per-level MAXIMA). Proportional to the section's sample count; only the GPU mesh cache
+    // invalidation below is footprint-local.
+    std::string why;
+    if (s.tree->build(d, s.tree->nodeQuads(), &why)) {
+        s.tree->widenRimSkirts(2.0f * landscapeNoiseParams_.amplitudeCm);
+        s.tree->resetHysteresis();
+        if (*s.renderer && device)
+            (*s.renderer)->forgetOverlapping(*device, *s.tree, touched.x0, touched.y0, touched.x1, touched.y1);
+    } else {
+        AVER_ERROR("[Landscape] a height edit left the section unbuildable: {}", why);
+    }
+    s.edit->dirty = true;
+    s.edit->collisionStale = true;   // see rebuildCollisionIfStale
+}
+
+namespace {
+
+void unionRect(landscape::BrushRect& r, u32 x, u32 y) {
+    if (r.empty) { r.x0 = r.x1 = x; r.y0 = r.y1 = y; r.empty = false; return; }
+    r.x0 = std::min(r.x0, x); r.x1 = std::max(r.x1, x);
+    r.y0 = std::min(r.y0, y); r.y1 = std::max(r.y1, y);
+}
+
+bool inRect(const landscape::BrushRect& r, u32 x, u32 y) {
+    return !r.empty && x >= r.x0 && x <= r.x1 && y >= r.y0 && y <= r.y1;
+}
+
+// The sample of `b` at the same world position as sample (ax, ay) of `a`, if it lies on b's grid.
+bool coincident(const fmt::OcLandData& a, u32 ax, u32 ay, const fmt::OcLandData& b, u32& bx, u32& by) {
+    const f32 wx = a.originCm[0] + static_cast<f32>(ax) * a.spacingCm;
+    const f32 wy = a.originCm[1] + static_cast<f32>(ay) * a.spacingCm;
+    const f32 fx = (wx - b.originCm[0]) / b.spacingCm, fy = (wy - b.originCm[1]) / b.spacingCm;
+    const f32 rx = std::round(fx), ry = std::round(fy);
+    if (std::fabs(fx - rx) > 0.01f || std::fabs(fy - ry) > 0.01f) return false;
+    if (rx < 0.0f || ry < 0.0f || rx >= static_cast<f32>(b.sampleCount) || ry >= static_cast<f32>(b.sampleCount)) return false;
+    bx = static_cast<u32>(rx); by = static_cast<u32>(ry);
     return true;
 }
 
-// One sculpt tick: grows the active stroke over the brush's footprint (before applying it, so the
-// "before" growStroke captures is not already the "after"), applies the brush, and -- if anything
-// was touched -- rebuilds whatever it may have moved.
-landscape::BrushRect GameLandscape::sculpt(rhi::IDevice* device, const landscape::BrushParams& p, f32 amount) {
-    growStroke(landscape::brushRect(landscapeData_, p));
+} // namespace
 
-    const landscape::BrushRect touched = landscape::applyBrush(landscapeData_, p, amount);
-    if (!touched.empty) {
-        // REBUILDS THE WHOLE TREE, not just the touched nodes: LandscapeTree::build() has no
-        // incremental form (a coarser node's errorCm/skirtCm/radius are per-level MAXIMA, so a
-        // local change can in principle move any of them). Proportional to the section's total
-        // sample count, not the brush footprint -- cheap here, but real on a large section. Only
-        // the GPU mesh cache invalidation below is footprint-local.
-        std::string why;
-        if (landscapeTree_.build(landscapeData_, landscapeTree_.nodeQuads(), &why)) {
-            landscapeTree_.widenRimSkirts(2.0f * landscapeNoiseParams_.amplitudeCm);
-            landscapeTree_.resetHysteresis();
-            if (landscapeRenderer_ && device)
-                landscapeRenderer_->forgetOverlapping(*device, landscapeTree_,
-                                                       touched.x0, touched.y0, touched.x1, touched.y1);
-        } else {
-            AVER_ERROR("[Landscape] sculpt left the section unbuildable: {}", why);
+void GameLandscape::matchSeams(std::vector<landscape::BrushRect>& touched, bool weights) {
+    const u32 count = static_cast<u32>(touched.size());
+    for (u32 ia = 0; ia < count; ++ia) {
+        for (u32 ib = ia + 1; ib < count; ++ib) {
+            if (touched[ia].empty && touched[ib].empty) continue;
+            SecRef sa = ref(ia), sb = ref(ib);
+            fmt::OcLandData& a = *sa.data;
+            fmt::OcLandData& b = *sb.data;
+            const f32 eps = 0.01f * std::min(a.spacingCm, b.spacingCm);
+            if (a.boundsMax[0] < b.boundsMin[0] - eps || b.boundsMax[0] < a.boundsMin[0] - eps ||
+                a.boundsMax[1] < b.boundsMin[1] - eps || b.boundsMax[1] < a.boundsMin[1] - eps) continue;
+            // a's samples inside the overlap of the two footprints (a line of samples for neighbours).
+            const f32 lx = std::max(a.boundsMin[0], b.boundsMin[0]) - eps, hx = std::min(a.boundsMax[0], b.boundsMax[0]) + eps;
+            const f32 ly = std::max(a.boundsMin[1], b.boundsMin[1]) - eps, hy = std::min(a.boundsMax[1], b.boundsMax[1]) + eps;
+            const f32 ix0 = std::ceil((lx - a.originCm[0]) / a.spacingCm), ix1 = std::floor((hx - a.originCm[0]) / a.spacingCm);
+            const f32 iy0 = std::ceil((ly - a.originCm[1]) / a.spacingCm), iy1 = std::floor((hy - a.originCm[1]) / a.spacingCm);
+            if (ix1 < 0.0f || iy1 < 0.0f) continue;
+            const u32 x0 = static_cast<u32>(std::max(ix0, 0.0f)), x1 = std::min(static_cast<u32>(ix1), a.sampleCount - 1);
+            const u32 y0 = static_cast<u32>(std::max(iy0, 0.0f)), y1 = std::min(static_cast<u32>(iy1), a.sampleCount - 1);
+            for (u32 y = y0; y <= y1; ++y) {
+                for (u32 x = x0; x <= x1; ++x) {
+                    u32 bx = 0, by = 0;
+                    if (!coincident(a, x, y, b, bx, by)) continue;
+                    if (!inRect(touched[ia], x, y) && !inRect(touched[ib], bx, by)) continue;
+                    const usize pa = static_cast<usize>(y) * a.sampleCount + x, pb = static_cast<usize>(by) * b.sampleCount + bx;
+                    if (!weights) {
+                        const f32 ha = a.heights[pa], hb = b.heights[pb];
+                        if (ha == hb) continue;
+                        const f32 m = 0.5f * (ha + hb);
+                        // Not yet in a section's share of the stroke? Capture it before it changes.
+                        growHeightStroke(sa, landscape::BrushRect{x, y, x, y, false});
+                        growHeightStroke(sb, landscape::BrushRect{bx, by, bx, by, false});
+                        a.heights[pa] = b.heights[pb] = m;
+                    } else {
+                        // Per layer name: both sections' stored planes (layer 0 is implicit) move to their mean.
+                        bool changed = false;
+                        for (usize la = 1; la < a.layerNames.size(); ++la) {
+                            usize lb = 1;
+                            while (lb < b.layerNames.size() && b.layerNames[lb] != a.layerNames[la]) ++lb;
+                            if (lb >= b.layerNames.size()) continue;
+                            const usize na = static_cast<usize>(a.sampleCount) * a.sampleCount, nb = static_cast<usize>(b.sampleCount) * b.sampleCount;
+                            u8& wa = a.weights[(la - 1) * na + pa];
+                            u8& wb = b.weights[(lb - 1) * nb + pb];
+                            if (wa == wb) continue;
+                            if (!changed) {
+                                growWeightStrokeIn(sa, landscape::BrushRect{x, y, x, y, false});
+                                growWeightStrokeIn(sb, landscape::BrushRect{bx, by, bx, by, false});
+                                changed = true;
+                            }
+                            wa = wb = static_cast<u8>((static_cast<u32>(wa) + wb + 1) / 2);
+                        }
+                        if (!changed) continue;
+                    }
+                    unionRect(touched[ia], x, y);
+                    unionRect(touched[ib], bx, by);
+                }
+            }
         }
-        dirty_ = true;
-        collisionStale_ = true;   // see rebuildCollisionIfStale
     }
-    return touched;
 }
 
-// Writes the resident section back to path(). A sculpt is fully functional in memory without this;
-// it's the one place edits actually reach disk.
+landscape::BrushRect GameLandscape::editHeights(rhi::IDevice* device,
+                                                const std::function<landscape::BrushRect(const fmt::OcLandData&)>& rectOf,
+                                                const std::function<landscape::BrushRect(fmt::OcLandData&)>& apply) {
+    landscape::BrushRect first{};
+    if (!loaded_) return first;
+    const u32 count = sectionCount();
+    std::vector<landscape::BrushRect> touched(count);
+    for (u32 i = 0; i < count; ++i) {
+        SecRef s = ref(i);
+        growHeightStroke(s, rectOf(*s.data));   // BEFORE the write
+        touched[i] = apply(*s.data);
+    }
+    if (count > 1) matchSeams(touched, false);
+    for (u32 i = 0; i < count; ++i) {
+        if (touched[i].empty) continue;
+        sectionHeightsChanged(ref(i), device, touched[i]);
+        if (first.empty) first = touched[i];
+    }
+    return first;
+}
+
+// One sculpt tick on every section the brush reaches.
+landscape::BrushRect GameLandscape::sculpt(rhi::IDevice* device, const landscape::BrushParams& p, f32 amount) {
+    return editHeights(device, [&](const fmt::OcLandData& d) { return landscape::brushRect(d, p); },
+                       [&](fmt::OcLandData& d) { return landscape::applyBrush(d, p, amount); });
+}
+
+// Writes one section back to its own file. The sidecar is ABSOLUTE: the exact origin goes out and the scene-frame one is put
+// back (at origin zero both are the same f32). A saved section's collision body catches up with its heights.
+bool GameLandscape::saveSection(u32 section, std::string* why) {
+    SecRef s = ref(section);
+    if (s.path->empty()) return false;
+    fmt::OcLandData& d = *s.data;
+    const f32 localOx = d.originCm[0], localOy = d.originCm[1];
+    d.originCm[0] = static_cast<f32>(s.homeAbs[0]);
+    d.originCm[1] = static_cast<f32>(s.homeAbs[1]);
+    const bool wrote = fmt::saveOcLand(*s.path, d, why);
+    d.originCm[0] = localOx;
+    d.originCm[1] = localOy;
+    if (!wrote) return false;
+    s.edit->dirty = false;
+    if (section == 0) rebuildCollision(); else rebuildExtraBody(extras_[section - 1]);
+    return true;
+}
+
+// Writes the primary back to path() and every dirty extra to its own file. A sculpt is fully functional in memory without
+// this; it is the one place edits reach disk, and the one deliberate commit point for collision (never rebuilt per stroke).
 bool GameLandscape::save(std::string* why) {
     if (!loaded_ || landscapePath_.empty()) return false;
-    // The sidecar is ABSOLUTE: write the exact origin, then put the scene-frame one back. At origin zero both are the same f32.
-    const f32 localOx = landscapeData_.originCm[0], localOy = landscapeData_.originCm[1];
-    landscapeData_.originCm[0] = static_cast<f32>(homeAbs_[0]);
-    landscapeData_.originCm[1] = static_cast<f32>(homeAbs_[1]);
-    const bool wrote = fmt::saveOcLand(landscapePath_, landscapeData_, why);
-    landscapeData_.originCm[0] = localOx;
-    landscapeData_.originCm[1] = localOy;
-    if (!wrote) return false;
-    dirty_ = false;
-    // Saving is the natural commit point for a sculpt, so it is where the collision snapshot
-    // catches up with the heights -- see rebuildCollision's own comment on why this is not done
-    // per stroke.
-    rebuildCollision();
-    return true;
+    bool ok = saveSection(0, why);
+    for (u32 i = 1; i < sectionCount(); ++i) {
+        if (!extras_[i - 1].edit.dirty || extras_[i - 1].path.empty()) continue;
+        std::string w;
+        if (!saveSection(i, &w)) {
+            ok = false;
+            if (why && why->empty()) *why = extras_[i - 1].path + ": " + w;
+        }
+    }
+    return ok;
 }
 
 // ---- wave3 layers ----
@@ -863,11 +1066,11 @@ void GameLandscape::remapFor(const fmt::OcLandData& d, std::array<i32, 8>& out) 
 
 void GameLandscape::rebuildRemap() {
     remapFor(landscapeData_, sectionToMaterial_);
-    weightsDirty_ = true;
+    edit_.weightsDirty = true;
     for (Section& e : extras_) {
         remapFor(e.data, e.remap);
 #if AVER_MODULE_PBR
-        e.weightsDirty = true;
+        e.edit.weightsDirty = true;
 #endif
     }
 }
@@ -911,109 +1114,210 @@ void GameLandscape::updateSurfaceSampler() {
 #endif
 }
 
+bool GameLandscape::ensureLayerOn(SecRef s, const std::string& name, u32& outIndex) {
+    if (!loaded_ || layerTable_.empty()) return false;
+    fmt::OcLandData& d = *s.data;
+    if (!d.hasLayers()) {
+        u32 base = 0;
+        if (!landscape::ensureLayer(d, layerTable_.front().name, base)) return false;
+    }
+    if (!landscape::ensureLayer(d, name, outIndex)) return false;
+    s.edit->dirty = true;
+    remapFor(d, *s.remap);
+    s.edit->weightsDirty = true;
+    return true;
+}
+
 bool GameLandscape::ensureLayer(const std::string& name, u32& outIndex) {
     if (!loaded_ || wStrokeActive_ || layerTable_.empty()) return false;
-    if (!landscapeData_.hasLayers()) {
-        u32 base = 0;
-        if (!landscape::ensureLayer(landscapeData_, layerTable_.front().name, base)) return false;
-    }
-    if (!landscape::ensureLayer(landscapeData_, name, outIndex)) return false;
-    dirty_ = true;
+    if (!ensureLayerOn(ref(0), name, outIndex)) return false;
     rebuildRemap();
     return true;
 }
 
-bool GameLandscape::removeLayer(u32 index) {
-    if (!loaded_ || wStrokeActive_ || !landscape::removeLayer(landscapeData_, index)) return false;
-    dirty_ = true;
-    rebuildRemap();
+bool GameLandscape::removeLayer(u32 index) { return removeLayer(0, index); }
+
+bool GameLandscape::removeLayer(u32 section, u32 index) {
+    if (!loaded_ || wStrokeActive_ || section >= sectionCount()) return false;
+    SecRef s = ref(section);
+    if (!landscape::removeLayer(*s.data, index)) return false;
+    s.edit->dirty = true;
+    remapFor(*s.data, *s.remap);
+    s.edit->weightsDirty = true;
     return true;
+}
+
+// A section whose weight stroke has captured nothing yet takes the plane count it has NOW (a layer may have just been added).
+void GameLandscape::refreshWeightPlanes(SecRef s) {
+    if (!s.edit->wEmpty) return;
+    s.edit->wPlanes = s.data->layerNames.empty() ? 0u : static_cast<u32>(s.data->layerNames.size() - 1);
 }
 
 void GameLandscape::fillLayer(u32 layer) {
     if (!loaded_ || !landscapeData_.layersValid() || layer >= landscapeData_.layerNames.size()) return;
     if (wStrokeActive_) growWeightStroke(landscape::BrushRect{0, 0, landscapeData_.sampleCount - 1, landscapeData_.sampleCount - 1, false});
     landscape::fillLayer(landscapeData_, layer);
-    weightsDirty_ = dirty_ = true;
+    edit_.weightsDirty = edit_.dirty = true;
 }
 
 void GameLandscape::autoFillBySlope(u32 layer, f32 minSlopeDeg, f32 maxSlopeDeg, f32 minZCm, f32 maxZCm, f32 featherDeg, f32 amount) {
     if (!loaded_ || !landscapeData_.layersValid() || layer >= landscapeData_.layerNames.size()) return;
     if (wStrokeActive_) growWeightStroke(landscape::BrushRect{0, 0, landscapeData_.sampleCount - 1, landscapeData_.sampleCount - 1, false});
     landscape::autoFillBySlope(landscapeData_, layer, minSlopeDeg, maxSlopeDeg, minZCm, maxZCm, featherDeg, amount);
-    weightsDirty_ = dirty_ = true;
+    edit_.weightsDirty = edit_.dirty = true;
+}
+
+void GameLandscape::fillLayerAll(const std::string& layerName) {
+    for (u32 i = 0; i < sectionCount(); ++i) {
+        SecRef s = ref(i);
+        u32 idx = 0;
+        if (!ensureLayerOn(s, layerName, idx)) continue;
+        refreshWeightPlanes(s);
+        const u32 n = s.data->sampleCount;
+        if (wStrokeActive_) growWeightStrokeIn(s, landscape::BrushRect{0, 0, n - 1, n - 1, false});
+        landscape::fillLayer(*s.data, idx);
+        s.edit->weightsDirty = s.edit->dirty = true;
+    }
+}
+
+void GameLandscape::autoFillBySlopeAll(const std::string& layerName, f32 minSlopeDeg, f32 maxSlopeDeg, f32 minZCm, f32 maxZCm,
+                                       f32 featherDeg, f32 amount) {
+    for (u32 i = 0; i < sectionCount(); ++i) {
+        SecRef s = ref(i);
+        u32 idx = 0;
+        if (!ensureLayerOn(s, layerName, idx)) continue;
+        refreshWeightPlanes(s);
+        const u32 n = s.data->sampleCount;
+        if (wStrokeActive_) growWeightStrokeIn(s, landscape::BrushRect{0, 0, n - 1, n - 1, false});
+        landscape::autoFillBySlope(*s.data, idx, minSlopeDeg, maxSlopeDeg, minZCm, maxZCm, featherDeg, amount);
+        s.edit->weightsDirty = s.edit->dirty = true;
+    }
 }
 
 landscape::BrushRect GameLandscape::paint(rhi::IDevice*, const landscape::PaintParams& p, f32 amount) {
     if (!loaded_ || !landscapeData_.layersValid()) return landscape::BrushRect{};
     growWeightStroke(landscape::paintRect(landscapeData_, p));
     const landscape::BrushRect touched = landscape::applyPaint(landscapeData_, p, amount);
-    if (!touched.empty) weightsDirty_ = dirty_ = true;
+    if (!touched.empty) edit_.weightsDirty = edit_.dirty = true;
     return touched;
+}
+
+landscape::BrushRect GameLandscape::paint(rhi::IDevice*, const landscape::PaintParams& p, f32 amount, const std::string& layerName) {
+    landscape::BrushRect first{};
+    if (!loaded_ || layerTable_.empty()) return first;
+    const u32 count = sectionCount();
+    std::vector<landscape::BrushRect> touched(count);
+    for (u32 i = 0; i < count; ++i) {
+        SecRef s = ref(i);
+        if (landscape::paintRect(*s.data, p).empty) continue;   // the brush does not reach this section
+        landscape::PaintParams q = p;
+        if (!ensureLayerOn(s, layerName, q.layer)) continue;
+        refreshWeightPlanes(s);   // the layer may have just joined the section; nothing of it is captured yet
+        growWeightStrokeIn(s, landscape::paintRect(*s.data, q));
+        touched[i] = landscape::applyPaint(*s.data, q, amount);
+    }
+    if (count > 1) matchSeams(touched, true);
+    for (u32 i = 0; i < count; ++i) {
+        if (touched[i].empty) continue;
+        ref(i).edit->weightsDirty = ref(i).edit->dirty = true;
+        if (first.empty) first = touched[i];
+    }
+    return first;
 }
 
 void GameLandscape::beginWeightStroke() {
     wStrokeActive_ = true;
-    wStrokeEmpty_ = true;
-    wStrokeBefore_.clear();
-    wStrokePlanes_ = landscapeData_.layerNames.empty() ? 0u : static_cast<u32>(landscapeData_.layerNames.size() - 1);
+    for (u32 i = 0; i < sectionCount(); ++i) {
+        SectionEdit& ed = *ref(i).edit;
+        ed.wEmpty = true;
+        ed.wBefore.clear();
+        refreshWeightPlanes(ref(i));
+    }
 }
 
-void GameLandscape::growWeightStroke(const landscape::BrushRect& r) {
-    if (r.empty || !wStrokeActive_ || wStrokePlanes_ == 0) return;
-    const u32 n = landscapeData_.sampleCount;
+void GameLandscape::growWeightStrokeIn(SecRef s, const landscape::BrushRect& r) {
+    SectionEdit& ed = *s.edit;
+    const fmt::OcLandData& d = *s.data;
+    if (r.empty || !wStrokeActive_ || ed.wPlanes == 0) return;
+    const u32 n = d.sampleCount;
     const usize nn = static_cast<usize>(n) * n;
-    if (landscapeData_.weights.size() < static_cast<usize>(wStrokePlanes_) * nn) return;
+    if (d.weights.size() < static_cast<usize>(ed.wPlanes) * nn) return;
     u32 nx0 = r.x0, ny0 = r.y0, nx1 = r.x1, ny1 = r.y1;
-    if (!wStrokeEmpty_) {
-        nx0 = std::min(nx0, wStrokeX0_); ny0 = std::min(ny0, wStrokeY0_);
-        nx1 = std::max(nx1, wStrokeX1_); ny1 = std::max(ny1, wStrokeY1_);
+    if (!ed.wEmpty) {
+        nx0 = std::min(nx0, ed.wX0); ny0 = std::min(ny0, ed.wY0);
+        nx1 = std::max(nx1, ed.wX1); ny1 = std::max(ny1, ed.wY1);
     }
     if (nx1 >= n || ny1 >= n) return;
     // Re-capture at the grown size: samples already inside the old rect keep their ORIGINAL pre-stroke value.
     const u32 nw = nx1 - nx0 + 1, nh = ny1 - ny0 + 1;
-    const usize oldW = wStrokeEmpty_ ? 0 : wStrokeX1_ - wStrokeX0_ + 1, oldH = wStrokeEmpty_ ? 0 : wStrokeY1_ - wStrokeY0_ + 1;
-    std::vector<u8> grown(static_cast<usize>(wStrokePlanes_) * nw * nh);
-    for (u32 pl = 0; pl < wStrokePlanes_; ++pl)
+    const usize oldW = ed.wEmpty ? 0 : ed.wX1 - ed.wX0 + 1, oldH = ed.wEmpty ? 0 : ed.wY1 - ed.wY0 + 1;
+    std::vector<u8> grown(static_cast<usize>(ed.wPlanes) * nw * nh);
+    for (u32 pl = 0; pl < ed.wPlanes; ++pl)
         for (u32 y = ny0; y <= ny1; ++y)
             for (u32 x = nx0; x <= nx1; ++x) {
-                const bool inOld = !wStrokeEmpty_ && x >= wStrokeX0_ && x <= wStrokeX1_ && y >= wStrokeY0_ && y <= wStrokeY1_;
+                const bool inOld = !ed.wEmpty && x >= ed.wX0 && x <= ed.wX1 && y >= ed.wY0 && y <= ed.wY1;
                 grown[(static_cast<usize>(pl) * nh + (y - ny0)) * nw + (x - nx0)] =
-                    inOld ? wStrokeBefore_[(static_cast<usize>(pl) * oldH + (y - wStrokeY0_)) * oldW + (x - wStrokeX0_)]
-                          : landscapeData_.weights[static_cast<usize>(pl) * nn + static_cast<usize>(y) * n + x];
+                    inOld ? ed.wBefore[(static_cast<usize>(pl) * oldH + (y - ed.wY0)) * oldW + (x - ed.wX0)]
+                          : d.weights[static_cast<usize>(pl) * nn + static_cast<usize>(y) * n + x];
             }
-    wStrokeBefore_ = std::move(grown);
-    wStrokeX0_ = nx0; wStrokeY0_ = ny0; wStrokeX1_ = nx1; wStrokeY1_ = ny1;
-    wStrokeEmpty_ = false;
+    ed.wBefore = std::move(grown);
+    ed.wX0 = nx0; ed.wY0 = ny0; ed.wX1 = nx1; ed.wY1 = ny1;
+    ed.wEmpty = false;
 }
 
-bool GameLandscape::endWeightStroke(std::vector<u8>& before, std::vector<u8>& after, u32& x0, u32& y0, u32& x1, u32& y1, u32& planes) {
+void GameLandscape::growWeightStroke(const landscape::BrushRect& r) {
+    if (loaded_) growWeightStrokeIn(ref(0), r);
+}
+
+bool GameLandscape::endWeightStroke(std::vector<WeightEdit>& out) {
+    out.clear();
     if (!wStrokeActive_) return false;
     wStrokeActive_ = false;
-    if (wStrokeEmpty_ || !loaded_ || wStrokePlanes_ == 0) { wStrokeBefore_.clear(); return false; }
-    const u32 n = landscapeData_.sampleCount;
-    const usize nn = static_cast<usize>(n) * n;
-    const u32 w = wStrokeX1_ - wStrokeX0_ + 1, h = wStrokeY1_ - wStrokeY0_ + 1;
-    after.resize(static_cast<usize>(wStrokePlanes_) * w * h);
-    for (u32 pl = 0; pl < wStrokePlanes_; ++pl)
-        for (u32 y = wStrokeY0_; y <= wStrokeY1_; ++y)
-            for (u32 x = wStrokeX0_; x <= wStrokeX1_; ++x)
-                after[(static_cast<usize>(pl) * h + (y - wStrokeY0_)) * w + (x - wStrokeX0_)] =
-                    landscapeData_.weights[static_cast<usize>(pl) * nn + static_cast<usize>(y) * n + x];
-    before = std::move(wStrokeBefore_);
-    x0 = wStrokeX0_; y0 = wStrokeY0_; x1 = wStrokeX1_; y1 = wStrokeY1_;
-    planes = wStrokePlanes_;
-    wStrokeBefore_.clear();
-    if (before == after) return false;   // a stroke that changed nothing makes no undo entry
-    weightsDirty_ = true;                // upload at once, not on the 100 ms timer
-    return true;
+    for (u32 i = 0; i < sectionCount(); ++i) {
+        SecRef s = ref(i);
+        SectionEdit& ed = *s.edit;
+        if (ed.wEmpty || ed.wPlanes == 0) { ed.wBefore.clear(); continue; }
+        const u32 n = s.data->sampleCount;
+        const usize nn = static_cast<usize>(n) * n;
+        WeightEdit we;
+        we.section = i;
+        we.x0 = ed.wX0; we.y0 = ed.wY0; we.x1 = ed.wX1; we.y1 = ed.wY1; we.planes = ed.wPlanes;
+        const u32 w = we.x1 - we.x0 + 1, h = we.y1 - we.y0 + 1;
+        we.after.resize(static_cast<usize>(we.planes) * w * h);
+        for (u32 pl = 0; pl < we.planes; ++pl)
+            for (u32 y = we.y0; y <= we.y1; ++y)
+                for (u32 x = we.x0; x <= we.x1; ++x)
+                    we.after[(static_cast<usize>(pl) * h + (y - we.y0)) * w + (x - we.x0)] =
+                        s.data->weights[static_cast<usize>(pl) * nn + static_cast<usize>(y) * n + x];
+        we.before = std::move(ed.wBefore);
+        ed.wBefore.clear();
+        ed.wEmpty = true;
+        if (we.before == we.after) continue;   // a stroke that changed nothing makes no undo entry
+        ed.weightsDirty = true;                // upload at once, not on the 100 ms timer
+        out.push_back(std::move(we));
+    }
+    return !out.empty();
 }
 
-bool GameLandscape::applyWeightRect(u32 x0, u32 y0, u32 x1, u32 y1, u32 planes, const std::vector<u8>& src) {
-    if (!loaded_ || src.empty() || !landscapeData_.layersValid()) return false;
-    const u32 n = landscapeData_.sampleCount;
+// The primary's share only (the older, single-section form).
+bool GameLandscape::endWeightStroke(std::vector<u8>& before, std::vector<u8>& after, u32& x0, u32& y0, u32& x1, u32& y1, u32& planes) {
+    std::vector<WeightEdit> all;
+    endWeightStroke(all);
+    for (WeightEdit& we : all) {
+        if (we.section != 0) continue;
+        before = std::move(we.before); after = std::move(we.after);
+        x0 = we.x0; y0 = we.y0; x1 = we.x1; y1 = we.y1; planes = we.planes;
+        return true;
+    }
+    return false;
+}
+
+bool GameLandscape::applyWeightRectIn(SecRef s, u32 x0, u32 y0, u32 x1, u32 y1, u32 planes, const std::vector<u8>& src) {
+    fmt::OcLandData& d = *s.data;
+    if (src.empty() || !d.layersValid()) return false;
+    const u32 n = d.sampleCount;
     if (x1 >= n || y1 >= n || x0 > x1 || y0 > y1) return false;
-    const u32 stored = landscapeData_.layerNames.empty() ? 0u : static_cast<u32>(landscapeData_.layerNames.size() - 1);
+    const u32 stored = d.layerNames.empty() ? 0u : static_cast<u32>(d.layerNames.size() - 1);
     if (planes == 0 || planes > stored) return false;
     const u32 w = x1 - x0 + 1, h = y1 - y0 + 1;
     if (src.size() != static_cast<usize>(planes) * w * h) return false;
@@ -1021,10 +1325,19 @@ bool GameLandscape::applyWeightRect(u32 x0, u32 y0, u32 x1, u32 y1, u32 planes, 
     for (u32 pl = 0; pl < planes; ++pl)
         for (u32 y = y0; y <= y1; ++y)
             for (u32 x = x0; x <= x1; ++x)
-                landscapeData_.weights[static_cast<usize>(pl) * nn + static_cast<usize>(y) * n + x] =
+                d.weights[static_cast<usize>(pl) * nn + static_cast<usize>(y) * n + x] =
                     src[(static_cast<usize>(pl) * h + (y - y0)) * w + (x - x0)];
-    weightsDirty_ = dirty_ = true;
+    s.edit->weightsDirty = s.edit->dirty = true;
     return true;
+}
+
+bool GameLandscape::applyWeightRect(u32 x0, u32 y0, u32 x1, u32 y1, u32 planes, const std::vector<u8>& src) {
+    return applyWeightRect(0, x0, y0, x1, y1, planes, src);
+}
+
+bool GameLandscape::applyWeightRect(u32 section, u32 x0, u32 y0, u32 x1, u32 y1, u32 planes, const std::vector<u8>& src) {
+    if (!loaded_ || section >= sectionCount()) return false;
+    return applyWeightRectIn(ref(section), x0, y0, x1, y1, planes, src);
 }
 
 bool GameLandscape::surfaceFrictionAt(f32 xCm, f32 yCm, f32& outFriction, f32& outRestitution) const {
@@ -1089,37 +1402,16 @@ bool GameLandscape::sampleGround(f32 xCm, f32 yCm, GroundInfo& out) const {
     return true;
 }
 
-void GameLandscape::heightsEdited(rhi::IDevice* device, const landscape::BrushRect& touched) {
-    if (touched.empty) return;
-    std::string why;
-    if (landscapeTree_.build(landscapeData_, landscapeTree_.nodeQuads(), &why)) {
-        landscapeTree_.widenRimSkirts(2.0f * landscapeNoiseParams_.amplitudeCm);
-        landscapeTree_.resetHysteresis();
-        if (landscapeRenderer_ && device)
-            landscapeRenderer_->forgetOverlapping(*device, landscapeTree_, touched.x0, touched.y0, touched.x1, touched.y1);
-    } else {
-        AVER_ERROR("[Landscape] a height edit left the section unbuildable: {}", why);
-    }
-    dirty_ = true;
-    collisionStale_ = true;
-}
-
 landscape::BrushRect GameLandscape::carveRiver(rhi::IDevice* device, const landscape::CarvePoint* pts, u32 n,
                                                const landscape::CarveParams& p) {
-    if (!loaded_) return landscape::BrushRect{};
-    growStroke(landscape::carveRect(landscapeData_, pts, n, p));
-    const landscape::BrushRect touched = landscape::carveRiver(landscapeData_, pts, n, p);
-    heightsEdited(device, touched);
-    return touched;
+    return editHeights(device, [&](const fmt::OcLandData& d) { return landscape::carveRect(d, pts, n, p); },
+                       [&](fmt::OcLandData& d) { return landscape::carveRiver(d, pts, n, p); });
 }
 
 landscape::BrushRect GameLandscape::carveBasin(rhi::IDevice* device, const f32* polyXY, u32 count, f32 levelCm,
                                                const landscape::CarveParams& p) {
-    if (!loaded_) return landscape::BrushRect{};
-    growStroke(landscape::basinRect(landscapeData_, polyXY, count, p));
-    const landscape::BrushRect touched = landscape::carveBasin(landscapeData_, polyXY, count, levelCm, p);
-    heightsEdited(device, touched);
-    return touched;
+    return editHeights(device, [&](const fmt::OcLandData& d) { return landscape::basinRect(d, polyXY, count, p); },
+                       [&](fmt::OcLandData& d) { return landscape::carveBasin(d, polyXY, count, levelCm, p); });
 }
 
 void GameLandscape::setSurfaceMaterial(const std::string& name) {
@@ -1276,7 +1568,7 @@ void GameLandscape::syncExtraMaterials(const pbr::MaterialDesc& base) {
         pbr::MaterialDesc sec, ring;
         makeTerrainSectionDescs(base, sec, ring, "." + std::to_string(i + 1));
         if (e.mat) lib.update(e.mat, sec); else e.mat = lib.create(sec);
-        e.paramsDirty = e.weightsDirty = true;
+        e.paramsDirty = e.edit.weightsDirty = true;
     }
 }
 
@@ -1304,7 +1596,7 @@ void GameLandscape::releaseTerrain(rhi::IDevice* device) {
             for (const u32 t : {e.texA, e.texB, e.texParams}) if (t) retired_.push_back({t, flushFrame_});
         }
         e.texA = e.texB = e.texParams = 0;
-        e.paramsDirty = e.weightsDirty = true;
+        e.paramsDirty = e.edit.weightsDirty = true;
         if (e.mat) lib.destroy(e.mat);
         e.mat = 0;
     }
@@ -1393,13 +1685,13 @@ void GameLandscape::flushWeights(rhi::IDevice* device, pbr::MaterialSystem* mate
     }
     if (!loaded_ || !terrainActive_ || !res || !materials || !materials->ready()) return;
     bool extraDue = false;
-    for (const Section& e : extras_) extraDue |= e.weightsDirty && e.mat && e.data.hasLayers();
-    if (!weightsDirty_ && !extraDue) return;
+    for (const Section& e : extras_) extraDue |= e.edit.weightsDirty && e.mat && e.data.hasLayers();
+    if (!edit_.weightsDirty && !extraDue) return;
     using clock = std::chrono::steady_clock;
     const auto now = clock::now();
     // Throttled while painting. Every new texture takes a slot in the ray path's bindless table, which only ever grows, so
     // the cadence is gentler than the design's 100 ms and a stroke's end uploads at once.
-    const bool primaryDue = weightsDirty_ && !(wStrokeActive_ && now - lastUpload_ < std::chrono::milliseconds(250));
+    const bool primaryDue = edit_.weightsDirty && !(wStrokeActive_ && now - lastUpload_ < std::chrono::milliseconds(250));
     if (!primaryDue && !extraDue) return;
 
     pbr::MaterialLibrary& lib = pbr::MaterialLibrary::get();
@@ -1412,15 +1704,15 @@ void GameLandscape::flushWeights(rhi::IDevice* device, pbr::MaterialSystem* mate
 
     if (primaryDue) {
         lastUpload_ = now;
-        weightsDirty_ = false;
+        edit_.weightsDirty = false;
         uploadSectionWeights(*res, *materials, *base, info, landscapeData_, sectionToMaterial_, std::string(), texA_, texB_,
                              texParams_, paramsDirty_);
         lib.touch(secMat_);
     }
     for (usize i = 0; i < extras_.size(); ++i) {
         Section& e = extras_[i];
-        if (!e.weightsDirty || !e.mat || !e.data.hasLayers()) continue;
-        e.weightsDirty = false;
+        if (!e.edit.weightsDirty || !e.mat || !e.data.hasLayers()) continue;
+        e.edit.weightsDirty = false;
         uploadSectionWeights(*res, *materials, *base, info, e.data, e.remap, "." + std::to_string(i + 1), e.texA, e.texB,
                              e.texParams, e.paramsDirty);
         lib.touch(e.mat);

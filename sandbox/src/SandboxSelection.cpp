@@ -1457,12 +1457,14 @@ void SandboxApp::undo() {
             break;
 #if AVER_MODULE_LANDSCAPE
         case EditCmd::Kind::LandscapeStroke:
-            landscape_.applyHeightRect(c.landX0, c.landY0, c.landX1, c.landY1, c.landBefore); break;
+            for (const auto& h : c.landHeights) landscape_.applyHeightRect(h.section, h.x0, h.y0, h.x1, h.y1, h.before);
+            break;
 #endif
 #if AVER_MODULE_LANDSCAPE
         // wave3 layers / rivers: paint planes over a rect, and the level's RIVER / LAKE records.
         case EditCmd::Kind::LandscapeWeights:
-            landscape_.applyWeightRect(c.landX0, c.landY0, c.landX1, c.landY1, c.landPlanes, c.landWBefore); break;
+            for (const auto& w : c.landWeights) landscape_.applyWeightRect(w.section, w.x0, w.y0, w.x1, w.y1, w.planes, w.before);
+            break;
         case EditCmd::Kind::WaterBodies:
             levelHeader_.rivers = c.riversBefore;
             levelHeader_.lakes = c.lakesBefore;
@@ -1526,11 +1528,13 @@ void SandboxApp::redo() {
             break;
 #if AVER_MODULE_LANDSCAPE
         case EditCmd::Kind::LandscapeStroke:
-            landscape_.applyHeightRect(c.landX0, c.landY0, c.landX1, c.landY1, c.landAfter); break;
+            for (const auto& h : c.landHeights) landscape_.applyHeightRect(h.section, h.x0, h.y0, h.x1, h.y1, h.after);
+            break;
 #endif
 #if AVER_MODULE_LANDSCAPE
         case EditCmd::Kind::LandscapeWeights:
-            landscape_.applyWeightRect(c.landX0, c.landY0, c.landX1, c.landY1, c.landPlanes, c.landWAfter); break;
+            for (const auto& w : c.landWeights) landscape_.applyWeightRect(w.section, w.x0, w.y0, w.x1, w.y1, w.planes, w.after);
+            break;
         case EditCmd::Kind::WaterBodies:
             levelHeader_.rivers = c.riversAfter;
             levelHeader_.lakes = c.lakesAfter;
