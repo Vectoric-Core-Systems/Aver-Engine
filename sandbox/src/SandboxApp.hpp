@@ -1569,7 +1569,6 @@ public:
     void setSunAngle(f32 deg);
     void setPtFurnaceTest();        // --pt-furnace
     void setPtSceneView();   // --pt-scene
-    void setPtIncludeFirstPerson(bool on) { ptIncludeFirstPerson_ = on; if (ptSceneView_) ptSceneView_->setIncludeFirstPerson(on); }   // --pt-include-first-person
     void setPtQualityRamp(int everyFrames);
     void setGiMethodCycle(int everyFrames) { giMethodCycleEvery_ = everyFrames; giMethodCycleCountdown_ = everyFrames; }
     void setPtSceneToggleOnAuto(int framesIn);
@@ -2097,7 +2096,7 @@ private:
 
     // One undoable edit (transform, create/destroy). Components captured via EntitySnapshot.
     struct EditCmd {
-        enum class Kind { Transform, Create, Destroy, CreateObj, DestroyObj, LandscapeStroke, FoliageStroke, Reparent, Material, Rename, RemoveComponent, Visibility, Collision, Animation, Prefab, LevelInstance, LandscapeWeights, WaterBodies, PlacedComponent, RenderFlags };
+        enum class Kind { Transform, Create, Destroy, CreateObj, DestroyObj, LandscapeStroke, FoliageStroke, Reparent, Material, Rename, RemoveComponent, Visibility, Collision, Animation, Prefab, LevelInstance, LandscapeWeights, WaterBodies, PlacedComponent };
         Kind kind = Kind::Transform;
         // Monotonic serial for save points; never reused so undo/redo cross saves correctly.
         u64 serial = 0;
@@ -2118,9 +2117,6 @@ private:
         // ANIMATION: before/after per entity (empty clip = none), replayed through applyEntityAnim().
         struct AnimChange { EditId id = 0; EntityAnim before, after; };
         std::vector<AnimChange> animation;
-        // RENDER FLAGS: CMeshRenderer::renderFlags before/after per entity (the Details panel's First person boxes), saved as `renderflags`.
-        struct RenderFlagsChange { EditId id = 0; u32 before = 0, after = 0; };
-        std::vector<RenderFlagsChange> renderFlags;
         std::string label;        // outliner display name; editor-owned bookkeeping, not World's
 #if AVER_MODULE_SCENE
         editor::EntitySnapshot snap;    // scene entity: asset name, persisted id, every other component
@@ -2241,7 +2237,6 @@ private:
     // entityCollide_ (which saveLevel writes as `nocollide`) and drops or remakes the static body
     // through rebuildEntityBody, which itself honours the flag.
     void applyCollideTo(const EditCmd& c, bool undoing);
-    void applyRenderFlagsTo(const EditCmd& c, bool undoing);   // EditCmd::Kind::RenderFlags
     void setEntityCollide(scene::Entity e, bool collide);
 
     // ---- object animation (a transform clip a placed mesh plays in Play) ----
@@ -4030,7 +4025,6 @@ private:
     bool ptSceneViewWantEnabled_ = false;
     // --pt-scene WAS GIVEN ON THE COMMAND LINE. Sticky for the session, separate from the want flag above.
     bool ptSceneViewFromCli_ = false;
-    bool ptIncludeFirstPerson_ = false;   // setPtIncludeFirstPerson, applied to each PtSceneView this app creates
     bool ptSceneViewUnavailable_ = false;   // init() refused once this session -- stop re-asking
     // A1: true while syncPtSceneView() holds ptSceneViewWantEnabled_ down because ray-driven primary visibility is painting the scene.
     bool ptSceneViewSuppressedByRayDriven_ = false;

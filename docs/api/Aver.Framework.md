@@ -2,7 +2,7 @@
 
 # Aver.Framework public API
 
-283 public types and 2425 public members, read from `scripting/csharp/Aver.Framework/` (154 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+283 public types and 2421 public members, read from `scripting/csharp/Aver.Framework/` (154 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Framework
 
@@ -1313,10 +1313,6 @@ Values: `Destroy = 0`, `Stop = 1`, `Reload = 2`, `Travel = 3`
 - `public float GetCullMargin()` - The cull margin in centimetres (0 when the entity has no mesh).
 - `public bool SetIgnoreOcclusion(bool ignore)` - Opts the mesh out of the occlusion test (editor Play; the shipped runtime has no occlusion culling).
 - `public bool GetIgnoreOcclusion()` - True when the mesh skips the occlusion test.
-- `public bool SetFirstPerson(bool on)` - Draws the mesh with the player view's first-person lens, in front of the world (a held weapon, arms): never culled by the main view, shadowed where it really is, casting no shadow unless SetFirstPersonCastsShadow.
-- `public bool GetFirstPerson()` - True when the mesh draws as first person.
-- `public bool SetFirstPersonCastsShadow(bool casts)` - Lets a first-person mesh cast shadows from its true position.
-- `public bool GetFirstPersonCastsShadow()` - True when the mesh's first-person cast flag is set.
 - `public bool SetLodBias(float stops)` - Biases the mesh's LOD choice, in stops: +1 halves the pixel-error threshold (a finer level is picked sooner), -1 doubles it.
 - `public float GetLodBias()` - The LOD bias in stops (0 when the entity has no mesh).
 - `public bool HasLight { get; }` - True when this entity carries a light.

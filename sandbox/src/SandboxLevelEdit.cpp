@@ -452,8 +452,6 @@ bool SandboxApp::fillPlacementFromEntity(scene::Entity e, fmt::OcWorldPlacement&
     // currently hiding must still write visible, or Ctrl+H's own claim of being temporary
     // would be false the moment anyone saved with it on. See authoredVisible's own comment.
     p.visible = authoredVisible(e);
-    // `renderflags`: the mesh's per-instance render flags (the Details panel's First person boxes, and what scripts set), known bits only.
-    if (mr) p.renderFlags = mr->renderFlags & scene::kRenderFlagsKnown;
     // THE AUTHORED ANIMATION, from the side map and NEVER from the entity's CAnimator: Play
     // advances that clock, and reading it here would write a session's progress into the level.
     if (const auto animIt = entityAnim_.find(static_cast<u32>(e)); animIt != entityAnim_.end()) {

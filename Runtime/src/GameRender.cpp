@@ -794,18 +794,6 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
         // Shadows-only (CMeshRenderer::renderFlags): hidden from every camera, still a caster and GI/RT geometry.
         if (scene::renderShadowMode(mr->renderFlags) == scene::kRenderShadowsOnly) ownerHiddenHere = true;
 
-        // First person (docs/plans/FIRST_PERSON.md): flagged itself, or under options.firstPersonRoot (the ancestor walk the owner-hide uses). It draws
-        // through the first-person projection, so the main frustum and the occlusion test say nothing about it, and it receives shadows but casts none
-        // unless kRenderFirstPersonCasts is set. A secondary camera's walk draws it as any mesh.
-        bool firstPersonHere = !viewPass && (mr->renderFlags & scene::kRenderFirstPerson) != 0u;
-        if (!firstPersonHere && !viewPass && options.firstPersonRoot != scene::kInvalidEntity) {
-            for (scene::Entity anc = ent; w.valid(anc); anc = w.parent(anc)) {
-                if (anc == options.firstPersonRoot) { firstPersonHere = true; break; }
-            }
-        }
-        const bool firstPersonCasts = firstPersonHere && (mr->renderFlags & scene::kRenderFirstPersonCasts) != 0u;
-        (void)firstPersonCasts;   // read only by the Voxi routes below
-
         // Frustum cull on the world-space extent of the entity's own box. A DEGENERATE box is DRAWN
         // rather than culled: an entity whose bounds were never filled in must not vanish, and being
         // conservative costs a draw call where being wrong costs a character.
@@ -871,7 +859,7 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
                                 + pl[pi][3];
                     if (d < -mr->cullMarginCm) outside = true;   // cullMarginCm grows the box: only a box wholly past the margin is out
                 }
-                frustumCulled = outside && !firstPersonHere;
+                frustumCulled = outside;
             }
         }
 
@@ -933,13 +921,11 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
         dec.skinned = skinned;
         dec.frustumCulled = frustumCulled;
         dec.ownerHidden = ownerHiddenHere;
-        dec.firstPerson = firstPersonHere;
         dec.baseMesh = handle;
         dec.posedMesh = posedMesh;
         dec.chosenMesh = posedMesh ? posedMesh : handle;
         if (options.decide) options.decide(dec, options.user);
         if (dec.skip) continue;
-        if (firstPersonHere) dec.occlusionCulled = false;   // the opt-out, whatever the host answered
 
         // The one place deciding who delivers this entity -- raster's drawMesh() or Voxi's direct
         // submit(). chooseRoute() (SceneSubmission.hpp) is called now, not inlined: it used to be
@@ -1036,8 +1022,7 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
             // A non-raster entity writes no depth and is not counted -- this pass is one half of a
             // frame the colour pass finishes, and both the counters and the "who delivered" hook
             // belong to that half. See DrawWorldPass.
-            // A first-person mesh writes no prepass depth: its depth is the squeezed slab, and the colour pass is the one that writes it.
-            if (!route.raster || firstPersonHere) continue;
+            if (!route.raster) continue;
             for (u32 pdi = 0; pdi < pdrawCount; ++pdi) {
                 const PlannedDraw& pd = pdraws[pdi];
                 if (!pd.mesh) continue;
@@ -1102,12 +1087,9 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
             if (options.voxiRenderer) {
                 options.voxiRenderer->setSubmitNoRay(hairNoRay);
                 options.voxiRenderer->setSubmitNoShadow(noShadowHere);
-                options.voxiRenderer->setSubmitFirstPerson(firstPersonHere, firstPersonCasts);   // Voxi derives no shadow, no ray, mover from it
             }
 #  endif
 #endif
-            // Sticky on the device like the layers, so set around this entity's draws and cleared after them.
-            if (firstPersonHere) device.setDrawFirstPerson(true);
             for (u32 pdi = 0; pdi < pdrawCount; ++pdi) {
                 const PlannedDraw& pd = pdraws[pdi];
                 if (!pd.mesh) continue;
@@ -1132,7 +1114,7 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
                 // LessEqual/no-write pipeline for parts no depth-prepass walk ever wrote depth for.
                 // dec.prepassEligible is the host's half: false unless a host says it ran a prepass
                 // walk.
-                bool prepassedDraw = dec.prepassEligible && !dl.look.blended && !dl.fx && !firstPersonHere;   // the prepass walk skipped it
+                bool prepassedDraw = dec.prepassEligible && !dl.look.blended && !dl.fx;
 #if AVER_MODULE_PBR && AVER_MODULE_VOXI
                 // ---- AN ALPHA-MASKED DRAW WRITES ITS OWN DEPTH FIRST WHEN NO PREPASS DID ----
                 //
@@ -1171,14 +1153,12 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
                 if (prepassedDraw) device.setNextDrawPrepassed(true);
                 device.drawMesh(pd.mesh, &wm.m[0][0], col, dl.look.metallic, dl.look.roughness);
             }
-            if (firstPersonHere) device.setDrawFirstPerson(false);
 #if AVER_MODULE_VOXI
             if (options.voxiRenderer) options.voxiRenderer->setSubmitMovable(false);
 #  if defined(AVER_VOXI_SUBMIT_NO_RAY)
             if (options.voxiRenderer) {
                 options.voxiRenderer->setSubmitNoRay(false);
                 options.voxiRenderer->setSubmitNoShadow(false);
-                options.voxiRenderer->setSubmitFirstPerson(false);
             }
 #  endif
 #endif
@@ -1236,7 +1216,6 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
 #  if defined(AVER_VOXI_SUBMIT_NO_RAY)
                     options.voxiRenderer->setSubmitNoRay(hairNoRay);
                     options.voxiRenderer->setSubmitNoShadow(noShadowHere);
-                    options.voxiRenderer->setSubmitFirstPerson(firstPersonHere, firstPersonCasts);
 #  endif
                     if (mr->layersInv) options.voxiRenderer->setSubmitLayers(mr->layersInv);
                     options.voxiRenderer->submit(del.mesh, &wm.m[0][0], col, dl.look.metallic,
@@ -1247,17 +1226,13 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
 #  if defined(AVER_VOXI_SUBMIT_NO_RAY)
                     options.voxiRenderer->setSubmitNoRay(false);
                     options.voxiRenderer->setSubmitNoShadow(false);
-                    options.voxiRenderer->setSubmitFirstPerson(false);
 #  endif
                 }
 #endif
                 if (options.onDirectDraw) {
-                    // Bracketed like the raster route's draw, so a feature the host feeds here (the path-traced view) knows it is first person.
-                    if (firstPersonHere) device.setDrawFirstPerson(true);
                     options.onDirectDraw(del.mesh, &wm.m[0][0], col, dl.look.metallic,
                                          dl.look.roughness, dl.matSet, directConstants, dl.matBytes,
                                          del.translucent, del.hiddenFromOwner, options.user);
-                    if (firstPersonHere) device.setDrawFirstPerson(false);
                 }
             }
         }

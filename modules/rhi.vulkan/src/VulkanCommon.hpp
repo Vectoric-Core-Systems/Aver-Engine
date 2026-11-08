@@ -1544,8 +1544,6 @@ public:
     void shiftWorld(const ShiftWorldInfo& info) override {
         composePrevViewProjInPlace(frameCB_.viewProj, info.deltaCm);          // the old camera in the new frame, for camera() readers
         composePrevViewProjInPlace(frameCB_.viewProjNoJitter, info.deltaCm);
-        composePrevViewProjInPlace(frameCB_.fpViewProj, info.deltaCm);
-        composePrevViewProjInPlace(frameCB_.fpPrevViewProj, info.deltaCm);
         f32 cam[3] = {frameCB_.camPos[0], frameCB_.camPos[1], frameCB_.camPos[2]};
         shiftPoint(cam, info.deltaCm);
         frameCB_.camPos[0] = cam[0]; frameCB_.camPos[1] = cam[1]; frameCB_.camPos[2] = cam[2];
@@ -1582,12 +1580,6 @@ public:
     // ---- translucency: sticky like setDrawBinding; drawMesh captures, endFrame replays (IDevice::setDrawBlended) ----
     void setDrawBlended(bool blended) override { drawBlended_ = blended; }
     void setDrawLayers(u32 layersInv) override { drawLayersInv_ = layersInv; }
-    void setDrawFirstPerson(bool on) override {
-        if (on == drawFirstPerson_) return;
-        drawFirstPerson_ = on;
-        for (IRenderFeature* f : features_) f->onDrawFirstPerson(on);
-    }
-    void setFirstPersonCamera(const f32 fpViewProj[16]) override;
     bool drawBlended() const override { return drawBlended_; }
     TextureHandle sceneColorBackdropTexture() override;
 
@@ -1861,12 +1853,9 @@ private:
         f32 world[16] = {};
         f32 color[4] = {};
         f32 metallic = 0.0f, roughness = 0.0f;
-        u32 objPad = 0;   // the object block's _objPad word (layers + first-person bit) at capture, written again on replay
         DrawBinding binding{};
     };
     std::vector<BlendedDraw> blendedDraws_;   // filled by drawMesh, sorted and drained by endFrame, cleared at beginFrame
-    std::vector<BlendedDraw> firstPersonDraws_;   // IRenderFeature::wantsFirstPersonOverlay: opaque first-person draws a suppressed scene left out
-    void replayFirstPersonDraws(VkCommandBuffer cmd);
     bool blendedPipelineMissingWarned_ = false;
     bool blendedSeen_ = false;   // a blended draw has been submitted: only then is the backdrop allocated (scene-sized HDR)
     // Opens the scene scope over msaaColorView_/depthView_ (+ the MSAA resolve target): CLEAR at beginFrame,
@@ -1909,8 +1898,6 @@ private:
     // See IDevice::setUnlit. Sticky exactly as wireframe_ is.
     bool unlit_ = false;
     u32 drawLayersInv_ = 0;   // setDrawLayers: written to the object block's _objPad word
-    bool drawFirstPerson_ = false;   // setDrawFirstPerson: bit 31 of the same word
-    bool fpPrimed_ = false;          // a first-person history exists to snapshot
     // Editor chrome (grid, gizmos, selection outlines, collider/nav overlays), replayed in endFrame's
     // overlay stage after the post chain -- see aver/rhi/EditorLines.hpp. Owns its own meshes/queue/
     // pipelines; createLineMesh/destroyLineMesh/drawLines/setLineDepth/setLineWidth all delegate here.

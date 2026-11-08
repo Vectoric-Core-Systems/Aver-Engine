@@ -107,18 +107,13 @@ struct PerFrameCB {
     // ABSOLUTE position. Both are zero at O = 0, which is what keeps a level that never rebases bit-identical.
     f32 worldOrigin[4];  // xyz = O in cm (a multiple of 1,638,400, exact in f32), w = the shift generation as a float
     f32 wavePhase[4];    // xyz = per-wave phase offset k * dot(dir, O.xy) mod 2*pi, added to the wave phase; w unused
-    // FIRST-PERSON RENDERING (docs/plans/FIRST_PERSON.md), appended. What a draw whose first-person bit is set projects with: the first-person lens
-    // with depth squeezed into the front slab. Equal to viewProj / the previous viewProj while IDevice::setFirstPersonCamera has not been called, so the
-    // bit is inert. fpViewProj carries the same TAA jitter as viewProj; fpPrevViewProj is the previous frame's, unjittered like the other history.
-    f32 fpViewProj[16];
-    f32 fpPrevViewProj[16];
 };
 
 // A REAL SIZE, not just an alignment. The `% 16 == 0` check both backends carried is necessary and
 // nowhere near sufficient: every legal edit to this struct keeps it a multiple of 16, so the one
 // assertion guarding the layout could not fail for the change most likely to break it. This number
 // moving is the signal that shared_prelude.hlsl's cbuffer has to move with it.
-static_assert(sizeof(PerFrameCB) == 912, "cbuffer PerFrame in shaders/shared_prelude.hlsl mirrors this");
+static_assert(sizeof(PerFrameCB) == 784, "cbuffer PerFrame in shaders/shared_prelude.hlsl mirrors this");
 static_assert(sizeof(PerFrameCB) % 16 == 0, "a constant buffer's rows are float4s");
 
 // Spot checks at the boundaries a reader would look for, in the shape MaterialTest.cpp proved out:
@@ -137,8 +132,6 @@ static_assert(offsetof(PerFrameCB, wave)      == 608, "the wave set follows time
 static_assert(offsetof(PerFrameCB, viewProjNoJitter) == 672, "the unjittered camera follows the waves");
 static_assert(offsetof(PerFrameCB, worldOrigin) == 752, "the floating origin follows the jitter row");
 static_assert(offsetof(PerFrameCB, wavePhase)   == 768, "the wave phase offsets follow the origin");
-static_assert(offsetof(PerFrameCB, fpViewProj)  == 784, "the first-person matrices follow the wave phase");
-static_assert(offsetof(PerFrameCB, fpPrevViewProj) == 848, "the previous first-person matrix follows it");
 
 // Constants for every post pass. Mirrors `cbuffer AverPost : register(b0)` in rhi::postShaderSource().
 struct PostCB {

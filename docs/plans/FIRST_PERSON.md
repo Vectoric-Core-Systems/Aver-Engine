@@ -37,24 +37,16 @@ Meshes flagged first person, such as a held weapon and arms, draw with their own
 - **Motion vectors:** a rigidly attached viewmodel has no screen motion under camera rotation. Velocity is `FP(cur)` minus `FP(prev)` applied to the same view-space point. Exact per-vertex animation velocity needs a previous-world matrix per draw, which is a follow-up. First-person pixels are marked in the G-buffer (`normalRoughness.w`, currently 0) for TAA and denoiser history.
 - **Path tracer:** reference views leave first-person meshes out by default.
 
-## Status (2026-11-08)
+## Status (2026-11-08): removed for now
 
-All steps have landed. In order:
+The owner chose UE's older way for now: first-person meshes are ordinary meshes, drawn with the main camera, and they can clip into walls. Fabric still drops a Godot viewmodel shader's depth push, so the hands and weapon draw, but it no longer flags them.
 
-- 62c51414: steps 1-2.
-- 3d3f2c8d: steps 3 and 5.
-- 25cd1995: step 6, the ray-driven raster overlay, with the nearest cascade rendered for it.
-- 8e05e9d2: step 4. The velocity is the jitter alone, and `normalRoughness.w` = 1.
-- 63cfdb01: step 7, `--pt-include-first-person`.
-- c3cc4639: step 8. The `renderflags` token saves the flags with the level.
-- Fabric a4b8da40: step 9, re-landed.
+All of steps 1-9 were taken out in one engine commit (the "Remove first-person rendering" commit on 08-gdint) and one Fabric commit. To bring it back, revert those two. The landed commits were:
 
-Still open:
+- engine: 62c51414 and 11eb816e (steps 1-2), 3d3f2c8d (3 and 5), b00cb437 (lens default), 25cd1995 (6), 8e05e9d2 (4), 63cfdb01 (7), c3cc4639 (8);
+- Fabric: a4b8da40 (9).
 
-- Per-vertex animation velocity: it needs a previous world matrix per draw.
-- In ray-driven mode, translucent first-person draws are not drawn. They are resolved in the ray-driven frame, which cannot see them.
-- Vulkan's overlay has no G-buffer, because Vulkan has none yet.
-- Raster + RT mode is not to be run on the owner's PC (see the material-variant fix 4e7364d7).
+The per-instance shadow fallback's noShadow skip from 25cd1995 was kept: it is not first-person code.
 
 ## Steps
 

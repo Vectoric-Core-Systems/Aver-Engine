@@ -57,11 +57,6 @@ struct OcWorldPlacement {
     // dependency graph of a text parser.
     bool snapToGround = false;
 
-    // `renderflags <n>`: the mesh's per-instance render flags (scene::CMeshRenderer::renderFlags: shadow mode, GI mode, the occlusion opt-out,
-    // first person and its cast flag), as a decimal. 0, the default, is not written, so a level that sets none round-trips byte-identically.
-    // The format module stays free of Aver.Scene: the loader masks unknown bits (scene::kRenderFlagsKnown).
-    u32 renderFlags = 0;
-
     // Which spawnable CLASS this placement instantiates, by NAME -- resolved through
     // aver_fw_class_find/aver_fw_spawn at load time. Mirrors OcWorldData::gameMode's own "by name,
     // empty means no override" contract (see that field's comment, same file) for the identical

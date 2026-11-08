@@ -395,13 +395,6 @@ constexpr u32 kFeatureFrameConstantRegister = 4;
 // b1: per-draw block (transform, then shading constants).
 constexpr u32 kObjectConstantRegister = 1;
 constexpr u32 kObjectConstantDwords = 32;
-// The object block's dword 27 (`_objPad`): the low 20 bits are the draw's inverted render layers (IDevice::setDrawLayers), bit 31 is the first-person
-// flag (IDevice::setDrawFirstPerson) that makes the scene vertex stage project through gFpViewProj. Bits 20-30 are free.
-constexpr u32 kObjectPadLayersMask = 0xFFFFFu;
-constexpr u32 kObjectPadFirstPerson = 0x80000000u;
-constexpr u32 packObjectPad(u32 layersInv, bool firstPerson) {
-    return (layersInv & kObjectPadLayersMask) | (firstPerson ? kObjectPadFirstPerson : 0u);
-}
 // b2: constant block traveling with binding table 1, root CBV.
 constexpr u32 kDrawConstantRegister = 2;
 // Largest b2 block setDrawBinding will carry.
@@ -854,18 +847,6 @@ public:
     // True when this frame's scenePass already composited the translucent (blended) draws itself, so
     // the backend must not replay them over the result. Asked after the scene pass.
     virtual bool blendedDrawsResolvedInScene() const { return false; }
-
-    // First-person overlay (docs/plans/FIRST_PERSON.md step 6). True when this feature suppresses the scene but wants the opaque draws flagged first
-    // person (IDevice::setDrawFirstPerson) captured and replayed over its scene pass, after the sky and before the blended replay, through
-    // firstPersonOverlayPipeline with firstPersonOverlayConstants, depth test and write on.
-    virtual bool wantsFirstPersonOverlay() const { return false; }
-    // The device's IDevice::setDrawFirstPerson state, told to every feature when it changes: the submitDraw calls that follow are first-person draws
-    // while it is on. A host feeding a feature directly brackets those calls with setDrawFirstPerson too, so both routes agree.
-    virtual void onDrawFirstPerson(bool on) { (void)on; }
-    // The overlay's pipeline for a draw whose material variant key is `fxKey` (0 = none), or 0 to drop the draw. `gbuffer`: the scene's G-buffer
-    // targets are bound with the colour (velocity, view Z, normal), so the overlay writes them too and the resolve after it sees the meshes.
-    virtual PipelineHandle firstPersonOverlayPipeline(u32 fxKey, bool gbuffer) const { (void)fxKey; (void)gbuffer; return 0; }
-    virtual bool firstPersonOverlayConstants(const void** data, u32* bytes) const { return sceneConstants(data, bytes); }
 
     // Draws depth-tested, blended geometry into the scene after opaque drawMesh and sky.
     virtual void transparentPass(IRenderContext& ctx) { (void)ctx; }

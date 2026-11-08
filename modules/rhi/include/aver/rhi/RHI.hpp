@@ -626,10 +626,6 @@ public:
     virtual void setCamera(const f32 viewProj[16], const f32 invViewProjRel[16], const f32 cameraPos[3]) {
         (void)viewProj; (void)invViewProjRel; (void)cameraPos;
     }
-    // First-person rendering (docs/plans/FIRST_PERSON.md): the view-projection that draws flagged with setDrawFirstPerson project through (the first-person
-    // lens, depth squeezed into the front slab). Call it after setCamera: setCamera resets it, so a frame that never calls this draws first-person meshes
-    // with the main camera and the flag is inert. The device applies the same TAA jitter as for setCamera's matrix.
-    virtual void setFirstPersonCamera(const f32 fpViewProj[16]) { (void)fpViewProj; }
     // Reads the camera back, for a feature fitting its own frustum to the view. False when the
     // backend has no camera to give. Any output may be null.
     virtual bool camera(f32 viewProj[16], f32 invViewProjRel[16], f32 cameraPos[3]) const {
@@ -740,9 +736,6 @@ public:
     // pixel shader in the per-object block's unread pad word (`_objPad`), where the raster local-light variant tests them against a light's
     // cull mask. 0 (the default) writes the block exactly as before; a backend that ignores this is correct for every scene without masks.
     virtual void setDrawLayers(u32 layersInv) { (void)layersInv; }
-    // First-person rendering: marks the subsequent scene drawMesh() calls to project with setFirstPersonCamera's matrix. Sticky like setDrawLayers; travels in
-    // bit 31 of the same `_objPad` word (packObjectPad). The caller clears it after the flagged draws.
-    virtual void setDrawFirstPerson(bool on) { (void)on; }
 
     // Unlit line geometry (grid, gizmos, selection outlines, collider/nav overlays): per-vertex
     // DISPLAY colour, drawn as a line list.

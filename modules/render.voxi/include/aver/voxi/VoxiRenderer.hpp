@@ -156,23 +156,6 @@ public:
     // Draws submitted while these are on are left out of the acceleration structure / the shadow cascades (see Draw::noRay). Sticky like setSubmitMovable.
     void setSubmitNoRay(bool on) { submitNoRay_ = on; }
     void setSubmitNoShadow(bool on) { submitNoShadow_ = on; }
-    // First-person rendering (docs/plans/FIRST_PERSON.md): the draws submitted next are first-person meshes, drawn through the first-person projection by the
-    // device. Sticky like setSubmitMovable. Voxi derives the rest from it: the draw is a mover (out of voxelisation and the GI shadow map, it moves with the
-    // camera) and, unless `casts`, leaves the shadow cascades and the acceleration structure. A casting one is in the owner-hidden lane: secondary rays see it,
-    // primary rays do not. Ray-driven mode therefore hides every first-person mesh from primary rays until the overlay of step 6 draws them.
-    void setSubmitFirstPerson(bool on, bool casts = false) { submitFirstPerson_ = on; submitFirstPersonCasts_ = on && casts; }
-    // What the passes make of one draw submitted this frame, for tests: the cascades, voxelisation and the acceleration-structure lane each read exactly
-    // these fields (shadowPass, voxelizePass, the TLAS build), so a test reads the verdicts here instead of running a GPU frame.
-    enum class RtLane { None, Opaque, OwnerHidden, Translucent };
-    struct SubmittedDraw {
-        rhi::MeshHandle mesh = 0;
-        bool firstPerson = false, noRay = false, noShadow = false, movable = false, translucent = false, hiddenFromOwner = false;
-        bool inShadowCascades() const { return !translucent && !noShadow; }
-        bool voxelised() const { return !translucent && !movable; }
-        RtLane rtLane() const { return noRay ? RtLane::None : translucent ? RtLane::Translucent : hiddenFromOwner ? RtLane::OwnerHidden : RtLane::Opaque; }
-    };
-    usize submittedDrawCount() const { return draws_.size(); }
-    SubmittedDraw submittedDraw(usize i) const;
     // G4 R4: the render layers (inverted, scene::storeMask; 0 = every layer) of the draws submitted next. Sticky like setSubmitMovable; the scene walk
     // sets it only for an entity whose layers are not the default and puts it back to 0 after. Read by the raster local-light shadow pass.
     void setSubmitLayers(u32 layersInv) { submitLayersInv_ = layersInv; }
@@ -251,20 +234,6 @@ public:
     bool wantsLateScenePass() const override;
     // This frame's translucent draws were composited inside the ray-driven frame; skip their replay.
     bool blendedDrawsResolvedInScene() const override { return translucentInPath_; }
-    // First-person step 6: in a ray-driven frame the first-person meshes (kept out of the primary rays) are drawn over the result by the device,
-    // through the raster scene shader (never the ray-queried one), sun-shadowed by the nearest cascade that shadowPass renders for them.
-    bool wantsFirstPersonOverlay() const override { return rayDrivenActive() && !graphStale() && !debugViewActive(); }
-    rhi::PipelineHandle firstPersonOverlayPipeline(u32 fxKey, bool gbuffer) const override;
-    bool firstPersonOverlayConstants(const void** data, u32* bytes) const override;
-    // The cascades shadowPass renders: `fitted` normally, none with ray tracing on (rays shadow everything), except one (the nearest) for a
-    // ray-driven frame drawing a first-person overlay. `mainReads` says whether the frame's own readers (raster scene, particles, fog) may
-    // sample the atlas; the overlay reads it through its own constants. Static for tests.
-    struct CascadePlan { u32 count = 0; bool mainReads = false; };
-    static CascadePlan planCascades(u32 fitted, bool rtActive, bool firstPersonOverlay) {
-        if (fitted == 0) return {};
-        if (!rtActive) return {fitted, true};
-        return firstPersonOverlay ? CascadePlan{1u, false} : CascadePlan{};
-    }
 
     // Builds the variants otherwise compiled on first use (NRD2 Stage B, Path Tracing and NeuRaC
     // twins). For tests and loading screens; call after onRenderTargetsChanged.
@@ -995,7 +964,6 @@ private:
         // frame is a BLAS refit nobody asked for, and CHair kHairRayTraced / kHairNoShadow opt in or out. Set by setSubmitNoRay / setSubmitNoShadow.
         bool noRay = false;
         bool noShadow = false;
-        bool firstPerson = false;   // drawn with the first-person projection; see setSubmitFirstPerson
         // MOVABLE: moves during play (game::PlayMobility decides); out of voxelisation and GI rebuild gate.
         bool movable = false;
         u32 layersInv = 0;   // G4 R4: render layers, inverted (0 = every layer); see setSubmitLayers
@@ -1004,8 +972,6 @@ private:
     u32 submitLayersInv_ = 0;
     bool submitNoRay_ = false;
     bool submitNoShadow_ = false;
-    bool submitFirstPerson_ = false;
-    bool submitFirstPersonCasts_ = false;
 
     // Material system answers (is authored, textures); remembered for ONE key computation. Not a member.
     struct DrawMaterialMemoSlot {
@@ -1056,8 +1022,6 @@ private:
     // Two facts about the list recorded as each draw appends and swapped by beginScene().
     std::vector<u32> translucentDraws_, translucentDrawsPrev_;
     u32 lastShadowDraws_ = 0;   // shadow-map draws the last shadow pass submitted, summed over cascades (RenderStats)
-    bool fpCascadeLive_ = false;           // shadowPass rendered the nearest cascade for the first-person overlay (planCascades)
-    mutable std::vector<u8> fpCbBlob_;     // firstPersonOverlayConstants: the frame block with the cascade switch on
     // Indices into draws_ / drawsPrev_ of light-flagged draws, in list order.
     std::vector<u32> lampDraws_, lampDrawsPrev_;
 

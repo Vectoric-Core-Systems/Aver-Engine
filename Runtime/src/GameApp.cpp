@@ -2644,7 +2644,6 @@ void GameApp::onRender(Engine& e) {
         opts.ownerHideRoot = firstPersonPawn_;
 
         opts.ownerHideAll = playView_.ownerHideAll;   // the collision fade hides every mesh under the target, not only the flagged ones
-        opts.firstPersonRoot = playView_.firstPersonRoot;   // docs/plans/FIRST_PERSON.md
         opts.cameraCullInv = playView_.cullInv;       // G4 R4: Camera3D.cull_mask; 0 (every layer) unless a camera node asks
         opts.viewerPos = eye_; opts.haveViewerPos = true;   // visibility ranges
         // Possessed pawn's tree is movable from first frame; everything else by PlayMobility.

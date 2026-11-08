@@ -152,12 +152,6 @@ public:
     // frame (onUpdate), any frequency; `revision` is ignored while `include` is false.
     void setIncludeDynamicMeshes(bool include, u64 revision);
     bool includesDynamicMeshes() const { return includeDynamic_; }
-    // First-person meshes (docs/plans/FIRST_PERSON.md step 7): left out of the reference by default, since a viewmodel drawn at its true place
-    // with the main lens is not what the player sees. On: traced at their true world position. Re-arms the accumulation.
-    void setIncludeFirstPerson(bool include);
-    bool includesFirstPerson() const { return includeFirstPerson_; }
-    void onDrawFirstPerson(bool on) override { drawFirstPerson_ = on; }
-    usize submittedDrawCount() const { return draws_.size(); }   // this frame's accepted draws, for tests
 
     const char* name() const override { return "Aver.PathTracer.SceneView"; }
 
@@ -274,8 +268,6 @@ private:
     // setIncludeDynamicMeshes state. builtDynamic* is what the scene on screen was last built with;
     // a difference makes rebuildScene() drop the PathTracer's geometry caches first.
     bool includeDynamic_ = false;
-    bool includeFirstPerson_ = false;   // setIncludeFirstPerson
-    bool drawFirstPerson_ = false;      // onDrawFirstPerson: the submitDraw calls now arriving are first person
     u64  dynamicRevision_ = 0;
     bool builtIncludeDynamic_ = false;
     u64  builtDynamicRevision_ = 0;

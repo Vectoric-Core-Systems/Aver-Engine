@@ -966,18 +966,12 @@ public:
     void setCamera(const f32 viewProj[16], const f32 invViewProjRel[16], const f32 camPos[3]) override {
         // Snapshot previous viewProj before overwrite (gbufCameraPrimed_ guards from zero state).
         if (gbufCameraPrimed_) std::memcpy(prevViewProj_, frameCB_.viewProj, sizeof(prevViewProj_));
-        // The first-person history moves with it; this frame's first-person matrix is the main one until setFirstPersonCamera replaces it.
-        std::memcpy(frameCB_.fpPrevViewProj, gbufCameraPrimed_ ? frameCB_.fpViewProj : viewProj, sizeof(frameCB_.fpPrevViewProj));
         gbufCameraPrimed_ = true;
 
         std::memcpy(frameCB_.viewProj, viewProj, sizeof(frameCB_.viewProj));
         std::memcpy(frameCB_.viewProjNoJitter, viewProj, sizeof(frameCB_.viewProjNoJitter));
-        std::memcpy(frameCB_.fpViewProj, viewProj, sizeof(frameCB_.fpViewProj));
         std::memcpy(frameCB_.invViewProjRel, invViewProjRel, sizeof(frameCB_.invViewProjRel));
         frameCB_.camPos[0] = camPos[0]; frameCB_.camPos[1] = camPos[1]; frameCB_.camPos[2] = camPos[2]; frameCB_.camPos[3] = 1;
-    }
-    void setFirstPersonCamera(const f32 fpViewProj[16]) override {
-        std::memcpy(frameCB_.fpViewProj, fpViewProj, sizeof(frameCB_.fpViewProj));
     }
     // TEMPORAL AA JITTER, applied to the UPLOADED copy only: frameCB_ (and so camera(), picking,
     // culling and every renderer's own previous-frame chain) stays unjittered. An 8-step Halton(2,3)
@@ -1005,10 +999,6 @@ public:
         for (u32 r = 0; r < 4; ++r) {                                    // viewProj * T
             cb.viewProj[r * 4 + 0] += cb.viewProj[r * 4 + 3] * nx;
             cb.viewProj[r * 4 + 1] += cb.viewProj[r * 4 + 3] * ny;
-        }
-        for (u32 r = 0; r < 4; ++r) {                                    // the first-person matrix gets the same jitter
-            cb.fpViewProj[r * 4 + 0] += cb.fpViewProj[r * 4 + 3] * nx;
-            cb.fpViewProj[r * 4 + 1] += cb.fpViewProj[r * 4 + 3] * ny;
         }
         for (u32 c = 0; c < 4; ++c)                                      // T^-1 * invViewProjRel
             cb.invViewProjRel[12 + c] -= nx * cb.invViewProjRel[c] + ny * cb.invViewProjRel[4 + c];
@@ -1076,8 +1066,6 @@ public:
     void shiftWorld(const ShiftWorldInfo& info) override {
         composePrevViewProjInPlace(frameCB_.viewProj, info.deltaCm);          // the old camera, in the new frame:
         composePrevViewProjInPlace(frameCB_.viewProjNoJitter, info.deltaCm);  // setCamera snapshots it as prevViewProj_
-        composePrevViewProjInPlace(frameCB_.fpViewProj, info.deltaCm);        // and the first-person pair the same way
-        composePrevViewProjInPlace(frameCB_.fpPrevViewProj, info.deltaCm);
         composePrevViewProjInPlace(prevViewProj_, info.deltaCm);
         composePrevViewProjInPlace(taaLastViewProj_, info.deltaCm);           // equal inputs stay equal: no false "camera moved"
         f32 cam[3] = {frameCB_.camPos[0], frameCB_.camPos[1], frameCB_.camPos[2]};
@@ -1194,11 +1182,6 @@ public:
     // Blended-mesh path (sticky across frames).
     void setDrawBlended(bool blended) override { drawBlended_ = blended; }
     void setDrawLayers(u32 layersInv) override { drawLayersInv_ = layersInv; }
-    void setDrawFirstPerson(bool on) override {
-        if (on == drawFirstPerson_) return;
-        drawFirstPerson_ = on;
-        for (IRenderFeature* f : features_) f->onDrawFirstPerson(on);
-    }
     bool drawBlended() const override { return drawBlended_; }
 
     void setLineDepth(bool testDepth) override { editorLines_.setDepthTest(testDepth); }
@@ -1571,15 +1554,10 @@ private:
         f32 color[4] = {};
         f32 metallic = 0.0f;
         f32 roughness = 0.0f;
-        u32 objPad = 0;   // the object block's _objPad word (layers + first-person bit) at capture, written again on replay
         DrawBinding binding{};
     };
     // Filled by drawMesh(), drained (sorted back-to-front) by endFrame(), cleared at next beginFrame.
     std::vector<BlendedDraw> blendedDraws_;
-    // First-person overlay (IRenderFeature::wantsFirstPersonOverlay): opaque first-person draws captured while the scene is suppressed, replayed by
-    // replayFirstPersonDraws after the sky. Cleared at beginFrame.
-    std::vector<BlendedDraw> firstPersonDraws_;
-    void replayFirstPersonDraws(const D3D12_VIEWPORT& vp, const D3D12_RECT& sc);
     // Missing blended pipeline warning (per-frame, unlike drawBindingIgnored_).
     bool blendedPipelineMissingWarned_ = false;
 
@@ -1609,7 +1587,6 @@ private:
     // See IDevice::setUnlit. Sticky like wireframe_.
     bool unlit_ = false;
     u32 drawLayersInv_ = 0;   // setDrawLayers: written to the object block's _objPad word
-    bool drawFirstPerson_ = false;   // setDrawFirstPerson: bit 31 of the same word
     ComPtr<ID3D12Resource> frameCBs_[kFrameCount];
     u8* frameCBPtr_[kFrameCount] = {nullptr, nullptr};
 
@@ -4426,7 +4403,6 @@ void D3D12Device::beginFrame() {
     depthOnlyMesh_ = 0;     // drawMesh consumes it; this is the backstop for an unpaired depth-only draw
     // Cleared here, not after flush (both end empty, but clear only here decides frame-start state).
     blendedDraws_.clear();
-    firstPersonDraws_.clear();
     blendedPipelineMissingWarned_ = false;   // said at most once per frame; see its own member comment
     nextDrawPrepassed_ = false;   // a reset command list has consumed nothing from last frame either
 
@@ -4698,7 +4674,6 @@ bool D3D12Device::depthOnlyDraw(MeshHandle mesh, const f32 world[16], const f32 
         std::memcpy(fc, world, 16 * sizeof(f32));
         // gBaseColor.a used in alpha test; defaults to zero (IDevice::drawMeshDepthPrepass).
         if (color) std::memcpy(fc + 16, color, 4 * sizeof(f32));
-        if (const u32 pad = packObjectPad(drawLayersInv_, drawFirstPerson_)) std::memcpy(fc + 27, &pad, sizeof(u32));   // a first-person draw's depth projects like its colour
         rhiContext_->setConstants(kObjectConstantRegister, fc, kObjectConstantDwords);
         rhiContext_->drawMesh(mesh);
         boundRootSig_ = nullptr;
@@ -4740,7 +4715,6 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
         std::memcpy(bd.color, color, 4 * sizeof(f32));
         bd.metallic = metallic;
         bd.roughness = roughness;
-        bd.objPad = packObjectPad(drawLayersInv_, drawFirstPerson_);
         storeDrawBinding(bd.binding, drawBinding_.set, drawBinding_.constants, drawBinding_.bytes);
         return;
     }
@@ -4748,21 +4722,7 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
     for (IRenderFeature* f : features_)
         f->submitDraw(mesh, world, color, metallic, roughness,
                       drawBinding_.set, drawBinding_.constants, drawBinding_.bytes, /*blended=*/false);
-    for (IRenderFeature* f : features_) {
-        if (!f->suppressesScene()) continue;
-        // A first-person draw the suppressing feature leaves to the device: kept for the overlay after the sky.
-        if (drawFirstPerson_ && f->wantsFirstPersonOverlay()) {
-            BlendedDraw& fd = firstPersonDraws_.emplace_back();
-            fd.mesh = mesh;
-            std::memcpy(fd.world, world, 16 * sizeof(f32));
-            std::memcpy(fd.color, color, 4 * sizeof(f32));
-            fd.metallic = metallic;
-            fd.roughness = roughness;
-            fd.objPad = packObjectPad(drawLayersInv_, drawFirstPerson_);
-            storeDrawBinding(fd.binding, drawBinding_.set, drawBinding_.constants, drawBinding_.bytes);
-        }
-        return;
-    }
+    for (IRenderFeature* f : features_) if (f->suppressesScene()) return;
 
     for (IRenderFeature* f : features_) {
         if (!f->overridesScenePipeline() || !rhiContext_) continue;
@@ -4810,7 +4770,7 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
         std::memcpy(fc + 16, color, 4 * sizeof(f32));
         fc[20] = metallic; fc[21] = roughness; fc[22] = unlit_ ? 1.0f : 0.0f; fc[23] = 0.0f;
         writeShadingConstants(fc, unlit_);
-        if (const u32 pad = packObjectPad(drawLayersInv_, drawFirstPerson_)) std::memcpy(fc + 27, &pad, sizeof(u32));
+        if (drawLayersInv_) std::memcpy(fc + 27, &drawLayersInv_, sizeof(u32));
         rhiContext_->setConstants(kObjectConstantRegister, fc, kObjectConstantDwords);
         // featureMs: draw call must match pipeline chosen (prepassed = IA path).
         if (featureMs) rhiContext_->dispatchMeshFor(mesh);
@@ -4836,7 +4796,6 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
     std::memcpy(consts + 16, color, 4 * sizeof(f32));
     consts[20] = metallic; consts[21] = roughness; consts[22] = unlit_ ? 1.0f : 0.0f; consts[23] = 0.0f;
     writeShadingConstants(consts, unlit_);
-    if (const u32 pad = packObjectPad(drawLayersInv_, drawFirstPerson_)) std::memcpy(consts + 27, &pad, sizeof(u32));
     cmdList_->SetGraphicsRoot32BitConstants(kSceneObjectParam, kObjectConstantDwords, consts, 0);
     if (useMs) { dispatchMesh(m); return; }
     cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -6083,46 +6042,6 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
 }
 
 // Closes the frame: post chain, overlay, UI, capture, then submit.
-// First-person overlay (IRenderFeature::wantsFirstPersonOverlay): the opaque first-person draws a suppressing scene feature left out, drawn over its
-// result through the feature's overlay pipeline (depth test and write on: the squeezed first-person depth sits in front of the scene's).
-void D3D12Device::replayFirstPersonDraws(const D3D12_VIEWPORT& vp, const D3D12_RECT& sc) {
-    IRenderFeature* owner = nullptr;
-    for (IRenderFeature* f : features_) if (f->overridesScenePipeline() && f->wantsFirstPersonOverlay()) { owner = f; break; }
-    if (!owner) return;
-    const void* cb = nullptr; u32 cbBytes = 0;
-    const bool haveCb = owner->firstPersonOverlayConstants(&cb, &cbBytes) && cb && cbBytes;
-    beginGpuSpan("first-person overlay");
-    cmdList_->RSSetViewports(1, &vp);
-    cmdList_->RSSetScissorRects(1, &sc);
-    PipelineHandle bound = 0;
-    for (const BlendedDraw& fd : firstPersonDraws_) {
-        if (fd.mesh == 0 || fd.mesh > meshes_.size() || !meshes_[fd.mesh - 1].alive) continue;
-        const PipelineHandle pso = owner->firstPersonOverlayPipeline(drawMaterialFxKey(fd.binding.constants, fd.binding.bytes), sceneRtvCount_ == 4);
-        if (!pso) continue;
-        if (pso != bound) {
-            rhiContext_->setPipeline(pso);
-            rhiContext_->setBindlessTable(owner->sceneBindlessTable());
-            if (const BindingSetHandle bs = owner->sceneBindingSet()) rhiContext_->setBindingSet(bs, 0);
-            if (haveCb) rhiContext_->setConstantBuffer(kFeatureFrameConstantRegister, cb, cbBytes);
-            bound = pso;
-        }
-        rhiContext_->setDrawBinding(fd.binding.set, fd.binding.constants, fd.binding.bytes);
-        f32 fc[kObjectConstantDwords];
-        std::memcpy(fc, fd.world, 16 * sizeof(f32));
-        std::memcpy(fc + 16, fd.color, 4 * sizeof(f32));
-        fc[20] = fd.metallic; fc[21] = fd.roughness; fc[22] = 0.0f; fc[23] = 0.0f;
-        writeShadingConstants(fc);
-        std::memcpy(fc + 27, &fd.objPad, sizeof(u32));   // carries the first-person bit: the vertex stage projects through gFpViewProj
-        rhiContext_->setConstants(kObjectConstantRegister, fc, kObjectConstantDwords);
-        rhiContext_->drawMesh(fd.mesh);
-    }
-    boundRootSig_ = nullptr;
-    boundPso_ = nullptr;
-    fovValid_ = false;
-    dbValid_ = false;
-    endGpuSpan();
-}
-
 void D3D12Device::endFrame() {
     if (!hasSwapchain_) return;
     HitchMarks hm("endFrame", 0.25);
@@ -6180,9 +6099,6 @@ void D3D12Device::endFrame() {
         cmdList_->DrawInstanced(3, 1, 0, 0);
         endGpuSpan();
     }
-
-    // First-person overlay: before the blended replay, so glass behind the viewmodel depth-tests against it.
-    if (!firstPersonDraws_.empty() && rhiContext_ && !frameSuppressed_ && !wireframeFrame_) replayFirstPersonDraws(sceneVp, sceneSc);
 
     // Blended mesh flush: every drawMesh(..., drawBlended_=true) was captured instead of drawn.
     // Must land between sky and transparent pass. Guarded on frameSuppressed_, not sceneSuppressed_.
@@ -6325,7 +6241,6 @@ void D3D12Device::endFrame() {
                 // fc[22] stays 0: unlit blended mesh not plumbed speculatively.
                 fc[20] = bd.metallic; fc[21] = bd.roughness; fc[22] = 0.0f; fc[23] = 0.0f;
                 writeShadingConstants(fc);
-                std::memcpy(fc + 27, &bd.objPad, sizeof(u32));   // layers and the first-person bit, as the captured draw had them
                 rhiContext_->setConstants(kObjectConstantRegister, fc, kObjectConstantDwords);
                 if (drawMs) rhiContext_->dispatchMeshFor(bd.mesh);
                 else        rhiContext_->drawMesh(bd.mesh);

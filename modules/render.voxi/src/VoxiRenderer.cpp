@@ -1313,12 +1313,6 @@ void VoxiRenderer::submit(rhi::MeshHandle mesh, const f32 world[16], const f32 b
     d.noRay = submitNoRay_;
     d.noShadow = submitNoShadow_;
     d.layersInv = submitLayersInv_;
-    if (submitFirstPerson_) {
-        d.firstPerson = true;
-        d.movable = true;                 // out of voxelisation and the GI shadow map
-        d.hiddenFromOwner = true;         // a caster is in the secondary-ray lane only (see setSubmitFirstPerson)
-        if (!submitFirstPersonCasts_) { d.noRay = true; d.noShadow = true; }
-    }
 
     // World-space bounding sphere for per-cascade cull.
     // Only local-space bounds are cached; world-space transforms per entity (differs per instance).
@@ -1356,15 +1350,6 @@ void VoxiRenderer::submit(rhi::MeshHandle mesh, const f32 world[16], const f32 b
         std::memcpy(&matFlags, d.mat + offsetof(pbr::MaterialConstants, flags), sizeof(matFlags));
         if (matFlags & pbr::MaterialFlag_Light) lampDraws_.push_back(drawIndex);
     }
-}
-
-VoxiRenderer::SubmittedDraw VoxiRenderer::submittedDraw(usize i) const {
-    SubmittedDraw s;
-    if (i >= draws_.size()) return s;
-    const Draw& d = draws_[i];
-    s.mesh = d.mesh; s.firstPerson = d.firstPerson; s.noRay = d.noRay; s.noShadow = d.noShadow; s.movable = d.movable;
-    s.translucent = d.translucent; s.hiddenFromOwner = d.hiddenFromOwner;
-    return s;
 }
 
 // IRenderFeature entry point for every draw. Blended draws filtered here: unfiltered,
@@ -5392,7 +5377,6 @@ VoxiRenderer::ShadowInstanceGroup& VoxiRenderer::shadowGroupFor(std::vector<Shad
 // back to one-draw-per-instance (shadowPso_) if the instanced pipeline failed to build.
 void VoxiRenderer::shadowPass(rhi::IRenderContext& ctx) {
     lastShadowDraws_ = 0;
-    fpCascadeLive_ = false;
     const bool useInstancing = shadowInstancedPso_ != 0;
     if ((!shadowPso_ && !shadowInstancedPso_) || drawsPrev_.empty()) { cb_.shadowParams[1] = 0.0f; return; }
     u32 cascades = fitCascades();
@@ -5400,18 +5384,13 @@ void VoxiRenderer::shadowPass(rhi::IRenderContext& ctx) {
     if (cascades > static_cast<u32>(AVER_VOXI_SHADOW_CASCADE_LIMIT))
         cascades = static_cast<u32>(AVER_VOXI_SHADOW_CASCADE_LIMIT);
 #endif
-    // With ray tracing on the frame's own readers never sample the atlas (shadowParams[1] = 0 keeps them off stale data); a ray-driven frame with
-    // first-person meshes still renders the nearest cascade for the overlay, which reads it through firstPersonOverlayConstants.
-    bool firstPerson = false;
-    if (rtActive_ && wantsFirstPersonOverlay())
-        firstPerson = std::any_of(drawsPrev_.begin(), drawsPrev_.end(), [](const Draw& d) { return d.firstPerson && !d.translucent; });
-    const CascadePlan plan = planCascades(cascades, rtActive_, firstPerson);
-    fpCascadeLive_ = firstPerson && plan.count > 0;
-    if (plan.count == 0) { cb_.shadowParams[1] = 0.0f; return; }
-    cascades = plan.count;
+    if (cascades == 0) { cb_.shadowParams[1] = 0.0f; return; }
+
+    // Atlas has no reader while ray tracing is on; shadowParams[1] = 0 prevents stale atlas reads.
+    if (rtActive_) { cb_.shadowParams[1] = 0.0f; return; }
 
     cb_.shadowParams[0] = 1.0f / static_cast<f32>(shadowCascadeSize_ * 2u);
-    cb_.shadowParams[1] = plan.mainReads ? 1.0f : 0.0f;
+    cb_.shadowParams[1] = 1.0f;
     cb_.shadowParams[3] = static_cast<f32>(cascades);
 
     rhi::ScopedGpuStat gpuStat(ctx, "Voxi shadow");
@@ -5481,8 +5460,7 @@ void VoxiRenderer::shadowPass(rhi::IRenderContext& ctx) {
         } else {
             for (const Draw& d : drawsPrev_) {
                 // Translucent draws excluded (depth-only pass) -- see the note above, first branch.
-                if (d.translucent) continue;
-                if (d.noShadow) continue;
+                if (d.translucent || d.noShadow) continue;   // noShadow as the instanced path honours it
                 if (d.boundsRadius >= 0.0f) {
                     const Vec3 dc{d.boundsCentre[0], d.boundsCentre[1], d.boundsCentre[2]};
                     if (dist(dc, cascCentre) > cascRadius + d.boundsRadius) continue;
@@ -9472,36 +9450,6 @@ rhi::PipelineHandle VoxiRenderer::scenePipelineFx(u32 key, bool meshExtra, bool 
     const FxScene& e = it->second;
     if (blended) return e.blended;
     return e.lit ? pickGbuf(e.lit, e.litGbuf) : 0;
-}
-
-// First-person step 6: the overlay's pipeline. Always a raster scene pipeline (gi layout, no AVER_RT): a material variant's plain twin when it is
-// built (createFxPipelines compiles raster shaders in every frame), else the ordinary raster scene pipeline; the G-buffer twin when the device has
-// the G-buffer bound, so TAA and the post chain read the mesh's own velocity (camera-locked: jitter only) and view Z, not the world's behind it.
-rhi::PipelineHandle VoxiRenderer::firstPersonOverlayPipeline(u32 fxKey, bool gbuffer) const {
-    if (!giReady_) return 0;
-    if (fxKey && settings_.materialFx) {
-        const u64 mk = fxMapKey(fxKey, rtActive_, false);
-        const auto it = fxScenes_.find(mk);
-        if (it == fxScenes_.end() || !it->second.tried) {
-            if (std::find(fxWanted_.begin(), fxWanted_.end(), mk) == fxWanted_.end()) fxWanted_.push_back(mk);
-        } else if (it->second.lit) {
-            return gbuffer && it->second.litGbuf ? it->second.litGbuf : it->second.lit;
-        }
-    }
-    return gbuffer && sceneGbufPso_ ? sceneGbufPso_ : scenePso_;
-}
-
-// The frame block with the cascade switch on when shadowPass rendered the nearest cascade for the overlay (the frame's own readers keep it off).
-bool VoxiRenderer::firstPersonOverlayConstants(const void** data, u32* bytes) const {
-    if (!giReady_) return false;
-    fpCbBlob_.resize(sizeof(cb_));
-    std::memcpy(fpCbBlob_.data(), &cb_, sizeof(cb_));
-    if (fpCascadeLive_) {
-        const f32 on = 1.0f;
-        std::memcpy(fpCbBlob_.data() + offsetof(FrameConstants, shadowParams) + sizeof(f32), &on, sizeof(on));
-    }
-    *data = fpCbBlob_.data(); *bytes = static_cast<u32>(fpCbBlob_.size());
-    return true;
 }
 
 void VoxiRenderer::destroyFxScenes() {

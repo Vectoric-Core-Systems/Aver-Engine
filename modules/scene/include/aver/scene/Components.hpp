@@ -85,7 +85,7 @@ struct CMeshRenderer {
 
 // CMeshRenderer::renderFlags. Bits 0-1, the shadow mode: 0 casts shadows (default), 1 casts none, 2 casts only (the mesh is invisible to the camera and kept for
 // shadows, GI and ray tracing, like a mesh hidden from its owner). Bits 2-3, the GI mode: 0 static (default), 1 dynamic, 2 disabled; 1 and 2 keep the mesh out of
-// the voxel GI bake exactly as a mover is. Bit 4: skip the occlusion test for this instance. Bit 5: first-person render; bit 6: and it casts shadows. Shadow mode 1 acts on the cascade and GI shadow maps; the ray-traced sun
+// the voxel GI bake exactly as a mover is. Bit 4: skip the occlusion test for this instance. Shadow mode 1 acts on the cascade and GI shadow maps; the ray-traced sun
 // shadow keeps the mesh (its instance masks are not changed here).
 inline constexpr u32 kRenderShadowMask = 0x3u;
 inline constexpr u32 kRenderShadowsOff = 1u;
@@ -95,9 +95,7 @@ inline constexpr u32 kRenderGiMask = 0x3u << kRenderGiShift;
 inline constexpr u32 kRenderGiDynamic = 1u;
 inline constexpr u32 kRenderGiDisabled = 2u;
 inline constexpr u32 kRenderIgnoreOcclusion = 0x10u;
-inline constexpr u32 kRenderFirstPerson = 0x20u;        // drawn with the first-person view-projection and depth slab (docs/plans/FIRST_PERSON.md)
-inline constexpr u32 kRenderFirstPersonCasts = 0x40u;   // a first-person mesh that also casts shadows, from its true position
-inline constexpr u32 kRenderFlagsKnown = kRenderShadowMask | kRenderGiMask | kRenderIgnoreOcclusion | kRenderFirstPerson | kRenderFirstPersonCasts;
+inline constexpr u32 kRenderFlagsKnown = kRenderShadowMask | kRenderGiMask | kRenderIgnoreOcclusion;
 inline constexpr u32 renderShadowMode(u32 flags) { return flags & kRenderShadowMask; }
 inline constexpr u32 renderGiMode(u32 flags) { return (flags & kRenderGiMask) >> kRenderGiShift; }
 

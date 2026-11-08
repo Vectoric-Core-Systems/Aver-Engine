@@ -534,7 +534,7 @@ void embVertexEnd(VSIn i, inout VSOut o, uint fx) {
     }
     o.wpos = wpos;
     o.nrmWS = normalize(nrm);
-    o.pos = averScenePos(float4(wpos, 1.0));
+    o.pos = mul(float4(wpos, 1.0), gViewProj);
     o.uv = gEmb.uv;
 #if AVER_MESH_EXTRA
     o.vcol = gEmb.color;

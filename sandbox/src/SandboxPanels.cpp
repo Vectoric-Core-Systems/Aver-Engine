@@ -2038,39 +2038,6 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                     }
                     ImGui::EndDisabled();
                 }
-                // FIRST PERSON (docs/plans/FIRST_PERSON.md): CMeshRenderer::renderFlags, saved with the level as `renderflags`. Whole selection, one
-                // undo entry per click (EditCmd::RenderFlags). Clearing First person clears its cast flag too.
-                {
-                    const auto setFlags = [&](u32 setBits, u32 clearBits) {
-                        EditCmd c;
-                        c.kind = EditCmd::Kind::RenderFlags;
-                        for (const scene::Entity ent : multiSelected) {
-                            auto* m = w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer);
-                            if (!m) continue;
-                            const u32 before = m->renderFlags, after = (before & ~clearBits) | setBits;
-                            if (before == after) continue;
-                            m->renderFlags = after;
-                            c.renderFlags.push_back({editIdFor(ent), before, after});
-                        }
-                        if (!c.renderFlags.empty()) pushEdit(std::move(c));
-                    };
-                    bool fp = (mr->renderFlags & scene::kRenderFirstPerson) != 0u;
-                    if (ImGui::Checkbox("First person", &fp))
-                        fp ? setFlags(scene::kRenderFirstPerson, 0u) : setFlags(0u, scene::kRenderFirstPerson | scene::kRenderFirstPersonCasts);
-                    uiReg_.track("details.mesh.firstperson");
-                    if (ImGui::IsItemHovered())
-                        ImGui::SetTooltip("Drawn with the player view's first-person lens, in front of the world (a held weapon, arms).\n"
-                                          "Never culled by the main view; receives shadows, casts none unless the box below is on.\n"
-                                          "Saved with the level.");
-                    ImGui::BeginDisabled(!fp);
-                    bool casts = (mr->renderFlags & scene::kRenderFirstPersonCasts) != 0u;
-                    if (ImGui::Checkbox("Casts shadow (first person)", &casts))
-                        casts ? setFlags(scene::kRenderFirstPersonCasts, 0u) : setFlags(0u, scene::kRenderFirstPersonCasts);
-                    uiReg_.track("details.mesh.firstpersoncasts");
-                    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                        ImGui::SetTooltip("The first-person mesh also casts shadows, from where it really is.");
-                    ImGui::EndDisabled();
-                }
                 // ANIMATION: the .ocworld anim/animspeed/animtime/animonce tokens -- a transform clip
                 // this placement plays in Play (a car on its route, a fan). Whole-selection and one undo
                 // entry per change, like Collides above (EditCmd::Animation). A skeletal mesh is left

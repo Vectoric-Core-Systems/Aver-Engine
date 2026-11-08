@@ -1017,28 +1017,6 @@ static void checkOcworldPlacementName() {
     }
 }
 
-// PLACE's `renderflags <n>`: the mesh's per-instance render flags (first person and the rest), written only when non-zero.
-static void checkOcworldPlacementRenderFlags() {
-    AVER_INFO("=== .ocworld PLACE renderflags token ===");
-    using namespace fmt;
-    std::string err;
-    OcWorldData w;
-    check(parseOcworld("OCWORLD 1\nNAME T\n"
-                       "PLACE a.ocmesh 0 0 0 0 0 0 1 M_A\n"
-                       "PLACE b.ocmesh 1 0 0 0 0 0 1 M_B snap renderflags 96 name Arms\n",
-                       w, &err), "PLACE lines with a renderflags token parse");
-    check(w.placements.size() == 2 && w.placements[0].renderFlags == 0 && w.placements[1].renderFlags == 96,
-          "absent reads 0; `renderflags 96` reads first person + casts");
-    check(w.placements[1].material == "M_B" && w.placements[1].snapToGround && w.placements[1].name == "Arms",
-          "the value is not swallowed as a material, and the tokens around it still read");
-    const std::string text = writeOcworld(w);
-    check(text.find("PLACE b.ocmesh 1 0 0 0 0 0 1 M_B snap renderflags 96 name Arms") != std::string::npos,
-          "the writer puts it after `snap`, in read order");
-    check(text.find("PLACE a.ocmesh 0 0 0 0 0 0 1 M_A\n") != std::string::npos, "a placement with no flags gains no token");
-    OcWorldData back;
-    check(parseOcworld(text, back, &err) && writeOcworld(back) == text, "and the round trip is byte-identical");
-}
-
 // Checks PLACE's `hidden` token: the Details panel's Visible checkbox, saved with the level
 // (owner decision, Unreal-style) rather than the editor's own H/Shift+H/Ctrl+H hide, which stays
 // session-only and never reaches this file. Modelled on `nocollide` right down to the contract:
@@ -2261,7 +2239,6 @@ int main(int argc, char** argv) {
     checkOcworldNesting();
     checkOcworldPlacementName();
     checkOcworldPlacementHidden();
-    checkOcworldPlacementRenderFlags();
     checkOcworldPlacementAnim();
     checkOcworldPlacementVehicle();
     checkOcworldScatter();
