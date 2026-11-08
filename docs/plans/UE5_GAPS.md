@@ -37,7 +37,7 @@ updated in `docs/plans/UE_FEATURE_PARITY_PLAN.md` (2026-10-11); much of that pla
 
 | UE5 feature | Status |
 |---|---|
-| Replication, RPCs, client prediction | Missing. The reliable-UDP transport in `modules/net` has no caller in `scripting`, `Runtime` or `sandbox`. |
+| Replication, RPCs, client prediction | Partial. Part 1 is built and tested headlessly (`Aver.Framework/Net`: server/client sessions, spawn/destroy, `[Replicated]` delta send, `[Rpc]` Server/Client/Multicast, ownership and authority checks, relevance), see [../NETWORKING.md](../NETWORKING.md). Not wired into `Runtime` or the editor, no actor binding, no prediction (plan written). |
 | Sessions, lobby, matchmaking, Steam/EOS, achievements | Missing. |
 | GameState / PlayerState split | Missing. GameMode, Pawn and PlayerController exist. |
 | Mass-style data-oriented entities | Partial. GPU ORCA crowds only. |

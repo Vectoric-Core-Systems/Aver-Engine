@@ -17,6 +17,15 @@
     <ProjectReference Include="..\Aver.Framework\Aver.Framework.csproj" />
   </ItemGroup>
 
+  <!-- Aver.Net.Abi.dll from AVER_NET_BIN (or the repository's build/bin), so the replication tests can also run on real UDP; they SKIP that half without it. -->
+  <PropertyGroup>
+    <AverNetBin Condition="'$(AVER_NET_BIN)' != ''">$(AVER_NET_BIN)</AverNetBin>
+    <AverNetBin Condition="'$(AverNetBin)' == ''">$(MSBuildThisFileDirectory)..\..\..\build\bin</AverNetBin>
+  </PropertyGroup>
+  <ItemGroup Condition="Exists('$(AverNetBin)\Aver.Net.Abi.dll')">
+    <None Include="$(AverNetBin)\Aver.Net.Abi.dll" Link="Aver.Net.Abi.dll" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <ItemGroup>
     <None Include="Fixtures\**" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>

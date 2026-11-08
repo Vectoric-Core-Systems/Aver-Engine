@@ -2,7 +2,7 @@
 
 # Aver.Framework public API
 
-291 public types and 2492 public members, read from `scripting/csharp/Aver.Framework/` (154 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+314 public types and 2620 public members, read from `scripting/csharp/Aver.Framework/` (158 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Framework
 
@@ -3464,3 +3464,237 @@ Values: `SunDir = 1`, `SunLux = 2`, `SunColor = 3`, `SunTemp = 4`, `FogDensity =
 `public interface IAverExtension` - The entry point of an extension's managed half: the type named by managed.entry in the extension's manifest.
 
 - `void Load(ExtensionContext context)` - Starts the extension.
+
+## namespace Aver.Framework.Net
+
+### INetTransport
+
+`public interface INetTransport : IDisposable` - Channel 0 is for reliable traffic (acknowledged, in order); channel 1 for unreliable-ordered traffic (newest wins).
+
+- `public const int ReliableChannel = 0`
+- `public const int UnreliableChannel = 1`
+- `bool Listen(string ip, int port, int maxPeers, out int boundPort)` - Starts accepting peers; boundPort is the port in use (0 asks for a free one).
+- `long Connect(string ip, int port)` - Starts a connection and returns the peer id (0 on failure).
+- `bool Poll(out NetTransportEvent ev)` - Moves the network once and hands out the next event; false when none is pending.
+- `bool Send(long peer, bool reliable, byte[] data)`
+- `void Disconnect(long peer)` - A graceful close: data already queued is delivered first.
+
+### LoopbackNetwork
+
+`public sealed class LoopbackNetwork` - An in-memory network: transports made from one LoopbackNetwork reach each other by port.
+
+- `public Func<byte[], bool>? DropUnreliable` - Called for each unreliable packet; true drops it.
+- `public LoopbackTransport CreateTransport()`
+
+### LoopbackTransport
+
+`public sealed class LoopbackTransport : INetTransport`
+
+- `public bool Listen(string ip, int port, int maxPeers, out int boundPort)`
+- `public long Connect(string ip, int port)`
+- `public bool Poll(out NetTransportEvent ev)`
+- `public bool Send(long peer, bool reliable, byte[] data)`
+- `public void Disconnect(long peer)`
+- `public void Dispose()`
+
+### NativeNetTransport
+
+`public sealed class NativeNetTransport : INetTransport` - The reliable-UDP transport of modules/net, through the Aver.Net.Abi library.
+
+- `public static bool IsAvailable()` - True when the native library loads.
+- `public static NativeNetTransport? CreateServer(string ip, int port, int maxPeers, out int boundPort)` - A host that accepts connections on ip:port (loopback unless the caller means to listen wider).
+- `public static NativeNetTransport? CreateClient()`
+- `public bool Listen(string ip, int port, int maxPeers, out int boundPort)`
+- `public long Connect(string ip, int port)`
+- `public bool Poll(out NetTransportEvent ev)`
+- `public bool Send(long peer, bool reliable, byte[] data)`
+- `public void Disconnect(long peer)`
+- `public void Dispose()`
+
+### NetCodec
+
+`public static class NetCodec` - Encodes and decodes the value types replication supports: bool, the integer and float types, string, byte[], enums, Vec3, Quat and one-dimensional arrays of those.
+
+- `public static bool IsSupported(Type t)` - Whether t can cross the wire.
+- `public static void Write(NetWriter w, Type t, object? v)`
+- `public static object? Read(NetReader r, Type t)`
+
+### NetConnection
+
+`public sealed class NetConnection` - A client as the server sees it.
+
+- `public uint Id { get; }` - 1 and up, assigned when the handshake completes; never reused within a session.
+- `public string UserData { get; }` - What the client sent in its hello (a name, a token).
+- `public Vec3 ViewPosition` - Where the client's player is looking from; the game sets it for distance relevance.
+- `public object? Tag` - Anything the game wants to hang on the connection.
+- `public bool Authenticated { get; }`
+
+### NetFormatException
+
+`public sealed class NetFormatException : Exception` - A packet that is truncated, oversized or otherwise not what the codec expects.
+
+- `public NetFormatException(string message)`
+
+### NetObject
+
+`public abstract class NetObject` - An object a NetSession replicates.
+
+- `public uint NetId { get; }` - The id both sides know it by (0 until spawned).
+- `public NetSession? Session { get; }`
+- `public uint OwnerId { get; }` - The connection that owns it: 0 is the server (nobody), otherwise a Id.
+- `public bool HasAuthority { get; }` - True on the server (and on an object with no session).
+- `public bool IsOwner { get; }` - True where this process is the owner: the owning client, or the server for an object it owns itself.
+- `public virtual bool AlwaysRelevant { get; }` - Whether the object stays in a client's world no matter how far away it is.
+- `public virtual Vec3 NetPosition { get; }` - Where the object is, for distance relevance (see Distance).
+
+### NetReader
+
+`public sealed class NetReader` - Reads what NetWriter wrote; every read checks the bounds and throws NetFormatException.
+
+- `public NetReader(byte[] buffer, int start = 0)`
+- `public int Remaining { get; }`
+- `public byte U8()`
+- `public ushort U16()`
+- `public uint U32()`
+- `public ulong U64()`
+- `public float F32()`
+- `public double F64()`
+- `public uint Var()`
+- `public byte[] Bytes()`
+- `public string Str()`
+
+### NetRelevance
+
+`public static class NetRelevance` - Ready-made relevance rules for RelevanceFilter.
+
+- `public static Func<NetObject, NetConnection, bool> Distance(float radius)` - An object is relevant to a connection when it is within radius of the connection's ViewPosition, or always relevant, or owned by that connection.
+
+### NetRole
+
+`public enum NetRole`
+
+Values: `None`, `Server`, `Client`
+
+### NetRpcRejection
+
+`public readonly record struct NetRpcRejection(NetObject? Object, string Method, NetConnection? From, string Reason)` - An RPC the receiver refused: the sender does not own the object, the method is unknown, the arguments do not decode.
+
+### NetSession
+
+`public sealed class NetSession : IDisposable`
+
+- `public const uint ProtocolVersion = 1` - Bumped whenever the wire format changes; a client with another version is refused at the handshake.
+- `public NetRole Role { get; }`
+- `public NetSessionState State { get; }`
+- `public bool IsServer { get; }`
+- `public bool IsClient { get; }`
+- `public uint LocalConnectionId { get; }` - 0 on the server; on a client the id the server assigned (0 until connected).
+- `public NetStats Stats { get; }`
+- `public int SendIntervalMs { get; set; }` - Minimum time between replication passes; 0 replicates on every Tick.
+- `public int UnreliableResyncMs { get; set; }` - How often unreliable properties are resent in full, so a lost packet only delays convergence.
+- `public bool DestroyOwnedOnDisconnect { get; set; }` - The objects a client owns are destroyed when it leaves (default); when false they stay, owned by nobody.
+- `public Func<NetConnection, string?>? ConnectionApproval { get; set; }` - Server: returns null to accept a connecting client, or the reason to refuse it.
+- `public Func<NetObject, NetConnection, bool>? RelevanceFilter { get; set; }` - Server: whether an object is replicated to a connection.
+- `public event Action<NetConnection>? ClientConnected` - Server: a client finished the handshake.
+- `public event Action<NetConnection>? ClientDisconnected` - Server: an authenticated client left (its owned objects are already handled).
+- `public event Action? Connected` - Client: the handshake finished and LocalConnectionId is set.
+- `public event Action<string>? Disconnected` - Client: the connection ended or never completed; the argument says why.
+- `public event Action<NetObject>? ObjectSpawned` - Client: a replicated object arrived, initial state applied.
+- `public event Action<NetObject>? ObjectDestroyed` - Client: a replicated object went away (destroyed, out of relevance, or the connection ended).
+- `public event Action<NetRpcRejection>? RpcRejected`
+- `public NetSession(INetTransport transport)`
+- `public IEnumerable<NetObject> Objects { get; }`
+- `public IReadOnlyCollection<NetConnection> Connections { get; }`
+- `public NetObject? Find(uint netId)`
+- `public NetConnection? FindConnection(uint id)`
+- `public bool StartServer(string ip, int port, int maxClients, out int boundPort)`
+- `public bool StartClient(string ip, int port, string helloData = "")`
+- `public void Kick(NetConnection conn, string? reason = null)` - Server: sends the client away (it is told why when reason is given).
+- `public void Stop()` - Ends the session: a client leaves, a server drops every client.
+- `public void Dispose()`
+- `public void Tick(long nowMs = -1)` - Moves the network, handles what arrived, and (on a server, at SendIntervalMs) replicates.
+- `public NetObject Spawn(string typeName, uint ownerId = 0)` - Server: makes an object of a registered type and replicates it to the connections it is relevant to.
+- `public T Spawn<T>(uint ownerId = 0) where T : NetObject`
+- `public void Destroy(NetObject o)` - Server: removes the object here and on every client that has it.
+- `public void SetOwner(NetObject o, uint ownerId)` - Server: hands the object to another connection (0 = the server).
+
+### NetSessionState
+
+`public enum NetSessionState`
+
+Values: `Idle`, `Connecting`, `Handshaking`, `Connected`, `Disconnected`
+
+### NetStats
+
+`public sealed class NetStats`
+
+- `public long PacketsSent, PacketsReceived, SpawnsSent, DestroysSent, PropMessagesSent, UnreliablePropMessagesSent, RpcsSent, RpcsExecuted, RpcsRejected, Malformed`
+
+### NetTransportEvent
+
+`public struct NetTransportEvent` - One thing the transport saw.
+
+- `public NetTransportEventType Type`
+- `public long Peer`
+- `public int Channel`
+- `public byte[]? Data`
+
+### NetTransportEventType
+
+`public enum NetTransportEventType`
+
+Values: `Connect = 1`, `Disconnect = 2`, `Data = 3`
+
+### NetTypeAttribute
+
+`public sealed class NetTypeAttribute : Attribute` - Registers a NetObject subclass under the name that crosses the wire.
+
+- `public NetTypeAttribute(string name)`
+- `public string Name { get; }`
+
+### NetTypes
+
+`public static class NetTypes` - The type registry: names to classes, and the per-class property and RPC tables built once by reflection.
+
+- `public static void Register<T>(string? name = null) where T : NetObject, new()`
+- `public static void Register(Type type, string? name = null)`
+- `public static void RegisterAssembly(Assembly assembly)` - Registers every [NetType] class in assembly.
+
+### NetWriter
+
+`public sealed class NetWriter` - Appends little-endian values to a growing buffer.
+
+- `public int Length { get; }`
+- `public byte[] ToArray()`
+- `public void U8(byte v)`
+- `public void U16(ushort v)`
+- `public void U32(uint v)`
+- `public void U64(ulong v)`
+- `public void F32(float v)`
+- `public void F64(double v)`
+- `public void Var(uint v)` - A length (7 bits per byte, low first).
+- `public void Bytes(ReadOnlySpan<byte> v)`
+- `public void Raw(ReadOnlySpan<byte> v)`
+- `public void Str(string v)`
+
+### ReplicatedAttribute
+
+`public sealed class ReplicatedAttribute : Attribute` - Marks a field or property of a NetObject as server-to-client state.
+
+- `public bool Reliable { get; init; }` - Sent reliably (default).
+- `public bool OwnerOnly { get; init; }` - Only the owning client (and the server) gets the value.
+- `public string? OnChanged { get; init; }` - Name of a parameterless method (or one taking the previous value) called on a client after a received change.
+
+### RpcAttribute
+
+`public sealed class RpcAttribute : Attribute` - Marks a method of a NetObject as callable across the network with CallRpc.
+
+- `public RpcAttribute(RpcTarget target)`
+- `public RpcTarget Target { get; }`
+- `public bool Reliable { get; init; }` - Acknowledged and ordered with spawns and property changes (default).
+
+### RpcTarget
+
+`public enum RpcTarget` - Where a [Rpc] method runs.
+
+Values: `Server = 0`, `Client = 1`, `Multicast = 2`
