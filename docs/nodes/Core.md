@@ -216,7 +216,7 @@ The nodes the parser (`OcGraphParser.AddDefaultPins`) and the compiler know by h
 | `VecScale` | Vec Scale | Vector | in: `ax` float, `ay` float, `az` float, `s` float<br>out: `x` float, `y` float, `z` float | none |
 | `VecSub` | Vec Subtract | Vector | in: `ax` float, `ay` float, `az` float, `bx` float, `by` float, `bz` float<br>out: `x` float, `y` float, `z` float | none |
 
-## Material graph (60)
+## Material graph (65)
 
 | Type | Display | Category | Pins | Attributes |
 |---|---|---|---|---|
@@ -224,6 +224,9 @@ The nodes the parser (`OcGraphParser.AddDefaultPins`) and the compiler know by h
 | `ConstFloat2` | Const Float2 | Const | out: `value` float2 | none |
 | `ConstFloat3` | Const Float3 | Const | out: `value` float3 | none |
 | `ConstFloat4` | Const Float4 | Const | out: `value` float4 | none |
+| `CallFunction` | Call Function | Function | none | `function` |
+| `FunctionInput` | Function Input | Function | out: `value` float | `name` |
+| `FunctionOutput` | Function Output | Function | in: `value` float | `name` |
 | `CameraPosition` | Camera Position | Input | out: `xyz` float3 | none |
 | `ObjectPosition` | Object Position | Input | out: `xyz` float3 | none |
 | `UV` | UV | Input | out: `uv` float2 | none |
@@ -258,6 +261,8 @@ The nodes the parser (`OcGraphParser.AddDefaultPins`) and the compiler know by h
 | `Subtract` | Subtract | Math | in: `a` float3, `b` float3<br>out: `result` float3 | none |
 | `Tan` | Tan | Math | in: `x` float3<br>out: `result` float3 | none |
 | `MaterialOutput` | Material Output | Output | in: `BaseColor` float3, `Metallic` float, `Roughness` float, `Normal` float3, `Emissive` float3, `Occlusion` float, `Opacity` float, `AlphaCutoff` float, `SubsurfaceWeight` float, `SubsurfaceRadius` float, `SubsurfaceColor` float3, `Ior` float, `Transmission` float, `AttenuationColor` float3, `AttenuationDistance` float, `ScatterColor` float3, `ScatterAnisotropy` float, `CoatWeight` float, `CoatRoughness` float, `CoatF0` float | none |
+| `ScalarParameter` | Scalar Parameter | Parameter | out: `value` float | `name` |
+| `VectorParameter` | Vector Parameter | Parameter | out: `value` float4 | `name` |
 | `Checker` | Checker | Procedural | in: `uv` float2, `scale` float = 8<br>out: `result` float | none |
 | `Noise` | Noise | Procedural | in: `uv` float2, `scale` float = 8<br>out: `result` float | none |
 | `SampleTexture` | Sample Texture | Texture | in: `uv` float2<br>out: `rgb` float3, `a` float, `rgba` float4 | `slot` |
