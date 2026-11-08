@@ -166,6 +166,9 @@ struct ProjectDesc {
     // 2048+ particles on the GPU when the device supports compute and indirect draw), 2 = on (every emitter that can). -1 / absent
     // = auto. CLI --particles-cpu / --particles-gpu outrank it.
     int particleGpu = -1; // RENDER.PARTICLEGPU  0/1/2
+    // RENDER.PARTICLESCALE: the particle scalability tier effects play at, 0 Low, 1 Medium, 2 High, 3 Epic. -1 / absent = Epic (every
+    // effect as authored). Only effects that carry SCALE / SCALEALL records change.
+    int particleScale = -1;
 
     // ---- UI SETTINGS THAT THE FILE COULD NOT HOLD (now fixed) ---------------------------------
     // These were live controls in Project Settings that applied immediately, then vanished on reopen
@@ -218,7 +221,7 @@ struct ProjectDesc {
                postExposure >= 0.0f || postBloom >= 0.0f ||
                postAutoExposure >= 0 || postTonemap >= 0 ||
                postTonemapWhite >= 0.0f || postAdjustBrightness >= 0.0f || postAdjustContrast >= 0.0f || postAdjustSaturation >= 0.0f ||
-               !backend.empty() || frameBudgetMs > 0.0f || averSr >= 0 || taa >= 0 || neuraa >= 0 || manyLights >= 0 || particleGpu >= 0;
+               !backend.empty() || frameBudgetMs > 0.0f || averSr >= 0 || taa >= 0 || neuraa >= 0 || manyLights >= 0 || particleGpu >= 0 || particleScale >= 0;
     }
 
     // ---- WINDOW.* -- shipped game window presentation (now persisted) -------------------------

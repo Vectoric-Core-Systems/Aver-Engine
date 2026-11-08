@@ -935,6 +935,7 @@ void GameApp::attachParticles(Engine& e) {
     {
         const int pm = cfg_.particleGpuArg >= 0 ? cfg_.particleGpuArg : (project_.particleGpu >= 0 ? project_.particleGpu : 1);
         particles::particleSystem().setGpuMode(pm);
+        if (project_.particleScale >= 0) particles::particleEffects().setScalabilityTier(static_cast<particles::ScalabilityTier>(std::min(project_.particleScale, 3)));
         particleRenderer_.setGpuEnabled(pm != 0);
         particleRenderer_.setTextureResolver(&GameContent::resolveParticleTexture, &content_);
         particleRenderer_.setMeshResolver(&GameContent::resolveParticleMesh, &content_);

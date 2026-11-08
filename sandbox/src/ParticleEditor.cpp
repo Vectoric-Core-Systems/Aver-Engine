@@ -337,11 +337,12 @@ void ParticleEditor::ensureSims() {
         nextInbox_.emplace_back();
     }
     muted_.resize(n, 0);
+    previewFx_ = particles::hasScalability(def_) ? particles::scaledForTier(def_, previewTier_).emitters : def_.emitters;
     for (usize i = 0; i < n; ++i) {
-        const u32 sig = signatureOf(def_.emitters[i]);
+        const u32 sig = signatureOf(previewFx_[i]);
         // A FIXED seed per emitter (12345 + index): Restart reproduces the same spread and lifetimes every time.
         if (sig != simSignature_[i]) {
-            sims_[i].init(def_.emitters[i], def_.params, 12345u + static_cast<u32>(i));
+            sims_[i].init(previewFx_[i], def_.params, 12345u + static_cast<u32>(i));
             simSignature_[i] = sig;
         }
     }
@@ -349,8 +350,7 @@ void ParticleEditor::ensureSims() {
     if (isoModule_ >= 0 && (static_cast<usize>(isoEmitter_) >= n || static_cast<usize>(isoModule_) >= def_.emitters[static_cast<usize>(isoEmitter_)].modules.size())) {
         isoEmitter_ = isoModule_ = -1;
     }
-    previewFx_ = def_.emitters;
-    if (isoModule_ >= 0) previewFx_[static_cast<usize>(isoEmitter_)] = pxmodel::isolatedModule(def_.emitters[static_cast<usize>(isoEmitter_)], isoModule_);
+    if (isoModule_ >= 0) previewFx_[static_cast<usize>(isoEmitter_)] = pxmodel::isolatedModule(previewFx_[static_cast<usize>(isoEmitter_)], isoModule_);
     for (usize i = 0; i < n; ++i) sims_[i].bind(previewFx_[i]);
 }
 
@@ -370,7 +370,7 @@ void ParticleEditor::tickPreview(f32 dt) {
     }
     std::vector<particles::EventRecord> events;
     for (usize i = 0; i < n; ++i) {
-        const particles::ParticleEffect& fx = def_.emitters[i];
+        const particles::ParticleEffect& fx = previewFx_[i];   // def_ with the preview-only tier and isolate applied
         particles::EmitterSim& sim = sims_[i];
         const bool silent = (solo_ >= 0 && static_cast<int>(i) != solo_) || muted_[i] != 0;
         for (usize s = 0; s < def_.params.size() && s < particles::kMaxUserParams; ++s) {
@@ -506,6 +506,12 @@ bool ParticleEditor::commitLiveParam(int param) {
     const bool changed = editSystem([&](particles::ParticleSystemDef& d) { return pxmodel::setUserParamValue(d, param, v); });
     clearLiveParam(param);
     return changed;
+}
+
+void ParticleEditor::setPreviewTier(particles::ScalabilityTier tier) {
+    if (tier == previewTier_) return;
+    previewTier_ = tier;
+    restartPreview();
 }
 
 void ParticleEditor::setMotion(pxmodel::PreviewMotion kind, f32 radiusCm, f32 speedCmPerSec) {

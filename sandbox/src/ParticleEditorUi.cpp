@@ -421,6 +421,61 @@ void ParticleEditor::drawLiveParams() {
     if (liveCount() > 1 && ImGui::SmallButton("Reset all")) resetLiveParams();
 }
 
+// ================================================================================== scalability ===
+
+// Per-tier scaling of the effect's spawn rate and particle cap, with the engine's quality ladder (Low .. Epic). The effect has a
+// default per tier and each emitter may override a tier. "Preview as" plays the effect at a tier without changing the asset.
+void ParticleEditor::drawScalability() {
+    using namespace particles;
+    static const char* kTiers[] = {"Low", "Medium", "High", "Epic"};
+    int pt = static_cast<int>(previewTier_);
+    ImGui::SetNextItemWidth(110.0f * (ImGui::GetFontSize() / 16.0f));
+    if (ImGui::Combo("Preview as", &pt, kTiers, 4)) setPreviewTier(static_cast<ScalabilityTier>(pt));
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Plays the preview at this tier. Epic is the effect as written. Not saved.");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(110.0f * (ImGui::GetFontSize() / 16.0f));
+    ImGui::Combo("Edit tier", &scaleEditTier_, kTiers, 4);
+
+    const ScalabilityTier tier = static_cast<ScalabilityTier>(scaleEditTier_);
+    const auto row = [&](const char* title, const TierScale& cur, const std::function<void(const std::function<bool(Scalability&)>&)>& apply) {
+        ImGui::PushID(title);
+        bool on = cur.set;
+        if (ImGui::Checkbox(title, &on)) {
+            apply([&](Scalability& s) { return on ? pxmodel::setTierScale(s, tier, TierScale{true, true, 1.0f, 1.0f}) : pxmodel::clearTierScale(s, tier); });
+        }
+        if (cur.set) {
+            bool enabled = cur.enabled;
+            f32 rate = cur.rateScale, mx = cur.maxScale;
+            bool ch = false;
+            ImGui::Indent();
+            ch |= ImGui::Checkbox("Plays at this tier", &enabled);
+            ImGui::BeginDisabled(!enabled);
+            ch |= ImGui::SliderFloat("Spawn rate x", &rate, 0.0f, 4.0f, "%.2f");
+            ch |= ImGui::SliderFloat("Max particles x", &mx, 0.0f, 4.0f, "%.2f");
+            ImGui::EndDisabled();
+            ImGui::Unindent();
+            if (ch) apply([&](Scalability& s) { return pxmodel::setTierScale(s, tier, TierScale{true, enabled, rate, mx}); });
+        }
+        ImGui::PopID();
+    };
+    row("Effect default", def_.scalability.tier[scaleEditTier_], [&](const std::function<bool(Scalability&)>& fn) {
+        editSystem([&](ParticleSystemDef& d) { return fn(d.scalability); }, idOf("scaleSys"), frameNow());
+    });
+    row("This emitter overrides", effect().scalability.tier[scaleEditTier_], [&](const std::function<bool(Scalability&)>& fn) {
+        editEffect([&](ParticleEffect& e) { return fn(e.scalability); }, idOf("scaleEm"), frameNow());
+    });
+
+    const TierScale eff = effectiveTierScale(def_, static_cast<usize>(sel_), tier);
+    const ParticleEffect& e = effect();
+    if (!eff.enabled)
+        ImGui::TextDisabled("%s: this emitter does not play.", kTiers[scaleEditTier_]);
+    else
+        ImGui::TextDisabled("%s: rate %.1f/s, burst %u, max %u particles", kTiers[scaleEditTier_], e.emissionRate * eff.rateScale,
+                            static_cast<u32>(std::lround(static_cast<double>(e.burstCount) * eff.rateScale)),
+                            std::max(1u, static_cast<u32>(std::lround(static_cast<double>(e.maxParticles) * eff.maxScale))));
+    ImGui::TextDisabled("The project's tier is RENDER.PARTICLESCALE (0 Low .. 3 Epic) in the .ocproject; absent plays every effect as written.");
+}
+
 // ================================================================================== the sections ==
 
 void ParticleEditor::drawParams() {
@@ -943,6 +998,10 @@ void ParticleEditor::drawParams() {
             editSystem([&](ParticleSystemDef& s) { return pxmodel::addEvent(s, sel_, static_cast<u8>(evOn), evChild, static_cast<u32>(evCount), evInherit); });
         ImGui::TextDisabled("A child needs a name without spaces; a rule that would form a loop is refused. Children spawn one tick later.");
     }
+
+    // ---- scalability ----
+    ImGui::SeparatorText("Scalability");
+    drawScalability();
 
     // ---- culling and bounds ----
     ImGui::SeparatorText("Culling and bounds");

@@ -9,6 +9,7 @@
 // Header-only so ParticleEditor.cpp, the UI translation unit and the test share one definition.
 #include "aver/particles/EmitterSim.hpp"
 #include "aver/particles/ParticleModules.hpp"
+#include "aver/particles/ParticleScalability.hpp"
 #include "aver/particles/ParticleTypes.hpp"
 
 #include <algorithm>
@@ -340,6 +341,27 @@ inline bool setCurvePoint(Curve4& c, int idx, f32 t, const f32 v[4]) {
     if (!changed) return false;
     c.t[i] = t;
     for (int k = 0; k < 4; ++k) c.v[i][k] = v[k];
+    return true;
+}
+
+// ---- Scalability tiers ----
+// Sets (or clears) one tier of a Scalability. The scales are clamped to what the parser accepts, [0, 100].
+inline bool setTierScale(particles::Scalability& s, particles::ScalabilityTier tier, const particles::TierScale& v) {
+    const usize t = static_cast<usize>(tier);
+    if (t >= particles::kScalabilityTiers || !std::isfinite(v.rateScale) || !std::isfinite(v.maxScale)) return false;
+    particles::TierScale n = v;
+    n.set = true;
+    n.rateScale = std::clamp(n.rateScale, 0.0f, 100.0f);
+    n.maxScale = std::clamp(n.maxScale, 0.0f, 100.0f);
+    const particles::TierScale& o = s.tier[t];
+    if (o.set && o.enabled == n.enabled && o.rateScale == n.rateScale && o.maxScale == n.maxScale) return false;
+    s.tier[t] = n;
+    return true;
+}
+inline bool clearTierScale(particles::Scalability& s, particles::ScalabilityTier tier) {
+    const usize t = static_cast<usize>(tier);
+    if (t >= particles::kScalabilityTiers || !s.tier[t].set) return false;
+    s.tier[t] = particles::TierScale{};
     return true;
 }
 

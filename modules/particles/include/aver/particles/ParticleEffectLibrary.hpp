@@ -6,6 +6,7 @@
 // every existing caller and test is untouched.
 #pragma once
 #include "aver/core/Hash.hpp"
+#include "aver/particles/ParticleScalability.hpp"
 #include "aver/particles/ParticleTypes.hpp"
 
 #include <string>
@@ -34,6 +35,13 @@ public:
     void setSystem(u64 id, const ParticleSystemDef& def);
     const ParticleSystemDef* findSystem(u64 id) const;
 
+    // The scalability tier effects play at (Epic: as authored). find / findSystem answer the effect AS SCALED for this tier; the
+    // authored definition is kept, so changing the tier at run time re-scales everything registered. A tier change bumps revision().
+    void setScalabilityTier(ScalabilityTier tier);
+    ScalabilityTier scalabilityTier() const { return tier_; }
+    // The effect as authored, whatever the tier.
+    const ParticleSystemDef* findAuthored(u64 id) const;
+
     // Drops every registered effect. Call when a project closes.
     void clear();
 
@@ -43,7 +51,10 @@ public:
     u64 revision() const { return revision_; }
 
 private:
-    std::unordered_map<u64, ParticleSystemDef> systems_;
+    void rescale(u64 id);
+    std::unordered_map<u64, ParticleSystemDef> systems_;   // authored
+    std::unordered_map<u64, ParticleSystemDef> scaled_;    // only for effects with scalability data, at tier_
+    ScalabilityTier tier_ = ScalabilityTier::Epic;
     u64 revision_ = 1;
 };
 

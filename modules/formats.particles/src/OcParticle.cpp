@@ -48,6 +48,7 @@
 // someone else's) writes "GI off" explicitly; nothing here special-cases what kind of effect that
 // is, only whether this one flag is set.
 #include "aver/formats/OcParticle.hpp"
+#include "aver/particles/ParticleScalability.hpp"
 #include "aver/core/CharConv.hpp"   // floating from_chars where libc++ has none
 #include "aver/core/Hash.hpp"
 #include "aver/formats/detail/TextScan.hpp"
@@ -183,7 +184,7 @@ enum class Rec : u8 {
     Header, Name, Param, EmitterHdr,
     Sim, Shape, Render, Sprite, Subuv, SizeCurve, ColorCurve, Blend, Emission, Lifetime, Direction, Speed, Gravity,
     Damping, Size, ColorStart, ColorEnd, Tex, Gi, Lighting, Sort, Fog, Bounds, Cull, SpawnAt, Module, OnEvent,
-    CustomShader,
+    CustomShader, Scale, SysScale,
     Other, Count
 };
 constexpr usize kRecCount = static_cast<usize>(Rec::Count);
@@ -203,6 +204,7 @@ Rec classifyLine(std::string_view line, bool sawHeaderYet) {
         {"TEX", Rec::Tex}, {"GI", Rec::Gi}, {"LIGHTING", Rec::Lighting}, {"SORT", Rec::Sort}, {"FOG", Rec::Fog},
         {"BOUNDS", Rec::Bounds}, {"CULL", Rec::Cull}, {"SPAWNAT", Rec::SpawnAt}, {"MODULE", Rec::Module},
         {"ONEVENT", Rec::OnEvent}, {"CUSTOMSHADER", Rec::CustomShader}, {"GDSHADER", Rec::CustomShader},
+        {"SCALE", Rec::Scale}, {"SCALEALL", Rec::SysScale},
     };
     for (const Entry& e : kTable)
         if (equalsCI(k, e.word)) return e.rec;
@@ -217,7 +219,7 @@ bool isV2OnlyRec(Rec r) {
     switch (r) {
     case Rec::Param: case Rec::EmitterHdr: case Rec::Sim: case Rec::Render: case Rec::Sprite: case Rec::Subuv:
     case Rec::SizeCurve: case Rec::ColorCurve: case Rec::Lighting: case Rec::Sort: case Rec::Fog: case Rec::Bounds:
-    case Rec::Cull: case Rec::SpawnAt: case Rec::Module: case Rec::OnEvent: case Rec::CustomShader:
+    case Rec::Cull: case Rec::SpawnAt: case Rec::Module: case Rec::OnEvent: case Rec::CustomShader: case Rec::Scale: case Rec::SysScale:
         return true;
     default:
         return false;
@@ -225,7 +227,41 @@ bool isV2OnlyRec(Rec r) {
 }
 
 bool isPerEmitter(Rec r) {
-    return r != Rec::Header && r != Rec::Name && r != Rec::Param && r != Rec::Other;
+    return r != Rec::Header && r != Rec::Name && r != Rec::Param && r != Rec::SysScale && r != Rec::Other;
+}
+
+// SCALE / SCALEALL <tier> [off] [rate=<f>] [max=<f>]: one scalability tier. The scales are multipliers in [0, 100].
+bool parseScaleRecord(const std::vector<std::string_view>& t, particles::ScalabilityTier& tier, particles::TierScale& out, std::string& why) {
+    if (t.size() < 2 || !particles::parseTierWord(t[1], tier)) { why = "needs a tier: low, medium, high or epic"; return false; }
+    particles::TierScale s;
+    s.set = true;
+    for (usize k = 2; k < t.size(); ++k) {
+        if (equalsCI(t[k], "off")) { s.enabled = false; continue; }
+        const usize eq = t[k].find('=');
+        if (eq == std::string_view::npos) { why = "expected off, rate=<f> or max=<f>, got '" + std::string(t[k]) + "'"; return false; }
+        const std::string_view name = t[k].substr(0, eq);
+        f32 v;
+        if (!strictF32(t[k].substr(eq + 1), v) || !(v >= 0.0f && v <= 100.0f)) { why = "'" + std::string(name) + "' must be a number in [0, 100]"; return false; }
+        if (equalsCI(name, "rate")) s.rateScale = v;
+        else if (equalsCI(name, "max")) s.maxScale = v;
+        else { why = "unknown field '" + std::string(name) + "' (want rate or max)"; return false; }
+    }
+    out = s;
+    return true;
+}
+
+std::string scalabilityText(const char* key, const particles::Scalability& sc) {
+    std::string out;
+    for (u32 i = 0; i < particles::kScalabilityTiers; ++i) {
+        const particles::TierScale& s = sc.tier[i];
+        if (!s.set) continue;
+        out += std::string(key) + " " + particles::tierWord(static_cast<particles::ScalabilityTier>(i));
+        if (!s.enabled) out += " off";
+        if (s.rateScale != 1.0f) out += " rate=" + num(s.rateScale);
+        if (s.maxScale != 1.0f) out += " max=" + num(s.maxScale);
+        out += "\n";
+    }
+    return out;
 }
 
 // ------------------------------------------------------------------------------------------------ parsing
@@ -657,6 +693,13 @@ bool parseOcparticleSystem(std::string_view text, particles::ParticleSystemDef& 
                 }
             }
             e.modules.push_back(m);
+        } else if (equalsCI(key, "SCALE") || equalsCI(key, "SCALEALL")) {
+            particles::ScalabilityTier tier{};
+            particles::TierScale ts;
+            std::string why;
+            if (!parseScaleRecord(t, tier, ts, why)) return fail(std::string(key) + " " + why);
+            if (equalsCI(key, "SCALEALL")) def.scalability.tier[static_cast<usize>(tier)] = ts;
+            else emitter().scalability.tier[static_cast<usize>(tier)] = ts;
         } else if (equalsCI(key, "ONEVENT")) {
             // ONEVENT death|collide SPAWN <emitter> <count> [inherit <k>]
             if (t.size() != 5 && t.size() != 7) return fail("ONEVENT needs: death|collide SPAWN <emitter> <count> [inherit <k>]");
@@ -820,6 +863,7 @@ bool ocparticleFitsV1(const particles::ParticleSystemDef& def) {
     if (e.boundsRadiusCm != 0 || e.cullDistanceCm != 0 || e.spawnAtTarget != d.spawnAtTarget) return false;
     if (e.sizeCurve.n >= 2 || e.colorCurve.n >= 2) return false;
     if (!e.modules.empty() || !e.events.empty() || !e.name.empty()) return false;
+    if (anyTierSet(e.scalability) || anyTierSet(def.scalability)) return false;
     return true;
 }
 
@@ -928,6 +972,7 @@ EmitterText buildEmitterText(const particles::ParticleSystemDef& def, usize inde
         R(Rec::Tex) = std::string("TEX ") + buf + "\n";
     }
     for (const Module& m : e.modules) R(Rec::Module) += moduleText(m, def);
+    R(Rec::Scale) = scalabilityText("SCALE", e.scalability);
     for (const EventSpawn& ev : e.events) {
         const std::string child = ev.emitter < def.emitters.size() ? def.emitters[ev.emitter].name : std::string();
         R(Rec::OnEvent) += std::string("ONEVENT ") + (ev.on == 0 ? "death" : "collide") + " SPAWN " + child + " " +
@@ -954,7 +999,7 @@ std::string freshEmitterBody(const EmitterText& t) {
         Rec::Emission, Rec::Lifetime, Rec::Direction, Rec::Speed, Rec::Gravity, Rec::Damping, Rec::Size, Rec::SizeCurve,
         Rec::ColorStart, Rec::ColorEnd, Rec::ColorCurve, Rec::Other /*blank*/,
         Rec::Lighting, Rec::Gi, Rec::Sort, Rec::Fog, Rec::Bounds, Rec::Cull, Rec::SpawnAt, Rec::Tex, Rec::CustomShader,
-        Rec::Module, Rec::OnEvent,
+        Rec::Module, Rec::OnEvent, Rec::Scale,
     };
     std::string out;
     for (Rec r : kOrder) {
@@ -1156,6 +1201,7 @@ std::string writeV2Text(const particles::ParticleSystemDef& def, std::string_vie
     for (usize i = 0; i < n; ++i) texts.push_back(buildEmitterText(def, i));
     const std::string nameLine = def.name.empty() ? std::string() : ("NAME " + def.name + "\n");
     const std::string paramLines = paramsText(def);
+    const std::string sysScaleLines = scalabilityText("SCALEALL", def.scalability);
     const std::string headerLine = "OCPARTICLE " + std::to_string(version) + "\n";
     const bool explicitEmitterLines = version >= 2;
 
@@ -1164,6 +1210,7 @@ std::string writeV2Text(const particles::ParticleSystemDef& def, std::string_vie
         out += "# Particle effect, written by the Aver Engine editor.\n";
         out += nameLine;
         out += paramLines;
+        out += sysScaleLines;
         for (usize i = 0; i < n; ++i) {
             out += "\n";
             if (explicitEmitterLines && (n > 1 || !def.emitters[i].name.empty())) out += emitterHeaderLine(def, i);
@@ -1199,14 +1246,14 @@ std::string writeV2Text(const particles::ParticleSystemDef& def, std::string_vie
                 cur = 0;
                 implicitZero = true;
             }
-            ls.push_back({line, r, (r == Rec::Header || r == Rec::Name || r == Rec::Param) ? -2 : cur});
+            ls.push_back({line, r, (r == Rec::Header || r == Rec::Name || r == Rec::Param || r == Rec::SysScale) ? -2 : cur});
         }
         (void)implicitZero;
     }
 
     std::vector<std::vector<bool>> placed(n, std::vector<bool>(kRecCount, false));
     std::vector<bool> blockSeen(n, false), blockHasHeader(n, false);
-    bool placedName = false, placedParam = false, preambleFlushed = false;
+    bool placedName = false, placedParam = false, placedSys = false, preambleFlushed = false;
     std::string out;
     out.reserve(existing.size() + 1024);
 
@@ -1215,6 +1262,7 @@ std::string writeV2Text(const particles::ParticleSystemDef& def, std::string_vie
         preambleFlushed = true;
         if (!placedName && !nameLine.empty()) { out += nameLine; placedName = true; }
         if (!placedParam && !paramLines.empty()) { out += paramLines; placedParam = true; }
+        if (!placedSys && !sysScaleLines.empty()) { out += sysScaleLines; placedSys = true; }
     };
     const auto flushEmitter = [&](int idx) {
         if (idx < 0 || static_cast<usize>(idx) >= n) return;
@@ -1222,7 +1270,7 @@ std::string writeV2Text(const particles::ParticleSystemDef& def, std::string_vie
             Rec::Sim, Rec::Shape, Rec::Render, Rec::Sprite, Rec::Subuv, Rec::Blend, Rec::Emission, Rec::Lifetime,
             Rec::Direction, Rec::Speed, Rec::Gravity, Rec::Damping, Rec::Size, Rec::SizeCurve, Rec::ColorStart,
             Rec::ColorEnd, Rec::ColorCurve, Rec::Lighting, Rec::Gi, Rec::Sort, Rec::Fog, Rec::Bounds, Rec::Cull,
-            Rec::SpawnAt, Rec::Tex, Rec::CustomShader, Rec::Module, Rec::OnEvent};
+            Rec::SpawnAt, Rec::Tex, Rec::CustomShader, Rec::Module, Rec::OnEvent, Rec::Scale};
         for (Rec r : kFlushOrder) {
             if (placed[static_cast<usize>(idx)][static_cast<usize>(r)]) continue;
             placed[static_cast<usize>(idx)][static_cast<usize>(r)] = true;
@@ -1248,6 +1296,9 @@ std::string writeV2Text(const particles::ParticleSystemDef& def, std::string_vie
             break;
         case Rec::Param:
             if (!placedParam) { placedParam = true; out += paramLines; }
+            break;
+        case Rec::SysScale:
+            if (!placedSys) { placedSys = true; out += sysScaleLines; }
             break;
         case Rec::EmitterHdr:
             if (inRange && explicitEmitterLines) { out += emitterHeaderLine(def, static_cast<usize>(l.emitter)); }

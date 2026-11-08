@@ -134,6 +134,10 @@ public:
     bool muted(int emitter) const;
     void setSolo(int emitter);   // -1 clears
     int solo() const { return solo_; }
+    // The scalability tier the preview plays at (Epic: the effect as written). Not saved; setting it restarts the preview.
+    particles::ScalabilityTier previewTier() const { return previewTier_; }
+    void setPreviewTier(particles::ScalabilityTier tier);
+
     // Live user parameters (preview only): override a parameter's value for the preview without an undo entry or a dirty mark.
     // They are matched by name and kind, so a rename or removal drops the override; commitLiveParam writes one into the asset
     // through the usual undo and clears it.
@@ -213,6 +217,8 @@ private:
     int isoEmitter_ = -1, isoModule_ = -1;
     struct LiveParam { std::string name; u8 kind = 0; f32 v[4] = {0, 0, 0, 0}; };
     std::vector<LiveParam> live_;
+    particles::ScalabilityTier previewTier_ = particles::ScalabilityTier::Epic;
+    int scaleEditTier_ = 0;   // UI: the tier the Scalability section edits
     pxmodel::PreviewMotion motion_ = pxmodel::PreviewMotion::None;
     f32 motionRadius_ = 150.0f, motionSpeed_ = 200.0f;
     Vec3 emitterPos_{0, 0, 0};
@@ -258,6 +264,7 @@ private:
     friend struct ParticleEditorUiAccess;
     void drawParams();
     void drawStats();
+    void drawScalability();
     void drawLiveParams();
     void drawCurveEditor(bool isColor);
     void drawPreviewToolbar();

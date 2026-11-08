@@ -8,10 +8,12 @@
 
 #include "aver/core/Log.hpp"
 #include "aver/formats/OcParticle.hpp"
+#include "aver/particles/ParticleEffectLibrary.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <string>
 
@@ -420,6 +422,146 @@ int main() {
         check(ed.liveCount() == 0, "Reset all clears every override");
         ed.setLiveParam(7, live);
         check(ed.liveCount() == 0, "an unknown parameter index is ignored");
+    }
+
+    // ---- 8. scalability tiers --------------------------------------------------------------------------------
+    AVER_INFO("scalability");
+    {
+        using particles::ScalabilityTier;
+        using particles::TierScale;
+        ParticleSystemDef d = smallSystem();
+        d.emitters[0].name = "Main";
+        d.emitters[0].burstCount = 40;
+        ParticleEffect second = d.emitters[0];
+        second.name = "Extra";
+        d.emitters.push_back(second);
+        px::setTierScale(d.scalability, ScalabilityTier::Low, TierScale{true, true, 0.25f, 0.5f});
+        px::setTierScale(d.scalability, ScalabilityTier::Medium, TierScale{true, true, 0.75f, 1.0f});
+        px::setTierScale(d.emitters[1].scalability, ScalabilityTier::Low, TierScale{true, false, 1.0f, 1.0f});   // Extra is off at Low
+        px::setTierScale(d.emitters[0].scalability, ScalabilityTier::Medium, TierScale{true, true, 1.0f, 1.0f});   // Main opts out at Medium
+
+        // -- the file
+        const std::string text = fmt::writeOcparticleSystem(d);
+        check(text.find("OCPARTICLE 2") != std::string::npos, "scalability is a version 2 feature");
+        check(text.find("SCALEALL low rate=0.25 max=0.5") != std::string::npos, "the effect default is one SCALEALL line per set tier");
+        check(text.find("SCALE low off") != std::string::npos, "an emitter override is a SCALE line inside its block");
+        ParticleSystemDef back;
+        std::string err;
+        check(fmt::parseOcparticleSystem(text, back, nullptr, &err), "and it parses: " + err);
+        bool same = back.emitters.size() == 2 && back.scalability.tier[0].set && back.scalability.tier[0].rateScale == 0.25f &&
+                    back.scalability.tier[0].maxScale == 0.5f && !back.scalability.tier[2].set && back.scalability.tier[1].rateScale == 0.75f;
+        same = same && back.emitters[1].scalability.tier[0].set && !back.emitters[1].scalability.tier[0].enabled && !back.emitters[0].scalability.tier[0].set &&
+               back.emitters[0].scalability.tier[1].set && back.emitters[0].scalability.tier[1].rateScale == 1.0f;
+        check(same, "every tier comes back as written, set or not");
+        check(fmt::writeOcparticleSystem(back) == text, "write, parse, write is stable");
+
+        // -- older readers: the extension is additive, nothing else moves
+        std::string stripped;
+        {
+            size_t at = 0;
+            while (at < text.size()) {
+                size_t nl = text.find('\n', at);
+                if (nl == std::string::npos) nl = text.size();
+                const std::string line = text.substr(at, nl - at);
+                if (line.rfind("SCALE", 0) != 0) stripped += line + "\n";
+                at = nl + 1;
+            }
+        }
+        ParticleSystemDef plain;
+        check(fmt::parseOcparticleSystem(stripped, plain, nullptr, &err) && plain.emitters.size() == 2 && !particles::hasScalability(plain),
+              "without its SCALE lines the same file is a plain effect: " + err);
+        check(plain.emitters[0].emissionRate == back.emitters[0].emissionRate && plain.emitters[1].name == "Extra", "with every other field untouched");
+
+        // v1 stays v1 until scalability is authored
+        ParticleSystemDef one;
+        one.emitters.emplace_back();
+        check(fmt::writeOcparticleSystem(one).rfind("OCPARTICLE 1", 0) == 0, "an effect with no scalability still writes as version 1");
+        px::setTierScale(one.emitters[0].scalability, ScalabilityTier::High, TierScale{true, true, 2.0f, 2.0f});
+        check(fmt::writeOcparticleSystem(one).rfind("OCPARTICLE 2", 0) == 0, "and becomes version 2 the moment a tier is authored");
+        px::clearTierScale(one.emitters[0].scalability, ScalabilityTier::High);
+        check(fmt::writeOcparticleSystem(one).rfind("OCPARTICLE 1", 0) == 0, "clearing it goes back to version 1");
+
+        // merging into an existing file keeps comments and records it does not know
+        std::string existing = text;
+        existing.insert(existing.find("EMITTER Main"), "# kept comment\nFUTURERECORD 1 2 3\n");
+        px::setTierScale(d.scalability, ScalabilityTier::High, TierScale{true, true, 1.5f, 1.5f});
+        const std::string merged = fmt::writeOcparticleSystem(d, existing);
+        check(merged.find("# kept comment") != std::string::npos && merged.find("FUTURERECORD 1 2 3") != std::string::npos, "a save keeps comments and unknown records");
+        check(merged.find("SCALEALL high rate=1.5 max=1.5") != std::string::npos, "and writes the new tier");
+        ParticleSystemDef reparsed;
+        check(fmt::parseOcparticleSystem(merged, reparsed, nullptr, &err) && reparsed.scalability.tier[2].set, "the merged file parses: " + err);
+
+        // errors name the line
+        ParticleSystemDef junk;
+        const char* bad[] = {"SCALE nonsense\n", "SCALE low rate=-1\n", "SCALE low speed=2\n", "SCALE low rate=abc\n", "SCALEALL\n"};
+        for (const char* b : bad) {
+            std::string e2;
+            const bool ok = fmt::parseOcparticleSystem(std::string("OCPARTICLE 2\nEMITTER A\n") + b, junk, nullptr, &e2);
+            check(!ok && e2.find("line 3") != std::string::npos, std::string("a bad record is refused with its line: ") + std::string(b, strlen(b) - 1));
+        }
+
+        // -- selection
+        const TierScale lowMain = particles::effectiveTierScale(d, 0, ScalabilityTier::Low);
+        check(lowMain.rateScale == 0.25f && lowMain.maxScale == 0.5f, "an emitter with no override takes the effect default");
+        check(!particles::effectiveTierScale(d, 1, ScalabilityTier::Low).enabled, "an emitter override wins over the default");
+        check(particles::effectiveTierScale(d, 0, ScalabilityTier::Medium).rateScale == 1.0f, "an override back to 1 beats a default of 0.75");
+        check(particles::effectiveTierScale(d, 1, ScalabilityTier::Medium).rateScale == 0.75f, "the other emitter still gets 0.75");
+        check(particles::tierIsIdentity(particles::effectiveTierScale(d, 0, ScalabilityTier::Epic)), "a tier nobody authored plays as written");
+
+        ParticleSystemDef low = particles::scaledForTier(d, ScalabilityTier::Low);
+        check(std::fabs(low.emitters[0].emissionRate - 15.0f) < 1e-4f && low.emitters[0].burstCount == 10 && low.emitters[0].maxParticles == 200,
+              "Low: rate 60 -> 15, burst 40 -> 10, max 400 -> 200");
+        check(low.emitters[1].emissionRate == 0.0f && low.emitters[1].burstCount == 0 && !low.emitters[1].spawnAtTarget, "an emitter that is off spawns nothing");
+        check(d.emitters[0].emissionRate == 60.0f, "the authored effect is not touched");
+        const ParticleSystemDef epic = particles::scaledForTier(d, ScalabilityTier::Epic);
+        check(epic.emitters[0].emissionRate == 60.0f && epic.emitters[0].maxParticles == 400, "Epic is the effect as written");
+        ParticleSystemDef ev = d;
+        px::addEvent(ev, 0, 0, 1, 3, 0.0f);
+        check(particles::scaledForTier(ev, ScalabilityTier::Low).emitters[0].events.empty(), "an event into an emitter that is off at the tier is dropped");
+        check(particles::scaledForTier(ev, ScalabilityTier::Epic).emitters[0].events.size() == 1, "but kept where it plays");
+        ParticleSystemDef tiny = d;
+        px::setTierScale(tiny.scalability, ScalabilityTier::High, TierScale{true, true, 0.0f, 0.0f});
+        check(particles::scaledForTier(tiny, ScalabilityTier::High).emitters[0].maxParticles == 1, "a particle cap never goes below one");
+        TierScale clampMe{true, true, 1000.0f, -5.0f};
+        particles::Scalability sc;
+        px::setTierScale(sc, ScalabilityTier::Low, clampMe);
+        check(sc.tier[0].rateScale == 100.0f && sc.tier[0].maxScale == 0.0f, "authored scales are clamped to what the parser accepts");
+        check(!px::setTierScale(sc, ScalabilityTier::Low, clampMe), "setting the same value is not an edit");
+
+        // -- the runtime library applies the tier and keeps the authored effect
+        particles::ParticleEffectLibrary lib;
+        lib.setSystem(7, d);
+        check(lib.find(7)->emissionRate == 60.0f, "the library plays at Epic by default");
+        lib.setScalabilityTier(ScalabilityTier::Low);
+        check(std::fabs(lib.find(7)->emissionRate - 15.0f) < 1e-4f && lib.findSystem(7)->emitters[1].emissionRate == 0.0f, "setting the tier re-scales what is registered");
+        check(lib.findAuthored(7)->emitters[0].emissionRate == 60.0f, "the authored effect is kept");
+        ParticleSystemDef later = d;
+        later.emitters[0].emissionRate = 100.0f;
+        lib.setSystem(8, later);
+        check(std::fabs(lib.find(8)->emissionRate - 25.0f) < 1e-4f, "an effect registered after the tier change is scaled too");
+        lib.setScalabilityTier(ScalabilityTier::Epic);
+        check(lib.find(7)->emissionRate == 60.0f && lib.find(8)->emissionRate == 100.0f, "and back to Epic restores them");
+        ParticleSystemDef plainDef = smallSystem();
+        lib.setSystem(9, plainDef);
+        lib.setScalabilityTier(ScalabilityTier::Low);
+        check(lib.find(9) == &lib.findAuthored(9)->emitters[0], "an effect with no scalability is not copied");
+
+        // -- the editor previews a tier
+        const std::string path = writeFixture(d, "pxTrackC_scale.ocparticle");
+        editor::ParticleEditor ed(path);
+        check(ed.loaded() && ed.previewTier() == ScalabilityTier::Epic, "the tab opens on Epic");
+        ed.seekPreview(1.5f);
+        const u32 epicCount = ed.previewTotal();
+        ed.setPreviewTier(ScalabilityTier::Low);
+        ed.seekPreview(1.5f);
+        const u32 lowCount = ed.previewTotal();
+        check(lowCount > 0 && lowCount < epicCount, "Low plays fewer particles than Epic: " + std::to_string(lowCount) + " < " + std::to_string(epicCount));
+        check(ed.previewSims()[1].aliveCount() == 0, "and the emitter that is off at Low plays none");
+        check(!ed.dirty() && ed.system().emitters[0].emissionRate == 60.0f, "previewing a tier is not an edit");
+        check(ed.editSystem([&](ParticleSystemDef& s) { return px::setTierScale(s.scalability, ScalabilityTier::Epic, TierScale{true, true, 0.5f, 0.5f}); }) && ed.dirty() && ed.canUndo(),
+              "authoring a tier is one undoable edit");
+        ed.undo();
+        check(!ed.system().scalability.tier[3].set, "undo takes it back");
     }
 
     AVER_INFO("{} failure(s)", g_failures);

@@ -12,6 +12,7 @@ void ParticleEffectLibrary::set(u64 id, const ParticleEffect& effect) {
     ParticleSystemDef& def = systems_[id];
     if (def.emitters.empty()) def.emitters.push_back(effect);
     else def.emitters[0] = effect;
+    rescale(id);
     ++revision_;
 }
 
@@ -30,17 +31,39 @@ void ParticleEffectLibrary::setSystem(u64 id, const ParticleSystemDef& def) {
         return;
     }
     systems_[id] = def;
+    rescale(id);
     ++revision_;
 }
 
-const ParticleSystemDef* ParticleEffectLibrary::findSystem(u64 id) const {
+const ParticleSystemDef* ParticleEffectLibrary::findAuthored(u64 id) const {
     if (id == 0) return nullptr;
     auto it = systems_.find(id);
     return it == systems_.end() || it->second.emitters.empty() ? nullptr : &it->second;
 }
 
+const ParticleSystemDef* ParticleEffectLibrary::findSystem(u64 id) const {
+    const ParticleSystemDef* authored = findAuthored(id);
+    if (!authored) return nullptr;
+    auto it = scaled_.find(id);
+    return it == scaled_.end() ? authored : &it->second;
+}
+
+void ParticleEffectLibrary::rescale(u64 id) {
+    auto it = systems_.find(id);
+    if (it == systems_.end() || !hasScalability(it->second)) { scaled_.erase(id); return; }
+    scaled_[id] = scaledForTier(it->second, tier_);
+}
+
+void ParticleEffectLibrary::setScalabilityTier(ScalabilityTier tier) {
+    if (tier == tier_) return;
+    tier_ = tier;
+    for (const auto& kv : systems_) rescale(kv.first);
+    ++revision_;
+}
+
 void ParticleEffectLibrary::clear() {
     systems_.clear();
+    scaled_.clear();
     ++revision_;
 }
 

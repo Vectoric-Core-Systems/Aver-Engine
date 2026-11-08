@@ -101,6 +101,17 @@ Fire and forget: no entity is made. Every emitter of the system with `SPAWNAT on
 
 Open a `.ocparticle`. The tab has an emitter list (add, duplicate, remove, reorder, rename, solo, mute), a module stack (add, remove, reorder, enable, bind a parameter to a user parameter), render, lighting, sorting, events and culling sections, the user parameters, and **Compute bounds** (runs the emitter for 3 s of simulated time and writes `BOUNDS`). The preview runs `EmitterSim` into a private CPU-tier renderer drawn into the shared preview surface; if the surface does not expose its transparent hook it falls back to coloured cubes. Edits are undoable; a drag is one undo step. The edit logic is `ParticleStackModel.hpp` (ImGui-free, tested by `ParticleStackModelTest`).
 
+**Track C additions** (docs/plans/EDITOR_UE_PARITY.md):
+
+* **Statistics** header: alive against the cap per emitter, a CPU/GPU badge (the tier the emitter takes in a game, by the `SIM` request or the 2048 rule; the preview itself is always CPU) and an estimate of the pooled GPU buffers (80 bytes a particle, 88 when it sorts, plus 16 per trail point).
+* **Playback**: play/pause, frame step (1/60 s), restart, speed 0.05x to 4x, loop with a length, a time scrubber and a time/frame readout. Seeking resimulates from 0 in fixed 1/60 s steps with the fixed per-emitter seed, so a time always shows the same particles.
+* **Curves**: the size and colour curves have a graph (wheel zoom, middle/right drag pan, drag a key, double-click to add, right-click or Delete to remove; the colour graph plots R G B A) and the colour curve a gradient bar with draggable stops (double-click a stop for a colour picker). The runtime curve is piecewise-linear with 2 to 4 stops, so there are no tangents.
+* **Isolate**: the `iso` button on a module runs the emitter with that module alone; preview only, the saved enable flags do not change.
+* **Preview**: Ground (floor grid), Bounds (each emitter's `BOUNDS` sphere) and a moving test emitter (circle or back-and-forth line) for trails and `spawn.inheritvelocity`.
+* **Templates**: Content Browser > Add > New Particle Effect from Template (smoke, sparks, rain, snow, embers, dust, mist, trail, debris, flipbook burst; all from the engine's own modules and built-ins), and a **Presets** button next to Add module (turbulence, wind, swirl, ground bounce and so on). The data is `sandbox/src/ParticleTemplates.hpp`.
+* **Live parameters**: sliders for the user parameters that drive the preview only (no undo entry, no dirty mark); Keep writes one into the asset.
+* **Scalability**: per-tier (Low, Medium, High, Epic) spawn-rate and particle-cap multipliers and an off switch, as an effect default with per-emitter overrides (`SCALEALL` / `SCALE`, see FORMAT_SPECS 11a.1). "Preview as" plays any tier. In a game the tier is the project key `RENDER.PARTICLESCALE` (0 Low .. 3 Epic; absent: Epic, everything as written), applied by `ParticleEffectLibrary::setScalabilityTier`; effects without scalability data are untouched.
+
 Emitters are placed in levels with `COMPONENT ParticleEmitter effect=Particles/Embers.ocparticle sim=auto playing=true seed=0`.
 
 ## Test content

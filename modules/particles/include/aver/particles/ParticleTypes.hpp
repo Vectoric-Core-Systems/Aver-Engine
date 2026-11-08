@@ -88,6 +88,22 @@ struct Curve4 {
     f32 v[4][4] = {};
 };
 
+// The engine's quality ladder, as particles see it: how much of an effect plays. Epic is the effect as authored.
+enum class ScalabilityTier : u8 { Low = 0, Medium = 1, High = 2, Epic = 3 };
+inline constexpr u32 kScalabilityTiers = 4;
+
+// What one tier does to an emitter. `set` marks a tier the author wrote (an emitter's own override only counts when set; the file
+// round-trips exactly the tiers that were set). rateScale multiplies the emission rate and burst count, maxScale the particle cap.
+struct TierScale {
+    bool set = false;
+    bool enabled = true;
+    f32 rateScale = 1.0f;
+    f32 maxScale = 1.0f;
+};
+struct Scalability {
+    TierScale tier[kScalabilityTiers];
+};
+
 // A named, script-settable value. kind 0 float (v[0]), 1 vec3 (v[0..2]), 2 colour (v[0..3]).
 struct UserParam {
     std::string name;
@@ -170,6 +186,7 @@ struct ParticleEffect {
     // The name of a registered embedded particles program (setCustomParticlePrograms). Its start() runs when a particle is born and its process() on every
     // update, replacing the built-in integration; it needs the GPU tier (an emitter that lands on the CPU tier simulates without it). Empty = none, today's emitter.
     std::string customShader;
+    Scalability scalability;            // this emitter's per-tier overrides of the effect's default (format v2: SCALE records)
 };
 
 // A whole authored effect: one or more emitters sharing user parameters.
@@ -177,6 +194,7 @@ struct ParticleSystemDef {
     std::string name;
     std::vector<ParticleEffect> emitters;
     std::vector<UserParam> params;
+    Scalability scalability;            // the effect's default per tier (format v2: SCALEALL records)
 };
 
 // receivesGI false is Unlit regardless of `lighting`; true means `lighting` (Ambient or Lit).
