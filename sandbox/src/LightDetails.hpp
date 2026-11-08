@@ -20,6 +20,7 @@
 
 #if AVER_WITH_IMGUI
 #include "imgui.h"
+#include "DetailsTable.hpp"
 #endif
 
 namespace aver::editor {
@@ -153,7 +154,7 @@ inline bool drawLightDetails(scene::CLight& c, const std::string& contentDir) {
 
     int type = c.kind == scene::kLightSpot ? 1 : (c.kind == scene::kLightRect ? 2 : 0);
     const char* types[] = {"Point", "Spot", "Rectangle"};
-    if (ImGui::Combo("Type", &type, types, 3)) {
+    if (editor::dt::Combo("Type", &type, types, 3)) {
         const i32 was = c.kind;
         c.kind = type == 1 ? scene::kLightSpot : (type == 2 ? scene::kLightRect : scene::kLightPoint);
         // Switching to a shape whose size was never set: give it the new-light value rather than 0.
@@ -164,21 +165,21 @@ inline bool drawLightDetails(scene::CLight& c, const std::string& contentDir) {
         }
         changed = true;
     }
-    changed |= ImGui::ColorEdit3("Colour", c.colour);
+    changed |= editor::dt::ColorEdit3("Colour", c.colour);
 
-    changed |= ImGui::DragFloat("Intensity (cd)", &c.intensityLux, 10.0f, 0.0f, 1.0e7f, "%.0f",
+    changed |= editor::dt::DragFloat("Intensity (cd)", &c.intensityLux, 10.0f, 0.0f, 1.0e7f, "%.0f",
                                 ImGuiSliderFlags_Logarithmic);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Candela: lux at 1 m on axis. A point light's total output is 4*pi times this;\n"
                           "a rectangle's is its intensity along the panel normal (radiance = cd / area).\n"
                           "With an IES profile this scales the profile; see 'Intensity = IES peak'.");
-    changed |= ImGui::DragFloat("Range (cm)", &c.rangeCm, 10.0f, 0.0f, 100000.0f, c.rangeCm > 0.0f ? "%.0f" : "auto");
+    changed |= editor::dt::DragFloat("Range (cm)", &c.rangeCm, 10.0f, 0.0f, 100000.0f, c.rangeCm > 0.0f ? "%.0f" : "auto");
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Where the light fades to nothing. 0 derives it from the intensity (capped at 50 m).");
 
     const bool noShadows = (c.flags & scene::kLightNoShadows) != 0;
     bool shadows = !noShadows;
-    if (ImGui::Checkbox("Cast shadows", &shadows)) {
+    if (editor::dt::Checkbox("Cast shadows", &shadows)) {
         c.flags = shadows ? (c.flags & ~scene::kLightNoShadows) : (c.flags | scene::kLightNoShadows);
         changed = true;
     }
@@ -186,26 +187,26 @@ inline bool drawLightDetails(scene::CLight& c, const std::string& contentDir) {
     if (c.kind == scene::kLightRect) {
         f32 w = c.widthCm > 0.0f ? c.widthCm : 100.0f;
         f32 h = c.heightCm > 0.0f ? c.heightCm : 100.0f;
-        if (ImGui::DragFloat("Width (cm)", &w, 1.0f, 1.0f, 5000.0f, "%.0f")) { c.widthCm = w; changed = true; }
-        if (ImGui::DragFloat("Height (cm)", &h, 1.0f, 1.0f, 5000.0f, "%.0f")) { c.heightCm = h; changed = true; }
+        if (editor::dt::DragFloat("Width (cm)", &w, 1.0f, 1.0f, 5000.0f, "%.0f")) { c.widthCm = w; changed = true; }
+        if (editor::dt::DragFloat("Height (cm)", &h, 1.0f, 1.0f, 5000.0f, "%.0f")) { c.heightCm = h; changed = true; }
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("The panel emits from its +X face, spanning local Y (width) and Z (height).\n"
                               "Shadows get a penumbra shaped like the panel.");
     } else {
         f32 r = c.sourceRadiusCm > 0.0f ? c.sourceRadiusCm : 1.0f;
-        if (ImGui::DragFloat("Source radius (cm)", &r, 0.1f, 0.1f, 200.0f, "%.1f")) { c.sourceRadiusCm = r; changed = true; }
+        if (editor::dt::DragFloat("Source radius (cm)", &r, 0.1f, 0.1f, 200.0f, "%.1f")) { c.sourceRadiusCm = r; changed = true; }
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Size of the bulb: larger means softer shadow edges.");
     }
 
     if (c.kind == scene::kLightSpot) {
         f32 inner = lightConeDegrees(c.innerCos), outer = lightConeDegrees(c.outerCos);
-        if (ImGui::DragFloat("Inner cone (deg)", &inner, 0.5f, 0.0f, 89.0f, "%.1f")) {
+        if (editor::dt::DragFloat("Inner cone (deg)", &inner, 0.5f, 0.0f, 89.0f, "%.1f")) {
             inner = std::min(inner, outer);
             c.innerCos = lightConeCos(inner);
             changed = true;
         }
-        if (ImGui::DragFloat("Outer cone (deg)", &outer, 0.5f, 0.0f, 89.0f, "%.1f")) {
+        if (editor::dt::DragFloat("Outer cone (deg)", &outer, 0.5f, 0.0f, 89.0f, "%.1f")) {
             outer = std::max(outer, inner);
             c.outerCos = lightConeCos(outer);
             changed = true;
@@ -216,7 +217,7 @@ inline bool drawLightDetails(scene::CLight& c, const std::string& contentDir) {
     changed |= lightAssetField("IES profile", iesPicker, contentDir, true, c.iesProfile);
     if (c.iesProfile) {
         bool peak = (c.flags & scene::kLightIesPeak) != 0;
-        if (ImGui::Checkbox("Intensity = IES peak", &peak)) {
+        if (editor::dt::Checkbox("Intensity = IES peak", &peak)) {
             c.flags = peak ? (c.flags | scene::kLightIesPeak) : (c.flags & ~scene::kLightIesPeak);
             changed = true;
         }
@@ -229,7 +230,7 @@ inline bool drawLightDetails(scene::CLight& c, const std::string& contentDir) {
     changed |= lightAssetField("Cookie", cookiePicker, contentDir, false, c.cookie);
     if (c.cookie && c.kind != scene::kLightSpot) {
         f32 outer = lightConeDegrees(c.outerCos);
-        if (ImGui::DragFloat("Cookie angle (deg)", &outer, 0.5f, 5.0f, 89.0f, "%.1f")) {
+        if (editor::dt::DragFloat("Cookie angle (deg)", &outer, 0.5f, 5.0f, 89.0f, "%.1f")) {
             c.outerCos = lightConeCos(outer);
             changed = true;
         }

@@ -940,3 +940,10 @@ target_include_directories(EditorThemeTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/s
 target_compile_definitions(EditorThemeTest PRIVATE AVER_THEME_FILE="${CMAKE_SOURCE_DIR}/sandbox/editor-theme.json")
 target_link_libraries(EditorThemeTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(EditorThemeTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# DetailsTableTest -- the Details table's pure half (sandbox/src/DetailsTable.hpp): label search, default
+# detection (the modified mark) and the persisted split's clamp. The widgets are ImGui, checked headed.
+add_executable(DetailsTableTest src/DetailsTableTest.cpp)
+target_include_directories(DetailsTableTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(DetailsTableTest PRIVATE Aver.Core)
+set_target_properties(DetailsTableTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

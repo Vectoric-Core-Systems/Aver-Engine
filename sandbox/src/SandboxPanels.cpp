@@ -12,6 +12,7 @@
 #include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "LightDetails.hpp"
 #include "DecalDetails.hpp"
+#include "DetailsTable.hpp"
 #include "PhysicalSurfaceTableModel.hpp"   // drawMaterialPhysSurface (the Physical Surface combo)
 
 namespace aver {
@@ -236,25 +237,39 @@ void SandboxApp::materialPanel(pbr::MaterialHandle handle) {
     // ImGui has already written the first drag delta into *d by the time IsItemActivated() fires.
     if (!matEditActive_) { matEditBefore_ = *d; matEditHandle_ = handle; }
     bool started = false, finished = false;
+    static const pbr::MaterialDesc dm{};   // the defaults the reset arrows return to
     const auto track = [&](bool c) {
-        started  |= ImGui::IsItemActivated();
-        finished |= ImGui::IsItemDeactivatedAfterEdit();
+        const bool rst = editor::dt::consumeReset();   // a reset is a whole edit: start and finish in one frame
+        started  |= ImGui::IsItemActivated() || rst;
+        finished |= ImGui::IsItemDeactivatedAfterEdit() || rst;
         return c;
     };
-    changed |= track(ImGui::SliderFloat("Metallic", &d->metallicFactor, 0.0f, 1.0f));
-    changed |= track(ImGui::SliderFloat("Roughness", &d->roughnessFactor, 0.045f, 1.0f));
-    changed |= track(ImGui::SliderFloat("Normal Scale", &d->normalScale, 0.0f, 4.0f));
-    changed |= track(ImGui::SliderFloat("Occlusion", &d->occlusionStrength, 0.0f, 1.0f));
+    editor::dt::def(dm.metallicFactor);
+    changed |= track(editor::dt::SliderFloat("Metallic", &d->metallicFactor, 0.0f, 1.0f));
+    editor::dt::def(dm.roughnessFactor);
+    changed |= track(editor::dt::SliderFloat("Roughness", &d->roughnessFactor, 0.045f, 1.0f));
+    editor::dt::def(dm.normalScale);
+    changed |= track(editor::dt::SliderFloat("Normal Scale", &d->normalScale, 0.0f, 4.0f));
+    editor::dt::def(dm.occlusionStrength);
+    changed |= track(editor::dt::SliderFloat("Occlusion", &d->occlusionStrength, 0.0f, 1.0f));
     // 0..0.2 covers water (~0.02) through gemstone (~0.17).
-    changed |= track(ImGui::SliderFloat("Reflectance", &d->reflectance, 0.0f, 0.2f, "%.3f"));
-    changed |= track(ImGui::SliderFloat("Grazing (f90)", &d->f90, 0.0f, 1.0f));
+    editor::dt::def(dm.reflectance);
+    changed |= track(editor::dt::SliderFloat("Reflectance", &d->reflectance, 0.0f, 0.2f, "%.3f"));
+    editor::dt::def(dm.f90);
+    changed |= track(editor::dt::SliderFloat("Grazing (f90)", &d->f90, 0.0f, 1.0f));
 
     // IOR and Reflectance are the same physical fact twice; F0 = ((1-n)/(1+n))^2, so 1.52 glass
     // implies 0.0426 -- a mismatch implies a physically impossible reflectance, invisible until a
     // grazing or critical angle.
     // REPORTED, NOT ENFORCED: clamping reflectance to the IOR would remove a knob authors
     // legitimately need (a thin film or coated lens really does deviate).
-    changed |= track(ImGui::SliderFloat("IOR", &d->ior, 1.0f, 2.5f, "%.3f"));
+    {   // room for the "= F0" / "(opaque)" notes drawn after these two rows
+        const float n0 = d->ior <= 0.0f ? 1.0f : d->ior, f00 = ((1.0f - n0) / (1.0f + n0)) * ((1.0f - n0) / (1.0f + n0));
+        if (std::fabs(f00 - d->reflectance) > 0.005f)
+            editor::dt::reserveRight(ImGui::CalcTextSize("= F0 0.000").x + ImGui::GetStyle().ItemSpacing.x);
+    }
+    editor::dt::def(dm.ior);
+    changed |= track(editor::dt::SliderFloat("IOR", &d->ior, 1.0f, 2.5f, "%.3f"));
     {
         const float n  = d->ior <= 0.0f ? 1.0f : d->ior;
         const float f0 = ((1.0f - n) / (1.0f + n)) * ((1.0f - n) / (1.0f + n));
@@ -270,7 +285,10 @@ void SandboxApp::materialPanel(pbr::MaterialHandle handle) {
     // Transmission is a SUBSTRATE property, applying whether or not the material is blended: it
     // scales the diffuse lobe (a transmissive surface must not also scatter its full base colour
     // back at you) and, when blended, pulls coverage toward 1 - transmission.
-    changed |= track(ImGui::SliderFloat("Transmission", &d->transmission, 0.0f, 1.0f));
+    editor::dt::def(dm.transmission);
+    if (d->transmission > 0.0f && d->alphaMode != pbr::AlphaMode::Blend)
+        editor::dt::reserveRight(ImGui::CalcTextSize("(opaque)").x + ImGui::GetStyle().ItemSpacing.x);
+    changed |= track(editor::dt::SliderFloat("Transmission", &d->transmission, 0.0f, 1.0f));
     if (d->transmission > 0.0f && d->alphaMode != pbr::AlphaMode::Blend) {
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(1.00f, 0.62f, 0.15f, 1.0f), "(opaque)");
@@ -281,20 +299,23 @@ void SandboxApp::materialPanel(pbr::MaterialHandle handle) {
     // WEIGHT is the on/off: 0 skips the wrap-diffuse/back-scatter terms, so RADIUS and COLOR have
     // nothing to widen or tint until Weight > 0 -- disabled at 0 to avoid offering controls that do
     // nothing.
-    changed |= track(ImGui::SliderFloat("Subsurface Weight", &d->subsurfaceWeight, 0.0f, 1.0f));
+    editor::dt::def(dm.subsurfaceWeight);
+    changed |= track(editor::dt::SliderFloat("Subsurface Weight", &d->subsurfaceWeight, 0.0f, 1.0f));
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Subsurface strength: light wraps past the shadow edge, passes through "
                           "thin parts lit from behind (leaves, curtains, ears) and through them from "
                           "the sky. 0 = off.");
     ImGui::BeginDisabled(d->subsurfaceWeight <= 0.0f);
-    changed |= track(ImGui::SliderFloat("Subsurface Radius", &d->subsurfaceRadius, 0.0f, 1.0f));
+    editor::dt::def(dm.subsurfaceRadius);
+    changed |= track(editor::dt::SliderFloat("Subsurface Radius", &d->subsurfaceRadius, 0.0f, 1.0f));
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("How deep light scatters, 0.25-5 cm: thin parts under it glow when lit "
                           "from behind, thicker ones do not. Also widens the glow seen looking "
                           "toward the light.");
     else if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
         ImGui::SetTooltip("Only does anything when Subsurface Weight is above 0.");
-    changed |= track(ImGui::ColorEdit3("Subsurface Color", d->subsurfaceColor));
+    editor::dt::def(dm.subsurfaceColor, 3);
+    changed |= track(editor::dt::ColorEdit3("Subsurface Color", d->subsurfaceColor));
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("The colour light takes inside the material, multiplied onto the base "
                           "colour. White keeps the surface colour; skin wants a deep red, leaves "
@@ -304,27 +325,33 @@ void SandboxApp::materialPanel(pbr::MaterialHandle handle) {
     ImGui::EndDisabled();
     // The volume inside a transmissive material. Distance is the on/off (<= 0 = no volume), and the
     // scatter pair does nothing without one, so those two are disabled at 0 like Subsurface above.
-    changed |= track(ImGui::DragFloat("Attenuation Distance (cm)", &d->attenuationDistance, 1.0f, 0.0f, 100000.0f, "%.1f"));
+    editor::dt::def(dm.attenuationDistance);
+    changed |= track(editor::dt::DragFloat("Attenuation Distance (cm)", &d->attenuationDistance, 1.0f, 0.0f, 100000.0f, "%.1f"));
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Distance over which light is reduced to Attenuation Color. 0 = no volume. "
                           "Water is about 100 with (0.65, 0.93, 0.97).");
     ImGui::BeginDisabled(d->attenuationDistance <= 0.0f);
-    changed |= track(ImGui::ColorEdit3("Attenuation Color", d->attenuationColor));
+    editor::dt::def(dm.attenuationColor, 3);
+    changed |= track(editor::dt::ColorEdit3("Attenuation Color", d->attenuationColor));
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Fraction of each channel left after Attenuation Distance. Low channels die "
                           "first: red in water, so depth goes cyan.");
-    changed |= track(ImGui::ColorEdit3("Scatter Color", d->scatterColor, ImGuiColorEditFlags_Float));
+    editor::dt::def(dm.scatterColor, 3);
+    changed |= track(editor::dt::ColorEdit3("Scatter Color", d->scatterColor, ImGuiColorEditFlags_Float));
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Single-scattering albedo per channel (linear, 0-1): the share of extinction "
                           "that scatters light toward the eye instead of absorbing it. Gives deep water "
                           "its haze. Black = pure absorber; open water is about (0.05, 0.35, 0.55).");
-    changed |= track(ImGui::SliderFloat("Scatter Anisotropy", &d->scatterAnisotropy, -0.99f, 0.99f));
+    editor::dt::def(dm.scatterAnisotropy);
+    changed |= track(editor::dt::SliderFloat("Scatter Anisotropy", &d->scatterAnisotropy, -0.99f, 0.99f));
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Henyey-Greenstein g: 0 scatters evenly, above 0 favours forward (haze "
                           "brightens toward the sun), below 0 favours back.");
     ImGui::EndDisabled();
-    changed |= track(ImGui::DragFloat3("Emissive", d->emissiveFactor, 0.01f, 0.0f, 32.0f));
-    changed |= track(ImGui::DragFloat("Light Intensity", &d->lightIntensity, 0.05f, 0.0f, 20.0f));
+    editor::dt::def(dm.emissiveFactor, 3);
+    changed |= track(editor::dt::DragFloat3("Emissive", d->emissiveFactor, 0.01f, 0.0f, 32.0f));
+    editor::dt::def(dm.lightIntensity);
+    changed |= track(editor::dt::DragFloat("Light Intensity", &d->lightIntensity, 0.05f, 0.0f, 20.0f));
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Makes this material a light source when ray tracing is on -- a MULTIPLIER on "
                           "the light Emissive and this draw's size already, physically, cast: 1 is "
@@ -334,7 +361,7 @@ void SandboxApp::materialPanel(pbr::MaterialHandle handle) {
 
     ImGui::Separator();
     int uvMode = static_cast<int>(d->uvMode);
-    if (ImGui::Combo("UV Mapping", &uvMode, "Mesh UVs\0World Aligned\0")) {
+    if (editor::dt::Combo("UV Mapping", &uvMode, "Mesh UVs\0World Aligned\0")) {
         d->uvMode = static_cast<pbr::UvMode>(uvMode);
         changed = true;
     }
@@ -342,7 +369,8 @@ void SandboxApp::materialPanel(pbr::MaterialHandle handle) {
     // dismissed without a change still activates/deactivates and must still close the bracket.
     track(false);
     if (d->uvMode == pbr::UvMode::WorldAligned) {
-        changed |= track(ImGui::SliderFloat("Tile Size (cm)", &d->uvTiling, 5.0f, 2000.0f, "%.0f",
+        editor::dt::def(dm.uvTiling);
+        changed |= track(editor::dt::SliderFloat("Tile Size (cm)", &d->uvTiling, 5.0f, 2000.0f, "%.0f",
                                       ImGuiSliderFlags_Logarithmic));
     }
 
@@ -351,7 +379,7 @@ void SandboxApp::materialPanel(pbr::MaterialHandle handle) {
         char buf[260];
         const std::string& p = d->textures[s].path;
         std::snprintf(buf, sizeof(buf), "%s", p.c_str());
-        if (ImGui::InputText(pbr::MaterialLibrary::textureSlotName(static_cast<pbr::TextureSlot>(s)),
+        if (editor::dt::InputText(pbr::MaterialLibrary::textureSlotName(static_cast<pbr::TextureSlot>(s)),
                              buf, sizeof(buf))) {
             d->textures[s].path = buf;
             changed = true;
@@ -1727,6 +1755,8 @@ void SandboxApp::buildOutlinerPanel() {
 void SandboxApp::buildDetailsPanel(Engine& e) {
     ImGui::Begin(AVER_WIN_DETAILS, &showDetails_);
     detailsFocused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+    editor::dt::begin();
+    uiReg_.track("details.search");
     if (sel_>=0 && sel_<(int)objects_.size()){
         MeshObj& o=objects_[sel_]; ImGui::TextUnformatted(o.name.c_str()); ImGui::Separator();
         if (::aver::editor::sectionHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -1734,26 +1764,29 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
             // the only transform edits pushing nothing (selectedXform/endTransformEdit already
             // branch for placeholder objects via the gizmo, so dragging was undoable but typing
             // the same number here was not).
-            ImGui::DragFloat3("Location (cm)", &o.pos.x, 1.0f);
-            if (ImGui::IsItemActivated()) beginTransformEdit();
-            bool objDone = ImGui::IsItemDeactivatedAfterEdit();
-            ImGui::DragFloat3("Rotation", &o.rotDeg.x, 1.0f);
-            if (ImGui::IsItemActivated()) beginTransformEdit();
-            objDone = objDone || ImGui::IsItemDeactivatedAfterEdit();
-            ImGui::DragFloat3("Scale", &o.scale.x, 0.01f, 0.02f, 100.f);
-            if (ImGui::IsItemActivated()) beginTransformEdit();
-            objDone = objDone || ImGui::IsItemDeactivatedAfterEdit();
+            editor::dt::DragFloat3("Location (cm)", &o.pos.x, 1.0f);
+            const bool rstL = editor::dt::consumeReset();
+            if (ImGui::IsItemActivated() || rstL) beginTransformEdit();
+            bool objDone = (ImGui::IsItemDeactivatedAfterEdit() || rstL);
+            editor::dt::DragFloat3("Rotation", &o.rotDeg.x, 1.0f);
+            const bool rstR = editor::dt::consumeReset();
+            if (ImGui::IsItemActivated() || rstR) beginTransformEdit();
+            objDone = objDone || (ImGui::IsItemDeactivatedAfterEdit() || rstR);
+            editor::dt::DragFloat3("Scale", &o.scale.x, 0.01f, 0.02f, 100.f);
+            const bool rstS = editor::dt::consumeReset();
+            if (ImGui::IsItemActivated() || rstS) beginTransformEdit();
+            objDone = objDone || (ImGui::IsItemDeactivatedAfterEdit() || rstS);
             if (objDone) endTransformEdit();
         }
         if (::aver::editor::sectionHeader("Material", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::ColorEdit3("Base Color", o.color);
+            editor::dt::ColorEdit3("Base Color", o.color);
             // GUARDED BECAUSE BOTH SIDES ARE: MeshObj::material only exists under this same #if,
             // and so does materialPanel. Base Color is the object's own float[3] and stays.
 #if AVER_MODULE_PBR
             materialPanel(o.material);
 #endif
         }
-        ImGui::Checkbox("Visible", &o.visible);
+        editor::dt::Checkbox("Visible", &o.visible);
 #if AVER_MODULE_SCENE
     } else if (sel_==kSelScene && scene::World::instance().valid(selEntity_)) {
         scene::World& w = scene::World::instance();
@@ -1857,17 +1890,23 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
               if (multiSelected.size() <= 1) {
                 Transform xf = loc->xf;
                 Vec3 euler = eulerDegFromQuat(xf.rotation);
-                bool moved = ImGui::DragFloat3("Location (cm)", &xf.position.x, 1.0f);
-                if (ImGui::IsItemActivated()) beginTransformEdit();
-                bool done = ImGui::IsItemDeactivatedAfterEdit();
-                if (ImGui::DragFloat3("Rotation", &euler.x, 1.0f)) {
+                editor::dt::def3(0.0f, 0.0f, 0.0f);
+                bool moved = editor::dt::DragFloat3("Location (cm)", &xf.position.x, 1.0f);
+                const bool rstL = editor::dt::consumeReset();
+                if (ImGui::IsItemActivated() || rstL) beginTransformEdit();
+                bool done = (ImGui::IsItemDeactivatedAfterEdit() || rstL);
+                editor::dt::def3(0.0f, 0.0f, 0.0f);
+                if (editor::dt::DragFloat3("Rotation", &euler.x, 1.0f)) {
                     xf.rotation = quatFromEulerDeg(euler); moved = true;
                 }
-                if (ImGui::IsItemActivated()) beginTransformEdit();
-                done = done || ImGui::IsItemDeactivatedAfterEdit();
-                moved |= ImGui::DragFloat3("Scale", &xf.scale.x, 0.5f, 0.01f, 100000.0f);
-                if (ImGui::IsItemActivated()) beginTransformEdit();
-                done = done || ImGui::IsItemDeactivatedAfterEdit();
+                const bool rstR = editor::dt::consumeReset();
+                if (ImGui::IsItemActivated() || rstR) beginTransformEdit();
+                done = done || (ImGui::IsItemDeactivatedAfterEdit() || rstR);
+                editor::dt::def3(1.0f, 1.0f, 1.0f);
+                moved |= editor::dt::DragFloat3("Scale", &xf.scale.x, 0.5f, 0.01f, 100000.0f);
+                const bool rstS = editor::dt::consumeReset();
+                if (ImGui::IsItemActivated() || rstS) beginTransformEdit();
+                done = done || (ImGui::IsItemDeactivatedAfterEdit() || rstS);
                 if (moved) w.setLocalTransform(selEntity_, xf);
                 if (done) endTransformEdit();
               } else {
@@ -1917,19 +1956,28 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                                           m[2] ? "mixed" : "matches");
                 };
 
-                bool moved = ImGui::DragFloat3("Location (cm)", &xf.position.x, 1.0f);
-                if (ImGui::IsItemActivated()) beginTransformEdit();
-                bool done = ImGui::IsItemDeactivatedAfterEdit();
+                editor::dt::def3(0.0f, 0.0f, 0.0f);
+                if (posMixed[0] || posMixed[1] || posMixed[2]) editor::dt::reserveRight(ImGui::CalcTextSize("(mixed)").x + ImGui::GetStyle().ItemSpacing.x);
+                bool moved = editor::dt::DragFloat3("Location (cm)", &xf.position.x, 1.0f);
+                const bool rstL = editor::dt::consumeReset();
+                if (ImGui::IsItemActivated() || rstL) beginTransformEdit();
+                bool done = (ImGui::IsItemDeactivatedAfterEdit() || rstL);
                 showMixedTag(posMixed);
-                if (ImGui::DragFloat3("Rotation", &euler.x, 1.0f)) {
+                editor::dt::def3(0.0f, 0.0f, 0.0f);
+                if (rotMixed[0] || rotMixed[1] || rotMixed[2]) editor::dt::reserveRight(ImGui::CalcTextSize("(mixed)").x + ImGui::GetStyle().ItemSpacing.x);
+                if (editor::dt::DragFloat3("Rotation", &euler.x, 1.0f)) {
                     xf.rotation = quatFromEulerDeg(euler); moved = true;
                 }
-                if (ImGui::IsItemActivated()) beginTransformEdit();
-                done = done || ImGui::IsItemDeactivatedAfterEdit();
+                const bool rstR = editor::dt::consumeReset();
+                if (ImGui::IsItemActivated() || rstR) beginTransformEdit();
+                done = done || (ImGui::IsItemDeactivatedAfterEdit() || rstR);
                 showMixedTag(rotMixed);
-                moved |= ImGui::DragFloat3("Scale", &xf.scale.x, 0.5f, 0.01f, 100000.0f);
-                if (ImGui::IsItemActivated()) beginTransformEdit();
-                done = done || ImGui::IsItemDeactivatedAfterEdit();
+                editor::dt::def3(1.0f, 1.0f, 1.0f);
+                if (scaleMixed[0] || scaleMixed[1] || scaleMixed[2]) editor::dt::reserveRight(ImGui::CalcTextSize("(mixed)").x + ImGui::GetStyle().ItemSpacing.x);
+                moved |= editor::dt::DragFloat3("Scale", &xf.scale.x, 0.5f, 0.01f, 100000.0f);
+                const bool rstS = editor::dt::consumeReset();
+                if (ImGui::IsItemActivated() || rstS) beginTransformEdit();
+                done = done || (ImGui::IsItemDeactivatedAfterEdit() || rstS);
                 showMixedTag(scaleMixed);
 
                 if (moved) {
@@ -1970,7 +2018,7 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
         if (auto* mr = w.component<scene::CMeshRenderer>(selEntity_, scene::kComponentMeshRenderer)) {
             if (::aver::editor::sectionHeader("Mesh", ImGuiTreeNodeFlags_DefaultOpen)) {
                 bool vis = authoredVisible(selEntity_);
-                if (ImGui::Checkbox("Visible", &vis)) {
+                if (editor::dt::Checkbox("Visible", &vis)) {
                     // Applies to the whole selection (same rule as the Mesh/Material pickers
                     // below), but unlike them pushes undo: Visible is authored, level-saved data
                     // (owner decision, Unreal-style), not session bookkeeping, so a stray click
@@ -2014,7 +2062,7 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                     const bool levelOwned = isLevelOwned(selEntity_);
                     ImGui::BeginDisabled(!levelOwned);
                     bool col = collides(selEntity_);
-                    if (ImGui::Checkbox("Collides", &col)) {
+                    if (editor::dt::Checkbox("Collides", &col)) {
                         EditCmd c;
                         c.kind = EditCmd::Kind::Collision;
                         for (const scene::Entity ent : multiSelected) {
@@ -2168,7 +2216,7 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                         };
                         ImGui::BeginDisabled(cur.clip.empty());
                         f32 speed = cur.speed;
-                        const bool speedEdited = ImGui::DragFloat("Speed##animSpeed", &speed, 0.01f, 0.01f, 100.0f, "%.2f");
+                        const bool speedEdited = editor::dt::DragFloat("Speed##animSpeed", &speed, 0.01f, 0.01f, 100.0f, "%.2f");
                         if (ImGui::IsItemActivated() || (speedEdited && animEditBefore_.empty())) snapshot();
                         if (speedEdited) tune([&](EntityAnim& n) { n.speed = speed; });
                         if (ImGui::IsItemDeactivatedAfterEdit()) commit();
@@ -2176,7 +2224,7 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                             ImGui::SetTooltip("Playback speed. Saved with the level (animspeed).");
                         f32 startTime = cur.time;
-                        const bool timeEdited = ImGui::DragFloat("Start time (s)##animTime", &startTime, 0.01f, 0.0f, 100000.0f, "%.2f");
+                        const bool timeEdited = editor::dt::DragFloat("Start time (s)##animTime", &startTime, 0.01f, 0.0f, 100000.0f, "%.2f");
                         if (ImGui::IsItemActivated() || (timeEdited && animEditBefore_.empty())) snapshot();
                         if (timeEdited) tune([&](EntityAnim& n) { n.time = startTime; });
                         if (ImGui::IsItemDeactivatedAfterEdit()) commit();
@@ -2186,7 +2234,7 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                                               "The mesh sits at its placement at this time and moves relative\n"
                                               "to it. Saved with the level (animtime).");
                         bool once = cur.once;
-                        if (ImGui::Checkbox("Play once##animOnce", &once)) {
+                        if (editor::dt::Checkbox("Play once##animOnce", &once)) {
                             snapshot();
                             tune([&](EntityAnim& n) { n.once = once; });
                             commit();
@@ -2375,7 +2423,7 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
         if (auto* pe = w.component<scene::CParticleEmitter>(selEntity_, scene::kComponentParticleEmitter)) {
             if (::aver::editor::sectionHeader("Particle Emitter", ImGuiTreeNodeFlags_DefaultOpen)) {
                 bool stopped = (pe->flags & scene::kParticleEmitterStopped) != 0;
-                if (ImGui::Checkbox("Stopped", &stopped)) {
+                if (editor::dt::Checkbox("Stopped", &stopped)) {
                     if (stopped) pe->flags |=  scene::kParticleEmitterStopped;
                     else         pe->flags &= ~scene::kParticleEmitterStopped;
                 }
@@ -2468,7 +2516,7 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
         if (auto* sb = w.component<scene::CSoftBody>(selEntity_, scene::kComponentSoftBody)) {
             if (::aver::editor::sectionHeader(ICON_TUNE " Soft Body", ImGuiTreeNodeFlags_DefaultOpen)) {
                 bool disabled = (sb->flags & scene::kSoftBodyDisabled) != 0;
-                if (ImGui::Checkbox("Simulated", &disabled)) {
+                if (editor::dt::Checkbox("Simulated", &disabled)) {
                     // The checkbox reads POSITIVELY and the flag is stored negatively -- see
                     // kSoftBodyDisabled's own comment for why the flag has to mean that.
                     if (disabled) sb->flags &= ~scene::kSoftBodyDisabled;
@@ -2478,7 +2526,7 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                 disabled = (sb->flags & scene::kSoftBodyDisabled) == 0;
 
                 f32 maxDist = scene::softBodyMaxDistanceCm(*sb);
-                if (ImGui::DragFloat("Max distance (cm)", &maxDist, 0.1f, 0.0f, 500.0f, "%.2f"))
+                if (editor::dt::DragFloat("Max distance (cm)", &maxDist, 0.1f, 0.0f, 500.0f, "%.2f"))
                     sb->maxDistanceCm = maxDist;
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("How far a vertex may leave where bone skinning would have\n"
@@ -2486,7 +2534,7 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                                       "Only reaches the solver on a mesh that HAS a rig.",
                                       static_cast<double>(scene::kSoftBodyDefaultMaxDistanceCm));
 
-                ImGui::DragFloat("Compliance", &sb->compliance, 0.0001f, 0.0f, 1.0f, "%.4f");
+                editor::dt::DragFloat("Compliance", &sb->compliance, 0.0001f, 0.0f, 1.0f, "%.4f");
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Inverse stiffness of the edge constraints.\n0 is inextensible.");
 
@@ -2654,25 +2702,25 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
         {
             f32 elev = 0.0f, azim = 0.0f;
             sky_.sunAngles(elev, azim);
-            bool moved = ImGui::SliderFloat("Elevation", &elev, -20.0f, 90.0f, "%.1f deg");
-            moved |= ImGui::SliderFloat("Azimuth", &azim, -180.0f, 180.0f, "%.1f deg");
+            bool moved = editor::dt::SliderFloat("Elevation", &elev, -20.0f, 90.0f, "%.1f deg");
+            moved |= editor::dt::SliderFloat("Azimuth", &azim, -180.0f, 180.0f, "%.1f deg");
             // Written back only on a real move: the angle round trip is lossy.
             if (moved) sky_.setSunAngles(elev, azim);
         }
-        ImGui::SliderFloat("Intensity", &sky_.sunIntensity, 0.0f, 8.0f, "%.2f");
+        editor::dt::SliderFloat("Intensity", &sky_.sunIntensity, 0.0f, 8.0f, "%.2f");
         bool useTemp = sky_.sunTemperatureK > 0.0f;
-        if (ImGui::Checkbox("Use Colour Temperature", &useTemp))
+        if (editor::dt::Checkbox("Use Colour Temperature", &useTemp))
             sky_.sunTemperatureK = useTemp ? 5500.0f : 0.0f;
         if (useTemp) {
-            ImGui::SliderFloat("Temperature", &sky_.sunTemperatureK, 1500.0f, 12000.0f, "%.0f K");
+            editor::dt::SliderFloat("Temperature", &sky_.sunTemperatureK, 1500.0f, 12000.0f, "%.0f K");
         } else {
-            ImGui::ColorEdit3("Colour", sunColor_);
+            editor::dt::ColorEdit3("Colour", sunColor_);
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("White (255, 255, 255) is the physical default -- the light\n"
                                   "arriving at the top of the atmosphere. The physical sky tints\n"
                                   "it toward orange by elevation on its own.");
         }
-        ImGui::SliderFloat("Angular Size", &sky_.sunAngularDiameterDeg, 0.05f, 8.0f, "%.2f deg");
+        editor::dt::SliderFloat("Angular Size", &sky_.sunAngularDiameterDeg, 0.05f, 8.0f, "%.2f deg");
         // hasLevelSun_ lives in SandboxApp.hpp's AVER_MODULE_SCENE block beside loadLevel/
         // saveLevel: only a scene-on build ever runs the loader that populates it.
 #if AVER_MODULE_SCENE
@@ -2683,7 +2731,7 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
         {
             int model = sky_.model == rhi::SkyModel::Physical ? 1 : 0;
             const char* names[] = {"Authored (two-colour dome)", "Physical (Rayleigh + Mie + ozone)"};
-            if (ImGui::Combo("Sky Model", &model, names, 2))
+            if (editor::dt::Combo("Sky Model", &model, names, 2))
                 sky_.model = model ? rhi::SkyModel::Physical : rhi::SkyModel::Authored;
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Physical derives the dome below from the sun's elevation.\n"
@@ -2692,42 +2740,42 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
         const bool physicalSky = sky_.model == rhi::SkyModel::Physical;
 
         ImGui::BeginDisabled(physicalSky);
-        ImGui::ColorEdit3("Zenith", skyZenith_); ImGui::ColorEdit3("Horizon", skyHorizon_);
-        ImGui::SliderFloat("Atmosphere Height", &sky_.atmosphereHeight, 0.05f, 4.0f, "%.2f");
+        editor::dt::ColorEdit3("Zenith", skyZenith_); editor::dt::ColorEdit3("Horizon", skyHorizon_);
+        editor::dt::SliderFloat("Atmosphere Height", &sky_.atmosphereHeight, 0.05f, 4.0f, "%.2f");
         ImGui::EndDisabled();
         if (physicalSky) {
             ImGui::TextDisabled("^ derived from the sun's elevation while the model is Physical");
             if (ImGui::TreeNode("Air")) {
-                ImGui::SliderFloat("Mie Scatter", &sky_.air.mieScatter, 0.0f, 4e-2f, "%.5f /km",
+                editor::dt::SliderFloat("Mie Scatter", &sky_.air.mieScatter, 0.0f, 4e-2f, "%.5f /km",
                                    ImGuiSliderFlags_Logarithmic);
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Aerosol. Raise it for haze, dust or a coastal day; the\n"
                                       "sun's halo and the pale band at the horizon both grow.");
-                ImGui::SliderFloat("Mie Extinction", &sky_.air.mieExtinction, 0.0f, 4e-2f, "%.5f /km",
+                editor::dt::SliderFloat("Mie Extinction", &sky_.air.mieExtinction, 0.0f, 4e-2f, "%.5f /km",
                                    ImGuiSliderFlags_Logarithmic);
-                ImGui::SliderFloat("Mie Anisotropy", &sky_.air.miePhaseG, 0.0f, 0.95f, "%.2f");
-                ImGui::SliderFloat("Rayleigh Height", &sky_.air.rayleighScaleKm, 1.0f, 20.0f, "%.1f km");
-                ImGui::SliderFloat("Mie Height", &sky_.air.mieScaleKm, 0.2f, 8.0f, "%.2f km");
-                ImGui::SliderFloat("Multi-Scatter", &sky_.air.multiScatterGain, 0.0f, 4.0f, "%.2f");
+                editor::dt::SliderFloat("Mie Anisotropy", &sky_.air.miePhaseG, 0.0f, 0.95f, "%.2f");
+                editor::dt::SliderFloat("Rayleigh Height", &sky_.air.rayleighScaleKm, 1.0f, 20.0f, "%.1f km");
+                editor::dt::SliderFloat("Mie Height", &sky_.air.mieScaleKm, 0.2f, 8.0f, "%.2f km");
+                editor::dt::SliderFloat("Multi-Scatter", &sky_.air.multiScatterGain, 0.0f, 4.0f, "%.2f");
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Stands in for every bounce after the first. 1.70 is\n"
                                       "calibrated: it puts diffuse light at 15-30%% of direct\n"
                                       "and the zenith's blue/red between 2.5 and 5.");
-                ImGui::SliderFloat("Planet Radius", &sky_.air.planetRadiusKm, 100.0f, 20000.0f, "%.0f km");
-                ImGui::SliderFloat("Air Depth", &sky_.air.atmosphereHeightKm, 5.0f, 200.0f, "%.0f km");
-                ImGui::SliderInt("Sky Steps", &sky_.air.viewSteps, 4, 96);
+                editor::dt::SliderFloat("Planet Radius", &sky_.air.planetRadiusKm, 100.0f, 20000.0f, "%.0f km");
+                editor::dt::SliderFloat("Air Depth", &sky_.air.atmosphereHeightKm, 5.0f, 200.0f, "%.0f km");
+                editor::dt::SliderInt("Sky Steps", &sky_.air.viewSteps, 4, 96);
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Samples along a sky ray. 32 is within 3%% of a converged\n"
                                       "march; below about 16 the horizon starts to band.");
-                ImGui::SliderInt("Aerial Steps", &sky_.air.aerialSteps, 1, 16);
+                editor::dt::SliderInt("Aerial Steps", &sky_.air.aerialSteps, 1, 16);
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Samples along the air between the camera and a surface.\n"
                                       "This one runs per shaded pixel, so it is the expensive one.");
                 ImGui::TreePop();
             }
         }
-        ImGui::ColorEdit3("Ground", sky_.groundAlbedo);
-        ImGui::SliderFloat("Ground Blend", &sky_.groundBlend, 0.0f, 1.0f, "%.2f");
+        editor::dt::ColorEdit3("Ground", sky_.groundAlbedo);
+        editor::dt::SliderFloat("Ground Blend", &sky_.groundBlend, 0.0f, 1.0f, "%.2f");
         // Range 0..32, logarithmic (used to stop at 2): the multiplier on the only term that fills
         // an enclosed space (sky light through openings), and an arcade needs far more of it than
         // a slider stopping at 2 can express. MEASURED on PTTest Sponza at exposure 1,
@@ -2741,24 +2789,24 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
         // reach the value the scene needed -- so "everything is too dark" was, in part,
         // unauthorable. Logarithmic: the useful range spans two orders of magnitude and the
         // interesting end is the bottom.
-        ImGui::SliderFloat("Sky Light", &sunAmbient_, 0.0f, 32.0f, "%.2f",
+        editor::dt::SliderFloat("Sky Light", &sunAmbient_, 0.0f, 32.0f, "%.2f",
                            ImGuiSliderFlags_Logarithmic);
 
         ImGui::Separator();
         ImGui::TextUnformatted("Height Fog");
-        ImGui::ColorEdit3("Fog Tint", fogColor_);
-        ImGui::SliderFloat("Fog Density", &fogDensity_, 1e-7f, 1e-3f, "%.2e",
+        editor::dt::ColorEdit3("Fog Tint", fogColor_);
+        editor::dt::SliderFloat("Fog Density", &fogDensity_, 1e-7f, 1e-3f, "%.2e",
                            ImGuiSliderFlags_Logarithmic);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Extinction per cm. Visibility = 3.912 / density.\n"
                               "2e-6 clear (20 km)   4e-6 light haze (10 km)\n"
                               "8e-6 haze (5 km)     8e-5 fog (500 m)");
-        ImGui::SliderFloat("Height Falloff", &sky_.fogFalloff, 0.0f, 0.02f, "%.5f",
+        editor::dt::SliderFloat("Height Falloff", &sky_.fogFalloff, 0.0f, 0.02f, "%.5f",
                            ImGuiSliderFlags_Logarithmic);
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 = uniform distance fog (the old behaviour)");
-        ImGui::DragFloat("Fog Height", &sky_.fogHeight, 1.0f);
-        ImGui::DragFloat("Fog Start", &sky_.fogStart, 1.0f, 0.0f, 1e6f);
-        ImGui::SliderFloat("Max Opacity", &sky_.fogMaxOpacity, 0.0f, 1.0f, "%.2f");
+        editor::dt::DragFloat("Fog Height", &sky_.fogHeight, 1.0f);
+        editor::dt::DragFloat("Fog Start", &sky_.fogStart, 1.0f, 0.0f, 1e6f);
+        editor::dt::SliderFloat("Max Opacity", &sky_.fogMaxOpacity, 0.0f, 1.0f, "%.2f");
         // FOG is its own record and needs its own mark: markLevelRecordEdited went in for SUN/SKY
         // but missed FOG, silently discarding Fog Tint/Density on a level with no FOG line.
         // Guarded for the same reason as hasLevelSun_ above.
@@ -2767,7 +2815,7 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
         if (streaming_.enabled()) {
             const world::StreamSettings& mst = streaming_.settings().stream;
             const f32 boundaryCm = static_cast<f32>(mst.loadRadius) * static_cast<f32>(mst.chunkSizeCm);
-            ImGui::Checkbox("Match Fog To Streaming Radius", &matchFogToStreamRadius_);
+            editor::dt::Checkbox("Match Fog To Streaming Radius", &matchFogToStreamRadius_);
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Recomputes Fog Density every frame -- overriding the slider\n"
                                   "above -- so opacity AT the load boundary (%.0fcm here) equals\n"
@@ -2775,7 +2823,7 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                                   "typically needs an order of magnitude more density than a\n"
                                   "level's authored default, i.e. a visibly foggier world.", boundaryCm);
             if (matchFogToStreamRadius_) {
-                ImGui::SliderFloat("Target Opacity At Boundary", &fogMatchTargetOpacity_, 0.5f, 0.99f, "%.2f");
+                editor::dt::SliderFloat("Target Opacity At Boundary", &fogMatchTargetOpacity_, 0.5f, 0.99f, "%.2f");
                 const f32 matched = fogDensityForOpacityAt(boundaryCm, fogMatchTargetOpacity_);
                 ImGui::TextDisabled("boundary %.0fcm -> density %.2e", boundaryCm, matched);
             }
@@ -2784,16 +2832,16 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
 
         ImGui::Separator();
         ImGui::TextUnformatted("Volumetric Clouds");
-        ImGui::Checkbox("Clouds", &sky_.cloudsEnabled);
+        editor::dt::Checkbox("Clouds", &sky_.cloudsEnabled);
         if (sky_.cloudsEnabled) {
-            ImGui::SliderFloat("Coverage", &sky_.cloudCoverage, 0.0f, 1.0f, "%.2f");
-            ImGui::SliderFloat("Density", &sky_.cloudDensity, 0.0f, 4.0f, "%.2f");
-            ImGui::DragFloat("Layer Bottom", &sky_.cloudBottom, 100.0f);
-            ImGui::DragFloat("Layer Top", &sky_.cloudTop, 100.0f);
+            editor::dt::SliderFloat("Coverage", &sky_.cloudCoverage, 0.0f, 1.0f, "%.2f");
+            editor::dt::SliderFloat("Density", &sky_.cloudDensity, 0.0f, 4.0f, "%.2f");
+            editor::dt::DragFloat("Layer Bottom", &sky_.cloudBottom, 100.0f);
+            editor::dt::DragFloat("Layer Top", &sky_.cloudTop, 100.0f);
             f32 featureSize = sky_.cloudScale > 1e-9f ? 1.0f / sky_.cloudScale : 50000.0f;
-            if (ImGui::DragFloat("Feature Size", &featureSize, 100.0f, 100.0f, 5e6f))
+            if (editor::dt::DragFloat("Feature Size", &featureSize, 100.0f, 100.0f, 5e6f))
                 sky_.cloudScale = 1.0f / std::fmax(featureSize, 1.0f);
-            ImGui::DragFloat2("Wind", sky_.cloudWind, 5.0f);
+            editor::dt::DragFloat2("Wind", sky_.cloudWind, 5.0f);
 #if AVER_MODULE_SOFTBODY_SCENE
             if (ImGui::SmallButton("Copy to cloth wind"))
                 softbody::softBodySystem().setWind(Vec3{sky_.cloudWind[0], sky_.cloudWind[1], 0.0f}, 0.0f, 0.3f, 0.0f);
@@ -2814,7 +2862,7 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
         buildWaterPanel(e);
     } else if (sel_==-4){
         ImGui::TextUnformatted("Post Process"); ImGui::Separator();
-        ImGui::Checkbox("Eye Adaptation", &post_.autoExposure);
+        editor::dt::Checkbox("Eye Adaptation", &post_.autoExposure);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("The exposure adjusts automatically as the view gets brighter or\n"
                               "darker, like eyes -- quickly toward light, more slowly toward dark.");
@@ -2822,7 +2870,7 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
         // landed at 4.05 (+2 stops) and masked the engine's tuned defaults (RHI.hpp) every launch.
         // EV reads the same whether it's compensation on Eye Adaptation or a fixed exposure.
         f32 ev = (post_.exposure > 0.0f) ? std::log2(post_.exposure) : 0.0f;
-        if (ImGui::SliderFloat("Brightness", &ev, -3.0f, 3.0f, "%+.1f EV"))
+        if (editor::dt::SliderFloat("Brightness", &ev, -3.0f, 3.0f, "%+.1f EV"))
             post_.exposure = std::exp2(ev);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(post_.autoExposure
@@ -2843,18 +2891,19 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
         // NIGHT VISION works on a fixed exposure too (Krawczyk/Myszkowski/Seidel 2005, rod-driven
         // scotopic vision), so it sits beside Eye Adaptation rather than inside its block.
         bool nightVision = post_.nightVision > 0.5f;
-        if (ImGui::Checkbox("Night Vision", &nightVision))
+        if (editor::dt::Checkbox("Night Vision", &nightVision))
             post_.nightVision = nightVision ? 1.0f : 0.0f;
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("In very dim light colour fades and shifts blue-grey as the eye's\n"
                               "rods take over.");
         ImGui::Separator();
-        ImGui::SliderFloat("Bloom", &post_.bloomIntensity, 0.0f, 1.0f, "%.3f");
+        editor::dt::SliderFloat("Bloom", &post_.bloomIntensity, 0.0f, 1.0f, "%.3f");
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Zero skips the whole bloom pyramid, not just its weight");
     } else if (sel_==kSelPostVolume){
         if (postVolumeTools_.drawDetails(e.device(), project_.contentDir(), levelHeader_.postVolumes, post_, viewPos()))
             markLevelUnsaved();
     } else ImGui::TextDisabled("Select an actor in the World Outliner");
+    editor::dt::end();
     ImGui::End();
 
 }

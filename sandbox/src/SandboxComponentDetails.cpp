@@ -8,6 +8,7 @@
 // component in place; a gesture is bracketed by a "before" capture and one undo entry.
 // docs/plans/parity_demo/ADD_COMPONENT.md sections 4 and 7.
 #include "SandboxApp.hpp"
+#include "DetailsTable.hpp"
 
 #if AVER_MODULE_SCENE
 #include "PlacedComponentModel.hpp"
@@ -471,7 +472,7 @@ void SandboxApp::drawPlacedComponentSections() {
             bool changed = false, finished = false;
             ImGui::BeginDisabled(!editable);
             const auto slider = [&](const char* label, f32& v, f32 lo, f32 hi, const char* format, bool log) {
-                changed = ImGui::SliderFloat(label, &v, lo, hi, format, log ? ImGuiSliderFlags_Logarithmic : 0) || changed;
+                changed = editor::dt::SliderFloat(label, &v, lo, hi, format, log ? ImGuiSliderFlags_Logarithmic : 0) || changed;
                 finished = ImGui::IsItemDeactivatedAfterEdit() || finished;
             };
             slider("Area density (kg/m2)", edit.material.areaDensityKgM2, 0.05f, 20.0f, "%.2f", true);
@@ -483,7 +484,7 @@ void SandboxApp::drawPlacedComponentSections() {
             slider("Damping", edit.sim.damping, 0.0f, 5.0f, "%.2f", false);
             slider("Vertex radius (cm)", edit.sim.vertexRadiusCm, 0.0f, 5.0f, "%.2f", false);
             int iterations = static_cast<int>(edit.sim.iterations);
-            if (ImGui::SliderInt("Iterations", &iterations, 1, 24)) { edit.sim.iterations = static_cast<u32>(iterations); changed = true; }
+            if (editor::dt::SliderInt("Iterations", &iterations, 1, 24)) { edit.sim.iterations = static_cast<u32>(iterations); changed = true; }
             finished = ImGui::IsItemDeactivatedAfterEdit() || finished;
             if (!destructible) {
                 slider("Drag", edit.cloth.dragCoeff, 0.0f, 2.0f, "%.2f", false);
@@ -528,28 +529,28 @@ void SandboxApp::drawPlacedComponentSections() {
         ImGui::BeginDisabled(playing);
         if (!destructible) {
             f32 wind = cloth->windScale > 0.0f ? cloth->windScale : 1.0f;
-            gestureEdit(k, ImGui::SliderFloat("Wind scale", &wind, 0.0f, 4.0f, "%.2f"), [&] { cloth->windScale = wind; });
+            gestureEdit(k, editor::dt::SliderFloat("Wind scale", &wind, 0.0f, 4.0f, "%.2f"), [&] { cloth->windScale = wind; });
             f32 stiff = cloth->stiffnessScale > 0.0f ? cloth->stiffnessScale : 1.0f;
-            gestureEdit(k, ImGui::SliderFloat("Stiffness scale", &stiff, 0.1f, 10.0f, "%.2f", ImGuiSliderFlags_Logarithmic), [&] { cloth->stiffnessScale = stiff; });
+            gestureEdit(k, editor::dt::SliderFloat("Stiffness scale", &stiff, 0.1f, 10.0f, "%.2f", ImGuiSliderFlags_Logarithmic), [&] { cloth->stiffnessScale = stiff; });
             f32 reach = cloth->reachScale > 0.0f ? cloth->reachScale : 1.0f;
-            gestureEdit(k, ImGui::SliderFloat("Reach scale", &reach, 0.0f, 4.0f, "%.2f"), [&] { cloth->reachScale = reach; });
+            gestureEdit(k, editor::dt::SliderFloat("Reach scale", &reach, 0.0f, 4.0f, "%.2f"), [&] { cloth->reachScale = reach; });
             f32 freeze = cloth->freezeDistanceCm;
-            gestureEdit(k, ImGui::DragFloat("Freeze distance (cm)", &freeze, 10.0f, 0.0f, 100000.0f, freeze > 0.0f ? "%.0f" : "system default"),
+            gestureEdit(k, editor::dt::DragFloat("Freeze distance (cm)", &freeze, 10.0f, 0.0f, 100000.0f, freeze > 0.0f ? "%.0f" : "system default"),
                         [&] { cloth->freezeDistanceCm = freeze; });
         } else {
             f32 tough = dest->toughnessScale > 0.0f ? dest->toughnessScale : 1.0f;
-            gestureEdit(k, ImGui::SliderFloat("Toughness scale", &tough, 0.05f, 20.0f, "%.2f", ImGuiSliderFlags_Logarithmic), [&] { dest->toughnessScale = tough; });
+            gestureEdit(k, editor::dt::SliderFloat("Toughness scale", &tough, 0.05f, 20.0f, "%.2f", ImGuiSliderFlags_Logarithmic), [&] { dest->toughnessScale = tough; });
             f32 impact = dest->impactScale > 0.0f ? dest->impactScale : 1.0f;
-            gestureEdit(k, ImGui::SliderFloat("Impact scale", &impact, 0.05f, 20.0f, "%.2f", ImGuiSliderFlags_Logarithmic), [&] { dest->impactScale = impact; });
+            gestureEdit(k, editor::dt::SliderFloat("Impact scale", &impact, 0.05f, 20.0f, "%.2f", ImGuiSliderFlags_Logarithmic), [&] { dest->impactScale = impact; });
             f32 life = dest->debrisLifetimeS;
-            gestureEdit(k, ImGui::DragFloat("Debris lifetime (s)", &life, 0.1f, 0.0f, 600.0f, life > 0.0f ? "%.1f" : "asset default"), [&] { dest->debrisLifetimeS = life; });
+            gestureEdit(k, editor::dt::DragFloat("Debris lifetime (s)", &life, 0.1f, 0.0f, 600.0f, life > 0.0f ? "%.1f" : "asset default"), [&] { dest->debrisLifetimeS = life; });
             int maxPieces = static_cast<int>(dest->maxPieces);
-            gestureEdit(k, ImGui::DragInt("Max pieces", &maxPieces, 0.2f, 0, 256, maxPieces > 0 ? "%d" : "asset default"),
+            gestureEdit(k, editor::dt::DragInt("Max pieces", &maxPieces, 0.2f, 0, 256, maxPieces > 0 ? "%d" : "asset default"),
                         [&] { dest->maxPieces = static_cast<u32>(std::max(0, maxPieces)); });
         }
         const auto flagBox = [&](const char* label, u32 bit, bool negative) {
             bool on = negative ? (flagsRef & bit) == 0 : (flagsRef & bit) != 0;
-            instantEdit(k, ImGui::Checkbox(label, &on), [&] {
+            instantEdit(k, editor::dt::Checkbox(label, &on), [&] {
                 const bool set = negative ? !on : on;
                 if (set) flagsRef |= bit; else flagsRef &= ~bit;
             });
@@ -700,15 +701,15 @@ void SandboxApp::drawPlacedComponentSections() {
             });
             ImGui::BeginDisabled(playing);
             f32 speed = an->speed;
-            gestureEdit(k, ImGui::DragFloat("Speed", &speed, 0.01f, -4.0f, 4.0f, "%.2f"), [&] { an->speed = speed; });
+            gestureEdit(k, editor::dt::DragFloat("Speed", &speed, 0.01f, -4.0f, 4.0f, "%.2f"), [&] { an->speed = speed; });
             f32 weight = an->blendWeight;
-            gestureEdit(k, ImGui::SliderFloat("Blend weight", &weight, 0.0f, 1.0f, "%.2f"), [&] { an->blendWeight = weight; });
+            gestureEdit(k, editor::dt::SliderFloat("Blend weight", &weight, 0.0f, 1.0f, "%.2f"), [&] { an->blendWeight = weight; });
             bool loop = (an->flags & scene::kAnimatorOnce) == 0;
-            instantEdit(k, ImGui::Checkbox("Loop", &loop), [&] {
+            instantEdit(k, editor::dt::Checkbox("Loop", &loop), [&] {
                 if (loop) an->flags &= ~scene::kAnimatorOnce; else an->flags |= scene::kAnimatorOnce;
             });
             bool playingClip = (an->flags & scene::kAnimatorPaused) == 0;
-            instantEdit(k, ImGui::Checkbox("Playing", &playingClip), [&] {
+            instantEdit(k, editor::dt::Checkbox("Playing", &playingClip), [&] {
                 if (playingClip) an->flags &= ~scene::kAnimatorPaused; else an->flags |= scene::kAnimatorPaused;
             });
             ImGui::EndDisabled();
@@ -737,7 +738,7 @@ void SandboxApp::drawPlacedComponentSections() {
             for (const auto& a : kAxes) {
                 ImGui::SameLine();
                 bool on = (axes & a.bit) != 0;
-                instantEdit(k, ImGui::Checkbox(a.label, &on) && (on || (axes & ~a.bit) != 0), [&] {
+                instantEdit(k, editor::dt::Checkbox(a.label, &on) && (on || (axes & ~a.bit) != 0), [&] {
                     rm->axes = on ? (axes | a.bit) : (axes & ~a.bit);
                 });
             }
@@ -745,18 +746,18 @@ void SandboxApp::drawPlacedComponentSections() {
             ImGui::TextDisabled("Sources");
             ImGui::SameLine();
             bool fromGraph = (sources & anim::kRootSrcGraph) != 0;
-            instantEdit(k, ImGui::Checkbox("State machine", &fromGraph) && (fromGraph || (sources & anim::kRootSrcMontage) != 0), [&] {
+            instantEdit(k, editor::dt::Checkbox("State machine", &fromGraph) && (fromGraph || (sources & anim::kRootSrcMontage) != 0), [&] {
                 rm->sources = fromGraph ? (sources | anim::kRootSrcGraph) : (sources & ~anim::kRootSrcGraph);
             });
             ImGui::SameLine();
             bool fromMontage = (sources & anim::kRootSrcMontage) != 0;
-            instantEdit(k, ImGui::Checkbox("Montage", &fromMontage) && (fromMontage || (sources & anim::kRootSrcGraph) != 0), [&] {
+            instantEdit(k, editor::dt::Checkbox("Montage", &fromMontage) && (fromMontage || (sources & anim::kRootSrcGraph) != 0), [&] {
                 rm->sources = fromMontage ? (sources | anim::kRootSrcMontage) : (sources & ~anim::kRootSrcMontage);
             });
             f32 scale = rm->scale > 0.0f ? rm->scale : 1.0f;
-            gestureEdit(k, ImGui::DragFloat("Scale", &scale, 0.01f, 0.0f, 100.0f, "%.2f"), [&] { rm->scale = scale; });
+            gestureEdit(k, editor::dt::DragFloat("Scale", &scale, 0.01f, 0.0f, 100.0f, "%.2f"), [&] { rm->scale = scale; });
             bool external = (rm->flags & anim::kRootMotionExternal) != 0;
-            instantEdit(k, ImGui::Checkbox("External consumer", &external), [&] {
+            instantEdit(k, editor::dt::Checkbox("External consumer", &external), [&] {
                 if (external) rm->flags |= anim::kRootMotionExternal; else rm->flags &= ~anim::kRootMotionExternal;
             });
             if (ImGui::IsItemHovered())
@@ -778,27 +779,27 @@ void SandboxApp::drawPlacedComponentSections() {
             ImGui::BeginDisabled(playing);
             int input = mm->inputSource == anim::kMotionInputEntityVelocity ? 1 : 0;
             static const char* const kInputs[] = {"Script", "Entity velocity"};
-            if (ImGui::Combo("Input", &input, kInputs, 2)) instantEdit(k, true, [&] { mm->inputSource = input == 1 ? anim::kMotionInputEntityVelocity : anim::kMotionInputScript; });
+            if (editor::dt::Combo("Input", &input, kInputs, 2)) instantEdit(k, true, [&] { mm->inputSource = input == 1 ? anim::kMotionInputEntityVelocity : anim::kMotionInputScript; });
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Script: a script or graph writes the desired velocity.\nEntity velocity: follows how the entity actually moves.");
             int facing = (mm->flags & anim::kMotionFaceYaw) ? 1 : 0;
             static const char* const kFacing[] = {"Velocity", "Entity heading"};
-            if (ImGui::Combo("Facing", &facing, kFacing, 2)) instantEdit(k, true, [&] {
+            if (editor::dt::Combo("Facing", &facing, kFacing, 2)) instantEdit(k, true, [&] {
                 if (facing == 1) mm->flags |= anim::kMotionFaceYaw; else mm->flags &= ~anim::kMotionFaceYaw;
             });
             f32 rate = mm->playRate > 0.0f ? mm->playRate : 1.0f;
-            gestureEdit(k, ImGui::DragFloat("Play rate", &rate, 0.01f, 0.1f, 4.0f, "%.2f"), [&] { mm->playRate = rate; });
+            gestureEdit(k, editor::dt::DragFloat("Play rate", &rate, 0.01f, 0.1f, 4.0f, "%.2f"), [&] { mm->playRate = rate; });
             f32 interval = mm->searchInterval;
-            gestureEdit(k, ImGui::DragFloat("Search interval (s)", &interval, 0.005f, 0.0f, 2.0f, interval > 0.0f ? "%.3f" : "database default"),
+            gestureEdit(k, editor::dt::DragFloat("Search interval (s)", &interval, 0.005f, 0.0f, 2.0f, interval > 0.0f ? "%.3f" : "database default"),
                         [&] { mm->searchInterval = interval; });
             f32 velHL = mm->velHalfLife;
-            gestureEdit(k, ImGui::DragFloat("Velocity half-life (s)", &velHL, 0.005f, 0.0f, 2.0f, velHL > 0.0f ? "%.3f" : "database default"),
+            gestureEdit(k, editor::dt::DragFloat("Velocity half-life (s)", &velHL, 0.005f, 0.0f, 2.0f, velHL > 0.0f ? "%.3f" : "database default"),
                         [&] { mm->velHalfLife = velHL; });
             f32 turnHL = mm->turnHalfLife;
-            gestureEdit(k, ImGui::DragFloat("Turn half-life (s)", &turnHL, 0.005f, 0.0f, 2.0f, turnHL > 0.0f ? "%.3f" : "database default"),
+            gestureEdit(k, editor::dt::DragFloat("Turn half-life (s)", &turnHL, 0.005f, 0.0f, 2.0f, turnHL > 0.0f ? "%.3f" : "database default"),
                         [&] { mm->turnHalfLife = turnHL; });
             bool paused = (mm->flags & anim::kMotionPaused) != 0;
-            instantEdit(k, ImGui::Checkbox("Paused", &paused), [&] {
+            instantEdit(k, editor::dt::Checkbox("Paused", &paused), [&] {
                 if (paused) mm->flags |= anim::kMotionPaused; else mm->flags &= ~anim::kMotionPaused;
             });
             ImGui::EndDisabled();
@@ -818,7 +819,7 @@ void SandboxApp::drawPlacedComponentSections() {
             assetRow(k, "rig", "Rig", cr->rig);
             ImGui::BeginDisabled(playing);
             f32 weight = cr->weight;
-            gestureEdit(k, ImGui::SliderFloat("Weight", &weight, 0.0f, 1.0f, "%.2f"), [&] { cr->weight = weight; });
+            gestureEdit(k, editor::dt::SliderFloat("Weight", &weight, 0.0f, 1.0f, "%.2f"), [&] { cr->weight = weight; });
             ImGui::EndDisabled();
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 turns the whole rig off without detaching it.");
             ImGui::TextDisabled("applied to %u entities last tick", anim::controlRigSystem().appliedLastTick());
@@ -830,12 +831,12 @@ void SandboxApp::drawPlacedComponentSections() {
             assetRow(k, "asset", "IK Rig", ik->asset);
             ImGui::BeginDisabled(playing);
             f32 weight = ik->weight;
-            gestureEdit(k, ImGui::SliderFloat("IK weight", &weight, 0.0f, 1.0f, "%.2f"), [&] { ik->weight = weight; });
+            gestureEdit(k, editor::dt::SliderFloat("IK weight", &weight, 0.0f, 1.0f, "%.2f"), [&] { ik->weight = weight; });
             const struct { const char* label; u32 off; } kParts[] = {
                 {"Foot placement", anim::kIkRigFeetOff}, {"Goals", anim::kIkRigGoalsOff}, {"Body", anim::kIkRigBodyOff}};
             for (const auto& p : kParts) {
                 bool on = (ik->flags & p.off) == 0;
-                instantEdit(k, ImGui::Checkbox(p.label, &on), [&] {
+                instantEdit(k, editor::dt::Checkbox(p.label, &on), [&] {
                     if (on) ik->flags &= ~p.off; else ik->flags |= p.off;
                 });
             }
@@ -857,14 +858,14 @@ void SandboxApp::drawPlacedComponentSections() {
             if (mt->faceRig == 0) ImGui::TextDisabled("No rig: the 52 ARKit shape names and the 15 visemes work on any mesh that has them.");
             ImGui::BeginDisabled(playing);
             f32 weight = mt->weight == 0.0f ? 1.0f : mt->weight;
-            gestureEdit(k, ImGui::SliderFloat("Weight", &weight, 0.01f, 2.0f, "%.2f"), [&] { mt->weight = weight; });
+            gestureEdit(k, editor::dt::SliderFloat("Weight", &weight, 0.01f, 2.0f, "%.2f"), [&] { mt->weight = weight; });
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Scales every blend shape. Use Enabled to turn them off: a weight of 0 reads as 1.");
             const struct { const char* label; u32 bit; bool inverted; } kFlags[] = {
                 {"Enabled", anim::kMorphOff, true}, {"Animation drives it", anim::kMorphIgnoreAnim, true},
                 {"Inherit from parent", anim::kMorphInheritParent, false}};
             for (const auto& f : kFlags) {
                 bool on = f.inverted ? (mt->flags & f.bit) == 0 : (mt->flags & f.bit) != 0;
-                instantEdit(k, ImGui::Checkbox(f.label, &on), [&] {
+                instantEdit(k, editor::dt::Checkbox(f.label, &on), [&] {
                     if (on == f.inverted) mt->flags &= ~f.bit; else mt->flags |= f.bit;
                 });
             }
@@ -886,19 +887,19 @@ void SandboxApp::drawPlacedComponentSections() {
             using Rig = camera::CCameraRig;
             const auto dragF = [&](const char* label, f32 Rig::* m, f32 speed, f32 lo, f32 hi, const char* fmtText, const char* tip) {
                 f32 v = rig->*m;
-                const bool ch = ImGui::DragFloat(label, &v, speed, lo, hi, fmtText);
+                const bool ch = editor::dt::DragFloat(label, &v, speed, lo, hi, fmtText);
                 if (tip && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
                 gestureEdit(k, ch, [&] { rig->*m = v; });
             };
             const auto dragV3 = [&](const char* label, f32 Rig::* mx, f32 Rig::* my, f32 Rig::* mz, const char* tip) {
                 f32 v[3] = {rig->*mx, rig->*my, rig->*mz};
-                const bool ch = ImGui::DragFloat3(label, v, 1.0f, -5000.0f, 5000.0f, "%.0f");
+                const bool ch = editor::dt::DragFloat3(label, v, 1.0f, -5000.0f, 5000.0f, "%.0f");
                 if (tip && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
                 gestureEdit(k, ch, [&] { rig->*mx = v[0]; rig->*my = v[1]; rig->*mz = v[2]; });
             };
             const auto flag = [&](const char* label, u32 bit, bool negative, const char* tip) {
                 bool on = negative ? (rig->flags & bit) == 0 : (rig->flags & bit) != 0;
-                const bool ch = ImGui::Checkbox(label, &on);
+                const bool ch = editor::dt::Checkbox(label, &on);
                 if (tip && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
                 const bool setBit = negative ? !on : on;
                 instantEdit(k, ch, [&] { rig->flags = setBit ? (rig->flags | bit) : (rig->flags & ~bit); });
@@ -939,7 +940,7 @@ void SandboxApp::drawPlacedComponentSections() {
                     bool on = cm::layerOn(mask, layer);
                     char lbl[24];
                     std::snprintf(lbl, sizeof lbl, "%u##lyr%u", layer, layer);
-                    if (ImGui::Checkbox(lbl, &on)) instantEdit(k, true, [&] { rig->collisionMask = cm::toggleLayer(mask, layer); });
+                    if (editor::dt::Checkbox(lbl, &on)) instantEdit(k, true, [&] { rig->collisionMask = cm::toggleLayer(mask, layer); });
                     if (layer % 8 != 7) ImGui::SameLine();
                 }
                 if (ImGui::SmallButton("Use the default (all but cloth and proxy)")) instantEdit(k, true, [&] { rig->collisionMask = 0; });
@@ -970,7 +971,7 @@ void SandboxApp::drawPlacedComponentSections() {
             {
                 static const char* const kCurves[] = {"Ease in-out", "Linear", "Ease in", "Ease out"};
                 int curve = static_cast<int>(rig->blendCurve < 4u ? rig->blendCurve : 0u);
-                if (ImGui::Combo("Blend curve", &curve, kCurves, 4)) instantEdit(k, true, [&] { rig->blendCurve = static_cast<u32>(curve); });
+                if (editor::dt::Combo("Blend curve", &curve, kCurves, 4)) instantEdit(k, true, [&] { rig->blendCurve = static_cast<u32>(curve); });
             }
             ImGui::TextDisabled("Feel");
             dragF("FOV kick (deg)", &Rig::fovKickDeg, 0.1f, 0.0f, 40.0f, "%.1f", "Added FOV at the speed below. 0 = off");
@@ -1018,17 +1019,17 @@ void SandboxApp::drawPlacedComponentSections() {
             ImGui::BeginDisabled(playing);
             static const char* kSim[] = {"Auto", "CPU", "GPU"};
             int sim = (pe->flags & scene::kParticleEmitterForceGpu) ? 2 : ((pe->flags & scene::kParticleEmitterForceCpu) ? 1 : 0);
-            instantEdit(k, ImGui::Combo("Simulate on", &sim, kSim, 3), [&] {
+            instantEdit(k, editor::dt::Combo("Simulate on", &sim, kSim, 3), [&] {
                 pe->flags &= ~(scene::kParticleEmitterForceCpu | scene::kParticleEmitterForceGpu);
                 if (sim == 1) pe->flags |= scene::kParticleEmitterForceCpu;
                 else if (sim == 2) pe->flags |= scene::kParticleEmitterForceGpu;
             });
             bool isPlaying = (pe->flags & scene::kParticleEmitterStopped) == 0;
-            instantEdit(k, ImGui::Checkbox("Playing", &isPlaying), [&] {
+            instantEdit(k, editor::dt::Checkbox("Playing", &isPlaying), [&] {
                 if (isPlaying) pe->flags &= ~scene::kParticleEmitterStopped; else pe->flags |= scene::kParticleEmitterStopped;
             });
             bool autoDestroy = (pe->flags & scene::kParticleEmitterAutoDestroy) != 0;
-            instantEdit(k, ImGui::Checkbox("Destroy when finished", &autoDestroy), [&] {
+            instantEdit(k, editor::dt::Checkbox("Destroy when finished", &autoDestroy), [&] {
                 if (autoDestroy) pe->flags |= scene::kParticleEmitterAutoDestroy; else pe->flags &= ~scene::kParticleEmitterAutoDestroy;
             });
             ImGui::EndDisabled();
@@ -1129,7 +1130,7 @@ void SandboxApp::drawPlacedComponentSections() {
                 const std::string* tn = bt.teamName(sb->teamId);
                 std::snprintf(s_team, sizeof s_team, "%s", tn ? tn->c_str() : "");
             }
-            ImGui::InputText("Team", s_team, sizeof s_team);
+            editor::dt::InputText("Team", s_team, sizeof s_team);
             s_teamActive = ImGui::IsItemActive();
             if (ImGui::IsItemActivated()) beginPlacedGesture(k);
             if (ImGui::IsItemDeactivatedAfterEdit() && placedGesture_ == &k) {
@@ -1165,7 +1166,7 @@ void SandboxApp::drawPlacedComponentSections() {
             ImGui::BeginDisabled(playing);
             if (drawAssetField("asset", "Smart Object", path, editor::placedAssetExts(k))) changeAsset(k, "asset", path);
             bool enabled = so->enabled != 0;
-            instantEdit(k, ImGui::Checkbox("Enabled", &enabled), [&] { so->enabled = enabled ? 1 : 0; });
+            instantEdit(k, editor::dt::Checkbox("Enabled", &enabled), [&] { so->enabled = enabled ? 1 : 0; });
             ImGui::EndDisabled();
 #if AVER_WITH_SYNAPSE_AI
             // The slot count lives in the Synapse DLL's registry, which registers the object on first ask: Play only.

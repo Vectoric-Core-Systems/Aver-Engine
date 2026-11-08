@@ -13,6 +13,7 @@
 
 #if AVER_WITH_IMGUI
 #include "imgui.h"
+#include "DetailsTable.hpp"
 #endif
 
 namespace aver::editor {
@@ -46,14 +47,14 @@ inline bool drawDecalDetails(scene::CDecal& c, const std::string& contentDir) {
         ImGui::TextDisabled("Spawned by the decal pool at run time; not saved with the level.");
 
     bool enabled = (c.flags & scene::kDecalDisabled) == 0;
-    if (ImGui::Checkbox("Enabled", &enabled)) {
+    if (editor::dt::Checkbox("Enabled", &enabled)) {
         c.flags = enabled ? (c.flags & ~scene::kDecalDisabled) : (c.flags | scene::kDecalDisabled);
         changed = true;
     }
 
     ImGui::SeparatorText("Box");
     f32 size[3] = {scene::decalSizeCm(c, 0), scene::decalSizeCm(c, 1), scene::decalSizeCm(c, 2)};
-    if (ImGui::DragFloat3("Size (cm)", size, 1.0f, 1.0f, 100000.0f, "%.0f")) {
+    if (editor::dt::DragFloat3("Size (cm)", size, 1.0f, 1.0f, 100000.0f, "%.0f")) {
         for (int i = 0; i < 3; ++i) c.sizeCm[i] = std::max(size[i], 1.0f);
         changed = true;
     }
@@ -61,19 +62,19 @@ inline bool drawDecalDetails(scene::CDecal& c, const std::string& contentDir) {
         ImGui::SetTooltip("Depth along the projection (X), width (Y), height (Z). The decal paints\n"
                           "every surface inside this box and projects along the entity's +X.\n"
                           "Drag the handles in the viewport, or scale the entity.");
-    changed |= ImGui::DragInt("Sort order", &c.sortOrder, 0.2f, -1000, 1000);
+    changed |= editor::dt::DragInt("Sort order", &c.sortOrder, 0.2f, -1000, 1000);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Higher paints over lower. Equal orders paint the nearer decal on top.");
 
     ImGui::SeparatorText("Appearance");
     f32 opacity = 1.0f - std::min(std::max(c.transparency, 0.0f), 1.0f);
-    if (ImGui::SliderFloat("Opacity", &opacity, 0.0f, 1.0f)) { c.transparency = 1.0f - opacity; changed = true; }
+    if (editor::dt::SliderFloat("Opacity", &opacity, 0.0f, 1.0f)) { c.transparency = 1.0f - opacity; changed = true; }
     f32 tint[3];
     scene::decalTint(c, tint);
-    if (ImGui::ColorEdit3("Tint", tint)) { for (int i = 0; i < 3; ++i) c.tint[i] = std::max(tint[i], 0.001f); changed = true; }
+    if (editor::dt::ColorEdit3("Tint", tint)) { for (int i = 0; i < 3; ++i) c.tint[i] = std::max(tint[i], 0.001f); changed = true; }
     const bool colour = (c.flags & scene::kDecalNoColour) == 0;
     bool colourOn = colour;
-    if (ImGui::Checkbox("Paint base colour", &colourOn)) {
+    if (editor::dt::Checkbox("Paint base colour", &colourOn)) {
         c.flags = colourOn ? (c.flags & ~scene::kDecalNoColour) : (c.flags | scene::kDecalNoColour);
         changed = true;
     }
@@ -83,32 +84,32 @@ inline bool drawDecalDetails(scene::CDecal& c, const std::string& contentDir) {
 
     ImGui::SeparatorText("Normal");
     bool normalOn = (c.flags & scene::kDecalNoNormal) == 0;
-    if (ImGui::Checkbox("Paint normal", &normalOn)) {
+    if (editor::dt::Checkbox("Paint normal", &normalOn)) {
         c.flags = normalOn ? (c.flags & ~scene::kDecalNoNormal) : (c.flags | scene::kDecalNoNormal);
         changed = true;
     }
     changed |= lightAssetField("Normal map", normalPicker, contentDir, false, c.normalTexture);
     f32 ns = scene::decalNormalStrength(c);
-    if (ImGui::SliderFloat("Normal strength", &ns, 0.01f, 2.0f)) { c.normalStrength = ns; changed = true; }
+    if (editor::dt::SliderFloat("Normal strength", &ns, 0.01f, 2.0f)) { c.normalStrength = ns; changed = true; }
 
     ImGui::SeparatorText("Roughness and metallic");
     bool roughOn = (c.flags & scene::kDecalNoRoughness) == 0;
-    if (ImGui::Checkbox("Paint roughness / metallic", &roughOn)) {
+    if (editor::dt::Checkbox("Paint roughness / metallic", &roughOn)) {
         c.flags = roughOn ? (c.flags & ~scene::kDecalNoRoughness) : (c.flags | scene::kDecalNoRoughness);
         changed = true;
     }
     changed |= lightAssetField("Roughness / metallic map", ormPicker, contentDir, false, c.ormTexture);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Linear image: green = roughness, blue = metallic (the glTF packing).");
-    changed |= ImGui::SliderFloat("Roughness", &c.roughness, 0.0f, 1.0f, c.roughness > 0.0f ? "%.2f" : "unset");
+    changed |= editor::dt::SliderFloat("Roughness", &c.roughness, 0.0f, 1.0f, c.roughness > 0.0f ? "%.2f" : "unset");
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Multiplies the map's green; with no map, the roughness itself. Unset leaves the\n"
                           "surface alone when there is no map.");
-    changed |= ImGui::SliderFloat("Metallic", &c.metallic, 0.0f, 1.0f, c.metallic > 0.0f ? "%.2f" : "none");
+    changed |= editor::dt::SliderFloat("Metallic", &c.metallic, 0.0f, 1.0f, c.metallic > 0.0f ? "%.2f" : "none");
 
     ImGui::SeparatorText("Fading");
     f32 edge = scene::decalEdgeFade(c);
-    if (ImGui::SliderFloat("Edge fade", &edge, 0.01f, 1.0f)) { c.edgeFade = edge; changed = true; }
+    if (editor::dt::SliderFloat("Edge fade", &edge, 0.01f, 1.0f)) { c.edgeFade = edge; changed = true; }
     f32 a0 = scene::decalAngleStartDeg(c), a1 = scene::decalAngleEndDeg(c);
     if (ImGui::DragFloatRange2("Angle fade (deg)", &a0, &a1, 0.5f, 1.0f, 90.0f, "full to %.0f", "gone at %.0f")) {
         c.angleFadeStartDeg = a0;
@@ -119,7 +120,7 @@ inline bool drawDecalDetails(scene::CDecal& c, const std::string& contentDir) {
         ImGui::SetTooltip("Angle between the surface normal and the way the decal looks back at you.\n"
                           "Surfaces tilted past the second value get nothing: stops stretching on walls\n"
                           "that run along the projection.");
-    changed |= ImGui::DragFloat("Fade distance (cm)", &c.fadeDistanceCm, 10.0f, 0.0f, 1.0e6f,
+    changed |= editor::dt::DragFloat("Fade distance (cm)", &c.fadeDistanceCm, 10.0f, 0.0f, 1.0e6f,
                                 c.fadeDistanceCm > 0.0f ? "%.0f" : "never");
 
     ImGui::SeparatorText("Emission and depth fade");
@@ -128,9 +129,9 @@ inline bool drawDecalDetails(scene::CDecal& c, const std::string& contentDir) {
         ImGui::SetTooltip("sRGB image added to the surface's emission, weighted by the fades above.\n"
                           "Drawn by the plain raster pipeline only (not ray-driven mode).");
     f32 energy = c.emissionEnergy > 0.0f ? c.emissionEnergy : 1.0f;
-    if (ImGui::DragFloat("Emission energy", &energy, 0.05f, 0.0f, 100.0f)) { c.emissionEnergy = std::max(energy, 0.001f); changed = true; }
+    if (editor::dt::DragFloat("Emission energy", &energy, 0.05f, 0.0f, 100.0f)) { c.emissionEnergy = std::max(energy, 0.001f); changed = true; }
     bool depth = (c.flags & scene::kDecalDepthFade) != 0;
-    if (ImGui::Checkbox("Depth fade curve", &depth)) {
+    if (editor::dt::Checkbox("Depth fade curve", &depth)) {
         c.flags = depth ? (c.flags | scene::kDecalDepthFade) : (c.flags & ~scene::kDecalDepthFade);
         changed = true;
     }
@@ -138,21 +139,21 @@ inline bool drawDecalDetails(scene::CDecal& c, const std::string& contentDir) {
         ImGui::SetTooltip("Fades along the projection by (1 - distance from the centre / half depth) ^ exponent,\n"
                           "in place of the soft edge on that axis. Exponent 0 does not fade on that side.");
     if (depth) {
-        changed |= ImGui::DragFloat("Upper exponent", &c.upperFade, 0.01f, 0.0f, 64.0f);
-        changed |= ImGui::DragFloat("Lower exponent", &c.lowerFade, 0.01f, 0.0f, 64.0f);
+        changed |= editor::dt::DragFloat("Upper exponent", &c.upperFade, 0.01f, 0.0f, 64.0f);
+        changed |= editor::dt::DragFloat("Lower exponent", &c.lowerFade, 0.01f, 0.0f, 64.0f);
     }
-    changed |= ImGui::SliderFloat("Normal fade", &c.normalFade, 0.0f, 0.99f, c.normalFade > 0.0f ? "%.2f" : "off");
+    changed |= editor::dt::SliderFloat("Normal fade", &c.normalFade, 0.0f, 0.99f, c.normalFade > 0.0f ? "%.2f" : "off");
     bool mix = (c.flags & scene::kDecalAlbedoMix) != 0;
-    if (ImGui::Checkbox("Albedo mix", &mix)) {
+    if (editor::dt::Checkbox("Albedo mix", &mix)) {
         c.flags = mix ? (c.flags | scene::kDecalAlbedoMix) : (c.flags & ~scene::kDecalAlbedoMix);
         changed = true;
     }
-    if (mix) changed |= ImGui::SliderFloat("Albedo mix weight", &c.albedoMix, 0.0f, 1.0f);
+    if (mix) changed |= editor::dt::SliderFloat("Albedo mix weight", &c.albedoMix, 0.0f, 1.0f);
 
     ImGui::SeparatorText("Image placement");
     f32 uvs[2] = {scene::decalUvScale(c, 0), scene::decalUvScale(c, 1)};
-    if (ImGui::DragFloat2("UV scale", uvs, 0.01f, -64.0f, 64.0f)) { c.uvScale[0] = uvs[0]; c.uvScale[1] = uvs[1]; changed = true; }
-    changed |= ImGui::DragFloat2("UV offset", c.uvOffset, 0.01f, -64.0f, 64.0f);
+    if (editor::dt::DragFloat2("UV scale", uvs, 0.01f, -64.0f, 64.0f)) { c.uvScale[0] = uvs[0]; c.uvScale[1] = uvs[1]; changed = true; }
+    changed |= editor::dt::DragFloat2("UV offset", c.uvOffset, 0.01f, -64.0f, 64.0f);
     return changed;
 }
 #endif
