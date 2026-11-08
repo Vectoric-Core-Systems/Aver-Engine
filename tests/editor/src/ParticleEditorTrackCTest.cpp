@@ -75,6 +75,54 @@ int main() {
         check(px::formatBytes(1536) == "1.5 KB" && px::formatBytes(3u << 20) == "3.0 MB", "byte formatting");
     }
 
+    // ---- 2. playback ---------------------------------------------------------------------------------------
+    AVER_INFO("playback");
+    {
+        const std::string path = writeFixture(smallSystem(), "pxTrackC_playback.ocparticle");
+        editor::ParticleEditor a(path), b(path);
+        check(a.loaded() && b.loaded(), "the fixture loads");
+        a.seekPreview(2.0f);
+        b.seekPreview(0.7f);
+        b.seekPreview(2.0f);   // from a different time: still resimulates from 0
+        check(std::fabs(a.previewTime() - 2.0f) < 1e-3f && std::fabs(b.previewTime() - 2.0f) < 1e-3f, "seek lands on the asked time");
+        const auto& pa = a.previewParticles();
+        const auto& pb = b.previewParticles();
+        bool same = pa.size() == pb.size() && !pa.empty();
+        for (usize i = 0; same && i < pa.size(); ++i)
+            same = pa[i].position.x == pb[i].position.x && pa[i].position.y == pb[i].position.y && pa[i].position.z == pb[i].position.z &&
+                   pa[i].age == pb[i].age && pa[i].id == pb[i].id;
+        check(same, "seeking the same time gives bit-identical particles, whatever came before");
+        check(a.previewTotal() > 30, "a 60/s emitter has particles at 2 s: " + std::to_string(a.previewTotal()));
+
+        editor::ParticleEditor c(path);
+        for (int i = 0; i < 120; ++i) c.stepPreviewFrame();
+        const auto& pc = c.previewParticles();
+        bool stepSame = pc.size() == pa.size();
+        for (usize i = 0; stepSame && i < pc.size(); ++i) stepSame = pc[i].position.x == pa[i].position.x && pc[i].id == pa[i].id;
+        check(stepSame, "120 frame steps equal a seek to 2 s");
+        check(!c.previewPlaying(), "frame step pauses");
+        check(c.previewFrame() == 120, "the frame readout counts steps");
+
+        editor::ParticleEditor d(path);
+        d.setPlaybackSpeed(2.0f);
+        d.advancePreview(1.0f);
+        check(std::fabs(d.previewTime() - 2.0f) < 0.05f, "speed 2 advances two simulated seconds per second: " + std::to_string(d.previewTime()));
+        d.setPlaybackSpeed(100.0f);
+        check(d.playbackSpeed() == 4.0f, "speed is clamped");
+        d.setPlaybackSpeed(1.0f);
+        d.restartPreview();
+        d.setLoop(true);
+        d.setLoopLength(1.0f);
+        d.advancePreview(0.9f);
+        d.advancePreview(0.5f);
+        check(d.previewTime() < 1.0f && d.previewTime() > 0.2f, "a looping preview wraps at its length: " + std::to_string(d.previewTime()));
+        d.seekPreview(50.0f);
+        check(d.previewTime() <= 1.0f + 1e-3f, "a looping seek stops at the loop length");
+        d.setLoop(false);
+        d.seekPreview(-5.0f);
+        check(d.previewTime() == 0.0f, "a negative seek is time 0");
+    }
+
     AVER_INFO("{} failure(s)", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

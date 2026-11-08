@@ -137,6 +137,27 @@ public:
     bool previewPlaying() const { return previewPlaying_; }
     void setPreviewPlaying(bool on) { previewPlaying_ = on; }
 
+    // ---- playback ---------------------------------------------------------------------------------------
+    //
+    // The preview clock runs in fixed steps (kPreviewStep) wherever the answer has to be repeatable: Seek resimulates from 0
+    // with the fixed per-emitter seed, so the same time always gives the same particles, and Frame step is exactly one such step.
+    static constexpr f32 kPreviewStep = 1.0f / 60.0f;
+    static constexpr f32 kMaxPreviewSeek = 60.0f;
+    f32 previewTime() const { return previewTime_; }
+    u32 previewFrame() const { return static_cast<u32>(previewTime_ / kPreviewStep + 0.5f); }
+    f32 playbackSpeed() const { return playSpeed_; }
+    void setPlaybackSpeed(f32 speed);                 // clamped to 0.05 .. 4
+    bool loop() const { return loop_; }
+    void setLoop(bool on) { loop_ = on; }
+    f32 loopLength() const { return loopLength_; }
+    void setLoopLength(f32 seconds);                  // clamped to 0.5 .. 60
+    // Advances by wall-clock `wallDt` times the speed, in steps of at most 1/30 s; when Loop is on, restarts at the loop length.
+    void advancePreview(f32 wallDt);
+    // Pauses and advances exactly one fixed step.
+    void stepPreviewFrame();
+    // Restarts and resimulates from 0 to `seconds` (clamped to 0 .. kMaxPreviewSeek, and to the loop length when looping).
+    void seekPreview(f32 seconds);
+
 private:
     void loadFromDisk();
     void syncEditBuffers();
@@ -169,6 +190,9 @@ private:
     u32 lastCoalesceKey_ = 0;
     u64 lastCoalesceFrame_ = 0;
     f32 previewTime_ = 0.0f;
+    f32 playSpeed_ = 1.0f;
+    bool loop_ = false;
+    f32 loopLength_ = 5.0f;
 
     // ImGui-only bookkeeping, plain PODs so they need no #if -- only the UI translation unit reads them.
     f64  previewLastClock_ = 0.0;
@@ -193,6 +217,7 @@ private:
     friend struct ParticleEditorUiAccess;
     void drawParams();
     void drawStats();
+    void drawTransport();
     void drawPreviewPane(Engine& e);
 };
 

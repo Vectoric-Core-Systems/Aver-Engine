@@ -402,6 +402,39 @@ void ParticleEditor::tickPreview(f32 dt) {
     }
 }
 
+void ParticleEditor::setPlaybackSpeed(f32 speed) { playSpeed_ = std::isfinite(speed) ? std::clamp(speed, 0.05f, 4.0f) : 1.0f; }
+void ParticleEditor::setLoopLength(f32 seconds) { loopLength_ = std::isfinite(seconds) ? std::clamp(seconds, 0.5f, 60.0f) : 5.0f; }
+
+void ParticleEditor::advancePreview(f32 wallDt) {
+    if (!loaded_ || !(wallDt > 0.0f)) return;
+    constexpr f32 kMaxStep = 1.0f / 30.0f;
+    f32 dt = wallDt * playSpeed_;
+    for (int guard = 0; dt > 1e-6f && guard < 4096; ++guard) {
+        if (loop_ && previewTime_ >= loopLength_ - 1e-5f) restartPreview();
+        const f32 room = loop_ ? loopLength_ - previewTime_ : dt;
+        const f32 step = std::min({dt, kMaxStep, std::max(room, 1e-4f)});
+        tickPreview(step);
+        dt -= step;
+    }
+}
+
+void ParticleEditor::stepPreviewFrame() {
+    previewPlaying_ = false;
+    if (loop_ && previewTime_ >= loopLength_ - 1e-5f) restartPreview();
+    tickPreview(kPreviewStep);
+}
+
+void ParticleEditor::seekPreview(f32 seconds) {
+    if (!loaded_) return;
+    if (!std::isfinite(seconds)) seconds = 0.0f;
+    seconds = std::clamp(seconds, 0.0f, loop_ ? std::min(loopLength_, kMaxPreviewSeek) : kMaxPreviewSeek);
+    restartPreview();
+    const int whole = static_cast<int>(std::floor(seconds / kPreviewStep + 1e-3f));
+    for (int i = 0; i < whole; ++i) tickPreview(kPreviewStep);
+    const f32 rest = seconds - static_cast<f32>(whole) * kPreviewStep;
+    if (rest > 1e-4f) tickPreview(rest);
+}
+
 const std::vector<particles::Particle>& ParticleEditor::previewParticles() const {
     static const std::vector<particles::Particle> kEmpty;
     if (sel_ < 0 || static_cast<usize>(sel_) >= sims_.size()) return kEmpty;

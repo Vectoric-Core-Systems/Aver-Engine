@@ -104,6 +104,46 @@ void ParticleEditor::drawStats() {
                         aliveTotal, pxmodel::formatBytes(gpuTotal).c_str());
 }
 
+// ================================================================================== playback ===
+
+// Play / pause, frame step, restart, speed, loop, and a time scrubber that resimulates from 0 with the fixed seed.
+void ParticleEditor::drawTransport() {
+    if (ImGui::Button(previewPlaying_ ? ICON_PAUSE : ICON_PLAY)) previewPlaying_ = !previewPlaying_;
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip(previewPlaying_ ? "Pause the preview" : "Play the preview");
+    ImGui::SameLine();
+    if (ImGui::Button(ICON_SKIP_NEXT)) stepPreviewFrame();
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Step one frame (1/60 s); pauses");
+    ImGui::SameLine();
+    if (ImGui::Button(ICON_REFRESH)) restartPreview();
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Restart from time 0");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(80.0f * (ImGui::GetFontSize() / 16.0f));
+    f32 speed = playSpeed_;
+    if (ImGui::SliderFloat("##pxspeed", &speed, 0.05f, 4.0f, "%.2fx", ImGuiSliderFlags_Logarithmic)) setPlaybackSpeed(speed);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Playback speed");
+    ImGui::SameLine();
+    bool lp = loop_;
+    if (ImGui::Checkbox("Loop", &lp)) setLoop(lp);
+    if (loop_) {
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(70.0f * (ImGui::GetFontSize() / 16.0f));
+        f32 len = loopLength_;
+        if (ImGui::DragFloat("##pxlooplen", &len, 0.05f, 0.5f, 60.0f, "%.1f s")) setLoopLength(len);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Loop length (the preview restarts here)");
+    }
+    ImGui::SameLine();
+    {
+        const f32 range = loop_ ? loopLength_ : std::max(10.0f, std::ceil(previewTime_ + 0.5f));
+        f32 t = std::min(previewTime_, range);
+        ImGui::SetNextItemWidth(std::max(80.0f, ImGui::GetContentRegionAvail().x - 120.0f * (ImGui::GetFontSize() / 16.0f)));
+        if (ImGui::SliderFloat("##pxseek", &t, 0.0f, range, "")) seekPreview(t);
+        if (ImGui::IsItemActive()) previewPlaying_ = false;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Seek: resimulates from 0 with the fixed seed");
+    }
+    ImGui::SameLine();
+    ImGui::Text("%.2f s  f%u", previewTime_, previewFrame());
+}
+
 // ================================================================================== the sections ==
 
 void ParticleEditor::drawParams() {
@@ -792,7 +832,7 @@ void ParticleEditor::draw(Engine& e) {
     const f64 now = ImGui::GetTime();
     const f32 dt = previewLastClock_ > 0.0 ? static_cast<f32>(now - previewLastClock_) : 0.0f;
     previewLastClock_ = now;
-    if (previewPlaying_) tickPreview(std::min(dt, 0.1f));
+    if (previewPlaying_) advancePreview(std::min(dt, 0.1f));
 
     if (ImGui::Button(ICON_SAVE " Save") ||
         (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
@@ -818,13 +858,11 @@ void ParticleEditor::draw(Engine& e) {
     if (ImGui::Button(ICON_REDO " Redo")) redo();
     ImGui::EndDisabled();
     ImGui::SameLine();
-    if (ImGui::Button(previewPlaying_ ? ICON_PAUSE " Pause preview" : ICON_PLAY " Play preview")) previewPlaying_ = !previewPlaying_;
-    ImGui::SameLine();
-    if (ImGui::Button(ICON_REFRESH " Restart preview")) restartPreview();
-    ImGui::SameLine();
     if (ImGui::Button("Compute bounds")) computeBounds();
     ImGui::SameLine();
     ImGui::TextDisabled("%u live particle(s) in this preview", previewTotal());
+
+    drawTransport();
 
     ImGui::Separator();
 
