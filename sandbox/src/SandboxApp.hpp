@@ -164,6 +164,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 // OcFoliage.hpp's own comment on why the format needs neither Aver.Scene nor Aver.Landscape.
 #include "FoliageTypeEditor.hpp"
 #include "OutlinerModel.hpp"      // Outliner type filter and folder paths
+#include "ContentCollections.hpp"  // Content Browser chips, favourites, collections
 #include "HairGroomTab.hpp"       // Groom tab (.ochair) and the Hair Details section
 #include "HairDebugOverlay.hpp"   // Show > Hair
 // Unconditional for the identical reason: OcInput.hpp's own comment states it needs no engine
@@ -4610,6 +4611,20 @@ private:
     char                cbFilter_[128] = {};      // Search box (filters folder by name).
     // Search box scope: also look under open folder (cbGatherDeepMatches).
     bool                cbSearchDeep_ = false;
+    // Type chips, favourites and collections (ContentCollections.hpp). cbView_ is "" for a folder, kCbFavView or a collection name.
+    u32                 cbTypeMask_ = 0;
+    editor::CbCollections cbCols_;
+    std::string         cbColsFor_;               // project dir cbCols_ was loaded for
+    std::string         cbView_;
+    char                cbNewColBuf_[64] = {};
+    bool                cbWantNewCol_ = false;
+    std::string         cbNewColAddPath_;         // file to put in the collection being created, if any
+    void cbColsEnsure();
+    void cbColsSave();
+    std::string cbKeyOf(const std::string& full) const;
+    void drawCbChips();
+    void drawCbSmartTree();
+    void cbCollectionMenu(const std::string& full);
     std::string         cbEngineRoot_;            // Empty in shipped build.
     std::vector<std::string> cbHistory_;
     int                 cbHistoryPos_ = -1;

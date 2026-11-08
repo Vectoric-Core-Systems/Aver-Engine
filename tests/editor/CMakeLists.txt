@@ -953,3 +953,9 @@ add_executable(OutlinerModelTest src/OutlinerModelTest.cpp)
 target_include_directories(OutlinerModelTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
 target_link_libraries(OutlinerModelTest PRIVATE Aver.Core)
 set_target_properties(OutlinerModelTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# ContentCollectionsTest -- Content Browser type chips, favourites and collections (sandbox/src/ContentCollections.hpp).
+add_executable(ContentCollectionsTest src/ContentCollectionsTest.cpp)
+target_include_directories(ContentCollectionsTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(ContentCollectionsTest PRIVATE Aver.Core)
+set_target_properties(ContentCollectionsTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

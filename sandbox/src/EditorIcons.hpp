@@ -141,3 +141,8 @@ inline constexpr unsigned short kIconRangeLast  = 0xF8FF;
 #define ICON_LOCK_OPEN         "\xEE\xA2\x98"   // U+E898 lock_open
 #define ICON_FILTER            "\xEE\x85\x92"   // U+E152 filter_list
 #define ICON_NEW_FOLDER        "\xEE\x8B\x8C"   // U+E2CC create_new_folder
+
+// ---- content browser --------------------------------------------------------------------
+#define ICON_STAR              "\xEE\xA0\xB8"   // U+E838 star
+#define ICON_STAR_BORDER       "\xEE\xA0\xBA"   // U+E83A star_border
+#define ICON_COLLECTION        "\xEE\x90\xB1"   // U+E431 collections_bookmark

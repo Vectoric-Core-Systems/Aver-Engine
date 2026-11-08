@@ -46,6 +46,143 @@ std::vector<SandboxApp::CbRoot> SandboxApp::cbRoots() const {
     return r;
 }
 
+// ---- favourites and collections: editor-side, per project (<project>/Saved/ContentCollections.txt) ----
+static constexpr const char* kCbFavView = "<favourites>";
+
+void SandboxApp::cbColsEnsure() {
+    const std::string dir = project_.valid() ? project_.dir : std::string();
+    if (dir == cbColsFor_) return;
+    cbColsFor_ = dir;
+    cbCols_ = editor::CbCollections{};
+    cbView_.clear();
+    std::string text;
+    if (!dir.empty() && readFileText((std::filesystem::path(dir) / "Saved" / "ContentCollections.txt").string(), text))
+        cbCols_ = editor::cbParse(text);
+}
+
+void SandboxApp::cbColsSave() {
+    if (cbColsFor_.empty()) return;
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(cbColsFor_) / "Saved", ec);
+    writeFileText((std::filesystem::path(cbColsFor_) / "Saved" / "ContentCollections.txt").string(), editor::cbSerialize(cbCols_));
+}
+
+std::string SandboxApp::cbKeyOf(const std::string& full) const {
+    return project_.valid() ? editor::cbContentKey(full, project_.contentDir()) : std::string();
+}
+
+// The file context menu's Favourite / Collection entries.
+void SandboxApp::cbCollectionMenu(const std::string& full) {
+    const std::string key = cbKeyOf(full);
+    if (key.empty()) return;
+    ImGui::Separator();
+    const bool fav = cbCols_.isFavourite(key);
+    if (ImGui::MenuItem(fav ? ICON_STAR_BORDER " Remove from Favourites" : ICON_STAR " Add to Favourites")) {
+        cbCols_.toggleFavourite(key);
+        cbColsSave();
+    }
+    if (ImGui::BeginMenu(ICON_COLLECTION " Add to Collection")) {
+        for (const editor::CbCollection& c : std::vector<editor::CbCollection>(cbCols_.collections))
+            if (ImGui::MenuItem(c.name.c_str())) { cbCols_.add(c.name, key); cbColsSave(); }
+        if (!cbCols_.collections.empty()) ImGui::Separator();
+        if (ImGui::MenuItem("New Collection...")) { cbWantNewCol_ = true; cbNewColBuf_[0] = '\0'; cbNewColAddPath_ = key; }
+        ImGui::EndMenu();
+    }
+    if (!cbView_.empty() && cbView_ != kCbFavView && ImGui::MenuItem("Remove from this Collection")) {
+        cbCols_.removeFrom(cbView_, key);
+        cbColsSave();
+    }
+}
+
+// Asset type chips: any lit chip shows its types; none lit shows everything.
+void SandboxApp::drawCbChips() {
+    const ImGuiStyle& st = ImGui::GetStyle();
+    const f32 right = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x;
+    const auto accent = editor::editorTheme().accent;
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f * dpi_, 1.0f * dpi_));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 9.0f * dpi_);
+    bool first = true;
+    for (u32 t = 0; t < editor::kCbTypeCount; ++t) {
+        const auto type = static_cast<editor::CbType>(t);
+        const char* name = editor::cbTypeName(type);
+        const f32 w = ImGui::CalcTextSize(name).x + 12.0f * dpi_;
+        if (!first) {
+            if (ImGui::GetCursorScreenPos().x + st.ItemSpacing.x + w < right) ImGui::SameLine();
+        }
+        first = false;
+        const bool on = (cbTypeMask_ >> t) & 1u;
+        if (on) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(accent.r, accent.g, accent.b, 0.35f));
+            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(accent.r, accent.g, accent.b, 0.9f));
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+        }
+        if (ImGui::Button((std::string(name) + "##chip" + std::to_string(t)).c_str())) cbTypeMask_ = editor::cbTypeToggled(cbTypeMask_, type);
+        if (on) { ImGui::PopStyleVar(); ImGui::PopStyleColor(2); }
+    }
+    if (editor::cbTypeFiltering(cbTypeMask_)) {
+        ImGui::SameLine();
+        if (ImGui::Button(ICON_CLOSE " Clear##chips")) cbTypeMask_ = 0;
+    }
+    ImGui::PopStyleVar(2);
+    uiReg_.track("contentBrowser.chips");
+}
+
+// Favourites and Collections, under the folder tree: clicking one shows its assets in the file pane.
+void SandboxApp::drawCbSmartTree() {
+    ImGui::Separator();
+    const bool favSel = cbView_ == kCbFavView;
+    if (ImGui::Selectable((std::string(ICON_STAR " Favourites  (") + std::to_string(cbCols_.favourites.size()) + ")###cbfav").c_str(), favSel)) {
+        cbView_ = kCbFavView;
+        cbSelection_.clear();
+    }
+    ImGui::SetNextItemOpen(true, ImGuiCond_Once);
+    const bool open = ImGui::TreeNodeEx(ICON_COLLECTION " Collections###cbcols", ImGuiTreeNodeFlags_SpanAvailWidth);
+    if (ImGui::BeginPopupContextItem("##cbcolsctx")) {
+        if (ImGui::MenuItem("New Collection...")) { cbWantNewCol_ = true; cbNewColBuf_[0] = '\0'; cbNewColAddPath_.clear(); }
+        ImGui::EndPopup();
+    }
+    if (open) {
+        std::string doDelete;
+        for (const editor::CbCollection& c : cbCols_.collections) {
+            ImGui::PushID(c.name.c_str());
+            if (ImGui::Selectable((c.name + "  (" + std::to_string(c.paths.size()) + ")###col").c_str(), cbView_ == c.name)) {
+                cbView_ = c.name;
+                cbSelection_.clear();
+            }
+            if (ImGui::BeginPopupContextItem("##colctx")) {
+                if (ImGui::MenuItem("Delete Collection")) doDelete = c.name;
+                ImGui::EndPopup();
+            }
+            ImGui::PopID();
+        }
+        if (!doDelete.empty()) {
+            cbCols_.remove(doDelete);
+            if (cbView_ == doDelete) cbView_.clear();
+            cbColsSave();
+        }
+        if (ImGui::SmallButton(ICON_ADD " New Collection")) { cbWantNewCol_ = true; cbNewColBuf_[0] = '\0'; cbNewColAddPath_.clear(); }
+        ImGui::TreePop();
+    }
+    if (cbWantNewCol_) { ImGui::OpenPopup("New Collection"); cbWantNewCol_ = false; }
+    if (ImGui::BeginPopupModal("New Collection", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+        const bool enter = ImGui::InputText("Name", cbNewColBuf_, sizeof cbNewColBuf_, ImGuiInputTextFlags_EnterReturnsTrue);
+        const bool ok = cbCols_.find(cbNewColBuf_) == nullptr && cbNewColBuf_[0] != '\0';
+        ImGui::BeginDisabled(!ok);
+        if (ImGui::Button("Create") || (enter && ok)) {
+            if (cbCols_.create(cbNewColBuf_)) {
+                if (!cbNewColAddPath_.empty()) cbCols_.add(cbNewColBuf_, cbNewColAddPath_);
+                cbColsSave();
+            }
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+}
+
 // Enters a folder and records it in the Back/Forward history.
 void SandboxApp::cbNavigate(const std::string& dir) {
     if (dir.empty() || dir == cbSelectedDir_) return;
@@ -54,6 +191,7 @@ void SandboxApp::cbNavigate(const std::string& dir) {
     cbHistory_.push_back(dir);
     cbHistoryPos_ = static_cast<int>(cbHistory_.size()) - 1;
     cbSelectedDir_ = dir;
+    cbView_.clear();
     cbSelectedFile_.clear();
     cbSelection_.clear();
     cbFilter_[0] = '\0';
@@ -831,6 +969,7 @@ bool SandboxApp::cbMoveEntryTo(const std::string& src, const std::string& destDi
     if (cbSelectedFile_ == src) cbSelectedFile_ = d.string();
     for (std::string& sp : cbSelection_) if (sp == src) sp = d.string();
     cbRewriteHistory(src, d.string());
+    if (const std::string a = cbKeyOf(src), b = cbKeyOf(d.string()); !a.empty() && !b.empty()) { cbCols_.rebase(a, b); cbColsSave(); }
     return true;
 }
 
@@ -950,6 +1089,7 @@ void SandboxApp::cbRenameEntry(const std::string& from, const std::string& newNa
     if (cbSelectedFile_ == from) { cbSelectedFile_ = dst.string(); }
     for (std::string& sp : cbSelection_) if (sp == from) sp = dst.string();
     cbRewriteHistory(from, dst.string());
+    if (const std::string a = cbKeyOf(from), b = cbKeyOf(dst.string()); !a.empty() && !b.empty()) { cbCols_.rebase(a, b); cbColsSave(); }
 
     // The same id invalidation a move causes (rename IS a move within a folder): content_'s meshes
     // are keyed by fnv1a64 of the content-relative path, so renaming retires the old id and creates
@@ -1144,6 +1284,7 @@ void SandboxApp::cbItemContextMenu(const std::string& full, const std::string& n
         refPanelScanned_ = true;
         showReferences_ = true;
     }
+    if (!isDir) cbCollectionMenu(full);
     ImGui::Separator();
     ImGui::BeginDisabled(!editable);
     if (ImGui::MenuItem("Rename", "F2")) {
@@ -1172,6 +1313,7 @@ void SandboxApp::drawContentBrowser() {
         return;
     }
     if (cbSelectedDir_.empty()) cbNavigate(roots.front().path);
+    cbColsEnsure();
     if (!drawerStartSub_.empty()) {
         // Canonicalised so separators and case match what the tree builds from directory_iterator.
         namespace fs = std::filesystem;
@@ -1386,6 +1528,8 @@ void SandboxApp::drawContentBrowser() {
         }
     }
     ImGui::Separator();
+    drawCbChips();
+    ImGui::Separator();
 
     const f32 footerH = ImGui::GetTextLineHeightWithSpacing() + 6.0f*dpi_;
     ImGui::BeginChild("cbTree", ImVec2(220.0f * dpi_, -footerH), true);
@@ -1400,6 +1544,7 @@ void SandboxApp::drawContentBrowser() {
         if (open) { drawFolderTree(r.path); ImGui::TreePop(); }
         ImGui::PopID();
     }
+    drawCbSmartTree();
     ImGui::EndChild();
 
     ImGui::SameLine();
@@ -2451,6 +2596,9 @@ void SandboxApp::drawFolderGallery(const std::vector<const DirEntry*>& shown) {
                     rcStatusDot(dl, ImVec2(o.x + inset, o.y + inset), dotR, rcStatusColour(rcSt),
                                 rcSt == editor::FileStatus::Conflicted);
                 }
+                if (!e.isDir && cbCols_.isFavourite(cbKeyOf(e.full)))
+                    dl->AddText(ImVec2(o.x + cellW - ImGui::GetFontSize() - 2.0f * dpi_, o.y + 2.0f * dpi_),
+                                IM_COL32(255, 200, 60, 255), ICON_STAR);
                 ImGui::PopID();
             }
         }
@@ -2478,13 +2626,39 @@ void SandboxApp::cbGatherDeepMatches(const std::string& dir, std::vector<const D
 
 // Draws the breadcrumb and the folder's filtered entries, as tiles or as a list.
 void SandboxApp::drawFolderFiles(std::string dir) {   // by value: a click below reassigns cbSelectedDir_
-    drawBreadcrumb(dir);
+    const bool virtualView = !cbView_.empty();
+    if (virtualView) {
+        ImGui::TextUnformatted(cbView_ == kCbFavView ? ICON_STAR " Favourites" : (std::string(ICON_COLLECTION " ") + cbView_).c_str());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Back to folders")) cbView_.clear();
+    } else {
+        drawBreadcrumb(dir);
+    }
     ImGui::Separator();
 
-    const DirListing& listing = dirListing(dir);
+    static const DirListing kEmptyListing;
+    const DirListing& listing = virtualView ? kEmptyListing : dirListing(dir);
     std::vector<const DirEntry*> shown;
     shown.reserve(listing.entries.size());
-    if (cbFilter_[0] != '\0' && cbSearchDeep_) {
+    if (virtualView) {
+        // The references of a favourites list or collection, resolved against their folder's listing.
+        const std::vector<std::string>* keys = &cbCols_.favourites;
+        if (cbView_ != kCbFavView) {
+            const editor::CbCollection* col = cbCols_.find(cbView_);
+            if (!col) { cbView_.clear(); return; }
+            keys = &col->paths;
+        }
+        const std::filesystem::path contentDir(project_.contentDir());
+        for (const std::string& key : *keys) {
+            const std::filesystem::path full = (contentDir / key).make_preferred();
+            const DirListing& l = dirListing(full.parent_path().string());
+            for (const DirEntry& e : l.entries)
+                if (!e.isDir && editor::cbContentKey(e.full, project_.contentDir()) == key && containsNoCase(e.name, cbFilter_)) {
+                    if (editor::cbTypePasses(cbTypeMask_, e.isDir, e.kindExt)) shown.push_back(&e);
+                    break;
+                }
+        }
+    } else if (cbFilter_[0] != '\0' && cbSearchDeep_) {
         // Searching subfolders too: previously the box only looked at the open folder, so finding
         // an asset meant already knowing which folder it was in. Only while a filter is typed: an
         // empty box would flatten the whole tree into one folder view and lose the hierarchy.
@@ -2493,10 +2667,14 @@ void SandboxApp::drawFolderFiles(std::string dir) {   // by value: a click below
         for (const DirEntry& e : listing.entries)
             if (containsNoCase(e.name, cbFilter_)) shown.push_back(&e);
     }
+    if (editor::cbTypeFiltering(cbTypeMask_))
+        shown.erase(std::remove_if(shown.begin(), shown.end(),
+                    [&](const DirEntry* e) { return !editor::cbTypePasses(cbTypeMask_, e->isDir, e->kindExt); }), shown.end());
 
     if (shown.empty()) {
-        ImGui::TextDisabled(listing.entries.empty() ? "(this folder is empty)"
-                                                    : "(nothing here matches the search)");
+        ImGui::TextDisabled(virtualView ? "(nothing here yet: right-click an asset to add it)"
+                            : listing.entries.empty() ? "(this folder is empty)"
+                            : "(nothing here matches the search or the type chips)");
         return;
     }
     // What Ctrl+A selects, captured here since the key handler runs outside this function:
@@ -2561,6 +2739,8 @@ void SandboxApp::drawFolderFiles(std::string dir) {   // by value: a click below
                 rcStatusDot(dl, ImVec2(rowRight - dotR - 2.0f * dpi_, o.y + h * 0.5f), dotR,
                             rcStatusColour(rcSt), rcSt == editor::FileStatus::Conflicted);
             }
+            if (!e.isDir && cbCols_.isFavourite(cbKeyOf(e.full)))
+                dl->AddText(ImVec2(rowRight - h * 1.6f, o.y + (h - ImGui::GetFontSize()) * 0.5f), IM_COL32(255, 200, 60, 255), ICON_STAR);
             ImGui::PopID();
         }
     }
