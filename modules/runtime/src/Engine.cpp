@@ -10,10 +10,12 @@
 #include "aver/core/Log.hpp"
 #include "aver/core/Version.hpp"
 #include "aver/core/HitchMarks.hpp"
+#include "aver/core/TraceCapture.hpp"
 
 #include <chrono>
 #include <cstdlib>
 #include <thread>
+#include <vector>
 
 namespace aver {
 
@@ -298,17 +300,30 @@ void Engine::frameStep() {
     // Phases of any frame longer than AVER_HITCH_MS (250 ms when unset; 0 off).
     const f64 hitchMs = hitchThresholdMs();
     using Clock = std::chrono::steady_clock;
+    trace::beginFrame();
+    const u64 traceFrameStartUs = trace::capturing() ? trace::detail::nowUs() : 0;
     const Clock::time_point t0 = Clock::now();
-    app_->onUpdate(*this, time_);
+    { AVER_TRACE_SCOPE("onUpdate"); app_->onUpdate(*this, time_); }
     const Clock::time_point t1 = Clock::now();
-    device_->beginFrame();
+    { AVER_TRACE_SCOPE("device.beginFrame"); device_->beginFrame(); }
     const Clock::time_point t2 = Clock::now();
     device_->uiNewFrame();   // ImGui NewFrame; the app builds widgets in onRender
-    app_->onRender(*this);
+    { AVER_TRACE_SCOPE("onRender"); app_->onRender(*this); }
     const Clock::time_point t3 = Clock::now();
-    device_->endFrame();     // records ImGui draw data before present
+    { AVER_TRACE_SCOPE("device.endFrame"); device_->endFrame(); }   // records ImGui draw data before present
     const Clock::time_point t4 = Clock::now();
-    if (swapchain_) swapchain_->present();
+    { AVER_TRACE_SCOPE("present"); if (swapchain_) swapchain_->present(); }
+    if (trace::capturing()) {
+        const rhi::GpuTimingReport gpu = device_->gpuTiming();
+        if (gpu.supported && !gpu.nodes.empty()) {
+            std::vector<trace::GpuSpan> spans;
+            spans.reserve(gpu.nodes.size());
+            for (const rhi::GpuTimingNode& n : gpu.nodes)
+                spans.push_back({n.label, n.ms, n.parent == rhi::GpuTimingNode::kNoParent ? 0xFFFFFFFFu : n.parent});
+            trace::addGpuReport(spans, traceFrameStartUs);
+        }
+    }
+    trace::endFrame();
     if (hitchMs > 0.0) {
         const Clock::time_point t5 = Clock::now();
         auto ms = [](Clock::time_point a, Clock::time_point b) { return std::chrono::duration<f64, std::milli>(b - a).count(); };

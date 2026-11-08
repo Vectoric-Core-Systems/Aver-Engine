@@ -1636,6 +1636,8 @@ void registerPhysicsCommands(std::vector<ConsoleCommandDesc>& t);
 #if AVER_MODULE_SCENE
 // world.* commands (the floating origin) -- defined in WorldConsole.cpp.
 void registerWorldCommands(std::vector<ConsoleCommandDesc>& t);
+// validate and trace -- defined in ToolingConsole.cpp.
+void registerToolingCommands(std::vector<ConsoleCommandDesc>& t);
 #endif
 
 namespace detail {
@@ -1707,6 +1709,7 @@ inline std::vector<ConsoleCommandDesc> buildConsoleCatalog() {
 #endif
 #if AVER_MODULE_SCENE
     registerWorldCommands(t);
+    registerToolingCommands(t);
 #endif
     return t;
 }

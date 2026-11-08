@@ -3,6 +3,7 @@
 // verbatim; the class itself is declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
+#include "AssetValidateRun.hpp"
 #include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "aver/rhi/Tonemap.hpp"
 #include "aver/game/GameTick.hpp"
@@ -72,6 +73,7 @@ void SandboxApp::applyProject(Engine& e) {
     storeLevelView();
 #endif
     project_ = browser_.project();
+    editor::toolingContentDirSlot() = project_.valid() ? project_.contentDir() : std::string();
 #if AVER_MODULE_FRAMEWORK
     game::publishProjectPaths(project_, /*editor=*/true);   // res:// and user:// for scripts
 #endif

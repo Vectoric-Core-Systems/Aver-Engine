@@ -3,6 +3,7 @@
 // the class is declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
+#include "AssetValidateRun.hpp"
 #include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "aver/anim/AnimGraphAsset.hpp"
 #include "aver/formats/OcInstances.hpp"   // New Instance Set
@@ -1303,6 +1304,10 @@ void SandboxApp::cbItemContextMenu(const std::string& full, const std::string& n
         refPanelResults_ = cbFindReferencesTo(full);
         refPanelScanned_ = true;
         showReferences_ = true;
+    }
+    if (project_.valid() && ImGui::MenuItem("Validate Assets")) {
+        cbStatus_ = editor::runAssetValidation(project_.contentDir(), full);
+        showMessageLog_ = true;
     }
     if (!isDir) cbCollectionMenu(full);
     ImGui::Separator();

@@ -48,6 +48,8 @@ aver_add_module(Aver.Formats
     src/LocGather.cpp
     src/OcMap.cpp
     src/OcMesh.cpp
+    # Asset data validation: rules per extension over a content tree (AssetValidate.hpp).
+    src/AssetValidate.cpp
     # G4 R7: meshes built from arrays at run time, instance tables baked into one mesh, and BSP constructive solid geometry for the converter.
     src/MeshBuild.cpp
     src/Csg.cpp

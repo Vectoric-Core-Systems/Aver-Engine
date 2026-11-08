@@ -22,6 +22,7 @@ add_executable(Sandbox WIN32
   src/SandboxOrigin.cpp
   src/SandboxEditorOrigin.cpp
   src/WorldConsole.cpp
+  src/ToolingConsole.cpp
   src/WorldOriginPanel.cpp
   src/SandboxProject.cpp
   src/SandboxPlay.cpp

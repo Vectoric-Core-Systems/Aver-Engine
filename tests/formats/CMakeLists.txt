@@ -601,3 +601,8 @@ if(TARGET Aver.Formats.Material)
   set_target_properties(MaterialFxTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# AssetValidateTest -- the asset validator's rules against a fixture content tree (AssetValidate.hpp).
+add_executable(AssetValidateTest src/AssetValidateTest.cpp)
+target_link_libraries(AssetValidateTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(AssetValidateTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

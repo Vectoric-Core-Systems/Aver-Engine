@@ -67,3 +67,8 @@ set_target_properties(FrameCapTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_B
 add_executable(ClipboardTest src/ClipboardTest.cpp)
 target_link_libraries(ClipboardTest PRIVATE Aver.Platform Aver.Core)
 set_target_properties(ClipboardTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# TraceCaptureTest -- timeline capture to Chrome trace JSON (aver/core/TraceCapture.hpp). Aver.Core only.
+add_executable(TraceCaptureTest src/TraceCaptureTest.cpp)
+target_link_libraries(TraceCaptureTest PRIVATE Aver.Core)
+set_target_properties(TraceCaptureTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

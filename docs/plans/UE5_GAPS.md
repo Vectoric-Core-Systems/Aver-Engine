@@ -60,8 +60,8 @@ updated in `docs/plans/UE_FEATURE_PARITY_PLAN.md` (2026-10-11); much of that pla
 
 | UE5 feature | Status |
 |---|---|
-| Timeline profiler (Insights) | Missing. A GPU timing flag and a status-bar readout exist. |
-| Asset data validation | Missing. Reference finding exists. |
+| Timeline profiler (Insights) | Partial. `trace <frames> [file.json]` records CPU scopes (AVER_TRACE_SCOPE in aver/core/TraceCapture.hpp) and the averaged GPU passes to a Chrome trace file for chrome://tracing or Perfetto. Only the frame phases in Engine.cpp are scoped so far; no in-editor viewer, no true GPU timestamps, no editor menu entry. |
+| Asset data validation | Partial. `AverAssetC validate <project>`, the `validate` console command and Content Browser > Validate Assets run five rules (missing references, ocmat header and GRAPHREF domain, ocgraph links, mesh slots, texture sizes; aver/formats/AssetValidate.hpp). Not yet: rules for sounds, animations, prefabs, level-instance and landscape assets, a save-time hook, a dockable results panel. |
 | Live Coding / state-preserving hot reload | Partial and unverified. |
 | Screen-reader bridge (UIA) | Missing. |
 

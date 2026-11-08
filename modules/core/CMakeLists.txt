@@ -13,6 +13,8 @@ aver_add_module(Aver.Core
     # builder -- the hot path (CpuLap/CpuNest) is header-only so it can be inlined at every one of
     # the ~100,000 boundaries a frame it is called from.
     src/CpuTiming.cpp
+    # Timeline capture to Chrome trace JSON (TraceCapture.hpp).
+    src/TraceCapture.cpp
   PUBLIC_DEFS
     # Version.hpp needs the number the top-level project() declares; keeping it in one place
     # stops a manifest's ENGINE check from being validated against a stale hard-coded copy.
