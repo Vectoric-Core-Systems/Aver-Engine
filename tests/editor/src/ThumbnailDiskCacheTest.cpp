@@ -3,6 +3,8 @@
 
 #include "aver/core/Log.hpp"
 
+#include <chrono>
+#include <filesystem>
 #include <fstream>
 #include <string>
 
@@ -79,6 +81,30 @@ int main() {
         check(out.size() == 8 && out[3] == 4 && out[4] == 5 && out[7] == 8, "row padding is stripped");
         check(meshThumbnailSource("a.ocmesh", "m1") != meshThumbnailSource("a.ocmesh", "m2"), "the material name is part of a mesh thumbnail's source");
         check(thumbnailDiskKey(meshThumbnailSource("a.ocmesh", "m1"), 1, 2) != thumbnailDiskKey("a.ocmesh", 1, 2), "and so is not the bare file's key");
+    }
+    {
+        namespace fs = std::filesystem;
+        const fs::path d = fs::temp_directory_path() / "aver_thumb_dep_test";
+        fs::remove_all(d); fs::create_directories(d);
+        const std::string mat = (d / "m.ocmat").string();
+        const std::string gr  = (d / "g.ocgraph").string();
+        { std::ofstream(mat) << "NAME m\ngraphref  Graphs/g.ocgraph \r\n"; std::ofstream(gr) << "a"; }
+        check(ocmatGraphRef(mat) == "Graphs/g.ocgraph", "GRAPHREF is read case-insensitively and trimmed");
+        { std::ofstream(mat) << "NAME m\nGRAPHREFX y\n"; }
+        check(ocmatGraphRef(mat).empty(), "a longer key is not GRAPHREF");
+        const std::string t0 = thumbnailDependencyTag({mat, gr});
+        check(t0 == thumbnailDependencyTag({mat, gr}), "an untouched material keeps its tag");
+        { std::ofstream(gr) << "a longer graph body"; }
+        const std::string t1 = thumbnailDependencyTag({mat, gr});
+        check(t1 != t0, "editing the graph changes the tag");
+        fs::last_write_time(mat, fs::last_write_time(mat) + std::chrono::seconds(5));
+        check(thumbnailDependencyTag({mat, gr}) != t1, "touching the material changes the tag");
+        const std::string t2 = thumbnailDependencyTag({mat, gr});
+        fs::remove(gr);
+        check(thumbnailDependencyTag({mat, gr}) != t2, "deleting a dependency changes the tag");
+        check(thumbnailDiskKey(meshThumbnailSource("a.ocmesh", "m" + t0), 1, 2) != thumbnailDiskKey(meshThumbnailSource("a.ocmesh", "m" + t1), 1, 2),
+              "so the mesh thumbnail key changes");
+        fs::remove_all(d);
     }
     {
         ThumbnailReadbackRing ring(2, 6);

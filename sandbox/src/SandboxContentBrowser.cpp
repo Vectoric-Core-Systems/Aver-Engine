@@ -2569,7 +2569,18 @@ void SandboxApp::drawFolderGallery(const std::vector<const DirEntry*>& shown) {
                             // The mesh's own slot-0 material, looked up only until the tile exists.
                             if (!thumbnails_.textureId(meshId)) {
                                 const std::string& slot0 = content_.meshSlot0Name(meshId);
-                                if (!slot0.empty()) { thumbMaterial = content_.materialForSurface(slot0); thumbMaterialName = slot0; }
+                                if (!slot0.empty()) {
+                                    thumbMaterial = content_.materialForSurface(slot0);
+                                    thumbMaterialName = slot0;
+                                    // The material file and its graph join the cache key, so editing either re-renders.
+                                    const std::string matFile = editor::resolveMaterialPath(project_.binariesDir(), content, slot0);
+                                    if (!matFile.empty()) {
+                                        std::vector<std::string> deps{matFile};
+                                        const std::string graph = editor::ocmatGraphRef(matFile);
+                                        if (!graph.empty()) deps.push_back(content + AVER_PATH_SEP + graph);
+                                        thumbMaterialName += editor::thumbnailDependencyTag(deps);
+                                    }
+                                }
                             }
 #endif
                             thumbnails_.request(meshId, meshHandle, thumbMaterial, e.full, thumbMaterialName);

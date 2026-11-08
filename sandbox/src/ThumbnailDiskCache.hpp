@@ -10,8 +10,10 @@
 #include "aver/core/Types.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <system_error>
 #include <unordered_map>
@@ -141,9 +143,41 @@ inline void thumbnailUnpadRows(const u8* src, u32 rowPitch, u32 rowBytes, u32 ro
 }
 
 // The source name a mesh thumbnail is keyed on: the mesh file plus its slot-0 material, so retargeting the
-// material re-renders. (Editing the material's own file does not -- only its name is part of the key.)
+// material re-renders. Pass the name plus thumbnailDependencyTag() of its files so editing them re-renders too.
 inline std::string meshThumbnailSource(const std::string& meshPath, const std::string& slot0Material) {
     return meshPath + "|mat:" + slot0Material;
+}
+
+// The graph an .ocmat references (its GRAPHREF record, a content-relative path), or "" when it has none.
+inline std::string ocmatGraphRef(const std::string& ocmatPath) {
+    std::ifstream in(ocmatPath);
+    std::string line;
+    const char* ws = " \t\r\n";
+    while (std::getline(in, line)) {
+        const usize b = line.find_first_not_of(ws);
+        if (b == std::string::npos || line.size() < b + 9) continue;
+        std::string key = line.substr(b, 8);
+        for (char& c : key) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        if (key != "GRAPHREF" || (line[b + 8] != ' ' && line[b + 8] != '\t')) continue;
+        const usize v = line.find_first_not_of(ws, b + 8);
+        if (v == std::string::npos) return {};
+        return line.substr(v, line.find_last_not_of(ws) - v + 1);
+    }
+    return {};
+}
+
+// What the files a mesh's look depends on (its material's .ocmat, that material's graph) were when the thumbnail
+// was drawn: path, mtime and size of each. A missing file stamps as 0:0, so deleting one also changes the tag.
+inline std::string thumbnailDependencyTag(const std::vector<std::string>& files) {
+    std::string tag;
+    for (const std::string& f : files) {
+        std::error_code ec;
+        const auto t = std::filesystem::last_write_time(f, ec);
+        const u64 mt = ec ? 0 : static_cast<u64>(t.time_since_epoch().count());
+        const u64 sz = ec ? 0 : static_cast<u64>(std::filesystem::file_size(f, ec));
+        tag += "|" + f + ":" + std::to_string(mt) + ":" + std::to_string(sz);
+    }
+    return tag;
 }
 
 // A small ring of readback slots. A GPU copy is issued into a slot, and the slot's bytes are safe to read once
