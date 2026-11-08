@@ -148,7 +148,7 @@ void pStops(float4 times, uint n, float t, out uint i, out float u) {
     i = n - 1u;
 }
 float pEventSizeAt(float t) {
-    uint n = (uint)gEv[0].z;
+    uint n = min((uint)gEv[0].z, 4u);
     if (n < 2u) return lerp(gEv[0].x, gEv[0].y, t);
     uint i; float u;
     pStops(gEv[1], n, t, i, u);
@@ -161,7 +161,7 @@ float pEventSizeAt(float t) {
 void pEventPayload(PParticle p, out uint tint, out float sizeRatio, out float ageFraction) {
     float t = p.lifetime > 0.0 ? saturate(p.age / p.lifetime) : 1.0;
     float4 c;
-    uint cn = (uint)gEv[0].w;
+    uint cn = min((uint)gEv[0].w, 4u);
     if (cn < 2u) {
         c = lerp(gEv[3], gEv[4], t);
     } else {
@@ -192,13 +192,13 @@ void pRaiseEvent(uint channel, PParticle p) {
 }
 // Birth triggers: every spawn rule of this emitter raises its channel for the particle just created.
 void pRaiseSpawnEvents(PParticle p) {
-    uint rules = asuint(gEv[10].z);
+    uint rules = min(asuint(gEv[10].z), PEV_CHANNELS - 2u);
     for (uint ri = 0u; ri < rules; ++ri)
         if (asuint(gEv[11u + ri].x) == PEVT_SPAWN) pRaiseEvent(2u + ri, p);
 }
 // Life-fraction and timer triggers, for a particle that survived the step: a crossing between the previous age and this one.
 void pRaiseTriggerEvents(PParticle p) {
-    uint rules = asuint(gEv[10].z);
+    uint rules = min(asuint(gEv[10].z), PEV_CHANNELS - 2u);
     for (uint ri = 0u; ri < rules; ++ri) {
         uint kind = asuint(gEv[11u + ri].x);
         float at = gEv[11u + ri].y;
