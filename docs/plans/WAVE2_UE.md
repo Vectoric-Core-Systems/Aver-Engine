@@ -1,0 +1,326 @@
+# UE5 parity, wave 2: plan (owner-approved scope 2026-11-09)
+
+**Owner's scope (2026-11-09):**
+- Most of the remaining UE features, starting with physics-driven hit reactions.
+- Dynamic HLOD.
+- A Trifactor rework.
+- PCG graphs and PCG vegetation.
+- Basic modelling in the editor.
+- The queued renderer items.
+
+**Interim defaults while the owner was asleep.** These were taken from the plan's recommendations, and the owner can override any of them:
+- **D1:** Voronoi destruction is brittle rigid shatter, alongside the soft-body dents and tears. It is scheduled last among the CPU tracks.
+- **D2:** HiZ ships off by default, and shadows use a clipmap, not VSM. No patent-gated GPU work happens overnight.
+- **D3:** HLOD is auto-built, cached and swapped at runtime, as in section W2.
+- **D4:** The PCG evaluator lives in `modules/world`.
+- **D5:** The `.ocgraph` profile is used if it supports typed data flow. Otherwise `.ocpcg` uses AVR1.
+- **D6:** The C# Geometry Script is deferred.
+- **D7:** Shadows are fixed Vulkan cascades plus a cached clipmap.
+- **D8:**
+  - Cluster paging is design and CPU planner only.
+  - Builder v3 is allowed: it marks meshes stale and never touches the sources.
+  - Skinned meshes stay on discrete LOD.
+- **D9:** No new dependencies.
+
+**Overnight runs:**
+- Phase A (headless) only, one agent at a time.
+- Editor UI is written and compile-checked only.
+- New renderer paths are off by default.
+- Nothing runs headed.
+
+
+Read-only survey of `C:/Users/User/AverBuilds/aver-merge` (branch head `66022228`). Nothing was built, run or edited.
+Method: read `UE5_GAPS.md`, `UE_FEATURE_PARITY_PLAN.md`, `wave4/{VIRTUALIZED_GEOMETRY,TEXTURE_STREAMING}.md`, `PCG.md`,
+`LEVEL_STREAMING.md`, `wave9/SOFTBODY_CLOTH_DESTRUCTION.md`, the Trifactor headers/sources, `Csg.hpp`, the ragdoll module + ABI,
+`OcFoliage.hpp`, `ChunkGenerator.hpp`, `VulkanDevice.cpp` shadow-scope comment, `SandboxApp.hpp` modes. Spot-checked file:line claims
+that are marked (V). Claims copied from the wave-4 design docs without re-checking are marked (D). Anything I could not check is marked (?).
+
+Legend. Size: S = hours, M = a day, L = several days. **H** = HEADLESS-TESTABLE (CPU/format/editor-model logic with unit tests, no GPU,
+no window). **G** = NEEDS-GPU/HEADED inspection (owner or a headed run; subject to the standing "no run likely to hang the GPU" rule, ask each time).
+
+## 0. Findings that change the scope
+
+1. **UE5_GAPS.md is wrong on physical animation.** "Missing" is not true: `modules/ragdoll` has `RagdollSystem` with Kinematic / Limp / Powered
+   modes, a blend weight that ramps in and out, `start/stop/setStrength/addImpulse`, chained into AnimSystem's pose-modifier seam
+   (`modules/ragdoll/include/aver/ragdoll/RagdollSystem.hpp` (V)), the Jolt ABI `physics_ragdoll_abi.h` (powered = motor per joint toward the target pose (V)),
+   and a C# wrapper `scripting/csharp/Aver.Framework/Ragdoll.cs`. What is missing is the *UE physical-animation layer on top* (per-region strength, hit-reaction envelopes, partial-body simulation, recovery). Workstream W6 is sized for that, not for a ragdoll.
+2. **Owner decision conflict on destruction.** `wave9/SOFTBODY_CLOTH_DESTRUCTION.md:3` records an owner decision (2026-10-17) that destruction uses soft bodies and
+   "supersedes the Voronoi pre-fracture reading". The new request asks for Voronoi again. They are compatible only if scoped (soft = dents/tears/cloth,
+   Voronoi = brittle rigid shatter). Decision D1 in section 3. `modules/fracture` no longer exists (not in `modules/`), `modules/softbody{,.scene}` do.
+3. **The Trifactor virtualization design is complete but zero GPU phases are built.** `VIRTUALIZED_GEOMETRY.md` (327 lines, P0-P4) is frozen; no `ClusterRenderer` exists
+   (grep over `modules`, `sandbox`, `Runtime` finds none). Its premise "the RHI has no indirect draw or dispatch" is now **stale**: `DeviceCaps::indirect`
+   (`RHI.hpp:111-112` (V)), `IRenderContext::drawIndexedIndirect/dispatchIndirect` (`RHIResources.hpp:709-711` (V)) and a Vulkan `dispatchIndirect`
+   (`VulkanRenderContext.cpp:753` (V)) landed with the GPU-particle tier. Mesh/amplification-shader indirect is still absent (?). P1 shrinks accordingly.
+4. **Scatter-from-paint-layer already exists** (`SandboxApp::scatterFoliageFromLayer`, `sandbox/src/LandscapePaintTool.cpp:250,267` (V)) and there is a procedural chunk
+   scatter (`world::GeneratedChunkSource`, palette + density bands + height source). PCG vegetation upgrades these; it does not start from zero.
+5. **No HLOD, no data layers anywhere.** `grep -i hlod` in `modules`, `sandbox`, `Runtime` finds nothing; `OcWorld.hpp` has no layer concept for placements (V; the only "layer" hits are cloud and fluid-material layers).
+   `trifactor::simplifyMesh(OcMeshData&, ratio)` (`ClusterBuilder.hpp:467` (V)) is submesh-aware and is the HLOD simplifier.
+6. **Vulkan cascades are still unwritten**, with the exact cause and the real fix documented at `VulkanDevice.cpp:3395-3411` (V) and `docs/BUGS.md:360`.
+
+---
+
+## W1. Trifactor rework (the Nanite path)
+
+### W1.1 Diagnosis (what is wrong or limited today)
+
+| # | Area | Finding and evidence | Severity |
+|---|---|---|---|
+| 1 | Reach | The GPU cluster path is **editor-only and D3D12-only**: one `dispatchMeshClusters` per entity (`sandbox/src/SandboxRender.cpp:1050-1195` (D)), pipeline built in `SandboxAssets.cpp:295-440` (D), gated at `SandboxApp.cpp:624-655` (D), behind `--lod-mesh-shader`. The packaged game has no cluster rendering at all. | High |
+| 2 | Shading | Clusters use a private pixel shader `sandbox/shaders/cluster_material.hlsl` whose header says "no ray tracing, ever" (`ClusterMaterialShader.hpp` (D)): no G-buffer, no velocity, no RT shadows/reflections, no denoiser inputs. So a clustered mesh shades differently from the same mesh on the normal path. | High |
+| 3 | Selection cost | The CPU cut `selectClusterCut` is a flat scan of every cluster of every level: 129,666 for a re-cooked `pine_tree_01` and ~1.9 s/frame CPU on Electric Dreams in `--lod-per-cluster` (`ClusterAdapt.hpp:279-285` (V)). The GPU twin is one AS thread per cluster of every level, per entity, again flat (D). No hierarchy traversal, no instance culling, no batching. | High |
+| 4 | Correctness (crack-freedom) | The local cut `inLocalCut` evaluates each cluster at **its own** bounding sphere, so a child and its parent can disagree and open a hole. The header itself says "THIS IS A REAL GAP" and that sphere containment across a DAG edge is **not a checked invariant** (`ClusterSelect.hpp:88-104` (V)). Tests only use synthetic DAGs built with containment. | High |
+| 5 | Materials | Clusters are built over the merged index buffer and straddle submeshes; `SubmeshRange.MeshletStart/Count` are written 0,0 (`modules/trifactor/README.md` "What's here, continued" (V)). A multi-material mesh therefore cannot be drawn per material from clusters; the GPU path "draws one material per mesh" (D). | High |
+| 6 | Vulkan parity | No cluster path on Vulkan. Voxi's mesh-shader scene pipelines are refused there (commit `449140a2`, refusal site not located even by the design author, `VIRTUALIZED_GEOMETRY.md` R4). | High |
+| 7 | Occlusion | No per-cluster HiZ. The only culler (`Aver.Occlusion`) is CPU-driven, one frame stale, per entity, defaults to `waitIdle`, is linked into Sandbox only, and `occlusion_test.hlsl:29-39` skips behind-camera corners so a near-plane-straddling box can be falsely culled (D). Packaged game: no occlusion culling. | Med |
+| 8 | Memory / streaming | `.ocmesh` stores every LOD level's indices + meshlets for the whole DAG (all resident); meshlet buffers live in **Upload** memory read over PCIe (`SandboxAssets.cpp:240-247` (D)). No cluster paging, so the DAG cannot exceed VRAM and nothing streams from disk. | Med |
+| 9 | Ray tracing | TLAS builds BLAS from the full LOD 0 (`VoxiRenderer.cpp:1756-1759` (D)); shadow/GI use a 20 cm-error proxy mesh (`GameContent.cpp:419-445` (D)). A virtualized mesh costs full-detail BLAS memory. | Med |
+| 10 | Builder quality | Grouping is a greedy region-grow (`groupClusters`, `ClusterBuilder.cpp` header notes, `kTargetGroupSize = 6`, `kMaxGroupSize = 8`, `:318-326` (V)), because METIS is forbidden by licence. Group boundaries are therefore irregular, boundary edges are locked on every level, and the lock-border flag is special-cased per "small shell" lineage (`ClusterBuilder.cpp:14-36,180-190` (V)). No measured edge-cut or coarsest-level triangle-count comparison exists in the repo (?). Complexity is already high: 1,695 lines in one file. | Med |
+| 11 | Exclusions | Skinned, morph, blended, vertex-animated meshes are excluded (D). Foliage wind that offsets vertices would desync cluster bounds (R11 in the design). | Med |
+| 12 | Tooling | `RelodTool` exists (imports log per-mesh clustering, commit `d2ebb9dd`) but there is no viewer: no cluster-colour / LOD-level / cull-stat debug view, no per-mesh cook report in the editor, no builder-version stale warning surfaced in the Content Browser (?). `kBuilderVersion = 2` (V) is stamped but nothing prompts a re-cook. | Low |
+| 13 | Build time | Per-group `meshopt_simplify` setup was ~98% of time until `SimplifySparse` (`ClusterBuilder.cpp:17-23` (V)). I found no current build-time numbers per MTri (?); measure before and after any builder change. | Unknown |
+
+### W1.2 Target and approach
+
+Execute the frozen `VIRTUALIZED_GEOMETRY.md` design, **re-sequenced** so everything CPU-side lands and is tested first, and with three additions: (a) a better partitioner,
+(b) a cluster page/stream layer (design only in wave 2), (c) a debug/report tool. Decisions already frozen there that I keep: group-shared LOD spheres derived at load,
+material-pure clusters (builder v3 / MLET v4), compute-culled indirect VS-pull back end as the portable default (Vulkan too), mesh-shader as an optional faster back end,
+two-pass HiZ behind `geom.hiz`, fixed-LOD `rtProxy`, reuse of `PSMainVoxi` (G-buffer + RT) via cluster front ends, default-on only when caps allow, delete the legacy path last. No software rasterizer (patent and scope).
+
+### W1.3 Steps
+
+1. **T-CPU-1 Group LOD spheres.** `trifactor::deriveLodSpheres`, `validateLodSpheres`, and a *coverage property test* (every cluster's `lodSphere` contains its members' bounds and the producing group's sphere; parent sphere >= child at every DAG edge). Fixes finding 4 for existing chunk-v3 files, no format change. **S, H.**
+2. **T-CPU-2 Cut oracle.** Rewrite `inLocalCut`/`selectClusterCut` on shared group spheres; add a property test "for random cameras the cut is a valid antichain cut: every LOD-0 triangle is covered exactly once, no pair of selected clusters is ancestor/descendant" (this *proves* crack-freedom for the test corpus instead of asserting it). Becomes the oracle the GPU kernel is checked against. **M, H.**
+3. **T-CPU-3 Material-pure cook.** `buildClusters` per submesh range, groups only inside a material slot, `u16 materialSlot` per meshlet (MLET v4, `kBuilderVersion = 3`), fills `SubmeshRange.MeshletStart/Count` for real. Round-trip + `validateLodDag` + "no cluster spans two slots" tests; a multi-material fixture. Keep v3 readers working (absent-vs-zero rule, `FORMAT_SPECS.md` 3.2). **M, H.**
+4. **T-CPU-4 Partitioner upgrade (clean room, no new dependency).** Replace greedy region-grow with recursive spatial bisection of the cluster adjacency graph (Morton/longest-axis split to target 4-8 clusters, then Kernighan-Lin/FM boundary refinement on shared-edge weight). Gate: measured *locked-boundary edge count* and *coarsest-level triangle count* on the existing five protected meshes + corpus must not regress versus v2 (the v1 commit used the same method: "corpus coarsest 1,195,431 -> 140,489"). Ship only if better; otherwise keep v2 and record the numbers. Bump `kBuilderVersion` only with output change. **L, H.**
+5. **T-CPU-5 Report/validation tool.** Extend `RelodTool` with per-mesh table (levels, clusters, tris per level, locked-edge ratio, seam cost, eligibility `virtualizable()` and *why not*), plus a stale-builder warning in the Content Browser details. **S, H** (the editor surface itself is G-light).
+6. **T-GPU-1 RHI remainder.** Indirect mesh-shader/amplification dispatch (D3D12 + Vulkan `vkCmdDrawMeshTasksIndirectEXT`) only if the mesh back end is kept; resource-state/buffer flag already exist (V). Reusable `HizPyramid` extracted from `Aver.Occlusion`, previous-frame pyramid kept. `IndirectSmokeTest` extended (compute writes args -> indirect dispatch fills UAV -> indirect draw draws a known triangle). **M, G** (D3D12 first, then Vulkan).
+7. **T-GPU-2 `ClusterRenderer` compute back end, no HiZ** (P2 of the design): `ClusterPool` in Default memory, instance table, instance cull -> cluster cull -> bin -> VS-pull indirect draw into the cluster twins of `PSMainVoxi` (`scenePso_`, `sceneGbufPso_`, `sceneRtPso_`, `sceneRtGbufPso_`), editor + packaged-game wiring, discrete-LOD fallback, `[GEOM]` stats, set-equality selftest vs the T-CPU-2 oracle (compare GPU-selected cluster set with CPU set on a fixed camera, readback only), pixel parity vs discrete LOD. Done = foliage scene draws via clusters on D3D12 **and** Vulkan with G-buffer and RT on, no black pixels. **L, G.**
+8. **T-GPU-3 HiZ two-pass + mesh back end** (P3): passes 5-8, `geom.hiz` default **off until the zero-diff A/B in motion passes** and the owner decides the patent question (D2). Fix `occlusion_test.hlsl` near-plane corner skip separately (changes the existing `--occlusion-cull` image, flag it). **L, G.**
+9. **T-GPU-4 RT proxy, deletions** (P4): `rtProxy` BLAS, remove `--lod-per-cluster`, `clusterCutCache_`, `AVER_MS_CLUSTER` block, `cluster_material.hlsl`, `dispatchMeshClusters` once unreferenced. **M, G** (build + existing suites are H; image diff is G).
+10. **T-GPU-5 Cluster paging (design + CPU half only in wave 2).** Page = group of clusters + their vertex/triangle slices; `.ocmesh` v-next stores pages with a root page always resident; CPU residency planner by projected-error demand; GPU side deferred to wave 3. Rationale: finding 8 limits mesh size, but it is not on the critical path for a shooter. **M (CPU planner + format, H); GPU deferred.**
+
+Risks specific to the owner's setup: all GPU steps need a headed Vulkan *and* D3D12 run; instance/cluster cull kernels must have bounded loops and be tried on a small scene first (standing no-TDR rule).
+
+---
+
+## W2. Dynamic HLOD
+
+**Interpretation (confirm, D3):** "dynamic" = HLOD proxies are generated automatically from the level (editor-time background bake, content-hash cached, regenerated when a cell's content changes) and swapped at runtime by distance, *and* the same builder can run at runtime for procedurally generated chunks. Not a per-frame mesh merge.
+
+**Current state.** Distance-cell streaming exists: `world::PlacementStreamer` (`modules/world/include/aver/world/PlacementStreamer.hpp`), `STREAM cell= load= evict=` record, `.ocstream` bake with per-placement bounds and cell-sorted foliage tables, `game::loadLevelFoliage` residency, fog hides the load edge (`LEVEL_STREAMING.md` sections 1, 2, 4, 4b (V)). Beyond `loadCm` the world is simply absent (fog). No proxy meshes, no hierarchy.
+
+**Target.** Per streaming cell, an HLOD1 proxy (merged + simplified static meshes of that cell); optional HLOD2 per block of NxN cells; proxies resident in a wider ring (`hlodCm` > `loadCm`) and replaced by the real cell content as it streams in, with hysteresis (no cross-fade in v1; dithered fade is a later G item).
+
+**Steps.**
+1. **Data model.** `.ocstream` gains `HLOD <cell> <level> <proxy .ocmesh> <sourceHash>` records; `STREAM` gets `hlod=<cm>`; `OcWorldData` additive fields. Round-trip + absent-vs-zero tests. **S, H.**
+2. **Merger.** `fmt::mergeStaticMeshes(placements, meshLoader) -> OcMeshData`: bake each placement's transform into vertices, group by material slot into submeshes (v1 keeps source materials; no atlas), drop tiny and fully-enclosed instances optionally (bounds-contained test), vertex-weld. Tests: triangle/volume conservation, submesh grouping, determinism. **M, H.**
+3. **Simplifier + budget.** Call `trifactor::simplifyMesh` to a per-cell triangle budget (target ratio from cell triangle count and screen-size at `hlodCm`; error cap in cm). Reuse (it is submesh-aware, commit `7a7692ff`). Tests: budget respected, material slots preserved, no NaN, watertight-ness not required. **S, H.**
+4. **Foliage handling.** Foliage tables (`.ocinst`) are millions of instances; HLOD for them = (a) coarsest Trifactor LOD of each *type* merged for the N largest instances in the cell, (b) the rest dropped, (c) ground-cover omitted. Impostor billboards = v2 (flag, D3). **M, H** (merger side), proxy look is G.
+5. **Bake tool + cache.** `AverAssetC hlod` and World Settings > Level Streaming > Build HLOD; proxy files under `Binaries/Streaming/<level>/hlod/`; staleness by `hashPlacements` of the cell's placement ids + mesh hashes (the `SOURCE` mechanism already exists for the whole level, extend per cell). Background thread in the editor (the stutter work shows main-thread bakes are noticeable, commit `b26f2996`). **M, H** (CLI + hashing), editor UI minimal.
+6. **Runtime ring.** `PlacementStreamer` gains a second residency radius; `LevelStreaming`/`GameStreaming` loads a cell's proxy when the cell is in the HLOD ring and not resident, hides it once the cell's real content is resident (swap on the frame the cell becomes ready, mirroring the existing "staged change applies only once all of it is ready" rule). Residency decisions are pure -> **H** (planner tests: ring transitions, hysteresis, no flicker over a camera walk); drawing proxies and BLAS policy (no BLAS for proxies, they must not occlude RT shadows differently) is **G**. **M.**
+7. **Runtime generation for PCG chunks.** After W3/W4 chunk generation, build the proxy on the generation worker with the same merger (cap time per chunk). **M, H** (merger) + G.
+8. **Editor view.** HLOD debug view (colour by level), per-cell triangle count in the streaming panel. **S, G-light.**
+
+Dependency: W2 steps 1-3,5 are independent of everything else. Overlap with W10 (data layers): both edit `OcWorld.*` and the streamer; serialize their format steps.
+
+---
+
+## W3. PCG graph system and editor
+
+**Current state.** (a) F# `Aver.Pcg` (`scripting/fsharp/Aver.Pcg/{Types,Primitives,Pcg}.fs`): `scatter` (uniform in bounds, MinSpacing, deterministic splitmix streams), `sampleInfinite`, `densityVolume`; C# `Aver.Pcg.Apply` spawns actors (`docs/PCG.md` sections 3-5 (V)). (b) C++ `render.pcg` GPU density volume (389 lines, "contract + CPU reference, no consumer" for bounded volumes). (c) `world::GeneratedChunkSource` (palette, density bands, height source) for chunk streaming. (d) `PCGVOLUME` level records exist but only the Sky volume is read by name (`PCG.md` section 4). There is **no graph, no point data type, no editor, no way to author a rule without writing F#**.
+
+**Target.** A UE-PCG-shaped framework: point data with attributes -> samplers -> filters/transforms -> spawners, authored as a node graph asset, executed deterministically by one evaluator used by the editor (preview/bake), the chunk generator (runtime) and C# (`Pcg.Run(graph, seed, bounds)`).
+
+**Design decisions (recommendation).**
+- **One C++ evaluator** (so the editor, the streamer and tests share it and F# stays an authoring language for *rules-as-code*, not the only path). It must reproduce `Aver.Pcg.Rand` splitmix/`hash2`/`hash3` bit-for-bit, and a cross-language test (F# vs C++ same seed, same points) keeps the determinism contract in `PCG.md` section 2.
+- **Where it lives:** CPU-only files in `modules/world` next to `ChunkGenerator` (RHI-free) or a new CPU module split from `render.pcg`. Module DAG impact not checked (?); decision D4. Not a new third-party dependency either way.
+- **Asset format:** `.ocpcg`, either an AVR1 container (like `.ocfoliage`) or a profile of the existing `.ocgraph` container so the existing node-graph canvas (`GraphEditorGeometry` layout/hit-test/link rules, `GraphNodeDefs` descriptor table, clipboard, collapse, find, problems) is reused. I did not verify that `OcGraph` supports data-flow (non-exec) pins with typed edges; material graphs (58 nodes) suggest yes (?). Step 1 settles this. Decision D5.
+- **Point data:** SoA `{pos, rot, scale, density, seed, color, steepness, bounds} + named f32/vec3/int attributes`, all in cm, +Z up, left-handed (the engine contract in `PCG.md` section 1).
+
+**Steps.**
+1. **Spike/decision (S, H):** confirm `.ocgraph` can carry typed data-flow nodes; otherwise write the AVR1 `.ocpcg` reader/writer with round-trip tests.
+2. **Core types + determinism (M, H):** `PointData`, attribute tables, `Rand` port, spatial hash grid. Tests: bit-identical vs F# golden vectors (generated once from F# and committed as a table), order independence.
+3. **Evaluator (M, H):** topological execution, per-node cache keyed by (node params, input hash, seed), cancellation, a time budget per call, error list. Nodes: *Create Points Grid*, *Surface Sampler* (heightfield/landscape via the existing `heightSource` callback; mesh surface sampling later), *Spline Sampler* (reuses river/lake spline code, `WaterSplineTool` (V exists)), *Volume Sampler*, *Bounds Filter*, *Density Noise* (reuses `TerrainNoise`/`sampleInfinite`), *Density Filter/Remap*, *Attribute Filter/Math/Set*, *Transform Points* (jitter, scale/rotate ranges), *Self Pruning* (priority-based radius prune, see W4), *Difference/Union/Intersect*, *Project to Surface*, *Slope/Height/Layer-Weight Filter* (landscape paint weights), *Distance to Spline/Actor Filter*, *Weighted Static Mesh Spawner* (outputs instance list), *Actor Spawner*, *Subgraph*, *Loop*. Each node is a pure function with its own unit test. Landscape-dependent nodes take an interface (`ILandscapeQuery`) so tests use a fake heightfield. **L.**
+4. **Output sinks (M, H):** (a) instance table `.ocinst` / level `FOLIAGE` records (bake, cell-sorted via the existing `cellOcInstances`), (b) `ChunkPayload` for `GeneratedChunkSource` (runtime chunk mode, replaces the hard-coded palette generator while keeping `generatorVersion` semantics so existing generated worlds stay stable, `generatorVersion = 2` today (V)), (c) actor spawn via `Aver.Pcg.Apply`. Determinism + "regenerate equals persisted" tests (`persistChunk` already has the compare logic (V)). 
+5. **PCG volume component (M, H model / G viewport):** a `PCGVOLUME` record gains `graph=<.ocpcg> seed= bounds=` (generalizing the Sky special case; keep Sky working). Generate-on-edit with a "Generate / Clean up" button, persistent vs transient result flag, partitioned generation per streaming cell (grid size = streaming cell) so editing a graph regenerates only dirty cells. 
+6. **Graph editor (L, G):** `PcgGraphEditor` as an `AssetEditor` registered after the existing ones (the hook pattern at `GraphEditor.hpp:5-20` (V): `registerFactory`), node palette with search, typed pin colours, per-node inspect (point count, attribute table, bounds), node *debug* toggle drawing the node's output points in the viewport as debug spheres (existing debug draw (?)), error/warning badges, UE editor style per `EDITOR_UE_PARITY.md` (grey + orange, Material Icons). Model/validation/undo (`SnapshotUndo<State>`) are pure and **H**; canvas drawing is **G**.
+7. **GPU density path hook (M, G):** a *GPU Density* node that calls the existing `render.pcg` compute volume for 3D noise (clouds/caves) and reads back; keep optional; CPU is the reference (the `sampleDensity` contract in `PCG.md` section 5).
+8. **Docs + sample + F# interop (S, H):** `docs/PCG.md` rewrite; F# helper to run a graph; a sample graph asset in the templates.
+
+**Not in v1:** hierarchical generation (grids of grids), runtime GPU point processing, PCG on arbitrary mesh surfaces beyond heightfield/spline/volume.
+
+---
+
+## W4. PCG vegetation and biomes on landscape
+
+**Current state.** Foliage type asset `.ocfoliage` (mesh, material, scaleMin/Max, weight, randomizeYaw, collisionRadiusCm, alignToNormal; deliberately no density/seed, `OcFoliage.hpp` (V)); brush tool + `FoliageTypeEditor`; `scatterFoliageFromLayer` bake; terrain layers (8 paint layers, weightmaps, each layer can name a foliage type + density, `LANDSCAPE_LAYERS_WATER.md` (V)); `heightSource`/`makeInfiniteHeightSource`; chunk generator scatter; streamed foliage tables with cell residency. **Missing:** biome concept, ecological rules (slope/altitude/moisture/layer), clumping, competition, per-type cull distances, a PCG-driven path, editor workflow.
+
+**Target.** Biome = (region mask) x (PCG subgraph set) x (foliage palette). Painted landscape layers + noise masks decide where; PCG graphs place; results stream with the level.
+
+**Steps.**
+1. **Biome asset (S, H):** `.ocbiome`: name, mask source (landscape layer name | noise spec | spline/volume), priority, list of `{foliage type, density, slope range, height range, layer weight min, noise threshold, clump params, prune priority/radius}`. Round-trip tests.
+2. **Rule nodes (M, H):** Slope, Altitude, Layer Weight, Noise-mask, *Clump* (parent points + children in radius, Poisson-disk), *Compete* (self-pruning where the larger type, by `collisionRadiusCm` and priority, removes smaller ones), *Edge falloff* (blend between two biomes by mask gradient with a seeded dither so borders interleave, no hard line). Tests on a synthetic heightfield + weightmap fixture: counts within tolerance, slope/altitude respected, no overlaps closer than radius, determinism.
+3. **`.ocfoliage` additive fields (S, H):** `cullStartCm`, `cullEndCm`, `lodScaleBias`, `alignMaxAngleDeg`, `groundOffsetCm`, `collision: none|trunk|full`. Absent-vs-zero rule (`OcFoliage.hpp` header (V)). Consumers: `GameFoliage` (`Runtime/src/GameFoliage.cpp` exists (V)) applies cull range on residency; renderer side uses the existing per-mesh LOD (and clusters once W1 lands).
+4. **Landscape integration (M, H model / G look):** *Generate Vegetation* in Landscape/Foliage mode runs the biome graph over the landscape sections, writes cell-sorted `.ocinst` + a record so it can be regenerated (replaces the one-shot, non-regenerating bake of `scatterFoliageFromLayer`; keep that button as a thin call into the new path). Manual brush edits are kept as an override set (the `persistChunk` baseline-vs-override idea in `LayeredChunkSource` (V) is the model).
+5. **Runtime procedural mode (M, H):** `GeneratedChunkSource` driven by a biome graph for open worlds; heightfield provider from the landscape; tests for chunk-edge continuity (no seams or duplicates between neighbouring chunks: points in the overlap are owned by exactly one chunk).
+6. **Editor UX (M, G):** Biome list in Landscape mode (create/assign/preview mask overlay as a coloured landscape overlay), density debug heatmap, instance count and memory readout, "Regenerate selected cells".
+7. **Performance guardrails (S, H):** per-cell instance cap, memory estimate before generation, warning if a type lacks LODs or has no `cullEndCm`.
+
+---
+
+## W5. In-engine modelling mode (UE Modeling Mode basics)
+
+**Current state.** `fmt::csg` (`modules/formats/src/Csg.cpp`, 792 lines): BSP booleans on **convex polygons in doubles**, primitives (box, sphere, cylinder/cone, torus, extrude, spin, sweep), `transform`, `invertFaces`, `bounds`, `volume`, `surfaceArea`, `toSoup`, `fromTriangles` (`Csg.hpp:17-79` (V)); contract: closed outward-wound solids only. `LightmapUnwrap.cpp` (chart unwrap + packing) exists in Formats. `writeOcMesh` + `MeshBuild.cpp` exist. `EditorMode { Select, Landscape, Foliage, Simulate, Animate }` (`SandboxApp.hpp:831` (V)). No editable polygon mesh, no mesh-edit UI, no in-editor mesh asset authoring.
+
+**Target (basic, as asked):** a Modeling mode that creates a mesh asset: primitives, select vertices/edges/faces, extrude, inset, bevel, delete, merge/weld, flip normals, boolean union/subtract/intersect on two meshes, transform/pivot, simple UV tools, save as `.ocmesh` placed in the level.
+
+**Design.**
+- New headless **`EditMesh`** (indexed polygon mesh with vertex/face/edge handles, per-face material and smoothing group, per-corner UV) in Aver.Formats beside Csg (no new module; Formats already owns mesh data and csg). Conversions `EditMesh <-> csg::Mesh` (triangulate/convexify non-planar quads before booleans) and `EditMesh <-> OcMeshData`.
+- Booleans reuse `csg::combine` (standing rule). Known limits to surface to the user: closed solids only, double-precision BSP, polygon count growth; speed on 10k+ polygon meshes is unmeasured (?); validate input and refuse open meshes with a message instead of producing garbage.
+- Mode UI follows landscape mode's pattern: a new `EditorMode::Modeling` value, a `ModelingMode.{hpp,cpp}` for tool panels and a pure `ModelingModel.hpp` for tool state, undo via `SnapshotUndo<State>` (the whole EditMesh is the state; fine for basic scale).
+- Saving: `OcMeshData` through `writeOcMesh`, then optionally Trifactor cook (`#if AVER_MODULE_TRIFACTOR`, the conversion sits in `ConvertTool` today (V)) so the model joins W1's virtualized path, plus `LightmapUnwrap` for the second UV set.
+
+**Steps.**
+1. **EditMesh core (M, H):** structure, validation (manifold/closed/degenerate checks), triangulation, normals, bounds, conversion + round trip with `OcMeshData` and csg. **M.**
+2. **Primitives (S, H):** box/sphere/cylinder/cone/torus/plane/stairs/arch via existing csg generators + a few new ones, with UV set and a "pivot at base" option (the EditorTransform code already cares about base-pivot meshes, `EditorTransform.hpp:75` (V)).
+3. **Poly edit ops (L, H):** select modes, move/rotate/scale selection, extrude (face/edge), inset, bevel (edge, chamfer segments), delete, weld/merge, flip, subdivide (flat), loop cut (v2), mirror. Each op: topology + area/volume invariants as tests (extrude a cube face then check volume = base*height).
+4. **Booleans (M, H):** operands = EditMesh vs another placed mesh/primitive; apply via csg; keep material per source; result cleanup (weld, remove degenerate). Tests with known volumes (union of overlapping boxes etc.; `csg::volume` exists).
+5. **UV tools (M, H):** box/planar/cylindrical projection, per-face transform, auto-unwrap by calling `LightmapUnwrap` for UV1, texel-density display value.
+6. **Mode UI (L, G):** viewport picking and gizmos for vertex/edge/face, selection overlay (reuse debug-line draw (?) and the existing gizmo/marquee code, `ViewportPick.hpp`, `ViewportMarquee.hpp` exist (V)), tool panels, hotkeys, Details integration. Pure pick math (ray vs vertex/edge/face, marquee select) is **H**; drawing is **G**.
+7. **Asset round trip (M, H model / G):** New Mesh asset, save, reimport into Content Browser with thumbnail, "edit in Modeling" on an authored mesh (only meshes saved with edit metadata keep quads; imported meshes open as triangles); level placement.
+8. **Out of v1:** sculpting, retopo, subdivision surface, n-gon booleans without triangulation, skinned meshes, Geometry Script C# API (the parity plan item 15 mentions "a C# geometry API"; EditMesh gets a thin C# wrapper later, decision D6).
+
+---
+
+## W6. Physics-driven animation (physical animation, hit reactions, blend in/out)
+
+**Current state (V from headers).** `RagdollSystem::start(entity, mode, blendSeconds)` / `stop` (blend back, then destroy) / `setStrength` (one 0..1 value) / `addImpulse(entity, boneHash, impulse)`; weight ramp to write the simulated pose over the animated pose in `apply()`; chained after the control rig; Jolt ABI `aver_phys_ragdoll_{create,set_mode,set_strength,set_target,set_pose,add_impulse,body_of_bone,of_body}`. Motors pull each joint toward the target pose relative to parent; the root part is not driven; one global strength. C# `Ragdoll.cs`; framework relay `aver_fw_set_ragdoll_provider`.
+
+**Gaps vs UE Physical Animation Component / hit reactions.** (1) strength/damping/blend are global, not per bone or per region; (2) no profile asset (UE: Physical Animation Profile); (3) no hit-reaction trigger (hit bone + impulse -> local blend-in, hold, blend-out); (4) no partial-body simulation (simulate arm only, rest stays animated; I did not check whether `RagdollBuilder` can build a subtree, ?); (5) no recovery/get-up; (6) no graph nodes, Details panel, debug overlay (nodes for other systems exist: `GraphNodeDefsPhysicalSurface.hpp`, `GraphNodeDefsIk.hpp`; a ragdoll node family not checked, ?); (7) no authoring of per-bone limits/mass in an editor (`RagdollBuilder` has `BuildOptions` and `definition()` (V)).
+
+**Steps.**
+1. **Profile asset `.ocphysanim` (S, H):** region -> bone list (or bone + descendants), per region `{strength, drive damping, maxTorqueScale, blendWeightTarget, hit response}`. Round trip + validation against a skeleton (unknown bones).
+2. **Per-bone weight and strength (M, H):** additive ABI `aver_phys_ragdoll_set_part_strength(ragdoll, bone, strength)` and `..._set_part_damping`; `RagdollSystem::State` carries a per-bone blend weight array (instead of one `weight`) so `apply()` blends per bone; keep the single-weight API as "set all". ABI is additive only (minor bump). Jolt runs on CPU: tests run headless with a small test skeleton (build ragdoll, set pose, step, assert).
+3. **Hit-reaction envelope (M, H):** pure `HitReaction` module: `trigger(bone, impulse, point, profile)` -> per-bone envelope (attack, hold, decay), falloff along the bone chain by hop distance, strength boost on the hit region, additive impulse on the hit part, auto-return to kinematic when envelope < epsilon. Tests: envelope math, chain falloff, repeated hits stack/cap, determinism, "recovers to animated pose within N steps".
+4. **Partial-body simulation (M, H):** simulate subtree from a chosen bone, others kinematic-driven; needs builder support for attaching to a kinematic parent part (?). Fall back to whole-body powered ragdoll with high strength outside the region if the builder cannot do it. Test: parts outside region follow animation within tolerance while hit region deflects.
+5. **Death / recovery (M, H logic):** powered -> limp transition rule (strength ramp to zero), get-up: choose montage by facing (prone/supine from the pelvis up-vector) via the existing Montage system; tests for the selection rule and state machine.
+6. **Damage-event glue (S, H):** a neutral `HitEvent {entity, bone, impulse, point, damage}` published to scripting; the weapon/hit code supplies it (Fabric-converted games map their own damage events onto it; no game-specific code, standing rule). Same event feeds W7.
+7. **Graph nodes + C# API (M, H):** `ApplyHitReaction`, `SetPhysicalAnimationProfile`, `BlendPhysicalAnimation(weight, seconds)`, region strength nodes; node-table tests like other families.
+8. **Editor (M, G):** profile editor tab (region tree on the skeleton, sliders), debug overlay showing parts, strength heat and active envelopes, an "apply hit" button in Animate/Simulate mode. Visual tuning of feel is G and subjective.
+
+---
+
+## W7. Voronoi fracture and destruction
+
+**Current state.** Soft bodies exist (Jolt soft-body ABI `physics_softbody_abi.h`, `modules/softbody{,.scene}`: cage, islands, damage, tear) and rope. No rigid fracture. `Csg` supplies mesh intersection with convex solids and `volume()`; `Soup`/`toSoup` supply watertight weld. Rigid body creation from convex hulls: `physics_shape_builder_abi.h` exists (convex hull builder not verified, ?).
+
+**Target.** UE Chaos-like geometry collection (basic): pre-fracture a static mesh into Voronoi pieces at edit time; at runtime the intact mesh is swapped for piece rigid bodies on damage, with connectivity, anchors, debris cleanup.
+
+**Steps.**
+1. **Fracture core (L, H):** `fracture::voronoi(mesh, seeds, options)`: seed generators (uniform, radial about a point, slab/brick, clustered), cell = intersection of bisector half-spaces (bounded by neighbour search to avoid O(n^2) for large counts), clipped against the closed mesh with `csg::combine(Intersection)`; interior faces get a dedicated inside material and planar UVs; optional two-level hierarchical fracture; fixed seed -> deterministic. Tests: sum of piece volumes = source volume within tolerance, every piece closed (`volume>0`, edge-manifold), no overlap (pairwise intersection volume ~ 0 on a sample), deterministic. Location: Formats geometry files next to Csg, no new dependency. Known risk: BSP robustness and speed on meshes with thousands of polygons; add a pre-step to fracture a convex-decomposed or simplified proxy (?).
+2. **Connectivity graph (M, H):** adjacency from shared cell faces with contact area; anchor flags (touching ground/user-marked); `connectedComponents` after removing broken links (reuse the idea in `softbody/Islands.hpp`, do not couple).
+3. **`.ocfrac` asset (M, H):** AVR1 container: pieces (indexed to one shared vertex pool for LOD/streaming friendliness), per-piece mass/centroid/convex hull, adjacency + area, break thresholds (per link), levels. Round-trip and `validate` tests.
+4. **Runtime component (L, H physics / G look):** `Destructible` component: intact visual mesh + single body; `Damage(point, impulse, radius)` or contact impulse over threshold -> break links within radius (strain accumulation, not just one-shot), replace broken-off components with piece bodies (convex hull shapes), apply radial impulse, keep anchored component static, sleep/despawn rules, active-piece cap, pooling. Jolt runs headlessly, so body counts, momentum and island results are testable without a GPU. Visuals (pieces share the source material; inside material), shadows/RT for pieces = ordinary entities, **G**.
+5. **Breakable constraints option (M, H):** instead of instant release, join adjacent pieces with Jolt breakable joints so partial collapse happens (the wave-1b Jolt list includes "breakable joints" (D); confirm they landed, ?).
+6. **Editor (M, G):** Fracture tool in the mesh/Details panel: seed count/pattern preview, "Fracture" -> writes `.ocfrac`, exploded-view slider, anchor painting later; "Destructible" component in Details.
+7. **Damage unification (S, H):** accept the same `HitEvent` as W6 plus explosion radial events; soft-body damage keeps its own path but takes the same event type.
+8. **Audio/FX hooks (S):** fire a script event per break (surface from `PhysicalSurface`); no engine FX coupling.
+
+---
+
+## W8. Texture streaming
+
+**State.** Design is complete (`wave4/TEXTURE_STREAMING.md`, 352 lines): feedback is software, handle never changes, partial reads of the existing `.octex` container (no format change), off-thread staging, mip-window swap under the same handle. **Nothing is implemented** ("Not found anywhere: any texture residency tracking..." in the design; texture streaming is "Missing" in `UE5_GAPS.md`). Still open: patent counsel read (design R5), D3D12 bindless versioning costs 8192 descriptors, blocking tail seed, packaged builds have no usable DDC (R2) which intersects the unfinished `.ocpak`/cook item.
+
+**Steps (design section 9, annotated).**
+1. `readFileRange`, cache `statCachedTexture/readCachedMips`, mip-window math + `TextureStreamMathTest`. **S, H.**
+2. Pure planner (budget, wanted-first-mip per texture, hysteresis, eviction order) + `TexturePlannerTest` with synthetic footprints. **M, H.**
+3. Streamable predicate + MaterialSystem owns texture ids (behaviour-neutral refactor; existing suites must stay green; `texIndex` stays in the b2 block). **M, H** (build + suites) with an equivalence screenshot **G**.
+4. RHI: texture stager, `bufferMapped`, `streamTextureMips`, descriptor rewrite incl. D3D12 bindless versioning, Vulkan equivalent. `TextureStreamRhiTest`. **L, G** (D3D12 then Vulkan).
+5. Feedback shader + UAV slot + copy-out/readback + `TextureFeedbackShaderTest`. **M, G.**
+6. Streamer worker, host wiring (editor + game), project keys, console vars, panel, and verification 4.1-4.6 of the design (resident MiB on Caldera/NeonDistrict, no hitch). **L, G.**
+7. Optional deferred tail seed if the hitch gate trips. **M, G.**
+Cook/package integration: later with `.ocpak` (cross-reference, not in wave 2).
+
+---
+
+## W9. Shadows on non-RT GPUs
+
+**State.** Cascades exist; **Vulkan never writes the cascade map** because `pushRenderScope` joins the open scope and discards the caller's attachments (`VulkanDevice.cpp:3395-3412` (V), `docs/BUGS.md:360`). The comment records a failed attempt (retargeting changed 10 -> 40 validation errors and the floor stopped drawing) and the real fix: *the scope must follow the bound targets (close on retarget, reopen lazily, persist across draws) and pipelines must match the targets they use* (pipeline `rasterizationSamples` and `VkPipelineRenderingCreateInfo` formats, shadow image layout transition to `DEPTH_ATTACHMENT_OPTIMAL`). The local-light shadow path already uses an "isolated" scope (R2, `setTargetsIsolated`, V). GI's shadow pass (`giShadowPass`) has the same shape. D3D12 cascades work. No clipmap, no VSM.
+
+**Steps.**
+1. **Vulkan scope fix (L, G):** make isolated scopes the rule for shadow and GI-shadow passes (extend the existing R2 mechanism to `shadowPass` and `giShadowPass`), pipelines created/selected against the actual depth-only target format with `rasterizationSamples = 1`, explicit barriers to/from `DEPTH_ATTACHMENT_OPTIMAL`/sampled. Gate: validation-error count does not increase (baseline: the 10 non-fatal errors of `VULKAN.md` (D)) and a `--no-rt --backend vulkan` capture matches D3D12 within tolerance on the cube scene (the comment quotes darkest floor pixel 13,15,19 vs 66,66,66 as the symptom). The existing screenshot A/B tooling (`scripts/shots.py` diff, commit `dc161180`) is the measurement. Needs a Vulkan device and a headed run.
+2. **Cascade quality pass (M, G):** texel-snapped cascade fitting, cascade blend band, slope-scaled bias, PCF kernel; compare D3D12/Vulkan after step 1 (I did not check which of these already exist, ?).
+3. **Clipmap/cached shadow (design M, H planner; implementation L, G).** *Cached shadow clipmap, non-sparse v1*: N concentric 2D levels around the camera (e.g. 4 x 4096), texel-snapped scroll so only newly exposed strips and dirty-caster rects re-render, per-level static-caster cache with invalidation when a casting entity moves/spawns. **Pure parts H:** level selection, scroll/snap math, dirty-rect union, invalidation tracker (tests with synthetic moves). Render integration G. This avoids sparse virtual-page residency (which needs RHI work and is where VSM patents concentrate).
+4. **Patent check (S):** repeat the wave-4 method for "virtual shadow map page cache invalidation" and clipmap shadow techniques before any VSM-like page table design; no counsel read exists yet (D2).
+5. **VSM-style page pool (L, G), explicitly stage 2 and gated on D2/D7:** virtual 16k per light, physical page pool, page marking from depth, per-page cache. Not scheduled in wave 2; the clipmap (step 3) is the deliverable.
+6. **Non-RT GI/AO fallback** is a separate row in the gaps doc (Lumen without DXR) and is out of scope for this wave.
+
+---
+
+## W10. Data layers
+
+**State.** Nothing in `OcWorld`/streaming; only editor-only Outliner folders and locks (commit `d7c889ce`) which are organization, not runtime state.
+
+**Target (UE data layers, basic).** Named layers; each placement/actor belongs to zero or more layers; layers have an initial state (Unloaded / Loaded / Activated) and an editor "visible/loaded in editor" toggle; runtime state set from C#/graph; streamer honours state.
+
+**Steps.**
+1. **Format (S, H):** header `DATALAYER name=<> initial=<unloaded|loaded|activated> runtime=<0|1> [parent=<>]`; per placement `layers=<a,b>`; additive, absent = no layer (loads exactly as before). Round-trip and "old reader ignores" tests; `OcWorldPlacement` field.
+2. **Residency (M, H):** `PlacementStreamer` takes a layer-state provider; a placement is eligible iff all its layers are Loaded/Activated; Activated additionally enables simulation/render (Loaded = resident but hidden, mirroring UE). Tests: state transitions, interaction with distance residency, foliage tables per layer (`FOLIAGE ... layers=`).
+3. **Runtime API (S, H):** `DataLayers.SetState/Get` in C# framework + graph nodes (`GraphNodeDefsWorld.hpp` pattern), events on completion.
+4. **Editor (M, G for panel, H for model):** Data Layers panel (create/rename/delete, assign selection, toggle editor visibility, load/unload in editor so large levels open light), saved with the level, undo. Pure model tests for assignment/rename cascade.
+5. **Cook path (S, H):** `AverAssetC cook-chunks` and `STREAM chunks=` must carry layer membership; test that chunk cooking splits per layer-state without losing placements.
+6. **HLOD interaction (S, H):** proxies only built from always-on layers; a layer with `runtime=1` excludes its placements from HLOD (decision D3).
+
+---
+
+## 2. Dependency-ordered schedule
+
+Owner is remote, so: **Phase A** is only headless-testable steps (agent-runnable end to end: build + ctest, local commit, no GPU); **Phase B** is GPU/headed work queued for when the owner can inspect. Workstream tracks that touch disjoint files run in parallel. "Shared file" notes mark collisions.
+
+### Phase A, headless (can start now; max 4 tracks at once on Sonnet per the usage rule)
+
+| Track | Steps (in order) | Files it owns | Parallel with |
+|---|---|---|---|
+| A1 Trifactor CPU | T-CPU-1 -> T-CPU-2 -> T-CPU-3 -> T-CPU-5 -> T-CPU-4 -> T-GPU-5 CPU planner | `modules/trifactor/**`, `modules/formats/src/OcMesh.cpp` + `OcMesh.hpp` (MLET v4), `tests/formats/src/TrifactorTest.cpp`, `RelodTool` | everything below |
+| A2 PCG core + vegetation rules | W3 1-5, W4 1-3,5,7 | new `modules/world/**/Pcg*`, `Aver.Pcg` F# only for golden vectors, `OcFoliage.*`, new `.ocbiome` files | A1, A3, A4 (shared with A5: `ChunkGenerator.*`, `OcWorld.*`) |
+| A3 EditMesh + modeling model | W5 1-5 | new `modules/formats/**/EditMesh*`, `Csg.*` (additive only), new `sandbox/src/ModelingModel.hpp` | A1, A2, A4 |
+| A4 Physical animation + fracture core | W6 1-7 in `modules/ragdoll/**`, `physics_ragdoll_abi.h` (additive), `scripting/csharp/Aver.Framework/Ragdoll.cs`; W7 1-5 in new fracture files and `.ocfrac` | disjoint from A1-A3; W6 and W7 steps share only the `HitEvent` type (define it first, S) | A1, A2, A3 |
+| A5 World: data layers + HLOD (after A2's `OcWorld` edits settle) | W10 1-3,5; W2 1-3,5,6(planner) | `modules/formats/src/OcWorld.*`, `OcStream.*`, `modules/world/PlacementStreamer.*`, `Runtime/src/*Streaming*` | A1, A3, A4. **Serialize against A2 on `OcWorld.*` and `ChunkGenerator.*`** |
+| A6 Texture streaming CPU | W8 1-3 | `modules/platform` (readFileRange), `modules/assets/TextureCache.*`, new planner files | all |
+| A7 Docs/gap-doc fixes | correct `UE5_GAPS.md` (physical animation row), VG doc "no indirect" note | docs only | all |
+
+Order inside Phase A that matters: T-CPU-1/2 before anything GPU; `HitEvent` (W6.6) before W7.7; EditMesh (W5.1) before booleans/UV; `.ocpcg` decision (W3.1) before the graph editor model; W3.3 before W4.2.
+
+### Phase B, GPU/headed (queued; each run needs owner approval, small first scenes, bounded kernels)
+
+Sequence and why: (1) **Vulkan shadow scope fix** (W9.1) because it unblocks every Vulkan parity check below and is small in scope; (2) **texture streaming RHI + feedback** (W8 4-6) vs (3) **ClusterRenderer** (W1 T-GPU-1/2): both edit `VoxiRenderer.cpp` and the RHI backends, so **do not run in parallel**; recommended order cluster renderer first (bigger frame win for the shooter), then texture streaming; (4) HiZ + mesh back end (T-GPU-3) after the owner's patent decision D2; (5) RT proxy + deletions (T-GPU-4); (6) shadow clipmap render integration (W9.3); (7) editor UIs and viewport drawing: PCG graph editor canvas (W3.6), Modeling mode viewport (W5.6), physical-animation tab and overlay (W6.8), fracture tool (W7.6), data layers panel (W10.4), HLOD ring look (W2.6/2.8), vegetation UX (W4.6). The UI items touch separate sandbox files but each needs a hook in `SandboxApp.hpp`/`SandboxApp.cpp` (mode enum, `registerFactory`, member lists): **serialize those hook edits** (one integrator), put the real logic in new files.
+
+Parallel-safe within Phase B: editor UI tabs (disjoint new files) can be built while a renderer track runs, but the renderer tracks themselves are serial.
+
+### Rough effort (sum of step sizes, Sonnet-workflow days, order-of-magnitude)
+W1 CPU ~7, W1 GPU ~12+; W2 ~7; W3 ~9; W4 ~6; W5 ~9; W6 ~7; W7 ~9; W8 ~9; W9 ~7 (without VSM); W10 ~4. Headless share is about 60% of the total.
+
+---
+
+## 3. Decisions the owner must make
+
+- **D1 Destruction scope.** The 2026-10-17 decision says destruction = soft bodies (supersedes Voronoi, `wave9/SOFTBODY_CLOTH_DESTRUCTION.md:3`). Confirm W7 as brittle-rigid Voronoi *in addition* to soft-body dents/tears/cloth, with shared damage events and no shared solver. If not, W7 is cut.
+- **D2 Patent/legal reads.** Counsel read still unrequested for: HiZ two-pass culling (Microsoft US 11,004,255 claims 1/13/18, R1 in the VG design; fallback = ship `geom.hiz` off), texture streaming (AMD 10,388,058 and 12,461,751, design R5), and any VSM-style page cache (W9.5). Wave 2 ships with HiZ off and clipmap-not-VSM unless told otherwise.
+- **D3 HLOD semantics and scope.** Confirm "dynamic" = auto-built, cached, runtime-swapped proxies (plus runtime build for PCG chunks). Also: proxy material strategy (v1 keeps source materials per slot vs atlas bake as a later L), foliage impostors (v2), whether `runtime=1` data layers are excluded from HLOD, and whether HLOD proxies appear in RT (recommended: no).
+- **D4 Module placement of the PCG evaluator.** CPU-only inside `modules/world` (simplest) vs a new CPU module split from `render.pcg` (cleaner dependency, new module). Neither adds a third-party library. Module-DAG check not performed (?).
+- **D5 `.ocpcg` format.** Profile of the existing `.ocgraph` container (reuses editor canvas, clipboard, find, problems) vs a new AVR1 `.ocpcg`. My recommendation is the former if step W3.1 confirms typed data-flow support.
+- **D6 Geometry Script.** The parity plan lists "a C# geometry API" with Modeling. Include a thin C# `EditMesh` API in wave 2 or defer (recommended: defer; editor first).
+- **D7 Shadow target.** Accept "fixed Vulkan cascades + cached clipmap" as the wave-2 non-RT shadow deliverable, VSM-with-sparse-pages deferred.
+- **D8 Trifactor scope cuts.** (a) Is cluster paging (W1 T-GPU-5) wave 2 design-only (recommended)? (b) Keep the mesh-shader back end or ship compute-only everywhere (saves the indirect mesh RHI work and the Vulkan mesh-shader pairing, loses some raster speed)? (c) OK to bump `kBuilderVersion` to 3 and require a bulk re-cook of multi-material project meshes (R2 in the VG design; tool never touches sources)? (d) Accept that skinned/morph meshes stay on discrete LOD.
+- **D9 New dependencies: none requested.** Everything above is buildable with what is vendored: meshoptimizer (simplify, meshlets), Jolt, `Csg`, `LightmapUnwrap`, ImGui. Items that *would* need a yes if scope grows: a convex-decomposition library (CoACD/VHACD) if fracture pieces need better collision than hulls; a robust exact-arithmetic boolean library (e.g. CGAL/Manifold) if BSP booleans prove too fragile for modelling; METIS/KaHIP if W1 T-CPU-4 cannot beat greedy grouping (previously forbidden for licence reasons, `modules/trifactor/README.md`). Not asking now.
+- **D10 Order within the owner's list.** My proposed priority: W1 CPU + W10 + W6 + W3/W4 first (headless, high value for the shooter and world building), then GPU tracks W9.1, W1 GPU, W8, then W5 UI, W7 UI. Re-order if the shooter's combat feel (W6/W7) should lead.
+
+## 4. What I could not verify
+
+- Any runtime behaviour: nothing was built or run (no timing, no image, no test results). Existing claims "builds and passes" come from README/docs only.
+- Line numbers marked (D) were copied from the wave-4 design docs (written 2026-10-11); the tree has moved since (e.g. the indirect-RHI premise is already stale). Re-grep before implementing.
+- Whether `RagdollBuilder` supports subtree/partial ragdolls, whether breakable joints and the convex-hull shape builder landed in the physics ABI, whether `OcGraph` supports typed data-flow graphs, existing viewport debug-draw primitives for overlays, which cascade-quality features already exist, Trifactor current build-time per MTri and the group-quality numbers (edge cut) for the greedy partitioner.
+- The module DAG consequences of placing PCG evaluator, EditMesh, fracture and HLOD merger code (checked only by reasoning from `Formats` below `Trifactor`).
+- BSP boolean speed/robustness at modelling scale and on fracture inputs.
+- Whether `docs/plans/wave9/SOFTBODY_CLOTH_DESTRUCTION.md` was implemented beyond what `modules/softbody{,.scene}` headers suggest; `git log` was not mined for it.
