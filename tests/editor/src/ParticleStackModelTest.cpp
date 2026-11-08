@@ -83,7 +83,19 @@ int main() {
         check(!px::addEvent(e, 2, 0, 0, 1, 0.0f), "C -> A would close a loop and is refused");
         check(!px::addEvent(e, 1, 0, 1, 1, 0.0f), "B -> B is refused");
         check(!px::addEvent(e, 0, 0, 1, 0, 0.0f), "a count of 0 is refused");
-        check(!px::addEvent(e, 0, 2, 1, 1, 0.0f), "an unknown event kind is refused");
+        check(!px::addEvent(e, 0, 9, 1, 1, 0.0f), "an unknown event kind is refused");
+        {
+            ParticleSystemDef t = e;
+            for (ParticleEffect& x : t.emitters) x.events.clear();
+            check(px::addEvent(t, 0, 2, 1, 1, 0.0f, 0.0f, particles::kEventPayloadAll, 1.5f), "a birth rule with a payload and a user scalar");
+            check(px::addEvent(t, 0, 3, 1, 1, 0.0f, 0.4f), "a life-fraction rule");
+            check(px::addEvent(t, 0, 4, 1, 1, 0.0f, 0.5f), "a timer rule");
+            check(!px::addEvent(t, 0, 3, 1, 1, 0.0f, 1.0f), "a life fraction of 1 is refused");
+            check(!px::addEvent(t, 0, 4, 1, 1, 0.0f, 0.0f), "a zero timer period is refused");
+            check(!px::addEvent(t, 0, 2, 1, 1, 0.0f, 0.0f, 8), "an unknown payload bit is refused");
+            check(t.emitters[0].events.size() == 3 && t.emitters[0].events[2].at == 0.5f && t.emitters[0].events[0].payload == particles::kEventPayloadAll, "the fields are stored");
+            check(!px::emitterOnGpu(t.emitters[0]), "an emitter with such a rule shows the CPU tier even when forced");
+        }
         check(!px::addEvent(e, 0, 0, 7, 1, 0.0f), "a missing child is refused");
 
         const int dup = px::duplicateEmitter(e, 0);

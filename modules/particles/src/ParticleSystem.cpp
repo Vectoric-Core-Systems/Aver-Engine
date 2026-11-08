@@ -120,6 +120,9 @@ void ParticleSystem::setGpuTier(IParticleGpuTier* tier) {
 
 bool ParticleSystem::wantGpu(const ParticleEffect& fx, u32 componentFlags) const {
     if (!gpuUsable()) return false;
+    // Spawn / lifetime / timer triggers, payloads and the user scalar exist on the CPU tier only (the GPU kernels raise death and collide
+    // with a position and a velocity): such an emitter stays on the CPU even when forced to the GPU.
+    for (const EventSpawn& ev : fx.events) if (eventNeedsCpu(ev)) return false;
     if (componentFlags & scene::kParticleEmitterForceCpu) return false;
     if (componentFlags & scene::kParticleEmitterForceGpu) return true;
     switch (fx.simTier) {
@@ -160,7 +163,7 @@ void ParticleSystem::buildInstance(SystemInstance& si, const ParticleSystemDef& 
     bool anyWant = false;
     for (usize i = 0; i < n; ++i) { want[i] = wantGpu(def.emitters[i], flags); anyWant = anyWant || want[i]; }
     const bool linkedGroup = hasEvents(def);
-    if (linkedGroup) for (usize i = 0; i < n; ++i) want[i] = anyWant;   // event-linked emitters share a tier
+    if (linkedGroup) for (usize i = 0; i < n; ++i) want[i] = anyWant && !systemEventsNeedCpu(def);   // event-linked emitters share a tier
 
     const Topology topo = topologyOf(def);
     bool groupFailed = false;
@@ -495,14 +498,17 @@ void ParticleSystem::stepSystem(SystemInstance& si, const ParticleSystemDef& def
         ei.sim.step(cx.dt, cx.time, fx.events.empty() ? nullptr : &ei.events);
 
         for (const EventRecord& ev : ei.events) {
-            for (const EventSpawn& rule : fx.events) {
+            for (usize ri = 0; ri < fx.events.size(); ++ri) {
+                const EventSpawn& rule = fx.events[ri];
                 if (rule.on != static_cast<u8>(ev.type) || rule.emitter >= n || rule.emitter == i) continue;
+                if (rule.on > static_cast<u8>(EventOn::Collide) && ev.rule != ri) continue;
                 EmitterInstance& child = si.emitters[rule.emitter];
                 if (child.gpu || child.nextInbox.size() >= kMaxInboxPerEmitter) continue;
                 SpawnRequest cr;
                 cr.xf = Mat4::translation(ev.position);
                 cr.count = rule.count;
                 cr.addVelocity = ev.velocity * rule.inheritVelocity;
+                applyEventPayload(rule, ev, cr);
                 cr.seed = (ev.id * 2654435761u) ^ (rule.emitter + 1u);
                 child.nextInbox.push_back(cr);
             }

@@ -275,15 +275,23 @@ inline bool eventWouldCycle(const ParticleSystemDef& d, usize parent, usize chil
     }
     return false;
 }
-inline bool addEvent(ParticleSystemDef& d, int parent, u8 on, int child, u32 count, f32 inherit) {
+// `on` is a particles::EventOn; `at` is the life fraction (Lifetime) or the period in seconds (Timer); `payload` is kEventPayload* bits.
+inline bool addEvent(ParticleSystemDef& d, int parent, u8 on, int child, u32 count, f32 inherit, f32 at = 0.0f, u8 payload = 0, f32 user = 0.0f) {
     if (parent < 0 || child < 0 || static_cast<usize>(parent) >= d.emitters.size() || static_cast<usize>(child) >= d.emitters.size()) return false;
-    if (on > 1 || count == 0 || count > 1000 || !std::isfinite(inherit) || eventWouldCycle(d, static_cast<usize>(parent), static_cast<usize>(child))) return false;
+    if (on > static_cast<u8>(particles::EventOn::Timer) || count == 0 || count > 1000 || !std::isfinite(inherit) || !std::isfinite(at) || !std::isfinite(user) ||
+        (payload & ~particles::kEventPayloadAll) != 0) return false;
+    if (on == static_cast<u8>(particles::EventOn::Lifetime) && !(at > 0.0f && at < 1.0f)) return false;
+    if (on == static_cast<u8>(particles::EventOn::Timer) && !(at >= 0.01f && at <= 3600.0f)) return false;
+    if (eventWouldCycle(d, static_cast<usize>(parent), static_cast<usize>(child))) return false;
     if (d.emitters[static_cast<usize>(child)].name.empty() || d.emitters[static_cast<usize>(child)].name.find(' ') != std::string::npos) return false;
     particles::EventSpawn ev;
     ev.on = on;
     ev.emitter = static_cast<u32>(child);
     ev.count = count;
     ev.inheritVelocity = std::clamp(inherit, 0.0f, 4.0f);
+    ev.at = (on == static_cast<u8>(particles::EventOn::Lifetime) || on == static_cast<u8>(particles::EventOn::Timer)) ? at : 0.0f;
+    ev.payload = payload;
+    ev.user = user;
     d.emitters[static_cast<usize>(parent)].events.push_back(ev);
     return true;
 }
@@ -382,6 +390,7 @@ inline u32 emitterCapacity(const ParticleEffect& e) {
     return (e.render == RenderKind::Ribbon && e.linked) ? e.linkedCapacity : std::max(1u, e.maxParticles);
 }
 inline bool emitterOnGpu(const ParticleEffect& e) {
+    for (const particles::EventSpawn& ev : e.events) if (particles::eventNeedsCpu(ev)) return false;   // a rule only the CPU tier runs
     if (e.simTier == SimTier::Cpu) return false;
     if (e.simTier == SimTier::Gpu) return true;
     return emitterCapacity(e) >= 2048u;

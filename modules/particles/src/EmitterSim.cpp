@@ -136,8 +136,8 @@ Particle EmitterSim::make(const SpawnRequest& req, u32 id, const std::vector<Res
     const Vec3 dir = coneSample(axis, fx.spreadDeg, p.seed);
     const f32 speed = lerpf(fx.speedMin, fx.speedMax, rand01(p.seed, kStreamSpeed)) * req.speedScale;
     p.velocity = dir * speed + req.addVelocity;
-    p.age = 0.0f;
     p.lifetime = std::max(0.001f, lerpf(fx.lifetimeMin, fx.lifetimeMax, rand01(p.seed, kStreamLifetime)) * req.lifeScale);
+    p.age = std::clamp(req.ageFraction, 0.0f, 0.95f) * p.lifetime;
     p.sizeScale = req.sizeScale;
     p.tint = req.tint;
     u32 frame = 0;
@@ -168,17 +168,26 @@ u32 EmitterSim::spawn(const SpawnRequest& req) {
     for (const ResolvedModule& m : resolved_)
         if (m.stage == ModuleStage::Spawn) spawnMods_.push_back(m);
 
+    std::vector<u32> birthRules;
+    for (usize r = 0; r < fx.events.size(); ++r)
+        if (fx.events[r].on == static_cast<u8>(EventOn::Spawn)) birthRules.push_back(static_cast<u32>(r));
+    const auto noteBirth = [&](const Particle& p) {
+        for (u32 r : birthRules) if (birthEvents_.size() < 4096) birthEvents_.push_back(makeEvent(p, EventOn::Spawn, r));
+    };
+
     u32 accepted = 0;
     for (u32 i = 0; i < req.count; ++i) {
         const u32 id = nextId_++;
         if (linked_) {
             const usize slot = id % capacity_;
             particles_[slot] = make(req, id, spawnMods_);
+            noteBirth(particles_[slot]);
             ++accepted;
             continue;
         }
         if (particles_.size() >= fx.maxParticles) continue;   // over budget drops the new spawn; nothing is evicted
         Particle p = make(req, id, spawnMods_);
+        noteBirth(p);
         particles_.push_back(p);
         if (ring_ != 0) {
             const usize slot = particles_.size() - 1;
@@ -191,9 +200,36 @@ u32 EmitterSim::spawn(const SpawnRequest& req) {
     return accepted;
 }
 
+EventRecord EmitterSim::makeEvent(const Particle& p, EventType type, u32 rule) const {
+    const ParticleEffect& fx = *fx_;
+    EventRecord r;
+    r.type = type;
+    r.id = p.id;
+    r.position = p.position;
+    r.velocity = p.velocity;
+    r.rule = rule;
+    const f32 t = p.lifetime > 0.0f ? std::clamp(p.age / p.lifetime, 0.0f, 1.0f) : 1.0f;
+    f32 c[4];
+    evalColor(fx, t, c);
+    const f32 a[4] = {(p.tint & 0xFFu) / 255.0f, ((p.tint >> 8) & 0xFFu) / 255.0f, ((p.tint >> 16) & 0xFFu) / 255.0f, (p.tint >> 24) / 255.0f};
+    r.tint = packRgba8(c[0] * a[0], c[1] * a[1], c[2] * a[2], c[3] * a[3]);
+    const f32 birth = evalSize(fx, 0.0f);
+    r.sizeRatio = (birth > 1e-4f ? evalSize(fx, t) / birth : 1.0f) * p.sizeScale;
+    r.ageFraction = t;
+    return r;
+}
+
 void EmitterSim::step(f32 dt, f32 time, std::vector<EventRecord>* eventsOut) {
     if (!fx_) return;
     const ParticleEffect& fx = *fx_;
+    if (eventsOut) eventsOut->insert(eventsOut->end(), birthEvents_.begin(), birthEvents_.end());
+    birthEvents_.clear();
+    std::vector<u32> lifeRules, timerRules;
+    for (usize r = 0; r < fx.events.size(); ++r) {
+        if (fx.events[r].on == static_cast<u8>(EventOn::Lifetime) && fx.events[r].at > 0.0f && fx.events[r].at < 1.0f) lifeRules.push_back(static_cast<u32>(r));
+        else if (fx.events[r].on == static_cast<u8>(EventOn::Timer) && fx.events[r].at > 1e-3f) timerRules.push_back(static_cast<u32>(r));
+    }
+    if (!eventsOut) { lifeRules.clear(); timerRules.clear(); }
     resolveModules(fx.modules, user_, resolved_);
     velMods_.clear(); posMods_.clear();
     for (const ResolvedModule& m : resolved_) {
@@ -201,7 +237,7 @@ void EmitterSim::step(f32 dt, f32 time, std::vector<EventRecord>* eventsOut) {
         else if (m.stage == ModuleStage::Position) posMods_.push_back(m);
     }
     bool wantDeath = false, wantCollide = false;
-    for (const EventSpawn& e : fx.events) { wantDeath |= e.on == 0; wantCollide |= e.on == 1; }
+    for (const EventSpawn& e : fx.events) { wantDeath |= e.on == static_cast<u8>(EventOn::Death); wantCollide |= e.on == static_cast<u8>(EventOn::Collide); }
     if (!eventsOut) wantDeath = wantCollide = false;
 
     ModuleEnv env;
@@ -218,7 +254,7 @@ void EmitterSim::step(f32 dt, f32 time, std::vector<EventRecord>* eventsOut) {
         p.position += p.velocity * dt;
         for (const ResolvedModule& m : posMods_) {
             const u32 bits = runPositionModule(m, env, p);
-            if ((bits & kModuleCollided) && wantCollide) eventsOut->push_back({EventType::Collide, p.id, p.position, p.velocity});
+            if ((bits & kModuleCollided) && wantCollide) eventsOut->push_back(makeEvent(p, EventType::Collide, 0));
             if (bits & kModuleKilled) return false;
         }
         return true;
@@ -232,11 +268,22 @@ void EmitterSim::step(f32 dt, f32 time, std::vector<EventRecord>* eventsOut) {
         p.age += dt;
         if (p.age >= p.lifetime || !advance(p)) {
             // Dies here. A compacting array does not write it back, so it drops out; a linked slot is emptied in place.
-            if (wantDeath) eventsOut->push_back({EventType::Death, p.id, p.position, p.velocity});
+            if (wantDeath) eventsOut->push_back(makeEvent(p, EventType::Death, 0));
             if (linked_) { particles_[r].age = 0.0f; particles_[r].lifetime = 0.0f; }
             continue;
         }
         p.rotation += p.angularVelocity * dt;
+
+        // Lifetime-fraction and timer triggers, for a particle that survived the step: a crossing between the previous age and this one.
+        for (u32 ri : lifeRules) {
+            const f32 at = fx.events[ri].at * p.lifetime;
+            if (p.age - dt < at && p.age >= at) eventsOut->push_back(makeEvent(p, EventOn::Lifetime, ri));
+        }
+        for (u32 ri : timerRules) {
+            const f32 period = fx.events[ri].at;
+            const f32 before = std::floor(std::max(0.0f, p.age - dt) / period), after = std::floor(p.age / period);
+            for (f32 k = before + 1.0f; k <= after && k < before + 5.0f; k += 1.0f) eventsOut->push_back(makeEvent(p, EventOn::Timer, ri));
+        }
 
         if (linked_) { particles_[r] = p; continue; }
 

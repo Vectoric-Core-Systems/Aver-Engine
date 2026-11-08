@@ -83,8 +83,9 @@ void ParticleEditor::drawStats() {
         const particles::ParticleEffect& e = def_.emitters[i];
         const u32 alive = i < sims_.size() ? sims_[i].aliveCount() : 0u;
         const u32 cap = pxmodel::emitterCapacity(e);
-        const bool gpu = pxmodel::emitterOnGpu(e);
-        const u64 mem = pxmodel::gpuMemoryEstimate(e);
+        const bool eventsCpu = particles::systemEventsNeedCpu(def_);   // event-linked emitters share one tier
+        const bool gpu = pxmodel::emitterOnGpu(e) && !eventsCpu;
+        const u64 mem = gpu ? pxmodel::gpuMemoryEstimate(e) : 0u;
         gpuTotal += mem;
         aliveTotal += alive;
         ImGui::TableNextRow();
@@ -96,7 +97,7 @@ void ParticleEditor::drawStats() {
         std::snprintf(over, sizeof over, "%u / %u", alive, cap);
         ImGui::ProgressBar(frac, ImVec2(-FLT_MIN, 0.0f), over);
         ImGui::TableNextColumn();
-        const char* how = e.simTier == particles::SimTier::Auto ? " (auto)" : " (forced)";
+        const char* how = eventsCpu && e.simTier != particles::SimTier::Cpu ? " (events)" : (e.simTier == particles::SimTier::Auto ? " (auto)" : " (forced)");
         ImGui::TextColored(gpu ? ImVec4(0.95f, 0.55f, 0.15f, 1.0f) : ImVec4(0.55f, 0.75f, 0.95f, 1.0f), "%s%s", gpu ? "GPU" : "CPU", how);
         ImGui::TableNextColumn();
         ImGui::TextUnformatted(gpu ? pxmodel::formatBytes(mem).c_str() : "-");
@@ -971,17 +972,35 @@ void ParticleEditor::drawParams() {
             const EventSpawn& ev = e.events[k];
             const std::string child = ev.emitter < d.emitters.size() ? d.emitters[ev.emitter].name : std::string("?");
             ImGui::PushID(static_cast<int>(k));
-            ImGui::Text("on %s: spawn %u into %s%s", ev.on == 0 ? "death" : "collide", ev.count, child.c_str(),
-                        ev.inheritVelocity != 0.0f ? (" (inherit " + std::to_string(ev.inheritVelocity).substr(0, 4) + ")").c_str() : "");
+            char when[48];
+            switch (ev.on) {
+            case 2: std::snprintf(when, sizeof when, "birth"); break;
+            case 3: std::snprintf(when, sizeof when, "%.0f%% of life", ev.at * 100.0f); break;
+            case 4: std::snprintf(when, sizeof when, "every %.2f s", ev.at); break;
+            default: std::snprintf(when, sizeof when, "%s", ev.on == 0 ? "death" : "collide"); break;
+            }
+            std::string extra = ev.inheritVelocity != 0.0f ? " vel " + std::to_string(ev.inheritVelocity).substr(0, 4) : std::string();
+            if (ev.payload & particles::kEventPayloadColor) extra += " colour";
+            if (ev.payload & particles::kEventPayloadSize) extra += " size";
+            if (ev.payload & particles::kEventPayloadAge) extra += " age";
+            if (ev.user != 0.0f) extra += " user " + std::to_string(ev.user).substr(0, 5);
+            ImGui::Text("on %s: spawn %u into %s%s%s", when, ev.count, child.c_str(), extra.c_str(), particles::eventNeedsCpu(ev) ? " [CPU tier]" : "");
             ImGui::SameLine();
             if (ImGui::SmallButton(ICON_CLOSE)) { editSystem([&](ParticleSystemDef& s) { return pxmodel::removeEvent(s, sel_, static_cast<int>(k)); }); ImGui::PopID(); break; }
             ImGui::PopID();
         }
         static int evOn = 0, evChild = 0, evCount = 3;
-        static f32 evInherit = 0.0f;
-        static const char* kOn[] = {"death", "collide"};
-        ImGui::SetNextItemWidth(90.0f);
-        ImGui::Combo("##evon", &evOn, kOn, 2);
+        static f32 evInherit = 0.0f, evAt = 0.5f, evUser = 0.0f;
+        static bool evColor = false, evSize = false, evAge = false;
+        static const char* kOn[] = {"death", "collide", "spawn (birth)", "life fraction", "timer"};
+        ImGui::SetNextItemWidth(110.0f);
+        ImGui::Combo("##evon", &evOn, kOn, 5);
+        if (evOn == 3 || evOn == 4) {
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(80.0f);
+            if (evOn == 3) ImGui::DragFloat("at##ev", &evAt, 0.01f, 0.01f, 0.99f, "%.2f");
+            else ImGui::DragFloat("every##ev", &evAt, 0.05f, 0.01f, 3600.0f, "%.2f s");
+        }
         ImGui::SameLine();
         std::vector<const char*> names;
         for (const ParticleEffect& x : d.emitters) names.push_back(x.name.c_str());
@@ -993,10 +1012,22 @@ void ParticleEditor::drawParams() {
         ImGui::SameLine();
         ImGui::SetNextItemWidth(80.0f);
         ImGui::DragFloat("inherit##ev", &evInherit, 0.01f, 0.0f, 4.0f, "%.2f");
+        ImGui::Checkbox("colour##ev", &evColor);
         ImGui::SameLine();
-        if (ImGui::Button(ICON_ADD " Event"))
-            editSystem([&](ParticleSystemDef& s) { return pxmodel::addEvent(s, sel_, static_cast<u8>(evOn), evChild, static_cast<u32>(evCount), evInherit); });
-        ImGui::TextDisabled("A child needs a name without spaces; a rule that would form a loop is refused. Children spawn one tick later.");
+        ImGui::Checkbox("size##ev", &evSize);
+        ImGui::SameLine();
+        ImGui::Checkbox("age##ev", &evAge);
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(80.0f);
+        ImGui::DragFloat("user##ev", &evUser, 0.05f, 0.0f, 100.0f, "%.2f");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("User scalar: multiplies the children's speed (0 = off)");
+        ImGui::SameLine();
+        if (ImGui::Button(ICON_ADD " Event")) {
+            const u8 payload = static_cast<u8>((evColor ? particles::kEventPayloadColor : 0) | (evSize ? particles::kEventPayloadSize : 0) | (evAge ? particles::kEventPayloadAge : 0));
+            editSystem([&](ParticleSystemDef& s) { return pxmodel::addEvent(s, sel_, static_cast<u8>(evOn), evChild, static_cast<u32>(evCount), evInherit, evAt, payload, evUser); });
+        }
+        ImGui::TextDisabled("Position is always inherited; velocity by 'inherit'; colour, size and age from the parent particle. A child needs a name without spaces; a loop is refused. Children spawn one tick later.");
+        ImGui::TextDisabled("Birth, life-fraction and timer rules, payloads and the user scalar run on the CPU tier: the system then leaves the GPU tier (see the Tier column).");
     }
 
     // ---- scalability ----

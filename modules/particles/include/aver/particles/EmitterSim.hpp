@@ -19,17 +19,31 @@ struct SpawnRequest {
     f32  speedScale = 1, sizeScale = 1, lifeScale = 1;
     u32  tint = 0xFFFFFFFFu;     // RGBA8; spawn.colortint replaces it
     u32  seed = 0;               // mixed into the emitter seed; 0 leaves it alone
+    f32  ageFraction = 0;        // the particle is born this far through its life (event payload)
 };
 
-enum class EventType : u8 { Death = 0, Collide = 1 };
+using EventType = EventOn;
 
-// A death or collide the step observed, for the parent emitter's ONEVENT rules.
+// An event the step observed, for the parent emitter's event rules. `rule` indexes ParticleEffect::events for the
+// Spawn / Lifetime / Timer triggers (several rules can share a kind); Death and Collide match by type.
 struct EventRecord {
     EventType type = EventType::Death;
     u32 id = 0;
     Vec3 position;
     Vec3 velocity;
+    u32 rule = 0;
+    u32 tint = 0xFFFFFFFFu;   // the particle's colour at the event, RGBA8 (the payload)
+    f32 sizeRatio = 1.0f;     // its size relative to its birth size, times its own scale
+    f32 ageFraction = 0.0f;   // how far through its life it was
 };
+
+// Fills a child's spawn request from the parent's event record and the rule's payload bits and user scalar.
+inline void applyEventPayload(const EventSpawn& rule, const EventRecord& ev, SpawnRequest& cr) {
+    if (rule.payload & kEventPayloadColor) cr.tint = ev.tint;
+    if (rule.payload & kEventPayloadSize) cr.sizeScale = ev.sizeRatio;
+    if (rule.payload & kEventPayloadAge) cr.ageFraction = ev.ageFraction;
+    if (rule.user != 0.0f) cr.speedScale = rule.user;
+}
 
 class EmitterSim {
 public:
@@ -52,6 +66,7 @@ public:
     // Death and collide events matching an ONEVENT rule are appended to *eventsOut when it is non-null.
     // Compaction keeps the surviving order (a linked ribbon never compacts).
     void step(f32 dt, f32 time, std::vector<EventRecord>* eventsOut);
+    // Spawn-trigger records for particles created since the last step are delivered by that step.
 
     // Live particles; for a linked ribbon the whole slot ring, dead slots having age >= lifetime.
     const std::vector<Particle>& particles() const { return particles_; }
@@ -75,6 +90,9 @@ private:
     Particle make(const SpawnRequest& req, u32 id, const std::vector<ResolvedModule>& spawnMods) const;
     void pushTrail(usize slot, Particle& p);
 
+    EventRecord makeEvent(const Particle& p, EventType type, u32 rule) const;
+
+    std::vector<EventRecord> birthEvents_;   // Spawn-trigger records waiting for the next step
     const ParticleEffect* fx_ = nullptr;
     u32 emitterSeed_ = 1;
     f32 user_[kMaxUserParams][4] = {};

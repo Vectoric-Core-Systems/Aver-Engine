@@ -111,13 +111,29 @@ struct UserParam {
     f32 v[4] = {0, 0, 0, 0};
 };
 
-// ONEVENT death|collide SPAWN child count [inherit k].
+// What fires an event rule. Death and Collide are the 0.7 triggers (ONEVENT records); the rest are CPU tier only (TRIGGER records).
+enum class EventOn : u8 { Death = 0, Collide = 1, Spawn = 2, Lifetime = 3, Timer = 4 };
+
+// Payload fields a child inherits from the parent particle at the event (EventSpawn::payload). Position is always inherited
+// and velocity is the `inheritVelocity` fraction, so those two need no bit.
+inline constexpr u8 kEventPayloadColor = 1;   // the child's tint is the parent's colour at the event (curve times tint)
+inline constexpr u8 kEventPayloadSize  = 2;   // the child's size scale is the parent's size at the event relative to its birth size
+inline constexpr u8 kEventPayloadAge   = 4;   // the child is born as far through its life as the parent was through its own
+inline constexpr u8 kEventPayloadAll   = 7;
+
+// ONEVENT death|collide SPAWN child count [inherit k]; TRIGGER <kind> ... SPAWN child count [inherit k] [color] [size] [age] [user v].
 struct EventSpawn {
-    u8  on = 0;               // 0 death, 1 collide
+    u8  on = 0;               // EventOn
     u32 emitter = 0;          // child emitter index inside the same system
     u32 count = 1;
-    f32 inheritVelocity = 0;  // fraction of the dying particle's velocity the children start with
+    f32 inheritVelocity = 0;  // fraction of the parent particle's velocity the children start with
+    f32 at = 0;               // Lifetime: the life fraction in (0,1) it fires at. Timer: the period in seconds
+    u8  payload = 0;          // kEventPayload* bits
+    f32 user = 0;             // user scalar: multiplies the children's speed when non-zero
 };
+
+// The rule needs the CPU tier: the GPU kernels only raise Death and Collide and carry position and velocity.
+inline bool eventNeedsCpu(const EventSpawn& ev) { return ev.on > static_cast<u8>(EventOn::Collide) || ev.payload != 0 || ev.user != 0.0f; }
 
 // One authored EMITTER: everything about how particles are born, move and fade. The members above the
 // "----" divider below keep their 0.7 names, defaults and meaning, so every existing caller compiles.
@@ -196,6 +212,14 @@ struct ParticleSystemDef {
     std::vector<UserParam> params;
     Scalability scalability;            // the effect's default per tier (format v2: SCALEALL records)
 };
+
+// Event-linked emitters share one tier, so one rule the GPU cannot run puts the whole system on the CPU.
+inline bool systemEventsNeedCpu(const ParticleSystemDef& d) {
+    for (const ParticleEffect& e : d.emitters)
+        for (const EventSpawn& ev : e.events)
+            if (eventNeedsCpu(ev)) return true;
+    return false;
+}
 
 // receivesGI false is Unlit regardless of `lighting`; true means `lighting` (Ambient or Lit).
 inline Lighting effectiveLighting(const ParticleEffect& e) {

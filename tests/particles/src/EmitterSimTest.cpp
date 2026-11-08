@@ -355,6 +355,88 @@ static void testEvents() {
     check(e3.empty(), "an effect with no ONEVENT rules records none");
 }
 
+static void testEventTriggers() {
+    AVER_INFO("--- spawn / lifetime / timer triggers and payloads ---");
+    ParticleEffect fx = baseEffect();
+    fx.lifetimeMin = fx.lifetimeMax = 1.0f;
+    fx.speedMin = fx.speedMax = 0.0f;
+    fx.sizeStart = 10.0f; fx.sizeEnd = 20.0f;
+    EventSpawn born; born.on = 2; born.emitter = 1; born.count = 1; born.payload = kEventPayloadAll;
+    EventSpawn half; half.on = 3; half.emitter = 1; half.count = 1; half.at = 0.5f;
+    EventSpawn tick; tick.on = 4; tick.emitter = 1; tick.count = 1; tick.at = 0.25f;
+    fx.events = {born, half, tick};
+    EmitterSim s;
+    s.init(fx, {}, 1);
+    SpawnRequest r; r.count = 2; r.tint = 0xFF0000FFu;
+    s.spawn(r);
+    std::vector<EventRecord> ev;
+    s.step(0.1f, 0.1f, &ev);
+    u32 births = 0, halves = 0, timers = 0;
+    for (const EventRecord& e : ev) { births += e.type == EventOn::Spawn; halves += e.type == EventOn::Lifetime; timers += e.type == EventOn::Timer; }
+    check(births == 2 && halves == 0 && timers == 0, "the first step reports the two births and nothing else");
+    check(ev[0].rule == 0 && ev[0].tint != 0, "a birth record carries the rule index and a colour");
+    ev.clear();
+    s.step(0.2f, 0.3f, &ev);   // age 0.3: the 0.25 s timer fired once per particle
+    timers = 0; for (const EventRecord& e : ev) timers += e.type == EventOn::Timer && e.rule == 2;
+    check(timers == 2, "the timer fires once per particle when its age passes 0.25 s");
+    ev.clear();
+    s.step(0.25f, 0.55f, &ev);   // age 0.55: passes the 0.5 life fraction and the 0.5 s timer mark
+    halves = timers = 0;
+    for (const EventRecord& e : ev) { halves += e.type == EventOn::Lifetime && e.rule == 1; timers += e.type == EventOn::Timer; if (e.type == EventOn::Lifetime) checkNear(e.ageFraction, 0.55f, 0.01f, "the record holds the life fraction at the event"); }
+    check(halves == 2, "the lifetime-fraction trigger fires once per particle at half its life");
+    check(timers == 2, "and the timer fires again at 0.5 s");
+    ev.clear();
+    s.step(0.1f, 0.65f, &ev);
+    halves = 0; for (const EventRecord& e : ev) halves += e.type == EventOn::Lifetime;
+    check(halves == 0, "the fraction trigger does not fire twice");
+    ev.clear();
+    s.step(0.5f, 1.15f, &ev);   // dies: no timer or fraction record for a particle that is gone
+    timers = 0; for (const EventRecord& e : ev) timers += e.type != EventOn::Death && e.type != EventOn::Timer ? 1u : 0u;
+    check(timers == 0, "nothing but timers/deaths from the last step");
+
+    // Payload: colour is the curve times tint, size the ratio to the birth size, age the life fraction; the user scalar scales speed.
+    SpawnRequest cr;
+    EventSpawn rule; rule.payload = kEventPayloadAll; rule.user = 3.0f;
+    EventRecord rec; rec.tint = 0x11223344u; rec.sizeRatio = 1.5f; rec.ageFraction = 0.4f;
+    applyEventPayload(rule, rec, cr);
+    check(cr.tint == 0x11223344u && cr.sizeScale == 1.5f && cr.ageFraction == 0.4f && cr.speedScale == 3.0f, "applyEventPayload copies each requested field");
+    SpawnRequest plain;
+    applyEventPayload(EventSpawn{}, rec, plain);
+    check(plain.tint == 0xFFFFFFFFu && plain.sizeScale == 1.0f && plain.ageFraction == 0.0f && plain.speedScale == 1.0f, "an empty payload changes nothing");
+
+    // A child born with the age payload starts partway through its life.
+    ParticleEffect child = baseEffect();
+    child.lifetimeMin = child.lifetimeMax = 2.0f;
+    EmitterSim cs;
+    cs.init(child, {}, 5);
+    SpawnRequest aged; aged.ageFraction = 0.5f;
+    cs.spawn(aged);
+    checkNear(cs.particles()[0].age, 1.0f, 1e-4f, "the age payload starts the child half-way through its life");
+
+    // A timer faster than the step fires several times; death records still arrive for a rule-less trigger set.
+    ParticleEffect fast = baseEffect();
+    fast.lifetimeMin = fast.lifetimeMax = 5.0f;
+    EventSpawn t2; t2.on = 4; t2.emitter = 1; t2.at = 0.1f;
+    fast.events = {t2};
+    EmitterSim fs;
+    fs.init(fast, {}, 6);
+    SpawnRequest one; one.count = 1;
+    fs.spawn(one);
+    std::vector<EventRecord> fe;
+    fs.step(0.35f, 0.35f, &fe);
+    check(fe.size() == 3, "a 0.35 s step crosses three 0.1 s timer marks");
+
+    // Which rules the GPU tier cannot run.
+    EventSpawn d0; d0.on = 0; EventSpawn pay; pay.on = 1; pay.payload = kEventPayloadColor;
+    check(!eventNeedsCpu(d0) && eventNeedsCpu(born) && eventNeedsCpu(half) && eventNeedsCpu(tick) && eventNeedsCpu(pay), "only plain death and collide rules run on the GPU");
+    ParticleSystemDef def;
+    def.emitters.resize(2);
+    def.emitters[0].events = {d0};
+    check(!systemEventsNeedCpu(def), "a system of plain rules may use the GPU");
+    def.emitters[1].events = {half};
+    check(systemEventsNeedCpu(def), "one CPU-only rule anywhere puts the system on the CPU");
+}
+
 static void testUserParamBinding() {
     AVER_INFO("--- user parameter binding ---");
     ParticleEffect fx = baseEffect();
@@ -519,6 +601,7 @@ int main() {
     testLinkedRibbon();
     testTrailRing();
     testEvents();
+    testEventTriggers();
     testUserParamBinding();
     testSpawnModulesApplied();
     testWave6Shapes();

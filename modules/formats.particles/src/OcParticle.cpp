@@ -35,6 +35,8 @@
 //   GI on|off                                      -- ParticleEffect::receivesGI (particles DECIDED 4)
 //   MODULE <key> [off] <param>=<number|@Name[.x|.y|.z|.w]> ...   -- the module stack, authored order
 //   ONEVENT death|collide SPAWN <emitter> <count> [inherit <k>]
+//   TRIGGER death|collide|spawn|lifetime <fraction>|timer <seconds> SPAWN <emitter> <count> [inherit <k>] [color] [size] [age] [user <v>]
+//                                                  -- event rules with a payload or a CPU-only trigger; ONEVENT stays the spelling of a plain death/collide rule
 //   CUSTOMSHADER <name>                            -- an embedded particles program (Shaders/<name>.particles.ocgraph) is the emitter's custom stage (GDSHADER reads as an alias)
 //
 // Every v1 record except NAME and TEX is always written (ParticleEffect always carries a value
@@ -183,7 +185,7 @@ const char* blendWord(rhi::BlendMode b) {
 enum class Rec : u8 {
     Header, Name, Param, EmitterHdr,
     Sim, Shape, Render, Sprite, Subuv, SizeCurve, ColorCurve, Blend, Emission, Lifetime, Direction, Speed, Gravity,
-    Damping, Size, ColorStart, ColorEnd, Tex, Gi, Lighting, Sort, Fog, Bounds, Cull, SpawnAt, Module, OnEvent,
+    Damping, Size, ColorStart, ColorEnd, Tex, Gi, Lighting, Sort, Fog, Bounds, Cull, SpawnAt, Module, OnEvent, Trigger,
     CustomShader, Scale, SysScale,
     Other, Count
 };
@@ -203,7 +205,7 @@ Rec classifyLine(std::string_view line, bool sawHeaderYet) {
         {"SPEED", Rec::Speed}, {"GRAVITY", Rec::Gravity}, {"DAMPING", Rec::Damping}, {"SIZE", Rec::Size},
         {"TEX", Rec::Tex}, {"GI", Rec::Gi}, {"LIGHTING", Rec::Lighting}, {"SORT", Rec::Sort}, {"FOG", Rec::Fog},
         {"BOUNDS", Rec::Bounds}, {"CULL", Rec::Cull}, {"SPAWNAT", Rec::SpawnAt}, {"MODULE", Rec::Module},
-        {"ONEVENT", Rec::OnEvent}, {"CUSTOMSHADER", Rec::CustomShader}, {"GDSHADER", Rec::CustomShader},
+        {"ONEVENT", Rec::OnEvent}, {"TRIGGER", Rec::Trigger}, {"CUSTOMSHADER", Rec::CustomShader}, {"GDSHADER", Rec::CustomShader},
         {"SCALE", Rec::Scale}, {"SCALEALL", Rec::SysScale},
     };
     for (const Entry& e : kTable)
@@ -219,7 +221,7 @@ bool isV2OnlyRec(Rec r) {
     switch (r) {
     case Rec::Param: case Rec::EmitterHdr: case Rec::Sim: case Rec::Render: case Rec::Sprite: case Rec::Subuv:
     case Rec::SizeCurve: case Rec::ColorCurve: case Rec::Lighting: case Rec::Sort: case Rec::Fog: case Rec::Bounds:
-    case Rec::Cull: case Rec::SpawnAt: case Rec::Module: case Rec::OnEvent: case Rec::CustomShader: case Rec::Scale: case Rec::SysScale:
+    case Rec::Cull: case Rec::SpawnAt: case Rec::Module: case Rec::OnEvent: case Rec::Trigger: case Rec::CustomShader: case Rec::Scale: case Rec::SysScale:
         return true;
     default:
         return false;
@@ -273,6 +275,9 @@ struct PendingEvent {
     u32 count;
     f32 inherit;
     usize line;
+    f32 at = 0;
+    u8 payload = 0;
+    f32 user = 0;
 };
 struct PendingBind {
     usize emitter, module;
@@ -716,6 +721,38 @@ bool parseOcparticleSystem(std::string_view text, particles::ParticleSystemDef& 
             }
             emitter();
             events.push_back({static_cast<usize>(cur), on, std::string(t[3]), count, inherit, lineNo});
+        } else if (equalsCI(key, "TRIGGER")) {
+            // TRIGGER death|collide|spawn|lifetime <fraction>|timer <seconds> SPAWN <emitter> <count> [inherit <k>] [color] [size] [age] [user <v>]
+            const char* usage = "TRIGGER needs: death|collide|spawn|lifetime <fraction>|timer <seconds> SPAWN <emitter> <count> [inherit <k>] [color] [size] [age] [user <v>]";
+            if (t.size() < 5) return fail(usage);
+            u8 on;
+            usize i = 2;
+            f32 at = 0.0f;
+            if (equalsCI(t[1], "death")) on = 0;
+            else if (equalsCI(t[1], "collide")) on = 1;
+            else if (equalsCI(t[1], "spawn")) on = 2;
+            else if (equalsCI(t[1], "lifetime") || equalsCI(t[1], "timer")) {
+                on = equalsCI(t[1], "timer") ? 4 : 3;
+                if (t.size() < 6 || !strictF32(t[2], at)) return fail(usage);
+                if (on == 3 && !(at > 0.0f && at < 1.0f)) return fail("TRIGGER lifetime needs a fraction strictly between 0 and 1");
+                if (on == 4 && !(at >= 0.01f && at <= 3600.0f)) return fail("TRIGGER timer needs a period from 0.01 to 3600 seconds");
+                i = 3;
+            } else return fail("TRIGGER must say death, collide, spawn, lifetime <fraction> or timer <seconds>, got '" + std::string(t[1]) + "'");
+            if (!equalsCI(t[i], "SPAWN") || i + 2 >= t.size()) return fail(usage);
+            u32 count;
+            if (!strictU32(t[i + 2], count) || count == 0) return fail("TRIGGER count must be a positive integer");
+            f32 inherit = 0.0f, user = 0.0f;
+            u8 payload = 0;
+            for (usize k = i + 3; k < t.size(); ++k) {
+                if (equalsCI(t[k], "inherit") && k + 1 < t.size() && strictF32(t[k + 1], inherit)) ++k;
+                else if (equalsCI(t[k], "user") && k + 1 < t.size() && strictF32(t[k + 1], user)) ++k;
+                else if (equalsCI(t[k], "color")) payload |= particles::kEventPayloadColor;
+                else if (equalsCI(t[k], "size")) payload |= particles::kEventPayloadSize;
+                else if (equalsCI(t[k], "age")) payload |= particles::kEventPayloadAge;
+                else return fail("TRIGGER: unexpected '" + std::string(t[k]) + "'");
+            }
+            emitter();
+            events.push_back({static_cast<usize>(cur), on, std::string(t[i + 1]), count, inherit, lineNo, at, payload, user});
         }
         // Any other key: forward-compat, unknown record. Skipped here, preserved verbatim by the writers' merge.
     }
@@ -761,6 +798,9 @@ bool parseOcparticleSystem(std::string_view text, particles::ParticleSystemDef& 
         es.emitter = static_cast<u32>(child);
         es.count = ev.count;
         es.inheritVelocity = ev.inherit;
+        es.at = ev.at;
+        es.payload = ev.payload;
+        es.user = ev.user;
         def.emitters[ev.emitter].events.push_back(es);
     }
     if (detectEventCycle(def)) {
@@ -975,6 +1015,19 @@ EmitterText buildEmitterText(const particles::ParticleSystemDef& def, usize inde
     R(Rec::Scale) = scalabilityText("SCALE", e.scalability);
     for (const EventSpawn& ev : e.events) {
         const std::string child = ev.emitter < def.emitters.size() ? def.emitters[ev.emitter].name : std::string();
+        if (particles::eventNeedsCpu(ev)) {
+            static const char* kOn[] = {"death", "collide", "spawn", "lifetime ", "timer "};
+            std::string line = std::string("TRIGGER ") + kOn[std::min<u8>(ev.on, 4)];
+            if (ev.on == 3 || ev.on == 4) line += num(ev.at);
+            line += " SPAWN " + child + " " + std::to_string(ev.count);
+            if (ev.inheritVelocity != 0.0f) line += " inherit " + num(ev.inheritVelocity);
+            if (ev.payload & particles::kEventPayloadColor) line += " color";
+            if (ev.payload & particles::kEventPayloadSize) line += " size";
+            if (ev.payload & particles::kEventPayloadAge) line += " age";
+            if (ev.user != 0.0f) line += " user " + num(ev.user);
+            R(Rec::Trigger) += line + "\n";
+            continue;
+        }
         R(Rec::OnEvent) += std::string("ONEVENT ") + (ev.on == 0 ? "death" : "collide") + " SPAWN " + child + " " +
                            std::to_string(ev.count) + (ev.inheritVelocity != 0.0f ? " inherit " + num(ev.inheritVelocity) : std::string()) + "\n";
     }
@@ -999,7 +1052,7 @@ std::string freshEmitterBody(const EmitterText& t) {
         Rec::Emission, Rec::Lifetime, Rec::Direction, Rec::Speed, Rec::Gravity, Rec::Damping, Rec::Size, Rec::SizeCurve,
         Rec::ColorStart, Rec::ColorEnd, Rec::ColorCurve, Rec::Other /*blank*/,
         Rec::Lighting, Rec::Gi, Rec::Sort, Rec::Fog, Rec::Bounds, Rec::Cull, Rec::SpawnAt, Rec::Tex, Rec::CustomShader,
-        Rec::Module, Rec::OnEvent, Rec::Scale,
+        Rec::Module, Rec::OnEvent, Rec::Trigger, Rec::Scale,
     };
     std::string out;
     for (Rec r : kOrder) {
@@ -1270,7 +1323,7 @@ std::string writeV2Text(const particles::ParticleSystemDef& def, std::string_vie
             Rec::Sim, Rec::Shape, Rec::Render, Rec::Sprite, Rec::Subuv, Rec::Blend, Rec::Emission, Rec::Lifetime,
             Rec::Direction, Rec::Speed, Rec::Gravity, Rec::Damping, Rec::Size, Rec::SizeCurve, Rec::ColorStart,
             Rec::ColorEnd, Rec::ColorCurve, Rec::Lighting, Rec::Gi, Rec::Sort, Rec::Fog, Rec::Bounds, Rec::Cull,
-            Rec::SpawnAt, Rec::Tex, Rec::CustomShader, Rec::Module, Rec::OnEvent, Rec::Scale};
+            Rec::SpawnAt, Rec::Tex, Rec::CustomShader, Rec::Module, Rec::OnEvent, Rec::Trigger, Rec::Scale};
         for (Rec r : kFlushOrder) {
             if (placed[static_cast<usize>(idx)][static_cast<usize>(r)]) continue;
             placed[static_cast<usize>(idx)][static_cast<usize>(r)] = true;

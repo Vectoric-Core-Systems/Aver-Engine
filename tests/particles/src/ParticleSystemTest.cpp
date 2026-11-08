@@ -236,6 +236,31 @@ int main() {
         check(alive == 6, std::string("events: three deaths x two = six children one tick later (child ") + (childFirst ? "first)" : "second)"));
     }
 
+    // ---- event triggers: birth and timer rules route to the child like death rules do (CPU tier) ----
+    for (int kind = 2; kind <= 4; kind += 2) {
+        ParticleEffectLibrary lib;
+        ParticleSystemDef def;
+        ParticleEffect parent, child;
+        parent.name = "Parent"; child.name = "Child";
+        parent.emissionRate = 0.0f; parent.burstCount = 3; parent.maxParticles = 50;
+        parent.lifetimeMin = parent.lifetimeMax = 5.0f;
+        parent.speedMin = parent.speedMax = 0.0f;
+        child.emissionRate = 0.0f; child.burstCount = 0; child.maxParticles = 50;
+        child.lifetimeMin = child.lifetimeMax = 10.0f;
+        child.speedMin = child.speedMax = 0.0f;
+        EventSpawn ev; ev.on = static_cast<u8>(kind); ev.emitter = 1; ev.count = 2; ev.at = 0.5f;
+        parent.events.push_back(ev);
+        def.emitters = {parent, child};
+        lib.setSystem(90 + static_cast<u64>(kind), def);
+        const scene::Entity e = spawnEmitterEntity(world, 90 + static_cast<u64>(kind));
+        ParticleSystem sys;
+        sys.setEffectLibrary(&lib);
+        for (int i = 0; i < 6; ++i) sys.tick(world, 0.25f);
+        u32 alive = 0;
+        sys.forEachInstance([&](const InstanceView& v) { if (v.entity == e && v.effect->name == "Child") alive += v.aliveHint; });
+        check(alive == (kind == 2 ? 6u : 12u), kind == 2 ? "birth rule: three births x two children" : "timer rule: marks at 0.5 s and 1 s, three parents, two children each");
+    }
+
     // ---- wave 10: script operations: parameters, bursts, modifiers, stop ----
     {
         ParticleEffectLibrary lib;

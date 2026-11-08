@@ -403,12 +403,15 @@ void ParticleEditor::tickPreview(f32 dt) {
         events.clear();
         sim.step(dt, previewTime_, fx.events.empty() ? nullptr : &events);
         for (const particles::EventRecord& ev : events) {
-            for (const particles::EventSpawn& rule : fx.events) {
+            for (usize ri = 0; ri < fx.events.size(); ++ri) {
+                const particles::EventSpawn& rule = fx.events[ri];
                 if (rule.on != static_cast<u8>(ev.type) || rule.emitter >= n || rule.emitter == i) continue;
+                if (rule.on > static_cast<u8>(particles::EventOn::Collide) && ev.rule != ri) continue;
                 particles::SpawnRequest cr;
                 cr.xf = Mat4::translation(ev.position);
                 cr.count = rule.count;
                 cr.addVelocity = ev.velocity * rule.inheritVelocity;
+                particles::applyEventPayload(rule, ev, cr);
                 cr.seed = (ev.id * 2654435761u) ^ (rule.emitter + 1u);
                 if (nextInbox_[rule.emitter].size() < 4096) nextInbox_[rule.emitter].push_back(cr);
             }

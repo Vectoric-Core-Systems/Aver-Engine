@@ -593,6 +593,50 @@ static void testV2Refusals() {
     }
 }
 
+static void testTriggers() {
+    AVER_INFO("=== .ocparticle: TRIGGER records (spawn, lifetime, timer, payloads) ===");
+    const char* text = "OCPARTICLE 2\nEMITTER A\n"
+                       "ONEVENT death SPAWN B 2\n"
+                       "TRIGGER spawn SPAWN B 1 inherit 0.5 color size age user 2\n"
+                       "TRIGGER lifetime 0.25 SPAWN B 3\n"
+                       "TRIGGER timer 0.5 SPAWN B 1 color\n"
+                       "TRIGGER collide SPAWN B 1 size\n"
+                       "EMITTER B\nSPAWNAT off\n";
+    particles::ParticleSystemDef d; std::string err;
+    check(fmt::parseOcparticleSystem(text, d, nullptr, &err), "parse: " + err);
+    const auto& ev = d.emitters[0].events;
+    check(ev.size() == 5, "five rules");
+    if (ev.size() == 5) {
+        check(ev[0].on == 0 && ev[0].payload == 0 && ev[0].user == 0.0f, "the plain ONEVENT is unchanged");
+        check(ev[1].on == 2 && ev[1].payload == particles::kEventPayloadAll && near(ev[1].inheritVelocity, 0.5f) && near(ev[1].user, 2.0f), "spawn with every payload field and a user scalar");
+        check(ev[2].on == 3 && near(ev[2].at, 0.25f) && ev[2].count == 3, "lifetime fraction");
+        check(ev[3].on == 4 && near(ev[3].at, 0.5f) && ev[3].payload == particles::kEventPayloadColor, "timer period and colour payload");
+        check(ev[4].on == 1 && ev[4].payload == particles::kEventPayloadSize, "a collide rule with a payload");
+    }
+    const std::string t1 = fmt::writeOcparticleSystem(d);
+    particles::ParticleSystemDef d2;
+    check(fmt::parseOcparticleSystem(t1, d2, nullptr, &err), "reparse: " + err);
+    check(fmt::writeOcparticleSystem(d2) == t1, "write -> parse -> write is byte-identical");
+    check(d2.emitters[0].events.size() == 5 && d2.emitters[0].events[3].on == 4 && near(d2.emitters[0].events[3].at, 0.5f), "the rules survive the round trip");
+    check(t1.find("ONEVENT death SPAWN B 2") != std::string::npos, "a plain death rule is still written as ONEVENT");
+
+    particles::ParticleSystemDef plain; check(fmt::parseOcparticleSystem(kSystemV2, plain, nullptr, &err), "plain v2 parses");
+    check(fmt::writeOcparticleSystem(plain).find("TRIGGER") == std::string::npos, "and writes no TRIGGER record");
+
+    const struct { const char* text; const char* wantIn; } bad[] = {
+        {"OCPARTICLE 2\nEMITTER A\nTRIGGER lifetime 1.5 SPAWN A 1\n", "fraction"},
+        {"OCPARTICLE 2\nEMITTER A\nTRIGGER timer 0 SPAWN A 1\n", "period"},
+        {"OCPARTICLE 2\nEMITTER A\nTRIGGER sometimes SPAWN A 1\n", "TRIGGER"},
+        {"OCPARTICLE 2\nEMITTER A\nTRIGGER spawn SPAWN A 1 shiny\n", "unexpected"},
+        {"OCPARTICLE 2\nEMITTER A\nTRIGGER spawn SPAWN Ghost 1\n", "does not exist"},
+        {"OCPARTICLE 2\nEMITTER A\nTRIGGER spawn SPAWN B 1\nEMITTER B\nTRIGGER timer 1 SPAWN A 1\n", "cycle"},
+    };
+    for (const auto& c : bad) {
+        particles::ParticleSystemDef x; std::string e;
+        check(!fmt::parseOcparticleSystem(c.text, x, nullptr, &e) && e.find(c.wantIn) != std::string::npos, std::string("refused with '") + c.wantIn + "': " + e);
+    }
+}
+
 static void testDefaultsAreV1() {
     AVER_INFO("=== .ocparticle: a default effect fits version 1 ===");
     particles::ParticleSystemDef d;
@@ -740,6 +784,7 @@ int main() {
     testV2Refusals();
     testDefaultsAreV1();
     testWave6Format();
+    testTriggers();
 
     AVER_INFO("==================================================");
     AVER_INFO("OcParticle tests done: {} failure(s)", g_failures);
