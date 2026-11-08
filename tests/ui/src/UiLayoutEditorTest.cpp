@@ -389,6 +389,207 @@ int main() {
         check(uiWriteLayout(ed.doc()) == before, "dragging inside an overlay or switcher does not reorder");
     }
 
+    AVER_INFO("=== palette search, device presets, safe zone ===");
+    {
+        check(uiEditorPaletteMatch("Uniform Grid Panel", "") && uiEditorPaletteMatch("Uniform Grid Panel", "grid") && uiEditorPaletteMatch("Uniform Grid Panel", "PANEL uni"),
+              "palette search: empty matches all, words match in any order and case");
+        check(!uiEditorPaletteMatch("Button", "grid") && !uiEditorPaletteMatch("Button", "butter"), "and every word must be found");
+        const std::vector<UiDevicePreset>& presets = uiEditorDevicePresets();
+        check(presets.size() >= 8 && presets[0].width == 1920 && presets[0].height == 1080, "device presets start with 1080p");
+        const UiRect safe = uiEditorSafeRect(UiInsets{0.05f, 0.05f, 0.05f, 0.05f}, 1000, 500);
+        check(approx(safe.x, 50) && approx(safe.y, 25) && approx(safe.w, 900) && approx(safe.h, 450), "the safe rectangle removes the fractions from each edge");
+
+        const std::string f = tempFile("device.ocui");
+        writeFileText(f, uiStarterLayoutText());
+        UiLayoutEditor ed(f);
+        check(ed.devicePreset() == 0, "a new tab previews at the first preset");
+        i32 phone = -1;
+        for (usize i = 0; i < presets.size(); ++i) if (std::string(presets[i].name) == "Phone portrait") phone = static_cast<i32>(i);
+        ed.setDevicePreset(phone);
+        ed.layoutPreview(est);
+        check(ed.devicePreset() == phone && ed.preview().viewport().w == 1080 && ed.preview().viewport().h == 2340, "a device preset sets the preview size");
+        const UiRect zone = ed.safeZoneRect();
+        check(zone.y > 0 && zone.x == 0 && zone.h < 2340 && zone.w == 1080, "and the phone's safe zone keeps the notch and the home bar out");
+        ed.setPreviewSize(777, 555);
+        check(ed.devicePreset() == -1 && approx(ed.safeZoneRect().x, 777 * 0.05f), "a custom size is no preset and gets a 5% safe zone");
+        ed.setPreviewSize(1920, 1080);
+        check(ed.devicePreset() >= 0, "a size that matches a preset selects it again");
+    }
+
+    AVER_INFO("=== multi-select ===");
+    {
+        const std::string f = tempFile("multi.ocui");
+        writeFileText(f, uiStarterLayoutText());
+        UiLayoutEditor ed(f);
+        const i32 a = ed.addWidget(UiWidgetKind::Button);
+        ed.select(0);
+        const i32 b = ed.addWidget(UiWidgetKind::Button);
+        ed.select(0);
+        const i32 c = ed.addWidget(UiWidgetKind::Text);
+        const std::string an = ed.doc().nodes[static_cast<usize>(a)].props.name, bn = ed.doc().nodes[static_cast<usize>(b)].props.name;
+        ed.select(uiLayoutFind(ed.doc(), an));
+        ed.toggleSelect(uiLayoutFind(ed.doc(), bn));
+        check(ed.selection().size() == 2 && ed.isSelected(uiLayoutFind(ed.doc(), an)) && ed.isSelected(uiLayoutFind(ed.doc(), bn)), "ctrl-click adds a second widget");
+        check(ed.selected() == uiLayoutFind(ed.doc(), bn), "the toggled one becomes the primary");
+        ed.toggleSelect(uiLayoutFind(ed.doc(), bn));
+        check(ed.selection().size() == 1 && ed.selected() == uiLayoutFind(ed.doc(), an), "toggling the primary off hands over to the other");
+        ed.toggleSelect(uiLayoutFind(ed.doc(), bn));
+        (void)c;
+
+        const bool set = ed.setPropertyOnSelection("width", "333");
+        check(set && approx(ed.doc().nodes[static_cast<usize>(uiLayoutFind(ed.doc(), an))].props.width, 333) &&
+                  approx(ed.doc().nodes[static_cast<usize>(uiLayoutFind(ed.doc(), bn))].props.width, 333),
+              "a property set on a multi-selection reaches every selected widget");
+        ed.undo();
+        check(!approx(ed.doc().nodes[static_cast<usize>(uiLayoutFind(ed.doc(), an))].props.width, 333) &&
+                  !approx(ed.doc().nodes[static_cast<usize>(uiLayoutFind(ed.doc(), bn))].props.width, 333),
+              "and is one undo entry");
+        check(!ed.setPropertyOnSelection("noSuchProp", "1") && !ed.setPropertyOnSelection("value", "1"), "an unknown property, or one no selected widget has, records nothing");
+        const f32 x0 = ed.doc().nodes[static_cast<usize>(uiLayoutFind(ed.doc(), an))].props.offsets.left;
+        ed.moveSelectionBy(15, 0);
+        check(approx(ed.doc().nodes[static_cast<usize>(uiLayoutFind(ed.doc(), an))].props.offsets.left, x0 + 15), "moving the selection moves all of it");
+        ed.undo();
+        ed.select(uiLayoutFind(ed.doc(), an));
+        ed.toggleSelect(uiLayoutFind(ed.doc(), bn));
+        const usize count = ed.doc().nodes.size();
+        ed.deleteSelection();
+        check(ed.doc().nodes.size() == count - 2 && uiLayoutFind(ed.doc(), an) < 0 && uiLayoutFind(ed.doc(), bn) < 0 && ed.doc().valid(), "delete removes the whole selection");
+        ed.undo();
+        check(ed.doc().nodes.size() == count, "in one undo");
+        ed.select(0);
+        ed.deleteSelection();
+        check(ed.doc().nodes.size() == count, "the root is never deleted");
+        ed.selectRange(1, 3);
+        check(ed.selection().size() == 3 && ed.selected() == 3, "shift-click selects a range, the clicked end primary");
+    }
+
+    AVER_INFO("=== animation timeline ===");
+    {
+        const std::string f = tempFile("timeline.ocui");
+        writeFileText(f, uiStarterLayoutText());
+        UiLayoutEditor ed(f);
+        const i32 btn = uiLayoutFind(ed.doc(), "PlayButton");
+        ed.select(btn);
+        const std::string anim = ed.addAnimation("Intro");
+        check(anim == "Intro" && ed.animationNames().size() == 1 && ed.timelineAnimation() == "Intro", "a new animation has one opacity track and becomes current");
+        check(ed.addAnimation("Intro").empty(), "a taken name is refused");
+        const std::string second = ed.addAnimation();
+        check(second == "Anim", "an empty name gets a free one");
+        ed.deleteAnimation("Anim");
+        check(ed.animationNames().size() == 1, "and an animation can be deleted");
+        ed.setTimelineAnimation("Intro");
+
+        const std::vector<UiTimelineTrack> tracks = ed.animationTracks("Intro");
+        check(tracks.size() == 1 && tracks[0].widget == "PlayButton" && tracks[0].prop == UiAnimProp::Opacity && tracks[0].keys.size() == 2 &&
+                  approx(tracks[0].keys[0].v[0], 0) && approx(tracks[0].keys[1].v[0], 1) && approx(ed.animationLength("Intro"), 1),
+              "the track runs 0 -> 1 over a second");
+
+        check(ed.addTrack("Intro", btn, UiAnimProp::Translate) && !ed.addTrack("Intro", btn, UiAnimProp::Translate) && !ed.addTrack("Intro", 999, UiAnimProp::Tint),
+              "a second track is added; the same widget and property twice, or a missing widget, is refused");
+        check(ed.setKeyValue("Intro", 1, 1, "40,0") && approx(ed.animationTracks("Intro")[1].keys[1].v[0], 40), "a key value is set from its token");
+        check(!ed.setKeyValue("Intro", 1, 1, "banana") && !ed.setKeyValue("Intro", 1, 9, "1,1"), "a bad token or key is refused");
+        const i32 mid = ed.addKey("Intro", 1, 0.5f);
+        check(mid == 1 && approx(ed.animationTracks("Intro")[1].keys[1].v[0], 20), "a key added between two samples the curve there");
+        check(ed.addKey("Intro", 1, 0.5f) < 0, "two keys cannot share a time");
+        const i32 moved = ed.moveKey("Intro", 1, 1, 2.0f);
+        const std::vector<UiTimelineTrack> after = ed.animationTracks("Intro");
+        check(moved == 2 && approx(after[1].keys[2].time, 2.0f) && approx(ed.animationLength("Intro"), 2.0f) && after[1].keys[0].time < after[1].keys[1].time,
+              "moving a key past another keeps them ordered and stretches the animation");
+        check(ed.setKeyEase("Intro", 1, 0, UiEase::QuadOut) && ed.animationTracks("Intro")[1].keys[0].ease == UiEase::QuadOut && !ed.setKeyEase("Intro", 1, 0, UiEase::QuadOut),
+              "a key's ease is set, and setting it again records nothing");
+        check(ed.deleteKey("Intro", 1, 2) && ed.animationTracks("Intro")[1].keys.size() == 2, "a key is deleted");
+        ed.deleteKey("Intro", 1, 1);
+        check(!ed.deleteKey("Intro", 1, 0), "the last key of a track stays");
+        check(ed.deleteTrack("Intro", 1) && ed.animationTracks("Intro").size() == 1, "a track is deleted");
+
+        std::string written = uiWriteLayout(ed.doc());
+        UiLayoutDoc back;
+        std::string err;
+        check(uiParseLayout(written, back, &err) && uiWriteLayout(back) == written, "the edited document round-trips: " + err);
+
+        // The preview plays it.
+        ed.layoutPreview(est);
+        const UiWidgetId pw = ed.previewWidget(btn);
+        ed.timelineSeek(0.5f);
+        check(ed.preview().get(pw)->fx.mask & kFxOpacity && approx(ed.preview().get(pw)->fx.opacity, 0.5f), "scrubbing applies the time to the preview widget");
+        check(approx(ed.timelineTime(), 0.5f) && !ed.timelinePlaying(), "and does not play");
+        ed.setPropertyOnSelection("width", "123");
+        check(approx(ed.preview().get(ed.previewWidget(btn))->fx.opacity, 0.5f), "an edit rebuilds the preview and keeps the scrubbed time");
+        ed.timelinePlay(true);
+        ed.timelineTick(0.25f);
+        check(ed.timelinePlaying() && approx(ed.timelineTime(), 0.75f), "play advances with the tick");
+        ed.timelineTick(0.5f);
+        check(!ed.timelinePlaying() && approx(ed.timelineTime(), 1.0f) && approx(ed.preview().get(ed.previewWidget(btn))->fx.opacity, 1.0f),
+              "and stops at the end holding the last values");
+        ed.setTimelineLoop(true);
+        ed.timelinePlay(true);
+        ed.timelineTick(1.25f);
+        check(ed.timelinePlaying() && approx(ed.timelineTime(), 0.25f), "looping wraps");
+        ed.timelinePlay(false);
+        check(!ed.timelinePlaying(), "pause");
+
+        check(ed.renameAnimation("Intro", "Appear") && ed.timelineAnimation() == "Appear" && !ed.renameAnimation("Appear", "") && ed.animationNames()[0] == "Appear", "rename");
+        ed.undo();
+        check(ed.animationNames()[0] == "Intro", "undo puts the name back");
+        ed.deleteAnimation("Intro");
+        check(ed.timelineAnimation().empty() && ed.animationNames().empty(), "deleting the current animation clears the timeline");
+        ed.undo();
+        check(ed.animationNames().size() == 1, "and undo brings it back");
+    }
+
+    AVER_INFO("=== bindings and events ===");
+    {
+        const std::string f = tempFile("binds.ocui");
+        writeFileText(f, uiStarterLayoutText());
+        UiLayoutEditor ed(f);
+        const i32 btn = uiLayoutFind(ed.doc(), "PlayButton");
+        check(ed.addBinding(btn, "text", "Player.Name", "Hi {0}") == 0 && ed.doc().binds[0].path == "vm:Player.Name" && ed.doc().binds[0].widget == "PlayButton" &&
+                  ed.doc().binds[0].rest == std::vector<std::string>({"format", "Hi {0}"}),
+              "a binding is recorded with its source prefix and format");
+        check(ed.addBinding(btn, "visible", "var:Alive", "", true) == 1 && ed.doc().binds[1].rest == std::vector<std::string>({"mode", "change"}), "a change-mode variable binding");
+        check(ed.addBinding(btn, "nonsense", "A") < 0 && ed.addBinding(btn, "text", "") < 0 && ed.addBinding(99, "text", "A") < 0, "an unknown property, an empty path and a missing widget are refused");
+        check(ed.setBinding(0, "text", "var:Name", "", false) && ed.doc().binds[0].path == "var:Name" && ed.doc().binds[0].rest.empty(), "a binding is edited");
+        const std::string text = uiWriteLayout(ed.doc());
+        UiLayoutDoc back;
+        check(uiParseLayout(text, back) && back.binds.size() == 2 && uiWriteLayout(back) == text, "bindings round-trip through the file");
+        check(ed.deleteBinding(0) && ed.doc().binds.size() == 1 && !ed.deleteBinding(5), "a binding is deleted");
+
+        check(ed.addEvent(btn, "click", "command", "game.start") == 0 && ed.addEvent(btn, "hover", "method", "Hud.Hover", {"x"}) == 1, "events are recorded");
+        check(ed.addEvent(btn, "bogus", "command", "x") < 0 && ed.addEvent(btn, "click", "bogus", "x") < 0 && ed.addEvent(btn, "click", "command", "") < 0 && ed.addEvent(99, "click", "command", "x") < 0,
+              "a bad event, action, target or widget is refused");
+        check(ed.setEvent(1, "unhover", "graph", "OnLeave", {}) && ed.doc().events[1].event == "unhover" && ed.doc().events[1].action == "graph", "an event is edited");
+        ed.layoutPreview(est);
+        check(ed.previewErrors().empty(), "the preview builds the routes without complaint");
+        ed.select(btn);
+        check(ed.renameSelected("StartButton") && ed.doc().events[0].widget == "StartButton" && ed.doc().binds[0].widget == "StartButton", "renaming a widget updates its bindings and events");
+        check(ed.deleteEvent(0) && ed.doc().events.size() == 1, "an event is deleted");
+        ed.deleteSelected();
+        check(ed.doc().events.empty() && ed.doc().binds.empty() && ed.doc().valid(), "deleting a widget takes its records with it");
+    }
+
+    AVER_INFO("=== widget state preview ===");
+    {
+        const std::string f = tempFile("state.ocui");
+        writeFileText(f, uiStarterLayoutText());
+        UiLayoutEditor ed(f);
+        const i32 btn = uiLayoutFind(ed.doc(), "PlayButton");
+        ed.select(btn);
+        ed.layoutPreview(est);
+        ed.setPreviewState(1);
+        ed.applyPreviewState();
+        check(ed.preview().get(ed.previewWidget(btn))->hovered && !ed.preview().get(ed.previewWidget(btn))->pressed, "hovered state");
+        ed.setPreviewState(2);
+        ed.applyPreviewState();
+        check(ed.preview().get(ed.previewWidget(btn))->pressed, "pressed state");
+        ed.setPreviewState(3);
+        ed.applyPreviewState();
+        check(!ed.preview().get(ed.previewWidget(btn))->enabled && !ed.preview().get(ed.previewWidget(btn))->hovered, "disabled state");
+        ed.setPreviewState(0);
+        ed.applyPreviewState();
+        check(ed.preview().get(ed.previewWidget(btn))->enabled && ed.doc().nodes[static_cast<usize>(btn)].props.enabled, "back to normal; the document was never touched");
+        check(ed.setProperty(btn, "bgHoverColor", "#112233") && ed.doc().nodes[static_cast<usize>(btn)].props.bgHoverColor == uiRgba(0x11, 0x22, 0x33), "per-state colours are properties");
+    }
+
     if (g_failures) {
         AVER_ERROR("{} check(s) failed", g_failures);
         return 1;

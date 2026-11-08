@@ -51,6 +51,9 @@ struct UiWidgetProps {
     UiHitMode hit = UiHitMode::Auto;
     std::string style;                       // named style in the theme; empty = the kind's default
     u32 bgColor = 0, textColor = 0, accentColor = 0;   // 0 = use the theme (alpha-zero is "unset")
+    // Colours for the other states (0 = derive them from the normal colour as before): bgColor and textColor are Normal.
+    u32 bgHoverColor = 0, bgPressedColor = 0, bgDisabledColor = 0;
+    u32 textHoverColor = 0, textPressedColor = 0, textDisabledColor = 0;
     f32 borderWidth = -1.0f;                 // design px; <0 = the style's
     u32 borderColor = 0;                     // 0 = the style's
 

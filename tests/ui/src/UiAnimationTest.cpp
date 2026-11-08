@@ -270,6 +270,40 @@ int main() {
         check(!list2.vertices().empty() && (list2.vertices()[0].rgba & 0xFF) == 200, "an animated colour replaces the authored one in the draw");
     }
 
+    AVER_INFO("=== per-state colours ===");
+    {
+        UiTree t;
+        const UiWidgetId id = t.create(UiWidgetKind::Panel, 0, "Root");
+        UiWidget* w = t.get(id);
+        w->bgColor = uiRgba(10, 20, 30, 255);
+        w->bgHoverColor = uiRgba(200, 0, 0, 255);
+        w->bgPressedColor = uiRgba(0, 200, 0, 255);
+        w->bgDisabledColor = uiRgba(0, 0, 200, 255);
+        t.setViewport(UiRect{0, 0, 100, 100});
+        t.layout(g_metrics);
+        const auto firstRed = [&]() {
+            UiDrawList list;
+            UiDrawListPainter p(list, nullptr);
+            t.draw(p);
+            return list.vertices().empty() ? 0u : list.vertices()[0].rgba & 0xFF;
+        };
+        check(firstRed() == 10, "normal uses bgColor");
+        w->hovered = true;
+        check(firstRed() == 200, "hovered uses bgHoverColor");
+        w->pressed = true;
+        check(firstRed() == 0, "pressed uses bgPressedColor");
+        w->hovered = w->pressed = false;
+        w->enabled = false;
+        UiDrawList list;
+        UiDrawListPainter p(list, nullptr);
+        t.draw(p);
+        check(!list.vertices().empty() && ((list.vertices()[0].rgba >> 16) & 0xFF) > 150, "disabled uses bgDisabledColor");
+        w->enabled = true;
+        w->bgHoverColor = 0;
+        w->hovered = true;
+        check(firstRed() != 200 && firstRed() > 10, "with no state colour the old derived shade applies");
+    }
+
     if (g_failures) {
         AVER_ERROR("{} check(s) failed", g_failures);
         return 1;

@@ -239,6 +239,8 @@ anchor 2). Enum names are lower case.
   `uv`, `imageMode` (`stretch fit`), `tint`, `placeholder`, `maxLength`, `masked`. The text properties are
   explained in [GAME_UI_TEXT.md](GAME_UI_TEXT.md); a style (`UiStyle`) can also set `fontFamily` and `bold`.
 * **Value:** `value`, `minValue`, `maxValue`, `step`, `showValue`, `checked`, `selected`, `items`, `rowHeight`.
+* **States:** `bgHoverColor`, `bgPressedColor`, `bgDisabledColor`, `textHoverColor`, `textPressedColor`, `textDisabledColor`
+  (a colour for that state; none = derive it from `bgColor` / `textColor` as before).
 * **Transform:** `renderTranslate`, `renderRotation`, `renderScale`, `renderPivot` (draw-only, see Animation).
 * **Navigation:** `focusable`, `tabIndex`, `navUp`, `navDown`, `navLeft`, `navRight`, `command`.
 * **Accessibility:** `accessName` (the label a narrator speaks; empty = derived from the widget's text or its label sibling).
@@ -361,6 +363,32 @@ hover, click, slider drag, keyboard navigation, text entry; the last event is sh
 whole-document snapshots; property drags are one undo entry. Renaming a widget rewrites `navUp/..` and
 `defaultFocus` references to it.
 
+### Animation, bindings and events in the designer
+
+A bottom panel (toolbar toggle "Animation / bindings / events"; its height drags) holds three tabs. Everything in them
+is an edit of the document with the tab's undo (one entry per edit); the preview rebuilds after each and keeps the
+scrubbed time.
+
+* **Animation**: pick or create an animation (**New** makes an opacity track for the selected widget), **Add track**
+  (property combo + the selected widget), a ruler and one row per track with its keys. Click the ruler to scrub (the
+  preview widgets take the values at once), **Play / Pause**, **Loop**, **|<**, a time field and a px/s zoom. Click a
+  key to select it; drag it to move (10 ms snap, Shift = free); double-click a row to add a key (it samples the curve
+  there); right-click for add / delete key / delete track. The row under the timeline edits the key: time, value
+  (a number, `x,y` or `#RRGGBBAA`) and the ease to the next key. Rotation and translate show in the preview; text stays
+  upright when its widget rotates.
+* **Bindings**: a table of every `BIND` (widget, property, `vm:`/`var:` path, format, on-change) with inline edits, plus a
+  row that adds one for the selected widget. In the inspector a bound property shows its path, and any property has a
+  **bind** button that adds a binding and jumps to this tab.
+* **Events**: the same for `EVENT` (widget, event, action command / graph / method, target, arguments).
+
+Other designer work in this step: **palette search** (words in any order), **device presets** with a **safe zone** overlay
+(the preset's insets, else 5%), **multi-select** (Ctrl+click on the canvas or hierarchy, Shift+click for a range in the
+hierarchy; the inspector, drag, arrow keys and Delete apply to all selected; a property edit goes to every selected
+widget it applies to as one undo entry) and **per-state colours**: the inspector's **States** section previews the selected
+widget as normal / hovered / pressed / disabled and edits `bgHoverColor`, `bgPressedColor`, `bgDisabledColor`,
+`textHoverColor`, `textPressedColor`, `textDisabledColor` (none = the derived shade as before). Not done: a theme editor
+(themes are still the built-in dark / light / contrast and `.octheme` sheets edited as files).
+
 ## Visual-script nodes
 
 The nodes are named `AN_*` as the plan asks (the existing catalog has no prefix; see "Wiring" for the catalog
@@ -434,6 +462,8 @@ frame before the graphs tick.
   system font is needed): `UiUnicodeTest`, `UiBidiTest`, `UiShapingTest`, `UiLineBreakTest`, `UiFontTest`,
   `UiGlyphAtlasTest`, `UiTextLayoutTest`, `UiTextTreeTest` and `UiTextAbiTest`; `tests/render.ui` checks the atlas
   upload and the page tokens; `tests/editor` has `FontSetEditorTest`.
+* `UiLayoutEditorTest` also covers the designer's headless edits: palette search, device presets and the safe zone,
+  multi-select, the timeline (tracks, keys, scrub, play, loop, rename, undo), bindings, events and the state preview.
 * `UiLayoutEditorTest`: move/resize/anchor-preset maths, the tab's load/save/dirty/undo against a real file,
   placement by drop, drag move and reorder, edge drag, duplicate/delete/reparent, rename following references.
 

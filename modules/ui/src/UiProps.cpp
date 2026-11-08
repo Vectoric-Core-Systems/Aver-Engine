@@ -209,6 +209,7 @@ std::vector<UiPropDesc> build() {
     const char* kNav = "Navigation";
     const char* kRoot = "Root";
     const char* kXform = "Transform";
+    const char* kStates = "States";
 
     // ---- placement ----
     {
@@ -280,6 +281,12 @@ std::vector<UiPropDesc> build() {
     v.push_back(cprop("bgColor", kLook, &P::bgColor));
     v.push_back(cprop("textColor", kLook, &P::textColor));
     v.push_back(cprop("accentColor", kLook, &P::accentColor));
+    v.push_back(cprop("bgHoverColor", kStates, &P::bgHoverColor));
+    v.push_back(cprop("bgPressedColor", kStates, &P::bgPressedColor));
+    v.push_back(cprop("bgDisabledColor", kStates, &P::bgDisabledColor));
+    v.push_back(cprop("textHoverColor", kStates, &P::textHoverColor));
+    v.push_back(cprop("textPressedColor", kStates, &P::textPressedColor));
+    v.push_back(cprop("textDisabledColor", kStates, &P::textDisabledColor));
     v.push_back(fprop("borderWidth", kLook, &P::borderWidth, -1, 50));
     v.push_back(cprop("borderColor", kLook, &P::borderColor));
 

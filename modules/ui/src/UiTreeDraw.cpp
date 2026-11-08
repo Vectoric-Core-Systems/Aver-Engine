@@ -90,13 +90,23 @@ void UiTree::drawWidget(UiPainter& p, const UiWidget& w, f32 parentOpacity, bool
     const u32 bgOwn = (fx.mask & kFxBg) ? fx.bg : w.bgColor;
     if (bgOwn && !hc) {
         bg = bgOwn;
-        if (vs == UiVisualState::Hover) bg = uiShade(bg, 0.15f);
-        else if (vs == UiVisualState::Pressed) bg = uiShade(bg, -0.2f);
-        else if (vs == UiVisualState::Disabled) bg = uiWithOpacity(bg, 0.5f);
+        if (vs == UiVisualState::Hover) bg = w.bgHoverColor ? w.bgHoverColor : uiShade(bg, 0.15f);
+        else if (vs == UiVisualState::Pressed) bg = w.bgPressedColor ? w.bgPressedColor : uiShade(bg, -0.2f);
+        else if (vs == UiVisualState::Disabled) bg = w.bgDisabledColor ? w.bgDisabledColor : uiWithOpacity(bg, 0.5f);
+    } else if (!hc) {
+        // A state colour with no normal colour of its own still applies to the theme's.
+        if (vs == UiVisualState::Hover && w.bgHoverColor) bg = w.bgHoverColor;
+        else if (vs == UiVisualState::Pressed && w.bgPressedColor) bg = w.bgPressedColor;
+        else if (vs == UiVisualState::Disabled && w.bgDisabledColor) bg = w.bgDisabledColor;
     }
     const u32 ownText = hc ? 0u : ((fx.mask & kFxText) ? fx.text : w.textColor);
     u32 textCol = ownText ? ownText : st.text;
     if (!enabled) textCol = ownText ? uiWithOpacity(ownText, 0.5f) : (st.textDisabled ? st.textDisabled : textCol);
+    if (!hc) {
+        const u32 stateText = vs == UiVisualState::Hover ? w.textHoverColor : vs == UiVisualState::Pressed ? w.textPressedColor
+                            : vs == UiVisualState::Disabled ? w.textDisabledColor : 0u;
+        if (stateText) textCol = stateText;
+    }
     const u32 accentOwn = (fx.mask & kFxAccent) ? fx.accent : w.accentColor;
     const u32 accent = (accentOwn && !hc) ? accentOwn : st.accent;
 

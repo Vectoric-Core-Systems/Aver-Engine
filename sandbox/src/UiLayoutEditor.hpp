@@ -16,10 +16,12 @@
 #include "EditorWidgets.hpp"
 #include "SnapshotUndo.hpp"
 
+#include "aver/ui/UiAnimation.hpp"
 #include "aver/ui/UiLayoutAsset.hpp"
 #include "aver/ui/UiProps.hpp"
 #include "aver/ui/UiTree.hpp"
 
+#include <algorithm>
 #include <functional>
 #include <memory>
 #include <string>
@@ -69,6 +71,26 @@ void uiEditorApplyAnchorPreset(ui::UiWidgetProps& p, UiAnchorPreset preset, cons
 // The deepest, topmost visible widget whose rectangle contains the point, ignoring input modes (an
 // editor selects what a player could not click). Clipping containers hide what they clip. 0 for none.
 ui::UiWidgetId uiEditorPick(const ui::UiTree& tree, f32 x, f32 y);
+
+// Palette search: every word of `query` (case-insensitive) is found in `label`; an empty query matches everything.
+bool uiEditorPaletteMatch(std::string_view label, std::string_view query);
+
+// Device presets for the preview size, with the safe zone each device needs (fractions of the screen, per edge).
+struct UiDevicePreset {
+    const char* name;
+    f32 width, height;
+    ui::UiInsets safe;
+};
+const std::vector<UiDevicePreset>& uiEditorDevicePresets();
+// The safe rectangle of a screen of `w` x `h` with `safe` fractions removed from each edge.
+ui::UiRect uiEditorSafeRect(const ui::UiInsets& safe, f32 w, f32 h);
+
+// One row of the animation timeline: a track as the editor shows it.
+struct UiTimelineTrack {
+    std::string widget;
+    ui::UiAnimProp prop = ui::UiAnimProp::Opacity;
+    std::vector<ui::UiAnimKey> keys;
+};
 
 // The text the Content Browser's "New UI Layout" writes. A valid, renderable layout (a test loads it).
 std::string uiStarterLayoutText();
@@ -140,6 +162,74 @@ public:
     void dragSelected(f32 dx, f32 dy, bool begin);
     void dragSelectedEdge(UiEdge edge, f32 delta, bool begin);
 
+    // ---- multi-select ------------------------------------------------------------------------------
+    // The primary selection (select(), selected()) plus any number of others, kept by name so a renumbering edit does not lose
+    // them. select() resets to one widget.
+    void toggleSelect(i32 index);                            // Ctrl+click: add or remove, the toggled one becomes primary
+    void selectRange(i32 first, i32 last);                   // Shift+click in the hierarchy: the nodes between, in document order
+    std::vector<i32> selection() const;                      // every selected node, ascending
+    bool isSelected(i32 index) const;
+    // Edits applied to every selected widget as ONE undo entry. A widget a property does not apply to is left as it was.
+    bool setPropertyOnSelection(std::string_view key, std::string_view text);
+    void deleteSelection();                                  // the root is never deleted
+    void moveSelectionBy(f32 dxDesign, f32 dyDesign, bool begin = true);   // begin = one undo entry; false continues a drag
+
+    // ---- device preview ------------------------------------------------------------------------------
+    i32 devicePreset() const { return device_; }             // index into uiEditorDevicePresets(), -1 for a custom size
+    void setDevicePreset(i32 index);                         // sets the preview size and the safe zone
+    bool safeZoneShown() const { return safeZone_; }
+    void showSafeZone(bool on) { safeZone_ = on; }
+    ui::UiRect safeZoneRect() const;                         // preview pixels; the preset's insets, else 5% on every edge
+
+    // ---- per-state preview ---------------------------------------------------------------------------
+    // Draws the selected widget as if hovered / pressed / disabled (0 normal, 1 hovered, 2 pressed, 3 disabled) in the
+    // non-interactive preview, so the state colours can be judged while editing them.
+    i32 previewState() const { return previewState_; }
+    void setPreviewState(i32 state) { previewState_ = std::clamp(state, 0, 3); }
+    void applyPreviewState();
+
+    // ---- animation timeline --------------------------------------------------------------------------
+    // The ANIM records as animations, edited with undo; the preview tree plays them (scrub, play, loop).
+    std::vector<std::string> animationNames() const;
+    std::vector<UiTimelineTrack> animationTracks(const std::string& anim) const;
+    f32 animationLength(const std::string& anim) const;
+    // A new animation: one track (opacity of the selected widget, 0 -> its value over one second). Empty name = a free one.
+    // Returns the name, empty if refused.
+    std::string addAnimation(const std::string& name = {});
+    bool deleteAnimation(const std::string& anim);
+    bool renameAnimation(const std::string& anim, const std::string& newName);
+    // Tracks are numbered in file order within the animation. addTrack starts with the widget's authored value at 0 and at the
+    // animation's end. False when the animation has that widget and property already, or the widget is not a node.
+    bool addTrack(const std::string& anim, i32 widgetIndex, ui::UiAnimProp prop);
+    bool deleteTrack(const std::string& anim, i32 track);
+    // Keys: addKey samples the value the track has at `time` (so adding one changes nothing visible); moveKey keeps the keys
+    // ordered and returns the key's new number (-1 refused); setKeyValue takes the record's token ("0.5", "10,20", "#FF0000").
+    i32 addKey(const std::string& anim, i32 track, f32 time);
+    i32 moveKey(const std::string& anim, i32 track, i32 key, f32 time);
+    bool setKeyValue(const std::string& anim, i32 track, i32 key, const std::string& token);
+    bool setKeyEase(const std::string& anim, i32 track, i32 key, ui::UiEase ease);
+    bool deleteKey(const std::string& anim, i32 track, i32 key);
+    // Playback in the preview. The current animation and time survive the preview rebuild every edit does.
+    const std::string& timelineAnimation() const { return animName_; }
+    void setTimelineAnimation(const std::string& anim);
+    f32 timelineTime() const { return animTime_; }
+    void timelineSeek(f32 seconds);                          // scrub: applies the time, stops playing
+    void timelinePlay(bool play);
+    bool timelinePlaying() const { return animPlaying_; }
+    bool timelineLoop() const { return animLoop_; }
+    void setTimelineLoop(bool loop) { animLoop_ = loop; }
+    void timelineTick(f32 dt);                               // advances the preview while playing
+
+    // ---- bindings and events ---------------------------------------------------------------------------
+    // BIND and EVENT records, by their number in the document (doc().binds / doc().events). Each refusal returns false/-1 and
+    // records nothing; each success is one undo entry.
+    i32 addBinding(i32 widgetIndex, const std::string& property, const std::string& path, const std::string& format = {}, bool onChange = false);
+    bool setBinding(i32 binding, const std::string& property, const std::string& path, const std::string& format, bool onChange);
+    bool deleteBinding(i32 binding);
+    i32 addEvent(i32 widgetIndex, const std::string& event, const std::string& action, const std::string& target, const std::vector<std::string>& args = {});
+    bool setEvent(i32 index, const std::string& event, const std::string& action, const std::string& target, const std::vector<std::string>& args);
+    bool deleteEvent(i32 index);
+
     // ---- the preview -----------------------------------------------------------------------------
     // The preview tree is rebuilt from the document after every edit. Layout needs text metrics, so
     // the caller supplies them (the tab uses ImGui's; a test uses the estimate).
@@ -186,6 +276,18 @@ private:
     u32 structureVersion_ = 0;   // bumped whenever the document is rebuilt; a draw loop compares it
     f32 dragAccumX_ = 0, dragAccumY_ = 0;   // reordering inside a stack or grid
 
+    std::vector<std::string> extraSelected_;   // selected besides selected_, by name
+    i32 device_ = 0;
+    bool safeZone_ = false;
+    i32 previewState_ = 0;
+    std::string animName_;
+    f32 animTime_ = 0;
+    bool animPlaying_ = false;
+    bool animLoop_ = false;
+    void applyTimeline();                       // re-applies the timeline after the preview was rebuilt
+    bool editAnimTrack(const std::string& anim, i32 track, const std::function<bool(ui::UiAnimTrack&)>& edit);
+    i32 animRecord(const std::string& anim, i32 track) const;   // index into doc_.anims, -1 if none
+
     SplitPane splitLeft_;
     SplitPane splitInspector_;
 
@@ -206,7 +308,24 @@ private:
     void propEditBegin();
     void propEditEnd();
 
+    void drawBottomPanel();
+    void drawTimeline();
+    void drawBindingsTab();
+    void drawEventsTab();
+    void drawStates();
     std::vector<std::string> layouts_;   // the palette's project layouts
+    std::string paletteQuery_;
+    i32 bottomTab_ = 0;              // 0 timeline, 1 bindings, 2 events
+    f32 bottomHeight_ = 0;           // 0 = a default share of the window
+    bool bottomOpen_ = true;
+    i32 timelineTrack_ = -1, timelineKey_ = -1;
+    bool timelineDragging_ = false, timelineDragMoved_ = false, scrubbing_ = false;
+    f32 timelineDragTime_ = 0;
+    f32 timelinePxPerSec_ = 160.0f;
+    i32 timelineAddProp_ = 0;
+    std::string newBindProp_ = "text", newBindPath_, newBindFormat_;
+    bool newBindChange_ = false;
+    std::string newEvent_ = "click", newEventAction_ = "command", newEventTarget_;
     int layoutsScanFrame_ = 0;
     bool interact_ = false;          // run the preview as a player would instead of editing it
     i32 zoomPercent_ = 0;            // 0 = fit
