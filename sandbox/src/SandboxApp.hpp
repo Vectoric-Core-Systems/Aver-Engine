@@ -3149,6 +3149,11 @@ private:
     bool entityLocked(scene::Entity e) const { return !outlinerLocked_.empty() && outlinerLocked_.count(static_cast<u32>(e)) != 0; }
     std::string outlinerFolderOf(scene::Entity e) const;
     void applyOutlinerMeta(const EditCmd& c, bool undoing);
+    // Folders and locks ride in the .ocworld (OUTFOLDER / OUTITEM); placements and lights are named by slot.
+    void captureOutlinerMeta(fmt::OcWorldData& w, const std::unordered_map<u32, i32>& placementSlotOf,
+                             const std::unordered_map<u32, i32>& lightSlotOf, bool streamed);
+    void restoreOutlinerMeta(const fmt::OcWorldData& w, const world::LevelInstance& inst, const std::vector<scene::Entity>& lights);
+    void clearOutlinerMeta();
     void outlinerSetLocked(const std::vector<scene::Entity>& ents, bool lock);
     void outlinerSetVisible(const std::vector<scene::Entity>& ents, bool visible);
     void outlinerMoveToFolder(const std::vector<scene::Entity>& ents, const std::string& folder);

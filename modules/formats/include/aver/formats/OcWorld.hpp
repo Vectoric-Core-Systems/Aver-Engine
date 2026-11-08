@@ -825,6 +825,20 @@ struct OcWorldData : OcWorldEnv {
     f64 extentMax[3] = {0, 0, 0};
     // [wave3/level-instances end]
 
+    // The World Outliner's editor-side organisation, kept with the level: virtual folders (`OUTFOLDER <path>`, empty ones
+    // included) and, per placed object, its lock and folder (`OUTITEM <P|L> <index> [lock] [folder <path>]`). `P` indexes
+    // `placements` and `L` indexes `lights`, both as the file lists them; writeOcworld renumbers a `P` index the way it
+    // renumbers a sequence target. A level without any gains no such lines.
+    struct OcOutlinerItem {
+        char kind = 'P';
+        i32  index = 0;
+        bool locked = false;
+        std::string folder;
+        bool operator==(const OcOutlinerItem& o) const { return kind == o.kind && index == o.index && locked == o.locked && folder == o.folder; }
+    };
+    std::vector<std::string> outlinerFolders;
+    std::vector<OcOutlinerItem> outlinerItems;
+
     // Baked instanced foliage: one content-relative path per `FOLIAGE <path>` record, each naming an
     // `.ocinst` file (OcInstances.hpp) -- a flat, potentially multi-million-row transform table, kept
     // OUTSIDE `placements` entirely rather than as one OcWorldPlacement per instance. Foliage this

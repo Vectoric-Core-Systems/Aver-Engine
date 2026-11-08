@@ -581,6 +581,7 @@ bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
 
     // LIGHT records, from every live CLight entity (they are not placements; see spawnLightAtCamera).
     w.lights.clear();
+    std::unordered_map<u32, i32> lightSlotOf;   // for the Outliner records
     if (scene::ComponentPool* lp = world.pool(scene::kComponentLight)) {
         const editor::LightAssetPaths paths = editor::LightAssetPaths::scan(project_.contentDir());
         for (usize i = 0; i < lp->size(); ++i) {
@@ -588,6 +589,7 @@ bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
             if (!world.valid(le)) continue;
             if (level_.instances().isMember(le)) continue;   // [wave3/level-instances] the child level's light
             const auto* lc = static_cast<const scene::CLight*>(lp->dataAt(i));
+            lightSlotOf.emplace(static_cast<u32>(le), static_cast<i32>(w.lights.size()));
             w.lights.push_back(editor::recordFromLight(*lc, transformFromMatrix(world.worldMatrix(le)),
                                                        world.name(le), paths));
         }
@@ -765,6 +767,7 @@ bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
     // THE SEQUENCE, written from the editor's model with each actor mapped to the slot it is saved in.
     seqEditor_.save(w, slotOf, [this](scene::Entity ent) { return sequenceBindName(ent); });   // [wave5/sequencer] a non-placement actor is saved by name
     if (streamedSave) appendStreamedSequenceTracks(w);
+    captureOutlinerMeta(w, slotOf, lightSlotOf, streamedSave);
 
     // CLASS PLACEMENTS GO BACK OUT TOO, AND UNTIL NOW THEY DID NOT: this loop rebuilds a
     // placement from SCENE COMPONENTS, and a `class=` placement has none -- opening a level and

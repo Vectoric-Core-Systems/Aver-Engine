@@ -333,6 +333,18 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
             continue;
         }
         // [wave3/level-instances end]
+        if (equalsCI(key, "OUTFOLDER") && t.size() >= 2) { out.outlinerFolders.push_back(percentDecode(t[1])); continue; }
+        if (equalsCI(key, "OUTITEM") && t.size() >= 3 && (t[1] == "P" || t[1] == "L")) {
+            OcWorldData::OcOutlinerItem it;
+            it.kind = t[1][0];
+            it.index = parseI32(t[2], -1);
+            for (usize i = 3; i < t.size(); ++i) {
+                if (equalsCI(t[i], "lock")) it.locked = true;
+                else if (equalsCI(t[i], "folder") && i + 1 < t.size()) it.folder = percentDecode(t[++i]);
+            }
+            if (it.index >= 0) out.outlinerItems.push_back(std::move(it));
+            continue;
+        }
         if (equalsCI(key, "OCWORLD") || equalsCI(key, "OCMAP")) {
             out.version = t.size() > 1 ? parseI32(t[1], 1) : 1;
             sawHeader = true;
@@ -1340,11 +1352,13 @@ std::string writeOcworld(const OcWorldData& w) {
     // Placements are emitted depth-first from the roots (see OcWorldPlacement::parent), which can
     // renumber them; sequence targets are written as the emit index.
     const std::vector<EmitStep> steps = placementEmitSteps(w.placements);
-    if (!w.sequences.empty()) {
-        std::vector<i32> emitIndex(w.placements.size(), -1);
+    std::vector<i32> emitIndex(w.placements.size(), -1);
+    {
         i32 nextIndex = 0;
         for (const EmitStep& st : steps)
             if (st.kind == EmitStep::Kind::Place) emitIndex[static_cast<usize>(st.index)] = nextIndex++;
+    }
+    if (!w.sequences.empty()) {
 
         s += "\n";
         appendSeqRecords(s, w.sequences, [&](i32 target) {
@@ -1357,6 +1371,19 @@ std::string writeOcworld(const OcWorldData& w) {
     appendOcLevelInstances(s, w.levelInstances);     // nothing for a level without instances
     if (w.hasExtent) { s += "\n"; s += writeOcExtentLine(w.extentMin, w.extentMax); }
     // [wave3/level-instances end]
+    if (!w.outlinerFolders.empty() || !w.outlinerItems.empty()) {
+        s += "\n";
+        for (const std::string& f : w.outlinerFolders) s += "OUTFOLDER " + percentEncode(f) + "\n";
+        for (const OcWorldData::OcOutlinerItem& it : w.outlinerItems) {
+            i32 idx = it.index;
+            if (it.kind == 'P') idx = idx >= 0 && idx < static_cast<i32>(emitIndex.size()) ? emitIndex[static_cast<usize>(idx)] : -1;
+            if (idx < 0 || (!it.locked && it.folder.empty())) continue;
+            s += std::string("OUTITEM ") + it.kind + " " + std::to_string(idx);
+            if (it.locked) s += " lock";
+            if (!it.folder.empty()) s += " folder " + percentEncode(it.folder);
+            s += "\n";
+        }
+    }
 
     s += "\n";
     const auto line = [&](const OcWorldPlacement& p, const char* keyword, const char* keywordG, usize depth) {

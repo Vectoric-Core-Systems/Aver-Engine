@@ -401,12 +401,14 @@ void SandboxApp::onLevelInstantiated(const game::GameLevel::LoadedLevel& loaded)
 #if AVER_MODULE_PHYSICS
     levelBodies_ = inst.bodies;
 #endif
+    std::vector<scene::Entity> lightEntities;
     {
         // LIGHT records: one bare CLight entity each (the instantiator does not know them).
         scene::World& lw = scene::World::instance();
         {
             // [wave3/level-instances] game::spawnLevelLights is the one spawner now (the packaged game uses it too).
             const std::vector<scene::Entity> lights = game::spawnLevelLights(lw, w.lights);
+            lightEntities = lights;
             for (usize k = 0; k < lights.size() && k < w.lights.size(); ++k)
                 entityLabels_[static_cast<u32>(lights[k])] = w.lights[k].name.empty() ? std::string("Light") : w.lights[k].name;
         }
@@ -459,6 +461,7 @@ void SandboxApp::onLevelInstantiated(const game::GameLevel::LoadedLevel& loaded)
 #endif
     }
 #if AVER_MODULE_SCENE
+    restoreOutlinerMeta(w, inst, lightEntities);
     // THE LEVEL'S SEQUENCE becomes the editor's: its tracks name placements, which are entities now.
     // levelHeader_ lets go of it, since saveLevel writes the sequence from the editor's model.
     {
@@ -1191,6 +1194,9 @@ void SandboxApp::unloadLevel(Engine& eng) {
     labelCounts_.clear();
     entityBodies_.clear();
     entityPlaceId_.clear();         // [wave3/level-instances]
+#if AVER_MODULE_SCENE
+    clearOutlinerMeta();
+#endif
     entityAuthoredName_.clear();    // [wave3/level-instances]
     // Cleared with the rest of the level's state: carrying one level's PCG records into the
     // next would write them into a file that never had them.

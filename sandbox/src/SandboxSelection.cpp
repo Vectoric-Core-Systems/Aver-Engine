@@ -1240,6 +1240,54 @@ void SandboxApp::outlinerSetVisible(const std::vector<scene::Entity>& ents, bool
     if (!c.visibility.empty()) pushEdit(std::move(c));
 }
 
+void SandboxApp::clearOutlinerMeta() {
+    outlinerLocked_.clear();
+    outlinerFolderOf_.clear();
+    outlinerFolders_.clear();
+    ++outlinerFolderRev_;
+}
+
+void SandboxApp::captureOutlinerMeta(fmt::OcWorldData& w, const std::unordered_map<u32, i32>& placementSlotOf,
+                                     const std::unordered_map<u32, i32>& lightSlotOf, bool streamed) {
+    w.outlinerFolders.clear();
+    w.outlinerItems.clear();
+    if (streamed) return;   // a streamed level's records are not all resident, so their slots are not ours to number
+    w.outlinerFolders = outlinerFolders_;
+    std::unordered_set<u32> ents(outlinerLocked_.begin(), outlinerLocked_.end());
+    for (const auto& kv : outlinerFolderOf_) ents.insert(kv.first);
+    for (const u32 e : ents) {
+        fmt::OcWorldData::OcOutlinerItem it;
+        if (const auto p = placementSlotOf.find(e); p != placementSlotOf.end()) { it.kind = 'P'; it.index = p->second; }
+        else if (const auto l = lightSlotOf.find(e); l != lightSlotOf.end())    { it.kind = 'L'; it.index = l->second; }
+        else continue;
+        it.locked = outlinerLocked_.count(e) != 0;
+        if (const auto f = outlinerFolderOf_.find(e); f != outlinerFolderOf_.end()) it.folder = f->second;
+        w.outlinerItems.push_back(std::move(it));
+    }
+    std::sort(w.outlinerItems.begin(), w.outlinerItems.end(), [](const auto& a, const auto& b) {
+        return a.kind != b.kind ? a.kind < b.kind : a.index < b.index;
+    });
+}
+
+void SandboxApp::restoreOutlinerMeta(const fmt::OcWorldData& w, const world::LevelInstance& inst,
+                                     const std::vector<scene::Entity>& lights) {
+    clearOutlinerMeta();
+    for (const std::string& f : w.outlinerFolders) editor::folderAdd(outlinerFolders_, f);
+    std::unordered_map<i32, scene::Entity> byPlacement;
+    for (usize k = 0; k < inst.entities.size(); ++k) byPlacement[inst.placementIndex[k]] = inst.entities[k];
+    for (const fmt::OcWorldData::OcOutlinerItem& it : w.outlinerItems) {
+        scene::Entity e = scene::kInvalidEntity;
+        if (it.kind == 'P') { if (const auto f = byPlacement.find(it.index); f != byPlacement.end()) e = f->second; }
+        else if (it.index >= 0 && static_cast<usize>(it.index) < lights.size()) e = lights[static_cast<usize>(it.index)];
+        if (e == scene::kInvalidEntity) continue;
+        if (it.locked) outlinerLocked_.insert(static_cast<u32>(e));
+        if (!it.folder.empty()) {
+            editor::folderAdd(outlinerFolders_, it.folder);
+            outlinerFolderOf_[static_cast<u32>(e)] = it.folder;
+        }
+    }
+}
+
 void SandboxApp::outlinerSetLocked(const std::vector<scene::Entity>& ents, bool lock) {
     scene::World& w = scene::World::instance();
     EditCmd c;
