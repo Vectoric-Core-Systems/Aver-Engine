@@ -20,6 +20,7 @@
 #include "imgui.h"
 
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -62,6 +63,47 @@ const char* kindWord(u8 kind) { return kind == 0 ? "float" : (kind == 1 ? "vec3"
 
 } // namespace
 
+// ================================================================================== statistics ===
+
+// Per emitter: the live count in the preview against the cap, the tier the emitter takes in a game (the preview itself always
+// runs on the CPU) and the GPU memory it would pool. The footer adds the GPU estimate up.
+void ParticleEditor::drawStats() {
+    const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_BordersInnerV;
+    if (!ImGui::BeginTable("##pxstats", 4, flags)) return;
+    ImGui::TableSetupColumn("Emitter", ImGuiTableColumnFlags_WidthStretch, 2.0f);
+    ImGui::TableSetupColumn("Alive / max", ImGuiTableColumnFlags_WidthStretch, 1.6f);
+    ImGui::TableSetupColumn("Tier", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+    ImGui::TableSetupColumn("GPU memory", ImGuiTableColumnFlags_WidthStretch, 1.2f);
+    ImGui::TableHeadersRow();
+    u64 gpuTotal = 0;
+    u32 aliveTotal = 0;
+    for (usize i = 0; i < def_.emitters.size(); ++i) {
+        const particles::ParticleEffect& e = def_.emitters[i];
+        const u32 alive = i < sims_.size() ? sims_[i].aliveCount() : 0u;
+        const u32 cap = pxmodel::emitterCapacity(e);
+        const bool gpu = pxmodel::emitterOnGpu(e);
+        const u64 mem = pxmodel::gpuMemoryEstimate(e);
+        gpuTotal += mem;
+        aliveTotal += alive;
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::TextUnformatted(e.name.empty() ? "(unnamed)" : e.name.c_str());
+        ImGui::TableNextColumn();
+        const f32 frac = cap > 0 ? std::min(1.0f, static_cast<f32>(alive) / static_cast<f32>(cap)) : 0.0f;
+        char over[48];
+        std::snprintf(over, sizeof over, "%u / %u", alive, cap);
+        ImGui::ProgressBar(frac, ImVec2(-FLT_MIN, 0.0f), over);
+        ImGui::TableNextColumn();
+        const char* how = e.simTier == particles::SimTier::Auto ? " (auto)" : " (forced)";
+        ImGui::TextColored(gpu ? ImVec4(0.95f, 0.55f, 0.15f, 1.0f) : ImVec4(0.55f, 0.75f, 0.95f, 1.0f), "%s%s", gpu ? "GPU" : "CPU", how);
+        ImGui::TableNextColumn();
+        ImGui::TextUnformatted(gpu ? pxmodel::formatBytes(mem).c_str() : "-");
+    }
+    ImGui::EndTable();
+    ImGui::TextDisabled("%u alive in the preview. GPU memory is an estimate (%s total) for the pooled buffers; the preview always runs on the CPU.",
+                        aliveTotal, pxmodel::formatBytes(gpuTotal).c_str());
+}
+
 // ================================================================================== the sections ==
 
 void ParticleEditor::drawParams() {
@@ -72,6 +114,9 @@ void ParticleEditor::drawParams() {
     // ---- identity ----
     ImGui::SeparatorText("Identity");
     if (ImGui::InputText("Name", nameBuf_, sizeof nameBuf_)) setName(nameBuf_);
+
+    // ---- statistics ----
+    if (ImGui::CollapsingHeader("Statistics", ImGuiTreeNodeFlags_DefaultOpen)) drawStats();
 
     // ---- emitters ----
     ImGui::SeparatorText("Emitters");

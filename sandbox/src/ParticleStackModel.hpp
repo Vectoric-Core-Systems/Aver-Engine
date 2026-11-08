@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -21,7 +22,11 @@ namespace aver::editor::pxmodel {
 using particles::Curve4;
 using particles::ModuleKind;
 using particles::ParticleEffect;
+using particles::Particle;
 using particles::ParticleSystemDef;
+using particles::RenderKind;
+using particles::SimTier;
+using particles::SortMode;
 using particles::UserParam;
 
 // ---- names ----
@@ -336,6 +341,39 @@ inline bool setCurvePoint(Curve4& c, int idx, f32 t, const f32 v[4]) {
     c.t[i] = t;
     for (int k = 0; k < 4; ++k) c.v[i][k] = v[k];
     return true;
+}
+
+// ---- Statistics (the stats panel) ----
+// What the runtime would do with an emitter, from the same rule ParticleSystem::wantGpu applies (SIM request, then Auto at
+// 2048 particles). The preview always simulates on the CPU; the badge says where the emitter lands in a game.
+inline u32 emitterCapacity(const ParticleEffect& e) {
+    return (e.render == RenderKind::Ribbon && e.linked) ? e.linkedCapacity : std::max(1u, e.maxParticles);
+}
+inline bool emitterOnGpu(const ParticleEffect& e) {
+    if (e.simTier == SimTier::Cpu) return false;
+    if (e.simTier == SimTier::Gpu) return true;
+    return emitterCapacity(e) >= 2048u;
+}
+inline bool emitterSorts(const ParticleEffect& e) {
+    if (e.sort == SortMode::None) return false;
+    if (e.sort == SortMode::Depth) return true;
+    return e.blend == rhi::BlendMode::AlphaBlend || e.blend == rhi::BlendMode::PremultipliedAlpha;
+}
+// An ESTIMATE of the pooled GPU buffers one emitter instance takes (ParticleGpuPool.cpp): 64 B particle, 4 B dead list, 12 B
+// alive lists, 8 B sort keys when it sorts, plus 16 B per trail point for trail ribbons. 0 for a CPU emitter.
+inline u64 gpuMemoryEstimate(const ParticleEffect& e) {
+    if (!emitterOnGpu(e)) return 0;
+    const u64 cap = emitterCapacity(e);
+    u64 per = sizeof(Particle) + 4u + 12u + (emitterSorts(e) ? 8u : 0u);
+    if (e.render == RenderKind::Ribbon && !e.linked) per += 16ull * e.trailPoints;
+    return cap * per;
+}
+inline std::string formatBytes(u64 b) {
+    char buf[32];
+    if (b >= (1ull << 20)) std::snprintf(buf, sizeof buf, "%.1f MB", static_cast<double>(b) / (1024.0 * 1024.0));
+    else if (b >= 1024) std::snprintf(buf, sizeof buf, "%.1f KB", static_cast<double>(b) / 1024.0);
+    else std::snprintf(buf, sizeof buf, "%llu B", static_cast<unsigned long long>(b));
+    return buf;
 }
 
 // ---- Compute bounds ----

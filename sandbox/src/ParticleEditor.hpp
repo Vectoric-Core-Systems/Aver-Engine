@@ -192,6 +192,7 @@ private:
 
     friend struct ParticleEditorUiAccess;
     void drawParams();
+    void drawStats();
     void drawPreviewPane(Engine& e);
 };
 

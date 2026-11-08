@@ -357,6 +357,18 @@ if(TARGET Aver.Formats.Particles)
   set_target_properties(ParticleStackModelTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
 
+# ParticleEditorTrackCTest -- the particle editor's track C logic (stats, playback and seek, curve and gradient edits, isolate, the
+# moving emitter, templates, live parameters, scalability). Compiles the tab headless like ParticleEditorLoadSaveTest above.
+if(TARGET Aver.Formats.Particles)
+  add_executable(ParticleEditorTrackCTest
+    src/ParticleEditorTrackCTest.cpp
+    ${CMAKE_SOURCE_DIR}/sandbox/src/ParticleEditor.cpp)
+  target_include_directories(ParticleEditorTrackCTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+  target_link_libraries(ParticleEditorTrackCTest PRIVATE
+    Aver.Formats.Particles Aver.Particles Aver.Formats Aver.Core Aver.Platform)
+  set_target_properties(ParticleEditorTrackCTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
 # FoliageTypeEditorTest -- the .ocfoliage foliage-type editor tab's headless core: load / save /
 # dirty / undo and every field setter's own clamping.
 #
