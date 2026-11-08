@@ -2979,8 +2979,11 @@ void SandboxApp::buildViewportOverlay() {
                                ImGuiWindowFlags_NoDocking|ImGuiWindowFlags_NoSavedSettings|
                                ImGuiWindowFlags_NoFocusOnAppearing|ImGuiWindowFlags_NoNavFocus;
 
-    ImGui::SetNextWindowPos(ImVec2(vpX_+pad, vpY_+pad), ImGuiCond_Always, ImVec2(0,0));
-    beginOverlayBar("##vpbar_left", f);
+    // ONE bar across the top of the viewport: view options left, tools / snap / camera right. The right
+    // cluster is aligned from the width it measured last frame (vpBarRightW_).
+    ImGui::SetNextWindowPos(ImVec2(vpX_, vpY_), ImGuiCond_Always, ImVec2(0,0));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(vpW_, 0.0f), ImVec2(vpW_, FLT_MAX));
+    beginOverlayBar("##vpbar", f);
 #if AVER_MODULE_SCENE
     // [wave3/level-instances] Open Level on an instance left a way back: this button.
     if (const editor::LevelReturnPoint* rp = levelInstanceModel_.returnTop()) {
@@ -2995,6 +2998,15 @@ void SandboxApp::buildViewportOverlay() {
         ImGui::Selectable("Perspective", true);
         const char* orthos[] = {"Top","Bottom","Left","Right","Front","Back"};
         for (const char* o : orthos) ImGui::Selectable(o, false, ImGuiSelectableFlags_Disabled);
+        ImGui::Separator();
+        ImGui::TextDisabled("Layout");
+        ImGui::Selectable(ICON_RECT_LIGHT " One Pane", true);
+        ImGui::BeginDisabled();
+        ImGui::Selectable(ICON_VIEW_SPLIT " Two Panes", false);
+        ImGui::Selectable(ICON_VIEW_QUAD " Four Panes", false);
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("The renderer draws one view per frame; more panes need multi-view rendering.");
         ImGui::EndPopup();
     }
     ImGui::SameLine();
@@ -3213,42 +3225,12 @@ void SandboxApp::buildViewportOverlay() {
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Fill the fields with the camera's position.");
         ImGui::EndPopup();
     }
-    if (showCamCoords_) {
-        constexpr f32 kDeg = 180.0f / 3.14159265358979323846f;
-        const Vec3 p = viewPos();
-        f32 yawDeg = std::fmod(yaw_ * kDeg, 360.0f);
-        if (yawDeg < 0.0f) yawDeg += 360.0f;
-        editor::FontScope readoutFont(editor::editorFonts().secondary, editor::editorFonts().secondaryPx);   // a readout, not content
-        ImGui::Text("X %.0f  Y %.0f  Z %.0f cm   yaw %.0f  pitch %.0f deg", p.x, p.y, p.z, yawDeg, pitch_ * kDeg);
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Copy")) {
-            char buf[96];
-            std::snprintf(buf, sizeof buf, "%.2f %.2f %.2f", p.x, p.y, p.z);
-            ImGui::SetClipboardText(buf);
-        }
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copies \"x y z\" (cm), the form --cam and Go To take.");
-    }
-    ImGui::End();
-#if AVER_MODULE_SCENE
-    editor::drawWorldOriginPanel(showWorldOrigin_, origin_, camPos_, dpi_);
-#endif
-
-    const f32 icon = 20.0f*dpi_, caretW = 11.0f*dpi_, tiny = 2.0f*dpi_, gap = 5.0f*dpi_;
-    ImGui::SetNextWindowPos(ImVec2(vpX_+vpW_-pad, vpY_+pad), ImGuiCond_Always, ImVec2(1,0));
-    beginOverlayBar("##vpbar_right", f);
-    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const f32 icon = 20.0f*dpi_, gap = 5.0f*dpi_, tinyGap = 2.0f*dpi_;
+    ImGui::SameLine(std::fmax(ImGui::GetCursorPosX() + gap * 3.0f,
+                              ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - vpBarRightW_));
+    const f32 rightStartX = ImGui::GetCursorScreenPos().x;
     auto toolBtn = [&](const char* id, int kind, bool active)->bool {
         return editor::toolButton(id, kind, active, icon, dpi_);
-    };
-    auto caretBtn = [&](const char* id, bool on)->bool {
-        const ImVec2 p = ImGui::GetCursorScreenPos();
-        ImGui::InvisibleButton(id, ImVec2(caretW, icon));
-        const bool hov = ImGui::IsItemHovered(), clk = ImGui::IsItemClicked();
-        if (hov) dl->AddRectFilled(p, ImVec2(p.x+caretW,p.y+icon), IM_COL32(74,76,82,255), 3.0f);
-        const ImVec2 c(p.x+caretW*0.5f, p.y+icon*0.5f); const f32 s=2.5f*dpi_;
-        const ImU32 col = on ? IM_COL32(232,150,60,255) : IM_COL32(190,191,195,255);
-        dl->AddTriangleFilled(ImVec2(c.x-s,c.y-s*0.6f), ImVec2(c.x+s,c.y-s*0.6f), ImVec2(c.x,c.y+s*0.8f), col);
-        return clk;
     };
 
     // Mode first, then that mode's tools, always leftmost ("what am I editing" before "with which
@@ -3330,17 +3312,52 @@ void SandboxApp::buildViewportOverlay() {
     ImGui::SameLine(0, gap);
     if (toolBtn("##tMove", 1, tool_==Tool::Move)) tool_=Tool::Move;
     uiReg_.track("tool.move");
-    ImGui::SameLine(0, tiny); if (caretBtn("##cMove", snapMove_)) ImGui::OpenPopup("snapMove");
     ImGui::SameLine(0, gap);
     if (toolBtn("##tRot", 2, tool_==Tool::Rotate)) tool_=Tool::Rotate;
     uiReg_.track("tool.rotate");
-    ImGui::SameLine(0, tiny); if (caretBtn("##cRot", snapRot_)) ImGui::OpenPopup("snapRot");
     ImGui::SameLine(0, gap);
     if (toolBtn("##tScl", 3, tool_==Tool::Scale)) tool_=Tool::Scale;
     uiReg_.track("tool.scale");
-    ImGui::SameLine(0, tiny); if (caretBtn("##cScl", snapScale_)) ImGui::OpenPopup("snapScale");
     ImGui::SameLine(0, gap*2);
     if (ImGui::Button(worldSpace_ ? "World" : "Local")) worldSpace_ = !worldSpace_;
+    // Grid and snap strip: grid visibility, then a toggle and a step for each transform snap.
+    ImGui::SameLine(0, gap*2);
+    {
+        const auto toggle = [&](const char* label, bool& on, const char* tip) {
+            if (on) { ImGui::PushStyleColor(ImGuiCol_Button, kAverOrangeDim); ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 1, 1, 1)); }
+            const bool hit = ImGui::Button(label);
+            if (on) ImGui::PopStyleColor(2);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+            if (hit) on = !on;
+        };
+        const auto stepCombo = [&](const char* id, editor::SnapKind kind, f32& value, const f32* presets, usize n) {
+            ImGui::SetNextItemWidth(56.0f * dpi_);
+            if (ImGui::BeginCombo(id, editor::snapLabel(kind, value).c_str())) {
+                for (usize i = 0; i < n; ++i)
+                    if (ImGui::Selectable(editor::snapLabel(kind, presets[i]).c_str(), value == presets[i])) value = presets[i];
+                ImGui::Separator();
+                ImGui::SetNextItemWidth(90.0f * dpi_);
+                if (ImGui::InputFloat("Custom", &value, 0.0f, 0.0f, "%g")) value = editor::clampSnapStep(kind, value);
+                ImGui::EndCombo();
+            }
+        };
+        toggle(ICON_GRID_ON "##showGrid", showGrid_, "Show the grid");
+        ImGui::SameLine(0, tinyGap);
+        toggle(ICON_TRANSFORM "##snapMoveOn", snapMove_, "Snap position to the grid step");
+        ImGui::SameLine(0, tinyGap);
+        stepCombo("##snapMoveStep", editor::SnapKind::Move, moveSnap_, editor::kMoveSnapPresets,
+                  sizeof editor::kMoveSnapPresets / sizeof(f32));
+        ImGui::SameLine(0, tinyGap);
+        toggle(ICON_ROTATE "##snapRotOn", snapRot_, "Snap rotation to the angle step");
+        ImGui::SameLine(0, tinyGap);
+        stepCombo("##snapRotStep", editor::SnapKind::Rotate, rotSnap_, editor::kRotateSnapPresets,
+                  sizeof editor::kRotateSnapPresets / sizeof(f32));
+        ImGui::SameLine(0, tinyGap);
+        toggle(ICON_SCALE "##snapSclOn", snapScale_, "Snap scale to the step");
+        ImGui::SameLine(0, tinyGap);
+        stepCombo("##snapSclStep", editor::SnapKind::Scale, scaleSnap_, editor::kScaleSnapPresets,
+                  sizeof editor::kScaleSnapPresets / sizeof(f32));
+    }
     }
 
     ImGui::SameLine(0, gap);
@@ -3351,6 +3368,7 @@ void SandboxApp::buildViewportOverlay() {
     const f32 camDial = flySpeed_ / kCamSpeedUnit;
     std::snprintf(camLbl, sizeof camLbl, camDial < 10.0f ? "Cam %.3g" : "Cam %.0f", camDial);
     if (dropButton(camLbl)) ImGui::OpenPopup("camSpeed");
+    const f32 rightEndX = ImGui::GetItemRectMax().x;
     if (ImGui::BeginPopup("camSpeed")) {
         f32 dial = flySpeed_ / kCamSpeedUnit;
         if (ImGui::SliderFloat("Speed", &dial, 20.0f / kCamSpeedUnit, 20000.0f / kCamSpeedUnit,
@@ -3362,25 +3380,26 @@ void SandboxApp::buildViewportOverlay() {
         ImGui::EndPopup();
     }
 
-    if (ImGui::BeginPopup("snapMove")) {
-        ImGui::Checkbox("Grid snap (position)", &snapMove_); ImGui::Separator();
-        const f32 opts[] = {0.1f,0.25f,0.5f,1,2,5,10,50,100};
-        for (f32 v : opts){ char b[24]; std::snprintf(b,sizeof b,"%g units", v); if (ImGui::Selectable(b, moveSnap_==v)){ moveSnap_=v; snapMove_=true; } }
-        ImGui::EndPopup();
-    }
-    if (ImGui::BeginPopup("snapRot")) {
-        ImGui::Checkbox("Angle snap (rotation)", &snapRot_); ImGui::Separator();
-        const f32 opts[] = {1,5,10,15,30,45,90};
-        for (f32 v : opts){ char b[24]; std::snprintf(b,sizeof b,"%gÃ‚Â°", v); if (ImGui::Selectable(b, rotSnap_==v)){ rotSnap_=v; snapRot_=true; } }
-        ImGui::EndPopup();
-    }
-    if (ImGui::BeginPopup("snapScale")) {
-        ImGui::Checkbox("Scale snap", &snapScale_); ImGui::Separator();
-        const f32 opts[] = {0.05f,0.1f,0.25f,0.5f,1};
-        for (f32 v : opts){ char b[24]; std::snprintf(b,sizeof b,"%g", v); if (ImGui::Selectable(b, scaleSnap_==v)){ scaleSnap_=v; snapScale_=true; } }
-        ImGui::EndPopup();
+    vpBarRightW_ = rightEndX - rightStartX;
+    if (showCamCoords_) {
+        constexpr f32 kDeg = 180.0f / 3.14159265358979323846f;
+        const Vec3 p = viewPos();
+        f32 yawDeg = std::fmod(yaw_ * kDeg, 360.0f);
+        if (yawDeg < 0.0f) yawDeg += 360.0f;
+        editor::FontScope readoutFont(editor::editorFonts().secondary, editor::editorFonts().secondaryPx);   // a readout, not content
+        ImGui::Text("X %.0f  Y %.0f  Z %.0f cm   yaw %.0f  pitch %.0f deg", p.x, p.y, p.z, yawDeg, pitch_ * kDeg);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Copy")) {
+            char buf[96];
+            std::snprintf(buf, sizeof buf, "%.2f %.2f %.2f", p.x, p.y, p.z);
+            ImGui::SetClipboardText(buf);
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copies \"x y z\" (cm), the form --cam and Go To take.");
     }
     ImGui::End();
+#if AVER_MODULE_SCENE
+    editor::drawWorldOriginPanel(showWorldOrigin_, origin_, camPos_, dpi_);
+#endif
 
     drawViewportContextMenu();
 }

@@ -965,3 +965,9 @@ add_executable(EditorPanelModelsTest src/EditorPanelModelsTest.cpp)
 target_include_directories(EditorPanelModelsTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
 target_link_libraries(EditorPanelModelsTest PRIVATE Aver.Core)
 set_target_properties(EditorPanelModelsTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# ViewportSnapTest -- snap rounding, step clamps and labels for the viewport options bar (sandbox/src/ViewportSnap.hpp).
+add_executable(ViewportSnapTest src/ViewportSnapTest.cpp)
+target_include_directories(ViewportSnapTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(ViewportSnapTest PRIVATE Aver.Core)
+set_target_properties(ViewportSnapTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

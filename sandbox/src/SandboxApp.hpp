@@ -222,6 +222,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "EditorNotifications.hpp"
 #include "EditorPrefs.hpp"
 #include "EditorIcons.hpp"
+#include "ViewportSnap.hpp"
 #include "EditorKeybinds.hpp"
 // The one place that decides who owns the keyboard and mouse this frame.
 #include "ViewportIconRenderer.hpp"
@@ -683,7 +684,7 @@ using aver::editor::quatFromEulerDeg;
 using aver::editor::eulerDegFromQuat;
 
 // Snap to grid (step).
-static inline f32 snapf(f32 v, f32 step) { return step > 0.0f ? std::round(v / step) * step : v; }
+static inline f32 snapf(f32 v, f32 step) { return editor::snapValue(v, step); }
 
 // Transform point (row-vector matrix).
 static inline Vec3 xformPoint(const Mat4& m, const Vec3& p) {
@@ -3622,6 +3623,7 @@ private:
     f32 prevMouseX_=0, prevMouseY_=0;
     // snapping (off by default; toggled from the toolbar carets)
     bool snapMove_=false, snapRot_=false, snapScale_=false;
+    f32  vpBarRightW_ = 0.0f;   // width the viewport options bar's right cluster measured last frame
 
     f32 moveSnap_=1.0f, rotSnap_=15.0f, scaleSnap_=0.25f;
     // frame state
