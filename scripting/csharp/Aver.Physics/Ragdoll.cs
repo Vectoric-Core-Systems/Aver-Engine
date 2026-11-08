@@ -147,6 +147,24 @@ public readonly struct Ragdoll : IEquatable<Ragdoll>
     public bool AddImpulse(int bone, Float3 impulse, Float3 worldPoint) =>
         Native.aver_phys_ragdoll_add_impulse(Handle, bone, impulse.X, impulse.Y, impulse.Z, worldPoint.X, worldPoint.Y, worldPoint.Z) != 0;
 
+    /// <summary>Powered strength of one bone's joint (the part the bone is or rides on), 0..1; negative goes back to
+    /// the ragdoll-wide <see cref="SetStrength"/>. False for a dead handle, a bad bone or a bone with no part.</summary>
+    public bool SetPartStrength(int bone, float strength) => Native.aver_phys_ragdoll_set_part_strength(Handle, bone, strength) != 0;
+
+    /// <summary>Motor damping ratio of one bone's joint (default 1); negative goes back to the default.</summary>
+    public bool SetPartDamping(int bone, float damping) => Native.aver_phys_ragdoll_set_part_damping(Handle, bone, damping) != 0;
+
+    /// <summary>Multiplies the torque ceiling of one bone's motor (default 1).</summary>
+    public bool SetPartTorqueScale(int bone, float scale) => Native.aver_phys_ragdoll_set_part_torque_scale(Handle, bone, scale) != 0;
+
+    /// <summary>PARTIAL-BODY SIMULATION: a pinned part stays kinematic in Limp and Powered mode (carried to its target
+    /// every step) while the unpinned parts simulate and stay joined to it. Pin everything outside a region and only
+    /// the region is simulated.</summary>
+    public bool SetPartPinned(int bone, bool pinned) => Native.aver_phys_ragdoll_set_part_pinned(Handle, bone, pinned ? 1 : 0) != 0;
+
+    /// <summary>True if the bone's part is pinned; false if not, or for a dead handle, a bad bone or a bone with no part.</summary>
+    public bool IsPartPinned(int bone) => Native.aver_phys_ragdoll_part_pinned(Handle, bone) == 1;
+
     /// <summary>The body of the bone's part, or of the ancestor part it rides on; <see cref="Body.None"/>
     /// if it has neither.</summary>
     public Body BodyOfBone(int bone) => new(Native.aver_phys_ragdoll_body_of_bone(Handle, bone));

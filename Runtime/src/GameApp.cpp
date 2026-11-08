@@ -92,6 +92,7 @@
 #  include "aver/framework/framework_anim_abi.h"
 #  include "aver/framework/framework_ik_abi.h"   // [wave5/ik-retarget] aver_fw_set_ik_provider
 #  include "aver/framework/framework_pose_abi.h" // aver_fw_set_pose_provider (script bone poses)
+#  include "aver/framework/framework_physanim_abi.h"   // aver_fw_set_physanim_provider (hit reactions, death, get-up)
 
 #  include "aver/framework/framework_morph_abi.h"   // [wave9/morph] aver_fw_set_morph_provider
 #  include "aver/framework/framework_worldfx_abi.h"   // [wave9/worldfx] script sun / fog / post layers
@@ -2082,6 +2083,7 @@ void GameApp::onInit(Engine& e) {
         aver_fw_set_ragdoll_provider(&ragdoll::providerStart, &ragdoll::providerStop, &ragdoll::providerMode,
                                      &ragdoll::providerSetStrength, &ragdoll::providerAddImpulse,
                                      &ragdoll::ragdollSystem());
+        aver_fw_set_physanim_provider(&ragdoll::physAnimProvider, &ragdoll::ragdollSystem());
 #endif
     }
 #endif

@@ -610,6 +610,25 @@ void RagdollSystem::setProfile(scene::Entity e, std::shared_ptr<const PhysAnimPr
     it->second.haveResolved = false;
 }
 
+bool RagdollSystem::setProfileAsset(scene::Entity e, u64 profileId) {
+    if (profileId == 0) { setProfile(e, nullptr); return true; }
+    auto it = profiles_.find(profileId);
+    if (it == profiles_.end()) {
+        std::shared_ptr<const PhysAnimProfile> loaded;
+        const std::string path = anim_ ? anim_->assetPath(profileId) : std::string{};
+        if (!path.empty()) {
+            auto p = std::make_shared<PhysAnimProfile>();
+            std::string why;
+            if (loadPhysAnimProfile(path, *p, &why)) loaded = std::move(p);
+            else AVER_WARN("[Ragdoll] physical animation profile '{}': {}", path, why);
+        }
+        it = profiles_.emplace(profileId, std::move(loaded)).first;   // a failure is cached as null
+    }
+    if (!it->second) return false;
+    setProfile(e, it->second);
+    return true;
+}
+
 bool RagdollSystem::applyHit(const HitEvent& hit) {
     if (!installed_ || !world_) return false;
     const scene::Entity e = static_cast<scene::Entity>(hit.entity);
@@ -758,6 +777,8 @@ bool RagdollSystem::getUp(scene::Entity e) {
 void RagdollSystem::clear() {
     for (auto& [e, s] : states_) destroyPhysics(s);
     states_.clear();
+    pendingProfiles_.clear();
+    profiles_.clear();
 }
 
 RagdollSystem& ragdollSystem() {
@@ -785,6 +806,61 @@ i32 providerSetStrength(i32 entity, f32 strength, void* user) {
 i32 providerAddImpulse(i32 entity, i64 boneNameHash, f32 ix, f32 iy, f32 iz, void* user) {
     return static_cast<RagdollSystem*>(user)->addImpulse(static_cast<scene::Entity>(entity),
                                                          static_cast<u64>(boneNameHash), Vec3{ix, iy, iz}) ? 1 : 0;
+}
+
+i32 physAnimProvider(i32 op, i32 entity, i64 h0, i64 h1, const f32* in, i32 inCount, i64* outI, void* user) {
+    auto& rs = *static_cast<RagdollSystem*>(user);
+    const auto e = static_cast<scene::Entity>(entity);
+    // The bone a hash names in the entity's built ragdoll, or -1.
+    auto boneOf = [&](i64 hash) -> i32 {
+        const RagdollDef* d = rs.definition(e);
+        return d ? d->boneByHash(static_cast<u64>(hash)) : -1;
+    };
+    switch (op) {
+        case 1: {   // hit
+            if (!in || inCount < 8) return 0;
+            HitEvent hit;
+            hit.entity = static_cast<u32>(entity);
+            hit.boneHash = static_cast<u64>(h0);
+            hit.impulse = Vec3{in[0], in[1], in[2]};
+            hit.point = Vec3{in[3], in[4], in[5]};
+            hit.damage = in[6];
+            hit.radius = in[7];
+            return rs.applyHit(hit) ? 1 : 0;
+        }
+        case 2: return rs.setProfileAsset(e, static_cast<u64>(h0)) ? 1 : 0;
+        case 3: return in && inCount >= 2 && rs.blendPhysicalAnimation(e, in[0], in[1]) ? 1 : 0;
+        case 4: return rs.simulateSubtree(e, static_cast<u64>(h0)) ? 1 : 0;
+        case 5: {   // one value of one bone
+            if (!in || inCount < 1) return 0;
+            const i32 bone = boneOf(h0);
+            if (bone < 0) return 0;
+            switch (h1) {
+                case 0: return rs.setPartStrength(e, bone, in[0]) ? 1 : 0;
+                case 1: return rs.setPartDamping(e, bone, in[0]) ? 1 : 0;
+                case 2: return rs.setPartTorqueScale(e, bone, in[0]) ? 1 : 0;
+                case 3: return rs.setBoneBlend(e, bone, in[0]) ? 1 : 0;
+                case 4: return rs.setPinned(e, bone, in[0] != 0.0f) ? 1 : 0;
+                default: return 0;
+            }
+        }
+        case 6: return rs.die(e) ? 1 : 0;
+        case 7: return rs.getUp(e) ? 1 : 0;
+        case 8: {
+            if (rs.mode(e) < 0) {
+                if (outI) { outI[0] = 0; outI[1] = 0; outI[2] = 0; }
+                return 0;
+            }
+            if (outI) {
+                const HitReaction* hr = rs.hitReaction(e);
+                outI[0] = static_cast<i64>(rs.life(e));
+                outI[1] = static_cast<i64>(rs.facing(e));
+                outI[2] = hr ? static_cast<i64>(hr->activeBones()) : 0;
+            }
+            return 1;
+        }
+        default: return 0;
+    }
 }
 
 } // namespace aver::ragdoll

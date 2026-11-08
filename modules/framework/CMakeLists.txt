@@ -27,6 +27,8 @@ add_library(Aver.Framework SHARED
   src/IkAbi.cpp
   # Bone poses read and written from a script, relayed to the pose seam (wave 7, docs/ANIM_POSE_SEAM.md).
   src/PoseAbi.cpp
+  # Hit reactions, partial-body simulation, death and get-up relayed to the ragdoll module (docs/physics/PHYSICAL_ANIMATION.md).
+  src/PhysAnimAbi.cpp
 
   # Blend-shape weights, face poses, face rig and lip-sync relayed to the morph system's provider (docs/ANIM_MORPH_FACE.md).
   src/MorphAbi.cpp

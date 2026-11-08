@@ -24,6 +24,11 @@ internal static partial class Native
     [DllImport(Lib)] internal static extern int aver_phys_ragdoll_set_pose(int ragdoll, float[] worldPos, float[] worldRot);
     [DllImport(Lib)] internal static extern int aver_phys_ragdoll_get_pose(int ragdoll, float[] outWorldPos, float[] outWorldRot);
     [DllImport(Lib)] internal static extern int aver_phys_ragdoll_add_impulse(int ragdoll, int bone, float ix, float iy, float iz, float px, float py, float pz);
+    [DllImport(Lib)] internal static extern int aver_phys_ragdoll_set_part_strength(int ragdoll, int bone, float strength);
+    [DllImport(Lib)] internal static extern int aver_phys_ragdoll_set_part_damping(int ragdoll, int bone, float damping);
+    [DllImport(Lib)] internal static extern int aver_phys_ragdoll_set_part_torque_scale(int ragdoll, int bone, float scale);
+    [DllImport(Lib)] internal static extern int aver_phys_ragdoll_set_part_pinned(int ragdoll, int bone, int pinned);
+    [DllImport(Lib)] internal static extern int aver_phys_ragdoll_part_pinned(int ragdoll, int bone);
     [DllImport(Lib)] internal static extern int aver_phys_ragdoll_body_of_bone(int ragdoll, int bone);
     [DllImport(Lib)] internal static extern int aver_phys_ragdoll_of_body(int body, out int outBone);
 }

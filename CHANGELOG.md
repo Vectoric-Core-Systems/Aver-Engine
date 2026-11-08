@@ -10,6 +10,10 @@ triggering inputs for anything summarised below.
 
 ## [Unreleased]
 
+### Physical animation (UE parity wave 2, W6)
+
+- **Hit reactions, partial-body simulation, death and get-up on a ragdoll** (`docs/physics/PHYSICAL_ANIMATION.md`). A `.ocphysanim` profile names regions of the skeleton and what each takes part with; a `HitEvent` (one neutral type, shared with the coming fracture work) blends the hit bone and its neighbours into the physics along an attack, hold and decay envelope, pushes the hit part and gives the body back to the animation by itself. `simulateSubtree` simulates one bone and everything below it while the rest follows the animation exactly. Per-bone blend, strength, damping and torque scale. `die()` ramps the motors to zero then goes limp; `getUp()` picks the profile montage by how the body lies and blends the simulation out. The physics ABI gained per-part strength, damping, torque scale and pins (additive); the framework gained `framework_physanim_abi.h`, `Entity.ApplyHit` and ten `PhysAnim` graph nodes. Tested headless (a 12 bone skeleton on CPU Jolt); the feel of a reaction has not been seen in a window and the editor tab and overlay are not written.
+
 ### Materials appear without a stall (phased residency)
 
 - **No frame waits on a decode, a BC7 encode or a material build.** A level, a runtime-spawned mesh or a first-drawn material used to decode and compress its textures on the render thread (a 21-material level: one 1.9 s frame). A worker pool now runs the cache read or the decode and encode (`assets::requestTexture` / `takeTexture`); the render thread only copies a finished chain to the GPU, 8 MiB a frame. A surface whose textures are not resident draws at once with a stand-in made of the material's own factors (mid grey base colour, rough non-metal, no glow; a masked or blended surface is not drawn until its texture arrives) and refines as the textures land. Geometry never pops. The derived-data cache works as before: a second run compresses nothing. `docs/MATERIALS.md` "Phased residency".

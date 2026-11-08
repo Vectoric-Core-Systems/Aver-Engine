@@ -90,6 +90,9 @@ public:
     // The entity's physical animation profile; null (or never set) uses the defaults. Resolved against the
     // skeleton when needed, so it may be set before the entity is posed.
     void setProfile(scene::Entity e, std::shared_ptr<const PhysAnimProfile> profile);
+    // The same by the profile's asset id (an .ocphysanim the animation resolver can find); 0 goes back to the
+    // defaults. Loaded once and shared. False when the asset cannot be found or does not parse.
+    bool setProfileAsset(scene::Entity e, u64 profileId);
     // Reacts to a hit: the hit bone and its neighbours blend into the simulation along their envelopes, the hit
     // part gets the impulse, and the ragdoll goes away by itself when the envelopes have run out. An entity with
     // a ragdoll already running (started by the caller, or dying) only receives the impulse. A radial event
@@ -174,6 +177,7 @@ private:
     std::unordered_map<scene::Entity, State> states_;
     std::unordered_map<u64, RagdollDef> defs_;
     std::unordered_map<scene::Entity, std::shared_ptr<const PhysAnimProfile>> pendingProfiles_;
+    std::unordered_map<u64, std::shared_ptr<const PhysAnimProfile>> profiles_;
     GetUpFn getUpFn_ = nullptr;
     void* getUpUser_ = nullptr;
 };
@@ -188,5 +192,9 @@ i32 providerStop(i32 entity, f32 blendSeconds, void* user);
 i32 providerMode(i32 entity, void* user);
 i32 providerSetStrength(i32 entity, f32 strength, void* user);
 i32 providerAddImpulse(i32 entity, i64 boneNameHash, f32 ix, f32 iy, f32 iz, void* user);
+
+// framework_physanim_abi.h's provider, with the RagdollSystem as `user` (hit reactions, partial-body
+// simulation, per-bone drive, death and get-up). Declared here for the same reason as the ones above.
+i32 physAnimProvider(i32 op, i32 entity, i64 h0, i64 h1, const f32* in, i32 inCount, i64* outI, void* user);
 
 } // namespace aver::ragdoll

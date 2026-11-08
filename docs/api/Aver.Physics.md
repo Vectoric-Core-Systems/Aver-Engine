@@ -2,7 +2,7 @@
 
 # Aver.Physics public API
 
-117 public types and 1163 public members, read from `scripting/csharp/Aver.Physics/` (53 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+117 public types and 1168 public members, read from `scripting/csharp/Aver.Physics/` (53 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Physics
 
@@ -958,6 +958,11 @@ Values: `None = 0`, `IncludeSensors = 1`
 - `public bool SetPose(Float3[] positions, Quaternion[] rotations)` - Teleports every part to the pose and zeroes its velocity.
 - `public bool GetPose(Float3[] positions, Quaternion[] rotations)` - Reads the current pose into the arrays (one element per bone each).
 - `public bool AddImpulse(int bone, Float3 impulse, Float3 worldPoint)` - An impulse (kg*cm/s) at a world point (cm) on the bone's part, or on its nearest ancestor part.
+- `public bool SetPartStrength(int bone, float strength)` - Powered strength of one bone's joint (the part the bone is or rides on), 0..1; negative goes back to the ragdoll-wide SetStrength.
+- `public bool SetPartDamping(int bone, float damping)` - Motor damping ratio of one bone's joint (default 1); negative goes back to the default.
+- `public bool SetPartTorqueScale(int bone, float scale)` - Multiplies the torque ceiling of one bone's motor (default 1).
+- `public bool SetPartPinned(int bone, bool pinned)` - PARTIAL-BODY SIMULATION: a pinned part stays kinematic in Limp and Powered mode (carried to its target every step) while the unpinned parts simulate and stay joined to it.
+- `public bool IsPartPinned(int bone)` - True if the bone's part is pinned; false if not, or for a dead handle, a bad bone or a bone with no part.
 - `public Body BodyOfBone(int bone)` - The body of the bone's part, or of the ancestor part it rides on; None if it has neither.
 - `public static Ragdoll OfBody(Body body, out int bone)` - The ragdoll that owns body as a part (None if none) and the bone of that part (-1 if none).
 - `public bool Equals(Ragdoll other)`

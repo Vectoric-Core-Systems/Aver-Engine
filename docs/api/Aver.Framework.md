@@ -2,7 +2,7 @@
 
 # Aver.Framework public API
 
-314 public types and 2620 public members, read from `scripting/csharp/Aver.Framework/` (158 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+317 public types and 2641 public members, read from `scripting/csharp/Aver.Framework/` (160 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Framework
 
@@ -600,6 +600,12 @@ Values: `None = 0`, `Bool = 1`, `Int = 2`, `Float = 3`, `Vec3 = 4`, `String = 5`
 - `public override bool Equals(object? o)`
 - `public override int GetHashCode()`
 - `public override string ToString()`
+
+### BodyFacing
+
+`public enum BodyFacing` - How a fallen body lies.
+
+Values: `Upright = 0`, `Supine = 1`, `Prone = 2`, `Side = 3`
 
 ### BoneChannels
 
@@ -1469,6 +1475,19 @@ Values: `Destroy = 0`, `Stop = 1`, `Reload = 2`, `Travel = 3`
 - `public bool IsMotionClip(string clipPath)` - True while the matcher plays this clip (the path as written in the .ocmotion's clip list).
 - `public float MotionCost { get; }` - Cost of the playing frame against the wanted trajectory at the last search.
 - `public int MotionSwitches { get; }` - How many times the matcher has switched frames.
+- `public bool ApplyHit(HitEvent hit)` - Reacts to a hit: the hit bone and its neighbours along the skeleton blend into the physics along their envelopes (attack, hold, decay from the profile), the hit part takes the impulse, and the ragdoll that was started for it removes itself when the reaction has run out.
+- `public bool ApplyHitReaction(string? bone, Vec3 impulse, float damage = 0f)` - As ApplyHit for a point hit on this entity.
+- `public bool SetPhysicalAnimationProfile(string? profileAsset)` - Sets the physical animation profile (an .ocphysanim asset) that shapes this entity's reactions, drive and death; null or empty goes back to the defaults.
+- `public bool BlendPhysicalAnimation(float weight, float seconds = 0.2f)` - Ramps the whole-body physical animation weight to weight (0 the animation, 1 the powered simulation) over seconds, starting a powered ragdoll when there is none.
+- `public bool SimulateBoneSubtree(string? bone)` - Simulates bone and everything below it; the rest of the body follows the animation exactly.
+- `public bool SetBoneStrength(string bone, float strength)` - Powered motor strength of one bone's joint, 0..1; negative goes back to the ragdoll-wide strength.
+- `public bool SetBoneDamping(string bone, float damping)` - Motor damping ratio of one bone's joint (default 1); negative goes back to the default.
+- `public bool SetBoneTorqueScale(string bone, float scale)` - Multiplier on the torque ceiling of one bone's motor (default 1).
+- `public bool SetBoneBlend(string bone, float blend)` - How much of the simulated pose shows for one bone, 0..1 (default 1), whatever the ragdoll-wide weight is.
+- `public bool PinBone(string bone, bool pinned = true)` - A pinned bone follows the animation exactly while the rest of the body simulates.
+- `public bool DieAsRagdoll()` - Starts dying: the whole body goes powered and the motors let go over the profile's death time, then the body is limp (Dead).
+- `public bool GetUpFromRagdoll()` - Gets a Dead body up: picks the profile's montage by how it lies (supine, prone, side), plays it, and blends the simulation out under it.
+- `public bool TryGetPhysicalAnimationState(out LifeState life, out BodyFacing facing, out int reactingBones)` - The life state, how the body lies and how many bones are still reacting to hits.
 - `public int PosedBoneCount { get; }` - How many bones the entity's skeleton has once it has been posed (0 before the first animation tick, or with no skeleton).
 - `public int FindBone(string name)` - The bone with that name, or -1.
 - `public BoneInfo? GetBoneInfo(int bone)` - A bone's name, parent (-1 for a root) and rest transform (parent-local), or null for an index the skeleton does not have.
@@ -1906,6 +1925,10 @@ Values: `Sphere = 0`, `Capsule = 1`, `Box = 2`
 
 `public readonly record struct HairState(bool Simulating, bool Frozen, bool Inert, bool Building, bool Built, int Lod, int RenderStrands, int SimStrands, int Colliders)` - What an entity's hair is doing: simulating, frozen by distance, inert (the groom did not build, or there is no compute device), still building, the strand level it is drawn at (0 every strand ..
 
+### HitEvent
+
+`public readonly record struct HitEvent(Entity Target, string? Bone, Vec3 Impulse, Vec3 Point = default, float Damage = 0f, float Radius = 0f)` - Something hit an entity.
+
 ### IGasClientRequests
 
 `public interface IGasClientRequests` - Receives activation requests made on a non-authoritative system, in place of failing them.
@@ -2282,6 +2305,12 @@ Values: `None = 0`, `Hidden = 1`, `FollowViewport = 2`
 - `public static bool IsPlaying(string? sequence = null)` - True while the sequence (null or empty = any sequence) is playing.
 - `public static bool TryGetState(string sequence, out float time, out float length, out float rate, out bool playing)` - The sequence's clock, length and rate.
 - `public static bool Bind(string sequence, string bindingName, Entity actor)` - Makes actor the actor that the sequence's tracks bound by the name bindingName drive (spawnable actors, a character picked at run time).
+
+### LifeState
+
+`public enum LifeState` - Where a character is between being alive and dead.
+
+Values: `Alive = 0`, `Dying = 1`, `Dead = 2`, `GettingUp = 3`
 
 ### Loc
 
