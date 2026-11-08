@@ -912,6 +912,22 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     t.push_back({"ConstFloat4", "Const Float4", "Const", {pin("value", "float4", true, "0,0,0,0")},
         {}, kDomainMaterial});
 
+    // -- PARAMETER: a named constant a material instance (.ocmati) can override; the pin default is the parent's value.
+    t.push_back({"ScalarParameter", "Scalar Parameter", "Parameter", {pin("value", "float", true, "0")},
+        {attr("name", "Name")}, kDomainMaterial});
+    t.push_back({"VectorParameter", "Vector Parameter", "Parameter", {pin("value", "float4", true, "1,1,1,1")},
+        {attr("name", "Name")}, kDomainMaterial});
+
+    // -- FUNCTION: a `DOMAIN materialfunction` graph is built from FunctionInput / FunctionOutput nodes and called
+    //    by CallFunction, whose pins are the function's inputs and outputs by name (inlined before compile; the
+    //    pins of a CallFunction are declared by the file, not by this palette entry).
+    t.push_back({"FunctionInput", "Function Input", "Function", {pin("value", "float", true, "0")},
+        {attr("name", "Name")}, kDomainMaterial});
+    t.push_back({"FunctionOutput", "Function Output", "Function", {pin("value", "float", false)},
+        {attr("name", "Name")}, kDomainMaterial});
+    t.push_back({"CallFunction", "Call Function", "Function", {},
+        {attr("function", "Function")}, kDomainMaterial});
+
     // -- INPUT: what the renderer already knows about this pixel/object, read-only, no wiring needed
     //    (emitNode's "what the renderer knows" section). UV is averSurfaceUV; the rest are xyz reads
     //    off the vertex/camera/instance transform (see MaterialGraphHlsl.cpp for exact bindings).

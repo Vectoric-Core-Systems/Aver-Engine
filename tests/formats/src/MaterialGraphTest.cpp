@@ -729,7 +729,20 @@ struct NodeCase { const char* label; GraphBuilder build; };
 
 // Every node type added since the original 25 -- see the big comment above for why this is a table
 // of small graphs rather than one more addition to M_Everything.
+// ScalarParameter + VectorParameter: literals whose default a material instance replaces.
+static fmt::OcGraphData parameterGraph() {
+    fmt::OcGraphData g;
+    fmt::parseOcgraph(
+        "OCGRAPH 1\nDOMAIN material\n"
+        "NODE w ScalarParameter 0 0 name=Wear\nPIN w value out float 0.25\n"
+        "NODE t VectorParameter 0 0 name=Tint\nPIN t value out float4 1,0.5,0.25,1\n"
+        "NODE o MaterialOutput 0 0\nPIN o BaseColor in float3\nPIN o Roughness in float\n"
+        "LINK t.value o.BaseColor\nLINK w.value o.Roughness\n", g, nullptr);
+    return g;
+}
+
 static const NodeCase kNewNodeCases[] = {
+    {"ScalarParameter + VectorParameter", []() -> fmt::OcGraphData { return parameterGraph(); }},
     {"CameraPosition", []() -> fmt::OcGraphData { return cameraPositionGraph(); }},
     {"ObjectPosition",  []() -> fmt::OcGraphData { return objectPositionGraph(); }},
     {"Sqrt",  []() -> fmt::OcGraphData { return unaryMathGraph("Sqrt", "0.2,0.4,0.6"); }},

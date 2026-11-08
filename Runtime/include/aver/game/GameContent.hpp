@@ -416,7 +416,10 @@ private:
 
     // Turns an .ocmat's GRAPHREF path into the id materialForSurface() stores.
     // Ported from SandboxApp::resolveMaterialGraph, same cache-by-compiled-path through pbr::materialGraphs().
-    u32 resolveMaterialGraph(const std::string& graphRef) const;
+    // `params` are a material instance's graph-parameter overrides: a non-empty set compiles its own variant of the graph
+    // (keyed by path and values), since parameters are folded in as literals; material functions are inlined first.
+    u32 resolveMaterialGraph(const std::string& graphRef,
+                             const std::vector<std::pair<std::string, std::string>>& params = {}) const;
 #endif
 #if AVER_MODULE_PBR && AVER_MODULE_SCENE
     std::unordered_map<i32, pbr::MaterialHandle> surfaceMaterials_;

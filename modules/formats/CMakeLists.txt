@@ -26,6 +26,8 @@ aver_add_module(Aver.Formats
     src/OcGraph.cpp
     # The EmbeddedHlsl node of a material graph (a shader translated by a tool, carried as emitted HLSL).
     src/OcGraphHlsl.cpp
+    # Material instances (.ocmati), graph parameters and material functions: text and graph rewriting, no renderer.
+    src/MaterialInstance.cpp
     # .ocprefab and the prefab-instance records of .ocworld: text, by-name components, no Aver.Scene.
     src/OcPrefab.cpp
     # [wave3/level-instances begin] LEVELINST/EXTENT records and the .ocpack level-pack sidecar: text, no Aver.Scene.

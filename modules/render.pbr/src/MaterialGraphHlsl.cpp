@@ -380,9 +380,13 @@ struct Emitter {
 
         // -- literals: the value rides on the OUTPUT pin's default, the idiom ConstFloat already
         //    established in the gameplay catalog. --
+        //    A ScalarParameter / VectorParameter is a literal too: its default is the value, and a material
+        //    instance replaces that default before the graph compiles (fmt::applyMaterialGraphParameters). --
         if (ciEquals(ty, "ConstFloat") || ciEquals(ty, "ConstFloat2") ||
-            ciEquals(ty, "ConstFloat3") || ciEquals(ty, "ConstFloat4")) {
-            const MatType t = ciEquals(ty, "ConstFloat")  ? MatType::Float
+            ciEquals(ty, "ConstFloat3") || ciEquals(ty, "ConstFloat4") ||
+            ciEquals(ty, "ScalarParameter") || ciEquals(ty, "VectorParameter")) {
+            const MatType t = ciEquals(ty, "ConstFloat") || ciEquals(ty, "ScalarParameter") ? MatType::Float
+                            : ciEquals(ty, "VectorParameter") ? MatType::Float4
                             : ciEquals(ty, "ConstFloat2") ? MatType::Float2
                             : ciEquals(ty, "ConstFloat3") ? MatType::Float3
                                                           : MatType::Float4;

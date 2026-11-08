@@ -15,7 +15,7 @@ updated in `docs/plans/UE_FEATURE_PARITY_PLAN.md` (2026-10-11); much of that pla
 | UE5 feature | Status |
 |---|---|
 | Texture streaming / virtual textures | Missing. Only a design exists (`wave4/TEXTURE_STREAMING.md`). |
-| Material instances and material functions | Missing (Planned). |
+| Material instances and material functions | Partial. `.ocmati` chains, scalar/vector graph parameters and inlined functions exist (`MATERIALS.md`). Parameters compile as literals per value set, not a cbuffer; no editor panel. |
 | Virtual Shadow Maps | Missing. There are cascades and RT shadows; the Vulkan cascades are unfinished. |
 | HLOD | Missing. Per-mesh LOD exists. |
 | Virtualised geometry | Partial. Clusters, the LOD DAG and a mesh-shader path exist. Per-cluster HiZ culling, cluster streaming and a compute fallback do not. |

@@ -1,6 +1,7 @@
 // Reader and writer for .ocmat, the engine's line-based text material format.
 
 #include "aver/formats/OcMat.hpp"
+#include "aver/formats/MaterialInstance.hpp"
 #include "aver/formats/detail/TextScan.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/platform/FileSystem.hpp"
@@ -686,6 +687,21 @@ bool loadOcmat(const std::string& path, pbr::MaterialDesc& out, OcMatExtras* ext
     }
     if (!parseOcmat(text, out, extras, err)) return false;
     if (out.name.empty()) out.name = std::filesystem::path(path).stem().string();
+    return true;
+}
+
+bool loadOcmatAny(const std::string& path, const std::string& contentDir, pbr::MaterialDesc& out, OcMatExtras* extras,
+                  std::vector<std::pair<std::string, std::string>>* instanceParams, std::string* err) {
+    if (!isMaterialInstancePath(path)) return loadOcmat(path, out, extras, err);
+    // The first file is the path as given; each PARENT after it is content-relative.
+    const MaterialTextReader read = [&](const std::string& p, std::string& text) {
+        return readFileText(p == path ? p : contentDir + AVER_PATH_SEP + p, text);
+    };
+    ResolvedMaterialInstance r;
+    if (!resolveMaterialInstance(path, read, r, err)) return false;
+    if (!parseOcmat(composeInstanceOcmat(r), out, extras, err)) return false;
+    out.name = std::filesystem::path(path).stem().string();
+    if (instanceParams) *instanceParams = std::move(r.params);
     return true;
 }
 

@@ -6,6 +6,8 @@
 
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace aver::fmt {
 
@@ -52,6 +54,11 @@ bool parseOcmat(std::string_view text, pbr::MaterialDesc& out,
 // Loads a material from disk. The name defaults to the file's stem when the file states none.
 bool loadOcmat(const std::string& path, pbr::MaterialDesc& out,
                OcMatExtras* extras = nullptr, std::string* err = nullptr);
+
+// loadOcmat for either file kind. An .ocmati (MaterialInstance.hpp) is resolved through its PARENT chain, relative to
+// `contentDir`, into the .ocmat it stands for; its merged graph-parameter overrides go to *instanceParams.
+bool loadOcmatAny(const std::string& path, const std::string& contentDir, pbr::MaterialDesc& out, OcMatExtras* extras,
+                  std::vector<std::pair<std::string, std::string>>* instanceParams = nullptr, std::string* err = nullptr);
 
 // R6: parses the key=value pairs of an `FX` record (the text after the keyword, or the whole record) into `out`; the same grammar parseOcmat reads from a file.
 // A converter composes the pairs and the cook applies them with this, so the key names live in one place.

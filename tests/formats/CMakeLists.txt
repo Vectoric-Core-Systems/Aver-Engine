@@ -252,6 +252,15 @@ if(TARGET Aver.Render.PBR.Materials)
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
 
+# MaterialInstanceTest -- .ocmati chains, graph parameters and material-function inlining, all in memory. No device, no dxc.
+if(TARGET Aver.Render.PBR.Materials AND TARGET Aver.Formats.Material)
+  add_executable(MaterialInstanceTest src/MaterialInstanceTest.cpp)
+  target_link_libraries(MaterialInstanceTest PRIVATE
+    Aver.Formats.Material Aver.Render.PBR.Materials Aver.Formats Aver.RHI Aver.Core Aver.Platform)
+  set_target_properties(MaterialInstanceTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
 # OcGraphHlslTest -- the EmbeddedHlsl / EmbeddedHlslEnv nodes (OcGraphHlsl.hpp): the new spellings, the round trip, and the files written before the rename.
 if(TARGET Aver.Render.PBR.Materials)
   add_executable(OcGraphHlslTest src/OcGraphHlslTest.cpp)

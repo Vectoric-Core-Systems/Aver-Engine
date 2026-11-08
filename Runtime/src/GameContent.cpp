@@ -41,6 +41,7 @@
 #  include "aver/assets/TextureUpload.hpp"
 #  include "aver/formats/OcGraph.hpp"
 #  include "aver/formats/OcMat.hpp"
+#  include "aver/formats/MaterialInstance.hpp"
 #  include "aver/pbr/MaterialGraphRegistry.hpp"
 #endif
 
@@ -1579,7 +1580,7 @@ bool slotCollidesFromFiles(const std::string& binariesDir, const std::string& co
         pbr::MaterialDesc d;
         fmt::OcMatExtras extras;
         std::string err;
-        if (!fmt::loadOcmat(path, d, &extras, &err)) return true;
+        if (!fmt::loadOcmatAny(path, contentDir, d, &extras, nullptr, &err)) return true;
         return d.alphaMode != pbr::AlphaMode::Mask && d.alphaMode != pbr::AlphaMode::Blend;
     }
     return true;
@@ -1600,7 +1601,7 @@ i32 slotSurfaceFromFiles(const std::string& binariesDir, const std::string& cont
         pbr::MaterialDesc d;
         fmt::OcMatExtras extras;
         std::string err;
-        if (!fmt::loadOcmat(path, d, &extras, &err)) return 0;
+        if (!fmt::loadOcmatAny(path, contentDir, d, &extras, nullptr, &err)) return 0;
         return aver::surfaceIdFromName(extras.physSurface);
     }
     return 0;
@@ -1623,7 +1624,7 @@ std::vector<std::pair<std::string, assets::TextureUsage>> slotTexturesFromFiles(
         pbr::MaterialDesc d;
         fmt::OcMatExtras extras;
         std::string err;
-        if (!fmt::loadOcmat(path, d, &extras, &err) || d.terrain.enabled()) return out;
+        if (!fmt::loadOcmatAny(path, contentDir, d, &extras, nullptr, &err) || d.terrain.enabled()) return out;
         for (u32 i = 0; i < pbr::kTextureSlotCount; ++i) {
             const std::string& p = d.textures[i].path;
             if (p.empty() || p.rfind("@rt:", 0) == 0) continue;
@@ -2255,7 +2256,8 @@ bool GameContent::resolveTerrainAtlas(const pbr::MaterialDesc& d, pbr::TerrainTe
 
 // .ocmat GRAPHREF path to gMaterialGraphId. Returns 0 for materials with no graph or load failure.
 // Broken graph does not disable the material: falls back to stock factors/maps.
-u32 GameContent::resolveMaterialGraph(const std::string& graphRef) const {
+u32 GameContent::resolveMaterialGraph(const std::string& graphRef,
+                                      const std::vector<std::pair<std::string, std::string>>& params) const {
     if (graphRef.empty()) return 0;
     const std::string content = project_.contentDir();
     if (content.empty()) return 0;
@@ -2264,8 +2266,9 @@ u32 GameContent::resolveMaterialGraph(const std::string& graphRef) const {
     std::string path = content + AVER_PATH_SEP + graphRef;
     toNativeSeparators(path);
 
-    // Compile once: multiple materials can share a graph.
-    if (const u32 known = pbr::materialGraphs().idOf(path)) return known;
+    // Compile once: multiple materials can share a graph. A parameter set is part of the identity.
+    const std::string key = params.empty() ? path : path + "#" + fmt::materialParameterKey(params);
+    if (const u32 known = pbr::materialGraphs().idOf(key)) return known;
 
     fmt::OcGraphData g;
     std::string err;
@@ -2274,7 +2277,23 @@ u32 GameContent::resolveMaterialGraph(const std::string& graphRef) const {
                    "one: {}", path, err);
         return 0;
     }
-    return pbr::materialGraphs().add(path, g.name, g);
+    const fmt::MaterialGraphReader readFn = [&content](const std::string& rel, fmt::OcGraphData& out, std::string* e) {
+        std::string p = content + AVER_PATH_SEP + rel;
+        toNativeSeparators(p);
+        return fmt::loadOcgraph(p, out, e);
+    };
+    if (!fmt::inlineMaterialFunctions(g, readFn, &err)) {
+        AVER_ERROR("[MaterialGraph] '{}': {}", path, err);
+        return 0;
+    }
+    std::vector<std::string> unknown;
+    if (!fmt::applyMaterialGraphParameters(g, params, &unknown, &err)) {
+        AVER_ERROR("[MaterialGraph] '{}': {}", path, err);
+        return 0;
+    }
+    for (const std::string& u : unknown)
+        AVER_WARN("[MaterialGraph] '{}' has no parameter '{}' -- the override is ignored", path, u);
+    return pbr::materialGraphs().add(key, g.name, g);
 }
 
 pbr::MaterialHandle GameContent::materialForSurface(const std::string& name) {
@@ -2304,8 +2323,9 @@ pbr::MaterialHandle GameContent::loadSurfaceMaterial(const std::string& name) {
             fmt::OcMatExtras extras;
             std::string err;
             // Parse failure breaks: corrupt built material must not fall through to stale hand-authored.
-            if (!fmt::loadOcmat(path, d, &extras, &err)) { AVER_WARN("[Material] {}", err); break; }
-            d.graphId = resolveMaterialGraph(extras.graphRef);
+            std::vector<std::pair<std::string, std::string>> instanceParams;
+            if (!fmt::loadOcmatAny(path, content, d, &extras, &instanceParams, &err)) { AVER_WARN("[Material] {}", err); break; }
+            d.graphId = resolveMaterialGraph(extras.graphRef, instanceParams);
             h = pbr::MaterialLibrary::get().create(d);
             if (h) {
                 AVER_INFO("[Material] '{}' loaded from {}{}", d.name, path,

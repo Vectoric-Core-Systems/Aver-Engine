@@ -218,13 +218,38 @@ LINK bands.result out.BaseColor
 Stated plainly, the way an honest limitation should be, rather than left for a reader to discover:
 
 - **No vertex or displacement graphs.** Every value a material graph reads about geometry is already-computed *per-pixel* vertex output; nothing a graph produces feeds back into the vertex stage. `MaterialOutput`'s twenty inputs are all pixel-stage surface properties (§6); none is a vertex offset, and nothing in the compiler touches a vertex shader at all.
-- **No per-graph dynamic constant buffer, and no exposed instance parameters.** `gMaterialGraphId` is four bytes inside the material's existing `AverMaterial` block (§5) — a graph gets no cbuffer of its own. There is no mechanism for a graph to declare a new authored numeric knob with its own per-material storage (the way an Unreal material-instance parameter would); a graph's only inputs are the fixed renderer-provided values (§7 Input category), the `Time` clock, this material's own existing textures, and literals baked directly into the graph's own generated HLSL text. Two materials sharing one `GRAPHREF` are pixel-for-pixel identical in what the graph contributes; they can only differ through their own `PARAM`/map values for fields the graph leaves undriven.
+- **No per-graph dynamic constant buffer.** `gMaterialGraphId` is four bytes inside the material's existing `AverMaterial` block (§5) — a graph gets no cbuffer of its own. Instance parameters (below) are therefore folded into the generated HLSL as literals, one graph arm per distinct value set, not read from per-material storage.
 - **No verified Vulkan parity.** `MaterialGraphTest` loads `dxcompiler.dll` directly and compiles against DXIL only — it never asks for `-spirv`, and no test anywhere compiles or runs a material graph through the Vulkan backend. Nothing about the emitted HLSL text is Vulkan-*specific*, but "should probably work" is not the same claim as "verified," and this page makes only the second kind.
 - **`WaveNormal` has no palette entry.** It is emitted (`ciEquals(ty, "WaveNormal")` in `MaterialGraphHlsl.cpp`, for the water surface's own ripple set — `position`/`height`/`focus`) and `MaterialGraphTest` never names it, so the only way to use it is to hand-author the `.ocgraph` text. `Time` and `Panner` (§7) are in the palette and the test.
 - **Graphs run on every path.** Raster calls `averEvalMaterial`; every ray hit (the ray-driven primary, ReSTIR GI candidates, reflections, Path Tracing vertices, and alpha-mask cut-out tests) runs the generated twin `averApplyMaterialGraphRt(graphId, ...)` from voxi_rt.hlsli's `rtHitSurface`, keyed on the hit's own material row. Both edit the same `AverAuthored` that `averComposeSurface` turns into the surface, so `Time` and `Panner` animate on ray-driven frames too. In the twin, `ObjectPosition` is the hit instance's position.
 - **No `VertexColor` node.** `VSOut` carries no vertex colour, so a palette entry for it could only produce a compile error naming a symbol that does not exist.
 - **Every graph in the process shares one compiled shader** (§5) — there is no per-graph shader variant, optimisation pass, or way for one graph's compile to diverge from what every other graph's `case` arm looks like. This is a deliberate trade (§5), not an oversight, but it means a future feature that wants a material-specific pipeline state (its own blend mode chosen by the graph, say) has nowhere to put that today.
 - **`GRAPHREF` resolves through `GameContent`, not through a standalone engine API.** `GameContent::resolveMaterialGraph` (`Runtime/src/GameContent.cpp:966`) is where a path becomes a registered graph and a `graphId`; there is no separate load-time entry point outside the game/editor content-loading code (the Anim editor's preview resolves `GRAPHREF` separately), consistent with how the rest of `.ocmat` loading works at this stage (`docs/EDITOR.md` Phase 9) but worth stating rather than assuming.
+
+## Material instances and material functions
+
+`modules/formats/{include,src}/aver/formats/MaterialInstance.*`; checked by `MaterialInstanceTest` (in memory, no device) and the `ScalarParameter + VectorParameter` case of `MaterialGraphTest` (real DXC).
+
+**Parameters.** A `DOMAIN material` graph declares them with `ScalarParameter` (float) and `VectorParameter` (float4) nodes: `name=<Name>` on the NODE line, the default on the output pin, exactly like a `ConstFloat`. The emitter treats them as literals.
+
+**Instances: `.ocmati`.** Text, `OCMATI 1`:
+
+```
+OCMATI 1
+PARENT Materials/Base.ocmat      # or another .ocmati; content-relative
+SCALAR Wear 0.75                 # graph parameter overrides
+VECTOR Tint 1 0.5 0.25 1
+PARAM roughnessFactor 0.3        # any other line is an .ocmat record applied over the parent
+TEX normal {Textures/N.png}
+```
+
+`resolveMaterialInstance` follows PARENT to the `.ocmat` at the root (chain cap 32, cycles refused with the chain named), merges parameters child-over-parent and orders records root-first so the leaf wins. `composeInstanceOcmat` appends the records to the base text and `parseOcmat` reads it, so every stock field and texture slot is overridable with no second list of names to keep in step. `fmt::loadOcmatAny` is `loadOcmat` for either extension; `GameContent` uses it everywhere it opened a `.ocmat`, so a mesh slot names an instance by its content path (`Materials/Rust.ocmati`) like any material.
+
+**How parameters reach the shader.** `GameContent::resolveMaterialGraph(ref, params)` loads the base's `GRAPHREF` graph, inlines functions, replaces the defaults (`applyMaterialGraphParameters`; a name the graph lacks is a warning) and registers the result under `path#name=value;...`. Two instances with the same values share an id; different values get their own arm in the one generated switch. That means a new value set grows the generated shader and triggers the registry's revision rebuild (§5); it is not a free per-material constant. Moving the values into the `AverMaterial` cbuffer (and its three mirrors) so instances never recompile is the follow-up.
+
+**Functions.** A `DOMAIN materialfunction` `.ocgraph` holds ordinary material nodes plus `FunctionInput` (`name=`, output pin `value` carrying the type and default) and `FunctionOutput` (`name=`, input pin `value`). A material graph calls it with a `CallFunction` node (`function=<content path>`) whose pins are the function's input and output names. `inlineMaterialFunctions` copies the body in under `<callId>~` ids, wires the caller's links through the boundary nodes (caller wire, else the call pin's typed literal, else the function's default), nests up to 16 deep and refuses cycles (chain named), missing files, non-function graphs and calls to an output the function lacks. An un-inlined `CallFunction` does not compile. A scalar wired into a wider function input is splatted by the consumer rather than at the boundary.
+
+**Not done:** the Details-style override panel and the palette's CallFunction pins (a call node's pins are written by hand or by tooling; the palette entries are bare), texture parameters (override a texture slot with a `TEX` record instead), instance preview in the graph editor, and an Add-Instance command in the content browser.
 
 ## One material, every path (2026-10-04)
 
