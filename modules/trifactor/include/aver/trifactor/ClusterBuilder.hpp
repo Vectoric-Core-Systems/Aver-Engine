@@ -274,6 +274,12 @@ struct LodDag {
 // the full invariant check.
 bool buildClusters(const fmt::OcMeshData& mesh, LodDag& dag, std::string* why = nullptr);
 
+// Which partitioner groups clusters for joint simplification. Process-wide; set before building.
+enum class GroupPartitioner : u8 { Meshopt, Bisect };
+void setGroupPartitioner(GroupPartitioner p);
+GroupPartitioner groupPartitioner();
+
+
 // Extends `dag` (already holding LOD 0 from buildClusters) with coarser LOD levels, iterating
 // GROUP -> SIMPLIFY (locked group boundary) -> RE-SPLIT until a level stops reducing triangle count
 // or a hard safety cap is hit.

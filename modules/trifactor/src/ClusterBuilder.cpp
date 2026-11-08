@@ -55,6 +55,7 @@
 // cluster would make every shared edge look single-use and lock everything.
 
 #include "aver/trifactor/ClusterBuilder.hpp"
+#include "aver/trifactor/ClusterPartition.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/formats/MorphTarget.hpp"
 
@@ -327,6 +328,8 @@ static_assert(kTargetGroupSize + kTargetGroupSize / 3 == kMaxGroupSize,
               "kMaxGroupSize documents meshopt_partitionClusters' own target..target+target/3 bound "
               "for kTargetGroupSize -- keep them in sync");
 
+GroupPartitioner g_groupPartitioner = GroupPartitioner::Meshopt;
+
 // Runs ONE meshopt_partitionClusters call over the clusters named by `ids`, using `positions`
 // (indexed like `clusterIndices` -- groupClusters, the only caller, builds that pairing two ways:
 // global ids for the large-shell bucket, locally-compacted ids for the small-shell one). Factored out
@@ -340,11 +343,14 @@ std::vector<std::vector<u32>> partitionClusterIds(const std::vector<u32>& ids,
     if (n == 1) return {{ids[0]}};   // meshopt_partitionClusters needs no help with this
 
     std::vector<u32> partitionOf(n);
-    const usize partitionCount = meshopt_partitionClusters(
-        partitionOf.data(), clusterIndices.data(), clusterIndices.size(),
-        clusterIndexCounts.data(), n,
-        positions, vertexCount, sizeof(f32) * 3,
-        kTargetGroupSize);
+    const usize partitionCount = g_groupPartitioner == GroupPartitioner::Bisect
+        ? partitionClustersBisect(partitionOf.data(), clusterIndices.data(), clusterIndexCounts.data(), n,
+                                  positions, vertexCount, sizeof(f32) * 3, kTargetGroupSize)
+        : meshopt_partitionClusters(
+              partitionOf.data(), clusterIndices.data(), clusterIndices.size(),
+              clusterIndexCounts.data(), n,
+              positions, vertexCount, sizeof(f32) * 3,
+              kTargetGroupSize);
 
     std::vector<std::vector<u32>> groups(partitionCount);
     for (u32 pos = 0; pos < n; ++pos) groups[partitionOf[pos]].push_back(ids[pos]);
@@ -598,6 +604,9 @@ u32 buildDirectCluster(const fmt::OcMeshData& mesh, std::vector<u32> shellVertic
 }
 
 } // namespace
+
+void setGroupPartitioner(GroupPartitioner p) { g_groupPartitioner = p; }
+GroupPartitioner groupPartitioner() { return g_groupPartitioner; }
 
 bool buildClusters(const fmt::OcMeshData& mesh, LodDag& dag, std::string* why) {
     if (mesh.positions.empty() || mesh.indices.empty()) {

@@ -57,3 +57,17 @@ if(TARGET Aver.Trifactor)
   target_link_libraries(MeshReportTest PRIVATE Aver.Trifactor Aver.Formats Aver.Core)
   set_target_properties(MeshReportTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# ClusterPagesTest -- cluster page plan and the CPU residency planner. Pure CPU.
+if(TARGET Aver.Trifactor)
+  add_executable(ClusterPagesTest src/ClusterPagesTest.cpp)
+  target_link_libraries(ClusterPagesTest PRIVATE Aver.Trifactor Aver.Formats Aver.Core)
+  set_target_properties(ClusterPagesTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
+# ClusterPartitionTest -- the clean-room cluster partitioner. Pure CPU.
+if(TARGET Aver.Trifactor)
+  add_executable(ClusterPartitionTest src/ClusterPartitionTest.cpp)
+  target_link_libraries(ClusterPartitionTest PRIVATE Aver.Trifactor Aver.Formats Aver.Core)
+  set_target_properties(ClusterPartitionTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
