@@ -21,7 +21,8 @@ set_target_properties(ParticleShiftTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CM
 #   ParticleSpawnAtTest      the spawn-at contract (VEHICLES and SOFTBODY_DEPTH call it), the Core seam, the provider
 #   ParticleSortNetworkTest  the bitonic network against std::sort
 #   ParticleLightingTest     which scene lights a lit emitter takes
-foreach(_t ParticleModulesTest EmitterSimTest ParticleSpawnAtTest ParticleSortNetworkTest ParticleLightingTest)
+#   ParticleGpuEventTest     the GPU tier's event channels, tier selection with a fake pool, the cbuffer and events-buffer layout, the payload arithmetic
+foreach(_t ParticleModulesTest EmitterSimTest ParticleSpawnAtTest ParticleSortNetworkTest ParticleLightingTest ParticleGpuEventTest)
   add_executable(${_t} src/${_t}.cpp)
   target_link_libraries(${_t} PRIVATE Aver.Particles Aver.Scene Aver.Core Aver.Platform)
   target_compile_definitions(${_t} PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")   # ParticleModulesTest reads the shared HLSL

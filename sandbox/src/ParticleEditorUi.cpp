@@ -83,7 +83,7 @@ void ParticleEditor::drawStats() {
         const particles::ParticleEffect& e = def_.emitters[i];
         const u32 alive = i < sims_.size() ? sims_[i].aliveCount() : 0u;
         const u32 cap = pxmodel::emitterCapacity(e);
-        const bool eventsCpu = particles::systemEventsNeedCpu(def_);   // event-linked emitters share one tier
+        const bool eventsCpu = particles::systemEventsNeedCpu(def_);   // more trigger rules than the GPU has channels: the linked emitters share the CPU tier
         const bool gpu = pxmodel::emitterOnGpu(e) && !eventsCpu;
         const u64 mem = gpu ? pxmodel::gpuMemoryEstimate(e) : 0u;
         gpuTotal += mem;
@@ -984,7 +984,7 @@ void ParticleEditor::drawParams() {
             if (ev.payload & particles::kEventPayloadSize) extra += " size";
             if (ev.payload & particles::kEventPayloadAge) extra += " age";
             if (ev.user != 0.0f) extra += " user " + std::to_string(ev.user).substr(0, 5);
-            ImGui::Text("on %s: spawn %u into %s%s%s", when, ev.count, child.c_str(), extra.c_str(), particles::eventNeedsCpu(ev) ? " [CPU tier]" : "");
+            ImGui::Text("on %s: spawn %u into %s%s%s", when, ev.count, child.c_str(), extra.c_str(), particles::eventRuleFires(ev) ? "" : " [never fires]");
             ImGui::SameLine();
             if (ImGui::SmallButton(ICON_CLOSE)) { editSystem([&](ParticleSystemDef& s) { return pxmodel::removeEvent(s, sel_, static_cast<int>(k)); }); ImGui::PopID(); break; }
             ImGui::PopID();

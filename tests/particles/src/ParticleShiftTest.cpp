@@ -218,7 +218,7 @@ int main() {
         std::vector<u32> ev(static_cast<usize>(kGpuEventRegionUints) * 2u, 0u);
         const auto putRecord = [&](u32 region, u32 type, u32 index, f32 x, f32 y, f32 z) {
             u32* base = ev.data() + region * kGpuEventRegionUints;
-            u32* rec = base + kGpuEventHeaderUints + (type == 0 ? 0u : kGpuEventCapacity * kGpuEventRecordUints) + index * kGpuEventRecordUints;
+            u32* rec = base + kGpuEventHeaderUints + type * kGpuEventChannelUints + index * kGpuEventRecordUints;
             std::memcpy(&rec[0], &x, 4); std::memcpy(&rec[1], &y, 4); std::memcpy(&rec[2], &z, 4);
             rec[3] = 77u;
             const f32 vx = 9.0f;
@@ -230,11 +230,13 @@ int main() {
         putRecord(1, 0, 3, 3.0f, 3.0f, 3.0f);   // beyond the count: stale, must not move
         ev[0 * kGpuEventRegionUints + 0] = 2u;    // region 0: two death records
         ev[1 * kGpuEventRegionUints + 1] = 1u;    // region 1: one collide record
+        putRecord(0, kGpuEventChannels - 1, 0, 2'000'003.0f, 1.0f, 2.0f);
+        ev[0 * kGpuEventRegionUints + kGpuEventChannels - 1] = 1u;   // region 0: one record on the last trigger channel
         const std::vector<u32> evBefore = ev;
         gpuShiftEvents(ev.data(), delta);
         const auto pos = [&](const std::vector<u32>& b, u32 region, u32 type, u32 index, int axis) {
             const u32* rec = b.data() + region * kGpuEventRegionUints + kGpuEventHeaderUints +
-                             (type == 0 ? 0u : kGpuEventCapacity * kGpuEventRecordUints) + index * kGpuEventRecordUints;
+                             type * kGpuEventChannelUints + index * kGpuEventRecordUints;
             f32 v;
             std::memcpy(&v, &rec[axis], 4);
             return v;
@@ -242,9 +244,10 @@ int main() {
         check(bitEqual(pos(ev, 0, 0, 0, 0), pos(evBefore, 0, 0, 0, 0) - delta[0]) && bitEqual(pos(ev, 0, 0, 1, 0), pos(evBefore, 0, 0, 1, 0) - delta[0]) &&
               bitEqual(pos(ev, 1, 1, 0, 0), pos(evBefore, 1, 1, 0, 0) - delta[0]),
               "the live event records of both regions and both types shift");
+        check(bitEqual(pos(ev, 0, kGpuEventChannels - 1, 0, 0), pos(evBefore, 0, kGpuEventChannels - 1, 0, 0) - delta[0]), "a record on the last trigger channel shifts");
         check(ev[0 * kGpuEventRegionUints + kGpuEventHeaderUints + 3] == 77u &&
               std::memcmp(&ev[1 * kGpuEventRegionUints + kGpuEventHeaderUints + 3 * kGpuEventRecordUints],
-                          &evBefore[1 * kGpuEventRegionUints + kGpuEventHeaderUints + 3 * kGpuEventRecordUints], 32) == 0,
+                          &evBefore[1 * kGpuEventRegionUints + kGpuEventHeaderUints + 3 * kGpuEventRecordUints], 40) == 0,
               "ids, velocities and records past the count are left alone");
 
         std::vector<Vec4> trail = {Vec4{2'000'000.0f, 1.0f, 2.0f, 0.5f}, Vec4{2'000'010.0f, 1.0f, 2.0f, 0.25f}};
@@ -260,7 +263,7 @@ int main() {
         check(has("void CSShift(uint3 dtid : SV_DispatchThreadID)"), "particles_sim.hlsl declares CSShift");
         check(has("gParticles[i].position = pos - d;") && has("gTrail[i] = float4(t.xyz - d, t.w);"),
               "CSShift subtracts the delta from the particle and the trail point and keeps the trail age");
-        check(has("min(gEvents[region + type], PEV_CAP)") && has("asfloat(gEvents[b + 0u]) - d.x"),
+        check(has("min(gEvents[region + channel], PEV_CAP)") && has("asfloat(gEvents[b + 0u]) - d.x"),
               "CSShift walks the live event records of both regions");
         check(has("const float3 d = gS.origin;"), "CSShift reads the delta from the header's origin field");
         const std::string cpp = readFile(std::string(AVER_REPO_ROOT) + "/modules/particles/src/ParticleGpu.cpp");

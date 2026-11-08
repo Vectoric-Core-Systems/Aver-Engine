@@ -87,10 +87,21 @@
 #define PARG_SPAWN 8u
 #define PARG_UPDATE 12u
 
-// Events buffer (ParticleGpuTypes.hpp): header uints then death records then collide records, eight uints each.
+// Events buffer (ParticleGpuTypes.hpp): per region a header of record counts (one per channel) then PEV_CAP records of PEV_REC uints per channel.
+// Channels: 0 death, 1 collide, 2.. one per trigger rule of the emitter (gEv rule table).
 #define PEV_CAP 2048u
-#define PEV_REC 8u
-#define PEV_HEADER 4u
+#define PEV_REC 10u
+#define PEV_HEADER 8u
+#define PEV_CHANNELS 6u
+#define PEV_REGION (PEV_HEADER + PEV_CHANNELS * PEV_CAP * PEV_REC)
+#define PEV_TINT 7u
+#define PEV_SIZE 8u
+#define PEV_AGE 9u
+#define PEVT_DEATH 0u
+#define PEVT_COLLIDE 1u
+#define PEVT_SPAWN 2u
+#define PEVT_LIFETIME 3u
+#define PEVT_TIMER 4u
 
 // ParticleTypes.hpp Particle: 64 bytes, identical layout.
 struct PParticle {

@@ -1015,7 +1015,7 @@ EmitterText buildEmitterText(const particles::ParticleSystemDef& def, usize inde
     R(Rec::Scale) = scalabilityText("SCALE", e.scalability);
     for (const EventSpawn& ev : e.events) {
         const std::string child = ev.emitter < def.emitters.size() ? def.emitters[ev.emitter].name : std::string();
-        if (particles::eventNeedsCpu(ev)) {
+        if (particles::eventIsExtended(ev)) {
             static const char* kOn[] = {"death", "collide", "spawn", "lifetime ", "timer "};
             std::string line = std::string("TRIGGER ") + kOn[std::min<u8>(ev.on, 4)];
             if (ev.on == 3 || ev.on == 4) line += num(ev.at);

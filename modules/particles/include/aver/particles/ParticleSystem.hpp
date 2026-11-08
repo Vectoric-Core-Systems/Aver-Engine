@@ -197,8 +197,10 @@ private:
         u32 gpuDepth = 0;
         u32 gpuCap = 0;                        // pool capacity this instance holds against the budget
         u32 seed = 1;                          // the emitter seed (the GPU twin of EmitterSim::init's)
-        u32 evType = 0, evCount = 0;           // the parent rule this GPU instance consumes
+        u32 evType = 0, evCount = 0;           // the parent rule this GPU instance consumes: the parent's event channel and the child count
         f32 evInherit = 0;
+        u8  evPayload = 0;                     // that rule's payload bits and speed scalar
+        f32 evUser = 0;
         f32 accum = 0;                         // emitters 1..n; emitter 0 uses CParticleEmitter::emitAccum
         u32 nextId = 0;                        // GPU: the id counter the CPU owns
         u32 aliveHint = 0;

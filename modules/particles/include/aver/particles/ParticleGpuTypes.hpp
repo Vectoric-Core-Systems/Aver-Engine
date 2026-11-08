@@ -12,13 +12,17 @@ namespace aver::particles {
 inline constexpr u32 kGpuMaxRequests = 64;       // spawn requests per dispatch batch
 inline constexpr u32 kGpuMaxModules  = kMaxModulesPerEmitter;
 inline constexpr u32 kGpuModuleRows  = 3;
-inline constexpr u32 kGpuEventCapacity = 2048;   // records per event type per emitter instance
+inline constexpr u32 kGpuEventCapacity = 2048;   // records per event channel per emitter instance
 inline constexpr u32 kGpuCounterCount = 16;
-// Events buffer: two regions; the frame parity picks the one written and a child reads the other. A region is four header uints
-// (death count, collide count), then kGpuEventCapacity death and as many collide records of eight uints (position xyz, id, velocity xyz, unused) as float bits.
-inline constexpr u32 kGpuEventRecordUints = 8;
-inline constexpr u32 kGpuEventHeaderUints = 4;
-inline constexpr u32 kGpuEventRegionUints = kGpuEventHeaderUints + 2 * kGpuEventCapacity * kGpuEventRecordUints;
+// Events buffer: two regions; the frame parity picks the one written and a child reads the other. A region is eight header uints
+// (a record count per channel, kGpuEventChannels of them; ParticleTypes.hpp: 0 death, 1 collide, then one per trigger rule), then
+// kGpuEventCapacity records per channel of ten uints as float bits: position xyz, id, velocity xyz, tint (RGBA8), size ratio, age fraction.
+inline constexpr u32 kGpuEventRecordUints = 10;
+inline constexpr u32 kGpuEventHeaderUints = 8;
+inline constexpr u32 kGpuEventChannelUints = kGpuEventCapacity * kGpuEventRecordUints;
+inline constexpr u32 kGpuEventRegionUints = kGpuEventHeaderUints + kGpuEventChannels * kGpuEventChannelUints;
+static_assert(kGpuEventChannels <= kGpuEventHeaderUints, "the region header holds one record count per channel");
+inline constexpr u32 kGpuEventTint = 7, kGpuEventSizeRatio = 8, kGpuEventAgeFraction = 9;   // record word indices past position, id and velocity
 
 inline constexpr u32 kGpuFlagLinked      = 1u << 0;   // linked ribbon: slot = id % capacity, no dead list
 inline constexpr u32 kGpuFlagTrail       = 1u << 1;   // trail ribbon: push to the trail ring
@@ -82,15 +86,33 @@ static_assert(offsetof(GpuSimHeader, gravity) == 32 && offsetof(GpuSimHeader, or
               offsetof(GpuSimHeader, drawMult) == 160 && offsetof(GpuSimHeader, sortedBase) == 176,
               "GpuSimHeader row offsets drifted from particles_common.hlsli");
 
+// What the kernels need to raise and consume events, fifteen float4 rows: the emitter's size and colour curves (the same layout the draw shader
+// reads) so a record carries the particle's colour and size at the event, the consumed rule's payload, and the emitter's trigger rules.
+struct GpuEventData {
+    f32 size[4];   // sizeStart, sizeEnd, size curve stops (0 none), colour curve stops (0 none)
+    f32 sizeT[4];  // size curve times
+    f32 sizeV[4];  // size curve values
+    f32 colA[4];   // colorStart (straight rgba)
+    f32 colB[4];   // colorEnd
+    f32 colT[4];   // colour curve times
+    f32 colV[4][4];// colour curve stops
+    u32 payload;  f32 user;  u32 ruleCount;  u32 pad;   // the consumed rule: payload bits and speed scalar; ruleCount: trigger channels this emitter raises
+    u32 rule[kGpuTriggerChannels][4];                   // per trigger channel: EventOn, the rule's `at` bits, 0, 0
+};
+static_assert(sizeof(GpuEventData) == 240, "GpuEventData is fifteen float4 rows; particles_sim.hlsl reads gEv[0..14]");
+static_assert(offsetof(GpuEventData, colV) == 96 && offsetof(GpuEventData, payload) == 160 && offsetof(GpuEventData, rule) == 176,
+              "GpuEventData row offsets drifted from particles_sim.hlsl");
+
 struct GpuSimCB {
     GpuSimHeader h;
     f32 user[kMaxUserParams][4];
     u32 mod[kGpuMaxModules * kGpuModuleRows][4];   // per module: 8 parameter values (bits), packed user refs, kind/stage
+    GpuEventData ev;
     GpuSpawnRequest req[kGpuMaxRequests];
 };
-static_assert(offsetof(GpuSimCB, user) == 192 && offsetof(GpuSimCB, mod) == 448 && offsetof(GpuSimCB, req) == 1216,
+static_assert(offsetof(GpuSimCB, user) == 192 && offsetof(GpuSimCB, mod) == 448 && offsetof(GpuSimCB, ev) == 1216 && offsetof(GpuSimCB, req) == 1456,
               "GpuSimCB block offsets drifted from particles_common.hlsli");
-static_assert(sizeof(GpuSimCB) == 8384, "GpuSimCB size drifted from particles_common.hlsli");
+static_assert(sizeof(GpuSimCB) == 8624, "GpuSimCB size drifted from particles_common.hlsli");
 
 struct GpuJob {
     u32 handle = 0;
@@ -120,13 +142,13 @@ inline void gpuShiftTrail(Vec4* t, usize n, const f32 delta[3]) {
     for (usize i = 0; i < n; ++i) { t[i].x -= delta[0]; t[i].y -= delta[1]; t[i].z -= delta[2]; }
 }
 // `events` is the instance's whole events buffer: two regions of kGpuEventRegionUints uints. Only the first
-// min(count, kGpuEventCapacity) records of each type are live; the rest is stale and left alone.
+// min(count, kGpuEventCapacity) records of each channel are live; the rest is stale and left alone.
 inline void gpuShiftEvents(u32* events, const f32 delta[3]) {
     for (u32 region = 0; region < 2; ++region) {
         u32* base = events + region * kGpuEventRegionUints;
-        for (u32 type = 0; type < 2; ++type) {
-            const u32 n = base[type] < kGpuEventCapacity ? base[type] : kGpuEventCapacity;
-            u32* rec = base + kGpuEventHeaderUints + (type == 0 ? 0u : kGpuEventCapacity * kGpuEventRecordUints);
+        for (u32 channel = 0; channel < kGpuEventChannels; ++channel) {
+            const u32 n = base[channel] < kGpuEventCapacity ? base[channel] : kGpuEventCapacity;
+            u32* rec = base + kGpuEventHeaderUints + channel * kGpuEventChannelUints;
             for (u32 i = 0; i < n; ++i, rec += kGpuEventRecordUints)
                 for (u32 a = 0; a < 3; ++a) {
                     f32 v;
@@ -137,6 +159,18 @@ inline void gpuShiftEvents(u32* events, const f32 delta[3]) {
         }
     }
 }
+
+// CPU mirror of pEventPayload (particles_sim.hlsl) and of EmitterSim's event record: the particle's colour (curve times tint), its size relative to its
+// birth size times its own scale, and how far through its life it is, at `age` of `lifetime`. ParticleGpuEventTest holds it to EmitterSim.
+struct GpuEventPayload {
+    u32 tint = 0xFFFFFFFFu;
+    f32 sizeRatio = 1.0f;
+    f32 ageFraction = 0.0f;
+};
+GpuEventPayload gpuEventPayload(const GpuEventData& d, u32 tint, f32 age, f32 lifetime, f32 sizeScale);
+
+// Fills the emitter-side half of the event block from `fx`: its curves and its firing trigger rules (channels 2.. in rule order).
+void packGpuEventData(const ParticleEffect& fx, GpuEventData& out);
 
 // Packs `fx`'s enabled modules into the uint4 table (kGpuModuleRows rows each); returns the module count.
 u32 packGpuModules(const ParticleEffect& fx, u32 (*outRows)[4]);

@@ -94,7 +94,10 @@ int main() {
             check(!px::addEvent(t, 0, 4, 1, 1, 0.0f, 0.0f), "a zero timer period is refused");
             check(!px::addEvent(t, 0, 2, 1, 1, 0.0f, 0.0f, 8), "an unknown payload bit is refused");
             check(t.emitters[0].events.size() == 3 && t.emitters[0].events[2].at == 0.5f && t.emitters[0].events[0].payload == particles::kEventPayloadAll, "the fields are stored");
-            check(!px::emitterOnGpu(t.emitters[0]), "an emitter with such a rule shows the CPU tier even when forced");
+            t.emitters[0].simTier = particles::SimTier::Gpu;
+            check(px::emitterOnGpu(t.emitters[0]), "an emitter with trigger and payload rules runs on the GPU tier when forced");
+            for (int k = 0; k < 3; ++k) t.emitters[0].events.push_back(t.emitters[0].events[2]);
+            check(!px::emitterOnGpu(t.emitters[0]), "more trigger rules than the GPU has event channels shows the CPU tier even when forced");
         }
         check(!px::addEvent(e, 0, 0, 7, 1, 0.0f), "a missing child is refused");
 

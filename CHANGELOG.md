@@ -17,7 +17,7 @@ triggering inputs for anything summarised below.
 
 ### Particles
 
-- **Event payloads and more triggers.** A `.ocparticle` event rule can fire at a particle's birth, at a life fraction or every N seconds of its age (new `TRIGGER` record; `ONEVENT` unchanged), and the child can inherit the parent's colour, size and age fraction plus a user speed scalar. CPU tier only: a system using any of it runs entirely on the CPU tier, shown as `CPU (events)` in the editor's tier column; the GPU kernels are unchanged. `docs/PARTICLES.md`. Not yet seen on a screen.
+- **Event payloads and more triggers.** A `.ocparticle` event rule can fire at a particle's birth, at a life fraction or every N seconds of its age (new `TRIGGER` record; `ONEVENT` unchanged), and the child can inherit the parent's colour, size and age fraction plus a user speed scalar. Both tiers run them: the GPU kernels write one event list per rule (a channel) and a child's spawn dispatch reads its parent's list the next frame. Only an emitter with more than four trigger rules, or a child fed by more than one rule, runs its whole system on the CPU tier (`CPU (events)` in the editor's tier column). `docs/PARTICLES.md`. Not yet seen on a screen; the GPU half has not run on a device.
 
 ### Extensions (contract 2)
 

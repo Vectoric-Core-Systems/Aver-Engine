@@ -107,10 +107,11 @@ void testProbes(Rig& rig, scene::World& world) {
     GpuSimCB cb;
     u32* words = reinterpret_cast<u32*>(&cb);
     for (usize i = 0; i < sizeof(GpuSimCB) / 4; ++i) words[i] = 0x10000000u + static_cast<u32>(i) * 7u;
-    const rhi::BufferHandle rb = rig.readbackBuffer(64 * 4);
-    u32 got[64] = {};
+    const rhi::BufferHandle rb = rig.readbackBuffer(72 * 4);
+    u32 got[72] = {};
     bool ran = rig.dev->runStandaloneCompute([&](rhi::IRenderContext& ctx) { rig.gpu.probe(ctx, h, cb, rb); });
     check(ran && rig.res->readBuffer(rb, got, sizeof got, 0), "CSProbe runs and reads back");
+    const usize reqW = offsetof(GpuSimCB, req) / 4, evW = offsetof(GpuSimCB, ev) / 4;
     const u32 expect[] = {
         // the 48 header words in order, then the sampled rows
         words[0], words[1], words[2], words[3], words[4], words[5], words[6], words[7], words[8], words[9], words[10], words[11],
@@ -119,14 +120,17 @@ void testProbes(Rig& rig, scene::World& world) {
         words[36], words[37], words[38], words[39], words[40], words[41], words[42], words[43], words[44], words[45], words[46], words[47],
         words[48], words[51], words[108], words[111],
         words[112], words[115], words[300], words[303],
-        words[304], words[307], words[2092], words[2095],
-        words[351], words[359],
+        words[reqW + 0], words[reqW + 3], words[reqW + 447 * 4], words[reqW + 447 * 4 + 3],
+        words[reqW + 11 * 4 + 3], words[reqW + 13 * 4 + 3],
+        // the event block: size[0], colV[3][3], payload, user, ruleCount, rule[0][0], rule[3][1], rule[3][3]
+        words[evW + 0], words[evW + 9 * 4 + 3], words[evW + 10 * 4 + 0], words[evW + 10 * 4 + 1], words[evW + 10 * 4 + 2],
+        words[evW + 11 * 4 + 0], words[evW + 14 * 4 + 1], words[evW + 14 * 4 + 3],
     };
     int firstBad = -1;
-    for (int i = 0; i < 62; ++i)
+    for (int i = 0; i < 70; ++i)
         if (got[i] != expect[i]) { firstBad = i; break; }
     if (firstBad >= 0) AVER_ERROR("  probe word {} read {:#x}, expected {:#x}", firstBad, got[firstBad], expect[firstBad]);
-    check(firstBad < 0, "every probed field of GpuSimCB reads back at its C++ offset (62 words)");
+    check(firstBad < 0, "every probed field of GpuSimCB reads back at its C++ offset (70 words)");
     rig.res->destroyBuffer(rb);
 
     // The RNG: kRandGolden's 32 pairs go in as the first 32 float4s of the request block.

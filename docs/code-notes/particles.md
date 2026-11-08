@@ -40,7 +40,7 @@ backticks are where the knowledge applies. Measurements are as originally record
 - banner: C++ and HLSL declare the same layout. particles_common.hlsli holds the twin. CSProbe in particles_sim.hlsl writes sentinel field values that ParticleGpuParityTest reads back (the three-mirrors lesson).
 - banner: change a struct here, change the HLSL and the static_asserts together.
 - kGpuModuleRows: uint4 per module.
-- events buffer: two regions. The frame parity picks the one being written; a child reads the other. A region holds four header uints (death count, collide count), then kGpuEventCapacity death records, then as many collide records, each eight uints (position xyz, id, velocity xyz, unused) as float bits.
+- events buffer: two regions. The frame parity picks the one being written; a child reads the other. A region holds eight header uints (a record count per channel: 0 death, 1 collide, 2.. one per trigger rule), then kGpuEventCapacity records per channel (kGpuEventChannels = 6), each ten uints as float bits: position xyz, id, velocity xyz, tint (RGBA8), size ratio, age fraction.
 - kGpuFlagLinked: linked ribbon, slot = id % capacity, no dead list. kGpuFlagTrail: trail ribbon, push to the trail ring. kGpuFlagSubuvStart: random start frame. kGpuFlagHasEvents: an events buffer is bound (this emitter raises events or has children).
 - kCtrDead: dead-list size. kCtrAlive: entries in the alive list being read this frame. kCtrAliveNext: survivors appended this frame. kCtrStatAlive: CSFinish copy for the stats readback.
 - kCtrDropped: spawns refused (dead list empty) since init. kCtrEvTotal: event-driven spawns this frame (CSBegin -> CSSpawn). kCtrEvIdBase: running id counter for event-driven spawns. kCtrEvIdThis: the base this frame's CSSpawn uses.
@@ -50,6 +50,7 @@ backticks are where the knowledge applies. Measurements are as originally record
 - GpuSpawnRequest: one spawn request, 7 float4s. xf: emitter world matrix, row-major: rows 0..2 rotate/scale, row 3 translates.
 - GpuSimHeader: twelve float4 rows, packed the way an HLSL cbuffer packs a struct (no member straddles a row). The row numbers 0 to 11 were marked beside the members.
 - GpuSimHeader.alive*: element offsets into the alive buffer. evActive: this emitter consumes its parent's events. evWriteBase: this frame's event region (uint offset). sortedBase: element offset of the sorted-order region. evReadBase: the parent's region this emitter consumes.
+- GpuEventData: the event block of GpuSimCB (between the modules and the requests): the emitter's size and colour curves, the consumed rule's payload bits and speed scalar, and the table of its trigger rules (kind, at) per channel. packGpuEventData fills it; gpuEventPayload is the CPU mirror of the kernel's payload arithmetic.
 - GpuSimCB: the whole b3 block of the simulation kernels. mod: per module, 8 parameter values (bits), packed user refs, kind/stage.
 - GpuJob: one tick of one GPU emitter instance, plain data. ParticleSystem produces them and ParticleGpu::record drains them.
 - GpuJob.handle: ParticleGpu::acquire's result. parent: handle whose events this instance consumes (0 none). order: recording order key; children record before parents. visible: a culled instance is neither dispatched nor drawn.
@@ -58,6 +59,6 @@ backticks are where the knowledge applies. Measurements are as originally record
 - GpuJob.cb: header, user values, modules and the first <= 64 requests. GpuJob.extra: requests past the first 64 (more spawn dispatches).
 - GpuShift: a floating-origin shift of one GPU instance's RESIDENT state (LARGE_WORLD 2.2.6): its particle slots, trail points and pending event records are all `delta` smaller. ParticleSystem::shiftWorld queues one per live GPU instance; ParticleGpu runs them (CSShift) before any job of the frame. Plain data, like GpuJob.
 - gpuShiftParticles / gpuShiftTrail / gpuShiftEvents: CPU mirrors of CSShift's arithmetic (particles_sim.hlsl): plain f32 `p - delta` per axis on exactly the fields the kernel writes, so ParticleShiftTest can hold the HLSL to a definition with no device. Dead slots shift too (harmless). A trail point keeps its w (the particle's age at the point). An event record shifts its position and not its velocity.
-- gpuShiftEvents: `events` is the instance's whole events buffer, two regions of kGpuEventRegionUints uints. Only the first min(count, kGpuEventCapacity) records of each type are live; the rest is stale and left alone.
+- gpuShiftEvents: `events` is the instance's whole events buffer, two regions of kGpuEventRegionUints uints. Only the first min(count, kGpuEventCapacity) records of each channel are live; the rest is stale and left alone.
 - packGpuModules: packs `fx`'s enabled modules into the uint4 table (kGpuModuleRows rows each); returns the module count.
 - static_assert messages (kept in code) name particles_common.hlsli as the layout twin.

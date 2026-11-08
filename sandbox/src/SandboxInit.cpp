@@ -966,7 +966,17 @@ void SandboxApp::onInit(Engine& e)  {
     {
         const int pm = particleGpuArg_ >= 0 ? particleGpuArg_ : (project_.particleGpu >= 0 ? project_.particleGpu : 1);
         particles::particleSystem().setGpuMode(pm);
-        if (project_.particleScale >= 0) particles::particleEffects().setScalabilityTier(static_cast<particles::ScalabilityTier>(std::min(project_.particleScale, 3)));
+        if (project_.particleScale >= 0) {
+            particles::particleEffects().setScalabilityTier(static_cast<particles::ScalabilityTier>(std::min(project_.particleScale, 3)));
+        }
+#if AVER_MODULE_VOXI
+        else {   // no RENDER.PARTICLESCALE: the particle tier follows the Overall Quality rung the project's render settings read as
+            particles::ScalabilityTier t;
+            const voxi::Renderer& vx = voxi::Renderer::get();
+            if (particles::tierForQualityRung(static_cast<u32>(voxi::overallFromSettings(vx.settings(), vx.deviceInfo())), t))
+                particles::particleEffects().setScalabilityTier(t);
+        }
+#endif
         particleRenderer_.setGpuEnabled(pm != 0);
         particleRenderer_.setTextureResolver(&game::GameContent::resolveParticleTexture, &content_);
         particleRenderer_.setMeshResolver(&game::GameContent::resolveParticleMesh, &content_);

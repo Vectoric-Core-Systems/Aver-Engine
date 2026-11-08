@@ -1300,6 +1300,12 @@ void SandboxApp::buildRenderingSettings(int page) {
                 if (qualityButton(kRungNames[i], cur == kRungs[i])) {
                     overallFollowMask |= applyOverall(s, kRungs[i], vx.deviceInfo());
                     changed = true;
+#if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
+                    // The particle scalability tier follows the preset unless the project pins it (RENDER.PARTICLESCALE).
+                    particles::ScalabilityTier pt;
+                    if (project_.particleScale < 0 && particles::tierForQualityRung(static_cast<u32>(kRungs[i]), pt))
+                        particles::particleEffects().setScalabilityTier(pt);
+#endif
                 }
                 if (kRungs[i] == OverallQuality::Epic && ImGui::IsItemHovered())
                     ImGui::SetTooltip("Global Illumination's voxel grid goes to 512^3, about\n"

@@ -37,6 +37,14 @@ inline bool parseTierWord(std::string_view w, ScalabilityTier& out) {
     return false;
 }
 
+// The particle tier the engine's Overall Quality rung asks for (the render ladder numbers its rungs 1 Low .. 4 Epic; 0 is Custom). False for
+// anything but a rung: the tier is then left as it is (a project key, or Epic).
+inline bool tierForQualityRung(u32 rung, ScalabilityTier& out) {
+    if (rung < 1u || rung > 4u) return false;
+    out = static_cast<ScalabilityTier>(rung - 1u);
+    return true;
+}
+
 inline bool tierIsIdentity(const TierScale& s) { return s.enabled && s.rateScale == 1.0f && s.maxScale == 1.0f; }
 inline bool anyTierSet(const Scalability& s) {
     for (const TierScale& t : s.tier) if (t.set) return true;

@@ -772,7 +772,7 @@ bool ParticleGpu::probeCopy(rhi::IRenderContext& ctx, u32 handle, rhi::PipelineH
 }
 
 bool ParticleGpu::probe(rhi::IRenderContext& ctx, u32 handle, const GpuSimCB& cb, rhi::BufferHandle dst) {
-    return probeCopy(ctx, handle, csProbe_, cb, dst, 64u);
+    return probeCopy(ctx, handle, csProbe_, cb, dst, 72u);
 }
 
 bool ParticleGpu::probeRng(rhi::IRenderContext& ctx, u32 handle, const GpuSimCB& cb, rhi::BufferHandle dst) {

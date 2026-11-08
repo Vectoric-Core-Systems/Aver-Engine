@@ -426,15 +426,9 @@ static void testEventTriggers() {
     fs.step(0.35f, 0.35f, &fe);
     check(fe.size() == 3, "a 0.35 s step crosses three 0.1 s timer marks");
 
-    // Which rules the GPU tier cannot run.
+    // Trigger and payload rules are the extended spelling; the GPU tier takes them (ParticleGpuEventTest holds the channel rules).
     EventSpawn d0; d0.on = 0; EventSpawn pay; pay.on = 1; pay.payload = kEventPayloadColor;
-    check(!eventNeedsCpu(d0) && eventNeedsCpu(born) && eventNeedsCpu(half) && eventNeedsCpu(tick) && eventNeedsCpu(pay), "only plain death and collide rules run on the GPU");
-    ParticleSystemDef def;
-    def.emitters.resize(2);
-    def.emitters[0].events = {d0};
-    check(!systemEventsNeedCpu(def), "a system of plain rules may use the GPU");
-    def.emitters[1].events = {half};
-    check(systemEventsNeedCpu(def), "one CPU-only rule anywhere puts the system on the CPU");
+    check(!eventIsExtended(d0) && eventIsExtended(born) && eventIsExtended(half) && eventIsExtended(tick) && eventIsExtended(pay), "trigger and payload rules are the extended spelling");
 }
 
 static void testUserParamBinding() {

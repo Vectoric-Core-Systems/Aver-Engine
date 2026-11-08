@@ -9,6 +9,7 @@
 // Header-only so ParticleEditor.cpp, the UI translation unit and the test share one definition.
 #include "aver/particles/EmitterSim.hpp"
 #include "aver/particles/ParticleModules.hpp"
+#include "aver/particles/ParticleGpuTypes.hpp"
 #include "aver/particles/ParticleScalability.hpp"
 #include "aver/particles/ParticleTypes.hpp"
 
@@ -390,7 +391,7 @@ inline u32 emitterCapacity(const ParticleEffect& e) {
     return (e.render == RenderKind::Ribbon && e.linked) ? e.linkedCapacity : std::max(1u, e.maxParticles);
 }
 inline bool emitterOnGpu(const ParticleEffect& e) {
-    for (const particles::EventSpawn& ev : e.events) if (particles::eventNeedsCpu(ev)) return false;   // a rule only the CPU tier runs
+    if (particles::emitterEventsNeedCpu(e)) return false;   // more trigger rules than the GPU tier has event channels
     if (e.simTier == SimTier::Cpu) return false;
     if (e.simTier == SimTier::Gpu) return true;
     return emitterCapacity(e) >= 2048u;
@@ -401,13 +402,13 @@ inline bool emitterSorts(const ParticleEffect& e) {
     return e.blend == rhi::BlendMode::AlphaBlend || e.blend == rhi::BlendMode::PremultipliedAlpha;
 }
 // An ESTIMATE of the pooled GPU buffers one emitter instance takes (ParticleGpuPool.cpp): 64 B particle, 4 B dead list, 12 B
-// alive lists, 8 B sort keys when it sorts, plus 16 B per trail point for trail ribbons. 0 for a CPU emitter.
+// alive lists, 8 B sort keys when it sorts, plus 16 B per trail point for trail ribbons and the events buffer of an emitter with event rules. 0 for a CPU emitter.
 inline u64 gpuMemoryEstimate(const ParticleEffect& e) {
     if (!emitterOnGpu(e)) return 0;
     const u64 cap = emitterCapacity(e);
     u64 per = sizeof(Particle) + 4u + 12u + (emitterSorts(e) ? 8u : 0u);
     if (e.render == RenderKind::Ribbon && !e.linked) per += 16ull * e.trailPoints;
-    return cap * per;
+    return cap * per + (e.events.empty() ? 0ull : static_cast<u64>(particles::kGpuEventRegionUints) * 2u * 4u);
 }
 inline std::string formatBytes(u64 b) {
     char buf[32];

@@ -13,6 +13,10 @@
 #include "aver/voxi/Voxi.hpp"
 // Scalability.hpp gives voxi::resolve(), ladder::*, applyOverall/overallFromSettings.
 #include "aver/voxi/Scalability.hpp"
+#if AVER_MODULE_PARTICLES
+#  include "aver/particles/ParticleEffectLibrary.hpp"
+#  include "aver/particles/ParticleScalability.hpp"
+#endif
 #endif
 
 #include <algorithm>
@@ -385,6 +389,10 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
             b.tierSetters.push_back([q](void* sp){
                 voxi::applyOverall(*static_cast<Settings*>(sp), static_cast<voxi::OverallQuality>(q),
                                     Renderer::get().deviceInfo());
+#if AVER_MODULE_PARTICLES
+                particles::ScalabilityTier pt;   // the particle scalability tier follows the preset
+                if (particles::tierForQualityRung(q, pt)) particles::particleEffects().setScalabilityTier(pt);
+#endif
             });
         },
         [](const VarValue& v, std::string& err) -> bool {

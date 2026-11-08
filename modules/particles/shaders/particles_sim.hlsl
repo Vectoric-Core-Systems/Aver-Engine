@@ -13,6 +13,7 @@ cbuffer SimCB : register(b3) {
     PSimHeader gS;
     float4 gUser[16];
     uint4  gMod[48];
+    float4 gEv[15];     // GpuEventData: curves 0..9, the consumed rule's payload 10, the trigger-rule table 11..14
     float4 gReq[448];
 };
 
@@ -127,18 +128,88 @@ PMod pLoadModule(uint index) {
 float4 pReq(uint req, uint row) { return gReq[req * 7u + row]; }
 
 // ------------------------------------------------------------------------------------------------ event records
-uint pEventBase(uint region, uint type) {
-    return region + PEV_HEADER + (type == 0u ? 0u : PEV_CAP * PEV_REC);
+uint pEventBase(uint region, uint channel) {
+    return region + PEV_HEADER + channel * PEV_CAP * PEV_REC;
 }
-void pRaiseEvent(uint type, PParticle p) {
+
+// Stop index and blend of a piecewise-linear curve of n >= 2 stops, clamped outside the first and last (evalCurve on the CPU).
+void pStops(float4 times, uint n, float t, out uint i, out float u) {
+    i = 0u; u = 0.0;
+    if (t <= times.x) return;
+    if (t >= times[n - 1u]) { i = n - 1u; return; }
+    [loop] for (uint k = 0u; k + 1u < n; ++k) {
+        if (t <= times[k + 1u]) {
+            float span = times[k + 1u] - times[k];
+            i = k;
+            u = span > 1.0e-8 ? (t - times[k]) / span : 1.0;
+            return;
+        }
+    }
+    i = n - 1u;
+}
+float pEventSizeAt(float t) {
+    uint n = (uint)gEv[0].z;
+    if (n < 2u) return lerp(gEv[0].x, gEv[0].y, t);
+    uint i; float u;
+    pStops(gEv[1], n, t, i, u);
+    float a = gEv[2][i];
+    if (u != 0.0) a = lerp(a, gEv[2][i + 1u], u);
+    return a;
+}
+// The particle's colour (curve times tint), size relative to its birth size times its own scale, and life fraction: what a record carries
+// (mirrors gpuEventPayload in ParticleSystem.cpp and EmitterSim::makeEvent).
+void pEventPayload(PParticle p, out uint tint, out float sizeRatio, out float ageFraction) {
+    float t = p.lifetime > 0.0 ? saturate(p.age / p.lifetime) : 1.0;
+    float4 c;
+    uint cn = (uint)gEv[0].w;
+    if (cn < 2u) {
+        c = lerp(gEv[3], gEv[4], t);
+    } else {
+        uint i; float u;
+        pStops(gEv[5], cn, t, i, u);
+        c = gEv[6u + i];
+        if (u != 0.0) c = lerp(c, gEv[6u + i + 1u], u);
+    }
+    float4 a = float4((float)(p.tint & 255u), (float)((p.tint >> 8) & 255u), (float)((p.tint >> 16) & 255u), (float)(p.tint >> 24)) * (1.0 / 255.0);
+    tint = pPackRgba8(c * a);
+    float birth = pEventSizeAt(0.0);
+    sizeRatio = (birth > 1.0e-4 ? pEventSizeAt(t) / birth : 1.0) * p.sizeScale;
+    ageFraction = t;
+}
+void pRaiseEvent(uint channel, PParticle p) {
     uint idx;
-    InterlockedAdd(gEvents[gS.evWriteBase + type], 1u, idx);
+    InterlockedAdd(gEvents[gS.evWriteBase + channel], 1u, idx);
     if (idx >= PEV_CAP) return;
-    uint b = pEventBase(gS.evWriteBase, type) + idx * PEV_REC;
+    uint b = pEventBase(gS.evWriteBase, channel) + idx * PEV_REC;
+    uint tint; float sizeRatio, ageFraction;
+    pEventPayload(p, tint, sizeRatio, ageFraction);
     gEvents[b + 0u] = asuint(p.position.x); gEvents[b + 1u] = asuint(p.position.y); gEvents[b + 2u] = asuint(p.position.z);
     gEvents[b + 3u] = p.id;
     gEvents[b + 4u] = asuint(p.velocity.x); gEvents[b + 5u] = asuint(p.velocity.y); gEvents[b + 6u] = asuint(p.velocity.z);
-    gEvents[b + 7u] = 0u;
+    gEvents[b + PEV_TINT] = tint;
+    gEvents[b + PEV_SIZE] = asuint(sizeRatio);
+    gEvents[b + PEV_AGE] = asuint(ageFraction);
+}
+// Birth triggers: every spawn rule of this emitter raises its channel for the particle just created.
+void pRaiseSpawnEvents(PParticle p) {
+    uint rules = asuint(gEv[10].z);
+    for (uint ri = 0u; ri < rules; ++ri)
+        if (asuint(gEv[11u + ri].x) == PEVT_SPAWN) pRaiseEvent(2u + ri, p);
+}
+// Life-fraction and timer triggers, for a particle that survived the step: a crossing between the previous age and this one.
+void pRaiseTriggerEvents(PParticle p) {
+    uint rules = asuint(gEv[10].z);
+    for (uint ri = 0u; ri < rules; ++ri) {
+        uint kind = asuint(gEv[11u + ri].x);
+        float at = gEv[11u + ri].y;
+        if (kind == PEVT_LIFETIME) {
+            float mark = at * p.lifetime;
+            if (p.age - gS.dt < mark && p.age >= mark) pRaiseEvent(2u + ri, p);
+        } else if (kind == PEVT_TIMER) {
+            float before = floor(max(0.0, p.age - gS.dt) / at), after = floor(p.age / at);
+            for (float k = before + 1.0; k <= after && k < before + 5.0; k += 1.0) pRaiseEvent(2u + ri, p);
+        }
+    }
 }
 
 // ------------------------------------------------------------------------------------------------ CSInit
@@ -157,9 +228,8 @@ void CSInit(uint3 dtid : SV_DispatchThreadID) {
         gArgs[PARG_SPAWN + 1u] = 1u; gArgs[PARG_SPAWN + 2u] = 1u;
         gArgs[PARG_UPDATE + 1u] = 1u; gArgs[PARG_UPDATE + 2u] = 1u;
         if ((gS.flags & PGPU_FLAG_HAS_EVENTS) != 0u) {
-            gEvents[0] = 0u; gEvents[1] = 0u;
-            gEvents[ (PEV_HEADER + 2u * PEV_CAP * PEV_REC) + 0u] = 0u;
-            gEvents[ (PEV_HEADER + 2u * PEV_CAP * PEV_REC) + 1u] = 0u;
+            for (uint r = 0u; r < 2u; ++r)
+                for (uint ch = 0u; ch < PEV_CHANNELS; ++ch) gEvents[r * PEV_REGION + ch] = 0u;
         }
     }
 }
@@ -184,8 +254,7 @@ void CSBegin(uint3 dtid : SV_DispatchThreadID) {
     gArgs[PARG_SPAWN + 1u] = 1u;
     gArgs[PARG_SPAWN + 2u] = 1u;
     if ((gS.flags & PGPU_FLAG_HAS_EVENTS) != 0u) {
-        gEvents[gS.evWriteBase + 0u] = 0u;
-        gEvents[gS.evWriteBase + 1u] = 0u;
+        for (uint ch = 0u; ch < PEV_CHANNELS; ++ch) gEvents[gS.evWriteBase + ch] = 0u;
     }
 }
 
@@ -201,6 +270,7 @@ void CSSpawn(uint3 dtid : SV_DispatchThreadID) {
     float3 velocity, addVelocity;
     float speedScale, sizeScale, lifeScale;
     uint tint, reqSeed, id;
+    float ageFraction = 0.0;
 
     if (gid < cpuTotal) {
         uint acc = 0u, k = 0u;
@@ -229,6 +299,13 @@ void CSSpawn(uint3 dtid : SV_DispatchThreadID) {
         addVelocity = evVel * gS.evInherit;
         speedScale = 1.0; sizeScale = 1.0; lifeScale = 1.0;
         tint = 0xFFFFFFFFu;
+        // The rule's payload: the child's tint, size scale and starting age follow the parent's record; the user scalar multiplies its speed.
+        const uint payload = asuint(gEv[10].x);
+        const float evUser = gEv[10].y;
+        if ((payload & 1u) != 0u) tint = gParentEvents[b + PEV_TINT];
+        if ((payload & 2u) != 0u) sizeScale = asfloat(gParentEvents[b + PEV_SIZE]);
+        if ((payload & 4u) != 0u) ageFraction = asfloat(gParentEvents[b + PEV_AGE]);
+        if (evUser != 0.0) speedScale = evUser;
         reqSeed = (evId * 2654435761u) | 1u;
         id = 0x80000000u | (gCtr[PCTR_EV_ID_THIS] + e);
     }
@@ -260,8 +337,8 @@ void CSSpawn(uint3 dtid : SV_DispatchThreadID) {
     float3 dir = pConeSample(axis, gS.spreadDeg, p.seed);
     float speed = lerp(gS.speedMin, gS.speedMax, pRand01(p.seed, PSTREAM_SPEED)) * speedScale;
     p.velocity = dir * speed + addVelocity;
-    p.age = 0.0;
     p.lifetime = max(0.001, lerp(gS.lifeMin, gS.lifeMax, pRand01(p.seed, PSTREAM_LIFETIME)) * lifeScale);
+    p.age = clamp(ageFraction, 0.0, 0.95) * p.lifetime;
     p.sizeScale = sizeScale;
     p.tint = tint;
     uint frame = 0u;
@@ -283,6 +360,7 @@ void CSSpawn(uint3 dtid : SV_DispatchThreadID) {
     }
     gParticles[slot] = p;
     InterlockedAdd(gCtr[PCTR_SPAWNED], 1u);
+    if ((gS.flags & PGPU_FLAG_HAS_EVENTS) != 0u) pRaiseSpawnEvents(p);
 
     if ((gS.flags & PGPU_FLAG_LINKED) == 0u) {
         uint idx;
@@ -365,6 +443,7 @@ void CSUpdate(uint3 dtid : SV_DispatchThreadID) {
     }
 
     p.rotation += p.angularVelocity * gS.dt;
+    if ((gS.flags & PGPU_FLAG_HAS_EVENTS) != 0u) pRaiseTriggerEvents(p);
 
     if (gS.trailRing != 0u) {
         uint head = p.trail & 255u, count = (p.trail >> 8) & 255u;
@@ -388,7 +467,7 @@ void CSUpdate(uint3 dtid : SV_DispatchThreadID) {
 // ------------------------------------------------------------------------------------------------ CSShift
 // The floating origin moved (LARGE_WORLD 2.2.6): every resident world position of this instance is gS.origin.xyz smaller
 // (the header's origin field carries the DELTA for this kernel; nothing else reads a header here). One thread per slot:
-// the particle, its trail point, and event record i of each type in both event regions. Mirrors gpuShiftParticles /
+// the particle, its trail point, and event record i of each channel in both event regions. Mirrors gpuShiftParticles /
 // gpuShiftTrail / gpuShiftEvents in ParticleGpuTypes.hpp. Dispatched with max(capacity, trail points, PEV_CAP) threads.
 [numthreads(64, 1, 1)]
 void CSShift(uint3 dtid : SV_DispatchThreadID) {
@@ -404,10 +483,10 @@ void CSShift(uint3 dtid : SV_DispatchThreadID) {
     }
     if ((gS.flags & PGPU_FLAG_HAS_EVENTS) != 0u && i < PEV_CAP) {
         [unroll] for (uint r = 0u; r < 2u; ++r) {
-            const uint region = r * (PEV_HEADER + 2u * PEV_CAP * PEV_REC);
-            [unroll] for (uint type = 0u; type < 2u; ++type) {
-                if (i < min(gEvents[region + type], PEV_CAP)) {
-                    const uint b = pEventBase(region, type) + i * PEV_REC;
+            const uint region = r * PEV_REGION;
+            [unroll] for (uint channel = 0u; channel < PEV_CHANNELS; ++channel) {
+                if (i < min(gEvents[region + channel], PEV_CAP)) {
+                    const uint b = pEventBase(region, channel) + i * PEV_REC;
                     gEvents[b + 0u] = asuint(asfloat(gEvents[b + 0u]) - d.x);
                     gEvents[b + 1u] = asuint(asfloat(gEvents[b + 1u]) - d.y);
                     gEvents[b + 2u] = asuint(asfloat(gEvents[b + 2u]) - d.z);
@@ -431,7 +510,7 @@ void CSFinish(uint3 dtid : SV_DispatchThreadID) {
 }
 
 // ------------------------------------------------------------------------------------------------ CSProbe
-// Copies every field the kernels read, in declaration order, into gDead (at least 160 uints). The parity test fills a
+// Copies every field the kernels read, in declaration order, into gDead (at least 70 uints). The parity test fills a
 // GpuSimCB with a distinct bit pattern per field and compares: a drifted mirror fails by index.
 [numthreads(1, 1, 1)]
 void CSProbe(uint3 dtid : SV_DispatchThreadID) {
@@ -454,6 +533,10 @@ void CSProbe(uint3 dtid : SV_DispatchThreadID) {
     gDead[o++] = asuint(gReq[0].x); gDead[o++] = asuint(gReq[0].w); gDead[o++] = asuint(gReq[447].x); gDead[o++] = asuint(gReq[447].w);
     // Request 1 starts at row 7: its count and seed live in rows 11 and 13.
     gDead[o++] = asuint(gReq[11].w); gDead[o++] = asuint(gReq[13].w);
+    // 62 uints so far. Then the event block: the first size value and the last colour value, the payload row and the first and last rule rows.
+    gDead[o++] = asuint(gEv[0].x); gDead[o++] = asuint(gEv[9].w);
+    gDead[o++] = asuint(gEv[10].x); gDead[o++] = asuint(gEv[10].y); gDead[o++] = asuint(gEv[10].z);
+    gDead[o++] = asuint(gEv[11].x); gDead[o++] = asuint(gEv[14].y); gDead[o++] = asuint(gEv[14].w);
 }
 
 // ------------------------------------------------------------------------------------------------ CSRngProbe

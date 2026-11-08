@@ -132,8 +132,24 @@ struct EventSpawn {
     f32 user = 0;             // user scalar: multiplies the children's speed when non-zero
 };
 
-// The rule needs the CPU tier: the GPU kernels only raise Death and Collide and carry position and velocity.
-inline bool eventNeedsCpu(const EventSpawn& ev) { return ev.on > static_cast<u8>(EventOn::Collide) || ev.payload != 0 || ev.user != 0.0f; }
+// The rule is a TRIGGER / payload rule (not a plain death or collide rule): it is written as a TRIGGER record, and both tiers run it.
+inline bool eventIsExtended(const EventSpawn& ev) { return ev.on > static_cast<u8>(EventOn::Collide) || ev.payload != 0 || ev.user != 0.0f; }
+
+// A rule that can ever fire: death, collide and spawn always; a life fraction strictly inside (0,1); a timer period above a millisecond.
+inline bool eventRuleFires(const EventSpawn& ev) {
+    switch (static_cast<EventOn>(ev.on)) {
+    case EventOn::Death: case EventOn::Collide: case EventOn::Spawn: return true;
+    case EventOn::Lifetime: return ev.at > 0.0f && ev.at < 1.0f;
+    case EventOn::Timer: return ev.at > 1e-3f;
+    }
+    return false;
+}
+
+// GPU event channels. An emitter's events buffer holds one list per channel: 0 death, 1 collide, then one per firing trigger rule
+// (spawn / lifetime / timer) in rule order. A child consumes the channel of the rule that names it.
+inline constexpr u32 kGpuTriggerChannels = 4;
+inline constexpr u32 kGpuEventChannels = 2 + kGpuTriggerChannels;
+inline constexpr int kNoEventChannel = -1;
 
 // One authored EMITTER: everything about how particles are born, move and fade. The members above the
 // "----" divider below keep their 0.7 names, defaults and meaning, so every existing caller compiles.
@@ -213,11 +229,34 @@ struct ParticleSystemDef {
     Scalability scalability;            // the effect's default per tier (format v2: SCALEALL records)
 };
 
-// Event-linked emitters share one tier, so one rule the GPU cannot run puts the whole system on the CPU.
+// The channel rule `rule` of `fx` writes to, or kNoEventChannel when it never fires or is past the trigger table.
+inline int gpuEventChannel(const ParticleEffect& fx, usize rule) {
+    if (rule >= fx.events.size() || !eventRuleFires(fx.events[rule])) return kNoEventChannel;
+    const u8 on = fx.events[rule].on;
+    if (on <= static_cast<u8>(EventOn::Collide)) return static_cast<int>(on);
+    u32 ordinal = 0;
+    for (usize i = 0; i < rule; ++i)
+        if (fx.events[i].on > static_cast<u8>(EventOn::Collide) && eventRuleFires(fx.events[i])) ++ordinal;
+    return ordinal < kGpuTriggerChannels ? static_cast<int>(2 + ordinal) : kNoEventChannel;
+}
+
+// The only rules the GPU tier cannot run: more firing trigger rules on one emitter than there are trigger channels.
+inline bool emitterEventsNeedCpu(const ParticleEffect& fx) {
+    u32 triggers = 0;
+    for (const EventSpawn& ev : fx.events)
+        if (ev.on > static_cast<u8>(EventOn::Collide) && eventRuleFires(ev)) ++triggers;
+    return triggers > kGpuTriggerChannels;
+}
+
+// Event-linked emitters share one tier, so one the GPU cannot run puts the whole system on the CPU: an emitter with more trigger rules than
+// channels, or a child fed by more than one rule (a GPU child consumes the one channel of the first rule that names it).
 inline bool systemEventsNeedCpu(const ParticleSystemDef& d) {
-    for (const ParticleEffect& e : d.emitters)
-        for (const EventSpawn& ev : e.events)
-            if (eventNeedsCpu(ev)) return true;
+    std::vector<u32> feeders(d.emitters.size(), 0u);
+    for (usize p = 0; p < d.emitters.size(); ++p) {
+        if (emitterEventsNeedCpu(d.emitters[p])) return true;
+        for (const EventSpawn& ev : d.emitters[p].events)
+            if (eventRuleFires(ev) && ev.emitter < feeders.size() && ev.emitter != p && ++feeders[ev.emitter] > 1u) return true;
+    }
     return false;
 }
 

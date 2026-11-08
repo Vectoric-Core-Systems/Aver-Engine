@@ -18,6 +18,7 @@ namespace {
 constexpr f32 kEventInstanceIdleSeconds = 5.0f;
 constexpr usize kMaxGpuJobs = 4096;
 constexpr usize kMaxInboxPerEmitter = 4096;
+constexpr u32 kNoParentChannel = 0xFFFFFFFFu;   // the rule feeding this GPU child never fires, so there is nothing to consume
 
 // A stable per-entity seed, so replaying the SAME scene reproduces the SAME particles. 0 is reserved
 // (CParticleEmitter::seed == 0 means "not yet assigned"), so a hash landing on it is nudged to 1.
@@ -44,6 +45,7 @@ Topology topologyOf(const ParticleSystemDef& def) {
     t.depth.assign(n, 0);
     for (usize p = 0; p < n; ++p)
         for (usize r = 0; r < def.emitters[p].events.size(); ++r) {
+            if (!eventRuleFires(def.emitters[p].events[r])) continue;
             const usize c = def.emitters[p].events[r].emitter;
             if (c < n && c != p && t.parent[c] < 0) { t.parent[c] = static_cast<int>(p); t.rule[c] = static_cast<int>(r); }
         }
@@ -99,6 +101,73 @@ u32 packGpuModules(const ParticleEffect& fx, u32 (*outRows)[4]) {
     return n;
 }
 
+void packGpuEventData(const ParticleEffect& fx, GpuEventData& out) {
+    out = GpuEventData{};
+    const u32 sizeStops = fx.sizeCurve.n >= 2 ? std::min<u32>(fx.sizeCurve.n, 4u) : 0u;
+    const u32 colStops = fx.colorCurve.n >= 2 ? std::min<u32>(fx.colorCurve.n, 4u) : 0u;
+    out.size[0] = fx.sizeStart; out.size[1] = fx.sizeEnd;
+    out.size[2] = static_cast<f32>(sizeStops); out.size[3] = static_cast<f32>(colStops);
+    for (u32 k = 0; k < 4; ++k) {
+        out.sizeT[k] = fx.sizeCurve.t[k];
+        out.sizeV[k] = fx.sizeCurve.v[k][0];
+        out.colT[k] = fx.colorCurve.t[k];
+        for (u32 c = 0; c < 4; ++c) out.colV[k][c] = fx.colorCurve.v[k][c];
+    }
+    for (u32 c = 0; c < 4; ++c) { out.colA[c] = fx.colorStart[c]; out.colB[c] = fx.colorEnd[c]; }
+    u32 channels = 0;
+    for (usize r = 0; r < fx.events.size(); ++r) {
+        const int ch = gpuEventChannel(fx, r);
+        if (ch < 2) continue;
+        const u32 slot = static_cast<u32>(ch) - 2u;
+        out.rule[slot][0] = fx.events[r].on;
+        out.rule[slot][1] = bitsOf(fx.events[r].at);
+        channels = std::max(channels, slot + 1u);
+    }
+    out.ruleCount = channels;
+}
+
+GpuEventPayload gpuEventPayload(const GpuEventData& d, u32 tint, f32 age, f32 lifetime, f32 sizeScale) {
+    // A piecewise-linear curve of n >= 2 stops, clamped outside the first and last: the arithmetic of evalCurve.
+    const auto stops = [](const f32* times, u32 n, f32 t, u32& i, f32& u) {
+        i = 0; u = 0.0f;
+        if (t <= times[0]) return;
+        if (t >= times[n - 1]) { i = n - 1; return; }
+        for (u32 k = 0; k + 1 < n; ++k)
+            if (t <= times[k + 1]) {
+                const f32 span = times[k + 1] - times[k];
+                i = k;
+                u = span > 1e-8f ? (t - times[k]) / span : 1.0f;
+                return;
+            }
+        i = n - 1;
+    };
+    const auto lerp = [](f32 a, f32 b, f32 u) { return a + (b - a) * u; };
+    GpuEventPayload out;
+    const f32 t = lifetime > 0.0f ? std::clamp(age / lifetime, 0.0f, 1.0f) : 1.0f;
+    const auto sizeAt = [&](f32 x) {
+        const u32 n = static_cast<u32>(d.size[2]);
+        if (n < 2) return lerp(d.size[0], d.size[1], x);
+        u32 i; f32 u;
+        stops(d.sizeT, n, x, i, u);
+        return u == 0.0f ? d.sizeV[i] : lerp(d.sizeV[i], d.sizeV[i + 1], u);
+    };
+    f32 c[4];
+    const u32 cn = static_cast<u32>(d.size[3]);
+    if (cn < 2) {
+        for (u32 k = 0; k < 4; ++k) c[k] = lerp(d.colA[k], d.colB[k], t);
+    } else {
+        u32 i; f32 u;
+        stops(d.colT, cn, t, i, u);
+        for (u32 k = 0; k < 4; ++k) c[k] = u == 0.0f ? d.colV[i][k] : lerp(d.colV[i][k], d.colV[i + 1][k], u);
+    }
+    const f32 a[4] = {(tint & 0xFFu) / 255.0f, ((tint >> 8) & 0xFFu) / 255.0f, ((tint >> 16) & 0xFFu) / 255.0f, (tint >> 24) / 255.0f};
+    out.tint = packRgba8(c[0] * a[0], c[1] * a[1], c[2] * a[2], c[3] * a[3]);
+    const f32 birth = sizeAt(0.0f);
+    out.sizeRatio = (birth > 1e-4f ? sizeAt(t) / birth : 1.0f) * sizeScale;
+    out.ageFraction = t;
+    return out;
+}
+
 ParticleSystem::~ParticleSystem() { reset(); }
 
 void ParticleSystem::releaseAllInstances() {
@@ -120,9 +189,8 @@ void ParticleSystem::setGpuTier(IParticleGpuTier* tier) {
 
 bool ParticleSystem::wantGpu(const ParticleEffect& fx, u32 componentFlags) const {
     if (!gpuUsable()) return false;
-    // Spawn / lifetime / timer triggers, payloads and the user scalar exist on the CPU tier only (the GPU kernels raise death and collide
-    // with a position and a velocity): such an emitter stays on the CPU even when forced to the GPU.
-    for (const EventSpawn& ev : fx.events) if (eventNeedsCpu(ev)) return false;
+    // More trigger rules than the GPU tier has event channels: the emitter stays on the CPU even when forced to the GPU.
+    if (emitterEventsNeedCpu(fx)) return false;
     if (componentFlags & scene::kParticleEmitterForceCpu) return false;
     if (componentFlags & scene::kParticleEmitterForceGpu) return true;
     switch (fx.simTier) {
@@ -198,9 +266,12 @@ void ParticleSystem::buildInstance(SystemInstance& si, const ParticleSystemDef& 
         gpuCapacityUsed_ += cap;
         if (p >= 0 && topo.rule[i] >= 0) {
             const EventSpawn& rule = def.emitters[static_cast<usize>(p)].events[static_cast<usize>(topo.rule[i])];
-            ei.evType = rule.on;
+            const int channel = gpuEventChannel(def.emitters[static_cast<usize>(p)], static_cast<usize>(topo.rule[i]));
+            ei.evType = channel < 0 ? kNoParentChannel : static_cast<u32>(channel);
             ei.evCount = rule.count;
             ei.evInherit = rule.inheritVelocity;
+            ei.evPayload = rule.payload;
+            ei.evUser = rule.user;
         }
     }
     if (groupFailed) {
@@ -395,7 +466,11 @@ void ParticleSystem::emitGpuJob(SystemInstance& si, const ParticleSystemDef& def
     h.damping = fx.damping;
     h.origin[0] = si.origin.x; h.origin[1] = si.origin.y; h.origin[2] = si.origin.z;
     h.flags = (linked ? kGpuFlagLinked : 0u) | (trail ? kGpuFlagTrail : 0u);
-    for (const EventSpawn& ev : fx.events) h.flags |= ev.on == 0 ? kGpuFlagDeathEvent : kGpuFlagCollideEvent;
+    for (usize r = 0; r < fx.events.size(); ++r) {
+        const int channel = gpuEventChannel(fx, r);
+        if (channel == 0) h.flags |= kGpuFlagDeathEvent;
+        else if (channel == 1) h.flags |= kGpuFlagCollideEvent;
+    }
     if (fx.subuvFrames > 1 && fx.subuvFps > 0.0f) h.flags |= kGpuFlagSubuvStart;
     h.shape = static_cast<u32>(fx.shape);
     h.shell = fx.shapeShell ? 1u : 0u;
@@ -409,11 +484,14 @@ void ParticleSystem::emitGpuJob(SystemInstance& si, const ParticleSystemDef& def
     h.trailSegment = fx.trailSegmentCm;
     h.subuvFrames = fx.subuvFrames;
     h.subuvFps = fx.subuvFps;
-    if (ei.gpuParent != 0) {
+    packGpuEventData(fx, job.cb.ev);
+    if (ei.gpuParent != 0 && ei.evType != kNoParentChannel) {
         h.evType = ei.evType;
         h.evCount = ei.evCount;
         h.evInherit = ei.evInherit;
         h.evActive = 1;
+        job.cb.ev.payload = ei.evPayload;
+        job.cb.ev.user = ei.evUser;
     }
     h.drawMult = trail ? h.trailRing : 1u;
 
