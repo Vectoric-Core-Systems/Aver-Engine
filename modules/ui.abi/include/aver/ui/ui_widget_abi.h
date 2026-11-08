@@ -62,8 +62,9 @@ extern "C" {
 #define AVER_UI_EVENT_ANIM_FINISHED     12  /* widget = the layout root, text = the animation's name, value = end time, index = loops played */
 
 /* Version of the widget ABI. 1 = the original; 2 adds widget animation (aver_ui_anim_*), the hover and animation-finished
- * events and the render-transform properties. A host that needs them checks this first. */
-#define AVER_UI_WIDGET_ABI_VERSION 2
+ * events and the render-transform properties; 3 adds bindings and event routes (aver_ui_set_binding_resolver,
+ * aver_ui_bind, aver_ui_event_route, aver_ui_route_poll). A host that needs them checks this first. */
+#define AVER_UI_WIDGET_ABI_VERSION 3
 
 // Bits of aver_ui_wants_input.
 #define AVER_UI_WANTS_POINTER  1   /* the pointer is on UI, or a menu is open: gameplay must not see it */
@@ -207,6 +208,40 @@ AVER_UI_API int32_t     aver_ui_anim_reverse(uint32_t root, const char* name);
 AVER_UI_API int32_t     aver_ui_anim_pause(uint32_t root, const char* name, int32_t paused);
 AVER_UI_API int32_t     aver_ui_anim_is_playing(uint32_t root, const char* name);   /* running and not paused */
 AVER_UI_API float       aver_ui_anim_time(uint32_t root, const char* name);          /* -1 when not running */
+
+// ---- bindings and event routes (the layout's BIND and EVENT records) ---------------------------------------------------
+
+#define AVER_UI_BIND_VIEWMODEL 0   /* a path on the host's view-model object ("vm:Player.Score" in a file) */
+#define AVER_UI_BIND_VARIABLE  1   /* a graph variable the host publishes ("var:Score") */
+#define AVER_UI_BIND_NONE      0   /* what a resolver returns: no value */
+#define AVER_UI_BIND_NUMBER    1
+#define AVER_UI_BIND_BOOL      2   /* *outNumber is 0 or 1 */
+#define AVER_UI_BIND_TEXT      3   /* UTF-8 into outText (at most cap-1 bytes + NUL) */
+
+/* The source of a binding's value: fill *outNumber or outText and return AVER_UI_BIND_*. Called while the frame runs,
+ * once per binding per frame (a binding with `mode change` only after aver_ui_bindings_changed). NULL clears; bindings then
+ * keep their last value. */
+typedef int32_t (*AverUiBindResolveFn)(int32_t source, const char* utf8Path, double* outNumber, char* outText, int32_t textCap);
+AVER_UI_API void    aver_ui_set_binding_resolver(AverUiBindResolveFn fn);
+/* Marks the bindings of a path (and its parents and children) to be read again; NULL or "" = all. */
+AVER_UI_API void    aver_ui_bindings_changed(const char* utf8Path);
+/* Adds a binding to the layout `widget` is in: a property key of the widget, a source, a path, an optional format
+ * ("Score: {0:D6}") and onChange 1 for `mode change`. 1 on success, 0 for an unknown widget or property. */
+AVER_UI_API int32_t aver_ui_bind(uint32_t widget, const char* property, int32_t source, const char* utf8Path,
+                                 const char* format, int32_t onChange);
+AVER_UI_API int32_t aver_ui_binding_count(uint32_t root);
+
+#define AVER_UI_ROUTE_COMMAND 0   /* raised as a Command event with text = target */
+#define AVER_UI_ROUTE_GRAPH   1   /* queued for aver_ui_route_poll: a graph event named target */
+#define AVER_UI_ROUTE_METHOD  2   /* queued for aver_ui_route_poll: a method the host runs */
+/* Routes one event of a widget ("click", "toggled", "valuechanged", "selectionchanged", "textchanged", "submitted",
+ * "focus", "blur", "hover", "unhover", "cancel", "command", "finished" for a layout root's animations) to an action. */
+AVER_UI_API int32_t aver_ui_event_route(uint32_t widget, const char* eventName, int32_t action, const char* target);
+/* Pops the oldest graph / method route that fired: its action, the widget and event that raised it, the target, the
+ * route's extra arguments (newline separated) and the event's text. Same buffer rules as aver_ui_event_poll. */
+AVER_UI_API int32_t aver_ui_route_poll(int32_t* outAction, uint32_t* outWidget, int32_t* outEventType, float* outValue,
+                                       int32_t* outIndex, char* targetBuf, int32_t targetCap, char* argsBuf,
+                                       int32_t argsCap, char* textBuf, int32_t textCap);
 
 // ---- events ------------------------------------------------------------------------------------------------------
 

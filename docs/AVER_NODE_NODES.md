@@ -825,6 +825,12 @@ Timers and events, the behaviour-tree blackboard, streamed audio, animation stat
 
 | `AN_UiAnimationFinished` | `exec` (in, exec), `layout` (in, int), `then` (out, exec), `finished` (out, bool) | `name=` | P | True when the animation finished in the events the last frame delivered. |
 
+| `AN_SetUiVariable` | `exec` (in, exec), `value` (in, float), `then` (out, exec), `success` (out, bool) | `name=` | P | Publishes a number as the graph variable `name=` for `var:` bindings in UI layouts (bindings of it update). |
+
+| `AN_SetUiVariableBool` | `exec` (in, exec), `value` (in, bool), `then` (out, exec), `success` (out, bool) | `name=` | P | Publishes a bool as a graph variable for `var:` bindings. |
+
+| `AN_UiGraphEventFired` | `exec` (in, exec), `then` (out, exec), `fired` (out, bool) | `name=` | P | True when a layout's `EVENT ... graph name=` route fired in the events the last frame delivered. |
+
 | `AN_OpenUiSettings` | `exec` (in, exec), `then` (out, exec), `layout` (out, int), `success` (out, bool) | — | P | Opens the built-in settings screen (Graphics, Audio, Controls with key rebinding). |
 | `AN_SetUiFont` | `exec` (in, exec), `widget` (in, int), `size` (in, float), `bold` (in, bool), `italic` (in, bool), `then` (out, exec), `success` (out, bool) | `family=` (optional) | P | Sets a widget's font: size in design pixels (0 = the theme's), bold, italic, and the font family from the project's font set when `family=` is given (empty keeps the current one). See GAME_UI_TEXT.md. |
 | `AN_SetUiTextStyle` | `exec` (in, exec), `widget` (in, int), `align` (in, int), `dir` (in, int), `wrap` (in, bool), `ellipsis` (in, bool), `maxLines` (in, int), `lineSpacing` (in, float, default 1), `letterSpacing` (in, float), `rich` (in, bool), `then` (out, exec), `success` (out, bool) | — | P | Sets all nine text style properties at once. `align`: 0 left, 1 centre, 2 right, 3 start, 4 end (start/end follow the text direction); `dir`: 0 auto, 1 LTR, 2 RTL; `maxLines` 0 = unlimited. |

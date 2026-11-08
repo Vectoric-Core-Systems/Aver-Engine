@@ -35,6 +35,7 @@ static class Program
         failures += InputRouterTests.RunAll();  // G1: input events, OnInput -> UI -> OnUnhandledInput
         failures += WorldPosApiTests.RunAll();   // wave 11 LARGE_WORLD: WorldPos, Double3, WorldOrigin in a bare process
         failures += ImageTests.RunAll();         // E8: the managed Image type (no native calls)
+        failures += UiBindingsTests.RunAll();    // UI designer: view-model paths, variables, EVENT method routes (no native calls)
 
         Console.WriteLine(failures == 0 ? "\nAll tests passed." : $"\n{failures} test(s) failed.");
         return failures;

@@ -39,7 +39,7 @@ static int finished(std::string* name = nullptr, float* value = nullptr) {
 }
 
 int main() {
-    check(aver_ui_widget_abi_version() == AVER_UI_WIDGET_ABI_VERSION && AVER_UI_WIDGET_ABI_VERSION == 2, "the widget ABI is version 2");
+    check(aver_ui_widget_abi_version() == AVER_UI_WIDGET_ABI_VERSION && AVER_UI_WIDGET_ABI_VERSION >= 2, "the widget ABI has animation (version 2 and up)");
 
     const char* doc =
         "OCUI 2\nWIDGET Root panel -\nWIDGET Box panel Root\n"

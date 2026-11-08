@@ -201,6 +201,26 @@ of the widget's rectangle, default the centre) is a 2D affine pushed on the draw
 children (`UiPainter::pushTransform`). It is draw-only: layout, hit testing and focus ignore it, so a widget that moves
 a long way should not be clicked while it does.
 
+### Bindings and event routes
+
+`BIND <widget> <property> <path> [format <text>] [mode change]` copies a value to a widget property every frame (or, with
+`mode change`, when the host says the path changed). The path is `vm:Player.Score` (a path on the C# **view model**,
+`UiBindings.ViewModel`: properties, fields, `[n]` / `[key]`; an object that implements `INotifyPropertyChanged`
+notifies by itself) or `var:Health` (a **graph variable**: `AN_SetUiVariable` / `AN_SetUiVariableBool` publish a graph's
+values, `UiBindings.SetVariable` does the same from code, `UiBindings.VariableResolver` answers for a host that keeps
+them elsewhere). One record, one source kind in the path prefix. Text can be formatted: `format "Score: {0:D6}"`,
+`{0:P0}`, `{0:F1}`, `{0:On|Off}` (full list in FORMAT_SPECS 11n). Only changed text is written, so an edit made by hand
+survives until the source changes.
+
+`EVENT <widget> <event> <action> <target> [args...]` sends `click`, `toggled`, `valuechanged`, `selectionchanged`,
+`textchanged`, `submitted`, `focus`, `blur`, `hover`, `unhover`, `cancel` or a root's `finished` to a **command**
+(raised as a Command event, so `ui.close` and every `OnCommand` handler work), a **graph** event
+(`UiBindings.GraphEvent`, `AN_UiGraphEventFired name=`) or a **method** (`UiBindings.RegisterMethod`, else a public method of the
+view model such as `Settings.SetVolume`, filled from the event by its parameter type). `UiSystem.Pump` delivers graph and
+method routes. In code: `UiBindings.Bind(widget, "text", "vm:Player.Score", "{0:D6}")`, `UiBindings.Route(...)`;
+C ABI `aver_ui_set_binding_resolver`, `aver_ui_bind`, `aver_ui_bindings_changed`, `aver_ui_event_route`,
+`aver_ui_route_poll`.
+
 ### Property reference
 
 Colours are `#RRGGBB` or `#RRGGBBAA`, or `none`. Insets/anchors/uv take 4 numbers (insets also 1 or 2, a point
@@ -367,6 +387,9 @@ nodes have a `success` out.
 | `AN_SeekUiAnimation` | `name=` | `layout`, `time` | `success` |
 | `AN_ReverseUiAnimation` | `name=` | `layout` | `success` |
 | `AN_UiAnimationFinished` | `name=` | `layout` | `finished` |
+| `AN_SetUiVariable` | `name=` | `value` | `success` |
+| `AN_SetUiVariableBool` | `name=` | `value` | `success` |
+| `AN_UiGraphEventFired` | `name=` | | `fired` |
 | `AN_OpenUiSettings` | | | `layout`, `success` |
 
 `AN_UiWasClicked` and `AN_UiCommandFired` read what the last `UiSystem.Pump()` delivered, so Pump must run once a
@@ -398,6 +421,9 @@ frame before the graphs tick.
 * `UiAnimationTest`, `UiAnimationAbiTest`: easing, ANIM parse/write, sampling, the player (play, reverse, loop,
   ping-pong, pause, seek, stop, the finish event, nested layouts), the render transform in the draw list, and the
   same through the C ABI.
+* `UiBindingsTest`, `UiBindingsAbiTest`: path and format helpers, frame- and change-mode bindings, BIND / EVENT records,
+  command / graph / method routes, hover, the finish route, and the same through the C ABI. `UiBindingsTests`
+  (`Aver.Framework.Tests`): view-model paths, variables and method invocation.
 * `UiLayoutAbiTest`: nested layouts through the C ABI (reader, overrides, slots, warnings, missing file, cycle, a
   layout larger than the first buffer).
 * `UiLayoutAssetTest`: the v2 records (byte-identical round trip, v1 unchanged, errors), instantiate with overrides,

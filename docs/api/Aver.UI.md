@@ -2,7 +2,7 @@
 
 # Aver.UI public API
 
-26 public types and 233 public members, read from `scripting/csharp/Aver.UI/` (9 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+28 public types and 257 public members, read from `scripting/csharp/Aver.UI/` (10 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.UI
 
@@ -161,6 +161,28 @@ Values: `Bold = 1`, `Italic = 2`, `Rich = 4`, `Ellipsis = 8`, `Wrap = 16`
 - `public static bool IsPlaying(Widget root, string name)` - Whether it is running and not paused.
 - `public static float Time(Widget root, string name)` - Where a running animation is, in seconds; -1 when it is not running.
 
+### UiBindings
+
+`public static class UiBindings` - Feeds the BIND records of opened layouts and runs the EVENT records that name a method.
+
+- `public static object? ViewModel { get; set; }` - The object vm: paths start from.
+- `public static Func<string, object?>? VariableResolver { get; set; }` - Answers var: paths that SetVariable has not set (a host that keeps graph variables elsewhere reads them here).
+- `public static event Action<string, IReadOnlyList<string>, UiEvent>? GraphEvent` - Called for a route whose action is graph: the target, the route's extra arguments and the event.
+- `public static void SetVariable(string name, object? value)` - Sets a graph variable (a number, bool or string) and re-reads the bindings of it when it changed.
+- `public static bool TryGetVariable(string name, out object? value)` - The variable's value; false when none was set and VariableResolver has none.
+- `public static void ClearVariables()` - Removes every published variable.
+- `public static void Notify(string? path = null)` - Tells the UI a path changed so its mode change bindings read again (null or empty = everything).
+- `public static void Install()` - Hands the native UI the resolver.
+- `public static bool Bind(Widget widget, string property, string path, string? format = null, bool onChange = false)` - Adds a binding to the layout widget is in.
+- `public static int Count(Widget root)` - The number of bindings in the layout at root.
+- `public static bool Route(Widget widget, string eventName, UiRouteAction action, string target)` - Routes one event of a widget (see the EVENT record) to a command, a graph event or a method.
+- `public static bool TryResolve(string path, out object? value)` - Resolves a vm: path against ViewModel.
+- `public static bool TryResolve(object? root, string path, out object? value)` - Resolves a path against any object: members separated by dots (public properties and fields, matched with the exact case first and then without), and [n] or [key] on arrays, lists and dictionaries.
+- `public static void RegisterMethod(string name, Action<UiEvent, IReadOnlyList<string>> handler)` - Registers a handler a method route can name (EVENT Play click method Menu.Start).
+- `public static void RegisterMethod(string name, Action handler)` - Registers a handler that needs neither the event nor arguments.
+- `public static void ClearMethods()` - Removes every registered method.
+- `public static bool InvokeMethod(string target, IReadOnlyList<string> args, UiEvent ev)` - Runs a method route: a registered handler by that name, else a public method on ViewModel ("Save", or "Settings.SetVolume" for a method of a member).
+
 ### UiEvent
 
 `public readonly record struct UiEvent(UiEventKind Kind, Widget Widget, float Value, int Index, string Text)` - One thing that happened in the UI.
@@ -192,8 +214,17 @@ Values: `Clicked = 0`, `Toggled = 1`, `ValueChanged = 2`, `SelectionChanged = 3`
 - `public static bool SeekAnimation(int layout, string name, float seconds)` - AN_SeekUiAnimation: jumps to a time and applies it.
 - `public static bool ReverseAnimation(int layout, string name)` - AN_ReverseUiAnimation: flips a running animation, or plays one backwards from its end.
 - `public static bool AnimationFinished(int layout, string name)` - AN_UiAnimationFinished: true when the animation finished since the last Pump.
+- `public static bool SetVariable(string name, float value)` - AN_SetUiVariable: publishes a number as the graph variable name for var: bindings.
+- `public static bool SetVariableBool(string name, bool value)` - AN_SetUiVariableBool: publishes a bool.
+- `public static bool GraphEventFired(string name)` - AN_UiGraphEventFired: true when an EVENT ...
 - `public static bool SetFocus(int widget)` - AN_SetUiFocus.
 - `public static bool CreateMenu(string name, string title, string entries, bool modal, out int menu)` - AN_ShowUiMenu: a centred menu of buttons; entries is one "Label|command" per line.
+
+### UiRouteAction
+
+`public enum UiRouteAction` - What an EVENT route does.
+
+Values: `Command = 0`, `Graph = 1`, `Method = 2`
 
 ### UiSystem
 
@@ -209,6 +240,7 @@ Values: `Clicked = 0`, `Toggled = 1`, `ValueChanged = 2`, `SelectionChanged = 3`
 - `public static int Pump()` - Delivers every pending event to Event and the registered handlers.
 - `public static bool WasClicked(Widget widget)` - Whether widget was clicked in the events the last Pump delivered.
 - `public static bool AnimationFinished(Widget root, string name)` - Whether the layout animation name of root finished in the events the last Pump delivered.
+- `public static bool GraphEventFired(string name)` - Whether an EVENT ...
 - `public static bool CommandFired(string command)` - Whether command fired in the events the last Pump delivered.
 - `public static bool WantsPointer { get; }` - The pointer is on UI or a menu is open: gameplay should ignore the mouse.
 - `public static bool WantsKeyboard { get; }` - A menu or text field owns the keyboard and gamepad.

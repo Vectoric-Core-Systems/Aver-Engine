@@ -142,6 +142,15 @@ inline void appendGameSystemNodeDefs(std::vector<GraphNodeDesc>& t) {
     t.push_back({"AN_UiAnimationFinished", "UI Animation Finished", "UI", {
         pin("exec", "exec", false), pin("layout", "int", false), pin("then", "exec", true), pin("finished", "bool", true)},
         {attr("name", "Animation")}});
+    t.push_back({"AN_SetUiVariable", "Set UI Variable", "UI", {
+        pin("exec", "exec", false), pin("value", "float", false), pin("then", "exec", true), pin("success", "bool", true)},
+        {attr("name", "Variable")}});
+    t.push_back({"AN_SetUiVariableBool", "Set UI Variable Bool", "UI", {
+        pin("exec", "exec", false), pin("value", "bool", false), pin("then", "exec", true), pin("success", "bool", true)},
+        {attr("name", "Variable")}});
+    t.push_back({"AN_UiGraphEventFired", "UI Graph Event Fired", "UI", {
+        pin("exec", "exec", false), pin("then", "exec", true), pin("fired", "bool", true)},
+        {attr("name", "Event")}});
     t.push_back({"AN_OpenUiSettings", "Open UI Settings", "UI", {
         pin("exec", "exec", false), pin("then", "exec", true), pin("layout", "int", true), pin("success", "bool", true)}});
     t.push_back({"AN_SpawnPrefab", "Spawn Prefab", "Prefab", {

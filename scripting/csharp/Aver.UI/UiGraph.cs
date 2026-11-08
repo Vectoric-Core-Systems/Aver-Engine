@@ -120,6 +120,25 @@ public static class UiGraphNodes
     /// <summary>AN_UiAnimationFinished: true when the animation finished since the last <see cref="UiSystem.Pump"/>.</summary>
     public static bool AnimationFinished(int layout, string name) => UiSystem.AnimationFinished(new Widget((uint)layout), name);
 
+    /// <summary>AN_SetUiVariable: publishes a number as the graph variable <paramref name="name"/> for <c>var:</c> bindings.</summary>
+    public static bool SetVariable(string name, float value)
+    {
+        if (string.IsNullOrEmpty(name)) return false;
+        UiBindings.SetVariable(name, value);
+        return true;
+    }
+
+    /// <summary>AN_SetUiVariableBool: publishes a bool.</summary>
+    public static bool SetVariableBool(string name, bool value)
+    {
+        if (string.IsNullOrEmpty(name)) return false;
+        UiBindings.SetVariable(name, value);
+        return true;
+    }
+
+    /// <summary>AN_UiGraphEventFired: true when an <c>EVENT ... graph &lt;name&gt;</c> route fired since the last <see cref="UiSystem.Pump"/>.</summary>
+    public static bool GraphEventFired(string name) => UiSystem.GraphEventFired(name);
+
     /// <summary>AN_SetUiFocus.</summary>
     public static bool SetFocus(int widget) => new Widget((uint)widget).Focus();
 

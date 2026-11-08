@@ -47,6 +47,9 @@ internal static class UiGraphInterop
                 case "an_stopuianimation": return UiGraphNodes.StopAnimation(a, s, flag);
                 case "an_seekuianimation": return UiGraphNodes.SeekAnimation(a, s, f);
                 case "an_reverseuianimation": return UiGraphNodes.ReverseAnimation(a, s);
+                case "an_setuivariable": return UiGraphNodes.SetVariable(s, f);
+                case "an_setuivariablebool": return UiGraphNodes.SetVariableBool(s, flag);
+                case "an_uigrapheventfired": outBool = UiGraphNodes.GraphEventFired(s); return true;
                 case "an_uianimationfinished": outBool = UiGraphNodes.AnimationFinished(a, s); return true;
                 case "an_openuisettings": return OpenSettings(out outInt);
                 default: return false;

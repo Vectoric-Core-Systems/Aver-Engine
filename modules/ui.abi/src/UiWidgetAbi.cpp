@@ -365,6 +365,71 @@ int32_t aver_ui_anim_pause(uint32_t root, const char* name, int32_t paused) {
 int32_t aver_ui_anim_is_playing(uint32_t root, const char* name) { return name && g_tree.animPlaying(root, name) ? 1 : 0; }
 float aver_ui_anim_time(uint32_t root, const char* name) { return name ? g_tree.animTime(root, name) : -1.0f; }
 
+// ---- bindings and routes -----------------------------------------------------------------------------------
+
+void aver_ui_set_binding_resolver(AverUiBindResolveFn fn) {
+    if (!fn) { g_tree.setBindingResolver({}); return; }
+    g_tree.setBindingResolver([fn](UiBindSource source, const std::string& path, UiBindValue& out) {
+        double number = 0;
+        std::string text(4096, '\0');
+        const int32_t kind = fn(source == UiBindSource::Variable ? AVER_UI_BIND_VARIABLE : AVER_UI_BIND_VIEWMODEL, path.c_str(),
+                                &number, text.data(), static_cast<int32_t>(text.size()));
+        out = {};
+        if (kind == AVER_UI_BIND_NUMBER || kind == AVER_UI_BIND_BOOL) {
+            out.kind = kind == AVER_UI_BIND_BOOL ? UiBindValue::Kind::Bool : UiBindValue::Kind::Number;
+            out.number = kind == AVER_UI_BIND_BOOL ? (number != 0.0 ? 1.0 : 0.0) : number;
+        } else if (kind == AVER_UI_BIND_TEXT) {
+            out.kind = UiBindValue::Kind::Text;
+            out.text.assign(text.c_str());
+        } else {
+            return false;
+        }
+        return true;
+    });
+}
+
+void aver_ui_bindings_changed(const char* utf8Path) { g_tree.bindingsChanged(utf8Path ? utf8Path : ""); }
+
+int32_t aver_ui_bind(uint32_t widget, const char* property, int32_t source, const char* utf8Path, const char* format,
+                     int32_t onChange) {
+    if (!property || !utf8Path || (source != AVER_UI_BIND_VIEWMODEL && source != AVER_UI_BIND_VARIABLE)) return 0;
+    return g_tree.bind(widget, property, source == AVER_UI_BIND_VARIABLE ? UiBindSource::Variable : UiBindSource::ViewModel,
+                       utf8Path, format ? format : "", onChange != 0) ? 1 : 0;
+}
+
+int32_t aver_ui_binding_count(uint32_t root) { return static_cast<int32_t>(g_tree.bindingCount(root)); }
+
+int32_t aver_ui_event_route(uint32_t widget, const char* eventName, int32_t action, const char* target) {
+    if (!eventName || !target || action < AVER_UI_ROUTE_COMMAND || action > AVER_UI_ROUTE_METHOD) return 0;
+    UiEventRoute r;
+    r.widget = widget;
+    if (!uiRouteEventFromName(eventName, r.type, r.hoverEnter)) return 0;
+    r.action = static_cast<UiRouteAction>(action);
+    r.target = target;
+    return g_tree.addRoute(std::move(r)) ? 1 : 0;
+}
+
+int32_t aver_ui_route_poll(int32_t* outAction, uint32_t* outWidget, int32_t* outEventType, float* outValue, int32_t* outIndex,
+                           char* targetBuf, int32_t targetCap, char* argsBuf, int32_t argsCap, char* textBuf, int32_t textCap) {
+    UiRoutedEvent q;
+    if (!g_tree.pollRouted(q)) return 0;
+    if (outAction) *outAction = static_cast<int32_t>(q.action);
+    if (outWidget) *outWidget = q.widget;
+    if (outEventType) *outEventType = q.eventType;
+    if (outValue) *outValue = q.value;
+    if (outIndex) *outIndex = q.index;
+    const auto put = [](const std::string& s, char* buf, int32_t cap) {
+        if (!buf || cap <= 0) return;
+        const usize n = std::min<usize>(s.size(), static_cast<usize>(cap) - 1);
+        std::memcpy(buf, s.data(), n);
+        buf[n] = '\0';
+    };
+    put(q.target, targetBuf, targetCap);
+    put(joinLines(q.args), argsBuf, argsCap);
+    put(q.text, textBuf, textCap);
+    return 1;
+}
+
 // ---- events -------------------------------------------------------------------------------------------------
 
 int32_t aver_ui_event_poll(int32_t* outType, uint32_t* outWidget, float* outValue, int32_t* outIndex,

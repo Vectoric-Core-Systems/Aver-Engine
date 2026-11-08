@@ -2,7 +2,7 @@
 
 # GameSystem nodes
 
-104 nodes. Rows: `scripting/csharp/Aver.Graph/GraphGameSystemNodeTable.cs`. Palette: `sandbox/src/GraphNodeDefsGameSystems.hpp`, `sandbox/src/GraphNodeDefsSynapseAi.hpp`.
+107 nodes. Rows: `scripting/csharp/Aver.Graph/GraphGameSystemNodeTable.cs`. Palette: `sandbox/src/GraphNodeDefsGameSystems.hpp`, `sandbox/src/GraphNodeDefsSynapseAi.hpp`.
 
 Path: D pure (a read, recomputed per reader), P exec, X trigger (an entry node).
 
@@ -69,6 +69,8 @@ Path: D pure (a read, recomputed per reader), P exec, X trigger (an entry node).
 | `AN_SetUiText` | Set UI Text | UI | P | in: `exec` exec, `widget` int<br>out: `then` exec, `success` bool | `path|name|text` | `UiGraphInterop.UiNodeForGraph`<br>Runs one UI node. |
 | `AN_SetUiTextFromTable` | Set UI Text From Table | Data | P | in: `exec` exec, `widget` int, `row` int<br>out: `then` exec, `success` bool | `table`, `column` | `DataContentGraph.SetUiTextForGraph`<br>AN_SetUiTextFromTable: the widget's text becomes the cell (a text reference in it still resolves in the UI). |
 | `AN_SetUiValue` | Set UI Value | UI | P | in: `exec` exec, `widget` int, `value` float<br>out: `then` exec, `success` bool | none | `UiGraphInterop.UiNodeForGraph`<br>Runs one UI node. |
+| `AN_SetUiVariable` | Set UI Variable | UI | P | in: `exec` exec, `value` float<br>out: `then` exec, `success` bool | `name|path|text` | `UiGraphInterop.UiNodeForGraph`<br>Runs one UI node. |
+| `AN_SetUiVariableBool` | Set UI Variable Bool | UI | P | in: `exec` exec, `value` bool<br>out: `then` exec, `success` bool | `name|path|text` | `UiGraphInterop.UiNodeForGraph`<br>Runs one UI node. |
 | `AN_SetUiVisible` | Set UI Visible | UI | P | in: `exec` exec, `widget` int, `visible` bool = true<br>out: `then` exec, `success` bool | none | `UiGraphInterop.UiNodeForGraph`<br>Runs one UI node. |
 | `AN_SetVoiceOcclusion` | Set Voice Occlusion | Audio | P | in: `exec` exec, `voice` int, `occlusion` float<br>out: `then` exec, `success` bool | none | `AudioStreamGraph.SetVoiceOcclusionForGraph`<br>SetVoiceOcclusion: sets occlusion by hand (a trigger volume, a door state). |
 | `AN_SpawnDecal` | Spawn Decal | Decal | P | in: `exec` exec, `x` float, `y` float, `z` float, `nx` float, `ny` float, `nz` float = 1, `sx` float = 100, `sy` float = 100, `sz` float = 100, `roll` float, `lifetime` float, `fadeOut` float = 0.5<br>out: `then` exec, `entity` int | `base` (optional), `normalmap` (optional), `orm` (optional) | `DecalGraph.SpawnDecalForGraph` |
@@ -79,6 +81,7 @@ Path: D pure (a read, recomputed per reader), P exec, X trigger (an entry node).
 | `AN_StopUiAnimation` | Stop UI Animation | UI | P | in: `exec` exec, `layout` int, `release` bool = true<br>out: `then` exec, `success` bool | `name|path|text` | `UiGraphInterop.UiNodeForGraph`<br>Runs one UI node. |
 | `AN_UiAnimationFinished` | UI Animation Finished | UI | P | in: `exec` exec, `layout` int<br>out: `then` exec, `finished` bool | `name|path|text` | `UiGraphInterop.UiNodeForGraph`<br>Runs one UI node. |
 | `AN_UiCommandFired` | UI Command Fired | UI | P | in: `exec` exec<br>out: `then` exec, `fired` bool | `path|name|text` | `UiGraphInterop.UiNodeForGraph`<br>Runs one UI node. |
+| `AN_UiGraphEventFired` | UI Graph Event Fired | UI | P | in: `exec` exec<br>out: `then` exec, `fired` bool | `name|path|text` | `UiGraphInterop.UiNodeForGraph`<br>Runs one UI node. |
 | `AN_UiWasClicked` | UI Was Clicked | UI | P | in: `exec` exec, `widget` int<br>out: `then` exec, `clicked` bool | none | `UiGraphInterop.UiNodeForGraph`<br>Runs one UI node. |
 | `ClearInputConfig` | Clear Input Config | Input | P | in: `exec` exec<br>out: `then` exec, `success` bool | `action` | `InputGraph.ClearConfigForGraph`<br>Drops an action's own triggers and modifiers; run it before the Add nodes in OnStart, since adds are not idempotent. |
 | `ConsumeRootMotion` | Consume Root Motion | Animation | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool, `x` float, `y` float, `z` float, `yaw` float, `seconds` float | none | `RootMotionGraphInterop.ConsumeRootMotionForGraph` |

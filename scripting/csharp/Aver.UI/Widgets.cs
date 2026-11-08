@@ -416,6 +416,7 @@ public static class UiSystem
     private static readonly HashSet<uint> s_clickedThisFrame = new();
     private static readonly HashSet<string> s_commandsThisFrame = new();
     private static readonly HashSet<(uint, string)> s_finishedThisFrame = new();
+    private static readonly HashSet<string> s_graphEventsThisFrame = new();
 
     /// <summary>Raised for every event, before the per-widget and per-command handlers.</summary>
     public static event Action<UiEvent>? Event;
@@ -472,12 +473,15 @@ public static class UiSystem
         s_clickedThisFrame.Clear();
         s_commandsThisFrame.Clear();
         s_finishedThisFrame.Clear();
+        s_graphEventsThisFrame.Clear();
         int count = 0;
         while (count < 512 && TryPoll(out UiEvent e))
         {
             count++;
             Deliver(e);
         }
+        // EVENT routes to a graph event or a method run after the events themselves, so a handler sees the state they left.
+        UiBindings.PumpRoutes(name => s_graphEventsThisFrame.Add(name));
         return count;
     }
 
@@ -500,6 +504,9 @@ public static class UiSystem
     /// <summary>Whether the layout animation <paramref name="name"/> of <paramref name="root"/> finished in the events the last
     /// <see cref="Pump"/> delivered.</summary>
     public static bool AnimationFinished(Widget root, string name) => s_finishedThisFrame.Contains((root.Id, name ?? string.Empty));
+
+    /// <summary>Whether an <c>EVENT ... graph &lt;name&gt;</c> route fired in the last <see cref="Pump"/>.</summary>
+    public static bool GraphEventFired(string name) => s_graphEventsThisFrame.Contains(name ?? string.Empty);
 
     /// <summary>Whether <paramref name="command"/> fired in the events the last <see cref="Pump"/> delivered.</summary>
     public static bool CommandFired(string command) => s_commandsThisFrame.Contains(command);
@@ -537,6 +544,7 @@ public static class UiSystem
     /// with <see cref="LastError"/> set.</summary>
     public static Widget OpenLayoutText(string ocui, bool applyEnvironment = true)
     {
+        UiBindings.Install();
         Native.aver_ui_set_layout_reader(s_layoutReader);
         uint id = Native.aver_ui_layout_open(ocui ?? string.Empty, applyEnvironment ? 1 : 0);
         if (id == 0)

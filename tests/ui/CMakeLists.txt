@@ -155,3 +155,13 @@ set_target_properties(UiAnimationTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAK
 add_executable(UiAnimationAbiTest src/UiAnimationAbiTest.cpp)
 target_link_libraries(UiAnimationAbiTest PRIVATE Aver.UI.Abi Aver.UI Aver.Core Aver.Platform)
 set_target_properties(UiAnimationAbiTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# UiBindingsTest / UiBindingsAbiTest — bindings and event routes (BIND / EVENT): path and format helpers, a resolver feeding
+# frame- and change-mode bindings, widget events routed to commands, graph events and methods; and the same through the C ABI.
+add_executable(UiBindingsTest src/UiBindingsTest.cpp)
+target_link_libraries(UiBindingsTest PRIVATE Aver.UI Aver.Core Aver.Platform)
+set_target_properties(UiBindingsTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+add_executable(UiBindingsAbiTest src/UiBindingsAbiTest.cpp)
+target_link_libraries(UiBindingsAbiTest PRIVATE Aver.UI.Abi Aver.UI Aver.Core Aver.Platform)
+set_target_properties(UiBindingsAbiTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

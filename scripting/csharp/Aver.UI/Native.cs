@@ -131,6 +131,21 @@ internal static class Native
     [DllImport(Lib)] internal static extern int   aver_ui_anim_is_playing(uint root, [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
     [DllImport(Lib)] internal static extern float aver_ui_anim_time(uint root, [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
 
+    // Bindings and event routes (widget ABI 3).
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate int BindResolveFn(int source, [MarshalAs(UnmanagedType.LPUTF8Str)] string path, IntPtr outNumber, IntPtr outText, int textCap);
+    [DllImport(Lib)] internal static extern void aver_ui_set_binding_resolver(BindResolveFn? fn);
+    [DllImport(Lib)] internal static extern void aver_ui_bindings_changed([MarshalAs(UnmanagedType.LPUTF8Str)] string path);
+    [DllImport(Lib)] internal static extern int  aver_ui_bind(uint widget, [MarshalAs(UnmanagedType.LPUTF8Str)] string property, int source,
+                                                  [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
+                                                  [MarshalAs(UnmanagedType.LPUTF8Str)] string format, int onChange);
+    [DllImport(Lib)] internal static extern int  aver_ui_binding_count(uint root);
+    [DllImport(Lib)] internal static extern int  aver_ui_event_route(uint widget, [MarshalAs(UnmanagedType.LPUTF8Str)] string eventName,
+                                                  int action, [MarshalAs(UnmanagedType.LPUTF8Str)] string target);
+    [DllImport(Lib)] internal static extern int  aver_ui_route_poll(out int action, out uint widget, out int eventType, out float value,
+                                                  out int index, byte[] target, int targetCap, byte[] args, int argsCap,
+                                                  byte[] text, int textCap);
+
     [DllImport(Lib)] internal static extern int aver_ui_event_poll(out int type, out uint widget, out float value,
                                                   out int index, byte[] textBuf, int textCap);
 
