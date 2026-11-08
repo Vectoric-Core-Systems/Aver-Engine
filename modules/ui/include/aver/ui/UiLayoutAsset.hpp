@@ -23,7 +23,7 @@
 //   OVERRIDE Row1 Title "Hello"              an exposed property of the used layout
 //   EXPOSE Title Label text                  (in the used layout) name -> widget key
 //   SLOT Content Body                        (in the used layout) name -> widget that takes the fills
-//   ANIM / BIND / EVENT                      parsed and kept; their runtime is a later step
+//   ANIM / BIND / EVENT                      animations, bindings and event routes (UiAnimation.hpp, UiBindings.hpp); attached to the root by uiInstantiateLayoutEx
 #include "aver/ui/UiLayout.hpp"
 #include "aver/ui/UiTree.hpp"
 

@@ -98,6 +98,11 @@ public enum UiEventKind
     Cancel = 9,
     /// <summary>A widget's command fired. <see cref="UiEvent.Text"/> is the command.</summary>
     Command = 10,
+    /// <summary>The pointer entered (<see cref="UiEvent.Value"/> 1) or left (0) a widget that has a hover EVENT route.</summary>
+    Hovered = 11,
+    /// <summary>A layout animation finished. <see cref="UiEvent.Widget"/> is the layout root, <see cref="UiEvent.Text"/> the
+    /// animation's name, <see cref="UiEvent.Index"/> the loops played.</summary>
+    AnimationFinished = 12,
 }
 
 /// <summary>One thing that happened in the UI.</summary>
@@ -410,6 +415,7 @@ public static class UiSystem
     private static readonly byte[] s_textBuf = new byte[1024];
     private static readonly HashSet<uint> s_clickedThisFrame = new();
     private static readonly HashSet<string> s_commandsThisFrame = new();
+    private static readonly HashSet<(uint, string)> s_finishedThisFrame = new();
 
     /// <summary>Raised for every event, before the per-widget and per-command handlers.</summary>
     public static event Action<UiEvent>? Event;
@@ -465,6 +471,7 @@ public static class UiSystem
     {
         s_clickedThisFrame.Clear();
         s_commandsThisFrame.Clear();
+        s_finishedThisFrame.Clear();
         int count = 0;
         while (count < 512 && TryPoll(out UiEvent e))
         {
@@ -478,6 +485,7 @@ public static class UiSystem
     {
         if (e.Kind == UiEventKind.Clicked) s_clickedThisFrame.Add(e.Widget.Id);
         else if (e.Kind == UiEventKind.Command) s_commandsThisFrame.Add(e.Text);
+        else if (e.Kind == UiEventKind.AnimationFinished) s_finishedThisFrame.Add((e.Widget.Id, e.Text));
         try { Event?.Invoke(e); } catch (Exception) { /* a subscriber's fault is not the UI's */ }
         if (s_widgetHandlers.TryGetValue((e.Widget.Id, e.Kind), out var list))
             foreach (var h in list.ToArray()) { try { h(e); } catch (Exception) { } }
@@ -488,6 +496,10 @@ public static class UiSystem
     /// <summary>Whether <paramref name="widget"/> was clicked in the events the last <see cref="Pump"/>
     /// delivered. For polling code such as graph nodes; handlers are better for everything else.</summary>
     public static bool WasClicked(Widget widget) => s_clickedThisFrame.Contains(widget.Id);
+
+    /// <summary>Whether the layout animation <paramref name="name"/> of <paramref name="root"/> finished in the events the last
+    /// <see cref="Pump"/> delivered.</summary>
+    public static bool AnimationFinished(Widget root, string name) => s_finishedThisFrame.Contains((root.Id, name ?? string.Empty));
 
     /// <summary>Whether <paramref name="command"/> fired in the events the last <see cref="Pump"/> delivered.</summary>
     public static bool CommandFired(string command) => s_commandsThisFrame.Contains(command);

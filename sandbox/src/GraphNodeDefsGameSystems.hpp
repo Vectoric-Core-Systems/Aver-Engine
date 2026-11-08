@@ -127,6 +127,21 @@ inline void appendGameSystemNodeDefs(std::vector<GraphNodeDesc>& t) {
         {attr("name", "Command")}});
     t.push_back({"AN_SetUiFocus", "Set UI Focus", "UI", {
         pin("exec", "exec", false), pin("widget", "int", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"AN_PlayUiAnimation", "Play UI Animation", "UI", {
+        pin("exec", "exec", false), pin("layout", "int", false), pin("loops", "int", false, "1"), pin("speed", "float", false, "1"), pin("reverse", "bool", false), pin("then", "exec", true), pin("success", "bool", true)},
+        {attr("name", "Animation")}});
+    t.push_back({"AN_StopUiAnimation", "Stop UI Animation", "UI", {
+        pin("exec", "exec", false), pin("layout", "int", false), pin("release", "bool", false, "true"), pin("then", "exec", true), pin("success", "bool", true)},
+        {attr("name", "Animation")}});
+    t.push_back({"AN_SeekUiAnimation", "Seek UI Animation", "UI", {
+        pin("exec", "exec", false), pin("layout", "int", false), pin("time", "float", false), pin("then", "exec", true), pin("success", "bool", true)},
+        {attr("name", "Animation")}});
+    t.push_back({"AN_ReverseUiAnimation", "Reverse UI Animation", "UI", {
+        pin("exec", "exec", false), pin("layout", "int", false), pin("then", "exec", true), pin("success", "bool", true)},
+        {attr("name", "Animation")}});
+    t.push_back({"AN_UiAnimationFinished", "UI Animation Finished", "UI", {
+        pin("exec", "exec", false), pin("layout", "int", false), pin("then", "exec", true), pin("finished", "bool", true)},
+        {attr("name", "Animation")}});
     t.push_back({"AN_OpenUiSettings", "Open UI Settings", "UI", {
         pin("exec", "exec", false), pin("then", "exec", true), pin("layout", "int", true), pin("success", "bool", true)}});
     t.push_back({"AN_SpawnPrefab", "Spawn Prefab", "Prefab", {

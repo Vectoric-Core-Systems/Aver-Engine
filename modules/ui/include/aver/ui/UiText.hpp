@@ -80,6 +80,10 @@ inline f32 uiAlignedX(UiTextAlign a, const UiRect& area, f32 lineWidth, bool rtl
 class UiPainter : public UiTextMetrics {
 public:
     virtual void setLayer(UiLayer) {}
+    // A 2D transform on everything drawn until the matching pop (a widget's render transform). A painter that cannot
+    // transform ignores it and draws untransformed.
+    virtual void pushTransform(const UiAffine&) {}
+    virtual void popTransform() {}
     virtual void pushClip(const UiRect& r) = 0;
     virtual void popClip() = 0;
     virtual void fillRect(const UiRect& r, u32 rgba) = 0;
@@ -105,6 +109,8 @@ public:
     UiDrawListPainter(UiDrawList& list, UiTextEngine* engine, const UiFont* bitmap);
 
     void setLayer(UiLayer l) override { list_.setLayer(l); }
+    void pushTransform(const UiAffine& a) override { list_.pushTransform(a); }
+    void popTransform() override { list_.popTransform(); }
     void pushClip(const UiRect& r) override;
     void popClip() override { list_.popClip(); }
     void fillRect(const UiRect& r, u32 rgba) override { list_.addRect(r.x, r.y, r.w, r.h, rgba); }

@@ -598,9 +598,12 @@ void UiTree::update(f32 dt, const UiInputFrame& in, const UiTextMetrics& metrics
     time_ += dt;
     metrics_ = &metrics;
 
+    refreshBindings();
+    animAdvance(dt);
     layout(metrics);
     updateScope();
     processPointer(in);
+    detectHover();
     processNav(in);
     processText(in);
 

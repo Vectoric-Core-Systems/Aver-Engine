@@ -43,6 +43,11 @@ internal static class UiGraphInterop
                 case "an_uiwasclicked": outBool = UiGraphNodes.WasClicked(a); return true;
                 case "an_uicommandfired": outBool = UiGraphNodes.CommandFired(s); return true;
                 case "an_setuifocus": return UiGraphNodes.SetFocus(a);
+                case "an_playuianimation": return UiGraphNodes.PlayAnimation(a, s, b, f, flag);
+                case "an_stopuianimation": return UiGraphNodes.StopAnimation(a, s, flag);
+                case "an_seekuianimation": return UiGraphNodes.SeekAnimation(a, s, f);
+                case "an_reverseuianimation": return UiGraphNodes.ReverseAnimation(a, s);
+                case "an_uianimationfinished": outBool = UiGraphNodes.AnimationFinished(a, s); return true;
                 case "an_openuisettings": return OpenSettings(out outInt);
                 default: return false;
             }

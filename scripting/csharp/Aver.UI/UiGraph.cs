@@ -104,6 +104,22 @@ public static class UiGraphNodes
     /// <summary>AN_UiCommandFired: true when a button with this command was activated since the last Pump.</summary>
     public static bool CommandFired(string command) => UiSystem.CommandFired(command);
 
+    /// <summary>AN_PlayUiAnimation: plays a layout animation (its <c>ANIM</c> records); <paramref name="loops"/> 0 repeats until stopped.</summary>
+    public static bool PlayAnimation(int layout, string name, int loops, float speed, bool reverse)
+        => UiAnimation.Play(new Widget((uint)layout), name, speed > 0f ? speed : 1f, loops < 0 ? 1 : loops, reverse);
+
+    /// <summary>AN_StopUiAnimation: stops it and, with <paramref name="release"/>, brings back the authored look.</summary>
+    public static bool StopAnimation(int layout, string name, bool release) => UiAnimation.Stop(new Widget((uint)layout), name, release);
+
+    /// <summary>AN_SeekUiAnimation: jumps to a time and applies it.</summary>
+    public static bool SeekAnimation(int layout, string name, float seconds) => UiAnimation.Seek(new Widget((uint)layout), name, seconds);
+
+    /// <summary>AN_ReverseUiAnimation: flips a running animation, or plays one backwards from its end.</summary>
+    public static bool ReverseAnimation(int layout, string name) => UiAnimation.Reverse(new Widget((uint)layout), name);
+
+    /// <summary>AN_UiAnimationFinished: true when the animation finished since the last <see cref="UiSystem.Pump"/>.</summary>
+    public static bool AnimationFinished(int layout, string name) => UiSystem.AnimationFinished(new Widget((uint)layout), name);
+
     /// <summary>AN_SetUiFocus.</summary>
     public static bool SetFocus(int widget) => new Widget((uint)widget).Focus();
 

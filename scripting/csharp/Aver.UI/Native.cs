@@ -117,6 +117,20 @@ internal static class Native
     internal delegate int LayoutReadFn([MarshalAs(UnmanagedType.LPUTF8Str)] string path, IntPtr output, int capacity);
     [DllImport(Lib)] internal static extern IntPtr aver_ui_layout_capture(uint root);
 
+    // Widget animation (widget ABI 2).
+    [DllImport(Lib)] internal static extern int   aver_ui_widget_abi_version();
+    [DllImport(Lib)] internal static extern int   aver_ui_anim_count(uint root);
+    [DllImport(Lib)] internal static extern IntPtr aver_ui_anim_name(uint root, int index);
+    [DllImport(Lib)] internal static extern float aver_ui_anim_length(uint root, [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
+    [DllImport(Lib)] internal static extern int   aver_ui_anim_play(uint root, [MarshalAs(UnmanagedType.LPUTF8Str)] string name,
+                                                  float speed, int loops, int reverse, int pingPong);
+    [DllImport(Lib)] internal static extern int   aver_ui_anim_stop(uint root, [MarshalAs(UnmanagedType.LPUTF8Str)] string name, int release);
+    [DllImport(Lib)] internal static extern int   aver_ui_anim_seek(uint root, [MarshalAs(UnmanagedType.LPUTF8Str)] string name, float time);
+    [DllImport(Lib)] internal static extern int   aver_ui_anim_reverse(uint root, [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
+    [DllImport(Lib)] internal static extern int   aver_ui_anim_pause(uint root, [MarshalAs(UnmanagedType.LPUTF8Str)] string name, int paused);
+    [DllImport(Lib)] internal static extern int   aver_ui_anim_is_playing(uint root, [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
+    [DllImport(Lib)] internal static extern float aver_ui_anim_time(uint root, [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
+
     [DllImport(Lib)] internal static extern int aver_ui_event_poll(out int type, out uint widget, out float value,
                                                   out int index, byte[] textBuf, int textCap);
 

@@ -58,6 +58,12 @@ extern "C" {
 #define AVER_UI_EVENT_KEY_CAPTURED      8   /* index = the raw key slot */
 #define AVER_UI_EVENT_CANCEL            9
 #define AVER_UI_EVENT_COMMAND           10  /* text = command: a button's `command`, "setting:<key>", "rebind:<action>:<slot>" */
+#define AVER_UI_EVENT_HOVERED           11  /* value 1 entered, 0 left; raised only for widgets with a hover EVENT route */
+#define AVER_UI_EVENT_ANIM_FINISHED     12  /* widget = the layout root, text = the animation's name, value = end time, index = loops played */
+
+/* Version of the widget ABI. 1 = the original; 2 adds widget animation (aver_ui_anim_*), the hover and animation-finished
+ * events and the render-transform properties. A host that needs them checks this first. */
+#define AVER_UI_WIDGET_ABI_VERSION 2
 
 // Bits of aver_ui_wants_input.
 #define AVER_UI_WANTS_POINTER  1   /* the pointer is on UI, or a menu is open: gameplay must not see it */
@@ -179,6 +185,28 @@ AVER_UI_API void aver_ui_set_layout_reader(AverUiLayoutReadFn read);
 AVER_UI_API const char* aver_ui_layout_warnings(void);
 // The subtree at `root` as .ocui text, for saving a layout built in code.
 AVER_UI_API const char* aver_ui_layout_capture(uint32_t root);
+
+// ---- widget animation (the layout's ANIM records; docs/GAME_UI.md) -----------------------------------------------------
+
+/* `root` is the widget aver_ui_layout_open returned (any widget inside it also works). An animation's name is the one its
+ * ANIM records share; one from a nested layout is "<instance>/<name>". Values the animation drives sit over the widget's
+ * properties (opacity, bgColor, textColor, accentColor, tint, renderTranslate, renderRotation, renderScale) and never
+ * change them. The functions return 1 on success, 0 for an unknown root or animation. */
+AVER_UI_API int32_t     aver_ui_widget_abi_version(void);
+AVER_UI_API int32_t     aver_ui_anim_count(uint32_t root);
+AVER_UI_API const char* aver_ui_anim_name(uint32_t root, int32_t index);        /* NULL out of range */
+AVER_UI_API float       aver_ui_anim_length(uint32_t root, const char* name);   /* seconds; -1 unknown */
+/* Starts from the beginning (the end when reverse is 1), replacing a run of the same name. loops: how many plays, 0 until
+ * stopped. pingPong 1 turns round at each end (a loop is then one pass). speed scales time (> 0). A finished play raises
+ * AVER_UI_EVENT_ANIM_FINISHED. */
+AVER_UI_API int32_t     aver_ui_anim_play(uint32_t root, const char* name, float speed, int32_t loops, int32_t reverse, int32_t pingPong);
+/* release 1 also drops the values it drove; a finished animation keeps its last values until released. */
+AVER_UI_API int32_t     aver_ui_anim_stop(uint32_t root, const char* name, int32_t release);
+AVER_UI_API int32_t     aver_ui_anim_seek(uint32_t root, const char* name, float time);   /* applies a time; starts paused if not running */
+AVER_UI_API int32_t     aver_ui_anim_reverse(uint32_t root, const char* name);
+AVER_UI_API int32_t     aver_ui_anim_pause(uint32_t root, const char* name, int32_t paused);
+AVER_UI_API int32_t     aver_ui_anim_is_playing(uint32_t root, const char* name);   /* running and not paused */
+AVER_UI_API float       aver_ui_anim_time(uint32_t root, const char* name);          /* -1 when not running */
 
 // ---- events ------------------------------------------------------------------------------------------------------
 

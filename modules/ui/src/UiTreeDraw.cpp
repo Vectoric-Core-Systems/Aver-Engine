@@ -49,13 +49,32 @@ void UiTree::drawScrollbar(UiPainter& p, const UiWidget& w, const UiStyle& st, f
 
 void UiTree::drawWidget(UiPainter& p, const UiWidget& w, f32 parentOpacity, bool parentEnabled) {
     if (!w.visible || w.inactive) return;
-    const f32 op = parentOpacity * w.opacity;
+    const UiWidgetFx& fx = w.fx;
+    const f32 op = parentOpacity * ((fx.mask & kFxOpacity) ? fx.opacity : w.opacity);
     if (op <= 0.003f) return;
     const bool enabled = parentEnabled && w.enabled;
     const bool hc = access_.highContrast;   // ignores per-widget colour overrides (images and tints are untouched)
 
     const UiStyle st = styleOf(w);
     const f32 s = scaleOf(w);
+
+    // Render transform: the authored one, or the animated value over it, around the pivot in the widget's rectangle.
+    const UiVec2 xlate = (fx.mask & kFxTranslate) ? fx.translate : w.renderTranslate;
+    const f32 rot = (fx.mask & kFxRotation) ? fx.rotation : w.renderRotation;
+    const UiVec2 xscale = (fx.mask & kFxScale) ? fx.scale : w.renderScale;
+    const bool transformed = xlate.x != 0.0f || xlate.y != 0.0f || rot != 0.0f || xscale.x != 1.0f || xscale.y != 1.0f;
+    if (transformed) {
+        const f32 rad = rot * 0.017453292519943295f;
+        const f32 cs = std::cos(rad), sn = std::sin(rad);
+        const f32 cx = w.rect.x + w.renderPivot.x * w.rect.w, cy = w.rect.y + w.renderPivot.y * w.rect.h;
+        // p' = pivot + translate + R * S * (p - pivot)
+        UiAffine a;
+        a.a = cs * xscale.x;  a.b = sn * xscale.x;
+        a.c = -sn * xscale.y; a.d = cs * xscale.y;
+        a.tx = cx + xlate.x * s - (a.a * cx + a.c * cy);
+        a.ty = cy + xlate.y * s - (a.b * cx + a.d * cy);
+        p.pushTransform(a);
+    }
     const f32 px = fontPx(w, st);
     const UiRect r = w.rect;
     const UiRect inner = r.deflate(paddingOf(w, st));
@@ -68,16 +87,18 @@ void UiTree::drawWidget(UiPainter& p, const UiWidget& w, f32 parentOpacity, bool
 
     const auto C = [op](u32 c) { return uiWithOpacity(c, op); };
     u32 bg = st.background[static_cast<usize>(vs)];
-    if (w.bgColor && !hc) {
-        bg = w.bgColor;
+    const u32 bgOwn = (fx.mask & kFxBg) ? fx.bg : w.bgColor;
+    if (bgOwn && !hc) {
+        bg = bgOwn;
         if (vs == UiVisualState::Hover) bg = uiShade(bg, 0.15f);
         else if (vs == UiVisualState::Pressed) bg = uiShade(bg, -0.2f);
         else if (vs == UiVisualState::Disabled) bg = uiWithOpacity(bg, 0.5f);
     }
-    const u32 ownText = hc ? 0u : w.textColor;
+    const u32 ownText = hc ? 0u : ((fx.mask & kFxText) ? fx.text : w.textColor);
     u32 textCol = ownText ? ownText : st.text;
     if (!enabled) textCol = ownText ? uiWithOpacity(ownText, 0.5f) : (st.textDisabled ? st.textDisabled : textCol);
-    const u32 accent = (w.accentColor && !hc) ? w.accentColor : st.accent;
+    const u32 accentOwn = (fx.mask & kFxAccent) ? fx.accent : w.accentColor;
+    const u32 accent = (accentOwn && !hc) ? accentOwn : st.accent;
 
     // Lays `txt` out with this widget's text props and paints it inside `area`. The layout comes from the
     // painter, so a widget is drawn with the same metrics that measured it.
@@ -94,6 +115,7 @@ void UiTree::drawWidget(UiPainter& p, const UiWidget& w, f32 parentOpacity, bool
     };
 
     bool clipChildren = w.clip;
+    const u32 tintOwn = (fx.mask & kFxTint) ? fx.tint : w.tint;
 
     switch (w.kind) {
         case UiWidgetKind::Panel:
@@ -119,9 +141,9 @@ void UiTree::drawWidget(UiPainter& p, const UiWidget& w, f32 parentOpacity, bool
             u64 tex = w.texture;
             if (tex == 0 && !w.image.empty() && imageResolver_) tex = imageResolver_(w.image);
             if (tex != 0) {
-                p.image(dst, tex, w.uv, C(w.tint));
+                p.image(dst, tex, w.uv, C(tintOwn));
             } else if (w.image.empty()) {
-                p.fillRect(dst, C(w.tint));                       // a plain tinted rectangle
+                p.fillRect(dst, C(tintOwn));                      // a plain tinted rectangle
             } else {
                 p.fillRect(dst, C(uiRgba(120, 120, 130, 90)));    // a path the host has not resolved
                 p.strokeRect(dst, s, C(uiRgba(160, 160, 170, 200)));
@@ -270,6 +292,7 @@ void UiTree::drawWidget(UiPainter& p, const UiWidget& w, f32 parentOpacity, bool
     const UiTheme& th = activeTheme();
     if (w.focused && focusVisible_ && enabled && w.focusable && th.focusWidth > 0.0f)
         p.strokeRect(r, th.focusWidth * (hc ? 2.0f : 1.0f) * s, C(th.focusColor));
+    if (transformed) p.popTransform();
 }
 
 } // namespace aver::ui

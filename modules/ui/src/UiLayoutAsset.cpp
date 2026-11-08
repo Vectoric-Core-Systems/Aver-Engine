@@ -1,5 +1,8 @@
 // The .ocui layout asset: parse, write, instantiate, capture and the structural edits.
 #include "aver/ui/UiLayoutAsset.hpp"
+
+#include "aver/ui/UiAnimation.hpp"
+#include "aver/ui/UiBindings.hpp"
 #include "aver/ui/UiProps.hpp"
 
 #include <algorithm>
@@ -277,6 +280,7 @@ struct InstCtx {
     std::vector<std::string> displayStack;
     std::vector<std::string>* errors;
     bool fatal = false;
+    UiLayoutRuntime runtime;               // the ANIM, BIND and EVENT records of everything built so far
 };
 
 std::string chainText(const InstCtx& cx, const std::string& again) {
@@ -383,6 +387,49 @@ UiWidgetId buildUse(InstCtx& cx, const UiLayoutNode& n, const UiWidgetProps& ins
 }
 
 // Creates `doc` under `parent`; inner widget names get `prefix`, the root is named `rootFull`.
+// Adds the document's ANIM, BIND and EVENT records to the runtime. Names get `prefix`, so a nested layout's animation is
+// "<instance>/<name>" and its widgets "<instance>/<widget>", the names they were built with.
+void collectRuntime(InstCtx& cx, const UiLayoutDoc& doc, const std::vector<UiWidgetId>& ids, const std::string& prefix,
+                    const std::string& rootFull) {
+    const std::string rootOriginal = doc.nodes[0].props.name;
+    const auto full = [&](const std::string& n) { return n == rootOriginal ? rootFull : prefix + n; };
+    const auto err = [&](const std::string& what) { if (cx.errors) cx.errors->push_back(what); };
+    std::vector<std::string> animErrors;
+    for (UiAnimation& a : uiAnimationsFromDoc(doc, &animErrors)) {
+        a.name = prefix + a.name;
+        for (UiAnimTrack& t : a.tracks) t.widget = full(t.widget);
+        cx.runtime.anims.push_back(std::move(a));
+    }
+    for (const std::string& e : animErrors) err(e);
+    const auto idOf = [&](const std::string& widget) -> UiWidgetId {
+        const i32 i = uiLayoutFind(doc, widget);
+        return i < 0 ? 0 : ids[static_cast<usize>(i)];
+    };
+    for (const UiLayoutBind& b : doc.binds) {
+        UiBinding nb;
+        nb.widget = idOf(b.widget);
+        nb.property = b.property;
+        if (!nb.widget) { err("BIND " + b.widget + " " + b.property + ": no such widget"); continue; }
+        if (!uiFindProperty(b.property)) { err("BIND " + b.widget + " " + b.property + ": unknown property"); continue; }
+        if (!uiParseBindPath(b.path, nb.source, nb.path)) { err("BIND " + b.widget + " " + b.property + ": empty path"); continue; }
+        for (usize i = 0; i + 1 < b.rest.size(); i += 2) {
+            if (b.rest[i] == "format") nb.format = b.rest[i + 1];
+            else if (b.rest[i] == "mode") nb.onChange = b.rest[i + 1] == "change";
+        }
+        cx.runtime.binds.push_back(std::move(nb));
+    }
+    for (const UiLayoutEvent& e : doc.events) {
+        UiEventRoute r;
+        r.widget = idOf(e.widget);
+        if (!r.widget) { err("EVENT " + e.widget + " " + e.event + ": no such widget"); continue; }
+        if (!uiRouteEventFromName(e.event, r.type, r.hoverEnter)) { err("EVENT " + e.widget + ": unknown event '" + e.event + "'"); continue; }
+        if (!uiRouteActionFromName(e.action, r.action)) { err("EVENT " + e.widget + " " + e.event + ": unknown action '" + e.action + "'"); continue; }
+        r.target = e.target;
+        r.args = e.rest;
+        cx.runtime.routes.push_back(std::move(r));
+    }
+}
+
 bool buildDoc(InstCtx& cx, const UiLayoutDoc& doc, std::vector<UiWidgetProps> props, UiWidgetId parent,
               const std::string& prefix, const std::string& rootFull, std::vector<UiWidgetId>& ids) {
     ids.assign(doc.nodes.size(), 0);
@@ -416,6 +463,7 @@ bool buildDoc(InstCtx& cx, const UiLayoutDoc& doc, std::vector<UiWidgetProps> pr
         else ids[i] = cx.tree.createFrom(p, par);
         if (!ids[i]) return false;
     }
+    collectRuntime(cx, doc, ids, prefix, rootFull);
     return true;
 }
 
@@ -441,6 +489,7 @@ UiInstantiateResult uiInstantiateLayoutEx(const UiLayoutDoc& doc, UiTree& tree, 
         return r;
     }
     r.root = r.nodeIds[0];
+    if (!cx.runtime.anims.empty() || !cx.runtime.binds.empty() || !cx.runtime.routes.empty()) tree.attachRuntime(r.root, std::move(cx.runtime));
     return r;
 }
 

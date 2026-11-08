@@ -2,7 +2,7 @@
 
 # GameSystem nodes
 
-99 nodes. Rows: `scripting/csharp/Aver.Graph/GraphGameSystemNodeTable.cs`. Palette: `sandbox/src/GraphNodeDefsGameSystems.hpp`, `sandbox/src/GraphNodeDefsSynapseAi.hpp`.
+104 nodes. Rows: `scripting/csharp/Aver.Graph/GraphGameSystemNodeTable.cs`. Palette: `sandbox/src/GraphNodeDefsGameSystems.hpp`, `sandbox/src/GraphNodeDefsSynapseAi.hpp`.
 
 Path: D pure (a read, recomputed per reader), P exec, X trigger (an entry node).
 
@@ -50,8 +50,11 @@ Path: D pure (a read, recomputed per reader), P exec, X trigger (an entry node).
 | `AN_PlayMusic` | Play Music | Audio | P | in: `exec` exec, `volume` float = 1, `fadeSeconds` float = 2, `looping` bool = true, `curve` int = 1<br>out: `then` exec, `voice` int, `success` bool | `sound` | `AudioStreamGraph.PlayMusicForGraph`<br>PlayMusic: crossfades the music slot to the sound= file. |
 | `AN_PlayStream` | Play Stream | Audio | P | in: `exec` exec, `volume` float = 1, `pitch` float = 1, `looping` bool, `bus` int, `fadeInSeconds` float<br>out: `then` exec, `voice` int, `success` bool | `sound` | `AudioStreamGraph.PlayStreamForGraph`<br>PlayStream: streams the sound= file flat. |
 | `AN_PlayStreamAt` | Play Stream At | Audio | P | in: `exec` exec, `x` float, `y` float, `z` float, `volume` float = 1, `pitch` float = 1, `looping` bool, `bus` int, `innerCm` float = 200, `outerCm` float = 2000, `fadeInSeconds` float<br>out: `then` exec, `voice` int, `success` bool | `sound` | `AudioStreamGraph.PlayStreamAtForGraph`<br>PlayStreamAt: the positioned counterpart. |
+| `AN_PlayUiAnimation` | Play UI Animation | UI | P | in: `exec` exec, `layout` int, `loops` int = 1, `speed` float = 1, `reverse` bool<br>out: `then` exec, `success` bool | `name|path|text` | `UiGraphInterop.UiNodeForGraph`<br>Runs one UI node. |
 | `AN_ReleaseCover` | Release Cover | AI | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | none | `GraphInteropSynapseAi.ReleaseCoverForGraph` |
+| `AN_ReverseUiAnimation` | Reverse UI Animation | UI | P | in: `exec` exec, `layout` int<br>out: `then` exec, `success` bool | `name|path|text` | `UiGraphInterop.UiNodeForGraph`<br>Runs one UI node. |
 | `AN_RevertPrefab` | Revert Prefab | Prefab | P | in: `exec` exec, `root` int<br>out: `then` exec | none | `GraphPrefabs.RevertPrefabForGraph`<br>AN_RevertPrefab. |
+| `AN_SeekUiAnimation` | Seek UI Animation | UI | P | in: `exec` exec, `layout` int, `time` float<br>out: `then` exec, `success` bool | `name|path|text` | `UiGraphInterop.UiNodeForGraph`<br>Runs one UI node. |
 | `AN_SetCulture` | Set Culture | Localization | P | in: `exec` exec<br>out: `then` exec, `success` bool | `culture` | `LocGraph.SetCultureForGraph`<br>AN_SetCulture: switches (and remembers) the culture. |
 | `AN_SetCultureByIndex` | Set Culture By Index | Localization | P | in: `exec` exec, `index` int<br>out: `then` exec, `success` bool | none | `LocGraph.SetCultureByIndexForGraph`<br>AN_SetCultureByIndex. |
 | `AN_SetDecalCapacity` | Set Decal Capacity | Decal | P | in: `exec` exec, `capacity` int = 256<br>out: `then` exec, `success` bool | none | `DecalGraph.SetDecalCapacityForGraph` |
@@ -73,6 +76,8 @@ Path: D pure (a read, recomputed per reader), P exec, X trigger (an entry node).
 | `AN_SquadJoin` | Squad Join | AI | P | in: `exec` exec, `entity` int, `squadId` int = 0, `spacingCm` float = 200<br>out: `then` exec, `success` bool | none | `GraphInteropSynapseAi.SquadJoinForGraph` |
 | `AN_SquadSetTarget` | Squad Set Target | AI | P | in: `exec` exec, `squadId` int = 0, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | none | `GraphInteropSynapseAi.SquadSetTargetForGraph` |
 | `AN_StopMusic` | Stop Music | Audio | P | in: `exec` exec, `fadeSeconds` float = 1<br>out: `then` exec, `success` bool | none | `AudioStreamGraph.StopMusicForGraph`<br>StopMusic: fades the current track out. |
+| `AN_StopUiAnimation` | Stop UI Animation | UI | P | in: `exec` exec, `layout` int, `release` bool = true<br>out: `then` exec, `success` bool | `name|path|text` | `UiGraphInterop.UiNodeForGraph`<br>Runs one UI node. |
+| `AN_UiAnimationFinished` | UI Animation Finished | UI | P | in: `exec` exec, `layout` int<br>out: `then` exec, `finished` bool | `name|path|text` | `UiGraphInterop.UiNodeForGraph`<br>Runs one UI node. |
 | `AN_UiCommandFired` | UI Command Fired | UI | P | in: `exec` exec<br>out: `then` exec, `fired` bool | `path|name|text` | `UiGraphInterop.UiNodeForGraph`<br>Runs one UI node. |
 | `AN_UiWasClicked` | UI Was Clicked | UI | P | in: `exec` exec, `widget` int<br>out: `then` exec, `clicked` bool | none | `UiGraphInterop.UiNodeForGraph`<br>Runs one UI node. |
 | `ClearInputConfig` | Clear Input Config | Input | P | in: `exec` exec<br>out: `then` exec, `success` bool | `action` | `InputGraph.ClearConfigForGraph`<br>Drops an action's own triggers and modifiers; run it before the Add nodes in OnStart, since adds are not idempotent. |

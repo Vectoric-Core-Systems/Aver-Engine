@@ -2,7 +2,7 @@
 
 # Aver.UI public API
 
-25 public types and 215 public members, read from `scripting/csharp/Aver.UI/` (8 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+26 public types and 233 public members, read from `scripting/csharp/Aver.UI/` (9 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.UI
 
@@ -146,6 +146,21 @@ Values: `Bold = 1`, `Italic = 2`, `Rich = 4`, `Ellipsis = 8`, `Wrap = 16`
 
 `public readonly record struct TextStyle(string? Family = null, float Size = 16f, bool Bold = false, bool Italic = false, bool Rich = false, bool Ellipsis = false)` - The look of a run of text: a family of the loaded font set (null or empty is the default family), a size in pixels, and the style switches.
 
+### UiAnimation
+
+`public static class UiAnimation` - Plays the animations of an .ocui layout (its ANIM records): tracks over a widget's opacity, colours and render transform.
+
+- `public static int AbiVersion { get; }` - The widget ABI version the native library reports (2 and up has animation).
+- `public static IReadOnlyList<string> List(Widget root)` - The names of the layout's animations.
+- `public static float Length(Widget root, string name)` - The animation's length in seconds, -1 for an unknown one.
+- `public static bool Play(Widget root, string name, float speed = 1f, int loops = 1, bool reverse = false, bool pingPong = false)` - Starts an animation from its start (its end when reverse), replacing a run of the same name.
+- `public static bool Stop(Widget root, string name, bool release = true)` - Stops it.
+- `public static bool Seek(Widget root, string name, float seconds)` - Jumps to a time (clamped) and applies it; an animation that was not running stays paused there.
+- `public static bool Reverse(Widget root, string name)` - Flips a running animation's direction; one that is not running starts from its end, backwards.
+- `public static bool Pause(Widget root, string name, bool paused = true)` - Pauses or resumes a running animation.
+- `public static bool IsPlaying(Widget root, string name)` - Whether it is running and not paused.
+- `public static float Time(Widget root, string name)` - Where a running animation is, in seconds; -1 when it is not running.
+
 ### UiEvent
 
 `public readonly record struct UiEvent(UiEventKind Kind, Widget Widget, float Value, int Index, string Text)` - One thing that happened in the UI.
@@ -154,7 +169,7 @@ Values: `Bold = 1`, `Italic = 2`, `Rich = 4`, `Ellipsis = 8`, `Wrap = 16`
 
 `public enum UiEventKind` - What happened to a widget.
 
-Values: `Clicked = 0`, `Toggled = 1`, `ValueChanged = 2`, `SelectionChanged = 3`, `TextChanged = 4`, `TextSubmitted = 5`, `FocusGained = 6`, `FocusLost = 7`, `KeyCaptured = 8`, `Cancel = 9`, `Command = 10`
+Values: `Clicked = 0`, `Toggled = 1`, `ValueChanged = 2`, `SelectionChanged = 3`, `TextChanged = 4`, `TextSubmitted = 5`, `FocusGained = 6`, `FocusLost = 7`, `KeyCaptured = 8`, `Cancel = 9`, `Command = 10`, `Hovered = 11`, `AnimationFinished = 12`
 
 ### UiGraphNodes
 
@@ -172,6 +187,11 @@ Values: `Clicked = 0`, `Toggled = 1`, `ValueChanged = 2`, `SelectionChanged = 3`
 - `public static bool GetValue(int widget, out float value, out bool isChecked, out int selected)` - AN_GetUiValue: a widget's value, checked state and selected index at once.
 - `public static bool WasClicked(int widget)` - AN_UiWasClicked: true when the widget was clicked since the last Pump.
 - `public static bool CommandFired(string command)` - AN_UiCommandFired: true when a button with this command was activated since the last Pump.
+- `public static bool PlayAnimation(int layout, string name, int loops, float speed, bool reverse)` - AN_PlayUiAnimation: plays a layout animation (its ANIM records); loops 0 repeats until stopped.
+- `public static bool StopAnimation(int layout, string name, bool release)` - AN_StopUiAnimation: stops it and, with release, brings back the authored look.
+- `public static bool SeekAnimation(int layout, string name, float seconds)` - AN_SeekUiAnimation: jumps to a time and applies it.
+- `public static bool ReverseAnimation(int layout, string name)` - AN_ReverseUiAnimation: flips a running animation, or plays one backwards from its end.
+- `public static bool AnimationFinished(int layout, string name)` - AN_UiAnimationFinished: true when the animation finished since the last Pump.
 - `public static bool SetFocus(int widget)` - AN_SetUiFocus.
 - `public static bool CreateMenu(string name, string title, string entries, bool modal, out int menu)` - AN_ShowUiMenu: a centred menu of buttons; entries is one "Label|command" per line.
 
@@ -188,6 +208,7 @@ Values: `Clicked = 0`, `Toggled = 1`, `ValueChanged = 2`, `SelectionChanged = 3`
 - `public static bool TryPoll(out UiEvent e)` - Takes the next event the UI raised, without dispatching it.
 - `public static int Pump()` - Delivers every pending event to Event and the registered handlers.
 - `public static bool WasClicked(Widget widget)` - Whether widget was clicked in the events the last Pump delivered.
+- `public static bool AnimationFinished(Widget root, string name)` - Whether the layout animation name of root finished in the events the last Pump delivered.
 - `public static bool CommandFired(string command)` - Whether command fired in the events the last Pump delivered.
 - `public static bool WantsPointer { get; }` - The pointer is on UI or a menu is open: gameplay should ignore the mouse.
 - `public static bool WantsKeyboard { get; }` - A menu or text field owns the keyboard and gamepad.

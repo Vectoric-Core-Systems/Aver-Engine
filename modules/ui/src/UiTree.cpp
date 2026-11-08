@@ -70,6 +70,7 @@ bool UiTree::destroy(UiWidgetId id) {
     } else {
         roots_.erase(std::remove(roots_.begin(), roots_.end(), id), roots_.end());
     }
+    dropRuntime(doomed);
     for (const UiWidgetId d : doomed) widgets_.erase(d);
     return true;
 }
@@ -100,6 +101,10 @@ bool UiTree::reparent(UiWidgetId id, UiWidgetId newParent, i32 index) {
 void UiTree::clear() {
     widgets_.clear();
     roots_.clear();
+    runtimes_.clear();
+    animRuns_.clear();
+    routed_.clear();
+    hoverSeen_.clear();
     focus_ = scope_ = captured_ = pressed_ = 0;
     pending_.clear();
     queue_.clear();
@@ -226,6 +231,7 @@ void UiTree::dispatch() {
         batch.swap(pending_);
         const auto listeners = listeners_;
         for (UiEvent& ev : batch) {
+            routeEvent(ev);
             for (const auto& l : listeners) l.second(ev);
             queue_.push_back(std::move(ev));
             while (queue_.size() > 1024) queue_.pop_front();

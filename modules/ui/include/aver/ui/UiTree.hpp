@@ -3,6 +3,8 @@
 // draws through a UiPainter. Core-only like the rest of Aver.UI: testable with no GPU and no window.
 // See docs/GAME_UI.md for the model (anchors vs stacks, focus scopes, input routing).
 #include "aver/ui/UiAccess.hpp"
+#include "aver/ui/UiAnimation.hpp"
+#include "aver/ui/UiBindings.hpp"
 #include "aver/ui/UiFocus.hpp"
 #include "aver/ui/UiLayout.hpp"
 #include "aver/ui/UiStyle.hpp"
@@ -48,7 +50,9 @@ enum class UiEventType : u8 {
     FocusLost,
     KeyCaptured,        // a KeyBind heard a key; index = raw key slot
     Cancel,             // Cancel reached the menu root (widget = root)
-    Command             // a widget's `command` fired, or a screen raised one; text = command
+    Command,            // a widget's `command` fired, or a screen raised one; text = command
+    Hovered,            // the pointer entered (value 1) or left (value 0); raised only for widgets with a hover route
+    AnimationFinished   // widget = the layout root, text = the animation's name, value = its end time, index = loops played
 };
 
 struct UiEvent {
@@ -77,6 +81,26 @@ using UiTextResolveFn = std::function<bool(std::string_view raw, std::string& ou
 // The texture id for an Image widget's content path, or 0 when the host has none (the widget then draws its
 // placeholder). Called every draw, so a resolver that borrows (keeps a texture alive while it is asked for) works.
 using UiImageResolveFn = std::function<u64(const std::string& path)>;
+
+// How UiTree::animPlay runs an animation. loops 0 repeats until stopped; pingPong turns round at each end instead of
+// jumping back (a loop is then one pass).
+struct UiAnimPlay {
+    f32 speed = 1.0f;
+    i32 loops = 1;
+    bool reverse = false;
+    bool pingPong = false;
+};
+
+// The animations, bindings and event routes of one layout root; uiInstantiateLayoutEx attaches them from the
+// document's ANIM, BIND and EVENT records, and they go when the root is destroyed.
+struct UiLayoutRuntime {
+    std::vector<UiAnimation> anims;
+    std::vector<UiBinding> binds;
+    std::vector<UiEventRoute> routes;
+};
+
+// The source of a binding's value: true with `out` set when the host has one for `path`.
+using UiBindResolveFn = std::function<bool(UiBindSource source, const std::string& path, UiBindValue& out)>;
 
 class UiTree {
 public:
@@ -173,6 +197,44 @@ public:
     // Runs the built-in commands (ui.close, ui.open:Name, ui.toggle:Name) for `text`; true if it was one.
     bool runBuiltinCommand(std::string_view text, UiWidgetId source);
 
+    // ---- layout runtime: animations, bindings, event routes (UiAnimation.hpp, UiBindings.hpp) --
+    // Adds to the runtime of `root` (a widget id; a nested one counts as its root). Bindings and routes name widgets
+    // by id: use uiInstantiateLayoutEx, which resolves the document's names.
+    void attachRuntime(UiWidgetId root, UiLayoutRuntime rt);
+    const UiLayoutRuntime* runtimeOf(UiWidgetId root) const;
+    const UiAnimation* findAnimation(UiWidgetId root, std::string_view name) const;
+
+    // Starts `name` of the layout at `root` from its start (its end when reversed), replacing a run of the same
+    // name. The first frame is applied at once. False for an unknown root or animation.
+    bool animPlay(UiWidgetId root, std::string_view name, const UiAnimPlay& options = {});
+    // Stops it; `release` also drops the values it was driving (the widgets draw as authored again). A finished
+    // animation keeps its last values until released.
+    bool animStop(UiWidgetId root, std::string_view name, bool release = true);
+    // Moves to `time` (clamped to the animation) and applies it, starting it paused if it was not running.
+    bool animSeek(UiWidgetId root, std::string_view name, f32 time);
+    // Flips the direction of a running animation; one that is not running starts from its end, backwards.
+    bool animReverse(UiWidgetId root, std::string_view name);
+    bool animPause(UiWidgetId root, std::string_view name, bool paused);
+    bool animPlaying(UiWidgetId root, std::string_view name) const;   // running and not paused
+    f32 animTime(UiWidgetId root, std::string_view name) const;       // -1 when not running
+    // Advances every running animation (update() does this); raises AnimationFinished for those that ended.
+    void animAdvance(f32 dt);
+
+    // Where a binding's value comes from. Evaluated at the top of update() (and refreshBindings()).
+    void setBindingResolver(UiBindResolveFn fn) { bindResolver_ = std::move(fn); }
+    // Marks the bindings of `path` (and its parents and children) to be read again; empty = all. Frame-mode bindings
+    // are read every frame anyway.
+    void bindingsChanged(std::string_view path = {});
+    // Adds one binding to the layout `widget` belongs to. False for an unknown widget or property.
+    bool bind(UiWidgetId widget, std::string_view property, UiBindSource source, std::string_view path,
+              std::string_view format = {}, bool onChange = false);
+    void refreshBindings();
+    usize bindingCount(UiWidgetId root) const;
+    // Adds an event route for a widget of the layout (see UiBindings.hpp).
+    bool addRoute(UiEventRoute route);
+    // Pops the oldest graph / method route the events fired. The queue holds 256.
+    bool pollRouted(UiRoutedEvent& out);
+
     // ---- programmatic value changes (no event is raised) ------------------------------------
     void setVisible(UiWidgetId id, bool visible);
     void setText(UiWidgetId id, std::string_view text);
@@ -238,6 +300,12 @@ private:
     bool focusableNow(UiWidgetId id) const;
     UiRect textArea(const UiWidget& w) const;
     void dispatch();
+    void routeEvent(const UiEvent& ev);
+    void detectHover();
+    UiWidgetId runtimeRoot(UiWidgetId id) const;
+    void dropRuntime(const std::vector<UiWidgetId>& doomed);
+    UiAnimation* animOf(UiWidgetId root, std::string_view name);
+    void applyAnim(usize run);
 
     // draw (UiTreeDraw.cpp)
     void drawWidget(UiPainter& p, const UiWidget& w, f32 opacity, bool enabled);
@@ -274,6 +342,20 @@ private:
     u64 frame_ = 0;
     u64 listenFrame_ = 0;
     bool scrollDrag_ = false;       // captured_ is dragging its scrollbar rather than its value
+
+    struct AnimRun {
+        UiWidgetId root = 0;
+        std::string name;
+        f32 time = 0, speed = 1.0f, dir = 1.0f;
+        i32 loops = 1, done = 0;
+        bool pingPong = false, paused = false;
+        std::vector<UiWidgetId> widgets;   // per track of the animation
+    };
+    std::unordered_map<UiWidgetId, UiLayoutRuntime> runtimes_;
+    std::vector<AnimRun> animRuns_;
+    UiBindResolveFn bindResolver_;
+    std::deque<UiRoutedEvent> routed_;
+    std::unordered_map<UiWidgetId, bool> hoverSeen_;
 
     std::vector<UiEvent> pending_;
     std::deque<UiEvent> queue_;

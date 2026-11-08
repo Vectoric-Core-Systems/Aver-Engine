@@ -23,7 +23,8 @@ layout, input, focus, events and drawing, is tested with no GPU and no window.
 | C ABI | `modules/ui.abi/ui_widget_abi.h` (beside the draw ABI `ui_abi.h`) |
 | C# | `scripting/csharp/Aver.UI` (`Widgets.cs`, `SettingsScreen.cs`, `UiGraph.cs`), `Aver.Framework/UiGameSettings.cs`, `UiGraphInterop.cs` |
 | Editor tab | `sandbox/src/UiLayoutEditor.{hpp,cpp}` |
-| Tests | `tests/ui`: `UiWidgetTest`, `UiPanelsTest`, `UiLayoutAssetTest`, `UiLayoutAbiTest`, `UiLayoutEditorTest` (and the existing `UiTest`) |
+| Animation, bindings, event routes | `modules/ui` (`UiAnimation.hpp`, `UiBindings.hpp`, `UiTreeRuntime.cpp`); C ABI `aver_ui_anim_*` |
+| Tests | `tests/ui`: `UiWidgetTest`, `UiPanelsTest`, `UiAnimationTest`, `UiLayoutAssetTest`, `UiLayoutAbiTest`, `UiLayoutEditorTest` (and the existing `UiTest`) |
 
 ## The model
 
@@ -180,6 +181,26 @@ the hierarchy; the palette's **Layouts** section lists the project's other `.ocu
 and the inspector shows the layout path and its exposed properties. A layout that would make a cycle is refused
 with the chain in the toolbar.
 
+### Animation
+
+`ANIM <name> <widget> <property> (<time> <value>)*` records make animations: tracks of keys over a widget's `opacity`,
+`bgColor`, `textColor`, `accentColor`, `tint` and render transform (`renderTranslate`, `renderRotation`,
+`renderScale`; aliases `offset`, `rotation`, `scale`, `color`). A value is a float, `x,y` or `#RRGGBB[AA]`, with an
+optional `@ease` that shapes the segment leaving that key (`linear step in out inout cubicin cubicout cubicinout`).
+Records sharing a name make one animation; a layout opened with `uiInstantiateLayoutEx` / `aver_ui_layout_open` keeps
+them with its root, and a used layout's are `<instance>/<name>`.
+
+The values sit over the widget's properties and are never written to them (a saved capture has the authored look).
+`UiTree::animPlay(root, name, {speed, loops, reverse, pingPong})`, `animStop(release)`, `animSeek`, `animReverse`,
+`animPause`; a finished play raises `AnimationFinished` (widget = the root, text = the name) and keeps its last values
+until released. `aver_ui_anim_*` (C), `UiAnimation.Play/Stop/Seek/Reverse/Pause/IsPlaying/Time` and
+`UiSystem.AnimationFinished` (C#), and the `AN_PlayUiAnimation` family of nodes expose it.
+
+The render transform (`renderTranslate` design px, `renderRotation` degrees, `renderScale`, `renderPivot` as a fraction
+of the widget's rectangle, default the centre) is a 2D affine pushed on the draw list around the widget and its
+children (`UiPainter::pushTransform`). It is draw-only: layout, hit testing and focus ignore it, so a widget that moves
+a long way should not be clicked while it does.
+
 ### Property reference
 
 Colours are `#RRGGBB` or `#RRGGBBAA`, or `none`. Insets/anchors/uv take 4 numbers (insets also 1 or 2, a point
@@ -198,6 +219,7 @@ anchor 2). Enum names are lower case.
   `uv`, `imageMode` (`stretch fit`), `tint`, `placeholder`, `maxLength`, `masked`. The text properties are
   explained in [GAME_UI_TEXT.md](GAME_UI_TEXT.md); a style (`UiStyle`) can also set `fontFamily` and `bold`.
 * **Value:** `value`, `minValue`, `maxValue`, `step`, `showValue`, `checked`, `selected`, `items`, `rowHeight`.
+* **Transform:** `renderTranslate`, `renderRotation`, `renderScale`, `renderPivot` (draw-only, see Animation).
 * **Navigation:** `focusable`, `tabIndex`, `navUp`, `navDown`, `navLeft`, `navRight`, `command`.
 * **Accessibility:** `accessName` (the label a narrator speaks; empty = derived from the widget's text or its label sibling).
 * **Root only:** `inputMode`, `modal`, `zOrder`, `layer`, `defaultFocus`, `cancelCommand`.
@@ -340,6 +362,11 @@ nodes have a `success` out.
 | `AN_UiWasClicked` | | `widget` | `clicked` |
 | `AN_UiCommandFired` | `name=` | | `fired` |
 | `AN_SetUiFocus` | | `widget` | `success` |
+| `AN_PlayUiAnimation` | `name=` | `layout`, `loops` (0 = until stopped), `speed`, `reverse` | `success` |
+| `AN_StopUiAnimation` | `name=` | `layout`, `release` | `success` |
+| `AN_SeekUiAnimation` | `name=` | `layout`, `time` | `success` |
+| `AN_ReverseUiAnimation` | `name=` | `layout` | `success` |
+| `AN_UiAnimationFinished` | `name=` | `layout` | `finished` |
 | `AN_OpenUiSettings` | | | `layout`, `success` |
 
 `AN_UiWasClicked` and `AN_UiCommandFired` read what the last `UiSystem.Pump()` delivered, so Pump must run once a
@@ -368,6 +395,9 @@ frame before the graphs tick.
 * `UiPanelsTest`: the panel containers: overlay alignment, uniform and plain grids, wrap breaking and justify, size
   box clamps, scale box fits and scaled text, border drawing, the switcher's hit/draw/focus filtering, the
   palette presets and the file round trip of the new modes.
+* `UiAnimationTest`, `UiAnimationAbiTest`: easing, ANIM parse/write, sampling, the player (play, reverse, loop,
+  ping-pong, pause, seek, stop, the finish event, nested layouts), the render transform in the draw list, and the
+  same through the C ABI.
 * `UiLayoutAbiTest`: nested layouts through the C ABI (reader, overrides, slots, warnings, missing file, cycle, a
   layout larger than the first buffer).
 * `UiLayoutAssetTest`: the v2 records (byte-identical round trip, v1 unchanged, errors), instantiate with overrides,
@@ -392,5 +422,6 @@ frame before the graphs tick.
   `UiSystem.ImageResolver` (C#) / `aver_ui_widget_set_texture` (C). The editor preview shows a placeholder.
 * **Graphics settings** are stored and raised as events (`GraphicsChanged`); no engine system applies them yet.
 * **Gamepad rebinding** is not offered (the capture is keyboard and mouse); gamepad rows are greyed out.
-* **Animation/transitions** (fades, slides) are not built; `opacity` can be driven from code.
+* **Animation**: the runtime exists (see Animation). Not done: animating layout properties (size, margin), hit
+  testing that follows a render transform, curves with custom tangents (the eases are fixed).
 * The nodes are exec-only; pure read variants (`AN_GetUiValue` as a data node) are a possible follow-up.

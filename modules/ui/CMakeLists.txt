@@ -23,6 +23,9 @@ aver_add_module(Aver.UI
     src/UiTreeLayout.cpp
     src/UiTreeInput.cpp
     src/UiTreeDraw.cpp
+    src/UiTreeRuntime.cpp
+    src/UiAnimation.cpp
+    src/UiBindings.cpp
     src/UiLayoutAsset.cpp
     # Control rendering: style boxes, the .octheme resource, stretch maths.
     src/UiStyleBox.cpp

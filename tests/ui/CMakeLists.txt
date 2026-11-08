@@ -143,3 +143,15 @@ set_target_properties(UiWoffTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BIN
 add_executable(UiHostTextTest src/UiHostTextTest.cpp)
 target_link_libraries(UiHostTextTest PRIVATE Aver.UI.Abi Aver.UI Aver.Core Aver.Platform)
 set_target_properties(UiHostTextTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# UiAnimationTest — widget animation: easing, ANIM record parse/write, sampling, the UiTree player (play, reverse, loop,
+# ping-pong, stop, seek, the finish event) and the render transform in the draw list.
+add_executable(UiAnimationTest src/UiAnimationTest.cpp)
+target_link_libraries(UiAnimationTest PRIVATE Aver.UI Aver.Core Aver.Platform)
+set_target_properties(UiAnimationTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# UiAnimationAbiTest — widget animation through the widget C ABI (version, play / reverse / loop / pause / seek / stop, the
+# finished event, the render-transform properties). Links the DLL the C# side loads.
+add_executable(UiAnimationAbiTest src/UiAnimationAbiTest.cpp)
+target_link_libraries(UiAnimationAbiTest PRIVATE Aver.UI.Abi Aver.UI Aver.Core Aver.Platform)
+set_target_properties(UiAnimationAbiTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

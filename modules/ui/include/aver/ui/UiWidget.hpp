@@ -54,6 +54,12 @@ struct UiWidgetProps {
     f32 borderWidth = -1.0f;                 // design px; <0 = the style's
     u32 borderColor = 0;                     // 0 = the style's
 
+    // ---- render transform: drawn only (layout, hit testing and focus ignore it) ----------------
+    UiVec2 renderTranslate{0, 0};            // design px
+    f32    renderRotation = 0;               // degrees, clockwise on screen
+    UiVec2 renderScale{1, 1};
+    UiVec2 renderPivot{0.5f, 0.5f};          // fraction of the widget's rectangle
+
     // ---- content ------------------------------------------------------------------------------
     std::string text;
     UiTextAlign textAlign = UiTextAlign::Left;
@@ -106,6 +112,17 @@ UiWidgetProps uiDefaultProps(UiWidgetKind kind);
 const char* uiKindName(UiWidgetKind kind);
 bool uiKindFromName(std::string_view name, UiWidgetKind& out);
 
+// Values an animation drives over the authored ones (UiAnimation.hpp). Runtime only: never saved, never in a property.
+enum UiFxBit : u32 { kFxOpacity = 1, kFxBg = 2, kFxText = 4, kFxAccent = 8, kFxTint = 16, kFxTranslate = 32, kFxRotation = 64, kFxScale = 128 };
+struct UiWidgetFx {
+    u32 mask = 0;                // UiFxBit: which fields hold a value
+    f32 opacity = 1;
+    u32 bg = 0, text = 0, accent = 0, tint = 0xFFFFFFFFu;
+    UiVec2 translate{0, 0};
+    f32 rotation = 0;
+    UiVec2 scale{1, 1};
+};
+
 // Runtime widget owned by a UiTree.
 struct UiWidget : UiWidgetProps {
     UiWidgetId id = 0;
@@ -131,6 +148,7 @@ struct UiWidget : UiWidgetProps {
     bool listening = false;      // KeyBind waiting for a key
     i32  caret = 0;              // TextInput
     i32  hotItem = -1;           // List: row under the pointer
+    UiWidgetFx fx{};             // animated overrides
     f32  wrapHint = 0;           // wrapped Text with a fill weight: the content width its last arrangement gave it (second layout pass)
 };
 

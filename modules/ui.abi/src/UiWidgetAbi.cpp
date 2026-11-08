@@ -19,7 +19,10 @@ using namespace aver;
 using namespace aver::ui;
 
 static_assert(static_cast<int>(UiWidgetKind::Count) == 12, "AVER_UI_KIND_* mirrors UiWidgetKind");
-static_assert(static_cast<int>(UiEventType::Command) == AVER_UI_EVENT_COMMAND, "AVER_UI_EVENT_* mirrors UiEventType");
+static_assert(static_cast<int>(UiEventType::Command) == AVER_UI_EVENT_COMMAND &&
+                  static_cast<int>(UiEventType::Hovered) == AVER_UI_EVENT_HOVERED &&
+                  static_cast<int>(UiEventType::AnimationFinished) == AVER_UI_EVENT_ANIM_FINISHED,
+              "AVER_UI_EVENT_* mirrors UiEventType");
 static_assert(static_cast<int>(UiNav::PageDown) == AVER_UI_NAV_PAGE_DOWN, "AVER_UI_NAV_* mirrors UiNav");
 static_assert(static_cast<int>(UiEditKey::Enter) == AVER_UI_EDIT_ENTER, "AVER_UI_EDIT_* mirrors UiEditKey");
 
@@ -318,6 +321,49 @@ const char* aver_ui_layout_capture(uint32_t root) {
     if (!uiCaptureLayout(g_tree, root, doc)) return nullptr;
     return keep(uiWriteLayout(doc));
 }
+
+// ---- animation ---------------------------------------------------------------------------------------------
+
+int32_t aver_ui_widget_abi_version(void) { return AVER_UI_WIDGET_ABI_VERSION; }
+
+int32_t aver_ui_anim_count(uint32_t root) {
+    const UiLayoutRuntime* rt = g_tree.runtimeOf(root);
+    return rt ? static_cast<int32_t>(rt->anims.size()) : 0;
+}
+
+const char* aver_ui_anim_name(uint32_t root, int32_t index) {
+    const UiLayoutRuntime* rt = g_tree.runtimeOf(root);
+    if (!rt || index < 0 || static_cast<usize>(index) >= rt->anims.size()) return nullptr;
+    return keep(rt->anims[static_cast<usize>(index)].name);
+}
+
+float aver_ui_anim_length(uint32_t root, const char* name) {
+    const UiAnimation* a = name ? g_tree.findAnimation(root, name) : nullptr;
+    return a ? a->length() : -1.0f;
+}
+
+int32_t aver_ui_anim_play(uint32_t root, const char* name, float speed, int32_t loops, int32_t reverse, int32_t pingPong) {
+    if (!name) return 0;
+    UiAnimPlay p;
+    p.speed = speed > 0.0f ? speed : 1.0f;
+    p.loops = loops < 0 ? 1 : loops;
+    p.reverse = reverse != 0;
+    p.pingPong = pingPong != 0;
+    return g_tree.animPlay(root, name, p) ? 1 : 0;
+}
+
+int32_t aver_ui_anim_stop(uint32_t root, const char* name, int32_t release) {
+    return name && g_tree.animStop(root, name, release != 0) ? 1 : 0;
+}
+int32_t aver_ui_anim_seek(uint32_t root, const char* name, float time) {
+    return name && g_tree.animSeek(root, name, time) ? 1 : 0;
+}
+int32_t aver_ui_anim_reverse(uint32_t root, const char* name) { return name && g_tree.animReverse(root, name) ? 1 : 0; }
+int32_t aver_ui_anim_pause(uint32_t root, const char* name, int32_t paused) {
+    return name && g_tree.animPause(root, name, paused != 0) ? 1 : 0;
+}
+int32_t aver_ui_anim_is_playing(uint32_t root, const char* name) { return name && g_tree.animPlaying(root, name) ? 1 : 0; }
+float aver_ui_anim_time(uint32_t root, const char* name) { return name ? g_tree.animTime(root, name) : -1.0f; }
 
 // ---- events -------------------------------------------------------------------------------------------------
 

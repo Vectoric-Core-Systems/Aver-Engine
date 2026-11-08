@@ -185,6 +185,20 @@ UiPropDesc insetsProp(const char* key, const char* group, UiInsets P::*m, u32 ma
     return d;
 }
 
+UiPropDesc v2prop(const char* key, const char* group, UiVec2 P::*m) {
+    UiPropDesc d = head(key, group, UiPropType::Vec2, kAll);
+    d.get = [m](const P& w, std::vector<std::string>& o) {
+        o.push_back(uiFormatFloat((w.*m).x)); o.push_back(uiFormatFloat((w.*m).y));
+    };
+    d.set = [m](P& w, const std::vector<std::string>& t) {
+        f32 x = 0, y = 0;
+        if (t.size() != 2 || !uiParseFloat(t[0], x) || !uiParseFloat(t[1], y)) return false;
+        w.*m = {x, y};
+        return true;
+    };
+    return d;
+}
+
 std::vector<UiPropDesc> build() {
     std::vector<UiPropDesc> v;
     const char* kPlace = "Placement";
@@ -194,6 +208,7 @@ std::vector<UiPropDesc> build() {
     const char* kVal = "Value";
     const char* kNav = "Navigation";
     const char* kRoot = "Root";
+    const char* kXform = "Transform";
 
     // ---- placement ----
     {
@@ -267,6 +282,12 @@ std::vector<UiPropDesc> build() {
     v.push_back(cprop("accentColor", kLook, &P::accentColor));
     v.push_back(fprop("borderWidth", kLook, &P::borderWidth, -1, 50));
     v.push_back(cprop("borderColor", kLook, &P::borderColor));
+
+    // ---- render transform ----
+    v.push_back(v2prop("renderTranslate", kXform, &P::renderTranslate));
+    v.push_back(fprop("renderRotation", kXform, &P::renderRotation, -360, 360));
+    v.push_back(v2prop("renderScale", kXform, &P::renderScale));
+    v.push_back(v2prop("renderPivot", kXform, &P::renderPivot));
 
     // ---- content ----
     v.push_back(sprop("text", kCont, &P::text, kLabelled));

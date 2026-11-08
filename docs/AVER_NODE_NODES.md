@@ -815,6 +815,16 @@ Timers and events, the behaviour-tree blackboard, streamed audio, animation stat
 
 | `AN_SetUiFocus` | `exec` (in, exec), `widget` (in, int), `then` (out, exec), `success` (out, bool) | — | P | Moves keyboard/gamepad focus to a widget. |
 
+| `AN_PlayUiAnimation` | `exec` (in, exec), `layout` (in, int), `loops` (in, int, default 1), `speed` (in, float, default 1), `reverse` (in, bool), `then` (out, exec), `success` (out, bool) | `name=` | P | Plays a layout animation (its `ANIM` records) from the start, or from the end when `reverse`. `loops` 0 repeats until stopped. |
+
+| `AN_StopUiAnimation` | `exec` (in, exec), `layout` (in, int), `release` (in, bool, default true), `then` (out, exec), `success` (out, bool) | `name=` | P | Stops a layout animation; `release` brings back the widgets' authored look. |
+
+| `AN_SeekUiAnimation` | `exec` (in, exec), `layout` (in, int), `time` (in, float), `then` (out, exec), `success` (out, bool) | `name=` | P | Jumps to a time and applies it. |
+
+| `AN_ReverseUiAnimation` | `exec` (in, exec), `layout` (in, int), `then` (out, exec), `success` (out, bool) | `name=` | P | Flips a running layout animation, or plays one backwards from its end. |
+
+| `AN_UiAnimationFinished` | `exec` (in, exec), `layout` (in, int), `then` (out, exec), `finished` (out, bool) | `name=` | P | True when the animation finished in the events the last frame delivered. |
+
 | `AN_OpenUiSettings` | `exec` (in, exec), `then` (out, exec), `layout` (out, int), `success` (out, bool) | — | P | Opens the built-in settings screen (Graphics, Audio, Controls with key rebinding). |
 | `AN_SetUiFont` | `exec` (in, exec), `widget` (in, int), `size` (in, float), `bold` (in, bool), `italic` (in, bool), `then` (out, exec), `success` (out, bool) | `family=` (optional) | P | Sets a widget's font: size in design pixels (0 = the theme's), bold, italic, and the font family from the project's font set when `family=` is given (empty keeps the current one). See GAME_UI_TEXT.md. |
 | `AN_SetUiTextStyle` | `exec` (in, exec), `widget` (in, int), `align` (in, int), `dir` (in, int), `wrap` (in, bool), `ellipsis` (in, bool), `maxLines` (in, int), `lineSpacing` (in, float, default 1), `letterSpacing` (in, float), `rich` (in, bool), `then` (out, exec), `success` (out, bool) | — | P | Sets all nine text style properties at once. `align`: 0 left, 1 centre, 2 right, 3 start, 4 end (start/end follow the text direction); `dir`: 0 auto, 1 LTR, 2 RTL; `maxLines` 0 = unlimited. |
