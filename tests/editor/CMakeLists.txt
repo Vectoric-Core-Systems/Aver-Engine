@@ -971,3 +971,9 @@ add_executable(ViewportSnapTest src/ViewportSnapTest.cpp)
 target_include_directories(ViewportSnapTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
 target_link_libraries(ViewportSnapTest PRIVATE Aver.Core)
 set_target_properties(ViewportSnapTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# ThumbnailDiskCacheTest -- keys and LRU eviction for the on-disk thumbnail cache (sandbox/src/ThumbnailDiskCache.hpp).
+add_executable(ThumbnailDiskCacheTest src/ThumbnailDiskCacheTest.cpp)
+target_include_directories(ThumbnailDiskCacheTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(ThumbnailDiskCacheTest PRIVATE Aver.Core)
+set_target_properties(ThumbnailDiskCacheTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

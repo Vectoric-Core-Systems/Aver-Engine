@@ -23,6 +23,7 @@ void SandboxApp::loadEditorPreferences() {
     using namespace editor;
     cbGallery_          = prefBool ("contentBrowser.gallery",        cbGallery_);
     cbTileSize_         = prefFloat("contentBrowser.tileSize",       cbTileSize_);
+    thumbDiskCapMB_     = prefInt  ("contentBrowser.thumbDiskCapMB", thumbDiskCapMB_);
     cbDoubleClickEnter_ = prefBool ("contentBrowser.dblClickEnter",  cbDoubleClickEnter_);
     drawerFrac_         = prefFloat("drawers.heightFraction",        drawerFrac_);
     drawerRate_         = prefFloat("drawers.slideRate",             drawerRate_);
@@ -259,6 +260,8 @@ void SandboxApp::buildEditorPrefs() {
     if (::aver::editor::sectionHeader("Content Browser", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Checkbox("Open in gallery (tiles) view", &cbGallery_);
         ImGui::SliderFloat("Tile size", &cbTileSize_, 56.0f, 168.0f, "%.0f dp");
+        ImGui::DragInt("Thumbnail cache (MB)", &thumbDiskCapMB_, 8.0f, 0, 8192, "%d MB");
+        ImGui::TextDisabled("Texture thumbnails kept under the project's Saved/ThumbnailCache; 0 turns it off.");
         ImGui::Checkbox("Double-click a folder to enter it", &cbDoubleClickEnter_);
         ImGui::TextDisabled("Single-click always selects; the tree navigates either way.");
         const std::vector<editor::IdeInfo>& ides = editor::detectedIdes();
@@ -2384,6 +2387,7 @@ void SandboxApp::saveEditorPreferences() {
     using namespace editor;
     setPrefBool ("contentBrowser.gallery",       cbGallery_);
     setPrefFloat("contentBrowser.tileSize",      cbTileSize_);
+    setPrefInt  ("contentBrowser.thumbDiskCapMB", thumbDiskCapMB_);
     setPrefBool ("contentBrowser.dblClickEnter", cbDoubleClickEnter_);
     setPrefFloat("drawers.heightFraction",       drawerFrac_);
     setPrefFloat("drawers.slideRate",            drawerRate_);

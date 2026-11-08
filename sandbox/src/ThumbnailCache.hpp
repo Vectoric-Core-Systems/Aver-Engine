@@ -27,6 +27,7 @@
 // the same entries_ map, the same kMaxThumbnails budget and LRU eviction, and the same release on
 // shutdown/project-switch/device-loss, so a browser mixing meshes and textures is one budget, not
 // two caches that don't know about each other.
+#include "ThumbnailDiskCache.hpp"
 #include "aver/rhi/RHI.hpp"
 #include "aver/rhi/RHIResources.hpp"
 #include "aver/render/preview/ActorPreview.hpp"
@@ -99,6 +100,11 @@ public:
 
     // The ImGui texture id for a finished texture thumbnail, or 0 -- same contract as textureId().
     u64 textureIdForPath(const std::string& absPath) const;
+
+    // Where texture thumbnails are kept between sessions (a folder under the project's Saved/) and the
+    // folder's size cap in megabytes; an empty dir or 0 turns it off. Cheap to call every frame.
+    // TEXTURES ONLY: a mesh thumbnail is a GPU render target and would need a texture readback to persist.
+    void setDiskCache(const std::string& dir, u64 capMB);
 
     // Drives both queues: picks at most ONE pending mesh request and points the preview at it, and
     // separately decodes at most ONE pending texture request. Called once per frame by the host,
@@ -187,7 +193,9 @@ private:
     // skip the other -- a frame with a texture to decode but no mesh to render must still decode it,
     // and the old single-body shape returned out of the whole function the moment pending_ was empty.
     void updateMeshPending();
-    void updateTexturePending();
+    // Returns true when it finished a texture from the disk cache (cheap enough to do a few per frame).
+    bool updateTexturePending();
+    ThumbnailDiskCache disk_;
 };
 
 } // namespace aver::editor

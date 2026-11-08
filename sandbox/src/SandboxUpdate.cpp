@@ -994,7 +994,11 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     if (hairScene_) hairScene_->update(scene::World::instance(), *e.device());
 #endif
     // Once per frame, before render features run (ThumbnailCache.hpp): update() points preview at next pending request.
-    if (thumbnails_.ready()) thumbnails_.update();
+    if (thumbnails_.ready()) {
+        thumbnails_.setDiskCache(project_.valid() ? (std::filesystem::path(project_.dir) / "Saved" / "ThumbnailCache").string() : std::string(),
+                                 static_cast<u64>(std::max(0, thumbDiskCapMB_)));
+        thumbnails_.update();
+    }
     // --drone: switches drone on N frames in (mirroring --chunk-stream so a capture can prove it without clicking Window > Drone).
     if (droneAutoFrames_ > 0 && --droneAutoFrames_ == 0) setDroneEnabled(true);
     // --undo-test: fires runUndoTest() N frames in. Lives inside `#if AVER_WITH_IMGUI` block (same as commands it proves).

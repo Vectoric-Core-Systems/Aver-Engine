@@ -4627,6 +4627,7 @@ private:
     char                importPath_[512] = {};
     bool                cbGallery_ = true;        // Tiles vs list.
     f32                 cbTileSize_ = 88.0f;      // Gallery tile edge (dp).
+    int                 thumbDiskCapMB_ = 256;    // Size cap of <project>/Saved/ThumbnailCache (0 = no disk cache).
     std::string         cbSelectedFile_;          // Highlighted entry in file view.
     char                cbFilter_[128] = {};      // Search box (filters folder by name).
     // Search box scope: also look under open folder (cbGatherDeepMatches).

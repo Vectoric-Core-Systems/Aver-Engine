@@ -15,6 +15,7 @@
 #include "aver/core/Hash.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/platform/Image.hpp"
+#include "stb_image_write.h"
 
 #include <algorithm>
 #include <filesystem>
@@ -410,7 +411,13 @@ void ThumbnailCache::update() {
     // a frame with nothing in pending_ should skip texPending_, or vice versa -- see the header's
     // own comment on why this split exists.
     updateMeshPending();
-    updateTexturePending();
+    // A texture served from the disk cache costs a small PNG decode, so a few go per frame; a miss
+    // (full decode + downscale + PNG write) stays one per frame.
+    for (int i = 0; i < 4 && updateTexturePending(); ++i) {}
+}
+
+void ThumbnailCache::setDiskCache(const std::string& dir, u64 capMB) {
+    disk_.configure(dir, capMB * 1024ull * 1024ull);
 }
 
 void ThumbnailCache::updateMeshPending() {
@@ -515,8 +522,8 @@ void ThumbnailCache::updateMeshPending() {
 // Decodes and uploads at most ONE texture per call, the same one-per-frame pace updateMeshPending()
 // keeps -- a 4K source is a real decode, not a copy of pixels someone else already rendered, and
 // this is what keeps a folder full of them from stalling the frame it was opened on.
-void ThumbnailCache::updateTexturePending() {
-    if (texPending_.empty()) return;
+bool ThumbnailCache::updateTexturePending() {
+    if (texPending_.empty()) return false;
 
     const auto front = texPending_.front();
     const u64 assetId = front.first;
@@ -532,7 +539,7 @@ void ThumbnailCache::updateTexturePending() {
                      "backlog; the rest is dropped as it is popped", kMaxThumbnails);
             cappedWarned_ = true;
         }
-        return;
+        return false;
     }
 
     Entry& e = entries_[assetId];
@@ -541,9 +548,28 @@ void ThumbnailCache::updateTexturePending() {
     e.lastSeen = frame_;
     ++e.attempts;
 
+    // The disk cache is keyed by path + the file's mtime and size, so an edited texture misses.
+    std::string diskKey;
+    std::vector<u8> pixels;
+    bool fromDisk = false;
+    if (disk_.enabled()) {
+        std::error_code sec;
+        const u64 sz = static_cast<u64>(std::filesystem::file_size(path, sec));
+        if (!sec) {
+            diskKey = thumbnailDiskKey(path, fileMtime(path), sz);
+            std::string cached;
+            ImageData png;
+            if (disk_.lookup(diskKey, cached) && decodeImage(cached, png) && png.valid() &&
+                png.width == kThumbnailPx && png.height == kThumbnailPx) {
+                pixels = std::move(png.pixels);
+                fromDisk = true;
+            }
+        }
+    }
+
     ImageData img;
     std::string why;
-    if (!decodeImage(path, img, &why) || !img.valid()) {
+    if (!fromDisk && (!decodeImage(path, img, &why) || !img.valid())) {
         AVER_WARN("[ThumbnailCache] '{}' not decoded ({}); it draws the typed glyph", path, why);
         if (e.attempts == kMaxThumbnailAttempts) {
             AVER_WARN("[ThumbnailCache] '{}' has not decoded in {} attempts; it draws the typed "
@@ -551,10 +577,22 @@ void ThumbnailCache::updateTexturePending() {
         }
         // NOT ERASED: an entry with no tex yet and attempts < the cap is exactly what
         // requestTexture() knows how to retry, the same shape a stalled mesh copy leaves behind.
-        return;
+        return false;
     }
 
-    const std::vector<u8> pixels = letterboxThumbnail(img);
+    if (!fromDisk) {
+        pixels = letterboxThumbnail(img);
+        if (!diskKey.empty()) {
+            std::error_code dec;
+            std::filesystem::create_directories(std::filesystem::path(disk_.pathFor(diskKey)).parent_path(), dec);
+            const std::string out = disk_.pathFor(diskKey);
+            if (stbi_write_png(out.c_str(), static_cast<int>(kThumbnailPx), static_cast<int>(kThumbnailPx), 4,
+                               pixels.data(), static_cast<int>(kThumbnailPx) * 4)) {
+                std::error_code fec;
+                disk_.recordWritten(diskKey, static_cast<u64>(std::filesystem::file_size(out, fec)));
+            }
+        }
+    }
 
     // REPLACED, NOT REUSED: unlike the mesh path's copyTexture, there is no in-place "write new
     // pixels into an existing texture" on this RHI (IResourceFactory only creates-with-initialData
@@ -579,7 +617,7 @@ void ThumbnailCache::updateTexturePending() {
     if (!e.tex) {
         AVER_ERROR("[ThumbnailCache] '{}' could not be uploaded", path);
         entries_.erase(assetId);
-        return;
+        return false;
     }
 
     // READY THE SAME FRAME IT WAS DECODED: unlike the mesh path there is no render feature to wait
@@ -588,6 +626,7 @@ void ThumbnailCache::updateTexturePending() {
     e.uiId = dev_->uiTextureId(e.tex);
     e.ready = e.uiId != 0;
     e.srcMtime = fileMtime(path);
+    return fromDisk;
 }
 
 rhi::IRenderFeature* ThumbnailCache::copyFeature() { return pass_; }
