@@ -382,6 +382,45 @@ void ParticleEditor::drawCurveEditor(bool isColor) {
     ImGui::PopID();
 }
 
+// ================================================================================== live parameters ===
+
+// The system's user parameters as sliders that drive the PREVIEW only: no undo entry, no dirty mark, nothing saved. "Keep" writes
+// the live value into the asset through the usual undo; "Reset" goes back to the asset's value.
+void ParticleEditor::drawLiveParams() {
+    using namespace particles;
+    if (def_.params.empty()) {
+        ImGui::TextDisabled("No user parameters. Add one under User parameters, bind a module parameter to it with @,\nthen drive it live here.");
+        return;
+    }
+    const u64 frame = frameNow();
+    for (usize i = 0; i < def_.params.size(); ++i) {
+        const UserParam& p = def_.params[i];
+        const f32* lv = liveValue(static_cast<int>(i));
+        f32 v[4] = {p.v[0], p.v[1], p.v[2], p.v[3]};
+        if (lv) for (int k = 0; k < 4; ++k) v[k] = lv[k];
+        ImGui::PushID(static_cast<int>(i));
+        bool ch = false;
+        ImGui::SetNextItemWidth(std::max(120.0f, ImGui::GetContentRegionAvail().x - 190.0f * (ImGui::GetFontSize() / 16.0f)));
+        if (p.kind == 0) ch = ImGui::DragFloat(p.name.c_str(), &v[0], std::max(0.01f, std::fabs(v[0]) * 0.01f), -1000000.0f, 1000000.0f, "%.3f");
+        else if (p.kind == 1) ch = ImGui::DragFloat3(p.name.c_str(), v, 0.05f);
+        else ch = ImGui::ColorEdit4(p.name.c_str(), v);
+        if (ch) setLiveParam(static_cast<int>(i), v);
+        (void)frame;
+        if (lv) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.95f, 0.6f, 0.2f, 1.0f), "live");
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Keep")) commitLiveParam(static_cast<int>(i));
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Write this value into the asset (one undo step)");
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Reset")) clearLiveParam(static_cast<int>(i));
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Back to the asset's value");
+        }
+        ImGui::PopID();
+    }
+    if (liveCount() > 1 && ImGui::SmallButton("Reset all")) resetLiveParams();
+}
+
 // ================================================================================== the sections ==
 
 void ParticleEditor::drawParams() {
@@ -395,6 +434,9 @@ void ParticleEditor::drawParams() {
 
     // ---- statistics ----
     if (ImGui::CollapsingHeader("Statistics", ImGuiTreeNodeFlags_DefaultOpen)) drawStats();
+
+    // ---- live parameters ----
+    if (ImGui::CollapsingHeader("Live parameters (preview only)", ImGuiTreeNodeFlags_DefaultOpen)) drawLiveParams();
 
     // ---- emitters ----
     ImGui::SeparatorText("Emitters");

@@ -375,6 +375,53 @@ int main() {
         }
     }
 
+    // ---- 7. live user parameters -----------------------------------------------------------------------------
+    AVER_INFO("live parameters");
+    {
+        ParticleSystemDef d = smallSystem();
+        ParticleEffect& e = d.emitters[0];
+        e.spreadDeg = 0.0f;
+        e.speedMin = e.speedMax = 10.0f;
+        const int wind = px::addUserParam(d, "Wind", 0);
+        { const f32 zero[4] = {0, 0, 0, 0}; px::setUserParamValue(d, wind, zero); }
+        const int mod = px::addModule(d.emitters[0], particles::ModuleKind::UpdateForce);
+        px::bindModuleParam(d, 0, mod, 0, wind, 0);
+        const std::string path = writeFixture(d, "pxTrackC_live.ocparticle");
+        editor::ParticleEditor ed(path);
+        const auto maxX = [&]() {
+            f32 m = 0;
+            for (const particles::Particle& q : ed.previewParticles()) m = std::max(m, std::fabs(q.position.x));
+            return m;
+        };
+        ed.seekPreview(1.0f);
+        check(maxX() < 1e-3f, "at the asset's value of 0 there is no wind");
+        check(ed.liveValue(wind) == nullptr && ed.liveCount() == 0, "and no live override");
+        const f32 live[4] = {2000.0f, 0, 0, 0};
+        ed.setLiveParam(wind, live);
+        check(ed.liveValue(wind) != nullptr && ed.liveValue(wind)[0] == 2000.0f && ed.liveCount() == 1, "a live value is held");
+        ed.seekPreview(1.0f);
+        check(maxX() > 100.0f, "the preview follows the live value: " + std::to_string(maxX()));
+        check(!ed.dirty() && !ed.canUndo(), "a live value is neither a dirty mark nor an undo entry");
+        check(ed.system().params[0].v[0] == 0.0f, "and the asset still holds 0");
+        ed.clearLiveParam(wind);
+        ed.seekPreview(1.0f);
+        check(maxX() < 1e-3f, "clearing it returns to the asset's value");
+        ed.setLiveParam(wind, live);
+        check(ed.commitLiveParam(wind), "Keep commits the live value");
+        check(ed.system().params[0].v[0] == 2000.0f && ed.dirty() && ed.canUndo(), "into the asset, dirty, with an undo entry");
+        check(ed.liveValue(wind) == nullptr, "and the override is gone");
+        ed.undo();
+        check(ed.system().params[0].v[0] == 0.0f, "undo takes it back");
+        ed.setLiveParam(wind, live);
+        ed.editSystem([&](ParticleSystemDef& s) { return px::renameUserParam(s, wind, "Gust"); });
+        check(ed.liveValue(wind) == nullptr, "renaming the parameter drops the stale override");
+        ed.setLiveParam(wind, live);
+        ed.resetLiveParams();
+        check(ed.liveCount() == 0, "Reset all clears every override");
+        ed.setLiveParam(7, live);
+        check(ed.liveCount() == 0, "an unknown parameter index is ignored");
+    }
+
     AVER_INFO("{} failure(s)", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

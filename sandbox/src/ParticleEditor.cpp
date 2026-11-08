@@ -373,7 +373,10 @@ void ParticleEditor::tickPreview(f32 dt) {
         const particles::ParticleEffect& fx = def_.emitters[i];
         particles::EmitterSim& sim = sims_[i];
         const bool silent = (solo_ >= 0 && static_cast<int>(i) != solo_) || muted_[i] != 0;
-        for (usize s = 0; s < def_.params.size() && s < particles::kMaxUserParams; ++s) sim.setUser(static_cast<u32>(s), def_.params[s].v);
+        for (usize s = 0; s < def_.params.size() && s < particles::kMaxUserParams; ++s) {
+            const f32* lv = liveValue(static_cast<int>(s));
+            sim.setUser(static_cast<u32>(s), lv ? lv : def_.params[s].v);
+        }
         sim.setOrigin(emitterPos_);
 
         u32 toSpawn = 0;
@@ -456,6 +459,53 @@ u32 ParticleEditor::previewTotal() const {
     u32 n = 0;
     for (const particles::EmitterSim& s : sims_) n += s.aliveCount();
     return n;
+}
+
+void ParticleEditor::setLiveParam(int param, const f32 v[4]) {
+    if (param < 0 || static_cast<usize>(param) >= def_.params.size()) return;
+    const particles::UserParam& p = def_.params[static_cast<usize>(param)];
+    for (LiveParam& l : live_)
+        if (l.name == p.name) {
+            l.kind = p.kind;
+            for (int k = 0; k < 4; ++k) l.v[k] = v[k];
+            return;
+        }
+    LiveParam l;
+    l.name = p.name;
+    l.kind = p.kind;
+    for (int k = 0; k < 4; ++k) l.v[k] = v[k];
+    live_.push_back(std::move(l));
+}
+
+const f32* ParticleEditor::liveValue(int param) const {
+    if (param < 0 || static_cast<usize>(param) >= def_.params.size()) return nullptr;
+    const particles::UserParam& p = def_.params[static_cast<usize>(param)];
+    for (const LiveParam& l : live_)
+        if (l.name == p.name && l.kind == p.kind) return l.v;
+    return nullptr;
+}
+
+void ParticleEditor::clearLiveParam(int param) {
+    if (param < 0 || static_cast<usize>(param) >= def_.params.size()) return;
+    const std::string& name = def_.params[static_cast<usize>(param)].name;
+    live_.erase(std::remove_if(live_.begin(), live_.end(), [&](const LiveParam& l) { return l.name == name; }), live_.end());
+}
+
+void ParticleEditor::resetLiveParams() { live_.clear(); }
+
+int ParticleEditor::liveCount() const {
+    int n = 0;
+    for (usize i = 0; i < def_.params.size(); ++i) n += liveValue(static_cast<int>(i)) ? 1 : 0;
+    return n;
+}
+
+bool ParticleEditor::commitLiveParam(int param) {
+    const f32* lv = liveValue(param);
+    if (!lv) return false;
+    f32 v[4] = {lv[0], lv[1], lv[2], lv[3]};
+    const bool changed = editSystem([&](particles::ParticleSystemDef& d) { return pxmodel::setUserParamValue(d, param, v); });
+    clearLiveParam(param);
+    return changed;
 }
 
 void ParticleEditor::setMotion(pxmodel::PreviewMotion kind, f32 radiusCm, f32 speedCmPerSec) {

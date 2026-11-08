@@ -134,6 +134,16 @@ public:
     bool muted(int emitter) const;
     void setSolo(int emitter);   // -1 clears
     int solo() const { return solo_; }
+    // Live user parameters (preview only): override a parameter's value for the preview without an undo entry or a dirty mark.
+    // They are matched by name and kind, so a rename or removal drops the override; commitLiveParam writes one into the asset
+    // through the usual undo and clears it.
+    void setLiveParam(int param, const f32 v[4]);
+    const f32* liveValue(int param) const;   // nullptr when the parameter is not overridden
+    void clearLiveParam(int param);
+    void resetLiveParams();
+    int liveCount() const;
+    bool commitLiveParam(int param);
+
     // A test emitter that moves (preview only, not saved): a circle or a back-and-forth line, so trails and
     // spawn.inheritvelocity have something to follow. Changing it needs no restart.
     void setMotion(pxmodel::PreviewMotion kind, f32 radiusCm, f32 speedCmPerSec);
@@ -201,6 +211,8 @@ private:
     std::vector<u8> muted_;
     int solo_ = -1;
     int isoEmitter_ = -1, isoModule_ = -1;
+    struct LiveParam { std::string name; u8 kind = 0; f32 v[4] = {0, 0, 0, 0}; };
+    std::vector<LiveParam> live_;
     pxmodel::PreviewMotion motion_ = pxmodel::PreviewMotion::None;
     f32 motionRadius_ = 150.0f, motionSpeed_ = 200.0f;
     Vec3 emitterPos_{0, 0, 0};
@@ -246,6 +258,7 @@ private:
     friend struct ParticleEditorUiAccess;
     void drawParams();
     void drawStats();
+    void drawLiveParams();
     void drawCurveEditor(bool isColor);
     void drawPreviewToolbar();
     void drawPreviewOverlay(const f32 viewProj[16], const f32 rectMin[2], const f32 rectSize[2]);
