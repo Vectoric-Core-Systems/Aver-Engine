@@ -1,5 +1,6 @@
 // The particle editor's track C logic (docs/plans/EDITOR_UE_PARITY.md): stats, playback and seek, curve and gradient key edits,
 // module isolate, the moving-emitter path, templates, live parameters and scalability. Headless: the tab is built without ImGui.
+#include "ParticleCurveModel.hpp"
 #include "ParticleEditor.hpp"
 #include "ParticleStackModel.hpp"
 
@@ -121,6 +122,74 @@ int main() {
         d.setLoop(false);
         d.seekPreview(-5.0f);
         check(d.previewTime() == 0.0f, "a negative seek is time 0");
+    }
+
+    // ---- 3. curve graph and gradient ----------------------------------------------------------------------
+    AVER_INFO("curves");
+    {
+        using namespace px;
+        CurveView view;
+        const ScreenRect rc{100, 50, 500, 250};
+        check(std::fabs(xToView(view, rc, viewToX(view, rc, 0.3f)) - 0.3f) < 1e-5f, "graph x round-trips through the screen");
+        check(std::fabs(yToView(view, rc, viewToY(view, rc, 0.7f)) - 0.7f) < 1e-5f, "graph y round-trips through the screen");
+        check(viewToY(view, rc, view.v1) == rc.y0 && viewToY(view, rc, view.v0) == rc.y1, "value grows upward on screen");
+
+        particles::Curve4 c;
+        const f32 a[4] = {1.0f, 0, 0, 0}, b[4] = {0.0f, 0, 0, 0};
+        c.n = 2; c.t[0] = 0.0f; c.t[1] = 1.0f;
+        for (int k = 0; k < 4; ++k) { c.v[0][k] = a[k]; c.v[1][k] = b[k]; }
+        check(insertKey(c, 0, 0.5f, 3.0f, false) && c.n == 3, "double-click adds a key");
+        check(std::fabs(c.t[1] - 0.5f) < 1e-6f && c.v[1][0] == 3.0f, "at the clicked time and value, in order");
+        check(!insertKey(c, 0, 0.5f, 1.0f, false), "but not on top of an existing key");
+        check(insertKey(c, 0, 0.25f, 0.5f, false) && c.n == 4, "a fourth key is allowed");
+        check(!insertKey(c, 0, 0.9f, 0.5f, false), "a fifth is refused (the format holds four)");
+        const int hit = pickKey(c, 0, view, rc, viewToX(view, rc, 0.5f) + 3.0f, viewToY(view, rc, 3.0f) - 2.0f, 8.0f);
+        check(hit >= 0 && std::fabs(c.t[hit] - 0.5f) < 1e-6f, "picking finds the key under the mouse");
+        check(pickKey(c, 0, view, rc, rc.x0, rc.y0, 8.0f) == -1, "and nothing in empty space");
+        check(moveKey(c, hit, 0, 0.9f, -4.0f, false), "dragging a key moves it");
+        check(c.t[hit] < 1.0f && c.t[hit] > c.t[hit - 1] && c.t[hit] < c.t[hit + 1], "its time is held between the neighbours");
+        check(c.v[hit][0] == 0.0f, "a size cannot go negative");
+        particles::ParticleSystemDef sys = smallSystem();
+        sys.emitters[0].sizeCurve = c;
+        bool ok = false;
+        const std::string text = fmt::writeOcparticleSystem(sys);
+        particles::ParticleSystemDef back;
+        std::string err;
+        ok = fmt::parseOcparticleSystem(text, back, nullptr, &err);
+        check(ok && back.emitters[0].sizeCurve.n == 4, "the edited curve survives a write and parse: " + err);
+
+        // colour channels and the gradient bar
+        particles::Curve4 g;
+        g.n = 2; g.t[0] = 0.0f; g.t[1] = 1.0f;
+        const f32 red[4] = {1, 0, 0, 1}, blue[4] = {0, 0, 1, 0};
+        for (int k = 0; k < 4; ++k) { g.v[0][k] = red[k]; g.v[1][k] = blue[k]; }
+        check(gradientInsertStop(g, 0.5f) && g.n == 3, "a click on the bar adds a stop");
+        check(std::fabs(g.v[1][0] - 0.5f) < 1e-5f && std::fabs(g.v[1][2] - 0.5f) < 1e-5f && std::fabs(g.v[1][3] - 0.5f) < 1e-5f,
+              "carrying the colour the gradient had there");
+        check(gradientPick(g, 100.0f, 500.0f, 300.0f + 4.0f, 8.0f) == 1, "the stop under the mouse is found");
+        check(gradientPick(g, 100.0f, 500.0f, 250.0f, 8.0f) == -1, "and none in between");
+        check(gradientMoveStop(g, 1, gradientTimeAt(100.0f, 500.0f, 380.0f)), "dragging a stop slides it");
+        check(std::fabs(g.t[1] - 0.7f) < 1e-5f && std::fabs(g.v[1][0] - 0.5f) < 1e-5f, "keeping its colour");
+        check(gradientMoveStop(g, 1, 5.0f) && g.t[1] < 1.0f, "and it stays inside the bar, before the next stop");
+        const f32 green[4] = {0, 2.0f, 0, 3.0f};
+        check(gradientSetStopColor(g, 1, green) && g.v[1][1] == 2.0f && g.v[1][3] == 1.0f, "recolouring keeps HDR rgb and clamps alpha");
+        check(removeCurvePoint(g, 1) && g.n == 2, "removing a stop leaves two");
+        check(removeCurvePoint(g, 0) && g.n == 0, "removing below two clears the curve back to the start/end pair");
+        CurveView z;
+        const f32 span0 = z.t1 - z.t0;
+        zoomView(z, 0.5f, 0.5f, 0.5f, 1.0f);
+        check(std::fabs((z.t1 - z.t0) - span0 * 0.5f) < 1e-5f && std::fabs((z.v1 - z.v0) - 1.2f) < 1e-5f, "zoom scales only the asked axes");
+        const f32 anchorBefore = 0.5f;
+        zoomView(z, anchorBefore, 0.5f, 0.5f, 1.0f);
+        check(z.t0 < anchorBefore && z.t1 > anchorBefore, "about a point inside the view");
+        for (int i = 0; i < 100; ++i) zoomView(z, 0.5f, 0.5f, 0.05f, 0.05f);
+        check(z.t1 - z.t0 >= 1e-3f, "zooming in has a floor");
+        CurveView pv;
+        panView(pv, rc, 40.0f, 0.0f);
+        check(pv.t0 < -0.05f, "panning right shows earlier times");
+        particles::Curve4 tall;
+        tall.n = 2; tall.t[1] = 1.0f; tall.v[0][0] = 0.0f; tall.v[1][0] = 50.0f;
+        check(frameCurve(tall, 1u).v1 > 50.0f, "framing fits the tallest key");
     }
 
     AVER_INFO("{} failure(s)", g_failures);

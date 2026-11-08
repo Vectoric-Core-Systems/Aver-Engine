@@ -8,6 +8,7 @@
 #include "ActorEditor.hpp"
 #include "EditorIcons.hpp"
 #include "EditorKeybinds.hpp"
+#include "ParticleCurveModel.hpp"
 #include "ParticleStackModel.hpp"
 
 #include "aver/core/Hash.hpp"
@@ -142,6 +143,235 @@ void ParticleEditor::drawTransport() {
     }
     ImGui::SameLine();
     ImGui::Text("%.2f s  f%u", previewTime_, previewFrame());
+}
+
+// ================================================================================== curves ===
+
+namespace {
+f32 niceStep(f32 span) {
+    const f32 raw = span / 5.0f;
+    const f32 mag = std::pow(10.0f, std::floor(std::log10(std::max(raw, 1e-6f))));
+    const f32 n = raw / mag;
+    return (n < 1.5f ? 1.0f : (n < 3.5f ? 2.0f : (n < 7.5f ? 5.0f : 10.0f))) * mag;
+}
+ImU32 channelColor(int ch, bool active) {
+    static const ImU32 kC[4] = {IM_COL32(235, 90, 80, 255), IM_COL32(110, 210, 110, 255), IM_COL32(100, 150, 245, 255), IM_COL32(200, 200, 200, 255)};
+    ImU32 c = kC[ch & 3];
+    if (!active) c = (c & 0x00FFFFFFu) | (110u << 24);
+    return c;
+}
+ImU32 packColor(const f32 c[4]) {
+    return IM_COL32(static_cast<int>(std::clamp(c[0], 0.0f, 1.0f) * 255), static_cast<int>(std::clamp(c[1], 0.0f, 1.0f) * 255),
+                    static_cast<int>(std::clamp(c[2], 0.0f, 1.0f) * 255), static_cast<int>(std::clamp(c[3], 0.0f, 1.0f) * 255));
+}
+} // namespace
+
+// The graph (value over particle life; wheel zooms, middle or right drag pans, drag a key, double-click to add, right-click a key
+// or press Delete to remove) and, for the colour curve, a gradient bar with draggable stops. Every change is an editEffect, so a
+// drag is one undo step.
+void ParticleEditor::drawCurveEditor(bool isColor) {
+    using namespace pxmodel;
+    const Curve4 curve = isColor ? effect().colorCurve : effect().sizeCurve;
+    if (curve.n < 2) return;
+    CurveView& view = isColor ? curveViewColor_ : curveViewSize_;
+    int& sel = curveSelKey_[isColor ? 1 : 0];
+    int& drag = curveDragKey_[isColor ? 1 : 0];
+    const u64 frame = frameNow();
+    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    ImGui::PushID(isColor ? "colorcurve" : "sizecurve");
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const auto edit = [&](const std::function<bool(Curve4&)>& fn, u32 key) {
+        editEffect([&](particles::ParticleEffect& x) { return fn(isColor ? x.colorCurve : x.sizeCurve); }, key, frame);
+    };
+
+    // ---- gradient bar (colour curve only) ----
+    if (isColor) {
+        const f32 w = std::max(120.0f, ImGui::GetContentRegionAvail().x - 8.0f);
+        const f32 barH = 22.0f * dpi, stopH = 14.0f * dpi;
+        ImGui::InvisibleButton("##gradient", ImVec2(w, barH + stopH), ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+        const ImVec2 a = ImGui::GetItemRectMin();
+        const f32 x0 = a.x + 6.0f, x1 = a.x + w - 6.0f;
+        // a checkerboard behind, then the colour in short segments (straight alpha over the board)
+        const f32 sq = barH * 0.5f;
+        for (f32 x = x0; x < x1; x += sq)
+            for (int row = 0; row < 2; ++row) {
+                const bool dark = (static_cast<int>((x - x0) / sq) + row) % 2 == 0;
+                dl->AddRectFilled(ImVec2(x, a.y + static_cast<f32>(row) * sq), ImVec2(std::min(x + sq, x1), a.y + static_cast<f32>(row + 1) * sq),
+                                  dark ? IM_COL32(70, 70, 70, 255) : IM_COL32(110, 110, 110, 255));
+            }
+        constexpr int kSeg = 48;
+        for (int i = 0; i < kSeg; ++i) {
+            f32 c0[4], c1[4];
+            particles::evalCurve(curve, static_cast<f32>(i) / kSeg, c0);
+            particles::evalCurve(curve, static_cast<f32>(i + 1) / kSeg, c1);
+            const f32 xa = x0 + (x1 - x0) * static_cast<f32>(i) / kSeg, xb = x0 + (x1 - x0) * static_cast<f32>(i + 1) / kSeg;
+            dl->AddRectFilledMultiColor(ImVec2(xa, a.y), ImVec2(xb, a.y + barH), packColor(c0), packColor(c1), packColor(c1), packColor(c0));
+        }
+        dl->AddRect(ImVec2(x0, a.y), ImVec2(x1, a.y + barH), IM_COL32(20, 20, 20, 255));
+        for (u32 i = 0; i < curve.n; ++i) {
+            const f32 sx = x0 + curve.t[i] * (x1 - x0);
+            const bool isSel = sel == static_cast<int>(i);
+            const f32 opaque[4] = {curve.v[i][0], curve.v[i][1], curve.v[i][2], 1.0f};
+            const ImVec2 tip(sx, a.y + barH), l(sx - 6.0f * dpi, a.y + barH + stopH), r(sx + 6.0f * dpi, a.y + barH + stopH);
+            dl->AddTriangleFilled(tip, l, r, packColor(opaque));
+            dl->AddTriangle(tip, l, r, isSel ? IM_COL32(255, 160, 40, 255) : IM_COL32(230, 230, 230, 255), isSel ? 2.0f : 1.0f);
+        }
+        const ImVec2 m = ImGui::GetIO().MousePos;
+        if (ImGui::IsItemActivated() && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            drag = gradientPick(curve, x0, x1, m.x, 8.0f * dpi);
+            if (drag >= 0) sel = drag;
+        }
+        if (drag >= 0 && ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 1.0f)) {
+            const f32 t = gradientTimeAt(x0, x1, m.x);
+            const int d = drag;
+            edit([&](Curve4& c) { return gradientMoveStop(c, d, t); }, idOf("gradmove"));
+        }
+        if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            const int hit = gradientPick(curve, x0, x1, m.x, 8.0f * dpi);
+            if (hit >= 0) {
+                sel = hit;
+                ImGui::OpenPopup("stopcolour");
+            } else {
+                const f32 t = gradientTimeAt(x0, x1, m.x);
+                edit([&](Curve4& c) { return gradientInsertStop(c, t); }, 0);
+            }
+        }
+        if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+            const int hit = gradientPick(curve, x0, x1, m.x, 8.0f * dpi);
+            if (hit >= 0) {
+                edit([&](Curve4& c) { return removeCurvePoint(c, hit); }, 0);
+                sel = -1;
+                drag = -1;
+            }
+        }
+        if (ImGui::IsItemDeactivated()) drag = -1;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Drag a stop to move it. Double-click a stop to recolour it, empty space to add one.\nRight-click a stop to remove it.");
+        if (ImGui::BeginPopup("stopcolour")) {
+            if (sel >= 0 && static_cast<u32>(sel) < curve.n) {
+                f32 col[4] = {curve.v[sel][0], curve.v[sel][1], curve.v[sel][2], curve.v[sel][3]};
+                const int s = sel;
+                if (ImGui::ColorPicker4("##stopcol", col, ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR))
+                    edit([&](Curve4& c) { return gradientSetStopColor(c, s, col); }, idOf("stopcol"));
+            }
+            ImGui::EndPopup();
+        }
+    }
+
+    // ---- the graph ----
+    const f32 gw = std::max(120.0f, ImGui::GetContentRegionAvail().x - 8.0f), gh = 150.0f * dpi;
+    ImGui::InvisibleButton("##graph", ImVec2(gw, gh),
+                           ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight | ImGuiButtonFlags_MouseButtonMiddle);
+    const ImVec2 p0 = ImGui::GetItemRectMin(), p1 = ImGui::GetItemRectMax();
+    const ScreenRect rc{p0.x, p0.y, p1.x, p1.y};
+    dl->PushClipRect(p0, p1, true);
+    dl->AddRectFilled(p0, p1, IM_COL32(24, 26, 30, 255));
+    {
+        const f32 ts = niceStep(view.t1 - view.t0), vs = niceStep(view.v1 - view.v0);
+        for (f32 t = std::ceil(view.t0 / ts) * ts; t <= view.t1; t += ts) {
+            const f32 x = viewToX(view, rc, t);
+            const bool edge = std::fabs(t) < ts * 0.01f || std::fabs(t - 1.0f) < ts * 0.01f;
+            dl->AddLine(ImVec2(x, p0.y), ImVec2(x, p1.y), edge ? IM_COL32(90, 90, 96, 255) : IM_COL32(48, 50, 56, 255));
+        }
+        for (f32 v = std::ceil(view.v0 / vs) * vs; v <= view.v1; v += vs) {
+            const f32 y = viewToY(view, rc, v);
+            dl->AddLine(ImVec2(p0.x, y), ImVec2(p1.x, y), std::fabs(v) < vs * 0.01f ? IM_COL32(90, 90, 96, 255) : IM_COL32(48, 50, 56, 255));
+            char lab[24];
+            std::snprintf(lab, sizeof lab, "%.3g", v);
+            dl->AddText(ImVec2(p0.x + 3.0f, y - ImGui::GetFontSize() - 1.0f), IM_COL32(130, 130, 138, 255), lab);
+        }
+    }
+    const int channels = isColor ? 4 : 1;
+    for (int ch = 0; ch < channels; ++ch) {
+        const bool active = !isColor || ((curveChannels_ >> ch) & 1);
+        ImVec2 prev{};
+        constexpr int kSamples = 96;
+        for (int i = 0; i <= kSamples; ++i) {
+            f32 v[4];
+            particles::evalCurve(curve, static_cast<f32>(i) / kSamples, v);
+            const ImVec2 pt(viewToX(view, rc, static_cast<f32>(i) / kSamples), viewToY(view, rc, v[ch]));
+            if (i > 0) dl->AddLine(prev, pt, isColor ? channelColor(ch, active) : IM_COL32(255, 160, 40, 255), active ? 2.0f : 1.0f);
+            prev = pt;
+        }
+    }
+    const int editCh = isColor ? curveEditChannel_ : 0;
+    for (u32 i = 0; i < curve.n; ++i) {
+        const ImVec2 k(viewToX(view, rc, curve.t[i]), viewToY(view, rc, curve.v[i][editCh]));
+        const bool isSel = sel == static_cast<int>(i);
+        const ImVec2 lo(k.x - 4.0f * dpi, k.y - 4.0f * dpi), hi(k.x + 4.0f * dpi, k.y + 4.0f * dpi);
+        dl->AddRectFilled(lo, hi, isSel ? IM_COL32(255, 160, 40, 255) : IM_COL32(240, 240, 240, 255));
+        dl->AddRect(lo, hi, IM_COL32(10, 10, 10, 255));
+    }
+    dl->PopClipRect();
+    dl->AddRect(p0, p1, IM_COL32(60, 62, 70, 255));
+
+    const ImGuiIO& io = ImGui::GetIO();
+    const bool hovered = ImGui::IsItemHovered();
+    if (hovered && io.MouseWheel != 0.0f) {
+        const f32 f = io.MouseWheel > 0.0f ? 0.88f : 1.0f / 0.88f;
+        const f32 at = xToView(view, rc, io.MousePos.x), av = yToView(view, rc, io.MousePos.y);
+        zoomView(view, at, av, io.KeyCtrl ? 1.0f : f, io.KeyShift ? 1.0f : f);
+    }
+    if (ImGui::IsItemActive() && (ImGui::IsMouseDragging(ImGuiMouseButton_Middle, 0.0f) || ImGui::IsMouseDragging(ImGuiMouseButton_Right, 2.0f)))
+        panView(view, rc, io.MouseDelta.x, io.MouseDelta.y);
+    if (ImGui::IsItemActivated() && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        drag = pickKey(curve, editCh, view, rc, io.MousePos.x, io.MousePos.y, 9.0f * dpi);
+        if (drag >= 0) sel = drag;
+    }
+    if (drag >= 0 && ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 1.0f)) {
+        const f32 t = xToView(view, rc, io.MousePos.x), v = yToView(view, rc, io.MousePos.y);
+        const int d = drag;
+        edit([&](Curve4& c) { return moveKey(c, d, editCh, t, v, isColor); }, idOf("keymove"));
+    }
+    if (hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+        const int hit = pickKey(curve, editCh, view, rc, io.MousePos.x, io.MousePos.y, 9.0f * dpi);
+        if (hit < 0) {
+            const f32 t = xToView(view, rc, io.MousePos.x), v = yToView(view, rc, io.MousePos.y);
+            edit([&](Curve4& c) { return insertKey(c, editCh, t, v, isColor); }, 0);
+        }
+    }
+    if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+        const int hit = pickKey(curve, editCh, view, rc, io.MousePos.x, io.MousePos.y, 9.0f * dpi);
+        if (hit >= 0) {
+            edit([&](Curve4& c) { return removeCurvePoint(c, hit); }, 0);
+            sel = -1;
+            drag = -1;
+        }
+    }
+    if (hovered && sel >= 0 && ImGui::IsKeyPressed(ImGuiKey_Delete)) {
+        const int s = sel;
+        edit([&](Curve4& c) { return removeCurvePoint(c, s); }, 0);
+        sel = -1;
+        drag = -1;
+    }
+    if (ImGui::IsItemDeactivated()) drag = -1;
+    if (sel >= static_cast<int>(curve.n)) sel = -1;
+    if (hovered)
+        ImGui::SetTooltip("Drag a key to move it. Double-click to add one, right-click a key to remove it.\n"
+                          "Wheel zooms (Ctrl: value only, Shift: time only); middle or right drag pans.");
+
+    // ---- under the graph: channels, framing, the selected key ----
+    if (isColor) {
+        static const char* kNames[4] = {"R", "G", "B", "A"};
+        for (int ch = 0; ch < 4; ++ch) {
+            if (ch > 0) ImGui::SameLine();
+            bool on = ((curveChannels_ >> ch) & 1) != 0;
+            ImGui::PushStyleColor(ImGuiCol_Text, channelColor(ch, true));
+            if (ImGui::Checkbox(kNames[ch], &on)) curveChannels_ = on ? (curveChannels_ | (1 << ch)) : (curveChannels_ & ~(1 << ch));
+            ImGui::PopStyleColor();
+        }
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(70.0f * dpi);
+        static const char* kEdit[4] = {"Edit R", "Edit G", "Edit B", "Edit A"};
+        ImGui::Combo("##editch", &curveEditChannel_, kEdit, 4);
+        ImGui::SameLine();
+    }
+    if (ImGui::SmallButton("Frame")) view = frameCurve(curve, isColor ? static_cast<u32>(curveChannels_) : 1u);
+    if (sel >= 0 && static_cast<u32>(sel) < curve.n) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("key %d: t %.3f  value %.3f", sel, curve.t[sel], curve.v[sel][editCh]);
+    }
+    ImGui::PopID();
 }
 
 // ================================================================================== the sections ==
@@ -533,7 +763,9 @@ void ParticleEditor::drawParams() {
                 });
             }
             if (curve.n >= 2) {
-                for (u32 i = 0; i < curve.n; ++i) {
+                drawCurveEditor(isColor);
+                const bool stopsOpen = ImGui::TreeNode("Stops (numeric)");
+                if (stopsOpen) for (u32 i = 0; i < curve.n; ++i) {
                     ImGui::PushID(static_cast<int>(i));
                     f32 t = curve.t[i], v[4] = {curve.v[i][0], curve.v[i][1], curve.v[i][2], curve.v[i][3]};
                     bool ch = false;
@@ -550,7 +782,7 @@ void ParticleEditor::drawParams() {
                                    idOf("pt") + static_cast<u32>(i), frame);
                     ImGui::PopID();
                 }
-                if (curve.n < 4 && ImGui::SmallButton(ICON_ADD " stop")) {
+                if (stopsOpen && curve.n < 4 && ImGui::SmallButton(ICON_ADD " stop")) {
                     editEffect([&](ParticleEffect& x) {
                         Curve4& c = isColor ? x.colorCurve : x.sizeCurve;
                         // Insert in the widest gap, with the interpolated value there.
@@ -563,6 +795,7 @@ void ParticleEditor::drawParams() {
                         return pxmodel::addCurvePoint(c, t, v);
                     });
                 }
+                if (stopsOpen) ImGui::TreePop();
             }
             ImGui::PopID();
         };

@@ -21,6 +21,7 @@
 #if AVER_MODULE_PARTICLES
 #include "AssetEditor.hpp"
 #include "EditorWidgets.hpp"
+#include "ParticleCurveModel.hpp"
 #include "SnapshotUndo.hpp"
 
 #include "aver/formats/OcParticle.hpp"
@@ -214,9 +215,18 @@ private:
     std::shared_ptr<ParticleEditorGpu> gpu_;   // ParticleEditorUi.cpp creates and owns it
     SplitPane split_;
 
+    // The curve editors' view state (UI only, not saved): index 0 the size curve, 1 the colour curve.
+    pxmodel::CurveView curveViewSize_{};
+    pxmodel::CurveView curveViewColor_{};
+    int curveSelKey_[2] = {-1, -1};
+    int curveDragKey_[2] = {-1, -1};
+    int curveChannels_ = 0xF;       // colour graph: which of R G B A are drawn
+    int curveEditChannel_ = 3;      // and which one a key drag edits (alpha by default)
+
     friend struct ParticleEditorUiAccess;
     void drawParams();
     void drawStats();
+    void drawCurveEditor(bool isColor);
     void drawTransport();
     void drawPreviewPane(Engine& e);
 };
