@@ -1837,4 +1837,22 @@ bool simplifyMesh(fmt::OcMeshData& mesh, f32 ratio, std::string* why) {
     return true;
 }
 
+bool simplifyToBudget(fmt::OcMeshData& mesh, u32 maxTriangles, u32* achieved, std::string* why) {
+    const auto tris = [&] { return static_cast<u32>(mesh.indices.size() / 3); };
+    if (maxTriangles < 1) maxTriangles = 1;
+    std::string last;
+    for (int pass = 0; pass < 6 && tris() > maxTriangles; ++pass) {
+        const u32 before = tris();
+        // Aim slightly under on later passes: each pass lands a little over its target.
+        const f32 ratio = static_cast<f32>(static_cast<f64>(maxTriangles) / static_cast<f64>(before)) * (pass ? 0.9f : 1.0f);
+        if (!(ratio > 0.0f) || !(ratio < 1.0f)) break;
+        if (!simplifyMesh(mesh, ratio, &last)) break;
+        if (tris() >= before) break;
+    }
+    if (achieved) *achieved = tris();
+    if (tris() <= maxTriangles + maxTriangles / 10) return true;
+    if (why) *why = last.empty() ? "could not reach the triangle budget" : last;
+    return false;
+}
+
 } // namespace aver::trifactor

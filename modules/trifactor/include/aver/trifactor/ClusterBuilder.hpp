@@ -485,4 +485,10 @@ bool packLodDag(const LodDag& dag, fmt::OcMeshData& mesh, std::string* why = nul
 // holding if this is ever used on geometry that tiles against another mesh.
 bool simplifyMesh(fmt::OcMeshData& mesh, f32 ratio, std::string* why = nullptr);
 
+// Simplifies to at most `maxTriangles`, by repeated simplifyMesh passes (each submesh keeps its material; a range too small to reduce
+// at the ratio is kept whole, so a mesh of many tiny submeshes can land above the budget). True when the mesh was already within the
+// budget or got there; false with `why` when it could not get within 10% of it (the mesh is left as the last good pass made it).
+// `achieved` receives the final triangle count either way.
+bool simplifyToBudget(fmt::OcMeshData& mesh, u32 maxTriangles, u32* achieved = nullptr, std::string* why = nullptr);
+
 } // namespace aver::trifactor

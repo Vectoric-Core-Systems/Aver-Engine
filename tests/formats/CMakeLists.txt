@@ -616,3 +616,14 @@ set_target_properties(AssetValidateTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CM
 add_executable(OcWorldDataLayersTest src/OcWorldDataLayersTest.cpp)
 target_link_libraries(OcWorldDataLayersTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(OcWorldDataLayersTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# OcMeshMergeTest -- fmt::mergeStaticMeshes and (when Trifactor is built) trifactor::simplifyToBudget. CPU only.
+add_executable(OcMeshMergeTest src/OcMeshMergeTest.cpp)
+target_link_libraries(OcMeshMergeTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+if(TARGET Aver.Trifactor)
+  target_link_libraries(OcMeshMergeTest PRIVATE Aver.Trifactor)
+  target_compile_definitions(OcMeshMergeTest PRIVATE AVER_MESHMERGE_TRIFACTOR=1)
+else()
+  target_compile_definitions(OcMeshMergeTest PRIVATE AVER_MESHMERGE_TRIFACTOR=0)
+endif()
+set_target_properties(OcMeshMergeTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
