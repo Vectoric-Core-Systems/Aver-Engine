@@ -1301,8 +1301,8 @@ void SandboxApp::unloadLevel(Engine& eng) {
 #if AVER_MODULE_LANDSCAPE
     landscape_.unload(eng.device());
     // The two editor-only sculpt flags landscape_.unload() itself does not know about.
-    sculpting_ = false;
-    sculptCursorValid_ = false;
+    landTool_.sculpting_ = false;
+    landTool_.sculptCursorValid_ = false;
 #endif
 }
 

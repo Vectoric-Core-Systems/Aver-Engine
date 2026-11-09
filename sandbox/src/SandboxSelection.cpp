@@ -1518,8 +1518,8 @@ void SandboxApp::undo() {
         case EditCmd::Kind::WaterBodies:
             levelHeader_.rivers = c.riversBefore;
             levelHeader_.lakes = c.lakesBefore;
-            waterBodiesStale_ = true;
-            waterSel_ = -1; waterPt_ = -1;
+            landTool_.waterBodiesStale_ = true;
+            landTool_.waterSel_ = -1; landTool_.waterPt_ = -1;
             markLevelUnsaved();
             break;
 #endif
@@ -1590,8 +1590,8 @@ void SandboxApp::redo() {
         case EditCmd::Kind::WaterBodies:
             levelHeader_.rivers = c.riversAfter;
             levelHeader_.lakes = c.lakesAfter;
-            waterBodiesStale_ = true;
-            waterSel_ = -1; waterPt_ = -1;
+            landTool_.waterBodiesStale_ = true;
+            landTool_.waterSel_ = -1; landTool_.waterPt_ = -1;
             markLevelUnsaved();
             break;
 #endif

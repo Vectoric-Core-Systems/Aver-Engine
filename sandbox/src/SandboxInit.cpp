@@ -560,7 +560,7 @@ void SandboxApp::createGizmoMeshes(Engine& e) {
 
 #if AVER_MODULE_LANDSCAPE
     // Sculpt brush footprint ring (flat in XY plane; reused, radius/position vary per-frame).
-    { auto bring = buildRotRing(2, kAxisHi); brushRing_ = e.device()->createLineMesh(bring.data(), (u32)bring.size()); }
+    { auto bring = buildRotRing(2, kAxisHi); landTool_.brushRing_ = e.device()->createLineMesh(bring.data(), (u32)bring.size()); }
 #endif
 }
 

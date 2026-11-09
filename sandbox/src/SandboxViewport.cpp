@@ -416,13 +416,13 @@ void SandboxApp::generateLandscapeNoise(Engine& e) {
 // samples lazily as each sculpt tick grows the rect (GameLandscape::sculpt) rather than up front,
 // because at stroke start the rect is not known -- a drag can wander anywhere.
 void SandboxApp::beginSculptStroke() {
-    sculpting_ = true;
+    landTool_.sculpting_ = true;
     landscape_.beginStroke();
 }
 
 // Ends a stroke and pushes ONE undo entry for the whole thing.
 void SandboxApp::endSculptStroke() {
-    sculpting_ = false;
+    landTool_.sculpting_ = false;
     if (!landscape_.strokeActive()) return;
     EditCmd c;
     c.kind = EditCmd::Kind::LandscapeStroke;
@@ -440,7 +440,7 @@ void SandboxApp::endSculptStroke() {
 // for keying off already-resolved meshes, one layer up): offering it would be a palette entry
 // that silently does nothing when picked.
 void SandboxApp::refreshFoliagePalette() {
-    foliagePalette_.clear();
+    landTool_.foliagePalette_.clear();
     const std::string dir = project_.contentDir();
     if (dir.empty()) return;
     std::error_code ec;
@@ -472,14 +472,14 @@ void SandboxApp::refreshFoliagePalette() {
         sp.assetPath = full;
         sp.name = it->path().stem().string();
         sp.type = std::move(type);
-        foliagePalette_.push_back(std::move(sp));
+        landTool_.foliagePalette_.push_back(std::move(sp));
     }
-    std::sort(foliagePalette_.begin(), foliagePalette_.end(),
+    std::sort(landTool_.foliagePalette_.begin(), landTool_.foliagePalette_.end(),
               [](const FoliageSpecies& a, const FoliageSpecies& b) { return a.name < b.name; });
     // Only one species ticked, else a project with many types opens with a brush painting a random
     // mix of every asset -- never what anyone wants and many clicks to undo.
-    for (size_t i = 0; i < foliagePalette_.size(); ++i) foliagePalette_[i].enabled = (i == 0);
-    AVER_INFO("[Foliage] palette: {} type(s) available to scatter", foliagePalette_.size());
+    for (size_t i = 0; i < landTool_.foliagePalette_.size(); ++i) landTool_.foliagePalette_[i].enabled = (i == 0);
+    AVER_INFO("[Foliage] palette: {} type(s) available to scatter", landTool_.foliagePalette_.size());
 }
 
 // A cheap deterministic hash, so a brush stroke is repeatable for the same seed and cursor.
@@ -498,8 +498,8 @@ void SandboxApp::refreshFoliagePalette() {
 // by hand"; the two are complementary. Placements are ordinary scene entities: they save, select,
 // move and undo.
 void SandboxApp::handleFoliage(Engine& e, const ImGuiIO& io, bool overScene, f32 mx, f32 my) {
-    sculptCursorValid_ = false;
-    if (!landscape_.loaded() || foliagePalette_.empty()) { foliageStroking_ = false; return; }
+    landTool_.sculptCursorValid_ = false;
+    if (!landscape_.loaded() || landTool_.foliagePalette_.empty()) { landTool_.foliageStroking_ = false; return; }
 
     Vec3 ro, rd;
     viewportRay(mx, my, ro, rd);
@@ -507,32 +507,32 @@ void SandboxApp::handleFoliage(Engine& e, const ImGuiIO& io, bool overScene, f32
     landscape::HeightfieldHit hit;
     const bool haveHit = overScene && landscape_.raycast(roA, rdA, hit);
     if (haveHit) {
-        sculptCursorValid_ = true;   // the same cursor ring the sculpt brush draws
-        sculptCursor_ = Vec3{hit.posCm[0], hit.posCm[1], hit.posCm[2]};
+        landTool_.sculptCursorValid_ = true;   // the same cursor ring the sculpt brush draws
+        landTool_.sculptCursor_ = Vec3{hit.posCm[0], hit.posCm[1], hit.posCm[2]};
     }
 
-    const bool erasing = io.KeyShift || foliageErase_;
+    const bool erasing = io.KeyShift || landTool_.foliageErase_;
     if (ImGui::IsMouseClicked(0) && overScene && haveHit) {
-        foliageStroking_ = true;
+        landTool_.foliageStroking_ = true;
         foliageBatch_ = EditCmd{};
         foliageBatch_.kind = EditCmd::Kind::FoliageStroke;
         foliageBatch_.label = erasing ? "Erase foliage" : "Paint foliage";
         foliageBatch_.batchWasErase = erasing;
     }
-    if (!io.MouseDown[0] && foliageStroking_) {
-        foliageStroking_ = false;
+    if (!io.MouseDown[0] && landTool_.foliageStroking_) {
+        landTool_.foliageStroking_ = false;
         if (!foliageBatch_.batchIds.empty()) pushEdit(std::move(foliageBatch_));
         foliageBatch_ = EditCmd{};
     }
-    if (!foliageStroking_ || !haveHit) return;
+    if (!landTool_.foliageStroking_ || !haveHit) return;
 
     // Rate-limited by time, not by frame: at 250 fps an unlimited brush would place hundreds of
     // instances in the time it takes to notice, and every one of them is a real entity.
     const f32 dt = std::fmin(e.time().dt, 0.05f);
-    foliageAccum_ += dt * foliageDensity_;
-    int attempts = static_cast<int>(foliageAccum_);
+    landTool_.foliageAccum_ += dt * landTool_.foliageDensity_;
+    int attempts = static_cast<int>(landTool_.foliageAccum_);
     if (attempts <= 0) return;
-    foliageAccum_ -= static_cast<f32>(attempts);
+    landTool_.foliageAccum_ -= static_cast<f32>(attempts);
     attempts = std::min(attempts, 16);   // a stall must not become a burst
 
     if (erasing) { foliageErase(hit.posCm[0], hit.posCm[1]); return; }
@@ -549,12 +549,12 @@ void SandboxApp::handleFoliage(Engine& e, const ImGuiIO& io, bool overScene, f32
 // rest of this class already does for the same reason.
 void SandboxApp::foliagePlaceOne(Engine& e, f32 cx, f32 cy) {
     std::vector<const FoliageSpecies*> live;
-    for (const auto& sp : foliagePalette_) if (sp.enabled) live.push_back(&sp);
+    for (const auto& sp : landTool_.foliagePalette_) if (sp.enabled) live.push_back(&sp);
     if (live.empty()) return;
 
     // Uniform over the disc, not the square: sqrt on the radius avoids clumping toward the centre.
-    const f32 ang = foliageRand(foliageSeed_) * 6.2831853f;
-    const f32 rad = std::sqrt(foliageRand(foliageSeed_)) * foliageRadiusCm_;
+    const f32 ang = foliageRand(landTool_.foliageSeed_) * 6.2831853f;
+    const f32 rad = std::sqrt(foliageRand(landTool_.foliageSeed_)) * landTool_.foliageRadiusCm_;
     const f32 x = cx + std::cos(ang) * rad;
     const f32 y = cy + std::sin(ang) * rad;
 
@@ -571,7 +571,7 @@ void SandboxApp::foliagePlaceOne(Engine& e, f32 cx, f32 cy) {
     for (const FoliageSpecies* s : live) if (s->type.weight > 0.0f) totalWeight += s->type.weight;
     const FoliageSpecies* picked = nullptr;
     if (totalWeight > 0.0f) {
-        f32 pick = foliageRand(foliageSeed_) * totalWeight;
+        f32 pick = foliageRand(landTool_.foliageSeed_) * totalWeight;
         for (const FoliageSpecies* s : live) {
             if (s->type.weight <= 0.0f) continue;
             if (pick < s->type.weight) { picked = s; break; }
@@ -579,10 +579,10 @@ void SandboxApp::foliagePlaceOne(Engine& e, f32 cx, f32 cy) {
         }
         if (!picked) picked = live.back();   // float rounding at the very top of the range
     } else {
-        picked = live[static_cast<size_t>(foliageRand(foliageSeed_) * live.size()) % live.size()];
+        picked = live[static_cast<size_t>(foliageRand(landTool_.foliageSeed_) * live.size()) % live.size()];
     }
     const FoliageSpecies& sp = *picked;
-    foliagePlaceAt(e, sp, x, y, foliageSeed_);
+    foliagePlaceAt(e, sp, x, y, landTool_.foliageSeed_);
 }
 
 // One instance of `sp` at (x, y): scale and yaw drawn from `rng`. foliagePlaceOne's tail, moved so the layer-driven scatter
@@ -602,7 +602,7 @@ void SandboxApp::foliagePlaceAt(Engine& e, const FoliageSpecies& sp, f32 x, f32 
     // 0 (grass, other overlap-tolerant fill) never entered the check, so it neither blocks nor is blocked.
     if (sp.type.collisionRadiusCm > 0.0f) {
         const f32 r = sp.type.collisionRadiusCm * sc;
-        for (const FoliagePlaced& p : foliagePlaced_) {
+        for (const FoliagePlaced& p : landTool_.foliagePlaced_) {
             if (!(p.solidRadiusCm > 0.0f)) continue;
             const f32 dx = p.pos.x - x, dy = p.pos.y - y;
             const f32 minDist = p.solidRadiusCm + r;
@@ -648,7 +648,7 @@ void SandboxApp::foliagePlaceAt(Engine& e, const FoliageSpecies& sp, f32 x, f32 
     }
     levelEntities_.push_back(ent);
     entityLabels_[static_cast<u32>(ent)] = makeEntityLabel(sp.type.material, sp.type.meshPath);
-    foliagePlaced_.push_back({xf.position,
+    landTool_.foliagePlaced_.push_back({xf.position,
                                sp.type.collisionRadiusCm > 0.0f ? sp.type.collisionRadiusCm * sc : 0.0f});
 
     EditCmd one = describeEntity(ent);
@@ -660,7 +660,7 @@ void SandboxApp::foliagePlaceAt(Engine& e, const FoliageSpecies& sp, f32 x, f32 
 // Removes painted instances within the brush; only entities tracked in foliagePlaced_, so an erase
 // pass cannot delete level geometry that merely happens to be under the cursor.
 void SandboxApp::foliageErase(f32 cx, f32 cy) {
-    const f32 rSq = foliageRadiusCm_ * foliageRadiusCm_;
+    const f32 rSq = landTool_.foliageRadiusCm_ * landTool_.foliageRadiusCm_;
     scene::World& world = scene::World::instance();
     for (size_t i = levelEntities_.size(); i-- > 0;) {
         const scene::Entity ent = levelEntities_[i];
@@ -669,11 +669,11 @@ void SandboxApp::foliageErase(f32 cx, f32 cy) {
         const f32 dx = xf.position.x - cx, dy = xf.position.y - cy;
         if (dx*dx + dy*dy > rSq) continue;
         bool mine = false;
-        for (size_t k = 0; k < foliagePlaced_.size(); ++k) {
-            const Vec3& p = foliagePlaced_[k].pos;
+        for (size_t k = 0; k < landTool_.foliagePlaced_.size(); ++k) {
+            const Vec3& p = landTool_.foliagePlaced_[k].pos;
             if (std::fabs(p.x - xf.position.x) < 1.0f && std::fabs(p.y - xf.position.y) < 1.0f) {
                 mine = true;
-                foliagePlaced_.erase(foliagePlaced_.begin() + static_cast<long>(k));
+                landTool_.foliagePlaced_.erase(landTool_.foliagePlaced_.begin() + static_cast<long>(k));
                 break;
             }
         }
@@ -1814,7 +1814,7 @@ void SandboxApp::handleManip(Engine& e) {
 #if AVER_MODULE_LANDSCAPE
         if (viewState_.mode_ == EditorMode::Landscape) {
             // wave3: the 1..4 sculpt keys belong to the Sculpt tab; Paint and Water have their own tools.
-            if (landscapeTab_ == LandscapeTab::Sculpt) {
+            if (landTool_.landscapeTab_ == LandscapeTab::Sculpt) {
             if (keybinds_.pressed(editor::CommandId::SculptRaise, io))   viewState_.sculptTool_=SculptTool::Raise;
             if (keybinds_.pressed(editor::CommandId::SculptLower, io))   viewState_.sculptTool_=SculptTool::Lower;
             if (keybinds_.pressed(editor::CommandId::SculptSmooth, io))  viewState_.sculptTool_=SculptTool::Smooth;
@@ -1861,9 +1861,9 @@ void SandboxApp::handleManip(Engine& e) {
 #if AVER_MODULE_LANDSCAPE
     if (isSculptTool) {
         // wave3: the Landscape panel's tabs pick the viewport tool (Sculpt is the original behaviour).
-        if (landscapeTab_ == LandscapeTab::Paint)      handlePaint(e, io, overScene, mx, my);
+        if (landTool_.landscapeTab_ == LandscapeTab::Paint)      handlePaint(e, io, overScene, mx, my);
 #if AVER_MODULE_FLUIDS
-        else if (landscapeTab_ == LandscapeTab::Water) handleWaterSpline(e, io, overScene, mx, my);
+        else if (landTool_.landscapeTab_ == LandscapeTab::Water) handleWaterSpline(e, io, overScene, mx, my);
 #endif
         else                                           handleSculpt(e, io, overScene, mx, my);
     } else
@@ -1962,8 +1962,8 @@ void SandboxApp::handleManip(Engine& e) {
 // viewportRay() -- the SAME screen->ray conversion pick() and the asset drag-drop's drop point use
 // -- and landscape::raycastHeightfield() for where that ray meets the section's surface.
 void SandboxApp::handleSculpt(Engine& e, const ImGuiIO& io, bool overScene, f32 mx, f32 my) {
-    sculptCursorValid_ = false;
-    if (!landscape_.loaded()) { sculpting_ = false; return; }
+    landTool_.sculptCursorValid_ = false;
+    if (!landscape_.loaded()) { landTool_.sculpting_ = false; return; }
 
     Vec3 ro, rd;
     viewportRay(mx, my, ro, rd);
@@ -1971,41 +1971,41 @@ void SandboxApp::handleSculpt(Engine& e, const ImGuiIO& io, bool overScene, f32 
     landscape::HeightfieldHit hit;
     const bool haveHit = overScene && landscape_.raycast(roA, rdA, hit);   // nearest hit among all sections
     if (haveHit) {
-        sculptCursorValid_ = true;
-        sculptCursor_ = Vec3{hit.posCm[0], hit.posCm[1], hit.posCm[2]};
+        landTool_.sculptCursorValid_ = true;
+        landTool_.sculptCursor_ = Vec3{hit.posCm[0], hit.posCm[1], hit.posCm[2]};
     }
 
     if (ImGui::IsMouseClicked(0) && overScene && haveHit) {
         beginSculptStroke();
-        sculptFlattenTargetCm_ = hit.posCm[2];   // captured once per stroke -- see BrushParams
+        landTool_.sculptFlattenTargetCm_ = hit.posCm[2];   // captured once per stroke -- see BrushParams
         // Ramp's start point AND its height, captured the same way and for the same reason:
         // see BrushParams::rampStartCm.
-        sculptRampStartCm_[0] = hit.posCm[0];
-        sculptRampStartCm_[1] = hit.posCm[1];
-        sculptRampStartHeightCm_ = hit.posCm[2];
+        landTool_.sculptRampStartCm_[0] = hit.posCm[0];
+        landTool_.sculptRampStartCm_[1] = hit.posCm[1];
+        landTool_.sculptRampStartHeightCm_ = hit.posCm[2];
         // Noise seed captured once per stroke from the start position, not the clock (see
         // BrushParams::noiseSeed), so replaying the same drag noises the same way. fnv1a64 over
         // the two raw floats truncated to 32 bits: reproducible since it hashes the exact bit pattern, not a rounded position.
         const f32 seedInput[2] = {hit.posCm[0], hit.posCm[1]};
-        sculptNoiseSeed_ = static_cast<u32>(fnv1a64(seedInput, sizeof(seedInput)));
+        landTool_.sculptNoiseSeed_ = static_cast<u32>(fnv1a64(seedInput, sizeof(seedInput)));
     }
     // Release ends the stroke and pushes the undo entry: previously sculpting was invisible to
     // Ctrl+Z (handleSculpt mutated the heightfield in place; the undo stack only knew entity
     // transforms), so Ctrl+Z after terrain work silently undid a moved object instead.
     if (!io.MouseDown[0] && landscape_.strokeActive()) endSculptStroke();
 
-    if (sculpting_ && haveHit) {
+    if (landTool_.sculpting_ && haveHit) {
         landscape::BrushParams p;
         p.centerCm[0] = hit.posCm[0];
         p.centerCm[1] = hit.posCm[1];
-        p.radiusCm = sculptRadiusCm_;
-        p.strength = sculptStrengthCm_;
-        p.flattenTargetCm = sculptFlattenTargetCm_;
-        p.falloff = sculptFalloff_;
-        p.rampStartCm[0] = sculptRampStartCm_[0];
-        p.rampStartCm[1] = sculptRampStartCm_[1];
-        p.rampStartHeightCm = sculptRampStartHeightCm_;
-        p.noiseSeed = sculptNoiseSeed_;
+        p.radiusCm = landTool_.sculptRadiusCm_;
+        p.strength = landTool_.sculptStrengthCm_;
+        p.flattenTargetCm = landTool_.sculptFlattenTargetCm_;
+        p.falloff = landTool_.sculptFalloff_;
+        p.rampStartCm[0] = landTool_.sculptRampStartCm_[0];
+        p.rampStartCm[1] = landTool_.sculptRampStartCm_[1];
+        p.rampStartHeightCm = landTool_.sculptRampStartHeightCm_;
+        p.noiseSeed = landTool_.sculptNoiseSeed_;
         p.mode = viewState_.sculptTool_==SculptTool::Raise   ? landscape::BrushMode::Raise
                : viewState_.sculptTool_==SculptTool::Lower   ? landscape::BrushMode::Lower
                : viewState_.sculptTool_==SculptTool::Smooth  ? landscape::BrushMode::Smooth
@@ -2066,20 +2066,20 @@ void SandboxApp::drawGizmo(Engine& e) {
 // The sculpt brush's footprint, drawn over the terrain the same undepth-tested way drawGizmo()
 // draws over a selection -- it needs to read through the ground plane it is standing on.
 void SandboxApp::drawSculptCursor(Engine& e) {
-    if (!brushRing_ || !sculptCursorValid_) return;
+    if (!landTool_.brushRing_ || !landTool_.sculptCursorValid_) return;
     const bool sculptTool = editorModeIsLandscape();
     if (!sculptTool) return;
     // wave3: the Paint tab draws its own radius and falloff (the Water tab never sets the cursor).
-    const bool paintTab = landscapeTab_ == LandscapeTab::Paint;
-    const f32 brushRadius = paintTab ? paintRadiusCm_ : sculptRadiusCm_;
-    const f32 brushFalloff = paintTab ? paintFalloff_ : sculptFalloff_;
+    const bool paintTab = landTool_.landscapeTab_ == LandscapeTab::Paint;
+    const f32 brushRadius = paintTab ? landTool_.paintRadiusCm_ : landTool_.sculptRadiusCm_;
+    const f32 brushFalloff = paintTab ? landTool_.paintFalloff_ : landTool_.sculptFalloff_;
     const Mat4 w = Mat4::scale(Vec3{brushRadius, brushRadius, brushRadius}) *
-                   Mat4::translation(sculptCursor_);
+                   Mat4::translation(landTool_.sculptCursor_);
     e.device()->setLineDepth(false);
     // Explicit, not relying on drawGizmo() having already reset it: these rings must stay hairline
     // regardless of what else ran before this call.
     e.device()->setLineWidth(1.0f);
-    e.device()->drawLines(brushRing_, &w.m[0][0]);
+    e.device()->drawLines(landTool_.brushRing_, &w.m[0][0]);
 
     // Second ring is where full strength stops (without it the Falloff slider is invisible until
     // after a stroke): the outer ring alone shows brush WIDTH, not SHAPE, so falloff 0.1 and 0.9
@@ -2094,8 +2094,8 @@ void SandboxApp::drawSculptCursor(Engine& e) {
     const f32 soft  = brushFalloff < 0.0f ? 0.0f : (brushFalloff > 1.0f ? 1.0f : brushFalloff);
     const f32 inner = brushRadius * (1.0f - soft);
     if (inner > brushRadius * 0.04f && inner < brushRadius * 0.96f) {
-        const Mat4 wi = Mat4::scale(Vec3{inner, inner, inner}) * Mat4::translation(sculptCursor_);
-        e.device()->drawLines(brushRing_, &wi.m[0][0]);
+        const Mat4 wi = Mat4::scale(Vec3{inner, inner, inner}) * Mat4::translation(landTool_.sculptCursor_);
+        e.device()->drawLines(landTool_.brushRing_, &wi.m[0][0]);
     }
     e.device()->setLineDepth(true);
 }
@@ -3320,14 +3320,14 @@ void SandboxApp::drawViewportLandscapeTools(f32 icon, f32 gap) {
     uiReg_.track("tool.sculptNoise");
     ImGui::SameLine(0, gap*2);
     // Brush settings live here, in the mode that owns them, not appearing/disappearing from a shared row by tool.
-    char brushLbl[32]; std::snprintf(brushLbl, sizeof brushLbl, "Brush %.0f", sculptRadiusCm_);
+    char brushLbl[32]; std::snprintf(brushLbl, sizeof brushLbl, "Brush %.0f", landTool_.sculptRadiusCm_);
     if (dropButton(brushLbl)) ImGui::OpenPopup("brushParams");
     ImGui::SameLine(0, gap);
     if (ImGui::Button(landscape_.dirty() ? "Save Terrain *" : "Save Terrain")) saveLandscape();
     uiReg_.track("landscape.save");
     if (ImGui::BeginPopup("brushParams")) {
-        editor::panelFloat("Radius (cm)", &sculptRadiusCm_, 50.0f, 5000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
-        ImGui::SliderFloat("Strength (cm)", &sculptStrengthCm_, 5.0f, 2000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
+        editor::panelFloat("Radius (cm)", &landTool_.sculptRadiusCm_, 50.0f, 5000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
+        ImGui::SliderFloat("Strength (cm)", &landTool_.sculptStrengthCm_, 5.0f, 2000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
         ImGui::EndPopup();
     }
 }
@@ -3552,7 +3552,7 @@ bool SandboxApp::editorModeAvailable(EditorMode m, const char** whyNot) const {
             // See editor::foliageModeGate (FoliageTypeEditor.hpp) for why an empty palette no
             // longer refuses entry, and for the headless test covering both branches.
             const editor::FoliageModeGate gate =
-                editor::foliageModeGate(landscape_.loaded(), foliagePalette_.empty());
+                editor::foliageModeGate(landscape_.loaded(), landTool_.foliagePalette_.empty());
             if (!gate.available) return no(gate.whyNot);
             return true;
         }
@@ -3579,7 +3579,7 @@ bool SandboxApp::editorModeAvailable(EditorMode m, const char** whyNot) const {
 // Foliage's equivalent of editorModeIsLandscape(): the mode is selected AND it can actually run.
 bool SandboxApp::editorModeIsFoliage() const {
 #if AVER_MODULE_LANDSCAPE
-    return viewState_.mode_ == EditorMode::Foliage && landscape_.loaded() && !foliagePalette_.empty();
+    return viewState_.mode_ == EditorMode::Foliage && landscape_.loaded() && !landTool_.foliagePalette_.empty();
 #else
     return false;
 #endif
@@ -3603,8 +3603,8 @@ void SandboxApp::setEditorMode(EditorMode m) {
 #if AVER_MODULE_LANDSCAPE
     // A stroke in flight is ENDED, not abandoned: endSculptStroke pushes the undo entry for what
     // was already painted, else the terrain would change with nothing on the undo stack to reverse it.
-    if (sculpting_) endSculptStroke();
-    sculptCursorValid_ = false;
+    if (landTool_.sculpting_) endSculptStroke();
+    landTool_.sculptCursorValid_ = false;
 #endif
     viewState_.dragging_ = false;
 #if AVER_MODULE_SCENE

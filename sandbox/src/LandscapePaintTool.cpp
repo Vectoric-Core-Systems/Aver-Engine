@@ -63,7 +63,7 @@ void layerScatterCandidates(const fmt::OcLandData& d, u32 sectionLayer, f32 dens
 
 // Ends a weight stroke and pushes ONE undo entry for it (none when nothing changed).
 void SandboxApp::endPaintStroke(const char* label) {
-    painting_ = false;
+    landTool_.painting_ = false;
     if (!landscape_.weightStrokeActive()) return;
     EditCmd c;
     c.kind = EditCmd::Kind::LandscapeWeights;
@@ -81,9 +81,9 @@ void SandboxApp::purgeWeightUndo() {
 
 // The viewport half: LMB paints the selected layer under the cursor while held.
 void SandboxApp::handlePaint(Engine& e, const ImGuiIO& io, bool overScene, f32 mx, f32 my) {
-    sculptCursorValid_ = false;
+    landTool_.sculptCursorValid_ = false;
     if (!landscape_.loaded() || !landscape_.terrainMaterialActive() || playSessionActive()) {
-        painting_ = false;
+        landTool_.painting_ = false;
         if (landscape_.weightStrokeActive()) endPaintStroke();
         return;
     }
@@ -94,32 +94,32 @@ void SandboxApp::handlePaint(Engine& e, const ImGuiIO& io, bool overScene, f32 m
     landscape::HeightfieldHit hit;
     const bool haveHit = overScene && landscape_.raycast(roA, rdA, hit);
     if (haveHit) {
-        sculptCursorValid_ = true;   // the same brush ring the sculpt tool draws
-        sculptCursor_ = Vec3{hit.posCm[0], hit.posCm[1], hit.posCm[2]};
+        landTool_.sculptCursorValid_ = true;   // the same brush ring the sculpt tool draws
+        landTool_.sculptCursor_ = Vec3{hit.posCm[0], hit.posCm[1], hit.posCm[2]};
     }
 
     if (ImGui::IsMouseClicked(0) && overScene && haveHit) {
         // Each section the brush reaches gets the layer added on the spot, before its share of the stroke is captured.
         landscape_.beginWeightStroke();
-        painting_ = true;
+        landTool_.painting_ = true;
     }
     if (!io.MouseDown[0] && landscape_.weightStrokeActive()) endPaintStroke();
 
-    if (painting_ && haveHit) {
+    if (landTool_.painting_ && haveHit) {
         landscape::PaintParams p;
         p.centerCm[0] = hit.posCm[0];
         p.centerCm[1] = hit.posCm[1];
-        p.radiusCm = paintRadiusCm_;
-        p.strength = paintStrength_;
-        p.falloff = paintFalloff_;
-        p.target = paintOpacity_;
-        p.mode = paintMode_ == 1 ? landscape::PaintMode::Erase : paintMode_ == 2 ? landscape::PaintMode::Smooth
+        p.radiusCm = landTool_.paintRadiusCm_;
+        p.strength = landTool_.paintStrength_;
+        p.falloff = landTool_.paintFalloff_;
+        p.target = landTool_.paintOpacity_;
+        p.mode = landTool_.paintMode_ == 1 ? landscape::PaintMode::Erase : landTool_.paintMode_ == 2 ? landscape::PaintMode::Smooth
                                                                                  : landscape::PaintMode::Paint;
         // dt-scaled like the sculpt brush, so holding paints at a rate that does not depend on the frame rate.
         const f32 dt = std::fmin(e.time().dt, 0.05f);
-        landscape_.paint(e.device(), p, std::fmin(1.0f, dt * 6.0f), landscape_.materialLayerName(static_cast<u32>(paintLayer_)));
+        landscape_.paint(e.device(), p, std::fmin(1.0f, dt * 6.0f), landscape_.materialLayerName(static_cast<u32>(landTool_.paintLayer_)));
     }
-    if (!io.MouseDown[0]) painting_ = false;
+    if (!io.MouseDown[0]) landTool_.painting_ = false;
 }
 
 void SandboxApp::buildLandscapePaintTab(Engine& e) {
@@ -164,7 +164,7 @@ void SandboxApp::buildLandscapePaintTab(Engine& e) {
     ImGui::Spacing();
     ImGui::TextDisabled("LAYERS");
     const u32 n = landscape_.materialLayerCount();
-    if (paintLayer_ < 0 || static_cast<u32>(paintLayer_) >= n) paintLayer_ = 0;
+    if (landTool_.paintLayer_ < 0 || static_cast<u32>(landTool_.paintLayer_) >= n) landTool_.paintLayer_ = 0;
     pbr::TerrainTextures info;
     bool haveInfo = false;
     if (const pbr::MaterialHandle bh = current.empty() ? 0 : content_.materialForSurface(current))
@@ -177,8 +177,8 @@ void SandboxApp::buildLandscapePaintTab(Engine& e) {
         const ImVec4 swatch(std::pow(avg[0], 1.0f / 2.2f), std::pow(avg[1], 1.0f / 2.2f), std::pow(avg[2], 1.0f / 2.2f), 1.0f);
         ImGui::ColorButton("##sw", swatch, ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoPicker, ImVec2(18.0f, 18.0f));
         ImGui::SameLine();
-        if (ImGui::Selectable(l->name.c_str(), paintLayer_ == static_cast<int>(i), 0, ImVec2(-1.0f, 0.0f)))
-            paintLayer_ = static_cast<int>(i);
+        if (ImGui::Selectable(l->name.c_str(), landTool_.paintLayer_ == static_cast<int>(i), 0, ImVec2(-1.0f, 0.0f)))
+            landTool_.paintLayer_ = static_cast<int>(i);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("%s\nSurface %s, friction %.2f, restitution %.2f%s", l->name.c_str(), l->surfaceName().c_str(),
                               l->friction, l->restitution, i == 0 ? "\nThe base layer: whatever is not painted." : "");
@@ -190,24 +190,24 @@ void SandboxApp::buildLandscapePaintTab(Engine& e) {
     ImGui::TextDisabled("TOOL");
     static const char* kPaintModes[3] = {"Paint", "Erase", "Smooth"};
     for (int i = 0; i < 3; ++i) {
-        const bool on = paintMode_ == i;
+        const bool on = landTool_.paintMode_ == i;
         if (on) ImGui::PushStyleColor(ImGuiCol_Button, kAverOrangeDim);
-        if (ImGui::Button(kPaintModes[i], ImVec2(-1, 0))) paintMode_ = i;
+        if (ImGui::Button(kPaintModes[i], ImVec2(-1, 0))) landTool_.paintMode_ = i;
         if (on) ImGui::PopStyleColor();
     }
     ImGui::Spacing();
     ImGui::TextDisabled("BRUSH");
-    editor::panelFloat("Radius (cm)", &paintRadiusCm_, 50.0f, 5000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
-    editor::panelFloat("Strength", &paintStrength_, 0.02f, 1.0f, "%.2f");
-    editor::panelFloat("Falloff", &paintFalloff_, 0.0f, 1.0f, "%.2f");
-    editor::panelFloat("Opacity", &paintOpacity_, 0.05f, 1.0f, "%.2f");
+    editor::panelFloat("Radius (cm)", &landTool_.paintRadiusCm_, 50.0f, 5000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
+    editor::panelFloat("Strength", &landTool_.paintStrength_, 0.02f, 1.0f, "%.2f");
+    editor::panelFloat("Falloff", &landTool_.paintFalloff_, 0.0f, 1.0f, "%.2f");
+    editor::panelFloat("Opacity", &landTool_.paintOpacity_, 0.05f, 1.0f, "%.2f");
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Paint stops at this weight, so a layer can be laid down thin.");
 
     // ---- whole-section commands ----
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::TextDisabled("COMMANDS");
-    const std::string layerName = landscape_.materialLayerName(static_cast<u32>(paintLayer_));
+    const std::string layerName = landscape_.materialLayerName(static_cast<u32>(landTool_.paintLayer_));
     if (ImGui::Button("Fill Layer", ImVec2(-1, 0))) {
         landscape_.beginWeightStroke();
         landscape_.fillLayerAll(layerName);
@@ -217,14 +217,14 @@ void SandboxApp::buildLandscapePaintTab(Engine& e) {
     if (ImGui::Button("Auto-fill By Slope / Height...", ImVec2(-1, 0))) ImGui::OpenPopup("##autoFill");
     if (ImGui::BeginPopup("##autoFill")) {
         ImGui::TextUnformatted("Paint the selected layer where...");
-        ImGui::SliderFloat("Min slope (deg)", &autoSlopeMinDeg_, 0.0f, 90.0f, "%.0f");
-        ImGui::SliderFloat("Max slope (deg)", &autoSlopeMaxDeg_, 0.0f, 90.0f, "%.0f");
-        ImGui::SliderFloat("Feather (deg)", &autoFeatherDeg_, 0.0f, 30.0f, "%.0f");
-        ImGui::DragFloat("Min height (cm)", &autoZMinCm_, 10.0f);
-        ImGui::DragFloat("Max height (cm)", &autoZMaxCm_, 10.0f);
+        ImGui::SliderFloat("Min slope (deg)", &landTool_.autoSlopeMinDeg_, 0.0f, 90.0f, "%.0f");
+        ImGui::SliderFloat("Max slope (deg)", &landTool_.autoSlopeMaxDeg_, 0.0f, 90.0f, "%.0f");
+        ImGui::SliderFloat("Feather (deg)", &landTool_.autoFeatherDeg_, 0.0f, 30.0f, "%.0f");
+        ImGui::DragFloat("Min height (cm)", &landTool_.autoZMinCm_, 10.0f);
+        ImGui::DragFloat("Max height (cm)", &landTool_.autoZMaxCm_, 10.0f);
         if (ImGui::Button("Apply")) {
             landscape_.beginWeightStroke();
-            landscape_.autoFillBySlopeAll(layerName, autoSlopeMinDeg_, autoSlopeMaxDeg_, autoZMinCm_, autoZMaxCm_, autoFeatherDeg_, 1.0f);
+            landscape_.autoFillBySlopeAll(layerName, landTool_.autoSlopeMinDeg_, landTool_.autoSlopeMaxDeg_, landTool_.autoZMinCm_, landTool_.autoZMaxCm_, landTool_.autoFeatherDeg_, 1.0f);
             endPaintStroke("Auto-fill terrain layer");
             ImGui::CloseCurrentPopup();
         }
@@ -247,7 +247,7 @@ void SandboxApp::buildLandscapePaintTab(Engine& e) {
         ImGui::SetTooltip("Drops section layers with no paint. Clears the paint undo history (the layer table changes).");
 
 #if AVER_MODULE_SCENE
-    const GameLandscapeLayer* sel = landscape_.materialLayer(static_cast<u32>(paintLayer_));
+    const GameLandscapeLayer* sel = landscape_.materialLayer(static_cast<u32>(landTool_.paintLayer_));
     ImGui::BeginDisabled(!sel || sel->foliage.empty() || sel->foliageDensity <= 0.0f);
     if (ImGui::Button("Scatter Foliage From Layer", ImVec2(-1, 0))) scatterFoliageFromLayer(e);
     ImGui::EndDisabled();
@@ -271,7 +271,7 @@ void SandboxApp::buildLandscapePaintTab(Engine& e) {
 // it. A second run regenerates it (same seed, same table) and keeps hand edits recorded in the .ocveg.
 void SandboxApp::scatterFoliageFromLayer(Engine& e) {
     (void)e;
-    const GameLandscapeLayer* l = landscape_.materialLayer(static_cast<u32>(paintLayer_));
+    const GameLandscapeLayer* l = landscape_.materialLayer(static_cast<u32>(landTool_.paintLayer_));
     if (!l || l->foliage.empty() || l->foliageDensity <= 0.0f || !project_.valid()) return;
 
     std::string rel = l->foliage;   // content-relative; an absolute path is made relative when it lies under Content

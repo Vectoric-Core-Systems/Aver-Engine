@@ -48,22 +48,22 @@ void SandboxApp::initEditorOrigin() {
         [this] { marqueeArmed_ = false; marqueeActive_ = false; });
 #if AVER_MODULE_LANDSCAPE
     // A stroke is ENDED, not abandoned: its undo entry is pushed for what was already painted, as when the mode changes mid-stroke.
-    eo.addGesture("a sculpt stroke is open", [this] { return sculpting_; }, [this] { endSculptStroke(); });
+    eo.addGesture("a sculpt stroke is open", [this] { return landTool_.sculpting_; }, [this] { endSculptStroke(); });
 #if AVER_WITH_IMGUI
     eo.addGesture("a paint stroke is open",
-        [this] { return painting_ || landscape_.weightStrokeActive(); },
+        [this] { return landTool_.painting_ || landscape_.weightStrokeActive(); },
         [this] { endPaintStroke(); });
     eo.addGesture("a foliage stroke is open",
-        [this] { return foliageStroking_; },
+        [this] { return landTool_.foliageStroking_; },
         [this] {
-            foliageStroking_ = false;
+            landTool_.foliageStroking_ = false;
             if (!foliageBatch_.batchIds.empty()) pushEdit(std::move(foliageBatch_));
             foliageBatch_ = EditCmd{};
         });
 #if AVER_MODULE_FLUIDS
     eo.addGesture("a water edit is open",
-        [this] { return waterGestureOpen_ || waterDrag_; },
-        [this] { waterGestureEnd("Edit water"); waterDrag_ = false; });
+        [this] { return landTool_.waterGestureOpen_ || landTool_.waterDrag_; },
+        [this] { waterGestureEnd("Edit water"); landTool_.waterDrag_ = false; });
 #endif
 #endif
 #endif
@@ -87,7 +87,7 @@ void SandboxApp::initEditorOrigin() {
     });
 #if AVER_MODULE_LANDSCAPE && AVER_MODULE_SCENE && AVER_WITH_IMGUI
     eo.addRebaser("foliage brush", [this](const world::ShiftEvent& ev) {
-        for (FoliagePlaced& f : foliagePlaced_) shiftPos(f.pos, ev.deltaF);
+        for (FoliagePlaced& f : landTool_.foliagePlaced_) shiftPos(f.pos, ev.deltaF);
     });
 #endif
 

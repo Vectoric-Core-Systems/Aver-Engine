@@ -62,8 +62,8 @@ bool SandboxApp::createLandscapeForLevel(rhi::IDevice* device, u32 samples, f32 
         setUpgradeStatus("Wrote " + dst.filename().string() + " but could not load it back.", editor::NotifySeverity::Error);
         return false;
     }
-    sculpting_ = false;
-    sculptCursorValid_ = false;
+    landTool_.sculpting_ = false;
+    landTool_.sculptCursorValid_ = false;
     recordLandscapeInLevel();
     // THE CACHE ONLY EXISTS IF THE BROWSER DOES. cbInvalidate drops a listing out of dirCache_,
     // which is the Content Browser's own, so it is declared and defined behind AVER_WITH_IMGUI

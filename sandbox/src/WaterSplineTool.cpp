@@ -141,29 +141,29 @@ std::string uniqueName(const std::string& base, const std::vector<fmt::OcRiver>&
 
 // The "before" of an edit gesture: refreshed every idle frame, held while one is open.
 void SandboxApp::waterSnapshotIfIdle() {
-    if (waterGestureOpen_) return;
-    waterGestureRivers_ = levelHeader_.rivers;
-    waterGestureLakes_ = levelHeader_.lakes;
+    if (landTool_.waterGestureOpen_) return;
+    landTool_.waterGestureRivers_ = levelHeader_.rivers;
+    landTool_.waterGestureLakes_ = levelHeader_.lakes;
 }
 
 // A record changed: the gesture is open, the level is unsaved, and the meshes rebuild before the next draw.
 void SandboxApp::waterEdited() {
-    waterGestureOpen_ = true;
-    waterBodiesStale_ = true;
+    landTool_.waterGestureOpen_ = true;
+    landTool_.waterBodiesStale_ = true;
     markLevelUnsaved();
 }
 
 // Ends the gesture and pushes ONE undo entry for it, none when nothing differs from the snapshot.
 void SandboxApp::waterGestureEnd(const char* label) {
-    if (!waterGestureOpen_) return;
-    waterGestureOpen_ = false;
-    if (editor::sameBodies(waterGestureRivers_, levelHeader_.rivers, waterGestureLakes_, levelHeader_.lakes)) return;
+    if (!landTool_.waterGestureOpen_) return;
+    landTool_.waterGestureOpen_ = false;
+    if (editor::sameBodies(landTool_.waterGestureRivers_, levelHeader_.rivers, landTool_.waterGestureLakes_, levelHeader_.lakes)) return;
     EditCmd c;
     c.kind = EditCmd::Kind::WaterBodies;
     c.label = label;
-    c.riversBefore = waterGestureRivers_;
+    c.riversBefore = landTool_.waterGestureRivers_;
     c.riversAfter = levelHeader_.rivers;
-    c.lakesBefore = waterGestureLakes_;
+    c.lakesBefore = landTool_.waterGestureLakes_;
     c.lakesAfter = levelHeader_.lakes;
     pushEdit(std::move(c));
 }
@@ -173,8 +173,8 @@ void SandboxApp::carveSelectedBody(Engine& e) {
     if (!landscape_.loaded()) return;
     const int nr = static_cast<int>(levelHeader_.rivers.size());
     landscape::CarveParams cp;
-    if (waterSel_ >= 0 && waterSel_ < nr) {
-        const fmt::OcRiver& r = levelHeader_.rivers[static_cast<usize>(waterSel_)];
+    if (landTool_.waterSel_ >= 0 && landTool_.waterSel_ < nr) {
+        const fmt::OcRiver& r = levelHeader_.rivers[static_cast<usize>(landTool_.waterSel_)];
         std::vector<landscape::CarvePoint> pts;
         editor::riverCarvePoints(r, 250.0f, pts);
         if (pts.empty()) return;
@@ -184,8 +184,8 @@ void SandboxApp::carveSelectedBody(Engine& e) {
         landscape_.carveRiver(e.device(), pts.data(), static_cast<u32>(pts.size()), cp);
         endSculptStroke();
         setUpgradeStatus("Carved the bed of " + r.name);
-    } else if (waterSel_ >= nr && waterSel_ < nr + static_cast<int>(levelHeader_.lakes.size())) {
-        const fmt::OcLake& l = levelHeader_.lakes[static_cast<usize>(waterSel_ - nr)];
+    } else if (landTool_.waterSel_ >= nr && landTool_.waterSel_ < nr + static_cast<int>(levelHeader_.lakes.size())) {
+        const fmt::OcLake& l = levelHeader_.lakes[static_cast<usize>(landTool_.waterSel_ - nr)];
         std::vector<f32> xy;
         editor::lakeOutlineXY(l, 300.0f, xy);
         if (xy.size() < 6) return;
@@ -204,19 +204,19 @@ void SandboxApp::buildLandscapeWaterTab(Engine& e) {
     auto& lakes = levelHeader_.lakes;
     const int nr = static_cast<int>(rivers.size());
     const int total = nr + static_cast<int>(lakes.size());
-    if (waterSel_ >= total) { waterSel_ = -1; waterPt_ = -1; }
+    if (landTool_.waterSel_ >= total) { landTool_.waterSel_ = -1; landTool_.waterPt_ = -1; }
 
     ImGui::TextDisabled("RIVERS AND LAKES");
     for (int i = 0; i < nr; ++i) {
         ImGui::PushID(i);
         const std::string label = rivers[static_cast<usize>(i)].name + "  (river, " + std::to_string(rivers[static_cast<usize>(i)].points.size()) + " pts)";
-        if (ImGui::Selectable(label.c_str(), waterSel_ == i)) { waterSel_ = i; waterPt_ = -1; }
+        if (ImGui::Selectable(label.c_str(), landTool_.waterSel_ == i)) { landTool_.waterSel_ = i; landTool_.waterPt_ = -1; }
         ImGui::PopID();
     }
     for (int j = 0; j < static_cast<int>(lakes.size()); ++j) {
         ImGui::PushID(1000 + j);
         const std::string label = lakes[static_cast<usize>(j)].name + "  (lake, " + std::to_string(lakes[static_cast<usize>(j)].points.size()) + " pts)";
-        if (ImGui::Selectable(label.c_str(), waterSel_ == nr + j)) { waterSel_ = nr + j; waterPt_ = -1; }
+        if (ImGui::Selectable(label.c_str(), landTool_.waterSel_ == nr + j)) { landTool_.waterSel_ = nr + j; landTool_.waterPt_ = -1; }
         ImGui::PopID();
     }
     if (total == 0) ImGui::TextDisabled("None yet. Add one, then click on the terrain to place its points.");
@@ -227,8 +227,8 @@ void SandboxApp::buildLandscapeWaterTab(Engine& e) {
         r.name = uniqueName("River", rivers, lakes);
         r.material = defaultMaterial;
         rivers.push_back(std::move(r));
-        waterSel_ = static_cast<int>(rivers.size()) - 1;
-        waterPt_ = -1;
+        landTool_.waterSel_ = static_cast<int>(rivers.size()) - 1;
+        landTool_.waterPt_ = -1;
         waterEdited();
         waterGestureEnd("New river");
     }
@@ -238,28 +238,28 @@ void SandboxApp::buildLandscapeWaterTab(Engine& e) {
         l.name = uniqueName("Lake", rivers, lakes);
         l.material = defaultMaterial;
         lakes.push_back(std::move(l));
-        waterSel_ = static_cast<int>(rivers.size() + lakes.size()) - 1;
-        waterPt_ = -1;
+        landTool_.waterSel_ = static_cast<int>(rivers.size() + lakes.size()) - 1;
+        landTool_.waterPt_ = -1;
         waterEdited();
         waterGestureEnd("New lake");
     }
     ImGui::SameLine();
-    ImGui::BeginDisabled(waterSel_ < 0);
-    if (ImGui::Button("Delete") && waterSel_ >= 0) {
-        if (waterSel_ < nr) rivers.erase(rivers.begin() + waterSel_);
-        else                lakes.erase(lakes.begin() + (waterSel_ - nr));
-        waterSel_ = -1;
-        waterPt_ = -1;
+    ImGui::BeginDisabled(landTool_.waterSel_ < 0);
+    if (ImGui::Button("Delete") && landTool_.waterSel_ >= 0) {
+        if (landTool_.waterSel_ < nr) rivers.erase(rivers.begin() + landTool_.waterSel_);
+        else                lakes.erase(lakes.begin() + (landTool_.waterSel_ - nr));
+        landTool_.waterSel_ = -1;
+        landTool_.waterPt_ = -1;
         waterEdited();
         waterGestureEnd("Delete water body");
     }
     ImGui::EndDisabled();
 
     // ---- the selected body ----
-    if (waterSel_ >= 0) {
+    if (landTool_.waterSel_ >= 0) {
         ImGui::Spacing();
         ImGui::Separator();
-        const bool isRiver = waterSel_ < nr;
+        const bool isRiver = landTool_.waterSel_ < nr;
         bool changed = false;
 
         const auto materialPicker = [&](std::string& material) {
@@ -296,7 +296,7 @@ void SandboxApp::buildLandscapeWaterTab(Engine& e) {
         };
 
         if (isRiver) {
-            fmt::OcRiver& r = rivers[static_cast<usize>(waterSel_)];
+            fmt::OcRiver& r = rivers[static_cast<usize>(landTool_.waterSel_)];
             nameField(r.name);
             materialPicker(r.material);
             f32 v;
@@ -310,11 +310,11 @@ void SandboxApp::buildLandscapeWaterTab(Engine& e) {
                 ImGui::PushID(k);
                 const fmt::OcRiverPoint& p = r.points[static_cast<usize>(k)];
                 const std::string label = "Point " + std::to_string(k) + "  (" + std::to_string(static_cast<int>(p.x)) + ", " + std::to_string(static_cast<int>(p.y)) + ")";
-                if (ImGui::Selectable(label.c_str(), waterPt_ == k)) waterPt_ = k;
+                if (ImGui::Selectable(label.c_str(), landTool_.waterPt_ == k)) landTool_.waterPt_ = k;
                 ImGui::PopID();
             }
-            if (waterPt_ >= 0 && waterPt_ < static_cast<int>(r.points.size())) {
-                fmt::OcRiverPoint& p = r.points[static_cast<usize>(waterPt_)];
+            if (landTool_.waterPt_ >= 0 && landTool_.waterPt_ < static_cast<int>(r.points.size())) {
+                fmt::OcRiverPoint& p = r.points[static_cast<usize>(landTool_.waterPt_)];
                 f32 w = static_cast<f32>(p.widthCm), fl = static_cast<f32>(p.flowCmS), z = static_cast<f32>(p.z);
                 if (ImGui::DragFloat("Width (cm)", &w, 5.0f, 10.0f, 20000.0f, "%.0f")) { p.widthCm = w; changed = true; }
                 if (ImGui::DragFloat("Flow (cm/s)", &fl, 1.0f, -2000.0f, 2000.0f, "%.0f")) { p.flowCmS = fl; changed = true; }
@@ -324,9 +324,9 @@ void SandboxApp::buildLandscapeWaterTab(Engine& e) {
                 editor::snapRiverToGround(r, [this](f64 x, f64 y, f64& z) { return landscape_.groundHeightAt(x, y, z); });
                 changed = true;
             }
-            if (ImGui::Button("Reverse Direction", ImVec2(-1, 0))) { editor::reverseRiver(r); waterPt_ = -1; changed = true; }
+            if (ImGui::Button("Reverse Direction", ImVec2(-1, 0))) { editor::reverseRiver(r); landTool_.waterPt_ = -1; changed = true; }
         } else {
-            fmt::OcLake& l = lakes[static_cast<usize>(waterSel_ - nr)];
+            fmt::OcLake& l = lakes[static_cast<usize>(landTool_.waterSel_ - nr)];
             nameField(l.name);
             materialPicker(l.material);
             f32 v;
@@ -339,7 +339,7 @@ void SandboxApp::buildLandscapeWaterTab(Engine& e) {
                 ImGui::PushID(k);
                 const std::string label = "Point " + std::to_string(k) + "  (" + std::to_string(static_cast<int>(l.points[static_cast<usize>(k)].x)) + ", " +
                                           std::to_string(static_cast<int>(l.points[static_cast<usize>(k)].y)) + ")";
-                if (ImGui::Selectable(label.c_str(), waterPt_ == k)) waterPt_ = k;
+                if (ImGui::Selectable(label.c_str(), landTool_.waterPt_ == k)) landTool_.waterPt_ = k;
                 ImGui::PopID();
             }
             if (ImGui::Button("Fit Level To Lowest Point", ImVec2(-1, 0))) {
@@ -357,26 +357,26 @@ void SandboxApp::buildLandscapeWaterTab(Engine& e) {
                               "One-shot: moving the water later does not move the bed.");
     }
 
-    if (waterGestureOpen_ && !ImGui::IsAnyItemActive() && !ImGui::IsMouseDown(0)) waterGestureEnd("Edit water");
+    if (landTool_.waterGestureOpen_ && !ImGui::IsAnyItemActive() && !ImGui::IsMouseDown(0)) waterGestureEnd("Edit water");
 }
 
 // The viewport half: LMB places and drags the selected body's control points on the terrain.
 void SandboxApp::handleWaterSpline(Engine& e, const ImGuiIO& io, bool overScene, f32 mx, f32 my) {
     (void)e;
-    sculptCursorValid_ = false;
+    landTool_.sculptCursorValid_ = false;
     waterSnapshotIfIdle();
     if (!landscape_.loaded()) return;
     auto& rivers = levelHeader_.rivers;
     auto& lakes = levelHeader_.lakes;
     const int nr = static_cast<int>(rivers.size());
-    if (waterSel_ < 0 || waterSel_ >= nr + static_cast<int>(lakes.size())) {
-        waterDrag_ = false;
-        if (waterGestureOpen_ && !io.MouseDown[0]) waterGestureEnd("Edit water");
+    if (landTool_.waterSel_ < 0 || landTool_.waterSel_ >= nr + static_cast<int>(lakes.size())) {
+        landTool_.waterDrag_ = false;
+        if (landTool_.waterGestureOpen_ && !io.MouseDown[0]) waterGestureEnd("Edit water");
         return;
     }
-    const bool isRiver = waterSel_ < nr;
-    fmt::OcRiver* river = isRiver ? &rivers[static_cast<usize>(waterSel_)] : nullptr;
-    fmt::OcLake* lake = isRiver ? nullptr : &lakes[static_cast<usize>(waterSel_ - nr)];
+    const bool isRiver = landTool_.waterSel_ < nr;
+    fmt::OcRiver* river = isRiver ? &rivers[static_cast<usize>(landTool_.waterSel_)] : nullptr;
+    fmt::OcLake* lake = isRiver ? nullptr : &lakes[static_cast<usize>(landTool_.waterSel_ - nr)];
     const auto count = [&]() { return static_cast<int>(isRiver ? river->points.size() : lake->points.size()); };
     const auto world = [&](int k) {
         if (isRiver) { const fmt::OcRiverPoint& p = river->points[static_cast<usize>(k)]; return Vec3{static_cast<f32>(p.x), static_cast<f32>(p.y), static_cast<f32>(p.z)}; }
@@ -387,8 +387,8 @@ void SandboxApp::handleWaterSpline(Engine& e, const ImGuiIO& io, bool overScene,
         if (k < 0 || k >= count()) return;
         if (isRiver) river->points.erase(river->points.begin() + k);
         else         lake->points.erase(lake->points.begin() + k);
-        waterPt_ = -1;
-        waterDrag_ = false;
+        landTool_.waterPt_ = -1;
+        landTool_.waterDrag_ = false;
         waterEdited();
     };
 
@@ -412,7 +412,7 @@ void SandboxApp::handleWaterSpline(Engine& e, const ImGuiIO& io, bool overScene,
         f32 t = 0.0f;
         if (hover >= 0) {
             if (io.KeyAlt) removePoint(hover);
-            else { waterPt_ = hover; waterDrag_ = true; }
+            else { landTool_.waterPt_ = hover; landTool_.waterDrag_ = true; }
         } else if (io.KeyCtrl) {
             const int seg = editor::pickSegment(sxy, valid, !isRiver, mx, my, 12.0f, t);
             if (seg >= 0 && haveHit) {
@@ -424,7 +424,7 @@ void SandboxApp::handleWaterSpline(Engine& e, const ImGuiIO& io, bool overScene,
                 } else {
                     lake->points.insert(lake->points.begin() + at, fmt::OcLakePoint{hit.posCm[0], hit.posCm[1]});
                 }
-                waterPt_ = at;
+                landTool_.waterPt_ = at;
                 waterEdited();
             }
         } else if (haveHit) {
@@ -435,42 +435,42 @@ void SandboxApp::handleWaterSpline(Engine& e, const ImGuiIO& io, bool overScene,
                 // Water does not run uphill: a new point is no higher than the one before it unless Shift is held.
                 if (!river->points.empty() && !io.KeyShift) p.z = std::min<f64>(p.z, river->points.back().z);
                 river->points.push_back(p);
-                waterPt_ = static_cast<int>(river->points.size()) - 1;
+                landTool_.waterPt_ = static_cast<int>(river->points.size()) - 1;
             } else {
                 if (lake->points.empty()) lake->levelCm = hit.posCm[2];   // the first click sets the level
                 lake->points.push_back(fmt::OcLakePoint{hit.posCm[0], hit.posCm[1]});
-                waterPt_ = static_cast<int>(lake->points.size()) - 1;
+                landTool_.waterPt_ = static_cast<int>(lake->points.size()) - 1;
             }
             waterEdited();
         }
     }
 
-    if (waterDrag_ && io.MouseDown[0] && waterPt_ >= 0 && waterPt_ < count()) {
+    if (landTool_.waterDrag_ && io.MouseDown[0] && landTool_.waterPt_ >= 0 && landTool_.waterPt_ < count()) {
         if (io.KeyShift) {
             // Vertical: pixels to centimetres at the point's distance from the camera.
             if (isRiver && io.MouseDelta.y != 0.0f) {
-                fmt::OcRiverPoint& p = river->points[static_cast<usize>(waterPt_)];
-                const Vec3 wp = world(waterPt_);
+                fmt::OcRiverPoint& p = river->points[static_cast<usize>(landTool_.waterPt_)];
+                const Vec3 wp = world(landTool_.waterPt_);
                 const f32 dist = std::sqrt((wp.x - viewState_.eye_.x) * (wp.x - viewState_.eye_.x) + (wp.y - viewState_.eye_.y) * (wp.y - viewState_.eye_.y) + (wp.z - viewState_.eye_.z) * (wp.z - viewState_.eye_.z));
                 p.z -= static_cast<f64>(io.MouseDelta.y) * std::max(dist, 100.0f) * 0.002;
                 waterEdited();
             }
         } else if (haveHit) {
             if (isRiver) {
-                fmt::OcRiverPoint& p = river->points[static_cast<usize>(waterPt_)];
+                fmt::OcRiverPoint& p = river->points[static_cast<usize>(landTool_.waterPt_)];
                 p.x = hit.posCm[0]; p.y = hit.posCm[1]; p.z = hit.posCm[2];
             } else {
-                fmt::OcLakePoint& p = lake->points[static_cast<usize>(waterPt_)];
+                fmt::OcLakePoint& p = lake->points[static_cast<usize>(landTool_.waterPt_)];
                 p.x = hit.posCm[0]; p.y = hit.posCm[1];
             }
             waterEdited();
         }
     }
-    if (!io.MouseDown[0]) waterDrag_ = false;
+    if (!io.MouseDown[0]) landTool_.waterDrag_ = false;
 
-    if (viewState_.levelFocused_ && waterPt_ >= 0 && ImGui::IsKeyPressed(ImGuiKey_Delete, false) && !io.WantTextInput) removePoint(waterPt_);
+    if (viewState_.levelFocused_ && landTool_.waterPt_ >= 0 && ImGui::IsKeyPressed(ImGuiKey_Delete, false) && !io.WantTextInput) removePoint(landTool_.waterPt_);
 
-    if (waterGestureOpen_ && !io.MouseDown[0] && !ImGui::IsAnyItemActive()) waterGestureEnd("Edit water");
+    if (landTool_.waterGestureOpen_ && !io.MouseDown[0] && !ImGui::IsAnyItemActive()) waterGestureEnd("Edit water");
 }
 
 #endif // AVER_WITH_IMGUI
@@ -480,17 +480,17 @@ void SandboxApp::handleWaterSpline(Engine& e, const ImGuiIO& io, bool overScene,
 void SandboxApp::drawWaterBodies(Engine& e) {
     rhi::IDevice* dev = e.device();
     if (!dev) return;
-    if (waterBodiesStale_) {
+    if (landTool_.waterBodiesStale_) {
         water_.rebuildBodies(*dev, levelHeader_);
-        waterBodiesStale_ = false;
+        landTool_.waterBodiesStale_ = false;
     }
 #if AVER_WITH_IMGUI
-    const bool show = !noEditorChrome_ && editorModeIsLandscape() && landscapeTab_ == LandscapeTab::Water;
+    const bool show = !noEditorChrome_ && editorModeIsLandscape() && landTool_.landscapeTab_ == LandscapeTab::Water;
 #else
     const bool show = false;
 #endif
     if (!show) {
-        if (waterLines_) { dev->destroyLineMesh(waterLines_); waterLines_ = 0; waterLinesKey_ = 0; }
+        if (landTool_.waterLines_) { dev->destroyLineMesh(landTool_.waterLines_); landTool_.waterLines_ = 0; landTool_.waterLinesKey_ = 0; }
         return;
     }
 
@@ -500,14 +500,14 @@ void SandboxApp::drawWaterBodies(Engine& e) {
         const u8* b = static_cast<const u8*>(p);
         for (usize i = 0; i < n; ++i) { key ^= b[i]; key *= 1099511628211ull; }
     };
-    mix(&waterSel_, sizeof waterSel_);
-    mix(&waterPt_, sizeof waterPt_);
+    mix(&landTool_.waterSel_, sizeof landTool_.waterSel_);
+    mix(&landTool_.waterPt_, sizeof landTool_.waterPt_);
     for (const fmt::OcRiver& r : levelHeader_.rivers) for (const fmt::OcRiverPoint& p : r.points) mix(&p, sizeof p);
     for (const fmt::OcLake& l : levelHeader_.lakes) { mix(&l.levelCm, sizeof l.levelCm); for (const fmt::OcLakePoint& p : l.points) mix(&p, sizeof p); }
 
-    if (key != waterLinesKey_) {
-        waterLinesKey_ = key;
-        if (waterLines_) { dev->destroyLineMesh(waterLines_); waterLines_ = 0; }
+    if (key != landTool_.waterLinesKey_) {
+        landTool_.waterLinesKey_ = key;
+        if (landTool_.waterLines_) { dev->destroyLineMesh(landTool_.waterLines_); landTool_.waterLines_ = 0; }
         std::vector<rhi::LineVertex> v;
         const auto seg = [&](const Vec3& a, const Vec3& b, f32 r, f32 g, f32 bl) {
             v.push_back({a.x, a.y, a.z + 15.0f, r, g, bl});
@@ -522,7 +522,7 @@ void SandboxApp::drawWaterBodies(Engine& e) {
         const int nr = static_cast<int>(levelHeader_.rivers.size());
         for (int i = 0; i < nr; ++i) {
             const fmt::OcRiver& r = levelHeader_.rivers[static_cast<usize>(i)];
-            const bool sel = i == waterSel_;
+            const bool sel = i == landTool_.waterSel_;
             std::vector<fluids::SplinePoint> pts;
             for (const fmt::OcRiverPoint& p : r.points)
                 pts.push_back({static_cast<f32>(p.x), static_cast<f32>(p.y), static_cast<f32>(p.z), static_cast<f32>(p.widthCm), static_cast<f32>(p.flowCmS)});
@@ -545,12 +545,12 @@ void SandboxApp::drawWaterBodies(Engine& e) {
             if (sel)
                 for (int k = 0; k < static_cast<int>(r.points.size()); ++k) {
                     const fmt::OcRiverPoint& p = r.points[static_cast<usize>(k)];
-                    handle({static_cast<f32>(p.x), static_cast<f32>(p.y), static_cast<f32>(p.z)}, k == waterPt_);
+                    handle({static_cast<f32>(p.x), static_cast<f32>(p.y), static_cast<f32>(p.z)}, k == landTool_.waterPt_);
                 }
         }
         for (int j = 0; j < static_cast<int>(levelHeader_.lakes.size()); ++j) {
             const fmt::OcLake& l = levelHeader_.lakes[static_cast<usize>(j)];
-            const bool sel = nr + j == waterSel_;
+            const bool sel = nr + j == landTool_.waterSel_;
             std::vector<f32> xy;
             editor::lakeOutlineXY(l, 200.0f, xy);
             const f32 z = static_cast<f32>(l.levelCm);
@@ -561,15 +561,15 @@ void SandboxApp::drawWaterBodies(Engine& e) {
             }
             if (sel)
                 for (int k = 0; k < static_cast<int>(l.points.size()); ++k)
-                    handle({static_cast<f32>(l.points[static_cast<usize>(k)].x), static_cast<f32>(l.points[static_cast<usize>(k)].y), z}, k == waterPt_);
+                    handle({static_cast<f32>(l.points[static_cast<usize>(k)].x), static_cast<f32>(l.points[static_cast<usize>(k)].y), z}, k == landTool_.waterPt_);
         }
-        if (!v.empty()) waterLines_ = dev->createLineMesh(v.data(), static_cast<u32>(v.size()));
+        if (!v.empty()) landTool_.waterLines_ = dev->createLineMesh(v.data(), static_cast<u32>(v.size()));
     }
-    if (waterLines_) {
+    if (landTool_.waterLines_) {
         const Mat4 w = Mat4::identity();
         dev->setLineDepth(false);
         dev->setLineWidth(2.0f * viewState_.dpi_);
-        dev->drawLines(waterLines_, &w.m[0][0]);
+        dev->drawLines(landTool_.waterLines_, &w.m[0][0]);
         dev->setLineWidth(1.0f);
         dev->setLineDepth(true);
     }

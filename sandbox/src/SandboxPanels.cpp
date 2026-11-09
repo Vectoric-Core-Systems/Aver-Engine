@@ -761,15 +761,15 @@ void SandboxApp::buildLandscapeModePanel(Engine& e) {
         // A choice of the sizes the quadtree can tile, not a free slider: any other count wrote an .ocland that loaded but never built.
         {
             static constexpr int kSizes[] = {129, 257, 513, 1025, 2049};
-            if (std::find(std::begin(kSizes), std::end(kSizes), landCreateSamples_) == std::end(kSizes)) landCreateSamples_ = 513;
+            if (std::find(std::begin(kSizes), std::end(kSizes), landTool_.landCreateSamples_) == std::end(kSizes)) landTool_.landCreateSamples_ = 513;
             char cur[16];
-            std::snprintf(cur, sizeof cur, "%d", landCreateSamples_);
+            std::snprintf(cur, sizeof cur, "%d", landTool_.landCreateSamples_);
             ImGui::SetNextItemWidth(-1.0f);
             if (ImGui::BeginCombo("Samples", cur)) {
                 for (int s : kSizes) {
                     char lbl[16];
                     std::snprintf(lbl, sizeof lbl, "%d", s);
-                    if (ImGui::Selectable(lbl, s == landCreateSamples_)) landCreateSamples_ = s;
+                    if (ImGui::Selectable(lbl, s == landTool_.landCreateSamples_)) landTool_.landCreateSamples_ = s;
                 }
                 ImGui::EndCombo();
             }
@@ -777,9 +777,9 @@ void SandboxApp::buildLandscapeModePanel(Engine& e) {
                 ImGui::SetTooltip("Grid resolution per side: a power of two plus one, the sizes the quadtree tiles.");
         }
         ImGui::SetNextItemWidth(-1.0f);
-        ImGui::SliderFloat("Spacing (cm)", &landCreateSpacingCm_, 25.0f, 400.0f, "%.0f");
+        ImGui::SliderFloat("Spacing (cm)", &landTool_.landCreateSpacingCm_, 25.0f, 400.0f, "%.0f");
         ImGui::TextDisabled("%.0f m across",
-                            (landCreateSamples_ - 1) * landCreateSpacingCm_ / 100.0f);
+                            (landTool_.landCreateSamples_ - 1) * landTool_.landCreateSpacingCm_ / 100.0f);
         ImGui::Spacing();
         ImGui::TextDisabled("SHAPE");
         int seed = static_cast<int>(landscape_.noiseParams().seed);
@@ -793,8 +793,8 @@ void SandboxApp::buildLandscapeModePanel(Engine& e) {
         ImGui::Spacing();
         ImGui::BeginDisabled(!project_.valid());
         if (ImGui::Button("Create Landscape", ImVec2(-1, 0)))
-            createLandscapeForLevel(e.device(), static_cast<u32>(landCreateSamples_),
-                                    landCreateSpacingCm_);
+            createLandscapeForLevel(e.device(), static_cast<u32>(landTool_.landCreateSamples_),
+                                    landTool_.landCreateSpacingCm_);
         ImGui::EndDisabled();
         uiReg_.track("landscape.create");
         if (!project_.valid() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
@@ -822,7 +822,7 @@ void SandboxApp::buildLandscapeModePanel(Engine& e) {
     // wave3: Sculpt | Paint | Water. The sculpt controls below are the first tab, unchanged.
     if (ImGui::BeginTabBar("##landscapeTabs")) {
     if (ImGui::BeginTabItem("Sculpt")) {
-    landscapeTab_ = LandscapeTab::Sculpt;
+    landTool_.landscapeTab_ = LandscapeTab::Sculpt;
     ImGui::TextDisabled("SCULPT");
     // 6 tools; only the first 4 have a hotkey (SculptRaise..SculptFlatten, keys 1-4). Ramp/Noise
     // are mouse/panel-only for now, so no tooltip advertises a key that does nothing.
@@ -836,32 +836,32 @@ void SandboxApp::buildLandscapeModePanel(Engine& e) {
 
     ImGui::Spacing();
     ImGui::TextDisabled("BRUSH");
-    editor::panelFloat("Radius (cm)", &sculptRadiusCm_, 50.0f, 5000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
-    editor::panelFloat("Strength (cm/s)", &sculptStrengthCm_, 5.0f, 2000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
+    editor::panelFloat("Radius (cm)", &landTool_.sculptRadiusCm_, 50.0f, 5000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
+    editor::panelFloat("Strength (cm/s)", &landTool_.sculptStrengthCm_, 5.0f, 2000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
     // FALLOFF is new: applyBrush's curve was a hardcoded smoothstep with no way to reach it, and
     // every terrain editor exposes hard vs. soft edge as separate tools.
-    editor::panelFloat("Falloff", &sculptFalloff_, 0.0f, 1.0f, "%.2f");
+    editor::panelFloat("Falloff", &landTool_.sculptFalloff_, 0.0f, 1.0f, "%.2f");
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("0 is a hard edge, 1 is a soft smoothstep shoulder.");
 
     if (viewState_.sculptTool_ == SculptTool::Flatten) {
         ImGui::Spacing();
         ImGui::TextDisabled("FLATTEN TARGET");
-        ImGui::Text("%.0f cm", sculptFlattenTargetCm_);
+        ImGui::Text("%.0f cm", landTool_.sculptFlattenTargetCm_);
         ImGui::TextDisabled("Picked from the first click of each stroke.");
     }
     if (viewState_.sculptTool_ == SculptTool::Ramp) {
         ImGui::Spacing();
         ImGui::TextDisabled("RAMP START");
-        ImGui::Text("(%.0f, %.0f) @ %.0f cm", sculptRampStartCm_[0], sculptRampStartCm_[1],
-                    sculptRampStartHeightCm_);
+        ImGui::Text("(%.0f, %.0f) @ %.0f cm", landTool_.sculptRampStartCm_[0], landTool_.sculptRampStartCm_[1],
+                    landTool_.sculptRampStartHeightCm_);
         ImGui::TextDisabled("Picked from the first click of each stroke. Strength is the total");
         ImGui::TextDisabled("rise from there to wherever the brush is now.");
     }
     if (viewState_.sculptTool_ == SculptTool::Noise) {
         ImGui::Spacing();
         ImGui::TextDisabled("NOISE SEED");
-        ImGui::Text("%u", sculptNoiseSeed_);
+        ImGui::Text("%u", landTool_.sculptNoiseSeed_);
         ImGui::TextDisabled("Derived from the first click of each stroke -- not the clock -- so");
         ImGui::TextDisabled("re-applying the same stroke gives the same terrain.");
     }
@@ -886,13 +886,13 @@ void SandboxApp::buildLandscapeModePanel(Engine& e) {
     ImGui::EndTabItem();
     }
     if (ImGui::BeginTabItem("Paint")) {
-        landscapeTab_ = LandscapeTab::Paint;
+        landTool_.landscapeTab_ = LandscapeTab::Paint;
         buildLandscapePaintTab(e);
         ImGui::EndTabItem();
     }
 #if AVER_MODULE_FLUIDS
     if (ImGui::BeginTabItem("Water")) {
-        landscapeTab_ = LandscapeTab::Water;
+        landTool_.landscapeTab_ = LandscapeTab::Water;
         buildLandscapeWaterTab(e);
         ImGui::EndTabItem();
     }
@@ -925,7 +925,7 @@ void SandboxApp::foliagePanelCreateType() {
 }
 
 void SandboxApp::buildFoliageModePanel() {
-    if (foliagePalette_.empty()) {
+    if (landTool_.foliagePalette_.empty()) {
         ImGui::TextWrapped("No foliage types are authored in this project yet, so Foliage mode "
                            "has nothing to paint.");
         ImGui::Spacing();
@@ -939,7 +939,7 @@ void SandboxApp::buildFoliageModePanel() {
     ImGui::TextWrapped("Ticked types are placed, chosen at random (weighted by each type's own "
                        "Weight) per instance. Scale, spacing, slope alignment and material are "
                        "authored on each type's own tab -- click " ICON_EDIT " to open it.");
-    for (auto& sp : foliagePalette_) {
+    for (auto& sp : landTool_.foliagePalette_) {
         ImGui::PushID(sp.assetPath.c_str());
         ImGui::Checkbox(sp.name.c_str(), &sp.enabled);
         ImGui::SameLine();
@@ -953,8 +953,8 @@ void SandboxApp::buildFoliageModePanel() {
 
     ImGui::Spacing();
     ImGui::TextDisabled("BRUSH");
-    editor::panelFloat("Radius (cm)", &foliageRadiusCm_, 100.0f, 10000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
-    editor::panelFloat("Density", &foliageDensity_, 1.0f, 64.0f, "%.0f");
+    editor::panelFloat("Radius (cm)", &landTool_.foliageRadiusCm_, 100.0f, 10000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
+    editor::panelFloat("Density", &landTool_.foliageDensity_, 1.0f, 64.0f, "%.0f");
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Placements attempted per brush application.");
 
     ImGui::Spacing();
