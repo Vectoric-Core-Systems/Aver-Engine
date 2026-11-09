@@ -285,12 +285,7 @@ std::vector<unsigned> earClip(const std::vector<double>& xy) {
     return out;
 }
 
-}  // namespace
-
-Mesh combine(const Mesh& a, const Mesh& b, Op op) {
-    if (a.empty()) return op == Op::Union ? b : Mesh{};
-    if (b.empty()) return op == Op::Intersection ? Mesh{} : a;
-    Bsp A(toInternal(a)), B(toInternal(b));
+Mesh combineTrees(Bsp A, Bsp B, Op op) {
     switch (op) {
         case Op::Union:
             A.clipTo(B);
@@ -321,6 +316,28 @@ Mesh combine(const Mesh& a, const Mesh& b, Op op) {
             break;
     }
     return fromInternal(A.allPolygons());
+}
+
+}  // namespace
+
+struct Prepared::Impl {
+    Bsp tree;
+    explicit Impl(const Mesh& m) : tree(toInternal(m)) {}
+};
+
+Prepared::Prepared(const Mesh& a) : impl_(a.empty() ? nullptr : new Impl(a)), source_(a) {}
+Prepared::~Prepared() = default;
+
+Mesh Prepared::combine(const Mesh& b, Op op) const {
+    if (!impl_) return op == Op::Union ? b : Mesh{};
+    if (b.empty()) return op == Op::Intersection ? Mesh{} : source_;
+    return combineTrees(impl_->tree, Bsp(toInternal(b)), op);
+}
+
+Mesh combine(const Mesh& a, const Mesh& b, Op op) {
+    if (a.empty()) return op == Op::Union ? b : Mesh{};
+    if (b.empty()) return op == Op::Intersection ? Mesh{} : a;
+    return combineTrees(Bsp(toInternal(a)), Bsp(toInternal(b)), op);
 }
 
 void transform(Mesh& m, const double t[12]) {

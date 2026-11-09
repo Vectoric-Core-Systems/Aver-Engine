@@ -53,6 +53,9 @@ aver_add_module(Aver.Formats
     # G4 R7: meshes built from arrays at run time, instance tables baked into one mesh, and BSP constructive solid geometry for the converter.
     src/MeshBuild.cpp
     src/Csg.cpp
+    # W7: Voronoi brittle fracture of a closed mesh (seed patterns, cells, contact graph) and the .ocfrac asset.
+    src/Fracture.cpp
+    src/OcFrac.cpp
     # EditMesh: the editable polygon mesh behind the Modeling mode (primitives, poly ops, booleans through Csg, UV tools, authored-mesh save): headless, no device.
     src/EditMesh.cpp
     src/EditMeshOps.cpp

@@ -10,6 +10,11 @@ add_executable(EditMeshTest src/EditMeshTest.cpp)
 target_link_libraries(EditMeshTest PRIVATE Aver.Formats Aver.Platform Aver.Core)
 set_target_properties(EditMeshTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# FractureTest -- Voronoi brittle fracture and the .ocfrac asset (aver/formats/Fracture.hpp, OcFrac.hpp): volume/closure/overlap invariants, contact graph, determinism, round trip, timing.
+add_executable(FractureTest src/FractureTest.cpp)
+target_link_libraries(FractureTest PRIVATE Aver.Formats Aver.Platform Aver.Core)
+set_target_properties(FractureTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 add_executable(MeshBuildTest src/MeshBuildTest.cpp)
 target_link_libraries(MeshBuildTest PRIVATE Aver.Formats Aver.Platform Aver.Core)
 set_target_properties(MeshBuildTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

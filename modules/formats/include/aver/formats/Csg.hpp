@@ -4,6 +4,7 @@
 // maps the result. A solid is a closed set of polygons wound counter-clockwise seen from outside; an open surface is carried but gives no meaningful boolean.
 // Contract: R7 of https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G4_RENDER.md.
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace aver::fmt::csg {
@@ -28,6 +29,21 @@ enum class Op { Union = 0, Intersection = 1, Subtraction = 2 };   // the operati
 
 // a OP b. Both are copied; neither is modified.
 Mesh combine(const Mesh& a, const Mesh& b, Op op);
+
+// A solid whose BSP tree is built once and reused: many booleans against the same operand (a fracture clips one mesh against hundreds of cells)
+// pay the tree build a single time. combine(b, op) equals aver::fmt::csg::combine(source, b, op).
+class Prepared {
+public:
+    explicit Prepared(const Mesh& a);
+    ~Prepared();
+    Prepared(const Prepared&) = delete;
+    Prepared& operator=(const Prepared&) = delete;
+    Mesh combine(const Mesh& b, Op op) const;
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+    Mesh source_;
+};
 
 // Row-vector convention is NOT used here: m is a 3x4 column-vector matrix, rows {r0, r1, r2} each (x, y, z, translation): p' = M * (p, 1). Normals use the
 // inverse transpose of the 3x3 part; a mirroring matrix reverses the winding.
