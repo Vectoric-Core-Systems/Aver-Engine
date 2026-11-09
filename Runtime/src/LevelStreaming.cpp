@@ -86,10 +86,36 @@ void LevelStreaming::begin(const fmt::OcWorldData& w, GameContent& content, rhi:
         if (bounds.back().max.x - bounds.back().min.x >= static_cast<f64>(kUnknownExtentCm)) ++unknown;
     }
     streamer_.build(bounds, s);
+    layers_.build(w.dataLayers);
+    completedLayers_.clear();
+    if (layers_.count() > 0) {
+        for (u32 i = 0; i < items_.size(); ++i) {
+            std::vector<std::string> names;
+            for (const u32 pl : items_[i].placements)
+                for (const std::string& n : records_[pl].layers)
+                    if (std::find(names.begin(), names.end(), n) == names.end()) names.push_back(n);
+            if (!names.empty()) layers_.bind(streamer_, i, names);
+        }
+        layers_.apply(streamer_);
+    }
     active_ = true;
     AVER_INFO("[LevelStream] {} placement(s) in {} root(s); cell {:.0f} m, load {:.0f} m, evict {:.0f} m; "
               "{} root(s) with unknown bounds stay resident",
               records_.size(), items_.size(), s.cellCm / 100.0f, s.loadCm / 100.0f, s.evictCm / 100.0f, unknown);
+}
+
+world::DataLayerSet::Result LevelStreaming::setDataLayerState(std::string_view name, world::LayerState st, bool fromGame) {
+    const world::DataLayerSet::Result r = layers_.setState(name, st, fromGame);
+    if (r == world::DataLayerSet::Result::Ok) layers_.apply(streamer_);
+    return r;
+}
+
+bool LevelStreaming::popCompletedLayer(std::string& name, world::LayerState& state) {
+    if (completedLayers_.empty()) return false;
+    name = layers_.name(completedLayers_.front().layer);
+    state = completedLayers_.front().state;
+    completedLayers_.pop_front();
+    return true;
 }
 
 void LevelStreaming::end(scene::World& world) {
@@ -263,6 +289,8 @@ void LevelStreaming::tick(scene::World& world, const std::vector<Vec3>& viewersL
     for (const Vec3& v : viewersLocal)
         viewers.push_back(world::Vec3d{static_cast<f64>(v.x) + static_cast<f64>(origin_.x), static_cast<f64>(v.y) + static_cast<f64>(origin_.y),
                                        static_cast<f64>(v.z)});
+    if (layers_.pending() > 0)
+        for (const world::DataLayerSet::Completed& c : layers_.settle(streamer_, viewers)) completedLayers_.push_back(c);   // last tick's loads and evictions
     std::vector<u32> toLoad, toEvict;
     streamer_.update(viewers, toLoad, toEvict);
     hm.mark("streamer");

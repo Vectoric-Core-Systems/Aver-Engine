@@ -30,6 +30,7 @@
 #endif
 #if AVER_MODULE_FRAMEWORK
 #  include "aver/framework/framework_abi.h"
+#  include "aver/framework/framework_datalayer_abi.h"
 #endif
 
 namespace aver::game {
@@ -326,7 +327,7 @@ void GameLevel::load(const std::string& path, GameContent& content) {
 #endif
     content_ = &content;
     world::LevelInstance inst;
-    if (streamed) streaming_.begin(w, content, *device_, opt, streamHooks_);
+    if (streamed) { streaming_.begin(w, content, *device_, opt, streamHooks_); installDataLayerProvider(); }
     else inst = world::instantiate(w, opt);
     if (cooked.use) {   // the chunk-owned placements stream from the set; w (the slim level) was loaded flat above
         std::string authoredWhy;
@@ -828,6 +829,45 @@ bool GameLevel::placementBounds(Vec3& lo, Vec3& hi, f32& radius) const {
     // [wave3/level-instances end]
 }
 
+void GameLevel::installDataLayerProvider() {
+#if AVER_MODULE_FRAMEWORK
+    if (streaming_.dataLayers().count() == 0) return;
+    aver_fw_set_datalayer_provider(
+        [](void* user) -> i32 { return static_cast<i32>(static_cast<GameLevel*>(user)->streaming_.dataLayers().count()); },
+        [](i32 index, char* buf, i32 cap, void* user) -> i32 {
+            const world::DataLayerSet& set = static_cast<GameLevel*>(user)->streaming_.dataLayers();
+            if (index < 0 || static_cast<usize>(index) >= set.count()) return 0;
+            if (buf && cap > 0) { std::strncpy(buf, set.name(static_cast<u32>(index)).c_str(), static_cast<usize>(cap) - 1); buf[cap - 1] = 0; }
+            return 1;
+        },
+        [](const char* name, i32* outState, void* user) -> i32 {
+            const world::DataLayerSet& set = static_cast<GameLevel*>(user)->streaming_.dataLayers();
+            const i32 id = set.idOf(name);
+            if (id < 0) return 0;
+            if (outState) *outState = static_cast<i32>(set.effective(static_cast<u32>(id)));
+            return 1;
+        },
+        [](const char* name, i32 state, void* user) -> i32 {
+            if (state < 0 || state > 2) return -2;
+            const world::LayerState st = state == 0 ? world::LayerState::Unloaded : state == 1 ? world::LayerState::Loaded : world::LayerState::Activated;
+            switch (static_cast<GameLevel*>(user)->streaming_.setDataLayerState(name, st, true)) {
+                case world::DataLayerSet::Result::Ok: return 1;
+                case world::DataLayerSet::Result::NotRuntime: return -1;
+                default: return 0;
+            }
+        },
+        [](char* buf, i32 cap, i32* outState, void* user) -> i32 {
+            std::string name;
+            world::LayerState st{};
+            if (!static_cast<GameLevel*>(user)->streaming_.popCompletedLayer(name, st)) return 0;
+            if (buf && cap > 0) { std::strncpy(buf, name.c_str(), static_cast<usize>(cap) - 1); buf[cap - 1] = 0; }
+            if (outState) *outState = static_cast<i32>(st);
+            return 1;
+        },
+        this);
+#endif
+}
+
 std::vector<std::string> GameLevel::foliageTablePaths(const std::vector<std::string>& foliageFiles) const {
     std::vector<std::string> out(foliageFiles.size());
     if (!content_) return out;
@@ -870,6 +910,9 @@ void GameLevel::unload() {
     scene::World& world = scene::World::instance();
     authored_.end(world);   // LARGE_WORLD 2.4.6: a cooked set's chunks (a no-op when none is streaming)
     streaming_.end(world);
+#if AVER_MODULE_FRAMEWORK
+    aver_fw_set_datalayer_provider(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+#endif
     if (content_ && device_) for (const u64 id : heldMeshes_) content_->releaseMesh(*device_, id);
     heldMeshes_.clear();
     streamFoliage_.clear();

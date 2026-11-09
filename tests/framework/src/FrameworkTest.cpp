@@ -7,6 +7,7 @@
 #include "aver/framework/framework_abi.h"
 #include "aver/framework/InputKeys.hpp"
 #include "aver/framework/framework_hooks.h"
+#include "aver/framework/framework_datalayer_abi.h"
 #include "aver/framework/framework_terrain_abi.h"
 #include "aver/framework/framework_timers_abi.h"
 #include "aver/scene/Components.hpp"
@@ -2285,6 +2286,66 @@ static void testTerrainAbi() {
     check(aver_fw_terrain_layer_count() == 0, "clearing the provider answers 0 again");
 }
 
+
+// ---- W10: data layer state (framework_datalayer_abi.h) ----
+struct FakeLayers {
+    int sets = 0;
+    int pending = 0;
+};
+static int32_t fakeLayerCount2(void*) { return 2; }
+static int32_t fakeLayerName2(int32_t i, char* buf, int32_t cap, void*) {
+    static const char* names[2] = {"Day", "Night"};
+    if (i < 0 || i > 1) return 0;
+    if (buf && cap > 0) { std::strncpy(buf, names[i], static_cast<size_t>(cap) - 1); buf[cap - 1] = 0; }
+    return 1;
+}
+static int32_t fakeLayerGet(const char* name, int32_t* st, void*) {
+    if (std::string(name) == "Day") { if (st) *st = AVER_FW_DATALAYER_ACTIVATED; return 1; }
+    if (std::string(name) == "Night") { if (st) *st = AVER_FW_DATALAYER_UNLOADED; return 1; }
+    return 0;
+}
+static int32_t fakeLayerSet(const char* name, int32_t st, void* user) {
+    if (st < 0 || st > 2) return -2;
+    if (std::string(name) == "Day") return -1;   // not a runtime layer
+    if (std::string(name) != "Night") return 0;
+    ++static_cast<FakeLayers*>(user)->sets;
+    static_cast<FakeLayers*>(user)->pending = 1;
+    return 1;
+}
+static int32_t fakeLayerPoll(char* buf, int32_t cap, int32_t* st, void* user) {
+    FakeLayers* f = static_cast<FakeLayers*>(user);
+    if (!f->pending) return 0;
+    f->pending = 0;
+    if (buf && cap > 0) { std::strncpy(buf, "Night", static_cast<size_t>(cap) - 1); buf[cap - 1] = 0; }
+    if (st) *st = AVER_FW_DATALAYER_ACTIVATED;
+    return 1;
+}
+
+static void testDataLayerAbi() {
+    AVER_INFO("=== data layers ===");
+    check(aver_fw_datalayer_abi_version() == AVER_FW_DATALAYER_ABI_VERSION, "data layer ABI version matches the header");
+    aver_fw_set_datalayer_provider(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+    char buf[16] = "untouched";
+    int32_t st = -9;
+    check(aver_fw_datalayer_count() == 0 && aver_fw_datalayer_name(0, buf, 16) == 0 && std::string(buf) == "untouched", "no provider: no layers, buffers untouched");
+    check(aver_fw_datalayer_get_state("Day", &st) == 0 && st == -9 && aver_fw_datalayer_set_state("Day", 2) == 0 && aver_fw_datalayer_poll_completed(buf, 16, &st) == 0,
+          "no provider: get, set and poll answer 0");
+
+    FakeLayers f;
+    check(aver_fw_set_datalayer_provider(&fakeLayerCount2, &fakeLayerName2, &fakeLayerGet, &fakeLayerSet, &fakeLayerPoll, &f) == 1, "provider installed");
+    check(aver_fw_datalayer_count() == 2 && aver_fw_datalayer_name(1, buf, 16) == 1 && std::string(buf) == "Night" && aver_fw_datalayer_name(5, buf, 16) == 0, "count and names relay");
+    check(aver_fw_datalayer_name(0, buf, 3) == 1 && std::string(buf) == "Da", "a long name is truncated at cap with a terminator");
+    check(aver_fw_datalayer_get_state("Day", &st) == 1 && st == AVER_FW_DATALAYER_ACTIVATED && aver_fw_datalayer_get_state("Nope", &st) == 0, "get relays the state; an unknown layer answers 0");
+    check(aver_fw_datalayer_get_state(nullptr, &st) == 0 && aver_fw_datalayer_set_state(nullptr, 1) == 0, "a null name answers 0 without calling the provider");
+    check(aver_fw_datalayer_set_state("Day", 2) == -1, "a non-runtime layer answers -1");
+    check(aver_fw_datalayer_set_state("Night", 9) == -2, "a bad state answers -2");
+    check(aver_fw_datalayer_set_state("Night", 2) == 1 && f.sets == 1, "a runtime layer is set, with the provider's user pointer");
+    check(aver_fw_datalayer_poll_completed(buf, 16, &st) == 1 && std::string(buf) == "Night" && st == AVER_FW_DATALAYER_ACTIVATED, "the completion is polled");
+    check(aver_fw_datalayer_poll_completed(buf, 16, &st) == 0, "and only once");
+    aver_fw_set_datalayer_provider(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+    check(aver_fw_datalayer_count() == 0, "clearing the provider answers 0 again");
+}
+
 int main() {
     AVER_INFO("Aver.Framework test");
     check(aver_fw_scene_abi_matches() == 1, "the framework's scene ABI major matches the loaded scene DLL");
@@ -2322,6 +2383,7 @@ int main() {
     testActionRegistryReadback();
     testInputSchemeTriggers();
     testTerrainAbi();
+    testDataLayerAbi();
 
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
     return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);

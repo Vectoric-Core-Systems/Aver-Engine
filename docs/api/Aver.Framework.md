@@ -2,7 +2,7 @@
 
 # Aver.Framework public API
 
-317 public types and 2641 public members, read from `scripting/csharp/Aver.Framework/` (160 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+320 public types and 2655 public members, read from `scripting/csharp/Aver.Framework/` (163 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Framework
 
@@ -967,6 +967,30 @@ Values: `String`, `Int`, `Float`, `Bool`, `Vec3`, `Text`, `Strings`
 ### DataIgnoreAttribute
 
 `public sealed class DataIgnoreAttribute : Attribute` - Leaves the member out of binding.
+
+### DataLayerResult
+
+`public enum DataLayerResult` - What SetState(string, DataLayerState) did.
+
+Values: `Ok = 1`, `Unknown = 0`, `NotRuntime = -1`, `BadState = -2`
+
+### DataLayers
+
+`public static class DataLayers` - The level's data layers.
+
+- `public static int Count { get; }` - How many layers the loaded level declares.
+- `public static string Name(int index)` - The name of layer index, or an empty string for an unknown index.
+- `public static IReadOnlyList<string> Names()` - The names of every layer, in file order.
+- `public static bool TryGetState(string name, out DataLayerState state)` - The state in force for a layer (never above its parent's), or false for an unknown name.
+- `public static DataLayerState GetState(string name)` - The state in force for a layer; Unloaded for an unknown name (use TryGetState to tell the two apart).
+- `public static DataLayerResult SetState(string name, DataLayerState state)` - Asks for a layer to take a state.
+- `public static bool TryPollCompleted(out string name, out DataLayerState state)` - Takes the oldest finished change: the streamer has loaded what an activated layer needs in range, or evicted everything an unloaded one held.
+
+### DataLayerState
+
+`public enum DataLayerState` - The runtime state of a data layer.
+
+Values: `Unloaded = 0`, `Loaded = 1`, `Activated = 2`
 
 ### DataRowNameAttribute
 

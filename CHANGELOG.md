@@ -10,6 +10,11 @@ triggering inputs for anything summarised below.
 
 ## [Unreleased]
 
+### Data layers and dynamic HLOD (UE parity wave 2, W10 and W2)
+
+- `DATALAYER` header records and `layers=` on placements and `FOLIAGE` tables; `PlacementStreamer` honours layer states (Unloaded / Loaded / Activated, parents, runtime flag) through `world::DataLayerSet`; cooked chunks carry membership (`LAYR`). C# `DataLayers` and `AN_GetDataLayerState` / `AN_SetDataLayerState` over a new `framework_datalayer_abi.h`.
+- Dynamic HLOD data: `STREAM hlod=`, `HLOD` records in the `.ocstream`, `fmt::mergeStaticMeshes`, `trifactor::simplifyToBudget`, `AverAssetC hlod` with per-cell content-hash staleness, the proxy residency ring on `PlacementStreamer`, and `world::buildChunkProxy` for generated chunks. Nothing draws proxies yet; see `docs/LEVEL_STREAMING.md` section 9.
+
 ### PCG vegetation and biomes (UE parity wave 2, W4)
 
 - `.ocbiome` (text): a mask (paint layer, noise, spline or volume, with a ramped edge and `invert`) and foliage entries with density, slope, height, layer, noise, clump and prune rules. New PCG nodes `NoiseMask`, `EdgeFalloff` (seeded dither so two biomes interleave at their border), `Clump` and `Compete`; `pcgBuildBiomeGraph` compiles biomes plus `.ocfoliage` types into one `DOMAIN pcg` graph.

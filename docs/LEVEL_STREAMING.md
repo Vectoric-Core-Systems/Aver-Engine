@@ -242,3 +242,40 @@ origin (`ItemLoader::load(entries, origin)`), so an origin shift loads and evict
 `setOrigin` at a level load. `recordPositionOf(entity, local, out)` is the untouched-record rule for write-back: a resident root keeps its authored f64 on every axis nobody moved and
 gets `origin + local` on a moved one; a child's record is parent-relative and has no origin. Bounds stored in a record stay f32 boxes (a centimetre at 100 km). A level that holds
 `LEVELINST` records is not origin-aware yet (`LevelInstances` still holds f32 bounds), and the service refuses to shift under it.
+
+## 9. Data layers and dynamic HLOD (UE parity wave 2, W10 and W2)
+
+**Data layers** (`DATALAYER <name> initial=<unloaded|loaded|activated> runtime=<0|1> [parent=<name>]`, one header record each; names percent-encoded). A placement lists the layers it is in with
+`layers=a,b` on its PLACE/PLACEG/CHILD record (`OcWorldPlacement::layers`) and a foliage table with `FOLIAGE <path> layers=a,b` (`OcWorldData::foliageLayers`, parallel to `foliageFiles`, may be
+shorter). All of it is additive: a level with none loads exactly as before, and an older reader skips the DATALAYER records (a `layers=` token on a placement with no material reads as its
+material there, the same trap `id=` has). A layer's state is ordered Unloaded < Loaded < Activated; a placement is resident only while every layer it is in is at least Loaded, and Activated
+additionally lets the host show and simulate it (Loaded = resident but hidden). A child layer is never above its parent. `runtime=1` layers may change while the game runs, the others only in
+the editor.
+
+- `world::PlacementStreamer`: `setItemLayers`, `setLayerState`, `eligible`, `activated`. Ineligible items are never loaded (a pin does not override a layer) and a layer going to Unloaded evicts its
+  resident items on the next update whatever the distance and the eviction budget; distance residency is otherwise unchanged. `world::DataLayerSet` (DataLayers.hpp) builds from the records, resolves
+  parents, refuses a game-side change to a `runtime=0` layer, binds items and reports completions (`settle`): an unload completes when no member is resident, a load when every member in load range is.
+- `game::LevelStreaming` builds the set at `begin` (a root's layers are the union of its placements') and applies it; `setDataLayerState(name, state, fromGame)` is the entry point. Loaded versus
+  Activated is NOT applied to entities yet (only residency), and a level with `DATALAYER` records but no `STREAM` still loads every placement.
+- C#: `Aver.Framework.DataLayers` (`Count`, `Names`, `TryGetState`, `GetState`, `SetState`, `TryPollCompleted`) over `framework_datalayer_abi.h` (a host-installed provider, like the terrain
+  queries); graph nodes `AN_GetDataLayerState` and `AN_SetDataLayerState` (docs/nodes/DataLayer.md). The Runtime does not install the provider yet.
+- Cook: `AverAssetC cook-chunks` writes a placement's layers as the `LAYR` payload extra and folds them into the cook hash (changing a layer makes a cooked set stale);
+  `world::splitPayloadByLayers` divides a cooked chunk into active, hidden and held entities by layer state, parents deciding their children, losing none. The authored chunk source reads
+  `LAYR` back into `OcWorldPlacement::layers`; nothing gates cooked-chunk loading by layer state yet.
+
+**Dynamic HLOD.** `STREAM ... hlod=<cm>` (`OcStreamSettings::hlodCm`, 0 = no ring) and `HLOD <cx>,<cy> <level> <proxy .ocmesh> <16 hex>` records in the `.ocstream` (`OcStreamData::hlod`)
+name one merged, simplified proxy per streaming cell and the hash of what it was built from. A proxy's vertices are relative to its cell's minimum corner `(cx * cellCm, cy * cellCm, 0)`.
+- `fmt::mergeStaticMeshes` (OcMeshMerge.hpp): bakes each placement's transform into its vertices, groups by material name into submeshes (source materials, no atlas), welds, optionally drops tiny
+  or enclosed instances, and keeps far-from-origin geometry exact with an `origin`. `trifactor::simplifyToBudget` reduces it to a triangle budget (per submesh, materials kept);
+  `fmt::hlodTargetTriangles` derives the budget from the cell's projected size at `hlodCm`.
+- `AverAssetC hlod <level> --content-dir <dir> [--hlod m] [--max-tris n] [--min-tris n] [--drop-smaller m] [--drop-enclosed] [--force]` (`fmt::bakeHlod`) needs the streaming data, builds the proxies
+  under `Binaries/Streaming/<level>/hlod/` and rewrites the `HLOD` records. Staleness is per cell: the hash covers the bake parameters and, for each merged placement, its id, asset, material,
+  world transform and mesh content, so editing one cell rebuilds only that cell, and a cell with no eligible content loses its proxy. Only static, visible, unanimated mesh placements feed
+  a proxy, and only those whose layers are all always on (defined, initially Activated, `runtime=0`, parents too). The editor's save of the bounds keeps the HLOD records.
+- `PlacementStreamer::buildHlod/updateHlod` (the ring): a cell's proxy shows from `hlodCm`, hides the update its own content is fully resident, shows again only once none of it is resident, and
+  hides past `hlodEvictCm`; pure residency decisions, tested over camera walks for gaps and flicker.
+- `world::buildChunkProxy` (ChunkProxy.hpp) makes a proxy for a generated chunk's payload with the same merger, with item and time caps; pure CPU so it can run on a generation worker.
+  Nothing calls it from the runtime yet.
+
+NOT done: drawing proxies (renderer integration, off by default) and the ray-tracing policy (proxies must never enter the BLAS/TLAS by default), the `LevelStreaming` consumer of `updateHlod`,
+the editor panels (Data Layers, Build HLOD, per-cell triangle counts), foliage HLOD, HLOD level 2 blocks, and a dithered cross-fade.

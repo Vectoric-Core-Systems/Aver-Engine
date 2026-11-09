@@ -65,6 +65,8 @@ add_library(Aver.Framework SHARED
   src/FrameworkOriginAbi.cpp
   # Terrain and water queries relayed from the host (wave 3, landscape layers and rivers).
   src/TerrainAbi.cpp
+  # Data layer state relayed from the host (W10, docs/LEVEL_STREAMING.md).
+  src/DataLayerAbi.cpp
   # Which entities are drawn between their last two fixed steps: the per-entity mode, the switch and the pose last drawn (wave 5, docs/PHYSICS_INTERPOLATION.md).
   src/InterpAbi.cpp)
 

@@ -134,6 +134,8 @@ public:
     // streaming() instead of instantiated whole, when a device was given before load().
     void setDevice(rhi::IDevice* device) { device_ = device; }
     void setStreamHooks(LevelStreaming::Hooks hooks) { streamHooks_ = std::move(hooks); }
+    // W10: lets C# and graphs read and set the level's data layers (framework_datalayer_abi.h); a no-op without the framework or layers.
+    void installDataLayerProvider();
     LevelStreaming& streaming() { return streaming_; }
     // COOKED CHUNKS (LARGE_WORLD 2.4.6). When on, a level whose STREAM record names `chunks=` streams from that cooked set while it is current, and the level
     // loads flat from the slim level the cook wrote. OFF by default and off in the editor: the editor edits records, and a slim level saved over the source would

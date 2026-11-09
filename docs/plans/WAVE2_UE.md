@@ -138,6 +138,14 @@ Risks specific to the owner's setup: all GPU steps need a headed Vulkan *and* D3
 
 Dependency: W2 steps 1-3,5 are independent of everything else. Overlap with W10 (data layers): both edit `OcWorld.*` and the streamer; serialize their format steps.
 
+**Status 2026-11-09 (W2 steps 1-3, 5, 6 planner, 7 merger; headless only, nothing drawn).**
+- Done and tested: (1) `STREAM hlod=` and `HLOD` records in the `.ocstream` (`OcWorldDataLayersTest`); (2) `fmt::mergeStaticMeshes` (`OcMeshMergeTest`); (3) `trifactor::simplifyToBudget` plus `fmt::hlodTargetTriangles`
+  (screen-area heuristic; the simplifier exposes no error cap in cm, so there is none); (5) `fmt::bakeHlod` and `AverAssetC hlod` with per-cell content-hash staleness (`OcHlodBakeTest`, `AverAssetCTest`);
+  (6) `PlacementStreamer::buildHlod/updateHlod`, ring with hysteresis, walked in `DataLayersHlodTest`; (7) `world::buildChunkProxy` with item and time caps (`ChunkProxyTest`).
+- Not done: (4) foliage handling; (6) the `LevelStreaming`/`GameStreaming` consumer, drawing proxies, and the no-BLAS policy for them (the renderer side must keep proxies out of RT by default);
+  (7) calling `buildChunkProxy` from the chunk generation path (generation is synchronous on the frame thread today, there is no worker); (8) editor view; the Build HLOD button, a background bake thread
+  in the editor (the bake takes `cancel` and `progress` callbacks for one), HLOD level 2 blocks; any run of the engine.
+
 ---
 
 ## W3. PCG graph system and editor
@@ -311,6 +319,14 @@ Cook/package integration: later with `.ocpak` (cross-reference, not in wave 2).
 4. **Editor (M, G for panel, H for model):** Data Layers panel (create/rename/delete, assign selection, toggle editor visibility, load/unload in editor so large levels open light), saved with the level, undo. Pure model tests for assignment/rename cascade.
 5. **Cook path (S, H):** `AverAssetC cook-chunks` and `STREAM chunks=` must carry layer membership; test that chunk cooking splits per layer-state without losing placements.
 6. **HLOD interaction (S, H):** proxies only built from always-on layers; a layer with `runtime=1` excludes its placements from HLOD (decision D3).
+
+**Status 2026-11-09 (W10 steps 1-3, 5, 6; headless only).**
+- Done and tested: (1) `DATALAYER`, `layers=`, `FOLIAGE ... layers=` (`OcWorldDataLayersTest`); (2) `PlacementStreamer` layer eligibility, `world::DataLayerSet` and its completion events (`DataLayersHlodTest`),
+  and `game::LevelStreaming` builds and applies the set (compile-checked only); (3) C# `DataLayers`, `framework_datalayer_abi.h` (relay tested in `FrameworkTest`) and nodes `AN_GetDataLayerState`,
+  `AN_SetDataLayerState` (`DataLayerNodeTests`); (5) `LAYR` payload extra, cook hash and `world::splitPayloadByLayers` (`AuthoredLayersTest`); (6) `hlodLayersAllowed` in the HLOD bake and `buildChunkProxy`
+  (`OcHlodBakeTest`, `ChunkProxyTest`).
+- Not done: (4) the editor panel and model; the Runtime installing the framework provider (so `DataLayers` answers defaults in a game today); Loaded versus Activated applied to entities (hide, no simulation);
+  gating cooked-chunk loading and baked foliage tables by layer state; a layered level without `STREAM` still loads everything; a completion event node or C# event (only `TryPollCompleted`).
 
 ---
 

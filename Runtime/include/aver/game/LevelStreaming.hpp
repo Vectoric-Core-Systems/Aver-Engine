@@ -15,6 +15,8 @@
 #if AVER_MODULE_SCENE
 #  include "aver/game/ItemLoader.hpp"
 #  include "aver/scene/World.hpp"
+#  include "aver/world/DataLayers.hpp"
+#  include <deque>
 #  include "aver/world/PlacementStreamer.hpp"
 #  include "aver/world/PlacementWriteBack.hpp"
 #  include "aver/world/WorldOrigin.hpp"
@@ -91,6 +93,16 @@ public:
     // Kinematic bodies of resident animated placements, for world::driveKinematicBodies.
     const std::vector<world::AnimatedBody>& animatedBodies() const { return loader_.animatedBodies(); }
 
+    // ---- data layers (W10): the level's DATALAYER records gate which roots may be resident. A root is held back while any layer of any of
+    // its placements is Unloaded, and evicted when one is unloaded. Loaded versus Activated (hide, do not simulate) is not applied here yet. ----
+    world::DataLayerSet& dataLayers() { return layers_; }
+    const world::DataLayerSet& dataLayers() const { return layers_; }
+    // Sets a layer by name and hands the streamer the new effective states. `fromGame` false is the editor (any layer); true the running game
+    // (only `runtime=1` layers).
+    world::DataLayerSet::Result setDataLayerState(std::string_view name, world::LayerState st, bool fromGame);
+    // The oldest layer change the streamer has finished acting on (see DataLayerSet::settle), or false. Filled once per tick.
+    bool popCompletedLayer(std::string& name, world::LayerState& state);
+
     usize residentRoots() const { return streamer_.residentCount(); }
     usize rootCount() const { return rootPlacements_.size(); }
     usize residentEntities() const { return placementOf_.size(); }
@@ -128,6 +140,8 @@ private:
     std::vector<u32> rootPlacements_;    // item -> root placement
     std::vector<Item> items_;
     world::PlacementStreamer streamer_;
+    world::DataLayerSet layers_;
+    std::deque<world::DataLayerSet::Completed> completedLayers_;
     world::OriginCm origin_{};
     std::vector<world::PlacementBaseline> baseline_;   // per placement; valid where hasBaseline_ (resident item roots)
     std::vector<u8> hasBaseline_;
