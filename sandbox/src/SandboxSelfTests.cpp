@@ -424,7 +424,7 @@ void SandboxApp::setSkinSceneDir(std::string d) { skinSceneDir_ = std::move(d); 
 void SandboxApp::setShaderSourceDir(std::string d) { shaderSourceDir_ = std::move(d); }
 
 #if AVER_MODULE_SYNAPSE
-void SandboxApp::setBakeNavOnStart(f32 cellCm) { navBakeOnStart_ = true; navBakeCell_ = cellCm; }
+void SandboxApp::setBakeNavOnStart(f32 cellCm) { dbgOv_.navBakeOnStart_ = true; dbgOv_.navBakeCell_ = cellCm; }
 
 #endif
 
@@ -2522,10 +2522,10 @@ void SandboxApp::runKeybindPersistTest(const std::string& mode) {
 #if AVER_MODULE_SYNAPSE
 // --bake-nav: fired at frame 5, not 0, since applyProject's startup builds collision bodies.
 void SandboxApp::navBakeCheck(Engine& e) {
-    if (navLoadPending_) { navLoadPending_ = false; loadNavForLevel(e); }
-    if (!navBakeOnStart_ || navBakeDone_) return;
+    if (dbgOv_.navLoadPending_) { dbgOv_.navLoadPending_ = false; loadNavForLevel(e); }
+    if (!dbgOv_.navBakeOnStart_ || dbgOv_.navBakeDone_) return;
     if (e.time().frame < 5) return;
-    navBakeDone_ = true;
+    dbgOv_.navBakeDone_ = true;
     // bakeNavigationNow samples scene::World::instance(), compiled only under AVER_MODULE_SCENE.
 #if AVER_MODULE_SCENE
     bakeNavigationNow(e);

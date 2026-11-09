@@ -593,10 +593,10 @@ editor::shutdownAnimEditors();
     water_.shutdown(e.device());
 #endif
 #if AVER_FLUIDS_SIMULATED
-    if (viewportIconsReady_) {
+    if (dbgOv_.viewportIconsReady_) {
         e.device()->removeRenderFeature(&viewportIcons_);
         viewportIcons_.shutdown();
-        viewportIconsReady_ = false;
+        dbgOv_.viewportIconsReady_ = false;
     }
 #endif
     // Remove render features before the device tears down.
@@ -779,15 +779,15 @@ bool SandboxApp::updateFrameInterpolation(rhi::IDevice* dev) {
         frameInterpolator_->setTrajectory(static_cast<neurafi::Trajectory>(traj < 0 ? 0 : (traj > 2 ? 2 : traj)));
         frameInterpolator_->setTraining(rset_.frameInterpTrainCli_ || rset_.frameInterpTrain_);
         // Window > Neural Visualiser.
-        const int vm = neurafiVizMode_ < 0 ? 0 : (neurafiVizMode_ > 4 ? 4 : neurafiVizMode_);
-        frameInterpolator_->setVisualisation(static_cast<neurafi::Visualisation>(vm), neurafiVizScalePx_);
+        const int vm = dbgOv_.neurafiVizMode_ < 0 ? 0 : (dbgOv_.neurafiVizMode_ > 4 ? 4 : dbgOv_.neurafiVizMode_);
+        frameInterpolator_->setVisualisation(static_cast<neurafi::Visualisation>(vm), dbgOv_.neurafiVizScalePx_);
     }
     neurafiViz_.setDevice(dev);
     neurafiViz_.setViewportRect(static_cast<u32>(viewState_.vpX_), static_cast<u32>(viewState_.vpY_),
                                 static_cast<u32>(viewState_.vpW_), static_cast<u32>(viewState_.vpH_));
-    neurafiViz_.setSource(frameInterpolator_ && neurafiVizMode_ > 0 ? frameInterpolator_.get() : nullptr,
-                          neurafiVizOpacity_);
-    dev->setFrameInterpShowGeneratedOnly(neurafiShowGeneratedOnly_);
+    neurafiViz_.setSource(frameInterpolator_ && dbgOv_.neurafiVizMode_ > 0 ? frameInterpolator_.get() : nullptr,
+                          dbgOv_.neurafiVizOpacity_);
+    dev->setFrameInterpShowGeneratedOnly(dbgOv_.neurafiShowGeneratedOnly_);
     dev->setFrameInterpolation(want);
     return want;
 }

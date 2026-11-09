@@ -1300,10 +1300,10 @@ void SandboxApp::cbItemContextMenu(const std::string& full, const std::string& n
     // Find References on demand: the scan already existed but could only be reached from the
     // delete/rename confirms, so "what uses this?" was askable only after deciding to remove it.
     if (!isDir && ImGui::MenuItem("Find References")) {
-        refPanelAsset_ = full;
-        refPanelResults_ = cbFindReferencesTo(full);
-        refPanelScanned_ = true;
-        showReferences_ = true;
+        dbgOv_.refPanelAsset_ = full;
+        dbgOv_.refPanelResults_ = cbFindReferencesTo(full);
+        dbgOv_.refPanelScanned_ = true;
+        dbgOv_.showReferences_ = true;
     }
     if (project_.valid() && ImGui::MenuItem("Validate Assets")) {
         drawerUi_.cbStatus_ = editor::runAssetValidation(project_.contentDir(), full);

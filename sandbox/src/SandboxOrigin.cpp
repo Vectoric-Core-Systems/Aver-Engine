@@ -29,7 +29,7 @@ void SandboxApp::initOrigin(Engine& e) {
     b.streaming = &streaming_;
     b.level = &level_;
 #  if AVER_MODULE_SYNAPSE_SCENE
-    b.nav = &nav_;
+    b.nav = &dbgOv_.nav_;
 #  endif
 #  if AVER_WITH_SYNAPSE_AI
     b.synapseAi = static_cast<synapse::SynapseAi*>(aver_syn_ai_instance());

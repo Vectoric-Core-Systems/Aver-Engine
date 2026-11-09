@@ -35,7 +35,7 @@ void SandboxApp::loadEditorPreferences() {
     viewState_.showGrid_           = prefBool ("viewport.showGrid",             viewState_.showGrid_);
     viewState_.showCamCoords_      = prefBool ("viewport.showCamCoords",        viewState_.showCamCoords_);
 #if AVER_MODULE_SCENE
-    showWorldOrigin_    = prefBool ("viewport.showWorldOrigin",      showWorldOrigin_);
+    dbgOv_.showWorldOrigin_    = prefBool ("viewport.showWorldOrigin",      dbgOv_.showWorldOrigin_);
 #endif
     // viewport.showColliders not restored on purpose: debug view, toggled from Window menu.
     showOutliner_       = prefBool ("panels.worldOutliner",          showOutliner_);
@@ -2442,7 +2442,7 @@ void SandboxApp::saveEditorPreferences() {
     setPrefBool ("viewport.showGrid",            viewState_.showGrid_);
     setPrefBool ("viewport.showCamCoords",       viewState_.showCamCoords_);
 #if AVER_MODULE_SCENE
-    setPrefBool ("viewport.showWorldOrigin",     showWorldOrigin_);
+    setPrefBool ("viewport.showWorldOrigin",     dbgOv_.showWorldOrigin_);
 #endif
     setPrefBool ("panels.worldOutliner",         showOutliner_);
     setPrefBool ("panels.details",               showDetails_);

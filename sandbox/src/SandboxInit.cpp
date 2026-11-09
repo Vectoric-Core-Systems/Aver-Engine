@@ -549,13 +549,13 @@ void SandboxApp::createGizmoMeshes(Engine& e) {
     // parameter, same reason gzMove_/gzMoveHi_ are two meshes instead of one recoloured in place.
     {
         auto cap = buildCapsuleWire(kPlayerStartCapsuleRadius, kPlayerStartCapsuleHalfHeight, kPlayerStartColor);
-        playerStartCapsule_ = e.device()->createLineMesh(cap.data(), (u32)cap.size());
+        dbgOv_.playerStartCapsule_ = e.device()->createLineMesh(cap.data(), (u32)cap.size());
         auto capSel = buildCapsuleWire(kPlayerStartCapsuleRadius, kPlayerStartCapsuleHalfHeight,
                                         kSelectionColor);
-        playerStartCapsuleSel_ = e.device()->createLineMesh(capSel.data(), (u32)capSel.size());
+        dbgOv_.playerStartCapsuleSel_ = e.device()->createLineMesh(capSel.data(), (u32)capSel.size());
         auto arrow = buildPlayerStartArrow(kPlayerStartCapsuleHalfHeight, kPlayerStartArrowLength,
                                             kPlayerStartArrowColor);
-        playerStartArrow_ = e.device()->createLineMesh(arrow.data(), (u32)arrow.size());
+        dbgOv_.playerStartArrow_ = e.device()->createLineMesh(arrow.data(), (u32)arrow.size());
     }
 
 #if AVER_MODULE_LANDSCAPE
@@ -649,12 +649,12 @@ void SandboxApp::installLandscapeProviders() {
 #if AVER_FLUIDS_SIMULATED
 void SandboxApp::initViewportIcons(Engine& e) {
     // 3D-viewport icon renderer (overlayPass; must exist before level loading creates Player Start).
-    viewportIconsReady_ = viewportIcons_.init(*e.device());
-    if (viewportIconsReady_) {
+    dbgOv_.viewportIconsReady_ = viewportIcons_.init(*e.device());
+    if (dbgOv_.viewportIconsReady_) {
         e.device()->addRenderFeature(&viewportIcons_);
-        playerStartIcon_ = viewportIcons_.loadIcon(executableDir() + AVER_PATH_SEP + "player-start-icon.png",
+        dbgOv_.playerStartIcon_ = viewportIcons_.loadIcon(executableDir() + AVER_PATH_SEP + "player-start-icon.png",
                                                    "PlayerStartIcon");
-        if (playerStartIcon_ == editor::ViewportIconRenderer::kNoIcon) viewportIconsReady_ = false;
+        if (dbgOv_.playerStartIcon_ == editor::ViewportIconRenderer::kNoIcon) dbgOv_.viewportIconsReady_ = false;
     }
 }
 #endif

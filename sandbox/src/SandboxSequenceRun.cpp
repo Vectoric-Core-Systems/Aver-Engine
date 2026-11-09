@@ -514,21 +514,21 @@ void SandboxApp::drawSequencePath(Engine& e) {
     show = show && !anyPlayActive();
 #endif
     if (!show) {
-        if (seqPathMesh_) { e.device()->destroyLineMesh(seqPathMesh_); seqPathMesh_ = 0; seqPathStamp_ = 0; }
+        if (dbgOv_.seqPathMesh_) { e.device()->destroyLineMesh(dbgOv_.seqPathMesh_); dbgOv_.seqPathMesh_ = 0; dbgOv_.seqPathStamp_ = 0; }
         return;
     }
     const u64 stamp = seqEditor_.pathStamp();
-    if (stamp != seqPathStamp_) {
-        if (seqPathMesh_) { e.device()->destroyLineMesh(seqPathMesh_); seqPathMesh_ = 0; }
+    if (stamp != dbgOv_.seqPathStamp_) {
+        if (dbgOv_.seqPathMesh_) { e.device()->destroyLineMesh(dbgOv_.seqPathMesh_); dbgOv_.seqPathMesh_ = 0; }
         std::vector<rhi::LineVertex> verts;
-        if (seqEditor_.pathLines(verts)) seqPathMesh_ = e.device()->createLineMesh(verts.data(), static_cast<u32>(verts.size()));
-        seqPathStamp_ = stamp;
+        if (seqEditor_.pathLines(verts)) dbgOv_.seqPathMesh_ = e.device()->createLineMesh(verts.data(), static_cast<u32>(verts.size()));
+        dbgOv_.seqPathStamp_ = stamp;
     }
-    if (!seqPathMesh_) return;
+    if (!dbgOv_.seqPathMesh_) return;
     const Mat4 world = Mat4::identity();   // vertices are in world space
     e.device()->setLineDepth(false);
     e.device()->setLineWidth(1.5f * viewState_.dpi_);
-    e.device()->drawLines(seqPathMesh_, &world.m[0][0]);
+    e.device()->drawLines(dbgOv_.seqPathMesh_, &world.m[0][0]);
     e.device()->setLineWidth(1.0f);
     e.device()->setLineDepth(true);
 }

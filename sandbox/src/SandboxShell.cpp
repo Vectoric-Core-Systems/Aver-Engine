@@ -22,29 +22,29 @@ void SandboxApp::resetPlayProfile(bool playStarting) {
 // ---- References panel ----
 // Finds files that name the asset. On-demand scan; text formats only (misses runtime references).
 void SandboxApp::buildReferencesPanel() {
-    if (!showReferences_) return;
+    if (!dbgOv_.showReferences_) return;
     ImGui::SetNextWindowSize(ImVec2(520.0f * viewState_.dpi_, 320.0f * viewState_.dpi_), ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("References", &showReferences_)) { ImGui::End(); return; }
+    if (!ImGui::Begin("References", &dbgOv_.showReferences_)) { ImGui::End(); return; }
 
-    if (!refPanelScanned_) {
+    if (!dbgOv_.refPanelScanned_) {
         ImGui::TextWrapped("Right-click an asset in the Content Browser and choose "
                            "\"Find References\" to see what names it.");
         ImGui::End();
         return;
     }
 
-    ImGui::TextDisabled("%s", cbRelativeToContent(refPanelAsset_).c_str());
+    ImGui::TextDisabled("%s", cbRelativeToContent(dbgOv_.refPanelAsset_).c_str());
     ImGui::SameLine();
-    if (ImGui::SmallButton("Rescan")) refPanelResults_ = cbFindReferencesTo(refPanelAsset_);
+    if (ImGui::SmallButton("Rescan")) dbgOv_.refPanelResults_ = cbFindReferencesTo(dbgOv_.refPanelAsset_);
     uiReg_.track("references.rescan");
     ImGui::Separator();
 
-    if (refPanelResults_.empty()) {
+    if (dbgOv_.refPanelResults_.empty()) {
         ImGui::TextColored(ImVec4(0.6f, 0.85f, 0.6f, 1.0f), "Nothing found that names this asset.");
     } else {
-        ImGui::Text("%zu file(s) name it:", refPanelResults_.size());
+        ImGui::Text("%zu file(s) name it:", dbgOv_.refPanelResults_.size());
         ImGui::Separator();
-        for (const std::string& rel : refPanelResults_) {
+        for (const std::string& rel : dbgOv_.refPanelResults_) {
             // Double-click opens the file.
             if (ImGui::Selectable(rel.c_str(), false, ImGuiSelectableFlags_AllowDoubleClick) &&
                 ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
@@ -65,9 +65,9 @@ void SandboxApp::buildReferencesPanel() {
 // ---- Neural Visualiser (Window > Neural Visualiser) ----
 // NeuraFI: frame interpolation overlay. NeuRaC: radiance cache (painted via rcDebugColour).
 void SandboxApp::buildNeuralVisualiserPanel(Engine& e) {
-    if (!showNeuralViz_) return;
+    if (!dbgOv_.showNeuralViz_) return;
     ImGui::SetNextWindowSize(ImVec2(470.0f * viewState_.dpi_, 430.0f * viewState_.dpi_), ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("Neural Visualiser", &showNeuralViz_)) { ImGui::End(); return; }
+    if (!ImGui::Begin("Neural Visualiser", &dbgOv_.showNeuralViz_)) { ImGui::End(); return; }
     rhi::IDevice* dev = e.device();
 
     // ---- NeuraFI ----
@@ -82,8 +82,8 @@ void SandboxApp::buildNeuralVisualiserPanel(Engine& e) {
     }
     static const char* kFiViews[] = {"Off", "Sources (which real frame)", "Confidence",
                                      "Path bend (curved vs straight)", "Network share of the bend"};
-    int fv = neurafiVizMode_ < 0 ? 0 : (neurafiVizMode_ > 4 ? 4 : neurafiVizMode_);
-    if (ImGui::Combo("View##neurafi", &fv, kFiViews, 5)) neurafiVizMode_ = fv;
+    int fv = dbgOv_.neurafiVizMode_ < 0 ? 0 : (dbgOv_.neurafiVizMode_ > 4 ? 4 : dbgOv_.neurafiVizMode_);
+    if (ImGui::Combo("View##neurafi", &fv, kFiViews, 5)) dbgOv_.neurafiVizMode_ = fv;
     uiReg_.track("neuralViz.neurafiView");
     switch (fv) {
         case 1: ImGui::TextDisabled("Orange: from the newer real frame. Blue: from the older one.\n"
@@ -97,16 +97,16 @@ void SandboxApp::buildNeuralVisualiserPanel(Engine& e) {
         default: break;
     }
     ImGui::BeginDisabled(fv == 0);
-    ImGui::SliderFloat("Opacity##neurafi", &neurafiVizOpacity_, 0.05f, 1.0f, "%.2f");
+    ImGui::SliderFloat("Opacity##neurafi", &dbgOv_.neurafiVizOpacity_, 0.05f, 1.0f, "%.2f");
     uiReg_.track("neuralViz.neurafiOpacity");
     ImGui::EndDisabled();
     ImGui::BeginDisabled(fv != 3 && fv != 4);
-    ImGui::SliderFloat("Full scale (px)##neurafi", &neurafiVizScalePx_, 0.05f, 4.0f, "%.2f px",
+    ImGui::SliderFloat("Full scale (px)##neurafi", &dbgOv_.neurafiVizScalePx_, 0.05f, 4.0f, "%.2f px",
                        ImGuiSliderFlags_Logarithmic);
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
         ImGui::SetTooltip("The bend, in pixels at the in-between frame, shown at full red.");
     ImGui::EndDisabled();
-    ImGui::Checkbox("Show interpolated frames only", &neurafiShowGeneratedOnly_);
+    ImGui::Checkbox("Show interpolated frames only", &dbgOv_.neurafiShowGeneratedOnly_);
     uiReg_.track("neuralViz.generatedOnly");
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Both images of every frame show the GENERATED one, so its errors can be\n"
@@ -130,8 +130,8 @@ void SandboxApp::buildNeuralVisualiserPanel(Engine& e) {
                            "Project Settings > Rendering > ReSTIR visibility rays: Cached (NeuRaC).");
     }
     static const char* kRcViews[] = {"Off", "Cached light", "Coverage", "Cascade", "Cell state", "Trust"};
-    int rv = neuracViewMode_ < 0 ? 0 : (neuracViewMode_ > 5 ? 5 : neuracViewMode_);
-    if (ImGui::Combo("View##neurac", &rv, kRcViews, 6)) neuracViewMode_ = rv;
+    int rv = dbgOv_.neuracViewMode_ < 0 ? 0 : (dbgOv_.neuracViewMode_ > 5 ? 5 : dbgOv_.neuracViewMode_);
+    if (ImGui::Combo("View##neurac", &rv, kRcViews, 6)) dbgOv_.neuracViewMode_ = rv;
     uiReg_.track("neuralViz.neuracView");
     switch (rv) {
         case 1: ImGui::TextDisabled("The light the cache holds at each visible surface, on its own.\n"
@@ -146,7 +146,7 @@ void SandboxApp::buildNeuralVisualiserPanel(Engine& e) {
         default: break;
     }
     ImGui::BeginDisabled(rv == 0);
-    ImGui::Checkbox("Cell grid", &neuracViewGrid_);
+    ImGui::Checkbox("Cell grid", &dbgOv_.neuracViewGrid_);
     uiReg_.track("neuralViz.neuracGrid");
     ImGui::EndDisabled();
     ImGui::TextDisabled("Replaces the lit image while on (not an overlay).");
@@ -159,9 +159,9 @@ void SandboxApp::buildNeuralVisualiserPanel(Engine& e) {
 // ---- Profiler panel (Window > GPU Profiler) ----
 // Frame time, CPU phases (Play), scene walk, Voxi accel-struct loop, and per-pass GPU table.
 void SandboxApp::buildProfilerPanel(Engine& e) {
-    if (!showProfiler_) return;
+    if (!dbgOv_.showProfiler_) return;
     ImGui::SetNextWindowSize(ImVec2(560.0f * viewState_.dpi_, 540.0f * viewState_.dpi_), ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("GPU Profiler", &showProfiler_)) { ImGui::End(); return; }
+    if (!ImGui::Begin("GPU Profiler", &dbgOv_.showProfiler_)) { ImGui::End(); return; }
 
 #if AVER_MODULE_FRAMEWORK
     const bool playing = anyPlayActive();
@@ -359,21 +359,21 @@ void SandboxApp::buildProfilerPanel(Engine& e) {
 #if AVER_MODULE_SCENE
 bool SandboxApp::bakeNavigationNow(Engine& e, std::string* why) {
     editor::NavBakeSettings s;
-    s.cellSizeCm = navBakeCell_;
+    s.cellSizeCm = dbgOv_.navBakeCell_;
     std::string reason;
     synapse::BakeStats st;
-    if (!editor::bakeNavigation(scene::World::instance(), s, nav_, &st, &reason)) {
+    if (!editor::bakeNavigation(scene::World::instance(), s, dbgOv_.nav_, &st, &reason)) {
         AVER_WARN("[Editor] navigation bake failed: {}", reason);
 #if AVER_WITH_IMGUI
         notifyOutcome(editor::NotifySeverity::Error, "Navigation bake failed", reason, true);
 #endif
         if (why) *why = reason;
-        nav_ = fmt::OcNavData{};
+        dbgOv_.nav_ = fmt::OcNavData{};
         rebuildNavOverlay(e);
         return false;
     }
     rebuildNavOverlay(e);
-    showNav_ = true;   // baking something invisible is how a bake gets run twice
+    dbgOv_.showNav_ = true;   // baking something invisible is how a bake gets run twice
 
     // Unsaved level has no path, so no .ocnav filename to write -- stays session-only, said so.
     if (levelPath_.empty()) {
@@ -387,7 +387,7 @@ bool SandboxApp::bakeNavigationNow(Engine& e, std::string* why) {
     }
     const std::string path = editor::navPathForLevel(levelPath_);
     std::string wwhy;
-    if (!fmt::saveOcNav(path, nav_, &wwhy)) {
+    if (!fmt::saveOcNav(path, dbgOv_.nav_, &wwhy)) {
         AVER_WARN("[Editor] navigation bake could not be written to {}: {}", path, wwhy);
         if (why) *why = wwhy;
 #if AVER_WITH_IMGUI
@@ -2041,12 +2041,12 @@ void SandboxApp::drawWindowMenu() {
             if (ImGui::MenuItem(ICON_LAYERS " Chunk Streaming", nullptr, streamOn)) setChunkStreamingEnabled(!streamOn);
             ImGui::EndDisabled();
             uiReg_.track("window.chunkStreaming");
-            ImGui::MenuItem(ICON_PROFILER " GPU Profiler", nullptr, &showProfiler_);
+            ImGui::MenuItem(ICON_PROFILER " GPU Profiler", nullptr, &dbgOv_.showProfiler_);
             uiReg_.track("window.gpuProfiler");
-            ImGui::MenuItem(ICON_NEURAL " Neural Visualiser", nullptr, &showNeuralViz_);
+            ImGui::MenuItem(ICON_NEURAL " Neural Visualiser", nullptr, &dbgOv_.showNeuralViz_);
             uiReg_.track("window.neuralVisualiser");
             // Which files name an asset; reachable from Content Browser context menu too.
-            ImGui::MenuItem(ICON_LINK " References", nullptr, &showReferences_);
+            ImGui::MenuItem(ICON_LINK " References", nullptr, &dbgOv_.showReferences_);
             uiReg_.track("window.references");
             if (!project_.valid() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                 ImGui::SetTooltip("Open or create a project first - a streamed world belongs to one.");
@@ -2133,40 +2133,40 @@ void SandboxApp::drawBuildMenu(Engine& e) {
                               "in different colours have no path between them.");
 #endif
         // Show Navigation works even without SCENE (reads a baked .ocnav).
-        ImGui::MenuItem("Show Navigation", nullptr, &showNav_);
+        ImGui::MenuItem("Show Navigation", nullptr, &dbgOv_.showNav_);
         ImGui::MenuItem("Show Post Volumes", nullptr, &showPostVolumes_);
 #if AVER_MODULE_SCENE
         ImGui::MenuItem("Show Decals", nullptr, &viewState_.showDecals_);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Draws every decal's projector box, not just the selected one's.");
         if (ImGui::BeginMenu("Show AI")) {
-            ImGui::MenuItem("Sight Cones", nullptr, &aiDebug_.sight);
-            ImGui::MenuItem("Hearing", nullptr, &aiDebug_.hearing);
-            ImGui::MenuItem("Path / Goal", nullptr, &aiDebug_.path);
-            ImGui::MenuItem("Steering", nullptr, &aiDebug_.steering);
-            ImGui::MenuItem("Behaviour Tree State", nullptr, &aiDebug_.btState);
-            ImGui::MenuItem("Cover", nullptr, &aiDebug_.cover);
-            ImGui::MenuItem("Queries (EQS)", nullptr, &aiDebug_.eqs);                 // AI: wave 3 #21
-            ImGui::MenuItem("Smart Object Slots", nullptr, &aiDebug_.smartObjects);
-            ImGui::MenuItem("State Tree", nullptr, &aiDebug_.stateTree);
+            ImGui::MenuItem("Sight Cones", nullptr, &dbgOv_.aiDebug_.sight);
+            ImGui::MenuItem("Hearing", nullptr, &dbgOv_.aiDebug_.hearing);
+            ImGui::MenuItem("Path / Goal", nullptr, &dbgOv_.aiDebug_.path);
+            ImGui::MenuItem("Steering", nullptr, &dbgOv_.aiDebug_.steering);
+            ImGui::MenuItem("Behaviour Tree State", nullptr, &dbgOv_.aiDebug_.btState);
+            ImGui::MenuItem("Cover", nullptr, &dbgOv_.aiDebug_.cover);
+            ImGui::MenuItem("Queries (EQS)", nullptr, &dbgOv_.aiDebug_.eqs);                 // AI: wave 3 #21
+            ImGui::MenuItem("Smart Object Slots", nullptr, &dbgOv_.aiDebug_.smartObjects);
+            ImGui::MenuItem("State Tree", nullptr, &dbgOv_.aiDebug_.stateTree);
             ImGui::EndMenu();
         }
         uiReg_.track("view.showAi");
         if (ImGui::BeginMenu("Show Motion Matching")) {
-            ImGui::MenuItem("Trajectories", nullptr, &motionDebug_.trajectory);
-            ImGui::MenuItem("Matched Frame", nullptr, &motionDebug_.matched);
-            ImGui::MenuItem("Labels", nullptr, &motionDebug_.labels);
-            ImGui::MenuItem("Group Costs", nullptr, &motionDebug_.costs);
+            ImGui::MenuItem("Trajectories", nullptr, &dbgOv_.motionDebug_.trajectory);
+            ImGui::MenuItem("Matched Frame", nullptr, &dbgOv_.motionDebug_.matched);
+            ImGui::MenuItem("Labels", nullptr, &dbgOv_.motionDebug_.labels);
+            ImGui::MenuItem("Group Costs", nullptr, &dbgOv_.motionDebug_.costs);
             ImGui::EndMenu();
         }
         uiReg_.track("view.showMotionMatching");
 
 #if AVER_MODULE_CAMERA
         if (ImGui::BeginMenu("Show Camera Rigs")) {
-            ImGui::MenuItem("Pivot and Lag", nullptr, &cameraDebug_.pivot);
-            ImGui::MenuItem("Arm and Probe", nullptr, &cameraDebug_.arm);
-            ImGui::MenuItem("Fade Radius", nullptr, &cameraDebug_.fade);
-            ImGui::MenuItem("Pitch Limits", nullptr, &cameraDebug_.limits);
+            ImGui::MenuItem("Pivot and Lag", nullptr, &dbgOv_.cameraDebug_.pivot);
+            ImGui::MenuItem("Arm and Probe", nullptr, &dbgOv_.cameraDebug_.arm);
+            ImGui::MenuItem("Fade Radius", nullptr, &dbgOv_.cameraDebug_.fade);
+            ImGui::MenuItem("Pitch Limits", nullptr, &dbgOv_.cameraDebug_.limits);
             ImGui::EndMenu();
         }
         uiReg_.track("view.showCameraRigs");
@@ -2174,15 +2174,15 @@ void SandboxApp::drawBuildMenu(Engine& e) {
 #endif
 #if AVER_MODULE_SOFTBODY_SCENE
         if (ImGui::BeginMenu("Show Soft Bodies")) {
-            ImGui::MenuItem("Strain", nullptr, &softBodyDebug_.strain);
-            ImGui::MenuItem("Pins", nullptr, &softBodyDebug_.pins);
-            ImGui::MenuItem("Pieces", nullptr, &softBodyDebug_.pieces);
-            ImGui::MenuItem("Wind", nullptr, &softBodyDebug_.wind);
-            ImGui::MenuItem("Budget", nullptr, &softBodyDebug_.budget);
-ImGui::MenuItem("Fields", nullptr, &softBodyDebug_.fields);
-ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
+            ImGui::MenuItem("Strain", nullptr, &dbgOv_.softBodyDebug_.strain);
+            ImGui::MenuItem("Pins", nullptr, &dbgOv_.softBodyDebug_.pins);
+            ImGui::MenuItem("Pieces", nullptr, &dbgOv_.softBodyDebug_.pieces);
+            ImGui::MenuItem("Wind", nullptr, &dbgOv_.softBodyDebug_.wind);
+            ImGui::MenuItem("Budget", nullptr, &dbgOv_.softBodyDebug_.budget);
+ImGui::MenuItem("Fields", nullptr, &dbgOv_.softBodyDebug_.fields);
+ImGui::MenuItem("Tuning", nullptr, &dbgOv_.softBodyDebug_.tuning);
 
-            ImGui::MenuItem("Constraints", nullptr, &softBodyDebug_.constraints);
+            ImGui::MenuItem("Constraints", nullptr, &dbgOv_.softBodyDebug_.constraints);
             ImGui::EndMenu();
         }
         uiReg_.track("view.showSoftBodies");
@@ -2190,19 +2190,19 @@ ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
 
 #if AVER_MODULE_VEHICLE_SCENE
         if (ImGui::BeginMenu("Show Vehicles")) {
-            ImGui::MenuItem("Suspension", nullptr, &vehicleDebug_.suspension);
-            ImGui::MenuItem("Forces", nullptr, &vehicleDebug_.forces);
-            ImGui::MenuItem("Slip", nullptr, &vehicleDebug_.slip);
-            ImGui::MenuItem("Chassis", nullptr, &vehicleDebug_.chassis);
-            ImGui::MenuItem("Velocity", nullptr, &vehicleDebug_.velocity);
-            ImGui::MenuItem("Labels", nullptr, &vehicleDebug_.labels);
-            ImGui::SliderFloat("Force scale (cm per 100 N)", &vehicleDebug_.forceScaleCmPer100N, 0.1f, 10.0f, "%.1f");
+            ImGui::MenuItem("Suspension", nullptr, &dbgOv_.vehicleDebug_.suspension);
+            ImGui::MenuItem("Forces", nullptr, &dbgOv_.vehicleDebug_.forces);
+            ImGui::MenuItem("Slip", nullptr, &dbgOv_.vehicleDebug_.slip);
+            ImGui::MenuItem("Chassis", nullptr, &dbgOv_.vehicleDebug_.chassis);
+            ImGui::MenuItem("Velocity", nullptr, &dbgOv_.vehicleDebug_.velocity);
+            ImGui::MenuItem("Labels", nullptr, &dbgOv_.vehicleDebug_.labels);
+            ImGui::SliderFloat("Force scale (cm per 100 N)", &dbgOv_.vehicleDebug_.forceScaleCmPer100N, 0.1f, 10.0f, "%.1f");
             ImGui::EndMenu();
         }
         uiReg_.track("view.showVehicles");
 #endif
 #if AVER_MODULE_PHYSICS
-        editor::drawPhysicsDebugMenu(physicsDebug_, physicsDebugFrame_);   // the whole "Show Physics" submenu
+        editor::drawPhysicsDebugMenu(dbgOv_.physicsDebug_, dbgOv_.physicsDebugFrame_);   // the whole "Show Physics" submenu
         uiReg_.track("view.showPhysics");
         ImGui::MenuItem("Show Collision Shapes", nullptr, &editor::collisionShapeOverlayOptions().enabled);
         uiReg_.track("view.showCollisionShapes");
@@ -2219,8 +2219,8 @@ ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
         uiReg_.track("view.showHair");
 #endif
         // Toggling forgets the overlay; rebuildColliderOverlay skips unchanged frames.
-        if (ImGui::MenuItem("Show Colliders", nullptr, &showColliders_))
-            colliderOverlayBuilt_ = false;
+        if (ImGui::MenuItem("Show Colliders", nullptr, &dbgOv_.showColliders_))
+            dbgOv_.colliderOverlayBuilt_ = false;
         uiReg_.track("view.showColliders");
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Every physics body's WORLD-SPACE BOUNDING BOX.\n"
@@ -2228,7 +2228,7 @@ ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
                               "A box collider is drawn exactly; a triangle mesh, sphere or capsule\n"
                               "is drawn as its bound -- it collides with its actual shape inside.");
 #endif
-        if (ImGui::MenuItem("Region Colours", nullptr, &navRegionColours_))
+        if (ImGui::MenuItem("Region Colours", nullptr, &dbgOv_.navRegionColours_))
             rebuildNavOverlay(e);
 #endif
         ImGui::EndMenu();
@@ -2681,27 +2681,27 @@ void SandboxApp::drawStatusBar(Engine& e, const ImVec2& wpos, const ImVec2& wsiz
     // VRAM against budget: over = GPU paging to RAM via PCIe.
     // Polled 2x/sec: grey <90%, amber >90%, red >100%.
     {
-        vramPollS_ -= dt;
-        if (vramPollS_ <= 0.0f) {
-            vramPollS_ = 0.5f;
-            vram_ = e.device()->videoMemory();
+        dbgOv_.vramPollS_ -= dt;
+        if (dbgOv_.vramPollS_ <= 0.0f) {
+            dbgOv_.vramPollS_ = 0.5f;
+            dbgOv_.vram_ = e.device()->videoMemory();
             static u32 vramLogTick = 0;
-            if (hitchVerbose() && vram_.supported && (vramLogTick++ % 4) == 0)
-                AVER_INFO("[VRAM] {} of {} MB; system memory the GPU uses {} MB", vram_.localUsageBytes >> 20,
-                          vram_.localBudgetBytes >> 20, vram_.nonLocalUsageBytes >> 20);
+            if (hitchVerbose() && dbgOv_.vram_.supported && (vramLogTick++ % 4) == 0)
+                AVER_INFO("[VRAM] {} of {} MB; system memory the GPU uses {} MB", dbgOv_.vram_.localUsageBytes >> 20,
+                          dbgOv_.vram_.localBudgetBytes >> 20, dbgOv_.vram_.nonLocalUsageBytes >> 20);
         }
-        if (vram_.supported && vram_.localBudgetBytes > 0) {
-            const f64 usedGb = static_cast<f64>(vram_.localUsageBytes) / (1024.0 * 1024.0 * 1024.0);
-            const f64 budgetGb = static_cast<f64>(vram_.localBudgetBytes) / (1024.0 * 1024.0 * 1024.0);
-            const f64 frac = static_cast<f64>(vram_.localUsageBytes) / static_cast<f64>(vram_.localBudgetBytes);
+        if (dbgOv_.vram_.supported && dbgOv_.vram_.localBudgetBytes > 0) {
+            const f64 usedGb = static_cast<f64>(dbgOv_.vram_.localUsageBytes) / (1024.0 * 1024.0 * 1024.0);
+            const f64 budgetGb = static_cast<f64>(dbgOv_.vram_.localBudgetBytes) / (1024.0 * 1024.0 * 1024.0);
+            const f64 frac = static_cast<f64>(dbgOv_.vram_.localUsageBytes) / static_cast<f64>(dbgOv_.vram_.localBudgetBytes);
             const bool over = frac > 1.0;
-            if (over != vramOverLogged_) {
+            if (over != dbgOv_.vramOverLogged_) {
                 if (over)
                     AVER_WARN("[Editor] GPU memory over budget: {:.1f} of {:.1f} GB -- the system is paging GPU "
                               "memory to RAM and frame rate will suffer", usedGb, budgetGb);
                 else
                     AVER_INFO("[Editor] GPU memory back under budget: {:.1f} of {:.1f} GB", usedGb, budgetGb);
-                vramOverLogged_ = over;
+                dbgOv_.vramOverLogged_ = over;
             }
             const ImVec4 col = over ? ImVec4(0.95f, 0.35f, 0.30f, 1.0f)
                              : frac > 0.9 ? ImVec4(0.95f, 0.72f, 0.25f, 1.0f)
@@ -2725,7 +2725,7 @@ void SandboxApp::drawStatusBar(Engine& e, const ImVec2& wpos, const ImVec2& wsiz
                                   "interpolation off, or close GPU-heavy programs (browsers, video).\n\n"
                                   "Also in system memory now: %.1f GB.",
                                   over ? "OVER BUDGET.\n\n" : "",
-                                  static_cast<f64>(vram_.nonLocalUsageBytes) / (1024.0 * 1024.0 * 1024.0));
+                                  static_cast<f64>(dbgOv_.vram_.nonLocalUsageBytes) / (1024.0 * 1024.0 * 1024.0));
         }
     }
 

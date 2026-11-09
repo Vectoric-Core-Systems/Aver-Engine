@@ -1004,10 +1004,10 @@ void SandboxApp::drawPlacedComponentSections() {
                 cams.pushModifier(kick);
             }
             ImGui::EndDisabled();
-            if (cameraLookRig_ == e) {
-                if (ImGui::SmallButton("Stop looking through (Esc)") || ImGui::IsKeyPressed(ImGuiKey_Escape)) cameraLookRig_ = scene::kInvalidEntity;
+            if (dbgOv_.cameraLookRig_ == e) {
+                if (ImGui::SmallButton("Stop looking through (Esc)") || ImGui::IsKeyPressed(ImGuiKey_Escape)) dbgOv_.cameraLookRig_ = scene::kInvalidEntity;
             } else if (ImGui::SmallButton("Look through")) {
-                cameraLookRig_ = e;
+                dbgOv_.cameraLookRig_ = e;
             }
         }
 #endif

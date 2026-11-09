@@ -38,7 +38,7 @@ void SandboxApp::installLevelInstanceHooks() {
         if (body > 0) {
             entityBodies_[static_cast<u32>(e)] = body;
             levelBodies_.push_back(body);
-            ++colliderRev_;
+            ++dbgOv_.colliderRev_;
         }
 #else
         (void)body;
@@ -58,7 +58,7 @@ void SandboxApp::installLevelInstanceHooks() {
             aver_phys_remove_body(it->second);
             levelBodies_.erase(std::remove(levelBodies_.begin(), levelBodies_.end(), it->second), levelBodies_.end());
             entityBodies_.erase(it);
-            ++colliderRev_;
+            ++dbgOv_.colliderRev_;
         }
 #endif
     };

@@ -1310,6 +1310,7 @@ private:
 #include "state/RevisionControlState.hpp"
 #include "state/McpState.hpp"
 #include "state/AutosaveSession.hpp"
+#include "state/DebugOverlayState.hpp"
 class HitchMarks;
 namespace game { struct SceneDrawStats; }
 
@@ -1523,10 +1524,10 @@ public:
     void setFrameInterpTrajectory(int t, bool train) { rset_.frameInterpTrajectoryCli_ = t; rset_.frameInterpTrainCli_ = train; }
     // --neurafi-view, --neurafi-generated-only, --neurac-view, --neurac-grid (negative = not given).
     void setNeuralVisualiserCli(int neurafiView, bool generatedOnly, int neuracView, bool neuracGrid) {
-        if (neurafiView >= 0) neurafiVizMode_ = neurafiView;
-        if (generatedOnly) neurafiShowGeneratedOnly_ = true;
-        if (neuracView >= 0) neuracViewMode_ = neuracView;
-        if (neuracGrid) neuracViewGrid_ = true;
+        if (neurafiView >= 0) dbgOv_.neurafiVizMode_ = neurafiView;
+        if (generatedOnly) dbgOv_.neurafiShowGeneratedOnly_ = true;
+        if (neuracView >= 0) dbgOv_.neuracViewMode_ = neuracView;
+        if (neuracGrid) dbgOv_.neuracViewGrid_ = true;
     }
     void setGpuTiming(bool on);                                // --gpu-timing
     void setLumaSweep(bool on, int stride);
@@ -1778,6 +1779,7 @@ private:
     RevisionControlState revCtl_;   // Revision-control panel
     McpState mcpState_;   // MCP automation bridge
     AutosaveSession autosave_;   // Level/project/prefs autosave timers, crash-recovery state and the post
+    DebugOverlayState dbgOv_;   // Debug overlays and diagnostics panels
     // ---- end feature state ----
 
     void applyProject(Engine& e);
@@ -3119,19 +3121,7 @@ private:
 #if AVER_MODULE_SCENE
     editor::DecalImageResolver decalImages_;  // a decal's image id -> a file under the project's content folder
     editor::DecalGizmo decalGizmo_;           // the selected decal's box and its face handles
-    editor::AiDebugOptions aiDebug_;          // Show > AI: sight cones, hearing, path, steering, BT state, cover
-    rhi::LineHandle aiDebugMesh_ = 0;         // this frame's AI debug lines (rebuilt every frame an option is on)
-    editor::MotionDebugOptions motionDebug_;   // Show > Motion Matching: trajectories, matched row, labels
-    editor::MotionDebugFrame motionDebugFrame_;
-    rhi::LineHandle motionDebugMesh_ = 0;     // this frame's motion-matching lines
 
-#if AVER_MODULE_CAMERA && AVER_MODULE_SCENE
-    editor::CameraDebugOptions cameraDebug_;    // Show > Camera Rigs
-    editor::CameraDebugFrame cameraDebugFrame_;
-    rhi::LineHandle cameraDebugMesh_ = 0;       // this frame's camera-rig lines
-    scene::Entity cameraLookRig_ = scene::kInvalidEntity;   // Details > Camera Rig > Look through: pilots the viewport with the rig's preview pose until Esc
-#endif
-    rhi::LineHandle classMarkerMesh_ = 0;     // this frame's graph-class root markers
     // PREFABS: the library (loaded assets), the system (instances in the world), the editor's operations on
     // them and the Create Prefab dialog. The system's hooks keep levelEntities_, labels and bodies in step.
     prefab::PrefabLibrary prefabLib_;
@@ -3265,67 +3255,9 @@ private:
     game::AccessFrame access_;
     editor::PostVolumeTools postVolumeTools_;   // POSTVOLUME records: Add menu, boxes, Details, viewport blend
     bool showPostVolumes_ = true;               // Show > Post Volumes: every volume's box, not just the selected one's
-#if AVER_MODULE_SYNAPSE
-    // The baked grid and the line mesh drawn from it. Rebuilt on every bake/load; mesh destruction needed to avoid upload buffer leak.
-    fmt::OcNavData  nav_;
-    rhi::LineHandle navMesh_=0;
-    bool showNav_=false;
-    bool navRegionColours_=true;
-    // --bake-nav: bake once at startup, then carry on. Deferred to a frame because bake reads PHYSICS BODIES, built by applyProject at init.
-    bool navBakeOnStart_=false;
-    bool navBakeDone_=false;
-    bool navLoadPending_=false;
-    f32  navBakeCell_=50.0f;
-#endif
 
-    // ---- the state belonging to the three non-navigation features above ----
-    // Collider overlay: the world-space AABB of every physics body. TOGGLE UNGUARDED; MESH guarded on AVER_MODULE_PHYSICS.
-    // Toggle persisted through editor.ini (runs in every config); mesh genuinely built from bodies.
-    bool showColliders_=false;
-#if AVER_MODULE_PHYSICS
-    // Two meshes: static bodies in colliderMesh_, kinematic/dynamic in colliderMoverMesh_.
-    rhi::LineHandle colliderMesh_=0;
-    rhi::LineHandle colliderMoverMesh_=0;
-    // What colliderMesh_ was built from, so rebuildColliderOverlay can skip unchanged frames.
-    // AllKnown: every STATIC body is one the editor tracks, so the sig covers all change paths.
-    bool colliderOverlayBuilt_ = false;
-    bool colliderOverlayAllKnown_ = false;
-    u64  colliderOverlaySig_ = 0;
-    u64  colliderRev_ = 0;
-    // The moving mesh's state: handles, tracking, post-play refresh, and AABBs for rebuild comparison.
-    std::vector<int32_t> colliderMovers_;
-    std::vector<f32> colliderMoverBoxes_, colliderMoverBoxesNext_;
-    std::vector<rhi::LineVertex> colliderMoverLines_;
-    bool colliderMoversTracked_ = false;
-    bool colliderMoversWereLive_ = false;
-    // The static audit: the handles colliderMesh_ drew, with the AABB each was drawn at. In Play, a rotating slice is re-read each frame.
-    std::vector<int32_t> colliderStatics_;
-    std::vector<f32> colliderStaticBoxes_;
-    usize colliderAuditCursor_ = 0;
-#endif
     // Frame time and the Play-only CPU phases, fed by onUpdate's begin()/end() brackets and folded in the status bar.
     editor::PlayProfile playProf_;
-#if AVER_WITH_IMGUI
-    // The profiler panel (Window > GPU Profiler): GPU pass table and frame time/Play CPU phases.
-    bool showProfiler_=false;
-    // The status bar's VRAM readout: the last videoMemory() answer, polled twice a second, and over-budget warning flag.
-    rhi::VideoMemoryInfo vram_{};
-    f32  vramPollS_ = 0.0f;
-    bool vramOverLogged_ = false;
-    // Window > Neural Visualiser. Choices applied every frame by onUpdate. Closing the window doesn't turn them off (its "Off" entries do).
-    bool showNeuralViz_ = false;
-    int  neurafiVizMode_ = 0;          // neurafi::Visualisation
-    f32  neurafiVizOpacity_ = 0.85f;
-    f32  neurafiVizScalePx_ = 0.5f;    // path bend at full heat
-    bool neurafiShowGeneratedOnly_ = false;
-    int  neuracViewMode_ = 0;          // VoxiRenderer::setNeuRaCView's mode
-    bool neuracViewGrid_ = false;
-    // The References panel. refPanelScanned_ distinguishes "opened but never asked" from "asked and found nothing".
-    bool showReferences_ = false;
-    bool refPanelScanned_ = false;
-    std::string refPanelAsset_;
-    std::vector<std::string> refPanelResults_;
-#endif
 
 #if AVER_WITH_IMGUI
     ImFont* fontMedium_=nullptr; // Roboto Medium, for the menu bar; null if only the fallback loaded
@@ -3348,26 +3280,7 @@ private:
     // Window > World Outliner / Details. Default ON: these are the editor's two primary panels.
     bool showOutliner_=true;
     bool showDetails_=true;
-#if AVER_MODULE_SOFTBODY_SCENE
-    // Show > Soft Bodies: strain / pins / pieces / wind / budget overlay. Not persisted. The line mesh is rebuilt each frame.
-    editor::SoftBodyDebugOptions softBodyDebug_;
-    editor::SoftBodyDebugFrame softBodyDebugFrame_;
-    rhi::LineHandle softBodyDebugMesh_ = 0;
-#endif
 
-#if AVER_MODULE_VEHICLE_SCENE
-    // Show > Vehicles: suspension / forces / slip / chassis / velocity / labels, plus the .ocvehicle editor's spec preview. Not persisted. The line mesh is rebuilt each frame.
-    editor::VehicleDebugOptions vehicleDebug_;
-    editor::VehicleDebugFrame vehicleDebugFrame_;
-    rhi::LineHandle vehicleDebugMesh_ = 0;
-#endif
-#if AVER_MODULE_PHYSICS
-    // Show > Physics: Jolt's debug renderer (bodies, constraints, contacts, static triangles, labels ...). Not persisted. The line mesh is rebuilt each frame.
-    editor::PhysicsDebugOptions physicsDebug_;
-    editor::PhysicsDebugFrame physicsDebugFrame_;
-    rhi::LineHandle physicsDebugMesh_ = 0;
-    rhi::LineHandle scriptDebugMesh_ = 0;   // DebugDraw's lines, replaced each frame (ScriptDebugLines.hpp)
-#endif
     bool showAbout_=false;             // Help > About
     bool wantSaveLevelAs_=false;
     char saveLevelAsName_[128]={};
@@ -3555,10 +3468,6 @@ private:
     // ---- the 3D-viewport icon renderer, and the Player Start marker it draws ----
     // viewportIconsReady_ is the ONE flag the render walk consults to skip the Player Start's cube (false unless the feature AND its texture both came up).
     editor::ViewportIconRenderer viewportIcons_;
-    bool viewportIconsReady_ = false;
-    editor::ViewportIconRenderer::IconHandle playerStartIcon_ = editor::ViewportIconRenderer::kNoIcon;
-    // The capsule/arrow line meshes, built once and placed with a world matrix per frame. Independent of viewportIconsReady_ (that flag gates only the SPRITE).
-    rhi::LineHandle playerStartCapsule_ = 0, playerStartCapsuleSel_ = 0, playerStartArrow_ = 0;
     fmt::OcWorldData levelHeader_;
 #if AVER_MODULE_PBR
     // pinMaterialResident()/unpinMaterialResident()'s storage -- checked by bindMaterialsForLevel() so a level-scoped release never destroys a material an open tab holds.
@@ -3693,7 +3602,6 @@ private:
     // overlays a shift stales, and the Show > World Origin window.
     editor::EditorOriginParticipant editorOrigin_;
     editor::WorldConsoleHost worldHost_;
-    bool showWorldOrigin_ = false;
     void initEditorOrigin();
     void afterOriginShift(Engine& e);
     bool originBlocksSave(const char* what);
@@ -4033,8 +3941,6 @@ private:
     // viewOverride_ and DrawWorldOptions::emissiveScale.
     editor::SequenceEditor seqEditor_;
     std::string seqHooksDir_;   // [wave5/sequencer] the content dir seqEditor_'s audio / event hooks were built for
-    rhi::LineHandle seqPathMesh_ = 0;
-    u64 seqPathStamp_ = 0;
     struct SequenceRunState {
         enum class Phase : u8 { Off, Waiting, Running, Draining, Done };
         SequenceRunArgs args;

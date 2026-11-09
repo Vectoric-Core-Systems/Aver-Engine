@@ -1190,12 +1190,12 @@ void SandboxApp::resolveViewOverride(const Timestep& t) {
 
 #if AVER_MODULE_CAMERA && AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE
     // Details > Camera Rig > Look through: the viewport shows the rig's stateless preview pose (no lag, no blend, no modifiers) until Esc.
-    if (cameraLookRig_ != scene::kInvalidEntity) {
+    if (dbgOv_.cameraLookRig_ != scene::kInvalidEntity) {
         scene::World& lookWorld = scene::World::instance();
-        if (!lookWorld.valid(cameraLookRig_)) {
-            cameraLookRig_ = scene::kInvalidEntity;
+        if (!lookWorld.valid(dbgOv_.cameraLookRig_)) {
+            dbgOv_.cameraLookRig_ = scene::kInvalidEntity;
         } else {
-            const camera::RigResult look = camera::cameraRigSystem().preview(lookWorld, cameraLookRig_, camera::RigFrame{});
+            const camera::RigResult look = camera::cameraRigSystem().preview(lookWorld, dbgOv_.cameraLookRig_, camera::RigFrame{});
             if (look.active) {
                 viewState_.viewOverride_ = true;
                 viewState_.viewPosOv_ = look.pov.pos;
@@ -1318,7 +1318,7 @@ void SandboxApp::applyDeviceRenderSettings(Engine& e, const Timestep& t) {
         voxiRenderer_.setGiVisPathView(editor::consoleGiVisPathViewSlot());
         voxiRenderer_.setBlendedGiCone(editor::consoleBlendedGiConeSlot());
         // Neural Visualiser NeuRaC view.
-        voxiRenderer_.setNeuRaCView(static_cast<u32>(neuracViewMode_ < 0 ? 0 : neuracViewMode_), neuracViewGrid_);
+        voxiRenderer_.setNeuRaCView(static_cast<u32>(dbgOv_.neuracViewMode_ < 0 ? 0 : dbgOv_.neuracViewMode_), dbgOv_.neuracViewGrid_);
         // See setGiConeTraceOff's comment; applied every frame.
         voxiRenderer_.setConeTraceEnabled(!rset_.giConeTraceOff_);
 #if AVER_MODULE_SR
@@ -1594,7 +1594,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     // Gated on Play (like physics/fw_tick above): pathing is gameplay, not authoring preview.
     // nav_ may be empty or frame stale; AgentSystem::tick treats that as "wait for a grid".
     if (!harness_.spawnTestClass_.empty() || aver_fw_play_state() == AVER_FW_PLAY_PLAYING) {
-        game::tickAi(gameDt, &nav_);
+        game::tickAi(gameDt, &dbgOv_.nav_);
     }
 #endif
 #endif

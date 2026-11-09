@@ -1130,7 +1130,7 @@ void SandboxApp::driveAnimatedBodies(f32 dt) {
         return;
     }
     if (!animatedBodiesBuilt_ || animatedBodiesFromAnim_ != entityAnim_.size() ||
-        animatedBodiesFromBodies_ != entityBodies_.size() || animatedBodiesFromRev_ != colliderRev_) {
+        animatedBodiesFromBodies_ != entityBodies_.size() || animatedBodiesFromRev_ != dbgOv_.colliderRev_) {
         animatedBodies_.clear();
         for (const auto& kv : entityAnim_) {
             const auto body = entityBodies_.find(kv.first);
@@ -1141,7 +1141,7 @@ void SandboxApp::driveAnimatedBodies(f32 dt) {
         animatedBodiesBuilt_ = true;
         animatedBodiesFromAnim_ = entityAnim_.size();
         animatedBodiesFromBodies_ = entityBodies_.size();
-        animatedBodiesFromRev_ = colliderRev_;
+        animatedBodiesFromRev_ = dbgOv_.colliderRev_;
     }
     if (world::driveKinematicBodies(scene::World::instance(), animatedBodies_, dt) != 0)
         animatedBodiesBuilt_ = false;

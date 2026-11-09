@@ -34,12 +34,12 @@ namespace aver {
 // Loads the navigation that belongs to a level, if it has any. An ABSENT file is the normal
 // case -- every level until somebody bakes one -- so it clears rather than complains.
 void SandboxApp::loadNavForLevel(Engine& e) {
-    nav_ = fmt::OcNavData{};
+    dbgOv_.nav_ = fmt::OcNavData{};
     const std::string path = editor::navPathForLevel(levelPath_);
     std::string why;
-    if (!path.empty() && fmt::loadOcNav(path, nav_, &why)) {
+    if (!path.empty() && fmt::loadOcNav(path, dbgOv_.nav_, &why)) {
         AVER_INFO("[Editor] navigation loaded from {} ({}x{} cells)", path,
-                  nav_.widthCells, nav_.heightCells);
+                  dbgOv_.nav_.widthCells, dbgOv_.nav_.heightCells);
     }
     rebuildNavOverlay(e);
 }
@@ -551,7 +551,7 @@ void SandboxApp::onLevelInstantiated(const game::GameLevel::LoadedLevel& loaded)
     // The overlay is a DEVICE resource and this function has no device -- loadLevel is
     // reachable from paths that pass no Engine at all. Latched here and serviced from the
     // frame loop, which is the only place a line mesh can be created.
-    navLoadPending_ = true;
+    dbgOv_.navLoadPending_ = true;
 #endif
 
     selectionUi_.sel_ = -1;

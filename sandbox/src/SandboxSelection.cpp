@@ -560,7 +560,7 @@ void SandboxApp::installPrefabHooks() {
             aver_phys_remove_body(it->second);
             levelBodies_.erase(std::remove(levelBodies_.begin(), levelBodies_.end(), it->second), levelBodies_.end());
             entityBodies_.erase(it);
-            ++colliderRev_;
+            ++dbgOv_.colliderRev_;
         }
 #endif
     };
@@ -1030,7 +1030,7 @@ void SandboxApp::captureSubtree(EditCmd& c, scene::Entity e) {
 void SandboxApp::rebuildEntityBody(scene::Entity e) {
     // The collider overlay caches what it drew (rebuildColliderOverlay); a body dropped or remade
     // here can leave the body COUNT unchanged, so tell it.
-    ++colliderRev_;
+    ++dbgOv_.colliderRev_;
     if (const auto it = entityBodies_.find(static_cast<u32>(e)); it != entityBodies_.end()) {
         aver_phys_remove_body(it->second);
         levelBodies_.erase(std::remove(levelBodies_.begin(), levelBodies_.end(), it->second),
@@ -1178,7 +1178,7 @@ void SandboxApp::destroyEntity(scene::Entity e) {
             levelBodies_.erase(std::remove(levelBodies_.begin(), levelBodies_.end(), it->second),
                                levelBodies_.end());
             entityBodies_.erase(it);
-            ++colliderRev_;   // see rebuildEntityBody
+            ++dbgOv_.colliderRev_;   // see rebuildEntityBody
         }
 #endif
     }

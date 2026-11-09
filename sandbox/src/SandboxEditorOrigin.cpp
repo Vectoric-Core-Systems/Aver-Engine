@@ -107,7 +107,7 @@ void SandboxApp::initEditorOrigin() {
 void SandboxApp::afterOriginShift(Engine& e) {
 #if AVER_MODULE_SYNAPSE
     // buildNavOverlay emits cell corners from the grid's own origin, which the Synapse participant has just moved.
-    if (navMesh_) rebuildNavOverlay(e);
+    if (dbgOv_.navMesh_) rebuildNavOverlay(e);
 #else
     (void)e;
 #endif

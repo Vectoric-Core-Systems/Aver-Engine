@@ -87,7 +87,7 @@ void SandboxApp::rebuildColliderOverlay(Engine& e) {
     u64 sig = kFnv1a64OffsetBasis;
     const auto mix = [&sig](u64 v) { sig = (sig ^ v) * kFnv1a64Prime; };
     mix(static_cast<u64>(static_cast<u32>(n)));
-    mix(colliderRev_);
+    mix(dbgOv_.colliderRev_);
 #if AVER_MODULE_SCENE
     mix(static_cast<u64>(levelBodies_.size()));
     mix(levelBodies_.empty() ? 0u : static_cast<u64>(static_cast<u32>(levelBodies_.front())));
@@ -96,44 +96,44 @@ void SandboxApp::rebuildColliderOverlay(Engine& e) {
     sig = editor::EditorOriginParticipant::overlaySignature(sig, origin_.generation());   // a floating-origin shift moves every box
 #endif
     bool staticStale =
-        !(colliderOverlayBuilt_ && colliderOverlayAllKnown_ && sig == colliderOverlaySig_);
+        !(dbgOv_.colliderOverlayBuilt_ && dbgOv_.colliderOverlayAllKnown_ && sig == dbgOv_.colliderOverlaySig_);
 
     // The audit (see the comment above): in Play, re-read a slice of the static handles the mesh drew.
     // Before the rebuild below, so a change found here is redrawn this frame, not the next.
-    if (!staticStale && moving && !colliderStatics_.empty()) {
+    if (!staticStale && moving && !dbgOv_.colliderStatics_.empty()) {
         constexpr usize kAuditSlice = 512;
-        const usize count = colliderStatics_.size();
-        usize i = colliderAuditCursor_ < count ? colliderAuditCursor_ : 0;
+        const usize count = dbgOv_.colliderStatics_.size();
+        usize i = dbgOv_.colliderAuditCursor_ < count ? dbgOv_.colliderAuditCursor_ : 0;
         const usize end = std::min(count, i + kAuditSlice);
         for (; i < end; ++i) {
-            const int32_t body = colliderStatics_[i];
+            const int32_t body = dbgOv_.colliderStatics_[i];
             f32 lo[3], hi[3];
-            const f32* drawn = &colliderStaticBoxes_[i * 6];
+            const f32* drawn = &dbgOv_.colliderStaticBoxes_[i * 6];
             if (aver_phys_body_motion_type(body) != 0 || !aver_phys_body_aabb(body, lo, hi) ||
                 std::memcmp(lo, drawn, sizeof lo) != 0 || std::memcmp(hi, drawn + 3, sizeof hi) != 0) {
                 staticStale = true;   // the rebuild resets the cursor
                 break;
             }
         }
-        colliderAuditCursor_ = i >= count ? 0 : i;
+        dbgOv_.colliderAuditCursor_ = i >= count ? 0 : i;
     }
 
     if (staticStale) {
-        colliderOverlaySig_ = sig;
-        colliderOverlayBuilt_ = true;
-        colliderOverlayAllKnown_ = false;
-        colliderMoversTracked_ = false;
-        colliderMovers_.clear();
-        colliderStatics_.clear();
-        colliderStaticBoxes_.clear();
-        colliderAuditCursor_ = 0;
-        colliderMoverBoxes_.clear();   // so the moving mesh below is remade even if nothing moved
-        if (colliderMesh_) { e.device()->destroyLineMesh(colliderMesh_); colliderMesh_ = 0; }
-        if (colliderMoverMesh_) { e.device()->destroyLineMesh(colliderMoverMesh_); colliderMoverMesh_ = 0; }
+        dbgOv_.colliderOverlaySig_ = sig;
+        dbgOv_.colliderOverlayBuilt_ = true;
+        dbgOv_.colliderOverlayAllKnown_ = false;
+        dbgOv_.colliderMoversTracked_ = false;
+        dbgOv_.colliderMovers_.clear();
+        dbgOv_.colliderStatics_.clear();
+        dbgOv_.colliderStaticBoxes_.clear();
+        dbgOv_.colliderAuditCursor_ = 0;
+        dbgOv_.colliderMoverBoxes_.clear();   // so the moving mesh below is remade even if nothing moved
+        if (dbgOv_.colliderMesh_) { e.device()->destroyLineMesh(dbgOv_.colliderMesh_); dbgOv_.colliderMesh_ = 0; }
+        if (dbgOv_.colliderMoverMesh_) { e.device()->destroyLineMesh(dbgOv_.colliderMoverMesh_); dbgOv_.colliderMoverMesh_ = 0; }
 
         if (n <= 0) {
-            colliderOverlayAllKnown_ = true;
-            colliderMoversTracked_ = true;
+            dbgOv_.colliderOverlayAllKnown_ = true;
+            dbgOv_.colliderMoversTracked_ = true;
         } else {
             // ABI doesn't report body shape; editor built each level body by one rule (rebuildEntityBody /
             // world::instantiate): triangles when content_.collisionMeshFor has a mesh for the entity's
@@ -170,7 +170,7 @@ void SandboxApp::rebuildColliderOverlay(Engine& e) {
                 if (motion < 0) continue;   // not a live body (-1; 0 is STATIC, a real answer)
                 const bool known = std::binary_search(tracked.begin(), tracked.end(), body);
                 if (motion != 0) {
-                    colliderMovers_.push_back(body);
+                    dbgOv_.colliderMovers_.push_back(body);
                     if (!known) moversKnown = false;
                     continue;
                 }
@@ -178,58 +178,58 @@ void SandboxApp::rebuildColliderOverlay(Engine& e) {
                 f32 lo[3], hi[3];
                 if (!aver_phys_body_aabb(body, lo, hi)) continue;
                 appendBoxEdges(lines, lo, hi, meshBodies.count(body) != 0 ? kColliderMeshRgb : kColliderBoxRgb);
-                colliderStatics_.push_back(body);   // what the Play audit re-reads
-                colliderStaticBoxes_.insert(colliderStaticBoxes_.end(), lo, lo + 3);
-                colliderStaticBoxes_.insert(colliderStaticBoxes_.end(), hi, hi + 3);
+                dbgOv_.colliderStatics_.push_back(body);   // what the Play audit re-reads
+                dbgOv_.colliderStaticBoxes_.insert(dbgOv_.colliderStaticBoxes_.end(), lo, lo + 3);
+                dbgOv_.colliderStaticBoxes_.insert(dbgOv_.colliderStaticBoxes_.end(), hi, hi + 3);
             }
             // Whether the editor tracks every static body, which is what lets the stamp above skip the
             // next frames; and every moving one, which is what lets the moving mesh skip them outside Play.
-            colliderOverlayAllKnown_ = staticKnown;
-            colliderMoversTracked_ = moversKnown;
+            dbgOv_.colliderOverlayAllKnown_ = staticKnown;
+            dbgOv_.colliderMoversTracked_ = moversKnown;
 
             if (!lines.empty())
-                colliderMesh_ = e.device()->createLineMesh(lines.data(), static_cast<u32>(lines.size()));
+                dbgOv_.colliderMesh_ = e.device()->createLineMesh(lines.data(), static_cast<u32>(lines.size()));
         }
     }
 
     const bool moversMayHaveMoved =
-        staticStale || moving || colliderMoversWereLive_ || !colliderMoversTracked_;
-    colliderMoversWereLive_ = moving;
-    if (!moversMayHaveMoved || colliderMovers_.empty()) return;
+        staticStale || moving || dbgOv_.colliderMoversWereLive_ || !dbgOv_.colliderMoversTracked_;
+    dbgOv_.colliderMoversWereLive_ = moving;
+    if (!moversMayHaveMoved || dbgOv_.colliderMovers_.empty()) return;
 
     // Where every mover is now, compared with where the mesh drew it: nothing moved, nothing to remake.
-    std::vector<f32>& boxes = colliderMoverBoxesNext_;
+    std::vector<f32>& boxes = dbgOv_.colliderMoverBoxesNext_;
     boxes.clear();
-    for (const int32_t body : colliderMovers_) {
+    for (const int32_t body : dbgOv_.colliderMovers_) {
         f32 lo[3], hi[3];
         if (!aver_phys_body_aabb(body, lo, hi)) continue;   // dead since the list was taken: draws nothing
         // Made static again since the list was taken (a script's SetBodyMotionType): redrawn green by the
         // next frame's full rebuild, which is also what drops it from this list.
-        if (moving && aver_phys_body_motion_type(body) == 0) colliderOverlayBuilt_ = false;
+        if (moving && aver_phys_body_motion_type(body) == 0) dbgOv_.colliderOverlayBuilt_ = false;
         boxes.insert(boxes.end(), lo, lo + 3);
         boxes.insert(boxes.end(), hi, hi + 3);
     }
-    if (boxes == colliderMoverBoxes_) return;
-    colliderMoverBoxes_.swap(boxes);
+    if (boxes == dbgOv_.colliderMoverBoxes_) return;
+    dbgOv_.colliderMoverBoxes_.swap(boxes);
 
-    if (colliderMoverMesh_) { e.device()->destroyLineMesh(colliderMoverMesh_); colliderMoverMesh_ = 0; }
-    colliderMoverLines_.clear();
-    for (usize i = 0; i + 6 <= colliderMoverBoxes_.size(); i += 6)
-        appendBoxEdges(colliderMoverLines_, &colliderMoverBoxes_[i], &colliderMoverBoxes_[i + 3], kColliderMoverRgb);
-    if (!colliderMoverLines_.empty())
-        colliderMoverMesh_ = e.device()->createLineMesh(colliderMoverLines_.data(),
-                                                        static_cast<u32>(colliderMoverLines_.size()));
+    if (dbgOv_.colliderMoverMesh_) { e.device()->destroyLineMesh(dbgOv_.colliderMoverMesh_); dbgOv_.colliderMoverMesh_ = 0; }
+    dbgOv_.colliderMoverLines_.clear();
+    for (usize i = 0; i + 6 <= dbgOv_.colliderMoverBoxes_.size(); i += 6)
+        appendBoxEdges(dbgOv_.colliderMoverLines_, &dbgOv_.colliderMoverBoxes_[i], &dbgOv_.colliderMoverBoxes_[i + 3], kColliderMoverRgb);
+    if (!dbgOv_.colliderMoverLines_.empty())
+        dbgOv_.colliderMoverMesh_ = e.device()->createLineMesh(dbgOv_.colliderMoverLines_.data(),
+                                                        static_cast<u32>(dbgOv_.colliderMoverLines_.size()));
 }
 
 #endif  // AVER_MODULE_PHYSICS
 
 #if AVER_MODULE_SYNAPSE
 void SandboxApp::rebuildNavOverlay(Engine& e) {
-    if (navMesh_) { e.device()->destroyLineMesh(navMesh_); navMesh_ = 0; }
-    if (nav_.cells.empty()) return;
-    const std::vector<rhi::LineVertex> lines = editor::buildNavOverlay(nav_, navRegionColours_);
+    if (dbgOv_.navMesh_) { e.device()->destroyLineMesh(dbgOv_.navMesh_); dbgOv_.navMesh_ = 0; }
+    if (dbgOv_.nav_.cells.empty()) return;
+    const std::vector<rhi::LineVertex> lines = editor::buildNavOverlay(dbgOv_.nav_, dbgOv_.navRegionColours_);
     if (lines.empty()) return;
-    navMesh_ = e.device()->createLineMesh(lines.data(), (u32)lines.size());
+    dbgOv_.navMesh_ = e.device()->createLineMesh(lines.data(), (u32)lines.size());
 }
 
 #endif
@@ -3231,7 +3231,7 @@ f32 SandboxApp::drawViewportShowMenu() {
         uiReg_.track("show.camCoords");
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("The camera's position (cm) and heading under this toolbar.");
 #if AVER_MODULE_SCENE
-        ImGui::Checkbox("World Origin", &showWorldOrigin_);
+        ImGui::Checkbox("World Origin", &dbgOv_.showWorldOrigin_);
         uiReg_.track("show.worldOrigin");
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("The floating origin: region, origin and camera in km, shifts and the last shift's cost.");
 #endif
@@ -3493,7 +3493,7 @@ void SandboxApp::buildViewportOverlay() {
     }
     ImGui::End();
 #if AVER_MODULE_SCENE
-    editor::drawWorldOriginPanel(showWorldOrigin_, origin_, viewState_.camPos_, viewState_.dpi_);
+    editor::drawWorldOriginPanel(dbgOv_.showWorldOrigin_, origin_, viewState_.camPos_, viewState_.dpi_);
 #endif
 
     drawViewportContextMenu();
