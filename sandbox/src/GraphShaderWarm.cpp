@@ -33,7 +33,7 @@ void SandboxApp::tickGraphShaderWarm(Engine& e) {
         AVER_INFO("[ShaderWarm] material graphs: {}; the scene pipelines rebuild now", why);
     };
     pbr::MaterialGraphRegistry& reg = pbr::materialGraphs();
-    const bool can = voxiAttached_ && e.window() != nullptr && maxFrames_ == 0 && e.device() != nullptr &&
+    const bool can = rset_.voxiAttached_ && e.window() != nullptr && maxFrames_ == 0 && e.device() != nullptr &&
                      e.device()->backend() == rhi::Backend::D3D12;
     if (!can || reg.count() == 0 || !voxiRenderer_.graphRebuildPending()) {
         if (graphWarmHeld_) {

@@ -1300,6 +1300,7 @@ private:
 #include "state/EditId.hpp"
 #include "state/PlayState.hpp"
 #include "state/HarnessState.hpp"
+#include "state/RenderSettingsState.hpp"
 class HitchMarks;
 namespace game { struct SceneDrawStats; }
 
@@ -1414,7 +1415,7 @@ public:
 
     void onShutdown(Engine& e) override;
     void setVSyncOff(bool off);               // --no-vsync
-    void setVSyncOn(bool on) { vsyncOnRequested_ = on; }   // --vsync
+    void setVSyncOn(bool on) { rset_.vsyncOnRequested_ = on; }   // --vsync
     void setLodSelect(bool on, f32 thresholdPx);
 #if AVER_MODULE_FRAMEWORK && AVER_MODULE_VOXI
     void applyScriptRender(voxi::Renderer& vx);   // framework_render_abi.h at the frame boundary (SandboxUpdate.cpp)
@@ -1509,8 +1510,8 @@ public:
     void setAverSrCycleAuto(int framesIn);   // --aversr-cycle [N]
 #endif
     void setResizeCycle(int n);              // --resize-cycle [N]
-    void setFrameInterpCli(int on) { frameInterpCli_ = on; }   // --frame-interp 0|1|2 (2: capture the generated image)
-    void setFrameInterpTrajectory(int t, bool train) { frameInterpTrajectoryCli_ = t; frameInterpTrainCli_ = train; }
+    void setFrameInterpCli(int on) { rset_.frameInterpCli_ = on; }   // --frame-interp 0|1|2 (2: capture the generated image)
+    void setFrameInterpTrajectory(int t, bool train) { rset_.frameInterpTrajectoryCli_ = t; rset_.frameInterpTrainCli_ = train; }
     // --neurafi-view, --neurafi-generated-only, --neurac-view, --neurac-grid (negative = not given).
     void setNeuralVisualiserCli(int neurafiView, bool generatedOnly, int neuracView, bool neuracGrid) {
         if (neurafiView >= 0) neurafiVizMode_ = neurafiView;
@@ -1635,10 +1636,10 @@ public:
     void clearAverSrUpscaler(rhi::IDevice* dev);
 
     void setEdgeAaOverride(bool on);   // --edge-aa
-    void setTaaOverride(bool on) { temporalAaEnabled_ = on; taaFromCli_ = true; }   // --taa / --no-taa
+    void setTaaOverride(bool on) { rset_.temporalAaEnabled_ = on; rset_.taaFromCli_ = true; }   // --taa / --no-taa
 
-    void setParticleGpuOverride(int mode) { particleGpuArg_ = mode; }                // --particles-cpu (0) / --particles-gpu (2)
-    void setNeuRaaOverride(bool on) { neuraaEnabled_ = on; neuraaFromCli_ = true; } // --neuraa / --no-neuraa
+    void setParticleGpuOverride(int mode) { rset_.particleGpuArg_ = mode; }                // --particles-cpu (0) / --particles-gpu (2)
+    void setNeuRaaOverride(bool on) { rset_.neuraaEnabled_ = on; rset_.neuraaFromCli_ = true; } // --neuraa / --no-neuraa
 
     void applyUpscalerSlot(rhi::IDevice* dev);
 
@@ -1686,7 +1687,7 @@ public:
     // --nrd2-train STEPS [DATASETDIR...] (NRD2 phase 4; no dirs = %LOCALAPPDATA%/AverEngine/nrd2_dataset).
     void setNrd2Train(u32 steps, std::vector<std::string> dirs) { nrd2Session_.requestCli(steps, std::move(dirs)); }
 #if AVER_MODULE_SR
-    void setNeuRaaCapture(const std::string& dir, u32 count) { neuraaCaptureDir_ = dir; neuraaCaptureCount_ = count; }
+    void setNeuRaaCapture(const std::string& dir, u32 count) { rset_.neuraaCaptureDir_ = dir; rset_.neuraaCaptureCount_ = count; }
 #endif
     void setCamera(Vec3 pos, f32 pitchDeg, f32 yawDeg);
     void setScriptsDir(std::string d);            // --scripts <dir>
@@ -1758,6 +1759,7 @@ private:
     // ---- feature state: plain-data groups moved out of this class (sandbox/src/state/) ----
     PlayState play_;   // Play-in-editor session
     HarnessState harness_;   // Automation and self-test state
+    RenderSettingsState rset_;   // Render-settings mirror
     // ---- end feature state ----
 
     void applyProject(Engine& e);
@@ -1823,10 +1825,6 @@ private:
     f32 projectAutosaveAccum_ = 0.0f;
 
 
-    // ---- FRAME BUDGET ----
-    // Scales GI work to hit target frame time (RENDER.FRAMEBUDGETMS).
-    f32  frameBudgetMs_ = 0.0f;       // RENDER.FRAMEBUDGETMS; <= 0 disables
-    bool frameBudgetForced_ = false;  // --frame-budget: run even during capture
     // Above unguarded (manifest keys); below guarded on VOXI (controller state).
 #if AVER_MODULE_VOXI
     voxi::FrameBudgetState frameBudget_;
@@ -1840,8 +1838,6 @@ private:
 
     bool hudPreviewActive() const;
     void setHudPreview(int index, f32 x, f32 y, f32 w, f32 h);
-    // Derived Data Cache write-behind budget, mirrored for slider binding.
-    f32 ddcRamBudgetMb_ = 256.0f;
     std::string saveLevelTo_;         // --save-level <out>
     std::string bakeLevelPackAsset_;  // --bake-level-pack <level>  [wave3/level-instances]
     std::string importSrc_, importDst_;
@@ -2388,10 +2384,7 @@ private:
 
     void spawnCube(Engine& engine);
 
-    // ---- Place Actors / Message Log / Undo History panels (SandboxToolPanels.cpp) ----
-    // Where the next Add lands: a drop point while one is set, else in front of the camera.
-    std::optional<Vec3> spawnAtOverride_;
-    Vec3 spawnPoint() const { return spawnAtOverride_ ? *spawnAtOverride_ : camPos_ + camForward() * kAddDistance; }
+    Vec3 spawnPoint() const { return rset_.spawnAtOverride_ ? *rset_.spawnAtOverride_ : camPos_ + camForward() * kAddDistance; }
     // Spawns one palette kind through the same functions as the toolbar's Add menu (and so the same undo entry).
     void placeActorKind(Engine& e, const std::string& kind, const Vec3* dropAt, bool onSurface);
     void buildPlaceActorsPanel(Engine& e);
@@ -3248,8 +3241,6 @@ private:
     // Set by loadLevel when level supplied CAMERA record; read by onAttach.
     bool levelCameraRestored_ = false;
     editor::AssetEditorHost assetEditors_;
-    bool vsyncOffRequested_ = false;
-    bool vsyncOnRequested_ = false;
     bool wantMeshReload_ = false;
     // Outliner display names (not scene::World::name which holds asset path).
     std::unordered_map<u32, std::string> entityLabels_;
@@ -3451,31 +3442,11 @@ private:
     Mat4 selectionOutline_{}; rhi::MeshHandle selectionMesh_ = 0; bool hasSelection_ = false;
     // Every selected entity's (world transform, mesh id) for this frame's outline pass. Rebuilt and cleared right after drawing.
     std::vector<std::pair<Mat4, u64>> selectionOutlines_;
-    // Top-of-atmosphere colour, mirroring rhi::SkyAtmosphere::sunColor's default (white).
-    f32 sunColor_[3]={1.0f,1.0f,1.0f}, sunAmbient_=1.0f;
-    // Editor's mirror of sky_.zenith/horizon, copied OVER sky_ every frame so rhi::SkyAtmosphere's defaults don't survive frame 1.
-    f32 skyZenith_[3]={0.24f,0.45f,0.85f}, skyHorizon_[3]={0.72f,0.83f,0.95f};
-    // A tint on the in-scattered sky (white = clear air), and an extinction per cm.
-    f32 fogColor_[3]={1.0f,1.0f,1.0f}, fogDensity_=4e-6f;
-#if AVER_MODULE_SCENE
-    // OPT-IN (Height Fog panel): recomputes fogDensity from the streaming load boundary rather than a fixed density.
-    bool matchFogToStreamRadius_ = false;
-    f32  fogMatchTargetOpacity_ = 0.9f;   // opacity WANTED at the load boundary itself
-#endif
-    rhi::PostSettings post_{};
     // The editor's colour-vision preview (View menu, editor prefs only) and this frame's accessibility options and captions.
     editor::AccessibilityPreview accessPreview_;
     game::AccessFrame access_;
     editor::PostVolumeTools postVolumeTools_;   // POSTVOLUME records: Add menu, boxes, Details, viewport blend
     bool showPostVolumes_ = true;               // Show > Post Volumes: every volume's box, not just the selected one's
-    // What this editor last handed the device, so per-frame push can tell when something ELSE (console post.* vars) changed it.
-    rhi::PostSettings postPushed_{};
-    bool postPushedValid_ = false;
-    // Which post values came from argv, so a stored preference cannot outrank a flag the caller typed.
-    bool postExposureFromCli_ = false, postBloomFromCli_ = false, postAutoExpFromCli_ = false;
-    // The authored sky, sun and air. Sole owner of the sun's direction.
-    rhi::SkyAtmosphere sky_{};
-    f32 cloudTime_ = 0.0f;   // seconds of accumulated wind
     // A screenshot asked for over MCP: captureCheck requests a new capture for it instead of re-reading frame sf's.
     bool mcpShotRequest_=false;
     // editor viewport aids
@@ -3606,9 +3577,6 @@ private:
     // Viewport Show flags. Both default ON.
     bool showStaticMeshes_=true;
     bool showAtmosphere_=true;
-    // File > Save Level As...
-    bool unlit_=false;                 // View mode: Unlit (no shading, authored colour only)
-    bool neuraaDebugView_=false;       // View mode: Edge Classes (NeuRAA); forces ray-driven
     bool showAbout_=false;             // Help > About
     bool wantSaveLevelAs_=false;
     char saveLevelAsName_[128]={};
@@ -3617,20 +3585,11 @@ private:
     bool scrollPrefsToKeybinds_=false;   // --scroll-prefs-to-keybinds, one-shot
     int  settingsPage_=1;            // 0 Description, 1 Rendering>General, 2 >GI, 3 >Ray Tracing, 4 >Path Tracing
     int  focusVoxi_=0;               // --project-settings: frames left to force the window open
-    int  msaaOverride_=0;            // --msaa N: apply a sample count at startup
-    // --depth-prepass: depth-only pass ahead of ordinary opaque walk, OFF (default) never calls setDepthPrepassEnabled/drawMeshDepthPrepass.
-    bool depthPrepassOverride_ = false;
-    // --gbuffer: debug view override, OR'd together every frame with the view-mode dropdown.
-    bool gbufferOverride_ = false;
-    // --gbuffer-debug velocity|viewz|normals: which channel (if any) GBufferDebugFeature draws over the 3D viewport.
-    GBufferDebugFeature::Mode gbufferDebugView_ = GBufferDebugFeature::Mode::Off;
     // Registered once in onInit, unregistered in onShutdown. Never rebuilt: one instance for the whole run.
     GBufferDebugFeature gbufferDebugFeature_;
-    bool gbufferDebugAttached_ = false;
 #if AVER_WITH_SYNAPSE_AI && AVER_MODULE_SYNAPSE_GPU
     // The GPU crowd-avoidance backend, installed behind the Synapse ABI's one SynapseAi (game::installCrowdGpu).
     synapse::GpuCrowdBackend crowdGpu_;
-    bool crowdGpuAttached_ = false;
 #endif
     // Window > Neural Visualiser's NeuraFI overlay. Registered beside gbufferDebugFeature_, for the run.
     NeuraFiVizFeature neurafiViz_;
@@ -3674,62 +3633,8 @@ private:
     u64  occlusionStaleReadbacks_ = 0;
     bool occlusionStaleWarnedOnce_ = false;
 #endif
-    // All three use -1 for "flag not given", NOT 0 (0 = Quality::Off, must be expressible).
-    int  giOverride_=-1;             // --gi [tier]: GI quality to apply at startup
-    bool giForceOff_=false;          // --no-gi: force it off, whatever the default is
-    int  rtOverride_=-1;             // --rt [tier]: ray tracing quality at startup
-    int  ptOverride_=-1;             // --pt [tier]: PATH tracing quality at startup
-    bool rtForceOff_=false;          // --no-rt: force it off, whatever the default is
-    int  rtRaysOverride_=0;          // --rt-rays N: sun occlusion rays per pixel (0 = flag not given)
-    // --gi-sky-occlusion-rays N: AMBIENT sky-visibility rays per pixel. -1 = flag not given (0 is a real value).
-    int  giSkyOccRaysOverride_=-1;
-    int  giSkyOccTileOverride_=-1;   // --gi-sky-occlusion-tile N
-    // --sky-light N. NEGATIVE means absent: 0 is a real, meaningful request (no sky ambient).
-    f32  skyLightOverride_=-1.0f;
-    // --gi-intensity F. Negative means absent; 0 is a real request (bounce off, direct only).
-    f32  giIntensityOverride_=-1.0f;
-    // --sky-physical / --sky-authored: -1 absent, 0 authored, 1 physical. Sun elevation in degrees (-999 when absent).
-    int  skyModelOverride_=-1;
-    f32  sunElevationOverride_=-999.0f;
-    int  rtPixelsPerRayOverride_=0;  // --rt-pixels-per-ray N: shadow tile edge (0 = flag not given)
-    int  rtShadowDenoiseOverride_=-1; // --rt-shadow-denoise N: spatial radius (-1 = flag not given)
-    int  rtRenderModeOverride_=-1;    // --rt-render-mode 0|1 (-1 = flag not given)
-    int  rdStagesOverride_=-1;        // --rd-stages 0|1|2 (-1 = flag not given)
-    int  ptBouncesOverride_=-1;       // --pt-bounces N (-1 = flag not given)
-    int  layeredBsdfOverride_=-1;     // --layered-bsdf N (-1 = flag not given)
-    f32  coatWeight_=0.0f;            // --coat W [R] [F0]: 0 = flag not given, and no coat anywhere
-    f32  coatRough_=0.1f;
-    f32  coatF0_=0.04f;
-    int  giUpdateIntervalOverride_=0; // --gi-update-interval N: GI revoxelise interval (0 = flag not given)
-    // --gi-mode N: indirect-diffuse estimator (0 = voxel cones, 1 = ReSTIR GI). Sentinel is -1 (0 is a real value).
-    int  giModeOverride_=-1;
-    // --restir-visibility none|reconstructed|half|full (Settings::giRestirVisibility). Sentinel is -1 (0 is a real value).
-    int  restirVisibilityOverride_=-1;
-    int  denoiserOverride_=-1;       // --denoiser 0|1|2: -1 is "flag not given"; see setDenoiser
-    f32  renderScaleOverride_=1.0f;  // --render-scale F: scene render resolution as a fraction of present, clamped [0.25,1]
 #if AVER_MODULE_SR
-    // --aversr LEVEL / the render-settings quality combo. Off (default) = no AverSR.
-    aver::sr::Quality averSrQuality_ = aver::sr::Quality::Off;
-    // True when --aversr set the value above, so loadEditorPreferences must not let a stored preference overwrite the CLI flag.
-    bool averSrFromCli_ = false;
-    bool averSrCliAuto_ = false;      // --aversr auto: CLI wins even though auto has no single level to pin.
-    int  averSrCliLevel_ = -1;        // --aversr LEVEL (not auto): the pinned level.
-    // User's Display preference, superset of averSrQuality_ (Auto and Manual besides the four named levels).
-    editor::AverSrChoice averSrChoice_ = editor::AverSrChoice::Auto;
-    // Set once when a stored display.renderScalePending cookie is found still armed at load; forces Off for the REST OF THIS SESSION.
-    bool averSrCookieTripped_ = false;
-    // Set true when migrateAverSrChoice ran on a genuinely ABSENT display.aversrChoice and landed on Auto.
-    bool averSrMigrationNoteArmed_ = false;
-    // Set the first time updateAverSrAuto is about to apply a non-Off level THIS SESSION.
-    bool averSrArmedNonOffOnce_ = false;
-    // Fires the "[AverSR] ... scene WxH -> present WxH" line exactly once per process.
-    bool averSrStartupLogged_ = false;
     // Why the CURRENTLY APPLIED level is what it is -- Auto/Manifest/User/Cli/ForcedOff.
-#if AVER_MODULE_VOXI
-    voxi::AverSrSource averSrSource_ = voxi::AverSrSource::Auto;
-#endif
-    // Project's own AverSR default combo's live edit state. Unconditionally reset to -1 on project open (not inherit from previous project).
-    int  averSrProjectDefault_ = -1;
     // FSR 1 (EASU + RCAS). Built whenever the scene is scaled (any AverSR level or a manual render
     // scale) or edge AA is on; dropped, after the device lets go of it, when none is (applyUpscalerSlot).
     std::unique_ptr<aver::sr::FsrUpscaler> averSrUpscaler_;
@@ -3737,53 +3642,14 @@ private:
     std::unique_ptr<aver::sr::TemporalUpscaler> taaUpscaler_;
     // NeuRAA wraps whichever upscaler holds the slot. Phase 1: only while its debug view is selected.
     std::unique_ptr<aver::sr::NeuRaa> neuraa_;
-    std::string neuraaCaptureDir_;          // --neuraa-capture DIR COUNT (training data)
-    u32  neuraaCaptureCount_ = 0;
-    bool neuraaCaptureStarted_ = false;
-    bool temporalAaEnabled_ = true;   // the project's RENDER.TAA (unstated = on); --no-taa / --taa win over it
-    bool taaFromCli_ = false;
 
-    int particleGpuArg_ = -1;   // --particles-cpu / --particles-gpu; -1 follows RENDER.PARTICLEGPU
-    bool neuraaEnabled_ = false;      // the project's RENDER.NEURAA (unstated = off)
-    bool neuraaFromCli_ = false;
-    // Edge AA (FXAA-class) in FSR's first pass: --edge-aa or Display > Edge anti-aliasing.
-    bool edgeAaEnabled_ = false;
-    f32  fsrSharpness_ = 0.2f;   // RCAS stops (0 = sharpest); Display > Sharpening
-
-    // ---- frame interpolation (docs/rendering/NEURAFI.md) ----
-    // Who decides, highest first: --frame-interp, project RENDER.FRAMEINTERP, Editor Preference (off by default).
-    int  frameInterpCli_ = -1;
-    bool frameInterpWhileEditing_ = false;   // Editor Preferences, display.frameInterpWhileEditing
-    u32  msaaPushed_ = 0;                    // sample count last given to the device (onUpdate)
-    // The gather's path and in-engine training (Editor Preferences display.frameInterpTrajectory / display.frameInterpTrain).
-    int  frameInterpTrajectory_ = 2;         // neurafi::Trajectory (0 straight, 1 quadratic, 2 learned)
-    bool frameInterpTrain_ = false;
-    int  frameInterpTrajectoryCli_ = -1;     // --frame-interp-trajectory; -1 = not given
-    bool frameInterpTrainCli_ = false;       // --frame-interp-train
-    // The status bar's frame rate counts interpolated frames or real frames only; chosen by clicking it.
-    bool fpsCountsInterpolated_ = true;
     std::unique_ptr<aver::neurafi::NeuraFI> frameInterpolator_;
     // Decides and pushes this frame's frame-interperation state; returns whether it is wanted (the G-buffer must then be on).
     bool updateFrameInterpolation(aver::rhi::IDevice* dev);
 #endif
-    int  rdAblate_=0;                // --rd-ablate: AVER_RD_ABLATE for PSRayDriven, 0 = normal
-    f32  rtDenoiseMotionTaper_=0.0f; // --rt-denoise-motion: 0 = no taper, the shipped default
-    bool ptSceneViewYieldLogged_=false;   // say once, per mode change, that the PT view yielded
-    int  refractionOverride_=-1;     // --refraction: -1 not given, else the mode
-    f32  refractionStrengthOverride_=-1.0f;
-    f32  refractionFadeOverride_=-1.0f;
-    bool msOverride_=false;          // --ms: force the mesh shader geometry path
     bool camOverride_=false;         // --cam X Y Z PITCH YAW: aim the viewport camera outright
     // --set NAME VALUE pairs, applied once through runConsoleLine on the first frame with a device.
     std::vector<std::pair<std::string, std::string>> consoleSets_;
-    // --mesh-heap default|upload (W4): true (default) = static mesh vertex/index buffers on the Default heap (VRAM);
-    // false keeps them on the Upload heap (see rhi::IDevice::setStaticMeshHeapDefault).
-    bool meshHeapDefault_ = true;
-    // --lod-share-vertices 0|1 (W11): true (default) shares LOD0's vertex buffer with every coarser LOD via
-    // createMeshSharingVertices, falling back to independent buffers on refusal (unsupported backend,
-    // compute-written vertices); false gives each LOD its own copy of LOD0's untouched data (VRAM).
-    // Read inside loadProjectMeshes' LOD-ladder loop, once per mesh at load time.
-    bool lodShareVertices_ = true;
 
     Vec3 camPosOverride_{};
     f32  pitchOverride_=0.0f, yawOverride_=0.0f;   // radians, converted in setCamera
@@ -3866,31 +3732,17 @@ private:
     bool levelPrepArmed_ = false;
     u64 levelPrepToast_ = 0;
     std::chrono::steady_clock::time_point levelPrepT0_{};
-    bool nrd2MenuWired_ = false;
     // Gizmo coordinate space. Honoured by drawGizmo, pickAxis, applyMove and applyRotate; SCALE tool always uses local.
     bool worldSpace_=true;
-    bool giDebugView_=false; Vec3 giCenter_{0,0,300}; f32 giExtent_=1200.0f;   // cm
-    bool giConeTraceOff_=false;   // --no-gi-cone: see setGiConeTraceOff's own comment
-    // --view-mode undenoised / the dropdown's independent "Undenoised" toggle: forces a bundle of existing runtime knobs off.
-    // NOT PERSISTED: reasserted every frame.
-    bool undenoised_=false;
-    // True when --view-mode or --unlit set the view for this run: stored viewport.wireframe/viewport.unlit don't override it on load.
-    bool viewModeFromCli_=false;
 #if AVER_MODULE_VOXI
     voxi::VoxiRenderer voxiRenderer_;
     editor::SceneLightFeed sceneLightFeed_;   // CLight entities -> Voxi lamps + path-tracer lights, per frame
     game::SceneDecalFeed sceneDecalFeed_;     // CDecal entities -> Voxi's projected-decal list, per frame
     game::EnvFxFeed envFxFeed_;               // G4 R8: the framework's fog volumes -> Voxi's volumetric fog, per frame
-    bool voxiAttached_=false;
-    // Viewport's ray-hit/triangles debug view (Ray Hit: Instances/Materials/Distance, Triangles), or None. NOT PERSISTED: reasserted every frame.
-    voxi::VoxiRenderer::ViewDebug debugView_ = voxi::VoxiRenderer::ViewDebug::None;
-    // Last frame's EFFECTIVE voxi::Settings::rtRenderMode, after onUpdate's auto-switch. Lets onUpdate tell an actual mode transition from an ordinary frame.
-    i32 lastEffectiveRtRenderMode_ = -1;
 #endif
 #if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
     // Registration is non-owning: particleRenderer_ must outlive the device, torn down in onShutdown.
     particles::ParticleRenderer particleRenderer_;
-    bool particlesAttached_=false;
 #endif
 
     // Water is an INDEPENDENT module from Particles. --water <heightCm> is the opt-in.
@@ -3898,9 +3750,6 @@ private:
     // The level's analytic surface and simulated volumes, shared with the runtime.
     game::GameWater water_;
 #endif
-    // These two stay OUTSIDE the guard: the flag is parsed either way.
-    bool  waterEnabled_  = false;
-    f32   waterHeightCm_ = 0.0f;
 #if AVER_MODULE_SCRIPTING
     void configureProjectInput(const char* when);   // the project's INPUT.SCHEME, at Play and level spawn (SandboxPlay.cpp)
     static i32 animCurve(i32 entity, i64 nameHash, f32* outValue, void*);
@@ -3957,17 +3806,6 @@ private:
     std::unique_ptr<aver::pt::PtFurnaceTest> ptFurnace_;
     // --pt-scene: the path tracer pointed at the real scene. ptSceneViewWantEnabled_ is the flag that matters.
     std::unique_ptr<aver::pt::PtSceneView> ptSceneView_;
-    // REQUESTED state (--pt-scene at startup, or the settings-page Quality combo later); ptSceneView_ != nullptr is the ACTUAL one.
-    bool ptSceneViewWantEnabled_ = false;
-    // --pt-scene WAS GIVEN ON THE COMMAND LINE. Sticky for the session, separate from the want flag above.
-    bool ptSceneViewFromCli_ = false;
-    bool ptSceneViewUnavailable_ = false;   // init() refused once this session -- stop re-asking
-    // A1: true while syncPtSceneView() holds ptSceneViewWantEnabled_ down because ray-driven primary visibility is painting the scene.
-    bool ptSceneViewSuppressedByRayDriven_ = false;
-    // Wireframe/a G-buffer debug view withdrew the path-traced view's want; remembered so leaving the view mode gives it back.
-    bool ptSceneViewSuppressedByViewMode_ = false;
-    // True while a stored non-unity render scale is on trial this session.
-    bool renderScaleCookieArmed_ = false;
     std::unique_ptr<aver::editor::ReflTest> refl_;
     int  reflBeaconIndex_ = -1;   // which objects_ entry the schedule shows and hides
     rhi::MeshHandle unitCubeMesh_ = 0;   // the editor's own unit cube, half-extent 1
@@ -4078,8 +3916,6 @@ private:
     // Selected mesh asset id (distinct from GPU handle). Cleared by placeholder Floor/Cube loop.
     u64 selectionMeshId_ = 0;
 
-    // Landscape CLI override path. Must exist unconditionally for command-line parsing.
-    std::string landscapeCliOverride_;
 #if AVER_MODULE_LANDSCAPE
     // Terrain section: render, collision, authoring (shared with runtime).
     game::GameLandscape landscape_;
@@ -4547,11 +4383,6 @@ private:
 #endif
 
     std::vector<scene::Entity> levelEntities_;
-    bool hasLevelSun_ = false;
-    bool hasLevelSky_ = false;
-    bool hasLevelFog_ = false;
-    // True if level record mentioned clouds (not just fmt::OcWorldEnv::hasClouds).
-    bool hasLevelClouds_ = false;
 
 #if AVER_MODULE_FRAMEWORK
     // Class placements: level_.classPlacements() has the list; spawnClassPlacements fills this.

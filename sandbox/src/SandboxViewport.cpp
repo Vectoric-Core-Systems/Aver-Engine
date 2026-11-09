@@ -3045,8 +3045,8 @@ void SandboxApp::drawViewportViewModeMenu() {
 #endif
     std::string viewModeLabel = "Lit";
 #if AVER_MODULE_VOXI
-    if (debugView_ != voxi::VoxiRenderer::ViewDebug::None) {
-        switch (debugView_) {
+    if (rset_.debugView_ != voxi::VoxiRenderer::ViewDebug::None) {
+        switch (rset_.debugView_) {
             case voxi::VoxiRenderer::ViewDebug::RayHitInstance: viewModeLabel = "Ray Hit: Instances"; break;
             case voxi::VoxiRenderer::ViewDebug::RayHitMaterial: viewModeLabel = "Ray Hit: Materials"; break;
             case voxi::VoxiRenderer::ViewDebug::RayHitDistance: viewModeLabel = "Ray Hit: Distance"; break;
@@ -3061,33 +3061,33 @@ void SandboxApp::drawViewportViewModeMenu() {
 #endif
     if (wireframe_) {
         viewModeLabel = "Wireframe";
-    } else if (neuraaDebugView_ && gbufferDebugView_ == GBufferDebugFeature::Mode::Off) {
+    } else if (rset_.neuraaDebugView_ && rset_.gbufferDebugView_ == GBufferDebugFeature::Mode::Off) {
         viewModeLabel = "Edge Classes (NeuRAA)";
-    } else if (gbufferDebugView_ != GBufferDebugFeature::Mode::Off) {
+    } else if (rset_.gbufferDebugView_ != GBufferDebugFeature::Mode::Off) {
         using GDM = GBufferDebugFeature::Mode;
-        viewModeLabel = gbufferDebugView_ == GDM::Velocity ? "G-Buffer: Velocity" :
-                        gbufferDebugView_ == GDM::ViewZ ? "G-Buffer: View-Space Depth" : "G-Buffer: Normal + Roughness";
+        viewModeLabel = rset_.gbufferDebugView_ == GDM::Velocity ? "G-Buffer: Velocity" :
+                        rset_.gbufferDebugView_ == GDM::ViewZ ? "G-Buffer: View-Space Depth" : "G-Buffer: Normal + Roughness";
         if (authoredRayDriven) viewModeLabel += " (raster)";
-    } else if (unlit_) {
+    } else if (rset_.unlit_) {
         viewModeLabel = "Unlit";
     }
     if (dropButton(viewModeLabel.c_str())) ImGui::OpenPopup("viewMode");
     if (ImGui::BeginPopup("viewMode")) {
-        if (ImGui::Selectable("Lit", !wireframe_ && !unlit_ && !neuraaDebugView_)) {
-            wireframe_=false; unlit_=false; neuraaDebugView_=false;
+        if (ImGui::Selectable("Lit", !wireframe_ && !rset_.unlit_ && !rset_.neuraaDebugView_)) {
+            wireframe_=false; rset_.unlit_=false; rset_.neuraaDebugView_=false;
         }
         // Unlit is not gated on the rasteriser: PSRayDriven honours gViewParams.x itself, so it
         // works under ray-driven as well as under Wireframe's forced fallback.
-        if (ImGui::Selectable("Unlit", unlit_ && !wireframe_)) { unlit_ = true; wireframe_ = false; }
+        if (ImGui::Selectable("Unlit", rset_.unlit_ && !wireframe_)) { rset_.unlit_ = true; wireframe_ = false; }
         uiReg_.track("viewMode.unlit");
         // Wireframe always selectable now: it used to BeginDisabled whenever ray-driven suppressed
         // the raster scene pass, with a tooltip pointing to Settings > Rendering, but onUpdate's
         // scratch-copy override (needRaster in its Voxi settings block) now does that for THIS
         // VIEWPORT ONLY every frame, so nothing is left to disable here.
         if (ImGui::Selectable("Wireframe", wireframe_)) {
-            wireframe_ = true; unlit_ = false;
+            wireframe_ = true; rset_.unlit_ = false;
 #if AVER_MODULE_VOXI
-            debugView_ = voxi::VoxiRenderer::ViewDebug::None;
+            rset_.debugView_ = voxi::VoxiRenderer::ViewDebug::None;
 #endif
         }
         uiReg_.track("viewMode.wireframe");
@@ -3099,7 +3099,7 @@ void SandboxApp::drawViewportViewModeMenu() {
             ImGui::SetTooltip("Needs a flat-albedo shading override the shader does not have yet.");
 #if AVER_MODULE_VOXI
         ImGui::Separator();
-        if (ImGui::Selectable("Voxel Radiance (GI debug)", giDebugView_)) giDebugView_ = !giDebugView_;
+        if (ImGui::Selectable("Voxel Radiance (GI debug)", rset_.giDebugView_)) rset_.giDebugView_ = !rset_.giDebugView_;
         // Same two console-var GI paints Settings > Rendering exposes (SandboxSettings.cpp): raw
         // bool slots owned by EditorConsole.hpp (see consoleGiPoisonViewSlot()'s comment there),
         // reasserted onto the live voxiRenderer_ every frame from onUpdate. Toggling the slots
@@ -3128,10 +3128,10 @@ void SandboxApp::drawViewportViewModeMenu() {
         {
             using GDM = GBufferDebugFeature::Mode;
             auto gbufItem = [&](const char* label, GDM m) {
-                if (ImGui::Selectable(label, gbufferDebugView_ == m)) {
-                    gbufferDebugView_ = (gbufferDebugView_ == m) ? GDM::Off : m;
+                if (ImGui::Selectable(label, rset_.gbufferDebugView_ == m)) {
+                    rset_.gbufferDebugView_ = (rset_.gbufferDebugView_ == m) ? GDM::Off : m;
 #if AVER_MODULE_VOXI
-                    if (gbufferDebugView_ != GDM::Off) debugView_ = voxi::VoxiRenderer::ViewDebug::None;
+                    if (rset_.gbufferDebugView_ != GDM::Off) rset_.debugView_ = voxi::VoxiRenderer::ViewDebug::None;
 #endif
                 }
                 if (ImGui::IsItemHovered())
@@ -3156,11 +3156,11 @@ void SandboxApp::drawViewportViewModeMenu() {
         using VD = voxi::VoxiRenderer::ViewDebug;
         auto debugItem = [&](const char* label, VD m, const char* trackName) {
             ImGui::BeginDisabled(!rdAvailable);
-            if (ImGui::Selectable(label, debugView_ == m)) {
-                debugView_ = (debugView_ == m) ? VD::None : m;
-                if (debugView_ != VD::None) {
+            if (ImGui::Selectable(label, rset_.debugView_ == m)) {
+                rset_.debugView_ = (rset_.debugView_ == m) ? VD::None : m;
+                if (rset_.debugView_ != VD::None) {
                     wireframe_ = false;
-                    gbufferDebugView_ = GBufferDebugFeature::Mode::Off;
+                    rset_.gbufferDebugView_ = GBufferDebugFeature::Mode::Off;
                 }
             }
             ImGui::EndDisabled();
@@ -3182,12 +3182,12 @@ void SandboxApp::drawViewportViewModeMenu() {
         // NeuRAA's edge detection (docs/rendering/NEURAA_NRD.md): drawn by the AverSR seam, not
         // PSRayDriven, so the scene keeps its normal shading underneath.
         ImGui::BeginDisabled(!rdAvailable);
-        if (ImGui::Selectable("Edge Classes (NeuRAA)", neuraaDebugView_)) {
-            neuraaDebugView_ = !neuraaDebugView_;
-            if (neuraaDebugView_) {
+        if (ImGui::Selectable("Edge Classes (NeuRAA)", rset_.neuraaDebugView_)) {
+            rset_.neuraaDebugView_ = !rset_.neuraaDebugView_;
+            if (rset_.neuraaDebugView_) {
                 wireframe_ = false;
-                debugView_ = VD::None;
-                gbufferDebugView_ = GBufferDebugFeature::Mode::Off;
+                rset_.debugView_ = VD::None;
+                rset_.gbufferDebugView_ = GBufferDebugFeature::Mode::Off;
             }
         }
         ImGui::EndDisabled();
@@ -3201,7 +3201,7 @@ void SandboxApp::drawViewportViewModeMenu() {
         // Undenoised is independent of every mode above (stays on across Lit/Unlit/Wireframe/
         // debug-view, combines with any) -- see onUpdate's UNDENOISED comment for the knobs this bundles.
         ImGui::Separator();
-        if (ImGui::Selectable("Undenoised", undenoised_)) undenoised_ = !undenoised_;
+        if (ImGui::Selectable("Undenoised", rset_.undenoised_)) rset_.undenoised_ = !rset_.undenoised_;
         uiReg_.track("viewMode.undenoised");
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Turns off the denoiser, the RT sun-shadow spatial filter and ReSTIR GI's spatial\n"

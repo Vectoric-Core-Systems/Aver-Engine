@@ -47,9 +47,9 @@ void SandboxApp::loadEditorPreferences() {
     lookSpeed_          = prefFloat("viewport.lookSensitivity",      lookSpeed_);
     // View flags gated to interactive runs only (not --frames). Snap is ungated: doesn't alter pixels.
     if (maxFrames_ == 0) {
-        if (!viewModeFromCli_) {
+        if (!rset_.viewModeFromCli_) {
             wireframe_    = prefBool("viewport.wireframe",          wireframe_);
-            unlit_        = prefBool("viewport.unlit",              unlit_);
+            rset_.unlit_        = prefBool("viewport.unlit",              rset_.unlit_);
         }
         showStaticMeshes_ = prefBool("viewport.showStaticMeshes",   showStaticMeshes_);
         showAtmosphere_   = prefBool("viewport.showAtmosphere",     showAtmosphere_);
@@ -64,61 +64,61 @@ void SandboxApp::loadEditorPreferences() {
     // Post process is a VIEW property (per observer, not per level). Gated off on capture runs.
     if (maxFrames_ == 0) {
         // Only the four exposed fields persist; rest is tuned in RHI.hpp.
-        if (!postExposureFromCli_ && project_.postExposure < 0.0f)
-            post_.exposure       = prefFloat("post.exposure",       post_.exposure);
-        if (!postAutoExpFromCli_ && project_.postAutoExposure < 0)
-            post_.autoExposure   = prefBool ("post.autoExposure",   post_.autoExposure);
-        if (!postBloomFromCli_ && project_.postBloom < 0.0f)
-            post_.bloomIntensity = prefFloat("post.bloomIntensity", post_.bloomIntensity);
-        post_.nightVision = prefFloat("post.nightVision", post_.nightVision);
+        if (!rset_.postExposureFromCli_ && project_.postExposure < 0.0f)
+            rset_.post_.exposure       = prefFloat("post.exposure",       rset_.post_.exposure);
+        if (!rset_.postAutoExpFromCli_ && project_.postAutoExposure < 0)
+            rset_.post_.autoExposure   = prefBool ("post.autoExposure",   rset_.post_.autoExposure);
+        if (!rset_.postBloomFromCli_ && project_.postBloom < 0.0f)
+            rset_.post_.bloomIntensity = prefFloat("post.bloomIntensity", rset_.post_.bloomIntensity);
+        rset_.post_.nightVision = prefFloat("post.nightVision", rset_.post_.nightVision);
         // Migration: settingsVersion resets to compiled defaults.
-        if (!postExposureFromCli_ && project_.postExposure < 0.0f && prefInt("post.settingsVersion", 0) < 2)
-            post_.exposure = 1.0f;
+        if (!rset_.postExposureFromCli_ && project_.postExposure < 0.0f && prefInt("post.settingsVersion", 0) < 2)
+            rset_.post_.exposure = 1.0f;
         // Migration: exposureKey halved in v3 (doubling stored exposure).
-        if (!postExposureFromCli_ && project_.postExposure < 0.0f && prefInt("post.settingsVersion", 0) < 3)
-            post_.exposure = std::min(post_.exposure * 2.0f, 8.0f);
+        if (!rset_.postExposureFromCli_ && project_.postExposure < 0.0f && prefInt("post.settingsVersion", 0) < 3)
+            rset_.post_.exposure = std::min(rset_.post_.exposure * 2.0f, 8.0f);
     }
 
     // DDC write-behind budget in MB (renderer expects bytes).
-    ddcRamBudgetMb_ = prefFloat("ddc.ramBudgetMb", ddcRamBudgetMb_);
+    rset_.ddcRamBudgetMb_ = prefFloat("ddc.ramBudgetMb", rset_.ddcRamBudgetMb_);
 #if AVER_MODULE_VOXI
-    voxiRenderer_.setGiCacheRamBudget(static_cast<u64>(ddcRamBudgetMb_) * 1024ull * 1024ull);
+    voxiRenderer_.setGiCacheRamBudget(static_cast<u64>(rset_.ddcRamBudgetMb_) * 1024ull * 1024ull);
 #endif
 
     prefIdeName_ = prefString("contentBrowser.ide", "");
 
     if (prefsDevice_ && prefsDevice_->vsyncCanDisable())
         prefsDevice_->setVSync(prefBool("display.vsync", prefsDevice_->vsync()));
-    frameInterpWhileEditing_ = prefBool("display.frameInterpWhileEditing", false);
+    rset_.frameInterpWhileEditing_ = prefBool("display.frameInterpWhileEditing", false);
     // Default: Learned trajectory (shipped weights).
-    frameInterpTrajectory_ = prefInt("display.frameInterpTrajectory", 2);
-    frameInterpTrain_ = prefBool("display.frameInterpTrain", false);
-    fpsCountsInterpolated_ = prefBool("display.fpsCountsInterpolated", true);
-    edgeAaEnabled_ = edgeAaEnabled_ || prefBool("display.edgeAa", false);   // --edge-aa also turns it on
-    fsrSharpness_  = prefFloat("display.fsrSharpness", fsrSharpness_);
+    rset_.frameInterpTrajectory_ = prefInt("display.frameInterpTrajectory", 2);
+    rset_.frameInterpTrain_ = prefBool("display.frameInterpTrain", false);
+    rset_.fpsCountsInterpolated_ = prefBool("display.fpsCountsInterpolated", true);
+    rset_.edgeAaEnabled_ = rset_.edgeAaEnabled_ || prefBool("display.edgeAa", false);   // --edge-aa also turns it on
+    rset_.fsrSharpness_  = prefFloat("display.fsrSharpness", rset_.fsrSharpness_);
     // Stored render scale behind crash cookie: detects device loss at startup via renderScalePending.
     // Migration: AverSrChoice from display.aversr/renderScale if display.aversrChoice not yet written.
 #if AVER_MODULE_SR
-    if (prefsDevice_ && renderScaleOverride_ == 1.0f && !averSrFromCli_) {
+    if (prefsDevice_ && rset_.renderScaleOverride_ == 1.0f && !rset_.averSrFromCli_) {
         const std::string storedChoice = prefString("display.aversrChoice", "");
-        averSrChoice_ = editor::migrateAverSrChoice(!storedChoice.empty(), storedChoice,
+        rset_.averSrChoice_ = editor::migrateAverSrChoice(!storedChoice.empty(), storedChoice,
                                                     prefFloat("display.aversr", 0.0f),
                                                     prefFloat("display.renderScale", 1.0f));
         // ONE-TIME NOTE (3.3 A): only when THIS load is the migration itself, and it landed on
         // Auto -- a session that already has a display.aversrChoice key on disk (Auto included)
         // was an explicit choice, not a silent default, and needs no note.
-        averSrMigrationNoteArmed_ =
-            storedChoice.empty() && averSrChoice_ == editor::AverSrChoice::Auto;
+        rset_.averSrMigrationNoteArmed_ =
+            storedChoice.empty() && rset_.averSrChoice_ == editor::AverSrChoice::Auto;
 
         const bool pending = prefBool("display.renderScalePending", false);
-        if (averSrChoice_ == editor::AverSrChoice::Manual) {
+        if (rset_.averSrChoice_ == editor::AverSrChoice::Manual) {
             // Crash-cookie mechanism as above (unchanged from before Auto existed). Manual is the
             // ONLY choice that still restores a raw display.renderScale directly -- every named
             // level below re-derives its own canonical scale through applyAverSrQuality instead.
             const f32 stored = prefFloat("display.renderScale", prefsDevice_->renderScale());
             if (stored == 1.0f) {
                 prefsDevice_->setRenderScale(stored);         // early-outs; costs nothing
-            } else if (pending && !renderScaleCookieArmed_) {
+            } else if (pending && !rset_.renderScaleCookieArmed_) {
                 // !renderScaleCookieArmed_: a cookie THIS process armed isn't evidence the previous
                 // launch crashed (see updateAverSrAuto's prefsLoaded_ gate for the frame-1 ordering bug).
                 // Falls back to the default 0.5, not native: a device loss is rarely the scale's fault,
@@ -133,36 +133,36 @@ void SandboxApp::loadEditorPreferences() {
             } else {
                 setPrefBool("display.renderScalePending", true);
                 flushEditorPrefs();   // ON DISK BEFORE THE DEVICE IS RISKED -- the whole point
-                renderScaleCookieArmed_ = true;
+                rset_.renderScaleCookieArmed_ = true;
                 prefsDevice_->setRenderScale(stored);
             }
-        } else if (pending && !renderScaleCookieArmed_) {
+        } else if (pending && !rset_.renderScaleCookieArmed_) {
             // Same !renderScaleCookieArmed_ reasoning as the Manual branch above.
             // A named level (or one Auto resolved to previously) didn't survive its own launch --
             // same crash class as Manual's raw scale, but via applyAverSrQuality. Force Off for
             // this launch (never re-attempt the level that just crashed) rather than reset a
             // number (there's no single "the scale" to reset here), and latch it so Project
             // Settings/Display can say why AverSR reads Off.
-            averSrCookieTripped_ = true;
+            rset_.averSrCookieTripped_ = true;
             AVER_CRITICAL("[AverSR] the last launch did not survive applying {} -- forcing Off "
                           "for this launch. Choose a level again if that was not the cause.",
-                          editor::averSrChoiceName(averSrChoice_));
+                          editor::averSrChoiceName(rset_.averSrChoice_));
             setPrefBool("display.renderScalePending", false);
             flushEditorPrefs();
             applyAverSrQuality(prefsDevice_, aver::sr::Quality::Off);
-        } else if (averSrChoice_ == editor::AverSrChoice::Auto) {
+        } else if (rset_.averSrChoice_ == editor::AverSrChoice::Auto) {
             // Applied by updateAverSrAuto next frame (needs project context).
         } else {
             // Named levels re-derive their own canonical scale; quality owns the scale.
             const aver::sr::Quality q =
-                static_cast<aver::sr::Quality>(editor::userLevelFor(averSrChoice_));
+                static_cast<aver::sr::Quality>(editor::userLevelFor(rset_.averSrChoice_));
             if (q != aver::sr::Quality::Off) {
                 // Armed before first non-Off application (same crash-cookie pattern as Manual).
                 setPrefBool("display.renderScalePending", true);
                 flushEditorPrefs();
-                renderScaleCookieArmed_ = true;
+                rset_.renderScaleCookieArmed_ = true;
             }
-            if (q != averSrQuality_) applyAverSrQuality(prefsDevice_, q);
+            if (q != rset_.averSrQuality_) applyAverSrQuality(prefsDevice_, q);
         }
     }
 #endif  // AVER_MODULE_SR
@@ -303,12 +303,12 @@ void SandboxApp::buildEditorPrefs() {
         ImGui::TextDisabled(vs ? "(capped to the refresh rate)" : "(uncapped, may tear)");
 
         // Frame interpolation while editing; Play follows project setting instead.
-        ImGui::Checkbox("Frame interpolation in viewport while editing", &frameInterpWhileEditing_);
+        ImGui::Checkbox("Frame interpolation in viewport while editing", &rset_.frameInterpWhileEditing_);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Shows a generated frame between every two rendered ones: twice the frames\n"
                               "on screen for the same rendering work, at about half a frame of extra delay.\n"
                               "Needs 1x anti-aliasing. Play uses the project's setting instead.");
-        if (frameInterpWhileEditing_ && prefsDevice_) {
+        if (rset_.frameInterpWhileEditing_ && prefsDevice_) {
             ImGui::SameLine();
             ImGui::TextDisabled(prefsDevice_->sampleCount() > 1 ? "(paused: needs 1x anti-aliasing)"
                                 : prefsDevice_->frameInterpolated() ? "(running)"
@@ -317,20 +317,20 @@ void SandboxApp::buildEditorPrefs() {
 
         // Frame interpolation trajectory path.
         static const char* kPaths[] = {"Straight lines", "Quadratic (procedural)", "Learned (NeuraFI)"};
-        int path = frameInterpTrajectory_ < 0 ? 0 : (frameInterpTrajectory_ > 2 ? 2 : frameInterpTrajectory_);
-        if (ImGui::Combo("Frame interpolation path", &path, kPaths, 3)) frameInterpTrajectory_ = path;
+        int path = rset_.frameInterpTrajectory_ < 0 ? 0 : (rset_.frameInterpTrajectory_ > 2 ? 2 : rset_.frameInterpTrajectory_);
+        if (ImGui::Combo("Frame interpolation path", &path, kPaths, 3)) rset_.frameInterpTrajectory_ = path;
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("How a pixel is followed between two rendered frames. Straight lines: constant\n"
                               "motion. Quadratic: bends with the last two frames' motion (exact for steady\n"
                               "acceleration). Learned: a small network predicts the bend; it uses the\n"
                               "quadratic until it has trained. Applies while editing and in Play.");
-        ImGui::Checkbox("Train NeuraFI while frame interpolation runs", &frameInterpTrain_);
+        ImGui::Checkbox("Train NeuraFI while frame interpolation runs", &rset_.frameInterpTrain_);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Learns from the frames you are already rendering: about 0.5 ms a frame while on.\n"
                               "Progress is saved every 500 steps beside the editor's settings and kept\n"
                               "between sessions; learning slows down as it accumulates, so leave it on as\n"
                               "long as you like.");
-        if (frameInterpolator_ && (frameInterpTrain_ || frameInterpTrajectoryCli_ == 2 || frameInterpTrajectory_ == 2)) {
+        if (frameInterpolator_ && (rset_.frameInterpTrain_ || rset_.frameInterpTrajectoryCli_ == 2 || rset_.frameInterpTrajectory_ == 2)) {
             const neurafi::NeuraFI::TrainingStatus st = frameInterpolator_->trainingStatus();
             ImGui::TextDisabled("NeuraFI: %llu steps (learning rate %.1e), %s",
                                 static_cast<unsigned long long>(st.lifetimeSteps), st.learningRate,
@@ -345,7 +345,7 @@ void SandboxApp::buildEditorPrefs() {
 
 #if AVER_MODULE_VOXI
         // NRD2 phase 4: which network weights the denoiser uses (Tools > Train Neural Denoiser trains them).
-        if (voxiAttached_) {
+        if (rset_.voxiAttached_) {
             const render::denoise::Nrd2NetworkStatus ns = voxiRenderer_.nrd2NetworkStatus();
             using Src = render::denoise::Nrd2NetworkStatus::Source;
             const char* src = ns.source == Src::User ? "user" : ns.source == Src::Shipped ? "shipped" : "none";
@@ -366,11 +366,11 @@ void SandboxApp::buildEditorPrefs() {
         // Combo picks an AverSR SOURCE: Auto follows CLI > Display > manifest > ladder; named items pin one level.
         std::string autoLabel = "Auto";
 #if AVER_MODULE_VOXI
-        if (voxiAttached_) {
+        if (rset_.voxiAttached_) {
             voxi::Renderer& vxr = voxi::Renderer::get();
-            const int cliLevel = (averSrFromCli_ && !averSrCliAuto_) ? averSrCliLevel_ : -1;
+            const int cliLevel = (rset_.averSrFromCli_ && !rset_.averSrCliAuto_) ? rset_.averSrCliLevel_ : -1;
             const voxi::AverSrDecision preview = voxi::resolveAverSrLevel(
-                cliLevel, -1, averSrProjectDefault_,
+                cliLevel, -1, rset_.averSrProjectDefault_,
                 voxi::autoAverSrLevel(vxr.settings(), vxr.deviceInfo()));
             autoLabel = std::string("Auto (") +
                        aver::sr::qualityName(static_cast<aver::sr::Quality>(preview.level)) +
@@ -378,18 +378,18 @@ void SandboxApp::buildEditorPrefs() {
         }
 #endif
         static const char* kAverSrItems[] = {"", "Off", "Quality", "Balanced", "Performance", "Manual scale"};
-        const int curIdx = static_cast<int>(averSrChoice_);
+        const int curIdx = static_cast<int>(rset_.averSrChoice_);
         const char* curLabel = curIdx == 0 ? autoLabel.c_str() : kAverSrItems[curIdx];
         if (ImGui::BeginCombo("AverSR", curLabel)) {
             for (int i = 0; i < 6; ++i) {
                 const bool sel = curIdx == i;
                 const char* itemLabel = i == 0 ? autoLabel.c_str() : kAverSrItems[i];
                 if (ImGui::Selectable(itemLabel, sel)) {
-                    averSrMigrationNoteArmed_ = false;   // Cleared on any explicit pick.
-                    averSrCookieTripped_ = false;   // Lifts the crash-cookie latch.
-                    averSrChoice_ = static_cast<editor::AverSrChoice>(i);
+                    rset_.averSrMigrationNoteArmed_ = false;   // Cleared on any explicit pick.
+                    rset_.averSrCookieTripped_ = false;   // Lifts the crash-cookie latch.
+                    rset_.averSrChoice_ = static_cast<editor::AverSrChoice>(i);
                     // Auto/Manual apply nothing here; updateAverSrAuto picks up Auto next frame.
-                    const int lvl = editor::userLevelFor(averSrChoice_);
+                    const int lvl = editor::userLevelFor(rset_.averSrChoice_);
                     if (lvl >= 0 && prefsDevice_)
                         applyAverSrQuality(prefsDevice_, static_cast<aver::sr::Quality>(lvl));
                 }
@@ -409,10 +409,10 @@ void SandboxApp::buildEditorPrefs() {
                               "The 5.0ms-at-Off / 2.3-1.7-1.3ms figure this tooltip used to quote\n"
                               "was recorded pre-ReSTIR/pre-denoiser; aver-aversr-measured.md records\n"
                               "this figure as unverified.");
-        if (averSrMigrationNoteArmed_)
+        if (rset_.averSrMigrationNoteArmed_)
             ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
                 "AverSR now defaults to Auto (%s). Choose Off for native resolution.",
-                aver::sr::qualityName(averSrQuality_));
+                aver::sr::qualityName(rset_.averSrQuality_));
 #endif
         // Render scale: 3D scene resolution as fraction of window. UI stays crisp.
         float rs = prefsDevice_ ? prefsDevice_->renderScale() : 1.0f;
@@ -420,8 +420,8 @@ void SandboxApp::buildEditorPrefs() {
             prefsDevice_->setRenderScale(rs);
 #if AVER_MODULE_SR
             // Dragging sets "Manual scale" (a deliberate choice like picking a combo item).
-            averSrMigrationNoteArmed_ = false;
-            averSrChoice_ = editor::AverSrChoice::Manual;
+            rset_.averSrMigrationNoteArmed_ = false;
+            rset_.averSrChoice_ = editor::AverSrChoice::Manual;
 #endif
         }
         if (ImGui::IsItemHovered())
@@ -429,15 +429,15 @@ void SandboxApp::buildEditorPrefs() {
                               "upscales it back for display with FSR 1. The editor UI stays crisp either way.");
 #if AVER_MODULE_SR
         ImGui::TextDisabled("Temporal AA: %s (Project Settings > Rendering > Anti-Aliasing & Upscaling)",
-                            temporalAaEnabled_ ? "on" : "off");
-        ImGui::Checkbox("Edge anti-aliasing", &edgeAaEnabled_);
+                            rset_.temporalAaEnabled_ ? "on" : "off");
+        ImGui::Checkbox("Edge anti-aliasing", &rset_.edgeAaEnabled_);
         uiReg_.track("prefs.display.edgeAa");
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("FXAA-class edge smoothing on the rendered scene, before the upscale.\n"
                               "Works at any render scale, including native.");
-        float sharpen = 2.0f - fsrSharpness_;   // shown as strength: 2 = sharpest, 0 = off-ish
+        float sharpen = 2.0f - rset_.fsrSharpness_;   // shown as strength: 2 = sharpest, 0 = off-ish
         if (ImGui::SliderFloat("Sharpening", &sharpen, 0.0f, 2.0f, "%.2f"))
-            fsrSharpness_ = 2.0f - sharpen;
+            rset_.fsrSharpness_ = 2.0f - sharpen;
         uiReg_.track("prefs.display.fsrSharpness");
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("FSR 1 RCAS sharpening after the upscale (AMD's default is 1.80 here).\n"
@@ -450,7 +450,7 @@ void SandboxApp::buildEditorPrefs() {
         ImGui::Checkbox("Wireframe", &wireframe_);
         uiReg_.track("prefs.viewport.wireframe");
         // Other view flags now persist (weren't remembered before).
-        ImGui::Checkbox("Unlit", &unlit_);
+        ImGui::Checkbox("Unlit", &rset_.unlit_);
         uiReg_.track("prefs.viewport.unlit");
         ImGui::Checkbox("Show static meshes", &showStaticMeshes_);
         uiReg_.track("prefs.viewport.showStaticMeshes");
@@ -495,9 +495,9 @@ void SandboxApp::buildEditorPrefs() {
         ImGui::TextDisabled("DerivedDataCache" AVER_PATH_SEP "GI. Derived data: deleting it costs one rebuild.");
 #if AVER_MODULE_VOXI
         // Budget in MB; floor is one volume.
-        if (ImGui::SliderFloat("Memory budget", &ddcRamBudgetMb_, 32.0f, 4096.0f, "%.0f MB",
+        if (ImGui::SliderFloat("Memory budget", &rset_.ddcRamBudgetMb_, 32.0f, 4096.0f, "%.0f MB",
                                ImGuiSliderFlags_Logarithmic))
-            voxiRenderer_.setGiCacheRamBudget(static_cast<u64>(ddcRamBudgetMb_) * 1024ull * 1024ull);
+            voxiRenderer_.setGiCacheRamBudget(static_cast<u64>(rset_.ddcRamBudgetMb_) * 1024ull * 1024ull);
         uiReg_.track("prefs.ddc.ramBudget");
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Only settled bakes are kept: dragging the sun or a material slider\n"
@@ -1421,10 +1421,10 @@ void SandboxApp::renderPageAntiAliasing(voxi::Renderer& vx, voxi::Settings& s, c
 
 #if AVER_MODULE_SR
     {
-        bool taa = temporalAaEnabled_;
-        ImGui::BeginDisabled(taaFromCli_);
+        bool taa = rset_.temporalAaEnabled_;
+        ImGui::BeginDisabled(rset_.taaFromCli_);
         if (ImGui::Checkbox("Temporal anti-aliasing (TAA)", &taa)) {
-            temporalAaEnabled_ = taa;
+            rset_.temporalAaEnabled_ = taa;
             project_.taa = taa ? 1 : 0;
             projectDirty_ = true;
         }
@@ -1443,10 +1443,10 @@ void SandboxApp::renderPageAntiAliasing(voxi::Renderer& vx, voxi::Settings& s, c
                                static_cast<u32>(s.msaa));
     }
     {
-        bool nra = neuraaEnabled_;
-        ImGui::BeginDisabled(neuraaFromCli_);
+        bool nra = rset_.neuraaEnabled_;
+        ImGui::BeginDisabled(rset_.neuraaFromCli_);
         if (ImGui::Checkbox("NeuRAA edge anti-aliasing", &nra)) {
-            neuraaEnabled_ = nra;
+            rset_.neuraaEnabled_ = nra;
             project_.neuraa = nra ? 1 : 0;
             projectDirty_ = true;
         }
@@ -1469,34 +1469,34 @@ void SandboxApp::renderPageAntiAliasing(voxi::Renderer& vx, voxi::Settings& s, c
     // AverSR's project default sits outside Overall/Custom detection on purpose (module boundary).
     {
         const char* rungName = averSrAutoRungName(s, vx.deviceInfo());
-        std::string sourceText = averSrSource_ == voxi::AverSrSource::Auto
+        std::string sourceText = rset_.averSrSource_ == voxi::AverSrSource::Auto
             ? (std::string("Auto from ") + rungName)
-            : (averSrSource_ == voxi::AverSrSource::ForcedOff
+            : (rset_.averSrSource_ == voxi::AverSrSource::ForcedOff
                    ? "forced Off after a failed launch"
-                   : averSrSourceText(averSrSource_));
-        ImGui::Text("Upscaling: AverSR %s (%s)", aver::sr::qualityName(averSrQuality_),
+                   : averSrSourceText(rset_.averSrSource_));
+        ImGui::Text("Upscaling: AverSR %s (%s)", aver::sr::qualityName(rset_.averSrQuality_),
                     sourceText.c_str());
         // Only meaningful when source is not Auto; surfaces hidden pinned levels.
-        if (averSrSource_ != voxi::AverSrSource::Auto) {
+        if (rset_.averSrSource_ != voxi::AverSrSource::Auto) {
             const u32 rungLevel = voxi::autoAverSrLevel(s, vx.deviceInfo());
-            if (rungLevel != static_cast<u32>(averSrQuality_))
+            if (rungLevel != static_cast<u32>(rset_.averSrQuality_))
                 ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
                     "(differs from the %s preset's default, %s)", rungName,
                     aver::sr::qualityName(static_cast<aver::sr::Quality>(rungLevel)));
         }
         // One-time migration note (also shown in Display preference).
-        if (averSrMigrationNoteArmed_)
+        if (rset_.averSrMigrationNoteArmed_)
             ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
                 "AverSR now defaults to Auto (%s). Choose Off for native resolution.",
-                aver::sr::qualityName(averSrQuality_));
+                aver::sr::qualityName(rset_.averSrQuality_));
         // -1 ("Follow Overall preset") is explicit default (index 0), not unstated.
         static const char* kProjDefaultItems[] = {"Follow Overall preset", "Off", "Quality",
                                                    "Balanced", "Performance"};
-        int projIdx = averSrProjectDefault_ < 0 ? 0 : averSrProjectDefault_ + 1;
+        int projIdx = rset_.averSrProjectDefault_ < 0 ? 0 : rset_.averSrProjectDefault_ + 1;
         if (ImGui::Combo("Upscaling default (AverSR)", &projIdx, kProjDefaultItems, 5)) {
-            averSrProjectDefault_ = projIdx == 0 ? -1 : projIdx - 1;
-            averSrMigrationNoteArmed_ = false;
-            averSrCookieTripped_ = false;   // an explicit pick lifts the crash-cookie latch
+            rset_.averSrProjectDefault_ = projIdx == 0 ? -1 : projIdx - 1;
+            rset_.averSrMigrationNoteArmed_ = false;
+            rset_.averSrCookieTripped_ = false;   // an explicit pick lifts the crash-cookie latch
             projectDirty_ = true;
         }
         uiReg_.track("project.averSr");
@@ -1710,8 +1710,8 @@ void SandboxApp::renderPageGi(voxi::Renderer& vx, voxi::Settings& s, const voxi:
                            "this session is still %u^3.", voxiRenderer_.voxelResolutionBuilt());
     if (ImGui::SliderFloat("GI intensity", &s.giIntensity, 0.0f, 4.0f)) changed = true;
     if (ImGui::SliderFloat("GI distance", &s.giMaxDistance, 10.0f, 20000.0f, "%.0f")) changed = true;
-    ImGui::DragFloat3("Volume centre", &giCenter_.x, 0.5f);
-    ImGui::DragFloat("Volume extent", &giExtent_, 0.5f, 1.0f, 100000.0f);
+    ImGui::DragFloat3("Volume centre", &rset_.giCenter_.x, 0.5f);
+    ImGui::DragFloat("Volume extent", &rset_.giExtent_, 0.5f, 1.0f, 100000.0f);
     // Diffuse cone count: tier-derived. Quality above re-derives it.
     {
         int cones = static_cast<int>(s.giCones);
@@ -2111,14 +2111,14 @@ void SandboxApp::renderPagePost(voxi::Renderer& vx, voxi::Settings& s, const vox
                 ImGui::SetTooltip("%s", tip);
             ImGui::PopID();
         };
-        postFloat("exposure", "Exposure", &project_.postExposure, &post_.exposure,
+        postFloat("exposure", "Exposure", &project_.postExposure, &rset_.post_.exposure,
                   0.05f, 8.0f, "%.2f", ImGuiSliderFlags_Logarithmic,
                   "project.post.exposure",
                   "Linear multiplier on scene radiance, applied before the tone\n"
                   "curve. With auto exposure below on, it is compensation on the\n"
                   "adapted value: 1 = as metered, 2 = one stop brighter.\n\n"
                   "Round-trips as RENDER.EXPOSURE.");
-        postFloat("bloom", "Bloom", &project_.postBloom, &post_.bloomIntensity,
+        postFloat("bloom", "Bloom", &project_.postBloom, &rset_.post_.bloomIntensity,
                   0.0f, 1.0f, "%.3f", 0, "project.post.bloom",
                   "ZERO IS A REAL ANSWER HERE, which is why the key's sentinel is\n"
                   "-1 and not 0: zero intensity builds no pyramid and records no\n"
@@ -2130,10 +2130,10 @@ void SandboxApp::renderPagePost(voxi::Renderer& vx, voxi::Settings& s, const vox
             // Checkbox, not settingInt slider. Tracks before tooltip for ordering.
             ImGui::PushID("autoExposure");
             bool stated = project_.postAutoExposure >= 0;
-            bool on = stated ? project_.postAutoExposure != 0 : post_.autoExposure;
+            bool on = stated ? project_.postAutoExposure != 0 : rset_.post_.autoExposure;
             if (ImGui::Checkbox("##stated", &stated)) {
                 project_.postAutoExposure = stated ? (on ? 1 : 0) : -1;
-                if (stated) post_.autoExposure = on;
+                if (stated) rset_.post_.autoExposure = on;
                 projectDirty_ = true;
             }
             if (ImGui::IsItemHovered())
@@ -2143,7 +2143,7 @@ void SandboxApp::renderPagePost(voxi::Renderer& vx, voxi::Settings& s, const vox
             ImGui::BeginDisabled(!stated);
             if (ImGui::Checkbox("Auto exposure", &on)) {
                 project_.postAutoExposure = on ? 1 : 0;
-                post_.autoExposure = on;
+                rset_.post_.autoExposure = on;
                 projectDirty_ = true;
             }
             ImGui::EndDisabled();
@@ -2157,7 +2157,7 @@ void SandboxApp::renderPagePost(voxi::Renderer& vx, voxi::Settings& s, const vox
             ImGui::PopID();
         }
         // Amber when adaptation is on: the recorded value still applies where adaptation is off.
-        if (post_.autoExposure && project_.postExposure >= 0.0f)
+        if (rset_.post_.autoExposure && project_.postExposure >= 0.0f)
             ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
                 "Auto exposure is on, so the adaptation overwrites Exposure every frame. The "
                 "recorded value still applies wherever auto exposure is off.");
@@ -2165,11 +2165,11 @@ void SandboxApp::renderPagePost(voxi::Renderer& vx, voxi::Settings& s, const vox
             ImGui::PushID("tonemap");
             bool stated = project_.postTonemap >= 0;
             // Clamped from both sources; neither is bounded.
-            int mode = stated ? project_.postTonemap : static_cast<int>(post_.tonemap);
+            int mode = stated ? project_.postTonemap : static_cast<int>(rset_.post_.tonemap);
             if (mode > 7) mode = 7;
             if (ImGui::Checkbox("##stated", &stated)) {
                 project_.postTonemap = stated ? mode : -1;
-                if (stated) post_.tonemap = static_cast<u32>(mode);
+                if (stated) rset_.post_.tonemap = static_cast<u32>(mode);
                 projectDirty_ = true;
             }
             if (ImGui::IsItemHovered())
@@ -2181,17 +2181,17 @@ void SandboxApp::renderPagePost(voxi::Renderer& vx, voxi::Settings& s, const vox
                              "Per-channel ACES\0ACES fitted (default)\0ACES luminance\0"
                              "Extended linear\0Extended Reinhard\0Extended filmic\0Extended ACES\0Extended AgX\0")) {
                 project_.postTonemap = mode;
-                post_.tonemap = static_cast<u32>(mode);
+                rset_.post_.tonemap = static_cast<u32>(mode);
                 projectDirty_ = true;
             }
             ImGui::EndDisabled();
             {
                 // The white point and display adjustments (RENDER.TONEMAPWHITE / ADJUST*); an edit states the key.
                 struct Row { const char* label; f32* project; f32* live; f32 hi; };
-                Row rows[] = {{"Tone white", &project_.postTonemapWhite, &post_.tonemapWhite, 16.0f},
-                              {"Brightness", &project_.postAdjustBrightness, &post_.adjustBrightness, 4.0f},
-                              {"Contrast", &project_.postAdjustContrast, &post_.adjustContrast, 4.0f},
-                              {"Saturation", &project_.postAdjustSaturation, &post_.adjustSaturation, 4.0f}};
+                Row rows[] = {{"Tone white", &project_.postTonemapWhite, &rset_.post_.tonemapWhite, 16.0f},
+                              {"Brightness", &project_.postAdjustBrightness, &rset_.post_.adjustBrightness, 4.0f},
+                              {"Contrast", &project_.postAdjustContrast, &rset_.post_.adjustContrast, 4.0f},
+                              {"Saturation", &project_.postAdjustSaturation, &rset_.post_.adjustSaturation, 4.0f}};
                 for (Row& r : rows) {
                     float v = *r.project >= 0.0f ? *r.project : *r.live;
                     if (ImGui::DragFloat(r.label, &v, 0.01f, 0.001f, r.hi, "%.3f")) {
@@ -2218,7 +2218,7 @@ void SandboxApp::renderPagePost(voxi::Renderer& vx, voxi::Settings& s, const vox
             ImGui::PopID();
         }
         // CLI flag precedence: a flag applies at startup, manifest later.
-        if (postExposureFromCli_ || postBloomFromCli_ || postAutoExpFromCli_)
+        if (rset_.postExposureFromCli_ || rset_.postBloomFromCli_ || rset_.postAutoExpFromCli_)
             ImGui::TextDisabled("A post-process flag was given on this launch; it outranks "
                                 "these keys when a project opens.");
     }
@@ -2250,7 +2250,7 @@ void SandboxApp::renderPagePerformance(voxi::Renderer& vx, voxi::Settings& s, co
 
         if (ImGui::Checkbox("Occlusion culling", &occlusionCullEnabled_)) projectDirty_ = true;
         uiReg_.track("project.occlusionCull");
-        if (ImGui::Checkbox("Depth pre-pass", &depthPrepassOverride_)) projectDirty_ = true;
+        if (ImGui::Checkbox("Depth pre-pass", &rset_.depthPrepassOverride_)) projectDirty_ = true;
         uiReg_.track("project.depthPrepass");
 
     }
@@ -2294,7 +2294,7 @@ void SandboxApp::renderPageDebug(voxi::Renderer& vx, voxi::Settings& s, const vo
     ImGui::Spacing();
     ImGui::TextUnformatted("Global illumination");
     ImGui::Separator();
-    ImGui::Checkbox("Debug: show voxel radiance", &giDebugView_);
+    ImGui::Checkbox("Debug: show voxel radiance", &rset_.giDebugView_);
 
     // Debug paints: live console-only. Read/write directly so checkbox and command sync.
     {
@@ -2451,13 +2451,13 @@ void SandboxApp::saveEditorPreferences() {
     setPrefBool ("panels.undoHistory",           showUndoHistory_);
     setPrefFloat("viewport.flySpeed",            flySpeed_);
     setPrefFloat("viewport.lookSensitivity",     lookSpeed_);
-    setPrefFloat("ddc.ramBudgetMb",              ddcRamBudgetMb_);
+    setPrefFloat("ddc.ramBudgetMb",              rset_.ddcRamBudgetMb_);
     // Guarded exactly as the load is: a --frames run that wrote its --unlit back would leave
     // the next interactive session unlit, and the run after that with moved gates.
     if (maxFrames_ == 0) {
-        if (!viewModeFromCli_) {
+        if (!rset_.viewModeFromCli_) {
             setPrefBool("viewport.wireframe",     wireframe_);
-            setPrefBool("viewport.unlit",         unlit_);
+            setPrefBool("viewport.unlit",         rset_.unlit_);
         }
         setPrefBool("viewport.showStaticMeshes",  showStaticMeshes_);
         setPrefBool("viewport.showAtmosphere",    showAtmosphere_);
@@ -2477,10 +2477,10 @@ void SandboxApp::saveEditorPreferences() {
     // writing anyway would adopt the project's look as this user's default everywhere, and buy
     // nothing, since the load declines to restore it and applyProject overwrites it regardless.
     if (maxFrames_ == 0) {
-        if (project_.postExposure < 0.0f)     setPrefFloat("post.exposure",     post_.exposure);
-        if (project_.postAutoExposure < 0)    setPrefBool ("post.autoExposure", post_.autoExposure);
-        if (project_.postBloom < 0.0f)      setPrefFloat("post.bloomIntensity", post_.bloomIntensity);
-        setPrefFloat("post.nightVision", post_.nightVision);
+        if (project_.postExposure < 0.0f)     setPrefFloat("post.exposure",     rset_.post_.exposure);
+        if (project_.postAutoExposure < 0)    setPrefBool ("post.autoExposure", rset_.post_.autoExposure);
+        if (project_.postBloom < 0.0f)      setPrefFloat("post.bloomIntensity", rset_.post_.bloomIntensity);
+        setPrefFloat("post.nightVision", rset_.post_.nightVision);
         // Marks the one-time exposure migrations above as done, so a session that never touches
         // Brightness still leaves editor.ini past the version that would force them again.
         setPrefInt("post.settingsVersion", 3);
@@ -2505,10 +2505,10 @@ void SandboxApp::saveEditorPreferences() {
     if (maxFrames_ == 0) {
         if (prefsDevice_ && prefsDevice_->vsyncCanDisable())
             setPrefBool("display.vsync", prefsDevice_->vsync());
-        setPrefBool("display.frameInterpWhileEditing", frameInterpWhileEditing_);
-        setPrefInt("display.frameInterpTrajectory", frameInterpTrajectory_);
-        setPrefBool("display.frameInterpTrain", frameInterpTrain_);
-        setPrefBool("display.fpsCountsInterpolated", fpsCountsInterpolated_);
+        setPrefBool("display.frameInterpWhileEditing", rset_.frameInterpWhileEditing_);
+        setPrefInt("display.frameInterpTrajectory", rset_.frameInterpTrajectory_);
+        setPrefBool("display.frameInterpTrain", rset_.frameInterpTrain_);
+        setPrefBool("display.fpsCountsInterpolated", rset_.fpsCountsInterpolated_);
         // The three AverSR keys below are skipped outright, not written a neutral value, when the
         // command line drove this session's render scale or AverSR level: an interactive `--aversr
         // quality` run has maxFrames_ == 0 too (it is not a --frames capture), so the outer guard
@@ -2519,8 +2519,8 @@ void SandboxApp::saveEditorPreferences() {
         // `#if AVER_MODULE_SR`: two of the three are written from AverSR-only state, and a build
         // that can't read them back shouldn't overwrite what one that can wrote there.
 #if AVER_MODULE_SR
-        if (!averSrFromCli_ && renderScaleOverride_ == 1.0f) {
-            setPrefString("display.aversrChoice", editor::averSrChoiceName(averSrChoice_));
+        if (!rset_.averSrFromCli_ && rset_.renderScaleOverride_ == 1.0f) {
+            setPrefString("display.aversrChoice", editor::averSrChoiceName(rset_.averSrChoice_));
             if (prefsDevice_)
                 // Through renderScaleToPersist, not the live device scale directly: persisting the
                 // live scale for anything but Manual was the exact bug the plan's 10.1/3.3-A
@@ -2528,7 +2528,7 @@ void SandboxApp::saveEditorPreferences() {
                 // resolved to, and the crash-cookie render-scale block at load would apply that
                 // stale fraction before Auto got to re-derive it.
                 setPrefFloat("display.renderScale",
-                            editor::renderScaleToPersist(averSrChoice_, prefsDevice_->renderScale()));
+                            editor::renderScaleToPersist(rset_.averSrChoice_, prefsDevice_->renderScale()));
             // The upscaler's quality mirror: before display.aversrChoice existed this was never
             // persisted at all (reset to Off every launch, desynced from display.renderScale above
             // once it wasn't). display.aversrChoice is now the source of truth; this mirror just
@@ -2537,10 +2537,10 @@ void SandboxApp::saveEditorPreferences() {
             // setPrefFloat, not an int helper, since none exists -- the prefs layer is float/bool/
             // string (every other numeric setting here goes through the same float pair), and the
             // enum's four values fit a float exactly.
-            setPrefFloat("display.aversr", static_cast<f32>(static_cast<int>(averSrQuality_)));
+            setPrefFloat("display.aversr", static_cast<f32>(static_cast<int>(rset_.averSrQuality_)));
         }
-        setPrefBool ("display.edgeAa",       edgeAaEnabled_);
-        setPrefFloat("display.fsrSharpness", fsrSharpness_);
+        setPrefBool ("display.edgeAa",       rset_.edgeAaEnabled_);
+        setPrefFloat("display.fsrSharpness", rset_.fsrSharpness_);
 #endif  // AVER_MODULE_SR
     }
 

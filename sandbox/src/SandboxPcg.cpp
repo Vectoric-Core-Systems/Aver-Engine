@@ -55,7 +55,7 @@ void SandboxApp::installPcgEditorHost() {
             markLevelUnsaved();
         }
 #  if AVER_MODULE_VOXI
-        if (voxiAttached_) {
+        if (rset_.voxiAttached_) {
             fmt::OcInstanceData copy = table;
             levelFoliage_.setExtraTable(fnv1a64(std::string_view(rel)), std::move(copy), materials);
         }
@@ -74,7 +74,7 @@ void SandboxApp::installPcgEditorHost() {
         if (!had) { if (why) *why = "nothing was generated for this graph"; return false; }
         if (it != levelHeader_.foliageFiles.end()) { levelHeader_.foliageFiles.erase(it); markLevelUnsaved(); }
 #  if AVER_MODULE_VOXI
-        if (voxiAttached_) levelFoliage_.clearExtraTable(fnv1a64(std::string_view(rel)));
+        if (rset_.voxiAttached_) levelFoliage_.clearExtraTable(fnv1a64(std::string_view(rel)));
 #  endif
         std::filesystem::remove(file, ec);
         return true;

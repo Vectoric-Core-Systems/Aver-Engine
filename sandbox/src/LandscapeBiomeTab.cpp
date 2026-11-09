@@ -132,7 +132,7 @@ void SandboxApp::buildBiomeSection() {
             setUpgradeStatus(u.status, editor::NotifySeverity::Warning);
         } else {
 #  if AVER_MODULE_VOXI
-            if (voxiAttached_) levelFoliage_.setExtraTable(fnv1a64(std::string_view(req.ocinstRel)), std::move(out.table), std::move(out.groupMaterials));
+            if (rset_.voxiAttached_) levelFoliage_.setExtraTable(fnv1a64(std::string_view(req.ocinstRel)), std::move(out.table), std::move(out.groupMaterials));
 #  endif
             if (std::find(levelHeader_.foliageFiles.begin(), levelHeader_.foliageFiles.end(), req.ocinstRel) == levelHeader_.foliageFiles.end()) {
                 levelHeader_.foliageFiles.push_back(req.ocinstRel);

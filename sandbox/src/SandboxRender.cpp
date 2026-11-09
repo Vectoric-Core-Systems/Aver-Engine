@@ -197,7 +197,7 @@ void SandboxApp::drawEditorObjects(Engine& e) {
     // 0.5` branch was already live on both backends since the selection outline needed it, at
     // frame constant 22; only the view-mode entry was missing).
     // Cleared at the end of the pass so it cannot leak into editor chrome.
-    e.device()->setUnlit(unlit_);
+    e.device()->setUnlit(rset_.unlit_);
     // Whether a level is OPEN, not whether it has anything in it. Used to read
     // `|| !levelEntities_.empty()`, which hid the built-in Floor/Cube placeholders the instant the
     // first object was added to an empty level (reported as "drag and drop replaces the default
@@ -1140,7 +1140,7 @@ void SandboxApp::drawSceneEntities(Engine& e) {
                 // it. Getting this the other way round is the 9.1 -> 64.2 ms/frame that motivated
                 // the floor in the first place.
                 constexpr f32 kMinCasterAngle = 0.02f;   // radians (~1.1 degrees)
-                if (!self.voxiAttached_ && cullRadius >= 0.0f) {
+                if (!self.rset_.voxiAttached_ && cullRadius >= 0.0f) {
                     const Vec3 vp = self.viewPos();
                     const f32 dx = cullCentre.x - vp.x, dy = cullCentre.y - vp.y, dz = cullCentre.z - vp.z;
                     const f32 dsq = dx * dx + dy * dy + dz * dz;
@@ -1255,7 +1255,7 @@ void SandboxApp::drawSceneEntities(Engine& e) {
                         // A THIRD WRITER OF gShadingModel that writeShadingConstants search misses:
                         // this path builds PerObject by hand. Used to hardcode STANDARD, so a mesh
                         // drawn through the GPU cluster path ignored Unlit while every other path honoured it.
-                        const u32 shadingModel = self.unlit_ ? 1u : 0u;   // AVER_MODEL_UNLIT / STANDARD
+                        const u32 shadingModel = self.rset_.unlit_ ? 1u : 0u;   // AVER_MODEL_UNLIT / STANDARD
                         std::memcpy(consts + 24, &shadingModel, sizeof(shadingModel));
                         consts[25] = 0.04f; consts[26] = 1.0f; consts[27] = 0.0f;
                         consts[28] = consts[29] = consts[30] = consts[31] = 0.0f;
@@ -2738,14 +2738,14 @@ const char* SandboxApp::occlusionSuppressingFeatureName() const {
     return "a registered feature";
 }
 
-void SandboxApp::setMsaaOverride(int n) { msaaOverride_ = n; }
+void SandboxApp::setMsaaOverride(int n) { rset_.msaaOverride_ = n; }
 
-void SandboxApp::setDepthPrepassOverride(bool on) { depthPrepassOverride_ = on; }
+void SandboxApp::setDepthPrepassOverride(bool on) { rset_.depthPrepassOverride_ = on; }
 
-void SandboxApp::setGBufferOverride(bool on) { gbufferOverride_ = on; }
+void SandboxApp::setGBufferOverride(bool on) { rset_.gbufferOverride_ = on; }
 
 // --gbuffer-debug: see gbufferDebugView_'s own member comment for what this actually drives.
-void SandboxApp::setGBufferDebugView(GBufferDebugFeature::Mode m) { gbufferDebugView_ = m; }
+void SandboxApp::setGBufferDebugView(GBufferDebugFeature::Mode m) { rset_.gbufferDebugView_ = m; }
 
 #if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
 // --occlusion-cull: see occlusionCullEnabled_'s own member comment. Unset (default) never
@@ -2775,59 +2775,59 @@ void SandboxApp::setOcclusionDebugForceWaitIdle(bool on) { occlusionDebugForceWa
 
 #endif
 
-void SandboxApp::setGiOverride(int q, bool dbg) { giOverride_ = q; giDebugView_ = dbg; }
+void SandboxApp::setGiOverride(int q, bool dbg) { rset_.giOverride_ = q; rset_.giDebugView_ = dbg; }
 
-void SandboxApp::setGiForceOff(bool off) { giForceOff_ = off; }
+void SandboxApp::setGiForceOff(bool off) { rset_.giForceOff_ = off; }
 
 // --no-gi-cone: the A/B measurement toggle (VoxiRenderer::setConeTraceEnabled). DELIBERATELY NOT
 // --no-gi (which also stops the volume being built): this flag alone turns off the per-pixel
 // cone-trace READ, so two otherwise-identical runs differ by exactly the trace's own GPU cost.
-void SandboxApp::setGiConeTraceOff(bool off) { giConeTraceOff_ = off; }
+void SandboxApp::setGiConeTraceOff(bool off) { rset_.giConeTraceOff_ = off; }
 
-void SandboxApp::setRtOverride(int q) { rtOverride_ = q; }
+void SandboxApp::setRtOverride(int q) { rset_.rtOverride_ = q; }
 
-void SandboxApp::setPtOverride(int q) { ptOverride_ = q; }
+void SandboxApp::setPtOverride(int q) { rset_.ptOverride_ = q; }
 
-void SandboxApp::setRtForceOff(bool off) { rtForceOff_ = off; }
+void SandboxApp::setRtForceOff(bool off) { rset_.rtForceOff_ = off; }
 
-void SandboxApp::setRtRays(int n) { rtRaysOverride_ = n; }
+void SandboxApp::setRtRays(int n) { rset_.rtRaysOverride_ = n; }
 
-void SandboxApp::setGiSkyOcclusionRays(int n) { giSkyOccRaysOverride_ = n; }
+void SandboxApp::setGiSkyOcclusionRays(int n) { rset_.giSkyOccRaysOverride_ = n; }
 
-void SandboxApp::setGiSkyOcclusionTile(int n) { giSkyOccTileOverride_ = n; }
+void SandboxApp::setGiSkyOcclusionTile(int n) { rset_.giSkyOccTileOverride_ = n; }
 
-void SandboxApp::setSkyLight(f32 v) { skyLightOverride_ = v; }
+void SandboxApp::setSkyLight(f32 v) { rset_.skyLightOverride_ = v; }
 
-void SandboxApp::setGiIntensity(f32 v) { giIntensityOverride_ = v; }
+void SandboxApp::setGiIntensity(f32 v) { rset_.giIntensityOverride_ = v; }
 
-void SandboxApp::setRtPixelsPerRay(int n) { rtPixelsPerRayOverride_ = n; }
+void SandboxApp::setRtPixelsPerRay(int n) { rset_.rtPixelsPerRayOverride_ = n; }
 
-void SandboxApp::setRtShadowDenoise(int n) { rtShadowDenoiseOverride_ = n; }
+void SandboxApp::setRtShadowDenoise(int n) { rset_.rtShadowDenoiseOverride_ = n; }
 
-void SandboxApp::setRtRenderMode(int n) { rtRenderModeOverride_ = n; }
+void SandboxApp::setRtRenderMode(int n) { rset_.rtRenderModeOverride_ = n; }
 
-void SandboxApp::setRdStages(int n) { rdStagesOverride_ = n; }
+void SandboxApp::setRdStages(int n) { rset_.rdStagesOverride_ = n; }
 
-void SandboxApp::setPtBounces(int n) { ptBouncesOverride_ = n; }
+void SandboxApp::setPtBounces(int n) { rset_.ptBouncesOverride_ = n; }
 
-void SandboxApp::setLayeredBsdf(int n) { layeredBsdfOverride_ = n; }
+void SandboxApp::setLayeredBsdf(int n) { rset_.layeredBsdfOverride_ = n; }
 
-void SandboxApp::setCoat(f32 w, f32 r, f32 f0) { coatWeight_=w; coatRough_=r; coatF0_=f0; }
+void SandboxApp::setCoat(f32 w, f32 r, f32 f0) { rset_.coatWeight_=w; rset_.coatRough_=r; rset_.coatF0_=f0; }
 
-void SandboxApp::setGiUpdateInterval(int n) { giUpdateIntervalOverride_ = n; }
+void SandboxApp::setGiUpdateInterval(int n) { rset_.giUpdateIntervalOverride_ = n; }
 
 // --gi-mode N. Unlike --rd-ablate this is NOT a shader define -- both estimators compile into
 // every scene pipeline and PSMainVoxi/PSRayDriven choose per pixel via Settings::giMode at draw
 // time, so this only has to reach setSettings() before the frame that reads it, not before init().
-void SandboxApp::setGiMode(int n) { giModeOverride_ = n; }
+void SandboxApp::setGiMode(int n) { rset_.giModeOverride_ = n; }
 
 // --restir-visibility none|reconstructed|half|full: same reasoning as setGiMode above -- read
 // per pixel at draw time, not baked into a pipeline at load.
-void SandboxApp::setRestirVisibility(int n) { restirVisibilityOverride_ = n; }
+void SandboxApp::setRestirVisibility(int n) { rset_.restirVisibilityOverride_ = n; }
 
-void SandboxApp::setDenoiser(int n) { denoiserOverride_ = n; }
+void SandboxApp::setDenoiser(int n) { rset_.denoiserOverride_ = n; }
 
-void SandboxApp::setRenderScale(f32 s) { renderScaleOverride_ = s; }
+void SandboxApp::setRenderScale(f32 s) { rset_.renderScaleOverride_ = s; }
 
 #if AVER_MODULE_SR
 // --aversr LEVEL. Records that the CLI chose it, so loadEditorPreferences leaves it alone -- the
@@ -2838,7 +2838,7 @@ void SandboxApp::setRenderScale(f32 s) { renderScaleOverride_ = s; }
 // way it legitimately can for Auto -- "the command line wins" keeps winning past the first frame,
 // not just when this setter runs.
 void SandboxApp::setAverSrQuality(aver::sr::Quality q) {
-    averSrQuality_ = q; averSrFromCli_ = true; averSrCliLevel_ = static_cast<int>(q);
+    rset_.averSrQuality_ = q; rset_.averSrFromCli_ = true; rset_.averSrCliLevel_ = static_cast<int>(q);
 }
 
 // --aversr auto: EXPLICIT CLI Auto, distinct from never passing --aversr at all. Sets
@@ -2847,7 +2847,7 @@ void SandboxApp::setAverSrQuality(aver::sr::Quality q) {
 // no pinned CLI level to short-circuit with -- the project manifest and ladder default decide the
 // level every frame, as if no --aversr flag had been given, except a stored user preference is
 // never consulted this run.
-void SandboxApp::setAverSrCliAuto() { averSrFromCli_ = true; averSrCliAuto_ = true; }
+void SandboxApp::setAverSrCliAuto() { rset_.averSrFromCli_ = true; rset_.averSrCliAuto_ = true; }
 
 // Constructs SpatialUpscaler against `dev`'s resource factory if not already built. Idempotent --
 // cheap to call every time the quality combo changes, not just once. See logAverSrActive()'s
@@ -2866,7 +2866,7 @@ void SandboxApp::clearAverSrUpscaler(rhi::IDevice* dev) {
     if (dev) dev->setUpscaler(nullptr);
 }
 
-void SandboxApp::setEdgeAaOverride(bool on) { edgeAaEnabled_ = on; }
+void SandboxApp::setEdgeAaOverride(bool on) { rset_.edgeAaEnabled_ = on; }
 
 // The device's one upscaler slot: FSR whenever the scene is rendered below native (an AverSR level
 // OR a manual render scale, which used to fall back to a plain bilinear stretch) or edge AA is
@@ -2877,38 +2877,38 @@ void SandboxApp::applyUpscalerSlot(rhi::IDevice* dev) {
     if (!dev) return;
     rhi::IResourceFactory* res = dev->resources();
     // Temporal AA takes the slot whenever it is on, at any scale (it is the AA as well as the upscale).
-    if (temporalAaEnabled_ && !taaUpscaler_ && res) taaUpscaler_ = std::make_unique<aver::sr::TemporalUpscaler>(*res);
-    const bool wantFsr = !temporalAaEnabled_ &&
-        (averSrQuality_ != aver::sr::Quality::Off || dev->renderScale() < 0.999f || edgeAaEnabled_);
+    if (rset_.temporalAaEnabled_ && !taaUpscaler_ && res) taaUpscaler_ = std::make_unique<aver::sr::TemporalUpscaler>(*res);
+    const bool wantFsr = !rset_.temporalAaEnabled_ &&
+        (rset_.averSrQuality_ != aver::sr::Quality::Off || dev->renderScale() < 0.999f || rset_.edgeAaEnabled_);
     if (wantFsr && !averSrUpscaler_ && res) averSrUpscaler_ = std::make_unique<aver::sr::FsrUpscaler>(*res);
-    rhi::IUpscaler* slot = temporalAaEnabled_ ? static_cast<rhi::IUpscaler*>(taaUpscaler_.get())
+    rhi::IUpscaler* slot = rset_.temporalAaEnabled_ ? static_cast<rhi::IUpscaler*>(taaUpscaler_.get())
                          : wantFsr ? averSrUpscaler_.get() : nullptr;
-    const bool wantNeuRaa = neuraaEnabled_ || neuraaDebugView_ || neuraaCaptureCount_ > 0;
+    const bool wantNeuRaa = rset_.neuraaEnabled_ || rset_.neuraaDebugView_ || rset_.neuraaCaptureCount_ > 0;
     if (wantNeuRaa && !neuraa_ && res) {
         neuraa_ = std::make_unique<aver::sr::NeuRaa>(*res);
         neuraa_->setWeightsPath(aver::executableDir() + "/data/neuraa_v1.bin");
     }
-    if (neuraa_ && neuraaCaptureCount_ > 0 && !neuraaCaptureStarted_) {
-        neuraa_->startCapture(neuraaCaptureDir_, neuraaCaptureCount_);
-        neuraaCaptureStarted_ = true;
+    if (neuraa_ && rset_.neuraaCaptureCount_ > 0 && !rset_.neuraaCaptureStarted_) {
+        neuraa_->startCapture(rset_.neuraaCaptureDir_, rset_.neuraaCaptureCount_);
+        rset_.neuraaCaptureStarted_ = true;
     }
     if (wantNeuRaa && neuraa_) {
         neuraa_->setInner(slot);
-        neuraa_->setEnabled(neuraaEnabled_);
-        neuraa_->setDebugView(neuraaDebugView_);
+        neuraa_->setEnabled(rset_.neuraaEnabled_);
+        neuraa_->setDebugView(rset_.neuraaDebugView_);
         slot = neuraa_.get();
     }
     if (averSrUpscaler_) {
-        averSrUpscaler_->setEdgeAa(edgeAaEnabled_);
-        averSrUpscaler_->setSharpness(fsrSharpness_);
+        averSrUpscaler_->setEdgeAa(rset_.edgeAaEnabled_);
+        averSrUpscaler_->setSharpness(rset_.fsrSharpness_);
     }
     if (taaUpscaler_) {
-        taaUpscaler_->setEdgeAa(edgeAaEnabled_);
-        taaUpscaler_->setSharpness(fsrSharpness_);
+        taaUpscaler_->setEdgeAa(rset_.edgeAaEnabled_);
+        taaUpscaler_->setSharpness(rset_.fsrSharpness_);
     }
     if (dev->upscaler() != slot) dev->setUpscaler(slot);
     if (!wantFsr && averSrUpscaler_) averSrUpscaler_.reset();
-    if (!temporalAaEnabled_ && taaUpscaler_) taaUpscaler_.reset();
+    if (!rset_.temporalAaEnabled_ && taaUpscaler_) taaUpscaler_.reset();
     if (!wantNeuRaa && neuraa_) neuraa_.reset();
 }
 
@@ -2917,10 +2917,10 @@ void SandboxApp::applyUpscalerSlot(rhi::IDevice* dev) {
 // (device->upscaler(), D3D12Device.cpp), so this function no longer needs to carry that caveat.
 void SandboxApp::logAverSrActive(rhi::IDevice* dev) {
     if (!dev) return;
-    AVER_INFO("[AverSR] {}: render scale {:.2f}{}", aver::sr::qualityName(averSrQuality_),
+    AVER_INFO("[AverSR] {}: render scale {:.2f}{}", aver::sr::qualityName(rset_.averSrQuality_),
               dev->renderScale(),
               averSrUpscaler_ ? "" : " (FsrUpscaler not constructed -- no resource factory)");
-    if (averSrUpscaler_ && averSrQuality_ != aver::sr::Quality::Off)
+    if (averSrUpscaler_ && rset_.averSrQuality_ != aver::sr::Quality::Off)
         AVER_INFO("[AverSR] {} handed to the device; the backend reports when it upscales",
                   averSrUpscaler_->name());
 }
@@ -2935,7 +2935,7 @@ void SandboxApp::applyAverSrQuality(rhi::IDevice* dev, aver::sr::Quality q) {
     // only on an explicit quality change.
     AVER_INFO("[AverSR] applyAverSrQuality({}) -> render scale {:.4f}",
               static_cast<int>(q), aver::sr::renderScaleFor(q));
-    averSrQuality_ = q;
+    rset_.averSrQuality_ = q;
     if (!dev) return;
     if (q == aver::sr::Quality::Off) {
         // DETACH BEFORE DESTROY: the device holds a raw pointer to the upscaler; reset() before
@@ -2995,7 +2995,7 @@ const char* SandboxApp::averSrAutoRungName(const voxi::Settings& s, const voxi::
 // onUpdate, OUTSIDE beginFrame/endFrame: applyAverSrQuality ends in setRenderScale, and doing that
 // mid-frame is the device-loss class aver-render-scale-device-loss documents.
 void SandboxApp::updateAverSrAuto(Engine& e) {
-    if (!voxiAttached_) return;
+    if (!rset_.voxiAttached_) return;
 #if AVER_WITH_IMGUI
     // NOT BEFORE PREFERENCES LOAD: onUpdate runs before buildUI's loadEditorPreferences. On frame 1,
     // resolving Auto here armed display.renderScalePending, read back by loadEditorPreferences as
@@ -3011,32 +3011,32 @@ void SandboxApp::updateAverSrAuto(Engine& e) {
     // resolving a level here would walk it back. --aversr itself (LEVEL or auto) is NOT caught:
     // onInit also sets renderScaleOverride_ as a side effect when it is not already pinned, so
     // averSrFromCli_ is needed as the other half of the check.
-    const bool explicitRenderScaleOnly = renderScaleOverride_ != 1.0f && !averSrFromCli_;
+    const bool explicitRenderScaleOnly = rset_.renderScaleOverride_ != 1.0f && !rset_.averSrFromCli_;
 
-    if (!explicitRenderScaleOnly && averSrChoice_ != editor::AverSrChoice::Manual) {
-        const int cliLevel  = (averSrFromCli_ && !averSrCliAuto_) ? averSrCliLevel_ : -1;
-        const int userLevel = editor::userLevelFor(averSrChoice_);
+    if (!explicitRenderScaleOnly && rset_.averSrChoice_ != editor::AverSrChoice::Manual) {
+        const int cliLevel  = (rset_.averSrFromCli_ && !rset_.averSrCliAuto_) ? rset_.averSrCliLevel_ : -1;
+        const int userLevel = editor::userLevelFor(rset_.averSrChoice_);
         const u32 autoLevel = voxi::autoAverSrLevel(vxr.settings(), vxr.deviceInfo());
         voxi::AverSrDecision decision =
-            voxi::resolveAverSrLevel(cliLevel, userLevel, averSrProjectDefault_, autoLevel);
+            voxi::resolveAverSrLevel(cliLevel, userLevel, rset_.averSrProjectDefault_, autoLevel);
 
         // A level that just took the device down is never silently re-attempted: loadEditorPreferences'
         // own cookie check already forced Off and latched it for a level that didn't survive launch;
         // stays forced for the session, same as that load-time latch (cleared only by a fresh process).
-        if (averSrCookieTripped_) decision = voxi::AverSrDecision{0u, voxi::AverSrSource::ForcedOff};
+        if (rset_.averSrCookieTripped_) decision = voxi::AverSrDecision{0u, voxi::AverSrSource::ForcedOff};
 
-        averSrSource_ = decision.source;
+        rset_.averSrSource_ = decision.source;
         const aver::sr::Quality q = static_cast<aver::sr::Quality>(decision.level);
-        if (q != averSrQuality_) {
+        if (q != rset_.averSrQuality_) {
             // (3.3 A) Armed before the first non-Off application this session: a level Auto
             // resolves mid-session can lose the device same as one loaded at startup -- same
             // cookie, extended to cover it; the existing 30-frame clear (onUpdate, beside the
             // shader watcher poll) applies unchanged.
-            if (q != aver::sr::Quality::Off && !averSrArmedNonOffOnce_) {
+            if (q != aver::sr::Quality::Off && !rset_.averSrArmedNonOffOnce_) {
                 editor::setPrefBool("display.renderScalePending", true);
                 editor::flushEditorPrefs();
-                renderScaleCookieArmed_ = true;
-                averSrArmedNonOffOnce_ = true;
+                rset_.renderScaleCookieArmed_ = true;
+                rset_.averSrArmedNonOffOnce_ = true;
             }
             applyAverSrQuality(dev, q);
         }
@@ -3044,7 +3044,7 @@ void SandboxApp::updateAverSrAuto(Engine& e) {
         // Manual: the Render Scale slider owns the scale directly (prefsDevice_->setRenderScale).
         // Resolving through userLevelFor's -1 sentinel would fight the user's drag every frame, so
         // this branch only reports the choice and never touches the device.
-        averSrSource_ = voxi::AverSrSource::User;
+        rset_.averSrSource_ = voxi::AverSrSource::User;
     }
     // else (explicitRenderScaleOnly): averSrSource_/averSrQuality_ untouched (Off); the startup
     // log below still fires -- a plain --render-scale run is still a non-native capture worth the warning.
@@ -3055,20 +3055,20 @@ void SandboxApp::updateAverSrAuto(Engine& e) {
     // accessor reads it back, this line only reports it). Present size is e.window(), not dev
     // (integrator fix) -- IDevice has no width()/height() (only ISwapchain does); same accessor
     // GameApp::onInit uses.
-    if (!averSrStartupLogged_ && dev) {
+    if (!rset_.averSrStartupLogged_ && dev) {
         const f32 scale = dev->renderScale();
         const u32 pw = e.window() ? e.window()->width()  : 0u;
         const u32 ph = e.window() ? e.window()->height() : 0u;
         const u32 sw = pw ? static_cast<u32>(std::lround(static_cast<f32>(pw) * scale)) : 0u;
         const u32 sh = ph ? static_cast<u32>(std::lround(static_cast<f32>(ph) * scale)) : 0u;
-        if (averSrChoice_ == editor::AverSrChoice::Manual)
+        if (rset_.averSrChoice_ == editor::AverSrChoice::Manual)
             AVER_INFO("[AverSR] Manual ({:.2f}) ({}): scene {}x{} -> present {}x{}; pass --aversr "
-                      "off for native captures", scale, averSrSourceText(averSrSource_), sw, sh, pw, ph);
+                      "off for native captures", scale, averSrSourceText(rset_.averSrSource_), sw, sh, pw, ph);
         else
             AVER_INFO("[AverSR] {} ({}): scene {}x{} -> present {}x{}; pass --aversr off for "
-                      "native captures", aver::sr::qualityName(averSrQuality_),
-                      averSrSourceText(averSrSource_), sw, sh, pw, ph);
-        averSrStartupLogged_ = true;
+                      "native captures", aver::sr::qualityName(rset_.averSrQuality_),
+                      averSrSourceText(rset_.averSrSource_), sw, sh, pw, ph);
+        rset_.averSrStartupLogged_ = true;
     }
 }
 #endif  // AVER_MODULE_VOXI
@@ -3087,11 +3087,11 @@ void SandboxApp::updateAverSrAuto(Engine& e) {
 // re-arm; small, bounded, pre-existing.
 bool SandboxApp::ptTakesViewport() const {
 #if AVER_MODULE_VOXI
-    if (ptSceneViewUnavailable_ || wireframe_ || gbufferDebugView_ != GBufferDebugFeature::Mode::Off)
+    if (rset_.ptSceneViewUnavailable_ || wireframe_ || rset_.gbufferDebugView_ != GBufferDebugFeature::Mode::Off)
         return false;
-    if (debugView_ != voxi::VoxiRenderer::ViewDebug::None && voxiRenderer_.rayDrivenAvailable())
+    if (rset_.debugView_ != voxi::VoxiRenderer::ViewDebug::None && voxiRenderer_.rayDrivenAvailable())
         return false;
-    return ptSceneViewFromCli_;
+    return rset_.ptSceneViewFromCli_;
 #else
     return false;
 #endif
@@ -3117,20 +3117,20 @@ void SandboxApp::syncPtSceneView(rhi::IDevice* dev) {
     // the flag and PT view registration must keep working with the module off, so this is a constant.
     const bool rayDrivenPaints = false;
 #endif
-    if (rayDrivenPaints && ptSceneViewWantEnabled_) {
+    if (rayDrivenPaints && rset_.ptSceneViewWantEnabled_) {
         // Set every frame this branch fires, so it stays true for as long as suppression does.
-        ptSceneViewSuppressedByRayDriven_ = true;
-        if (!ptSceneViewYieldLogged_) {
-            ptSceneViewYieldLogged_ = true;
+        rset_.ptSceneViewSuppressedByRayDriven_ = true;
+        if (!rset_.ptSceneViewYieldLogged_) {
+            rset_.ptSceneViewYieldLogged_ = true;
             AVER_INFO("[PT] the path-traced view is paused while a ray-hit debug view is "
                       "drawing; it resumes when the view goes back to Lit.");
         }
-        ptSceneViewWantEnabled_ = false;
+        rset_.ptSceneViewWantEnabled_ = false;
     } else if (!rayDrivenPaints) {
-        ptSceneViewYieldLogged_ = false;   // re-arm the message if the mode changes back
+        rset_.ptSceneViewYieldLogged_ = false;   // re-arm the message if the mode changes back
         // The view comes back only if THIS yield caused the loss and --pt-scene still asks for it.
-        if (ptSceneViewSuppressedByRayDriven_ && ptSceneViewFromCli_) ptSceneViewWantEnabled_ = true;
-        ptSceneViewSuppressedByRayDriven_ = false;   // A1: same re-arm trigger as the log message
+        if (rset_.ptSceneViewSuppressedByRayDriven_ && rset_.ptSceneViewFromCli_) rset_.ptSceneViewWantEnabled_ = true;
+        rset_.ptSceneViewSuppressedByRayDriven_ = false;   // A1: same re-arm trigger as the log message
     }
 
     // ---- A RASTER-ONLY VIEW MODE HAS THE FRAME ----
@@ -3139,22 +3139,22 @@ void SandboxApp::syncPtSceneView(rhi::IDevice* dev) {
     // tracer, not wireframe, would fill the viewport. After the ray-driven block on purpose (its
     // release restores the want the same frame this withdraws it); released the same way -- returns
     // only if the view mode caused the loss and the request is still live, else the hold passes to ray-driven.
-    const bool rasterViewMode = wireframe_ || gbufferDebugView_ != GBufferDebugFeature::Mode::Off;
+    const bool rasterViewMode = wireframe_ || rset_.gbufferDebugView_ != GBufferDebugFeature::Mode::Off;
     if (rasterViewMode) {
-        if (ptSceneViewWantEnabled_) ptSceneViewSuppressedByViewMode_ = true;
-        ptSceneViewWantEnabled_ = false;
-    } else if (ptSceneViewSuppressedByViewMode_) {
-        ptSceneViewSuppressedByViewMode_ = false;
+        if (rset_.ptSceneViewWantEnabled_) rset_.ptSceneViewSuppressedByViewMode_ = true;
+        rset_.ptSceneViewWantEnabled_ = false;
+    } else if (rset_.ptSceneViewSuppressedByViewMode_) {
+        rset_.ptSceneViewSuppressedByViewMode_ = false;
         if (rayDrivenPaints) {
-            ptSceneViewSuppressedByRayDriven_ = true;
+            rset_.ptSceneViewSuppressedByRayDriven_ = true;
         } else {
-            if (ptSceneViewFromCli_) ptSceneViewWantEnabled_ = true;
+            if (rset_.ptSceneViewFromCli_) rset_.ptSceneViewWantEnabled_ = true;
         }
     }
 
-    if (ptSceneViewWantEnabled_ == (ptSceneView_ != nullptr)) return;
+    if (rset_.ptSceneViewWantEnabled_ == (ptSceneView_ != nullptr)) return;
 
-    if (ptSceneViewWantEnabled_) {
+    if (rset_.ptSceneViewWantEnabled_) {
         ptSceneView_ = std::make_unique<aver::pt::PtSceneView>();
 #if AVER_MODULE_PBR && AVER_MODULE_VOXI
         // The HOST resolves the material -- only the host knows it bound one, which is why
@@ -3234,12 +3234,12 @@ void SandboxApp::syncPtSceneView(rhi::IDevice* dev) {
 #endif
         if (ptSceneView_->init(*dev)) {
             dev->addRenderFeature(ptSceneView_.get());
-            ptSceneViewUnavailable_ = false;
+            rset_.ptSceneViewUnavailable_ = false;
             AVER_INFO("[PT] scene view enabled");
         } else {
             AVER_ERROR("[PT] scene view unavailable on this device");
             ptSceneView_.reset();
-            ptSceneViewUnavailable_ = true;
+            rset_.ptSceneViewUnavailable_ = true;
             // Don't retry every frame. No reach into voxi::Settings::pathTracing here --
             // syncPtSceneView() must keep working with AVER_MODULE_VOXI off -- so the settings-page
             // combo can go stale; its own BeginDisabled keeps the UI honest anyway.
@@ -3255,18 +3255,18 @@ void SandboxApp::setFrameTimeReport(bool on) { harness_.frameTimeReport_ = on; }
 
 // --rd-ablate: forwarded to voxiRenderer_ BEFORE init(), because it becomes a shader define and
 // the pipelines are compiled once there. Setting it later would be silently inert.
-void SandboxApp::setRayDrivenAblation(int m) { rdAblate_ = m; }
+void SandboxApp::setRayDrivenAblation(int m) { rset_.rdAblate_ = m; }
 
 // --rt-denoise-motion: forwarded to Voxi where --rd-ablate is, and for the same reason --
 // both are measurement dials that have to be set before the renderer composes a frame.
-void SandboxApp::setRtDenoiseMotionTaper(f32 v) { rtDenoiseMotionTaper_ = v; }
+void SandboxApp::setRtDenoiseMotionTaper(f32 v) { rset_.rtDenoiseMotionTaper_ = v; }
 
 // --refraction / --refraction-strength / --refraction-fade. -1 in any of them means "not given".
 void SandboxApp::setRefractionOverrides(int mode, f32 strength, f32 fade) {
-    refractionOverride_ = mode; refractionStrengthOverride_ = strength; refractionFadeOverride_ = fade;
+    rset_.refractionOverride_ = mode; rset_.refractionStrengthOverride_ = strength; rset_.refractionFadeOverride_ = fade;
 }
 
-void SandboxApp::setMsOverride(bool on) { msOverride_ = on; }
+void SandboxApp::setMsOverride(bool on) { rset_.msOverride_ = on; }
 
 void SandboxApp::setProbe(u32 x, u32 y) { harness_.probeX_ = x; harness_.probeY_ = y; }
 

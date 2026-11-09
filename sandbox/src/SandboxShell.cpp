@@ -2644,7 +2644,7 @@ void SandboxApp::drawStatusBar(Engine& e, const ImVec2& wpos, const ImVec2& wsiz
         const f64 realFps = smoothMs > 1e-3 ? 1000.0 / smoothMs : 0.0;
         char fpsLabel[96];
         // Short label; tooltip shows full text.
-        if (interpolating && fpsCountsInterpolated_)
+        if (interpolating && rset_.fpsCountsInterpolated_)
             std::snprintf(fpsLabel, sizeof fpsLabel, "%.0f FPS (%.0f real)###fps", realFps * 2.0, realFps);
         else if (interpolating)
             std::snprintf(fpsLabel, sizeof fpsLabel, "%.0f FPS real###fps", realFps);
@@ -2671,8 +2671,8 @@ void SandboxApp::drawStatusBar(Engine& e, const ImVec2& wpos, const ImVec2& wsiz
                               playProf_.worstFrameMs());
         if (ImGui::BeginPopup("##fpsMode")) {
             ImGui::TextDisabled("Frame rate shows");
-            if (ImGui::RadioButton("Real frames only", !fpsCountsInterpolated_)) fpsCountsInterpolated_ = false;
-            if (ImGui::RadioButton("Real + interpolated frames", fpsCountsInterpolated_)) fpsCountsInterpolated_ = true;
+            if (ImGui::RadioButton("Real frames only", !rset_.fpsCountsInterpolated_)) rset_.fpsCountsInterpolated_ = false;
+            if (ImGui::RadioButton("Real + interpolated frames", rset_.fpsCountsInterpolated_)) rset_.fpsCountsInterpolated_ = true;
             if (!interpolating)
                 ImGui::TextDisabled("Frame interpolation is not running, so both read the same.");
             ImGui::EndPopup();
@@ -2827,14 +2827,14 @@ void SandboxApp::buildUI(Engine& e) {
         loadProjectMeshes(e);
     }
 #endif
-    if (vsyncOffRequested_) {
-        vsyncOffRequested_ = false;
+    if (rset_.vsyncOffRequested_) {
+        rset_.vsyncOffRequested_ = false;
         if (prefsDevice_->vsyncCanDisable()) { prefsDevice_->setVSync(false); AVER_INFO("[Sandbox] vsync OFF (--no-vsync)"); }
         else AVER_WARN("[Sandbox] --no-vsync ignored: this display path cannot tear");
     }
     // --vsync: forces it ON, overriding stored preference.
-    if (vsyncOnRequested_) {
-        vsyncOnRequested_ = false;
+    if (rset_.vsyncOnRequested_) {
+        rset_.vsyncOnRequested_ = false;
         prefsDevice_->setVSync(true);
         AVER_INFO("[Sandbox] vsync ON (--vsync)");
     }

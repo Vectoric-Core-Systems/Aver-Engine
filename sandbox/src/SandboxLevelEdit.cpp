@@ -160,25 +160,25 @@ void SandboxApp::captureRenderSettingsFromUi(const voxi::Settings& requested, u3
     // control on the Rendering page, and RENDER.FRAMEBUDGETMS 33 is in the .ocproject for good.
     // The forced flag is exactly the distinction, and it already exists for the symmetric bug on
     // the way in (applyProjectRenderSettings clobbering the flag from the manifest's default).
-    if (!frameBudgetForced_) project_.frameBudgetMs = frameBudgetMs_;
+    if (!rset_.frameBudgetForced_) project_.frameBudgetMs = rset_.frameBudgetMs_;
     project_.lodSelect          = lodSelectEnabled_ ? 1 : 0;
     project_.lodThresholdPx     = lodErrorThresholdPx_;
     project_.occlusionCull      = occlusionCullEnabled_ ? 1 : 0;
-    project_.depthPrepass       = depthPrepassOverride_ ? 1 : 0;
+    project_.depthPrepass       = rset_.depthPrepassOverride_ ? 1 : 0;
 #if AVER_MODULE_SR
     // optimisation-wave-2, 3.3 A: NOT a voxi::Settings field (module boundary, Scalability.hpp's
     // own header comment) so it rides along beside occlusionCull/depthPrepass here rather than
     // through captureVoxiSettings' shared capture rule just above -- same "editor-side flag, same
     // manifest key, same -1 means unstated rule" shape those two already are.
-    project_.averSr = averSrProjectDefault_;
+    project_.averSr = rset_.averSrProjectDefault_;
 #endif
     // The GI volume's placement, which had no key at all -- so a level whose geometry is not at
     // the origin could never record where its indirect light should be gathered.
     project_.hasGiVolume = true;
-    project_.giCenter[0] = giCenter_.x;
-    project_.giCenter[1] = giCenter_.y;
-    project_.giCenter[2] = giCenter_.z;
-    project_.giExtent    = giExtent_;
+    project_.giCenter[0] = rset_.giCenter_.x;
+    project_.giCenter[1] = rset_.giCenter_.y;
+    project_.giCenter[2] = rset_.giCenter_.z;
+    project_.giExtent    = rset_.giExtent_;
     projectDirty_ = true;
 }
 
@@ -556,10 +556,10 @@ bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
     // silently dropped. That second half was missing for a long time: the claim was in this
     // comment while the flags were set only by the loader, so it held for levels that already
     // had the record and for no others.
-    w.hasSun    = hasLevelSun_;
-    w.hasSky    = hasLevelSky_;
-    w.hasFog    = hasLevelFog_;
-    w.hasClouds = hasLevelClouds_;
+    w.hasSun    = rset_.hasLevelSun_;
+    w.hasSky    = rset_.hasLevelSky_;
+    w.hasFog    = rset_.hasLevelFog_;
+    w.hasClouds = rset_.hasLevelClouds_;
 
     // THE EDITOR'S OWN MIRRORS GO BACK INTO THE ATMOSPHERE FIRST, because the Details sliders
     // bind to these members rather than to sky_, and the frame loop is what normally copies
@@ -567,19 +567,19 @@ bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
     // --save-level, which runs the moment the renderer attaches -- and reading sky_ without
     // this would then write the atmosphere's defaults over the author's sliders.
     for (int i = 0; i < 3; ++i) {
-        sky_.sunColor[i] = sunColor_[i];
-        sky_.zenith[i]   = skyZenith_[i];
-        sky_.horizon[i]  = skyHorizon_[i];
-        sky_.fogColor[i] = fogColor_[i];
+        rset_.sky_.sunColor[i] = rset_.sunColor_[i];
+        rset_.sky_.zenith[i]   = rset_.skyZenith_[i];
+        rset_.sky_.horizon[i]  = rset_.skyHorizon_[i];
+        rset_.sky_.fogColor[i] = rset_.fogColor_[i];
     }
-    sky_.skyLightIntensity = sunAmbient_;
-    sky_.fogDensity        = fogDensity_;
+    rset_.sky_.skyLightIntensity = rset_.sunAmbient_;
+    rset_.sky_.fogDensity        = rset_.fogDensity_;
 
     // ONE CAPTURE, the exact inverse of the one applyLevelSky applies -- see LevelSky.hpp. This
     // was seventeen hand-written assignments that had to be kept in step with the loader by
     // eye, and were not: the sun's `lux` was read and never written, so turning Intensity down
     // and saving gave the old value straight back from levelHeader_'s passthrough.
-    assets::captureLevelEnv(sky_, w);
+    assets::captureLevelEnv(rset_.sky_, w);
 
     // Straight back out, in the order they were read. See loadLevel.
     w.pcgVolumes = levelPcgVolumes_;

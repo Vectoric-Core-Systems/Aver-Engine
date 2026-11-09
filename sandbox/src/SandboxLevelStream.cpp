@@ -175,7 +175,7 @@ void SandboxApp::tickLevelStreaming(f32 dt) {
             instanceSelPinned_ = want;
         }
 #  if AVER_MODULE_VOXI
-        if (voxiAttached_) {
+        if (rset_.voxiAttached_) {
             const voxi::Renderer& vx = voxi::Renderer::get();
             level_.setPackedRenderOk(voxi::resolve(vx.settings(), vx.deviceInfo()).rtRenderMode.effective == 1u);
         }
@@ -220,7 +220,7 @@ void SandboxApp::tickLevelStreaming(f32 dt) {
     const auto t1 = std::chrono::steady_clock::now();
 #  if AVER_MODULE_VOXI
     const u32 rebuilds = levelFoliage_.rebuilds();
-    if (voxiAttached_) levelFoliage_.update(camPos_, dt);
+    if (rset_.voxiAttached_) levelFoliage_.update(camPos_, dt);
     const bool foliageRebuilt = levelFoliage_.rebuilds() != rebuilds;
 #  else
     const bool foliageRebuilt = false;
@@ -432,12 +432,12 @@ void SandboxApp::buildLevelStreamingSettings() {
             ImGui::SetNextItemWidth(200.0f * dpi_);
             if (ImGui::SliderFloat("Fog opacity there", &st.fogOpacity, 0.5f, 0.99f, "%.2f")) markLevelUnsaved();
             const f32 wallCm = st.loadCm - st.fogCells * st.cellCm;
-            if (wallCm <= sky_.fogStart + 100.0f)
+            if (wallCm <= rset_.sky_.fogStart + 100.0f)
                 ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "The fog edge is inside the fog start: raise the load distance.");
             else
                 ImGui::TextDisabled("Fog %.0f%% at %.0f m, objects load to %.0f m (density %.2e)",
                                     st.fogOpacity * 100.0f, wallCm / 100.0f, st.loadCm / 100.0f,
-                                    assets::fogForStreamEdge(st, sky_, sky_.fogDensity, eye_.z));
+                                    assets::fogForStreamEdge(st, rset_.sky_, rset_.sky_.fogDensity, eye_.z));
         }
         ImGui::TextDisabled("Data: %s", st.dataPath.empty() ? "(not generated yet)" : st.dataPath.c_str());
         if (level_.streaming().active() && level_.streamDataStale())

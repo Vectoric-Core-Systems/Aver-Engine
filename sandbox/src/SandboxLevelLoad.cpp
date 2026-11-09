@@ -324,18 +324,18 @@ void SandboxApp::loadLevel(Engine& eng, const std::string& path) {
         for (const fmt::OcPcgVolume& v : levelPcgVolumes_) {
             if (v.name != "Sky") continue;
             const f64 floorV = v.coverageFloor < 0.0 ? 0.0 : (v.coverageFloor > 1.0 ? 1.0 : v.coverageFloor);
-            sky_.cloudsEnabled = true;
-            sky_.cloudSeed     = v.seed;
-            sky_.cloudCoverage = static_cast<f32>(1.0 - floorV);
+            rset_.sky_.cloudsEnabled = true;
+            rset_.sky_.cloudSeed     = v.seed;
+            rset_.sky_.cloudCoverage = static_cast<f32>(1.0 - floorV);
             AVER_INFO("[Level] sky field '{}' drives the cloud layer: seed {}, coverage {:.2f}",
-                      v.name, sky_.cloudSeed, sky_.cloudCoverage);
+                      v.name, rset_.sky_.cloudSeed, rset_.sky_.cloudCoverage);
             break;
         }
 
         // TERRAIN FIRST, THEN THE THINGS THAT STAND ON IT: this used to run at the end of loadLevel, harmless only while the ground was a flat plane -- a `snap` placement asks the ground how high it is.
 #if AVER_MODULE_LANDSCAPE
         landscape_.setTerrainChangedHook([this] { applyLandscapeToStreaming(); });
-        landscape_.setPathOverride(landscapeCliOverride_);
+        landscape_.setPathOverride(rset_.landscapeCliOverride_);
         pbr::MaterialSystem* landscapeMaterials = nullptr;
 #if AVER_MODULE_PBR && AVER_MODULE_VOXI
         landscapeMaterials = &voxiRenderer_.materials();
@@ -369,7 +369,7 @@ void SandboxApp::loadLevel(Engine& eng, const std::string& path) {
         // that still clears whatever the previous level left). GATED ON voxiAttached_, same as
         // GameApp's identical call: setFoliage builds GPU-side tables and must not run before init()
         // has given the renderer a device.
-        if (voxiAttached_) {
+        if (rset_.voxiAttached_) {
             if (projectLoading_) projectLoading_->stage("Loading foliage", 0.75f);
             const std::vector<std::string> tables = level_.foliageTablePaths(loaded.world.foliageFiles);
             levelFoliage_.load(loaded.world, content_, eng.device(), &voxiRenderer_, project_.contentDir(),
@@ -962,7 +962,7 @@ bool SandboxApp::classPartsBounds(scene::Entity root, Vec3& lo, Vec3& hi) const 
 // its own mirrors of the fields the Details sliders bind to, the record-present flags saveLevel
 // reads, and the one warning that only makes sense to somebody authoring a level.
 void SandboxApp::applyLevelSky(const fmt::OcWorldData& w) {
-    assets::applyLevelEnv(w, sky_);
+    assets::applyLevelEnv(w, rset_.sky_);
 
     // RESEEDED FROM THE ATMOSPHERE. The frame loop copies each of these back over sky_ every
     // frame (see the "FROZEN: sunDirection stays unnormalised" block), so applying a level and
@@ -970,29 +970,29 @@ void SandboxApp::applyLevelSky(const fmt::OcWorldData& w) {
     // `lux` bug already had once: a level could state any intensity and every scene rendered at
     // the editor's default, silently, with a BIT-IDENTICAL frame either way.
     for (int i = 0; i < 3; ++i) {
-        sunColor_[i]   = sky_.sunColor[i];
-        skyZenith_[i]  = sky_.zenith[i];
-        skyHorizon_[i] = sky_.horizon[i];
-        fogColor_[i]   = sky_.fogColor[i];
+        rset_.sunColor_[i]   = rset_.sky_.sunColor[i];
+        rset_.skyZenith_[i]  = rset_.sky_.zenith[i];
+        rset_.skyHorizon_[i] = rset_.sky_.horizon[i];
+        rset_.fogColor_[i]   = rset_.sky_.fogColor[i];
     }
-    sunAmbient_ = sky_.skyLightIntensity;
-    fogDensity_ = sky_.fogDensity;
+    rset_.sunAmbient_ = rset_.sky_.skyLightIntensity;
+    rset_.fogDensity_ = rset_.sky_.fogDensity;
 
     if (w.hasSun) {
         // A sun below the horizon is legal -- the physical model renders night -- but under the
         // authored dome it silently lit everything from underneath, so no level was ever told.
         // Say it out loud rather than clamping: only the author knows if they meant it.
         f32 elev = 0.0f, azim = 0.0f;
-        sky_.sunAngles(elev, azim);
+        rset_.sky_.sunAngles(elev, azim);
         if (elev < 0.0f)
             AVER_WARN("[Level] SUN is {:.1f} degrees BELOW the horizon (dir {:.3f} {:.3f} {:.3f}). "
                       "The physical sky renders that as night; --sky-authored lights from below "
                       "as it always did.", elev, w.sunDir[0], w.sunDir[1], w.sunDir[2]);
-        hasLevelSun_ = true;
+        rset_.hasLevelSun_ = true;
     }
-    if (w.hasSky)    hasLevelSky_    = true;
-    if (w.hasFog)    hasLevelFog_    = true;
-    if (w.hasClouds) hasLevelClouds_ = true;
+    if (w.hasSky)    rset_.hasLevelSky_    = true;
+    if (w.hasFog)    rset_.hasLevelFog_    = true;
+    if (w.hasClouds) rset_.hasLevelClouds_ = true;
 }
 
 #endif
@@ -1019,8 +1019,8 @@ void SandboxApp::fitGiVolumeToLevel() {
     f32 radius = 1.0f;
     level_.placementBounds(lo, hi, radius);   // false (lo = hi = 0, radius 1) for a level with no placements
     const Vec3 centre{(lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f, (lo.z + hi.z) * 0.5f};
-    giCenter_ = centre;
-    giExtent_ = radius;
+    rset_.giCenter_ = centre;
+    rset_.giExtent_ = radius;
     AVER_INFO("[Voxi] GI volume fitted to the level: centre ({:.0f},{:.0f},{:.0f}) half-extent {:.0f}cm",
               centre.x, centre.y, centre.z, radius);
 }
@@ -1243,15 +1243,15 @@ void SandboxApp::unloadLevel(Engine& eng) {
     // including File > New Level. The analytic surface is left standing.
     water_.unload();
 #endif
-    hasLevelFog_ = false;
-    hasLevelSun_ = false;
-    hasLevelSky_ = false;
-    hasLevelClouds_ = false;
+    rset_.hasLevelFog_ = false;
+    rset_.hasLevelSun_ = false;
+    rset_.hasLevelSky_ = false;
+    rset_.hasLevelClouds_ = false;
     // BACK TO THE EDITOR DEFAULT, now that the slider IS the saved value. While fog lived in two
     // members this happened for free: the level's copy went out of scope with levelFog_ and the
     // slider had never been touched. With one member, leaving it alone would carry one level's
     // weather into the next one that declares none.
-    fogDensity_ = 4e-6f;
+    rset_.fogDensity_ = 4e-6f;
 #if AVER_MODULE_VOXI
     // FOLIAGE LIVES OUTSIDE levelEntities_ ENTIRELY (no entity, no draw-list membership -- see
     // GameFoliage.hpp's own header comment), so nothing above this line touches it. Cleared here
@@ -1259,7 +1259,7 @@ void SandboxApp::unloadLevel(Engine& eng) {
     // that fails after this point must not leave the PREVIOUS level's trees standing in an
     // otherwise-empty world. Gated on voxiAttached_ like every other post-init voxiRenderer_ call
     // this function's neighbours make (e.g. GameApp's identical hooks.afterUnload).
-    if (voxiAttached_) levelFoliage_.clear();
+    if (rset_.voxiAttached_) levelFoliage_.clear();
 #endif
 #if AVER_MODULE_SCENE
     streamLabel_.clear();

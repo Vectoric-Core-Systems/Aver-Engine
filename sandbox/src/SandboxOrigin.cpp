@@ -44,7 +44,7 @@ void SandboxApp::initOrigin(Engine& e) {
     b.water = &water_;
 #  endif
     // Every origin-relative position the editor holds across frames (2.2.5, host members).
-    b.positions = {&camPos_, &viewPosOv_, &harness_.camWanderBasePos_, &camPosOverride_, &giCenter_, &dronePos_, &droneLastPos_, &eye_};
+    b.positions = {&camPos_, &viewPosOv_, &harness_.camWanderBasePos_, &camPosOverride_, &rset_.giCenter_, &dronePos_, &droneLastPos_, &eye_};
 #  if AVER_MODULE_LANDSCAPE
     b.positions.push_back(&sculptCursor_);
 #  endif
@@ -88,7 +88,7 @@ void SandboxApp::tickOrigin(Engine& e) {
     game::OriginBindings& b = origin_.bindings();
     b.device = e.device();
 #  if AVER_MODULE_VOXI
-    b.voxi = voxiAttached_ ? &voxiRenderer_ : nullptr;
+    b.voxi = rset_.voxiAttached_ ? &voxiRenderer_ : nullptr;
 #  endif
     const u32 generation = origin_.generation();
     // A world.rebase or world.tp typed in the console runs here, ahead of the camera-driven update, never in the UI pass.

@@ -103,9 +103,9 @@ void SandboxApp::installLevelInstanceHooks() {
     // Packed rows go through the foliage path: ray-traced geometry, resident while the instance is.
     game::LevelInstances::PackedSink ps;
     ps.set = [this](u64 owner, fmt::OcInstanceData rows, std::vector<std::string> mats) {
-        if (voxiAttached_) levelFoliage_.setExtraTable(owner, std::move(rows), std::move(mats));
+        if (rset_.voxiAttached_) levelFoliage_.setExtraTable(owner, std::move(rows), std::move(mats));
     };
-    ps.clear = [this](u64 owner) { if (voxiAttached_) levelFoliage_.clearExtraTable(owner); };
+    ps.clear = [this](u64 owner) { if (rset_.voxiAttached_) levelFoliage_.clearExtraTable(owner); };
     level_.setPackedSink(std::move(ps));
 #endif
 #if AVER_MODULE_FRAMEWORK

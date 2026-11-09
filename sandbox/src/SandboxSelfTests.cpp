@@ -56,7 +56,7 @@ void SandboxApp::setSelectEntity(std::string p) { selectEntity_ = std::move(p); 
 
 // --water <heightCm>. Stored whether or not the module is compiled in, so a build without it can
 // say so rather than ignoring the flag in silence.
-void SandboxApp::setWater(bool on, f32 heightCm) { waterEnabled_ = on; waterHeightCm_ = heightCm; }
+void SandboxApp::setWater(bool on, f32 heightCm) { rset_.waterEnabled_ = on; rset_.waterHeightCm_ = heightCm; }
 
 // --open-legacy: open an older-series project WITHOUT upgrading it. Never migrates, so it cannot
 // damage the project -- safe for a benchmark that must measure content exactly as it is on disk.
@@ -89,12 +89,12 @@ void SandboxApp::setDroneGraph(std::string) {}
 #endif
 
 // --landscape <path>: explicit .ocland override for capture testing.
-void SandboxApp::setLandscapePath(std::string path) { landscapeCliOverride_ = std::move(path); }
+void SandboxApp::setLandscapePath(std::string path) { rset_.landscapeCliOverride_ = std::move(path); }
 
 #if AVER_MODULE_SCENE
 void SandboxApp::setFogMatchToStreamRadius(bool on, f32 targetOpacity) {
-    matchFogToStreamRadius_ = on;
-    if (targetOpacity > 0.0f) fogMatchTargetOpacity_ = std::clamp(targetOpacity, 0.05f, 0.99f);
+    rset_.matchFogToStreamRadius_ = on;
+    if (targetOpacity > 0.0f) rset_.fogMatchTargetOpacity_ = std::clamp(targetOpacity, 0.05f, 0.99f);
 }
 
 #endif
@@ -140,36 +140,36 @@ bool* SandboxApp::autoCompileFlag() { return &harness_.autoCompile_; }
 
 // Turns clouds on, optionally at the given coverage. --clouds [coverage].
 void SandboxApp::setClouds(f32 coverage) {
-    sky_.cloudsEnabled = true;
-    if (coverage >= 0.0f) sky_.cloudCoverage = coverage;
+    rset_.sky_.cloudsEnabled = true;
+    if (coverage >= 0.0f) rset_.sky_.cloudCoverage = coverage;
 }
 
 // Selects the physical sky and optionally moves the sun's elevation. --sky-physical [elevation].
 void SandboxApp::setSkyPhysical(f32 elevationDeg) {
-    skyModelOverride_ = 1;
-    if (elevationDeg > -90.0f) sunElevationOverride_ = elevationDeg;
+    rset_.skyModelOverride_ = 1;
+    if (elevationDeg > -90.0f) rset_.sunElevationOverride_ = elevationDeg;
 }
 
-void SandboxApp::setSkyAuthored() { skyModelOverride_ = 0; }
+void SandboxApp::setSkyAuthored() { rset_.skyModelOverride_ = 0; }
 
 // Sets exposure, bloom intensity and auto-exposure. --exposure / --bloom / --auto-exposure.
 void SandboxApp::setPost(f32 exposure, bool exposureSet, f32 bloomIntensity, bool bloomSet, bool autoExposure) {
-    post_.exposure = exposure;
-    post_.bloomIntensity = bloomIntensity;
-    if (autoExposure) post_.autoExposure = true;
-    postExposureFromCli_ = exposureSet;
-    postBloomFromCli_    = bloomSet;
-    postAutoExpFromCli_  = autoExposure;
+    rset_.post_.exposure = exposure;
+    rset_.post_.bloomIntensity = bloomIntensity;
+    if (autoExposure) rset_.post_.autoExposure = true;
+    rset_.postExposureFromCli_ = exposureSet;
+    rset_.postBloomFromCli_    = bloomSet;
+    rset_.postAutoExpFromCli_  = autoExposure;
 }
 
 // --tonemap N / --max-radiance F: POST settings (not renderer ones).
-void SandboxApp::setTonemap(int mode)      { if (mode >= 0) post_.tonemap = static_cast<u32>(mode); }
+void SandboxApp::setTonemap(int mode)      { if (mode >= 0) rset_.post_.tonemap = static_cast<u32>(mode); }
 
-void SandboxApp::setMaxRadiance(f32 ceil)  { if (ceil >= 0.0f) post_.maxRadiance = ceil; }
+void SandboxApp::setMaxRadiance(f32 ceil)  { if (ceil >= 0.0f) rset_.post_.maxRadiance = ceil; }
 
 // Disables auto-exposure for a capture run unless the run asked for it.
 void SandboxApp::applyCaptureExposureRule(bool explicitlyRequested) {
-    if (maxFrames_ != 0 && !explicitlyRequested) post_.autoExposure = false;
+    if (maxFrames_ != 0 && !explicitlyRequested) rset_.post_.autoExposure = false;
 }
 
 void SandboxApp::setFocusVoxi(bool b) { focusVoxi_ = b ? 4 : 0; }
@@ -246,7 +246,7 @@ void SandboxApp::setSunAngle(f32 deg) { harness_.sunAngle_ = deg; }
 void SandboxApp::setPtFurnaceTest() { harness_.furnaceTest_ = true; harness_.ptFurnaceTest_ = true; }
 
 // --pt-scene: enable path tracer scene view.
-void SandboxApp::setPtSceneView() { ptSceneViewWantEnabled_ = true; ptSceneViewFromCli_ = true; }
+void SandboxApp::setPtSceneView() { rset_.ptSceneViewWantEnabled_ = true; rset_.ptSceneViewFromCli_ = true; }
 
 // --pt-quality-ramp [N]: ramp quality during frames for testing.
 void SandboxApp::setPtQualityRamp(int everyFrames) {
@@ -444,11 +444,11 @@ void SandboxApp::setConsoleSets(std::vector<std::pair<std::string, std::string>>
 }
 
 // --mesh-heap default|upload: select mesh heap mode.
-void SandboxApp::setMeshHeapDefault(bool on) { meshHeapDefault_ = on; }
+void SandboxApp::setMeshHeapDefault(bool on) { rset_.meshHeapDefault_ = on; }
 
 // --lod-share-vertices 0|1 (W11): read inside loadProjectMeshes' LOD-ladder loop. false (DEFAULT)
 // is today's behaviour -- every LOD level gets its own independent vertex buffer.
-void SandboxApp::setLodShareVertices(bool on) { lodShareVertices_ = on; }
+void SandboxApp::setLodShareVertices(bool on) { rset_.lodShareVertices_ = on; }
 
 // --cam-translate SPEED: fly camera forward (world-cm/frame); frame-counter driven, repeatable.
 void SandboxApp::setCamTranslate(f32 speedCmPerFrame) { harness_.camTranslateSpeed_ = speedCmPerFrame; }
@@ -471,36 +471,36 @@ void SandboxApp::setScriptsDir(std::string d) { scriptsDir_ = std::move(d); }
 void SandboxApp::setSpawnTest(std::string cls) { harness_.spawnTestClass_ = std::move(cls); }
 
 // --unlit: set unlit view mode.
-void SandboxApp::setUnlitMode(bool on) { unlit_ = on; if (on) viewModeFromCli_ = true; }
+void SandboxApp::setUnlitMode(bool on) { rset_.unlit_ = on; if (on) rset_.viewModeFromCli_ = true; }
 
 // --view-mode: set viewport view mode (lit|unlit|wireframe|rayhit-*|triangles|undenoised).
 void SandboxApp::setViewMode(const std::string& mode) {
     std::string m = mode;
     for (char& c : m) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     if (m == "undenoised") {
-        undenoised_ = true;
+        rset_.undenoised_ = true;
         AVER_INFO("[Sandbox] --view-mode undenoised");
         return;
     }
     if (m == "lit" || m == "unlit" || m == "wireframe") {
-        unlit_ = (m == "unlit");
+        rset_.unlit_ = (m == "unlit");
         wireframe_ = (m == "wireframe");
 #if AVER_MODULE_VOXI
-        debugView_ = voxi::VoxiRenderer::ViewDebug::None;
+        rset_.debugView_ = voxi::VoxiRenderer::ViewDebug::None;
 #endif
     } else if (m == "rayhit-instance" || m == "rayhit-material" || m == "rayhit-distance" || m == "triangles" ||
                m == "ambient-occlusion" || m == "light-count" || m == "many-lights-raw") {
 #if AVER_MODULE_VOXI
-        if (m == "rayhit-instance")      debugView_ = voxi::VoxiRenderer::ViewDebug::RayHitInstance;
-        else if (m == "rayhit-material") debugView_ = voxi::VoxiRenderer::ViewDebug::RayHitMaterial;
-        else if (m == "rayhit-distance") debugView_ = voxi::VoxiRenderer::ViewDebug::RayHitDistance;
-        else if (m == "ambient-occlusion") debugView_ = voxi::VoxiRenderer::ViewDebug::AmbientOcclusion;
+        if (m == "rayhit-instance")      rset_.debugView_ = voxi::VoxiRenderer::ViewDebug::RayHitInstance;
+        else if (m == "rayhit-material") rset_.debugView_ = voxi::VoxiRenderer::ViewDebug::RayHitMaterial;
+        else if (m == "rayhit-distance") rset_.debugView_ = voxi::VoxiRenderer::ViewDebug::RayHitDistance;
+        else if (m == "ambient-occlusion") rset_.debugView_ = voxi::VoxiRenderer::ViewDebug::AmbientOcclusion;
 
-        else if (m == "light-count")       debugView_ = voxi::VoxiRenderer::ViewDebug::LightCount;
-        else if (m == "many-lights-raw")   debugView_ = voxi::VoxiRenderer::ViewDebug::ManyLightsRaw;
-        else                             debugView_ = voxi::VoxiRenderer::ViewDebug::Triangles;
+        else if (m == "light-count")       rset_.debugView_ = voxi::VoxiRenderer::ViewDebug::LightCount;
+        else if (m == "many-lights-raw")   rset_.debugView_ = voxi::VoxiRenderer::ViewDebug::ManyLightsRaw;
+        else                             rset_.debugView_ = voxi::VoxiRenderer::ViewDebug::Triangles;
         wireframe_ = false;
-        gbufferDebugView_ = GBufferDebugFeature::Mode::Off;
+        rset_.gbufferDebugView_ = GBufferDebugFeature::Mode::Off;
 #else
         AVER_WARN("[Sandbox] --view-mode {} was given but this build has no Voxi module "
                   "(-DAVER_MODULE_VOXI=ON to include it); there is no ray-driven path to show it through", m);
@@ -511,7 +511,7 @@ void SandboxApp::setViewMode(const std::string& mode) {
                    "rayhit-material|rayhit-distance|triangles|undenoised)", mode);
         return;
     }
-    viewModeFromCli_ = true;
+    rset_.viewModeFromCli_ = true;
     AVER_INFO("[Sandbox] --view-mode {}", m);
 }
 
@@ -1183,9 +1183,9 @@ void SandboxApp::runProjectSwitchTest() {
 
     const fmt::ProjectDesc saved = project_;
     const std::string savedBackend = projectBackend_;
-    const f32 savedBudget = frameBudgetMs_;
-    const bool savedForced = frameBudgetForced_;
-    frameBudgetForced_ = false;   // the manifest path, not the --frame-budget override path
+    const f32 savedBudget = rset_.frameBudgetMs_;
+    const bool savedForced = rset_.frameBudgetForced_;
+    rset_.frameBudgetForced_ = false;   // the manifest path, not the --frame-budget override path
 
     fmt::ProjectDesc a;
     a.name = "SwitchTestA";
@@ -1196,7 +1196,7 @@ void SandboxApp::runProjectSwitchTest() {
     project_ = a;
     applyProjectRenderSettings();
     check(projectBackend_ == "vulkan", "opening A puts its backend in the dropdown mirror");
-    check(frameBudgetMs_ == 8.0f, "opening A arms its frame budget");
+    check(rset_.frameBudgetMs_ == 8.0f, "opening A arms its frame budget");
 
     fmt::ProjectDesc b;
     b.name = "SwitchTestB";
@@ -1206,13 +1206,13 @@ void SandboxApp::runProjectSwitchTest() {
     applyProjectRenderSettings();
     check(projectBackend_.empty(),
           "opening B clears the backend mirror instead of inheriting A's vulkan");
-    check(frameBudgetMs_ == b.frameBudgetMs,
+    check(rset_.frameBudgetMs_ == b.frameBudgetMs,
           "opening B resets the frame budget instead of inheriting A's 8ms");
 
     project_ = saved;
     projectBackend_ = savedBackend;
-    frameBudgetMs_ = savedBudget;
-    frameBudgetForced_ = savedForced;
+    rset_.frameBudgetMs_ = savedBudget;
+    rset_.frameBudgetForced_ = savedForced;
     applyProjectRenderSettings();
 
     AVER_INFO("[project-switch-test] RESULT: {}", failures == 0 ? "PASS" : "FAIL");
@@ -2698,7 +2698,7 @@ void SandboxApp::lumaSweepCheck(Engine& e) {
                 AVER_INFO("[LumaSweep] frame={} meanLinLuma={:.6f} samples={} viewport=({},{} {}x{}) "
                           "giMode={} camWobbleDeg={:.2f} camWobblePeriod={} yawDeg={:.3f}",
                           harness_.lumaSweepFrame_, meanLin, n, (int)harness_.lumaSweepVpX_, (int)harness_.lumaSweepVpY_,
-                          (int)harness_.lumaSweepVpW_, (int)harness_.lumaSweepVpH_, giModeOverride_, harness_.camWobbleDeg_,
+                          (int)harness_.lumaSweepVpW_, (int)harness_.lumaSweepVpH_, rset_.giModeOverride_, harness_.camWobbleDeg_,
                           harness_.camWobblePeriod_, harness_.lumaSweepYaw_ * 57.29577951f);
             }
 
@@ -2765,7 +2765,7 @@ void SandboxApp::lumaSweepCheck(Engine& e) {
                           "camWobbleDeg={:.2f} camWobblePeriod={}",
                           harness_.lumaSweepFrame_, outlierCount, havePrev ? (i64)flickerCount : -1,
                           outlierMax, flickerMax, meanLin, harness_.fireflyMult_,
-                          gridW, gridH, giModeOverride_, harness_.camWobbleDeg_, harness_.camWobblePeriod_);
+                          gridW, gridH, rset_.giModeOverride_, harness_.camWobbleDeg_, harness_.camWobblePeriod_);
                 harness_.fireflyPrevGrid_ = grid;
                 harness_.fireflyPrevW_ = gridW;
                 harness_.fireflyPrevH_ = gridH;

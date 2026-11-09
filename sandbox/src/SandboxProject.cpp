@@ -120,12 +120,12 @@ void SandboxApp::applyProject(Engine& e) {
     // preference is one machine's editor.ini and would move a gate probe on that machine and not
     // another, while these keys are IN THE PROJECT -- the same bytes for everyone who checks it
     // out, which is the property a baseline needs. Auto exposure is the exception, below.
-    if (project_.postExposure >= 0.0f && !postExposureFromCli_)
-        post_.exposure = project_.postExposure;
-    if (project_.postBloom >= 0.0f && !postBloomFromCli_)
-        post_.bloomIntensity = project_.postBloom;
-    if (project_.postAutoExposure >= 0 && !postAutoExpFromCli_) {
-        post_.autoExposure = project_.postAutoExposure != 0;
+    if (project_.postExposure >= 0.0f && !rset_.postExposureFromCli_)
+        rset_.post_.exposure = project_.postExposure;
+    if (project_.postBloom >= 0.0f && !rset_.postBloomFromCli_)
+        rset_.post_.bloomIntensity = project_.postBloom;
+    if (project_.postAutoExposure >= 0 && !rset_.postAutoExpFromCli_) {
+        rset_.post_.autoExposure = project_.postAutoExposure != 0;
         // THE CAPTURE RULE IS CALLED, NOT RE-SPELLED. applyCaptureExposureRule
         // (SandboxSelfTests.cpp:214) owns "a --frames run has auto-exposure off unless the run
         // asked for it by name" and main() calls it at startup -- a manifest key that switched the
@@ -135,7 +135,7 @@ void SandboxApp::applyProject(Engine& e) {
         // under test. Passing false is not a guess: this branch runs only when postAutoExpFromCli_
         // is false, which is precisely the question that parameter asks.
         applyCaptureExposureRule(/*explicitlyRequested=*/false);
-        if (project_.postAutoExposure != 0 && !post_.autoExposure)
+        if (project_.postAutoExposure != 0 && !rset_.post_.autoExposure)
             AVER_INFO("[Project] RENDER.AUTOEXPOSURE 1 in {} is not applied in a run with a frame "
                       "limit; pass --auto-exposure to ask for it by name", project_.manifestPath);
     }
@@ -151,9 +151,9 @@ void SandboxApp::applyProject(Engine& e) {
     // the other three would close that, and it is a change to SandboxApp.hpp and setTonemap rather
     // than to this file.
     // Clamped to the curves that exist (rhi/Tonemap.hpp), and the white point and display adjustments ride along.
-    rhi::applyProjectTonemapKeys(post_, project_.postTonemap, project_.postTonemapWhite, project_.postAdjustBrightness,
+    rhi::applyProjectTonemapKeys(rset_.post_, project_.postTonemap, project_.postTonemapWhite, project_.postAdjustBrightness,
                                  project_.postAdjustContrast, project_.postAdjustSaturation,
-                                 post_.tonemap == rhi::PostSettings{}.tonemap);
+                                 rset_.post_.tonemap == rhi::PostSettings{}.tonemap);
     // THE EFFECTIVE VALUES, AFTER PRECEDENCE -- not what the manifest asked for. A log line saying
     // what the file requested would be exactly as reassuring and exactly as useless in the case
     // that matters, which is a flag and a key disagreeing.
@@ -161,8 +161,8 @@ void SandboxApp::applyProject(Engine& e) {
         project_.postAutoExposure >= 0 || project_.postTonemap >= 0 || project_.postTonemapWhite >= 0.0f ||
         project_.postAdjustBrightness >= 0.0f || project_.postAdjustContrast >= 0.0f || project_.postAdjustSaturation >= 0.0f)
         AVER_INFO("[Project] post chain from {}: exposure {:.3f}, bloom {:.3f}, auto-exposure {}, "
-                  "tonemap {}", project_.manifestPath, post_.exposure, post_.bloomIntensity,
-                  post_.autoExposure ? "on" : "off", post_.tonemap);
+                  "tonemap {}", project_.manifestPath, rset_.post_.exposure, rset_.post_.bloomIntensity,
+                  rset_.post_.autoExposure ? "on" : "off", rset_.post_.tonemap);
     startContentWatch();
     {
         // String and data-table stores for this project. The editor previews a culture (--culture, else the saved
@@ -356,8 +356,8 @@ void SandboxApp::applyProjectVoxiSettings() {
     // The GI volume, which is not a voxi::Settings field at all -- it is set through
     // setVolume(centre, extent), so it has to be applied separately from the knob block above.
     if (project_.hasGiVolume) {
-        giCenter_ = Vec3{project_.giCenter[0], project_.giCenter[1], project_.giCenter[2]};
-        giExtent_ = project_.giExtent;
+        rset_.giCenter_ = Vec3{project_.giCenter[0], project_.giCenter[1], project_.giCenter[2]};
+        rset_.giExtent_ = project_.giExtent;
     }
 }
 
@@ -379,7 +379,7 @@ void SandboxApp::applyProjectRenderSettings() {
     // NOT WHEN --frame-budget SAID SO. This runs on every project apply, and the manifest's
     // default is -1, so an unconditional assignment silently switched the flag back off one
     // frame after it was set -- the controller was wired, reachable and never once ran.
-    if (!frameBudgetForced_) frameBudgetMs_ = project_.frameBudgetMs;
+    if (!rset_.frameBudgetForced_) rset_.frameBudgetMs_ = project_.frameBudgetMs;
 #if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
     // G4 R5: how many sub-viewports may exist and how many are drawn per frame; a mirror like the lines above (an unstated key is the default, not 'keep the last project's').
     game::SubViewportHost::configure(game::subViewportSettingsOf(project_.subViewports, project_.subViewRenders, project_.subViewPixels));
@@ -393,13 +393,13 @@ void SandboxApp::applyProjectRenderSettings() {
     // default ("follow the Overall preset"), not a sentinel for "nothing to apply". A project with
     // no RENDER.AVERSR key must reset this back to -1, unconditionally, or a project opened right
     // after one that pinned a level would silently inherit that teammate's pin.
-    averSrProjectDefault_ = project_.averSr;
+    rset_.averSrProjectDefault_ = project_.averSr;
     // Mirrors too: an unstated RENDER.TAA is the engine default (on), not "keep the last project's".
-    if (!taaFromCli_) temporalAaEnabled_ = project_.taa != 0;
-    if (!neuraaFromCli_) neuraaEnabled_ = project_.neuraa > 0;
+    if (!rset_.taaFromCli_) rset_.temporalAaEnabled_ = project_.taa != 0;
+    if (!rset_.neuraaFromCli_) rset_.neuraaEnabled_ = project_.neuraa > 0;
 
 #if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
-    if (particleGpuArg_ < 0) {   // an unstated RENDER.PARTICLEGPU is auto, not 'keep the last project's'
+    if (rset_.particleGpuArg_ < 0) {   // an unstated RENDER.PARTICLEGPU is auto, not 'keep the last project's'
         const int pm = project_.particleGpu >= 0 ? project_.particleGpu : 1;
         particles::particleSystem().setGpuMode(pm);
         particleRenderer_.setGpuEnabled(pm != 0);
@@ -408,7 +408,7 @@ void SandboxApp::applyProjectRenderSettings() {
 #endif
 
     if (!project_.hasRenderSettings()) return;
-    if (!voxiAttached_) { projectRenderPending_ = true; return; }
+    if (!rset_.voxiAttached_) { projectRenderPending_ = true; return; }
     projectRenderPending_ = false;
 
     // Idempotent by the time we get here on the startup path -- the settings were already seeded
@@ -429,7 +429,7 @@ void SandboxApp::applyProjectRenderSettings() {
     if (project_.occlusionCull >= 0) occlusionCullEnabled_ = project_.occlusionCull != 0;
     // projectBackend_ and frameBudgetMs_ were applied above the hasRenderSettings() guard --
     // see the comment there for why they cannot live down here with the rest of the block.
-    if (project_.depthPrepass  >= 0) depthPrepassOverride_ = project_.depthPrepass != 0;
+    if (project_.depthPrepass  >= 0) rset_.depthPrepassOverride_ = project_.depthPrepass != 0;
 
     // PHYSICS.* AND AUDIO.* USED TO BE APPLIED HERE, and that is why they now are not: everything
     // from this point on is reached only past the hasRenderSettings() and voxiAttached_ returns
@@ -466,27 +466,27 @@ void SandboxApp::applyProjectRenderSettings() {
     // committed, device-clamped truth instead.
     {
         voxi::RenderCliOverrides cli;
-        cli.globalIllumination = giOverride_;
-        cli.rayTracing         = rtOverride_;
-        cli.pathTracing        = ptOverride_;
-        cli.giForceOff         = giForceOff_;
-        cli.rtForceOff         = rtForceOff_;
-        cli.rtRenderMode       = rtRenderModeOverride_;
-        cli.rayDrivenStages    = rdStagesOverride_;
-        cli.refractionMode     = refractionOverride_;
-        cli.rtShadowDenoise    = rtShadowDenoiseOverride_;
-        cli.ptBounces          = ptBouncesOverride_;
-        cli.layeredBsdf        = layeredBsdfOverride_;
-        cli.msaa               = msaaOverride_;
-        cli.rtShadowRays       = rtRaysOverride_;
-        cli.giSkyOcclusionRays = giSkyOccRaysOverride_;
-        cli.giSkyOcclusionTile = giSkyOccTileOverride_;
-        cli.giIntensity        = giIntensityOverride_;
-        cli.rtPixelsPerRayTile = rtPixelsPerRayOverride_;
-        cli.giUpdateInterval   = giUpdateIntervalOverride_;
-        cli.giMode             = giModeOverride_;
-        cli.giRestirVisibility = restirVisibilityOverride_;
-        cli.denoiser           = denoiserOverride_;
+        cli.globalIllumination = rset_.giOverride_;
+        cli.rayTracing         = rset_.rtOverride_;
+        cli.pathTracing        = rset_.ptOverride_;
+        cli.giForceOff         = rset_.giForceOff_;
+        cli.rtForceOff         = rset_.rtForceOff_;
+        cli.rtRenderMode       = rset_.rtRenderModeOverride_;
+        cli.rayDrivenStages    = rset_.rdStagesOverride_;
+        cli.refractionMode     = rset_.refractionOverride_;
+        cli.rtShadowDenoise    = rset_.rtShadowDenoiseOverride_;
+        cli.ptBounces          = rset_.ptBouncesOverride_;
+        cli.layeredBsdf        = rset_.layeredBsdfOverride_;
+        cli.msaa               = rset_.msaaOverride_;
+        cli.rtShadowRays       = rset_.rtRaysOverride_;
+        cli.giSkyOcclusionRays = rset_.giSkyOccRaysOverride_;
+        cli.giSkyOcclusionTile = rset_.giSkyOccTileOverride_;
+        cli.giIntensity        = rset_.giIntensityOverride_;
+        cli.rtPixelsPerRayTile = rset_.rtPixelsPerRayOverride_;
+        cli.giUpdateInterval   = rset_.giUpdateIntervalOverride_;
+        cli.giMode             = rset_.giModeOverride_;
+        cli.giRestirVisibility = rset_.restirVisibilityOverride_;
+        cli.denoiser           = rset_.denoiserOverride_;
 
         // THE SENTENCE IS THIS HOST'S, THE DECISION IS THE HEADER'S. "[Sandbox]" is the editor's
         // tag and the shipped game's is "[Game]", so the shared apply hands back a CliOverrideNote
@@ -565,8 +565,8 @@ void SandboxApp::frameBudgetTick(f32 dt, voxi::Settings& vs) {
     // OFF IN CAPTURE RUNS unless asked for by name. A controller that retunes quality mid-run
     // makes every bounded measurement incomparable, which is most of how this engine is
     // checked. --frame-budget is the way to exercise it in one anyway, including in a gate.
-    frameBudget_.budgetMs = frameBudgetMs_;
-    if (maxFrames_ != 0 && !frameBudgetForced_) { frameBudget_.rung = 0; return; }
+    frameBudget_.budgetMs = rset_.frameBudgetMs_;
+    if (maxFrames_ != 0 && !rset_.frameBudgetForced_) { frameBudget_.rung = 0; return; }
     // The warm-up, hitch rejection, averaging, hysteresis and rung table are the shared
     // controller's (FrameBudget.hpp), identical in the standalone runtime.
     if (voxi::frameBudgetTick(frameBudget_, dt, vs))

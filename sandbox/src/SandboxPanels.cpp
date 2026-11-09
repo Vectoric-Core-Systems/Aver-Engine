@@ -2925,30 +2925,30 @@ void SandboxApp::drawSunDetails() {
     ImGui::TextUnformatted("Directional Light (Sun)"); ImGui::Separator();
     {
         f32 elev = 0.0f, azim = 0.0f;
-        sky_.sunAngles(elev, azim);
+        rset_.sky_.sunAngles(elev, azim);
         bool moved = editor::dt::SliderFloat("Elevation", &elev, -20.0f, 90.0f, "%.1f deg");
         moved |= editor::dt::SliderFloat("Azimuth", &azim, -180.0f, 180.0f, "%.1f deg");
         // Written back only on a real move: the angle round trip is lossy.
-        if (moved) sky_.setSunAngles(elev, azim);
+        if (moved) rset_.sky_.setSunAngles(elev, azim);
     }
-    editor::dt::SliderFloat("Intensity", &sky_.sunIntensity, 0.0f, 8.0f, "%.2f");
-    bool useTemp = sky_.sunTemperatureK > 0.0f;
+    editor::dt::SliderFloat("Intensity", &rset_.sky_.sunIntensity, 0.0f, 8.0f, "%.2f");
+    bool useTemp = rset_.sky_.sunTemperatureK > 0.0f;
     if (editor::dt::Checkbox("Use Colour Temperature", &useTemp))
-        sky_.sunTemperatureK = useTemp ? 5500.0f : 0.0f;
+        rset_.sky_.sunTemperatureK = useTemp ? 5500.0f : 0.0f;
     if (useTemp) {
-        editor::dt::SliderFloat("Temperature", &sky_.sunTemperatureK, 1500.0f, 12000.0f, "%.0f K");
+        editor::dt::SliderFloat("Temperature", &rset_.sky_.sunTemperatureK, 1500.0f, 12000.0f, "%.0f K");
     } else {
-        editor::dt::ColorEdit3("Colour", sunColor_);
+        editor::dt::ColorEdit3("Colour", rset_.sunColor_);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("White (255, 255, 255) is the physical default -- the light\n"
                               "arriving at the top of the atmosphere. The physical sky tints\n"
                               "it toward orange by elevation on its own.");
     }
-    editor::dt::SliderFloat("Angular Size", &sky_.sunAngularDiameterDeg, 0.05f, 8.0f, "%.2f deg");
+    editor::dt::SliderFloat("Angular Size", &rset_.sky_.sunAngularDiameterDeg, 0.05f, 8.0f, "%.2f deg");
     // hasLevelSun_ lives in SandboxApp.hpp's AVER_MODULE_SCENE block beside loadLevel/
     // saveLevel: only a scene-on build ever runs the loader that populates it.
 #if AVER_MODULE_SCENE
-    markLevelRecordEdited(hasLevelSun_);
+    markLevelRecordEdited(rset_.hasLevelSun_);
 #endif
 }
 
@@ -2956,53 +2956,53 @@ void SandboxApp::drawSunDetails() {
 void SandboxApp::drawSkyDetails(Engine& e) {
     ImGui::TextUnformatted("Sky + Atmosphere"); ImGui::Separator();
     {
-        int model = sky_.model == rhi::SkyModel::Physical ? 1 : 0;
+        int model = rset_.sky_.model == rhi::SkyModel::Physical ? 1 : 0;
         const char* names[] = {"Authored (two-colour dome)", "Physical (Rayleigh + Mie + ozone)"};
         if (editor::dt::Combo("Sky Model", &model, names, 2))
-            sky_.model = model ? rhi::SkyModel::Physical : rhi::SkyModel::Authored;
+            rset_.sky_.model = model ? rhi::SkyModel::Physical : rhi::SkyModel::Authored;
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Physical derives the dome below from the sun's elevation.\n"
                               "Sunset stops being a colour somebody picked and becomes geometry.");
     }
-    const bool physicalSky = sky_.model == rhi::SkyModel::Physical;
+    const bool physicalSky = rset_.sky_.model == rhi::SkyModel::Physical;
 
     ImGui::BeginDisabled(physicalSky);
-    editor::dt::ColorEdit3("Zenith", skyZenith_); editor::dt::ColorEdit3("Horizon", skyHorizon_);
-    editor::dt::SliderFloat("Atmosphere Height", &sky_.atmosphereHeight, 0.05f, 4.0f, "%.2f");
+    editor::dt::ColorEdit3("Zenith", rset_.skyZenith_); editor::dt::ColorEdit3("Horizon", rset_.skyHorizon_);
+    editor::dt::SliderFloat("Atmosphere Height", &rset_.sky_.atmosphereHeight, 0.05f, 4.0f, "%.2f");
     ImGui::EndDisabled();
     if (physicalSky) {
         ImGui::TextDisabled("^ derived from the sun's elevation while the model is Physical");
         if (ImGui::TreeNode("Air")) {
-            editor::dt::SliderFloat("Mie Scatter", &sky_.air.mieScatter, 0.0f, 4e-2f, "%.5f /km",
+            editor::dt::SliderFloat("Mie Scatter", &rset_.sky_.air.mieScatter, 0.0f, 4e-2f, "%.5f /km",
                                ImGuiSliderFlags_Logarithmic);
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Aerosol. Raise it for haze, dust or a coastal day; the\n"
                                   "sun's halo and the pale band at the horizon both grow.");
-            editor::dt::SliderFloat("Mie Extinction", &sky_.air.mieExtinction, 0.0f, 4e-2f, "%.5f /km",
+            editor::dt::SliderFloat("Mie Extinction", &rset_.sky_.air.mieExtinction, 0.0f, 4e-2f, "%.5f /km",
                                ImGuiSliderFlags_Logarithmic);
-            editor::dt::SliderFloat("Mie Anisotropy", &sky_.air.miePhaseG, 0.0f, 0.95f, "%.2f");
-            editor::dt::SliderFloat("Rayleigh Height", &sky_.air.rayleighScaleKm, 1.0f, 20.0f, "%.1f km");
-            editor::dt::SliderFloat("Mie Height", &sky_.air.mieScaleKm, 0.2f, 8.0f, "%.2f km");
-            editor::dt::SliderFloat("Multi-Scatter", &sky_.air.multiScatterGain, 0.0f, 4.0f, "%.2f");
+            editor::dt::SliderFloat("Mie Anisotropy", &rset_.sky_.air.miePhaseG, 0.0f, 0.95f, "%.2f");
+            editor::dt::SliderFloat("Rayleigh Height", &rset_.sky_.air.rayleighScaleKm, 1.0f, 20.0f, "%.1f km");
+            editor::dt::SliderFloat("Mie Height", &rset_.sky_.air.mieScaleKm, 0.2f, 8.0f, "%.2f km");
+            editor::dt::SliderFloat("Multi-Scatter", &rset_.sky_.air.multiScatterGain, 0.0f, 4.0f, "%.2f");
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Stands in for every bounce after the first. 1.70 is\n"
                                   "calibrated: it puts diffuse light at 15-30%% of direct\n"
                                   "and the zenith's blue/red between 2.5 and 5.");
-            editor::dt::SliderFloat("Planet Radius", &sky_.air.planetRadiusKm, 100.0f, 20000.0f, "%.0f km");
-            editor::dt::SliderFloat("Air Depth", &sky_.air.atmosphereHeightKm, 5.0f, 200.0f, "%.0f km");
-            editor::dt::SliderInt("Sky Steps", &sky_.air.viewSteps, 4, 96);
+            editor::dt::SliderFloat("Planet Radius", &rset_.sky_.air.planetRadiusKm, 100.0f, 20000.0f, "%.0f km");
+            editor::dt::SliderFloat("Air Depth", &rset_.sky_.air.atmosphereHeightKm, 5.0f, 200.0f, "%.0f km");
+            editor::dt::SliderInt("Sky Steps", &rset_.sky_.air.viewSteps, 4, 96);
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Samples along a sky ray. 32 is within 3%% of a converged\n"
                                   "march; below about 16 the horizon starts to band.");
-            editor::dt::SliderInt("Aerial Steps", &sky_.air.aerialSteps, 1, 16);
+            editor::dt::SliderInt("Aerial Steps", &rset_.sky_.air.aerialSteps, 1, 16);
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Samples along the air between the camera and a surface.\n"
                                   "This one runs per shaded pixel, so it is the expensive one.");
             ImGui::TreePop();
         }
     }
-    editor::dt::ColorEdit3("Ground", sky_.groundAlbedo);
-    editor::dt::SliderFloat("Ground Blend", &sky_.groundBlend, 0.0f, 1.0f, "%.2f");
+    editor::dt::ColorEdit3("Ground", rset_.sky_.groundAlbedo);
+    editor::dt::SliderFloat("Ground Blend", &rset_.sky_.groundBlend, 0.0f, 1.0f, "%.2f");
     // Range 0..32, logarithmic (used to stop at 2): the multiplier on the only term that fills
     // an enclosed space (sky light through openings), and an arcade needs far more of it than
     // a slider stopping at 2 can express. MEASURED on PTTest Sponza at exposure 1,
@@ -3016,42 +3016,42 @@ void SandboxApp::drawSkyDetails(Engine& e) {
     // reach the value the scene needed -- so "everything is too dark" was, in part,
     // unauthorable. Logarithmic: the useful range spans two orders of magnitude and the
     // interesting end is the bottom.
-    editor::dt::SliderFloat("Sky Light", &sunAmbient_, 0.0f, 32.0f, "%.2f",
+    editor::dt::SliderFloat("Sky Light", &rset_.sunAmbient_, 0.0f, 32.0f, "%.2f",
                        ImGuiSliderFlags_Logarithmic);
 
     ImGui::Separator();
     ImGui::TextUnformatted("Height Fog");
-    editor::dt::ColorEdit3("Fog Tint", fogColor_);
-    editor::dt::SliderFloat("Fog Density", &fogDensity_, 1e-7f, 1e-3f, "%.2e",
+    editor::dt::ColorEdit3("Fog Tint", rset_.fogColor_);
+    editor::dt::SliderFloat("Fog Density", &rset_.fogDensity_, 1e-7f, 1e-3f, "%.2e",
                        ImGuiSliderFlags_Logarithmic);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Extinction per cm. Visibility = 3.912 / density.\n"
                           "2e-6 clear (20 km)   4e-6 light haze (10 km)\n"
                           "8e-6 haze (5 km)     8e-5 fog (500 m)");
-    editor::dt::SliderFloat("Height Falloff", &sky_.fogFalloff, 0.0f, 0.02f, "%.5f",
+    editor::dt::SliderFloat("Height Falloff", &rset_.sky_.fogFalloff, 0.0f, 0.02f, "%.5f",
                        ImGuiSliderFlags_Logarithmic);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 = uniform distance fog (the old behaviour)");
-    editor::dt::DragFloat("Fog Height", &sky_.fogHeight, 1.0f);
-    editor::dt::DragFloat("Fog Start", &sky_.fogStart, 1.0f, 0.0f, 1e6f);
-    editor::dt::SliderFloat("Max Opacity", &sky_.fogMaxOpacity, 0.0f, 1.0f, "%.2f");
+    editor::dt::DragFloat("Fog Height", &rset_.sky_.fogHeight, 1.0f);
+    editor::dt::DragFloat("Fog Start", &rset_.sky_.fogStart, 1.0f, 0.0f, 1e6f);
+    editor::dt::SliderFloat("Max Opacity", &rset_.sky_.fogMaxOpacity, 0.0f, 1.0f, "%.2f");
     // FOG is its own record and needs its own mark: markLevelRecordEdited went in for SUN/SKY
     // but missed FOG, silently discarding Fog Tint/Density on a level with no FOG line.
     // Guarded for the same reason as hasLevelSun_ above.
 #if AVER_MODULE_SCENE
-    markLevelRecordEdited(hasLevelFog_);
+    markLevelRecordEdited(rset_.hasLevelFog_);
     if (streaming_.enabled()) {
         const world::StreamSettings& mst = streaming_.settings().stream;
         const f32 boundaryCm = static_cast<f32>(mst.loadRadius) * static_cast<f32>(mst.chunkSizeCm);
-        editor::dt::Checkbox("Match Fog To Streaming Radius", &matchFogToStreamRadius_);
+        editor::dt::Checkbox("Match Fog To Streaming Radius", &rset_.matchFogToStreamRadius_);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Recomputes Fog Density every frame -- overriding the slider\n"
                               "above -- so opacity AT the load boundary (%.0fcm here) equals\n"
                               "the target below. NOT a free win: hiding a boundary this close\n"
                               "typically needs an order of magnitude more density than a\n"
                               "level's authored default, i.e. a visibly foggier world.", boundaryCm);
-        if (matchFogToStreamRadius_) {
-            editor::dt::SliderFloat("Target Opacity At Boundary", &fogMatchTargetOpacity_, 0.5f, 0.99f, "%.2f");
-            const f32 matched = fogDensityForOpacityAt(boundaryCm, fogMatchTargetOpacity_);
+        if (rset_.matchFogToStreamRadius_) {
+            editor::dt::SliderFloat("Target Opacity At Boundary", &rset_.fogMatchTargetOpacity_, 0.5f, 0.99f, "%.2f");
+            const f32 matched = fogDensityForOpacityAt(boundaryCm, rset_.fogMatchTargetOpacity_);
             ImGui::TextDisabled("boundary %.0fcm -> density %.2e", boundaryCm, matched);
         }
     }
@@ -3059,19 +3059,19 @@ void SandboxApp::drawSkyDetails(Engine& e) {
 
     ImGui::Separator();
     ImGui::TextUnformatted("Volumetric Clouds");
-    editor::dt::Checkbox("Clouds", &sky_.cloudsEnabled);
-    if (sky_.cloudsEnabled) {
-        editor::dt::SliderFloat("Coverage", &sky_.cloudCoverage, 0.0f, 1.0f, "%.2f");
-        editor::dt::SliderFloat("Density", &sky_.cloudDensity, 0.0f, 4.0f, "%.2f");
-        editor::dt::DragFloat("Layer Bottom", &sky_.cloudBottom, 100.0f);
-        editor::dt::DragFloat("Layer Top", &sky_.cloudTop, 100.0f);
-        f32 featureSize = sky_.cloudScale > 1e-9f ? 1.0f / sky_.cloudScale : 50000.0f;
+    editor::dt::Checkbox("Clouds", &rset_.sky_.cloudsEnabled);
+    if (rset_.sky_.cloudsEnabled) {
+        editor::dt::SliderFloat("Coverage", &rset_.sky_.cloudCoverage, 0.0f, 1.0f, "%.2f");
+        editor::dt::SliderFloat("Density", &rset_.sky_.cloudDensity, 0.0f, 4.0f, "%.2f");
+        editor::dt::DragFloat("Layer Bottom", &rset_.sky_.cloudBottom, 100.0f);
+        editor::dt::DragFloat("Layer Top", &rset_.sky_.cloudTop, 100.0f);
+        f32 featureSize = rset_.sky_.cloudScale > 1e-9f ? 1.0f / rset_.sky_.cloudScale : 50000.0f;
         if (editor::dt::DragFloat("Feature Size", &featureSize, 100.0f, 100.0f, 5e6f))
-            sky_.cloudScale = 1.0f / std::fmax(featureSize, 1.0f);
-        editor::dt::DragFloat2("Wind", sky_.cloudWind, 5.0f);
+            rset_.sky_.cloudScale = 1.0f / std::fmax(featureSize, 1.0f);
+        editor::dt::DragFloat2("Wind", rset_.sky_.cloudWind, 5.0f);
 #if AVER_MODULE_SOFTBODY_SCENE
         if (ImGui::SmallButton("Copy to cloth wind"))
-            softbody::softBodySystem().setWind(Vec3{sky_.cloudWind[0], sky_.cloudWind[1], 0.0f}, 0.0f, 0.3f, 0.0f);
+            softbody::softBodySystem().setWind(Vec3{rset_.sky_.cloudWind[0], rset_.sky_.cloudWind[1], 0.0f}, 0.0f, 0.3f, 0.0f);
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Sets the soft-body (cloth) wind to this cloud drift. They are independent otherwise.");
 #endif
     }
@@ -3079,8 +3079,8 @@ void SandboxApp::drawSkyDetails(Engine& e) {
     // deliberately: turning clouds OFF must reach the file, so marking only inside the
     // enabled branch would make "off" the one setting that could never be saved.
 #if AVER_MODULE_SCENE
-    markLevelRecordEdited(hasLevelClouds_);
-    markLevelRecordEdited(hasLevelSky_);
+    markLevelRecordEdited(rset_.hasLevelClouds_);
+    markLevelRecordEdited(rset_.hasLevelSky_);
 #endif
     // Water lives beside the Sky, not its own mode: it's a level property like sun/fog, and
     // the weather panel is where an author looks for it. No markLevelRecordEdited needed --
@@ -3092,25 +3092,25 @@ void SandboxApp::drawSkyDetails(Engine& e) {
 // Details for the global Post Process settings.
 void SandboxApp::drawPostProcessDetails(Engine& e) {
     ImGui::TextUnformatted("Post Process"); ImGui::Separator();
-    editor::dt::Checkbox("Eye Adaptation", &post_.autoExposure);
+    editor::dt::Checkbox("Eye Adaptation", &rset_.post_.autoExposure);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("The exposure adjusts automatically as the view gets brighter or\n"
                           "darker, like eyes -- quickly toward light, more slowly toward dark.");
     // Stops, not the raw linear post_.exposure: a linear drag has no scale, which is how one
     // landed at 4.05 (+2 stops) and masked the engine's tuned defaults (RHI.hpp) every launch.
     // EV reads the same whether it's compensation on Eye Adaptation or a fixed exposure.
-    f32 ev = (post_.exposure > 0.0f) ? std::log2(post_.exposure) : 0.0f;
+    f32 ev = (rset_.post_.exposure > 0.0f) ? std::log2(rset_.post_.exposure) : 0.0f;
     if (editor::dt::SliderFloat("Brightness", &ev, -3.0f, 3.0f, "%+.1f EV"))
-        post_.exposure = std::exp2(ev);
+        rset_.post_.exposure = std::exp2(ev);
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip(post_.autoExposure
+        ImGui::SetTooltip(rset_.post_.autoExposure
             ? "Compensation on top of Eye Adaptation's own exposure:\n"
               "0 = as tuned, +1 = twice as bright, -1 = half."
             : "Fixed exposure relative to 1, with Eye Adaptation off:\n"
               "0 = as tuned, +1 = twice as bright, -1 = half.");
     ImGui::SameLine();
-    if (ImGui::Button("Reset")) post_.exposure = 1.0f;
-    if (post_.autoExposure) {
+    if (ImGui::Button("Reset")) rset_.post_.exposure = 1.0f;
+    if (rset_.post_.autoExposure) {
         // Live readout, so a stuck-looking value reads as adaptation working, not broken (see
         // IDevice::postExposureReadout; it lags the eye by a frame or two). Clamps/histogram
         // cuts are tuned engine defaults (RHI.hpp), not panel-exposed dials.
@@ -3120,14 +3120,14 @@ void SandboxApp::drawPostProcessDetails(Engine& e) {
     }
     // NIGHT VISION works on a fixed exposure too (Krawczyk/Myszkowski/Seidel 2005, rod-driven
     // scotopic vision), so it sits beside Eye Adaptation rather than inside its block.
-    bool nightVision = post_.nightVision > 0.5f;
+    bool nightVision = rset_.post_.nightVision > 0.5f;
     if (editor::dt::Checkbox("Night Vision", &nightVision))
-        post_.nightVision = nightVision ? 1.0f : 0.0f;
+        rset_.post_.nightVision = nightVision ? 1.0f : 0.0f;
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("In very dim light colour fades and shifts blue-grey as the eye's\n"
                           "rods take over.");
     ImGui::Separator();
-    editor::dt::SliderFloat("Bloom", &post_.bloomIntensity, 0.0f, 1.0f, "%.3f");
+    editor::dt::SliderFloat("Bloom", &rset_.post_.bloomIntensity, 0.0f, 1.0f, "%.3f");
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Zero skips the whole bloom pyramid, not just its weight");
 }
 
@@ -3248,7 +3248,7 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
     } else if (sel_==-4){
         drawPostProcessDetails(e);
     } else if (sel_==kSelPostVolume){
-        if (postVolumeTools_.drawDetails(e.device(), project_.contentDir(), levelHeader_.postVolumes, post_, viewPos()))
+        if (postVolumeTools_.drawDetails(e.device(), project_.contentDir(), levelHeader_.postVolumes, rset_.post_, viewPos()))
             markLevelUnsaved();
     } else ImGui::TextDisabled("Select an actor in the World Outliner");
     editor::dt::end();

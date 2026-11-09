@@ -31,9 +31,9 @@ static std::vector<editor::PlaceItem> placeCatalogue() {
 
 void SandboxApp::placeActorKind(Engine& e, const std::string& kind, const Vec3* dropAt, bool onSurface) {
     // The spawn functions read spawnPoint(); an override lives only for this call.
-    struct Reset { std::optional<Vec3>& o; ~Reset() { o.reset(); } } reset{spawnAtOverride_};
+    struct Reset { std::optional<Vec3>& o; ~Reset() { o.reset(); } } reset{rset_.spawnAtOverride_};
     const auto at = [&](f32 lift) {
-        if (dropAt) spawnAtOverride_ = Vec3{dropAt->x, dropAt->y, dropAt->z + (onSurface ? lift : 0.0f)};
+        if (dropAt) rset_.spawnAtOverride_ = Vec3{dropAt->x, dropAt->y, dropAt->z + (onSurface ? lift : 0.0f)};
     };
     const auto primitive = [&](const char* path, const char* label) {
         const rhi::primitives::BuiltinPrimitive* p = rhi::primitives::findBuiltinPrimitive(path);

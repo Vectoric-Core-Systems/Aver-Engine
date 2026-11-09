@@ -300,7 +300,7 @@ void SandboxApp::scatterFoliageFromLayer(Engine& e) {
     if (!out.ok) { setUpgradeStatus("Generate vegetation: " + out.error, editor::NotifySeverity::Warning); return; }
 
 #  if AVER_MODULE_VOXI
-    if (voxiAttached_) {
+    if (rset_.voxiAttached_) {
         std::vector<std::string> mats(out.table.groups.size(), req.type.material);
         levelFoliage_.setExtraTable(fnv1a64(std::string_view(req.ocinstRel)), std::move(out.table), std::move(mats));
     }

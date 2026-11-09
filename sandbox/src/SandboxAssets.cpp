@@ -33,7 +33,7 @@ namespace aver {
 void SandboxApp::loadProjectMeshes(Engine& e) {
 #if AVER_MODULE_SCENE
     // setStaticMeshHeapDefault must run before any createMesh call.
-    if (e.device()) e.device()->setStaticMeshHeapDefault(meshHeapDefault_);
+    if (e.device()) e.device()->setStaticMeshHeapDefault(rset_.meshHeapDefault_);
     const std::string dir = project_.contentDir();
     if (dir.empty()) return;
     std::error_code ec;
@@ -132,7 +132,7 @@ void SandboxApp::onMeshLoaded(const game::GameContent::LoadedMesh& m, void* user
     // Streamed meshes skip what only the off-by-default cluster paths read (per-cluster LOD, cluster
     // stats) and share LOD0's vertex buffer across the ladder: both were most of a streamed upload.
     const bool clusterData = !pass->streamed || app.lodPerClusterEnabled_ || app.lodClusterStatsEnabled_;
-    const bool shareVertices = app.lodShareVertices_ || pass->streamed;
+    const bool shareVertices = app.rset_.lodShareVertices_ || pass->streamed;
 #endif
     if (!quiet) AVER_INFO("[Mesh] '{}' -> {} verts, {} indices, lodCount={}, coarserLods={}, meshlets={}",
               rel, verts.size(), md.indices.size(), md.lodCount(), md.coarserLods.size(),
@@ -519,9 +519,9 @@ void SandboxApp::makeMaterialFor(MeshObj& o) {
     d.metallicFactor  = o.metallic;
     d.roughnessFactor = o.roughness;
     // --coat only; zero otherwise leaves MaterialFlag_Coat clear in packMaterial.
-    d.coatWeight      = coatWeight_;
-    d.coatRoughness   = coatRough_;
-    d.coatF0          = coatF0_;
+    d.coatWeight      = rset_.coatWeight_;
+    d.coatRoughness   = rset_.coatRough_;
+    d.coatF0          = rset_.coatF0_;
     o.material = pbr::MaterialLibrary::get().create(d);
     if (!o.material) { AVER_WARN("[Sandbox] no material for '{}'; it will draw with the fallback", o.name); return; }
     o.metallic = o.roughness = 1.0f;

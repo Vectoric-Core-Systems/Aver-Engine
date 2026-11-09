@@ -150,7 +150,7 @@ void SandboxApp::setBackend(std::string b) { backendName_ = std::move(b); }
 void SandboxApp::setCultureOverride(std::string tag) { cultureOverride_ = std::move(tag); }
 
 // --frame-budget <ms>: target frame time, and run the controller even in a bounded capture.
-void SandboxApp::setFrameBudget(f32 ms) { frameBudgetMs_ = ms; frameBudgetForced_ = ms > 0.0f; }
+void SandboxApp::setFrameBudget(f32 ms) { rset_.frameBudgetMs_ = ms; rset_.frameBudgetForced_ = ms > 0.0f; }
 
 void SandboxApp::setDebugLayer(bool d) { debugLayer_ = d; }
 
@@ -601,7 +601,7 @@ editor::shutdownAnimEditors();
 #endif
     // Remove render features before the device tears down.
 #if AVER_WITH_SYNAPSE_AI && AVER_MODULE_SYNAPSE_GPU
-    if (crowdGpuAttached_) { game::removeCrowdGpu(e.device(), crowdGpu_); crowdGpuAttached_ = false; }
+    if (rset_.crowdGpuAttached_) { game::removeCrowdGpu(e.device(), crowdGpu_); rset_.crowdGpuAttached_ = false; }
 #endif
     e.device()->removeRenderFeature(&gbufferDebugFeature_);
     gbufferDebugFeature_.shutdown();
@@ -675,12 +675,12 @@ editor::shutdownAnimEditors();
         ptFurnace_.reset();
     }
     // GBufferDebugFeature always registered, so always unregister here.
-    if (gbufferDebugAttached_) {
+    if (rset_.gbufferDebugAttached_) {
         e.device()->removeRenderFeature(&gbufferDebugFeature_);
-        gbufferDebugAttached_ = false;
+        rset_.gbufferDebugAttached_ = false;
     }
     // Routed through the same reconciler the editor's live toggle uses.
-    ptSceneViewWantEnabled_ = false;
+    rset_.ptSceneViewWantEnabled_ = false;
     syncPtSceneView(e.device());
     if (skinDraw_) {
         // Latch verdict before reset.
@@ -711,7 +711,7 @@ editor::shutdownAnimEditors();
     thumbnails_.shutdown();
 #endif
 #if AVER_MODULE_VOXI
-    if (voxiAttached_) { e.device()->removeRenderFeature(&voxiRenderer_); voxiAttached_ = false; }
+    if (rset_.voxiAttached_) { e.device()->removeRenderFeature(&voxiRenderer_); rset_.voxiAttached_ = false; }
     voxiRenderer_.shutdown();
 #else
     (void)e;
@@ -728,7 +728,7 @@ editor::shutdownAnimEditors();
                   (particleTickAccumSec_ / static_cast<f64>(particleTickFrames_)) * 1e6,
                   particleTickFrames_, particleTickAccumSec_ * 1e3, liveEmitters, totalLive);
     }
-    if (particlesAttached_) { e.device()->removeRenderFeature(&particleRenderer_); particlesAttached_ = false; }
+    if (rset_.particlesAttached_) { e.device()->removeRenderFeature(&particleRenderer_); rset_.particlesAttached_ = false; }
     content_.releaseParticleTextures();
     particleRenderer_.shutdown();
 #endif
@@ -745,7 +745,7 @@ editor::shutdownAnimEditors();
     AVER_INFO("[Sandbox] shutdown");
 }
 
-void SandboxApp::setVSyncOff(bool off) { vsyncOffRequested_ = off; }
+void SandboxApp::setVSyncOff(bool off) { rset_.vsyncOffRequested_ = off; }
 
 // Frame interpolation decision; see docs/rendering/NEURAFI.md decision 8.
 // --frame-interp wins; otherwise Play follows project RENDER.FRAMEINTERP, editing follows Editor Preference.
@@ -756,10 +756,10 @@ bool SandboxApp::updateFrameInterpolation(rhi::IDevice* dev) {
 #else
     const bool playing = false;
 #endif
-    bool want = frameInterpCli_ >= 0 ? frameInterpCli_ >= 1
+    bool want = rset_.frameInterpCli_ >= 0 ? rset_.frameInterpCli_ >= 1
               : playing           ? project_.frameInterp == 1
-                                  : frameInterpWhileEditing_;
-    dev->setFrameInterpCaptureGenerated(frameInterpCli_ == 2);
+                                  : rset_.frameInterpWhileEditing_;
+    dev->setFrameInterpCaptureGenerated(rset_.frameInterpCli_ == 2);
     if (want && !frameInterpolator_) {
         if (dev->resources()) {
             frameInterpolator_ = std::make_unique<neurafi::NeuraFI>(*dev);
@@ -775,9 +775,9 @@ bool SandboxApp::updateFrameInterpolation(rhi::IDevice* dev) {
         }
     }
     if (frameInterpolator_) {
-        const int traj = frameInterpTrajectoryCli_ >= 0 ? frameInterpTrajectoryCli_ : frameInterpTrajectory_;
+        const int traj = rset_.frameInterpTrajectoryCli_ >= 0 ? rset_.frameInterpTrajectoryCli_ : rset_.frameInterpTrajectory_;
         frameInterpolator_->setTrajectory(static_cast<neurafi::Trajectory>(traj < 0 ? 0 : (traj > 2 ? 2 : traj)));
-        frameInterpolator_->setTraining(frameInterpTrainCli_ || frameInterpTrain_);
+        frameInterpolator_->setTraining(rset_.frameInterpTrainCli_ || rset_.frameInterpTrain_);
         // Window > Neural Visualiser.
         const int vm = neurafiVizMode_ < 0 ? 0 : (neurafiVizMode_ > 4 ? 4 : neurafiVizMode_);
         frameInterpolator_->setVisualisation(static_cast<neurafi::Visualisation>(vm), neurafiVizScalePx_);

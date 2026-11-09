@@ -566,7 +566,7 @@ void SandboxApp::drawPlacedComponentSections() {
         }
         ImGui::EndDisabled();
         if (!destructible) {
-            if (ImGui::SmallButton("Copy sky wind")) sys.setWind(Vec3{sky_.cloudWind[0], sky_.cloudWind[1], 0.0f}, 0.0f, 0.3f, 0.0f);
+            if (ImGui::SmallButton("Copy sky wind")) sys.setWind(Vec3{rset_.sky_.cloudWind[0], rset_.sky_.cloudWind[1], 0.0f}, 0.0f, 0.3f, 0.0f);
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Sets the soft-body wind to the sky cloud drift. They are independent otherwise.");
         }
 

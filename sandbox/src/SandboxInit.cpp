@@ -43,24 +43,24 @@ namespace aver {
 void SandboxApp::applyStartupRenderSettings(Engine& e) {
 #if AVER_MODULE_SR
     // AverSR quality drives renderScaleOverride_; --render-scale wins if both set.
-    if (averSrQuality_ != aver::sr::Quality::Off && renderScaleOverride_ == 1.0f)
-        renderScaleOverride_ = aver::sr::renderScaleFor(averSrQuality_);
+    if (rset_.averSrQuality_ != aver::sr::Quality::Off && rset_.renderScaleOverride_ == 1.0f)
+        rset_.renderScaleOverride_ = aver::sr::renderScaleFor(rset_.averSrQuality_);
 #endif
     // Apply render scale once, before device sizes are determined.
-    if (renderScaleOverride_ != 1.0f) {
-        e.device()->setRenderScale(renderScaleOverride_);
+    if (rset_.renderScaleOverride_ != 1.0f) {
+        e.device()->setRenderScale(rset_.renderScaleOverride_);
         AVER_INFO("[Sandbox] render scale {:.2f} (--render-scale)", e.device()->renderScale());
     }
 #if AVER_MODULE_SR
     // Build GPU upscaler when non-Off quality is set.
-    if (averSrQuality_ != aver::sr::Quality::Off) {
+    if (rset_.averSrQuality_ != aver::sr::Quality::Off) {
         ensureAverSrUpscaler(e.device());
         logAverSrActive(e.device());
     }
     applyUpscalerSlot(e.device());   // a manual scale or edge AA wants FSR too
 #endif
     // Depth-only pass before opaque walk. See entity loop for two-walk mechanism.
-    if (depthPrepassOverride_) {
+    if (rset_.depthPrepassOverride_) {
         e.device()->setDepthPrepassEnabled(true);
         AVER_INFO("[Sandbox] depth prepass enabled (--depth-prepass)");
     }
@@ -70,9 +70,9 @@ void SandboxApp::applyStartupRenderSettings(Engine& e) {
 void SandboxApp::addCoreRenderFeatures(Engine& e) {
     // Register GBuffer debug unconditionally (mode defaults to Off). Per-frame write gated in onUpdate.
     e.device()->addRenderFeature(&gbufferDebugFeature_);
-    gbufferDebugAttached_ = true;
+    rset_.gbufferDebugAttached_ = true;
 #if AVER_WITH_SYNAPSE_AI && AVER_MODULE_SYNAPSE_GPU
-    crowdGpuAttached_ = game::installCrowdGpu(*e.device(), crowdGpu_);
+    rset_.crowdGpuAttached_ = game::installCrowdGpu(*e.device(), crowdGpu_);
 #endif
     // NeuraFI viz draws nothing until Neural Visualiser picks a view.
     e.device()->addRenderFeature(&neurafiViz_);
@@ -665,9 +665,9 @@ void SandboxApp::setupFurnaceTest() {
     if (harness_.furnaceTest_) {
         objects_.clear();
         sel_ = -1;
-        sky_.furnaceRadiance = 0.25f;
-        sky_.furnaceSun = harness_.furnaceSun_;
-        sunAmbient_ = 1.0f;
+        rset_.sky_.furnaceRadiance = 0.25f;
+        rset_.sky_.furnaceSun = harness_.furnaceSun_;
+        rset_.sunAmbient_ = 1.0f;
 
         // Albedo 1, fully rough, non-metallic white surfaces.
         const auto white = [&](const char* nm, Vec3 pos, Vec3 scale) {
@@ -713,15 +713,15 @@ void SandboxApp::setupFurnaceTest() {
                 }
             }
             // Give plates materials only when a coat is asked for (normally use per-draw fallback).
-            if (coatWeight_ > 0.0f) {
+            if (rset_.coatWeight_ > 0.0f) {
                 for (MeshObj& o : objects_) makeMaterialFor(o);
                 AVER_INFO("[Furnace] grid plates given materials so the coat has somewhere to "
                           "live (coat {:.2f} rough {:.2f} f0 {:.3f}); an uncoated run still uses "
                           "the per-draw fallback path and reads exactly what it always did.",
-                          coatWeight_, coatRough_, coatF0_);
+                          rset_.coatWeight_, rset_.coatRough_, rset_.coatF0_);
             }
             AVER_INFO("[Furnace] grid: 6 roughness x 3 metallic at albedo 1, L = {}",
-                      sky_.furnaceRadiance);
+                      rset_.sky_.furnaceRadiance);
         }
     }
 }
@@ -759,7 +759,7 @@ void SandboxApp::setupReflectionTest() {
         reflBeaconIndex_ = static_cast<int>(objects_.size()) - 1;
 
         refl_->setBeaconPosition(bp);
-        refl_->setVolumeExtent(giExtent_);
+        refl_->setVolumeExtent(rset_.giExtent_);
     }
 }
 
@@ -906,42 +906,42 @@ void SandboxApp::initVoxiBackend(Engine& e) {
 
         voxi::Settings s = voxi::Renderer::get().settings();
         s.msaa = static_cast<voxi::Msaa>(e.device()->sampleCount());
-        if (msaaOverride_) s.msaa = static_cast<voxi::Msaa>(msaaOverride_);
+        if (rset_.msaaOverride_) s.msaa = static_cast<voxi::Msaa>(rset_.msaaOverride_);
         // --no-gi/no-rt win over --gi/--rt (force-off take precedence).
-        if (giForceOff_)          s.globalIllumination = voxi::Quality::Off;
-        else if (giOverride_ >= 0) s.globalIllumination = static_cast<voxi::Quality>(giOverride_);
-        if (rtForceOff_)          s.rayTracing = voxi::Quality::Off;
-        else if (rtOverride_ >= 0) s.rayTracing = static_cast<voxi::Quality>(rtOverride_);
-        if (ptOverride_ >= 0) s.pathTracing = static_cast<voxi::Quality>(ptOverride_);
-        if (msOverride_) s.meshShaders = true;
+        if (rset_.giForceOff_)          s.globalIllumination = voxi::Quality::Off;
+        else if (rset_.giOverride_ >= 0) s.globalIllumination = static_cast<voxi::Quality>(rset_.giOverride_);
+        if (rset_.rtForceOff_)          s.rayTracing = voxi::Quality::Off;
+        else if (rset_.rtOverride_ >= 0) s.rayTracing = static_cast<voxi::Quality>(rset_.rtOverride_);
+        if (rset_.ptOverride_ >= 0) s.pathTracing = static_cast<voxi::Quality>(rset_.ptOverride_);
+        if (rset_.msOverride_) s.meshShaders = true;
         // Apply tier settings first, then knobs in second call (setSettings re-runs each frame).
         voxi::Renderer::get().setSettings(s);
         auto k = voxi::Renderer::get().settings();
-        if (rtRaysOverride_ > 0) k.rtShadowRays = static_cast<u32>(rtRaysOverride_);
-        else if (rtRaysOverride_ < 0)
+        if (rset_.rtRaysOverride_ > 0) k.rtShadowRays = static_cast<u32>(rset_.rtRaysOverride_);
+        else if (rset_.rtRaysOverride_ < 0)
             AVER_WARN("[Sandbox] --rt-rays {} is not a ray count; the default of {} stands",
-                      rtRaysOverride_, k.rtShadowRays);
-        if (rtShadowDenoiseOverride_ >= 0) k.rtShadowDenoise = static_cast<u32>(rtShadowDenoiseOverride_);
-        if (rtRenderModeOverride_    >= 0) k.rtRenderMode    = static_cast<u32>(rtRenderModeOverride_);
-        if (ptBouncesOverride_       >= 0) k.ptBounces       = static_cast<u32>(ptBouncesOverride_);
-        if (layeredBsdfOverride_     >= 0) k.layeredBsdf     = static_cast<voxi::Quality>(layeredBsdfOverride_);
+                      rset_.rtRaysOverride_, k.rtShadowRays);
+        if (rset_.rtShadowDenoiseOverride_ >= 0) k.rtShadowDenoise = static_cast<u32>(rset_.rtShadowDenoiseOverride_);
+        if (rset_.rtRenderModeOverride_    >= 0) k.rtRenderMode    = static_cast<u32>(rset_.rtRenderModeOverride_);
+        if (rset_.ptBouncesOverride_       >= 0) k.ptBounces       = static_cast<u32>(rset_.ptBouncesOverride_);
+        if (rset_.layeredBsdfOverride_     >= 0) k.layeredBsdf     = static_cast<voxi::Quality>(rset_.layeredBsdfOverride_);
         // GI sky occlusion rays derive from RT tier change (set in second call only).
-        if (giSkyOccRaysOverride_ >= 0) k.giSkyOcclusionRays = static_cast<u32>(giSkyOccRaysOverride_);
-        if (giSkyOccTileOverride_ >= 0) k.giSkyOcclusionTile = static_cast<u32>(giSkyOccTileOverride_);
-        if (rtPixelsPerRayOverride_ > 0) k.rtPixelsPerRayTile = static_cast<u32>(rtPixelsPerRayOverride_);
-        else if (rtPixelsPerRayOverride_ < 0)
+        if (rset_.giSkyOccRaysOverride_ >= 0) k.giSkyOcclusionRays = static_cast<u32>(rset_.giSkyOccRaysOverride_);
+        if (rset_.giSkyOccTileOverride_ >= 0) k.giSkyOcclusionTile = static_cast<u32>(rset_.giSkyOccTileOverride_);
+        if (rset_.rtPixelsPerRayOverride_ > 0) k.rtPixelsPerRayTile = static_cast<u32>(rset_.rtPixelsPerRayOverride_);
+        else if (rset_.rtPixelsPerRayOverride_ < 0)
             AVER_WARN("[Sandbox] --rt-pixels-per-ray {} is not a tile edge; the default of {} stands",
-                      rtPixelsPerRayOverride_, k.rtPixelsPerRayTile);
+                      rset_.rtPixelsPerRayOverride_, k.rtPixelsPerRayTile);
         // Refraction mode is tier-derived (set in second call only).
-        if (refractionOverride_ >= 0)          k.refractionMode = static_cast<u32>(refractionOverride_);
-        if (refractionStrengthOverride_ >= 0.0f) k.refractionStrength = refractionStrengthOverride_;
-        if (refractionFadeOverride_ >= 0.0f)     k.refractionEdgeFade = refractionFadeOverride_;
-        if (giUpdateIntervalOverride_ > 0) k.giUpdateInterval = static_cast<u32>(giUpdateIntervalOverride_);
-        else if (giUpdateIntervalOverride_ < 0)
+        if (rset_.refractionOverride_ >= 0)          k.refractionMode = static_cast<u32>(rset_.refractionOverride_);
+        if (rset_.refractionStrengthOverride_ >= 0.0f) k.refractionStrength = rset_.refractionStrengthOverride_;
+        if (rset_.refractionFadeOverride_ >= 0.0f)     k.refractionEdgeFade = rset_.refractionFadeOverride_;
+        if (rset_.giUpdateIntervalOverride_ > 0) k.giUpdateInterval = static_cast<u32>(rset_.giUpdateIntervalOverride_);
+        else if (rset_.giUpdateIntervalOverride_ < 0)
             AVER_WARN("[Sandbox] --gi-update-interval {} is not a frame count; the default of {} stands",
-                      giUpdateIntervalOverride_, k.giUpdateInterval);
-        if (giModeOverride_ >= 0) k.giMode = static_cast<u32>(giModeOverride_);
-        if (denoiserOverride_ >= 0) voxi::setDenoiserMode(k, denoiserOverride_ > 2 ? 2u : static_cast<u32>(denoiserOverride_));
+                      rset_.giUpdateIntervalOverride_, k.giUpdateInterval);
+        if (rset_.giModeOverride_ >= 0) k.giMode = static_cast<u32>(rset_.giModeOverride_);
+        if (rset_.denoiserOverride_ >= 0) voxi::setDenoiserMode(k, rset_.denoiserOverride_ > 2 ? 2u : static_cast<u32>(rset_.denoiserOverride_));
         voxi::Renderer::get().setSettings(k);
         AVER_INFO("[Voxi] attached: MSAA {}x, RT tier {}, SM {}, mesh tier {}", caps.maxMsaaSamples, caps.rayTracingTier, caps.shaderModel, caps.meshShaderTier);
 
@@ -953,21 +953,21 @@ void SandboxApp::initVoxiBackend(Engine& e) {
             aver::executableDir() + AVER_PATH_SEP "data" AVER_PATH_SEP + render::denoise::kNrd2WeightsFileName);
         if (harness_.frameTimeReport_) voxiRenderer_.setFrameTimeReport(true);
         // Set measurement dials before init().
-        if (rdAblate_) {
-            voxiRenderer_.setRayDrivenAblation(static_cast<u32>(rdAblate_));
+        if (rset_.rdAblate_) {
+            voxiRenderer_.setRayDrivenAblation(static_cast<u32>(rset_.rdAblate_));
             AVER_WARN("[Sandbox] --rd-ablate {}: the ray-driven frame is DELIBERATELY WRONG. "
                       "This is a stopwatch for attributing PSRayDriven's cost, not a quality "
-                      "setting -- see AVER_RD_ABLATE in voxi.hlsl.", rdAblate_);
+                      "setting -- see AVER_RD_ABLATE in voxi.hlsl.", rset_.rdAblate_);
         }
-        if (rtDenoiseMotionTaper_ > 0.0f) {
-            voxiRenderer_.setRtDenoiseMotionTaper(rtDenoiseMotionTaper_);
+        if (rset_.rtDenoiseMotionTaper_ > 0.0f) {
+            voxiRenderer_.setRtDenoiseMotionTaper(rset_.rtDenoiseMotionTaper_);
             AVER_INFO("[Sandbox] --rt-denoise-motion {}: the shadow denoiser will fade out "
                       "as the gather centre reprojects. 0 (the default) is no taper.",
-                      rtDenoiseMotionTaper_);
+                      rset_.rtDenoiseMotionTaper_);
         }
         if (voxiRenderer_.init(*e.device())) {
             e.device()->addRenderFeature(&voxiRenderer_);
-            voxiAttached_ = true;
+            rset_.voxiAttached_ = true;
             if (foliagePending_) {
                 foliagePending_ = false;
                 levelFoliage_.load(foliagePendingWorld_, content_, e.device(), &voxiRenderer_, project_.contentDir(),
@@ -1057,7 +1057,7 @@ void SandboxApp::initParticleRenderer(Engine& e) {
     // Particle renderer (registered unconditionally; system/effects are singletons).
     particles::particleSystem().setEffectLibrary(&particles::particleEffects());
     {
-        const int pm = particleGpuArg_ >= 0 ? particleGpuArg_ : (project_.particleGpu >= 0 ? project_.particleGpu : 1);
+        const int pm = rset_.particleGpuArg_ >= 0 ? rset_.particleGpuArg_ : (project_.particleGpu >= 0 ? project_.particleGpu : 1);
         particles::particleSystem().setGpuMode(pm);
         if (project_.particleScale >= 0) {
             particles::particleEffects().setScalabilityTier(static_cast<particles::ScalabilityTier>(std::min(project_.particleScale, 3)));
@@ -1077,10 +1077,10 @@ void SandboxApp::initParticleRenderer(Engine& e) {
     if (particleRenderer_.init(*e.device())) {
         particleRenderer_.setSystem(&particles::particleSystem());
         e.device()->addRenderFeature(&particleRenderer_);
-        particlesAttached_ = true;
+        rset_.particlesAttached_ = true;
 #if AVER_MODULE_VOXI
         // Install GI seam once Voxi has attached (gated on --no-particle-gi).
-        if (voxiAttached_ && !harness_.noParticleGi_) {
+        if (rset_.voxiAttached_ && !harness_.noParticleGi_) {
             particles::ParticleRenderer::GiSeam seam;
             seam.prepare = &SandboxApp::particleGiPrepare;
             seam.bind = &SandboxApp::particleGiBind;
@@ -1101,7 +1101,7 @@ void SandboxApp::initParticleRenderer(Engine& e) {
 void SandboxApp::initWaterRenderer(Engine& e) {
 #if AVER_MODULE_FLUIDS
     // Water renderer (failed init means no water; HLSL compiles at runtime).
-    if (waterEnabled_) {
+    if (rset_.waterEnabled_) {
         // Default swell: 4 non-harmonic waves.
         fluids::GerstnerWave waves[4];
         const f32 dirs[4][2] = {{1.0f, 0.15f}, {0.6f, -0.8f}, {-0.3f, 0.95f}, {-0.85f, -0.5f}};
@@ -1114,7 +1114,7 @@ void SandboxApp::initWaterRenderer(Engine& e) {
             waves[i].amplitudeCm  = amps[i];
             waves[i].steepness    = 0.75f;
         }
-        if (water_.attachSurface(*e.device(), waterHeightCm_, waves, 4)) {
+        if (water_.attachSurface(*e.device(), rset_.waterHeightCm_, waves, 4)) {
             // Set physics plane from water level (rendering and buoyancy are separate capabilities).
 #if AVER_MODULE_PHYSICS
             const f32 normal[3]  = {0.0f, 0.0f, 1.0f};
@@ -1122,13 +1122,13 @@ void SandboxApp::initWaterRenderer(Engine& e) {
             aver_phys_set_water_plane(water_.waterLevelCm(), normal,
                                       1.0f, 0.5f, 0.05f, current);
 #endif
-            AVER_INFO("[Water] surface and buoyancy plane at z = {} cm", waterHeightCm_);
+            AVER_INFO("[Water] surface and buoyancy plane at z = {} cm", rset_.waterHeightCm_);
         } else {
             AVER_ERROR("[Water] renderer unavailable on this device");
         }
     }
 #else
-    if (waterEnabled_)
+    if (rset_.waterEnabled_)
         AVER_WARN("[Water] --water was given, but this build has no water module");
 #endif
 }
