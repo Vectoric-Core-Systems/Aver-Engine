@@ -47,6 +47,21 @@ int main() {
         check(parseCommand(R"({"cmd":"click","x":1,"y":2,"button":"middle"})", c, &why), "a middle click");
         check(c.events[1].button == 2, "carries button 2");
 
+        check(parseCommand(R"({"cmd":"wheel","x":10,"y":20,"delta":-3})", c, &why), "wheel parses");
+        check(c.events.size() == 2 && c.events[0].kind == InputEvent::Kind::MouseMove &&
+              c.events[1].kind == InputEvent::Kind::MouseWheel, "as a move to the point, then the wheel");
+        check(c.events[1].wheel == -3 && c.events[1].x == 10 && c.events[1].y == 20, "carrying the notches and the point");
+        check(!parseCommand(R"({"cmd":"wheel","x":10,"y":20})", c, &why), "a wheel without a delta is refused");
+        check(!parseCommand(R"({"cmd":"wheel","x":10,"y":20,"delta":0})", c, &why), "a zero delta is refused");
+
+        check(parseCommand(R"({"cmd":"drag","x":0,"y":0,"x2":80,"y2":-40,"button":"right"})", c, &why), "drag parses");
+        check(c.events.size() == 11, "as move, down, 8 steps, up (got " + std::to_string(c.events.size()) + ")");
+        check(c.events[1].kind == InputEvent::Kind::MouseDown && c.events[1].button == 1 &&
+              c.events[10].kind == InputEvent::Kind::MouseUp && c.events[10].button == 1, "pressed and released on the asked button");
+        check(c.events[2].x == 10 && c.events[2].y == -5, "the first step is an eighth of the way");
+        check(c.events[9].x == 80 && c.events[9].y == -40 && c.events[10].x == 80, "the last step and the release land on the end point");
+        check(!parseCommand(R"({"cmd":"drag","x":0,"y":0,"x2":5})", c, &why), "a drag without y2 is refused");
+
         check(parseCommand(R"({"cmd":"key","key":"F"})", c, &why), "a letter key parses");
         check(c.events.size() == 2 && c.events[0].key == 'F', "as down+up on the right code");
         check(parseCommand(R"({"cmd":"key","key":"f1"})", c, &why), "a named key parses");

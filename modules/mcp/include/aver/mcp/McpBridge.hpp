@@ -14,9 +14,10 @@ namespace aver::mcp {
 
 // One synthetic input, in the editor's vocabulary rather than Win32's.
 struct InputEvent {
-    enum class Kind { MouseMove, MouseDown, MouseUp, KeyDown, KeyUp, Text } kind = Kind::MouseMove;
+    enum class Kind { MouseMove, MouseDown, MouseUp, MouseWheel, KeyDown, KeyUp, Text } kind = Kind::MouseMove;
     i32 x = 0, y = 0;          // client pixels, for the mouse kinds
     i32 button = 0;            // 0 left, 1 right, 2 middle
+    i32 wheel = 0;             // MouseWheel: notches, positive away from the user (scrolls up)
     u32 key = 0;              // a virtual-key code, for the key kinds
     std::string text;          // for Text
 };

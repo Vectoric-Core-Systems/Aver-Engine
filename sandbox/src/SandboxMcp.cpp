@@ -14,6 +14,10 @@
 #include <filesystem>
 #include <limits>
 #include <string_view>
+
+#if AVER_WITH_IMGUI
+#  include "imgui_internal.h"   // ImGuiContextHook: holdMcpPointer re-applies the pointer inside NewFrame
+#endif
 #include <unordered_map>
 #include <unordered_set>
 
@@ -259,6 +263,16 @@ void SandboxApp::applyMcpCommand(const mcp::Command& c) {
                     e.button == 1 ? WM_RBUTTONUP : e.button == 2 ? WM_MBUTTONUP : WM_LBUTTONUP,
                     0, lp);
                 break;
+            case mcp::InputEvent::Kind::MouseWheel: {
+#if AVER_WITH_IMGUI
+                ImGui::GetIO().AddMouseWheelEvent(0.0f, static_cast<f32>(e.wheel));
+#endif
+                // WM_MOUSEWHEEL carries screen coordinates, unlike the button messages.
+                POINT sp{e.x, e.y};
+                ::ClientToScreen(hwnd, &sp);
+                ::PostMessageW(hwnd, WM_MOUSEWHEEL, MAKEWPARAM(0, static_cast<SHORT>(e.wheel * WHEEL_DELTA)), MAKELPARAM(sp.x, sp.y));
+                break;
+            }
             case mcp::InputEvent::Kind::KeyDown:
                 ::PostMessageW(hwnd, WM_KEYDOWN, static_cast<WPARAM>(e.key), 0);
                 break;
@@ -275,11 +289,24 @@ void SandboxApp::applyMcpCommand(const mcp::Command& c) {
 }
 
 // Puts the MCP pointer back each frame for a second after the last move: a leave or move the window saw in the meantime would otherwise win.
+// It is re-added from a NewFramePre hook, i.e. inside ImGui::NewFrame after the platform backend's own frame start. While the editor is
+// the foreground window and the real cursor is outside it, imgui_impl_win32 queues the real cursor every frame; a position queued
+// earlier (from update, as this used to) lost to it and every injected click landed nowhere. This call only installs the hook.
 void SandboxApp::holdMcpPointer() {
-    if (mcpPointerHold_ <= 0) return;
-    --mcpPointerHold_;
 #if AVER_WITH_IMGUI
-    ImGui::GetIO().AddMousePosEvent(mcpPointerX_, mcpPointerY_);
+    ImGuiContext* ctx = ImGui::GetCurrentContext();
+    if (!ctx || ctx == mcpHookCtx_) return;
+    ImGuiContextHook h;
+    h.Type = ImGuiContextHookType_NewFramePre;
+    h.UserData = this;
+    h.Callback = [](ImGuiContext*, ImGuiContextHook* hook) {
+        SandboxApp* self = static_cast<SandboxApp*>(hook->UserData);
+        if (self->mcpPointerHold_ <= 0) return;
+        --self->mcpPointerHold_;
+        ImGui::GetIO().AddMousePosEvent(self->mcpPointerX_, self->mcpPointerY_);
+    };
+    ImGui::AddContextHook(ctx, &h);
+    mcpHookCtx_ = ctx;
 #endif
 }
 

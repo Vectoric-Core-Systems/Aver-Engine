@@ -85,11 +85,14 @@ bridge itself gives up on the editor's main thread after 60).
 ### `aver_editor`
 
 Sends one raw command and returns the reply: `{module, fn, args, text}` for an `abi` call (the default),
-or `cmd` = `ping`, `modules`, `widgets`, `move`, `click`, `key`, `text`, `shot` with their own fields in
+or `cmd` = `ping`, `modules`, `widgets`, `move`, `click`, `drag`, `wheel`, `key`, `text`, `shot` with their own fields in
 `extra`. Ask `cmd: "modules"` for the ABIs this build registered (`editor`, `physics`, `world`, `graph`,
 `level`). `text` may hold newlines, quotes and non-ASCII: the bridge undoes every JSON escape.
 
-`move`, `click` and `shot` work in window client pixels, the same pixels as the screenshot: click what you
+`drag` takes `x, y, x2, y2` (and `button`): press, eight steps of motion, release. `wheel` takes `x, y` and a nonzero
+`delta` in notches, negative scrolling down, over the window under the point.
+
+`move`, `click`, `drag`, `wheel` and `shot` work in window client pixels, the same pixels as the screenshot: click what you
 see in it. `shot` (and `editor::screenshot`) captures the next frame. Before, both re-saved the one image
 captured at frame 4, so every shot of a running editor was the same stale picture.
 

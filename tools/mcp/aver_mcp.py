@@ -963,7 +963,7 @@ def _is_number(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool) and v == v and abs(v) != float("inf")
 
 
-_EDITOR_CMDS = ("abi", "ping", "modules", "widgets", "shot", "move", "click", "key", "text")
+_EDITOR_CMDS = ("abi", "ping", "modules", "widgets", "shot", "move", "click", "drag", "wheel", "key", "text")
 
 
 def tool_editor(args):
@@ -1627,8 +1627,8 @@ TOOLS = [
                        "ready), world (stream_on, stream_off, stream_stats, warp), graph (entity_pos, load, "
                        "attach, tick), level (see aver_level, which is the friendlier way in). Other cmds: "
                        "ping, modules (lists the registered ABIs -- ask this first), widgets, and the input "
-                       "commands move/click/key/text/shot, whose own fields go in `extra` (x, y, button, "
-                       "widget, key, path). `text` may hold newlines and quotes. The reply's `result` is "
+                       "commands move/click/drag/wheel/key/text/shot, whose own fields go in `extra` (x, y, button, "
+                       "widget, key, path; drag also x2, y2; wheel a nonzero delta in notches, negative scrolls down). `text` may hold newlines and quotes. The reply's `result` is "
                        "parsed when it is JSON. Refuses with the way to start the channel when nothing is "
                        "listening. The channel is loopback-only and drives the real editor the user may be "
                        "looking at.",

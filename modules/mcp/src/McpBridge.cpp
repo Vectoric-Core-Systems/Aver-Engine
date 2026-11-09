@@ -256,6 +256,45 @@ bool parseCommand(const std::string& line, Command& out, std::string* why) {
         return true;
     }
 
+    // A wheel turn over a point: the pointer moves there first, so the window under it is the one that scrolls.
+    if (cmd == "wheel") {
+        if (!haveXY) return fail("wheel needs \"x\" and \"y\"");
+        i64 d = 0;
+        if (!findNumber(line, "delta", d) || d == 0) return fail("wheel needs a nonzero \"delta\" in notches (negative scrolls down)");
+        InputEvent mv; mv.kind = InputEvent::Kind::MouseMove;
+        mv.x = static_cast<i32>(x); mv.y = static_cast<i32>(y);
+        InputEvent wh = mv; wh.kind = InputEvent::Kind::MouseWheel; wh.wheel = static_cast<i32>(d);
+        out.events.push_back(mv);
+        out.events.push_back(wh);
+        return true;
+    }
+
+    // Press at (x, y), move in kDragSteps steps to (x2, y2), release there. The steps let a drag pass the UI's drag threshold
+    // and read as motion, not as a jump.
+    if (cmd == "drag") {
+        i64 x2 = 0, y2 = 0;
+        if (!haveXY || !findNumber(line, "x2", x2) || !findNumber(line, "y2", y2))
+            return fail("drag needs \"x\", \"y\", \"x2\" and \"y2\"");
+        std::string b; findString(line, "button", b);
+        const int btn = buttonFor(b);
+        constexpr int kDragSteps = 8;
+        InputEvent mv; mv.kind = InputEvent::Kind::MouseMove;
+        mv.x = static_cast<i32>(x); mv.y = static_cast<i32>(y);
+        InputEvent dn = mv; dn.kind = InputEvent::Kind::MouseDown; dn.button = btn;
+        out.events.push_back(mv);
+        out.events.push_back(dn);
+        for (int i = 1; i <= kDragSteps; ++i) {
+            InputEvent s; s.kind = InputEvent::Kind::MouseMove;
+            s.x = static_cast<i32>(x + (x2 - x) * i / kDragSteps);
+            s.y = static_cast<i32>(y + (y2 - y) * i / kDragSteps);
+            out.events.push_back(s);
+        }
+        InputEvent up; up.kind = InputEvent::Kind::MouseUp; up.button = btn;
+        up.x = static_cast<i32>(x2); up.y = static_cast<i32>(y2);
+        out.events.push_back(up);
+        return true;
+    }
+
     if (cmd == "key") {
         std::string k;
         if (!findString(line, "key", k)) return fail("key needs a \"key\"");
