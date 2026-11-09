@@ -8,6 +8,7 @@
 //   COLL  u8 collide             the authored flag; the host's ItemLoader picks the shape from the asset, as the flat path does
 //   CMPN  str type, u16 n, n x (str key, str value)   one TAG PER COMPONENT, in file order (the host's apply order)
 //   LABL  str label              the outliner name
+//   LAYR  u16 n, n x str name    the data layers the placement is in (OcWorldPlacement::layers); absent = none
 //   SNAP  u8 1                   snapToGround: the stored Z is the offset above ground
 //   EULR  f32 roll, pitch, yaw   the authored rotation in degrees, the exact f32 casts instantiate() makes. The payload's
 //                                quaternion is quatFromEulerDeg of these; a host that feeds instantiate() (which takes Euler)
@@ -38,6 +39,7 @@ inline constexpr u32 kExtraComponent   = extraTag('C', 'M', 'P', 'N');
 inline constexpr u32 kExtraLabel       = extraTag('L', 'A', 'B', 'L');
 inline constexpr u32 kExtraSnap        = extraTag('S', 'N', 'A', 'P');
 inline constexpr u32 kExtraEuler       = extraTag('E', 'U', 'L', 'R');
+inline constexpr u32 kExtraLayers      = extraTag('L', 'A', 'Y', 'R');
 
 // Everything a placement adds to a payload entity. A `has*` flag false (or an empty list) means "that tag is not written".
 struct PlacementExtras {
@@ -62,17 +64,19 @@ struct PlacementExtras {
 
     bool hasEuler = false;
     f32  euler[3] = {0, 0, 0};   // roll, pitch, yaw (degrees)
+
+    std::vector<std::string> layers;   // data layer names; empty = not written
 };
 
 // The first extra with `tag`, or nullptr.
 const PayloadExtra* findExtra(const PayloadEntity& e, u32 tag);
 
-// Replaces the seven known tags on `e` with `x`; every other extra stays where it was. Known tags are appended in the fixed order
-// PLID, ANIM, COLL, CMPN..., LABL, SNAP, EULR, so the encoded bytes are a function of `x` alone. False (and `e` untouched) when a
+// Replaces the eight known tags on `e` with `x`; every other extra stays where it was. Known tags are appended in the fixed order
+// PLID, ANIM, COLL, CMPN..., LABL, SNAP, EULR, LAYR, so the encoded bytes are a function of `x` alone. False (and `e` untouched) when a
 // value cannot fit the codec's u16 fields; `why` says which.
 bool setPlacementExtras(PayloadEntity& e, const PlacementExtras& x, std::string* why = nullptr);
 
-// Reads the seven known tags. A known tag that is the wrong length, or truncated, fails with `why` naming it. A missing tag leaves
+// Reads the eight known tags. A known tag that is the wrong length, or truncated, fails with `why` naming it. A missing tag leaves
 // the matching field at its default with its `has*` false.
 bool getPlacementExtras(const PayloadEntity& e, PlacementExtras& out, std::string* why = nullptr);
 

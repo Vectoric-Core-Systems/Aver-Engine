@@ -1,5 +1,7 @@
 #include "aver/world/DataLayers.hpp"
 
+#include "aver/world/ChunkPayloadExtras.hpp"
+
 #include <algorithm>
 
 namespace aver::world {
@@ -41,6 +43,11 @@ LayerState DataLayerSet::effective(u32 id) const {
         p = layers_[static_cast<usize>(p)].parent;
     }
     return out;
+}
+
+LayerState DataLayerSet::effectiveByName(std::string_view name) const {
+    const i32 id = idOf(name);
+    return id < 0 ? LayerState::Activated : effective(static_cast<u32>(id));
 }
 
 DataLayerSet::Result DataLayerSet::setState(std::string_view name, LayerState st, bool fromGame) {
@@ -86,6 +93,22 @@ std::vector<DataLayerSet::Completed> DataLayerSet::settle(const PlacementStreame
         else ++k;
     }
     return done;
+}
+
+PayloadLayerSplit splitPayloadByLayers(const ChunkPayload& p, const DataLayerSet& layers) {
+    PayloadLayerSplit out;
+    std::vector<LayerState> fate(p.entities.size(), LayerState::Activated);
+    for (usize i = 0; i < p.entities.size(); ++i) {
+        const PayloadEntity& e = p.entities[i];
+        LayerState st = LayerState::Activated;
+        PlacementExtras x;
+        if (getPlacementExtras(e, x))
+            for (const std::string& n : x.layers) st = std::min(st, layers.effectiveByName(n));
+        if (e.parent >= 0 && static_cast<usize>(e.parent) < i) st = std::min(st, fate[static_cast<usize>(e.parent)]);   // parents precede children
+        fate[i] = st;
+        (st == LayerState::Unloaded ? out.held : st == LayerState::Loaded ? out.hidden : out.active).push_back(static_cast<u32>(i));
+    }
+    return out;
 }
 
 } // namespace aver::world

@@ -243,3 +243,8 @@ set_target_properties(PcgBiomeTest PROPERTIES
 add_executable(DataLayersHlodTest src/DataLayersHlodTest.cpp)
 target_link_libraries(DataLayersHlodTest PRIVATE Aver.World Aver.Formats Aver.Core)
 set_target_properties(DataLayersHlodTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# AuthoredLayersTest -- data layers through the chunk cook: the LAYR extra, staleness, and splitting a cooked chunk by layer state.
+add_executable(AuthoredLayersTest src/AuthoredLayersTest.cpp)
+target_link_libraries(AuthoredLayersTest PRIVATE Aver.World Aver.Formats Aver.Core)
+set_target_properties(AuthoredLayersTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

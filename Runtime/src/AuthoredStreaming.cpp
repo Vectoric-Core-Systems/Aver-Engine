@@ -70,6 +70,7 @@ bool toRecords(const world::ChunkPayload& p, std::vector<fmt::OcWorldPlacement>&
             r.animOnce = x.animOnce;
         }
         r.components = std::move(x.components);
+        r.layers = std::move(x.layers);
         if (x.hasLabel) r.name = x.label;
         r.parent = e.parent;
         r.placementId = x.placementId;

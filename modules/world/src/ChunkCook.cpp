@@ -65,6 +65,8 @@ void hashPlacement(Hasher& H, const fmt::OcWorldPlacement& p) {
     H.str(p.vehiclePreset);
     H.pod<i32>(p.parent);
     H.pod<u64>(p.placementId);
+    H.pod<u64>(static_cast<u64>(p.layers.size()));
+    for (const std::string& l : p.layers) H.str(l);
     H.pod<u64>(static_cast<u64>(p.components.size()));
     for (const fmt::OcPlacedComponent& c : p.components) {
         H.str(c.type);
@@ -209,7 +211,8 @@ void boxOf(const Pose64& w, const Vec3& lo, const Vec3& hi, Box& out) {
 bool packable(const fmt::OcWorldPlacement& p) {
     constexpr usize kMax = 0xFFFF;
     if (p.name.size() > kMax || p.animClip.size() > kMax || p.asset.size() > kMax || p.material.size() > kMax) return false;
-    if (p.components.size() > kMaxExtrasPerEntity / 2) return false;
+    if (p.components.size() > kMaxExtrasPerEntity / 2 || p.layers.size() > kMaxExtrasPerEntity / 2) return false;
+    for (const std::string& l : p.layers) if (l.size() > kMax) return false;
     for (const fmt::OcPlacedComponent& c : p.components) {
         if (c.type.size() > kMax || c.kv.size() > kMax) return false;
         usize bytes = 4 + c.type.size();
@@ -466,6 +469,7 @@ ChunkPayload CookPlan::payload(usize ci) const {
                 x.collide = false;
             }
             x.components = src.components;
+            x.layers = src.layers;
             if (!src.name.empty()) {
                 x.hasLabel = true;
                 x.label = src.name;

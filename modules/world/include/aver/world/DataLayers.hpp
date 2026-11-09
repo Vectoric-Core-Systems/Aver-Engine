@@ -4,6 +4,7 @@
 
 #include "aver/core/Types.hpp"
 #include "aver/formats/OcWorld.hpp"
+#include "aver/world/ChunkPayload.hpp"
 #include "aver/world/PlacementStreamer.hpp"
 
 #include <string>
@@ -25,6 +26,8 @@ public:
     // The state asked for, and the state in force: never above any ancestor's.
     LayerState state(u32 id) const { return layers_[id].state; }
     LayerState effective(u32 id) const;
+    // The effective state of a layer by name; a name that is not a layer is Activated (it loads as no layer).
+    LayerState effectiveByName(std::string_view name) const;
 
     // The editor sets any layer (fromGame = false); the running game only the `runtime=1` ones. Setting what it already is queues nothing.
     Result setState(std::string_view name, LayerState st, bool fromGame);
@@ -56,5 +59,11 @@ private:
 };
 
 LayerState toLayerState(fmt::OcDataLayerState s);
+
+// A cooked chunk's entities split by the current layer states (the LAYR extra, ChunkPayloadExtras.hpp): `active` are shown and
+// simulated, `hidden` are resident but not shown (every layer at least Loaded, one only Loaded), `held` are not loaded (some layer
+// Unloaded, or the parent entity is held). Every entity is in exactly one list, in payload order, so nothing is lost.
+struct PayloadLayerSplit { std::vector<u32> active, hidden, held; };
+PayloadLayerSplit splitPayloadByLayers(const ChunkPayload& p, const DataLayerSet& layers);
 
 } // namespace aver::world

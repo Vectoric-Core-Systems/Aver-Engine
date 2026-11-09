@@ -10,7 +10,7 @@ namespace {
 
 bool isKnown(u32 tag) {
     return tag == kExtraPlacementId || tag == kExtraAnim || tag == kExtraCollide || tag == kExtraComponent ||
-           tag == kExtraLabel || tag == kExtraSnap || tag == kExtraEuler;
+           tag == kExtraLabel || tag == kExtraSnap || tag == kExtraEuler || tag == kExtraLayers;
 }
 
 // A string the codec's u16 length can carry.
@@ -82,6 +82,17 @@ bool setPlacementExtras(PayloadEntity& e, const PlacementExtras& x, std::string*
         w.f32v(x.euler[2]);
         push(fresh, kExtraEuler, w);
     }
+    if (!x.layers.empty()) {
+        if (x.layers.size() > 0xFFFF) return fail("too many data layers for one payload entity");
+        ByteWriter w;
+        w.u16v(static_cast<u16>(x.layers.size()));
+        for (const std::string& l : x.layers) {
+            if (!fits(l)) return fail("data layer name is longer than a payload string");
+            w.str(l);
+        }
+        if (w.bytes.size() > kMaxExtraBytes) return fail("data layer list is larger than one payload extra can hold");
+        push(fresh, kExtraLayers, w);
+    }
     if (e.extras.size() + fresh.size() > kMaxExtrasPerEntity) return fail("too many extras for one payload entity");
 
     // Drop the old known tags, keep everything else in order, then append the new ones.
@@ -97,7 +108,7 @@ bool getPlacementExtras(const PayloadEntity& e, PlacementExtras& out, std::strin
         return false;
     };
     out = PlacementExtras{};
-    bool sawPlid = false, sawAnim = false, sawColl = false, sawLabl = false, sawSnap = false, sawEuler = false;
+    bool sawPlid = false, sawAnim = false, sawColl = false, sawLabl = false, sawSnap = false, sawEuler = false, sawLayr = false;
 
     for (const PayloadExtra& x : e.extras) {
         ByteReader r(x.bytes.data(), x.bytes.size());
@@ -155,6 +166,13 @@ bool getPlacementExtras(const PayloadEntity& e, PlacementExtras& out, std::strin
             out.euler[1] = r.f32v();
             out.euler[2] = r.f32v();
             if (r.bad || r.left) return fail("EULR", "is not exactly 12 bytes");
+        } else if (x.tag == kExtraLayers) {
+            if (sawLayr) return fail("LAYR", "appears twice");
+            sawLayr = true;
+            const u16 n = r.u16v();
+            if (r.bad || static_cast<usize>(n) * 2 > r.left) return fail("LAYR", "name count exceeds the extra");
+            for (u16 i = 0; i < n && !r.bad; ++i) out.layers.push_back(r.str());
+            if (r.bad || r.left) return fail("LAYR", "is truncated or has trailing bytes");
         }
         // Any other tag is a newer cook's; skipped, never an error.
     }
