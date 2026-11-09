@@ -174,7 +174,7 @@ void SandboxApp::installAssetEditorHooks() {
             if (!project_.valid()) return false;
             // Write happens on autosave timer or Project Settings Save button.
             project_.inputScheme = contentRelativePath;
-            projectDirty_ = true;
+            autosave_.projectDirty_ = true;
             return true;
         };
         editor::setInputSchemeEditorHooks(std::move(hooks));
@@ -974,7 +974,7 @@ void SandboxApp::initVoxiBackend(Engine& e) {
                                    {}, viewState_.camPos_, &foliagePendingTables_);
                 if (!levelFoliage_.result().error.empty()) AVER_WARN("[Foliage] {}", levelFoliage_.result().error);
             }
-            if (projectRenderPending_) applyProjectRenderSettings();
+            if (autosave_.projectRenderPending_) applyProjectRenderSettings();
             if (harness_.saveProject_ && !harness_.saveProjectDone_) { harness_.saveProjectDone_ = true; seedAndSaveProject(); }
 #if AVER_WITH_IMGUI
             // Deferred import handshake (UI-only; needs browser).

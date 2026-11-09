@@ -3795,8 +3795,8 @@ void SandboxApp::drawNotifications() {
                 drawerUi_.drawerRaise_ = true;
                 break;
             case editor::NotifyAction::Dismiss:          q.dismiss(actId); break;
-            case editor::NotifyAction::PostponeAutosave: autosavePostponeRequested_ = true; break;
-            case editor::NotifyAction::RetryAutosave:    autosaveRetryRequested_ = true; break;
+            case editor::NotifyAction::PostponeAutosave: autosave_.autosavePostponeRequested_ = true; break;
+            case editor::NotifyAction::RetryAutosave:    autosave_.autosaveRetryRequested_ = true; break;
             case editor::NotifyAction::CancelNeuralTraining: nrd2Session_.cancel(); break;
             default: break;
         }

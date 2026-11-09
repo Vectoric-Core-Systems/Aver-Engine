@@ -576,7 +576,7 @@ void SandboxApp::onShutdown(Engine& e)  {
     editor::flushEditorPrefs();
     // Flush project manifest; project autosave has 0.5s debounce, so immediate exit loses edits.
     // maxFrames_ guard: --frames sets render settings, so unguarded flush would save capture flags into manifest.
-    if (maxFrames_ == 0 && projectDirty_ && project_.valid()) {
+    if (maxFrames_ == 0 && autosave_.projectDirty_ && project_.valid()) {
         std::string why;
         if (!saveProjectManifest(&why))
             AVER_WARN("[Project] could not flush unsaved settings on exit: {}", why);

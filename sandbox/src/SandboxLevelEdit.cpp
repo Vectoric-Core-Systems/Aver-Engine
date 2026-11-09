@@ -179,7 +179,7 @@ void SandboxApp::captureRenderSettingsFromUi(const voxi::Settings& requested, u3
     project_.giCenter[1] = rset_.giCenter_.y;
     project_.giCenter[2] = rset_.giCenter_.z;
     project_.giExtent    = rset_.giExtent_;
-    projectDirty_ = true;
+    autosave_.projectDirty_ = true;
 }
 
 #endif
@@ -233,7 +233,7 @@ bool SandboxApp::saveProjectManifest(std::string* why) {
         if (why) *why = "could not write " + project_.manifestPath;
         return false;
     }
-    projectDirty_ = false;
+    autosave_.projectDirty_ = false;
     AVER_INFO("[Project] wrote {}", project_.manifestPath);
     return true;
 }
@@ -842,7 +842,7 @@ bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
     // A REAL SAVE RETIRES THE SIDECAR -- but only a save of THE LEVEL. saveLevel is also how the
     // autosave itself and --save-level write, and deleting the recovery file on either would
     // throw away the safety net at the moment it was being created.
-    if (path == levelPath_ && autosaveWritten_) clearAutosave();
+    if (path == levelPath_ && autosave_.autosaveWritten_) clearAutosave();
     return true;
 }
 

@@ -47,9 +47,9 @@ void SandboxApp::maybeAutosavePrefs(f32 dt) {
     // guards -- but the honest rule is that a bounded run must leave no trace in the user's
     // profile at all, or one machine's gate results start depending on what was captured last.
     if (maxFrames_ != 0) return;
-    prefsAutosaveAccum_ += dt;
-    if (prefsAutosaveAccum_ < kPrefsAutosaveSec) return;
-    prefsAutosaveAccum_ = 0.0f;
+    autosave_.prefsAutosaveAccum_ += dt;
+    if (autosave_.prefsAutosaveAccum_ < AutosaveSession::kPrefsAutosaveSec) return;
+    autosave_.prefsAutosaveAccum_ = 0.0f;
     saveEditorPreferences();
 }
 
@@ -105,7 +105,7 @@ void SandboxApp::maybeAutosave(f32 dt) {
     // the countdown is unreachable from a bounded run without it -- it needs thirty seconds of
     // unsaved edits, which no capture has -- and it announces itself so a sidecar appearing
     // beside somebody's level is never a surprise.
-    if (maxFrames_ != 0 && !harness_.autosaveTestLift_) { autosaveAccum_ = 0.0f; return; }
+    if (maxFrames_ != 0 && !harness_.autosaveTestLift_) { autosave_.autosaveAccum_ = 0.0f; return; }
     if (maxFrames_ != 0 && harness_.autosaveTestLift_ && !harness_.autosaveTestWarned_) {
         harness_.autosaveTestWarned_ = true;
         AVER_WARN("[Autosave] --autosave-test is lifting the capture guard: this bounded run "
@@ -114,15 +114,15 @@ void SandboxApp::maybeAutosave(f32 dt) {
 
     // A Retry pressed on the failure notification. Handled before the disabled-check below,
     // because that check is exactly what Retry exists to undo.
-    if (autosaveRetryRequested_) {
-        autosaveRetryRequested_ = false;
-        autosaveIntervalSec_ = kAutosaveDefaultSec;
-        autosaveFailedWarned_ = false;
-        autosaveAccum_ = 0.0f;
+    if (autosave_.autosaveRetryRequested_) {
+        autosave_.autosaveRetryRequested_ = false;
+        autosave_.autosaveIntervalSec_ = AutosaveSession::kAutosaveDefaultSec;
+        autosave_.autosaveFailedWarned_ = false;
+        autosave_.autosaveAccum_ = 0.0f;
         autosaveCancelNotice();
     }
 
-    if (autosaveIntervalSec_ <= 0.0f) return;
+    if (autosave_.autosaveIntervalSec_ <= 0.0f) return;
     // NOTHING TO SAVE is the common case and must cost nothing: no level, never saved (so there
     // is nowhere to put the sidecar), or nothing edited since it was opened.
     // NOTHING TO SAVE is the common case and must cost nothing: nothing edited since the level
@@ -132,88 +132,88 @@ void SandboxApp::maybeAutosave(f32 dt) {
     // A COUNTDOWN IN FLIGHT IS CANCELLED, NOT LEFT RUNNING, when the reason for it goes away --
     // the commonest case being that the user saved manually while the warning was on screen.
     // Counting down to a save that is no longer needed is worse than not warning at all.
-    if (!levelHasUnsavedEdits()) { autosaveAccum_ = 0.0f; autosaveCancelNotice(); return; }
-    if (levelPath_.empty() && project_.dir.empty()) { autosaveAccum_ = 0.0f; autosaveCancelNotice(); return; }
+    if (!levelHasUnsavedEdits()) { autosave_.autosaveAccum_ = 0.0f; autosaveCancelNotice(); return; }
+    if (levelPath_.empty() && project_.dir.empty()) { autosave_.autosaveAccum_ = 0.0f; autosaveCancelNotice(); return; }
 
     // PENDING: the countdown reached zero LAST frame and the toast said "Saving..." then. Only
     // now, one presented frame later, is the blocking write actually done -- see the state's
     // comment at autosaveState_.
-    if (autosaveState_ == AutosaveState::Pending) {
-        autosaveState_ = AutosaveState::Idle;
-        autosaveAccum_ = 0.0f;
+    if (autosave_.autosaveState_ == AutosaveState::Pending) {
+        autosave_.autosaveState_ = AutosaveState::Idle;
+        autosave_.autosaveAccum_ = 0.0f;
         autosaveRunSave();
         return;
     }
 
-    if (autosavePostponeRequested_) {
-        autosavePostponeRequested_ = false;
-        if (autosavePostpones_ < kAutosaveMaxPostpones) ++autosavePostpones_;
-        autosaveAccum_ = 0.0f;
+    if (autosave_.autosavePostponeRequested_) {
+        autosave_.autosavePostponeRequested_ = false;
+        if (autosave_.autosavePostpones_ < AutosaveSession::kAutosaveMaxPostpones) ++autosave_.autosavePostpones_;
+        autosave_.autosaveAccum_ = 0.0f;
         autosaveCancelNotice();
         editor::Notification p;
         p.severity = editor::NotifySeverity::Info;
         p.title = "Autosave postponed";
-        p.body  = "Next attempt in " + std::to_string(static_cast<int>(autosaveIntervalSec_)) + "s.";
+        p.body  = "Next attempt in " + std::to_string(static_cast<int>(autosave_.autosaveIntervalSec_)) + "s.";
         p.ttlSec = 3.0;
         editor::notifications().push(std::move(p));
         return;
     }
 
-    autosaveAccum_ += dt;
+    autosave_.autosaveAccum_ += dt;
 
     // THE WARNING WINDOW. Announced before it happens rather than after, because the save is a
     // synchronous world walk on the main thread -- the user feels it, and a hitch you were
     // warned about is a different experience from one you were not.
-    const f32 remaining = autosaveIntervalSec_ - autosaveAccum_;
-    if (remaining <= kAutosaveWarnSec) {
+    const f32 remaining = autosave_.autosaveIntervalSec_ - autosave_.autosaveAccum_;
+    if (remaining <= AutosaveSession::kAutosaveWarnSec) {
         const int secs = remaining > 0.0f ? static_cast<int>(remaining) + 1 : 0;
-        if (autosaveState_ != AutosaveState::Counting) {
-            autosaveState_ = AutosaveState::Counting;
-            autosaveShownSec_ = -1;
+        if (autosave_.autosaveState_ != AutosaveState::Counting) {
+            autosave_.autosaveState_ = AutosaveState::Counting;
+            autosave_.autosaveShownSec_ = -1;
             editor::Notification n;
             n.severity = editor::NotifySeverity::Info;
             n.title = "Autosaving soon";
             n.hasProgress = true;   // implies no expiry, so the countdown cannot fade mid-count
-            autosaveNotify_ = editor::notifications().push(std::move(n));
+            autosave_.autosaveNotify_ = editor::notifications().push(std::move(n));
         }
         // ONE UPDATE PER WHOLE SECOND, not per frame: the text only changes once a second, and
         // pushing 144 identical updates a second through a mutex to redraw the same string is
         // work nobody sees.
-        if (secs != autosaveShownSec_) {
-            autosaveShownSec_ = secs;
-            const bool exhausted = autosavePostpones_ >= kAutosaveMaxPostpones;
+        if (secs != autosave_.autosaveShownSec_) {
+            autosave_.autosaveShownSec_ = secs;
+            const bool exhausted = autosave_.autosavePostpones_ >= AutosaveSession::kAutosaveMaxPostpones;
             editor::Notification u;
             u.severity = editor::NotifySeverity::Info;
             u.title = "Autosaving in " + std::to_string(secs) + "s";
-            u.body  = exhausted ? "Postponed " + std::to_string(kAutosaveMaxPostpones) +
+            u.body  = exhausted ? "Postponed " + std::to_string(AutosaveSession::kAutosaveMaxPostpones) +
                                       " times already - saving this time."
                                 : "The editor will pause briefly to write a recovery file.";
-            editor::notifications().update(autosaveNotify_, u.severity, u.title, u.body);
+            editor::notifications().update(autosave_.autosaveNotify_, u.severity, u.title, u.body);
             editor::notifications().setProgress(
-                autosaveNotify_, 1.0f - (remaining / kAutosaveWarnSec), "");
+                autosave_.autosaveNotify_, 1.0f - (remaining / AutosaveSession::kAutosaveWarnSec), "");
             if (!exhausted)
-                editor::notifications().setActions(autosaveNotify_,
+                editor::notifications().setActions(autosave_.autosaveNotify_,
                                                    editor::NotifyAction::PostponeAutosave, "Postpone",
                                                    editor::NotifyAction::None, "");
             else
-                editor::notifications().setActions(autosaveNotify_, editor::NotifyAction::None, "",
+                editor::notifications().setActions(autosave_.autosaveNotify_, editor::NotifyAction::None, "",
                                                    editor::NotifyAction::None, "");
         }
     }
 
-    if (autosaveAccum_ < autosaveIntervalSec_) return;
+    if (autosave_.autosaveAccum_ < autosave_.autosaveIntervalSec_) return;
 
     // ZERO. Say "Saving..." and STOP -- the write happens next frame, after this one has been
     // presented. Doing both here would set the state to "Saved" before buildUI ever ran, so the
     // one message describing the stall the user is about to feel would never be drawn.
-    autosaveState_ = AutosaveState::Pending;
-    editor::notifications().update(autosaveNotify_, editor::NotifySeverity::Info,
+    autosave_.autosaveState_ = AutosaveState::Pending;
+    editor::notifications().update(autosave_.autosaveNotify_, editor::NotifySeverity::Info,
                                    "Autosaving...", "Writing a recovery file.");
-    editor::notifications().setProgress(autosaveNotify_, -1.0f, "");
+    editor::notifications().setProgress(autosave_.autosaveNotify_, -1.0f, "");
     // The buttons go NOW, not when the save finishes: activations are drained in onRender, which
     // runs after onUpdate, so a Postpone clicked on this frame would arrive after the save had
     // already happened and would silently do nothing.
-    editor::notifications().setActions(autosaveNotify_, editor::NotifyAction::None, "",
+    editor::notifications().setActions(autosave_.autosaveNotify_, editor::NotifyAction::None, "",
                                        editor::NotifyAction::None, "");
 #else
     (void)dt;
@@ -227,10 +227,10 @@ void SandboxApp::autosaveCancelNotice() {
     // countdown, declared under the same guard as levelPath_ itself -- a build with no scene has
     // no level, no countdown, and nothing here to cancel. Emptying the body rather than reaching
     // for fields a SCENE=OFF build never declared.
-    if (autosaveNotify_) editor::notifications().close(autosaveNotify_);
-    autosaveNotify_ = 0;
-    autosaveState_ = AutosaveState::Idle;
-    autosaveShownSec_ = -1;
+    if (autosave_.autosaveNotify_) editor::notifications().close(autosave_.autosaveNotify_);
+    autosave_.autosaveNotify_ = 0;
+    autosave_.autosaveState_ = AutosaveState::Idle;
+    autosave_.autosaveShownSec_ = -1;
 #endif
 }
 
@@ -239,7 +239,7 @@ void SandboxApp::autosaveCancelNotice() {
 void SandboxApp::autosaveRunSave() {
 #if AVER_MODULE_SCENE
     const std::string dst = autosavePathFor(levelPath_);
-    if (dst.empty()) { autosaveAccum_ = 0.0f; autosaveCancelNotice(); return; }
+    if (dst.empty()) { autosave_.autosaveAccum_ = 0.0f; autosaveCancelNotice(); return; }
     // The untitled path lives under <project>/Saved, which need not exist yet. Harmless for the
     // beside-the-level case, where the parent is the level's own folder.
     {
@@ -249,33 +249,33 @@ void SandboxApp::autosaveRunSave() {
     }
     const std::string name = std::filesystem::path(dst).filename().string();
     if (saveLevel(dst)) {
-        autosaveWritten_ = true;
-        autosavePostpones_ = 0;   // a successful save earns the postpones back
+        autosave_.autosaveWritten_ = true;
+        autosave_.autosavePostpones_ = 0;   // a successful save earns the postpones back
         AVER_INFO("[Autosave] wrote {}", dst);
-        editor::notifications().finish(autosaveNotify_, editor::NotifySeverity::Success,
+        editor::notifications().finish(autosave_.autosaveNotify_, editor::NotifySeverity::Success,
                                        "Autosaved", name, 4.0);
     } else {
         // ONCE, not every interval: a directory that cannot be written will not start working,
         // and a log line every thirty seconds would bury everything else.
-        if (!autosaveFailedWarned_) {
-            autosaveFailedWarned_ = true;
+        if (!autosave_.autosaveFailedWarned_) {
+            autosave_.autosaveFailedWarned_ = true;
             AVER_WARN("[Autosave] could not write {} -- autosave is off for this session", dst);
         }
-        autosaveIntervalSec_ = 0.0f;
+        autosave_.autosaveIntervalSec_ = 0.0f;
         // STICKY, WITH A WAY BACK. This used to be a single log line and then silence: the
         // user's safety net was gone for the rest of the session and nothing on screen ever said
         // so. Every real cause of it -- a locked file, a full disk, a share that blinked -- is
         // transient, so latching it off for the session with no way to undo was always the wrong
         // answer to a temporary problem.
-        editor::notifications().finish(autosaveNotify_, editor::NotifySeverity::Error,
+        editor::notifications().finish(autosave_.autosaveNotify_, editor::NotifySeverity::Error,
                                        "Autosave failed - it is now OFF for this session",
                                        "Could not write " + dst, 0.0);
-        editor::notifications().setSticky(autosaveNotify_, true);
-        editor::notifications().setActions(autosaveNotify_,
+        editor::notifications().setSticky(autosave_.autosaveNotify_, true);
+        editor::notifications().setActions(autosave_.autosaveNotify_,
                                            editor::NotifyAction::RetryAutosave, "Turn back on",
                                            editor::NotifyAction::ShowOutputLog, "Show in Output Log");
     }
-    autosaveNotify_ = 0;
+    autosave_.autosaveNotify_ = 0;
 #endif
 }
 
@@ -289,8 +289,8 @@ void SandboxApp::clearAutosave() {
     if (p.empty()) return;
     std::error_code ec;
     std::filesystem::remove(p, ec);
-    autosaveWritten_ = false;
-    autosaveAccum_ = 0.0f;
+    autosave_.autosaveWritten_ = false;
+    autosave_.autosaveAccum_ = 0.0f;
 #endif
 }
 
@@ -298,7 +298,7 @@ void SandboxApp::clearAutosave() {
 // told about is a file, not a recovery.
 void SandboxApp::checkForRecovery() {
 #if AVER_MODULE_SCENE
-    recoveryPath_.clear();
+    autosave_.recoveryPath_.clear();
     const std::string p = autosavePathFor(levelPath_);
     if (p.empty()) return;
     std::error_code ec;
@@ -307,7 +307,7 @@ void SandboxApp::checkForRecovery() {
     // sidecar older than the level it shadows; with no level there is no such file, so the test
     // cannot be made and must not be faked -- offer it and let the author decide.
     if (levelPath_.empty()) {
-        recoveryPath_ = p;
+        autosave_.recoveryPath_ = p;
         AVER_WARN("[Autosave] an unsaved level from a previous session is recoverable: {}", p);
         return;
     }
@@ -318,14 +318,14 @@ void SandboxApp::checkForRecovery() {
     if (ec) return;
     const auto liveT = std::filesystem::last_write_time(levelPath_, ec);
     if (ec || sideT <= liveT) { std::filesystem::remove(p, ec); return; }
-    recoveryPath_ = p;
+    autosave_.recoveryPath_ = p;
     AVER_WARN("[Autosave] '{}' has unsaved changes from a previous session", levelPath_);
 #endif
 }
 
 void SandboxApp::drawRecoveryPrompt(Engine& e) {
 #if AVER_WITH_IMGUI && AVER_MODULE_SCENE
-    if (recoveryPath_.empty()) return;
+    if (autosave_.recoveryPath_.empty()) return;
     constexpr const char* kTitle = "Recover unsaved changes?";
     if (!ImGui::IsPopupOpen(kTitle)) ImGui::OpenPopup(kTitle);
     const ImVec2 centre = ImGui::GetMainViewport()->GetCenter();
@@ -340,8 +340,8 @@ void SandboxApp::drawRecoveryPrompt(Engine& e) {
     ImGui::Spacing();
     ImGui::Separator();
     if (ImGui::Button("Recover", ImVec2(120.0f * viewState_.dpi_, 0.0f))) {
-        const std::string p = recoveryPath_;
-        recoveryPath_.clear();
+        const std::string p = autosave_.recoveryPath_;
+        autosave_.recoveryPath_.clear();
         ImGui::CloseCurrentPopup();
         // Loaded like any other level, then RE-POINTED at the real file: recovering must not
         // leave levelPath_ aimed at the sidecar, or the next Ctrl+S would save into it and the
@@ -360,8 +360,8 @@ void SandboxApp::drawRecoveryPrompt(Engine& e) {
     ImGui::SameLine();
     if (ImGui::Button("Discard", ImVec2(120.0f * viewState_.dpi_, 0.0f))) {
         std::error_code ec;
-        std::filesystem::remove(recoveryPath_, ec);
-        recoveryPath_.clear();
+        std::filesystem::remove(autosave_.recoveryPath_, ec);
+        autosave_.recoveryPath_.clear();
         ImGui::CloseCurrentPopup();
     }
     ImGui::EndPopup();
@@ -397,11 +397,11 @@ void SandboxApp::maybeAutosaveProject(f32 dt) {
     // reason: --frames sets render settings from the command line, and applyProjectRenderSettings
     // marks the project dirty when it does, so a bounded run would write those flags into the
     // user's manifest as if they had chosen them.
-    if (maxFrames_ != 0) { projectAutosaveAccum_ = 0.0f; return; }
-    if (!projectDirty_ || !project_.valid()) { projectAutosaveAccum_ = 0.0f; return; }
-    projectAutosaveAccum_ += dt;
-    if (projectAutosaveAccum_ < kProjectAutosaveSec) return;
-    projectAutosaveAccum_ = 0.0f;
+    if (maxFrames_ != 0) { autosave_.projectAutosaveAccum_ = 0.0f; return; }
+    if (!autosave_.projectDirty_ || !project_.valid()) { autosave_.projectAutosaveAccum_ = 0.0f; return; }
+    autosave_.projectAutosaveAccum_ += dt;
+    if (autosave_.projectAutosaveAccum_ < AutosaveSession::kProjectAutosaveSec) return;
+    autosave_.projectAutosaveAccum_ = 0.0f;
     std::string why;
     if (saveProjectManifest(&why)) {
         projectSaveStatus_ = "Saved.";

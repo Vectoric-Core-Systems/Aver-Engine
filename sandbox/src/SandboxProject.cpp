@@ -408,8 +408,8 @@ void SandboxApp::applyProjectRenderSettings() {
 #endif
 
     if (!project_.hasRenderSettings()) return;
-    if (!rset_.voxiAttached_) { projectRenderPending_ = true; return; }
-    projectRenderPending_ = false;
+    if (!rset_.voxiAttached_) { autosave_.projectRenderPending_ = true; return; }
+    autosave_.projectRenderPending_ = false;
 
     // Idempotent by the time we get here on the startup path -- the settings were already seeded
     // before init(). Still called, because the mid-session project-open path reaches this

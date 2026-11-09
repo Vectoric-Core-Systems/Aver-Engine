@@ -344,7 +344,7 @@ void SandboxApp::setNotifyTest(int) {}
 // --autosave-test <sec>: test autosave with shortened interval; needs AVER_MODULE_SCENE && AVER_WITH_IMGUI.
 #if AVER_WITH_IMGUI && AVER_MODULE_SCENE
 void SandboxApp::setAutosaveTest(f32 sec) {
-    autosaveIntervalSec_ = sec;
+    autosave_.autosaveIntervalSec_ = sec;
     harness_.notifyTestLift_ = true;
     harness_.autosaveTestArm_ = true;
     harness_.autosaveTestLift_ = true;

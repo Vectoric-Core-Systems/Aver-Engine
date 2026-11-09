@@ -775,15 +775,15 @@ void SandboxApp::buildProjectSettings() {
             // couldn't be changed from the editor -- saveProjectManifest already wrote them via
             // writeOcproject, which owns NAME/AUTHOR/CONTENT/STARTMAP. Only the widgets were missing.
             ImGui::PushItemWidth(-160.0f * viewState_.dpi_);
-            if (editField("Name", project_.name, 96)) projectDirty_ = true;
+            if (editField("Name", project_.name, 96)) autosave_.projectDirty_ = true;
             uiReg_.track("project.name");
             // Rename is manifest-only: folder/filename keep the old name, and project_.name feeds
             // csharpNamespaceFor(), so new scripts/materials get a namespace existing ones don't.
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Renames the project in the manifest only.\nThe folder and file keep their names, and new scripts get a namespace from this.");
-            if (editField("Author", project_.author, 96)) projectDirty_ = true;
+            if (editField("Author", project_.author, 96)) autosave_.projectDirty_ = true;
             uiReg_.track("project.author");
-            if (editField("Start map", project_.startMap, 256)) projectDirty_ = true;
+            if (editField("Start map", project_.startMap, 256)) autosave_.projectDirty_ = true;
             uiReg_.track("project.startMap");
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Relative to the content root, e.g. Maps/Default.ocmap");
@@ -797,7 +797,7 @@ void SandboxApp::buildProjectSettings() {
                 if (ImGui::BeginCombo("Input Scheme", curLabel.c_str())) {
                     if (ImGui::Selectable("None", project_.inputScheme.empty())) {
                         project_.inputScheme.clear();
-                        projectDirty_ = true;
+                        autosave_.projectDirty_ = true;
                     }
                     const std::string dir = project_.contentDir();
                     std::error_code ec;
@@ -821,7 +821,7 @@ void SandboxApp::buildProjectSettings() {
                         for (const std::string& c : choices)
                             if (ImGui::Selectable(c.c_str(), c == project_.inputScheme)) {
                                 project_.inputScheme = c;
-                                projectDirty_ = true;
+                                autosave_.projectDirty_ = true;
                             }
                     }
                     ImGui::EndCombo();
@@ -835,7 +835,7 @@ void SandboxApp::buildProjectSettings() {
             // GAME.MODE: the GameMode every level without its own World Settings override uses.
             if (classPicker("Default Game Mode", project_.gameMode, AVER_FW_CLASS_GAME_MODE,
                             "Engine default (drone)", nullptr, nullptr))
-                projectDirty_ = true;
+                autosave_.projectDirty_ = true;
             uiReg_.track("project.gameMode");
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Used by every level whose World Settings leave Game Mode empty.\n"
@@ -858,7 +858,7 @@ void SandboxApp::buildProjectSettings() {
                         const std::string tag = aver_fw_loc_culture_at(i);
                         if (ImGui::Selectable(tag.c_str(), tag == curDefault)) {
                             project_.localeDefault = tag;
-                            projectDirty_ = true;
+                            autosave_.projectDirty_ = true;
                             reloadLoc(aver_fw_loc_culture());
                         }
                     }
@@ -875,7 +875,7 @@ void SandboxApp::buildProjectSettings() {
                     const std::string tag = fmt::normalizeCulture(freeCulture);
                     if (!tag.empty()) {
                         project_.localeDefault = tag;
-                        projectDirty_ = true;
+                        autosave_.projectDirty_ = true;
                         freeCulture[0] = '\0';
                         reloadLoc(aver_fw_loc_culture());
                     }
@@ -955,7 +955,7 @@ void SandboxApp::buildProjectSettings() {
     // change. The button stays for a deliberate save; the dirty mark shows the window before it fires.
     if (project_.valid()) {
         ImGui::Separator();
-        ImGui::BeginDisabled(!projectDirty_);
+        ImGui::BeginDisabled(!autosave_.projectDirty_);
         if (ImGui::Button("Save Project Settings", ImVec2(220.0f * viewState_.dpi_, 0.0f))) {
             std::string why;
             if (saveProjectManifest(&why)) {
@@ -968,20 +968,20 @@ void SandboxApp::buildProjectSettings() {
         }
         ImGui::EndDisabled();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip(projectDirty_
+            ImGui::SetTooltip(autosave_.projectDirty_
                 ? "Writes EVERY page into the .ocproject.\nComments and any keys this build does not know are preserved."
                 : "Nothing has changed since the manifest was last read.");
 
         // Revert re-reads the file rather than keeping an undo stack -- a manifest is small enough
         // that this stays exact where a remembered snapshot would drift as fields are added.
         ImGui::SameLine();
-        ImGui::BeginDisabled(!projectDirty_);
+        ImGui::BeginDisabled(!autosave_.projectDirty_);
         if (ImGui::Button("Revert", ImVec2(110.0f * viewState_.dpi_, 0.0f))) {
             fmt::ProjectDesc fresh;
             std::string why;
             if (fmt::loadOcproject(project_.manifestPath, fresh, &why)) {
                 project_ = fresh;
-                projectDirty_ = false;
+                autosave_.projectDirty_ = false;
                 projectSaveStatus_ = "Reverted to the file on disk.";
             } else {
                 projectSaveStatus_ = "Revert failed: " + why;
@@ -992,7 +992,7 @@ void SandboxApp::buildProjectSettings() {
         ImGui::EndDisabled();
 
         // Show dirty mark.
-        if (projectDirty_) {
+        if (autosave_.projectDirty_) {
             ImGui::SameLine();
             ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f), "unsaved changes");
         }
@@ -1035,7 +1035,7 @@ bool SandboxApp::settingInt(const char* label, int* v, int lo, int hi, int whenE
     ImGui::EndDisabled();
     if (tip && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("%s", tip);
     ImGui::PopID();
-    if (changed) projectDirty_ = true;
+    if (changed) autosave_.projectDirty_ = true;
     return changed;
 #else
     (void)label; (void)v; (void)lo; (void)hi; (void)whenEnabled; (void)tip; return false;
@@ -1059,7 +1059,7 @@ void SandboxApp::buildWindowSettings() {
         ImGui::SetNextItemWidth(320.0f * viewState_.dpi_);
         if (ImGui::InputTextWithHint("Title", project_.name.c_str(), buf, sizeof buf)) {
             project_.windowTitle = buf;
-            projectDirty_ = true;
+            autosave_.projectDirty_ = true;
         }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Empty uses the project's NAME.");
     }
@@ -1071,7 +1071,7 @@ void SandboxApp::buildWindowSettings() {
         if (ImGui::Checkbox("##stated", &stated)) {
             project_.windowWidth  = stated ? wh[0] : -1;
             project_.windowHeight = stated ? wh[1] : -1;
-            projectDirty_ = true;
+            autosave_.projectDirty_ = true;
         }
         ImGui::SameLine();
         ImGui::BeginDisabled(!stated);
@@ -1079,7 +1079,7 @@ void SandboxApp::buildWindowSettings() {
         if (ImGui::InputInt2("Size", wh)) {
             project_.windowWidth  = wh[0];
             project_.windowHeight = wh[1];
-            projectDirty_ = true;
+            autosave_.projectDirty_ = true;
         }
         ImGui::EndDisabled();
         ImGui::PopID();
@@ -1113,13 +1113,13 @@ void SandboxApp::buildImportSettings() {
         f32 v = project_.importScale >= 0.0f ? project_.importScale : 100.0f;
         bool stated = project_.importScale >= 0.0f;
         ImGui::PushID("scale");
-        if (ImGui::Checkbox("##stated", &stated)) { project_.importScale = stated ? v : -1.0f; projectDirty_ = true; }
+        if (ImGui::Checkbox("##stated", &stated)) { project_.importScale = stated ? v : -1.0f; autosave_.projectDirty_ = true; }
         ImGui::SameLine();
         ImGui::BeginDisabled(!stated);
         ImGui::SetNextItemWidth(180.0f * viewState_.dpi_);
         if (ImGui::DragFloat("Unit scale", &v, 0.5f, 0.001f, 10000.0f, "%.3f")) {
             project_.importScale = v;
-            projectDirty_ = true;
+            autosave_.projectDirty_ = true;
         }
         ImGui::EndDisabled();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
@@ -1163,13 +1163,13 @@ void SandboxApp::buildStreamSettings() {
         f32 v = project_.streamLeadSeconds >= 0.0f ? project_.streamLeadSeconds : 1.5f;
         bool stated = project_.streamLeadSeconds >= 0.0f;
         ImGui::PushID("lead");
-        if (ImGui::Checkbox("##stated", &stated)) { project_.streamLeadSeconds = stated ? v : -1.0f; projectDirty_ = true; }
+        if (ImGui::Checkbox("##stated", &stated)) { project_.streamLeadSeconds = stated ? v : -1.0f; autosave_.projectDirty_ = true; }
         ImGui::SameLine();
         ImGui::BeginDisabled(!stated);
         ImGui::SetNextItemWidth(180.0f * viewState_.dpi_);
         if (ImGui::SliderFloat("Lead seconds", &v, 0.0f, 10.0f, "%.2f")) {
             project_.streamLeadSeconds = v;
-            projectDirty_ = true;
+            autosave_.projectDirty_ = true;
         }
         ImGui::EndDisabled();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
@@ -1199,7 +1199,7 @@ void SandboxApp::buildPhysicsSettings() {
     ImGui::TextUnformatted("Gravity (cm/s^2)");
     if (ImGui::DragFloat3("##gravity", project_.gravity, 1.0f, -10000.0f, 10000.0f, "%.1f")) {
         project_.hasGravity = true;
-        projectDirty_ = true;
+        autosave_.projectDirty_ = true;
         if (ready) aver_phys_set_gravity(project_.gravity[0], project_.gravity[1], project_.gravity[2]);
     }
     uiReg_.track("project.physics.gravity");
@@ -1210,7 +1210,7 @@ void SandboxApp::buildPhysicsSettings() {
     f32 hz = project_.fixedStep > 0.0f ? 1.0f / project_.fixedStep : 60.0f;
     if (ImGui::SliderFloat("Tick rate (Hz)", &hz, 20.0f, 240.0f, "%.0f")) {
         project_.fixedStep = 1.0f / hz;
-        projectDirty_ = true;
+        autosave_.projectDirty_ = true;
         // Setter refuses outside (0, 0.5] and returns 0.
         if (ready && !aver_phys_set_fixed_step(project_.fixedStep))
             AVER_WARN("[Project] physics tick rate {} Hz refused by the solver", hz);
@@ -1223,7 +1223,7 @@ void SandboxApp::buildPhysicsSettings() {
     ImGui::PopItemWidth();
 
     if (ready) ImGui::TextDisabled("%d body(ies) in the world.", aver_phys_body_count());
-    editor::drawPhysicsSettingsGroups(project_, projectDirty_, viewState_.dpi_);
+    editor::drawPhysicsSettingsGroups(project_, autosave_.projectDirty_, viewState_.dpi_);
     editor::drawPhysicalSurfaceTable(project_.contentDir(), viewState_.dpi_);   // Content/Physics/Surfaces.ocsurf as an editable table; Save registers the rows with the physics module
 #else
     ImGui::TextDisabled("This build has no physics module.");
@@ -1255,7 +1255,7 @@ void SandboxApp::buildAudioSettings() {
 
     if (mixed) {
         project_.hasAudioMix = true;
-        projectDirty_ = true;
+        autosave_.projectDirty_ = true;
         aver_audio_set_master_volume(project_.masterVolume);
         for (int b = 0; b < 4; ++b) aver_audio_set_bus_volume(b, project_.busVolume[b]);
     }
@@ -1386,7 +1386,7 @@ void SandboxApp::renderPageOverview(voxi::Renderer& vx, voxi::Settings& s, const
             for (int i = 1; i < 4; ++i) if (projectBackend_ == kKeys[i]) { cur = i; break; }
             if (ImGui::Combo("Renderer", &cur, kNames, 4)) {
                 projectBackend_ = kKeys[cur];
-                projectDirty_ = true;
+                autosave_.projectDirty_ = true;
             }
             uiReg_.track("project.backend");
             // Shows what is actually running beside what was asked for.
@@ -1426,7 +1426,7 @@ void SandboxApp::renderPageAntiAliasing(voxi::Renderer& vx, voxi::Settings& s, c
         if (ImGui::Checkbox("Temporal anti-aliasing (TAA)", &taa)) {
             rset_.temporalAaEnabled_ = taa;
             project_.taa = taa ? 1 : 0;
-            projectDirty_ = true;
+            autosave_.projectDirty_ = true;
         }
         ImGui::EndDisabled();
         uiReg_.track("project.taa");
@@ -1448,7 +1448,7 @@ void SandboxApp::renderPageAntiAliasing(voxi::Renderer& vx, voxi::Settings& s, c
         if (ImGui::Checkbox("NeuRAA edge anti-aliasing", &nra)) {
             rset_.neuraaEnabled_ = nra;
             project_.neuraa = nra ? 1 : 0;
-            projectDirty_ = true;
+            autosave_.projectDirty_ = true;
         }
         ImGui::EndDisabled();
         uiReg_.track("project.neuraa");
@@ -1497,7 +1497,7 @@ void SandboxApp::renderPageAntiAliasing(voxi::Renderer& vx, voxi::Settings& s, c
             rset_.averSrProjectDefault_ = projIdx == 0 ? -1 : projIdx - 1;
             rset_.averSrMigrationNoteArmed_ = false;
             rset_.averSrCookieTripped_ = false;   // an explicit pick lifts the crash-cookie latch
-            projectDirty_ = true;
+            autosave_.projectDirty_ = true;
         }
         uiReg_.track("project.averSr");
         if (ImGui::IsItemHovered())
@@ -1514,7 +1514,7 @@ void SandboxApp::renderPageAntiAliasing(voxi::Renderer& vx, voxi::Settings& s, c
         bool fg = project_.frameInterp == 1;
         if (ImGui::Checkbox("Frame interpolation (Play and packaged game)", &fg)) {
             project_.frameInterp = fg ? 1 : 0;
-            projectDirty_ = true;
+            autosave_.projectDirty_ = true;
         }
         uiReg_.track("project.frameInterp");
         if (ImGui::IsItemHovered())
@@ -2093,7 +2093,7 @@ void SandboxApp::renderPagePost(voxi::Renderer& vx, voxi::Settings& s, const vox
                 // Unticking leaves the viewport alone: "unstated" means compiled default applies next open.
                 *key = stated ? v : -1.0f;
                 if (stated) *live = v;
-                projectDirty_ = true;
+                autosave_.projectDirty_ = true;
             }
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Unticked: this project does not state it,\n"
@@ -2103,7 +2103,7 @@ void SandboxApp::renderPagePost(voxi::Renderer& vx, voxi::Settings& s, const vox
             if (ImGui::SliderFloat(label, &v, lo, hi, form, flags)) {
                 *key = v;
                 *live = v;
-                projectDirty_ = true;
+                autosave_.projectDirty_ = true;
             }
             ImGui::EndDisabled();
             uiReg_.track(trackName);
@@ -2134,7 +2134,7 @@ void SandboxApp::renderPagePost(voxi::Renderer& vx, voxi::Settings& s, const vox
             if (ImGui::Checkbox("##stated", &stated)) {
                 project_.postAutoExposure = stated ? (on ? 1 : 0) : -1;
                 if (stated) rset_.post_.autoExposure = on;
-                projectDirty_ = true;
+                autosave_.projectDirty_ = true;
             }
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Unticked: this project does not state it,\n"
@@ -2144,7 +2144,7 @@ void SandboxApp::renderPagePost(voxi::Renderer& vx, voxi::Settings& s, const vox
             if (ImGui::Checkbox("Auto exposure", &on)) {
                 project_.postAutoExposure = on ? 1 : 0;
                 rset_.post_.autoExposure = on;
-                projectDirty_ = true;
+                autosave_.projectDirty_ = true;
             }
             ImGui::EndDisabled();
             uiReg_.track("project.post.autoExposure");
@@ -2170,7 +2170,7 @@ void SandboxApp::renderPagePost(voxi::Renderer& vx, voxi::Settings& s, const vox
             if (ImGui::Checkbox("##stated", &stated)) {
                 project_.postTonemap = stated ? mode : -1;
                 if (stated) rset_.post_.tonemap = static_cast<u32>(mode);
-                projectDirty_ = true;
+                autosave_.projectDirty_ = true;
             }
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Unticked: this project does not state it,\n"
@@ -2182,7 +2182,7 @@ void SandboxApp::renderPagePost(voxi::Renderer& vx, voxi::Settings& s, const vox
                              "Extended linear\0Extended Reinhard\0Extended filmic\0Extended ACES\0Extended AgX\0")) {
                 project_.postTonemap = mode;
                 rset_.post_.tonemap = static_cast<u32>(mode);
-                projectDirty_ = true;
+                autosave_.projectDirty_ = true;
             }
             ImGui::EndDisabled();
             {
@@ -2195,7 +2195,7 @@ void SandboxApp::renderPagePost(voxi::Renderer& vx, voxi::Settings& s, const vox
                 for (Row& r : rows) {
                     float v = *r.project >= 0.0f ? *r.project : *r.live;
                     if (ImGui::DragFloat(r.label, &v, 0.01f, 0.001f, r.hi, "%.3f")) {
-                        *r.project = v; *r.live = v; projectDirty_ = true;
+                        *r.project = v; *r.live = v; autosave_.projectDirty_ = true;
                     }
                 }
             }
@@ -2233,7 +2233,7 @@ void SandboxApp::renderPagePerformance(voxi::Renderer& vx, voxi::Settings& s, co
         bool lod = lod_.lodSelectEnabled_;
         if (ImGui::Checkbox("LOD select", &lod)) {
             setLodSelect(lod, lod_.lodErrorThresholdPx_);
-            projectDirty_ = true;
+            autosave_.projectDirty_ = true;
         }
         uiReg_.track("project.lod.select");
         if (ImGui::IsItemHovered())
@@ -2243,14 +2243,14 @@ void SandboxApp::renderPagePerformance(voxi::Renderer& vx, voxi::Settings& s, co
         f32 px = lod_.lodErrorThresholdPx_;
         if (ImGui::SliderFloat("Screen error (px)", &px, 0.25f, 8.0f, "%.2f")) {
             setLodSelect(lod_.lodSelectEnabled_, px);
-            projectDirty_ = true;
+            autosave_.projectDirty_ = true;
         }
         uiReg_.track("project.lod.threshold");
         ImGui::EndDisabled();
 
-        if (ImGui::Checkbox("Occlusion culling", &occl_.occlusionCullEnabled_)) projectDirty_ = true;
+        if (ImGui::Checkbox("Occlusion culling", &occl_.occlusionCullEnabled_)) autosave_.projectDirty_ = true;
         uiReg_.track("project.occlusionCull");
-        if (ImGui::Checkbox("Depth pre-pass", &rset_.depthPrepassOverride_)) projectDirty_ = true;
+        if (ImGui::Checkbox("Depth pre-pass", &rset_.depthPrepassOverride_)) autosave_.projectDirty_ = true;
         uiReg_.track("project.depthPrepass");
 
     }
@@ -2273,7 +2273,7 @@ void SandboxApp::renderPagePerformance(voxi::Renderer& vx, voxi::Settings& s, co
             project_.particleGpu = pg;
             particles::particleSystem().setGpuMode(pg);
             particleRenderer_.setGpuEnabled(pg != 0);
-            projectDirty_ = true;
+            autosave_.projectDirty_ = true;
         }
         uiReg_.track("project.particles.gpu");
         if (ImGui::IsItemHovered())

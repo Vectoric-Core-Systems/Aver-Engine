@@ -1309,6 +1309,7 @@ private:
 #include "state/LodState.hpp"
 #include "state/RevisionControlState.hpp"
 #include "state/McpState.hpp"
+#include "state/AutosaveSession.hpp"
 class HitchMarks;
 namespace game { struct SceneDrawStats; }
 
@@ -1776,6 +1777,7 @@ private:
     LodState lod_;   // Mesh LOD / cluster selection and mesh-shader path
     RevisionControlState revCtl_;   // Revision-control panel
     McpState mcpState_;   // MCP automation bridge
+    AutosaveSession autosave_;   // Level/project/prefs autosave timers, crash-recovery state and the post
     // ---- end feature state ----
 
     void applyProject(Engine& e);
@@ -1834,11 +1836,6 @@ private:
     void seedAndSaveProject();
 
     bool saveProjectManifest(std::string* why);
-    bool projectDirty_ = false;
-
-    // Auto-saved on edit with 0.5s debounce.
-    static constexpr f32 kProjectAutosaveSec = 0.5f;
-    f32 projectAutosaveAccum_ = 0.0f;
 
 
     // Above unguarded (manifest keys); below guarded on VOXI (controller state).
@@ -1849,7 +1846,6 @@ private:
 #endif
 
     void maybeAutosaveProject(f32 dt);
-    bool projectRenderPending_ = false;   // manifest read before the device attached
     std::string projectSaveStatus_;
 
     bool hudPreviewActive() const;
@@ -2280,50 +2276,13 @@ private:
 
     f32 selectedRadius() const;
 
-    // ---- FOUR GROUPS THAT SAT INSIDE `#if AVER_MODULE_SCENE` AND ARE READ FROM OUTSIDE IT ----
-    // Plain arithmetic/flags, no scene:: type, each read unconditionally.
-    //
-    // Preference autosave timer: maybeAutosavePrefs (SandboxAutosave.cpp) runs unguarded. 0.25s debounce.
-    // Prefs are cheap to check/write, so the interval is short; dragged slider collapses 60 frames to 4.
-    static constexpr f32 kPrefsAutosaveSec = 0.25f;
-    f32 prefsAutosaveAccum_ = 0.0f;
-
-    // Deferred autosave answers: drawNotifications writes them, maybeAutosave consumes next tick.
-    bool autosavePostponeRequested_ = false;
-    bool autosaveRetryRequested_ = false;
-
     // --no-editor-chrome: suppress editor chrome for comparison with AverEngineRuntime.exe.
     bool noEditorChrome_ = false;
 
 #if AVER_MODULE_SCENE
     scene::Entity playerStart_ = scene::kInvalidEntity;
 
-    // The Outliner row currently being renamed in place, and its edit buffer.
-    // Create-a-landscape controls; the shape knobs are landscape_.noiseParams(), shared with the
-    // ring generator so a created section and the tiles around it come from one set of numbers.
-    // Autosave interval, TEN MINUTES. The old 30s period made the countdown visible; silence
-    // would be expected, but now saveLevel doesn't call markLevelSaved, so the timer restarts immediately
-    // and a 10s warning on 30s put a countdown visible a third of every minute.
-    static constexpr f32 kAutosaveDefaultSec = 600.0f;
-    f32 autosaveIntervalSec_ = kAutosaveDefaultSec;
-    f32 autosaveAccum_ = 0.0f;
-
-    // Why three states, not a bool: the save is synchronous (onUpdate runs BEFORE onRender), so a "Saving..."
-    // notification raised and saved in the same tick would be replaced by "Saved" before buildUI draws it.
-    // Pending spends one presented frame saying so, then writes on the tick after.
-    enum class AutosaveState : u8 { Idle, Counting, Pending };
-    AutosaveState autosaveState_ = AutosaveState::Idle;
-    u64 autosaveNotify_ = 0;      // the countdown's notification, updated in place
-    int autosaveShownSec_ = -1;   // last whole second rendered, so updates are 1/s not 1/frame
-    u8  autosavePostpones_ = 0;
-    // Ten seconds is long enough to finish a drag and press Postpone, short enough that the warning
-    // is about the save that is coming rather than a background fact.
-    static constexpr f32 kAutosaveWarnSec = 10.0f;
-    // A Postpone that works forever is a way to switch the safety net off without ever deciding to.
-    static constexpr u8  kAutosaveMaxPostpones = 3;
-    bool autosaveWritten_ = false;
-    bool autosaveFailedWarned_ = false;
-    std::string recoveryPath_;      // a sidecar newer than its level, waiting to be offered
+    using AutosaveState = AutosaveSession::AutosaveState;
 
 
 
