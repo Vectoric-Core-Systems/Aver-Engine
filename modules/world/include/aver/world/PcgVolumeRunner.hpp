@@ -29,15 +29,23 @@ struct PcgProgram {
     std::function<const fmt::OcGraphData*(const std::string&)> graphLoader;
     u64 environmentStamp = 0;                       // bump when landscape/splines/actors change
     f64 budgetMs = 0.0;                             // per cell; 0 = unlimited
+    u32 maxPointsPerNode = 4'000'000;               // per-node output cap (PcgContext::maxPoints); a dense entry errors instead of allocating
 };
 
 // A landscape that only knows a height function (the host's existing heightSource); normals are differenced.
 class PcgHeightFnLandscape final : public ILandscapeQuery {
 public:
-    explicit PcgHeightFnLandscape(std::function<bool(f32, f32, f32&)> h) : h_(std::move(h)) {}
+    // `layer` (optional) answers a painted layer weight for the biome masks and layer gates; without it every layer is 0.
+    using LayerFn = std::function<f32(std::string_view layer, f32 x, f32 y)>;
+    explicit PcgHeightFnLandscape(std::function<bool(f32, f32, f32&)> h, LayerFn layer = {})
+        : h_(std::move(h)), layer_(std::move(layer)) {}
     bool heightAt(f64 x, f64 y, f32& z) const override { return h_ && h_(static_cast<f32>(x), static_cast<f32>(y), z); }
+    f32 layerWeight(std::string_view layer, f64 x, f64 y) const override {
+        return layer_ ? layer_(layer, static_cast<f32>(x), static_cast<f32>(y)) : 0.0f;
+    }
 private:
     std::function<bool(f32, f32, f32&)> h_;
+    LayerFn layer_;
 };
 
 // The generatorVersion recorded for graph-generated chunks: the high bits mark the PCG path (palette versions are small

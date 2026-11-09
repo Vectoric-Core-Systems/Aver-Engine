@@ -8,6 +8,7 @@
 //   * per-point randomness is hash(point.seed, node seed, stream), never a running counter;
 //   * ties in any ordering fall back to (seed, x, y, z, index).
 #include "aver/pcg/PcgVolume.hpp"
+#include "aver/formats/OcInstances.hpp"
 #include "aver/world/PcgGraph.hpp"
 
 #include <algorithm>
@@ -54,12 +55,13 @@ bool overCap(const PcgNodeCtx& n, f64 count) {
     return true;
 }
 
-Quat alignUpTo(const Vec3& normal) {
+// Tilts +Z onto `normal`, by at most maxDeg (steeper ground tilts only that far).
+Quat alignUpTo(const Vec3& normal, f32 maxDeg = 90.0f) {
     const f32 c = std::min(1.0f, std::max(-1.0f, normal.z));
     if (c > 0.99999f) return Quat::identity();
     const Vec3 axis = cross(Vec3{0, 0, 1}, normal);
     if (axis.x * axis.x + axis.y * axis.y + axis.z * axis.z < 1e-12f) return Quat::identity();
-    return Quat::fromAxisAngle(axis, std::acos(c));
+    return Quat::fromAxisAngle(axis, std::min(std::acos(c), maxDeg * kDeg2Rad));
 }
 
 f32 steepnessDeg(const Vec3& n) { return std::acos(std::min(1.0f, std::max(-1.0f, n.z))) * kRad2Deg; }
@@ -245,8 +247,8 @@ void nBoundsFilter(const PcgNodeCtx& n, const In& in, PcgNodeOut& out) {
     split(P, out, [&](usize i) { return box.contains(P.pos[i]); });
 }
 
-void nDensityNoise(const PcgNodeCtx& n, const In& in, PcgNodeOut& out) {
-    PcgPoints P = inAt(in, 0);
+// The hash-lattice fBm the noise nodes share: `seed` params add to the node seed, `cell` is the lattice cell in cm.
+pcg::InfiniteSpec noiseSpecFor(const PcgNodeCtx& n, f32 defaultCellCm) {
     pcg::InfiniteSpec spec{};
     spec.seed = n.seed + n.p.integer("seed", 0);
     spec.layerCount = 1;
@@ -255,8 +257,14 @@ void nDensityNoise(const PcgNodeCtx& n, const In& in, PcgNodeOut& out) {
     spec.layers[0].octaves = std::max(1, n.p.integer("octaves", 3));
     spec.layers[0].lacunarity = 2.0f;
     spec.layers[0].gain = 0.5f;
-    spec.cellSizeCm = static_cast<f32>(n.p.num("cell", 1600.0));
-    if (spec.cellSizeCm <= 0.0f) spec.cellSizeCm = 1600.0f;
+    spec.cellSizeCm = static_cast<f32>(n.p.num("cell", defaultCellCm));
+    if (spec.cellSizeCm <= 0.0f) spec.cellSizeCm = defaultCellCm;
+    return spec;
+}
+
+void nDensityNoise(const PcgNodeCtx& n, const In& in, PcgNodeOut& out) {
+    PcgPoints P = inAt(in, 0);
+    const pcg::InfiniteSpec spec = noiseSpecFor(n, 1600.0f);
     const std::string mode = n.p.str("mode", "set");
     const f32 scale = static_cast<f32>(n.p.num("scale", 1.0)), bias = static_cast<f32>(n.p.num("bias", 0.0));
     const bool use3d = n.p.flag("use3d", false);
@@ -268,6 +276,17 @@ void nDensityNoise(const PcgNodeCtx& n, const In& in, PcgNodeOut& out) {
         else P.density[i] = v;
     }
     out.pins.push_back(std::move(P));
+}
+
+// Splits by the noise value at the point's XY: inside = [min, max]. The patch mask of a biome rule.
+void nNoiseMask(const PcgNodeCtx& n, const In& in, PcgNodeOut& out) {
+    const PcgPoints& P = inAt(in, 0);
+    const pcg::InfiniteSpec spec = noiseSpecFor(n, 4000.0f);
+    const f32 lo = static_cast<f32>(n.p.num("min", 0.5)), hi = static_cast<f32>(n.p.num("max", 1.0e30));
+    split(P, out, [&](usize i) {
+        const f32 v = pcg::sampleInfiniteAbs(spec, P.pos[i].x, P.pos[i].y, 0.0);
+        return v >= lo && v <= hi;
+    });
 }
 
 void nDensityFilter(const PcgNodeCtx& n, const In& in, PcgNodeOut& out) {
@@ -477,7 +496,7 @@ void nProjectToSurface(const PcgNodeCtx& n, const In& in, PcgNodeOut& out) {
     out.pins.assign(1, P.emptyLike());
     if (!n.ctx.landscape) { n.error("no landscape is available to project onto"); return; }
     const bool align = n.p.flag("align", false), drop = n.p.flag("drop", true);
-    const f32 zOff = static_cast<f32>(n.p.num("zOffset", 0.0));
+    const f32 zOff = static_cast<f32>(n.p.num("zOffset", 0.0)), alignMax = static_cast<f32>(n.p.num("alignMax", 90.0));
     for (usize i = 0; i < P.size(); ++i) {
         f32 z = 0.0f;
         if (!n.ctx.landscape->heightAt(P.pos[i].x, P.pos[i].y, z)) {
@@ -491,7 +510,7 @@ void nProjectToSurface(const PcgNodeCtx& n, const In& in, PcgNodeOut& out) {
         Vec3 nrm{0, 0, 1};
         n.ctx.landscape->normalAt(P.pos[i].x, P.pos[i].y, nrm);
         o.steepness[k] = steepnessDeg(nrm);
-        if (align) o.rot[k] = alignUpTo(nrm) * P.rot[i];
+        if (align) o.rot[k] = alignUpTo(nrm, alignMax) * P.rot[i];
     }
 }
 
@@ -555,6 +574,162 @@ void nDistanceToActor(const PcgNodeCtx& n, const In& in, PcgNodeOut& out) {
     });
 }
 
+// ---- biome rules --------------------------------------------------------------------------------------------------------
+
+f32 ramp01(f32 v, f32 lo, f32 width) {
+    if (width <= 0.0f) return v >= lo ? 1.0f : 0.0f;
+    return std::min(1.0f, std::max(0.0f, (v - lo) / width));
+}
+
+// A mask value m in [0, 1] per point -- a paint layer weight, a noise value, nearness to a spline, depth inside a volume,
+// each ramped over `edge` -- keeps the point when a seeded per-point hash u < m. In the ramp the survivors thin out at
+// random, so the border of two biomes (one `invert=1`) interleaves instead of drawing a line. edge=0 is a hard cut.
+// outputs: inside (kept), outside. The kept points carry the value as attribute "mask".
+void nEdgeFalloff(const PcgNodeCtx& n, const In& in, PcgNodeOut& out) {
+    const PcgPoints& P = inAt(in, 0);
+    const std::string source = n.p.str("source", "layer");
+    const f32 edge = static_cast<f32>(n.p.num("edge", 0.0)), mn = static_cast<f32>(n.p.num("min", 0.5));
+    const bool invert = n.p.flag("invert", false);
+    pcg::InfiniteSpec spec{};
+    const std::vector<Vec3>* line = nullptr;
+    PcgBox box;
+    bool ok = true;
+    if (source == "layer") {
+        if (!n.ctx.landscape) { n.error("source=layer but no landscape is available"); ok = false; }
+    } else if (source == "noise") {
+        spec = noiseSpecFor(n, 4000.0f);
+    } else if (source == "spline") {
+        const auto it = n.ctx.splines.find(n.p.str("name"));
+        if (it == n.ctx.splines.end()) { n.error("unknown spline '" + n.p.str("name") + "'"); ok = false; } else line = &it->second;
+    } else if (source == "volume") {
+        box = boxFromParams(n, ok);
+    } else {
+        n.error("source must be layer, noise, spline or volume");
+        ok = false;
+    }
+    out.pins.assign(2, P.emptyLike());
+    if (!ok) { out.pins[1] = P; return; }
+    const std::string layer = n.p.str("name");
+    const f32 half = static_cast<f32>(n.p.num("half", 500.0));
+    for (usize i = 0; i < P.size(); ++i) {
+        const Vec3& q = P.pos[i];
+        f32 m = 0.0f;
+        if (source == "layer") m = ramp01(n.ctx.landscape->layerWeight(layer, q.x, q.y), mn, edge);
+        else if (source == "noise") m = ramp01(pcg::sampleInfiniteAbs(spec, q.x, q.y, 0.0), mn, edge);
+        else if (source == "spline") m = ramp01(half + edge - distToPolyline(q, *line), 0.0f, edge);
+        else m = ramp01(std::min({q.x - box.min.x, box.max.x - q.x, q.y - box.min.y, box.max.y - q.y}), 0.0f, edge);
+        if (invert) m = 1.0f - m;
+        const f32 u = pcgFloat01(pcgHash2(P.seed[i] ^ n.seed, 0xED6E));
+        if (u < m) {
+            out.pins[0].appendFrom(P, i);
+            out.pins[0].setScalar("mask", out.pins[0].size() - 1, m);
+        } else {
+            out.pins[1].appendFrom(P, i);
+        }
+    }
+}
+
+// Each input point is a clump PARENT: it gets min..max children inside `radius` (XY), placed from the parent's seed so the
+// children exist wherever the parent does. `spacing` > 0 keeps siblings that far apart (a few seeded retries, then the
+// child is dropped). `chance` thins the parents. keepParent=1 keeps the parent as one of the clump.
+void nClump(const PcgNodeCtx& n, const In& in, PcgNodeOut& out) {
+    const PcgPoints& P = inAt(in, 0);
+    out.pins.assign(1, P.emptyLike());
+    const f32 radius = static_cast<f32>(n.p.num("radius", 0.0));
+    const i32 cmin = std::max(0, n.p.integer("min", 3)), cmax = std::max(cmin, n.p.integer("max", 6));
+    const f32 chance = static_cast<f32>(n.p.num("chance", 1.0)), spacing = static_cast<f32>(n.p.num("spacing", 0.0));
+    const bool keepParent = n.p.flag("keepParent", false);
+    if (radius <= 0.0f) { n.error("needs radius > 0"); out.pins[0] = P; return; }
+    if (overCap(n, static_cast<f64>(P.size()) * (cmax + 1))) return;
+    PcgPoints& o = out.pins[0];
+    std::vector<Vec3> sib;
+    for (usize i = 0; i < P.size(); ++i) {
+        const i32 base = P.seed[i] ^ n.seed;
+        if (chance < 1.0f && pcgFloat01(pcgHash2(base, 0xC1)) >= chance) continue;
+        if (keepParent) o.appendFrom(P, i);
+        const i32 count = cmin + static_cast<i32>(pcgHash2(base, 0xC2) % static_cast<u32>(cmax - cmin + 1));
+        sib.clear();
+        for (i32 k = 0; k < count; ++k) {
+            const u32 childSeed = pcgHash2(base, 100 + k);
+            Vec3 off{};
+            bool placed = false;
+            for (i32 attempt = 0; attempt < (spacing > 0.0f ? 8 : 1) && !placed; ++attempt) {
+                const i32 a = static_cast<i32>(childSeed) + attempt * 7919;
+                const f32 r = radius * std::sqrt(pcgFloat01(pcgHash2(a, 1)));   // sqrt: uniform over the disc
+                const f32 th = pcgFloat01(pcgHash2(a, 2)) * 6.28318530718f;
+                off = Vec3{r * cosD(th), r * sinD(th), 0.0f};
+                placed = true;
+                if (spacing > 0.0f)
+                    for (const Vec3& s : sib)
+                        if (dist2(s, off, false) < spacing * spacing) { placed = false; break; }
+            }
+            if (!placed) continue;
+            sib.push_back(off);
+            o.appendFrom(P, i);
+            const usize c = o.size() - 1;
+            o.pos[c] = P.pos[i] + off;
+            o.seed[c] = static_cast<i32>(childSeed);
+        }
+    }
+}
+
+// Overlap resolution across types: the point with the higher `priority` attribute wins, then the larger radius, then the
+// seed. Two points conflict when closer than (ra + rb) * overlap, where r = the `radius` attribute * the larger XY scale.
+// A point with radius 0 never blocks and is only blocked by a real radius. `maxRadius` bounds the radius for the margin.
+void nCompete(const PcgNodeCtx& n, const In& in, PcgNodeOut& out) {
+    const PcgPoints& P = inAt(in, 0);
+    const usize N = P.size();
+    const std::string radAttr = n.p.str("radiusAttr", "radius"), prioAttr = n.p.str("priorityAttr", "priority");
+    const f32 overlap = static_cast<f32>(n.p.num("overlap", 1.0)), maxDeclared = static_cast<f32>(n.p.num("maxRadius", 0.0));
+    const bool greedy = n.p.str("mode", "greedy") != "local", use3d = n.p.flag("dims3", false);
+    std::vector<f32> r(N, 0.0f), pr(N, 0.0f);
+    f32 maxR = 0.0f;
+    for (usize i = 0; i < N; ++i) {
+        r[i] = P.scalar(radAttr, i) * std::max(P.scale[i].x, P.scale[i].y);
+        pr[i] = P.scalar(prioAttr, i);
+        maxR = std::max(maxR, r[i]);
+    }
+    out.pins.assign(1, P.emptyLike());
+    if (maxR <= 0.0f) { out.pins[0] = P; return; }
+    if (maxR > maxDeclared * 1.0001f + 1e-3f)
+        n.warn("a radius of " + std::to_string(maxR) + " cm exceeds maxRadius=" + std::to_string(maxDeclared) +
+               "; cell seams are only exact up to the declared maximum");
+    const f32 maxThr = 2.0f * maxR * overlap;
+    std::vector<u32> order(N);
+    std::iota(order.begin(), order.end(), 0u);
+    std::sort(order.begin(), order.end(), [&](u32 a, u32 b) {
+        if (pr[a] != pr[b]) return pr[a] > pr[b];
+        if (r[a] != r[b]) return r[a] > r[b];
+        if (P.seed[a] != P.seed[b]) return P.seed[a] < P.seed[b];
+        if (P.pos[a].x != P.pos[b].x) return P.pos[a].x < P.pos[b].x;
+        if (P.pos[a].y != P.pos[b].y) return P.pos[a].y < P.pos[b].y;
+        return a < b;
+    });
+    std::vector<u32> rank(N);
+    for (usize k = 0; k < N; ++k) rank[order[k]] = static_cast<u32>(k);
+    std::vector<char> keep(N, 1);
+    PcgSpatialGrid grid(maxThr);
+    const auto blockedBy = [&](u32 a, u32 b) {
+        const f32 t = (r[a] + r[b]) * overlap;
+        return t > 0.0f && dist2(P.pos[a], P.pos[b], use3d) < t * t;
+    };
+    if (greedy) {
+        for (u32 idx : order) {
+            bool blocked = false;
+            grid.forEachNear(P.pos[idx], maxThr, [&](u32 j) { if (!blocked && blockedBy(idx, j)) blocked = true; });
+            if (blocked) keep[idx] = 0; else grid.insert(P.pos[idx], idx);
+        }
+    } else {
+        grid.build(P.pos);
+        for (u32 idx = 0; idx < N; ++idx) {
+            bool blocked = false;
+            grid.forEachNear(P.pos[idx], maxThr, [&](u32 j) { if (!blocked && j != idx && rank[j] < rank[idx] && blockedBy(idx, j)) blocked = true; });
+            if (blocked) keep[idx] = 0;
+        }
+    }
+    for (usize i = 0; i < N; ++i) if (keep[i]) out.pins[0].appendFrom(P, i);
+}
+
 // ---- spawners -----------------------------------------------------------------------------------------------------------
 
 void nWeightedMeshSpawner(const PcgNodeCtx& n, const In& in, PcgNodeOut& out) {
@@ -584,7 +759,17 @@ void nWeightedMeshSpawner(const PcgNodeCtx& n, const In& in, PcgNodeOut& out) {
     if (total <= 0.0) { if (!entries.empty()) n.error("every mesh weight is <= 0"); out.pins.push_back(std::move(P)); return; }
     const std::string material = n.p.str("material");
     std::vector<PcgInstanceGroup> groups(entries.size());
-    for (usize k = 0; k < entries.size(); ++k) { groups[k].mesh = entries[k].mesh; groups[k].material = material; }
+    const f32 cullStart = static_cast<f32>(n.p.num("cullStart", 0.0)), cullEnd = static_cast<f32>(n.p.num("cullEnd", 0.0));
+    const f32 lodBias = static_cast<f32>(n.p.num("lodBias", 1.0));
+    const i32 collision = n.p.integer("collision", 0);   // 0 none, 1 trunk, 2 full
+    for (usize k = 0; k < entries.size(); ++k) {
+        groups[k].mesh = entries[k].mesh;
+        groups[k].material = material;
+        groups[k].cullStartCm = cullStart;
+        groups[k].cullEndCm = cullEnd;
+        groups[k].lodScaleBias = lodBias > 0.0f ? lodBias : 1.0f;
+        groups[k].flags = collision == 1 ? fmt::kOcInstanceFlagCollisionTrunk : collision == 2 ? fmt::kOcInstanceFlagCollisionFull : 0u;
+    }
     auto& meshIdx = P.iAttr["mesh"];
     meshIdx.assign(P.size(), 0);
     for (usize i = 0; i < P.size(); ++i) {
@@ -626,6 +811,11 @@ f32 marginPrune(const PcgParams& p) {
     if (r <= 0.0f) return static_cast<f32>(p.num("margin", 0.0));
     return p.str("mode", "greedy") == "local" ? r : 3.0f * r;   // greedy chains: three radii covers all but pathological runs
 }
+f32 marginClump(const PcgParams& p) { return static_cast<f32>(p.num("radius", 0.0)); }
+f32 marginCompete(const PcgParams& p) {
+    const f32 thr = 2.0f * static_cast<f32>(p.num("maxRadius", 0.0)) * static_cast<f32>(p.num("overlap", 1.0));
+    return p.str("mode", "greedy") == "local" ? thr : 3.0f * thr;
+}
 f32 marginRadius(const PcgParams& p) { return static_cast<f32>(p.num("radius", 1.0)); }
 f32 marginJitter(const PcgParams& p) {
     const Vec3 a = p.vec3("posMin", {}), b = p.vec3("posMax", {});
@@ -661,6 +851,10 @@ const std::vector<PcgNodeDef>& pcgNodeDefs() {
         {"LayerWeightFilter", {"in"}, {"inside", "outside"}, nLayerWeightFilter, false, marginNone, "Splits by a landscape paint layer weight."},
         {"DistanceToSplineFilter", {"in"}, {"inside", "outside"}, nDistanceToSpline, false, marginNone, "Splits by XY distance to a named spline."},
         {"DistanceToActorFilter", {"in"}, {"inside", "outside"}, nDistanceToActor, false, marginNone, "Splits by XY distance to the nearest tagged actor."},
+        {"NoiseMask", {"in"}, {"inside", "outside"}, nNoiseMask, false, marginNone, "Splits by the noise value at the point (cell=, octaves=, seed=, min=, max=)."},
+        {"EdgeFalloff", {"in"}, {"inside", "outside"}, nEdgeFalloff, false, marginNone, "Biome mask from a layer, noise, spline or volume, ramped over edge=; a seeded dither thins points across the ramp."},
+        {"Clump", {"in"}, {"out"}, nClump, false, marginClump, "Each point becomes the parent of min..max children inside radius (optional sibling spacing)."},
+        {"Compete", {"in"}, {"out"}, nCompete, false, marginCompete, "Overlap resolution across types by priority, then radius attribute (maxRadius= bounds the margin)."},
         {"WeightedMeshSpawner", {"in"}, {"out"}, nWeightedMeshSpawner, true, marginNone, "Picks a mesh per point by weight and emits instances."},
         {"ActorSpawner", {"in"}, {"out"}, nActorSpawner, true, marginNone, "Emits one actor spawn record per point."},
         {"Input", {}, {"out"}, nullptr, false, marginNone, "Subgraph entry: the points the caller passed in."},

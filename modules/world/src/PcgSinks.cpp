@@ -15,7 +15,10 @@ bool pcgToInstanceData(const PcgResult& r, fmt::OcInstanceData& out, f32 cellCm,
         if (g.items.empty()) continue;
         fmt::OcInstanceGroup grp;
         grp.asset = g.mesh;
-        grp.flags = fmt::kOcInstanceFlagCastShadow;
+        grp.flags = fmt::kOcInstanceFlagCastShadow | g.flags;
+        grp.cullStartCm = g.cullStartCm;
+        grp.cullEndCm = g.cullEndCm;
+        grp.lodScaleBias = g.lodScaleBias;
         grp.first = static_cast<u32>(out.transforms.size() / 12);
         grp.count = static_cast<u32>(g.items.size());
         for (const PcgInstance& i : g.items) {

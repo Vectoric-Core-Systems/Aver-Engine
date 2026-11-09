@@ -39,6 +39,7 @@ PcgContext PcgCellGenerator::makeContext(const PcgBox& evalBox, bool partitioned
     c.graphLoader = p.graphLoader;
     c.environmentStamp = p.environmentStamp;
     c.budgetMs = p.budgetMs;
+    c.maxPoints = p.maxPointsPerNode;
     c.partitioned = partitioned;
     c.cache = cache;
     return c;

@@ -56,6 +56,9 @@ struct PcgInstanceGroup {
     std::string mesh;
     std::string material;
     std::vector<PcgInstance> items;
+    // What the foliage type asked for; pcgToInstanceData carries them into the .ocinst group (ICUL, flags).
+    f32 cullStartCm = 0.0f, cullEndCm = 0.0f, lodScaleBias = 1.0f;
+    u32 flags = 0;     // extra .ocinst group flag bits (collision)
 };
 struct PcgActorSpawn {
     std::string actorClass;

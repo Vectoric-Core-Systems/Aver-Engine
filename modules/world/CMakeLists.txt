@@ -37,6 +37,9 @@ aver_add_module(Aver.World
     src/PcgGraph.cpp
     src/PcgVolumeRunner.cpp
     src/PcgSinks.cpp
+    # Biomes (.ocbiome + .ocfoliage) compiled to a PCG graph, and the generation guardrails.
+    src/PcgBiome.cpp
+    src/PcgVegetation.cpp
     src/ChunkWorld.cpp
     # The authored-level cook (LARGE_WORLD 2.4.5): pure Core + Formats + Platform; the same nine pure sources are also compiled straight into AverAssetC (tests/formats).
     src/LevelFlatten.cpp

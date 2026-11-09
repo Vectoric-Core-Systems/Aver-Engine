@@ -229,3 +229,12 @@ target_compile_definitions(PcgPartitionTest PRIVATE
   AVER_PCG_SAMPLE="${CMAKE_SOURCE_DIR}/templates/FirstPerson/Content/PCG/PG_ForestScatter.ocgraph")
 set_target_properties(PcgPartitionTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# PcgBiomeTest -- W4 vegetation: noise mask, edge falloff, clump and compete nodes; the biome -> graph compiler on a synthetic
+# heightfield and weightmap; Generate Vegetation (cell-sorted .ocinst, .ocveg record, manual overrides, partial regenerate);
+# chunk-edge ownership through GeneratedChunkSource; the guardrails.
+add_executable(PcgBiomeTest src/PcgBiomeTest.cpp)
+target_link_libraries(PcgBiomeTest PRIVATE
+  Aver.World Aver.Scene Aver.Formats Aver.Platform Aver.Render.Pcg Aver.Core)
+set_target_properties(PcgBiomeTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

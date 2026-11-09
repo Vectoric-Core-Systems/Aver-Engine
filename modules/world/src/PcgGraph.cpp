@@ -221,8 +221,10 @@ private:
     void sink(const PcgNodeOut& o) {
         for (const PcgInstanceGroup& g : o.groups) {
             auto it = std::find_if(res_.groups.begin(), res_.groups.end(),
-                                   [&](const PcgInstanceGroup& x) { return x.mesh == g.mesh && x.material == g.material; });
-            if (it == res_.groups.end()) { res_.groups.push_back({g.mesh, g.material, {}}); it = res_.groups.end() - 1; }
+                                   [&](const PcgInstanceGroup& x) {
+                                       return x.mesh == g.mesh && x.material == g.material && x.cullEndCm == g.cullEndCm && x.flags == g.flags;
+                                   });
+            if (it == res_.groups.end()) { res_.groups.push_back({g.mesh, g.material, {}, g.cullStartCm, g.cullEndCm, g.lodScaleBias, g.flags}); it = res_.groups.end() - 1; }
             it->items.insert(it->items.end(), g.items.begin(), g.items.end());
         }
         res_.actors.insert(res_.actors.end(), o.actors.begin(), o.actors.end());
