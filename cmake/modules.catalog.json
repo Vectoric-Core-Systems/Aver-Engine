@@ -232,6 +232,23 @@
     },
     {
       "schema": 1,
+      "name": "Aver.Destruct",
+      "dir": "destruct",
+      "displayName": "Destruction",
+      "description": "Brittle rigid destruction: a pre-fractured .ocfrac mesh as piece bodies on Jolt, with strain accumulation, anchors, debris limits and optional breakable joints.",
+      "category": "Physics",
+      "option": "AVER_MODULE_DESTRUCT",
+      "required": false,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.Formats",
+        "Aver.Physics"
+      ],
+      "consequence": "A fractured mesh cannot be broken into piece bodies at run time."
+    },
+    {
+      "schema": 1,
       "name": "Aver.Extensions",
       "dir": "extensions",
       "displayName": "Extensions",

@@ -252,6 +252,11 @@ if(AVER_MODULE_PHYSICS)
   if(AVER_MODULE_VEHICLE)
     add_subdirectory(modules/vehicle)
   endif()
+
+  # Brittle rigid destruction (W7): a Voronoi-fractured .ocfrac as piece bodies. Core + Formats + the physics C ABI.
+  if(AVER_MODULE_DESTRUCT)
+    add_subdirectory(modules/destruct)
+  endif()
 endif()
 # Strand hair: the .ochair groom's generator, glTF curve import, collision proxy hulls and the settings builder over the physics hair ABI (docs/HAIR.md). Core,
 # Formats and Aver.Physics's C ABI only; the scene and render halves are later phases. The option comes from modules/hair/module.json.
@@ -620,6 +625,9 @@ if(AVER_BUILD_TESTS)
 
     if(TARGET Aver.Hair)
       add_subdirectory(tests/hair)
+    endif()
+    if(TARGET Aver.Destruct)
+      add_subdirectory(tests/destruct)
     endif()
   endif()
 

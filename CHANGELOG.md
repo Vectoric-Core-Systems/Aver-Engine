@@ -10,6 +10,10 @@ triggering inputs for anything summarised below.
 
 ## [Unreleased]
 
+### Brittle destruction (headless)
+
+- Voronoi fracture of a closed mesh (`fracture::voronoi`: uniform, radial, brick and clustered seeds, bounded neighbour search, inside material and UVs, contact graph with anchors), the `.ocfrac` asset, and `Aver.Destruct`'s `Destructible` (strain from `HitEvent`s, piece bodies from convex hulls, debris cap, sleeping despawn, optional breakable joints). `csg::Prepared` builds a BSP once for many booleans. See `docs/DESTRUCTION.md`. No editor tool yet.
+
 ### Editor UIs for the wave 2 systems (compile-checked and model-tested only)
 
 - PCG Graph tab for `DOMAIN pcg` graphs: node palette with search, canvas with typed pins, inspector, preview run with per-node point counts, Generate / Clean up into the open level, viewport debug points. New PCG Graph in the Content Browser.
