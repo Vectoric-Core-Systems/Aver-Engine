@@ -573,7 +573,7 @@ editor::PrefabUiCallbacks SandboxApp::prefabUiCallbacks() {
     cb.select = [this](scene::Entity e) { sel_ = kSelScene; selEntity_ = e; };
     cb.openAsset = [this](const std::string& ref) { assetEditors_.open(prefabModel_.fullPathFor(ref)); };
     cb.markDirty = [this] { markLevelUnsaved(); };
-    cb.status = [this](const std::string& s) { cbStatus_ = s; };
+    cb.status = [this](const std::string& s) { drawerUi_.cbStatus_ = s; };
     return cb;
 }
 #endif

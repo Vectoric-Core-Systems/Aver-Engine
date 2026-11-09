@@ -129,13 +129,13 @@ bool SandboxApp::addPlacedComponent(const editor::PlacedKind& kind) {
     scene::World& w = scene::World::instance();
     const scene::Entity e = selEntity_;
     if (!w.valid(e)) return false;
-    if (anyPlayActive()) { cbStatus_ = "Stop Play to add components."; return false; }
+    if (anyPlayActive()) { drawerUi_.cbStatus_ = "Stop Play to add components."; return false; }
     const u32 cid = kindComponentId(w, kind);
     if (cid == 0) return false;
     editor::AttachContext ctx = placedAttachContext(e);
     ctx.alreadyPresent = w.hasComponent(e, cid);
     std::string why;
-    if (!editor::canAttach(ctx, kind, &why)) { cbStatus_ = why; return false; }
+    if (!editor::canAttach(ctx, kind, &why)) { drawerUi_.cbStatus_ = why; return false; }
 
     fmt::OcPlacedComponent rec = editor::makeNewRecord(kind);
     if (std::string_view(kind.type) == "SkeletalMesh") {
@@ -147,7 +147,7 @@ bool SandboxApp::addPlacedComponent(const editor::PlacedKind& kind) {
         if (!preset.empty()) setKey(rec, "skeleton", preset);
     }
     if (!game::applyPlacedComponent(w, e, rec)) {
-        cbStatus_ = std::string("Could not add ") + kind.menuLabel + " (see the log)";
+        drawerUi_.cbStatus_ = std::string("Could not add ") + kind.menuLabel + " (see the log)";
         return false;
     }
     EditCmd c;
@@ -158,7 +158,7 @@ bool SandboxApp::addPlacedComponent(const editor::PlacedKind& kind) {
     c.pcAfter = game::capturePlacedComponent(w, e, kind.type, [this](u64 id) { return pathOfContentId(id); });
     pushEdit(std::move(c));
     markLevelUnsaved();
-    cbStatus_ = std::string("Added ") + kind.menuLabel;
+    drawerUi_.cbStatus_ = std::string("Added ") + kind.menuLabel;
     return true;
 }
 
@@ -166,7 +166,7 @@ bool SandboxApp::removePlacedComponentFromSelection(const editor::PlacedKind& ki
     scene::World& w = scene::World::instance();
     const scene::Entity e = selEntity_;
     if (!w.valid(e)) return false;
-    if (anyPlayActive()) { cbStatus_ = "Stop Play to remove components."; return false; }
+    if (anyPlayActive()) { drawerUi_.cbStatus_ = "Stop Play to remove components."; return false; }
     const auto has = [&](const char* name) {
         const u32 id = w.componentId(name);
         return id != 0 && w.hasComponent(e, id);
@@ -174,7 +174,7 @@ bool SandboxApp::removePlacedComponentFromSelection(const editor::PlacedKind& ki
     std::string why;
     if (!editor::canRemove(w.hasComponent(e, scene::kComponentAnimator), has("CRootMotion"), has("CMotionMatcher"),
                            has("CControlRig"), has("CIkRig"), kind, &why)) {
-        cbStatus_ = why;
+        drawerUi_.cbStatus_ = why;
         return false;
     }
     auto before = game::capturePlacedComponent(w, e, kind.type, [this](u64 id) { return pathOfContentId(id); });
@@ -188,7 +188,7 @@ bool SandboxApp::removePlacedComponentFromSelection(const editor::PlacedKind& ki
     c.pcAfter = std::nullopt;
     pushEdit(std::move(c));
     markLevelUnsaved();
-    cbStatus_ = std::string("Removed ") + kind.menuLabel;
+    drawerUi_.cbStatus_ = std::string("Removed ") + kind.menuLabel;
     return true;
 }
 
@@ -230,7 +230,7 @@ bool SandboxApp::drawAssetField(const char* id, const char* label, std::string& 
                 if (!extWanted(lowerExt(std::filesystem::path(one)))) continue;
                 const std::string rel = cbRelativeToContent(one);
                 if (rel.empty() || std::filesystem::path(rel).is_absolute() || rel.rfind("..", 0) == 0) {
-                    cbStatus_ = "That asset is not under the project's Content folder";
+                    drawerUi_.cbStatus_ = "That asset is not under the project's Content folder";
                     taken = true;
                     break;
                 }
@@ -241,7 +241,7 @@ bool SandboxApp::drawAssetField(const char* id, const char* label, std::string& 
             if (!taken) {
                 std::string list;
                 for (const char* e : exts) list += (list.empty() ? "" : "/") + std::string(e);
-                cbStatus_ = "Only a " + list + " asset can be dropped here";
+                drawerUi_.cbStatus_ = "Only a " + list + " asset can be dropped here";
             }
         }
         ImGui::EndDragDropTarget();
@@ -252,7 +252,7 @@ bool SandboxApp::drawAssetField(const char* id, const char* label, std::string& 
     static ImGuiID s_owner = 0;   // which row's candidates pickPlacedCands_ holds; one popup is open at a time
     const ImGuiID me = ImGui::GetID("##pick");
     if (ImGui::IsPopupOpen("##pick")) {
-        PickerCands& pc = pickPlacedCands_;
+        PickerCands& pc = drawerUi_.pickPlacedCands_;
         if (s_owner != me) { pc.drop(); s_owner = me; }
         const int frame = ImGui::GetFrameCount();
         if (pc.lastFrame < frame - 1 || pc.stamp != content_.index().size()) {
@@ -273,7 +273,7 @@ bool SandboxApp::drawAssetField(const char* id, const char* label, std::string& 
             changed = true;
         }
     } else if (s_owner == me) {
-        pickPlacedCands_.drop();
+        drawerUi_.pickPlacedCands_.drop();
         s_owner = 0;
     }
     ImGui::PopID();
@@ -369,7 +369,7 @@ void SandboxApp::drawPlacedComponentSections() {
         fmt::OcPlacedComponent rec = before ? *before : editor::makeNewRecord(k);
         setKey(rec, key, path);
         if (!game::applyPlacedComponent(w, e, rec)) {
-            cbStatus_ = std::string("Could not use '") + path + "' for " + k.menuLabel + " (see the log)";
+            drawerUi_.cbStatus_ = std::string("Could not use '") + path + "' for " + k.menuLabel + " (see the log)";
             return;
         }
         commitPlacedEdit(k, std::move(before));
@@ -396,7 +396,7 @@ void SandboxApp::drawPlacedComponentSections() {
             const char* exts[] = {ext};
             return drawAssetField(label, label, path, std::span<const char* const>(exts, 1), {});
         };
-        env.setStatus = [this](const std::string& msg) { cbStatus_ = msg; };
+        env.setStatus = [this](const std::string& msg) { drawerUi_.cbStatus_ = msg; };
         return env;
     };
     // Cloth and Destructible share one section body: preset, asset (create / paint), tuning, and the Play controls.
@@ -448,11 +448,11 @@ void SandboxApp::drawPlacedComponentSections() {
                 const std::filesystem::path target = std::filesystem::path(project_.contentDir()) / rel;
                 std::error_code ec;
                 if (std::filesystem::exists(target, ec)) {
-                    cbStatus_ = rel + " already exists; assign it instead.";
+                    drawerUi_.cbStatus_ = rel + " already exists; assign it instead.";
                 } else {
                     std::string why;
                     if (!softbody::saveSoftAsset(target.string(), sm::starterAsset(destructible, cur), &why)) {
-                        cbStatus_ = "Could not write " + rel + ": " + why;
+                        drawerUi_.cbStatus_ = "Could not write " + rel + ": " + why;
                     } else {
                         cbAdoptNewAsset(target, false);
                         changeAsset(k, "asset", rel);
@@ -499,7 +499,7 @@ void SandboxApp::drawPlacedComponentSections() {
             if (changed && editable) s_asset = edit;
             if (finished && editable) {
                 std::string why;
-                if (!softbody::saveSoftAsset(absAsset, s_asset, &why)) cbStatus_ = "Could not save the asset: " + why;
+                if (!softbody::saveSoftAsset(absAsset, s_asset, &why)) drawerUi_.cbStatus_ = "Could not save the asset: " + why;
             }
             if (!editable) ImGui::TextDisabled("%s", assetId == 0 ? "Create an .ocsoft to override the preset." : "Stop Play to edit.");
             ImGui::TreePop();
@@ -578,8 +578,8 @@ void SandboxApp::drawPlacedComponentSections() {
             if (ImGui::SmallButton("Paint pins...")) {
                 fmt::OcMeshData md;
                 std::string why;
-                if (!fmt::loadOcMesh(project_.contentDir() + "/" + meshRel, md, &why)) cbStatus_ = "Could not read the mesh: " + why;
-                else if (!paint.load(md, shown, absAsset)) cbStatus_ = "The mesh could not be welded for painting";
+                if (!fmt::loadOcMesh(project_.contentDir() + "/" + meshRel, md, &why)) drawerUi_.cbStatus_ = "Could not read the mesh: " + why;
+                else if (!paint.load(md, shown, absAsset)) drawerUi_.cbStatus_ = "The mesh could not be welded for painting";
                 else paint.entity = static_cast<u32>(e);
             }
         } else if (ImGui::SmallButton("Close paint")) {
@@ -648,13 +648,13 @@ void SandboxApp::drawPlacedComponentSections() {
             env.createAsset = [&](const std::string& rel, const std::string& text) {
                 const std::filesystem::path target = std::filesystem::path(project_.contentDir()) / rel;
                 std::string why;
-                if (!editor::writeNewFile(target.string(), text, &why)) { cbStatus_ = "Could not write " + rel + ": " + why; return false; }
+                if (!editor::writeNewFile(target.string(), text, &why)) { drawerUi_.cbStatus_ = "Could not write " + rel + ": " + why; return false; }
                 cbAdoptNewAsset(target, false);
                 changeAsset(k, "asset", rel);
                 return true;
             };
             env.openEditor = [this](const std::string& rel) { assetEditors_.open((std::filesystem::path(project_.contentDir()) / rel).string()); };
-            env.setStatus = [this](const std::string& s) { cbStatus_ = s; };
+            env.setStatus = [this](const std::string& s) { drawerUi_.cbStatus_ = s; };
             env.contentDir = project_.contentDir();
             env.entityName = std::string(w.name(e));
             env.pickRay = [this](Vec3& origin, Vec3& direction) {
@@ -1073,7 +1073,7 @@ void SandboxApp::drawPlacedComponentSections() {
             env.instantEdit = [&](bool changed, const std::function<void()>& mutate) { instantEdit(k, changed, mutate); };
             env.gestureEdit = [&](bool changed, const std::function<void()>& mutate) { gestureEdit(k, changed, mutate); };
             env.assetRow = [&](const char* key, const char* label, u64 id) { assetRow(k, key, label, id); };
-            env.setStatus = [this](const std::string& msg) { cbStatus_ = msg; };
+            env.setStatus = [this](const std::string& msg) { drawerUi_.cbStatus_ = msg; };
 #  if AVER_MODULE_RENDER_HAIR && AVER_MODULE_RENDER_SOFTBODY
             env.computeHost = hairScene_ && hairScene_->ready();
 #  endif
@@ -1097,13 +1097,13 @@ void SandboxApp::drawPlacedComponentSections() {
             env.createAsset = [&](const std::string& rel, const std::string& text) {
                 const std::filesystem::path target = std::filesystem::path(project_.contentDir()) / rel;
                 std::string why;
-                if (!editor::writeNewFile(target.string(), text, &why)) { cbStatus_ = "Could not write " + rel + ": " + why; return false; }
+                if (!editor::writeNewFile(target.string(), text, &why)) { drawerUi_.cbStatus_ = "Could not write " + rel + ": " + why; return false; }
                 cbAdoptNewAsset(target, false);
                 changeAsset(k, "asset", rel);
                 return true;
             };
             env.openEditor = [this](const std::string& rel) { assetEditors_.open((std::filesystem::path(project_.contentDir()) / rel).string()); };
-            env.setStatus = [this](const std::string& s) { cbStatus_ = s; };
+            env.setStatus = [this](const std::string& s) { drawerUi_.cbStatus_ = s; };
             if (const auto* mr = w.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer)) env.meshRel = pathOfContentId(mr->mesh);
             editor::drawVehicleSection(env, &w, static_cast<u32>(e));
         }

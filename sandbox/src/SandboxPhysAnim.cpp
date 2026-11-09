@@ -21,7 +21,7 @@ void SandboxApp::cbCreatePhysAnim() {
     if (target.empty()) return;
     std::string why;
     if (!ragdoll::savePhysAnimProfile(target.string(), editor::physAnimStarter(target.stem().string()), &why)) {
-        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        drawerUi_.cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
         AVER_ERROR("[Editor] new physical animation profile failed: {}", why);
         return;
     }

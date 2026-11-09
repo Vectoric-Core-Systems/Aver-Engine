@@ -102,9 +102,9 @@ void SandboxApp::buildMessageLogPanel() {
     std::string copyText;
     {
         std::lock_guard<std::mutex> lk(logMutex_);
-        total = logLines_.size();
-        for (usize i = 0; i < logLines_.size(); ++i) {
-            const LogLine& ln = logLines_[i];
+        total = drawerUi_.logLines_.size();
+        for (usize i = 0; i < drawerUi_.logLines_.size(); ++i) {
+            const LogLine& ln = drawerUi_.logLines_[i];
             const std::string_view cat = editor::logCategoryOf(ln.text);
             if (!cat.empty()) categories.insert(std::string(cat));
             if (editor::logLineMatches(f, ln.level, ln.text)) shown.push_back(static_cast<u32>(i));
@@ -113,17 +113,17 @@ void SandboxApp::buildMessageLogPanel() {
         const bool wantCopy = ImGui::SmallButton(ICON_COPY " Copy");
         ImGui::EndDisabled();
         if (wantCopy) {
-            for (const u32 i : shown) { copyText += logLines_[i].text; copyText += '\n'; }
+            for (const u32 i : shown) { copyText += drawerUi_.logLines_[i].text; copyText += '\n'; }
         }
     }
     if (!copyText.empty()) ImGui::SetClipboardText(copyText.c_str());
     ImGui::SameLine();
     if (ImGui::SmallButton(ICON_CLEAR_ALL " Clear")) {
         std::lock_guard<std::mutex> lk(logMutex_);
-        logFirstSerial_ += logLines_.size();
-        logLines_.clear();
-        logMultiRowCount_ = 0;
-        logSelAnchor_ = logSelEnd_ = -1;
+        drawerUi_.logFirstSerial_ += drawerUi_.logLines_.size();
+        drawerUi_.logLines_.clear();
+        drawerUi_.logMultiRowCount_ = 0;
+        drawerUi_.logSelAnchor_ = drawerUi_.logSelEnd_ = -1;
         shown.clear();
     }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Clears the shared log buffer (the Output Log drawer too).");
@@ -150,20 +150,20 @@ void SandboxApp::buildMessageLogPanel() {
         const bool atBottom = ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 2.0f;
         bool multi = false;
         for (const u32 i : shown)
-            if (i < logLines_.size() && logLines_[i].rows > 1) { multi = true; break; }
+            if (i < drawerUi_.logLines_.size() && drawerUi_.logLines_[i].rows > 1) { multi = true; break; }
         if (!multi) {
             ImGuiListClipper clipper;
             clipper.Begin(static_cast<int>(shown.size()), std::floor(ImGui::GetTextLineHeightWithSpacing()));
             while (clipper.Step())
                 for (int k = clipper.DisplayStart; k < clipper.DisplayEnd; ++k) {
                     const u32 i = shown[static_cast<usize>(k)];
-                    if (i < logLines_.size()) drawLogLine(logLines_[i].level, logLines_[i].text.c_str());
+                    if (i < drawerUi_.logLines_.size()) drawLogLine(drawerUi_.logLines_[i].level, drawerUi_.logLines_[i].text.c_str());
                 }
         } else {
             // Multi-row lines break the clipper's fixed row height: draw the newest few hundred whole.
             const usize first = shown.size() > 600 ? shown.size() - 600 : 0;
             for (usize k = first; k < shown.size(); ++k)
-                if (shown[k] < logLines_.size()) drawLogLine(logLines_[shown[k]].level, logLines_[shown[k]].text.c_str());
+                if (shown[k] < drawerUi_.logLines_.size()) drawLogLine(drawerUi_.logLines_[shown[k]].level, drawerUi_.logLines_[shown[k]].text.c_str());
         }
         if (atBottom) ImGui::SetScrollHereY(1.0f);
     }

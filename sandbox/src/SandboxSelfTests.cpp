@@ -134,7 +134,7 @@ void SandboxApp::setBakeLevelPack(std::string levelAsset) { bakeLevelPackAsset_ 
 void SandboxApp::setRayProbe(f32 x, f32 y) { harness_.rayProbe_ = true; harness_.rayProbeX_ = x; harness_.rayProbeY_ = y; }
 
 // Queues one Content Browser import to run on startup. --import <src> <destDir>.
-void SandboxApp::setImportOnce(std::string src, std::string dst) { importSrc_ = std::move(src); importDst_ = std::move(dst); }
+void SandboxApp::setImportOnce(std::string src, std::string dst) { drawerUi_.importSrc_ = std::move(src); drawerUi_.importDst_ = std::move(dst); }
 
 bool* SandboxApp::autoCompileFlag() { return &harness_.autoCompile_; }
 
@@ -180,9 +180,9 @@ void SandboxApp::setProjectSettingsPage(int page) { focusVoxi_ = 4; settingsPage
 // Opens a drawer on startup, optionally in a Content subfolder. --drawer.
 void SandboxApp::setDrawerOpen(int which, std::string sub) {
     if (!which) return;
-    drawer_ = drawerShown_ = which == 2 ? Drawer::Log : which == 3 ? Drawer::Console : Drawer::Content;
-    drawerAnim_ = 1.0f;
-    drawerStartSub_ = std::move(sub);
+    drawerUi_.drawer_ = drawerUi_.drawerShown_ = which == 2 ? Drawer::Log : which == 3 ? Drawer::Console : Drawer::Content;
+    drawerUi_.drawerAnim_ = 1.0f;
+    drawerUi_.drawerStartSub_ = std::move(sub);
 }
 
 void SandboxApp::setFocusScript(bool b) { tools_.armNewScript(b); }
@@ -201,7 +201,7 @@ void SandboxApp::setSceneCensus(bool b) { harness_.sceneCensus_ = b; }
 void SandboxApp::setSceneCensus(bool) {}
 #endif
 
-void SandboxApp::setOpenLevelByName(std::string n) { openLevelByName_ = std::move(n); }
+void SandboxApp::setOpenLevelByName(std::string n) { drawerUi_.openLevelByName_ = std::move(n); }
 
 void SandboxApp::setFocusCompileMenu(bool b) { tools_.armCompileMenu(b); }
 
@@ -951,7 +951,7 @@ void SandboxApp::maybePlayTest(Engine& e) {
     if (!harness_.playTestBegun_) {
         // Wait for an --open-level request to finish loading (and ~1 s more): otherwise Play begins on the
         // startup level, which is what the play-test then reports on.
-        if (!openLevelByName_.empty() || !pendingOpenPath_.empty() || pendingOpenPrompt_) { harness_.playTestSettle_ = 0; return; }
+        if (!drawerUi_.openLevelByName_.empty() || !pendingOpenPath_.empty() || pendingOpenPrompt_) { harness_.playTestSettle_ = 0; return; }
         if (++harness_.playTestSettle_ < 60u) return;
         // No GameMode is a case worth testing; test the engine default pawn fallback too.
         if (aver_fw_find_class_with_flags(AVER_FW_CLASS_GAME_MODE) == 0) {
@@ -1226,7 +1226,7 @@ void SandboxApp::runGraphPrintTest() {
         if (cond) AVER_INFO("[graph-print-test] PASS: {}", what);
         else      { AVER_ERROR("[graph-print-test] FAIL: {}", what); ++failures; }
     };
-    auto clear = [this] { std::lock_guard<std::mutex> lk(logMutex_); graphPrints_.clear(); };
+    auto clear = [this] { std::lock_guard<std::mutex> lk(logMutex_); drawerUi_.graphPrints_.clear(); };
 
     // Test PrintString on OnTick; runs every frame during Play (when watched).
     clear();
@@ -1234,8 +1234,8 @@ void SandboxApp::runGraphPrintTest() {
     usize rows = 0; u32 count = 0; std::string text;
     {
         std::lock_guard<std::mutex> lk(logMutex_);
-        rows = graphPrints_.size();
-        if (!graphPrints_.empty()) { count = graphPrints_.back().count; text = graphPrints_.back().text; }
+        rows = drawerUi_.graphPrints_.size();
+        if (!drawerUi_.graphPrints_.empty()) { count = drawerUi_.graphPrints_.back().count; text = drawerUi_.graphPrints_.back().text; }
     }
     check(rows == 1, "200 identical prints collapse to ONE row, not 200");
     check(count == 200, "and the row counts every one of them");
@@ -1247,7 +1247,7 @@ void SandboxApp::runGraphPrintTest() {
         AVER_INFO("[Graph] branch: took_true");
         AVER_INFO("[Graph] branch: took_false");
     }
-    { std::lock_guard<std::mutex> lk(logMutex_); rows = graphPrints_.size(); }
+    { std::lock_guard<std::mutex> lk(logMutex_); rows = drawerUi_.graphPrints_.size(); }
     check(rows == 6, "alternating prints stay separate rows");
 
     // Non-graph lines must not reach the feed (avoid duplicate logging).
@@ -1256,8 +1256,8 @@ void SandboxApp::runGraphPrintTest() {
     AVER_INFO("[Graph] real: yes");
     {
         std::lock_guard<std::mutex> lk(logMutex_);
-        rows = graphPrints_.size();
-        text = graphPrints_.empty() ? std::string() : graphPrints_.back().text;
+        rows = drawerUi_.graphPrints_.size();
+        text = drawerUi_.graphPrints_.empty() ? std::string() : drawerUi_.graphPrints_.back().text;
     }
     check(rows == 1, "only the [Graph] line is picked up");
     check(text == "real: yes", "and it is the right one");
@@ -1266,7 +1266,7 @@ void SandboxApp::runGraphPrintTest() {
     clear();
     for (int i = 0; i < static_cast<int>(kMaxGraphPrints) + 20; ++i)
         AVER_INFO("[Graph] n{}: distinct", i);
-    { std::lock_guard<std::mutex> lk(logMutex_); rows = graphPrints_.size(); }
+    { std::lock_guard<std::mutex> lk(logMutex_); rows = drawerUi_.graphPrints_.size(); }
     check(rows == kMaxGraphPrints, "the feed is capped, oldest dropped");
     clear();
 
@@ -2419,10 +2419,10 @@ void SandboxApp::runClassPlaceTest(Engine& eng) {
         const scene::Entity r = static_cast<scene::Entity>(levelClassInstances_[0].entity);
         multiSetSingle(r);
         const u32 before = w.count();
-        cbStatus_.clear();
+        drawerUi_.cbStatus_.clear();
         duplicateSelection();
         w.flush();
-        check(w.count() == before && cbStatus_.find("graph-class") != std::string::npos,
+        check(w.count() == before && drawerUi_.cbStatus_.find("graph-class") != std::string::npos,
               "Duplicate on a class actor changes nothing and says why");
     }
 

@@ -361,7 +361,7 @@ void SandboxApp::renderJobStep(Engine& e) {
             onLevel = !levelPath_.empty() && fs::equivalent(want, levelPath_, ec) && !ec;
             if (!onLevel && !r.levelRequested && !projectLoading_ && r.waited > 2) {
                 if (!requestOpenLevel(want.string(), "render queue")) {
-                    fail(openLevelError_.empty() ? "could not open the level " + want.string() : openLevelError_);
+                    fail(drawerUi_.openLevelError_.empty() ? "could not open the level " + want.string() : drawerUi_.openLevelError_);
                     return;
                 }
                 r.levelRequested = true;

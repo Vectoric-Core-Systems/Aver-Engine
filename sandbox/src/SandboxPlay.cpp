@@ -1041,7 +1041,7 @@ void SandboxApp::pushInput(bool uiActive) {
     if (uiActive) {
         ImGuiIO& io = ImGui::GetIO();
         const bool chordSpace = !suppressed && keybinds_.pressed(editor::CommandId::DrawerToggleContent, io);
-        const bool chordEsc   = !suppressed && drawer_ != Drawer::None &&
+        const bool chordEsc   = !suppressed && drawerUi_.drawer_ != Drawer::None &&
                                 keybinds_.pressed(editor::CommandId::DrawerDismiss, io);
         policy.eaten[AVER_FW_KEY_SPACE]  = chordSpace;
         policy.eaten[AVER_FW_KEY_LCTRL]  = chordSpace;

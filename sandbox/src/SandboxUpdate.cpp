@@ -188,7 +188,7 @@ void SandboxApp::tickCameraAutomation(Engine& e, const Timestep& t, HitchMarks& 
     // --nrd2-capture: handed over once the renderer is attached and the level asked for (--open-level) is the
     // one loaded, plus ~10 s for streaming to bring in the scene (the startup level used to be captured
     // instead); it starts stepping on NRD2 frames and holds the camera the same way.
-    const bool nrd2LevelReady = openLevelByName_.empty() && pendingOpenPath_.empty() && !pendingOpenPrompt_ &&
+    const bool nrd2LevelReady = drawerUi_.openLevelByName_.empty() && pendingOpenPath_.empty() && !pendingOpenPrompt_ &&
                                 !levelName_.empty();
     harness_.nrd2CaptureSettle_ = nrd2LevelReady ? harness_.nrd2CaptureSettle_ + 1u : 0u;
     if (harness_.nrd2CapturePoses_ && rset_.voxiAttached_ && !harness_.nrd2CaptureStarted_ && (harness_.nrd2CaptureSettle_ > 600u || t.frame > 6000)) {
@@ -276,7 +276,7 @@ void SandboxApp::tickLaunchRequests(const Timestep& t) {
     // --save-level <out>: writes the OPEN level to another path (not over levelPath_).
     // Waits for every pending open (--open-level, forwarded launch, unsaved-changes prompt) before acting.
     if (!saveLevelTo_.empty() && !harness_.saveLevelDone_ && !levelPath_.empty() &&
-        openLevelByName_.empty() && pendingOpenPath_.empty() && !pendingOpenPrompt_) {
+        drawerUi_.openLevelByName_.empty() && pendingOpenPath_.empty() && !pendingOpenPrompt_) {
         harness_.saveLevelDone_ = true;
         if (saveLevel(saveLevelTo_))
             AVER_INFO("[Level] --save-level wrote '{}' ({}) to {}",
@@ -306,7 +306,7 @@ void SandboxApp::tickLaunchRequests(const Timestep& t) {
         if (isLevelFile(path.c_str())) {
             // Same funnel as Content Browser (unsaved-changes check and class-placement spawn).
             if (!requestOpenLevel(path, "opened, forwarded from another launch"))
-                AVER_WARN("[Sandbox] forwarded level '{}': {}", path, openLevelError_);
+                AVER_WARN("[Sandbox] forwarded level '{}': {}", path, drawerUi_.openLevelError_);
         }
     }
 #endif  // AVER_MODULE_SCENE
@@ -507,7 +507,7 @@ void SandboxApp::resolveEditorInputOwnership(Engine& e) {
 #endif
         ic.mouseCaptured     = mouse_.captured();
         ic.pointerInViewport = viewState_.levelHovered_ && inViewport(oio.MousePos.x, oio.MousePos.y);
-        ic.drawerOpen        = drawer_ != Drawer::None;
+        ic.drawerOpen        = drawerUi_.drawer_ != Drawer::None;
         ic.landscapeMode     = viewState_.mode_ == EditorMode::Landscape;
         ic.pointerOnScene    = viewState_.levelImageHovered_;
         ic.sceneFocused      = viewState_.levelFocused_;
@@ -1064,7 +1064,7 @@ void SandboxApp::tickThumbnailsAndTestHooks(Engine& e) {
     // Once per frame, before render features run (ThumbnailCache.hpp): update() points preview at next pending request.
     if (thumbnails_.ready()) {
         thumbnails_.setDiskCache(project_.valid() ? (std::filesystem::path(project_.dir) / "Saved" / "ThumbnailCache").string() : std::string(),
-                                 static_cast<u64>(std::max(0, thumbDiskCapMB_)));
+                                 static_cast<u64>(std::max(0, drawerUi_.thumbDiskCapMB_)));
         thumbnails_.update();
     }
     // --drone: switches drone on N frames in (mirroring --chunk-stream so a capture can prove it without clicking Window > Drone).

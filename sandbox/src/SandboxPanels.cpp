@@ -41,12 +41,12 @@ bool SandboxApp::assetPicker(const char* popupId, const std::vector<AssetChoice>
     bool chose = false;
     if (ImGui::BeginPopup(popupId)) {
         if (ImGui::IsWindowAppearing()) {
-            assetPickerFilter_[0] = 0;
+            drawerUi_.assetPickerFilter_[0] = 0;
             ImGui::SetKeyboardFocusHere();
         }
         ImGui::SetNextItemWidth(260.0f * viewState_.dpi_);
         ImGui::InputTextWithHint("##assetPickerFilter", "Search assets...",
-                                 assetPickerFilter_, sizeof assetPickerFilter_);
+                                 drawerUi_.assetPickerFilter_, sizeof drawerUi_.assetPickerFilter_);
         ImGui::Separator();
 
         // NEVER A SILENT TRUNCATION (same rule as the node palette): a capped list that just
@@ -54,7 +54,7 @@ bool SandboxApp::assetPicker(const char* popupId, const std::vector<AssetChoice>
         constexpr usize kShown = 40;
         usize matched = 0, drawn = 0;
         for (const AssetChoice& c : candidates) {
-            if (!containsNoCase(c.label, assetPickerFilter_)) continue;
+            if (!containsNoCase(c.label, drawerUi_.assetPickerFilter_)) continue;
             ++matched;
             if (drawn >= kShown) continue;
             ++drawn;
@@ -87,7 +87,7 @@ bool SandboxApp::assignParticleEffect(scene::Entity ent, const std::string& absP
     auto* pe = w.component<scene::CParticleEmitter>(ent, scene::kComponentParticleEmitter);
     if (!pe) return false;
     if (lowerExt(std::filesystem::path(absPath)) != ".ocparticle") {
-        cbStatus_ = "Only a .ocparticle asset can be assigned to an emitter";
+        drawerUi_.cbStatus_ = "Only a .ocparticle asset can be assigned to an emitter";
         return false;
     }
     const std::string content = project_.contentDir();
@@ -95,13 +95,13 @@ bool SandboxApp::assignParticleEffect(scene::Entity ent, const std::string& absP
     std::string rel = content.empty() ? std::string()
                                       : std::filesystem::relative(absPath, content, ec).string();
     if (content.empty() || ec || rel.empty()) {
-        cbStatus_ = "Could not resolve the effect to a project-relative path";
+        drawerUi_.cbStatus_ = "Could not resolve the effect to a project-relative path";
         return false;
     }
     for (char& ch : rel) if (ch == '\\') ch = '/';
     pe->effect = fnv1a64(std::string_view(rel));
     markLevelUnsaved();
-    cbStatus_ = "Assigned " + std::filesystem::path(absPath).filename().string();
+    drawerUi_.cbStatus_ = "Assigned " + std::filesystem::path(absPath).filename().string();
     AVER_INFO("[Particles] entity {} effect set to 0x{:016X} ('{}')", ent, pe->effect, rel);
     return true;
 #else
@@ -122,7 +122,7 @@ bool SandboxApp::assignMeshId(scene::Entity ent, u64 meshId) {
     mr->dirty = 1;
     markLevelUnsaved();
     const auto it = meshPathById_.find(meshId);
-    cbStatus_ = "Assigned " + (it == meshPathById_.end()
+    drawerUi_.cbStatus_ = "Assigned " + (it == meshPathById_.end()
                                    ? std::string("mesh")
                                    : std::filesystem::path(it->second).filename().string());
     AVER_INFO("[Editor] entity {} mesh set to 0x{:016X} ('{}')", ent, meshId,
@@ -154,7 +154,7 @@ bool SandboxApp::assignMaterialToken(scene::Entity ent, i32 token) {
     }
 #endif
     const char* nm = aver_scene_material_name(token);
-    cbStatus_ = std::string("Assigned surface ") + (nm && *nm ? nm : "(unnamed)");
+    drawerUi_.cbStatus_ = std::string("Assigned surface ") + (nm && *nm ? nm : "(unnamed)");
     AVER_INFO("[Editor] entity {} material set to token {} ('{}')", ent, token, nm ? nm : "");
     return true;
 }
@@ -620,11 +620,11 @@ editor::SequenceHost SandboxApp::sequenceHost() {
 
 // A .ocseq opened from the Content Browser: the sequencer takes its sequences into the open level (actors bound by name).
 bool SandboxApp::openSequenceFile(const std::string& fullPath) {
-    if (levelPath_.empty()) { cbStatus_ = "Open a level first: a sequence file binds the open level's actors by name"; return false; }
+    if (levelPath_.empty()) { drawerUi_.cbStatus_ = "Open a level first: a sequence file binds the open level's actors by name"; return false; }
     setEditorMode(EditorMode::Animate);
     const editor::SequenceHost h = sequenceHost();
     const bool ok = seqEditor_.importOcseq(fullPath, h.findByName);
-    cbStatus_ = seqEditor_.status();
+    drawerUi_.cbStatus_ = seqEditor_.status();
     return ok;
 }
 
@@ -2396,7 +2396,7 @@ void SandboxApp::drawMeshAnimation(scene::World& w, const std::vector<scene::Ent
                     const std::string rel = picked ? cbRelativeToContent(content_.pathFor(picked))
                                                    : std::string();
                     if (picked && fnv1a64(std::string_view(rel)) != picked) {
-                        cbStatus_ = "Could not resolve the clip to a project-relative path";
+                        drawerUi_.cbStatus_ = "Could not resolve the clip to a project-relative path";
                     } else {
                         EditCmd c;
                         c.kind = EditCmd::Kind::Animation;
@@ -2514,7 +2514,7 @@ void SandboxApp::drawMeshAssetPicker(scene::CMeshRenderer* mr, const std::vector
         // "the foliage palette, a future asset picker"); listing every .ocmesh in the
         // content index could offer one the device refused or never loaded, blanking
         // the entity if picked.
-        PickerCands& pc = pickMeshCands_;
+        PickerCands& pc = drawerUi_.pickMeshCands_;
         const int frame = ImGui::GetFrameCount();
         if (pc.lastFrame < frame - 1 || pc.stamp != meshPathById_.size()) {
             pc.list.clear();
@@ -2540,7 +2540,7 @@ void SandboxApp::drawMeshAssetPicker(scene::CMeshRenderer* mr, const std::vector
                     if (assignMeshId(ent, picked)) ++n;
                 if (n > 1) {
                     const auto mit = meshPathById_.find(picked);
-                    cbStatus_ = "Assigned " +
+                    drawerUi_.cbStatus_ = "Assigned " +
                         (mit == meshPathById_.end()
                              ? std::string("mesh")
                              : std::filesystem::path(mit->second).filename().string()) +
@@ -2549,7 +2549,7 @@ void SandboxApp::drawMeshAssetPicker(scene::CMeshRenderer* mr, const std::vector
             }
         }
     } else {
-        pickMeshCands_.drop();
+        drawerUi_.pickMeshCands_.drop();
     }
 }
 #endif
@@ -2586,7 +2586,7 @@ void SandboxApp::drawMeshMaterialSection(scene::CMeshRenderer* mr, const std::ve
             // unrelated surface by coincidence. aver_scene_material() interns (or reuses) the
             // token for a name without loading anything, so every stem gets one whether or
             // not a .ocmat is behind it yet.
-            PickerCands& pc = pickMaterialCands_;
+            PickerCands& pc = drawerUi_.pickMaterialCands_;
             const int frame = ImGui::GetFrameCount();
             if (pc.lastFrame < frame - 1 || pc.stamp != content_.surfaceMaterials().size()) {
                 std::unordered_set<i32> seen;
@@ -2629,14 +2629,14 @@ void SandboxApp::drawMeshMaterialSection(scene::CMeshRenderer* mr, const std::ve
                     if (n > 1) {
                         const char* pickedName =
                             aver_scene_material_name(static_cast<i32>(static_cast<u32>(picked)));
-                        cbStatus_ = std::string("Assigned surface ") +
+                        drawerUi_.cbStatus_ = std::string("Assigned surface ") +
                             (pickedName && *pickedName ? pickedName : "(unnamed)") +
                             " to " + std::to_string(n) + " entities";
                     }
                 }
             }
         } else {
-            pickMaterialCands_.drop();
+            drawerUi_.pickMaterialCands_.drop();
         }
         const pbr::MaterialHandle authored = content_.authoredFor(shown);
         if (!authored) {
@@ -2686,7 +2686,7 @@ void SandboxApp::drawParticleEmitterDetails(scene::World& w) {
                         assigned = true;
                         break;
                     }
-                    if (!assigned) cbStatus_ = "Only a .ocparticle effect can be dropped on this emitter";
+                    if (!assigned) drawerUi_.cbStatus_ = "Only a .ocparticle effect can be dropped on this emitter";
                 }
                 ImGui::EndDragDropTarget();
             }
@@ -2708,7 +2708,7 @@ void SandboxApp::drawParticleEmitterDetails(scene::World& w) {
                 // the two disagree, which is why the label is derived rather than used as-is.
                 // Labelled relative, so this popup reads like the Mesh/Material ones above
                 // instead of the developer's whole local directory tree.
-                PickerCands& pc = pickEffectCands_;
+                PickerCands& pc = drawerUi_.pickEffectCands_;
                 const int frame = ImGui::GetFrameCount();
                 if (pc.lastFrame < frame - 1 || pc.stamp != content_.index().size()) {
                     std::vector<AssetChoice>& cands = pc.list;
@@ -2737,7 +2737,7 @@ void SandboxApp::drawParticleEmitterDetails(scene::World& w) {
                         assignParticleEffect(selEntity_, path);
                 }
             } else {
-                pickEffectCands_.drop();
+                drawerUi_.pickEffectCands_.drop();
             }
             ImGui::TextDisabled("age %.2fs   seed 0x%08x", pe->age, pe->seed);
         }
@@ -2868,7 +2868,7 @@ void SandboxApp::drawAddRemoveComponent(scene::World& w) {
                     if (auto* c = static_cast<scene::CDecal*>(w.addComponent(selEntity_, a.id)))
                         *c = editor::makeNewDecal();
                 }
-                cbStatus_ = std::string("Added ") + a.name;
+                drawerUi_.cbStatus_ = std::string("Added ") + a.name;
                 // Not undoable, so at least mark dirty: adding pushes no EditCmd, so without
                 // this the level closed clean and the component was silently gone. Remove
                 // Component below has no such problem -- it captures the component and can be undoable.
@@ -2907,7 +2907,7 @@ void SandboxApp::drawAddRemoveComponent(scene::World& w) {
                 // Undoable: removeComponentFromSelection captures the component byte-exact
                 // before dropping it, unlike Add Component above (no "before" to capture).
                 if (removeComponentFromSelection(r.id))
-                    cbStatus_ = std::string("Removed ") + r.name;
+                    drawerUi_.cbStatus_ = std::string("Removed ") + r.name;
             }
             ImGui::EndDisabled();
             if (!present && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))

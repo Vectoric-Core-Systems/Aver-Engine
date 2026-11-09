@@ -96,7 +96,7 @@ void SandboxApp::cbCreatePcgGraph() {
     g.links.push_back({keep, "out", spawn, "in"});
     std::string why;
     if (!writeFileTextAtomic(target.string(), fmt::writeOcgraph(g, ""))) {
-        cbStatus_ = "Could not write " + target.filename().string();
+        drawerUi_.cbStatus_ = "Could not write " + target.filename().string();
         return;
     }
     cbAdoptNewAsset(target);

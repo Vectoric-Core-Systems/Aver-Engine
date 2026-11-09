@@ -49,7 +49,7 @@ void SandboxApp::buildReferencesPanel() {
             if (ImGui::Selectable(rel.c_str(), false, ImGuiSelectableFlags_AllowDoubleClick) &&
                 ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
                 const std::string abs = project_.contentDir() + AVER_PATH_SEP + rel;
-                cbSelectedFile_ = abs;
+                drawerUi_.cbSelectedFile_ = abs;
                 assetEditors_.open(abs);
             }
         }
@@ -523,7 +523,7 @@ void SandboxApp::revisionControlTick() {
     // ASKED ONLY WHILE SOMETHING IS SHOWING THE ANSWER. A timer that runs whenever the editor is
     // open would spawn a git process every few seconds for the whole session to keep a panel nobody
     // has opened up to date.
-    if (!showRevisionControl_ && drawer_ != Drawer::Content) return;
+    if (!showRevisionControl_ && drawerUi_.drawer_ != Drawer::Content) return;
     // Two answers the timer must not retry (settled facts, not slow ones): git missing, or this
     // project not in a repository. Neither changes while the editor watches; Refresh re-asks because
     // the user knows when they've installed git or run `git init`.
@@ -1303,20 +1303,20 @@ void SandboxApp::drawExitPrompt(Engine& e) {
 
 // Open level picker, rebuilding its list (shared by menu item and --open-level-picker).
 void SandboxApp::openLevelPickerNow() {
-    openLevelList_ = editor::listLevels(project_.contentDir());
-    openLevelSelected_ = -1;
-    openLevelError_.clear();
+    drawerUi_.openLevelList_ = editor::listLevels(project_.contentDir());
+    drawerUi_.openLevelSelected_ = -1;
+    drawerUi_.openLevelError_.clear();
 #if AVER_MODULE_SCENE
     // Pre-select the currently open level so list shows where you are.
-    for (int i = 0; i < static_cast<int>(openLevelList_.size()); ++i) {
+    for (int i = 0; i < static_cast<int>(drawerUi_.openLevelList_.size()); ++i) {
         std::error_code lec;
         if (!levelPath_.empty() &&
-            std::filesystem::equivalent(openLevelList_[static_cast<usize>(i)].absPath,
+            std::filesystem::equivalent(drawerUi_.openLevelList_[static_cast<usize>(i)].absPath,
                                         levelPath_, lec))
-            openLevelSelected_ = i;
+            drawerUi_.openLevelSelected_ = i;
     }
 #endif
-    openLevelPicker_ = true;
+    drawerUi_.openLevelPicker_ = true;
 }
 
 // File > Open Level picker (project-local list, not OS file dialog).
@@ -1324,20 +1324,20 @@ void SandboxApp::drawOpenLevelPrompt(Engine& e) {
     (void)e;   // required by the caller's uniform signature (buildPanels/menu dispatch); unused here
 #if AVER_WITH_IMGUI && AVER_MODULE_SCENE
     if (armOpenLevelPicker_) { armOpenLevelPicker_ = false; openLevelPickerNow(); }
-    if (!openLevelByName_.empty()) {
-        const std::string want = openLevelByName_;
-        openLevelByName_.clear();
+    if (!drawerUi_.openLevelByName_.empty()) {
+        const std::string want = drawerUi_.openLevelByName_;
+        drawerUi_.openLevelByName_.clear();
         bool found = false;
         for (const editor::LevelEntry& l : editor::listLevels(project_.contentDir())) {
             if (l.relPath != want && l.name != want) continue;
             found = true;
             if (!requestOpenLevel(l.absPath, "opened by --open-level"))
-                AVER_ERROR("[Level] --open-level {}: {}", want, openLevelError_);
+                AVER_ERROR("[Level] --open-level {}: {}", want, drawerUi_.openLevelError_);
             break;
         }
         if (!found) AVER_ERROR("[Level] --open-level {}: no level of that name in this project", want);
     }
-    if (!openLevelPicker_) return;
+    if (!drawerUi_.openLevelPicker_) return;
     constexpr const char* kTitle = "Open Level";
     if (!ImGui::IsPopupOpen(kTitle)) ImGui::OpenPopup(kTitle);
     const ImVec2 centre = ImGui::GetMainViewport()->GetCenter();
@@ -1345,24 +1345,24 @@ void SandboxApp::drawOpenLevelPrompt(Engine& e) {
     ImGui::SetNextWindowSize(ImVec2(560.0f * viewState_.dpi_, 0.0f), ImGuiCond_Appearing);
     if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
 
-    if (openLevelList_.empty()) {
+    if (drawerUi_.openLevelList_.empty()) {
         ImGui::TextDisabled("This project has no levels yet.");
         ImGui::TextDisabled("File > New Level, then Save Level As, writes one to Content" AVER_PATH_SEP "Maps.");
     } else {
         ImGui::TextUnformatted("Levels in this project");
         ImGui::BeginChild("##levels", ImVec2(0.0f, 240.0f * viewState_.dpi_), true);
-        for (int i = 0; i < static_cast<int>(openLevelList_.size()); ++i) {
-            const editor::LevelEntry& l = openLevelList_[static_cast<usize>(i)];
+        for (int i = 0; i < static_cast<int>(drawerUi_.openLevelList_.size()); ++i) {
+            const editor::LevelEntry& l = drawerUi_.openLevelList_[static_cast<usize>(i)];
             // Current level is marked, not hidden (re-opening discards edits).
             const bool current = !levelPath_.empty() &&
                 std::filesystem::path(l.absPath) == std::filesystem::path(levelPath_);
             ImGui::PushID(i);
-            if (ImGui::Selectable(l.name.c_str(), openLevelSelected_ == i,
+            if (ImGui::Selectable(l.name.c_str(), drawerUi_.openLevelSelected_ == i,
                                   ImGuiSelectableFlags_AllowDoubleClick)) {
-                openLevelSelected_ = i;
+                drawerUi_.openLevelSelected_ = i;
                 if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
                     if (requestOpenLevel(l.absPath, "opened from File > Open Level")) {
-                        openLevelPicker_ = false;
+                        drawerUi_.openLevelPicker_ = false;
                         ImGui::CloseCurrentPopup();
                     }
                 }
@@ -1375,26 +1375,26 @@ void SandboxApp::drawOpenLevelPrompt(Engine& e) {
         ImGui::EndChild();
     }
 
-    if (!openLevelError_.empty())
-        ImGui::TextColored(ImVec4(0.93f, 0.42f, 0.38f, 1.0f), "%s", openLevelError_.c_str());
+    if (!drawerUi_.openLevelError_.empty())
+        ImGui::TextColored(ImVec4(0.93f, 0.42f, 0.38f, 1.0f), "%s", drawerUi_.openLevelError_.c_str());
 
     ImGui::Spacing();
     ImGui::Separator();
-    const bool picked = openLevelSelected_ >= 0 &&
-                        openLevelSelected_ < static_cast<int>(openLevelList_.size());
+    const bool picked = drawerUi_.openLevelSelected_ >= 0 &&
+                        drawerUi_.openLevelSelected_ < static_cast<int>(drawerUi_.openLevelList_.size());
     ImGui::BeginDisabled(!picked);
     if (ImGui::Button("Open", ImVec2(110.0f * viewState_.dpi_, 0.0f)) && picked) {
-        const editor::LevelEntry& l = openLevelList_[static_cast<usize>(openLevelSelected_)];
+        const editor::LevelEntry& l = drawerUi_.openLevelList_[static_cast<usize>(drawerUi_.openLevelSelected_)];
         if (requestOpenLevel(l.absPath, "opened from File > Open Level")) {
-            openLevelPicker_ = false;
+            drawerUi_.openLevelPicker_ = false;
             ImGui::CloseCurrentPopup();
         }
     }
     ImGui::EndDisabled();
     ImGui::SameLine();
     if (ImGui::Button("Cancel", ImVec2(110.0f * viewState_.dpi_, 0.0f))) {
-        openLevelPicker_ = false;
-        openLevelError_.clear();
+        drawerUi_.openLevelPicker_ = false;
+        drawerUi_.openLevelError_.clear();
         ImGui::CloseCurrentPopup();
     }
     ImGui::EndPopup();
@@ -1885,7 +1885,7 @@ void SandboxApp::drawFileMenu(Engine& e) {
         if (ImGui::MenuItem(ICON_REFRESH " Reload Start Level")) {
             const std::string start = project_.contentDir() + AVER_PATH_SEP + project_.startMap;
             if (!requestOpenLevel(start, "reloaded from the project's start level"))
-                AVER_WARN("[Level] reload: {}", openLevelError_);
+                AVER_WARN("[Level] reload: {}", drawerUi_.openLevelError_);
         }
         ImGui::EndDisabled();
         uiReg_.track("file.reloadStartLevel");
@@ -2023,12 +2023,12 @@ void SandboxApp::drawWindowMenu() {
         ImGui::MenuItem(ICON_MOVIE " Render Queue", nullptr, &showRenderQueue_);
         uiReg_.track("window.renderQueue");
 #endif
-        if (ImGui::MenuItem(ICON_FOLDER " Content Browser", "Ctrl+Space", drawer_ == Drawer::Content)) toggleDrawer(Drawer::Content);
+        if (ImGui::MenuItem(ICON_FOLDER " Content Browser", "Ctrl+Space", drawerUi_.drawer_ == Drawer::Content)) toggleDrawer(Drawer::Content);
         uiReg_.track("window.contentBrowser");
-        if (ImGui::MenuItem(ICON_LOG " Output Log", nullptr, drawer_ == Drawer::Log)) toggleDrawer(Drawer::Log);
+        if (ImGui::MenuItem(ICON_LOG " Output Log", nullptr, drawerUi_.drawer_ == Drawer::Log)) toggleDrawer(Drawer::Log);
         // track() names the LAST item; keep it immediately after the widget.
         uiReg_.track("window.outputLog");
-        if (ImGui::MenuItem(ICON_CONSOLE " Console", "`", drawer_ == Drawer::Console)) toggleDrawer(Drawer::Console);
+        if (ImGui::MenuItem(ICON_CONSOLE " Console", "`", drawerUi_.drawer_ == Drawer::Console)) toggleDrawer(Drawer::Console);
         uiReg_.track("window.console");
         if (ImGui::MenuItem(ICON_WORLD " World Settings", nullptr, showWorldSettings_))
             showWorldSettings_ = !showWorldSettings_;
@@ -2454,12 +2454,12 @@ void SandboxApp::drawLevelTab(Engine& e) {
                                 ++placed;
                             }
                             if (placed == 0) {
-                                cbStatus_ = "Nothing in that drag can be placed in the level (only meshes, particles, prefabs, levels and graph classes can)";
+                                drawerUi_.cbStatus_ = "Nothing in that drag can be placed in the level (only meshes, particles, prefabs, levels and graph classes can)";
                                 AVER_INFO("[Editor] drop: none of the {} dragged item(s) is a placeable asset",
                                           dragged.size());
                             }
 #else
-                            cbStatus_ = "Placing objects needs the scene module";
+                            drawerUi_.cbStatus_ = "Placing objects needs the scene module";
                             AVER_WARN("[Editor] drop: scene module not compiled in, ignoring '{}'", droppedPath);
 #endif
                         }
@@ -2758,7 +2758,7 @@ void SandboxApp::drawStatusBar(Engine& e, const ImVec2& wpos, const ImVec2& wsiz
 
     // Upgrade outcome: 12s is readable but not permanent. Failure in error color.
     auto drawerButton = [&](const char* label, Drawer d, const char* tip) {
-        const bool on = drawer_ == d;
+        const bool on = drawerUi_.drawer_ == d;
         if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
         if (ImGui::SmallButton(label)) toggleDrawer(d);
         if (on) ImGui::PopStyleColor();
@@ -2898,9 +2898,9 @@ void SandboxApp::buildUI(Engine& e) {
         if (!io.WantTextInput && !io.WantCaptureKeyboard) {
             if (keybinds_.pressed(editor::CommandId::DrawerToggleContent, io)) toggleDrawer(Drawer::Content);
             if (keybinds_.pressed(editor::CommandId::DrawerToggleConsole, io)) toggleDrawer(Drawer::Console);
-            if (drawer_ != Drawer::None && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel) &&
+            if (drawerUi_.drawer_ != Drawer::None && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel) &&
                 keybinds_.pressed(editor::CommandId::DrawerDismiss, io))
-                drawer_ = Drawer::None;
+                drawerUi_.drawer_ = Drawer::None;
         }
     }
 
@@ -3067,7 +3067,7 @@ void SandboxApp::drawGraphPrintOverlay(ImVec2 vpMin, ImVec2 vpMax) {
     std::vector<std::pair<std::string, f32>> visible;
     {
         std::lock_guard<std::mutex> lk(logMutex_);
-        for (auto& gp : graphPrints_) {
+        for (auto& gp : drawerUi_.graphPrints_) {
             // Stamped on first sight (not when logged) so minimized window doesn't expire before viewing.
             if (gp.at < 0.0) gp.at = now;
             const f64 age = now - gp.at;
@@ -3081,9 +3081,9 @@ void SandboxApp::drawGraphPrintOverlay(ImVec2 vpMin, ImVec2 vpMax) {
                                  a);
         }
         // Reap in loop, not sink: line stays visible until viewed once.
-        while (!graphPrints_.empty() && graphPrints_.front().at >= 0.0 &&
-               now - graphPrints_.front().at > kGraphPrintHoldSec)
-            graphPrints_.pop_front();
+        while (!drawerUi_.graphPrints_.empty() && drawerUi_.graphPrints_.front().at >= 0.0 &&
+               now - drawerUi_.graphPrints_.front().at > kGraphPrintHoldSec)
+            drawerUi_.graphPrints_.pop_front();
     }
     if (visible.empty()) return;
 
@@ -3144,20 +3144,20 @@ void SandboxApp::drawGraphPrintOverlay(ImVec2 vpMin, ImVec2 vpMax) {
 }
 
 void SandboxApp::drawOutputLog() {
-    const int minLevel = logLevelFilter_ == 4 ? (int)LogLevel::Critical
-                      : logLevelFilter_ == 3 ? (int)LogLevel::Error
-                      : logLevelFilter_ == 2 ? (int)LogLevel::Warn
-                      : logLevelFilter_ == 1 ? (int)LogLevel::Info : (int)LogLevel::Trace;
-    const bool hasSel = logSelAnchor_ >= 0;
-    const i64 selLo = std::min(logSelAnchor_, logSelEnd_), selHi = std::max(logSelAnchor_, logSelEnd_);
+    const int minLevel = drawerUi_.logLevelFilter_ == 4 ? (int)LogLevel::Critical
+                      : drawerUi_.logLevelFilter_ == 3 ? (int)LogLevel::Error
+                      : drawerUi_.logLevelFilter_ == 2 ? (int)LogLevel::Warn
+                      : drawerUi_.logLevelFilter_ == 1 ? (int)LogLevel::Info : (int)LogLevel::Trace;
+    const bool hasSel = drawerUi_.logSelAnchor_ >= 0;
+    const i64 selLo = std::min(drawerUi_.logSelAnchor_, drawerUi_.logSelEnd_), selHi = std::max(drawerUi_.logSelAnchor_, drawerUi_.logSelEnd_);
     // The lines the level filter shows, or only the selected ones among them, one per line.
     const auto collect = [&](bool selectedOnly) {
         std::string out;
         std::lock_guard<std::mutex> lk(logMutex_);
-        for (usize i = 0; i < logLines_.size(); ++i) {
-            const i64 serial = static_cast<i64>(logFirstSerial_ + i);
-            if ((int)logLines_[i].level < minLevel || (selectedOnly && (serial < selLo || serial > selHi))) continue;
-            out += logLines_[i].text;
+        for (usize i = 0; i < drawerUi_.logLines_.size(); ++i) {
+            const i64 serial = static_cast<i64>(drawerUi_.logFirstSerial_ + i);
+            if ((int)drawerUi_.logLines_[i].level < minLevel || (selectedOnly && (serial < selLo || serial > selHi))) continue;
+            out += drawerUi_.logLines_[i].text;
             out += char(10);
         }
         return out;
@@ -3165,10 +3165,10 @@ void SandboxApp::drawOutputLog() {
 
     if (ImGui::SmallButton("Clear")) {
         std::lock_guard<std::mutex> lk(logMutex_);
-        logFirstSerial_ += logLines_.size();
-        logLines_.clear();
-        logMultiRowCount_ = 0;
-        logSelAnchor_ = logSelEnd_ = -1;
+        drawerUi_.logFirstSerial_ += drawerUi_.logLines_.size();
+        drawerUi_.logLines_.clear();
+        drawerUi_.logMultiRowCount_ = 0;
+        drawerUi_.logSelAnchor_ = drawerUi_.logSelEnd_ = -1;
     }
     ImGui::SameLine();
     if (ImGui::SmallButton("Copy")) ImGui::SetClipboardText(collect(hasSel).c_str());
@@ -3178,9 +3178,9 @@ void SandboxApp::drawOutputLog() {
     ImGui::SameLine();
     ImGui::SetNextItemWidth(110.0f * viewState_.dpi_);
     // Appended only; order is persisted in editor.ini.
-    ImGui::Combo("##loglevel", &logLevelFilter_, "All\0Info+\0Warn+\0Error+\0Critical+\0");
+    ImGui::Combo("##loglevel", &drawerUi_.logLevelFilter_, "All\0Info+\0Warn+\0Error+\0Critical+\0");
     ImGui::SameLine();
-    ImGui::Checkbox("Auto-scroll", &logAutoScroll_);
+    ImGui::Checkbox("Auto-scroll", &drawerUi_.logAutoScroll_);
     ImGui::Separator();
 
     ImGui::BeginChild("##logscroll", ImVec2(0, 0), false, ImGuiWindowFlags_HorizontalScrollbar);
@@ -3191,39 +3191,39 @@ void SandboxApp::drawOutputLog() {
         // Only visible rows submitted: ImGuiListClipper, or spacers over summed row heights once
         // any multi-row line exists.
         std::vector<u32> shown;
-        shown.reserve(logLines_.size());
-        for (usize i = 0; i < logLines_.size(); ++i)
-            if ((int)logLines_[i].level >= minLevel) shown.push_back(static_cast<u32>(i));
+        shown.reserve(drawerUi_.logLines_.size());
+        for (usize i = 0; i < drawerUi_.logLines_.size(); ++i)
+            if ((int)drawerUi_.logLines_[i].level >= minLevel) shown.push_back(static_cast<u32>(i));
         if (!shown.empty()) {
-            firstShown = static_cast<i64>(logFirstSerial_ + shown.front());
-            lastShown = static_cast<i64>(logFirstSerial_ + shown.back());
+            firstShown = static_cast<i64>(drawerUi_.logFirstSerial_ + shown.front());
+            lastShown = static_cast<i64>(drawerUi_.logFirstSerial_ + shown.back());
         }
         // One row: the selection behind it, a click selects it (Shift extends), a right click on an unselected row selects it.
         ImDrawList* rowDl = ImGui::GetWindowDrawList();
         const auto drawRow = [&](u32 idx) {
-            const LogLine& ln = logLines_[idx];
-            const i64 serial = static_cast<i64>(logFirstSerial_ + idx);
+            const LogLine& ln = drawerUi_.logLines_[idx];
+            const i64 serial = static_cast<i64>(drawerUi_.logFirstSerial_ + idx);
             const bool selected = hasSel && serial >= selLo && serial <= selHi;
             const ImVec2 p = ImGui::GetCursorScreenPos();
             const ImVec2 q(p.x + ImGui::GetContentRegionAvail().x, p.y + static_cast<f32>(ln.rows) * ImGui::GetTextLineHeight());
             if (selected) rowDl->AddRectFilled(p, q, ImGui::GetColorU32(ImGuiCol_Header));
             if (ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(p, q)) {
                 if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                    if (ImGui::GetIO().KeyShift && logSelAnchor_ >= 0) logSelEnd_ = serial;
-                    else logSelAnchor_ = logSelEnd_ = serial;
+                    if (ImGui::GetIO().KeyShift && drawerUi_.logSelAnchor_ >= 0) drawerUi_.logSelEnd_ = serial;
+                    else drawerUi_.logSelAnchor_ = drawerUi_.logSelEnd_ = serial;
                 } else if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) && !selected) {
-                    logSelAnchor_ = logSelEnd_ = serial;
+                    drawerUi_.logSelAnchor_ = drawerUi_.logSelEnd_ = serial;
                 }
             }
             drawLogLine(ln.level, ln.text.c_str());
         };
-        if (logMultiRowCount_ != 0) {
+        if (drawerUi_.logMultiRowCount_ != 0) {
             const f32 lineH = ImGui::GetTextLineHeight();
             const f32 spacing = ImGui::GetStyle().ItemSpacing.y;
             // top[k] = y of row k below the first row, each height floored as ImGui snaps its cursor.
             std::vector<f32> top(shown.size() + 1, 0.0f);
             for (usize k = 0; k < shown.size(); ++k)
-                top[k + 1] = top[k] + std::floor(static_cast<f32>(logLines_[shown[k]].rows) * lineH + spacing);
+                top[k + 1] = top[k] + std::floor(static_cast<f32>(drawerUi_.logLines_[shown[k]].rows) * lineH + spacing);
             const ImDrawList* dl = ImGui::GetWindowDrawList();
             const f32 y0 = ImGui::GetCursorScreenPos().y;
             const f32 visTop = dl->GetClipRectMin().y - y0;
@@ -3249,20 +3249,20 @@ void SandboxApp::drawOutputLog() {
     if (ImGui::IsWindowFocused()) {
         if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_C) && hasSel) copySelected = true;
         if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_A)) selectAll = true;
-        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) logSelAnchor_ = logSelEnd_ = -1;
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) drawerUi_.logSelAnchor_ = drawerUi_.logSelEnd_ = -1;
     }
     if (ImGui::BeginPopupContextWindow("##logmenu")) {
-        const bool sel = logSelAnchor_ >= 0;
+        const bool sel = drawerUi_.logSelAnchor_ >= 0;
         if (ImGui::MenuItem("Copy selected", "Ctrl+C", false, sel)) copySelected = true;
         if (ImGui::MenuItem("Copy all shown")) copyShown = true;
         if (ImGui::MenuItem("Select all shown", "Ctrl+A")) selectAll = true;
-        if (ImGui::MenuItem("Clear selection", "Esc", false, sel)) logSelAnchor_ = logSelEnd_ = -1;
+        if (ImGui::MenuItem("Clear selection", "Esc", false, sel)) drawerUi_.logSelAnchor_ = drawerUi_.logSelEnd_ = -1;
         ImGui::EndPopup();
     }
-    if (selectAll && firstShown >= 0) { logSelAnchor_ = firstShown; logSelEnd_ = lastShown; }
+    if (selectAll && firstShown >= 0) { drawerUi_.logSelAnchor_ = firstShown; drawerUi_.logSelEnd_ = lastShown; }
     if (copySelected) ImGui::SetClipboardText(collect(true).c_str());
     if (copyShown) ImGui::SetClipboardText(collect(false).c_str());
-    if (logAutoScroll_ && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4.0f)
+    if (drawerUi_.logAutoScroll_ && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4.0f)
         ImGui::SetScrollHereY(1.0f);
     ImGui::EndChild();
 }
@@ -3276,7 +3276,7 @@ void SandboxApp::drawOutputLog() {
 // Live suggestions for consoleInput_: substring match on command/variable names.
 std::vector<SandboxApp::ConsoleSuggestion> SandboxApp::computeConsoleSuggestions() const {
     std::vector<ConsoleSuggestion> out;
-    const std::string_view sv(consoleInput_);
+    const std::string_view sv(drawerUi_.consoleInput_);
     if (sv.empty() || std::isspace(static_cast<unsigned char>(sv.back()))) return out;
 
     std::vector<std::string_view> words;
@@ -3319,14 +3319,14 @@ std::vector<SandboxApp::ConsoleSuggestion> SandboxApp::computeConsoleSuggestions
 
 // Seeds input and arms focus latch (toggleDrawer behavior).
 void SandboxApp::seedConsoleInput(const std::string& line) {
-    std::strncpy(consoleInput_, line.c_str(), sizeof(consoleInput_) - 1);
-    consoleInput_[sizeof(consoleInput_) - 1] = '\0';
-    consoleFocusPending_ = true;
+    std::strncpy(drawerUi_.consoleInput_, line.c_str(), sizeof(drawerUi_.consoleInput_) - 1);
+    drawerUi_.consoleInput_[sizeof(drawerUi_.consoleInput_) - 1] = '\0';
+    drawerUi_.consoleFocusPending_ = true;
 }
 
 // Completes last word, keeping prefix.
 void SandboxApp::acceptConsoleSuggestion(const std::string& insertText) {
-    const std::string cur(consoleInput_);
+    const std::string cur(drawerUi_.consoleInput_);
     const std::size_t lastSpace = cur.find_last_of(" \t");
     const std::string prefix = lastSpace == std::string::npos ? std::string() : cur.substr(0, lastSpace + 1);
     seedConsoleInput(prefix + insertText + " ");
@@ -3398,32 +3398,32 @@ void SandboxApp::drawConsoleVarRow(const editor::ConsoleVar& v) {
 
 // REPL: transcript, suggestions, input line.
 void SandboxApp::drawConsoleTranscriptTab(Engine& e) {
-    if (ImGui::SmallButton("Clear")) consoleLines_.clear();
+    if (ImGui::SmallButton("Clear")) drawerUi_.consoleLines_.clear();
     ImGui::SameLine();
     // Copy, since text can't be selected (colored text loses drag-selection).
     if (ImGui::SmallButton("Copy")) {
         std::string all;
-        for (const LogLine& ln : consoleLines_) { all += ln.text; all += char(10); }
+        for (const LogLine& ln : drawerUi_.consoleLines_) { all += ln.text; all += char(10); }
         ImGui::SetClipboardText(all.c_str());
-        consoleLines_.push_back({LogLevel::Info,
-                                 "[console] copied " + std::to_string(consoleLines_.size()) +
+        drawerUi_.consoleLines_.push_back({LogLevel::Info,
+                                 "[console] copied " + std::to_string(drawerUi_.consoleLines_.size()) +
                                  " line(s) to the clipboard"});
     }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copy every line here to the clipboard");
     ImGui::SameLine();
-    ImGui::Checkbox("Auto-scroll", &consoleAutoScroll_);
+    ImGui::Checkbox("Auto-scroll", &drawerUi_.consoleAutoScroll_);
     ImGui::Separator();
 
     // Welcome lines: orientation for first-time users.
-    if (consoleLines_.empty())
+    if (drawerUi_.consoleLines_.empty())
         for (const std::string& line : editor::consoleWelcomeLines())
-            consoleLines_.push_back({LogLevel::Info, line});
+            drawerUi_.consoleLines_.push_back({LogLevel::Info, line});
 
     // Pre-fills input for screenshot capture (--drawer console:<seed>).
-    if (!drawerStartSub_.empty()) {
-        std::strncpy(consoleInput_, drawerStartSub_.c_str(), sizeof(consoleInput_) - 1);
-        consoleInput_[sizeof(consoleInput_) - 1] = '\0';
-        drawerStartSub_.clear();
+    if (!drawerUi_.drawerStartSub_.empty()) {
+        std::strncpy(drawerUi_.consoleInput_, drawerUi_.drawerStartSub_.c_str(), sizeof(drawerUi_.consoleInput_) - 1);
+        drawerUi_.consoleInput_[sizeof(drawerUi_.consoleInput_) - 1] = '\0';
+        drawerUi_.drawerStartSub_.clear();
     }
 
     // Compute suggestions before layout to know height.
@@ -3436,14 +3436,14 @@ void SandboxApp::drawConsoleTranscriptTab(Engine& e) {
     ImGui::BeginChild("##consolescroll", ImVec2(0, -(inputLineH + suggestH)), false,
                        ImGuiWindowFlags_HorizontalScrollbar);
     {
-        for (const LogLine& ln : consoleLines_) {
+        for (const LogLine& ln : drawerUi_.consoleLines_) {
             drawConsoleTranscriptLine(ln.level, ln.text);
             // Right-click to copy single line.
             if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
                 ImGui::SetClipboardText(ln.text.c_str());
         }
     }
-    if (consoleAutoScroll_ && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4.0f)
+    if (drawerUi_.consoleAutoScroll_ && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4.0f)
         ImGui::SetScrollHereY(1.0f);
     ImGui::EndChild();
 
@@ -3459,16 +3459,16 @@ void SandboxApp::drawConsoleTranscriptTab(Engine& e) {
         ImGui::EndChild();
     }
 
-    if (consoleFocusPending_) { ImGui::SetKeyboardFocusHere(); consoleFocusPending_ = false; }
+    if (drawerUi_.consoleFocusPending_) { ImGui::SetKeyboardFocusHere(); drawerUi_.consoleFocusPending_ = false; }
     ImGui::SetNextItemWidth(-1.0f);
-    const bool submitted = ImGui::InputText("##consoleinput", consoleInput_, sizeof(consoleInput_),
+    const bool submitted = ImGui::InputText("##consoleinput", drawerUi_.consoleInput_, sizeof(drawerUi_.consoleInput_),
         ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackHistory |
         ImGuiInputTextFlags_CallbackCompletion, &SandboxApp::consoleInputCallback, this);
-    if (submitted && consoleInput_[0] != '\0') {
-        runConsoleLine(e, consoleInput_);
-        consoleHistory_.emplace_back(consoleInput_);
-        consoleHistoryPos_ = -1;
-        consoleInput_[0] = '\0';
+    if (submitted && drawerUi_.consoleInput_[0] != '\0') {
+        runConsoleLine(e, drawerUi_.consoleInput_);
+        drawerUi_.consoleHistory_.emplace_back(drawerUi_.consoleInput_);
+        drawerUi_.consoleHistoryPos_ = -1;
+        drawerUi_.consoleInput_[0] = '\0';
         ImGui::SetKeyboardFocusHere(-1);
     }
 }
@@ -3477,7 +3477,7 @@ void SandboxApp::drawConsoleTranscriptTab(Engine& e) {
 void SandboxApp::drawConsoleBrowserTab() {
     ImGui::SetNextItemWidth(-1.0f);
     ImGui::InputTextWithHint("##consolebrowsefilter", "Filter by name or description (e.g. \"gi\", \"exposure\", \"read-only\")...",
-                              consoleBrowseFilter_, sizeof(consoleBrowseFilter_));
+                              drawerUi_.consoleBrowseFilter_, sizeof(drawerUi_.consoleBrowseFilter_));
     ImGui::Separator();
 
     ImGui::BeginChild("##consolevarlist", ImVec2(0, -ImGui::GetTextLineHeightWithSpacing()));
@@ -3485,7 +3485,7 @@ void SandboxApp::drawConsoleBrowserTab() {
     std::size_t shown = 0, total = 0;
     for (const editor::ConsoleVar& v : editor::allVars()) {
         ++total;
-        if (!editor::varMatchesQuery(v, consoleBrowseFilter_)) continue;
+        if (!editor::varMatchesQuery(v, drawerUi_.consoleBrowseFilter_)) continue;
         const std::string group = editor::varGroupKey(v.name);
         if (group != lastGroup) {
             if (!lastGroup.empty()) ImGui::Spacing();
@@ -3495,7 +3495,7 @@ void SandboxApp::drawConsoleBrowserTab() {
         drawConsoleVarRow(v);
         ++shown;
     }
-    if (shown == 0) ImGui::TextDisabled("No variable's name or description matches '%s'.", consoleBrowseFilter_);
+    if (shown == 0) ImGui::TextDisabled("No variable's name or description matches '%s'.", drawerUi_.consoleBrowseFilter_);
     ImGui::EndChild();
 
     // Two variable groups omitted from browsing; see EditorConsole.hpp.
@@ -3509,7 +3509,7 @@ void SandboxApp::drawConsole(Engine& e) {
 
     if (ImGui::BeginTabBar("##consoleTabs")) {
         const ImGuiTabItemFlags replFlags =
-            consoleFocusPending_ ? ImGuiTabItemFlags_SetSelected : ImGuiTabItemFlags_None;
+            drawerUi_.consoleFocusPending_ ? ImGuiTabItemFlags_SetSelected : ImGuiTabItemFlags_None;
         if (ImGui::BeginTabItem("Transcript", nullptr, replFlags)) {
             drawConsoleTranscriptTab(e);
             ImGui::EndTabItem();
@@ -3524,8 +3524,8 @@ void SandboxApp::drawConsole(Engine& e) {
 
 // Parses and dispatches commands; no quoting support.
 void SandboxApp::runConsoleLine(Engine& e, const std::string& line) {
-    consoleLines_.push_back({LogLevel::Info, "> " + line});
-    if (consoleLines_.size() > kMaxConsoleLines) consoleLines_.pop_front();
+    drawerUi_.consoleLines_.push_back({LogLevel::Info, "> " + line});
+    if (drawerUi_.consoleLines_.size() > DrawerState::kMaxConsoleLines) drawerUi_.consoleLines_.pop_front();
 
     std::vector<std::string> tokens;
     {
@@ -3540,8 +3540,8 @@ void SandboxApp::runConsoleLine(Engine& e, const std::string& line) {
 
     const editor::ConsoleCommandDesc* cmd = editor::findCommand(tokens[0]);
     auto print = [this](LogLevel lvl, std::string text) {
-        consoleLines_.push_back({lvl, std::move(text)});
-        if (consoleLines_.size() > kMaxConsoleLines) consoleLines_.pop_front();
+        drawerUi_.consoleLines_.push_back({lvl, std::move(text)});
+        if (drawerUi_.consoleLines_.size() > DrawerState::kMaxConsoleLines) drawerUi_.consoleLines_.pop_front();
     };
     if (!cmd) {
         print(LogLevel::Error, "Unknown command '" + tokens[0] + "'. Type 'help' for a list.");
@@ -3556,9 +3556,9 @@ void SandboxApp::runConsoleLine(Engine& e, const std::string& line) {
     SandboxApp* self = static_cast<SandboxApp*>(data->UserData);
     if (data->EventFlag == ImGuiInputTextFlags_CallbackHistory) {
         // consoleHistory_ is most-recent-last; Up/Down walk older/newer.
-        if (self->consoleHistory_.empty()) return 0;
-        const int last = static_cast<int>(self->consoleHistory_.size()) - 1;
-        int pos = self->consoleHistoryPos_;
+        if (self->drawerUi_.consoleHistory_.empty()) return 0;
+        const int last = static_cast<int>(self->drawerUi_.consoleHistory_.size()) - 1;
+        int pos = self->drawerUi_.consoleHistoryPos_;
         if (data->EventKey == ImGuiKey_UpArrow) {
             if (pos < 0) pos = last;
             else if (pos > 0) --pos;
@@ -3566,16 +3566,16 @@ void SandboxApp::runConsoleLine(Engine& e, const std::string& line) {
             if (pos < 0) return 0;
             ++pos;
             if (pos > last) {
-                self->consoleHistoryPos_ = -1;
+                self->drawerUi_.consoleHistoryPos_ = -1;
                 data->DeleteChars(0, data->BufTextLen);
                 return 0;
             }
         } else {
             return 0;
         }
-        self->consoleHistoryPos_ = pos;
+        self->drawerUi_.consoleHistoryPos_ = pos;
         data->DeleteChars(0, data->BufTextLen);
-        data->InsertChars(0, self->consoleHistory_[static_cast<size_t>(pos)].c_str());
+        data->InsertChars(0, self->drawerUi_.consoleHistory_[static_cast<size_t>(pos)].c_str());
     } else if (data->EventFlag == ImGuiInputTextFlags_CallbackCompletion) {
         // v1 completes command names only, not args.
         const char* bufStart = data->Buf;
@@ -3597,8 +3597,8 @@ void SandboxApp::runConsoleLine(Engine& e, const std::string& line) {
         } else if (matches.size() > 1) {
             std::string list = "Candidates:";
             for (const editor::ConsoleCommandDesc* m : matches) list += " " + m->name;
-            self->consoleLines_.push_back({LogLevel::Info, list});
-            if (self->consoleLines_.size() > kMaxConsoleLines) self->consoleLines_.pop_front();
+            self->drawerUi_.consoleLines_.push_back({LogLevel::Info, list});
+            if (self->drawerUi_.consoleLines_.size() > DrawerState::kMaxConsoleLines) self->drawerUi_.consoleLines_.pop_front();
         }
     }
     return 0;
@@ -3607,22 +3607,22 @@ void SandboxApp::runConsoleLine(Engine& e, const std::string& line) {
 // Draws the bottom drawer, sliding Content Browser or Output Log up over viewport.
 void SandboxApp::drawDrawer(Engine& e) {
     const f32 dt = std::fmin(e.time().dt, 0.05f);
-    const f32 target = drawer_ == Drawer::None ? 0.0f : 1.0f;
-    drawerAnim_ += (target - drawerAnim_) * (1.0f - std::exp(-drawerRate_ * dt));
-    if (drawer_ != Drawer::None) drawerShown_ = drawer_;
-    if (drawer_ == Drawer::None && drawerAnim_ < 0.004f) { drawerAnim_ = 0.0f; drawerPixelH_ = 0.0f; return; }
+    const f32 target = drawerUi_.drawer_ == Drawer::None ? 0.0f : 1.0f;
+    drawerUi_.drawerAnim_ += (target - drawerUi_.drawerAnim_) * (1.0f - std::exp(-drawerUi_.drawerRate_ * dt));
+    if (drawerUi_.drawer_ != Drawer::None) drawerUi_.drawerShown_ = drawerUi_.drawer_;
+    if (drawerUi_.drawer_ == Drawer::None && drawerUi_.drawerAnim_ < 0.004f) { drawerUi_.drawerAnim_ = 0.0f; drawerUi_.drawerPixelH_ = 0.0f; return; }
 
     const ImGuiViewport* mv = ImGui::GetMainViewport();
     const ImVec2 wpos = mv->WorkPos, wsize = mv->WorkSize;
     const f32 statusH = 26.0f * viewState_.dpi_;
-    const f32 fullH = (wsize.y - statusH) * drawerFrac_;
-    const f32 h = fullH * drawerAnim_;
+    const f32 fullH = (wsize.y - statusH) * drawerUi_.drawerFrac_;
+    const f32 h = fullH * drawerUi_.drawerAnim_;
     // Published for viewport hint (prevents drawing through drawer).
-    drawerPixelH_ = h;
+    drawerUi_.drawerPixelH_ = h;
 
     ImGui::SetNextWindowPos(ImVec2(wpos.x, wpos.y + wsize.y - statusH - h));
     ImGui::SetNextWindowSize(ImVec2(wsize.x, h));
-    if (drawerRaise_) { ImGui::SetNextWindowFocus(); drawerRaise_ = false; }
+    if (drawerUi_.drawerRaise_) { ImGui::SetNextWindowFocus(); drawerUi_.drawerRaise_ = false; }
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowMinSize, ImVec2(0.0f, 0.0f));
     ImGui::Begin("##drawer", nullptr, kDrawerFlags);
@@ -3633,8 +3633,8 @@ void SandboxApp::drawDrawer(Engine& e) {
     ImGui::InvisibleButton("##drawergrip", ImVec2(std::fmax(wsize.x, 1.0f), gripH));
     if (ImGui::IsItemHovered() || ImGui::IsItemActive()) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
     if (ImGui::IsItemActive() && wsize.y > statusH + 1.0f) {
-        drawerFrac_ -= ImGui::GetIO().MouseDelta.y / (wsize.y - statusH);
-        drawerFrac_ = std::fmin(0.88f, std::fmax(0.14f, drawerFrac_));
+        drawerUi_.drawerFrac_ -= ImGui::GetIO().MouseDelta.y / (wsize.y - statusH);
+        drawerUi_.drawerFrac_ = std::fmin(0.88f, std::fmax(0.14f, drawerUi_.drawerFrac_));
     }
     ImGui::SetCursorPos(ImVec2(ImGui::GetStyle().WindowPadding.x, gripH + ImGui::GetStyle().WindowPadding.y));
     ImGui::GetWindowDrawList()->AddLine(ImVec2(wpos.x, ImGui::GetWindowPos().y),
@@ -3643,23 +3643,23 @@ void SandboxApp::drawDrawer(Engine& e) {
 
     {
         editor::FontScope title(editor::editorFonts().header, editor::editorFonts().headerPx);
-        ImGui::TextUnformatted(drawerShown_ == Drawer::Log ? "Output Log" :
-                                drawerShown_ == Drawer::Console ? "Console" : "Content Browser");
+        ImGui::TextUnformatted(drawerUi_.drawerShown_ == Drawer::Log ? "Output Log" :
+                                drawerUi_.drawerShown_ == Drawer::Console ? "Console" : "Content Browser");
     }
     ImGui::SameLine();
     {
         editor::FontScope hintFont(editor::editorFonts().secondary, editor::editorFonts().secondaryPx);
-        ImGui::TextDisabled(drawerShown_ == Drawer::Content ? "(Ctrl+Space or Esc to dismiss)" :
-                             drawerShown_ == Drawer::Console ? "(` or Esc to dismiss)" : "(Esc to dismiss)");
+        ImGui::TextDisabled(drawerUi_.drawerShown_ == Drawer::Content ? "(Ctrl+Space or Esc to dismiss)" :
+                             drawerUi_.drawerShown_ == Drawer::Console ? "(` or Esc to dismiss)" : "(Esc to dismiss)");
     }
     ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), wsize.x - 34.0f * viewState_.dpi_));
-    if (ImGui::Button("X")) drawer_ = Drawer::None;
+    if (ImGui::Button("X")) drawerUi_.drawer_ = Drawer::None;
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Close the drawer");
     ImGui::Separator();
 
     if (ImGui::GetContentRegionAvail().y > ImGui::GetFrameHeight()) {
-        if (drawerShown_ == Drawer::Log)          drawOutputLog();
-        else if (drawerShown_ == Drawer::Console) drawConsole(e);
+        if (drawerUi_.drawerShown_ == Drawer::Log)          drawOutputLog();
+        else if (drawerUi_.drawerShown_ == Drawer::Console) drawConsole(e);
         else                                       drawContentBrowser();
     }
     ImGui::End();
@@ -3668,10 +3668,10 @@ void SandboxApp::drawDrawer(Engine& e) {
 
 // Opens a drawer, or closes it if it is already the one showing.
 void SandboxApp::toggleDrawer(Drawer d) {
-    drawer_ = (drawer_ == d) ? Drawer::None : d;
-    if (drawer_ != Drawer::None) drawerRaise_ = true;
+    drawerUi_.drawer_ = (drawerUi_.drawer_ == d) ? Drawer::None : d;
+    if (drawerUi_.drawer_ != Drawer::None) drawerUi_.drawerRaise_ = true;
     // Arms console focus latch (window doesn't 'appear' when switching tabs).
-    if (drawer_ == Drawer::Console) consoleFocusPending_ = true;
+    if (drawerUi_.drawer_ == Drawer::Console) drawerUi_.consoleFocusPending_ = true;
 }
 
 // Reuses Output Log/Console palette (avoid drift).
@@ -3703,7 +3703,7 @@ void SandboxApp::drawNotifications() {
     const f32 width   = 340.0f * viewState_.dpi_;
     const f32 anchorX = mv->WorkPos.x + mv->WorkSize.x - pad;
     // Above status bar and drawer; drawerPixelH_ is current frame.
-    f32 y = mv->WorkPos.y + mv->WorkSize.y - statusH - drawerPixelH_ - pad;
+    f32 y = mv->WorkPos.y + mv->WorkSize.y - statusH - drawerUi_.drawerPixelH_ - pad;
 
     const ImGuiWindowFlags base =
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
@@ -3791,8 +3791,8 @@ void SandboxApp::drawNotifications() {
         switch (act) {
             case editor::NotifyAction::ShowOutputLog:
                 // Open (not toggle) to avoid closing if already open.
-                drawer_ = Drawer::Log;
-                drawerRaise_ = true;
+                drawerUi_.drawer_ = Drawer::Log;
+                drawerUi_.drawerRaise_ = true;
                 break;
             case editor::NotifyAction::Dismiss:          q.dismiss(actId); break;
             case editor::NotifyAction::PostponeAutosave: autosavePostponeRequested_ = true; break;

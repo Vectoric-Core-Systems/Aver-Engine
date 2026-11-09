@@ -76,12 +76,12 @@ static u32 logTextRows(std::string_view t) {
     auto* self = static_cast<SandboxApp*>(ctx);
     std::lock_guard<std::mutex> lock(self->logMutex_);
     const u32 rows = logTextRows(msg);
-    self->logLines_.push_back({level, std::string(msg), rows});
-    if (rows > 1) ++self->logMultiRowCount_;
-    if (self->logLines_.size() > kMaxLogLines) {
-        if (self->logLines_.front().rows > 1) --self->logMultiRowCount_;
-        self->logLines_.pop_front();
-        ++self->logFirstSerial_;
+    self->drawerUi_.logLines_.push_back({level, std::string(msg), rows});
+    if (rows > 1) ++self->drawerUi_.logMultiRowCount_;
+    if (self->drawerUi_.logLines_.size() > DrawerState::kMaxLogLines) {
+        if (self->drawerUi_.logLines_.front().rows > 1) --self->drawerUi_.logMultiRowCount_;
+        self->drawerUi_.logLines_.pop_front();
+        ++self->drawerUi_.logFirstSerial_;
     }
 
     // Forwards Info+ lines to loading screen (main thread only; Jolt job pool may log too).
@@ -97,14 +97,14 @@ static u32 logTextRows(std::string_view t) {
     if (msg.rfind("[Graph] ", 0) == 0) {
         std::string text(msg.substr(8));
         // Collapse consecutive duplicates with rising count instead of flooding buffer.
-        if (!self->graphPrints_.empty() && self->graphPrints_.back().text == text) {
-            ++self->graphPrints_.back().count;
+        if (!self->drawerUi_.graphPrints_.empty() && self->drawerUi_.graphPrints_.back().text == text) {
+            ++self->drawerUi_.graphPrints_.back().count;
             // Unstamped so it re-stamps to now next frame: a still-firing print must not fade
             // under its own rising count.
-            self->graphPrints_.back().at = -1.0;
+            self->drawerUi_.graphPrints_.back().at = -1.0;
         } else {
-            self->graphPrints_.push_back({std::move(text), -1.0, 1});
-            if (self->graphPrints_.size() > kMaxGraphPrints) self->graphPrints_.pop_front();
+            self->drawerUi_.graphPrints_.push_back({std::move(text), -1.0, 1});
+            if (self->drawerUi_.graphPrints_.size() > kMaxGraphPrints) self->drawerUi_.graphPrints_.pop_front();
         }
     }
 
@@ -623,20 +623,20 @@ editor::shutdownAnimEditors();
     aver_audio_shutdown();
 #endif
 #if AVER_WITH_IMGUI
-    if (logoTexture_ || compileIconTexture_ || fileIconsTexture_ || folderIconsTexture_) {
+    if (logoTexture_ || compileIconTexture_ || drawerUi_.fileIconsTexture_ || drawerUi_.folderIconsTexture_) {
         if (rhi::IResourceFactory* res = e.device()->resources()) {
             res->waitIdle();
             if (logoTexture_) res->destroyTexture(logoTexture_);
             if (logoSmallTexture_) res->destroyTexture(logoSmallTexture_);
             if (compileIconTexture_) res->destroyTexture(compileIconTexture_);
-            if (fileIconsTexture_) res->destroyTexture(fileIconsTexture_);
-            if (folderIconsTexture_) res->destroyTexture(folderIconsTexture_);
+            if (drawerUi_.fileIconsTexture_) res->destroyTexture(drawerUi_.fileIconsTexture_);
+            if (drawerUi_.folderIconsTexture_) res->destroyTexture(drawerUi_.folderIconsTexture_);
         }
         logoTexture_ = 0; logoUiId_ = 0;
         logoSmallTexture_ = 0; logoSmallUiId_ = 0;
         compileIconTexture_ = 0; compileIconUiId_ = 0;
-        fileIconsTexture_ = 0; fileIconsUiId_ = 0;
-        folderIconsTexture_ = 0; folderIconsUiId_ = 0;
+        drawerUi_.fileIconsTexture_ = 0; drawerUi_.fileIconsUiId_ = 0;
+        drawerUi_.folderIconsTexture_ = 0; drawerUi_.folderIconsUiId_ = 0;
     }
 #endif
 #if AVER_MODULE_PBR

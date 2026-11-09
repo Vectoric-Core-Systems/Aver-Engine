@@ -462,17 +462,17 @@ void SandboxApp::initEditorUi(Engine& e) {
         AVER_INFO("[Sandbox] DPI scale {:.2f}, UI font rasterised at {:.0f}px", viewState_.dpi_, 16.0f * viewState_.dpi_);
         loadLogo(e);   // the start screen and the menu bar's mark
         loadCompileIcon(e);
-        loadIconSheet(e, "file-icons.png",   kFileIconTiles, "FileTypeIcons", fileIconsTexture_,   fileIconsUiId_,   fileIconAspect_);
-        loadIconSheet(e, "folder-icons.png", kFolderIconTiles, "FolderIcons",  folderIconsTexture_, folderIconsUiId_, folderIconAspect_);
-        loadIconSheet(e, "asset-icons.png",  kAssetIconTiles,  "AssetTypeIcons", assetIconsTexture_,  assetIconsUiId_,  assetIconAspect_);
+        loadIconSheet(e, "file-icons.png",   DrawerState::kFileIconTiles, "FileTypeIcons", drawerUi_.fileIconsTexture_,   drawerUi_.fileIconsUiId_,   drawerUi_.fileIconAspect_);
+        loadIconSheet(e, "folder-icons.png", DrawerState::kFolderIconTiles, "FolderIcons",  drawerUi_.folderIconsTexture_, drawerUi_.folderIconsUiId_, drawerUi_.folderIconAspect_);
+        loadIconSheet(e, "asset-icons.png",  DrawerState::kAssetIconTiles,  "AssetTypeIcons", drawerUi_.assetIconsTexture_,  drawerUi_.assetIconsUiId_,  drawerUi_.assetIconAspect_);
         loadGameUiFont(e);
         if (const std::string er = editor::engineRoot(); !er.empty()) {
             std::error_code ec;
             const std::filesystem::path cs = std::filesystem::path(er) / "scripting" / "csharp";
-            if (std::filesystem::is_directory(cs, ec)) cbEngineRoot_ = cs.string();
+            if (std::filesystem::is_directory(cs, ec)) drawerUi_.cbEngineRoot_ = cs.string();
         }
         AVER_INFO("[Sandbox] Content Browser engine root: {}",
-                  cbEngineRoot_.empty() ? "(none - shipped build)" : cbEngineRoot_.c_str());
+                  drawerUi_.cbEngineRoot_.empty() ? "(none - shipped build)" : drawerUi_.cbEngineRoot_.c_str());
     }
 }
 #endif
@@ -978,9 +978,9 @@ void SandboxApp::initVoxiBackend(Engine& e) {
             if (harness_.saveProject_ && !harness_.saveProjectDone_) { harness_.saveProjectDone_ = true; seedAndSaveProject(); }
 #if AVER_WITH_IMGUI
             // Deferred import handshake (UI-only; needs browser).
-            if (!importSrc_.empty() && !harness_.importDone_) {
+            if (!drawerUi_.importSrc_.empty() && !harness_.importDone_) {
                 harness_.importDone_ = true;
-                importAsset(importSrc_, importDst_);
+                importAsset(drawerUi_.importSrc_, drawerUi_.importDst_);
             }
 #endif
 #if AVER_MODULE_PBR

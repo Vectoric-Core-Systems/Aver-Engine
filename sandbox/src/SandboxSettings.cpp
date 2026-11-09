@@ -21,15 +21,15 @@ constexpr f32 kDefaultRenderScale = 0.5f;
 // Reads every editor preference into the members that back the widgets.
 void SandboxApp::loadEditorPreferences() {
     using namespace editor;
-    cbGallery_          = prefBool ("contentBrowser.gallery",        cbGallery_);
-    cbTileSize_         = prefFloat("contentBrowser.tileSize",       cbTileSize_);
-    thumbDiskCapMB_     = prefInt  ("contentBrowser.thumbDiskCapMB", thumbDiskCapMB_);
-    cbDoubleClickEnter_ = prefBool ("contentBrowser.dblClickEnter",  cbDoubleClickEnter_);
-    drawerFrac_         = prefFloat("drawers.heightFraction",        drawerFrac_);
-    drawerRate_         = prefFloat("drawers.slideRate",             drawerRate_);
-    logAutoScroll_      = prefBool ("outputLog.autoScroll",          logAutoScroll_);
-    logLevelFilter_     = prefInt  ("outputLog.levelFilter",         logLevelFilter_);
-    consoleAutoScroll_  = prefBool ("console.autoScroll",            consoleAutoScroll_);
+    drawerUi_.cbGallery_          = prefBool ("contentBrowser.gallery",        drawerUi_.cbGallery_);
+    drawerUi_.cbTileSize_         = prefFloat("contentBrowser.tileSize",       drawerUi_.cbTileSize_);
+    drawerUi_.thumbDiskCapMB_     = prefInt  ("contentBrowser.thumbDiskCapMB", drawerUi_.thumbDiskCapMB_);
+    drawerUi_.cbDoubleClickEnter_ = prefBool ("contentBrowser.dblClickEnter",  drawerUi_.cbDoubleClickEnter_);
+    drawerUi_.drawerFrac_         = prefFloat("drawers.heightFraction",        drawerUi_.drawerFrac_);
+    drawerUi_.drawerRate_         = prefFloat("drawers.slideRate",             drawerUi_.drawerRate_);
+    drawerUi_.logAutoScroll_      = prefBool ("outputLog.autoScroll",          drawerUi_.logAutoScroll_);
+    drawerUi_.logLevelFilter_     = prefInt  ("outputLog.levelFilter",         drawerUi_.logLevelFilter_);
+    drawerUi_.consoleAutoScroll_  = prefBool ("console.autoScroll",            drawerUi_.consoleAutoScroll_);
     // --auto-compile on command line wins (autoCompileFromCli_).
     if (!harness_.autoCompileFromCli_) harness_.autoCompile_ = prefBool("scripting.autoCompile", harness_.autoCompile_);
     viewState_.showGrid_           = prefBool ("viewport.showGrid",             viewState_.showGrid_);
@@ -188,7 +188,7 @@ void SandboxApp::resolvePreferredIdeFromPrefs() {
     if (prefIdeName_.empty() || !editor::ideDetectionFinished()) return;
     const std::vector<editor::IdeInfo>& ides = editor::detectedIdes();
     for (usize i = 0; i < ides.size(); ++i)
-        if (ides[i].name == prefIdeName_) { cbIdeChoice_ = static_cast<int>(i); break; }
+        if (ides[i].name == prefIdeName_) { drawerUi_.cbIdeChoice_ = static_cast<int>(i); break; }
     prefIdeName_.clear();
 }
 
@@ -258,37 +258,37 @@ void SandboxApp::buildEditorPrefs() {
     if (!ImGui::Begin("Editor Preferences", &showEditorPrefs_, ImGuiWindowFlags_NoDocking)) { ImGui::End(); return; }
 
     if (::aver::editor::sectionHeader("Content Browser", ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::Checkbox("Open in gallery (tiles) view", &cbGallery_);
-        ImGui::SliderFloat("Tile size", &cbTileSize_, 56.0f, 168.0f, "%.0f dp");
-        ImGui::DragInt("Thumbnail cache (MB)", &thumbDiskCapMB_, 8.0f, 0, 8192, "%d MB");
+        ImGui::Checkbox("Open in gallery (tiles) view", &drawerUi_.cbGallery_);
+        ImGui::SliderFloat("Tile size", &drawerUi_.cbTileSize_, 56.0f, 168.0f, "%.0f dp");
+        ImGui::DragInt("Thumbnail cache (MB)", &drawerUi_.thumbDiskCapMB_, 8.0f, 0, 8192, "%d MB");
         ImGui::TextDisabled("Texture and mesh thumbnails kept under the project's Saved/ThumbnailCache; 0 turns it off.");
-        ImGui::Checkbox("Double-click a folder to enter it", &cbDoubleClickEnter_);
+        ImGui::Checkbox("Double-click a folder to enter it", &drawerUi_.cbDoubleClickEnter_);
         ImGui::TextDisabled("Single-click always selects; the tree navigates either way.");
         const std::vector<editor::IdeInfo>& ides = editor::detectedIdes();
-        std::string label = cbIdeChoice_ < 0 || cbIdeChoice_ >= static_cast<int>(ides.size())
+        std::string label = drawerUi_.cbIdeChoice_ < 0 || drawerUi_.cbIdeChoice_ >= static_cast<int>(ides.size())
                           ? "Automatic (" + editor::preferredIde().name + ")"
-                          : ides[static_cast<usize>(cbIdeChoice_)].name;
+                          : ides[static_cast<usize>(drawerUi_.cbIdeChoice_)].name;
         if (ImGui::BeginCombo("Open source in", label.c_str())) {
-            if (ImGui::Selectable("Automatic", cbIdeChoice_ < 0)) cbIdeChoice_ = -1;
+            if (ImGui::Selectable("Automatic", drawerUi_.cbIdeChoice_ < 0)) drawerUi_.cbIdeChoice_ = -1;
             for (usize i = 0; i < ides.size(); ++i)
-                if (ImGui::Selectable(ides[i].name.c_str(), cbIdeChoice_ == static_cast<int>(i)))
-                    cbIdeChoice_ = static_cast<int>(i);
+                if (ImGui::Selectable(ides[i].name.c_str(), drawerUi_.cbIdeChoice_ == static_cast<int>(i)))
+                    drawerUi_.cbIdeChoice_ = static_cast<int>(i);
             ImGui::EndCombo();
         }
         if (!editor::ideDetectionFinished())
             ImGui::TextDisabled("Still scanning for installed IDEs...");
     }
     if (::aver::editor::sectionHeader("Drawers", ImGuiTreeNodeFlags_DefaultOpen)) {
-        f32 pct = drawerFrac_ * 100.0f;
+        f32 pct = drawerUi_.drawerFrac_ * 100.0f;
         if (ImGui::SliderFloat("Height", &pct, 14.0f, 88.0f, "%.0f%% of the window"))
-            drawerFrac_ = pct / 100.0f;
-        ImGui::SliderFloat("Slide speed", &drawerRate_, 4.0f, 40.0f, "%.0f");
+            drawerUi_.drawerFrac_ = pct / 100.0f;
+        ImGui::SliderFloat("Slide speed", &drawerUi_.drawerRate_, 4.0f, 40.0f, "%.0f");
         ImGui::TextDisabled("Ctrl+Space opens the Content Browser; Esc dismisses a drawer.");
     }
     if (::aver::editor::sectionHeader("Output Log", ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::Checkbox("Auto-scroll to the newest line", &logAutoScroll_);
+        ImGui::Checkbox("Auto-scroll to the newest line", &drawerUi_.logAutoScroll_);
         // Same entries as Output Log drawer's combo.
-        ImGui::Combo("Level filter", &logLevelFilter_, "All\0Info+\0Warn+\0Error+\0Critical+\0");
+        ImGui::Combo("Level filter", &drawerUi_.logLevelFilter_, "All\0Info+\0Warn+\0Error+\0Critical+\0");
     }
     if (::aver::editor::sectionHeader("Display", ImGuiTreeNodeFlags_DefaultOpen)) {
         const bool canDisable = prefsDevice_ && prefsDevice_->vsyncCanDisable();
@@ -2427,15 +2427,15 @@ void SandboxApp::buildRenderingSettings(int page) {
 // before it stores.
 void SandboxApp::saveEditorPreferences() {
     using namespace editor;
-    setPrefBool ("contentBrowser.gallery",       cbGallery_);
-    setPrefFloat("contentBrowser.tileSize",      cbTileSize_);
-    setPrefInt  ("contentBrowser.thumbDiskCapMB", thumbDiskCapMB_);
-    setPrefBool ("contentBrowser.dblClickEnter", cbDoubleClickEnter_);
-    setPrefFloat("drawers.heightFraction",       drawerFrac_);
-    setPrefFloat("drawers.slideRate",            drawerRate_);
-    setPrefBool ("outputLog.autoScroll",         logAutoScroll_);
-    setPrefInt  ("outputLog.levelFilter",        logLevelFilter_);
-    setPrefBool ("console.autoScroll",           consoleAutoScroll_);
+    setPrefBool ("contentBrowser.gallery",       drawerUi_.cbGallery_);
+    setPrefFloat("contentBrowser.tileSize",      drawerUi_.cbTileSize_);
+    setPrefInt  ("contentBrowser.thumbDiskCapMB", drawerUi_.thumbDiskCapMB_);
+    setPrefBool ("contentBrowser.dblClickEnter", drawerUi_.cbDoubleClickEnter_);
+    setPrefFloat("drawers.heightFraction",       drawerUi_.drawerFrac_);
+    setPrefFloat("drawers.slideRate",            drawerUi_.drawerRate_);
+    setPrefBool ("outputLog.autoScroll",         drawerUi_.logAutoScroll_);
+    setPrefInt  ("outputLog.levelFilter",        drawerUi_.logLevelFilter_);
+    setPrefBool ("console.autoScroll",           drawerUi_.consoleAutoScroll_);
     // Not written back from a --auto-compile run: that launch must not overwrite what the user chose
     // from the Tools menu before this session started.
     if (!harness_.autoCompileFromCli_) setPrefBool("scripting.autoCompile", harness_.autoCompile_);
@@ -2487,8 +2487,8 @@ void SandboxApp::saveEditorPreferences() {
     }
 
     const std::vector<editor::IdeInfo>& ides = editor::detectedIdes();
-    if (cbIdeChoice_ >= 0 && cbIdeChoice_ < static_cast<int>(ides.size()))
-        setPrefString("contentBrowser.ide", ides[static_cast<usize>(cbIdeChoice_)].name);
+    if (drawerUi_.cbIdeChoice_ >= 0 && drawerUi_.cbIdeChoice_ < static_cast<int>(ides.size()))
+        setPrefString("contentBrowser.ide", ides[static_cast<usize>(drawerUi_.cbIdeChoice_)].name);
     else
         setPrefString("contentBrowser.ide", "");   // Automatic
 

@@ -1101,7 +1101,7 @@ bool SandboxApp::mcpLevelAbi(const mcp::AbiCall& a, std::string& r, std::string&
             return false;
         }
         if (!requestOpenLevel(path, "opened over MCP")) {
-            w = openLevelError_.empty() ? std::string("that level could not be opened") : openLevelError_;
+            w = drawerUi_.openLevelError_.empty() ? std::string("that level could not be opened") : drawerUi_.openLevelError_;
             return false;
         }
         if (discard && levelHasUnsavedEdits()) {

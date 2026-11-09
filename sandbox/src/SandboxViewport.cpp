@@ -782,7 +782,7 @@ void SandboxApp::addPlayerStart(Engine&) {
     scene::World& world = scene::World::instance();
     if (playerStart_ != scene::kInvalidEntity && world.valid(playerStart_)) {
         sel_ = kSelScene; selEntity_ = playerStart_;
-        cbStatus_ = "This level already has a Player Start -- selected it";
+        drawerUi_.cbStatus_ = "This level already has a Player Start -- selected it";
         AVER_INFO("[Editor] Player Start already exists; selected it rather than adding a second");
         return;
     }
@@ -1129,14 +1129,14 @@ void SandboxApp::dropGraphClass(const std::string& fullPath, f32 screenX, f32 sc
     }
     editor::GraphClassDecl d;
     if (!editor::parseGraphClassDecl(text, d)) {
-        cbStatus_ = "'" + fileName + "' declares no CLASS (or is not a gameplay graph), so it cannot be placed. "
+        drawerUi_.cbStatus_ = "'" + fileName + "' declares no CLASS (or is not a gameplay graph), so it cannot be placed. "
                     "Add a 'CLASS AN_Name Actor' line.";
         AVER_WARN("[Editor] drop: '{}' declares no placeable CLASS", fullPath);
         return;
     }
     Vec3 at = dropWorldPoint(screenX, screenY);
     if (!(std::isfinite(at.x) && std::isfinite(at.y) && std::isfinite(at.z))) {
-        cbStatus_ = "Could not find a valid drop position";
+        drawerUi_.cbStatus_ = "Could not find a valid drop position";
         return;
     }
     if (viewState_.snapMove_) for (int k = 0; k < 3; ++k) (&at.x)[k] = snapf((&at.x)[k], viewState_.moveSnap_);
@@ -1203,16 +1203,16 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
     // A prefab drops as an instance (its own undo entry); its entities come through the prefab hooks.
     if (ext == ".ocprefab") {
         if (!(hideEditorScene_ || !levelPath_.empty())) {
-            cbStatus_ = "Load a level (or hide the editor scene) before dropping assets";
+            drawerUi_.cbStatus_ = "Load a level (or hide the editor scene) before dropping assets";
             return;
         }
         prefabModel_.setContentDir(project_.contentDir());
         const std::string ref = editor::PrefabEditorModel::assetRefFor(project_.contentDir(), full);
-        if (ref.empty()) { cbStatus_ = "Could not resolve '" + fileName + "' to a project-relative path"; return; }
+        if (ref.empty()) { drawerUi_.cbStatus_ = "Could not resolve '" + fileName + "' to a project-relative path"; return; }
         Transform xf;
         xf.position = dropWorldPoint(screenX, screenY);
         if (!(std::isfinite(xf.position.x) && std::isfinite(xf.position.y) && std::isfinite(xf.position.z))) {
-            cbStatus_ = "Could not find a valid drop position";
+            drawerUi_.cbStatus_ = "Could not find a valid drop position";
             return;
         }
         if (viewState_.snapMove_) for (int k = 0; k < 3; ++k) (&xf.position.x)[k] = snapf((&xf.position.x)[k], viewState_.moveSnap_);
@@ -1220,14 +1220,14 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
         editor::PrefabEdit edit;
         std::string why;
         if (!prefabModel_.place(ref, xf, scene::kInvalidEntity, root, edit, &why)) {
-            cbStatus_ = "Could not place '" + fileName + "': " + why;
+            drawerUi_.cbStatus_ = "Could not place '" + fileName + "': " + why;
             AVER_WARN("[Editor] drop: prefab '{}' not placed: {}", ref, why);
             return;
         }
         sel_ = kSelScene; selEntity_ = root;
         pushPrefabEdit(edit);
         markLevelUnsaved();
-        cbStatus_ = "Placed " + fileName;
+        drawerUi_.cbStatus_ = "Placed " + fileName;
         return;
     }
 #endif
@@ -1239,29 +1239,29 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
     // the level-instance hooks.
     if (ext == ".ocworld" || ext == ".ocmap") {
         if (!(hideEditorScene_ || !levelPath_.empty())) {
-            cbStatus_ = "Load a level (or hide the editor scene) before dropping assets";
+            drawerUi_.cbStatus_ = "Load a level (or hide the editor scene) before dropping assets";
             return;
         }
         levelInstanceModel_.setContentDir(project_.contentDir());
         const std::string ref = editor::LevelInstanceEditorModel::assetRefFor(project_.contentDir(), full);
-        if (ref.empty()) { cbStatus_ = "Could not resolve '" + fileName + "' to a project-relative path"; return; }
+        if (ref.empty()) { drawerUi_.cbStatus_ = "Could not resolve '" + fileName + "' to a project-relative path"; return; }
         Transform xf;
         xf.position = dropWorldPoint(screenX, screenY);
         if (!(std::isfinite(xf.position.x) && std::isfinite(xf.position.y) && std::isfinite(xf.position.z))) {
-            cbStatus_ = "Could not find a valid drop position";
+            drawerUi_.cbStatus_ = "Could not find a valid drop position";
             return;
         }
         if (viewState_.snapMove_) for (int k = 0; k < 3; ++k) (&xf.position.x)[k] = snapf((&xf.position.x)[k], viewState_.moveSnap_);
         const editor::LevelInstanceEditorModel::PlaceResult pr = levelInstanceModel_.place(ref, xf);
         if (!pr.ok) {
-            cbStatus_ = pr.error;
+            drawerUi_.cbStatus_ = pr.error;
             AVER_WARN("[Editor] drop: level '{}' not placed: {}", ref, pr.error);
             return;
         }
         sel_ = kSelScene; selEntity_ = pr.root;
         pushLevelInstanceEdit(pr.edit);
         markLevelUnsaved();
-        cbStatus_ = "Placed " + fileName;
+        drawerUi_.cbStatus_ = "Placed " + fileName;
         return;
     }
     // [wave3/level-instances end]
@@ -1272,16 +1272,16 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
 #endif
     if (!isMesh && !isParticle) {
 #if AVER_MODULE_PARTICLES
-        cbStatus_ = "'" + fileName + "' can't be placed in the level (only meshes, particles, prefabs, levels and graph classes can)";
+        drawerUi_.cbStatus_ = "'" + fileName + "' can't be placed in the level (only meshes, particles, prefabs, levels and graph classes can)";
         AVER_WARN("[Editor] drop: '{}' is not a placeable asset (need .ocmesh, .ocparticle, .ocprefab, .ocworld or .ocgraph)", full);
 #else
-        cbStatus_ = "'" + fileName + "' can't be placed in the level (only meshes, prefabs, levels and graph classes can)";
+        drawerUi_.cbStatus_ = "'" + fileName + "' can't be placed in the level (only meshes, prefabs, levels and graph classes can)";
         AVER_WARN("[Editor] drop: '{}' is not a placeable asset (need .ocmesh, .ocprefab, .ocworld or .ocgraph)", full);
 #endif
         return;
     }
     if (!(hideEditorScene_ || !levelPath_.empty())) {
-        cbStatus_ = "Load a level (or hide the editor scene) before dropping assets";
+        drawerUi_.cbStatus_ = "Load a level (or hide the editor scene) before dropping assets";
         AVER_WARN("[Editor] drop: no scene world is active to place '{}' into", full);
         return;
     }
@@ -1291,7 +1291,7 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
     std::string rel = content.empty() ? std::string()
                                       : std::filesystem::relative(full, content, ec).string();
     if (content.empty() || ec || rel.empty()) {
-        cbStatus_ = "Could not resolve '" + fileName + "' to a project-relative path";
+        drawerUi_.cbStatus_ = "Could not resolve '" + fileName + "' to a project-relative path";
         AVER_WARN("[Editor] drop: relative() failed for '{}' against content root '{}'", full, content);
         return;
     }
@@ -1306,7 +1306,7 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
         particles::ParticleEffect fx;
         std::string err;
         if (!fmt::loadOcparticle(full, fx, nullptr, &err)) {
-            cbStatus_ = "Could not load '" + fileName + "': " + err;
+            drawerUi_.cbStatus_ = "Could not load '" + fileName + "': " + err;
             AVER_WARN("[Editor] drop: {}", err);
             return;
         }
@@ -1315,7 +1315,7 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
 
         const Vec3 at = dropWorldPoint(screenX, screenY);
         if (!(std::isfinite(at.x) && std::isfinite(at.y) && std::isfinite(at.z))) {
-            cbStatus_ = "Could not find a valid drop position";
+            drawerUi_.cbStatus_ = "Could not find a valid drop position";
             AVER_WARN("[Editor] drop: computed a non-finite world position for '{}'", rel);
             return;
         }
@@ -1327,7 +1327,7 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
 
         const scene::Entity ent = world.create(rel, scene::kInvalidEntity, xf);
         if (ent == scene::kInvalidEntity) {
-            cbStatus_ = "The world refused to place '" + rel + "'";
+            drawerUi_.cbStatus_ = "The world refused to place '" + rel + "'";
             AVER_WARN("[Editor] drop: the world refused a new entity for '{}'", rel);
             return;
         }
@@ -1343,7 +1343,7 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
             c.kind = EditCmd::Kind::Create;
             pushEdit(std::move(c));
         }
-        cbStatus_ = "Placed " + fileName;
+        drawerUi_.cbStatus_ = "Placed " + fileName;
         AVER_INFO("[Editor] placed particle emitter entity #{} from '{}' around effect 0x{:016X} "
                   "at ({:.0f}, {:.0f}, {:.0f})",
                   (u32)ent, rel, effectId, xf.position.x, xf.position.y, xf.position.z);
@@ -1359,7 +1359,7 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
         loadProjectMeshes(e);
     }
     if (content_.meshFor(meshId) == 0) {
-        cbStatus_ = "Could not resolve '" + rel + "' to a loaded mesh";
+        drawerUi_.cbStatus_ = "Could not resolve '" + rel + "' to a loaded mesh";
         AVER_WARN("[Editor] drop: '{}' (id {}) is not a loaded scene mesh", rel, meshId);
         return;
     }
@@ -1367,7 +1367,7 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
     bool onSurface = false;
     const Vec3 at = dropWorldPoint(screenX, screenY, &onSurface);
     if (!(std::isfinite(at.x) && std::isfinite(at.y) && std::isfinite(at.z))) {
-        cbStatus_ = "Could not find a valid drop position";
+        drawerUi_.cbStatus_ = "Could not find a valid drop position";
         AVER_WARN("[Editor] drop: computed a non-finite world position for '{}'", rel);
         return;
     }
@@ -1392,7 +1392,7 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
 
     const scene::Entity ent = world.create(rel, scene::kInvalidEntity, xf);
     if (ent == scene::kInvalidEntity) {
-        cbStatus_ = "The world refused to place '" + rel + "'";
+        drawerUi_.cbStatus_ = "The world refused to place '" + rel + "'";
         AVER_WARN("[Editor] drop: the world refused a new entity for '{}'", rel);
         return;
     }
@@ -1416,7 +1416,7 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
         c.kind = EditCmd::Kind::Create;
         pushEdit(std::move(c));
     }
-    cbStatus_ = "Placed " + fileName;
+    drawerUi_.cbStatus_ = "Placed " + fileName;
     AVER_INFO("[Editor] placed entity #{} from '{}' at ({:.0f}, {:.0f}, {:.0f}){}",
               (u32)ent, rel, xf.position.x, xf.position.y, xf.position.z,
               lift > 0.0f ? " -- lifted " + std::to_string((int)lift) + "cm to rest on the surface"
@@ -2215,7 +2215,7 @@ void SandboxApp::copySelection() {
                 if (multiIsSelected(p)) { ancestorSelected = true; break; }
             if (ancestorSelected) continue;
 #if AVER_MODULE_FRAMEWORK
-            if (classSlotOfEntity(ent) >= 0) { cbStatus_ = "Duplicate/Copy is not supported for graph-class actors yet: drag the graph in again"; continue; }
+            if (classSlotOfEntity(ent) >= 0) { drawerUi_.cbStatus_ = "Duplicate/Copy is not supported for graph-class actors yet: drag the graph in again"; continue; }
 #endif
 
             EditCmd c = describeEntity(ent);
@@ -2234,7 +2234,7 @@ void SandboxApp::copySelection() {
     }
     if (sel_ == kSelScene && selEntity_ != scene::kInvalidEntity && scene::World::instance().valid(selEntity_)) {
 #if AVER_MODULE_FRAMEWORK
-        if (classSlotOfEntity(selEntity_) >= 0) { cbStatus_ = "Duplicate/Copy is not supported for graph-class actors yet: drag the graph in again"; return; }
+        if (classSlotOfEntity(selEntity_) >= 0) { drawerUi_.cbStatus_ = "Duplicate/Copy is not supported for graph-class actors yet: drag the graph in again"; return; }
 #endif
         EditCmd c = describeEntity(selEntity_);
         captureSubtree(c, selEntity_);
@@ -2344,7 +2344,7 @@ void SandboxApp::duplicateSelection() {
                 if (multiIsSelected(p)) { ancestorSelected = true; break; }
             if (ancestorSelected) continue;
 #if AVER_MODULE_FRAMEWORK
-            if (classSlotOfEntity(ent) >= 0) { cbStatus_ = "Duplicate/Copy is not supported for graph-class actors yet: drag the graph in again"; continue; }
+            if (classSlotOfEntity(ent) >= 0) { drawerUi_.cbStatus_ = "Duplicate/Copy is not supported for graph-class actors yet: drag the graph in again"; continue; }
 #endif
 
             EditCmd src = describeEntity(ent);
@@ -2373,7 +2373,7 @@ void SandboxApp::duplicateSelection() {
     }
     if (sel_ == kSelScene && selEntity_ != scene::kInvalidEntity && scene::World::instance().valid(selEntity_)) {
 #if AVER_MODULE_FRAMEWORK
-        if (classSlotOfEntity(selEntity_) >= 0) { cbStatus_ = "Duplicate/Copy is not supported for graph-class actors yet: drag the graph in again"; return; }
+        if (classSlotOfEntity(selEntity_) >= 0) { drawerUi_.cbStatus_ = "Duplicate/Copy is not supported for graph-class actors yet: drag the graph in again"; return; }
 #endif
         EditCmd src = describeEntity(selEntity_);
         // Descendants read BEFORE anything is spawned -- the copy is about to become the

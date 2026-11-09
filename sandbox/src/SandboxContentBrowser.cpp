@@ -46,7 +46,7 @@ bool importGltfToDir(const std::string& src, const std::string& destDir, const s
 std::vector<SandboxApp::CbRoot> SandboxApp::cbRoots() const {
     std::vector<CbRoot> r;
     if (project_.valid()) r.push_back({"Content", project_.contentDir(), false});
-    if (!cbEngineRoot_.empty()) r.push_back({"Engine", cbEngineRoot_, true});
+    if (!drawerUi_.cbEngineRoot_.empty()) r.push_back({"Engine", drawerUi_.cbEngineRoot_, true});
     return r;
 }
 
@@ -55,20 +55,20 @@ static constexpr const char* kCbFavView = "<favourites>";
 
 void SandboxApp::cbColsEnsure() {
     const std::string dir = project_.valid() ? project_.dir : std::string();
-    if (dir == cbColsFor_) return;
-    cbColsFor_ = dir;
-    cbCols_ = editor::CbCollections{};
-    cbView_.clear();
+    if (dir == drawerUi_.cbColsFor_) return;
+    drawerUi_.cbColsFor_ = dir;
+    drawerUi_.cbCols_ = editor::CbCollections{};
+    drawerUi_.cbView_.clear();
     std::string text;
     if (!dir.empty() && readFileText((std::filesystem::path(dir) / "Saved" / "ContentCollections.txt").string(), text))
-        cbCols_ = editor::cbParse(text);
+        drawerUi_.cbCols_ = editor::cbParse(text);
 }
 
 void SandboxApp::cbColsSave() {
-    if (cbColsFor_.empty()) return;
+    if (drawerUi_.cbColsFor_.empty()) return;
     std::error_code ec;
-    std::filesystem::create_directories(std::filesystem::path(cbColsFor_) / "Saved", ec);
-    writeFileText((std::filesystem::path(cbColsFor_) / "Saved" / "ContentCollections.txt").string(), editor::cbSerialize(cbCols_));
+    std::filesystem::create_directories(std::filesystem::path(drawerUi_.cbColsFor_) / "Saved", ec);
+    writeFileText((std::filesystem::path(drawerUi_.cbColsFor_) / "Saved" / "ContentCollections.txt").string(), editor::cbSerialize(drawerUi_.cbCols_));
 }
 
 std::string SandboxApp::cbKeyOf(const std::string& full) const {
@@ -80,20 +80,20 @@ void SandboxApp::cbCollectionMenu(const std::string& full) {
     const std::string key = cbKeyOf(full);
     if (key.empty()) return;
     ImGui::Separator();
-    const bool fav = cbCols_.isFavourite(key);
+    const bool fav = drawerUi_.cbCols_.isFavourite(key);
     if (ImGui::MenuItem(fav ? ICON_STAR_BORDER " Remove from Favourites" : ICON_STAR " Add to Favourites")) {
-        cbCols_.toggleFavourite(key);
+        drawerUi_.cbCols_.toggleFavourite(key);
         cbColsSave();
     }
     if (ImGui::BeginMenu(ICON_COLLECTION " Add to Collection")) {
-        for (const editor::CbCollection& c : std::vector<editor::CbCollection>(cbCols_.collections))
-            if (ImGui::MenuItem(c.name.c_str())) { cbCols_.add(c.name, key); cbColsSave(); }
-        if (!cbCols_.collections.empty()) ImGui::Separator();
-        if (ImGui::MenuItem("New Collection...")) { cbWantNewCol_ = true; cbNewColBuf_[0] = '\0'; cbNewColAddPath_ = key; }
+        for (const editor::CbCollection& c : std::vector<editor::CbCollection>(drawerUi_.cbCols_.collections))
+            if (ImGui::MenuItem(c.name.c_str())) { drawerUi_.cbCols_.add(c.name, key); cbColsSave(); }
+        if (!drawerUi_.cbCols_.collections.empty()) ImGui::Separator();
+        if (ImGui::MenuItem("New Collection...")) { drawerUi_.cbWantNewCol_ = true; drawerUi_.cbNewColBuf_[0] = '\0'; drawerUi_.cbNewColAddPath_ = key; }
         ImGui::EndMenu();
     }
-    if (!cbView_.empty() && cbView_ != kCbFavView && ImGui::MenuItem("Remove from this Collection")) {
-        cbCols_.removeFrom(cbView_, key);
+    if (!drawerUi_.cbView_.empty() && drawerUi_.cbView_ != kCbFavView && ImGui::MenuItem("Remove from this Collection")) {
+        drawerUi_.cbCols_.removeFrom(drawerUi_.cbView_, key);
         cbColsSave();
     }
 }
@@ -114,18 +114,18 @@ void SandboxApp::drawCbChips() {
             if (ImGui::GetCursorScreenPos().x + st.ItemSpacing.x + w < right) ImGui::SameLine();
         }
         first = false;
-        const bool on = (cbTypeMask_ >> t) & 1u;
+        const bool on = (drawerUi_.cbTypeMask_ >> t) & 1u;
         if (on) {
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(accent.r, accent.g, accent.b, 0.35f));
             ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(accent.r, accent.g, accent.b, 0.9f));
             ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
         }
-        if (ImGui::Button((std::string(name) + "##chip" + std::to_string(t)).c_str())) cbTypeMask_ = editor::cbTypeToggled(cbTypeMask_, type);
+        if (ImGui::Button((std::string(name) + "##chip" + std::to_string(t)).c_str())) drawerUi_.cbTypeMask_ = editor::cbTypeToggled(drawerUi_.cbTypeMask_, type);
         if (on) { ImGui::PopStyleVar(); ImGui::PopStyleColor(2); }
     }
-    if (editor::cbTypeFiltering(cbTypeMask_)) {
+    if (editor::cbTypeFiltering(drawerUi_.cbTypeMask_)) {
         ImGui::SameLine();
-        if (ImGui::Button(ICON_CLOSE " Clear##chips")) cbTypeMask_ = 0;
+        if (ImGui::Button(ICON_CLOSE " Clear##chips")) drawerUi_.cbTypeMask_ = 0;
     }
     ImGui::PopStyleVar(2);
     uiReg_.track("contentBrowser.chips");
@@ -134,24 +134,24 @@ void SandboxApp::drawCbChips() {
 // Favourites and Collections, under the folder tree: clicking one shows its assets in the file pane.
 void SandboxApp::drawCbSmartTree() {
     ImGui::Separator();
-    const bool favSel = cbView_ == kCbFavView;
-    if (ImGui::Selectable((std::string(ICON_STAR " Favourites  (") + std::to_string(cbCols_.favourites.size()) + ")###cbfav").c_str(), favSel)) {
-        cbView_ = kCbFavView;
-        cbSelection_.clear();
+    const bool favSel = drawerUi_.cbView_ == kCbFavView;
+    if (ImGui::Selectable((std::string(ICON_STAR " Favourites  (") + std::to_string(drawerUi_.cbCols_.favourites.size()) + ")###cbfav").c_str(), favSel)) {
+        drawerUi_.cbView_ = kCbFavView;
+        drawerUi_.cbSelection_.clear();
     }
     ImGui::SetNextItemOpen(true, ImGuiCond_Once);
     const bool open = ImGui::TreeNodeEx(ICON_COLLECTION " Collections###cbcols", ImGuiTreeNodeFlags_SpanAvailWidth);
     if (ImGui::BeginPopupContextItem("##cbcolsctx")) {
-        if (ImGui::MenuItem("New Collection...")) { cbWantNewCol_ = true; cbNewColBuf_[0] = '\0'; cbNewColAddPath_.clear(); }
+        if (ImGui::MenuItem("New Collection...")) { drawerUi_.cbWantNewCol_ = true; drawerUi_.cbNewColBuf_[0] = '\0'; drawerUi_.cbNewColAddPath_.clear(); }
         ImGui::EndPopup();
     }
     if (open) {
         std::string doDelete;
-        for (const editor::CbCollection& c : cbCols_.collections) {
+        for (const editor::CbCollection& c : drawerUi_.cbCols_.collections) {
             ImGui::PushID(c.name.c_str());
-            if (ImGui::Selectable((c.name + "  (" + std::to_string(c.paths.size()) + ")###col").c_str(), cbView_ == c.name)) {
-                cbView_ = c.name;
-                cbSelection_.clear();
+            if (ImGui::Selectable((c.name + "  (" + std::to_string(c.paths.size()) + ")###col").c_str(), drawerUi_.cbView_ == c.name)) {
+                drawerUi_.cbView_ = c.name;
+                drawerUi_.cbSelection_.clear();
             }
             if (ImGui::BeginPopupContextItem("##colctx")) {
                 if (ImGui::MenuItem("Delete Collection")) doDelete = c.name;
@@ -160,22 +160,22 @@ void SandboxApp::drawCbSmartTree() {
             ImGui::PopID();
         }
         if (!doDelete.empty()) {
-            cbCols_.remove(doDelete);
-            if (cbView_ == doDelete) cbView_.clear();
+            drawerUi_.cbCols_.remove(doDelete);
+            if (drawerUi_.cbView_ == doDelete) drawerUi_.cbView_.clear();
             cbColsSave();
         }
-        if (ImGui::SmallButton(ICON_ADD " New Collection")) { cbWantNewCol_ = true; cbNewColBuf_[0] = '\0'; cbNewColAddPath_.clear(); }
+        if (ImGui::SmallButton(ICON_ADD " New Collection")) { drawerUi_.cbWantNewCol_ = true; drawerUi_.cbNewColBuf_[0] = '\0'; drawerUi_.cbNewColAddPath_.clear(); }
         ImGui::TreePop();
     }
-    if (cbWantNewCol_) { ImGui::OpenPopup("New Collection"); cbWantNewCol_ = false; }
+    if (drawerUi_.cbWantNewCol_) { ImGui::OpenPopup("New Collection"); drawerUi_.cbWantNewCol_ = false; }
     if (ImGui::BeginPopupModal("New Collection", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
-        const bool enter = ImGui::InputText("Name", cbNewColBuf_, sizeof cbNewColBuf_, ImGuiInputTextFlags_EnterReturnsTrue);
-        const bool ok = cbCols_.find(cbNewColBuf_) == nullptr && cbNewColBuf_[0] != '\0';
+        const bool enter = ImGui::InputText("Name", drawerUi_.cbNewColBuf_, sizeof drawerUi_.cbNewColBuf_, ImGuiInputTextFlags_EnterReturnsTrue);
+        const bool ok = drawerUi_.cbCols_.find(drawerUi_.cbNewColBuf_) == nullptr && drawerUi_.cbNewColBuf_[0] != '\0';
         ImGui::BeginDisabled(!ok);
         if (ImGui::Button("Create") || (enter && ok)) {
-            if (cbCols_.create(cbNewColBuf_)) {
-                if (!cbNewColAddPath_.empty()) cbCols_.add(cbNewColBuf_, cbNewColAddPath_);
+            if (drawerUi_.cbCols_.create(drawerUi_.cbNewColBuf_)) {
+                if (!drawerUi_.cbNewColAddPath_.empty()) drawerUi_.cbCols_.add(drawerUi_.cbNewColBuf_, drawerUi_.cbNewColAddPath_);
                 cbColsSave();
             }
             ImGui::CloseCurrentPopup();
@@ -189,33 +189,33 @@ void SandboxApp::drawCbSmartTree() {
 
 // Enters a folder and records it in the Back/Forward history.
 void SandboxApp::cbNavigate(const std::string& dir) {
-    if (dir.empty() || dir == cbSelectedDir_) return;
-    if (cbHistoryPos_ >= 0 && cbHistoryPos_ + 1 < static_cast<int>(cbHistory_.size()))
-        cbHistory_.resize(static_cast<usize>(cbHistoryPos_) + 1);
-    cbHistory_.push_back(dir);
-    cbHistoryPos_ = static_cast<int>(cbHistory_.size()) - 1;
-    cbSelectedDir_ = dir;
-    cbView_.clear();
-    cbSelectedFile_.clear();
-    cbSelection_.clear();
-    cbFilter_[0] = '\0';
+    if (dir.empty() || dir == drawerUi_.cbSelectedDir_) return;
+    if (drawerUi_.cbHistoryPos_ >= 0 && drawerUi_.cbHistoryPos_ + 1 < static_cast<int>(drawerUi_.cbHistory_.size()))
+        drawerUi_.cbHistory_.resize(static_cast<usize>(drawerUi_.cbHistoryPos_) + 1);
+    drawerUi_.cbHistory_.push_back(dir);
+    drawerUi_.cbHistoryPos_ = static_cast<int>(drawerUi_.cbHistory_.size()) - 1;
+    drawerUi_.cbSelectedDir_ = dir;
+    drawerUi_.cbView_.clear();
+    drawerUi_.cbSelectedFile_.clear();
+    drawerUi_.cbSelection_.clear();
+    drawerUi_.cbFilter_[0] = '\0';
 }
 
-bool SandboxApp::cbCanBack() const { return cbHistoryPos_ > 0; }
+bool SandboxApp::cbCanBack() const { return drawerUi_.cbHistoryPos_ > 0; }
 
-bool SandboxApp::cbCanForward() const { return cbHistoryPos_ >= 0 &&
-                                   cbHistoryPos_ + 1 < static_cast<int>(cbHistory_.size()); }
+bool SandboxApp::cbCanForward() const { return drawerUi_.cbHistoryPos_ >= 0 &&
+                                   drawerUi_.cbHistoryPos_ + 1 < static_cast<int>(drawerUi_.cbHistory_.size()); }
 
-void SandboxApp::cbBack()    { if (cbCanBack())    { cbSelectedDir_ = cbHistory_[static_cast<usize>(--cbHistoryPos_)]; cbClearSelection(); } }
+void SandboxApp::cbBack()    { if (cbCanBack())    { drawerUi_.cbSelectedDir_ = drawerUi_.cbHistory_[static_cast<usize>(--drawerUi_.cbHistoryPos_)]; cbClearSelection(); } }
 
-void SandboxApp::cbForward() { if (cbCanForward()) { cbSelectedDir_ = cbHistory_[static_cast<usize>(++cbHistoryPos_)]; cbClearSelection(); } }
+void SandboxApp::cbForward() { if (cbCanForward()) { drawerUi_.cbSelectedDir_ = drawerUi_.cbHistory_[static_cast<usize>(++drawerUi_.cbHistoryPos_)]; cbClearSelection(); } }
 
 // Returns the parent folder, or empty at a mounted root.
 std::string SandboxApp::cbParentDir() const {
     for (const CbRoot& r : cbRoots())
-        if (cbSelectedDir_ == r.path) return {};
+        if (drawerUi_.cbSelectedDir_ == r.path) return {};
     std::error_code ec;
-    std::filesystem::path p = std::filesystem::path(cbSelectedDir_).parent_path();
+    std::filesystem::path p = std::filesystem::path(drawerUi_.cbSelectedDir_).parent_path();
     if (p.empty()) return {};
     const std::string up = p.string();
     for (const CbRoot& r : cbRoots())
@@ -238,7 +238,7 @@ std::string SandboxApp::cbParentDir() const {
 // its neighbours (cbIsEditable/cbInvalidate/importModel) do, so the callers are guarded instead.
 const editor::IdeInfo& SandboxApp::cbIde() const {
     const std::vector<editor::IdeInfo>& ides = editor::detectedIdes();
-    if (cbIdeChoice_ >= 0 && cbIdeChoice_ < static_cast<int>(ides.size())) return ides[static_cast<usize>(cbIdeChoice_)];
+    if (drawerUi_.cbIdeChoice_ >= 0 && drawerUi_.cbIdeChoice_ < static_cast<int>(ides.size())) return ides[static_cast<usize>(drawerUi_.cbIdeChoice_)];
     return editor::preferredIde();
 }
 
@@ -253,35 +253,35 @@ void SandboxApp::cbOpenEntry(const std::string& full, bool isDir) {
     if (editor::isLevelPath(full)) {
 #if AVER_MODULE_SCENE
         if (requestOpenLevel(full, "opened from the Content Browser"))
-            cbStatus_ = "Opening " + std::filesystem::path(full).stem().string();
+            drawerUi_.cbStatus_ = "Opening " + std::filesystem::path(full).stem().string();
         else
-            cbStatus_ = openLevelError_;
+            drawerUi_.cbStatus_ = drawerUi_.openLevelError_;
 #else
         // requestOpenLevel/openLevelError_ need AVER_MODULE_SCENE (levels only instantiate into
         // scene::World). Falling through to openWithShell() would reintroduce the Notepad bug above.
-        cbStatus_ = "This build has no Scene module, so levels cannot be opened";
+        drawerUi_.cbStatus_ = "This build has no Scene module, so levels cannot be opened";
 #endif
         return;
     }
 #if AVER_MODULE_SCENE
     // [wave5/sequencer] A sequence file opens in the Sequencer, bound by name to the open level's actors.
     if (ext == ".ocseq") {
-        if (openSequenceFile(full)) cbStatus_ = "Opened in the Sequencer";
+        if (openSequenceFile(full)) drawerUi_.cbStatus_ = "Opened in the Sequencer";
         return;
     }
 #endif
-    if (assetEditors_.open(full)) { cbStatus_ = "Opened in the asset editor"; return; }
+    if (assetEditors_.open(full)) { drawerUi_.cbStatus_ = "Opened in the asset editor"; return; }
     if (cbIsSourceFile(ext)) {
         const editor::IdeInfo& ide = cbIde();
-        if (editor::openInIde(ide, full)) { cbStatus_ = "Opened in " + ide.name; return; }
-        cbStatus_ = "Could not open in " + ide.name;
+        if (editor::openInIde(ide, full)) { drawerUi_.cbStatus_ = "Opened in " + ide.name; return; }
+        drawerUi_.cbStatus_ = "Could not open in " + ide.name;
         return;
     }
-    cbStatus_ = editor::openWithShell(full) ? "Opened" : "Nothing is registered to open that";
+    drawerUi_.cbStatus_ = editor::openWithShell(full) ? "Opened" : "Nothing is registered to open that";
 }
 
 // Drops a folder's cached listing so the next frame re-reads it.
-void SandboxApp::cbInvalidate(const std::string& dir) { dirCache_.erase(dir); }
+void SandboxApp::cbInvalidate(const std::string& dir) { drawerUi_.dirCache_.erase(dir); }
 
 // False for engine content, which the browser mounts read-only.
 bool SandboxApp::cbIsEditable(const std::string& path) const { return !isEnginePath(path); }
@@ -290,24 +290,24 @@ bool SandboxApp::cbIsEditable(const std::string& path) const { return !isEngineP
 // thousand names are taken. NEVER returns a path that exists: an existing NewGraph.ocgraph may be
 // somebody's work in progress, and silently replacing it is the one outcome this must not have.
 std::filesystem::path SandboxApp::cbFreeAssetPath(const char* stem, const char* ext) {
-    if (!cbIsEditable(cbSelectedDir_)) { cbStatus_ = cbImportBlockedReason(cbSelectedDir_); return {}; }
+    if (!cbIsEditable(drawerUi_.cbSelectedDir_)) { drawerUi_.cbStatus_ = cbImportBlockedReason(drawerUi_.cbSelectedDir_); return {}; }
     std::error_code ec;
     for (int n = 0; n < 1000; ++n) {
         const std::string name = std::string(stem) + (n == 0 ? "" : std::to_string(n)) + ext;
-        std::filesystem::path candidate = std::filesystem::path(cbSelectedDir_) / name;
+        std::filesystem::path candidate = std::filesystem::path(drawerUi_.cbSelectedDir_) / name;
         if (!std::filesystem::exists(candidate, ec)) return candidate;
     }
-    cbStatus_ = std::string("Could not find a free name for a new ") + stem;
+    drawerUi_.cbStatus_ = std::string("Could not find a free name for a new ") + stem;
     return {};
 }
 
 // The tail every successful create runs: refresh the folder cache, select the new file, open its
 // editor (selection was the missing part; cbCreateSoundGraph used to leave the highlight stale).
 void SandboxApp::cbAdoptNewAsset(const std::filesystem::path& target, bool openEditor) {
-    cbInvalidate(cbSelectedDir_);
-    cbSelectedFile_ = target.string();
+    cbInvalidate(drawerUi_.cbSelectedDir_);
+    drawerUi_.cbSelectedFile_ = target.string();
     if (openEditor) assetEditors_.open(target.string());
-    cbStatus_ = "Created " + target.filename().string();
+    drawerUi_.cbStatus_ = "Created " + target.filename().string();
 }
 
 // Writes a new material SOURCE file -- an [AverMaterial] C# class -- into the selected folder.
@@ -338,12 +338,12 @@ void SandboxApp::cbCreateMaterial() {
 
     std::string why;
     if (!editor::writeNewFile(target.string(), text, &why)) {
-        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        drawerUi_.cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
         AVER_ERROR("[Editor] new material failed: {}", why);
         return;
     }
     cbAdoptNewAsset(target, /*openEditor=*/false);
-    cbStatus_ = "Created " + target.filename().string() + " (" + bound + ") - Compile C# to build its .ocmat";
+    drawerUi_.cbStatus_ = "Created " + target.filename().string() + " (" + bound + ") - Compile C# to build its .ocmat";
 }
 #endif
 
@@ -354,7 +354,7 @@ void SandboxApp::cbCreateSoundGraph() {
     if (target.empty()) return;
     std::string why;
     if (!fmt::saveOcSound(target.string(), editor::snStarterGraph(), &why)) {
-        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        drawerUi_.cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
         AVER_ERROR("[Editor] new sound graph failed: {}", why);
         return;
     }
@@ -372,7 +372,7 @@ void SandboxApp::cbCreateParticleEffect() {
     const particles::ParticleEffect fx = editor::pxStarterEffect(&extras);
     std::string why;
     if (!fmt::saveOcparticle(target.string(), fx, &extras, &why)) {
-        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        drawerUi_.cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
         AVER_ERROR("[Editor] new particle effect failed: {}", why);
         return;
     }
@@ -389,7 +389,7 @@ void SandboxApp::cbCreateParticleFromTemplate(usize index) {
     if (target.empty()) return;
     std::string why;
     if (!editor::writeNewFile(target.string(), all[index].text, &why)) {
-        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        drawerUi_.cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
         AVER_ERROR("[Editor] new particle effect from template failed: {}", why);
         return;
     }
@@ -439,7 +439,7 @@ void SandboxApp::cbCreateFoliageType() {
 #endif
     std::string why;
     if (!fmt::saveOcFoliage(target.string(), starter, &why)) {
-        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        drawerUi_.cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
         AVER_ERROR("[Editor] new foliage type failed: {}", why);
         return;
     }
@@ -459,12 +459,12 @@ void SandboxApp::cbCreateVehicleAsset() {
     if (target.empty()) return;
     const std::string text = editor::vehicleStarterText();
     if (text.empty()) {
-        cbStatus_ = "No starter vehicle is available in this build";
+        drawerUi_.cbStatus_ = "No starter vehicle is available in this build";
         return;
     }
     std::string why;
     if (!editor::writeNewFile(target.string(), text, &why)) {
-        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        drawerUi_.cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
         AVER_ERROR("[Editor] new vehicle asset failed: {}", why);
         return;
     }
@@ -483,7 +483,7 @@ void SandboxApp::cbCreateInputScheme() {
 
     std::string why;
     if (!editor::writeNewFile(target.string(), text, &why)) {
-        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        drawerUi_.cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
         AVER_ERROR("[Editor] new input scheme failed: {}", why);
         return;
     }
@@ -498,7 +498,7 @@ void SandboxApp::cbCreateCaptions() {
 
     std::string why;
     if (!editor::writeNewFile(target.string(), text, &why)) {
-        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        drawerUi_.cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
         AVER_ERROR("[Editor] new captions file failed: {}", why);
         return;
     }
@@ -511,7 +511,7 @@ void SandboxApp::cbCreateDataTable() {
     if (target.empty()) return;
     std::string why;
     if (!editor::writeNewFile(target.string(), fmt::writeTableCsv(editor::dataTableStarter()), &why)) {
-        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        drawerUi_.cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
         AVER_ERROR("[Editor] new data table failed: {}", why);
         return;
     }
@@ -521,8 +521,8 @@ void SandboxApp::cbCreateDataTable() {
 // Writes an empty string table Localization/<default culture>/<name>.ocstrings and opens it. The default culture is
 // the project's LOCALE.DEFAULT ("en" when unset).
 void SandboxApp::cbCreateStringTable(const std::string& name) {
-    if (!project_.valid()) { cbStatus_ = "Open a project first"; return; }
-    if (!fmt::validLocTable(name)) { cbStatus_ = "A table name is letters, digits and underscores"; return; }
+    if (!project_.valid()) { drawerUi_.cbStatus_ = "Open a project first"; return; }
+    if (!fmt::validLocTable(name)) { drawerUi_.cbStatus_ = "A table name is letters, digits and underscores"; return; }
     std::string culture = fmt::normalizeCulture(project_.localeDefault);
     if (culture.empty()) culture = "en";
     const std::filesystem::path dir = std::filesystem::path(project_.contentDir()) / "Localization" / culture;
@@ -533,7 +533,7 @@ void SandboxApp::cbCreateStringTable(const std::string& name) {
     starter.culture = culture;
     std::string why;
     if (!editor::writeNewFile(target.string(), fmt::writeOcstrings(starter), &why)) {
-        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        drawerUi_.cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
         AVER_ERROR("[Editor] new string table failed: {}", why);
         return;
     }
@@ -584,7 +584,7 @@ void SandboxApp::cbCreateGameplayDefs() {
 
     std::string why;
     if (!editor::writeNewFile(target.string(), kStarter, &why)) {
-        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        drawerUi_.cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
         AVER_ERROR("[Editor] new gameplay definitions failed: {}", why);
         return;
     }
@@ -601,7 +601,7 @@ void SandboxApp::cbCreateNodeGraph() {
 
     std::string why;
     if (!editor::writeNewFile(target.string(), text, &why)) {
-        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        drawerUi_.cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
         AVER_ERROR("[Editor] new graph failed: {}", why);
         return;
     }
@@ -619,7 +619,7 @@ void SandboxApp::cbCreateBehaviourTree() {
     // that looks like success) plus a blackboard schema with the keys the built-in leaves read.
     std::string why;
     if (!editor::btGraphWriteStarter(target.string(), &why)) {
-        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        drawerUi_.cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
         AVER_ERROR("[Editor] new behaviour tree failed: {}", why);
         return;
     }
@@ -633,7 +633,7 @@ void SandboxApp::cbCreateStateTree() {
     if (target.empty()) return;
     std::string why;
     if (!editor::stateTreeWriteStarter(target.string(), &why)) {
-        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        drawerUi_.cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
         AVER_ERROR("[Editor] new state tree failed: {}", why);
         return;
     }
@@ -645,7 +645,7 @@ void SandboxApp::cbCreateEqsQuery() {
     if (target.empty()) return;
     std::string why;
     if (!editor::eqsWriteStarter(target.string(), &why)) {
-        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        drawerUi_.cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
         AVER_ERROR("[Editor] new query failed: {}", why);
         return;
     }
@@ -657,7 +657,7 @@ void SandboxApp::cbCreateSmartObject() {
     if (target.empty()) return;
     std::string why;
     if (!editor::aiWriteSmartObjectStarter(target.string(), &why)) {
-        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        drawerUi_.cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
         AVER_ERROR("[Editor] new smart object failed: {}", why);
         return;
     }
@@ -671,7 +671,7 @@ void SandboxApp::cbCreateUiLayout() {
     if (target.empty()) return;
     std::string why;
     if (!editor::writeNewFile(target.string(), editor::uiStarterLayoutText(), &why)) {
-        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        drawerUi_.cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
         AVER_ERROR("[Editor] new UI layout failed: {}", why);
         return;
     }
@@ -685,7 +685,7 @@ void SandboxApp::cbCreateFontSet() {
     if (target.empty()) return;
     std::string why;
     if (!editor::writeNewFile(target.string(), editor::fontSetStarterText(), &why)) {
-        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        drawerUi_.cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
         AVER_ERROR("[Editor] new font set failed: {}", why);
         return;
     }
@@ -698,7 +698,7 @@ void SandboxApp::cbCreateBlendSpace() {
     if (target.empty()) return;
     std::string why;
     if (!anim::saveBlendSpace(target.string(), editor::bsStarterSpace(), &why)) {
-        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        drawerUi_.cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
         AVER_ERROR("[Editor] new blend space failed: {}", why);
         return;
     }
@@ -710,7 +710,7 @@ void SandboxApp::cbCreateStateMachine() {
     if (target.empty()) return;
     std::string why;
     if (!anim::saveStateMachine(target.string(), editor::asmStarterMachine(), &why)) {
-        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        drawerUi_.cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
         AVER_ERROR("[Editor] new state machine failed: {}", why);
         return;
     }
@@ -723,7 +723,7 @@ void SandboxApp::cbCreateMontage() {
     if (target.empty()) return;
     std::string why;
     if (!anim::saveMontage(target.string(), editor::montageStarter(), &why)) {
-        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        drawerUi_.cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
         AVER_ERROR("[Editor] new montage failed: {}", why);
         return;
     }
@@ -740,10 +740,10 @@ void SandboxApp::cbCreateIkRig(const std::string& skeletonPath) {
         fmt::OcSkeleton skel;
         std::string why;
         if (!fmt::loadOcSkel(skeletonPath, skel, &why)) {
-            cbStatus_ = "Could not read the skeleton: " + why;
+            drawerUi_.cbStatus_ = "Could not read the skeleton: " + why;
             return;
         }
-        cbSelectedDir_ = std::filesystem::path(skeletonPath).parent_path().string();
+        drawerUi_.cbSelectedDir_ = std::filesystem::path(skeletonPath).parent_path().string();
         stem = std::filesystem::path(skeletonPath).stem().string() + "Ik";
     }
     const std::filesystem::path target = cbFreeAssetPath(stem.c_str(), ".ocikrig");
@@ -756,7 +756,7 @@ void SandboxApp::cbCreateIkRig(const std::string& skeletonPath) {
     rig.name = target.stem().string();
     std::string why;
     if (!anim::saveIkRig(target.string(), rig, &why)) {
-        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        drawerUi_.cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
         AVER_ERROR("[Editor] new IK rig failed: {}", why);
         return;
     }
@@ -771,7 +771,7 @@ void SandboxApp::cbCreateFaceRig() {
     if (target.empty()) return;
     std::string why;
     if (!anim::saveFaceRig(target.string(), rig, &why)) {
-        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        drawerUi_.cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
         AVER_ERROR("[Editor] new face rig failed: {}", why);
         return;
     }
@@ -781,7 +781,7 @@ void SandboxApp::cbCreateFaceRig() {
 void SandboxApp::cbCreateRetarget(const std::string& sourceSkeletonPath) {
     std::string stem = "NewRetargeter";
     if (!sourceSkeletonPath.empty()) {
-        cbSelectedDir_ = std::filesystem::path(sourceSkeletonPath).parent_path().string();
+        drawerUi_.cbSelectedDir_ = std::filesystem::path(sourceSkeletonPath).parent_path().string();
         stem = std::filesystem::path(sourceSkeletonPath).stem().string() + "_Retarget";
     }
     const std::filesystem::path target = cbFreeAssetPath(stem.c_str(), ".ocretarget");
@@ -791,7 +791,7 @@ void SandboxApp::cbCreateRetarget(const std::string& sourceSkeletonPath) {
     a.name = target.stem().string();
     std::string why;
     if (!anim::saveRetarget(target.string(), a, &why)) {
-        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        drawerUi_.cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
         AVER_ERROR("[Editor] new retargeter failed: {}", why);
         return;
     }
@@ -811,7 +811,7 @@ bool SandboxApp::cbOpenRetargetFor(const std::string& targetSkeletonPath) {
         if (lower(want) == lower(have)) matches.push_back(rp);
     }
     if (matches.size() == 1) { assetEditors_.open(matches[0]); return true; }
-    cbStatus_ = matches.empty() ? "No retargeter in this project targets that skeleton: create one from the source skeleton's tab."
+    drawerUi_.cbStatus_ = matches.empty() ? "No retargeter in this project targets that skeleton: create one from the source skeleton's tab."
                                 : "Several retargeters target that skeleton: open the one you want from the Content Browser.";
     return false;
 }
@@ -822,7 +822,7 @@ void SandboxApp::cbCreateRig() {
     if (target.empty()) return;
     std::string why;
     if (!fmt::saveOcRig(target.string(), editor::rigStarter(target.stem().string()), &why)) {
-        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        drawerUi_.cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
         AVER_ERROR("[Editor] new control rig failed: {}", why);
         return;
     }
@@ -838,7 +838,7 @@ void SandboxApp::cbCreateSequence() {
     file.sequences.back().name = target.stem().string();
     file.sequences.back().autoplay = false;
     if (!writeFileText(target.string(), fmt::writeOcseq(file))) {
-        cbStatus_ = "Could not write " + target.filename().string();
+        drawerUi_.cbStatus_ = "Could not write " + target.filename().string();
         AVER_ERROR("[Editor] new sequence failed: {}", target.string());
         return;
     }
@@ -851,7 +851,7 @@ void SandboxApp::cbCreateMotionDb() {
     if (target.empty()) return;
     std::string why;
     if (!anim::saveMotionAsset(target.string(), editor::motionStarter(), &why)) {
-        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        drawerUi_.cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
         AVER_ERROR("[Editor] new motion database failed: {}", why);
         return;
     }
@@ -870,9 +870,9 @@ std::string SandboxApp::cbImportBlockedReason(const std::string& dir) const {
 // viewport drop target for why there's only one). A drag starting outside the selection carries
 // just that item, since grabbing an unselected file is unambiguously about that file.
 std::string SandboxApp::cbMoveDragPayloadFor(const std::string& dragged) const {
-    if (!cbIsSelected(dragged) || cbSelection_.size() <= 1) return dragged;
+    if (!cbIsSelected(dragged) || drawerUi_.cbSelection_.size() <= 1) return dragged;
     std::string blob;
-    for (const std::string& p : cbSelection_) {
+    for (const std::string& p : drawerUi_.cbSelection_) {
         if (!blob.empty()) blob += char(10);
         blob += p;
     }
@@ -922,9 +922,9 @@ void SandboxApp::cbFolderDropTarget(const std::string& folderPath) {
             // Latched, not acted on: a modal can't open mid-drag (ImGui gesture vs popup), so this
             // records the request and cbFileOpModals opens it next frame. Same shape as
             // cbWantRename_ and outlinerDeleteRequest_.
-            cbMoveSources_ = editor::splitDropPayload(std::string(static_cast<const char*>(pl->Data)));
-            cbMoveDest_ = folderPath;
-            cbWantMoveOrCopy_ = true;
+            drawerUi_.cbMoveSources_ = editor::splitDropPayload(std::string(static_cast<const char*>(pl->Data)));
+            drawerUi_.cbMoveDest_ = folderPath;
+            drawerUi_.cbWantMoveOrCopy_ = true;
         }
     }
     ImGui::EndDragDropTarget();
@@ -957,14 +957,14 @@ bool SandboxApp::cbCopyEntryTo(const std::string& src, const std::string& destDi
     const std::filesystem::path s(src);
     const std::filesystem::path d = std::filesystem::path(destDir) / s.filename();
     if (std::filesystem::exists(d, ec)) {
-        cbStatus_ = "'" + s.filename().string() + "' is already in that folder";
+        drawerUi_.cbStatus_ = "'" + s.filename().string() + "' is already in that folder";
         return false;
     }
     if (std::filesystem::is_directory(s, ec))
         std::filesystem::copy(s, d, std::filesystem::copy_options::recursive, ec);
     else
         std::filesystem::copy_file(s, d, ec);
-    if (ec) { cbStatus_ = "Copy failed: " + ec.message(); return false; }
+    if (ec) { drawerUi_.cbStatus_ = "Copy failed: " + ec.message(); return false; }
     cbInvalidate(destDir);
     return true;
 }
@@ -974,23 +974,23 @@ bool SandboxApp::cbMoveEntryTo(const std::string& src, const std::string& destDi
     std::error_code ec;
     const std::filesystem::path s(src);
     const std::filesystem::path d = std::filesystem::path(destDir) / s.filename();
-    if (!cbIsEditable(src)) { cbStatus_ = "Engine content cannot be moved"; return false; }
+    if (!cbIsEditable(src)) { drawerUi_.cbStatus_ = "Engine content cannot be moved"; return false; }
     if (std::filesystem::exists(d, ec)) {
-        cbStatus_ = "'" + s.filename().string() + "' is already in that folder";
+        drawerUi_.cbStatus_ = "'" + s.filename().string() + "' is already in that folder";
         return false;
     }
     std::filesystem::rename(s, d, ec);
-    if (ec) { cbStatus_ = "Move failed: " + ec.message(); return false; }
+    if (ec) { drawerUi_.cbStatus_ = "Move failed: " + ec.message(); return false; }
     // Both folders invalidated: unlike rename/duplicate/create (which stay put), a move empties one
     // and fills another -- forgetting the source leaves a ghost tile that opens nothing.
     cbInvalidate(s.parent_path().string());
     cbInvalidate(destDir);
     // The same bookkeeping cbRenameEntry does, for the same reason: here the path IS the identity.
-    if (cbSelectedDir_ == src)  cbSelectedDir_ = d.string();
-    if (cbSelectedFile_ == src) cbSelectedFile_ = d.string();
-    for (std::string& sp : cbSelection_) if (sp == src) sp = d.string();
+    if (drawerUi_.cbSelectedDir_ == src)  drawerUi_.cbSelectedDir_ = d.string();
+    if (drawerUi_.cbSelectedFile_ == src) drawerUi_.cbSelectedFile_ = d.string();
+    for (std::string& sp : drawerUi_.cbSelection_) if (sp == src) sp = d.string();
     cbRewriteHistory(src, d.string());
-    if (const std::string a = cbKeyOf(src), b = cbKeyOf(d.string()); !a.empty() && !b.empty()) { cbCols_.rebase(a, b); cbColsSave(); }
+    if (const std::string a = cbKeyOf(src), b = cbKeyOf(d.string()); !a.empty() && !b.empty()) { drawerUi_.cbCols_.rebase(a, b); cbColsSave(); }
     return true;
 }
 
@@ -1088,8 +1088,8 @@ void SandboxApp::cbAfterMoveOrCopy(const std::vector<std::string>& srcs) {
         std::error_code ec;
         if (std::filesystem::is_directory(std::filesystem::path(sp), ec)) { wantMeshReload_ = true; break; }
     }
-    cbMoveSources_.clear();
-    cbMoveDest_.clear();
+    drawerUi_.cbMoveSources_.clear();
+    drawerUi_.cbMoveDest_.clear();
 }
 
 void SandboxApp::cbRenameEntry(const std::string& from, const std::string& newName, bool repointRefs) {
@@ -1097,20 +1097,20 @@ void SandboxApp::cbRenameEntry(const std::string& from, const std::string& newNa
     std::error_code ec;
     const std::filesystem::path src(from);
     const std::filesystem::path dst = src.parent_path() / newName;
-    if (std::filesystem::exists(dst, ec)) { cbStatus_ = "'" + newName + "' already exists"; return; }
+    if (std::filesystem::exists(dst, ec)) { drawerUi_.cbStatus_ = "'" + newName + "' already exists"; return; }
     std::filesystem::rename(src, dst, ec);
-    if (ec) { cbStatus_ = "Rename failed: " + ec.message(); return; }
+    if (ec) { drawerUi_.cbStatus_ = "Rename failed: " + ec.message(); return; }
 
     // AFTER the filesystem rename, never before: if the rename fails there is nothing to repoint,
     // and repointing first would leave every referrer naming a file that does not exist yet.
     RefRewriteReport rep;
     if (repointRefs) rep = cbRewriteReferences(from, dst.string());
     cbInvalidate(src.parent_path().string());
-    if (cbSelectedDir_ == from)  { cbSelectedDir_ = dst.string(); }
-    if (cbSelectedFile_ == from) { cbSelectedFile_ = dst.string(); }
-    for (std::string& sp : cbSelection_) if (sp == from) sp = dst.string();
+    if (drawerUi_.cbSelectedDir_ == from)  { drawerUi_.cbSelectedDir_ = dst.string(); }
+    if (drawerUi_.cbSelectedFile_ == from) { drawerUi_.cbSelectedFile_ = dst.string(); }
+    for (std::string& sp : drawerUi_.cbSelection_) if (sp == from) sp = dst.string();
     cbRewriteHistory(from, dst.string());
-    if (const std::string a = cbKeyOf(from), b = cbKeyOf(dst.string()); !a.empty() && !b.empty()) { cbCols_.rebase(a, b); cbColsSave(); }
+    if (const std::string a = cbKeyOf(from), b = cbKeyOf(dst.string()); !a.empty() && !b.empty()) { drawerUi_.cbCols_.rebase(a, b); cbColsSave(); }
 
     // The same id invalidation a move causes (rename IS a move within a folder): content_'s meshes
     // are keyed by fnv1a64 of the content-relative path, so renaming retires the old id and creates
@@ -1127,29 +1127,29 @@ void SandboxApp::cbRenameEntry(const std::string& from, const std::string& newNa
     // Reports partial failure separately from success: N separate writes, not transactional, so
     // "3 of 4" is a state the author needs to see.
     if (!repointRefs) {
-        cbStatus_ = "Renamed to " + newName;
+        drawerUi_.cbStatus_ = "Renamed to " + newName;
     } else if (rep.filesFailed) {
-        cbStatus_ = "Renamed to " + newName + " -- repointed " + std::to_string(rep.refsRewritten) +
+        drawerUi_.cbStatus_ = "Renamed to " + newName + " -- repointed " + std::to_string(rep.refsRewritten) +
                     " reference(s) in " + std::to_string(rep.filesChanged) + " file(s), but " +
                     std::to_string(rep.filesFailed) + " file(s) could NOT be updated";
         AVER_ERROR("[Editor] {} file(s) referencing '{}' could not be rewritten -- they still name "
                    "the old path", rep.filesFailed, from);
     } else if (rep.filesChanged) {
-        cbStatus_ = "Renamed to " + newName + " -- repointed " + std::to_string(rep.refsRewritten) +
+        drawerUi_.cbStatus_ = "Renamed to " + newName + " -- repointed " + std::to_string(rep.refsRewritten) +
                     " reference(s) in " + std::to_string(rep.filesChanged) + " file(s)";
     } else {
-        cbStatus_ = "Renamed to " + newName;
+        drawerUi_.cbStatus_ = "Renamed to " + newName;
     }
 }
 
 // Rewrites history entries under `from` to `to`, dropping them when `to` is empty.
 void SandboxApp::cbRewriteHistory(const std::string& from, const std::string& to) {
     std::vector<std::string> kept;
-    kept.reserve(cbHistory_.size());
-    const std::string current = cbHistoryPos_ >= 0 && cbHistoryPos_ < static_cast<int>(cbHistory_.size())
-                              ? cbHistory_[static_cast<usize>(cbHistoryPos_)] : std::string();
+    kept.reserve(drawerUi_.cbHistory_.size());
+    const std::string current = drawerUi_.cbHistoryPos_ >= 0 && drawerUi_.cbHistoryPos_ < static_cast<int>(drawerUi_.cbHistory_.size())
+                              ? drawerUi_.cbHistory_[static_cast<usize>(drawerUi_.cbHistoryPos_)] : std::string();
     std::string newCurrent = current;
-    for (const std::string& h : cbHistory_) {
+    for (const std::string& h : drawerUi_.cbHistory_) {
         const bool under = h.size() >= from.size() && h.compare(0, from.size(), from) == 0 &&
                            (h.size() == from.size() || h[from.size()] == '\\' || h[from.size()] == '/');
         std::string next = h;
@@ -1160,11 +1160,11 @@ void SandboxApp::cbRewriteHistory(const std::string& from, const std::string& to
         if (h == current) newCurrent = next;
         if (kept.empty() || kept.back() != next) kept.push_back(next);
     }
-    cbHistory_.swap(kept);
-    cbHistoryPos_ = -1;
-    for (usize i = 0; i < cbHistory_.size(); ++i)
-        if (cbHistory_[i] == newCurrent) { cbHistoryPos_ = static_cast<int>(i); break; }
-    if (cbHistoryPos_ < 0 && !cbHistory_.empty()) cbHistoryPos_ = static_cast<int>(cbHistory_.size()) - 1;
+    drawerUi_.cbHistory_.swap(kept);
+    drawerUi_.cbHistoryPos_ = -1;
+    for (usize i = 0; i < drawerUi_.cbHistory_.size(); ++i)
+        if (drawerUi_.cbHistory_[i] == newCurrent) { drawerUi_.cbHistoryPos_ = static_cast<int>(i); break; }
+    if (drawerUi_.cbHistoryPos_ < 0 && !drawerUi_.cbHistory_.empty()) drawerUi_.cbHistoryPos_ = static_cast<int>(drawerUi_.cbHistory_.size()) - 1;
 }
 
 namespace {
@@ -1229,7 +1229,7 @@ void SandboxApp::cbDuplicateEntry(const std::string& path) {
         std::filesystem::copy(src, dst, std::filesystem::copy_options::recursive, ec);
     else
         std::filesystem::copy_file(src, dst, ec);
-    if (ec) { cbStatus_ = "Duplicate failed: " + ec.message(); return; }
+    if (ec) { drawerUi_.cbStatus_ = "Duplicate failed: " + ec.message(); return; }
     // A duplicated level gets its own NAME and ID -- see restampLevelIdentity. The copy is already
     // on disk and valid, so a failure here only costs the rename and is logged, not reported as a
     // failed duplicate.
@@ -1239,34 +1239,34 @@ void SandboxApp::cbDuplicateEntry(const std::string& path) {
         AVER_WARN("[Editor] duplicated '{}' but could not give the copy its own NAME/ID",
                   dst.filename().string());
     cbInvalidate(src.parent_path().string());
-    cbStatus_ = "Duplicated as " + dst.filename().string();
+    drawerUi_.cbStatus_ = "Duplicated as " + dst.filename().string();
 }
 
 // Moves a file or folder to the recycle bin and drops it from the selection and history.
 void SandboxApp::cbDeleteEntry(const std::string& path) {
     const std::filesystem::path src(path);
     const std::string parent = src.parent_path().string();
-    if (!editor::moveToRecycleBin(path)) { cbStatus_ = "Could not delete " + src.filename().string(); return; }
+    if (!editor::moveToRecycleBin(path)) { drawerUi_.cbStatus_ = "Could not delete " + src.filename().string(); return; }
     cbInvalidate(parent);
-    if (cbSelectedFile_ == path) cbSelectedFile_.clear();
-    cbSelection_.erase(std::remove(cbSelection_.begin(), cbSelection_.end(), path),
-                       cbSelection_.end());
-    if (cbSelectedDir_ == path) cbSelectedDir_ = parent;
+    if (drawerUi_.cbSelectedFile_ == path) drawerUi_.cbSelectedFile_.clear();
+    drawerUi_.cbSelection_.erase(std::remove(drawerUi_.cbSelection_.begin(), drawerUi_.cbSelection_.end(), path),
+                       drawerUi_.cbSelection_.end());
+    if (drawerUi_.cbSelectedDir_ == path) drawerUi_.cbSelectedDir_ = parent;
     cbRewriteHistory(path, std::string());
-    cbStatus_ = "Moved " + src.filename().string() + " to the recycle bin";
+    drawerUi_.cbStatus_ = "Moved " + src.filename().string() + " to the recycle bin";
 }
 
 // Creates a folder under parent. Refuses engine content.
 void SandboxApp::cbCreateFolder(const std::string& parent, const std::string& name) {
     if (name.empty()) return;
-    if (!cbIsEditable(parent)) { cbStatus_ = "Engine content is read-only"; return; }
+    if (!cbIsEditable(parent)) { drawerUi_.cbStatus_ = "Engine content is read-only"; return; }
     std::error_code ec;
     const std::filesystem::path dst = std::filesystem::path(parent) / name;
-    if (std::filesystem::exists(dst, ec)) { cbStatus_ = "'" + name + "' already exists"; return; }
+    if (std::filesystem::exists(dst, ec)) { drawerUi_.cbStatus_ = "'" + name + "' already exists"; return; }
     std::filesystem::create_directory(dst, ec);
-    if (ec) { cbStatus_ = "Could not create folder: " + ec.message(); return; }
+    if (ec) { drawerUi_.cbStatus_ = "Could not create folder: " + ec.message(); return; }
     cbInvalidate(parent);
-    cbStatus_ = "Created " + name;
+    drawerUi_.cbStatus_ = "Created " + name;
 }
 
 // Draws the right-click menu for one Content Browser entry.
@@ -1281,7 +1281,7 @@ void SandboxApp::cbItemContextMenu(const std::string& full, const std::string& n
             for (usize i = 0; i < editor::detectedIdes().size(); ++i) {
                 const editor::IdeInfo& ide = editor::detectedIdes()[i];
                 if (ImGui::MenuItem(ide.name.c_str()))
-                    cbStatus_ = editor::openInIde(ide, full) ? "Opened in " + ide.name
+                    drawerUi_.cbStatus_ = editor::openInIde(ide, full) ? "Opened in " + ide.name
                                                             : "Could not open in " + ide.name;
             }
             ImGui::EndMenu();
@@ -1290,11 +1290,11 @@ void SandboxApp::cbItemContextMenu(const std::string& full, const std::string& n
     if (!isDir && lowerExt(std::filesystem::path(full)) == ".json" && ImGui::MenuItem("Open as Data Table")) {
         fmt::OcTableData probe;
         std::string why;
-        if (!fmt::loadTable(full, probe, &why)) cbStatus_ = "Not a data table: " + why;
-        else if (assetEditors_.open(full)) cbStatus_ = "Opened as a data table";
+        if (!fmt::loadTable(full, probe, &why)) drawerUi_.cbStatus_ = "Not a data table: " + why;
+        else if (assetEditors_.open(full)) drawerUi_.cbStatus_ = "Opened as a data table";
     }
     if (ImGui::MenuItem("Show in Explorer")) editor::revealInFileManager(full);
-    if (ImGui::MenuItem("Copy Path")) { ImGui::SetClipboardText(full.c_str()); cbStatus_ = "Path copied"; }
+    if (ImGui::MenuItem("Copy Path")) { ImGui::SetClipboardText(full.c_str()); drawerUi_.cbStatus_ = "Path copied"; }
     // Reimport / Import options... on an FBX import record, or on any file the record names.
     if (!isDir) modelReimportMenuItems(full, project_.valid() ? project_.dir : std::string(), project_.contentDir());
     // Find References on demand: the scan already existed but could only be reached from the
@@ -1306,18 +1306,18 @@ void SandboxApp::cbItemContextMenu(const std::string& full, const std::string& n
         showReferences_ = true;
     }
     if (project_.valid() && ImGui::MenuItem("Validate Assets")) {
-        cbStatus_ = editor::runAssetValidation(project_.contentDir(), full);
+        drawerUi_.cbStatus_ = editor::runAssetValidation(project_.contentDir(), full);
         showMessageLog_ = true;
     }
     if (!isDir) cbCollectionMenu(full);
     ImGui::Separator();
     ImGui::BeginDisabled(!editable);
     if (ImGui::MenuItem("Rename", "F2")) {
-        cbContextPath_ = full; cbContextIsDir_ = isDir; cbWantRename_ = true;
-        std::snprintf(cbRenameBuf_, sizeof cbRenameBuf_, "%s", name.c_str());
+        drawerUi_.cbContextPath_ = full; drawerUi_.cbContextIsDir_ = isDir; drawerUi_.cbWantRename_ = true;
+        std::snprintf(drawerUi_.cbRenameBuf_, sizeof drawerUi_.cbRenameBuf_, "%s", name.c_str());
     }
-    if (ImGui::MenuItem("Duplicate", "Ctrl+D")) { cbContextPath_ = full; cbContextIsDir_ = isDir; cbWantDuplicate_ = true; }
-    if (ImGui::MenuItem("Delete", "Del")) { cbContextPath_ = full; cbContextIsDir_ = isDir; cbWantDelete_ = true; }
+    if (ImGui::MenuItem("Duplicate", "Ctrl+D")) { drawerUi_.cbContextPath_ = full; drawerUi_.cbContextIsDir_ = isDir; drawerUi_.cbWantDuplicate_ = true; }
+    if (ImGui::MenuItem("Delete", "Del")) { drawerUi_.cbContextPath_ = full; drawerUi_.cbContextIsDir_ = isDir; drawerUi_.cbWantDelete_ = true; }
     ImGui::EndDisabled();
     if (!editable) ImGui::TextDisabled("Engine content is read-only here.");
     ImGui::EndPopup();
@@ -1325,8 +1325,8 @@ void SandboxApp::cbItemContextMenu(const std::string& full, const std::string& n
 
 // True for a path inside the Engine root -- what earns the Module folder icon.
 bool SandboxApp::isEnginePath(const std::string& p) const {
-    return !cbEngineRoot_.empty() && p.size() >= cbEngineRoot_.size() &&
-           p.compare(0, cbEngineRoot_.size(), cbEngineRoot_) == 0;
+    return !drawerUi_.cbEngineRoot_.empty() && p.size() >= drawerUi_.cbEngineRoot_.size() &&
+           p.compare(0, drawerUi_.cbEngineRoot_.size(), drawerUi_.cbEngineRoot_) == 0;
 }
 
 // Draws the Content Browser: navigation, Add and Import, and a folder tree beside a file view.
@@ -1337,16 +1337,16 @@ void SandboxApp::drawContentBrowser() {
         ImGui::TextDisabled("Create or open a project (File menu) to browse its Content folder.");
         return;
     }
-    if (cbSelectedDir_.empty()) cbNavigate(roots.front().path);
+    if (drawerUi_.cbSelectedDir_.empty()) cbNavigate(roots.front().path);
     cbColsEnsure();
-    if (!drawerStartSub_.empty()) {
+    if (!drawerUi_.drawerStartSub_.empty()) {
         // Canonicalised so separators and case match what the tree builds from directory_iterator.
         namespace fs = std::filesystem;
         std::error_code ec;
-        const fs::path target = fs::canonical(fs::path(roots.front().path) / drawerStartSub_, ec);
-        if (ec) AVER_WARN("[Sandbox] --drawer content:{}: no such folder under Content", drawerStartSub_);
+        const fs::path target = fs::canonical(fs::path(roots.front().path) / drawerUi_.drawerStartSub_, ec);
+        if (ec) AVER_WARN("[Sandbox] --drawer content:{}: no such folder under Content", drawerUi_.drawerStartSub_);
         else    cbNavigate(target.string());
-        drawerStartSub_.clear();
+        drawerUi_.drawerStartSub_.clear();
     }
     ImGui::BeginDisabled(!cbCanBack());
     if (ImGui::ArrowButton("##cbback", ImGuiDir_Left)) cbBack();
@@ -1368,8 +1368,8 @@ void SandboxApp::drawContentBrowser() {
 
     if (ImGui::Button("+ Add")) ImGui::OpenPopup("cbAddMenu");
     if (ImGui::BeginPopup("cbAddMenu")) {
-        ImGui::BeginDisabled(!cbIsEditable(cbSelectedDir_));
-        if (ImGui::MenuItem("New Folder")) { cbWantNewFolder_ = true; cbNewFolderBuf_[0] = '\0'; }
+        ImGui::BeginDisabled(!cbIsEditable(drawerUi_.cbSelectedDir_));
+        if (ImGui::MenuItem("New Folder")) { drawerUi_.cbWantNewFolder_ = true; drawerUi_.cbNewFolderBuf_[0] = '\0'; }
         ImGui::EndDisabled();
         ImGui::Separator();
         // These four ignore the selected folder (says so, rather than letting "+ Add" imply "add
@@ -1394,7 +1394,7 @@ void SandboxApp::drawContentBrowser() {
         // first format the editor could edit but nothing could produce -- the "built through every
         // layer, read by nothing" defect again. Same argument for .ocgraph and .ocbt: both had a
         // working editor tab and icon but no way to be brought into existence.
-        ImGui::BeginDisabled(!cbIsEditable(cbSelectedDir_));
+        ImGui::BeginDisabled(!cbIsEditable(drawerUi_.cbSelectedDir_));
         if (ImGui::MenuItem("New Aver Node Graph")) cbCreateNodeGraph();
         uiReg_.track("cb.add.nodeGraph");
         if (ImGui::MenuItem("New Behaviour Tree"))  cbCreateBehaviourTree();
@@ -1458,7 +1458,7 @@ void SandboxApp::drawContentBrowser() {
             if (!hairTarget.empty()) {
                 std::string hairWhy;
                 if (editor::writeStarterHairGroom(hairTarget.string(), &hairWhy)) cbAdoptNewAsset(hairTarget);
-                else cbStatus_ = "Could not write " + hairTarget.filename().string() + ": " + hairWhy;
+                else drawerUi_.cbStatus_ = "Could not write " + hairTarget.filename().string() + ": " + hairWhy;
             }
         }
         uiReg_.track("cb.add.hairGroom");
@@ -1470,9 +1470,9 @@ void SandboxApp::drawContentBrowser() {
             const std::filesystem::path target = cbFreeAssetPath("NewShape", ".ocshape");
             std::string why;
             if (target.empty()) {
-                cbStatus_ = "Could not find a free name for a new collision shape";
+                drawerUi_.cbStatus_ = "Could not find a free name for a new collision shape";
             } else if (!editor::writeNewShapeStarter(target.string(), &why)) {
-                cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+                drawerUi_.cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
                 AVER_ERROR("[Editor] new collision shape failed: {}", why);
             } else {
                 cbAdoptNewAsset(target);
@@ -1483,9 +1483,9 @@ void SandboxApp::drawContentBrowser() {
             const std::filesystem::path target = project_.valid() ? freeInstanceSetPath(project_.contentDir()) : std::filesystem::path();
             std::string why;
             if (target.empty()) {
-                cbStatus_ = "Could not find a free name for a new instance set";
+                drawerUi_.cbStatus_ = "Could not find a free name for a new instance set";
             } else if (!fmt::saveOcInstances(target.string(), fmt::OcInstanceData{}, &why)) {
-                cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+                drawerUi_.cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
                 AVER_ERROR("[Editor] new instance set failed: {}", why);
             } else {
                 cbNavigate(target.parent_path().string());
@@ -1499,7 +1499,7 @@ void SandboxApp::drawContentBrowser() {
         uiReg_.track("cb.add.captions");
         if (ImGui::MenuItem("New Data Table"))      cbCreateDataTable();
         uiReg_.track("cb.add.dataTable");
-        if (ImGui::MenuItem("New String Table")) { cbWantNewStringTable_ = true; cbNewStringTableBuf_[0] = '\0'; }
+        if (ImGui::MenuItem("New String Table")) { drawerUi_.cbWantNewStringTable_ = true; drawerUi_.cbNewStringTableBuf_[0] = '\0'; }
         uiReg_.track("cb.add.stringTable");
         if (ImGui::MenuItem("New Gameplay Definitions")) cbCreateGameplayDefs();
         uiReg_.track("cb.add.gameplayDefs");
@@ -1514,9 +1514,9 @@ void SandboxApp::drawContentBrowser() {
     }
     ImGui::SameLine();
     {
-        const std::string reason = cbImportBlockedReason(cbSelectedDir_);
+        const std::string reason = cbImportBlockedReason(drawerUi_.cbSelectedDir_);
         ImGui::BeginDisabled(!reason.empty());
-        if (ImGui::Button("Import...")) cbWantImport_ = true;
+        if (ImGui::Button("Import...")) drawerUi_.cbWantImport_ = true;
         ImGui::EndDisabled();
         if (!reason.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip("%s", reason.c_str());
@@ -1527,7 +1527,7 @@ void SandboxApp::drawContentBrowser() {
     {
         ModelReimportResult mr;
         if (takeModelReimportResult(mr)) {
-            cbStatus_ = mr.ok ? mr.title : mr.title + " - see the Output Log";
+            drawerUi_.cbStatus_ = mr.ok ? mr.title : mr.title + " - see the Output Log";
             notifyOutcome(mr.ok ? editor::NotifySeverity::Success : editor::NotifySeverity::Error, mr.title, mr.body, !mr.ok);
             cbInvalidate(mr.destDir);
             wantMeshReload_ = true;
@@ -1542,30 +1542,30 @@ void SandboxApp::drawContentBrowser() {
             if (active) ImGui::PopStyleColor();
             return hit;
         };
-        const f32 controls = cbGallery_ ? 250.0f : 130.0f;
+        const f32 controls = drawerUi_.cbGallery_ ? 250.0f : 130.0f;
         ImGui::SameLine();
         ImGui::SetNextItemWidth(std::fmax(80.0f*viewState_.dpi_,
             ImGui::GetWindowWidth() - ImGui::GetCursorPosX() - (controls + 14.0f)*viewState_.dpi_));
         ImGui::InputTextWithHint("##cbsearch",
-                                 cbSearchDeep_ ? "Search this folder and below..."
+                                 drawerUi_.cbSearchDeep_ ? "Search this folder and below..."
                                                : "Search this folder...",
-                                 cbFilter_, sizeof(cbFilter_));
+                                 drawerUi_.cbFilter_, sizeof(drawerUi_.cbFilter_));
         ImGui::SameLine();
         // Off by default: the search box keeps meaning what it always meant until asked for more.
         // Hint text changes with it, since silently searching more than the visible folder confuses.
-        ImGui::Checkbox("Subfolders", &cbSearchDeep_);
+        ImGui::Checkbox("Subfolders", &drawerUi_.cbSearchDeep_);
         uiReg_.track("contentBrowser.searchDeep");
 
         ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), ImGui::GetWindowWidth() - controls*viewState_.dpi_));
-        if (viewTab("Tiles", cbGallery_)) cbGallery_ = true;
+        if (viewTab("Tiles", drawerUi_.cbGallery_)) drawerUi_.cbGallery_ = true;
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Gallery view");
         ImGui::SameLine(0.0f, 2.0f*viewState_.dpi_);
-        if (viewTab("List", !cbGallery_)) cbGallery_ = false;
+        if (viewTab("List", !drawerUi_.cbGallery_)) drawerUi_.cbGallery_ = false;
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("List view");
-        if (cbGallery_) {
+        if (drawerUi_.cbGallery_) {
             ImGui::SameLine();
             ImGui::SetNextItemWidth(110.0f*viewState_.dpi_);
-            ImGui::SliderFloat("##cbzoom", &cbTileSize_, 56.0f, 168.0f, "%.0f");
+            ImGui::SliderFloat("##cbzoom", &drawerUi_.cbTileSize_, 56.0f, 168.0f, "%.0f");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Tile size");
         }
     }
@@ -1578,7 +1578,7 @@ void SandboxApp::drawContentBrowser() {
     for (const CbRoot& r : roots) {
         ImGuiTreeNodeFlags rootFlags = ImGuiTreeNodeFlags_SpanAvailWidth;
         if (!r.engine) rootFlags |= ImGuiTreeNodeFlags_DefaultOpen;
-        if (cbSelectedDir_ == r.path) rootFlags |= ImGuiTreeNodeFlags_Selected;
+        if (drawerUi_.cbSelectedDir_ == r.path) rootFlags |= ImGuiTreeNodeFlags_Selected;
         ImGui::PushID(r.label);
         const bool open = ImGui::TreeNodeEx(r.label, rootFlags);
         if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) cbNavigate(r.path);
@@ -1591,20 +1591,20 @@ void SandboxApp::drawContentBrowser() {
 
     ImGui::SameLine();
     ImGui::BeginChild("cbFiles", ImVec2(0, -footerH), true);
-    drawFolderFiles(cbSelectedDir_);
+    drawFolderFiles(drawerUi_.cbSelectedDir_);
     if (ImGui::BeginPopupContextWindow("##cbbgctx",
             ImGuiPopupFlags_MouseButtonRight | ImGuiPopupFlags_NoOpenOverItems)) {
-        const std::string reason = cbImportBlockedReason(cbSelectedDir_);
+        const std::string reason = cbImportBlockedReason(drawerUi_.cbSelectedDir_);
         ImGui::BeginDisabled(!reason.empty());
-        if (ImGui::MenuItem("New Folder")) { cbWantNewFolder_ = true; cbNewFolderBuf_[0] = '\0'; }
-        if (ImGui::MenuItem("Import...")) cbWantImport_ = true;
+        if (ImGui::MenuItem("New Folder")) { drawerUi_.cbWantNewFolder_ = true; drawerUi_.cbNewFolderBuf_[0] = '\0'; }
+        if (ImGui::MenuItem("Import...")) drawerUi_.cbWantImport_ = true;
         ImGui::EndDisabled();
         if (!reason.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip("%s", reason.c_str());
         ImGui::Separator();
-        if (ImGui::MenuItem("Show in Explorer")) editor::revealInFileManager(cbSelectedDir_);
-        if (ImGui::MenuItem("Copy Path")) { ImGui::SetClipboardText(cbSelectedDir_.c_str()); cbStatus_ = "Path copied"; }
-        if (ImGui::MenuItem("Refresh")) cbInvalidate(cbSelectedDir_);
+        if (ImGui::MenuItem("Show in Explorer")) editor::revealInFileManager(drawerUi_.cbSelectedDir_);
+        if (ImGui::MenuItem("Copy Path")) { ImGui::SetClipboardText(drawerUi_.cbSelectedDir_.c_str()); drawerUi_.cbStatus_ = "Path copied"; }
+        if (ImGui::MenuItem("Refresh")) cbInvalidate(drawerUi_.cbSelectedDir_);
         ImGui::EndPopup();
     }
     ImGui::EndChild();
@@ -1616,17 +1616,17 @@ void SandboxApp::drawContentBrowser() {
 
 // Draws the browser footer: the folder's counts, the selection, and the last operation's outcome.
 void SandboxApp::cbFooter() {
-    const DirListing& l = dirListing(cbSelectedDir_);
+    const DirListing& l = dirListing(drawerUi_.cbSelectedDir_);
     const usize files = l.entries.size() - l.dirCount;
     ImGui::Text("%zu folder%s, %zu file%s", l.dirCount, l.dirCount == 1 ? "" : "s",
                 files, files == 1 ? "" : "s");
-    if (!cbSelectedFile_.empty()) {
+    if (!drawerUi_.cbSelectedFile_.empty()) {
         ImGui::SameLine();
-        ImGui::TextDisabled("|  %s", std::filesystem::path(cbSelectedFile_).filename().string().c_str());
+        ImGui::TextDisabled("|  %s", std::filesystem::path(drawerUi_.cbSelectedFile_).filename().string().c_str());
     }
-    if (!cbStatus_.empty()) {
+    if (!drawerUi_.cbStatus_.empty()) {
         ImGui::SameLine();
-        ImGui::TextDisabled("|  %s", cbStatus_.c_str());
+        ImGui::TextDisabled("|  %s", drawerUi_.cbStatus_.c_str());
     }
 }
 
@@ -1638,48 +1638,48 @@ void SandboxApp::cbShortcuts() {
     // CTRL+A COMES FIRST, because it is the one key here that has to work with NOTHING
     // selected -- which is exactly the state the guard below returns on.
     if (!io.WantTextInput && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_A, false)) {
-        cbSelection_.clear();
-        for (const std::string& p : cbShownPaths_) cbSelection_.push_back(p);
-        if (!cbSelection_.empty() && !cbIsSelected(cbSelectedFile_)) cbSelectedFile_ = cbSelection_.front();
-        cbStatus_ = std::to_string(cbSelection_.size()) + " item(s) selected";
+        drawerUi_.cbSelection_.clear();
+        for (const std::string& p : drawerUi_.cbShownPaths_) drawerUi_.cbSelection_.push_back(p);
+        if (!drawerUi_.cbSelection_.empty() && !cbIsSelected(drawerUi_.cbSelectedFile_)) drawerUi_.cbSelectedFile_ = drawerUi_.cbSelection_.front();
+        drawerUi_.cbStatus_ = std::to_string(drawerUi_.cbSelection_.size()) + " item(s) selected";
         return;
     }
-    if (io.WantTextInput || io.WantCaptureKeyboard || cbSelectedFile_.empty()) return;
+    if (io.WantTextInput || io.WantCaptureKeyboard || drawerUi_.cbSelectedFile_.empty()) return;
     std::error_code ec;
-    const bool isDir = std::filesystem::is_directory(cbSelectedFile_, ec);
-    const bool editable = cbIsEditable(cbSelectedFile_);
-    if (ImGui::IsKeyPressed(ImGuiKey_Enter, false)) cbOpenEntry(cbSelectedFile_, isDir);
+    const bool isDir = std::filesystem::is_directory(drawerUi_.cbSelectedFile_, ec);
+    const bool editable = cbIsEditable(drawerUi_.cbSelectedFile_);
+    if (ImGui::IsKeyPressed(ImGuiKey_Enter, false)) cbOpenEntry(drawerUi_.cbSelectedFile_, isDir);
     if (editable && ImGui::IsKeyPressed(ImGuiKey_F2, false)) {
-        cbContextPath_ = cbSelectedFile_; cbContextIsDir_ = isDir; cbWantRename_ = true;
-        std::snprintf(cbRenameBuf_, sizeof cbRenameBuf_, "%s",
-                      std::filesystem::path(cbSelectedFile_).filename().string().c_str());
+        drawerUi_.cbContextPath_ = drawerUi_.cbSelectedFile_; drawerUi_.cbContextIsDir_ = isDir; drawerUi_.cbWantRename_ = true;
+        std::snprintf(drawerUi_.cbRenameBuf_, sizeof drawerUi_.cbRenameBuf_, "%s",
+                      std::filesystem::path(drawerUi_.cbSelectedFile_).filename().string().c_str());
     }
     if (editable && ImGui::IsKeyPressed(ImGuiKey_Delete, false)) {
-        cbContextPath_ = cbSelectedFile_; cbContextIsDir_ = isDir; cbWantDelete_ = true;
+        drawerUi_.cbContextPath_ = drawerUi_.cbSelectedFile_; drawerUi_.cbContextIsDir_ = isDir; drawerUi_.cbWantDelete_ = true;
     }
     if (editable && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_D, false)) {
-        cbContextPath_ = cbSelectedFile_; cbContextIsDir_ = isDir; cbWantDuplicate_ = true;
+        drawerUi_.cbContextPath_ = drawerUi_.cbSelectedFile_; drawerUi_.cbContextIsDir_ = isDir; drawerUi_.cbWantDuplicate_ = true;
     }
 }
 
 // Runs the deferred file operations and their dialogs: duplicate, rename, delete, new folder, import.
 void SandboxApp::cbFileOpModals() {
-    if (cbWantDuplicate_) { cbWantDuplicate_ = false; cbDuplicateEntry(cbContextPath_); }
+    if (drawerUi_.cbWantDuplicate_) { drawerUi_.cbWantDuplicate_ = false; cbDuplicateEntry(drawerUi_.cbContextPath_); }
 
-    if (cbWantRename_)    { ImGui::OpenPopup("cbRename");    cbWantRename_ = false; }
-    if (cbWantDelete_)    { ImGui::OpenPopup("cbDelete");    cbWantDelete_ = false; }
-    if (cbWantNewFolder_) { ImGui::OpenPopup("cbNewFolder"); cbWantNewFolder_ = false; }
-    if (cbWantNewStringTable_) { ImGui::OpenPopup("cbNewStringTable"); cbWantNewStringTable_ = false; }
-    if (cbWantImport_)    { ImGui::OpenPopup("Import Asset"); cbWantImport_ = false; }
+    if (drawerUi_.cbWantRename_)    { ImGui::OpenPopup("cbRename");    drawerUi_.cbWantRename_ = false; }
+    if (drawerUi_.cbWantDelete_)    { ImGui::OpenPopup("cbDelete");    drawerUi_.cbWantDelete_ = false; }
+    if (drawerUi_.cbWantNewFolder_) { ImGui::OpenPopup("cbNewFolder"); drawerUi_.cbWantNewFolder_ = false; }
+    if (drawerUi_.cbWantNewStringTable_) { ImGui::OpenPopup("cbNewStringTable"); drawerUi_.cbWantNewStringTable_ = false; }
+    if (drawerUi_.cbWantImport_)    { ImGui::OpenPopup("Import Asset"); drawerUi_.cbWantImport_ = false; }
 
-    if (cbWantMoveOrCopy_) { ImGui::OpenPopup("cbMoveOrCopy"); cbWantMoveOrCopy_ = false; }
+    if (drawerUi_.cbWantMoveOrCopy_) { ImGui::OpenPopup("cbMoveOrCopy"); drawerUi_.cbWantMoveOrCopy_ = false; }
 
     // Copy Here / Move Here / Cancel, same as Unreal and every file manager. Deliberately not a
     // silent move: a drag is easy to do by accident, and copy vs move is the difference between a
     // duplicate and a broken reference.
     if (ImGui::BeginPopupModal("cbMoveOrCopy", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        const std::vector<std::string> srcs = cbPruneNested(cbMoveSources_);
-        ImGui::TextDisabled("To  %s", std::filesystem::path(cbMoveDest_).filename().string().c_str());
+        const std::vector<std::string> srcs = cbPruneNested(drawerUi_.cbMoveSources_);
+        ImGui::TextDisabled("To  %s", std::filesystem::path(drawerUi_.cbMoveDest_).filename().string().c_str());
         ImGui::Separator();
 
         // The names, capped: a hundred-file drag should not grow a modal taller than the screen.
@@ -1722,36 +1722,36 @@ void SandboxApp::cbFileOpModals() {
         ImGui::Separator();
         if (ImGui::Button("Copy Here", ImVec2(120.0f * viewState_.dpi_, 0))) {
             int ok = 0;
-            for (const std::string& sp : srcs) if (cbCopyEntryTo(sp, cbMoveDest_)) ++ok;
-            if (ok) cbStatus_ = "Copied " + std::to_string(ok) + " item(s)";
+            for (const std::string& sp : srcs) if (cbCopyEntryTo(sp, drawerUi_.cbMoveDest_)) ++ok;
+            if (ok) drawerUi_.cbStatus_ = "Copied " + std::to_string(ok) + " item(s)";
             cbAfterMoveOrCopy(srcs);
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
         if (ImGui::Button("Move Here", ImVec2(120.0f * viewState_.dpi_, 0))) {
             int ok = 0;
-            for (const std::string& sp : srcs) if (cbMoveEntryTo(sp, cbMoveDest_)) ++ok;
-            if (ok) cbStatus_ = "Moved " + std::to_string(ok) + " item(s)";
+            for (const std::string& sp : srcs) if (cbMoveEntryTo(sp, drawerUi_.cbMoveDest_)) ++ok;
+            if (ok) drawerUi_.cbStatus_ = "Moved " + std::to_string(ok) + " item(s)";
             cbAfterMoveOrCopy(srcs);
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
         if (ImGui::Button("Cancel", ImVec2(100.0f * viewState_.dpi_, 0)) ||
             ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
-            cbMoveSources_.clear();
+            drawerUi_.cbMoveSources_.clear();
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
     }
 
     if (ImGui::BeginPopupModal("cbRename", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::TextDisabled("Rename %s", cbContextIsDir_ ? "folder" : "file");
+        ImGui::TextDisabled("Rename %s", drawerUi_.cbContextIsDir_ ? "folder" : "file");
         ImGui::SetNextItemWidth(360.0f*viewState_.dpi_);
         if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
-        const bool submit = ImGui::InputText("##cbrenametxt", cbRenameBuf_, sizeof cbRenameBuf_,
+        const bool submit = ImGui::InputText("##cbrenametxt", drawerUi_.cbRenameBuf_, sizeof drawerUi_.cbRenameBuf_,
                                              ImGuiInputTextFlags_EnterReturnsTrue);
-        const bool valid = cbRenameBuf_[0] != '\0' && !std::strpbrk(cbRenameBuf_, "\\/:*?\"<>|");
-        if (!valid && cbRenameBuf_[0] != '\0') ImGui::TextColored(ImVec4(0.95f,0.5f,0.45f,1), "That name is not a legal filename.");
+        const bool valid = drawerUi_.cbRenameBuf_[0] != '\0' && !std::strpbrk(drawerUi_.cbRenameBuf_, "\\/:*?\"<>|");
+        if (!valid && drawerUi_.cbRenameBuf_[0] != '\0') ImGui::TextColored(ImVec4(0.95f,0.5f,0.45f,1), "That name is not a legal filename.");
 
         // Renaming breaks every reference -- the worse half of the defect the delete confirm just
         // gained a warning for: an ObjectId is fnv1a64 of the content-relative path, so a rename
@@ -1760,22 +1760,22 @@ void SandboxApp::cbFileOpModals() {
         // scanned, nothing rewritten, nothing said. Warns, does not rewrite: fixing referrers means
         // editing other people's files from inside a rename dialog, which wants its own
         // change/undo/test -- the honest half that can land now.
-        if (!cbContextIsDir_) {
-            if (ImGui::IsWindowAppearing()) cbRenameRefs_ = cbFindReferencesTo(cbContextPath_);
-            if (!cbRenameRefs_.empty()) {
+        if (!drawerUi_.cbContextIsDir_) {
+            if (ImGui::IsWindowAppearing()) drawerUi_.cbRenameRefs_ = cbFindReferencesTo(drawerUi_.cbContextPath_);
+            if (!drawerUi_.cbRenameRefs_.empty()) {
                 ImGui::Separator();
                 ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.25f, 1.0f),
                                    ICON_WARNING " %zu file(s) reference this asset by its current path:",
-                                   cbRenameRefs_.size());
-                const usize shown = cbRenameRefs_.size() < 8 ? cbRenameRefs_.size() : usize(8);
-                for (usize i = 0; i < shown; ++i) ImGui::BulletText("%s", cbRenameRefs_[i].c_str());
-                if (cbRenameRefs_.size() > shown)
-                    ImGui::TextDisabled("   ...and %zu more", cbRenameRefs_.size() - shown);
+                                   drawerUi_.cbRenameRefs_.size());
+                const usize shown = drawerUi_.cbRenameRefs_.size() < 8 ? drawerUi_.cbRenameRefs_.size() : usize(8);
+                for (usize i = 0; i < shown; ++i) ImGui::BulletText("%s", drawerUi_.cbRenameRefs_[i].c_str());
+                if (drawerUi_.cbRenameRefs_.size() > shown)
+                    ImGui::TextDisabled("   ...and %zu more", drawerUi_.cbRenameRefs_.size() - shown);
                 // Opt-in (replacing "renaming will not update them"), default ON: repointing is what
                 // an author wants nearly every time, but it edits other people's files, and a tool
                 // that does that with no way to decline is one people stop trusting.
-                ImGui::Checkbox("Update them to the new name", &cbRenameRepoint_);
-                if (cbRenameRepoint_) {
+                ImGui::Checkbox("Update them to the new name", &drawerUi_.cbRenameRepoint_);
+                if (drawerUi_.cbRenameRepoint_) {
                     // What it still can't fix, said here rather than discovered later: real
                     // reference kinds no text rewrite can reach.
                     ImGui::TextDisabled("Rewrites path references in .ocworld/.ocmap/.ocmat/.ocgraph/.ocproject.");
@@ -1790,16 +1790,16 @@ void SandboxApp::cbFileOpModals() {
 
         ImGui::BeginDisabled(!valid);
         if (ImGui::Button("Rename") || (submit && valid)) {
-            if (!cbRenameRefs_.empty() && !cbRenameRepoint_)
+            if (!drawerUi_.cbRenameRefs_.empty() && !drawerUi_.cbRenameRepoint_)
                 AVER_WARN("[Editor] renamed '{}' while {} file(s) still reference its old path",
-                          cbContextPath_, cbRenameRefs_.size());
-            cbRenameEntry(cbContextPath_, cbRenameBuf_, cbRenameRepoint_ && !cbRenameRefs_.empty());
-            cbRenameRefs_.clear();
+                          drawerUi_.cbContextPath_, drawerUi_.cbRenameRefs_.size());
+            cbRenameEntry(drawerUi_.cbContextPath_, drawerUi_.cbRenameBuf_, drawerUi_.cbRenameRepoint_ && !drawerUi_.cbRenameRefs_.empty());
+            drawerUi_.cbRenameRefs_.clear();
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndDisabled();
         ImGui::SameLine();
-        if (ImGui::Button("Cancel")) { cbRenameRefs_.clear(); ImGui::CloseCurrentPopup(); }
+        if (ImGui::Button("Cancel")) { drawerUi_.cbRenameRefs_.clear(); ImGui::CloseCurrentPopup(); }
         ImGui::EndPopup();
     }
 
@@ -1808,8 +1808,8 @@ void SandboxApp::cbFileOpModals() {
         // whole selection like Move/Copy, pruned with cbPruneNested (else a folder in the selection
         // would try to delete its own children a second time). A lone selection reduces to just cbContextPath_.
         const std::vector<std::string> targets =
-            (cbSelection_.size() > 1 && cbIsSelected(cbContextPath_))
-                ? cbPruneNested(cbSelection_) : std::vector<std::string>{cbContextPath_};
+            (drawerUi_.cbSelection_.size() > 1 && cbIsSelected(drawerUi_.cbContextPath_))
+                ? cbPruneNested(drawerUi_.cbSelection_) : std::vector<std::string>{drawerUi_.cbContextPath_};
 
         if (targets.size() > 1) {
             ImGui::Text("Delete %zu items?", targets.size());
@@ -1819,10 +1819,10 @@ void SandboxApp::cbFileOpModals() {
             if (targets.size() > kShow)
                 ImGui::TextDisabled("   ...and %zu more", targets.size() - kShow);
         } else {
-            ImGui::TextUnformatted(cbContextIsDir_
+            ImGui::TextUnformatted(drawerUi_.cbContextIsDir_
                 ? "Delete this folder and everything in it?"
                 : "Delete this file?");
-            ImGui::TextDisabled("%s", cbContextPath_.c_str());
+            ImGui::TextDisabled("%s", drawerUi_.cbContextPath_.c_str());
         }
         ImGui::TextDisabled("It goes to the recycle bin, so it can be restored.");
 
@@ -1830,49 +1830,49 @@ void SandboxApp::cbFileOpModals() {
         // IsWindowAppearing, not per frame (walks the content tree), and aggregated across every
         // target in the selection, not just cbContextPath_.
         if (ImGui::IsWindowAppearing()) {
-            cbDeleteRefs_.clear();
+            drawerUi_.cbDeleteRefs_.clear();
             for (const std::string& t : targets) {
                 std::error_code dec;
                 if (std::filesystem::is_directory(t, dec)) continue;
                 const std::vector<std::string> refs = cbFindReferencesTo(t);
-                cbDeleteRefs_.insert(cbDeleteRefs_.end(), refs.begin(), refs.end());
+                drawerUi_.cbDeleteRefs_.insert(drawerUi_.cbDeleteRefs_.end(), refs.begin(), refs.end());
             }
-            std::sort(cbDeleteRefs_.begin(), cbDeleteRefs_.end());
-            cbDeleteRefs_.erase(std::unique(cbDeleteRefs_.begin(), cbDeleteRefs_.end()), cbDeleteRefs_.end());
+            std::sort(drawerUi_.cbDeleteRefs_.begin(), drawerUi_.cbDeleteRefs_.end());
+            drawerUi_.cbDeleteRefs_.erase(std::unique(drawerUi_.cbDeleteRefs_.begin(), drawerUi_.cbDeleteRefs_.end()), drawerUi_.cbDeleteRefs_.end());
         }
-        if (!cbDeleteRefs_.empty()) {
+        if (!drawerUi_.cbDeleteRefs_.empty()) {
             ImGui::Separator();
             ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.25f, 1.0f),
-                               ICON_WARNING " %zu file(s) reference what would be deleted:", cbDeleteRefs_.size());
+                               ICON_WARNING " %zu file(s) reference what would be deleted:", drawerUi_.cbDeleteRefs_.size());
             // Capped, because a shared material can be named by hundreds of levels and a
             // modal that grows past the screen cannot be dismissed.
-            const usize shown = cbDeleteRefs_.size() < 12 ? cbDeleteRefs_.size() : usize(12);
-            for (usize i = 0; i < shown; ++i) ImGui::BulletText("%s", cbDeleteRefs_[i].c_str());
-            if (cbDeleteRefs_.size() > shown)
-                ImGui::TextDisabled("   ...and %zu more", cbDeleteRefs_.size() - shown);
+            const usize shown = drawerUi_.cbDeleteRefs_.size() < 12 ? drawerUi_.cbDeleteRefs_.size() : usize(12);
+            for (usize i = 0; i < shown; ++i) ImGui::BulletText("%s", drawerUi_.cbDeleteRefs_[i].c_str());
+            if (drawerUi_.cbDeleteRefs_.size() > shown)
+                ImGui::TextDisabled("   ...and %zu more", drawerUi_.cbDeleteRefs_.size() - shown);
             ImGui::TextDisabled("References are stored as paths, so deleting this breaks them.");
             ImGui::Separator();
         }
         if (ImGui::Button("Delete")) {
             for (const std::string& t : targets) cbDeleteEntry(t);
-            cbDeleteRefs_.clear();
+            drawerUi_.cbDeleteRefs_.clear();
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
-        if (ImGui::Button("Cancel")) { cbDeleteRefs_.clear(); ImGui::CloseCurrentPopup(); }
+        if (ImGui::Button("Cancel")) { drawerUi_.cbDeleteRefs_.clear(); ImGui::CloseCurrentPopup(); }
         ImGui::EndPopup();
     }
 
     if (ImGui::BeginPopupModal("cbNewFolder", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::TextDisabled("New folder in %s", cbSelectedDir_.c_str());
+        ImGui::TextDisabled("New folder in %s", drawerUi_.cbSelectedDir_.c_str());
         ImGui::SetNextItemWidth(360.0f*viewState_.dpi_);
         if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
-        const bool submit = ImGui::InputText("##cbnewfoldertxt", cbNewFolderBuf_, sizeof cbNewFolderBuf_,
+        const bool submit = ImGui::InputText("##cbnewfoldertxt", drawerUi_.cbNewFolderBuf_, sizeof drawerUi_.cbNewFolderBuf_,
                                              ImGuiInputTextFlags_EnterReturnsTrue);
-        const bool valid = cbNewFolderBuf_[0] != '\0' && !std::strpbrk(cbNewFolderBuf_, "\\/:*?\"<>|");
+        const bool valid = drawerUi_.cbNewFolderBuf_[0] != '\0' && !std::strpbrk(drawerUi_.cbNewFolderBuf_, "\\/:*?\"<>|");
         ImGui::BeginDisabled(!valid);
         if (ImGui::Button("Create") || (submit && valid)) {
-            cbCreateFolder(cbSelectedDir_, cbNewFolderBuf_);
+            cbCreateFolder(drawerUi_.cbSelectedDir_, drawerUi_.cbNewFolderBuf_);
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndDisabled();
@@ -1885,12 +1885,12 @@ void SandboxApp::cbFileOpModals() {
         ImGui::TextDisabled("New string table (a file per culture under Localization/)");
         ImGui::SetNextItemWidth(360.0f*viewState_.dpi_);
         if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
-        const bool submit = ImGui::InputText("##cbnewstringtabletxt", cbNewStringTableBuf_, sizeof cbNewStringTableBuf_,
+        const bool submit = ImGui::InputText("##cbnewstringtabletxt", drawerUi_.cbNewStringTableBuf_, sizeof drawerUi_.cbNewStringTableBuf_,
                                              ImGuiInputTextFlags_EnterReturnsTrue);
-        const bool valid = fmt::validLocTable(cbNewStringTableBuf_);
+        const bool valid = fmt::validLocTable(drawerUi_.cbNewStringTableBuf_);
         ImGui::BeginDisabled(!valid);
         if (ImGui::Button("Create") || (submit && valid)) {
-            cbCreateStringTable(cbNewStringTableBuf_);
+            cbCreateStringTable(drawerUi_.cbNewStringTableBuf_);
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndDisabled();
@@ -1936,13 +1936,13 @@ void SandboxApp::drawBreadcrumb(const std::string& dir) {
 editor::GraphAssetFamily SandboxApp::graphAssetFamilyFor(const std::string& path) {
     std::error_code ec;
     const auto mtime = std::filesystem::last_write_time(path, ec);
-    if (auto it = graphDomainCache_.find(path);
-        it != graphDomainCache_.end() && !ec && it->second.first == mtime) return it->second.second;
+    if (auto it = drawerUi_.graphDomainCache_.find(path);
+        it != drawerUi_.graphDomainCache_.end() && !ec && it->second.first == mtime) return it->second.second;
 
     fmt::OcGraphData g;
     editor::GraphAssetFamily family = editor::GraphAssetFamily::Gameplay;
     if (fmt::loadOcgraph(path, g)) family = editor::graphAssetPresentationFor(fmt::ocGraphDomainOf(g)).family;
-    if (!ec) graphDomainCache_[path] = {mtime, family};
+    if (!ec) drawerUi_.graphDomainCache_[path] = {mtime, family};
     return family;
 }
 
@@ -1963,7 +1963,7 @@ bool SandboxApp::cbDirWatched(const std::string& dir) const {
 // Drops the listings a changed path can alter: its own and any below it (a folder), its parent's
 // entries, and its grandparent's (a subfolder's module flag reads the CMakeLists.txt inside it).
 void SandboxApp::cbApplyWatchEvents() {
-    if (watchEvents_.empty() || dirCache_.empty() || !contentWatch_.watching()) return;
+    if (watchEvents_.empty() || drawerUi_.dirCache_.empty() || !contentWatch_.watching()) return;
     const std::string root = cbPathKey(contentWatch_.root());
     auto parentOf = [](const std::string& p) {
         const usize slash = p.find_last_of('/');
@@ -1979,14 +1979,14 @@ void SandboxApp::cbApplyWatchEvents() {
             exact.push_back(parentOf(exact.back()));
         }
     }
-    for (auto it = dirCache_.begin(); it != dirCache_.end();) {
+    for (auto it = drawerUi_.dirCache_.begin(); it != drawerUi_.dirCache_.end();) {
         const std::string key = cbPathKey(it->first);
         bool stale = std::find(exact.begin(), exact.end(), key) != exact.end();
         for (usize i = 0; !stale && i < subtrees.size(); ++i) {
             const std::string& p = subtrees[i];
             stale = key == p || (key.size() > p.size() && key.compare(0, p.size(), p) == 0 && key[p.size()] == '/');
         }
-        it = stale ? dirCache_.erase(it) : std::next(it);
+        it = stale ? drawerUi_.dirCache_.erase(it) : std::next(it);
     }
 }
 
@@ -1994,7 +1994,7 @@ void SandboxApp::cbApplyWatchEvents() {
 // kWatchedRefreshFrames as a net for events the watcher drops); others every 20 frames.
 const DirListing& SandboxApp::dirListing(const std::string& dir) {
     constexpr int kWatchedRefreshFrames = 600;
-    DirListing& c = dirCache_[dir];
+    DirListing& c = drawerUi_.dirCache_[dir];
     if (frameNo_ - c.stamp < (c.watched ? kWatchedRefreshFrames : 20)) return c;
     c.stamp = frameNo_;
     c.watched = cbDirWatched(dir);
@@ -2051,7 +2051,7 @@ void SandboxApp::drawFolderTree(const std::string& dir) {
     }
     for (const auto& [full, name] : subs) {
         ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
-        if (cbSelectedDir_ == full) flags |= ImGuiTreeNodeFlags_Selected;
+        if (drawerUi_.cbSelectedDir_ == full) flags |= ImGuiTreeNodeFlags_Selected;
         const bool open = ImGui::TreeNodeEx(name.c_str(), flags);
         if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) cbNavigate(full);
         // The tree is the other half of the gesture: dragging to a folder you can SEE but are not
@@ -2219,15 +2219,15 @@ bool SandboxApp::isSkinnedMeshEntry(const DirEntry& e) const {
 // peeking at its head and cached against the file's modification time.
 // THE ASSET CHECK COMES FIRST, and has to: below it sits `if (ext != ".cs") return -1;`.
 int SandboxApp::fileIconTile(const std::string& path, const std::string& name, const std::string& ext) {
-    if (const int a = assetIconTile(ext); a >= 0) return kAssetTileBase + a;
+    if (const int a = assetIconTile(ext); a >= 0) return DrawerState::kAssetTileBase + a;
     if (name == "CMakeLists.txt") return 3;
     if (ext == ".cpp" || ext == ".cxx" || ext == ".cc" || ext == ".hpp" || ext == ".hxx" || ext == ".h")
         return 2;
     if (ext != ".cs") return -1;
     std::error_code ec;
     const auto mtime = std::filesystem::last_write_time(path, ec);
-    if (auto it = fileIconCache_.find(path);
-        it != fileIconCache_.end() && !ec && it->second.first == mtime) return it->second.second;
+    if (auto it = drawerUi_.fileIconCache_.find(path);
+        it != drawerUi_.fileIconCache_.end() && !ec && it->second.first == mtime) return it->second.second;
 
     std::ifstream in(path, std::ios::binary);
     if (!in.is_open()) return 1;
@@ -2239,7 +2239,7 @@ int SandboxApp::fileIconTile(const std::string& path, const std::string& name, c
         "AverBehaviour", "AverActor", "AverPawn", "AverCharacter", "AverPlayerController",
         "AverGameMode", "AverGameInstance", "[AverClass", "[AverGameMode"};
     for (const char* m : kScriptMarkers) if (body.find(m) != std::string::npos) { tile = 0; break; }
-    if (!ec) fileIconCache_[path] = {mtime, tile};
+    if (!ec) drawerUi_.fileIconCache_[path] = {mtime, tile};
     return tile;
 }
 
@@ -2299,7 +2299,7 @@ void SandboxApp::drawEntryIcon(ImDrawList* dl, ImVec2 centre, f32 s, bool isDir,
                    const std::string& kindExt,
                    editor::GraphAssetFamily graphFamily) {
     if (isDir) {
-        if (folderIconsUiId_) blitTile(dl, folderIconsUiId_, centre, s, folderIconAspect_, module ? 1 : 0, 2);
+        if (drawerUi_.folderIconsUiId_) blitTile(dl, drawerUi_.folderIconsUiId_, centre, s, drawerUi_.folderIconAspect_, module ? 1 : 0, 2);
         else                  folderGlyph(dl, centre, s, IM_COL32(232, 187, 92, 255));
         return;
     }
@@ -2308,12 +2308,12 @@ void SandboxApp::drawEntryIcon(ImDrawList* dl, ImVec2 centre, f32 s, bool isDir,
     // plain blue graph icon -- falls to the domain-aware typed glyph below instead.
     const bool skipGenericGraphSprite =
         kindExt == ".ocgraph" && graphFamily != editor::GraphAssetFamily::Gameplay;
-    if (!skipGenericGraphSprite && tile >= kAssetTileBase && assetIconsUiId_) {
-        blitTile(dl, assetIconsUiId_, centre, s, assetIconAspect_, tile - kAssetTileBase, kAssetIconTiles);
+    if (!skipGenericGraphSprite && tile >= DrawerState::kAssetTileBase && drawerUi_.assetIconsUiId_) {
+        blitTile(dl, drawerUi_.assetIconsUiId_, centre, s, drawerUi_.assetIconAspect_, tile - DrawerState::kAssetTileBase, DrawerState::kAssetIconTiles);
         return;
     }
-    if (!skipGenericGraphSprite && tile >= 0 && tile < kAssetTileBase && fileIconsUiId_) {
-        blitTile(dl, fileIconsUiId_, centre, s, fileIconAspect_, tile, kFileIconTiles);
+    if (!skipGenericGraphSprite && tile >= 0 && tile < DrawerState::kAssetTileBase && drawerUi_.fileIconsUiId_) {
+        blitTile(dl, drawerUi_.fileIconsUiId_, centre, s, drawerUi_.fileIconAspect_, tile, DrawerState::kFileIconTiles);
         return;
     }
     // The typed glyph, before the anonymous page. This is the line that makes twenty different
@@ -2356,7 +2356,7 @@ void SandboxApp::drawEntryIcon(ImDrawList* dl, ImVec2 centre, f32 s, bool isDir,
 // what a shift-range measures from. cbSelection_ is the set and always contains cbSelectedFile_
 // when anything is selected, so single-item actions (rename, duplicate) need no special case.
 bool SandboxApp::cbIsSelected(const std::string& path) const {
-    return std::find(cbSelection_.begin(), cbSelection_.end(), path) != cbSelection_.end();
+    return std::find(drawerUi_.cbSelection_.begin(), drawerUi_.cbSelection_.end(), path) != drawerUi_.cbSelection_.end();
 }
 
 // Applies one click to the selection, with the modifier rules every file browser has trained
@@ -2368,46 +2368,46 @@ void SandboxApp::cbClickSelect(const std::vector<const DirEntry*>& shown, int in
     const std::string& path = shown[static_cast<usize>(index)]->full;
     const ImGuiIO& io = ImGui::GetIO();
 
-    if (io.KeyShift && !cbSelectedFile_.empty()) {
+    if (io.KeyShift && !drawerUi_.cbSelectedFile_.empty()) {
         int anchor = -1;
         for (int i = 0; i < static_cast<int>(shown.size()); ++i)
-            if (shown[static_cast<usize>(i)]->full == cbSelectedFile_) { anchor = i; break; }
+            if (shown[static_cast<usize>(i)]->full == drawerUi_.cbSelectedFile_) { anchor = i; break; }
         if (anchor >= 0) {
             const int lo = anchor < index ? anchor : index;
             const int hi = anchor < index ? index : anchor;
-            cbSelection_.clear();
-            for (int i = lo; i <= hi; ++i) cbSelection_.push_back(shown[static_cast<usize>(i)]->full);
+            drawerUi_.cbSelection_.clear();
+            for (int i = lo; i <= hi; ++i) drawerUi_.cbSelection_.push_back(shown[static_cast<usize>(i)]->full);
             // The ACTIVE item does not move on a shift-click, so shift-clicking again from the
             // same anchor grows and shrinks the range rather than walking it.
             return;
         }
     }
     if (io.KeyCtrl) {
-        const auto it = std::find(cbSelection_.begin(), cbSelection_.end(), path);
-        if (it != cbSelection_.end()) {
-            cbSelection_.erase(it);
+        const auto it = std::find(drawerUi_.cbSelection_.begin(), drawerUi_.cbSelection_.end(), path);
+        if (it != drawerUi_.cbSelection_.end()) {
+            drawerUi_.cbSelection_.erase(it);
             // Ctrl-clicking the active item away has to hand "active" to something still selected,
             // or the footer names a file that is no longer part of the selection.
-            if (cbSelectedFile_ == path)
-                cbSelectedFile_ = cbSelection_.empty() ? std::string() : cbSelection_.back();
+            if (drawerUi_.cbSelectedFile_ == path)
+                drawerUi_.cbSelectedFile_ = drawerUi_.cbSelection_.empty() ? std::string() : drawerUi_.cbSelection_.back();
             return;
         }
-        cbSelection_.push_back(path);
-        cbSelectedFile_ = path;
+        drawerUi_.cbSelection_.push_back(path);
+        drawerUi_.cbSelectedFile_ = path;
         return;
     }
-    cbSelection_.assign(1, path);
-    cbSelectedFile_ = path;
+    drawerUi_.cbSelection_.assign(1, path);
+    drawerUi_.cbSelectedFile_ = path;
 }
 
 // Ctrl+A: everything the current folder is showing, which is what the filter left visible.
 void SandboxApp::cbSelectAll(const std::vector<const DirEntry*>& shown) {
-    cbSelection_.clear();
-    for (const DirEntry* e : shown) cbSelection_.push_back(e->full);
-    if (!cbSelection_.empty() && !cbIsSelected(cbSelectedFile_)) cbSelectedFile_ = cbSelection_.front();
+    drawerUi_.cbSelection_.clear();
+    for (const DirEntry* e : shown) drawerUi_.cbSelection_.push_back(e->full);
+    if (!drawerUi_.cbSelection_.empty() && !cbIsSelected(drawerUi_.cbSelectedFile_)) drawerUi_.cbSelectedFile_ = drawerUi_.cbSelection_.front();
 }
 
-void SandboxApp::cbClearSelection() { cbSelection_.clear(); cbSelectedFile_.clear(); }
+void SandboxApp::cbClearSelection() { drawerUi_.cbSelection_.clear(); drawerUi_.cbSelectedFile_.clear(); }
 
 // What the drag preview says: the one name, or how many are coming.
 // Counts cbMoveDragPayloadFor's payload: newline-separated paths (a path can't contain one), the
@@ -2457,7 +2457,7 @@ static void rcStatusDot(ImDrawList* dl, ImVec2 c, f32 r, ImU32 col, bool conflic
 
 // Draws the gallery view: a wrapped, row-clipped grid of icon tiles.
 void SandboxApp::drawFolderGallery(const std::vector<const DirEntry*>& shown) {
-    const f32 tile   = cbTileSize_ * viewState_.dpi_;
+    const f32 tile   = drawerUi_.cbTileSize_ * viewState_.dpi_;
     const f32 pad    = 8.0f * viewState_.dpi_;
     const f32 labelH = ImGui::GetTextLineHeight() * 2.0f + 4.0f * viewState_.dpi_;   // two lines: names wrap
     const f32 cellW  = tile, cellH = tile + labelH;
@@ -2489,9 +2489,9 @@ void SandboxApp::drawFolderGallery(const std::vector<const DirEntry*>& shown) {
                     cbClickSelect(shown, idx);
                     // A double-click OPENS, and must not also leave a range behind: opening a
                     // folder replaces the listing the selection indexes into.
-                    if (ImGui::IsMouseDoubleClicked(0) || (e.isDir && !cbDoubleClickEnter_)) {
-                        cbSelection_.assign(1, e.full);
-                        cbSelectedFile_ = e.full;
+                    if (ImGui::IsMouseDoubleClicked(0) || (e.isDir && !drawerUi_.cbDoubleClickEnter_)) {
+                        drawerUi_.cbSelection_.assign(1, e.full);
+                        drawerUi_.cbSelectedFile_ = e.full;
                         cbOpenEntry(e.full, e.isDir);
                     }
                 }
@@ -2651,7 +2651,7 @@ void SandboxApp::drawFolderGallery(const std::vector<const DirEntry*>& shown) {
                     rcStatusDot(dl, ImVec2(o.x + inset, o.y + inset), dotR, rcStatusColour(rcSt),
                                 rcSt == editor::FileStatus::Conflicted);
                 }
-                if (!e.isDir && cbCols_.isFavourite(cbKeyOf(e.full)))
+                if (!e.isDir && drawerUi_.cbCols_.isFavourite(cbKeyOf(e.full)))
                     dl->AddText(ImVec2(o.x + cellW - ImGui::GetFontSize() - 2.0f * viewState_.dpi_, o.y + 2.0f * viewState_.dpi_),
                                 IM_COL32(255, 200, 60, 255), ICON_STAR);
                 ImGui::PopID();
@@ -2675,17 +2675,17 @@ void SandboxApp::cbGatherDeepMatches(const std::string& dir, std::vector<const D
     const DirListing& l = dirListing(dir);
     for (const DirEntry& e : l.entries) {
         if (e.isDir) cbGatherDeepMatches(e.full, out, depth + 1);
-        else if (containsNoCase(e.name, cbFilter_)) out.push_back(&e);
+        else if (containsNoCase(e.name, drawerUi_.cbFilter_)) out.push_back(&e);
     }
 }
 
 // Draws the breadcrumb and the folder's filtered entries, as tiles or as a list.
 void SandboxApp::drawFolderFiles(std::string dir) {   // by value: a click below reassigns cbSelectedDir_
-    const bool virtualView = !cbView_.empty();
+    const bool virtualView = !drawerUi_.cbView_.empty();
     if (virtualView) {
-        ImGui::TextUnformatted(cbView_ == kCbFavView ? ICON_STAR " Favourites" : (std::string(ICON_COLLECTION " ") + cbView_).c_str());
+        ImGui::TextUnformatted(drawerUi_.cbView_ == kCbFavView ? ICON_STAR " Favourites" : (std::string(ICON_COLLECTION " ") + drawerUi_.cbView_).c_str());
         ImGui::SameLine();
-        if (ImGui::SmallButton("Back to folders")) cbView_.clear();
+        if (ImGui::SmallButton("Back to folders")) drawerUi_.cbView_.clear();
     } else {
         drawBreadcrumb(dir);
     }
@@ -2697,10 +2697,10 @@ void SandboxApp::drawFolderFiles(std::string dir) {   // by value: a click below
     shown.reserve(listing.entries.size());
     if (virtualView) {
         // The references of a favourites list or collection, resolved against their folder's listing.
-        const std::vector<std::string>* keys = &cbCols_.favourites;
-        if (cbView_ != kCbFavView) {
-            const editor::CbCollection* col = cbCols_.find(cbView_);
-            if (!col) { cbView_.clear(); return; }
+        const std::vector<std::string>* keys = &drawerUi_.cbCols_.favourites;
+        if (drawerUi_.cbView_ != kCbFavView) {
+            const editor::CbCollection* col = drawerUi_.cbCols_.find(drawerUi_.cbView_);
+            if (!col) { drawerUi_.cbView_.clear(); return; }
             keys = &col->paths;
         }
         const std::filesystem::path contentDir(project_.contentDir());
@@ -2708,23 +2708,23 @@ void SandboxApp::drawFolderFiles(std::string dir) {   // by value: a click below
             const std::filesystem::path full = (contentDir / key).make_preferred();
             const DirListing& l = dirListing(full.parent_path().string());
             for (const DirEntry& e : l.entries)
-                if (!e.isDir && editor::cbContentKey(e.full, project_.contentDir()) == key && containsNoCase(e.name, cbFilter_)) {
-                    if (editor::cbTypePasses(cbTypeMask_, e.isDir, e.kindExt)) shown.push_back(&e);
+                if (!e.isDir && editor::cbContentKey(e.full, project_.contentDir()) == key && containsNoCase(e.name, drawerUi_.cbFilter_)) {
+                    if (editor::cbTypePasses(drawerUi_.cbTypeMask_, e.isDir, e.kindExt)) shown.push_back(&e);
                     break;
                 }
         }
-    } else if (cbFilter_[0] != '\0' && cbSearchDeep_) {
+    } else if (drawerUi_.cbFilter_[0] != '\0' && drawerUi_.cbSearchDeep_) {
         // Searching subfolders too: previously the box only looked at the open folder, so finding
         // an asset meant already knowing which folder it was in. Only while a filter is typed: an
         // empty box would flatten the whole tree into one folder view and lose the hierarchy.
         cbGatherDeepMatches(dir, shown, 0);
     } else {
         for (const DirEntry& e : listing.entries)
-            if (containsNoCase(e.name, cbFilter_)) shown.push_back(&e);
+            if (containsNoCase(e.name, drawerUi_.cbFilter_)) shown.push_back(&e);
     }
-    if (editor::cbTypeFiltering(cbTypeMask_))
+    if (editor::cbTypeFiltering(drawerUi_.cbTypeMask_))
         shown.erase(std::remove_if(shown.begin(), shown.end(),
-                    [&](const DirEntry* e) { return !editor::cbTypePasses(cbTypeMask_, e->isDir, e->kindExt); }), shown.end());
+                    [&](const DirEntry* e) { return !editor::cbTypePasses(drawerUi_.cbTypeMask_, e->isDir, e->kindExt); }), shown.end());
 
     if (shown.empty()) {
         ImGui::TextDisabled(virtualView ? "(nothing here yet: right-click an asset to add it)"
@@ -2735,11 +2735,11 @@ void SandboxApp::drawFolderFiles(std::string dir) {   // by value: a click below
     // What Ctrl+A selects, captured here since the key handler runs outside this function:
     // `shown` is what the search box left visible -- selecting filtered-away files would surprise
     // the moment the box is cleared.
-    cbShownPaths_.clear();
-    cbShownPaths_.reserve(shown.size());
-    for (const DirEntry* p : shown) cbShownPaths_.push_back(p->full);
+    drawerUi_.cbShownPaths_.clear();
+    drawerUi_.cbShownPaths_.reserve(shown.size());
+    for (const DirEntry* p : shown) drawerUi_.cbShownPaths_.push_back(p->full);
 
-    if (cbGallery_) { drawFolderGallery(shown); return; }
+    if (drawerUi_.cbGallery_) { drawFolderGallery(shown); return; }
 
     const f32 h = ImGui::GetTextLineHeight() * 1.3f;
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -2762,9 +2762,9 @@ void SandboxApp::drawFolderFiles(std::string dir) {   // by value: a click below
             if (ImGui::Selectable(e.name.c_str(), cbIsSelected(e.full),
                                   ImGuiSelectableFlags_AllowDoubleClick)) {
                 cbClickSelect(shown, i);
-                if (ImGui::IsMouseDoubleClicked(0) || (e.isDir && !cbDoubleClickEnter_)) {
-                    cbSelection_.assign(1, e.full);
-                    cbSelectedFile_ = e.full;
+                if (ImGui::IsMouseDoubleClicked(0) || (e.isDir && !drawerUi_.cbDoubleClickEnter_)) {
+                    drawerUi_.cbSelection_.assign(1, e.full);
+                    drawerUi_.cbSelectedFile_ = e.full;
                     cbOpenEntry(e.full, e.isDir);
                 }
             }
@@ -2794,7 +2794,7 @@ void SandboxApp::drawFolderFiles(std::string dir) {   // by value: a click below
                 rcStatusDot(dl, ImVec2(rowRight - dotR - 2.0f * viewState_.dpi_, o.y + h * 0.5f), dotR,
                             rcStatusColour(rcSt), rcSt == editor::FileStatus::Conflicted);
             }
-            if (!e.isDir && cbCols_.isFavourite(cbKeyOf(e.full)))
+            if (!e.isDir && drawerUi_.cbCols_.isFavourite(cbKeyOf(e.full)))
                 dl->AddText(ImVec2(rowRight - h * 1.6f, o.y + (h - ImGui::GetFontSize()) * 0.5f), IM_COL32(255, 200, 60, 255), ICON_STAR);
             ImGui::PopID();
         }
@@ -2818,11 +2818,11 @@ void SandboxApp::drawImportModal() {
     ImGui::TextDisabled(".gltf/.glb/.fbx become .ocmesh; .wav/.ogg/.mp3/.flac/.m4a become .ocaudio.");
     ImGui::TextDisabled("Anything else is copied as-is.");
     ImGui::SetNextItemWidth(420.0f * viewState_.dpi_);
-    ImGui::InputText("Source file", importPath_, sizeof(importPath_));
+    ImGui::InputText("Source file", drawerUi_.importPath_, sizeof(drawerUi_.importPath_));
     ImGui::SameLine();
     if (ImGui::Button("Browse...")) {
-        const std::string start = importPath_[0] != '\0'
-            ? std::filesystem::path(importPath_).parent_path().string() : std::string();
+        const std::string start = drawerUi_.importPath_[0] != '\0'
+            ? std::filesystem::path(drawerUi_.importPath_).parent_path().string() : std::string();
 #if AVER_HAVE_AUDIO_IMPORT
         const char* kFilterLabel = "Importable assets (*.gltf, *.glb, *.fbx, *.wav, *.ogg, *.mp3, *.flac, *.m4a)";
         const char* kFilterSpec  = "*.gltf;*.glb;*.fbx;*.wav;*.ogg;*.mp3;*.flac;*.m4a";
@@ -2833,18 +2833,18 @@ void SandboxApp::drawImportModal() {
         std::string picked;
         if (openFileDialog("Import asset", kFilterLabel, kFilterSpec,
                            directoryExists(start) ? start : std::string(), picked)) {
-            if (picked.size() < sizeof(importPath_)) {
-                std::snprintf(importPath_, sizeof(importPath_), "%s", picked.c_str());
+            if (picked.size() < sizeof(drawerUi_.importPath_)) {
+                std::snprintf(drawerUi_.importPath_, sizeof(drawerUi_.importPath_), "%s", picked.c_str());
             } else {
                 AVER_WARN("[Import] picked path is {} chars, longer than the {}-char field - not applied",
-                          picked.size(), sizeof(importPath_) - 1);
-                cbStatus_ = "Picked path is too long - not applied";
+                          picked.size(), sizeof(drawerUi_.importPath_) - 1);
+                drawerUi_.cbStatus_ = "Picked path is too long - not applied";
             }
         }
     }
     // FBX options, shown once an .fbx path is typed or picked (nothing for other files).
-    drawFbxImportOptionsPanel(importPath_);
-    const std::string dest = cbSelectedDir_.empty() ? project_.contentDir() : cbSelectedDir_;
+    drawFbxImportOptionsPanel(drawerUi_.importPath_);
+    const std::string dest = drawerUi_.cbSelectedDir_.empty() ? project_.contentDir() : drawerUi_.cbSelectedDir_;
     const std::string blocked = cbImportBlockedReason(dest);
     if (blocked.empty()) {
         ImGui::Text("Into: %s", dest.c_str());
@@ -2858,9 +2858,9 @@ void SandboxApp::drawImportModal() {
     // not the enforcement, which happens where each file's true name is computed (importGltfToDir's
     // own loop).
     bool wouldCollide = false;
-    if (blocked.empty() && importPath_[0] != '\0') {
+    if (blocked.empty() && drawerUi_.importPath_[0] != '\0') {
         std::error_code cec;
-        const std::filesystem::path srcPath(importPath_);
+        const std::filesystem::path srcPath(drawerUi_.importPath_);
         std::string ext = srcPath.extension().string();
         for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         if (ext == ".gltf" || ext == ".glb" || ext == ".fbx") {
@@ -2868,9 +2868,9 @@ void SandboxApp::drawImportModal() {
                            (ext == ".fbx" && std::filesystem::exists(dest + AVER_PATH_SEP + srcPath.stem().string() + ".ocimport", cec));
         }
 #if AVER_HAVE_AUDIO_IMPORT
-        else if (fmt::isImportableAudio(importPath_)) {
+        else if (fmt::isImportableAudio(drawerUi_.importPath_)) {
             wouldCollide = std::filesystem::exists(
-                dest + AVER_PATH_SEP + std::filesystem::path(fmt::ocAudioPathFor(importPath_)).filename().string(), cec);
+                dest + AVER_PATH_SEP + std::filesystem::path(fmt::ocAudioPathFor(drawerUi_.importPath_)).filename().string(), cec);
         }
 #endif
         else {
@@ -2885,12 +2885,12 @@ void SandboxApp::drawImportModal() {
         ImGui::Separator();
     }
 
-    ImGui::BeginDisabled(importPath_[0] == '\0' || !blocked.empty());
+    ImGui::BeginDisabled(drawerUi_.importPath_[0] == '\0' || !blocked.empty());
     if (ImGui::Button("Import")) {
-        modelImportArmDialogOptions(importPath_);          // the panel's FBX options apply to exactly this import
-        importAsset(importPath_, dest, wouldCollide && s_overwrite);
+        modelImportArmDialogOptions(drawerUi_.importPath_);          // the panel's FBX options apply to exactly this import
+        importAsset(drawerUi_.importPath_, dest, wouldCollide && s_overwrite);
         modelImportDisarm();
-        importPath_[0] = '\0';
+        drawerUi_.importPath_[0] = '\0';
         s_overwrite = false;
         ImGui::CloseCurrentPopup();
     }
@@ -2934,7 +2934,7 @@ void SandboxApp::importAsset(const std::string& src, const std::string& destDir,
     std::error_code ec;
     if (!cbIsEditable(destDir)) {
         AVER_WARN("[Import] '{}' is engine content and is read-only", destDir);
-        cbStatus_ = "Engine content is read-only";
+        drawerUi_.cbStatus_ = "Engine content is read-only";
         notifyOutcome(editor::NotifySeverity::Warning, "Import refused",
                      "Engine content is read-only.");
         return;
@@ -2972,11 +2972,11 @@ void SandboxApp::importAsset(const std::string& src, const std::string& destDir,
 
     std::filesystem::copy_file(src, dest, ec);
     if (ec) { AVER_WARN("[Import] failed to copy '{}' -> '{}': {}", src, dest, ec.message());
-              cbStatus_ = "Import failed - see the Output Log";
+              drawerUi_.cbStatus_ = "Import failed - see the Output Log";
               notifyOutcome(editor::NotifySeverity::Error, "Import failed", ec.message(), true);
               return; }
     AVER_INFO("[Import] imported '{}' into {}", name, destDir);
-    cbStatus_ = "Imported " + name;
+    drawerUi_.cbStatus_ = "Imported " + name;
     // Content-relative, not absolute: unreadable at this width, and the reader already knows
     // which project is open. cbRelativeToContent falls back to absolute only when there is no project.
     notifyOutcome(editor::NotifySeverity::Success, "Imported " + name,
@@ -2995,7 +2995,7 @@ void SandboxApp::importAudio(const std::string& src, const std::string& destDir,
     if (!r.ok) {
         AVER_WARN("[Import] {} could not be decoded: {}",
                   std::filesystem::path(src).filename().string(), r.error);
-        cbStatus_ = "Import failed - see the Output Log";
+        drawerUi_.cbStatus_ = "Import failed - see the Output Log";
         notifyOutcome(editor::NotifySeverity::Error,
                      "Could not decode " + std::filesystem::path(src).filename().string(),
                      r.error, true);
@@ -3012,7 +3012,7 @@ void SandboxApp::importAudio(const std::string& src, const std::string& destDir,
             cbDeleteEntry(out);
         } else {
             AVER_WARN("[Import] '{}' already exists in {} - not overwritten", outName, destDir);
-            cbStatus_ = "Already imported";
+            drawerUi_.cbStatus_ = "Already imported";
             notifyOutcome(editor::NotifySeverity::Warning, "Already imported",
                          outName + " exists here already and was not overwritten.");
             return;
@@ -3022,7 +3022,7 @@ void SandboxApp::importAudio(const std::string& src, const std::string& destDir,
     std::string why;
     if (!fmt::saveOcAudio(out, data, std::filesystem::path(src).filename().string(), &why)) {
         AVER_WARN("[Import] could not write '{}': {}", out, why);
-        cbStatus_ = "Import failed - see the Output Log";
+        drawerUi_.cbStatus_ = "Import failed - see the Output Log";
         notifyOutcome(editor::NotifySeverity::Error, "Could not write " + outName, why, true);
         return;
     }
@@ -3034,7 +3034,7 @@ void SandboxApp::importAudio(const std::string& src, const std::string& destDir,
     AVER_INFO("[Import] '{}' -> {} ({} via {}, {} ch, {} Hz, {:.2f} s)",
               std::filesystem::path(src).filename().string(), outName,
               data.samples.size(), r.decoder, data.channels, data.sampleRate, seconds);
-    cbStatus_ = "Imported " + outName;
+    drawerUi_.cbStatus_ = "Imported " + outName;
     notifyOutcome(editor::NotifySeverity::Success, "Imported " + outName,
                  std::to_string(data.channels) + " ch, " +
                      std::to_string(data.sampleRate) + " Hz");
@@ -3054,12 +3054,12 @@ void SandboxApp::importModel(const std::string& src, const std::string& destDir,
     const std::string srcName = std::filesystem::path(src).filename().string();
     if (!importModelFile(src, destDir, project_.contentDir(), overwrite, sum, &why)) {
         AVER_WARN("[Import] {}", why);
-        cbStatus_ = "Import failed - see the Output Log";
+        drawerUi_.cbStatus_ = "Import failed - see the Output Log";
         notifyOutcome(editor::NotifySeverity::Error, "Could not import " + srcName, why, true);
         return;
     }
     if (sum.meshesWritten == 0 && sum.rigsWritten == 0 && sum.clipsWritten == 0) {
-        cbStatus_ = "Import produced nothing - see the Output Log";
+        drawerUi_.cbStatus_ = "Import produced nothing - see the Output Log";
         notifyOutcome(editor::NotifySeverity::Warning, "Nothing imported from " + srcName,
                      "The file parsed but contained no meshes, skeletons or clips.", true);
         return;
@@ -3070,7 +3070,7 @@ void SandboxApp::importModel(const std::string& src, const std::string& destDir,
     if (sum.materialsWritten || sum.texturesWritten)
         counts += ", with " + std::to_string(sum.materialsWritten) + " material(s) and " +
                   std::to_string(sum.texturesWritten) + " texture(s)";
-    cbStatus_ = "Imported " + counts + " from " + srcName;
+    drawerUi_.cbStatus_ = "Imported " + counts + " from " + srcName;
     // The outcome of a slow operation, which is precisely what a notification is for.
     notifyOutcome(editor::NotifySeverity::Success, "Imported " + srcName, counts);
     cbInvalidate(destDir);
@@ -3085,7 +3085,7 @@ void SandboxApp::importModel(const std::string& src, const std::string& destDir,
 // Unsupported extensions aren't filtered here either -- importAsset already decides what it can
 // do with a file (convert, copy, or refuse).
 void SandboxApp::importDroppedFiles(const std::vector<std::string>& paths) {
-    const std::string destDir = cbSelectedDir_.empty() ? project_.contentDir() : cbSelectedDir_;
+    const std::string destDir = drawerUi_.cbSelectedDir_.empty() ? project_.contentDir() : drawerUi_.cbSelectedDir_;
     for (const std::string& p : paths) {
         std::error_code ec;
         if (std::filesystem::is_directory(p, ec)) {

@@ -123,7 +123,7 @@ bool SandboxApp::originBlocksSave(const char* what) {
                   "Return to the first region with world.tp 0 0 0, then save.",
                   what, o.x / world::kOriginStepCm, o.y / world::kOriginStepCm);
     }
-    cbStatus_ = "Cannot save away from the first region: world.tp 0 0 0 first";
+    drawerUi_.cbStatus_ = "Cannot save away from the first region: world.tp 0 0 0 first";
     return true;
 }
 

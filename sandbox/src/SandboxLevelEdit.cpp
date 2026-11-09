@@ -311,10 +311,10 @@ bool SandboxApp::handleOpenRequest(const char* path) {
 // is empty" failure a picker would otherwise make easy to hit, so the check happens up front and
 // the failure is reported where the person clicked.
 bool SandboxApp::requestOpenLevel(const std::string& path, const char* why) {
-    openLevelError_.clear();
+    drawerUi_.openLevelError_.clear();
     std::error_code ec;
     if (path.empty() || !std::filesystem::exists(path, ec)) {
-        openLevelError_ = "That level is not there any more.";
+        drawerUi_.openLevelError_ = "That level is not there any more.";
         return false;
     }
     // Parsed, not merely stat'd. A level that exists and does not parse would empty the world
@@ -328,7 +328,7 @@ bool SandboxApp::requestOpenLevel(const std::string& path, const char* why) {
             ? fmt::loadOcmap(path, legacyProbe, &parseWhy)
             : fmt::loadOcworld(path, probe, &parseWhy);
         if (!ok) {
-            openLevelError_ = parseWhy.empty() ? std::string("That level could not be read.")
+            drawerUi_.openLevelError_ = parseWhy.empty() ? std::string("That level could not be read.")
                                                : parseWhy;
             return false;
         }

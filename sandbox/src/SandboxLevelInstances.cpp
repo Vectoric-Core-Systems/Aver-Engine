@@ -137,7 +137,7 @@ editor::LevelInstanceUiCallbacks SandboxApp::levelInstanceUiCallbacks() {
     cb.pushUndo = [this](const editor::LevelInstanceEdit& e) { pushLevelInstanceEdit(e); };
     cb.select = [this](scene::Entity e) { sel_ = kSelScene; selEntity_ = e; };
     cb.markDirty = [this] { markLevelUnsaved(); };
-    cb.status = [this](const std::string& s) { cbStatus_ = s; };
+    cb.status = [this](const std::string& s) { drawerUi_.cbStatus_ = s; };
     cb.openLevel = [this](const std::string& assetRef) { openInstanceLevel(assetRef); };
     cb.bakePack = [this](scene::Entity root, std::string* why) { return bakeInstancePack(root, why); };
     cb.removeReplaced = [this](const std::vector<scene::Entity>& es) {
@@ -204,13 +204,13 @@ void SandboxApp::openInstanceLevel(const std::string& assetRef) {
     rp.yawDeg = viewState_.yaw_ * kRadToDeg;
     rp.pitchDeg = viewState_.pitch_ * kRadToDeg;
     if (requestOpenLevel(full, "opened from a level instance")) levelInstanceModel_.pushReturn(std::move(rp));
-    else cbStatus_ = openLevelError_;
+    else drawerUi_.cbStatus_ = drawerUi_.openLevelError_;
 }
 
 void SandboxApp::levelInstanceBack() {
     editor::LevelReturnPoint rp;
     if (!levelInstanceModel_.popReturn(rp)) return;
-    if (!requestOpenLevel(rp.levelPath, "back from a level instance")) cbStatus_ = openLevelError_;
+    if (!requestOpenLevel(rp.levelPath, "back from a level instance")) drawerUi_.cbStatus_ = drawerUi_.openLevelError_;
 }
 
 bool SandboxApp::bakeInstancePack(scene::Entity root, std::string* why) {
@@ -218,7 +218,7 @@ bool SandboxApp::bakeInstancePack(scene::Entity root, std::string* why) {
     if (asset.empty()) { if (why) *why = "not an instance"; return false; }
     world::PackBakeReport rep;
     if (!game::bakeLevelPackWithContent(level_.assets(), asset, content_, project_.contentDir(), project_.dir, rep, why)) return false;
-    cbStatus_ = "Baked " + std::to_string(rep.rows) + " row(s) in " + std::to_string(rep.groups) + " group(s); " +
+    drawerUi_.cbStatus_ = "Baked " + std::to_string(rep.rows) + " row(s) in " + std::to_string(rep.groups) + " group(s); " +
                 std::to_string(rep.kept) + " stay entities";
     level_.instances().reloadAsset(asset);   // the bake changes what a packed instance shows
     return true;

@@ -795,7 +795,7 @@ scene::Entity SandboxApp::spawnClassSlot(usize slot, const Transform* worldXf) {
 // edit. Every refusal sets the status line, warns, fills *why and returns kInvalidEntity.
 scene::Entity SandboxApp::placeClassInstance(fmt::OcWorldPlacement p, std::string* why) {
     const auto refuse = [&](const std::string& msg) {
-        cbStatus_ = msg;
+        drawerUi_.cbStatus_ = msg;
         if (why) *why = msg;
         AVER_WARN("[Editor] place class '{}': {}", p.className, msg);
         return scene::kInvalidEntity;
@@ -841,7 +841,7 @@ scene::Entity SandboxApp::placeClassInstance(fmt::OcWorldPlacement p, std::strin
     c2.classSlot = static_cast<i32>(slot);
     pushEdit(std::move(c2));
     markLevelUnsaved();
-    cbStatus_ = "Placed " + p.className;
+    drawerUi_.cbStatus_ = "Placed " + p.className;
     AVER_INFO("[Editor] placed class '{}' at ({:.0f}, {:.0f}, {:.0f})", p.className, p.x, p.y, p.z);
     return e;
 }
