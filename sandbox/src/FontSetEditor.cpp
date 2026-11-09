@@ -858,7 +858,7 @@ void FontSetEditor::drawToolbar() {
     if (ImGui::Button("Redo")) redo();
     ImGui::EndDisabled();
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(90.0f * (ImGui::GetFontSize() / 16.0f));
+    ImGui::SetNextItemWidth(90.0f * (fontScale()));
     ImGui::InputTextWithHint("##lang", "language", language_, sizeof language_);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("The UI language to preview (ja, ar, zh-Hans ...): reorders chains with lang= and applies OVERRIDE rows");
     const std::string bad = fsValidate(doc_);
@@ -1176,7 +1176,7 @@ void FontSetEditor::draw(Engine& e) {
         return;
     }
     frameStart_ = doc_;
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
 
     EditorTextPreview& pv = preview();
     const std::string root = fontContentRootOf(path_);

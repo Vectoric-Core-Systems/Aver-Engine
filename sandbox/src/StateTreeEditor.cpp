@@ -1,6 +1,7 @@
 // The StateTree editor tab. See the header for the wiring.
 
 #include "StateTreeEditor.hpp"
+#include "EditorChrome.hpp"
 #include "EditorKeybinds.hpp"
 
 #include "aver/core/Hash.hpp"
@@ -674,7 +675,7 @@ void StateTreeEditor::drawCanvas(f32 width) {
         ImGui::EndChild();
         return;
     }
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
     TreeLayoutParams lp;
     lp.nodeW = 200.0f * dpi; lp.gapX = 36.0f * dpi; lp.gapY = 70.0f * dpi;
     const f32 headerH = 24.0f * dpi, lineH = 16.0f * dpi;
@@ -1156,7 +1157,7 @@ void StateTreeEditor::draw(Engine& e) {
     drawToolbar();
     ImGui::Separator();
 
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
     const f32 avail = ImGui::GetContentRegionAvail().x;
     const f32 minCanvas = 240.0f * dpi, minSide = 300.0f * dpi;
     const f32 canvasW = splitPaneWidth(split_, kPrefSplit, kDefaultCanvasFraction, avail, minCanvas, minSide);

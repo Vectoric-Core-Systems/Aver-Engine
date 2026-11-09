@@ -694,7 +694,7 @@ void arrow(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 col, f32 thick, f32 head) {
 } // namespace
 
 void AnimStateMachineEditor::drawCanvas() {
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     const ImVec2 p0 = ImGui::GetCursorScreenPos();
@@ -859,7 +859,7 @@ void AnimStateMachineEditor::drawCanvas() {
 }
 
 void AnimStateMachineEditor::drawDetails() {
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
     AnimStateMachineAsset before = asset_;
     bool ended = false;
     auto touch = [&](bool changed) {
@@ -1089,7 +1089,7 @@ void AnimStateMachineEditor::drawDetails() {
 
 void AnimStateMachineEditor::drawPipeline() {
     if (!::aver::editor::sectionHeader("Pipeline (slots, layered and additive blends, curves)")) return;
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
     const AnimStateMachineAsset before = asset_;
     bool ended = false;
     auto touch = [&](bool changed) {
@@ -1331,7 +1331,7 @@ void AnimStateMachineEditor::draw(Engine& e) {
     ImGui::EndDisabled();
     ImGui::Separator();
 
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
     const f32 detailsW = std::min(ImGui::GetContentRegionAvail().x * 0.4f, 380.0f * dpi);
     if (ImGui::BeginChild("##asmcanvaspane", ImVec2(ImGui::GetContentRegionAvail().x - detailsW - 8.0f * dpi, 0), true)) drawCanvas();
     ImGui::EndChild();

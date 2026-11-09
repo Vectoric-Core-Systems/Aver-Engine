@@ -1,6 +1,7 @@
 // The actor editor tab: opens a C# actor file, previews it in 3D, and writes placements back.
 
 #include "ActorEditor.hpp"
+#include "EditorChrome.hpp"
 #include "EditorKeybinds.hpp"
 #include "EditorEuler.hpp"
 #include "EditorTransform.hpp"
@@ -741,7 +742,7 @@ void ActorEditor::drawTreeNode(int idx) {
 // from draw()'s own AVER_WITH_IMGUI body, so the #else branch is dead code kept for linkage only.
 void ActorEditor::drawComponentTree(bool ownColumn) {
 #if AVER_WITH_IMGUI
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
     ImGui::TextDisabled("COMPONENTS");
     const f32 h = ownColumn ? -(76.0f * dpi) : 190.0f * dpi;
     if (ImGui::BeginChild("##components", ImVec2(0.0f, h), ImGuiChildFlags_Borders)) {
@@ -1342,7 +1343,7 @@ void ActorEditor::draw(Engine& e) {
     ImGui::Separator();
 
     // ---- the layout ----
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
     const f32 avail = ImGui::GetContentRegionAvail().x;
 
     // Column widths are shared by every actor tab and persisted in DPI-independent units.

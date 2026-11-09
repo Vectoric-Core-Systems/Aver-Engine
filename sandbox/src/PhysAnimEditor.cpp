@@ -1,4 +1,5 @@
 #include "PhysAnimEditor.hpp"
+#include "EditorChrome.hpp"
 
 #include "aver/core/Log.hpp"
 
@@ -161,7 +162,7 @@ void PhysAnimEditor::draw(Engine&) {
     }
 
     // Sizes are logical px scaled by the UI font, so the swatches, indents and columns keep their proportions at 300% DPI.
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
     const f32 lineH = ImGui::GetTextLineHeight();
     const auto swatch = [&](ImU32 col) {
         const ImVec2 p = ImGui::GetCursorScreenPos();

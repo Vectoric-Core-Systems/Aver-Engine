@@ -560,7 +560,7 @@ void MotionDbEditor::touch(bool changed) {
 }
 
 void MotionDbEditor::drawHeader() {
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
     char buf[256];
     auto text = [&](const char* label, std::string& v) {
         std::snprintf(buf, sizeof buf, "%s", v.c_str());
@@ -623,7 +623,7 @@ void MotionDbEditor::drawHeader() {
 }
 
 void MotionDbEditor::drawTags() {
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
     ImGui::SeparatorText("Tags");
     char buf[128];
     int removeAt = -1;
@@ -649,7 +649,7 @@ void MotionDbEditor::drawTags() {
 }
 
 void MotionDbEditor::drawFeatures() {
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
     ImGui::SeparatorText("Features");
     char buf[128];
     int removeAt = -1;
@@ -723,7 +723,7 @@ void MotionDbEditor::drawFeatures() {
 
 // The entry's window and its tag ranges on the clip's duration. Handles drag in 1/30 s steps.
 void MotionDbEditor::drawLane(i32 ci) {
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
     MotionClipEntry& e = asset_.clips[static_cast<usize>(ci)];
     f32 total = clipDuration(e.clip);
     if (total <= 0.0f) {
@@ -780,7 +780,7 @@ void MotionDbEditor::drawLane(i32 ci) {
 }
 
 void MotionDbEditor::drawClips() {
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
     ImGui::SeparatorText("Clips");
     char buf[256];
     int removeAt = -1, moveAt = -1, moveBy = 0;
@@ -908,7 +908,7 @@ void MotionDbEditor::drawBake() {
 }
 
 void MotionDbEditor::drawLab() {
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
     ImGui::SeparatorText("Query lab");
     const anim::PoseDatabase* db = database();
     if (!db) {

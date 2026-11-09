@@ -27,6 +27,9 @@ struct EditorFonts {
     ImFont* secondary = nullptr;   // status bar, secondary hints, viewport readouts
 };
 
+// The DPI scale of the UI: the current font size over the 16 px base.
+inline f32 fontScale() { return ImGui::GetFontSize() / 16.0f; }
+
 inline EditorFonts& editorFonts() { static EditorFonts f; return f; }
 
 // Push/pop a type-scale font for the current scope. A null font pushes nothing.

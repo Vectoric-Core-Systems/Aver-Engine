@@ -3,6 +3,7 @@
 // test builds without ImGui and no Debug object file grows past the COFF section cap. Every edit goes through the tab's
 // editEffect / editSystem and the ImGui-free functions in ParticleStackModel.hpp.
 #include "ParticleEditor.hpp"
+#include "EditorChrome.hpp"
 
 #if AVER_MODULE_PARTICLES && AVER_WITH_IMGUI
 #include "ActorEditor.hpp"
@@ -120,7 +121,7 @@ void ParticleEditor::drawTransport() {
     if (ImGui::Button(ICON_REFRESH)) restartPreview();
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Restart from time 0");
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(80.0f * (ImGui::GetFontSize() / 16.0f));
+    ImGui::SetNextItemWidth(80.0f * (fontScale()));
     f32 speed = playSpeed_;
     if (ImGui::SliderFloat("##pxspeed", &speed, 0.05f, 4.0f, "%.2fx", ImGuiSliderFlags_Logarithmic)) setPlaybackSpeed(speed);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Playback speed");
@@ -129,7 +130,7 @@ void ParticleEditor::drawTransport() {
     if (ImGui::Checkbox("Loop", &lp)) setLoop(lp);
     if (loop_) {
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(70.0f * (ImGui::GetFontSize() / 16.0f));
+        ImGui::SetNextItemWidth(70.0f * (fontScale()));
         f32 len = loopLength_;
         if (ImGui::DragFloat("##pxlooplen", &len, 0.05f, 0.5f, 60.0f, "%.1f s")) setLoopLength(len);
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Loop length (the preview restarts here)");
@@ -138,7 +139,7 @@ void ParticleEditor::drawTransport() {
     {
         const f32 range = loop_ ? loopLength_ : std::max(10.0f, std::ceil(previewTime_ + 0.5f));
         f32 t = std::min(previewTime_, range);
-        ImGui::SetNextItemWidth(std::max(80.0f, ImGui::GetContentRegionAvail().x - 120.0f * (ImGui::GetFontSize() / 16.0f)));
+        ImGui::SetNextItemWidth(std::max(80.0f, ImGui::GetContentRegionAvail().x - 120.0f * (fontScale())));
         if (ImGui::SliderFloat("##pxseek", &t, 0.0f, range, "")) seekPreview(t);
         if (ImGui::IsItemActive()) previewPlaying_ = false;
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Seek: resimulates from 0 with the fixed seed");
@@ -186,7 +187,7 @@ void ParticleEditor::drawCurveEditor(bool isColor) {
     int& sel = curveSelKey_[isColor ? 1 : 0];
     int& drag = curveDragKey_[isColor ? 1 : 0];
     const u64 frame = frameNow();
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
     ImGui::PushID(isColor ? "colorcurve" : "sizecurve");
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const auto edit = [&](const std::function<bool(Curve4&)>& fn, u32 key) {
@@ -401,7 +402,7 @@ void ParticleEditor::drawLiveParams() {
         if (lv) for (int k = 0; k < 4; ++k) v[k] = lv[k];
         ImGui::PushID(static_cast<int>(i));
         bool ch = false;
-        ImGui::SetNextItemWidth(std::max(120.0f, ImGui::GetContentRegionAvail().x - 190.0f * (ImGui::GetFontSize() / 16.0f)));
+        ImGui::SetNextItemWidth(std::max(120.0f, ImGui::GetContentRegionAvail().x - 190.0f * (fontScale())));
         if (p.kind == 0) ch = ImGui::DragFloat(p.name.c_str(), &v[0], std::max(0.01f, std::fabs(v[0]) * 0.01f), -1000000.0f, 1000000.0f, "%.3f");
         else if (p.kind == 1) ch = ImGui::DragFloat3(p.name.c_str(), v, 0.05f);
         else ch = ImGui::ColorEdit4(p.name.c_str(), v);
@@ -430,11 +431,11 @@ void ParticleEditor::drawScalability() {
     using namespace particles;
     static const char* kTiers[] = {"Low", "Medium", "High", "Epic"};
     int pt = static_cast<int>(previewTier_);
-    ImGui::SetNextItemWidth(110.0f * (ImGui::GetFontSize() / 16.0f));
+    ImGui::SetNextItemWidth(110.0f * (fontScale()));
     if (ImGui::Combo("Preview as", &pt, kTiers, 4)) setPreviewTier(static_cast<ScalabilityTier>(pt));
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Plays the preview at this tier. Epic is the effect as written. Not saved.");
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(110.0f * (ImGui::GetFontSize() / 16.0f));
+    ImGui::SetNextItemWidth(110.0f * (fontScale()));
     ImGui::Combo("Edit tier", &scaleEditTier_, kTiers, 4);
 
     const ScalabilityTier tier = static_cast<ScalabilityTier>(scaleEditTier_);
@@ -502,7 +503,7 @@ void ParticleEditor::drawParams() {
             const bool isSel = static_cast<int>(i) == sel_;
             char label[96];
             std::snprintf(label, sizeof label, "%zu  %s", i, d.emitters[i].name.empty() ? "(unnamed)" : d.emitters[i].name.c_str());
-            if (ImGui::Selectable(label, isSel, 0, ImVec2(ImGui::GetContentRegionAvail().x - 90.0f * (ImGui::GetFontSize() / 16.0f), 0))) select(static_cast<int>(i));
+            if (ImGui::Selectable(label, isSel, 0, ImVec2(ImGui::GetContentRegionAvail().x - 90.0f * (fontScale()), 0))) select(static_cast<int>(i));
             ImGui::SameLine();
             bool m = muted(static_cast<int>(i));
             if (ImGui::Checkbox("##mute", &m)) setMuted(static_cast<int>(i), m);
@@ -1094,7 +1095,7 @@ void ParticleEditor::drawParams() {
 
 // The row above the picture: ground grid, bounds spheres, and the moving test emitter. All preview-only, none of it saved.
 void ParticleEditor::drawPreviewToolbar() {
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
     ImGui::Checkbox("Ground", &showGround_);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("The floor grid under the particles");
     ImGui::SameLine();
@@ -1373,7 +1374,7 @@ void ParticleEditor::draw(Engine& e) {
     ImGui::Separator();
 
     // Draggable, persisted, through the shared SplitPane helper (EditorWidgets.hpp).
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
     const f32 avail = ImGui::GetContentRegionAvail().x;
     const f32 minPreview = 180.0f * dpi, minParams = 220.0f * dpi;
     const f32 leftW = splitPaneWidth(split_, kPrefPreviewSplit, kDefaultPreviewFraction, avail, minPreview, minParams);

@@ -1,6 +1,7 @@
 // The visual behaviour-tree editor tab. See the header for the wiring.
 
 #include "BtGraphEditor.hpp"
+#include "EditorChrome.hpp"
 #include "EditorKeybinds.hpp"
 
 #include "aver/core/Hash.hpp"
@@ -503,7 +504,7 @@ void BtGraphEditor::drawCanvas(f32 width) {
         ImGui::EndChild();
         return;
     }
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
     BtLayoutParams lp;
     lp.nodeW *= dpi; lp.gapX *= dpi; lp.gapY *= dpi; lp.headerH *= dpi; lp.lineH *= dpi; lp.padY *= dpi;
     const std::vector<BtNodeBox> boxes = btLayout(asset_, lp);
@@ -902,7 +903,7 @@ void BtGraphEditor::draw(Engine& e) {
     drawToolbar();
     ImGui::Separator();
 
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
     const f32 avail = ImGui::GetContentRegionAvail().x;
     const f32 minCanvas = 240.0f * dpi, minSide = 260.0f * dpi;
     const f32 canvasW = splitPaneWidth(split_, kPrefSplit, kDefaultCanvasFraction, avail, minCanvas, minSide);

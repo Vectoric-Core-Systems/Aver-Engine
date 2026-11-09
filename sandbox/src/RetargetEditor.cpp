@@ -1,5 +1,6 @@
 // The .ocretarget editor tab. See the header for the SandboxApp hook and for why the edits are free functions.
 #include "RetargetEditor.hpp"
+#include "EditorChrome.hpp"
 #include "EditorKeybinds.hpp"
 
 #include "aver/anim/AnimSampler.hpp"
@@ -483,7 +484,7 @@ void RetargetEditor::drawChains() {
 
 void RetargetEditor::drawChainDetails() {
     if (!inRange(asset_.chains.size(), selChain_)) { ImGui::TextDisabled("Select a chain."); return; }
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
     RetargetChainDef& c = asset_.chains[static_cast<usize>(selChain_)];
     char buf[128];
     std::snprintf(buf, sizeof buf, "%s", c.name.c_str());
@@ -515,7 +516,7 @@ void RetargetEditor::drawChainDetails() {
 }
 
 void RetargetEditor::drawRoot() {
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
     if (srcOk_) { boneCombo("source pelvis", src_, asset_.root.srcBone); boneCombo("source root", src_, asset_.rootMotion.srcBone); }
     if (dstOk_) { boneCombo("target pelvis", dst_, asset_.root.dstBone); boneCombo("target root", dst_, asset_.rootMotion.dstBone); }
     const RtgScales sc = scales();

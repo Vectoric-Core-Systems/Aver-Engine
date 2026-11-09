@@ -1169,7 +1169,7 @@ void AnimEditor::drawMorph(Engine& e) {
         return;
     }
     ImGui::TextDisabled("Preview mesh with blend shapes (.ocmesh):");
-    ImGui::SetNextItemWidth(-80.0f * (ImGui::GetFontSize() / 16.0f));
+    ImGui::SetNextItemWidth(-80.0f * (fontScale()));
     ImGui::InputText("##morphMesh", morphMeshBuf_, sizeof morphMeshBuf_);
     ImGui::SameLine();
     if (ImGui::Button("Preview") && morphMeshBuf_[0] != '\0') {
@@ -1320,7 +1320,7 @@ void AnimEditor::drawCurves() {
 
         if (sel) {
             ImGui::Indent();
-            const f32 w = 170.0f * (ImGui::GetFontSize() / 16.0f);
+            const f32 w = 170.0f * (fontScale());
             ImGui::SetNextItemWidth(w);
             ImGui::InputText("Name", curveNameBuf_, sizeof curveNameBuf_);
             if (ImGui::IsItemDeactivatedAfterEdit()) {
@@ -1441,7 +1441,7 @@ void AnimEditor::drawCurves() {
 // can answer.
 void AnimEditor::drawCurveWidget(fmt::OcCurve& c) {
 #if AVER_WITH_IMGUI
-    const f32 uiScale = ImGui::GetFontSize() / 16.0f;
+    const f32 uiScale = fontScale();
     const f32 height = 160.0f * uiScale;
     const f32 width = std::max(ImGui::GetContentRegionAvail().x, 40.0f);
 
@@ -1657,7 +1657,7 @@ void AnimEditor::drawSockets() {
 
         if (sel) {
             ImGui::Indent();
-            const f32 w = 170.0f * (ImGui::GetFontSize() / 16.0f);
+            const f32 w = 170.0f * (fontScale());
             ImGui::SetNextItemWidth(w);
             ImGui::InputText("Name", socketNameBuf_, sizeof socketNameBuf_);
             if (ImGui::IsItemDeactivatedAfterEdit()) {
@@ -1796,7 +1796,7 @@ void AnimEditor::drawNotifies() {
 
         if (sel) {
             ImGui::Indent();
-            ImGui::SetNextItemWidth(180.0f * (ImGui::GetFontSize() / 16.0f));
+            ImGui::SetNextItemWidth(180.0f * (fontScale()));
             ImGui::InputText("Event", notifyNameBuf_, sizeof notifyNameBuf_);
             // Committed on deactivate (same boundary as the graph editor's text fields), so one typed
             // name is one edit, not one per keystroke.
@@ -1810,7 +1810,7 @@ void AnimEditor::drawNotifies() {
             }
             f32 t = n.time;
             const f32 dur = clip_.duration > 0.0f ? clip_.duration : 1.0f;
-            ImGui::SetNextItemWidth(180.0f * (ImGui::GetFontSize() / 16.0f));
+            ImGui::SetNextItemWidth(180.0f * (fontScale()));
             const bool timeChanged = ImGui::SliderFloat("Time", &t, 0.0f, dur, "%.3f s");
             // One drag is one undo entry: pushed at activation, before this widget's apply below.
             if (ImGui::IsItemActivated()) pushUndo();
@@ -1824,7 +1824,7 @@ void AnimEditor::drawNotifies() {
             // instant, as before. See AnimSystem.hpp's own banner for what the runtime does with a
             // non-zero value.
             f32 stateDur = notifyDurationAt(i);
-            ImGui::SetNextItemWidth(180.0f * (ImGui::GetFontSize() / 16.0f));
+            ImGui::SetNextItemWidth(180.0f * (fontScale()));
             const bool durChanged = ImGui::SliderFloat("Duration", &stateDur, 0.0f, dur, "%.3f s");
             if (ImGui::IsItemActivated()) pushUndo();
             if (durChanged) {
@@ -1879,7 +1879,7 @@ void AnimEditor::drawTimeline() {
     // the slider itself; per-track ticks, curve overlay and notify markers moved to their own lanes.
     if (ImGui::SliderFloat("##time", &time_, 0.0f, dur, "%.3f s")) playing_ = false;
 
-    const f32 uiScale = ImGui::GetFontSize() / 16.0f;
+    const f32 uiScale = fontScale();
     // Name column width fixed across every lane (the master slider has none, so this constant exists
     // only from here down), so a key's x in one row lands under the same instant as in every other row
     // and under the playhead line.
@@ -2098,7 +2098,7 @@ void AnimEditor::drawClipRetime() {
     // the first look at this panel would find Trim refusing until Full Range is pressed. Re-applied
     // only while End is still its unset default, so a deliberate 0.0 isn't fought.
     if (retimeTrimEnd_ <= 0.0f && clip_.duration > 0.0f) retimeTrimEnd_ = clip_.duration;
-    const f32 w = 130.0f * (ImGui::GetFontSize() / 16.0f);
+    const f32 w = 130.0f * (fontScale());
 
     ImGui::TextWrapped("These act on the WHOLE clip: every track's keys, every notify's time and "
                        "state window, and every curve's keys move together, so nothing drifts out "
@@ -2304,7 +2304,7 @@ void AnimEditor::drawTrackKeyEditor() {
         return;
     }
 
-    const f32 w = 160.0f * (ImGui::GetFontSize() / 16.0f);
+    const f32 w = 160.0f * (fontScale());
     const f32 dur = clip_.duration > 0.0f ? clip_.duration : 1.0f;
 
     // Time: DragFloat already doubles as "type an exact value" via double-click/Ctrl+click, so no
@@ -2556,7 +2556,7 @@ void AnimEditor::draw(Engine& e) {
     // Scaled, not raw pixels: sizes here predate 300% DPI, where a 240px column becomes ~80 logical
     // pixels, narrow enough that bone names fit only because they're short. GetFontSize() stands in as
     // the DPI proxy since it's already correct here and needs nothing threading through four call sites.
-    const f32 uiScale = ImGui::GetFontSize() / 16.0f;
+    const f32 uiScale = fontScale();
 
     // The strip's height must be decided here, before the row below is laid out: ImGui is immediate-
     // mode, so the row's BeginChild calls need a height this frame ("total room minus the strip"),

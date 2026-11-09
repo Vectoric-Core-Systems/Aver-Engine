@@ -2,6 +2,7 @@
 // why the structural edits are free functions rather than members.
 
 #include "BtEditor.hpp"
+#include "EditorChrome.hpp"
 #include "EditorKeybinds.hpp"
 
 #include "aver/core/Log.hpp"
@@ -540,7 +541,7 @@ void BtEditor::draw(Engine& e) {
 
     // Draggable, persisted, through the shared SplitPane helper (EditorWidgets.hpp) -- see this
     // file's own kDefaultTreeFraction comment for why 0.45f is not a new number.
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
     const f32 avail = ImGui::GetContentRegionAvail().x;
     const f32 minTree = 140.0f * dpi, minDetails = 200.0f * dpi;
     const f32 paneW = splitPaneWidth(split_, kPrefTreeSplit, kDefaultTreeFraction, avail,

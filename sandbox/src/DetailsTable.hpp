@@ -105,7 +105,7 @@ inline void begin() {
     s.active = true;
     s.shown = 0;
     s.dl = ImGui::GetWindowDrawList();
-    s.scale = ImGui::GetFontSize() / 16.0f;
+    s.scale = fontScale();
     s.avail = ImGui::GetContentRegionAvail().x;
     if (s.fraction < 0.0f) s.fraction = loadSplitFraction(kSplitKey, 0.40f);
     s.splitPx = detailsSplitPx(s.fraction, s.avail, s.scale);

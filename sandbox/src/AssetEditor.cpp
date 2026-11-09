@@ -382,7 +382,7 @@ public:
             return;
         }
 
-        const f32 dpi = ImGui::GetFontSize() / 16.0f;
+        const f32 dpi = fontScale();
         const f32 avail = ImGui::GetContentRegionAvail().x;
         const f32 minView = 240.0f * dpi, minDetails = 220.0f * dpi;
         const f32 viewW = splitPaneWidth(split_, kPrefViewSplit, kDefaultViewFraction, avail,
@@ -498,7 +498,7 @@ private:
         }
         if (!gpuMesh_) { ImGui::TextDisabled("This mesh could not be uploaded for preview."); return; }
 
-        const f32 dpi = ImGui::GetFontSize() / 16.0f;
+        const f32 dpi = fontScale();
 
         // ONLY WHEN FOCUSED. ActorPreview is shared by every tab that draws into it, and the draw
         // list is whatever the last writer set this frame -- so an actor editor and a mesh viewer

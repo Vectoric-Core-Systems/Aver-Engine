@@ -866,7 +866,7 @@ void EqsEditor::draw(Engine& e) {
     }
     ImGui::Separator();
 
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
     const f32 avail = ImGui::GetContentRegionAvail().x;
     const f32 minForm = 320.0f * dpi, minSide = 280.0f * dpi;
     const f32 formW = splitPaneWidth(split_, kPrefSplit, kDefaultFormFraction, avail, minForm, minSide);

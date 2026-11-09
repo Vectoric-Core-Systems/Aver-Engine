@@ -2,6 +2,7 @@
 // are free functions rather than members.
 
 #include "BlendSpaceEditor.hpp"
+#include "EditorChrome.hpp"
 #include "EditorKeybinds.hpp"
 
 #include "aver/anim/AnimGraphAsset.hpp"
@@ -230,7 +231,7 @@ std::string stem(const std::string& p) { return std::filesystem::path(p).stem().
 } // namespace
 
 void BlendSpaceEditor::drawCanvas() {
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     const f32 pad = 28.0f * dpi;
@@ -404,7 +405,7 @@ void BlendSpaceEditor::drawDetails() {
         for (usize k = 0; k < s.markers.size(); ++k) {
             ImGui::PushID(static_cast<int>(k));
             std::snprintf(buf, sizeof buf, "%s", s.markers[k].name.c_str());
-            ImGui::SetNextItemWidth(90.0f * (ImGui::GetFontSize() / 16.0f));
+            ImGui::SetNextItemWidth(90.0f * (fontScale()));
             if (ImGui::InputText("##mn", buf, sizeof buf)) { s.markers[k].name = buf; touch(true); } else touch(false);
             ImGui::SameLine();
             touch(ImGui::DragFloat("##mt", &s.markers[k].time, 0.005f, 0.0f, 600.0f, "%.3f s"));
@@ -471,7 +472,7 @@ void BlendSpaceEditor::draw(Engine& e) {
     ImGui::TextDisabled("click: probe   drag a point: move   double-click: add   Del: remove");
     ImGui::Separator();
 
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
     const f32 detailsW = std::min(ImGui::GetContentRegionAvail().x * 0.4f, 340.0f * dpi);
     if (ImGui::BeginChild("##bscanvaspane", ImVec2(ImGui::GetContentRegionAvail().x - detailsW - 8.0f * dpi, 0), true)) drawCanvas();
     ImGui::EndChild();

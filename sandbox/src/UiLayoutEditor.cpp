@@ -2866,7 +2866,7 @@ void UiLayoutEditor::draw(Engine& e) {
                            previewErrors_.size() > 1 ? (" (+" + std::to_string(previewErrors_.size() - 1) + " more)").c_str() : "");
     ImGui::Separator();
 
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
     const f32 avail = ImGui::GetContentRegionAvail().x;
     const f32 leftW = splitPaneWidth(splitLeft_, kPrefLeftSplit, kDefaultLeftFraction, avail, 150.0f * dpi, 400.0f * dpi);
     if (ImGui::BeginChild("##uileft", ImVec2(leftW, 0), true)) {

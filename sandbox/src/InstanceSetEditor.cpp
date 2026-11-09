@@ -1,5 +1,6 @@
 // The `.ocinst` instance-set editor. See InstanceSetEditor.hpp for the three layers.
 #include "InstanceSetEditor.hpp"
+#include "EditorChrome.hpp"
 
 #include "EditorTransform.hpp"
 #include "aver/core/Log.hpp"
@@ -332,7 +333,7 @@ public:
         focused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
         handleKeys();
 
-        const f32 dpi = ImGui::GetFontSize() / 16.0f;
+        const f32 dpi = fontScale();
         const f32 avail = ImGui::GetContentRegionAvail().x;
         const f32 minView = 260.0f * dpi, minSide = 260.0f * dpi;
         const f32 viewW = splitPaneWidth(split_, kPrefViewSplit, kDefaultViewFraction, avail, minView, minSide);

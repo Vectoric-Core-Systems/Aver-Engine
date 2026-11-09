@@ -3,6 +3,7 @@
 // class is declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
+#include "EditorChrome.hpp"
 #if AVER_MODULE_FRAMEWORK
 #  include "aver/game/PlacementProps.hpp"
 #endif

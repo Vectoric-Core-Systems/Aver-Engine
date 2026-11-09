@@ -1,5 +1,6 @@
 // The .ocikrig editor tab. See the header for the SandboxApp hook and for why the edits are free functions.
 #include "IkRigEditor.hpp"
+#include "EditorChrome.hpp"
 #include "EditorKeybinds.hpp"
 
 #include "aver/anim/AnimSampler.hpp"
@@ -673,7 +674,7 @@ void IkRigEditor::drawPreview(float width, float height) {
 }
 
 void IkRigEditor::drawChains() {
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
     if (ImGui::Button("Add chain") && skelOk_) {
         std::string s = selBone_ >= 0 ? skel_.bones[static_cast<usize>(selBone_)].name : (skel_.bones.empty() ? std::string() : skel_.bones[0].name);
         std::string e = s;
@@ -749,7 +750,7 @@ void IkRigEditor::drawChains() {
 }
 
 void IkRigEditor::drawLimits() {
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
     if (skelOk_ && selBone_ >= 0) {
         const std::string& bn = skel_.bones[static_cast<usize>(selBone_)].name;
         if (ImGui::Button(("Add limit for " + bn).c_str())) addLimit(bn, 45.0f, 45.0f, 30.0f);
@@ -805,7 +806,7 @@ void IkRigEditor::drawLimits() {
 }
 
 void IkRigEditor::drawFeet() {
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
     if (ImGui::BeginCombo("Add foot", "chain...")) {
         for (const IkRigChainDef& c : asset_.chains) {
             bool has = false;
@@ -862,7 +863,7 @@ void IkRigEditor::drawFeet() {
 }
 
 void IkRigEditor::drawBody() {
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
     char buf[256];
     std::snprintf(buf, sizeof buf, "%s", asset_.skeleton.c_str());
     if (ImGui::InputText("Skeleton", buf, sizeof buf)) { asset_.skeleton = buf; markDirty(); }

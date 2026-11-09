@@ -2,6 +2,7 @@
 // functions rather than members.
 
 #include "MontageEditor.hpp"
+#include "EditorChrome.hpp"
 #include "EditorKeybinds.hpp"
 
 #include "aver/anim/AnimGraphAsset.hpp"
@@ -450,7 +451,7 @@ void MontageEditor::touch(bool changed) {
 }
 
 void MontageEditor::drawHeader() {
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
     char buf[256];
     auto text = [&](const char* label, std::string& v) {
         std::snprintf(buf, sizeof buf, "%s", v.c_str());
@@ -485,7 +486,7 @@ void MontageEditor::drawHeader() {
 }
 
 void MontageEditor::drawTimeline() {
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
     const MtgTimeline tl = timeline();
     const f32 total = std::max(tl.total, 0.1f);
     const ImVec2 p0 = ImGui::GetCursorScreenPos();
@@ -578,7 +579,7 @@ void MontageEditor::drawTimeline() {
 }
 
 void MontageEditor::drawSegments() {
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
     char buf[256];
     int removeAt = -1, moveAt = -1, moveBy = 0;
     for (usize i = 0; i < asset_.segments.size(); ++i) {
@@ -625,7 +626,7 @@ void MontageEditor::drawSegments() {
 }
 
 void MontageEditor::drawDetails() {
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
     char buf[256];
     if (ImGui::Button("Add section at playhead")) addSection("Section", mtgSnap(playhead_));
     ImGui::SameLine();

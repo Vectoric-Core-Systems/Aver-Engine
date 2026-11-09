@@ -1,4 +1,5 @@
 #include "PcgGraphEditor.hpp"
+#include "EditorChrome.hpp"
 
 #include "aver/core/Log.hpp"
 #include "aver/platform/FileSystem.hpp"
@@ -315,7 +316,7 @@ void PcgGraphEditor::draw(Engine&) {
 
     // Every size below is in logical px and scaled by the UI font: at 300% DPI the text is three times larger and
     // fixed sizes clipped the palette and inspector and drew node titles past their boxes.
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
 
     // ---- toolbar ----
     ImGui::BeginDisabled(!history_.canUndo());

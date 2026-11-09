@@ -2,6 +2,7 @@
 // the structural edits are free functions, and for why this is a list rather than a canvas.
 
 #include "SoundEditor.hpp"
+#include "EditorChrome.hpp"
 #include "EditorKeybinds.hpp"
 
 #include "EditorIcons.hpp"
@@ -828,7 +829,7 @@ void SoundEditor::drawDetails() {
 void SoundEditor::drawTransport() {
     // draw() carries no dpi (see the header); the ruler below wants one, so it's taken from the
     // font metrics the same way draw() itself does.
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
 
     if (ImGui::Button(ICON_PLAY " Preview")) playPreview();
     ImGui::SameLine();
@@ -954,7 +955,7 @@ void SoundEditor::draw(Engine& e) {
     // Draggable, persisted, through the shared SplitPane helper (EditorWidgets.hpp) -- see this
     // file's own kDefaultListFraction comment for why 0.32f is not a new number. dpi is taken from
     // the font metrics, the same proxy the reserve above already relies on.
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
     const f32 avail = ImGui::GetContentRegionAvail().x;
     const f32 minList = 140.0f * dpi, minDetails = 220.0f * dpi;
     const f32 listW = splitPaneWidth(split_, kPrefListSplit, kDefaultListFraction, avail,

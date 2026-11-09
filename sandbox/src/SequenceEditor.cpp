@@ -1,5 +1,6 @@
 // The level sequence editor behind the Animate mode (SequenceEditor.hpp).
 #include "SequenceEditor.hpp"
+#include "EditorChrome.hpp"
 
 #if AVER_MODULE_SCENE
 #include "SequenceCurveOps.hpp"
@@ -1431,7 +1432,7 @@ void SequenceEditor::drawSequenceBar(SequenceHost& host) {
     ImGui::AlignTextToFramePadding();
     ImGui::TextDisabled("Sequence");
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(150.0f * (ImGui::GetFontSize() / 16.0f));
+    ImGui::SetNextItemWidth(150.0f * (fontScale()));
     if (ImGui::BeginCombo("##seqPick", model_.name.c_str())) {
         for (usize i = 0; i < names.size(); ++i)
             if (ImGui::Selectable(names[i].c_str(), i == curSlot_)) switchSequence(i);
@@ -1644,7 +1645,7 @@ void SequenceEditor::drawKeyDetails(SequenceHost&) {
     OcSeqTrack& tr = model_.tracks[static_cast<usize>(selTrack_)];
     ImGui::Spacing();
     ImGui::TextDisabled("KEY");
-    const f32 ui = ImGui::GetFontSize() / 16.0f;
+    const f32 ui = fontScale();
     (void)ui;
     // Edits go through these: the first change of a gesture pushes the undo step.
     const auto drag = [&](const char* label, f64& v, f32 speed, f32 lo, f32 hi, const char* fmtStr) {
@@ -1854,7 +1855,7 @@ void SequenceEditor::drawKeyDetails(SequenceHost&) {
 
 void SequenceEditor::drawTimeline(SequenceHost& host) {
     host_ = &host;
-    const f32 ui = ImGui::GetFontSize() / 16.0f;
+    const f32 ui = fontScale();
     const f32 winH = std::fmax(190.0f * ui, host.vpH * 0.3f);
     ImGui::SetNextWindowPos(ImVec2(host.vpX + 8.0f, host.vpY + host.vpH - winH - 8.0f), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(std::fmax(360.0f * ui, host.vpW - 16.0f), winH), ImGuiCond_FirstUseEver);

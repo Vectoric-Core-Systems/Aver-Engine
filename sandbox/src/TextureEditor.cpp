@@ -319,7 +319,7 @@ void TextureEditor::draw(Engine& e) {
     }
     ensureTexture(e);
 
-    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 dpi = fontScale();
     drawToolbar(dpi);
     ImGui::Separator();
 
