@@ -70,12 +70,12 @@ void SandboxApp::setGraphTab(std::string tab) { graphTab_ = std::move(tab); }
 
 void SandboxApp::setInputProbe(bool on) { inputProbe_ = on; }
 
-void SandboxApp::setAutoCompile(bool on) { autoCompile_ = on; autoCompileFromCli_ = on; }
+void SandboxApp::setAutoCompile(bool on) { harness_.autoCompile_ = on; harness_.autoCompileFromCli_ = on; }
 
-void SandboxApp::setFocusLevelAt(int frame) { focusLevelAt_ = frame; }
+void SandboxApp::setFocusLevelAt(int frame) { harness_.focusLevelAt_ = frame; }
 
 // --chunk-stream [N]: frames before setChunkStreamingEnabled fires.
-void SandboxApp::setChunkStreamAuto(int framesIn) { chunkStreamAutoFrames_ = framesIn; }
+void SandboxApp::setChunkStreamAuto(int framesIn) { harness_.chunkStreamAutoFrames_ = framesIn; }
 
 #if AVER_MODULE_SCENE
 void SandboxApp::setDroneGraph(std::string relPath) { droneGraphRel_ = std::move(relPath); }
@@ -106,17 +106,17 @@ void SandboxApp::setFogMatchToStreamRadius(bool, f32) {}
 #endif
 
 // --drone [N]: frames before setDroneEnabled fires.
-void SandboxApp::setDroneAuto(int framesIn) { droneAutoFrames_ = framesIn; }
+void SandboxApp::setDroneAuto(int framesIn) { harness_.droneAutoFrames_ = framesIn; }
 
 // --undo-test [N]: frames before runUndoTest fires and exits.
-void SandboxApp::setUndoTestAuto(int framesIn) { undoTestAutoFrames_ = framesIn; }
+void SandboxApp::setUndoTestAuto(int framesIn) { harness_.undoTestAutoFrames_ = framesIn; }
 
 // --class-place-test [N]: frames before runClassPlaceTest fires and exits.
-void SandboxApp::setClassPlaceTestAuto(int framesIn) { classPlaceTestAutoFrames_ = framesIn; }
+void SandboxApp::setClassPlaceTestAuto(int framesIn) { harness_.classPlaceTestAutoFrames_ = framesIn; }
 
 // --keybind-test write|read [N]: test keybinding persistence.
 void SandboxApp::setKeybindTestAuto(std::string mode, int framesIn) {
-    keybindTestMode_ = std::move(mode); keybindTestAutoFrames_ = framesIn;
+    harness_.keybindTestMode_ = std::move(mode); harness_.keybindTestAutoFrames_ = framesIn;
 }
 
 void SandboxApp::setShowEditorPrefs(bool on) { if (on) showEditorPrefs_ = true; }
@@ -124,19 +124,19 @@ void SandboxApp::setShowEditorPrefs(bool on) { if (on) showEditorPrefs_ = true; 
 // --scroll-prefs-to-keybinds: scroll preferences panel to keybinds.
 void SandboxApp::setScrollPrefsToKeybinds(bool on) { scrollPrefsToKeybinds_ = on; }
 
-void SandboxApp::setHudTest(int idx) { hudTest_ = idx; }
+void SandboxApp::setHudTest(int idx) { harness_.hudTest_ = idx; }
 
-void SandboxApp::setSaveProject(bool on) { saveProject_ = on; }
+void SandboxApp::setSaveProject(bool on) { harness_.saveProject_ = on; }
 
 void SandboxApp::setSaveLevelTo(std::string p) { saveLevelTo_ = std::move(p); }
 void SandboxApp::setBakeLevelPack(std::string levelAsset) { bakeLevelPackAsset_ = std::move(levelAsset); }   // [wave3/level-instances]
 
-void SandboxApp::setRayProbe(f32 x, f32 y) { rayProbe_ = true; rayProbeX_ = x; rayProbeY_ = y; }
+void SandboxApp::setRayProbe(f32 x, f32 y) { harness_.rayProbe_ = true; harness_.rayProbeX_ = x; harness_.rayProbeY_ = y; }
 
 // Queues one Content Browser import to run on startup. --import <src> <destDir>.
 void SandboxApp::setImportOnce(std::string src, std::string dst) { importSrc_ = std::move(src); importDst_ = std::move(dst); }
 
-bool* SandboxApp::autoCompileFlag() { return &autoCompile_; }
+bool* SandboxApp::autoCompileFlag() { return &harness_.autoCompile_; }
 
 // Turns clouds on, optionally at the given coverage. --clouds [coverage].
 void SandboxApp::setClouds(f32 coverage) {
@@ -196,7 +196,7 @@ void SandboxApp::setNoEditorChrome(bool b) { noEditorChrome_ = b; }
 
 // --scene-census: walk the scene and report entity counts.
 #if AVER_MODULE_SCENE
-void SandboxApp::setSceneCensus(bool b) { sceneCensus_ = b; }
+void SandboxApp::setSceneCensus(bool b) { harness_.sceneCensus_ = b; }
 #else
 void SandboxApp::setSceneCensus(bool) {}
 #endif
@@ -210,133 +210,133 @@ void SandboxApp::setMcpPort(u16 p) { mcpPort_ = p; }
 
 #endif
 
-void SandboxApp::setSkinTest() { skinTest_ = true; }
+void SandboxApp::setSkinTest() { harness_.skinTest_ = true; }
 
 void SandboxApp::setSkinDrawTest() { skinDrawTest_ = true; }
 
-void SandboxApp::setParticleTest() { particleTest_ = true; }
+void SandboxApp::setParticleTest() { harness_.particleTest_ = true; }
 
 // --no-particle-gi: A/B toggle for particle GI seam; distinct from --no-gi and --no-gi-cone.
-void SandboxApp::setNoParticleGi() { noParticleGi_ = true; }
+void SandboxApp::setNoParticleGi() { harness_.noParticleGi_ = true; }
 
 // --particle-stress <N> <M>: stress-test particle emitters.
 void SandboxApp::setParticleStress(int emitters, int maxParticles) {
-    particleStressEmitters_ = emitters;
-    particleStressMaxParticles_ = maxParticles;
+    harness_.particleStressEmitters_ = emitters;
+    harness_.particleStressMaxParticles_ = maxParticles;
 }
 
-void SandboxApp::setParticleStressSecondEmitter() { particleStressSecondEmitter_ = true; }
+void SandboxApp::setParticleStressSecondEmitter() { harness_.particleStressSecondEmitter_ = true; }
 
-void SandboxApp::setReflTest() { reflTest_ = true; }
+void SandboxApp::setReflTest() { harness_.reflTest_ = true; }
 
-void SandboxApp::setFurnaceTest() { furnaceTest_ = true; }
+void SandboxApp::setFurnaceTest() { harness_.furnaceTest_ = true; }
 
-void SandboxApp::setFurnaceSun() { furnaceTest_ = true; furnaceSun_ = true; }
+void SandboxApp::setFurnaceSun() { harness_.furnaceTest_ = true; harness_.furnaceSun_ = true; }
 
 // --furnace-grid: implies --furnace-test; furnace is a sky property.
-void SandboxApp::setFurnaceGrid() { furnaceTest_ = true; furnaceGrid_ = true; }
+void SandboxApp::setFurnaceGrid() { harness_.furnaceTest_ = true; harness_.furnaceGrid_ = true; }
 
 // --furnace-tilt DEG: implies the grid, since it is the grid it rotates.
-void SandboxApp::setFurnaceTilt(f32 d) { furnaceTest_ = true; furnaceGrid_ = true; furnaceTilt_ = d; }
+void SandboxApp::setFurnaceTilt(f32 d) { harness_.furnaceTest_ = true; harness_.furnaceGrid_ = true; harness_.furnaceTilt_ = d; }
 
 // --sun-angle DEG: sun's angular diameter; sets ray-traced penumbra width.
-void SandboxApp::setSunAngle(f32 deg) { sunAngle_ = deg; }
+void SandboxApp::setSunAngle(f32 deg) { harness_.sunAngle_ = deg; }
 
 // --pt-furnace: measure furnace through path tracer.
-void SandboxApp::setPtFurnaceTest() { furnaceTest_ = true; ptFurnaceTest_ = true; }
+void SandboxApp::setPtFurnaceTest() { harness_.furnaceTest_ = true; harness_.ptFurnaceTest_ = true; }
 
 // --pt-scene: enable path tracer scene view.
 void SandboxApp::setPtSceneView() { ptSceneViewWantEnabled_ = true; ptSceneViewFromCli_ = true; }
 
 // --pt-quality-ramp [N]: ramp quality during frames for testing.
 void SandboxApp::setPtQualityRamp(int everyFrames) {
-    ptQualityRampEvery_ = everyFrames;
-    ptQualityRampCountdown_ = everyFrames;
+    harness_.ptQualityRampEvery_ = everyFrames;
+    harness_.ptQualityRampCountdown_ = everyFrames;
 }
 
-void SandboxApp::setPtSceneToggleOnAuto(int framesIn)  { ptSceneToggleOnAutoFrames_  = framesIn; }
+void SandboxApp::setPtSceneToggleOnAuto(int framesIn)  { harness_.ptSceneToggleOnAutoFrames_  = framesIn; }
 
-void SandboxApp::setPtSceneToggleOffAuto(int framesIn) { ptSceneToggleOffAutoFrames_ = framesIn; }
+void SandboxApp::setPtSceneToggleOffAuto(int framesIn) { harness_.ptSceneToggleOffAutoFrames_ = framesIn; }
 
 // --sun-set-at N ELEV AZIM / --gi-history-reset-at N: see sunSetAtFrames_'s own comment.
 void SandboxApp::setSunSetAt(int framesIn, f32 elevDeg, f32 azimDeg) {
-    sunSetAtFrames_ = framesIn; sunSetElevDeg_ = elevDeg; sunSetAzimDeg_ = azimDeg;
+    harness_.sunSetAtFrames_ = framesIn; harness_.sunSetElevDeg_ = elevDeg; harness_.sunSetAzimDeg_ = azimDeg;
 }
 
 void SandboxApp::setSunSweep(int framesIn, f32 degPerFrame, int turns) {
-    sunSweepFrames_ = framesIn; sunSweepDeg_ = degPerFrame; sunSweepTurnsLeft_ = turns;
+    harness_.sunSweepFrames_ = framesIn; harness_.sunSweepDeg_ = degPerFrame; harness_.sunSweepTurnsLeft_ = turns;
 }
 
-void SandboxApp::setGiHistoryResetAt(int framesIn) { giHistoryResetAtFrames_ = framesIn; }
+void SandboxApp::setGiHistoryResetAt(int framesIn) { harness_.giHistoryResetAtFrames_ = framesIn; }
 
 #if AVER_MODULE_SR
-void SandboxApp::setAverSrCycleAuto(int framesIn) { averSrCycleFrames_ = framesIn; }
+void SandboxApp::setAverSrCycleAuto(int framesIn) { harness_.averSrCycleFrames_ = framesIn; }
 
 #endif
 
-void SandboxApp::setResizeCycle(int n) { resizeCycle_ = n < 0 ? 0 : (u64)n; }
+void SandboxApp::setResizeCycle(int n) { harness_.resizeCycle_ = n < 0 ? 0 : (u64)n; }
 
-void SandboxApp::setGpuTiming(bool on) { gpuTiming_ = on; }
+void SandboxApp::setGpuTiming(bool on) { harness_.gpuTiming_ = on; }
 
 // --luma-sweep [STRIDE]: measure pixel luminance (readback only, doesn't change rendering).
-void SandboxApp::setLumaSweep(bool on, int stride) { lumaSweep_ = on; lumaSweepStride_ = stride > 0 ? stride : 1; }
+void SandboxApp::setLumaSweep(bool on, int stride) { harness_.lumaSweep_ = on; harness_.lumaSweepStride_ = stride > 0 ? stride : 1; }
 
 // --firefly-metric [MULT]: measure outlier pixels (shares --luma-sweep readback).
-void SandboxApp::setFireflyMetric(bool on, f32 mult) { fireflyMetric_ = on; fireflyMult_ = mult > 0.0f ? mult : 8.0f; }
+void SandboxApp::setFireflyMetric(bool on, f32 mult) { harness_.fireflyMetric_ = on; harness_.fireflyMult_ = mult > 0.0f ? mult : 8.0f; }
 
 // Guarded because members are AVER_MODULE_FRAMEWORK-only; setters need no-op stubs for compilation.
 #if AVER_MODULE_FRAMEWORK
-void SandboxApp::setPieCameraTest(int n) { pieCamFrames_ = n; }
+void SandboxApp::setPieCameraTest(int n) { harness_.pieCamFrames_ = n; }
 #else
 void SandboxApp::setPieCameraTest(int) {}
 #endif
 
 #if AVER_MODULE_FRAMEWORK
-void SandboxApp::setInputStuckTest(int n) { inputStuckFrames_ = n; }
+void SandboxApp::setInputStuckTest(int n) { harness_.inputStuckFrames_ = n; }
 #else
 void SandboxApp::setInputStuckTest(int) {}
 #endif
 
 #if AVER_MODULE_FRAMEWORK
-void SandboxApp::setInputSourceTest(int n) { inputSrcFrames_ = n; }
+void SandboxApp::setInputSourceTest(int n) { harness_.inputSrcFrames_ = n; }
 #else
 void SandboxApp::setInputSourceTest(int) {}
 #endif
 
 #if AVER_MODULE_FRAMEWORK
-void SandboxApp::setWheelSpeedTest(int n) { wheelTestFrames_ = n; }
+void SandboxApp::setWheelSpeedTest(int n) { harness_.wheelTestFrames_ = n; }
 #else
 void SandboxApp::setWheelSpeedTest(int) {}
 #endif
 
 // Guarded because members are AVER_WITH_IMGUI-only.
 #if AVER_WITH_IMGUI
-void SandboxApp::setMultiSelectTest(int n) { multiSelTestFrames_ = n; }
+void SandboxApp::setMultiSelectTest(int n) { harness_.multiSelTestFrames_ = n; }
 #else
 void SandboxApp::setMultiSelectTest(int) {}
 #endif
 
 #if AVER_WITH_IMGUI
-void SandboxApp::setCbMoveTest(const std::string& dir) { cbMoveTestDir_ = dir; cbMoveTestFrames_ = 10; }
+void SandboxApp::setCbMoveTest(const std::string& dir) { harness_.cbMoveTestDir_ = dir; harness_.cbMoveTestFrames_ = 10; }
 #else
 void SandboxApp::setCbMoveTest(const std::string&) {}
 #endif
 
 #if AVER_WITH_IMGUI
-void SandboxApp::setSaveDirtyTest(int n) { saveDirtyTestFrames_ = n; }
+void SandboxApp::setSaveDirtyTest(int n) { harness_.saveDirtyTestFrames_ = n; }
 #else
 void SandboxApp::setSaveDirtyTest(int) {}
 #endif
 
 #if AVER_WITH_IMGUI
-void SandboxApp::setPrefsWriteTest(int n) { prefsWriteTestFrames_ = n; }
+void SandboxApp::setPrefsWriteTest(int n) { harness_.prefsWriteTestFrames_ = n; }
 #else
 void SandboxApp::setPrefsWriteTest(int) {}
 #endif
 
 // --notify-test N: lift capture suppression to show toast.
 #if AVER_WITH_IMGUI
-void SandboxApp::setNotifyTest(int n) { notifyTestFrames_ = n; notifyTestLift_ = true; }
+void SandboxApp::setNotifyTest(int n) { harness_.notifyTestFrames_ = n; harness_.notifyTestLift_ = true; }
 #else
 void SandboxApp::setNotifyTest(int) {}
 #endif
@@ -345,9 +345,9 @@ void SandboxApp::setNotifyTest(int) {}
 #if AVER_WITH_IMGUI && AVER_MODULE_SCENE
 void SandboxApp::setAutosaveTest(f32 sec) {
     autosaveIntervalSec_ = sec;
-    notifyTestLift_ = true;
-    autosaveTestArm_ = true;
-    autosaveTestLift_ = true;
+    harness_.notifyTestLift_ = true;
+    harness_.autosaveTestArm_ = true;
+    harness_.autosaveTestLift_ = true;
 }
 #else
 void SandboxApp::setAutosaveTest(f32) {}
@@ -355,50 +355,50 @@ void SandboxApp::setAutosaveTest(f32) {}
 
 // --find-refs <path>: print what references an asset.
 #if AVER_WITH_IMGUI
-void SandboxApp::setFindRefs(const std::string& p) { findRefsPath_ = p; findRefsFrames_ = 8; }
+void SandboxApp::setFindRefs(const std::string& p) { harness_.findRefsPath_ = p; harness_.findRefsFrames_ = 8; }
 #else
 void SandboxApp::setFindRefs(const std::string&) {}
 #endif
 
 #if AVER_WITH_IMGUI
-void SandboxApp::setRenameRepointTest(int frames) { renameRepointFrames_ = frames > 0 ? frames : 8; }
+void SandboxApp::setRenameRepointTest(int frames) { harness_.renameRepointFrames_ = frames > 0 ? frames : 8; }
 #else
 void SandboxApp::setRenameRepointTest(int) {}
 #endif
 
 #if AVER_WITH_IMGUI
-void SandboxApp::setProjectSwitchTest(int frames) { projectSwitchFrames_ = frames > 0 ? frames : 8; }
+void SandboxApp::setProjectSwitchTest(int frames) { harness_.projectSwitchFrames_ = frames > 0 ? frames : 8; }
 #else
 void SandboxApp::setProjectSwitchTest(int) {}
 #endif
 
 #if AVER_WITH_IMGUI
-void SandboxApp::setValidateGraph(const std::string& p) { validateGraphPath_ = p; validateGraphFrames_ = 8; }
+void SandboxApp::setValidateGraph(const std::string& p) { harness_.validateGraphPath_ = p; harness_.validateGraphFrames_ = 8; }
 #else
 void SandboxApp::setValidateGraph(const std::string&) {}
 #endif
 
 #if AVER_WITH_IMGUI
-void SandboxApp::setGraphPrintTest(int frames) { graphPrintTestFrames_ = frames > 0 ? frames : 8; }
+void SandboxApp::setGraphPrintTest(int frames) { harness_.graphPrintTestFrames_ = frames > 0 ? frames : 8; }
 #else
 void SandboxApp::setGraphPrintTest(int) {}
 #endif
 
 #if AVER_WITH_IMGUI
-void SandboxApp::setAssetAssignTest(int frames) { assetAssignTestFrames_ = frames > 0 ? frames : 8; }
+void SandboxApp::setAssetAssignTest(int frames) { harness_.assetAssignTestFrames_ = frames > 0 ? frames : 8; }
 #else
 void SandboxApp::setAssetAssignTest(int) {}
 #endif
 
 #if AVER_WITH_IMGUI
-void SandboxApp::setGraphHitsTest(const std::string& p) { graphHitsTestPath_ = p; graphHitsTestFrames_ = 8; }
+void SandboxApp::setGraphHitsTest(const std::string& p) { harness_.graphHitsTestPath_ = p; harness_.graphHitsTestFrames_ = 8; }
 #else
 void SandboxApp::setGraphHitsTest(const std::string&) {}
 #endif
 
 #if AVER_WITH_IMGUI
 void SandboxApp::setClearShaderCache(const std::string& dir) {
-    clearShaderCacheDir_ = dir; clearShaderCacheFrames_ = 4;
+    harness_.clearShaderCacheDir_ = dir; harness_.clearShaderCacheFrames_ = 4;
 }
 #else
 void SandboxApp::setClearShaderCache(const std::string&) {}
@@ -407,13 +407,13 @@ void SandboxApp::setClearShaderCache(const std::string&) {}
 // Same reason as pieCamFrames_ et al. above: recapFrames_/vmFrames_ are `#if AVER_MODULE_FRAMEWORK`
 // (maybeRecaptureTest/maybeViewmodelTest are Play-in-Editor-only).
 #if AVER_MODULE_FRAMEWORK
-void SandboxApp::setRecaptureTest(int n)   { recapFrames_ = n; }
+void SandboxApp::setRecaptureTest(int n)   { harness_.recapFrames_ = n; }
 #else
 void SandboxApp::setRecaptureTest(int)     {}
 #endif
 
 #if AVER_MODULE_FRAMEWORK
-void SandboxApp::setViewmodelTest(int n)   { vmFrames_ = n; }
+void SandboxApp::setViewmodelTest(int n)   { harness_.vmFrames_ = n; }
 #else
 void SandboxApp::setViewmodelTest(int)     {}
 #endif
@@ -431,12 +431,12 @@ void SandboxApp::setBakeNavOnStart(f32 cellCm) { navBakeOnStart_ = true; navBake
 // --cam X Y Z PITCH YAW: place viewport camera (cm, degrees).
 // --cam-wobble DEG PERIOD: swing yaw sinusoidally; returns to zero at whole periods (frame-counter driven).
 void SandboxApp::setCamWobble(f32 degrees, i32 periodFrames) {
-    camWobbleDeg_ = degrees;
-    camWobblePeriod_ = periodFrames > 0 ? periodFrames : 0;
+    harness_.camWobbleDeg_ = degrees;
+    harness_.camWobblePeriod_ = periodFrames > 0 ? periodFrames : 0;
 }
 
 // --cam-wobble-stop N: frame where wobble stops.
-void SandboxApp::setCamWobbleStop(i32 frame) { camWobbleStopFrame_ = frame > 0 ? frame : 0; }
+void SandboxApp::setCamWobbleStop(i32 frame) { harness_.camWobbleStopFrame_ = frame > 0 ? frame : 0; }
 
 // --set NAME VALUE, repeatable: apply console variables on first frame with device.
 void SandboxApp::setConsoleSets(std::vector<std::pair<std::string, std::string>> sets) {
@@ -451,12 +451,12 @@ void SandboxApp::setMeshHeapDefault(bool on) { meshHeapDefault_ = on; }
 void SandboxApp::setLodShareVertices(bool on) { lodShareVertices_ = on; }
 
 // --cam-translate SPEED: fly camera forward (world-cm/frame); frame-counter driven, repeatable.
-void SandboxApp::setCamTranslate(f32 speedCmPerFrame) { camTranslateSpeed_ = speedCmPerFrame; }
+void SandboxApp::setCamTranslate(f32 speedCmPerFrame) { harness_.camTranslateSpeed_ = speedCmPerFrame; }
 
 // --cam-wander AMP SPEED: smooth non-repeating drift (for trajectory training); stopped by --cam-wobble-stop.
 void SandboxApp::setCamWander(f32 amp, f32 speed) {
-    camWanderAmp_ = amp > 0.0f ? amp : 0.0f;
-    camWanderSpeed_ = speed > 0.0f ? speed : 1.0f;
+    harness_.camWanderAmp_ = amp > 0.0f ? amp : 0.0f;
+    harness_.camWanderSpeed_ = speed > 0.0f ? speed : 1.0f;
 }
 
 void SandboxApp::setCamera(Vec3 pos, f32 pitchDeg, f32 yawDeg) {
@@ -468,7 +468,7 @@ void SandboxApp::setCamera(Vec3 pos, f32 pitchDeg, f32 yawDeg) {
 
 void SandboxApp::setScriptsDir(std::string d) { scriptsDir_ = std::move(d); }
 
-void SandboxApp::setSpawnTest(std::string cls) { spawnTestClass_ = std::move(cls); }
+void SandboxApp::setSpawnTest(std::string cls) { harness_.spawnTestClass_ = std::move(cls); }
 
 // --unlit: set unlit view mode.
 void SandboxApp::setUnlitMode(bool on) { unlit_ = on; if (on) viewModeFromCli_ = true; }
@@ -515,7 +515,7 @@ void SandboxApp::setViewMode(const std::string& mode) {
     AVER_INFO("[Sandbox] --view-mode {}", m);
 }
 
-void SandboxApp::setPlayTest() { playTest_ = true; }
+void SandboxApp::setPlayTest() { harness_.playTest_ = true; }
 
 void SandboxApp::setProjectPath(std::string p) { projectPath_ = std::move(p); }
 
@@ -533,29 +533,29 @@ void SandboxApp::setSingleInstanceEligible(bool b) { singleInstanceEligible_ = b
 #if AVER_MODULE_FRAMEWORK
 // Spawns one instance of the --spawn-test class, then destroys it a few frames later.
 void SandboxApp::maybeSpawnTestActor() {
-    if (spawnTestClass_.empty()) return;
+    if (harness_.spawnTestClass_.empty()) return;
 
-    if (!spawnTestDone_) {
-        spawnTestDone_ = true;
-        const int32_t c = aver_fw_class_find(spawnTestClass_.c_str());
+    if (!harness_.spawnTestDone_) {
+        harness_.spawnTestDone_ = true;
+        const int32_t c = aver_fw_class_find(harness_.spawnTestClass_.c_str());
         if (c == 0) {
             AVER_WARN("[spawn-test] no class named '{}' is declared - is the script assembly loaded? "
-                      "(pass --scripts <dir> pointing at the built actor assembly)", spawnTestClass_);
+                      "(pass --scripts <dir> pointing at the built actor assembly)", harness_.spawnTestClass_);
             return;
         }
-        spawnTestEntity_ = aver_fw_spawn(c, "spawn-test-instance", nullptr, nullptr, nullptr);
-        if (spawnTestEntity_ == 0)
-            AVER_WARN("[spawn-test] class '{}' failed to spawn", spawnTestClass_);
+        harness_.spawnTestEntity_ = aver_fw_spawn(c, "spawn-test-instance", nullptr, nullptr, nullptr);
+        if (harness_.spawnTestEntity_ == 0)
+            AVER_WARN("[spawn-test] class '{}' failed to spawn", harness_.spawnTestClass_);
         else
             AVER_INFO("[spawn-test] spawned '{}' as entity {} - watch for its OnBeginPlay/OnTick lines",
-                      spawnTestClass_, spawnTestEntity_);
+                      harness_.spawnTestClass_, harness_.spawnTestEntity_);
         return;
     }
 
-    if (spawnTestEntity_ != 0 && ++spawnTestFrames_ == 3) {
-        AVER_INFO("[spawn-test] destroying entity {} - watch for its OnEndPlay line", spawnTestEntity_);
-        aver_fw_destroy(spawnTestEntity_);
-        spawnTestEntity_ = 0;
+    if (harness_.spawnTestEntity_ != 0 && ++harness_.spawnTestFrames_ == 3) {
+        AVER_INFO("[spawn-test] destroying entity {} - watch for its OnEndPlay line", harness_.spawnTestEntity_);
+        aver_fw_destroy(harness_.spawnTestEntity_);
+        harness_.spawnTestEntity_ = 0;
     }
 }
 
@@ -591,79 +591,79 @@ void injectKey(InputState& in, i32 vk, bool pressed) {
 
 // --pie-camera-test [N]: verify PIE camera holds still with no input; tests round-trip with pawn.
 void SandboxApp::maybePieCameraTest() {
-    if (pieCamFrames_ <= 0) return;
+    if (harness_.pieCamFrames_ <= 0) return;
 // Needs AVER_WITH_IMGUI to drive camera via ImGuiIO.
 #if AVER_MODULE_FRAMEWORK && AVER_WITH_IMGUI
-    ++pieCamFrame_;
-    if (pieCamFrame_ == 10) { startPlay(); return; }   // let startup settle, as --play-test does
-    if (pieCamFrame_ < 11) return;
+    ++harness_.pieCamFrame_;
+    if (harness_.pieCamFrame_ == 10) { startPlay(); return; }   // let startup settle, as --play-test does
+    if (harness_.pieCamFrame_ < 11) return;
 
     ImGuiIO& io = ImGui::GetIO();
 
     // ---- phase 1: idle. Nothing touches anything; the view must not move. ----
-    if (pieCamFrame_ == 11) {
-        pieCamRef_ = camPos_; pieCamRefYaw_ = yaw_; pieCamRefPitch_ = pitch_;
+    if (harness_.pieCamFrame_ == 11) {
+        harness_.pieCamRef_ = camPos_; harness_.pieCamRefYaw_ = yaw_; harness_.pieCamRefPitch_ = pitch_;
         return;
     }
-    if (pieCamFrame_ < 40) {
-        pieCamMaxPos_   = std::fmax(pieCamMaxPos_,   (camPos_ - pieCamRef_).size());
-        pieCamMaxYaw_   = std::fmax(pieCamMaxYaw_,   std::fabs(yaw_   - pieCamRefYaw_));
-        pieCamMaxPitch_ = std::fmax(pieCamMaxPitch_, std::fabs(pitch_ - pieCamRefPitch_));
+    if (harness_.pieCamFrame_ < 40) {
+        harness_.pieCamMaxPos_   = std::fmax(harness_.pieCamMaxPos_,   (camPos_ - harness_.pieCamRef_).size());
+        harness_.pieCamMaxYaw_   = std::fmax(harness_.pieCamMaxYaw_,   std::fabs(yaw_   - harness_.pieCamRefYaw_));
+        harness_.pieCamMaxPitch_ = std::fmax(harness_.pieCamMaxPitch_, std::fabs(pitch_ - harness_.pieCamRefPitch_));
         return;
     }
 
     // ---- phase 2: one look, then settle. ----
-    if (pieCamFrame_ == 40) { pieCamPendingLook_ = true; return; }
-    if (pieCamFrame_ == 41) return;                    // the look lands in the fly block here
-    if (pieCamFrame_ == 42) {
+    if (harness_.pieCamFrame_ == 40) { harness_.pieCamPendingLook_ = true; return; }
+    if (harness_.pieCamFrame_ == 41) return;                    // the look lands in the fly block here
+    if (harness_.pieCamFrame_ == 42) {
         // Check if look survived the round-trip into the pawn and back.
-        pieCamKeptYaw_   = std::fabs(yaw_   - pieCamWantYaw_)   < 1e-3f;
-        pieCamKeptPitch_ = std::fabs(pitch_ - pieCamWantPitch_) < 1e-3f;
-        pieCamRef_ = camPos_;
+        harness_.pieCamKeptYaw_   = std::fabs(yaw_   - harness_.pieCamWantYaw_)   < 1e-3f;
+        harness_.pieCamKeptPitch_ = std::fabs(pitch_ - harness_.pieCamWantPitch_) < 1e-3f;
+        harness_.pieCamRef_ = camPos_;
         return;
     }
 
     // ---- phase 3: hold W, check camera travels ----
     // Send to both readers: editor fly block reads ImGui::IsKeyDown, gameplay reads AVER_FW_KEY_W from input_.
-    if (pieCamFrame_ >= 50 && pieCamFrame_ < 90) {
+    if (harness_.pieCamFrame_ >= 50 && harness_.pieCamFrame_ < 90) {
         io.AddKeyEvent(ImGuiKey_W, true);
         injectKey(input_, 'W', true);          // VK_W is the ASCII code; see InputKeys.hpp
-        if (pieCamFrame_ == 50) pieCamMoveFrom_ = camPos_;
+        if (harness_.pieCamFrame_ == 50) harness_.pieCamMoveFrom_ = camPos_;
         return;
     }
-    if (pieCamFrame_ == 90) {
+    if (harness_.pieCamFrame_ == 90) {
         io.AddKeyEvent(ImGuiKey_W, false);
         injectKey(input_, 'W', false);
-        pieCamMoved_    = (camPos_ - pieCamMoveFrom_).size();
+        harness_.pieCamMoved_    = (camPos_ - harness_.pieCamMoveFrom_).size();
         // Measure forward component only; gravity or stray impulse could register distance elsewhere.
-        const Vec3 d = (camPos_ - pieCamMoveFrom_).getSafeNormal();
-        pieCamMoveDot_  = dot(d, camForward());
+        const Vec3 d = (camPos_ - harness_.pieCamMoveFrom_).getSafeNormal();
+        harness_.pieCamMoveDot_  = dot(d, camForward());
         return;
     }
     // ---- phase 4: released, must coast to stop ----
-    if (pieCamFrame_ == 92) { pieCamAfterMove_ = camPos_; return; }
-    if (pieCamFrame_ > 92)
-        pieCamCoast_ = std::fmax(pieCamCoast_, (camPos_ - pieCamAfterMove_).size());
+    if (harness_.pieCamFrame_ == 92) { harness_.pieCamAfterMove_ = camPos_; return; }
+    if (harness_.pieCamFrame_ > 92)
+        harness_.pieCamCoast_ = std::fmax(harness_.pieCamCoast_, (camPos_ - harness_.pieCamAfterMove_).size());
 
-    if (pieCamFrame_ >= 92 + pieCamFrames_) {
-        const bool idleOk  = pieCamMaxPos_ < 0.5f && pieCamMaxYaw_ < 1e-3f && pieCamMaxPitch_ < 1e-3f;
-        const bool lookOk  = pieCamKeptYaw_ && pieCamKeptPitch_;
-        const bool moveOk  = pieCamMoved_ > 1.0f && pieCamMoveDot_ > 0.9f;
-        const bool stopOk  = pieCamCoast_ < 0.5f;
+    if (harness_.pieCamFrame_ >= 92 + harness_.pieCamFrames_) {
+        const bool idleOk  = harness_.pieCamMaxPos_ < 0.5f && harness_.pieCamMaxYaw_ < 1e-3f && harness_.pieCamMaxPitch_ < 1e-3f;
+        const bool lookOk  = harness_.pieCamKeptYaw_ && harness_.pieCamKeptPitch_;
+        const bool moveOk  = harness_.pieCamMoved_ > 1.0f && harness_.pieCamMoveDot_ > 0.9f;
+        const bool stopOk  = harness_.pieCamCoast_ < 0.5f;
         AVER_INFO("[pie-camera] idle  : max drift pos {:.4f} cm, yaw {:.6f}, pitch {:.6f} -- {}",
-                  pieCamMaxPos_, pieCamMaxYaw_, pieCamMaxPitch_, idleOk ? "STEADY" : "DRIFTING");
+                  harness_.pieCamMaxPos_, harness_.pieCamMaxYaw_, harness_.pieCamMaxPitch_, idleOk ? "STEADY" : "DRIFTING");
         AVER_INFO("[pie-camera] look  : +0.5 yaw / +0.3 pitch -> yaw {}, pitch {} -- {}",
-                  pieCamKeptYaw_ ? "kept" : "REVERTED", pieCamKeptPitch_ ? "kept" : "REVERTED",
+                  harness_.pieCamKeptYaw_ ? "kept" : "REVERTED", harness_.pieCamKeptPitch_ ? "kept" : "REVERTED",
                   lookOk ? "the view answers the mouse" : "THE VIEW IGNORES THE MOUSE");
         AVER_INFO("[pie-camera] move  : W held 40 frames -> travelled {:.1f} cm, {:.3f} along the "
-                  "view -- {}", pieCamMoved_, pieCamMoveDot_,
+                  "view -- {}", harness_.pieCamMoved_, harness_.pieCamMoveDot_,
                   moveOk ? "the view answers W" : "THE VIEW IGNORES W");
-        AVER_INFO("[pie-camera] release: drift after W let go {:.4f} cm -- {}", pieCamCoast_,
+        AVER_INFO("[pie-camera] release: drift after W let go {:.4f} cm -- {}", harness_.pieCamCoast_,
                   stopOk ? "stops" : "STILL MOVING (the key is stuck or nothing clears it)");
         AVER_INFO("[pie-camera] RESULT: {}",
                   (idleOk && lookOk && moveOk && stopOk) ? "PASS" : "FAIL");
         stopPlay();
-        pieCamFrames_ = 0;
+        harness_.pieCamFrames_ = 0;
     }
 #endif
 }
@@ -671,113 +671,113 @@ void SandboxApp::maybePieCameraTest() {
 // --input-source-test N: verify InputState sees real OS events and ImGui sees them too.
 // Posts REAL WINDOW MESSAGES (not ImGui queue) since the test checks whether the real path is wired.
 void SandboxApp::maybeInputSourceTest() {
-    if (inputSrcFrames_ <= 0) return;
+    if (harness_.inputSrcFrames_ <= 0) return;
 #if defined(_WIN32) && AVER_WITH_IMGUI
-    ++inputSrcFrame_;
+    ++harness_.inputSrcFrame_;
     HWND hwnd = window_ ? static_cast<HWND>(window_->nativeHandle()) : nullptr;
-    if (!hwnd) { if (inputSrcFrame_ > 4) { AVER_INFO("[input-source] RESULT: SKIPPED (no window)"); inputSrcFrames_ = 0; } return; }
+    if (!hwnd) { if (harness_.inputSrcFrame_ > 4) { AVER_INFO("[input-source] RESULT: SKIPPED (no window)"); harness_.inputSrcFrames_ = 0; } return; }
 
     const int   kVk = 0x57;              // VK_W
-    const int   half = inputSrcFrames_;  // frames spent held, then the same again released
+    const int   half = harness_.inputSrcFrames_;  // frames spent held, then the same again released
 
-    if (inputSrcFrame_ == 5)        { ::PostMessageW(hwnd, WM_KEYDOWN, (WPARAM)kVk, 0); return; }
-    if (inputSrcFrame_ == 6 + half) { ::PostMessageW(hwnd, WM_KEYUP,   (WPARAM)kVk, 0); return; }
-    if (inputSrcFrame_ < 7) return;
+    if (harness_.inputSrcFrame_ == 5)        { ::PostMessageW(hwnd, WM_KEYDOWN, (WPARAM)kVk, 0); return; }
+    if (harness_.inputSrcFrame_ == 6 + half) { ::PostMessageW(hwnd, WM_KEYUP,   (WPARAM)kVk, 0); return; }
+    if (harness_.inputSrcFrame_ < 7) return;
 
     // Wait for PostMessageW queue delivery and ImGui NewFrame before sampling.
     const bool inState = input_.keyHeld(kVk);
     const bool inImGui = ImGui::IsKeyDown(ImGuiKey_W);
-    const bool wantDown = inputSrcFrame_ < 6 + half;
-    if (inputSrcFrame_ >= 7 && inputSrcFrame_ != 6 + half + 1) {
-        if (inState) inputSrcStateSaw_ = true;
-        if (inImGui) inputSrcImguiSaw_ = true;
-        if (inState != inImGui) ++inputSrcDisagree_;
-        if (!wantDown && inputSrcFrame_ > 6 + half + 2 && (inState || inImGui)) ++inputSrcStuck_;
+    const bool wantDown = harness_.inputSrcFrame_ < 6 + half;
+    if (harness_.inputSrcFrame_ >= 7 && harness_.inputSrcFrame_ != 6 + half + 1) {
+        if (inState) harness_.inputSrcStateSaw_ = true;
+        if (inImGui) harness_.inputSrcImguiSaw_ = true;
+        if (inState != inImGui) ++harness_.inputSrcDisagree_;
+        if (!wantDown && harness_.inputSrcFrame_ > 6 + half + 2 && (inState || inImGui)) ++harness_.inputSrcStuck_;
     }
 
-    if (inputSrcFrame_ >= 6 + half * 2) {
-        const bool stateOk = inputSrcStateSaw_;
-        const bool imguiOk = inputSrcImguiSaw_;
-        const bool agreeOk = inputSrcDisagree_ == 0;
-        const bool clearOk = inputSrcStuck_ == 0;
-        AVER_INFO("[input-source] InputState saw the OS key: {} -- {}", inputSrcStateSaw_ ? "yes" : "NO",
+    if (harness_.inputSrcFrame_ >= 6 + half * 2) {
+        const bool stateOk = harness_.inputSrcStateSaw_;
+        const bool imguiOk = harness_.inputSrcImguiSaw_;
+        const bool agreeOk = harness_.inputSrcDisagree_ == 0;
+        const bool clearOk = harness_.inputSrcStuck_ == 0;
+        AVER_INFO("[input-source] InputState saw the OS key: {} -- {}", harness_.inputSrcStateSaw_ ? "yes" : "NO",
                   stateOk ? "setEventCallback is wired and receiving" : "THE EDITOR NEVER GOT THE EVENT");
-        AVER_INFO("[input-source] ImGui still saw it too : {} -- {}", inputSrcImguiSaw_ ? "yes" : "NO",
+        AVER_INFO("[input-source] ImGui still saw it too : {} -- {}", harness_.inputSrcImguiSaw_ ? "yes" : "NO",
                   imguiOk ? "the two do not compete" : "IMGUI STOPPED SEEING INPUT");
-        AVER_INFO("[input-source] frames they disagreed  : {} -- {}", inputSrcDisagree_,
+        AVER_INFO("[input-source] frames they disagreed  : {} -- {}", harness_.inputSrcDisagree_,
                   agreeOk ? "one stream, two readers" : "THE TWO VIEWS OF THE KEYBOARD HAVE DIVERGED");
-        AVER_INFO("[input-source] held after WM_KEYUP    : {} -- {}", inputSrcStuck_,
+        AVER_INFO("[input-source] held after WM_KEYUP    : {} -- {}", harness_.inputSrcStuck_,
                   clearOk ? "released" : "STILL HELD");
         AVER_INFO("[input-source] RESULT: {}",
                   (stateOk && imguiOk && agreeOk && clearOk) ? "PASS" : "FAIL");
-        inputSrcFrames_ = 0;
+        harness_.inputSrcFrames_ = 0;
     }
 #endif
 }
 
 // --wheel-speed-test: verify wheel input changes fly speed. Posts REAL WINDOW MESSAGES.
 void SandboxApp::maybeWheelSpeedTest() {
-    if (wheelTestFrames_ <= 0) return;
+    if (harness_.wheelTestFrames_ <= 0) return;
 #if defined(_WIN32) && AVER_WITH_IMGUI
-    ++wheelTestFrame_;
+    ++harness_.wheelTestFrame_;
     HWND hwnd = window_ ? static_cast<HWND>(window_->nativeHandle()) : nullptr;
     if (!hwnd) {
-        if (wheelTestFrame_ > 4) { AVER_INFO("[wheel-test] RESULT: SKIPPED (no window)"); wheelTestFrames_ = 0; }
+        if (harness_.wheelTestFrame_ > 4) { AVER_INFO("[wheel-test] RESULT: SKIPPED (no window)"); harness_.wheelTestFrames_ = 0; }
         return;
     }
     // Sample both sources every frame.
-    wheelTestSawImGui_ = wheelTestSawImGui_ || ImGui::GetIO().MouseWheel != 0.0f;
-    wheelTestSawInput_ = wheelTestSawInput_ || input_.wheel() != 0.0f;
+    harness_.wheelTestSawImGui_ = harness_.wheelTestSawImGui_ || ImGui::GetIO().MouseWheel != 0.0f;
+    harness_.wheelTestSawInput_ = harness_.wheelTestSawInput_ || input_.wheel() != 0.0f;
     // Check if change happens when wheel arrives.
     if (input_.wheel() != 0.0f) {
-        wheelTestOwnAtWheel_ = own_.keyboardToTool || own_.mouseToTool;
-        wheelTestFlyAtWheel_ = flying_;
+        harness_.wheelTestOwnAtWheel_ = own_.keyboardToTool || own_.mouseToTool;
+        harness_.wheelTestFlyAtWheel_ = flying_;
     }
 
-    if (wheelTestFrame_ == 5) {
-        wheelTestSpeedBefore_ = flySpeed_;
+    if (harness_.wheelTestFrame_ == 5) {
+        harness_.wheelTestSpeedBefore_ = flySpeed_;
         // Force fly mode; test the wheel READ, not the gesture that opens it.
-        wheelTestForceFly_ = true;
+        harness_.wheelTestForceFly_ = true;
         return;
     }
     // Post wheel-up message (one notch speed-up).
-    if (wheelTestFrame_ == 6) {
+    if (harness_.wheelTestFrame_ == 6) {
         ::PostMessageW(hwnd, WM_MOUSEWHEEL, MAKEWPARAM(0, WHEEL_DELTA), 0);
         return;
     }
     // Wait for PostMessageW queue delivery.
-    if (wheelTestFrame_ < 9) return;
+    if (harness_.wheelTestFrame_ < 9) return;
 
-    wheelTestForceFly_ = false;
+    harness_.wheelTestForceFly_ = false;
     const f32 after = flySpeed_;
-    const f32 want = wheelTestSpeedBefore_ * 1.25f;
-    const bool moved = std::fabs(after - wheelTestSpeedBefore_) > 0.01f;
+    const f32 want = harness_.wheelTestSpeedBefore_ * 1.25f;
+    const bool moved = std::fabs(after - harness_.wheelTestSpeedBefore_) > 0.01f;
     const bool right = std::fabs(after - want) < std::fmax(1.0f, want * 0.02f);
     AVER_INFO("[wheel-test] speed {:.1f} -> {:.1f} cm/s (one notch up, want {:.1f})",
-              wheelTestSpeedBefore_, after, want);
+              harness_.wheelTestSpeedBefore_, after, want);
     AVER_INFO("[wheel-test] sources during onUpdate: io.MouseWheel seen={} input_.wheel() seen={}",
-              wheelTestSawImGui_ ? "yes" : "NO (always zero -- this is the bug)",
-              wheelTestSawInput_ ? "yes" : "NO");
+              harness_.wheelTestSawImGui_ ? "yes" : "NO (always zero -- this is the bug)",
+              harness_.wheelTestSawInput_ ? "yes" : "NO");
     AVER_INFO("[wheel-test] gates on the wheel frame: inputOwnedByTool={} flying={}",
-              wheelTestOwnAtWheel_ ? "yes" : "NO", wheelTestFlyAtWheel_ ? "yes" : "NO");
+              harness_.wheelTestOwnAtWheel_ ? "yes" : "NO", harness_.wheelTestFlyAtWheel_ ? "yes" : "NO");
     AVER_INFO("[wheel-test] RESULT: {}", (moved && right) ? "PASS"
                                        : moved ? "FAIL (speed moved, but not by one notch)"
                                                : "FAIL (speed did not change at all)");
-    wheelTestFrames_ = 0;
+    harness_.wheelTestFrames_ = 0;
 #else
     AVER_INFO("[wheel-test] RESULT: SKIPPED (needs Win32 + ImGui)");
-    wheelTestFrames_ = 0;
+    harness_.wheelTestFrames_ = 0;
 #endif
 }
 
 // --viewmodel-test N: verify gun stays still in view space relative to camera.
 // Invariant: rigidly parented to eye, so view-space position is constant; any drift means mismatched transforms.
 void SandboxApp::maybeViewmodelTest() {
-    if (vmFrames_ <= 0) return;
+    if (harness_.vmFrames_ <= 0) return;
 #if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE && AVER_WITH_IMGUI
-    ++vmFrame_;
-    if (vmFrame_ == 10) { startPlay(); return; }
-    if (vmFrame_ < 20) return;
+    ++harness_.vmFrame_;
+    if (harness_.vmFrame_ == 10) { startPlay(); return; }
+    if (harness_.vmFrame_ < 20) return;
 
     scene::World& w = scene::World::instance();
     const int32_t viewId = aver_fw_view_entity();
@@ -786,14 +786,14 @@ void SandboxApp::maybeViewmodelTest() {
 
     // Gun is the view entity's mesh-bearing child; walk rather than cache.
     scene::Entity gun = scene::kInvalidEntity;
-    vmKids_ = 0;
+    harness_.vmKids_ = 0;
     const u32 vmN = w.count();
     for (u32 k = 0; k < vmN; ++k) {
         const scene::Entity c = w.at(k);
         if (!w.valid(c) || w.parent(c) != ve) continue;
-        if (w.component<scene::CMeshRenderer>(c, scene::kComponentMeshRenderer)) { if (!w.valid(gun)) gun = c; ++vmKids_; }
+        if (w.component<scene::CMeshRenderer>(c, scene::kComponentMeshRenderer)) { if (!w.valid(gun)) gun = c; ++harness_.vmKids_; }
     }
-    if (!w.valid(gun)) { if (vmFrame_ == 25) AVER_INFO("[viewmodel] no viewmodel found under the view entity"); return; }
+    if (!w.valid(gun)) { if (harness_.vmFrame_ == 25) AVER_INFO("[viewmodel] no viewmodel found under the view entity"); return; }
 
     const Mat4& gm = w.worldMatrix(gun);
     const Vec3 gunPos{gm.m[3][0], gm.m[3][1], gm.m[3][2]};
@@ -812,29 +812,29 @@ void SandboxApp::maybeViewmodelTest() {
 
     // ---- phase 1: dead still ----
     // Baseline reference; prevent measuring from zero-initialized vmRef_.
-    if (vmFrame_ <= 25) { vmRef_ = vs; return; }
-    if (vmFrame_ < 25 + vmFrames_) {
-        vmStill_ = std::fmax(vmStill_, (vs - vmRef_).size());
+    if (harness_.vmFrame_ <= 25) { harness_.vmRef_ = vs; return; }
+    if (harness_.vmFrame_ < 25 + harness_.vmFrames_) {
+        harness_.vmStill_ = std::fmax(harness_.vmStill_, (vs - harness_.vmRef_).size());
         return;
     }
     // ---- phase 2: turning, one steady look per frame ----
-    if (vmFrame_ <= 25 + vmFrames_) { vmRef_ = vs; return; }
+    if (harness_.vmFrame_ <= 25 + harness_.vmFrames_) { harness_.vmRef_ = vs; return; }
     ImGuiIO& io = ImGui::GetIO();
-    io.AddMousePosEvent(vpX_ + vpW_ * 0.5f + (f32)(vmFrame_ % 20) * 2.0f, vpY_ + vpH_ * 0.5f);
-    vmMoving_ = std::fmax(vmMoving_, (vs - vmRef_).size());
+    io.AddMousePosEvent(vpX_ + vpW_ * 0.5f + (f32)(harness_.vmFrame_ % 20) * 2.0f, vpY_ + vpH_ * 0.5f);
+    harness_.vmMoving_ = std::fmax(harness_.vmMoving_, (vs - harness_.vmRef_).size());
 
-    if (vmFrame_ >= 25 + vmFrames_ * 2) {
-        const bool stillOk  = vmStill_  < 0.05f;
-        const bool moveOk   = vmMoving_ < 0.05f;
+    if (harness_.vmFrame_ >= 25 + harness_.vmFrames_ * 2) {
+        const bool stillOk  = harness_.vmStill_  < 0.05f;
+        const bool moveOk   = harness_.vmMoving_ < 0.05f;
         AVER_INFO("[viewmodel] offset from the eye: ({:.3f}, {:.3f}, {:.3f}) cm right/up/forward",
-                  vmRef_.x, vmRef_.y, vmRef_.z);
-        AVER_INFO("[viewmodel] still  : drifts {:.4f} cm in view space -- {}", vmStill_,
+                  harness_.vmRef_.x, harness_.vmRef_.y, harness_.vmRef_.z);
+        AVER_INFO("[viewmodel] still  : drifts {:.4f} cm in view space -- {}", harness_.vmStill_,
                   stillOk ? "rigid" : "IT MOVES WITH NOBODY TOUCHING ANYTHING");
-        AVER_INFO("[viewmodel] turning: drifts {:.4f} cm in view space -- {}", vmMoving_,
+        AVER_INFO("[viewmodel] turning: drifts {:.4f} cm in view space -- {}", harness_.vmMoving_,
                   moveOk ? "rigid" : "IT SWIMS AGAINST THE CAMERA WHILE TURNING");
         AVER_INFO("[viewmodel] RESULT: {}", (stillOk && moveOk) ? "PASS" : "FAIL");
         stopPlay();
-        vmFrames_ = 0;
+        harness_.vmFrames_ = 0;
     }
 #endif
 }
@@ -842,30 +842,30 @@ void SandboxApp::maybeViewmodelTest() {
 // --recapture-test N: verify recapture click doesn't also fire weapon.
 // Unlike --input-stuck-test: this releases then clicks back.
 void SandboxApp::maybeRecaptureTest() {
-    if (recapFrames_ <= 0) return;
+    if (harness_.recapFrames_ <= 0) return;
 #if AVER_MODULE_FRAMEWORK && AVER_WITH_IMGUI
-    ++recapFrame_;
-    if (recapFrame_ == 10) { startPlay(); return; }
-    if (recapFrame_ < 15) return;
+    ++harness_.recapFrame_;
+    if (harness_.recapFrame_ == 10) { startPlay(); return; }
+    if (harness_.recapFrame_ < 15) return;
 
     ImGuiIO& io = ImGui::GetIO();
     // Park pointer in viewport middle; recapture gates on inViewport().
     io.AddMousePosEvent(vpX_ + vpW_ * 0.5f, vpY_ + vpH_ * 0.5f);
 
     // Release to editor, then click back and hold (mimic the real gesture).
-    if (recapFrame_ == 15) { releasedByUser_ = true; return; }
-    if (recapFrame_ < 20) return;
+    if (harness_.recapFrame_ == 15) { releasedByUser_ = true; return; }
+    if (harness_.recapFrame_ < 20) return;
 
     // Inject to both readers (ImGui and input_); one real click reaches both.
     io.AddMouseButtonEvent(0, true);
     injectMouseButton(input_, 0, true);
     // Count leak only after recapture succeeds (releasedByUser_ clears).
-    if (!releasedByUser_) recapNotRecaptured_ = 1;
-    if (recapNotRecaptured_ && aver_fw_input_key(AVER_FW_KEY_MOUSE_LEFT)) ++recapLeaked_;
+    if (!releasedByUser_) harness_.recapNotRecaptured_ = 1;
+    if (harness_.recapNotRecaptured_ && aver_fw_input_key(AVER_FW_KEY_MOUSE_LEFT)) ++harness_.recapLeaked_;
 
-    if (recapFrame_ >= 21 + recapFrames_) {
-        const bool tookBack = recapNotRecaptured_ != 0;
-        const bool clean    = recapLeaked_ == 0;
+    if (harness_.recapFrame_ >= 21 + harness_.recapFrames_) {
+        const bool tookBack = harness_.recapNotRecaptured_ != 0;
+        const bool clean    = harness_.recapLeaked_ == 0;
         // NOT-RECAPTURED IS A FINDING, NOT A FAILURE: the recapture branch requires
         // !WantCaptureMouse, and ImGui ALWAYS wants the mouse over the 3D dock window (measured
         // here), so it can't be taken today -- its own bug, and the reason the weapon-fire defect
@@ -876,14 +876,14 @@ void SandboxApp::maybeRecaptureTest() {
                            : "UNREACHABLE: the branch needs !WantCaptureMouse and the viewport is "
                              "an ImGui window, so it always wants the mouse");
         AVER_INFO("[recapture] frames it also reached the gun: {} of {} -- {}",
-                  recapLeaked_, recapFrames_,
+                  harness_.recapLeaked_, harness_.recapFrames_,
                   clean ? "no shot leaked" : "THE RECAPTURE CLICK IS FIRING THE WEAPON");
         AVER_INFO("[recapture] RESULT: {}",
                   !clean ? "FAIL" : (tookBack ? "PASS" : "PASS (recapture unreachable -- see above)"));
         io.AddMouseButtonEvent(0, false);
         injectMouseButton(input_, 0, false);   // both readers let go, for the reason both were told
         stopPlay();
-        recapFrames_ = 0;
+        harness_.recapFrames_ = 0;
     }
 #endif
 }
@@ -892,43 +892,43 @@ void SandboxApp::maybeRecaptureTest() {
 // Tests the input path that fires on publishInput; injects to input_, not ImGui.
 // Guarded on AVER_WITH_IMGUI because own_ resolution needs UI context.
 void SandboxApp::maybeInputStuckTest() {
-    if (inputStuckFrames_ <= 0) return;
+    if (harness_.inputStuckFrames_ <= 0) return;
 #if AVER_MODULE_FRAMEWORK && AVER_WITH_IMGUI
-    ++inputStuckFrame_;
-    if (inputStuckFrame_ == 10) { startPlay(); return; }
-    if (inputStuckFrame_ < 11) return;
+    ++harness_.inputStuckFrame_;
+    if (harness_.inputStuckFrame_ == 10) { startPlay(); return; }
+    if (harness_.inputStuckFrame_ < 11) return;
 
     // ---- phase 1: hold the button and verify it reaches gameplay ----
-    if (inputStuckFrame_ < 30) {
+    if (harness_.inputStuckFrame_ < 30) {
         injectMouseButton(input_, 0, true);
-        if (inputStuckFrame_ > 12 && aver_fw_input_key(AVER_FW_KEY_MOUSE_LEFT)) inputStuckSawDown_ = true;
+        if (harness_.inputStuckFrame_ > 12 && aver_fw_input_key(AVER_FW_KEY_MOUSE_LEFT)) harness_.inputStuckSawDown_ = true;
         return;
     }
 
     // ---- phase 2: release mouse to editor, but keep button physically down ----
-    if (inputStuckFrame_ == 30) { injectMouseButton(input_, 0, true); releasedByUser_ = true; return; }
+    if (harness_.inputStuckFrame_ == 30) { injectMouseButton(input_, 0, true); releasedByUser_ = true; return; }
 
     // ---- phase 3: gameplay must see nothing held ----
     injectMouseButton(input_, 0, true);   // physically down; must not reach game
     for (int k = 0; k < AVER_FW_KEY_COUNT; ++k) {
-        if (aver_fw_input_key(k)) { ++inputStuckLatched_; if (inputStuckFirstKey_ < 0) inputStuckFirstKey_ = k; }
+        if (aver_fw_input_key(k)) { ++harness_.inputStuckLatched_; if (harness_.inputStuckFirstKey_ < 0) harness_.inputStuckFirstKey_ = k; }
     }
 
-    if (inputStuckFrame_ >= 30 + inputStuckFrames_) {
-        const bool downOk  = inputStuckSawDown_;
-        const bool clearOk = inputStuckLatched_ == 0;
+    if (harness_.inputStuckFrame_ >= 30 + harness_.inputStuckFrames_) {
+        const bool downOk  = harness_.inputStuckSawDown_;
+        const bool clearOk = harness_.inputStuckLatched_ == 0;
         AVER_INFO("[input-stuck] press  : MOUSE_LEFT held -> gameplay {} -- {}",
                   downOk ? "saw it" : "NEVER SAW IT",
                   downOk ? "the button reaches the game" : "THE TEST PROVED NOTHING (no input arrived)");
         AVER_INFO("[input-stuck] release: {} key-frames still held across {} frames after the "
                   "release chord, first offender key {} -- {}",
-                  inputStuckLatched_, inputStuckFrames_, inputStuckFirstKey_,
+                  harness_.inputStuckLatched_, harness_.inputStuckFrames_, harness_.inputStuckFirstKey_,
                   clearOk ? "nothing latched" : "A KEY IS STUCK (pushInput returned without publishing)");
         AVER_INFO("[input-stuck] RESULT: {}", (downOk && clearOk) ? "PASS" : "FAIL");
         injectMouseButton(input_, 0, false);
         releasedByUser_ = false;
         stopPlay();
-        inputStuckFrames_ = 0;
+        harness_.inputStuckFrames_ = 0;
     }
 #endif
 }
@@ -938,7 +938,7 @@ void SandboxApp::maybeInputStuckTest() {
 // AVER_PLAYTEST_SHOT=<prefix> (writes <prefix>-play<N>.png of the window at AVER_PLAYTEST_SHOT_AT frames into each Play, default 30 before its end),
 // AVER_PLAYTEST_KEYS (letters held instead of W), AVER_PLAYTEST_JUMP=0 (no jump at frame 100).
 void SandboxApp::maybePlayTest(Engine& e) {
-    if (!playTest_) return;
+    if (!harness_.playTest_) return;
     const auto envInt = [](const char* name, int fallback) {
         const char* v = std::getenv(name);
         return v && *v ? std::atoi(v) : fallback;
@@ -947,22 +947,22 @@ void SandboxApp::maybePlayTest(Engine& e) {
     const int plays = std::max(envInt("AVER_PLAYTEST_PLAYS", 1), 1);
     const char* shotPrefix = std::getenv("AVER_PLAYTEST_SHOT");
     const int shotAt = envInt("AVER_PLAYTEST_SHOT_AT", length - 30);
-    if (playTestRound_ >= plays) return;
-    if (!playTestBegun_) {
+    if (harness_.playTestRound_ >= plays) return;
+    if (!harness_.playTestBegun_) {
         // Wait for an --open-level request to finish loading (and ~1 s more): otherwise Play begins on the
         // startup level, which is what the play-test then reports on.
-        if (!openLevelByName_.empty() || !pendingOpenPath_.empty() || pendingOpenPrompt_) { playTestSettle_ = 0; return; }
-        if (++playTestSettle_ < 60u) return;
+        if (!openLevelByName_.empty() || !pendingOpenPath_.empty() || pendingOpenPrompt_) { harness_.playTestSettle_ = 0; return; }
+        if (++harness_.playTestSettle_ < 60u) return;
         // No GameMode is a case worth testing; test the engine default pawn fallback too.
         if (aver_fw_find_class_with_flags(AVER_FW_CLASS_GAME_MODE) == 0) {
-            if (++playTestWait_ <= 10) return;
-            playTestBegun_ = true;
+            if (++harness_.playTestWait_ <= 10) return;
+            harness_.playTestBegun_ = true;
             AVER_INFO("[play-test] no GameMode after 10 frames -- exercising the engine default "
                       "pawn fallback instead");
             startPlay();
             return;
         }
-        playTestBegun_ = true;
+        harness_.playTestBegun_ = true;
         AVER_INFO("[play-test] starting - watch for GameMode/Controller/Pawn OnBeginPlay + Pawn OnTick");
         startPlay();
         return;
@@ -979,31 +979,31 @@ void SandboxApp::maybePlayTest(Engine& e) {
         } else {
             aver_fw_input_set_key(AVER_FW_KEY_W, 1);
         }
-        if (playTestFrames_ > 60) aver_fw_input_set_key(AVER_FW_KEY_MOUSE_LEFT, 1);
-        if (playTestFrames_ == 100 && envInt("AVER_PLAYTEST_JUMP", 1) != 0) aver_fw_input_set_key(AVER_FW_KEY_SPACE, 1);
+        if (harness_.playTestFrames_ > 60) aver_fw_input_set_key(AVER_FW_KEY_MOUSE_LEFT, 1);
+        if (harness_.playTestFrames_ == 100 && envInt("AVER_PLAYTEST_JUMP", 1) != 0) aver_fw_input_set_key(AVER_FW_KEY_SPACE, 1);
 #if AVER_WITH_IMGUI
         // The key state alone reaches no game's event handlers (_input / OnInput): a real press and release does, as the mouse would.
-        if (playTestFrames_ == 61) injectMouseButton(input_, 0, true);
-        if (playTestFrames_ == std::max(62, length - 40)) injectMouseButton(input_, 0, false);
+        if (harness_.playTestFrames_ == 61) injectMouseButton(input_, 0, true);
+        if (harness_.playTestFrames_ == std::max(62, length - 40)) injectMouseButton(input_, 0, false);
 #endif
     }
     {
-        ++playTestFrames_;
+        ++harness_.playTestFrames_;
         if (shotPrefix && *shotPrefix && e.device()) {
             // One frame of lag is inherent to the capture: requested now, read a few frames later.
-            if (playTestFrames_ == shotAt) {
+            if (harness_.playTestFrames_ == shotAt) {
                 e.device()->requestCapture(static_cast<u32>(vpX_ + vpW_ / 2), static_cast<u32>(vpY_ + vpH_ / 2));
-                playTestShotFrame_ = playTestFrames_;
-            } else if (playTestShotFrame_ >= 0 && playTestFrames_ == playTestShotFrame_ + 3) {
+                harness_.playTestShotFrame_ = harness_.playTestFrames_;
+            } else if (harness_.playTestShotFrame_ >= 0 && harness_.playTestFrames_ == harness_.playTestShotFrame_ + 3) {
                 std::vector<u8> img;
                 u32 iw = 0, ih = 0;
-                const std::string path = std::string(shotPrefix) + "-play" + std::to_string(playTestRound_ + 1) + ".png";
+                const std::string path = std::string(shotPrefix) + "-play" + std::to_string(harness_.playTestRound_ + 1) + ".png";
                 if (e.device()->getFrameImage(img, iw, ih) && iw && ih && stbi_write_png(path.c_str(), static_cast<int>(iw), static_cast<int>(ih), 4, img.data(), static_cast<int>(iw) * 4))
-                    AVER_INFO("[play-test] screenshot: {} ({}x{}) at Play frame {}", path, iw, ih, playTestShotFrame_);
-                playTestShotFrame_ = -1;
+                    AVER_INFO("[play-test] screenshot: {} ({}x{}) at Play frame {}", path, iw, ih, harness_.playTestShotFrame_);
+                harness_.playTestShotFrame_ = -1;
             }
         }
-        if (playTestFrames_ == length) {
+        if (harness_.playTestFrames_ == length) {
             const int32_t pawn = fwPlaying ? aver_fw_controlled_pawn(aver_fw_player_controller(0)) : 0;
             if (pawn) {
                 const scene::Entity pe = static_cast<scene::Entity>(static_cast<uint32_t>(pawn));
@@ -1015,12 +1015,12 @@ void SandboxApp::maybePlayTest(Engine& e) {
             // Use stopPlay(), not aver_fw_end_play() directly; test the button path, not a bypass.
             stopPlay();
             // The next Play (AVER_PLAYTEST_PLAYS) begins like the first, once the level has reloaded and settled.
-            if (++playTestRound_ < plays) {
-                playTestBegun_ = false;
-                playTestSettle_ = 0;
-                playTestWait_ = 0;
-                playTestFrames_ = 0;
-                AVER_INFO("[play-test] Play {} of {} next", playTestRound_ + 1, plays);
+            if (++harness_.playTestRound_ < plays) {
+                harness_.playTestBegun_ = false;
+                harness_.playTestSettle_ = 0;
+                harness_.playTestWait_ = 0;
+                harness_.playTestFrames_ = 0;
+                AVER_INFO("[play-test] Play {} of {} next", harness_.playTestRound_ + 1, plays);
             }
         }
     }
@@ -1275,8 +1275,8 @@ void SandboxApp::runGraphPrintTest() {
 
 void SandboxApp::runClearShaderCache() {
     std::filesystem::path dir;
-    if (!clearShaderCacheDir_.empty()) {
-        dir = clearShaderCacheDir_;
+    if (!harness_.clearShaderCacheDir_.empty()) {
+        dir = harness_.clearShaderCacheDir_;
     } else {
         const std::string udir = userDataDir();
         if (udir.empty()) {
@@ -1306,8 +1306,8 @@ void SandboxApp::runValidateGraph() {
         AVER_ERROR("[validate-graph] the staged bridge exports no GraphValidate");
         return;
     }
-    const std::string abs = project_.valid() && validateGraphPath_.find(':') == std::string::npos
-        ? (project_.contentDir() + AVER_PATH_SEP + validateGraphPath_) : validateGraphPath_;
+    const std::string abs = project_.valid() && harness_.validateGraphPath_.find(':') == std::string::npos
+        ? (project_.contentDir() + AVER_PATH_SEP + harness_.validateGraphPath_) : harness_.validateGraphPath_;
     std::string text;
     if (!readFileText(abs, text)) {
         AVER_ERROR("[validate-graph] could not read '{}'", abs);
@@ -1315,9 +1315,9 @@ void SandboxApp::runValidateGraph() {
     }
     std::string err;
     if (scripts_.graphValidate(text, err))
-        AVER_INFO("[validate-graph] '{}' is VALID", validateGraphPath_);
+        AVER_INFO("[validate-graph] '{}' is VALID", harness_.validateGraphPath_);
     else
-        AVER_INFO("[validate-graph] '{}' is INVALID: {}", validateGraphPath_, err);
+        AVER_INFO("[validate-graph] '{}' is INVALID: {}", harness_.validateGraphPath_, err);
 #else
     AVER_ERROR("[validate-graph] this build has no scripting module; nothing to validate against");
 #endif
@@ -1382,9 +1382,9 @@ void SandboxApp::runRenameRepointTest() {
 
 void SandboxApp::runFindRefs() {
     const std::string abs = project_.valid()
-        ? (project_.contentDir() + AVER_PATH_SEP + findRefsPath_) : findRefsPath_;
+        ? (project_.contentDir() + AVER_PATH_SEP + harness_.findRefsPath_) : harness_.findRefsPath_;
     const std::vector<std::string> refs = cbFindReferencesTo(abs);
-    AVER_INFO("[find-refs] '{}' is referenced by {} file(s)", findRefsPath_, refs.size());
+    AVER_INFO("[find-refs] '{}' is referenced by {} file(s)", harness_.findRefsPath_, refs.size());
     for (const std::string& r : refs) AVER_INFO("[find-refs]   {}", r);
 }
 
@@ -1638,8 +1638,8 @@ void SandboxApp::runGraphHitsTest() {
     std::string name;
     {   // Read graph name from file (key for the managed table).
         std::string text;
-        if (!readFileText(graphHitsTestPath_, text)) {
-            AVER_ERROR("[graph-hits-test] FAIL: could not read '{}'", graphHitsTestPath_);
+        if (!readFileText(harness_.graphHitsTestPath_, text)) {
+            AVER_ERROR("[graph-hits-test] FAIL: could not read '{}'", harness_.graphHitsTestPath_);
             AVER_INFO("[graph-hits-test] RESULT: FAIL");
             return;
         }
@@ -1654,7 +1654,7 @@ void SandboxApp::runGraphHitsTest() {
 
     // Test with recording disabled first.
     scripts_.graphSetHitRecording(false);
-    check(scripts_.graphLoad(kEnt, graphHitsTestPath_), "the graph loads onto an entity");
+    check(scripts_.graphLoad(kEnt, harness_.graphHitsTestPath_), "the graph loads onto an entity");
     scripts_.graphTick(kEnt, 0.016f);
     scripts_.graphNodeHits(name, 5.0f, hits);
     check(hits.empty(), "with recording OFF a full tick records nothing");
@@ -2542,14 +2542,14 @@ void SandboxApp::navBakeCheck(Engine& e) {
 // Prints two checkable numbers: ray origin's distance along view axis
 // and reprojection of a ray point (must return the asked-for pixel).
 void SandboxApp::rayProbeCheck(Engine& e) {
-    if (!rayProbe_ || maxFrames_ == 0 || rayProbeDone_) return;
+    if (!harness_.rayProbe_ || maxFrames_ == 0 || harness_.rayProbeDone_) return;
     const u64 want = maxFrames_ > 8 ? maxFrames_ - 2 : maxFrames_ - 1;
     if (e.time().frame < want) return;
-    rayProbeDone_ = true;
+    harness_.rayProbeDone_ = true;
     // viewportRay is guarded by AVER_WITH_IMGUI.
 #if AVER_WITH_IMGUI
     Vec3 ro{}, rd{};
-    viewportRay(rayProbeX_, rayProbeY_, ro, rd);
+    viewportRay(harness_.rayProbeX_, harness_.rayProbeY_, ro, rd);
     const Vec3 fwd = camForward();
     const Vec3 d   = ro - eye_;
     const f32 along = d.x*fwd.x + d.y*fwd.y + d.z*fwd.z;
@@ -2558,7 +2558,7 @@ void SandboxApp::rayProbeCheck(Engine& e) {
     AVER_INFO("[RayProbe] screen ({:.1f},{:.1f}) viewport ({:.0f},{:.0f} {:.0f}x{:.0f}) "
               "eye ({:.2f},{:.2f},{:.2f}) origin ({:.2f},{:.2f},{:.2f}) "
               "aheadOfEye {:.4f} dir ({:.3f},{:.3f},{:.3f}) reproject {} ({:.1f},{:.1f})",
-              rayProbeX_, rayProbeY_, vpX_, vpY_, vpW_, vpH_,
+              harness_.rayProbeX_, harness_.rayProbeY_, vpX_, vpY_, vpW_, vpH_,
               eye_.x, eye_.y, eye_.z, ro.x, ro.y, ro.z, along,
               rd.x, rd.y, rd.z, ok ? "ok" : "BEHIND", bx, by);
 #else
@@ -2567,12 +2567,12 @@ void SandboxApp::rayProbeCheck(Engine& e) {
 }
 
 void SandboxApp::gpuTimingCheck(Engine& e) {
-    if (!gpuTiming_ || maxFrames_ == 0 || gpuTimingDone_) return;
+    if (!harness_.gpuTiming_ || maxFrames_ == 0 || harness_.gpuTimingDone_) return;
     // Averages the second half of the run only, so load-time builds do not dilute steady state.
     if (maxFrames_ > 64 && e.time().frame == maxFrames_ / 2 && e.device()) e.device()->resetGpuTiming();
     const u64 want = maxFrames_ > 8 ? maxFrames_ - 2 : maxFrames_ - 1;
     if (e.time().frame < want) return;
-    gpuTimingDone_ = true;
+    harness_.gpuTimingDone_ = true;
     editor::handleFrameTime(*this, e, {}, [](LogLevel lvl, std::string msg) {
         if (lvl == LogLevel::Error) AVER_ERROR("[GPU] {}", msg);
         else                        AVER_INFO ("[GPU] {}", msg);
@@ -2591,13 +2591,13 @@ void SandboxApp::gpuTimingCheck(Engine& e) {
 // --resize-cycle N: resize the real window every N frames during a bounded run.
 // Window::setFrameSize resizes without activating, so a capture run doesn't steal focus.
 void SandboxApp::resizeCheck(Engine& e) {
-    if (resizeCycle_ == 0 || !e.window()) return;
+    if (harness_.resizeCycle_ == 0 || !e.window()) return;
     const u64 f = e.time().frame;
-    if (f == 0 || (f % resizeCycle_) != 0) return;
+    if (f == 0 || (f % harness_.resizeCycle_) != 0) return;
     i32 w = 0, h = 0;
     if (!e.window()->frameSize(w, h)) return;
     // Alternate between two sizes.
-    const bool big = (resizeStep_++ & 1) == 0;
+    const bool big = (harness_.resizeStep_++ & 1) == 0;
     const int nw = big ? (w - 137) : (w + 137);   // odd numbers on purpose
     const int nh = big ? (h -  83) : (h +  83);
     if (nw < 320 || nh < 240) return;
@@ -2607,35 +2607,35 @@ void SandboxApp::resizeCheck(Engine& e) {
 
 void SandboxApp::captureCheck(Engine& e) {
     // --luma-sweep and --firefly-metric share the device's capture slot; don't stomp.
-    if (lumaSweep_ || fireflyMetric_) return;
+    if (harness_.lumaSweep_ || harness_.fireflyMetric_) return;
     const u64 f = e.time().frame;
     const u64 sf = maxFrames_>8?maxFrames_-3:4;
-    const u32 px_ = probeU_ >= 0.0f ? (u32)(vpX_ + vpW_ * probeU_)
-                  : (probeX_ ? probeX_ : (u32)(vpX_ + vpW_*0.5f));
-    const u32 py_ = probeV_ >= 0.0f ? (u32)(vpY_ + vpH_ * probeV_)
-                  : (probeY_ ? probeY_ : (u32)(vpY_ + vpH_*0.5f));
+    const u32 px_ = harness_.probeU_ >= 0.0f ? (u32)(vpX_ + vpW_ * harness_.probeU_)
+                  : (harness_.probeX_ ? harness_.probeX_ : (u32)(vpX_ + vpW_*0.5f));
+    const u32 py_ = harness_.probeV_ >= 0.0f ? (u32)(vpY_ + vpH_ * harness_.probeV_)
+                  : (harness_.probeY_ ? harness_.probeY_ : (u32)(vpY_ + vpH_*0.5f));
     if (f==sf || mcpShotRequest_) {
         e.device()->requestCapture(px_, py_);
-        capX_=px_; capY_=py_; capVpX_=vpX_; capVpY_=vpY_; capVpW_=vpW_; capVpH_=vpH_;
-        capFrame_=f;
+        harness_.capX_=px_; harness_.capY_=py_; harness_.capVpX_=vpX_; harness_.capVpY_=vpY_; harness_.capVpW_=vpW_; harness_.capVpH_=vpH_;
+        harness_.capFrame_=f;
         mcpShotRequest_=false;
     }
-    if (f>capFrame_ && !capDone_){
-        const bool insideReq = (f32)capX_ >= capVpX_ && (f32)capX_ < capVpX_+capVpW_ &&
-                               (f32)capY_ >= capVpY_ && (f32)capY_ < capVpY_+capVpH_;
-        const bool rectStable = capVpX_==vpX_ && capVpY_==vpY_ && capVpW_==vpW_ && capVpH_==vpH_;
+    if (f>harness_.capFrame_ && !harness_.capDone_){
+        const bool insideReq = (f32)harness_.capX_ >= harness_.capVpX_ && (f32)harness_.capX_ < harness_.capVpX_+harness_.capVpW_ &&
+                               (f32)harness_.capY_ >= harness_.capVpY_ && (f32)harness_.capY_ < harness_.capVpY_+harness_.capVpH_;
+        const bool rectStable = harness_.capVpX_==vpX_ && harness_.capVpY_==vpY_ && harness_.capVpW_==vpW_ && harness_.capVpH_==vpH_;
         const char* tag = !insideReq ? "OUTSIDE-VIEWPORT"
                         : !rectStable ? "VIEWPORT-MOVED"
                                       : "in-viewport";
         f32 px[4]; if (e.device()->getCapture(px)) {
             AVER_INFO("[Sandbox] probe ({},{}) px ({:.2f},{:.2f},{:.2f}) raw ({},{},{}) viewport ({},{} {}x{}) {}",
-                      capX_, capY_, px[0],px[1],px[2],
+                      harness_.capX_, harness_.capY_, px[0],px[1],px[2],
                       (int)(px[0]*255.0f+0.5f), (int)(px[1]*255.0f+0.5f), (int)(px[2]*255.0f+0.5f),
-                      (int)capVpX_, (int)capVpY_, (int)capVpW_, (int)capVpH_, tag);
+                      (int)harness_.capVpX_, (int)harness_.capVpY_, (int)harness_.capVpW_, (int)harness_.capVpH_, tag);
             if (!insideReq)
                 AVER_ERROR("[Sandbox] PROBE INVALID: ({},{}) is outside the 3D viewport ({},{} {}x{}) "
                            "-- the value above is editor chrome, not a shading result",
-                           capX_, capY_, (int)capVpX_, (int)capVpY_, (int)capVpW_, (int)capVpH_);
+                           harness_.capX_, harness_.capY_, (int)harness_.capVpX_, (int)harness_.capVpY_, (int)harness_.capVpW_, (int)harness_.capVpH_);
             else if (!rectStable)
                 AVER_WARN("[Sandbox] PROBE SUSPECT: the viewport moved to ({},{} {}x{}) after the "
                           "capture was requested -- re-run before trusting the value above",
@@ -2644,7 +2644,7 @@ void SandboxApp::captureCheck(Engine& e) {
         if (!shot_.empty()){ std::vector<u8> img; u32 iw=0,ih=0;
             if (e.device()->getFrameImage(img,iw,ih)&&iw&&ih && stbi_write_png(shot_.c_str(),(int)iw,(int)ih,4,img.data(),(int)iw*4))
                 AVER_INFO("[Sandbox] screenshot: {} ({}x{})", shot_, iw, ih); }
-        capDone_=true;
+        harness_.capDone_=true;
     }
 }
 
@@ -2658,25 +2658,25 @@ void SandboxApp::captureCheck(Engine& e) {
 // Reference is an OUTER RING MINUS INNER CORE: excludes the inner core so a cluster
 // up to that size doesn't inflate its own reference.
 void SandboxApp::lumaSweepCheck(Engine& e) {
-    if ((!lumaSweep_ && !fireflyMetric_) || maxFrames_ == 0) return;
+    if ((!harness_.lumaSweep_ && !harness_.fireflyMetric_) || maxFrames_ == 0) return;
     // Only issue NEW requests on stride; pending readback is always collected.
-    const bool sampleThisFrame = (e.time().frame % (u64)lumaSweepStride_) == 0;
-    if (lumaSweepPending_) {
+    const bool sampleThisFrame = (e.time().frame % (u64)harness_.lumaSweepStride_) == 0;
+    if (harness_.lumaSweepPending_) {
         std::vector<u8> img; u32 iw = 0, ih = 0;
         if (e.device()->getFrameImage(img, iw, ih) && iw && ih) {
-            const u32 x0 = (u32)std::fmax(0.0f, lumaSweepVpX_);
-            const u32 y0 = (u32)std::fmax(0.0f, lumaSweepVpY_);
-            const u32 x1 = (u32)std::fmin((f32)iw, lumaSweepVpX_ + lumaSweepVpW_);
-            const u32 y1 = (u32)std::fmin((f32)ih, lumaSweepVpY_ + lumaSweepVpH_);
+            const u32 x0 = (u32)std::fmax(0.0f, harness_.lumaSweepVpX_);
+            const u32 y0 = (u32)std::fmax(0.0f, harness_.lumaSweepVpY_);
+            const u32 x1 = (u32)std::fmin((f32)iw, harness_.lumaSweepVpX_ + harness_.lumaSweepVpW_);
+            const u32 y1 = (u32)std::fmin((f32)ih, harness_.lumaSweepVpY_ + harness_.lumaSweepVpH_);
             auto toLin = [](u8 c) -> f32 {
                 const f32 s = c / 255.0f;
                 return s <= 0.04045f ? s / 12.92f : std::pow((s + 0.055f) / 1.055f, 2.4f);
             };
             // Allocate grid only for firefly metric.
             // Stride 1 for fireflies (full res), stride 4 for luma sweep (cheap).
-            const u32 step = fireflyMetric_ ? 1u : 4u;
-            const u32 gridW = (fireflyMetric_ && x1 > x0) ? (x1 - 1 - x0) / step + 1 : 0;
-            const u32 gridH = (fireflyMetric_ && y1 > y0) ? (y1 - 1 - y0) / step + 1 : 0;
+            const u32 step = harness_.fireflyMetric_ ? 1u : 4u;
+            const u32 gridW = (harness_.fireflyMetric_ && x1 > x0) ? (x1 - 1 - x0) / step + 1 : 0;
+            const u32 gridH = (harness_.fireflyMetric_ && y1 > y0) ? (y1 - 1 - y0) / step + 1 : 0;
             std::vector<f32> grid;
             if (gridW && gridH) grid.assign((size_t)gridW * gridH, 0.0f);
 
@@ -2694,15 +2694,15 @@ void SandboxApp::lumaSweepCheck(Engine& e) {
             }
             const f64 meanLin = n ? sum / (f64)n : -1.0;
             // lumaSweepYaw_ cached at request time; yaw_ already advanced by THIS tick's camWobble.
-            if (lumaSweep_) {
+            if (harness_.lumaSweep_) {
                 AVER_INFO("[LumaSweep] frame={} meanLinLuma={:.6f} samples={} viewport=({},{} {}x{}) "
                           "giMode={} camWobbleDeg={:.2f} camWobblePeriod={} yawDeg={:.3f}",
-                          lumaSweepFrame_, meanLin, n, (int)lumaSweepVpX_, (int)lumaSweepVpY_,
-                          (int)lumaSweepVpW_, (int)lumaSweepVpH_, giModeOverride_, camWobbleDeg_,
-                          camWobblePeriod_, lumaSweepYaw_ * 57.29577951f);
+                          harness_.lumaSweepFrame_, meanLin, n, (int)harness_.lumaSweepVpX_, (int)harness_.lumaSweepVpY_,
+                          (int)harness_.lumaSweepVpW_, (int)harness_.lumaSweepVpH_, giModeOverride_, harness_.camWobbleDeg_,
+                          harness_.camWobblePeriod_, harness_.lumaSweepYaw_ * 57.29577951f);
             }
 
-            if (fireflyMetric_ && !grid.empty()) {
+            if (harness_.fireflyMetric_ && !grid.empty()) {
                 // Summed-area table for O(1) windowed sums.
                 std::vector<f64> sat((size_t)(gridW + 1) * (gridH + 1), 0.0);
                 for (u32 gy = 0; gy < gridH; ++gy) {
@@ -2726,8 +2726,8 @@ void SandboxApp::lumaSweepCheck(Engine& e) {
                 const f64 kAbsFloor = 0.02;
                 // A firefly is distinguished by INSTABILITY, not just spatial outliers.
                 // Outliers whose luminance changed materially since the previous sampled frame.
-                const bool havePrev = fireflyPrevW_ == gridW && fireflyPrevH_ == gridH &&
-                                      fireflyPrevGrid_.size() == grid.size();
+                const bool havePrev = harness_.fireflyPrevW_ == gridW && harness_.fireflyPrevH_ == gridH &&
+                                      harness_.fireflyPrevGrid_.size() == grid.size();
                 u64 outlierCount = 0; f64 outlierMax = 0.0; u64 flickerCount = 0; f64 flickerMax = 0.0;
                 for (u32 gy = 0; gy < gridH; ++gy) {
                     const int oy0 = std::max(0, (int)gy - Ro), oy1 = std::min((int)gridH - 1, (int)gy + Ro);
@@ -2744,12 +2744,12 @@ void SandboxApp::lumaSweepCheck(Engine& e) {
                         const f64 ringCnt  = outerCnt - innerCnt;
                         const f64 localRef = ringCnt > 0.0 ? (outerSum - innerSum) / ringCnt
                                                             : (outerCnt > 0.0 ? outerSum / outerCnt : 0.0);
-                        if (lum > (f64)fireflyMult_ * std::max(localRef, kAbsFloor)) {
+                        if (lum > (f64)harness_.fireflyMult_ * std::max(localRef, kAbsFloor)) {
                             ++outlierCount;
                             outlierMax = std::max(outlierMax, lum);
                             // Relative to the LARGER of the two for stability.
                             if (havePrev) {
-                                const f64 was = fireflyPrevGrid_[(size_t)gy * gridW + gx];
+                                const f64 was = harness_.fireflyPrevGrid_[(size_t)gy * gridW + gx];
                                 const f64 den = std::max(std::max(was, lum), kAbsFloor);
                                 if (std::fabs(lum - was) / den > 0.5) {
                                     ++flickerCount;
@@ -2763,25 +2763,25 @@ void SandboxApp::lumaSweepCheck(Engine& e) {
                 AVER_INFO("[FireflyMetric] frame={} outliers={} flicker={} maxLin={:.4f} "
                           "flickerMax={:.4f} meanLin={:.6f} mult={:.2f} grid={}x{} giMode={} "
                           "camWobbleDeg={:.2f} camWobblePeriod={}",
-                          lumaSweepFrame_, outlierCount, havePrev ? (i64)flickerCount : -1,
-                          outlierMax, flickerMax, meanLin, fireflyMult_,
-                          gridW, gridH, giModeOverride_, camWobbleDeg_, camWobblePeriod_);
-                fireflyPrevGrid_ = grid;
-                fireflyPrevW_ = gridW;
-                fireflyPrevH_ = gridH;
+                          harness_.lumaSweepFrame_, outlierCount, havePrev ? (i64)flickerCount : -1,
+                          outlierMax, flickerMax, meanLin, harness_.fireflyMult_,
+                          gridW, gridH, giModeOverride_, harness_.camWobbleDeg_, harness_.camWobblePeriod_);
+                harness_.fireflyPrevGrid_ = grid;
+                harness_.fireflyPrevW_ = gridW;
+                harness_.fireflyPrevH_ = gridH;
             }
         } else {
             AVER_WARN("[LumaSweep] frame={}: getFrameImage() returned nothing -- this backend may "
-                      "not support a full-frame readback", lumaSweepFrame_);
+                      "not support a full-frame readback", harness_.lumaSweepFrame_);
         }
-        lumaSweepPending_ = false;
+        harness_.lumaSweepPending_ = false;
     }
     if (!sampleThisFrame) return;
     e.device()->requestCapture((u32)(vpX_ + vpW_ * 0.5f), (u32)(vpY_ + vpH_ * 0.5f));
-    lumaSweepVpX_ = vpX_; lumaSweepVpY_ = vpY_; lumaSweepVpW_ = vpW_; lumaSweepVpH_ = vpH_;
-    lumaSweepFrame_ = e.time().frame;
-    lumaSweepYaw_ = yaw_;   // THIS tick's angle, for THIS tick's image.
-    lumaSweepPending_ = true;
+    harness_.lumaSweepVpX_ = vpX_; harness_.lumaSweepVpY_ = vpY_; harness_.lumaSweepVpW_ = vpW_; harness_.lumaSweepVpH_ = vpH_;
+    harness_.lumaSweepFrame_ = e.time().frame;
+    harness_.lumaSweepYaw_ = yaw_;   // THIS tick's angle, for THIS tick's image.
+    harness_.lumaSweepPending_ = true;
 }
 
 } // namespace aver

@@ -662,11 +662,11 @@ void SandboxApp::initViewportIcons(Engine& e) {
 // --furnace-test: shading model energy conservation with a uniform white diffuse.
 void SandboxApp::setupFurnaceTest() {
     // Furnace test: shading model energy conservation with uniform white diffuse (--furnace-test).
-    if (furnaceTest_) {
+    if (harness_.furnaceTest_) {
         objects_.clear();
         sel_ = -1;
         sky_.furnaceRadiance = 0.25f;
-        sky_.furnaceSun = furnaceSun_;
+        sky_.furnaceSun = harness_.furnaceSun_;
         sunAmbient_ = 1.0f;
 
         // Albedo 1, fully rough, non-metallic white surfaces.
@@ -688,7 +688,7 @@ void SandboxApp::setupFurnaceTest() {
         white("FurnaceCaveTop",   Vec3{-330, -520, 350}, Vec3{200.0f, 200.0f, 20.0f});
 
         // Furnace grid: specular half (6 roughness x 3 metallic at albedo 1).
-        if (furnaceGrid_) {
+        if (harness_.furnaceGrid_) {
             objects_.clear();
             const f32 rough[6] = {0.05f, 0.25f, 0.45f, 0.65f, 0.85f, 1.0f};
             const f32 metal[3] = {0.0f, 0.5f, 1.0f};
@@ -703,7 +703,7 @@ void SandboxApp::setupFurnaceTest() {
                     o.pos   = Vec3{700.0f, -450.0f + 180.0f * (f32)ri, 60.0f + 140.0f * (f32)mi};
                     // Thin plate; tilt shows glancing incidence (--furnace-tilt).
                     o.scale = Vec3{0.5f, 60.0f, 60.0f};
-                    o.rotDeg = Vec3{furnaceTilt_, 0.0f, 0.0f};
+                    o.rotDeg = Vec3{harness_.furnaceTilt_, 0.0f, 0.0f};
                     o.color[0] = o.color[1] = o.color[2] = 1.0f;
                     o.metallic  = metal[mi];
                     o.roughness = rough[ri];
@@ -729,7 +729,7 @@ void SandboxApp::setupFurnaceTest() {
 // --refl-test: a mirror and a beacon to verify ray-traced reflection is global.
 void SandboxApp::setupReflectionTest() {
     // Reflection test: mirror and beacon to verify ray-traced reflection is global (--refl-test).
-    if (reflTest_) {
+    if (harness_.reflTest_) {
         refl_ = std::make_unique<aver::editor::ReflTest>();
         objects_.clear();
         sel_ = -1;
@@ -951,7 +951,7 @@ void SandboxApp::initVoxiBackend(Engine& e) {
         voxiRenderer_.setNrd2WeightsPaths(
             aver::userDataDir().empty() ? std::string() : aver::userDataDir() + AVER_PATH_SEP + render::denoise::kNrd2WeightsFileName,
             aver::executableDir() + AVER_PATH_SEP "data" AVER_PATH_SEP + render::denoise::kNrd2WeightsFileName);
-        if (frameTimeReport_) voxiRenderer_.setFrameTimeReport(true);
+        if (harness_.frameTimeReport_) voxiRenderer_.setFrameTimeReport(true);
         // Set measurement dials before init().
         if (rdAblate_) {
             voxiRenderer_.setRayDrivenAblation(static_cast<u32>(rdAblate_));
@@ -975,11 +975,11 @@ void SandboxApp::initVoxiBackend(Engine& e) {
                 if (!levelFoliage_.result().error.empty()) AVER_WARN("[Foliage] {}", levelFoliage_.result().error);
             }
             if (projectRenderPending_) applyProjectRenderSettings();
-            if (saveProject_ && !saveProjectDone_) { saveProjectDone_ = true; seedAndSaveProject(); }
+            if (harness_.saveProject_ && !harness_.saveProjectDone_) { harness_.saveProjectDone_ = true; seedAndSaveProject(); }
 #if AVER_WITH_IMGUI
             // Deferred import handshake (UI-only; needs browser).
-            if (!importSrc_.empty() && !importDone_) {
-                importDone_ = true;
+            if (!importSrc_.empty() && !harness_.importDone_) {
+                harness_.importDone_ = true;
                 importAsset(importSrc_, importDst_);
             }
 #endif
@@ -1080,7 +1080,7 @@ void SandboxApp::initParticleRenderer(Engine& e) {
         particlesAttached_ = true;
 #if AVER_MODULE_VOXI
         // Install GI seam once Voxi has attached (gated on --no-particle-gi).
-        if (voxiAttached_ && !noParticleGi_) {
+        if (voxiAttached_ && !harness_.noParticleGi_) {
             particles::ParticleRenderer::GiSeam seam;
             seam.prepare = &SandboxApp::particleGiPrepare;
             seam.bind = &SandboxApp::particleGiBind;
@@ -1140,7 +1140,7 @@ void SandboxApp::initWaterRenderer(Engine& e) {
 #if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
 void SandboxApp::setupParticleScenes() {
     // Particle test: dust cloud overlapping cube (shows transparent pass depth test).
-    if (particleTest_) {
+    if (harness_.particleTest_) {
         objects_.clear();
         sel_ = -1;
 
@@ -1227,7 +1227,7 @@ void SandboxApp::setupParticleScenes() {
                   emberEmitter, kEmberEffectId);
     }
     // Particle stress: N grid emitters (measures cost, tests parity/price pass).
-    else if (particleStressEmitters_ > 0) {
+    else if (harness_.particleStressEmitters_ > 0) {
         objects_.clear();
         sel_ = -1;
 
@@ -1235,7 +1235,7 @@ void SandboxApp::setupParticleScenes() {
         fx.shape = particles::EmitterShape::Box;
         fx.shapeSize = Vec3{350.0f, 60.0f, 90.0f};
         fx.emissionRate = 150.0f;   // steady fog/mist emission rate
-        fx.maxParticles = static_cast<u32>(particleStressMaxParticles_ > 0 ? particleStressMaxParticles_ : 400);
+        fx.maxParticles = static_cast<u32>(harness_.particleStressMaxParticles_ > 0 ? harness_.particleStressMaxParticles_ : 400);
         // Burst whole cap on frame 1 to reach steady-state cost immediately.
         fx.burstCount = fx.maxParticles;
         // Long lifetime keeps burst-filled population steady across capture window.
@@ -1256,7 +1256,7 @@ void SandboxApp::setupParticleScenes() {
         particles::particleEffects().set(kStressEffectId, fx);
 
         scene::World& world = scene::World::instance();
-        const int n = particleStressEmitters_;
+        const int n = harness_.particleStressEmitters_;
         const int cols = static_cast<int>(std::ceil(std::sqrt(static_cast<f64>(n))));
         const f32 spacing = 140.0f;
         for (int idx = 0; idx < n; ++idx) {
@@ -1277,7 +1277,7 @@ void SandboxApp::setupParticleScenes() {
                   n, fx.maxParticles, kStressEffectId);
 
         // Add second additive emitter to cover both blend pipelines.
-        if (particleStressSecondEmitter_) {
+        if (harness_.particleStressSecondEmitter_) {
             particles::ParticleEffect fx2;
             fx2.shape = particles::EmitterShape::Sphere;
             fx2.shapeSize = Vec3{10.0f, 0.0f, 0.0f};
@@ -1321,14 +1321,14 @@ void SandboxApp::setupParticleScenes() {
 #if AVER_MODULE_SCRIPTING
 void SandboxApp::setupGpuSelfTests(Engine& e) {
     // GPU skinning self-test (--skin-test; costs waitIdle).
-    if (skinTest_) {
+    if (harness_.skinTest_) {
         skinSelfTest_ = std::make_unique<aver::render::SkinSelfTest>();
         if (skinSelfTest_->init(*e.device())) e.device()->addRenderFeature(skinSelfTest_.get());
         else { AVER_ERROR("[Skin] self-test unavailable on this device"); skinSelfTest_.reset(); }
     }
 
     // Path tracer furnace test (energy conservation; --pt-furnace).
-    if (ptFurnaceTest_) {
+    if (harness_.ptFurnaceTest_) {
         ptFurnace_ = std::make_unique<aver::pt::PtFurnaceTest>();
         if (ptFurnace_->init(*e.device())) e.device()->addRenderFeature(ptFurnace_.get());
         else { AVER_ERROR("[PT] furnace unavailable on this device"); ptFurnace_.reset(); }

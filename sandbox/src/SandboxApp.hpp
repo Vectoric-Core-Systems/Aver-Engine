@@ -1299,6 +1299,7 @@ private:
 
 #include "state/EditId.hpp"
 #include "state/PlayState.hpp"
+#include "state/HarnessState.hpp"
 class HitchMarks;
 namespace game { struct SceneDrawStats; }
 
@@ -1498,7 +1499,7 @@ public:
     void setPtFurnaceTest();        // --pt-furnace
     void setPtSceneView();   // --pt-scene
     void setPtQualityRamp(int everyFrames);
-    void setGiMethodCycle(int everyFrames) { giMethodCycleEvery_ = everyFrames; giMethodCycleCountdown_ = everyFrames; }
+    void setGiMethodCycle(int everyFrames) { harness_.giMethodCycleEvery_ = everyFrames; harness_.giMethodCycleCountdown_ = everyFrames; }
     void setPtSceneToggleOnAuto(int framesIn);
     void setPtSceneToggleOffAuto(int framesIn);
     void setSunSetAt(int framesIn, f32 elevDeg, f32 azimDeg);
@@ -1669,18 +1670,18 @@ public:
     void setCamWobble(f32 degrees, i32 periodFrames);
     // --cam-wobble-stop, --set: console variables and camera control.
     void setCamWobbleStop(i32 frame);
-    void addCamTeleport(i32 frame, const Vec3& pos) { camTeleports_.push_back({frame, pos}); }
+    void addCamTeleport(i32 frame, const Vec3& pos) { harness_.camTeleports_.push_back({frame, pos}); }
     void setConsoleSets(std::vector<std::pair<std::string, std::string>> sets);
     void setMeshHeapDefault(bool on);
     void setLodShareVertices(bool on);
     void setCamTranslate(f32 speedCmPerFrame);
     void setCamWander(f32 amp, f32 speed);        // --cam-wander AMP SPEED
-    void setCamFly(f32 dx, f32 dy, f32 yawDeg) { camFlyX_ = dx; camFlyY_ = dy; camFlyYaw_ = yawDeg; }   // --cam-fly
+    void setCamFly(f32 dx, f32 dy, f32 yawDeg) { harness_.camFlyX_ = dx; harness_.camFlyY_ = dy; harness_.camFlyYaw_ = yawDeg; }   // --cam-fly
     // --nrd2-capture DIR POSES [HOLD] [HELDOUT_FROM] and --nrd2-oracle grad|grid (NRD2 phase 3 dataset).
     // DIR "default" (or "-") is %LOCALAPPDATA%/AverEngine/nrd2_dataset/<level>.
     void setNrd2Capture(const std::string& dir, u32 poses, u32 hold, u32 heldOutFrom, bool oracleGrid) {
-        nrd2CaptureDir_ = dir; nrd2CapturePoses_ = poses; nrd2CaptureHold_ = hold;
-        nrd2CaptureHeldOut_ = heldOutFrom; nrd2CaptureGrid_ = oracleGrid;
+        harness_.nrd2CaptureDir_ = dir; harness_.nrd2CapturePoses_ = poses; harness_.nrd2CaptureHold_ = hold;
+        harness_.nrd2CaptureHeldOut_ = heldOutFrom; harness_.nrd2CaptureGrid_ = oracleGrid;
     }
     // --nrd2-train STEPS [DATASETDIR...] (NRD2 phase 4; no dirs = %LOCALAPPDATA%/AverEngine/nrd2_dataset).
     void setNrd2Train(u32 steps, std::vector<std::string> dirs) { nrd2Session_.requestCli(steps, std::move(dirs)); }
@@ -1756,6 +1757,7 @@ private:
 
     // ---- feature state: plain-data groups moved out of this class (sandbox/src/state/) ----
     PlayState play_;   // Play-in-editor session
+    HarnessState harness_;   // Automation and self-test state
     // ---- end feature state ----
 
     void applyProject(Engine& e);
@@ -1838,22 +1840,11 @@ private:
 
     bool hudPreviewActive() const;
     void setHudPreview(int index, f32 x, f32 y, f32 w, f32 h);
-    int hudPreviewIndex_ = -1;
-    int hudTest_ = -1;
-    bool saveProject_ = false;
     // Derived Data Cache write-behind budget, mirrored for slider binding.
     f32 ddcRamBudgetMb_ = 256.0f;
     std::string saveLevelTo_;         // --save-level <out>
     std::string bakeLevelPackAsset_;  // --bake-level-pack <level>  [wave3/level-instances]
-    bool bakeLevelPackDone_ = false;
-    bool saveLevelDone_ = false;
-    bool rayProbe_ = false, rayProbeDone_ = false;   // --ray-probe <sx> <sy>
-    f32  rayProbeX_ = 0.0f, rayProbeY_ = 0.0f;
     std::string importSrc_, importDst_;
-    bool importDone_ = false;
-    bool saveProjectDone_ = false;
-    bool hudTestReported_ = false;
-    f32 hudRectX_ = 0, hudRectY_ = 0, hudRectW_ = 0, hudRectH_ = 0;
 
     void saveLevelInteractive();
 
@@ -1863,9 +1854,6 @@ private:
     // Viewport screenshot to Saved/Screenshots (File > Take Screenshot, F9).
     void requestViewportScreenshot();
     void serviceViewportScreenshot(Engine& e);
-    u8  viewportShotState_ = 0;    // 0 idle, 1 requested, 2 capture requested and awaiting the image
-    u64 viewportShotFrame_ = 0;    // engine frame the capture was requested on
-    u32 viewportShotTries_ = 0;    // frames waited for the image; gives up rather than waiting forever
 
     // Window title (updated with level and dirty state).
     void refreshWindowTitle(Engine& e);
@@ -1886,22 +1874,6 @@ private:
     DirectoryWatcher contentWatch_;
     std::vector<FileEvent> watchEvents_;
 
-    bool autoCompile_ = false;
-    // True when --auto-compile enabled.
-    bool autoCompileFromCli_ = false;
-    int focusLevelAt_ = 0;
-    // Frames before chunk streaming auto-enables.
-    int chunkStreamAutoFrames_ = 5;
-    int droneAutoFrames_ = 0;        // --drone: frames left before auto-enabling, 0 = off
-    int undoTestAutoFrames_ = 0;     // --undo-test: frames left before runUndoTest() fires, 0 = off
-    int classPlaceTestAutoFrames_ = 0;   // --class-place-test: frames left before runClassPlaceTest() fires, 0 = off
-    int keybindTestAutoFrames_ = 0;  // --keybind-test: frames left before it fires, 0 = off
-    std::string keybindTestMode_;    // "write" or "read"
-    static constexpr int kAutoCompileQuietMs = 500;
-    std::chrono::steady_clock::time_point autoCompileDue_{};
-    int autoCompilePending_ = 0;
-    std::string autoCompileReason_;
-
     // Unloads the live script assemblies and loads the ones in binDir. Writes a status line.
 #if AVER_MODULE_SCRIPTING
     bool reloadScripts(const std::string& binDir, std::string* status);
@@ -1915,14 +1887,9 @@ private:
     void restorePlayWorld();
 
     int32_t engineDefaultGameMode();
-    int32_t engineDefaultGm_ = 0;
     // World/Project Settings: a combo of declared classes with `flag`, by name (SandboxSettings.cpp).
     bool classPicker(const char* label, std::string& value, int32_t flag, const char* emptyLabel,
                      const char* engineClass, const char* engineLabel);
-    // The view request before the editor overrode it (see startPlay).
-    bool    savedView_ = false;
-    int32_t savedViewMode_ = AVER_FW_VIEW_THIRD_PERSON;
-    float   savedViewEye_ = 160.0f, savedViewBoom_ = 450.0f;
 
     bool placePawnAtPlayerStart(const char* who);
 
@@ -1936,38 +1903,16 @@ private:
     void stopPlay();
 
     void maybePieCameraTest();
-    Vec3 pieCamMoveFrom_{0, 0, 0}, pieCamAfterMove_{0, 0, 0};
-    f32  pieCamMoved_ = 0.0f, pieCamMoveDot_ = 0.0f, pieCamCoast_ = 0.0f;
-    int pieCamFrames_ = 0, pieCamFrame_ = 0;
-    Vec3 pieCamRef_{0, 0, 0};
-    f32  pieCamRefYaw_ = 0.0f, pieCamRefPitch_ = 0.0f;
-    f32  pieCamMaxPos_ = 0.0f, pieCamMaxYaw_ = 0.0f, pieCamMaxPitch_ = 0.0f;
-    bool pieCamKeptYaw_ = false, pieCamKeptPitch_ = false;
-    bool pieCamPendingLook_ = false;
-    f32  pieCamWantYaw_ = 0.0f, pieCamWantPitch_ = 0.0f;
 
     void maybeInputSourceTest();
-    int  inputSrcFrames_ = 0, inputSrcFrame_ = 0, inputSrcDisagree_ = 0, inputSrcStuck_ = 0;
 
     void maybeWheelSpeedTest();
-    int  wheelTestFrames_ = 0, wheelTestFrame_ = 0;
-    f32  wheelTestSpeedBefore_ = 0.0f;
-    bool wheelTestForceFly_ = false, wheelTestSawImGui_ = false, wheelTestSawInput_ = false;
-    bool wheelTestOwnAtWheel_ = false, wheelTestFlyAtWheel_ = false;
-    bool inputSrcStateSaw_ = false, inputSrcImguiSaw_ = false;
 
     void maybeViewmodelTest();
-    int  vmFrames_ = 0, vmFrame_ = 0;
-    Vec3 vmRef_{0, 0, 0};
-    f32  vmStill_ = 0.0f, vmMoving_ = 0.0f;
-    u32  vmKids_ = 0;
 
     void maybeRecaptureTest();
-    int recapFrames_ = 0, recapFrame_ = 0, recapLeaked_ = 0, recapNotRecaptured_ = 0;
 
     void maybeInputStuckTest();
-    int  inputStuckFrames_ = 0, inputStuckFrame_ = 0, inputStuckLatched_ = 0, inputStuckFirstKey_ = -1;
-    bool inputStuckSawDown_ = false;
 
     void maybePlayTest(Engine& e);
 
@@ -2397,12 +2342,6 @@ private:
 
 
 
-    // --scene-census + the latch that fires it exactly once. Emitted from onUpdate, not the load:
-    // class placements spawn LATER than loadLevel, and a census at load would miss them -- the exact
-    // divergence this exists to catch.
-    bool sceneCensus_ = false;
-    bool sceneCensusDone_ = false;
-
     scene::Entity outlinerRenaming_ = scene::kInvalidEntity;
     // The row whose right-click menu was open last frame. The flat Outliner only submits the rows
     // its clipper hands out, and a popup lives inside its row's BeginPopupContextItem, so the clipper
@@ -2542,11 +2481,6 @@ private:
     void drawSculptCursor(Engine& e);
 #endif
 
-    // --autosave-test latches (outside AVER_WITH_IMGUI since maybeAutosave reads them).
-    bool autosaveTestArm_ = false;
-    bool autosaveTestLift_ = false;
-    bool autosaveTestWarned_ = false;
-
 #if AVER_WITH_IMGUI
     void deleteSelection();
 
@@ -2557,53 +2491,29 @@ private:
     void duplicateSelection();
 
     void runCbMoveTest(const std::string& root);
-    std::string cbMoveTestDir_;
-    int cbMoveTestFrames_ = 0;
 
     void runNotifyTest();
 
     void runPrefsWriteTest();
-    int prefsWriteTestFrames_ = 0;
-    int  notifyTestFrames_ = 0;
-    bool notifyTestLift_ = false;
 
-    // Opening a project with no render settings must not inherit the previous project's settings.
-    int projectSwitchFrames_ = 0;
     void runProjectSwitchTest();
 
-    // Validates one .ocgraph end-to-end through the managed GraphValidate export.
-    int graphPrintTestFrames_ = 0;
     void runGraphPrintTest();
 
-    // --clear-shader-cache: clears DXIL blob cache. Path empty = user data directory.
-    int clearShaderCacheFrames_ = 0;
-    std::string clearShaderCacheDir_;
     void runClearShaderCache();
 
-    std::string validateGraphPath_;
-    int validateGraphFrames_ = 0;
     void runValidateGraph();
 
-    // --rename-repoint-test: the rename/repoint chain over real project files.
-    int renameRepointFrames_ = 0;
     void runRenameRepointTest();
 
-    std::string findRefsPath_;
-    int findRefsFrames_ = 0;
     void runFindRefs();
 
     void runSaveDirtyTest();
-    int saveDirtyTestFrames_ = 0;
 
     void runMultiSelectTest(Engine& eng);
-    int multiSelTestFrames_ = 0;
 
-    // Asset picker's assignment helpers: the material case uses INTERNED NAME TOKEN vs path hashes.
-    std::string graphHitsTestPath_;
-    int graphHitsTestFrames_ = 0;
     void runGraphHitsTest();
 
-    int assetAssignTestFrames_ = 0;
     void runAssetAssignTest();
 
     void runUndoTest(Engine& eng);
@@ -3322,22 +3232,6 @@ private:
     void lumaSweepCheck(Engine& e);
 
     u64 maxFrames_; bool headless_; std::string beamPath_, shot_;
-    u64 resizeCycle_ = 0;
-    bool gpuTiming_ = false;
-    bool gpuTimingDone_ = false;
-    bool gpuTimingStartupReset_ = false;   // GPU average restarted once load work is done.
-    u32 resizeStep_ = 0;
-    bool lumaSweep_ = false;
-    int  lumaSweepStride_ = 1;
-    bool lumaSweepPending_ = false;
-    u64  lumaSweepFrame_ = 0;
-    f32  lumaSweepYaw_ = 0.0f;
-    f32  lumaSweepVpX_=0, lumaSweepVpY_=0, lumaSweepVpW_=0, lumaSweepVpH_=0;
-    bool fireflyMetric_ = false;
-    // Last sampled frame's luminance grid for flicker detection.
-    std::vector<f32> fireflyPrevGrid_;
-    u32 fireflyPrevW_ = 0, fireflyPrevH_ = 0;
-    f32  fireflyMult_ = 8.0f;
     // Default to Move (gizmo ready on open, vs Select which needs a second key press).
     Tool initialTool_ = Tool::Move;
     std::vector<MeshObj> objects_;
@@ -3582,13 +3476,8 @@ private:
     // The authored sky, sun and air. Sole owner of the sun's direction.
     rhi::SkyAtmosphere sky_{};
     f32 cloudTime_ = 0.0f;   // seconds of accumulated wind
-    bool capDone_=false;
     // A screenshot asked for over MCP: captureCheck requests a new capture for it instead of re-reading frame sf's.
     bool mcpShotRequest_=false;
-    u64 capFrame_=~0ull;   // the frame the pending capture was requested on
-    // The pixel requested and the viewport rect it was requested against, latched at request time.
-    u32 capX_=0, capY_=0;
-    f32 capVpX_=0, capVpY_=0, capVpW_=0, capVpH_=0;
     // editor viewport aids
     rhi::LineHandle gridMesh_=0;
 #if AVER_MODULE_SYNAPSE
@@ -3883,32 +3772,10 @@ private:
     int  refractionOverride_=-1;     // --refraction: -1 not given, else the mode
     f32  refractionStrengthOverride_=-1.0f;
     f32  refractionFadeOverride_=-1.0f;
-    bool frameTimeReport_=false;     // --frame-time: report the frame period, to price the above
     bool msOverride_=false;          // --ms: force the mesh shader geometry path
-    u32  probeX_=0, probeY_=0;       // --probe X Y: absolute capture pixel (0 = viewport centre)
-    f32  probeU_=-1.0f, probeV_=-1.0f;   // --probe-rel U V: a FRACTION of the viewport rect
     bool camOverride_=false;         // --cam X Y Z PITCH YAW: aim the viewport camera outright
-    f32  camWobbleDeg_=0.0f;         // --cam-wobble DEG PERIOD: yaw amplitude, 0 = no motion
-    i32  camWobblePeriod_=0;         // ...and its period in FRAMES; sin is 0 at every multiple
-    f32  camWobbleBaseYaw_=0.0f;     // the yaw to swing about, latched on the first wobbled frame
-    bool camWobbleBased_=false;
-    std::vector<std::pair<i32, Vec3>> camTeleports_;   // --cam-teleport FRAME X Y Z (repeatable)
-    i32  camWobbleStopFrame_=0;      // --cam-wobble-stop N: wobble only while frame < N; 0 = never stop
     // --set NAME VALUE pairs, applied once through runConsoleLine on the first frame with a device.
     std::vector<std::pair<std::string, std::string>> consoleSets_;
-    bool consoleSetsApplied_=false;
-    f32  camTranslateSpeed_=0.0f;    // --cam-translate SPEED: forward-flight, cm/frame, 0 = no motion
-    f32  camWanderAmp_=0.0f;         // --cam-wander AMP SPEED: non-repeating drift, 0 = off
-    f32  camWanderSpeed_=1.0f;
-    f32  camFlyX_=0.0f, camFlyY_=0.0f, camFlyYaw_=0.0f;   // --cam-fly: cm and degrees per frame
-    bool camWanderBased_=false;
-    u64  camWanderHeld_=0;           // frames the wander was paused (NeuRAA capture holding a pose)
-    std::string nrd2CaptureDir_;     // --nrd2-capture (see setNrd2Capture)
-    u32 nrd2CaptureSettle_ = 0;      // frames the requested level has been loaded
-    u32  nrd2CapturePoses_=0, nrd2CaptureHold_=256, nrd2CaptureHeldOut_=~0u;
-    bool nrd2CaptureGrid_=false, nrd2CaptureStarted_=false;
-    Vec3 camWanderBasePos_{};
-    f32  camWanderBaseYaw_=0.0f, camWanderBasePitch_=0.0f;
     // --mesh-heap default|upload (W4): true (default) = static mesh vertex/index buffers on the Default heap (VRAM);
     // false keeps them on the Upload heap (see rhi::IDevice::setStaticMeshHeapDefault).
     bool meshHeapDefault_ = true;
@@ -3933,19 +3800,8 @@ private:
     std::string runningBackend_ = "?";   // what the device actually came back as, latched at init
     bool debugLayer_=false;          // --debug-layer: validate every graphics call (a real per-call tax)
     std::string scriptsDir_;         // --scripts <dir>: where to look for user script assemblies
-    std::string spawnTestClass_;     // --spawn-test <ClassName>: headless actor-loop test trigger
-    bool spawnTestDone_=false;       // the spawn is one-shot, done on the first frame scripts are ready
-    int32_t spawnTestEntity_=0;      // the spawned test entity, destroyed a few frames later
-    int spawnTestFrames_=0;          // frames since the test spawn, so the destroy is one-shot too
     // The open drawer's CURRENT animated height in pixels, 0 when closed. Published to avoid viewport hint drift.
     f32  drawerPixelH_=0.0f;
-    bool playTest_=false;            // --play-test: headless begin_play -> tick -> end_play trigger
-    bool playTestBegun_=false;       // begin_play has fired (one-shot, once a GameMode class is declared)
-    u32 playTestSettle_ = 0;   // frames the requested level has been loaded (play-test waits ~1 s)
-    int  playTestWait_=0;            // frames spent waiting for a GameMode class before giving up
-    int  playTestFrames_=0;          // frames since begin_play, so the Stop is one-shot too
-    int  playTestRound_=0;           // Plays finished (AVER_PLAYTEST_PLAYS runs more than one)
-    int  playTestShotFrame_=-1;      // the frame a mid-Play capture was requested on (AVER_PLAYTEST_SHOT)
     editor::ProjectBrowser browser_;
     fmt::ProjectDesc project_;
     std::string projectPath_;        // <path>.ocproject given on the command line
@@ -4072,11 +3928,7 @@ private:
 #endif
     // The retained game UI's renderer. Heap-owned because create() may decline.
     aver::render::ui::UiRenderer* gameUi_ = nullptr;
-    bool skinTest_ = false;       // --skin-test: GPU skinning against its CPU reference, then exit
     std::unique_ptr<aver::render::SkinSelfTest> skinSelfTest_;
-    // VERDICTS LATCHED OUT OF THE TWO TESTS ABOVE: onShutdown destroys them before exitCode() is read. -1 = never asked, 0 = passed, 1 = failed.
-    int skinSelfTestExit_ = -1;
-    int skinDrawExit_     = -1;
     bool skinDrawTest_ = false;   // --skin-draw-test: does the RASTERISER read the skinned buffer
     // BESIDE skinDraw_, outside the scene guard: ThumbnailCache (sandbox/src/ThumbnailCache.hpp) stands on the RHI and ActorPreview only.
     // The content browser already treats that as settled.
@@ -4099,22 +3951,9 @@ private:
     std::string shaderSourceDir_;                 // --shader-source <dir>, empty = off
     aver::DirectoryWatcher shaderWatch_;    // --skin-scene-test <dir>: where the cooked rig lives
     std::unique_ptr<aver::editor::SkinSceneTest> skinScene_;
-    bool particleTest_ = false;   // --particle-test: a dust cloud straddling an opaque occluder.
-    bool noParticleGi_ = false;   // --no-particle-gi: see setNoParticleGi's own comment
-    // VERIFICATION-ONLY: --particle-stress <N> <M> spawns N grid-arranged emitters capped at M particles.
-    int  particleStressEmitters_ = 0;
-    int  particleStressMaxParticles_ = 0;
-    bool particleStressSecondEmitter_ = false;   // --particle-stress2: diag, see its own comment
     // Direct CPU wall-clock timing around particles::particleSystem().tick(). Accumulated every frame, printed once at shutdown.
     f64  particleTickAccumSec_ = 0.0;
     u64  particleTickFrames_ = 0;
-    bool reflTest_ = false;       // --refl-test: are ray-traced reflections global?
-    bool furnaceTest_ = false;    // --furnace-test: does the shading model conserve energy?
-    bool furnaceGrid_ = false;    // --furnace-grid: the same question across roughness/metallic
-    f32  furnaceTilt_ = 0.0f;     // --furnace-tilt DEG: read that grid at grazing incidence
-    bool furnaceSun_ = false;     // --furnace-sun: the variant where only the DIRECT term is lit
-    f32  sunAngle_ = -1.0f;       // --sun-angle: negative leaves the sky's own value alone
-    bool ptFurnaceTest_ = false;  // --pt-furnace: the same question asked of the path tracer
     std::unique_ptr<aver::pt::PtFurnaceTest> ptFurnace_;
     // --pt-scene: the path tracer pointed at the real scene. ptSceneViewWantEnabled_ is the flag that matters.
     std::unique_ptr<aver::pt::PtSceneView> ptSceneView_;
@@ -4127,28 +3966,8 @@ private:
     bool ptSceneViewSuppressedByRayDriven_ = false;
     // Wireframe/a G-buffer debug view withdrew the path-traced view's want; remembered so leaving the view mode gives it back.
     bool ptSceneViewSuppressedByViewMode_ = false;
-    // --pt-scene-toggle-on/--pt-scene-toggle-off [N]: VERIFICATION ONLY. Simulates flipping the Path Tracing Quality combo N frames into a bounded run.
-    int ptQualityRampEvery_ = 0;
-    int ptQualityRampCountdown_ = 0;
-    int giMethodCycleEvery_ = 0;       // --gi-method-cycle N
-    int giMethodCycleCountdown_ = 0;
-    int ptSceneToggleOnAutoFrames_ = 0;
-    int ptSceneToggleOffAutoFrames_ = 0;
-    // --sun-set-at N ELEV AZIM: VERIFICATION ONLY. Simulates dragging the Directional Light panel's sliders, N frames into a --frames run.
-    int sunSetAtFrames_ = 0;
-    f32 sunSetElevDeg_ = 0.0f, sunSetAzimDeg_ = 0.0f;
-    // --sun-sweep START DEG: the DRAG, not the jump -- turns the sun's azimuth by sunSweepDeg_ every frame for the rest of the run.
-    int sunSweepFrames_ = 0;
-    f32 sunSweepDeg_ = 0.0f;
-    // --sun-sweep-frames N: the drag LETS GO after N turns (0 = never), and the final angles are logged.
-    int sunSweepTurnsLeft_ = 0;
-    int giHistoryResetAtFrames_ = 0;
     // True while a stored non-unity render scale is on trial this session.
     bool renderScaleCookieArmed_ = false;
-#if AVER_MODULE_SR
-    // --aversr-cycle [N]: drive the on-then-off transition. Verification-only; 0 means never.
-    int averSrCycleFrames_ = 0;
-#endif
     std::unique_ptr<aver::editor::ReflTest> refl_;
     int  reflBeaconIndex_ = -1;   // which objects_ entry the schedule shows and hides
     rhi::MeshHandle unitCubeMesh_ = 0;   // the editor's own unit cube, half-extent 1

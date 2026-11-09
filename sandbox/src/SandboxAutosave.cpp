@@ -105,9 +105,9 @@ void SandboxApp::maybeAutosave(f32 dt) {
     // the countdown is unreachable from a bounded run without it -- it needs thirty seconds of
     // unsaved edits, which no capture has -- and it announces itself so a sidecar appearing
     // beside somebody's level is never a surprise.
-    if (maxFrames_ != 0 && !autosaveTestLift_) { autosaveAccum_ = 0.0f; return; }
-    if (maxFrames_ != 0 && autosaveTestLift_ && !autosaveTestWarned_) {
-        autosaveTestWarned_ = true;
+    if (maxFrames_ != 0 && !harness_.autosaveTestLift_) { autosaveAccum_ = 0.0f; return; }
+    if (maxFrames_ != 0 && harness_.autosaveTestLift_ && !harness_.autosaveTestWarned_) {
+        harness_.autosaveTestWarned_ = true;
         AVER_WARN("[Autosave] --autosave-test is lifting the capture guard: this bounded run "
                   "WILL write a recovery sidecar. Point it at a throwaway project.");
     }
@@ -460,7 +460,7 @@ void SandboxApp::pumpContentWatch() {
         // resolves is cheap and the alternative is a material stuck on its fallback forever.
         voxiRenderer_.materials().forgetFailedResolves();
 #endif
-        if (autoCompile_) scheduleAutoCompile("the watcher lost records");
+        if (harness_.autoCompile_) scheduleAutoCompile("the watcher lost records");
         return;
     }
     bool sawImage = false;
@@ -475,7 +475,7 @@ void SandboxApp::pumpContentWatch() {
         const std::string full = (std::filesystem::path(contentWatch_.root()) / ev.path).string();
         if (assetEditors_.notifyFileChanged(full))
             AVER_TRACE("[Editor] '{}' changed on disk; its tab was told", ev.path);
-        if (autoCompile_ && isScriptSource(ev.path)) scheduleAutoCompile(ev.path);
+        if (harness_.autoCompile_ && isScriptSource(ev.path)) scheduleAutoCompile(ev.path);
         if (isTextureSource(ev.path)) sawImage = true;
     }
 #if AVER_MODULE_PBR && AVER_MODULE_VOXI
@@ -519,25 +519,25 @@ void SandboxApp::pumpContentWatch() {
 
 // Pushes the auto-compile deadline out, so a burst of changes produces one build.
 void SandboxApp::scheduleAutoCompile(const std::string& why) {
-    autoCompileDue_ = std::chrono::steady_clock::now() +
-                      std::chrono::milliseconds(kAutoCompileQuietMs);
-    if (autoCompileReason_.empty()) autoCompileReason_ = why;
-    ++autoCompilePending_;
+    harness_.autoCompileDue_ = std::chrono::steady_clock::now() +
+                      std::chrono::milliseconds(HarnessState::kAutoCompileQuietMs);
+    if (harness_.autoCompileReason_.empty()) harness_.autoCompileReason_ = why;
+    ++harness_.autoCompilePending_;
 }
 
 // Starts the queued auto-compile once its deadline passes and no build is running.
 void SandboxApp::serviceAutoCompile() {
-    if (autoCompilePending_ == 0) return;
-    if (std::chrono::steady_clock::now() < autoCompileDue_) return;
+    if (harness_.autoCompilePending_ == 0) return;
+    if (std::chrono::steady_clock::now() < harness_.autoCompileDue_) return;
     if (tools_.compiling()) {
-        autoCompileDue_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+        harness_.autoCompileDue_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
         return;
     }
-    if (!project_.valid()) { autoCompilePending_ = 0; autoCompileReason_.clear(); return; }
+    if (!project_.valid()) { harness_.autoCompilePending_ = 0; harness_.autoCompileReason_.clear(); return; }
     AVER_INFO("[Editor] auto-compile: {} script change(s) settled (first was '{}')",
-              autoCompilePending_, autoCompileReason_);
-    autoCompilePending_ = 0;
-    autoCompileReason_.clear();
+              harness_.autoCompilePending_, harness_.autoCompileReason_);
+    harness_.autoCompilePending_ = 0;
+    harness_.autoCompileReason_.clear();
     tools_.triggerToolbarCompile(project_);
 }
 

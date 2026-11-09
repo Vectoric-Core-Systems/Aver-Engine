@@ -120,16 +120,16 @@ void SandboxApp::applyScriptRender(voxi::Renderer& vx) {
 void SandboxApp::applyConsoleSets(Engine& e, const Timestep& t) {
     // --set NAME VALUE applied at frame 5 (after project's RENDER.* apply).
 #if AVER_WITH_IMGUI
-    if (!consoleSetsApplied_ && !consoleSets_.empty() && t.frame >= 5 && e.device()) {
-        consoleSetsApplied_ = true;
+    if (!harness_.consoleSetsApplied_ && !consoleSets_.empty() && t.frame >= 5 && e.device()) {
+        harness_.consoleSetsApplied_ = true;
         for (const auto& kv : consoleSets_) {
             AVER_INFO("[Sandbox] --set {} {}", kv.first, kv.second);
             runConsoleLine(e, "set " + kv.first + " " + kv.second);
         }
     }
 #else
-    if (!consoleSetsApplied_ && !consoleSets_.empty()) {
-        consoleSetsApplied_ = true;
+    if (!harness_.consoleSetsApplied_ && !consoleSets_.empty()) {
+        harness_.consoleSetsApplied_ = true;
         AVER_WARN("[Sandbox] --set ignored: this build has no editor console to route {} pair(s) through",
                   consoleSets_.size());
     }
@@ -153,16 +153,16 @@ void SandboxApp::tickViewModeAndCameraDrift(const Timestep& t, bool& debugViewAc
     voxiRenderer_.setPaused(wireframe_);
 #endif
     // --cam-wobble-stop N: wobble runs only below frame N, then holds. Measuring artifact appearance/decay needs both.
-    if (camWobbleDeg_ != 0.0f && camWobblePeriod_ > 0 &&
-        (camWobbleStopFrame_ <= 0 || t.frame < (u64)camWobbleStopFrame_)) {
-        if (!camWobbleBased_) { camWobbleBaseYaw_ = yaw_; camWobbleBased_ = true; }
-        const f32 phase = 6.2831853f * (f32)(t.frame - 1) / (f32)camWobblePeriod_;
-        yaw_ = camWobbleBaseYaw_ + camWobbleDeg_ * 0.01745329252f * std::sin(phase);
+    if (harness_.camWobbleDeg_ != 0.0f && harness_.camWobblePeriod_ > 0 &&
+        (harness_.camWobbleStopFrame_ <= 0 || t.frame < (u64)harness_.camWobbleStopFrame_)) {
+        if (!harness_.camWobbleBased_) { harness_.camWobbleBaseYaw_ = yaw_; harness_.camWobbleBased_ = true; }
+        const f32 phase = 6.2831853f * (f32)(t.frame - 1) / (f32)harness_.camWobblePeriod_;
+        yaw_ = harness_.camWobbleBaseYaw_ + harness_.camWobbleDeg_ * 0.01745329252f * std::sin(phase);
     }
     // --cam-translate SPEED: one fixed step per frame along camForward(), composed with wobble.
-    if (camTranslateSpeed_ != 0.0f &&
-        (camWobbleStopFrame_ <= 0 || t.frame < (u64)camWobbleStopFrame_)) {
-        camPos_ += camForward() * camTranslateSpeed_;
+    if (harness_.camTranslateSpeed_ != 0.0f &&
+        (harness_.camWobbleStopFrame_ <= 0 || t.frame < (u64)harness_.camWobbleStopFrame_)) {
+        camPos_ += camForward() * harness_.camTranslateSpeed_;
     }
 }
 
@@ -190,46 +190,46 @@ void SandboxApp::tickCameraAutomation(Engine& e, const Timestep& t, HitchMarks& 
     // instead); it starts stepping on NRD2 frames and holds the camera the same way.
     const bool nrd2LevelReady = openLevelByName_.empty() && pendingOpenPath_.empty() && !pendingOpenPrompt_ &&
                                 !levelName_.empty();
-    nrd2CaptureSettle_ = nrd2LevelReady ? nrd2CaptureSettle_ + 1u : 0u;
-    if (nrd2CapturePoses_ && voxiAttached_ && !nrd2CaptureStarted_ && (nrd2CaptureSettle_ > 600u || t.frame > 6000)) {
+    harness_.nrd2CaptureSettle_ = nrd2LevelReady ? harness_.nrd2CaptureSettle_ + 1u : 0u;
+    if (harness_.nrd2CapturePoses_ && voxiAttached_ && !harness_.nrd2CaptureStarted_ && (harness_.nrd2CaptureSettle_ > 600u || t.frame > 6000)) {
         render::denoise::Nrd2CaptureConfig c;
         c.scene = levelName_.empty() ? std::string("unnamed") : levelName_;
         // Path Tracing feeds NRD2 different noise: its poses form their own scene for stratified training.
         if (voxi::Renderer::get().settings().pathTracing != voxi::Quality::Off) c.scene += "_PT";
         for (char& ch : c.scene)
             if (!(std::isalnum(static_cast<unsigned char>(ch)) || ch == '_' || ch == '-')) ch = '_';
-        c.dir = (nrd2CaptureDir_.empty() || nrd2CaptureDir_ == "default" || nrd2CaptureDir_ == "-")
-              ? userDataDir() + AVER_PATH_SEP "nrd2_dataset" AVER_PATH_SEP + c.scene : nrd2CaptureDir_;
-        c.poses = nrd2CapturePoses_;
-        c.hold = nrd2CaptureHold_;
-        c.heldOutFrom = nrd2CaptureHeldOut_;
-        c.oracle = nrd2CaptureGrid_ ? render::denoise::Nrd2OracleMode::Grid : render::denoise::Nrd2OracleMode::Grad;
-        if (camWanderAmp_ <= 0.0f)
+        c.dir = (harness_.nrd2CaptureDir_.empty() || harness_.nrd2CaptureDir_ == "default" || harness_.nrd2CaptureDir_ == "-")
+              ? userDataDir() + AVER_PATH_SEP "nrd2_dataset" AVER_PATH_SEP + c.scene : harness_.nrd2CaptureDir_;
+        c.poses = harness_.nrd2CapturePoses_;
+        c.hold = harness_.nrd2CaptureHold_;
+        c.heldOutFrom = harness_.nrd2CaptureHeldOut_;
+        c.oracle = harness_.nrd2CaptureGrid_ ? render::denoise::Nrd2OracleMode::Grid : render::denoise::Nrd2OracleMode::Grad;
+        if (harness_.camWanderAmp_ <= 0.0f)
             AVER_WARN("[NRD2] --nrd2-capture without --cam-wander: every pose is the same view");
         voxiRenderer_.startNrd2Capture(c);
-        nrd2CaptureStarted_ = true;
+        harness_.nrd2CaptureStarted_ = true;
     }
     if (voxiAttached_ && voxiRenderer_.nrd2CaptureHolding()) neuraaHold = true;
 #endif
-    for (const auto& [f, p] : camTeleports_) if (f > 0 && t.frame == static_cast<u64>(f)) teleportCamera(p);
-    if (neuraaHold) ++camWanderHeld_;
-    if (camWanderAmp_ > 0.0f && !neuraaHold && (camWobbleStopFrame_ <= 0 || t.frame < (u64)camWobbleStopFrame_)) {
-        if (!camWanderBased_) {
-            camWanderBasePos_ = camPos_; camWanderBaseYaw_ = yaw_; camWanderBasePitch_ = pitch_;
-            camWanderBased_ = true;
+    for (const auto& [f, p] : harness_.camTeleports_) if (f > 0 && t.frame == static_cast<u64>(f)) teleportCamera(p);
+    if (neuraaHold) ++harness_.camWanderHeld_;
+    if (harness_.camWanderAmp_ > 0.0f && !neuraaHold && (harness_.camWobbleStopFrame_ <= 0 || t.frame < (u64)harness_.camWobbleStopFrame_)) {
+        if (!harness_.camWanderBased_) {
+            harness_.camWanderBasePos_ = camPos_; harness_.camWanderBaseYaw_ = yaw_; harness_.camWanderBasePitch_ = pitch_;
+            harness_.camWanderBased_ = true;
         }
-        const f32 s = static_cast<f32>(t.frame - 1 - camWanderHeld_) * camWanderSpeed_;
-        const f32 a = camWanderAmp_;
-        yaw_ = camWanderBaseYaw_ + a * 0.4363f *   // +-25 degrees at AMP 1
+        const f32 s = static_cast<f32>(t.frame - 1 - harness_.camWanderHeld_) * harness_.camWanderSpeed_;
+        const f32 a = harness_.camWanderAmp_;
+        yaw_ = harness_.camWanderBaseYaw_ + a * 0.4363f *   // +-25 degrees at AMP 1
                (std::sin(0.0131f * s) + 0.6f * std::sin(0.0317f * s + 1.1f) + 0.3f * std::sin(0.0719f * s + 2.3f)) / 1.9f;
-        pitch_ = camWanderBasePitch_ + a * 0.1396f *   // +-8 degrees
+        pitch_ = harness_.camWanderBasePitch_ + a * 0.1396f *   // +-8 degrees
                  (std::sin(0.0173f * s + 0.5f) + 0.5f * std::sin(0.0437f * s + 1.3f)) / 1.5f;
-        camPos_ = camWanderBasePos_ + Vec3{a * 300.0f * std::sin(0.0091f * s + 0.2f),    // +-3 m across
+        camPos_ = harness_.camWanderBasePos_ + Vec3{a * 300.0f * std::sin(0.0091f * s + 0.2f),    // +-3 m across
                                            a * 300.0f * std::sin(0.0113f * s + 1.9f),
                                            a * 60.0f * std::sin(0.0213f * s + 0.7f)};    // +-0.6 m up/down (Z up)
     }
-    if (camFlyX_ != 0.0f || camFlyY_ != 0.0f) { camPos_.x += camFlyX_; camPos_.y += camFlyY_; }
-    if (camFlyYaw_ != 0.0f) yaw_ += camFlyYaw_ * 0.0174533f;
+    if (harness_.camFlyX_ != 0.0f || harness_.camFlyY_ != 0.0f) { camPos_.x += harness_.camFlyX_; camPos_.y += harness_.camFlyY_; }
+    if (harness_.camFlyYaw_ != 0.0f) yaw_ += harness_.camFlyYaw_ * 0.0174533f;
 }
 
 // Occlusion flags that --no-occlusion-cull and the console re-assert every frame.
@@ -264,8 +264,8 @@ void SandboxApp::pollAutosave(Engine& e, const Timestep& t) {
 void SandboxApp::tickLaunchRequests(const Timestep& t) {
     // Census at frame 2+ (after applyProject's scripting and spawnClassPlacements).
 #if AVER_MODULE_SCENE
-    if (sceneCensus_ && !sceneCensusDone_ && t.frame >= 2) {
-        sceneCensusDone_ = true;
+    if (harness_.sceneCensus_ && !harness_.sceneCensusDone_ && t.frame >= 2) {
+        harness_.sceneCensusDone_ = true;
         // playerStart_ excluded (editor synthesises it but shipped game doesn't).
         AVER_INFO("[Census] {}",
                   world::formatSceneCensus(
@@ -275,9 +275,9 @@ void SandboxApp::tickLaunchRequests(const Timestep& t) {
 #if AVER_MODULE_SCENE
     // --save-level <out>: writes the OPEN level to another path (not over levelPath_).
     // Waits for every pending open (--open-level, forwarded launch, unsaved-changes prompt) before acting.
-    if (!saveLevelTo_.empty() && !saveLevelDone_ && !levelPath_.empty() &&
+    if (!saveLevelTo_.empty() && !harness_.saveLevelDone_ && !levelPath_.empty() &&
         openLevelByName_.empty() && pendingOpenPath_.empty() && !pendingOpenPrompt_) {
-        saveLevelDone_ = true;
+        harness_.saveLevelDone_ = true;
         if (saveLevel(saveLevelTo_))
             AVER_INFO("[Level] --save-level wrote '{}' ({}) to {}",
                       levelName_, levelPath_, saveLevelTo_);
@@ -287,8 +287,8 @@ void SandboxApp::tickLaunchRequests(const Timestep& t) {
 #endif
 #if AVER_MODULE_SCENE
     // --bake-level-pack <level>: bakes that level's pack once the project's meshes are in.
-    if (!bakeLevelPackAsset_.empty() && !bakeLevelPackDone_ && t.frame >= 2 && pendingOpenPath_.empty() && !pendingOpenPrompt_) {
-        bakeLevelPackDone_ = true;
+    if (!bakeLevelPackAsset_.empty() && !harness_.bakeLevelPackDone_ && t.frame >= 2 && pendingOpenPath_.empty() && !pendingOpenPrompt_) {
+        harness_.bakeLevelPackDone_ = true;
         std::string bakeWhy;
         world::LevelAssetLibrary& lib = level_.assets();
         lib.setLoader(world::LevelAssetLibrary::diskLoader(project_.contentDir()));
@@ -331,24 +331,24 @@ void SandboxApp::tickLaunchRequests(const Timestep& t) {
 // Command-line actions that fire after a set number of frames.
 void SandboxApp::tickAutoFrameCommands(Engine& e, const Timestep& t) {
     // --pt-scene-toggle-on/-off: checked before syncPtSceneView() so the same onUpdate() that flips the flag also acts on it.
-    if (ptSceneToggleOnAutoFrames_  > 0 && --ptSceneToggleOnAutoFrames_  == 0) ptSceneViewWantEnabled_ = true;
-    if (ptSceneToggleOffAutoFrames_ > 0 && --ptSceneToggleOffAutoFrames_ == 0) ptSceneViewWantEnabled_ = false;
+    if (harness_.ptSceneToggleOnAutoFrames_  > 0 && --harness_.ptSceneToggleOnAutoFrames_  == 0) ptSceneViewWantEnabled_ = true;
+    if (harness_.ptSceneToggleOffAutoFrames_ > 0 && --harness_.ptSceneToggleOffAutoFrames_ == 0) ptSceneViewWantEnabled_ = false;
     // --sun-set-at: writes the same setting as Directional Light panel's sliders.
-    if (sunSetAtFrames_ > 0 && --sunSetAtFrames_ == 0) {
-        sky_.setSunAngles(sunSetElevDeg_, sunSetAzimDeg_);
+    if (harness_.sunSetAtFrames_ > 0 && --harness_.sunSetAtFrames_ == 0) {
+        sky_.setSunAngles(harness_.sunSetElevDeg_, harness_.sunSetAzimDeg_);
         AVER_INFO("[Sandbox] --sun-set-at: sun moved to elevation {:.1f} deg, azimuth {:.1f} deg",
-                  sunSetElevDeg_, sunSetAzimDeg_);
+                  harness_.sunSetElevDeg_, harness_.sunSetAzimDeg_);
     }
     // --sun-sweep: turns the sun every frame until turnsLeft reaches 0.
-    if (sunSweepFrames_ > 0) {
-        if (sunSweepFrames_ > 1) {
-            --sunSweepFrames_;
+    if (harness_.sunSweepFrames_ > 0) {
+        if (harness_.sunSweepFrames_ > 1) {
+            --harness_.sunSweepFrames_;
         } else {
             f32 el = 0.0f, az = 0.0f;
             sky_.sunAngles(el, az);
-            sky_.setSunAngles(el, az + sunSweepDeg_);
-            if (sunSweepTurnsLeft_ > 0 && --sunSweepTurnsLeft_ == 0) {
-                sunSweepFrames_ = 0;
+            sky_.setSunAngles(el, az + harness_.sunSweepDeg_);
+            if (harness_.sunSweepTurnsLeft_ > 0 && --harness_.sunSweepTurnsLeft_ == 0) {
+                harness_.sunSweepFrames_ = 0;
                 sky_.sunAngles(el, az);
                 AVER_INFO("[Sandbox] --sun-sweep-frames: the drag let go at frame {}, sun at elevation "
                           "{:.3f} deg, azimuth {:.3f} deg", t.frame, el, az);
@@ -357,7 +357,7 @@ void SandboxApp::tickAutoFrameCommands(Engine& e, const Timestep& t) {
     }
 #if AVER_MODULE_VOXI
     // --gi-history-reset-at: resets GI reservoir and denoiser history.
-    if (giHistoryResetAtFrames_ > 0 && --giHistoryResetAtFrames_ == 0) {
+    if (harness_.giHistoryResetAtFrames_ > 0 && --harness_.giHistoryResetAtFrames_ == 0) {
         voxi::Renderer::get().requestGiHistoryReset();
         voxi::Renderer::get().requestDenoiserHistoryReset();
         AVER_INFO("[Sandbox] --gi-history-reset-at: GI reservoir and denoiser history reset requested");
@@ -391,7 +391,7 @@ void SandboxApp::tickAutoFrameCommands(Engine& e, const Timestep& t) {
     }
 #if AVER_MODULE_SR
     // --aversr-cycle: On/Off/On to exercise the transition that used to crash.
-    if (averSrCycleFrames_ > 0 && --averSrCycleFrames_ == 0) {
+    if (harness_.averSrCycleFrames_ > 0 && --harness_.averSrCycleFrames_ == 0) {
         AVER_INFO("[AverSR] --aversr-cycle: Performance -> Off, the transition that used to crash");
         applyAverSrQuality(e.device(), aver::sr::Quality::Performance);
         applyAverSrQuality(e.device(), aver::sr::Quality::Off);
@@ -406,8 +406,8 @@ void SandboxApp::tickPathTracingAutomation() {
     if (ptSceneView_) ptSceneView_->setLegacyEnvironment(editor::consolePtLegacyEnvSlot());
 #if AVER_MODULE_VOXI
     // --pt-quality-ramp: verification-only, raises PT rung on live view every N frames.
-    if (ptQualityRampEvery_ > 0 && --ptQualityRampCountdown_ <= 0) {
-        ptQualityRampCountdown_ = ptQualityRampEvery_;
+    if (harness_.ptQualityRampEvery_ > 0 && --harness_.ptQualityRampCountdown_ <= 0) {
+        harness_.ptQualityRampCountdown_ = harness_.ptQualityRampEvery_;
         voxi::Settings ramped = voxi::Renderer::get().settings();
         const u32 rung = static_cast<u32>(ramped.pathTracing);
         // Off is never raised INTO (the ramp exercises rung changes on a live view).
@@ -420,8 +420,8 @@ void SandboxApp::tickPathTracingAutomation() {
     }
     // --gi-method-cycle: verification-only, steps the GI page's Method combo every N frames
     // (cones -> ReSTIR GI -> ReSTIR PT -> reference PT), exactly as a click would; nothing is saved.
-    if (giMethodCycleEvery_ > 0 && --giMethodCycleCountdown_ <= 0) {
-        giMethodCycleCountdown_ = giMethodCycleEvery_;
+    if (harness_.giMethodCycleEvery_ > 0 && --harness_.giMethodCycleCountdown_ <= 0) {
+        harness_.giMethodCycleCountdown_ = harness_.giMethodCycleEvery_;
         voxi::Settings m = voxi::Renderer::get().settings();
         const bool ptOn = m.pathTracing != voxi::Quality::Off;
         const int cur  = ptOn ? (m.ptMode == 1u ? 3 : 2) : (m.giMode != 0 ? 1 : 0);
@@ -518,7 +518,7 @@ void SandboxApp::resolveEditorInputOwnership(Engine& e) {
         }
         // --wheel-speed-test overrides stand in for right-drag state (headless has no real cursor).
 #if AVER_MODULE_FRAMEWORK
-        if (wheelTestForceFly_) {
+        if (harness_.wheelTestForceFly_) {
             ic.uiWantsKeyboard = false;
             ic.uiWantsMouse = false;
             ic.pointerInViewport = true;
@@ -564,7 +564,7 @@ void SandboxApp::tickEditorFlyCamera(const Timestep& t) {
 #endif
         // --wheel-speed-test drives this directly (forces state rather than synthesising right-drag).
 #if AVER_MODULE_FRAMEWORK
-        if (wheelTestForceFly_) flying_ = true;
+        if (harness_.wheelTestForceFly_) flying_ = true;
 #endif
         if (flying_) ImGui::SetMouseCursor(ImGuiMouseCursor_None);
 
@@ -605,11 +605,11 @@ void SandboxApp::tickEditorFlyCamera(const Timestep& t) {
         // Spectator Play flies without holding right button (mouse look still wants it).
         // Synthetic look injection point matches real look (--pie-camera-test).
 #if AVER_MODULE_FRAMEWORK
-        if (pieCamPendingLook_) {
-            pieCamPendingLook_ = false;
+        if (harness_.pieCamPendingLook_) {
+            harness_.pieCamPendingLook_ = false;
             yaw_   += 0.5f;
             pitch_ += 0.3f;
-            pieCamWantYaw_ = yaw_; pieCamWantPitch_ = pitch_;
+            harness_.pieCamWantYaw_ = yaw_; harness_.pieCamWantPitch_ = pitch_;
         }
 #endif
         // defaultPawnPlay_ is scene-guarded. Without the module, camera flies on right button alone.
@@ -718,7 +718,7 @@ void SandboxApp::tickEditorFlyCamera(const Timestep& t) {
 #if AVER_MODULE_FRAMEWORK
 void SandboxApp::tickPlayMouseCapture(Engine& e) {
     // --recapture-test opts in (gesture lives entirely inside this block).
-    const bool interactive = (maxFrames_ == 0 && !playTest_) || recapFrames_ > 0;
+    const bool interactive = (maxFrames_ == 0 && !harness_.playTest_) || harness_.recapFrames_ > 0;
     // The #if isn't redundant with uiActive(): runtime flag doesn't make ImGuiIO names COMPILE on UI-less build.
 #if AVER_WITH_IMGUI
     if (e.device()->uiActive() && interactive) {
@@ -804,15 +804,15 @@ void SandboxApp::tickPlayMouseCapture(Engine& e) {
 void SandboxApp::reportHudPreview() {
     // UI frame opens before gameplay ticks (ticking is when a game draws its HUD).
     // --hud-preview <n>: name every HUD once, then preview one over the level viewport.
-    if (hudTest_ >= 0 && !hudTestReported_ && scripts_.ready()) {
-        hudTestReported_ = true;
+    if (harness_.hudTest_ >= 0 && !harness_.hudTestReported_ && scripts_.ready()) {
+        harness_.hudTestReported_ = true;
         const i32 n = scripts_.hudCount();
         AVER_INFO("[HUD] {} declared", n);
         for (i32 i = 0; i < n; ++i) AVER_INFO("[HUD]   {}: '{}'", i, scripts_.hudName(i));
-        if (hudTest_ >= n) AVER_WARN("[HUD] no HUD at index {}", hudTest_);
+        if (harness_.hudTest_ >= n) AVER_WARN("[HUD] no HUD at index {}", harness_.hudTest_);
     }
-    if (hudTest_ >= 0 && hudTest_ < scripts_.hudCount())
-        setHudPreview(hudTest_, vpX_, vpY_, vpW_, vpH_);
+    if (harness_.hudTest_ >= 0 && harness_.hudTest_ < scripts_.hudCount())
+        setHudPreview(harness_.hudTest_, vpX_, vpY_, vpW_, vpH_);
 }
 #endif
 #endif
@@ -857,8 +857,8 @@ void SandboxApp::submitSubViewports() {
 void SandboxApp::feedUiPointer() {
     // Pointer converted here (only place that can do it correctly): UI frame is laid out against viewport, not window.
     {
-        const f32 ox = hudPreviewActive() ? hudRectX_ : static_cast<f32>(vpX_);
-        const f32 oy = hudPreviewActive() ? hudRectY_ : static_cast<f32>(vpY_);
+        const f32 ox = hudPreviewActive() ? harness_.hudRectX_ : static_cast<f32>(vpX_);
+        const f32 oy = hudPreviewActive() ? harness_.hudRectY_ : static_cast<f32>(vpY_);
         f32 px = 0.0f, py = 0.0f;
         u32 buttons = 0;
 #if AVER_WITH_IMGUI
@@ -918,7 +918,7 @@ void SandboxApp::tickGameUi(Engine& e, const Timestep& t) {
 #if AVER_MODULE_FRAMEWORK
 void SandboxApp::tickGameplay(Engine& e, const Timestep& t, const f32 gameDt) {
     // The frame order: OnPhysicsTick before each fixed step, then OnTick (GameTick.hpp).
-    if (!spawnTestClass_.empty() || aver_fw_play_state() == AVER_FW_PLAY_PLAYING) {
+    if (!harness_.spawnTestClass_.empty() || aver_fw_play_state() == AVER_FW_PLAY_PLAYING) {
 #if AVER_MODULE_SCENE && AVER_MODULE_PHYSICS
         // Level's cars: each driver sets input before physics step, each entity written after.
         // Inside this gate so Pause and Frame Skip hold traffic with everything else.
@@ -1068,27 +1068,27 @@ void SandboxApp::tickThumbnailsAndTestHooks(Engine& e) {
         thumbnails_.update();
     }
     // --drone: switches drone on N frames in (mirroring --chunk-stream so a capture can prove it without clicking Window > Drone).
-    if (droneAutoFrames_ > 0 && --droneAutoFrames_ == 0) setDroneEnabled(true);
+    if (harness_.droneAutoFrames_ > 0 && --harness_.droneAutoFrames_ == 0) setDroneEnabled(true);
     // --undo-test: fires runUndoTest() N frames in. Lives inside `#if AVER_WITH_IMGUI` block (same as commands it proves).
 #if AVER_WITH_IMGUI
-    if (undoTestAutoFrames_ > 0 && --undoTestAutoFrames_ == 0) runUndoTest(e);
-    if (classPlaceTestAutoFrames_ > 0 && --classPlaceTestAutoFrames_ == 0) runClassPlaceTest(e);
-    if (multiSelTestFrames_ > 0 && --multiSelTestFrames_ == 0) runMultiSelectTest(e);
-    if (cbMoveTestFrames_ > 0 && --cbMoveTestFrames_ == 0) runCbMoveTest(cbMoveTestDir_);
-    if (saveDirtyTestFrames_ > 0 && --saveDirtyTestFrames_ == 0) runSaveDirtyTest();
-    if (findRefsFrames_ > 0 && --findRefsFrames_ == 0) runFindRefs();
-    if (projectSwitchFrames_ > 0 && --projectSwitchFrames_ == 0) runProjectSwitchTest();
-    if (validateGraphFrames_ > 0 && --validateGraphFrames_ == 0) runValidateGraph();
-    if (graphPrintTestFrames_ > 0 && --graphPrintTestFrames_ == 0) runGraphPrintTest();
-    if (clearShaderCacheFrames_ > 0 && --clearShaderCacheFrames_ == 0) runClearShaderCache();
-    if (assetAssignTestFrames_ > 0 && --assetAssignTestFrames_ == 0) runAssetAssignTest();
-    if (graphHitsTestFrames_ > 0 && --graphHitsTestFrames_ == 0) runGraphHitsTest();
-    if (renameRepointFrames_ > 0 && --renameRepointFrames_ == 0) runRenameRepointTest();
-    if (prefsWriteTestFrames_ > 0 && --prefsWriteTestFrames_ == 0) runPrefsWriteTest();
-    if (notifyTestFrames_ > 0 && --notifyTestFrames_ == 0) runNotifyTest();
+    if (harness_.undoTestAutoFrames_ > 0 && --harness_.undoTestAutoFrames_ == 0) runUndoTest(e);
+    if (harness_.classPlaceTestAutoFrames_ > 0 && --harness_.classPlaceTestAutoFrames_ == 0) runClassPlaceTest(e);
+    if (harness_.multiSelTestFrames_ > 0 && --harness_.multiSelTestFrames_ == 0) runMultiSelectTest(e);
+    if (harness_.cbMoveTestFrames_ > 0 && --harness_.cbMoveTestFrames_ == 0) runCbMoveTest(harness_.cbMoveTestDir_);
+    if (harness_.saveDirtyTestFrames_ > 0 && --harness_.saveDirtyTestFrames_ == 0) runSaveDirtyTest();
+    if (harness_.findRefsFrames_ > 0 && --harness_.findRefsFrames_ == 0) runFindRefs();
+    if (harness_.projectSwitchFrames_ > 0 && --harness_.projectSwitchFrames_ == 0) runProjectSwitchTest();
+    if (harness_.validateGraphFrames_ > 0 && --harness_.validateGraphFrames_ == 0) runValidateGraph();
+    if (harness_.graphPrintTestFrames_ > 0 && --harness_.graphPrintTestFrames_ == 0) runGraphPrintTest();
+    if (harness_.clearShaderCacheFrames_ > 0 && --harness_.clearShaderCacheFrames_ == 0) runClearShaderCache();
+    if (harness_.assetAssignTestFrames_ > 0 && --harness_.assetAssignTestFrames_ == 0) runAssetAssignTest();
+    if (harness_.graphHitsTestFrames_ > 0 && --harness_.graphHitsTestFrames_ == 0) runGraphHitsTest();
+    if (harness_.renameRepointFrames_ > 0 && --harness_.renameRepointFrames_ == 0) runRenameRepointTest();
+    if (harness_.prefsWriteTestFrames_ > 0 && --harness_.prefsWriteTestFrames_ == 0) runPrefsWriteTest();
+    if (harness_.notifyTestFrames_ > 0 && --harness_.notifyTestFrames_ == 0) runNotifyTest();
     // Armed once: markLevelUnsaved gives autosave timer something to do; re-marking would loop forever.
-    if (autosaveTestArm_) { autosaveTestArm_ = false; markLevelUnsaved(); }
-    if (keybindTestAutoFrames_ > 0 && --keybindTestAutoFrames_ == 0) runKeybindPersistTest(keybindTestMode_);
+    if (harness_.autosaveTestArm_) { harness_.autosaveTestArm_ = false; markLevelUnsaved(); }
+    if (harness_.keybindTestAutoFrames_ > 0 && --harness_.keybindTestAutoFrames_ == 0) runKeybindPersistTest(harness_.keybindTestMode_);
 #endif
 }
 #endif
@@ -1122,7 +1122,7 @@ void SandboxApp::tickGraphs(const Timestep& t, HitchMarks& hm, const f32 gameDt)
     // Ungated: every class-placed graph ran OnTick while browsing, mutating level. Need FRAMEWORK guard for aver_fw_play_state().
 #if AVER_MODULE_FRAMEWORK
     playProf_.begin(editor::PlayPhase::GraphTicks);
-    if (!spawnTestClass_.empty() || aver_fw_play_state() == AVER_FW_PLAY_PLAYING)
+    if (!harness_.spawnTestClass_.empty() || aver_fw_play_state() == AVER_FW_PLAY_PLAYING)
         scripts_.tickGraphClassInstances(gameDt);
     playProf_.end(editor::PlayPhase::GraphTicks);
     hm.mark("graphTicks");
@@ -1135,7 +1135,7 @@ void SandboxApp::tickGraphs(const Timestep& t, HitchMarks& hm, const f32 gameDt)
 #if AVER_MODULE_SCENE
 void SandboxApp::tickChunkAndLevelStreaming(const Timestep& t, HitchMarks& hm) {
     // --chunk-stream: switches streaming on N frames in so a capture can prove it happened.
-    if (chunkStreamAutoFrames_ > 0 && --chunkStreamAutoFrames_ == 0) setChunkStreamingEnabled(true);
+    if (harness_.chunkStreamAutoFrames_ > 0 && --harness_.chunkStreamAutoFrames_ == 0) setChunkStreamingEnabled(true);
     // Chunk streaming. Runs here so it sees THIS frame's camPos_ and evictions land in flush() below.
     // Runs while idling outside Play too (exactly who this feature is for).
     if (streaming_.enabled()) {
@@ -1335,7 +1335,7 @@ void SandboxApp::applyDeviceRenderSettings(Engine& e, const Timestep& t) {
 #endif
         const Vec3 sd = Vec3{skySun.sunDirection[0], skySun.sunDirection[1],
                              skySun.sunDirection[2]}.getSafeNormal();
-        if (sunAngle_ > 0.0f) sky_.sunAngularDiameterDeg = sunAngle_;
+        if (harness_.sunAngle_ > 0.0f) sky_.sunAngularDiameterDeg = harness_.sunAngle_;
         // Direction only; color/ambient reach shaders through device frame constants.
         voxiRenderer_.setSunDirection(&sd.x);
     }
@@ -1532,7 +1532,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #if AVER_MODULE_FRAMEWORK
     publishWindowState(e);
 #endif
-    if (hudPreviewActive()) aver_ui_begin_frame(hudRectX_, hudRectY_, hudRectW_, hudRectH_);
+    if (hudPreviewActive()) aver_ui_begin_frame(harness_.hudRectX_, harness_.hudRectY_, harness_.hudRectW_, harness_.hudRectH_);
     else                    aver_ui_begin_frame(vpX_, vpY_, vpW_, vpH_);
     // Font and pointer lent per frame, right after frame opens. Font re-lent every frame (loadGameUiFont can leave it invalid).
     aver_ui_set_font(&uiFont_);
@@ -1541,7 +1541,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #endif
     feedUiPointer();
 #if AVER_MODULE_SCRIPTING
-    if (hudPreviewActive()) scripts_.hudDraw(hudPreviewIndex_, t.dt);
+    if (hudPreviewActive()) scripts_.hudDraw(harness_.hudPreviewIndex_, t.dt);
 #endif
     tickGameUi(e, t);
     hm.mark("ui+tests");
@@ -1593,7 +1593,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #if AVER_MODULE_SYNAPSE_SCENE && AVER_MODULE_FRAMEWORK
     // Gated on Play (like physics/fw_tick above): pathing is gameplay, not authoring preview.
     // nav_ may be empty or frame stale; AgentSystem::tick treats that as "wait for a grid".
-    if (!spawnTestClass_.empty() || aver_fw_play_state() == AVER_FW_PLAY_PLAYING) {
+    if (!harness_.spawnTestClass_.empty() || aver_fw_play_state() == AVER_FW_PLAY_PLAYING) {
         game::tickAi(gameDt, &nav_);
     }
 #endif

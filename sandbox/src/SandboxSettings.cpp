@@ -31,7 +31,7 @@ void SandboxApp::loadEditorPreferences() {
     logLevelFilter_     = prefInt  ("outputLog.levelFilter",         logLevelFilter_);
     consoleAutoScroll_  = prefBool ("console.autoScroll",            consoleAutoScroll_);
     // --auto-compile on command line wins (autoCompileFromCli_).
-    if (!autoCompileFromCli_) autoCompile_ = prefBool("scripting.autoCompile", autoCompile_);
+    if (!harness_.autoCompileFromCli_) harness_.autoCompile_ = prefBool("scripting.autoCompile", harness_.autoCompile_);
     showGrid_           = prefBool ("viewport.showGrid",             showGrid_);
     showCamCoords_      = prefBool ("viewport.showCamCoords",        showCamCoords_);
 #if AVER_MODULE_SCENE
@@ -2438,7 +2438,7 @@ void SandboxApp::saveEditorPreferences() {
     setPrefBool ("console.autoScroll",           consoleAutoScroll_);
     // Not written back from a --auto-compile run: that launch must not overwrite what the user chose
     // from the Tools menu before this session started.
-    if (!autoCompileFromCli_) setPrefBool("scripting.autoCompile", autoCompile_);
+    if (!harness_.autoCompileFromCli_) setPrefBool("scripting.autoCompile", harness_.autoCompile_);
     setPrefBool ("viewport.showGrid",            showGrid_);
     setPrefBool ("viewport.showCamCoords",       showCamCoords_);
 #if AVER_MODULE_SCENE

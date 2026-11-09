@@ -113,7 +113,7 @@ void SandboxApp::updateCpuTimingEnable() {
     {
         // CPU span timing runs only while something reads it: the profiler panel, --gpu-timing, or
         // the lead-up to a power-of-two scene-walk log line (the report averages the last 30 walks).
-        bool wantCpuTiming = gpuTiming_;
+        bool wantCpuTiming = harness_.gpuTiming_;
 #if AVER_WITH_IMGUI
         wantCpuTiming = wantCpuTiming || showProfiler_;
 #endif
@@ -2283,8 +2283,8 @@ void SandboxApp::onRender(Engine& e)  {
     tickLevelPrepToast(e);
 #endif
     // Restarts the GPU average once, when no load screen is up, so it covers steady state only.
-    if (!gpuTimingStartupReset_ && !projectLoading_) {
-        gpuTimingStartupReset_ = true;
+    if (!harness_.gpuTimingStartupReset_ && !projectLoading_) {
+        harness_.gpuTimingStartupReset_ = true;
         e.device()->resetGpuTiming();
     }
 
@@ -2418,19 +2418,19 @@ void SandboxApp::requestViewportScreenshot() {
     // A second press while one is in flight is a no-op, not a queued shot: the device has one
     // capture slot, and racing two requests would have the later one silently cancel the earlier
     // one's pending read.
-    if (viewportShotState_ != 0) return;
-    viewportShotState_ = 1;
+    if (harness_.viewportShotState_ != 0) return;
+    harness_.viewportShotState_ = 1;
 }
 
 // Runs once a frame, right beside captureCheck(e) in onRender -- AFTER it, which is what makes the
 // single frame-number check below sufficient.
 void SandboxApp::serviceViewportScreenshot(Engine& e) {
-    if (viewportShotState_ == 0) return;
+    if (harness_.viewportShotState_ == 0) return;
 
-    if (viewportShotState_ == 1) {
+    if (harness_.viewportShotState_ == 1) {
         // --luma-sweep/--firefly-metric request a fresh capture every tick for the WHOLE run (see
         // captureCheck's own comment) -- there is no frame where the slot is safely ours to take.
-        if (lumaSweep_ || fireflyMetric_) return;
+        if (harness_.lumaSweep_ || harness_.fireflyMetric_) return;
         // The one frame captureCheck itself calls requestCapture() on, in a bounded run: taking
         // the slot first would have captureCheck's read land OUR pixel under its own probe
         // coordinates, reporting a wrong pixel as the probe's own. Leave the latch set
@@ -2442,16 +2442,16 @@ void SandboxApp::serviceViewportScreenshot(Engine& e) {
         const u32 cx = static_cast<u32>(vpX_ + vpW_ * 0.5f);
         const u32 cy = static_cast<u32>(vpY_ + vpH_ * 0.5f);
         e.device()->requestCapture(cx, cy);
-        viewportShotFrame_ = f;
-        viewportShotTries_ = 0;
-        viewportShotState_ = 2;
+        harness_.viewportShotFrame_ = f;
+        harness_.viewportShotTries_ = 0;
+        harness_.viewportShotState_ = 2;
         return;
     }
 
     // state 2: awaiting the image. One frame of lag is inherent to requestCapture() -- serviced
     // inside present(), so a request made while handling frame f isn't ready until the next tick.
-    if (e.time().frame <= viewportShotFrame_) return;
-    ++viewportShotTries_;
+    if (e.time().frame <= harness_.viewportShotFrame_) return;
+    ++harness_.viewportShotTries_;
 
     std::vector<u8> img; u32 iw = 0, ih = 0;
     if (e.device()->getFrameImage(img, iw, ih) && iw && ih) {
@@ -2520,20 +2520,20 @@ void SandboxApp::serviceViewportScreenshot(Engine& e) {
                           "Could not write " + path, true);
 #endif
         }
-        viewportShotState_ = 0;
+        harness_.viewportShotState_ = 0;
         return;
     }
 
     // GIVE UP rather than wait forever: a device loss or a stuck readback must not leave the latch
     // pending forever, which would silently swallow every later F9 press -- requestViewportScreenshot()
     // refuses to re-arm while viewportShotState_ != 0.
-    if (viewportShotTries_ >= 30) {
-        AVER_WARN("[Sandbox] screenshot: no frame image after {} frames, giving up", viewportShotTries_);
+    if (harness_.viewportShotTries_ >= 30) {
+        AVER_WARN("[Sandbox] screenshot: no frame image after {} frames, giving up", harness_.viewportShotTries_);
 #if AVER_WITH_IMGUI
         notifyOutcome(editor::NotifySeverity::Warning, "Screenshot failed",
                       "The captured frame never arrived.", true);
 #endif
-        viewportShotState_ = 0;
+        harness_.viewportShotState_ = 0;
     }
 }
 
@@ -3251,7 +3251,7 @@ void SandboxApp::syncPtSceneView(rhi::IDevice* dev) {
     }
 }
 
-void SandboxApp::setFrameTimeReport(bool on) { frameTimeReport_ = on; }
+void SandboxApp::setFrameTimeReport(bool on) { harness_.frameTimeReport_ = on; }
 
 // --rd-ablate: forwarded to voxiRenderer_ BEFORE init(), because it becomes a shader define and
 // the pipelines are compiled once there. Setting it later would be silently inert.
@@ -3268,9 +3268,9 @@ void SandboxApp::setRefractionOverrides(int mode, f32 strength, f32 fade) {
 
 void SandboxApp::setMsOverride(bool on) { msOverride_ = on; }
 
-void SandboxApp::setProbe(u32 x, u32 y) { probeX_ = x; probeY_ = y; }
+void SandboxApp::setProbe(u32 x, u32 y) { harness_.probeX_ = x; harness_.probeY_ = y; }
 
-void SandboxApp::setProbeRel(f32 u, f32 v) { probeU_ = u; probeV_ = v; }
+void SandboxApp::setProbeRel(f32 u, f32 v) { harness_.probeU_ = u; harness_.probeV_ = v; }
 
 #if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
 bool SandboxApp::occlusionWasVisible(scene::Entity e) const {

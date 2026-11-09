@@ -536,15 +536,15 @@ int SandboxApp::exitCode() const  {
         if (!skinScene_->passed()) return 1;
     }
     // Read from latched scalars, not objects: onShutdown destroys both before exitCode() is called.
-    if (skinSelfTestExit_ > 0) {
-        AVER_ERROR("[Skin] --skin-test reported {}", skinSelfTestExit_ == 2 ? "no verdict (it did "
+    if (harness_.skinSelfTestExit_ > 0) {
+        AVER_ERROR("[Skin] --skin-test reported {}", harness_.skinSelfTestExit_ == 2 ? "no verdict (it did "
                    "not finish)" : "FAIL");
-        return skinSelfTestExit_;
+        return harness_.skinSelfTestExit_;
     }
-    if (skinDrawExit_ > 0) {
-        AVER_ERROR("[Skin] --skin-draw-test reported {}", skinDrawExit_ == 2 ? "no verdict (it did "
+    if (harness_.skinDrawExit_ > 0) {
+        AVER_ERROR("[Skin] --skin-draw-test reported {}", harness_.skinDrawExit_ == 2 ? "no verdict (it did "
                    "not finish)" : "FAIL");
-        return skinDrawExit_;
+        return harness_.skinDrawExit_;
     }
 #if AVER_MODULE_SCENE
     if (const int rc = sequenceRunExit()) return rc;
@@ -666,7 +666,7 @@ editor::shutdownAnimEditors();
     }
     if (skinSelfTest_) {
         // Latch verdict before reset; Engine::run calls exitCode() after onShutdown.
-        skinSelfTestExit_ = !skinSelfTest_->finished() ? 2 : (skinSelfTest_->passed() ? 0 : 1);
+        harness_.skinSelfTestExit_ = !skinSelfTest_->finished() ? 2 : (skinSelfTest_->passed() ? 0 : 1);
         e.device()->removeRenderFeature(skinSelfTest_.get());
         skinSelfTest_.reset();
     }
@@ -684,7 +684,7 @@ editor::shutdownAnimEditors();
     syncPtSceneView(e.device());
     if (skinDraw_) {
         // Latch verdict before reset.
-        skinDrawExit_ = !skinDraw_->finished() ? 2 : (skinDraw_->passed() ? 0 : 1);
+        harness_.skinDrawExit_ = !skinDraw_->finished() ? 2 : (skinDraw_->passed() ? 0 : 1);
         e.device()->removeRenderFeature(skinDraw_.get());
         skinDraw_.reset();
     }

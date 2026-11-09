@@ -216,7 +216,7 @@ void SandboxApp::restorePlayWorld() {
 // rows existing; AVER_FW_CLASS_PAWN/CONTROLLER/GAME_MODE need no ancestor.
 // Returns the GameMode class, or 0 if the framework would not take it.
 int32_t SandboxApp::engineDefaultGameMode() {
-    if (engineDefaultGm_) return engineDefaultGm_;
+    if (harness_.engineDefaultGm_) return harness_.engineDefaultGm_;
     const int32_t pawn = aver_fw_class_declare("AverDefaultPawn", nullptr);
     const int32_t ctrl = aver_fw_class_declare("AverDefaultController", nullptr);
     const int32_t gm   = aver_fw_class_declare("AverDefaultGameMode", nullptr);
@@ -230,7 +230,7 @@ int32_t SandboxApp::engineDefaultGameMode() {
     aver_fw_class_set_default_pawn(gm, "AverDefaultPawn");
     aver_fw_class_set_player_controller(gm, "AverDefaultController");
     aver_fw_class_seal(pawn); aver_fw_class_seal(ctrl); aver_fw_class_seal(gm);
-    engineDefaultGm_ = gm;
+    harness_.engineDefaultGm_ = gm;
     AVER_INFO("[Sandbox] engine default play classes registered "
               "(AverDefaultGameMode -> AverDefaultPawn, AverDefaultController)");
     return gm;
@@ -405,8 +405,8 @@ void SandboxApp::startPlay() {
             // eye height 0 -- and drivePlayCamera's no-view-entity fallback is `pawnPos + up * eye`,
             // putting a real character with no view node yet at its FEET, inside the floor. Not
             // hypothetical: an uncompiled-scripts project hits this on its first Play.
-            aver_fw_view(&savedViewMode_, &savedViewEye_, &savedViewBoom_);
-            savedView_ = true;
+            aver_fw_view(&harness_.savedViewMode_, &harness_.savedViewEye_, &harness_.savedViewBoom_);
+            harness_.savedView_ = true;
             aver_fw_set_view(AVER_FW_VIEW_FIRST_PERSON, 0.0f, 0.0f);
 
             // AND IT STARTS WHERE YOU WERE LOOKING, WHICH IS THE WHOLE OF THE BUG REPORT.
@@ -651,7 +651,7 @@ void SandboxApp::stopPlay() {
     // which for --play-test with a larger --frames is AFTER this Stop): restarting here would leave the
     // dump averaging only the edit frames after it, and the Play passes the run exists to attribute
     // would be gone. startPlay's restart already made the average Play-only up to this point.
-    const bool gpuDumpPending = gpuTiming_ && maxFrames_ != 0 && !gpuTimingDone_;
+    const bool gpuDumpPending = harness_.gpuTiming_ && maxFrames_ != 0 && !harness_.gpuTimingDone_;
     if (!gpuDumpPending) resetPlayProfile(false);
     closePlayWindow();
     // Cleared unconditionally, before anything else: a stale ejected/frame-step flag must never
@@ -707,9 +707,9 @@ void SandboxApp::stopPlay() {
 #endif
     // Restored whether or not the default pawn was what ended, so a view this editor changed can
     // never outlive the session that changed it.
-    if (savedView_) {
-        savedView_ = false;
-        aver_fw_set_view(savedViewMode_, savedViewEye_, savedViewBoom_);
+    if (harness_.savedView_) {
+        harness_.savedView_ = false;
+        aver_fw_set_view(harness_.savedViewMode_, harness_.savedViewEye_, harness_.savedViewBoom_);
     }
     if (aver_fw_play_state() != AVER_FW_PLAY_EDITOR) {
         aver_fw_end_play();

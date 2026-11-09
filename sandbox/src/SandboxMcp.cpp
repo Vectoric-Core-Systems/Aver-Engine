@@ -228,7 +228,7 @@ void SandboxApp::applyMcpCommand(const mcp::Command& c) {
     // The window as it is now, written to the path on the next frame (the same capture editor::screenshot asks for).
     if (c.name == "shot") {
         shot_ = c.arg;
-        capDone_ = false;
+        harness_.capDone_ = false;
         mcpShotRequest_ = true;
         return;
     }
@@ -331,7 +331,7 @@ void SandboxApp::registerMcpAbis() {
         if (a.fn == "screenshot") {
             if (a.text.empty()) { w = "screenshot needs a path in \"text\""; return false; }
             shot_ = a.text;
-            capDone_ = false;
+            harness_.capDone_ = false;
             mcpShotRequest_ = true;
             r = a.text;
             return true;

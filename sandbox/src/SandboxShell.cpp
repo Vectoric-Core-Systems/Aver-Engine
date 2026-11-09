@@ -975,10 +975,10 @@ void SandboxApp::drawRevisionControlStatusWidget() {
 // Whether HUD preview may draw (tab has rect and no session playing).
 bool SandboxApp::hudPreviewActive() const {
 #if AVER_MODULE_SCRIPTING && AVER_MODULE_FRAMEWORK
-    return hudPreviewIndex_ >= 0 && hudRectW_ > 1.0f &&
+    return harness_.hudPreviewIndex_ >= 0 && harness_.hudRectW_ > 1.0f &&
            aver_fw_play_state() != AVER_FW_PLAY_PLAYING;
 #elif AVER_MODULE_SCRIPTING
-    return hudPreviewIndex_ >= 0 && hudRectW_ > 1.0f;
+    return harness_.hudPreviewIndex_ >= 0 && harness_.hudRectW_ > 1.0f;
 #else
     return false;
 #endif
@@ -986,7 +986,7 @@ bool SandboxApp::hudPreviewActive() const {
 
 // Called by the HUD tab each frame; cleared when not drawn.
 void SandboxApp::setHudPreview(int index, f32 x, f32 y, f32 w, f32 h) {
-    hudPreviewIndex_ = index; hudRectX_ = x; hudRectY_ = y; hudRectW_ = w; hudRectH_ = h;
+    harness_.hudPreviewIndex_ = index; harness_.hudRectX_ = x; harness_.hudRectY_ = y; harness_.hudRectW_ = w; harness_.hudRectH_ = h;
 }
 
 #if AVER_WITH_IMGUI
@@ -2386,7 +2386,7 @@ void SandboxApp::drawLevelTab(Engine& e) {
     // ---- the level, as a tab drawing the scene texture ----
     {
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-        if (focusLevelAt_ > 0 && ImGui::GetFrameCount() == focusLevelAt_) {
+        if (harness_.focusLevelAt_ > 0 && ImGui::GetFrameCount() == harness_.focusLevelAt_) {
             ImGui::SetWindowFocus(AVER_WIN_LEVEL);
             AVER_INFO("[Editor] --focus-level-at: bringing the Level tab forward");
         }
@@ -3688,7 +3688,7 @@ void SandboxApp::toggleDrawer(Drawer d) {
 // Draws the notification stack, bottom-right, newest nearest the corner.
 void SandboxApp::drawNotifications() {
     // --frames (measurement mode): skip toasts.
-    if (maxFrames_ != 0 && !notifyTestLift_) return;
+    if (maxFrames_ != 0 && !harness_.notifyTestLift_) return;
 
     editor::NotificationQueue& q = editor::notifications();
     static std::vector<editor::Notification> shown;
