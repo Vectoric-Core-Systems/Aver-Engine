@@ -29,6 +29,7 @@ aver_add_module(Aver.World
     src/ChunkSource.cpp
     src/ChunkStreamer.cpp
     src/PlacementStreamer.cpp
+    src/DataLayers.cpp
     src/ChunkGenerator.cpp
     src/ScatterPalette.cpp
     # The PCG graph evaluator: point data, the node set, per-cell partitioned generation and the output sinks. Core + Formats only.

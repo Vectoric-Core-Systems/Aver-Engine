@@ -171,8 +171,9 @@ void PlacementStreamer::update(const std::vector<Vec3>& viewers, std::vector<u32
 
     // Pinned and not resident: loaded first, ignoring distance and budget.
     const usize loadStart = toLoad.size();
+    layerEvictions(toEvict);
     for (u32 i : pinned_)
-        if (!items_[i].resident) toLoad.push_back(i);
+        if (!items_[i].resident && !gated(items_[i], i)) toLoad.push_back(i);
 
     if (!viewers.empty()) {
         struct Cand { f32 d; u32 item; };
@@ -192,7 +193,7 @@ void PlacementStreamer::update(const std::vector<Vec3>& viewers, std::vector<u32
                         Item& m = items_[id];
                         if (m.stamp == stampCounter_) continue;
                         m.stamp = stampCounter_;
-                        if (m.resident || m.pinned) continue;
+                        if (m.resident || m.pinned || gated(m, id)) continue;
                         const f32 d = nearest(m.b, viewers);
                         if (d <= s_.loadCm) cand.push_back({d, id});
                     }
@@ -200,7 +201,7 @@ void PlacementStreamer::update(const std::vector<Vec3>& viewers, std::vector<u32
         }
         for (u32 id : wide_) {
             const Item& m = items_[id];
-            if (m.resident || m.pinned) continue;
+            if (m.resident || m.pinned || gated(m, id)) continue;
             const f32 d = nearest(m.b, viewers);
             if (d <= s_.loadCm) cand.push_back({d, id});
         }
@@ -215,7 +216,7 @@ void PlacementStreamer::update(const std::vector<Vec3>& viewers, std::vector<u32
         std::vector<Cand> ev;
         for (u32 id : residents_) {
             const Item& m = items_[id];
-            if (m.pinned) continue;
+            if (m.pinned || gated(m, id)) continue;   // gated residents were evicted by layerEvictions
             const f32 d = nearest(m.b, viewers);
             if (d > s_.evictCm) ev.push_back({d, id});
         }
@@ -338,8 +339,9 @@ void PlacementStreamer::update(const std::vector<Vec3d>& viewers, std::vector<u3
     emitted_ = false;
 
     const usize loadStart = toLoad.size();
+    layerEvictions(toEvict);
     for (u32 i : pinned_)
-        if (!items_[i].resident) toLoad.push_back(i);
+        if (!items_[i].resident && !gated(items_[i], i)) toLoad.push_back(i);
 
     if (!viewers.empty()) {
         struct Cand { f64 d; u32 item; };
@@ -360,7 +362,7 @@ void PlacementStreamer::update(const std::vector<Vec3d>& viewers, std::vector<u3
                         Item& m = items_[id];
                         if (m.stamp == stampCounter_) continue;
                         m.stamp = stampCounter_;
-                        if (m.resident || m.pinned) continue;
+                        if (m.resident || m.pinned || gated(m, id)) continue;
                         const f64 d = nearestD(m.bd, viewers);
                         if (d <= loadCm) cand.push_back({d, id});
                     }
@@ -368,7 +370,7 @@ void PlacementStreamer::update(const std::vector<Vec3d>& viewers, std::vector<u3
         }
         for (u32 id : wide_) {
             const Item& m = items_[id];
-            if (m.resident || m.pinned) continue;
+            if (m.resident || m.pinned || gated(m, id)) continue;
             const f64 d = nearestD(m.bd, viewers);
             if (d <= loadCm) cand.push_back({d, id});
         }
@@ -381,7 +383,7 @@ void PlacementStreamer::update(const std::vector<Vec3d>& viewers, std::vector<u3
         std::vector<Cand> ev;
         for (u32 id : residents_) {
             const Item& m = items_[id];
-            if (m.pinned) continue;
+            if (m.pinned || gated(m, id)) continue;   // gated residents were evicted by layerEvictions
             const f64 d = nearestD(m.bd, viewers);
             if (d > evictCm) ev.push_back({d, id});
         }
@@ -393,6 +395,104 @@ void PlacementStreamer::update(const std::vector<Vec3d>& viewers, std::vector<u3
         emitted_ = !ev.empty();
     }
     emitted_ = emitted_ || toLoad.size() > loadStart;
+}
+
+// ---- data layers -------------------------------------------------------------------------------------------------
+
+void PlacementStreamer::setItemLayers(u32 item, const std::vector<u32>& layers) {
+    if (item >= items_.size()) return;
+    if (layers.empty()) { itemLayers_.erase(item); items_[item].layered = false; }
+    else { itemLayers_[item] = layers; items_[item].layered = true; }
+    dirty_ = true;
+}
+
+void PlacementStreamer::setLayerState(u32 layer, LayerState st) {
+    if (layer >= layerStates_.size()) layerStates_.resize(layer + 1, LayerState::Activated);
+    if (layerStates_[layer] == st) return;
+    layerStates_[layer] = st;
+    dirty_ = true;
+}
+
+bool PlacementStreamer::eligible(u32 item) const {
+    if (item >= items_.size() || !items_[item].layered) return true;
+    const auto it = itemLayers_.find(item);
+    if (it == itemLayers_.end()) return true;
+    for (const u32 l : it->second)
+        if (layerState(l) == LayerState::Unloaded) return false;
+    return true;
+}
+
+bool PlacementStreamer::activated(u32 item) const {
+    if (item >= items_.size() || !items_[item].layered) return true;
+    const auto it = itemLayers_.find(item);
+    if (it == itemLayers_.end()) return true;
+    for (const u32 l : it->second)
+        if (layerState(l) != LayerState::Activated) return false;
+    return true;
+}
+
+// Residents whose layers were unloaded go first and ignore the eviction budget: a layer unload is a request, not a cull.
+void PlacementStreamer::layerEvictions(std::vector<u32>& toEvict) {
+    if (itemLayers_.empty()) return;
+    for (const u32 id : residents_)
+        if (gated(items_[id], id)) toEvict.push_back(id);
+}
+
+// ---- HLOD ring ---------------------------------------------------------------------------------------------------
+
+void PlacementStreamer::buildHlod(const std::vector<HlodCell>& cells) {
+    hlod_.assign(cells.size(), HlodState{});
+    for (usize i = 0; i < cells.size(); ++i) hlod_[i].cell = cells[i];
+    hlodItemsDirty_ = true;
+}
+
+void PlacementStreamer::rebuildHlodItems() {
+    std::unordered_map<u64, u32> at;
+    at.reserve(hlod_.size());
+    for (u32 i = 0; i < hlod_.size(); ++i) { hlod_[i].items.clear(); at.emplace(key(hlod_[i].cell.cx, hlod_[i].cell.cy), i); }
+    for (u32 id = 0; id < items_.size(); ++id) {
+        const Item& m = items_[id];
+        if (!m.alive) continue;
+        const f64 cx = (m.bd.min.x + m.bd.max.x) * 0.5, cy = (m.bd.min.y + m.bd.max.y) * 0.5;
+        const auto it = at.find(key(cellOfD(cx), cellOfD(cy)));
+        if (it != at.end()) hlod_[it->second].items.push_back(id);
+    }
+    hlodItemsDirty_ = false;
+}
+
+void PlacementStreamer::updateHlod(const std::vector<Vec3>& viewers, std::vector<u32>& toShow, std::vector<u32>& toHide) {
+    std::vector<Vec3d> v;
+    v.reserve(viewers.size());
+    for (const Vec3& p : viewers) v.push_back(Vec3d{p.x, p.y, p.z});
+    updateHlod(v, toShow, toHide);
+}
+
+void PlacementStreamer::updateHlod(const std::vector<Vec3d>& viewers, std::vector<u32>& toShow, std::vector<u32>& toHide) {
+    if (hlod_.empty() || s_.hlodCm <= 0.0f) return;
+    if (hlodItemsDirty_) rebuildHlodItems();
+    const f64 cell = static_cast<f64>(s_.cellCm), showCm = static_cast<f64>(s_.hlodCm);
+    const f64 hideCm = s_.hlodEvictCm > s_.hlodCm ? static_cast<f64>(s_.hlodEvictCm) : showCm + cell;
+    for (u32 i = 0; i < hlod_.size(); ++i) {
+        HlodState& h = hlod_[i];
+        const AabbD box{Vec3d{static_cast<f64>(h.cell.cx) * cell, static_cast<f64>(h.cell.cy) * cell, 0},
+                        Vec3d{static_cast<f64>(h.cell.cx + 1) * cell, static_cast<f64>(h.cell.cy + 1) * cell, 0}};
+        const f64 d = viewers.empty() ? 3.0e38 : nearestD(box, viewers);
+        usize eligibleN = 0, residentN = 0, residentEligible = 0;
+        for (const u32 id : h.items) {
+            const Item& m = items_[id];
+            if (m.resident) ++residentN;
+            if (gated(m, id)) continue;
+            ++eligibleN;
+            if (m.resident) ++residentEligible;
+        }
+        const bool complete = eligibleN > 0 && residentEligible == eligibleN;
+        if (h.shown) {
+            if (complete || d > hideCm) { h.shown = false; toHide.push_back(i); }
+        } else if (d <= showCm && !complete && residentN == 0) {
+            h.shown = true;
+            toShow.push_back(i);
+        }
+    }
 }
 
 } // namespace aver::world

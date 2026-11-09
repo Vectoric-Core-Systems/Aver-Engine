@@ -238,3 +238,8 @@ target_link_libraries(PcgBiomeTest PRIVATE
   Aver.World Aver.Scene Aver.Formats Aver.Platform Aver.Render.Pcg Aver.Core)
 set_target_properties(PcgBiomeTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# DataLayersHlodTest -- data-layer eligibility on PlacementStreamer, DataLayerSet, and the HLOD proxy ring over camera walks (pure logic).
+add_executable(DataLayersHlodTest src/DataLayersHlodTest.cpp)
+target_link_libraries(DataLayersHlodTest PRIVATE Aver.World Aver.Formats Aver.Core)
+set_target_properties(DataLayersHlodTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

@@ -6,6 +6,7 @@
 #include "aver/core/Types.hpp"
 #include "aver/world/WorldPos.hpp"
 
+#include <cstdint>
 #include <initializer_list>
 #include <unordered_map>
 #include <vector>
@@ -25,7 +26,14 @@ struct PlacementStreamSettings {
     f32 evictCm = 30000.0f;
     u32 loadBudget = 128;   // a batch past ~256 bodies rebuilds the whole physics broadphase
     u32 evictBudget = 2048;   // 0 = unlimited
+    // HLOD ring (docs/LEVEL_STREAMING.md): a cell's proxy is wanted out to hlodCm and kept to hlodEvictCm. 0 = no ring.
+    f32 hlodCm = 0.0f;
+    f32 hlodEvictCm = 0.0f;   // <= hlodCm means hlodCm + cellCm
 };
+
+// A data layer's runtime state, ordered as OcDataLayerState: an item is eligible to be resident only if every layer it is in is at
+// least Loaded; Activated additionally lets the host render and simulate it (Loaded = resident but hidden).
+enum class LayerState : u8 { Unloaded = 0, Loaded = 1, Activated = 2 };
 
 class PlacementStreamer {
 public:
@@ -49,6 +57,30 @@ public:
 
     void remove(u32 item);
     void pin(u32 item, bool on);
+
+    // ---- data layers (additive: an item in no layer behaves exactly as before) ----
+    // Layer ids are the caller's (DataLayerSet's); an id never set is Activated. Changing a state makes the next update ask for the
+    // loads and evictions it implies, ignoring distance for the evictions and the idle early-out.
+    void setItemLayers(u32 item, const std::vector<u32>& layers);
+    void setLayerState(u32 layer, LayerState st);
+    LayerState layerState(u32 layer) const { return layer < layerStates_.size() ? layerStates_[layer] : LayerState::Activated; }
+    // Every layer of the item is at least Loaded (true for an item in no layer).
+    bool eligible(u32 item) const;
+    // Every layer of the item is Activated: the host shows and simulates it. A resident item that is eligible but not activated is held hidden.
+    bool activated(u32 item) const;
+    const std::vector<u32>& residentItems() const { return residents_; }
+
+    // ---- HLOD ring ----
+    // `cells` are the streaming cells (cellCm grid) that have a proxy. A proxy shows from hlodCm until the cell's own content is
+    // fully resident, then hides; it shows again only once none of the cell's content is resident (and the cell is back within
+    // hlodCm), and hides past hlodEvictCm. Content = the items whose centre is in the cell and that are eligible (layers).
+    // Indices in toShow/toHide are positions in `cells`. Proxies are not content: they have no body and are never ray-traced (the host's rule).
+    struct HlodCell { std::int64_t cx = 0, cy = 0; };
+    void buildHlod(const std::vector<HlodCell>& cells);
+    void updateHlod(const std::vector<Vec3d>& viewers, std::vector<u32>& toShow, std::vector<u32>& toHide);
+    void updateHlod(const std::vector<Vec3>& viewers, std::vector<u32>& toShow, std::vector<u32>& toHide);
+    bool hlodShown(u32 cell) const { return cell < hlod_.size() && hlod_[cell].shown; }
+    usize hlodCellCount() const { return hlod_.size(); }
 
     // Appends to toLoad (pinned first, then nearest first, <= loadBudget) and toEvict (furthest first).
     void update(const std::vector<Vec3>& viewers, std::vector<u32>& toLoad, std::vector<u32>& toEvict);
@@ -75,6 +107,12 @@ private:
         bool wide = false;   // spans more than kMaxCells cells (or unknown): checked directly, not gridded
         u32 resPos = 0;   // index in residents_ while resident
         u32 stamp = 0;    // dedup mark while visiting cells
+        bool layered = false;   // has an entry in itemLayers_
+    };
+    struct HlodState {
+        HlodCell cell;
+        std::vector<u32> items;   // alive items whose centre is in the cell
+        bool shown = false;
     };
 
     std::int64_t cellOf(f32 v) const;
@@ -89,8 +127,16 @@ private:
     void insertCellsD(u32 item);
     void eraseCellsD(u32 item);
 
+    bool gated(const Item& it, u32 id) const { return it.layered && !eligible(id); }
+    void layerEvictions(std::vector<u32>& toEvict);
+    void rebuildHlodItems();
+
     PlacementStreamSettings s_;
     std::vector<Item> items_;
+    std::unordered_map<u32, std::vector<u32>> itemLayers_;
+    std::vector<LayerState> layerStates_;
+    std::vector<HlodState> hlod_;
+    bool hlodItemsDirty_ = true;
     std::unordered_map<u64, std::vector<u32>> cells_;
     std::vector<u32> residents_;
     std::vector<u32> pinned_;
