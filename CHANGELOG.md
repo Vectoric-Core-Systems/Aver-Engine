@@ -10,6 +10,15 @@ triggering inputs for anything summarised below.
 
 ## [Unreleased]
 
+### Editor UIs for the wave 2 systems (compile-checked and model-tested only)
+
+- PCG Graph tab for `DOMAIN pcg` graphs: node palette with search, canvas with typed pins, inspector, preview run with per-node point counts, Generate / Clean up into the open level, viewport debug points. New PCG Graph in the Content Browser.
+- Modeling mode (`EditorMode::Modeling`): primitives, vertex / edge / face pick and marquee, transform, extrude, inset, bevel, delete, weld, flip, subdivide, mirror, boolean, UV projection and save, drawn as a wireframe.
+- Window > Data Layers: layers with parents, assignment from the selection, initial state, runtime flag, editor show / load toggles, saved with the level and undoable.
+- Physical Animation Profile tab for `.ocphysanim` (regions on the skeleton, drive and envelope, offline hit preview) and an Apply Hit / Die / Get Up section in the Simulate and Animate mode panels.
+- Landscape > Paint > Biomes: the project's biomes as a list, New Biome, estimate, Generate Vegetation for several biomes at once.
+- World Settings > Level Streaming > Build HLOD: background bake with progress and Cancel.
+
 ### Data layers and dynamic HLOD (UE parity wave 2, W10 and W2)
 
 - `DATALAYER` header records and `layers=` on placements and `FOLIAGE` tables; `PlacementStreamer` honours layer states (Unloaded / Loaded / Activated, parents, runtime flag) through `world::DataLayerSet`; cooked chunks carry membership (`LAYR`). C# `DataLayers` and `AN_GetDataLayerState` / `AN_SetDataLayerState` over a new `framework_datalayer_abi.h`.

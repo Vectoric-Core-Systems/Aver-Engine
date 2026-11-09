@@ -146,6 +146,10 @@ Dependency: W2 steps 1-3,5 are independent of everything else. Overlap with W10 
   (7) calling `buildChunkProxy` from the chunk generation path (generation is synchronous on the frame thread today, there is no worker); (8) editor view; the Build HLOD button, a background bake thread
   in the editor (the bake takes `cancel` and `progress` callbacks for one), HLOD level 2 blocks; any run of the engine.
 
+**Status 2026-11-09 (W2 step 5 editor half, compile-checked and model-tested only).**
+- Done: World Settings > Level Streaming > HLOD: distance slider, **Build HLOD** (saves the level, then runs `fmt::bakeHlod` on a background thread with progress and Cancel, "Rebuild all" option), a summary line; the `STREAM hlod=` distance is applied when it finishes. `HlodBuildJob` (job, prerequisites, summary) is tested with a stand-in bake (`HlodBuildJobTest`).
+- Not done: the HLOD debug view (colour by level), per-cell triangle counts in the panel, level 2 blocks. Never run in the editor; the real bake was not run from the panel.
+
 ---
 
 ## W3. PCG graph system and editor
@@ -182,6 +186,10 @@ Dependency: W2 steps 1-3,5 are independent of everything else. Overlap with W10 
 - Not done: step 6 (editor canvas, palette, inspect, viewport debug draw, Generate / Clean up button), step 7, F#/C# `Pcg.Run` and the `Aver.Pcg.Apply` bridge for actor spawn records, the F# graph-run helper from step 8, mesh-surface sampling.
 - Not verified: nothing ran in the editor or the game; the `GameStreaming` graph hook compiles but no level has been streamed through it. Greedy `SelfPrune` across cell seams is exact only in `mode=local` (greedy uses a three-radius margin and passed the seam-spacing test, but is not proven equal to a whole run). Positions are world-space f32. Test-level only: the per-node cache keys on region, so it helps re-runs of the same cell, not neighbouring cells.
 
+**Status 2026-11-09 (W3 step 6, compile-checked and model-tested only).**
+- Done: the PCG Graph tab (`PcgGraphEditor`, `sandbox/src/PcgGraphEditor.*`, `PcgEditModel.hpp`). It claims only `DOMAIN pcg` files (registered before the general graph editor), keeps the original text so an untouched save is byte-identical, and has: node palette with search and categories (from `pcgNodeDefs()`), a canvas on `GraphEditorGeometry` (pan, zoom, drag nodes, drag pin to pin, typed pin colours, point-count and problem badges), undo/redo (`SnapshotUndo`), an inspector with each node's parameters (schema defaults, leftover tokens kept), a preview run over a box (seed, size, fit to landscape), **Generate** (bakes a cell-sorted `.ocinst` under Foliage, lists it in the level, shows it) and **Clean up**, and **Debug points** (a cross in the viewport at the selected node's output). Content Browser: New PCG Graph. Tests: `PcgEditModelTest` (38), `PcgGraphEditorTest` (30).
+- Not done: the GPU Density node (step 7), mesh-surface sampling, copy/paste and comment boxes on the PCG canvas, a per-attribute table in the inspector (only point counts and diagnostics are shown). Nothing was drawn or run; the canvas interaction (hit-testing, drag, link) is unverified on screen.
+
 ---
 
 ## W4. PCG vegetation and biomes on landscape
@@ -208,6 +216,10 @@ Dependency: W2 steps 1-3,5 are independent of everything else. Overlap with W10 
 - Done, step 7: per-cell instance cap (deterministic: smallest seeds kept), memory estimate that refuses an over-cap setup before generating, warnings for no `cullEndCm`, no LODs (host callback), unknown paint layer.
 - Not done: step 6 (all editor UX: biome list, mask overlay, heatmap, readouts, "Regenerate selected cells"); editor fields for the new `.ocfoliage` properties; brush edits writing the override set (the model and file format are ready); consumers of the `.ocinst` collision flags and of `lodScaleBias` (carried, not read); a mesh-LOD probe for the "no LODs" warning in the hosts (the hook takes a callback, none is wired); a biome set UI for several biomes at once (the compiler accepts a list).
 - Not verified: nothing ran in the editor or the game. Greedy `Compete` across cell seams passed the four-cell comparison but is not proven equal to a whole run in pathological chains (margin is three diameters). Layer masks at runtime read the host's section data (`layerWeightAtScene`); not exercised. Positions are world-space `f32`, as for W3.
+
+**Status 2026-11-09 (W4 step 6, part; compile-checked and tested headless).**
+- Done: Landscape > Paint > Biomes (Generate Vegetation): the project's `.ocbiome` files as a checkbox list, New Biome from a foliage type, seed and cell size, the guardrail estimate line, and **Generate Vegetation** for the ticked biomes together (`generateBiomeVegetation`, `estimateBiomeVegetation` in `VegetationGenerate`, `BiomeListModel.hpp`; `VegetationGenerateTest` 41 checks). It writes `Foliage/<name>_vegetation.ocinst` plus the `.ocveg`, keeps hand edits, and shows the result through the level's extra foliage tables.
+- Not done: mask overlay on the terrain, density heatmap, readouts beyond the estimate and the result line, "Regenerate selected cells", editing a biome's entries in the UI (they are text), editor fields for the new `.ocfoliage` properties.
 
 ---
 
@@ -239,6 +251,10 @@ Dependency: W2 steps 1-3,5 are independent of everything else. Overlap with W10 
 - Not done: step 6 (viewport picking, gizmos, overlay, panels, hotkeys, `EditorMode::Modeling`, `ModelingMode.cpp`); step 7's editor half (New Mesh asset, Content Browser thumbnail, "edit in Modeling", level placement) and wiring the Trifactor cook into `SaveOptions::cook`; loop cut, loop / ring selection, bevel at corners where only some of the edges are selected, bevel profile other than the corner-controlled curve.
 - Known limits: boolean results keep no smoothing groups and come back as convex BSP pieces (many triangles / small polygons), speed on large meshes is unmeasured; `fromOcMesh` makes one smoothing group for every non-flat corner; the sidecar is ignored once the `.ocmesh` is changed by anything else (by design). Nothing was run in a window.
 
+**Status 2026-11-09 (W5 step 6, compile-checked and tested headless).**
+- Done: `EditorMode::Modeling`. `ModelingPick.hpp` (pure: project the mesh once, nearest vertex, nearest edge, front-most face, marquee collecting vertices, edges or faces, additive/replace; uses `ViewportMarquee.hpp`), `ModelingMode.{hpp,cpp}` (tool panels: New Mesh, Select, Transform, Edit with extrude/inset/bevel/delete/weld/flip/subdivide/mirror/boolean, UV, File; click/marquee glue; wireframe overlay with the selection in orange), `SandboxModeling.cpp` (viewport input: 1/2/3 select modes, Delete, Ctrl+Z/Y routed to the mode while it is active). Tests: `ModelingPickTest` (30), `ModelingModeTest` (17).
+- Not done: a viewport gizmo for moving the selection (transforms are numeric fields), a shaded view of the edit mesh (it is drawn as lines), occlusion-aware picking (clicks prefer the nearer element, marquees select through), New Mesh asset / thumbnail / "edit in Modeling" from the Content Browser, placing the result in a level, the Details integration, wiring the Trifactor cook into Save.
+
 ---
 
 ## W6. Physics-driven animation (physical animation, hit reactions, blend in/out)
@@ -261,6 +277,10 @@ Dependency: W2 steps 1-3,5 are independent of everything else. Overlap with W10 
 - Done: (1) `.ocphysanim` text profile with round trip, validation against a skeleton and resolve (`PhysAnimProfile`). (2) Additive ABI `aver_phys_ragdoll_set_part_strength / _damping / _torque_scale / _pinned`; per-bone blend weight in `RagdollSystem` (a multiplier on the kept global ramp). (3) `HitReaction` envelope (attack, hold, decay; falloff by hop; stacking capped at 1; deterministic; runs out by itself). (4) Partial-body simulation: `RagdollBuilder` needed no change, a pinned part is a kinematic part joined to simulated neighbours, so the fallback was not used (`simulateSubtree`). (5) `LifeMachine` (Alive/Dying/Dead/GettingUp) and the get-up montage rule from how the root part lies, `die()` / `getUp()` on the system, montage played through a handler or `AnimSystem::montages()`. (6) `HitEvent` in `aver/core/HitEvent.hpp` (+ C# `HitEvent`), the type W7.7 should consume; `RagdollSystem::applyHit` and a radial form. (7) `framework_physanim_abi.h` relay, `Entity.ApplyHit` / `BlendPhysicalAnimation` / `SimulateBoneSubtree` / `SetBone*` / `PinBone` / `DieAsRagdoll` / `GetUpFromRagdoll`, ten `PhysAnim` graph nodes; Aver.Physics C# bindings for the new calls.
 - Tests: `PhysAnimProfileTest` (64 checks, pure), `PhysicalAnimationTest` (67 checks, headless Jolt, 12 bone skeleton), `FrameworkPhysAnimAbiTest` (18), `PhysAnimNodeTests` in the managed graph suite; full headless suite 552/552.
 - Not done: step 8 (editor tab, overlay, apply-hit button). Not verified: the feel of any reaction in a window (profile defaults are untuned guesses); the sandbox and runtime wiring compiles but was never run; nothing wires a game weapon to `HitEvent` (adapters call `Entity.ApplyHit`); the get-up does not move the entity to where the body lies; a hit before the entity has been posed once is refused.
+
+**Status 2026-11-09 (W6 step 8, compile-checked and tested headless).**
+- Done: the Physical Animation Profile tab (`PhysAnimEditor`, `PhysAnimEditModel.hpp`, opens `.ocphysanim`): skeleton picker (the profile names none, so the previewed skeleton is chosen per session), the bone tree coloured by region with the heat of a previewed hit, regions (add, remove, rename, move = precedence, add/remove bone or subtree), drive and envelope sliders, reach and life settings, an offline hit preview that runs the real `HitReaction` envelope (curve, bones reached, settle time) and the problems list from `validatePhysAnimProfile`; Content Browser: New Physical Animation Profile. In the Simulate and Animate mode panels: a **Physical Animation** section with profile choice (session), bone, push, direction, radial, **Apply Hit**, Die and Get Up on the selected posed character. Tests: `PhysAnimEditModelTest` (33), `PhysAnimEditorTest` (16).
+- Not done: the viewport debug overlay (parts, strength heat, active envelopes). Not verified: the feel of any reaction; Apply Hit was never run against a live ragdoll.
 
 ---
 
@@ -331,9 +351,12 @@ Cook/package integration: later with `.ocpak` (cross-reference, not in wave 2).
   and `game::LevelStreaming` builds and applies the set (compile-checked only); (3) C# `DataLayers`, `framework_datalayer_abi.h` (relay tested in `FrameworkTest`) and nodes `AN_GetDataLayerState`,
   `AN_SetDataLayerState` (`DataLayerNodeTests`); (5) `LAYR` payload extra, cook hash and `world::splitPayloadByLayers` (`AuthoredLayersTest`); (6) `hlodLayersAllowed` in the HLOD bake and `buildChunkProxy`
   (`OcHlodBakeTest`, `ChunkProxyTest`).
-- Not done: (4) the editor panel and model; the Runtime installing the framework provider (so `DataLayers` answers defaults in a game today); Loaded versus Activated applied to entities (hide, no simulation);
+- Not done: the Runtime installing the framework provider (so `DataLayers` answers defaults in a game today); Loaded versus Activated applied to entities (hide, no simulation);
   gating cooked-chunk loading and baked foliage tables by layer state; a layered level without `STREAM` still loads everything; a completion event node or C# event (only `TryPollCompleted`).
 
+**Status 2026-11-09 (W10 step 4, compile-checked and tested headless).**
+- Done: Window > Data Layers (`DataLayerModel.hpp`, `DataLayersPanel`, `SandboxDataLayers.cpp`): create, create child, rename (children, members and editor flags follow), delete (children move up), assign or remove the selection, select a layer's members, initial state and runtime flag, editor Show and Loaded toggles (editor only: they hide the layer's objects through the session hide and make them unpickable, nothing is unloaded or saved), saved with the level as `DATALAYER` records and each placement's `layers=`, and undoable through the editor's undo stack (`EditCmd::Kind::DataLayers`, which marks the level dirty). Tests: `DataLayerModelTest` (44).
+- Not done: layers on streamed-in placements (the streamed path does not read or write membership), Outliner rows greyed for hidden layers, drag-to-assign, layer-aware selection filters. Never drawn.
 ---
 
 ## 2. Dependency-ordered schedule

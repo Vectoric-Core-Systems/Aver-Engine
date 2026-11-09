@@ -117,7 +117,7 @@ The design intent, stated in `Types.fs`: **F# owns the rules, a compute shader o
 
 ## 7. Path 4 — PCG graphs (`DOMAIN pcg`)
 
-Status: evaluator, nodes, sinks, per-cell generation and the `PCGVOLUME graph=` record are built and unit-tested headless (`tests/world/Pcg*Test`). **Not built:** the graph editor canvas (a `.ocgraph` of this domain opens in the Content Browser as "PCG Graph" but has no PCG node palette yet), viewport debug drawing, a "Generate / Clean up" button, the GPU density node, a C#/F# `Pcg.Run` entry point. Author graphs as text for now.
+Status: evaluator, nodes, sinks, per-cell generation and the `PCGVOLUME graph=` record are built and unit-tested headless (`tests/world/Pcg*Test`). The editor tab (`PcgGraphEditor`: palette, canvas, inspector, preview run, Generate / Clean up, viewport debug points) is written and compile-checked but was never drawn or run; see `docs/plans/WAVE2_UE.md` W3 for what it does not do. **Not built:** the GPU density node, a C#/F# `Pcg.Run` entry point.
 
 **Format decision (D5).** A PCG graph is a profile of the existing `.ocgraph` container, not a new AVR1 format. The container already carries what typed data flow needs: arbitrary pin type strings (`points`), per-node `key=value` tokens (`OcGraphNode::extraTokens`), `DOMAIN`, unknown-record preservation and a byte-exact load/save. `DOMAIN pcg` marks the profile (`OcGraphDomain::Pcg`), which also keeps the gameplay compiler and the material compiler from ever seeing it. The editor's canvas, clipboard, find and problems features can be reused when the UI lands. Nothing in this path is C# or F#.
 
@@ -180,7 +180,7 @@ Landscape-dependent nodes use `ILandscapeQuery` (`heightAt`, `normalAt`, `layerW
 
 ## 8. Biomes and vegetation (W4)
 
-Status: assets, rule nodes, the biome-to-graph compiler, Generate Vegetation, the runtime chunk mode and the guardrails are built and unit-tested headless (`PcgBiomeTest`, `OcBiomeTest`, `OcFoliageTest`, `VegetationGenerateTest`). **Not built:** the Landscape-mode biome list, mask overlay, density heatmap and "Regenerate selected cells" UI, editor exposure of the new `.ocfoliage` fields, brush edits that write the override set, collision from the `.ocinst` flags, and the renderer use of `lodScaleBias`. Nothing ran in the editor or the game.
+Status: assets, rule nodes, the biome-to-graph compiler, Generate Vegetation, the runtime chunk mode and the guardrails are built and unit-tested headless (`PcgBiomeTest`, `OcBiomeTest`, `OcFoliageTest`, `VegetationGenerateTest`). The Landscape > Paint > Biomes list (New Biome, estimate, Generate Vegetation for several biomes) is written and compile-checked, never drawn. **Not built:** the mask overlay, density heatmap and "Regenerate selected cells" UI, editor exposure of the new `.ocfoliage` fields, brush edits that write the override set, collision from the `.ocinst` flags, and the renderer use of `lodScaleBias`. Nothing ran in the editor or the game.
 
 **`.ocbiome`** (`aver::fmt::OcBiomeData`, text): one mask and a list of foliage entries.
 
