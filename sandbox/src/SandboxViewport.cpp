@@ -1554,6 +1554,251 @@ void SandboxApp::applyRotate(EditXform& o, f32 px, f32 py, f32 mx, f32 my) {
     o.rotDeg = eulerDegFromQuat((dq * quatFromEulerDeg(o.rotDeg)).normalized());
 }
 
+#if AVER_WITH_IMGUI && AVER_MODULE_SCENE
+// A selected decal's or rope's handles: begins a grab on click and carries an active one. True when the click grabbed a handle.
+bool SandboxApp::dragDecalAndRopeHandles(const ImGuiIO& io, bool overScene, f32 mx, f32 my) {
+    // A selected decal's box handles come before any pick: grabbing one resizes the box (the drag
+    // continues below until the button is released), and the click is not also a selection change.
+    bool decalHandleGrabbed = false;
+    if (ImGui::IsMouseClicked(0) && overScene && !noEditorChrome_ && sel_ == kSelScene &&
+        selEntity_ != scene::kInvalidEntity &&
+        scene::World::instance().hasComponent(selEntity_, scene::kComponentDecal)) {
+        Vec3 ro0, rd0, ro1, rd1;
+        viewportRay(mx, my, ro0, rd0);
+        viewportRay(mx + 1.0f, my, ro1, rd1);
+        const Mat4& dm = scene::World::instance().worldMatrix(selEntity_);
+        const Vec3 dp{dm.m[3][0], dm.m[3][1], dm.m[3][2]};
+        const f32 pixelWorldCm = dist(ro0, dp) * dist(rd0, rd1);
+        decalHandleGrabbed = decalGizmo_.beginDrag(scene::World::instance(), selEntity_, ro0, rd0, pixelWorldCm);
+    }
+#if AVER_MODULE_SOFTBODY_SCENE
+    // A selected rope's two end handles (SoftShapeGizmos.cpp): grabbing one drags that end on the camera-facing plane, and the click is not also a pick.
+    // The drag edits the component, not an undo step (the Details rows are); a Rope host that is the selected decal never gets here.
+    if (!decalHandleGrabbed && ImGui::IsMouseClicked(0) && overScene && !noEditorChrome_ && sel_ == kSelScene &&
+        selEntity_ != scene::kInvalidEntity && !anyPlayActive()) {
+        Vec3 ro0, rd0, ro1, rd1;
+        viewportRay(mx, my, ro0, rd0);
+        viewportRay(mx + 1.0f, my, ro1, rd1);
+        const Mat4& rm = scene::World::instance().worldMatrix(selEntity_);
+        const Vec3 rp{rm.m[3][0], rm.m[3][1], rm.m[3][2]};
+        decalHandleGrabbed = editor::ropeHandleBegin(&scene::World::instance(), static_cast<u32>(selEntity_), ro0, rd0, dist(ro0, rp) * dist(rd0, rd1));
+    }
+    if (editor::ropeHandleActive()) {
+        if (io.MouseDown[0]) {
+            Vec3 ro, rd;
+            viewportRay(mx, my, ro, rd);
+            if (editor::ropeHandleUpdate(&scene::World::instance(), ro, rd)) markLevelUnsaved();
+        } else {
+            editor::ropeHandleEnd();
+        }
+    }
+#endif
+    if (decalGizmo_.dragging()) {
+        if (io.MouseDown[0]) {
+            Vec3 ro, rd;
+            viewportRay(mx, my, ro, rd);
+            if (decalGizmo_.updateDrag(scene::World::instance(), ro, rd)) markLevelUnsaved();
+        } else {
+            decalGizmo_.endDrag();
+        }
+    }
+    return decalHandleGrabbed;
+}
+#endif
+
+#if AVER_WITH_IMGUI && AVER_MODULE_SCENE
+// Tracks, draws and commits the armed selection marquee.
+void SandboxApp::updateMarquee(const ImGuiIO& io, f32 mx, f32 my) {
+    // Marquee continues while armed, becomes ACTIVE once the drag clears the threshold, commits
+    // on release -- independent of `overScene`, since a drag that started inside the viewport
+    // must keep tracking past its edge.
+    if (marqueeArmed_) {
+        marqueeX1_ = mx; marqueeY1_ = my;
+        if (!marqueeActive_ &&
+            editor::marqueeExceedsThreshold(marqueeX0_, marqueeY0_, marqueeX1_, marqueeY1_))
+            marqueeActive_ = true;
+
+        if (marqueeActive_) {
+            f32 loX, loY, hiX, hiY;
+            editor::normalizeMarqueeRect(marqueeX0_, marqueeY0_, marqueeX1_, marqueeY1_, loX, loY, hiX, hiY);
+            // The selection outline's own orange (kSelectionColor, SandboxApp.hpp), diluted for
+            // the fill so the scene underneath a drag stays readable.
+            ImDrawList* dl = ImGui::GetForegroundDrawList();
+            dl->AddRectFilled(ImVec2(loX, loY), ImVec2(hiX, hiY), IM_COL32(235, 163, 10, 40));
+            dl->AddRect(ImVec2(loX, loY), ImVec2(hiX, hiY), IM_COL32(235, 163, 10, 220), 0.0f, 0, 1.5f*dpi_);
+        }
+
+        if (!io.MouseDown[0]) {
+            if (marqueeActive_) {
+                f32 loX, loY, hiX, hiY;
+                editor::normalizeMarqueeRect(marqueeX0_, marqueeY0_, marqueeX1_, marqueeY1_, loX, loY, hiX, hiY);
+                // Every entity eligible per pick()'s broadphase, whose projected world AABB intersects the rectangle.
+                std::vector<scene::Entity> hitEnts;
+                scene::World& w = scene::World::instance();
+                const u32 n = w.count();
+                for (u32 i = 0; i < n; ++i) {
+                    const scene::Entity ent = w.at(i);
+                    if (!w.valid(ent) || w.destroyPending(ent)) continue;
+                    if (anyChunkWorldOwns(ent) || entityLocked(ent)) continue;
+                    const auto* mr = w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer);
+                    if (!mr || !(mr->flags & scene::kMeshRendererVisible) || mr->mesh == 0) continue;
+                    if (content_.meshFor(mr->mesh) == 0) continue;
+                    Vec3 lmin{mr->aabbMin[0], mr->aabbMin[1], mr->aabbMin[2]};
+                    Vec3 lmax{mr->aabbMax[0], mr->aabbMax[1], mr->aabbMax[2]};
+                    if (!(lmax.x > lmin.x && lmax.y > lmin.y && lmax.z > lmin.z)) { lmin = Vec3{-1,-1,-1}; lmax = Vec3{1,1,1}; }
+                    const Mat4 wm = w.worldMatrix(ent);
+                    f32 cx[8], cy[8]; int cn = 0;
+                    for (u32 c = 0; c < 8; ++c) {
+                        const Vec3 p{(c & 1) ? lmax.x : lmin.x, (c & 2) ? lmax.y : lmin.y, (c & 4) ? lmax.z : lmin.z};
+                        f32 sx, sy;
+                        if (project(xformPoint(wm, p), sx, sy)) { cx[cn] = sx; cy[cn] = sy; ++cn; }
+                    }
+                    if (editor::projectedAabbIntersectsRect(cx, cy, cn, loX, loY, hiX, hiY))
+                        hitEnts.push_back(ent);
+                }
+                // Ctrl ADDS the catch to the existing selection; a plain drag REPLACES it --
+                // including replacing it with nothing, when the rectangle caught nothing at all.
+                if (hitEnts.empty()) {
+                    if (!io.KeyCtrl) { multiClear(); sel_ = -1; selEntity_ = scene::kInvalidEntity; }
+                } else if (io.KeyCtrl) {
+                    for (const scene::Entity ent : hitEnts) if (!multiIsSelected(ent)) multiToggle(ent);
+                } else {
+                    multiSetSingle(hitEnts.front());
+                    for (usize k = 1; k < hitEnts.size(); ++k) multiToggle(hitEnts[k]);
+                }
+            }
+            marqueeArmed_ = false;
+            marqueeActive_ = false;
+        }
+    }
+}
+#endif
+
+#if AVER_WITH_IMGUI
+// Delete / Copy / Paste / Duplicate / Undo / Redo and the selection verbs, from the level, Outliner or Details.
+void SandboxApp::handleEditVerbKeys(const ImGuiIO& io) {
+    // The Outliner and Details panels count as "the level" for the edit verbs too, not just
+    // levelFocused_ (true only while the 3D viewport holds keyboard focus): clicking an Outliner
+    // row -- the ordinary way to select something -- moved focus there, so Delete/Copy/Paste/
+    // Duplicate/Undo silently stopped working (reported as "deleting is a bit broken"). Not a
+    // blanket "any window": WantTextInput excludes text fields, and the Content Browser keeps its
+    // own Delete (deletes a FILE) rather than sharing this key's meaning.
+    //
+    // Also gated on !dragging_, a correctness fix, not a nicety: beginTransformEdit captures
+    // editBefore_ at grab time but nothing pins the gesture to that entity, so Ctrl+A/Delete/
+    // Ctrl+V while the mouse is still held could change the selection under the drag and
+    // endTransformEdit would push an undo record for an entity that was never dragged -- corruption
+    // an anchor-equality assert wouldn't catch. (Repro: drag a non-first Outliner object's gizmo,
+    // press Ctrl+A mid-drag -- the gizmo jumped to the other object.) Gating the verbs is narrower
+    // than pinning a dragEntity_ through the drag (that risks a second source of truth for "what is
+    // being dragged"): the mouse button already blocks a click from changing selection, so the keyboard verbs were the whole hole.
+    if (!dragging_ && (levelFocused_ || outlinerFocused_ || detailsFocused_) && !io.WantTextInput) {
+        if (keybinds_.pressed(editor::CommandId::EditDelete, io))    deleteSelection();
+        if (keybinds_.pressed(editor::CommandId::EditCopy, io))      copySelection();
+        if (keybinds_.pressed(editor::CommandId::EditPaste, io))     pasteClipboard();
+        if (keybinds_.pressed(editor::CommandId::EditDuplicate, io)) duplicateSelection();
+        // Guarded on the same emptiness the menu item greys itself on (key and menu agree), and
+        // also on AVER_MODULE_SCENE (not one of the panel-focus checks above): outlinerOrder_ and
+        // selectAllInOutliner belong to the ECS world's multi-selection (multiSel_ and friends, in
+        // SandboxApp.hpp), which doesn't exist without SCENE.
+#if AVER_MODULE_SCENE
+        if (!outlinerOrder_.empty() && keybinds_.pressed(editor::CommandId::EditSelectAll, io))
+            selectAllInOutliner();
+#endif
+        if (keybinds_.pressed(editor::CommandId::EditUndo, io)) undo();
+        // Ctrl+Shift+Z: intentionally NOT-rebindable alternate spelling of Redo (same command),
+        // kept hardcoded next to the registry-driven checks as it always was.
+        if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z, false)) redo();
+        if (keybinds_.pressed(editor::CommandId::EditRedo, io)) redo();
+
+#if AVER_MODULE_SCENE
+        if (keybinds_.pressed(editor::CommandId::SnapToFloor, io))     snapSelectionToFloor();
+        if (keybinds_.pressed(editor::CommandId::HideSelected, io))    hideSelection();
+        if (keybinds_.pressed(editor::CommandId::IsolateSelected, io)) isolateSelection();
+        if (keybinds_.pressed(editor::CommandId::UnhideAll, io))       unhideAll();
+
+        // Nudge is camera-relative, snapped to whichever single world axis each direction most
+        // agrees with -- else "left" on a non-axis-aligned camera would nudge diagonally.
+        {
+            const Vec3 rightVec = cross(Vec3{0,0,1}, camForward());
+            Vec3 fwdFlat = camForward(); fwdFlat.z = 0.0f;
+            const Vec3 rightAxis = std::fabs(rightVec.x) >= std::fabs(rightVec.y)
+                ? Vec3{rightVec.x >= 0.0f ? 1.0f : -1.0f, 0.0f, 0.0f}
+                : Vec3{0.0f, rightVec.y >= 0.0f ? 1.0f : -1.0f, 0.0f};
+            const Vec3 fwdAxis = std::fabs(fwdFlat.x) >= std::fabs(fwdFlat.y)
+                ? Vec3{fwdFlat.x >= 0.0f ? 1.0f : -1.0f, 0.0f, 0.0f}
+                : Vec3{0.0f, fwdFlat.y >= 0.0f ? 1.0f : -1.0f, 0.0f};
+            const f32 nudgeStep = snapMove_ ? moveSnap_ : 10.0f;
+
+            using CI = editor::CommandId;
+            const CI kNudgeIds[6] = {CI::NudgeLeft, CI::NudgeRight, CI::NudgeForward,
+                                      CI::NudgeBack, CI::NudgeUp, CI::NudgeDown};
+            bool anyNudgeDown = false;
+            for (CI id : kNudgeIds) {
+                const auto& ch = keybinds_.chordFor(id);
+                if (ch.isBound() && ImGui::IsKeyDown(ch.key)) { anyNudgeDown = true; break; }
+            }
+            // One undo entry per held run, not per repeat: opens on the first nudge key down,
+            // closes once all are up. Tracks its own flag (not editBeforeValid_, which a Details
+            // panel field drag also holds open -- this would otherwise close that entry every frame).
+            if (anyNudgeDown && !nudgeEditOpen_) nudgeEditOpen_ = beginTransformEdit();
+
+            if (keybinds_.pressed(CI::NudgeLeft, io))    nudgeSelection(rightAxis * -nudgeStep);
+            if (keybinds_.pressed(CI::NudgeRight, io))   nudgeSelection(rightAxis *  nudgeStep);
+            if (keybinds_.pressed(CI::NudgeForward, io)) nudgeSelection(fwdAxis   *  nudgeStep);
+            if (keybinds_.pressed(CI::NudgeBack, io))    nudgeSelection(fwdAxis   * -nudgeStep);
+            if (keybinds_.pressed(CI::NudgeUp, io))      nudgeSelection(Vec3{0.0f, 0.0f,  nudgeStep});
+            if (keybinds_.pressed(CI::NudgeDown, io))    nudgeSelection(Vec3{0.0f, 0.0f, -nudgeStep});
+
+            if (!anyNudgeDown && nudgeEditOpen_) { endTransformEdit(); nudgeEditOpen_ = false; }
+        }
+#endif
+    }
+}
+#endif
+
+#if AVER_WITH_IMGUI
+// Applies the active gizmo drag to the selection for this frame's mouse position.
+void SandboxApp::applyGizmoDrag(f32 mx, f32 my) {
+    if (dragging_ && anySelected()) {
+        EditXform o;
+        if (selectedXform(o)) {
+            const f32 dx=mx-prevMouseX_, dy=my-prevMouseY_;
+            const Vec3 before = o.pos;
+            if (tool_==Tool::Move)        applyMove(o, dx, dy);
+            else if (tool_==Tool::Rotate) applyRotate(o, prevMouseX_, prevMouseY_, mx, my);
+            else if (tool_==Tool::Scale)  applyScale(o, dx, dy);
+            setSelectedXform(o);
+#if AVER_MODULE_SCENE
+            // The rest of the selection follows by the same world-space DELTA the anchor just
+            // moved (reads `before` rather than recomputing: snap/axis-constraint/projection are
+            // already applied to the anchor, so re-deriving per entity could snap each separately
+            // and change their spacing).
+            //
+            // Move only: rotate/scale about a shared pivot need a pivot CHOSEN (anchor? centroid?
+            // each object's own?), and picking one silently would be worse than the honest gap --
+            // they still act on the anchor alone.
+            if (tool_ == Tool::Move) {
+                const Vec3 delta = o.pos - before;
+                if (delta.x != 0.0f || delta.y != 0.0f || delta.z != 0.0f) {
+                    // Through the shared helper, which also decides what beginTransformEdit
+                    // recorded (skip the anchor, and anything beneath another selected entity, or
+                    // a child would move twice) -- the undo record depends on matching that rule exactly, so both read from one place.
+                    scene::World& w = scene::World::instance();
+                    forEachMultiMoved([&](scene::Entity ent, const Transform& xf) {
+                        Transform t = xf;
+                        t.position += delta;
+                        w.setLocalTransform(ent, t);
+                    });
+                }
+            }
+#endif
+        }
+        prevMouseX_=mx; prevMouseY_=my;
+    }
+}
+#endif
+
 // Runs the tool keys, picking, and the gizmo drag for one frame.
 void SandboxApp::handleManip(Engine& e) {
 #if AVER_WITH_IMGUI
@@ -1632,51 +1877,7 @@ void SandboxApp::handleManip(Engine& e) {
 #endif
     {
 #if AVER_MODULE_SCENE
-        // A selected decal's box handles come before any pick: grabbing one resizes the box (the drag
-        // continues below until the button is released), and the click is not also a selection change.
-        bool decalHandleGrabbed = false;
-        if (ImGui::IsMouseClicked(0) && overScene && !noEditorChrome_ && sel_ == kSelScene &&
-            selEntity_ != scene::kInvalidEntity &&
-            scene::World::instance().hasComponent(selEntity_, scene::kComponentDecal)) {
-            Vec3 ro0, rd0, ro1, rd1;
-            viewportRay(mx, my, ro0, rd0);
-            viewportRay(mx + 1.0f, my, ro1, rd1);
-            const Mat4& dm = scene::World::instance().worldMatrix(selEntity_);
-            const Vec3 dp{dm.m[3][0], dm.m[3][1], dm.m[3][2]};
-            const f32 pixelWorldCm = dist(ro0, dp) * dist(rd0, rd1);
-            decalHandleGrabbed = decalGizmo_.beginDrag(scene::World::instance(), selEntity_, ro0, rd0, pixelWorldCm);
-        }
-#if AVER_MODULE_SOFTBODY_SCENE
-        // A selected rope's two end handles (SoftShapeGizmos.cpp): grabbing one drags that end on the camera-facing plane, and the click is not also a pick.
-        // The drag edits the component, not an undo step (the Details rows are); a Rope host that is the selected decal never gets here.
-        if (!decalHandleGrabbed && ImGui::IsMouseClicked(0) && overScene && !noEditorChrome_ && sel_ == kSelScene &&
-            selEntity_ != scene::kInvalidEntity && !anyPlayActive()) {
-            Vec3 ro0, rd0, ro1, rd1;
-            viewportRay(mx, my, ro0, rd0);
-            viewportRay(mx + 1.0f, my, ro1, rd1);
-            const Mat4& rm = scene::World::instance().worldMatrix(selEntity_);
-            const Vec3 rp{rm.m[3][0], rm.m[3][1], rm.m[3][2]};
-            decalHandleGrabbed = editor::ropeHandleBegin(&scene::World::instance(), static_cast<u32>(selEntity_), ro0, rd0, dist(ro0, rp) * dist(rd0, rd1));
-        }
-        if (editor::ropeHandleActive()) {
-            if (io.MouseDown[0]) {
-                Vec3 ro, rd;
-                viewportRay(mx, my, ro, rd);
-                if (editor::ropeHandleUpdate(&scene::World::instance(), ro, rd)) markLevelUnsaved();
-            } else {
-                editor::ropeHandleEnd();
-            }
-        }
-#endif
-        if (decalGizmo_.dragging()) {
-            if (io.MouseDown[0]) {
-                Vec3 ro, rd;
-                viewportRay(mx, my, ro, rd);
-                if (decalGizmo_.updateDrag(scene::World::instance(), ro, rd)) markLevelUnsaved();
-            } else {
-                decalGizmo_.endDrag();
-            }
-        }
+        const bool decalHandleGrabbed = dragDecalAndRopeHandles(io, overScene, mx, my);
 #endif
         if (ImGui::IsMouseClicked(0) && overScene
 #if AVER_MODULE_SCENE
@@ -1744,185 +1945,13 @@ void SandboxApp::handleManip(Engine& e) {
             dragging_=false; activeAxis_=-1;
         }
 #if AVER_MODULE_SCENE
-        // Marquee continues while armed, becomes ACTIVE once the drag clears the threshold, commits
-        // on release -- independent of `overScene`, since a drag that started inside the viewport
-        // must keep tracking past its edge.
-        if (marqueeArmed_) {
-            marqueeX1_ = mx; marqueeY1_ = my;
-            if (!marqueeActive_ &&
-                editor::marqueeExceedsThreshold(marqueeX0_, marqueeY0_, marqueeX1_, marqueeY1_))
-                marqueeActive_ = true;
-
-            if (marqueeActive_) {
-                f32 loX, loY, hiX, hiY;
-                editor::normalizeMarqueeRect(marqueeX0_, marqueeY0_, marqueeX1_, marqueeY1_, loX, loY, hiX, hiY);
-                // The selection outline's own orange (kSelectionColor, SandboxApp.hpp), diluted for
-                // the fill so the scene underneath a drag stays readable.
-                ImDrawList* dl = ImGui::GetForegroundDrawList();
-                dl->AddRectFilled(ImVec2(loX, loY), ImVec2(hiX, hiY), IM_COL32(235, 163, 10, 40));
-                dl->AddRect(ImVec2(loX, loY), ImVec2(hiX, hiY), IM_COL32(235, 163, 10, 220), 0.0f, 0, 1.5f*dpi_);
-            }
-
-            if (!io.MouseDown[0]) {
-                if (marqueeActive_) {
-                    f32 loX, loY, hiX, hiY;
-                    editor::normalizeMarqueeRect(marqueeX0_, marqueeY0_, marqueeX1_, marqueeY1_, loX, loY, hiX, hiY);
-                    // Every entity eligible per pick()'s broadphase, whose projected world AABB intersects the rectangle.
-                    std::vector<scene::Entity> hitEnts;
-                    scene::World& w = scene::World::instance();
-                    const u32 n = w.count();
-                    for (u32 i = 0; i < n; ++i) {
-                        const scene::Entity ent = w.at(i);
-                        if (!w.valid(ent) || w.destroyPending(ent)) continue;
-                        if (anyChunkWorldOwns(ent) || entityLocked(ent)) continue;
-                        const auto* mr = w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer);
-                        if (!mr || !(mr->flags & scene::kMeshRendererVisible) || mr->mesh == 0) continue;
-                        if (content_.meshFor(mr->mesh) == 0) continue;
-                        Vec3 lmin{mr->aabbMin[0], mr->aabbMin[1], mr->aabbMin[2]};
-                        Vec3 lmax{mr->aabbMax[0], mr->aabbMax[1], mr->aabbMax[2]};
-                        if (!(lmax.x > lmin.x && lmax.y > lmin.y && lmax.z > lmin.z)) { lmin = Vec3{-1,-1,-1}; lmax = Vec3{1,1,1}; }
-                        const Mat4 wm = w.worldMatrix(ent);
-                        f32 cx[8], cy[8]; int cn = 0;
-                        for (u32 c = 0; c < 8; ++c) {
-                            const Vec3 p{(c & 1) ? lmax.x : lmin.x, (c & 2) ? lmax.y : lmin.y, (c & 4) ? lmax.z : lmin.z};
-                            f32 sx, sy;
-                            if (project(xformPoint(wm, p), sx, sy)) { cx[cn] = sx; cy[cn] = sy; ++cn; }
-                        }
-                        if (editor::projectedAabbIntersectsRect(cx, cy, cn, loX, loY, hiX, hiY))
-                            hitEnts.push_back(ent);
-                    }
-                    // Ctrl ADDS the catch to the existing selection; a plain drag REPLACES it --
-                    // including replacing it with nothing, when the rectangle caught nothing at all.
-                    if (hitEnts.empty()) {
-                        if (!io.KeyCtrl) { multiClear(); sel_ = -1; selEntity_ = scene::kInvalidEntity; }
-                    } else if (io.KeyCtrl) {
-                        for (const scene::Entity ent : hitEnts) if (!multiIsSelected(ent)) multiToggle(ent);
-                    } else {
-                        multiSetSingle(hitEnts.front());
-                        for (usize k = 1; k < hitEnts.size(); ++k) multiToggle(hitEnts[k]);
-                    }
-                }
-                marqueeArmed_ = false;
-                marqueeActive_ = false;
-            }
-        }
+        updateMarquee(io, mx, my);
 #endif
     }
 
-    // The Outliner and Details panels count as "the level" for the edit verbs too, not just
-    // levelFocused_ (true only while the 3D viewport holds keyboard focus): clicking an Outliner
-    // row -- the ordinary way to select something -- moved focus there, so Delete/Copy/Paste/
-    // Duplicate/Undo silently stopped working (reported as "deleting is a bit broken"). Not a
-    // blanket "any window": WantTextInput excludes text fields, and the Content Browser keeps its
-    // own Delete (deletes a FILE) rather than sharing this key's meaning.
-    //
-    // Also gated on !dragging_, a correctness fix, not a nicety: beginTransformEdit captures
-    // editBefore_ at grab time but nothing pins the gesture to that entity, so Ctrl+A/Delete/
-    // Ctrl+V while the mouse is still held could change the selection under the drag and
-    // endTransformEdit would push an undo record for an entity that was never dragged -- corruption
-    // an anchor-equality assert wouldn't catch. (Repro: drag a non-first Outliner object's gizmo,
-    // press Ctrl+A mid-drag -- the gizmo jumped to the other object.) Gating the verbs is narrower
-    // than pinning a dragEntity_ through the drag (that risks a second source of truth for "what is
-    // being dragged"): the mouse button already blocks a click from changing selection, so the keyboard verbs were the whole hole.
-    if (!dragging_ && (levelFocused_ || outlinerFocused_ || detailsFocused_) && !io.WantTextInput) {
-        if (keybinds_.pressed(editor::CommandId::EditDelete, io))    deleteSelection();
-        if (keybinds_.pressed(editor::CommandId::EditCopy, io))      copySelection();
-        if (keybinds_.pressed(editor::CommandId::EditPaste, io))     pasteClipboard();
-        if (keybinds_.pressed(editor::CommandId::EditDuplicate, io)) duplicateSelection();
-        // Guarded on the same emptiness the menu item greys itself on (key and menu agree), and
-        // also on AVER_MODULE_SCENE (not one of the panel-focus checks above): outlinerOrder_ and
-        // selectAllInOutliner belong to the ECS world's multi-selection (multiSel_ and friends, in
-        // SandboxApp.hpp), which doesn't exist without SCENE.
-#if AVER_MODULE_SCENE
-        if (!outlinerOrder_.empty() && keybinds_.pressed(editor::CommandId::EditSelectAll, io))
-            selectAllInOutliner();
-#endif
-        if (keybinds_.pressed(editor::CommandId::EditUndo, io)) undo();
-        // Ctrl+Shift+Z: intentionally NOT-rebindable alternate spelling of Redo (same command),
-        // kept hardcoded next to the registry-driven checks as it always was.
-        if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z, false)) redo();
-        if (keybinds_.pressed(editor::CommandId::EditRedo, io)) redo();
+    handleEditVerbKeys(io);
 
-#if AVER_MODULE_SCENE
-        if (keybinds_.pressed(editor::CommandId::SnapToFloor, io))     snapSelectionToFloor();
-        if (keybinds_.pressed(editor::CommandId::HideSelected, io))    hideSelection();
-        if (keybinds_.pressed(editor::CommandId::IsolateSelected, io)) isolateSelection();
-        if (keybinds_.pressed(editor::CommandId::UnhideAll, io))       unhideAll();
-
-        // Nudge is camera-relative, snapped to whichever single world axis each direction most
-        // agrees with -- else "left" on a non-axis-aligned camera would nudge diagonally.
-        {
-            const Vec3 rightVec = cross(Vec3{0,0,1}, camForward());
-            Vec3 fwdFlat = camForward(); fwdFlat.z = 0.0f;
-            const Vec3 rightAxis = std::fabs(rightVec.x) >= std::fabs(rightVec.y)
-                ? Vec3{rightVec.x >= 0.0f ? 1.0f : -1.0f, 0.0f, 0.0f}
-                : Vec3{0.0f, rightVec.y >= 0.0f ? 1.0f : -1.0f, 0.0f};
-            const Vec3 fwdAxis = std::fabs(fwdFlat.x) >= std::fabs(fwdFlat.y)
-                ? Vec3{fwdFlat.x >= 0.0f ? 1.0f : -1.0f, 0.0f, 0.0f}
-                : Vec3{0.0f, fwdFlat.y >= 0.0f ? 1.0f : -1.0f, 0.0f};
-            const f32 nudgeStep = snapMove_ ? moveSnap_ : 10.0f;
-
-            using CI = editor::CommandId;
-            const CI kNudgeIds[6] = {CI::NudgeLeft, CI::NudgeRight, CI::NudgeForward,
-                                      CI::NudgeBack, CI::NudgeUp, CI::NudgeDown};
-            bool anyNudgeDown = false;
-            for (CI id : kNudgeIds) {
-                const auto& ch = keybinds_.chordFor(id);
-                if (ch.isBound() && ImGui::IsKeyDown(ch.key)) { anyNudgeDown = true; break; }
-            }
-            // One undo entry per held run, not per repeat: opens on the first nudge key down,
-            // closes once all are up. Tracks its own flag (not editBeforeValid_, which a Details
-            // panel field drag also holds open -- this would otherwise close that entry every frame).
-            if (anyNudgeDown && !nudgeEditOpen_) nudgeEditOpen_ = beginTransformEdit();
-
-            if (keybinds_.pressed(CI::NudgeLeft, io))    nudgeSelection(rightAxis * -nudgeStep);
-            if (keybinds_.pressed(CI::NudgeRight, io))   nudgeSelection(rightAxis *  nudgeStep);
-            if (keybinds_.pressed(CI::NudgeForward, io)) nudgeSelection(fwdAxis   *  nudgeStep);
-            if (keybinds_.pressed(CI::NudgeBack, io))    nudgeSelection(fwdAxis   * -nudgeStep);
-            if (keybinds_.pressed(CI::NudgeUp, io))      nudgeSelection(Vec3{0.0f, 0.0f,  nudgeStep});
-            if (keybinds_.pressed(CI::NudgeDown, io))    nudgeSelection(Vec3{0.0f, 0.0f, -nudgeStep});
-
-            if (!anyNudgeDown && nudgeEditOpen_) { endTransformEdit(); nudgeEditOpen_ = false; }
-        }
-#endif
-    }
-
-    if (dragging_ && anySelected()) {
-        EditXform o;
-        if (selectedXform(o)) {
-            const f32 dx=mx-prevMouseX_, dy=my-prevMouseY_;
-            const Vec3 before = o.pos;
-            if (tool_==Tool::Move)        applyMove(o, dx, dy);
-            else if (tool_==Tool::Rotate) applyRotate(o, prevMouseX_, prevMouseY_, mx, my);
-            else if (tool_==Tool::Scale)  applyScale(o, dx, dy);
-            setSelectedXform(o);
-#if AVER_MODULE_SCENE
-            // The rest of the selection follows by the same world-space DELTA the anchor just
-            // moved (reads `before` rather than recomputing: snap/axis-constraint/projection are
-            // already applied to the anchor, so re-deriving per entity could snap each separately
-            // and change their spacing).
-            //
-            // Move only: rotate/scale about a shared pivot need a pivot CHOSEN (anchor? centroid?
-            // each object's own?), and picking one silently would be worse than the honest gap --
-            // they still act on the anchor alone.
-            if (tool_ == Tool::Move) {
-                const Vec3 delta = o.pos - before;
-                if (delta.x != 0.0f || delta.y != 0.0f || delta.z != 0.0f) {
-                    // Through the shared helper, which also decides what beginTransformEdit
-                    // recorded (skip the anchor, and anything beneath another selected entity, or
-                    // a child would move twice) -- the undo record depends on matching that rule exactly, so both read from one place.
-                    scene::World& w = scene::World::instance();
-                    forEachMultiMoved([&](scene::Entity ent, const Transform& xf) {
-                        Transform t = xf;
-                        t.position += delta;
-                        w.setLocalTransform(ent, t);
-                    });
-                }
-            }
-#endif
-        }
-        prevMouseX_=mx; prevMouseY_=my;
-    }
+    applyGizmoDrag(mx, my);
 #else
     (void)e;
 #endif

@@ -2483,6 +2483,18 @@ private:
     void applyRotate(EditXform& o, f32 px, f32 py, f32 mx, f32 my);
 
     void handleManip(Engine& e);
+#if AVER_WITH_IMGUI && AVER_MODULE_SCENE
+    bool dragDecalAndRopeHandles(const ImGuiIO& io, bool overScene, f32 mx, f32 my);
+#endif
+#if AVER_WITH_IMGUI && AVER_MODULE_SCENE
+    void updateMarquee(const ImGuiIO& io, f32 mx, f32 my);
+#endif
+#if AVER_WITH_IMGUI
+    void handleEditVerbKeys(const ImGuiIO& io);
+#endif
+#if AVER_WITH_IMGUI
+    void applyGizmoDrag(f32 mx, f32 my);
+#endif
 
 #if AVER_MODULE_SCENE
     // Viewport placement verbs from handleManip; drop selection to floor or snap to grid.

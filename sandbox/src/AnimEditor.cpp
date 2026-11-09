@@ -443,6 +443,18 @@ public:
         return true;
     }
     void draw(Engine& e) override;
+#if AVER_WITH_IMGUI
+    void drawHeader();
+#endif
+#if AVER_WITH_IMGUI
+    void drawPreviewView(Engine& e, render::preview::ActorPreview* preview, f32 uiScale, f32 dt);
+#endif
+#if AVER_WITH_IMGUI
+    void drawTracksColumn(Engine& e, f32 h);
+#endif
+#if AVER_WITH_IMGUI
+    void drawSequencerStrip(bool seqExpanded, f32 stripH, f32 seqSplitAvail, f32 seqHandleH, f32 minSeqH, f32 minMainH);
+#endif
     void onFileChanged() override { reload_ = true; }
 
     // Restores the view/tracks split to its default fraction and persists it (SplitPane, see
@@ -2447,23 +2459,9 @@ void AnimEditor::frameSelectedBone(render::preview::ActorPreview& preview, usize
     cam.distance = std::clamp(reach * 2.0f * 1.8f, 2.0f, 500000.0f);
 }
 
-void AnimEditor::draw(Engine& e) {
 #if AVER_WITH_IMGUI
-    reloadIfNeeded();
-
-    // Clock runs off ImGui's time, not engine dt: an asset tab only draws while active, so an
-    // engine-dt clock would accumulate while hidden and the clip would jump on return.
-    const f64 now = ImGui::GetTime();
-    const f32 dt = lastClock_ > 0.0 ? static_cast<f32>(now - lastClock_) : 0.0f;
-    lastClock_ = now;
-    if (playing_ && isClip_) {
-        time_ += dt * speed_;
-        if (clip_.duration > 0.0f) {
-            if (loop_) { time_ = std::fmod(time_, clip_.duration); if (time_ < 0.0f) time_ += clip_.duration; }
-            else if (time_ >= clip_.duration) { time_ = clip_.duration; playing_ = false; }
-        }
-    }
-
+// The undo / redo row, clip or skeleton summary, clip flags and the missing-skeleton notice.
+void AnimEditor::drawHeader() {
     // Ctrl+Z/Ctrl+Y reach the same undo()/redo() as the buttons, guarded the same way, and skipped
     // while an InputText has focus (it has its own Ctrl+Z; WantTextInput is the same check
     // SoundEditor.cpp uses to tell the two apart). Follows isClip_, same as pushUndo().
@@ -2529,6 +2527,250 @@ void AnimEditor::draw(Engine& e) {
                            "(skeletonRef = '%s'). Put the matching .ocskel beside it, or anywhere "
                            "under Content.", clip_.skeletonRef.c_str());
     }
+}
+#endif
+
+#if AVER_WITH_IMGUI
+// The preview column: material status line, the viewport image with its toolbar, and camera input.
+void AnimEditor::drawPreviewView(Engine& e, render::preview::ActorPreview* preview, f32 uiScale, f32 dt) {
+    // What the mesh is shading with, in one line above the picture (same "message above the
+    // render" as GraphEditor::drawMaterialViewport) -- a preview that says nothing about itself
+    // just looks broken, and an author who never opens the Output Log (or does, and finds nothing
+    // there for four of resolvePreviewMaterial's five ways of coming up empty) needs the answer
+    // right here. Guarded on materialStatus_ non-empty rather than AVER_MODULE_PBR: without that
+    // module materialTried_ never latches, so the string simply stays empty and the line never draws.
+    if (!materialStatus_.empty()) {
+        // Wrapped, not a single long line: unlike GraphEditor's own short compile-error sentence,
+        // some branches spell out every .ocmat path tried, wider than the view column (minView
+        // 200px). TextDisabled/TextColored don't wrap on their own, so colour is pushed by hand
+        // around TextWrapped instead.
+        if (materialFailed_) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.72f, 0.35f, 1.0f));
+        else                 ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+        ImGui::TextWrapped("%s", materialStatus_.c_str());
+        ImGui::PopStyleColor();
+    }
+    if (preview && preview->uiTextureId()) {
+        const ImVec2 avail = ImGui::GetContentRegionAvail();
+        // Debounced: resize() waits for the GPU to idle and destroys a texture ImGui may still be
+        // sampling, so resizing every frame of a drag would stall the editor.
+        const u32 w = static_cast<u32>(std::max(64.0f, avail.x));
+        const u32 hh = static_cast<u32>(std::max(64.0f, avail.y));
+        if (w != pendingW_ || hh != pendingH_) {
+            pendingW_ = w; pendingH_ = hh;
+            resizeDue_ = ImGui::GetTime() + 0.25;
+        } else if (resizeDue_ > 0.0 && ImGui::GetTime() >= resizeDue_) {
+            resizeDue_ = 0.0;
+            preview->resize(pendingW_, pendingH_);
+        } else if (resizeDue_ <= 0.0 && (preview->width() != w || preview->height() != hh) &&
+                   ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)) {
+            // SHARED target: another tab resized it to its own viewport since this one's last
+            // request, which only compared against itself and so kept drawing that size. Taken
+            // back only while focused, so two visible tabs don't fight over it.
+            resizeDue_ = ImGui::GetTime() + 0.1;
+        }
+        const f32 iw = avail.x, ih = avail.y;
+        ImGui::Image(static_cast<ImTextureID>(preview->uiTextureId()), ImVec2(iw, ih));
+
+        // Preview chrome (PreviewChrome.hpp): toolbar, stats, axes gizmo. Reasserted onto the
+        // preview every frame, since it is shared across every asset tab that has one.
+        const ImVec2 imageMin = ImGui::GetItemRectMin(), imageMax = ImGui::GetItemRectMax();
+        const PreviewShowItem extraShow[] = {
+            {"Bones", &showBones_},
+            {"Sockets", &showSockets_},
+        };
+        drawPreviewToolbar("animPreviewToolbar", imageMin, imageMax, uiScale, viewMode_, showFlags_,
+                           extraShow, static_cast<int>(sizeof extraShow / sizeof extraShow[0]));
+        preview->setViewMode(viewMode_);
+        preview->setShowFlags(showFlags_);
+
+        std::vector<std::string> stats;
+        stats.push_back("Bones: " + formatCount(skel_.bones.size()));
+        AnimSkinFeature* skin = sharedSkin(e);
+        if (skin && showMesh_ && skin->drawMesh()) {
+            stats.push_back("Vertices: " + formatCount(skin->vertexCount()));
+            stats.push_back("Triangles: " + formatCount(skin->triangleCount()));
+        }
+        if (isClip_) {
+            char lenBuf[32];
+            std::snprintf(lenBuf, sizeof lenBuf, "Length: %.2f s", clip_.duration);
+            stats.push_back(lenBuf);
+            // sampleRate/Frames only mean anything for a baked clip (OcAnim.hpp).
+            if (clip_.storage == fmt::OcAnimStorage::BakedUniform && clip_.sampleRate > 0) {
+                stats.push_back("FPS: " + std::to_string(clip_.sampleRate));
+                const u32 frames = static_cast<u32>(std::lround(clip_.duration * clip_.sampleRate));
+                stats.push_back("Frames: " + formatCount(frames));
+            }
+            stats.push_back("Notifies: " + formatCount(clip_.notifies.size()));
+            stats.push_back("Curves: " + formatCount(clip_.curves.size()));
+        }
+        drawPreviewStats(imageMin, uiScale, stats);
+        drawPreviewAxes(imageMin, imageMax, uiScale, preview->camera());
+
+        // Navigation, matched to the main viewport. Gated on hover alone, like the orbit it
+        // replaces: fires only while the mouse sits over the preview image, so a drag ending over
+        // the sequencer strip below can never also spin/pan/nudge this camera.
+        if (ImGui::IsItemHovered()) {
+            const ImGuiIO& io = ImGui::GetIO();
+            render::preview::PreviewCamera& cam = preview->camera();
+
+            // Left-drag orbits, x inverted: matches ActorEditor.cpp/GraphEditor.cpp (AssetEditor.cpp
+            // still uses +) -- the drag moves the world under the cursor, so pushing right swings
+            // the view left.
+            if (ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+                cam.addOrbit(-io.MouseDelta.x * 0.4f, io.MouseDelta.y * 0.4f);
+            if (io.MouseWheel != 0.0f)
+                cam.addZoom(io.MouseWheel > 0.0f ? 0.9f : 1.1f);
+
+            // Middle/right-drag pan via camera().panPixels() -- every other preview tab already
+            // has this (AssetEditor.cpp, ActorEditor.cpp, GraphEditor.cpp); an orbit camera alone
+            // can't bring an off-centre joint to the middle of frame before zooming in.
+            for (const ImGuiMouseButton b : {ImGuiMouseButton_Middle, ImGuiMouseButton_Right}) {
+                if (!ImGui::IsMouseDragging(b)) continue;
+                const ImVec2 d = ImGui::GetMouseDragDelta(b);
+                ImGui::ResetMouseDragDelta(b);
+                cam.panPixels(d.x, d.y, static_cast<f32>(preview->height()));
+            }
+
+            // WASD/QE move the PIVOT, not an eye position: PreviewCamera is an orbit (yaw/pitch/
+            // distance about a pivot, see its declaration), so stepping a camPos_ the way
+            // SandboxViewport's fly camera does (SandboxApp.cpp's `flying_` block) would be
+            // discarded by the next addOrbit/addZoom recomputing the eye from pivot+distance+yaw+
+            // pitch. Moving the pivot along forward/right/world-up keeps orbit/zoom meaning intact
+            // while giving WASD/QE recentring along the view axis (panPixels above is limited to
+            // the screen-parallel plane). Scaled by the camera's own distance -- fine steps when
+            // framed close, fast enough to be worth pressing when framed wide -- same reasoning as
+            // frameSelectedBone's formula.
+            if (!io.WantCaptureKeyboard) {
+                const f32 yawRad = radians(cam.yawDeg), pitchRad = radians(cam.pitchDeg);
+                const Vec3 fwd = Vec3{std::cos(pitchRad) * std::cos(yawRad),
+                                      std::cos(pitchRad) * std::sin(yawRad),
+                                      -std::sin(pitchRad)}.getSafeNormal();
+                const Vec3 worldUp{0.0f, 0.0f, 1.0f};
+                const Vec3 right = cross(worldUp, fwd).getSafeNormal();
+                const f32 sp = cam.distance * dt;
+                Vec3 step{0.0f, 0.0f, 0.0f};
+                if (ImGui::IsKeyDown(ImGuiKey_W)) step += fwd * sp;
+                if (ImGui::IsKeyDown(ImGuiKey_S)) step -= fwd * sp;
+                if (ImGui::IsKeyDown(ImGuiKey_D)) step += right * sp;
+                if (ImGui::IsKeyDown(ImGuiKey_A)) step -= right * sp;
+                if (ImGui::IsKeyDown(ImGuiKey_E)) step += worldUp * sp;
+                if (ImGui::IsKeyDown(ImGuiKey_Q)) step -= worldUp * sp;
+                cam.pivot[0] += step.x; cam.pivot[1] += step.y; cam.pivot[2] += step.z;
+
+                // F frames the selected bone if one is selected, the whole rig otherwise. `false`
+                // (no repeat) so holding F doesn't refire every frame.
+                if (ImGui::IsKeyPressed(ImGuiKey_F, false)) {
+                    if (selectedBone_ >= 0 && static_cast<usize>(selectedBone_) < model_.size()) {
+                        frameSelectedBone(*preview, static_cast<usize>(selectedBone_));
+                    } else {
+                        preview->frameAll();
+                        // Same back-off as buildPreview's initial autoframe (see its comment):
+                        // frameAll's radius pick, off a thin bone box, would land the camera
+                        // inside the rig without this.
+                        cam.addZoom(2.6f);
+                    }
+                }
+            }
+        }
+    } else {
+        ImGui::TextDisabled("No preview on this backend.");
+    }
+}
+#endif
+
+#if AVER_WITH_IMGUI
+// The right column: notifies, curves, morph targets and tracks.
+void AnimEditor::drawTracksColumn(Engine& e, f32 h) {
+    // With blend shapes on the previewed mesh the right column gains a MORPH TARGETS section, taking its room from the
+    // notifies and curves above it. A clip with no mesh to preview still gets the one-line "preview mesh" field.
+    const bool morphSection = morphPanel_.hasTargets() || (isClip_ && (skel_.bones.empty() || !showMesh_));
+    const f32 notifiesH = morphSection ? 0.22f : 0.38f, curvesH = morphSection ? 0.24f : 0.30f;
+    ImGui::TextDisabled("NOTIFIES");
+    if (ImGui::BeginChild("notifies", ImVec2(0, h * notifiesH), false)) drawNotifies();
+    ImGui::EndChild();
+    ImGui::Separator();
+    ImGui::TextDisabled("CURVES");
+    if (ImGui::BeginChild("curves", ImVec2(0, h * curvesH), false)) drawCurves();
+    ImGui::EndChild();
+    ImGui::Separator();
+    if (morphSection) {
+        ImGui::TextDisabled("MORPH TARGETS");
+        if (ImGui::BeginChild("morph", ImVec2(0, h * (morphPanel_.hasTargets() ? 0.30f : 0.10f)), false)) drawMorph(e);
+        ImGui::EndChild();
+        ImGui::Separator();
+    }
+    ImGui::TextDisabled("TRACKS");
+    drawTracks();
+}
+#endif
+
+#if AVER_WITH_IMGUI
+// The retractable sequencer strip along the bottom: its splitter, header and the transport and timeline.
+void AnimEditor::drawSequencerStrip(bool seqExpanded, f32 stripH, f32 seqSplitAvail, f32 seqHandleH, f32 minSeqH, f32 minMainH) {
+    // Sequencer strip, drawn after the row above so top-to-bottom flow places it where the height
+    // budget already reserved. Nothing to draw for a skeleton tab (h already claimed all of hTotal).
+    if (isClip_) {
+        if (seqExpanded) {
+            // Drag handle, only while expanded: a collapsed strip has nothing to resize, and a handle
+            // drawn anyway would invite a drag that silently does nothing.
+            //
+            // Writes straight back into `stripH`, unlike split_'s drawSplitHandle (which only updates
+            // its SplitPane for the NEXT frame, since "view" is drawn before it runs). Here the handle
+            // runs before the "sequencer" child, so a drag's resize applies this same frame -- the
+            // better answer for the one pane in this tab where handle and pane draw in that order.
+            bool seqReleased = false;
+            verticalSplitterHandle("##seqsplit", seqHandleH, &stripH, seqSplitAvail, minSeqH, minMainH,
+                                    &seqReleased);
+            seqSplit_.fraction = splitFractionOf(stripH, seqSplitAvail);
+            if (seqReleased) storeSplitFraction(kPrefSeqSplit, seqSplit_.fraction);
+        }
+        if (ImGui::BeginChild("sequencer", ImVec2(0, stripH), true)) {
+            // Retract toggle: ICON_EXPAND ("expand_more", a downward chevron) reads as "open, click to
+            // close" (like a tree-node arrow), ICON_CHEVRON ("chevron_right") as "closed, click to open".
+            if (ImGui::SmallButton(seqCollapsed_ ? ICON_CHEVRON " Sequencer" : ICON_EXPAND " Sequencer")) {
+                seqCollapsed_ = !seqCollapsed_;
+                // Persisted immediately (storeSplitFraction's "instant a drag ends" rule,
+                // EditorWidgets.hpp) so a crash or alt-tab right after this click doesn't silently
+                // un-collapse the strip next launch.
+                setPrefBool(kPrefSeqCollapsed, seqCollapsed_);
+                flushEditorPrefs();
+            }
+            if (seqExpanded) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("%.3f s   %zu track(s)", clip_.duration, clip_.tracks.size());
+                // Strip's own content, filling what's left after the header row. drawTimeline()'s
+                // track-lane child clips further still (its own ImGuiListClipper region), so a short
+                // strip grows an inner scrollbar there rather than clipping the transport/scrub bar above.
+                if (ImGui::BeginChild("sequencerBody", ImVec2(0, 0), false)) {
+                    drawTransport();
+                    drawTimeline();
+                }
+                ImGui::EndChild();
+            }
+        }
+        ImGui::EndChild();
+    }
+}
+#endif
+
+void AnimEditor::draw(Engine& e) {
+#if AVER_WITH_IMGUI
+    reloadIfNeeded();
+
+    // Clock runs off ImGui's time, not engine dt: an asset tab only draws while active, so an
+    // engine-dt clock would accumulate while hidden and the clip would jump on return.
+    const f64 now = ImGui::GetTime();
+    const f32 dt = lastClock_ > 0.0 ? static_cast<f32>(now - lastClock_) : 0.0f;
+    lastClock_ = now;
+    if (playing_ && isClip_) {
+        time_ += dt * speed_;
+        if (clip_.duration > 0.0f) {
+            if (loop_) { time_ = std::fmod(time_, clip_.duration); if (time_ < 0.0f) time_ += clip_.duration; }
+            else if (time_ >= clip_.duration) { time_ = clip_.duration; playing_ = false; }
+        }
+    }
+
+    drawHeader();
 
     ImGui::Separator();
     // Transport and timeline lanes now live in their own retractable strip along the bottom of the
@@ -2650,222 +2892,20 @@ void AnimEditor::draw(Engine& e) {
     const f32 midW = splitPaneWidth(split_, kPrefViewSplit, kDefaultViewFraction, midAvail,
                                      minView, minTracks);
     if (ImGui::BeginChild("view", ImVec2(midW, h), true)) {
-        // What the mesh is shading with, in one line above the picture (same "message above the
-        // render" as GraphEditor::drawMaterialViewport) -- a preview that says nothing about itself
-        // just looks broken, and an author who never opens the Output Log (or does, and finds nothing
-        // there for four of resolvePreviewMaterial's five ways of coming up empty) needs the answer
-        // right here. Guarded on materialStatus_ non-empty rather than AVER_MODULE_PBR: without that
-        // module materialTried_ never latches, so the string simply stays empty and the line never draws.
-        if (!materialStatus_.empty()) {
-            // Wrapped, not a single long line: unlike GraphEditor's own short compile-error sentence,
-            // some branches spell out every .ocmat path tried, wider than the view column (minView
-            // 200px). TextDisabled/TextColored don't wrap on their own, so colour is pushed by hand
-            // around TextWrapped instead.
-            if (materialFailed_) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.72f, 0.35f, 1.0f));
-            else                 ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-            ImGui::TextWrapped("%s", materialStatus_.c_str());
-            ImGui::PopStyleColor();
-        }
-        if (preview && preview->uiTextureId()) {
-            const ImVec2 avail = ImGui::GetContentRegionAvail();
-            // Debounced: resize() waits for the GPU to idle and destroys a texture ImGui may still be
-            // sampling, so resizing every frame of a drag would stall the editor.
-            const u32 w = static_cast<u32>(std::max(64.0f, avail.x));
-            const u32 hh = static_cast<u32>(std::max(64.0f, avail.y));
-            if (w != pendingW_ || hh != pendingH_) {
-                pendingW_ = w; pendingH_ = hh;
-                resizeDue_ = ImGui::GetTime() + 0.25;
-            } else if (resizeDue_ > 0.0 && ImGui::GetTime() >= resizeDue_) {
-                resizeDue_ = 0.0;
-                preview->resize(pendingW_, pendingH_);
-            } else if (resizeDue_ <= 0.0 && (preview->width() != w || preview->height() != hh) &&
-                       ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)) {
-                // SHARED target: another tab resized it to its own viewport since this one's last
-                // request, which only compared against itself and so kept drawing that size. Taken
-                // back only while focused, so two visible tabs don't fight over it.
-                resizeDue_ = ImGui::GetTime() + 0.1;
-            }
-            const f32 iw = avail.x, ih = avail.y;
-            ImGui::Image(static_cast<ImTextureID>(preview->uiTextureId()), ImVec2(iw, ih));
-
-            // Preview chrome (PreviewChrome.hpp): toolbar, stats, axes gizmo. Reasserted onto the
-            // preview every frame, since it is shared across every asset tab that has one.
-            const ImVec2 imageMin = ImGui::GetItemRectMin(), imageMax = ImGui::GetItemRectMax();
-            const PreviewShowItem extraShow[] = {
-                {"Bones", &showBones_},
-                {"Sockets", &showSockets_},
-            };
-            drawPreviewToolbar("animPreviewToolbar", imageMin, imageMax, uiScale, viewMode_, showFlags_,
-                               extraShow, static_cast<int>(sizeof extraShow / sizeof extraShow[0]));
-            preview->setViewMode(viewMode_);
-            preview->setShowFlags(showFlags_);
-
-            std::vector<std::string> stats;
-            stats.push_back("Bones: " + formatCount(skel_.bones.size()));
-            AnimSkinFeature* skin = sharedSkin(e);
-            if (skin && showMesh_ && skin->drawMesh()) {
-                stats.push_back("Vertices: " + formatCount(skin->vertexCount()));
-                stats.push_back("Triangles: " + formatCount(skin->triangleCount()));
-            }
-            if (isClip_) {
-                char lenBuf[32];
-                std::snprintf(lenBuf, sizeof lenBuf, "Length: %.2f s", clip_.duration);
-                stats.push_back(lenBuf);
-                // sampleRate/Frames only mean anything for a baked clip (OcAnim.hpp).
-                if (clip_.storage == fmt::OcAnimStorage::BakedUniform && clip_.sampleRate > 0) {
-                    stats.push_back("FPS: " + std::to_string(clip_.sampleRate));
-                    const u32 frames = static_cast<u32>(std::lround(clip_.duration * clip_.sampleRate));
-                    stats.push_back("Frames: " + formatCount(frames));
-                }
-                stats.push_back("Notifies: " + formatCount(clip_.notifies.size()));
-                stats.push_back("Curves: " + formatCount(clip_.curves.size()));
-            }
-            drawPreviewStats(imageMin, uiScale, stats);
-            drawPreviewAxes(imageMin, imageMax, uiScale, preview->camera());
-
-            // Navigation, matched to the main viewport. Gated on hover alone, like the orbit it
-            // replaces: fires only while the mouse sits over the preview image, so a drag ending over
-            // the sequencer strip below can never also spin/pan/nudge this camera.
-            if (ImGui::IsItemHovered()) {
-                const ImGuiIO& io = ImGui::GetIO();
-                render::preview::PreviewCamera& cam = preview->camera();
-
-                // Left-drag orbits, x inverted: matches ActorEditor.cpp/GraphEditor.cpp (AssetEditor.cpp
-                // still uses +) -- the drag moves the world under the cursor, so pushing right swings
-                // the view left.
-                if (ImGui::IsMouseDragging(ImGuiMouseButton_Left))
-                    cam.addOrbit(-io.MouseDelta.x * 0.4f, io.MouseDelta.y * 0.4f);
-                if (io.MouseWheel != 0.0f)
-                    cam.addZoom(io.MouseWheel > 0.0f ? 0.9f : 1.1f);
-
-                // Middle/right-drag pan via camera().panPixels() -- every other preview tab already
-                // has this (AssetEditor.cpp, ActorEditor.cpp, GraphEditor.cpp); an orbit camera alone
-                // can't bring an off-centre joint to the middle of frame before zooming in.
-                for (const ImGuiMouseButton b : {ImGuiMouseButton_Middle, ImGuiMouseButton_Right}) {
-                    if (!ImGui::IsMouseDragging(b)) continue;
-                    const ImVec2 d = ImGui::GetMouseDragDelta(b);
-                    ImGui::ResetMouseDragDelta(b);
-                    cam.panPixels(d.x, d.y, static_cast<f32>(preview->height()));
-                }
-
-                // WASD/QE move the PIVOT, not an eye position: PreviewCamera is an orbit (yaw/pitch/
-                // distance about a pivot, see its declaration), so stepping a camPos_ the way
-                // SandboxViewport's fly camera does (SandboxApp.cpp's `flying_` block) would be
-                // discarded by the next addOrbit/addZoom recomputing the eye from pivot+distance+yaw+
-                // pitch. Moving the pivot along forward/right/world-up keeps orbit/zoom meaning intact
-                // while giving WASD/QE recentring along the view axis (panPixels above is limited to
-                // the screen-parallel plane). Scaled by the camera's own distance -- fine steps when
-                // framed close, fast enough to be worth pressing when framed wide -- same reasoning as
-                // frameSelectedBone's formula.
-                if (!io.WantCaptureKeyboard) {
-                    const f32 yawRad = radians(cam.yawDeg), pitchRad = radians(cam.pitchDeg);
-                    const Vec3 fwd = Vec3{std::cos(pitchRad) * std::cos(yawRad),
-                                          std::cos(pitchRad) * std::sin(yawRad),
-                                          -std::sin(pitchRad)}.getSafeNormal();
-                    const Vec3 worldUp{0.0f, 0.0f, 1.0f};
-                    const Vec3 right = cross(worldUp, fwd).getSafeNormal();
-                    const f32 sp = cam.distance * dt;
-                    Vec3 step{0.0f, 0.0f, 0.0f};
-                    if (ImGui::IsKeyDown(ImGuiKey_W)) step += fwd * sp;
-                    if (ImGui::IsKeyDown(ImGuiKey_S)) step -= fwd * sp;
-                    if (ImGui::IsKeyDown(ImGuiKey_D)) step += right * sp;
-                    if (ImGui::IsKeyDown(ImGuiKey_A)) step -= right * sp;
-                    if (ImGui::IsKeyDown(ImGuiKey_E)) step += worldUp * sp;
-                    if (ImGui::IsKeyDown(ImGuiKey_Q)) step -= worldUp * sp;
-                    cam.pivot[0] += step.x; cam.pivot[1] += step.y; cam.pivot[2] += step.z;
-
-                    // F frames the selected bone if one is selected, the whole rig otherwise. `false`
-                    // (no repeat) so holding F doesn't refire every frame.
-                    if (ImGui::IsKeyPressed(ImGuiKey_F, false)) {
-                        if (selectedBone_ >= 0 && static_cast<usize>(selectedBone_) < model_.size()) {
-                            frameSelectedBone(*preview, static_cast<usize>(selectedBone_));
-                        } else {
-                            preview->frameAll();
-                            // Same back-off as buildPreview's initial autoframe (see its comment):
-                            // frameAll's radius pick, off a thin bone box, would land the camera
-                            // inside the rig without this.
-                            cam.addZoom(2.6f);
-                        }
-                    }
-                }
-            }
-        } else {
-            ImGui::TextDisabled("No preview on this backend.");
-        }
+        drawPreviewView(e, preview, uiScale, dt);
     }
     ImGui::EndChild();
     drawSplitHandle(split_, "##animsplit", kPrefViewSplit, midAvail, minView, minTracks,
                      6.0f * uiScale);
 
     if (ImGui::BeginChild("tracks", ImVec2(0, h), true)) {
-        // With blend shapes on the previewed mesh the right column gains a MORPH TARGETS section, taking its room from the
-        // notifies and curves above it. A clip with no mesh to preview still gets the one-line "preview mesh" field.
-        const bool morphSection = morphPanel_.hasTargets() || (isClip_ && (skel_.bones.empty() || !showMesh_));
-        const f32 notifiesH = morphSection ? 0.22f : 0.38f, curvesH = morphSection ? 0.24f : 0.30f;
-        ImGui::TextDisabled("NOTIFIES");
-        if (ImGui::BeginChild("notifies", ImVec2(0, h * notifiesH), false)) drawNotifies();
-        ImGui::EndChild();
-        ImGui::Separator();
-        ImGui::TextDisabled("CURVES");
-        if (ImGui::BeginChild("curves", ImVec2(0, h * curvesH), false)) drawCurves();
-        ImGui::EndChild();
-        ImGui::Separator();
-        if (morphSection) {
-            ImGui::TextDisabled("MORPH TARGETS");
-            if (ImGui::BeginChild("morph", ImVec2(0, h * (morphPanel_.hasTargets() ? 0.30f : 0.10f)), false)) drawMorph(e);
-            ImGui::EndChild();
-            ImGui::Separator();
-        }
-        ImGui::TextDisabled("TRACKS");
-        drawTracks();
+        drawTracksColumn(e, h);
     }
     ImGui::EndChild();
     ImGui::EndChild();   // "panelsRow" (see its BeginChild comment); WindowPadding was already
                          // popped right after that BeginChild, nothing further to undo here.
 
-    // Sequencer strip, drawn after the row above so top-to-bottom flow places it where the height
-    // budget already reserved. Nothing to draw for a skeleton tab (h already claimed all of hTotal).
-    if (isClip_) {
-        if (seqExpanded) {
-            // Drag handle, only while expanded: a collapsed strip has nothing to resize, and a handle
-            // drawn anyway would invite a drag that silently does nothing.
-            //
-            // Writes straight back into `stripH`, unlike split_'s drawSplitHandle (which only updates
-            // its SplitPane for the NEXT frame, since "view" is drawn before it runs). Here the handle
-            // runs before the "sequencer" child, so a drag's resize applies this same frame -- the
-            // better answer for the one pane in this tab where handle and pane draw in that order.
-            bool seqReleased = false;
-            verticalSplitterHandle("##seqsplit", seqHandleH, &stripH, seqSplitAvail, minSeqH, minMainH,
-                                    &seqReleased);
-            seqSplit_.fraction = splitFractionOf(stripH, seqSplitAvail);
-            if (seqReleased) storeSplitFraction(kPrefSeqSplit, seqSplit_.fraction);
-        }
-        if (ImGui::BeginChild("sequencer", ImVec2(0, stripH), true)) {
-            // Retract toggle: ICON_EXPAND ("expand_more", a downward chevron) reads as "open, click to
-            // close" (like a tree-node arrow), ICON_CHEVRON ("chevron_right") as "closed, click to open".
-            if (ImGui::SmallButton(seqCollapsed_ ? ICON_CHEVRON " Sequencer" : ICON_EXPAND " Sequencer")) {
-                seqCollapsed_ = !seqCollapsed_;
-                // Persisted immediately (storeSplitFraction's "instant a drag ends" rule,
-                // EditorWidgets.hpp) so a crash or alt-tab right after this click doesn't silently
-                // un-collapse the strip next launch.
-                setPrefBool(kPrefSeqCollapsed, seqCollapsed_);
-                flushEditorPrefs();
-            }
-            if (seqExpanded) {
-                ImGui::SameLine();
-                ImGui::TextDisabled("%.3f s   %zu track(s)", clip_.duration, clip_.tracks.size());
-                // Strip's own content, filling what's left after the header row. drawTimeline()'s
-                // track-lane child clips further still (its own ImGuiListClipper region), so a short
-                // strip grows an inner scrollbar there rather than clipping the transport/scrub bar above.
-                if (ImGui::BeginChild("sequencerBody", ImVec2(0, 0), false)) {
-                    drawTransport();
-                    drawTimeline();
-                }
-                ImGui::EndChild();
-            }
-        }
-        ImGui::EndChild();
-    }
+    drawSequencerStrip(seqExpanded, stripH, seqSplitAvail, seqHandleH, minSeqH, minMainH);
 #else
     (void)e;
 #endif
