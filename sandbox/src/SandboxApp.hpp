@@ -1297,6 +1297,9 @@ private:
     bool failed_ = false;
 };
 
+class HitchMarks;
+namespace game { struct SceneDrawStats; }
+
 // The editor application: owns the scene, the panels, and the frame loop.
 class SandboxApp final : public Application {
 public:
@@ -4374,6 +4377,78 @@ private:
     bool foliagePending_ = false;
 #  endif
 #endif
+
+    // SandboxInit.cpp: the steps onInit runs, in order
+    void applyStartupRenderSettings(Engine& e);
+    void addCoreRenderFeatures(Engine& e);
+    void registerAssetEditors();
+    void installAssetEditorHooks();
+    void installActorEditorHooks();
+    void bindWindow(Engine& e);
+#if AVER_MODULE_MCP
+    void startMcpChannel();
+#endif
+    void startRuntimeSystems();
+    void installGameProviders();
+#if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
+    void initLodMeshShader(Engine& e);
+#endif
+    void openStartupProject(Engine& e);
+#if AVER_WITH_IMGUI
+    void initEditorUi(Engine& e);
+#endif
+    void createDefaultScene(Engine& e);
+    void createGizmoMeshes(Engine& e);
+#if AVER_MODULE_SCENE
+    void initSceneRenderers(Engine& e);
+#endif
+#if AVER_MODULE_FLUIDS
+    void initWater(Engine& e);
+#endif
+#if AVER_MODULE_LANDSCAPE
+    void installLandscapeProviders();
+#endif
+#if AVER_FLUIDS_SIMULATED
+    void initViewportIcons(Engine& e);
+#endif
+    void setupFurnaceTest();
+    void setupReflectionTest();
+    void setupSkinDrawTest(Engine& e);
+#if AVER_MODULE_SCRIPTING
+    void initScriptingHost();
+#endif
+#if AVER_MODULE_SCRIPTING
+#if AVER_MODULE_VOXI
+    void initVoxiBackend(Engine& e);
+#endif
+#endif
+#if AVER_MODULE_SCRIPTING
+    void initGameUi(Engine& e);
+#endif
+#if AVER_MODULE_SCRIPTING
+#if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
+    void initOcclusionCuller(Engine& e);
+#endif
+#endif
+#if AVER_MODULE_SCRIPTING
+#if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
+    void initParticleRenderer(Engine& e);
+#endif
+#endif
+#if AVER_MODULE_SCRIPTING
+#if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
+    void initWaterRenderer(Engine& e);
+#endif
+#endif
+#if AVER_MODULE_SCRIPTING
+#if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
+    void setupParticleScenes();
+#endif
+#endif
+#if AVER_MODULE_SCRIPTING
+    void setupGpuSelfTests(Engine& e);
+#endif
+    void setInitialToolAndCamera();
 
 #if AVER_MODULE_FRAMEWORK
     void spawnClassPlacements();

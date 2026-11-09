@@ -39,14 +39,8 @@
 
 namespace aver {
 
-// Build editor: asset editors, physics, scene, gizmos, render features.
-void SandboxApp::onInit(Engine& e)  {
-    // FIRST: set engineForSplash_ before anything logs (logSink uses it to update splash).
-    engineForSplash_ = &e;
-    mainThreadId_ = std::this_thread::get_id();
-    AVER_INFO("[Sandbox] backend={} adapter='{}'", rhi::backendName(e.device()->backend()), e.device()->adapterName());
-    // Latched for Project Settings display (no Engine& to re-ask).
-    runningBackend_ = rhi::backendName(e.device()->backend());
+// AverSR quality, the render scale, the GPU upscaler and the depth prepass, before device sizes are determined.
+void SandboxApp::applyStartupRenderSettings(Engine& e) {
 #if AVER_MODULE_SR
     // AverSR quality drives renderScaleOverride_; --render-scale wins if both set.
     if (averSrQuality_ != aver::sr::Quality::Off && renderScaleOverride_ == 1.0f)
@@ -70,7 +64,10 @@ void SandboxApp::onInit(Engine& e)  {
         e.device()->setDepthPrepassEnabled(true);
         AVER_INFO("[Sandbox] depth prepass enabled (--depth-prepass)");
     }
+}
 
+// The G-buffer debug, crowd GPU and NeuraFI visualiser render features.
+void SandboxApp::addCoreRenderFeatures(Engine& e) {
     // Register GBuffer debug unconditionally (mode defaults to Off). Per-frame write gated in onUpdate.
     e.device()->addRenderFeature(&gbufferDebugFeature_);
     gbufferDebugAttached_ = true;
@@ -79,7 +76,10 @@ void SandboxApp::onInit(Engine& e)  {
 #endif
     // NeuraFI viz draws nothing until Neural Visualiser picks a view.
     e.device()->addRenderFeature(&neurafiViz_);
+}
 
+// The asset editor factories; registration order is precedence (first factory that accepts a path wins).
+void SandboxApp::registerAssetEditors() {
     // Registration order is precedence: first factory that accepts path wins.
     assetEditors_.registerFactory(&editor::makeMeshEditor);
     assetEditors_.registerFactory(&editor::makeActorEditor);
@@ -161,6 +161,10 @@ void SandboxApp::onInit(Engine& e)  {
     assetEditors_.registerFactory(&editor::makeStringTableEditor);  // .ocstrings, Localization/<culture>/*.csv
     assetEditors_.registerFactory(&editor::makeDataTableEditor);    // .csv, table-shaped .json
     assetEditors_.registerFactory(&editor::makeTextureEditor);  // image formats, read-only
+}
+
+// The input scheme, caption, UI layout, string table and instance set editors' hooks into the app.
+void SandboxApp::installAssetEditorHooks() {
     {
         // Hooks to query/set project's Input Scheme.
         editor::InputSchemeEditorHooks hooks;
@@ -248,6 +252,10 @@ void SandboxApp::onInit(Engine& e)  {
         editor::setInstanceSetEditorHooks(std::move(hooks));
     }
 #endif
+}
+
+// Locates AverDesign, then gives the actor editor its compile and IDE hooks.
+void SandboxApp::installActorEditorHooks() {
     // Locate AverDesign before ActorEditor (caches Roslyn availability).
     locateAverDesign();
     {
@@ -264,6 +272,10 @@ void SandboxApp::onInit(Engine& e)  {
 #endif
         editor::setActorEditorHooks(std::move(hooks));
     }
+}
+
+// Window event sink, drag-drop, single-instance forwarding and the close guard.
+void SandboxApp::bindWindow(Engine& e) {
     window_ = e.window();
     // Set event sink. Everything lands in accumulator unfiltered.
     if (window_) window_->setEventCallback(&sandboxWindowEvent, &input_);
@@ -279,16 +291,20 @@ void SandboxApp::onInit(Engine& e)  {
     }
     // Window X button goes through same unsaved-changes check as File > Exit.
     if (window_ && window_->valid()) window_->setCloseGuard(&SandboxApp::onCloseGuardThunk, this);
+}
 
+// Starts the MCP channel when --mcp gave a port.
 #if AVER_MODULE_MCP
+void SandboxApp::startMcpChannel() {
     // Start MCP channel if port is set (ABI registration, widget hooks, listen shared with status bar).
     if (mcpPort_ && !mcpStart(mcpPort_))
         AVER_WARN("[Mcp] --mcp was given but the channel did not start; the editor is "
                   "unaffected and carries on");
+}
 #endif
 
-    browser_.init();
-
+// Physics, audio, AI components, the control rig and ragdolls; all before any level loads.
+void SandboxApp::startRuntimeSystems() {
 #if AVER_MODULE_PHYSICS
     // Must start before any level loads: loading builds a static body per colliding placement.
     game::startPhysics("Sandbox");
@@ -327,6 +343,10 @@ void SandboxApp::onInit(Engine& e)  {
 #endif
     }
 #endif
+}
+
+// Framework providers (montages, model import, IK, morph, sequences) and the game systems wiring.
+void SandboxApp::installGameProviders() {
 #if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
     // Montages: the framework relays PlayMontage and friends to AnimSystem's montage players.
     aver_fw_set_anim_provider(&anim::montageProvider, &anim::animSystem());
@@ -363,8 +383,11 @@ void SandboxApp::onInit(Engine& e)  {
     installPrefabHooks();
     installLevelInstanceHooks();   // [wave3/level-instances]
 #endif
+}
 
+// --lod-mesh-shader: whether the per-cluster mesh-shader path can run on this device.
 #if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
+void SandboxApp::initLodMeshShader(Engine& e) {
     // Off unless --lod-mesh-shader (opt-in). D3D12 only; needs AVER_MODULE_VOXI for GI/shadows.
     lodMeshShaderEnabled_ = lodMeshShaderRequest_ > 0;
     if (lodMeshShaderEnabled_) {
@@ -394,8 +417,11 @@ void SandboxApp::onInit(Engine& e)  {
                           "DXC {}); drawing without it", mcaps.meshShaderTier, mcaps.shaderModel,
                           mcaps.dxcAvailable);
     }
+}
 #endif
 
+// Opens the project or level given on the command line.
+void SandboxApp::openStartupProject(Engine& e) {
     if (!projectPath_.empty()) {
         // --open-legacy skips upgrade prompt and opens old project directly.
         std::string err;
@@ -426,7 +452,11 @@ void SandboxApp::onInit(Engine& e)  {
                   openMapPath_);
 #endif
     }
+}
+
+// DPI scale, logo, icon sheets, game UI font and the Content Browser engine root.
 #if AVER_WITH_IMGUI
+void SandboxApp::initEditorUi(Engine& e) {
     if (e.device()->uiActive()) {
         applyDpi(e.window() ? e.window()->dpiScale() : 1.0f);
         AVER_INFO("[Sandbox] DPI scale {:.2f}, UI font rasterised at {:.0f}px", dpi_, 16.0f * dpi_);
@@ -444,7 +474,11 @@ void SandboxApp::onInit(Engine& e)  {
         AVER_INFO("[Sandbox] Content Browser engine root: {}",
                   cbEngineRoot_.empty() ? "(none - shipped build)" : cbEngineRoot_.c_str());
     }
+}
 #endif
+
+// The default blank map: floor, cube, optional --beam mesh and the grid.
+void SandboxApp::createDefaultScene(Engine& e) {
     // Default blank map: ground + cube + sun + sky + atmosphere.
     std::vector<rhi::MeshVertex> gv, gi_v; std::vector<u32> gi, ci;
     appendGround(gv, gi, kEditorFloorHalf);
@@ -495,7 +529,10 @@ void SandboxApp::onInit(Engine& e)  {
 
     std::vector<rhi::LineVertex> gl; buildGrid(gl, kEditorGridHalf, kEditorGridCell);
     gridMesh_ = e.device()->createLineMesh(gl.data(), (u32)gl.size());
+}
 
+// Gizmo handles, the Player Start capsule and the sculpt brush ring.
+void SandboxApp::createGizmoMeshes(Engine& e) {
     // Per-mode gizmos: normal + yellow-highlight variant of each axis.
     for (int a = 0; a < 3; ++a) {
         auto mv=buildMoveAxis(a,kAxisCol[a]);   gzMove_[a]  =e.device()->createLineMesh(mv.data(),(u32)mv.size());
@@ -525,8 +562,11 @@ void SandboxApp::onInit(Engine& e)  {
     // Sculpt brush footprint ring (flat in XY plane; reused, radius/position vary per-frame).
     { auto bring = buildRotRing(2, kAxisHi); brushRing_ = e.device()->createLineMesh(bring.data(), (u32)bring.size()); }
 #endif
+}
 
+// Skinned, soft-body and hair scenes (registered before Voxi), thumbnails and --skin-scene-test.
 #if AVER_MODULE_SCENE
+void SandboxApp::initSceneRenderers(Engine& e) {
     // Scene join, registered before Voxi (reads vertex buffers in prePass).
     skinnedScene_ = std::make_unique<aver::render::SkinnedScene>();
     if (skinnedScene_->init(*e.device())) {
@@ -583,21 +623,31 @@ void SandboxApp::onInit(Engine& e)  {
     } else if (!skinSceneDir_.empty()) {
         AVER_ERROR("[Skin] --skin-scene-test needs the scene join, which did not initialise");
     }
+}
 #endif
 
+// Registers the fluid renderer; must precede Voxi, which reads its vertex buffer.
 #if AVER_MODULE_FLUIDS
+void SandboxApp::initWater(Engine& e) {
     // Register fluid (spawned only if level asks for it). Must precede Voxi (reads vertex buffer).
     water_.init(*e.device());
 #if AVER_MODULE_LANDSCAPE
     // wave3: river / lake depth reads the ground; C# and graphs read the landscape layers.
     water_.setGroundHeightSource([this](f64 x, f64 y, f64& z) { return landscape_.groundHeightAt(x, y, z); });
 #endif
-#endif
-#if AVER_MODULE_LANDSCAPE
-    landscape_.installProviders();
+}
 #endif
 
+// Landscape layers for scripts and graphs.
+#if AVER_MODULE_LANDSCAPE
+void SandboxApp::installLandscapeProviders() {
+    landscape_.installProviders();
+}
+#endif
+
+// The 3D viewport icon renderer; must exist before level loading creates the Player Start.
 #if AVER_FLUIDS_SIMULATED
+void SandboxApp::initViewportIcons(Engine& e) {
     // 3D-viewport icon renderer (overlayPass; must exist before level loading creates Player Start).
     viewportIconsReady_ = viewportIcons_.init(*e.device());
     if (viewportIconsReady_) {
@@ -606,8 +656,11 @@ void SandboxApp::onInit(Engine& e)  {
                                                    "PlayerStartIcon");
         if (playerStartIcon_ == editor::ViewportIconRenderer::kNoIcon) viewportIconsReady_ = false;
     }
+}
 #endif
 
+// --furnace-test: shading model energy conservation with a uniform white diffuse.
+void SandboxApp::setupFurnaceTest() {
     // Furnace test: shading model energy conservation with uniform white diffuse (--furnace-test).
     if (furnaceTest_) {
         objects_.clear();
@@ -671,7 +724,10 @@ void SandboxApp::onInit(Engine& e)  {
                       sky_.furnaceRadiance);
         }
     }
+}
 
+// --refl-test: a mirror and a beacon to verify ray-traced reflection is global.
+void SandboxApp::setupReflectionTest() {
     // Reflection test: mirror and beacon to verify ray-traced reflection is global (--refl-test).
     if (reflTest_) {
         refl_ = std::make_unique<aver::editor::ReflTest>();
@@ -705,7 +761,10 @@ void SandboxApp::onInit(Engine& e)  {
         refl_->setBeaconPosition(bp);
         refl_->setVolumeExtent(giExtent_);
     }
+}
 
+// --skin-draw-test: GPU skinning, registered before the scene renderer.
+void SandboxApp::setupSkinDrawTest(Engine& e) {
     // Test GPU skinning: register before scene renderer (reads vertex buffer this writes).
     if (skinDrawTest_) {
         skinDraw_ = std::make_unique<aver::editor::SkinDrawTest>();
@@ -741,8 +800,11 @@ void SandboxApp::onInit(Engine& e)  {
             skinDraw_.reset();
         }
     }
+}
+
+// Starts the scripting host and wires its graph, notify and provider hooks.
 #if AVER_MODULE_SCRIPTING
-    {
+void SandboxApp::initScriptingHost() {
         scripting::HostDesc hd;
         hd.bridgeDir = executableDir() + AVER_PATH_SEP "Scripting";
         hd.scriptsDir = resolveScriptsDir();
@@ -817,8 +879,13 @@ void SandboxApp::onInit(Engine& e)  {
             spawnClassPlacements();
         }
 #endif
+}
+#endif
 
+// GPU capabilities, Voxi device info and the Voxi renderer.
+#if AVER_MODULE_SCRIPTING
 #if AVER_MODULE_VOXI
+void SandboxApp::initVoxiBackend(Engine& e) {
     // Set GPU capabilities and Voxi device info.
     {
         const rhi::DeviceCaps caps = e.device()->caps();
@@ -938,7 +1005,13 @@ void SandboxApp::onInit(Engine& e)  {
             voxiRenderer_.setDepthProxy(&SandboxApp::depthProxyLookup, this);
         }
     }
+}
 #endif
+#endif
+
+// The game UI render feature, its text and image bindings, and the sub-viewport host.
+#if AVER_MODULE_SCRIPTING
+void SandboxApp::initGameUi(Engine& e) {
     // The game UI's render feature: overlay pass only, so ordering against scene features is free.
     gameUi_ = aver::render::ui::UiRenderer::create(*e.device());
     if (gameUi_) e.device()->addRenderFeature(gameUi_);
@@ -953,8 +1026,13 @@ void SandboxApp::onInit(Engine& e)  {
         if (auto* ui = static_cast<SandboxApp*>(self)->gameUi_) ui->dropBinding(t);
     }, this);
 #endif
+}
+#endif
 
+// The occlusion culler; it calls renderSceneEntities() directly.
+#if AVER_MODULE_SCRIPTING
 #if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
+void SandboxApp::initOcclusionCuller(Engine& e) {
     // Occlusion culler (not IRenderFeature; calls renderSceneEntities() directly).
     if (rhi::IResourceFactory* occRes = e.device()->resources()) {
         occluder_ = aver::occlusion::createOcclusionCuller(*occRes);
@@ -968,9 +1046,14 @@ void SandboxApp::onInit(Engine& e)  {
             occluder_->ensureSized(*occRes, occSceneDesc.width, occSceneDesc.height, e.device()->sampleCount());
         }
     }
+}
+#endif
 #endif
 
+// The particle renderer (registered unconditionally; the system and effects are singletons).
+#if AVER_MODULE_SCRIPTING
 #if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
+void SandboxApp::initParticleRenderer(Engine& e) {
     // Particle renderer (registered unconditionally; system/effects are singletons).
     particles::particleSystem().setEffectLibrary(&particles::particleEffects());
     {
@@ -1008,7 +1091,14 @@ void SandboxApp::onInit(Engine& e)  {
     } else {
         AVER_ERROR("[Particles] renderer unavailable on this device");
     }
+}
+#endif
+#endif
 
+// The water renderer (a failed init means no water; HLSL compiles at runtime).
+#if AVER_MODULE_SCRIPTING
+#if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
+void SandboxApp::initWaterRenderer(Engine& e) {
 #if AVER_MODULE_FLUIDS
     // Water renderer (failed init means no water; HLSL compiles at runtime).
     if (waterEnabled_) {
@@ -1036,12 +1126,19 @@ void SandboxApp::onInit(Engine& e)  {
         } else {
             AVER_ERROR("[Water] renderer unavailable on this device");
         }
+    }
 #else
     if (waterEnabled_)
         AVER_WARN("[Water] --water was given, but this build has no water module");
 #endif
-    }
+}
+#endif
+#endif
 
+// --particle-test and --particle-stress: dust and grid emitters for the transparent pass.
+#if AVER_MODULE_SCRIPTING
+#if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
+void SandboxApp::setupParticleScenes() {
     // Particle test: dust cloud overlapping cube (shows transparent pass depth test).
     if (particleTest_) {
         objects_.clear();
@@ -1216,8 +1313,13 @@ void SandboxApp::onInit(Engine& e)  {
                       emitter2, kStressEffect2Id);
         }
     }
+}
+#endif
 #endif
 
+// --skin-test and --pt-furnace render features.
+#if AVER_MODULE_SCRIPTING
+void SandboxApp::setupGpuSelfTests(Engine& e) {
     // GPU skinning self-test (--skin-test; costs waitIdle).
     if (skinTest_) {
         skinSelfTest_ = std::make_unique<aver::render::SkinSelfTest>();
@@ -1231,19 +1333,11 @@ void SandboxApp::onInit(Engine& e)  {
         if (ptFurnace_->init(*e.device())) e.device()->addRenderFeature(ptFurnace_.get());
         else { AVER_ERROR("[PT] furnace unavailable on this device"); ptFurnace_.reset(); }
     }
-
-    // Path tracer scene view (progressive still-camera reference; --pt-scene).
-    syncPtSceneView(e.device());
-
-        tools_.setAutoCompileFlag(autoCompileFlag());
-        tools_.setReloader([this](const std::string& binDir, std::string* status) {
-            return reloadScripts(binDir, status);
-        });
-    }
+}
 #endif
-#if AVER_MODULE_SCENE
-    initOrigin(e);   // LARGE_WORLD: the floating origin's bindings and participants (SandboxOrigin.cpp)
-#endif
+
+// The starting tool, and the camera framing (level, default or --cam).
+void SandboxApp::setInitialToolAndCamera() {
     tool_ = initialTool_;
     sel_ = 1;
     bool framedByLevel = false;
@@ -1264,6 +1358,102 @@ void SandboxApp::onInit(Engine& e)  {
         pitch_  = pitchOverride_;
         yaw_    = yawOverride_;
     }
+}
+
+// Build editor: asset editors, physics, scene, gizmos, render features.
+void SandboxApp::onInit(Engine& e)  {
+    // FIRST: set engineForSplash_ before anything logs (logSink uses it to update splash).
+    engineForSplash_ = &e;
+    mainThreadId_ = std::this_thread::get_id();
+    AVER_INFO("[Sandbox] backend={} adapter='{}'", rhi::backendName(e.device()->backend()), e.device()->adapterName());
+    // Latched for Project Settings display (no Engine& to re-ask).
+    runningBackend_ = rhi::backendName(e.device()->backend());
+    applyStartupRenderSettings(e);
+
+    addCoreRenderFeatures(e);
+
+    registerAssetEditors();
+    installAssetEditorHooks();
+    installActorEditorHooks();
+    bindWindow(e);
+
+#if AVER_MODULE_MCP
+    startMcpChannel();
+#endif
+
+    browser_.init();
+
+    startRuntimeSystems();
+    installGameProviders();
+
+#if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
+    initLodMeshShader(e);
+#endif
+
+    openStartupProject(e);
+#if AVER_WITH_IMGUI
+    initEditorUi(e);
+#endif
+    createDefaultScene(e);
+
+    createGizmoMeshes(e);
+
+#if AVER_MODULE_SCENE
+    initSceneRenderers(e);
+#endif
+
+#if AVER_MODULE_FLUIDS
+    initWater(e);
+#endif
+#if AVER_MODULE_LANDSCAPE
+    installLandscapeProviders();
+#endif
+
+#if AVER_FLUIDS_SIMULATED
+    initViewportIcons(e);
+#endif
+
+    setupFurnaceTest();
+
+    setupReflectionTest();
+
+    setupSkinDrawTest(e);
+#if AVER_MODULE_SCRIPTING
+    {
+    initScriptingHost();
+
+#if AVER_MODULE_VOXI
+    initVoxiBackend(e);
+#endif
+    initGameUi(e);
+
+#if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
+    initOcclusionCuller(e);
+#endif
+
+#if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
+    initParticleRenderer(e);
+
+    initWaterRenderer(e);
+
+    setupParticleScenes();
+#endif
+
+    setupGpuSelfTests(e);
+
+    // Path tracer scene view (progressive still-camera reference; --pt-scene).
+    syncPtSceneView(e.device());
+
+        tools_.setAutoCompileFlag(autoCompileFlag());
+        tools_.setReloader([this](const std::string& binDir, std::string* status) {
+            return reloadScripts(binDir, status);
+        });
+    }
+#endif
+#if AVER_MODULE_SCENE
+    initOrigin(e);   // LARGE_WORLD: the floating origin's bindings and participants (SandboxOrigin.cpp)
+#endif
+    setInitialToolAndCamera();
 }
 
 } // namespace aver
