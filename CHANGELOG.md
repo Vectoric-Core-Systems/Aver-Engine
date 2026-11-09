@@ -10,6 +10,13 @@ triggering inputs for anything summarised below.
 
 ## [Unreleased]
 
+### PCG vegetation and biomes (UE parity wave 2, W4)
+
+- `.ocbiome` (text): a mask (paint layer, noise, spline or volume, with a ramped edge and `invert`) and foliage entries with density, slope, height, layer, noise, clump and prune rules. New PCG nodes `NoiseMask`, `EdgeFalloff` (seeded dither so two biomes interleave at their border), `Clump` and `Compete`; `pcgBuildBiomeGraph` compiles biomes plus `.ocfoliage` types into one `DOMAIN pcg` graph.
+- `.ocfoliage` gains `cullStartCm`, `cullEndCm`, `lodScaleBias`, `alignMaxAngleDeg`, `groundOffsetCm` and `collision` (older files read the defaults); `.ocinst` gains an optional per-group cull chunk (`ICUL`) and collision flag bits. `GameFoliage` thins and drops a group's rows by cell distance to its cull range.
+- Generate Vegetation (`VegetationGenerator`): runs biomes cell by cell into a cell-sorted `.ocinst` with an `.ocveg` record that keeps the manual override set (erase stamps, additions) and regenerates only stale cells. Scatter Foliage From Layer is now a thin call into it. A `PCGVOLUME graph=` may name an `.ocbiome` for runtime procedural chunks (one instance, one owning chunk).
+- Guardrails: a per-cell instance cap, a memory estimate that refuses an over-cap setup before generating, and warnings for no `cullEndCm`, no LODs and unknown paint layers. See `docs/PCG.md` section 8.
+
 ### PCG graphs (UE parity wave 2, W3)
 
 - A `DOMAIN pcg` profile of the `.ocgraph` container carries typed point-set data flow (no new format), run by one C++ evaluator in `modules/world`: 29 nodes (samplers, filters, transforms, self-pruning, set operations, landscape/spline/actor filters, mesh and actor spawners, Subgraph, Loop), a per-node cache, cancellation, a time budget, diagnostics and validation. The `Aver.Pcg` hash and `Pcg.scatter` are ported bit for bit and checked against golden vectors generated from the F# module.

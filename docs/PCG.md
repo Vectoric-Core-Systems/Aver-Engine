@@ -178,6 +178,35 @@ Landscape-dependent nodes use `ILandscapeQuery` (`heightAt`, `normalAt`, `layerW
 
 **Not in v1:** hierarchical generation, runtime GPU point processing, PCG on arbitrary mesh surfaces beyond heightfield, spline and volume.
 
+## 8. Biomes and vegetation (W4)
+
+Status: assets, rule nodes, the biome-to-graph compiler, Generate Vegetation, the runtime chunk mode and the guardrails are built and unit-tested headless (`PcgBiomeTest`, `OcBiomeTest`, `OcFoliageTest`, `VegetationGenerateTest`). **Not built:** the Landscape-mode biome list, mask overlay, density heatmap and "Regenerate selected cells" UI, editor exposure of the new `.ocfoliage` fields, brush edits that write the override set, collision from the `.ocinst` flags, and the renderer use of `lodScaleBias`. Nothing ran in the editor or the game.
+
+**`.ocbiome`** (`aver::fmt::OcBiomeData`, text): one mask and a list of foliage entries.
+
+```
+OCBIOME 1
+NAME Pine Forest
+PRIORITY 2
+MASK layer name=Forest min=0.4 edge=0.3
+ENTRY foliage=Foliage/Pine.ocfoliage density=4 slope=0,35 height=0,9000 layer=Forest layerMin=0.5 clump=600,3,6 priority=2 prune=250
+ENTRY foliage=Foliage/Fern.ocfoliage density=30 noise=3000,0.4,0.9,7
+```
+
+The mask is `layer`, `noise`, `spline` or `volume`, each with a ramp `edge` and `invert=1`. A mask value between 0 and 1 keeps a candidate when a seeded per-point hash is below it, so across the ramp the points thin out at random: a biome and its inverse interleave and there is no line. `density` is instances per 100 m^2 (the unit a terrain layer's "Foliage per 100 m^2" uses); with `clump` it is the total, grouped round parents. `prune` defaults to the foliage type's `collisionRadiusCm`.
+
+**Rule nodes** (added to the table in section 7). `NoiseMask` (inside / outside by noise value), `EdgeFalloff` (the biome mask: `source=layer|noise|spline|volume`, `edge`, `invert`; kept points carry `mask`), `Clump` (each point becomes the parent of `min..max` children inside `radius`, optional sibling `spacing` and parent `chance`), `Compete` (overlap resolution across types: higher `priority` attribute wins, then the larger `radius` attribute; `maxRadius` bounds the cell margin). Slope, altitude and layer weight are the existing `SlopeFilter`, `HeightFilter` and `LayerWeightFilter`; `ProjectToSurface` gained `alignMax` (degrees).
+
+**Compiling a biome.** `pcgBuildBiomeGraph` turns biomes and their `.ocfoliage` types into one `DOMAIN pcg` graph: per entry a world grid at the density's spacing, jitter, optional clump, projection (align cap, ground offset), mask, slope, height, layer, noise, yaw and scale, then tags; every entry meets in one `Compete`, and each type has its own spawner. A biome therefore runs through the same evaluator, cell ownership and sinks as a hand graph. Changing the order of biomes or entries changes node ids and so seeds.
+
+**Foliage type fields** (additive in `.ocfoliage`; an older file reads the defaults, never zero): `cullStartCm`, `cullEndCm` (0 = never), `lodScaleBias` (1), `alignMaxAngleDeg` (90), `groundOffsetCm` (0, along world up), `collision` (none | trunk | full). The type's cull range, LOD bias and collision flag reach the `.ocinst` group (chunk `ICUL`, flag bits). `GameFoliage` reads the cull range: it keeps a quantised, seeded share of the group's rows in a cell between `cullStartCm` and `cullEndCm` by the cell's distance to the viewer and none past `cullEndCm`, and rebuilds when a cell crosses a quarter step. Collision and `lodScaleBias` are carried but nothing consumes them yet.
+
+**Generate Vegetation** (`VegetationGenerator`, `PcgVegetation.hpp`). Runs the biomes over an area cell by cell, writes a cell-sorted `.ocinst`, and keeps an `.ocveg` record: biomes, seed, area, cell size, output, an input hash (graph, seed, area, cell: a different hash means the table is stale) and the **manual override set**, `ERASE x y z r` stamps that drop generated rows and `ADD` rows for hand-placed ones. A regenerate re-runs the biomes and re-applies the overrides on the fresh result. Cells keep their results; after a sculpt or paint stroke `invalidate(box)` marks only the cells it reaches, and an edited biome changes the graph hash so every cell regenerates. `Scatter Foliage From Layer` is a thin call into this: the layer's foliage type, density and minimum weight make a one-entry biome saved beside the table as `<name>_vegetation.ocbiome`.
+
+**Runtime procedural mode.** A `PCGVOLUME` whose `graph` is a `.ocbiome` generates chunks from the biome: `GameStreaming` loads it with its foliage types and compiles it, one chunk is one PCG cell, and every instance belongs to exactly one chunk (`PcgBiomeTest` checks four neighbouring chunks against a whole-area run, clump and compete included). The landscape is the host's height function plus an optional layer-weight query (`GameStreaming::LayerWeightFn`, wired from `GameLandscape::layerWeightAtScene` in both hosts); without it layer masks read 0.
+
+**Guardrails.** `pcgEstimateBiome` before generating: candidates per cell, a byte estimate, and warnings for an entry with no `cullEndCm`, a mesh without LODs (a host callback), a candidate count over the cap and an unknown paint layer. `PcgGuardrails::maxInstancesPerCell` (default 250,000) refuses an over-cap setup before generation (`ignoreCaps` overrides) and caps each cell's result to the instances with the smallest seeds (the same ones every run). A streamed biome over the cap is not streamed and logs why.
+
 ## Related
 
 `docs/SCRIPTING_API.md` for the C# surface `Aver.Pcg.Apply` and rules built on it actually run against. `docs/ABI.md` for every other C seam, and where `aver_fw_*_sky_clouds` sits among them. `docs/CHUNKS.md` for why a per-position-only field (§4's `InfiniteSpec`) is the property that makes seeded, streamed generation possible in principle — chunk streaming itself is unbuilt; nothing in this document depends on it existing.
