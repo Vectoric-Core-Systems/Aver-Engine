@@ -624,7 +624,9 @@ bool saveAuthoredMesh(const std::string& path, const EditMesh& m, const SaveOpti
     const u64 hash = hashOcMesh(back);
     if (!saveOcMesh(path, d, why)) return false;
     std::ofstream side(path + ".edit", std::ios::binary | std::ios::trunc);
-    const std::string text = serializeEditMesh(m, hash);
+    EditMesh clean = m;
+    compact(clean);                                       // vertices an edit left behind are not worth keeping
+    const std::string text = serializeEditMesh(clean, hash);
     side.write(text.data(), static_cast<std::streamsize>(text.size()));
     if (!side) { setWhy(why, "the mesh was saved but " + path + ".edit could not be written"); return false; }
     return true;

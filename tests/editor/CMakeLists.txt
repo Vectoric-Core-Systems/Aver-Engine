@@ -11,6 +11,15 @@ target_include_directories(SnapshotUndoTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/
 target_link_libraries(SnapshotUndoTest PRIVATE Aver.Core)
 set_target_properties(SnapshotUndoTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# ModelingModelTest -- sandbox/src/ModelingModel.hpp (header-only, no ImGui): the Modeling mode's document, selection modes and their conversions,
+# every command with undo / redo, refusals that leave the document and history alone, tool parameters, UV commands, and the save / reopen story.
+if(TARGET Aver.Formats)
+  add_executable(ModelingModelTest src/ModelingModelTest.cpp)
+  target_include_directories(ModelingModelTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+  target_link_libraries(ModelingModelTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+  set_target_properties(ModelingModelTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
 # EditorPrefsTest -- the editor's own preferences store.
 #
 # It COMPILES the sandbox translation unit directly rather than linking a library, because the store
