@@ -108,9 +108,8 @@ struct SceneRenderLogState {
 static SceneRenderLogState g_sceneRenderLog;
 #endif  // AVER_MODULE_SCENE
 
-// Submits the frame: the editor scene, the level world, gizmos, and the overlays.
-void SandboxApp::onRender(Engine& e)  {
-    handleManip(e);
+// Whether the CPU timing facility runs this frame.
+void SandboxApp::updateCpuTimingEnable() {
     {
         // CPU span timing runs only while something reads it: the profiler panel, --gpu-timing, or
         // the lead-up to a power-of-two scene-walk log line (the report averages the last 30 walks).
@@ -123,11 +122,10 @@ void SandboxApp::onRender(Engine& e)  {
         wantCpuTiming = wantCpuTiming || nextReport - sceneWalkReports_ <= 32;
         cpuTimingSetEnabled(wantCpuTiming);
     }
-#if AVER_MODULE_LANDSCAPE
-    // Drains an undo/redo that changed terrain heights; deferred to here as the first point after
-    // those run that has a device (see GameLandscape::applyHeightRect's own comment).
-    landscape_.flushPendingInvalidate(e.device());
-#endif
+}
+
+// The project loading screen comes down once the draw count settles or the frame cap passes.
+void SandboxApp::tickProjectLoadingScreen() {
     // Loading screen comes down here, not when applyProject returned: holds until the draw count
     // settles so it covers the tail of the load, not just the head -- startupComplete() ticks the
     // same settle counters, so this is the one place deciding "finished".
@@ -147,7 +145,11 @@ void SandboxApp::onRender(Engine& e)  {
             projectLoading_.reset();
         }
     }
+}
+
+// The "Preparing level" toast while the ray-tracing structures build.
 #if AVER_MODULE_VOXI
+void SandboxApp::tickLevelPrepToast(Engine& e) {
     // After the loading screen closes the ray-tracing structures can still be building (bottom-level
     // builds are budgeted per frame), which read as an unexplained stutter. A notification says so when it
     // lasts past 0.3 s, and finishes when the builds are done. Interactive runs only.
@@ -184,13 +186,11 @@ void SandboxApp::onRender(Engine& e)  {
     } else {
         levelPrepArmed_ = false;
     }
+}
 #endif
-    // Restarts the GPU average once, when no load screen is up, so it covers steady state only.
-    if (!gpuTimingStartupReset_ && !projectLoading_) {
-        gpuTimingStartupReset_ = true;
-        e.device()->resetGpuTiming();
-    }
 
+// The start mode, wireframe and unlit switches, and the editor's own mesh objects.
+void SandboxApp::drawEditorObjects(Engine& e) {
     applyStartMode();
     e.device()->setWireframe(wireframe_);
     // UNLIT for the whole scene pass, alongside wireframe (shared_prelude.hlsl's `gMaterial.z >
@@ -231,7 +231,11 @@ void SandboxApp::onRender(Engine& e)  {
         if (i == sel_) selectionOutline_ = w, selectionMesh_ = o.mesh, selectionMeshId_ = 0,
                        hasSelection_ = true;
     }
+}
 
+// The water surface.
+#if AVER_MODULE_FLUIDS
+void SandboxApp::drawWater(Engine& e) {
     // ---- the simulated fluid, drawn like every other surface in the level ----
     // Went from an ordinary opaque mesh, to its own FluidScene::transparentPass ("tinted plastic",
     // invisible to shadows/TLAS/GI), to this: a normal TRANSLUCENT draw through
@@ -240,7 +244,6 @@ void SandboxApp::onRender(Engine& e)  {
     // averVolumeThickness needs a real back face to trace for path length/absorption.
     // NOT GATED ON hideEditorScene: authored level content, stays visible through Play like the
     // landscape below. Material resolution, the fallback look and placement live in GameWater::draw.
-#if AVER_MODULE_FLUIDS
     {
         pbr::MaterialSystem* fluidMaterials = nullptr;
 #if AVER_MODULE_PBR && AVER_MODULE_VOXI
@@ -248,9 +251,12 @@ void SandboxApp::onRender(Engine& e)  {
 #endif
         water_.draw(*e.device(), content_, fluidMaterials);
     }
+}
 #endif
 
+// Landscape ring tiles and draw.
 #if AVER_MODULE_LANDSCAPE
+void SandboxApp::drawLandscape(Engine& e) {
     // Landscape pass: ring update then one draw through game::GameLandscape, hand-rolled like the
     // objects_ loop above (not an IRenderFeature). Not gated on hideEditorScene: real environment
     // geometry, stays visible through Play like the sky and fog.
@@ -262,9 +268,12 @@ void SandboxApp::onRender(Engine& e)  {
         landscape_.updateRingTiles(e.device(), eye_.x, eye_.y, &content_, landscapeMaterials);
         landscape_.draw(*e.device(), eye_, viewProj_, vpH_, &content_, landscapeMaterials, playView_.fovYRad);
     }
+}
 #endif
 
+// Lights, fog volumes and decals handed to Voxi.
 #if AVER_MODULE_SCENE && AVER_MODULE_VOXI
+void SandboxApp::updateSceneFeeds() {
     // CLight entities -> Voxi's lamp list and the path tracer's lights, before the frame's draws.
     sceneLightFeed_.update(scene::World::instance(), voxiRenderer_, ptSceneView_.get(), project_.contentDir());
     envFxFeed_.update(voxiRenderer_, eye_);   // G4 R8: local fog volumes
@@ -272,12 +281,12 @@ void SandboxApp::onRender(Engine& e)  {
     if (prefabModel_.contentDir() != project_.contentDir()) prefabModel_.setContentDir(project_.contentDir());
     decalImages_.setContentDir(project_.contentDir());
     sceneDecalFeed_.update(scene::World::instance(), voxiRenderer_, decalImages_.loader());
+}
 #endif
 
+// One frame of the Play mobility tracker, before either walk asks it anything.
 #if AVER_MODULE_SCENE
-    // Scene-entity pass: draws every live entity carrying a CMeshRenderer.
-    {
-        scene::World& w = scene::World::instance();
+void SandboxApp::beginPlayMobilityFrame() {
         // One frame of the Play mobility tracker (PlayMobility.hpp), before either walk asks it
         // anything. The possessed pawn's whole tree is movable from its first frame: the viewmodel
         // hangs off its camera and moves whenever the player looks around.
@@ -291,11 +300,13 @@ void SandboxApp::onRender(Engine& e)  {
 #endif
             playMobility_.beginFrame(movableRoot);
         }
-        // The three drawn/culled/owner-hidden counters belong to game::drawWorld now: it fills a
-        // SceneDrawStats the editor reads back (`colourStats` below) rather than incrementing
-        // locals itself. 3B's per-frame direct-route tallies (draws delivered, multi-part count for
-        // culled entities) moved with them into ColourWalk, the hook context below.
+}
+#endif
+
+// This frame's LOD counters from zero, and the per-cluster cut cache sweep.
+#if AVER_MODULE_SCENE
 #if AVER_MODULE_TRIFACTOR
+void SandboxApp::resetLodFrameState(Engine& e) {
         lodStats_ = LodSelectStats{};   // this frame's counters, from zero -- see the struct comment
         lodClusterStats_ = LodClusterStats{};
         lodMeshShaderStats_ = LodMeshShaderStats{};
@@ -326,12 +337,14 @@ void SandboxApp::onRender(Engine& e)  {
                         voxiRenderer_.bindGiResources(*giRes, kv.second.bindingSet, kClusterGiSrvBase);
         }
 #endif
+}
+#endif
 #endif
 
-        // The six frustum planes are no longer derived here: both walks are game::drawWorld now,
-        // which builds them from viewProj with the same two dozen adds (GameRender.cpp) -- one
-        // spelling instead of two that could drift.
+// The depth prepass: the colour walk's own function, run a second time (--depth-prepass).
+#if AVER_MODULE_SCENE
 #if AVER_MODULE_VOXI
+void SandboxApp::drawDepthPrepass(Engine& e) {
         // ---- depth prepass phase: the COLOUR WALK'S OWN FUNCTION, run a second time ----
         // ONE ScopedGpuStat, not one per draw: span budget is 64/frame and Electric Dreams submits
         // over a thousand instances -- per-draw markers would also measure wrong, folding colour
@@ -475,7 +488,134 @@ void SandboxApp::onRender(Engine& e)  {
                                       prepassMaterials, skinnedScene_.get(), popt);
             }
         }
-#endif // AVER_MODULE_VOXI
+}
+#endif
+#endif
+
+// The scene-render and LOD log lines, written when their numbers changed.
+#if AVER_MODULE_SCENE
+void SandboxApp::logSceneRenderStats(const aver::game::SceneDrawStats& colourStats) {
+        // Read back out of SceneDrawStats, not counted here: suppressLog above stops the library
+        // writing its own "[Game] scene-render:" line so the editor can write this one instead.
+        // Compared against the last line PRINTED (g_sceneRenderLog), not colourStats' `last*` trio,
+        // since drawWorld updates that trio before returning.
+        //
+        // THE LINE IS THROTTLED, THE STATE IS NOT. lastSceneDrawn_ is read every frame by
+        // startupComplete()'s settle detector, so it (and its two siblings) follow the counts on
+        // every frame exactly as before, whether or not a line is written. What is throttled is the
+        // WRITE: over a big level a moving camera changes these counts nearly every frame, and each
+        // AVER_* line takes the log mutex, flushes and feeds the Output Log. The line is compared
+        // against what the LAST PRINTED line said (not against last frame), so a change that is held
+        // back is still owed: once the camera settles, the next line is at most a second away and says
+        // the final numbers. The first line always prints, and so does every change in a bounded run
+        // (--frames N, the gates and captures), where frames are not one-to-one with wall time and the
+        // log is what a script reads.
+        const auto sceneNow = std::chrono::steady_clock::now();
+        if ((colourStats.drawn != g_sceneRenderLog.drawn || colourStats.culled != g_sceneRenderLog.culled ||
+             colourStats.ownerHidden != g_sceneRenderLog.ownerHidden) &&
+            (g_sceneRenderLog.drawn < 0 || maxFrames_ != 0 ||
+             sceneNow - g_sceneRenderLog.at >= std::chrono::seconds(1))) {
+            // F4 (occlusion-fix-plan.md): `culled` now counts an occlusion-culled entity too, not
+            // only frustum-culled -- previously the occlusion branch incremented no counter at all,
+            // so its contribution was invisible here. Relabelled from "frustum-culled" to plain
+            // "culled" to match (see chooseRoute()'s priority ordering for which counter an entity
+            // BOTH culled and owner-hidden lands in).
+            AVER_INFO("[Sandbox] scene-render: {} spawned CMeshRenderer entit{} drawn, {} culled, {} owner-hidden",
+                      colourStats.drawn, colourStats.drawn == 1 ? "y" : "ies", colourStats.culled,
+                      colourStats.ownerHidden);
+            g_sceneRenderLog.drawn = colourStats.drawn;
+            g_sceneRenderLog.culled = colourStats.culled;
+            g_sceneRenderLog.ownerHidden = colourStats.ownerHidden;
+            g_sceneRenderLog.at = sceneNow;
+        }
+        lastSceneDrawn_ = colourStats.drawn;
+        lastSceneCulled_ = colourStats.culled;
+        lastSceneOwnerHidden_ = colourStats.ownerHidden;
+#if AVER_MODULE_TRIFACTOR
+        // Greppable `[LOD-SELECT]`, only when the tuple changed. trianglesBeforeLod0 vs
+        // trianglesAfterLevel predicts frame time; the cluster-cull counters are real telemetry
+        // against the chosen level's meshlets, informational only (ClusterAdapt.hpp).
+        if (lodSelectEnabled_ &&
+            (lodStats_.instancesTested != lastLoggedLodStats_.instancesTested ||
+             lodStats_.levelCollapsed != lastLoggedLodStats_.levelCollapsed ||
+             lodStats_.trianglesAfterLevel != lastLoggedLodStats_.trianglesAfterLevel ||
+             lodStats_.frustumCulled != lastLoggedLodStats_.frustumCulled ||
+             lodStats_.coneCulled != lastLoggedLodStats_.coneCulled)) {
+            AVER_INFO("[LOD-SELECT] instances={} levelCollapsed={} clustersTested={} "
+                      "frustumCulled(info)={} coneCulled(info)={} trisBefore={} trisAfter={}",
+                      lodStats_.instancesTested, lodStats_.levelCollapsed, lodStats_.clustersTested,
+                      lodStats_.frustumCulled, lodStats_.coneCulled,
+                      lodStats_.trianglesBeforeLod0, lodStats_.trianglesAfterLevel);
+            lastLoggedLodStats_ = lodStats_;
+        }
+        // `[LOD-CLUSTER]`, greppable. `distinctLevelsMax`: if it never exceeds 1, every instance's
+        // cut collapsed to one level (discrete LOD with extra steps). `rebuilds`/`hits`/`rebuildMs`
+        // are the real CPU-assembly cost. `instancesShortcut` (the instance-level shortcut's count)
+        // is NOT included in `instancesTested`/`clustersTested` -- sum both for the true total.
+        if (lodPerClusterEnabled_ &&
+            (lodClusterStats_.instancesTested != lastLoggedLodClusterStats_.instancesTested ||
+             lodClusterStats_.clustersDrawn != lastLoggedLodClusterStats_.clustersDrawn ||
+             lodClusterStats_.trianglesDrawn != lastLoggedLodClusterStats_.trianglesDrawn ||
+             lodClusterStats_.instancesMixedLevels != lastLoggedLodClusterStats_.instancesMixedLevels ||
+             lodClusterStats_.instancesShortcut != lastLoggedLodClusterStats_.instancesShortcut ||
+             lodClusterStats_.rebuilds != lastLoggedLodClusterStats_.rebuilds)) {
+            AVER_INFO("[LOD-CLUSTER] instances={} instancesShortcut={} clustersTested={} "
+                      "frustumCulled={} coneCulled={} lodRejected={} clustersDrawn={} trisBefore={} "
+                      "trisDrawn={} instancesMixedLevels={} distinctLevelsMax={} rebuilds={} hits={} "
+                      "rebuildIdx={} rebuildMs={:.3f}",
+                      lodClusterStats_.instancesTested, lodClusterStats_.instancesShortcut,
+                      lodClusterStats_.clustersTested,
+                      lodClusterStats_.frustumCulled, lodClusterStats_.coneCulled,
+                      lodClusterStats_.lodRejected, lodClusterStats_.clustersDrawn,
+                      lodClusterStats_.trianglesBeforeLod0, lodClusterStats_.trianglesDrawn,
+                      lodClusterStats_.instancesMixedLevels, lodClusterStats_.maxDistinctLevelsSeen,
+                      lodClusterStats_.rebuilds, lodClusterStats_.cacheHits,
+                      lodClusterStats_.rebuildIndices, lodClusterStats_.rebuildMs);
+            lastLoggedLodClusterStats_ = lodClusterStats_;
+        }
+        // `[LOD-MESH-SHADER]`, greppable, same log-on-change discipline. `clustersDispatched` is
+        // real, the exact clusterCount every dispatchMeshClusters call used; `survivors`/
+        // `trianglesDrawn`/`distinctLevelsMax` are CPU-mirrored telemetry sampled every 64 frames.
+        if (lodMeshShaderEnabled_ &&
+            (lodMeshShaderStats_.instancesTested != lastLoggedLodMeshShaderStats_.instancesTested ||
+             lodMeshShaderStats_.clustersDispatched != lastLoggedLodMeshShaderStats_.clustersDispatched ||
+             lodMeshShaderStats_.survivors != lastLoggedLodMeshShaderStats_.survivors ||
+             lodMeshShaderStats_.instancesMixedLevels != lastLoggedLodMeshShaderStats_.instancesMixedLevels ||
+             lodMeshShaderStats_.instancesShortcut != lastLoggedLodMeshShaderStats_.instancesShortcut)) {
+            AVER_INFO("[LOD-MESH-SHADER] pipelineReady={} instances={} clustersDispatched={} "
+                      "survivors(sampled)={} trisDrawn(sampled)={} instancesMixedLevels(sampled)={} "
+                      "distinctLevelsMax(sampled)={} shortcut(sampled)={}",
+                      lodMeshPipelineReady_, lodMeshShaderStats_.instancesTested,
+                      lodMeshShaderStats_.clustersDispatched, lodMeshShaderStats_.survivors,
+                      lodMeshShaderStats_.trianglesDrawn, lodMeshShaderStats_.instancesMixedLevels,
+                      lodMeshShaderStats_.maxDistinctLevelsSeen, lodMeshShaderStats_.instancesShortcut);
+            lastLoggedLodMeshShaderStats_ = lodMeshShaderStats_;
+        }
+#endif
+}
+#endif
+
+// The scene-entity pass: every live entity carrying a CMeshRenderer.
+#if AVER_MODULE_SCENE
+void SandboxApp::drawSceneEntities(Engine& e) {
+    // Scene-entity pass: draws every live entity carrying a CMeshRenderer.
+    {
+        scene::World& w = scene::World::instance();
+    beginPlayMobilityFrame();
+        // The three drawn/culled/owner-hidden counters belong to game::drawWorld now: it fills a
+        // SceneDrawStats the editor reads back (`colourStats` below) rather than incrementing
+        // locals itself. 3B's per-frame direct-route tallies (draws delivered, multi-part count for
+        // culled entities) moved with them into ColourWalk, the hook context below.
+#if AVER_MODULE_TRIFACTOR
+    resetLodFrameState(e);
+#endif
+
+        // The six frustum planes are no longer derived here: both walks are game::drawWorld now,
+        // which builds them from viewProj with the same two dozen adds (GameRender.cpp) -- one
+        // spelling instead of two that could drift.
+#if AVER_MODULE_VOXI
+    drawDepthPrepass(e);
+#endif
 
         // CPU-bound or GPU-bound? --frame-time reports whole frames from the CPU, and GPU-wait
         // looks identical to CPU work, so this timer (and the streamer's below) answer it directly.
@@ -1789,105 +1929,13 @@ void SandboxApp::onRender(Engine& e)  {
             }
             ++sceneWalkReports_;
         }
-        // Read back out of SceneDrawStats, not counted here: suppressLog above stops the library
-        // writing its own "[Game] scene-render:" line so the editor can write this one instead.
-        // Compared against the last line PRINTED (g_sceneRenderLog), not colourStats' `last*` trio,
-        // since drawWorld updates that trio before returning.
-        //
-        // THE LINE IS THROTTLED, THE STATE IS NOT. lastSceneDrawn_ is read every frame by
-        // startupComplete()'s settle detector, so it (and its two siblings) follow the counts on
-        // every frame exactly as before, whether or not a line is written. What is throttled is the
-        // WRITE: over a big level a moving camera changes these counts nearly every frame, and each
-        // AVER_* line takes the log mutex, flushes and feeds the Output Log. The line is compared
-        // against what the LAST PRINTED line said (not against last frame), so a change that is held
-        // back is still owed: once the camera settles, the next line is at most a second away and says
-        // the final numbers. The first line always prints, and so does every change in a bounded run
-        // (--frames N, the gates and captures), where frames are not one-to-one with wall time and the
-        // log is what a script reads.
-        const auto sceneNow = std::chrono::steady_clock::now();
-        if ((colourStats.drawn != g_sceneRenderLog.drawn || colourStats.culled != g_sceneRenderLog.culled ||
-             colourStats.ownerHidden != g_sceneRenderLog.ownerHidden) &&
-            (g_sceneRenderLog.drawn < 0 || maxFrames_ != 0 ||
-             sceneNow - g_sceneRenderLog.at >= std::chrono::seconds(1))) {
-            // F4 (occlusion-fix-plan.md): `culled` now counts an occlusion-culled entity too, not
-            // only frustum-culled -- previously the occlusion branch incremented no counter at all,
-            // so its contribution was invisible here. Relabelled from "frustum-culled" to plain
-            // "culled" to match (see chooseRoute()'s priority ordering for which counter an entity
-            // BOTH culled and owner-hidden lands in).
-            AVER_INFO("[Sandbox] scene-render: {} spawned CMeshRenderer entit{} drawn, {} culled, {} owner-hidden",
-                      colourStats.drawn, colourStats.drawn == 1 ? "y" : "ies", colourStats.culled,
-                      colourStats.ownerHidden);
-            g_sceneRenderLog.drawn = colourStats.drawn;
-            g_sceneRenderLog.culled = colourStats.culled;
-            g_sceneRenderLog.ownerHidden = colourStats.ownerHidden;
-            g_sceneRenderLog.at = sceneNow;
-        }
-        lastSceneDrawn_ = colourStats.drawn;
-        lastSceneCulled_ = colourStats.culled;
-        lastSceneOwnerHidden_ = colourStats.ownerHidden;
-#if AVER_MODULE_TRIFACTOR
-        // Greppable `[LOD-SELECT]`, only when the tuple changed. trianglesBeforeLod0 vs
-        // trianglesAfterLevel predicts frame time; the cluster-cull counters are real telemetry
-        // against the chosen level's meshlets, informational only (ClusterAdapt.hpp).
-        if (lodSelectEnabled_ &&
-            (lodStats_.instancesTested != lastLoggedLodStats_.instancesTested ||
-             lodStats_.levelCollapsed != lastLoggedLodStats_.levelCollapsed ||
-             lodStats_.trianglesAfterLevel != lastLoggedLodStats_.trianglesAfterLevel ||
-             lodStats_.frustumCulled != lastLoggedLodStats_.frustumCulled ||
-             lodStats_.coneCulled != lastLoggedLodStats_.coneCulled)) {
-            AVER_INFO("[LOD-SELECT] instances={} levelCollapsed={} clustersTested={} "
-                      "frustumCulled(info)={} coneCulled(info)={} trisBefore={} trisAfter={}",
-                      lodStats_.instancesTested, lodStats_.levelCollapsed, lodStats_.clustersTested,
-                      lodStats_.frustumCulled, lodStats_.coneCulled,
-                      lodStats_.trianglesBeforeLod0, lodStats_.trianglesAfterLevel);
-            lastLoggedLodStats_ = lodStats_;
-        }
-        // `[LOD-CLUSTER]`, greppable. `distinctLevelsMax`: if it never exceeds 1, every instance's
-        // cut collapsed to one level (discrete LOD with extra steps). `rebuilds`/`hits`/`rebuildMs`
-        // are the real CPU-assembly cost. `instancesShortcut` (the instance-level shortcut's count)
-        // is NOT included in `instancesTested`/`clustersTested` -- sum both for the true total.
-        if (lodPerClusterEnabled_ &&
-            (lodClusterStats_.instancesTested != lastLoggedLodClusterStats_.instancesTested ||
-             lodClusterStats_.clustersDrawn != lastLoggedLodClusterStats_.clustersDrawn ||
-             lodClusterStats_.trianglesDrawn != lastLoggedLodClusterStats_.trianglesDrawn ||
-             lodClusterStats_.instancesMixedLevels != lastLoggedLodClusterStats_.instancesMixedLevels ||
-             lodClusterStats_.instancesShortcut != lastLoggedLodClusterStats_.instancesShortcut ||
-             lodClusterStats_.rebuilds != lastLoggedLodClusterStats_.rebuilds)) {
-            AVER_INFO("[LOD-CLUSTER] instances={} instancesShortcut={} clustersTested={} "
-                      "frustumCulled={} coneCulled={} lodRejected={} clustersDrawn={} trisBefore={} "
-                      "trisDrawn={} instancesMixedLevels={} distinctLevelsMax={} rebuilds={} hits={} "
-                      "rebuildIdx={} rebuildMs={:.3f}",
-                      lodClusterStats_.instancesTested, lodClusterStats_.instancesShortcut,
-                      lodClusterStats_.clustersTested,
-                      lodClusterStats_.frustumCulled, lodClusterStats_.coneCulled,
-                      lodClusterStats_.lodRejected, lodClusterStats_.clustersDrawn,
-                      lodClusterStats_.trianglesBeforeLod0, lodClusterStats_.trianglesDrawn,
-                      lodClusterStats_.instancesMixedLevels, lodClusterStats_.maxDistinctLevelsSeen,
-                      lodClusterStats_.rebuilds, lodClusterStats_.cacheHits,
-                      lodClusterStats_.rebuildIndices, lodClusterStats_.rebuildMs);
-            lastLoggedLodClusterStats_ = lodClusterStats_;
-        }
-        // `[LOD-MESH-SHADER]`, greppable, same log-on-change discipline. `clustersDispatched` is
-        // real, the exact clusterCount every dispatchMeshClusters call used; `survivors`/
-        // `trianglesDrawn`/`distinctLevelsMax` are CPU-mirrored telemetry sampled every 64 frames.
-        if (lodMeshShaderEnabled_ &&
-            (lodMeshShaderStats_.instancesTested != lastLoggedLodMeshShaderStats_.instancesTested ||
-             lodMeshShaderStats_.clustersDispatched != lastLoggedLodMeshShaderStats_.clustersDispatched ||
-             lodMeshShaderStats_.survivors != lastLoggedLodMeshShaderStats_.survivors ||
-             lodMeshShaderStats_.instancesMixedLevels != lastLoggedLodMeshShaderStats_.instancesMixedLevels ||
-             lodMeshShaderStats_.instancesShortcut != lastLoggedLodMeshShaderStats_.instancesShortcut)) {
-            AVER_INFO("[LOD-MESH-SHADER] pipelineReady={} instances={} clustersDispatched={} "
-                      "survivors(sampled)={} trisDrawn(sampled)={} instancesMixedLevels(sampled)={} "
-                      "distinctLevelsMax(sampled)={} shortcut(sampled)={}",
-                      lodMeshPipelineReady_, lodMeshShaderStats_.instancesTested,
-                      lodMeshShaderStats_.clustersDispatched, lodMeshShaderStats_.survivors,
-                      lodMeshShaderStats_.trianglesDrawn, lodMeshShaderStats_.instancesMixedLevels,
-                      lodMeshShaderStats_.maxDistinctLevelsSeen, lodMeshShaderStats_.instancesShortcut);
-            lastLoggedLodMeshShaderStats_ = lodMeshShaderStats_;
-        }
-#endif
+    logSceneRenderStats(colourStats);
     }
+}
 #endif
+
+// The selected meshes' boundary and crease edges, as lines; returns whether a Play session is active.
+bool SandboxApp::drawSelectionOutline(Engine& e) {
     // Selection outline: the selected mesh's boundary and crease edges, as LINES.
     //
     // USED TO BE A drawMesh, which is why there was no outline: drawMesh is gated on
@@ -1936,7 +1984,12 @@ void SandboxApp::onRender(Engine& e)  {
     }
     hasSelection_ = false;
     selectionOutlines_.clear();
+    return anyPlaying;
+}
 
+// The Player Start's wire capsule, facing arrow and billboard sprite.
+#if AVER_MODULE_SCENE
+void SandboxApp::drawPlayerStartMarker(Engine& e, const bool anyPlaying) {
     // ---- THE PLAYER START'S MARKER: a wire capsule, a facing arrow and a billboard sprite, like
     // Unreal's APlayerStart ----
     // Queued every frame rather than kept as scene state, matching the rest of the editor's chrome.
@@ -1947,7 +2000,6 @@ void SandboxApp::onRender(Engine& e)  {
     // viewportIconsReady_ gates only the SPRITE below (it needs the icon renderer and its texture);
     // the capsule/arrow are ordinary line meshes and draw whenever the marker itself should be
     // visible, the same as the gizmo or the grid.
-#if AVER_MODULE_SCENE
     if (!noEditorChrome_ && !anyPlaying && playerStart_ != scene::kInvalidEntity) {
         const scene::World& psw = scene::World::instance();
         if (psw.valid(playerStart_)) {
@@ -1976,24 +2028,12 @@ void SandboxApp::onRender(Engine& e)  {
             }
         }
     }
+}
 #endif
 
-    e.device()->setWireframe(false);
-    // Cleared with wireframe, and for the same reason: both are sticky device state, so leaving
-    // unlit on here would flatten the grid, the gizmo and every other piece of chrome drawn
-    // after the scene.
-    e.device()->setUnlit(false);
-    // Explicit, not relying on the selection outline/marker above resetting it themselves: the grid,
-    // nav mesh and collider overlay below must stay hairline-thin regardless of what drew before them.
-    e.device()->setLineWidth(1.0f);
-#if AVER_MODULE_SCENE
-    drawSequencePath(e);
-#endif
-    if (showGrid_ && !noEditorChrome_) {
-        const Mat4 g = Mat4::identity();
-        e.device()->drawLines(gridMesh_, &g.m[0][0]);
-    }
+// The baked navigation mesh.
 #if AVER_MODULE_SYNAPSE
+void SandboxApp::drawNavMesh(Engine& e) {
     if (showNav_ && navMesh_ && !noEditorChrome_) {
         // Already in world space -- buildNavOverlay emits absolute cell corners, because a
         // grid has an origin of its own and folding it into a matrix would mean two places
@@ -2001,8 +2041,12 @@ void SandboxApp::onRender(Engine& e)  {
         const Mat4 n = Mat4::identity();
         e.device()->drawLines(navMesh_, &n.m[0][0]);
     }
+}
 #endif
+
+// The AI debug lines.
 #if AVER_MODULE_SYNAPSE_SCENE
+void SandboxApp::drawAiDebug(Engine& e) {
     // AI debug overlays: collect this frame's lines and labels, upload the lines like the navmesh, draw them.
     if (aiDebugMesh_) { e.device()->destroyLineMesh(aiDebugMesh_); aiDebugMesh_ = 0; }
     editor::aiDebugCollect(aiDebug_);
@@ -2014,8 +2058,12 @@ void SandboxApp::onRender(Engine& e)  {
             if (aiDebugMesh_) e.device()->drawLines(aiDebugMesh_, &ai.m[0][0]);
         }
     }
+}
 #endif
+
+// Motion debug, modeling lines, PCG debug points and camera rig debug.
 #if AVER_MODULE_SCENE
+void SandboxApp::drawMotionModelingCameraDebug(Engine& e) {
     // Motion-matching overlay (Show > Motion Matching): the same line-mesh route, world-space vertices.
     if (motionDebugMesh_) { e.device()->destroyLineMesh(motionDebugMesh_); motionDebugMesh_ = 0; }
     editor::motionDebugCollect(motionDebug_, motionDebugFrame_);
@@ -2037,8 +2085,12 @@ void SandboxApp::onRender(Engine& e)  {
         if (cameraDebugMesh_) e.device()->drawLines(cameraDebugMesh_, &camId.m[0][0]);
     }
 #endif
+}
 #endif
+
+// Soft-body debug lines.
 #if AVER_MODULE_SOFTBODY_SCENE
+void SandboxApp::drawSoftBodyDebug(Engine& e) {
     // Soft-body overlay (Show > Soft Bodies) and the paint tool's pins and brush: the same line-mesh route, world space.
     if (softBodyDebugMesh_) { e.device()->destroyLineMesh(softBodyDebugMesh_); softBodyDebugMesh_ = 0; }
     softBodyDebug_.selected = static_cast<u32>(selEntity_);
@@ -2072,9 +2124,12 @@ void SandboxApp::onRender(Engine& e)  {
         const Mat4 sbId = Mat4::identity();
         if (softBodyDebugMesh_) e.device()->drawLines(softBodyDebugMesh_, &sbId.m[0][0]);
     }
+}
 #endif
 
+// Vehicle debug lines.
 #if AVER_MODULE_VEHICLE_SCENE
+void SandboxApp::drawVehicleDebug(Engine& e) {
     // Vehicle overlay (Show > Vehicles) and the .ocvehicle editor's spec preview over the selected entity: the same line-mesh route, world space.
     if (vehicleDebugMesh_) { e.device()->destroyLineMesh(vehicleDebugMesh_); vehicleDebugMesh_ = 0; }
     {
@@ -2094,8 +2149,12 @@ void SandboxApp::onRender(Engine& e)  {
         const Mat4 vehId = Mat4::identity();
         if (vehicleDebugMesh_) e.device()->drawLines(vehicleDebugMesh_, &vehId.m[0][0]);
     }
+}
 #endif
+
+// Markers for class placements.
 #if AVER_MODULE_FRAMEWORK
+void SandboxApp::drawClassMarkers(Engine& e) {
     // Class-root markers: a class actor can have no mesh at all, so each live root gets three axis lines to be
     // seen and clicked (pick() tests the same box). Edit mode only; world-space vertices, so identity.
     if (classMarkerMesh_) { e.device()->destroyLineMesh(classMarkerMesh_); classMarkerMesh_ = 0; }
@@ -2121,12 +2180,12 @@ void SandboxApp::onRender(Engine& e)  {
             if (classMarkerMesh_) e.device()->drawLines(classMarkerMesh_, &cmId.m[0][0]);
         }
     }
+}
 #endif
-#if AVER_MODULE_FRAMEWORK
-    // Scripts' DebugDraw lines, then aged by this frame (drawn under noEditorChrome_ too: they are the game's).
-    game::drawScriptDebugLines(e.device(), scriptDebugMesh_, e.time().dt);
-#endif
+
+// Physics debug, hair debug and the collider overlay.
 #if AVER_MODULE_PHYSICS
+void SandboxApp::drawPhysicsDebug(Engine& e) {
     // Show > Physics: collect, upload and draw Jolt's debug lines in one call (nothing drawn under noEditorChrome_).
     editor::physicsDebugDraw(e.device(), physicsDebug_, eye_, physicsDebugFrame_, physicsDebugMesh_, noEditorChrome_);
 #if AVER_MODULE_HAIR_SCENE
@@ -2145,16 +2204,11 @@ void SandboxApp::onRender(Engine& e)  {
         if (colliderMesh_) e.device()->drawLines(colliderMesh_, &cm.m[0][0]);
         if (colliderMoverMesh_) e.device()->drawLines(colliderMoverMesh_, &cm.m[0][0]);
     }
+}
 #endif
-#if AVER_MODULE_LANDSCAPE && AVER_MODULE_FLUIDS
-    drawWaterBodies(e);   // wave3: rebuilds edited rivers / lakes (any mode), draws the Water tab's handles
-#endif
-    // Show > Collision Shapes and the .ocshape tab's preview: shape-accurate wire for the selected entity's body and the moving ones (its mesh is freed and rebuilt each call).
-#if AVER_MODULE_SCENE
-    editor::collisionShapeOverlayRender(e, static_cast<u32>(sel_ == kSelScene ? selEntity_ : scene::kInvalidEntity), noEditorChrome_);
-#else
-    editor::collisionShapeOverlayRender(e, 0xFFFFFFFFu, noEditorChrome_);
-#endif
+
+// The gizmo, post-volume overlay, decal gizmo and sculpt cursor.
+void SandboxApp::drawEditorGizmos(Engine& e) {
     // GIZMO AND SCULPT CURSOR are chrome too -- and the gizmo is the loudest of the lot, since
     // it draws on top of geometry by design.
     if (!noEditorChrome_) {
@@ -2169,7 +2223,10 @@ void SandboxApp::onRender(Engine& e)  {
         drawSculptCursor(e);
 #endif
     }
-    buildUI(e);
+}
+
+// The debug overlays' text labels.
+void SandboxApp::drawDebugLabels() {
 #if AVER_MODULE_SYNAPSE_SCENE && AVER_WITH_IMGUI
     if (aiDebug_.any() && !noEditorChrome_)
         editor::aiDebugDrawLabels(synapse::aiDebug(), viewProj_, static_cast<f32>(vpX_), static_cast<f32>(vpY_),
@@ -2190,18 +2247,10 @@ void SandboxApp::onRender(Engine& e)  {
         editor::vehicleDebugDrawLabels(vehicleDebugFrame_, viewProj_, static_cast<f32>(vpX_), static_cast<f32>(vpY_),
                                        static_cast<f32>(vpW_), static_cast<f32>(vpH_), eye_, vehicleDebug_.labelMaxDistanceCm);
 #endif
-#if AVER_WITH_IMGUI
-#if AVER_MODULE_PHYSICS
-    if (physicsDebug_.labels && !noEditorChrome_)
-        editor::physicsDebugDrawLabels(physicsDebugFrame_, viewProj_, static_cast<f32>(vpX_), static_cast<f32>(vpY_),
-                                       static_cast<f32>(vpW_), static_cast<f32>(vpH_), eye_, physicsDebug_.radiusCm);
-#endif
-    uiReg_.endFrame();
-#endif
-    submitGameUi(e);
-    // Before captureCheck, because both use the device's single capture slot and the draw test
-    // finishes inside the first dozen frames while the ordinary probe fires near the last.
-    skinDrawCheck(e);
+}
+
+// --refl-test: drives the ray-tracing switch and the beacon from the schedule.
+void SandboxApp::tickReflectionTest(Engine& e) {
     if (refl_ && !refl_->finished()) {
 #if AVER_MODULE_VOXI
         // The schedule owns both switches, because the experiment IS the pair of them: the same
@@ -2218,6 +2267,116 @@ void SandboxApp::onRender(Engine& e)  {
             objects_[reflBeaconIndex_].visible = refl_->beaconVisible();
         refl_->tick(e, vpX_, vpY_, vpW_, vpH_);
     }
+}
+
+// Submits the frame: the editor scene, the level world, gizmos, and the overlays.
+void SandboxApp::onRender(Engine& e)  {
+    handleManip(e);
+    updateCpuTimingEnable();
+#if AVER_MODULE_LANDSCAPE
+    // Drains an undo/redo that changed terrain heights; deferred to here as the first point after
+    // those run that has a device (see GameLandscape::applyHeightRect's own comment).
+    landscape_.flushPendingInvalidate(e.device());
+#endif
+    tickProjectLoadingScreen();
+#if AVER_MODULE_VOXI
+    tickLevelPrepToast(e);
+#endif
+    // Restarts the GPU average once, when no load screen is up, so it covers steady state only.
+    if (!gpuTimingStartupReset_ && !projectLoading_) {
+        gpuTimingStartupReset_ = true;
+        e.device()->resetGpuTiming();
+    }
+
+    drawEditorObjects(e);
+
+#if AVER_MODULE_FLUIDS
+    drawWater(e);
+#endif
+
+#if AVER_MODULE_LANDSCAPE
+    drawLandscape(e);
+#endif
+
+#if AVER_MODULE_SCENE && AVER_MODULE_VOXI
+    updateSceneFeeds();
+#endif
+
+#if AVER_MODULE_SCENE
+    drawSceneEntities(e);
+#endif
+    const bool anyPlaying = drawSelectionOutline(e);
+
+#if AVER_MODULE_SCENE
+    drawPlayerStartMarker(e, anyPlaying);
+#endif
+
+    e.device()->setWireframe(false);
+    // Cleared with wireframe, and for the same reason: both are sticky device state, so leaving
+    // unlit on here would flatten the grid, the gizmo and every other piece of chrome drawn
+    // after the scene.
+    e.device()->setUnlit(false);
+    // Explicit, not relying on the selection outline/marker above resetting it themselves: the grid,
+    // nav mesh and collider overlay below must stay hairline-thin regardless of what drew before them.
+    e.device()->setLineWidth(1.0f);
+#if AVER_MODULE_SCENE
+    drawSequencePath(e);
+#endif
+    if (showGrid_ && !noEditorChrome_) {
+        const Mat4 g = Mat4::identity();
+        e.device()->drawLines(gridMesh_, &g.m[0][0]);
+    }
+#if AVER_MODULE_SYNAPSE
+    drawNavMesh(e);
+#endif
+#if AVER_MODULE_SYNAPSE_SCENE
+    drawAiDebug(e);
+#endif
+#if AVER_MODULE_SCENE
+    drawMotionModelingCameraDebug(e);
+#endif
+#if AVER_MODULE_SOFTBODY_SCENE
+    drawSoftBodyDebug(e);
+#endif
+
+#if AVER_MODULE_VEHICLE_SCENE
+    drawVehicleDebug(e);
+#endif
+#if AVER_MODULE_FRAMEWORK
+    drawClassMarkers(e);
+#endif
+#if AVER_MODULE_FRAMEWORK
+    // Scripts' DebugDraw lines, then aged by this frame (drawn under noEditorChrome_ too: they are the game's).
+    game::drawScriptDebugLines(e.device(), scriptDebugMesh_, e.time().dt);
+#endif
+#if AVER_MODULE_PHYSICS
+    drawPhysicsDebug(e);
+#endif
+#if AVER_MODULE_LANDSCAPE && AVER_MODULE_FLUIDS
+    drawWaterBodies(e);   // wave3: rebuilds edited rivers / lakes (any mode), draws the Water tab's handles
+#endif
+    // Show > Collision Shapes and the .ocshape tab's preview: shape-accurate wire for the selected entity's body and the moving ones (its mesh is freed and rebuilt each call).
+#if AVER_MODULE_SCENE
+    editor::collisionShapeOverlayRender(e, static_cast<u32>(sel_ == kSelScene ? selEntity_ : scene::kInvalidEntity), noEditorChrome_);
+#else
+    editor::collisionShapeOverlayRender(e, 0xFFFFFFFFu, noEditorChrome_);
+#endif
+    drawEditorGizmos(e);
+    buildUI(e);
+    drawDebugLabels();
+#if AVER_WITH_IMGUI
+#if AVER_MODULE_PHYSICS
+    if (physicsDebug_.labels && !noEditorChrome_)
+        editor::physicsDebugDrawLabels(physicsDebugFrame_, viewProj_, static_cast<f32>(vpX_), static_cast<f32>(vpY_),
+                                       static_cast<f32>(vpW_), static_cast<f32>(vpH_), eye_, physicsDebug_.radiusCm);
+#endif
+    uiReg_.endFrame();
+#endif
+    submitGameUi(e);
+    // Before captureCheck, because both use the device's single capture slot and the draw test
+    // finishes inside the first dozen frames while the ordinary probe fires near the last.
+    skinDrawCheck(e);
+    tickReflectionTest(e);
     // lastSceneCulled_ only exists under AVER_MODULE_SCENE; skinScene_->tick() is called unguarded
     // since SkinSceneTest is a no-op with SCENE off anyway (0, same as lastSceneCulled_ would read).
     if (skinScene_ && !skinScene_->finished())

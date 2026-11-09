@@ -4378,78 +4378,6 @@ private:
 #  endif
 #endif
 
-    // SandboxInit.cpp: the steps onInit runs, in order
-    void applyStartupRenderSettings(Engine& e);
-    void addCoreRenderFeatures(Engine& e);
-    void registerAssetEditors();
-    void installAssetEditorHooks();
-    void installActorEditorHooks();
-    void bindWindow(Engine& e);
-#if AVER_MODULE_MCP
-    void startMcpChannel();
-#endif
-    void startRuntimeSystems();
-    void installGameProviders();
-#if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
-    void initLodMeshShader(Engine& e);
-#endif
-    void openStartupProject(Engine& e);
-#if AVER_WITH_IMGUI
-    void initEditorUi(Engine& e);
-#endif
-    void createDefaultScene(Engine& e);
-    void createGizmoMeshes(Engine& e);
-#if AVER_MODULE_SCENE
-    void initSceneRenderers(Engine& e);
-#endif
-#if AVER_MODULE_FLUIDS
-    void initWater(Engine& e);
-#endif
-#if AVER_MODULE_LANDSCAPE
-    void installLandscapeProviders();
-#endif
-#if AVER_FLUIDS_SIMULATED
-    void initViewportIcons(Engine& e);
-#endif
-    void setupFurnaceTest();
-    void setupReflectionTest();
-    void setupSkinDrawTest(Engine& e);
-#if AVER_MODULE_SCRIPTING
-    void initScriptingHost();
-#endif
-#if AVER_MODULE_SCRIPTING
-#if AVER_MODULE_VOXI
-    void initVoxiBackend(Engine& e);
-#endif
-#endif
-#if AVER_MODULE_SCRIPTING
-    void initGameUi(Engine& e);
-#endif
-#if AVER_MODULE_SCRIPTING
-#if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
-    void initOcclusionCuller(Engine& e);
-#endif
-#endif
-#if AVER_MODULE_SCRIPTING
-#if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
-    void initParticleRenderer(Engine& e);
-#endif
-#endif
-#if AVER_MODULE_SCRIPTING
-#if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
-    void initWaterRenderer(Engine& e);
-#endif
-#endif
-#if AVER_MODULE_SCRIPTING
-#if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
-    void setupParticleScenes();
-#endif
-#endif
-#if AVER_MODULE_SCRIPTING
-    void setupGpuSelfTests(Engine& e);
-#endif
-    void setInitialToolAndCamera();
-
     // SandboxUpdate.cpp: the steps onUpdate runs, in order
     void applyConsoleSets(Engine& e, const Timestep& t);
     void tickViewModeAndCameraDrift(const Timestep& t, bool& debugViewActiveThisFrame);
@@ -4538,6 +4466,142 @@ private:
     void applyDeviceRenderSettings(Engine& e, const Timestep& t);
     void setupCameraAndSky(Engine& e);
     void pushPostSettings(Engine& e, bool debugViewActiveThisFrame);
+
+    // SandboxInit.cpp: the steps onInit runs, in order
+    void applyStartupRenderSettings(Engine& e);
+    void addCoreRenderFeatures(Engine& e);
+    void registerAssetEditors();
+    void installAssetEditorHooks();
+    void installActorEditorHooks();
+    void bindWindow(Engine& e);
+#if AVER_MODULE_MCP
+    void startMcpChannel();
+#endif
+    void startRuntimeSystems();
+    void installGameProviders();
+#if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
+    void initLodMeshShader(Engine& e);
+#endif
+    void openStartupProject(Engine& e);
+#if AVER_WITH_IMGUI
+    void initEditorUi(Engine& e);
+#endif
+    void createDefaultScene(Engine& e);
+    void createGizmoMeshes(Engine& e);
+#if AVER_MODULE_SCENE
+    void initSceneRenderers(Engine& e);
+#endif
+#if AVER_MODULE_FLUIDS
+    void initWater(Engine& e);
+#endif
+#if AVER_MODULE_LANDSCAPE
+    void installLandscapeProviders();
+#endif
+#if AVER_FLUIDS_SIMULATED
+    void initViewportIcons(Engine& e);
+#endif
+    void setupFurnaceTest();
+    void setupReflectionTest();
+    void setupSkinDrawTest(Engine& e);
+#if AVER_MODULE_SCRIPTING
+    void initScriptingHost();
+#endif
+#if AVER_MODULE_SCRIPTING
+#if AVER_MODULE_VOXI
+    void initVoxiBackend(Engine& e);
+#endif
+#endif
+#if AVER_MODULE_SCRIPTING
+    void initGameUi(Engine& e);
+#endif
+#if AVER_MODULE_SCRIPTING
+#if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
+    void initOcclusionCuller(Engine& e);
+#endif
+#endif
+#if AVER_MODULE_SCRIPTING
+#if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
+    void initParticleRenderer(Engine& e);
+#endif
+#endif
+#if AVER_MODULE_SCRIPTING
+#if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
+    void initWaterRenderer(Engine& e);
+#endif
+#endif
+#if AVER_MODULE_SCRIPTING
+#if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
+    void setupParticleScenes();
+#endif
+#endif
+#if AVER_MODULE_SCRIPTING
+    void setupGpuSelfTests(Engine& e);
+#endif
+    void setInitialToolAndCamera();
+
+    // SandboxRender.cpp: the steps onRender runs, in order
+    void updateCpuTimingEnable();
+    void tickProjectLoadingScreen();
+#if AVER_MODULE_VOXI
+    void tickLevelPrepToast(Engine& e);
+#endif
+    void drawEditorObjects(Engine& e);
+#if AVER_MODULE_FLUIDS
+    void drawWater(Engine& e);
+#endif
+#if AVER_MODULE_LANDSCAPE
+    void drawLandscape(Engine& e);
+#endif
+#if AVER_MODULE_SCENE && AVER_MODULE_VOXI
+    void updateSceneFeeds();
+#endif
+#if AVER_MODULE_SCENE
+    void beginPlayMobilityFrame();
+#endif
+#if AVER_MODULE_SCENE
+#if AVER_MODULE_TRIFACTOR
+    void resetLodFrameState(Engine& e);
+#endif
+#endif
+#if AVER_MODULE_SCENE
+#if AVER_MODULE_VOXI
+    void drawDepthPrepass(Engine& e);
+#endif
+#endif
+#if AVER_MODULE_SCENE
+    void logSceneRenderStats(const aver::game::SceneDrawStats& colourStats);
+#endif
+#if AVER_MODULE_SCENE
+    void drawSceneEntities(Engine& e);
+#endif
+    bool drawSelectionOutline(Engine& e);
+#if AVER_MODULE_SCENE
+    void drawPlayerStartMarker(Engine& e, const bool anyPlaying);
+#endif
+#if AVER_MODULE_SYNAPSE
+    void drawNavMesh(Engine& e);
+#endif
+#if AVER_MODULE_SYNAPSE_SCENE
+    void drawAiDebug(Engine& e);
+#endif
+#if AVER_MODULE_SCENE
+    void drawMotionModelingCameraDebug(Engine& e);
+#endif
+#if AVER_MODULE_SOFTBODY_SCENE
+    void drawSoftBodyDebug(Engine& e);
+#endif
+#if AVER_MODULE_VEHICLE_SCENE
+    void drawVehicleDebug(Engine& e);
+#endif
+#if AVER_MODULE_FRAMEWORK
+    void drawClassMarkers(Engine& e);
+#endif
+#if AVER_MODULE_PHYSICS
+    void drawPhysicsDebug(Engine& e);
+#endif
+    void drawEditorGizmos(Engine& e);
+    void drawDebugLabels();
+    void tickReflectionTest(Engine& e);
 
 #if AVER_MODULE_FRAMEWORK
     void spawnClassPlacements();
