@@ -69,6 +69,9 @@ add_executable(Sandbox WIN32
   # W4: Generate Vegetation (biome run over the landscape sections, .ocinst + .ocveg), headless core.
   src/VegetationGenerate.cpp
   src/LandscapeBiomeTab.cpp
+  src/PcgGraphEditor.cpp
+  src/PcgDebugDraw.cpp
+  src/SandboxPcg.cpp
   src/WaterSplineTool.cpp
   # Movie Render Queue: the frame plan and PNG / EXR / MP4 output, and the Window > Render Queue panel.
   src/RenderQueueOutput.cpp

@@ -1042,3 +1042,21 @@ if(TARGET Aver.Ragdoll)
   target_link_libraries(PhysAnimEditorTest PRIVATE Aver.Ragdoll Aver.Formats Aver.Core Aver.Platform)
   set_target_properties(PhysAnimEditorTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# PcgEditModelTest -- sandbox/src/PcgEditModel.hpp (header-only, no ImGui): the PCG graph editor's schema, palette search, node and link edits, parameter
+# tokens, preview run and debug-point tap, over the real evaluator. GraphEditorGeometry.cpp is compiled in for the link rules and attribute rows.
+if(TARGET Aver.World)
+  add_executable(PcgEditModelTest src/PcgEditModelTest.cpp ${CMAKE_SOURCE_DIR}/sandbox/src/GraphEditorGeometry.cpp)
+  target_include_directories(PcgEditModelTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+  target_link_libraries(PcgEditModelTest PRIVATE Aver.World Aver.Formats Aver.Core Aver.Platform)
+  set_target_properties(PcgEditModelTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
+# PcgGraphEditorTest -- the PCG Graph tab as an asset, headless (sandbox/src/PcgGraphEditor.cpp and GraphEditorGeometry.cpp compiled directly, no ImGui): the factory,
+# a byte-identical untouched save, edits with undo / redo, parameter tokens, the preview, Generate / Clean up through a fake host, and the debug-point overlay feed.
+if(TARGET Aver.World)
+  add_executable(PcgGraphEditorTest src/PcgGraphEditorTest.cpp ${CMAKE_SOURCE_DIR}/sandbox/src/PcgGraphEditor.cpp ${CMAKE_SOURCE_DIR}/sandbox/src/GraphEditorGeometry.cpp)
+  target_include_directories(PcgGraphEditorTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+  target_link_libraries(PcgGraphEditorTest PRIVATE Aver.World Aver.Formats Aver.Core Aver.Platform)
+  set_target_properties(PcgGraphEditorTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()

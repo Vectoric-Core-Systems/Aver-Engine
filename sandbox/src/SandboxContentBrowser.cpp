@@ -1418,6 +1418,10 @@ void SandboxApp::drawContentBrowser() {
         if (ImGui::MenuItem("New IK Rig"))          cbCreateIkRig();   // [wave5/ik-retarget]
         uiReg_.track("cb.add.ikRig");
 
+#if AVER_MODULE_SCENE && AVER_MODULE_LANDSCAPE
+        if (ImGui::MenuItem("New PCG Graph")) cbCreatePcgGraph();
+        uiReg_.track("cb.add.pcgGraph");
+#endif
 #if AVER_MODULE_RAGDOLL
         if (ImGui::MenuItem("New Physical Animation Profile")) cbCreatePhysAnim();
         uiReg_.track("cb.add.physAnim");

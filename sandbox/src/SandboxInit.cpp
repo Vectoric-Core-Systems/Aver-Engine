@@ -84,6 +84,11 @@ void SandboxApp::onInit(Engine& e)  {
     assetEditors_.registerFactory(&editor::makeMeshEditor);
     assetEditors_.registerFactory(&editor::makeActorEditor);
     assetEditors_.registerFactory(&editor::makeAnimEditor);
+    // The PCG graph tab claims only `DOMAIN pcg` files, so it goes BEFORE the general graph editor (first match wins).
+    assetEditors_.registerFactory(&editor::makePcgGraphEditor);
+#if AVER_MODULE_SCENE && AVER_MODULE_LANDSCAPE
+    installPcgEditorHost();
+#endif
     // Append graph editor (order matters; would change which editor claims shared file types).
     assetEditors_.registerFactory(&editor::makeGraphEditor);
     // Wire graph validator via lambda to avoid .NET dependency in GraphEditor.

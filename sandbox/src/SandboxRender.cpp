@@ -2025,6 +2025,7 @@ void SandboxApp::onRender(Engine& e)  {
         if (motionDebugMesh_) e.device()->drawLines(motionDebugMesh_, &mmId.m[0][0]);
     }
 
+    editor::drawPcgDebugPoints(e, noEditorChrome_);   // the PCG Graph tab's Debug Points
 #if AVER_MODULE_CAMERA
     // Camera rig overlay (Show > Camera Rigs): the same line-mesh route, world-space vertices.
     if (cameraDebugMesh_) { e.device()->destroyLineMesh(cameraDebugMesh_); cameraDebugMesh_ = 0; }

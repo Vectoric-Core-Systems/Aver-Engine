@@ -48,6 +48,7 @@
 // Behaviour-tree format (.ocbt).
 #include "aver/formats/OcBt.hpp"
 #include "aver/formats/GltfImport.hpp"
+#include "PcgGraphEditor.hpp"      // `DOMAIN pcg` graph tab (W3 step 6)
 #include "HlodBuildJob.hpp"       // World Settings > Level Streaming > Build HLOD
 #include "DataLayersPanel.hpp"   // Window > Data Layers (W10 step 4)
 #include "ModelImportDialog.hpp"   // ModelImportSummary, writeImportedModel, importFbxToDir (FBX import)
@@ -4319,6 +4320,8 @@ private:
     void buildCookChunksSettings();
     // World Settings > Level Streaming > HLOD (SandboxLevelHlod.cpp): a background bake of the per-cell proxies.
     void buildHlodSettings();
+    void installPcgEditorHost();   // SandboxPcg.cpp: the PCG Graph tab's landscape / Generate / Clean up
+    void cbCreatePcgGraph();       // SandboxPcg.cpp: a starter PCG graph
     void buildPhysAnimSection();   // SandboxPhysAnim.cpp: Simulate / Animate mode panels, Apply Hit
     void startHlodBuild();
     void pollHlodBuild();
