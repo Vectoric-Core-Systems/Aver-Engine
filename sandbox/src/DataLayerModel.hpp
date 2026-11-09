@@ -72,7 +72,7 @@ public:
     Names descendants(const std::string& name) const {
         Names out;
         for (usize i = 0; i < out.size() + 1; ++i) {
-            const std::string& at = i == 0 ? name : out[i - 1];
+            const std::string at = i == 0 ? name : out[i - 1];   // a copy: push_back below can reallocate `out`
             for (const fmt::OcDataLayer& l : layers_)
                 if (l.parent == at && std::find(out.begin(), out.end(), l.name) == out.end()) out.push_back(l.name);
         }

@@ -224,7 +224,8 @@ int main() {
         std::string exeDirNorm = executableDir(), repoNorm = AVER_REPO_ROOT;
         for (char& c : exeDirNorm) c = c == '\\' ? '/' : static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         for (char& c : repoNorm) c = c == '\\' ? '/' : static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        if (exeDirNorm.rfind(repoNorm, 0) != 0) {
+        if (!repoNorm.empty() && repoNorm.back() != '/') repoNorm += '/';   // a sibling such as <repo>-build must not count as inside
+        if ((exeDirNorm + '/').rfind(repoNorm, 0) != 0) {
             AVER_INFO("  skipped: this binary is outside the repository ({}), so the executableDir()-walk has no templates\\ to find", executableDir());
         } else {
             const auto walked = editor::listTemplates();

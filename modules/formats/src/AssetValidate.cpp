@@ -110,7 +110,7 @@ void ruleOcmat(const ValidateContext& ctx, const std::string& rel, ValidateRepor
     while (h < text.size()) {
         size_t e = text.find('\n', h);
         if (e == std::string::npos) e = text.size();
-        const size_t k = text.find_first_not_of(" 	", h);
+        const size_t k = text.find_first_not_of(" \t\r", h);
         if (k != std::string::npos && k < e && text[k] != '#') {
             if (text.compare(k, 5, "OCMAT") != 0)
                 add(r, ValidateSeverity::Error, "ocmat-parse", rel, "does not start with an OCMAT header");

@@ -1,6 +1,7 @@
 // Reader and writer for .ocbiome (text). See OcBiome.hpp for the grammar.
 #include "aver/formats/OcBiome.hpp"
 
+#include "aver/core/CharConv.hpp"   // floating from_chars where libc++ has none
 #include "aver/platform/FileSystem.hpp"
 
 #include <charconv>
@@ -22,7 +23,7 @@ std::string inum(i32 v) { return std::to_string(v); }
 
 bool toF(std::string_view s, f32& out) {
     if (s.empty()) return false;
-    const auto r = std::from_chars(s.data(), s.data() + s.size(), out);
+    const auto r = aver::fromChars(s.data(), s.data() + s.size(), out);
     return r.ec == std::errc() && r.ptr == s.data() + s.size() && std::isfinite(out);
 }
 bool toI(std::string_view s, i32& out) {

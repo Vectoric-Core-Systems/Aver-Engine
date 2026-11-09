@@ -1,6 +1,7 @@
 // Reader and writer for .ocveg (text). See OcVegetation.hpp.
 #include "aver/formats/OcVegetation.hpp"
 
+#include "aver/core/CharConv.hpp"   // floating from_chars where libc++ has none
 #include "aver/platform/FileSystem.hpp"
 
 #include <charconv>
@@ -19,7 +20,7 @@ std::string fnum(f32 v) {
     return std::string(buf, r.ptr);
 }
 bool toF(const std::string& s, f32& out) {
-    const auto r = std::from_chars(s.data(), s.data() + s.size(), out);
+    const auto r = aver::fromChars(s.data(), s.data() + s.size(), out);
     return r.ec == std::errc() && r.ptr == s.data() + s.size() && std::isfinite(out);
 }
 template <class T> bool toInt(const std::string& s, T& out, int base = 10) {
