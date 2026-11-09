@@ -163,7 +163,7 @@ void SandboxApp::captureRenderSettingsFromUi(const voxi::Settings& requested, u3
     if (!rset_.frameBudgetForced_) project_.frameBudgetMs = rset_.frameBudgetMs_;
     project_.lodSelect          = lodSelectEnabled_ ? 1 : 0;
     project_.lodThresholdPx     = lodErrorThresholdPx_;
-    project_.occlusionCull      = occlusionCullEnabled_ ? 1 : 0;
+    project_.occlusionCull      = occl_.occlusionCullEnabled_ ? 1 : 0;
     project_.depthPrepass       = rset_.depthPrepassOverride_ ? 1 : 0;
 #if AVER_MODULE_SR
     // optimisation-wave-2, 3.3 A: NOT a voxi::Settings field (module boundary, Scalability.hpp's

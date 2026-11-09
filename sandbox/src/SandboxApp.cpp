@@ -733,10 +733,10 @@ editor::shutdownAnimEditors();
     particleRenderer_.shutdown();
 #endif
 #if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
-    if (occluder_) {
+    if (occl_.occluder_) {
         if (rhi::IResourceFactory* occRes = e.device()->resources())
-            aver::occlusion::destroyOcclusionCuller(*occRes, occluder_);
-        occluder_ = nullptr;
+            aver::occlusion::destroyOcclusionCuller(*occRes, occl_.occluder_);
+        occl_.occluder_ = nullptr;
     }
 #endif
 #if AVER_MODULE_SCRIPTING

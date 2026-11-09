@@ -49,7 +49,7 @@ void SandboxApp::initOrigin(Engine& e) {
     b.positions.push_back(&landTool_.sculptCursor_);
 #  endif
 #  if AVER_MODULE_OCCLUSION
-    b.positions.push_back(&occlusionBasisCamPos_);
+    b.positions.push_back(&occl_.occlusionBasisCamPos_);
 #  endif
 #  if AVER_MODULE_FRAMEWORK
     b.positions.push_back(&harness_.pieCamRef_);
@@ -57,7 +57,7 @@ void SandboxApp::initOrigin(Engine& e) {
 #  endif
 #  if AVER_MODULE_OCCLUSION
     // The culler's answer was computed from the old basis: it reports "not exact" once, so nothing is culled for a frame.
-    b.onRenderCommit = [this](const world::ShiftEvent&) { if (occluder_) occluder_->invalidateBasis(); };
+    b.onRenderCommit = [this](const world::ShiftEvent&) { if (occl_.occluder_) occl_.occluder_->invalidateBasis(); };
 #  endif
     // A project that is still loading, or Play on its way out (the reload that restores the level), is not a moment to move the world.
     b.busy = [this](bool) -> const char* {

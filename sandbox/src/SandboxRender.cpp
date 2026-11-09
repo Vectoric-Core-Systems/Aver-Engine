@@ -664,10 +664,10 @@ void SandboxApp::drawSceneEntities(Engine& e) {
         // between two individually-under-threshold frames could under-cover. Only the global
         // "not trustworthy" fallback below (and readbackLagIsExactlyOneCall()) actually guarantees
         // no false cull -- the per-entity margin doesn't by itself prove safety.
-        const f32 occlusionMoveDist = occlusionBasisValid_
-            ? (viewPos() - occlusionBasisCamPos_).size() : 1e30f;
-        const f32 occlusionRotRad = occlusionBasisValid_
-            ? std::acos(std::clamp(dot(viewForward(), occlusionBasisForward_), -1.0f, 1.0f))
+        const f32 occlusionMoveDist = occl_.occlusionBasisValid_
+            ? (viewPos() - occl_.occlusionBasisCamPos_).size() : 1e30f;
+        const f32 occlusionRotRad = occl_.occlusionBasisValid_
+            ? std::acos(std::clamp(dot(viewForward(), occl_.occlusionBasisForward_), -1.0f, 1.0f))
             : 3.2f;   // > pi: forces "untrustworthy" before the first basis has ever landed
         // 45 degrees: keeps the tan() below from blowing up before the global fallback
         // (kOcclusionTeleportRotRad) takes over.
@@ -694,9 +694,9 @@ void SandboxApp::drawSceneEntities(Engine& e) {
         // being consumed is a discontinuity no motion margin covers -- an exact rect mismatch forces
         // the same "everyone visible" fallback a teleport does.
         const bool occlusionRectUnchanged =
-            occRect[0] == occlusionBasisRect_[0] && occRect[1] == occlusionBasisRect_[1] &&
-            occRect[2] == occlusionBasisRect_[2] && occRect[3] == occlusionBasisRect_[3];
-        const bool occlusionTrustworthy = occlusionBasisValid_ &&
+            occRect[0] == occl_.occlusionBasisRect_[0] && occRect[1] == occl_.occlusionBasisRect_[1] &&
+            occRect[2] == occl_.occlusionBasisRect_[2] && occRect[3] == occl_.occlusionBasisRect_[3];
+        const bool occlusionTrustworthy = occl_.occlusionBasisValid_ &&
             occlusionMoveDist <= kOcclusionTeleportMoveCm &&
             occlusionRotRad <= kOcclusionTeleportRotRad &&
             occlusionRectUnchanged;
@@ -707,29 +707,29 @@ void SandboxApp::drawSceneEntities(Engine& e) {
         // submits for primary rays) -- idles unless occlusion.cullUnderSuppression overrides it.
         // Runs after beginFrame, so this is THIS frame's own election result, not a stale one.
         const bool occlusionRuns = aver::game::occlusionTestShouldRun(
-            occlusionCullEnabled_, occluder_ != nullptr, e.device()->sceneSuppressed(),
-            occlusionCullUnderSuppression_);
+            occl_.occlusionCullEnabled_, occl_.occluder_ != nullptr, e.device()->sceneSuppressed(),
+            occl_.occlusionCullUnderSuppression_);
         // Once per transition, not every idle frame -- ray-driven is this project's standing
         // default, so a per-frame line would flood the log. Resets when occlusionRuns next goes
         // true, so idle -> running -> idle logs a second time rather than once per process.
-        if (occlusionCullEnabled_ && occluder_ && !occlusionRuns) {
-            if (!occlusionIdleLogged_) {
-                occlusionIdleLogged_ = true;
+        if (occl_.occlusionCullEnabled_ && occl_.occluder_ && !occlusionRuns) {
+            if (!occl_.occlusionIdleLogged_) {
+                occl_.occlusionIdleLogged_ = true;
                 AVER_INFO("[Occlusion] idle: '{}' paints the scene, so culling can save no raster "
                           "work; RENDER.OCCLUSIONCULL is unchanged.",
                           occlusionSuppressingFeatureName());
             }
         } else {
-            occlusionIdleLogged_ = false;
+            occl_.occlusionIdleLogged_ = false;
         }
         if (occlusionRuns) {
-            occlusionBoxes_.clear();
-            occlusionBoxEntities_.clear();
-            occlusionOrder_.resize(n);
+            occl_.occlusionBoxes_.clear();
+            occl_.occlusionBoxEntities_.clear();
+            occl_.occlusionOrder_.resize(n);
             u32 head = 0, tail = n;   // pass-1 fills from the front, pass-2 from the back
             for (u32 k = 0; k < n; ++k) {
                 const scene::Entity e2 = w.at(k);
-                (occlusionWasVisible(e2) ? occlusionOrder_[head++] : occlusionOrder_[--tail]) = k;
+                (occlusionWasVisible(e2) ? occl_.occlusionOrder_[head++] : occl_.occlusionOrder_[--tail]) = k;
 
                 if (w.destroyPending(e2)) continue;
                 const scene::CMeshRenderer* mr2 =
@@ -796,8 +796,8 @@ void SandboxApp::drawSceneEntities(Engine& e) {
                     box.min[0] = wlo2.x; box.min[1] = wlo2.y; box.min[2] = wlo2.z;
                     box.max[0] = whi2.x; box.max[1] = whi2.y; box.max[2] = whi2.z;
                 }
-                occlusionBoxes_.push_back(box);
-                occlusionBoxEntities_.push_back(e2);
+                occl_.occlusionBoxes_.push_back(box);
+                occl_.occlusionBoxEntities_.push_back(e2);
             }
             // `head` is exactly the pass-1 count: head counts up from the front, tail down from
             // the back, so head == tail once every index has landed on one side or the other.
@@ -808,18 +808,18 @@ void SandboxApp::drawSceneEntities(Engine& e) {
                 // else risks disagreeing with the actual depth buffer the seed pass reads.
                 if (const rhi::TextureHandle depthTex = e.device()->sceneDepthTexture();
                     depthTex && occRes->textureInfo(depthTex, sceneDesc)) {
-                    occluder_->ensureSized(*occRes, sceneDesc.width, sceneDesc.height, e.device()->sampleCount());
+                    occl_.occluder_->ensureSized(*occRes, sceneDesc.width, sceneDesc.height, e.device()->sampleCount());
                     // F7's once-per-change diagnostic: fires when the rect or pyramid actually
                     // changed since it last printed, so a dock-layout drag leaves a trail instead
                     // of a silent change in which entities get culled.
-                    if (occRect[0] != occlusionLoggedRect_[0] || occRect[1] != occlusionLoggedRect_[1] ||
-                        occRect[2] != occlusionLoggedRect_[2] || occRect[3] != occlusionLoggedRect_[3] ||
-                        sceneDesc.width != occlusionLoggedPyramidW_ ||
-                        sceneDesc.height != occlusionLoggedPyramidH_) {
-                        occlusionLoggedRect_[0] = occRect[0]; occlusionLoggedRect_[1] = occRect[1];
-                        occlusionLoggedRect_[2] = occRect[2]; occlusionLoggedRect_[3] = occRect[3];
-                        occlusionLoggedPyramidW_ = sceneDesc.width;
-                        occlusionLoggedPyramidH_ = sceneDesc.height;
+                    if (occRect[0] != occl_.occlusionLoggedRect_[0] || occRect[1] != occl_.occlusionLoggedRect_[1] ||
+                        occRect[2] != occl_.occlusionLoggedRect_[2] || occRect[3] != occl_.occlusionLoggedRect_[3] ||
+                        sceneDesc.width != occl_.occlusionLoggedPyramidW_ ||
+                        sceneDesc.height != occl_.occlusionLoggedPyramidH_) {
+                        occl_.occlusionLoggedRect_[0] = occRect[0]; occl_.occlusionLoggedRect_[1] = occRect[1];
+                        occl_.occlusionLoggedRect_[2] = occRect[2]; occl_.occlusionLoggedRect_[3] = occRect[3];
+                        occl_.occlusionLoggedPyramidW_ = sceneDesc.width;
+                        occl_.occlusionLoggedPyramidH_ = sceneDesc.height;
                         AVER_INFO("[Occlusion] testing against scene rect {:.0f},{:.0f} {:.0f}x{:.0f} "
                                   "of a {}x{} pyramid",
                                   occRect[0], occRect[1], occRect[2], occRect[3],
@@ -832,9 +832,9 @@ void SandboxApp::drawSceneEntities(Engine& e) {
             // comment), the same safe default a fresh entity gets, so a wall that moved in front of
             // something while culling was idle is discovered fresh on resume, and the next frame
             // doesn't reuse a stale motion basis.
-            occlusionVisible_.clear();
-            occlusionOrder_.clear();   // empty means "no reordering" -- see the loop below
-            occlusionBasisValid_ = false;
+            occl_.occlusionVisible_.clear();
+            occl_.occlusionOrder_.clear();   // empty means "no reordering" -- see the loop below
+            occl_.occlusionBasisValid_ = false;
         }
 
         // Runs buildPyramid()+testBatch() ONCE this frame -- either at the pass-1/pass-2 boundary
@@ -844,7 +844,7 @@ void SandboxApp::drawSceneEntities(Engine& e) {
         const auto occlusionBuildAndTest = [&]() {
             if (occlusionPyramidBuilt) return;
             occlusionPyramidBuilt = true;
-            if (occlusionBoxes_.empty()) return;
+            if (occl_.occlusionBoxes_.empty()) return;
             // NO EARLY-OUT HERE: an earlier version skipped this whenever the camera had moved,
             // which froze the basis stash below at the last still pose -- occlusionMoveDist then
             // measured against an ever-older reference, stayed above threshold forever, and
@@ -853,7 +853,7 @@ void SandboxApp::drawSceneEntities(Engine& e) {
             rhi::IResourceFactory* occRes = e.device()->resources();
             const rhi::TextureHandle depthTex = e.device()->sceneDepthTexture();
             if (!pctx || !occRes || !depthTex) return;
-            occluder_->buildPyramid(*pctx, depthTex, &viewState_.viewProj_.m[0][0]);
+            occl_.occluder_->buildPyramid(*pctx, depthTex, &viewState_.viewProj_.m[0][0]);
             // Stashes the camera basis this call's readback will (at best, one call from now)
             // reflect. camForward() is the same vector that built viewProj_ this frame (the
             // unconditional camForward()/setCamera call earlier in this function, before free-fly
@@ -861,13 +861,13 @@ void SandboxApp::drawSceneEntities(Engine& e) {
             // camera mode. Deliberately AFTER buildPyramid() (so a bailed-out frame doesn't stash a
             // basis for a pyramid never built) and BEFORE testBatch() (order doesn't matter there,
             // but keeps the stash beside the call it documents).
-            occlusionBasisCamPos_ = viewPos();
-            occlusionBasisForward_ = viewForward();
+            occl_.occlusionBasisCamPos_ = viewPos();
+            occl_.occlusionBasisForward_ = viewForward();
             // F7: stashed alongside the camera basis, same idiom -- see occlusionBasisRect_'s own
             // member comment.
-            occlusionBasisRect_[0] = occRect[0]; occlusionBasisRect_[1] = occRect[1];
-            occlusionBasisRect_[2] = occRect[2]; occlusionBasisRect_[3] = occRect[3];
-            occlusionBasisValid_ = true;
+            occl_.occlusionBasisRect_[0] = occRect[0]; occl_.occlusionBasisRect_[1] = occRect[1];
+            occl_.occlusionBasisRect_[2] = occRect[2]; occl_.occlusionBasisRect_[3] = occRect[3];
+            occl_.occlusionBasisValid_ = true;
             // IDENTITY, NOT GEOMETRY: hashed from occlusionBoxEntities_ (which entities, which
             // order), not occlusionBoxes_'s bounds -- every box was just dilated by a margin that
             // changes nearly every frame for the SAME population, so hashing bounds cannot tell
@@ -876,30 +876,30 @@ void SandboxApp::drawSceneEntities(Engine& e) {
             // doc comment in Occlusion.hpp for why the module takes this as a parameter rather than
             // deriving it from the upload bytes itself, as it used to).
             const u64 occlusionIdentityKey = aver::occlusion::hashIdentityKey(
-                occlusionBoxEntities_.data(), static_cast<u32>(occlusionBoxEntities_.size()));
+                occl_.occlusionBoxEntities_.data(), static_cast<u32>(occl_.occlusionBoxEntities_.size()));
             // F7: `occRect` is this frame's own scene sub-rect, never folded into
             // occlusionIdentityKey above, which stays keyed on entity identity alone (0f85785a/
             // e04efdab's own rule, unchanged).
-            occluder_->testBatch(*pctx, *occRes, occlusionBoxes_.data(),
-                                 static_cast<u32>(occlusionBoxes_.size()), occlusionIdentityKey,
-                                 occRect, occlusionResults_);
+            occl_.occluder_->testBatch(*pctx, *occRes, occl_.occlusionBoxes_.data(),
+                                 static_cast<u32>(occl_.occlusionBoxes_.size()), occlusionIdentityKey,
+                                 occRect, occl_.occlusionResults_);
             u32 c = 0, t = 0;
-            occluder_->lastTestCounts(c, t);
-            occlusionCulledAccum_ += c;
-            occlusionTestedAccum_ += t;
-            ++occlusionReportFrames_;
+            occl_.occluder_->lastTestCounts(c, t);
+            occl_.occlusionCulledAccum_ += c;
+            occl_.occlusionTestedAccum_ += t;
+            ++occl_.occlusionReportFrames_;
             // Trust the raw per-box answer only when BOTH (a) camera motion stayed under the
             // dilation bound (occlusionTrustworthy) AND (b) the readback landed exactly one call
             // behind, not more (readbackLagIsExactlyOneCall(), OcclusionCuller.cpp's
             // generation-stamp check). Failing (b) means the "one call stale" assumption the whole
             // margin rests on was wrong this frame -- worth knowing about, not just silently
             // correcting for, so it forces the same "everyone visible" fallback as failing (a).
-            const bool occlusionReadbackLagExpected = occluder_->readbackLagIsExactlyOneCall();
+            const bool occlusionReadbackLagExpected = occl_.occluder_->readbackLagIsExactlyOneCall();
             const bool occlusionResultsTrusted = occlusionTrustworthy && occlusionReadbackLagExpected;
             if (!occlusionReadbackLagExpected) {
-                ++occlusionStaleReadbacks_;
-                if (!occlusionStaleWarnedOnce_) {
-                    occlusionStaleWarnedOnce_ = true;
+                ++occl_.occlusionStaleReadbacks_;
+                if (!occl_.occlusionStaleWarnedOnce_) {
+                    occl_.occlusionStaleWarnedOnce_ = true;
                     AVER_WARN("[Occlusion] a readback landed more than one call stale (see "
                               "OcclusionCuller.cpp's generation-stamp check) -- culling is "
                               "disabled for every frame this keeps happening on, not merely made "
@@ -907,9 +907,9 @@ void SandboxApp::drawSceneEntities(Engine& e) {
                               "how often");
                 }
             }
-            for (usize bi = 0; bi < occlusionBoxEntities_.size(); ++bi)
-                occlusionVisible_[occlusionBoxEntities_[bi]] =
-                    !occlusionResultsTrusted || (occlusionResults_[bi] != 0);
+            for (usize bi = 0; bi < occl_.occlusionBoxEntities_.size(); ++bi)
+                occl_.occlusionVisible_[occl_.occlusionBoxEntities_[bi]] =
+                    !occlusionResultsTrusted || (occl_.occlusionResults_[bi] != 0);
         };
 #endif
 
@@ -1091,7 +1091,7 @@ void SandboxApp::drawSceneEntities(Engine& e) {
             // key) because with no culler compiled in, d.occlusionCulled is always false, so the
             // route is identical either way regardless of this tint.
 #if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
-            d.tint = self.occlusionShowCulled_;
+            d.tint = self.occl_.occlusionShowCulled_;
 #endif
 
             // Asked here too, not restated: drawWorld calls the identical chooseRoute() on the
@@ -1768,9 +1768,9 @@ void SandboxApp::drawSceneEntities(Engine& e) {
         copt.onVisit = colourVisit;
         // Empty means "no reordering": occlusionOrder_ is resized to n when culling runs and
         // cleared when idle, so a null order here is world order.
-        if (!occlusionOrder_.empty()) {
-            copt.visitOrder = occlusionOrder_.data();
-            copt.visitOrderCount = static_cast<u32>(occlusionOrder_.size());
+        if (!occl_.occlusionOrder_.empty()) {
+            copt.visitOrder = occl_.occlusionOrder_.data();
+            copt.visitOrderCount = static_cast<u32>(occl_.occlusionOrder_.size());
         }
 #endif
 #if AVER_MODULE_VOXI
@@ -1818,12 +1818,12 @@ void SandboxApp::drawSceneEntities(Engine& e) {
         // pass-1/pass-2-boundary call in the walk), so the wider condition would keep re-satisfying
         // this power-of-two check every frame culling sits idle, once the count freezes on a 2^n-1
         // value, instead of printing once and stopping.
-        if (occlusionRuns && occlusionReportFrames_ &&
-            (occlusionReportFrames_ & (occlusionReportFrames_ + 1)) == 0) {
-            const f64 pct = occlusionTestedAccum_ ? 100.0 * static_cast<f64>(occlusionCulledAccum_) /
-                                                    static_cast<f64>(occlusionTestedAccum_) : 0.0;
+        if (occlusionRuns && occl_.occlusionReportFrames_ &&
+            (occl_.occlusionReportFrames_ & (occl_.occlusionReportFrames_ + 1)) == 0) {
+            const f64 pct = occl_.occlusionTestedAccum_ ? 100.0 * static_cast<f64>(occl_.occlusionCulledAccum_) /
+                                                    static_cast<f64>(occl_.occlusionTestedAccum_) : 0.0;
             AVER_INFO("[Occlusion] {} of {} tested entities culled ({:.1f}%) over {} frame(s)",
-                      occlusionCulledAccum_, occlusionTestedAccum_, pct, occlusionReportFrames_);
+                      occl_.occlusionCulledAccum_, occl_.occlusionTestedAccum_, pct, occl_.occlusionReportFrames_);
             // 3B: THIS FRAME's own snapshot (unlike the lifetime accumulators above) -- concrete
             // evidence a culled multi-part entity still yields N draws, never collapsed to slot 0's.
             AVER_INFO("[Occlusion] this frame: {} entities culled (frustum or occlusion) delivered "
@@ -1831,11 +1831,11 @@ void SandboxApp::drawSceneEntities(Engine& e) {
                       colourStats.culled, walk.culledDraws, walk.culledMultiPart);
             // Folded into the same cadence: a staleness-detector trip is rare enough that a separate
             // periodic line would mostly print zero, riding a report a reader already watches.
-            if (occlusionStaleReadbacks_)
+            if (occl_.occlusionStaleReadbacks_)
                 AVER_INFO("[Occlusion] {} of those {} frame(s) had a readback more than one call "
                           "stale (see the one-time warning above) -- culling was fully disabled "
                           "on those frames, not merely more conservative",
-                          occlusionStaleReadbacks_, occlusionReportFrames_);
+                          occl_.occlusionStaleReadbacks_, occl_.occlusionReportFrames_);
             // Splits occlusionStaleReadbacks_ by which of two independent checks failed:
             // IOcclusionCuller::boxIdentityChurnCount() isolates the IDENTITY dimension (caller's
             // identityKey disagreed though the GPU generation stamp matched) from the TIMING
@@ -1849,12 +1849,12 @@ void SandboxApp::drawSceneEntities(Engine& e) {
             // margin as population churn, not a GPU timing race. Left in place as a standing
             // diagnostic: a future regression that reopens that gap (or a genuine new one) shows
             // up here as the same 1:1 tracking, rather than as an unexplained stale-readback count.
-            if (const u64 identityChurn = occluder_->boxIdentityChurnCount())
+            if (const u64 identityChurn = occl_.occluder_->boxIdentityChurnCount())
                 AVER_INFO("[Occlusion] {} of those {} stale readback(s) were the IDENTITY check "
                           "(caller's box population/order actually changed), not a GPU timing "
                           "race -- see hashIdentityKey()'s comment (OcclusionMath.hpp) if this "
                           "number is tracking staleReadbacks almost 1:1 under camera motion",
-                          identityChurn, occlusionStaleReadbacks_);
+                          identityChurn, occl_.occlusionStaleReadbacks_);
         }
 #endif
         {
@@ -2751,7 +2751,7 @@ void SandboxApp::setGBufferDebugView(GBufferDebugFeature::Mode m) { rset_.gbuffe
 // --occlusion-cull: see occlusionCullEnabled_'s own member comment. Unset (default) never
 // reorders the entity walk or calls occluder_ at all, reproducing today's frame exactly. Guarded
 // the same as the member it assigns: with the module OFF, that member doesn't exist either.
-void SandboxApp::setOcclusionCullOverride(bool on) { occlusionCullEnabled_ = on; }
+void SandboxApp::setOcclusionCullOverride(bool on) { occl_.occlusionCullEnabled_ = on; }
 
 // --no-occlusion-cull: the CLI has no way to say "off" that beats a level's own manifest --
 // applyProjectVoxiSettings writes occlusionCullEnabled_ during load, AFTER CLI setters run at
@@ -2760,7 +2760,7 @@ void SandboxApp::setOcclusionCullOverride(bool on) { occlusionCullEnabled_ = on;
 // OCCLUSIONCULL 1. Applied instead every frame in onUpdate (occlusionCullForceOff_
 // below), the same point the Project Settings checkbox writes this member from -- i.e. this
 // reproduces headlessly the same live toggle done by hand, not a new code path.
-void SandboxApp::setOcclusionCullForceOff() { occlusionCullForceOff_ = true; }
+void SandboxApp::setOcclusionCullForceOff() { occl_.occlusionCullForceOff_ = true; }
 
 // --occlusion-waitidle / --no-occlusion-waitidle: forces (or releases) OcclusionCuller::
 // testBatch()'s res.waitIdle() at runtime, no rebuild -- see IOcclusionCuller::setDebugForceWaitIdle's
@@ -2771,7 +2771,7 @@ void SandboxApp::setOcclusionCullForceOff() { occlusionCullForceOff_ = true; }
 // once occluder_ is created, and onUpdate reasserts that slot every frame, the same seed-then-reassert
 // shape as occlusionCullForceOff_.
 // for occlusionCullForceOff_ above.
-void SandboxApp::setOcclusionDebugForceWaitIdle(bool on) { occlusionDebugForceWaitIdleArg_ = on; }
+void SandboxApp::setOcclusionDebugForceWaitIdle(bool on) { occl_.occlusionDebugForceWaitIdleArg_ = on; }
 
 #endif
 
@@ -3274,8 +3274,8 @@ void SandboxApp::setProbeRel(f32 u, f32 v) { harness_.probeU_ = u; harness_.prob
 
 #if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
 bool SandboxApp::occlusionWasVisible(scene::Entity e) const {
-    const auto it = occlusionVisible_.find(e);
-    return it == occlusionVisible_.end() || it->second;
+    const auto it = occl_.occlusionVisible_.find(e);
+    return it == occl_.occlusionVisible_.end() || it->second;
 }
 
 #endif

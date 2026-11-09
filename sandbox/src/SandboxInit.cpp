@@ -1035,15 +1035,15 @@ void SandboxApp::initGameUi(Engine& e) {
 void SandboxApp::initOcclusionCuller(Engine& e) {
     // Occlusion culler (not IRenderFeature; calls renderSceneEntities() directly).
     if (rhi::IResourceFactory* occRes = e.device()->resources()) {
-        occluder_ = aver::occlusion::createOcclusionCuller(*occRes);
+        occl_.occluder_ = aver::occlusion::createOcclusionCuller(*occRes);
         // Sync --occlusion-waitidle flag (console and CLI stay in sync).
-        editor::consoleOcclusionForceWaitIdleSlot() = occlusionDebugForceWaitIdleArg_;
-        occluder_->setDebugForceWaitIdle(occlusionDebugForceWaitIdleArg_);
+        editor::consoleOcclusionForceWaitIdleSlot() = occl_.occlusionDebugForceWaitIdleArg_;
+        occl_.occluder_->setDebugForceWaitIdle(occl_.occlusionDebugForceWaitIdleArg_);
         // Warm up compute pipelines before frame loop (required for pointer stability).
         rhi::TextureDesc occSceneDesc;
         if (const rhi::TextureHandle occDepth = e.device()->sceneDepthTexture();
             occDepth && occRes->textureInfo(occDepth, occSceneDesc)) {
-            occluder_->ensureSized(*occRes, occSceneDesc.width, occSceneDesc.height, e.device()->sampleCount());
+            occl_.occluder_->ensureSized(*occRes, occSceneDesc.width, occSceneDesc.height, e.device()->sampleCount());
         }
     }
 }

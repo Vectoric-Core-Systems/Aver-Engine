@@ -99,11 +99,11 @@ void SandboxApp::applyScriptRender(voxi::Renderer& vx) {
     }
 #  if AVER_MODULE_OCCLUSION
     if (aver_fw_render_get(AVER_FW_RENDER_OCCLUSION, &v)) {
-        if (!occTaken) { occTaken = true; occSaved = occlusionCullEnabled_; }
-        occlusionCullEnabled_ = v >= 0.5f;
+        if (!occTaken) { occTaken = true; occSaved = occl_.occlusionCullEnabled_; }
+        occl_.occlusionCullEnabled_ = v >= 0.5f;
     } else if (occTaken) {
         occTaken = false;
-        occlusionCullEnabled_ = occSaved;
+        occl_.occlusionCullEnabled_ = occSaved;
     }
 #  endif
     (void)occTaken; (void)occSaved;
@@ -236,12 +236,12 @@ void SandboxApp::tickCameraAutomation(Engine& e, const Timestep& t, HitchMarks& 
 #if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
 void SandboxApp::reassertOcclusionConsole() {
     // --no-occlusion-cull: reasserted every frame (applyProjectVoxiSettings rewrites it during level load).
-    if (occlusionCullForceOff_) occlusionCullEnabled_ = false;
+    if (occl_.occlusionCullForceOff_) occl_.occlusionCullEnabled_ = false;
     // --occlusion-waitidle: reasserted every frame so console `set` is live before this frame's testBatch().
-    if (occluder_) occluder_->setDebugForceWaitIdle(editor::consoleOcclusionForceWaitIdleSlot());
+    if (occl_.occluder_) occl_.occluder_->setDebugForceWaitIdle(editor::consoleOcclusionForceWaitIdleSlot());
     // occlusion.showCulled/occlusion.cullUnderSuppression read every frame (live for this frame's onRender walk).
-    occlusionShowCulled_ = editor::consoleOcclusionShowCulledSlot();
-    occlusionCullUnderSuppression_ = editor::consoleOcclusionCullUnderSuppressionSlot();
+    occl_.occlusionShowCulled_ = editor::consoleOcclusionShowCulledSlot();
+    occl_.occlusionCullUnderSuppression_ = editor::consoleOcclusionCullUnderSuppressionSlot();
 }
 #endif
 

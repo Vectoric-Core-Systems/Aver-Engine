@@ -2248,7 +2248,7 @@ void SandboxApp::renderPagePerformance(voxi::Renderer& vx, voxi::Settings& s, co
         uiReg_.track("project.lod.threshold");
         ImGui::EndDisabled();
 
-        if (ImGui::Checkbox("Occlusion culling", &occlusionCullEnabled_)) projectDirty_ = true;
+        if (ImGui::Checkbox("Occlusion culling", &occl_.occlusionCullEnabled_)) projectDirty_ = true;
         uiReg_.track("project.occlusionCull");
         if (ImGui::Checkbox("Depth pre-pass", &rset_.depthPrepassOverride_)) projectDirty_ = true;
         uiReg_.track("project.depthPrepass");
