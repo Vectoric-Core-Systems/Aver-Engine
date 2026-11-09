@@ -328,9 +328,14 @@ public:
         if (!gpuMesh_) return;
         rhi::IDevice* dev = editor::sharedEditorDevice();
         if (!dev) return;
-        if (render::preview::ActorPreview* preview = editor::sharedPreviewIfCreated())
-            preview->dropDrawsUsing(gpuMesh_);
+        render::preview::ActorPreview* preview = editor::sharedPreviewIfCreated();
+        if (preview) preview->dropDrawsUsing(gpuMesh_);
         dev->destroyMesh(gpuMesh_);
+        for (const rhi::MeshHandle part : partMeshes_) {
+            if (!part) continue;
+            if (preview) preview->dropDrawsUsing(part);
+            dev->destroyMesh(part);
+        }
     }
 #endif
 
@@ -495,6 +500,7 @@ private:
             uploadTried_ = true;
             gpuMesh_ = uploadMesh(*dev);
             if (!gpuMesh_) AVER_WARN("[Editor] mesh preview: could not upload '{}'", path_);
+            else uploadParts(*dev);
         }
         if (!gpuMesh_) { ImGui::TextDisabled("This mesh could not be uploaded for preview."); return; }
 
@@ -509,21 +515,28 @@ private:
             preview->setViewMode(viewMode_);
             preview->setShowFlags(show_);
 
-            std::vector<render::preview::PreviewDraw> draws(1);
-            draws[0].mesh = gpuMesh_;
-            // Shaded with the mesh's own first material, as Unreal's mesh editor shows it.
-            if (!mesh_.submeshes.empty() && mesh_.submeshes[0].materialSlot < mesh_.materialSlots.size())
-                draws[0].materialHandle = previewMaterialFor(mesh_.materialSlots[mesh_.submeshes[0].materialSlot]);
+            // Each submesh shaded with its own slot's material, as Unreal's mesh editor shows it. A mesh whose
+            // submeshes all name one material is a single draw of the whole upload.
+            const usize nDraws = partMeshes_.empty() ? 1 : partMeshes_.size();
+            std::vector<render::preview::PreviewDraw> draws(nDraws);
+            for (usize k = 0; k < nDraws; ++k) {
+                draws[k].mesh = partMeshes_.empty() ? gpuMesh_ : partMeshes_[k];
+                const usize sub = partMeshes_.empty() ? 0 : k;
+                if (sub < mesh_.submeshes.size() && mesh_.submeshes[sub].materialSlot < mesh_.materialSlots.size())
+                    draws[k].materialHandle = previewMaterialFor(mesh_.materialSlots[mesh_.submeshes[sub].materialSlot]);
+            }
             // Recentre on the mesh's own middle and give frameAll a real extent: at boundsRadius 0
             // it computes a zero span and falls back to a fixed distance, framing every mesh
             // identically regardless of size. Same reasoning ThumbnailCache writes out at length.
             f32 centre[3] = {};
             f32 radius = 0.0f;
             if (dev->meshBounds(gpuMesh_, centre, &radius)) {
-                draws[0].world[12] = -centre[0];
-                draws[0].world[13] = -centre[1];
-                draws[0].world[14] = -centre[2];
-                draws[0].boundsRadius = radius;
+                for (render::preview::PreviewDraw& d : draws) {   // the whole mesh's centre and extent, so the parts stay assembled
+                    d.world[12] = -centre[0];
+                    d.world[13] = -centre[1];
+                    d.world[14] = -centre[2];
+                    d.boundsRadius = radius;
+                }
             }
             preview->setDrawList(std::move(draws));
             if (!framed_) { preview->frameAll(); framed_ = true; }
@@ -624,6 +637,41 @@ private:
     rhi::MeshHandle uploadMesh(rhi::IDevice& dev) const {
         const u32 n = mesh_.vertexCount();
         if (n == 0 || mesh_.indices.empty()) return 0;
+        const std::vector<rhi::MeshVertex> verts = previewVertices();
+        return dev.createMesh(verts.data(), n, mesh_.indices.data(),
+                              static_cast<u32>(mesh_.indices.size()));
+    }
+
+    // When the submeshes name more than one material: one compacted upload per submesh (its own index range and
+    // only the vertices it uses; indices in the file are absolute), drawn with that submesh's slot.
+    void uploadParts(rhi::IDevice& dev) {
+        if (mesh_.submeshes.size() < 2) return;
+        bool mixed = false;
+        for (const fmt::OcMeshSubmesh& s : mesh_.submeshes)
+            if (s.materialSlot != mesh_.submeshes[0].materialSlot) { mixed = true; break; }
+        if (!mixed) return;
+        const std::vector<rhi::MeshVertex> verts = previewVertices();
+        std::vector<u32> remap(verts.size(), ~0u);
+        for (const fmt::OcMeshSubmesh& s : mesh_.submeshes) {
+            std::vector<rhi::MeshVertex> pv;
+            std::vector<u32> pi;
+            std::vector<u32> touched;
+            const usize end = std::min<usize>(usize(s.indexStart) + s.indexCount, mesh_.indices.size());
+            for (usize i = s.indexStart; i < end; ++i) {
+                const u32 v = mesh_.indices[i];
+                if (v >= verts.size()) continue;
+                if (remap[v] == ~0u) { remap[v] = static_cast<u32>(pv.size()); pv.push_back(verts[v]); touched.push_back(v); }
+                pi.push_back(remap[v]);
+            }
+            for (const u32 v : touched) remap[v] = ~0u;
+            partMeshes_.push_back(pi.empty() ? rhi::MeshHandle{0}
+                                             : dev.createMesh(pv.data(), static_cast<u32>(pv.size()), pi.data(),
+                                                              static_cast<u32>(pi.size())));
+        }
+    }
+
+    std::vector<rhi::MeshVertex> previewVertices() const {
+        const u32 n = mesh_.vertexCount();
         std::vector<rhi::MeshVertex> verts(n);
         for (u32 i = 0; i < n; ++i) {
             rhi::MeshVertex& v = verts[i];
@@ -640,8 +688,7 @@ private:
                 v.v = mesh_.uvs[usize(i)*2+1];
             } else { v.u = 0.0f; v.v = 0.0f; }
         }
-        return dev.createMesh(verts.data(), n, mesh_.indices.data(),
-                              static_cast<u32>(mesh_.indices.size()));
+        return verts;
     }
 
     // ITEM 1.2 (i): the material-slot list, editable. OcMeshSubmesh::materialSlot is a POSITIONAL
@@ -785,6 +832,7 @@ private:
     static constexpr usize kMaxUvTris = 20000;
 
     rhi::MeshHandle gpuMesh_ = 0;
+    std::vector<rhi::MeshHandle> partMeshes_;   // one per submesh, only when they name more than one material
     bool uploadTried_ = false;
     bool framed_ = false;
 
