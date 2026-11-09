@@ -1,6 +1,6 @@
 # Procedural content generation
 
-The PCG API, as it stands at `bac1d87`. Two of its three paths are wired end to end and demonstrated working; the third is a type contract and a CPU reference with nothing consuming it yet. Read the status line at the top of each path before assuming it does something.
+The PCG API. Two of its first three paths are wired end to end and demonstrated working; the third is a type contract and a CPU reference with nothing consuming it yet. Section 7 is the graph system layered on top of them (a C++ evaluator over `DOMAIN pcg` graphs). Read the status line at the top of each path before assuming it does something.
 
 ## 1. The split, and why
 
@@ -114,6 +114,69 @@ The design intent, stated in `Types.fs`: **F# owns the rules, a compute shader o
 3. Check determinism the way §2 describes: two identical seeds must agree bit for bit, two different seeds must disagree. `PcgScatterBehaviour.cs` is the copyable pattern.
 4. To spawn the result: `Aver.Pcg.Apply.PcgApply.Apply(placements)`, and declare the actor classes your `Asset` strings name — `ApplyResult.UnknownClass` is silent-forest debugging built in, read it before assuming nothing generated.
 5. To drive the sky: edit the project's scaffolded `Content/Sky.fs`, or replace it with your own module that ends in an `Apply()` calling `Aver.Framework.Sky.SetClouds`.
+
+## 7. Path 4 — PCG graphs (`DOMAIN pcg`)
+
+Status: evaluator, nodes, sinks, per-cell generation and the `PCGVOLUME graph=` record are built and unit-tested headless (`tests/world/Pcg*Test`). **Not built:** the graph editor canvas (a `.ocgraph` of this domain opens in the Content Browser as "PCG Graph" but has no PCG node palette yet), viewport debug drawing, a "Generate / Clean up" button, the GPU density node, a C#/F# `Pcg.Run` entry point. Author graphs as text for now.
+
+**Format decision (D5).** A PCG graph is a profile of the existing `.ocgraph` container, not a new AVR1 format. The container already carries what typed data flow needs: arbitrary pin type strings (`points`), per-node `key=value` tokens (`OcGraphNode::extraTokens`), `DOMAIN`, unknown-record preservation and a byte-exact load/save. `DOMAIN pcg` marks the profile (`OcGraphDomain::Pcg`), which also keeps the gameplay compiler and the material compiler from ever seeing it. The editor's canvas, clipboard, find and problems features can be reused when the UI lands. Nothing in this path is C# or F#.
+
+**Where it lives (D4).** `modules/world`, files `Pcg*.{hpp,cpp}`; Core + Formats only, no scene, no RHI. Density noise reuses `aver::pcg::sampleInfiniteAbs`.
+
+```
+OCGRAPH 1
+DOMAIN pcg
+NODE grid CreatePointsGrid 0 0 spacing=300
+PIN grid out out points
+NODE keep DensityFilter 200 0 min=0.5
+PIN keep in in points
+PIN keep inside out points
+NODE trees WeightedMeshSpawner 400 0 meshes=Meshes/Pine.ocmesh:3,Meshes/Fir.ocmesh:1
+PIN trees in in points
+LINK grid.out keep.in
+LINK keep.inside trees.in
+```
+
+A complete sample: `templates/FirstPerson/Content/PCG/PG_ForestScatter.ocgraph` (loaded and run by `PcgPartitionTest`). Parameters are `key=value` tokens on the NODE line; vectors are `x,y,z`, polylines `x,y,z|x,y,z`, mesh lists `path:weight,path:weight`.
+
+**Point data** (`PcgPoints`): struct of arrays, one entry per point: position, rotation, scale, density, seed, colour, steepness (degrees), local half-extents, plus named `f32` / `int` / `vec3` attribute columns. Columns missing on one side are zero-filled when sets are merged.
+
+**Determinism.** `pcgHash`, `pcgHash2`, `pcgHash3`, `pcgFloat01` and `CreatePointsRandom` are `Aver.Pcg.Rand` and `Pcg.scatter` ported bit for bit; `PcgPointsTest` compares them to a table generated once from the F# module (`tests/world/data/pcg_golden.fsx`). Beyond that, three rules: samplers sit on a **world-anchored lattice** and seed each point from its lattice index (a point's identity does not depend on the region being evaluated); per-point randomness is `hash(point.seed, node seed, stream)`, never a counter; every tie-break ends in (seed, x, y, z). Node seeds are `hash(graph seed, node id)`.
+
+**Nodes.**
+
+| Node | Pins | What it does |
+|---|---|---|
+| `CreatePointsGrid` | out | XY grid at cell centres (`spacing`, `z`) |
+| `CreatePointsRandom` | out | `count` uniform points, identical to `Pcg.scatter`; not partition-stable (warns when partitioned) |
+| `SurfaceSampler` | out | grid dropped on the landscape; sets steepness; `align=1`, `zOffset` |
+| `SplineSampler` | out | along `pts=` or a named context spline; `spacing`, `jitter`; yaw follows the tangent |
+| `VolumeSampler` | out | 3D lattice in `volume=<name>` or `min=` / `max=` |
+| `BoundsFilter` | in; inside, outside | box test |
+| `DensityNoise` | in; out | `cell`, `octaves`, `seed`, `mode` (set, mul, add, max), `scale`, `bias`, `use3d` |
+| `DensityFilter`, `DensityRemap` | in; inside, outside / out | range split, linear remap |
+| `AttributeFilter`, `AttributeMath`, `AttributeSet` | in; ... | compare; `dst = a op (b or value)`; set (constant or seeded random `min`..`max`) |
+| `TransformPoints` | in; out | seeded `posMin/Max`, `rotMin/Max` (degrees about X, Y, Z), `scaleMin/Max`, `uniformScale` |
+| `SelfPrune` | in; out | `radius` (or per-point extents), `priority=<attr>`, `mode` (greedy, local), `dims3` |
+| `Difference`, `Intersect`, `Union` | a, b; out | by `radius`; `Union dedup=<r>` |
+| `ProjectToSurface` | in; out | snap to landscape height; `align`, `zOffset`, `drop` |
+| `SlopeFilter`, `HeightFilter`, `LayerWeightFilter` | in; inside, outside | steepness (or `source=landscape`), world Z, paint-layer weight |
+| `DistanceToSplineFilter`, `DistanceToActorFilter` | in; inside, outside | XY distance to a context spline / tagged actors |
+| `WeightedMeshSpawner` | in; out | picks a mesh per point by weight, emits instances (sink) |
+| `ActorSpawner` | in; out | one spawn record per point (sink) |
+| `Input`, `Output`, `Subgraph`, `Loop` | | subgraph entry and exit; `graph=` runs another graph once, or once per point (`max=` caps iterations; nesting limit 8) |
+
+Landscape-dependent nodes use `ILandscapeQuery` (`heightAt`, `normalAt`, `layerWeight`); a host with only a height function wraps it in `PcgHeightFnLandscape`. Splines, tagged actors and named volumes come from the `PcgContext`.
+
+**Evaluator.** `pcgEvaluate(graph, PcgContext)`: topological, driven from the sink nodes; a per-node cache keyed by (type, params, node seed, input content hashes, region, environment stamp); a cancel flag and a wall-clock budget checked between nodes; an error/warning list (`PcgResult::diags`) with node ids; per-node point counts for an inspector. `pcgValidate` checks types, pins, doubled inputs, cycles and sink presence without running anything. A bad graph never throws: it reports and produces what it can.
+
+**Output sinks** (`PcgSinks.hpp`). (a) `pcgToInstanceData` builds an `.ocinst` table, optionally cell-sorted through `cellOcInstances`, for baking. (b) `pcgToChunkPayload` builds a chunk's entities; `GeneratorSettings::pcgProgram` makes `GeneratedChunkSource` use it instead of the density field and palette. With the field unset the palette generator is byte-identical to before. Entities are named from the point seed and sorted canonically, so `persistChunk`'s "regenerate equals persisted" comparison works. `generatorVersion` for a graph world is `pcgGeneratorVersion(program)` (a reserved high range plus the graph hash), so editing the graph makes older saved chunks report as stale instead of silently mixing. (c) `pcgActorsIn` returns actor spawn records for the host to spawn; the C# `Aver.Pcg.Apply` bridge for them is not written.
+
+**Per-cell generation.** `PcgCellGenerator` evaluates a cell grown by the graph's margin (the sum of each node's reach: prune radius, jitter amplitude, difference radius) and keeps only what lies inside the cell, half-open, so every point is owned by exactly one cell. With `SelfPrune mode=local` a cell run equals a whole-volume run exactly (`PcgPartitionTest`). `mode=greedy` (the default) uses a margin of three radii; it separates every pair across seams in the tests, but pathological chains are not guaranteed identical to a whole run. `PcgCellStore` caches cells with staleness: a graph edit or an environment stamp change makes cells stale (regenerated lazily), and `invalidateBox` marks only the cells a changed region reaches. Positions are world-space `f32`, so ownership is exact but placement resolution degrades past about 100 km from the origin.
+
+**`PCGVOLUME` records.** `graph <Content-relative .ocgraph>` hands the volume to the graph: `seed` is the graph seed, `bounds` (when not `infinite`) limits it, `radius` is the streaming radius, and `transient` marks the result as regenerated each session rather than baked. A volume without `graph` is the density-field and SCATTER path of §4, unchanged, and the `Sky` volume is never given a graph. `game::GameStreaming::enable` (shared by the editor and the game) builds the program, wires the existing height source in as the landscape, and resolves Subgraph and Loop graphs from the Content directory.
+
+**Not in v1:** hierarchical generation, runtime GPU point processing, PCG on arbitrary mesh surfaces beyond heightfield, spline and volume.
 
 ## Related
 

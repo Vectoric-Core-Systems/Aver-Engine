@@ -10,6 +10,13 @@ triggering inputs for anything summarised below.
 
 ## [Unreleased]
 
+### PCG graphs (UE parity wave 2, W3)
+
+- A `DOMAIN pcg` profile of the `.ocgraph` container carries typed point-set data flow (no new format), run by one C++ evaluator in `modules/world`: 29 nodes (samplers, filters, transforms, self-pruning, set operations, landscape/spline/actor filters, mesh and actor spawners, Subgraph, Loop), a per-node cache, cancellation, a time budget, diagnostics and validation. The `Aver.Pcg` hash and `Pcg.scatter` are ported bit for bit and checked against golden vectors generated from the F# module.
+- Sinks: `.ocinst` tables, streaming chunk payloads (`GeneratorSettings::pcgProgram`, palette generator unchanged when unset, graph hash in `generatorVersion`) and actor spawn records.
+- `PCGVOLUME ... graph <path> [transient]` runs a graph per streaming cell; each point is owned by one cell, and cell-by-cell runs equal a whole run (local pruning). Dirty cells regenerate alone. The `Sky` volume and every graph-less volume are untouched.
+- Not yet: the editor canvas, viewport debug draw, the Generate / Clean up button, a C#/F# `Pcg.Run`. See `docs/PCG.md` section 7.
+
 ### Physical animation (UE parity wave 2, W6)
 
 - **Hit reactions, partial-body simulation, death and get-up on a ragdoll** (`docs/physics/PHYSICAL_ANIMATION.md`). A `.ocphysanim` profile names regions of the skeleton and what each takes part with; a `HitEvent` (one neutral type, shared with the coming fracture work) blends the hit bone and its neighbours into the physics along an attack, hold and decay envelope, pushes the hit part and gives the body back to the animation by itself. `simulateSubtree` simulates one bone and everything below it while the rest follows the animation exactly. Per-bone blend, strength, damping and torque scale. `die()` ramps the motors to zero then goes limp; `getUp()` picks the profile montage by how the body lies and blends the simulation out. The physics ABI gained per-part strength, damping, torque scale and pins (additive); the framework gained `framework_physanim_abi.h`, `Entity.ApplyHit` and ten `PhysAnim` graph nodes. Tested headless (a 12 bone skeleton on CPU Jolt); the feel of a reaction has not been seen in a window and the editor tab and overlay are not written.

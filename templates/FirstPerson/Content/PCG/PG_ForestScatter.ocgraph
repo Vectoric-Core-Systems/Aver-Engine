@@ -1,0 +1,37 @@
+OCGRAPH 1
+DOMAIN pcg
+NAME PG_ForestScatter
+DESCRIPTION Sample PCG graph: trees on gentle ground, thinned by noise, jittered, then pruned so crowns do not overlap. Point a PCGVOLUME at it with `graph Content/PCG/PG_ForestScatter.ocgraph`; swap the mesh paths for your own. See docs/PCG.md.
+# sample on a 3 m landscape lattice (world-anchored, so streamed cells agree)
+NODE surface SurfaceSampler 0 0 spacing=300
+PIN surface out out points
+# a hash-noise density field, 40 m features
+NODE noise DensityNoise 220 0 cell=4000 octaves=3
+PIN noise in in points
+PIN noise out out points
+NODE dense DensityFilter 440 0 min=0.5
+PIN dense in in points
+PIN dense inside out points
+PIN dense outside out points
+# keep to slopes a tree can stand on
+NODE slope SlopeFilter 660 0 min=0 max=30
+PIN slope in in points
+PIN slope inside out points
+PIN slope outside out points
+# break up the lattice, vary the size, spin each tree
+NODE jitter TransformPoints 880 0 posMin=-120,-120,0 posMax=120,120,0 rotMin=0,0,0 rotMax=0,0,360 scaleMin=0.8,0.8,0.8 scaleMax=1.4,1.4,1.4
+PIN jitter in in points
+PIN jitter out out points
+# denser noise wins; 4 m between trunks
+NODE prune SelfPrune 1100 0 radius=400 priority=density
+PIN prune in in points
+PIN prune out out points
+NODE trees WeightedMeshSpawner 1320 0 meshes=Meshes/Tree_Pine.ocmesh:3,Meshes/Tree_Fir.ocmesh:1
+PIN trees in in points
+PIN trees out out points
+LINK surface.out noise.in
+LINK noise.out dense.in
+LINK dense.inside slope.in
+LINK slope.inside jitter.in
+LINK jitter.out prune.in
+LINK prune.out trees.in

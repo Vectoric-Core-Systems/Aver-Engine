@@ -164,6 +164,16 @@ Dependency: W2 steps 1-3,5 are independent of everything else. Overlap with W10 
 
 **Not in v1:** hierarchical generation (grids of grids), runtime GPU point processing, PCG on arbitrary mesh surfaces beyond heightfield/spline/volume.
 
+**Status 2026-11-09 (W3 steps 1-5 and 8, headless; `docs/PCG.md` section 7).**
+- Done, step 1 (D5): the `.ocgraph` container carries typed data flow as is (pin type strings, `key=value` node tokens, `DOMAIN`), so a PCG graph is `DOMAIN pcg` (`OcGraphDomain::Pcg`); no AVR1 `.ocpcg`.
+- Done, step 2: `PcgPoints` (SoA plus named f32/int/vec3 attributes), `pcgHash*`/`pcgFloat01` and `Pcg.scatter` (`pcgScatterReference`) ported bit for bit and compared with golden vectors generated from the F# module (`tests/world/data/pcg_golden.fsx`), spatial hash grid. Order independence is covered by the partition tests.
+- Done, step 3 (`modules/world`, D4): topological evaluator with per-node cache, cancel flag, time budget, diagnostics, validation, Subgraph and Loop; 29 nodes (the planned set minus mesh-surface sampling), each unit-tested, landscape through an `ILandscapeQuery` fake. Not done: the GPU Density node (step 7) and a node-catalog entry (these are not script-graph nodes).
+- Done, step 4: `.ocinst` table sink (cell-sorted through `cellOcInstances`), chunk payload sink wired into `GeneratedChunkSource` via `GeneratorSettings::pcgProgram` (palette path byte-identical when unset; graph worlds record `pcgGeneratorVersion` so stale saves are detected; `persistChunk` regenerate-equals-persisted tested), actor spawn records.
+- Done, step 5 (model, headless): `PCGVOLUME ... graph <path> [transient]`, `PcgCellGenerator` (each point owned by exactly one cell, nine cells equal a whole run with local pruning), `PcgCellStore` dirty-cell tracking (graph edit or environment stamp makes cells stale, `invalidateBox` marks only the reachable cells), wired into `GameStreaming::enable` (shared by the editor and the game). The `Sky` volume and graph-less volumes are untouched.
+- Done, step 8 (partly): `docs/PCG.md` section 7, sample graph `templates/FirstPerson/Content/PCG/PG_ForestScatter.ocgraph` (loaded and run by a test), CHANGELOG entry.
+- Not done: step 6 (editor canvas, palette, inspect, viewport debug draw, Generate / Clean up button), step 7, F#/C# `Pcg.Run` and the `Aver.Pcg.Apply` bridge for actor spawn records, the F# graph-run helper from step 8, mesh-surface sampling.
+- Not verified: nothing ran in the editor or the game; the `GameStreaming` graph hook compiles but no level has been streamed through it. Greedy `SelfPrune` across cell seams is exact only in `mode=local` (greedy uses a three-radius margin and passed the seam-spacing test, but is not proven equal to a whole run). Positions are world-space f32. Test-level only: the per-node cache keys on region, so it helps re-runs of the same cell, not neighbouring cells.
+
 ---
 
 ## W4. PCG vegetation and biomes on landscape
