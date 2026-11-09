@@ -248,3 +248,8 @@ set_target_properties(DataLayersHlodTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${C
 add_executable(AuthoredLayersTest src/AuthoredLayersTest.cpp)
 target_link_libraries(AuthoredLayersTest PRIVATE Aver.World Aver.Formats Aver.Core)
 set_target_properties(AuthoredLayersTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# ChunkProxyTest -- the HLOD proxy of a generated chunk (pure CPU, runs on a generation worker in the game).
+add_executable(ChunkProxyTest src/ChunkProxyTest.cpp)
+target_link_libraries(ChunkProxyTest PRIVATE Aver.World Aver.Formats Aver.Core)
+set_target_properties(ChunkProxyTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

@@ -49,17 +49,7 @@ Pose compose(const Pose& parent, const Pose& child) {
     return o;
 }
 
-void matrixOf(const Pose& t, f64 m[12]) {
-    const f64 ex[3] = {1, 0, 0}, ey[3] = {0, 1, 0}, ez[3] = {0, 0, 1};
-    f64 cx[3], cy[3], cz[3];
-    rotateD(t.rot, ex, cx); rotateD(t.rot, ey, cy); rotateD(t.rot, ez, cz);
-    for (int i = 0; i < 3; ++i) {
-        m[i * 4 + 0] = cx[i] * t.scale.x;
-        m[i * 4 + 1] = cy[i] * t.scale.y;
-        m[i * 4 + 2] = cz[i] * t.scale.z;
-        m[i * 4 + 3] = t.pos[i];
-    }
-}
+void matrixOf(const Pose& t, f64 m[12]) { ocMergeMatrix(t.pos, t.rot, t.scale, m); }
 
 std::string slashes(std::string s) { std::replace(s.begin(), s.end(), '\\', '/'); return s; }
 

@@ -61,6 +61,25 @@ bool inside(const Box& in, const Box& outer) {
 
 } // namespace
 
+void ocMergeMatrix(const f64 pos[3], const Quat& rot, const Vec3& scale, f64 m[12]) {
+    const f64 qx = rot.x, qy = rot.y, qz = rot.z, qw = rot.w;
+    const auto rotate = [&](const f64 v[3], f64 o[3]) {
+        const f64 tx = 2.0 * (qy * v[2] - qz * v[1]), ty = 2.0 * (qz * v[0] - qx * v[2]), tz = 2.0 * (qx * v[1] - qy * v[0]);
+        o[0] = v[0] + qw * tx + (qy * tz - qz * ty);
+        o[1] = v[1] + qw * ty + (qz * tx - qx * tz);
+        o[2] = v[2] + qw * tz + (qx * ty - qy * tx);
+    };
+    const f64 ex[3] = {1, 0, 0}, ey[3] = {0, 1, 0}, ez[3] = {0, 0, 1};
+    f64 cx[3], cy[3], cz[3];
+    rotate(ex, cx); rotate(ey, cy); rotate(ez, cz);
+    for (int i = 0; i < 3; ++i) {
+        m[i * 4 + 0] = cx[i] * scale.x;
+        m[i * 4 + 1] = cy[i] * scale.y;
+        m[i * 4 + 2] = cz[i] * scale.z;
+        m[i * 4 + 3] = pos[i];
+    }
+}
+
 bool mergeStaticMeshes(const std::vector<OcMergeItem>& items, const OcMergeOptions& opt, OcMeshData& out, OcMergeReport* report,
                        std::string* why) {
     OcMergeReport rep;

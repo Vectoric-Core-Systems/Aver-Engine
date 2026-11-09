@@ -1,6 +1,7 @@
 // Merging static meshes into one (dynamic HLOD proxies, docs/LEVEL_STREAMING.md). Pure CPU on OcMeshData: no GPU, no scene.
 #pragma once
 
+#include "aver/core/Math.hpp"
 #include "aver/core/Types.hpp"
 #include "aver/formats/OcMesh.hpp"
 
@@ -16,6 +17,9 @@ struct OcMergeItem {
     // Overrides every slot of the mesh when non-empty (a placement's `material`); empty = the mesh's own slot names.
     std::string material;
 };
+
+// The row-major 3x4 of a pose: columns of the rotation scaled per axis, then the translation (f64).
+void ocMergeMatrix(const f64 pos[3], const Quat& rot, const Vec3& scale, f64 m[12]);
 
 struct OcMergeOptions {
     // Subtracted from the translation: the merged vertices are relative to this world point, so they stay precise far from the origin.
