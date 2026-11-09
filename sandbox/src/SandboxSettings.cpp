@@ -85,10 +85,10 @@ void SandboxApp::loadEditorPreferences() {
     voxiRenderer_.setGiCacheRamBudget(static_cast<u64>(rset_.ddcRamBudgetMb_) * 1024ull * 1024ull);
 #endif
 
-    prefIdeName_ = prefString("contentBrowser.ide", "");
+    launch_.prefIdeName_ = prefString("contentBrowser.ide", "");
 
-    if (prefsDevice_ && prefsDevice_->vsyncCanDisable())
-        prefsDevice_->setVSync(prefBool("display.vsync", prefsDevice_->vsync()));
+    if (launch_.prefsDevice_ && launch_.prefsDevice_->vsyncCanDisable())
+        launch_.prefsDevice_->setVSync(prefBool("display.vsync", launch_.prefsDevice_->vsync()));
     rset_.frameInterpWhileEditing_ = prefBool("display.frameInterpWhileEditing", false);
     // Default: Learned trajectory (shipped weights).
     rset_.frameInterpTrajectory_ = prefInt("display.frameInterpTrajectory", 2);
@@ -99,7 +99,7 @@ void SandboxApp::loadEditorPreferences() {
     // Stored render scale behind crash cookie: detects device loss at startup via renderScalePending.
     // Migration: AverSrChoice from display.aversr/renderScale if display.aversrChoice not yet written.
 #if AVER_MODULE_SR
-    if (prefsDevice_ && rset_.renderScaleOverride_ == 1.0f && !rset_.averSrFromCli_) {
+    if (launch_.prefsDevice_ && rset_.renderScaleOverride_ == 1.0f && !rset_.averSrFromCli_) {
         const std::string storedChoice = prefString("display.aversrChoice", "");
         rset_.averSrChoice_ = editor::migrateAverSrChoice(!storedChoice.empty(), storedChoice,
                                                     prefFloat("display.aversr", 0.0f),
@@ -115,9 +115,9 @@ void SandboxApp::loadEditorPreferences() {
             // Crash-cookie mechanism as above (unchanged from before Auto existed). Manual is the
             // ONLY choice that still restores a raw display.renderScale directly -- every named
             // level below re-derives its own canonical scale through applyAverSrQuality instead.
-            const f32 stored = prefFloat("display.renderScale", prefsDevice_->renderScale());
+            const f32 stored = prefFloat("display.renderScale", launch_.prefsDevice_->renderScale());
             if (stored == 1.0f) {
-                prefsDevice_->setRenderScale(stored);         // early-outs; costs nothing
+                launch_.prefsDevice_->setRenderScale(stored);         // early-outs; costs nothing
             } else if (pending && !rset_.renderScaleCookieArmed_) {
                 // !renderScaleCookieArmed_: a cookie THIS process armed isn't evidence the previous
                 // launch crashed (see updateAverSrAuto's prefsLoaded_ gate for the frame-1 ordering bug).
@@ -134,7 +134,7 @@ void SandboxApp::loadEditorPreferences() {
                 setPrefBool("display.renderScalePending", true);
                 flushEditorPrefs();   // ON DISK BEFORE THE DEVICE IS RISKED -- the whole point
                 rset_.renderScaleCookieArmed_ = true;
-                prefsDevice_->setRenderScale(stored);
+                launch_.prefsDevice_->setRenderScale(stored);
             }
         } else if (pending && !rset_.renderScaleCookieArmed_) {
             // Same !renderScaleCookieArmed_ reasoning as the Manual branch above.
@@ -149,7 +149,7 @@ void SandboxApp::loadEditorPreferences() {
                           editor::averSrChoiceName(rset_.averSrChoice_));
             setPrefBool("display.renderScalePending", false);
             flushEditorPrefs();
-            applyAverSrQuality(prefsDevice_, aver::sr::Quality::Off);
+            applyAverSrQuality(launch_.prefsDevice_, aver::sr::Quality::Off);
         } else if (rset_.averSrChoice_ == editor::AverSrChoice::Auto) {
             // Applied by updateAverSrAuto next frame (needs project context).
         } else {
@@ -162,7 +162,7 @@ void SandboxApp::loadEditorPreferences() {
                 flushEditorPrefs();
                 rset_.renderScaleCookieArmed_ = true;
             }
-            if (q != rset_.averSrQuality_) applyAverSrQuality(prefsDevice_, q);
+            if (q != rset_.averSrQuality_) applyAverSrQuality(launch_.prefsDevice_, q);
         }
     }
 #endif  // AVER_MODULE_SR
@@ -185,11 +185,11 @@ void SandboxApp::loadEditorPreferences() {
 
 // Resolves the stored IDE name to an index, once the async scan has produced the list.
 void SandboxApp::resolvePreferredIdeFromPrefs() {
-    if (prefIdeName_.empty() || !editor::ideDetectionFinished()) return;
+    if (launch_.prefIdeName_.empty() || !editor::ideDetectionFinished()) return;
     const std::vector<editor::IdeInfo>& ides = editor::detectedIdes();
     for (usize i = 0; i < ides.size(); ++i)
-        if (ides[i].name == prefIdeName_) { drawerUi_.cbIdeChoice_ = static_cast<int>(i); break; }
-    prefIdeName_.clear();
+        if (ides[i].name == launch_.prefIdeName_) { drawerUi_.cbIdeChoice_ = static_cast<int>(i); break; }
+    launch_.prefIdeName_.clear();
 }
 
 
@@ -291,10 +291,10 @@ void SandboxApp::buildEditorPrefs() {
         ImGui::Combo("Level filter", &drawerUi_.logLevelFilter_, "All\0Info+\0Warn+\0Error+\0Critical+\0");
     }
     if (::aver::editor::sectionHeader("Display", ImGuiTreeNodeFlags_DefaultOpen)) {
-        const bool canDisable = prefsDevice_ && prefsDevice_->vsyncCanDisable();
-        bool vs = prefsDevice_ ? prefsDevice_->vsync() : true;
+        const bool canDisable = launch_.prefsDevice_ && launch_.prefsDevice_->vsyncCanDisable();
+        bool vs = launch_.prefsDevice_ ? launch_.prefsDevice_->vsync() : true;
         ImGui::BeginDisabled(!canDisable);
-        if (ImGui::Checkbox("V-Sync", &vs) && prefsDevice_) prefsDevice_->setVSync(vs);
+        if (ImGui::Checkbox("V-Sync", &vs) && launch_.prefsDevice_) launch_.prefsDevice_->setVSync(vs);
         ImGui::EndDisabled();
         if (!canDisable && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip("This display path cannot tear, so vsync cannot be turned off.\n"
@@ -308,10 +308,10 @@ void SandboxApp::buildEditorPrefs() {
             ImGui::SetTooltip("Shows a generated frame between every two rendered ones: twice the frames\n"
                               "on screen for the same rendering work, at about half a frame of extra delay.\n"
                               "Needs 1x anti-aliasing. Play uses the project's setting instead.");
-        if (rset_.frameInterpWhileEditing_ && prefsDevice_) {
+        if (rset_.frameInterpWhileEditing_ && launch_.prefsDevice_) {
             ImGui::SameLine();
-            ImGui::TextDisabled(prefsDevice_->sampleCount() > 1 ? "(paused: needs 1x anti-aliasing)"
-                                : prefsDevice_->frameInterpolated() ? "(running)"
+            ImGui::TextDisabled(launch_.prefsDevice_->sampleCount() > 1 ? "(paused: needs 1x anti-aliasing)"
+                                : launch_.prefsDevice_->frameInterpolated() ? "(running)"
                                                                  : "(starting)");
         }
 
@@ -390,8 +390,8 @@ void SandboxApp::buildEditorPrefs() {
                     rset_.averSrChoice_ = static_cast<editor::AverSrChoice>(i);
                     // Auto/Manual apply nothing here; updateAverSrAuto picks up Auto next frame.
                     const int lvl = editor::userLevelFor(rset_.averSrChoice_);
-                    if (lvl >= 0 && prefsDevice_)
-                        applyAverSrQuality(prefsDevice_, static_cast<aver::sr::Quality>(lvl));
+                    if (lvl >= 0 && launch_.prefsDevice_)
+                        applyAverSrQuality(launch_.prefsDevice_, static_cast<aver::sr::Quality>(lvl));
                 }
                 if (sel) ImGui::SetItemDefaultFocus();
             }
@@ -415,9 +415,9 @@ void SandboxApp::buildEditorPrefs() {
                 aver::sr::qualityName(rset_.averSrQuality_));
 #endif
         // Render scale: 3D scene resolution as fraction of window. UI stays crisp.
-        float rs = prefsDevice_ ? prefsDevice_->renderScale() : 1.0f;
-        if (ImGui::SliderFloat("Render Scale", &rs, 0.25f, 1.0f, "%.2f") && prefsDevice_) {
-            prefsDevice_->setRenderScale(rs);
+        float rs = launch_.prefsDevice_ ? launch_.prefsDevice_->renderScale() : 1.0f;
+        if (ImGui::SliderFloat("Render Scale", &rs, 0.25f, 1.0f, "%.2f") && launch_.prefsDevice_) {
+            launch_.prefsDevice_->setRenderScale(rs);
 #if AVER_MODULE_SR
             // Dragging sets "Manual scale" (a deliberate choice like picking a combo item).
             rset_.averSrMigrationNoteArmed_ = false;
@@ -1383,15 +1383,15 @@ void SandboxApp::renderPageOverview(voxi::Renderer& vx, voxi::Settings& s, const
             static const char* kNames[] = {"Engine default", "D3D12", "Vulkan", "D3D11"};
             static const char* kKeys[]  = {"", "d3d12", "vulkan", "d3d11"};
             int cur = 0;
-            for (int i = 1; i < 4; ++i) if (projectBackend_ == kKeys[i]) { cur = i; break; }
+            for (int i = 1; i < 4; ++i) if (launch_.projectBackend_ == kKeys[i]) { cur = i; break; }
             if (ImGui::Combo("Renderer", &cur, kNames, 4)) {
-                projectBackend_ = kKeys[cur];
+                launch_.projectBackend_ = kKeys[cur];
                 autosave_.projectDirty_ = true;
             }
             uiReg_.track("project.backend");
             // Shows what is actually running beside what was asked for.
             ImGui::SameLine();
-            ImGui::TextDisabled("(now: %s)", runningBackend_.c_str());
+            ImGui::TextDisabled("(now: %s)", launch_.runningBackend_.c_str());
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Takes effect on the next launch.\n"
                                   "A backend must be compiled into the build to be usable:\n"
@@ -2503,8 +2503,8 @@ void SandboxApp::saveEditorPreferences() {
     // Guarded here rather than in onShutdown() so a future third caller can't reintroduce it, and
     // so the rule reads the same as its two neighbours.
     if (maxFrames_ == 0) {
-        if (prefsDevice_ && prefsDevice_->vsyncCanDisable())
-            setPrefBool("display.vsync", prefsDevice_->vsync());
+        if (launch_.prefsDevice_ && launch_.prefsDevice_->vsyncCanDisable())
+            setPrefBool("display.vsync", launch_.prefsDevice_->vsync());
         setPrefBool("display.frameInterpWhileEditing", rset_.frameInterpWhileEditing_);
         setPrefInt("display.frameInterpTrajectory", rset_.frameInterpTrajectory_);
         setPrefBool("display.frameInterpTrain", rset_.frameInterpTrain_);
@@ -2521,14 +2521,14 @@ void SandboxApp::saveEditorPreferences() {
 #if AVER_MODULE_SR
         if (!rset_.averSrFromCli_ && rset_.renderScaleOverride_ == 1.0f) {
             setPrefString("display.aversrChoice", editor::averSrChoiceName(rset_.averSrChoice_));
-            if (prefsDevice_)
+            if (launch_.prefsDevice_)
                 // Through renderScaleToPersist, not the live device scale directly: persisting the
                 // live scale for anything but Manual was the exact bug the plan's 10.1/3.3-A
                 // corrections describe -- Auto would persist whatever fraction this session's rung
                 // resolved to, and the crash-cookie render-scale block at load would apply that
                 // stale fraction before Auto got to re-derive it.
                 setPrefFloat("display.renderScale",
-                            editor::renderScaleToPersist(rset_.averSrChoice_, prefsDevice_->renderScale()));
+                            editor::renderScaleToPersist(rset_.averSrChoice_, launch_.prefsDevice_->renderScale()));
             // The upscaler's quality mirror: before display.aversrChoice existed this was never
             // persisted at all (reset to Off every launch, desynced from display.renderScale above
             // once it wasn't). display.aversrChoice is now the source of truth; this mirror just

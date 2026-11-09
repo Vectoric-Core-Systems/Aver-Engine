@@ -13,7 +13,7 @@
 namespace aver {
 // Restarts profiler stats when Play starts/stops (called from startPlay/stopPlay in SandboxPlay.cpp).
 void SandboxApp::resetPlayProfile(bool playStarting) {
-    if (prefsDevice_) prefsDevice_->resetGpuTiming();
+    if (launch_.prefsDevice_) launch_.prefsDevice_->resetGpuTiming();
     if (playStarting) playProf_.resetPhases();
 }
 
@@ -2816,26 +2816,26 @@ void SandboxApp::buildUI(Engine& e) {
 #if AVER_WITH_IMGUI
     uiReg_.beginFrame();
 #endif
-    prefsDevice_ = e.device();
+    launch_.prefsDevice_ = e.device();
 #if AVER_WITH_IMGUI
-    if (!prefsLoaded_) { prefsLoaded_ = true; loadEditorPreferences(); }
+    if (!launch_.prefsLoaded_) { launch_.prefsLoaded_ = true; loadEditorPreferences(); }
 #endif
 #if AVER_MODULE_SCENE
-    if (wantMeshReload_) {
-        wantMeshReload_ = false;
+    if (launch_.wantMeshReload_) {
+        launch_.wantMeshReload_ = false;
         releaseProjectMeshes(e);
         loadProjectMeshes(e);
     }
 #endif
     if (rset_.vsyncOffRequested_) {
         rset_.vsyncOffRequested_ = false;
-        if (prefsDevice_->vsyncCanDisable()) { prefsDevice_->setVSync(false); AVER_INFO("[Sandbox] vsync OFF (--no-vsync)"); }
+        if (launch_.prefsDevice_->vsyncCanDisable()) { launch_.prefsDevice_->setVSync(false); AVER_INFO("[Sandbox] vsync OFF (--no-vsync)"); }
         else AVER_WARN("[Sandbox] --no-vsync ignored: this display path cannot tear");
     }
     // --vsync: forces it ON, overriding stored preference.
     if (rset_.vsyncOnRequested_) {
         rset_.vsyncOnRequested_ = false;
-        prefsDevice_->setVSync(true);
+        launch_.prefsDevice_->setVSync(true);
         AVER_INFO("[Sandbox] vsync ON (--vsync)");
     }
 #if AVER_WITH_IMGUI

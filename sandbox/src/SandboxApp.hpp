@@ -1316,6 +1316,7 @@ private:
 #include "state/DroneState.hpp"
 #include "state/BrandIconState.hpp"
 #include "state/EditHistoryState.hpp"
+#include "state/LaunchConfigState.hpp"
 class HitchMarks;
 namespace game { struct SceneDrawStats; }
 
@@ -1790,6 +1791,7 @@ private:
     DroneState drone_;   // Editor drone pawn (graph-driven test pawn) runtime state.
     BrandIconState brand_;
     EditHistoryState edit_;   // Undo/redo history
+    LaunchConfigState launch_;   // Launch configuration and prefs-load flags
     // ---- end feature state ----
 
     void applyProject(Engine& e);
@@ -2171,9 +2173,6 @@ private:
     std::string selectionLabel() const;
 
     f32 selectedRadius() const;
-
-    // --no-editor-chrome: suppress editor chrome for comparison with AverEngineRuntime.exe.
-    bool noEditorChrome_ = false;
 
 #if AVER_MODULE_SCENE
     scene::Entity playerStart_ = scene::kInvalidEntity;
@@ -2993,14 +2992,7 @@ private:
     // Default to Move (gizmo ready on open, vs Select which needs a second key press).
     Tool initialTool_ = Tool::Move;
     std::vector<MeshObj> objects_;
-    bool hideEditorScene_ = false;
-    rhi::IDevice* prefsDevice_ = nullptr;
-    std::string prefIdeName_;
-    bool prefsLoaded_ = false;
-    // Set by loadLevel when level supplied CAMERA record; read by onAttach.
-    bool levelCameraRestored_ = false;
     editor::AssetEditorHost assetEditors_;
-    bool wantMeshReload_ = false;
 #if AVER_MODULE_SCENE
     editor::DecalImageResolver decalImages_;  // a decal's image id -> a file under the project's content folder
     editor::DecalGizmo decalGizmo_;           // the selected decal's box and its face handles
@@ -3084,7 +3076,6 @@ private:
     void setEditorMode(EditorMode m);
 
     void toggleEditorMode();
-    std::string startMode_;
 
     void applyStartMode();
     // The projection and owner-hide mode of the Play camera (GameCamera.hpp): FOV, roll, clip planes, the collision fade. The default outside Play.
@@ -3147,31 +3138,14 @@ private:
     bool updateFrameInterpolation(aver::rhi::IDevice* dev);
 #endif
     bool camOverride_=false;         // --cam X Y Z PITCH YAW: aim the viewport camera outright
-    // --set NAME VALUE pairs, applied once through runConsoleLine on the first frame with a device.
-    std::vector<std::pair<std::string, std::string>> consoleSets_;
 
     Vec3 camPosOverride_{};
     f32  pitchOverride_=0.0f, yawOverride_=0.0f;   // radians, converted in setCamera
-    bool useWarp_=false;             // --warp: run on the D3D12 software rasteriser
-    // The engine, for the log sink to write the startup splash through. Set at the top of onInit.
-    Engine* engineForSplash_ = nullptr;
-    std::thread::id mainThreadId_{};
-    bool windowedOverride_=false;    // --windowed: kept so the flag still parses; windowed is the default now
-    bool fullscreenOverride_=false;  // --fullscreen: opt an interactive run INTO borderless fullscreen
-    std::string backendName_;   // --backend: which RHI backend to ask for first
-    std::string cultureOverride_;   // --culture: beats the saved preview culture (editor pref loc.previewCulture)
-    // RENDER.BACKEND as the OPEN PROJECT states it. Separate from backendName_ (what this run launched with).
-    std::string projectBackend_;
-    std::string runningBackend_ = "?";   // what the device actually came back as, latched at init
-    bool debugLayer_=false;          // --debug-layer: validate every graphics call (a real per-call tax)
-    std::string scriptsDir_;         // --scripts <dir>: where to look for user script assemblies
     editor::ProjectBrowser browser_;
     fmt::ProjectDesc project_;
     std::string projectPath_;        // <path>.ocproject given on the command line
     std::string openMapPath_;        // <path>.ocmap given on the command line, if any
     bool browserActive_=false;
-    // Whether THIS launch's own command line was eligible to register as the single-instance primary.
-    bool singleInstanceEligible_ = false;
     bool        armOpenLevelPicker_ = false;   // --open-level-picker, consumed on the first draw
     int frameNo_ = 0;                                      // bumped once per UI frame; the cache freshness clock
     editor::ToolsMenu tools_;

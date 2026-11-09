@@ -204,11 +204,11 @@ void SandboxApp::drawEditorObjects(Engine& e) {
     // stuff" -- nothing was replaced, the placeholders just hid in the same frame). levelEntities_
     // is AVER_MODULE_SCENE-only, so the OR term is simply absent, not always-false, when it's off.
 #if AVER_MODULE_SCENE
-    hideEditorScene_ = playSessionActive() || !levelPath_.empty();
+    launch_.hideEditorScene_ = playSessionActive() || !levelPath_.empty();
 #else
-    hideEditorScene_ = playSessionActive();
+    launch_.hideEditorScene_ = playSessionActive();
 #endif
-    const bool hideEditorScene = hideEditorScene_;
+    const bool hideEditorScene = launch_.hideEditorScene_;
     for (int i=0;i<(int)objects_.size();++i) {
         MeshObj& o = objects_[i];
         if (!o.visible || hideEditorScene || !viewState_.showStaticMeshes_) continue;
@@ -1972,7 +1972,7 @@ bool SandboxApp::drawSelectionOutline(Engine& e) {
 #endif
     // Ejected shows the outline again (UE shows selection in Simulate): anyPlaying itself must stay
     // the union every OTHER play-chrome gate (including the Player Start marker below) relies on.
-    if (selectionUi_.hasSelection_ && maxFrames_ == 0 && (!anyPlaying || playEjected()) && !noEditorChrome_) {
+    if (selectionUi_.hasSelection_ && maxFrames_ == 0 && (!anyPlaying || playEjected()) && !launch_.noEditorChrome_) {
         // Unreal's selection outline width, scaled by DPI like the gizmo handles below.
         e.device()->setLineWidth(2.0f * viewState_.dpi_);
         // One drawLines per selected entity. selectionOutlineLines caches per MESH id, so N
@@ -2000,7 +2000,7 @@ void SandboxApp::drawPlayerStartMarker(Engine& e, const bool anyPlaying) {
     // viewportIconsReady_ gates only the SPRITE below (it needs the icon renderer and its texture);
     // the capsule/arrow are ordinary line meshes and draw whenever the marker itself should be
     // visible, the same as the gizmo or the grid.
-    if (!noEditorChrome_ && !anyPlaying && playerStart_ != scene::kInvalidEntity) {
+    if (!launch_.noEditorChrome_ && !anyPlaying && playerStart_ != scene::kInvalidEntity) {
         const scene::World& psw = scene::World::instance();
         if (psw.valid(playerStart_)) {
             const Transform& psXf = psw.localTransform(playerStart_);
@@ -2034,7 +2034,7 @@ void SandboxApp::drawPlayerStartMarker(Engine& e, const bool anyPlaying) {
 // The baked navigation mesh.
 #if AVER_MODULE_SYNAPSE
 void SandboxApp::drawNavMesh(Engine& e) {
-    if (dbgOv_.showNav_ && dbgOv_.navMesh_ && !noEditorChrome_) {
+    if (dbgOv_.showNav_ && dbgOv_.navMesh_ && !launch_.noEditorChrome_) {
         // Already in world space -- buildNavOverlay emits absolute cell corners, because a
         // grid has an origin of its own and folding it into a matrix would mean two places
         // could disagree about where the navmesh is.
@@ -2050,7 +2050,7 @@ void SandboxApp::drawAiDebug(Engine& e) {
     // AI debug overlays: collect this frame's lines and labels, upload the lines like the navmesh, draw them.
     if (dbgOv_.aiDebugMesh_) { e.device()->destroyLineMesh(dbgOv_.aiDebugMesh_); dbgOv_.aiDebugMesh_ = 0; }
     editor::aiDebugCollect(dbgOv_.aiDebug_);
-    if (dbgOv_.aiDebug_.any() && !noEditorChrome_) {
+    if (dbgOv_.aiDebug_.any() && !launch_.noEditorChrome_) {
         const std::vector<rhi::LineVertex> aiVerts = editor::aiDebugLineVertices(synapse::aiDebug());
         if (!aiVerts.empty()) {
             dbgOv_.aiDebugMesh_ = e.device()->createLineMesh(aiVerts.data(), static_cast<u32>(aiVerts.size()));
@@ -2067,19 +2067,19 @@ void SandboxApp::drawMotionModelingCameraDebug(Engine& e) {
     // Motion-matching overlay (Show > Motion Matching): the same line-mesh route, world-space vertices.
     if (dbgOv_.motionDebugMesh_) { e.device()->destroyLineMesh(dbgOv_.motionDebugMesh_); dbgOv_.motionDebugMesh_ = 0; }
     editor::motionDebugCollect(dbgOv_.motionDebug_, dbgOv_.motionDebugFrame_);
-    if (dbgOv_.motionDebug_.any() && !noEditorChrome_ && !dbgOv_.motionDebugFrame_.lines.empty()) {
+    if (dbgOv_.motionDebug_.any() && !launch_.noEditorChrome_ && !dbgOv_.motionDebugFrame_.lines.empty()) {
         dbgOv_.motionDebugMesh_ = e.device()->createLineMesh(dbgOv_.motionDebugFrame_.lines.data(), static_cast<u32>(dbgOv_.motionDebugFrame_.lines.size()));
         const Mat4 mmId = Mat4::identity();
         if (dbgOv_.motionDebugMesh_) e.device()->drawLines(dbgOv_.motionDebugMesh_, &mmId.m[0][0]);
     }
 
-    editor::drawModelingLines(e, modeling_, viewState_.mode_ == EditorMode::Modeling, noEditorChrome_);   // Modeling mode wireframe
-    editor::drawPcgDebugPoints(e, noEditorChrome_);   // the PCG Graph tab's Debug Points
+    editor::drawModelingLines(e, modeling_, viewState_.mode_ == EditorMode::Modeling, launch_.noEditorChrome_);   // Modeling mode wireframe
+    editor::drawPcgDebugPoints(e, launch_.noEditorChrome_);   // the PCG Graph tab's Debug Points
 #if AVER_MODULE_CAMERA
     // Camera rig overlay (Show > Camera Rigs): the same line-mesh route, world-space vertices.
     if (dbgOv_.cameraDebugMesh_) { e.device()->destroyLineMesh(dbgOv_.cameraDebugMesh_); dbgOv_.cameraDebugMesh_ = 0; }
     editor::cameraDebugCollect(dbgOv_.cameraDebug_, dbgOv_.cameraDebugFrame_);
-    if (dbgOv_.cameraDebug_.any() && !noEditorChrome_ && !dbgOv_.cameraDebugFrame_.lines.empty()) {
+    if (dbgOv_.cameraDebug_.any() && !launch_.noEditorChrome_ && !dbgOv_.cameraDebugFrame_.lines.empty()) {
         dbgOv_.cameraDebugMesh_ = e.device()->createLineMesh(dbgOv_.cameraDebugFrame_.lines.data(), static_cast<u32>(dbgOv_.cameraDebugFrame_.lines.size()));
         const Mat4 camId = Mat4::identity();
         if (dbgOv_.cameraDebugMesh_) e.device()->drawLines(dbgOv_.cameraDebugMesh_, &camId.m[0][0]);
@@ -2101,7 +2101,7 @@ void SandboxApp::drawSoftBodyDebug(Engine& e) {
 #  if AVER_WITH_IMGUI
     {
         editor::SoftBodyPaintTool& paintTool = editor::softBodyPaintTool();
-        if (paintTool.active() && !anyPlayActive() && !noEditorChrome_) {
+        if (paintTool.active() && !anyPlayActive() && !launch_.noEditorChrome_) {
             const ImGuiIO& pio = ImGui::GetIO();
             if (inViewport(pio.MousePos.x, pio.MousePos.y) && !pio.WantCaptureMouse) {
                 Vec3 ro, rd;
@@ -2119,7 +2119,7 @@ void SandboxApp::drawSoftBodyDebug(Engine& e) {
         }
     }
 #  endif
-    if (!noEditorChrome_ && !dbgOv_.softBodyDebugFrame_.lines.empty()) {
+    if (!launch_.noEditorChrome_ && !dbgOv_.softBodyDebugFrame_.lines.empty()) {
         dbgOv_.softBodyDebugMesh_ = e.device()->createLineMesh(dbgOv_.softBodyDebugFrame_.lines.data(), static_cast<u32>(dbgOv_.softBodyDebugFrame_.lines.size()));
         const Mat4 sbId = Mat4::identity();
         if (dbgOv_.softBodyDebugMesh_) e.device()->drawLines(dbgOv_.softBodyDebugMesh_, &sbId.m[0][0]);
@@ -2144,7 +2144,7 @@ void SandboxApp::drawVehicleDebug(Engine& e) {
         }
         editor::vehicleDebugCollect(dbgOv_.vehicleDebug_, vehicle::vehiclePhysicsSystem(), previewAt, dbgOv_.vehicleDebugFrame_);
     }
-    if (!noEditorChrome_ && !dbgOv_.vehicleDebugFrame_.lines.empty()) {
+    if (!launch_.noEditorChrome_ && !dbgOv_.vehicleDebugFrame_.lines.empty()) {
         dbgOv_.vehicleDebugMesh_ = e.device()->createLineMesh(dbgOv_.vehicleDebugFrame_.lines.data(), static_cast<u32>(dbgOv_.vehicleDebugFrame_.lines.size()));
         const Mat4 vehId = Mat4::identity();
         if (dbgOv_.vehicleDebugMesh_) e.device()->drawLines(dbgOv_.vehicleDebugMesh_, &vehId.m[0][0]);
@@ -2158,7 +2158,7 @@ void SandboxApp::drawClassMarkers(Engine& e) {
     // Class-root markers: a class actor can have no mesh at all, so each live root gets three axis lines to be
     // seen and clicked (pick() tests the same box). Edit mode only; world-space vertices, so identity.
     if (dbgOv_.classMarkerMesh_) { e.device()->destroyLineMesh(dbgOv_.classMarkerMesh_); dbgOv_.classMarkerMesh_ = 0; }
-    if (!noEditorChrome_ && !anyPlayActive() && !lvl_.levelClassInstances_.empty()) {
+    if (!launch_.noEditorChrome_ && !anyPlayActive() && !lvl_.levelClassInstances_.empty()) {
         scene::World& cw = scene::World::instance();
         std::vector<editor::MarkerSeg> segs;
         for (const ClassInstance& ci : lvl_.levelClassInstances_) {
@@ -2187,10 +2187,10 @@ void SandboxApp::drawClassMarkers(Engine& e) {
 #if AVER_MODULE_PHYSICS
 void SandboxApp::drawPhysicsDebug(Engine& e) {
     // Show > Physics: collect, upload and draw Jolt's debug lines in one call (nothing drawn under noEditorChrome_).
-    editor::physicsDebugDraw(e.device(), dbgOv_.physicsDebug_, viewState_.eye_, dbgOv_.physicsDebugFrame_, dbgOv_.physicsDebugMesh_, noEditorChrome_);
+    editor::physicsDebugDraw(e.device(), dbgOv_.physicsDebug_, viewState_.eye_, dbgOv_.physicsDebugFrame_, dbgOv_.physicsDebugMesh_, launch_.noEditorChrome_);
 #if AVER_MODULE_HAIR_SCENE
     // Hair overlay (Show > Hair): sampled guide strands and the collision proxies. HairDebugOverlay.hpp owns its line mesh and replaces it each frame.
-    editor::hairDebugDraw(*e.device(), noEditorChrome_, static_cast<u32>(selectionUi_.selEntity_));
+    editor::hairDebugDraw(*e.device(), launch_.noEditorChrome_, static_cast<u32>(selectionUi_.selEntity_));
 #endif
     // ---- COLLIDERS, which could not be seen at all until now --------------------------------
     // No collider overlay, toggle or wireframe existed before; the drawLines infrastructure was
@@ -2198,8 +2198,8 @@ void SandboxApp::drawPhysicsDebug(Engine& e) {
     // change, and the few that move, remade each frame a play session runs and some box moved.
     // rebuildColliderOverlay keeps the last of each while its stamp holds. See it for the stamp and
     // the fallback to a full per-frame walk when untracked static bodies exist.
-    if (dbgOv_.showColliders_ && !noEditorChrome_) rebuildColliderOverlay(e);
-    if (dbgOv_.showColliders_ && !noEditorChrome_ && (dbgOv_.colliderMesh_ || dbgOv_.colliderMoverMesh_)) {
+    if (dbgOv_.showColliders_ && !launch_.noEditorChrome_) rebuildColliderOverlay(e);
+    if (dbgOv_.showColliders_ && !launch_.noEditorChrome_ && (dbgOv_.colliderMesh_ || dbgOv_.colliderMoverMesh_)) {
         const Mat4 cm = Mat4::identity();   // world space already, same as the navmesh
         if (dbgOv_.colliderMesh_) e.device()->drawLines(dbgOv_.colliderMesh_, &cm.m[0][0]);
         if (dbgOv_.colliderMoverMesh_) e.device()->drawLines(dbgOv_.colliderMoverMesh_, &cm.m[0][0]);
@@ -2211,7 +2211,7 @@ void SandboxApp::drawPhysicsDebug(Engine& e) {
 void SandboxApp::drawEditorGizmos(Engine& e) {
     // GIZMO AND SCULPT CURSOR are chrome too -- and the gizmo is the loudest of the lot, since
     // it draws on top of geometry by design.
-    if (!noEditorChrome_) {
+    if (!launch_.noEditorChrome_) {
         drawGizmo(e);
         postVolumeTools_.drawOverlay(*e.device(), lvl_.levelHeader_.postVolumes, showPostVolumes_);
 #if AVER_MODULE_SCENE
@@ -2228,22 +2228,22 @@ void SandboxApp::drawEditorGizmos(Engine& e) {
 // The debug overlays' text labels.
 void SandboxApp::drawDebugLabels() {
 #if AVER_MODULE_SYNAPSE_SCENE && AVER_WITH_IMGUI
-    if (dbgOv_.aiDebug_.any() && !noEditorChrome_)
+    if (dbgOv_.aiDebug_.any() && !launch_.noEditorChrome_)
         editor::aiDebugDrawLabels(synapse::aiDebug(), viewState_.viewProj_, static_cast<f32>(viewState_.vpX_), static_cast<f32>(viewState_.vpY_),
                                   static_cast<f32>(viewState_.vpW_), static_cast<f32>(viewState_.vpH_), viewState_.eye_, dbgOv_.aiDebug_.labelMaxDistanceCm);
 #endif
 #if AVER_MODULE_SCENE && AVER_WITH_IMGUI
-    if (dbgOv_.motionDebug_.any() && !noEditorChrome_)
+    if (dbgOv_.motionDebug_.any() && !launch_.noEditorChrome_)
         editor::motionDebugDrawLabels(dbgOv_.motionDebugFrame_, viewState_.viewProj_, static_cast<f32>(viewState_.vpX_), static_cast<f32>(viewState_.vpY_),
                                       static_cast<f32>(viewState_.vpW_), static_cast<f32>(viewState_.vpH_), viewState_.eye_, dbgOv_.motionDebug_.labelMaxDistanceCm);
 #endif
 #if AVER_MODULE_SOFTBODY_SCENE && AVER_WITH_IMGUI
-    if ((dbgOv_.softBodyDebug_.budget || dbgOv_.softBodyDebug_.tuning) && !noEditorChrome_)
+    if ((dbgOv_.softBodyDebug_.budget || dbgOv_.softBodyDebug_.tuning) && !launch_.noEditorChrome_)
         editor::softBodyDebugDrawBudget(dbgOv_.softBodyDebugFrame_, static_cast<f32>(viewState_.vpX_), static_cast<f32>(viewState_.vpY_));
 #endif
 
 #if AVER_MODULE_VEHICLE_SCENE && AVER_WITH_IMGUI
-    if (dbgOv_.vehicleDebug_.labels && !noEditorChrome_)
+    if (dbgOv_.vehicleDebug_.labels && !launch_.noEditorChrome_)
         editor::vehicleDebugDrawLabels(dbgOv_.vehicleDebugFrame_, viewState_.viewProj_, static_cast<f32>(viewState_.vpX_), static_cast<f32>(viewState_.vpY_),
                                        static_cast<f32>(viewState_.vpW_), static_cast<f32>(viewState_.vpH_), viewState_.eye_, dbgOv_.vehicleDebug_.labelMaxDistanceCm);
 #endif
@@ -2322,7 +2322,7 @@ void SandboxApp::onRender(Engine& e)  {
 #if AVER_MODULE_SCENE
     drawSequencePath(e);
 #endif
-    if (viewState_.showGrid_ && !noEditorChrome_) {
+    if (viewState_.showGrid_ && !launch_.noEditorChrome_) {
         const Mat4 g = Mat4::identity();
         e.device()->drawLines(viewState_.gridMesh_, &g.m[0][0]);
     }
@@ -2357,16 +2357,16 @@ void SandboxApp::onRender(Engine& e)  {
 #endif
     // Show > Collision Shapes and the .ocshape tab's preview: shape-accurate wire for the selected entity's body and the moving ones (its mesh is freed and rebuilt each call).
 #if AVER_MODULE_SCENE
-    editor::collisionShapeOverlayRender(e, static_cast<u32>(selectionUi_.sel_ == SelectionState::kSelScene ? selectionUi_.selEntity_ : scene::kInvalidEntity), noEditorChrome_);
+    editor::collisionShapeOverlayRender(e, static_cast<u32>(selectionUi_.sel_ == SelectionState::kSelScene ? selectionUi_.selEntity_ : scene::kInvalidEntity), launch_.noEditorChrome_);
 #else
-    editor::collisionShapeOverlayRender(e, 0xFFFFFFFFu, noEditorChrome_);
+    editor::collisionShapeOverlayRender(e, 0xFFFFFFFFu, launch_.noEditorChrome_);
 #endif
     drawEditorGizmos(e);
     buildUI(e);
     drawDebugLabels();
 #if AVER_WITH_IMGUI
 #if AVER_MODULE_PHYSICS
-    if (dbgOv_.physicsDebug_.labels && !noEditorChrome_)
+    if (dbgOv_.physicsDebug_.labels && !launch_.noEditorChrome_)
         editor::physicsDebugDrawLabels(dbgOv_.physicsDebugFrame_, viewState_.viewProj_, static_cast<f32>(viewState_.vpX_), static_cast<f32>(viewState_.vpY_),
                                        static_cast<f32>(viewState_.vpW_), static_cast<f32>(viewState_.vpH_), viewState_.eye_, dbgOv_.physicsDebug_.radiusCm);
 #endif
@@ -3001,7 +3001,7 @@ void SandboxApp::updateAverSrAuto(Engine& e) {
     // resolving Auto here armed display.renderScalePending, read back by loadEditorPreferences as
     // "the last launch did not survive applying Auto" and forced AverSR Off every launch regardless
     // of Display or the project's RENDER.AVERSR choice; headless never builds UI or loads prefs, so nothing to wait for.
-    if (!prefsLoaded_ && !headless_) return;
+    if (!launch_.prefsLoaded_ && !headless_) return;
 #endif
     rhi::IDevice* dev = e.device();
     voxi::Renderer& vxr = voxi::Renderer::get();

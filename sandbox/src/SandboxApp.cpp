@@ -86,11 +86,11 @@ static u32 logTextRows(std::string_view t) {
 
     // Forwards Info+ lines to loading screen (main thread only; Jolt job pool may log too).
     // MUST NOT LOG: core log mutex is held and non-recursive.
-    if (level >= LogLevel::Info && std::this_thread::get_id() == self->mainThreadId_) {
+    if (level >= LogLevel::Info && std::this_thread::get_id() == self->launch_.mainThreadId_) {
         const std::string text = splashTextFor(msg);
         if (self->projectLoading_) self->projectLoading_->stage(text.c_str());
-        else if (self->engineForSplash_ && self->engineForSplash_->loadingScreenActive())
-            self->engineForSplash_->setLoadingStatus(text);
+        else if (self->launch_.engineForSplash_ && self->launch_.engineForSplash_->loadingScreenActive())
+            self->launch_.engineForSplash_->setLoadingStatus(text);
     }
 
     // Graph "Print" nodes get on-screen overlay. Filtered on "[Graph] " prefix (cheaper than draw-time scan).
@@ -115,11 +115,11 @@ static u32 logTextRows(std::string_view t) {
 // Boot configuration for the editor window.
 BootConfig SandboxApp::config() const  {
     BootConfig c; c.windowTitle="Aver Engine \xE2\x80\x94 Editor"; c.windowWidth=1600; c.windowHeight=900;
-    c.maxFrames=maxFrames_; c.headless=headless_; c.useWarp=useWarp_;
+    c.maxFrames=maxFrames_; c.headless=headless_; c.useWarp=launch_.useWarp_;
     // Windowed by default; bounded captures must not be reshaped by --fullscreen.
-    c.fullscreen = fullscreenOverride_ && maxFrames_ == 0;
-    c.enableDebugLayer=debugLayer_;
-    c.backend = backendName_.empty() ? nullptr : backendName_.c_str();
+    c.fullscreen = launch_.fullscreenOverride_ && maxFrames_ == 0;
+    c.enableDebugLayer=launch_.debugLayer_;
+    c.backend = launch_.backendName_.empty() ? nullptr : launch_.backendName_.c_str();
     return c;
 }
 
@@ -139,20 +139,20 @@ bool SandboxApp::startupComplete() const  {
 #endif  // AVER_MODULE_SCENE
 }
 
-void SandboxApp::setUseWarp(bool w) { useWarp_ = w; }
+void SandboxApp::setUseWarp(bool w) { launch_.useWarp_ = w; }
 
-void SandboxApp::setWindowed(bool w) { windowedOverride_ = w; }
+void SandboxApp::setWindowed(bool w) { launch_.windowedOverride_ = w; }
 
-void SandboxApp::setFullscreen(bool f) { fullscreenOverride_ = f; }
+void SandboxApp::setFullscreen(bool f) { launch_.fullscreenOverride_ = f; }
 
-void SandboxApp::setBackend(std::string b) { backendName_ = std::move(b); }
+void SandboxApp::setBackend(std::string b) { launch_.backendName_ = std::move(b); }
 
-void SandboxApp::setCultureOverride(std::string tag) { cultureOverride_ = std::move(tag); }
+void SandboxApp::setCultureOverride(std::string tag) { launch_.cultureOverride_ = std::move(tag); }
 
 // --frame-budget <ms>: target frame time, and run the controller even in a bounded capture.
 void SandboxApp::setFrameBudget(f32 ms) { rset_.frameBudgetMs_ = ms; rset_.frameBudgetForced_ = ms > 0.0f; }
 
-void SandboxApp::setDebugLayer(bool d) { debugLayer_ = d; }
+void SandboxApp::setDebugLayer(bool d) { launch_.debugLayer_ = d; }
 
 #if AVER_WITH_IMGUI
 // Rebuild ImGui style and font atlas for the given DPI scale.

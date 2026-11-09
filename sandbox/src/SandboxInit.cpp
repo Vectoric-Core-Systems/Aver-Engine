@@ -283,7 +283,7 @@ void SandboxApp::bindWindow(Engine& e) {
     if (window_) window_->setAcceptDroppedFiles(true);
 
     // Single-instance forwarding receiver (singleInstanceEligible_ gates both registration and hook).
-    if (window_ && window_->valid() && singleInstanceEligible_) {
+    if (window_ && window_->valid() && launch_.singleInstanceEligible_) {
         Window::registerAsSingleInstancePrimary(window_->nativeHandle());
 #if AVER_MODULE_SCENE
         window_->setOpenRequestHook(&SandboxApp::onOpenRequestThunk, this);
@@ -356,7 +356,7 @@ void SandboxApp::installGameProviders() {
         ModelImportHost host;
         host.contentDir = [this] { return project_.valid() ? project_.contentDir() : std::string(); };
         host.projectDir = [this] { return project_.valid() ? project_.dir : std::string(); };
-        host.imported = [this](const std::string& destDir) { cbInvalidate(destDir); wantMeshReload_ = true; };
+        host.imported = [this](const std::string& destDir) { cbInvalidate(destDir); launch_.wantMeshReload_ = true; };
         installModelImportProvider(host);
     }
     // [wave5/ik-retarget] IK goals, foot-IK weights and rig inputs.
@@ -1345,7 +1345,7 @@ void SandboxApp::setInitialToolAndCamera() {
     framedByLevel = !lvl_.levelEntities_.empty();
 #endif
     // Restored camera counts as framed (level can have CAMERA record with no placements).
-    if (levelCameraRestored_) framedByLevel = true;
+    if (launch_.levelCameraRestored_) framedByLevel = true;
     if (!framedByLevel) {
         viewState_.camPos_ = Vec3{700.0f, 700.0f, 450.0f};
         const Vec3 d = (Vec3{0,0,1} - viewState_.camPos_).getSafeNormal();
@@ -1363,11 +1363,11 @@ void SandboxApp::setInitialToolAndCamera() {
 // Build editor: asset editors, physics, scene, gizmos, render features.
 void SandboxApp::onInit(Engine& e)  {
     // FIRST: set engineForSplash_ before anything logs (logSink uses it to update splash).
-    engineForSplash_ = &e;
-    mainThreadId_ = std::this_thread::get_id();
+    launch_.engineForSplash_ = &e;
+    launch_.mainThreadId_ = std::this_thread::get_id();
     AVER_INFO("[Sandbox] backend={} adapter='{}'", rhi::backendName(e.device()->backend()), e.device()->adapterName());
     // Latched for Project Settings display (no Engine& to re-ask).
-    runningBackend_ = rhi::backendName(e.device()->backend());
+    launch_.runningBackend_ = rhi::backendName(e.device()->backend());
     applyStartupRenderSettings(e);
 
     addCoreRenderFeatures(e);

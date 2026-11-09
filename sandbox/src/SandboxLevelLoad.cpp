@@ -586,14 +586,14 @@ void SandboxApp::onLevelInstantiated(const game::GameLevel::LoadedLevel& loaded)
         if (w.hasCamera) AVER_INFO("[Level] CAMERA record ignored -- --cam was given and outranks it");
     } else if (lookupLevelView(loaded.path, leftView)) {
         applyLevelView(leftView);
-        levelCameraRestored_ = true;
+        launch_.levelCameraRestored_ = true;
         AVER_INFO("[Level] camera back where it was left: ({:.0f},{:.0f},{:.0f}) yaw {:.1f} pitch {:.1f} "
                   "(Saved/LevelViews.ini)", viewState_.camPos_.x, viewState_.camPos_.y, viewState_.camPos_.z, leftView.yawDeg, leftView.pitchDeg);
     } else if (w.hasCamera) {
         applyLevelView(editor::LevelView{static_cast<f32>(w.camX), static_cast<f32>(w.camY),
                                          static_cast<f32>(w.camZ), static_cast<f32>(w.camYaw),
                                          static_cast<f32>(w.camPitch), static_cast<f32>(w.camSpeed)});
-        levelCameraRestored_ = true;
+        launch_.levelCameraRestored_ = true;
         // LOGGED because this is otherwise invisible: a restored camera and an auto-framed one
         // look the same from outside the process, and the difference is exactly what a person
         // reporting "it didn't remember where I was" needs to be able to check.
@@ -681,7 +681,7 @@ void SandboxApp::onLegacyOcmapInstantiated(const game::GameLevel::LoadedLevel& l
     editor::LevelView leftView;
     if (!camOverride_ && lookupLevelView(loaded.path, leftView)) {
         applyLevelView(leftView);
-        levelCameraRestored_ = true;
+        launch_.levelCameraRestored_ = true;
     } else if (!loaded.world.placements.empty()) {
         frameCameraOnLevel();
     }
@@ -801,7 +801,7 @@ scene::Entity SandboxApp::placeClassInstance(fmt::OcWorldPlacement p, std::strin
         return scene::kInvalidEntity;
     };
     if (anyPlayActive()) return refuse("Stop Play before placing an actor");
-    if (!(hideEditorScene_ || !levelPath_.empty()))
+    if (!(launch_.hideEditorScene_ || !levelPath_.empty()))
         return refuse("Load a level (or hide the editor scene) before dropping assets");
     // A legacy .ocmap save has no record for a class actor: it would be placed now and gone on save.
     if (lvl_.levelIsLegacyOcmap_) return refuse("this level is a legacy .ocmap, which cannot store a class actor -- Save As an .ocworld first");

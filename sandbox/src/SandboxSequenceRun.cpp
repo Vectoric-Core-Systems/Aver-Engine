@@ -216,7 +216,7 @@ bool SandboxApp::startRenderJob(const fmt::RenderJob& job, const std::string& ba
     r.job.normalise();
     r.jobDir = baseDir;
     r.prevMode = viewState_.mode_;
-    r.prevChrome = noEditorChrome_;
+    r.prevChrome = launch_.noEditorChrome_;
     r.phase = SequenceRunState::Phase::Waiting;
     setNoEditorChrome(true);
     return true;
@@ -509,7 +509,7 @@ void SandboxApp::serviceRenderCapture(Engine& e) {
 // Animate mode's camera path: the curve, a marker per key, the playhead. Lines are always on top, so a
 // path that runs through a wall is still readable. The mesh is rebuilt only when its stamp changes.
 void SandboxApp::drawSequencePath(Engine& e) {
-    bool show = viewState_.mode_ == EditorMode::Animate && !noEditorChrome_ && seqEditor_.active();
+    bool show = viewState_.mode_ == EditorMode::Animate && !launch_.noEditorChrome_ && seqEditor_.active();
 #if AVER_MODULE_FRAMEWORK
     show = show && !anyPlayActive();
 #endif

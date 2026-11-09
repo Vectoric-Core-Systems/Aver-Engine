@@ -192,7 +192,7 @@ void SandboxApp::setFocusTools(bool b) { tools_.armToolsMenu(b); }
 void SandboxApp::setOpenLevelPicker(bool b) { armOpenLevelPicker_ = b; }
 
 // --no-editor-chrome: suppress viewport chrome (grid, gizmo, outline).
-void SandboxApp::setNoEditorChrome(bool b) { noEditorChrome_ = b; }
+void SandboxApp::setNoEditorChrome(bool b) { launch_.noEditorChrome_ = b; }
 
 // --scene-census: walk the scene and report entity counts.
 #if AVER_MODULE_SCENE
@@ -440,7 +440,7 @@ void SandboxApp::setCamWobbleStop(i32 frame) { harness_.camWobbleStopFrame_ = fr
 
 // --set NAME VALUE, repeatable: apply console variables on first frame with device.
 void SandboxApp::setConsoleSets(std::vector<std::pair<std::string, std::string>> sets) {
-    consoleSets_ = std::move(sets);
+    launch_.consoleSets_ = std::move(sets);
 }
 
 // --mesh-heap default|upload: select mesh heap mode.
@@ -466,7 +466,7 @@ void SandboxApp::setCamera(Vec3 pos, f32 pitchDeg, f32 yawDeg) {
     yawOverride_   = yawDeg   * 0.01745329252f;
 }
 
-void SandboxApp::setScriptsDir(std::string d) { scriptsDir_ = std::move(d); }
+void SandboxApp::setScriptsDir(std::string d) { launch_.scriptsDir_ = std::move(d); }
 
 void SandboxApp::setSpawnTest(std::string cls) { harness_.spawnTestClass_ = std::move(cls); }
 
@@ -520,7 +520,7 @@ void SandboxApp::setPlayTest() { harness_.playTest_ = true; }
 void SandboxApp::setProjectPath(std::string p) { projectPath_ = std::move(p); }
 
 // --mode <name>: set editor mode; applied on first frame with level.
-void SandboxApp::setStartMode(std::string m) { startMode_ = std::move(m); }
+void SandboxApp::setStartMode(std::string m) { launch_.startMode_ = std::move(m); }
 
 // <path>.ocmap given on the command line: opened INSTEAD of the project's start map.
 void SandboxApp::setOpenMap(std::string p) { openMapPath_ = std::move(p); }
@@ -528,7 +528,7 @@ void SandboxApp::setOpenMap(std::string p) { openMapPath_ = std::move(p); }
 void SandboxApp::armBrowser(bool on) { browserActive_ = on; }
 
 // Whether launch command line was shell-shaped; decides single-instance primary registration.
-void SandboxApp::setSingleInstanceEligible(bool b) { singleInstanceEligible_ = b; }
+void SandboxApp::setSingleInstanceEligible(bool b) { launch_.singleInstanceEligible_ = b; }
 
 #if AVER_MODULE_FRAMEWORK
 // Spawns one instance of the --spawn-test class, then destroys it a few frames later.
@@ -1182,7 +1182,7 @@ void SandboxApp::runProjectSwitchTest() {
     };
 
     const fmt::ProjectDesc saved = project_;
-    const std::string savedBackend = projectBackend_;
+    const std::string savedBackend = launch_.projectBackend_;
     const f32 savedBudget = rset_.frameBudgetMs_;
     const bool savedForced = rset_.frameBudgetForced_;
     rset_.frameBudgetForced_ = false;   // the manifest path, not the --frame-budget override path
@@ -1195,7 +1195,7 @@ void SandboxApp::runProjectSwitchTest() {
     check(a.valid() && a.hasRenderSettings(), "project A is valid and states render settings");
     project_ = a;
     applyProjectRenderSettings();
-    check(projectBackend_ == "vulkan", "opening A puts its backend in the dropdown mirror");
+    check(launch_.projectBackend_ == "vulkan", "opening A puts its backend in the dropdown mirror");
     check(rset_.frameBudgetMs_ == 8.0f, "opening A arms its frame budget");
 
     fmt::ProjectDesc b;
@@ -1204,13 +1204,13 @@ void SandboxApp::runProjectSwitchTest() {
     check(b.valid() && !b.hasRenderSettings(), "project B is valid and states NO render settings");
     project_ = b;
     applyProjectRenderSettings();
-    check(projectBackend_.empty(),
+    check(launch_.projectBackend_.empty(),
           "opening B clears the backend mirror instead of inheriting A's vulkan");
     check(rset_.frameBudgetMs_ == b.frameBudgetMs,
           "opening B resets the frame budget instead of inheriting A's 8ms");
 
     project_ = saved;
-    projectBackend_ = savedBackend;
+    launch_.projectBackend_ = savedBackend;
     rset_.frameBudgetMs_ = savedBudget;
     rset_.frameBudgetForced_ = savedForced;
     applyProjectRenderSettings();
@@ -1765,7 +1765,7 @@ void SandboxApp::runUndoTest(Engine& eng) {
         // a pending bit until flush() is called. This test flushes after each destroy to
         // simulate the eventually-consistent state a human would see across real frames.
         const u32 base = w.count();
-        hideEditorScene_ = true;   // forces spawnCube()'s scene-entity branch
+        launch_.hideEditorScene_ = true;   // forces spawnCube()'s scene-entity branch
 
         spawnCube(eng);
         w.flush();
@@ -1821,7 +1821,7 @@ void SandboxApp::runUndoTest(Engine& eng) {
     {
         scene::World& w = scene::World::instance();
         const u32 base = w.count();
-        hideEditorScene_ = true;
+        launch_.hideEditorScene_ = true;
 
         spawnCube(eng); w.flush();
         const scene::Entity parent = selectionUi_.selEntity_;
@@ -2207,7 +2207,7 @@ void SandboxApp::runUndoTest(Engine& eng) {
 #endif
     {
         const usize objBase = objects_.size();
-        hideEditorScene_ = false;   // forces spawnCube()'s placeholder-object branch instead
+        launch_.hideEditorScene_ = false;   // forces spawnCube()'s placeholder-object branch instead
         selectionUi_.sel_ = -1; selectionUi_.selEntity_ = kInvalidId;
 
         spawnCube(eng);

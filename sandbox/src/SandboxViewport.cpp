@@ -875,7 +875,7 @@ void SandboxApp::spawnPrimitive(Engine& engine, const char* assetPath, const cha
     const rhi::primitives::BuiltinPrimitive* prim = rhi::primitives::findBuiltinPrimitive(assetPath);
     const f32 half = prim ? prim->spawnScale : kEditorCubeHalf;
 #if AVER_MODULE_SCENE
-    if (hideEditorScene_ || !levelPath_.empty()) {
+    if (launch_.hideEditorScene_ || !levelPath_.empty()) {
         scene::World& world = scene::World::instance();
         Transform xf;
         xf.position = at;
@@ -1061,7 +1061,7 @@ bool SandboxApp::pickSurfacePoint(f32 screenX, f32 screenY, Vec3& out) {
 #endif
 
     // Placeholder Floor/Cube boxes, bounds-only -- pick()'s own placeholder loop.
-    if (!hideEditorScene_)
+    if (!launch_.hideEditorScene_)
         for (const MeshObj& o : objects_) {
             if (!o.visible) continue;
             Transform tr; tr.position = o.pos; tr.rotation = quatFromEulerDeg(o.rotDeg); tr.scale = o.scale;
@@ -1153,7 +1153,7 @@ void SandboxApp::drawGraphActorMenu() {
         lvl_.classPickDirty_ = false;
     }
     const bool playing = anyPlayActive();
-    const bool noLevel = !(hideEditorScene_ || !levelPath_.empty());
+    const bool noLevel = !(launch_.hideEditorScene_ || !levelPath_.empty());
     if (lvl_.classPickList_.empty()) ImGui::TextDisabled("No graph under Content declares a CLASS");
     const editor::GraphClassDecl* chosen = nullptr;
     for (const editor::GraphClassDecl& d : lvl_.classPickList_) {
@@ -1202,7 +1202,7 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
 #if AVER_MODULE_SCENE
     // A prefab drops as an instance (its own undo entry); its entities come through the prefab hooks.
     if (ext == ".ocprefab") {
-        if (!(hideEditorScene_ || !levelPath_.empty())) {
+        if (!(launch_.hideEditorScene_ || !levelPath_.empty())) {
             drawerUi_.cbStatus_ = "Load a level (or hide the editor scene) before dropping assets";
             return;
         }
@@ -1238,7 +1238,7 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
     // [wave3/level-instances begin] A level drops as an instance of it (its own undo entry); its entities come through
     // the level-instance hooks.
     if (ext == ".ocworld" || ext == ".ocmap") {
-        if (!(hideEditorScene_ || !levelPath_.empty())) {
+        if (!(launch_.hideEditorScene_ || !levelPath_.empty())) {
             drawerUi_.cbStatus_ = "Load a level (or hide the editor scene) before dropping assets";
             return;
         }
@@ -1280,7 +1280,7 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
 #endif
         return;
     }
-    if (!(hideEditorScene_ || !levelPath_.empty())) {
+    if (!(launch_.hideEditorScene_ || !levelPath_.empty())) {
         drawerUi_.cbStatus_ = "Load a level (or hide the editor scene) before dropping assets";
         AVER_WARN("[Editor] drop: no scene world is active to place '{}' into", full);
         return;
@@ -1560,7 +1560,7 @@ bool SandboxApp::dragDecalAndRopeHandles(const ImGuiIO& io, bool overScene, f32 
     // A selected decal's box handles come before any pick: grabbing one resizes the box (the drag
     // continues below until the button is released), and the click is not also a selection change.
     bool decalHandleGrabbed = false;
-    if (ImGui::IsMouseClicked(0) && overScene && !noEditorChrome_ && selectionUi_.sel_ == SelectionState::kSelScene &&
+    if (ImGui::IsMouseClicked(0) && overScene && !launch_.noEditorChrome_ && selectionUi_.sel_ == SelectionState::kSelScene &&
         selectionUi_.selEntity_ != scene::kInvalidEntity &&
         scene::World::instance().hasComponent(selectionUi_.selEntity_, scene::kComponentDecal)) {
         Vec3 ro0, rd0, ro1, rd1;
@@ -1574,7 +1574,7 @@ bool SandboxApp::dragDecalAndRopeHandles(const ImGuiIO& io, bool overScene, f32 
 #if AVER_MODULE_SOFTBODY_SCENE
     // A selected rope's two end handles (SoftShapeGizmos.cpp): grabbing one drags that end on the camera-facing plane, and the click is not also a pick.
     // The drag edits the component, not an undo step (the Details rows are); a Rope host that is the selected decal never gets here.
-    if (!decalHandleGrabbed && ImGui::IsMouseClicked(0) && overScene && !noEditorChrome_ && selectionUi_.sel_ == SelectionState::kSelScene &&
+    if (!decalHandleGrabbed && ImGui::IsMouseClicked(0) && overScene && !launch_.noEditorChrome_ && selectionUi_.sel_ == SelectionState::kSelScene &&
         selectionUi_.selEntity_ != scene::kInvalidEntity && !anyPlayActive()) {
         Vec3 ro0, rd0, ro1, rd1;
         viewportRay(mx, my, ro0, rd0);
@@ -2500,7 +2500,7 @@ bool SandboxApp::pick(Engine& e, const ImGuiIO& io) {
     // Placeholder objects_ (MeshObj boxes/the floor) stay bounds-only: for these, the box IS the
     // geometry, so a triangle test would buy nothing. Same t > 0.0f start-inside guard as the scene
     // loop below, compared against the same bestT, so the nearer of the two worlds still wins.
-    if (!hideEditorScene_)
+    if (!launch_.hideEditorScene_)
         for (int i=0;i<(int)objects_.size();++i){
             MeshObj& o=objects_[i]; if(!o.visible) continue;
             Transform tr; tr.position=o.pos; tr.rotation=quatFromEulerDeg(o.rotDeg); tr.scale=o.scale;
@@ -2550,9 +2550,9 @@ bool SandboxApp::pick(Engine& e, const ImGuiIO& io) {
         // sprite were unclickable. Pickable only while the marker is drawn (the render's gate).
         // Tested before the candidates so a nearer mesh still wins through bestT.
 #if AVER_MODULE_FRAMEWORK
-        const bool markerDrawn = !noEditorChrome_ && !anyPlayActive();
+        const bool markerDrawn = !launch_.noEditorChrome_ && !anyPlayActive();
 #else
-        const bool markerDrawn = !noEditorChrome_;
+        const bool markerDrawn = !launch_.noEditorChrome_;
 #endif
         if (markerDrawn && playerStart_ != scene::kInvalidEntity && w.valid(playerStart_)) {
             const Transform& psXf = w.localTransform(playerStart_);
@@ -2604,7 +2604,7 @@ bool SandboxApp::pick(Engine& e, const ImGuiIO& io) {
     // geometry it paints -- so a click that reaches geometry means the geometry. Only a click that hits
     // NOTHING else selects a decal by its box; every other way in is the Outliner, Add > Decal (which selects
     // what it creates) and Show > Decals' drawn boxes.
-    if (best == -1 && bestEnt == kInvalidId && viewState_.showDecals_ && !noEditorChrome_) {
+    if (best == -1 && bestEnt == kInvalidId && viewState_.showDecals_ && !launch_.noEditorChrome_) {
         scene::World& w = scene::World::instance();
         if (scene::ComponentPool* dp = w.pool(scene::kComponentDecal)) {
             for (usize i = 0; i < dp->size(); ++i) {
@@ -2637,7 +2637,7 @@ bool SandboxApp::pick(Engine& e, const ImGuiIO& io) {
             if (const scene::Entity r = classRootOf(static_cast<scene::Entity>(bestEnt)); r != scene::kInvalidEntity)
                 bestEnt = r;
         // A root nobody can see (no mesh) is clickable through its marker box, only while the marker is drawn.
-        if (!noEditorChrome_ && !anyPlayActive()) {
+        if (!launch_.noEditorChrome_ && !anyPlayActive()) {
             scene::World& cw = scene::World::instance();
             constexpr f32 h = editor::kClassMarkerHalf;
             for (const ClassInstance& ci : lvl_.levelClassInstances_) {
@@ -2779,7 +2779,7 @@ void SandboxApp::snapSelectionToFloor() {
 #endif
         // Placeholder boxes (Floor/Cube), bounds-only -- pick()'s own placeholder loop. Never one of
         // `sel`: the multi-selection this function walks is always scene entities.
-        if (!hideEditorScene_)
+        if (!launch_.hideEditorScene_)
             for (const MeshObj& o : objects_) {
                 if (!o.visible) continue;
                 Transform tr; tr.position = o.pos; tr.rotation = quatFromEulerDeg(o.rotDeg); tr.scale = o.scale;
@@ -3634,9 +3634,9 @@ void SandboxApp::toggleEditorMode() {
 // and self-clearing, which is the same shape the other deferred startup flags in this file use:
 // there is no single "the project is now ready" callback to hang it off.
 void SandboxApp::applyStartMode() {
-    if (startMode_.empty()) return;
-    const std::string want = startMode_;
-    startMode_.clear();
+    if (launch_.startMode_.empty()) return;
+    const std::string want = launch_.startMode_;
+    launch_.startMode_.clear();
     for (int i = 0; i < kEditorModeCount; ++i) {
         std::string lower = kEditorModeNames[i];
         for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));

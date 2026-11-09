@@ -152,7 +152,7 @@ void SandboxApp::captureRenderSettingsFromUi(const voxi::Settings& requested, u3
     // hardware this device does not have.
     voxi::captureVoxiSettings(project_, requested, vx.settings(), vx.deviceInfo(), overallFollowMask);
 
-    project_.backend = projectBackend_;
+    project_.backend = launch_.projectBackend_;
     // NOT WHEN --frame-budget SUPPLIED IT. frameBudgetMs_ holds either the project's own value or
     // a CLI test override, and this function cannot tell them apart on its own -- so writing it
     // unconditionally let a diagnostic flag become a persisted project setting. With settings now

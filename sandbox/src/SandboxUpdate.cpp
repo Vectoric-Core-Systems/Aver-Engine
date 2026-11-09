@@ -120,18 +120,18 @@ void SandboxApp::applyScriptRender(voxi::Renderer& vx) {
 void SandboxApp::applyConsoleSets(Engine& e, const Timestep& t) {
     // --set NAME VALUE applied at frame 5 (after project's RENDER.* apply).
 #if AVER_WITH_IMGUI
-    if (!harness_.consoleSetsApplied_ && !consoleSets_.empty() && t.frame >= 5 && e.device()) {
+    if (!harness_.consoleSetsApplied_ && !launch_.consoleSets_.empty() && t.frame >= 5 && e.device()) {
         harness_.consoleSetsApplied_ = true;
-        for (const auto& kv : consoleSets_) {
+        for (const auto& kv : launch_.consoleSets_) {
             AVER_INFO("[Sandbox] --set {} {}", kv.first, kv.second);
             runConsoleLine(e, "set " + kv.first + " " + kv.second);
         }
     }
 #else
-    if (!harness_.consoleSetsApplied_ && !consoleSets_.empty()) {
+    if (!harness_.consoleSetsApplied_ && !launch_.consoleSets_.empty()) {
         harness_.consoleSetsApplied_ = true;
         AVER_WARN("[Sandbox] --set ignored: this build has no editor console to route {} pair(s) through",
-                  consoleSets_.size());
+                  launch_.consoleSets_.size());
     }
 #endif
 }

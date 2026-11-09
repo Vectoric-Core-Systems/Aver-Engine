@@ -485,7 +485,7 @@ void SandboxApp::drawWaterBodies(Engine& e) {
         landTool_.waterBodiesStale_ = false;
     }
 #if AVER_WITH_IMGUI
-    const bool show = !noEditorChrome_ && editorModeIsLandscape() && landTool_.landscapeTab_ == LandscapeTab::Water;
+    const bool show = !launch_.noEditorChrome_ && editorModeIsLandscape() && landTool_.landscapeTab_ == LandscapeTab::Water;
 #else
     const bool show = false;
 #endif

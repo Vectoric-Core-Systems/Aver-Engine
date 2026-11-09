@@ -169,7 +169,7 @@ void SandboxApp::applyProject(Engine& e) {
         // preview choice) and never reads the player's own saved language.
         game::LocalizationInit li;
         li.project = &project_;
-        li.cultureOverride = cultureOverride_.empty() ? editor::prefString("loc.previewCulture", "") : cultureOverride_;
+        li.cultureOverride = launch_.cultureOverride_.empty() ? editor::prefString("loc.previewCulture", "") : launch_.cultureOverride_;
         li.readSavedCulture = false;
         game::initLocalization(li);
         game::uiTextInit(project_.contentDir());   // the Play/preview font set: Content/UI/Fonts.ocfonts or the built-in one, following the preview culture
@@ -283,7 +283,7 @@ void SandboxApp::applyProject(Engine& e) {
 #endif
 #if AVER_MODULE_SCRIPTING
     loading.stage("Starting scripts");
-    if (scripts_.ready() && scriptsDir_.empty() && project_.valid()) {
+    if (scripts_.ready() && launch_.scriptsDir_.empty() && project_.valid()) {
         const std::string bin = editor::scriptsBinaryDir(project_);
         const i32 n = scripts_.loadScripts(bin);
         if (n > 0) AVER_INFO("[Scripting] {} project behaviour(s) live from {}", n, bin);
@@ -375,7 +375,7 @@ void SandboxApp::applyProjectRenderSettings() {
     // GI -- and because the Rendering page writes the whole block back (project_.backend =
     // projectBackend_, below), the next edit to any control on that page baked the inherited
     // backend into a manifest that had never asked for it.
-    projectBackend_ = project_.backend;
+    launch_.projectBackend_ = project_.backend;
     // NOT WHEN --frame-budget SAID SO. This runs on every project apply, and the manifest's
     // default is -1, so an unconditional assignment silently switched the flag back off one
     // frame after it was set -- the controller was wired, reachable and never once ran.

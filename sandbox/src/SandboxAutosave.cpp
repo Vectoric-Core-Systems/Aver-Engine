@@ -383,9 +383,9 @@ void SandboxApp::locateAverDesign() const {
 
 #if AVER_MODULE_SCRIPTING
 std::string SandboxApp::resolveScriptsDir() const {
-    if (scriptsDir_.empty())
+    if (launch_.scriptsDir_.empty())
         return project_.valid() ? editor::scriptsBinaryDir(project_) : executableDir() + AVER_PATH_SEP "Scripts";
-    const std::string& sd = scriptsDir_;
+    const std::string& sd = launch_.scriptsDir_;
     const bool absolute = sd.size() > 1 && (sd[1] == ':' || sd[0] == '\\' || sd[0] == '/');
     return absolute ? sd : executableDir() + AVER_PATH_SEP + sd;
 }

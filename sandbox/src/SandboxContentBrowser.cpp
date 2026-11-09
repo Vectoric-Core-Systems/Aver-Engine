@@ -1084,9 +1084,9 @@ std::string SandboxApp::cbRelativeToContent(const std::string& abs) const {
 void SandboxApp::cbAfterMoveOrCopy(const std::vector<std::string>& srcs) {
     for (const std::string& sp : srcs) {
         const std::string ext = lowerExt(std::filesystem::path(sp));
-        if (ext == ".ocmesh" || ext == ".ocparticle") { wantMeshReload_ = true; break; }
+        if (ext == ".ocmesh" || ext == ".ocparticle") { launch_.wantMeshReload_ = true; break; }
         std::error_code ec;
-        if (std::filesystem::is_directory(std::filesystem::path(sp), ec)) { wantMeshReload_ = true; break; }
+        if (std::filesystem::is_directory(std::filesystem::path(sp), ec)) { launch_.wantMeshReload_ = true; break; }
     }
     drawerUi_.cbMoveSources_.clear();
     drawerUi_.cbMoveDest_.clear();
@@ -1121,7 +1121,7 @@ void SandboxApp::cbRenameEntry(const std::string& from, const std::string& newNa
         const std::string ext = lowerExt(dst);
         std::error_code dec;
         if (ext == ".ocmesh" || ext == ".ocparticle" || std::filesystem::is_directory(dst, dec))
-            wantMeshReload_ = true;
+            launch_.wantMeshReload_ = true;
     }
 
     // Reports partial failure separately from success: N separate writes, not transactional, so
@@ -1530,7 +1530,7 @@ void SandboxApp::drawContentBrowser() {
             drawerUi_.cbStatus_ = mr.ok ? mr.title : mr.title + " - see the Output Log";
             notifyOutcome(mr.ok ? editor::NotifySeverity::Success : editor::NotifySeverity::Error, mr.title, mr.body, !mr.ok);
             cbInvalidate(mr.destDir);
-            wantMeshReload_ = true;
+            launch_.wantMeshReload_ = true;
         }
     }
 
@@ -3074,7 +3074,7 @@ void SandboxApp::importModel(const std::string& src, const std::string& destDir,
     // The outcome of a slow operation, which is precisely what a notification is for.
     notifyOutcome(editor::NotifySeverity::Success, "Imported " + srcName, counts);
     cbInvalidate(destDir);
-    wantMeshReload_ = true;
+    launch_.wantMeshReload_ = true;
 }
 
 // Imports every path a drag from outside the editor dropped, into the Content Browser's current

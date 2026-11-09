@@ -394,7 +394,7 @@ void SandboxApp::registerMcpAbis() {
 #endif
         // Exit as File > Exit does. Refused while something is unsaved, unless args[0] is 1: exit without saving it.
         if (a.fn == "quit") {
-            if (!engineForSplash_) { w = "the editor has no engine yet"; return false; }
+            if (!launch_.engineForSplash_) { w = "the editor has no engine yet"; return false; }
             const bool discard = !a.args.empty() && a.args[0] != 0.0;
 #if AVER_WITH_IMGUI
             if (!discard && (assetEditors_.anyDirty() || levelHasUnsavedEdits())) {
@@ -406,7 +406,7 @@ void SandboxApp::registerMcpAbis() {
             if (anyPlayActive()) stopPlay();
 #endif
             AVER_INFO("[Mcp] exit requested{}", discard ? " (unsaved changes discarded)" : "");
-            engineForSplash_->requestExit();
+            launch_.engineForSplash_->requestExit();
             r = "exiting";
             return true;
         }
@@ -820,14 +820,14 @@ bool SandboxApp::mcpLevelPlace(const std::string& text, std::string& r, std::str
         return out;
     };
     std::vector<std::string> missing = unloaded();
-    if (!missing.empty() && engineForSplash_) {
+    if (!missing.empty() && launch_.engineForSplash_) {
         std::error_code ec;
         bool onDisk = false;
         for (const std::string& m : missing)
             if (!contentDir.empty() && fs::exists(fs::path(contentDir) / m, ec)) onDisk = true;
         if (onDisk) {
-            releaseProjectMeshes(*engineForSplash_);
-            loadProjectMeshes(*engineForSplash_);
+            releaseProjectMeshes(*launch_.engineForSplash_);
+            loadProjectMeshes(*launch_.engineForSplash_);
             missing = unloaded();
         }
     }

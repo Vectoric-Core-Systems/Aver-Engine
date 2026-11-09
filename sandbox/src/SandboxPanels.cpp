@@ -1914,7 +1914,7 @@ void SandboxApp::buildOutlinerPanel() {
 #if AVER_MODULE_SCENE
     drawOutlinerFilterBar();
 #endif
-    if (!hideEditorScene_)
+    if (!launch_.hideEditorScene_)
         for (int i=0;i<(int)objects_.size();++i) {
             if (ImGui::Selectable(editor::iconLabel(ICON_ACTOR_MESH, objects_[i].name.c_str()).c_str(), selectionUi_.sel_==i)) { selectionUi_.sel_=i; selectionUi_.selEntity_=kInvalidId; }
             uiReg_.track(("outliner.placeholder." + std::to_string(i)).c_str());
@@ -1928,7 +1928,7 @@ void SandboxApp::buildOutlinerPanel() {
         // says stale, and rebuildOutlinerCache() for what this used to do unconditionally.
         refreshOutlinerCache();
 
-        if (!selectionUi_.outlinerRoots_.empty() && !hideEditorScene_) ImGui::Separator();
+        if (!selectionUi_.outlinerRoots_.empty() && !launch_.hideEditorScene_) ImGui::Separator();
         // A FLAT LIST submits only the rows on screen, and its order was recorded by the rebuild;
         // see drawOutlinerFlatRows.
         // A TREE submits the roots that have children and their open rows, and only the on-screen
