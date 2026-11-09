@@ -161,8 +161,8 @@ void SandboxApp::captureRenderSettingsFromUi(const voxi::Settings& requested, u3
     // The forced flag is exactly the distinction, and it already exists for the symmetric bug on
     // the way in (applyProjectRenderSettings clobbering the flag from the manifest's default).
     if (!rset_.frameBudgetForced_) project_.frameBudgetMs = rset_.frameBudgetMs_;
-    project_.lodSelect          = lodSelectEnabled_ ? 1 : 0;
-    project_.lodThresholdPx     = lodErrorThresholdPx_;
+    project_.lodSelect          = lod_.lodSelectEnabled_ ? 1 : 0;
+    project_.lodThresholdPx     = lod_.lodErrorThresholdPx_;
     project_.occlusionCull      = occl_.occlusionCullEnabled_ ? 1 : 0;
     project_.depthPrepass       = rset_.depthPrepassOverride_ ? 1 : 0;
 #if AVER_MODULE_SR

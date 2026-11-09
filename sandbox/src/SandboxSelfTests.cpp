@@ -10,8 +10,8 @@ namespace aver {
 // --lod-select [px]: virtualized-geometry LOD selection; thresholdPx is pixel budget for screenSpaceErrorPx.
 void SandboxApp::setLodSelect(bool on, f32 thresholdPx) {
 #if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
-    lodSelectEnabled_ = on;
-    lodErrorThresholdPx_ = thresholdPx;
+    lod_.lodSelectEnabled_ = on;
+    lod_.lodErrorThresholdPx_ = thresholdPx;
 #else
     (void)on; (void)thresholdPx;
 #endif
@@ -20,7 +20,7 @@ void SandboxApp::setLodSelect(bool on, f32 thresholdPx) {
 // --lod-cluster-stats: separate gate to measure cluster selection.
 void SandboxApp::setLodClusterStats(bool on) {
 #if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
-    lodClusterStatsEnabled_ = on;
+    lod_.lodClusterStatsEnabled_ = on;
 #else
     (void)on;
 #endif
@@ -29,8 +29,8 @@ void SandboxApp::setLodClusterStats(bool on) {
 // --lod-per-cluster [px]: per-cluster selection; overrides per-level when both given.
 void SandboxApp::setLodPerCluster(bool on, f32 thresholdPx) {
 #if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
-    lodPerClusterEnabled_ = on;
-    if (on) lodErrorThresholdPx_ = thresholdPx;   // shares the one pixel-budget knob with --lod-select
+    lod_.lodPerClusterEnabled_ = on;
+    if (on) lod_.lodErrorThresholdPx_ = thresholdPx;   // shares the one pixel-budget knob with --lod-select
 #else
     (void)on; (void)thresholdPx;
 #endif
@@ -39,9 +39,9 @@ void SandboxApp::setLodPerCluster(bool on, f32 thresholdPx) {
 // --lod-mesh-shader [px]: GPU per-cluster selection via amplification shader; falls back to per-instance.
 void SandboxApp::setLodMeshShader(bool on, f32 thresholdPx) {
 #if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
-    lodMeshShaderRequest_ = on ? 1 : 0;
-    lodMeshShaderEnabled_ = on;
-    if (on) lodErrorThresholdPx_ = thresholdPx;   // shares the one pixel-budget knob with the others
+    lod_.lodMeshShaderRequest_ = on ? 1 : 0;
+    lod_.lodMeshShaderEnabled_ = on;
+    if (on) lod_.lodErrorThresholdPx_ = thresholdPx;   // shares the one pixel-budget knob with the others
 #else
     (void)on; (void)thresholdPx;
 #endif

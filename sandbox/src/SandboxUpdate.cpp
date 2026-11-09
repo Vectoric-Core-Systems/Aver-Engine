@@ -91,11 +91,11 @@ void SandboxApp::applyScriptRender(voxi::Renderer& vx) {
     static f32 lodSaved = 0.0f;
     static bool occSaved = false;
     if (aver_fw_render_get(AVER_FW_RENDER_LOD_THRESHOLD, &v)) {
-        if (!lodTaken) { lodTaken = true; lodSaved = lodErrorThresholdPx_; }
-        lodErrorThresholdPx_ = v;
+        if (!lodTaken) { lodTaken = true; lodSaved = lod_.lodErrorThresholdPx_; }
+        lod_.lodErrorThresholdPx_ = v;
     } else if (lodTaken) {
         lodTaken = false;
-        lodErrorThresholdPx_ = lodSaved;
+        lod_.lodErrorThresholdPx_ = lodSaved;
     }
 #  if AVER_MODULE_OCCLUSION
     if (aver_fw_render_get(AVER_FW_RENDER_OCCLUSION, &v)) {

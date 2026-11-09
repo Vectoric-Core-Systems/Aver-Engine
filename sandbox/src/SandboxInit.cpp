@@ -389,8 +389,8 @@ void SandboxApp::installGameProviders() {
 #if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
 void SandboxApp::initLodMeshShader(Engine& e) {
     // Off unless --lod-mesh-shader (opt-in). D3D12 only; needs AVER_MODULE_VOXI for GI/shadows.
-    lodMeshShaderEnabled_ = lodMeshShaderRequest_ > 0;
-    if (lodMeshShaderEnabled_) {
+    lod_.lodMeshShaderEnabled_ = lod_.lodMeshShaderRequest_ > 0;
+    if (lod_.lodMeshShaderEnabled_) {
         const rhi::DeviceCaps mcaps = e.device()->caps();
         // D3D12 only (Voxi table-0 merge is D3D12-specific).
         const bool ok = mcaps.meshShaderTier > 0 && mcaps.shaderModel >= 65 && mcaps.dxcAvailable
@@ -398,7 +398,7 @@ void SandboxApp::initLodMeshShader(Engine& e) {
                         && e.device()->backend() == rhi::Backend::D3D12
 #endif
                         ;
-        lodMeshShaderEnabled_ = ok;
+        lod_.lodMeshShaderEnabled_ = ok;
         if (ok) {
 #if AVER_MODULE_VOXI
             AVER_INFO("[LOD] per-cluster mesh-shader path ON by request (mesh tier {}, SM {}) "

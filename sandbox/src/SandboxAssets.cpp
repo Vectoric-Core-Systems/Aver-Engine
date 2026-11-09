@@ -68,7 +68,7 @@ void SandboxApp::loadProjectMeshes(Engine& e) {
         }
 #endif
 #if AVER_MODULE_TRIFACTOR
-        if (const auto lit = app.meshLods_.find(id); lit != app.meshLods_.end()) {
+        if (const auto lit = app.lod_.meshLods_.find(id); lit != app.lod_.meshLods_.end()) {
             // Level 0 is the released mesh itself; the coarser levels are this hook's to free (they
             // share its vertex buffer, which cannot go while they live).
             const std::vector<rhi::MeshHandle>& levels = lit->second.handles;
@@ -76,9 +76,9 @@ void SandboxApp::loadProjectMeshes(Engine& e) {
                 app.depthProxy_.erase(levels[lvl]);
                 if (lvl > 0) app.content_.releaseMeshHandle(levels[lvl]);
             }
-            app.meshLods_.erase(lit);
+            app.lod_.meshLods_.erase(lit);
         }
-        app.meshClusterData_.erase(id);
+        app.lod_.meshClusterData_.erase(id);
 #endif
     }, &s_lazyPass);
 
@@ -131,7 +131,7 @@ void SandboxApp::onMeshLoaded(const game::GameContent::LoadedMesh& m, void* user
 #if AVER_MODULE_TRIFACTOR
     // Streamed meshes skip what only the off-by-default cluster paths read (per-cluster LOD, cluster
     // stats) and share LOD0's vertex buffer across the ladder: both were most of a streamed upload.
-    const bool clusterData = !pass->streamed || app.lodPerClusterEnabled_ || app.lodClusterStatsEnabled_;
+    const bool clusterData = !pass->streamed || app.lod_.lodPerClusterEnabled_ || app.lod_.lodClusterStatsEnabled_;
     const bool shareVertices = app.rset_.lodShareVertices_ || pass->streamed;
 #endif
     if (!quiet) AVER_INFO("[Mesh] '{}' -> {} verts, {} indices, lodCount={}, coarserLods={}, meshlets={}",
@@ -210,7 +210,7 @@ void SandboxApp::onMeshLoaded(const game::GameContent::LoadedMesh& m, void* user
                               ladder.errorCm[pick]);
                 }
             }
-            app.meshLods_[id] = std::move(ladder);
+            app.lod_.meshLods_[id] = std::move(ladder);
             hm.mark("hook:proxy");
 
             // Flat cluster data for per-cluster path. verts is copied (LOD0 MeshHandle already created from it).
@@ -222,11 +222,11 @@ void SandboxApp::onMeshLoaded(const game::GameContent::LoadedMesh& m, void* user
                 trifactor::buildMeshClusterLevelBounds(cd.clusters, cd.levelBounds);
                 for (const trifactor::MeshClusterView& cv : cd.clusters)
                     cd.maxSphereRadius = std::max(cd.maxSphereRadius, cv.sphereRadius);
-                app.meshClusterData_[id] = std::move(cd);
+                app.lod_.meshClusterData_[id] = std::move(cd);
             }
 
             // GPU cluster buffers for --lod-mesh-shader (built only when flag is on).
-            if (app.lodMeshShaderEnabled_) {
+            if (app.lod_.lodMeshShaderEnabled_) {
                 std::vector<trifactor::MeshClusterView> gpuBounds;
                 std::vector<trifactor::GpuMeshletDesc> gpuDesc;
                 std::vector<u32> gpuVerts, gpuTris;
@@ -276,7 +276,7 @@ void SandboxApp::onMeshLoaded(const game::GameContent::LoadedMesh& m, void* user
                                 res->setSrvBuffer(gpu.bindingSet, 2, gpu.verts,  sizeof(u32), (u32)gpuVerts.size());
                                 res->setSrvBuffer(gpu.bindingSet, 3, gpu.tris,   sizeof(u32), (u32)gpuTris.size());
                                 // Voxi's slots (t4/t5..) are NOT populated here: lifetime mismatch (texture can be resized later).
-                                app.meshClusterGpu_[id] = gpu;
+                                app.lod_.meshClusterGpu_[id] = gpu;
                             } else {
                                 AVER_WARN("[LOD-MESH-SHADER] '{}' binding set failed; this mesh falls back to the CPU per-cluster path", rel);
                             }
@@ -297,16 +297,16 @@ void SandboxApp::ensureLodMeshPipeline(Engine& e) {
     // Reopen latch when a new material graph appears: pipeline compiled earlier won't have an arm for it.
 #if AVER_MODULE_PBR
     const u64 graphRev = pbr::materialGraphs().revision();
-    if (lodMeshPipelineTried_ && lodMeshPipelineGraphRev_ != graphRev) {
-        lodMeshPipelineTried_ = false;
-        lodMeshPipelineReady_ = false;
+    if (lod_.lodMeshPipelineTried_ && lod_.lodMeshPipelineGraphRev_ != graphRev) {
+        lod_.lodMeshPipelineTried_ = false;
+        lod_.lodMeshPipelineReady_ = false;
     }
-    lodMeshPipelineGraphRev_ = graphRev;
+    lod_.lodMeshPipelineGraphRev_ = graphRev;
 #endif
-    if (lodMeshPipelineTried_) return;
+    if (lod_.lodMeshPipelineTried_) return;
     // Test flag before setting latch to avoid burning the one attempt while flag is false.
-    if (!lodMeshShaderEnabled_) return;
-    lodMeshPipelineTried_ = true;
+    if (!lod_.lodMeshShaderEnabled_) return;
+    lod_.lodMeshPipelineTried_ = true;
 
 #if !AVER_MODULE_PBR
     // No PBR module: cluster pixel shader can't evaluate a surface.
@@ -329,39 +329,39 @@ void SandboxApp::ensureLodMeshPipeline(Engine& e) {
         return;
     }
 
-    lodMeshLayout_ = rhi::PipelineLayout{};
-    lodMeshLayout_.srvCount = 4;   // table 0, t0..t3: ClusterBounds, ClusterMeshletDesc, verts, tris
+    lod_.lodMeshLayout_ = rhi::PipelineLayout{};
+    lod_.lodMeshLayout_.srvCount = 4;   // table 0, t0..t3: ClusterBounds, ClusterMeshletDesc, verts, tris
     // Table 1 is the material (t4 without Voxi, t13 with it); srvCount1 supplies material textures.
 #if AVER_MODULE_VOXI
     // Stage 3 register map: t0..t3 cluster geometry, t4..t12 Voxi GI (reserves t6..t12 for TLAS/RT),
     // t13..t20 material (table 1). Check against giLayout() (VoxiRenderer.cpp) before deploying.
-    lodMeshLayout_.srvCount += voxi::kGiSrvCount;   // t4..t12
-    lodMeshLayout_.uavCount  = voxi::kGiUavCount;   // u0..u3, reserved; this PS never writes them
+    lod_.lodMeshLayout_.srvCount += voxi::kGiSrvCount;   // t4..t12
+    lod_.lodMeshLayout_.uavCount  = voxi::kGiUavCount;   // u0..u3, reserved; this PS never writes them
 #endif
-    lodMeshLayout_.srvCount1 = pbr::kMaterialSrvCount;
-    lodMeshLayout_.samplers[kClusterMaterialSamplerSlot].filter        = rhi::Filter::Anisotropic;
-    lodMeshLayout_.samplers[kClusterMaterialSamplerSlot].address       = rhi::AddressMode::Wrap;
-    lodMeshLayout_.samplers[kClusterMaterialSamplerSlot].maxAnisotropy = 8;
-    lodMeshLayout_.samplerCount = kClusterMaterialSamplerSlot + 1;
+    lod_.lodMeshLayout_.srvCount1 = pbr::kMaterialSrvCount;
+    lod_.lodMeshLayout_.samplers[kClusterMaterialSamplerSlot].filter        = rhi::Filter::Anisotropic;
+    lod_.lodMeshLayout_.samplers[kClusterMaterialSamplerSlot].address       = rhi::AddressMode::Wrap;
+    lod_.lodMeshLayout_.samplers[kClusterMaterialSamplerSlot].maxAnisotropy = 8;
+    lod_.lodMeshLayout_.samplerCount = kClusterMaterialSamplerSlot + 1;
 #if AVER_MODULE_VOXI
     // Voxi's two samplers, at kClusterGiSamplerBase (same filter/address/compare as giSamplers()).
-    lodMeshLayout_.samplers[kClusterGiSamplerBase + 0].filter  = rhi::Filter::Linear;
-    lodMeshLayout_.samplers[kClusterGiSamplerBase + 0].address = rhi::AddressMode::Clamp;
-    lodMeshLayout_.samplers[kClusterGiSamplerBase + 1].filter  = rhi::Filter::ComparisonLinear;
-    lodMeshLayout_.samplers[kClusterGiSamplerBase + 1].address = rhi::AddressMode::Clamp;
-    lodMeshLayout_.samplers[kClusterGiSamplerBase + 1].compare = rhi::CompareOp::LessEqual;
-    lodMeshLayout_.samplerCount = kClusterGiSamplerBase + 2;
+    lod_.lodMeshLayout_.samplers[kClusterGiSamplerBase + 0].filter  = rhi::Filter::Linear;
+    lod_.lodMeshLayout_.samplers[kClusterGiSamplerBase + 0].address = rhi::AddressMode::Clamp;
+    lod_.lodMeshLayout_.samplers[kClusterGiSamplerBase + 1].filter  = rhi::Filter::ComparisonLinear;
+    lod_.lodMeshLayout_.samplers[kClusterGiSamplerBase + 1].address = rhi::AddressMode::Clamp;
+    lod_.lodMeshLayout_.samplers[kClusterGiSamplerBase + 1].compare = rhi::CompareOp::LessEqual;
+    lod_.lodMeshLayout_.samplerCount = kClusterGiSamplerBase + 2;
 #endif
     // b1 (PerObject): 32-dword root-constants; b4 (kFeatureFrameConstantRegister): AS/MS only.
-    lodMeshLayout_.constantDwords[rhi::kObjectConstantRegister] = rhi::kObjectConstantDwords;
-    lodMeshLayout_.constantDwords[rhi::kFeatureFrameConstantRegister] = 0;
+    lod_.lodMeshLayout_.constantDwords[rhi::kObjectConstantRegister] = rhi::kObjectConstantDwords;
+    lod_.lodMeshLayout_.constantDwords[rhi::kFeatureFrameConstantRegister] = 0;
 #if AVER_MODULE_VOXI
     // b3 (VoxiFrame): pixel-shader-only root CBV (cannot share b4; see kClusterGiFrameRegister comment).
-    lodMeshLayout_.constantDwords[kClusterGiFrameRegister] = 0;
+    lod_.lodMeshLayout_.constantDwords[kClusterGiFrameRegister] = 0;
 #endif
 
     // AS/MS from shared prelude (no material state); pixel shader below does.
-    const std::string defs = std::string("AVER_MS_CLUSTER=1;") + rhi::meshGeometryDefines(lodMeshLayout_);
+    const std::string defs = std::string("AVER_MS_CLUSTER=1;") + rhi::meshGeometryDefines(lod_.lodMeshLayout_);
     static const std::string kEmptySource;
 
     rhi::ShaderDesc asd;
@@ -371,12 +371,12 @@ void SandboxApp::ensureLodMeshPipeline(Engine& e) {
     asd.stage = rhi::ShaderStage::Amplification;
     asd.minShaderModel = 65;
     asd.defines = defs.c_str();
-    lodMeshAsShader_ = res->createShader(asd);
+    lod_.lodMeshAsShader_ = res->createShader(asd);
 
     rhi::ShaderDesc msd = asd;
     msd.entry = "MSClusterMain";
     msd.stage = rhi::ShaderStage::Mesh;
-    lodMeshMsShader_ = res->createShader(msd);
+    lod_.lodMeshMsShader_ = res->createShader(msd);
 
     // Pixel shader: shared prelude + material prelude + optional Voxi GI prelude + source.
     const std::string& kMaterialGraphHlsl = pbr::materialGraphs().hlsl();
@@ -390,10 +390,10 @@ void SandboxApp::ensureLodMeshPipeline(Engine& e) {
     // Material textures based at THIS layout's srvCount (t13 with Voxi, t4 without).
     std::string psDefs =
 #if AVER_MODULE_VOXI
-        pbr::materialShaderDefines(lodMeshLayout_.srvCount, kClusterMaterialSamplerSlot,
+        pbr::materialShaderDefines(lod_.lodMeshLayout_.srvCount, kClusterMaterialSamplerSlot,
                                    voxi::Renderer::get().settings().layeredBsdf != voxi::Quality::Off) +
 #else
-        pbr::materialShaderDefines(lodMeshLayout_.srvCount, kClusterMaterialSamplerSlot,
+        pbr::materialShaderDefines(lod_.lodMeshLayout_.srvCount, kClusterMaterialSamplerSlot,
                                    /*layeredBsdf=*/false) +
 #endif
         ";AVER_CLUSTER_PS_DEBUG=0";
@@ -412,30 +412,30 @@ void SandboxApp::ensureLodMeshPipeline(Engine& e) {
     psd.defines = psDefs.c_str();
     // SM 6.5 like siblings (no SM6-specific syntax; untested with lower model).
     psd.minShaderModel = 65;
-    lodMeshPsShader_ = res->createShader(psd);
+    lod_.lodMeshPsShader_ = res->createShader(psd);
 
-    if (!lodMeshAsShader_ || !lodMeshMsShader_ || !lodMeshPsShader_) {
+    if (!lod_.lodMeshAsShader_ || !lod_.lodMeshMsShader_ || !lod_.lodMeshPsShader_) {
         AVER_WARN("[LOD-MESH-SHADER] AS/MS/PS compile failed; falling back to --lod-per-cluster/--lod-select");
         return;
     }
 
     rhi::GraphicsPipelineDesc pd;
-    pd.as = lodMeshAsShader_;
-    pd.ms = lodMeshMsShader_;
-    pd.ps = lodMeshPsShader_;
-    pd.layout = lodMeshLayout_;
+    pd.as = lod_.lodMeshAsShader_;
+    pd.ms = lod_.lodMeshMsShader_;
+    pd.ps = lod_.lodMeshPsShader_;
+    pd.layout = lod_.lodMeshLayout_;
     pd.cull = rhi::CullMode::None;
     pd.depth = {true, true, rhi::CompareOp::Less};
     pd.renderTargetCount = 1;
     pd.renderTargets[0] = e.device()->backbufferFormat();
     pd.depthFormat = e.device()->depthFormat();
     pd.sampleCount = e.device()->sampleCount();
-    lodMeshPipeline_ = res->createGraphicsPipeline(pd);
-    if (!lodMeshPipeline_) {
+    lod_.lodMeshPipeline_ = res->createGraphicsPipeline(pd);
+    if (!lod_.lodMeshPipeline_) {
         AVER_WARN("[LOD-MESH-SHADER] pipeline creation failed; falling back to --lod-per-cluster/--lod-select");
         return;
     }
-    lodMeshPipelineReady_ = true;
+    lod_.lodMeshPipelineReady_ = true;
     AVER_INFO("[LOD-MESH-SHADER] GPU per-cluster pipeline ready (meshShaderTier={})", caps.meshShaderTier);
 #endif   // AVER_MODULE_PBR
 }
@@ -458,15 +458,15 @@ void SandboxApp::releaseProjectMeshes(Engine& e) {
         }
 #endif
 #if AVER_MODULE_TRIFACTOR
-        meshLods_.erase(id);
-        meshClusterData_.erase(id);
+        lod_.meshLods_.erase(id);
+        lod_.meshClusterData_.erase(id);
 #endif
     }
 #if AVER_MODULE_TRIFACTOR
     // Destroy per-instance CPU-assembled cut handles explicitly (GPU buffers would leak).
-    for (auto& [ent, cache] : clusterCutCache_)
+    for (auto& [ent, cache] : lod_.clusterCutCache_)
         if (cache.handle) e.device()->destroyMesh(cache.handle);
-    clusterCutCache_.clear();
+    lod_.clusterCutCache_.clear();
 #endif
     // destroyBaseHandles=false: editor's mesh reload never destroyed base handles.
     content_.releaseProjectMeshes(*e.device(), /*destroyBaseHandles=*/false);

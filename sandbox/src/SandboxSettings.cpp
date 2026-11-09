@@ -2230,19 +2230,19 @@ void SandboxApp::renderPagePerformance(voxi::Renderer& vx, voxi::Settings& s, co
     using namespace aver::voxi;
     ImGui::TextUnformatted("Culling and level of detail");
     {
-        bool lod = lodSelectEnabled_;
+        bool lod = lod_.lodSelectEnabled_;
         if (ImGui::Checkbox("LOD select", &lod)) {
-            setLodSelect(lod, lodErrorThresholdPx_);
+            setLodSelect(lod, lod_.lodErrorThresholdPx_);
             projectDirty_ = true;
         }
         uiReg_.track("project.lod.select");
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Off draws every instance at LOD 0. Measured on Electric Dreams:\n"
                               "102.7 ms median off, 76.7 ms on.");
-        ImGui::BeginDisabled(!lodSelectEnabled_);
-        f32 px = lodErrorThresholdPx_;
+        ImGui::BeginDisabled(!lod_.lodSelectEnabled_);
+        f32 px = lod_.lodErrorThresholdPx_;
         if (ImGui::SliderFloat("Screen error (px)", &px, 0.25f, 8.0f, "%.2f")) {
-            setLodSelect(lodSelectEnabled_, px);
+            setLodSelect(lod_.lodSelectEnabled_, px);
             projectDirty_ = true;
         }
         uiReg_.track("project.lod.threshold");

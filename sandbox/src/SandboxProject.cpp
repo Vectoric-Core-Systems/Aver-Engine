@@ -423,9 +423,9 @@ void SandboxApp::applyProjectRenderSettings() {
     // unstated rule.
     if (project_.lodSelect >= 0)
         setLodSelect(project_.lodSelect != 0,
-                     project_.lodThresholdPx >= 0.0f ? project_.lodThresholdPx : lodErrorThresholdPx_);
+                     project_.lodThresholdPx >= 0.0f ? project_.lodThresholdPx : lod_.lodErrorThresholdPx_);
     else if (project_.lodThresholdPx >= 0.0f)
-        setLodSelect(lodSelectEnabled_, project_.lodThresholdPx);
+        setLodSelect(lod_.lodSelectEnabled_, project_.lodThresholdPx);
     if (project_.occlusionCull >= 0) occl_.occlusionCullEnabled_ = project_.occlusionCull != 0;
     // projectBackend_ and frameBudgetMs_ were applied above the hasRenderSettings() guard --
     // see the comment there for why they cannot live down here with the rest of the block.

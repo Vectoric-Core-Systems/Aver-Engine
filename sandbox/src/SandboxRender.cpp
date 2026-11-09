@@ -307,19 +307,19 @@ void SandboxApp::beginPlayMobilityFrame() {
 #if AVER_MODULE_SCENE
 #if AVER_MODULE_TRIFACTOR
 void SandboxApp::resetLodFrameState(Engine& e) {
-        lodStats_ = LodSelectStats{};   // this frame's counters, from zero -- see the struct comment
-        lodClusterStats_ = LodClusterStats{};
-        lodMeshShaderStats_ = LodMeshShaderStats{};
-        ++lodClusterFrame_;
+        lod_.lodStats_ = LodSelectStats{};   // this frame's counters, from zero -- see the struct comment
+        lod_.lodClusterStats_ = LodClusterStats{};
+        lod_.lodMeshShaderStats_ = LodMeshShaderStats{};
+        ++lod_.lodClusterFrame_;
         // Sweeps the per-instance cut cache: an entry unused for 256 frames (entity destroyed,
         // CMeshRenderer removed, or the toggle turned off) would otherwise leak its GPU handle
         // forever -- no destruction hook catches that here. 256-frame grace so a briefly off-screen
         // instance isn't mistaken for gone; checked only every 64 frames.
-        if (lodPerClusterEnabled_ && (lodClusterFrame_ % 64 == 0)) {
-            for (auto it2 = clusterCutCache_.begin(); it2 != clusterCutCache_.end();) {
-                if (lodClusterFrame_ - it2->second.lastUsedFrame > 256) {
+        if (lod_.lodPerClusterEnabled_ && (lod_.lodClusterFrame_ % 64 == 0)) {
+            for (auto it2 = lod_.clusterCutCache_.begin(); it2 != lod_.clusterCutCache_.end();) {
+                if (lod_.lodClusterFrame_ - it2->second.lastUsedFrame > 256) {
                     if (it2->second.handle) e.device()->destroyMesh(it2->second.handle);
-                    it2 = clusterCutCache_.erase(it2);
+                    it2 = lod_.clusterCutCache_.erase(it2);
                 } else {
                     ++it2;
                 }
@@ -330,9 +330,9 @@ void SandboxApp::resetLodFrameState(Engine& e) {
         // table-0 binding set before any entity draws through it this frame -- one pass over
         // meshClusterGpu_ (bounded by distinct meshes, not instances), keeping tables correct
         // across a live GI-quality/shadow-resolution change that recreates those handles.
-        if (lodMeshShaderEnabled_ && lodMeshPipelineReady_) {
+        if (lod_.lodMeshShaderEnabled_ && lod_.lodMeshPipelineReady_) {
             if (rhi::IResourceFactory* giRes = e.device()->resources())
-                for (auto& kv : meshClusterGpu_)
+                for (auto& kv : lod_.meshClusterGpu_)
                     if (kv.second.bindingSet)
                         voxiRenderer_.bindGiResources(*giRes, kv.second.bindingSet, kClusterGiSrvBase);
         }
@@ -402,13 +402,13 @@ void SandboxApp::drawDepthPrepass(Engine& e) {
 #if AVER_MODULE_TRIFACTOR
                     SandboxApp& self = *static_cast<SandboxApp*>(user);
                     // dispatchMeshClusters has no depth-only twin to call.
-                    if (self.lodMeshShaderEnabled_ && self.lodMeshPipelineReady_ &&
-                        self.meshClusterGpu_.count(d.meshId)) { d.skip = true; return; }
+                    if (self.lod_.lodMeshShaderEnabled_ && self.lod_.lodMeshPipelineReady_ &&
+                        self.lod_.meshClusterGpu_.count(d.meshId)) { d.skip = true; return; }
                     // clusterCutCache_ is rebuilt-or-reused once per frame per entity; running that
                     // decision twice would duplicate the rebuild or read a cache the colour walk
                     // hasn't populated yet -- not unsafe, just unneeded for a path nothing in this
                     // session enables.
-                    if (self.lodPerClusterEnabled_ && self.meshClusterData_.count(d.meshId)) {
+                    if (self.lod_.lodPerClusterEnabled_ && self.lod_.meshClusterData_.count(d.meshId)) {
                         d.skip = true; return;
                     }
                     // The cull already answered by the time decide() runs, and a culled entity
@@ -417,9 +417,9 @@ void SandboxApp::drawDepthPrepass(Engine& e) {
                     // Guarded on haveWorldBox like the colour walk: an instance with no usable box
                     // must take LOD 0 in BOTH walks. Fed the box the cull already used, not one
                     // re-derived here -- re-deriving it is what made the two copies disagree before.
-                    if (self.lodSelectEnabled_ && d.haveWorldBox) {
-                        if (const auto lit = self.meshLods_.find(d.meshId);
-                            lit != self.meshLods_.end()) {
+                    if (self.lod_.lodSelectEnabled_ && d.haveWorldBox) {
+                        if (const auto lit = self.lod_.meshLods_.find(d.meshId);
+                            lit != self.lod_.meshLods_.end()) {
                             const auto& ladder = lit->second;
                             const Vec3 sphereCenter = (d.worldBoxMin + d.worldBoxMax) * 0.5f;
                             const f32 sphereRadius = dist(d.worldBoxMin, d.worldBoxMax) * 0.5f;
@@ -430,7 +430,7 @@ void SandboxApp::drawDepthPrepass(Engine& e) {
                             pview.verticalFovRadians = self.playView_.fovYRad;
                             const u32 plevel = trifactor::chooseLevelCached(
                                 ladder.errorCm, sphereCenter, sphereRadius,
-                                lodThresholdFor(self.lodErrorThresholdPx_, d.entity), pview);
+                                lodThresholdFor(self.lod_.lodErrorThresholdPx_, d.entity), pview);
                             d.chosenMesh = ladder.handles[plevel];
                         }
                     }
@@ -535,61 +535,61 @@ void SandboxApp::logSceneRenderStats(const aver::game::SceneDrawStats& colourSta
         // Greppable `[LOD-SELECT]`, only when the tuple changed. trianglesBeforeLod0 vs
         // trianglesAfterLevel predicts frame time; the cluster-cull counters are real telemetry
         // against the chosen level's meshlets, informational only (ClusterAdapt.hpp).
-        if (lodSelectEnabled_ &&
-            (lodStats_.instancesTested != lastLoggedLodStats_.instancesTested ||
-             lodStats_.levelCollapsed != lastLoggedLodStats_.levelCollapsed ||
-             lodStats_.trianglesAfterLevel != lastLoggedLodStats_.trianglesAfterLevel ||
-             lodStats_.frustumCulled != lastLoggedLodStats_.frustumCulled ||
-             lodStats_.coneCulled != lastLoggedLodStats_.coneCulled)) {
+        if (lod_.lodSelectEnabled_ &&
+            (lod_.lodStats_.instancesTested != lod_.lastLoggedLodStats_.instancesTested ||
+             lod_.lodStats_.levelCollapsed != lod_.lastLoggedLodStats_.levelCollapsed ||
+             lod_.lodStats_.trianglesAfterLevel != lod_.lastLoggedLodStats_.trianglesAfterLevel ||
+             lod_.lodStats_.frustumCulled != lod_.lastLoggedLodStats_.frustumCulled ||
+             lod_.lodStats_.coneCulled != lod_.lastLoggedLodStats_.coneCulled)) {
             AVER_INFO("[LOD-SELECT] instances={} levelCollapsed={} clustersTested={} "
                       "frustumCulled(info)={} coneCulled(info)={} trisBefore={} trisAfter={}",
-                      lodStats_.instancesTested, lodStats_.levelCollapsed, lodStats_.clustersTested,
-                      lodStats_.frustumCulled, lodStats_.coneCulled,
-                      lodStats_.trianglesBeforeLod0, lodStats_.trianglesAfterLevel);
-            lastLoggedLodStats_ = lodStats_;
+                      lod_.lodStats_.instancesTested, lod_.lodStats_.levelCollapsed, lod_.lodStats_.clustersTested,
+                      lod_.lodStats_.frustumCulled, lod_.lodStats_.coneCulled,
+                      lod_.lodStats_.trianglesBeforeLod0, lod_.lodStats_.trianglesAfterLevel);
+            lod_.lastLoggedLodStats_ = lod_.lodStats_;
         }
         // `[LOD-CLUSTER]`, greppable. `distinctLevelsMax`: if it never exceeds 1, every instance's
         // cut collapsed to one level (discrete LOD with extra steps). `rebuilds`/`hits`/`rebuildMs`
         // are the real CPU-assembly cost. `instancesShortcut` (the instance-level shortcut's count)
         // is NOT included in `instancesTested`/`clustersTested` -- sum both for the true total.
-        if (lodPerClusterEnabled_ &&
-            (lodClusterStats_.instancesTested != lastLoggedLodClusterStats_.instancesTested ||
-             lodClusterStats_.clustersDrawn != lastLoggedLodClusterStats_.clustersDrawn ||
-             lodClusterStats_.trianglesDrawn != lastLoggedLodClusterStats_.trianglesDrawn ||
-             lodClusterStats_.instancesMixedLevels != lastLoggedLodClusterStats_.instancesMixedLevels ||
-             lodClusterStats_.instancesShortcut != lastLoggedLodClusterStats_.instancesShortcut ||
-             lodClusterStats_.rebuilds != lastLoggedLodClusterStats_.rebuilds)) {
+        if (lod_.lodPerClusterEnabled_ &&
+            (lod_.lodClusterStats_.instancesTested != lod_.lastLoggedLodClusterStats_.instancesTested ||
+             lod_.lodClusterStats_.clustersDrawn != lod_.lastLoggedLodClusterStats_.clustersDrawn ||
+             lod_.lodClusterStats_.trianglesDrawn != lod_.lastLoggedLodClusterStats_.trianglesDrawn ||
+             lod_.lodClusterStats_.instancesMixedLevels != lod_.lastLoggedLodClusterStats_.instancesMixedLevels ||
+             lod_.lodClusterStats_.instancesShortcut != lod_.lastLoggedLodClusterStats_.instancesShortcut ||
+             lod_.lodClusterStats_.rebuilds != lod_.lastLoggedLodClusterStats_.rebuilds)) {
             AVER_INFO("[LOD-CLUSTER] instances={} instancesShortcut={} clustersTested={} "
                       "frustumCulled={} coneCulled={} lodRejected={} clustersDrawn={} trisBefore={} "
                       "trisDrawn={} instancesMixedLevels={} distinctLevelsMax={} rebuilds={} hits={} "
                       "rebuildIdx={} rebuildMs={:.3f}",
-                      lodClusterStats_.instancesTested, lodClusterStats_.instancesShortcut,
-                      lodClusterStats_.clustersTested,
-                      lodClusterStats_.frustumCulled, lodClusterStats_.coneCulled,
-                      lodClusterStats_.lodRejected, lodClusterStats_.clustersDrawn,
-                      lodClusterStats_.trianglesBeforeLod0, lodClusterStats_.trianglesDrawn,
-                      lodClusterStats_.instancesMixedLevels, lodClusterStats_.maxDistinctLevelsSeen,
-                      lodClusterStats_.rebuilds, lodClusterStats_.cacheHits,
-                      lodClusterStats_.rebuildIndices, lodClusterStats_.rebuildMs);
-            lastLoggedLodClusterStats_ = lodClusterStats_;
+                      lod_.lodClusterStats_.instancesTested, lod_.lodClusterStats_.instancesShortcut,
+                      lod_.lodClusterStats_.clustersTested,
+                      lod_.lodClusterStats_.frustumCulled, lod_.lodClusterStats_.coneCulled,
+                      lod_.lodClusterStats_.lodRejected, lod_.lodClusterStats_.clustersDrawn,
+                      lod_.lodClusterStats_.trianglesBeforeLod0, lod_.lodClusterStats_.trianglesDrawn,
+                      lod_.lodClusterStats_.instancesMixedLevels, lod_.lodClusterStats_.maxDistinctLevelsSeen,
+                      lod_.lodClusterStats_.rebuilds, lod_.lodClusterStats_.cacheHits,
+                      lod_.lodClusterStats_.rebuildIndices, lod_.lodClusterStats_.rebuildMs);
+            lod_.lastLoggedLodClusterStats_ = lod_.lodClusterStats_;
         }
         // `[LOD-MESH-SHADER]`, greppable, same log-on-change discipline. `clustersDispatched` is
         // real, the exact clusterCount every dispatchMeshClusters call used; `survivors`/
         // `trianglesDrawn`/`distinctLevelsMax` are CPU-mirrored telemetry sampled every 64 frames.
-        if (lodMeshShaderEnabled_ &&
-            (lodMeshShaderStats_.instancesTested != lastLoggedLodMeshShaderStats_.instancesTested ||
-             lodMeshShaderStats_.clustersDispatched != lastLoggedLodMeshShaderStats_.clustersDispatched ||
-             lodMeshShaderStats_.survivors != lastLoggedLodMeshShaderStats_.survivors ||
-             lodMeshShaderStats_.instancesMixedLevels != lastLoggedLodMeshShaderStats_.instancesMixedLevels ||
-             lodMeshShaderStats_.instancesShortcut != lastLoggedLodMeshShaderStats_.instancesShortcut)) {
+        if (lod_.lodMeshShaderEnabled_ &&
+            (lod_.lodMeshShaderStats_.instancesTested != lod_.lastLoggedLodMeshShaderStats_.instancesTested ||
+             lod_.lodMeshShaderStats_.clustersDispatched != lod_.lastLoggedLodMeshShaderStats_.clustersDispatched ||
+             lod_.lodMeshShaderStats_.survivors != lod_.lastLoggedLodMeshShaderStats_.survivors ||
+             lod_.lodMeshShaderStats_.instancesMixedLevels != lod_.lastLoggedLodMeshShaderStats_.instancesMixedLevels ||
+             lod_.lodMeshShaderStats_.instancesShortcut != lod_.lastLoggedLodMeshShaderStats_.instancesShortcut)) {
             AVER_INFO("[LOD-MESH-SHADER] pipelineReady={} instances={} clustersDispatched={} "
                       "survivors(sampled)={} trisDrawn(sampled)={} instancesMixedLevels(sampled)={} "
                       "distinctLevelsMax(sampled)={} shortcut(sampled)={}",
-                      lodMeshPipelineReady_, lodMeshShaderStats_.instancesTested,
-                      lodMeshShaderStats_.clustersDispatched, lodMeshShaderStats_.survivors,
-                      lodMeshShaderStats_.trianglesDrawn, lodMeshShaderStats_.instancesMixedLevels,
-                      lodMeshShaderStats_.maxDistinctLevelsSeen, lodMeshShaderStats_.instancesShortcut);
-            lastLoggedLodMeshShaderStats_ = lodMeshShaderStats_;
+                      lod_.lodMeshPipelineReady_, lod_.lodMeshShaderStats_.instancesTested,
+                      lod_.lodMeshShaderStats_.clustersDispatched, lod_.lodMeshShaderStats_.survivors,
+                      lod_.lodMeshShaderStats_.trianglesDrawn, lod_.lodMeshShaderStats_.instancesMixedLevels,
+                      lod_.lodMeshShaderStats_.maxDistinctLevelsSeen, lod_.lodMeshShaderStats_.instancesShortcut);
+            lod_.lastLoggedLodMeshShaderStats_ = lod_.lodMeshShaderStats_;
         }
 #endif
 }
@@ -1173,7 +1173,7 @@ void SandboxApp::drawSceneEntities(Engine& e) {
             // each), a token first met this walk still gets exactly the call it always got, and an
             // unread `rsEntity` stays the default look.
 #if AVER_MODULE_TRIFACTOR
-            const bool entityLookRead = self.lodMeshShaderEnabled_;
+            const bool entityLookRead = self.lod_.lodMeshShaderEnabled_;
 #else
             const bool entityLookRead = false;
 #endif
@@ -1220,9 +1220,9 @@ void SandboxApp::drawSceneEntities(Engine& e) {
             // paths, or the unmodified mesh -- the only place that draws glass correctly.
             // NOR IN WIREFRAME: this path shades straight into the scene target, and the wireframe
             // view draws only what reaches drawMesh (IDevice::setWireframe).
-            if (self.lodMeshShaderEnabled_ && self.lodMeshPipelineReady_ && !d.skinned &&
+            if (self.lod_.lodMeshShaderEnabled_ && self.lod_.lodMeshPipelineReady_ && !d.skinned &&
                 d.haveWorldBox && !blended && !self.viewState_.wireframe_) {
-                if (const auto git = self.meshClusterGpu_.find(d.meshId); git != self.meshClusterGpu_.end()) {
+                if (const auto git = self.lod_.meshClusterGpu_.find(d.meshId); git != self.lod_.meshClusterGpu_.end()) {
                     const auto& gpu = git->second;
                     if (rhi::IRenderContext* ctx = c.engine->device()->renderContext();
                         ctx && gpu.clusterCount) {
@@ -1237,7 +1237,7 @@ void SandboxApp::drawSceneEntities(Engine& e) {
                         // upload (ASMain does not re-clamp); the six frustum planes are copied
                         // verbatim from the same Frustum::fromViewProj the CPU reference calls.
                         SandboxApp::ClusterFrameCB frameCb;
-                        frameCb.budgetPx = std::max(self.lodErrorThresholdPx_, trifactor::kMinClusterBudgetPx);
+                        frameCb.budgetPx = std::max(self.lod_.lodErrorThresholdPx_, trifactor::kMinClusterBudgetPx);
                         frameCb.projScale = trifactor::projScale(view);
                         frameCb.worldScale = worldScale;
                         const trifactor::Frustum frustum = trifactor::Frustum::fromViewProj(view.viewProj);
@@ -1274,7 +1274,7 @@ void SandboxApp::drawSceneEntities(Engine& e) {
                         // second manual accumulator that could disagree with it -- see that call site.
                         {
                             CpuNest clusterDispatchNest(CpuSpan::ClusterDispatch);
-                            ctx->setPipeline(self.lodMeshPipeline_);
+                            ctx->setPipeline(self.lod_.lodMeshPipeline_);
                             ctx->setBindingSet(gpu.bindingSet, 0);
                             // THE MATERIAL, ON THE CONTEXT -- why foliage on this path drew black.
                             // setDrawBinding above records the material on the DEVICE, which only
@@ -1310,8 +1310,8 @@ void SandboxApp::drawSceneEntities(Engine& e) {
                         // which sends the entity down the same direct route culling would, with
                         // hiddenFromOwner false (deliver() keys that on route.raster, true here).
 
-                        ++self.lodMeshShaderStats_.instancesTested;
-                        self.lodMeshShaderStats_.clustersDispatched += gpu.clusterCount;
+                        ++self.lod_.lodMeshShaderStats_.instancesTested;
+                        self.lod_.lodMeshShaderStats_.clustersDispatched += gpu.clusterCount;
 
                         // Informational counters: the SAME CPU reference over the same clusters and
                         // budget the GPU dispatch just used, sampled every 64 frames.
@@ -1321,28 +1321,28 @@ void SandboxApp::drawSceneEntities(Engine& e) {
                         // frame -- and since 64 divides --frames 128 evenly, that frame is
                         // guaranteed to be this task's own benchmark's last, not a coincidence. A
                         // once-per-second stall for a log line no render pass reads is unacceptable.
-                        if (self.lodClusterStatsEnabled_ && self.lodClusterFrame_ % 64 == 0) {
-                            if (const auto cit2 = self.meshClusterData_.find(d.meshId);
-                                cit2 != self.meshClusterData_.end()) {
+                        if (self.lod_.lodClusterStatsEnabled_ && self.lod_.lodClusterFrame_ % 64 == 0) {
+                            if (const auto cit2 = self.lod_.meshClusterData_.find(d.meshId);
+                                cit2 != self.lod_.meshClusterData_.end()) {
                                 const auto& mcd = cit2->second;
                                 bool sampledShortcut = false;
-                                if (const auto lit2 = self.meshLods_.find(d.meshId); lit2 != self.meshLods_.end()) {
+                                if (const auto lit2 = self.lod_.meshLods_.find(d.meshId); lit2 != self.lod_.meshLods_.end()) {
                                     const auto& ladder2 = lit2->second;
                                     const Vec3 sphereCenter2 = (wlo + whi) * 0.5f;
                                     const f32 sphereRadius2 = dist(wlo, whi) * 0.5f;
                                     const u32 candidateLevel2 = trifactor::chooseLevelCached(
                                         ladder2.errorCm, sphereCenter2, sphereRadius2,
-                                        self.lodErrorThresholdPx_, view);
+                                        self.lod_.lodErrorThresholdPx_, view);
                                     if (candidateLevel2 < mcd.levelBounds.size() &&
                                         trifactor::provablySingleLevelCut(
                                             mcd.levelBounds, candidateLevel2, sphereCenter2, sphereRadius2,
-                                            mcd.maxSphereRadius * worldScale, self.lodErrorThresholdPx_, view)) {
-                                        self.lodMeshShaderStats_.survivors += mcd.levelBounds[candidateLevel2].count;
-                                        self.lodMeshShaderStats_.trianglesDrawn +=
+                                            mcd.maxSphereRadius * worldScale, self.lod_.lodErrorThresholdPx_, view)) {
+                                        self.lod_.lodMeshShaderStats_.survivors += mcd.levelBounds[candidateLevel2].count;
+                                        self.lod_.lodMeshShaderStats_.trianglesDrawn +=
                                             mcd.levelBounds[candidateLevel2].triangleCount;
-                                        self.lodMeshShaderStats_.maxDistinctLevelsSeen =
-                                            std::max(self.lodMeshShaderStats_.maxDistinctLevelsSeen, 1u);
-                                        ++self.lodMeshShaderStats_.instancesShortcut;
+                                        self.lod_.lodMeshShaderStats_.maxDistinctLevelsSeen =
+                                            std::max(self.lod_.lodMeshShaderStats_.maxDistinctLevelsSeen, 1u);
+                                        ++self.lod_.lodMeshShaderStats_.instancesShortcut;
                                         sampledShortcut = true;
                                     }
                                 }
@@ -1355,12 +1355,12 @@ void SandboxApp::drawSceneEntities(Engine& e) {
                                         cv.coneAxis = xformVec(wm, cv.coneAxis).getSafeNormal();
                                     }
                                     const trifactor::ClusterCutResult cr = trifactor::selectClusterCut(
-                                        worldClusters, self.lodErrorThresholdPx_, view, true);
-                                    self.lodMeshShaderStats_.survivors += cr.stats.drawn;
-                                    self.lodMeshShaderStats_.trianglesDrawn += cr.stats.trianglesAfter;
-                                    if (cr.stats.distinctLevels > 1) ++self.lodMeshShaderStats_.instancesMixedLevels;
-                                    self.lodMeshShaderStats_.maxDistinctLevelsSeen =
-                                        std::max(self.lodMeshShaderStats_.maxDistinctLevelsSeen, cr.stats.distinctLevels);
+                                        worldClusters, self.lod_.lodErrorThresholdPx_, view, true);
+                                    self.lod_.lodMeshShaderStats_.survivors += cr.stats.drawn;
+                                    self.lod_.lodMeshShaderStats_.trianglesDrawn += cr.stats.trianglesAfter;
+                                    if (cr.stats.distinctLevels > 1) ++self.lod_.lodMeshShaderStats_.instancesMixedLevels;
+                                    self.lod_.lodMeshShaderStats_.maxDistinctLevelsSeen =
+                                        std::max(self.lod_.lodMeshShaderStats_.maxDistinctLevelsSeen, cr.stats.distinctLevels);
                                 }
                             }
                         }
@@ -1370,8 +1370,8 @@ void SandboxApp::drawSceneEntities(Engine& e) {
             // PER-CLUSTER path wins over per-LEVEL when both are enabled: this is what actually
             // mixes LOD levels within one instance's draw; the per-level `else if` below is
             // unchanged and still reachable when --lod-per-cluster is off.
-            if (!clusterDispatched && self.lodPerClusterEnabled_ && !d.skinned && d.haveWorldBox) {
-                if (const auto cit = self.meshClusterData_.find(d.meshId); cit != self.meshClusterData_.end()) {
+            if (!clusterDispatched && self.lod_.lodPerClusterEnabled_ && !d.skinned && d.haveWorldBox) {
+                if (const auto cit = self.lod_.meshClusterData_.find(d.meshId); cit != self.lod_.meshClusterData_.end()) {
                     const auto& cd = cit->second;
                     trifactor::View view;
                     view.eye = self.viewState_.eye_;
@@ -1386,19 +1386,19 @@ void SandboxApp::drawSceneEntities(Engine& e) {
                     // level's ladder handle directly, skipping the copy/transform/scan. Falls
                     // through to the real scan when the proof doesn't hold.
                     bool tookShortcut = false;
-                    if (const auto lit = self.meshLods_.find(d.meshId); lit != self.meshLods_.end()) {
+                    if (const auto lit = self.lod_.meshLods_.find(d.meshId); lit != self.lod_.meshLods_.end()) {
                         const auto& ladder = lit->second;
                         const Vec3 sphereCenter = (wlo + whi) * 0.5f;
                         const f32 sphereRadius = dist(wlo, whi) * 0.5f;
                         const u32 candidateLevel = trifactor::chooseLevelCached(
-                            ladder.errorCm, sphereCenter, sphereRadius, self.lodErrorThresholdPx_, view);
+                            ladder.errorCm, sphereCenter, sphereRadius, self.lod_.lodErrorThresholdPx_, view);
                         if (candidateLevel < ladder.handles.size() &&
                             trifactor::provablySingleLevelCut(
                                 cd.levelBounds, candidateLevel, sphereCenter, sphereRadius,
-                                cd.maxSphereRadius * worldScale, self.lodErrorThresholdPx_, view)) {
+                                cd.maxSphereRadius * worldScale, self.lod_.lodErrorThresholdPx_, view)) {
                             mesh = ladder.handles[candidateLevel];
                             tookShortcut = true;
-                            ++self.lodClusterStats_.instancesShortcut;
+                            ++self.lod_.lodClusterStats_.instancesShortcut;
                         }
                     }
 
@@ -1415,20 +1415,20 @@ void SandboxApp::drawSceneEntities(Engine& e) {
                     }
 
                     const trifactor::ClusterCutResult cr = trifactor::selectClusterCut(
-                        worldClusters, self.lodErrorThresholdPx_, view, true /* useFrustum */);
+                        worldClusters, self.lod_.lodErrorThresholdPx_, view, true /* useFrustum */);
 
-                    ++self.lodClusterStats_.instancesTested;
-                    self.lodClusterStats_.clustersTested += cr.stats.tested;
-                    self.lodClusterStats_.frustumCulled += cr.stats.frustumCulled;
-                    self.lodClusterStats_.coneCulled += cr.stats.coneCulled;
-                    self.lodClusterStats_.lodRejected += cr.stats.lodRejected;
-                    self.lodClusterStats_.clustersDrawn += cr.stats.drawn;
-                    self.lodClusterStats_.trianglesDrawn += cr.stats.trianglesAfter;
+                    ++self.lod_.lodClusterStats_.instancesTested;
+                    self.lod_.lodClusterStats_.clustersTested += cr.stats.tested;
+                    self.lod_.lodClusterStats_.frustumCulled += cr.stats.frustumCulled;
+                    self.lod_.lodClusterStats_.coneCulled += cr.stats.coneCulled;
+                    self.lod_.lodClusterStats_.lodRejected += cr.stats.lodRejected;
+                    self.lod_.lodClusterStats_.clustersDrawn += cr.stats.drawn;
+                    self.lod_.lodClusterStats_.trianglesDrawn += cr.stats.trianglesAfter;
                     if (const auto tIt = self.meshTris_.find(d.meshId); tIt != self.meshTris_.end())
-                        self.lodClusterStats_.trianglesBeforeLod0 += tIt->second;
-                    if (cr.stats.distinctLevels > 1) ++self.lodClusterStats_.instancesMixedLevels;
-                    self.lodClusterStats_.maxDistinctLevelsSeen =
-                        std::max(self.lodClusterStats_.maxDistinctLevelsSeen, cr.stats.distinctLevels);
+                        self.lod_.lodClusterStats_.trianglesBeforeLod0 += tIt->second;
+                    if (cr.stats.distinctLevels > 1) ++self.lod_.lodClusterStats_.instancesMixedLevels;
+                    self.lod_.lodClusterStats_.maxDistinctLevelsSeen =
+                        std::max(self.lod_.lodClusterStats_.maxDistinctLevelsSeen, cr.stats.distinctLevels);
 
                     // Sort for a cheap, order-independent "did the cut change" comparison. The cut
                     // is expected STABLE frame to frame (camera moves continuously, not by a full
@@ -1436,8 +1436,8 @@ void SandboxApp::drawSceneEntities(Engine& e) {
                     std::vector<u32> selectedIds = cr.drawnIds;
                     std::sort(selectedIds.begin(), selectedIds.end());
 
-                    auto& cache = self.clusterCutCache_[d.entity];
-                    cache.lastUsedFrame = self.lodClusterFrame_;
+                    auto& cache = self.lod_.clusterCutCache_[d.entity];
+                    cache.lastUsedFrame = self.lod_.lodClusterFrame_;
                     if (selectedIds != cache.selectedIds || cache.handle == 0) {
                         // REBUILD: concatenate every selected cluster's precomputed expanded global
                         // index list into ONE fresh index buffer against the shared vertex array
@@ -1459,10 +1459,10 @@ void SandboxApp::drawSceneEntities(Engine& e) {
                             c.engine->device()->createMesh(cd.verts.data(), (u32)cd.verts.size(),
                                                     assembled.data(), (u32)assembled.size());
                         const auto t1 = std::chrono::steady_clock::now();
-                        self.lodClusterStats_.rebuildMs +=
+                        self.lod_.lodClusterStats_.rebuildMs +=
                             std::chrono::duration<f64, std::milli>(t1 - t0).count();
-                        self.lodClusterStats_.rebuildIndices += assembled.size();
-                        ++self.lodClusterStats_.rebuilds;
+                        self.lod_.lodClusterStats_.rebuildIndices += assembled.size();
+                        ++self.lod_.lodClusterStats_.rebuilds;
 
                         if (newHandle) {
                             if (cache.handle) {
@@ -1496,13 +1496,13 @@ void SandboxApp::drawSceneEntities(Engine& e) {
                         // handle (fail-safe), or fall through to the LOD-0 handle `mesh` already
                         // holds on the very first frame.
                     } else {
-                        ++self.lodClusterStats_.cacheHits;
+                        ++self.lod_.lodClusterStats_.cacheHits;
                     }
                     if (cache.handle) mesh = cache.handle;
                     }   // !tookShortcut
                 }
-            } else if (!clusterDispatched && self.lodSelectEnabled_ && !d.skinned && d.haveWorldBox) {
-                if (const auto lit = self.meshLods_.find(d.meshId); lit != self.meshLods_.end()) {
+            } else if (!clusterDispatched && self.lod_.lodSelectEnabled_ && !d.skinned && d.haveWorldBox) {
+                if (const auto lit = self.lod_.meshLods_.find(d.meshId); lit != self.lod_.meshLods_.end()) {
                     const auto& ladder = lit->second;
                     const Vec3 sphereCenter = (wlo + whi) * 0.5f;
                     const f32 sphereRadius = dist(wlo, whi) * 0.5f;   // half the box diagonal:
@@ -1513,20 +1513,20 @@ void SandboxApp::drawSceneEntities(Engine& e) {
                     view.viewportHeightPx = self.viewState_.vpH_;
                     view.verticalFovRadians = self.playView_.fovYRad;   // matches this frame's proj build, above
                     const u32 level = trifactor::chooseLevelCached(
-                        ladder.errorCm, sphereCenter, sphereRadius, lodThresholdFor(self.lodErrorThresholdPx_, d.entity), view);
+                        ladder.errorCm, sphereCenter, sphereRadius, lodThresholdFor(self.lod_.lodErrorThresholdPx_, d.entity), view);
                     mesh = ladder.handles[level];
 
-                    ++self.lodStats_.instancesTested;
-                    if (level > 0) ++self.lodStats_.levelCollapsed;
-                    self.lodStats_.trianglesBeforeLod0 += ladder.triCounts.front();
-                    self.lodStats_.trianglesAfterLevel += ladder.triCounts[level];
+                    ++self.lod_.lodStats_.instancesTested;
+                    if (level > 0) ++self.lod_.lodStats_.levelCollapsed;
+                    self.lod_.lodStats_.trianglesBeforeLod0 += ladder.triCounts.front();
+                    self.lod_.lodStats_.trianglesAfterLevel += ladder.triCounts[level];
 
                     // Informational cluster-cull telemetry for the CHOSEN level only -- real and
                     // tested, but not subtracted from trianglesAfterLevel (this slice draws the
                     // whole chosen level). ladder.clusters[level] holds mesh-local bounds; a working
                     // copy is transformed by this instance's world matrix into world space, using a
                     // uniform-scale approximation that's fine for a counter never reaching the draw call.
-                    if (self.lodClusterStatsEnabled_ &&
+                    if (self.lod_.lodClusterStatsEnabled_ &&
                         level < ladder.clusters.size() && !ladder.clusters[level].empty()) {
                         const f32 worldScale = xformVec(wm, Vec3{1, 0, 0}).size();
                         std::vector<trifactor::ClusterView> worldClusters = ladder.clusters[level];
@@ -1539,9 +1539,9 @@ void SandboxApp::drawSceneEntities(Engine& e) {
                         const trifactor::SelectionResult sr = trifactor::selectVisibleClustersWithStats(
                             worldClusters, 1e30f /* no LOD collapse: already chosen */, view,
                             true /* useFrustum */);
-                        self.lodStats_.clustersTested += sr.stats.tested;
-                        self.lodStats_.frustumCulled += sr.stats.frustumCulled;
-                        self.lodStats_.coneCulled += sr.stats.coneCulled;
+                        self.lod_.lodStats_.clustersTested += sr.stats.tested;
+                        self.lod_.lodStats_.frustumCulled += sr.stats.frustumCulled;
+                        self.lod_.lodStats_.coneCulled += sr.stats.coneCulled;
                     }
                 }
             }
@@ -1588,9 +1588,9 @@ void SandboxApp::drawSceneEntities(Engine& e) {
                 bool eligible = c.engine->device()->depthPrepassEnabled() && !self.viewState_.wireframe_ &&
                                 !clusterDispatched && !d.skinned;
 #if AVER_MODULE_TRIFACTOR
-                if (eligible && self.lodMeshShaderEnabled_ && self.lodMeshPipelineReady_ &&
-                    self.meshClusterGpu_.count(d.meshId)) eligible = false;
-                if (eligible && self.lodPerClusterEnabled_ && self.meshClusterData_.count(d.meshId))
+                if (eligible && self.lod_.lodMeshShaderEnabled_ && self.lod_.lodMeshPipelineReady_ &&
+                    self.lod_.meshClusterGpu_.count(d.meshId)) eligible = false;
+                if (eligible && self.lod_.lodPerClusterEnabled_ && self.lod_.meshClusterData_.count(d.meshId))
                     eligible = false;
 #endif
                 d.prepassEligible = eligible;
