@@ -627,3 +627,8 @@ else()
   target_compile_definitions(OcMeshMergeTest PRIVATE AVER_MESHMERGE_TRIFACTOR=0)
 endif()
 set_target_properties(OcMeshMergeTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# OcHlodBakeTest -- the per-cell HLOD bake and its staleness, exclusions and budget (disk under the temp folder, no device).
+add_executable(OcHlodBakeTest src/OcHlodBakeTest.cpp)
+target_link_libraries(OcHlodBakeTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(OcHlodBakeTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

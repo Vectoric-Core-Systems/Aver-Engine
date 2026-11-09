@@ -118,6 +118,7 @@ aver_add_module(Aver.Formats
     src/OcStream.cpp
     src/OcStreamBake.cpp
     src/OcMeshMerge.cpp
+    src/OcHlodBake.cpp
     # .oclanes -- a level's traffic lanes, the sidecar world::VehicleSystem follows. TEXT, written by the
     # generator's Python pipeline, so it needs only the line scanner every other text reader here
     # shares; beside .ocinst because both are level-adjacent tables no entity represents.
