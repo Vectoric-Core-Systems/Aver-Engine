@@ -2303,7 +2303,7 @@ void SandboxApp::drawMainToolbar(Engine& e, const ImVec2& wpos, const ImVec2& ws
 #endif
         if (ImGui::Selectable(ICON_POST_PROCESS " Post Process Volume")) {
             postVolumeTools_.addAtCamera(levelHeader_.postVolumes, viewPos());
-            sel_ = kSelPostVolume; selEntity_ = kInvalidId;
+            selectionUi_.sel_ = SelectionState::kSelPostVolume; selectionUi_.selEntity_ = kInvalidId;
             markLevelUnsaved();
         }
         uiReg_.track("toolbar.add.postProcessVolume");
@@ -2492,7 +2492,7 @@ bool SandboxApp::applySelectRequest() {
             };
             for (const Pseudo& ps : kPseudo) {
                 if (std::string(ps.shown).find(want) == std::string::npos) continue;
-                sel_ = ps.sel; selEntity_ = kInvalidId;
+                selectionUi_.sel_ = ps.sel; selectionUi_.selEntity_ = kInvalidId;
                 AVER_INFO("[Editor] --select matched '{}' for '{}'", ps.shown, want);
                 return true;
             }
@@ -2511,7 +2511,7 @@ bool SandboxApp::applySelectRequest() {
                 found = ent;
         }
         if (found != kInvalidId) {
-            sel_ = kSelScene; selEntity_ = found;
+            selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = found;
             AVER_INFO("[Editor] --select matched entity {} ('{}') for '{}'",
                       (u32)found, sw.name(found), want);
         } else {
@@ -2934,18 +2934,18 @@ void SandboxApp::buildUI(Engine& e) {
         if (ImGui::BeginMenu("Select")){
             // Select All now works; disabled only when nothing to select.
 #if AVER_MODULE_SCENE
-            ImGui::BeginDisabled(outlinerOrder_.empty());
+            ImGui::BeginDisabled(selectionUi_.outlinerOrder_.empty());
             if (ImGui::MenuItem(ICON_SELECT_ALL " Select All",
                                 editor::chordToString(
                                     keybinds_.chordFor(editor::CommandId::EditSelectAll)).c_str()))
                 selectAllInOutliner();
             ImGui::EndDisabled();
             uiReg_.track("select.all");
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) && outlinerOrder_.empty())
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) && selectionUi_.outlinerOrder_.empty())
                 ImGui::SetTooltip("Nothing is listed in the World Outliner to select.");
 #endif
             // Clears both sel_ and selEntity_ to avoid stale data.
-            if(ImGui::MenuItem(ICON_DESELECT " Select None")) { sel_=-1; selEntity_=kInvalidId; }
+            if(ImGui::MenuItem(ICON_DESELECT " Select None")) { selectionUi_.sel_=-1; selectionUi_.selEntity_=kInvalidId; }
             uiReg_.track("select.none");
             ImGui::EndMenu();
         }

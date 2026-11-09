@@ -616,7 +616,7 @@ void SandboxApp::initSceneRenderers(Engine& e) {
             content_.indexAsset(clipId, d + "/Rig_Bend.ocanim");
             anim::animSystem().setResolver(&game::GameContent::resolveAnimAsset, &content_);
             objects_.clear();   // nothing unrelated on screen
-            sel_ = -1;
+            selectionUi_.sel_ = -1;
         } else {
             skinScene_.reset();
         }
@@ -664,7 +664,7 @@ void SandboxApp::setupFurnaceTest() {
     // Furnace test: shading model energy conservation with uniform white diffuse (--furnace-test).
     if (harness_.furnaceTest_) {
         objects_.clear();
-        sel_ = -1;
+        selectionUi_.sel_ = -1;
         rset_.sky_.furnaceRadiance = 0.25f;
         rset_.sky_.furnaceSun = harness_.furnaceSun_;
         rset_.sunAmbient_ = 1.0f;
@@ -732,7 +732,7 @@ void SandboxApp::setupReflectionTest() {
     if (harness_.reflTest_) {
         refl_ = std::make_unique<aver::editor::ReflTest>();
         objects_.clear();
-        sel_ = -1;
+        selectionUi_.sel_ = -1;
 
         // Metallic near-smooth mirror.
         MeshObj m;
@@ -771,7 +771,7 @@ void SandboxApp::setupSkinDrawTest(Engine& e) {
         if (skinDraw_->init(*e.device())) {
             e.device()->addRenderFeature(skinDraw_.get());
             objects_.clear();
-            sel_ = -1;
+            selectionUi_.sel_ = -1;
             // Ground pale/rough (measures light reach).
             MeshObj g;
             g.name = "SkinDrawTest.Ground";
@@ -1142,7 +1142,7 @@ void SandboxApp::setupParticleScenes() {
     // Particle test: dust cloud overlapping cube (shows transparent pass depth test).
     if (harness_.particleTest_) {
         objects_.clear();
-        sel_ = -1;
+        selectionUi_.sel_ = -1;
 
         MeshObj occluderCube;
         occluderCube.name = "ParticleTest.Occluder";
@@ -1229,7 +1229,7 @@ void SandboxApp::setupParticleScenes() {
     // Particle stress: N grid emitters (measures cost, tests parity/price pass).
     else if (harness_.particleStressEmitters_ > 0) {
         objects_.clear();
-        sel_ = -1;
+        selectionUi_.sel_ = -1;
 
         particles::ParticleEffect fx;
         fx.shape = particles::EmitterShape::Box;
@@ -1339,7 +1339,7 @@ void SandboxApp::setupGpuSelfTests(Engine& e) {
 // The starting tool, and the camera framing (level, default or --cam).
 void SandboxApp::setInitialToolAndCamera() {
     viewState_.tool_ = initialTool_;
-    sel_ = 1;
+    selectionUi_.sel_ = 1;
     bool framedByLevel = false;
 #if AVER_MODULE_SCENE
     framedByLevel = !levelEntities_.empty();

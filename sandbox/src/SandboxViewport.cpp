@@ -261,7 +261,7 @@ rhi::LineHandle SandboxApp::selectionOutlineLines(Engine& e, u64 meshId) {
 // and meshPathById_ -- the scene's mesh-id -> .ocmesh map -- is the only way to turn the id into a
 // file to read.
 #if AVER_MODULE_PBR && AVER_MODULE_SCENE
-    if (const auto it = selOutlineLines_.find(meshId); it != selOutlineLines_.end()) return it->second;
+    if (const auto it = selectionUi_.selOutlineLines_.find(meshId); it != selectionUi_.selOutlineLines_.end()) return it->second;
 
     const auto pit = meshPathById_.find(meshId);
     const std::string content = project_.contentDir();
@@ -271,7 +271,7 @@ rhi::LineHandle SandboxApp::selectionOutlineLines(Engine& e, u64 meshId) {
     std::string why;
     if (!fmt::loadOcMesh(content + "/" + pit->second, md, &why)) {
         AVER_WARN("[Editor] selection outline: {}", why);
-        selOutlineLines_[meshId] = 0;   // cached as "no outline", so this is not retried per frame
+        selectionUi_.selOutlineLines_[meshId] = 0;   // cached as "no outline", so this is not retried per frame
         return 0;
     }
 
@@ -361,7 +361,7 @@ rhi::LineHandle SandboxApp::selectionOutlineLines(Engine& e, u64 meshId) {
                             : e.device()->createLineMesh(lines.data(), static_cast<u32>(lines.size()));
     AVER_INFO("[Editor] selection outline for '{}': {} edge(s) of {} triangle(s)",
               pit->second, lines.size() / 2, triCount);
-    selOutlineLines_[meshId] = h;
+    selectionUi_.selOutlineLines_[meshId] = h;
     return h;
 #else
     // No material system, no cache: 0 already means "no outline" to every caller (SandboxRender.cpp
@@ -781,7 +781,7 @@ void SandboxApp::addPlayerStart(Engine&) {
 #if AVER_MODULE_SCENE
     scene::World& world = scene::World::instance();
     if (playerStart_ != scene::kInvalidEntity && world.valid(playerStart_)) {
-        sel_ = kSelScene; selEntity_ = playerStart_;
+        selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = playerStart_;
         drawerUi_.cbStatus_ = "This level already has a Player Start -- selected it";
         AVER_INFO("[Editor] Player Start already exists; selected it rather than adding a second");
         return;
@@ -794,7 +794,7 @@ void SandboxApp::addPlayerStart(Engine&) {
     const f32 yaw = degrees(std::atan2(f.y, f.x));
     playerStart_ = makePlayerStart(at, yaw);
     if (playerStart_ == scene::kInvalidEntity) return;
-    sel_ = kSelScene; selEntity_ = playerStart_;
+    selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = playerStart_;
     // An undo entry -- this was the only Add item that didn't push one (spawnPrimitive and
     // spawnFromAssetDrop both end with describeEntity()+pushEdit(); this didn't), so Ctrl+Z after
     // adding a Player Start silently undid whatever edit came before instead (worse than doing nothing).
@@ -829,7 +829,7 @@ void SandboxApp::spawnLightAtCamera(i32 kind) {
     if (auto* c = static_cast<scene::CLight*>(world.addComponent(e, scene::kComponentLight)))
         *c = editor::makeNewLight(kind);
     entityLabels_[static_cast<u32>(e)] = label;
-    sel_ = kSelScene; selEntity_ = e;
+    selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = e;
     {
         EditCmd c = describeEntity(e);
         c.kind = EditCmd::Kind::Create;
@@ -852,7 +852,7 @@ void SandboxApp::spawnDecalAtCamera() {
     const scene::Entity e = editor::createEditorDecal(world, at, degrees(std::atan2(f.y, f.x)));
     if (e == scene::kInvalidEntity) { AVER_WARN("[Editor] Add: the world refused a new decal"); return; }
     entityLabels_[static_cast<u32>(e)] = "Decal";
-    sel_ = kSelScene; selEntity_ = e;
+    selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = e;
     {
         EditCmd c = describeEntity(e);
         c.kind = EditCmd::Kind::Create;
@@ -904,7 +904,7 @@ void SandboxApp::spawnPrimitive(Engine& engine, const char* assetPath, const cha
         // file's own placement gets. Before describeEntity() below so the pushed Create's hadBody matches what was built.
         rebuildEntityBody(e);
 #endif
-        sel_ = kSelScene; selEntity_ = e;
+        selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = e;
         {
             EditCmd c = describeEntity(e);
             c.kind = EditCmd::Kind::Create;
@@ -951,13 +951,13 @@ void SandboxApp::spawnPrimitive(Engine& engine, const char* assetPath, const cha
     c.color[0]=0.72f; c.color[1]=0.72f; c.color[2]=0.74f; c.metallic=0.0f; c.roughness=0.6f;
     objects_.push_back(c);
     // Unguarded: the placeholder-world fallback, reached with SCENE off too.
-    sel_ = (int)objects_.size() - 1; selEntity_ = kInvalidId;
+    selectionUi_.sel_ = (int)objects_.size() - 1; selectionUi_.selEntity_ = kInvalidId;
     // Pushes a CreateObj undo entry (this branch used to push none, so a placeholder cube add was
     // silently non-undoable). Mirrors the scene branch's describeEntity()+pushEdit() tail, minus
     // the EditId/World indirection only the scene entity needs.
     EditCmd edit;
     edit.kind = EditCmd::Kind::CreateObj;
-    edit.objIndex = sel_;
+    edit.objIndex = selectionUi_.sel_;
     edit.objSnapshot = c;
     pushEdit(std::move(edit));
 }
@@ -1224,7 +1224,7 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
             AVER_WARN("[Editor] drop: prefab '{}' not placed: {}", ref, why);
             return;
         }
-        sel_ = kSelScene; selEntity_ = root;
+        selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = root;
         pushPrefabEdit(edit);
         markLevelUnsaved();
         drawerUi_.cbStatus_ = "Placed " + fileName;
@@ -1258,7 +1258,7 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
             AVER_WARN("[Editor] drop: level '{}' not placed: {}", ref, pr.error);
             return;
         }
-        sel_ = kSelScene; selEntity_ = pr.root;
+        selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = pr.root;
         pushLevelInstanceEdit(pr.edit);
         markLevelUnsaved();
         drawerUi_.cbStatus_ = "Placed " + fileName;
@@ -1337,7 +1337,7 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
         }
         levelEntities_.push_back(ent);
         entityLabels_[static_cast<u32>(ent)] = makeEntityLabel(std::string(), rel);
-        sel_ = kSelScene; selEntity_ = ent;
+        selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = ent;
         {
             EditCmd c = describeEntity(ent);
             c.kind = EditCmd::Kind::Create;
@@ -1410,7 +1410,7 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
     // branch only, the .ocparticle branch above has no CMeshRenderer. Before describeEntity() so hadBody matches what was built.
     rebuildEntityBody(ent);
 #endif
-    sel_ = kSelScene; selEntity_ = ent;
+    selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = ent;
     {
         EditCmd c = describeEntity(ent);
         c.kind = EditCmd::Kind::Create;
@@ -1560,28 +1560,28 @@ bool SandboxApp::dragDecalAndRopeHandles(const ImGuiIO& io, bool overScene, f32 
     // A selected decal's box handles come before any pick: grabbing one resizes the box (the drag
     // continues below until the button is released), and the click is not also a selection change.
     bool decalHandleGrabbed = false;
-    if (ImGui::IsMouseClicked(0) && overScene && !noEditorChrome_ && sel_ == kSelScene &&
-        selEntity_ != scene::kInvalidEntity &&
-        scene::World::instance().hasComponent(selEntity_, scene::kComponentDecal)) {
+    if (ImGui::IsMouseClicked(0) && overScene && !noEditorChrome_ && selectionUi_.sel_ == SelectionState::kSelScene &&
+        selectionUi_.selEntity_ != scene::kInvalidEntity &&
+        scene::World::instance().hasComponent(selectionUi_.selEntity_, scene::kComponentDecal)) {
         Vec3 ro0, rd0, ro1, rd1;
         viewportRay(mx, my, ro0, rd0);
         viewportRay(mx + 1.0f, my, ro1, rd1);
-        const Mat4& dm = scene::World::instance().worldMatrix(selEntity_);
+        const Mat4& dm = scene::World::instance().worldMatrix(selectionUi_.selEntity_);
         const Vec3 dp{dm.m[3][0], dm.m[3][1], dm.m[3][2]};
         const f32 pixelWorldCm = dist(ro0, dp) * dist(rd0, rd1);
-        decalHandleGrabbed = decalGizmo_.beginDrag(scene::World::instance(), selEntity_, ro0, rd0, pixelWorldCm);
+        decalHandleGrabbed = decalGizmo_.beginDrag(scene::World::instance(), selectionUi_.selEntity_, ro0, rd0, pixelWorldCm);
     }
 #if AVER_MODULE_SOFTBODY_SCENE
     // A selected rope's two end handles (SoftShapeGizmos.cpp): grabbing one drags that end on the camera-facing plane, and the click is not also a pick.
     // The drag edits the component, not an undo step (the Details rows are); a Rope host that is the selected decal never gets here.
-    if (!decalHandleGrabbed && ImGui::IsMouseClicked(0) && overScene && !noEditorChrome_ && sel_ == kSelScene &&
-        selEntity_ != scene::kInvalidEntity && !anyPlayActive()) {
+    if (!decalHandleGrabbed && ImGui::IsMouseClicked(0) && overScene && !noEditorChrome_ && selectionUi_.sel_ == SelectionState::kSelScene &&
+        selectionUi_.selEntity_ != scene::kInvalidEntity && !anyPlayActive()) {
         Vec3 ro0, rd0, ro1, rd1;
         viewportRay(mx, my, ro0, rd0);
         viewportRay(mx + 1.0f, my, ro1, rd1);
-        const Mat4& rm = scene::World::instance().worldMatrix(selEntity_);
+        const Mat4& rm = scene::World::instance().worldMatrix(selectionUi_.selEntity_);
         const Vec3 rp{rm.m[3][0], rm.m[3][1], rm.m[3][2]};
-        decalHandleGrabbed = editor::ropeHandleBegin(&scene::World::instance(), static_cast<u32>(selEntity_), ro0, rd0, dist(ro0, rp) * dist(rd0, rd1));
+        decalHandleGrabbed = editor::ropeHandleBegin(&scene::World::instance(), static_cast<u32>(selectionUi_.selEntity_), ro0, rd0, dist(ro0, rp) * dist(rd0, rd1));
     }
     if (editor::ropeHandleActive()) {
         if (io.MouseDown[0]) {
@@ -1612,15 +1612,15 @@ void SandboxApp::updateMarquee(const ImGuiIO& io, f32 mx, f32 my) {
     // Marquee continues while armed, becomes ACTIVE once the drag clears the threshold, commits
     // on release -- independent of `overScene`, since a drag that started inside the viewport
     // must keep tracking past its edge.
-    if (marqueeArmed_) {
-        marqueeX1_ = mx; marqueeY1_ = my;
-        if (!marqueeActive_ &&
-            editor::marqueeExceedsThreshold(marqueeX0_, marqueeY0_, marqueeX1_, marqueeY1_))
-            marqueeActive_ = true;
+    if (selectionUi_.marqueeArmed_) {
+        selectionUi_.marqueeX1_ = mx; selectionUi_.marqueeY1_ = my;
+        if (!selectionUi_.marqueeActive_ &&
+            editor::marqueeExceedsThreshold(selectionUi_.marqueeX0_, selectionUi_.marqueeY0_, selectionUi_.marqueeX1_, selectionUi_.marqueeY1_))
+            selectionUi_.marqueeActive_ = true;
 
-        if (marqueeActive_) {
+        if (selectionUi_.marqueeActive_) {
             f32 loX, loY, hiX, hiY;
-            editor::normalizeMarqueeRect(marqueeX0_, marqueeY0_, marqueeX1_, marqueeY1_, loX, loY, hiX, hiY);
+            editor::normalizeMarqueeRect(selectionUi_.marqueeX0_, selectionUi_.marqueeY0_, selectionUi_.marqueeX1_, selectionUi_.marqueeY1_, loX, loY, hiX, hiY);
             // The selection outline's own orange (kSelectionColor, SandboxApp.hpp), diluted for
             // the fill so the scene underneath a drag stays readable.
             ImDrawList* dl = ImGui::GetForegroundDrawList();
@@ -1629,9 +1629,9 @@ void SandboxApp::updateMarquee(const ImGuiIO& io, f32 mx, f32 my) {
         }
 
         if (!io.MouseDown[0]) {
-            if (marqueeActive_) {
+            if (selectionUi_.marqueeActive_) {
                 f32 loX, loY, hiX, hiY;
-                editor::normalizeMarqueeRect(marqueeX0_, marqueeY0_, marqueeX1_, marqueeY1_, loX, loY, hiX, hiY);
+                editor::normalizeMarqueeRect(selectionUi_.marqueeX0_, selectionUi_.marqueeY0_, selectionUi_.marqueeX1_, selectionUi_.marqueeY1_, loX, loY, hiX, hiY);
                 // Every entity eligible per pick()'s broadphase, whose projected world AABB intersects the rectangle.
                 std::vector<scene::Entity> hitEnts;
                 scene::World& w = scene::World::instance();
@@ -1659,7 +1659,7 @@ void SandboxApp::updateMarquee(const ImGuiIO& io, f32 mx, f32 my) {
                 // Ctrl ADDS the catch to the existing selection; a plain drag REPLACES it --
                 // including replacing it with nothing, when the rectangle caught nothing at all.
                 if (hitEnts.empty()) {
-                    if (!io.KeyCtrl) { multiClear(); sel_ = -1; selEntity_ = scene::kInvalidEntity; }
+                    if (!io.KeyCtrl) { multiClear(); selectionUi_.sel_ = -1; selectionUi_.selEntity_ = scene::kInvalidEntity; }
                 } else if (io.KeyCtrl) {
                     for (const scene::Entity ent : hitEnts) if (!multiIsSelected(ent)) multiToggle(ent);
                 } else {
@@ -1667,8 +1667,8 @@ void SandboxApp::updateMarquee(const ImGuiIO& io, f32 mx, f32 my) {
                     for (usize k = 1; k < hitEnts.size(); ++k) multiToggle(hitEnts[k]);
                 }
             }
-            marqueeArmed_ = false;
-            marqueeActive_ = false;
+            selectionUi_.marqueeArmed_ = false;
+            selectionUi_.marqueeActive_ = false;
         }
     }
 }
@@ -1702,7 +1702,7 @@ void SandboxApp::handleEditVerbKeys(const ImGuiIO& io) {
         // selectAllInOutliner belong to the ECS world's multi-selection (multiSel_ and friends, in
         // SandboxApp.hpp), which doesn't exist without SCENE.
 #if AVER_MODULE_SCENE
-        if (!outlinerOrder_.empty() && keybinds_.pressed(editor::CommandId::EditSelectAll, io))
+        if (!selectionUi_.outlinerOrder_.empty() && keybinds_.pressed(editor::CommandId::EditSelectAll, io))
             selectAllInOutliner();
 #endif
         if (keybinds_.pressed(editor::CommandId::EditUndo, io)) undo();
@@ -1741,7 +1741,7 @@ void SandboxApp::handleEditVerbKeys(const ImGuiIO& io) {
             // One undo entry per held run, not per repeat: opens on the first nudge key down,
             // closes once all are up. Tracks its own flag (not editBeforeValid_, which a Details
             // panel field drag also holds open -- this would otherwise close that entry every frame).
-            if (anyNudgeDown && !nudgeEditOpen_) nudgeEditOpen_ = beginTransformEdit();
+            if (anyNudgeDown && !selectionUi_.nudgeEditOpen_) selectionUi_.nudgeEditOpen_ = beginTransformEdit();
 
             if (keybinds_.pressed(CI::NudgeLeft, io))    nudgeSelection(rightAxis * -nudgeStep);
             if (keybinds_.pressed(CI::NudgeRight, io))   nudgeSelection(rightAxis *  nudgeStep);
@@ -1750,7 +1750,7 @@ void SandboxApp::handleEditVerbKeys(const ImGuiIO& io) {
             if (keybinds_.pressed(CI::NudgeUp, io))      nudgeSelection(Vec3{0.0f, 0.0f,  nudgeStep});
             if (keybinds_.pressed(CI::NudgeDown, io))    nudgeSelection(Vec3{0.0f, 0.0f, -nudgeStep});
 
-            if (!anyNudgeDown && nudgeEditOpen_) { endTransformEdit(); nudgeEditOpen_ = false; }
+            if (!anyNudgeDown && selectionUi_.nudgeEditOpen_) { endTransformEdit(); selectionUi_.nudgeEditOpen_ = false; }
         }
 #endif
     }
@@ -1906,9 +1906,9 @@ void SandboxApp::handleManip(Engine& e) {
                 // 13px hotspot at the pivot, now the whole silhouette). No drag threshold needed:
                 // a non-moving click produces no transform change, and endTransformEdit already
                 // drops a no-op edit (nearlySameXform).
-                const int  prevSel = sel_;
+                const int  prevSel = selectionUi_.sel_;
 #if AVER_MODULE_SCENE
-                const scene::Entity prevEnt = selEntity_;
+                const scene::Entity prevEnt = selectionUi_.selEntity_;
 #endif
                 const bool hadSel = anySelected();
                 const bool pickHit = pick(e, io);
@@ -1917,9 +1917,9 @@ void SandboxApp::handleManip(Engine& e) {
                 // would be trivially true on a miss too, letting a Ctrl-click on empty space next
                 // to a selection grab and drag it. Requiring pickHit means only a click that landed
                 // back on the selected thing counts.
-                const bool sameTarget = pickHit && hadSel && anySelected() && sel_ == prevSel
+                const bool sameTarget = pickHit && hadSel && anySelected() && selectionUi_.sel_ == prevSel
 #if AVER_MODULE_SCENE
-                                        && selEntity_ == prevEnt
+                                        && selectionUi_.selEntity_ == prevEnt
 #endif
                     ;
                 if (haveGizmo && sameTarget && viewState_.tool_ == Tool::Move) {
@@ -1934,8 +1934,8 @@ void SandboxApp::handleManip(Engine& e) {
                 // -- arming that makes Ctrl+drag from empty space ADD to an existing selection. A
                 // release with no further movement reads as that same click (marqueeActive_ stays false).
                 else if (viewState_.tool_ == Tool::Select && !pickHit && (!anySelected() || io.KeyCtrl)) {
-                    marqueeArmed_ = true; marqueeActive_ = false;
-                    marqueeX0_ = marqueeX1_ = mx; marqueeY0_ = marqueeY1_ = my;
+                    selectionUi_.marqueeArmed_ = true; selectionUi_.marqueeActive_ = false;
+                    selectionUi_.marqueeX0_ = selectionUi_.marqueeX1_ = mx; selectionUi_.marqueeY0_ = selectionUi_.marqueeY1_ = my;
                 }
 #endif
             }
@@ -2140,57 +2140,57 @@ void SandboxApp::deleteSelection() {
             }
             AVER_INFO("[Editor] deleted {} selected entities", victims.size());
             multiClear();
-            selEntity_ = scene::kInvalidEntity;
-            sel_ = -1;
+            selectionUi_.selEntity_ = scene::kInvalidEntity;
+            selectionUi_.sel_ = -1;
             return;
         }
     }
-    if (sel_ == kSelScene && selEntity_ != scene::kInvalidEntity) {
+    if (selectionUi_.sel_ == SelectionState::kSelScene && selectionUi_.selEntity_ != scene::kInvalidEntity) {
         scene::World& w = scene::World::instance();
-        if (w.valid(selEntity_)) {
+        if (w.valid(selectionUi_.selEntity_)) {
             // [wave3/level-instances begin]
             {
                 editor::LevelInstanceEdit lie;
-                if (levelInstanceModel_.destroyInstance(selEntity_, lie) ||
-                    levelInstanceModel_.deleteMember(selEntity_, lie, [this](scene::Entity m) { destroyEntity(m); })) {
-                    AVER_INFO("[Editor] deleted level instance entity #{}", (u32)selEntity_);
+                if (levelInstanceModel_.destroyInstance(selectionUi_.selEntity_, lie) ||
+                    levelInstanceModel_.deleteMember(selectionUi_.selEntity_, lie, [this](scene::Entity m) { destroyEntity(m); })) {
+                    AVER_INFO("[Editor] deleted level instance entity #{}", (u32)selectionUi_.selEntity_);
                     pushLevelInstanceEdit(lie);
                     multiClear();
-                    selEntity_ = scene::kInvalidEntity;
-                    sel_ = -1;
+                    selectionUi_.selEntity_ = scene::kInvalidEntity;
+                    selectionUi_.sel_ = -1;
                     return;
                 }
             }
             // [wave3/level-instances end]
-            AVER_INFO("[Editor] deleted entity #{} '{}'", (u32)selEntity_, w.name(selEntity_));
-            EditCmd c = describeEntity(selEntity_);
+            AVER_INFO("[Editor] deleted entity #{} '{}'", (u32)selectionUi_.selEntity_, w.name(selectionUi_.selEntity_));
+            EditCmd c = describeEntity(selectionUi_.selEntity_);
             c.kind = EditCmd::Kind::Destroy;
             // Before destroyEntity, which retires the subtree and its hierarchy links -- a capture
             // afterwards would find an empty subtree and report a complete undo record it didn't have.
-            captureSubtree(c, selEntity_);
+            captureSubtree(c, selectionUi_.selEntity_);
 #if AVER_MODULE_FRAMEWORK
-            tagClassEdit(c, selEntity_);
+            tagClassEdit(c, selectionUi_.selEntity_);
 #endif
             if (!c.subtree.empty())
                 AVER_INFO("[Editor] ...and {} descendant(s) with it", c.subtree.size());
-            destroyEntity(selEntity_);
+            destroyEntity(selectionUi_.selEntity_);
             pushEdit(std::move(c));
         }
         multiClear();
-        selEntity_ = scene::kInvalidEntity;
-        sel_ = -1;
+        selectionUi_.selEntity_ = scene::kInvalidEntity;
+        selectionUi_.sel_ = -1;
         return;
     }
 #endif
-    if (sel_ >= 0 && sel_ < (int)objects_.size()) {
+    if (selectionUi_.sel_ >= 0 && selectionUi_.sel_ < (int)objects_.size()) {
         EditCmd c;
         c.kind = EditCmd::Kind::DestroyObj;
-        c.objIndex = sel_;
-        c.objSnapshot = objects_[sel_];
-        objects_.erase(objects_.begin() + sel_);
-        objectsErasedAt(sel_);
+        c.objIndex = selectionUi_.sel_;
+        c.objSnapshot = objects_[selectionUi_.sel_];
+        objects_.erase(objects_.begin() + selectionUi_.sel_);
+        objectsErasedAt(selectionUi_.sel_);
         pushEdit(std::move(c));
-        sel_ = -1;
+        selectionUi_.sel_ = -1;
     }
 }
 
@@ -2205,10 +2205,10 @@ void SandboxApp::copySelection() {
     // would omit the entity the author clicked first. Descendants of another selected entity are
     // still skipped: captureSubtree already takes them along inside their parent, so keeping them
     // too would paste them twice, once orphaned.
-    if (sel_ == kSelScene && !multiStale() && multiSel_.size() > 1) {
+    if (selectionUi_.sel_ == SelectionState::kSelScene && !multiStale() && selectionUi_.multiSel_.size() > 1) {
         scene::World& w = scene::World::instance();
         clipboard_.entities.clear();
-        for (const scene::Entity ent : multiSel_) {
+        for (const scene::Entity ent : selectionUi_.multiSel_) {
             if (!w.valid(ent)) continue;
             bool ancestorSelected = false;
             for (scene::Entity p = w.parent(ent); p != scene::kInvalidEntity; p = w.parent(p))
@@ -2232,12 +2232,12 @@ void SandboxApp::copySelection() {
         AVER_INFO("[Editor] copied {} entities", clipboard_.entities.size());
         return;
     }
-    if (sel_ == kSelScene && selEntity_ != scene::kInvalidEntity && scene::World::instance().valid(selEntity_)) {
+    if (selectionUi_.sel_ == SelectionState::kSelScene && selectionUi_.selEntity_ != scene::kInvalidEntity && scene::World::instance().valid(selectionUi_.selEntity_)) {
 #if AVER_MODULE_FRAMEWORK
-        if (classSlotOfEntity(selEntity_) >= 0) { drawerUi_.cbStatus_ = "Duplicate/Copy is not supported for graph-class actors yet: drag the graph in again"; return; }
+        if (classSlotOfEntity(selectionUi_.selEntity_) >= 0) { drawerUi_.cbStatus_ = "Duplicate/Copy is not supported for graph-class actors yet: drag the graph in again"; return; }
 #endif
-        EditCmd c = describeEntity(selEntity_);
-        captureSubtree(c, selEntity_);
+        EditCmd c = describeEntity(selectionUi_.selEntity_);
+        captureSubtree(c, selectionUi_.selEntity_);
         ClipboardEntity ce;
         ce.snap = c.snap;
         ce.subtree = std::move(c.subtree);
@@ -2251,7 +2251,7 @@ void SandboxApp::copySelection() {
 #endif
     if (movableSelected()) {
         clipboard_.hasObject = true;
-        clipboard_.object = objects_[sel_];
+        clipboard_.object = objects_[selectionUi_.sel_];
         clipboard_.entities.clear();   // exclusive with the scene path, as the two halves always were
     }
 }
@@ -2281,7 +2281,7 @@ void SandboxApp::pasteClipboard() {
                                                     &ce.hadAnim);
             if (e == scene::kInvalidEntity) continue;
             spawnSubtreeUnder(e, ce.subtree, /*restoreIds=*/false);
-            sel_ = kSelScene; selEntity_ = e;   // spawnSubtreeUnder selects whatever it made last
+            selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = e;   // spawnSubtreeUnder selects whatever it made last
             EditCmd c = describeEntity(e);
             c.kind = EditCmd::Kind::Create;
             // Captured from the copy so REDO puts the children back too: undo of a Create destroys
@@ -2296,7 +2296,7 @@ void SandboxApp::pasteClipboard() {
         // The pastes become the selection (matches Duplicate): a drag right after Ctrl+V moves what was just made, making paste-then-place one motion.
         multiSetSingle(made.front());
         for (usize i = 1; i < made.size(); ++i) multiToggle(made[i]);
-        sel_ = kSelScene; selEntity_ = made.front();
+        selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = made.front();
         if (made.size() == 1)
             AVER_INFO("[Editor] pasted entity #{} and {} descendant(s)", (u32)made.front(),
                       clipboard_.entities.front().subtree.size());
@@ -2310,10 +2310,10 @@ void SandboxApp::pasteClipboard() {
         o.pos = at;
         o.name = makeEntityLabel(clipboard_.object.name, clipboard_.object.name);
         objects_.push_back(o);
-        sel_ = (int)objects_.size() - 1; selEntity_ = kInvalidId;
+        selectionUi_.sel_ = (int)objects_.size() - 1; selectionUi_.selEntity_ = kInvalidId;
         EditCmd c;
         c.kind = EditCmd::Kind::CreateObj;
-        c.objIndex = sel_;
+        c.objIndex = selectionUi_.sel_;
         c.objSnapshot = o;
         pushEdit(std::move(c));
     }
@@ -2334,10 +2334,10 @@ void SandboxApp::duplicateSelection() {
     //
     // Ancestors skipped like the mover skips them: duplicating a parent already duplicates its
     // children via captureSubtree, so a selected child would get a second, orphaned copy.
-    if (sel_ == kSelScene && !multiStale() && multiSel_.size() > 1) {
+    if (selectionUi_.sel_ == SelectionState::kSelScene && !multiStale() && selectionUi_.multiSel_.size() > 1) {
         scene::World& w = scene::World::instance();
         std::vector<scene::Entity> made;
-        for (const scene::Entity ent : multiSel_) {
+        for (const scene::Entity ent : selectionUi_.multiSel_) {
             if (!w.valid(ent)) continue;
             bool ancestorSelected = false;
             for (scene::Entity p = w.parent(ent); p != scene::kInvalidEntity; p = w.parent(p))
@@ -2367,18 +2367,18 @@ void SandboxApp::duplicateSelection() {
         // The copies become the selection, so a drag right after Ctrl+D moves what was just made (as every editor does).
         multiSetSingle(made.front());
         for (usize i = 1; i < made.size(); ++i) multiToggle(made[i]);
-        sel_ = kSelScene; selEntity_ = made.front();
+        selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = made.front();
         AVER_INFO("[Editor] duplicated {} entities", made.size());
         return;
     }
-    if (sel_ == kSelScene && selEntity_ != scene::kInvalidEntity && scene::World::instance().valid(selEntity_)) {
+    if (selectionUi_.sel_ == SelectionState::kSelScene && selectionUi_.selEntity_ != scene::kInvalidEntity && scene::World::instance().valid(selectionUi_.selEntity_)) {
 #if AVER_MODULE_FRAMEWORK
-        if (classSlotOfEntity(selEntity_) >= 0) { drawerUi_.cbStatus_ = "Duplicate/Copy is not supported for graph-class actors yet: drag the graph in again"; return; }
+        if (classSlotOfEntity(selectionUi_.selEntity_) >= 0) { drawerUi_.cbStatus_ = "Duplicate/Copy is not supported for graph-class actors yet: drag the graph in again"; return; }
 #endif
-        EditCmd src = describeEntity(selEntity_);
+        EditCmd src = describeEntity(selectionUi_.selEntity_);
         // Descendants read BEFORE anything is spawned -- the copy is about to become the
         // selection, and captureSubtree walks whatever it is handed.
-        captureSubtree(src, selEntity_);
+        captureSubtree(src, selectionUi_.selEntity_);
         EditXform x = src.after;
         x.pos.x += delta; x.pos.y += delta;
         const std::string label = makeEntityLabel(std::string(), src.snap.asset);
@@ -2387,7 +2387,7 @@ void SandboxApp::duplicateSelection() {
                                                 &src.hadAnim);
         if (e == scene::kInvalidEntity) return;
         spawnSubtreeUnder(e, src.subtree, /*restoreIds=*/false);
-        sel_ = kSelScene; selEntity_ = e;
+        selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = e;
         EditCmd c = describeEntity(e);
         c.kind = EditCmd::Kind::Create;
         captureSubtree(c, e);              // so REDO rebuilds the children; see pasteClipboard
@@ -2398,14 +2398,14 @@ void SandboxApp::duplicateSelection() {
     }
 #endif
     if (movableSelected()) {
-        MeshObj o = objects_[sel_];
+        MeshObj o = objects_[selectionUi_.sel_];
         o.pos.x += delta; o.pos.y += delta;
-        o.name = makeEntityLabel(objects_[sel_].name, objects_[sel_].name);
+        o.name = makeEntityLabel(objects_[selectionUi_.sel_].name, objects_[selectionUi_.sel_].name);
         objects_.push_back(o);
-        sel_ = (int)objects_.size() - 1; selEntity_ = kInvalidId;
+        selectionUi_.sel_ = (int)objects_.size() - 1; selectionUi_.selEntity_ = kInvalidId;
         EditCmd c;
         c.kind = EditCmd::Kind::CreateObj;
-        c.objIndex = sel_;
+        c.objIndex = selectionUi_.sel_;
         c.objSnapshot = o;
         pushEdit(std::move(c));
     }
@@ -2665,8 +2665,8 @@ bool SandboxApp::pick(Engine& e, const ImGuiIO& io) {
     }
     if (extend && bestEnt == kInvalidId && best == -1) return false;
 #endif
-    if (bestEnt != kInvalidId) { sel_ = kSelScene; selEntity_ = bestEnt; }
-    else                       { sel_ = best;     selEntity_ = kInvalidId; }
+    if (bestEnt != kInvalidId) { selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = bestEnt; }
+    else                       { selectionUi_.sel_ = best;     selectionUi_.selEntity_ = kInvalidId; }
     return bestEnt != kInvalidId || best != -1;
 }
 
@@ -2869,7 +2869,7 @@ bool SandboxApp::authoredVisible(scene::Entity e) const {
     const auto* mr = w.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer);
     if (!mr) return true;   // no renderer, nothing to hide -- matches OcWorldPlacement::visible's own default
     if (mr->flags & scene::kMeshRendererVisible) return true;
-    return std::find(editorHidden_.begin(), editorHidden_.end(), e) != editorHidden_.end();
+    return std::find(selectionUi_.editorHidden_.begin(), selectionUi_.editorHidden_.end(), e) != selectionUi_.editorHidden_.end();
 }
 
 // Sets the AUTHORED bit directly (Details panel's write path; saveLevel reads the same bit).
@@ -2881,8 +2881,8 @@ void SandboxApp::setAuthoredVisible(scene::Entity e, bool v) {
     scene::World& w = scene::World::instance();
     auto* mr = w.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer);
     if (!mr) return;
-    if (const auto it = std::find(editorHidden_.begin(), editorHidden_.end(), e); it != editorHidden_.end())
-        editorHidden_.erase(it);
+    if (const auto it = std::find(selectionUi_.editorHidden_.begin(), selectionUi_.editorHidden_.end(), e); it != selectionUi_.editorHidden_.end())
+        selectionUi_.editorHidden_.erase(it);
     if (v) mr->flags |=  scene::kMeshRendererVisible;
     else   mr->flags &= ~scene::kMeshRendererVisible;
 }
@@ -2898,7 +2898,7 @@ void SandboxApp::hideSelection() {
         auto* mr = w.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer);
         if (!mr || !(mr->flags & scene::kMeshRendererVisible)) continue;   // already hidden: not ours to restore
         mr->flags &= ~scene::kMeshRendererVisible;
-        editorHidden_.push_back(e);
+        selectionUi_.editorHidden_.push_back(e);
     }
 }
 
@@ -2917,7 +2917,7 @@ void SandboxApp::isolateSelection() {
         if (!mr || !(mr->flags & scene::kMeshRendererVisible) || mr->mesh == 0) continue;
         if (content_.meshFor(mr->mesh) == 0) continue;
         mr->flags &= ~scene::kMeshRendererVisible;
-        editorHidden_.push_back(ent);
+        selectionUi_.editorHidden_.push_back(ent);
     }
 }
 
@@ -2925,12 +2925,12 @@ void SandboxApp::isolateSelection() {
 // "everything", so an entity some other mechanism hid is left alone.
 void SandboxApp::unhideAll() {
     scene::World& w = scene::World::instance();
-    for (const scene::Entity e : editorHidden_) {
+    for (const scene::Entity e : selectionUi_.editorHidden_) {
         if (!w.valid(e)) continue;
         if (auto* mr = w.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer))
             mr->flags |= scene::kMeshRendererVisible;
     }
-    editorHidden_.clear();
+    selectionUi_.editorHidden_.clear();
 }
 
 #endif   // AVER_MODULE_SCENE

@@ -1465,38 +1465,38 @@ void SandboxApp::runMultiSelectTest(Engine& eng) {
     scene::Entity d = w.create("msD");
 
     multiSetSingle(a);
-    check(selEntity_ == a && selectedEntities().size() == 1, "a plain click selects exactly one");
+    check(selectionUi_.selEntity_ == a && selectedEntities().size() == 1, "a plain click selects exactly one");
 
     multiToggle(b);
     check(selectedEntities().size() == 2 && multiIsSelected(a) && multiIsSelected(b),
           "ctrl+click adds a second without dropping the first");
-    check(selEntity_ == b, "and the newly added one becomes the anchor");
+    check(selectionUi_.selEntity_ == b, "and the newly added one becomes the anchor");
 
     multiToggle(b);
     check(selectedEntities().size() == 1 && !multiIsSelected(b),
           "ctrl+click again removes it");
-    check(selEntity_ == a, "and the anchor moves to something still selected");
+    check(selectionUi_.selEntity_ == a, "and the anchor moves to something still selected");
 
     // Range walk needs drawn order; shift+click takes the whole range.
-    outlinerOrder_ = {a, b, c};
+    selectionUi_.outlinerOrder_ = {a, b, c};
     multiSetSingle(a);
     multiRange(c);
     check(selectedEntities().size() == 3, "shift+click takes the whole range in DRAWN order");
-    check(selEntity_ == a, "and the anchor stays put so a second shift re-ranges from it");
+    check(selectionUi_.selEntity_ == a, "and the anchor stays put so a second shift re-ranges from it");
 
     // Moving anchor within the set must not collapse it (avoid dropping multiple rows).
-    sel_ = kSelScene; selEntity_ = b;
+    selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = b;
     check(!multiStale(), "moving the anchor WITHIN the set is not stale");
     check(selectedEntities().size() == 3, "and the set survives it");
 
     // Anchor assigned outside the set marks it stale (simulates pick/undo/paste/spawn).
-    sel_ = kSelScene; selEntity_ = d;
+    selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = d;
     check(multiStale(), "an anchor assigned OUTSIDE the set marks it stale");
     check(selectedEntities().size() == 1 && selectedEntities()[0] == d,
           "and the selection collapses to that one entity rather than staying three");
     check(!multiIsSelected(a), "the stale set stops reporting membership");
     multiSyncToAnchor();
-    check(multiSel_.empty(), "the once-a-frame sync then actually drops it");
+    check(selectionUi_.multiSel_.empty(), "the once-a-frame sync then actually drops it");
 
     // Destroyed entities must not survive in selection.
     multiSetSingle(a); multiToggle(b);
@@ -1511,9 +1511,9 @@ void SandboxApp::runMultiSelectTest(Engine& eng) {
             w.setLocalTransform(e, t);
         };
         place(m0, 0.0f); place(m1, 100.0f); place(m2, 200.0f);
-        outlinerOrder_ = {m0, m1, m2};
+        selectionUi_.outlinerOrder_ = {m0, m1, m2};
         multiSetSingle(m0); multiToggle(m1); multiToggle(m2);
-        sel_ = kSelScene; selEntity_ = m0;
+        selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = m0;
 
         check(beginTransformEdit(), "a multi-selection opens a transform gesture");
         const Vec3 delta{0.0f, 0.0f, 500.0f};
@@ -1540,7 +1540,7 @@ void SandboxApp::runMultiSelectTest(Engine& eng) {
               "redo takes the whole set forward again, not just the anchor");
 
         multiClear();
-        sel_ = -1; selEntity_ = scene::kInvalidEntity;
+        selectionUi_.sel_ = -1; selectionUi_.selEntity_ = scene::kInvalidEntity;
         undoStack_.clear(); redoStack_.clear();
         w.destroy(m0); w.destroy(m1); w.destroy(m2); w.flush();
     }
@@ -1548,13 +1548,13 @@ void SandboxApp::runMultiSelectTest(Engine& eng) {
     // ---- Select All and Ctrl+D copy the whole set ----
     {
         scene::Entity s0 = w.create("selA"), s1 = w.create("selB"), s2 = w.create("selC");
-        outlinerOrder_ = {s0, s1, s2};
+        selectionUi_.outlinerOrder_ = {s0, s1, s2};
         multiClear();
-        sel_ = -1; selEntity_ = scene::kInvalidEntity;
+        selectionUi_.sel_ = -1; selectionUi_.selEntity_ = scene::kInvalidEntity;
 
         selectAllInOutliner();
         check(selectedEntities().size() == 3, "Select All takes every row the outliner listed");
-        check(selEntity_ == s0,
+        check(selectionUi_.selEntity_ == s0,
               "and anchors on the FIRST row, so a following shift-click ranges downward");
 
         // Duplicate the whole set; count world entities to verify (not just selection).
@@ -1566,18 +1566,18 @@ void SandboxApp::runMultiSelectTest(Engine& eng) {
         check(!multiIsSelected(s0), "leaving the originals deselected, so a drag moves the copies");
 
         multiClear();
-        sel_ = -1; selEntity_ = scene::kInvalidEntity;
+        selectionUi_.sel_ = -1; selectionUi_.selEntity_ = scene::kInvalidEntity;
         undoStack_.clear(); redoStack_.clear();
-        outlinerOrder_.clear();
+        selectionUi_.outlinerOrder_.clear();
     }
 
     // ---- Copy/Paste take the whole set too, and don't double-copy a subtree ----
     {
         scene::Entity c0 = w.create("cpA"), c1 = w.create("cpB"), c2 = w.create("cpC");
         multiClear();
-        sel_ = -1; selEntity_ = scene::kInvalidEntity;
+        selectionUi_.sel_ = -1; selectionUi_.selEntity_ = scene::kInvalidEntity;
         multiSetSingle(c0); multiToggle(c1); multiToggle(c2);
-        sel_ = kSelScene; selEntity_ = c0;
+        selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = c0;
 
         // Count world entities to catch anchor-only copy.
         const usize beforeCopy = w.count();
@@ -1589,7 +1589,7 @@ void SandboxApp::runMultiSelectTest(Engine& eng) {
         check(w.valid(c0) && w.valid(c1) && w.valid(c2), "with every original left alone");
 
         multiClear();
-        sel_ = -1; selEntity_ = scene::kInvalidEntity;
+        selectionUi_.sel_ = -1; selectionUi_.selEntity_ = scene::kInvalidEntity;
         undoStack_.clear(); redoStack_.clear();
 
         // Parent+child selected shouldn't double-copy the child as orphan.
@@ -1598,7 +1598,7 @@ void SandboxApp::runMultiSelectTest(Engine& eng) {
         w.flush();
         multiClear();
         multiSetSingle(par); multiToggle(kid);
-        sel_ = kSelScene; selEntity_ = par;
+        selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = par;
 
         const usize beforeNest = w.count();
         copySelection();
@@ -1608,12 +1608,12 @@ void SandboxApp::runMultiSelectTest(Engine& eng) {
               "the child is not copied a second time as an orphan");
 
         multiClear();
-        sel_ = -1; selEntity_ = scene::kInvalidEntity;
+        selectionUi_.sel_ = -1; selectionUi_.selEntity_ = scene::kInvalidEntity;
         undoStack_.clear(); redoStack_.clear();
     }
 
     multiClear();
-    sel_ = -1; selEntity_ = scene::kInvalidEntity;
+    selectionUi_.sel_ = -1; selectionUi_.selEntity_ = scene::kInvalidEntity;
     w.destroy(a); w.destroy(c); w.destroy(d); w.flush();
 #endif
     AVER_INFO("[multiselect-test] RESULT: {}", failures == 0 ? "PASS" : "FAIL");
@@ -1769,8 +1769,8 @@ void SandboxApp::runUndoTest(Engine& eng) {
 
         spawnCube(eng);
         w.flush();
-        const scene::Entity a1 = selEntity_;
-        check(sel_ == kSelScene && w.valid(a1) && w.count() == base + 1, "spawnCube creates one scene entity");
+        const scene::Entity a1 = selectionUi_.selEntity_;
+        check(selectionUi_.sel_ == SelectionState::kSelScene && w.valid(a1) && w.count() == base + 1, "spawnCube creates one scene entity");
 
         // A custom object id, not the fnv1a64(asset name) default.
         const u64 customId = 0x00A5EA55u;
@@ -1783,8 +1783,8 @@ void SandboxApp::runUndoTest(Engine& eng) {
 
         undo();
         w.flush();
-        const scene::Entity a2 = selEntity_;
-        check(sel_ == kSelScene && w.valid(a2) && w.count() == base + 1, "undo restores the deleted entity");
+        const scene::Entity a2 = selectionUi_.selEntity_;
+        check(selectionUi_.sel_ == SelectionState::kSelScene && w.valid(a2) && w.count() == base + 1, "undo restores the deleted entity");
         check(w.valid(a2) && w.objectId(a2) == customId, "undo restores the SAME (custom) persisted object id");
 
         redo();
@@ -1793,21 +1793,21 @@ void SandboxApp::runUndoTest(Engine& eng) {
 
         undo();
         w.flush();
-        const scene::Entity a3 = selEntity_;
-        check(sel_ == kSelScene && w.valid(a3) && w.count() == base + 1, "a second undo restores it again");
+        const scene::Entity a3 = selectionUi_.selEntity_;
+        check(selectionUi_.sel_ == SelectionState::kSelScene && w.valid(a3) && w.count() == base + 1, "a second undo restores it again");
         check(w.valid(a3) && w.objectId(a3) == customId, "the custom object id survives a second undo too");
 
         copySelection();
         pasteClipboard();
         w.flush();
-        const scene::Entity b1 = selEntity_;   // pasteClipboard() selects the pasted copy
+        const scene::Entity b1 = selectionUi_.selEntity_;   // pasteClipboard() selects the pasted copy
         check(w.valid(b1) && b1 != a3 && w.count() == base + 2, "paste creates a second, distinct entity");
         check(w.valid(b1) && w.objectId(b1) != customId,
               "paste's copy does NOT clone a's custom object id (see instantiateEntity's restoreObjectId)");
 
         duplicateSelection();   // duplicates b1, the current selection
         w.flush();
-        const scene::Entity c1 = selEntity_;
+        const scene::Entity c1 = selectionUi_.selEntity_;
         check(w.valid(c1) && c1 != b1 && w.count() == base + 3, "duplicate creates a third, distinct entity");
         check(w.valid(c1) && w.objectId(c1) != customId, "duplicate's copy also does not clone the custom object id");
 
@@ -1824,11 +1824,11 @@ void SandboxApp::runUndoTest(Engine& eng) {
         hideEditorScene_ = true;
 
         spawnCube(eng); w.flush();
-        const scene::Entity parent = selEntity_;
+        const scene::Entity parent = selectionUi_.selEntity_;
         spawnCube(eng); w.flush();
-        const scene::Entity child = selEntity_;
+        const scene::Entity child = selectionUi_.selEntity_;
         spawnCube(eng); w.flush();
-        const scene::Entity grand = selEntity_;
+        const scene::Entity grand = selectionUi_.selEntity_;
         check(w.count() == base + 3, "three entities for the hierarchy phase");
 
         // keepWorld = false: local transform matches parent-relative transform.
@@ -1845,7 +1845,7 @@ void SandboxApp::runUndoTest(Engine& eng) {
             Transform cxf; cxf.position = Vec3{0.0f, 0.0f, 90.0f};
             w.setLocalTransform(child, cxf);
 
-            sel_ = kSelScene; selEntity_ = child;
+            selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = child;
             EditXform gx{};
             check(selectedXform(gx), "the child's transform reads back");
             check(std::fabs(gx.pos.x - 5000.0f) < 0.01f && std::fabs(gx.pos.z - 90.0f) < 0.01f,
@@ -1865,7 +1865,7 @@ void SandboxApp::runUndoTest(Engine& eng) {
             check(selectedXform(again) && std::fabs(again.pos.z - 140.0f) < 0.01f,
                   "and moving it in world space puts it where the drag asked");
 
-                sel_ = kSelScene; selEntity_ = parent;
+                selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = parent;
         }
 
         // ---- undo of a TRANSFORM on a child ---------------------------------------------
@@ -1877,7 +1877,7 @@ void SandboxApp::runUndoTest(Engine& eng) {
             Transform cxf; cxf.position = Vec3{0.0f, 0.0f, 90.0f};
             w.setLocalTransform(child, cxf);
 
-            sel_ = kSelScene; selEntity_ = child;
+            selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = child;
             beginTransformEdit();
             EditXform moved{};
             selectedXform(moved);
@@ -1907,14 +1907,14 @@ void SandboxApp::runUndoTest(Engine& eng) {
         // ---- undo of DELETING A CHILD keeps it attached ---------------------------------
         // Subtree capture restores everything BELOW the deleted entity; a deleted child came back as a root.
         {
-            sel_ = kSelScene; selEntity_ = child;
+            selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = child;
             deleteSelection();
             w.flush();
             check(!w.valid(child), "the child is deleted");
 
             undo();
             w.flush();
-            const scene::Entity back = selEntity_;
+            const scene::Entity back = selectionUi_.selEntity_;
             check(w.valid(back), "and undo brings it back");
             check(w.parent(back) == parent,
                   "STILL PARENTED to the entity it hung from, rather than restored as a root");
@@ -1929,9 +1929,9 @@ void SandboxApp::runUndoTest(Engine& eng) {
         {
             // A fresh depth-2 chain, independent of the parent/child/grand fixture above.
             const u32 dbase = w.count();
-            spawnCube(eng); w.flush(); const scene::Entity dp = selEntity_;
-            spawnCube(eng); w.flush(); const scene::Entity dc = selEntity_;
-            spawnCube(eng); w.flush(); const scene::Entity dg = selEntity_;
+            spawnCube(eng); w.flush(); const scene::Entity dp = selectionUi_.selEntity_;
+            spawnCube(eng); w.flush(); const scene::Entity dc = selectionUi_.selEntity_;
+            spawnCube(eng); w.flush(); const scene::Entity dg = selectionUi_.selEntity_;
             check(w.setParent(dc, dp, false) && w.setParent(dg, dc, false),
                   "a fresh parent -> child -> grandchild chain for the copy phase");
             Transform dcx; dcx.position = Vec3{0.0f, 0.0f, 120.0f};
@@ -1939,10 +1939,10 @@ void SandboxApp::runUndoTest(Engine& eng) {
             check(w.count() == dbase + 3, "three entities before any copying");
 
             // ---- Duplicate ----
-            sel_ = kSelScene; selEntity_ = dp;
+            selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = dp;
             duplicateSelection();
             w.flush();
-            const scene::Entity dupRoot = selEntity_;
+            const scene::Entity dupRoot = selectionUi_.selEntity_;
             check(w.valid(dupRoot) && dupRoot != dp, "duplicate made a NEW root entity");
             check(w.count() == dbase + 6,
                   "and brought BOTH descendants with it -- three more entities, not one");
@@ -1966,11 +1966,11 @@ void SandboxApp::runUndoTest(Engine& eng) {
             undo(); w.flush();
 
             // ---- Copy / Paste ----
-            sel_ = kSelScene; selEntity_ = dp;
+            selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = dp;
             copySelection();
             pasteClipboard();
             w.flush();
-            const scene::Entity pasteRoot = selEntity_;
+            const scene::Entity pasteRoot = selectionUi_.selEntity_;
             check(w.valid(pasteRoot) && pasteRoot != dp, "paste made a NEW root entity");
             check(w.count() == dbase + 6, "and pasted the descendants with it");
             const scene::Entity pasteChild = w.firstChild(pasteRoot);
@@ -1988,7 +1988,7 @@ void SandboxApp::runUndoTest(Engine& eng) {
             undo(); w.flush();
 
             // Clean up.
-            sel_ = kSelScene; selEntity_ = dp; deleteSelection(); w.flush();
+            selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = dp; deleteSelection(); w.flush();
             check(w.count() == dbase, "the copy phase cleaned up after itself");
         }
 
@@ -2055,7 +2055,7 @@ void SandboxApp::runUndoTest(Engine& eng) {
         {
             const u32 rnbase = w.count();
             spawnCube(eng); w.flush();
-            const scene::Entity re = selEntity_;
+            const scene::Entity re = selectionUi_.selEntity_;
             const std::string spawned = entityLabels_.count(static_cast<u32>(re))
                                       ? entityLabels_[static_cast<u32>(re)] : std::string();
             const usize stackBefore = undoStack_.size();
@@ -2080,7 +2080,7 @@ void SandboxApp::runUndoTest(Engine& eng) {
                   "and the entity's ASSET name is untouched by any of it");
 
             undo();                       // put the label back
-            sel_ = kSelScene; selEntity_ = re; deleteSelection(); w.flush();
+            selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = re; deleteSelection(); w.flush();
             check(w.count() == rnbase, "the rename phase cleaned up after itself");
         }
 
@@ -2088,9 +2088,9 @@ void SandboxApp::runUndoTest(Engine& eng) {
         // pushReparent is what a World Outliner drag-and-drop calls.
         {
             const u32 rbase = w.count();
-            spawnCube(eng); w.flush(); const scene::Entity ra = selEntity_;
-            spawnCube(eng); w.flush(); const scene::Entity rb = selEntity_;
-            spawnCube(eng); w.flush(); const scene::Entity rc = selEntity_;
+            spawnCube(eng); w.flush(); const scene::Entity ra = selectionUi_.selEntity_;
+            spawnCube(eng); w.flush(); const scene::Entity rb = selectionUi_.selEntity_;
+            spawnCube(eng); w.flush(); const scene::Entity rc = selectionUi_.selEntity_;
             check(w.count() == rbase + 3, "three fresh roots for the reparent phase");
 
             Transform axf; axf.position = Vec3{1000.0f, 0.0f, 0.0f};
@@ -2158,12 +2158,12 @@ void SandboxApp::runUndoTest(Engine& eng) {
             check(w.parent(rc) == rb, "and undo re-attaches it");
 
             // Clean up.
-            sel_ = kSelScene; selEntity_ = ra; deleteSelection(); w.flush();
+            selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = ra; deleteSelection(); w.flush();
             check(w.count() == rbase, "teardown: the reparent phase leaves no entities behind");
             undoStack_.clear(); redoStack_.clear(); markLevelSaved();
         }
 
-        sel_ = kSelScene; selEntity_ = parent;
+        selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = parent;
         deleteSelection();
         w.flush();
         check(w.count() == base, "deleting the PARENT removes all three -- World::destroy takes the subtree");
@@ -2174,7 +2174,7 @@ void SandboxApp::runUndoTest(Engine& eng) {
         check(w.count() == base + 3, "and undo brings all three back, not just the one that was selected");
 
         // Restored relationship, not just count.
-        const scene::Entity p2 = selEntity_;
+        const scene::Entity p2 = selectionUi_.selEntity_;
         check(w.valid(p2) && w.parent(p2) == scene::kInvalidEntity, "the restored parent is a root again");
         u32 kids = 0;
         scene::Entity firstKid = scene::kInvalidEntity;
@@ -2197,7 +2197,7 @@ void SandboxApp::runUndoTest(Engine& eng) {
         check(w.count() == base + 3, "and a second undo restores all three again");
 
         // Clean up.
-        sel_ = kSelScene; selEntity_ = selEntity_;
+        selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = selectionUi_.selEntity_;
         deleteSelection();
         w.flush();
         check(w.count() == base, "teardown: the phase leaves no entities behind");
@@ -2208,17 +2208,17 @@ void SandboxApp::runUndoTest(Engine& eng) {
     {
         const usize objBase = objects_.size();
         hideEditorScene_ = false;   // forces spawnCube()'s placeholder-object branch instead
-        sel_ = -1; selEntity_ = kInvalidId;
+        selectionUi_.sel_ = -1; selectionUi_.selEntity_ = kInvalidId;
 
         spawnCube(eng);
-        check(sel_ >= 0 && (usize)sel_ < objects_.size() && objects_.size() == objBase + 1,
+        check(selectionUi_.sel_ >= 0 && (usize)selectionUi_.sel_ < objects_.size() && objects_.size() == objBase + 1,
               "spawnCube (placeholder branch) adds one object");
 
         deleteSelection();
         check(objects_.size() == objBase, "deleteSelection removes the placeholder object");
 
         undo();
-        check(objects_.size() == objBase + 1 && sel_ >= 0 && (usize)sel_ < objects_.size(),
+        check(objects_.size() == objBase + 1 && selectionUi_.sel_ >= 0 && (usize)selectionUi_.sel_ < objects_.size(),
               "undo restores the deleted placeholder object -- THIS DID NOT EXIST before this change");
 
         redo();
@@ -2336,7 +2336,7 @@ void SandboxApp::runClassPlaceTest(Engine& eng) {
     check(!undoStack_.empty() && undoStack_.back().kind == EditCmd::Kind::Create &&
           undoStack_.back().className == "AN_CompProbe" && undoStack_.back().classSlot == 1,
           "the Create edit carries the class name and slot");
-    check(selEntity_ == e2 && subtreeSize(e2) == 3, "the new root is selected and has its parts");
+    check(selectionUi_.selEntity_ == e2 && subtreeSize(e2) == 3, "the new root is selected and has its parts");
 
     // 5. A moved root is saved at its live pose.
     {

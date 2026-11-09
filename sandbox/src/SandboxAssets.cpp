@@ -62,9 +62,9 @@ void SandboxApp::loadProjectMeshes(Engine& e) {
         app.pickGeometry_.erase(id);
         app.skinnedMeshIds_.erase(id);   // meshPathById_ stays: it is only a path lookup
 #if AVER_MODULE_PBR
-        if (const auto oit = app.selOutlineLines_.find(id); oit != app.selOutlineLines_.end()) {
+        if (const auto oit = app.selectionUi_.selOutlineLines_.find(id); oit != app.selectionUi_.selOutlineLines_.end()) {
             if (oit->second) p->engine->device()->destroyLineMesh(oit->second);
-            app.selOutlineLines_.erase(oit);
+            app.selectionUi_.selOutlineLines_.erase(oit);
         }
 #endif
 #if AVER_MODULE_TRIFACTOR
@@ -452,9 +452,9 @@ void SandboxApp::releaseProjectMeshes(Engine& e) {
         pickGeometry_.erase(id);
 #if AVER_MODULE_PBR
         // selOutlineLines_ exists only under PBR; line mesh cached here is dropped.
-        if (const auto oit = selOutlineLines_.find(id); oit != selOutlineLines_.end()) {
+        if (const auto oit = selectionUi_.selOutlineLines_.find(id); oit != selectionUi_.selOutlineLines_.end()) {
             if (oit->second) e.device()->destroyLineMesh(oit->second);
-            selOutlineLines_.erase(oit);
+            selectionUi_.selOutlineLines_.erase(oit);
         }
 #endif
 #if AVER_MODULE_TRIFACTOR

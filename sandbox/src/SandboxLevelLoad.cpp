@@ -554,8 +554,8 @@ void SandboxApp::onLevelInstantiated(const game::GameLevel::LoadedLevel& loaded)
     navLoadPending_ = true;
 #endif
 
-    sel_ = -1;
-    selEntity_ = scene::kInvalidEntity;
+    selectionUi_.sel_ = -1;
+    selectionUi_.selEntity_ = scene::kInvalidEntity;
 
     // A STORED VIEWPOINT OUTRANKS AUTO-FRAMING, because it is the more specific statement:
     // frameCameraOnLevel guesses a view from the level's bounds, and a CAMERA record is where the
@@ -674,8 +674,8 @@ void SandboxApp::onLegacyOcmapInstantiated(const game::GameLevel::LoadedLevel& l
     levelPath_ = loaded.path;
     levelName_ = m.name;
 
-    sel_ = -1;
-    selEntity_ = scene::kInvalidEntity;
+    selectionUi_.sel_ = -1;
+    selectionUi_.selEntity_ = scene::kInvalidEntity;
 
     // Where the camera was left, else framed on the level (an .ocmap has no CAMERA record).
     editor::LevelView leftView;
@@ -833,7 +833,7 @@ scene::Entity SandboxApp::placeClassInstance(fmt::OcWorldPlacement p, std::strin
         return refuse("class '" + p.className + "' failed to spawn (see the log)");
     }
     multiSetSingle(e);
-    sel_ = kSelScene; selEntity_ = e;
+    selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = e;
 
     EditCmd c2 = describeEntity(e);
     c2.kind = EditCmd::Kind::Create;
@@ -888,7 +888,7 @@ void SandboxApp::respawnClassFromEdit(const EditCmd& c) {
     if (e == scene::kInvalidEntity) return;
     rebindEdit(c.id, e);
     multiSetSingle(e);
-    sel_ = kSelScene; selEntity_ = e;
+    selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = e;
 }
 
 // After Stop: aver_fw_end_play destroys every class-bearing entity, so respawn each root it took, at its
@@ -908,8 +908,8 @@ void SandboxApp::respawnLostClassInstances() {
         const scene::Entity e = spawnClassSlot(s.slot, &xf);
         if (e == scene::kInvalidEntity) continue;
         rebindEdit(s.id, e);
-        for (scene::Entity& m : multiSel_) if (m == old) m = e;
-        if (selEntity_ == old) selEntity_ = e;
+        for (scene::Entity& m : selectionUi_.multiSel_) if (m == old) m = e;
+        if (selectionUi_.selEntity_ == old) selectionUi_.selEntity_ = e;
         multiRebuildSet();
     }
     aver_fw_spawn_batch_end();
@@ -1232,7 +1232,7 @@ void SandboxApp::unloadLevel(Engine& eng) {
     editToEntity_.clear();
     entityToEdit_.clear();
     editBeforeValid_ = false;
-    if (sel_ == kSelScene) { sel_ = -1; selEntity_ = scene::kInvalidEntity; }
+    if (selectionUi_.sel_ == SelectionState::kSelScene) { selectionUi_.sel_ = -1; selectionUi_.selEntity_ = scene::kInvalidEntity; }
 #if AVER_MODULE_PHYSICS
     for (const int32_t b : levelBodies_) aver_phys_remove_body(b);
     aver_phys_snapshot_release_all();   // the editor's unloadLevel: snapshots of this level's bodies could never be restored again

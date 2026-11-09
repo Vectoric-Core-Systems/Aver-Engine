@@ -49,66 +49,66 @@ editor::EntitySnapshot captureAuthored(scene::World& w, scene::Entity e,
 // "this one thing is now selected". The outliner's own multi paths keep the anchor inside the
 // set, so they stay multi.
 bool SandboxApp::multiStale() const {
-    return !multiSel_.empty() && multiSet_.find(selEntity_) == multiSet_.end();
+    return !selectionUi_.multiSel_.empty() && selectionUi_.multiSet_.find(selectionUi_.selEntity_) == selectionUi_.multiSet_.end();
 }
 
 bool SandboxApp::multiIsSelected(scene::Entity e) const {
     if (multiStale()) return false;
-    return multiSet_.find(e) != multiSet_.end();
+    return selectionUi_.multiSet_.find(e) != selectionUi_.multiSet_.end();
 }
 
 void SandboxApp::multiRebuildSet() {
-    multiSet_.clear();
-    multiSet_.insert(multiSel_.begin(), multiSel_.end());
+    selectionUi_.multiSet_.clear();
+    selectionUi_.multiSet_.insert(selectionUi_.multiSel_.begin(), selectionUi_.multiSel_.end());
 }
 
 // Drops a set the anchor has left. Called once a frame so a stale set cannot come back to life
 // later by the anchor happening to land on one of its members again.
-void SandboxApp::multiSyncToAnchor() { if (multiStale()) { multiSel_.clear(); multiSet_.clear(); } }
+void SandboxApp::multiSyncToAnchor() { if (multiStale()) { selectionUi_.multiSel_.clear(); selectionUi_.multiSet_.clear(); } }
 
-void SandboxApp::multiClear() { multiSel_.clear(); multiSet_.clear(); }
+void SandboxApp::multiClear() { selectionUi_.multiSel_.clear(); selectionUi_.multiSet_.clear(); }
 
 // Plain click: this one becomes the whole selection.
 void SandboxApp::multiSetSingle(scene::Entity e) {
-    multiSel_.assign(1, e);
+    selectionUi_.multiSel_.assign(1, e);
     multiRebuildSet();
-    sel_ = kSelScene; selEntity_ = e;
+    selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = e;
 }
 
 // Ctrl+click: add or remove one, and keep the anchor pointing at something that is still selected.
 void SandboxApp::multiToggle(scene::Entity e) {
-    if (multiSet_.erase(e)) {
-        if (const auto it = std::find(multiSel_.begin(), multiSel_.end(), e); it != multiSel_.end())
-            multiSel_.erase(it);
-        if (selEntity_ == e) {
+    if (selectionUi_.multiSet_.erase(e)) {
+        if (const auto it = std::find(selectionUi_.multiSel_.begin(), selectionUi_.multiSel_.end(), e); it != selectionUi_.multiSel_.end())
+            selectionUi_.multiSel_.erase(it);
+        if (selectionUi_.selEntity_ == e) {
             // The anchor was just deselected. Hand it to whatever is left rather than leaving it
             // pointing at something the user can no longer see highlighted.
-            if (multiSel_.empty()) { sel_ = -1; selEntity_ = scene::kInvalidEntity; }
-            else selEntity_ = multiSel_.back();
+            if (selectionUi_.multiSel_.empty()) { selectionUi_.sel_ = -1; selectionUi_.selEntity_ = scene::kInvalidEntity; }
+            else selectionUi_.selEntity_ = selectionUi_.multiSel_.back();
         }
         return;
     }
-    multiSel_.push_back(e);
-    multiSet_.insert(e);
-    sel_ = kSelScene; selEntity_ = e;
+    selectionUi_.multiSel_.push_back(e);
+    selectionUi_.multiSet_.insert(e);
+    selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = e;
 }
 
 // Shift+click: everything between the anchor and this row, in the order the rows are DRAWN.
 // Visible order, not creation order -- a range selection means "what I can see between these
 // two", and the outliner's order is a filtered, sorted tree walk that matches nothing else.
 void SandboxApp::multiRange(scene::Entity to) {
-    const auto& ord = outlinerOrder_;
-    const auto a = std::find(ord.begin(), ord.end(), selEntity_);
+    const auto& ord = selectionUi_.outlinerOrder_;
+    const auto a = std::find(ord.begin(), ord.end(), selectionUi_.selEntity_);
     const auto b = std::find(ord.begin(), ord.end(), to);
     if (a == ord.end() || b == ord.end()) { multiSetSingle(to); return; }
     auto lo = a, hi = b;
     if (lo > hi) std::swap(lo, hi);
-    multiSel_.assign(lo, hi + 1);
+    selectionUi_.multiSel_.assign(lo, hi + 1);
     multiRebuildSet();
     // The anchor STAYS where it was, so a second shift-click re-ranges from the same origin
     // instead of walking the anchor along with it -- which is what every file browser does.
-    sel_ = kSelScene;
-    if (!multiIsSelected(selEntity_)) selEntity_ = to;
+    selectionUi_.sel_ = SelectionState::kSelScene;
+    if (!multiIsSelected(selectionUi_.selEntity_)) selectionUi_.selEntity_ = to;
 }
 
 // The live selection, skipping anything destroyed since it was selected. Callers must not assume
@@ -117,8 +117,8 @@ std::vector<scene::Entity> SandboxApp::selectedEntities() const {
     std::vector<scene::Entity> out;
     const scene::World& w = scene::World::instance();
     if (!multiStale())
-        for (const scene::Entity e : multiSel_) if (w.valid(e)) out.push_back(e);
-    if (out.empty() && sel_ == kSelScene && w.valid(selEntity_)) out.push_back(selEntity_);
+        for (const scene::Entity e : selectionUi_.multiSel_) if (w.valid(e)) out.push_back(e);
+    if (out.empty() && selectionUi_.sel_ == SelectionState::kSelScene && w.valid(selectionUi_.selEntity_)) out.push_back(selectionUi_.selEntity_);
     return out;
 }
 
@@ -133,15 +133,15 @@ std::vector<scene::Entity> SandboxApp::selectedEntities() const {
 // toggle after the first only ever ADDED its row (the anchor it moved along the way is put back on
 // the first row by the last line, exactly as before).
 void SandboxApp::selectAllInOutliner() {
-    if (outlinerOrder_.empty()) return;
-    multiSel_ = outlinerOrder_;
+    if (selectionUi_.outlinerOrder_.empty()) return;
+    selectionUi_.multiSel_ = selectionUi_.outlinerOrder_;
     multiRebuildSet();
-    sel_ = kSelScene; selEntity_ = outlinerOrder_.front();
+    selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = selectionUi_.outlinerOrder_.front();
 }
 
 #endif
 
-bool SandboxApp::movableSelected() const { return sel_ >= 0 && sel_ < (int)objects_.size(); }
+bool SandboxApp::movableSelected() const { return selectionUi_.sel_ >= 0 && selectionUi_.sel_ < (int)objects_.size(); }
 
 // True while a play session owns the input, so editor interaction must stand down. False while
 // ejected: the editor has the camera, input and tools back, same as a released mouse.
@@ -150,7 +150,7 @@ bool SandboxApp::gameHasInput() const { return playSessionActive() && !releasedB
 // True when the selection is a thing in either world, rather than a sun/sky/post pseudo-entry.
 bool SandboxApp::anySelected() const {
 #if AVER_MODULE_SCENE
-    if (sel_ == kSelScene) return scene::World::instance().valid(selEntity_);
+    if (selectionUi_.sel_ == SelectionState::kSelScene) return scene::World::instance().valid(selectionUi_.selEntity_);
 #endif
     return movableSelected();
 }
@@ -169,12 +169,12 @@ bool SandboxApp::anySelected() const {
 // the change is a no-op for every level that has no hierarchy in it -- which today is all of them.
 bool SandboxApp::selectedXform(EditXform& x) const {
 #if AVER_MODULE_SCENE
-    if (sel_ == kSelScene) {
+    if (selectionUi_.sel_ == SelectionState::kSelScene) {
         scene::World& w = scene::World::instance();
-        if (!w.valid(selEntity_)) return false;
-        const auto* loc = w.component<scene::CLocal>(selEntity_, scene::kComponentLocal);
+        if (!w.valid(selectionUi_.selEntity_)) return false;
+        const auto* loc = w.component<scene::CLocal>(selectionUi_.selEntity_, scene::kComponentLocal);
         if (!loc) return false;
-        const scene::Entity par = w.parent(selEntity_);
+        const scene::Entity par = w.parent(selectionUi_.selEntity_);
         if (par == scene::kInvalidEntity) {
             x.pos = loc->xf.position;
             x.rotDeg = eulerDegFromQuat(loc->xf.rotation);
@@ -192,7 +192,7 @@ bool SandboxApp::selectedXform(EditXform& x) const {
     }
 #endif
     if (!movableSelected()) return false;
-    const MeshObj& o = objects_[sel_];
+    const MeshObj& o = objects_[selectionUi_.sel_];
     x.pos = o.pos; x.rotDeg = o.rotDeg; x.scale = o.scale;
     return true;
 }
@@ -200,19 +200,19 @@ bool SandboxApp::selectedXform(EditXform& x) const {
 // Writes the selection's transform, taking it IN WORLD SPACE. The exact inverse of the read.
 void SandboxApp::setSelectedXform(const EditXform& x) {
 #if AVER_MODULE_SCENE
-    if (sel_ == kSelScene) {
+    if (selectionUi_.sel_ == SelectionState::kSelScene) {
         scene::World& w = scene::World::instance();
-        if (!w.valid(selEntity_)) return;
+        if (!w.valid(selectionUi_.selEntity_)) return;
         Transform xf;
         xf.position = x.pos;
         xf.rotation = quatFromEulerDeg(x.rotDeg);
         xf.scale    = x.scale;
-        w.setLocalTransform(selEntity_, localFromWorldFor(w, selEntity_, x));
+        w.setLocalTransform(selectionUi_.selEntity_, localFromWorldFor(w, selectionUi_.selEntity_, x));
         return;
     }
 #endif
     if (!movableSelected()) return;
-    MeshObj& o = objects_[sel_];
+    MeshObj& o = objects_[selectionUi_.sel_];
     o.pos = x.pos; o.rotDeg = x.rotDeg; o.scale = x.scale;
 }
 
@@ -491,13 +491,13 @@ const EntityAnim* SandboxApp::entityAnim(scene::Entity e) const {
 // to put back whatever was actually there, not just one flag.
 bool SandboxApp::removeComponentFromSelection(u32 type) {
     scene::World& w = scene::World::instance();
-    if (!w.valid(selEntity_) || !w.hasComponent(selEntity_, type)) return false;
-    const void* src = w.getComponent(selEntity_, type);
+    if (!w.valid(selectionUi_.selEntity_) || !w.hasComponent(selectionUi_.selEntity_, type)) return false;
+    const void* src = w.getComponent(selectionUi_.selEntity_, type);
     const usize size = w.componentSize(type);
     if (!src || size == 0) return false;
     EditCmd c;
     c.kind = EditCmd::Kind::RemoveComponent;
-    c.id = editIdFor(selEntity_);
+    c.id = editIdFor(selectionUi_.selEntity_);
     c.removedComponent.type = type;
     c.removedComponent.bytes.resize(size);
     std::memcpy(c.removedComponent.bytes.data(), src, size);
@@ -554,7 +554,7 @@ void SandboxApp::installPrefabHooks() {
         entityCollide_.erase(static_cast<u32>(e));
         entityAnim_.erase(static_cast<u32>(e));
         entitySnapZ_.erase(static_cast<u32>(e));
-        if (sel_ == kSelScene && e == selEntity_) { sel_ = -1; selEntity_ = scene::kInvalidEntity; }
+        if (selectionUi_.sel_ == SelectionState::kSelScene && e == selectionUi_.selEntity_) { selectionUi_.sel_ = -1; selectionUi_.selEntity_ = scene::kInvalidEntity; }
 #if AVER_MODULE_PHYSICS
         if (const auto it = entityBodies_.find(static_cast<u32>(e)); it != entityBodies_.end()) {
             aver_phys_remove_body(it->second);
@@ -570,7 +570,7 @@ void SandboxApp::installPrefabHooks() {
 editor::PrefabUiCallbacks SandboxApp::prefabUiCallbacks() {
     editor::PrefabUiCallbacks cb;
     cb.pushUndo = [this](const editor::PrefabEdit& e) { pushPrefabEdit(e); };
-    cb.select = [this](scene::Entity e) { sel_ = kSelScene; selEntity_ = e; };
+    cb.select = [this](scene::Entity e) { selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = e; };
     cb.openAsset = [this](const std::string& ref) { assetEditors_.open(prefabModel_.fullPathFor(ref)); };
     cb.markDirty = [this] { markLevelUnsaved(); };
     cb.status = [this](const std::string& s) { drawerUi_.cbStatus_ = s; };
@@ -634,14 +634,14 @@ void SandboxApp::endTransformEdit() {
     c.before = editBefore_; c.after = now;
     c.alsoMoved = std::move(also);
 #if AVER_MODULE_SCENE
-    if (sel_ == kSelScene) c.id = editIdFor(selEntity_); else
+    if (selectionUi_.sel_ == SelectionState::kSelScene) c.id = editIdFor(selectionUi_.selEntity_); else
 #endif
-    c.objIndex = sel_;
+    c.objIndex = selectionUi_.sel_;
 #if AVER_MODULE_SCENE && AVER_MODULE_PHYSICS
     // ON COMMIT, ONCE, not every frame of the drag -- a body refitted per frame would refit tens
     // of times for one gesture. Undo/redo get the identical rebuild through applyXformTo, which
     // replays this same before/after pair; see rebuildMovedBodies for why descendants need it too.
-    if (sel_ == kSelScene) rebuildMovedBodies(selEntity_);
+    if (selectionUi_.sel_ == SelectionState::kSelScene) rebuildMovedBodies(selectionUi_.selEntity_);
     for (const EditCmd::AlsoMoved& m : c.alsoMoved) {
         const scene::Entity moved = entityForEdit(m.id);
         if (moved != scene::kInvalidEntity) rebuildMovedBodies(moved);
@@ -702,7 +702,7 @@ void SandboxApp::applyXformTo(const EditCmd& c, const EditXform& x, bool undoing
         // than accumulating whatever the live path skipped.
         rebuildMovedBodies(e);
 #endif
-        sel_ = kSelScene; selEntity_ = e;
+        selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = e;
         return;
     }
 #endif
@@ -710,7 +710,7 @@ void SandboxApp::applyXformTo(const EditCmd& c, const EditXform& x, bool undoing
         MeshObj& o = objects_[c.objIndex];
         o.pos = x.pos; o.rotDeg = x.rotDeg; o.scale = x.scale;
         // Unguarded: this is the non-scene MeshObj fallback, reached with SCENE off too.
-        sel_ = c.objIndex; selEntity_ = kInvalidId;
+        selectionUi_.sel_ = c.objIndex; selectionUi_.selEntity_ = kInvalidId;
     }
 }
 
@@ -731,7 +731,7 @@ SandboxApp::EditCmd SandboxApp::describeEntity(scene::Entity e) {
         c.after.scale = loc->xf.scale;
     }
     const auto animIt = entityAnim_.find(static_cast<u32>(e));
-    c.snap = captureAuthored(w, e, editorHidden_, animIt != entityAnim_.end());
+    c.snap = captureAuthored(w, e, selectionUi_.editorHidden_, animIt != entityAnim_.end());
     if (animIt != entityAnim_.end()) c.hadAnim = animIt->second;
     if (const scene::Entity par = w.parent(e); par != scene::kInvalidEntity)
         c.parentId = editIdFor(par);
@@ -794,7 +794,7 @@ scene::Entity SandboxApp::spawnEntityFrom(const editor::EntitySnapshot& snap, co
     // command carrying `hadBody` was captured.
     if (hadBody) rebuildEntityBody(e);
 #endif
-    sel_ = kSelScene; selEntity_ = e;
+    selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = e;
     return e;
 }
 
@@ -827,7 +827,7 @@ void SandboxApp::recreateFrom(const EditCmd& c) {
     spawnSubtreeUnder(e, c.subtree, /*restoreIds=*/true);
     // spawnEntityFrom selects whatever it made last, so the selection has to be put back on the
     // entity the command is actually about.
-    sel_ = kSelScene; selEntity_ = e;
+    selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = e;
 #endif
 }
 
@@ -937,7 +937,7 @@ void SandboxApp::pushReparent(scene::Entity child, scene::Entity newParent) {
         c.after.scale = loc->xf.scale;
     }
     c.reparentNewParentId = newParent != scene::kInvalidEntity ? editIdFor(newParent) : 0;
-    sel_ = kSelScene; selEntity_ = child;
+    selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = child;
     pushEdit(std::move(c));
 }
 
@@ -962,7 +962,7 @@ void SandboxApp::applyReparentTo(const EditCmd& c, EditId parentEditId, const Ed
     t.rotation = quatFromEulerDeg(xf.rotDeg);
     t.scale    = xf.scale;
     w.setLocalTransform(e, t);
-    sel_ = kSelScene; selEntity_ = e;
+    selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = e;
 }
 
 // Fills `c.subtree` with `e`'s descendants, parents before children, for a Destroy.
@@ -990,7 +990,7 @@ void SandboxApp::captureSubtree(EditCmd& c, scene::Entity e) {
         if (const auto lb = entityLabels_.find(static_cast<u32>(d)); lb != entityLabels_.end())
             n.label = lb->second;
         const auto animIt = entityAnim_.find(static_cast<u32>(d));
-        n.snap = captureAuthored(w, d, editorHidden_, animIt != entityAnim_.end());
+        n.snap = captureAuthored(w, d, selectionUi_.editorHidden_, animIt != entityAnim_.end());
         if (animIt != entityAnim_.end()) n.hadAnim = animIt->second;
         // Same two non-component flags the root carries; a subtree restored without them has the
         // identical silent-solidify problem one level down.
@@ -1171,7 +1171,7 @@ void SandboxApp::destroyEntity(scene::Entity e) {
         // and every path that destroys without going through deleteSelection (the foliage eraser,
         // an undone Create, a level reload) left it that way. Cleared where the destruction
         // actually happens, so no caller can forget.
-        if (sel_ == kSelScene && d == selEntity_) { sel_ = -1; selEntity_ = scene::kInvalidEntity; }
+        if (selectionUi_.sel_ == SelectionState::kSelScene && d == selectionUi_.selEntity_) { selectionUi_.sel_ = -1; selectionUi_.selEntity_ = scene::kInvalidEntity; }
 #if AVER_MODULE_PHYSICS
         if (const auto it = entityBodies_.find(static_cast<u32>(d)); it != entityBodies_.end()) {
             aver_phys_remove_body(it->second);
@@ -1208,22 +1208,22 @@ void SandboxApp::destroyEntity(scene::Entity e) {
 // Lock and folders are editor-only: EditCmd::OutlinerMeta, undoable, and invisible to currentEditMark.
 
 std::string SandboxApp::outlinerFolderOf(scene::Entity e) const {
-    const auto it = outlinerFolderOf_.find(static_cast<u32>(e));
-    return it == outlinerFolderOf_.end() ? std::string() : it->second;
+    const auto it = selectionUi_.outlinerFolderOf_.find(static_cast<u32>(e));
+    return it == selectionUi_.outlinerFolderOf_.end() ? std::string() : it->second;
 }
 
 void SandboxApp::applyOutlinerMeta(const EditCmd& c, bool undoing) {
     for (const EditCmd::OutlinerMetaChange& ch : c.outlinerMeta) {
         const scene::Entity e = entityForEdit(ch.id);
         if (e == scene::kInvalidEntity || !scene::World::instance().valid(e)) continue;
-        if (undoing ? ch.lockBefore : ch.lockAfter) outlinerLocked_.insert(static_cast<u32>(e));
-        else                                         outlinerLocked_.erase(static_cast<u32>(e));
+        if (undoing ? ch.lockBefore : ch.lockAfter) selectionUi_.outlinerLocked_.insert(static_cast<u32>(e));
+        else                                         selectionUi_.outlinerLocked_.erase(static_cast<u32>(e));
         const std::string& f = undoing ? ch.folderBefore : ch.folderAfter;
-        if (f.empty()) outlinerFolderOf_.erase(static_cast<u32>(e));
-        else           outlinerFolderOf_[static_cast<u32>(e)] = f;
+        if (f.empty()) selectionUi_.outlinerFolderOf_.erase(static_cast<u32>(e));
+        else           selectionUi_.outlinerFolderOf_[static_cast<u32>(e)] = f;
     }
-    if (c.foldersChanged) outlinerFolders_ = undoing ? c.foldersBefore : c.foldersAfter;
-    ++outlinerFolderRev_;
+    if (c.foldersChanged) selectionUi_.outlinerFolders_ = undoing ? c.foldersBefore : c.foldersAfter;
+    ++selectionUi_.outlinerFolderRev_;
 }
 
 void SandboxApp::outlinerSetVisible(const std::vector<scene::Entity>& ents, bool visible) {
@@ -1241,10 +1241,10 @@ void SandboxApp::outlinerSetVisible(const std::vector<scene::Entity>& ents, bool
 }
 
 void SandboxApp::clearOutlinerMeta() {
-    outlinerLocked_.clear();
-    outlinerFolderOf_.clear();
-    outlinerFolders_.clear();
-    ++outlinerFolderRev_;
+    selectionUi_.outlinerLocked_.clear();
+    selectionUi_.outlinerFolderOf_.clear();
+    selectionUi_.outlinerFolders_.clear();
+    ++selectionUi_.outlinerFolderRev_;
 }
 
 void SandboxApp::captureOutlinerMeta(fmt::OcWorldData& w, const std::unordered_map<u32, i32>& placementSlotOf,
@@ -1252,16 +1252,16 @@ void SandboxApp::captureOutlinerMeta(fmt::OcWorldData& w, const std::unordered_m
     w.outlinerFolders.clear();
     w.outlinerItems.clear();
     if (streamed) return;   // a streamed level's records are not all resident, so their slots are not ours to number
-    w.outlinerFolders = outlinerFolders_;
-    std::unordered_set<u32> ents(outlinerLocked_.begin(), outlinerLocked_.end());
-    for (const auto& kv : outlinerFolderOf_) ents.insert(kv.first);
+    w.outlinerFolders = selectionUi_.outlinerFolders_;
+    std::unordered_set<u32> ents(selectionUi_.outlinerLocked_.begin(), selectionUi_.outlinerLocked_.end());
+    for (const auto& kv : selectionUi_.outlinerFolderOf_) ents.insert(kv.first);
     for (const u32 e : ents) {
         fmt::OcWorldData::OcOutlinerItem it;
         if (const auto p = placementSlotOf.find(e); p != placementSlotOf.end()) { it.kind = 'P'; it.index = p->second; }
         else if (const auto l = lightSlotOf.find(e); l != lightSlotOf.end())    { it.kind = 'L'; it.index = l->second; }
         else continue;
-        it.locked = outlinerLocked_.count(e) != 0;
-        if (const auto f = outlinerFolderOf_.find(e); f != outlinerFolderOf_.end()) it.folder = f->second;
+        it.locked = selectionUi_.outlinerLocked_.count(e) != 0;
+        if (const auto f = selectionUi_.outlinerFolderOf_.find(e); f != selectionUi_.outlinerFolderOf_.end()) it.folder = f->second;
         w.outlinerItems.push_back(std::move(it));
     }
     std::sort(w.outlinerItems.begin(), w.outlinerItems.end(), [](const auto& a, const auto& b) {
@@ -1272,7 +1272,7 @@ void SandboxApp::captureOutlinerMeta(fmt::OcWorldData& w, const std::unordered_m
 void SandboxApp::restoreOutlinerMeta(const fmt::OcWorldData& w, const world::LevelInstance& inst,
                                      const std::vector<scene::Entity>& lights) {
     clearOutlinerMeta();
-    for (const std::string& f : w.outlinerFolders) editor::folderAdd(outlinerFolders_, f);
+    for (const std::string& f : w.outlinerFolders) editor::folderAdd(selectionUi_.outlinerFolders_, f);
     std::unordered_map<i32, scene::Entity> byPlacement;
     for (usize k = 0; k < inst.entities.size(); ++k) byPlacement[inst.placementIndex[k]] = inst.entities[k];
     for (const fmt::OcWorldData::OcOutlinerItem& it : w.outlinerItems) {
@@ -1280,10 +1280,10 @@ void SandboxApp::restoreOutlinerMeta(const fmt::OcWorldData& w, const world::Lev
         if (it.kind == 'P') { if (const auto f = byPlacement.find(it.index); f != byPlacement.end()) e = f->second; }
         else if (it.index >= 0 && static_cast<usize>(it.index) < lights.size()) e = lights[static_cast<usize>(it.index)];
         if (e == scene::kInvalidEntity) continue;
-        if (it.locked) outlinerLocked_.insert(static_cast<u32>(e));
+        if (it.locked) selectionUi_.outlinerLocked_.insert(static_cast<u32>(e));
         if (!it.folder.empty()) {
-            editor::folderAdd(outlinerFolders_, it.folder);
-            outlinerFolderOf_[static_cast<u32>(e)] = it.folder;
+            editor::folderAdd(selectionUi_.outlinerFolders_, it.folder);
+            selectionUi_.outlinerFolderOf_[static_cast<u32>(e)] = it.folder;
         }
     }
 }
@@ -1307,7 +1307,7 @@ void SandboxApp::outlinerSetLocked(const std::vector<scene::Entity>& ents, bool 
 }
 
 void SandboxApp::outlinerMoveToFolder(const std::vector<scene::Entity>& ents, const std::string& folder) {
-    if (!folder.empty() && !editor::folderExists(outlinerFolders_, folder)) return;
+    if (!folder.empty() && !editor::folderExists(selectionUi_.outlinerFolders_, folder)) return;
     scene::World& w = scene::World::instance();
     EditCmd c;
     c.kind = EditCmd::Kind::OutlinerMeta;
@@ -1331,9 +1331,9 @@ std::string SandboxApp::outlinerNewFolder(const std::string& parent, const std::
     EditCmd c;
     c.kind = EditCmd::Kind::OutlinerMeta;
     c.foldersChanged = true;
-    c.foldersBefore = outlinerFolders_;
-    const std::string path = editor::folderUniquePath(outlinerFolders_, parent);
-    c.foldersAfter = outlinerFolders_;
+    c.foldersBefore = selectionUi_.outlinerFolders_;
+    const std::string path = editor::folderUniquePath(selectionUi_.outlinerFolders_, parent);
+    c.foldersAfter = selectionUi_.outlinerFolders_;
     editor::folderAdd(c.foldersAfter, path);
     scene::World& w = scene::World::instance();
     for (const scene::Entity ent : members) {
@@ -1353,14 +1353,14 @@ std::string SandboxApp::outlinerNewFolder(const std::string& parent, const std::
 // Renames `from` to the path `to` (subfolders and members follow). Refused for an invalid or taken name.
 void SandboxApp::outlinerRenameFolder(const std::string& from, const std::string& to) {
     if (from.empty() || to == from || !editor::folderNameValid(editor::folderLeaf(to))) return;
-    if (editor::folderExists(outlinerFolders_, to) || editor::folderIsWithin(to, from)) return;
+    if (editor::folderExists(selectionUi_.outlinerFolders_, to) || editor::folderIsWithin(to, from)) return;
     EditCmd c;
     c.kind = EditCmd::Kind::OutlinerMeta;
     c.foldersChanged = true;
-    c.foldersBefore = outlinerFolders_;
-    for (const std::string& f : outlinerFolders_) editor::folderAdd(c.foldersAfter, editor::folderRebased(f, from, to));
+    c.foldersBefore = selectionUi_.outlinerFolders_;
+    for (const std::string& f : selectionUi_.outlinerFolders_) editor::folderAdd(c.foldersAfter, editor::folderRebased(f, from, to));
     editor::folderAdd(c.foldersAfter, to);
-    for (const auto& [ent, f] : outlinerFolderOf_) {
+    for (const auto& [ent, f] : selectionUi_.outlinerFolderOf_) {
         if (!editor::folderIsWithin(f, from)) continue;
         EditCmd::OutlinerMetaChange ch;
         ch.id = editIdFor(static_cast<scene::Entity>(ent));
@@ -1375,15 +1375,15 @@ void SandboxApp::outlinerRenameFolder(const std::string& from, const std::string
 
 // Removes `path` and its subfolders; everything in them moves up to the parent of `path`.
 void SandboxApp::outlinerDeleteFolder(const std::string& path) {
-    if (path.empty() || !editor::folderExists(outlinerFolders_, path)) return;
+    if (path.empty() || !editor::folderExists(selectionUi_.outlinerFolders_, path)) return;
     const std::string up = editor::folderParent(path);
     EditCmd c;
     c.kind = EditCmd::Kind::OutlinerMeta;
     c.foldersChanged = true;
-    c.foldersBefore = outlinerFolders_;
-    for (const std::string& f : outlinerFolders_)
+    c.foldersBefore = selectionUi_.outlinerFolders_;
+    for (const std::string& f : selectionUi_.outlinerFolders_)
         if (!editor::folderIsWithin(f, path)) c.foldersAfter.push_back(f);
-    for (const auto& [ent, f] : outlinerFolderOf_) {
+    for (const auto& [ent, f] : selectionUi_.outlinerFolderOf_) {
         if (!editor::folderIsWithin(f, path)) continue;
         EditCmd::OutlinerMetaChange ch;
         ch.id = editIdFor(static_cast<scene::Entity>(ent));
@@ -1439,7 +1439,7 @@ void SandboxApp::foliageBatchDestroy(const EditCmd& c) {
         const scene::Entity ent = entityForEdit(id);
         if (ent != scene::kInvalidEntity) destroyEntity(ent);
     }
-    sel_ = -1; selEntity_ = scene::kInvalidEntity;
+    selectionUi_.sel_ = -1; selectionUi_.selEntity_ = scene::kInvalidEntity;
 }
 
 // Recreates everything a foliage stroke destroyed, rebinding each snapshot to its old edit id so
@@ -1455,7 +1455,7 @@ void SandboxApp::foliageBatchRecreate(EditCmd& c) {
         // addressable across repeated undo/redo cycles rather than working exactly once.
         if (i < c.batchIds.size()) c.batchIds[i] = one.id;
     }
-    sel_ = -1; selEntity_ = scene::kInvalidEntity;
+    selectionUi_.sel_ = -1; selectionUi_.selEntity_ = scene::kInvalidEntity;
 }
 
 #endif
@@ -1470,7 +1470,7 @@ void SandboxApp::undo() {
         case EditCmd::Kind::Transform: applyXformTo(c, c.before, /*undoing=*/true); break;
 #if AVER_MODULE_SCENE
         case EditCmd::Kind::Create:    destroyEntity(entityForEdit(c.id));
-                                       sel_ = -1; selEntity_ = scene::kInvalidEntity; break;
+                                       selectionUi_.sel_ = -1; selectionUi_.selEntity_ = scene::kInvalidEntity; break;
         case EditCmd::Kind::Destroy:   recreateFrom(c); break;
         case EditCmd::Kind::Reparent:  applyReparentTo(c, c.reparentOldParentId, c.before); break;
 #endif
@@ -1487,23 +1487,23 @@ void SandboxApp::undo() {
         case EditCmd::Kind::DataLayers: applyDataLayerEdit(c.dataLayers, /*undoing=*/true); break;
         case EditCmd::Kind::Animation:  applyAnimationTo(c, /*undoing=*/true); break;
         case EditCmd::Kind::Prefab:     if (c.prefab) prefabModel_.undo(*c.prefab);
-                                        sel_ = -1; selEntity_ = scene::kInvalidEntity; break;
+                                        selectionUi_.sel_ = -1; selectionUi_.selEntity_ = scene::kInvalidEntity; break;
         case EditCmd::Kind::LevelInstance: if (c.levelInst) levelInstanceModel_.undo(*c.levelInst);   // [wave3/level-instances]
-                                        sel_ = -1; selEntity_ = scene::kInvalidEntity; break;
+                                        selectionUi_.sel_ = -1; selectionUi_.selEntity_ = scene::kInvalidEntity; break;
 #endif
         case EditCmd::Kind::CreateObj:   // undo a create: take it back out
             if (c.objIndex >= 0 && c.objIndex < (int)objects_.size()) {
                 objects_.erase(objects_.begin() + c.objIndex);
                 objectsErasedAt(c.objIndex);
             }
-            sel_ = -1; selEntity_ = kInvalidId;
+            selectionUi_.sel_ = -1; selectionUi_.selEntity_ = kInvalidId;
             break;
         case EditCmd::Kind::DestroyObj:  // undo a destroy: put it back at its old index
             if (c.objIndex >= 0 && c.objIndex <= (int)objects_.size()) {
                 objects_.insert(objects_.begin() + c.objIndex, c.objSnapshot);
                 objectsInsertedAt(c.objIndex);
             }
-            sel_ = c.objIndex; selEntity_ = kInvalidId;
+            selectionUi_.sel_ = c.objIndex; selectionUi_.selEntity_ = kInvalidId;
             break;
 #if AVER_MODULE_LANDSCAPE
         case EditCmd::Kind::LandscapeStroke:
@@ -1546,7 +1546,7 @@ void SandboxApp::redo() {
 #if AVER_MODULE_SCENE
         case EditCmd::Kind::Create:    recreateFrom(c); break;
         case EditCmd::Kind::Destroy:   destroyEntity(entityForEdit(c.id));
-                                       sel_ = -1; selEntity_ = scene::kInvalidEntity; break;
+                                       selectionUi_.sel_ = -1; selectionUi_.selEntity_ = scene::kInvalidEntity; break;
         case EditCmd::Kind::Reparent:  applyReparentTo(c, c.reparentNewParentId, c.after); break;
 #endif
 #if AVER_MODULE_PBR
@@ -1562,21 +1562,21 @@ void SandboxApp::redo() {
         case EditCmd::Kind::DataLayers: applyDataLayerEdit(c.dataLayers, /*undoing=*/false); break;
         case EditCmd::Kind::Animation:  applyAnimationTo(c, /*undoing=*/false); break;
         case EditCmd::Kind::Prefab:     if (c.prefab) prefabModel_.redo(*c.prefab);
-                                        sel_ = -1; selEntity_ = scene::kInvalidEntity; break;
+                                        selectionUi_.sel_ = -1; selectionUi_.selEntity_ = scene::kInvalidEntity; break;
         case EditCmd::Kind::LevelInstance: if (c.levelInst) levelInstanceModel_.redo(*c.levelInst);   // [wave3/level-instances]
-                                        sel_ = -1; selEntity_ = scene::kInvalidEntity; break;
+                                        selectionUi_.sel_ = -1; selectionUi_.selEntity_ = scene::kInvalidEntity; break;
 #endif
         case EditCmd::Kind::CreateObj:   // redo a create: put it back
             if (c.objIndex >= 0 && c.objIndex <= (int)objects_.size())
                 objects_.insert(objects_.begin() + c.objIndex, c.objSnapshot);
-            sel_ = c.objIndex; selEntity_ = kInvalidId;
+            selectionUi_.sel_ = c.objIndex; selectionUi_.selEntity_ = kInvalidId;
             break;
         case EditCmd::Kind::DestroyObj:  // redo a destroy: take it back out
             if (c.objIndex >= 0 && c.objIndex < (int)objects_.size()) {
                 objects_.erase(objects_.begin() + c.objIndex);
                 objectsErasedAt(c.objIndex);
             }
-            sel_ = -1; selEntity_ = kInvalidId;
+            selectionUi_.sel_ = -1; selectionUi_.selEntity_ = kInvalidId;
             break;
 #if AVER_MODULE_LANDSCAPE
         case EditCmd::Kind::LandscapeStroke:
@@ -1608,18 +1608,18 @@ void SandboxApp::redo() {
 // Returns what the status bar calls the current selection.
 std::string SandboxApp::selectionLabel() const {
 #if AVER_MODULE_SCENE
-    if (sel_ == kSelScene && scene::World::instance().valid(selEntity_)) {
-        const auto it = entityLabels_.find(static_cast<u32>(selEntity_));
+    if (selectionUi_.sel_ == SelectionState::kSelScene && scene::World::instance().valid(selectionUi_.selEntity_)) {
+        const auto it = entityLabels_.find(static_cast<u32>(selectionUi_.selEntity_));
         if (it != entityLabels_.end()) return it->second;
-        const std::string nm = scene::World::instance().name(selEntity_);
-        return nm.empty() ? ("Entity " + std::to_string((u32)selEntity_)) : nm;
+        const std::string nm = scene::World::instance().name(selectionUi_.selEntity_);
+        return nm.empty() ? ("Entity " + std::to_string((u32)selectionUi_.selEntity_)) : nm;
     }
 #endif
-    if (movableSelected()) return objects_[sel_].name;
-    if (sel_ == -2) return "Directional Light (Sun)";
-    if (sel_ == -3) return "Sky + Atmosphere";
-    if (sel_ == -4) return "Post Process";
-    if (sel_ == kSelPostVolume) return "Post Process Volumes";
+    if (movableSelected()) return objects_[selectionUi_.sel_].name;
+    if (selectionUi_.sel_ == -2) return "Directional Light (Sun)";
+    if (selectionUi_.sel_ == -3) return "Sky + Atmosphere";
+    if (selectionUi_.sel_ == -4) return "Post Process";
+    if (selectionUi_.sel_ == SelectionState::kSelPostVolume) return "Post Process Volumes";
     return "nothing selected";
 }
 
@@ -1629,7 +1629,7 @@ f32 SandboxApp::selectedRadius() const {
     if (!selectedXform(x)) return kEditorCubeHalf;
     const f32 s = std::fmax(std::fabs(x.scale.x), std::fmax(std::fabs(x.scale.y), std::fabs(x.scale.z)));
 #if AVER_MODULE_SCENE
-    if (sel_ == kSelScene) {
+    if (selectionUi_.sel_ == SelectionState::kSelScene) {
         // THE MESH'S OWN BOUNDS, NOT ITS SCALE. This returned `max(1, s)` -- the largest scale
         // COMPONENT -- and read no geometry at all. Almost every authored entity has scale 1, so
         // this was 1.0 for essentially the whole scene, and focusOnSelection's
@@ -1641,8 +1641,8 @@ f32 SandboxApp::selectedRadius() const {
         // branch, and by pick() for its ray test -- CMeshRenderer carries aabbMin/aabbMax in
         // MESH space, so the half-extent is scaled into world space here the same way.
         scene::World& w = scene::World::instance();
-        if (w.valid(selEntity_)) {
-            if (const auto* mr = w.component<scene::CMeshRenderer>(selEntity_, scene::kComponentMeshRenderer)) {
+        if (w.valid(selectionUi_.selEntity_)) {
+            if (const auto* mr = w.component<scene::CMeshRenderer>(selectionUi_.selEntity_, scene::kComponentMeshRenderer)) {
                 const f32 ex = (mr->aabbMax[0] - mr->aabbMin[0]) * std::fabs(x.scale.x);
                 const f32 ey = (mr->aabbMax[1] - mr->aabbMin[1]) * std::fabs(x.scale.y);
                 const f32 ez = (mr->aabbMax[2] - mr->aabbMin[2]) * std::fabs(x.scale.z);
@@ -1654,7 +1654,7 @@ f32 SandboxApp::selectedRadius() const {
 #if AVER_MODULE_FRAMEWORK
             // A graph-class root carries no mesh of its own: frame the box of its parts.
             Vec3 lo, hi;
-            if (classPartsBounds(selEntity_, lo, hi)) {
+            if (classPartsBounds(selectionUi_.selEntity_, lo, hi)) {
                 const Vec3 d{hi.x - lo.x, hi.y - lo.y, hi.z - lo.z};
                 return std::fmax(1.0f, 0.5f * std::sqrt(dot(d, d)));
             }
@@ -1664,7 +1664,7 @@ f32 SandboxApp::selectedRadius() const {
     }
 #endif
     if (movableSelected()) {
-        const MeshObj& o = objects_[sel_];
+        const MeshObj& o = objects_[selectionUi_.sel_];
         const Vec3 e{o.aabbMax.x - o.aabbMin.x, o.aabbMax.y - o.aabbMin.y, o.aabbMax.z - o.aabbMin.z};
         return std::fmax(1.0f, 0.5f * std::fmax(e.x, std::fmax(e.y, e.z)) * s);
     }

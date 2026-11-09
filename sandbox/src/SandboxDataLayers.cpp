@@ -25,10 +25,10 @@ void SandboxApp::drawDataLayersPanel() {
             if (e != scene::kInvalidEntity && scene::World::instance().valid(e)) ents.push_back(e);
         }
         if (ents.empty()) return;
-        multiSel_ = ents;
+        selectionUi_.multiSel_ = ents;
         multiRebuildSet();
-        sel_ = kSelScene;
-        selEntity_ = ents.front();
+        selectionUi_.sel_ = SelectionState::kSelScene;
+        selectionUi_.selEntity_ = ents.front();
     };
     host.push = [this](editor::dl::Edit e) { pushDataLayerEdit(std::move(e)); };
     host.refreshVisibility = [this]() { syncDataLayerVisibility(); };
@@ -65,7 +65,7 @@ void SandboxApp::syncDataLayerVisibility() {
         dataLayerHidden_.erase(id);
         const scene::Entity e = static_cast<scene::Entity>(id);
         if (!w.valid(e)) continue;
-        if (const auto it = std::find(editorHidden_.begin(), editorHidden_.end(), e); it != editorHidden_.end()) editorHidden_.erase(it);
+        if (const auto it = std::find(selectionUi_.editorHidden_.begin(), selectionUi_.editorHidden_.end(), e); it != selectionUi_.editorHidden_.end()) selectionUi_.editorHidden_.erase(it);
         if (auto* mr = w.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer)) mr->flags |= scene::kMeshRendererVisible;
     }
     for (const editor::dl::Key key : dataLayers_.allMembers()) {
@@ -75,7 +75,7 @@ void SandboxApp::syncDataLayerVisibility() {
         auto* mr = w.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer);
         if (!mr || !(mr->flags & scene::kMeshRendererVisible)) continue;   // already hidden by someone else or not drawable
         mr->flags &= ~scene::kMeshRendererVisible;
-        editorHidden_.push_back(e);
+        selectionUi_.editorHidden_.push_back(e);
         dataLayerHidden_.insert(static_cast<u32>(e));
     }
 }

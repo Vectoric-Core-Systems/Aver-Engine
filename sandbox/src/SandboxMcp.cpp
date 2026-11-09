@@ -629,9 +629,9 @@ bool SandboxApp::mcpLevelMove(AvId e, const EditXform& x, std::string& why) {
               "and place it again with the offset you want";
         return false;
     }
-    const int prevSel = sel_;
-    const AvId prevEnt = selEntity_;
-    const std::vector<scene::Entity> prevMulti = multiSel_;
+    const int prevSel = selectionUi_.sel_;
+    const AvId prevEnt = selectionUi_.selEntity_;
+    const std::vector<scene::Entity> prevMulti = selectionUi_.multiSel_;
     multiSetSingle(e);
     const bool ok = beginTransformEdit();
     if (ok) {
@@ -640,9 +640,9 @@ bool SandboxApp::mcpLevelMove(AvId e, const EditXform& x, std::string& why) {
     } else {
         why = "entity " + jid(e) + " has no transform to edit";
     }
-    sel_ = prevSel;
-    selEntity_ = prevEnt;
-    multiSel_ = prevMulti;
+    selectionUi_.sel_ = prevSel;
+    selectionUi_.selEntity_ = prevEnt;
+    selectionUi_.multiSel_ = prevMulti;
     multiRebuildSet();                   // multiSet_ must mirror multiSel_ (see its declaration)
     return ok;
 #else
@@ -1198,8 +1198,8 @@ bool SandboxApp::mcpLevelAbi(const mcp::AbiCall& a, std::string& r, std::string&
     // The same selection the outliner's multi paths build: the first id single (the anchor), the rest toggled in.
     const auto selectIds = [this](const std::vector<scene::Entity>& ids) {
         multiClear();
-        sel_ = -1;
-        selEntity_ = scene::kInvalidEntity;
+        selectionUi_.sel_ = -1;
+        selectionUi_.selEntity_ = scene::kInvalidEntity;
         if (ids.empty()) return;
         multiSetSingle(ids[0]);
         for (usize i = 1; i < ids.size(); ++i) multiToggle(ids[i]);

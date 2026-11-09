@@ -20,12 +20,12 @@ namespace aver {
 #if AVER_MODULE_SCENE
 // Starts an inline rename on a row, seeded with the name it already shows.
 void SandboxApp::beginOutlinerRename(scene::Entity e) {
-    outlinerRenaming_ = e;
-    outlinerRenameFocus_ = true;
+    selectionUi_.outlinerRenaming_ = e;
+    selectionUi_.outlinerRenameFocus_ = true;
     const auto it = entityLabels_.find(static_cast<u32>(e));
     const std::string cur = it != entityLabels_.end() ? it->second
                                                       : scene::World::instance().name(e);
-    std::snprintf(outlinerRenameBuf_, sizeof outlinerRenameBuf_, "%s", cur.c_str());
+    std::snprintf(selectionUi_.outlinerRenameBuf_, sizeof selectionUi_.outlinerRenameBuf_, "%s", cur.c_str());
 }
 
 #endif
@@ -1170,7 +1170,7 @@ void SandboxApp::drawOutlinerRow(const OutlinerRow& row,
     ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_SpanAvailWidth;
     // The whole set is highlighted, not just the anchor: an invisible multi-select looks broken,
     // and the first thing a user does with a "broken" selection is click again and lose it.
-    if (sel_ == kSelScene && (selEntity_ == row.ent || multiIsSelected(row.ent)))
+    if (selectionUi_.sel_ == SelectionState::kSelScene && (selectionUi_.selEntity_ == row.ent || multiIsSelected(row.ent)))
         flags |= ImGuiTreeNodeFlags_Selected;
     if (!hasKids) {
         flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
@@ -1182,21 +1182,21 @@ void SandboxApp::drawOutlinerRow(const OutlinerRow& row,
 
     // The row becomes a text field while renaming, rather than a dialog: edited where it's read,
     // as every file browser and outliner does, keeping the tree's shape from jumping.
-    if (outlinerRenaming_ == row.ent) {
+    if (selectionUi_.outlinerRenaming_ == row.ent) {
         ImGui::SetNextItemWidth(-1.0f);
-        if (outlinerRenameFocus_) { ImGui::SetKeyboardFocusHere(); outlinerRenameFocus_ = false; }
+        if (selectionUi_.outlinerRenameFocus_) { ImGui::SetKeyboardFocusHere(); selectionUi_.outlinerRenameFocus_ = false; }
         const bool done = ImGui::InputText(("##ren" + std::to_string((u32)row.ent)).c_str(),
-                                           outlinerRenameBuf_, sizeof outlinerRenameBuf_,
+                                           selectionUi_.outlinerRenameBuf_, sizeof selectionUi_.outlinerRenameBuf_,
                                            ImGuiInputTextFlags_EnterReturnsTrue);
         // Escape abandons; Enter or clicking away commits. Deactivation covers both the click
         // and the Escape, so the key has to be tested first.
         if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
-            outlinerRenaming_ = scene::kInvalidEntity;
+            selectionUi_.outlinerRenaming_ = scene::kInvalidEntity;
         } else if (done || ImGui::IsItemDeactivatedAfterEdit()) {
-            renameEntity(row.ent, outlinerRenameBuf_);
-            outlinerRenaming_ = scene::kInvalidEntity;
+            renameEntity(row.ent, selectionUi_.outlinerRenameBuf_);
+            selectionUi_.outlinerRenaming_ = scene::kInvalidEntity;
         } else if (ImGui::IsItemDeactivated()) {
-            outlinerRenaming_ = scene::kInvalidEntity;   // clicked away without editing
+            selectionUi_.outlinerRenaming_ = scene::kInvalidEntity;   // clicked away without editing
         }
         // The children still have to be walked, or renaming a parent collapses the tree for a
         // frame. TreeNodeEx is skipped, so nothing was pushed and nothing must be popped.
@@ -1211,7 +1211,7 @@ void SandboxApp::drawOutlinerRow(const OutlinerRow& row,
     // whole order was recorded by rebuildOutlinerCache (root order IS the visual order when nothing
     // nests); a tree's leaf roots are copied in a run at a time by drawOutlinerTreeRows. Both pass
     // recordOrder = false.
-    if (recordOrder) outlinerOrder_.push_back(row.ent);
+    if (recordOrder) selectionUi_.outlinerOrder_.push_back(row.ent);
 
     const std::string label = editor::iconLabel(outlinerIconFor(row.ent), row.shown.c_str()) +
                               "##e" + std::to_string((u32)row.ent);
@@ -1233,7 +1233,7 @@ void SandboxApp::drawOutlinerRow(const OutlinerRow& row,
         // Same keys as the Content Browser and every file browser: shift extends from the
         // anchor, ctrl toggles, a bare click replaces -- the two panels must agree on this.
         const ImGuiIO& cio = ImGui::GetIO();
-        if (cio.KeyShift && sel_ == kSelScene && selEntity_ != scene::kInvalidEntity)
+        if (cio.KeyShift && selectionUi_.sel_ == SelectionState::kSelScene && selectionUi_.selEntity_ != scene::kInvalidEntity)
             multiRange(row.ent);
         else if (cio.KeyCtrl)
             multiToggle(row.ent);
@@ -1249,11 +1249,11 @@ void SandboxApp::drawOutlinerRow(const OutlinerRow& row,
         beginOutlinerRename(row.ent);
     }
     if (ImGui::BeginPopupContextItem(("##ctx" + std::to_string((u32)row.ent)).c_str())) {
-        outlinerCtxRow_ = row.ent;   // re-marked every frame it stays open; see drawOutlinerFlatRows
+        selectionUi_.outlinerCtxRow_ = row.ent;   // re-marked every frame it stays open; see drawOutlinerFlatRows
         // Right-click on a row already in the selection keeps the whole set (otherwise "select
         // five, right-click, Delete" deletes one); right-click outside it selects just that row.
         if (!multiIsSelected(row.ent)) multiSetSingle(row.ent);
-        else { sel_ = kSelScene; selEntity_ = row.ent; }
+        else { selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = row.ent; }
         if (ImGui::MenuItem("Rename", "F2")) beginOutlinerRename(row.ent);
         {
             const std::vector<scene::Entity> sel = selectedEntities();
@@ -1265,13 +1265,13 @@ void SandboxApp::drawOutlinerRow(const OutlinerRow& row,
             }
             if (ImGui::BeginMenu(ICON_FOLDER " Move to Folder")) {
                 if (ImGui::MenuItem("(No folder)")) outlinerMoveToFolder(sel, std::string());
-                for (const std::string& f : std::vector<std::string>(outlinerFolders_))
+                for (const std::string& f : std::vector<std::string>(selectionUi_.outlinerFolders_))
                     if (ImGui::MenuItem(f.c_str())) outlinerMoveToFolder(sel, f);
                 ImGui::Separator();
                 if (ImGui::MenuItem(ICON_NEW_FOLDER " New Folder")) {
-                    outlinerFolderRenaming_ = outlinerNewFolder(std::string(), sel);
-                    outlinerFolderRenameFocus_ = true;
-                    std::snprintf(outlinerFolderRenameBuf_, sizeof outlinerFolderRenameBuf_, "%s", editor::folderLeaf(outlinerFolderRenaming_).c_str());
+                    selectionUi_.outlinerFolderRenaming_ = outlinerNewFolder(std::string(), sel);
+                    selectionUi_.outlinerFolderRenameFocus_ = true;
+                    std::snprintf(selectionUi_.outlinerFolderRenameBuf_, sizeof selectionUi_.outlinerFolderRenameBuf_, "%s", editor::folderLeaf(selectionUi_.outlinerFolderRenaming_).c_str());
                 }
                 ImGui::EndMenu();
             }
@@ -1284,7 +1284,7 @@ void SandboxApp::drawOutlinerRow(const OutlinerRow& row,
         // that destroying an entity mid-walk would invalidate. Answered after the whole tree draws.
         if (ImGui::MenuItem("Delete", editor::chordToString(
                 keybinds_.chordFor(editor::CommandId::EditDelete)).c_str())) {
-            outlinerDeleteRequest_ = row.ent;
+            selectionUi_.outlinerDeleteRequest_ = row.ent;
         }
         // [wave3/level-instances begin] the selection (and what is under it) becomes a level, replaced by an instance of it
         if (ImGui::MenuItem("Create Level Instance...")) {
@@ -1357,21 +1357,21 @@ static int outlinerPinnedRoots(const std::vector<scene::Entity>& roots, scene::E
 // submits does not -- so wheel-scrolling toward a far drop target mid-drag would cancel the drag,
 // and scrolling away from a rename would orphan its text field.
 void SandboxApp::drawOutlinerFlatRows() {
-    const int count = static_cast<int>(outlinerRoots_.size());
+    const int count = static_cast<int>(selectionUi_.outlinerRoots_.size());
     ImGuiListClipper clipper;
     clipper.Begin(count, std::floor(ImGui::GetTextLineHeightWithSpacing()));
 
     // The row whose context menu was open last frame is pinned too; drawing it re-marks it if the
     // menu is still open, so the mark lapses one frame after the menu closes.
-    const scene::Entity ctxRow = outlinerCtxRow_;
-    outlinerCtxRow_ = scene::kInvalidEntity;
+    const scene::Entity ctxRow = selectionUi_.outlinerCtxRow_;
+    selectionUi_.outlinerCtxRow_ = scene::kInvalidEntity;
     int pinAt[3] = {-1, -1, -1};
-    const int pinCount = outlinerPinnedRoots(outlinerRootEnts_, outlinerRenaming_, ctxRow, pinAt);
+    const int pinCount = outlinerPinnedRoots(selectionUi_.outlinerRootEnts_, selectionUi_.outlinerRenaming_, ctxRow, pinAt);
     for (int p = 0; p < pinCount; ++p) clipper.IncludeItemByIndex(pinAt[p]);
 
     while (clipper.Step())
         for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i)
-            drawOutlinerRow(*outlinerRoots_[static_cast<usize>(i)], outlinerChildren_, 0, false);
+            drawOutlinerRow(*selectionUi_.outlinerRoots_[static_cast<usize>(i)], selectionUi_.outlinerChildren_, 0, false);
 }
 
 // DRAWS A TREE CACHE (some row has a parent listed) WITHOUT SUBMITTING THE LEAF ROOTS THAT ARE OFF
@@ -1396,32 +1396,32 @@ void SandboxApp::drawOutlinerFlatRows() {
 // drawOutlinerFlatRows), each included in the clipper of the run it falls in. A parent and its
 // subtree are always submitted, so a pin there needs nothing.
 void SandboxApp::drawOutlinerTreeRows() {
-    const int count = static_cast<int>(outlinerRoots_.size());
+    const int count = static_cast<int>(selectionUi_.outlinerRoots_.size());
 
-    const scene::Entity ctxRow = outlinerCtxRow_;
-    outlinerCtxRow_ = scene::kInvalidEntity;
+    const scene::Entity ctxRow = selectionUi_.outlinerCtxRow_;
+    selectionUi_.outlinerCtxRow_ = scene::kInvalidEntity;
     int pinAt[3] = {-1, -1, -1};
-    const int pinCount = outlinerPinnedRoots(outlinerRootEnts_, outlinerRenaming_, ctxRow, pinAt);
+    const int pinCount = outlinerPinnedRoots(selectionUi_.outlinerRootEnts_, selectionUi_.outlinerRenaming_, ctxRow, pinAt);
     const float rowPitch = std::floor(ImGui::GetTextLineHeightWithSpacing());
 
     const auto drawLeafRun = [&](int from, int to) {
         if (from >= to) return;
-        outlinerOrder_.insert(outlinerOrder_.end(), outlinerRootEnts_.begin() + from,
-                              outlinerRootEnts_.begin() + to);
+        selectionUi_.outlinerOrder_.insert(selectionUi_.outlinerOrder_.end(), selectionUi_.outlinerRootEnts_.begin() + from,
+                              selectionUi_.outlinerRootEnts_.begin() + to);
         ImGuiListClipper clipper;
         clipper.Begin(to - from, rowPitch);
         for (int p = 0; p < pinCount; ++p)
             if (pinAt[p] >= from && pinAt[p] < to) clipper.IncludeItemByIndex(pinAt[p] - from);
         while (clipper.Step())
             for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i)
-                drawOutlinerRow(*outlinerRoots_[static_cast<usize>(from + i)], outlinerChildren_, 0,
+                drawOutlinerRow(*selectionUi_.outlinerRoots_[static_cast<usize>(from + i)], selectionUi_.outlinerChildren_, 0,
                                 false);
     };
 
     int next = 0;
-    for (const u32 parentAt : outlinerParentRoots_) {
+    for (const u32 parentAt : selectionUi_.outlinerParentRoots_) {
         drawLeafRun(next, static_cast<int>(parentAt));
-        drawOutlinerRow(*outlinerRoots_[parentAt], outlinerChildren_, 0);
+        drawOutlinerRow(*selectionUi_.outlinerRoots_[parentAt], selectionUi_.outlinerChildren_, 0);
         next = static_cast<int>(parentAt) + 1;
     }
     drawLeafRun(next, count);
@@ -1455,9 +1455,9 @@ u64 SandboxApp::outlinerSignature() const {
     u64 h = kFnv1a64OffsetBasis;
     const auto mix = [&h](u64 v) { h = (h ^ v) * kFnv1a64Prime; };
     mix(w.count());
-    mix(fnv1a64(outlinerFilter_));
-    mix(outlinerTypeMask_);
-    mix(outlinerFolderRev_);
+    mix(fnv1a64(selectionUi_.outlinerFilter_));
+    mix(selectionUi_.outlinerTypeMask_);
+    mix(selectionUi_.outlinerFolderRev_);
     mix(static_cast<u64>(droneEntity_));
     mix(static_cast<u64>(entityLabels_.size()));
     mix(static_cast<u64>(levelEntities_.size()));
@@ -1497,7 +1497,7 @@ u64 SandboxApp::outlinerSlotSignature(u32 slot) const {
     mix(hasMesh ? 1u : 0u);
     mix(fnv1a64(std::string_view(nm)));
     mix(static_cast<u64>(w.parent(ent)));
-    if (editor::outlinerTypeFiltering(outlinerTypeMask_)) mix(static_cast<u64>(outlinerTypeFor(ent)));
+    if (editor::outlinerTypeFiltering(selectionUi_.outlinerTypeMask_)) mix(static_cast<u64>(outlinerTypeFor(ent)));
     // childCount only changes the drawn rows through the pivot-keep rule (an unnamed, mesh-less
     // entity survives once it has a child), so it only needs hashing for the entities that rule
     // could apply to.
@@ -1540,7 +1540,7 @@ u64 SandboxApp::outlinerEditMark() const {
 bool SandboxApp::outlinerAuditDiverged(bool full) {
     const u32 n = scene::World::instance().count();
     // The stamp holds the count, so a mismatch here means the rebuild has not run since it moved.
-    if (outlinerSlotSigs_.size() != n) return true;
+    if (selectionUi_.outlinerSlotSigs_.size() != n) return true;
     // FOUR TIMES AS LONG A CYCLE WHILE PLAYING: a spawn or destroy moves the stamp's entity count and
     // is not the audit's job, and a Play frame is many times an idle one, so the slice (n / cycle
     // slots of hashing, about 0.2 ms at 52.8k entities) is not worth paying at the idle rate.
@@ -1549,12 +1549,12 @@ bool SandboxApp::outlinerAuditDiverged(bool full) {
     const u32 cycle = outlinerPlaying() ? kAuditCycleFrames * 4 : kAuditCycleFrames;
     const u32 slice = full ? n
         : std::min(n, std::max(kAuditMinSlice, (n + cycle - 1) / cycle));
-    u32 i = outlinerAuditCursor_ < n ? outlinerAuditCursor_ : 0;
+    u32 i = selectionUi_.outlinerAuditCursor_ < n ? selectionUi_.outlinerAuditCursor_ : 0;
     for (u32 k = 0; k < slice; ++k) {
-        if (outlinerSlotSignature(i) != outlinerSlotSigs_[i]) return true;
+        if (outlinerSlotSignature(i) != selectionUi_.outlinerSlotSigs_[i]) return true;
         if (++i == n) i = 0;
     }
-    outlinerAuditCursor_ = i;
+    selectionUi_.outlinerAuditCursor_ = i;
     return false;
 }
 
@@ -1584,17 +1584,17 @@ bool SandboxApp::outlinerPlaying() const {
 void SandboxApp::refreshOutlinerCache() {
     constexpr double kPlayRebuildInterval = 0.5;   // seconds
     const u64 editMark = outlinerEditMark();
-    const bool edited = editMark != outlinerEditMark_;
-    if (outlinerCacheValid_ && !edited && outlinerPlaying() &&
-        ImGui::GetTime() - outlinerRebuiltAt_ < kPlayRebuildInterval)
+    const bool edited = editMark != selectionUi_.outlinerEditMark_;
+    if (selectionUi_.outlinerCacheValid_ && !edited && outlinerPlaying() &&
+        ImGui::GetTime() - selectionUi_.outlinerRebuiltAt_ < kPlayRebuildInterval)
         return;
     const u64 sig = outlinerSignature();
-    outlinerEditMark_ = editMark;
-    if (outlinerCacheValid_ && sig == outlinerCacheSig_ && !outlinerAuditDiverged(edited)) return;
+    selectionUi_.outlinerEditMark_ = editMark;
+    if (selectionUi_.outlinerCacheValid_ && sig == selectionUi_.outlinerCacheSig_ && !outlinerAuditDiverged(edited)) return;
     rebuildOutlinerCache();
-    outlinerCacheSig_ = sig;
-    outlinerCacheValid_ = true;
-    outlinerRebuiltAt_ = ImGui::GetTime();
+    selectionUi_.outlinerCacheSig_ = sig;
+    selectionUi_.outlinerCacheValid_ = true;
+    selectionUi_.outlinerRebuiltAt_ = ImGui::GetTime();
 }
 
 // Redoes the three passes and the sort that buildOutlinerPanel used to run unconditionally every
@@ -1639,9 +1639,9 @@ void SandboxApp::rebuildOutlinerCache() {
     // case-insensitive substring of the label; ancestors are kept too (a dropped parent's row
     // is never visited by the root-down walk below) but descendants of a match are NOT --
     // "show me the thing I named" shouldn't unfold its subtree.
-    const bool typeFiltering = editor::outlinerTypeFiltering(outlinerTypeMask_);
-    if (!outlinerFilter_.empty() || typeFiltering) {
-        const std::string needle = lowerCopy(outlinerFilter_);
+    const bool typeFiltering = editor::outlinerTypeFiltering(selectionUi_.outlinerTypeMask_);
+    if (!selectionUi_.outlinerFilter_.empty() || typeFiltering) {
+        const std::string needle = lowerCopy(selectionUi_.outlinerFilter_);
         std::unordered_map<u32, const OutlinerRow*> byEnt;
         byEnt.reserve(rows.size());
         for (const OutlinerRow& r : rows) byEnt[static_cast<u32>(r.ent)] = &r;
@@ -1650,7 +1650,7 @@ void SandboxApp::rebuildOutlinerCache() {
         keep.reserve(rows.size());
         for (const OutlinerRow& r : rows) {
             if (!needle.empty() && lowerCopy(r.shown).find(needle) == std::string::npos) continue;
-            if (typeFiltering && !editor::outlinerTypeShown(outlinerTypeMask_, outlinerTypeFor(r.ent))) continue;
+            if (typeFiltering && !editor::outlinerTypeShown(selectionUi_.outlinerTypeMask_, outlinerTypeFor(r.ent))) continue;
             keep.insert(static_cast<u32>(r.ent));
             // Walk up through the rows we actually have, not through World: an ancestor that
             // was already excluded by the filters above is not a row and must not be revived.
@@ -1673,58 +1673,58 @@ void SandboxApp::rebuildOutlinerCache() {
     // outlinerRows_ TAKES OWNERSHIP FIRST, before outlinerChildren_/outlinerRoots_ are built: both
     // point INTO outlinerRows_, so it must reach its final address before anything takes a
     // pointer into it. The swap moves rows in without copying every OutlinerRow::shown string.
-    outlinerRows_.swap(rows);
+    selectionUi_.outlinerRows_.swap(rows);
 
     // PASS TWO, and it has to be separate: w.at() walks the dense array (swap-with-last on
     // destroy, no ordering guarantee), so a child can appear before its parent -- testing
     // membership against a still-filling set would wrongly promote children to roots.
-    outlinerChildren_.clear();
-    outlinerChildren_.reserve(outlinerRows_.size());
-    outlinerRoots_.clear();
-    for (const OutlinerRow& r : outlinerRows_) {
+    selectionUi_.outlinerChildren_.clear();
+    selectionUi_.outlinerChildren_.reserve(selectionUi_.outlinerRows_.size());
+    selectionUi_.outlinerRoots_.clear();
+    for (const OutlinerRow& r : selectionUi_.outlinerRows_) {
         if (r.par != scene::kInvalidEntity && survived.count(static_cast<u32>(r.par)))
-            outlinerChildren_[static_cast<u32>(r.par)].push_back(&r);
+            selectionUi_.outlinerChildren_[static_cast<u32>(r.par)].push_back(&r);
         else
-            outlinerRoots_.push_back(&r);   // true root, or one whose parent was filtered out or
+            selectionUi_.outlinerRoots_.push_back(&r);   // true root, or one whose parent was filtered out or
                                             // gone -- promoted so it stays reachable.
     }
     // ALPHABETICAL, not scan order: linkToParent PREPENDS, so the engine's child order is
     // newest-first and the list would visibly reshuffle every time anything is attached.
     const auto byLabel = [](const OutlinerRow* a, const OutlinerRow* b) { return a->shown < b->shown; };
-    std::sort(outlinerRoots_.begin(), outlinerRoots_.end(), byLabel);
-    for (auto& kv : outlinerChildren_) std::sort(kv.second.begin(), kv.second.end(), byLabel);
+    std::sort(selectionUi_.outlinerRoots_.begin(), selectionUi_.outlinerRoots_.end(), byLabel);
+    for (auto& kv : selectionUi_.outlinerChildren_) std::sort(kv.second.begin(), kv.second.end(), byLabel);
 
     // Roots filed in a folder leave the root list and draw under their folder (same alphabetical order).
-    outlinerFolderRows_.clear();
-    if (!outlinerFolderOf_.empty()) {
+    selectionUi_.outlinerFolderRows_.clear();
+    if (!selectionUi_.outlinerFolderOf_.empty()) {
         std::vector<const OutlinerRow*> unfiled;
-        unfiled.reserve(outlinerRoots_.size());
-        for (const OutlinerRow* r : outlinerRoots_) {
-            const auto fi = outlinerFolderOf_.find(static_cast<u32>(r->ent));
-            if (fi != outlinerFolderOf_.end() && editor::folderExists(outlinerFolders_, fi->second))
-                outlinerFolderRows_[fi->second].push_back(r);
+        unfiled.reserve(selectionUi_.outlinerRoots_.size());
+        for (const OutlinerRow* r : selectionUi_.outlinerRoots_) {
+            const auto fi = selectionUi_.outlinerFolderOf_.find(static_cast<u32>(r->ent));
+            if (fi != selectionUi_.outlinerFolderOf_.end() && editor::folderExists(selectionUi_.outlinerFolders_, fi->second))
+                selectionUi_.outlinerFolderRows_[fi->second].push_back(r);
             else
                 unfiled.push_back(r);
         }
-        outlinerRoots_.swap(unfiled);
+        selectionUi_.outlinerRoots_.swap(unfiled);
     }
 
     // What the audit compares against, and where it starts: a fresh cycle from slot 0.
-    outlinerSlotSigs_.swap(slotSigs);
-    outlinerAuditCursor_ = 0;
+    selectionUi_.outlinerSlotSigs_.swap(slotSigs);
+    selectionUi_.outlinerAuditCursor_ = 0;
 
     // THE ROOTS AS A PLAIN ARRAY, and which of them have children, both found HERE so the per-frame
     // draws never touch a row to learn them: the roots are alphabetical, so their rows sit all over
     // outlinerRows_ and a pass over them is a cache miss per root (52k of them every frame).
     // outlinerParentRoots_ is empty for a flat list, which skips the lookups.
-    outlinerRootEnts_.clear();
-    outlinerRootEnts_.reserve(outlinerRoots_.size());
-    outlinerParentRoots_.clear();
-    for (usize i = 0; i < outlinerRoots_.size(); ++i) {
-        const scene::Entity ent = outlinerRoots_[i]->ent;
-        outlinerRootEnts_.push_back(ent);
-        if (!outlinerChildren_.empty() && outlinerChildren_.count(static_cast<u32>(ent)))
-            outlinerParentRoots_.push_back(static_cast<u32>(i));
+    selectionUi_.outlinerRootEnts_.clear();
+    selectionUi_.outlinerRootEnts_.reserve(selectionUi_.outlinerRoots_.size());
+    selectionUi_.outlinerParentRoots_.clear();
+    for (usize i = 0; i < selectionUi_.outlinerRoots_.size(); ++i) {
+        const scene::Entity ent = selectionUi_.outlinerRoots_[i]->ent;
+        selectionUi_.outlinerRootEnts_.push_back(ent);
+        if (!selectionUi_.outlinerChildren_.empty() && selectionUi_.outlinerChildren_.count(static_cast<u32>(ent)))
+            selectionUi_.outlinerParentRoots_.push_back(static_cast<u32>(i));
     }
 
     // A FLAT LIST'S ORDER IS RECORDED HERE, ONCE. Nothing nests (no row has a listed parent), so the
@@ -1732,8 +1732,8 @@ void SandboxApp::rebuildOutlinerCache() {
     // (drawOutlinerFlatRows) -- so drawOutlinerRow cannot be what fills outlinerOrder_ any more, and
     // multiRange/selectAllInOutliner/the Select All enable checks all need the whole list. A tree
     // rebuilds its order each frame (drawOutlinerTreeRows): the open rows move with the folders.
-    outlinerFlat_ = outlinerChildren_.empty() && outlinerFolderRows_.empty();
-    if (outlinerFlat_) outlinerOrder_ = outlinerRootEnts_;
+    selectionUi_.outlinerFlat_ = selectionUi_.outlinerChildren_.empty() && selectionUi_.outlinerFolderRows_.empty();
+    if (selectionUi_.outlinerFlat_) selectionUi_.outlinerOrder_ = selectionUi_.outlinerRootEnts_;
 }
 
 #endif
@@ -1747,14 +1747,14 @@ void SandboxApp::rebuildOutlinerCache() {
 void SandboxApp::drawOutlinerFilterBar() {
     const float btn = ImGui::GetFrameHeight(), sp = ImGui::GetStyle().ItemSpacing.x;
     char buf[128];
-    std::snprintf(buf, sizeof buf, "%s", outlinerFilter_.c_str());
+    std::snprintf(buf, sizeof buf, "%s", selectionUi_.outlinerFilter_.c_str());
     ImGui::SetNextItemWidth(-(2.0f * btn + 2.0f * sp));
     if (ImGui::InputTextWithHint("##outlinerFilter", ICON_SEARCH " Filter by name", buf, sizeof buf))
-        outlinerFilter_ = buf;
+        selectionUi_.outlinerFilter_ = buf;
     uiReg_.track("outliner.filter");
 
     ImGui::SameLine();
-    const bool typeFiltering = editor::outlinerTypeFiltering(outlinerTypeMask_);
+    const bool typeFiltering = editor::outlinerTypeFiltering(selectionUi_.outlinerTypeMask_);
     if (typeFiltering) {
         const auto a = editor::editorTheme().accent;
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(a.r, a.g, a.b, 1.0f));
@@ -1766,19 +1766,19 @@ void SandboxApp::drawOutlinerFilterBar() {
     if (ImGui::BeginPopup("##typeFilterPopup")) {
         for (u32 t = 0; t < editor::kOutlinerTypeCount; ++t) {
             const auto type = static_cast<editor::OutlinerType>(t);
-            bool on = editor::outlinerTypeShown(outlinerTypeMask_, type);
-            if (ImGui::Checkbox(editor::outlinerTypeName(type), &on)) outlinerTypeMask_ = editor::outlinerTypeToggled(outlinerTypeMask_, type);
+            bool on = editor::outlinerTypeShown(selectionUi_.outlinerTypeMask_, type);
+            if (ImGui::Checkbox(editor::outlinerTypeName(type), &on)) selectionUi_.outlinerTypeMask_ = editor::outlinerTypeToggled(selectionUi_.outlinerTypeMask_, type);
         }
         ImGui::Separator();
-        if (ImGui::Selectable("Show all")) outlinerTypeMask_ = editor::kOutlinerAllTypes;
+        if (ImGui::Selectable("Show all")) selectionUi_.outlinerTypeMask_ = editor::kOutlinerAllTypes;
         ImGui::EndPopup();
     }
 
     ImGui::SameLine();
     if (ImGui::Button(ICON_NEW_FOLDER "##newFolder", ImVec2(btn, btn))) {
-        outlinerFolderRenaming_ = outlinerNewFolder(std::string(), selectedEntities());
-        outlinerFolderRenameFocus_ = true;
-        std::snprintf(outlinerFolderRenameBuf_, sizeof outlinerFolderRenameBuf_, "%s", editor::folderLeaf(outlinerFolderRenaming_).c_str());
+        selectionUi_.outlinerFolderRenaming_ = outlinerNewFolder(std::string(), selectedEntities());
+        selectionUi_.outlinerFolderRenameFocus_ = true;
+        std::snprintf(selectionUi_.outlinerFolderRenameBuf_, sizeof selectionUi_.outlinerFolderRenameBuf_, "%s", editor::folderLeaf(selectionUi_.outlinerFolderRenaming_).c_str());
     }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("New folder (takes the selected actors)");
     uiReg_.track("outliner.newFolder");
@@ -1787,10 +1787,10 @@ void SandboxApp::drawOutlinerFilterBar() {
 // The folders under `parent`, each with its subfolders and the roots filed in it. Folders are editor-only
 // (OutlinerModel.hpp). Actions are collected and answered after the walk: they reshape the folder list.
 void SandboxApp::drawOutlinerFolders(const std::string& parent) {
-    const bool filtering = !outlinerFilter_.empty() || editor::outlinerTypeFiltering(outlinerTypeMask_);
-    const std::vector<std::string> list = outlinerFolders_;
+    const bool filtering = !selectionUi_.outlinerFilter_.empty() || editor::outlinerTypeFiltering(selectionUi_.outlinerTypeMask_);
+    const std::vector<std::string> list = selectionUi_.outlinerFolders_;
     const auto hasRows = [&](const std::string& path) {
-        for (const auto& [f, rows] : outlinerFolderRows_)
+        for (const auto& [f, rows] : selectionUi_.outlinerFolderRows_)
             if (!rows.empty() && editor::folderIsWithin(f, path)) return true;
         return false;
     };
@@ -1807,26 +1807,26 @@ void SandboxApp::drawOutlinerFolders(const std::string& parent) {
         if (editor::folderParent(path) != parent) continue;
         if (filtering && !hasRows(path)) continue;
         ImGui::PushID(path.c_str());
-        const auto rowsIt = outlinerFolderRows_.find(path);
-        const usize count = rowsIt == outlinerFolderRows_.end() ? 0 : rowsIt->second.size();
+        const auto rowsIt = selectionUi_.outlinerFolderRows_.find(path);
+        const usize count = rowsIt == selectionUi_.outlinerFolderRows_.end() ? 0 : rowsIt->second.size();
 
-        if (outlinerFolderRenaming_ == path) {
+        if (selectionUi_.outlinerFolderRenaming_ == path) {
             ImGui::SetNextItemWidth(-1.0f);
-            if (outlinerFolderRenameFocus_) { ImGui::SetKeyboardFocusHere(); outlinerFolderRenameFocus_ = false; }
-            const bool done = ImGui::InputText("##renameFolder", outlinerFolderRenameBuf_, sizeof outlinerFolderRenameBuf_,
+            if (selectionUi_.outlinerFolderRenameFocus_) { ImGui::SetKeyboardFocusHere(); selectionUi_.outlinerFolderRenameFocus_ = false; }
+            const bool done = ImGui::InputText("##renameFolder", selectionUi_.outlinerFolderRenameBuf_, sizeof selectionUi_.outlinerFolderRenameBuf_,
                                                ImGuiInputTextFlags_EnterReturnsTrue);
             if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
-                outlinerFolderRenaming_.clear();
+                selectionUi_.outlinerFolderRenaming_.clear();
             } else if (done || ImGui::IsItemDeactivatedAfterEdit()) {
-                const std::string leaf = outlinerFolderRenameBuf_;
+                const std::string leaf = selectionUi_.outlinerFolderRenameBuf_;
                 if (editor::folderNameValid(leaf)) {
                     doRenameFrom = path;
                     const std::string up = editor::folderParent(path);
                     doRenameTo = up.empty() ? leaf : up + "/" + leaf;
                 }
-                outlinerFolderRenaming_.clear();
+                selectionUi_.outlinerFolderRenaming_.clear();
             } else if (ImGui::IsItemDeactivated()) {
-                outlinerFolderRenaming_.clear();
+                selectionUi_.outlinerFolderRenaming_.clear();
             }
             ImGui::PopID();
             continue;
@@ -1847,9 +1847,9 @@ void SandboxApp::drawOutlinerFolders(const std::string& parent) {
         if (ImGui::BeginPopupContextItem("##folderCtx")) {
             if (ImGui::MenuItem(ICON_NEW_FOLDER " New Subfolder")) doNewSub = path;
             if (ImGui::MenuItem("Rename")) {
-                outlinerFolderRenaming_ = path;
-                outlinerFolderRenameFocus_ = true;
-                std::snprintf(outlinerFolderRenameBuf_, sizeof outlinerFolderRenameBuf_, "%s", editor::folderLeaf(path).c_str());
+                selectionUi_.outlinerFolderRenaming_ = path;
+                selectionUi_.outlinerFolderRenameFocus_ = true;
+                std::snprintf(selectionUi_.outlinerFolderRenameBuf_, sizeof selectionUi_.outlinerFolderRenameBuf_, "%s", editor::folderLeaf(path).c_str());
             }
             if (ImGui::MenuItem("Select Contents", nullptr, false, count != 0)) { doSelect = true; selectPath = path; }
             if (ImGui::MenuItem("Delete Folder")) doDelete = path;
@@ -1857,8 +1857,8 @@ void SandboxApp::drawOutlinerFolders(const std::string& parent) {
         }
         if (open) {
             drawOutlinerFolders(path);
-            if (rowsIt != outlinerFolderRows_.end())
-                for (const OutlinerRow* r : rowsIt->second) drawOutlinerRow(*r, outlinerChildren_, 0);
+            if (rowsIt != selectionUi_.outlinerFolderRows_.end())
+                for (const OutlinerRow* r : rowsIt->second) drawOutlinerRow(*r, selectionUi_.outlinerChildren_, 0);
             ImGui::TreePop();
         }
         ImGui::PopID();
@@ -1868,13 +1868,13 @@ void SandboxApp::drawOutlinerFolders(const std::string& parent) {
     if (!doRenameFrom.empty()) outlinerRenameFolder(doRenameFrom, doRenameTo);
     if (!doDelete.empty()) outlinerDeleteFolder(doDelete);
     if (!doNewSub.empty()) {
-        outlinerFolderRenaming_ = outlinerNewFolder(doNewSub, {});
-        outlinerFolderRenameFocus_ = true;
-        std::snprintf(outlinerFolderRenameBuf_, sizeof outlinerFolderRenameBuf_, "%s", editor::folderLeaf(outlinerFolderRenaming_).c_str());
+        selectionUi_.outlinerFolderRenaming_ = outlinerNewFolder(doNewSub, {});
+        selectionUi_.outlinerFolderRenameFocus_ = true;
+        std::snprintf(selectionUi_.outlinerFolderRenameBuf_, sizeof selectionUi_.outlinerFolderRenameBuf_, "%s", editor::folderLeaf(selectionUi_.outlinerFolderRenaming_).c_str());
     }
     if (doSelect) {
         bool first = true;
-        for (const auto& [f, rows] : outlinerFolderRows_) {
+        for (const auto& [f, rows] : selectionUi_.outlinerFolderRows_) {
             if (!editor::folderIsWithin(f, selectPath)) continue;
             for (const OutlinerRow* r : rows) {
                 if (first) { multiSetSingle(r->ent); first = false; }
@@ -1898,7 +1898,7 @@ void SandboxApp::buildOutlinerPanel() {
     if (!visible) {
 #if AVER_MODULE_SCENE
         refreshOutlinerCache();
-        if (!outlinerFlat_) outlinerOrder_ = outlinerRootEnts_;
+        if (!selectionUi_.outlinerFlat_) selectionUi_.outlinerOrder_ = selectionUi_.outlinerRootEnts_;
 #endif
         ImGui::End();
         return;
@@ -1916,7 +1916,7 @@ void SandboxApp::buildOutlinerPanel() {
 #endif
     if (!hideEditorScene_)
         for (int i=0;i<(int)objects_.size();++i) {
-            if (ImGui::Selectable(editor::iconLabel(ICON_ACTOR_MESH, objects_[i].name.c_str()).c_str(), sel_==i)) { sel_=i; selEntity_=kInvalidId; }
+            if (ImGui::Selectable(editor::iconLabel(ICON_ACTOR_MESH, objects_[i].name.c_str()).c_str(), selectionUi_.sel_==i)) { selectionUi_.sel_=i; selectionUi_.selEntity_=kInvalidId; }
             uiReg_.track(("outliner.placeholder." + std::to_string(i)).c_str());
         }
 #if AVER_MODULE_SCENE
@@ -1928,7 +1928,7 @@ void SandboxApp::buildOutlinerPanel() {
         // says stale, and rebuildOutlinerCache() for what this used to do unconditionally.
         refreshOutlinerCache();
 
-        if (!outlinerRoots_.empty() && !hideEditorScene_) ImGui::Separator();
+        if (!selectionUi_.outlinerRoots_.empty() && !hideEditorScene_) ImGui::Separator();
         // A FLAT LIST submits only the rows on screen, and its order was recorded by the rebuild;
         // see drawOutlinerFlatRows.
         // A TREE submits the roots that have children and their open rows, and only the on-screen
@@ -1938,9 +1938,9 @@ void SandboxApp::buildOutlinerPanel() {
         // Cheap regardless of cache state -- a copy of the childless roots' entities plus one push
         // per open row of a parent, and selection highlighting inside drawOutlinerRow reads
         // sel_/selEntity_/multiSel_ live, so a selection change needs no cache invalidation either.
-        if (!outlinerFlat_) { outlinerOrder_.clear(); outlinerOrder_.reserve(outlinerRootEnts_.size()); }
-        if (!outlinerFolders_.empty()) drawOutlinerFolders(std::string());
-        if (outlinerFlat_) drawOutlinerFlatRows();
+        if (!selectionUi_.outlinerFlat_) { selectionUi_.outlinerOrder_.clear(); selectionUi_.outlinerOrder_.reserve(selectionUi_.outlinerRootEnts_.size()); }
+        if (!selectionUi_.outlinerFolders_.empty()) drawOutlinerFolders(std::string());
+        if (selectionUi_.outlinerFlat_) drawOutlinerFlatRows();
         else               drawOutlinerTreeRows();
 
         // The deferred delete, answered here: the tree is fully drawn, every TreePop is paired,
@@ -1950,11 +1950,11 @@ void SandboxApp::buildOutlinerPanel() {
         // pushes an undo entry (which moves outlinerEditMark(), so the next refresh audits every
         // slot and sees the pending destroy), and the flush that retires the entity moves the entity
         // count -- so the cache rebuilds on its own next frame, no cache poke needed here.
-        if (outlinerDeleteRequest_ != scene::kInvalidEntity) {
-            const scene::Entity doomed = outlinerDeleteRequest_;
-            outlinerDeleteRequest_ = scene::kInvalidEntity;
+        if (selectionUi_.outlinerDeleteRequest_ != scene::kInvalidEntity) {
+            const scene::Entity doomed = selectionUi_.outlinerDeleteRequest_;
+            selectionUi_.outlinerDeleteRequest_ = scene::kInvalidEntity;
             if (scene::World::instance().valid(doomed)) {
-                sel_ = kSelScene; selEntity_ = doomed;
+                selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = doomed;
                 deleteSelection();
             }
         }
@@ -2011,16 +2011,16 @@ void SandboxApp::buildOutlinerPanel() {
 #endif
     ImGui::Separator();
     // Unguarded: the sun/sky/post-process pseudo-entries exist whether or not there is a scene.
-    if (ImGui::Selectable(ICON_SUN " Directional Light (Sun)", sel_==-2)) { sel_=-2; selEntity_=kInvalidId; }
+    if (ImGui::Selectable(ICON_SUN " Directional Light (Sun)", selectionUi_.sel_==-2)) { selectionUi_.sel_=-2; selectionUi_.selEntity_=kInvalidId; }
     uiReg_.track("outliner.sun");
-    if (ImGui::Selectable(ICON_SKY " Sky + Atmosphere", sel_==-3))        { sel_=-3; selEntity_=kInvalidId; }
+    if (ImGui::Selectable(ICON_SKY " Sky + Atmosphere", selectionUi_.sel_==-3))        { selectionUi_.sel_=-3; selectionUi_.selEntity_=kInvalidId; }
     uiReg_.track("outliner.sky");
-    if (ImGui::Selectable(ICON_POST_PROCESS " Post Process", sel_==-4))            { sel_=-4; selEntity_=kInvalidId; }
+    if (ImGui::Selectable(ICON_POST_PROCESS " Post Process", selectionUi_.sel_==-4))            { selectionUi_.sel_=-4; selectionUi_.selEntity_=kInvalidId; }
     uiReg_.track("outliner.postProcess");
     {
         char pvLabel[64];
         std::snprintf(pvLabel, sizeof pvLabel, ICON_POST_PROCESS " Post Process Volumes (%zu)", levelHeader_.postVolumes.size());
-        if (ImGui::Selectable(pvLabel, sel_==kSelPostVolume)) { sel_=kSelPostVolume; selEntity_=kInvalidId; }
+        if (ImGui::Selectable(pvLabel, selectionUi_.sel_==SelectionState::kSelPostVolume)) { selectionUi_.sel_=SelectionState::kSelPostVolume; selectionUi_.selEntity_=kInvalidId; }
         uiReg_.track("outliner.postVolumes");
     }
     ImGui::End();
@@ -2029,7 +2029,7 @@ void SandboxApp::buildOutlinerPanel() {
 #if AVER_MODULE_SCENE
 // Details header for a scene entity: the editable name, its id, and for a graph-class actor the class and its editable fields.
 void SandboxApp::drawEntityNameAndClass(const std::string& nm) {
-    const auto lit = entityLabels_.find(static_cast<u32>(selEntity_));
+    const auto lit = entityLabels_.find(static_cast<u32>(selectionUi_.selEntity_));
     {
         char nameBuf[128];
         std::snprintf(nameBuf, sizeof nameBuf, "%s",
@@ -2040,13 +2040,13 @@ void SandboxApp::drawEntityNameAndClass(const std::string& nm) {
             "##entityname", nm.empty() ? "(unnamed entity)" : nm.c_str(),
             nameBuf, sizeof nameBuf, ImGuiInputTextFlags_EnterReturnsTrue);
         if (entered || ImGui::IsItemDeactivatedAfterEdit())
-            renameEntity(selEntity_, nameBuf);
+            renameEntity(selectionUi_.selEntity_, nameBuf);
         uiReg_.track("details.entityName");
     }
-    ImGui::TextDisabled("#%u  %s", (u32)selEntity_, nm.c_str());
+    ImGui::TextDisabled("#%u  %s", (u32)selectionUi_.selEntity_, nm.c_str());
 #if AVER_MODULE_FRAMEWORK
     // A graph-class actor's root: which class it is, and the way to its graph.
-    if (const int classIdx = classSlotOfEntity(selEntity_); classIdx >= 0) {
+    if (const int classIdx = classSlotOfEntity(selectionUi_.selEntity_); classIdx >= 0) {
         const usize slot = levelClassInstances_[static_cast<usize>(classIdx)].placement;
         const std::string cls = slot < classAuthored_.size() ? classAuthored_[slot].className : std::string();
         ImGui::TextDisabled("Graph class: %s", cls.c_str());
@@ -2059,7 +2059,7 @@ void SandboxApp::drawEntityNameAndClass(const std::string& nm) {
 #if AVER_MODULE_SCRIPTING
         // Its per-instance [Editable] values (a C# actor's fields): set on the live actor, saved with the level.
         if (scripts_.editablesAvailable()) {
-            const std::string wire = scripts_.editableList(static_cast<i32>(selEntity_));
+            const std::string wire = scripts_.editableList(static_cast<i32>(selectionUi_.selEntity_));
             if (!wire.empty() && ::aver::editor::sectionHeader("Editable", ImGuiTreeNodeFlags_DefaultOpen)) {
                 usize at = 0;
                 while (at < wire.size()) {
@@ -2080,8 +2080,8 @@ void SandboxApp::drawEntityNameAndClass(const std::string& nm) {
                     const std::string id = col[0] + "##editable";
                     if (ImGui::InputText(id.c_str(), buf, sizeof buf, ImGuiInputTextFlags_EnterReturnsTrue) ||
                         ImGui::IsItemDeactivatedAfterEdit()) {
-                        if (scripts_.editableSet(static_cast<i32>(selEntity_), col[0], buf) && slot < classAuthored_.size())
-                            game::capturePlacementProps(static_cast<i32>(selEntity_), classAuthored_[slot]);
+                        if (scripts_.editableSet(static_cast<i32>(selectionUi_.selEntity_), col[0], buf) && slot < classAuthored_.size())
+                            game::capturePlacementProps(static_cast<i32>(selectionUi_.selEntity_), classAuthored_[slot]);
                     }
                     ImGui::SameLine();
                     ImGui::TextDisabled("%s", col[1].c_str());
@@ -2098,19 +2098,19 @@ void SandboxApp::drawEntityNameAndClass(const std::string& nm) {
 #if AVER_MODULE_SCENE
 // Prefab and level-instance controls for a single selected entity.
 void SandboxApp::drawEntityPrefabSection(const std::string& nm, const std::vector<scene::Entity>& multiSelected) {
-    const auto lit = entityLabels_.find(static_cast<u32>(selEntity_));
+    const auto lit = entityLabels_.find(static_cast<u32>(selectionUi_.selEntity_));
     // PREFAB: what this is an instance of, its overrides, Apply / Revert / Unpack; or, for an ordinary entity,
     // the way to turn it (and everything under it) into a prefab.
     if (multiSelected.size() <= 1) {
-        editor::prefabDetailsDraw(prefabModel_, selEntity_, prefabUiCallbacks());
-        if (!prefabSys_.isLinked(selEntity_) && ImGui::SmallButton("Create Prefab...")) {
+        editor::prefabDetailsDraw(prefabModel_, selectionUi_.selEntity_, prefabUiCallbacks());
+        if (!prefabSys_.isLinked(selectionUi_.selEntity_) && ImGui::SmallButton("Create Prefab...")) {
             prefabModel_.setContentDir(project_.contentDir());
-            editor::prefabCreateDialogOpen(prefabDlg_, selEntity_, lit != entityLabels_.end() ? lit->second : nm, "Prefabs");
+            editor::prefabCreateDialogOpen(prefabDlg_, selectionUi_.selEntity_, lit != entityLabels_.end() ? lit->second : nm, "Prefabs");
         }
         uiReg_.track("details.createPrefab");
         // LEVEL INSTANCE: what this is an instance of, edit in place, packed, streaming, overrides.
         levelInstanceModel_.setContentDir(project_.contentDir());
-        editor::levelInstanceDetailsDraw(levelInstanceModel_, selEntity_, levelInstanceUiCallbacks());
+        editor::levelInstanceDetailsDraw(levelInstanceModel_, selectionUi_.selEntity_, levelInstanceUiCallbacks());
     }
 }
 #endif
@@ -2118,7 +2118,7 @@ void SandboxApp::drawEntityPrefabSection(const std::string& nm, const std::vecto
 #if AVER_MODULE_SCENE
 // The Transform section: one entity, or a per-component edit applied across a multi-selection.
 void SandboxApp::drawEntityTransformSection(scene::World& w, const std::vector<scene::Entity>& multiSelected) {
-    if (const auto* loc = w.component<scene::CLocal>(selEntity_, scene::kComponentLocal)) {
+    if (const auto* loc = w.component<scene::CLocal>(selectionUi_.selEntity_, scene::kComponentLocal)) {
         if (::aver::editor::sectionHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
           if (multiSelected.size() <= 1) {
             Transform xf = loc->xf;
@@ -2140,7 +2140,7 @@ void SandboxApp::drawEntityTransformSection(scene::World& w, const std::vector<s
             const bool rstS = editor::dt::consumeReset();
             if (ImGui::IsItemActivated() || rstS) beginTransformEdit();
             done = done || (ImGui::IsItemDeactivatedAfterEdit() || rstS);
-            if (moved) w.setLocalTransform(selEntity_, xf);
+            if (moved) w.setLocalTransform(selectionUi_.selEntity_, xf);
             if (done) endTransformEdit();
           } else {
             // MULTI-SELECTION TRANSFORM, PER COMPONENT: shows the anchor's value via the same
@@ -2225,7 +2225,7 @@ void SandboxApp::drawEntityTransformSection(scene::World& w, const std::vector<s
                 const bool touchScale[3] = {xf.scale.x != origScale.x,
                                             xf.scale.y != origScale.y,
                                             xf.scale.z != origScale.z};
-                w.setLocalTransform(selEntity_, xf);
+                w.setLocalTransform(selectionUi_.selEntity_, xf);
                 forEachMultiMoved([&](scene::Entity ent, const Transform& oxf) {
                     Transform t = oxf;
                     if (touchPos[0])   t.position.x = xf.position.x;
@@ -2254,7 +2254,7 @@ void SandboxApp::drawEntityTransformSection(scene::World& w, const std::vector<s
 #if AVER_MODULE_SCENE
 // Mesh section: the Visible and Collides toggles, applied to the whole selection.
 void SandboxApp::drawMeshVisibleCollides(scene::World& w, const std::vector<scene::Entity>& multiSelected) {
-    bool vis = authoredVisible(selEntity_);
+    bool vis = authoredVisible(selectionUi_.selEntity_);
     if (editor::dt::Checkbox("Visible", &vis)) {
         // Applies to the whole selection (same rule as the Mesh/Material pickers below), and unlike
         // them pushes undo: Visible is authored, level-saved data, so a click is as recoverable as
@@ -2264,8 +2264,8 @@ void SandboxApp::drawMeshVisibleCollides(scene::World& w, const std::vector<scen
     // Saved with the level, Unreal-style -- unlike H/Shift+H/Ctrl+H (temporary,
     // editor-only, see hideSelection in SandboxViewport.cpp; can disagree with this).
     if (ImGui::IsItemHovered()) {
-        const bool hHidden = std::find(editorHidden_.begin(), editorHidden_.end(),
-                                       selEntity_) != editorHidden_.end();
+        const bool hHidden = std::find(selectionUi_.editorHidden_.begin(), selectionUi_.editorHidden_.end(),
+                                       selectionUi_.selEntity_) != selectionUi_.editorHidden_.end();
         if (hHidden)
             ImGui::SetTooltip("Saved with the level.\n"
                               "H hides it in the editor only, without changing this.\n"
@@ -2285,9 +2285,9 @@ void SandboxApp::drawMeshVisibleCollides(scene::World& w, const std::vector<scen
         };
         // Disabled for an entity the level does not own (a class instance, a preview): saveLevel
         // writes nocollide per level placement only, so the edit would dirty the level and be lost.
-        const bool levelOwned = isLevelOwned(selEntity_);
+        const bool levelOwned = isLevelOwned(selectionUi_.selEntity_);
         ImGui::BeginDisabled(!levelOwned);
-        bool col = collides(selEntity_);
+        bool col = collides(selectionUi_.selEntity_);
         if (editor::dt::Checkbox("Collides", &col)) {
             EditCmd c;
             c.kind = EditCmd::Kind::Collision;
@@ -2323,7 +2323,7 @@ void SandboxApp::drawMeshAnimation(scene::World& w, const std::vector<scene::Ent
     // entry per change, like Collides above (EditCmd::Animation). A skeletal mesh is left
     // out (its CAnimator is a skeletal clock), and nothing is editable while Play has object
     // animation live: it has already captured each entity's base.
-    if (!w.hasComponent(selEntity_, scene::kComponentSkeletalMesh)) {
+    if (!w.hasComponent(selectionUi_.selEntity_, scene::kComponentSkeletalMesh)) {
         ImGui::SeparatorText("Animation");
         if (levelIsLegacyOcmap_) {
             ImGui::TextDisabled("The legacy .ocmap format cannot store an animation.");
@@ -2337,11 +2337,11 @@ void SandboxApp::drawMeshAnimation(scene::World& w, const std::vector<scene::Ent
                 const EntityAnim* a = entityAnim(ent);
                 return a ? *a : EntityAnim{};
             };
-            const EntityAnim cur = animOf(selEntity_);
+            const EntityAnim cur = animOf(selectionUi_.selEntity_);
             const bool live = anim::animSystem().objectAnimationLive();
             // Only the level's own placements save an animation (saveLevel writes the tokens
             // per levelEntities_ entry); on a class instance or preview an edit would be lost.
-            const bool levelOwned = isLevelOwned(selEntity_);
+            const bool levelOwned = isLevelOwned(selectionUi_.selEntity_);
             if (live) {
                 ImGui::TextDisabled("Stop Play to edit the animation.");
             } else if (!levelOwned) {
@@ -2489,7 +2489,7 @@ void SandboxApp::drawMeshAssetPicker(scene::CMeshRenderer* mr, const std::vector
     // VEHICLE: the `vehicle <preset>` token of a placement that drives in Play. Read-only, the
     // way the file's other authored-elsewhere tokens are shown: the generator writes it, and
     // the preset is not edited here.
-    if (const std::string* vehicle = level_.vehiclePresetOf(selEntity_)) {
+    if (const std::string* vehicle = level_.vehiclePresetOf(selectionUi_.selEntity_)) {
         ImGui::TextDisabled("vehicle  %s", vehicle->c_str());
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("A physics car in Play (suspension, tyres, gravity, collisions), driven along\n"
@@ -2528,7 +2528,7 @@ void SandboxApp::drawMeshAssetPicker(scene::CMeshRenderer* mr, const std::vector
         u64 picked = 0;
         if (assetPicker("##pickMesh", pc.list, mr->mesh, &picked)) {
             if (multiSelected.size() <= 1) {
-                assignMeshId(selEntity_, picked);
+                assignMeshId(selectionUi_.selEntity_, picked);
             } else {
                 // Applies to the whole selection, same as Transform above: every
                 // entity with a CMeshRenderer takes the pick, not just the anchor.
@@ -2619,7 +2619,7 @@ void SandboxApp::drawMeshMaterialSection(scene::CMeshRenderer* mr, const std::ve
             if (assetPicker("##pickMaterial", pc.list,
                             static_cast<u64>(static_cast<u32>(shown)), &picked)) {
                 if (multiSelected.size() <= 1) {
-                    assignMaterialToken(selEntity_, static_cast<i32>(static_cast<u32>(picked)));
+                    assignMaterialToken(selectionUi_.selEntity_, static_cast<i32>(static_cast<u32>(picked)));
                 } else {
                     // Same shape as the mesh picker just above: one pick, applied to
                     // every selected entity that has a CMeshRenderer.
@@ -2655,7 +2655,7 @@ void SandboxApp::drawMeshMaterialSection(scene::CMeshRenderer* mr, const std::ve
 #if AVER_MODULE_SCENE && AVER_MODULE_PARTICLES
 // The Particle Emitter section.
 void SandboxApp::drawParticleEmitterDetails(scene::World& w) {
-    if (auto* pe = w.component<scene::CParticleEmitter>(selEntity_, scene::kComponentParticleEmitter)) {
+    if (auto* pe = w.component<scene::CParticleEmitter>(selectionUi_.selEntity_, scene::kComponentParticleEmitter)) {
         if (::aver::editor::sectionHeader("Particle Emitter", ImGuiTreeNodeFlags_DefaultOpen)) {
             bool stopped = (pe->flags & scene::kParticleEmitterStopped) != 0;
             if (editor::dt::Checkbox("Stopped", &stopped)) {
@@ -2682,7 +2682,7 @@ void SandboxApp::drawParticleEmitterDetails(scene::World& w) {
                     bool assigned = false;
                     for (const std::string& one : editor::splitDropPayload(blob)) {
                         if (lowerExt(std::filesystem::path(one)) != ".ocparticle") continue;
-                        assignParticleEffect(selEntity_, one);
+                        assignParticleEffect(selectionUi_.selEntity_, one);
                         assigned = true;
                         break;
                     }
@@ -2734,7 +2734,7 @@ void SandboxApp::drawParticleEmitterDetails(scene::World& w) {
                     // own key spelling suggests it should.
                     const std::string path = content_.pathFor(picked);
                     if (!path.empty())
-                        assignParticleEffect(selEntity_, path);
+                        assignParticleEffect(selectionUi_.selEntity_, path);
                 }
             } else {
                 drawerUi_.pickEffectCands_.drop();
@@ -2748,7 +2748,7 @@ void SandboxApp::drawParticleEmitterDetails(scene::World& w) {
 #if AVER_MODULE_SCENE && AVER_MODULE_PHYSICS
 // The Soft Body section and its physics viewer entries.
 void SandboxApp::drawSoftBodyDetails(scene::World& w) {
-    if (auto* sb = w.component<scene::CSoftBody>(selEntity_, scene::kComponentSoftBody)) {
+    if (auto* sb = w.component<scene::CSoftBody>(selectionUi_.selEntity_, scene::kComponentSoftBody)) {
         if (::aver::editor::sectionHeader(ICON_TUNE " Soft Body", ImGuiTreeNodeFlags_DefaultOpen)) {
             bool disabled = (sb->flags & scene::kSoftBodyDisabled) != 0;
             if (editor::dt::Checkbox("Simulated", &disabled)) {
@@ -2815,7 +2815,7 @@ void SandboxApp::drawSoftBodyDetails(scene::World& w) {
 #if AVER_MODULE_RENDER_SOFTBODY
             // Is it actually drawn? Simulating and drawing fail identically from the
             // viewport; a non-zero draw handle means simulated vertices replace the authored mesh.
-            const bool drawn = softBodyScene_ && softBodyScene_->drawHandle(selEntity_) != 0;
+            const bool drawn = softBodyScene_ && softBodyScene_->drawHandle(selectionUi_.selEntity_) != 0;
             ImGui::TextDisabled("%s drawn from the simulation: %s",
                                 drawn ? ICON_VISIBILITY : ICON_WARNING, drawn ? "yes" : "no");
             if (softBodyScene_)
@@ -2852,20 +2852,20 @@ void SandboxApp::drawAddRemoveComponent(scene::World& w) {
              "A box that projects colour, normal and roughness onto the surfaces inside it."},
         };
         for (const Addable& a : kAddable) {
-            const bool present = w.hasComponent(selEntity_, a.id);
+            const bool present = w.hasComponent(selectionUi_.selEntity_, a.id);
             ImGui::BeginDisabled(present);
             if (ImGui::MenuItem(a.name)) {
                 // addComponent hands back zero-filled storage with no constructor run, so
                 // defaults are written here -- same fix as World::create(); CSynapseAgent hit this bug once.
                 if (a.id == scene::kComponentSoftBody) {
                     if (auto* c = static_cast<scene::CSoftBody*>(
-                            w.addComponent(selEntity_, a.id)))
+                            w.addComponent(selectionUi_.selEntity_, a.id)))
                         *c = scene::CSoftBody{};
                 } else if (a.id == scene::kComponentLight) {
-                    if (auto* c = static_cast<scene::CLight*>(w.addComponent(selEntity_, a.id)))
+                    if (auto* c = static_cast<scene::CLight*>(w.addComponent(selectionUi_.selEntity_, a.id)))
                         *c = editor::makeNewLight(scene::kLightPoint);
                 } else if (a.id == scene::kComponentDecal) {
-                    if (auto* c = static_cast<scene::CDecal*>(w.addComponent(selEntity_, a.id)))
+                    if (auto* c = static_cast<scene::CDecal*>(w.addComponent(selectionUi_.selEntity_, a.id)))
                         *c = editor::makeNewDecal();
                 }
                 drawerUi_.cbStatus_ = std::string("Added ") + a.name;
@@ -2900,7 +2900,7 @@ void SandboxApp::drawAddRemoveComponent(scene::World& w) {
         };
         bool anyPresent = false;
         for (const Removable& r : kRemovable) {
-            const bool present = w.hasComponent(selEntity_, r.id);
+            const bool present = w.hasComponent(selectionUi_.selEntity_, r.id);
             anyPresent = anyPresent || present;
             ImGui::BeginDisabled(!present);
             if (ImGui::MenuItem(r.name)) {
@@ -3136,8 +3136,8 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
     viewState_.detailsFocused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
     editor::dt::begin();
     uiReg_.track("details.search");
-    if (sel_>=0 && sel_<(int)objects_.size()){
-        MeshObj& o=objects_[sel_]; ImGui::TextUnformatted(o.name.c_str()); ImGui::Separator();
+    if (selectionUi_.sel_>=0 && selectionUi_.sel_<(int)objects_.size()){
+        MeshObj& o=objects_[selectionUi_.sel_]; ImGui::TextUnformatted(o.name.c_str()); ImGui::Separator();
         if (::aver::editor::sectionHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
             // Bracketed for undo, as the scene-entity branch below does: these three drags were
             // the only transform edits pushing nothing (selectedXform/endTransformEdit already
@@ -3167,9 +3167,9 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
         }
         editor::dt::Checkbox("Visible", &o.visible);
 #if AVER_MODULE_SCENE
-    } else if (sel_==kSelScene && scene::World::instance().valid(selEntity_)) {
+    } else if (selectionUi_.sel_==SelectionState::kSelScene && scene::World::instance().valid(selectionUi_.selEntity_)) {
         scene::World& w = scene::World::instance();
-        const std::string nm = w.name(selEntity_);
+        const std::string nm = w.name(selectionUi_.selEntity_);
         // Editable, which it never was: no rename affordance existed anywhere (not here, not the
         // Outliner, no F2, no context menu) so a level of "Cube 1..40" stayed that way;
         // entityLabels_ was written only at spawn/paste/duplicate/load, never by a person.
@@ -3191,7 +3191,7 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                                 (int)multiSelected.size());
         drawEntityPrefabSection(nm, multiSelected);
         drawEntityTransformSection(w, multiSelected);
-        if (auto* mr = w.component<scene::CMeshRenderer>(selEntity_, scene::kComponentMeshRenderer)) {
+        if (auto* mr = w.component<scene::CMeshRenderer>(selectionUi_.selEntity_, scene::kComponentMeshRenderer)) {
             if (::aver::editor::sectionHeader("Mesh", ImGuiTreeNodeFlags_DefaultOpen)) {
                 drawMeshVisibleCollides(w, multiSelected);
                 drawMeshAnimation(w, multiSelected);
@@ -3222,14 +3222,14 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
 #endif
 
         // ---- Light (CLight): type, intensity, IES profile, cookie ----
-        if (auto* lt = w.component<scene::CLight>(selEntity_, scene::kComponentLight)) {
+        if (auto* lt = w.component<scene::CLight>(selectionUi_.selEntity_, scene::kComponentLight)) {
             if (::aver::editor::sectionHeader("Light", ImGuiTreeNodeFlags_DefaultOpen)) {
                 if (editor::drawLightDetails(*lt, project_.contentDir())) markLevelUnsaved();
             }
         }
 
         // ---- Decal (CDecal): the projector box, appearance, which channels it paints ----
-        if (auto* dc = w.component<scene::CDecal>(selEntity_, scene::kComponentDecal)) {
+        if (auto* dc = w.component<scene::CDecal>(selectionUi_.selEntity_, scene::kComponentDecal)) {
             if (::aver::editor::sectionHeader("Decal", ImGuiTreeNodeFlags_DefaultOpen)) {
                 if (editor::drawDecalDetails(*dc, project_.contentDir())) markLevelUnsaved();
             }
@@ -3241,13 +3241,13 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
 
         drawAddRemoveComponent(w);
 #endif
-    } else if (sel_==-2){
+    } else if (selectionUi_.sel_==-2){
         drawSunDetails();
-    } else if (sel_==-3){
+    } else if (selectionUi_.sel_==-3){
         drawSkyDetails(e);
-    } else if (sel_==-4){
+    } else if (selectionUi_.sel_==-4){
         drawPostProcessDetails(e);
-    } else if (sel_==kSelPostVolume){
+    } else if (selectionUi_.sel_==SelectionState::kSelPostVolume){
         if (postVolumeTools_.drawDetails(e.device(), project_.contentDir(), levelHeader_.postVolumes, rset_.post_, viewPos()))
             markLevelUnsaved();
     } else ImGui::TextDisabled("Select an actor in the World Outliner");

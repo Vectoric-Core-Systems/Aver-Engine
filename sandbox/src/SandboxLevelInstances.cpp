@@ -52,7 +52,7 @@ void SandboxApp::installLevelInstanceHooks() {
         entitySnapZ_.erase(static_cast<u32>(e));
         entityPlaceId_.erase(static_cast<u32>(e));
         entityAuthoredName_.erase(static_cast<u32>(e));
-        if (sel_ == kSelScene && e == selEntity_) { sel_ = -1; selEntity_ = scene::kInvalidEntity; }
+        if (selectionUi_.sel_ == SelectionState::kSelScene && e == selectionUi_.selEntity_) { selectionUi_.sel_ = -1; selectionUi_.selEntity_ = scene::kInvalidEntity; }
 #if AVER_MODULE_PHYSICS
         if (const auto it = entityBodies_.find(static_cast<u32>(e)); it != entityBodies_.end()) {
             aver_phys_remove_body(it->second);
@@ -135,7 +135,7 @@ void SandboxApp::installLevelInstanceHooks() {
 editor::LevelInstanceUiCallbacks SandboxApp::levelInstanceUiCallbacks() {
     editor::LevelInstanceUiCallbacks cb;
     cb.pushUndo = [this](const editor::LevelInstanceEdit& e) { pushLevelInstanceEdit(e); };
-    cb.select = [this](scene::Entity e) { sel_ = kSelScene; selEntity_ = e; };
+    cb.select = [this](scene::Entity e) { selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = e; };
     cb.markDirty = [this] { markLevelUnsaved(); };
     cb.status = [this](const std::string& s) { drawerUi_.cbStatus_ = s; };
     cb.openLevel = [this](const std::string& assetRef) { openInstanceLevel(assetRef); };

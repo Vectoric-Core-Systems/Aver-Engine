@@ -167,8 +167,8 @@ void SandboxApp::tickLevelStreaming(f32 dt) {
     // The selected instance stays loaded while it is selected; packed rows show only under ray-driven primary visibility
     // (otherwise those instances realise unpacked).
     {
-        const scene::Entity want = (sel_ == kSelScene && selEntity_ != scene::kInvalidEntity)
-                                       ? level_.instances().topRootOf(selEntity_) : scene::kInvalidEntity;
+        const scene::Entity want = (selectionUi_.sel_ == SelectionState::kSelScene && selectionUi_.selEntity_ != scene::kInvalidEntity)
+                                       ? level_.instances().topRootOf(selectionUi_.selEntity_) : scene::kInvalidEntity;
         if (want != instanceSelPinned_) {
             if (instanceSelPinned_ != scene::kInvalidEntity) level_.instances().pin(instanceSelPinned_, false);
             if (want != scene::kInvalidEntity) level_.instances().pin(want, true);
@@ -186,8 +186,8 @@ void SandboxApp::tickLevelStreaming(f32 dt) {
         adoptNewLevelEntities();
         // What is selected stays loaded while it is selected, so a gesture never loses its entity.
         std::unordered_set<u32> selected;
-        if (selEntity_ != scene::kInvalidEntity) selected.insert(static_cast<u32>(selEntity_));
-        for (const scene::Entity e : multiSel_) selected.insert(static_cast<u32>(e));
+        if (selectionUi_.selEntity_ != scene::kInvalidEntity) selected.insert(static_cast<u32>(selectionUi_.selEntity_));
+        for (const scene::Entity e : selectionUi_.multiSel_) selected.insert(static_cast<u32>(e));
         // An object with a sequence track stays loaded too (the track holds its entity).
         for (const scene::Entity e : seqEditor_.trackEntities()) pinStreamed(e);
         for (const u32 key : selected) {

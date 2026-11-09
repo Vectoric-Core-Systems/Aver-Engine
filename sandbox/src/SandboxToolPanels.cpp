@@ -48,7 +48,7 @@ void SandboxApp::placeActorKind(Engine& e, const std::string& kind, const Vec3* 
     } else if (kind == "playerstart") { at(0.0f); addPlayerStart(e); }
     else if (kind == "postvolume") {
         postVolumeTools_.addAtCamera(levelHeader_.postVolumes, dropAt ? *dropAt : viewPos());
-        sel_ = kSelPostVolume; selEntity_ = kInvalidId;
+        selectionUi_.sel_ = SelectionState::kSelPostVolume; selectionUi_.selEntity_ = kInvalidId;
         markLevelUnsaved();
     }
 #if AVER_MODULE_SCENE

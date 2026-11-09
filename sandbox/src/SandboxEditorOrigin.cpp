@@ -25,7 +25,7 @@ void SandboxApp::initEditorOrigin() {
     // A transform gesture (gizmo drag, nudge, Details drag) holds the pre-gesture transforms. Cancelling puts them back in the OLD
     // frame, before the shift, and closes the gesture without an undo entry.
     eo.addGesture("a transform edit is open",
-        [this] { return editBeforeValid_ || viewState_.dragging_ || nudgeEditOpen_; },
+        [this] { return editBeforeValid_ || viewState_.dragging_ || selectionUi_.nudgeEditOpen_; },
         [this] {
             scene::World& w = scene::World::instance();
             if (editBeforeValid_) {
@@ -39,13 +39,13 @@ void SandboxApp::initEditorOrigin() {
             multiMoveBefore_.clear();
             viewState_.dragging_ = false;
             viewState_.activeAxis_ = -1;
-            nudgeEditOpen_ = false;
+            selectionUi_.nudgeEditOpen_ = false;
             viewState_.rotDragDeg_ = 0.0f;
             viewState_.rotAppliedDeg_ = 0.0f;
         });
     eo.addGesture("a selection rectangle is being dragged",
-        [this] { return marqueeArmed_ || marqueeActive_; },
-        [this] { marqueeArmed_ = false; marqueeActive_ = false; });
+        [this] { return selectionUi_.marqueeArmed_ || selectionUi_.marqueeActive_; },
+        [this] { selectionUi_.marqueeArmed_ = false; selectionUi_.marqueeActive_ = false; });
 #if AVER_MODULE_LANDSCAPE
     // A stroke is ENDED, not abandoned: its undo entry is pushed for what was already painted, as when the mode changes mid-stroke.
     eo.addGesture("a sculpt stroke is open", [this] { return landTool_.sculpting_; }, [this] { endSculptStroke(); });

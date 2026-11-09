@@ -1304,6 +1304,7 @@ private:
 #include "state/ViewportState.hpp"
 #include "state/LandscapeToolState.hpp"
 #include "state/DrawerState.hpp"
+#include "state/SelectionState.hpp"
 class HitchMarks;
 namespace game { struct SceneDrawStats; }
 
@@ -1766,6 +1767,7 @@ private:
     ViewportState viewState_;   // Viewport and camera
     LandscapeToolState landTool_;   // Landscape, foliage and water-spline tools
     DrawerState drawerUi_;   // Bottom drawer
+    SelectionState selectionUi_;   // Selection and the outliner
     // ---- end feature state ----
 
     void applyProject(Engine& e);
@@ -1927,12 +1929,6 @@ private:
     Vec3 camForward() const;
 
 #if AVER_MODULE_SCENE
-    // ---- MULTI-SELECTION ----
-    // Anchor plus set: anchor (sel_/selEntity_) kept as-is, multiSel_ is the rest.
-    // INVARIANT: multiSel_ always contains selEntity_ when selected.
-    std::vector<scene::Entity> multiSel_;
-    // Parallel set for fast O(1) lookup; vector maintains order.
-    std::unordered_set<scene::Entity> multiSet_;
     void multiRebuildSet();                     // after any bulk rewrite of multiSel_
 
     bool multiStale() const;
@@ -1943,9 +1939,6 @@ private:
     void multiToggle(scene::Entity e);
     void multiRange(scene::Entity to);
     std::vector<scene::Entity> selectedEntities() const;
-    // Outliner row order (multiRange, selectAllInOutliner).
-    std::vector<scene::Entity> outlinerOrder_;
-    std::string outlinerFilter_;   // name filter box; empty = show everything
 
     void selectAllInOutliner();
 #endif
@@ -2152,8 +2145,8 @@ private:
 #if AVER_MODULE_SCENE
         if (multiStale()) return;
         scene::World& w = scene::World::instance();
-        for (const scene::Entity ent : multiSel_) {
-            if (ent == selEntity_ || !w.valid(ent)) continue;
+        for (const scene::Entity ent : selectionUi_.multiSel_) {
+            if (ent == selectionUi_.selEntity_ || !w.valid(ent)) continue;
             bool ancestorSelected = false;
             for (scene::Entity p = w.parent(ent); p != scene::kInvalidEntity; p = w.parent(p))
                 if (multiIsSelected(p)) { ancestorSelected = true; break; }
@@ -2326,14 +2319,6 @@ private:
 
 
 
-    scene::Entity outlinerRenaming_ = scene::kInvalidEntity;
-    // The row whose right-click menu was open last frame. The flat Outliner only submits the rows
-    // its clipper hands out, and a popup lives inside its row's BeginPopupContextItem, so the clipper
-    // pins this row (like the renaming and dragged ones) or scrolling it away would strand the menu.
-    scene::Entity outlinerCtxRow_ = scene::kInvalidEntity;
-    bool outlinerRenameFocus_ = false;
-    char outlinerRenameBuf_[128] = {0};
-
     void beginOutlinerRename(scene::Entity e);
 
 #endif
@@ -2442,14 +2427,8 @@ private:
     void hideSelection();
     void isolateSelection();
     void unhideAll();
-    std::vector<scene::Entity> editorHidden_;
     // Union of selection's world bounds for framing and gizmo anchor.
     bool selectionBounds(Vec3& center, f32& radius) const;
-    // Left-drag on empty space draws marquee; release selects intersecting entities (Ctrl adds).
-    bool nudgeEditOpen_ = false;
-    bool marqueeArmed_ = false;
-    bool marqueeActive_ = false;
-    f32 marqueeX0_ = 0.0f, marqueeY0_ = 0.0f, marqueeX1_ = 0.0f, marqueeY1_ = 0.0f;
 #endif
 
 #if AVER_MODULE_LANDSCAPE && AVER_WITH_IMGUI
@@ -2965,8 +2944,7 @@ private:
     void buildPanels(Engine& e);
 
 #if AVER_MODULE_SCENE
-    // One Outliner row, kept across frames (see outlinerSignature for cache validity).
-    struct OutlinerRow { scene::Entity ent; scene::Entity par; std::string shown; };
+    using OutlinerRow = SelectionState::OutlinerRow;
 
     static std::string lowerCopy(std::string v);
 
@@ -2974,17 +2952,7 @@ private:
     editor::OutlinerType outlinerTypeFor(scene::Entity ent) const;
     const char* outlinerIconFor(scene::Entity ent) const;
 
-    // ---- eye, lock and folders (editor-only; see OutlinerModel.hpp) ----
-    std::unordered_set<u32> outlinerLocked_;                  // entities viewport picking skips
-    std::unordered_map<u32, std::string> outlinerFolderOf_;   // root entity -> folder path
-    std::vector<std::string> outlinerFolders_;                // sorted folder paths, empty ones included
-    u32 outlinerFolderRev_ = 0;                               // bumps when folders change, so the row cache rebuilds
-    u32 outlinerTypeMask_ = editor::kOutlinerAllTypes;        // type filter
-    std::unordered_map<std::string, std::vector<const OutlinerRow*>> outlinerFolderRows_;   // root rows per folder
-    std::string outlinerFolderRenaming_;                      // folder being renamed inline
-    char outlinerFolderRenameBuf_[96] = {};
-    bool outlinerFolderRenameFocus_ = false;
-    bool entityLocked(scene::Entity e) const { return !outlinerLocked_.empty() && outlinerLocked_.count(static_cast<u32>(e)) != 0; }
+    bool entityLocked(scene::Entity e) const { return !selectionUi_.outlinerLocked_.empty() && selectionUi_.outlinerLocked_.count(static_cast<u32>(e)) != 0; }
     std::string outlinerFolderOf(scene::Entity e) const;
     void applyOutlinerMeta(const EditCmd& c, bool undoing);
     // Folders and locks ride in the .ocworld (OUTFOLDER / OUTITEM); placements and lights are named by slot.
@@ -3019,17 +2987,6 @@ private:
     // Tree cache: roots with children, then childless roots on-screen.
     void drawOutlinerTreeRows();
 
-    // Outliner row cache and signature tracking for efficient reuse.
-    std::vector<OutlinerRow> outlinerRows_;
-    std::unordered_map<u32, std::vector<const OutlinerRow*>> outlinerChildren_;
-    std::vector<const OutlinerRow*> outlinerRoots_;
-    // Entity of each root and indices of roots that have listed children.
-    std::vector<scene::Entity> outlinerRootEnts_;
-    std::vector<u32> outlinerParentRoots_;
-    // Signature the cache was built from, and whether it has been built.
-    u64  outlinerCacheSig_ = 0;
-    bool outlinerCacheValid_ = false;
-
     // Cache staleness detection: outlinerSignature (O(1) stamp) and per-slot fingerprints.
     u64  outlinerSignature() const;
     u64  outlinerEditMark() const;
@@ -3039,15 +2996,6 @@ private:
     void refreshOutlinerCache();
     // Rebuilds outlinerRows_/outlinerChildren_/outlinerRoots_.
     void rebuildOutlinerCache();
-    // True when cache holds no parent/child pair (flat import: every row is a uniform leaf).
-    bool outlinerFlat_ = false;
-    // One fingerprint per dense slot and next audit cursor position.
-    std::vector<u64> outlinerSlotSigs_;
-    u32  outlinerAuditCursor_ = 0;
-    // outlinerEditMark as of last refresh.
-    u64  outlinerEditMark_ = 0;
-    // ImGui::GetTime of last rebuild and whether Play is running.
-    double outlinerRebuiltAt_ = 0.0;
     bool outlinerPlaying() const;
 #endif
 
@@ -3191,12 +3139,6 @@ private:
     // Default to Move (gizmo ready on open, vs Select which needs a second key press).
     Tool initialTool_ = Tool::Move;
     std::vector<MeshObj> objects_;
-    // Selection: sel_ >= 0 is objects_ index, -1 is nothing, -2/-3/-4 sun/sky/post, kSelScene is entity.
-    static constexpr int kSelScene = -5;
-    static constexpr int kSelPostVolume = -6;   // the Post Process Volumes entry (levelHeader_.postVolumes)
-    int sel_ = 1;
-    // AvId (generic "nothing selected" sentinel).
-    AvId selEntity_ = kInvalidId;
     bool hideEditorScene_ = false;
     rhi::IDevice* prefsDevice_ = nullptr;
     std::string prefIdeName_;
@@ -3351,10 +3293,6 @@ private:
 #if AVER_MODULE_SCENE
     scene::Entity firstPersonPawn_ = scene::kInvalidEntity;
 #endif
-    // Latched during the scene pass so the outline draws after every surface is down.
-    Mat4 selectionOutline_{}; rhi::MeshHandle selectionMesh_ = 0; bool hasSelection_ = false;
-    // Every selected entity's (world transform, mesh id) for this frame's outline pass. Rebuilt and cleared right after drawing.
-    std::vector<std::pair<Mat4, u64>> selectionOutlines_;
     // The editor's colour-vision preview (View menu, editor prefs only) and this frame's accessibility options and captions.
     editor::AccessibilityPreview accessPreview_;
     game::AccessFrame access_;
@@ -3670,9 +3608,6 @@ private:
     bool showUiDemo_ = false;
     std::string matSaveStatus_;   // what the last 'Save to C#' did
     // A row asked to be deleted; answered after the tree walk (drawOutlinerRow). GUARDED: type is scene::Entity.
-#if AVER_MODULE_SCENE
-    scene::Entity outlinerDeleteRequest_ = scene::kInvalidEntity;
-#endif
     bool inputProbe_ = false;
     bool openLegacy_ = false;   // --open-legacy
     std::string openAsset_;
@@ -3759,12 +3694,6 @@ private:
 #  endif
     // [wave3/level-instances end]
 #endif
-#if AVER_MODULE_PBR
-    // Mesh id -> cached outline line mesh (0 = no outline).
-    std::unordered_map<u64, rhi::LineHandle> selOutlineLines_;
-#endif
-    // Selected mesh asset id (distinct from GPU handle). Cleared by placeholder Floor/Cube loop.
-    u64 selectionMeshId_ = 0;
 
 #if AVER_MODULE_LANDSCAPE
     // Terrain section: render, collision, authoring (shared with runtime).

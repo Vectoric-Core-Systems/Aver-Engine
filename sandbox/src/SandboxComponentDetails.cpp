@@ -100,7 +100,7 @@ editor::AttachContext SandboxApp::placedAttachContext(scene::Entity e) const {
 }
 
 void SandboxApp::beginPlacedGesture(const editor::PlacedKind& kind) {
-    placedBefore_ = game::capturePlacedComponent(scene::World::instance(), selEntity_, kind.type,
+    placedBefore_ = game::capturePlacedComponent(scene::World::instance(), selectionUi_.selEntity_, kind.type,
                                                  [this](u64 id) { return pathOfContentId(id); });
     placedGesture_ = &kind;
 }
@@ -111,7 +111,7 @@ void SandboxApp::commitPlacedEdit(const editor::PlacedKind& kind, std::optional<
     placedBefore_.reset();
     placedGesture_ = nullptr;
     scene::World& w = scene::World::instance();
-    const scene::Entity e = selEntity_;
+    const scene::Entity e = selectionUi_.selEntity_;
     if (!w.valid(e)) return;
     auto after = game::capturePlacedComponent(w, e, kind.type, [this](u64 id) { return pathOfContentId(id); });
     if (before == after) return;
@@ -127,7 +127,7 @@ void SandboxApp::commitPlacedEdit(const editor::PlacedKind& kind, std::optional<
 
 bool SandboxApp::addPlacedComponent(const editor::PlacedKind& kind) {
     scene::World& w = scene::World::instance();
-    const scene::Entity e = selEntity_;
+    const scene::Entity e = selectionUi_.selEntity_;
     if (!w.valid(e)) return false;
     if (anyPlayActive()) { drawerUi_.cbStatus_ = "Stop Play to add components."; return false; }
     const u32 cid = kindComponentId(w, kind);
@@ -164,7 +164,7 @@ bool SandboxApp::addPlacedComponent(const editor::PlacedKind& kind) {
 
 bool SandboxApp::removePlacedComponentFromSelection(const editor::PlacedKind& kind) {
     scene::World& w = scene::World::instance();
-    const scene::Entity e = selEntity_;
+    const scene::Entity e = selectionUi_.selEntity_;
     if (!w.valid(e)) return false;
     if (anyPlayActive()) { drawerUi_.cbStatus_ = "Stop Play to remove components."; return false; }
     const auto has = [&](const char* name) {
@@ -283,14 +283,14 @@ bool SandboxApp::drawAssetField(const char* id, const char* label, std::string& 
 void SandboxApp::drawPlacedAddMenu() {
     scene::World& w = scene::World::instance();
     const bool playing = anyPlayActive();
-    const editor::AttachContext base = placedAttachContext(selEntity_);   // the popup body only runs while open
+    const editor::AttachContext base = placedAttachContext(selectionUi_.selEntity_);   // the popup body only runs while open
     bool headed = false;
     for (const editor::PlacedKind& k : editor::kPlacedKinds) {
         const u32 id = kindComponentId(w, k);
         if (id == 0) continue;   // not registered in this build
         if (!headed) { ImGui::Separator(); ImGui::TextDisabled("Animation and AI"); headed = true; }
         editor::AttachContext ctx = base;
-        ctx.alreadyPresent = w.hasComponent(selEntity_, id);
+        ctx.alreadyPresent = w.hasComponent(selectionUi_.selEntity_, id);
         std::string why;
         bool ok = editor::canAttach(ctx, k, &why);
         if (ok && playing) { ok = false; why = "Stop Play to add components."; }
@@ -304,7 +304,7 @@ void SandboxApp::drawPlacedAddMenu() {
 
 bool SandboxApp::drawPlacedRemoveMenu() {
     scene::World& w = scene::World::instance();
-    const scene::Entity e = selEntity_;
+    const scene::Entity e = selectionUi_.selEntity_;
     const bool playing = anyPlayActive();
     const auto has = [&](const char* name) {
         const u32 id = w.componentId(name);
@@ -334,7 +334,7 @@ bool SandboxApp::drawPlacedRemoveMenu() {
 // The Details sections of the components this entity carries, in canonical order.
 void SandboxApp::drawPlacedComponentSections() {
     scene::World& w = scene::World::instance();
-    const scene::Entity e = selEntity_;
+    const scene::Entity e = selectionUi_.selEntity_;
     if (!w.valid(e)) return;
     const bool playing = anyPlayActive();
     const ImVec4 kRed(0.95f, 0.35f, 0.25f, 1.0f);

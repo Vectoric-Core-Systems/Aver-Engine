@@ -87,7 +87,7 @@ void SandboxApp::buildPhysAnimSection() {
     ImGui::Separator();
     ImGui::TextDisabled("PHYSICAL ANIMATION");
     scene::World& world = scene::World::instance();
-    const scene::Entity e = (sel_ == kSelScene && world.valid(selEntity_)) ? selEntity_ : scene::kInvalidEntity;
+    const scene::Entity e = (selectionUi_.sel_ == SelectionState::kSelScene && world.valid(selectionUi_.selEntity_)) ? selectionUi_.selEntity_ : scene::kInvalidEntity;
     const fmt::OcSkeleton* skel = e != scene::kInvalidEntity ? anim::animSystem().posedSkeleton(e) : nullptr;
     if (!skel || skel->bones.empty()) {
         ImGui::TextWrapped("Select a skinned character that has been posed (it plays an animation) to hit it. The physics world has to be running: Play in Simulate mode.");

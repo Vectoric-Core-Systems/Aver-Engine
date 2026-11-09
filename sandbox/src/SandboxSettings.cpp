@@ -644,7 +644,7 @@ void SandboxApp::buildWorldSettings() {
 #if AVER_MODULE_SCENE
             if (playerStart_ != scene::kInvalidEntity) {
                 ImGui::SameLine();
-                if (ImGui::SmallButton("Select")) { sel_ = kSelScene; selEntity_ = playerStart_; }
+                if (ImGui::SmallButton("Select")) { selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = playerStart_; }
                 uiReg_.track("worldSettings.selectPlayerStart");
             }
 #endif

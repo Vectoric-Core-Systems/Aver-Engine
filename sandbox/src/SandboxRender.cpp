@@ -228,8 +228,8 @@ void SandboxApp::drawEditorObjects(Engine& e) {
         e.device()->drawMesh(o.mesh, &w.m[0][0], col, o.metallic, o.roughness);
         // Floor/Cube placeholders have no .ocmesh behind them, so they get no outline --
         // selectionMeshId_ stays 0 and selectionOutlineLines returns 0 for it.
-        if (i == sel_) selectionOutline_ = w, selectionMesh_ = o.mesh, selectionMeshId_ = 0,
-                       hasSelection_ = true;
+        if (i == selectionUi_.sel_) selectionUi_.selectionOutline_ = w, selectionUi_.selectionMesh_ = o.mesh, selectionUi_.selectionMeshId_ = 0,
+                       selectionUi_.hasSelection_ = true;
     }
 }
 
@@ -1621,15 +1621,15 @@ void SandboxApp::drawSceneEntities(Engine& e) {
             // EVERY SELECTED ENTITY, NOT ONLY THE ANCHOR: used to keep one Mat4/mesh id, so a
             // multi-selection was highlighted in the Outliner but only one of five dragged props
             // showed an outline in the 3D view.
-            if (self.sel_ == SandboxApp::kSelScene &&
-                (ent == self.selEntity_ || self.multiIsSelected(ent))) {
-                self.selectionOutline_ = world;
-                self.selectionMesh_ = chosenMesh;
-                self.selectionMeshId_ = meshId;
-                self.hasSelection_ = true;
+            if (self.selectionUi_.sel_ == SelectionState::kSelScene &&
+                (ent == self.selectionUi_.selEntity_ || self.multiIsSelected(ent))) {
+                self.selectionUi_.selectionOutline_ = world;
+                self.selectionUi_.selectionMesh_ = chosenMesh;
+                self.selectionUi_.selectionMeshId_ = meshId;
+                self.selectionUi_.hasSelection_ = true;
                 // Anchor stays in the scalars above (other code reads them); the rest accumulate
                 // here, cleared with hasSelection_ at the draw site so nothing outlives its frame.
-                self.selectionOutlines_.push_back({world, meshId});
+                self.selectionUi_.selectionOutlines_.push_back({world, meshId});
             }
         };
 
@@ -1972,18 +1972,18 @@ bool SandboxApp::drawSelectionOutline(Engine& e) {
 #endif
     // Ejected shows the outline again (UE shows selection in Simulate): anyPlaying itself must stay
     // the union every OTHER play-chrome gate (including the Player Start marker below) relies on.
-    if (hasSelection_ && maxFrames_ == 0 && (!anyPlaying || playEjected()) && !noEditorChrome_) {
+    if (selectionUi_.hasSelection_ && maxFrames_ == 0 && (!anyPlaying || playEjected()) && !noEditorChrome_) {
         // Unreal's selection outline width, scaled by DPI like the gizmo handles below.
         e.device()->setLineWidth(2.0f * viewState_.dpi_);
         // One drawLines per selected entity. selectionOutlineLines caches per MESH id, so N
         // copies of the same asset share one line buffer and this costs N draws, not N buffers.
-        for (const auto& [xf, meshId] : selectionOutlines_)
+        for (const auto& [xf, meshId] : selectionUi_.selectionOutlines_)
             if (const rhi::LineHandle lh = selectionOutlineLines(e, meshId))
                 e.device()->drawLines(lh, &xf.m[0][0]);
         e.device()->setLineWidth(1.0f);   // sticky: back to hairline before the marker/grid below
     }
-    hasSelection_ = false;
-    selectionOutlines_.clear();
+    selectionUi_.hasSelection_ = false;
+    selectionUi_.selectionOutlines_.clear();
     return anyPlaying;
 }
 
@@ -2011,8 +2011,8 @@ void SandboxApp::drawPlayerStartMarker(Engine& e, const bool anyPlaying) {
             // of it; the Player Start's mesh draw is skipped by identity (the colour walk above), so
             // selectionOutlines_ never carries it -- checked directly here instead, the same
             // selection test colourDelivered uses for every other entity.
-            const bool psSelected = sel_ == kSelScene &&
-                (playerStart_ == selEntity_ || multiIsSelected(playerStart_));
+            const bool psSelected = selectionUi_.sel_ == SelectionState::kSelScene &&
+                (playerStart_ == selectionUi_.selEntity_ || multiIsSelected(playerStart_));
             e.device()->setLineDepth(true);
             e.device()->setLineWidth(1.5f * viewState_.dpi_);
             e.device()->drawLines(psSelected ? playerStartCapsuleSel_ : playerStartCapsule_, &psWorld.m[0][0]);
@@ -2093,7 +2093,7 @@ void SandboxApp::drawMotionModelingCameraDebug(Engine& e) {
 void SandboxApp::drawSoftBodyDebug(Engine& e) {
     // Soft-body overlay (Show > Soft Bodies) and the paint tool's pins and brush: the same line-mesh route, world space.
     if (softBodyDebugMesh_) { e.device()->destroyLineMesh(softBodyDebugMesh_); softBodyDebugMesh_ = 0; }
-    softBodyDebug_.selected = static_cast<u32>(selEntity_);
+    softBodyDebug_.selected = static_cast<u32>(selectionUi_.selEntity_);
     softBodyDebug_.drawBuilds = softBodyScene_ ? softBodyScene_->drawBuildsLastFrame() : 0u;
     editor::softBodyDebugCollect(softBodyDebug_, softbody::softBodySystem(), softBodyDebugFrame_);
 
@@ -2136,8 +2136,8 @@ void SandboxApp::drawVehicleDebug(Engine& e) {
         editor::PreviewPose previewPose;
         const editor::PreviewPose* previewAt = nullptr;
         scene::World& vw = scene::World::instance();
-        if (selEntity_ != scene::kInvalidEntity && vw.valid(selEntity_)) {
-            const Transform xf = transformFromMatrix(vw.worldMatrix(selEntity_));
+        if (selectionUi_.selEntity_ != scene::kInvalidEntity && vw.valid(selectionUi_.selEntity_)) {
+            const Transform xf = transformFromMatrix(vw.worldMatrix(selectionUi_.selEntity_));
             previewPose.position = xf.position;
             previewPose.rotation = xf.rotation;
             previewAt = &previewPose;
@@ -2165,7 +2165,7 @@ void SandboxApp::drawClassMarkers(Engine& e) {
             if (ci.removed || ci.entity == 0) continue;
             const scene::Entity root = static_cast<scene::Entity>(ci.entity);
             if (!cw.valid(root) || cw.destroyPending(root)) continue;
-            const bool selected = sel_ == kSelScene && (selEntity_ == root || multiIsSelected(root));
+            const bool selected = selectionUi_.sel_ == SelectionState::kSelScene && (selectionUi_.selEntity_ == root || multiIsSelected(root));
             editor::classMarkerSegments(worldTransformOf(cw, root).position, editor::kClassMarkerHalf, selected, segs);
         }
         if (!segs.empty()) {
@@ -2190,7 +2190,7 @@ void SandboxApp::drawPhysicsDebug(Engine& e) {
     editor::physicsDebugDraw(e.device(), physicsDebug_, viewState_.eye_, physicsDebugFrame_, physicsDebugMesh_, noEditorChrome_);
 #if AVER_MODULE_HAIR_SCENE
     // Hair overlay (Show > Hair): sampled guide strands and the collision proxies. HairDebugOverlay.hpp owns its line mesh and replaces it each frame.
-    editor::hairDebugDraw(*e.device(), noEditorChrome_, static_cast<u32>(selEntity_));
+    editor::hairDebugDraw(*e.device(), noEditorChrome_, static_cast<u32>(selectionUi_.selEntity_));
 #endif
     // ---- COLLIDERS, which could not be seen at all until now --------------------------------
     // No collider overlay, toggle or wireframe existed before; the drawLines infrastructure was
@@ -2217,7 +2217,7 @@ void SandboxApp::drawEditorGizmos(Engine& e) {
 #if AVER_MODULE_SCENE
         // The selected decal's projector box and face handles (dim boxes for every decal under Show > Decals).
         decalGizmo_.draw(*e.device(), scene::World::instance(),
-                         sel_ == kSelScene ? selEntity_ : scene::kInvalidEntity, viewState_.showDecals_);
+                         selectionUi_.sel_ == SelectionState::kSelScene ? selectionUi_.selEntity_ : scene::kInvalidEntity, viewState_.showDecals_);
 #endif
 #if AVER_MODULE_LANDSCAPE
         drawSculptCursor(e);
@@ -2357,7 +2357,7 @@ void SandboxApp::onRender(Engine& e)  {
 #endif
     // Show > Collision Shapes and the .ocshape tab's preview: shape-accurate wire for the selected entity's body and the moving ones (its mesh is freed and rebuilt each call).
 #if AVER_MODULE_SCENE
-    editor::collisionShapeOverlayRender(e, static_cast<u32>(sel_ == kSelScene ? selEntity_ : scene::kInvalidEntity), noEditorChrome_);
+    editor::collisionShapeOverlayRender(e, static_cast<u32>(selectionUi_.sel_ == SelectionState::kSelScene ? selectionUi_.selEntity_ : scene::kInvalidEntity), noEditorChrome_);
 #else
     editor::collisionShapeOverlayRender(e, 0xFFFFFFFFu, noEditorChrome_);
 #endif
