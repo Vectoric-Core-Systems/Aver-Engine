@@ -658,8 +658,8 @@ void SandboxApp::drawPlacedComponentSections() {
             env.contentDir = project_.contentDir();
             env.entityName = std::string(w.name(e));
             env.pickRay = [this](Vec3& origin, Vec3& direction) {
-                if (vpW_ == 0 || vpH_ == 0) return false;
-                viewportRay(static_cast<f32>(vpX_) + 0.5f * static_cast<f32>(vpW_), static_cast<f32>(vpY_) + 0.5f * static_cast<f32>(vpH_), origin, direction);
+                if (viewState_.vpW_ == 0 || viewState_.vpH_ == 0) return false;
+                viewportRay(static_cast<f32>(viewState_.vpX_) + 0.5f * static_cast<f32>(viewState_.vpW_), static_cast<f32>(viewState_.vpY_) + 0.5f * static_cast<f32>(viewState_.vpH_), origin, direction);
                 return true;
             };
             editor::drawCollisionShapeSection(env, &w, static_cast<u32>(e));

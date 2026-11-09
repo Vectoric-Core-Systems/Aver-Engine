@@ -192,7 +192,7 @@ void SandboxApp::tickLevelPrepToast(Engine& e) {
 // The start mode, wireframe and unlit switches, and the editor's own mesh objects.
 void SandboxApp::drawEditorObjects(Engine& e) {
     applyStartMode();
-    e.device()->setWireframe(wireframe_);
+    e.device()->setWireframe(viewState_.wireframe_);
     // UNLIT for the whole scene pass, alongside wireframe (shared_prelude.hlsl's `gMaterial.z >
     // 0.5` branch was already live on both backends since the selection outline needed it, at
     // frame constant 22; only the view-mode entry was missing).
@@ -211,7 +211,7 @@ void SandboxApp::drawEditorObjects(Engine& e) {
     const bool hideEditorScene = hideEditorScene_;
     for (int i=0;i<(int)objects_.size();++i) {
         MeshObj& o = objects_[i];
-        if (!o.visible || hideEditorScene || !showStaticMeshes_) continue;
+        if (!o.visible || hideEditorScene || !viewState_.showStaticMeshes_) continue;
         Transform tr; tr.position=o.pos; tr.rotation=quatFromEulerDeg(o.rotDeg); tr.scale=o.scale;
         Mat4 w = tr.toMatrix();
         f32 col[4]={o.color[0],o.color[1],o.color[2],1};
@@ -265,8 +265,8 @@ void SandboxApp::drawLandscape(Engine& e) {
 #if AVER_MODULE_PBR && AVER_MODULE_VOXI
         landscapeMaterials = &voxiRenderer_.materials();
 #endif
-        landscape_.updateRingTiles(e.device(), eye_.x, eye_.y, &content_, landscapeMaterials);
-        landscape_.draw(*e.device(), eye_, viewProj_, vpH_, &content_, landscapeMaterials, playView_.fovYRad);
+        landscape_.updateRingTiles(e.device(), viewState_.eye_.x, viewState_.eye_.y, &content_, landscapeMaterials);
+        landscape_.draw(*e.device(), viewState_.eye_, viewState_.viewProj_, viewState_.vpH_, &content_, landscapeMaterials, playView_.fovYRad);
     }
 }
 #endif
@@ -276,7 +276,7 @@ void SandboxApp::drawLandscape(Engine& e) {
 void SandboxApp::updateSceneFeeds() {
     // CLight entities -> Voxi's lamp list and the path tracer's lights, before the frame's draws.
     sceneLightFeed_.update(scene::World::instance(), voxiRenderer_, ptSceneView_.get(), project_.contentDir());
-    envFxFeed_.update(voxiRenderer_, eye_);   // G4 R8: local fog volumes
+    envFxFeed_.update(voxiRenderer_, viewState_.eye_);   // G4 R8: local fog volumes
     // CDecal entities -> Voxi's projected-decal list (raster and ray hits both paint them).
     if (prefabModel_.contentDir() != project_.contentDir()) prefabModel_.setContentDir(project_.contentDir());
     decalImages_.setContentDir(project_.contentDir());
@@ -380,7 +380,7 @@ void SandboxApp::drawDepthPrepass(Engine& e) {
         // NO visitOrder: occlusionOrder_ reorders the COLOUR walk for buildPyramid(); this pass has
         // no pyramid and no pass-1/pass-2 boundary, so world order (null) is correct.
         // Not in Wireframe: it draws no scene colour, so there is nothing for depth to save.
-        if (e.device()->depthPrepassEnabled() && !wireframe_) {
+        if (e.device()->depthPrepassEnabled() && !viewState_.wireframe_) {
             if (rhi::IRenderContext* pctx = e.device()->renderContext()) {
                 rhi::ScopedGpuStat prepassScope(*pctx, "depth prepass");
 
@@ -424,9 +424,9 @@ void SandboxApp::drawDepthPrepass(Engine& e) {
                             const Vec3 sphereCenter = (d.worldBoxMin + d.worldBoxMax) * 0.5f;
                             const f32 sphereRadius = dist(d.worldBoxMin, d.worldBoxMax) * 0.5f;
                             trifactor::View pview;
-                            pview.eye = self.eye_;
-                            pview.viewProj = self.viewProj_;
-                            pview.viewportHeightPx = self.vpH_;
+                            pview.eye = self.viewState_.eye_;
+                            pview.viewProj = self.viewState_.viewProj_;
+                            pview.viewportHeightPx = self.viewState_.vpH_;
                             pview.verticalFovRadians = self.playView_.fovYRad;
                             const u32 plevel = trifactor::chooseLevelCached(
                                 ladder.errorCm, sphereCenter, sphereRadius,
@@ -464,7 +464,7 @@ void SandboxApp::drawDepthPrepass(Engine& e) {
 
                 popt.ownerHideAll = playView_.ownerHideAll;   // the collision fade, in the depth prepass too
                 popt.cameraCullInv = playView_.cullInv;       // G4 R4: both passes must agree on what is drawn
-                popt.viewerPos = eye_; popt.haveViewerPos = true;
+                popt.viewerPos = viewState_.eye_; popt.haveViewerPos = true;
                 popt.mobility = &play_.playMobility_;
                 // --no-walk-cache, negated (g_noWalkCacheArg true = cache OFF). MUST MATCH the
                 // colour call site's copt.useMeshLookupCache below -- both passes resolve the same
@@ -484,7 +484,7 @@ void SandboxApp::drawDepthPrepass(Engine& e) {
                 // and prints no line, since those three numbers describe a frame and this is half
                 // of one. drawn/culled/owner-hidden are still counted by the colour walk below.
                 aver::game::SceneDrawStats prepassStats;
-                aver::game::drawWorld(*e.device(), viewProj_, content_, prepassStats,
+                aver::game::drawWorld(*e.device(), viewState_.viewProj_, content_, prepassStats,
                                       prepassMaterials, skinnedScene_.get(), popt);
             }
         }
@@ -853,7 +853,7 @@ void SandboxApp::drawSceneEntities(Engine& e) {
             rhi::IResourceFactory* occRes = e.device()->resources();
             const rhi::TextureHandle depthTex = e.device()->sceneDepthTexture();
             if (!pctx || !occRes || !depthTex) return;
-            occluder_->buildPyramid(*pctx, depthTex, &viewProj_.m[0][0]);
+            occluder_->buildPyramid(*pctx, depthTex, &viewState_.viewProj_.m[0][0]);
             // Stashes the camera basis this call's readback will (at best, one call from now)
             // reflect. camForward() is the same vector that built viewProj_ this frame (the
             // unconditional camForward()/setCamera call earlier in this function, before free-fly
@@ -1221,15 +1221,15 @@ void SandboxApp::drawSceneEntities(Engine& e) {
             // NOR IN WIREFRAME: this path shades straight into the scene target, and the wireframe
             // view draws only what reaches drawMesh (IDevice::setWireframe).
             if (self.lodMeshShaderEnabled_ && self.lodMeshPipelineReady_ && !d.skinned &&
-                d.haveWorldBox && !blended && !self.wireframe_) {
+                d.haveWorldBox && !blended && !self.viewState_.wireframe_) {
                 if (const auto git = self.meshClusterGpu_.find(d.meshId); git != self.meshClusterGpu_.end()) {
                     const auto& gpu = git->second;
                     if (rhi::IRenderContext* ctx = c.engine->device()->renderContext();
                         ctx && gpu.clusterCount) {
                         trifactor::View view;
-                        view.eye = self.eye_;
-                        view.viewProj = self.viewProj_;
-                        view.viewportHeightPx = self.vpH_;
+                        view.eye = self.viewState_.eye_;
+                        view.viewProj = self.viewState_.viewProj_;
+                        view.viewportHeightPx = self.viewState_.vpH_;
                         view.verticalFovRadians = self.playView_.fovYRad;
                         const f32 worldScale = xformVec(wm, Vec3{1, 0, 0}).size();
 
@@ -1374,9 +1374,9 @@ void SandboxApp::drawSceneEntities(Engine& e) {
                 if (const auto cit = self.meshClusterData_.find(d.meshId); cit != self.meshClusterData_.end()) {
                     const auto& cd = cit->second;
                     trifactor::View view;
-                    view.eye = self.eye_;
-                    view.viewProj = self.viewProj_;
-                    view.viewportHeightPx = self.vpH_;
+                    view.eye = self.viewState_.eye_;
+                    view.viewProj = self.viewState_.viewProj_;
+                    view.viewportHeightPx = self.viewState_.vpH_;
                     view.verticalFovRadians = self.playView_.fovYRad;
                     const f32 worldScale = xformVec(wm, Vec3{1, 0, 0}).size();
 
@@ -1508,9 +1508,9 @@ void SandboxApp::drawSceneEntities(Engine& e) {
                     const f32 sphereRadius = dist(wlo, whi) * 0.5f;   // half the box diagonal:
                                                                       // encloses the box exactly (ClusterSelect's own convention).
                     trifactor::View view;
-                    view.eye = self.eye_;
-                    view.viewProj = self.viewProj_;
-                    view.viewportHeightPx = self.vpH_;
+                    view.eye = self.viewState_.eye_;
+                    view.viewProj = self.viewState_.viewProj_;
+                    view.viewportHeightPx = self.viewState_.vpH_;
                     view.verticalFovRadians = self.playView_.fovYRad;   // matches this frame's proj build, above
                     const u32 level = trifactor::chooseLevelCached(
                         ladder.errorCm, sphereCenter, sphereRadius, lodThresholdFor(self.lodErrorThresholdPx_, d.entity), view);
@@ -1585,7 +1585,7 @@ void SandboxApp::drawSceneEntities(Engine& e) {
             // CPU per-cluster): an entity that walk skipped wrote no depth, so testing against the
             // LessEqual/no-write pipeline here would test against whatever depth was already there.
             {
-                bool eligible = c.engine->device()->depthPrepassEnabled() && !self.wireframe_ &&
+                bool eligible = c.engine->device()->depthPrepassEnabled() && !self.viewState_.wireframe_ &&
                                 !clusterDispatched && !d.skinned;
 #if AVER_MODULE_TRIFACTOR
                 if (eligible && self.lodMeshShaderEnabled_ && self.lodMeshPipelineReady_ &&
@@ -1740,7 +1740,7 @@ void SandboxApp::drawSceneEntities(Engine& e) {
 
         copt.ownerHideAll = playView_.ownerHideAll;   // the collision fade hides every mesh under the target, not only the flagged ones
         copt.cameraCullInv = playView_.cullInv;       // G4 R4: Camera3D.cull_mask and visibility ranges, as in the prepass
-        copt.viewerPos = eye_; copt.haveViewerPos = true;
+        copt.viewerPos = viewState_.eye_; copt.haveViewerPos = true;
         copt.mobility = &play_.playMobility_;
         // Worded differently from the library's line on purpose: "spawned CMeshRenderer entities"
         // names a concept a packaged game has no vocabulary for, and "culled" deliberately covers
@@ -1790,7 +1790,7 @@ void SandboxApp::drawSceneEntities(Engine& e) {
         // this change since last frame" for anyone but drawWorld -- hence SandboxApp keeps its own
         // lastSceneDrawn_/Culled_/OwnerHidden_ below.
         aver::game::SceneDrawStats colourStats;
-        aver::game::drawWorld(*e.device(), viewProj_, content_, colourStats, colourMaterials,
+        aver::game::drawWorld(*e.device(), viewState_.viewProj_, content_, colourStats, colourMaterials,
                               skinnedScene_.get(), copt);
         // The one line that stands in for colourSkipped's old per-entity warning on entities that
         // carry a level placement record: how many were newly seen this walk, so a level that
@@ -1974,7 +1974,7 @@ bool SandboxApp::drawSelectionOutline(Engine& e) {
     // the union every OTHER play-chrome gate (including the Player Start marker below) relies on.
     if (hasSelection_ && maxFrames_ == 0 && (!anyPlaying || playEjected()) && !noEditorChrome_) {
         // Unreal's selection outline width, scaled by DPI like the gizmo handles below.
-        e.device()->setLineWidth(2.0f * dpi_);
+        e.device()->setLineWidth(2.0f * viewState_.dpi_);
         // One drawLines per selected entity. selectionOutlineLines caches per MESH id, so N
         // copies of the same asset share one line buffer and this costs N draws, not N buffers.
         for (const auto& [xf, meshId] : selectionOutlines_)
@@ -2014,7 +2014,7 @@ void SandboxApp::drawPlayerStartMarker(Engine& e, const bool anyPlaying) {
             const bool psSelected = sel_ == kSelScene &&
                 (playerStart_ == selEntity_ || multiIsSelected(playerStart_));
             e.device()->setLineDepth(true);
-            e.device()->setLineWidth(1.5f * dpi_);
+            e.device()->setLineWidth(1.5f * viewState_.dpi_);
             e.device()->drawLines(psSelected ? playerStartCapsuleSel_ : playerStartCapsule_, &psWorld.m[0][0]);
             e.device()->drawLines(playerStartArrow_, &psWorld.m[0][0]);
             e.device()->setLineWidth(1.0f);
@@ -2073,7 +2073,7 @@ void SandboxApp::drawMotionModelingCameraDebug(Engine& e) {
         if (motionDebugMesh_) e.device()->drawLines(motionDebugMesh_, &mmId.m[0][0]);
     }
 
-    editor::drawModelingLines(e, modeling_, mode_ == EditorMode::Modeling, noEditorChrome_);   // Modeling mode wireframe
+    editor::drawModelingLines(e, modeling_, viewState_.mode_ == EditorMode::Modeling, noEditorChrome_);   // Modeling mode wireframe
     editor::drawPcgDebugPoints(e, noEditorChrome_);   // the PCG Graph tab's Debug Points
 #if AVER_MODULE_CAMERA
     // Camera rig overlay (Show > Camera Rigs): the same line-mesh route, world-space vertices.
@@ -2187,7 +2187,7 @@ void SandboxApp::drawClassMarkers(Engine& e) {
 #if AVER_MODULE_PHYSICS
 void SandboxApp::drawPhysicsDebug(Engine& e) {
     // Show > Physics: collect, upload and draw Jolt's debug lines in one call (nothing drawn under noEditorChrome_).
-    editor::physicsDebugDraw(e.device(), physicsDebug_, eye_, physicsDebugFrame_, physicsDebugMesh_, noEditorChrome_);
+    editor::physicsDebugDraw(e.device(), physicsDebug_, viewState_.eye_, physicsDebugFrame_, physicsDebugMesh_, noEditorChrome_);
 #if AVER_MODULE_HAIR_SCENE
     // Hair overlay (Show > Hair): sampled guide strands and the collision proxies. HairDebugOverlay.hpp owns its line mesh and replaces it each frame.
     editor::hairDebugDraw(*e.device(), noEditorChrome_, static_cast<u32>(selEntity_));
@@ -2217,7 +2217,7 @@ void SandboxApp::drawEditorGizmos(Engine& e) {
 #if AVER_MODULE_SCENE
         // The selected decal's projector box and face handles (dim boxes for every decal under Show > Decals).
         decalGizmo_.draw(*e.device(), scene::World::instance(),
-                         sel_ == kSelScene ? selEntity_ : scene::kInvalidEntity, showDecals_);
+                         sel_ == kSelScene ? selEntity_ : scene::kInvalidEntity, viewState_.showDecals_);
 #endif
 #if AVER_MODULE_LANDSCAPE
         drawSculptCursor(e);
@@ -2229,23 +2229,23 @@ void SandboxApp::drawEditorGizmos(Engine& e) {
 void SandboxApp::drawDebugLabels() {
 #if AVER_MODULE_SYNAPSE_SCENE && AVER_WITH_IMGUI
     if (aiDebug_.any() && !noEditorChrome_)
-        editor::aiDebugDrawLabels(synapse::aiDebug(), viewProj_, static_cast<f32>(vpX_), static_cast<f32>(vpY_),
-                                  static_cast<f32>(vpW_), static_cast<f32>(vpH_), eye_, aiDebug_.labelMaxDistanceCm);
+        editor::aiDebugDrawLabels(synapse::aiDebug(), viewState_.viewProj_, static_cast<f32>(viewState_.vpX_), static_cast<f32>(viewState_.vpY_),
+                                  static_cast<f32>(viewState_.vpW_), static_cast<f32>(viewState_.vpH_), viewState_.eye_, aiDebug_.labelMaxDistanceCm);
 #endif
 #if AVER_MODULE_SCENE && AVER_WITH_IMGUI
     if (motionDebug_.any() && !noEditorChrome_)
-        editor::motionDebugDrawLabels(motionDebugFrame_, viewProj_, static_cast<f32>(vpX_), static_cast<f32>(vpY_),
-                                      static_cast<f32>(vpW_), static_cast<f32>(vpH_), eye_, motionDebug_.labelMaxDistanceCm);
+        editor::motionDebugDrawLabels(motionDebugFrame_, viewState_.viewProj_, static_cast<f32>(viewState_.vpX_), static_cast<f32>(viewState_.vpY_),
+                                      static_cast<f32>(viewState_.vpW_), static_cast<f32>(viewState_.vpH_), viewState_.eye_, motionDebug_.labelMaxDistanceCm);
 #endif
 #if AVER_MODULE_SOFTBODY_SCENE && AVER_WITH_IMGUI
     if ((softBodyDebug_.budget || softBodyDebug_.tuning) && !noEditorChrome_)
-        editor::softBodyDebugDrawBudget(softBodyDebugFrame_, static_cast<f32>(vpX_), static_cast<f32>(vpY_));
+        editor::softBodyDebugDrawBudget(softBodyDebugFrame_, static_cast<f32>(viewState_.vpX_), static_cast<f32>(viewState_.vpY_));
 #endif
 
 #if AVER_MODULE_VEHICLE_SCENE && AVER_WITH_IMGUI
     if (vehicleDebug_.labels && !noEditorChrome_)
-        editor::vehicleDebugDrawLabels(vehicleDebugFrame_, viewProj_, static_cast<f32>(vpX_), static_cast<f32>(vpY_),
-                                       static_cast<f32>(vpW_), static_cast<f32>(vpH_), eye_, vehicleDebug_.labelMaxDistanceCm);
+        editor::vehicleDebugDrawLabels(vehicleDebugFrame_, viewState_.viewProj_, static_cast<f32>(viewState_.vpX_), static_cast<f32>(viewState_.vpY_),
+                                       static_cast<f32>(viewState_.vpW_), static_cast<f32>(viewState_.vpH_), viewState_.eye_, vehicleDebug_.labelMaxDistanceCm);
 #endif
 }
 
@@ -2265,7 +2265,7 @@ void SandboxApp::tickReflectionTest(Engine& e) {
 #endif
         if (reflBeaconIndex_ >= 0 && reflBeaconIndex_ < (int)objects_.size())
             objects_[reflBeaconIndex_].visible = refl_->beaconVisible();
-        refl_->tick(e, vpX_, vpY_, vpW_, vpH_);
+        refl_->tick(e, viewState_.vpX_, viewState_.vpY_, viewState_.vpW_, viewState_.vpH_);
     }
 }
 
@@ -2322,9 +2322,9 @@ void SandboxApp::onRender(Engine& e)  {
 #if AVER_MODULE_SCENE
     drawSequencePath(e);
 #endif
-    if (showGrid_ && !noEditorChrome_) {
+    if (viewState_.showGrid_ && !noEditorChrome_) {
         const Mat4 g = Mat4::identity();
-        e.device()->drawLines(gridMesh_, &g.m[0][0]);
+        e.device()->drawLines(viewState_.gridMesh_, &g.m[0][0]);
     }
 #if AVER_MODULE_SYNAPSE
     drawNavMesh(e);
@@ -2367,8 +2367,8 @@ void SandboxApp::onRender(Engine& e)  {
 #if AVER_WITH_IMGUI
 #if AVER_MODULE_PHYSICS
     if (physicsDebug_.labels && !noEditorChrome_)
-        editor::physicsDebugDrawLabels(physicsDebugFrame_, viewProj_, static_cast<f32>(vpX_), static_cast<f32>(vpY_),
-                                       static_cast<f32>(vpW_), static_cast<f32>(vpH_), eye_, physicsDebug_.radiusCm);
+        editor::physicsDebugDrawLabels(physicsDebugFrame_, viewState_.viewProj_, static_cast<f32>(viewState_.vpX_), static_cast<f32>(viewState_.vpY_),
+                                       static_cast<f32>(viewState_.vpW_), static_cast<f32>(viewState_.vpH_), viewState_.eye_, physicsDebug_.radiusCm);
 #endif
     uiReg_.endFrame();
 #endif
@@ -2381,9 +2381,9 @@ void SandboxApp::onRender(Engine& e)  {
     // since SkinSceneTest is a no-op with SCENE off anyway (0, same as lastSceneCulled_ would read).
     if (skinScene_ && !skinScene_->finished())
 #if AVER_MODULE_SCENE
-        skinScene_->tick(e, vpX_, vpY_, vpW_, vpH_, static_cast<u32>(lastSceneCulled_ < 0 ? 0 : lastSceneCulled_));
+        skinScene_->tick(e, viewState_.vpX_, viewState_.vpY_, viewState_.vpW_, viewState_.vpH_, static_cast<u32>(lastSceneCulled_ < 0 ? 0 : lastSceneCulled_));
 #else
-        skinScene_->tick(e, vpX_, vpY_, vpW_, vpH_, 0u);
+        skinScene_->tick(e, viewState_.vpX_, viewState_.vpY_, viewState_.vpW_, viewState_.vpH_, 0u);
 #endif
     captureCheck(e);
     // AFTER captureCheck, not before: both touch the device's single capture slot -- this ordering
@@ -2439,8 +2439,8 @@ void SandboxApp::serviceViewportScreenshot(Engine& e) {
         const u64 sf = maxFrames_ > 8 ? maxFrames_ - 3 : 4;
         if (maxFrames_ != 0 && f == sf) return;
 
-        const u32 cx = static_cast<u32>(vpX_ + vpW_ * 0.5f);
-        const u32 cy = static_cast<u32>(vpY_ + vpH_ * 0.5f);
+        const u32 cx = static_cast<u32>(viewState_.vpX_ + viewState_.vpW_ * 0.5f);
+        const u32 cy = static_cast<u32>(viewState_.vpY_ + viewState_.vpH_ * 0.5f);
         e.device()->requestCapture(cx, cy);
         harness_.viewportShotFrame_ = f;
         harness_.viewportShotTries_ = 0;
@@ -2464,10 +2464,10 @@ void SandboxApp::serviceViewportScreenshot(Engine& e) {
             if (v >= (f32)hi) return hi;
             return (u32)v;
         };
-        const u32 cx = clampToRange(vpX_, iw);
-        const u32 cy = clampToRange(vpY_, ih);
-        const u32 cw = clampToRange(vpW_, iw - cx);
-        const u32 ch = clampToRange(vpH_, ih - cy);
+        const u32 cx = clampToRange(viewState_.vpX_, iw);
+        const u32 cy = clampToRange(viewState_.vpY_, ih);
+        const u32 cw = clampToRange(viewState_.vpW_, iw - cx);
+        const u32 ch = clampToRange(viewState_.vpH_, ih - cy);
         const bool crop = cw > 0 && ch > 0;
         const u32 outW = crop ? cw : iw;
         const u32 outH = crop ? ch : ih;
@@ -2555,7 +2555,7 @@ void SandboxApp::skinDrawCheck(Engine& e) {
         voxiRenderer_.setSettings(s);
     }
 #endif
-    skinDraw_->tick(*e.device(), vpX_, vpY_, vpW_, vpH_);
+    skinDraw_->tick(*e.device(), viewState_.vpX_, viewState_.vpY_, viewState_.vpW_, viewState_.vpH_);
 }
 
 // Hands the ABI's retained UI draw list to the game UI render feature, once per frame.
@@ -3087,7 +3087,7 @@ void SandboxApp::updateAverSrAuto(Engine& e) {
 // re-arm; small, bounded, pre-existing.
 bool SandboxApp::ptTakesViewport() const {
 #if AVER_MODULE_VOXI
-    if (rset_.ptSceneViewUnavailable_ || wireframe_ || rset_.gbufferDebugView_ != GBufferDebugFeature::Mode::Off)
+    if (rset_.ptSceneViewUnavailable_ || viewState_.wireframe_ || rset_.gbufferDebugView_ != GBufferDebugFeature::Mode::Off)
         return false;
     if (rset_.debugView_ != voxi::VoxiRenderer::ViewDebug::None && voxiRenderer_.rayDrivenAvailable())
         return false;
@@ -3139,7 +3139,7 @@ void SandboxApp::syncPtSceneView(rhi::IDevice* dev) {
     // tracer, not wireframe, would fill the viewport. After the ray-driven block on purpose (its
     // release restores the want the same frame this withdraws it); released the same way -- returns
     // only if the view mode caused the loss and the request is still live, else the hold passes to ray-driven.
-    const bool rasterViewMode = wireframe_ || rset_.gbufferDebugView_ != GBufferDebugFeature::Mode::Off;
+    const bool rasterViewMode = viewState_.wireframe_ || rset_.gbufferDebugView_ != GBufferDebugFeature::Mode::Off;
     if (rasterViewMode) {
         if (rset_.ptSceneViewWantEnabled_) rset_.ptSceneViewSuppressedByViewMode_ = true;
         rset_.ptSceneViewWantEnabled_ = false;

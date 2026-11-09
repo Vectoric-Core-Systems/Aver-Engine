@@ -25,7 +25,7 @@ void SandboxApp::initEditorOrigin() {
     // A transform gesture (gizmo drag, nudge, Details drag) holds the pre-gesture transforms. Cancelling puts them back in the OLD
     // frame, before the shift, and closes the gesture without an undo entry.
     eo.addGesture("a transform edit is open",
-        [this] { return editBeforeValid_ || dragging_ || nudgeEditOpen_; },
+        [this] { return editBeforeValid_ || viewState_.dragging_ || nudgeEditOpen_; },
         [this] {
             scene::World& w = scene::World::instance();
             if (editBeforeValid_) {
@@ -37,11 +37,11 @@ void SandboxApp::initEditorOrigin() {
             }
             editBeforeValid_ = false;
             multiMoveBefore_.clear();
-            dragging_ = false;
-            activeAxis_ = -1;
+            viewState_.dragging_ = false;
+            viewState_.activeAxis_ = -1;
             nudgeEditOpen_ = false;
-            rotDragDeg_ = 0.0f;
-            rotAppliedDeg_ = 0.0f;
+            viewState_.rotDragDeg_ = 0.0f;
+            viewState_.rotAppliedDeg_ = 0.0f;
         });
     eo.addGesture("a selection rectangle is being dragged",
         [this] { return marqueeArmed_ || marqueeActive_; },
@@ -97,7 +97,7 @@ void SandboxApp::initEditorOrigin() {
 
     // ---- the world.* console ----
     worldHost_.origin = &origin_;
-    worldHost_.camPos = &camPos_;
+    worldHost_.camPos = &viewState_.camPos_;
     worldHost_.onTeleport = [this] { streaming_.resetVelocityTracking(); };   // a jump, not a one-frame flight to here
     editor::worldConsoleHostSlot() = &worldHost_;
 }

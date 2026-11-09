@@ -324,7 +324,7 @@ void SandboxApp::registerMcpAbis() {
             if (a.args.empty()) { w = "tool needs a tool index 0-" + std::to_string(kMaxTool); return false; }
             const int t = static_cast<int>(a.args[0]);
             if (t < 0 || t > kMaxTool) { w = "tool index out of range 0-" + std::to_string(kMaxTool); return false; }
-            tool_ = static_cast<Tool>(t);
+            viewState_.tool_ = static_cast<Tool>(t);
             r = kToolNames[t];
             return true;
         }
@@ -413,7 +413,7 @@ void SandboxApp::registerMcpAbis() {
         // The 3D viewport in window client pixels, the space click and move take.
         if (a.fn == "viewport") {
             char b[128];
-            std::snprintf(b, sizeof b, "{\"x\":%.0f,\"y\":%.0f,\"w\":%.0f,\"h\":%.0f}", vpX_, vpY_, vpW_, vpH_);
+            std::snprintf(b, sizeof b, "{\"x\":%.0f,\"y\":%.0f,\"w\":%.0f,\"h\":%.0f}", viewState_.vpX_, viewState_.vpY_, viewState_.vpW_, viewState_.vpH_);
             r = b;
             return true;
         }
@@ -464,14 +464,14 @@ void SandboxApp::registerMcpAbis() {
         }
         if (a.fn == "warp") {
             if (a.args.size() < 3) { w = "warp needs 3 args: x y z (world centimetres)"; return false; }
-            camPos_ = Vec3{static_cast<f32>(a.args[0]), static_cast<f32>(a.args[1]),
+            viewState_.camPos_ = Vec3{static_cast<f32>(a.args[0]), static_cast<f32>(a.args[1]),
                            static_cast<f32>(a.args[2])};
             // A teleport, not a move: the next chunk-streaming update must not see this as a
             // huge one-frame velocity computed against wherever the camera used to be -- the
             // same rule frameCameraOnLevel's own comment states for the same reason.
             streaming_.resetVelocityTracking();
             char buf[96];
-            std::snprintf(buf, sizeof buf, "camPos=(%.1f,%.1f,%.1f)", camPos_.x, camPos_.y, camPos_.z);
+            std::snprintf(buf, sizeof buf, "camPos=(%.1f,%.1f,%.1f)", viewState_.camPos_.x, viewState_.camPos_.y, viewState_.camPos_.z);
             r = buf;
             return true;
         }
@@ -617,7 +617,7 @@ bool SandboxApp::mcpLevelMove(AvId e, const EditXform& x, std::string& why) {
     // A person's drag (gizmo, a Details field, a held nudge) keeps editBefore_ open across frames. Borrowing
     // it here would overwrite that before-state and close the gesture, so their real end would find nothing
     // to record and the drag's undo entry would be lost.
-    if (editBeforeValid_ || dragging_) {
+    if (editBeforeValid_ || viewState_.dragging_) {
         why = "a drag is in flight in the editor (gizmo, Details field or nudge) -- let go of it and retry";
         return false;
     }
@@ -1042,8 +1042,8 @@ bool SandboxApp::mcpLevelAbi(const mcp::AbiCall& a, std::string& r, std::string&
         } else {
             j += ",\"playerStart\":null";
         }
-        j += ",\"camera\":{\"pos\":" + jv3(camPos_.x, camPos_.y, camPos_.z) + ",\"yaw\":" +
-             jnum(degrees(yaw_)) + ",\"pitch\":" + jnum(degrees(pitch_)) + "},\"selection\":[";
+        j += ",\"camera\":{\"pos\":" + jv3(viewState_.camPos_.x, viewState_.camPos_.y, viewState_.camPos_.z) + ",\"yaw\":" +
+             jnum(degrees(viewState_.yaw_)) + ",\"pitch\":" + jnum(degrees(viewState_.pitch_)) + "},\"selection\":[";
         bool firstSel = true;
         for (const scene::Entity e : selectedEntities()) {
             if (!firstSel) j += ",";
@@ -1375,8 +1375,8 @@ bool SandboxApp::mcpLevelAbi(const mcp::AbiCall& a, std::string& r, std::string&
             if (selectionBounds(center, rad)) {
                 // F's own formula (onUpdate): stand back far enough that the whole selection's sphere fits.
                 const f32 d = std::fmax(50.0f, rad / std::tan(radians(30.0f)) * 1.6f);
-                camPos_ = center - camForward() * d;
-                flySpeed_ = std::fmax(flySpeed_, rad * 0.4f);
+                viewState_.camPos_ = center - camForward() * d;
+                viewState_.flySpeed_ = std::fmax(viewState_.flySpeed_, rad * 0.4f);
                 streaming_.resetVelocityTracking();   // a teleport, as frameCameraOnLevel says
                 framed = true;
             }

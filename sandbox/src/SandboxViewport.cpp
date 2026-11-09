@@ -787,7 +787,7 @@ void SandboxApp::addPlayerStart(Engine&) {
         return;
     }
     Vec3 at = spawnPoint();
-    if (snapMove_) for (int k = 0; k < 3; ++k) (&at.x)[k] = snapf((&at.x)[k], moveSnap_);
+    if (viewState_.snapMove_) for (int k = 0; k < 3; ++k) (&at.x)[k] = snapf((&at.x)[k], viewState_.moveSnap_);
     // Faces the camera's direction: atan2 of forward, in the +X-forward/+Y-right frame the level
     // format's yaw is authored in.
     const Vec3 f = camForward();
@@ -817,7 +817,7 @@ void SandboxApp::addPlayerStart(Engine&) {
 void SandboxApp::spawnLightAtCamera(i32 kind) {
     scene::World& world = scene::World::instance();
     Vec3 at = spawnPoint();
-    if (snapMove_) for (int k = 0; k < 3; ++k) (&at.x)[k] = snapf((&at.x)[k], moveSnap_);
+    if (viewState_.snapMove_) for (int k = 0; k < 3; ++k) (&at.x)[k] = snapf((&at.x)[k], viewState_.moveSnap_);
     const Vec3 f = camForward();
     const f32 yaw = degrees(std::atan2(f.y, f.x));
     Transform xf;
@@ -847,7 +847,7 @@ void SandboxApp::spawnLightAtCamera(i32 kind) {
 void SandboxApp::spawnDecalAtCamera() {
     scene::World& world = scene::World::instance();
     Vec3 at = spawnPoint();
-    if (snapMove_) for (int k = 0; k < 3; ++k) (&at.x)[k] = snapf((&at.x)[k], moveSnap_);
+    if (viewState_.snapMove_) for (int k = 0; k < 3; ++k) (&at.x)[k] = snapf((&at.x)[k], viewState_.moveSnap_);
     const Vec3 f = camForward();
     const scene::Entity e = editor::createEditorDecal(world, at, degrees(std::atan2(f.y, f.x)));
     if (e == scene::kInvalidEntity) { AVER_WARN("[Editor] Add: the world refused a new decal"); return; }
@@ -879,7 +879,7 @@ void SandboxApp::spawnPrimitive(Engine& engine, const char* assetPath, const cha
         scene::World& world = scene::World::instance();
         Transform xf;
         xf.position = at;
-        if (snapMove_) for (int k=0;k<3;++k) (&xf.position.x)[k] = snapf((&xf.position.x)[k], moveSnap_);
+        if (viewState_.snapMove_) for (int k=0;k<3;++k) (&xf.position.x)[k] = snapf((&xf.position.x)[k], viewState_.moveSnap_);
         xf.rotation = Quat{0,0,0,1};
         // FROZEN: scale is the half-extent in cm, matching .ocworld PLACEG against the unit cube.
         xf.scale = Vec3{half, half, half};
@@ -947,7 +947,7 @@ void SandboxApp::spawnPrimitive(Engine& engine, const char* assetPath, const cha
     MeshObj c; c.mesh = mesh; c.tris = tris; c.scale = scale;
     c.name = std::string(label) + " " + std::to_string(++spawnCount_);
     c.pos = at;
-    if (snapMove_) for (int k=0;k<3;++k) (&c.pos.x)[k] = snapf((&c.pos.x)[k], moveSnap_);
+    if (viewState_.snapMove_) for (int k=0;k<3;++k) (&c.pos.x)[k] = snapf((&c.pos.x)[k], viewState_.moveSnap_);
     c.color[0]=0.72f; c.color[1]=0.72f; c.color[2]=0.74f; c.metallic=0.0f; c.roughness=0.6f;
     objects_.push_back(c);
     // Unguarded: the placeholder-world fallback, reached with SCENE off too.
@@ -1026,7 +1026,7 @@ Vec3 SandboxApp::dropWorldPoint(f32 screenX, f32 screenY, bool* onSurface) const
     // in front of the camera, matching spawnCube()'s placement. Nothing was hit, so nothing is
     // underneath to rest on -- the object goes exactly where the camera is pointing.
     if (onSurface) *onSurface = false;
-    return camPos_ + camForward() * kAddDistance;
+    return viewState_.camPos_ + camForward() * kAddDistance;
 }
 
 // The first SURFACE under a screen point, for Play From Here: whichever the ray meets first of the
@@ -1139,7 +1139,7 @@ void SandboxApp::dropGraphClass(const std::string& fullPath, f32 screenX, f32 sc
         cbStatus_ = "Could not find a valid drop position";
         return;
     }
-    if (snapMove_) for (int k = 0; k < 3; ++k) (&at.x)[k] = snapf((&at.x)[k], moveSnap_);
+    if (viewState_.snapMove_) for (int k = 0; k < 3; ++k) (&at.x)[k] = snapf((&at.x)[k], viewState_.moveSnap_);
     // No rest-lift: a class's bounds are unknown before it spawns, and a character's origin is its feet.
     std::string why;
     placeClassInstance(editor::makeClassPlacement(d.className, at, 0.0), &why);
@@ -1185,8 +1185,8 @@ void SandboxApp::drawGraphActorMenu() {
     if (ImGui::MenuItem("Refresh")) classPickDirty_ = true;
 
     if (chosen) {
-        Vec3 at = camPos_ + camForward() * kAddDistance;
-        if (snapMove_) for (int k = 0; k < 3; ++k) (&at.x)[k] = snapf((&at.x)[k], moveSnap_);
+        Vec3 at = viewState_.camPos_ + camForward() * kAddDistance;
+        if (viewState_.snapMove_) for (int k = 0; k < 3; ++k) (&at.x)[k] = snapf((&at.x)[k], viewState_.moveSnap_);
         std::string why;
         placeClassInstance(editor::makeClassPlacement(std::string(chosen->className), at, 0.0), &why);
     }
@@ -1215,7 +1215,7 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
             cbStatus_ = "Could not find a valid drop position";
             return;
         }
-        if (snapMove_) for (int k = 0; k < 3; ++k) (&xf.position.x)[k] = snapf((&xf.position.x)[k], moveSnap_);
+        if (viewState_.snapMove_) for (int k = 0; k < 3; ++k) (&xf.position.x)[k] = snapf((&xf.position.x)[k], viewState_.moveSnap_);
         scene::Entity root = scene::kInvalidEntity;
         editor::PrefabEdit edit;
         std::string why;
@@ -1251,7 +1251,7 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
             cbStatus_ = "Could not find a valid drop position";
             return;
         }
-        if (snapMove_) for (int k = 0; k < 3; ++k) (&xf.position.x)[k] = snapf((&xf.position.x)[k], moveSnap_);
+        if (viewState_.snapMove_) for (int k = 0; k < 3; ++k) (&xf.position.x)[k] = snapf((&xf.position.x)[k], viewState_.moveSnap_);
         const editor::LevelInstanceEditorModel::PlaceResult pr = levelInstanceModel_.place(ref, xf);
         if (!pr.ok) {
             cbStatus_ = pr.error;
@@ -1323,7 +1323,7 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
         scene::World& world = scene::World::instance();
         Transform xf;
         xf.position = at;
-        if (snapMove_) for (int k=0;k<3;++k) (&xf.position.x)[k] = snapf((&xf.position.x)[k], moveSnap_);
+        if (viewState_.snapMove_) for (int k=0;k<3;++k) (&xf.position.x)[k] = snapf((&xf.position.x)[k], viewState_.moveSnap_);
 
         const scene::Entity ent = world.create(rel, scene::kInvalidEntity, xf);
         if (ent == scene::kInvalidEntity) {
@@ -1388,7 +1388,7 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
             lift = editor::dropRestLift(b->first.z, xf.scale.z);
     }
     xf.position.z += lift;
-    if (snapMove_) for (int k=0;k<3;++k) (&xf.position.x)[k] = snapf((&xf.position.x)[k], moveSnap_);
+    if (viewState_.snapMove_) for (int k=0;k<3;++k) (&xf.position.x)[k] = snapf((&xf.position.x)[k], viewState_.moveSnap_);
 
     const scene::Entity ent = world.create(rel, scene::kInvalidEntity, xf);
     if (ent == scene::kInvalidEntity) {
@@ -1426,17 +1426,17 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
 #endif
 #endif
 
-f32 SandboxApp::gizmoLen(const Vec3& origin) const { f32 L = dist(eye_, origin) * 0.17f; return L < 50.0f ? 50.0f : L; }
+f32 SandboxApp::gizmoLen(const Vec3& origin) const { f32 L = dist(viewState_.eye_, origin) * 0.17f; return L < 50.0f ? 50.0f : L; }
 
 // Projects a world point to viewport pixels (row-vector clip = p * viewProj). False when behind.
 bool SandboxApp::project(const Vec3& wp, f32& sx, f32& sy) const {
-    const Mat4& m = viewProj_;
+    const Mat4& m = viewState_.viewProj_;
     const f32 x = wp.x*m.m[0][0]+wp.y*m.m[1][0]+wp.z*m.m[2][0]+m.m[3][0];
     const f32 y = wp.x*m.m[0][1]+wp.y*m.m[1][1]+wp.z*m.m[2][1]+m.m[3][1];
     const f32 w = wp.x*m.m[0][3]+wp.y*m.m[1][3]+wp.z*m.m[2][3]+m.m[3][3];
     if (w <= 1e-4f) return false;
-    sx = vpX_ + (x / w * 0.5f + 0.5f) * vpW_;
-    sy = vpY_ + (1.0f - (y / w * 0.5f + 0.5f)) * vpH_;
+    sx = viewState_.vpX_ + (x / w * 0.5f + 0.5f) * viewState_.vpW_;
+    sy = viewState_.vpY_ + (1.0f - (y / w * 0.5f + 0.5f)) * viewState_.vpH_;
     return true;
 }
 
@@ -1452,7 +1452,7 @@ bool SandboxApp::project(const Vec3& wp, f32& sx, f32& sy) const {
 // local regardless: applyScale writes o.scale.x/y/z (the object's own axes), so a world-axis handle
 // on a rotated object would drag one way while the number changed another. UE hides World here too.
 void SandboxApp::gizmoBasis(const EditXform& o, Vec3 ax[3]) const {
-    if (worldSpace_ && tool_ != Tool::Scale) {
+    if (viewState_.worldSpace_ && viewState_.tool_ != Tool::Scale) {
         for (int a = 0; a < 3; ++a) ax[a] = kAxisDir[a];
         return;
     }
@@ -1463,8 +1463,8 @@ void SandboxApp::gizmoBasis(const EditXform& o, Vec3 ax[3]) const {
 // Returns which gizmo handle is under the cursor: 0..2 axis, 3 = centre, -1 = none.
 int SandboxApp::pickAxis(const Vec3& origin, const Vec3 ax[3], f32 L, f32 mx, f32 my) const {
     f32 ox, oy; if (!project(origin, ox, oy)) return -1;
-    const f32 thr = 16.0f * dpi_;
-    if (tool_ == Tool::Rotate) {
+    const f32 thr = 16.0f * viewState_.dpi_;
+    if (viewState_.tool_ == Tool::Rotate) {
         int best=-1; f32 bestD=thr;
         for (int a=0;a<3;++a) {
             const Vec3 P=ax[(a+1)%3], Q=ax[(a+2)%3];
@@ -1480,7 +1480,7 @@ int SandboxApp::pickAxis(const Vec3& origin, const Vec3 ax[3], f32 L, f32 mx, f3
         }
         return best;
     }
-    if (std::sqrt((mx-ox)*(mx-ox)+(my-oy)*(my-oy)) < 13.0f*dpi_) return 3;
+    if (std::sqrt((mx-ox)*(mx-ox)+(my-oy)*(my-oy)) < 13.0f*viewState_.dpi_) return 3;
     int best=-1; f32 bestD=thr;
     for (int a=0;a<3;++a) {
         f32 tx, ty; if (!project(origin + ax[a]*L, tx, ty)) continue;
@@ -1492,15 +1492,15 @@ int SandboxApp::pickAxis(const Vec3& origin, const Vec3 ax[3], f32 L, f32 mx, f3
 
 // Moves the transform by a mouse delta in pixels, along the active axis or the screen plane.
 void SandboxApp::applyMove(EditXform& o, f32 dx, f32 dy) {
-    if (activeAxis_ == 3) {
+    if (viewState_.activeAxis_ == 3) {
         const Vec3 fwd = camForward();
         const Vec3 s = cross(Vec3{0,0,1}, fwd).getSafeNormal();
         const Vec3 u = cross(fwd, s);
-        const f32 wpp = 2.0f * std::tan(radians(30.0f)) * dist(eye_, o.pos) / (vpH_ > 1 ? vpH_ : 900.0f);
+        const f32 wpp = 2.0f * std::tan(radians(30.0f)) * dist(viewState_.eye_, o.pos) / (viewState_.vpH_ > 1 ? viewState_.vpH_ : 900.0f);
         o.pos += s * (dx * wpp) + u * (-dy * wpp);
     } else {
         Vec3 ax[3]; gizmoBasis(o, ax);
-        const Vec3 A = ax[activeAxis_];
+        const Vec3 A = ax[viewState_.activeAxis_];
         f32 s0x,s0y,s1x,s1y;
         if (project(o.pos, s0x, s0y) && project(o.pos + A, s1x, s1y)) {
             const f32 px=s1x-s0x, py=s1y-s0y, pl2=px*px+py*py;
@@ -1509,23 +1509,23 @@ void SandboxApp::applyMove(EditXform& o, f32 dx, f32 dy) {
     }
     // Grid snap stays in WORLD space even for a local-axis drag: a grid the object isn't aligned to
     // is still the grid the level is built on; snapping to the object's own rotated lattice would put nothing on round numbers.
-    if (snapMove_) for (int k=0;k<3;++k) (&o.pos.x)[k] = snapf((&o.pos.x)[k], moveSnap_);
+    if (viewState_.snapMove_) for (int k=0;k<3;++k) (&o.pos.x)[k] = snapf((&o.pos.x)[k], viewState_.moveSnap_);
 }
 
 // Scales the transform by a mouse delta in pixels, along the active axis or uniformly.
 void SandboxApp::applyScale(EditXform& o, f32 dx, f32 dy) {
     auto bump = [&](int a, f32 amt){ f32& c=(&o.scale.x)[a]; c += amt; if (c<0.02f) c=0.02f; };
-    if (activeAxis_ == 3) { const f32 amt=(dx - dy)/80.0f; for (int a=0;a<3;++a) bump(a, amt); }
+    if (viewState_.activeAxis_ == 3) { const f32 amt=(dx - dy)/80.0f; for (int a=0;a<3;++a) bump(a, amt); }
     else {
         Vec3 ax[3]; gizmoBasis(o, ax);
-        const Vec3 A = ax[activeAxis_];
+        const Vec3 A = ax[viewState_.activeAxis_];
         f32 s0x,s0y,s1x,s1y;
         if (project(o.pos, s0x, s0y) && project(o.pos + A, s1x, s1y)) {
             const f32 px=s1x-s0x, py=s1y-s0y, pl=std::sqrt(px*px+py*py);
-            if (pl > 1e-3f) bump(activeAxis_, ((dx*px + dy*py)/pl) / 60.0f);
+            if (pl > 1e-3f) bump(viewState_.activeAxis_, ((dx*px + dy*py)/pl) / 60.0f);
         }
     }
-    if (snapScale_) for (int k=0;k<3;++k) (&o.scale.x)[k] = std::fmax(0.02f, snapf((&o.scale.x)[k], scaleSnap_));
+    if (viewState_.snapScale_) for (int k=0;k<3;++k) (&o.scale.x)[k] = std::fmax(0.02f, snapf((&o.scale.x)[k], viewState_.scaleSnap_));
 }
 
 // Rotates the transform about the active gizmo axis by the swept cursor angle, by QUATERNION
@@ -1539,16 +1539,16 @@ void SandboxApp::applyRotate(EditXform& o, f32 px, f32 py, f32 mx, f32 my) {
     f32 da=a1-a0; while (da> kPi) da-=kTwoPi; while (da< -kPi) da+=kTwoPi;
 
     Vec3 ax[3]; gizmoBasis(o, ax);
-    const Vec3 A = ax[activeAxis_];
+    const Vec3 A = ax[viewState_.activeAxis_];
     // Which way the ring turns on screen depends on which side of it the camera is.
     const f32 sgn = dot(A, camForward()) >= 0.0f ? -1.0f : 1.0f;
 
-    rotDragDeg_ += degrees(da) * sgn;
+    viewState_.rotDragDeg_ += degrees(da) * sgn;
     // Snaps the ACCUMULATED angle, not the per-frame delta -- snapping each delta would round most to zero and the object would never turn.
-    const f32 target = snapRot_ ? snapf(rotDragDeg_, rotSnap_) : rotDragDeg_;
-    const f32 step = target - rotAppliedDeg_;
+    const f32 target = viewState_.snapRot_ ? snapf(viewState_.rotDragDeg_, viewState_.rotSnap_) : viewState_.rotDragDeg_;
+    const f32 step = target - viewState_.rotAppliedDeg_;
     if (std::fabs(step) < 1e-5f) return;
-    rotAppliedDeg_ = target;
+    viewState_.rotAppliedDeg_ = target;
 
     const Quat dq = Quat::fromAxisAngle(A, radians(step));
     o.rotDeg = eulerDegFromQuat((dq * quatFromEulerDeg(o.rotDeg)).normalized());
@@ -1625,7 +1625,7 @@ void SandboxApp::updateMarquee(const ImGuiIO& io, f32 mx, f32 my) {
             // the fill so the scene underneath a drag stays readable.
             ImDrawList* dl = ImGui::GetForegroundDrawList();
             dl->AddRectFilled(ImVec2(loX, loY), ImVec2(hiX, hiY), IM_COL32(235, 163, 10, 40));
-            dl->AddRect(ImVec2(loX, loY), ImVec2(hiX, hiY), IM_COL32(235, 163, 10, 220), 0.0f, 0, 1.5f*dpi_);
+            dl->AddRect(ImVec2(loX, loY), ImVec2(hiX, hiY), IM_COL32(235, 163, 10, 220), 0.0f, 0, 1.5f*viewState_.dpi_);
         }
 
         if (!io.MouseDown[0]) {
@@ -1692,7 +1692,7 @@ void SandboxApp::handleEditVerbKeys(const ImGuiIO& io) {
     // press Ctrl+A mid-drag -- the gizmo jumped to the other object.) Gating the verbs is narrower
     // than pinning a dragEntity_ through the drag (that risks a second source of truth for "what is
     // being dragged"): the mouse button already blocks a click from changing selection, so the keyboard verbs were the whole hole.
-    if (!dragging_ && (levelFocused_ || outlinerFocused_ || detailsFocused_) && !io.WantTextInput) {
+    if (!viewState_.dragging_ && (viewState_.levelFocused_ || viewState_.outlinerFocused_ || viewState_.detailsFocused_) && !io.WantTextInput) {
         if (keybinds_.pressed(editor::CommandId::EditDelete, io))    deleteSelection();
         if (keybinds_.pressed(editor::CommandId::EditCopy, io))      copySelection();
         if (keybinds_.pressed(editor::CommandId::EditPaste, io))     pasteClipboard();
@@ -1728,7 +1728,7 @@ void SandboxApp::handleEditVerbKeys(const ImGuiIO& io) {
             const Vec3 fwdAxis = std::fabs(fwdFlat.x) >= std::fabs(fwdFlat.y)
                 ? Vec3{fwdFlat.x >= 0.0f ? 1.0f : -1.0f, 0.0f, 0.0f}
                 : Vec3{0.0f, fwdFlat.y >= 0.0f ? 1.0f : -1.0f, 0.0f};
-            const f32 nudgeStep = snapMove_ ? moveSnap_ : 10.0f;
+            const f32 nudgeStep = viewState_.snapMove_ ? viewState_.moveSnap_ : 10.0f;
 
             using CI = editor::CommandId;
             const CI kNudgeIds[6] = {CI::NudgeLeft, CI::NudgeRight, CI::NudgeForward,
@@ -1760,14 +1760,14 @@ void SandboxApp::handleEditVerbKeys(const ImGuiIO& io) {
 #if AVER_WITH_IMGUI
 // Applies the active gizmo drag to the selection for this frame's mouse position.
 void SandboxApp::applyGizmoDrag(f32 mx, f32 my) {
-    if (dragging_ && anySelected()) {
+    if (viewState_.dragging_ && anySelected()) {
         EditXform o;
         if (selectedXform(o)) {
-            const f32 dx=mx-prevMouseX_, dy=my-prevMouseY_;
+            const f32 dx=mx-viewState_.prevMouseX_, dy=my-viewState_.prevMouseY_;
             const Vec3 before = o.pos;
-            if (tool_==Tool::Move)        applyMove(o, dx, dy);
-            else if (tool_==Tool::Rotate) applyRotate(o, prevMouseX_, prevMouseY_, mx, my);
-            else if (tool_==Tool::Scale)  applyScale(o, dx, dy);
+            if (viewState_.tool_==Tool::Move)        applyMove(o, dx, dy);
+            else if (viewState_.tool_==Tool::Rotate) applyRotate(o, viewState_.prevMouseX_, viewState_.prevMouseY_, mx, my);
+            else if (viewState_.tool_==Tool::Scale)  applyScale(o, dx, dy);
             setSelectedXform(o);
 #if AVER_MODULE_SCENE
             // The rest of the selection follows by the same world-space DELTA the anchor just
@@ -1778,7 +1778,7 @@ void SandboxApp::applyGizmoDrag(f32 mx, f32 my) {
             // Move only: rotate/scale about a shared pivot need a pivot CHOSEN (anchor? centroid?
             // each object's own?), and picking one silently would be worse than the honest gap --
             // they still act on the anchor alone.
-            if (tool_ == Tool::Move) {
+            if (viewState_.tool_ == Tool::Move) {
                 const Vec3 delta = o.pos - before;
                 if (delta.x != 0.0f || delta.y != 0.0f || delta.z != 0.0f) {
                     // Through the shared helper, which also decides what beginTransformEdit
@@ -1794,7 +1794,7 @@ void SandboxApp::applyGizmoDrag(f32 mx, f32 my) {
             }
 #endif
         }
-        prevMouseX_=mx; prevMouseY_=my;
+        viewState_.prevMouseX_=mx; viewState_.prevMouseY_=my;
     }
 }
 #endif
@@ -1806,27 +1806,27 @@ void SandboxApp::handleManip(Engine& e) {
     if (gameHasInput()) return;
     const ImGuiIO& io = ImGui::GetIO();
 
-    if (levelFocused_ && !io.WantCaptureKeyboard) {
+    if (viewState_.levelFocused_ && !io.WantCaptureKeyboard) {
         // 1..4 select a tool WITHIN the active mode (not a flat list that grows with every mode);
         // Tab switches mode. Both halves of the 1..4 dispatch are 4 commands, not 8 -- their scopes
         // never overlap since mode_ is single-valued.
         if (keybinds_.pressed(editor::CommandId::ModeToggleLandscape, io)) toggleEditorMode();
 #if AVER_MODULE_LANDSCAPE
-        if (mode_ == EditorMode::Landscape) {
+        if (viewState_.mode_ == EditorMode::Landscape) {
             // wave3: the 1..4 sculpt keys belong to the Sculpt tab; Paint and Water have their own tools.
             if (landscapeTab_ == LandscapeTab::Sculpt) {
-            if (keybinds_.pressed(editor::CommandId::SculptRaise, io))   sculptTool_=SculptTool::Raise;
-            if (keybinds_.pressed(editor::CommandId::SculptLower, io))   sculptTool_=SculptTool::Lower;
-            if (keybinds_.pressed(editor::CommandId::SculptSmooth, io))  sculptTool_=SculptTool::Smooth;
-            if (keybinds_.pressed(editor::CommandId::SculptFlatten, io)) sculptTool_=SculptTool::Flatten;
+            if (keybinds_.pressed(editor::CommandId::SculptRaise, io))   viewState_.sculptTool_=SculptTool::Raise;
+            if (keybinds_.pressed(editor::CommandId::SculptLower, io))   viewState_.sculptTool_=SculptTool::Lower;
+            if (keybinds_.pressed(editor::CommandId::SculptSmooth, io))  viewState_.sculptTool_=SculptTool::Smooth;
+            if (keybinds_.pressed(editor::CommandId::SculptFlatten, io)) viewState_.sculptTool_=SculptTool::Flatten;
             }
         } else
 #endif
         {
-            if (keybinds_.pressed(editor::CommandId::ToolSelect, io)) tool_=Tool::Select;
-            if (keybinds_.pressed(editor::CommandId::ToolMove, io))   tool_=Tool::Move;
-            if (keybinds_.pressed(editor::CommandId::ToolRotate, io)) tool_=Tool::Rotate;
-            if (keybinds_.pressed(editor::CommandId::ToolScale, io))  tool_=Tool::Scale;
+            if (keybinds_.pressed(editor::CommandId::ToolSelect, io)) viewState_.tool_=Tool::Select;
+            if (keybinds_.pressed(editor::CommandId::ToolMove, io))   viewState_.tool_=Tool::Move;
+            if (keybinds_.pressed(editor::CommandId::ToolRotate, io)) viewState_.tool_=Tool::Rotate;
+            if (keybinds_.pressed(editor::CommandId::ToolScale, io))  viewState_.tool_=Tool::Scale;
         }
 #if AVER_MODULE_LANDSCAPE
         if (landscape_.loaded()) {
@@ -1834,8 +1834,8 @@ void SandboxApp::handleManip(Engine& e) {
 #endif
     }
     const f32 mx=io.MousePos.x, my=io.MousePos.y;
-    const bool overScene = levelHovered_ && inViewport(mx, my);
-    if (mode_ == EditorMode::Modeling) { handleModelingInput(io, overScene, mx, my); return; }   // the mode owns the click: no level picking
+    const bool overScene = viewState_.levelHovered_ && inViewport(mx, my);
+    if (viewState_.mode_ == EditorMode::Modeling) { handleModelingInput(io, overScene, mx, my); return; }   // the mode owns the click: no level picking
 
 #if AVER_MODULE_LANDSCAPE
     const bool isSculptTool = editorModeIsLandscape();
@@ -1848,15 +1848,15 @@ void SandboxApp::handleManip(Engine& e) {
     // brush-ring cursor and click/drag handling below, not this one. Object transforms are a
     // Select-mode action; in Landscape mode a drag is a brush stroke and must not also nudge whatever is selected.
     const bool isXformTool = !editorModeIsLandscape() &&
-                             (tool_==Tool::Move || tool_==Tool::Rotate || tool_==Tool::Scale);
+                             (viewState_.tool_==Tool::Move || viewState_.tool_==Tool::Rotate || viewState_.tool_==Tool::Scale);
 
-    hoverAxis_ = -1;
+    viewState_.hoverAxis_ = -1;
     EditXform gx;
     const bool haveGizmo = isXformTool && anySelected() && selectedXform(gx);
     Vec3 gaxis[3];
     if (haveGizmo) gizmoBasis(gx, gaxis);
-    if (haveGizmo && !dragging_ && overScene)
-        hoverAxis_ = pickAxis(gx.pos, gaxis, gizmoLen(gx.pos), mx, my);
+    if (haveGizmo && !viewState_.dragging_ && overScene)
+        viewState_.hoverAxis_ = pickAxis(gx.pos, gaxis, gizmoLen(gx.pos), mx, my);
 
 #if AVER_MODULE_LANDSCAPE
     if (isSculptTool) {
@@ -1888,8 +1888,8 @@ void SandboxApp::handleManip(Engine& e) {
             if (haveGizmo)
                 ax = pickAxis(gx.pos, gaxis, gizmoLen(gx.pos), mx, my);
             if (ax >= 0) {
-                dragging_=true; activeAxis_=ax; prevMouseX_=mx; prevMouseY_=my;
-                rotDragDeg_=0.0f; rotAppliedDeg_=0.0f;   // see applyRotate
+                viewState_.dragging_=true; viewState_.activeAxis_=ax; viewState_.prevMouseX_=mx; viewState_.prevMouseY_=my;
+                viewState_.rotDragDeg_=0.0f; viewState_.rotAppliedDeg_=0.0f;   // see applyRotate
                 beginTransformEdit();
             }
             else {
@@ -1922,9 +1922,9 @@ void SandboxApp::handleManip(Engine& e) {
                                         && selEntity_ == prevEnt
 #endif
                     ;
-                if (haveGizmo && sameTarget && tool_ == Tool::Move) {
-                    dragging_=true; activeAxis_=3; prevMouseX_=mx; prevMouseY_=my;
-                    rotDragDeg_=0.0f; rotAppliedDeg_=0.0f;
+                if (haveGizmo && sameTarget && viewState_.tool_ == Tool::Move) {
+                    viewState_.dragging_=true; viewState_.activeAxis_=3; viewState_.prevMouseX_=mx; viewState_.prevMouseY_=my;
+                    viewState_.rotDragDeg_=0.0f; viewState_.rotAppliedDeg_=0.0f;
                     beginTransformEdit();
                 }
 #if AVER_MODULE_SCENE
@@ -1933,7 +1933,7 @@ void SandboxApp::handleManip(Engine& e) {
                 // (costs nothing extra), and a Ctrl-click miss (pick() left selection alone for it)
                 // -- arming that makes Ctrl+drag from empty space ADD to an existing selection. A
                 // release with no further movement reads as that same click (marqueeActive_ stays false).
-                else if (tool_ == Tool::Select && !pickHit && (!anySelected() || io.KeyCtrl)) {
+                else if (viewState_.tool_ == Tool::Select && !pickHit && (!anySelected() || io.KeyCtrl)) {
                     marqueeArmed_ = true; marqueeActive_ = false;
                     marqueeX0_ = marqueeX1_ = mx; marqueeY0_ = marqueeY1_ = my;
                 }
@@ -1941,8 +1941,8 @@ void SandboxApp::handleManip(Engine& e) {
             }
         }
         if (!io.MouseDown[0]) {
-            if (dragging_) endTransformEdit();
-            dragging_=false; activeAxis_=-1;
+            if (viewState_.dragging_) endTransformEdit();
+            viewState_.dragging_=false; viewState_.activeAxis_=-1;
         }
 #if AVER_MODULE_SCENE
         updateMarquee(io, mx, my);
@@ -2006,11 +2006,11 @@ void SandboxApp::handleSculpt(Engine& e, const ImGuiIO& io, bool overScene, f32 
         p.rampStartCm[1] = sculptRampStartCm_[1];
         p.rampStartHeightCm = sculptRampStartHeightCm_;
         p.noiseSeed = sculptNoiseSeed_;
-        p.mode = sculptTool_==SculptTool::Raise   ? landscape::BrushMode::Raise
-               : sculptTool_==SculptTool::Lower   ? landscape::BrushMode::Lower
-               : sculptTool_==SculptTool::Smooth  ? landscape::BrushMode::Smooth
-               : sculptTool_==SculptTool::Flatten ? landscape::BrushMode::Flatten
-               : sculptTool_==SculptTool::Ramp    ? landscape::BrushMode::Ramp
+        p.mode = viewState_.sculptTool_==SculptTool::Raise   ? landscape::BrushMode::Raise
+               : viewState_.sculptTool_==SculptTool::Lower   ? landscape::BrushMode::Lower
+               : viewState_.sculptTool_==SculptTool::Smooth  ? landscape::BrushMode::Smooth
+               : viewState_.sculptTool_==SculptTool::Flatten ? landscape::BrushMode::Flatten
+               : viewState_.sculptTool_==SculptTool::Ramp    ? landscape::BrushMode::Ramp
                                             : landscape::BrushMode::Noise;
 
         // dt-scaled so holding paints at a constant rate regardless of frame rate; clamped like
@@ -2035,7 +2035,7 @@ void SandboxApp::drawGizmo(Engine& e) {
     // "no gizmo" rather than inheriting `: gzScale_`. Also gated to Select mode, else the gizmo
     // would keep drawing over the terrain during a brush (tool_ still holds the last object tool).
     if (editorModeIsLandscape()) return;
-    if (tool_!=Tool::Move && tool_!=Tool::Rotate && tool_!=Tool::Scale) return;
+    if (viewState_.tool_!=Tool::Move && viewState_.tool_!=Tool::Rotate && viewState_.tool_!=Tool::Scale) return;
     EditXform x;
     if (!selectedXform(x)) return;
     const Vec3 O = x.pos;
@@ -2043,18 +2043,18 @@ void SandboxApp::drawGizmo(Engine& e) {
     // The handles are drawn along the SAME axes pickAxis tests and applyMove drags. The line
     // meshes are built along the world axes, so local space rotates them here. Row-vector
     // order, matching Transform::matrix(): scale, then rotate, then translate.
-    const bool localGizmo = !worldSpace_ || tool_ == Tool::Scale;
+    const bool localGizmo = !viewState_.worldSpace_ || viewState_.tool_ == Tool::Scale;
     const Mat4 w = localGizmo
         ? Mat4::scale(Vec3{L,L,L}) * Mat4::fromQuat(quatFromEulerDeg(x.rotDeg)) * Mat4::translation(O)
         : Mat4::scale(Vec3{L,L,L}) * Mat4::translation(O);
-    const rhi::LineHandle* nrm = tool_==Tool::Move ? gzMove_ : tool_==Tool::Rotate ? gzRot_ : gzScale_;
-    const rhi::LineHandle* hi  = tool_==Tool::Move ? gzMoveHi_ : tool_==Tool::Rotate ? gzRotHi_ : gzScaleHi_;
+    const rhi::LineHandle* nrm = viewState_.tool_==Tool::Move ? viewState_.gzMove_ : viewState_.tool_==Tool::Rotate ? viewState_.gzRot_ : viewState_.gzScale_;
+    const rhi::LineHandle* hi  = viewState_.tool_==Tool::Move ? viewState_.gzMoveHi_ : viewState_.tool_==Tool::Rotate ? viewState_.gzRotHi_ : viewState_.gzScaleHi_;
     e.device()->setLineDepth(false);
     // Unreal draws its gizmo handles a few pixels wide, not hairline -- setLineWidth is in DISPLAY
     // pixels (RHI.hpp), so this scales by DPI the same way the rest of the editor's own line widths do.
-    e.device()->setLineWidth(3.0f * dpi_);
+    e.device()->setLineWidth(3.0f * viewState_.dpi_);
     for (int a=0;a<3;++a) {
-        const bool active = (dragging_ && a==activeAxis_) || (!dragging_ && a==hoverAxis_);
+        const bool active = (viewState_.dragging_ && a==viewState_.activeAxis_) || (!viewState_.dragging_ && a==viewState_.hoverAxis_);
         e.device()->drawLines(active ? hi[a] : nrm[a], &w.m[0][0]);
     }
     // Back to hairline for the grid and everything else: the setter is sticky.
@@ -2261,8 +2261,8 @@ void SandboxApp::copySelection() {
 // thing's undo entry. No-op when the clipboard is empty (keybind dispatch doesn't gate on
 // clipboard state, so that's expected).
 void SandboxApp::pasteClipboard() {
-    Vec3 at = camPos_ + camForward() * kAddDistance;
-    if (snapMove_) for (int k = 0; k < 3; ++k) (&at.x)[k] = snapf((&at.x)[k], moveSnap_);
+    Vec3 at = viewState_.camPos_ + camForward() * kAddDistance;
+    if (viewState_.snapMove_) for (int k = 0; k < 3; ++k) (&at.x)[k] = snapf((&at.x)[k], viewState_.moveSnap_);
 #if AVER_MODULE_SCENE
     if (!clipboard_.entities.empty()) {
         // Relative layout is preserved, not a loop pasting each item at `at` (which would stack
@@ -2323,7 +2323,7 @@ void SandboxApp::pasteClipboard() {
 // sits: Duplicate makes a visible sibling next to the original, where Paste restores at the copied
 // transform -- separately-reasoned placement. Never touches clipboard_.
 void SandboxApp::duplicateSelection() {
-    const f32 delta = snapMove_ ? moveSnap_ : kDuplicateOffset;
+    const f32 delta = viewState_.snapMove_ ? viewState_.moveSnap_ : kDuplicateOffset;
 #if AVER_MODULE_SCENE
     // The whole selection, not just the anchor (previously read selEntity_ alone, so Ctrl+D on
     // five props duplicated one and dropped the other four).
@@ -2426,9 +2426,9 @@ void SandboxApp::duplicateSelection() {
 // expressions differ only in the iv.m[2][*] term (ndc.z): present at the far plane (z=1), absent
 // at the near plane (z=0); depth range is [0,1], not [-1,1] (see Mat4::perspectiveLH).
 void SandboxApp::viewportRay(f32 screenX, f32 screenY, Vec3& ro, Vec3& rd) const {
-    const f32 nx = (screenX - vpX_) / vpW_ * 2.f - 1.f;   // NDC within the viewport rect
-    const f32 ny = 1.f - (screenY - vpY_) / vpH_ * 2.f;
-    const Mat4& iv = invVP_;
+    const f32 nx = (screenX - viewState_.vpX_) / viewState_.vpW_ * 2.f - 1.f;   // NDC within the viewport rect
+    const f32 ny = 1.f - (screenY - viewState_.vpY_) / viewState_.vpH_ * 2.f;
+    const Mat4& iv = viewState_.invVP_;
     const f32 fx = nx*iv.m[0][0]+ny*iv.m[1][0]+iv.m[2][0]+iv.m[3][0];
     const f32 fy = nx*iv.m[0][1]+ny*iv.m[1][1]+iv.m[2][1]+iv.m[3][1];
     const f32 fz = nx*iv.m[0][2]+ny*iv.m[1][2]+iv.m[2][2]+iv.m[3][2];
@@ -2604,7 +2604,7 @@ bool SandboxApp::pick(Engine& e, const ImGuiIO& io) {
     // geometry it paints -- so a click that reaches geometry means the geometry. Only a click that hits
     // NOTHING else selects a decal by its box; every other way in is the Outliner, Add > Decal (which selects
     // what it creates) and Show > Decals' drawn boxes.
-    if (best == -1 && bestEnt == kInvalidId && showDecals_ && !noEditorChrome_) {
+    if (best == -1 && bestEnt == kInvalidId && viewState_.showDecals_ && !noEditorChrome_) {
         scene::World& w = scene::World::instance();
         if (scene::ComponentPool* dp = w.pool(scene::kComponentDecal)) {
             for (usize i = 0; i < dp->size(); ++i) {
@@ -2947,35 +2947,35 @@ void SandboxApp::drawViewportContextMenu() {
 #if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
     const ImGuiIO& io = ImGui::GetIO();
     // levelHovered_ is the fly camera's own "pointer is over the Level, not a panel or a bar" test.
-    const bool overLevel = levelHovered_ && inViewport(io.MousePos.x, io.MousePos.y);
+    const bool overLevel = viewState_.levelHovered_ && inViewport(io.MousePos.x, io.MousePos.y);
     if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) && overLevel) {
-        vpCtx_.armed = true;
-        vpCtx_.camPos = camPos_;
+        viewState_.vpCtx_.armed = true;
+        viewState_.vpCtx_.camPos = viewState_.camPos_;
     }
-    if (ImGui::IsMouseReleased(ImGuiMouseButton_Right) && vpCtx_.armed) {
-        vpCtx_.armed = false;
+    if (ImGui::IsMouseReleased(ImGuiMouseButton_Right) && viewState_.vpCtx_.armed) {
+        viewState_.vpCtx_.armed = false;
         const ImVec2 down = io.MouseClickedPos[ImGuiMouseButton_Right];
         const f32 dx = io.MousePos.x - down.x, dy = io.MousePos.y - down.y;
         const bool still = dx * dx + dy * dy <= io.MouseDragThreshold * io.MouseDragThreshold &&
-                           dist(camPos_, vpCtx_.camPos) < 0.01f;
+                           dist(viewState_.camPos_, viewState_.vpCtx_.camPos) < 0.01f;
         // Not while a session runs: the viewport is the game's then, and a second Play cannot layer.
         if (still && overLevel && !anyPlayActive()) {
             // Cast ONCE, at the release point, so what the tooltip shows is what the item plays at.
-            vpCtx_.hasHit = pickSurfacePoint(io.MousePos.x, io.MousePos.y, vpCtx_.hit);
+            viewState_.vpCtx_.hasHit = pickSurfacePoint(io.MousePos.x, io.MousePos.y, viewState_.vpCtx_.hit);
             ImGui::OpenPopup("##vpContext");
         }
     }
     if (ImGui::BeginPopup("##vpContext")) {
-        const bool canPlay = vpCtx_.hasHit && !anyPlayActive();
+        const bool canPlay = viewState_.vpCtx_.hasHit && !anyPlayActive();
         if (!canPlay) ImGui::BeginDisabled();
-        if (ImGui::MenuItem(ICON_PLAY " Play From Here")) playFromHere(vpCtx_.hit);
+        if (ImGui::MenuItem(ICON_PLAY " Play From Here")) playFromHere(viewState_.vpCtx_.hit);
         uiReg_.track("viewport.context.playFromHere");
         if (!canPlay) ImGui::EndDisabled();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            if (vpCtx_.hasHit)
+            if (viewState_.vpCtx_.hasHit)
                 ImGui::SetTooltip("Play with the player standing at (%.0f, %.0f, %.0f), facing the view.\n"
                                   "The Play options' spawn choice is left alone.",
-                                  vpCtx_.hit.x, vpCtx_.hit.y, vpCtx_.hit.z);
+                                  viewState_.vpCtx_.hit.x, viewState_.vpCtx_.hit.y, viewState_.vpCtx_.hit.z);
             else
                 ImGui::SetTooltip("Nothing under the cursor to stand on.");
         }
@@ -2985,7 +2985,7 @@ void SandboxApp::drawViewportContextMenu() {
 }
 
 void SandboxApp::teleportCamera(const Vec3& p) {
-    camPos_ = p;
+    viewState_.camPos_ = p;
 #if AVER_MODULE_SCENE
     streaming_.resetVelocityTracking();   // a jump, not a one-frame flight to here
 #endif
@@ -3059,7 +3059,7 @@ void SandboxApp::drawViewportViewModeMenu() {
         }
     } else
 #endif
-    if (wireframe_) {
+    if (viewState_.wireframe_) {
         viewModeLabel = "Wireframe";
     } else if (rset_.neuraaDebugView_ && rset_.gbufferDebugView_ == GBufferDebugFeature::Mode::Off) {
         viewModeLabel = "Edge Classes (NeuRAA)";
@@ -3073,19 +3073,19 @@ void SandboxApp::drawViewportViewModeMenu() {
     }
     if (dropButton(viewModeLabel.c_str())) ImGui::OpenPopup("viewMode");
     if (ImGui::BeginPopup("viewMode")) {
-        if (ImGui::Selectable("Lit", !wireframe_ && !rset_.unlit_ && !rset_.neuraaDebugView_)) {
-            wireframe_=false; rset_.unlit_=false; rset_.neuraaDebugView_=false;
+        if (ImGui::Selectable("Lit", !viewState_.wireframe_ && !rset_.unlit_ && !rset_.neuraaDebugView_)) {
+            viewState_.wireframe_=false; rset_.unlit_=false; rset_.neuraaDebugView_=false;
         }
         // Unlit is not gated on the rasteriser: PSRayDriven honours gViewParams.x itself, so it
         // works under ray-driven as well as under Wireframe's forced fallback.
-        if (ImGui::Selectable("Unlit", rset_.unlit_ && !wireframe_)) { rset_.unlit_ = true; wireframe_ = false; }
+        if (ImGui::Selectable("Unlit", rset_.unlit_ && !viewState_.wireframe_)) { rset_.unlit_ = true; viewState_.wireframe_ = false; }
         uiReg_.track("viewMode.unlit");
         // Wireframe always selectable now: it used to BeginDisabled whenever ray-driven suppressed
         // the raster scene pass, with a tooltip pointing to Settings > Rendering, but onUpdate's
         // scratch-copy override (needRaster in its Voxi settings block) now does that for THIS
         // VIEWPORT ONLY every frame, so nothing is left to disable here.
-        if (ImGui::Selectable("Wireframe", wireframe_)) {
-            wireframe_ = true; rset_.unlit_ = false;
+        if (ImGui::Selectable("Wireframe", viewState_.wireframe_)) {
+            viewState_.wireframe_ = true; rset_.unlit_ = false;
 #if AVER_MODULE_VOXI
             rset_.debugView_ = voxi::VoxiRenderer::ViewDebug::None;
 #endif
@@ -3159,7 +3159,7 @@ void SandboxApp::drawViewportViewModeMenu() {
             if (ImGui::Selectable(label, rset_.debugView_ == m)) {
                 rset_.debugView_ = (rset_.debugView_ == m) ? VD::None : m;
                 if (rset_.debugView_ != VD::None) {
-                    wireframe_ = false;
+                    viewState_.wireframe_ = false;
                     rset_.gbufferDebugView_ = GBufferDebugFeature::Mode::Off;
                 }
             }
@@ -3185,7 +3185,7 @@ void SandboxApp::drawViewportViewModeMenu() {
         if (ImGui::Selectable("Edge Classes (NeuRAA)", rset_.neuraaDebugView_)) {
             rset_.neuraaDebugView_ = !rset_.neuraaDebugView_;
             if (rset_.neuraaDebugView_) {
-                wireframe_ = false;
+                viewState_.wireframe_ = false;
                 rset_.debugView_ = VD::None;
                 rset_.gbufferDebugView_ = GBufferDebugFeature::Mode::Off;
             }
@@ -3218,16 +3218,16 @@ f32 SandboxApp::drawViewportShowMenu() {
     uiReg_.track("viewport.show");
     const f32 leftEndX = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;   // where the left cluster ends
     if (ImGui::BeginPopup("showFlags")) {
-        ImGui::Checkbox("Grid", &showGrid_);
+        ImGui::Checkbox("Grid", &viewState_.showGrid_);
         uiReg_.track("show.grid");
         // These two used to share a stack-local `bool t=true;`, re-initialised every frame and
         // written by both boxes, so they always rendered ticked, could never be unticked, and
         // toggled nothing. Now real state.
-        ImGui::Checkbox("Static Meshes", &showStaticMeshes_);
+        ImGui::Checkbox("Static Meshes", &viewState_.showStaticMeshes_);
         uiReg_.track("show.staticMeshes");
-        ImGui::Checkbox("Atmosphere", &showAtmosphere_);
+        ImGui::Checkbox("Atmosphere", &viewState_.showAtmosphere_);
         uiReg_.track("show.atmosphere");
-        ImGui::Checkbox("Camera Coordinates", &showCamCoords_);
+        ImGui::Checkbox("Camera Coordinates", &viewState_.showCamCoords_);
         uiReg_.track("show.camCoords");
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("The camera's position (cm) and heading under this toolbar.");
 #if AVER_MODULE_SCENE
@@ -3244,13 +3244,13 @@ f32 SandboxApp::drawViewportShowMenu() {
         uiReg_.track("show.goToLevel");
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stands back far enough to see every placement in the level.");
 #endif
-        ImGui::SetNextItemWidth(220.0f * dpi_);
-        const bool enter = ImGui::InputFloat3("##goTo", goToPos_, "%.0f", ImGuiInputTextFlags_EnterReturnsTrue);
+        ImGui::SetNextItemWidth(220.0f * viewState_.dpi_);
+        const bool enter = ImGui::InputFloat3("##goTo", viewState_.goToPos_, "%.0f", ImGuiInputTextFlags_EnterReturnsTrue);
         ImGui::SameLine();
-        if (ImGui::Button("Go") || enter) teleportCamera(Vec3{goToPos_[0], goToPos_[1], goToPos_[2]});
+        if (ImGui::Button("Go") || enter) teleportCamera(Vec3{viewState_.goToPos_[0], viewState_.goToPos_[1], viewState_.goToPos_[2]});
         uiReg_.track("show.goTo");
         ImGui::SameLine();
-        if (ImGui::Button("Here")) { goToPos_[0] = camPos_.x; goToPos_[1] = camPos_.y; goToPos_[2] = camPos_.z; }
+        if (ImGui::Button("Here")) { viewState_.goToPos_[0] = viewState_.camPos_.x; viewState_.goToPos_[1] = viewState_.camPos_.y; viewState_.goToPos_[2] = viewState_.camPos_.z; }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Fill the fields with the camera's position.");
         ImGui::EndPopup();
     }
@@ -3269,14 +3269,14 @@ void SandboxApp::drawViewportModeCombo(f32 gap) {
             widest = std::fmax(widest, ImGui::CalcTextSize(kEditorModeNames[i]).x);
         ImGui::SetNextItemWidth(widest + ImGui::GetFrameHeight() +
                                 ImGui::GetStyle().FramePadding.x * 4.0f);
-        const char* modeLbl = kEditorModeNames[static_cast<int>(mode_)];
+        const char* modeLbl = kEditorModeNames[static_cast<int>(viewState_.mode_)];
         if (ImGui::BeginCombo("##editorMode", modeLbl, ImGuiComboFlags_HeightLarge)) {
             for (int i = 0; i < kEditorModeCount; ++i) {
                 const EditorMode m = static_cast<EditorMode>(i);
                 const char* whyNot = "";
                 const bool ok = editorModeAvailable(m, &whyNot);
                 if (!ok) ImGui::BeginDisabled();
-                if (ImGui::Selectable(kEditorModeNames[i], mode_ == m)) setEditorMode(m);
+                if (ImGui::Selectable(kEditorModeNames[i], viewState_.mode_ == m)) setEditorMode(m);
                 ImGui::SameLine();
                 ImGui::TextDisabled("-- %s", kEditorModeHints[i]);
                 if (!ok) {
@@ -3299,24 +3299,24 @@ void SandboxApp::drawViewportModeCombo(f32 gap) {
 // Sculpt tool buttons, brush popup and Save Terrain.
 void SandboxApp::drawViewportLandscapeTools(f32 icon, f32 gap) {
     auto toolBtn = [&](const char* id, int kind, bool active)->bool {
-        return editor::toolButton(id, kind, active, icon, dpi_);
+        return editor::toolButton(id, kind, active, icon, viewState_.dpi_);
     };
-    if (toolBtn("##tSRaise", 4, sculptTool_==SculptTool::Raise)) sculptTool_=SculptTool::Raise;
+    if (toolBtn("##tSRaise", 4, viewState_.sculptTool_==SculptTool::Raise)) viewState_.sculptTool_=SculptTool::Raise;
     uiReg_.track("tool.sculptRaise");
     ImGui::SameLine(0, gap);
-    if (toolBtn("##tSLower", 5, sculptTool_==SculptTool::Lower)) sculptTool_=SculptTool::Lower;
+    if (toolBtn("##tSLower", 5, viewState_.sculptTool_==SculptTool::Lower)) viewState_.sculptTool_=SculptTool::Lower;
     uiReg_.track("tool.sculptLower");
     ImGui::SameLine(0, gap);
-    if (toolBtn("##tSSmooth", 6, sculptTool_==SculptTool::Smooth)) sculptTool_=SculptTool::Smooth;
+    if (toolBtn("##tSSmooth", 6, viewState_.sculptTool_==SculptTool::Smooth)) viewState_.sculptTool_=SculptTool::Smooth;
     uiReg_.track("tool.sculptSmooth");
     ImGui::SameLine(0, gap);
-    if (toolBtn("##tSFlatten", 7, sculptTool_==SculptTool::Flatten)) sculptTool_=SculptTool::Flatten;
+    if (toolBtn("##tSFlatten", 7, viewState_.sculptTool_==SculptTool::Flatten)) viewState_.sculptTool_=SculptTool::Flatten;
     uiReg_.track("tool.sculptFlatten");
     ImGui::SameLine(0, gap);
-    if (toolBtn("##tSRamp", 8, sculptTool_==SculptTool::Ramp)) sculptTool_=SculptTool::Ramp;
+    if (toolBtn("##tSRamp", 8, viewState_.sculptTool_==SculptTool::Ramp)) viewState_.sculptTool_=SculptTool::Ramp;
     uiReg_.track("tool.sculptRamp");
     ImGui::SameLine(0, gap);
-    if (toolBtn("##tSNoise", 9, sculptTool_==SculptTool::Noise)) sculptTool_=SculptTool::Noise;
+    if (toolBtn("##tSNoise", 9, viewState_.sculptTool_==SculptTool::Noise)) viewState_.sculptTool_=SculptTool::Noise;
     uiReg_.track("tool.sculptNoise");
     ImGui::SameLine(0, gap*2);
     // Brush settings live here, in the mode that owns them, not appearing/disappearing from a shared row by tool.
@@ -3336,23 +3336,23 @@ void SandboxApp::drawViewportLandscapeTools(f32 icon, f32 gap) {
 // Select / Move / Rotate / Scale, the space toggle, grid and snap strip.
 void SandboxApp::drawViewportTransformTools(f32 icon, f32 gap, f32 tinyGap) {
     auto toolBtn = [&](const char* id, int kind, bool active)->bool {
-        return editor::toolButton(id, kind, active, icon, dpi_);
+        return editor::toolButton(id, kind, active, icon, viewState_.dpi_);
     };
-    if (toolBtn("##tSel", 0, tool_==Tool::Select)) tool_=Tool::Select;
+    if (toolBtn("##tSel", 0, viewState_.tool_==Tool::Select)) viewState_.tool_=Tool::Select;
     uiReg_.track("tool.select");
     ImGui::SameLine(0, gap);
-    if (toolBtn("##tMove", 1, tool_==Tool::Move)) tool_=Tool::Move;
+    if (toolBtn("##tMove", 1, viewState_.tool_==Tool::Move)) viewState_.tool_=Tool::Move;
     uiReg_.track("tool.move");
     ImGui::SameLine(0, gap);
-    if (toolBtn("##tRot", 2, tool_==Tool::Rotate)) tool_=Tool::Rotate;
+    if (toolBtn("##tRot", 2, viewState_.tool_==Tool::Rotate)) viewState_.tool_=Tool::Rotate;
     uiReg_.track("tool.rotate");
     ImGui::SameLine(0, gap);
-    if (toolBtn("##tScl", 3, tool_==Tool::Scale)) tool_=Tool::Scale;
+    if (toolBtn("##tScl", 3, viewState_.tool_==Tool::Scale)) viewState_.tool_=Tool::Scale;
     uiReg_.track("tool.scale");
     ImGui::SameLine(0, gap*2);
-    if (ImGui::Button(worldSpace_ ? ICON_WORLD_SPACE "##space" : ICON_LOCAL_SPACE "##space")) worldSpace_ = !worldSpace_;
+    if (ImGui::Button(viewState_.worldSpace_ ? ICON_WORLD_SPACE "##space" : ICON_LOCAL_SPACE "##space")) viewState_.worldSpace_ = !viewState_.worldSpace_;
     uiReg_.track("viewport.space");
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", worldSpace_ ? "World space: the gizmo follows the world axes (click for local)"
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", viewState_.worldSpace_ ? "World space: the gizmo follows the world axes (click for local)"
                                                                : "Local space: the gizmo follows the object's axes (click for world)");
     // Grid and snap strip: grid visibility, then a toggle and a step for each transform snap.
     ImGui::SameLine(0, gap*2);
@@ -3365,31 +3365,31 @@ void SandboxApp::drawViewportTransformTools(f32 icon, f32 gap, f32 tinyGap) {
             if (hit) on = !on;
         };
         const auto stepCombo = [&](const char* id, editor::SnapKind kind, f32& value, const f32* presets, usize n) {
-            ImGui::SetNextItemWidth(54.0f * dpi_);
+            ImGui::SetNextItemWidth(54.0f * viewState_.dpi_);
             if (ImGui::BeginCombo(id, editor::snapLabel(kind, value).c_str())) {
                 for (usize i = 0; i < n; ++i)
                     if (ImGui::Selectable(editor::snapLabel(kind, presets[i]).c_str(), value == presets[i])) value = presets[i];
                 ImGui::Separator();
-                ImGui::SetNextItemWidth(90.0f * dpi_);
+                ImGui::SetNextItemWidth(90.0f * viewState_.dpi_);
                 if (ImGui::InputFloat("Custom", &value, 0.0f, 0.0f, "%g")) value = editor::clampSnapStep(kind, value);
                 ImGui::EndCombo();
             }
         };
-        toggle(ICON_GRID_ON "##showGrid", showGrid_, "Show the grid");
+        toggle(ICON_GRID_ON "##showGrid", viewState_.showGrid_, "Show the grid");
         ImGui::SameLine(0, tinyGap);
-        toggle(ICON_TRANSFORM "##snapMoveOn", snapMove_, "Snap position to the grid step");
+        toggle(ICON_TRANSFORM "##snapMoveOn", viewState_.snapMove_, "Snap position to the grid step");
         ImGui::SameLine(0, tinyGap);
-        stepCombo("##snapMoveStep", editor::SnapKind::Move, moveSnap_, editor::kMoveSnapPresets,
+        stepCombo("##snapMoveStep", editor::SnapKind::Move, viewState_.moveSnap_, editor::kMoveSnapPresets,
                   sizeof editor::kMoveSnapPresets / sizeof(f32));
         ImGui::SameLine(0, tinyGap);
-        toggle(ICON_ROTATE "##snapRotOn", snapRot_, "Snap rotation to the angle step");
+        toggle(ICON_ROTATE "##snapRotOn", viewState_.snapRot_, "Snap rotation to the angle step");
         ImGui::SameLine(0, tinyGap);
-        stepCombo("##snapRotStep", editor::SnapKind::Rotate, rotSnap_, editor::kRotateSnapPresets,
+        stepCombo("##snapRotStep", editor::SnapKind::Rotate, viewState_.rotSnap_, editor::kRotateSnapPresets,
                   sizeof editor::kRotateSnapPresets / sizeof(f32));
         ImGui::SameLine(0, tinyGap);
-        toggle(ICON_SCALE "##snapSclOn", snapScale_, "Snap scale to the step");
+        toggle(ICON_SCALE "##snapSclOn", viewState_.snapScale_, "Snap scale to the step");
         ImGui::SameLine(0, tinyGap);
-        stepCombo("##snapSclStep", editor::SnapKind::Scale, scaleSnap_, editor::kScaleSnapPresets,
+        stepCombo("##snapSclStep", editor::SnapKind::Scale, viewState_.scaleSnap_, editor::kScaleSnapPresets,
                   sizeof editor::kScaleSnapPresets / sizeof(f32));
     }
 }
@@ -3401,18 +3401,18 @@ f32 SandboxApp::drawViewportCameraSpeed(f32 gap) {
     // while slow speeds (0.25 vs 0.5 matters) keep 3 sig figs; whole numbers above 10 only -- at
     // speed 18 decimals would be false accuracy.
     char camLbl[32];
-    const f32 camDial = flySpeed_ / kCamSpeedUnit;
+    const f32 camDial = viewState_.flySpeed_ / ViewportState::kCamSpeedUnit;
     std::snprintf(camLbl, sizeof camLbl, camDial < 10.0f ? ICON_CAMERA " %.3g" : ICON_CAMERA " %.0f", camDial);
     if (dropButton(camLbl)) ImGui::OpenPopup("camSpeed");
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Camera speed");
     const f32 rightEndX = ImGui::GetItemRectMax().x;
     if (ImGui::BeginPopup("camSpeed")) {
-        f32 dial = flySpeed_ / kCamSpeedUnit;
-        if (ImGui::SliderFloat("Speed", &dial, 20.0f / kCamSpeedUnit, 20000.0f / kCamSpeedUnit,
+        f32 dial = viewState_.flySpeed_ / ViewportState::kCamSpeedUnit;
+        if (ImGui::SliderFloat("Speed", &dial, 20.0f / ViewportState::kCamSpeedUnit, 20000.0f / ViewportState::kCamSpeedUnit,
                                "%.2f", ImGuiSliderFlags_Logarithmic))
-            flySpeed_ = dial * kCamSpeedUnit;
+            viewState_.flySpeed_ = dial * ViewportState::kCamSpeedUnit;
         // Still shown (not the number you steer by) because someone measuring a fly-through needs the actual rate.
-        ImGui::TextDisabled("%.0f cm/s", flySpeed_);
+        ImGui::TextDisabled("%.0f cm/s", viewState_.flySpeed_);
         ImGui::TextDisabled("Right-drag the viewport and scroll UP to speed up.");
         ImGui::EndPopup();
     }
@@ -3422,8 +3422,8 @@ f32 SandboxApp::drawViewportCameraSpeed(f32 gap) {
 // Draws the viewport's overlay bars: view options on the left, transform tools, snapping and
 // camera speed on the right.
 void SandboxApp::buildViewportOverlay() {
-    if (vpW_ < 80.0f || vpH_ < 60.0f) return;
-    const f32 pad = 8.0f*dpi_;
+    if (viewState_.vpW_ < 80.0f || viewState_.vpH_ < 60.0f) return;
+    const f32 pad = 8.0f*viewState_.dpi_;
     const ImGuiWindowFlags f = ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoMove|
                                ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_AlwaysAutoResize|
                                ImGuiWindowFlags_NoDocking|ImGuiWindowFlags_NoSavedSettings|
@@ -3431,26 +3431,26 @@ void SandboxApp::buildViewportOverlay() {
 
     // ONE bar across the top of the viewport: view options left, tools / snap / camera right. The right
     // cluster is aligned from the width it measured last frame (vpBarRightW_).
-    ImGui::SetNextWindowPos(ImVec2(vpX_, vpY_), ImGuiCond_Always, ImVec2(0,0));
-    ImGui::SetNextWindowSizeConstraints(ImVec2(vpW_, 0.0f), ImVec2(vpW_, FLT_MAX));
+    ImGui::SetNextWindowPos(ImVec2(viewState_.vpX_, viewState_.vpY_), ImGuiCond_Always, ImVec2(0,0));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(viewState_.vpW_, 0.0f), ImVec2(viewState_.vpW_, FLT_MAX));
     // Compact, like Unreal's viewport toolbar: the small UI font and tight padding keep the whole bar on one row (at 300% DPI the body
     // font and default padding needed two). The popups opened from the bar share the compact look.
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4.0f * dpi_, 3.0f * dpi_));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4.0f * viewState_.dpi_, 3.0f * viewState_.dpi_));
     beginOverlayBar("##vpbar", f);
     ImGui::PopStyleVar();
     const bool barFont = editor::editorFonts().secondary != nullptr;
     if (barFont) ImGui::PushFont(editor::editorFonts().secondary, editor::editorFonts().secondaryPx);
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(5.0f * dpi_, 2.0f * dpi_));
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(3.0f * dpi_, 3.0f * dpi_));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(5.0f * viewState_.dpi_, 2.0f * viewState_.dpi_));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(3.0f * viewState_.dpi_, 3.0f * viewState_.dpi_));
     drawViewportViewTypeMenu();
     ImGui::SameLine();
     drawViewportViewModeMenu();
     ImGui::SameLine();
     const f32 leftEndX = drawViewportShowMenu();
-    const f32 icon = ImGui::GetFrameHeight(), gap = 4.0f*dpi_, tinyGap = 1.0f*dpi_;
+    const f32 icon = ImGui::GetFrameHeight(), gap = 4.0f*viewState_.dpi_, tinyGap = 1.0f*viewState_.dpi_;
     // Right-aligned on the same row when both clusters fit; otherwise the right cluster takes a second row instead of
     // being drawn over the left one (at 300% DPI, or with the Mode panel docked beside the viewport, they do not fit).
-    const f32 rightX = ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - vpBarRightW_;
+    const f32 rightX = ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - viewState_.vpBarRightW_;
     if (rightX >= leftEndX + gap * 3.0f) ImGui::SameLine(rightX);
     else ImGui::SetCursorPosX(std::fmax(ImGui::GetStyle().WindowPadding.x, rightX));
     const f32 rightStartX = ImGui::GetCursorScreenPos().x;
@@ -3463,7 +3463,7 @@ void SandboxApp::buildViewportOverlay() {
     drawViewportModeCombo(gap);
 
 #if AVER_MODULE_LANDSCAPE
-    if (mode_ == EditorMode::Landscape) {
+    if (viewState_.mode_ == EditorMode::Landscape) {
         drawViewportLandscapeTools(icon, gap);
     } else
 #endif
@@ -3473,16 +3473,16 @@ void SandboxApp::buildViewportOverlay() {
 
     const f32 rightEndX = drawViewportCameraSpeed(gap);
 
-    vpBarRightW_ = rightEndX - rightStartX;
+    viewState_.vpBarRightW_ = rightEndX - rightStartX;
     ImGui::PopStyleVar(2);
     if (barFont) ImGui::PopFont();
-    if (showCamCoords_) {
+    if (viewState_.showCamCoords_) {
         constexpr f32 kDeg = 180.0f / 3.14159265358979323846f;
         const Vec3 p = viewPos();
-        f32 yawDeg = std::fmod(yaw_ * kDeg, 360.0f);
+        f32 yawDeg = std::fmod(viewState_.yaw_ * kDeg, 360.0f);
         if (yawDeg < 0.0f) yawDeg += 360.0f;
         editor::FontScope readoutFont(editor::editorFonts().secondary, editor::editorFonts().secondaryPx);   // a readout, not content
-        ImGui::Text("X %.0f  Y %.0f  Z %.0f cm   yaw %.0f  pitch %.0f deg", p.x, p.y, p.z, yawDeg, pitch_ * kDeg);
+        ImGui::Text("X %.0f  Y %.0f  Z %.0f cm   yaw %.0f  pitch %.0f deg", p.x, p.y, p.z, yawDeg, viewState_.pitch_ * kDeg);
         ImGui::SameLine();
         if (ImGui::SmallButton("Copy")) {
             char buf[96];
@@ -3493,7 +3493,7 @@ void SandboxApp::buildViewportOverlay() {
     }
     ImGui::End();
 #if AVER_MODULE_SCENE
-    editor::drawWorldOriginPanel(showWorldOrigin_, origin_, camPos_, dpi_);
+    editor::drawWorldOriginPanel(showWorldOrigin_, origin_, viewState_.camPos_, viewState_.dpi_);
 #endif
 
     drawViewportContextMenu();
@@ -3526,7 +3526,7 @@ std::string SandboxApp::makeEntityLabel(const std::string& surface, const std::s
 // alone, so a level without terrain loaded cannot be painted into.
 bool SandboxApp::editorModeIsLandscape() const {
 #if AVER_MODULE_LANDSCAPE
-    return mode_ == EditorMode::Landscape && landscape_.loaded();
+    return viewState_.mode_ == EditorMode::Landscape && landscape_.loaded();
 #else
     return false;
 #endif
@@ -3579,7 +3579,7 @@ bool SandboxApp::editorModeAvailable(EditorMode m, const char** whyNot) const {
 // Foliage's equivalent of editorModeIsLandscape(): the mode is selected AND it can actually run.
 bool SandboxApp::editorModeIsFoliage() const {
 #if AVER_MODULE_LANDSCAPE
-    return mode_ == EditorMode::Foliage && landscape_.loaded() && !foliagePalette_.empty();
+    return viewState_.mode_ == EditorMode::Foliage && landscape_.loaded() && !foliagePalette_.empty();
 #else
     return false;
 #endif
@@ -3588,7 +3588,7 @@ bool SandboxApp::editorModeIsFoliage() const {
 // Switching mode ends whatever the previous one was mid-way through. A drag that began as a
 // gizmo move and finishes as a brush stroke would apply one to the other's target.
 void SandboxApp::setEditorMode(EditorMode m) {
-    if (mode_ == m) return;
+    if (viewState_.mode_ == m) return;
 #if AVER_MODULE_LANDSCAPE
     // Refreshed here, BEFORE the availability check: a type authored moments ago (Content
     // Browser's New Foliage Type, or a palette row edit) must make the mode enterable on this
@@ -3606,13 +3606,13 @@ void SandboxApp::setEditorMode(EditorMode m) {
     if (sculpting_) endSculptStroke();
     sculptCursorValid_ = false;
 #endif
-    dragging_ = false;
+    viewState_.dragging_ = false;
 #if AVER_MODULE_SCENE
     // Leaving Animate puts the actors back where they were authored; entering starts previewing.
-    if (mode_ == EditorMode::Animate) seqEditor_.leave();
+    if (viewState_.mode_ == EditorMode::Animate) seqEditor_.leave();
     if (m == EditorMode::Animate) seqEditor_.enter();
 #endif
-    mode_ = m;
+    viewState_.mode_ = m;
     // Leaving Select with something selected is fine and even useful -- the selection is still
     // there when you come back -- but the gizmo must stop drawing, which it does because its
     // draw path tests the mode.
@@ -3622,11 +3622,11 @@ void SandboxApp::setEditorMode(EditorMode m) {
 // Tab. Returns to Select from anywhere, and from Select goes to the last non-Select mode used --
 // a toggle, not a cycle (cycling four modes would need three presses to get back).
 void SandboxApp::toggleEditorMode() {
-    if (mode_ != EditorMode::Select) {
-        lastNonSelectMode_ = mode_;
+    if (viewState_.mode_ != EditorMode::Select) {
+        viewState_.lastNonSelectMode_ = viewState_.mode_;
         setEditorMode(EditorMode::Select);
     } else {
-        setEditorMode(lastNonSelectMode_);
+        setEditorMode(viewState_.lastNonSelectMode_);
     }
 }
 

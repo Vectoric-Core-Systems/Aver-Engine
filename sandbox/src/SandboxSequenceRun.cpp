@@ -100,7 +100,7 @@ void SandboxApp::sequenceRunStep(Engine& e) {
         // state (running() false), which starts it over.
         if (!seqEditor_.running()) {
             setEditorMode(EditorMode::Animate);
-            if (mode_ != EditorMode::Animate) { fail("could not enter Animate mode"); return; }
+            if (viewState_.mode_ != EditorMode::Animate) { fail("could not enter Animate mode"); return; }
             seqEditor_.beginRun();
             seqEditor_.runFrame(0);
         }
@@ -151,7 +151,7 @@ void SandboxApp::serviceSequenceCapture(Engine& e) {
         if (e.device()->getCapture(probe) && e.device()->getFrameImage(img, iw, ih) && iw && ih) {
             std::vector<u8> crop;
             u32 ow = 0, oh = 0;
-            cropViewport(img, iw, ih, vpX_, vpY_, vpW_, vpH_, crop, ow, oh);
+            cropViewport(img, iw, ih, viewState_.vpX_, viewState_.vpY_, viewState_.vpW_, viewState_.vpH_, crop, ow, oh);
             char name[32];
             std::snprintf(name, sizeof name, "seq_%05lld.png", static_cast<long long>(r.pendingFrame));
             const std::string path = (std::filesystem::path(r.args.dir) / name).string();
@@ -171,7 +171,7 @@ void SandboxApp::serviceSequenceCapture(Engine& e) {
     }
 
     if (r.phase == Phase::Running && r.pendingFrame < 0 && r.frame % r.args.every == 0) {
-        e.device()->requestCapture(static_cast<u32>(vpX_ + vpW_ * 0.5f), static_cast<u32>(vpY_ + vpH_ * 0.5f));
+        e.device()->requestCapture(static_cast<u32>(viewState_.vpX_ + viewState_.vpW_ * 0.5f), static_cast<u32>(viewState_.vpY_ + viewState_.vpH_ * 0.5f));
         r.pendingFrame = r.frame;
         r.pendingEngineFrame = e.time().frame;
         r.tries = 0;
@@ -215,7 +215,7 @@ bool SandboxApp::startRenderJob(const fmt::RenderJob& job, const std::string& ba
     r.job = job;
     r.job.normalise();
     r.jobDir = baseDir;
-    r.prevMode = mode_;
+    r.prevMode = viewState_.mode_;
     r.prevChrome = noEditorChrome_;
     r.phase = SequenceRunState::Phase::Waiting;
     setNoEditorChrome(true);
@@ -255,10 +255,10 @@ void SandboxApp::applyRenderJobViewport() {
         vw = std::max(1.0f, std::floor(w * s));
         vh = std::max(1.0f, std::floor(h * s));
     }
-    vpX_ = 0.0f;
-    vpY_ = 0.0f;
-    vpW_ = vw;
-    vpH_ = vh;
+    viewState_.vpX_ = 0.0f;
+    viewState_.vpY_ = 0.0f;
+    viewState_.vpW_ = vw;
+    viewState_.vpH_ = vh;
 }
 
 // Sizes the window to the output and takes the screen. False (nothing changed) when there is no window handle.
@@ -395,7 +395,7 @@ void SandboxApp::renderJobStep(Engine& e) {
         // level reload during the wait drops the run state (running() false), which starts it over.
         if (!seqEditor_.running()) {
             setEditorMode(EditorMode::Animate);
-            if (mode_ != EditorMode::Animate) { fail("could not enter Animate mode"); return; }
+            if (viewState_.mode_ != EditorMode::Animate) { fail("could not enter Animate mode"); return; }
             seqEditor_.beginRun();
         }
         seqEditor_.runAt(renderRun_.sampleTime(renderRun_.firstFrame(), 0));
@@ -494,11 +494,11 @@ void SandboxApp::serviceRenderCapture(Engine& e) {
             if (!r.warnedPt) return;
         }
     }
-    r.capW = static_cast<u32>(vpW_);
-    r.capH = static_cast<u32>(vpH_);
-    r.capX = vpX_;
-    r.capY = vpY_;
-    e.device()->requestCapture(static_cast<u32>(vpX_ + vpW_ * 0.5f), static_cast<u32>(vpY_ + vpH_ * 0.5f));
+    r.capW = static_cast<u32>(viewState_.vpW_);
+    r.capH = static_cast<u32>(viewState_.vpH_);
+    r.capX = viewState_.vpX_;
+    r.capY = viewState_.vpY_;
+    e.device()->requestCapture(static_cast<u32>(viewState_.vpX_ + viewState_.vpW_ * 0.5f), static_cast<u32>(viewState_.vpY_ + viewState_.vpH_ * 0.5f));
     r.pendingFrame = r.frame;
     r.pendingSub = r.sub;
     r.pendingEngineFrame = e.time().frame;
@@ -509,7 +509,7 @@ void SandboxApp::serviceRenderCapture(Engine& e) {
 // Animate mode's camera path: the curve, a marker per key, the playhead. Lines are always on top, so a
 // path that runs through a wall is still readable. The mesh is rebuilt only when its stamp changes.
 void SandboxApp::drawSequencePath(Engine& e) {
-    bool show = mode_ == EditorMode::Animate && !noEditorChrome_ && seqEditor_.active();
+    bool show = viewState_.mode_ == EditorMode::Animate && !noEditorChrome_ && seqEditor_.active();
 #if AVER_MODULE_FRAMEWORK
     show = show && !anyPlayActive();
 #endif
@@ -527,7 +527,7 @@ void SandboxApp::drawSequencePath(Engine& e) {
     if (!seqPathMesh_) return;
     const Mat4 world = Mat4::identity();   // vertices are in world space
     e.device()->setLineDepth(false);
-    e.device()->setLineWidth(1.5f * dpi_);
+    e.device()->setLineWidth(1.5f * viewState_.dpi_);
     e.device()->drawLines(seqPathMesh_, &world.m[0][0]);
     e.device()->setLineWidth(1.0f);
     e.device()->setLineDepth(true);

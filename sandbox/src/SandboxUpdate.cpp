@@ -142,7 +142,7 @@ void SandboxApp::tickViewModeAndCameraDrift(const Timestep& t, bool& debugViewAc
     // View mode reaches Voxi from onUpdate (before prePass), unlike unlit which rides per-draw state.
     voxiRenderer_.setUnlit(rset_.unlit_);
     // Debug views need rasteriser; reasserted here before prePass for the same reason.
-    const bool viewModeNeedsRaster = wireframe_ || rset_.gbufferDebugView_ != GBufferDebugFeature::Mode::Off;
+    const bool viewModeNeedsRaster = viewState_.wireframe_ || rset_.gbufferDebugView_ != GBufferDebugFeature::Mode::Off;
     // Raster-only mode clears ray-hit/triangles view (wireframe_ can be ticked from Settings too).
     if (viewModeNeedsRaster) rset_.debugView_ = voxi::VoxiRenderer::ViewDebug::None;
     const bool viewModeNeedsRayDriven = !viewModeNeedsRaster &&
@@ -150,19 +150,19 @@ void SandboxApp::tickViewModeAndCameraDrift(const Timestep& t, bool& debugViewAc
     voxiRenderer_.setViewDebug(viewModeNeedsRayDriven ? rset_.debugView_ : voxi::VoxiRenderer::ViewDebug::None);
     debugViewActiveThisFrame = viewModeNeedsRayDriven;
     // Wireframe disables shadows, GI, ray tracing and denoising (see setPaused).
-    voxiRenderer_.setPaused(wireframe_);
+    voxiRenderer_.setPaused(viewState_.wireframe_);
 #endif
     // --cam-wobble-stop N: wobble runs only below frame N, then holds. Measuring artifact appearance/decay needs both.
     if (harness_.camWobbleDeg_ != 0.0f && harness_.camWobblePeriod_ > 0 &&
         (harness_.camWobbleStopFrame_ <= 0 || t.frame < (u64)harness_.camWobbleStopFrame_)) {
-        if (!harness_.camWobbleBased_) { harness_.camWobbleBaseYaw_ = yaw_; harness_.camWobbleBased_ = true; }
+        if (!harness_.camWobbleBased_) { harness_.camWobbleBaseYaw_ = viewState_.yaw_; harness_.camWobbleBased_ = true; }
         const f32 phase = 6.2831853f * (f32)(t.frame - 1) / (f32)harness_.camWobblePeriod_;
-        yaw_ = harness_.camWobbleBaseYaw_ + harness_.camWobbleDeg_ * 0.01745329252f * std::sin(phase);
+        viewState_.yaw_ = harness_.camWobbleBaseYaw_ + harness_.camWobbleDeg_ * 0.01745329252f * std::sin(phase);
     }
     // --cam-translate SPEED: one fixed step per frame along camForward(), composed with wobble.
     if (harness_.camTranslateSpeed_ != 0.0f &&
         (harness_.camWobbleStopFrame_ <= 0 || t.frame < (u64)harness_.camWobbleStopFrame_)) {
-        camPos_ += camForward() * harness_.camTranslateSpeed_;
+        viewState_.camPos_ += camForward() * harness_.camTranslateSpeed_;
     }
 }
 
@@ -215,21 +215,21 @@ void SandboxApp::tickCameraAutomation(Engine& e, const Timestep& t, HitchMarks& 
     if (neuraaHold) ++harness_.camWanderHeld_;
     if (harness_.camWanderAmp_ > 0.0f && !neuraaHold && (harness_.camWobbleStopFrame_ <= 0 || t.frame < (u64)harness_.camWobbleStopFrame_)) {
         if (!harness_.camWanderBased_) {
-            harness_.camWanderBasePos_ = camPos_; harness_.camWanderBaseYaw_ = yaw_; harness_.camWanderBasePitch_ = pitch_;
+            harness_.camWanderBasePos_ = viewState_.camPos_; harness_.camWanderBaseYaw_ = viewState_.yaw_; harness_.camWanderBasePitch_ = viewState_.pitch_;
             harness_.camWanderBased_ = true;
         }
         const f32 s = static_cast<f32>(t.frame - 1 - harness_.camWanderHeld_) * harness_.camWanderSpeed_;
         const f32 a = harness_.camWanderAmp_;
-        yaw_ = harness_.camWanderBaseYaw_ + a * 0.4363f *   // +-25 degrees at AMP 1
+        viewState_.yaw_ = harness_.camWanderBaseYaw_ + a * 0.4363f *   // +-25 degrees at AMP 1
                (std::sin(0.0131f * s) + 0.6f * std::sin(0.0317f * s + 1.1f) + 0.3f * std::sin(0.0719f * s + 2.3f)) / 1.9f;
-        pitch_ = harness_.camWanderBasePitch_ + a * 0.1396f *   // +-8 degrees
+        viewState_.pitch_ = harness_.camWanderBasePitch_ + a * 0.1396f *   // +-8 degrees
                  (std::sin(0.0173f * s + 0.5f) + 0.5f * std::sin(0.0437f * s + 1.3f)) / 1.5f;
-        camPos_ = harness_.camWanderBasePos_ + Vec3{a * 300.0f * std::sin(0.0091f * s + 0.2f),    // +-3 m across
+        viewState_.camPos_ = harness_.camWanderBasePos_ + Vec3{a * 300.0f * std::sin(0.0091f * s + 0.2f),    // +-3 m across
                                            a * 300.0f * std::sin(0.0113f * s + 1.9f),
                                            a * 60.0f * std::sin(0.0213f * s + 0.7f)};    // +-0.6 m up/down (Z up)
     }
-    if (harness_.camFlyX_ != 0.0f || harness_.camFlyY_ != 0.0f) { camPos_.x += harness_.camFlyX_; camPos_.y += harness_.camFlyY_; }
-    if (harness_.camFlyYaw_ != 0.0f) yaw_ += harness_.camFlyYaw_ * 0.0174533f;
+    if (harness_.camFlyX_ != 0.0f || harness_.camFlyY_ != 0.0f) { viewState_.camPos_.x += harness_.camFlyX_; viewState_.camPos_.y += harness_.camFlyY_; }
+    if (harness_.camFlyYaw_ != 0.0f) viewState_.yaw_ += harness_.camFlyYaw_ * 0.0174533f;
 }
 
 // Occlusion flags that --no-occlusion-cull and the console re-assert every frame.
@@ -473,9 +473,9 @@ void SandboxApp::tickAmbientState(const Timestep& t) {
 void SandboxApp::tickDpiAndPlayWindow(Engine& e) {
     if (e.device()->uiActive()) {
         // Must stay outside the ImGui frame (font atlas cannot be touched inside one).
-        const f32 dpi = e.window() ? e.window()->dpiScale() : dpi_;
-        if (std::fabs(dpi - dpi_) > 0.01f) {
-            AVER_INFO("[Sandbox] DPI changed {:.2f} -> {:.2f}, re-rasterising the UI font", dpi_, dpi);
+        const f32 dpi = e.window() ? e.window()->dpiScale() : viewState_.dpi_;
+        if (std::fabs(dpi - viewState_.dpi_) > 0.01f) {
+            AVER_INFO("[Sandbox] DPI changed {:.2f} -> {:.2f}, re-rasterising the UI font", viewState_.dpi_, dpi);
             applyDpi(dpi);
         }
     }
@@ -506,11 +506,11 @@ void SandboxApp::resolveEditorInputOwnership(Engine& e) {
         ic.defaultPawnPlay   = play_.defaultPawnPlay_ && !playEjected();
 #endif
         ic.mouseCaptured     = mouse_.captured();
-        ic.pointerInViewport = levelHovered_ && inViewport(oio.MousePos.x, oio.MousePos.y);
+        ic.pointerInViewport = viewState_.levelHovered_ && inViewport(oio.MousePos.x, oio.MousePos.y);
         ic.drawerOpen        = drawer_ != Drawer::None;
-        ic.landscapeMode     = mode_ == EditorMode::Landscape;
-        ic.pointerOnScene    = levelImageHovered_;
-        ic.sceneFocused      = levelFocused_;
+        ic.landscapeMode     = viewState_.mode_ == EditorMode::Landscape;
+        ic.pointerOnScene    = viewState_.levelImageHovered_;
+        ic.sceneFocused      = viewState_.levelFocused_;
         // ImGui sees only the editor window: the play window's keys and mouse are the game's.
         if (playWindowFocused()) {
             ic.textInput = ic.uiWantsKeyboard = ic.uiWantsMouse = false;
@@ -531,7 +531,7 @@ void SandboxApp::resolveEditorInputOwnership(Engine& e) {
 #if AVER_WITH_IMGUI
     // uiActive() first (headless has no ImGui context). Nothing lost skipping it there.
     // The drone's right-drag look reads InputState too (captured mouse, play window), so both must release.
-    if (e.device()->uiActive() && !ImGui::GetIO().MouseDown[1] && !input_.mouseHeld(1)) flying_ = false;
+    if (e.device()->uiActive() && !ImGui::GetIO().MouseDown[1] && !input_.mouseHeld(1)) viewState_.flying_ = false;
 #endif
 }
 #endif
@@ -542,31 +542,31 @@ void SandboxApp::tickEditorFlyCamera(const Timestep& t) {
     if (own_.keyboardToTool || own_.mouseToTool) {
         const ImGuiIO& io = ImGui::GetIO();
         const bool inPlayWindow = playWindowFocused();
-        const bool overUI = !inPlayWindow && (!levelHovered_ || !inViewport(io.MousePos.x, io.MousePos.y));
+        const bool overUI = !inPlayWindow && (!viewState_.levelHovered_ || !inViewport(io.MousePos.x, io.MousePos.y));
         // The play window's keys arrive through input_ only (ImGui sees the editor window).
         auto flyKey = [&](ImGuiKey k, i32 vk) { return ImGui::IsKeyDown(k) || (inPlayWindow && input_.keyHeld(vk)); };
         if (inputProbe_ && (ImGui::GetFrameCount() % 30) == 0)
             AVER_INFO("[input-probe] mouse=({},{}) wantCaptureMouse={} hovered={} inViewport={} "
                       "focused={} -> overUI={} | flying={} cam=({:.0f},{:.0f},{:.0f}) yaw={:.2f}",
                       (int)io.MousePos.x, (int)io.MousePos.y, (int)io.WantCaptureMouse,
-                      (int)levelHovered_, (int)inViewport(io.MousePos.x, io.MousePos.y),
-                      (int)levelFocused_, (int)overUI, (int)flying_,
-                      camPos_.x, camPos_.y, camPos_.z, yaw_);
+                      (int)viewState_.levelHovered_, (int)inViewport(io.MousePos.x, io.MousePos.y),
+                      (int)viewState_.levelFocused_, (int)overUI, (int)viewState_.flying_,
+                      viewState_.camPos_.x, viewState_.camPos_.y, viewState_.camPos_.z, viewState_.yaw_);
 
         // Right mouse enters fly mode; leaving is handled unconditionally above (outside this gate).
-        if (ImGui::IsMouseClicked(1) && !overUI) flying_ = true;
+        if (ImGui::IsMouseClicked(1) && !overUI) viewState_.flying_ = true;
         // The drone pawn looks while the right button is held, read from InputState: ImGui sees
         // neither a captured mouse's clicks over the viewport reliably nor the play window at all.
 #if AVER_MODULE_SCENE
         if (play_.defaultPawnPlay_ && !playEjected() && input_.mouseHeld(1) &&
             (!overUI || inPlayWindow || mouse_.captured()))
-            flying_ = true;
+            viewState_.flying_ = true;
 #endif
         // --wheel-speed-test drives this directly (forces state rather than synthesising right-drag).
 #if AVER_MODULE_FRAMEWORK
-        if (harness_.wheelTestForceFly_) flying_ = true;
+        if (harness_.wheelTestForceFly_) viewState_.flying_ = true;
 #endif
-        if (flying_) ImGui::SetMouseCursor(ImGuiMouseCursor_None);
+        if (viewState_.flying_) ImGui::SetMouseCursor(ImGuiMouseCursor_None);
 
         // Wheel changes fly speed, up = faster (Unreal's direction), 1.25x per notch so a notch feels
         // the same at any speed. The flying drone pawn takes it without RMB too: in Play the mouse
@@ -574,15 +574,15 @@ void SandboxApp::tickEditorFlyCamera(const Timestep& t) {
         auto wheelFlySpeed = [&] {
             const f32 wheel = input_.wheel();
             if (wheel == 0.0f) return;
-            flySpeed_ *= std::pow(1.25f, wheel);
-            flySpeed_ = flySpeed_ < 20.0f ? 20.0f : (flySpeed_ > 40000.0f ? 40000.0f : flySpeed_);
+            viewState_.flySpeed_ *= std::pow(1.25f, wheel);
+            viewState_.flySpeed_ = viewState_.flySpeed_ < 20.0f ? 20.0f : (viewState_.flySpeed_ > 40000.0f ? 40000.0f : viewState_.flySpeed_);
         };
 #if AVER_MODULE_SCENE
-        if (!flying_ && play_.defaultPawnPlay_ && !playEjected() && !play_.walkCapsule_ && (!overUI || inPlayWindow))
+        if (!viewState_.flying_ && play_.defaultPawnPlay_ && !playEjected() && !play_.walkCapsule_ && (!overUI || inPlayWindow))
             wheelFlySpeed();
 #endif
 
-        if (flying_) {
+        if (viewState_.flying_) {
             // input_.mouseDX/DY not io.MouseDelta: same phase bug as wheel below.
             // ImGui computes io.MouseDelta in NewFrame, but Engine::frameStep runs onUpdate before uiNewFrame.
             // InputState holds THIS frame's motion (fed by pumpEvents before frameStep).
@@ -592,9 +592,9 @@ void SandboxApp::tickEditorFlyCamera(const Timestep& t) {
             const bool cap = mouse_.captured();
             const f32 mdx = cap ? mouse_.dx() : static_cast<f32>(input_.mouseDX());
             const f32 mdy = cap ? mouse_.dy() : static_cast<f32>(input_.mouseDY());
-            yaw_   += mdx * lookSpeed_;
-            pitch_ -= mdy * lookSpeed_;
-            pitch_ = pitch_ < -1.54f ? -1.54f : (pitch_ > 1.54f ? 1.54f : pitch_);
+            viewState_.yaw_   += mdx * viewState_.lookSpeed_;
+            viewState_.pitch_ -= mdy * viewState_.lookSpeed_;
+            viewState_.pitch_ = viewState_.pitch_ < -1.54f ? -1.54f : (viewState_.pitch_ > 1.54f ? 1.54f : viewState_.pitch_);
             wheelFlySpeed();
         }
 
@@ -607,20 +607,20 @@ void SandboxApp::tickEditorFlyCamera(const Timestep& t) {
 #if AVER_MODULE_FRAMEWORK
         if (harness_.pieCamPendingLook_) {
             harness_.pieCamPendingLook_ = false;
-            yaw_   += 0.5f;
-            pitch_ += 0.3f;
-            harness_.pieCamWantYaw_ = yaw_; harness_.pieCamWantPitch_ = pitch_;
+            viewState_.yaw_   += 0.5f;
+            viewState_.pitch_ += 0.3f;
+            harness_.pieCamWantYaw_ = viewState_.yaw_; harness_.pieCamWantPitch_ = viewState_.pitch_;
         }
 #endif
         // defaultPawnPlay_ is scene-guarded. Without the module, camera flies on right button alone.
         // EJECTED DROPS THE EXCEPTION: spectator pawn stops flying without RMB, block below moves camPos_ instead.
         bool flyPawnDriven = false;
 #if AVER_MODULE_SCENE
-        if ((flying_ || (play_.defaultPawnPlay_ && !playEjected())) && (!io.WantCaptureKeyboard || inPlayWindow)) {
+        if ((viewState_.flying_ || (play_.defaultPawnPlay_ && !playEjected())) && (!io.WantCaptureKeyboard || inPlayWindow)) {
 #else
-        if (flying_ && (!io.WantCaptureKeyboard || inPlayWindow)) {
+        if (viewState_.flying_ && (!io.WantCaptureKeyboard || inPlayWindow)) {
 #endif
-            const f32 sp = flySpeed_ * t.dt;
+            const f32 sp = viewState_.flySpeed_ * t.dt;
             // The possessed default pawn also takes the game's own input (AVER_FW_KEY_A.. is A-Z in
             // order), like the walking one, so --play-test and a game's input mapping can fly it.
 #if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE
@@ -654,22 +654,22 @@ void SandboxApp::tickEditorFlyCamera(const Timestep& t) {
                         const Transform& cur = pw.localTransform(pe);
                         pw.setLocalPosition(pe, cur.position + step);
                         // Yaw about world up, pitch about pawn's right (same as viewport camera).
-                        const Quat qy = Quat::fromAxisAngle(Vec3{0, 0, 1}, yaw_);
-                        const Quat qp = Quat::fromAxisAngle(Vec3{0, 1, 0}, -pitch_);
+                        const Quat qy = Quat::fromAxisAngle(Vec3{0, 0, 1}, viewState_.yaw_);
+                        const Quat qp = Quat::fromAxisAngle(Vec3{0, 1, 0}, -viewState_.pitch_);
                         pw.setLocalRotation(pe, qy * qp);
                     }
                 }
             } else
 #endif
-            camPos_ += step;
+            viewState_.camPos_ += step;
         } else if (!overUI) {
             // Scroll-to-dolly (uses input_.wheel() not io.MouseWheel, which is always zero here).
             const f32 wheel = input_.wheel();
-            if (wheel != 0.0f) camPos_ += fwd * wheel * (flySpeed_ * 0.15f);
+            if (wheel != 0.0f) viewState_.camPos_ += fwd * wheel * (viewState_.flySpeed_ * 0.15f);
             // MMB pan (uses input_.mouseDX/DY, not frame-old delta).
             if (io.MouseDown[2]) {
-                camPos_ -= right * static_cast<f32>(input_.mouseDX()) * 0.02f;
-                camPos_ += up    * static_cast<f32>(input_.mouseDY()) * 0.02f;
+                viewState_.camPos_ -= right * static_cast<f32>(input_.mouseDX()) * 0.02f;
+                viewState_.camPos_ += up    * static_cast<f32>(input_.mouseDY()) * 0.02f;
             }
         }
         // Nothing drove the flying pawn: it glides to rest (the keyboard is the UI's for a moment), or
@@ -695,7 +695,7 @@ void SandboxApp::tickEditorFlyCamera(const Timestep& t) {
         // Scene-guarded: F frames a SELECTED ENTITY's bounds (selectionBounds is `#if AVER_MODULE_SCENE`).
         // STANDS DOWN FOR PAWN TO CAMERA: Shift+F in ejected session both teleports pawn and frames the camera.
 #if AVER_MODULE_SCENE
-        if ((levelFocused_ || outlinerFocused_ || detailsFocused_) && !io.WantCaptureKeyboard &&
+        if ((viewState_.levelFocused_ || viewState_.outlinerFocused_ || viewState_.detailsFocused_) && !io.WantCaptureKeyboard &&
             keybinds_.pressed(editor::CommandId::ViewFrameSelected, io) && anySelected() &&
             !(playEjected() && hasPossessedPawn() &&
               keybinds_.held(editor::CommandId::PlayPawnToCamera, io))) {
@@ -703,8 +703,8 @@ void SandboxApp::tickEditorFlyCamera(const Timestep& t) {
             Vec3 center; f32 r;
             if (selectionBounds(center, r)) {
                 const f32 d = std::fmax(50.0f, r / std::tan(radians(30.0f)) * 1.6f);
-                camPos_ = center - fwd * d;
-                flySpeed_ = std::fmax(flySpeed_, r * 0.4f);
+                viewState_.camPos_ = center - fwd * d;
+                viewState_.flySpeed_ = std::fmax(viewState_.flySpeed_, r * 0.4f);
                 // Teleport (see frameCameraOnLevel for why streaming_.resetVelocityTracking() is needed).
                 streaming_.resetVelocityTracking();
             }
@@ -728,7 +728,7 @@ void SandboxApp::tickPlayMouseCapture(Engine& e) {
             const ImGuiIO& mio = ImGui::GetIO();
             // Not while ejected (that click is a viewport selection, mouse stays free).
             if (playSessionActive() && !playEjected() && releasedByUser_ && ImGui::IsMouseClicked(0) &&
-                levelHovered_ && inViewport(mio.MousePos.x, mio.MousePos.y)) {
+                viewState_.levelHovered_ && inViewport(mio.MousePos.x, mio.MousePos.y)) {
                 releasedByUser_ = false;
                 // Click means "give the mouse back" not a trigger pull. Eaten until button-up (see pushInput).
                 eatRecaptureClick_ = true;
@@ -769,7 +769,7 @@ void SandboxApp::tickPlayMouseCapture(Engine& e) {
         // GATED LIKE FRAME SELECTED (level viewport, Outliner, Details), not asset tabs or with WantTextInput.
         {
             const ImGuiIO& pio = ImGui::GetIO();
-            if ((levelFocused_ || levelHovered_ || outlinerFocused_ || detailsFocused_) &&
+            if ((viewState_.levelFocused_ || viewState_.levelHovered_ || viewState_.outlinerFocused_ || viewState_.detailsFocused_) &&
                 !pio.WantTextInput && !pio.WantCaptureKeyboard && playEjected() &&
                 keybinds_.pressed(editor::CommandId::PlayPawnToCamera, pio) &&
                 // Only warn about missing pawn if nothing else answered (Frame Selected shares this press).
@@ -812,7 +812,7 @@ void SandboxApp::reportHudPreview() {
         if (harness_.hudTest_ >= n) AVER_WARN("[HUD] no HUD at index {}", harness_.hudTest_);
     }
     if (harness_.hudTest_ >= 0 && harness_.hudTest_ < scripts_.hudCount())
-        setHudPreview(harness_.hudTest_, vpX_, vpY_, vpW_, vpH_);
+        setHudPreview(harness_.hudTest_, viewState_.vpX_, viewState_.vpY_, viewState_.vpW_, viewState_.vpH_);
 }
 #endif
 #endif
@@ -824,11 +824,11 @@ void SandboxApp::publishWindowState(Engine& e) {
     // window and takes no requests); the shipped game publishes its real window (GameDisplay.cpp). Before this a game read zeros: no size, a scale of 1.
     {
         i32 s[AVER_FW_WINDOW_STATE_COUNT] = {};
-        s[AVER_FW_WINDOW_WIDTH] = static_cast<i32>(vpW_);
-        s[AVER_FW_WINDOW_HEIGHT] = static_cast<i32>(vpH_);
+        s[AVER_FW_WINDOW_WIDTH] = static_cast<i32>(viewState_.vpW_);
+        s[AVER_FW_WINDOW_HEIGHT] = static_cast<i32>(viewState_.vpH_);
         const f32 dpi = e.window() && e.window()->dpiScale() > 0.0f ? e.window()->dpiScale() : 1.0f;
         s[AVER_FW_WINDOW_DPI_PERCENT] = static_cast<i32>(dpi * 100.0f + 0.5f);
-        s[AVER_FW_WINDOW_FOCUSED] = levelFocused_ ? 1 : 0;
+        s[AVER_FW_WINDOW_FOCUSED] = viewState_.levelFocused_ ? 1 : 0;
         aver_fw_window_publish(s);
     }
 }
@@ -857,8 +857,8 @@ void SandboxApp::submitSubViewports() {
 void SandboxApp::feedUiPointer() {
     // Pointer converted here (only place that can do it correctly): UI frame is laid out against viewport, not window.
     {
-        const f32 ox = hudPreviewActive() ? harness_.hudRectX_ : static_cast<f32>(vpX_);
-        const f32 oy = hudPreviewActive() ? harness_.hudRectY_ : static_cast<f32>(vpY_);
+        const f32 ox = hudPreviewActive() ? harness_.hudRectX_ : static_cast<f32>(viewState_.vpX_);
+        const f32 oy = hudPreviewActive() ? harness_.hudRectY_ : static_cast<f32>(viewState_.vpY_);
         f32 px = 0.0f, py = 0.0f;
         u32 buttons = 0;
 #if AVER_WITH_IMGUI
@@ -897,7 +897,7 @@ void SandboxApp::tickGameUi(Engine& e, const Timestep& t) {
     // updates and draws every frame (it is empty unless a script or graph made a widget).
 #if AVER_MODULE_FRAMEWORK
     // Accessibility: options, captions and narration for this frame (unscaled time), pushed to the UI before it lays out.
-    game::accessibilityFrame(t.dt, viewPos(), yaw_, pitch_, access_);
+    game::accessibilityFrame(t.dt, viewPos(), viewState_.yaw_, viewState_.pitch_, access_);
 #endif
     game::pushAccessibilityToUi(access_);
     if (gameUi_) gameUi_->setColourVision(access_.snap.colourVisionPacked);
@@ -924,9 +924,9 @@ void SandboxApp::tickGameplay(Engine& e, const Timestep& t, const f32 gameDt) {
         // Inside this gate so Pause and Frame Skip hold traffic with everything else.
         // Focus is the view (pawn's eye while possessed, free camera while ejected): cars far from it think less often.
         playProf_.begin(editor::PlayPhase::Vehicles);
-        vehicles_.prePhysics(gameDt, camPos_);
+        vehicles_.prePhysics(gameDt, viewState_.camPos_);
 
-        game::tickVehiclesPre(gameDt, camPos_);
+        game::tickVehiclesPre(gameDt, viewState_.camPos_);
         playProf_.end(editor::PlayPhase::Vehicles);
 #endif
         playProf_.begin(editor::PlayPhase::Gameplay);
@@ -1147,10 +1147,10 @@ void SandboxApp::tickChunkAndLevelStreaming(const Timestep& t, HitchMarks& hm) {
         // Drone keeps its own corridor resident while flying (both are StreamSource entries).
         if (droneEntity_ != scene::kInvalidEntity && droneGraphLoaded_) {
             const world::StreamSource drone{dronePos_, droneVel_};
-            streaming_.tick(camPos_, t.dt, &drone, tris);
+            streaming_.tick(viewState_.camPos_, t.dt, &drone, tris);
         } else
 #endif
-        streaming_.tick(camPos_, t.dt, nullptr, tris);
+        streaming_.tick(viewState_.camPos_, t.dt, nullptr, tris);
     }
 #if AVER_MODULE_SCENE
     tickLevelStreaming(t.dt);
@@ -1168,20 +1168,20 @@ void SandboxApp::resolveViewOverride(const Timestep& t) {
     else {
         drivePlayCamera(t.dt);
 #if AVER_MODULE_FRAMEWORK
-        if (playSessionActive()) game::applyCameraFx(camPos_, yaw_, pitch_, t.dt);   // the player's shake/bob scales, Play camera only (never the free-fly camera)
+        if (playSessionActive()) game::applyCameraFx(viewState_.camPos_, viewState_.yaw_, viewState_.pitch_, t.dt);   // the player's shake/bob scales, Play camera only (never the free-fly camera)
 #endif
     }
 #endif
     // A sequence camera (Animate's pilot view, or Play's camera track) replaces the view for this
     // frame only: camPos_/yaw_/pitch_ are the persisted editor camera and stay untouched.
-    viewOverride_ = false;
+    viewState_.viewOverride_ = false;
 #if AVER_MODULE_SCENE
     {
         game::SeqCameraPose sp;
         if (seqEditor_.viewPose(playEjected(), sp)) {
-            viewOverride_ = true;
-            viewPosOv_ = sp.position;
-            viewFwdOv_ = game::cameraForward(sp.yaw, sp.pitch);
+            viewState_.viewOverride_ = true;
+            viewState_.viewPosOv_ = sp.position;
+            viewState_.viewFwdOv_ = game::cameraForward(sp.yaw, sp.pitch);
             // The pawn is in view now, not behind the eye.
             if (seqEditor_.playRunning()) firstPersonPawn_ = scene::kInvalidEntity;
         }
@@ -1197,9 +1197,9 @@ void SandboxApp::resolveViewOverride(const Timestep& t) {
         } else {
             const camera::RigResult look = camera::cameraRigSystem().preview(lookWorld, cameraLookRig_, camera::RigFrame{});
             if (look.active) {
-                viewOverride_ = true;
-                viewPosOv_ = look.pov.pos;
-                viewFwdOv_ = game::cameraForward(look.pov.yaw, look.pov.pitch);
+                viewState_.viewOverride_ = true;
+                viewState_.viewPosOv_ = look.pov.pos;
+                viewState_.viewFwdOv_ = game::cameraForward(look.pov.yaw, look.pov.pitch);
             }
         }
     }
@@ -1234,8 +1234,8 @@ void SandboxApp::applyDeviceRenderSettings(Engine& e, const Timestep& t) {
                                   rset_.gbufferDebugView_ != GBufferDebugFeature::Mode::Off);
     gbufferDebugFeature_.setDevice(e.device());
     // vpX_/vpY_/vpW_/vpH_: this frame's 3D-viewport rect (frame stale at worst on first draw).
-    gbufferDebugFeature_.setViewportRect(static_cast<u32>(vpX_), static_cast<u32>(vpY_),
-                                         static_cast<u32>(vpW_), static_cast<u32>(vpH_));
+    gbufferDebugFeature_.setViewportRect(static_cast<u32>(viewState_.vpX_), static_cast<u32>(viewState_.vpY_),
+                                         static_cast<u32>(viewState_.vpW_), static_cast<u32>(viewState_.vpH_));
     gbufferDebugFeature_.setMode(rset_.gbufferDebugView_);
 #if AVER_MODULE_VOXI
     e.device()->setMeshShaders(voxi::Renderer::get().settings().meshShaders);
@@ -1262,7 +1262,7 @@ void SandboxApp::applyDeviceRenderSettings(Engine& e, const Timestep& t) {
         frameBudgetTick(t.dt, vs);
         const f32 c[3] = {rset_.giCenter_.x, rset_.giCenter_.y, rset_.giCenter_.z};
         // Auto-switch: ray-hit/triangles debug views can't draw through the rasteriser; Wireframe/G-buffer can't draw through ray-driven.
-        const bool needRaster = wireframe_ || rset_.gbufferDebugView_ != GBufferDebugFeature::Mode::Off;
+        const bool needRaster = viewState_.wireframe_ || rset_.gbufferDebugView_ != GBufferDebugFeature::Mode::Off;
         const bool needRayDriven = !needRaster &&
             (rset_.debugView_ != voxi::VoxiRenderer::ViewDebug::None || rset_.neuraaDebugView_) &&
             voxiRenderer_.rayDrivenAvailable();
@@ -1345,12 +1345,12 @@ void SandboxApp::applyDeviceRenderSettings(Engine& e, const Timestep& t) {
 // Viewport rect, camera matrices, fog, sky and runtime assets.
 void SandboxApp::setupCameraAndSky(Engine& e) {
     // Confine the scene to the dockspace's central node (latched by buildUI last frame).
-    e.device()->setViewportRect((u32)vpX_, (u32)vpY_, (u32)std::fmax(1.0f, vpW_), (u32)std::fmax(1.0f, vpH_));
+    e.device()->setViewportRect((u32)viewState_.vpX_, (u32)viewState_.vpY_, (u32)std::fmax(1.0f, viewState_.vpW_), (u32)std::fmax(1.0f, viewState_.vpH_));
 
     const Vec3 fwd = viewForward();
     const f32 aspect = viewAspect();
     const game::CameraMatrices cam = game::pushCamera(*e.device(), viewPos(), fwd, aspect, playView_);
-    invVP_ = cam.invVP; viewProj_ = cam.viewProj; eye_ = viewPos();
+    viewState_.invVP_ = cam.invVP; viewState_.viewProj_ = cam.viewProj; viewState_.eye_ = viewPos();
 
     // One member for one value; fixes dead code in fog handling.
     f32 fog = rset_.fogDensity_;
@@ -1364,7 +1364,7 @@ void SandboxApp::setupCameraAndSky(Engine& e) {
     }
 #endif
     // sunDirection stays unnormalised; shaders normalise it.
-    rset_.sky_.enabled = showAtmosphere_;   // Show > Atmosphere; the backend already gates the sky draw on this
+    rset_.sky_.enabled = viewState_.showAtmosphere_;   // Show > Atmosphere; the backend already gates the sky draw on this
     for (int i = 0; i < 3; ++i) {
         rset_.sky_.sunColor[i] = rset_.sunColor_[i];
         rset_.sky_.zenith[i]   = rset_.skyZenith_[i];
@@ -1385,7 +1385,7 @@ void SandboxApp::setupCameraAndSky(Engine& e) {
     rset_.sky_.skyLightIntensity = rset_.sunAmbient_;
 #if AVER_MODULE_SCENE
     // A streamed level that hides its load edge in fog (World Settings > Level Streaming).
-    if (level_.streaming().active()) fog = assets::fogForStreamEdge(levelHeader_.stream, rset_.sky_, fog, eye_.z);
+    if (level_.streaming().active()) fog = assets::fogForStreamEdge(levelHeader_.stream, rset_.sky_, fog, viewState_.eye_.z);
 #endif
     rset_.sky_.fogDensity = fog;
     rset_.sky_.cloudTime = rset_.cloudTime_;
@@ -1533,7 +1533,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     publishWindowState(e);
 #endif
     if (hudPreviewActive()) aver_ui_begin_frame(harness_.hudRectX_, harness_.hudRectY_, harness_.hudRectW_, harness_.hudRectH_);
-    else                    aver_ui_begin_frame(vpX_, vpY_, vpW_, vpH_);
+    else                    aver_ui_begin_frame(viewState_.vpX_, viewState_.vpY_, viewState_.vpW_, viewState_.vpH_);
     // Font and pointer lent per frame, right after frame opens. Font re-lent every frame (loadGameUiFont can leave it invalid).
     aver_ui_set_font(&uiFont_);
 #if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK

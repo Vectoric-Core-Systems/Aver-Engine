@@ -114,7 +114,7 @@ void SandboxApp::buildHlodSettings() {
     ImGui::TextDisabled("HLOD");
     fmt::OcStreamSettings& st = levelHeader_.stream;
     f32 hlodM = st.hlodCm / 100.0f;
-    ImGui::SetNextItemWidth(200.0f * dpi_);
+    ImGui::SetNextItemWidth(200.0f * viewState_.dpi_);
     if (ImGui::SliderFloat("HLOD distance (m)", &hlodM, 0.0f, 5000.0f, hlodM > 0.0f ? "%.0f" : "off")) {
         st.hlodCm = hlodM * 100.0f;
         markLevelUnsaved();

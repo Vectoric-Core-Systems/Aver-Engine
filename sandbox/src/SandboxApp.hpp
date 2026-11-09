@@ -1301,6 +1301,7 @@ private:
 #include "state/PlayState.hpp"
 #include "state/HarnessState.hpp"
 #include "state/RenderSettingsState.hpp"
+#include "state/ViewportState.hpp"
 class HitchMarks;
 namespace game { struct SceneDrawStats; }
 
@@ -1760,6 +1761,7 @@ private:
     PlayState play_;   // Play-in-editor session
     HarnessState harness_;   // Automation and self-test state
     RenderSettingsState rset_;   // Render-settings mirror
+    ViewportState viewState_;   // Viewport and camera
     // ---- end feature state ----
 
     void applyProject(Engine& e);
@@ -2384,7 +2386,7 @@ private:
 
     void spawnCube(Engine& engine);
 
-    Vec3 spawnPoint() const { return rset_.spawnAtOverride_ ? *rset_.spawnAtOverride_ : camPos_ + camForward() * kAddDistance; }
+    Vec3 spawnPoint() const { return rset_.spawnAtOverride_ ? *rset_.spawnAtOverride_ : viewState_.camPos_ + camForward() * kAddDistance; }
     // Spawns one palette kind through the same functions as the toolbar's Add menu (and so the same undo entry).
     void placeActorKind(Engine& e, const std::string& kind, const Vec3* dropAt, bool onSurface);
     void buildPlaceActorsPanel(Engine& e);
@@ -3205,8 +3207,7 @@ private:
     f32 drawViewportCameraSpeed(f32 gap);
     // Viewport right-click menu (Play From Here). RMB armed on press, decided on release.
     void drawViewportContextMenu();
-    struct ViewportCtx { bool armed = false; bool hasHit = false; Vec3 camPos{}; Vec3 hit{}; };
-    ViewportCtx vpCtx_;
+    using ViewportCtx = ViewportState::ViewportCtx;
 #endif
 
     // Requests probe pixel and screenshot on capture run, then reports what was read.
@@ -3247,7 +3248,6 @@ private:
 #if AVER_MODULE_SCENE
     editor::DecalImageResolver decalImages_;  // a decal's image id -> a file under the project's content folder
     editor::DecalGizmo decalGizmo_;           // the selected decal's box and its face handles
-    bool showDecals_ = true;                  // Show > Decals: dim boxes for every decal, not just the selected one
     editor::AiDebugOptions aiDebug_;          // Show > AI: sight cones, hearing, path, steering, BT state, cover
     rhi::LineHandle aiDebugMesh_ = 0;         // this frame's AI debug lines (rebuilt every frame an option is on)
     editor::MotionDebugOptions motionDebug_;   // Show > Motion Matching: trajectories, matched row, labels
@@ -3328,12 +3328,8 @@ private:
     std::string makeEntityLabel(const std::string& surface, const std::string& asset);
     // Returns "Wood" for M_Wood, else the asset's stem, else "Entity"; lets saveLevel distinguish generated from renamed labels.
     static std::string entityLabelBase(const std::string& surface, const std::string& asset);
-    Tool tool_ = Tool::Move;   // see initialTool_ for why this is Move and not Select
 
-    // Which mode the viewport is in. UNGUARDED: Landscape is AVER_MODULE_LANDSCAPE-only, but mode switch/dispatch read it unconditionally.
-    EditorMode mode_ = EditorMode::Select;
 #if AVER_MODULE_LANDSCAPE
-    SculptTool sculptTool_ = SculptTool::Raise;
     // 1.0 is the smoothstep the brush always had (see BrushParams::falloff).
     f32 sculptFalloff_ = 1.0f;
 
@@ -3411,28 +3407,16 @@ private:
     void setEditorMode(EditorMode m);
 
     void toggleEditorMode();
-    EditorMode lastNonSelectMode_ = EditorMode::Landscape;
     std::string startMode_;
 
     void applyStartMode();
-    // Free-fly editor camera: position plus yaw/pitch.
-    Vec3 camPos_{7.0f, 7.0f, 4.5f};
-    f32 yaw_ = 0.0f, pitch_ = 0.0f, flySpeed_ = 800.0f, lookSpeed_ = 0.005f;   // cm/s
-    // A sequence camera showing instead of the free-fly one this frame (set where the camera is
-    // pushed; camPos_/yaw_/pitch_ are persisted and stay the editor's own).
-    bool viewOverride_ = false;
-    Vec3 viewPosOv_{0.0f, 0.0f, 0.0f}, viewFwdOv_{1.0f, 0.0f, 0.0f};
     // The projection and owner-hide mode of the Play camera (GameCamera.hpp): FOV, roll, clip planes, the collision fade. The default outside Play.
     game::PlayView playView_;
-    Vec3 viewPos() const { return viewOverride_ ? viewPosOv_ : camPos_; }
+    Vec3 viewPos() const { return viewState_.viewOverride_ ? viewState_.viewPosOv_ : viewState_.camPos_; }
     // Moves the editor camera without turning it; streaming treats it as a jump, not a fast move.
     void teleportCamera(const Vec3& p);
-    Vec3 viewForward() const { return viewOverride_ ? viewFwdOv_ : camForward(); }
+    Vec3 viewForward() const { return viewState_.viewOverride_ ? viewState_.viewFwdOv_ : camForward(); }
 
-    // What "1" on the camera-speed dial means, in cm/s (movement integration uses cm/s).
-    // DISPLAY scale only: divide by it so default speed reads "1" not "800".
-    static constexpr f32 kCamSpeedUnit = 800.0f;
-    bool flying_ = false;
     // The pawn viewed in FIRST PERSON this frame, or kInvalidEntity. RESET UNCONDITIONALLY at the top of drivePlayCamera().
     // Used by owner-hide check: a mesh with kMeshRendererHiddenFromOwner skips rasterised draw when this is itself or an ancestor.
 #if AVER_MODULE_SCENE
@@ -3449,8 +3433,6 @@ private:
     bool showPostVolumes_ = true;               // Show > Post Volumes: every volume's box, not just the selected one's
     // A screenshot asked for over MCP: captureCheck requests a new capture for it instead of re-reading frame sf's.
     bool mcpShotRequest_=false;
-    // editor viewport aids
-    rhi::LineHandle gridMesh_=0;
 #if AVER_MODULE_SYNAPSE
     // The baked grid and the line mesh drawn from it. Rebuilt on every bake/load; mesh destruction needed to avoid upload buffer leak.
     fmt::OcNavData  nav_;
@@ -3512,25 +3494,7 @@ private:
     std::string refPanelAsset_;
     std::vector<std::string> refPanelResults_;
 #endif
-    rhi::LineHandle gzMove_[3]={0,0,0}, gzMoveHi_[3]={0,0,0};
-    rhi::LineHandle gzRot_[3]={0,0,0}, gzRotHi_[3]={0,0,0};
-    rhi::LineHandle gzScale_[3]={0,0,0}, gzScaleHi_[3]={0,0,0};
-    bool showGrid_=true, wireframe_=false;
-    // Show > Camera Coordinates, and the Show > Go To fields (cm).
-    bool showCamCoords_=false;
-    f32 goToPos_[3]={0.0f, 0.0f, 0.0f};
-    // gizmo interaction
-    bool dragging_=false; int activeAxis_=-1, hoverAxis_=-1;
-    // Rotation drag accumulators for snap working on total swept angle rather than per-frame delta.
-    f32 rotDragDeg_=0.0f, rotAppliedDeg_=0.0f;
-    f32 prevMouseX_=0, prevMouseY_=0;
-    // snapping (off by default; toggled from the toolbar carets)
-    bool snapMove_=false, snapRot_=false, snapScale_=false;
-    f32  vpBarRightW_ = 0.0f;   // width the viewport options bar's right cluster measured last frame
 
-    f32 moveSnap_=1.0f, rotSnap_=15.0f, scaleSnap_=0.25f;
-    // frame state
-    f32 dpi_=1.0f;
 #if AVER_WITH_IMGUI
     ImFont* fontMedium_=nullptr; // Roboto Medium, for the menu bar; null if only the fallback loaded
 #endif
@@ -3542,8 +3506,6 @@ private:
     // The Vulkan backend, held on same terms as the D3D12 one above for teardown ordering.
     std::unique_ptr<rhi::vkb::IUiBackend> uiBackendVk_;
 #endif
-    // 3D viewport rect, in backbuffer pixels. Latched by buildUI, consumed the next frame.
-    f32 vpX_=0, vpY_=0, vpW_=1600, vpH_=900;
     bool dockBuilt_=false;   // false = build the default layout on the next frame
     // Set by View > Reset Layout so the builder overrides a layout restored from the ini.
     bool dockResetRequested_=false;
@@ -3574,9 +3536,6 @@ private:
     rhi::LineHandle physicsDebugMesh_ = 0;
     rhi::LineHandle scriptDebugMesh_ = 0;   // DebugDraw's lines, replaced each frame (ScriptDebugLines.hpp)
 #endif
-    // Viewport Show flags. Both default ON.
-    bool showStaticMeshes_=true;
-    bool showAtmosphere_=true;
     bool showAbout_=false;             // Help > About
     bool wantSaveLevelAs_=false;
     char saveLevelAsName_[128]={};
@@ -3732,8 +3691,6 @@ private:
     bool levelPrepArmed_ = false;
     u64 levelPrepToast_ = 0;
     std::chrono::steady_clock::time_point levelPrepT0_{};
-    // Gizmo coordinate space. Honoured by drawGizmo, pickAxis, applyMove and applyRotate; SCALE tool always uses local.
-    bool worldSpace_=true;
 #if AVER_MODULE_VOXI
     voxi::VoxiRenderer voxiRenderer_;
     editor::SceneLightFeed sceneLightFeed_;   // CLight entities -> Voxi lamps + path-tracer lights, per frame
@@ -3811,19 +3768,11 @@ private:
     rhi::MeshHandle unitCubeMesh_ = 0;   // the editor's own unit cube, half-extent 1
     bool showUiDemo_ = false;
     std::string matSaveStatus_;   // what the last 'Save to C#' did
-    unsigned centralDock_ = 0;    // the dock node an opened asset editor lands in
-    bool levelFocused_ = true;    // the Level tab holds the keyboard
-    // The two panels a selection is also made from, so the edit verbs reach a selection made there.
-    bool outlinerFocused_ = false;
     // A row asked to be deleted; answered after the tree walk (drawOutlinerRow). GUARDED: type is scene::Entity.
 #if AVER_MODULE_SCENE
     scene::Entity outlinerDeleteRequest_ = scene::kInvalidEntity;
 #endif
-    bool detailsFocused_  = false;
-    bool levelHovered_ = true;    // the cursor is over the Level tab and it is topmost there
-    bool levelImageHovered_ = false;   // ... and on the scene picture, not on a viewport toolbar or popup
     bool inputProbe_ = false;
-    bool levelVisible_ = true;    // the Level tab is the selected tab
     bool openLegacy_ = false;   // --open-legacy
     std::string openAsset_;
     std::string selectEntity_;   // --select
@@ -4778,7 +4727,6 @@ private:
 
     u32 sceneWalkReports_ = 0;     // Scene walk count (cost split reports at 2^n).
 
-    Mat4 invVP_, viewProj_; Vec3 eye_{0,0,0};
 };
 
 } // namespace aver

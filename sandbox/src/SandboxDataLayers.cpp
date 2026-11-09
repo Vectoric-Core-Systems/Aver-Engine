@@ -32,7 +32,7 @@ void SandboxApp::drawDataLayersPanel() {
     };
     host.push = [this](editor::dl::Edit e) { pushDataLayerEdit(std::move(e)); };
     host.refreshVisibility = [this]() { syncDataLayerVisibility(); };
-    editor::drawDataLayersPanel(&showDataLayers_, dataLayers_, dataLayersUi_, host, dpi_);
+    editor::drawDataLayersPanel(&showDataLayers_, dataLayers_, dataLayersUi_, host, viewState_.dpi_);
 }
 
 // The model already applied `e`; this records it for undo and refreshes what the toggles show.

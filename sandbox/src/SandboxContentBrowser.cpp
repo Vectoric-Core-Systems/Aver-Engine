@@ -103,13 +103,13 @@ void SandboxApp::drawCbChips() {
     const ImGuiStyle& st = ImGui::GetStyle();
     const f32 right = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x;
     const auto accent = editor::editorTheme().accent;
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f * dpi_, 1.0f * dpi_));
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 9.0f * dpi_);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f * viewState_.dpi_, 1.0f * viewState_.dpi_));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 9.0f * viewState_.dpi_);
     bool first = true;
     for (u32 t = 0; t < editor::kCbTypeCount; ++t) {
         const auto type = static_cast<editor::CbType>(t);
         const char* name = editor::cbTypeName(type);
-        const f32 w = ImGui::CalcTextSize(name).x + 12.0f * dpi_;
+        const f32 w = ImGui::CalcTextSize(name).x + 12.0f * viewState_.dpi_;
         if (!first) {
             if (ImGui::GetCursorScreenPos().x + st.ItemSpacing.x + w < right) ImGui::SameLine();
         }
@@ -1352,12 +1352,12 @@ void SandboxApp::drawContentBrowser() {
     if (ImGui::ArrowButton("##cbback", ImGuiDir_Left)) cbBack();
     ImGui::EndDisabled();
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Back");
-    ImGui::SameLine(0.0f, 2.0f*dpi_);
+    ImGui::SameLine(0.0f, 2.0f*viewState_.dpi_);
     ImGui::BeginDisabled(!cbCanForward());
     if (ImGui::ArrowButton("##cbfwd", ImGuiDir_Right)) cbForward();
     ImGui::EndDisabled();
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Forward");
-    ImGui::SameLine(0.0f, 2.0f*dpi_);
+    ImGui::SameLine(0.0f, 2.0f*viewState_.dpi_);
     const std::string parent = cbParentDir();
     ImGui::BeginDisabled(parent.empty());
     if (ImGui::ArrowButton("##cbup", ImGuiDir_Up)) cbNavigate(parent);
@@ -1544,8 +1544,8 @@ void SandboxApp::drawContentBrowser() {
         };
         const f32 controls = cbGallery_ ? 250.0f : 130.0f;
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(std::fmax(80.0f*dpi_,
-            ImGui::GetWindowWidth() - ImGui::GetCursorPosX() - (controls + 14.0f)*dpi_));
+        ImGui::SetNextItemWidth(std::fmax(80.0f*viewState_.dpi_,
+            ImGui::GetWindowWidth() - ImGui::GetCursorPosX() - (controls + 14.0f)*viewState_.dpi_));
         ImGui::InputTextWithHint("##cbsearch",
                                  cbSearchDeep_ ? "Search this folder and below..."
                                                : "Search this folder...",
@@ -1556,15 +1556,15 @@ void SandboxApp::drawContentBrowser() {
         ImGui::Checkbox("Subfolders", &cbSearchDeep_);
         uiReg_.track("contentBrowser.searchDeep");
 
-        ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), ImGui::GetWindowWidth() - controls*dpi_));
+        ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), ImGui::GetWindowWidth() - controls*viewState_.dpi_));
         if (viewTab("Tiles", cbGallery_)) cbGallery_ = true;
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Gallery view");
-        ImGui::SameLine(0.0f, 2.0f*dpi_);
+        ImGui::SameLine(0.0f, 2.0f*viewState_.dpi_);
         if (viewTab("List", !cbGallery_)) cbGallery_ = false;
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("List view");
         if (cbGallery_) {
             ImGui::SameLine();
-            ImGui::SetNextItemWidth(110.0f*dpi_);
+            ImGui::SetNextItemWidth(110.0f*viewState_.dpi_);
             ImGui::SliderFloat("##cbzoom", &cbTileSize_, 56.0f, 168.0f, "%.0f");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Tile size");
         }
@@ -1573,8 +1573,8 @@ void SandboxApp::drawContentBrowser() {
     drawCbChips();
     ImGui::Separator();
 
-    const f32 footerH = ImGui::GetTextLineHeightWithSpacing() + 6.0f*dpi_;
-    ImGui::BeginChild("cbTree", ImVec2(220.0f * dpi_, -footerH), true);
+    const f32 footerH = ImGui::GetTextLineHeightWithSpacing() + 6.0f*viewState_.dpi_;
+    ImGui::BeginChild("cbTree", ImVec2(220.0f * viewState_.dpi_, -footerH), true);
     for (const CbRoot& r : roots) {
         ImGuiTreeNodeFlags rootFlags = ImGuiTreeNodeFlags_SpanAvailWidth;
         if (!r.engine) rootFlags |= ImGuiTreeNodeFlags_DefaultOpen;
@@ -1720,7 +1720,7 @@ void SandboxApp::cbFileOpModals() {
         }
 
         ImGui::Separator();
-        if (ImGui::Button("Copy Here", ImVec2(120.0f * dpi_, 0))) {
+        if (ImGui::Button("Copy Here", ImVec2(120.0f * viewState_.dpi_, 0))) {
             int ok = 0;
             for (const std::string& sp : srcs) if (cbCopyEntryTo(sp, cbMoveDest_)) ++ok;
             if (ok) cbStatus_ = "Copied " + std::to_string(ok) + " item(s)";
@@ -1728,7 +1728,7 @@ void SandboxApp::cbFileOpModals() {
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
-        if (ImGui::Button("Move Here", ImVec2(120.0f * dpi_, 0))) {
+        if (ImGui::Button("Move Here", ImVec2(120.0f * viewState_.dpi_, 0))) {
             int ok = 0;
             for (const std::string& sp : srcs) if (cbMoveEntryTo(sp, cbMoveDest_)) ++ok;
             if (ok) cbStatus_ = "Moved " + std::to_string(ok) + " item(s)";
@@ -1736,7 +1736,7 @@ void SandboxApp::cbFileOpModals() {
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
-        if (ImGui::Button("Cancel", ImVec2(100.0f * dpi_, 0)) ||
+        if (ImGui::Button("Cancel", ImVec2(100.0f * viewState_.dpi_, 0)) ||
             ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
             cbMoveSources_.clear();
             ImGui::CloseCurrentPopup();
@@ -1746,7 +1746,7 @@ void SandboxApp::cbFileOpModals() {
 
     if (ImGui::BeginPopupModal("cbRename", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::TextDisabled("Rename %s", cbContextIsDir_ ? "folder" : "file");
-        ImGui::SetNextItemWidth(360.0f*dpi_);
+        ImGui::SetNextItemWidth(360.0f*viewState_.dpi_);
         if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
         const bool submit = ImGui::InputText("##cbrenametxt", cbRenameBuf_, sizeof cbRenameBuf_,
                                              ImGuiInputTextFlags_EnterReturnsTrue);
@@ -1865,7 +1865,7 @@ void SandboxApp::cbFileOpModals() {
 
     if (ImGui::BeginPopupModal("cbNewFolder", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::TextDisabled("New folder in %s", cbSelectedDir_.c_str());
-        ImGui::SetNextItemWidth(360.0f*dpi_);
+        ImGui::SetNextItemWidth(360.0f*viewState_.dpi_);
         if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
         const bool submit = ImGui::InputText("##cbnewfoldertxt", cbNewFolderBuf_, sizeof cbNewFolderBuf_,
                                              ImGuiInputTextFlags_EnterReturnsTrue);
@@ -1883,7 +1883,7 @@ void SandboxApp::cbFileOpModals() {
 
     if (ImGui::BeginPopupModal("cbNewStringTable", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::TextDisabled("New string table (a file per culture under Localization/)");
-        ImGui::SetNextItemWidth(360.0f*dpi_);
+        ImGui::SetNextItemWidth(360.0f*viewState_.dpi_);
         if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
         const bool submit = ImGui::InputText("##cbnewstringtabletxt", cbNewStringTableBuf_, sizeof cbNewStringTableBuf_,
                                              ImGuiInputTextFlags_EnterReturnsTrue);
@@ -1909,7 +1909,7 @@ void SandboxApp::drawBreadcrumb(const std::string& dir) {
     if (!owner) { ImGui::TextDisabled("%s", dir.c_str()); return; }
 
     std::string acc = owner->path;
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2.0f*dpi_, 1.0f*dpi_));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2.0f*viewState_.dpi_, 1.0f*viewState_.dpi_));
     if (ImGui::SmallButton(owner->label)) cbNavigate(acc);
     std::string tail = dir.substr(owner->path.size());
     usize i = 0;
@@ -1920,7 +1920,7 @@ void SandboxApp::drawBreadcrumb(const std::string& dir) {
         if (i == start) break;
         const std::string seg = tail.substr(start, i - start);
         acc += AVER_PATH_SEP + seg;
-        ImGui::SameLine(0.0f, 2.0f*dpi_); ImGui::TextDisabled(">"); ImGui::SameLine(0.0f, 2.0f*dpi_);
+        ImGui::SameLine(0.0f, 2.0f*viewState_.dpi_); ImGui::TextDisabled(">"); ImGui::SameLine(0.0f, 2.0f*viewState_.dpi_);
         ImGui::PushID(static_cast<int>(start));
         if (ImGui::SmallButton(seg.c_str())) cbNavigate(acc);
         ImGui::PopID();
@@ -2457,9 +2457,9 @@ static void rcStatusDot(ImDrawList* dl, ImVec2 c, f32 r, ImU32 col, bool conflic
 
 // Draws the gallery view: a wrapped, row-clipped grid of icon tiles.
 void SandboxApp::drawFolderGallery(const std::vector<const DirEntry*>& shown) {
-    const f32 tile   = cbTileSize_ * dpi_;
-    const f32 pad    = 8.0f * dpi_;
-    const f32 labelH = ImGui::GetTextLineHeight() * 2.0f + 4.0f * dpi_;   // two lines: names wrap
+    const f32 tile   = cbTileSize_ * viewState_.dpi_;
+    const f32 pad    = 8.0f * viewState_.dpi_;
+    const f32 labelH = ImGui::GetTextLineHeight() * 2.0f + 4.0f * viewState_.dpi_;   // two lines: names wrap
     const f32 cellW  = tile, cellH = tile + labelH;
     int perRow = static_cast<int>((ImGui::GetContentRegionAvail().x + pad) / (cellW + pad));
     if (perRow < 1) perRow = 1;
@@ -2537,8 +2537,8 @@ void SandboxApp::drawFolderGallery(const std::vector<const DirEntry*>& shown) {
                 // Unreal's tile in three pieces: a panel so the grid reads as objects, a preview
                 // square, and a bar along the bottom edge in the type's colour; the name sits on a
                 // slightly darker strip so long names don't look like they belong to the tile beneath.
-                const f32 round  = 3.0f * dpi_;
-                const f32 barH   = ImMax(2.0f, 3.0f * dpi_);
+                const f32 round  = 3.0f * viewState_.dpi_;
+                const f32 barH   = ImMax(2.0f, 3.0f * viewState_.dpi_);
                 const f32 prevH  = tile - barH;                 // the preview square, above the bar
                 const ImVec2 cardMin = o, cardMax(o.x + cellW, o.y + cellH);
                 const ImU32 accent = cardAccent(e.kindExt.empty() ? lowerExt(e.path) : e.kindExt,
@@ -2625,11 +2625,11 @@ void SandboxApp::drawFolderGallery(const std::vector<const DirEntry*>& shown) {
                 if (!drewThumb)
                     drawEntryIcon(dl, iconCentre, prevH*0.58f, e.isDir, e.tile, e.module, e.kindExt,
                                   e.graphFamily);
-                const f32 wrap = cellW - 6.0f*dpi_;
+                const f32 wrap = cellW - 6.0f*viewState_.dpi_;
                 const std::string label = fitLabel(e.name, wrap, 2);
                 const ImVec2 ts = ImGui::CalcTextSize(label.c_str());
-                const f32 tx = ts.x <= wrap ? o.x + (cellW - ts.x)*0.5f : o.x + 3.0f*dpi_;
-                const f32 ty = o.y + tile + 2.0f*dpi_;
+                const f32 tx = ts.x <= wrap ? o.x + (cellW - ts.x)*0.5f : o.x + 3.0f*viewState_.dpi_;
+                const f32 ty = o.y + tile + 2.0f*viewState_.dpi_;
                 const ImVec4 clip(o.x, o.y + tile, o.x + cellW, o.y + cellH);
                 dl->AddText(nullptr, 0.0f, ImVec2(tx, ty), ImGui::GetColorU32(ImGuiCol_Text),
                             label.c_str(), nullptr, wrap, &clip);
@@ -2646,13 +2646,13 @@ void SandboxApp::drawFolderGallery(const std::vector<const DirEntry*>& shown) {
                 // Overlaps a rendered thumbnail's top-left corner (the one unavoidable spot): that
                 // corner is letterboxed background, not part of the asset.
                 if (rcHas) {
-                    const f32 dotR = ImMin(ImMax(cellW * 0.075f, 3.0f * dpi_), 7.0f * dpi_);
-                    const f32 inset = 2.0f * dpi_ + dotR;
+                    const f32 dotR = ImMin(ImMax(cellW * 0.075f, 3.0f * viewState_.dpi_), 7.0f * viewState_.dpi_);
+                    const f32 inset = 2.0f * viewState_.dpi_ + dotR;
                     rcStatusDot(dl, ImVec2(o.x + inset, o.y + inset), dotR, rcStatusColour(rcSt),
                                 rcSt == editor::FileStatus::Conflicted);
                 }
                 if (!e.isDir && cbCols_.isFavourite(cbKeyOf(e.full)))
-                    dl->AddText(ImVec2(o.x + cellW - ImGui::GetFontSize() - 2.0f * dpi_, o.y + 2.0f * dpi_),
+                    dl->AddText(ImVec2(o.x + cellW - ImGui::GetFontSize() - 2.0f * viewState_.dpi_, o.y + 2.0f * viewState_.dpi_),
                                 IM_COL32(255, 200, 60, 255), ICON_STAR);
                 ImGui::PopID();
             }
@@ -2790,8 +2790,8 @@ void SandboxApp::drawFolderFiles(std::string dir) {   // by value: a click below
             // the dot -- the alternative was reserving a column's width from every row for a mark
             // most rows lack.
             if (rcHas) {
-                const f32 dotR = ImMin(ImMax(h * 0.20f, 3.0f * dpi_), 6.0f * dpi_);
-                rcStatusDot(dl, ImVec2(rowRight - dotR - 2.0f * dpi_, o.y + h * 0.5f), dotR,
+                const f32 dotR = ImMin(ImMax(h * 0.20f, 3.0f * viewState_.dpi_), 6.0f * viewState_.dpi_);
+                rcStatusDot(dl, ImVec2(rowRight - dotR - 2.0f * viewState_.dpi_, o.y + h * 0.5f), dotR,
                             rcStatusColour(rcSt), rcSt == editor::FileStatus::Conflicted);
             }
             if (!e.isDir && cbCols_.isFavourite(cbKeyOf(e.full)))
@@ -2817,7 +2817,7 @@ void SandboxApp::drawImportModal() {
     ImGui::TextUnformatted("Import an asset into the selected folder.");
     ImGui::TextDisabled(".gltf/.glb/.fbx become .ocmesh; .wav/.ogg/.mp3/.flac/.m4a become .ocaudio.");
     ImGui::TextDisabled("Anything else is copied as-is.");
-    ImGui::SetNextItemWidth(420.0f * dpi_);
+    ImGui::SetNextItemWidth(420.0f * viewState_.dpi_);
     ImGui::InputText("Source file", importPath_, sizeof(importPath_));
     ImGui::SameLine();
     if (ImGui::Button("Browse...")) {

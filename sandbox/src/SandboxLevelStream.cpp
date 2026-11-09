@@ -163,7 +163,7 @@ void SandboxApp::adoptNewLevelEntities() {
 }
 
 void SandboxApp::tickLevelStreaming(f32 dt) {
-    std::vector<Vec3> viewers{camPos_};
+    std::vector<Vec3> viewers{viewState_.camPos_};
     // The selected instance stays loaded while it is selected; packed rows show only under ray-driven primary visibility
     // (otherwise those instances realise unpacked).
     {
@@ -220,7 +220,7 @@ void SandboxApp::tickLevelStreaming(f32 dt) {
     const auto t1 = std::chrono::steady_clock::now();
 #  if AVER_MODULE_VOXI
     const u32 rebuilds = levelFoliage_.rebuilds();
-    if (rset_.voxiAttached_) levelFoliage_.update(camPos_, dt);
+    if (rset_.voxiAttached_) levelFoliage_.update(viewState_.camPos_, dt);
     const bool foliageRebuilt = levelFoliage_.rebuilds() != rebuilds;
 #  else
     const bool foliageRebuilt = false;
@@ -388,19 +388,19 @@ void SandboxApp::buildLevelStreamingSettings() {
                           "instead of all at once. Objects stay editable; saving writes every one.");
     if (st.enabled) {
         f32 cellM = st.cellCm / 100.0f, loadM = st.loadCm / 100.0f, evictM = st.evictCm / 100.0f;
-        ImGui::SetNextItemWidth(200.0f * dpi_);
+        ImGui::SetNextItemWidth(200.0f * viewState_.dpi_);
         if (ImGui::SliderFloat("Cell size (m)", &cellM, 16.0f, 256.0f, "%.0f")) {
             st.cellCm = cellM * 100.0f;
             markLevelUnsaved();
         }
         bool distances = false;
-        ImGui::SetNextItemWidth(200.0f * dpi_);
+        ImGui::SetNextItemWidth(200.0f * viewState_.dpi_);
         if (ImGui::SliderFloat("Load distance (m)", &loadM, 50.0f, 2000.0f, "%.0f")) {
             st.loadCm = loadM * 100.0f;
             if (st.evictCm < st.loadCm + 1000.0f) st.evictCm = st.loadCm + 1000.0f;
             distances = true;
         }
-        ImGui::SetNextItemWidth(200.0f * dpi_);
+        ImGui::SetNextItemWidth(200.0f * viewState_.dpi_);
         if (ImGui::SliderFloat("Unload distance (m)", &evictM, loadM + 10.0f, 2500.0f, "%.0f")) {
             st.evictCm = evictM * 100.0f;
             distances = true;
@@ -427,9 +427,9 @@ void SandboxApp::buildLevelStreamingSettings() {
                               "distance: objects then load behind the fog. A short load distance means a\n"
                               "foggy level -- raise the load distance to push the fog back.");
         if (st.fogCells > 0.0f) {
-            ImGui::SetNextItemWidth(200.0f * dpi_);
+            ImGui::SetNextItemWidth(200.0f * viewState_.dpi_);
             if (ImGui::SliderFloat("Fog cells inside the edge", &st.fogCells, 0.5f, 4.0f, "%.1f")) markLevelUnsaved();
-            ImGui::SetNextItemWidth(200.0f * dpi_);
+            ImGui::SetNextItemWidth(200.0f * viewState_.dpi_);
             if (ImGui::SliderFloat("Fog opacity there", &st.fogOpacity, 0.5f, 0.99f, "%.2f")) markLevelUnsaved();
             const f32 wallCm = st.loadCm - st.fogCells * st.cellCm;
             if (wallCm <= rset_.sky_.fogStart + 100.0f)
@@ -437,7 +437,7 @@ void SandboxApp::buildLevelStreamingSettings() {
             else
                 ImGui::TextDisabled("Fog %.0f%% at %.0f m, objects load to %.0f m (density %.2e)",
                                     st.fogOpacity * 100.0f, wallCm / 100.0f, st.loadCm / 100.0f,
-                                    assets::fogForStreamEdge(st, rset_.sky_, rset_.sky_.fogDensity, eye_.z));
+                                    assets::fogForStreamEdge(st, rset_.sky_, rset_.sky_.fogDensity, viewState_.eye_.z));
         }
         ImGui::TextDisabled("Data: %s", st.dataPath.empty() ? "(not generated yet)" : st.dataPath.c_str());
         if (level_.streaming().active() && level_.streamDataStale())

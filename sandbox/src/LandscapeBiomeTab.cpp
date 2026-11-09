@@ -75,7 +75,7 @@ void SandboxApp::buildBiomeSection() {
 
     // New Biome from a foliage type.
     ImGui::BeginDisabled(u.foliage.empty());
-    ImGui::SetNextItemWidth(-90.0f * dpi_);
+    ImGui::SetNextItemWidth(-90.0f * viewState_.dpi_);
     if (ImGui::BeginCombo("##biomefoliage", u.foliage.empty() ? "(no .ocfoliage in the project)" : u.foliage[static_cast<usize>(u.foliagePick)].c_str())) {
         for (int i = 0; i < static_cast<int>(u.foliage.size()); ++i)
             if (ImGui::Selectable(u.foliage[static_cast<usize>(i)].c_str(), u.foliagePick == i)) u.foliagePick = i;
@@ -101,9 +101,9 @@ void SandboxApp::buildBiomeSection() {
 
     if (ImGui::InputInt("Seed", &u.seed)) u.estimateStale = true;
     const char* cells[] = {"32 m", "64 m", "128 m"};
-    ImGui::SetNextItemWidth(120.0f * dpi_);
+    ImGui::SetNextItemWidth(120.0f * viewState_.dpi_);
     if (ImGui::Combo("Cell size", &u.cellChoice, cells, 3)) u.estimateStale = true;
-    ImGui::SetNextItemWidth(160.0f * dpi_);
+    ImGui::SetNextItemWidth(160.0f * viewState_.dpi_);
     ImGui::InputText("Output name", u.outName, sizeof u.outName);
 
     editor::BiomeVegetationRequest req;

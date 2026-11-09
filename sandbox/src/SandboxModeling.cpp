@@ -7,7 +7,7 @@
 namespace aver {
 
 void SandboxApp::handleModelingInput(const ImGuiIO& io, bool overScene, f32 mx, f32 my) {
-    if (levelFocused_ && !io.WantTextInput) {
+    if (viewState_.levelFocused_ && !io.WantTextInput) {
         if (ImGui::IsKeyPressed(ImGuiKey_1, false)) modeling_.setSelectMode(0);
         if (ImGui::IsKeyPressed(ImGuiKey_2, false)) modeling_.setSelectMode(1);
         if (ImGui::IsKeyPressed(ImGuiKey_3, false)) modeling_.setSelectMode(2);
@@ -21,7 +21,7 @@ void SandboxApp::handleModelingInput(const ImGuiIO& io, bool overScene, f32 mx, 
     m.released = io.MouseReleased[0];
     m.ctrl = io.KeyCtrl;
     m.shift = io.KeyShift;
-    modeling_.handleMouse(m, [this](const Vec3& w, f32& sx, f32& sy) { return project(w, sx, sy); }, eye_);
+    modeling_.handleMouse(m, [this](const Vec3& w, f32& sx, f32& sy) { return project(w, sx, sy); }, viewState_.eye_);
 }
 
 }  // namespace aver

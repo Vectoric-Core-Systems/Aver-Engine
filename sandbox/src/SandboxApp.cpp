@@ -157,13 +157,13 @@ void SandboxApp::setDebugLayer(bool d) { debugLayer_ = d; }
 #if AVER_WITH_IMGUI
 // Rebuild ImGui style and font atlas for the given DPI scale.
 void SandboxApp::applyDpi(f32 dpi) {
-    dpi_ = dpi;
+    viewState_.dpi_ = dpi;
     // Push dpi through editor::setGraphEditorDpi (not pulled from AssetEditor::draw()).
-    editor::setGraphEditorDpi(dpi_);
+    editor::setGraphEditorDpi(viewState_.dpi_);
     editor::reloadEditorTheme(executableDir());
     applyEditorMetrics();
     applyEditorColors();
-    if (dpi_ > 1.01f) ImGui::GetStyle().ScaleAllSizes(dpi_);
+    if (viewState_.dpi_ > 1.01f) ImGui::GetStyle().ScaleAllSizes(viewState_.dpi_);
 
     ImGuiIO& io = ImGui::GetIO();
     io.Fonts->Clear();
@@ -174,7 +174,7 @@ void SandboxApp::applyDpi(f32 dpi) {
     const std::string regular = dir + AVER_PATH_SEP "Roboto-Regular.ttf";
     const std::string medium  = dir + AVER_PATH_SEP "Roboto-Medium.ttf";
     const editor::EditorTheme& theme = editor::editorTheme();
-    const f32 px = theme.fontBody * dpi_;
+    const f32 px = theme.fontBody * viewState_.dpi_;
 
     ImFont* body = fileExists(regular) ? io.Fonts->AddFontFromFileTTF(regular.c_str(), px) : nullptr;
     if (!body) {
@@ -190,14 +190,14 @@ void SandboxApp::applyDpi(f32 dpi) {
         // under fontMedium_ show as notdef boxes.
         if (fontMedium_) mergeIconFont(px);
         // Header: the same Medium face at the header size, for panel and section titles.
-        const f32 hpx = theme.fontHeader * dpi_;
+        const f32 hpx = theme.fontHeader * viewState_.dpi_;
         editor::editorFonts().header = io.Fonts->AddFontFromFileTTF(medium.c_str(), hpx);
         editor::editorFonts().headerPx = hpx;
         if (editor::editorFonts().header) mergeIconFont(hpx);
     }
     // Small: status bar, secondary hints and readouts. The atlas is dynamic (glyphs rasterise on first
     // use), so three faces and their icon merges cost a few more glyph entries, not a bigger texture.
-    const f32 spx = theme.fontSmall * dpi_;
+    const f32 spx = theme.fontSmall * viewState_.dpi_;
     editor::editorFonts().secondary = io.Fonts->AddFontFromFileTTF(regular.c_str(), spx);
     editor::editorFonts().secondaryPx = spx;
     if (editor::editorFonts().secondary) mergeIconFont(spx);
@@ -266,7 +266,7 @@ void SandboxApp::loadLogo(Engine& e) {
 
     // The menu bar's copy: an area average in premultiplied alpha (no dark fringe) down to the bar's height. The full texture has one
     // mip, so sampling it at ~70 px from 512 aliased.
-    const u32 sh = std::max(8u, static_cast<u32>(std::lround(22.0f * dpi_)));
+    const u32 sh = std::max(8u, static_cast<u32>(std::lround(22.0f * viewState_.dpi_)));
     const u32 sw = std::max(1u, static_cast<u32>(std::lround(static_cast<f32>(sh) * logoAspect_)));
     std::vector<u8> markPx(static_cast<usize>(sw) * sh * 4);
     for (u32 y = 0; y < sh; ++y)
@@ -783,8 +783,8 @@ bool SandboxApp::updateFrameInterpolation(rhi::IDevice* dev) {
         frameInterpolator_->setVisualisation(static_cast<neurafi::Visualisation>(vm), neurafiVizScalePx_);
     }
     neurafiViz_.setDevice(dev);
-    neurafiViz_.setViewportRect(static_cast<u32>(vpX_), static_cast<u32>(vpY_),
-                                static_cast<u32>(vpW_), static_cast<u32>(vpH_));
+    neurafiViz_.setViewportRect(static_cast<u32>(viewState_.vpX_), static_cast<u32>(viewState_.vpY_),
+                                static_cast<u32>(viewState_.vpW_), static_cast<u32>(viewState_.vpH_));
     neurafiViz_.setSource(frameInterpolator_ && neurafiVizMode_ > 0 ? frameInterpolator_.get() : nullptr,
                           neurafiVizOpacity_);
     dev->setFrameInterpShowGeneratedOnly(neurafiShowGeneratedOnly_);

@@ -545,10 +545,10 @@ bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
     if (!camOverride_) {
         constexpr f64 kDeg = 180.0 / 3.14159265358979323846;
         w.hasCamera = true;
-        w.camX = camPos_.x; w.camY = camPos_.y; w.camZ = camPos_.z;
-        w.camYaw = static_cast<f64>(yaw_) * kDeg;
-        w.camPitch = static_cast<f64>(pitch_) * kDeg;
-        w.camSpeed = flySpeed_;
+        w.camX = viewState_.camPos_.x; w.camY = viewState_.camPos_.y; w.camZ = viewState_.camPos_.z;
+        w.camYaw = static_cast<f64>(viewState_.yaw_) * kDeg;
+        w.camPitch = static_cast<f64>(viewState_.pitch_) * kDeg;
+        w.camSpeed = viewState_.flySpeed_;
     }
 
     // EACH RECORD GOES OUT WHENEVER THE LEVEL CARRIED IT **OR** THE AUTHOR HAS EDITED IT HERE

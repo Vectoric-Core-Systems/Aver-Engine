@@ -121,7 +121,7 @@ void SandboxApp::setChunkStreamingEnabled(bool on) {
                        std::move(height), std::move(layers));
     if (streaming_.enabled())
         streaming_.warnIfCameraOutsideGeneratedBand(
-            camPos_, "press F to focus something near ground level, or fly down.");
+            viewState_.camPos_, "press F to focus something near ground level, or fly down.");
 }
 
 // Spawns (or despawns) the graph-driven drone. OPT-IN, same shape as setChunkStreamingEnabled:
@@ -178,7 +178,7 @@ void SandboxApp::setDroneEnabled(bool on) {
             AVER_INFO("[Drone] spawning at the level's Player Start ({:.0f}, {:.0f}, {:.0f})",
                       sp.x, sp.y, sp.z);
         } else {
-            xf.position = camPos_ + camForward() * kAddDistance;
+            xf.position = viewState_.camPos_ + camForward() * kAddDistance;
             xf.rotation = Quat{0, 0, 0, 1};
         }
     }
@@ -373,7 +373,7 @@ void SandboxApp::loadLevel(Engine& eng, const std::string& path) {
             if (projectLoading_) projectLoading_->stage("Loading foliage", 0.75f);
             const std::vector<std::string> tables = level_.foliageTablePaths(loaded.world.foliageFiles);
             levelFoliage_.load(loaded.world, content_, eng.device(), &voxiRenderer_, project_.contentDir(),
-                [this](f32 f) { if (projectLoading_) projectLoading_->progress(0.75f + f * 0.15f); }, camPos_,
+                [this](f32 f) { if (projectLoading_) projectLoading_->progress(0.75f + f * 0.15f); }, viewState_.camPos_,
                 &tables);
             if (!levelFoliage_.result().error.empty()) AVER_WARN("[Foliage] {}", levelFoliage_.result().error);
             foliagePending_ = false;
@@ -588,7 +588,7 @@ void SandboxApp::onLevelInstantiated(const game::GameLevel::LoadedLevel& loaded)
         applyLevelView(leftView);
         levelCameraRestored_ = true;
         AVER_INFO("[Level] camera back where it was left: ({:.0f},{:.0f},{:.0f}) yaw {:.1f} pitch {:.1f} "
-                  "(Saved/LevelViews.ini)", camPos_.x, camPos_.y, camPos_.z, leftView.yawDeg, leftView.pitchDeg);
+                  "(Saved/LevelViews.ini)", viewState_.camPos_.x, viewState_.camPos_.y, viewState_.camPos_.z, leftView.yawDeg, leftView.pitchDeg);
     } else if (w.hasCamera) {
         applyLevelView(editor::LevelView{static_cast<f32>(w.camX), static_cast<f32>(w.camY),
                                          static_cast<f32>(w.camZ), static_cast<f32>(w.camYaw),
@@ -598,7 +598,7 @@ void SandboxApp::onLevelInstantiated(const game::GameLevel::LoadedLevel& loaded)
         // look the same from outside the process, and the difference is exactly what a person
         // reporting "it didn't remember where I was" needs to be able to check.
         AVER_INFO("[Level] camera restored to ({:.0f},{:.0f},{:.0f}) yaw {:.1f} pitch {:.1f} speed {:.0f}",
-                  camPos_.x, camPos_.y, camPos_.z, w.camYaw, w.camPitch, flySpeed_);
+                  viewState_.camPos_.x, viewState_.camPos_.y, viewState_.camPos_.z, w.camYaw, w.camPitch, viewState_.flySpeed_);
     } else if (!w.placements.empty()) {
         frameCameraOnLevel();
     }
@@ -1036,11 +1036,11 @@ void SandboxApp::frameCameraOnLevel() {
     level_.placementBounds(lo, hi, radius);
     const Vec3 centre{(lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f, (lo.z + hi.z) * 0.5f};
     const f32 dist = radius * 1.6f;
-    camPos_ = Vec3{centre.x - dist * 0.65f, centre.y - dist * 0.65f, centre.z + dist * 0.55f};
-    const Vec3 look = (centre - camPos_).getSafeNormal();
-    yaw_   = std::atan2(look.y, look.x);
-    pitch_ = std::asin(std::fmax(-1.0f, std::fmin(1.0f, look.z)));
-    flySpeed_ = std::fmax(flySpeed_, radius * 0.02f);
+    viewState_.camPos_ = Vec3{centre.x - dist * 0.65f, centre.y - dist * 0.65f, centre.z + dist * 0.55f};
+    const Vec3 look = (centre - viewState_.camPos_).getSafeNormal();
+    viewState_.yaw_   = std::atan2(look.y, look.x);
+    viewState_.pitch_ = std::asin(std::fmax(-1.0f, std::fmin(1.0f, look.z)));
+    viewState_.flySpeed_ = std::fmax(viewState_.flySpeed_, radius * 0.02f);
     // This is a teleport, not a move: the next chunk-streaming update must not see this as a
     // (huge, one-frame) velocity computed against wherever the camera used to be.
     streaming_.resetVelocityTracking();
@@ -1049,14 +1049,14 @@ void SandboxApp::frameCameraOnLevel() {
 // Moves the editor camera to a stored view -- the level's CAMERA record or where it was last left.
 void SandboxApp::applyLevelView(const editor::LevelView& v) {
     constexpr f32 kRad = 3.14159265358979323846f / 180.0f;
-    camPos_ = Vec3{v.x, v.y, v.z};
-    yaw_    = v.yawDeg * kRad;
+    viewState_.camPos_ = Vec3{v.x, v.y, v.z};
+    viewState_.yaw_    = v.yawDeg * kRad;
     // Clamped to the same limits the mouse-look path enforces, so a hand-edited or corrupted file
     // cannot put the camera somewhere the controls can never recover from.
-    pitch_  = std::fmax(-1.54f, std::fmin(1.54f, v.pitchDeg * kRad));
+    viewState_.pitch_  = std::fmax(-1.54f, std::fmin(1.54f, v.pitchDeg * kRad));
     // 0 means UNSTATED -- no stored speed leaves the user's preference alone rather than resetting
     // the camera to a stored zero and appearing to freeze.
-    if (v.speed > 0.0f) flySpeed_ = std::fmax(20.0f, std::fmin(40000.0f, v.speed));
+    if (v.speed > 0.0f) viewState_.flySpeed_ = std::fmax(20.0f, std::fmin(40000.0f, v.speed));
     streaming_.resetVelocityTracking();   // a teleport; see frameCameraOnLevel
 }
 
@@ -1088,7 +1088,7 @@ void SandboxApp::storeLevelView() {
     const std::string key = editor::levelViewKey(levelPath_, project_.dir);
     if (file.empty() || key.empty()) return;
 
-    editor::LevelView v{camPos_.x, camPos_.y, camPos_.z, degrees(yaw_), degrees(pitch_), flySpeed_};
+    editor::LevelView v{viewState_.camPos_.x, viewState_.camPos_.y, viewState_.camPos_.z, degrees(viewState_.yaw_), degrees(viewState_.pitch_), viewState_.flySpeed_};
 #if AVER_MODULE_FRAMEWORK
     // While a session drives the camera from the pawn, camPos_ is the pawn's eye, not the editor's.
     if (play_.preplayViewValid_ && anyPlayActive() && !playEjected()) v = play_.preplayView_;

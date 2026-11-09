@@ -330,7 +330,7 @@ void SandboxApp::drawRecoveryPrompt(Engine& e) {
     if (!ImGui::IsPopupOpen(kTitle)) ImGui::OpenPopup(kTitle);
     const ImVec2 centre = ImGui::GetMainViewport()->GetCenter();
     ImGui::SetNextWindowPos(centre, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(520.0f * dpi_, 0.0f), ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize(ImVec2(520.0f * viewState_.dpi_, 0.0f), ImGuiCond_Appearing);
     if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
 
     ImGui::TextWrapped("'%s' was left with unsaved changes -- the editor closed before they were "
@@ -339,7 +339,7 @@ void SandboxApp::drawRecoveryPrompt(Engine& e) {
                         "you save.");
     ImGui::Spacing();
     ImGui::Separator();
-    if (ImGui::Button("Recover", ImVec2(120.0f * dpi_, 0.0f))) {
+    if (ImGui::Button("Recover", ImVec2(120.0f * viewState_.dpi_, 0.0f))) {
         const std::string p = recoveryPath_;
         recoveryPath_.clear();
         ImGui::CloseCurrentPopup();
@@ -358,7 +358,7 @@ void SandboxApp::drawRecoveryPrompt(Engine& e) {
         setUpgradeStatus("Recovered - not yet saved", editor::NotifySeverity::Warning);
     }
     ImGui::SameLine();
-    if (ImGui::Button("Discard", ImVec2(120.0f * dpi_, 0.0f))) {
+    if (ImGui::Button("Discard", ImVec2(120.0f * viewState_.dpi_, 0.0f))) {
         std::error_code ec;
         std::filesystem::remove(recoveryPath_, ec);
         recoveryPath_.clear();

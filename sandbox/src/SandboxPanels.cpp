@@ -44,7 +44,7 @@ bool SandboxApp::assetPicker(const char* popupId, const std::vector<AssetChoice>
             assetPickerFilter_[0] = 0;
             ImGui::SetKeyboardFocusHere();
         }
-        ImGui::SetNextItemWidth(260.0f * dpi_);
+        ImGui::SetNextItemWidth(260.0f * viewState_.dpi_);
         ImGui::InputTextWithHint("##assetPickerFilter", "Search assets...",
                                  assetPickerFilter_, sizeof assetPickerFilter_);
         ImGui::Separator();
@@ -448,13 +448,13 @@ void SandboxApp::buildModePanel(Engine& e) {
     ImGui::Begin(AVER_WIN_MODE);
 
     ImGui::PushStyleColor(ImGuiCol_Text, kAverOrange);
-    ImGui::TextUnformatted(kEditorModeNames[static_cast<int>(mode_)]);
+    ImGui::TextUnformatted(kEditorModeNames[static_cast<int>(viewState_.mode_)]);
     ImGui::PopStyleColor();
-    ImGui::TextDisabled("%s", kEditorModeHints[static_cast<int>(mode_)]);
+    ImGui::TextDisabled("%s", kEditorModeHints[static_cast<int>(viewState_.mode_)]);
     ImGui::Separator();
     ImGui::Spacing();
 
-    switch (mode_) {
+    switch (viewState_.mode_) {
         case EditorMode::Select:    buildSelectModePanel();    break;
 #if AVER_MODULE_LANDSCAPE
         case EditorMode::Landscape: buildLandscapeModePanel(e); break;
@@ -466,7 +466,7 @@ void SandboxApp::buildModePanel(Engine& e) {
             break;
 #endif
         case EditorMode::Simulate:  buildSimulateModePanel(e);  break;
-        case EditorMode::Modeling:  modeling_.drawPanel(project_.contentDir(), dpi_); break;
+        case EditorMode::Modeling:  modeling_.drawPanel(project_.contentDir(), viewState_.dpi_); break;
 #if AVER_MODULE_SCENE
         case EditorMode::Animate:   buildAnimateModePanel();    break;
 #else
@@ -497,29 +497,29 @@ void SandboxApp::buildSelectModePanel() {
     ImGui::TextDisabled("TRANSFORM");
     const char* names[4] = {"Select", "Move", "Rotate", "Scale"};
     for (int i = 0; i < 4; ++i) {
-        const bool on = static_cast<int>(tool_) == i;
+        const bool on = static_cast<int>(viewState_.tool_) == i;
         if (on) ImGui::PushStyleColor(ImGuiCol_Button, kAverOrangeDim);
-        if (ImGui::Button(names[i], ImVec2(-1, 0))) tool_ = static_cast<Tool>(i);
+        if (ImGui::Button(names[i], ImVec2(-1, 0))) viewState_.tool_ = static_cast<Tool>(i);
         if (on) ImGui::PopStyleColor();
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Hotkey %d", i + 1);
     }
     ImGui::Spacing();
     ImGui::TextDisabled("SPACE");
-    if (ImGui::Button(worldSpace_ ? "World" : "Local", ImVec2(-1, 0))) worldSpace_ = !worldSpace_;
+    if (ImGui::Button(viewState_.worldSpace_ ? "World" : "Local", ImVec2(-1, 0))) viewState_.worldSpace_ = !viewState_.worldSpace_;
     ImGui::Spacing();
     // A checkbox plus a step: snapMove_ et al are on/off, moveSnap_ et al are the increment, kept
     // separate so turning snapping off doesn't lose the set step.
     // Checkbox on its own line, value below at full width -- side by side clipped "15 deg" to "15 de".
     ImGui::TextDisabled("SNAPPING");
-    ImGui::Checkbox("Grid (position)", &snapMove_);
+    ImGui::Checkbox("Grid (position)", &viewState_.snapMove_);
     ImGui::SetNextItemWidth(-1);
-    ImGui::DragFloat("##moveSnap", &moveSnap_, 1.0f, 1.0f, 1000.0f, "%.0f cm");
-    ImGui::Checkbox("Angle (rotation)", &snapRot_);
+    ImGui::DragFloat("##moveSnap", &viewState_.moveSnap_, 1.0f, 1.0f, 1000.0f, "%.0f cm");
+    ImGui::Checkbox("Angle (rotation)", &viewState_.snapRot_);
     ImGui::SetNextItemWidth(-1);
-    ImGui::DragFloat("##rotSnap", &rotSnap_, 1.0f, 1.0f, 90.0f, "%.0f deg");
-    ImGui::Checkbox("Step (scale)", &snapScale_);
+    ImGui::DragFloat("##rotSnap", &viewState_.rotSnap_, 1.0f, 1.0f, 90.0f, "%.0f deg");
+    ImGui::Checkbox("Step (scale)", &viewState_.snapScale_);
     ImGui::SetNextItemWidth(-1);
-    ImGui::DragFloat("##sclSnap", &scaleSnap_, 0.01f, 0.01f, 1.0f, "%.2f");
+    ImGui::DragFloat("##sclSnap", &viewState_.scaleSnap_, 0.01f, 0.01f, 1.0f, "%.2f");
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::TextDisabled("Selected: %s", selectionLabel().c_str());
@@ -569,9 +569,9 @@ editor::SequenceHost SandboxApp::sequenceHost() {
         const auto it = entityLabels_.find(static_cast<u32>(ent));
         return it != entityLabels_.end() ? it->second : scene::World::instance().name(ent);
     };
-    h.editorCamera.position = camPos_;
-    h.editorCamera.yaw = yaw_;
-    h.editorCamera.pitch = pitch_;
+    h.editorCamera.position = viewState_.camPos_;
+    h.editorCamera.yaw = viewState_.yaw_;
+    h.editorCamera.pitch = viewState_.pitch_;
     // What a transform track can drive: a saved placement (not a light or decal record, not inside a prefab).
     h.canKey = [this](scene::Entity ent) {
         scene::World& w = scene::World::instance();
@@ -581,7 +581,7 @@ editor::SequenceHost SandboxApp::sequenceHost() {
             return false;
         return !prefabSys_.isLinked(ent);
     };
-    h.setEditorCamera = [this](const game::SeqCameraPose& p) { camPos_ = p.position; yaw_ = p.yaw; pitch_ = p.pitch; };
+    h.setEditorCamera = [this](const game::SeqCameraPose& p) { viewState_.camPos_ = p.position; viewState_.yaw_ = p.yaw; viewState_.pitch_ = p.pitch; };
     // [wave5/sequencer] Bindings by name: the outliner label is the name a level saves for a placement, a light or a
     // class actor; the scene's own entity name is the fallback.
     h.findByName = [this](const std::string& name) -> scene::Entity {
@@ -613,8 +613,8 @@ editor::SequenceHost SandboxApp::sequenceHost() {
     };
     // Not undoable, so the mark has to survive an undo and clear only on save.
     h.markLevelDirty = [this]() { markLevelUnsaved(); };
-    h.vpX = vpX_; h.vpY = vpY_; h.vpW = vpW_; h.vpH = vpH_;
-    h.levelFocused = levelFocused_;
+    h.vpX = viewState_.vpX_; h.vpY = viewState_.vpY_; h.vpW = viewState_.vpW_; h.vpH = viewState_.vpH_;
+    h.levelFocused = viewState_.levelFocused_;
     return h;
 }
 
@@ -667,7 +667,7 @@ void SandboxApp::buildWaterPanel(Engine& e) {
             wp.name = "Water";
             // At the camera's feet, not z=0 (invisible on terrain built up from the origin).
             // Rounded so the field shows a number somebody would actually have typed.
-            wp.levelCm = std::floor(camPos_.z / 10.0f) * 10.0f - 100.0;
+            wp.levelCm = std::floor(viewState_.camPos_.z / 10.0f) * 10.0f - 100.0;
             wp.infinite = true;
             levelHeader_.waters.assign(1, std::move(wp));
             water_.applyLevel(*e.device(), levelHeader_);
@@ -827,9 +827,9 @@ void SandboxApp::buildLandscapeModePanel(Engine& e) {
     // 6 tools; only the first 4 have a hotkey (SculptRaise..SculptFlatten, keys 1-4). Ramp/Noise
     // are mouse/panel-only for now, so no tooltip advertises a key that does nothing.
     for (int i = 0; i < 6; ++i) {
-        const bool on = static_cast<int>(sculptTool_) == i;
+        const bool on = static_cast<int>(viewState_.sculptTool_) == i;
         if (on) ImGui::PushStyleColor(ImGuiCol_Button, kAverOrangeDim);
-        if (ImGui::Button(kSculptToolNames[i], ImVec2(-1, 0))) sculptTool_ = static_cast<SculptTool>(i);
+        if (ImGui::Button(kSculptToolNames[i], ImVec2(-1, 0))) viewState_.sculptTool_ = static_cast<SculptTool>(i);
         if (on) ImGui::PopStyleColor();
         if (i < 4 && ImGui::IsItemHovered()) ImGui::SetTooltip("Hotkey %d", i + 1);
     }
@@ -844,13 +844,13 @@ void SandboxApp::buildLandscapeModePanel(Engine& e) {
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("0 is a hard edge, 1 is a soft smoothstep shoulder.");
 
-    if (sculptTool_ == SculptTool::Flatten) {
+    if (viewState_.sculptTool_ == SculptTool::Flatten) {
         ImGui::Spacing();
         ImGui::TextDisabled("FLATTEN TARGET");
         ImGui::Text("%.0f cm", sculptFlattenTargetCm_);
         ImGui::TextDisabled("Picked from the first click of each stroke.");
     }
-    if (sculptTool_ == SculptTool::Ramp) {
+    if (viewState_.sculptTool_ == SculptTool::Ramp) {
         ImGui::Spacing();
         ImGui::TextDisabled("RAMP START");
         ImGui::Text("(%.0f, %.0f) @ %.0f cm", sculptRampStartCm_[0], sculptRampStartCm_[1],
@@ -858,7 +858,7 @@ void SandboxApp::buildLandscapeModePanel(Engine& e) {
         ImGui::TextDisabled("Picked from the first click of each stroke. Strength is the total");
         ImGui::TextDisabled("rise from there to wherever the brush is now.");
     }
-    if (sculptTool_ == SculptTool::Noise) {
+    if (viewState_.sculptTool_ == SculptTool::Noise) {
         ImGui::Spacing();
         ImGui::TextDisabled("NOISE SEED");
         ImGui::Text("%u", sculptNoiseSeed_);
@@ -1888,7 +1888,7 @@ void SandboxApp::drawOutlinerFolders(const std::string& parent) {
 void SandboxApp::buildOutlinerPanel() {
     const bool visible = ImGui::Begin(AVER_WIN_OUTLINER, &showOutliner_);
     // So the edit verbs work on a selection made HERE -- see the dispatch in handleManip.
-    outlinerFocused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+    viewState_.outlinerFocused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
     // COLLAPSED, OR BEHIND ANOTHER DOCK TAB: Begin returned false, so nothing below would be seen
     // (its items are all skipped), yet this used to walk every row anyway. Same early-out as
     // buildProfilerPanel. The one thing still owed is outlinerOrder_: Select All (the Select menu,
@@ -3133,7 +3133,7 @@ void SandboxApp::drawPostProcessDetails(Engine& e) {
 
 void SandboxApp::buildDetailsPanel(Engine& e) {
     ImGui::Begin(AVER_WIN_DETAILS, &showDetails_);
-    detailsFocused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+    viewState_.detailsFocused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
     editor::dt::begin();
     uiReg_.track("details.search");
     if (sel_>=0 && sel_<(int)objects_.size()){
@@ -3267,7 +3267,7 @@ void SandboxApp::buildChunkStreamingPanel() {
     const world::StreamStats& s = streaming_.stats();
     // Anchored to the viewport, not the window's corner: a fixed (12, 60) from the window origin
     // used to overlap the mode panel's tool buttons once a docked panel appeared on the left.
-    ImGui::SetNextWindowPos(ImVec2(vpX_ + 12.0f * dpi_, vpY_ + 60.0f * dpi_), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(viewState_.vpX_ + 12.0f * viewState_.dpi_, viewState_.vpY_ + 60.0f * viewState_.dpi_), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowBgAlpha(0.85f);
     if (!ImGui::Begin("Chunk Streaming", nullptr, ImGuiWindowFlags_NoFocusOnAppearing)) {
         ImGui::End();

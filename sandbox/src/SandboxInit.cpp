@@ -262,7 +262,7 @@ void SandboxApp::installActorEditorHooks() {
         editor::ActorEditorHooks hooks;
         hooks.compileScripts = [this] { tools_.triggerToolbarCompile(project_); };
         hooks.compileBusy    = [this] { return tools_.compiling(); };
-        hooks.drawCompileButton = [this] { tools_.drawCompileButton(project_, dpi_, compileIconUiId_); };
+        hooks.drawCompileButton = [this] { tools_.drawCompileButton(project_, viewState_.dpi_, compileIconUiId_); };
 #if AVER_WITH_IMGUI
         hooks.openInIde = [this](const std::string& p) {
             const editor::IdeInfo& ide = cbIde();
@@ -459,7 +459,7 @@ void SandboxApp::openStartupProject(Engine& e) {
 void SandboxApp::initEditorUi(Engine& e) {
     if (e.device()->uiActive()) {
         applyDpi(e.window() ? e.window()->dpiScale() : 1.0f);
-        AVER_INFO("[Sandbox] DPI scale {:.2f}, UI font rasterised at {:.0f}px", dpi_, 16.0f * dpi_);
+        AVER_INFO("[Sandbox] DPI scale {:.2f}, UI font rasterised at {:.0f}px", viewState_.dpi_, 16.0f * viewState_.dpi_);
         loadLogo(e);   // the start screen and the menu bar's mark
         loadCompileIcon(e);
         loadIconSheet(e, "file-icons.png",   kFileIconTiles, "FileTypeIcons", fileIconsTexture_,   fileIconsUiId_,   fileIconAspect_);
@@ -528,19 +528,19 @@ void SandboxApp::createDefaultScene(Engine& e) {
     for (MeshObj& o : objects_) makeMaterialFor(o);
 
     std::vector<rhi::LineVertex> gl; buildGrid(gl, kEditorGridHalf, kEditorGridCell);
-    gridMesh_ = e.device()->createLineMesh(gl.data(), (u32)gl.size());
+    viewState_.gridMesh_ = e.device()->createLineMesh(gl.data(), (u32)gl.size());
 }
 
 // Gizmo handles, the Player Start capsule and the sculpt brush ring.
 void SandboxApp::createGizmoMeshes(Engine& e) {
     // Per-mode gizmos: normal + yellow-highlight variant of each axis.
     for (int a = 0; a < 3; ++a) {
-        auto mv=buildMoveAxis(a,kAxisCol[a]);   gzMove_[a]  =e.device()->createLineMesh(mv.data(),(u32)mv.size());
-        auto mh=buildMoveAxis(a,kAxisHi);       gzMoveHi_[a]=e.device()->createLineMesh(mh.data(),(u32)mh.size());
-        auto rr=buildRotRing(a,kAxisCol[a]);    gzRot_[a]   =e.device()->createLineMesh(rr.data(),(u32)rr.size());
-        auto rh=buildRotRing(a,kAxisHi);        gzRotHi_[a] =e.device()->createLineMesh(rh.data(),(u32)rh.size());
-        auto sc=buildScaleAxis(a,kAxisCol[a]);  gzScale_[a] =e.device()->createLineMesh(sc.data(),(u32)sc.size());
-        auto sh=buildScaleAxis(a,kAxisHi);      gzScaleHi_[a]=e.device()->createLineMesh(sh.data(),(u32)sh.size());
+        auto mv=buildMoveAxis(a,kAxisCol[a]);   viewState_.gzMove_[a]  =e.device()->createLineMesh(mv.data(),(u32)mv.size());
+        auto mh=buildMoveAxis(a,kAxisHi);       viewState_.gzMoveHi_[a]=e.device()->createLineMesh(mh.data(),(u32)mh.size());
+        auto rr=buildRotRing(a,kAxisCol[a]);    viewState_.gzRot_[a]   =e.device()->createLineMesh(rr.data(),(u32)rr.size());
+        auto rh=buildRotRing(a,kAxisHi);        viewState_.gzRotHi_[a] =e.device()->createLineMesh(rh.data(),(u32)rh.size());
+        auto sc=buildScaleAxis(a,kAxisCol[a]);  viewState_.gzScale_[a] =e.device()->createLineMesh(sc.data(),(u32)sc.size());
+        auto sh=buildScaleAxis(a,kAxisHi);      viewState_.gzScaleHi_[a]=e.device()->createLineMesh(sh.data(),(u32)sh.size());
     }
 
     // The Player Start's capsule and facing arrow, built once (like the gizmo handles just above) and
@@ -745,7 +745,7 @@ void SandboxApp::setupReflectionTest() {
         m.aabbMin = Vec3{-1900, -1900, -60}; m.aabbMax = Vec3{1900, 1900, 20};
         objects_.push_back(m);
 
-        const Vec3 bp = aver::editor::ReflTest::beaconPosition(camPos_, Vec3{0, 0, 0});
+        const Vec3 bp = aver::editor::ReflTest::beaconPosition(viewState_.camPos_, Vec3{0, 0, 0});
         MeshObj bcn;
         bcn.name = "ReflBeacon";
         bcn.mesh = unitCubeMesh_;
@@ -971,7 +971,7 @@ void SandboxApp::initVoxiBackend(Engine& e) {
             if (foliagePending_) {
                 foliagePending_ = false;
                 levelFoliage_.load(foliagePendingWorld_, content_, e.device(), &voxiRenderer_, project_.contentDir(),
-                                   {}, camPos_, &foliagePendingTables_);
+                                   {}, viewState_.camPos_, &foliagePendingTables_);
                 if (!levelFoliage_.result().error.empty()) AVER_WARN("[Foliage] {}", levelFoliage_.result().error);
             }
             if (projectRenderPending_) applyProjectRenderSettings();
@@ -1338,7 +1338,7 @@ void SandboxApp::setupGpuSelfTests(Engine& e) {
 
 // The starting tool, and the camera framing (level, default or --cam).
 void SandboxApp::setInitialToolAndCamera() {
-    tool_ = initialTool_;
+    viewState_.tool_ = initialTool_;
     sel_ = 1;
     bool framedByLevel = false;
 #if AVER_MODULE_SCENE
@@ -1347,16 +1347,16 @@ void SandboxApp::setInitialToolAndCamera() {
     // Restored camera counts as framed (level can have CAMERA record with no placements).
     if (levelCameraRestored_) framedByLevel = true;
     if (!framedByLevel) {
-        camPos_ = Vec3{700.0f, 700.0f, 450.0f};
-        const Vec3 d = (Vec3{0,0,1} - camPos_).getSafeNormal();
-        yaw_ = std::atan2(d.y, d.x);
-        pitch_ = std::asin(d.z);
+        viewState_.camPos_ = Vec3{700.0f, 700.0f, 450.0f};
+        const Vec3 d = (Vec3{0,0,1} - viewState_.camPos_).getSafeNormal();
+        viewState_.yaw_ = std::atan2(d.y, d.x);
+        viewState_.pitch_ = std::asin(d.z);
     }
     // Apply --cam override last (outranks level framing and default).
     if (camOverride_) {
-        camPos_ = camPosOverride_;
-        pitch_  = pitchOverride_;
-        yaw_    = yawOverride_;
+        viewState_.camPos_ = camPosOverride_;
+        viewState_.pitch_  = pitchOverride_;
+        viewState_.yaw_    = yawOverride_;
     }
 }
 

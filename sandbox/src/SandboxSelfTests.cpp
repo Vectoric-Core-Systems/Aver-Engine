@@ -484,7 +484,7 @@ void SandboxApp::setViewMode(const std::string& mode) {
     }
     if (m == "lit" || m == "unlit" || m == "wireframe") {
         rset_.unlit_ = (m == "unlit");
-        wireframe_ = (m == "wireframe");
+        viewState_.wireframe_ = (m == "wireframe");
 #if AVER_MODULE_VOXI
         rset_.debugView_ = voxi::VoxiRenderer::ViewDebug::None;
 #endif
@@ -499,7 +499,7 @@ void SandboxApp::setViewMode(const std::string& mode) {
         else if (m == "light-count")       rset_.debugView_ = voxi::VoxiRenderer::ViewDebug::LightCount;
         else if (m == "many-lights-raw")   rset_.debugView_ = voxi::VoxiRenderer::ViewDebug::ManyLightsRaw;
         else                             rset_.debugView_ = voxi::VoxiRenderer::ViewDebug::Triangles;
-        wireframe_ = false;
+        viewState_.wireframe_ = false;
         rset_.gbufferDebugView_ = GBufferDebugFeature::Mode::Off;
 #else
         AVER_WARN("[Sandbox] --view-mode {} was given but this build has no Voxi module "
@@ -602,13 +602,13 @@ void SandboxApp::maybePieCameraTest() {
 
     // ---- phase 1: idle. Nothing touches anything; the view must not move. ----
     if (harness_.pieCamFrame_ == 11) {
-        harness_.pieCamRef_ = camPos_; harness_.pieCamRefYaw_ = yaw_; harness_.pieCamRefPitch_ = pitch_;
+        harness_.pieCamRef_ = viewState_.camPos_; harness_.pieCamRefYaw_ = viewState_.yaw_; harness_.pieCamRefPitch_ = viewState_.pitch_;
         return;
     }
     if (harness_.pieCamFrame_ < 40) {
-        harness_.pieCamMaxPos_   = std::fmax(harness_.pieCamMaxPos_,   (camPos_ - harness_.pieCamRef_).size());
-        harness_.pieCamMaxYaw_   = std::fmax(harness_.pieCamMaxYaw_,   std::fabs(yaw_   - harness_.pieCamRefYaw_));
-        harness_.pieCamMaxPitch_ = std::fmax(harness_.pieCamMaxPitch_, std::fabs(pitch_ - harness_.pieCamRefPitch_));
+        harness_.pieCamMaxPos_   = std::fmax(harness_.pieCamMaxPos_,   (viewState_.camPos_ - harness_.pieCamRef_).size());
+        harness_.pieCamMaxYaw_   = std::fmax(harness_.pieCamMaxYaw_,   std::fabs(viewState_.yaw_   - harness_.pieCamRefYaw_));
+        harness_.pieCamMaxPitch_ = std::fmax(harness_.pieCamMaxPitch_, std::fabs(viewState_.pitch_ - harness_.pieCamRefPitch_));
         return;
     }
 
@@ -617,9 +617,9 @@ void SandboxApp::maybePieCameraTest() {
     if (harness_.pieCamFrame_ == 41) return;                    // the look lands in the fly block here
     if (harness_.pieCamFrame_ == 42) {
         // Check if look survived the round-trip into the pawn and back.
-        harness_.pieCamKeptYaw_   = std::fabs(yaw_   - harness_.pieCamWantYaw_)   < 1e-3f;
-        harness_.pieCamKeptPitch_ = std::fabs(pitch_ - harness_.pieCamWantPitch_) < 1e-3f;
-        harness_.pieCamRef_ = camPos_;
+        harness_.pieCamKeptYaw_   = std::fabs(viewState_.yaw_   - harness_.pieCamWantYaw_)   < 1e-3f;
+        harness_.pieCamKeptPitch_ = std::fabs(viewState_.pitch_ - harness_.pieCamWantPitch_) < 1e-3f;
+        harness_.pieCamRef_ = viewState_.camPos_;
         return;
     }
 
@@ -628,22 +628,22 @@ void SandboxApp::maybePieCameraTest() {
     if (harness_.pieCamFrame_ >= 50 && harness_.pieCamFrame_ < 90) {
         io.AddKeyEvent(ImGuiKey_W, true);
         injectKey(input_, 'W', true);          // VK_W is the ASCII code; see InputKeys.hpp
-        if (harness_.pieCamFrame_ == 50) harness_.pieCamMoveFrom_ = camPos_;
+        if (harness_.pieCamFrame_ == 50) harness_.pieCamMoveFrom_ = viewState_.camPos_;
         return;
     }
     if (harness_.pieCamFrame_ == 90) {
         io.AddKeyEvent(ImGuiKey_W, false);
         injectKey(input_, 'W', false);
-        harness_.pieCamMoved_    = (camPos_ - harness_.pieCamMoveFrom_).size();
+        harness_.pieCamMoved_    = (viewState_.camPos_ - harness_.pieCamMoveFrom_).size();
         // Measure forward component only; gravity or stray impulse could register distance elsewhere.
-        const Vec3 d = (camPos_ - harness_.pieCamMoveFrom_).getSafeNormal();
+        const Vec3 d = (viewState_.camPos_ - harness_.pieCamMoveFrom_).getSafeNormal();
         harness_.pieCamMoveDot_  = dot(d, camForward());
         return;
     }
     // ---- phase 4: released, must coast to stop ----
-    if (harness_.pieCamFrame_ == 92) { harness_.pieCamAfterMove_ = camPos_; return; }
+    if (harness_.pieCamFrame_ == 92) { harness_.pieCamAfterMove_ = viewState_.camPos_; return; }
     if (harness_.pieCamFrame_ > 92)
-        harness_.pieCamCoast_ = std::fmax(harness_.pieCamCoast_, (camPos_ - harness_.pieCamAfterMove_).size());
+        harness_.pieCamCoast_ = std::fmax(harness_.pieCamCoast_, (viewState_.camPos_ - harness_.pieCamAfterMove_).size());
 
     if (harness_.pieCamFrame_ >= 92 + harness_.pieCamFrames_) {
         const bool idleOk  = harness_.pieCamMaxPos_ < 0.5f && harness_.pieCamMaxYaw_ < 1e-3f && harness_.pieCamMaxPitch_ < 1e-3f;
@@ -731,11 +731,11 @@ void SandboxApp::maybeWheelSpeedTest() {
     // Check if change happens when wheel arrives.
     if (input_.wheel() != 0.0f) {
         harness_.wheelTestOwnAtWheel_ = own_.keyboardToTool || own_.mouseToTool;
-        harness_.wheelTestFlyAtWheel_ = flying_;
+        harness_.wheelTestFlyAtWheel_ = viewState_.flying_;
     }
 
     if (harness_.wheelTestFrame_ == 5) {
-        harness_.wheelTestSpeedBefore_ = flySpeed_;
+        harness_.wheelTestSpeedBefore_ = viewState_.flySpeed_;
         // Force fly mode; test the wheel READ, not the gesture that opens it.
         harness_.wheelTestForceFly_ = true;
         return;
@@ -749,7 +749,7 @@ void SandboxApp::maybeWheelSpeedTest() {
     if (harness_.wheelTestFrame_ < 9) return;
 
     harness_.wheelTestForceFly_ = false;
-    const f32 after = flySpeed_;
+    const f32 after = viewState_.flySpeed_;
     const f32 want = harness_.wheelTestSpeedBefore_ * 1.25f;
     const bool moved = std::fabs(after - harness_.wheelTestSpeedBefore_) > 0.01f;
     const bool right = std::fabs(after - want) < std::fmax(1.0f, want * 0.02f);
@@ -805,7 +805,7 @@ void SandboxApp::maybeViewmodelTest() {
                           fwd.x * wup.y - fwd.y * wup.x}.getSafeNormal();
     const Vec3 up2{rgt.y * fwd.z - rgt.z * fwd.y, rgt.z * fwd.x - rgt.x * fwd.z,
                    rgt.x * fwd.y - rgt.y * fwd.x};
-    const Vec3 rel = gunPos - camPos_;
+    const Vec3 rel = gunPos - viewState_.camPos_;
     const Vec3 vs{rel.x * rgt.x + rel.y * rgt.y + rel.z * rgt.z,
                   rel.x * up2.x + rel.y * up2.y + rel.z * up2.z,
                   rel.x * fwd.x + rel.y * fwd.y + rel.z * fwd.z};
@@ -820,7 +820,7 @@ void SandboxApp::maybeViewmodelTest() {
     // ---- phase 2: turning, one steady look per frame ----
     if (harness_.vmFrame_ <= 25 + harness_.vmFrames_) { harness_.vmRef_ = vs; return; }
     ImGuiIO& io = ImGui::GetIO();
-    io.AddMousePosEvent(vpX_ + vpW_ * 0.5f + (f32)(harness_.vmFrame_ % 20) * 2.0f, vpY_ + vpH_ * 0.5f);
+    io.AddMousePosEvent(viewState_.vpX_ + viewState_.vpW_ * 0.5f + (f32)(harness_.vmFrame_ % 20) * 2.0f, viewState_.vpY_ + viewState_.vpH_ * 0.5f);
     harness_.vmMoving_ = std::fmax(harness_.vmMoving_, (vs - harness_.vmRef_).size());
 
     if (harness_.vmFrame_ >= 25 + harness_.vmFrames_ * 2) {
@@ -850,7 +850,7 @@ void SandboxApp::maybeRecaptureTest() {
 
     ImGuiIO& io = ImGui::GetIO();
     // Park pointer in viewport middle; recapture gates on inViewport().
-    io.AddMousePosEvent(vpX_ + vpW_ * 0.5f, vpY_ + vpH_ * 0.5f);
+    io.AddMousePosEvent(viewState_.vpX_ + viewState_.vpW_ * 0.5f, viewState_.vpY_ + viewState_.vpH_ * 0.5f);
 
     // Release to editor, then click back and hold (mimic the real gesture).
     if (harness_.recapFrame_ == 15) { releasedByUser_ = true; return; }
@@ -992,7 +992,7 @@ void SandboxApp::maybePlayTest(Engine& e) {
         if (shotPrefix && *shotPrefix && e.device()) {
             // One frame of lag is inherent to the capture: requested now, read a few frames later.
             if (harness_.playTestFrames_ == shotAt) {
-                e.device()->requestCapture(static_cast<u32>(vpX_ + vpW_ / 2), static_cast<u32>(vpY_ + vpH_ / 2));
+                e.device()->requestCapture(static_cast<u32>(viewState_.vpX_ + viewState_.vpW_ / 2), static_cast<u32>(viewState_.vpY_ + viewState_.vpH_ / 2));
                 harness_.playTestShotFrame_ = harness_.playTestFrames_;
             } else if (harness_.playTestShotFrame_ >= 0 && harness_.playTestFrames_ == harness_.playTestShotFrame_ + 3) {
                 std::vector<u8> img;
@@ -2551,15 +2551,15 @@ void SandboxApp::rayProbeCheck(Engine& e) {
     Vec3 ro{}, rd{};
     viewportRay(harness_.rayProbeX_, harness_.rayProbeY_, ro, rd);
     const Vec3 fwd = camForward();
-    const Vec3 d   = ro - eye_;
+    const Vec3 d   = ro - viewState_.eye_;
     const f32 along = d.x*fwd.x + d.y*fwd.y + d.z*fwd.z;
     f32 bx = 0.0f, by = 0.0f;
     const bool ok = project(ro + rd * 0.5f, bx, by);
     AVER_INFO("[RayProbe] screen ({:.1f},{:.1f}) viewport ({:.0f},{:.0f} {:.0f}x{:.0f}) "
               "eye ({:.2f},{:.2f},{:.2f}) origin ({:.2f},{:.2f},{:.2f}) "
               "aheadOfEye {:.4f} dir ({:.3f},{:.3f},{:.3f}) reproject {} ({:.1f},{:.1f})",
-              harness_.rayProbeX_, harness_.rayProbeY_, vpX_, vpY_, vpW_, vpH_,
-              eye_.x, eye_.y, eye_.z, ro.x, ro.y, ro.z, along,
+              harness_.rayProbeX_, harness_.rayProbeY_, viewState_.vpX_, viewState_.vpY_, viewState_.vpW_, viewState_.vpH_,
+              viewState_.eye_.x, viewState_.eye_.y, viewState_.eye_.z, ro.x, ro.y, ro.z, along,
               rd.x, rd.y, rd.z, ok ? "ok" : "BEHIND", bx, by);
 #else
     AVER_INFO("[RayProbe] this build has no editor viewport (AVER_WITH_IMGUI is off); nothing to probe");
@@ -2610,20 +2610,20 @@ void SandboxApp::captureCheck(Engine& e) {
     if (harness_.lumaSweep_ || harness_.fireflyMetric_) return;
     const u64 f = e.time().frame;
     const u64 sf = maxFrames_>8?maxFrames_-3:4;
-    const u32 px_ = harness_.probeU_ >= 0.0f ? (u32)(vpX_ + vpW_ * harness_.probeU_)
-                  : (harness_.probeX_ ? harness_.probeX_ : (u32)(vpX_ + vpW_*0.5f));
-    const u32 py_ = harness_.probeV_ >= 0.0f ? (u32)(vpY_ + vpH_ * harness_.probeV_)
-                  : (harness_.probeY_ ? harness_.probeY_ : (u32)(vpY_ + vpH_*0.5f));
+    const u32 px_ = harness_.probeU_ >= 0.0f ? (u32)(viewState_.vpX_ + viewState_.vpW_ * harness_.probeU_)
+                  : (harness_.probeX_ ? harness_.probeX_ : (u32)(viewState_.vpX_ + viewState_.vpW_*0.5f));
+    const u32 py_ = harness_.probeV_ >= 0.0f ? (u32)(viewState_.vpY_ + viewState_.vpH_ * harness_.probeV_)
+                  : (harness_.probeY_ ? harness_.probeY_ : (u32)(viewState_.vpY_ + viewState_.vpH_*0.5f));
     if (f==sf || mcpShotRequest_) {
         e.device()->requestCapture(px_, py_);
-        harness_.capX_=px_; harness_.capY_=py_; harness_.capVpX_=vpX_; harness_.capVpY_=vpY_; harness_.capVpW_=vpW_; harness_.capVpH_=vpH_;
+        harness_.capX_=px_; harness_.capY_=py_; harness_.capVpX_=viewState_.vpX_; harness_.capVpY_=viewState_.vpY_; harness_.capVpW_=viewState_.vpW_; harness_.capVpH_=viewState_.vpH_;
         harness_.capFrame_=f;
         mcpShotRequest_=false;
     }
     if (f>harness_.capFrame_ && !harness_.capDone_){
         const bool insideReq = (f32)harness_.capX_ >= harness_.capVpX_ && (f32)harness_.capX_ < harness_.capVpX_+harness_.capVpW_ &&
                                (f32)harness_.capY_ >= harness_.capVpY_ && (f32)harness_.capY_ < harness_.capVpY_+harness_.capVpH_;
-        const bool rectStable = harness_.capVpX_==vpX_ && harness_.capVpY_==vpY_ && harness_.capVpW_==vpW_ && harness_.capVpH_==vpH_;
+        const bool rectStable = harness_.capVpX_==viewState_.vpX_ && harness_.capVpY_==viewState_.vpY_ && harness_.capVpW_==viewState_.vpW_ && harness_.capVpH_==viewState_.vpH_;
         const char* tag = !insideReq ? "OUTSIDE-VIEWPORT"
                         : !rectStable ? "VIEWPORT-MOVED"
                                       : "in-viewport";
@@ -2639,7 +2639,7 @@ void SandboxApp::captureCheck(Engine& e) {
             else if (!rectStable)
                 AVER_WARN("[Sandbox] PROBE SUSPECT: the viewport moved to ({},{} {}x{}) after the "
                           "capture was requested -- re-run before trusting the value above",
-                          (int)vpX_, (int)vpY_, (int)vpW_, (int)vpH_);
+                          (int)viewState_.vpX_, (int)viewState_.vpY_, (int)viewState_.vpW_, (int)viewState_.vpH_);
         }
         if (!shot_.empty()){ std::vector<u8> img; u32 iw=0,ih=0;
             if (e.device()->getFrameImage(img,iw,ih)&&iw&&ih && stbi_write_png(shot_.c_str(),(int)iw,(int)ih,4,img.data(),(int)iw*4))
@@ -2777,10 +2777,10 @@ void SandboxApp::lumaSweepCheck(Engine& e) {
         harness_.lumaSweepPending_ = false;
     }
     if (!sampleThisFrame) return;
-    e.device()->requestCapture((u32)(vpX_ + vpW_ * 0.5f), (u32)(vpY_ + vpH_ * 0.5f));
-    harness_.lumaSweepVpX_ = vpX_; harness_.lumaSweepVpY_ = vpY_; harness_.lumaSweepVpW_ = vpW_; harness_.lumaSweepVpH_ = vpH_;
+    e.device()->requestCapture((u32)(viewState_.vpX_ + viewState_.vpW_ * 0.5f), (u32)(viewState_.vpY_ + viewState_.vpH_ * 0.5f));
+    harness_.lumaSweepVpX_ = viewState_.vpX_; harness_.lumaSweepVpY_ = viewState_.vpY_; harness_.lumaSweepVpW_ = viewState_.vpW_; harness_.lumaSweepVpH_ = viewState_.vpH_;
     harness_.lumaSweepFrame_ = e.time().frame;
-    harness_.lumaSweepYaw_ = yaw_;   // THIS tick's angle, for THIS tick's image.
+    harness_.lumaSweepYaw_ = viewState_.yaw_;   // THIS tick's angle, for THIS tick's image.
     harness_.lumaSweepPending_ = true;
 }
 

@@ -319,7 +319,7 @@ void SandboxApp::startPlay() {
 #endif
     // And the editor's view, for storeLevelView: leaving the level mid-session must remember where
     // the editor camera was, not the pawn's eye the session is driving it from.
-    play_.preplayView_ = editor::LevelView{camPos_.x, camPos_.y, camPos_.z, degrees(yaw_), degrees(pitch_), flySpeed_};
+    play_.preplayView_ = editor::LevelView{viewState_.camPos_.x, viewState_.camPos_.y, viewState_.camPos_.z, degrees(viewState_.yaw_), degrees(viewState_.pitch_), viewState_.flySpeed_};
     play_.preplayViewValid_ = true;
 
     // TERRAIN COLLISION, BEFORE A SINGLE PAWN EXISTS TO FALL THROUGH IT.
@@ -422,13 +422,13 @@ void SandboxApp::startPlay() {
                 // level-headed, and startDefaultPawnWalk(false) reads that back as its feet and yaw;
                 // a flyer is a camera, so it hovers one standing eye height above the feet and keeps
                 // the pitch the editor camera had.
-                if (play_.defaultPawnWalk_) placeDefaultPawnAtCamera(*fromHere, yaw_, 0.0f);
-                else placeDefaultPawnAtCamera(*fromHere + Vec3{0.0f, 0.0f, kWalkEye}, yaw_, pitch_);
+                if (play_.defaultPawnWalk_) placeDefaultPawnAtCamera(*fromHere, viewState_.yaw_, 0.0f);
+                else placeDefaultPawnAtCamera(*fromHere + Vec3{0.0f, 0.0f, kWalkEye}, viewState_.yaw_, viewState_.pitch_);
                 atCamera = false;
             } else if (atCamera)
-                placeDefaultPawnAtCamera(camPos_, yaw_, pitch_);
+                placeDefaultPawnAtCamera(viewState_.camPos_, viewState_.yaw_, viewState_.pitch_);
             else if (!placePawnAtPlayerStart("the engine's default pawn")) {
-                placeDefaultPawnAtCamera(camPos_, yaw_, pitch_);
+                placeDefaultPawnAtCamera(viewState_.camPos_, viewState_.yaw_, viewState_.pitch_);
                 atCamera = true;
             } else if (!play_.defaultPawnWalk_) {
                 raiseFlyingPawnToEye();
@@ -466,16 +466,16 @@ void SandboxApp::startPlay() {
         // then falls to the floor.
         if (fromHere) {
             // Play From Here: the pawn's origin is its feet, exactly as at a Player Start.
-            if (game::placePossessedPawn(*fromHere, degrees(yaw_)))
+            if (game::placePossessedPawn(*fromHere, degrees(viewState_.yaw_)))
                 AVER_INFO("[Sandbox] Play: {} spawned from here ({:.0f}, {:.0f}, {:.0f}) yaw {:.0f}",
-                          aver_fw_class_name(gm), fromHere->x, fromHere->y, fromHere->z, degrees(yaw_));
+                          aver_fw_class_name(gm), fromHere->x, fromHere->y, fromHere->z, degrees(viewState_.yaw_));
             else
                 AVER_WARN("[Sandbox] Play From Here: {} possessed no pawn to place; it stays where the "
                           "GameMode put it", aver_fw_class_name(gm));
         } else if (play_.playSpawnAt_ == PlaySpawnAt::CameraLocation) {
-            if (game::placePossessedPawn(camPos_, degrees(yaw_)))
+            if (game::placePossessedPawn(viewState_.camPos_, degrees(viewState_.yaw_)))
                 AVER_INFO("[Sandbox] Play: {} spawned at the camera ({:.0f}, {:.0f}, {:.0f}) yaw {:.0f}",
-                          aver_fw_class_name(gm), camPos_.x, camPos_.y, camPos_.z, degrees(yaw_));
+                          aver_fw_class_name(gm), viewState_.camPos_.x, viewState_.camPos_.y, viewState_.camPos_.z, degrees(viewState_.yaw_));
         } else {
             placePawnAtPlayerStart(aver_fw_class_name(gm));
         }
@@ -507,8 +507,8 @@ void SandboxApp::startDefaultPawnWalk(bool fromCamera) {
     if (fromCamera) feet.z -= kWalkEye;
     else {                                     // a Player Start's facing becomes the view's, level head
         const Vec3 f = pw.localTransform(pe).rotation.rotate(Vec3{1, 0, 0});
-        if (f.x * f.x + f.y * f.y > 1e-6f) yaw_ = std::atan2(f.y, f.x);
-        pitch_ = 0.0f;
+        if (f.x * f.x + f.y * f.y > 1e-6f) viewState_.yaw_ = std::atan2(f.y, f.x);
+        viewState_.pitch_ = 0.0f;
     }
     play_.walkCapsule_ = aver_phys_character_create(kWalkRadius, kWalkHeight, feet.x, feet.y, feet.z + kWalkHeight * 0.5f);
     if (!play_.walkCapsule_) {
@@ -516,7 +516,7 @@ void SandboxApp::startDefaultPawnWalk(bool fromCamera) {
         return;
     }
     pw.setLocalPosition(pe, feet);
-    pw.setLocalRotation(pe, Quat::fromAxisAngle(Vec3{0, 0, 1}, yaw_) * Quat::fromAxisAngle(Vec3{0, 1, 0}, -pitch_));
+    pw.setLocalRotation(pe, Quat::fromAxisAngle(Vec3{0, 0, 1}, viewState_.yaw_) * Quat::fromAxisAngle(Vec3{0, 1, 0}, -viewState_.pitch_));
     aver_fw_set_view(AVER_FW_VIEW_FIRST_PERSON, kWalkEye, 0.0f);
     AVER_INFO("[Sandbox] Play: the default pawn WALKS (capsule {:.0f} x {:.0f} cm, eye {:.0f} cm) from ({:.0f}, {:.0f}, {:.0f})",
               kWalkRadius, kWalkHeight, kWalkEye, feet.x, feet.y, feet.z);
@@ -561,7 +561,7 @@ void SandboxApp::driveDefaultPawnWalk(const Vec3& fwd, const Vec3& right) {
     float p[3];
     if (aver_phys_character_position(play_.walkCapsule_, p) != 0)
         pw.setLocalPosition(pe, Vec3{p[0], p[1], p[2] - kWalkHeight * 0.5f});
-    pw.setLocalRotation(pe, Quat::fromAxisAngle(Vec3{0, 0, 1}, yaw_) * Quat::fromAxisAngle(Vec3{0, 1, 0}, -pitch_));
+    pw.setLocalRotation(pe, Quat::fromAxisAngle(Vec3{0, 0, 1}, viewState_.yaw_) * Quat::fromAxisAngle(Vec3{0, 1, 0}, -viewState_.pitch_));
 #else
     (void)fwd; (void)right;
 #endif
@@ -616,7 +616,7 @@ void SandboxApp::driveDefaultPawnFly(const Vec3& velocity, f32 dt) {
     if (!pw.valid(pe)) return;
     float p[3];
     if (aver_phys_character_position(play_.flyCapsule_, p) != 0) pw.setLocalPosition(pe, Vec3{p[0], p[1], p[2]});
-    pw.setLocalRotation(pe, Quat::fromAxisAngle(Vec3{0, 0, 1}, yaw_) * Quat::fromAxisAngle(Vec3{0, 1, 0}, -pitch_));
+    pw.setLocalRotation(pe, Quat::fromAxisAngle(Vec3{0, 0, 1}, viewState_.yaw_) * Quat::fromAxisAngle(Vec3{0, 1, 0}, -viewState_.pitch_));
 #else
     (void)velocity; (void)dt;
 #endif
@@ -812,7 +812,7 @@ void SandboxApp::reloadAfterPlay(Engine& eng) {
     const std::string keepPath = play_.pieTravelled_ ? play_.pieEditedLevelPath_ : levelPath_;
     const std::string path = keepPath.empty() ? snapshot : keepPath;
     levelPath_ = keepPath;   // before the load too, so the view unloadLevel stores is the edited level's
-    const Vec3 cam = camPos_; const f32 yaw = yaw_, pitch = pitch_, speed = flySpeed_;
+    const Vec3 cam = viewState_.camPos_; const f32 yaw = viewState_.yaw_, pitch = viewState_.pitch_, speed = viewState_.flySpeed_;
     const world::OriginCm camOrigin = origin_.origin();   // the camera is origin-relative; the reload resets the origin
     const bool wasUnsaved = play_.pieWasUnsaved_;
     projectLoading_ = std::make_unique<LoadingScreen>(
@@ -829,11 +829,11 @@ void SandboxApp::reloadAfterPlay(Engine& eng) {
 #endif
         spawnClassPlacements();
     levelPath_ = keepPath;
-    camPos_ = cam; yaw_ = yaw; pitch_ = pitch; flySpeed_ = speed;
+    viewState_.camPos_ = cam; viewState_.yaw_ = yaw; viewState_.pitch_ = pitch; viewState_.flySpeed_ = speed;
     {
         const world::OriginCm now = origin_.origin();
-        camPos_.x += static_cast<f32>(static_cast<f64>(camOrigin.x) - static_cast<f64>(now.x));
-        camPos_.y += static_cast<f32>(static_cast<f64>(camOrigin.y) - static_cast<f64>(now.y));
+        viewState_.camPos_.x += static_cast<f32>(static_cast<f64>(camOrigin.x) - static_cast<f64>(now.x));
+        viewState_.camPos_.y += static_cast<f32>(static_cast<f64>(camOrigin.y) - static_cast<f64>(now.y));
     }
     if (wasUnsaved) markLevelUnsaved();
     std::error_code ec;
@@ -851,8 +851,8 @@ void SandboxApp::raiseFlyingPawnToEye() {
     if (!pn || !pw.valid(pe)) return;
     const Transform& t = pw.localTransform(pe);
     const Vec3 f = t.rotation.rotate(Vec3{1, 0, 0});
-    if (f.x * f.x + f.y * f.y > 1e-6f) { yaw_ = std::atan2(f.y, f.x); pitch_ = 0.0f; }
-    placeDefaultPawnAtCamera(t.position + Vec3{0.0f, 0.0f, kWalkEye}, yaw_, pitch_);
+    if (f.x * f.x + f.y * f.y > 1e-6f) { viewState_.yaw_ = std::atan2(f.y, f.x); viewState_.pitch_ = 0.0f; }
+    placeDefaultPawnAtCamera(t.position + Vec3{0.0f, 0.0f, kWalkEye}, viewState_.yaw_, viewState_.pitch_);
 }
 
 // LEVEL TRAVEL IN PLAY, the way the packaged game runs it (GameApp::travelTo): the session's actors end (the
@@ -932,7 +932,7 @@ void SandboxApp::travelDuringPlay(Engine& eng, const std::string& requested) {
     }
     bool atCamera = false;
     if (!placePawnAtPlayerStart("the engine's default pawn")) {
-        placeDefaultPawnAtCamera(camPos_, yaw_, pitch_);
+        placeDefaultPawnAtCamera(viewState_.camPos_, viewState_.yaw_, viewState_.pitch_);
         atCamera = true;
     } else if (!play_.defaultPawnWalk_) {
         raiseFlyingPawnToEye();
@@ -1063,7 +1063,7 @@ void SandboxApp::drivePlayCamera(f32 dt) {
     // Camera rigs run during a Play session only; authoring and the free-fly camera keep the default projection.
     if (!playSessionActive()) {
         playView_ = game::PlayView{};
-        firstPersonPawn_ = game::drivePlayCamera(camPos_, yaw_, pitch_, standIn);
+        firstPersonPawn_ = game::drivePlayCamera(viewState_.camPos_, viewState_.yaw_, viewState_.pitch_, standIn);
         return;
     }
     // The sequencer's camera goes to the rig system as the external pose: when it lets go the rig blends back from it.
@@ -1075,7 +1075,7 @@ void SandboxApp::drivePlayCamera(f32 dt) {
         external.yaw = sp.yaw;
         external.pitch = sp.pitch;
     }
-    firstPersonPawn_ = game::drivePlayCamera(camPos_, yaw_, pitch_, playView_, dt, standIn, &external);
+    firstPersonPawn_ = game::drivePlayCamera(viewState_.camPos_, viewState_.yaw_, viewState_.pitch_, playView_, dt, standIn, &external);
     if (playView_.cut) streaming_.resetVelocityTracking();   // a teleport, not a fast move
 }
 
@@ -1180,13 +1180,13 @@ void SandboxApp::tickSequencePost() { seqEditor_.tickPost(); }
 #endif
 
 // Aspect comes from the viewport rect (the dockspace's central node), not the whole window.
-f32 SandboxApp::viewAspect() const { return vpH_ > 0.5f ? vpW_ / vpH_ : 1.777f; }
+f32 SandboxApp::viewAspect() const { return viewState_.vpH_ > 0.5f ? viewState_.vpW_ / viewState_.vpH_ : 1.777f; }
 
-bool SandboxApp::inViewport(f32 mx, f32 my) const { return mx >= vpX_ && mx < vpX_+vpW_ && my >= vpY_ && my < vpY_+vpH_; }
+bool SandboxApp::inViewport(f32 mx, f32 my) const { return mx >= viewState_.vpX_ && mx < viewState_.vpX_+viewState_.vpW_ && my >= viewState_.vpY_ && my < viewState_.vpY_+viewState_.vpH_; }
 
 // The camera's forward axis, built from yaw and pitch.
 Vec3 SandboxApp::camForward() const {
-    return game::cameraForward(yaw_, pitch_);
+    return game::cameraForward(viewState_.yaw_, viewState_.pitch_);
 }
 
 #if AVER_MODULE_SCRIPTING
@@ -1299,8 +1299,8 @@ void SandboxApp::openPlayWindow(Engine& e) {
     const f32 dpi = window_->dpiScale() > 0.0f ? window_->dpiScale() : 1.0f;
     WindowDesc d;
     d.title = "Aver Engine - Play (Esc to stop)";
-    d.width  = static_cast<u32>(std::fmax(320.0f, vpW_) / dpi);   // logical; create() applies the DPI
-    d.height = static_cast<u32>(std::fmax(180.0f, vpH_) / dpi);
+    d.width  = static_cast<u32>(std::fmax(320.0f, viewState_.vpW_) / dpi);   // logical; create() applies the DPI
+    d.height = static_cast<u32>(std::fmax(180.0f, viewState_.vpH_) / dpi);
     d.quitOnDestroy = false;
     auto w = std::make_unique<Window>();
     if (!w->create(d)) {
@@ -1346,10 +1346,10 @@ void SandboxApp::updatePlayWindow(Engine& e) {
             play_.playWindowH_ = ph;
         }
     }
-    vpX_ = 0.0f;
-    vpY_ = 0.0f;
-    vpW_ = static_cast<f32>(play_.playWindowW_);
-    vpH_ = static_cast<f32>(play_.playWindowH_);
+    viewState_.vpX_ = 0.0f;
+    viewState_.vpY_ = 0.0f;
+    viewState_.vpW_ = static_cast<f32>(play_.playWindowW_);
+    viewState_.vpH_ = static_cast<f32>(play_.playWindowH_);
 }
 
 // True while a game is playing, in a build with or without the framework.
@@ -1405,7 +1405,7 @@ void SandboxApp::playFromHere(const Vec3& surface) {
     if (anyPlayActive()) return;
     play_.playFromHere_ = surface + Vec3{0.0f, 0.0f, kPlayFromHereLiftCm};
     AVER_INFO("[Sandbox] Play: from here ({:.0f}, {:.0f}, {:.0f}), yaw {:.0f}",
-              play_.playFromHere_->x, play_.playFromHere_->y, play_.playFromHere_->z, degrees(yaw_));
+              play_.playFromHere_->x, play_.playFromHere_->y, play_.playFromHere_->z, degrees(viewState_.yaw_));
     startPlay();
     play_.playFromHere_.reset();   // startPlay already took it; this only matters if it ever returns before doing so
 #else
@@ -1455,17 +1455,17 @@ void SandboxApp::teleportPawnToCamera() {
         return;
     }
 
-    Vec3 feet = camPos_;
+    Vec3 feet = viewState_.camPos_;
     const char* what = "the flying default pawn, at the camera itself";
     if (play_.defaultPawnPlay_ && !play_.walkCapsule_) {
 #if AVER_MODULE_PHYSICS
         if (play_.flyCapsule_) {
             what = "the flying default pawn and its collider, at the camera itself";
-            aver_phys_character_set_position(play_.flyCapsule_, camPos_.x, camPos_.y, camPos_.z);
+            aver_phys_character_set_position(play_.flyCapsule_, viewState_.camPos_.x, viewState_.camPos_.y, viewState_.camPos_.z);
             aver_phys_character_set_velocity(play_.flyCapsule_, 0.0f, 0.0f, 0.0f);
         }
 #endif
-        placeDefaultPawnAtCamera(camPos_, yaw_, pitch_);
+        placeDefaultPawnAtCamera(viewState_.camPos_, viewState_.yaw_, viewState_.pitch_);
     } else if (play_.defaultPawnPlay_) {
         what = "the walking default pawn and its capsule";
         f32 ownFeetZ = -FLT_MAX;
@@ -1473,7 +1473,7 @@ void SandboxApp::teleportPawnToCamera() {
         float wp[3];
         if (aver_phys_character_position(play_.walkCapsule_, wp) != 0) ownFeetZ = wp[2] - kWalkHeight * 0.5f;
 #endif
-        feet = feetBelowCamera(camPos_, kWalkEye, play_.walkCapsule_, ownFeetZ);
+        feet = feetBelowCamera(viewState_.camPos_, kWalkEye, play_.walkCapsule_, ownFeetZ);
 #if AVER_MODULE_PHYSICS
         aver_phys_character_set_position(play_.walkCapsule_, feet.x, feet.y, feet.z + kWalkHeight * 0.5f);
         // Stopped dead: a capsule keeps the last velocity it was given for as long as nothing drives
@@ -1482,7 +1482,7 @@ void SandboxApp::teleportPawnToCamera() {
 #endif
         // The same two writes driveDefaultPawnWalk makes once possessed, so the pawn is already
         // where and how that function will next put it.
-        placeDefaultPawnAtCamera(feet, yaw_, pitch_);
+        placeDefaultPawnAtCamera(feet, viewState_.yaw_, viewState_.pitch_);
     } else {
         what = "the pawn";
         // The eye height the game camera itself puts this pawn's view at (aver_fw_view: what a
@@ -1504,7 +1504,7 @@ void SandboxApp::teleportPawnToCamera() {
         // this cannot see, so the log says which case it was rather than claiming success either way.
         if (!self) what = "the pawn (no physics capsule or body found for it: if its own script positions it, the move will not stay)";
 #endif
-        feet = feetBelowCamera(camPos_, eye, self, ownFeetZ);
+        feet = feetBelowCamera(viewState_.camPos_, eye, self, ownFeetZ);
 #if AVER_MODULE_PHYSICS
         if (capsule) {
             what = "the pawn and its character capsule";
@@ -1517,24 +1517,24 @@ void SandboxApp::teleportPawnToCamera() {
             // built at its entity's own position (PhysicsSceneSync.cpp), so it goes to the same
             // point, upright and at rest, facing the camera's yaw.
             what = "the pawn and its rigid body";
-            const Quat q = Quat::fromAxisAngle(Vec3{0, 0, 1}, yaw_);
+            const Quat q = Quat::fromAxisAngle(Vec3{0, 0, 1}, viewState_.yaw_);
             aver_phys_body_set_position(body, feet.x, feet.y, feet.z);
             aver_phys_body_set_rotation(body, q.x, q.y, q.z, q.w);
             aver_phys_body_set_velocity(body, 0.0f, 0.0f, 0.0f);
             aver_phys_body_set_angular_velocity(body, 0.0f, 0.0f, 0.0f);
         }
 #endif
-        game::placePossessedPawn(feet, degrees(yaw_));
+        game::placePossessedPawn(feet, degrees(viewState_.yaw_));
         // The pitch, on the pawn's head: the view node it publishes, when that node really hangs off
         // this pawn (the published id is process-wide and can outlive whoever set it). Written the way
         // Character.ApplyLookRotation writes it, Rot(0, -pitch, 0), which Drive then reads back.
         const int32_t vn = aver_fw_view_entity();
         const scene::Entity ve = static_cast<scene::Entity>(static_cast<uint32_t>(vn));
         if (vn && pw.valid(ve) && pw.parent(ve) == pe)
-            pw.setLocalRotation(ve, Quat::fromAxisAngle(Vec3{0, 1, 0}, -pitch_));
+            pw.setLocalRotation(ve, Quat::fromAxisAngle(Vec3{0, 1, 0}, -viewState_.pitch_));
     }
     AVER_INFO("[Sandbox] Pawn to Camera: moved {} to ({:.0f}, {:.0f}, {:.0f}) yaw {:.0f}", what,
-              feet.x, feet.y, feet.z, degrees(yaw_));
+              feet.x, feet.y, feet.z, degrees(viewState_.yaw_));
 #if AVER_WITH_IMGUI
     // Named only when it has a chord: a cleared binding would read "none possesses it there".
     const editor::Chord& eject = keybinds_.chordFor(editor::CommandId::PlayEject);

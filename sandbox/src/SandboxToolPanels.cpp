@@ -128,10 +128,10 @@ void SandboxApp::buildMessageLogPanel() {
     }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Clears the shared log buffer (the Output Log drawer too).");
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(100.0f * dpi_);
+    ImGui::SetNextItemWidth(100.0f * viewState_.dpi_);
     ImGui::Combo("##msgLevel", &msgLogLevel_, "All\0Info+\0Warn+\0Error+\0Critical+\0");
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(130.0f * dpi_);
+    ImGui::SetNextItemWidth(130.0f * viewState_.dpi_);
     if (ImGui::BeginCombo("##msgCat", msgLogCategory_.empty() ? "All categories" : msgLogCategory_.c_str())) {
         if (ImGui::Selectable("All categories", msgLogCategory_.empty())) msgLogCategory_.clear();
         for (const std::string& c : categories)

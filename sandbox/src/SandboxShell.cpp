@@ -23,7 +23,7 @@ void SandboxApp::resetPlayProfile(bool playStarting) {
 // Finds files that name the asset. On-demand scan; text formats only (misses runtime references).
 void SandboxApp::buildReferencesPanel() {
     if (!showReferences_) return;
-    ImGui::SetNextWindowSize(ImVec2(520.0f * dpi_, 320.0f * dpi_), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(520.0f * viewState_.dpi_, 320.0f * viewState_.dpi_), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("References", &showReferences_)) { ImGui::End(); return; }
 
     if (!refPanelScanned_) {
@@ -66,7 +66,7 @@ void SandboxApp::buildReferencesPanel() {
 // NeuraFI: frame interpolation overlay. NeuRaC: radiance cache (painted via rcDebugColour).
 void SandboxApp::buildNeuralVisualiserPanel(Engine& e) {
     if (!showNeuralViz_) return;
-    ImGui::SetNextWindowSize(ImVec2(470.0f * dpi_, 430.0f * dpi_), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(470.0f * viewState_.dpi_, 430.0f * viewState_.dpi_), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("Neural Visualiser", &showNeuralViz_)) { ImGui::End(); return; }
     rhi::IDevice* dev = e.device();
 
@@ -160,7 +160,7 @@ void SandboxApp::buildNeuralVisualiserPanel(Engine& e) {
 // Frame time, CPU phases (Play), scene walk, Voxi accel-struct loop, and per-pass GPU table.
 void SandboxApp::buildProfilerPanel(Engine& e) {
     if (!showProfiler_) return;
-    ImGui::SetNextWindowSize(ImVec2(560.0f * dpi_, 540.0f * dpi_), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(560.0f * viewState_.dpi_, 540.0f * viewState_.dpi_), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("GPU Profiler", &showProfiler_)) { ImGui::End(); return; }
 
 #if AVER_MODULE_FRAMEWORK
@@ -202,9 +202,9 @@ void SandboxApp::buildProfilerPanel(Engine& e) {
                                 static_cast<unsigned long long>(playProf_.playFrames()));
             if (ImGui::BeginTable("##cpuphases", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV)) {
                 ImGui::TableSetupColumn("Phase", ImGuiTableColumnFlags_WidthStretch);
-                ImGui::TableSetupColumn("avg ms", ImGuiTableColumnFlags_WidthFixed, 70.0f * dpi_);
-                ImGui::TableSetupColumn("worst ms", ImGuiTableColumnFlags_WidthFixed, 70.0f * dpi_);
-                ImGui::TableSetupColumn("% frame", ImGuiTableColumnFlags_WidthFixed, 60.0f * dpi_);
+                ImGui::TableSetupColumn("avg ms", ImGuiTableColumnFlags_WidthFixed, 70.0f * viewState_.dpi_);
+                ImGui::TableSetupColumn("worst ms", ImGuiTableColumnFlags_WidthFixed, 70.0f * viewState_.dpi_);
+                ImGui::TableSetupColumn("% frame", ImGuiTableColumnFlags_WidthFixed, 60.0f * viewState_.dpi_);
                 ImGui::TableHeadersRow();
                 f64 timedMs = 0.0;
                 for (usize i = 0; i < editor::kPlayPhaseCount; ++i) {
@@ -248,17 +248,17 @@ void SandboxApp::buildProfilerPanel(Engine& e) {
             const usize overheadIdx = static_cast<usize>(CpuSpan::TimingOverhead);
             if (ImGui::BeginTable("##cpuwalk", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV)) {
                 ImGui::TableSetupColumn("Span", ImGuiTableColumnFlags_WidthStretch);
-                ImGui::TableSetupColumn("ms / walk", ImGuiTableColumnFlags_WidthFixed, 80.0f * dpi_);
-                ImGui::TableSetupColumn("calls / walk", ImGuiTableColumnFlags_WidthFixed, 90.0f * dpi_);
+                ImGui::TableSetupColumn("ms / walk", ImGuiTableColumnFlags_WidthFixed, 80.0f * viewState_.dpi_);
+                ImGui::TableSetupColumn("calls / walk", ImGuiTableColumnFlags_WidthFixed, 90.0f * viewState_.dpi_);
                 ImGui::TableHeadersRow();
                 for (usize i = 0; i < w.nodes.size(); ++i) {
                     if (i == overheadIdx) continue;   // footnote below: see CpuTimingFormat.hpp
                     const CpuTimingNode& n = w.nodes[i];
                     ImGui::TableNextRow();
                     ImGui::TableSetColumnIndex(0);
-                    if (i != walkIdx) ImGui::Indent(14.0f * dpi_);
+                    if (i != walkIdx) ImGui::Indent(14.0f * viewState_.dpi_);
                     ImGui::TextUnformatted(n.label);
-                    if (i != walkIdx) ImGui::Unindent(14.0f * dpi_);
+                    if (i != walkIdx) ImGui::Unindent(14.0f * viewState_.dpi_);
                     ImGui::TableSetColumnIndex(1); ImGui::Text("%.2f", n.ms * perWalk);
                     ImGui::TableSetColumnIndex(2);
                     if (i == walkIdx) ImGui::TextDisabled("-");
@@ -279,7 +279,7 @@ void SandboxApp::buildProfilerPanel(Engine& e) {
     }
 
 #if AVER_MODULE_PHYSICS
-    editor::drawPhysicsProfileSection(dpi_);   // the "Physics (Jolt)" header: stats line and the scope tree
+    editor::drawPhysicsProfileSection(viewState_.dpi_);   // the "Physics (Jolt)" header: stats line and the scope tree
 #endif
     // ---- GPU passes ----
     if (!::aver::editor::sectionHeader("GPU passes", ImGuiTreeNodeFlags_DefaultOpen)) { ImGui::End(); return; }
@@ -319,11 +319,11 @@ void SandboxApp::buildProfilerPanel(Engine& e) {
     if (ImGui::BeginTable("##passes", 4,
                           ImGuiTableFlags_Resizable | ImGuiTableFlags_RowBg |
                           ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_ScrollY,
-                          ImVec2(0.0f, std::fmax(ImGui::GetContentRegionAvail().y, 160.0f * dpi_)))) {
+                          ImVec2(0.0f, std::fmax(ImGui::GetContentRegionAvail().y, 160.0f * viewState_.dpi_)))) {
         ImGui::TableSetupColumn("Pass", ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn("incl ms", ImGuiTableColumnFlags_WidthFixed, 70.0f * dpi_);
-        ImGui::TableSetupColumn("excl ms", ImGuiTableColumnFlags_WidthFixed, 70.0f * dpi_);
-        ImGui::TableSetupColumn("% GPU",   ImGuiTableColumnFlags_WidthFixed, 60.0f * dpi_);
+        ImGui::TableSetupColumn("incl ms", ImGuiTableColumnFlags_WidthFixed, 70.0f * viewState_.dpi_);
+        ImGui::TableSetupColumn("excl ms", ImGuiTableColumnFlags_WidthFixed, 70.0f * viewState_.dpi_);
+        ImGui::TableSetupColumn("% GPU",   ImGuiTableColumnFlags_WidthFixed, 60.0f * viewState_.dpi_);
         ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableHeadersRow();
 
@@ -337,9 +337,9 @@ void SandboxApp::buildProfilerPanel(Engine& e) {
             const f64 excl = n.ms - childSum[i];
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
-            if (depth * 14.0f * dpi_ > 0.0f) ImGui::Indent(depth * 14.0f * dpi_);   // Indent(0) would apply the default indent
+            if (depth * 14.0f * viewState_.dpi_ > 0.0f) ImGui::Indent(depth * 14.0f * viewState_.dpi_);   // Indent(0) would apply the default indent
             ImGui::TextUnformatted(n.label.c_str());
-            if (depth * 14.0f * dpi_ > 0.0f) ImGui::Unindent(depth * 14.0f * dpi_);
+            if (depth * 14.0f * viewState_.dpi_ > 0.0f) ImGui::Unindent(depth * 14.0f * viewState_.dpi_);
             ImGui::TableSetColumnIndex(1); ImGui::Text("%.2f", n.ms);
             ImGui::TableSetColumnIndex(2);
             const f64 frac = total > 0.0 ? (excl / total) : 0.0;
@@ -658,7 +658,7 @@ ImU32 SandboxApp::rcStatusColour(editor::FileStatus s) {
 // Window > Revision Control: what git says about the open project, and nothing that can change it.
 void SandboxApp::buildRevisionControlPanel() {
     if (!showRevisionControl_) return;
-    ImGui::SetNextWindowSize(ImVec2(680.0f * dpi_, 480.0f * dpi_), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(680.0f * viewState_.dpi_, 480.0f * viewState_.dpi_), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("Revision Control", &showRevisionControl_)) { ImGui::End(); return; }
 
     if (!project_.valid()) {
@@ -748,8 +748,8 @@ void SandboxApp::buildRevisionControlPanel() {
                                  ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
                                  ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_Resizable,
                                  ImVec2(0.0f, listH))) {
-        ImGui::TableSetupColumn("XY",     ImGuiTableColumnFlags_WidthFixed, 34.0f * dpi_);
-        ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed, 96.0f * dpi_);
+        ImGui::TableSetupColumn("XY",     ImGuiTableColumnFlags_WidthFixed, 34.0f * viewState_.dpi_);
+        ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed, 96.0f * viewState_.dpi_);
         ImGui::TableSetupColumn("Path",   ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableHeadersRow();
@@ -807,8 +807,8 @@ void SandboxApp::buildRevisionControlPanel() {
             } else if (ImGui::BeginTable("##rcLog", 3,
                                          ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
                                          ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_Resizable)) {
-                ImGui::TableSetupColumn("Commit", ImGuiTableColumnFlags_WidthFixed, 78.0f * dpi_);
-                ImGui::TableSetupColumn("When",   ImGuiTableColumnFlags_WidthFixed, 96.0f * dpi_);
+                ImGui::TableSetupColumn("Commit", ImGuiTableColumnFlags_WidthFixed, 78.0f * viewState_.dpi_);
+                ImGui::TableSetupColumn("When",   ImGuiTableColumnFlags_WidthFixed, 96.0f * viewState_.dpi_);
                 ImGui::TableSetupColumn("Subject", ImGuiTableColumnFlags_WidthStretch);
                 ImGui::TableSetupScrollFreeze(0, 1);
                 ImGui::TableHeadersRow();
@@ -992,14 +992,14 @@ void SandboxApp::setHudPreview(int index, f32 x, f32 y, f32 w, f32 h) {
 #if AVER_WITH_IMGUI
 // Draws a button with a drop-down triangle. Returns true when clicked.
 bool SandboxApp::dropButton(const char* label) {
-    const f32 extra = 16.0f*dpi_;
+    const f32 extra = 16.0f*viewState_.dpi_;
     const ImVec2 ts = ImGui::CalcTextSize(label);
     // The label sits left with the arrow in its own space; centred in the whole box it ran into the arrow.
     ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.0f, 0.5f));
     const bool clicked = ImGui::Button(label, ImVec2(ts.x + ImGui::GetStyle().FramePadding.x*2 + extra, 0));
     ImGui::PopStyleVar();
     const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
-    const f32 cx = mx.x - extra*0.5f - 2.0f*dpi_, cy = (mn.y+mx.y)*0.5f, s = 3.0f*dpi_;
+    const f32 cx = mx.x - extra*0.5f - 2.0f*viewState_.dpi_, cy = (mn.y+mx.y)*0.5f, s = 3.0f*viewState_.dpi_;
     ImGui::GetWindowDrawList()->AddTriangleFilled(
         ImVec2(cx-s,cy-s*0.55f), ImVec2(cx+s,cy-s*0.55f), ImVec2(cx,cy+s*0.8f), ImGui::GetColorU32(ImGuiCol_Text));
     return clicked;
@@ -1089,13 +1089,13 @@ void SandboxApp::drawAboutPrompt(Engine& e) {
     if (!ImGui::IsPopupOpen(kTitle)) ImGui::OpenPopup(kTitle);
     const ImVec2 centre = ImGui::GetMainViewport()->GetCenter();
     ImGui::SetNextWindowPos(centre, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(460.0f * dpi_, 0.0f), ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize(ImVec2(460.0f * viewState_.dpi_, 0.0f), ImGuiCond_Appearing);
     if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
 
     if (logoUiId_) {
-        const f32 h = 56.0f * dpi_;
+        const f32 h = 56.0f * viewState_.dpi_;
         ImGui::Image(static_cast<ImTextureID>(logoUiId_), ImVec2(h * logoAspect_, h));
-        ImGui::SameLine(0.0f, 14.0f * dpi_);
+        ImGui::SameLine(0.0f, 14.0f * viewState_.dpi_);
     }
     ImGui::BeginGroup();
     if (fontMedium_) ImGui::PushFont(fontMedium_, 0.0f);
@@ -1113,12 +1113,12 @@ void SandboxApp::drawAboutPrompt(Engine& e) {
         const char* adapter = dev->adapterName();
         if (adapter && *adapter) ImGui::Text("Adapter    %s", adapter);
     }
-    ImGui::Text("Interface  %.0f%% scale", static_cast<double>(dpi_) * 100.0);
+    ImGui::Text("Interface  %.0f%% scale", static_cast<double>(viewState_.dpi_) * 100.0);
     ImGui::TextDisabled("Settings   %s", editor::editorPrefsPath().c_str());
 
     ImGui::Spacing();
     ImGui::Separator();
-    if (ImGui::Button("Close", ImVec2(110.0f * dpi_, 0.0f))) {
+    if (ImGui::Button("Close", ImVec2(110.0f * viewState_.dpi_, 0.0f))) {
         showAbout_ = false;
         ImGui::CloseCurrentPopup();
     }
@@ -1136,7 +1136,7 @@ void SandboxApp::drawSaveLevelAsPrompt() {
     if (!ImGui::IsPopupOpen(kTitle)) ImGui::OpenPopup(kTitle);
     const ImVec2 centre = ImGui::GetMainViewport()->GetCenter();
     ImGui::SetNextWindowPos(centre, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(520.0f * dpi_, 0.0f), ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize(ImVec2(520.0f * viewState_.dpi_, 0.0f), ImGuiCond_Appearing);
     if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
 
     const std::string maps = project_.valid()
@@ -1169,7 +1169,7 @@ void SandboxApp::drawSaveLevelAsPrompt() {
     ImGui::Separator();
     const bool valid = named && !maps.empty() && stem.find_first_of("\\/:*?\"<>|") == std::string::npos;
     ImGui::BeginDisabled(!valid);
-    const bool go = ImGui::Button("Save", ImVec2(110.0f * dpi_, 0.0f));
+    const bool go = ImGui::Button("Save", ImVec2(110.0f * viewState_.dpi_, 0.0f));
     ImGui::EndDisabled();
     if (!valid && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
         ImGui::SetTooltip(maps.empty() ? "Open or create a project first."
@@ -1219,7 +1219,7 @@ void SandboxApp::drawSaveLevelAsPrompt() {
 #endif
     }
     ImGui::SameLine();
-    if (ImGui::Button("Cancel", ImVec2(110.0f * dpi_, 0.0f))) {
+    if (ImGui::Button("Cancel", ImVec2(110.0f * viewState_.dpi_, 0.0f))) {
         wantSaveLevelAs_ = false;
         saveLevelAsError_.clear();
         ImGui::CloseCurrentPopup();
@@ -1235,7 +1235,7 @@ void SandboxApp::drawExitPrompt(Engine& e) {
     if (!ImGui::IsPopupOpen(kTitle)) ImGui::OpenPopup(kTitle);
     const ImVec2 centre = ImGui::GetMainViewport()->GetCenter();
     ImGui::SetNextWindowPos(centre, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(480.0f * dpi_, 0.0f), ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize(ImVec2(480.0f * viewState_.dpi_, 0.0f), ImGuiCond_Appearing);
     if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
 
     std::vector<std::string> dirty = assetEditors_.dirtyTitles();
@@ -1262,7 +1262,7 @@ void SandboxApp::drawExitPrompt(Engine& e) {
     ImGui::Spacing();
     ImGui::Separator();
 
-    if (ImGui::Button("Save all and exit", ImVec2(150.0f * dpi_, 0.0f))) {
+    if (ImGui::Button("Save all and exit", ImVec2(150.0f * viewState_.dpi_, 0.0f))) {
         std::string why;
         usize failed = assetEditors_.saveAllDirty(&why);
 #if AVER_MODULE_SCENE
@@ -1283,14 +1283,14 @@ void SandboxApp::drawExitPrompt(Engine& e) {
         }
     }
     ImGui::SameLine();
-    if (ImGui::Button("Discard and exit", ImVec2(150.0f * dpi_, 0.0f))) {
+    if (ImGui::Button("Discard and exit", ImVec2(150.0f * viewState_.dpi_, 0.0f))) {
         AVER_WARN("[Editor] exiting with {} unsaved item(s); the changes are gone", dirty.size());
         ImGui::CloseCurrentPopup();
         exitPrompt_ = false;
         e.requestExit();
     }
     ImGui::SameLine();
-    if (ImGui::Button("Cancel", ImVec2(110.0f * dpi_, 0.0f))) {
+    if (ImGui::Button("Cancel", ImVec2(110.0f * viewState_.dpi_, 0.0f))) {
         ImGui::CloseCurrentPopup();
         exitPrompt_ = false;
         exitPromptError_.clear();
@@ -1342,7 +1342,7 @@ void SandboxApp::drawOpenLevelPrompt(Engine& e) {
     if (!ImGui::IsPopupOpen(kTitle)) ImGui::OpenPopup(kTitle);
     const ImVec2 centre = ImGui::GetMainViewport()->GetCenter();
     ImGui::SetNextWindowPos(centre, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(560.0f * dpi_, 0.0f), ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize(ImVec2(560.0f * viewState_.dpi_, 0.0f), ImGuiCond_Appearing);
     if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
 
     if (openLevelList_.empty()) {
@@ -1350,7 +1350,7 @@ void SandboxApp::drawOpenLevelPrompt(Engine& e) {
         ImGui::TextDisabled("File > New Level, then Save Level As, writes one to Content" AVER_PATH_SEP "Maps.");
     } else {
         ImGui::TextUnformatted("Levels in this project");
-        ImGui::BeginChild("##levels", ImVec2(0.0f, 240.0f * dpi_), true);
+        ImGui::BeginChild("##levels", ImVec2(0.0f, 240.0f * viewState_.dpi_), true);
         for (int i = 0; i < static_cast<int>(openLevelList_.size()); ++i) {
             const editor::LevelEntry& l = openLevelList_[static_cast<usize>(i)];
             // Current level is marked, not hidden (re-opening discards edits).
@@ -1383,7 +1383,7 @@ void SandboxApp::drawOpenLevelPrompt(Engine& e) {
     const bool picked = openLevelSelected_ >= 0 &&
                         openLevelSelected_ < static_cast<int>(openLevelList_.size());
     ImGui::BeginDisabled(!picked);
-    if (ImGui::Button("Open", ImVec2(110.0f * dpi_, 0.0f)) && picked) {
+    if (ImGui::Button("Open", ImVec2(110.0f * viewState_.dpi_, 0.0f)) && picked) {
         const editor::LevelEntry& l = openLevelList_[static_cast<usize>(openLevelSelected_)];
         if (requestOpenLevel(l.absPath, "opened from File > Open Level")) {
             openLevelPicker_ = false;
@@ -1392,7 +1392,7 @@ void SandboxApp::drawOpenLevelPrompt(Engine& e) {
     }
     ImGui::EndDisabled();
     ImGui::SameLine();
-    if (ImGui::Button("Cancel", ImVec2(110.0f * dpi_, 0.0f))) {
+    if (ImGui::Button("Cancel", ImVec2(110.0f * viewState_.dpi_, 0.0f))) {
         openLevelPicker_ = false;
         openLevelError_.clear();
         ImGui::CloseCurrentPopup();
@@ -1414,7 +1414,7 @@ void SandboxApp::drawPendingOpenPrompt(Engine& e) {
     if (!ImGui::IsPopupOpen(kTitle)) ImGui::OpenPopup(kTitle);
     const ImVec2 centre = ImGui::GetMainViewport()->GetCenter();
     ImGui::SetNextWindowPos(centre, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(480.0f * dpi_, 0.0f), ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize(ImVec2(480.0f * viewState_.dpi_, 0.0f), ImGuiCond_Appearing);
     if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
 
     if (pendingNewLevel_)
@@ -1439,7 +1439,7 @@ void SandboxApp::drawPendingOpenPrompt(Engine& e) {
 #if AVER_MODULE_SCENE
     ImGui::BeginDisabled(levelPath_.empty());
     if (ImGui::Button(pendingNewLevel_ ? "Save and continue" : "Save and open",
-                      ImVec2(160.0f * dpi_, 0.0f))) {
+                      ImVec2(160.0f * viewState_.dpi_, 0.0f))) {
         if (saveLevel(levelPath_)) {
             const std::string toOpen = pendingOpenPath_;
             const bool wasNew = pendingNewLevel_;
@@ -1461,12 +1461,12 @@ void SandboxApp::drawPendingOpenPrompt(Engine& e) {
     // comment above this modal can't actually be open without it -- kept disabled, not removed, so
     // the row's three-button layout doesn't shift between configurations.
     ImGui::BeginDisabled(true);
-    ImGui::Button(pendingNewLevel_ ? "Save and continue" : "Save and open", ImVec2(160.0f * dpi_, 0.0f));
+    ImGui::Button(pendingNewLevel_ ? "Save and continue" : "Save and open", ImVec2(160.0f * viewState_.dpi_, 0.0f));
     ImGui::EndDisabled();
 #endif
     ImGui::SameLine();
     if (ImGui::Button(pendingNewLevel_ ? "Discard and continue" : "Discard and open",
-                      ImVec2(170.0f * dpi_, 0.0f))) {
+                      ImVec2(170.0f * viewState_.dpi_, 0.0f))) {
 #if AVER_MODULE_SCENE
         const std::string toOpen = pendingOpenPath_;
         const bool wasNew = pendingNewLevel_;
@@ -1482,7 +1482,7 @@ void SandboxApp::drawPendingOpenPrompt(Engine& e) {
 #endif
     }
     ImGui::SameLine();
-    if (ImGui::Button("Cancel", ImVec2(110.0f * dpi_, 0.0f))) {
+    if (ImGui::Button("Cancel", ImVec2(110.0f * viewState_.dpi_, 0.0f))) {
         ImGui::CloseCurrentPopup();
         pendingOpenPrompt_ = false;
         pendingNewLevel_ = false;
@@ -1535,7 +1535,7 @@ void SandboxApp::drawLaunchRuntimePrompt(Engine& e) {
     if (!ImGui::IsPopupOpen(kTitle)) ImGui::OpenPopup(kTitle);
     const ImVec2 centre = ImGui::GetMainViewport()->GetCenter();
     ImGui::SetNextWindowPos(centre, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(480.0f * dpi_, 0.0f), ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize(ImVec2(480.0f * viewState_.dpi_, 0.0f), ImGuiCond_Appearing);
     if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
 
     const bool levelDirty = levelHasUnsavedEdits();
@@ -1553,7 +1553,7 @@ void SandboxApp::drawLaunchRuntimePrompt(Engine& e) {
 
     // Saves the LEVEL only; offered only when the level is what is unsaved.
     ImGui::BeginDisabled(!levelDirty);
-    const bool saveAndLaunch = ImGui::Button("Save and launch", ImVec2(160.0f * dpi_, 0.0f));
+    const bool saveAndLaunch = ImGui::Button("Save and launch", ImVec2(160.0f * viewState_.dpi_, 0.0f));
     ImGui::EndDisabled();
     if (saveAndLaunch) {
         if (saveLevel(levelPath_)) {
@@ -1567,13 +1567,13 @@ void SandboxApp::drawLaunchRuntimePrompt(Engine& e) {
         }
     }
     ImGui::SameLine();
-    if (ImGui::Button("Launch saved version", ImVec2(170.0f * dpi_, 0.0f))) {
+    if (ImGui::Button("Launch saved version", ImVec2(170.0f * viewState_.dpi_, 0.0f))) {
         ImGui::CloseCurrentPopup();
         launchRuntimePrompt_ = false;
         launchInRuntime(e, true);
     }
     ImGui::SameLine();
-    if (ImGui::Button("Cancel", ImVec2(110.0f * dpi_, 0.0f))) {
+    if (ImGui::Button("Cancel", ImVec2(110.0f * viewState_.dpi_, 0.0f))) {
         ImGui::CloseCurrentPopup();
         launchRuntimePrompt_ = false;
     }
@@ -1590,7 +1590,7 @@ void SandboxApp::drawUpgradePrompt() {
 
     const ImVec2 centre = ImGui::GetMainViewport()->GetCenter();
     ImGui::SetNextWindowPos(centre, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(560.0f * dpi_, 0.0f), ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize(ImVec2(560.0f * viewState_.dpi_, 0.0f), ImGuiCond_Appearing);
     if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
 
     ImGui::TextWrapped("'%s' was created by an earlier version of the editor and is missing some "
@@ -1601,7 +1601,7 @@ void SandboxApp::drawUpgradePrompt() {
     ImGui::Spacing();
     ImGui::Separator();
 
-    if (ImGui::BeginChild("##upgradeList", ImVec2(0.0f, 200.0f * dpi_), ImGuiChildFlags_Borders)) {
+    if (ImGui::BeginChild("##upgradeList", ImVec2(0.0f, 200.0f * viewState_.dpi_), ImGuiChildFlags_Borders)) {
         for (const editor::ProjectFix& f : pendingUpgrade_.fixes) {
             ImGui::BulletText("%s", f.summary.c_str());
             if (!f.detail.empty()) {
@@ -1614,7 +1614,7 @@ void SandboxApp::drawUpgradePrompt() {
     ImGui::EndChild();
     ImGui::Separator();
 
-    if (ImGui::Button("Upgrade", ImVec2(120.0f * dpi_, 0.0f))) {
+    if (ImGui::Button("Upgrade", ImVec2(120.0f * viewState_.dpi_, 0.0f))) {
         std::string err;
         if (editor::applyProjectUpgrade(project_, pendingUpgrade_, &err)) {
             setUpgradeStatus("Project upgraded - Compile C# to rebuild.");
@@ -1628,7 +1628,7 @@ void SandboxApp::drawUpgradePrompt() {
         ImGui::CloseCurrentPopup();
     }
     ImGui::SameLine();
-    if (ImGui::Button("Not now", ImVec2(120.0f * dpi_, 0.0f))) {
+    if (ImGui::Button("Not now", ImVec2(120.0f * viewState_.dpi_, 0.0f))) {
         upgradeAsked_ = true;
         setUpgradeStatus("Project left as it is.", editor::NotifySeverity::Info);
         ImGui::CloseCurrentPopup();
@@ -1659,7 +1659,7 @@ void SandboxApp::drawPlayToolbar(Engine& e) {
 
     const ImVec4 kGreen(0.36f, 0.82f, 0.36f, 1.0f), kRed(0.93f, 0.33f, 0.28f, 1.0f);
     const f32 iconW = ImGui::GetFrameHeight() * 1.35f;
-    const f32 divW = editor::capsuleDivider(dpi_), padW = editor::capsulePad(dpi_);
+    const f32 divW = editor::capsuleDivider(viewState_.dpi_), padW = editor::capsulePad(viewState_.dpi_);
     const auto iconBtn = [&](const char* id, const char* icon, const ImVec4* tint) {
         if (tint) ImGui::PushStyleColor(ImGuiCol_Text, *tint);
         const bool hit = ImGui::Button((std::string(icon) + "##" + id).c_str(), ImVec2(iconW, 0.0f));
@@ -1670,17 +1670,17 @@ void SandboxApp::drawPlayToolbar(Engine& e) {
                          : play_.playMode_ == PlayMode::Standalone ? ICON_GAMEPAD
                          : play_.playMode_ == PlayMode::NewWindow  ? ICON_OPEN_IN_NEW : ICON_PLAY;
     const std::string platformsLabel = std::string(ICON_PLATFORMS " Platforms");
-    const f32 platformsW = ImGui::CalcTextSize(platformsLabel.c_str()).x + ImGui::GetStyle().FramePadding.x * 2.0f + 16.0f * dpi_ + 2.0f * padW;
+    const f32 platformsW = ImGui::CalcTextSize(platformsLabel.c_str()).x + ImGui::GetStyle().FramePadding.x * 2.0f + 16.0f * viewState_.dpi_ + 2.0f * padW;
 
     // The row's width, so it stays centred as before.
     const u32 buttons = !anyPlay ? 2u : (session ? (paused ? 4u : 3u) : 1u);
     f32 grpW = iconW * static_cast<f32>(buttons) + divW * static_cast<f32>(buttons - 1) + 2.0f * padW;
-    if (!anyPlay) grpW += 6.0f * dpi_ + platformsW;
+    if (!anyPlay) grpW += 6.0f * viewState_.dpi_ + platformsW;
     ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), (wsizeX - grpW) * 0.5f));
 
     if (!anyPlay) {
         {
-            editor::ToolbarCapsule cap(dpi_);
+            editor::ToolbarCapsule cap(viewState_.dpi_);
             if (iconBtn("play", modeIcon, &kGreen)) launchPlay(e, play_.playMode_);
             uiReg_.track("toolbar.play");
             if (ImGui::IsItemHovered()) {
@@ -1773,9 +1773,9 @@ void SandboxApp::drawPlayToolbar(Engine& e) {
             uiReg_.track("toolbar.play.options.advanced");
             ImGui::EndPopup();
         }
-        ImGui::SameLine(0.0f, 6.0f * dpi_);
+        ImGui::SameLine(0.0f, 6.0f * viewState_.dpi_);
         {
-            editor::ToolbarCapsule cap(dpi_);
+            editor::ToolbarCapsule cap(viewState_.dpi_);
             if (dropButton(platformsLabel.c_str())) ImGui::OpenPopup("platforms");
             uiReg_.track("toolbar.platforms");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Package the project, or launch it as a standalone game");
@@ -1802,7 +1802,7 @@ void SandboxApp::drawPlayToolbar(Engine& e) {
         return;
     }
 
-    editor::ToolbarCapsule cap(dpi_);
+    editor::ToolbarCapsule cap(viewState_.dpi_);
     if (session) {
         if (iconBtn("pause", paused ? ICON_PLAY : ICON_PAUSE, paused ? &kGreen : nullptr)) aver_fw_set_paused(paused ? 0 : 1);
         uiReg_.track("toolbar.play.pause");
@@ -1851,7 +1851,7 @@ void SandboxApp::drawPlayToolbar(Engine& e) {
     }
 #else
     (void)e;
-    const f32 grpW = 200.0f * dpi_;
+    const f32 grpW = 200.0f * viewState_.dpi_;
     ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), (wsizeX - grpW) * 0.5f));
     ImGui::BeginDisabled(true);
     ImGui::Button(ICON_PLAY " Play"); ImGui::SameLine();
@@ -2096,7 +2096,7 @@ void SandboxApp::drawWindowMenu() {
                                       : "The UI render feature is unavailable on this backend.");
         ImGui::Separator();
         // Reset Layout applies to the focused tab.
-        const bool assetTabActive = !levelVisible_ && assetEditors_.anyOpen();
+        const bool assetTabActive = !viewState_.levelVisible_ && assetEditors_.anyOpen();
         if (ImGui::MenuItem(assetTabActive ? ICON_LAYOUT " Reset Tab Layout" : ICON_LAYOUT " Reset Layout")) {
             if (assetTabActive) assetEditors_.resetFocusedLayout();
             else              { dockBuilt_ = false; dockResetRequested_ = true; }
@@ -2136,7 +2136,7 @@ void SandboxApp::drawBuildMenu(Engine& e) {
         ImGui::MenuItem("Show Navigation", nullptr, &showNav_);
         ImGui::MenuItem("Show Post Volumes", nullptr, &showPostVolumes_);
 #if AVER_MODULE_SCENE
-        ImGui::MenuItem("Show Decals", nullptr, &showDecals_);
+        ImGui::MenuItem("Show Decals", nullptr, &viewState_.showDecals_);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Draws every decal's projector box, not just the selected one's.");
         if (ImGui::BeginMenu("Show AI")) {
@@ -2250,7 +2250,7 @@ void SandboxApp::drawMainToolbar(Engine& e, const ImVec2& wpos, const ImVec2& ws
     // Buttons sit on capsule plates (EditorChrome.hpp): file actions, the script build, play, settings.
     // Popups are begun after their capsule closes, so they do not inherit its transparent buttons.
     std::optional<editor::ToolbarCapsule> cap;
-    cap.emplace(dpi_);
+    cap.emplace(viewState_.dpi_);
     // levelPath_ and saveLevel() are under AVER_MODULE_SCENE only.
 #if AVER_MODULE_SCENE
     // Opens Save As if level has no path; otherwise saves.
@@ -2310,19 +2310,19 @@ void SandboxApp::drawMainToolbar(Engine& e, const ImVec2& wpos, const ImVec2& ws
         ImGui::EndPopup();
     }
     ImGui::SameLine();
-    cap.emplace(dpi_);
-    tools_.drawCompileButton(project_, dpi_, compileIconUiId_);
+    cap.emplace(viewState_.dpi_);
+    tools_.drawCompileButton(project_, viewState_.dpi_, compileIconUiId_);
     uiReg_.track("toolbar.compileCs");
     cap.reset();
     ImGui::SameLine();
     drawPlayToolbar(e);
-    ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), wsize.x - 150.0f*dpi_));
-    cap.emplace(dpi_);
+    ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), wsize.x - 150.0f*viewState_.dpi_));
+    cap.emplace(viewState_.dpi_);
     if (dropButton(ICON_SETTINGS " Settings")) ImGui::OpenPopup("settingsMenu");
     cap.reset();
     if (ImGui::BeginPopup("settingsMenu")) {
-        ImGui::Checkbox("Show Grid", &showGrid_);
-        ImGui::Checkbox("Wireframe", &wireframe_);
+        ImGui::Checkbox("Show Grid", &viewState_.showGrid_);
+        ImGui::Checkbox("Wireframe", &viewState_.wireframe_);
         ImGui::EndPopup();
     }
     ImGui::End();
@@ -2374,7 +2374,7 @@ void SandboxApp::drawDockHost(const ImVec2& wpos, const ImVec2& wsize, f32 toolb
         ImGui::DockBuilderDockWindow(AVER_WIN_LEVEL,           centre);
         ImGui::DockBuilderFinish(dockId);
     }
-    if (const ImGuiDockNode* cn = ImGui::DockBuilderGetCentralNode(dockId)) centralDock_ = cn->ID;
+    if (const ImGuiDockNode* cn = ImGui::DockBuilderGetCentralNode(dockId)) viewState_.centralDock_ = cn->ID;
     editor::drawDockSplitterLines(dockId);
     ImGui::End(); // ##dockhost
 }
@@ -2390,7 +2390,7 @@ void SandboxApp::drawLevelTab(Engine& e) {
             ImGui::SetWindowFocus(AVER_WIN_LEVEL);
             AVER_INFO("[Editor] --focus-level-at: bringing the Level tab forward");
         }
-        levelVisible_ = ImGui::Begin(AVER_WIN_LEVEL, nullptr,
+        viewState_.levelVisible_ = ImGui::Begin(AVER_WIN_LEVEL, nullptr,
                                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
                                      ImGuiWindowFlags_NoCollapse);
         const ImVec2 at = ImGui::GetCursorScreenPos();
@@ -2399,10 +2399,10 @@ void SandboxApp::drawLevelTab(Engine& e) {
         const f32 h = avail.y > 8.0f ? avail.y : 8.0f;
 
         // Play in New Window owns the scene rect (updatePlayWindow); the tab only says where the game went.
-        if (!playWindow_) vpX_ = at.x, vpY_ = at.y, vpW_ = w, vpH_ = h;
+        if (!playWindow_) viewState_.vpX_ = at.x, viewState_.vpY_ = at.y, viewState_.vpW_ = w, viewState_.vpH_ = h;
         drawGraphPrintOverlay(at, ImVec2(at.x + w, at.y + h));
-        levelFocused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
-        levelHovered_ = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows |
+        viewState_.levelFocused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+        viewState_.levelHovered_ = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows |
                                                ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
 
         if (playWindow_) {
@@ -2411,7 +2411,7 @@ void SandboxApp::drawLevelTab(Engine& e) {
             const ImVec2 ts = ImGui::CalcTextSize(note);
             ImGui::SetCursorScreenPos(ImVec2(at.x + std::fmax(0.0f, (w - ts.x) * 0.5f), at.y + h * 0.5f - ts.y));
             ImGui::TextDisabled("%s", note);
-        } else if (levelVisible_ && e.device()) {
+        } else if (viewState_.levelVisible_ && e.device()) {
             e.device()->setViewportToTexture(true);
             if (const u64 tex = e.device()->viewportTextureId()) {
                 // The texture is the whole backbuffer; the scene is this sub-rect of it.
@@ -2469,7 +2469,7 @@ void SandboxApp::drawLevelTab(Engine& e) {
             }
         }
         // The pointer is on the scene picture itself: not on the viewport's toolbars (windows of their own) or a popup over it.
-        levelImageHovered_ = !playWindow_ && levelVisible_ && ImGui::IsWindowHovered() &&
+        viewState_.levelImageHovered_ = !playWindow_ && viewState_.levelVisible_ && ImGui::IsWindowHovered() &&
                              ImGui::IsMouseHoveringRect(at, ImVec2(at.x + w, at.y + h), false);
         ImGui::End();
         ImGui::PopStyleVar();
@@ -2616,28 +2616,28 @@ void SandboxApp::drawStatusBar(Engine& e, const ImVec2& wpos, const ImVec2& wsiz
 #if AVER_MODULE_MCP
     clusterW += barStyle.ItemSpacing.x + faceWidth(ICON_MCP " MCP :65535");
 #endif
-    const f32 clusterX = wsize.x - clusterW - 8.0f * dpi_;
+    const f32 clusterX = wsize.x - clusterW - 8.0f * viewState_.dpi_;
     // Background tasks: every running progress notification (shader compiles, level prep, imports, autosave, training).
     static std::vector<editor::Notification> bgTasks;
     editor::notifications().progressTasks(bgTasks);
     const editor::TaskSummary taskSum = editor::summariseTasks(bgTasks);
     std::string taskLabel = std::string(ICON_REFRESH " ") + taskSum.label;
     if (taskSum.extra) taskLabel += "  +" + std::to_string(taskSum.extra);
-    const f32 taskBarW = 72.0f * dpi_;
+    const f32 taskBarW = 72.0f * viewState_.dpi_;
     const f32 tasksW = bgTasks.empty() ? 0.0f : ImGui::CalcTextSize(taskLabel.c_str()).x + taskBarW + barStyle.ItemSpacing.x;
-    const f32 tasksX = clusterX - tasksW - 16.0f * dpi_;
+    const f32 tasksX = clusterX - tasksW - 16.0f * viewState_.dpi_;
     const f32 leftLimit = bgTasks.empty() ? clusterX : tasksX;
     const char* kBarSep = "  |  ";
     // Starts the next readout on the same line when it (and its separator) ends before the cluster.
     const auto barRoom = [&](f32 width) {
         ImGui::SameLine(0.0f, 0.0f);
-        return ImGui::GetCursorPosX() + ImGui::CalcTextSize(kBarSep).x + width <= leftLimit - 12.0f * dpi_;
+        return ImGui::GetCursorPosX() + ImGui::CalcTextSize(kBarSep).x + width <= leftLimit - 12.0f * viewState_.dpi_;
     };
 
     ImGui::SetCursorPosY((statusH - ImGui::GetTextLineHeight()) * 0.5f);
     ImGui::TextUnformatted(project_.valid() ? project_.name.c_str() : "No project");
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s on %s\nDPI %.0f%%", rhi::backendName(e.device()->backend()), e.device()->adapterName(), dpi_ * 100.f);
+        ImGui::SetTooltip("%s on %s\nDPI %.0f%%", rhi::backendName(e.device()->backend()), e.device()->adapterName(), viewState_.dpi_ * 100.f);
     // Frame rate (clickable): with interpolation, shows real or real+interpolated. Real FPS only.
     {
         const bool interpolating = e.device()->frameInterpolated();
@@ -2777,7 +2777,7 @@ void SandboxApp::drawStatusBar(Engine& e, const ImVec2& wpos, const ImVec2& wsiz
             for (const editor::Notification& t : bgTasks) {
                 ImGui::PushID(static_cast<int>(t.id));
                 ImGui::TextUnformatted(t.title.c_str());
-                ImGui::ProgressBar(t.progress, ImVec2(240.0f * dpi_, 6.0f * dpi_), "");
+                ImGui::ProgressBar(t.progress, ImVec2(240.0f * viewState_.dpi_, 6.0f * viewState_.dpi_), "");
                 if (!t.progressNote.empty()) ImGui::TextDisabled("%s", t.progressNote.c_str());
                 for (int a = 0; a < 2; ++a) {
                     if (t.actions[a] == editor::NotifyAction::None) continue;
@@ -2859,9 +2859,9 @@ void SandboxApp::buildUI(Engine& e) {
             browserActive_ = false;
             return;
         }
-        editor::BrowserAction action = browser_.draw(dpi_, fontMedium_, logoUiId_, logoAspect_);
+        editor::BrowserAction action = browser_.draw(viewState_.dpi_, fontMedium_, logoUiId_, logoAspect_);
         // An importer's start-screen button opens its dialog here; the project it converted opens through the browser's upgrade gate.
-        editor::extensionImporter().drawModal(dpi_);
+        editor::extensionImporter().drawModal(viewState_.dpi_);
         if (const std::string converted = editor::extensionImporter().takeOpenRequest(); !converted.empty() && action == editor::BrowserAction::Stay) {
             std::string openErr;
             if (browser_.openOrOfferUpgrade(converted, &openErr)) action = editor::BrowserAction::Open;
@@ -2917,7 +2917,7 @@ void SandboxApp::buildUI(Engine& e) {
             ImGui::SetCursorPosY(y + (ImGui::GetFrameHeight() - h) * 0.5f);
             ImGui::Image(static_cast<ImTextureID>(logoSmallUiId_), ImVec2(h * logoAspect_, h));
             ImGui::SetCursorPosY(y);
-            ImGui::SameLine(0.0f, 6.0f * dpi_);
+            ImGui::SameLine(0.0f, 6.0f * viewState_.dpi_);
         } else {
             ImGui::TextColored(ImVec4(0.95f,0.42f,0.13f,1),"AE");
         }
@@ -2962,7 +2962,7 @@ void SandboxApp::buildUI(Engine& e) {
 
     const ImGuiViewport* mv = ImGui::GetMainViewport();
     const ImVec2 wpos = mv->WorkPos, wsize = mv->WorkSize; // already excludes the menu bar
-    const f32 toolbarH = 42.0f*dpi_, statusH = 26.0f*dpi_;
+    const f32 toolbarH = 42.0f*viewState_.dpi_, statusH = 26.0f*viewState_.dpi_;
 
     drawMainToolbar(e, wpos, wsize, toolbarH);
 
@@ -2971,13 +2971,13 @@ void SandboxApp::buildUI(Engine& e) {
     drawLevelTab(e);
 
     // No mode panel in Select (redundant with viewport toolbar).
-    outlinerFocused_ = false;
-    detailsFocused_  = false;
-    if (levelVisible_ || !assetEditors_.anyOpen()) {
-        if (mode_ != EditorMode::Select) buildModePanel(e);
+    viewState_.outlinerFocused_ = false;
+    viewState_.detailsFocused_  = false;
+    if (viewState_.levelVisible_ || !assetEditors_.anyOpen()) {
+        if (viewState_.mode_ != EditorMode::Select) buildModePanel(e);
 #if AVER_MODULE_SCENE
         // A floating timeline over the viewport's bottom edge until the user docks it.
-        if (mode_ == EditorMode::Animate && !sequenceRunActive()) buildSequencerWindow();
+        if (viewState_.mode_ == EditorMode::Animate && !sequenceRunActive()) buildSequencerWindow();
 #endif
         buildPanels(e);
     }
@@ -2989,7 +2989,7 @@ void SandboxApp::buildUI(Engine& e) {
 #endif
     // While a game plays (not ejected) the view is the game's: the toolbars would sit over its HUD (a label in the top-left corner). F8 brings them back.
     const bool gameView = playSessionActive() && !play_.playEjected_;
-    if (levelVisible_ && !runClean && !gameView) buildViewportOverlay();
+    if (viewState_.levelVisible_ && !runClean && !gameView) buildViewportOverlay();
     drawDrawer(e);
     // drawNotifications after drawDrawer (needs drawerPixelH_ from this frame).
     if (!runClean) drawNotifications();
@@ -3020,10 +3020,10 @@ void SandboxApp::buildUI(Engine& e) {
     applyOpenAssetRequests();
     pumpContentWatch();
     cbApplyWatchEvents();
-    assetEditors_.draw(e, centralDock_, dpi_);
-    tools_.drawModals(project_, dpi_);
-    editor::extensionImporter().drawModal(dpi_);
-    editor::extensionsWindow().draw(dpi_);
+    assetEditors_.draw(e, viewState_.centralDock_, viewState_.dpi_);
+    tools_.drawModals(project_, viewState_.dpi_);
+    editor::extensionImporter().drawModal(viewState_.dpi_);
+    editor::extensionsWindow().draw(viewState_.dpi_);
     drawDataLayersPanel();
     pollHlodBuild();
     // The converted project an import dialog was told to open: the same switch the project browser makes.
@@ -3041,7 +3041,7 @@ void SandboxApp::buildUI(Engine& e) {
             AVER_ERROR("[Editor] cannot open the imported project {}: {}", converted, openErr);
         }
     }
-    nrd2Session_.drawWindow(dpi_);
+    nrd2Session_.drawWindow(viewState_.dpi_);
     drawUpgradePrompt();
     drawAboutPrompt(e);
     drawSaveLevelAsPrompt();
@@ -3088,15 +3088,15 @@ void SandboxApp::drawGraphPrintOverlay(ImVec2 vpMin, ImVec2 vpMax) {
     if (visible.empty()) return;
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    const f32 pad = 8.0f * dpi_;
-    const f32 lineH = ImGui::GetTextLineHeight() + 2.0f * dpi_;
+    const f32 pad = 8.0f * viewState_.dpi_;
+    const f32 lineH = ImGui::GetTextLineHeight() + 2.0f * viewState_.dpi_;
     f32 y = vpMax.y - pad - lineH * static_cast<f32>(visible.size());
     for (const auto& [text, alpha] : visible) {
         const ImVec2 sz = ImGui::CalcTextSize(text.c_str());
         // Backing plate: white text on 3D background is unreadable.
-        dl->AddRectFilled(ImVec2(vpMin.x + pad - 4.0f * dpi_, y - 1.0f * dpi_),
-                          ImVec2(vpMin.x + pad + sz.x + 4.0f * dpi_, y + lineH - 1.0f * dpi_),
-                          IM_COL32(0, 0, 0, static_cast<int>(150.0f * alpha)), 3.0f * dpi_);
+        dl->AddRectFilled(ImVec2(vpMin.x + pad - 4.0f * viewState_.dpi_, y - 1.0f * viewState_.dpi_),
+                          ImVec2(vpMin.x + pad + sz.x + 4.0f * viewState_.dpi_, y + lineH - 1.0f * viewState_.dpi_),
+                          IM_COL32(0, 0, 0, static_cast<int>(150.0f * alpha)), 3.0f * viewState_.dpi_);
         dl->AddText(ImVec2(vpMin.x + pad, y),
                     IM_COL32(150, 230, 255, static_cast<int>(255.0f * alpha)), text.c_str());
         y += lineH;
@@ -3176,7 +3176,7 @@ void SandboxApp::drawOutputLog() {
         ImGui::SetTooltip(hasSel ? "Copy the selected lines (Ctrl+C)"
                                  : "Copy the lines the level filter shows.\nClick a line to select it, Shift+click to extend, Ctrl+A for all shown.");
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(110.0f * dpi_);
+    ImGui::SetNextItemWidth(110.0f * viewState_.dpi_);
     // Appended only; order is persisted in editor.ini.
     ImGui::Combo("##loglevel", &logLevelFilter_, "All\0Info+\0Warn+\0Error+\0Critical+\0");
     ImGui::SameLine();
@@ -3431,7 +3431,7 @@ void SandboxApp::drawConsoleTranscriptTab(Engine& e) {
     const f32 inputLineH = ImGui::GetFrameHeightWithSpacing();
     const f32 suggestRowH = ImGui::GetTextLineHeightWithSpacing();
     const f32 suggestH = suggestions.empty() ? 0.0f
-        : std::min<f32>(static_cast<f32>(suggestions.size()), 6.0f) * suggestRowH + 8.0f * dpi_;
+        : std::min<f32>(static_cast<f32>(suggestions.size()), 6.0f) * suggestRowH + 8.0f * viewState_.dpi_;
 
     ImGui::BeginChild("##consolescroll", ImVec2(0, -(inputLineH + suggestH)), false,
                        ImGuiWindowFlags_HorizontalScrollbar);
@@ -3614,7 +3614,7 @@ void SandboxApp::drawDrawer(Engine& e) {
 
     const ImGuiViewport* mv = ImGui::GetMainViewport();
     const ImVec2 wpos = mv->WorkPos, wsize = mv->WorkSize;
-    const f32 statusH = 26.0f * dpi_;
+    const f32 statusH = 26.0f * viewState_.dpi_;
     const f32 fullH = (wsize.y - statusH) * drawerFrac_;
     const f32 h = fullH * drawerAnim_;
     // Published for viewport hint (prevents drawing through drawer).
@@ -3628,7 +3628,7 @@ void SandboxApp::drawDrawer(Engine& e) {
     ImGui::Begin("##drawer", nullptr, kDrawerFlags);
 
     // Top edge is a resize grip, claimed before anything else is submitted.
-    const f32 gripH = 5.0f * dpi_;
+    const f32 gripH = 5.0f * viewState_.dpi_;
     ImGui::SetCursorPos(ImVec2(0.0f, 0.0f));
     ImGui::InvisibleButton("##drawergrip", ImVec2(std::fmax(wsize.x, 1.0f), gripH));
     if (ImGui::IsItemHovered() || ImGui::IsItemActive()) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
@@ -3652,7 +3652,7 @@ void SandboxApp::drawDrawer(Engine& e) {
         ImGui::TextDisabled(drawerShown_ == Drawer::Content ? "(Ctrl+Space or Esc to dismiss)" :
                              drawerShown_ == Drawer::Console ? "(` or Esc to dismiss)" : "(Esc to dismiss)");
     }
-    ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), wsize.x - 34.0f * dpi_));
+    ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), wsize.x - 34.0f * viewState_.dpi_));
     if (ImGui::Button("X")) drawer_ = Drawer::None;
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Close the drawer");
     ImGui::Separator();
@@ -3698,9 +3698,9 @@ void SandboxApp::drawNotifications() {
 
     // Own windows (separate Begin) for correct z-order and hit-testing.
     const ImGuiViewport* mv = ImGui::GetMainViewport();
-    const f32 pad     = 8.0f * dpi_;
-    const f32 statusH = 26.0f * dpi_;
-    const f32 width   = 340.0f * dpi_;
+    const f32 pad     = 8.0f * viewState_.dpi_;
+    const f32 statusH = 26.0f * viewState_.dpi_;
+    const f32 width   = 340.0f * viewState_.dpi_;
     const f32 anchorX = mv->WorkPos.x + mv->WorkSize.x - pad;
     // Above status bar and drawer; drawerPixelH_ is current frame.
     f32 y = mv->WorkPos.y + mv->WorkSize.y - statusH - drawerPixelH_ - pad;
@@ -3755,7 +3755,7 @@ void SandboxApp::drawNotifications() {
                 }
                 if (n.hasProgress) {
                     // Negative progress = indeterminate; no text overlay.
-                    ImGui::ProgressBar(n.progress, ImVec2(-FLT_MIN, 6.0f * dpi_), "");
+                    ImGui::ProgressBar(n.progress, ImVec2(-FLT_MIN, 6.0f * viewState_.dpi_), "");
                     if (!n.progressNote.empty()) ImGui::TextDisabled("%s", n.progressNote.c_str());
                 }
             }
@@ -3773,7 +3773,7 @@ void SandboxApp::drawNotifications() {
         ImGui::End();
 
         const auto it = heights.find(n.id);
-        y -= (it == heights.end() ? 48.0f * dpi_ : it->second) + pad * 0.5f;
+        y -= (it == heights.end() ? 48.0f * viewState_.dpi_ : it->second) + pad * 0.5f;
     }
 
     if (hidden > 0) {

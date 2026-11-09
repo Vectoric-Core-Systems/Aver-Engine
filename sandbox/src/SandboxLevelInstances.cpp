@@ -200,9 +200,9 @@ void SandboxApp::openInstanceLevel(const std::string& assetRef) {
     const std::string full = levelInstanceModel_.fullPathFor(assetRef);
     editor::LevelReturnPoint rp;
     rp.levelPath = levelPath_;
-    rp.camPos = camPos_;
-    rp.yawDeg = yaw_ * kRadToDeg;
-    rp.pitchDeg = pitch_ * kRadToDeg;
+    rp.camPos = viewState_.camPos_;
+    rp.yawDeg = viewState_.yaw_ * kRadToDeg;
+    rp.pitchDeg = viewState_.pitch_ * kRadToDeg;
     if (requestOpenLevel(full, "opened from a level instance")) levelInstanceModel_.pushReturn(std::move(rp));
     else cbStatus_ = openLevelError_;
 }

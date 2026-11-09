@@ -32,8 +32,8 @@ void SandboxApp::loadEditorPreferences() {
     consoleAutoScroll_  = prefBool ("console.autoScroll",            consoleAutoScroll_);
     // --auto-compile on command line wins (autoCompileFromCli_).
     if (!harness_.autoCompileFromCli_) harness_.autoCompile_ = prefBool("scripting.autoCompile", harness_.autoCompile_);
-    showGrid_           = prefBool ("viewport.showGrid",             showGrid_);
-    showCamCoords_      = prefBool ("viewport.showCamCoords",        showCamCoords_);
+    viewState_.showGrid_           = prefBool ("viewport.showGrid",             viewState_.showGrid_);
+    viewState_.showCamCoords_      = prefBool ("viewport.showCamCoords",        viewState_.showCamCoords_);
 #if AVER_MODULE_SCENE
     showWorldOrigin_    = prefBool ("viewport.showWorldOrigin",      showWorldOrigin_);
 #endif
@@ -43,23 +43,23 @@ void SandboxApp::loadEditorPreferences() {
     showPlaceActors_    = prefBool ("panels.placeActors",            showPlaceActors_);
     showMessageLog_     = prefBool ("panels.messageLog",             showMessageLog_);
     showUndoHistory_    = prefBool ("panels.undoHistory",            showUndoHistory_);
-    flySpeed_           = prefFloat("viewport.flySpeed",             flySpeed_);
-    lookSpeed_          = prefFloat("viewport.lookSensitivity",      lookSpeed_);
+    viewState_.flySpeed_           = prefFloat("viewport.flySpeed",             viewState_.flySpeed_);
+    viewState_.lookSpeed_          = prefFloat("viewport.lookSensitivity",      viewState_.lookSpeed_);
     // View flags gated to interactive runs only (not --frames). Snap is ungated: doesn't alter pixels.
     if (maxFrames_ == 0) {
         if (!rset_.viewModeFromCli_) {
-            wireframe_    = prefBool("viewport.wireframe",          wireframe_);
+            viewState_.wireframe_    = prefBool("viewport.wireframe",          viewState_.wireframe_);
             rset_.unlit_        = prefBool("viewport.unlit",              rset_.unlit_);
         }
-        showStaticMeshes_ = prefBool("viewport.showStaticMeshes",   showStaticMeshes_);
-        showAtmosphere_   = prefBool("viewport.showAtmosphere",     showAtmosphere_);
+        viewState_.showStaticMeshes_ = prefBool("viewport.showStaticMeshes",   viewState_.showStaticMeshes_);
+        viewState_.showAtmosphere_   = prefBool("viewport.showAtmosphere",     viewState_.showAtmosphere_);
     }
-    snapMove_           = prefBool ("snap.move",                      snapMove_);
-    snapRot_            = prefBool ("snap.rotate",                    snapRot_);
-    snapScale_          = prefBool ("snap.scale",                     snapScale_);
-    moveSnap_           = prefFloat("snap.moveStep",                  moveSnap_);
-    rotSnap_            = prefFloat("snap.rotateStep",                rotSnap_);
-    scaleSnap_          = prefFloat("snap.scaleStep",                 scaleSnap_);
+    viewState_.snapMove_           = prefBool ("snap.move",                      viewState_.snapMove_);
+    viewState_.snapRot_            = prefBool ("snap.rotate",                    viewState_.snapRot_);
+    viewState_.snapScale_          = prefBool ("snap.scale",                     viewState_.snapScale_);
+    viewState_.moveSnap_           = prefFloat("snap.moveStep",                  viewState_.moveSnap_);
+    viewState_.rotSnap_            = prefFloat("snap.rotateStep",                viewState_.rotSnap_);
+    viewState_.scaleSnap_          = prefFloat("snap.scaleStep",                 viewState_.scaleSnap_);
 
     // Post process is a VIEW property (per observer, not per level). Gated off on capture runs.
     if (maxFrames_ == 0) {
@@ -253,7 +253,7 @@ void SandboxApp::buildEditorPrefs() {
     if (!showEditorPrefs_) return;
     const ImGuiViewport* mv = ImGui::GetMainViewport();
     // Six sections: FirstUseEver default; saved size is preserved.
-    ImGui::SetNextWindowSize(ImVec2(560.0f*dpi_, 640.0f*dpi_), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(560.0f*viewState_.dpi_, 640.0f*viewState_.dpi_), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowPos(ImVec2(mv->GetCenter().x, mv->GetCenter().y), ImGuiCond_FirstUseEver, ImVec2(0.5f,0.5f));
     if (!ImGui::Begin("Editor Preferences", &showEditorPrefs_, ImGuiWindowFlags_NoDocking)) { ImGui::End(); return; }
 
@@ -445,48 +445,48 @@ void SandboxApp::buildEditorPrefs() {
 #endif
     }
     if (::aver::editor::sectionHeader("Viewport", ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::Checkbox("Show grid", &showGrid_);
+        ImGui::Checkbox("Show grid", &viewState_.showGrid_);
         uiReg_.track("prefs.viewport.showGrid");
-        ImGui::Checkbox("Wireframe", &wireframe_);
+        ImGui::Checkbox("Wireframe", &viewState_.wireframe_);
         uiReg_.track("prefs.viewport.wireframe");
         // Other view flags now persist (weren't remembered before).
         ImGui::Checkbox("Unlit", &rset_.unlit_);
         uiReg_.track("prefs.viewport.unlit");
-        ImGui::Checkbox("Show static meshes", &showStaticMeshes_);
+        ImGui::Checkbox("Show static meshes", &viewState_.showStaticMeshes_);
         uiReg_.track("prefs.viewport.showStaticMeshes");
-        ImGui::Checkbox("Show atmosphere", &showAtmosphere_);
+        ImGui::Checkbox("Show atmosphere", &viewState_.showAtmosphere_);
         uiReg_.track("prefs.viewport.showAtmosphere");
         // Same dial as viewport chip, not raw rate.
         {
-            f32 dial = flySpeed_ / kCamSpeedUnit;
-            if (ImGui::SliderFloat("Fly speed", &dial, 20.0f / kCamSpeedUnit,
-                                   20000.0f / kCamSpeedUnit, "%.2f", ImGuiSliderFlags_Logarithmic))
-                flySpeed_ = dial * kCamSpeedUnit;
+            f32 dial = viewState_.flySpeed_ / ViewportState::kCamSpeedUnit;
+            if (ImGui::SliderFloat("Fly speed", &dial, 20.0f / ViewportState::kCamSpeedUnit,
+                                   20000.0f / ViewportState::kCamSpeedUnit, "%.2f", ImGuiSliderFlags_Logarithmic))
+                viewState_.flySpeed_ = dial * ViewportState::kCamSpeedUnit;
             ImGui::SameLine();
-            ImGui::TextDisabled("(%.0f cm/s)", flySpeed_);
+            ImGui::TextDisabled("(%.0f cm/s)", viewState_.flySpeed_);
         }
         uiReg_.track("prefs.viewport.flySpeed");
-        ImGui::SliderFloat("Look sensitivity", &lookSpeed_, 0.001f, 0.02f, "%.4f");
+        ImGui::SliderFloat("Look sensitivity", &viewState_.lookSpeed_, 0.001f, 0.02f, "%.4f");
         uiReg_.track("prefs.viewport.lookSensitivity");
 
         // Snap: the toolbar could set it but nothing kept it -- moveSnap_/rotSnap_/scaleSnap_ and
         // their toggles weren't in load/saveEditorPreferences, so a grid setup didn't survive a restart.
         ImGui::Separator();
         ImGui::TextDisabled("Snap");
-        ImGui::Checkbox("Move", &snapMove_);   uiReg_.track("prefs.snap.move");
+        ImGui::Checkbox("Move", &viewState_.snapMove_);   uiReg_.track("prefs.snap.move");
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(120.0f * dpi_);
-        ImGui::DragFloat("##moveSnap", &moveSnap_, 0.1f, 0.01f, 10000.0f, "%.2f units");
+        ImGui::SetNextItemWidth(120.0f * viewState_.dpi_);
+        ImGui::DragFloat("##moveSnap", &viewState_.moveSnap_, 0.1f, 0.01f, 10000.0f, "%.2f units");
         uiReg_.track("prefs.snap.moveStep");
-        ImGui::Checkbox("Rotate", &snapRot_);  uiReg_.track("prefs.snap.rotate");
+        ImGui::Checkbox("Rotate", &viewState_.snapRot_);  uiReg_.track("prefs.snap.rotate");
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(120.0f * dpi_);
-        ImGui::DragFloat("##rotSnap", &rotSnap_, 0.5f, 0.1f, 180.0f, "%.1f deg");
+        ImGui::SetNextItemWidth(120.0f * viewState_.dpi_);
+        ImGui::DragFloat("##rotSnap", &viewState_.rotSnap_, 0.5f, 0.1f, 180.0f, "%.1f deg");
         uiReg_.track("prefs.snap.rotateStep");
-        ImGui::Checkbox("Scale", &snapScale_); uiReg_.track("prefs.snap.scale");
+        ImGui::Checkbox("Scale", &viewState_.snapScale_); uiReg_.track("prefs.snap.scale");
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(120.0f * dpi_);
-        ImGui::DragFloat("##scaleSnap", &scaleSnap_, 0.01f, 0.01f, 10.0f, "%.2f");
+        ImGui::SetNextItemWidth(120.0f * viewState_.dpi_);
+        ImGui::DragFloat("##scaleSnap", &viewState_.scaleSnap_, 0.01f, 0.01f, 10.0f, "%.2f");
         uiReg_.track("prefs.snap.scaleStep");
     }
     // --scroll-prefs-to-keybinds: one-shot verification aid; consumes its flag once.
@@ -535,7 +535,7 @@ void SandboxApp::buildEditorPrefs() {
     if (scrollPrefsToKeybinds_) { ImGui::SetScrollHereY(0.0f); scrollPrefsToKeybinds_ = false; }
     // Registry owns clearing listening_ on header collapse.
     const bool keybindsOpen = ::aver::editor::sectionHeader("Keybinds", ImGuiTreeNodeFlags_DefaultOpen);
-    keybinds_.drawPreferencesSection(dpi_, keybindsOpen, &uiReg_);
+    keybinds_.drawPreferencesSection(viewState_.dpi_, keybindsOpen, &uiReg_);
     ImGui::Separator();
     ImGui::TextDisabled("Preferences apply immediately and are saved for next time.");
     ImGui::TextDisabled("%s", editor::editorPrefsPath().c_str());
@@ -558,7 +558,7 @@ bool SandboxApp::classPicker(const char* label, std::string& value, int32_t flag
         return (c && (aver_fw_class_get_flags(c) & flag)) ? v : v + "  (not declared -- compile .NET?)";
     };
     bool changed = false;
-    ImGui::SetNextItemWidth(320.0f * dpi_);
+    ImGui::SetNextItemWidth(320.0f * viewState_.dpi_);
     if (ImGui::BeginCombo(label, labelOf(value).c_str())) {
         auto item = [&](const std::string& v, const std::string& text) {
             if (ImGui::Selectable(text.c_str(), value == v) && value != v) { value = v; changed = true; }
@@ -589,7 +589,7 @@ void SandboxApp::buildWorldSettings() {
 #else
 
     const ImGuiViewport* mv = ImGui::GetMainViewport();
-    ImGui::SetNextWindowSize(ImVec2(560.0f * dpi_, 480.0f * dpi_), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(560.0f * viewState_.dpi_, 480.0f * viewState_.dpi_), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowPos(ImVec2(mv->GetCenter().x, mv->GetCenter().y), ImGuiCond_FirstUseEver,
                             ImVec2(0.5f, 0.5f));
     if (!ImGui::Begin("World Settings", &showWorldSettings_, ImGuiWindowFlags_NoDocking)) {
@@ -608,7 +608,7 @@ void SandboxApp::buildWorldSettings() {
     ImGui::Separator();
     ImGui::Text("%s", levelName_.empty() ? "(untitled)" : levelName_.c_str());
     ImGui::TextDisabled("%s", levelPath_.c_str());
-    ImGui::Dummy(ImVec2(0, 6.0f * dpi_));
+    ImGui::Dummy(ImVec2(0, 6.0f * viewState_.dpi_));
 
     // ---- GameMode and default pawn overrides ----
     ImGui::TextDisabled("Game Mode");
@@ -632,7 +632,7 @@ void SandboxApp::buildWorldSettings() {
 #else
     ImGui::TextDisabled("This build has no framework module, so there is no game mode to pick.");
 #endif
-    ImGui::Dummy(ImVec2(0, 6.0f * dpi_));
+    ImGui::Dummy(ImVec2(0, 6.0f * viewState_.dpi_));
 
     // ---- Player Start ----
     ImGui::TextDisabled("Player Start");
@@ -653,7 +653,7 @@ void SandboxApp::buildWorldSettings() {
             ImGui::TextDisabled("None. Add one with Add > Player Start.");
         }
     }
-    ImGui::Dummy(ImVec2(0, 6.0f * dpi_));
+    ImGui::Dummy(ImVec2(0, 6.0f * viewState_.dpi_));
 
     // ---- Streaming, per density field ----
     ImGui::TextDisabled("World Streaming");
@@ -671,7 +671,7 @@ void SandboxApp::buildWorldSettings() {
             ImGui::Text("%s", v.name.empty() ? "(unnamed)" : v.name.c_str());
 
             int radius = v.radiusChunks > 0 ? v.radiusChunks : 3;   // 0 = "runtime default (3)"
-            ImGui::SetNextItemWidth(160.0f * dpi_);
+            ImGui::SetNextItemWidth(160.0f * viewState_.dpi_);
             if (ImGui::SliderInt("Radius (chunks)", &radius, 1, 24)) {
                 v.radiusChunks = radius;
             }
@@ -679,18 +679,18 @@ void SandboxApp::buildWorldSettings() {
             ImGui::TextDisabled("%.0fm", static_cast<f64>(radius) * 16.0);
 
             int samples = v.samplesPerAxis > 0 ? v.samplesPerAxis : 4;
-            ImGui::SetNextItemWidth(160.0f * dpi_);
+            ImGui::SetNextItemWidth(160.0f * viewState_.dpi_);
             if (ImGui::SliderInt("Samples / axis", &samples, 1, 32)) {
                 v.samplesPerAxis = samples;
             }
             ImGui::SameLine();
             ImGui::TextDisabled("%d candidates/chunk", samples * samples);
             ImGui::PopID();
-            ImGui::Dummy(ImVec2(0, 4.0f * dpi_));
+            ImGui::Dummy(ImVec2(0, 4.0f * viewState_.dpi_));
         }
         ImGui::TextDisabled("Takes effect when streaming is next enabled (Window > Chunk Streaming).");
     }
-    ImGui::Dummy(ImVec2(0, 6.0f * dpi_));
+    ImGui::Dummy(ImVec2(0, 6.0f * viewState_.dpi_));
     buildLevelStreamingSettings();
 
     ImGui::End();
@@ -737,12 +737,12 @@ void SandboxApp::buildProjectSettings() {
     if (settingsPage_ == kRenderPagePathTracing) settingsPage_ = kRenderPageGi;
 
     const ImGuiViewport* mv = ImGui::GetMainViewport();
-    ImGui::SetNextWindowSize(ImVec2(880.0f*dpi_, 560.0f*dpi_), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(880.0f*viewState_.dpi_, 560.0f*viewState_.dpi_), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowPos(ImVec2(mv->GetCenter().x, mv->GetCenter().y), ImGuiCond_FirstUseEver, ImVec2(0.5f,0.5f));
     if (!ImGui::Begin("Project Settings", &showProjectSettings_, ImGuiWindowFlags_NoDocking)) { ImGui::End(); return; }
 
     // settingsPage_: 0 Description, 5-9 the non-rendering categories, the rest kRenderPage*.
-    ImGui::BeginChild("##categories", ImVec2(220.0f*dpi_, 0), ImGuiChildFlags_Borders);
+    ImGui::BeginChild("##categories", ImVec2(220.0f*viewState_.dpi_, 0), ImGuiChildFlags_Borders);
     ImGui::TextDisabled("Project");
     ImGui::Indent();
     if (ImGui::Selectable("Description", settingsPage_==0)) settingsPage_=0;
@@ -774,7 +774,7 @@ void SandboxApp::buildProjectSettings() {
             // Editable at last: this page was five ImGui::Text lines, so name/author/start map
             // couldn't be changed from the editor -- saveProjectManifest already wrote them via
             // writeOcproject, which owns NAME/AUTHOR/CONTENT/STARTMAP. Only the widgets were missing.
-            ImGui::PushItemWidth(-160.0f * dpi_);
+            ImGui::PushItemWidth(-160.0f * viewState_.dpi_);
             if (editField("Name", project_.name, 96)) projectDirty_ = true;
             uiReg_.track("project.name");
             // Rename is manifest-only: folder/filename keep the old name, and project_.name feeds
@@ -869,7 +869,7 @@ void SandboxApp::buildProjectSettings() {
                     ImGui::SetTooltip("LOCALE.DEFAULT: the culture every missing translation falls back to.\n"
                                       "Cultures are the folders under Content/Localization.");
                 static char freeCulture[32] = {};
-                ImGui::SetNextItemWidth(120.0f * dpi_);
+                ImGui::SetNextItemWidth(120.0f * viewState_.dpi_);
                 if (ImGui::InputTextWithHint("##localeDefaultFree", "other, e.g. pt-BR", freeCulture, sizeof freeCulture,
                                              ImGuiInputTextFlags_EnterReturnsTrue)) {
                     const std::string tag = fmt::normalizeCulture(freeCulture);
@@ -956,7 +956,7 @@ void SandboxApp::buildProjectSettings() {
     if (project_.valid()) {
         ImGui::Separator();
         ImGui::BeginDisabled(!projectDirty_);
-        if (ImGui::Button("Save Project Settings", ImVec2(220.0f * dpi_, 0.0f))) {
+        if (ImGui::Button("Save Project Settings", ImVec2(220.0f * viewState_.dpi_, 0.0f))) {
             std::string why;
             if (saveProjectManifest(&why)) {
                 projectSaveStatus_ = "Saved.";
@@ -976,7 +976,7 @@ void SandboxApp::buildProjectSettings() {
         // that this stays exact where a remembered snapshot would drift as fields are added.
         ImGui::SameLine();
         ImGui::BeginDisabled(!projectDirty_);
-        if (ImGui::Button("Revert", ImVec2(110.0f * dpi_, 0.0f))) {
+        if (ImGui::Button("Revert", ImVec2(110.0f * viewState_.dpi_, 0.0f))) {
             fmt::ProjectDesc fresh;
             std::string why;
             if (fmt::loadOcproject(project_.manifestPath, fresh, &why)) {
@@ -1030,7 +1030,7 @@ bool SandboxApp::settingInt(const char* label, int* v, int lo, int hi, int whenE
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Unticked: this project does not state it,\nand the engine's own default applies.");
     ImGui::SameLine();
     ImGui::BeginDisabled(!stated);
-    ImGui::SetNextItemWidth(180.0f * dpi_);
+    ImGui::SetNextItemWidth(180.0f * viewState_.dpi_);
     if (ImGui::SliderInt(label, v, lo, hi)) changed = true;
     ImGui::EndDisabled();
     if (tip && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("%s", tip);
@@ -1056,7 +1056,7 @@ void SandboxApp::buildWindowSettings() {
     {
         char buf[128];
         std::snprintf(buf, sizeof buf, "%s", project_.windowTitle.c_str());
-        ImGui::SetNextItemWidth(320.0f * dpi_);
+        ImGui::SetNextItemWidth(320.0f * viewState_.dpi_);
         if (ImGui::InputTextWithHint("Title", project_.name.c_str(), buf, sizeof buf)) {
             project_.windowTitle = buf;
             projectDirty_ = true;
@@ -1075,7 +1075,7 @@ void SandboxApp::buildWindowSettings() {
         }
         ImGui::SameLine();
         ImGui::BeginDisabled(!stated);
-        ImGui::SetNextItemWidth(220.0f * dpi_);
+        ImGui::SetNextItemWidth(220.0f * viewState_.dpi_);
         if (ImGui::InputInt2("Size", wh)) {
             project_.windowWidth  = wh[0];
             project_.windowHeight = wh[1];
@@ -1116,7 +1116,7 @@ void SandboxApp::buildImportSettings() {
         if (ImGui::Checkbox("##stated", &stated)) { project_.importScale = stated ? v : -1.0f; projectDirty_ = true; }
         ImGui::SameLine();
         ImGui::BeginDisabled(!stated);
-        ImGui::SetNextItemWidth(180.0f * dpi_);
+        ImGui::SetNextItemWidth(180.0f * viewState_.dpi_);
         if (ImGui::DragFloat("Unit scale", &v, 0.5f, 0.001f, 10000.0f, "%.3f")) {
             project_.importScale = v;
             projectDirty_ = true;
@@ -1166,7 +1166,7 @@ void SandboxApp::buildStreamSettings() {
         if (ImGui::Checkbox("##stated", &stated)) { project_.streamLeadSeconds = stated ? v : -1.0f; projectDirty_ = true; }
         ImGui::SameLine();
         ImGui::BeginDisabled(!stated);
-        ImGui::SetNextItemWidth(180.0f * dpi_);
+        ImGui::SetNextItemWidth(180.0f * viewState_.dpi_);
         if (ImGui::SliderFloat("Lead seconds", &v, 0.0f, 10.0f, "%.2f")) {
             project_.streamLeadSeconds = v;
             projectDirty_ = true;
@@ -1223,8 +1223,8 @@ void SandboxApp::buildPhysicsSettings() {
     ImGui::PopItemWidth();
 
     if (ready) ImGui::TextDisabled("%d body(ies) in the world.", aver_phys_body_count());
-    editor::drawPhysicsSettingsGroups(project_, projectDirty_, dpi_);
-    editor::drawPhysicalSurfaceTable(project_.contentDir(), dpi_);   // Content/Physics/Surfaces.ocsurf as an editable table; Save registers the rows with the physics module
+    editor::drawPhysicsSettingsGroups(project_, projectDirty_, viewState_.dpi_);
+    editor::drawPhysicalSurfaceTable(project_.contentDir(), viewState_.dpi_);   // Content/Physics/Surfaces.ocsurf as an editable table; Save registers the rows with the physics module
 #else
     ImGui::TextDisabled("This build has no physics module.");
 #endif
@@ -2439,8 +2439,8 @@ void SandboxApp::saveEditorPreferences() {
     // Not written back from a --auto-compile run: that launch must not overwrite what the user chose
     // from the Tools menu before this session started.
     if (!harness_.autoCompileFromCli_) setPrefBool("scripting.autoCompile", harness_.autoCompile_);
-    setPrefBool ("viewport.showGrid",            showGrid_);
-    setPrefBool ("viewport.showCamCoords",       showCamCoords_);
+    setPrefBool ("viewport.showGrid",            viewState_.showGrid_);
+    setPrefBool ("viewport.showCamCoords",       viewState_.showCamCoords_);
 #if AVER_MODULE_SCENE
     setPrefBool ("viewport.showWorldOrigin",     showWorldOrigin_);
 #endif
@@ -2449,25 +2449,25 @@ void SandboxApp::saveEditorPreferences() {
     setPrefBool ("panels.placeActors",           showPlaceActors_);
     setPrefBool ("panels.messageLog",            showMessageLog_);
     setPrefBool ("panels.undoHistory",           showUndoHistory_);
-    setPrefFloat("viewport.flySpeed",            flySpeed_);
-    setPrefFloat("viewport.lookSensitivity",     lookSpeed_);
+    setPrefFloat("viewport.flySpeed",            viewState_.flySpeed_);
+    setPrefFloat("viewport.lookSensitivity",     viewState_.lookSpeed_);
     setPrefFloat("ddc.ramBudgetMb",              rset_.ddcRamBudgetMb_);
     // Guarded exactly as the load is: a --frames run that wrote its --unlit back would leave
     // the next interactive session unlit, and the run after that with moved gates.
     if (maxFrames_ == 0) {
         if (!rset_.viewModeFromCli_) {
-            setPrefBool("viewport.wireframe",     wireframe_);
+            setPrefBool("viewport.wireframe",     viewState_.wireframe_);
             setPrefBool("viewport.unlit",         rset_.unlit_);
         }
-        setPrefBool("viewport.showStaticMeshes",  showStaticMeshes_);
-        setPrefBool("viewport.showAtmosphere",    showAtmosphere_);
+        setPrefBool("viewport.showStaticMeshes",  viewState_.showStaticMeshes_);
+        setPrefBool("viewport.showAtmosphere",    viewState_.showAtmosphere_);
     }
-    setPrefBool ("snap.move",                    snapMove_);
-    setPrefBool ("snap.rotate",                  snapRot_);
-    setPrefBool ("snap.scale",                   snapScale_);
-    setPrefFloat("snap.moveStep",                moveSnap_);
-    setPrefFloat("snap.rotateStep",              rotSnap_);
-    setPrefFloat("snap.scaleStep",               scaleSnap_);
+    setPrefBool ("snap.move",                    viewState_.snapMove_);
+    setPrefBool ("snap.rotate",                  viewState_.snapRot_);
+    setPrefBool ("snap.scale",                   viewState_.snapScale_);
+    setPrefFloat("snap.moveStep",                viewState_.moveSnap_);
+    setPrefFloat("snap.rotateStep",              viewState_.rotSnap_);
+    setPrefFloat("snap.scaleStep",               viewState_.scaleSnap_);
 
     // Guarded like the load, same reason: a --frames run writing its CLI exposure back would leave
     // the next interactive session looking at the capture's eyes.

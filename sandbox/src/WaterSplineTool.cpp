@@ -451,7 +451,7 @@ void SandboxApp::handleWaterSpline(Engine& e, const ImGuiIO& io, bool overScene,
             if (isRiver && io.MouseDelta.y != 0.0f) {
                 fmt::OcRiverPoint& p = river->points[static_cast<usize>(waterPt_)];
                 const Vec3 wp = world(waterPt_);
-                const f32 dist = std::sqrt((wp.x - eye_.x) * (wp.x - eye_.x) + (wp.y - eye_.y) * (wp.y - eye_.y) + (wp.z - eye_.z) * (wp.z - eye_.z));
+                const f32 dist = std::sqrt((wp.x - viewState_.eye_.x) * (wp.x - viewState_.eye_.x) + (wp.y - viewState_.eye_.y) * (wp.y - viewState_.eye_.y) + (wp.z - viewState_.eye_.z) * (wp.z - viewState_.eye_.z));
                 p.z -= static_cast<f64>(io.MouseDelta.y) * std::max(dist, 100.0f) * 0.002;
                 waterEdited();
             }
@@ -468,7 +468,7 @@ void SandboxApp::handleWaterSpline(Engine& e, const ImGuiIO& io, bool overScene,
     }
     if (!io.MouseDown[0]) waterDrag_ = false;
 
-    if (levelFocused_ && waterPt_ >= 0 && ImGui::IsKeyPressed(ImGuiKey_Delete, false) && !io.WantTextInput) removePoint(waterPt_);
+    if (viewState_.levelFocused_ && waterPt_ >= 0 && ImGui::IsKeyPressed(ImGuiKey_Delete, false) && !io.WantTextInput) removePoint(waterPt_);
 
     if (waterGestureOpen_ && !io.MouseDown[0] && !ImGui::IsAnyItemActive()) waterGestureEnd("Edit water");
 }
@@ -568,7 +568,7 @@ void SandboxApp::drawWaterBodies(Engine& e) {
     if (waterLines_) {
         const Mat4 w = Mat4::identity();
         dev->setLineDepth(false);
-        dev->setLineWidth(2.0f * dpi_);
+        dev->setLineWidth(2.0f * viewState_.dpi_);
         dev->drawLines(waterLines_, &w.m[0][0]);
         dev->setLineWidth(1.0f);
         dev->setLineDepth(true);
