@@ -1222,11 +1222,8 @@ ProjectUpgrade inspectProject(const fmt::ProjectDesc& proj, const std::vector<Ex
     const std::string content = proj.contentDir();
     const std::string scriptsDir = proj.scriptsDir();
 
-    for (const char* d : {"Maps", "Meshes", "Materials", "Textures", "Sounds", "Scripts"}) {
-        const std::string path = content + AVER_PATH_SEP + d;
-        if (!fileExists(path))
-            up.fixes.push_back({ProjectFix::Kind::CreateFolder, std::string("Create Content" AVER_PATH_SEP) + d, path});
-    }
+    // No Content subfolder is required: each is created when something is first written into it, so an empty
+    // or missing Content\Sounds is not a reason to ask the author to "upgrade".
 
     const std::string csproj = scriptsCsprojPath(proj);
     if (csproj.empty()) return up;

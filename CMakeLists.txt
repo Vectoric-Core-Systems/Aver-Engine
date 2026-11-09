@@ -5,7 +5,7 @@ cmake_minimum_required(VERSION 3.24)
 if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin" AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
   set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version")
 endif()
-project(AverEngine VERSION 0.7.0 LANGUAGES C CXX)
+project(AverEngine VERSION 0.8.0 LANGUAGES C CXX)
 # RC ONLY WHERE THERE IS A RESOURCE COMPILER. Naming it in project() above made configure fail on
 # line 2 everywhere but Windows ("No CMAKE_RC_COMPILER could be found"), before a single option was
 # read. The .rc files are icons and version blocks for Windows executables; nothing else has them.
@@ -17,14 +17,14 @@ endif()
 # file: writes sandbox/src/GraphNodeFamilies.gen.inc, which GraphNodeDefs.hpp includes.
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/GraphNodeFamilies.cmake")
 
-# THE FULL ENGINE VERSION IS 0.7.0-1, and the "-1" cannot live in project() above: CMake accepts only
+# AN OPTIONAL VERSION SUFFIX (0.7.0 carried "-1"; 0.8.0 has none), which cannot live in project() above: CMake accepts only
 # numeric components there. So the suffix is kept here and appended wherever the version reaches the
 # binaries (modules/core/CMakeLists.txt). The split is deliberate: upgrade::parseVersion stops at '-' by
 # design ("the suffix is not ours to interpret"), so series checks and upgrade planning see 0.7.0, while
-# every CREATEDWITH/ENGINE stamp and the UI record the full 0.7.0-1.
+# every CREATEDWITH/ENGINE stamp and the UI record the full version with its suffix.
 # scripts/stage-payload.ps1 and scripts/publish-release.ps1 read only the NUMERIC part of project(); teach
 # them this suffix before cutting a release from this series, or the payload and tag will say 0.7.0.
-set(AVER_VERSION_SUFFIX "-1")
+set(AVER_VERSION_SUFFIX "")
 
 # ---------------------------------------------------------------------------
 # Aver Engine — permissively-licensed, modular 3D engine (see docs/ARCHITECTURE.md).

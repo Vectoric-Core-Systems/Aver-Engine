@@ -282,6 +282,7 @@ int runConvert(int argc, char** argv) {
         return exitCode(ExitCode::Usage);
     }
     while (!outDir.empty() && (outDir.back() == '\\' || outDir.back() == '/')) outDir.pop_back();
+    createDirectories(outDir);   // a stated output folder is made, not a reason for every write to fail
     const std::string base = !baseOverride.empty() ? baseOverride : stemOf(input);
 
     // THE PER-MODE DEFAULTS, applied only where the command line left a budget unset.

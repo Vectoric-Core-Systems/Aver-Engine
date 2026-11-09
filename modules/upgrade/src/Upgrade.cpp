@@ -231,6 +231,20 @@ bool step_0_6_to_0_7(const Context& ctx, std::string* err) {
     return true;
 }
 
+// A 0.7 PROJECT NEEDS NOTHING DONE TO IT. Every project-visible change after 0.7.0 reads absence as the 0.7
+// behaviour:
+//   - `.ocworld`, `.ocfoliage`, `.ocmat` and `.ocproject` gained optional records and keys (data layers, world
+//     partition and HLOD, foliage cull/LOD/align/ground/collision fields, material sampler and surface fields,
+//     render settings); a file without them loads as before.
+//   - New formats (.ocbiome, .ocvegetation, .ocshape, .ocsurf, .ocfrac, .ochair, .occaptions, .ocbuslayout, HLOD
+//     bakes, material instances) cannot exist in a 0.7 project.
+//   - Missing Content subfolders are no longer an upgrade item: folders are created when something is written.
+bool step_0_7_to_0_8(const Context& ctx, std::string* err) {
+    (void)ctx;
+    (void)err;
+    return true;
+}
+
 // EVERY STEP EVER SHIPPED, OLDEST FIRST, AND NONE OF THEM EDITED AFTER THE FACT. A project made in
 // 0.1 will still be opened years from now, and it will run exactly this function.
 const std::vector<Step> kSteps = {
@@ -252,6 +266,9 @@ const std::vector<Step> kSteps = {
     {{0, 6, 0}, {0, 7, 0},
      "Nothing to repair: 0.7's format changes are optional records and new formats; absent reads as 0.6",
      &step_0_6_to_0_7},
+    {{0, 7, 0}, {0, 8, 0},
+     "Nothing to repair: 0.8's format changes are optional records and new formats; absent reads as 0.7",
+     &step_0_7_to_0_8},
 };
 
 } // namespace
