@@ -322,6 +322,13 @@ Dependency: W2 steps 1-3,5 are independent of everything else. Overlap with W10 
 7. Optional deferred tail seed if the hitch gate trips. **M, G.**
 Cook/package integration: later with `.ocpak` (cross-reference, not in wave 2).
 
+**Status 2026-11-09 (CPU steps 1-2).**
+- Done, headless-tested:
+  - Step 1: `readFileRange` (platform, cases in `FileRangeTest`); `statCachedTexture`/`readCachedMips` and `CachedTextureInfo` in `TextureCache` (the whole-file loader now shares the header parser); `TextureStreamMath.hpp` (window bytes, legal tops, tail/initial mip, footprint to mip, `textureStreamable`); `tests/assets/TextureStreamMathTest`.
+  - Step 2: `TexturePlanner`, `PoolController`, `UploadRing` (`modules/assets`, no device); `tests/assets/TexturePlannerTest`. The planner is time-free (hold and retry are counted in frames).
+- Step 3 is written but held off `08-gdint` on branch `hold/w8-step3-voxi-texids`. It moves the ownership of ray-path texture ids into `MaterialSystem::textureId` and changes the slot order of Voxi's ray-path texture table, which is always on. It needs the step-3 equivalence screenshot (G) before it lands.
+- Not done: steps 4-7 (RHI, feedback shader, worker, host wiring), held for the owner's patent decision D2.
+
 ---
 
 ## W9. Shadows on non-RT GPUs
