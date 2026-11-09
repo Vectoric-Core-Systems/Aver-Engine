@@ -2989,7 +2989,15 @@ void SandboxApp::buildViewportOverlay() {
     // cluster is aligned from the width it measured last frame (vpBarRightW_).
     ImGui::SetNextWindowPos(ImVec2(vpX_, vpY_), ImGuiCond_Always, ImVec2(0,0));
     ImGui::SetNextWindowSizeConstraints(ImVec2(vpW_, 0.0f), ImVec2(vpW_, FLT_MAX));
+    // Compact, like Unreal's viewport toolbar: the small UI font and tight padding keep the whole bar on one row (at 300% DPI the body
+    // font and default padding needed two). The popups opened from the bar share the compact look.
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4.0f * dpi_, 3.0f * dpi_));
     beginOverlayBar("##vpbar", f);
+    ImGui::PopStyleVar();
+    const bool barFont = editor::editorFonts().secondary != nullptr;
+    if (barFont) ImGui::PushFont(editor::editorFonts().secondary, editor::editorFonts().secondaryPx);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(5.0f * dpi_, 2.0f * dpi_));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(3.0f * dpi_, 3.0f * dpi_));
 #if AVER_MODULE_SCENE
     // [wave3/level-instances] Open Level on an instance left a way back: this button.
     if (const editor::LevelReturnPoint* rp = levelInstanceModel_.returnTop()) {
@@ -3194,6 +3202,7 @@ void SandboxApp::buildViewportOverlay() {
     ImGui::SameLine();
     if (dropButton("Show")) ImGui::OpenPopup("showFlags");
     uiReg_.track("viewport.show");
+    const f32 leftEndX = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;   // where the left cluster ends
     if (ImGui::BeginPopup("showFlags")) {
         ImGui::Checkbox("Grid", &showGrid_);
         uiReg_.track("show.grid");
@@ -3231,9 +3240,12 @@ void SandboxApp::buildViewportOverlay() {
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Fill the fields with the camera's position.");
         ImGui::EndPopup();
     }
-    const f32 icon = 20.0f*dpi_, gap = 5.0f*dpi_, tinyGap = 2.0f*dpi_;
-    ImGui::SameLine(std::fmax(ImGui::GetCursorPosX() + gap * 3.0f,
-                              ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - vpBarRightW_));
+    const f32 icon = ImGui::GetFrameHeight(), gap = 4.0f*dpi_, tinyGap = 1.0f*dpi_;
+    // Right-aligned on the same row when both clusters fit; otherwise the right cluster takes a second row instead of
+    // being drawn over the left one (at 300% DPI, or with the Mode panel docked beside the viewport, they do not fit).
+    const f32 rightX = ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - vpBarRightW_;
+    if (rightX >= leftEndX + gap * 3.0f) ImGui::SameLine(rightX);
+    else ImGui::SetCursorPosX(std::fmax(ImGui::GetStyle().WindowPadding.x, rightX));
     const f32 rightStartX = ImGui::GetCursorScreenPos().x;
     auto toolBtn = [&](const char* id, int kind, bool active)->bool {
         return editor::toolButton(id, kind, active, icon, dpi_);
@@ -3325,7 +3337,10 @@ void SandboxApp::buildViewportOverlay() {
     if (toolBtn("##tScl", 3, tool_==Tool::Scale)) tool_=Tool::Scale;
     uiReg_.track("tool.scale");
     ImGui::SameLine(0, gap*2);
-    if (ImGui::Button(worldSpace_ ? "World" : "Local")) worldSpace_ = !worldSpace_;
+    if (ImGui::Button(worldSpace_ ? ICON_WORLD_SPACE "##space" : ICON_LOCAL_SPACE "##space")) worldSpace_ = !worldSpace_;
+    uiReg_.track("viewport.space");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", worldSpace_ ? "World space: the gizmo follows the world axes (click for local)"
+                                                               : "Local space: the gizmo follows the object's axes (click for world)");
     // Grid and snap strip: grid visibility, then a toggle and a step for each transform snap.
     ImGui::SameLine(0, gap*2);
     {
@@ -3337,7 +3352,7 @@ void SandboxApp::buildViewportOverlay() {
             if (hit) on = !on;
         };
         const auto stepCombo = [&](const char* id, editor::SnapKind kind, f32& value, const f32* presets, usize n) {
-            ImGui::SetNextItemWidth(56.0f * dpi_);
+            ImGui::SetNextItemWidth(54.0f * dpi_);
             if (ImGui::BeginCombo(id, editor::snapLabel(kind, value).c_str())) {
                 for (usize i = 0; i < n; ++i)
                     if (ImGui::Selectable(editor::snapLabel(kind, presets[i]).c_str(), value == presets[i])) value = presets[i];
@@ -3372,8 +3387,9 @@ void SandboxApp::buildViewportOverlay() {
     // speed 18 decimals would be false accuracy.
     char camLbl[32];
     const f32 camDial = flySpeed_ / kCamSpeedUnit;
-    std::snprintf(camLbl, sizeof camLbl, camDial < 10.0f ? "Cam %.3g" : "Cam %.0f", camDial);
+    std::snprintf(camLbl, sizeof camLbl, camDial < 10.0f ? ICON_CAMERA " %.3g" : ICON_CAMERA " %.0f", camDial);
     if (dropButton(camLbl)) ImGui::OpenPopup("camSpeed");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Camera speed");
     const f32 rightEndX = ImGui::GetItemRectMax().x;
     if (ImGui::BeginPopup("camSpeed")) {
         f32 dial = flySpeed_ / kCamSpeedUnit;
@@ -3387,6 +3403,8 @@ void SandboxApp::buildViewportOverlay() {
     }
 
     vpBarRightW_ = rightEndX - rightStartX;
+    ImGui::PopStyleVar(2);
+    if (barFont) ImGui::PopFont();
     if (showCamCoords_) {
         constexpr f32 kDeg = 180.0f / 3.14159265358979323846f;
         const Vec3 p = viewPos();

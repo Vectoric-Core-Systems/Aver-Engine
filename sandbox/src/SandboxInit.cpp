@@ -430,7 +430,7 @@ void SandboxApp::onInit(Engine& e)  {
     if (e.device()->uiActive()) {
         applyDpi(e.window() ? e.window()->dpiScale() : 1.0f);
         AVER_INFO("[Sandbox] DPI scale {:.2f}, UI font rasterised at {:.0f}px", dpi_, 16.0f * dpi_);
-        if (browserActive_) loadLogo(e);
+        loadLogo(e);   // the start screen and the menu bar's mark
         loadCompileIcon(e);
         loadIconSheet(e, "file-icons.png",   kFileIconTiles, "FileTypeIcons", fileIconsTexture_,   fileIconsUiId_,   fileIconAspect_);
         loadIconSheet(e, "folder-icons.png", kFolderIconTiles, "FolderIcons",  folderIconsTexture_, folderIconsUiId_, folderIconAspect_);

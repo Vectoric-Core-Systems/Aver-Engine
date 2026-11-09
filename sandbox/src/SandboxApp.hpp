@@ -3966,6 +3966,8 @@ private:
     rhi::TextureHandle compileIconTexture_=0;   // the Compile C# status sprite sheet (3 tiles)
     u64 compileIconUiId_=0;
     u64 logoUiId_=0;
+    rhi::TextureHandle logoSmallTexture_=0;   // the logo area-averaged down to the menu bar's size (the full one has no mips)
+    u64 logoSmallUiId_=0;
     f32 logoAspect_=1.0f;
     editor::ToolsMenu tools_;
     editor::Nrd2Session nrd2Session_;   // Tools > Train Neural Denoiser, --nrd2-train
@@ -4562,6 +4564,7 @@ private:
     void holdMcpPointer();
     f32 mcpPointerX_ = 0.0f, mcpPointerY_ = 0.0f;
     int mcpPointerHold_ = 0;   // frames left
+    void* mcpHookCtx_ = nullptr;   // the ImGui context holdMcpPointer installed its NewFramePre hook on
 
     void registerMcpAbis();
 

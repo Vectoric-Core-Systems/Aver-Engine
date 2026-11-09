@@ -263,6 +263,41 @@ void SandboxApp::loadLogo(Engine& e) {
     if (!logoUiId_) { AVER_WARN("[Sandbox] the start-screen mark is not reachable from the UI"); return; }
     logoAspect_ = h > 0 ? static_cast<f32>(w) / static_cast<f32>(h) : 1.0f;
     AVER_INFO("[Sandbox] start-screen mark decoded from {} ({}x{})", path, w, h);
+
+    // The menu bar's copy: an area average in premultiplied alpha (no dark fringe) down to the bar's height. The full texture has one
+    // mip, so sampling it at ~70 px from 512 aliased.
+    const u32 sh = std::max(8u, static_cast<u32>(std::lround(22.0f * dpi_)));
+    const u32 sw = std::max(1u, static_cast<u32>(std::lround(static_cast<f32>(sh) * logoAspect_)));
+    std::vector<u8> markPx(static_cast<usize>(sw) * sh * 4);
+    for (u32 y = 0; y < sh; ++y)
+        for (u32 x = 0; x < sw; ++x) {
+            const f64 x0 = static_cast<f64>(x) * img.width / sw, x1 = static_cast<f64>(x + 1) * img.width / sw;
+            const f64 y0 = static_cast<f64>(y) * img.height / sh, y1 = static_cast<f64>(y + 1) * img.height / sh;
+            f64 acc[4] = {0, 0, 0, 0}, area = 0.0;
+            for (u32 sy = static_cast<u32>(y0); sy < img.height && sy < y1; ++sy) {
+                const f64 wy = std::min<f64>(sy + 1, y1) - std::max<f64>(sy, y0);
+                for (u32 sx = static_cast<u32>(x0); sx < img.width && sx < x1; ++sx) {
+                    const f64 wgt = wy * (std::min<f64>(sx + 1, x1) - std::max<f64>(sx, x0));
+                    const u8* p = &img.pixels[(static_cast<usize>(sy) * img.width + sx) * 4];
+                    const f64 a = p[3] / 255.0;
+                    acc[0] += wgt * p[0] * a; acc[1] += wgt * p[1] * a; acc[2] += wgt * p[2] * a; acc[3] += wgt * a;
+                    area += wgt;
+                }
+            }
+            u8* d = &markPx[(static_cast<usize>(y) * sw + x) * 4];
+            const f64 a = area > 0.0 ? acc[3] / area : 0.0;
+            for (int c = 0; c < 3; ++c) d[c] = static_cast<u8>(std::clamp(acc[3] > 0.0 ? acc[c] / acc[3] + 0.5 : 0.0, 0.0, 255.0));   // un-premultiplied
+            d[3] = static_cast<u8>(std::clamp(a * 255.0 + 0.5, 0.0, 255.0));
+        }
+    rhi::TextureDesc sd = td;
+    sd.width = sw;
+    sd.height = sh;
+    sd.debugName = "EditorLogoSmall";
+    const void* smallLevels[1] = {markPx.data()};
+    sd.initialData = smallLevels;
+    sd.initialRowPitch = sw * 4;
+    logoSmallTexture_ = res->createTexture(sd);
+    if (logoSmallTexture_) logoSmallUiId_ = e.device()->uiTextureId(logoSmallTexture_);
 }
 
 // Upload Compile C# button's three-tile status sprite sheet. Missing file is non-fatal.
@@ -592,11 +627,13 @@ editor::shutdownAnimEditors();
         if (rhi::IResourceFactory* res = e.device()->resources()) {
             res->waitIdle();
             if (logoTexture_) res->destroyTexture(logoTexture_);
+            if (logoSmallTexture_) res->destroyTexture(logoSmallTexture_);
             if (compileIconTexture_) res->destroyTexture(compileIconTexture_);
             if (fileIconsTexture_) res->destroyTexture(fileIconsTexture_);
             if (folderIconsTexture_) res->destroyTexture(folderIconsTexture_);
         }
         logoTexture_ = 0; logoUiId_ = 0;
+        logoSmallTexture_ = 0; logoSmallUiId_ = 0;
         compileIconTexture_ = 0; compileIconUiId_ = 0;
         fileIconsTexture_ = 0; fileIconsUiId_ = 0;
         folderIconsTexture_ = 0; folderIconsUiId_ = 0;

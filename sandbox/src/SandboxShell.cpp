@@ -337,9 +337,9 @@ void SandboxApp::buildProfilerPanel(Engine& e) {
             const f64 excl = n.ms - childSum[i];
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
-            ImGui::Indent(depth * 14.0f * dpi_);
+            if (depth * 14.0f * dpi_ > 0.0f) ImGui::Indent(depth * 14.0f * dpi_);   // Indent(0) would apply the default indent
             ImGui::TextUnformatted(n.label.c_str());
-            ImGui::Unindent(depth * 14.0f * dpi_);
+            if (depth * 14.0f * dpi_ > 0.0f) ImGui::Unindent(depth * 14.0f * dpi_);
             ImGui::TableSetColumnIndex(1); ImGui::Text("%.2f", n.ms);
             ImGui::TableSetColumnIndex(2);
             const f64 frac = total > 0.0 ? (excl / total) : 0.0;
@@ -994,7 +994,10 @@ void SandboxApp::setHudPreview(int index, f32 x, f32 y, f32 w, f32 h) {
 bool SandboxApp::dropButton(const char* label) {
     const f32 extra = 16.0f*dpi_;
     const ImVec2 ts = ImGui::CalcTextSize(label);
+    // The label sits left with the arrow in its own space; centred in the whole box it ran into the arrow.
+    ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.0f, 0.5f));
     const bool clicked = ImGui::Button(label, ImVec2(ts.x + ImGui::GetStyle().FramePadding.x*2 + extra, 0));
+    ImGui::PopStyleVar();
     const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
     const f32 cx = mx.x - extra*0.5f - 2.0f*dpi_, cy = (mn.y+mx.y)*0.5f, s = 3.0f*dpi_;
     ImGui::GetWindowDrawList()->AddTriangleFilled(
@@ -1643,9 +1646,9 @@ void SandboxApp::drawPlayToolbar(Engine& e) {
     const f32 wsizeX = mv->WorkSize.x;
 
 #if AVER_MODULE_FRAMEWORK
-    const ImGuiStyle& style = ImGui::GetStyle();
-    auto btnW = [&](const char* label) { return ImGui::CalcTextSize(label).x + style.FramePadding.x * 2.0f; };
-
+    // Unreal's play row: icon-only buttons on one plate. Idle: the play button (green, showing the chosen mode's icon) and the options
+    // menu, then Platforms. Playing: Pause (a green Resume while paused), Frame Skip while paused, a red Stop, Eject. Names, shortcuts and
+    // what each does are in the hover tooltips, as in Unreal.
     const int32_t ps = aver_fw_play_state();
     const bool paused = ps == AVER_FW_PLAY_PAUSED;
     // anyPlayActive() includes stand-ins (drones/spectators have no begin_play).
@@ -1654,55 +1657,48 @@ void SandboxApp::drawPlayToolbar(Engine& e) {
     const bool session = playSessionActive();
     const bool ejected = playEjected();
 
-    const char* modeName = playMode_ == PlayMode::Simulate   ? "Simulate"
-                          : playMode_ == PlayMode::Standalone ? "Standalone" : "Play";
-    const std::string playLabel = std::string(ICON_PLAY " ") + modeName;
-    const char* pauseLabel = paused ? ICON_PLAY " Resume" : ICON_PAUSE " Pause";
-    constexpr const char* kFrameSkipLabel = ICON_SKIP_NEXT " Frame Skip";
-    const char* ejectLabel = ejected ? ICON_GAMEPAD " Possess" : ICON_EJECT " Eject";
-    constexpr const char* kStopLabel = ICON_STOP " Stop";
-    // dropButton returns only the click.
-    const f32 dropW = btnW(" ") + 16.0f * dpi_;
-
-    // Not playing: an orange pill, then the options arrow on a plate. Playing: one plate holding the
-    // transport buttons, a thin divider between each.
+    const ImVec4 kGreen(0.36f, 0.82f, 0.36f, 1.0f), kRed(0.93f, 0.33f, 0.28f, 1.0f);
+    const f32 iconW = ImGui::GetFrameHeight() * 1.35f;
     const f32 divW = editor::capsuleDivider(dpi_), padW = editor::capsulePad(dpi_);
-    const f32 pillW = btnW(playLabel.c_str()) + 12.0f * dpi_;
-    f32 grpW = 0.0f;
-    if (!anyPlay) {
-        grpW = pillW + 4.0f * dpi_ + dropW + 2.0f * padW;
-    } else {
-        u32 buttons = 0;
-        const auto add = [&](f32 w) { grpW += w; ++buttons; };
-        if (session) add(btnW(pauseLabel));
-        if (session && paused) add(btnW(kFrameSkipLabel));
-        if (session) add(btnW(ejectLabel));
-        add(btnW(kStopLabel));
-        grpW += 2.0f * padW + divW * static_cast<f32>(buttons - 1);
-    }
+    const auto iconBtn = [&](const char* id, const char* icon, const ImVec4* tint) {
+        if (tint) ImGui::PushStyleColor(ImGuiCol_Text, *tint);
+        const bool hit = ImGui::Button((std::string(icon) + "##" + id).c_str(), ImVec2(iconW, 0.0f));
+        if (tint) ImGui::PopStyleColor();
+        return hit;
+    };
+    const char* modeIcon = playMode_ == PlayMode::Simulate   ? ICON_SIMULATE
+                         : playMode_ == PlayMode::Standalone ? ICON_GAMEPAD
+                         : playMode_ == PlayMode::NewWindow  ? ICON_OPEN_IN_NEW : ICON_PLAY;
+    const std::string platformsLabel = std::string(ICON_PLATFORMS " Platforms");
+    const f32 platformsW = ImGui::CalcTextSize(platformsLabel.c_str()).x + ImGui::GetStyle().FramePadding.x * 2.0f + 16.0f * dpi_ + 2.0f * padW;
+
+    // The row's width, so it stays centred as before.
+    const u32 buttons = !anyPlay ? 2u : (session ? (paused ? 4u : 3u) : 1u);
+    f32 grpW = iconW * static_cast<f32>(buttons) + divW * static_cast<f32>(buttons - 1) + 2.0f * padW;
+    if (!anyPlay) grpW += 6.0f * dpi_ + platformsW;
     ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), (wsizeX - grpW) * 0.5f));
 
     if (!anyPlay) {
-        if (editor::primaryPill(playLabel.c_str(), pillW)) launchPlay(e, playMode_);
-        uiReg_.track("toolbar.play");
-        if (ImGui::IsItemHovered()) {
-            if (playMode_ == PlayMode::Standalone) {
-                ImGui::SetTooltip("Standalone Game: a separate Aver Engine Runtime on the saved level");
-            } else if (playMode_ == PlayMode::NewWindow) {
-                ImGui::SetTooltip("Play in a new window (Esc there returns to the editor)");
-            } else {
-                const editor::CommandId modeCmd = playMode_ == PlayMode::Simulate
-                                                 ? editor::CommandId::PlaySimulate : editor::CommandId::PlayStart;
-                ImGui::SetTooltip("%s (%s)", playMode_ == PlayMode::Simulate ? "Simulate" : "Play in the viewport",
-                                  editor::chordToString(keybinds_.chordFor(modeCmd)).c_str());
-            }
-        }
-        ImGui::SameLine(0.0f, 4.0f * dpi_);
         {
-            editor::ToolbarCapsule dropCap(dpi_);
-            if (dropButton(" ")) ImGui::OpenPopup("playOptions");
+            editor::ToolbarCapsule cap(dpi_);
+            if (iconBtn("play", modeIcon, &kGreen)) launchPlay(e, playMode_);
+            uiReg_.track("toolbar.play");
+            if (ImGui::IsItemHovered()) {
+                if (playMode_ == PlayMode::Standalone) {
+                    ImGui::SetTooltip("Standalone Game: a separate Aver Engine Runtime on the saved level");
+                } else if (playMode_ == PlayMode::NewWindow) {
+                    ImGui::SetTooltip("Play in a new window (Esc there returns to the editor)");
+                } else {
+                    const editor::CommandId modeCmd = playMode_ == PlayMode::Simulate
+                                                     ? editor::CommandId::PlaySimulate : editor::CommandId::PlayStart;
+                    ImGui::SetTooltip("%s (%s)", playMode_ == PlayMode::Simulate ? "Simulate" : "Play this level in the selected viewport",
+                                      editor::chordToString(keybinds_.chordFor(modeCmd)).c_str());
+                }
+            }
+            cap.divider();
+            if (iconBtn("playOptions", ICON_MORE_VERT, nullptr)) ImGui::OpenPopup("playOptions");
             uiReg_.track("toolbar.play.options");
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Play options");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Change the play mode and play settings");
         }
         if (ImGui::BeginPopup("playOptions")) {
             ImGui::TextDisabled("MODES");
@@ -1711,13 +1707,13 @@ void SandboxApp::drawPlayToolbar(Engine& e) {
                                 playMode_ == PlayMode::SelectedViewport))
                 launchPlay(e, PlayMode::SelectedViewport);
             uiReg_.track("toolbar.play.options.viewport");
-            if (ImGui::MenuItem(ICON_PLAY " New Window", nullptr, playMode_ == PlayMode::NewWindow))
+            if (ImGui::MenuItem(ICON_OPEN_IN_NEW " New Window", nullptr, playMode_ == PlayMode::NewWindow))
                 launchPlay(e, PlayMode::NewWindow);
             uiReg_.track("toolbar.play.options.newWindow");
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Plays in a window of its own, without the editor around it.\n"
                                   "Esc in that window (or closing it) returns to the editor.");
-            if (ImGui::MenuItem(ICON_EJECT " Simulate",
+            if (ImGui::MenuItem(ICON_SIMULATE " Simulate",
                                 editor::chordToString(keybinds_.chordFor(editor::CommandId::PlaySimulate)).c_str(),
                                 playMode_ == PlayMode::Simulate))
                 launchPlay(e, PlayMode::Simulate);
@@ -1777,31 +1773,65 @@ void SandboxApp::drawPlayToolbar(Engine& e) {
             uiReg_.track("toolbar.play.options.advanced");
             ImGui::EndPopup();
         }
+        ImGui::SameLine(0.0f, 6.0f * dpi_);
+        {
+            editor::ToolbarCapsule cap(dpi_);
+            if (dropButton(platformsLabel.c_str())) ImGui::OpenPopup("platforms");
+            uiReg_.track("toolbar.platforms");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Package the project, or launch it as a standalone game");
+        }
+        if (ImGui::BeginPopup("platforms")) {
+            ImGui::TextDisabled("WINDOWS");
+            const bool haveProj = project_.valid();
+            ImGui::BeginDisabled(!haveProj || tools_.compiling());
+            if (ImGui::MenuItem(ICON_PACKAGE " Package Project...")) tools_.openPackageProject();
+            ImGui::EndDisabled();
+            uiReg_.track("toolbar.platforms.package");
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("%s", !haveProj ? "Open a project first."
+                                  : tools_.compiling() ? "A script build is running; packaging would stage a half-written assembly."
+                                  : "Stage this project into a standalone, runnable game directory (also File > Package Project...).");
+            const bool standaloneOk = haveProj && !levelPath_.empty() && !editor::runtimeExecutablePath().empty();
+            if (ImGui::MenuItem(ICON_GAMEPAD " Launch Standalone Game", nullptr, false, standaloneOk)) launchPlay(e, PlayMode::Standalone);
+            uiReg_.track("toolbar.platforms.launch");
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("%s", standaloneOk ? "A separate Aver Engine Runtime process on the saved level."
+                                                     : "Needs a project, a saved level and AverEngineRuntime.exe beside the editor.");
+            ImGui::EndPopup();
+        }
         return;
     }
 
     editor::ToolbarCapsule cap(dpi_);
     if (session) {
-        if (ImGui::Button(pauseLabel)) aver_fw_set_paused(paused ? 0 : 1);
+        if (iconBtn("pause", paused ? ICON_PLAY : ICON_PAUSE, paused ? &kGreen : nullptr)) aver_fw_set_paused(paused ? 0 : 1);
         uiReg_.track("toolbar.play.pause");
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("%s (%s)", paused ? "Resume" : "Pause",
                               editor::chordToString(keybinds_.chordFor(editor::CommandId::PlayPause)).c_str());
         cap.divider();
         if (paused) {
-            if (ImGui::Button(kFrameSkipLabel)) requestPlayFrameStep();
+            if (iconBtn("frameSkip", ICON_SKIP_NEXT, nullptr)) requestPlayFrameStep();
             uiReg_.track("toolbar.play.frameSkip");
             if (ImGui::IsItemHovered()) {
                 const editor::Chord& skipChord = keybinds_.chordFor(editor::CommandId::PlayFrameSkip);
                 if (skipChord.isBound())
-                    ImGui::SetTooltip("Advance one gameplay tick, then pause again (%s)",
+                    ImGui::SetTooltip("Frame Skip: advance one gameplay tick, then pause again (%s)",
                                       editor::chordToString(skipChord).c_str());
                 else
-                    ImGui::SetTooltip("Advance one gameplay tick, then pause again");
+                    ImGui::SetTooltip("Frame Skip: advance one gameplay tick, then pause again");
             }
             cap.divider();
         }
-        if (ImGui::Button(ejectLabel)) togglePlayEject();
+    }
+    if (iconBtn("stop", ICON_STOP, &kRed)) stopPlay();
+    uiReg_.track("toolbar.stop");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Stop (%s)",
+                          editor::chordToString(keybinds_.chordFor(editor::CommandId::PlayStop)).c_str());
+    if (session) {
+        cap.divider();
+        if (iconBtn("eject", ejected ? ICON_GAMEPAD : ICON_EJECT, nullptr)) togglePlayEject();
         uiReg_.track("toolbar.play.eject");
         if (ImGui::IsItemHovered()) {
             const std::string ejectChord =
@@ -1814,17 +1844,11 @@ void SandboxApp::drawPlayToolbar(Engine& e) {
             else if (ejected)
                 ImGui::SetTooltip("Possess the player again (%s)", ejectChord.c_str());
             else
-                ImGui::SetTooltip("Detach from the player: the game keeps running and the editor\n"
+                ImGui::SetTooltip("Eject: detach from the player; the game keeps running and the editor\n"
                                   "camera, selection and gizmos come back (%s)",
                                   ejectChord.c_str());
         }
-        cap.divider();
     }
-    if (ImGui::Button(kStopLabel)) stopPlay();
-    uiReg_.track("toolbar.stop");
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Stop (%s)",
-                          editor::chordToString(keybinds_.chordFor(editor::CommandId::PlayStop)).c_str());
 #else
     (void)e;
     const f32 grpW = 200.0f * dpi_;
@@ -1937,7 +1961,17 @@ void SandboxApp::buildUI(Engine& e) {
     // ---- menu bar ----
     if (ImGui::BeginMainMenuBar()) {
         if (fontMedium_) ImGui::PushFont(fontMedium_, 0.0f);
-        ImGui::TextColored(ImVec4(0.95f,0.42f,0.13f,1),"AE");
+        // The engine's mark, as Unreal shows its logo at the start of the menu bar; the drawn "AE" only when logo.png is missing.
+        if (logoSmallUiId_) {
+            const f32 h = ImGui::GetFrameHeight() * 0.92f;
+            const f32 y = ImGui::GetCursorPosY();
+            ImGui::SetCursorPosY(y + (ImGui::GetFrameHeight() - h) * 0.5f);
+            ImGui::Image(static_cast<ImTextureID>(logoSmallUiId_), ImVec2(h * logoAspect_, h));
+            ImGui::SetCursorPosY(y);
+            ImGui::SameLine(0.0f, 6.0f * dpi_);
+        } else {
+            ImGui::TextColored(ImVec4(0.95f,0.42f,0.13f,1),"AE");
+        }
                     const bool open_file = ImGui::BeginMenu("File");
         uiReg_.track("menu.file");
         if (open_file){

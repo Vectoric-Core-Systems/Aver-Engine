@@ -41,6 +41,12 @@ inline constexpr unsigned short kIconRangeLast  = 0xF8FF;
 #define ICON_SKIP_NEXT   "\xEE\x81\x84"   // U+E044 skip_next (Play: Frame Skip)
 #define ICON_EJECT       "\xEE\xA3\xBB"   // U+E8FB eject (Play: Eject)
 #define ICON_GAMEPAD     "\xEE\x8C\xB8"   // U+E338 videogame_asset (Play: Possess)
+#define ICON_MORE_VERT   "\xEE\x97\x94"   // U+E5D4 more_vert (Play: options)
+#define ICON_OPEN_IN_NEW "\xEE\xA2\x9E"   // U+E89E open_in_new (Play: New Window)
+#define ICON_SIMULATE    "\xEE\x81\xA8"   // U+E068 slow_motion_video (Play: Simulate)
+#define ICON_PLATFORMS   "\xEE\x86\xB1"   // U+E1B1 devices (toolbar: Platforms)
+#define ICON_WORLD_SPACE "\xEE\xA0\x8B"   // U+E80B public (viewport: world-space gizmo)
+#define ICON_LOCAL_SPACE "\xEE\xA1\x8D"   // U+E84D 3d_rotation (viewport: local-space gizmo)
 
 // ---- editing ----------------------------------------------------------------------------------
 #define ICON_ADD         "\xEE\x85\x85"   // U+E145 add
