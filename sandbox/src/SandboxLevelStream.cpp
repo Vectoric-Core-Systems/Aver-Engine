@@ -334,18 +334,18 @@ void SandboxApp::stampStreamFields(fmt::OcWorldData& w, const std::unordered_map
     }
     fmt::assignPlacementIds(w);
     std::string why;
-    const std::string stem = std::filesystem::path(levelPath_).stem().string();
-    if (!fmt::writeOcStreamFor(w, stem, project_.dir, level_.streamFoliage(), &why))
+    const std::string stem = std::filesystem::path(projSess_.levelPath_).stem().string();
+    if (!fmt::writeOcStreamFor(w, stem, projSess_.project_.dir, level_.streamFoliage(), &why))
         AVER_WARN("[LevelStream] could not write the streaming data: {}", why);
 }
 
 // World Settings > Regenerate Streaming Data: saves, then rebuilds every placement's bounds from its
 // mesh and cuts the foliage into cells (fmt::bakeOcStream), and reopens the level to use it.
 bool SandboxApp::regenerateStreamData(std::string& report) {
-    if (!saveLevel(levelPath_)) { report = "the level could not be saved"; return false; }
+    if (!saveLevel(projSess_.levelPath_)) { report = "the level could not be saved"; return false; }
     fmt::OcWorldData w;
     std::string why;
-    if (!fmt::loadOcworld(levelPath_, w, &why)) { report = why; return false; }
+    if (!fmt::loadOcworld(projSess_.levelPath_, w, &why)) { report = why; return false; }
     w.stream.enabled = true;
     fmt::OcStreamBakeOptions opt;
     opt.foliageCellCm = w.stream.cellCm > 0.0f ? w.stream.cellCm : 6400.0f;
@@ -357,9 +357,9 @@ bool SandboxApp::regenerateStreamData(std::string& report) {
         return true;
     };
     fmt::OcStreamBakeReport rep;
-    const std::string stem = std::filesystem::path(levelPath_).stem().string();
-    if (!fmt::bakeOcStream(w, stem, project_.contentDir(), project_.dir, opt, rep, &why) ||
-        !fmt::saveOcworld(levelPath_, w, &why)) {
+    const std::string stem = std::filesystem::path(projSess_.levelPath_).stem().string();
+    if (!fmt::bakeOcStream(w, stem, projSess_.project_.contentDir(), projSess_.project_.dir, opt, rep, &why) ||
+        !fmt::saveOcworld(projSess_.levelPath_, w, &why)) {
         report = why;
         return false;
     }
@@ -368,7 +368,7 @@ bool SandboxApp::regenerateStreamData(std::string& report) {
     report = std::to_string(rep.withBounds) + " of " + std::to_string(rep.placements) + " objects with bounds, " +
              std::to_string(rep.foliageInstances) + " foliage instances in " + std::to_string(rep.foliageCells) + " cells";
     AVER_INFO("[LevelStream] regenerated {}: {}", w.stream.dataPath, report);
-    requestOpenLevel(levelPath_, "reopened with regenerated streaming data");
+    requestOpenLevel(projSess_.levelPath_, "reopened with regenerated streaming data");
     return true;
 }
 
@@ -468,9 +468,9 @@ void SandboxApp::buildLevelStreamingSettings() {
     if (st.enabled != ls.active()) {
         ImGui::TextDisabled(st.enabled ? "Starts when the level is reopened." : "Stops when the level is reopened.");
         if (ImGui::Button("Save and Reopen")) {
-            if (saveLevel(levelPath_)) {
+            if (saveLevel(projSess_.levelPath_)) {
                 markLevelSaved();
-                requestOpenLevel(levelPath_, "reopened to apply level streaming");
+                requestOpenLevel(projSess_.levelPath_, "reopened to apply level streaming");
             }
         }
         uiReg_.track("worldSettings.streamReopen");

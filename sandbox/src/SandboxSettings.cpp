@@ -64,18 +64,18 @@ void SandboxApp::loadEditorPreferences() {
     // Post process is a VIEW property (per observer, not per level). Gated off on capture runs.
     if (maxFrames_ == 0) {
         // Only the four exposed fields persist; rest is tuned in RHI.hpp.
-        if (!rset_.postExposureFromCli_ && project_.postExposure < 0.0f)
+        if (!rset_.postExposureFromCli_ && projSess_.project_.postExposure < 0.0f)
             rset_.post_.exposure       = prefFloat("post.exposure",       rset_.post_.exposure);
-        if (!rset_.postAutoExpFromCli_ && project_.postAutoExposure < 0)
+        if (!rset_.postAutoExpFromCli_ && projSess_.project_.postAutoExposure < 0)
             rset_.post_.autoExposure   = prefBool ("post.autoExposure",   rset_.post_.autoExposure);
-        if (!rset_.postBloomFromCli_ && project_.postBloom < 0.0f)
+        if (!rset_.postBloomFromCli_ && projSess_.project_.postBloom < 0.0f)
             rset_.post_.bloomIntensity = prefFloat("post.bloomIntensity", rset_.post_.bloomIntensity);
         rset_.post_.nightVision = prefFloat("post.nightVision", rset_.post_.nightVision);
         // Migration: settingsVersion resets to compiled defaults.
-        if (!rset_.postExposureFromCli_ && project_.postExposure < 0.0f && prefInt("post.settingsVersion", 0) < 2)
+        if (!rset_.postExposureFromCli_ && projSess_.project_.postExposure < 0.0f && prefInt("post.settingsVersion", 0) < 2)
             rset_.post_.exposure = 1.0f;
         // Migration: exposureKey halved in v3 (doubling stored exposure).
-        if (!rset_.postExposureFromCli_ && project_.postExposure < 0.0f && prefInt("post.settingsVersion", 0) < 3)
+        if (!rset_.postExposureFromCli_ && projSess_.project_.postExposure < 0.0f && prefInt("post.settingsVersion", 0) < 3)
             rset_.post_.exposure = std::min(rset_.post_.exposure * 2.0f, 8.0f);
     }
 
@@ -597,7 +597,7 @@ void SandboxApp::buildWorldSettings() {
         return;
     }
 
-    if (levelPath_.empty()) {
+    if (projSess_.levelPath_.empty()) {
         ImGui::TextDisabled("No level is open.");
         ImGui::TextWrapped("World Settings edit the level file. Open or create a level first.");
         ImGui::End();
@@ -606,8 +606,8 @@ void SandboxApp::buildWorldSettings() {
 
     ImGui::TextDisabled("Level");
     ImGui::Separator();
-    ImGui::Text("%s", levelName_.empty() ? "(untitled)" : levelName_.c_str());
-    ImGui::TextDisabled("%s", levelPath_.c_str());
+    ImGui::Text("%s", projSess_.levelName_.empty() ? "(untitled)" : projSess_.levelName_.c_str());
+    ImGui::TextDisabled("%s", projSess_.levelPath_.c_str());
     ImGui::Dummy(ImVec2(0, 6.0f * viewState_.dpi_));
 
     // ---- GameMode and default pawn overrides ----
@@ -617,7 +617,7 @@ void SandboxApp::buildWorldSettings() {
     {
         // Stored by class NAME (handles are process-local). Empty = inherit: the project's GAME.MODE,
         // then the engine's own (the flying drone).
-        const std::string projectGm = project_.gameMode.empty() ? "engine default: drone" : project_.gameMode;
+        const std::string projectGm = projSess_.project_.gameMode.empty() ? "engine default: drone" : projSess_.project_.gameMode;
         if (classPicker("GameMode Override", lvl_.levelHeader_.gameMode, AVER_FW_CLASS_GAME_MODE,
                         ("Project default (" + projectGm + ")").c_str(), "AverDefaultGameMode",
                         "Engine default (drone)"))
@@ -770,20 +770,20 @@ void SandboxApp::buildProjectSettings() {
     if (panels_.settingsPage_ == 0) {
         ImGui::TextUnformatted("Description");
         ImGui::Separator();
-        if (project_.valid()) {
+        if (projSess_.project_.valid()) {
             // Editable at last: this page was five ImGui::Text lines, so name/author/start map
             // couldn't be changed from the editor -- saveProjectManifest already wrote them via
             // writeOcproject, which owns NAME/AUTHOR/CONTENT/STARTMAP. Only the widgets were missing.
             ImGui::PushItemWidth(-160.0f * viewState_.dpi_);
-            if (editField("Name", project_.name, 96)) autosave_.projectDirty_ = true;
+            if (editField("Name", projSess_.project_.name, 96)) autosave_.projectDirty_ = true;
             uiReg_.track("project.name");
             // Rename is manifest-only: folder/filename keep the old name, and project_.name feeds
             // csharpNamespaceFor(), so new scripts/materials get a namespace existing ones don't.
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Renames the project in the manifest only.\nThe folder and file keep their names, and new scripts get a namespace from this.");
-            if (editField("Author", project_.author, 96)) autosave_.projectDirty_ = true;
+            if (editField("Author", projSess_.project_.author, 96)) autosave_.projectDirty_ = true;
             uiReg_.track("project.author");
-            if (editField("Start map", project_.startMap, 256)) autosave_.projectDirty_ = true;
+            if (editField("Start map", projSess_.project_.startMap, 256)) autosave_.projectDirty_ = true;
             uiReg_.track("project.startMap");
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Relative to the content root, e.g. Maps/Default.ocmap");
@@ -793,13 +793,13 @@ void SandboxApp::buildProjectSettings() {
             // Map which at least errors. Rescanned each time it opens (same pattern as
             // refreshFoliagePalette in SandboxViewport.cpp); fine for a handful of .ocinput files.
             {
-                const std::string curLabel = project_.inputScheme.empty() ? "None" : project_.inputScheme;
+                const std::string curLabel = projSess_.project_.inputScheme.empty() ? "None" : projSess_.project_.inputScheme;
                 if (ImGui::BeginCombo("Input Scheme", curLabel.c_str())) {
-                    if (ImGui::Selectable("None", project_.inputScheme.empty())) {
-                        project_.inputScheme.clear();
+                    if (ImGui::Selectable("None", projSess_.project_.inputScheme.empty())) {
+                        projSess_.project_.inputScheme.clear();
                         autosave_.projectDirty_ = true;
                     }
-                    const std::string dir = project_.contentDir();
+                    const std::string dir = projSess_.project_.contentDir();
                     std::error_code ec;
                     if (!dir.empty() && std::filesystem::exists(dir, ec)) {
                         std::vector<std::string> choices;
@@ -819,8 +819,8 @@ void SandboxApp::buildProjectSettings() {
                         }
                         std::sort(choices.begin(), choices.end());
                         for (const std::string& c : choices)
-                            if (ImGui::Selectable(c.c_str(), c == project_.inputScheme)) {
-                                project_.inputScheme = c;
+                            if (ImGui::Selectable(c.c_str(), c == projSess_.project_.inputScheme)) {
+                                projSess_.project_.inputScheme = c;
                                 autosave_.projectDirty_ = true;
                             }
                     }
@@ -833,7 +833,7 @@ void SandboxApp::buildProjectSettings() {
             }
 #if AVER_MODULE_FRAMEWORK
             // GAME.MODE: the GameMode every level without its own World Settings override uses.
-            if (classPicker("Default Game Mode", project_.gameMode, AVER_FW_CLASS_GAME_MODE,
+            if (classPicker("Default Game Mode", projSess_.project_.gameMode, AVER_FW_CLASS_GAME_MODE,
                             "Engine default (drone)", nullptr, nullptr))
                 autosave_.projectDirty_ = true;
             uiReg_.track("project.gameMode");
@@ -847,17 +847,17 @@ void SandboxApp::buildProjectSettings() {
             {
                 const auto reloadLoc = [&](const std::string& previewTag) {
                     game::LocalizationInit li;
-                    li.project = &project_;
+                    li.project = &projSess_.project_;
                     li.cultureOverride = previewTag;
                     li.readSavedCulture = false;
                     game::initLocalization(li);
                 };
-                const std::string curDefault = project_.localeDefault.empty() ? std::string("en") : project_.localeDefault;
+                const std::string curDefault = projSess_.project_.localeDefault.empty() ? std::string("en") : projSess_.project_.localeDefault;
                 if (ImGui::BeginCombo("Default Culture", curDefault.c_str())) {
                     for (int i = 0; i < aver_fw_loc_culture_count(); ++i) {
                         const std::string tag = aver_fw_loc_culture_at(i);
                         if (ImGui::Selectable(tag.c_str(), tag == curDefault)) {
-                            project_.localeDefault = tag;
+                            projSess_.project_.localeDefault = tag;
                             autosave_.projectDirty_ = true;
                             reloadLoc(aver_fw_loc_culture());
                         }
@@ -874,7 +874,7 @@ void SandboxApp::buildProjectSettings() {
                                              ImGuiInputTextFlags_EnterReturnsTrue)) {
                     const std::string tag = fmt::normalizeCulture(freeCulture);
                     if (!tag.empty()) {
-                        project_.localeDefault = tag;
+                        projSess_.project_.localeDefault = tag;
                         autosave_.projectDirty_ = true;
                         freeCulture[0] = '\0';
                         reloadLoc(aver_fw_loc_culture());
@@ -903,16 +903,16 @@ void SandboxApp::buildProjectSettings() {
             // Read-only on purpose: ENGINE is a requirement, not a preference, and changing CONTENT
             // mid-session would move where every asset resolves from with nothing re-mounting.
             ImGui::Text("Engine      %s %s (this build: %.*s)",
-                        project_.engineName.empty() ? "(unset)" : project_.engineName.c_str(),
-                        project_.engineMinVersion.empty() ? "" : project_.engineMinVersion.c_str(),
+                        projSess_.project_.engineName.empty() ? "(unset)" : projSess_.project_.engineName.c_str(),
+                        projSess_.project_.engineMinVersion.empty() ? "" : projSess_.project_.engineMinVersion.c_str(),
                         (int)kEngineVersion.size(), kEngineVersion.data());
-            ImGui::Text("Content     %s", project_.contentRoot.c_str());
+            ImGui::Text("Content     %s", projSess_.project_.contentRoot.c_str());
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Read-only: every asset path resolves from here, and nothing re-mounts on a change.");
             ImGui::Separator();
-            ImGui::TextDisabled("%s", project_.manifestPath.c_str());
+            ImGui::TextDisabled("%s", projSess_.project_.manifestPath.c_str());
             ImGui::Spacing();
-            if (project_.hasRenderSettings())
+            if (projSess_.project_.hasRenderSettings())
                 ImGui::TextDisabled("This project states render settings; they were applied on open.");
             else
                 ImGui::TextDisabled("This project states no render settings yet.");
@@ -953,15 +953,15 @@ void SandboxApp::buildProjectSettings() {
     // every drag was rejected as noise for a source-controlled .ocproject, but losing edits lost
     // worse -- see maybeAutosaveProject, which now debounces a write half a second after the last
     // change. The button stays for a deliberate save; the dirty mark shows the window before it fires.
-    if (project_.valid()) {
+    if (projSess_.project_.valid()) {
         ImGui::Separator();
         ImGui::BeginDisabled(!autosave_.projectDirty_);
         if (ImGui::Button("Save Project Settings", ImVec2(220.0f * viewState_.dpi_, 0.0f))) {
             std::string why;
             if (saveProjectManifest(&why)) {
-                projectSaveStatus_ = "Saved.";
+                projSess_.projectSaveStatus_ = "Saved.";
             } else {
-                projectSaveStatus_ = "Save failed: " + why;
+                projSess_.projectSaveStatus_ = "Save failed: " + why;
                 notifyOutcome(editor::NotifySeverity::Error, "Could not save project settings",
                               why, true);
             }
@@ -979,12 +979,12 @@ void SandboxApp::buildProjectSettings() {
         if (ImGui::Button("Revert", ImVec2(110.0f * viewState_.dpi_, 0.0f))) {
             fmt::ProjectDesc fresh;
             std::string why;
-            if (fmt::loadOcproject(project_.manifestPath, fresh, &why)) {
-                project_ = fresh;
+            if (fmt::loadOcproject(projSess_.project_.manifestPath, fresh, &why)) {
+                projSess_.project_ = fresh;
                 autosave_.projectDirty_ = false;
-                projectSaveStatus_ = "Reverted to the file on disk.";
+                projSess_.projectSaveStatus_ = "Reverted to the file on disk.";
             } else {
-                projectSaveStatus_ = "Revert failed: " + why;
+                projSess_.projectSaveStatus_ = "Revert failed: " + why;
                 notifyOutcome(editor::NotifySeverity::Error, "Could not revert project settings",
                               why, true);
             }
@@ -996,9 +996,9 @@ void SandboxApp::buildProjectSettings() {
             ImGui::SameLine();
             ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f), "unsaved changes");
         }
-        if (!projectSaveStatus_.empty()) {
+        if (!projSess_.projectSaveStatus_.empty()) {
             ImGui::SameLine();
-            ImGui::TextDisabled("%s", projectSaveStatus_.c_str());
+            ImGui::TextDisabled("%s", projSess_.projectSaveStatus_.c_str());
         }
     }
     ImGui::End();
@@ -1047,7 +1047,7 @@ void SandboxApp::buildWindowSettings() {
 #if AVER_WITH_IMGUI
     ImGui::TextUnformatted("Window");
     ImGui::Separator();
-    if (!project_.valid()) { ImGui::TextDisabled("No project loaded."); return; }
+    if (!projSess_.project_.valid()) { ImGui::TextDisabled("No project loaded."); return; }
 
     ImGui::TextDisabled("What a PACKAGED GAME opens as. The editor ignores all of it -- its own");
     ImGui::TextDisabled("window is an editor concern and lives in editor.ini.");
@@ -1055,41 +1055,41 @@ void SandboxApp::buildWindowSettings() {
 
     {
         char buf[128];
-        std::snprintf(buf, sizeof buf, "%s", project_.windowTitle.c_str());
+        std::snprintf(buf, sizeof buf, "%s", projSess_.project_.windowTitle.c_str());
         ImGui::SetNextItemWidth(320.0f * viewState_.dpi_);
-        if (ImGui::InputTextWithHint("Title", project_.name.c_str(), buf, sizeof buf)) {
-            project_.windowTitle = buf;
+        if (ImGui::InputTextWithHint("Title", projSess_.project_.name.c_str(), buf, sizeof buf)) {
+            projSess_.project_.windowTitle = buf;
             autosave_.projectDirty_ = true;
         }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Empty uses the project's NAME.");
     }
     {
-        int wh[2] = {project_.windowWidth > 0 ? project_.windowWidth : 1280,
-                     project_.windowHeight > 0 ? project_.windowHeight : 720};
-        bool stated = project_.windowWidth > 0 && project_.windowHeight > 0;
+        int wh[2] = {projSess_.project_.windowWidth > 0 ? projSess_.project_.windowWidth : 1280,
+                     projSess_.project_.windowHeight > 0 ? projSess_.project_.windowHeight : 720};
+        bool stated = projSess_.project_.windowWidth > 0 && projSess_.project_.windowHeight > 0;
         ImGui::PushID("size");
         if (ImGui::Checkbox("##stated", &stated)) {
-            project_.windowWidth  = stated ? wh[0] : -1;
-            project_.windowHeight = stated ? wh[1] : -1;
+            projSess_.project_.windowWidth  = stated ? wh[0] : -1;
+            projSess_.project_.windowHeight = stated ? wh[1] : -1;
             autosave_.projectDirty_ = true;
         }
         ImGui::SameLine();
         ImGui::BeginDisabled(!stated);
         ImGui::SetNextItemWidth(220.0f * viewState_.dpi_);
         if (ImGui::InputInt2("Size", wh)) {
-            project_.windowWidth  = wh[0];
-            project_.windowHeight = wh[1];
+            projSess_.project_.windowWidth  = wh[0];
+            projSess_.project_.windowHeight = wh[1];
             autosave_.projectDirty_ = true;
         }
         ImGui::EndDisabled();
         ImGui::PopID();
     }
-    settingInt("Resizable", &project_.windowResizable, 0, 1, 1, "0 or 1.");
-    settingInt("Fullscreen", &project_.windowFullscreen, 0, 1, 0,
+    settingInt("Resizable", &projSess_.project_.windowResizable, 0, 1, 1, "0 or 1.");
+    settingInt("Fullscreen", &projSess_.project_.windowFullscreen, 0, 1, 0,
                "Borderless fullscreen, applied when the game window is created.");
-    settingInt("V-Sync mode", &project_.windowVsync, 0, 3, 0,
+    settingInt("V-Sync mode", &projSess_.project_.windowVsync, 0, 3, 0,
                "The shipped game's present mode: 0 vsync, 1 off, 2 adaptive, 3 mailbox. A device without the mode uses the nearest it has. The editor keeps its own V-Sync preference.");
-    settingInt("Max FPS", &project_.windowMaxFps, 0, 1000, 0, "The shipped game's frame rate cap; 0 is none.");
+    settingInt("Max FPS", &projSess_.project_.windowMaxFps, 0, 1000, 0, "The shipped game's frame rate cap; 0 is none.");
     ImGui::Spacing();
     ImGui::TextDisabled("Title, size, resizable and fullscreen reach platform::WindowDesc through");
     ImGui::TextDisabled("the game's BootConfig, at window creation.");
@@ -1101,7 +1101,7 @@ void SandboxApp::buildImportSettings() {
 #if AVER_WITH_IMGUI
     ImGui::TextUnformatted("Import Defaults");
     ImGui::Separator();
-    if (!project_.valid()) { ImGui::TextDisabled("No project loaded."); return; }
+    if (!projSess_.project_.valid()) { ImGui::TextDisabled("No project loaded."); return; }
 
     ImGui::TextDisabled("What an import assumes when the source file does not say. Every importer");
     ImGui::TextDisabled("already had these as an options struct; none of them was reachable from");
@@ -1110,15 +1110,15 @@ void SandboxApp::buildImportSettings() {
     ImGui::Spacing();
 
     {
-        f32 v = project_.importScale >= 0.0f ? project_.importScale : 100.0f;
-        bool stated = project_.importScale >= 0.0f;
+        f32 v = projSess_.project_.importScale >= 0.0f ? projSess_.project_.importScale : 100.0f;
+        bool stated = projSess_.project_.importScale >= 0.0f;
         ImGui::PushID("scale");
-        if (ImGui::Checkbox("##stated", &stated)) { project_.importScale = stated ? v : -1.0f; autosave_.projectDirty_ = true; }
+        if (ImGui::Checkbox("##stated", &stated)) { projSess_.project_.importScale = stated ? v : -1.0f; autosave_.projectDirty_ = true; }
         ImGui::SameLine();
         ImGui::BeginDisabled(!stated);
         ImGui::SetNextItemWidth(180.0f * viewState_.dpi_);
         if (ImGui::DragFloat("Unit scale", &v, 0.5f, 0.001f, 10000.0f, "%.3f")) {
-            project_.importScale = v;
+            projSess_.project_.importScale = v;
             autosave_.projectDirty_ = true;
         }
         ImGui::EndDisabled();
@@ -1127,12 +1127,12 @@ void SandboxApp::buildImportSettings() {
                               "which is what glTF, USD and most DCCs export.");
         ImGui::PopID();
     }
-    settingInt("Convert axes", &project_.importConvertAxes, 0, 1, 1,
+    settingInt("Convert axes", &projSess_.project_.importConvertAxes, 0, 1, 1,
                "Y-up right-handed -> this engine's Z-up left-handed.");
-    settingInt("Generate normals", &project_.importGenNormals, 0, 1, 1,
+    settingInt("Generate normals", &projSess_.project_.importGenNormals, 0, 1, 1,
                "Synthesise normals a source file omitted.");
-    settingInt("Generate mips", &project_.importGenMips, 0, 1, 1, nullptr);
-    settingInt("Max texture (px)", &project_.importMaxTexture, 0, 8192, 2048,
+    settingInt("Generate mips", &projSess_.project_.importGenMips, 0, 1, 1, nullptr);
+    settingInt("Max texture (px)", &projSess_.project_.importMaxTexture, 0, 8192, 2048,
                "Downscale ceiling. 0 means no cap.\n"
                "A 4K import is tens of MB per texture once mipped.");
     ImGui::Spacing();
@@ -1147,28 +1147,28 @@ void SandboxApp::buildStreamSettings() {
 #if AVER_WITH_IMGUI
     ImGui::TextUnformatted("World Streaming");
     ImGui::Separator();
-    if (!project_.valid()) { ImGui::TextDisabled("No project loaded."); return; }
+    if (!projSess_.project_.valid()) { ImGui::TextDisabled("No project loaded."); return; }
 
     ImGui::TextDisabled("world::StreamSettings -- the knobs a shipping title tunes per platform.");
     ImGui::Spacing();
-    settingInt("Load radius",     &project_.streamLoadRadius,     1, 16, 3, "Chunks loaded around the camera.");
-    settingInt("Evict radius",    &project_.streamEvictRadius,    1, 32, 5,
+    settingInt("Load radius",     &projSess_.project_.streamLoadRadius,     1, 16, 3, "Chunks loaded around the camera.");
+    settingInt("Evict radius",    &projSess_.project_.streamEvictRadius,    1, 32, 5,
                "Must exceed the load radius, or a chunk is evicted the frame after it loads.");
-    settingInt("Load budget",     &project_.streamLoadBudget,     1, 32, 2,
+    settingInt("Load budget",     &projSess_.project_.streamLoadBudget,     1, 32, 2,
                "Chunks loaded per frame. THE ONLY THING BOUNDING THE FRAME HITCH:\n"
                "the load is synchronous, so this is a frame-time dial, not a memory one.");
-    settingInt("Evict budget",    &project_.streamEvictBudget,    1, 32, 4, nullptr);
-    settingInt("Vertical radius", &project_.streamVerticalRadius, 0, 8,  1, nullptr);
+    settingInt("Evict budget",    &projSess_.project_.streamEvictBudget,    1, 32, 4, nullptr);
+    settingInt("Vertical radius", &projSess_.project_.streamVerticalRadius, 0, 8,  1, nullptr);
     {
-        f32 v = project_.streamLeadSeconds >= 0.0f ? project_.streamLeadSeconds : 1.5f;
-        bool stated = project_.streamLeadSeconds >= 0.0f;
+        f32 v = projSess_.project_.streamLeadSeconds >= 0.0f ? projSess_.project_.streamLeadSeconds : 1.5f;
+        bool stated = projSess_.project_.streamLeadSeconds >= 0.0f;
         ImGui::PushID("lead");
-        if (ImGui::Checkbox("##stated", &stated)) { project_.streamLeadSeconds = stated ? v : -1.0f; autosave_.projectDirty_ = true; }
+        if (ImGui::Checkbox("##stated", &stated)) { projSess_.project_.streamLeadSeconds = stated ? v : -1.0f; autosave_.projectDirty_ = true; }
         ImGui::SameLine();
         ImGui::BeginDisabled(!stated);
         ImGui::SetNextItemWidth(180.0f * viewState_.dpi_);
         if (ImGui::SliderFloat("Lead seconds", &v, 0.0f, 10.0f, "%.2f")) {
-            project_.streamLeadSeconds = v;
+            projSess_.project_.streamLeadSeconds = v;
             autosave_.projectDirty_ = true;
         }
         ImGui::EndDisabled();
@@ -1197,22 +1197,22 @@ void SandboxApp::buildPhysicsSettings() {
 
     ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.45f);
     ImGui::TextUnformatted("Gravity (cm/s^2)");
-    if (ImGui::DragFloat3("##gravity", project_.gravity, 1.0f, -10000.0f, 10000.0f, "%.1f")) {
-        project_.hasGravity = true;
+    if (ImGui::DragFloat3("##gravity", projSess_.project_.gravity, 1.0f, -10000.0f, 10000.0f, "%.1f")) {
+        projSess_.project_.hasGravity = true;
         autosave_.projectDirty_ = true;
-        if (ready) aver_phys_set_gravity(project_.gravity[0], project_.gravity[1], project_.gravity[2]);
+        if (ready) aver_phys_set_gravity(projSess_.project_.gravity[0], projSess_.project_.gravity[1], projSess_.project_.gravity[2]);
     }
     uiReg_.track("project.physics.gravity");
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Engine axes, +Z up. One g down is (0, 0, -980).");
 
     // Stored in seconds (ABI unit), displayed as Hz; conversion here only.
-    f32 hz = project_.fixedStep > 0.0f ? 1.0f / project_.fixedStep : 60.0f;
+    f32 hz = projSess_.project_.fixedStep > 0.0f ? 1.0f / projSess_.project_.fixedStep : 60.0f;
     if (ImGui::SliderFloat("Tick rate (Hz)", &hz, 20.0f, 240.0f, "%.0f")) {
-        project_.fixedStep = 1.0f / hz;
+        projSess_.project_.fixedStep = 1.0f / hz;
         autosave_.projectDirty_ = true;
         // Setter refuses outside (0, 0.5] and returns 0.
-        if (ready && !aver_phys_set_fixed_step(project_.fixedStep))
+        if (ready && !aver_phys_set_fixed_step(projSess_.project_.fixedStep))
             AVER_WARN("[Project] physics tick rate {} Hz refused by the solver", hz);
     }
     uiReg_.track("project.physics.tickRate");
@@ -1223,8 +1223,8 @@ void SandboxApp::buildPhysicsSettings() {
     ImGui::PopItemWidth();
 
     if (ready) ImGui::TextDisabled("%d body(ies) in the world.", aver_phys_body_count());
-    editor::drawPhysicsSettingsGroups(project_, autosave_.projectDirty_, viewState_.dpi_);
-    editor::drawPhysicalSurfaceTable(project_.contentDir(), viewState_.dpi_);   // Content/Physics/Surfaces.ocsurf as an editable table; Save registers the rows with the physics module
+    editor::drawPhysicsSettingsGroups(projSess_.project_, autosave_.projectDirty_, viewState_.dpi_);
+    editor::drawPhysicalSurfaceTable(projSess_.project_.contentDir(), viewState_.dpi_);   // Content/Physics/Surfaces.ocsurf as an editable table; Save registers the rows with the physics module
 #else
     ImGui::TextDisabled("This build has no physics module.");
 #endif
@@ -1243,23 +1243,23 @@ void SandboxApp::buildAudioSettings() {
     // One presence flag for the whole mix (OcProjectDesc::hasAudioMix): touching any slider states
     // it, because a muted bus and an unstated one must stay different things.
     bool mixed = false;
-    if (ImGui::SliderFloat("Master", &project_.masterVolume, 0.0f, 1.0f, "%.2f")) mixed = true;
+    if (ImGui::SliderFloat("Master", &projSess_.project_.masterVolume, 0.0f, 1.0f, "%.2f")) mixed = true;
     uiReg_.track("project.audio.master");
     ImGui::Separator();
     static const char* kBusNames[4] = {"Sfx", "Music", "Voice", "UI"};
     for (int b = 0; b < 4; ++b) {
-        if (ImGui::SliderFloat(kBusNames[b], &project_.busVolume[b], 0.0f, 1.0f, "%.2f")) mixed = true;
+        if (ImGui::SliderFloat(kBusNames[b], &projSess_.project_.busVolume[b], 0.0f, 1.0f, "%.2f")) mixed = true;
         uiReg_.track((std::string("project.audio.bus.") + kBusNames[b]).c_str());
     }
     ImGui::PopItemWidth();
 
     if (mixed) {
-        project_.hasAudioMix = true;
+        projSess_.project_.hasAudioMix = true;
         autosave_.projectDirty_ = true;
-        aver_audio_set_master_volume(project_.masterVolume);
-        for (int b = 0; b < 4; ++b) aver_audio_set_bus_volume(b, project_.busVolume[b]);
+        aver_audio_set_master_volume(projSess_.project_.masterVolume);
+        for (int b = 0; b < 4; ++b) aver_audio_set_bus_volume(b, projSess_.project_.busVolume[b]);
     }
-    if (!project_.hasAudioMix)
+    if (!projSess_.project_.hasAudioMix)
         ImGui::TextDisabled("This project states no mix; these are the engine's defaults.");
 #else
     ImGui::TextDisabled("This build does not link the audio seam.");
@@ -1291,7 +1291,7 @@ void SandboxApp::renderPageOverview(voxi::Renderer& vx, voxi::Settings& s, const
 #if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
                 // The particle scalability tier follows the preset unless the project pins it (RENDER.PARTICLESCALE).
                 particles::ScalabilityTier pt;
-                if (project_.particleScale < 0 && particles::tierForQualityRung(static_cast<u32>(kRungs[i]), pt))
+                if (projSess_.project_.particleScale < 0 && particles::tierForQualityRung(static_cast<u32>(kRungs[i]), pt))
                     particles::particleEffects().setScalabilityTier(pt);
 #endif
             }
@@ -1425,7 +1425,7 @@ void SandboxApp::renderPageAntiAliasing(voxi::Renderer& vx, voxi::Settings& s, c
         ImGui::BeginDisabled(rset_.taaFromCli_);
         if (ImGui::Checkbox("Temporal anti-aliasing (TAA)", &taa)) {
             rset_.temporalAaEnabled_ = taa;
-            project_.taa = taa ? 1 : 0;
+            projSess_.project_.taa = taa ? 1 : 0;
             autosave_.projectDirty_ = true;
         }
         ImGui::EndDisabled();
@@ -1447,7 +1447,7 @@ void SandboxApp::renderPageAntiAliasing(voxi::Renderer& vx, voxi::Settings& s, c
         ImGui::BeginDisabled(rset_.neuraaFromCli_);
         if (ImGui::Checkbox("NeuRAA edge anti-aliasing", &nra)) {
             rset_.neuraaEnabled_ = nra;
-            project_.neuraa = nra ? 1 : 0;
+            projSess_.project_.neuraa = nra ? 1 : 0;
             autosave_.projectDirty_ = true;
         }
         ImGui::EndDisabled();
@@ -1511,9 +1511,9 @@ void SandboxApp::renderPageAntiAliasing(voxi::Renderer& vx, voxi::Settings& s, c
     ImGui::Separator();
     // Frame interpolation for Play and packaged game (RENDER.FRAMEINTERP in project).
     {
-        bool fg = project_.frameInterp == 1;
+        bool fg = projSess_.project_.frameInterp == 1;
         if (ImGui::Checkbox("Frame interpolation (Play and packaged game)", &fg)) {
-            project_.frameInterp = fg ? 1 : 0;
+            projSess_.project_.frameInterp = fg ? 1 : 0;
             autosave_.projectDirty_ = true;
         }
         uiReg_.track("project.frameInterp");
@@ -2111,14 +2111,14 @@ void SandboxApp::renderPagePost(voxi::Renderer& vx, voxi::Settings& s, const vox
                 ImGui::SetTooltip("%s", tip);
             ImGui::PopID();
         };
-        postFloat("exposure", "Exposure", &project_.postExposure, &rset_.post_.exposure,
+        postFloat("exposure", "Exposure", &projSess_.project_.postExposure, &rset_.post_.exposure,
                   0.05f, 8.0f, "%.2f", ImGuiSliderFlags_Logarithmic,
                   "project.post.exposure",
                   "Linear multiplier on scene radiance, applied before the tone\n"
                   "curve. With auto exposure below on, it is compensation on the\n"
                   "adapted value: 1 = as metered, 2 = one stop brighter.\n\n"
                   "Round-trips as RENDER.EXPOSURE.");
-        postFloat("bloom", "Bloom", &project_.postBloom, &rset_.post_.bloomIntensity,
+        postFloat("bloom", "Bloom", &projSess_.project_.postBloom, &rset_.post_.bloomIntensity,
                   0.0f, 1.0f, "%.3f", 0, "project.post.bloom",
                   "ZERO IS A REAL ANSWER HERE, which is why the key's sentinel is\n"
                   "-1 and not 0: zero intensity builds no pyramid and records no\n"
@@ -2129,10 +2129,10 @@ void SandboxApp::renderPagePost(voxi::Renderer& vx, voxi::Settings& s, const vox
         {
             // Checkbox, not settingInt slider. Tracks before tooltip for ordering.
             ImGui::PushID("autoExposure");
-            bool stated = project_.postAutoExposure >= 0;
-            bool on = stated ? project_.postAutoExposure != 0 : rset_.post_.autoExposure;
+            bool stated = projSess_.project_.postAutoExposure >= 0;
+            bool on = stated ? projSess_.project_.postAutoExposure != 0 : rset_.post_.autoExposure;
             if (ImGui::Checkbox("##stated", &stated)) {
-                project_.postAutoExposure = stated ? (on ? 1 : 0) : -1;
+                projSess_.project_.postAutoExposure = stated ? (on ? 1 : 0) : -1;
                 if (stated) rset_.post_.autoExposure = on;
                 autosave_.projectDirty_ = true;
             }
@@ -2142,7 +2142,7 @@ void SandboxApp::renderPagePost(voxi::Renderer& vx, voxi::Settings& s, const vox
             ImGui::SameLine();
             ImGui::BeginDisabled(!stated);
             if (ImGui::Checkbox("Auto exposure", &on)) {
-                project_.postAutoExposure = on ? 1 : 0;
+                projSess_.project_.postAutoExposure = on ? 1 : 0;
                 rset_.post_.autoExposure = on;
                 autosave_.projectDirty_ = true;
             }
@@ -2157,18 +2157,18 @@ void SandboxApp::renderPagePost(voxi::Renderer& vx, voxi::Settings& s, const vox
             ImGui::PopID();
         }
         // Amber when adaptation is on: the recorded value still applies where adaptation is off.
-        if (rset_.post_.autoExposure && project_.postExposure >= 0.0f)
+        if (rset_.post_.autoExposure && projSess_.project_.postExposure >= 0.0f)
             ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
                 "Auto exposure is on, so the adaptation overwrites Exposure every frame. The "
                 "recorded value still applies wherever auto exposure is off.");
         {
             ImGui::PushID("tonemap");
-            bool stated = project_.postTonemap >= 0;
+            bool stated = projSess_.project_.postTonemap >= 0;
             // Clamped from both sources; neither is bounded.
-            int mode = stated ? project_.postTonemap : static_cast<int>(rset_.post_.tonemap);
+            int mode = stated ? projSess_.project_.postTonemap : static_cast<int>(rset_.post_.tonemap);
             if (mode > 7) mode = 7;
             if (ImGui::Checkbox("##stated", &stated)) {
-                project_.postTonemap = stated ? mode : -1;
+                projSess_.project_.postTonemap = stated ? mode : -1;
                 if (stated) rset_.post_.tonemap = static_cast<u32>(mode);
                 autosave_.projectDirty_ = true;
             }
@@ -2180,7 +2180,7 @@ void SandboxApp::renderPagePost(voxi::Renderer& vx, voxi::Settings& s, const vox
             if (ImGui::Combo("Tone curve", &mode,
                              "Per-channel ACES\0ACES fitted (default)\0ACES luminance\0"
                              "Extended linear\0Extended Reinhard\0Extended filmic\0Extended ACES\0Extended AgX\0")) {
-                project_.postTonemap = mode;
+                projSess_.project_.postTonemap = mode;
                 rset_.post_.tonemap = static_cast<u32>(mode);
                 autosave_.projectDirty_ = true;
             }
@@ -2188,10 +2188,10 @@ void SandboxApp::renderPagePost(voxi::Renderer& vx, voxi::Settings& s, const vox
             {
                 // The white point and display adjustments (RENDER.TONEMAPWHITE / ADJUST*); an edit states the key.
                 struct Row { const char* label; f32* project; f32* live; f32 hi; };
-                Row rows[] = {{"Tone white", &project_.postTonemapWhite, &rset_.post_.tonemapWhite, 16.0f},
-                              {"Brightness", &project_.postAdjustBrightness, &rset_.post_.adjustBrightness, 4.0f},
-                              {"Contrast", &project_.postAdjustContrast, &rset_.post_.adjustContrast, 4.0f},
-                              {"Saturation", &project_.postAdjustSaturation, &rset_.post_.adjustSaturation, 4.0f}};
+                Row rows[] = {{"Tone white", &projSess_.project_.postTonemapWhite, &rset_.post_.tonemapWhite, 16.0f},
+                              {"Brightness", &projSess_.project_.postAdjustBrightness, &rset_.post_.adjustBrightness, 4.0f},
+                              {"Contrast", &projSess_.project_.postAdjustContrast, &rset_.post_.adjustContrast, 4.0f},
+                              {"Saturation", &projSess_.project_.postAdjustSaturation, &rset_.post_.adjustSaturation, 4.0f}};
                 for (Row& r : rows) {
                     float v = *r.project >= 0.0f ? *r.project : *r.live;
                     if (ImGui::DragFloat(r.label, &v, 0.01f, 0.001f, r.hi, "%.3f")) {
@@ -2268,9 +2268,9 @@ void SandboxApp::renderPagePerformance(voxi::Renderer& vx, voxi::Settings& s, co
     ImGui::Separator();
     ImGui::TextUnformatted("Particles");
     {
-        int pg = project_.particleGpu < 0 ? 1 : project_.particleGpu;
+        int pg = projSess_.project_.particleGpu < 0 ? 1 : projSess_.project_.particleGpu;
         if (ImGui::Combo("Particles on GPU", &pg, "Off (CPU only)\0Auto\0On\0")) {
-            project_.particleGpu = pg;
+            projSess_.project_.particleGpu = pg;
             particles::particleSystem().setGpuMode(pg);
             particleRenderer_.setGpuEnabled(pg != 0);
             autosave_.projectDirty_ = true;
@@ -2477,9 +2477,9 @@ void SandboxApp::saveEditorPreferences() {
     // writing anyway would adopt the project's look as this user's default everywhere, and buy
     // nothing, since the load declines to restore it and applyProject overwrites it regardless.
     if (maxFrames_ == 0) {
-        if (project_.postExposure < 0.0f)     setPrefFloat("post.exposure",     rset_.post_.exposure);
-        if (project_.postAutoExposure < 0)    setPrefBool ("post.autoExposure", rset_.post_.autoExposure);
-        if (project_.postBloom < 0.0f)      setPrefFloat("post.bloomIntensity", rset_.post_.bloomIntensity);
+        if (projSess_.project_.postExposure < 0.0f)     setPrefFloat("post.exposure",     rset_.post_.exposure);
+        if (projSess_.project_.postAutoExposure < 0)    setPrefBool ("post.autoExposure", rset_.post_.autoExposure);
+        if (projSess_.project_.postBloom < 0.0f)      setPrefFloat("post.bloomIntensity", rset_.post_.bloomIntensity);
         setPrefFloat("post.nightVision", rset_.post_.nightVision);
         // Marks the one-time exposure migrations above as done, so a session that never touches
         // Brightness still leaves editor.ini past the version that would force them again.

@@ -63,7 +63,7 @@ void SandboxApp::applyProject(Engine& e) {
     startupSettleCount_ = -2;
     startupSettleFrames_ = 0;
 #endif
-    projectLoadingFrames_ = 0;
+    projSess_.projectLoadingFrames_ = 0;
     LoadingScreen& loading = *projectLoading_;
     loading.stage("Opening project");
 
@@ -72,22 +72,22 @@ void SandboxApp::applyProject(Engine& e) {
     // and the unloadLevel that follows would file it under the new one.
     storeLevelView();
 #endif
-    project_ = browser_.project();
-    editor::toolingContentDirSlot() = project_.valid() ? project_.contentDir() : std::string();
+    projSess_.project_ = browser_.project();
+    editor::toolingContentDirSlot() = projSess_.project_.valid() ? projSess_.project_.contentDir() : std::string();
 #if AVER_MODULE_FRAMEWORK
-    game::publishProjectPaths(project_, /*editor=*/true);   // res:// and user:// for scripts
+    game::publishProjectPaths(projSess_.project_, /*editor=*/true);   // res:// and user:// for scripts
 #endif
 #if AVER_MODULE_PHYSICS
     // This project's solver settings and world limits, before its level builds a single body: the limits are
     // fixed for a world's lifetime, so an empty world is rebuilt here (PhysicsProjectApply.hpp).
-    game::configureProjectPhysics(project_, "Sandbox");
+    game::configureProjectPhysics(projSess_.project_, "Sandbox");
 #endif
-    editor::setActorEditorContentRoot(project_.contentDir());
+    editor::setActorEditorContentRoot(projSess_.project_.contentDir());
     // The project's physical-surface table, before its level builds a shape (the editor re-registers it when the Physical Surfaces
     // panel saves). Registration is independent of any physics world; a missing file is silent.
-    game::loadPhysicalSurfaces(project_.contentDir());
+    game::loadPhysicalSurfaces(projSess_.project_.contentDir());
 
-    editor::setAnimEditorContentRoot(project_.contentDir());
+    editor::setAnimEditorContentRoot(projSess_.project_.contentDir());
     loading.stage("Applying project settings");
     applyProjectRenderSettings();
     // ---- RENDER.EXPOSURE / BLOOM / AUTOEXPOSURE / TONEMAP: THE POST CHAIN A PROJECT COULD NOT
@@ -120,12 +120,12 @@ void SandboxApp::applyProject(Engine& e) {
     // preference is one machine's editor.ini and would move a gate probe on that machine and not
     // another, while these keys are IN THE PROJECT -- the same bytes for everyone who checks it
     // out, which is the property a baseline needs. Auto exposure is the exception, below.
-    if (project_.postExposure >= 0.0f && !rset_.postExposureFromCli_)
-        rset_.post_.exposure = project_.postExposure;
-    if (project_.postBloom >= 0.0f && !rset_.postBloomFromCli_)
-        rset_.post_.bloomIntensity = project_.postBloom;
-    if (project_.postAutoExposure >= 0 && !rset_.postAutoExpFromCli_) {
-        rset_.post_.autoExposure = project_.postAutoExposure != 0;
+    if (projSess_.project_.postExposure >= 0.0f && !rset_.postExposureFromCli_)
+        rset_.post_.exposure = projSess_.project_.postExposure;
+    if (projSess_.project_.postBloom >= 0.0f && !rset_.postBloomFromCli_)
+        rset_.post_.bloomIntensity = projSess_.project_.postBloom;
+    if (projSess_.project_.postAutoExposure >= 0 && !rset_.postAutoExpFromCli_) {
+        rset_.post_.autoExposure = projSess_.project_.postAutoExposure != 0;
         // THE CAPTURE RULE IS CALLED, NOT RE-SPELLED. applyCaptureExposureRule
         // (SandboxSelfTests.cpp:214) owns "a --frames run has auto-exposure off unless the run
         // asked for it by name" and main() calls it at startup -- a manifest key that switched the
@@ -135,9 +135,9 @@ void SandboxApp::applyProject(Engine& e) {
         // under test. Passing false is not a guess: this branch runs only when postAutoExpFromCli_
         // is false, which is precisely the question that parameter asks.
         applyCaptureExposureRule(/*explicitlyRequested=*/false);
-        if (project_.postAutoExposure != 0 && !rset_.post_.autoExposure)
+        if (projSess_.project_.postAutoExposure != 0 && !rset_.post_.autoExposure)
             AVER_INFO("[Project] RENDER.AUTOEXPOSURE 1 in {} is not applied in a run with a frame "
-                      "limit; pass --auto-exposure to ask for it by name", project_.manifestPath);
+                      "limit; pass --auto-exposure to ask for it by name", projSess_.project_.manifestPath);
     }
     // RENDER.TONEMAP HAS NO "WAS --tonemap GIVEN" BOOL TO ASK, which is why it is decided against
     // the compiled default instead: setPost keeps three such bools, setTonemap
@@ -151,38 +151,38 @@ void SandboxApp::applyProject(Engine& e) {
     // the other three would close that, and it is a change to SandboxApp.hpp and setTonemap rather
     // than to this file.
     // Clamped to the curves that exist (rhi/Tonemap.hpp), and the white point and display adjustments ride along.
-    rhi::applyProjectTonemapKeys(rset_.post_, project_.postTonemap, project_.postTonemapWhite, project_.postAdjustBrightness,
-                                 project_.postAdjustContrast, project_.postAdjustSaturation,
+    rhi::applyProjectTonemapKeys(rset_.post_, projSess_.project_.postTonemap, projSess_.project_.postTonemapWhite, projSess_.project_.postAdjustBrightness,
+                                 projSess_.project_.postAdjustContrast, projSess_.project_.postAdjustSaturation,
                                  rset_.post_.tonemap == rhi::PostSettings{}.tonemap);
     // THE EFFECTIVE VALUES, AFTER PRECEDENCE -- not what the manifest asked for. A log line saying
     // what the file requested would be exactly as reassuring and exactly as useless in the case
     // that matters, which is a flag and a key disagreeing.
-    if (project_.postExposure >= 0.0f || project_.postBloom >= 0.0f ||
-        project_.postAutoExposure >= 0 || project_.postTonemap >= 0 || project_.postTonemapWhite >= 0.0f ||
-        project_.postAdjustBrightness >= 0.0f || project_.postAdjustContrast >= 0.0f || project_.postAdjustSaturation >= 0.0f)
+    if (projSess_.project_.postExposure >= 0.0f || projSess_.project_.postBloom >= 0.0f ||
+        projSess_.project_.postAutoExposure >= 0 || projSess_.project_.postTonemap >= 0 || projSess_.project_.postTonemapWhite >= 0.0f ||
+        projSess_.project_.postAdjustBrightness >= 0.0f || projSess_.project_.postAdjustContrast >= 0.0f || projSess_.project_.postAdjustSaturation >= 0.0f)
         AVER_INFO("[Project] post chain from {}: exposure {:.3f}, bloom {:.3f}, auto-exposure {}, "
-                  "tonemap {}", project_.manifestPath, rset_.post_.exposure, rset_.post_.bloomIntensity,
+                  "tonemap {}", projSess_.project_.manifestPath, rset_.post_.exposure, rset_.post_.bloomIntensity,
                   rset_.post_.autoExposure ? "on" : "off", rset_.post_.tonemap);
     startContentWatch();
     {
         // String and data-table stores for this project. The editor previews a culture (--culture, else the saved
         // preview choice) and never reads the player's own saved language.
         game::LocalizationInit li;
-        li.project = &project_;
+        li.project = &projSess_.project_;
         li.cultureOverride = launch_.cultureOverride_.empty() ? editor::prefString("loc.previewCulture", "") : launch_.cultureOverride_;
         li.readSavedCulture = false;
         game::initLocalization(li);
-        game::uiTextInit(project_.contentDir());   // the Play/preview font set: Content/UI/Fonts.ocfonts or the built-in one, following the preview culture
+        game::uiTextInit(projSess_.project_.contentDir());   // the Play/preview font set: Content/UI/Fonts.ocfonts or the built-in one, following the preview culture
         game::uiTextBindRenderer(gameUi_);
-        game::uiImagesSetContent(project_.contentDir());   // a Play session's UI images are read from this project's Content
+        game::uiImagesSetContent(projSess_.project_.contentDir());   // a Play session's UI images are read from this project's Content
 #if AVER_WITH_UI_ABI && AVER_MODULE_FRAMEWORK
         aver_ui_set_text_resolver(&aver_fw_loc_resolve, &aver_fw_loc_epoch);
 #endif
         // Accessibility (docs/ACCESSIBILITY.md): the options and the Captions folder of this project. A Play session tests the
         // player's own choices, so the options come from the same Saved/Settings.ini ConfigureInput opens (unlike the culture).
         game::AccessibilityInit ai;
-        ai.settingsPath = project_.dir + AVER_PATH_SEP "Saved" AVER_PATH_SEP "Settings.ini";
-        ai.contentDir = project_.contentDir();
+        ai.settingsPath = projSess_.project_.dir + AVER_PATH_SEP "Saved" AVER_PATH_SEP "Settings.ini";
+        ai.contentDir = projSess_.project_.contentDir();
         game::initAccessibility(ai);
 #if AVER_WITH_UI_ABI && AVER_MODULE_FRAMEWORK
         game::installAccessibilityUi();      // focus and value changes of widgets are spoken when narration is on
@@ -191,13 +191,13 @@ void SandboxApp::applyProject(Engine& e) {
         game::installAccessibilityAudio();   // every sound the audio ABI starts can raise its caption cue
 #endif
     }
-    pendingUpgrade_ = editor::inspectProject(project_);
+    projSess_.pendingUpgrade_ = editor::inspectProject(projSess_.project_);
     panels_.upgradeAsked_ = false;
-    if (!pendingUpgrade_.empty())
+    if (!projSess_.pendingUpgrade_.empty())
         AVER_INFO("[Editor] project '{}' predates {} of this editor's project files; offering to upgrade",
-                  project_.name, pendingUpgrade_.fixes.size());
+                  projSess_.project_.name, projSess_.pendingUpgrade_.fixes.size());
     if (e.window())
-        e.window()->setTitle("Aver Engine \xE2\x80\x94 Editor \xE2\x80\x94 " + project_.name);
+        e.window()->setTitle("Aver Engine \xE2\x80\x94 Editor \xE2\x80\x94 " + projSess_.project_.name);
 #if AVER_MODULE_PBR
     loading.stage("Loading materials");
     // THE BC7 DERIVED-DATA CACHE (modules/assets/TextureCache.hpp), pointed at THIS project before
@@ -206,10 +206,10 @@ void SandboxApp::applyProject(Engine& e) {
     // materials" stage missed the cache for its own load. Cleared (not left pointing at whatever
     // project is going away) when there is nothing valid to point it at, on the same "-1/empty
     // means unstated, do not silently keep the old value" rule the manifest keys above follow.
-    assets::setTextureCacheDir(project_.valid() ? project_.dir + AVER_PATH_SEP "Saved" AVER_PATH_SEP "DerivedDataCache" AVER_PATH_SEP "Textures"
+    assets::setTextureCacheDir(projSess_.project_.valid() ? projSess_.project_.dir + AVER_PATH_SEP "Saved" AVER_PATH_SEP "DerivedDataCache" AVER_PATH_SEP "Textures"
                                                 : std::string());
     releaseProjectMaterials();
-    content_.adopt(project_);
+    content_.adopt(projSess_.project_);
 #if AVER_MODULE_SCENE
     // [wave5/ik-retarget] adopt cleared AnimSystem; the project's .ocretarget assets say which clips play on which rig.
     anim::animSystem().registerRetargets(content_.idsWithExtension(".ocretarget"));
@@ -268,7 +268,7 @@ void SandboxApp::applyProject(Engine& e) {
     // and applyProjectPhysics asks aver_phys_ready() itself rather than trusting that, so a world
     // that does not exist yet produces "will apply once the world exists" instead of silence.
 #if AVER_MODULE_PHYSICS
-    game::applyProjectPhysics(project_);
+    game::applyProjectPhysics(projSess_.project_);
 #endif
 // AVER_WITH_AUDIO_ABI, not a plausible-looking AVER_MODULE_AUDIO -- there is no such macro,
 // and an #if on one compiles this whole block to nothing while the build stays green. It means
@@ -279,12 +279,12 @@ void SandboxApp::applyProject(Engine& e) {
 // device by a macro nobody read as a capability -- a packaged game was silent and Audio.Load
 // succeeded into nothing. Renamed for what it actually gates.
 #if AVER_WITH_AUDIO_ABI
-    game::applyProjectAudioMix(project_);
+    game::applyProjectAudioMix(projSess_.project_);
 #endif
 #if AVER_MODULE_SCRIPTING
     loading.stage("Starting scripts");
-    if (scripts_.ready() && launch_.scriptsDir_.empty() && project_.valid()) {
-        const std::string bin = editor::scriptsBinaryDir(project_);
+    if (scripts_.ready() && launch_.scriptsDir_.empty() && projSess_.project_.valid()) {
+        const std::string bin = editor::scriptsBinaryDir(projSess_.project_);
         const i32 n = scripts_.loadScripts(bin);
         if (n > 0) AVER_INFO("[Scripting] {} project behaviour(s) live from {}", n, bin);
         else if (!anyFileWithExtension(bin, ".dll"))   // a DLL of actor classes only (a converted project) holds no behaviours, and the bridge has said what it loaded
@@ -294,10 +294,10 @@ void SandboxApp::applyProject(Engine& e) {
     // initScripting() call -- a seam wired in one root and not the other is the exact defect
     // aee2404 exists to fix. Independent of scriptsDir_/the --scripts override: a graph class
     // lives under the project's CONTENT directory, declared regardless of which C# source loaded.
-    if (scripts_.ready() && project_.valid()) {
-        const i32 graphClasses = scripts_.declareGraphClasses(project_.contentDir());
+    if (scripts_.ready() && projSess_.project_.valid()) {
+        const i32 graphClasses = scripts_.declareGraphClasses(projSess_.project_.contentDir());
         if (graphClasses > 0)
-            AVER_INFO("[Graph] {} graph class(es) declared from '{}'", graphClasses, project_.contentDir());
+            AVER_INFO("[Graph] {} graph class(es) declared from '{}'", graphClasses, projSess_.project_.contentDir());
     }
 #endif
 #if AVER_MODULE_FRAMEWORK
@@ -316,7 +316,7 @@ void SandboxApp::applyProject(Engine& e) {
         spawnClassPlacements();
 #endif
     // Every renderer mode's shaders into the blob cache, in the background (interactive editor only).
-    if (e.window() != nullptr && maxFrames_ == 0) shaderWarmup_.start(project_.manifestPath);
+    if (e.window() != nullptr && maxFrames_ == 0) shaderWarmup_.start(projSess_.project_.manifestPath);
 }
 
 #if AVER_MODULE_VOXI
@@ -335,7 +335,7 @@ void SandboxApp::applyProject(Engine& e) {
 // settings, never voxiRenderer_ or the device. That is the same thing the startup block does
 // before init.
 void SandboxApp::applyProjectVoxiSettings() {
-    if (!project_.valid() || !project_.hasRenderSettings()) return;
+    if (!projSess_.project_.valid() || !projSess_.project_.hasRenderSettings()) return;
 
     voxi::Renderer& vx = voxi::Renderer::get();
 
@@ -351,18 +351,18 @@ void SandboxApp::applyProjectVoxiSettings() {
     // whatever THIS commit's tier resolved to, not whatever was already live before this project
     // opened.
     voxi::Settings x = vx.settings();
-    voxi::applyManifestTwoPhase(project_, x, [&]() { vx.setSettings(x); x = vx.settings(); });
+    voxi::applyManifestTwoPhase(projSess_.project_, x, [&]() { vx.setSettings(x); x = vx.settings(); });
 
     // The GI volume, which is not a voxi::Settings field at all -- it is set through
     // setVolume(centre, extent), so it has to be applied separately from the knob block above.
-    if (project_.hasGiVolume) {
-        rset_.giCenter_ = Vec3{project_.giCenter[0], project_.giCenter[1], project_.giCenter[2]};
-        rset_.giExtent_ = project_.giExtent;
+    if (projSess_.project_.hasGiVolume) {
+        rset_.giCenter_ = Vec3{projSess_.project_.giCenter[0], projSess_.project_.giCenter[1], projSess_.project_.giCenter[2]};
+        rset_.giExtent_ = projSess_.project_.giExtent;
     }
 }
 
 void SandboxApp::applyProjectRenderSettings() {
-    if (!project_.valid()) return;
+    if (!projSess_.project_.valid()) return;
 
     // MIRRORS, NOT A DELTA -- which is why these two run BEFORE the hasRenderSettings() guard
     // rather than beside the knobs they look like they belong with. Everything past that guard
@@ -375,16 +375,16 @@ void SandboxApp::applyProjectRenderSettings() {
     // GI -- and because the Rendering page writes the whole block back (project_.backend =
     // projectBackend_, below), the next edit to any control on that page baked the inherited
     // backend into a manifest that had never asked for it.
-    launch_.projectBackend_ = project_.backend;
+    launch_.projectBackend_ = projSess_.project_.backend;
     // NOT WHEN --frame-budget SAID SO. This runs on every project apply, and the manifest's
     // default is -1, so an unconditional assignment silently switched the flag back off one
     // frame after it was set -- the controller was wired, reachable and never once ran.
-    if (!rset_.frameBudgetForced_) rset_.frameBudgetMs_ = project_.frameBudgetMs;
+    if (!rset_.frameBudgetForced_) rset_.frameBudgetMs_ = projSess_.project_.frameBudgetMs;
 #if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
     // G4 R5: how many sub-viewports may exist and how many are drawn per frame; a mirror like the lines above (an unstated key is the default, not 'keep the last project's').
-    game::SubViewportHost::configure(game::subViewportSettingsOf(project_.subViewports, project_.subViewRenders, project_.subViewPixels));
+    game::SubViewportHost::configure(game::subViewportSettingsOf(projSess_.project_.subViewports, projSess_.project_.subViewRenders, projSess_.project_.subViewPixels));
 #endif
-    game::configureRuntimeMeshBudget(project_);
+    game::configureRuntimeMeshBudget(projSess_.project_);
 #if AVER_MODULE_SR
     // optimisation-wave-2, 3.3 A: MIRRORS, NOT A DELTA, for the SAME reason projectBackend_ and
     // frameBudgetMs_ are up here rather than below the hasRenderSettings() guard -- but unlike
@@ -393,21 +393,21 @@ void SandboxApp::applyProjectRenderSettings() {
     // default ("follow the Overall preset"), not a sentinel for "nothing to apply". A project with
     // no RENDER.AVERSR key must reset this back to -1, unconditionally, or a project opened right
     // after one that pinned a level would silently inherit that teammate's pin.
-    rset_.averSrProjectDefault_ = project_.averSr;
+    rset_.averSrProjectDefault_ = projSess_.project_.averSr;
     // Mirrors too: an unstated RENDER.TAA is the engine default (on), not "keep the last project's".
-    if (!rset_.taaFromCli_) rset_.temporalAaEnabled_ = project_.taa != 0;
-    if (!rset_.neuraaFromCli_) rset_.neuraaEnabled_ = project_.neuraa > 0;
+    if (!rset_.taaFromCli_) rset_.temporalAaEnabled_ = projSess_.project_.taa != 0;
+    if (!rset_.neuraaFromCli_) rset_.neuraaEnabled_ = projSess_.project_.neuraa > 0;
 
 #if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
     if (rset_.particleGpuArg_ < 0) {   // an unstated RENDER.PARTICLEGPU is auto, not 'keep the last project's'
-        const int pm = project_.particleGpu >= 0 ? project_.particleGpu : 1;
+        const int pm = projSess_.project_.particleGpu >= 0 ? projSess_.project_.particleGpu : 1;
         particles::particleSystem().setGpuMode(pm);
         particleRenderer_.setGpuEnabled(pm != 0);
     }
 #endif
 #endif
 
-    if (!project_.hasRenderSettings()) return;
+    if (!projSess_.project_.hasRenderSettings()) return;
     if (!rset_.voxiAttached_) { autosave_.projectRenderPending_ = true; return; }
     autosave_.projectRenderPending_ = false;
 
@@ -421,15 +421,15 @@ void SandboxApp::applyProjectRenderSettings() {
     // pre-pass are editor-side per-frame flags rather than fields on voxi::Settings, so they
     // are applied directly rather than through setSettings. Same manifest keys, same -1 means
     // unstated rule.
-    if (project_.lodSelect >= 0)
-        setLodSelect(project_.lodSelect != 0,
-                     project_.lodThresholdPx >= 0.0f ? project_.lodThresholdPx : lod_.lodErrorThresholdPx_);
-    else if (project_.lodThresholdPx >= 0.0f)
-        setLodSelect(lod_.lodSelectEnabled_, project_.lodThresholdPx);
-    if (project_.occlusionCull >= 0) occl_.occlusionCullEnabled_ = project_.occlusionCull != 0;
+    if (projSess_.project_.lodSelect >= 0)
+        setLodSelect(projSess_.project_.lodSelect != 0,
+                     projSess_.project_.lodThresholdPx >= 0.0f ? projSess_.project_.lodThresholdPx : lod_.lodErrorThresholdPx_);
+    else if (projSess_.project_.lodThresholdPx >= 0.0f)
+        setLodSelect(lod_.lodSelectEnabled_, projSess_.project_.lodThresholdPx);
+    if (projSess_.project_.occlusionCull >= 0) occl_.occlusionCullEnabled_ = projSess_.project_.occlusionCull != 0;
     // projectBackend_ and frameBudgetMs_ were applied above the hasRenderSettings() guard --
     // see the comment there for why they cannot live down here with the rest of the block.
-    if (project_.depthPrepass  >= 0) rset_.depthPrepassOverride_ = project_.depthPrepass != 0;
+    if (projSess_.project_.depthPrepass  >= 0) rset_.depthPrepassOverride_ = projSess_.project_.depthPrepass != 0;
 
     // PHYSICS.* AND AUDIO.* USED TO BE APPLIED HERE, and that is why they now are not: everything
     // from this point on is reached only past the hasRenderSettings() and voxiAttached_ returns
@@ -535,8 +535,8 @@ void SandboxApp::applyProjectRenderSettings() {
     // reasons that covers -- so a device limitation is never reported twice from two call sites.
     {
         voxi::FieldReport reports[4];
-        const voxi::ManifestAsks asks{project_.giMode, project_.denoiser, project_.rtRenderMode,
-                                      project_.refractionMode};
+        const voxi::ManifestAsks asks{projSess_.project_.giMode, projSess_.project_.denoiser, projSess_.project_.rtRenderMode,
+                                      projSess_.project_.refractionMode};
         const u32 nReports =
             voxi::manifestContradictions(vx.settings(), vx.deviceInfo(), asks, reports);
         for (u32 i = 0; i < nReports; ++i) {
@@ -545,7 +545,7 @@ void SandboxApp::applyProjectRenderSettings() {
                 continue;
             AVER_WARN("[Project] {} sets RENDER.{} {}, but {} The recorded value is not what is "
                       "actually running.",
-                      project_.manifestPath, reports[i].manifestKey, reports[i].requested,
+                      projSess_.project_.manifestPath, reports[i].manifestKey, reports[i].requested,
                       voxi::disableReasonText(reports[i].reason));
         }
     }
@@ -553,7 +553,7 @@ void SandboxApp::applyProjectRenderSettings() {
     voxiRenderer_.setSettings(vx.settings());
     // RENDER.PATHTRACING reaches Voxi through the settings above (its path-traced frame); the standalone
     // reference view is --pt-scene only.
-    AVER_INFO("[Project] applied render settings from {}", project_.manifestPath);
+    AVER_INFO("[Project] applied render settings from {}", projSess_.project_.manifestPath);
 }
 
 // INSIDE THE GUARD, not one line past its #endif where it was: this takes a voxi::Settings& and

@@ -264,7 +264,7 @@ rhi::LineHandle SandboxApp::selectionOutlineLines(Engine& e, u64 meshId) {
     if (const auto it = selectionUi_.selOutlineLines_.find(meshId); it != selectionUi_.selOutlineLines_.end()) return it->second;
 
     const auto pit = lvl_.meshPathById_.find(meshId);
-    const std::string content = project_.contentDir();
+    const std::string content = projSess_.project_.contentDir();
     if (pit == lvl_.meshPathById_.end() || content.empty()) return 0;
 
     fmt::OcMeshData md;
@@ -441,7 +441,7 @@ void SandboxApp::endSculptStroke() {
 // that silently does nothing when picked.
 void SandboxApp::refreshFoliagePalette() {
     landTool_.foliagePalette_.clear();
-    const std::string dir = project_.contentDir();
+    const std::string dir = projSess_.project_.contentDir();
     if (dir.empty()) return;
     std::error_code ec;
     if (!std::filesystem::exists(dir, ec)) return;
@@ -875,7 +875,7 @@ void SandboxApp::spawnPrimitive(Engine& engine, const char* assetPath, const cha
     const rhi::primitives::BuiltinPrimitive* prim = rhi::primitives::findBuiltinPrimitive(assetPath);
     const f32 half = prim ? prim->spawnScale : kEditorCubeHalf;
 #if AVER_MODULE_SCENE
-    if (launch_.hideEditorScene_ || !levelPath_.empty()) {
+    if (launch_.hideEditorScene_ || !projSess_.levelPath_.empty()) {
         scene::World& world = scene::World::instance();
         Transform xf;
         xf.position = at;
@@ -1149,11 +1149,11 @@ void SandboxApp::dropGraphClass(const std::string& fullPath, f32 screenX, f32 sc
 // scanned when the Add popup opens (classPickDirty_) and again on Refresh.
 void SandboxApp::drawGraphActorMenu() {
     if (lvl_.classPickDirty_) {
-        lvl_.classPickList_ = editor::scanGraphClasses(project_.contentDir());
+        lvl_.classPickList_ = editor::scanGraphClasses(projSess_.project_.contentDir());
         lvl_.classPickDirty_ = false;
     }
     const bool playing = anyPlayActive();
-    const bool noLevel = !(launch_.hideEditorScene_ || !levelPath_.empty());
+    const bool noLevel = !(launch_.hideEditorScene_ || !projSess_.levelPath_.empty());
     if (lvl_.classPickList_.empty()) ImGui::TextDisabled("No graph under Content declares a CLASS");
     const editor::GraphClassDecl* chosen = nullptr;
     for (const editor::GraphClassDecl& d : lvl_.classPickList_) {
@@ -1202,12 +1202,12 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
 #if AVER_MODULE_SCENE
     // A prefab drops as an instance (its own undo entry); its entities come through the prefab hooks.
     if (ext == ".ocprefab") {
-        if (!(launch_.hideEditorScene_ || !levelPath_.empty())) {
+        if (!(launch_.hideEditorScene_ || !projSess_.levelPath_.empty())) {
             drawerUi_.cbStatus_ = "Load a level (or hide the editor scene) before dropping assets";
             return;
         }
-        prefabModel_.setContentDir(project_.contentDir());
-        const std::string ref = editor::PrefabEditorModel::assetRefFor(project_.contentDir(), full);
+        prefabModel_.setContentDir(projSess_.project_.contentDir());
+        const std::string ref = editor::PrefabEditorModel::assetRefFor(projSess_.project_.contentDir(), full);
         if (ref.empty()) { drawerUi_.cbStatus_ = "Could not resolve '" + fileName + "' to a project-relative path"; return; }
         Transform xf;
         xf.position = dropWorldPoint(screenX, screenY);
@@ -1238,12 +1238,12 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
     // [wave3/level-instances begin] A level drops as an instance of it (its own undo entry); its entities come through
     // the level-instance hooks.
     if (ext == ".ocworld" || ext == ".ocmap") {
-        if (!(launch_.hideEditorScene_ || !levelPath_.empty())) {
+        if (!(launch_.hideEditorScene_ || !projSess_.levelPath_.empty())) {
             drawerUi_.cbStatus_ = "Load a level (or hide the editor scene) before dropping assets";
             return;
         }
-        levelInstanceModel_.setContentDir(project_.contentDir());
-        const std::string ref = editor::LevelInstanceEditorModel::assetRefFor(project_.contentDir(), full);
+        levelInstanceModel_.setContentDir(projSess_.project_.contentDir());
+        const std::string ref = editor::LevelInstanceEditorModel::assetRefFor(projSess_.project_.contentDir(), full);
         if (ref.empty()) { drawerUi_.cbStatus_ = "Could not resolve '" + fileName + "' to a project-relative path"; return; }
         Transform xf;
         xf.position = dropWorldPoint(screenX, screenY);
@@ -1280,13 +1280,13 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
 #endif
         return;
     }
-    if (!(launch_.hideEditorScene_ || !levelPath_.empty())) {
+    if (!(launch_.hideEditorScene_ || !projSess_.levelPath_.empty())) {
         drawerUi_.cbStatus_ = "Load a level (or hide the editor scene) before dropping assets";
         AVER_WARN("[Editor] drop: no scene world is active to place '{}' into", full);
         return;
     }
 
-    const std::string content = project_.contentDir();
+    const std::string content = projSess_.project_.contentDir();
     std::error_code ec;
     std::string rel = content.empty() ? std::string()
                                       : std::filesystem::relative(full, content, ec).string();
@@ -2456,7 +2456,7 @@ const aver::editor::PickGeometry& SandboxApp::pickGeometryFor(u64 meshId) {
 
     aver::editor::PickGeometry g;   // stays empty (and is still cached) on either failure below
     const auto pit = lvl_.meshPathById_.find(meshId);
-    const std::string content = project_.contentDir();
+    const std::string content = projSess_.project_.contentDir();
     if (pit == lvl_.meshPathById_.end() || content.empty()) {
         AVER_WARN("[Pick] mesh id {} has no known project path; clicking it falls back to its "
                   "bounding box.", meshId);
@@ -3567,7 +3567,7 @@ bool SandboxApp::editorModeAvailable(EditorMode m, const char** whyNot) const {
             return true;
         case EditorMode::Animate:
 #if AVER_MODULE_SCENE
-            if (lvl_.levelEntities_.empty() && levelPath_.empty()) return no("Open or populate a level first.");
+            if (lvl_.levelEntities_.empty() && projSess_.levelPath_.empty()) return no("Open or populate a level first.");
             return true;
 #else
             return no("This build has the scene module switched off (AVER_MODULE_SCENE).");

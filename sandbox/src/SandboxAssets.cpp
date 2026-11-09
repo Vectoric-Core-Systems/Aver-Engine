@@ -34,7 +34,7 @@ void SandboxApp::loadProjectMeshes(Engine& e) {
 #if AVER_MODULE_SCENE
     // setStaticMeshHeapDefault must run before any createMesh call.
     if (e.device()) e.device()->setStaticMeshHeapDefault(rset_.meshHeapDefault_);
-    const std::string dir = project_.contentDir();
+    const std::string dir = projSess_.project_.contentDir();
     if (dir.empty()) return;
     std::error_code ec;
     if (!std::filesystem::exists(dir, ec)) return;
@@ -476,13 +476,13 @@ void SandboxApp::releaseProjectMeshes(Engine& e) {
 #if AVER_MODULE_PBR
 void SandboxApp::loadProjectMaterials() {
 #if AVER_MODULE_SCENE
-    const std::string dir = project_.contentDir();
+    const std::string dir = projSess_.project_.contentDir();
     if (dir.empty()) return;
     const std::string contentMatDir = dir + AVER_PATH_SEP "Materials";
-    const std::string binMatDir = project_.binariesDir() + AVER_PATH_SEP "Materials";
+    const std::string binMatDir = projSess_.project_.binariesDir() + AVER_PATH_SEP "Materials";
 
     // Must agree with content_.materialForSurface()'s resolution (MaterialResolve.hpp).
-    const std::vector<std::string> stems = editor::projectMaterialStems(project_.binariesDir(), dir);
+    const std::vector<std::string> stems = editor::projectMaterialStems(projSess_.project_.binariesDir(), dir);
 
     u32 loaded = 0;
     for (const std::string& stem : stems) {

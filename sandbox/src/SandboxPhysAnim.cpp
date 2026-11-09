@@ -96,7 +96,7 @@ void SandboxApp::buildPhysAnimSection() {
     ragdoll::RagdollSystem& rs = ragdoll::ragdollSystem();
 
     // The profile this character reacts with.
-    if (u.profileRoot != project_.contentDir()) scanProfiles(u, project_.contentDir());
+    if (u.profileRoot != projSess_.project_.contentDir()) scanProfiles(u, projSess_.project_.contentDir());
     const char* cur = u.profileChoice >= 0 ? u.profiles[static_cast<usize>(u.profileChoice)].c_str() : "(defaults)";
     ImGui::SetNextItemWidth(-1.0f);
     if (ImGui::BeginCombo("##physprofile", std::filesystem::path(cur).filename().string().c_str())) {

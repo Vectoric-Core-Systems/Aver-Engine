@@ -80,7 +80,7 @@ void SandboxApp::initOrigin(Engine& e) {
 
 void SandboxApp::configureOrigin() {
     // Off unless the project states WORLD.FLOATINGORIGIN 1: see the header comment.
-    origin_.configure(project_.worldFloatingOrigin, project_.worldRebaseMarginCm, false, project_.worldAllowShiftRequest);
+    origin_.configure(projSess_.project_.worldFloatingOrigin, projSess_.project_.worldRebaseMarginCm, false, projSess_.project_.worldAllowShiftRequest);
 }
 
 void SandboxApp::tickOrigin(Engine& e) {

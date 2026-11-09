@@ -57,8 +57,8 @@ void SandboxApp::buildBiomeSection() {
     BiomeUi& u = biomeUi();
     ImGui::Spacing();
     if (!ImGui::CollapsingHeader("Biomes (Generate Vegetation)")) return;
-    if (!project_.valid()) { ImGui::TextDisabled("Open a project first."); return; }
-    const std::string contentDir = project_.contentDir();
+    if (!projSess_.project_.valid()) { ImGui::TextDisabled("Open a project first."); return; }
+    const std::string contentDir = projSess_.project_.contentDir();
     if (u.root != contentDir) rescan(u, contentDir);
 
     std::vector<const fmt::OcLandData*> sections;

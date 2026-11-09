@@ -29,18 +29,18 @@ namespace aver {
 // around an authored section, so a created section and its neighbours come out of one function
 // rather than two that have to agree.
 bool SandboxApp::createLandscapeForLevel(rhi::IDevice* device, u32 samples, f32 spacingCm) {
-    if (!project_.valid()) { setUpgradeStatus("Open a project first.", editor::NotifySeverity::Warning); return false; }
+    if (!projSess_.project_.valid()) { setUpgradeStatus("Open a project first.", editor::NotifySeverity::Warning); return false; }
     // LEVELNAME_ NEEDS SCENE, LANDSCAPE DOES NOT: levelName_ is declared `#if AVER_MODULE_SCENE`
     // (SandboxApp.hpp, beside levelEntities_) because only a scene can ever have a level open to
     // name -- see refreshWindowTitle's own comment on that split. A tree with the scene compiled
     // out never sets it and, on any tree, an unset one already reads back as "untitled" here, so a
     // scene-less build gets that name outright instead of reading a member that would not exist.
 #if AVER_MODULE_SCENE
-    const std::string stem = levelName_.empty() ? std::string("untitled") : levelName_;
+    const std::string stem = projSess_.levelName_.empty() ? std::string("untitled") : projSess_.levelName_;
 #else
     const std::string stem = "untitled";
 #endif
-    const std::filesystem::path dir = std::filesystem::path(project_.contentDir()) / "Landscape";
+    const std::filesystem::path dir = std::filesystem::path(projSess_.project_.contentDir()) / "Landscape";
     const std::filesystem::path dst = dir / (stem + ".ocland");
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
@@ -86,9 +86,9 @@ bool SandboxApp::createLandscapeForLevel(rhi::IDevice* device, u32 samples, f32 
 // --landscape was never named in the file -- the level looked terrain-less to anything but this
 // machine's directory listing, and moving the project broke it silently.
 void SandboxApp::recordLandscapeInLevel() {
-    if (!landscape_.loaded() || landscape_.path().empty() || !project_.valid()) return;
+    if (!landscape_.loaded() || landscape_.path().empty() || !projSess_.project_.valid()) return;
     std::error_code ec;
-    std::string rel = std::filesystem::relative(landscape_.path(), project_.contentDir(), ec).string();
+    std::string rel = std::filesystem::relative(landscape_.path(), projSess_.project_.contentDir(), ec).string();
     if (ec || rel.empty()) rel = landscape_.path();
     for (char& c : rel) if (c == '\\') c = '/';
 
@@ -99,7 +99,7 @@ void SandboxApp::recordLandscapeInLevel() {
     // and a scene-less tree has no open level to name, so it falls back to the record's own
     // "Landscape" default here too rather than reading a member the scene-off build never declared.
 #if AVER_MODULE_SCENE
-    if (lp.name.empty()) lp.name = levelName_.empty() ? std::string("Landscape") : levelName_;
+    if (lp.name.empty()) lp.name = projSess_.levelName_.empty() ? std::string("Landscape") : projSess_.levelName_;
 #else
     if (lp.name.empty()) lp.name = "Landscape";
 #endif
@@ -150,9 +150,9 @@ void SandboxApp::captureRenderSettingsFromUi(const voxi::Settings& requested, u3
     // fields (the three tier enums, meshShaders, msaa) get captureClamped's N5 rule instead, so an
     // edit on a machine without RT/PT/mesh-shader hardware never rewrites a teammate's pin for
     // hardware this device does not have.
-    voxi::captureVoxiSettings(project_, requested, vx.settings(), vx.deviceInfo(), overallFollowMask);
+    voxi::captureVoxiSettings(projSess_.project_, requested, vx.settings(), vx.deviceInfo(), overallFollowMask);
 
-    project_.backend = launch_.projectBackend_;
+    projSess_.project_.backend = launch_.projectBackend_;
     // NOT WHEN --frame-budget SUPPLIED IT. frameBudgetMs_ holds either the project's own value or
     // a CLI test override, and this function cannot tell them apart on its own -- so writing it
     // unconditionally let a diagnostic flag become a persisted project setting. With settings now
@@ -160,25 +160,25 @@ void SandboxApp::captureRenderSettingsFromUi(const voxi::Settings& requested, u3
     // control on the Rendering page, and RENDER.FRAMEBUDGETMS 33 is in the .ocproject for good.
     // The forced flag is exactly the distinction, and it already exists for the symmetric bug on
     // the way in (applyProjectRenderSettings clobbering the flag from the manifest's default).
-    if (!rset_.frameBudgetForced_) project_.frameBudgetMs = rset_.frameBudgetMs_;
-    project_.lodSelect          = lod_.lodSelectEnabled_ ? 1 : 0;
-    project_.lodThresholdPx     = lod_.lodErrorThresholdPx_;
-    project_.occlusionCull      = occl_.occlusionCullEnabled_ ? 1 : 0;
-    project_.depthPrepass       = rset_.depthPrepassOverride_ ? 1 : 0;
+    if (!rset_.frameBudgetForced_) projSess_.project_.frameBudgetMs = rset_.frameBudgetMs_;
+    projSess_.project_.lodSelect          = lod_.lodSelectEnabled_ ? 1 : 0;
+    projSess_.project_.lodThresholdPx     = lod_.lodErrorThresholdPx_;
+    projSess_.project_.occlusionCull      = occl_.occlusionCullEnabled_ ? 1 : 0;
+    projSess_.project_.depthPrepass       = rset_.depthPrepassOverride_ ? 1 : 0;
 #if AVER_MODULE_SR
     // optimisation-wave-2, 3.3 A: NOT a voxi::Settings field (module boundary, Scalability.hpp's
     // own header comment) so it rides along beside occlusionCull/depthPrepass here rather than
     // through captureVoxiSettings' shared capture rule just above -- same "editor-side flag, same
     // manifest key, same -1 means unstated rule" shape those two already are.
-    project_.averSr = rset_.averSrProjectDefault_;
+    projSess_.project_.averSr = rset_.averSrProjectDefault_;
 #endif
     // The GI volume's placement, which had no key at all -- so a level whose geometry is not at
     // the origin could never record where its indirect light should be gathered.
-    project_.hasGiVolume = true;
-    project_.giCenter[0] = rset_.giCenter_.x;
-    project_.giCenter[1] = rset_.giCenter_.y;
-    project_.giCenter[2] = rset_.giCenter_.z;
-    project_.giExtent    = rset_.giExtent_;
+    projSess_.project_.hasGiVolume = true;
+    projSess_.project_.giCenter[0] = rset_.giCenter_.x;
+    projSess_.project_.giCenter[1] = rset_.giCenter_.y;
+    projSess_.project_.giCenter[2] = rset_.giCenter_.z;
+    projSess_.project_.giExtent    = rset_.giExtent_;
     autosave_.projectDirty_ = true;
 }
 
@@ -195,23 +195,23 @@ void SandboxApp::applyProjectRenderSettings() {}
 void SandboxApp::seedAndSaveProject() {
 #if AVER_MODULE_VOXI
     const voxi::Settings d{};   // as declared, never as clamped
-    if (project_.giQuality       < 0)    project_.giQuality       = static_cast<int>(d.globalIllumination);
-    if (project_.rayTracing      < 0)    project_.rayTracing      = static_cast<int>(d.rayTracing);
-    if (project_.pathTracing     < 0)    project_.pathTracing     = static_cast<int>(d.pathTracing);
+    if (projSess_.project_.giQuality       < 0)    projSess_.project_.giQuality       = static_cast<int>(d.globalIllumination);
+    if (projSess_.project_.rayTracing      < 0)    projSess_.project_.rayTracing      = static_cast<int>(d.rayTracing);
+    if (projSess_.project_.pathTracing     < 0)    projSess_.project_.pathTracing     = static_cast<int>(d.pathTracing);
     // Derived from the (now-seeded) GI tier, not from d.voxelResolution's raw struct default --
     // otherwise a manifest that only states giQuality would bake in Medium's 128 regardless of
     // the tier, and never let that tier drive the grid on a later load (see Renderer::setSettings).
-    if (project_.voxelResolution <= 0)
-        project_.voxelResolution = static_cast<int>(
-            voxi::Renderer::voxelResolutionForQuality(static_cast<voxi::Quality>(project_.giQuality)));
-    if (project_.giIntensity     < 0.0f) project_.giIntensity     = d.giIntensity;
-    if (project_.giMaxDistance   < 0.0f) project_.giMaxDistance   = d.giMaxDistance;
-    if (project_.rtShadowRays       < 0) project_.rtShadowRays       = static_cast<int>(d.rtShadowRays);
-    if (project_.rtPixelsPerRayTile < 0) project_.rtPixelsPerRayTile = static_cast<int>(d.rtPixelsPerRayTile);
-    if (project_.rtShadowDenoise    < 0) project_.rtShadowDenoise    = static_cast<int>(d.rtShadowDenoise);
-    if (project_.rtRenderMode       < 0) project_.rtRenderMode       = static_cast<int>(d.rtRenderMode);
-    if (project_.ptBounces          < 0) project_.ptBounces          = static_cast<int>(d.ptBounces);
-    if (project_.layeredBsdf        < 0) project_.layeredBsdf        = static_cast<int>(d.layeredBsdf);
+    if (projSess_.project_.voxelResolution <= 0)
+        projSess_.project_.voxelResolution = static_cast<int>(
+            voxi::Renderer::voxelResolutionForQuality(static_cast<voxi::Quality>(projSess_.project_.giQuality)));
+    if (projSess_.project_.giIntensity     < 0.0f) projSess_.project_.giIntensity     = d.giIntensity;
+    if (projSess_.project_.giMaxDistance   < 0.0f) projSess_.project_.giMaxDistance   = d.giMaxDistance;
+    if (projSess_.project_.rtShadowRays       < 0) projSess_.project_.rtShadowRays       = static_cast<int>(d.rtShadowRays);
+    if (projSess_.project_.rtPixelsPerRayTile < 0) projSess_.project_.rtPixelsPerRayTile = static_cast<int>(d.rtPixelsPerRayTile);
+    if (projSess_.project_.rtShadowDenoise    < 0) projSess_.project_.rtShadowDenoise    = static_cast<int>(d.rtShadowDenoise);
+    if (projSess_.project_.rtRenderMode       < 0) projSess_.project_.rtRenderMode       = static_cast<int>(d.rtRenderMode);
+    if (projSess_.project_.ptBounces          < 0) projSess_.project_.ptBounces          = static_cast<int>(d.ptBounces);
+    if (projSess_.project_.layeredBsdf        < 0) projSess_.project_.layeredBsdf        = static_cast<int>(d.layeredBsdf);
 #endif
     std::string why;
     if (saveProjectManifest(&why)) AVER_INFO("[Project] --save-project wrote the manifest");
@@ -220,21 +220,21 @@ void SandboxApp::seedAndSaveProject() {
 
 // Writes the project manifest to disk. Returns false and fills why on failure.
 bool SandboxApp::saveProjectManifest(std::string* why) {
-    if (!project_.valid()) { if (why) *why = "no project is open"; return false; }
+    if (!projSess_.project_.valid()) { if (why) *why = "no project is open"; return false; }
     std::string existing;
-    readFileText(project_.manifestPath, existing);
-    const std::string out = fmt::writeOcproject(project_, existing);
+    readFileText(projSess_.project_.manifestPath, existing);
+    const std::string out = fmt::writeOcproject(projSess_.project_, existing);
     // ATOMIC NOW THAT THIS RUNS ON A TIMER. A plain writeFileText truncates and then writes, so
     // the window where the manifest is empty or half-written used to be one click wide and is now
     // entered every half second of editing. Losing a project file to a crash landing inside that
     // window is exactly the trade the autosave was not meant to make -- same write-temp-then-swap
     // the level save and editor.ini already use.
-    if (!writeFileTextAtomic(project_.manifestPath, out)) {
-        if (why) *why = "could not write " + project_.manifestPath;
+    if (!writeFileTextAtomic(projSess_.project_.manifestPath, out)) {
+        if (why) *why = "could not write " + projSess_.project_.manifestPath;
         return false;
     }
     autosave_.projectDirty_ = false;
-    AVER_INFO("[Project] wrote {}", project_.manifestPath);
+    AVER_INFO("[Project] wrote {}", projSess_.project_.manifestPath);
     return true;
 }
 
@@ -248,22 +248,22 @@ bool SandboxApp::saveProjectManifest(std::string* why) {
 // outside a silent success and a silent failure are the same button.
 void SandboxApp::saveLevelInteractive() {
 #if AVER_MODULE_SCENE
-    if (levelPath_.empty()) {
+    if (projSess_.levelPath_.empty()) {
         // Never written, so there is no file to overwrite. Open the same prompt the menu does
         // rather than inventing a name: Save As is what Save means for a level with no path.
         panels_.saveLevelAsName_[0] = '\0';
         std::snprintf(panels_.saveLevelAsName_, sizeof panels_.saveLevelAsName_, "%s",
-                      levelName_.empty() ? "untitled" : levelName_.c_str());
+                      projSess_.levelName_.empty() ? "untitled" : projSess_.levelName_.c_str());
         panels_.saveLevelAsError_.clear();
         panels_.wantSaveLevelAs_ = true;
         return;
     }
-    const std::string name = std::filesystem::path(levelPath_).filename().string();
-    if (saveLevel(levelPath_)) {
+    const std::string name = std::filesystem::path(projSess_.levelPath_).filename().string();
+    if (saveLevel(projSess_.levelPath_)) {
         setUpgradeStatus("Saved " + name);
     } else {
         setUpgradeStatus("Could not save " + name, editor::NotifySeverity::Error);
-        AVER_ERROR("[Level] save: could not write {}", levelPath_);
+        AVER_ERROR("[Level] save: could not write {}", projSess_.levelPath_);
     }
 #endif
 }
@@ -295,7 +295,7 @@ bool SandboxApp::handleOpenRequest(const char* path) {
     // comparing against project_.manifestPath needs no separate "the forwarded thing IS a project" case.
     if (owner.empty()) return false;
     std::error_code ec;
-    if (!std::filesystem::equivalent(owner, project_.manifestPath, ec) || ec) return false;
+    if (!std::filesystem::equivalent(owner, projSess_.project_.manifestPath, ec) || ec) return false;
     return true;
 }
 
@@ -358,10 +358,10 @@ void SandboxApp::startNewLevel(Engine& eng) {
     if (anyPlayActive()) stopPlay();
 #endif
     unloadLevel(eng);
-    levelName_ = "untitled";
+    projSess_.levelName_ = "untitled";
     // CLEARED, so the next Ctrl+S cannot silently overwrite the level that was open before this
     // one. saveLevel takes whatever path it is given and asks nothing.
-    levelPath_.clear();
+    projSess_.levelPath_.clear();
 }
 
 // The actual open, past every guard. The ONE place that pairs loadLevel with the class-placement
@@ -389,7 +389,7 @@ void SandboxApp::openLevelDirect(Engine& eng, const std::string& path) {
     startupSettleCount_ = -2;
     startupSettleFrames_ = 0;
 #endif
-    projectLoadingFrames_ = 0;
+    projSess_.projectLoadingFrames_ = 0;
     projectLoading_->stage("Opening level");
 
     loadLevel(eng, path);
@@ -511,7 +511,7 @@ bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
     // levelHeader_.
     fmt::OcWorldData w = lvl_.levelHeader_;
     w.dataLayers = dataLayers_.layers();
-    w.name = levelName_.empty() ? std::string("untitled") : levelName_;
+    w.name = projSess_.levelName_.empty() ? std::string("untitled") : projSess_.levelName_;
     // THE MARKER IS THE TRUTH WHEN THERE IS ONE: saveLevel's banner used to list SPAWN among
     // fields that "ride through untouched" -- correct while nothing could edit it, wrong now that
     // a Player Start can be dragged. A level with no marker keeps whatever SPAWN it arrived with.
@@ -588,7 +588,7 @@ bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
     w.lights.clear();
     std::unordered_map<u32, i32> lightSlotOf;   // for the Outliner records
     if (scene::ComponentPool* lp = world.pool(scene::kComponentLight)) {
-        const editor::LightAssetPaths paths = editor::LightAssetPaths::scan(project_.contentDir());
+        const editor::LightAssetPaths paths = editor::LightAssetPaths::scan(projSess_.project_.contentDir());
         for (usize i = 0; i < lp->size(); ++i) {
             const scene::Entity le = lp->entityAt(i);
             if (!world.valid(le)) continue;
@@ -612,7 +612,7 @@ bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
     }
 
     // DECAL records, from every authored CDecal entity (pooled gameplay decals are skipped inside).
-    w.decals = editor::recordsFromDecalEntities(world, editor::LightAssetPaths::scan(project_.contentDir()),
+    w.decals = editor::recordsFromDecalEntities(world, editor::LightAssetPaths::scan(projSess_.project_.contentDir()),
                                                 [this](scene::Entity d) { return level_.instances().isMember(d); });   // [wave3/level-instances]
 
     // WHICH PLACEMENT SLOT EACH ENTITY WILL OCCUPY, decided BEFORE any is written, because a
@@ -842,7 +842,7 @@ bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
     // A REAL SAVE RETIRES THE SIDECAR -- but only a save of THE LEVEL. saveLevel is also how the
     // autosave itself and --save-level write, and deleting the recovery file on either would
     // throw away the safety net at the moment it was being created.
-    if (path == levelPath_ && autosave_.autosaveWritten_) clearAutosave();
+    if (path == projSess_.levelPath_ && autosave_.autosaveWritten_) clearAutosave();
     return true;
 }
 
@@ -852,7 +852,7 @@ bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
 bool SandboxApp::saveLevelAsOcmap(const std::string& path, bool playSnapshot) {
     scene::World& world = scene::World::instance();
     fmt::OcMapData m = lvl_.legacyMapHeader_;
-    m.name = levelName_.empty() ? std::string("untitled") : levelName_;
+    m.name = projSess_.levelName_.empty() ? std::string("untitled") : projSess_.levelName_;
 
     // THE MARKER IS THE TRUTH WHEN THERE IS ONE -- same reasoning as saveLevel's own SPAWN
     // handling just above, applied to the identical field on the legacy struct.

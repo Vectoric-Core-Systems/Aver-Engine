@@ -64,20 +64,20 @@ world::CookInput cookInputFor(const fmt::ProjectDesc& project, const std::string
 // Saves the level (with `chunks=` set, so the source names its set), re-reads what it just wrote, and cooks THAT: the hash in the
 // index has to be of the text a runtime will parse.
 bool SandboxApp::cookLevelChunks(std::string& report) {
-    if (!project_.valid() || levelPath_.empty()) { report = "no level is open"; return false; }
-    const CookTarget target = cookTarget(project_.dir, levelPath_);
+    if (!projSess_.project_.valid() || projSess_.levelPath_.empty()) { report = "no level is open"; return false; }
+    const CookTarget target = cookTarget(projSess_.project_.dir, projSess_.levelPath_);
     if (lvl_.levelHeader_.stream.chunksPath != target.relative) {
         lvl_.levelHeader_.stream.chunksPath = target.relative;
         markLevelUnsaved();
     }
-    if (!saveLevel(levelPath_)) { report = "the level could not be saved"; return false; }
+    if (!saveLevel(projSess_.levelPath_)) { report = "the level could not be saved"; return false; }
     markLevelSaved();
 
     fmt::OcWorldData w;
     std::string why;
-    if (!fmt::loadOcworld(levelPath_, w, &why)) { report = why; return false; }
+    if (!fmt::loadOcworld(projSess_.levelPath_, w, &why)) { report = why; return false; }
 
-    const world::CookInput in = cookInputFor(project_, levelPath_, level_.assets(), content_);
+    const world::CookInput in = cookInputFor(projSess_.project_, projSess_.levelPath_, level_.assets(), content_);
     world::CookReport rep;
     if (!world::cookAuthoredLevel(w, in, world::CookOptions{}, rep, &why)) { report = why; return false; }
 
@@ -95,14 +95,14 @@ bool SandboxApp::cookLevelChunks(std::string& report) {
 // Before a Standalone launch: the runtime streams the cooked set only while it is current (a stale set is skipped with a warning),
 // so a level that names one gets it re-cooked here when the saved level has moved on. False when the cook fails (no launch).
 bool SandboxApp::refreshCookedChunksForPlay() {
-    if (lvl_.levelHeader_.stream.chunksPath.empty() || !project_.valid() || levelPath_.empty()) return true;   // this level streams the old way
+    if (lvl_.levelHeader_.stream.chunksPath.empty() || !projSess_.project_.valid() || projSess_.levelPath_.empty()) return true;   // this level streams the old way
     fmt::OcWorldData w;
     std::string why;
-    if (!fmt::loadOcworld(levelPath_, w, &why)) return true;   // the launch reports an unreadable level itself
+    if (!fmt::loadOcworld(projSess_.levelPath_, w, &why)) return true;   // the launch reports an unreadable level itself
 
-    const CookTarget target = cookTarget(project_.dir, levelPath_);
+    const CookTarget target = cookTarget(projSess_.project_.dir, projSess_.levelPath_);
     world::AuthoredChunkSource src;
-    const world::CookInput in = cookInputFor(project_, levelPath_, level_.assets(), content_);
+    const world::CookInput in = cookInputFor(projSess_.project_, projSess_.levelPath_, level_.assets(), content_);
     if (src.open(target.dir, nullptr) && world::cookSourceHash(w, in, world::CookOptions{}) == src.sourceHash()) return true;
     src.close();   // a set cannot be replaced under open files
 

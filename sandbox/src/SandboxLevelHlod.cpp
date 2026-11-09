@@ -53,22 +53,22 @@ bool builtinMeshData(const std::string& asset, fmt::OcMeshData& out) {
 } // namespace
 
 void SandboxApp::startHlodBuild() {
-    const std::string blocked = editor::hlodBlockedReason(lvl_.levelHeader_.stream, project_.valid() && !levelPath_.empty());
+    const std::string blocked = editor::hlodBlockedReason(lvl_.levelHeader_.stream, projSess_.project_.valid() && !projSess_.levelPath_.empty());
     if (!blocked.empty()) { lvl_.hlodReport_ = blocked; return; }
-    if (!saveLevel(levelPath_)) { lvl_.hlodReport_ = "The level could not be saved."; return; }
+    if (!saveLevel(projSess_.levelPath_)) { lvl_.hlodReport_ = "The level could not be saved."; return; }
     markLevelSaved();
 
     auto w = std::make_shared<fmt::OcWorldData>();
     std::string why;
-    if (!fmt::loadOcworld(levelPath_, *w, &why)) { lvl_.hlodReport_ = "Failed: " + why; return; }
+    if (!fmt::loadOcworld(projSess_.levelPath_, *w, &why)) { lvl_.hlodReport_ = "Failed: " + why; return; }
     if (!w->stream.enabled) { lvl_.hlodReport_ = "Failed: the saved level does not stream."; return; }
     {   // the stream data places each placement in its cell
         fmt::OcStreamData sd;
-        if (!w->stream.dataPath.empty() && fmt::loadOcStream((std::filesystem::path(project_.dir) / w->stream.dataPath).string(), sd))
+        if (!w->stream.dataPath.empty() && fmt::loadOcStream((std::filesystem::path(projSess_.project_.dir) / w->stream.dataPath).string(), sd))
             fmt::applyOcStreamBounds(*w, sd);
     }
-    const std::string stem = std::filesystem::path(levelPath_).stem().string();
-    const std::string contentDir = project_.contentDir(), projectDir = project_.dir;
+    const std::string stem = std::filesystem::path(projSess_.levelPath_).stem().string();
+    const std::string contentDir = projSess_.project_.contentDir(), projectDir = projSess_.project_.dir;
     const bool force = lvl_.hlodForce_;
     lvl_.hlodReport_ = "Building...";
     hlodJob_.start([w, stem, contentDir, projectDir, force](const std::atomic<bool>& cancel, std::atomic<u32>& done, std::atomic<u32>& total) {
@@ -105,7 +105,7 @@ void SandboxApp::pollHlodBuild() {
     }
     lvl_.hlodReport_ = editor::hlodSummary(res.report);
     for (const std::string& m : res.report.warnings) AVER_WARN("[HLOD] {}", m);
-    AVER_INFO("[HLOD] {}: {}", levelPath_, lvl_.hlodReport_);
+    AVER_INFO("[HLOD] {}: {}", projSess_.levelPath_, lvl_.hlodReport_);
 }
 
 // Drawn inside World Settings > Level Streaming, under Cooked chunks.
@@ -124,7 +124,7 @@ void SandboxApp::buildHlodSettings() {
         ImGui::SetTooltip("Cells past the load distance, out to this one, show a merged low-poly proxy.\n"
                           "0 = no HLOD ring. When it is 0, Build HLOD uses three load distances.");
     const bool running = hlodJob_.running();
-    const std::string blocked = editor::hlodBlockedReason(st, project_.valid() && !levelPath_.empty());
+    const std::string blocked = editor::hlodBlockedReason(st, projSess_.project_.valid() && !projSess_.levelPath_.empty());
     ImGui::BeginDisabled(running || !blocked.empty());
     if (ImGui::Button("Build HLOD")) startHlodBuild();
     ImGui::EndDisabled();

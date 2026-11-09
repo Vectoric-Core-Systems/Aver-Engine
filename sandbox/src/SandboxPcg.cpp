@@ -45,11 +45,11 @@ void SandboxApp::installPcgEditorHost() {
         return any;
     };
     h.publish = [this](const fmt::OcInstanceData& table, const std::vector<std::string>& materials, const std::string& graphPath, std::string* why) -> std::string {
-        if (!project_.valid() || levelPath_.empty()) { if (why) *why = "open a project and a level first"; return {}; }
+        if (!projSess_.project_.valid() || projSess_.levelPath_.empty()) { if (why) *why = "open a project and a level first"; return {}; }
         const std::string rel = outputRelFor(graphPath);
         std::error_code ec;
-        std::filesystem::create_directories((std::filesystem::path(project_.contentDir()) / rel).parent_path(), ec);
-        if (!fmt::saveOcInstances(project_.contentDir() + "/" + rel, table, why)) return {};
+        std::filesystem::create_directories((std::filesystem::path(projSess_.project_.contentDir()) / rel).parent_path(), ec);
+        if (!fmt::saveOcInstances(projSess_.project_.contentDir() + "/" + rel, table, why)) return {};
         if (std::find(lvl_.levelHeader_.foliageFiles.begin(), lvl_.levelHeader_.foliageFiles.end(), rel) == lvl_.levelHeader_.foliageFiles.end()) {
             lvl_.levelHeader_.foliageFiles.push_back(rel);
             markLevelUnsaved();
@@ -65,10 +65,10 @@ void SandboxApp::installPcgEditorHost() {
         return rel;
     };
     h.clean = [this](const std::string& graphPath, std::string* why) {
-        if (!project_.valid()) { if (why) *why = "open a project first"; return false; }
+        if (!projSess_.project_.valid()) { if (why) *why = "open a project first"; return false; }
         const std::string rel = outputRelFor(graphPath);
         const auto it = std::find(lvl_.levelHeader_.foliageFiles.begin(), lvl_.levelHeader_.foliageFiles.end(), rel);
-        const std::string file = project_.contentDir() + "/" + rel;
+        const std::string file = projSess_.project_.contentDir() + "/" + rel;
         std::error_code ec;
         const bool had = it != lvl_.levelHeader_.foliageFiles.end() || std::filesystem::exists(file, ec);
         if (!had) { if (why) *why = "nothing was generated for this graph"; return false; }

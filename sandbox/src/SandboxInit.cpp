@@ -168,12 +168,12 @@ void SandboxApp::installAssetEditorHooks() {
     {
         // Hooks to query/set project's Input Scheme.
         editor::InputSchemeEditorHooks hooks;
-        hooks.contentDir = [this] { return project_.contentDir(); };
-        hooks.projectInputScheme = [this] { return project_.inputScheme; };
+        hooks.contentDir = [this] { return projSess_.project_.contentDir(); };
+        hooks.projectInputScheme = [this] { return projSess_.project_.inputScheme; };
         hooks.useAsProjectInputScheme = [this](const std::string& contentRelativePath) {
-            if (!project_.valid()) return false;
+            if (!projSess_.project_.valid()) return false;
             // Write happens on autosave timer or Project Settings Save button.
-            project_.inputScheme = contentRelativePath;
+            projSess_.project_.inputScheme = contentRelativePath;
             autosave_.projectDirty_ = true;
             return true;
         };
@@ -182,7 +182,7 @@ void SandboxApp::installAssetEditorHooks() {
         editor::CaptionEditorHooks ch;
         ch.soundPaths = [this] {
             std::vector<std::string> out;
-            std::string root = project_.contentDir();
+            std::string root = projSess_.project_.contentDir();
             for (char& c : root) if (c == '\\') c = '/';
             for (std::string p : content_.pathsWithExtension(".ocaudio")) {
                 for (char& c : p) if (c == '\\') c = '/';
@@ -234,7 +234,7 @@ void SandboxApp::installAssetEditorHooks() {
 #endif
     {
         editor::StringTableEditorHooks hooks;
-        hooks.defaultCulture = [this] { return project_.localeDefault; };
+        hooks.defaultCulture = [this] { return projSess_.project_.localeDefault; };
         hooks.openAsset = [this](const std::string& abs) { assetEditors_.open(abs); };
         editor::setStringTableEditorHooks(std::move(hooks));
     }
@@ -245,7 +245,7 @@ void SandboxApp::installAssetEditorHooks() {
         hooks.levelReferences = [this](const std::string& abs) {
             std::error_code ec;
             for (const std::string& f : lvl_.levelHeader_.foliageFiles)
-                if (std::filesystem::equivalent(std::filesystem::path(project_.contentDir()) / f, abs, ec) && !ec) return true;
+                if (std::filesystem::equivalent(std::filesystem::path(projSess_.project_.contentDir()) / f, abs, ec) && !ec) return true;
             return false;
         };
         hooks.regenerateStreaming = [this](std::string& report) { return regenerateStreamData(report); };
@@ -260,9 +260,9 @@ void SandboxApp::installActorEditorHooks() {
     locateAverDesign();
     {
         editor::ActorEditorHooks hooks;
-        hooks.compileScripts = [this] { tools_.triggerToolbarCompile(project_); };
+        hooks.compileScripts = [this] { tools_.triggerToolbarCompile(projSess_.project_); };
         hooks.compileBusy    = [this] { return tools_.compiling(); };
-        hooks.drawCompileButton = [this] { tools_.drawCompileButton(project_, viewState_.dpi_, brand_.compileIconUiId_); };
+        hooks.drawCompileButton = [this] { tools_.drawCompileButton(projSess_.project_, viewState_.dpi_, brand_.compileIconUiId_); };
 #if AVER_WITH_IMGUI
         hooks.openInIde = [this](const std::string& p) {
             const editor::IdeInfo& ide = cbIde();
@@ -354,8 +354,8 @@ void SandboxApp::installGameProviders() {
     // packaged game installs none and answers "unavailable".
     {
         ModelImportHost host;
-        host.contentDir = [this] { return project_.valid() ? project_.contentDir() : std::string(); };
-        host.projectDir = [this] { return project_.valid() ? project_.dir : std::string(); };
+        host.contentDir = [this] { return projSess_.project_.valid() ? projSess_.project_.contentDir() : std::string(); };
+        host.projectDir = [this] { return projSess_.project_.valid() ? projSess_.project_.dir : std::string(); };
         host.imported = [this](const std::string& destDir) { cbInvalidate(destDir); launch_.wantMeshReload_ = true; };
         installModelImportProvider(host);
     }
@@ -422,11 +422,11 @@ void SandboxApp::initLodMeshShader(Engine& e) {
 
 // Opens the project or level given on the command line.
 void SandboxApp::openStartupProject(Engine& e) {
-    if (!projectPath_.empty()) {
+    if (!projSess_.projectPath_.empty()) {
         // --open-legacy skips upgrade prompt and opens old project directly.
         std::string err;
-        const bool opened = panels_.openLegacy_ ? browser_.open(projectPath_, &err)
-                                        : browser_.openOrOfferUpgrade(projectPath_, &err);
+        const bool opened = panels_.openLegacy_ ? browser_.open(projSess_.projectPath_, &err)
+                                        : browser_.openOrOfferUpgrade(projSess_.projectPath_, &err);
         if (opened) applyProject(e);
         else if (!panels_.openLegacy_ && browser_.upgradePending()) {
             armBrowser(true);
@@ -435,21 +435,21 @@ void SandboxApp::openStartupProject(Engine& e) {
                            "limit, so nothing can answer the upgrade prompt. THE PROJECT WILL NOT "
                            "OPEN and every timing, probe and screenshot from this run measures an "
                            "empty editor. Pass --open-legacy to open it as-is without upgrading.",
-                           projectPath_);
+                           projSess_.projectPath_);
             } else {
                 AVER_INFO("[Sandbox] '{}' was made by an older series; asking before opening it",
-                          projectPath_);
+                          projSess_.projectPath_);
             }
         } else {
-            AVER_WARN("[Sandbox] '{}' not loaded: {}", projectPath_, err);
+            AVER_WARN("[Sandbox] '{}' not loaded: {}", projSess_.projectPath_, err);
         }
-    } else if (!openMapPath_.empty()) {
+    } else if (!projSess_.openMapPath_.empty()) {
         // Load level with no project. Everything else hangs off applyProject.
 #if AVER_MODULE_SCENE
         loadStartMap(e);
 #else
         AVER_WARN("[Sandbox] '{}' not opened: this build has no scene to instantiate a level into",
-                  openMapPath_);
+                  projSess_.openMapPath_);
 #endif
     }
 }
@@ -871,11 +871,11 @@ void SandboxApp::initScriptingHost() {
 
         // Declare graph classes (retry after scripting host bootstraps).
 #if AVER_MODULE_FRAMEWORK
-        if (scripts_.ready() && project_.valid()) {
-            game::setAiContentRoot(project_.contentDir());   // AI: wave 3 #21 -- where .oceqs / .ocso / .ocst paths resolve
-            const i32 graphClasses = scripts_.declareGraphClasses(project_.contentDir());
+        if (scripts_.ready() && projSess_.project_.valid()) {
+            game::setAiContentRoot(projSess_.project_.contentDir());   // AI: wave 3 #21 -- where .oceqs / .ocso / .ocst paths resolve
+            const i32 graphClasses = scripts_.declareGraphClasses(projSess_.project_.contentDir());
             if (graphClasses > 0)
-                AVER_INFO("[Graph] {} graph class(es) declared from '{}'", graphClasses, project_.contentDir());
+                AVER_INFO("[Graph] {} graph class(es) declared from '{}'", graphClasses, projSess_.project_.contentDir());
             spawnClassPlacements();
         }
 #endif
@@ -970,7 +970,7 @@ void SandboxApp::initVoxiBackend(Engine& e) {
             rset_.voxiAttached_ = true;
             if (lvl_.foliagePending_) {
                 lvl_.foliagePending_ = false;
-                levelFoliage_.load(lvl_.foliagePendingWorld_, content_, e.device(), &voxiRenderer_, project_.contentDir(),
+                levelFoliage_.load(lvl_.foliagePendingWorld_, content_, e.device(), &voxiRenderer_, projSess_.project_.contentDir(),
                                    {}, viewState_.camPos_, &lvl_.foliagePendingTables_);
                 if (!levelFoliage_.result().error.empty()) AVER_WARN("[Foliage] {}", levelFoliage_.result().error);
             }
@@ -1057,10 +1057,10 @@ void SandboxApp::initParticleRenderer(Engine& e) {
     // Particle renderer (registered unconditionally; system/effects are singletons).
     particles::particleSystem().setEffectLibrary(&particles::particleEffects());
     {
-        const int pm = rset_.particleGpuArg_ >= 0 ? rset_.particleGpuArg_ : (project_.particleGpu >= 0 ? project_.particleGpu : 1);
+        const int pm = rset_.particleGpuArg_ >= 0 ? rset_.particleGpuArg_ : (projSess_.project_.particleGpu >= 0 ? projSess_.project_.particleGpu : 1);
         particles::particleSystem().setGpuMode(pm);
-        if (project_.particleScale >= 0) {
-            particles::particleEffects().setScalabilityTier(static_cast<particles::ScalabilityTier>(std::min(project_.particleScale, 3)));
+        if (projSess_.project_.particleScale >= 0) {
+            particles::particleEffects().setScalabilityTier(static_cast<particles::ScalabilityTier>(std::min(projSess_.project_.particleScale, 3)));
         }
 #if AVER_MODULE_VOXI
         else {   // no RENDER.PARTICLESCALE: the particle tier follows the Overall Quality rung the project's render settings read as

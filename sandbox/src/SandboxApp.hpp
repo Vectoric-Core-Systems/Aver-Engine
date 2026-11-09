@@ -1317,6 +1317,7 @@ private:
 #include "state/BrandIconState.hpp"
 #include "state/EditHistoryState.hpp"
 #include "state/LaunchConfigState.hpp"
+#include "state/ProjectSessionState.hpp"
 class HitchMarks;
 namespace game { struct SceneDrawStats; }
 
@@ -1792,6 +1793,7 @@ private:
     BrandIconState brand_;
     EditHistoryState edit_;   // Undo/redo history
     LaunchConfigState launch_;   // Launch configuration and prefs-load flags
+    ProjectSessionState projSess_;   // Open project/level identity and pending open requests
     // ---- end feature state ----
 
     void applyProject(Engine& e);
@@ -1860,12 +1862,9 @@ private:
 #endif
 
     void maybeAutosaveProject(f32 dt);
-    std::string projectSaveStatus_;
 
     bool hudPreviewActive() const;
     void setHudPreview(int index, f32 x, f32 y, f32 w, f32 h);
-    std::string saveLevelTo_;         // --save-level <out>
-    std::string bakeLevelPackAsset_;  // --bake-level-pack <level>  [wave3/level-instances]
 
     void saveLevelInteractive();
 
@@ -1878,7 +1877,6 @@ private:
 
     // Window title (updated with level and dirty state).
     void refreshWindowTitle(Engine& e);
-    std::string windowTitleShown_;
 
     void startContentWatch();
 
@@ -2191,13 +2189,6 @@ private:
     // no scene this is a function that still exists and does nothing, which is a far smaller thing
     // to get right than a destructor that exists in one configuration and not another.
     void refreshPlayerStart();
-
-    // THE OPEN LEVEL'S FILE PATH AND DISPLAY NAME, outside the scene block they were declared in.
-    // Both are plain strings about a file on disk. loadNavForLevel reads levelPath_ to find the
-    // .ocnav baked beside it, and that function is guarded on AVER_MODULE_SYNAPSE -- the grid math,
-    // which exists in a tree with no entity world at all. A path is not scene state even when
-    // everything that path loads INTO is.
-    std::string levelPath_, levelName_;
 
     f32 playerStartYaw_ = 0.0f;
 
@@ -3142,9 +3133,6 @@ private:
     Vec3 camPosOverride_{};
     f32  pitchOverride_=0.0f, yawOverride_=0.0f;   // radians, converted in setCamera
     editor::ProjectBrowser browser_;
-    fmt::ProjectDesc project_;
-    std::string projectPath_;        // <path>.ocproject given on the command line
-    std::string openMapPath_;        // <path>.ocmap given on the command line, if any
     bool browserActive_=false;
     bool        armOpenLevelPicker_ = false;   // --open-level-picker, consumed on the first draw
     int frameNo_ = 0;                                      // bumped once per UI frame; the cache freshness clock
@@ -3239,13 +3227,7 @@ private:
     std::string matSaveStatus_;   // what the last 'Save to C#' did
     // A row asked to be deleted; answered after the tree walk (drawOutlinerRow). GUARDED: type is scene::Entity.
     bool inputProbe_ = false;
-    std::string openAsset_;
-    std::string selectEntity_;   // --select
-    std::string lastOpenAssetPath_;  // last path --open-asset opened; openAsset_ itself is cleared once consumed.
-    std::string graphSelectNode_;
-    std::string graphTab_; // --graph-select <nodeId>; see setGraphSelectNode's own comment
 
-    editor::ProjectUpgrade pendingUpgrade_;
     // The loaded level's own header, placements and PCG volumes stripped. Starting from what the file said, overwriting only what the editor owns.
     // ---- the 3D-viewport icon renderer, and the Player Start marker it draws ----
     // viewportIconsReady_ is the ONE flag the render walk consults to skip the Player Start's cube (false unless the feature AND its texture both came up).
@@ -3843,8 +3825,6 @@ private:
 #endif  // AVER_MODULE_SCENE
     // Project-open loading screen (alive from applyProject until scene settles).
     std::unique_ptr<struct LoadingScreen> projectLoading_;
-    // Frames the project loading screen has been up (capped in onRender).
-    int projectLoadingFrames_ = 0;
 #if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
     using MeshLodLadder = LodState::MeshLodLadder;
 #endif

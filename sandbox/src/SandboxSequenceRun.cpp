@@ -78,7 +78,7 @@ void SandboxApp::sequenceRunStep(Engine& e) {
 
     if (r.phase == Phase::Waiting) {
         ++r.waited;
-        bool ready = !levelPath_.empty() && !projectLoading_;
+        bool ready = !projSess_.levelPath_.empty() && !projectLoading_;
 #if AVER_MODULE_VOXI
         ready = ready && !voxiRenderer_.accelBuildsPending();
 #endif
@@ -202,7 +202,7 @@ bool SandboxApp::startRenderJob(const fmt::RenderJob& job, const std::string& ba
 #if AVER_MODULE_FRAMEWORK
     if (anyPlayActive()) { why = "stop Play before rendering"; return false; }
 #endif
-    if (job.level.empty() && levelPath_.empty()) { why = "open a level first"; return false; }
+    if (job.level.empty() && projSess_.levelPath_.empty()) { why = "open a level first"; return false; }
     if (job.level.empty() && !seqEditor_.anyCamera()) {
         why = "the level has no camera path: key the camera in Animate mode (K) and save the level first";
         return false;
@@ -232,8 +232,8 @@ editor::RenderQueueHost SandboxApp::renderQueueHost() {
     h.sequenceName = seqEditor_.sequenceName();
     h.sequenceLength = seqEditor_.runLength();
     h.sequenceFps = seqEditor_.runFps();
-    h.levelPath = levelPath_;
-    h.baseDir = project_.valid() ? project_.dir : executableDir();
+    h.levelPath = projSess_.levelPath_;
+    h.baseDir = projSess_.project_.valid() ? projSess_.project_.dir : executableDir();
     h.busy = seqRun_.isJob && sequenceRunActive();
     h.progress = seqRun_.samplesTotal > 0 ? static_cast<f32>(seqRun_.samplesDone) / static_cast<f32>(seqRun_.samplesTotal) : 0.0f;
     h.status = seqRun_.status;
@@ -353,12 +353,12 @@ void SandboxApp::renderJobStep(Engine& e) {
             fs::path want = r.job.level;
             std::error_code ec;
             if (want.is_relative() && !fs::exists(want, ec)) {
-                const fs::path bases[2] = {fs::path(r.jobDir), fs::path(project_.valid() ? project_.dir : std::string())};
+                const fs::path bases[2] = {fs::path(r.jobDir), fs::path(projSess_.project_.valid() ? projSess_.project_.dir : std::string())};
                 for (const fs::path& base : bases) {
                     if (!base.empty() && fs::exists(base / want, ec)) { want = base / want; break; }
                 }
             }
-            onLevel = !levelPath_.empty() && fs::equivalent(want, levelPath_, ec) && !ec;
+            onLevel = !projSess_.levelPath_.empty() && fs::equivalent(want, projSess_.levelPath_, ec) && !ec;
             if (!onLevel && !r.levelRequested && !projectLoading_ && r.waited > 2) {
                 if (!requestOpenLevel(want.string(), "render queue")) {
                     fail(drawerUi_.openLevelError_.empty() ? "could not open the level " + want.string() : drawerUi_.openLevelError_);
@@ -367,7 +367,7 @@ void SandboxApp::renderJobStep(Engine& e) {
                 r.levelRequested = true;
             }
         }
-        bool ready = onLevel && !levelPath_.empty() && !projectLoading_ && panels_.pendingOpenPath_.empty();
+        bool ready = onLevel && !projSess_.levelPath_.empty() && !projectLoading_ && panels_.pendingOpenPath_.empty();
 #if AVER_MODULE_VOXI
         ready = ready && !voxiRenderer_.accelBuildsPending();
 #endif

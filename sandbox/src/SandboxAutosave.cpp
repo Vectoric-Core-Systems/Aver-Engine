@@ -84,7 +84,7 @@ std::string SandboxApp::autosavePathFor(const std::string& levelPath) const {
     // ONE FILE, NOT ONE PER UNTITLED LEVEL. Two unsaved levels cannot exist at once -- opening
     // another closes this one, which already prompts -- so a name is not needed and a growing
     // pile of Untitled-3.autosave files is avoided.
-    const std::string dir = project_.dir;
+    const std::string dir = projSess_.project_.dir;
     return dir.empty() ? std::string() : dir + AVER_PATH_SEP "Saved" AVER_PATH_SEP "Untitled.ocworld.autosave";
 }
 
@@ -133,7 +133,7 @@ void SandboxApp::maybeAutosave(f32 dt) {
     // the commonest case being that the user saved manually while the warning was on screen.
     // Counting down to a save that is no longer needed is worse than not warning at all.
     if (!levelHasUnsavedEdits()) { autosave_.autosaveAccum_ = 0.0f; autosaveCancelNotice(); return; }
-    if (levelPath_.empty() && project_.dir.empty()) { autosave_.autosaveAccum_ = 0.0f; autosaveCancelNotice(); return; }
+    if (projSess_.levelPath_.empty() && projSess_.project_.dir.empty()) { autosave_.autosaveAccum_ = 0.0f; autosaveCancelNotice(); return; }
 
     // PENDING: the countdown reached zero LAST frame and the toast said "Saving..." then. Only
     // now, one presented frame later, is the blocking write actually done -- see the state's
@@ -238,7 +238,7 @@ void SandboxApp::autosaveCancelNotice() {
 // the same module as its caller's body was: saveLevel and autosavePathFor are scene-side.
 void SandboxApp::autosaveRunSave() {
 #if AVER_MODULE_SCENE
-    const std::string dst = autosavePathFor(levelPath_);
+    const std::string dst = autosavePathFor(projSess_.levelPath_);
     if (dst.empty()) { autosave_.autosaveAccum_ = 0.0f; autosaveCancelNotice(); return; }
     // The untitled path lives under <project>/Saved, which need not exist yet. Harmless for the
     // beside-the-level case, where the parent is the level's own folder.
@@ -285,7 +285,7 @@ void SandboxApp::clearAutosave() {
     // levelPath_ is scene state, and autosaveWritten_/autosaveAccum_ track nothing but the sidecar
     // this function deletes -- without SCENE there is no level for any of it to be about, so the
     // whole body goes rather than resetting fields a SCENE=OFF build never declared.
-    const std::string p = autosavePathFor(levelPath_);
+    const std::string p = autosavePathFor(projSess_.levelPath_);
     if (p.empty()) return;
     std::error_code ec;
     std::filesystem::remove(p, ec);
@@ -299,14 +299,14 @@ void SandboxApp::clearAutosave() {
 void SandboxApp::checkForRecovery() {
 #if AVER_MODULE_SCENE
     autosave_.recoveryPath_.clear();
-    const std::string p = autosavePathFor(levelPath_);
+    const std::string p = autosavePathFor(projSess_.levelPath_);
     if (p.empty()) return;
     std::error_code ec;
     if (!std::filesystem::exists(p, ec)) return;
     // AN UNTITLED SIDECAR HAS NOTHING TO BE NEWER THAN. The comparison below exists to reject a
     // sidecar older than the level it shadows; with no level there is no such file, so the test
     // cannot be made and must not be faked -- offer it and let the author decide.
-    if (levelPath_.empty()) {
+    if (projSess_.levelPath_.empty()) {
         autosave_.recoveryPath_ = p;
         AVER_WARN("[Autosave] an unsaved level from a previous session is recoverable: {}", p);
         return;
@@ -316,10 +316,10 @@ void SandboxApp::checkForRecovery() {
     // invite someone to overwrite good work with stale work.
     const auto sideT = std::filesystem::last_write_time(p, ec);
     if (ec) return;
-    const auto liveT = std::filesystem::last_write_time(levelPath_, ec);
+    const auto liveT = std::filesystem::last_write_time(projSess_.levelPath_, ec);
     if (ec || sideT <= liveT) { std::filesystem::remove(p, ec); return; }
     autosave_.recoveryPath_ = p;
-    AVER_WARN("[Autosave] '{}' has unsaved changes from a previous session", levelPath_);
+    AVER_WARN("[Autosave] '{}' has unsaved changes from a previous session", projSess_.levelPath_);
 #endif
 }
 
@@ -334,7 +334,7 @@ void SandboxApp::drawRecoveryPrompt(Engine& e) {
     if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
 
     ImGui::TextWrapped("'%s' was left with unsaved changes -- the editor closed before they were "
-                       "saved.", std::filesystem::path(levelPath_).filename().string().c_str());
+                       "saved.", std::filesystem::path(projSess_.levelPath_).filename().string().c_str());
     ImGui::TextDisabled("Recovering opens the autosave. The level on disk is not touched until "
                         "you save.");
     ImGui::Spacing();
@@ -346,10 +346,10 @@ void SandboxApp::drawRecoveryPrompt(Engine& e) {
         // Loaded like any other level, then RE-POINTED at the real file: recovering must not
         // leave levelPath_ aimed at the sidecar, or the next Ctrl+S would save into it and the
         // level would never actually be written.
-        const std::string real = levelPath_;
+        const std::string real = projSess_.levelPath_;
         openLevelDirect(e, p);
-        levelPath_ = real;
-        levelName_ = std::filesystem::path(real).stem().string();
+        projSess_.levelPath_ = real;
+        projSess_.levelName_ = std::filesystem::path(real).stem().string();
         // AND IT REALLY IS UNSAVED. loadLevel marks the document clean, which is right for
         // every ordinary open and wrong for exactly this one: the content came from the
         // autosave sidecar, so the file at levelPath_ does NOT contain it. Saying otherwise
@@ -384,7 +384,7 @@ void SandboxApp::locateAverDesign() const {
 #if AVER_MODULE_SCRIPTING
 std::string SandboxApp::resolveScriptsDir() const {
     if (launch_.scriptsDir_.empty())
-        return project_.valid() ? editor::scriptsBinaryDir(project_) : executableDir() + AVER_PATH_SEP "Scripts";
+        return projSess_.project_.valid() ? editor::scriptsBinaryDir(projSess_.project_) : executableDir() + AVER_PATH_SEP "Scripts";
     const std::string& sd = launch_.scriptsDir_;
     const bool absolute = sd.size() > 1 && (sd[1] == ':' || sd[0] == '\\' || sd[0] == '/');
     return absolute ? sd : executableDir() + AVER_PATH_SEP + sd;
@@ -398,15 +398,15 @@ void SandboxApp::maybeAutosaveProject(f32 dt) {
     // marks the project dirty when it does, so a bounded run would write those flags into the
     // user's manifest as if they had chosen them.
     if (maxFrames_ != 0) { autosave_.projectAutosaveAccum_ = 0.0f; return; }
-    if (!autosave_.projectDirty_ || !project_.valid()) { autosave_.projectAutosaveAccum_ = 0.0f; return; }
+    if (!autosave_.projectDirty_ || !projSess_.project_.valid()) { autosave_.projectAutosaveAccum_ = 0.0f; return; }
     autosave_.projectAutosaveAccum_ += dt;
     if (autosave_.projectAutosaveAccum_ < AutosaveSession::kProjectAutosaveSec) return;
     autosave_.projectAutosaveAccum_ = 0.0f;
     std::string why;
     if (saveProjectManifest(&why)) {
-        projectSaveStatus_ = "Saved.";
+        projSess_.projectSaveStatus_ = "Saved.";
     } else {
-        projectSaveStatus_ = "Save failed: " + why;
+        projSess_.projectSaveStatus_ = "Save failed: " + why;
         // THE FAILURE ARM ONLY. A successful project autosave fires on a 0.5s debounce while a
         // slider is being dragged -- a toast per success would be a toast twice a second. A
         // FAILURE means the manifest could not be written at all, and today that is invisible
@@ -427,8 +427,8 @@ void SandboxApp::maybeAutosaveProject(f32 dt) {
 // Starts watching the project's content root, recursively, for changes made outside the editor.
 void SandboxApp::startContentWatch() {
     contentWatch_.stop();
-    if (!project_.valid()) return;
-    const std::string root = project_.contentDir();
+    if (!projSess_.project_.valid()) return;
+    const std::string root = projSess_.project_.contentDir();
     if (root.empty()) return;
     if (contentWatch_.start(root, /*recursive=*/true))
         AVER_INFO("[Editor] watching '{}' for changes made outside this editor", root);
@@ -445,7 +445,7 @@ void SandboxApp::pumpContentWatch() {
         {
             // Which string or data file changed is unknown: read both stores again, keeping the previewed culture.
             game::LocalizationInit li;
-            li.project = &project_;
+            li.project = &projSess_.project_;
             li.cultureOverride = aver_fw_loc_culture();
             li.readSavedCulture = false;
             game::initLocalization(li);
@@ -533,12 +533,12 @@ void SandboxApp::serviceAutoCompile() {
         harness_.autoCompileDue_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
         return;
     }
-    if (!project_.valid()) { harness_.autoCompilePending_ = 0; harness_.autoCompileReason_.clear(); return; }
+    if (!projSess_.project_.valid()) { harness_.autoCompilePending_ = 0; harness_.autoCompileReason_.clear(); return; }
     AVER_INFO("[Editor] auto-compile: {} script change(s) settled (first was '{}')",
               harness_.autoCompilePending_, harness_.autoCompileReason_);
     harness_.autoCompilePending_ = 0;
     harness_.autoCompileReason_.clear();
-    tools_.triggerToolbarCompile(project_);
+    tools_.triggerToolbarCompile(projSess_.project_);
 }
 
 #if AVER_MODULE_SCRIPTING

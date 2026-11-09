@@ -153,7 +153,7 @@ void SandboxApp::capturePlayWorld() {
     // physics touched anything.
 #if AVER_MODULE_PHYSICS
     // The .ocshape assets and mesh leaves a CollisionShape component builds its body from (editor Play only, as CRigidBody is).
-    game::setColliderShapeHost(game::makeColliderShapeHost(content_, project_.contentDir(), [this](u64 id) { return pathOfContentId(id); }));
+    game::setColliderShapeHost(game::makeColliderShapeHost(content_, projSess_.project_.contentDir(), [this](u64 id) { return pathOfContentId(id); }));
     editor::syncPhysicsFromScene();
     // THE LEVEL'S CARS, same rule and same place: a `vehicle` placement is a fixed pose until PLAY builds
     // its Jolt vehicle, from where the entity stands NOW (a car the user nudged in the editor drives from
@@ -262,15 +262,15 @@ bool SandboxApp::placePawnAtPlayerStart(const char* who) {
 // file every time; see that method's header for the return contract). At Play start, and before a
 // level's class actors spawn, since they begin play in the editor too and may ask for the project's actions.
 void SandboxApp::configureProjectInput(const char* when) {
-    std::string schemePath = project_.inputScheme.empty()
-        ? std::string() : project_.contentDir() + AVER_PATH_SEP + project_.inputScheme;
+    std::string schemePath = projSess_.project_.inputScheme.empty()
+        ? std::string() : projSess_.project_.contentDir() + AVER_PATH_SEP + projSess_.project_.inputScheme;
     if (!schemePath.empty() && !fileExists(schemePath)) {
         AVER_WARN("[Sandbox] {}: INPUT.SCHEME '{}' does not exist -- no input scheme will be loaded",
                   when, schemePath);
         schemePath.clear();
     }
     // <project dir>\Saved\Settings.ini. Settings' own flush creates the directory the first time it writes.
-    const std::string settingsPath = project_.dir + AVER_PATH_SEP "Saved" AVER_PATH_SEP "Settings.ini";
+    const std::string settingsPath = projSess_.project_.dir + AVER_PATH_SEP "Saved" AVER_PATH_SEP "Settings.ini";
     const int32_t actions = scripts_.configureInput(schemePath, settingsPath);
     if (actions > 0)
         AVER_INFO("[Sandbox] {}: input scheme ready ({} action(s) from '{}')", when, actions, schemePath);
@@ -304,7 +304,7 @@ void SandboxApp::startPlay() {
     capturePlayWorld();
 #if AVER_MODULE_SCENE
     // After playMobility_.begin: the sequence starts from 0 (when it autoplays) and its actors are seeded.
-    seqEditor_.beginPlay(play_.playMobility_, game::makeSequenceHooks(project_.contentDir(), [this](i32 ent, const std::string& name) {
+    seqEditor_.beginPlay(play_.playMobility_, game::makeSequenceHooks(projSess_.project_.contentDir(), [this](i32 ent, const std::string& name) {
 #if AVER_MODULE_SCRIPTING
         return scripts_.graphFire(ent, name.c_str());
 #else
@@ -362,7 +362,7 @@ void SandboxApp::startPlay() {
         // String and data tables re-read at every Play start, so a table saved since the last Play applies, under the
         // same preview culture. The missing-key list starts empty: Stop reports this session's own.
         game::LocalizationInit li;
-        li.project = &project_;
+        li.project = &projSess_.project_;
         li.cultureOverride = aver_fw_loc_culture();
         li.readSavedCulture = false;
         game::initLocalization(li);
@@ -385,7 +385,7 @@ void SandboxApp::startPlay() {
                   c ? "not that kind of class" : "not declared (compile .NET?)");
         return 0;
     };
-    const std::string& gmName = !lvl_.levelHeader_.gameMode.empty() ? lvl_.levelHeader_.gameMode : project_.gameMode;
+    const std::string& gmName = !lvl_.levelHeader_.gameMode.empty() ? lvl_.levelHeader_.gameMode : projSess_.project_.gameMode;
     int32_t gm = resolveNamed(gmName, AVER_FW_CLASS_GAME_MODE, "GameMode");
     if (!gm) gm = engineGm;
     const int32_t pawnOverride = resolveNamed(lvl_.levelHeader_.defaultPawn, AVER_FW_CLASS_PAWN, "default pawn");
@@ -809,9 +809,9 @@ void SandboxApp::reloadAfterPlay(Engine& eng) {
     play_.pieSnapshotPath_.clear();
     if (snapshot.empty()) return;
     // The level Play began on, which after a level travel is not the one open now.
-    const std::string keepPath = play_.pieTravelled_ ? play_.pieEditedLevelPath_ : levelPath_;
+    const std::string keepPath = play_.pieTravelled_ ? play_.pieEditedLevelPath_ : projSess_.levelPath_;
     const std::string path = keepPath.empty() ? snapshot : keepPath;
-    levelPath_ = keepPath;   // before the load too, so the view unloadLevel stores is the edited level's
+    projSess_.levelPath_ = keepPath;   // before the load too, so the view unloadLevel stores is the edited level's
     const Vec3 cam = viewState_.camPos_; const f32 yaw = viewState_.yaw_, pitch = viewState_.pitch_, speed = viewState_.flySpeed_;
     const world::OriginCm camOrigin = origin_.origin();   // the camera is origin-relative; the reload resets the origin
     const bool wasUnsaved = play_.pieWasUnsaved_;
@@ -819,7 +819,7 @@ void SandboxApp::reloadAfterPlay(Engine& eng) {
         eng, eng.window() != nullptr && maxFrames_ == 0, executableDir() + AVER_PATH_SEP "splash.png");
     startupSettleCount_ = -2;
     startupSettleFrames_ = 0;
-    projectLoadingFrames_ = 0;
+    projSess_.projectLoadingFrames_ = 0;
     projectLoading_->stage("Restoring level after Play");
     destroyPlaySpawned();
     level_.setNextLoadSource(snapshot);
@@ -828,7 +828,7 @@ void SandboxApp::reloadAfterPlay(Engine& eng) {
     if (scripts_.ready())
 #endif
         spawnClassPlacements();
-    levelPath_ = keepPath;
+    projSess_.levelPath_ = keepPath;
     viewState_.camPos_ = cam; viewState_.yaw_ = yaw; viewState_.pitch_ = pitch; viewState_.flySpeed_ = speed;
     {
         const world::OriginCm now = origin_.origin();
@@ -869,7 +869,7 @@ void SandboxApp::travelDuringPlay(Engine& eng, const std::string& requested) {
     }
     std::string path = requested;
     if (path.rfind("res://", 0) == 0) path = path.substr(6);
-    if (!std::filesystem::path(path).is_absolute()) path = project_.contentDir() + AVER_PATH_SEP + path;
+    if (!std::filesystem::path(path).is_absolute()) path = projSess_.project_.contentDir() + AVER_PATH_SEP + path;
     if (!fileExists(path)) {
         AVER_ERROR("[Play] level travel to '{}': no such level; staying", requested);
         return;
@@ -877,7 +877,7 @@ void SandboxApp::travelDuringPlay(Engine& eng, const std::string& requested) {
     AVER_INFO("[Play] level travel to '{}'", path);
     if (!play_.pieTravelled_) {
         play_.pieTravelled_ = true;
-        play_.pieEditedLevelPath_ = levelPath_;
+        play_.pieEditedLevelPath_ = projSess_.levelPath_;
     }
 
     // What the session built for the level being left, rebuilt for the new one below as Play start builds it.
@@ -917,7 +917,7 @@ void SandboxApp::travelDuringPlay(Engine& eng, const std::string& requested) {
         const int32_t c = n.empty() ? 0 : aver_fw_class_find(n.c_str());
         return (c && (aver_fw_class_get_flags(c) & flag) != 0) ? c : 0;
     };
-    int32_t gm = named(!lvl_.levelHeader_.gameMode.empty() ? lvl_.levelHeader_.gameMode : project_.gameMode, AVER_FW_CLASS_GAME_MODE);
+    int32_t gm = named(!lvl_.levelHeader_.gameMode.empty() ? lvl_.levelHeader_.gameMode : projSess_.project_.gameMode, AVER_FW_CLASS_GAME_MODE);
     if (!gm) gm = engineGm;
     const int32_t pawnOverride = named(lvl_.levelHeader_.defaultPawn, AVER_FW_CLASS_PAWN);
     const bool drone = pawnOverride ? pawnOverride == dronePawn : gm == engineGm;
@@ -1156,8 +1156,8 @@ void SandboxApp::driveAnimatedBodies(f32 dt) {
 void SandboxApp::tickSequencePre(Engine& e, f32 dt) {
     sequenceRunStep(e);
     // The audio and event hooks reach the audio ABI, the event bus and entity graphs; rebuilt when the project moves.
-    if (!seqEditor_.hasHooks() || seqHooksDir_ != project_.contentDir()) {
-        seqHooksDir_ = project_.contentDir();
+    if (!seqEditor_.hasHooks() || seqHooksDir_ != projSess_.project_.contentDir()) {
+        seqHooksDir_ = projSess_.project_.contentDir();
         seqEditor_.setHooks(game::makeSequenceHooks(seqHooksDir_, [this](i32 ent, const std::string& name) {
 #if AVER_MODULE_SCRIPTING
             return scripts_.graphFire(ent, name.c_str());

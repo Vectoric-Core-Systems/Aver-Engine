@@ -272,11 +272,11 @@ void SandboxApp::buildLandscapePaintTab(Engine& e) {
 void SandboxApp::scatterFoliageFromLayer(Engine& e) {
     (void)e;
     const GameLandscapeLayer* l = landscape_.materialLayer(static_cast<u32>(landTool_.paintLayer_));
-    if (!l || l->foliage.empty() || l->foliageDensity <= 0.0f || !project_.valid()) return;
+    if (!l || l->foliage.empty() || l->foliageDensity <= 0.0f || !projSess_.project_.valid()) return;
 
     std::string rel = l->foliage;   // content-relative; an absolute path is made relative when it lies under Content
     for (char& c : rel) if (c == '\\') c = '/';
-    const std::string contentDir = project_.contentDir();
+    const std::string contentDir = projSess_.project_.contentDir();
     std::string contentFwd = contentDir;
     for (char& c : contentFwd) if (c == '\\') c = '/';
     if (rel.size() > contentFwd.size() && rel.compare(0, contentFwd.size(), contentFwd) == 0) rel = rel.substr(contentFwd.size() + 1);

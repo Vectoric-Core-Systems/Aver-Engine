@@ -48,7 +48,7 @@ void SandboxApp::buildReferencesPanel() {
             // Double-click opens the file.
             if (ImGui::Selectable(rel.c_str(), false, ImGuiSelectableFlags_AllowDoubleClick) &&
                 ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
-                const std::string abs = project_.contentDir() + AVER_PATH_SEP + rel;
+                const std::string abs = projSess_.project_.contentDir() + AVER_PATH_SEP + rel;
                 drawerUi_.cbSelectedFile_ = abs;
                 assetEditors_.open(abs);
             }
@@ -376,7 +376,7 @@ bool SandboxApp::bakeNavigationNow(Engine& e, std::string* why) {
     dbgOv_.showNav_ = true;   // baking something invisible is how a bake gets run twice
 
     // Unsaved level has no path, so no .ocnav filename to write -- stays session-only, said so.
-    if (levelPath_.empty()) {
+    if (projSess_.levelPath_.empty()) {
         AVER_WARN("[Editor] navigation baked but NOT saved -- this level has no path yet; "
                   "save the level and bake again to write its .ocnav");
 #if AVER_WITH_IMGUI
@@ -385,7 +385,7 @@ bool SandboxApp::bakeNavigationNow(Engine& e, std::string* why) {
 #endif
         return true;
     }
-    const std::string path = editor::navPathForLevel(levelPath_);
+    const std::string path = editor::navPathForLevel(projSess_.levelPath_);
     std::string wwhy;
     if (!fmt::saveOcNav(path, dbgOv_.nav_, &wwhy)) {
         AVER_WARN("[Editor] navigation bake could not be written to {}: {}", path, wwhy);
@@ -456,8 +456,8 @@ std::string rcStatusFace(bool busy, const editor::StatusBarSummary& summary) {
 
 // Reaps workers and refreshes state. Once a frame, from buildUI.
 void SandboxApp::revisionControlTick() {
-    if (revCtl_.rcProjectDir_ != project_.dir) {
-        revCtl_.rcProjectDir_ = project_.dir;
+    if (revCtl_.rcProjectDir_ != projSess_.project_.dir) {
+        revCtl_.rcProjectDir_ = projSess_.project_.dir;
         revCtl_.rcRoot_.clear();
         revCtl_.rcRootKey_.clear();
         revCtl_.rcStatus_ = editor::RepoStatus{};
@@ -480,7 +480,7 @@ void SandboxApp::revisionControlTick() {
     if (rcStatusJob_ && rcStatusJob_->done.load(std::memory_order_acquire)) {
         const std::shared_ptr<RcStatusQuery> job = rcStatusJob_;
         rcStatusJob_.reset();
-        if (job->dir == project_.dir) {
+        if (job->dir == projSess_.project_.dir) {
             revCtl_.rcGitPresent_ = job->gitPresent;
             revCtl_.rcRoot_ = job->root;
             revCtl_.rcRootKey_ = flattenedPath(job->root);
@@ -537,11 +537,11 @@ void SandboxApp::revisionControlTick() {
 // Hands `git status` to a worker. Returns immediately, always.
 void SandboxApp::revisionControlRefresh(bool force) {
     if (rcStatusJob_) return;            // one in flight answers everyone waiting
-    if (!project_.valid() || project_.dir.empty()) return;
+    if (!projSess_.project_.valid() || projSess_.project_.dir.empty()) return;
     if (!force && revCtl_.rcAnswered_ && !revCtl_.rcGitPresent_) return;
 
     auto job = std::make_shared<RcStatusQuery>();
-    job->dir = project_.dir;
+    job->dir = projSess_.project_.dir;
     const std::string knownRoot = (force || revCtl_.rcProjectDir_ != job->dir) ? std::string() : revCtl_.rcRoot_;
     revCtl_.rcProjectDir_ = job->dir;
     rcStatusJob_ = job;
@@ -661,7 +661,7 @@ void SandboxApp::buildRevisionControlPanel() {
     ImGui::SetNextWindowSize(ImVec2(680.0f * viewState_.dpi_, 480.0f * viewState_.dpi_), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("Revision Control", &revCtl_.showRevisionControl_)) { ImGui::End(); return; }
 
-    if (!project_.valid()) {
+    if (!projSess_.project_.valid()) {
         ImGui::TextWrapped("Open a project first. This panel reports on the repository the "
                            "PROJECT lives in, which is not the same tree as the editor's own.");
         ImGui::End();
@@ -698,7 +698,7 @@ void SandboxApp::buildRevisionControlPanel() {
         return;
     }
     if (revCtl_.rcRoot_.empty()) {
-        ImGui::TextWrapped("'%s' is not inside a git repository.", project_.name.c_str());
+        ImGui::TextWrapped("'%s' is not inside a git repository.", projSess_.project_.name.c_str());
         ImGui::TextDisabled("That is a normal way to use the editor. Run `git init` in the project "
                             "folder and press Refresh if you want history for it.");
         // A REAL FAILURE, when there is one. gitRepositoryRoot leaves this empty for "not a
@@ -926,7 +926,7 @@ ImVec4 SandboxApp::rcMoodColour(editor::RepoMood m) {
 void SandboxApp::drawRevisionControlStatusWidget() {
     const bool busy = rcStatusJob_ != nullptr;
     const editor::StatusBarSummary summary = editor::summariseForStatusBar(
-        project_.valid(), revCtl_.rcAnswered_, revCtl_.rcGitPresent_, revCtl_.rcRoot_, revCtl_.rcStatus_, revCtl_.rcWhy_);
+        projSess_.project_.valid(), revCtl_.rcAnswered_, revCtl_.rcGitPresent_, revCtl_.rcRoot_, revCtl_.rcStatus_, revCtl_.rcWhy_);
     const std::string face = rcStatusFace(busy, summary);
 
     // Carries the same facts the panel would, plus one line this widget owns: what clicking it
@@ -1139,8 +1139,8 @@ void SandboxApp::drawSaveLevelAsPrompt() {
     ImGui::SetNextWindowSize(ImVec2(520.0f * viewState_.dpi_, 0.0f), ImGuiCond_Appearing);
     if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
 
-    const std::string maps = project_.valid()
-        ? (std::filesystem::path(project_.contentDir()) / "Maps").string()
+    const std::string maps = projSess_.project_.valid()
+        ? (std::filesystem::path(projSess_.project_.contentDir()) / "Maps").string()
         : std::string();
 
     ImGui::TextUnformatted("Name");
@@ -1178,19 +1178,19 @@ void SandboxApp::drawSaveLevelAsPrompt() {
         std::filesystem::create_directories(maps, ec);
 #if AVER_MODULE_SCENE
         // Copy gets a new ID; zero it so the writer recomputes from the new name.
-        const bool renamed = stem != levelName_;
-        const std::string prevName = levelName_;
+        const bool renamed = stem != projSess_.levelName_;
+        const std::string prevName = projSess_.levelName_;
         const u64 prevId = lvl_.levelHeader_.contentId, prevLegacyId = lvl_.legacyMapHeader_.contentId;
         if (renamed) {
-            levelName_ = stem;
+            projSess_.levelName_ = stem;
             lvl_.levelHeader_.contentId = 0;
             lvl_.legacyMapHeader_.contentId = 0;
         }
         if (saveLevel(target.string())) {
 #if AVER_MODULE_PHYSICS
             // Lanes file travels with the level (copy reads from <name>.oclanes).
-            if (!levelPath_.empty()) {
-                const std::filesystem::path from = game::GameLevel::laneSidecarPath(levelPath_);
+            if (!projSess_.levelPath_.empty()) {
+                const std::filesystem::path from = game::GameLevel::laneSidecarPath(projSess_.levelPath_);
                 const std::filesystem::path to = game::GameLevel::laneSidecarPath(target.string());
                 std::error_code lec;
                 if (from != to && std::filesystem::exists(from, lec)) {
@@ -1200,14 +1200,14 @@ void SandboxApp::drawSaveLevelAsPrompt() {
                 }
             }
 #endif
-            levelPath_ = target.string();
+            projSess_.levelPath_ = target.string();
             cbInvalidate(maps);
             setUpgradeStatus("Saved " + target.filename().string());
             panels_.wantSaveLevelAs_ = false;
             ImGui::CloseCurrentPopup();
         } else {
             if (renamed) {
-                levelName_ = prevName;
+                projSess_.levelName_ = prevName;
                 lvl_.levelHeader_.contentId = prevId;
                 lvl_.legacyMapHeader_.contentId = prevLegacyId;
             }
@@ -1244,14 +1244,14 @@ void SandboxApp::drawExitPrompt(Engine& e) {
     const bool levelDirty = levelHasUnsavedEdits();
     if (levelDirty)
         dirty.insert(dirty.begin(),
-                     "Level: " + (levelName_.empty() ? std::string("untitled") : levelName_));
+                     "Level: " + (projSess_.levelName_.empty() ? std::string("untitled") : projSess_.levelName_));
 #endif
     ImGui::TextWrapped("%zu item%s ha%s unsaved changes:",
                        dirty.size(), dirty.size() == 1 ? "" : "s", dirty.size() == 1 ? "s" : "ve");
     ImGui::Spacing();
     for (const std::string& t : dirty) ImGui::BulletText("%s", t.c_str());
 #if AVER_MODULE_SCENE
-    if (levelDirty && levelPath_.empty())
+    if (levelDirty && projSess_.levelPath_.empty())
         ImGui::TextDisabled("This level has never been saved -- \"Save all\" cannot name a file "
                             "for it. Cancel, then File > Save Level As.");
 #endif
@@ -1266,9 +1266,9 @@ void SandboxApp::drawExitPrompt(Engine& e) {
         std::string why;
         usize failed = assetEditors_.saveAllDirty(&why);
 #if AVER_MODULE_SCENE
-        if (levelDirty && !levelPath_.empty() && !saveLevel(levelPath_)) {
+        if (levelDirty && !projSess_.levelPath_.empty() && !saveLevel(projSess_.levelPath_)) {
             ++failed;
-            why += (why.empty() ? "" : "; ") + std::string("could not save the level to ") + levelPath_;
+            why += (why.empty() ? "" : "; ") + std::string("could not save the level to ") + projSess_.levelPath_;
         }
 #endif
         if (failed == 0) {
@@ -1303,16 +1303,16 @@ void SandboxApp::drawExitPrompt(Engine& e) {
 
 // Open level picker, rebuilding its list (shared by menu item and --open-level-picker).
 void SandboxApp::openLevelPickerNow() {
-    drawerUi_.openLevelList_ = editor::listLevels(project_.contentDir());
+    drawerUi_.openLevelList_ = editor::listLevels(projSess_.project_.contentDir());
     drawerUi_.openLevelSelected_ = -1;
     drawerUi_.openLevelError_.clear();
 #if AVER_MODULE_SCENE
     // Pre-select the currently open level so list shows where you are.
     for (int i = 0; i < static_cast<int>(drawerUi_.openLevelList_.size()); ++i) {
         std::error_code lec;
-        if (!levelPath_.empty() &&
+        if (!projSess_.levelPath_.empty() &&
             std::filesystem::equivalent(drawerUi_.openLevelList_[static_cast<usize>(i)].absPath,
-                                        levelPath_, lec))
+                                        projSess_.levelPath_, lec))
             drawerUi_.openLevelSelected_ = i;
     }
 #endif
@@ -1328,7 +1328,7 @@ void SandboxApp::drawOpenLevelPrompt(Engine& e) {
         const std::string want = drawerUi_.openLevelByName_;
         drawerUi_.openLevelByName_.clear();
         bool found = false;
-        for (const editor::LevelEntry& l : editor::listLevels(project_.contentDir())) {
+        for (const editor::LevelEntry& l : editor::listLevels(projSess_.project_.contentDir())) {
             if (l.relPath != want && l.name != want) continue;
             found = true;
             if (!requestOpenLevel(l.absPath, "opened by --open-level"))
@@ -1354,8 +1354,8 @@ void SandboxApp::drawOpenLevelPrompt(Engine& e) {
         for (int i = 0; i < static_cast<int>(drawerUi_.openLevelList_.size()); ++i) {
             const editor::LevelEntry& l = drawerUi_.openLevelList_[static_cast<usize>(i)];
             // Current level is marked, not hidden (re-opening discards edits).
-            const bool current = !levelPath_.empty() &&
-                std::filesystem::path(l.absPath) == std::filesystem::path(levelPath_);
+            const bool current = !projSess_.levelPath_.empty() &&
+                std::filesystem::path(l.absPath) == std::filesystem::path(projSess_.levelPath_);
             ImGui::PushID(i);
             if (ImGui::Selectable(l.name.c_str(), drawerUi_.openLevelSelected_ == i,
                                   ImGuiSelectableFlags_AllowDoubleClick)) {
@@ -1427,7 +1427,7 @@ void SandboxApp::drawPendingOpenPrompt(Engine& e) {
 #if AVER_MODULE_SCENE
     // levelPath_ only exists under AVER_MODULE_SCENE; this modal only opens via requestOpenLevel or
     // New Level, both themselves SCENE-guarded, so nothing below can run without it either.
-    if (levelPath_.empty())
+    if (projSess_.levelPath_.empty())
         ImGui::TextDisabled("This level has never been saved, so there is no file to save it to. "
                             "Cancel, then File > Save Level As.");
 #endif
@@ -1437,10 +1437,10 @@ void SandboxApp::drawPendingOpenPrompt(Engine& e) {
     // DISABLED WITH NO PATH TO SAVE TO. It used to treat "never saved" as success and open
     // straight through -- the one case where "Save and open" was a button that discarded.
 #if AVER_MODULE_SCENE
-    ImGui::BeginDisabled(levelPath_.empty());
+    ImGui::BeginDisabled(projSess_.levelPath_.empty());
     if (ImGui::Button(panels_.pendingNewLevel_ ? "Save and continue" : "Save and open",
                       ImVec2(160.0f * viewState_.dpi_, 0.0f))) {
-        if (saveLevel(levelPath_)) {
+        if (saveLevel(projSess_.levelPath_)) {
             const std::string toOpen = panels_.pendingOpenPath_;
             const bool wasNew = panels_.pendingNewLevel_;
             ImGui::CloseCurrentPopup();
@@ -1452,7 +1452,7 @@ void SandboxApp::drawPendingOpenPrompt(Engine& e) {
         } else {
             // STAY OPEN on a failed save -- same reasoning as drawExitPrompt's identical guard:
             // proceeding anyway would discard exactly the work this prompt exists to protect.
-            AVER_ERROR("[Sandbox] could not save '{}'; the forwarded open was cancelled", levelPath_);
+            AVER_ERROR("[Sandbox] could not save '{}'; the forwarded open was cancelled", projSess_.levelPath_);
         }
     }
     ImGui::EndDisabled();
@@ -1501,7 +1501,7 @@ void SandboxApp::drawPendingOpenPrompt(Engine& e) {
 void SandboxApp::launchInRuntime(Engine& e, bool skipDirtyCheck) {
     (void)e;   // no engine access needed; kept for the same uniform signature other menu actions use
 #if AVER_MODULE_SCENE
-    if (!project_.valid() || levelPath_.empty()) return;
+    if (!projSess_.project_.valid() || projSess_.levelPath_.empty()) return;
     // Anything the runtime would read from disk and find stale: the level, an asset tab, the terrain.
     bool anythingUnsaved = levelHasUnsavedEdits() || assetEditors_.anyDirty();
 #if AVER_MODULE_LANDSCAPE
@@ -1510,11 +1510,11 @@ void SandboxApp::launchInRuntime(Engine& e, bool skipDirtyCheck) {
     if (!skipDirtyCheck && anythingUnsaved) { panels_.launchRuntimePrompt_ = true; return; }
 
     if (!refreshCookedChunksForPlay()) return;   // a level that names a cooked chunk set gets it re-cooked first when the saved level moved on (SandboxLevelCook.cpp)
-    const std::string levelFile = std::filesystem::path(levelPath_).filename().string();
+    const std::string levelFile = std::filesystem::path(projSess_.levelPath_).filename().string();
     std::string why;
-    if (editor::launchRuntime(project_.manifestPath, levelPath_, play_.playStandaloneArgs_, &why)) {
+    if (editor::launchRuntime(projSess_.project_.manifestPath, projSess_.levelPath_, play_.playStandaloneArgs_, &why)) {
         setUpgradeStatus("Launched " + levelFile + " in Aver Engine Runtime");
-        AVER_INFO("[Editor] launched AverEngineRuntime.exe on {}", levelPath_);
+        AVER_INFO("[Editor] launched AverEngineRuntime.exe on {}", projSess_.levelPath_);
     } else {
         setUpgradeStatus("Could not launch Aver Engine Runtime: " + why, editor::NotifySeverity::Error);
         AVER_ERROR("[Editor] could not launch Aver Engine Runtime: {}", why);
@@ -1556,14 +1556,14 @@ void SandboxApp::drawLaunchRuntimePrompt(Engine& e) {
     const bool saveAndLaunch = ImGui::Button("Save and launch", ImVec2(160.0f * viewState_.dpi_, 0.0f));
     ImGui::EndDisabled();
     if (saveAndLaunch) {
-        if (saveLevel(levelPath_)) {
+        if (saveLevel(projSess_.levelPath_)) {
             ImGui::CloseCurrentPopup();
             panels_.launchRuntimePrompt_ = false;
             launchInRuntime(e, true);
         } else {
             // STAY OPEN on a failed save -- same reasoning as drawPendingOpenPrompt's identical
             // guard: proceeding anyway would launch a level missing the very edits this is for.
-            AVER_ERROR("[Editor] could not save '{}'; the runtime was not launched", levelPath_);
+            AVER_ERROR("[Editor] could not save '{}'; the runtime was not launched", projSess_.levelPath_);
         }
     }
     ImGui::SameLine();
@@ -1584,7 +1584,7 @@ void SandboxApp::drawLaunchRuntimePrompt(Engine& e) {
 // Draws the modal offering to add the project files this project is missing, listing each fix.
 void SandboxApp::drawUpgradePrompt() {
 #if AVER_WITH_IMGUI
-    if (pendingUpgrade_.empty() || panels_.upgradeAsked_) return;
+    if (projSess_.pendingUpgrade_.empty() || panels_.upgradeAsked_) return;
     constexpr const char* kTitle = "Upgrade project?";
     if (!ImGui::IsPopupOpen(kTitle)) ImGui::OpenPopup(kTitle);
 
@@ -1594,7 +1594,7 @@ void SandboxApp::drawUpgradePrompt() {
     if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
 
     ImGui::TextWrapped("'%s' was created by an earlier version of the editor and is missing some "
-                       "of the files a project now needs.", project_.name.c_str());
+                       "of the files a project now needs.", projSess_.project_.name.c_str());
     ImGui::Spacing();
     ImGui::TextDisabled("Nothing you wrote is replaced. The .csproj is edited by appending, not "
                         "regenerated, so anything you added by hand stays.");
@@ -1602,7 +1602,7 @@ void SandboxApp::drawUpgradePrompt() {
     ImGui::Separator();
 
     if (ImGui::BeginChild("##upgradeList", ImVec2(0.0f, 200.0f * viewState_.dpi_), ImGuiChildFlags_Borders)) {
-        for (const editor::ProjectFix& f : pendingUpgrade_.fixes) {
+        for (const editor::ProjectFix& f : projSess_.pendingUpgrade_.fixes) {
             ImGui::BulletText("%s", f.summary.c_str());
             if (!f.detail.empty()) {
                 ImGui::Indent();
@@ -1616,14 +1616,14 @@ void SandboxApp::drawUpgradePrompt() {
 
     if (ImGui::Button("Upgrade", ImVec2(120.0f * viewState_.dpi_, 0.0f))) {
         std::string err;
-        if (editor::applyProjectUpgrade(project_, pendingUpgrade_, &err)) {
+        if (editor::applyProjectUpgrade(projSess_.project_, projSess_.pendingUpgrade_, &err)) {
             setUpgradeStatus("Project upgraded - Compile C# to rebuild.");
-            AVER_INFO("[Editor] '{}' upgraded", project_.name);
+            AVER_INFO("[Editor] '{}' upgraded", projSess_.project_.name);
         } else {
             setUpgradeStatus("Upgrade failed: " + err, editor::NotifySeverity::Error);
-            AVER_ERROR("[Editor] upgrade of '{}' failed: {}", project_.name, err);
+            AVER_ERROR("[Editor] upgrade of '{}' failed: {}", projSess_.project_.name, err);
         }
-        pendingUpgrade_ = {};
+        projSess_.pendingUpgrade_ = {};
         panels_.upgradeAsked_ = true;
         ImGui::CloseCurrentPopup();
     }
@@ -1722,15 +1722,15 @@ void SandboxApp::drawPlayToolbar(Engine& e) {
                 ImGui::SetTooltip("Runs the game without possessing the player: the editor keeps the\n"
                                   "camera, selection and gizmos. %s possesses.",
                                   editor::chordToString(keybinds_.chordFor(editor::CommandId::PlayEject)).c_str());
-            const bool haveLevel = !levelPath_.empty();
+            const bool haveLevel = !projSess_.levelPath_.empty();
             const bool haveRuntime = !editor::runtimeExecutablePath().empty();
-            const bool standaloneOk = project_.valid() && haveLevel && haveRuntime;
+            const bool standaloneOk = projSess_.project_.valid() && haveLevel && haveRuntime;
             if (ImGui::MenuItem(ICON_GAMEPAD " Standalone Game", nullptr,
                                 play_.playMode_ == PlayMode::Standalone, standaloneOk))
                 launchPlay(e, PlayMode::Standalone);
             uiReg_.track("toolbar.play.options.standalone");
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                ImGui::SetTooltip("%s", !project_.valid() ? "Open a project first."
+                ImGui::SetTooltip("%s", !projSess_.project_.valid() ? "Open a project first."
                                   : !haveLevel ? "Save the level first -- Standalone reads it from disk."
                                   : !haveRuntime ? "AverEngineRuntime.exe was not found beside the editor."
                                   : "A separate Aver Engine Runtime process on the saved level.");
@@ -1782,7 +1782,7 @@ void SandboxApp::drawPlayToolbar(Engine& e) {
         }
         if (ImGui::BeginPopup("platforms")) {
             ImGui::TextDisabled("WINDOWS");
-            const bool haveProj = project_.valid();
+            const bool haveProj = projSess_.project_.valid();
             ImGui::BeginDisabled(!haveProj || tools_.compiling());
             if (ImGui::MenuItem(ICON_PACKAGE " Package Project...")) tools_.openPackageProject();
             ImGui::EndDisabled();
@@ -1791,7 +1791,7 @@ void SandboxApp::drawPlayToolbar(Engine& e) {
                 ImGui::SetTooltip("%s", !haveProj ? "Open a project first."
                                   : tools_.compiling() ? "A script build is running; packaging would stage a half-written assembly."
                                   : "Stage this project into a standalone, runnable game directory (also File > Package Project...).");
-            const bool standaloneOk = haveProj && !levelPath_.empty() && !editor::runtimeExecutablePath().empty();
+            const bool standaloneOk = haveProj && !projSess_.levelPath_.empty() && !editor::runtimeExecutablePath().empty();
             if (ImGui::MenuItem(ICON_GAMEPAD " Launch Standalone Game", nullptr, false, standaloneOk)) launchPlay(e, PlayMode::Standalone);
             uiReg_.track("toolbar.platforms.launch");
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
@@ -1869,7 +1869,7 @@ void SandboxApp::drawFileMenu(Engine& e) {
     uiReg_.track("menu.file");
     if (open_file){
 #if AVER_MODULE_SCENE
-        const bool haveProject = project_.valid();
+        const bool haveProject = projSess_.project_.valid();
         ImGui::BeginDisabled(!haveProject);
         // Asks first; prevents silently discarding unsaved edits.
         if (ImGui::MenuItem(ICON_NEW_FILE " New Level")) {
@@ -1881,9 +1881,9 @@ void SandboxApp::drawFileMenu(Engine& e) {
         if (ImGui::MenuItem(ICON_FOLDER_OPEN " Open Level...")) openLevelPickerNow();
         uiReg_.track("file.openLevel");
         // Reload: reopens the start level to discard edits.
-        ImGui::BeginDisabled(project_.startMap.empty());
+        ImGui::BeginDisabled(projSess_.project_.startMap.empty());
         if (ImGui::MenuItem(ICON_REFRESH " Reload Start Level")) {
-            const std::string start = project_.contentDir() + AVER_PATH_SEP + project_.startMap;
+            const std::string start = projSess_.project_.contentDir() + AVER_PATH_SEP + projSess_.project_.startMap;
             if (!requestOpenLevel(start, "reloaded from the project's start level"))
                 AVER_WARN("[Level] reload: {}", drawerUi_.openLevelError_);
         }
@@ -1897,9 +1897,9 @@ void SandboxApp::drawFileMenu(Engine& e) {
         // Save Level As: saveLevel takes an arbitrary path; this provides the UI.
         if (ImGui::MenuItem(ICON_SAVE " Save Level As...")) {
             panels_.saveLevelAsName_[0] = '\0';
-            const std::string stem = levelPath_.empty()
-                ? levelName_
-                : std::filesystem::path(levelPath_).stem().string();
+            const std::string stem = projSess_.levelPath_.empty()
+                ? projSess_.levelName_
+                : std::filesystem::path(projSess_.levelPath_).stem().string();
             std::snprintf(panels_.saveLevelAsName_, sizeof panels_.saveLevelAsName_, "%s",
                           stem.empty() ? "untitled" : stem.c_str());
             panels_.saveLevelAsError_.clear();
@@ -1935,8 +1935,8 @@ void SandboxApp::drawFileMenu(Engine& e) {
 #if AVER_MODULE_SCENE
         // Starts AverEngineRuntime.exe on this level (separate process).
         {
-            const bool haveProj = project_.valid();
-            const bool haveLevel = !levelPath_.empty();
+            const bool haveProj = projSess_.project_.valid();
+            const bool haveLevel = !projSess_.levelPath_.empty();
             const std::string runtimeExe = editor::runtimeExecutablePath();
             ImGui::BeginDisabled(!haveProj || !haveLevel || runtimeExe.empty());
             if (ImGui::MenuItem(ICON_LAUNCH " Launch in Aver Engine Runtime")) launchInRuntime(e);
@@ -1954,9 +1954,9 @@ void SandboxApp::drawFileMenu(Engine& e) {
         ImGui::Separator();
         // Packaging disabled only with specific reason.
         {
-            const bool haveProj = project_.valid();
+            const bool haveProj = projSess_.project_.valid();
             const bool haveScripts = haveProj &&
-                std::filesystem::exists(editor::scriptsBinaryDir(project_));
+                std::filesystem::exists(editor::scriptsBinaryDir(projSess_.project_));
             ImGui::BeginDisabled(!haveProj || tools_.compiling());
             if (ImGui::MenuItem(ICON_PACKAGE " Package Project...")) tools_.openPackageProject();
             ImGui::EndDisabled();
@@ -2037,7 +2037,7 @@ void SandboxApp::drawWindowMenu() {
 #if AVER_MODULE_SCENE
         {
             const bool streamOn = streaming_.enabled();
-            ImGui::BeginDisabled(!project_.valid());
+            ImGui::BeginDisabled(!projSess_.project_.valid());
             if (ImGui::MenuItem(ICON_LAYERS " Chunk Streaming", nullptr, streamOn)) setChunkStreamingEnabled(!streamOn);
             ImGui::EndDisabled();
             uiReg_.track("window.chunkStreaming");
@@ -2048,7 +2048,7 @@ void SandboxApp::drawWindowMenu() {
             // Which files name an asset; reachable from Content Browser context menu too.
             ImGui::MenuItem(ICON_LINK " References", nullptr, &dbgOv_.showReferences_);
             uiReg_.track("window.references");
-            if (!project_.valid() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            if (!projSess_.project_.valid() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                 ImGui::SetTooltip("Open or create a project first - a streamed world belongs to one.");
             else if (ImGui::IsItemHovered())
                 ImGui::SetTooltip(streamOn
@@ -2057,11 +2057,11 @@ void SandboxApp::drawWindowMenu() {
         }
         {
             const bool droneOn = drone_.droneEntity_ != scene::kInvalidEntity;
-            ImGui::BeginDisabled(!project_.valid());
+            ImGui::BeginDisabled(!projSess_.project_.valid());
             if (ImGui::MenuItem(ICON_BOT " Drone", nullptr, droneOn)) setDroneEnabled(!droneOn);
             ImGui::EndDisabled();
             uiReg_.track("window.drone");
-            if (!project_.valid() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            if (!projSess_.project_.valid() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                 ImGui::SetTooltip("Open or create a project first - the drone reads its graph from Content" AVER_PATH_SEP "Scripts.");
             else if (ImGui::IsItemHovered())
                 ImGui::SetTooltip(droneOn
@@ -2257,7 +2257,7 @@ void SandboxApp::drawMainToolbar(Engine& e, const ImVec2& wpos, const ImVec2& ws
     if (ImGui::Button(ICON_SAVE " Save")) saveLevelInteractive();
     uiReg_.track("toolbar.save");
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip(levelPath_.empty() ? "Save Level As..."
+        ImGui::SetTooltip(projSess_.levelPath_.empty() ? "Save Level As..."
                                              : "Save Level (Ctrl+S)");
 #else
     ImGui::BeginDisabled(true);
@@ -2311,7 +2311,7 @@ void SandboxApp::drawMainToolbar(Engine& e, const ImVec2& wpos, const ImVec2& ws
     }
     ImGui::SameLine();
     cap.emplace(viewState_.dpi_);
-    tools_.drawCompileButton(project_, viewState_.dpi_, brand_.compileIconUiId_);
+    tools_.drawCompileButton(projSess_.project_, viewState_.dpi_, brand_.compileIconUiId_);
     uiReg_.track("toolbar.compileCs");
     cap.reset();
     ImGui::SameLine();
@@ -2481,9 +2481,9 @@ void SandboxApp::drawLevelTab(Engine& e) {
 // Resolves the --select request. Returns true when it matched a Sun / Sky / Post Process entry.
 bool SandboxApp::applySelectRequest() {
     // Cleared after it fires (prevent repeated firing each frame).
-    if (!selectEntity_.empty() && frameNo_ > 5) {
-        const std::string want = selectEntity_;
-        selectEntity_.clear();
+    if (!projSess_.selectEntity_.empty() && frameNo_ > 5) {
+        const std::string want = projSess_.selectEntity_;
+        projSess_.selectEntity_.clear();
         // Pseudo-entries (Sun, Sky, Post Process) aren't entities but appear in Outliner/Details.
         {
             struct Pseudo { int sel; const char* shown; };
@@ -2526,51 +2526,51 @@ bool SandboxApp::applySelectRequest() {
 #if AVER_WITH_IMGUI
 // Applies --open-asset, --graph-select and --graph-tab once the editor is up.
 void SandboxApp::applyOpenAssetRequests() {
-    if (!openAsset_.empty() && frameNo_ > 5) {
-        std::string want = openAsset_;
-        openAsset_.clear();
+    if (!projSess_.openAsset_.empty() && frameNo_ > 5) {
+        std::string want = projSess_.openAsset_;
+        projSess_.openAsset_.clear();
         // Relative path is project-relative ("Content/..."), not editor launch directory.
-        if (project_.valid() && !std::filesystem::path(want).is_absolute()) {
-            const std::filesystem::path inProject = std::filesystem::path(project_.dir) / want;
+        if (projSess_.project_.valid() && !std::filesystem::path(want).is_absolute()) {
+            const std::filesystem::path inProject = std::filesystem::path(projSess_.project_.dir) / want;
             std::error_code ec;
             if (std::filesystem::exists(inProject, ec)) want = inProject.string();
         }
-        lastOpenAssetPath_ = want;
+        projSess_.lastOpenAssetPath_ = want;
         if (assetEditors_.open(want)) AVER_INFO("[Editor] --open-asset opened {}", want);
         else AVER_ERROR("[Editor] --open-asset: no registered editor accepts {}", want);
     }
     // --graph-select: run one frame after --open-asset so editor exists by then.
-    if (!graphSelectNode_.empty() && frameNo_ > 6) {
-        const std::string nodeId = graphSelectNode_;
-        graphSelectNode_.clear();
-        if (auto* ed = assetEditors_.find(lastOpenAssetPath_)) {
+    if (!projSess_.graphSelectNode_.empty() && frameNo_ > 6) {
+        const std::string nodeId = projSess_.graphSelectNode_;
+        projSess_.graphSelectNode_.clear();
+        if (auto* ed = assetEditors_.find(projSess_.lastOpenAssetPath_)) {
             if (auto* ge = dynamic_cast<editor::GraphEditor*>(ed)) {
                 // Report result, not call (captures against non-existent nodes were marked successful).
                 if (ge->selectNode(nodeId))
                     AVER_INFO("[Editor] --graph-select selected '{}'", nodeId);
                 else
                     AVER_ERROR("[Editor] --graph-select: '{}' names no node or component in {}",
-                               nodeId, lastOpenAssetPath_);
+                               nodeId, projSess_.lastOpenAssetPath_);
             } else {
-                AVER_ERROR("[Editor] --graph-select: '{}' is not a graph editor", lastOpenAssetPath_);
+                AVER_ERROR("[Editor] --graph-select: '{}' is not a graph editor", projSess_.lastOpenAssetPath_);
             }
         } else {
-            AVER_ERROR("[Editor] --graph-select: no open editor for '{}'", lastOpenAssetPath_);
+            AVER_ERROR("[Editor] --graph-select: no open editor for '{}'", projSess_.lastOpenAssetPath_);
         }
     }
     // --graph-tab: run one frame after --open-asset (like --graph-select); graph editors only.
-    if (!graphTab_.empty() && frameNo_ > 6) {
-        const std::string tab = graphTab_;
-        graphTab_.clear();
-        if (auto* ed = assetEditors_.find(lastOpenAssetPath_)) {
+    if (!projSess_.graphTab_.empty() && frameNo_ > 6) {
+        const std::string tab = projSess_.graphTab_;
+        projSess_.graphTab_.clear();
+        if (auto* ed = assetEditors_.find(projSess_.lastOpenAssetPath_)) {
             if (auto* ge = dynamic_cast<editor::GraphEditor*>(ed)) {
                 if (tab == "viewport") { ge->showViewportTab(); AVER_INFO("[Editor] --graph-tab viewport"); }
                 else AVER_WARN("[Editor] --graph-tab: only 'viewport' is selectable, got '{}'", tab);
             } else {
-                AVER_ERROR("[Editor] --graph-tab: '{}' is not a graph editor", lastOpenAssetPath_);
+                AVER_ERROR("[Editor] --graph-tab: '{}' is not a graph editor", projSess_.lastOpenAssetPath_);
             }
         } else {
-            AVER_ERROR("[Editor] --graph-tab: no open editor for '{}'", lastOpenAssetPath_);
+            AVER_ERROR("[Editor] --graph-tab: no open editor for '{}'", projSess_.lastOpenAssetPath_);
         }
     }
 }
@@ -2604,7 +2604,7 @@ void SandboxApp::drawStatusBar(Engine& e, const ImVec2& wpos, const ImVec2& wsiz
     // count, DEBUG, VRAM, frame rate) when the bar is too narrow, rather than drawing under the buttons.
     const bool rcBusy = rcStatusJob_ != nullptr;
     const editor::StatusBarSummary rcSummary = editor::summariseForStatusBar(
-        project_.valid(), revCtl_.rcAnswered_, revCtl_.rcGitPresent_, revCtl_.rcRoot_, revCtl_.rcStatus_, revCtl_.rcWhy_);
+        projSess_.project_.valid(), revCtl_.rcAnswered_, revCtl_.rcGitPresent_, revCtl_.rcRoot_, revCtl_.rcStatus_, revCtl_.rcWhy_);
     const std::string rcFace = rcStatusFace(rcBusy, rcSummary);
     const ImGuiStyle& barStyle = ImGui::GetStyle();
     const f32 barBtnPad = barStyle.FramePadding.x * 2.0f;
@@ -2635,7 +2635,7 @@ void SandboxApp::drawStatusBar(Engine& e, const ImVec2& wpos, const ImVec2& wsiz
     };
 
     ImGui::SetCursorPosY((statusH - ImGui::GetTextLineHeight()) * 0.5f);
-    ImGui::TextUnformatted(project_.valid() ? project_.name.c_str() : "No project");
+    ImGui::TextUnformatted(projSess_.project_.valid() ? projSess_.project_.name.c_str() : "No project");
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("%s on %s\nDPI %.0f%%", rhi::backendName(e.device()->backend()), e.device()->adapterName(), viewState_.dpi_ * 100.f);
     // Frame rate (clickable): with interpolation, shows real or real+interpolated. Real FPS only.
@@ -2924,7 +2924,7 @@ void SandboxApp::buildUI(Engine& e) {
         drawFileMenu(e);
         drawEditMenu();
         drawWindowMenu();
-        tools_.drawMenu(project_);
+        tools_.drawMenu(projSess_.project_);
         drawBuildMenu(e);
         if (ImGui::BeginMenu("Accessibility")) {
             editor::drawColourVisionPreviewMenu(accessPreview_);
@@ -3021,7 +3021,7 @@ void SandboxApp::buildUI(Engine& e) {
     pumpContentWatch();
     cbApplyWatchEvents();
     assetEditors_.draw(e, viewState_.centralDock_, viewState_.dpi_);
-    tools_.drawModals(project_, viewState_.dpi_);
+    tools_.drawModals(projSess_.project_, viewState_.dpi_);
     editor::extensionImporter().drawModal(viewState_.dpi_);
     editor::extensionsWindow().draw(viewState_.dpi_);
     drawDataLayersPanel();

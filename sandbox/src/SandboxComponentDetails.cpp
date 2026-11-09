@@ -389,7 +389,7 @@ void SandboxApp::drawPlacedComponentSections() {
     const auto makeSoftEnv = [&](const editor::PlacedKind& k) {
         editor::SoftSectionEnv env;
         env.playing = playing;
-        env.contentDir = project_.contentDir();
+        env.contentDir = projSess_.project_.contentDir();
         env.instantEdit = [&, kp = &k](bool changed, const std::function<void()>& mutate) { instantEdit(*kp, changed, mutate); };
         env.gestureEdit = [&, kp = &k](bool changed, const std::function<void()>& mutate) { gestureEdit(*kp, changed, mutate); };
         env.pickAsset = [this](const char* label, std::string& path, const char* ext) {
@@ -425,7 +425,7 @@ void SandboxApp::drawPlacedComponentSections() {
 
         // The asset behind the row, re-read on a change of path and about twice a second when no widget is busy.
         const std::string assetRel = pathOfContentId(assetId);
-        const std::string absAsset = assetRel.empty() ? std::string() : project_.contentDir() + "/" + assetRel;
+        const std::string absAsset = assetRel.empty() ? std::string() : projSess_.project_.contentDir() + "/" + assetRel;
         static std::string s_loadedFor;
         static softbody::SoftAsset s_asset;
         static bool s_ok = false;
@@ -445,7 +445,7 @@ void SandboxApp::drawPlacedComponentSections() {
             ImGui::BeginDisabled(playing || meshRel.empty());
             if (ImGui::SmallButton("Create .ocsoft")) {
                 const std::string rel = sm::assetPathForMesh(meshRel);
-                const std::filesystem::path target = std::filesystem::path(project_.contentDir()) / rel;
+                const std::filesystem::path target = std::filesystem::path(projSess_.project_.contentDir()) / rel;
                 std::error_code ec;
                 if (std::filesystem::exists(target, ec)) {
                     drawerUi_.cbStatus_ = rel + " already exists; assign it instead.";
@@ -578,7 +578,7 @@ void SandboxApp::drawPlacedComponentSections() {
             if (ImGui::SmallButton("Paint pins...")) {
                 fmt::OcMeshData md;
                 std::string why;
-                if (!fmt::loadOcMesh(project_.contentDir() + "/" + meshRel, md, &why)) drawerUi_.cbStatus_ = "Could not read the mesh: " + why;
+                if (!fmt::loadOcMesh(projSess_.project_.contentDir() + "/" + meshRel, md, &why)) drawerUi_.cbStatus_ = "Could not read the mesh: " + why;
                 else if (!paint.load(md, shown, absAsset)) drawerUi_.cbStatus_ = "The mesh could not be welded for painting";
                 else paint.entity = static_cast<u32>(e);
             }
@@ -643,19 +643,19 @@ void SandboxApp::drawPlacedComponentSections() {
             env.pathOfId = [this](u64 id) { return pathOfContentId(id); };
             env.fileExists = [this](const std::string& rel) {
                 std::error_code ec;
-                return std::filesystem::exists(std::filesystem::path(project_.contentDir()) / rel, ec);
+                return std::filesystem::exists(std::filesystem::path(projSess_.project_.contentDir()) / rel, ec);
             };
             env.createAsset = [&](const std::string& rel, const std::string& text) {
-                const std::filesystem::path target = std::filesystem::path(project_.contentDir()) / rel;
+                const std::filesystem::path target = std::filesystem::path(projSess_.project_.contentDir()) / rel;
                 std::string why;
                 if (!editor::writeNewFile(target.string(), text, &why)) { drawerUi_.cbStatus_ = "Could not write " + rel + ": " + why; return false; }
                 cbAdoptNewAsset(target, false);
                 changeAsset(k, "asset", rel);
                 return true;
             };
-            env.openEditor = [this](const std::string& rel) { assetEditors_.open((std::filesystem::path(project_.contentDir()) / rel).string()); };
+            env.openEditor = [this](const std::string& rel) { assetEditors_.open((std::filesystem::path(projSess_.project_.contentDir()) / rel).string()); };
             env.setStatus = [this](const std::string& s) { drawerUi_.cbStatus_ = s; };
-            env.contentDir = project_.contentDir();
+            env.contentDir = projSess_.project_.contentDir();
             env.entityName = std::string(w.name(e));
             env.pickRay = [this](Vec3& origin, Vec3& direction) {
                 if (viewState_.vpW_ == 0 || viewState_.vpH_ == 0) return false;
@@ -1092,17 +1092,17 @@ void SandboxApp::drawPlacedComponentSections() {
             env.pathOfId = [this](u64 id) { return pathOfContentId(id); };
             env.fileExists = [this](const std::string& rel) {
                 std::error_code ec;
-                return std::filesystem::exists(std::filesystem::path(project_.contentDir()) / rel, ec);
+                return std::filesystem::exists(std::filesystem::path(projSess_.project_.contentDir()) / rel, ec);
             };
             env.createAsset = [&](const std::string& rel, const std::string& text) {
-                const std::filesystem::path target = std::filesystem::path(project_.contentDir()) / rel;
+                const std::filesystem::path target = std::filesystem::path(projSess_.project_.contentDir()) / rel;
                 std::string why;
                 if (!editor::writeNewFile(target.string(), text, &why)) { drawerUi_.cbStatus_ = "Could not write " + rel + ": " + why; return false; }
                 cbAdoptNewAsset(target, false);
                 changeAsset(k, "asset", rel);
                 return true;
             };
-            env.openEditor = [this](const std::string& rel) { assetEditors_.open((std::filesystem::path(project_.contentDir()) / rel).string()); };
+            env.openEditor = [this](const std::string& rel) { assetEditors_.open((std::filesystem::path(projSess_.project_.contentDir()) / rel).string()); };
             env.setStatus = [this](const std::string& s) { drawerUi_.cbStatus_ = s; };
             if (const auto* mr = w.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer)) env.meshRel = pathOfContentId(mr->mesh);
             editor::drawVehicleSection(env, &w, static_cast<u32>(e));

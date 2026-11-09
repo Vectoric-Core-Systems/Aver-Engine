@@ -61,7 +61,7 @@ void SandboxApp::tickGraphShaderWarm(Engine& e) {
             if (graphWarmHeld_) release("the graph list could not be written");
             return;
         }
-        graphWarmup_.start(project_.manifestPath, list);
+        graphWarmup_.start(projSess_.project_.manifestPath, list);
         if (graphWarmup_.finished()) {   // could not start: compile here, as before
             if (graphWarmHeld_) release("the background compile could not start");
             return;

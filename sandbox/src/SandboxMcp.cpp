@@ -385,8 +385,8 @@ void SandboxApp::registerMcpAbis() {
             const int32_t s = aver_fw_play_state();
             r = std::string("{\"state\":") +
                 jq(!anyPlayActive() ? "editor" : s == AVER_FW_PLAY_PAUSED ? "paused" : "playing") +
-                ",\"level\":" + jq(levelPath_) +
-                ",\"edited_level\":" + jq(play_.pieTravelled_ ? play_.pieEditedLevelPath_ : levelPath_) +
+                ",\"level\":" + jq(projSess_.levelPath_) +
+                ",\"edited_level\":" + jq(play_.pieTravelled_ ? play_.pieEditedLevelPath_ : projSess_.levelPath_) +
                 ",\"travelled\":" + (play_.pieTravelled_ ? "true" : "false") +
                 ",\"reload_pending\":" + (play_.pieReloadPending_ ? "true" : "false") + "}";
             return true;
@@ -665,18 +665,18 @@ bool SandboxApp::mcpLevelSave(const std::string& targetIn, std::string& r, std::
     const std::string target = trimmed(targetIn);
 
     if (target.empty()) {
-        if (levelPath_.empty()) {
+        if (projSess_.levelPath_.empty()) {
             w = "this level has never been saved -- pass a name (saved as Maps/<name>.ocworld) or a path to save it as";
             return false;
         }
-        const std::string name = fs::path(levelPath_).filename().string();
-        if (!saveLevel(levelPath_)) {
+        const std::string name = fs::path(projSess_.levelPath_).filename().string();
+        if (!saveLevel(projSess_.levelPath_)) {
             setUpgradeStatus("Could not save " + name, editor::NotifySeverity::Error);
-            w = "could not write " + levelPath_ + " -- see the editor log";
+            w = "could not write " + projSess_.levelPath_ + " -- see the editor log";
             return false;
         }
         setUpgradeStatus("Saved " + name);
-        r = "{\"path\":" + jq(levelPath_) + ",\"saved\":true,\"savedAs\":false}";
+        r = "{\"path\":" + jq(projSess_.levelPath_) + ",\"saved\":true,\"savedAs\":false}";
         return true;
     }
 
@@ -687,18 +687,18 @@ bool SandboxApp::mcpLevelSave(const std::string& targetIn, std::string& r, std::
             w = "a level name cannot contain any of \\ / : * ? \" < > |";
             return false;
         }
-        if (!project_.valid()) {
+        if (!projSess_.project_.valid()) {
             w = "a bare name saves into <project>/Content/Maps and no project is open -- pass a full path";
             return false;
         }
-        dest = fs::path(project_.contentDir()) / "Maps" / (target + ".ocworld");
+        dest = fs::path(projSess_.project_.contentDir()) / "Maps" / (target + ".ocworld");
     } else {
         if (!dest.is_absolute()) {
-            if (!project_.valid()) {
+            if (!projSess_.project_.valid()) {
                 w = "a relative path is resolved against the project's Content directory and no project is open";
                 return false;
             }
-            dest = fs::path(project_.contentDir()) / dest;
+            dest = fs::path(projSess_.project_.contentDir()) / dest;
         }
         const std::string ext = lowered(dest.extension().string());
         if (ext.empty()) dest += ".ocworld";
@@ -715,17 +715,17 @@ bool SandboxApp::mcpLevelSave(const std::string& targetIn, std::string& r, std::
     std::error_code ec;
     fs::create_directories(dest.parent_path(), ec);
 
-    const bool renamed = stem != levelName_;
-    const std::string prevName = levelName_;
+    const bool renamed = stem != projSess_.levelName_;
+    const std::string prevName = projSess_.levelName_;
     const u64 prevId = lvl_.levelHeader_.contentId, prevLegacyId = lvl_.legacyMapHeader_.contentId;
     if (renamed) {
-        levelName_ = stem;
+        projSess_.levelName_ = stem;
         lvl_.levelHeader_.contentId = 0;
         lvl_.legacyMapHeader_.contentId = 0;
     }
     if (!saveLevel(dest.string())) {
         if (renamed) {
-            levelName_ = prevName;
+            projSess_.levelName_ = prevName;
             lvl_.levelHeader_.contentId = prevId;
             lvl_.legacyMapHeader_.contentId = prevLegacyId;
         }
@@ -733,12 +733,12 @@ bool SandboxApp::mcpLevelSave(const std::string& targetIn, std::string& r, std::
         w = "could not write " + dest.string() + " -- see the editor log";
         return false;
     }
-    levelPath_ = dest.string();
+    projSess_.levelPath_ = dest.string();
 #if AVER_WITH_IMGUI
     cbInvalidate(dest.parent_path().string());
 #endif
     setUpgradeStatus("Saved " + dest.filename().string());
-    r = "{\"path\":" + jq(levelPath_) + ",\"saved\":true,\"savedAs\":true,\"name\":" + jq(levelName_) + "}";
+    r = "{\"path\":" + jq(projSess_.levelPath_) + ",\"saved\":true,\"savedAs\":true,\"name\":" + jq(projSess_.levelName_) + "}";
     return true;
 #else
     (void)targetIn; (void)r;
@@ -781,7 +781,7 @@ bool SandboxApp::mcpLevelPlace(const std::string& text, std::string& r, std::str
     const auto sane = [](f64 v) {
         return std::isfinite(v) && std::fabs(v) <= static_cast<f64>(std::numeric_limits<f32>::max());
     };
-    const std::string contentDir = project_.valid() ? project_.contentDir() : std::string();
+    const std::string contentDir = projSess_.project_.valid() ? projSess_.project_.contentDir() : std::string();
     for (fmt::OcWorldPlacement& p : doc.placements) {
         if (!sane(p.x) || !sane(p.y) || !sane(p.z) || !sane(p.yaw) || !sane(p.pitch) || !sane(p.roll) ||
             !sane(p.sx) || !sane(p.sy) || !sane(p.sz) || !sane(p.animSpeed) || !sane(p.animTime)) {
@@ -1024,7 +1024,7 @@ bool SandboxApp::mcpLevelAbi(const mcp::AbiCall& a, std::string& r, std::string&
 
     // ---- info: the state every other refusal is about ---------------------------------------------
     if (fn == "info") {
-        std::string j = "{\"level\":" + jq(levelPath_) + ",\"name\":" + jq(levelName_) +
+        std::string j = "{\"level\":" + jq(projSess_.levelPath_) + ",\"name\":" + jq(projSess_.levelName_) +
                         ",\"entities\":" + std::to_string(lvl_.levelEntities_.size()) +
                         ",\"dirty\":" + jb(levelHasUnsavedEdits()) +
                         ",\"format\":" + jq(lvl_.levelIsLegacyOcmap_ ? "ocmap" : "ocworld") +
@@ -1032,7 +1032,7 @@ bool SandboxApp::mcpLevelAbi(const mcp::AbiCall& a, std::string& r, std::string&
                         ",\"loading\":" + jb(projectLoading_ != nullptr) +
                         ",\"pendingOpen\":" + jq(panels_.pendingOpenPath_) +
                         ",\"pendingOpenPrompt\":" + jb(panels_.pendingOpenPrompt_) +
-                        ",\"content\":" + jq(project_.valid() ? project_.contentDir() : std::string());
+                        ",\"content\":" + jq(projSess_.project_.valid() ? projSess_.project_.contentDir() : std::string());
         Vec3 sp{};
         f32 sy = 0.0f;
         if (playerStartTransform(sp, sy)) {
@@ -1071,10 +1071,10 @@ bool SandboxApp::mcpLevelAbi(const mcp::AbiCall& a, std::string& r, std::string&
         std::error_code ec;
         std::vector<fs::path> tries;
         const fs::path given(want);
-        if (given.is_absolute() || !project_.valid()) {
+        if (given.is_absolute() || !projSess_.project_.valid()) {
             tries.push_back(given);
         } else {
-            const fs::path content(project_.contentDir());
+            const fs::path content(projSess_.project_.contentDir());
             tries.push_back(content / given);
             tries.push_back(content / "Maps" / given);
         }
@@ -1105,14 +1105,14 @@ bool SandboxApp::mcpLevelAbi(const mcp::AbiCall& a, std::string& r, std::string&
             return false;
         }
         if (discard && levelHasUnsavedEdits()) {
-            AVER_WARN("[Mcp] level::open discards the unsaved edits to '{}'", levelPath_);
+            AVER_WARN("[Mcp] level::open discards the unsaved edits to '{}'", projSess_.levelPath_);
             markLevelSaved();   // else applyPendingOpen stops at its unsaved-changes prompt
         }
         r = "{\"queued\":true,\"path\":" + jq(path) + "}";
         return true;
     }
 
-    if (levelPath_.empty() && fn != "save") {
+    if (projSess_.levelPath_.empty() && fn != "save") {
         w = "no level is open -- open one first (op open)";
         return false;
     }
@@ -1327,7 +1327,7 @@ bool SandboxApp::mcpLevelAbi(const mcp::AbiCall& a, std::string& r, std::string&
             after.speed = a.args.size() > 1 ? static_cast<f32>(a.args[1]) : 1.0f;
             after.time  = a.args.size() > 2 ? static_cast<f32>(a.args[2]) : 0.0f;
             after.once  = a.args.size() > 3 && a.args[3] != 0.0;
-            if (!checkObjectClip(content_, project_.valid() ? project_.contentDir() : std::string(), after.clip, w))
+            if (!checkObjectClip(content_, projSess_.project_.valid() ? projSess_.project_.contentDir() : std::string(), after.clip, w))
                 return false;
         }
         const EntityAnim* cur = entityAnim(e);

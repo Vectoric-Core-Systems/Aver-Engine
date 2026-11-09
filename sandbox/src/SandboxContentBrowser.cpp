@@ -45,7 +45,7 @@ bool importGltfToDir(const std::string& src, const std::string& destDir, const s
 // Returns the mounted roots: the project's Content, and the engine's source tree where present.
 std::vector<SandboxApp::CbRoot> SandboxApp::cbRoots() const {
     std::vector<CbRoot> r;
-    if (project_.valid()) r.push_back({"Content", project_.contentDir(), false});
+    if (projSess_.project_.valid()) r.push_back({"Content", projSess_.project_.contentDir(), false});
     if (!drawerUi_.cbEngineRoot_.empty()) r.push_back({"Engine", drawerUi_.cbEngineRoot_, true});
     return r;
 }
@@ -54,7 +54,7 @@ std::vector<SandboxApp::CbRoot> SandboxApp::cbRoots() const {
 static constexpr const char* kCbFavView = "<favourites>";
 
 void SandboxApp::cbColsEnsure() {
-    const std::string dir = project_.valid() ? project_.dir : std::string();
+    const std::string dir = projSess_.project_.valid() ? projSess_.project_.dir : std::string();
     if (dir == drawerUi_.cbColsFor_) return;
     drawerUi_.cbColsFor_ = dir;
     drawerUi_.cbCols_ = editor::CbCollections{};
@@ -72,7 +72,7 @@ void SandboxApp::cbColsSave() {
 }
 
 std::string SandboxApp::cbKeyOf(const std::string& full) const {
-    return project_.valid() ? editor::cbContentKey(full, project_.contentDir()) : std::string();
+    return projSess_.project_.valid() ? editor::cbContentKey(full, projSess_.project_.contentDir()) : std::string();
 }
 
 // The file context menu's Favourite / Collection entries.
@@ -329,8 +329,8 @@ void SandboxApp::cbCreateMaterial() {
     const std::string bound = stem.rfind("M_", 0) == 0 ? stem : "M_" + stem;
     // Through csharpNamespaceFor: a project name is a folder name and may contain spaces --
     // pasting one straight after `namespace ` ("My Game") produced C# that could not compile.
-    const std::string ns    = (project_.valid() && !project_.name.empty())
-                                  ? editor::csharpNamespaceFor(project_.name) + ".Materials"
+    const std::string ns    = (projSess_.project_.valid() && !projSess_.project_.name.empty())
+                                  ? editor::csharpNamespaceFor(projSess_.project_.name) + ".Materials"
                                   : std::string("Materials");
 
     pbr::MaterialDesc d;   // engine defaults: the starter is plain, not a guess at intent
@@ -521,11 +521,11 @@ void SandboxApp::cbCreateDataTable() {
 // Writes an empty string table Localization/<default culture>/<name>.ocstrings and opens it. The default culture is
 // the project's LOCALE.DEFAULT ("en" when unset).
 void SandboxApp::cbCreateStringTable(const std::string& name) {
-    if (!project_.valid()) { drawerUi_.cbStatus_ = "Open a project first"; return; }
+    if (!projSess_.project_.valid()) { drawerUi_.cbStatus_ = "Open a project first"; return; }
     if (!fmt::validLocTable(name)) { drawerUi_.cbStatus_ = "A table name is letters, digits and underscores"; return; }
-    std::string culture = fmt::normalizeCulture(project_.localeDefault);
+    std::string culture = fmt::normalizeCulture(projSess_.project_.localeDefault);
     if (culture.empty()) culture = "en";
-    const std::filesystem::path dir = std::filesystem::path(project_.contentDir()) / "Localization" / culture;
+    const std::filesystem::path dir = std::filesystem::path(projSess_.project_.contentDir()) / "Localization" / culture;
     const std::filesystem::path target = dir / (name + ".ocstrings");
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
@@ -1010,7 +1010,7 @@ bool SandboxApp::cbMoveEntryTo(const std::string& src, const std::string& destDi
 // not "there are exactly N".
 std::vector<std::string> SandboxApp::cbFindReferencesTo(const std::string& absPath) const {
     std::vector<std::string> out;
-    if (!project_.valid()) return out;
+    if (!projSess_.project_.valid()) return out;
     const std::string needle = cbRelativeToContent(absPath);
     if (needle.empty() || needle == absPath) return out;   // outside the content root
 
@@ -1019,7 +1019,7 @@ std::vector<std::string> SandboxApp::cbFindReferencesTo(const std::string& absPa
     const std::string want = editor::normaliseForRefScan(needle);
 
     std::error_code ec;
-    const std::string content = project_.contentDir();
+    const std::string content = projSess_.project_.contentDir();
     for (std::filesystem::recursive_directory_iterator it(content, ec), end; it != end; it.increment(ec)) {
         if (ec) break;
         if (!it->is_regular_file(ec)) continue;
@@ -1044,7 +1044,7 @@ std::vector<std::string> SandboxApp::cbFindReferencesTo(const std::string& absPa
 
 SandboxApp::RefRewriteReport SandboxApp::cbRewriteReferences(const std::string& oldAbs, const std::string& newAbs) {
     RefRewriteReport rep;
-    if (!project_.valid()) return rep;
+    if (!projSess_.project_.valid()) return rep;
     const std::string oldRel = cbRelativeToContent(oldAbs);
     const std::string newRel = cbRelativeToContent(newAbs);
     if (oldRel.empty() || newRel.empty() || oldRel == oldAbs || newRel == newAbs) return rep;
@@ -1053,7 +1053,7 @@ SandboxApp::RefRewriteReport SandboxApp::cbRewriteReferences(const std::string& 
     // Scans for the old path -- the same set of files the warning listed, so what the dialog
     // promised is exactly what gets edited. The rename has already happened on disk by this point.
     for (const std::string& refRel : cbFindReferencesTo(oldAbs)) {
-        const std::string abs = project_.contentDir() + AVER_PATH_SEP + refRel;
+        const std::string abs = projSess_.project_.contentDir() + AVER_PATH_SEP + refRel;
         std::string text;
         if (!readFileText(abs, text)) { ++rep.filesFailed; continue; }
         const editor::RefRewrite r = editor::rewriteAssetRefs(text, oldRel, newRel);
@@ -1068,10 +1068,10 @@ SandboxApp::RefRewriteReport SandboxApp::cbRewriteReferences(const std::string& 
 }
 
 std::string SandboxApp::cbRelativeToContent(const std::string& abs) const {
-    if (!project_.valid()) return abs;
+    if (!projSess_.project_.valid()) return abs;
     std::error_code ec;
     const auto rel = std::filesystem::relative(std::filesystem::path(abs),
-                                               std::filesystem::path(project_.contentDir()), ec);
+                                               std::filesystem::path(projSess_.project_.contentDir()), ec);
     if (ec || rel.empty()) return abs;
     std::string out = rel.generic_string();
     return out;
@@ -1296,7 +1296,7 @@ void SandboxApp::cbItemContextMenu(const std::string& full, const std::string& n
     if (ImGui::MenuItem("Show in Explorer")) editor::revealInFileManager(full);
     if (ImGui::MenuItem("Copy Path")) { ImGui::SetClipboardText(full.c_str()); drawerUi_.cbStatus_ = "Path copied"; }
     // Reimport / Import options... on an FBX import record, or on any file the record names.
-    if (!isDir) modelReimportMenuItems(full, project_.valid() ? project_.dir : std::string(), project_.contentDir());
+    if (!isDir) modelReimportMenuItems(full, projSess_.project_.valid() ? projSess_.project_.dir : std::string(), projSess_.project_.contentDir());
     // Find References on demand: the scan already existed but could only be reached from the
     // delete/rename confirms, so "what uses this?" was askable only after deciding to remove it.
     if (!isDir && ImGui::MenuItem("Find References")) {
@@ -1305,8 +1305,8 @@ void SandboxApp::cbItemContextMenu(const std::string& full, const std::string& n
         dbgOv_.refPanelScanned_ = true;
         dbgOv_.showReferences_ = true;
     }
-    if (project_.valid() && ImGui::MenuItem("Validate Assets")) {
-        drawerUi_.cbStatus_ = editor::runAssetValidation(project_.contentDir(), full);
+    if (projSess_.project_.valid() && ImGui::MenuItem("Validate Assets")) {
+        drawerUi_.cbStatus_ = editor::runAssetValidation(projSess_.project_.contentDir(), full);
         panels_.showMessageLog_ = true;
     }
     if (!isDir) cbCollectionMenu(full);
@@ -1376,13 +1376,13 @@ void SandboxApp::drawContentBrowser() {
         // here"): scripts land in the project's Scripts folder, C++ in modules\. The C++ pair needs
         // no project -- it writes into the engine tree -- so it stays enabled when the C# pair isn't.
         ImGui::TextDisabled("  Written to a fixed location, not this folder");
-        ImGui::BeginDisabled(!project_.valid());
+        ImGui::BeginDisabled(!projSess_.project_.valid());
         if (ImGui::MenuItem("New C# Script...")) tools_.openNewCsScript();
         uiReg_.track("cb.add.csScript");
         if (ImGui::MenuItem("New C# Class..."))  tools_.openNewCsClass();
         uiReg_.track("cb.add.csClass");
         ImGui::EndDisabled();
-        if (!project_.valid() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        if (!projSess_.project_.valid() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip("Open or create a project first - a script belongs to one.");
         ImGui::Separator();
         if (ImGui::MenuItem("New C++ Module...")) tools_.openNewCppModule();
@@ -1480,7 +1480,7 @@ void SandboxApp::drawContentBrowser() {
         }
         uiReg_.track("cb.add.collisionShape");
         if (ImGui::MenuItem("New Instance Set")) {
-            const std::filesystem::path target = project_.valid() ? freeInstanceSetPath(project_.contentDir()) : std::filesystem::path();
+            const std::filesystem::path target = projSess_.project_.valid() ? freeInstanceSetPath(projSess_.project_.contentDir()) : std::filesystem::path();
             std::string why;
             if (target.empty()) {
                 drawerUi_.cbStatus_ = "Could not find a free name for a new instance set";
@@ -1523,7 +1523,7 @@ void SandboxApp::drawContentBrowser() {
     }
     drawImportModal();
     // The Import options modal, and the outcome of a Reimport started from the context menu or that modal.
-    drawModelImportPopups(project_.valid() ? project_.dir : std::string(), project_.contentDir());
+    drawModelImportPopups(projSess_.project_.valid() ? projSess_.project_.dir : std::string(), projSess_.project_.contentDir());
     {
         ModelReimportResult mr;
         if (takeModelReimportResult(mr)) {
@@ -2179,7 +2179,7 @@ void SandboxApp::drawFolderTree(const std::string& dir) {
 bool SandboxApp::isSkinnedMeshEntry(const DirEntry& e) const {
 #if AVER_MODULE_SCENE
     if (e.isDir || e.kindExt != ".ocmesh" || lvl_.skinnedMeshIds_.empty()) return false;
-    const std::string content = project_.contentDir();
+    const std::string content = projSess_.project_.contentDir();
     if (content.empty()) return false;
     std::error_code ec;
     std::string rel = std::filesystem::relative(e.path, content, ec).string();
@@ -2567,7 +2567,7 @@ void SandboxApp::drawFolderGallery(const std::vector<const DirEntry*>& shown) {
                 // looked up, never loaded -- loadProjectMeshes() already uploads every .ocmesh on
                 // project open, so a miss means "not loaded" (reload), not a stalling synchronous read.
                 if (!e.isDir && e.kindExt == ".ocmesh" && thumbnails_.ready()) {
-                    const std::string content = project_.contentDir();
+                    const std::string content = projSess_.project_.contentDir();
                     std::error_code relEc;
                     std::string rel = content.empty() ? std::string()
                                       : std::filesystem::relative(e.path, content, relEc).string();
@@ -2587,7 +2587,7 @@ void SandboxApp::drawFolderGallery(const std::vector<const DirEntry*>& shown) {
                                     thumbMaterial = content_.materialForSurface(slot0);
                                     thumbMaterialName = slot0;
                                     // The material file and its graph join the cache key, so editing either re-renders.
-                                    const std::string matFile = editor::resolveMaterialPath(project_.binariesDir(), content, slot0);
+                                    const std::string matFile = editor::resolveMaterialPath(projSess_.project_.binariesDir(), content, slot0);
                                     if (!matFile.empty()) {
                                         std::vector<std::string> deps{matFile};
                                         const std::string graph = editor::ocmatGraphRef(matFile);
@@ -2703,12 +2703,12 @@ void SandboxApp::drawFolderFiles(std::string dir) {   // by value: a click below
             if (!col) { drawerUi_.cbView_.clear(); return; }
             keys = &col->paths;
         }
-        const std::filesystem::path contentDir(project_.contentDir());
+        const std::filesystem::path contentDir(projSess_.project_.contentDir());
         for (const std::string& key : *keys) {
             const std::filesystem::path full = (contentDir / key).make_preferred();
             const DirListing& l = dirListing(full.parent_path().string());
             for (const DirEntry& e : l.entries)
-                if (!e.isDir && editor::cbContentKey(e.full, project_.contentDir()) == key && containsNoCase(e.name, drawerUi_.cbFilter_)) {
+                if (!e.isDir && editor::cbContentKey(e.full, projSess_.project_.contentDir()) == key && containsNoCase(e.name, drawerUi_.cbFilter_)) {
                     if (editor::cbTypePasses(drawerUi_.cbTypeMask_, e.isDir, e.kindExt)) shown.push_back(&e);
                     break;
                 }
@@ -2844,7 +2844,7 @@ void SandboxApp::drawImportModal() {
     }
     // FBX options, shown once an .fbx path is typed or picked (nothing for other files).
     drawFbxImportOptionsPanel(drawerUi_.importPath_);
-    const std::string dest = drawerUi_.cbSelectedDir_.empty() ? project_.contentDir() : drawerUi_.cbSelectedDir_;
+    const std::string dest = drawerUi_.cbSelectedDir_.empty() ? projSess_.project_.contentDir() : drawerUi_.cbSelectedDir_;
     const std::string blocked = cbImportBlockedReason(dest);
     if (blocked.empty()) {
         ImGui::Text("Into: %s", dest.c_str());
@@ -3052,7 +3052,7 @@ void SandboxApp::importModel(const std::string& src, const std::string& destDir,
     GltfImportSummary sum;
     std::string why;
     const std::string srcName = std::filesystem::path(src).filename().string();
-    if (!importModelFile(src, destDir, project_.contentDir(), overwrite, sum, &why)) {
+    if (!importModelFile(src, destDir, projSess_.project_.contentDir(), overwrite, sum, &why)) {
         AVER_WARN("[Import] {}", why);
         drawerUi_.cbStatus_ = "Import failed - see the Output Log";
         notifyOutcome(editor::NotifySeverity::Error, "Could not import " + srcName, why, true);
@@ -3085,7 +3085,7 @@ void SandboxApp::importModel(const std::string& src, const std::string& destDir,
 // Unsupported extensions aren't filtered here either -- importAsset already decides what it can
 // do with a file (convert, copy, or refuse).
 void SandboxApp::importDroppedFiles(const std::vector<std::string>& paths) {
-    const std::string destDir = drawerUi_.cbSelectedDir_.empty() ? project_.contentDir() : drawerUi_.cbSelectedDir_;
+    const std::string destDir = drawerUi_.cbSelectedDir_.empty() ? projSess_.project_.contentDir() : drawerUi_.cbSelectedDir_;
     for (const std::string& p : paths) {
         std::error_code ec;
         if (std::filesystem::is_directory(p, ec)) {

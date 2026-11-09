@@ -127,7 +127,7 @@ BootConfig SandboxApp::config() const  {
 bool SandboxApp::startupComplete() const  {
 #if AVER_MODULE_SCENE
     if (lvl_.lastSceneDrawn_ < 0) return false;
-    if (project_.manifestPath.empty()) return true;    // no project loading
+    if (projSess_.project_.manifestPath.empty()) return true;    // no project loading
     if (lvl_.lastSceneDrawn_ == 0) return false;
     constexpr int kSettleFrames = 8;
     if (lvl_.lastSceneDrawn_ == startupSettleCount_) ++startupSettleFrames_;
@@ -444,7 +444,7 @@ void SandboxApp::onDeviceCreated(Engine& e)  {
 // touched it again, so different levels -- and unsaved edits -- looked identical. No project open:
 // leaves the title alone; BootConfig's constructor default (`c.windowTitle`) already covers that case.
 void SandboxApp::refreshWindowTitle(Engine& e) {
-    if (!e.window() || !project_.valid()) return;
+    if (!e.window() || !projSess_.project_.valid()) return;
     // levelName_ first (the world's `name` field, survives the level moving on disk); falls back
     // to the saved file's stem, then "untitled" for a never-saved level -- matching the exit prompt
     // and Save Level As (SandboxShell.cpp).
@@ -452,20 +452,20 @@ void SandboxApp::refreshWindowTitle(Engine& e) {
     // Level half guarded, project half not: levelName_/levelPath_ are `#if AVER_MODULE_SCENE`
     // (every verb that sets them -- load, Save As, New Level -- is too). A scene-less tree can
     // never have a level open, so it falls back to the project-only title this function replaced.
-    std::string title = "Aver Engine \xE2\x80\x94 Editor \xE2\x80\x94 " + project_.name;
+    std::string title = "Aver Engine \xE2\x80\x94 Editor \xE2\x80\x94 " + projSess_.project_.name;
 #if AVER_MODULE_SCENE
-    std::string display = levelName_;
-    if (display.empty() && !levelPath_.empty())
-        display = std::filesystem::path(levelPath_).stem().string();
+    std::string display = projSess_.levelName_;
+    if (display.empty() && !projSess_.levelPath_.empty())
+        display = std::filesystem::path(projSess_.levelPath_).stem().string();
     if (display.empty()) display = "untitled";
     title += " \xE2\x80\x94 " + display;
     if (levelHasUnsavedEdits()) title += "*";
 #endif
     // ONLY WHEN IT CHANGES: setTitle is a Win32 call, and this runs every frame -- most of which
     // change nothing about the level's name or dirty state.
-    if (title != windowTitleShown_) {
-        windowTitleShown_ = title;
-        e.window()->setTitle(windowTitleShown_);
+    if (title != projSess_.windowTitleShown_) {
+        projSess_.windowTitleShown_ = title;
+        e.window()->setTitle(projSess_.windowTitleShown_);
     }
 }
 
@@ -516,7 +516,7 @@ void SandboxApp::pumpGraphDebugger() {
     aver_fw_set_paused(1);
 #endif
     std::string path = editor::graphPathForName(hit.graph);
-    if (path.empty() && project_.valid()) path = editor::findGraphFileByName(project_.contentDir(), hit.graph);
+    if (path.empty() && projSess_.project_.valid()) path = editor::findGraphFileByName(projSess_.project_.contentDir(), hit.graph);
     if (!path.empty()) editor::revealGraphNode(path, hit.node);
     notifyOutcome(editor::NotifySeverity::Info, "Breakpoint hit",
                   "'" + hit.node + "' in " + hit.graph + ". Play is paused at the end of this frame; "
@@ -576,7 +576,7 @@ void SandboxApp::onShutdown(Engine& e)  {
     editor::flushEditorPrefs();
     // Flush project manifest; project autosave has 0.5s debounce, so immediate exit loses edits.
     // maxFrames_ guard: --frames sets render settings, so unguarded flush would save capture flags into manifest.
-    if (maxFrames_ == 0 && autosave_.projectDirty_ && project_.valid()) {
+    if (maxFrames_ == 0 && autosave_.projectDirty_ && projSess_.project_.valid()) {
         std::string why;
         if (!saveProjectManifest(&why))
             AVER_WARN("[Project] could not flush unsaved settings on exit: {}", why);
@@ -757,7 +757,7 @@ bool SandboxApp::updateFrameInterpolation(rhi::IDevice* dev) {
     const bool playing = false;
 #endif
     bool want = rset_.frameInterpCli_ >= 0 ? rset_.frameInterpCli_ >= 1
-              : playing           ? project_.frameInterp == 1
+              : playing           ? projSess_.project_.frameInterp == 1
                                   : rset_.frameInterpWhileEditing_;
     dev->setFrameInterpCaptureGenerated(rset_.frameInterpCli_ == 2);
     if (want && !frameInterpolator_) {

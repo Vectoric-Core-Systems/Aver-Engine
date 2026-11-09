@@ -189,11 +189,11 @@ void SandboxApp::tickCameraAutomation(Engine& e, const Timestep& t, HitchMarks& 
     // one loaded, plus ~10 s for streaming to bring in the scene (the startup level used to be captured
     // instead); it starts stepping on NRD2 frames and holds the camera the same way.
     const bool nrd2LevelReady = drawerUi_.openLevelByName_.empty() && panels_.pendingOpenPath_.empty() && !panels_.pendingOpenPrompt_ &&
-                                !levelName_.empty();
+                                !projSess_.levelName_.empty();
     harness_.nrd2CaptureSettle_ = nrd2LevelReady ? harness_.nrd2CaptureSettle_ + 1u : 0u;
     if (harness_.nrd2CapturePoses_ && rset_.voxiAttached_ && !harness_.nrd2CaptureStarted_ && (harness_.nrd2CaptureSettle_ > 600u || t.frame > 6000)) {
         render::denoise::Nrd2CaptureConfig c;
-        c.scene = levelName_.empty() ? std::string("unnamed") : levelName_;
+        c.scene = projSess_.levelName_.empty() ? std::string("unnamed") : projSess_.levelName_;
         // Path Tracing feeds NRD2 different noise: its poses form their own scene for stratified training.
         if (voxi::Renderer::get().settings().pathTracing != voxi::Quality::Off) c.scene += "_PT";
         for (char& ch : c.scene)
@@ -275,28 +275,28 @@ void SandboxApp::tickLaunchRequests(const Timestep& t) {
 #if AVER_MODULE_SCENE
     // --save-level <out>: writes the OPEN level to another path (not over levelPath_).
     // Waits for every pending open (--open-level, forwarded launch, unsaved-changes prompt) before acting.
-    if (!saveLevelTo_.empty() && !harness_.saveLevelDone_ && !levelPath_.empty() &&
+    if (!projSess_.saveLevelTo_.empty() && !harness_.saveLevelDone_ && !projSess_.levelPath_.empty() &&
         drawerUi_.openLevelByName_.empty() && panels_.pendingOpenPath_.empty() && !panels_.pendingOpenPrompt_) {
         harness_.saveLevelDone_ = true;
-        if (saveLevel(saveLevelTo_))
+        if (saveLevel(projSess_.saveLevelTo_))
             AVER_INFO("[Level] --save-level wrote '{}' ({}) to {}",
-                      levelName_, levelPath_, saveLevelTo_);
+                      projSess_.levelName_, projSess_.levelPath_, projSess_.saveLevelTo_);
         else
-            AVER_ERROR("[Level] --save-level failed for {}", saveLevelTo_);
+            AVER_ERROR("[Level] --save-level failed for {}", projSess_.saveLevelTo_);
     }
 #endif
 #if AVER_MODULE_SCENE
     // --bake-level-pack <level>: bakes that level's pack once the project's meshes are in.
-    if (!bakeLevelPackAsset_.empty() && !harness_.bakeLevelPackDone_ && t.frame >= 2 && panels_.pendingOpenPath_.empty() && !panels_.pendingOpenPrompt_) {
+    if (!projSess_.bakeLevelPackAsset_.empty() && !harness_.bakeLevelPackDone_ && t.frame >= 2 && panels_.pendingOpenPath_.empty() && !panels_.pendingOpenPrompt_) {
         harness_.bakeLevelPackDone_ = true;
         std::string bakeWhy;
         world::LevelAssetLibrary& lib = level_.assets();
-        lib.setLoader(world::LevelAssetLibrary::diskLoader(project_.contentDir()));
+        lib.setLoader(world::LevelAssetLibrary::diskLoader(projSess_.project_.contentDir()));
         world::PackBakeReport rep;
-        if (game::bakeLevelPackWithContent(lib, bakeLevelPackAsset_, content_, project_.contentDir(), project_.dir, rep, &bakeWhy))
+        if (game::bakeLevelPackWithContent(lib, projSess_.bakeLevelPackAsset_, content_, projSess_.project_.contentDir(), projSess_.project_.dir, rep, &bakeWhy))
             AVER_INFO("[LevelPack] --bake-level-pack: {} row(s) in {} group(s), {} kept as entities", rep.rows, rep.groups, rep.kept);
         else
-            AVER_ERROR("[LevelPack] --bake-level-pack failed for {}: {}", bakeLevelPackAsset_, bakeWhy);
+            AVER_ERROR("[LevelPack] --bake-level-pack failed for {}: {}", projSess_.bakeLevelPackAsset_, bakeWhy);
     }
 #endif
     // Forwarded open request (guarded as a whole; queue filled only by setOpenRequestHook).
@@ -314,7 +314,7 @@ void SandboxApp::tickLaunchRequests(const Timestep& t) {
     if (window_ && window_->hasPendingDroppedFiles()) {
         const std::vector<std::string> dropped = window_->takePendingDroppedFiles();
 #if AVER_WITH_IMGUI
-        if (project_.valid()) {
+        if (projSess_.project_.valid()) {
             importDroppedFiles(dropped);
         } else {
             AVER_WARN("[Import] {} file(s) dropped with no project open; ignored", dropped.size());
@@ -686,9 +686,9 @@ void SandboxApp::tickEditorFlyCamera(const Timestep& t) {
 
         // Ctrl+Shift+B / Ctrl+Shift+R mirror the Tools menu's Compile/Reload Scripts items. Same site.
         if (!io.WantTextInput && keybinds_.pressed(editor::CommandId::CompileScripts, io))
-            tools_.requestCompileScripts(project_);
+            tools_.requestCompileScripts(projSess_.project_);
         if (!io.WantTextInput && keybinds_.pressed(editor::CommandId::ReloadScripts, io))
-            tools_.requestReloadScripts(project_);
+            tools_.requestReloadScripts(projSess_.project_);
 
         // F frames the selection at a distance derived from its radius.
         // Outliner/Details count too (levelFocused_ is false when those panels have focus).
@@ -1063,7 +1063,7 @@ void SandboxApp::updateRenderScenes(Engine& e, HitchMarks& hm) {
 void SandboxApp::tickThumbnailsAndTestHooks(Engine& e) {
     // Once per frame, before render features run (ThumbnailCache.hpp): update() points preview at next pending request.
     if (thumbnails_.ready()) {
-        thumbnails_.setDiskCache(project_.valid() ? (std::filesystem::path(project_.dir) / "Saved" / "ThumbnailCache").string() : std::string(),
+        thumbnails_.setDiskCache(projSess_.project_.valid() ? (std::filesystem::path(projSess_.project_.dir) / "Saved" / "ThumbnailCache").string() : std::string(),
                                  static_cast<u64>(std::max(0, drawerUi_.thumbDiskCapMB_)));
         thumbnails_.update();
     }
@@ -1304,7 +1304,7 @@ void SandboxApp::applyDeviceRenderSettings(Engine& e, const Timestep& t) {
         }
         voxiRenderer_.setVolume(c, rset_.giExtent_);
         // Baked volume cache directory; empty when no project open.
-        voxiRenderer_.setGiCacheDir(project_.valid() ? fmt::giCacheDir(project_.dir) : std::string());
+        voxiRenderer_.setGiCacheDir(projSess_.project_.valid() ? fmt::giCacheDir(projSess_.project_.dir) : std::string());
         voxiRenderer_.setDebugView(rset_.giDebugView_);
         // Console knob voxi.giPoisonView reasserted each frame.
         voxiRenderer_.setGiPoisonView(editor::consoleGiPoisonViewSlot());
@@ -1453,7 +1453,7 @@ void SandboxApp::pushPostSettings(Engine& e, bool debugViewActiveThisFrame) {
         rset_.postPushed_ = dbg;
     } else {
         // The level's post volumes blend onto a copy: post_ stays the base the panels edit (POST_VOLUMES.md).
-        rhi::PostSettings shown = postVolumeTools_.blend(*e.device(), project_.contentDir(),
+        rhi::PostSettings shown = postVolumeTools_.blend(*e.device(), projSess_.project_.contentDir(),
                                                               lvl_.levelHeader_.postVolumes, rset_.post_, viewPos());
         // The player's accessibility choices win over the level's volumes, in a Play session only (a saved option must not change the
         // authoring view); the editor's colour-vision preview fills in when no filter is set. Scene only: the editor chrome draws after.

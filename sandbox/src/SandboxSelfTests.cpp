@@ -49,10 +49,10 @@ void SandboxApp::setLodMeshShader(bool on, f32 thresholdPx) {
 
 void SandboxApp::setUiDemo(bool on) { panels_.showUiDemo_ = on; }
 
-void SandboxApp::setOpenAsset(std::string p) { openAsset_ = std::move(p); }
+void SandboxApp::setOpenAsset(std::string p) { projSess_.openAsset_ = std::move(p); }
 
 // --select <substring>: select entity by name; makes the Details panel capturable in bounded runs.
-void SandboxApp::setSelectEntity(std::string p) { selectEntity_ = std::move(p); }
+void SandboxApp::setSelectEntity(std::string p) { projSess_.selectEntity_ = std::move(p); }
 
 // --water <heightCm>. Stored whether or not the module is compiled in, so a build without it can
 // say so rather than ignoring the flag in silence.
@@ -63,10 +63,10 @@ void SandboxApp::setWater(bool on, f32 heightCm) { rset_.waterEnabled_ = on; rse
 void SandboxApp::setOpenLegacy(bool on) { panels_.openLegacy_ = on; }
 
 // --graph-select <nodeId>: select node for capture; work happens in onGui().
-void SandboxApp::setGraphSelectNode(std::string id) { graphSelectNode_ = std::move(id); }
+void SandboxApp::setGraphSelectNode(std::string id) { projSess_.graphSelectNode_ = std::move(id); }
 
 // --graph-tab viewport: bring Viewport tab to front.
-void SandboxApp::setGraphTab(std::string tab) { graphTab_ = std::move(tab); }
+void SandboxApp::setGraphTab(std::string tab) { projSess_.graphTab_ = std::move(tab); }
 
 void SandboxApp::setInputProbe(bool on) { inputProbe_ = on; }
 
@@ -128,8 +128,8 @@ void SandboxApp::setHudTest(int idx) { harness_.hudTest_ = idx; }
 
 void SandboxApp::setSaveProject(bool on) { harness_.saveProject_ = on; }
 
-void SandboxApp::setSaveLevelTo(std::string p) { saveLevelTo_ = std::move(p); }
-void SandboxApp::setBakeLevelPack(std::string levelAsset) { bakeLevelPackAsset_ = std::move(levelAsset); }   // [wave3/level-instances]
+void SandboxApp::setSaveLevelTo(std::string p) { projSess_.saveLevelTo_ = std::move(p); }
+void SandboxApp::setBakeLevelPack(std::string levelAsset) { projSess_.bakeLevelPackAsset_ = std::move(levelAsset); }   // [wave3/level-instances]
 
 void SandboxApp::setRayProbe(f32 x, f32 y) { harness_.rayProbe_ = true; harness_.rayProbeX_ = x; harness_.rayProbeY_ = y; }
 
@@ -517,13 +517,13 @@ void SandboxApp::setViewMode(const std::string& mode) {
 
 void SandboxApp::setPlayTest() { harness_.playTest_ = true; }
 
-void SandboxApp::setProjectPath(std::string p) { projectPath_ = std::move(p); }
+void SandboxApp::setProjectPath(std::string p) { projSess_.projectPath_ = std::move(p); }
 
 // --mode <name>: set editor mode; applied on first frame with level.
 void SandboxApp::setStartMode(std::string m) { launch_.startMode_ = std::move(m); }
 
 // <path>.ocmap given on the command line: opened INSTEAD of the project's start map.
-void SandboxApp::setOpenMap(std::string p) { openMapPath_ = std::move(p); }
+void SandboxApp::setOpenMap(std::string p) { projSess_.openMapPath_ = std::move(p); }
 
 void SandboxApp::armBrowser(bool on) { browserActive_ = on; }
 
@@ -1181,7 +1181,7 @@ void SandboxApp::runProjectSwitchTest() {
         else      { AVER_ERROR("[project-switch-test] FAIL: {}", what); ++failures; }
     };
 
-    const fmt::ProjectDesc saved = project_;
+    const fmt::ProjectDesc saved = projSess_.project_;
     const std::string savedBackend = launch_.projectBackend_;
     const f32 savedBudget = rset_.frameBudgetMs_;
     const bool savedForced = rset_.frameBudgetForced_;
@@ -1193,7 +1193,7 @@ void SandboxApp::runProjectSwitchTest() {
     a.backend = "vulkan";
     a.frameBudgetMs = 8.0f;
     check(a.valid() && a.hasRenderSettings(), "project A is valid and states render settings");
-    project_ = a;
+    projSess_.project_ = a;
     applyProjectRenderSettings();
     check(launch_.projectBackend_ == "vulkan", "opening A puts its backend in the dropdown mirror");
     check(rset_.frameBudgetMs_ == 8.0f, "opening A arms its frame budget");
@@ -1202,14 +1202,14 @@ void SandboxApp::runProjectSwitchTest() {
     b.name = "SwitchTestB";
     b.dir = executableDir();
     check(b.valid() && !b.hasRenderSettings(), "project B is valid and states NO render settings");
-    project_ = b;
+    projSess_.project_ = b;
     applyProjectRenderSettings();
     check(launch_.projectBackend_.empty(),
           "opening B clears the backend mirror instead of inheriting A's vulkan");
     check(rset_.frameBudgetMs_ == b.frameBudgetMs,
           "opening B resets the frame budget instead of inheriting A's 8ms");
 
-    project_ = saved;
+    projSess_.project_ = saved;
     launch_.projectBackend_ = savedBackend;
     rset_.frameBudgetMs_ = savedBudget;
     rset_.frameBudgetForced_ = savedForced;
@@ -1306,8 +1306,8 @@ void SandboxApp::runValidateGraph() {
         AVER_ERROR("[validate-graph] the staged bridge exports no GraphValidate");
         return;
     }
-    const std::string abs = project_.valid() && harness_.validateGraphPath_.find(':') == std::string::npos
-        ? (project_.contentDir() + AVER_PATH_SEP + harness_.validateGraphPath_) : harness_.validateGraphPath_;
+    const std::string abs = projSess_.project_.valid() && harness_.validateGraphPath_.find(':') == std::string::npos
+        ? (projSess_.project_.contentDir() + AVER_PATH_SEP + harness_.validateGraphPath_) : harness_.validateGraphPath_;
     std::string text;
     if (!readFileText(abs, text)) {
         AVER_ERROR("[validate-graph] could not read '{}'", abs);
@@ -1329,14 +1329,14 @@ void SandboxApp::runRenameRepointTest() {
         if (cond) AVER_INFO("[rename-repoint-test] PASS: {}", what);
         else      { AVER_ERROR("[rename-repoint-test] FAIL: {}", what); ++failures; }
     };
-    if (!project_.valid()) {
+    if (!projSess_.project_.valid()) {
         AVER_ERROR("[rename-repoint-test] FAIL: needs an open project (pass --project)");
         AVER_INFO("[rename-repoint-test] RESULT: FAIL");
         return;
     }
 
     std::error_code ec;
-    const std::filesystem::path root = std::filesystem::path(project_.contentDir()) / "RepointTmp";
+    const std::filesystem::path root = std::filesystem::path(projSess_.project_.contentDir()) / "RepointTmp";
     std::filesystem::remove_all(root, ec);
     std::filesystem::create_directories(root, ec);
 
@@ -1381,8 +1381,8 @@ void SandboxApp::runRenameRepointTest() {
 }
 
 void SandboxApp::runFindRefs() {
-    const std::string abs = project_.valid()
-        ? (project_.contentDir() + AVER_PATH_SEP + harness_.findRefsPath_) : harness_.findRefsPath_;
+    const std::string abs = projSess_.project_.valid()
+        ? (projSess_.project_.contentDir() + AVER_PATH_SEP + harness_.findRefsPath_) : harness_.findRefsPath_;
     const std::vector<std::string> refs = cbFindReferencesTo(abs);
     AVER_INFO("[find-refs] '{}' is referenced by {} file(s)", harness_.findRefsPath_, refs.size());
     for (const std::string& r : refs) AVER_INFO("[find-refs]   {}", r);

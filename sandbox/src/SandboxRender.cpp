@@ -141,7 +141,7 @@ void SandboxApp::tickProjectLoadingScreen() {
     if (projectLoading_) {
         if (projectLoading_->borrowed) {
             if (!projectLoading_->borrowed->loadingScreenActive()) projectLoading_.reset();
-        } else if (++projectLoadingFrames_ >= kLoadingScreenFrameCap || startupComplete()) {
+        } else if (++projSess_.projectLoadingFrames_ >= kLoadingScreenFrameCap || startupComplete()) {
             projectLoading_.reset();
         }
     }
@@ -163,7 +163,7 @@ void SandboxApp::tickLevelPrepToast(Engine& e) {
         if (pending && !levelPrepToast_ && sec > 0.3) {
             editor::Notification n;
             n.severity = editor::NotifySeverity::Info;
-            n.title = "Preparing " + levelName_;
+            n.title = "Preparing " + projSess_.levelName_;
             n.body = "Building the ray-tracing structures for this level; the view settles when they finish.";
             n.sticky = true;
             n.hasProgress = true;
@@ -177,7 +177,7 @@ void SandboxApp::tickLevelPrepToast(Engine& e) {
                 std::snprintf(body, sizeof body, "Ready after %.1f s.", sec);
                 editor::notifications().setSticky(levelPrepToast_, false);   // finish() leaves sticky set
                 editor::notifications().finish(levelPrepToast_, editor::NotifySeverity::Success,
-                                               levelName_ + " ready", body, 3.0);
+                                               projSess_.levelName_ + " ready", body, 3.0);
             }
             levelPrepArmed_ = false;
             levelPrepToast_ = 0;
@@ -204,7 +204,7 @@ void SandboxApp::drawEditorObjects(Engine& e) {
     // stuff" -- nothing was replaced, the placeholders just hid in the same frame). levelEntities_
     // is AVER_MODULE_SCENE-only, so the OR term is simply absent, not always-false, when it's off.
 #if AVER_MODULE_SCENE
-    launch_.hideEditorScene_ = playSessionActive() || !levelPath_.empty();
+    launch_.hideEditorScene_ = playSessionActive() || !projSess_.levelPath_.empty();
 #else
     launch_.hideEditorScene_ = playSessionActive();
 #endif
@@ -275,11 +275,11 @@ void SandboxApp::drawLandscape(Engine& e) {
 #if AVER_MODULE_SCENE && AVER_MODULE_VOXI
 void SandboxApp::updateSceneFeeds() {
     // CLight entities -> Voxi's lamp list and the path tracer's lights, before the frame's draws.
-    sceneLightFeed_.update(scene::World::instance(), voxiRenderer_, ptSceneView_.get(), project_.contentDir());
+    sceneLightFeed_.update(scene::World::instance(), voxiRenderer_, ptSceneView_.get(), projSess_.project_.contentDir());
     envFxFeed_.update(voxiRenderer_, viewState_.eye_);   // G4 R8: local fog volumes
     // CDecal entities -> Voxi's projected-decal list (raster and ray hits both paint them).
-    if (prefabModel_.contentDir() != project_.contentDir()) prefabModel_.setContentDir(project_.contentDir());
-    decalImages_.setContentDir(project_.contentDir());
+    if (prefabModel_.contentDir() != projSess_.project_.contentDir()) prefabModel_.setContentDir(projSess_.project_.contentDir());
+    decalImages_.setContentDir(projSess_.project_.contentDir());
     sceneDecalFeed_.update(scene::World::instance(), voxiRenderer_, decalImages_.loader());
 }
 #endif
@@ -2486,7 +2486,7 @@ void SandboxApp::serviceViewportScreenshot(Engine& e) {
         // <project>/Saved/Screenshots -- same `Saved/` convention autosavePathFor documents for
         // recoverable, non-authored state. No project open falls back to the executable's
         // directory (same fallback CrashReport.cpp uses for Saved/Crashes).
-        const std::string base = !project_.dir.empty() ? project_.dir : executableDir();
+        const std::string base = !projSess_.project_.dir.empty() ? projSess_.project_.dir : executableDir();
         const std::string dir = base + AVER_PATH_SEP "Saved" AVER_PATH_SEP "Screenshots";
         std::error_code mkec;
         std::filesystem::create_directories(dir, mkec);

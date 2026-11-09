@@ -63,7 +63,7 @@ void SandboxApp::installLevelInstanceHooks() {
 #endif
     };
     h.spawnPrefab = [this](const fmt::OcPrefabInstance& pr, const Transform& local, scene::Entity parent) {
-        prefabModel_.setContentDir(project_.contentDir());
+        prefabModel_.setContentDir(projSess_.project_.contentDir());
         return prefabSys_.instantiate(pr.prefab, local, parent, pr.overrides, pr.name);
     };
     h.captureEntity = [this](scene::Entity e, fmt::OcWorldData& into, i32 parentIdx) {
@@ -184,12 +184,12 @@ bool SandboxApp::captureEntityForInstance(scene::Entity e, fmt::OcWorldData& int
     if (root != scene::kInvalidEntity)
         frame = transformFromMatrix(w.worldMatrix(e) * w.worldMatrix(root).inverse());
     if (const auto* lc = w.component<scene::CLight>(e, scene::kComponentLight)) {
-        into.lights.push_back(editor::recordFromLight(*lc, frame, w.name(e), editor::LightAssetPaths::scan(project_.contentDir())));
+        into.lights.push_back(editor::recordFromLight(*lc, frame, w.name(e), editor::LightAssetPaths::scan(projSess_.project_.contentDir())));
         return true;
     }
     if (const auto* dc = w.component<scene::CDecal>(e, scene::kComponentDecal)) {
         if (dc->flags & scene::kDecalPooled) return false;
-        into.decals.push_back(editor::recordFromDecal(*dc, frame, w.name(e), editor::LightAssetPaths::scan(project_.contentDir())));
+        into.decals.push_back(editor::recordFromDecal(*dc, frame, w.name(e), editor::LightAssetPaths::scan(projSess_.project_.contentDir())));
         return true;
     }
     return false;
@@ -199,7 +199,7 @@ bool SandboxApp::captureEntityForInstance(scene::Entity e, fmt::OcWorldData& int
 void SandboxApp::openInstanceLevel(const std::string& assetRef) {
     const std::string full = levelInstanceModel_.fullPathFor(assetRef);
     editor::LevelReturnPoint rp;
-    rp.levelPath = levelPath_;
+    rp.levelPath = projSess_.levelPath_;
     rp.camPos = viewState_.camPos_;
     rp.yawDeg = viewState_.yaw_ * kRadToDeg;
     rp.pitchDeg = viewState_.pitch_ * kRadToDeg;
@@ -217,7 +217,7 @@ bool SandboxApp::bakeInstancePack(scene::Entity root, std::string* why) {
     const std::string asset = level_.instances().assetOf(root);
     if (asset.empty()) { if (why) *why = "not an instance"; return false; }
     world::PackBakeReport rep;
-    if (!game::bakeLevelPackWithContent(level_.assets(), asset, content_, project_.contentDir(), project_.dir, rep, why)) return false;
+    if (!game::bakeLevelPackWithContent(level_.assets(), asset, content_, projSess_.project_.contentDir(), projSess_.project_.dir, rep, why)) return false;
     drawerUi_.cbStatus_ = "Baked " + std::to_string(rep.rows) + " row(s) in " + std::to_string(rep.groups) + " group(s); " +
                 std::to_string(rep.kept) + " stay entities";
     level_.instances().reloadAsset(asset);   // the bake changes what a packed instance shows

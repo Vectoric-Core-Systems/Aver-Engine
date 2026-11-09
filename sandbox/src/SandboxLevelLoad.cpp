@@ -35,7 +35,7 @@ namespace aver {
 // case -- every level until somebody bakes one -- so it clears rather than complains.
 void SandboxApp::loadNavForLevel(Engine& e) {
     dbgOv_.nav_ = fmt::OcNavData{};
-    const std::string path = editor::navPathForLevel(levelPath_);
+    const std::string path = editor::navPathForLevel(projSess_.levelPath_);
     std::string why;
     if (!path.empty() && fmt::loadOcNav(path, dbgOv_.nav_, &why)) {
         AVER_INFO("[Editor] navigation loaded from {} ({}x{} cells)", path,
@@ -97,7 +97,7 @@ void SandboxApp::setChunkStreamingEnabled(bool on) {
         return;
     }
 
-    if (!project_.valid()) {
+    if (!projSess_.project_.valid()) {
         AVER_WARN("[ChunkWorld] cannot enable streaming: no project is open");
         return;
     }
@@ -117,7 +117,7 @@ void SandboxApp::setChunkStreamingEnabled(bool on) {
     if (landscape_.loaded())
         layers = [this](std::string_view name, f32 x, f32 y) { return landscape_.layerWeightAtScene(name, x, y); };
 #endif
-    streaming_.enable(project_, lvl_.levelPcgVolumes_, lvl_.levelHeader_.scatterSpecies, &content_,
+    streaming_.enable(projSess_.project_, lvl_.levelPcgVolumes_, lvl_.levelHeader_.scatterSpecies, &content_,
                        std::move(height), std::move(layers));
     if (streaming_.enabled())
         streaming_.warnIfCameraOutsideGeneratedBand(
@@ -145,7 +145,7 @@ void SandboxApp::setDroneEnabled(bool on) {
         return;
     }
 
-    if (!project_.valid()) {
+    if (!projSess_.project_.valid()) {
         AVER_WARN("[Drone] cannot enable: no project is open");
         return;
     }
@@ -221,9 +221,9 @@ void SandboxApp::setDroneEnabled(bool on) {
     // that file -- one sample's content compiled into the editor.
     // THE PROJECT'S OWN ANSWER FIRST, then the CLI override: until DRONE.GRAPH existed the drone
     // spawned with no graph from anywhere but --drone-graph, sitting perfectly still.
-    const std::string& droneRel = !drone_.droneGraphRel_.empty() ? drone_.droneGraphRel_ : project_.droneGraph;
+    const std::string& droneRel = !drone_.droneGraphRel_.empty() ? drone_.droneGraphRel_ : projSess_.project_.droneGraph;
     const std::string graphPath =
-        droneRel.empty() ? std::string() : project_.contentDir() + AVER_PATH_SEP + droneRel;
+        droneRel.empty() ? std::string() : projSess_.project_.contentDir() + AVER_PATH_SEP + droneRel;
     if (graphPath.empty()) {
         AVER_WARN("[Drone] entity #{} spawned with NO graph, so it will sit still. Give the "
                   "project a DRONE.GRAPH line (e.g. `DRONE.GRAPH Scripts/Drone.ocgraph`), or "
@@ -340,7 +340,7 @@ void SandboxApp::loadLevel(Engine& eng, const std::string& path) {
 #if AVER_MODULE_PBR && AVER_MODULE_VOXI
         landscapeMaterials = &voxiRenderer_.materials();
 #endif
-        landscape_.loadForLevel(eng.device(), project_.contentDir(), levelPath, w, &content_, landscapeMaterials);
+        landscape_.loadForLevel(eng.device(), projSess_.project_.contentDir(), levelPath, w, &content_, landscapeMaterials);
 #else
         (void)eng; (void)levelPath;
 #endif
@@ -372,7 +372,7 @@ void SandboxApp::loadLevel(Engine& eng, const std::string& path) {
         if (rset_.voxiAttached_) {
             if (projectLoading_) projectLoading_->stage("Loading foliage", 0.75f);
             const std::vector<std::string> tables = level_.foliageTablePaths(loaded.world.foliageFiles);
-            levelFoliage_.load(loaded.world, content_, eng.device(), &voxiRenderer_, project_.contentDir(),
+            levelFoliage_.load(loaded.world, content_, eng.device(), &voxiRenderer_, projSess_.project_.contentDir(),
                 [this](f32 f) { if (projectLoading_) projectLoading_->progress(0.75f + f * 0.15f); }, viewState_.camPos_,
                 &tables);
             if (!levelFoliage_.result().error.empty()) AVER_WARN("[Foliage] {}", levelFoliage_.result().error);
@@ -420,7 +420,7 @@ void SandboxApp::onLevelInstantiated(const game::GameLevel::LoadedLevel& loaded)
         }
         // PREFABINST records: each instance is rebuilt from its asset, with its overrides applied. The hooks add the
         // entities to levelEntities_ and label them.
-        prefabModel_.setContentDir(project_.contentDir());
+        prefabModel_.setContentDir(projSess_.project_.contentDir());
         prefabSys_.instantiateLevelInstances(w.prefabInstances);
         // DECAL records, the same way: one bare CDecal entity each.
         {
@@ -541,11 +541,11 @@ void SandboxApp::onLevelInstantiated(const game::GameLevel::LoadedLevel& loaded)
     // reading the same record is how they drift, and this pair already had: this block set
     // fogDensity_ while saveLevel wrote a different member entirely.
     applyLevelSky(w);
-    levelPath_ = loaded.path;
-    levelName_ = w.name;
+    projSess_.levelPath_ = loaded.path;
+    projSess_.levelName_ = w.name;
     // [wave3/level-instances begin] the model's view of "the open level", for the cycle check
-    levelInstanceModel_.setContentDir(project_.contentDir());
-    levelInstanceModel_.setOpenLevel(editor::LevelInstanceEditorModel::assetRefFor(project_.contentDir(), loaded.path));
+    levelInstanceModel_.setContentDir(projSess_.project_.contentDir());
+    levelInstanceModel_.setOpenLevel(editor::LevelInstanceEditorModel::assetRefFor(projSess_.project_.contentDir(), loaded.path));
     // [wave3/level-instances end]
 #if AVER_MODULE_SYNAPSE
     // The overlay is a DEVICE resource and this function has no device -- loadLevel is
@@ -616,7 +616,7 @@ void SandboxApp::onLevelInstantiated(const game::GameLevel::LoadedLevel& loaded)
     // 2356cm and shrank the volume for a level it already covered. project_.giExtent is 0 when
     // the manifest states nothing, which is exactly the "no author has an opinion" case the fit
     // is for.
-    if (!w.placements.empty() && project_.giExtent <= 0.0f) fitGiVolumeToLevel();
+    if (!w.placements.empty() && projSess_.project_.giExtent <= 0.0f) fitGiVolumeToLevel();
 #endif
 
     // JUST LOADED MEANS JUST SAVED, as far as the exit prompt is concerned. openLevelDirect
@@ -671,8 +671,8 @@ void SandboxApp::onLegacyOcmapInstantiated(const game::GameLevel::LoadedLevel& l
                                              static_cast<f32>(m.spawnZ)},
                                         static_cast<f32>(m.spawnYaw));
     }
-    levelPath_ = loaded.path;
-    levelName_ = m.name;
+    projSess_.levelPath_ = loaded.path;
+    projSess_.levelName_ = m.name;
 
     selectionUi_.sel_ = -1;
     selectionUi_.selEntity_ = scene::kInvalidEntity;
@@ -688,7 +688,7 @@ void SandboxApp::onLegacyOcmapInstantiated(const game::GameLevel::LoadedLevel& l
     // The legacy .ocmap path fitted the GI volume through the camera framing's old side effect too,
     // so it gets the explicit call for the same reason the OCWORLD path above does.
 #if AVER_MODULE_VOXI
-    if (!loaded.world.placements.empty() && project_.giExtent <= 0.0f) fitGiVolumeToLevel();
+    if (!loaded.world.placements.empty() && projSess_.project_.giExtent <= 0.0f) fitGiVolumeToLevel();
 #endif
 }
 
@@ -801,7 +801,7 @@ scene::Entity SandboxApp::placeClassInstance(fmt::OcWorldPlacement p, std::strin
         return scene::kInvalidEntity;
     };
     if (anyPlayActive()) return refuse("Stop Play before placing an actor");
-    if (!(launch_.hideEditorScene_ || !levelPath_.empty()))
+    if (!(launch_.hideEditorScene_ || !projSess_.levelPath_.empty()))
         return refuse("Load a level (or hide the editor scene) before dropping assets");
     // A legacy .ocmap save has no record for a class actor: it would be placed now and gone on save.
     if (lvl_.levelIsLegacyOcmap_) return refuse("this level is a legacy .ocmap, which cannot store a class actor -- Save As an .ocworld first");
@@ -809,7 +809,7 @@ scene::Entity SandboxApp::placeClassInstance(fmt::OcWorldPlacement p, std::strin
     // Declared again on every placement: a graph written or edited after the project opened becomes placeable,
     // and its COMP data matches the file the managed bind reloads.
     if (!scripts_.ready()) return refuse("Scripting is not ready; use Tools > Reload Scripts");
-    scripts_.declareGraphClasses(project_.contentDir());
+    scripts_.declareGraphClasses(projSess_.project_.contentDir());
 #endif
     const int32_t c = aver_fw_class_find(p.className.c_str());
     if (c == 0)
@@ -1063,13 +1063,13 @@ void SandboxApp::applyLevelView(const editor::LevelView& v) {
 // <project>/Saved/LevelViews.ini, or empty with no project: editor.ini deliberately holds nothing
 // about a project, so a level outside one has nowhere to be remembered.
 std::string SandboxApp::levelViewsPath() const {
-    return project_.valid() ? project_.dir + AVER_PATH_SEP "Saved" AVER_PATH_SEP "LevelViews.ini" : std::string();
+    return projSess_.project_.valid() ? projSess_.project_.dir + AVER_PATH_SEP "Saved" AVER_PATH_SEP "LevelViews.ini" : std::string();
 }
 
 bool SandboxApp::lookupLevelView(const std::string& levelPath, editor::LevelView& out) const {
     if (maxFrames_ != 0) return false;
     const std::string file = levelViewsPath();
-    const std::string key = editor::levelViewKey(levelPath, project_.dir);
+    const std::string key = editor::levelViewKey(levelPath, projSess_.project_.dir);
     if (file.empty() || key.empty()) return false;
     std::string text;
     if (!readFileText(file, text)) return false;   // no file yet: nothing remembered
@@ -1083,9 +1083,9 @@ bool SandboxApp::lookupLevelView(const std::string& levelPath, editor::LevelView
 // Read-modify-write, so the other levels' entries (and a second editor's) survive. Skipped when the
 // entry already says the same thing, so switching levels without moving never touches the file.
 void SandboxApp::storeLevelView() {
-    if (maxFrames_ != 0 || levelPath_.empty()) return;
+    if (maxFrames_ != 0 || projSess_.levelPath_.empty()) return;
     const std::string file = levelViewsPath();
-    const std::string key = editor::levelViewKey(levelPath_, project_.dir);
+    const std::string key = editor::levelViewKey(projSess_.levelPath_, projSess_.project_.dir);
     if (file.empty() || key.empty()) return;
 
     editor::LevelView v{viewState_.camPos_.x, viewState_.camPos_.y, viewState_.camPos_.z, degrees(viewState_.yaw_), degrees(viewState_.pitch_), viewState_.flySpeed_};
@@ -1104,7 +1104,7 @@ void SandboxApp::storeLevelView() {
             return;
     }
     views[key] = v;
-    createDirectories(project_.dir + AVER_PATH_SEP "Saved");
+    createDirectories(projSess_.project_.dir + AVER_PATH_SEP "Saved");
     // DirectWrite fallback, editor.ini's trade: a remembered camera is cache-grade, and a locked
     // file falling back to a plain write beats the view silently never reaching disk.
     AtomicWriteError err;
@@ -1120,19 +1120,19 @@ void SandboxApp::loadStartMap(Engine& eng) {
     // A MAP NAMED ON THE COMMAND LINE OUTRANKS THE PROJECT'S START MAP, loaded even when the
     // project has no start map at all -- the whole point of naming one. Checked before
     // project_.valid(), so a level outside any project still opens rather than silently opening nothing.
-    if (!openMapPath_.empty()) {
+    if (!projSess_.openMapPath_.empty()) {
         std::error_code ec;
-        if (std::filesystem::exists(openMapPath_, ec)) { loadLevel(eng, openMapPath_); return; }
-        AVER_ERROR("[Level] '{}' does not exist", openMapPath_);
-        openMapPath_.clear();                  // fall back to the start map rather than nothing
+        if (std::filesystem::exists(projSess_.openMapPath_, ec)) { loadLevel(eng, projSess_.openMapPath_); return; }
+        AVER_ERROR("[Level] '{}' does not exist", projSess_.openMapPath_);
+        projSess_.openMapPath_.clear();                  // fall back to the start map rather than nothing
     }
-    if (!project_.valid() || project_.startMap.empty()) return;
-    const std::string path = project_.contentDir() + AVER_PATH_SEP + project_.startMap;
+    if (!projSess_.project_.valid() || projSess_.project_.startMap.empty()) return;
+    const std::string path = projSess_.project_.contentDir() + AVER_PATH_SEP + projSess_.project_.startMap;
     std::error_code ec;
     if (!std::filesystem::exists(path, ec)) {
-        AVER_INFO("[Level] start map '{}' does not exist yet - the world starts empty", project_.startMap);
-        levelName_ = std::filesystem::path(project_.startMap).stem().string();
-        levelPath_ = path;
+        AVER_INFO("[Level] start map '{}' does not exist yet - the world starts empty", projSess_.project_.startMap);
+        projSess_.levelName_ = std::filesystem::path(projSess_.project_.startMap).stem().string();
+        projSess_.levelPath_ = path;
         return;
     }
     loadLevel(eng, path);
@@ -1297,7 +1297,7 @@ void SandboxApp::unloadLevel(Engine& eng) {
     // Its entity and body lists are the load-time subset of the editor's own, already destroyed and
     // removed above; destroying an entity already destroyed and removing a removed body are no-ops.
     level_.unload();
-    levelPath_.clear();
+    projSess_.levelPath_.clear();
 #if AVER_MODULE_LANDSCAPE
     landscape_.unload(eng.device());
     // The two editor-only sculpt flags landscape_.unload() itself does not know about.
