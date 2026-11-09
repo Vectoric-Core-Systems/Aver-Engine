@@ -4450,6 +4450,95 @@ private:
 #endif
     void setInitialToolAndCamera();
 
+    // SandboxUpdate.cpp: the steps onUpdate runs, in order
+    void applyConsoleSets(Engine& e, const Timestep& t);
+    void tickViewModeAndCameraDrift(const Timestep& t, bool& debugViewActiveThisFrame);
+    void tickCameraAutomation(Engine& e, const Timestep& t, HitchMarks& hm);
+#if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
+    void reassertOcclusionConsole();
+#endif
+    void pollAutosave(Engine& e, const Timestep& t);
+    void tickLaunchRequests(const Timestep& t);
+    void tickAutoFrameCommands(Engine& e, const Timestep& t);
+    void tickPathTracingAutomation();
+#if AVER_MODULE_MCP
+    void pumpMcp();
+#endif
+    void tickAmbientState(const Timestep& t);
+#if AVER_WITH_IMGUI
+    void tickDpiAndPlayWindow(Engine& e);
+#endif
+#if AVER_WITH_IMGUI
+    void resolveEditorInputOwnership(Engine& e);
+#endif
+#if AVER_WITH_IMGUI
+    void tickEditorFlyCamera(const Timestep& t);
+#endif
+#if AVER_MODULE_FRAMEWORK
+    void tickPlayMouseCapture(Engine& e);
+#endif
+#if AVER_MODULE_FRAMEWORK
+#if AVER_MODULE_SCRIPTING
+    void reportHudPreview();
+#endif
+#endif
+#if AVER_MODULE_FRAMEWORK
+    void publishWindowState(Engine& e);
+#endif
+#if AVER_MODULE_FRAMEWORK
+#if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
+    void submitSubViewports();
+#endif
+#endif
+#if AVER_MODULE_FRAMEWORK
+    void feedUiPointer();
+#endif
+#if AVER_MODULE_FRAMEWORK
+    void tickGameUi(Engine& e, const Timestep& t);
+#endif
+#if AVER_MODULE_FRAMEWORK
+    void tickGameplay(Engine& e, const Timestep& t, const f32 gameDt);
+#endif
+#if AVER_MODULE_FLUIDS
+    void tickWater(Engine& e, HitchMarks& hm, const f32 gameDt);
+#endif
+#if AVER_MODULE_SCENE
+    void tickObjectAnimation(Engine& e, HitchMarks& hm, const f32 gameDt);
+#endif
+#if AVER_MODULE_SCENE
+#if AVER_MODULE_SOFTBODY_SCENE
+    void tickSoftBodySim(HitchMarks& hm, const f32 gameDt);
+#endif
+#endif
+#if AVER_MODULE_SCENE
+#if AVER_MODULE_PHYSICS
+    void tickDriveBodies(HitchMarks& hm, const f32 gameDt);
+#endif
+#endif
+#if AVER_MODULE_SCENE
+#if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
+    void tickParticles(const f32 gameDt);
+#endif
+#endif
+#if AVER_MODULE_SCENE
+    void updateRenderScenes(Engine& e, HitchMarks& hm);
+#endif
+#if AVER_MODULE_SCENE
+    void tickThumbnailsAndTestHooks(Engine& e);
+#endif
+#if AVER_MODULE_SCENE
+#if AVER_MODULE_SCRIPTING
+    void tickGraphs(const Timestep& t, HitchMarks& hm, const f32 gameDt);
+#endif
+#endif
+#if AVER_MODULE_SCENE
+    void tickChunkAndLevelStreaming(const Timestep& t, HitchMarks& hm);
+#endif
+    void resolveViewOverride(const Timestep& t);
+    void applyDeviceRenderSettings(Engine& e, const Timestep& t);
+    void setupCameraAndSky(Engine& e);
+    void pushPostSettings(Engine& e, bool debugViewActiveThisFrame);
+
 #if AVER_MODULE_FRAMEWORK
     void spawnClassPlacements();
     void reportSlowGameplay(f64 ms);   // SandboxUpdate.cpp

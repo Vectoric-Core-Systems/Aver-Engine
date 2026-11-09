@@ -116,24 +116,8 @@ void SandboxApp::applyScriptRender(voxi::Renderer& vx) {
 }
 #endif
 
-void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
-    HitchMarks hm("update");
-#if AVER_MODULE_SCENE
-    tickOrigin(e);   // S0: the only place the floating origin shifts (LARGE_WORLD 2.2.4); before input, gameplay, physics, streaming, flush
-#endif
-    // Forced unpause on scope exit (holds through all exit paths).
-    struct FrameStepGuard {
-        bool active = false;
-        ~FrameStepGuard() {
-#if AVER_MODULE_FRAMEWORK
-            if (active) aver_fw_set_paused(1);
-#endif
-        }
-    } frameStepGuard;
-#if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
-    // Stop asked for the level back as it was when Play began (stopPlay; it cannot load from inside the UI).
-    if (pieReloadPending_ && !anyPlayActive()) reloadAfterPlay(e);
-#endif
+// --set NAME VALUE, applied at frame 5 (after the project's RENDER.* apply).
+void SandboxApp::applyConsoleSets(Engine& e, const Timestep& t) {
     // --set NAME VALUE applied at frame 5 (after project's RENDER.* apply).
 #if AVER_WITH_IMGUI
     if (!consoleSetsApplied_ && !consoleSets_.empty() && t.frame >= 5 && e.device()) {
@@ -150,8 +134,10 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
                   consoleSets_.size());
     }
 #endif
-    // Camera set first so downstream (view matrix, reprojection, shadow history) sees one consistent frame.
-    bool debugViewActiveThisFrame = false;
+}
+
+// The view mode reaches Voxi; --cam-wobble and --cam-translate move the camera.
+void SandboxApp::tickViewModeAndCameraDrift(const Timestep& t, bool& debugViewActiveThisFrame) {
 #if AVER_MODULE_VOXI
     // View mode reaches Voxi from onUpdate (before prePass), unlike unlit which rides per-draw state.
     voxiRenderer_.setUnlit(unlit_);
@@ -178,6 +164,10 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         (camWobbleStopFrame_ <= 0 || t.frame < (u64)camWobbleStopFrame_)) {
         camPos_ += camForward() * camTranslateSpeed_;
     }
+}
+
+// Neural-denoiser setup and capture, camera teleports, --cam-wander and --cam-fly.
+void SandboxApp::tickCameraAutomation(Engine& e, const Timestep& t, HitchMarks& hm) {
     // --cam-wander AMP SPEED: follows sum of sines at irrational frequencies (NeuraFI training trajectory).
     // NeuRAA's training capture holds it still while it captures a pose, then it resumes where it was.
 #if AVER_MODULE_SR
@@ -240,7 +230,11 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     }
     if (camFlyX_ != 0.0f || camFlyY_ != 0.0f) { camPos_.x += camFlyX_; camPos_.y += camFlyY_; }
     if (camFlyYaw_ != 0.0f) yaw_ += camFlyYaw_ * 0.0174533f;
+}
+
+// Occlusion flags that --no-occlusion-cull and the console re-assert every frame.
 #if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
+void SandboxApp::reassertOcclusionConsole() {
     // --no-occlusion-cull: reasserted every frame (applyProjectVoxiSettings rewrites it during level load).
     if (occlusionCullForceOff_) occlusionCullEnabled_ = false;
     // --occlusion-waitidle: reasserted every frame so console `set` is live before this frame's testBatch().
@@ -248,7 +242,11 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     // occlusion.showCulled/occlusion.cullUnderSuppression read every frame (live for this frame's onRender walk).
     occlusionShowCulled_ = editor::consoleOcclusionShowCulledSlot();
     occlusionCullUnderSuppression_ = editor::consoleOcclusionCullUnderSuppressionSlot();
+}
 #endif
+
+// Autosave polling, window title, selection anchor sync and project settings auto-save.
+void SandboxApp::pollAutosave(Engine& e, const Timestep& t) {
     // Autosave polling (drained unconditionally every frame, safe since pumpEvents runs before onUpdate).
     maybeAutosave(t.dt);
     maybeAutosavePrefs(t.dt);
@@ -260,7 +258,10 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #endif
     // Project settings auto-save (like preferences).
     maybeAutosaveProject(t.dt);
-    hm.mark("autosave");
+}
+
+// Scene census, --save-level, --bake-level-pack, forwarded open requests and dropped files.
+void SandboxApp::tickLaunchRequests(const Timestep& t) {
     // Census at frame 2+ (after applyProject's scripting and spawnClassPlacements).
 #if AVER_MODULE_SCENE
     if (sceneCensus_ && !sceneCensusDone_ && t.frame >= 2) {
@@ -285,7 +286,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     }
 #endif
 #if AVER_MODULE_SCENE
-    // [wave3/level-instances begin] --bake-level-pack <level>: bakes that level's pack once the project's meshes are in.
+    // --bake-level-pack <level>: bakes that level's pack once the project's meshes are in.
     if (!bakeLevelPackAsset_.empty() && !bakeLevelPackDone_ && t.frame >= 2 && pendingOpenPath_.empty() && !pendingOpenPrompt_) {
         bakeLevelPackDone_ = true;
         std::string bakeWhy;
@@ -297,7 +298,6 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         else
             AVER_ERROR("[LevelPack] --bake-level-pack failed for {}: {}", bakeLevelPackAsset_, bakeWhy);
     }
-    // [wave3/level-instances end]
 #endif
     // Forwarded open request (guarded as a whole; queue filled only by setOpenRequestHook).
 #if AVER_MODULE_SCENE
@@ -326,6 +326,10 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
                   dropped.size());
 #endif
     }
+}
+
+// Command-line actions that fire after a set number of frames.
+void SandboxApp::tickAutoFrameCommands(Engine& e, const Timestep& t) {
     // --pt-scene-toggle-on/-off: checked before syncPtSceneView() so the same onUpdate() that flips the flag also acts on it.
     if (ptSceneToggleOnAutoFrames_  > 0 && --ptSceneToggleOnAutoFrames_  == 0) ptSceneViewWantEnabled_ = true;
     if (ptSceneToggleOffAutoFrames_ > 0 && --ptSceneToggleOffAutoFrames_ == 0) ptSceneViewWantEnabled_ = false;
@@ -394,10 +398,10 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         AVER_INFO("[AverSR] --aversr-cycle: survived the round trip");
     }
 #endif
-    // The Path Tracing tier drives Voxi's path-traced frame (voxi_pt.hlsli); the standalone reference
-    // view below is --pt-scene only. Add/remove render feature (only safe before device_->beginFrame; see syncPtSceneView()).
-    syncPtSceneView(e.device());
-    hm.mark("ptSceneView");
+}
+
+// The path tracer's legacy environment switch and the --pt-quality-ramp / --gi-method-cycle drivers.
+void SandboxApp::tickPathTracingAutomation() {
     // Path tracer's matched-environment legacy switch (contrast-fix F6/F7, root cause R5).
     if (ptSceneView_) ptSceneView_->setLegacyEnvironment(editor::consolePtLegacyEnvSlot());
 #if AVER_MODULE_VOXI
@@ -439,11 +443,19 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         if (q != voxi::Quality::Off) ptSceneView_->setQuality(static_cast<u32>(q) - 1);
     }
 #endif
+}
+
+// One MCP command per frame, then the pointer hold.
 #if AVER_MODULE_MCP
+void SandboxApp::pumpMcp() {
     // One event per frame (click needs press and release).
     if (mcp_.listening()) mcp_.pump([this](const mcp::Command& c) { applyMcpCommand(c); });
     holdMcpPointer();
+}
 #endif
+
+// Cloud clock, world-fx tick and the UI demo animation.
+void SandboxApp::tickAmbientState(const Timestep& t) {
     if (sky_.cloudsEnabled) cloudTime_ += t.dt;
 #if AVER_MODULE_FRAMEWORK
     aver_fw_worldfx_tick(t.dt);   // every frame, Play or not: advances the script post blends, and the first tick after Stop drops the session's overrides, layers and scales
@@ -454,7 +466,11 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         uiDemoScroll_  = std::fmod(uiDemoScroll_ + t.dt * 24.0f, 216.0f);   // px, wraps at 12 rows
         uiDemoClock_  += t.dt;
     }
+}
+
+// Re-rasterises the UI font on a DPI change, then updates the play window.
 #if AVER_WITH_IMGUI
+void SandboxApp::tickDpiAndPlayWindow(Engine& e) {
     if (e.device()->uiActive()) {
         // Must stay outside the ImGui frame (font atlas cannot be touched inside one).
         const f32 dpi = e.window() ? e.window()->dpiScale() : dpi_;
@@ -464,7 +480,12 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         }
     }
     updatePlayWindow(e);
-    hm.mark("playWindow");
+}
+#endif
+
+// Who gets the keyboard and mouse this frame: the editor tools, the game or the UI.
+#if AVER_WITH_IMGUI
+void SandboxApp::resolveEditorInputOwnership(Engine& e) {
     // Engine's default pawn is an exception: it must not stand down (leaving it out broke PIE feel).
     // One arbitration computed once instead of eleven spellings.
 #if AVER_WITH_IMGUI
@@ -512,6 +533,12 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     // The drone's right-drag look reads InputState too (captured mouse, play window), so both must release.
     if (e.device()->uiActive() && !ImGui::GetIO().MouseDown[1] && !input_.mouseHeld(1)) flying_ = false;
 #endif
+}
+#endif
+
+// Keyboard and wheel driving of the editor camera or the possessed default pawn.
+#if AVER_WITH_IMGUI
+void SandboxApp::tickEditorFlyCamera(const Timestep& t) {
     if (own_.keyboardToTool || own_.mouseToTool) {
         const ImGuiIO& io = ImGui::GetIO();
         const bool inPlayWindow = playWindowFocused();
@@ -684,19 +711,12 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         }
 #endif  // AVER_MODULE_SCENE
     }
+}
 #endif
-#if AVER_MODULE_SCRIPTING
-    scripts_.update(t.dt);
-    hm.mark("scripts");
-#endif
-    // Game time: the frame scaled by the time scale (1 outside a session). tickGameplayGroups takes real time
-    // (physics keeps a real-time cadence and scales each step); the gameplay systems below advance in game time.
+
+// Click-to-capture of the mouse for the play viewport.
 #if AVER_MODULE_FRAMEWORK
-    const f32 gameDt = t.dt * game::gameTimeScale();
-#else
-    const f32 gameDt = t.dt;
-#endif
-#if AVER_MODULE_FRAMEWORK
+void SandboxApp::tickPlayMouseCapture(Engine& e) {
     // --recapture-test opts in (gesture lives entirely inside this block).
     const bool interactive = (maxFrames_ == 0 && !playTest_) || recapFrames_ > 0;
     // The #if isn't redundant with uiActive(): runtime flag doesn't make ImGuiIO names COMPILE on UI-less build.
@@ -775,11 +795,14 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #else
     (void)interactive;   // no ImGui to arbitrate mouse/keyboard capture with
 #endif
-    pollCapturedMouse();
-    pushInput(e.device()->uiActive());
-    hm.mark("input");
-    // UI frame opens before gameplay ticks (ticking is when a game draws its HUD).
+}
+#endif
+
+// --hud-preview: names every HUD once, then previews one over the level viewport.
+#if AVER_MODULE_FRAMEWORK
 #if AVER_MODULE_SCRIPTING
+void SandboxApp::reportHudPreview() {
+    // UI frame opens before gameplay ticks (ticking is when a game draws its HUD).
     // --hud-preview <n>: name every HUD once, then preview one over the level viewport.
     if (hudTest_ >= 0 && !hudTestReported_ && scripts_.ready()) {
         hudTestReported_ = true;
@@ -790,8 +813,13 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     }
     if (hudTest_ >= 0 && hudTest_ < scripts_.hudCount())
         setHudPreview(hudTest_, vpX_, vpY_, vpW_, vpH_);
+}
 #endif
+#endif
+
+// The window size, scale and focus a game reads during Play.
 #if AVER_MODULE_FRAMEWORK
+void SandboxApp::publishWindowState(Engine& e) {
     // What a game reads as its window during Play: the level viewport's size, the display's scale and the focus. Published only (the editor owns its
     // window and takes no requests); the shipped game publishes its real window (GameDisplay.cpp). Before this a game read zeros: no size, a scale of 1.
     {
@@ -803,12 +831,13 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         s[AVER_FW_WINDOW_FOCUSED] = levelFocused_ ? 1 : 0;
         aver_fw_window_publish(s);
     }
+}
 #endif
-    if (hudPreviewActive()) aver_ui_begin_frame(hudRectX_, hudRectY_, hudRectW_, hudRectH_);
-    else                    aver_ui_begin_frame(vpX_, vpY_, vpW_, vpH_);
-    // Font and pointer lent per frame, right after frame opens. Font re-lent every frame (loadGameUiFont can leave it invalid).
-    aver_ui_set_font(&uiFont_);
+
+// Sub-viewports shown over the window, first in the UI frame's list.
+#if AVER_MODULE_FRAMEWORK
 #if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
+void SandboxApp::submitSubViewports() {
     // Sub-viewports shown over the window (G4 R5): first in the frame's list, so the HUD draws over them; the rectangle is in the UI frame's own space.
     {
         game::SubViewportHost::OnScreenView sv[16];
@@ -819,7 +848,13 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
             aver_ui_textured_rect(uiRect[0] + sv[i].x, uiRect[1] + sv[i].y, sv[i].w, sv[i].h, aver::render::ui::UiRenderer::textureId(sv[i].texture),
                                   0.0f, 0.0f, 1.0f, 1.0f, 0xFFFFFFFFu);
     }
+}
 #endif
+#endif
+
+// Pointer position and buttons for the game UI, converted to the UI frame's space.
+#if AVER_MODULE_FRAMEWORK
+void SandboxApp::feedUiPointer() {
     // Pointer converted here (only place that can do it correctly): UI frame is laid out against viewport, not window.
     {
         const f32 ox = hudPreviewActive() ? hudRectX_ : static_cast<f32>(vpX_);
@@ -852,9 +887,12 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #endif
         aver_ui_set_pointer(px, py, buttons);
     }
-#if AVER_MODULE_SCRIPTING
-    if (hudPreviewActive()) scripts_.hudDraw(hudPreviewIndex_, t.dt);
+}
 #endif
+
+// Accessibility, UI input, retained widgets and the self-test drivers.
+#if AVER_MODULE_FRAMEWORK
+void SandboxApp::tickGameUi(Engine& e, const Timestep& t) {
     // Retained game-UI widgets: Play feeds them this frame's keyboard/pad/wheel; the tree itself lays out,
     // updates and draws every frame (it is empty unless a script or graph made a widget).
 #if AVER_MODULE_FRAMEWORK
@@ -873,16 +911,12 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     maybeWheelSpeedTest();
     maybeRecaptureTest();
     maybeViewmodelTest();
-    hm.mark("ui+tests");
-#if AVER_MODULE_SCRIPTING
-    pumpGraphDebugger();
+}
 #endif
-    // Frame Skip: lift pause for exactly this frame's tick groups. frameStepGuard's destructor puts it back.
-    if (playFrameStepPending_ && aver_fw_play_state() == AVER_FW_PLAY_PAUSED) {
-        playFrameStepPending_ = false;
-        aver_fw_set_paused(0);
-        frameStepGuard.active = true;
-    }
+
+// The frame order: OnPhysicsTick before each fixed step, then OnTick; level travel.
+#if AVER_MODULE_FRAMEWORK
+void SandboxApp::tickGameplay(Engine& e, const Timestep& t, const f32 gameDt) {
     // The frame order: OnPhysicsTick before each fixed step, then OnTick (GameTick.hpp).
     if (!spawnTestClass_.empty() || aver_fw_play_state() == AVER_FW_PLAY_PLAYING) {
 #if AVER_MODULE_SCENE && AVER_MODULE_PHYSICS
@@ -916,9 +950,12 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         if (aver_fw_take_travel_request(travel, static_cast<int32_t>(sizeof travel)) > 0) travelDuringPlay(e, travel);
     }
     game::pumpContentPrefetch(content_);   // a script's "this is about to be shown": its textures start decoding now
-    hm.mark("gameplay");
+}
 #endif
+
+// Water simulation, after the physics step and before any prePass.
 #if AVER_MODULE_FLUIDS
+void SandboxApp::tickWater(Engine& e, HitchMarks& hm, const f32 gameDt) {
     // After physics step, before any prePass (not gated on Play).
     // The path-traced reference traces the displaced water only while it holds still.
     water_.setFrozen(ptSceneView_ != nullptr);
@@ -926,8 +963,12 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         ptSceneView_->setIncludeDynamicMeshes(water_.displacedSurfaceActive(), water_.displacedSurfaceRevision());
     water_.update(*e.device(), gameDt);
     hm.mark("water");
+}
 #endif
+
+// Sequence pre-phase, animation graphs, ragdoll and the animation clock.
 #if AVER_MODULE_SCENE
+void SandboxApp::tickObjectAnimation(Engine& e, HitchMarks& hm, const f32 gameDt) {
     // Retires deferred destroys and propagates world matrices once, after gameplay and before onRender.
     // Animation clock runs UNCONDITIONALLY (not gated on PLAYING; hanging it there would freeze previews outside Play mode).
 #if AVER_MODULE_FRAMEWORK
@@ -946,24 +987,39 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     anim::animSystem().tick(scene::World::instance(), gameDt);
     playProf_.end(editor::PlayPhase::ObjectAnim);
     hm.mark("objectAnim");
+}
+#endif
+
+// Soft-body tick, after the pose it reads.
+#if AVER_MODULE_SCENE
 #if AVER_MODULE_SOFTBODY_SCENE
+void SandboxApp::tickSoftBodySim(HitchMarks& hm, const f32 gameDt) {
     // After the pose it reads (skin palette), before the draw scene copies the result (plan 2.5.2).
     playProf_.begin(editor::PlayPhase::SoftBody);
     game::tickSoftBodies(gameDt, viewPos());
     playProf_.end(editor::PlayPhase::SoftBody);
     hm.mark("softBodies");
+}
 #endif
-    // The level sequence's Post phase (Animate preview, Play), after the clips so a sequenced actor wins.
-    tickSequencePost();
-    hm.mark("sequence");
+#endif
+
+// Animated placements' kinematic bodies follow the tick that moved them.
+#if AVER_MODULE_SCENE
 #if AVER_MODULE_PHYSICS
+void SandboxApp::tickDriveBodies(HitchMarks& hm, const f32 gameDt) {
     // After the tick that moved them: animated placement's kinematic body follows it (carries standing characters).
     playProf_.begin(editor::PlayPhase::DriveBodies);
     driveAnimatedBodies(gameDt);
     playProf_.end(editor::PlayPhase::DriveBodies);
     hm.mark("driveBodies");
+}
 #endif
+#endif
+
+// Particle system tick, previews included.
+#if AVER_MODULE_SCENE
 #if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
+void SandboxApp::tickParticles(const f32 gameDt) {
     // Unconditionally (like animation clock): previews outside Play should still show effects.
     {
         const auto tickStart = std::chrono::steady_clock::now();
@@ -978,7 +1034,13 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         particleTickAccumSec_ += std::chrono::duration<f64>(std::chrono::steady_clock::now() - tickStart).count();
         ++particleTickFrames_;
     }
+}
 #endif
+#endif
+
+// Skinned, soft-body and hair scenes, after the tick and before anything draws.
+#if AVER_MODULE_SCENE
+void SandboxApp::updateRenderScenes(Engine& e, HitchMarks& hm) {
     // After the tick, before anything draws: update() creates per-entity skin targets and copies matrices out of AnimSystem.
     playProf_.begin(editor::PlayPhase::Skinned);
     if (skinnedScene_)
@@ -993,6 +1055,12 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     // Strand hair: HairSystem ticked inside game::tickSoftBodies (GameSystemsWiring.hpp); this reconciles the GPU side with what it published.
     if (hairScene_) hairScene_->update(scene::World::instance(), *e.device());
 #endif
+}
+#endif
+
+// Thumbnail requests and the frame-countdown test hooks.
+#if AVER_MODULE_SCENE
+void SandboxApp::tickThumbnailsAndTestHooks(Engine& e) {
     // Once per frame, before render features run (ThumbnailCache.hpp): update() points preview at next pending request.
     if (thumbnails_.ready()) {
         thumbnails_.setDiskCache(project_.valid() ? (std::filesystem::path(project_.dir) / "Saved" / "ThumbnailCache").string() : std::string(),
@@ -1022,7 +1090,13 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     if (autosaveTestArm_) { autosaveTestArm_ = false; markLevelUnsaved(); }
     if (keybindTestAutoFrames_ > 0 && --keybindTestAutoFrames_ == 0) runKeybindPersistTest(keybindTestMode_);
 #endif
+}
+#endif
+
+// The drone graph and the Play graph ticks.
+#if AVER_MODULE_SCENE
 #if AVER_MODULE_SCRIPTING
+void SandboxApp::tickGraphs(const Timestep& t, HitchMarks& hm, const f32 gameDt) {
     // Ticks the graph-driven drone if live. Runs before chunk streaming so it sees this frame's drone position/velocity.
     if (droneEntity_ != scene::kInvalidEntity && droneGraphLoaded_) {
         droneTimeSeconds_ += t.dt;
@@ -1053,7 +1127,13 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     playProf_.end(editor::PlayPhase::GraphTicks);
     hm.mark("graphTicks");
 #endif
+}
 #endif
+#endif
+
+// Chunk and level streaming.
+#if AVER_MODULE_SCENE
+void SandboxApp::tickChunkAndLevelStreaming(const Timestep& t, HitchMarks& hm) {
     // --chunk-stream: switches streaming on N frames in so a capture can prove it happened.
     if (chunkStreamAutoFrames_ > 0 && --chunkStreamAutoFrames_ == 0) setChunkStreamingEnabled(true);
     // Chunk streaming. Runs here so it sees THIS frame's camPos_ and evictions land in flush() below.
@@ -1076,24 +1156,11 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     tickLevelStreaming(t.dt);
     hm.mark("levelStreaming");
 #endif
-    playProf_.begin(editor::PlayPhase::WorldFlush);
-    scene::World::instance().flush();
-    playProf_.end(editor::PlayPhase::WorldFlush);
-    hm.mark("worldFlush");
-#if AVER_WITH_AUDIO_ABI
-    // Reclaims finished voices every frame (Play or not). Gap: aver_audio_init had single caller, so voices leaked until mixer ran out.
-    // Not gated on Play: voices outlive a session, so gating would leak voices that finish after Stop.
-    aver_audio_collect();
-    hm.mark("audio");
+}
 #endif
-#if AVER_MODULE_SYNAPSE_SCENE && AVER_MODULE_FRAMEWORK
-    // Gated on Play (like physics/fw_tick above): pathing is gameplay, not authoring preview.
-    // nav_ may be empty or frame stale; AgentSystem::tick treats that as "wait for a grid".
-    if (!spawnTestClass_.empty() || aver_fw_play_state() == AVER_FW_PLAY_PLAYING) {
-        game::tickAi(gameDt, &nav_);
-    }
-#endif
-#endif
+
+// Play camera, sequence camera and camera-rig look-through for this frame.
+void SandboxApp::resolveViewOverride(const Timestep& t) {
 #if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE
     // Ejected: leave camPos_/yaw_/pitch_ where the user flew them (drivePlayCamera snaps view to pawn every frame) and clear owner-hide root.
     // Re-possessing calls drivePlayCamera() again next frame.
@@ -1137,6 +1204,10 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         }
     }
 #endif
+}
+
+// G-buffer, mesh-shader and Voxi settings pushed to the device.
+void SandboxApp::applyDeviceRenderSettings(Engine& e, const Timestep& t) {
     // G-buffer: pushed every frame so live dropdown click or --gbuffer-debug takes effect immediately.
     // OR'd together: --gbuffer alone must write with no view selected.
     // Voxi's denoiser reads these targets every frame it runs.
@@ -1269,6 +1340,10 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         voxiRenderer_.setSunDirection(&sd.x);
     }
 #endif
+}
+
+// Viewport rect, camera matrices, fog, sky and runtime assets.
+void SandboxApp::setupCameraAndSky(Engine& e) {
     // Confine the scene to the dockspace's central node (latched by buildUI last frame).
     e.device()->setViewportRect((u32)vpX_, (u32)vpY_, (u32)std::fmax(1.0f, vpW_), (u32)std::fmax(1.0f, vpH_));
 
@@ -1360,8 +1435,10 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         subViews_.update(svIn);
     }
 #endif
-    hm.mark("deviceSetup");
-    // Console post.* vars write the device, not post_; adopt device changes into post_ before pushing.
+}
+
+// The post-process settings, with the level's volumes and accessibility on top.
+void SandboxApp::pushPostSettings(Engine& e, bool debugViewActiveThisFrame) {
     if (postPushedValid_ && !rhi::postSettingsEqual(e.device()->postProcess(), postPushed_))
         post_ = e.device()->postProcess();
     // Debug views paint flat diagnostic colours; disable auto-exposure/bloom/local exposure.
@@ -1386,6 +1463,147 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         postPushed_ = shown;
     }
     postPushedValid_ = true;
+}
+
+void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
+    HitchMarks hm("update");
+#if AVER_MODULE_SCENE
+    tickOrigin(e);   // S0: the only place the floating origin shifts (LARGE_WORLD 2.2.4); before input, gameplay, physics, streaming, flush
+#endif
+    // Forced unpause on scope exit (holds through all exit paths).
+    struct FrameStepGuard {
+        bool active = false;
+        ~FrameStepGuard() {
+#if AVER_MODULE_FRAMEWORK
+            if (active) aver_fw_set_paused(1);
+#endif
+        }
+    } frameStepGuard;
+#if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
+    // Stop asked for the level back as it was when Play began (stopPlay; it cannot load from inside the UI).
+    if (pieReloadPending_ && !anyPlayActive()) reloadAfterPlay(e);
+#endif
+    applyConsoleSets(e, t);
+    // Camera set first so downstream (view matrix, reprojection, shadow history) sees one consistent frame.
+    bool debugViewActiveThisFrame = false;
+    tickViewModeAndCameraDrift(t, debugViewActiveThisFrame);
+    tickCameraAutomation(e, t, hm);
+#if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
+    reassertOcclusionConsole();
+#endif
+    pollAutosave(e, t);
+    hm.mark("autosave");
+    tickLaunchRequests(t);
+    tickAutoFrameCommands(e, t);
+    // The Path Tracing tier drives Voxi's path-traced frame (voxi_pt.hlsli); the standalone reference
+    // view below is --pt-scene only. Add/remove render feature (only safe before device_->beginFrame; see syncPtSceneView()).
+    syncPtSceneView(e.device());
+    hm.mark("ptSceneView");
+    tickPathTracingAutomation();
+#if AVER_MODULE_MCP
+    pumpMcp();
+#endif
+    tickAmbientState(t);
+#if AVER_WITH_IMGUI
+    tickDpiAndPlayWindow(e);
+    hm.mark("playWindow");
+    resolveEditorInputOwnership(e);
+    tickEditorFlyCamera(t);
+#endif
+#if AVER_MODULE_SCRIPTING
+    scripts_.update(t.dt);
+    hm.mark("scripts");
+#endif
+    // Game time: the frame scaled by the time scale (1 outside a session). tickGameplayGroups takes real time
+    // (physics keeps a real-time cadence and scales each step); the gameplay systems below advance in game time.
+#if AVER_MODULE_FRAMEWORK
+    const f32 gameDt = t.dt * game::gameTimeScale();
+#else
+    const f32 gameDt = t.dt;
+#endif
+#if AVER_MODULE_FRAMEWORK
+    tickPlayMouseCapture(e);
+    pollCapturedMouse();
+    pushInput(e.device()->uiActive());
+    hm.mark("input");
+#if AVER_MODULE_SCRIPTING
+    reportHudPreview();
+#endif
+#if AVER_MODULE_FRAMEWORK
+    publishWindowState(e);
+#endif
+    if (hudPreviewActive()) aver_ui_begin_frame(hudRectX_, hudRectY_, hudRectW_, hudRectH_);
+    else                    aver_ui_begin_frame(vpX_, vpY_, vpW_, vpH_);
+    // Font and pointer lent per frame, right after frame opens. Font re-lent every frame (loadGameUiFont can leave it invalid).
+    aver_ui_set_font(&uiFont_);
+#if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
+    submitSubViewports();
+#endif
+    feedUiPointer();
+#if AVER_MODULE_SCRIPTING
+    if (hudPreviewActive()) scripts_.hudDraw(hudPreviewIndex_, t.dt);
+#endif
+    tickGameUi(e, t);
+    hm.mark("ui+tests");
+#if AVER_MODULE_SCRIPTING
+    pumpGraphDebugger();
+#endif
+    // Frame Skip: lift pause for exactly this frame's tick groups. frameStepGuard's destructor puts it back.
+    if (playFrameStepPending_ && aver_fw_play_state() == AVER_FW_PLAY_PAUSED) {
+        playFrameStepPending_ = false;
+        aver_fw_set_paused(0);
+        frameStepGuard.active = true;
+    }
+    tickGameplay(e, t, gameDt);
+    hm.mark("gameplay");
+#endif
+#if AVER_MODULE_FLUIDS
+    tickWater(e, hm, gameDt);
+#endif
+#if AVER_MODULE_SCENE
+    tickObjectAnimation(e, hm, gameDt);
+#if AVER_MODULE_SOFTBODY_SCENE
+    tickSoftBodySim(hm, gameDt);
+#endif
+    // The level sequence's Post phase (Animate preview, Play), after the clips so a sequenced actor wins.
+    tickSequencePost();
+    hm.mark("sequence");
+#if AVER_MODULE_PHYSICS
+    tickDriveBodies(hm, gameDt);
+#endif
+#if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
+    tickParticles(gameDt);
+#endif
+    updateRenderScenes(e, hm);
+    tickThumbnailsAndTestHooks(e);
+#if AVER_MODULE_SCRIPTING
+    tickGraphs(t, hm, gameDt);
+#endif
+    tickChunkAndLevelStreaming(t, hm);
+    playProf_.begin(editor::PlayPhase::WorldFlush);
+    scene::World::instance().flush();
+    playProf_.end(editor::PlayPhase::WorldFlush);
+    hm.mark("worldFlush");
+#if AVER_WITH_AUDIO_ABI
+    // Reclaims finished voices every frame (Play or not). Gap: aver_audio_init had single caller, so voices leaked until mixer ran out.
+    // Not gated on Play: voices outlive a session, so gating would leak voices that finish after Stop.
+    aver_audio_collect();
+    hm.mark("audio");
+#endif
+#if AVER_MODULE_SYNAPSE_SCENE && AVER_MODULE_FRAMEWORK
+    // Gated on Play (like physics/fw_tick above): pathing is gameplay, not authoring preview.
+    // nav_ may be empty or frame stale; AgentSystem::tick treats that as "wait for a grid".
+    if (!spawnTestClass_.empty() || aver_fw_play_state() == AVER_FW_PLAY_PLAYING) {
+        game::tickAi(gameDt, &nav_);
+    }
+#endif
+#endif
+    resolveViewOverride(t);
+    applyDeviceRenderSettings(e, t);
+    setupCameraAndSky(e);
+    hm.mark("deviceSetup");
+    // Console post.* vars write the device, not post_; adopt device changes into post_ before pushing.
+    pushPostSettings(e, debugViewActiveThisFrame);
 }
 
 } // namespace aver
