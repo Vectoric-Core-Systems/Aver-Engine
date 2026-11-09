@@ -118,6 +118,24 @@ std::string percentDecode(std::string_view s) {
     return out;
 }
 
+// A layer name inside a comma list: percent-encoded, with the separator escaped too.
+static std::string encodeLayerName(const std::string& n) {
+    std::string e = percentEncode(n), out;
+    for (const char c : e) { if (c == ',') out += "%2C"; else out += c; }
+    return out;
+}
+static std::vector<std::string> decodeLayerList(std::string_view v) {
+    std::vector<std::string> out;
+    for (std::string_view d : splitCommas(v))
+        if (!d.empty()) out.push_back(percentDecode(d));
+    return out;
+}
+static std::string encodeLayerList(const std::vector<std::string>& v) {
+    std::string out;
+    for (const std::string& n : v) { if (n.empty()) continue; if (!out.empty()) out += ','; out += encodeLayerName(n); }
+    return out;
+}
+
 // How the comment writeOcworld puts under `OCWORLD 1` begins. parseOcworld must not keep it as a
 // header note, or every save would add one more copy of it above the author's own comments.
 constexpr std::string_view kWriterBannerPrefix = "Written by the Aver Engine editor";
@@ -771,6 +789,7 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
                 else if (keyValue(t[i], "fogopacity=", v)) out.stream.fogOpacity = static_cast<f32>(parseF64(v, out.stream.fogOpacity));
                 else if (keyValue(t[i], "data=", v))  out.stream.dataPath = std::string(v);
                 else if (keyValue(t[i], "chunks=", v)) out.stream.chunksPath = percentDecode(v);
+                else if (keyValue(t[i], "hlod=", v)) out.stream.hlodCm = static_cast<f32>(parseF64(v, 0.0));
                 else if (equalsCI(t[i], "off")) out.stream.enabled = false;   // `STREAM off chunks=...`: a cooked set named, streaming from records off
                 else if (keyValue(t[i], "lazy=", v)) {
                     for (std::string_view d : splitCommas(v))
@@ -782,6 +801,25 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
             // SCATTER's `mesh` -- none of those support a path with a space in it either, so this
             // does not invent an escaping scheme none of this file's other asset references have.
             out.foliageFiles.push_back(std::string(t[1]));
+            out.foliageLayers.emplace_back();
+            for (usize i = 2; i < t.size(); ++i) {
+                std::string_view lv;
+                if (keyValue(t[i], "layers=", lv)) out.foliageLayers.back() = decodeLayerList(lv);
+            }
+        } else if (equalsCI(key, "DATALAYER") && t.size() >= 2) {
+            OcDataLayer dl;
+            dl.name = percentDecode(t[1]);
+            for (usize i = 2; i < t.size(); ++i) {
+                std::string_view lv;
+                if (keyValue(t[i], "initial=", lv)) {
+                    if (equalsCI(lv, "unloaded")) dl.initial = OcDataLayerState::Unloaded;
+                    else if (equalsCI(lv, "loaded")) dl.initial = OcDataLayerState::Loaded;
+                    else dl.initial = OcDataLayerState::Activated;
+                }
+                else if (keyValue(t[i], "runtime=", lv)) dl.runtime = lv != "0";
+                else if (keyValue(t[i], "parent=", lv)) dl.parent = percentDecode(lv);
+            }
+            if (!dl.name.empty()) out.dataLayers.push_back(std::move(dl));
         } else if (parseSeqRecord(key, t, out.sequences, seqState)) {
             // SEQUENCE / SEQTRACK / SEQKEY / ENDSEQUENCE: consumed (OcSeq.cpp)
         } else if (equalsCI(key, "COMPONENT") && t.size() >= 2) {
@@ -884,6 +922,7 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
                 else if (equalsCI(t[i], "vehicle") && i + 1 < t.size()) { p.vehiclePreset = percentDecode(t[++i]); }
                 // Streaming tokens `id=<hex>` and `aabb=a,b,c,d,e,f`, before the material fallback.
                 else if (keyValue(t[i], "id=", kv)) p.placementId = parseU64(std::string("0x") + std::string(kv));
+                else if (keyValue(t[i], "layers=", kv)) p.layers = decodeLayerList(kv);
                 else if (keyValue(t[i], "aabb=", kv)) {
                     const std::vector<std::string_view> c = splitCommas(kv);
                     if (c.size() == 6) {
@@ -1018,9 +1057,17 @@ std::string writeOcworld(const OcWorldData& w) {
         }
         if (!w.stream.dataPath.empty()) s += " data=" + w.stream.dataPath;
         if (!w.stream.chunksPath.empty()) s += " chunks=" + percentEncode(w.stream.chunksPath);
+        if (w.stream.hlodCm > 0.0f) s += " hlod=" + num(w.stream.hlodCm);
         s += "\n";
     }
     else if (!w.stream.chunksPath.empty()) s += "STREAM off chunks=" + percentEncode(w.stream.chunksPath) + "\n";   // a cooked set named while streaming from records is off
+    for (const OcDataLayer& dl : w.dataLayers) {
+        s += "DATALAYER " + percentEncode(dl.name) + " initial=" +
+             (dl.initial == OcDataLayerState::Unloaded ? "unloaded" : dl.initial == OcDataLayerState::Loaded ? "loaded" : "activated") +
+             " runtime=" + (dl.runtime ? "1" : "0");
+        if (!dl.parent.empty()) s += " parent=" + percentEncode(dl.parent);
+        s += "\n";
+    }
     if (w.hasSun) {
         // The VECTOR is written, because it round-trips exactly where degrees do not. The elevation
         // rides along as a trailing comment so the line is still readable by a person -- the parser
@@ -1350,7 +1397,11 @@ std::string writeOcworld(const OcWorldData& w) {
         s += "\n";
         // One token, same "no escaping this file's other asset paths do not have either" rule
         // FOLIAGE's own parse branch states -- see that comment for why.
-        for (const std::string& path : w.foliageFiles) s += "FOLIAGE " + path + "\n";
+        for (usize i = 0; i < w.foliageFiles.size(); ++i) {
+            s += "FOLIAGE " + w.foliageFiles[i];
+            if (i < w.foliageLayers.size() && !w.foliageLayers[i].empty()) s += " layers=" + encodeLayerList(w.foliageLayers[i]);
+            s += "\n";
+        }
     }
 
     // Placements are emitted depth-first from the roots (see OcWorldPlacement::parent), which can
@@ -1430,6 +1481,7 @@ std::string writeOcworld(const OcWorldData& w) {
             std::snprintf(ib, sizeof ib, " id=%016llx", static_cast<unsigned long long>(p.placementId));
             s += ib;
         }
+        if (!p.layers.empty()) { const std::string l = encodeLayerList(p.layers); if (!l.empty()) s += " layers=" + l; }
         // Bounds are generated data: they live in the level's .ocstream, never here.
         s += "\n";
         // COMPONENT lines sit right after the placement line, before its BEGIN, one level deeper. Omitted when

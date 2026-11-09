@@ -6,6 +6,8 @@
 //   SOURCE <16 hex>                                   hashPlacements() of the level it was made from
 //   FOLIAGE <content-relative .ocinst> <project-relative cell-sorted copy>
 //   B <placement id, 16 hex> minx miny minz maxx maxy maxz     world bounds, cm
+//   HLOD <cx>,<cy> <level> <proxy .ocmesh, project-relative> <16 hex>   a cell's (level 1) or block's (level 2+) proxy and the
+//                                                                      hash of the content it was built from; absent = no HLOD
 #pragma once
 #include "aver/core/Types.hpp"
 #include "aver/formats/OcWorld.hpp"
@@ -29,8 +31,19 @@ struct OcStreamFoliage {
     std::string cells;    // its cell-sorted copy, project-relative
 };
 
+// One HLOD proxy: the merged, simplified static meshes of a streaming cell (`level` 1) or of a block of cells (`level` 2+, `cx,cy` its
+// first cell). `sourceHash` is hashHlodCell() of what it was built from, so a changed cell is found without rebuilding the rest.
+struct OcStreamHlod {
+    i32 cx = 0, cy = 0;
+    u32 level = 1;
+    std::string proxy;
+    u64 sourceHash = 0;
+    bool operator==(const OcStreamHlod&) const = default;
+};
+
 struct OcStreamData {
     u64 sourceHash = 0;
+    std::vector<OcStreamHlod> hlod;
     std::vector<OcStreamFoliage> foliage;
     std::vector<OcStreamBounds> bounds;
 };

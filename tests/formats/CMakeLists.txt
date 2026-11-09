@@ -611,3 +611,8 @@ endif()
 add_executable(AssetValidateTest src/AssetValidateTest.cpp)
 target_link_libraries(AssetValidateTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(AssetValidateTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# OcWorldDataLayersTest -- DATALAYER / layers= / STREAM hlod= in .ocworld and the HLOD record in .ocstream: round trips, defaults, absent = unchanged. No device.
+add_executable(OcWorldDataLayersTest src/OcWorldDataLayersTest.cpp)
+target_link_libraries(OcWorldDataLayersTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(OcWorldDataLayersTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

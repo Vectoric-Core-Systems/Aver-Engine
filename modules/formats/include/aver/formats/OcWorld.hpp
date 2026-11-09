@@ -28,6 +28,21 @@ struct OcPlacedComponent {
     bool operator==(const OcPlacedComponent&) const = default;
 };
 
+// Runtime state of a data layer, ordered: a placement is resident only when every layer it belongs to is at least Loaded, and
+// Activated additionally enables rendering and simulation (Loaded = resident but hidden), as in UE.
+enum class OcDataLayerState : u8 { Unloaded = 0, Loaded = 1, Activated = 2 };
+
+// DATALAYER header record. Additive: a level without one loads exactly as it always did.
+//   DATALAYER <name> initial=<unloaded|loaded|activated> runtime=<0|1> [parent=<name>]
+// `runtime=1` layers may change state while the game runs; the others keep `initial`. A child layer is never above its parent.
+struct OcDataLayer {
+    std::string name;   // percent-encoded in the file
+    OcDataLayerState initial = OcDataLayerState::Activated;
+    bool runtime = false;
+    std::string parent;   // empty = a root layer
+    bool operator==(const OcDataLayer&) const = default;
+};
+
 // One placed thing. Covers both record forms: PLACE (uniform scale) and PLACEG (non-uniform).
 struct OcWorldPlacement {
     std::string asset;                     // asset reference (mesh path or name)
@@ -133,6 +148,10 @@ struct OcWorldPlacement {
     bool hasBounds = false;
     f32  boundsMin[3] = {0, 0, 0};   // world-space AABB in cm
     f32  boundsMax[3] = {0, 0, 0};
+
+    // Data layers this placement belongs to, by name (`layers=a,b` on the PLACE record; names percent-encoded).
+    // Empty = in no layer, written as nothing, loads as it always did.
+    std::vector<std::string> layers;
 
     // COMPONENT records attached to this placement, in file order. Empty means an ordinary placement,
     // byte-identical to a level written before this field existed. They travel inside the struct so
@@ -718,6 +737,9 @@ struct OcStreamSettings {
     // LARGE_WORLD 2.4.4: the cooked chunk set this level streams from, relative to the project root (`Binaries/Chunks/<level>`); empty = none.
     // Written as `chunks=` on the STREAM record (`STREAM off chunks=...` when streaming from records is off).
     std::string chunksPath;
+    // Dynamic HLOD (docs/LEVEL_STREAMING.md): proxies of cells stay resident out to this distance, past loadCm. 0 = no HLOD ring
+    // (`STREAM ... hlod=<cm>`; absent and zero are the same).
+    f32 hlodCm = 0.0f;
 };
 
 struct OcWorldData : OcWorldEnv {
@@ -868,6 +890,12 @@ struct OcWorldData : OcWorldEnv {
     // has no collision and is not individually selectable -- this format's job is only to name the
     // file, not to decide any of that.
     std::vector<std::string> foliageFiles;
+    // `FOLIAGE <path> layers=a,b`: the data layers each foliage table belongs to, parallel to foliageFiles. May be shorter than
+    // foliageFiles (or empty): a missing entry is "no layers".
+    std::vector<std::vector<std::string>> foliageLayers;
+
+    // DATALAYER records, in file order. Empty for every level written before data layers existed.
+    std::vector<OcDataLayer> dataLayers;
 
     // SEQUENCE records; the editor authors one. Empty for every level without one.
     std::vector<OcSequence> sequences;

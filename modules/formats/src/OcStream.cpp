@@ -31,6 +31,15 @@ bool loadOcStream(const std::string& path, OcStreamData& out, std::string* why) 
         } else if (key == "FOLIAGE") {
             OcStreamFoliage fo;
             if (ls >> fo.source >> fo.cells) out.foliage.push_back(std::move(fo));
+        } else if (key == "HLOD") {
+            std::string cell, hex;
+            OcStreamHlod h;
+            u32 level = 0;
+            if (!(ls >> cell >> level >> h.proxy >> hex) || level == 0) continue;
+            if (std::sscanf(cell.c_str(), "%d,%d", &h.cx, &h.cy) != 2) continue;
+            h.level = level;
+            h.sourceHash = std::strtoull(hex.c_str(), nullptr, 16);
+            out.hlod.push_back(std::move(h));
         } else if (key == "B") {
             std::string hex;
             OcStreamBounds b;
@@ -47,6 +56,12 @@ bool saveOcStream(const std::string& path, const OcStreamData& in, std::string* 
     char buf[192];
     std::snprintf(buf, sizeof buf, "SOURCE %016" PRIx64 "\n", static_cast<uint64_t>(in.sourceHash));
     s += buf;
+    for (const OcStreamHlod& h : in.hlod) {
+        std::snprintf(buf, sizeof buf, "HLOD %d,%d %u ", h.cx, h.cy, h.level);
+        s += buf + h.proxy;
+        std::snprintf(buf, sizeof buf, " %016" PRIx64 "\n", static_cast<uint64_t>(h.sourceHash));
+        s += buf;
+    }
     for (const OcStreamFoliage& fo : in.foliage) s += "FOLIAGE " + fo.source + " " + fo.cells + "\n";
     for (const OcStreamBounds& b : in.bounds) {
         std::snprintf(buf, sizeof buf, "B %016" PRIx64 " %.9g %.9g %.9g %.9g %.9g %.9g\n", static_cast<uint64_t>(b.id),

@@ -88,6 +88,10 @@ bool writeOcStreamFor(OcWorldData& w, const std::string& levelStem, const std::s
     OcStreamData d;
     d.sourceHash = hashPlacements(w);
     d.foliage = foliage;
+    {   // HLOD proxies are their own bake (hlod bake, per-cell staleness): a save of the bounds keeps them
+        OcStreamData old;
+        if (loadOcStream((std::filesystem::path(projectDir) / w.stream.dataPath).string(), old)) d.hlod = std::move(old.hlod);
+    }
     for (const OcWorldPlacement& p : w.placements) {
         if (!p.placementId || !p.hasBounds) continue;
         OcStreamBounds b;

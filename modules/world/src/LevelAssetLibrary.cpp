@@ -128,6 +128,7 @@ bool LevelAssetLibrary::fill(Entry& e, const std::string& path, fmt::OcWorldData
     h.decals = data.decals;
     h.prefabInstances = data.prefabInstances;
     h.foliageFiles = data.foliageFiles;
+    h.foliageLayers = data.foliageLayers;
     h.levelInstances = data.levelInstances;
     a.contentHash = fnv1a64(std::string_view(fmt::writeOcworld(h)));
 
@@ -298,6 +299,7 @@ bool LevelAssetLibrary::resolve(const fmt::OcLevelInstance& rec, ResolvedContent
     w.decals = a->data.decals;
     w.prefabInstances = a->data.prefabInstances;
     w.foliageFiles = a->data.foliageFiles;
+    w.foliageLayers = a->data.foliageLayers;
     w.levelInstances = a->data.levelInstances;
 
     std::vector<char> removed(w.placements.size(), 0);
