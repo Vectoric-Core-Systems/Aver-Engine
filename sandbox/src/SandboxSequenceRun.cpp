@@ -367,7 +367,7 @@ void SandboxApp::renderJobStep(Engine& e) {
                 r.levelRequested = true;
             }
         }
-        bool ready = onLevel && !levelPath_.empty() && !projectLoading_ && pendingOpenPath_.empty();
+        bool ready = onLevel && !levelPath_.empty() && !projectLoading_ && panels_.pendingOpenPath_.empty();
 #if AVER_MODULE_VOXI
         ready = ready && !voxiRenderer_.accelBuildsPending();
 #endif

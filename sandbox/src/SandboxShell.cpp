@@ -1025,8 +1025,8 @@ bool SandboxApp::onCloseGuardThunk(void* user) {
 
 bool SandboxApp::onCloseGuard() {
 #if AVER_WITH_IMGUI
-    if (exitPrompt_) return false;
-    if (assetEditors_.anyDirty() || levelHasUnsavedEdits()) { exitPrompt_ = true; return false; }
+    if (panels_.exitPrompt_) return false;
+    if (assetEditors_.anyDirty() || levelHasUnsavedEdits()) { panels_.exitPrompt_ = true; return false; }
 #endif
     return true;
 }
@@ -1050,7 +1050,7 @@ void SandboxApp::markLevelUnsaved() { savedEditMark_ = ~0ull; }
 // Exit, unless something is unsaved (ask first).
 void SandboxApp::requestExitChecked(Engine& e) {
 #if AVER_WITH_IMGUI
-    if (assetEditors_.anyDirty() || levelHasUnsavedEdits()) { exitPrompt_ = true; return; }
+    if (assetEditors_.anyDirty() || levelHasUnsavedEdits()) { panels_.exitPrompt_ = true; return; }
 #endif
     e.requestExit();
 }
@@ -1084,7 +1084,7 @@ void SandboxApp::saveAll() {
 // by a -DAVER_ENABLE_UI=OFF build.
 void SandboxApp::drawAboutPrompt(Engine& e) {
 #if AVER_WITH_IMGUI
-    if (!showAbout_) return;
+    if (!panels_.showAbout_) return;
     constexpr const char* kTitle = "About Aver Engine";
     if (!ImGui::IsPopupOpen(kTitle)) ImGui::OpenPopup(kTitle);
     const ImVec2 centre = ImGui::GetMainViewport()->GetCenter();
@@ -1119,7 +1119,7 @@ void SandboxApp::drawAboutPrompt(Engine& e) {
     ImGui::Spacing();
     ImGui::Separator();
     if (ImGui::Button("Close", ImVec2(110.0f * viewState_.dpi_, 0.0f))) {
-        showAbout_ = false;
+        panels_.showAbout_ = false;
         ImGui::CloseCurrentPopup();
     }
     ImGui::EndPopup();
@@ -1131,7 +1131,7 @@ void SandboxApp::drawAboutPrompt(Engine& e) {
 // Names a new file for the level and saves it there (prompted, not file dialog).
 void SandboxApp::drawSaveLevelAsPrompt() {
 #if AVER_WITH_IMGUI
-    if (!wantSaveLevelAs_) return;
+    if (!panels_.wantSaveLevelAs_) return;
     constexpr const char* kTitle = "Save Level As";
     if (!ImGui::IsPopupOpen(kTitle)) ImGui::OpenPopup(kTitle);
     const ImVec2 centre = ImGui::GetMainViewport()->GetCenter();
@@ -1146,12 +1146,12 @@ void SandboxApp::drawSaveLevelAsPrompt() {
     ImGui::TextUnformatted("Name");
     ImGui::PushItemWidth(-1);
     if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
-    const bool submit = ImGui::InputTextWithHint("##savelevelas", "Arena", saveLevelAsName_,
-                                                 sizeof saveLevelAsName_,
+    const bool submit = ImGui::InputTextWithHint("##savelevelas", "Arena", panels_.saveLevelAsName_,
+                                                 sizeof panels_.saveLevelAsName_,
                                                  ImGuiInputTextFlags_EnterReturnsTrue);
     ImGui::PopItemWidth();
 
-    const std::string stem = saveLevelAsName_;
+    const std::string stem = panels_.saveLevelAsName_;
     const bool named = !stem.empty();
     const std::filesystem::path target = named && !maps.empty()
         ? std::filesystem::path(maps) / (stem + ".ocworld")
@@ -1162,8 +1162,8 @@ void SandboxApp::drawSaveLevelAsPrompt() {
     std::error_code ec;
     const bool exists = !target.empty() && std::filesystem::exists(target, ec);
     if (exists) ImGui::TextDisabled("A level of that name is already there and will be replaced.");
-    if (!saveLevelAsError_.empty())
-        ImGui::TextColored(ImVec4(0.93f, 0.42f, 0.38f, 1.0f), "%s", saveLevelAsError_.c_str());
+    if (!panels_.saveLevelAsError_.empty())
+        ImGui::TextColored(ImVec4(0.93f, 0.42f, 0.38f, 1.0f), "%s", panels_.saveLevelAsError_.c_str());
 
     ImGui::Spacing();
     ImGui::Separator();
@@ -1203,7 +1203,7 @@ void SandboxApp::drawSaveLevelAsPrompt() {
             levelPath_ = target.string();
             cbInvalidate(maps);
             setUpgradeStatus("Saved " + target.filename().string());
-            wantSaveLevelAs_ = false;
+            panels_.wantSaveLevelAs_ = false;
             ImGui::CloseCurrentPopup();
         } else {
             if (renamed) {
@@ -1211,17 +1211,17 @@ void SandboxApp::drawSaveLevelAsPrompt() {
                 levelHeader_.contentId = prevId;
                 legacyMapHeader_.contentId = prevLegacyId;
             }
-            saveLevelAsError_ = "Could not write " + target.filename().string() + ".";
+            panels_.saveLevelAsError_ = "Could not write " + target.filename().string() + ".";
         }
 #else
-        wantSaveLevelAs_ = false;
+        panels_.wantSaveLevelAs_ = false;
         ImGui::CloseCurrentPopup();
 #endif
     }
     ImGui::SameLine();
     if (ImGui::Button("Cancel", ImVec2(110.0f * viewState_.dpi_, 0.0f))) {
-        wantSaveLevelAs_ = false;
-        saveLevelAsError_.clear();
+        panels_.wantSaveLevelAs_ = false;
+        panels_.saveLevelAsError_.clear();
         ImGui::CloseCurrentPopup();
     }
     ImGui::EndPopup();
@@ -1230,7 +1230,7 @@ void SandboxApp::drawSaveLevelAsPrompt() {
 
 void SandboxApp::drawExitPrompt(Engine& e) {
 #if AVER_WITH_IMGUI
-    if (!exitPrompt_) return;
+    if (!panels_.exitPrompt_) return;
     constexpr const char* kTitle = "Unsaved changes";
     if (!ImGui::IsPopupOpen(kTitle)) ImGui::OpenPopup(kTitle);
     const ImVec2 centre = ImGui::GetMainViewport()->GetCenter();
@@ -1255,9 +1255,9 @@ void SandboxApp::drawExitPrompt(Engine& e) {
         ImGui::TextDisabled("This level has never been saved -- \"Save all\" cannot name a file "
                             "for it. Cancel, then File > Save Level As.");
 #endif
-    if (!exitPromptError_.empty()) {
+    if (!panels_.exitPromptError_.empty()) {
         ImGui::Spacing();
-        ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.40f, 1.0f), "%s", exitPromptError_.c_str());
+        ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.40f, 1.0f), "%s", panels_.exitPromptError_.c_str());
     }
     ImGui::Spacing();
     ImGui::Separator();
@@ -1273,11 +1273,11 @@ void SandboxApp::drawExitPrompt(Engine& e) {
 #endif
         if (failed == 0) {
             ImGui::CloseCurrentPopup();
-            exitPrompt_ = false;
+            panels_.exitPrompt_ = false;
             e.requestExit();
         } else {
             // Stay open on failure (user asked to keep the work).
-            exitPromptError_ = why;
+            panels_.exitPromptError_ = why;
             AVER_ERROR("[Editor] {} editor(s) could not be saved; the exit was cancelled: {}",
                        failed, why);
         }
@@ -1286,14 +1286,14 @@ void SandboxApp::drawExitPrompt(Engine& e) {
     if (ImGui::Button("Discard and exit", ImVec2(150.0f * viewState_.dpi_, 0.0f))) {
         AVER_WARN("[Editor] exiting with {} unsaved item(s); the changes are gone", dirty.size());
         ImGui::CloseCurrentPopup();
-        exitPrompt_ = false;
+        panels_.exitPrompt_ = false;
         e.requestExit();
     }
     ImGui::SameLine();
     if (ImGui::Button("Cancel", ImVec2(110.0f * viewState_.dpi_, 0.0f))) {
         ImGui::CloseCurrentPopup();
-        exitPrompt_ = false;
-        exitPromptError_.clear();
+        panels_.exitPrompt_ = false;
+        panels_.exitPromptError_.clear();
     }
     ImGui::EndPopup();
 #else
@@ -1409,7 +1409,7 @@ void SandboxApp::drawOpenLevelPrompt(Engine& e) {
 // "forwarded", the only case that used to exist.
 void SandboxApp::drawPendingOpenPrompt(Engine& e) {
 #if AVER_WITH_IMGUI
-    if (!pendingOpenPrompt_ && !pendingNewLevel_) return;
+    if (!panels_.pendingOpenPrompt_ && !panels_.pendingNewLevel_) return;
     constexpr const char* kTitle = "Unsaved changes";
     if (!ImGui::IsPopupOpen(kTitle)) ImGui::OpenPopup(kTitle);
     const ImVec2 centre = ImGui::GetMainViewport()->GetCenter();
@@ -1417,13 +1417,13 @@ void SandboxApp::drawPendingOpenPrompt(Engine& e) {
     ImGui::SetNextWindowSize(ImVec2(480.0f * viewState_.dpi_, 0.0f), ImGuiCond_Appearing);
     if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
 
-    if (pendingNewLevel_)
+    if (panels_.pendingNewLevel_)
         ImGui::TextWrapped("The current level has unsaved changes. Starting a new level "
                            "discards them.");
     else
         ImGui::TextWrapped("'%s' is about to be %s. The current level has unsaved changes.",
-                           std::filesystem::path(pendingOpenPath_).filename().string().c_str(),
-                           pendingOpenWhy_.empty() ? "opened" : pendingOpenWhy_.c_str());
+                           std::filesystem::path(panels_.pendingOpenPath_).filename().string().c_str(),
+                           panels_.pendingOpenWhy_.empty() ? "opened" : panels_.pendingOpenWhy_.c_str());
 #if AVER_MODULE_SCENE
     // levelPath_ only exists under AVER_MODULE_SCENE; this modal only opens via requestOpenLevel or
     // New Level, both themselves SCENE-guarded, so nothing below can run without it either.
@@ -1438,15 +1438,15 @@ void SandboxApp::drawPendingOpenPrompt(Engine& e) {
     // straight through -- the one case where "Save and open" was a button that discarded.
 #if AVER_MODULE_SCENE
     ImGui::BeginDisabled(levelPath_.empty());
-    if (ImGui::Button(pendingNewLevel_ ? "Save and continue" : "Save and open",
+    if (ImGui::Button(panels_.pendingNewLevel_ ? "Save and continue" : "Save and open",
                       ImVec2(160.0f * viewState_.dpi_, 0.0f))) {
         if (saveLevel(levelPath_)) {
-            const std::string toOpen = pendingOpenPath_;
-            const bool wasNew = pendingNewLevel_;
+            const std::string toOpen = panels_.pendingOpenPath_;
+            const bool wasNew = panels_.pendingNewLevel_;
             ImGui::CloseCurrentPopup();
-            pendingOpenPrompt_ = false;
-            pendingNewLevel_ = false;
-            pendingOpenPath_.clear();
+            panels_.pendingOpenPrompt_ = false;
+            panels_.pendingNewLevel_ = false;
+            panels_.pendingOpenPath_.clear();
             if (wasNew) startNewLevel(e);
             else        openLevelDirect(e, toOpen);
         } else {
@@ -1461,21 +1461,21 @@ void SandboxApp::drawPendingOpenPrompt(Engine& e) {
     // comment above this modal can't actually be open without it -- kept disabled, not removed, so
     // the row's three-button layout doesn't shift between configurations.
     ImGui::BeginDisabled(true);
-    ImGui::Button(pendingNewLevel_ ? "Save and continue" : "Save and open", ImVec2(160.0f * viewState_.dpi_, 0.0f));
+    ImGui::Button(panels_.pendingNewLevel_ ? "Save and continue" : "Save and open", ImVec2(160.0f * viewState_.dpi_, 0.0f));
     ImGui::EndDisabled();
 #endif
     ImGui::SameLine();
-    if (ImGui::Button(pendingNewLevel_ ? "Discard and continue" : "Discard and open",
+    if (ImGui::Button(panels_.pendingNewLevel_ ? "Discard and continue" : "Discard and open",
                       ImVec2(170.0f * viewState_.dpi_, 0.0f))) {
 #if AVER_MODULE_SCENE
-        const std::string toOpen = pendingOpenPath_;
-        const bool wasNew = pendingNewLevel_;
+        const std::string toOpen = panels_.pendingOpenPath_;
+        const bool wasNew = panels_.pendingNewLevel_;
 #endif
         AVER_WARN("[Sandbox] the current level's unsaved changes are gone");
         ImGui::CloseCurrentPopup();
-        pendingOpenPrompt_ = false;
-        pendingNewLevel_ = false;
-        pendingOpenPath_.clear();
+        panels_.pendingOpenPrompt_ = false;
+        panels_.pendingNewLevel_ = false;
+        panels_.pendingOpenPath_.clear();
 #if AVER_MODULE_SCENE
         if (wasNew) startNewLevel(e);
         else        openLevelDirect(e, toOpen);
@@ -1484,9 +1484,9 @@ void SandboxApp::drawPendingOpenPrompt(Engine& e) {
     ImGui::SameLine();
     if (ImGui::Button("Cancel", ImVec2(110.0f * viewState_.dpi_, 0.0f))) {
         ImGui::CloseCurrentPopup();
-        pendingOpenPrompt_ = false;
-        pendingNewLevel_ = false;
-        pendingOpenPath_.clear();
+        panels_.pendingOpenPrompt_ = false;
+        panels_.pendingNewLevel_ = false;
+        panels_.pendingOpenPath_.clear();
     }
     ImGui::EndPopup();
 #else
@@ -1507,7 +1507,7 @@ void SandboxApp::launchInRuntime(Engine& e, bool skipDirtyCheck) {
 #if AVER_MODULE_LANDSCAPE
     anythingUnsaved = anythingUnsaved || landscape_.dirty();
 #endif
-    if (!skipDirtyCheck && anythingUnsaved) { launchRuntimePrompt_ = true; return; }
+    if (!skipDirtyCheck && anythingUnsaved) { panels_.launchRuntimePrompt_ = true; return; }
 
     if (!refreshCookedChunksForPlay()) return;   // a level that names a cooked chunk set gets it re-cooked first when the saved level moved on (SandboxLevelCook.cpp)
     const std::string levelFile = std::filesystem::path(levelPath_).filename().string();
@@ -1530,7 +1530,7 @@ void SandboxApp::launchInRuntime(Engine& e, bool skipDirtyCheck) {
 void SandboxApp::drawLaunchRuntimePrompt(Engine& e) {
     (void)e;
 #if AVER_WITH_IMGUI && AVER_MODULE_SCENE
-    if (!launchRuntimePrompt_) return;
+    if (!panels_.launchRuntimePrompt_) return;
     constexpr const char* kTitle = "Launch in Aver Engine Runtime";
     if (!ImGui::IsPopupOpen(kTitle)) ImGui::OpenPopup(kTitle);
     const ImVec2 centre = ImGui::GetMainViewport()->GetCenter();
@@ -1558,7 +1558,7 @@ void SandboxApp::drawLaunchRuntimePrompt(Engine& e) {
     if (saveAndLaunch) {
         if (saveLevel(levelPath_)) {
             ImGui::CloseCurrentPopup();
-            launchRuntimePrompt_ = false;
+            panels_.launchRuntimePrompt_ = false;
             launchInRuntime(e, true);
         } else {
             // STAY OPEN on a failed save -- same reasoning as drawPendingOpenPrompt's identical
@@ -1569,13 +1569,13 @@ void SandboxApp::drawLaunchRuntimePrompt(Engine& e) {
     ImGui::SameLine();
     if (ImGui::Button("Launch saved version", ImVec2(170.0f * viewState_.dpi_, 0.0f))) {
         ImGui::CloseCurrentPopup();
-        launchRuntimePrompt_ = false;
+        panels_.launchRuntimePrompt_ = false;
         launchInRuntime(e, true);
     }
     ImGui::SameLine();
     if (ImGui::Button("Cancel", ImVec2(110.0f * viewState_.dpi_, 0.0f))) {
         ImGui::CloseCurrentPopup();
-        launchRuntimePrompt_ = false;
+        panels_.launchRuntimePrompt_ = false;
     }
     ImGui::EndPopup();
 #endif
@@ -1584,7 +1584,7 @@ void SandboxApp::drawLaunchRuntimePrompt(Engine& e) {
 // Draws the modal offering to add the project files this project is missing, listing each fix.
 void SandboxApp::drawUpgradePrompt() {
 #if AVER_WITH_IMGUI
-    if (pendingUpgrade_.empty() || upgradeAsked_) return;
+    if (pendingUpgrade_.empty() || panels_.upgradeAsked_) return;
     constexpr const char* kTitle = "Upgrade project?";
     if (!ImGui::IsPopupOpen(kTitle)) ImGui::OpenPopup(kTitle);
 
@@ -1624,12 +1624,12 @@ void SandboxApp::drawUpgradePrompt() {
             AVER_ERROR("[Editor] upgrade of '{}' failed: {}", project_.name, err);
         }
         pendingUpgrade_ = {};
-        upgradeAsked_ = true;
+        panels_.upgradeAsked_ = true;
         ImGui::CloseCurrentPopup();
     }
     ImGui::SameLine();
     if (ImGui::Button("Not now", ImVec2(120.0f * viewState_.dpi_, 0.0f))) {
-        upgradeAsked_ = true;
+        panels_.upgradeAsked_ = true;
         setUpgradeStatus("Project left as it is.", editor::NotifySeverity::Info);
         ImGui::CloseCurrentPopup();
     }
@@ -1767,7 +1767,7 @@ void SandboxApp::drawPlayToolbar(Engine& e) {
 
             ImGui::Separator();
             if (ImGui::MenuItem("Advanced Settings...")) {
-                showEditorPrefs_ = true;
+                panels_.showEditorPrefs_ = true;
                 play_.scrollPrefsToPlay_ = true;
             }
             uiReg_.track("toolbar.play.options.advanced");
@@ -1873,7 +1873,7 @@ void SandboxApp::drawFileMenu(Engine& e) {
         ImGui::BeginDisabled(!haveProject);
         // Asks first; prevents silently discarding unsaved edits.
         if (ImGui::MenuItem(ICON_NEW_FILE " New Level")) {
-            if (levelHasUnsavedEdits()) pendingNewLevel_ = true;
+            if (levelHasUnsavedEdits()) panels_.pendingNewLevel_ = true;
             else                        startNewLevel(e);
         }
         uiReg_.track("file.newLevel");
@@ -1896,14 +1896,14 @@ void SandboxApp::drawFileMenu(Engine& e) {
         uiReg_.track("file.saveAll");
         // Save Level As: saveLevel takes an arbitrary path; this provides the UI.
         if (ImGui::MenuItem(ICON_SAVE " Save Level As...")) {
-            saveLevelAsName_[0] = '\0';
+            panels_.saveLevelAsName_[0] = '\0';
             const std::string stem = levelPath_.empty()
                 ? levelName_
                 : std::filesystem::path(levelPath_).stem().string();
-            std::snprintf(saveLevelAsName_, sizeof saveLevelAsName_, "%s",
+            std::snprintf(panels_.saveLevelAsName_, sizeof panels_.saveLevelAsName_, "%s",
                           stem.empty() ? "untitled" : stem.c_str());
-            saveLevelAsError_.clear();
-            wantSaveLevelAs_ = true;
+            panels_.saveLevelAsError_.clear();
+            panels_.wantSaveLevelAs_ = true;
         }
         uiReg_.track("file.saveLevelAs");
         ImGui::EndDisabled();
@@ -1993,9 +1993,9 @@ void SandboxApp::drawEditMenu() {
         if (ImGui::MenuItem(ICON_DELETE " Delete", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditDelete)).c_str(), false, anySelected())) deleteSelection();
         uiReg_.track("edit.delete");
         ImGui::Separator();
-        if (ImGui::MenuItem(ICON_TUNE " Editor Preferences...")) showEditorPrefs_ = true;
+        if (ImGui::MenuItem(ICON_TUNE " Editor Preferences...")) panels_.showEditorPrefs_ = true;
         uiReg_.track("edit.editorPreferences");
-        if (ImGui::MenuItem(ICON_PROJECT " Project Settings...")) showProjectSettings_ = true;
+        if (ImGui::MenuItem(ICON_PROJECT " Project Settings...")) panels_.showProjectSettings_ = true;
         uiReg_.track("edit.projectSettings");
         ImGui::EndMenu();
     }
@@ -2009,18 +2009,18 @@ void SandboxApp::drawWindowMenu() {
     uiReg_.track("menu.window");
     if (open_window){
         // MenuItem now captures return value so panels can be reopened.
-        ImGui::MenuItem(ICON_OUTLINER " World Outliner", nullptr, &showOutliner_);
+        ImGui::MenuItem(ICON_OUTLINER " World Outliner", nullptr, &panels_.showOutliner_);
         uiReg_.track("window.worldOutliner");
-        ImGui::MenuItem(ICON_DETAILS " Details", nullptr, &showDetails_);
+        ImGui::MenuItem(ICON_DETAILS " Details", nullptr, &panels_.showDetails_);
         uiReg_.track("window.details");
-        ImGui::MenuItem(ICON_ADD " Place Actors", nullptr, &showPlaceActors_);
+        ImGui::MenuItem(ICON_ADD " Place Actors", nullptr, &panels_.showPlaceActors_);
         uiReg_.track("window.placeActors");
-        ImGui::MenuItem(ICON_LOG " Message Log", nullptr, &showMessageLog_);
+        ImGui::MenuItem(ICON_LOG " Message Log", nullptr, &panels_.showMessageLog_);
         uiReg_.track("window.messageLog");
-        ImGui::MenuItem(ICON_RESET " Undo History", nullptr, &showUndoHistory_);
+        ImGui::MenuItem(ICON_RESET " Undo History", nullptr, &panels_.showUndoHistory_);
         uiReg_.track("window.undoHistory");
 #if AVER_MODULE_SCENE
-        ImGui::MenuItem(ICON_MOVIE " Render Queue", nullptr, &showRenderQueue_);
+        ImGui::MenuItem(ICON_MOVIE " Render Queue", nullptr, &panels_.showRenderQueue_);
         uiReg_.track("window.renderQueue");
 #endif
         if (ImGui::MenuItem(ICON_FOLDER " Content Browser", "Ctrl+Space", drawerUi_.drawer_ == Drawer::Content)) toggleDrawer(Drawer::Content);
@@ -2030,8 +2030,8 @@ void SandboxApp::drawWindowMenu() {
         uiReg_.track("window.outputLog");
         if (ImGui::MenuItem(ICON_CONSOLE " Console", "`", drawerUi_.drawer_ == Drawer::Console)) toggleDrawer(Drawer::Console);
         uiReg_.track("window.console");
-        if (ImGui::MenuItem(ICON_WORLD " World Settings", nullptr, showWorldSettings_))
-            showWorldSettings_ = !showWorldSettings_;
+        if (ImGui::MenuItem(ICON_WORLD " World Settings", nullptr, panels_.showWorldSettings_))
+            panels_.showWorldSettings_ = !panels_.showWorldSettings_;
         uiReg_.track("window.worldSettings");
         ImGui::Separator();
 #if AVER_MODULE_SCENE
@@ -2077,7 +2077,7 @@ void SandboxApp::drawWindowMenu() {
             ImGui::SetTooltip("What git says about this project: the branch, what changed, and\n"
                               "each file's history and diff. It READS the repository and cannot\n"
                               "alter one -- there is no commit, revert or push here.");
-        ImGui::MenuItem(ICON_LAYERS " Data Layers", nullptr, &showDataLayers_);
+        ImGui::MenuItem(ICON_LAYERS " Data Layers", nullptr, &panels_.showDataLayers_);
         uiReg_.track("window.dataLayers");
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Group objects into named layers the streamer loads, hides or activates together.\nAssign the selection, set a layer's initial state, and hide or unload one in the editor.");
@@ -2088,7 +2088,7 @@ void SandboxApp::drawWindowMenu() {
                               "Install an .avext package from a file, or uninstall one.");
         ImGui::Separator();
         ImGui::BeginDisabled(gameUi_ == nullptr);
-        if (ImGui::MenuItem(ICON_WIDGETS " Game UI Demo", nullptr, showUiDemo_)) showUiDemo_ = !showUiDemo_;
+        if (ImGui::MenuItem(ICON_WIDGETS " Game UI Demo", nullptr, panels_.showUiDemo_)) panels_.showUiDemo_ = !panels_.showUiDemo_;
         uiReg_.track("window.gameUiDemo");
         ImGui::EndDisabled();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
@@ -2099,7 +2099,7 @@ void SandboxApp::drawWindowMenu() {
         const bool assetTabActive = !viewState_.levelVisible_ && assetEditors_.anyOpen();
         if (ImGui::MenuItem(assetTabActive ? ICON_LAYOUT " Reset Tab Layout" : ICON_LAYOUT " Reset Layout")) {
             if (assetTabActive) assetEditors_.resetFocusedLayout();
-            else              { dockBuilt_ = false; dockResetRequested_ = true; }
+            else              { panels_.dockBuilt_ = false; panels_.dockResetRequested_ = true; }
         }
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(assetTabActive
@@ -2348,17 +2348,17 @@ void SandboxApp::drawDockHost(const ImVec2& wpos, const ImVec2& wsize, f32 toolb
 
     // Defer to restored layout from ini file; reset only on explicit Reset Layout.
     const ImGuiDockNode* restored = ImGui::DockBuilderGetNode(dockId);
-    const bool adoptRestored = !dockBuilt_ && !dockResetRequested_ &&
+    const bool adoptRestored = !panels_.dockBuilt_ && !panels_.dockResetRequested_ &&
                                restored && restored->IsSplitNode();
     if (adoptRestored) {
-        dockBuilt_ = true;
+        panels_.dockBuilt_ = true;
         // Logged once to detect regressions (default == restored on first launch).
         AVER_INFO("[Editor] dock layout restored from editor-layout.ini");
     }
 
-    if (!dockBuilt_ && dockSize.x > 1.0f && dockSize.y > 1.0f) {
-        dockResetRequested_ = false;
-        dockBuilt_ = true;
+    if (!panels_.dockBuilt_ && dockSize.x > 1.0f && dockSize.y > 1.0f) {
+        panels_.dockResetRequested_ = false;
+        panels_.dockBuilt_ = true;
         ImGui::DockBuilderRemoveNode(dockId);
         ImGui::DockBuilderAddNode(dockId, ImGuiDockNodeFlags_DockSpace); // private flag, required here
         ImGui::DockBuilderSetNodeSize(dockId, dockSize); // must precede the splits
@@ -2951,7 +2951,7 @@ void SandboxApp::buildUI(Engine& e) {
         }
         uiReg_.track("menu.select");
         if (ImGui::BeginMenu("Help")){
-            if (ImGui::MenuItem(ICON_INFO " About Aver Engine")) showAbout_ = true;
+            if (ImGui::MenuItem(ICON_INFO " About Aver Engine")) panels_.showAbout_ = true;
             uiReg_.track("help.about");
             ImGui::EndMenu();
         }

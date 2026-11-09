@@ -1311,6 +1311,7 @@ private:
 #include "state/McpState.hpp"
 #include "state/AutosaveSession.hpp"
 #include "state/DebugOverlayState.hpp"
+#include "state/PanelState.hpp"
 class HitchMarks;
 namespace game { struct SceneDrawStats; }
 
@@ -1780,6 +1781,7 @@ private:
     McpState mcpState_;   // MCP automation bridge
     AutosaveSession autosave_;   // Level/project/prefs autosave timers, crash-recovery state and the post
     DebugOverlayState dbgOv_;   // Debug overlays and diagnostics panels
+    PanelState panels_;   // Editor panel/dialog visibility flags, prompt requests and dock layout 
     // ---- end feature state ----
 
     void applyProject(Engine& e);
@@ -2332,11 +2334,6 @@ private:
     void buildPlaceActorsPanel(Engine& e);
     void buildMessageLogPanel();
     void buildUndoHistoryPanel();
-    bool showPlaceActors_ = false, showMessageLog_ = false, showUndoHistory_ = false;
-    char placeQuery_[64] = {};
-    int  msgLogLevel_ = 0;              // the Output Log's filter indices: All, Info+, Warn+, Error+, Critical+
-    std::string msgLogCategory_;
-    char msgLogQuery_[96] = {};
 
 #if AVER_WITH_IMGUI
 // Drag-and-drop from the Content Browser, hence UI-only: spawnFromAssetDrop's sole caller is the
@@ -3270,25 +3267,7 @@ private:
     // The Vulkan backend, held on same terms as the D3D12 one above for teardown ordering.
     std::unique_ptr<rhi::vkb::IUiBackend> uiBackendVk_;
 #endif
-    bool dockBuilt_=false;   // false = build the default layout on the next frame
-    // Set by View > Reset Layout so the builder overrides a layout restored from the ini.
-    bool dockResetRequested_=false;
-    // Warn ONCE about a missing icon font (not once per DPI change).
-    bool iconWarned_=false;
-    bool showProjectSettings_=false; // Edit > Project Settings window
-    bool showWorldSettings_=false;   // Window > World Settings (per-LEVEL settings)
-    // Window > World Outliner / Details. Default ON: these are the editor's two primary panels.
-    bool showOutliner_=true;
-    bool showDetails_=true;
 
-    bool showAbout_=false;             // Help > About
-    bool wantSaveLevelAs_=false;
-    char saveLevelAsName_[128]={};
-    std::string saveLevelAsError_;
-    bool showEditorPrefs_=false;     // Edit > Editor Preferences window
-    bool scrollPrefsToKeybinds_=false;   // --scroll-prefs-to-keybinds, one-shot
-    int  settingsPage_=1;            // 0 Description, 1 Rendering>General, 2 >GI, 3 >Ray Tracing, 4 >Path Tracing
-    int  focusVoxi_=0;               // --project-settings: frames left to force the window open
     // Registered once in onInit, unregistered in onShutdown. Never rebuilt: one instance for the whole run.
     GBufferDebugFeature gbufferDebugFeature_;
 #if AVER_WITH_SYNAPSE_AI && AVER_MODULE_SYNAPSE_GPU
@@ -3341,15 +3320,6 @@ private:
     bool browserActive_=false;
     // Whether THIS launch's own command line was eligible to register as the single-instance primary.
     bool singleInstanceEligible_ = false;
-    // ONE PENDING OPEN, whatever asked for it: File > Open Level's picker, a Content Browser double-click, or a path forwarded from a second launch.
-    // Funnelled through one request so the unsaved-changes guard and the class-placement spawn happen once.
-    std::string pendingOpenPath_;
-    std::string pendingOpenWhy_;      // how it was asked for, for the modal's own sentence
-    // The modal shown when a pending open would discard unsaved work. Separate from exitPrompt_.
-    bool        pendingOpenPrompt_ = false;
-    bool        pendingNewLevel_ = false;   // File > New Level, waiting on the unsaved-changes prompt
-    // File > Launch in Aver Engine Runtime, waiting on drawLaunchRuntimePrompt's unsaved-changes ask.
-    bool        launchRuntimePrompt_ = false;
     bool        armOpenLevelPicker_ = false;   // --open-level-picker, consumed on the first draw
     rhi::TextureHandle logoTexture_=0;   // 0 when logo.png was absent or undecodable
     int frameNo_ = 0;                                      // bumped once per UI frame; the cache freshness clock
@@ -3447,11 +3417,9 @@ private:
     std::unique_ptr<aver::editor::ReflTest> refl_;
     int  reflBeaconIndex_ = -1;   // which objects_ entry the schedule shows and hides
     rhi::MeshHandle unitCubeMesh_ = 0;   // the editor's own unit cube, half-extent 1
-    bool showUiDemo_ = false;
     std::string matSaveStatus_;   // what the last 'Save to C#' did
     // A row asked to be deleted; answered after the tree walk (drawOutlinerRow). GUARDED: type is scene::Entity.
     bool inputProbe_ = false;
-    bool openLegacy_ = false;   // --open-legacy
     std::string openAsset_;
     std::string selectEntity_;   // --select
     std::string lastOpenAssetPath_;  // last path --open-asset opened; openAsset_ itself is cleared once consumed.
@@ -3459,9 +3427,6 @@ private:
     std::string graphTab_; // --graph-select <nodeId>; see setGraphSelectNode's own comment
 
     editor::ProjectUpgrade pendingUpgrade_;
-    bool        upgradeAsked_ = false;
-    bool        exitPrompt_ = false;      // the unsaved-changes modal is up
-    std::string exitPromptError_;         // why a "Save all" attempt failed
     // Every PCGVOLUME the loaded level carried, kept verbatim so a save cannot drop them.
     std::vector<fmt::OcPcgVolume> levelPcgVolumes_;
     // The loaded level's own header, placements and PCG volumes stripped. Starting from what the file said, overwriting only what the editor owns.
@@ -3498,7 +3463,6 @@ private:
     std::unordered_map<u32, bool> entityLegacyDeform_;
     std::unordered_map<u32, i32> entityLegacySurface_;
     std::unordered_map<u32, std::string> entityLegacyMaterial_;
-    f32  uiDemoHealth_ = 0.72f, uiDemoStamina_ = 0.44f, uiDemoScroll_ = 0.0f, uiDemoClock_ = 0.0f;
     // Game UI font. Invalid font (missing file) draws nothing.
     ui::UiFont uiFont_;
     rhi::TextureHandle uiFontTexture_ = 0;
@@ -3978,7 +3942,6 @@ private:
     } seqRun_;
     editor::RenderRun renderRun_;
     editor::RenderQueuePanelState renderQueue_;
-    bool showRenderQueue_ = false;
 #endif
 #if AVER_MODULE_SCENE && AVER_MODULE_PHYSICS
     // Vehicles as physics cars while Play runs. Built in capturePlayWorld, ended in stopPlay.
@@ -4121,7 +4084,6 @@ private:
     // Window > Data Layers (SandboxDataLayers.cpp). Members are keyed by EditId so an undone delete finds its layers again.
     editor::dl::Model   dataLayers_;
     editor::DataLayersUi dataLayersUi_;
-    bool                showDataLayers_ = false;
     std::unordered_set<u32> dataLayerHidden_;   // entities the layer toggles hid (a subset of editorHidden_)
     void drawDataLayersPanel();
     void pushDataLayerEdit(editor::dl::Edit e);

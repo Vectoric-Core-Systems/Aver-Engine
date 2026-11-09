@@ -251,11 +251,11 @@ void SandboxApp::saveLevelInteractive() {
     if (levelPath_.empty()) {
         // Never written, so there is no file to overwrite. Open the same prompt the menu does
         // rather than inventing a name: Save As is what Save means for a level with no path.
-        saveLevelAsName_[0] = '\0';
-        std::snprintf(saveLevelAsName_, sizeof saveLevelAsName_, "%s",
+        panels_.saveLevelAsName_[0] = '\0';
+        std::snprintf(panels_.saveLevelAsName_, sizeof panels_.saveLevelAsName_, "%s",
                       levelName_.empty() ? "untitled" : levelName_.c_str());
-        saveLevelAsError_.clear();
-        wantSaveLevelAs_ = true;
+        panels_.saveLevelAsError_.clear();
+        panels_.wantSaveLevelAs_ = true;
         return;
     }
     const std::string name = std::filesystem::path(levelPath_).filename().string();
@@ -333,19 +333,19 @@ bool SandboxApp::requestOpenLevel(const std::string& path, const char* why) {
             return false;
         }
     }
-    pendingOpenPath_ = path;
-    pendingOpenWhy_  = why ? why : "";
+    panels_.pendingOpenPath_ = path;
+    panels_.pendingOpenWhy_  = why ? why : "";
     return true;
 }
 
 // Drains a pending open. Called once per frame from onUpdate, which is where an Engine& is.
 void SandboxApp::applyPendingOpen(Engine& eng) {
-    if (pendingOpenPath_.empty() || pendingOpenPrompt_) return;
+    if (panels_.pendingOpenPath_.empty() || panels_.pendingOpenPrompt_) return;
     // The prompt asks whether the level differs from its file, the same test the exit prompt
     // uses; see levelHasUnsavedEdits.
-    if (levelHasUnsavedEdits()) { pendingOpenPrompt_ = true; return; }
-    const std::string path = pendingOpenPath_;
-    pendingOpenPath_.clear();
+    if (levelHasUnsavedEdits()) { panels_.pendingOpenPrompt_ = true; return; }
+    const std::string path = panels_.pendingOpenPath_;
+    panels_.pendingOpenPath_.clear();
     openLevelDirect(eng, path);
 }
 

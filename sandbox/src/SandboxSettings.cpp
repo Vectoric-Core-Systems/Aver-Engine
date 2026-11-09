@@ -38,11 +38,11 @@ void SandboxApp::loadEditorPreferences() {
     dbgOv_.showWorldOrigin_    = prefBool ("viewport.showWorldOrigin",      dbgOv_.showWorldOrigin_);
 #endif
     // viewport.showColliders not restored on purpose: debug view, toggled from Window menu.
-    showOutliner_       = prefBool ("panels.worldOutliner",          showOutliner_);
-    showDetails_        = prefBool ("panels.details",                showDetails_);
-    showPlaceActors_    = prefBool ("panels.placeActors",            showPlaceActors_);
-    showMessageLog_     = prefBool ("panels.messageLog",             showMessageLog_);
-    showUndoHistory_    = prefBool ("panels.undoHistory",            showUndoHistory_);
+    panels_.showOutliner_       = prefBool ("panels.worldOutliner",          panels_.showOutliner_);
+    panels_.showDetails_        = prefBool ("panels.details",                panels_.showDetails_);
+    panels_.showPlaceActors_    = prefBool ("panels.placeActors",            panels_.showPlaceActors_);
+    panels_.showMessageLog_     = prefBool ("panels.messageLog",             panels_.showMessageLog_);
+    panels_.showUndoHistory_    = prefBool ("panels.undoHistory",            panels_.showUndoHistory_);
     viewState_.flySpeed_           = prefFloat("viewport.flySpeed",             viewState_.flySpeed_);
     viewState_.lookSpeed_          = prefFloat("viewport.lookSensitivity",      viewState_.lookSpeed_);
     // View flags gated to interactive runs only (not --frames). Snap is ungated: doesn't alter pixels.
@@ -250,12 +250,12 @@ void SandboxApp::buildPlayPrefsSection() {
 // Draws the Editor Preferences window: how this machine's editor behaves.
 void SandboxApp::buildEditorPrefs() {
     resolvePreferredIdeFromPrefs();
-    if (!showEditorPrefs_) return;
+    if (!panels_.showEditorPrefs_) return;
     const ImGuiViewport* mv = ImGui::GetMainViewport();
     // Six sections: FirstUseEver default; saved size is preserved.
     ImGui::SetNextWindowSize(ImVec2(560.0f*viewState_.dpi_, 640.0f*viewState_.dpi_), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowPos(ImVec2(mv->GetCenter().x, mv->GetCenter().y), ImGuiCond_FirstUseEver, ImVec2(0.5f,0.5f));
-    if (!ImGui::Begin("Editor Preferences", &showEditorPrefs_, ImGuiWindowFlags_NoDocking)) { ImGui::End(); return; }
+    if (!ImGui::Begin("Editor Preferences", &panels_.showEditorPrefs_, ImGuiWindowFlags_NoDocking)) { ImGui::End(); return; }
 
     if (::aver::editor::sectionHeader("Content Browser", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Checkbox("Open in gallery (tiles) view", &drawerUi_.cbGallery_);
@@ -532,7 +532,7 @@ void SandboxApp::buildEditorPrefs() {
     buildPlayPrefsSection();
 
     // Scroll landing point: one-shot via scrollPrefsToKeybinds_ flag.
-    if (scrollPrefsToKeybinds_) { ImGui::SetScrollHereY(0.0f); scrollPrefsToKeybinds_ = false; }
+    if (panels_.scrollPrefsToKeybinds_) { ImGui::SetScrollHereY(0.0f); panels_.scrollPrefsToKeybinds_ = false; }
     // Registry owns clearing listening_ on header collapse.
     const bool keybindsOpen = ::aver::editor::sectionHeader("Keybinds", ImGuiTreeNodeFlags_DefaultOpen);
     keybinds_.drawPreferencesSection(viewState_.dpi_, keybindsOpen, &uiReg_);
@@ -579,10 +579,10 @@ bool SandboxApp::classPicker(const char* label, std::string& value, int32_t flag
 
 // World Settings: per-level edits. Project Settings: per-project. No parallel setting copy.
 void SandboxApp::buildWorldSettings() {
-    if (!showWorldSettings_) return;
+    if (!panels_.showWorldSettings_) return;
 #if !AVER_MODULE_SCENE
     // No scene module: no level to configure.
-    if (ImGui::Begin("World Settings", &showWorldSettings_, ImGuiWindowFlags_NoDocking))
+    if (ImGui::Begin("World Settings", &panels_.showWorldSettings_, ImGuiWindowFlags_NoDocking))
         ImGui::TextDisabled("This build has no scene module, so there is no level to configure.");
     ImGui::End();
     return;
@@ -592,7 +592,7 @@ void SandboxApp::buildWorldSettings() {
     ImGui::SetNextWindowSize(ImVec2(560.0f * viewState_.dpi_, 480.0f * viewState_.dpi_), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowPos(ImVec2(mv->GetCenter().x, mv->GetCenter().y), ImGuiCond_FirstUseEver,
                             ImVec2(0.5f, 0.5f));
-    if (!ImGui::Begin("World Settings", &showWorldSettings_, ImGuiWindowFlags_NoDocking)) {
+    if (!ImGui::Begin("World Settings", &panels_.showWorldSettings_, ImGuiWindowFlags_NoDocking)) {
         ImGui::End();
         return;
     }
@@ -732,42 +732,42 @@ const char* renderPageTitle(int page) {
 } // namespace
 
 void SandboxApp::buildProjectSettings() {
-    if (focusVoxi_ > 0) { showProjectSettings_ = true; --focusVoxi_; } // --project-settings
-    if (!showProjectSettings_) return;
-    if (settingsPage_ == kRenderPagePathTracing) settingsPage_ = kRenderPageGi;
+    if (panels_.focusVoxi_ > 0) { panels_.showProjectSettings_ = true; --panels_.focusVoxi_; } // --project-settings
+    if (!panels_.showProjectSettings_) return;
+    if (panels_.settingsPage_ == kRenderPagePathTracing) panels_.settingsPage_ = kRenderPageGi;
 
     const ImGuiViewport* mv = ImGui::GetMainViewport();
     ImGui::SetNextWindowSize(ImVec2(880.0f*viewState_.dpi_, 560.0f*viewState_.dpi_), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowPos(ImVec2(mv->GetCenter().x, mv->GetCenter().y), ImGuiCond_FirstUseEver, ImVec2(0.5f,0.5f));
-    if (!ImGui::Begin("Project Settings", &showProjectSettings_, ImGuiWindowFlags_NoDocking)) { ImGui::End(); return; }
+    if (!ImGui::Begin("Project Settings", &panels_.showProjectSettings_, ImGuiWindowFlags_NoDocking)) { ImGui::End(); return; }
 
     // settingsPage_: 0 Description, 5-9 the non-rendering categories, the rest kRenderPage*.
     ImGui::BeginChild("##categories", ImVec2(220.0f*viewState_.dpi_, 0), ImGuiChildFlags_Borders);
     ImGui::TextDisabled("Project");
     ImGui::Indent();
-    if (ImGui::Selectable("Description", settingsPage_==0)) settingsPage_=0;
+    if (ImGui::Selectable("Description", panels_.settingsPage_==0)) panels_.settingsPage_=0;
     ImGui::Unindent();
     ImGui::TextDisabled("Engine");
     ImGui::Indent();
     ImGui::TextDisabled("Rendering");
     ImGui::Indent();
     for (const int p : kRenderPageOrder)
-        if (ImGui::Selectable(renderPageTitle(p), settingsPage_ == p)) settingsPage_ = p;
+        if (ImGui::Selectable(renderPageTitle(p), panels_.settingsPage_ == p)) panels_.settingsPage_ = p;
     ImGui::Unindent();
     // Siblings of Rendering, not children: neither is drawn by the renderer.
-    if (ImGui::Selectable("Physics",                settingsPage_==5)) settingsPage_=5;
-    if (ImGui::Selectable("Audio",                  settingsPage_==6)) settingsPage_=6;
+    if (ImGui::Selectable("Physics",                panels_.settingsPage_==5)) panels_.settingsPage_=5;
+    if (ImGui::Selectable("Audio",                  panels_.settingsPage_==6)) panels_.settingsPage_=6;
     // Three categories a project couldn't state until now, each a real options struct the engine
     // already had but no file could reach: platform::WindowDesc, the importers' options, world::StreamSettings.
-    if (ImGui::Selectable("Window",                 settingsPage_==7)) settingsPage_=7;
-    if (ImGui::Selectable("Import Defaults",        settingsPage_==8)) settingsPage_=8;
-    if (ImGui::Selectable("World Streaming",        settingsPage_==9)) settingsPage_=9;
+    if (ImGui::Selectable("Window",                 panels_.settingsPage_==7)) panels_.settingsPage_=7;
+    if (ImGui::Selectable("Import Defaults",        panels_.settingsPage_==8)) panels_.settingsPage_=8;
+    if (ImGui::Selectable("World Streaming",        panels_.settingsPage_==9)) panels_.settingsPage_=9;
     ImGui::Unindent();
     ImGui::EndChild();
 
     ImGui::SameLine();
     ImGui::BeginChild("##page", ImVec2(0, 0), ImGuiChildFlags_Borders);
-    if (settingsPage_ == 0) {
+    if (panels_.settingsPage_ == 0) {
         ImGui::TextUnformatted("Description");
         ImGui::Separator();
         if (project_.valid()) {
@@ -926,19 +926,19 @@ void SandboxApp::buildProjectSettings() {
             ImGui::TextDisabled("No project loaded. The editor runs fine without one; open or");
             ImGui::TextDisabled("create a project from the start screen to populate this page.");
         }
-    } else if (settingsPage_ == 5) {
+    } else if (panels_.settingsPage_ == 5) {
         buildPhysicsSettings();
-    } else if (settingsPage_ == 6) {
+    } else if (panels_.settingsPage_ == 6) {
         buildAudioSettings();
-    } else if (settingsPage_ == 7) {
+    } else if (panels_.settingsPage_ == 7) {
         buildWindowSettings();
-    } else if (settingsPage_ == 8) {
+    } else if (panels_.settingsPage_ == 8) {
         buildImportSettings();
-    } else if (settingsPage_ == 9) {
+    } else if (panels_.settingsPage_ == 9) {
         buildStreamSettings();
     } else {
 #if AVER_MODULE_VOXI
-        buildRenderingSettings(settingsPage_);
+        buildRenderingSettings(panels_.settingsPage_);
 #else
         ImGui::TextUnformatted("Rendering");
         ImGui::Separator();
@@ -2444,11 +2444,11 @@ void SandboxApp::saveEditorPreferences() {
 #if AVER_MODULE_SCENE
     setPrefBool ("viewport.showWorldOrigin",     dbgOv_.showWorldOrigin_);
 #endif
-    setPrefBool ("panels.worldOutliner",         showOutliner_);
-    setPrefBool ("panels.details",               showDetails_);
-    setPrefBool ("panels.placeActors",           showPlaceActors_);
-    setPrefBool ("panels.messageLog",            showMessageLog_);
-    setPrefBool ("panels.undoHistory",           showUndoHistory_);
+    setPrefBool ("panels.worldOutliner",         panels_.showOutliner_);
+    setPrefBool ("panels.details",               panels_.showDetails_);
+    setPrefBool ("panels.placeActors",           panels_.showPlaceActors_);
+    setPrefBool ("panels.messageLog",            panels_.showMessageLog_);
+    setPrefBool ("panels.undoHistory",           panels_.showUndoHistory_);
     setPrefFloat("viewport.flySpeed",            viewState_.flySpeed_);
     setPrefFloat("viewport.lookSensitivity",     viewState_.lookSpeed_);
     setPrefFloat("ddc.ramBudgetMb",              rset_.ddcRamBudgetMb_);

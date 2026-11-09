@@ -209,8 +209,8 @@ void SandboxApp::mergeIconFont(f32 px) {
 #if AVER_WITH_IMGUI
     const std::string icons = executableDir() + AVER_PATH_SEP "MaterialIcons-Regular.ttf";
     if (!fileExists(icons)) {
-        if (!iconWarned_) {
-            iconWarned_ = true;
+        if (!panels_.iconWarned_) {
+            panels_.iconWarned_ = true;
             AVER_WARN("[Sandbox] '{}' missing -- icons will render as empty boxes", icons);
         }
         return;

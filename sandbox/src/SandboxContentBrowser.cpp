@@ -1307,7 +1307,7 @@ void SandboxApp::cbItemContextMenu(const std::string& full, const std::string& n
     }
     if (project_.valid() && ImGui::MenuItem("Validate Assets")) {
         drawerUi_.cbStatus_ = editor::runAssetValidation(project_.contentDir(), full);
-        showMessageLog_ = true;
+        panels_.showMessageLog_ = true;
     }
     if (!isDir) cbCollectionMenu(full);
     ImGui::Separator();

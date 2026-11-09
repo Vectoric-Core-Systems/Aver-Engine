@@ -989,17 +989,17 @@ void SandboxApp::markLevelRecordEdited(bool& has) {
 // early-out is BeginPopupModal's, not Begin's), so hiding needs a caller-side guard -- previously
 // one function submitted both unconditionally, so their Window menu items could never do anything.
 void SandboxApp::buildPanels(Engine& e) {
-    if (showOutliner_) buildOutlinerPanel();
+    if (panels_.showOutliner_) buildOutlinerPanel();
     // Takes the Engine now (previously `(void)e`, since nothing here needed one): the Level
     // branch edits the WATER record, and applying it to the live surface needs a device.
-    if (showDetails_)  buildDetailsPanel(e);
-    if (showPlaceActors_)  buildPlaceActorsPanel(e);
-    if (showMessageLog_)   buildMessageLogPanel();
-    if (showUndoHistory_)  buildUndoHistoryPanel();
+    if (panels_.showDetails_)  buildDetailsPanel(e);
+    if (panels_.showPlaceActors_)  buildPlaceActorsPanel(e);
+    if (panels_.showMessageLog_)   buildMessageLogPanel();
+    if (panels_.showUndoHistory_)  buildUndoHistoryPanel();
 #if AVER_MODULE_SCENE
-    if (showRenderQueue_) {
+    if (panels_.showRenderQueue_) {
         editor::RenderQueueHost host = renderQueueHost();
-        editor::renderQueuePanelDraw(renderQueue_, host, &showRenderQueue_);
+        editor::renderQueuePanelDraw(renderQueue_, host, &panels_.showRenderQueue_);
     }
 #endif
 }
@@ -1886,7 +1886,7 @@ void SandboxApp::drawOutlinerFolders(const std::string& parent) {
 #endif
 
 void SandboxApp::buildOutlinerPanel() {
-    const bool visible = ImGui::Begin(AVER_WIN_OUTLINER, &showOutliner_);
+    const bool visible = ImGui::Begin(AVER_WIN_OUTLINER, &panels_.showOutliner_);
     // So the edit verbs work on a selection made HERE -- see the dispatch in handleManip.
     viewState_.outlinerFocused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
     // COLLAPSED, OR BEHIND ANOTHER DOCK TAB: Begin returned false, so nothing below would be seen
@@ -3132,7 +3132,7 @@ void SandboxApp::drawPostProcessDetails(Engine& e) {
 }
 
 void SandboxApp::buildDetailsPanel(Engine& e) {
-    ImGui::Begin(AVER_WIN_DETAILS, &showDetails_);
+    ImGui::Begin(AVER_WIN_DETAILS, &panels_.showDetails_);
     viewState_.detailsFocused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
     editor::dt::begin();
     uiReg_.track("details.search");

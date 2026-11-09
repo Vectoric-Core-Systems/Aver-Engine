@@ -2572,7 +2572,7 @@ void SandboxApp::submitGameUi(Engine& e) {
 #endif
     if (!gameUi_) return;
 
-    if (showUiDemo_) drawUiDemo();
+    if (panels_.showUiDemo_) drawUiDemo();
 
 #if AVER_MODULE_VOXI
     // World labels (Label3D) are not drawn while ray-driven primary visibility owns the frame, unless the game opts in.
@@ -2608,9 +2608,9 @@ void SandboxApp::drawUiDemo() {
     const f32 barX = ox + 32.0f, barY = oy + sh - 240.0f;
     aver_ui_rect(barX - 3, barY - 3, barW + 6, barH * 2 + 12, kPanel);
     aver_ui_rect(barX, barY, barW, barH, kFrame);
-    aver_ui_rect(barX + 1, barY + 1, (barW - 2) * uiDemoHealth_, barH - 2, kHealth);
+    aver_ui_rect(barX + 1, barY + 1, (barW - 2) * panels_.uiDemoHealth_, barH - 2, kHealth);
     aver_ui_rect(barX, barY + barH + 6, barW, barH, kFrame);
-    aver_ui_rect(barX + 1, barY + barH + 7, (barW - 2) * uiDemoStamina_, barH - 2, kStamina);
+    aver_ui_rect(barX + 1, barY + barH + 7, (barW - 2) * panels_.uiDemoStamina_, barH - 2, kStamina);
 
     // ---- TEXT, which this HUD could not draw until the font landed --------------------------
     // Straight onto the SAME draw list the bars above went into, through the C++ API since
@@ -2624,9 +2624,9 @@ void SandboxApp::drawUiDemo() {
                 static_cast<const aver::ui::UiDrawList*>(aver_ui_draw_list()))) {
             constexpr u32 kLabel = 0xFFD8D2C8;
             char buf[64];
-            std::snprintf(buf, sizeof buf, "HEALTH  %d%%", static_cast<int>(uiDemoHealth_ * 100.0f + 0.5f));
+            std::snprintf(buf, sizeof buf, "HEALTH  %d%%", static_cast<int>(panels_.uiDemoHealth_ * 100.0f + 0.5f));
             dl->addText(barX, barY - 6.0f, buf, uiFont_, kLabel);
-            std::snprintf(buf, sizeof buf, "STAMINA %d%%", static_cast<int>(uiDemoStamina_ * 100.0f + 0.5f));
+            std::snprintf(buf, sizeof buf, "STAMINA %d%%", static_cast<int>(panels_.uiDemoStamina_ * 100.0f + 0.5f));
             dl->addText(barX, barY + barH * 2.0f + 18.0f, buf, uiFont_, kLabel);
             // RIGHT-ALIGNED, which is what uiTextWidth is for: measuring before drawing is the
             // only way to place anything that is not left-aligned.
@@ -2649,7 +2649,7 @@ void SandboxApp::drawUiDemo() {
     aver_ui_push_clip(static_cast<i32>(px) + 8, static_cast<i32>(py) + 8,
                       static_cast<i32>(px + pw) - 8, static_cast<i32>(py + ph) - 8);
     for (int i = 0; i < 12; ++i) {
-        const f32 ry = py + 12.0f + static_cast<f32>(i) * 18.0f - uiDemoScroll_;
+        const f32 ry = py + 12.0f + static_cast<f32>(i) * 18.0f - panels_.uiDemoScroll_;
         aver_ui_rect(px + 12, ry, pw - 24, 12, (i & 1) ? 0x60E8E4DC : 0x30E8E4DC);
     }
     aver_ui_pop_clip();

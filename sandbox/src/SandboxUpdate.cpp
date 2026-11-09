@@ -188,7 +188,7 @@ void SandboxApp::tickCameraAutomation(Engine& e, const Timestep& t, HitchMarks& 
     // --nrd2-capture: handed over once the renderer is attached and the level asked for (--open-level) is the
     // one loaded, plus ~10 s for streaming to bring in the scene (the startup level used to be captured
     // instead); it starts stepping on NRD2 frames and holds the camera the same way.
-    const bool nrd2LevelReady = drawerUi_.openLevelByName_.empty() && pendingOpenPath_.empty() && !pendingOpenPrompt_ &&
+    const bool nrd2LevelReady = drawerUi_.openLevelByName_.empty() && panels_.pendingOpenPath_.empty() && !panels_.pendingOpenPrompt_ &&
                                 !levelName_.empty();
     harness_.nrd2CaptureSettle_ = nrd2LevelReady ? harness_.nrd2CaptureSettle_ + 1u : 0u;
     if (harness_.nrd2CapturePoses_ && rset_.voxiAttached_ && !harness_.nrd2CaptureStarted_ && (harness_.nrd2CaptureSettle_ > 600u || t.frame > 6000)) {
@@ -276,7 +276,7 @@ void SandboxApp::tickLaunchRequests(const Timestep& t) {
     // --save-level <out>: writes the OPEN level to another path (not over levelPath_).
     // Waits for every pending open (--open-level, forwarded launch, unsaved-changes prompt) before acting.
     if (!saveLevelTo_.empty() && !harness_.saveLevelDone_ && !levelPath_.empty() &&
-        drawerUi_.openLevelByName_.empty() && pendingOpenPath_.empty() && !pendingOpenPrompt_) {
+        drawerUi_.openLevelByName_.empty() && panels_.pendingOpenPath_.empty() && !panels_.pendingOpenPrompt_) {
         harness_.saveLevelDone_ = true;
         if (saveLevel(saveLevelTo_))
             AVER_INFO("[Level] --save-level wrote '{}' ({}) to {}",
@@ -287,7 +287,7 @@ void SandboxApp::tickLaunchRequests(const Timestep& t) {
 #endif
 #if AVER_MODULE_SCENE
     // --bake-level-pack <level>: bakes that level's pack once the project's meshes are in.
-    if (!bakeLevelPackAsset_.empty() && !harness_.bakeLevelPackDone_ && t.frame >= 2 && pendingOpenPath_.empty() && !pendingOpenPrompt_) {
+    if (!bakeLevelPackAsset_.empty() && !harness_.bakeLevelPackDone_ && t.frame >= 2 && panels_.pendingOpenPath_.empty() && !panels_.pendingOpenPrompt_) {
         harness_.bakeLevelPackDone_ = true;
         std::string bakeWhy;
         world::LevelAssetLibrary& lib = level_.assets();
@@ -460,11 +460,11 @@ void SandboxApp::tickAmbientState(const Timestep& t) {
 #if AVER_MODULE_FRAMEWORK
     aver_fw_worldfx_tick(t.dt);   // every frame, Play or not: advances the script post blends, and the first tick after Stop drops the session's overrides, layers and scales
 #endif
-    if (showUiDemo_) {
-        uiDemoHealth_  = 0.5f + 0.5f * std::sin(uiDemoClock_ * 0.7f);
-        uiDemoStamina_ = 0.5f + 0.5f * std::sin(uiDemoClock_ * 1.6f + 1.0f);
-        uiDemoScroll_  = std::fmod(uiDemoScroll_ + t.dt * 24.0f, 216.0f);   // px, wraps at 12 rows
-        uiDemoClock_  += t.dt;
+    if (panels_.showUiDemo_) {
+        panels_.uiDemoHealth_  = 0.5f + 0.5f * std::sin(panels_.uiDemoClock_ * 0.7f);
+        panels_.uiDemoStamina_ = 0.5f + 0.5f * std::sin(panels_.uiDemoClock_ * 1.6f + 1.0f);
+        panels_.uiDemoScroll_  = std::fmod(panels_.uiDemoScroll_ + t.dt * 24.0f, 216.0f);   // px, wraps at 12 rows
+        panels_.uiDemoClock_  += t.dt;
     }
 }
 

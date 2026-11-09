@@ -1030,8 +1030,8 @@ bool SandboxApp::mcpLevelAbi(const mcp::AbiCall& a, std::string& r, std::string&
                         ",\"format\":" + jq(levelIsLegacyOcmap_ ? "ocmap" : "ocworld") +
                         ",\"playing\":" + jb(playing) +
                         ",\"loading\":" + jb(projectLoading_ != nullptr) +
-                        ",\"pendingOpen\":" + jq(pendingOpenPath_) +
-                        ",\"pendingOpenPrompt\":" + jb(pendingOpenPrompt_) +
+                        ",\"pendingOpen\":" + jq(panels_.pendingOpenPath_) +
+                        ",\"pendingOpenPrompt\":" + jb(panels_.pendingOpenPrompt_) +
                         ",\"content\":" + jq(project_.valid() ? project_.contentDir() : std::string());
         Vec3 sp{};
         f32 sy = 0.0f;
@@ -1155,7 +1155,7 @@ bool SandboxApp::mcpLevelAbi(const mcp::AbiCall& a, std::string& r, std::string&
         return true;
     }
 
-    if (!pendingOpenPath_.empty() || pendingOpenPrompt_) {
+    if (!panels_.pendingOpenPath_.empty() || panels_.pendingOpenPrompt_) {
         w = "a level open is pending (info reports it) -- wait for it, or the edit would land on the level being replaced";
         return false;
     }

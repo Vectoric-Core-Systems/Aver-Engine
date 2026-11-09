@@ -47,7 +47,7 @@ void SandboxApp::setLodMeshShader(bool on, f32 thresholdPx) {
 #endif
 }
 
-void SandboxApp::setUiDemo(bool on) { showUiDemo_ = on; }
+void SandboxApp::setUiDemo(bool on) { panels_.showUiDemo_ = on; }
 
 void SandboxApp::setOpenAsset(std::string p) { openAsset_ = std::move(p); }
 
@@ -60,7 +60,7 @@ void SandboxApp::setWater(bool on, f32 heightCm) { rset_.waterEnabled_ = on; rse
 
 // --open-legacy: open an older-series project WITHOUT upgrading it. Never migrates, so it cannot
 // damage the project -- safe for a benchmark that must measure content exactly as it is on disk.
-void SandboxApp::setOpenLegacy(bool on) { openLegacy_ = on; }
+void SandboxApp::setOpenLegacy(bool on) { panels_.openLegacy_ = on; }
 
 // --graph-select <nodeId>: select node for capture; work happens in onGui().
 void SandboxApp::setGraphSelectNode(std::string id) { graphSelectNode_ = std::move(id); }
@@ -119,10 +119,10 @@ void SandboxApp::setKeybindTestAuto(std::string mode, int framesIn) {
     harness_.keybindTestMode_ = std::move(mode); harness_.keybindTestAutoFrames_ = framesIn;
 }
 
-void SandboxApp::setShowEditorPrefs(bool on) { if (on) showEditorPrefs_ = true; }
+void SandboxApp::setShowEditorPrefs(bool on) { if (on) panels_.showEditorPrefs_ = true; }
 
 // --scroll-prefs-to-keybinds: scroll preferences panel to keybinds.
-void SandboxApp::setScrollPrefsToKeybinds(bool on) { scrollPrefsToKeybinds_ = on; }
+void SandboxApp::setScrollPrefsToKeybinds(bool on) { panels_.scrollPrefsToKeybinds_ = on; }
 
 void SandboxApp::setHudTest(int idx) { harness_.hudTest_ = idx; }
 
@@ -172,10 +172,10 @@ void SandboxApp::applyCaptureExposureRule(bool explicitlyRequested) {
     if (maxFrames_ != 0 && !explicitlyRequested) rset_.post_.autoExposure = false;
 }
 
-void SandboxApp::setFocusVoxi(bool b) { focusVoxi_ = b ? 4 : 0; }
+void SandboxApp::setFocusVoxi(bool b) { panels_.focusVoxi_ = b ? 4 : 0; }
 
 // --project-settings-page N: jump to settings sub-page N.
-void SandboxApp::setProjectSettingsPage(int page) { focusVoxi_ = 4; settingsPage_ = page; }
+void SandboxApp::setProjectSettingsPage(int page) { panels_.focusVoxi_ = 4; panels_.settingsPage_ = page; }
 
 // Opens a drawer on startup, optionally in a Content subfolder. --drawer.
 void SandboxApp::setDrawerOpen(int which, std::string sub) {
@@ -951,7 +951,7 @@ void SandboxApp::maybePlayTest(Engine& e) {
     if (!harness_.playTestBegun_) {
         // Wait for an --open-level request to finish loading (and ~1 s more): otherwise Play begins on the
         // startup level, which is what the play-test then reports on.
-        if (!drawerUi_.openLevelByName_.empty() || !pendingOpenPath_.empty() || pendingOpenPrompt_) { harness_.playTestSettle_ = 0; return; }
+        if (!drawerUi_.openLevelByName_.empty() || !panels_.pendingOpenPath_.empty() || panels_.pendingOpenPrompt_) { harness_.playTestSettle_ = 0; return; }
         if (++harness_.playTestSettle_ < 60u) return;
         // No GameMode is a case worth testing; test the engine default pawn fallback too.
         if (aver_fw_find_class_with_flags(AVER_FW_CLASS_GAME_MODE) == 0) {

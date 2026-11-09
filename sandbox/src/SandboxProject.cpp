@@ -192,7 +192,7 @@ void SandboxApp::applyProject(Engine& e) {
 #endif
     }
     pendingUpgrade_ = editor::inspectProject(project_);
-    upgradeAsked_ = false;
+    panels_.upgradeAsked_ = false;
     if (!pendingUpgrade_.empty())
         AVER_INFO("[Editor] project '{}' predates {} of this editor's project files; offering to upgrade",
                   project_.name, pendingUpgrade_.fixes.size());

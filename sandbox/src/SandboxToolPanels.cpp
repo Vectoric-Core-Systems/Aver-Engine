@@ -60,12 +60,12 @@ void SandboxApp::placeActorKind(Engine& e, const std::string& kind, const Vec3* 
 }
 
 void SandboxApp::buildPlaceActorsPanel(Engine& e) {
-    if (!ImGui::Begin(ICON_ADD " Place Actors###Place Actors", &showPlaceActors_)) { ImGui::End(); return; }
+    if (!ImGui::Begin(ICON_ADD " Place Actors###Place Actors", &panels_.showPlaceActors_)) { ImGui::End(); return; }
     static const std::vector<editor::PlaceItem> all = placeCatalogue();
     ImGui::SetNextItemWidth(-FLT_MIN);
-    ImGui::InputTextWithHint("##placeSearch", ICON_SEARCH " Search actors", placeQuery_, sizeof placeQuery_);
+    ImGui::InputTextWithHint("##placeSearch", ICON_SEARCH " Search actors", panels_.placeQuery_, sizeof panels_.placeQuery_);
     ImGui::Separator();
-    const std::vector<editor::PlaceItem> shown = editor::filterPlaceItems(all, placeQuery_, "");
+    const std::vector<editor::PlaceItem> shown = editor::filterPlaceItems(all, panels_.placeQuery_, "");
     for (const std::string& cat : editor::placeCategories(shown)) {
         ImGui::SetNextItemOpen(true, ImGuiCond_Once);
         if (!ImGui::CollapsingHeader(cat.c_str())) continue;
@@ -88,12 +88,12 @@ void SandboxApp::buildPlaceActorsPanel(Engine& e) {
 // ---- Message Log -------------------------------------------------------------------------------
 
 void SandboxApp::buildMessageLogPanel() {
-    if (!ImGui::Begin(ICON_LOG " Message Log###Message Log", &showMessageLog_)) { ImGui::End(); return; }
+    if (!ImGui::Begin(ICON_LOG " Message Log###Message Log", &panels_.showMessageLog_)) { ImGui::End(); return; }
     editor::LogFilter f;
-    f.minLevel = msgLogLevel_ == 4 ? LogLevel::Critical : msgLogLevel_ == 3 ? LogLevel::Error
-               : msgLogLevel_ == 2 ? LogLevel::Warn : msgLogLevel_ == 1 ? LogLevel::Info : LogLevel::Trace;
-    f.category = msgLogCategory_;
-    f.query = msgLogQuery_;
+    f.minLevel = panels_.msgLogLevel_ == 4 ? LogLevel::Critical : panels_.msgLogLevel_ == 3 ? LogLevel::Error
+               : panels_.msgLogLevel_ == 2 ? LogLevel::Warn : panels_.msgLogLevel_ == 1 ? LogLevel::Info : LogLevel::Trace;
+    f.category = panels_.msgLogCategory_;
+    f.query = panels_.msgLogQuery_;
 
     // Read-only over the log buffer the sink fills; this panel never logs, so it cannot feed itself.
     std::vector<u32> shown;
@@ -129,18 +129,18 @@ void SandboxApp::buildMessageLogPanel() {
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Clears the shared log buffer (the Output Log drawer too).");
     ImGui::SameLine();
     ImGui::SetNextItemWidth(100.0f * viewState_.dpi_);
-    ImGui::Combo("##msgLevel", &msgLogLevel_, "All\0Info+\0Warn+\0Error+\0Critical+\0");
+    ImGui::Combo("##msgLevel", &panels_.msgLogLevel_, "All\0Info+\0Warn+\0Error+\0Critical+\0");
     ImGui::SameLine();
     ImGui::SetNextItemWidth(130.0f * viewState_.dpi_);
-    if (ImGui::BeginCombo("##msgCat", msgLogCategory_.empty() ? "All categories" : msgLogCategory_.c_str())) {
-        if (ImGui::Selectable("All categories", msgLogCategory_.empty())) msgLogCategory_.clear();
+    if (ImGui::BeginCombo("##msgCat", panels_.msgLogCategory_.empty() ? "All categories" : panels_.msgLogCategory_.c_str())) {
+        if (ImGui::Selectable("All categories", panels_.msgLogCategory_.empty())) panels_.msgLogCategory_.clear();
         for (const std::string& c : categories)
-            if (ImGui::Selectable(c.c_str(), c == msgLogCategory_)) msgLogCategory_ = c;
+            if (ImGui::Selectable(c.c_str(), c == panels_.msgLogCategory_)) panels_.msgLogCategory_ = c;
         ImGui::EndCombo();
     }
     ImGui::SameLine();
     ImGui::SetNextItemWidth(-FLT_MIN);
-    ImGui::InputTextWithHint("##msgSearch", ICON_SEARCH " Filter", msgLogQuery_, sizeof msgLogQuery_);
+    ImGui::InputTextWithHint("##msgSearch", ICON_SEARCH " Filter", panels_.msgLogQuery_, sizeof panels_.msgLogQuery_);
     ImGui::TextDisabled("%zu of %zu messages", shown.size(), total);
     ImGui::Separator();
 
@@ -174,7 +174,7 @@ void SandboxApp::buildMessageLogPanel() {
 // ---- Undo History ------------------------------------------------------------------------------
 
 void SandboxApp::buildUndoHistoryPanel() {
-    if (!ImGui::Begin(ICON_RESET " Undo History###Undo History", &showUndoHistory_)) { ImGui::End(); return; }
+    if (!ImGui::Begin(ICON_RESET " Undo History###Undo History", &panels_.showUndoHistory_)) { ImGui::End(); return; }
     const auto kindName = [](EditCmd::Kind k) -> const char* {
         switch (k) {
             case EditCmd::Kind::Transform: return "Transform";

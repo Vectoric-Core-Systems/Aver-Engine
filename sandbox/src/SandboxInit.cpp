@@ -425,10 +425,10 @@ void SandboxApp::openStartupProject(Engine& e) {
     if (!projectPath_.empty()) {
         // --open-legacy skips upgrade prompt and opens old project directly.
         std::string err;
-        const bool opened = openLegacy_ ? browser_.open(projectPath_, &err)
+        const bool opened = panels_.openLegacy_ ? browser_.open(projectPath_, &err)
                                         : browser_.openOrOfferUpgrade(projectPath_, &err);
         if (opened) applyProject(e);
-        else if (!openLegacy_ && browser_.upgradePending()) {
+        else if (!panels_.openLegacy_ && browser_.upgradePending()) {
             armBrowser(true);
             if (maxFrames_ != 0) {
                 AVER_ERROR("[Sandbox] '{}' was made by an older series and this run has a frame "
