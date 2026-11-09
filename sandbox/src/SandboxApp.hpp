@@ -2643,6 +2643,36 @@ private:
     void saveEditorPreferences();
 
     void buildUI(Engine& e);
+#if AVER_WITH_IMGUI
+    void drawFileMenu(Engine& e);
+#endif
+#if AVER_WITH_IMGUI
+    void drawEditMenu();
+#endif
+#if AVER_WITH_IMGUI
+    void drawWindowMenu();
+#endif
+#if AVER_WITH_IMGUI
+    void drawBuildMenu(Engine& e);
+#endif
+#if AVER_WITH_IMGUI
+    void drawMainToolbar(Engine& e, const ImVec2& wpos, const ImVec2& wsize, f32 toolbarH);
+#endif
+#if AVER_WITH_IMGUI
+    void drawDockHost(const ImVec2& wpos, const ImVec2& wsize, f32 toolbarH, f32 statusH);
+#endif
+#if AVER_WITH_IMGUI
+    void drawLevelTab(Engine& e);
+#endif
+#if AVER_WITH_IMGUI && AVER_MODULE_SCENE
+    bool applySelectRequest();
+#endif
+#if AVER_WITH_IMGUI
+    void applyOpenAssetRequests();
+#endif
+#if AVER_WITH_IMGUI
+    void drawStatusBar(Engine& e, const ImVec2& wpos, const ImVec2& wsize, f32 statusH);
+#endif
 
 #if AVER_WITH_IMGUI
     // ---- Revision control: editor-facing half of RevisionControl.hpp ----
@@ -3136,6 +3166,39 @@ private:
     void buildOutlinerPanel();
 
     void buildDetailsPanel(Engine& e);
+#if AVER_MODULE_SCENE
+    void drawEntityNameAndClass(const std::string& nm);
+#endif
+#if AVER_MODULE_SCENE
+    void drawEntityPrefabSection(const std::string& nm, const std::vector<scene::Entity>& multiSelected);
+#endif
+#if AVER_MODULE_SCENE
+    void drawEntityTransformSection(scene::World& w, const std::vector<scene::Entity>& multiSelected);
+#endif
+#if AVER_MODULE_SCENE
+    void drawMeshVisibleCollides(scene::World& w, const std::vector<scene::Entity>& multiSelected);
+#endif
+#if AVER_MODULE_SCENE
+    void drawMeshAnimation(scene::World& w, const std::vector<scene::Entity>& multiSelected);
+#endif
+#if AVER_MODULE_SCENE
+    void drawMeshAssetPicker(scene::CMeshRenderer* mr, const std::vector<scene::Entity>& multiSelected);
+#endif
+#if AVER_MODULE_SCENE && AVER_MODULE_PBR
+    void drawMeshMaterialSection(scene::CMeshRenderer* mr, const std::vector<scene::Entity>& multiSelected);
+#endif
+#if AVER_MODULE_SCENE && AVER_MODULE_PARTICLES
+    void drawParticleEmitterDetails(scene::World& w);
+#endif
+#if AVER_MODULE_SCENE && AVER_MODULE_PHYSICS
+    void drawSoftBodyDetails(scene::World& w);
+#endif
+#if AVER_MODULE_SCENE
+    void drawAddRemoveComponent(scene::World& w);
+#endif
+    void drawSunDetails();
+    void drawSkyDetails(Engine& e);
+    void drawPostProcessDetails(Engine& e);
 
     void drawDrawer(Engine& e);
 
@@ -3179,9 +3242,43 @@ private:
 
 #if AVER_MODULE_VOXI
     void buildRenderingSettings(int page);
+#if AVER_WITH_IMGUI && AVER_MODULE_VOXI
+    void renderPageOverview(voxi::Renderer& vx, voxi::Settings& s, const voxi::Resolution& er, bool& changed, u32& overallFollowMask);
+#endif
+#if AVER_WITH_IMGUI && AVER_MODULE_VOXI
+    void renderPageAntiAliasing(voxi::Renderer& vx, voxi::Settings& s, const voxi::Resolution& er, bool& changed);
+#endif
+#if AVER_WITH_IMGUI && AVER_MODULE_VOXI
+    void renderPageGi(voxi::Renderer& vx, voxi::Settings& s, const voxi::Resolution& er, bool& changed);
+#endif
+#if AVER_WITH_IMGUI && AVER_MODULE_VOXI
+    void renderPageRayTracing(voxi::Renderer& vx, voxi::Settings& s, const voxi::Resolution& er, bool& changed);
+#endif
+#if AVER_WITH_IMGUI && AVER_MODULE_VOXI
+    void renderPageDenoising(voxi::Renderer& vx, voxi::Settings& s, const voxi::Resolution& er, bool& changed);
+#endif
+#if AVER_WITH_IMGUI && AVER_MODULE_VOXI
+    void renderPageMaterials(voxi::Renderer& vx, voxi::Settings& s, const voxi::Resolution& er, bool& changed);
+#endif
+#if AVER_WITH_IMGUI && AVER_MODULE_VOXI
+    void renderPagePost(voxi::Renderer& vx, voxi::Settings& s, const voxi::Resolution& er, bool& changed);
+#endif
+#if AVER_WITH_IMGUI && AVER_MODULE_VOXI
+    void renderPagePerformance(voxi::Renderer& vx, voxi::Settings& s, const voxi::Resolution& er, bool& changed);
+#endif
+#if AVER_WITH_IMGUI && AVER_MODULE_VOXI
+    void renderPageDebug(voxi::Renderer& vx, voxi::Settings& s, const voxi::Resolution& er, bool& changed);
+#endif
 #endif
 
     void buildViewportOverlay();
+    void drawViewportViewTypeMenu();
+    void drawViewportViewModeMenu();
+    f32 drawViewportShowMenu();
+    void drawViewportModeCombo(f32 gap);
+    void drawViewportLandscapeTools(f32 icon, f32 gap);
+    void drawViewportTransformTools(f32 icon, f32 gap, f32 tinyGap);
+    f32 drawViewportCameraSpeed(f32 gap);
     // Viewport right-click menu (Play From Here). RMB armed on press, decided on release.
     void drawViewportContextMenu();
     struct ViewportCtx { bool armed = false; bool hasHit = false; Vec3 camPos{}; Vec3 hit{}; };

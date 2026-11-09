@@ -2026,6 +2026,1111 @@ void SandboxApp::buildOutlinerPanel() {
     ImGui::End();
 }
 
+#if AVER_MODULE_SCENE
+// Details header for a scene entity: the editable name, its id, and for a graph-class actor the class and its editable fields.
+void SandboxApp::drawEntityNameAndClass(const std::string& nm) {
+    const auto lit = entityLabels_.find(static_cast<u32>(selEntity_));
+    {
+        char nameBuf[128];
+        std::snprintf(nameBuf, sizeof nameBuf, "%s",
+                      lit != entityLabels_.end() ? lit->second.c_str()
+                                                 : (nm.empty() ? "" : nm.c_str()));
+        ImGui::SetNextItemWidth(-1.0f);
+        const bool entered = ImGui::InputTextWithHint(
+            "##entityname", nm.empty() ? "(unnamed entity)" : nm.c_str(),
+            nameBuf, sizeof nameBuf, ImGuiInputTextFlags_EnterReturnsTrue);
+        if (entered || ImGui::IsItemDeactivatedAfterEdit())
+            renameEntity(selEntity_, nameBuf);
+        uiReg_.track("details.entityName");
+    }
+    ImGui::TextDisabled("#%u  %s", (u32)selEntity_, nm.c_str());
+#if AVER_MODULE_FRAMEWORK
+    // A graph-class actor's root: which class it is, and the way to its graph.
+    if (const int classIdx = classSlotOfEntity(selEntity_); classIdx >= 0) {
+        const usize slot = levelClassInstances_[static_cast<usize>(classIdx)].placement;
+        const std::string cls = slot < classAuthored_.size() ? classAuthored_[slot].className : std::string();
+        ImGui::TextDisabled("Graph class: %s", cls.c_str());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Open Graph")) {
+            for (const editor::GraphClassDecl& d : editor::scanGraphClasses(project_.contentDir()))
+                if (d.className == cls) { assetEditors_.open(d.path); break; }
+        }
+        uiReg_.track("details.graphClass.open");
+#if AVER_MODULE_SCRIPTING
+        // Its per-instance [Editable] values (a C# actor's fields): set on the live actor, saved with the level.
+        if (scripts_.editablesAvailable()) {
+            const std::string wire = scripts_.editableList(static_cast<i32>(selEntity_));
+            if (!wire.empty() && ::aver::editor::sectionHeader("Editable", ImGuiTreeNodeFlags_DefaultOpen)) {
+                usize at = 0;
+                while (at < wire.size()) {
+                    usize end = wire.find('\n', at);
+                    if (end == std::string::npos) end = wire.size();
+                    const std::string line = wire.substr(at, end - at);
+                    at = end + 1;
+                    std::vector<std::string> col;
+                    for (usize b = 0, t; b <= line.size(); b = t + 1) {
+                        t = line.find('\t', b);
+                        if (t == std::string::npos) t = line.size();
+                        col.push_back(line.substr(b, t - b));
+                    }
+                    if (col.size() < 3) continue;
+                    char buf[256];
+                    std::snprintf(buf, sizeof buf, "%s", col[2].c_str());
+                    ImGui::SetNextItemWidth(-140.0f);
+                    const std::string id = col[0] + "##editable";
+                    if (ImGui::InputText(id.c_str(), buf, sizeof buf, ImGuiInputTextFlags_EnterReturnsTrue) ||
+                        ImGui::IsItemDeactivatedAfterEdit()) {
+                        if (scripts_.editableSet(static_cast<i32>(selEntity_), col[0], buf) && slot < classAuthored_.size())
+                            game::capturePlacementProps(static_cast<i32>(selEntity_), classAuthored_[slot]);
+                    }
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("%s", col[1].c_str());
+                }
+                uiReg_.track("details.editable");
+            }
+        }
+#endif
+    }
+#endif
+}
+#endif
+
+#if AVER_MODULE_SCENE
+// Prefab and level-instance controls for a single selected entity.
+void SandboxApp::drawEntityPrefabSection(const std::string& nm, const std::vector<scene::Entity>& multiSelected) {
+    const auto lit = entityLabels_.find(static_cast<u32>(selEntity_));
+    // PREFAB: what this is an instance of, its overrides, Apply / Revert / Unpack; or, for an ordinary entity,
+    // the way to turn it (and everything under it) into a prefab.
+    if (multiSelected.size() <= 1) {
+        editor::prefabDetailsDraw(prefabModel_, selEntity_, prefabUiCallbacks());
+        if (!prefabSys_.isLinked(selEntity_) && ImGui::SmallButton("Create Prefab...")) {
+            prefabModel_.setContentDir(project_.contentDir());
+            editor::prefabCreateDialogOpen(prefabDlg_, selEntity_, lit != entityLabels_.end() ? lit->second : nm, "Prefabs");
+        }
+        uiReg_.track("details.createPrefab");
+        // LEVEL INSTANCE: what this is an instance of, edit in place, packed, streaming, overrides.
+        levelInstanceModel_.setContentDir(project_.contentDir());
+        editor::levelInstanceDetailsDraw(levelInstanceModel_, selEntity_, levelInstanceUiCallbacks());
+    }
+}
+#endif
+
+#if AVER_MODULE_SCENE
+// The Transform section: one entity, or a per-component edit applied across a multi-selection.
+void SandboxApp::drawEntityTransformSection(scene::World& w, const std::vector<scene::Entity>& multiSelected) {
+    if (const auto* loc = w.component<scene::CLocal>(selEntity_, scene::kComponentLocal)) {
+        if (::aver::editor::sectionHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
+          if (multiSelected.size() <= 1) {
+            Transform xf = loc->xf;
+            Vec3 euler = eulerDegFromQuat(xf.rotation);
+            editor::dt::def3(0.0f, 0.0f, 0.0f);
+            bool moved = editor::dt::DragFloat3("Location (cm)", &xf.position.x, 1.0f);
+            const bool rstL = editor::dt::consumeReset();
+            if (ImGui::IsItemActivated() || rstL) beginTransformEdit();
+            bool done = (ImGui::IsItemDeactivatedAfterEdit() || rstL);
+            editor::dt::def3(0.0f, 0.0f, 0.0f);
+            if (editor::dt::DragFloat3("Rotation", &euler.x, 1.0f)) {
+                xf.rotation = quatFromEulerDeg(euler); moved = true;
+            }
+            const bool rstR = editor::dt::consumeReset();
+            if (ImGui::IsItemActivated() || rstR) beginTransformEdit();
+            done = done || (ImGui::IsItemDeactivatedAfterEdit() || rstR);
+            editor::dt::def3(1.0f, 1.0f, 1.0f);
+            moved |= editor::dt::DragFloat3("Scale", &xf.scale.x, 0.5f, 0.01f, 100000.0f);
+            const bool rstS = editor::dt::consumeReset();
+            if (ImGui::IsItemActivated() || rstS) beginTransformEdit();
+            done = done || (ImGui::IsItemDeactivatedAfterEdit() || rstS);
+            if (moved) w.setLocalTransform(selEntity_, xf);
+            if (done) endTransformEdit();
+          } else {
+            // MULTI-SELECTION TRANSFORM, PER COMPONENT: shows the anchor's value via the same
+            // DragFloat3 calls as the single-entity branch, but an edited component is SET on
+            // every selected entity, not the gizmo's world-space delta (SandboxViewport.cpp)
+            // -- typing Z=0 floors every prop at its own X/Y. Diffed against `orig*` (anchor's
+            // pre-edit reading) so untouched components stay put.
+            //
+            // forEachMultiMoved supplies the set (for "(mixed)" and the apply): excludes the
+            // anchor and any entity whose parent is selected too (so a selected child isn't
+            // moved twice), same rule as the gizmo drag; endTransformEdit's
+            // multiMoveBefore_/alsoMoved diff still yields one undo entry.
+            Transform xf = loc->xf;
+            Vec3 euler = eulerDegFromQuat(xf.rotation);
+            const Vec3 origPos = xf.position, origEuler = euler, origScale = xf.scale;
+
+            bool posMixed[3] = {false, false, false};
+            bool rotMixed[3] = {false, false, false};
+            bool scaleMixed[3] = {false, false, false};
+            // Same tolerance as nearlySameXform/nearlySameTransform elsewhere: "(mixed)" is a
+            // judgement call about equal-enough numbers, not the bit-exact touch test below.
+            forEachMultiMoved([&](scene::Entity, const Transform& oxf) {
+                const Vec3 oe = eulerDegFromQuat(oxf.rotation);
+                if (std::fabs(oxf.position.x - origPos.x) > 1e-4f) posMixed[0] = true;
+                if (std::fabs(oxf.position.y - origPos.y) > 1e-4f) posMixed[1] = true;
+                if (std::fabs(oxf.position.z - origPos.z) > 1e-4f) posMixed[2] = true;
+                if (std::fabs(oe.x - origEuler.x) > 1e-2f) rotMixed[0] = true;
+                if (std::fabs(oe.y - origEuler.y) > 1e-2f) rotMixed[1] = true;
+                if (std::fabs(oe.z - origEuler.z) > 1e-2f) rotMixed[2] = true;
+                if (std::fabs(oxf.scale.x - origScale.x) > 1e-4f) scaleMixed[0] = true;
+                if (std::fabs(oxf.scale.y - origScale.y) > 1e-4f) scaleMixed[1] = true;
+                if (std::fabs(oxf.scale.z - origScale.z) > 1e-4f) scaleMixed[2] = true;
+            });
+            // "(mixed)" sits beside the whole DragFloat3 row (one control, three axes), so it
+            // can't mark just the disagreeing axis -- same flag-it/explain-on-hover idiom as
+            // the IOR/F0 check in materialPanel.
+            const auto showMixedTag = [&](const bool m[3]) {
+                if (!(m[0] || m[1] || m[2])) return;
+                ImGui::SameLine();
+                ImGui::TextDisabled("(mixed)");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("X %s   Y %s   Z %s across the selection.\n"
+                                      "Editing a field sets that value on every selected entity.",
+                                      m[0] ? "mixed" : "matches",
+                                      m[1] ? "mixed" : "matches",
+                                      m[2] ? "mixed" : "matches");
+            };
+
+            editor::dt::def3(0.0f, 0.0f, 0.0f);
+            if (posMixed[0] || posMixed[1] || posMixed[2]) editor::dt::reserveRight(ImGui::CalcTextSize("(mixed)").x + ImGui::GetStyle().ItemSpacing.x);
+            bool moved = editor::dt::DragFloat3("Location (cm)", &xf.position.x, 1.0f);
+            const bool rstL = editor::dt::consumeReset();
+            if (ImGui::IsItemActivated() || rstL) beginTransformEdit();
+            bool done = (ImGui::IsItemDeactivatedAfterEdit() || rstL);
+            showMixedTag(posMixed);
+            editor::dt::def3(0.0f, 0.0f, 0.0f);
+            if (rotMixed[0] || rotMixed[1] || rotMixed[2]) editor::dt::reserveRight(ImGui::CalcTextSize("(mixed)").x + ImGui::GetStyle().ItemSpacing.x);
+            if (editor::dt::DragFloat3("Rotation", &euler.x, 1.0f)) {
+                xf.rotation = quatFromEulerDeg(euler); moved = true;
+            }
+            const bool rstR = editor::dt::consumeReset();
+            if (ImGui::IsItemActivated() || rstR) beginTransformEdit();
+            done = done || (ImGui::IsItemDeactivatedAfterEdit() || rstR);
+            showMixedTag(rotMixed);
+            editor::dt::def3(1.0f, 1.0f, 1.0f);
+            if (scaleMixed[0] || scaleMixed[1] || scaleMixed[2]) editor::dt::reserveRight(ImGui::CalcTextSize("(mixed)").x + ImGui::GetStyle().ItemSpacing.x);
+            moved |= editor::dt::DragFloat3("Scale", &xf.scale.x, 0.5f, 0.01f, 100000.0f);
+            const bool rstS = editor::dt::consumeReset();
+            if (ImGui::IsItemActivated() || rstS) beginTransformEdit();
+            done = done || (ImGui::IsItemDeactivatedAfterEdit() || rstS);
+            showMixedTag(scaleMixed);
+
+            if (moved) {
+                // "Touched", not "nonzero": which axis a widget wrote this frame, found the
+                // same way the mixed check above did -- by comparing to the pre-edit reading.
+                const bool touchPos[3]   = {xf.position.x != origPos.x,
+                                            xf.position.y != origPos.y,
+                                            xf.position.z != origPos.z};
+                const bool touchRot[3]   = {euler.x != origEuler.x,
+                                            euler.y != origEuler.y,
+                                            euler.z != origEuler.z};
+                const bool touchScale[3] = {xf.scale.x != origScale.x,
+                                            xf.scale.y != origScale.y,
+                                            xf.scale.z != origScale.z};
+                w.setLocalTransform(selEntity_, xf);
+                forEachMultiMoved([&](scene::Entity ent, const Transform& oxf) {
+                    Transform t = oxf;
+                    if (touchPos[0])   t.position.x = xf.position.x;
+                    if (touchPos[1])   t.position.y = xf.position.y;
+                    if (touchPos[2])   t.position.z = xf.position.z;
+                    if (touchRot[0] || touchRot[1] || touchRot[2]) {
+                        Vec3 oe = eulerDegFromQuat(oxf.rotation);
+                        if (touchRot[0]) oe.x = euler.x;
+                        if (touchRot[1]) oe.y = euler.y;
+                        if (touchRot[2]) oe.z = euler.z;
+                        t.rotation = quatFromEulerDeg(oe);
+                    }
+                    if (touchScale[0]) t.scale.x = xf.scale.x;
+                    if (touchScale[1]) t.scale.y = xf.scale.y;
+                    if (touchScale[2]) t.scale.z = xf.scale.z;
+                    w.setLocalTransform(ent, t);
+                });
+            }
+            if (done) endTransformEdit();
+          }
+        }
+    }
+}
+#endif
+
+#if AVER_MODULE_SCENE
+// Mesh section: the Visible and Collides toggles, applied to the whole selection.
+void SandboxApp::drawMeshVisibleCollides(scene::World& w, const std::vector<scene::Entity>& multiSelected) {
+    bool vis = authoredVisible(selEntity_);
+    if (editor::dt::Checkbox("Visible", &vis)) {
+        // Applies to the whole selection (same rule as the Mesh/Material pickers below), and unlike
+        // them pushes undo: Visible is authored, level-saved data, so a click is as recoverable as
+        // a transform edit (one EditCmd::Visibility for the set, shared with the Outliner's eye).
+        outlinerSetVisible(multiSelected, vis);
+    }
+    // Saved with the level, Unreal-style -- unlike H/Shift+H/Ctrl+H (temporary,
+    // editor-only, see hideSelection in SandboxViewport.cpp; can disagree with this).
+    if (ImGui::IsItemHovered()) {
+        const bool hHidden = std::find(editorHidden_.begin(), editorHidden_.end(),
+                                       selEntity_) != editorHidden_.end();
+        if (hHidden)
+            ImGui::SetTooltip("Saved with the level.\n"
+                              "H hides it in the editor only, without changing this.\n"
+                              "(hidden in editor, Ctrl+H to show)");
+        else
+            ImGui::SetTooltip("Saved with the level.\n"
+                              "H hides it in the editor only, without changing this.");
+    }
+    // COLLIDES: the .ocworld `nocollide` flag, which until now could only be authored by
+    // editing the file. Whole-selection and one undo entry per click, exactly like
+    // Visible above (EditCmd::Collision). Off removes each entity's static body on the
+    // spot; on fits a fresh one -- both inside setEntityCollide.
+    {
+        const auto collides = [&](scene::Entity ent) {
+            const auto it = entityCollide_.find(static_cast<u32>(ent));
+            return it == entityCollide_.end() ? true : it->second;   // absent = the default
+        };
+        // Disabled for an entity the level does not own (a class instance, a preview): saveLevel
+        // writes nocollide per level placement only, so the edit would dirty the level and be lost.
+        const bool levelOwned = isLevelOwned(selEntity_);
+        ImGui::BeginDisabled(!levelOwned);
+        bool col = collides(selEntity_);
+        if (editor::dt::Checkbox("Collides", &col)) {
+            EditCmd c;
+            c.kind = EditCmd::Kind::Collision;
+            for (const scene::Entity ent : multiSelected) {
+                if (!w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer)) continue;
+                if (!isLevelOwned(ent)) continue;   // a mixed selection edits only what would be saved
+                const bool before = collides(ent);
+                if (before == col) continue;   // already there: no dead entry for it
+                setEntityCollide(ent, col);
+                c.collide.push_back({editIdFor(ent), before, col});
+            }
+            if (!c.collide.empty()) pushEdit(std::move(c));
+        }
+        uiReg_.track("details.mesh.collides");
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            if (levelOwned)
+                ImGui::SetTooltip("Saved with the level (off writes nocollide).\n"
+                                  "Off removes its static body, so nothing collides with it.");
+            else
+                ImGui::SetTooltip("This entity is not one of the level's own placements, so\n"
+                                  "the level would not save this setting.");
+        }
+        ImGui::EndDisabled();
+    }
+}
+#endif
+
+#if AVER_MODULE_SCENE
+// Mesh section: the placement's object-animation clip, speed, start time and once flag.
+void SandboxApp::drawMeshAnimation(scene::World& w, const std::vector<scene::Entity>& multiSelected) {
+    // ANIMATION: the .ocworld anim/animspeed/animtime/animonce tokens -- a transform clip
+    // this placement plays in Play (a car on its route, a fan). Whole-selection and one undo
+    // entry per change, like Collides above (EditCmd::Animation). A skeletal mesh is left
+    // out (its CAnimator is a skeletal clock), and nothing is editable while Play has object
+    // animation live: it has already captured each entity's base.
+    if (!w.hasComponent(selEntity_, scene::kComponentSkeletalMesh)) {
+        ImGui::SeparatorText("Animation");
+        if (levelIsLegacyOcmap_) {
+            ImGui::TextDisabled("The legacy .ocmap format cannot store an animation.");
+        } else {
+            std::vector<scene::Entity> targets;   // the selected meshes this section applies to
+            for (const scene::Entity ent : multiSelected)
+                if (w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer) &&
+                    !w.hasComponent(ent, scene::kComponentSkeletalMesh))
+                    targets.push_back(ent);
+            const auto animOf = [&](scene::Entity ent) {
+                const EntityAnim* a = entityAnim(ent);
+                return a ? *a : EntityAnim{};
+            };
+            const EntityAnim cur = animOf(selEntity_);
+            const bool live = anim::animSystem().objectAnimationLive();
+            // Only the level's own placements save an animation (saveLevel writes the tokens
+            // per levelEntities_ entry); on a class instance or preview an edit would be lost.
+            const bool levelOwned = isLevelOwned(selEntity_);
+            if (live) {
+                ImGui::TextDisabled("Stop Play to edit the animation.");
+            } else if (!levelOwned) {
+                ImGui::TextDisabled("Not saved: not one of the level's placements.");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("This entity is not one of the level's own placements (a class\n"
+                                      "instance or a preview), so the level would not save an animation on it.");
+            }
+            ImGui::BeginDisabled(live || !levelOwned);
+
+            // The clip, and why it would not move this mesh if it would not.
+            ImGui::TextDisabled("clip  %s", cur.clip.empty() ? "(none)" : cur.clip.c_str());
+            if (!cur.clip.empty()) {
+                const u64 clipId = fnv1a64(std::string_view(cur.clip));
+                const bool indexed = !content_.pathFor(clipId).empty();
+                const fmt::OcAnimation* clip = indexed ? anim::animSystem().clip(clipId) : nullptr;
+                if (!indexed)
+                    ImGui::TextDisabled(ICON_WARNING " not found under the project's Content");
+                else if (!clip)
+                    ImGui::TextDisabled(ICON_WARNING " the clip could not be loaded");
+                else if (!(clip->flags & fmt::kOcAnimObject))
+                    ImGui::TextDisabled(ICON_WARNING " a skeletal clip: it will not move this mesh");
+                else
+                    ImGui::TextDisabled("%.2f s", static_cast<double>(clip->duration));
+            }
+            if (ImGui::Button("Change Clip...")) ImGui::OpenPopup("##pickAnim");
+            uiReg_.track("details.anim.clip");
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("A transform clip this mesh plays in Play: a car on a route, a fan.\n"
+                                  "The placement is where it sits at the start time; the clip\n"
+                                  "moves it from there. Saved with the level (anim).");
+            // Built only while the popup is open: listing means reading every project .ocanim
+            // once (AnimSystem caches them) to keep the object clips and drop the skeletal ones.
+            if (ImGui::IsPopupOpen("##pickAnim")) {
+                std::vector<AssetChoice> clips;
+                for (const auto& kv : content_.index()) {
+                    if (lowerExt(std::filesystem::path(kv.second)) != ".ocanim") continue;
+                    const fmt::OcAnimation* c = anim::animSystem().clip(kv.first);
+                    if (c && (c->flags & fmt::kOcAnimObject))
+                        clips.push_back({cbRelativeToContent(kv.second), kv.first});
+                }
+                std::sort(clips.begin(), clips.end(),
+                          [](const AssetChoice& a, const AssetChoice& b) { return a.label < b.label; });
+                std::vector<AssetChoice> cands;
+                cands.push_back({"(None)", 0});
+                cands.insert(cands.end(), clips.begin(), clips.end());
+                u64 picked = 0;
+                const u64 currentId = cur.clip.empty() ? 0 : fnv1a64(std::string_view(cur.clip));
+                if (assetPicker("##pickAnim", cands, currentId, &picked)) {
+                    // The path is the identity (id = fnv1a64 of it), so it is derived from the
+                    // index's file and checked to hash back to the pick.
+                    const std::string rel = picked ? cbRelativeToContent(content_.pathFor(picked))
+                                                   : std::string();
+                    if (picked && fnv1a64(std::string_view(rel)) != picked) {
+                        cbStatus_ = "Could not resolve the clip to a project-relative path";
+                    } else {
+                        EditCmd c;
+                        c.kind = EditCmd::Kind::Animation;
+                        for (const scene::Entity ent : targets) {
+                            if (!isLevelOwned(ent)) continue;   // a mixed selection edits only what would be saved
+                            const EntityAnim before = animOf(ent);
+                            EntityAnim after = before;
+                            after.clip = rel;
+                            if (rel.empty()) after = EntityAnim{};   // None: back to the defaults
+                            if (before == after) continue;           // already there: no dead entry
+                            applyEntityAnim(ent, after);
+                            c.animation.push_back({editIdFor(ent), before, after});
+                        }
+                        if (!c.animation.empty()) pushEdit(std::move(c));
+                    }
+                }
+            }
+
+            // Speed, start time and Play once tune the clips already on the selection (nothing
+            // to tune on an entity without one). A drag is ONE undo entry: animEditBefore_ is the
+            // selection as it stood when the widget was grabbed, before that frame's edit lands.
+            const auto snapshot = [&] {
+                animEditBefore_.clear();
+                for (const scene::Entity ent : targets)
+                    if (const EntityAnim* a = entityAnim(ent))
+                        animEditBefore_.push_back({editIdFor(ent), *a, *a});
+            };
+            const auto commit = [&] {
+                EditCmd c;
+                c.kind = EditCmd::Kind::Animation;
+                for (EditCmd::AnimChange& ch : animEditBefore_) {
+                    const scene::Entity ent = entityForEdit(ch.id);
+                    const EntityAnim* now = w.valid(ent) ? entityAnim(ent) : nullptr;
+                    if (!now || *now == ch.before) continue;
+                    ch.after = *now;
+                    c.animation.push_back(ch);
+                }
+                animEditBefore_.clear();
+                if (!c.animation.empty()) pushEdit(std::move(c));
+            };
+            const auto tune = [&](auto&& set) {
+                for (const scene::Entity ent : targets) {
+                    const EntityAnim* a = entityAnim(ent);
+                    if (!a) continue;
+                    EntityAnim next = *a;
+                    set(next);
+                    applyEntityAnim(ent, next);
+                }
+            };
+            ImGui::BeginDisabled(cur.clip.empty());
+            f32 speed = cur.speed;
+            const bool speedEdited = editor::dt::DragFloat("Speed##animSpeed", &speed, 0.01f, 0.01f, 100.0f, "%.2f");
+            if (ImGui::IsItemActivated() || (speedEdited && animEditBefore_.empty())) snapshot();
+            if (speedEdited) tune([&](EntityAnim& n) { n.speed = speed; });
+            if (ImGui::IsItemDeactivatedAfterEdit()) commit();
+            uiReg_.track("details.anim.speed");
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("Playback speed. Saved with the level (animspeed).");
+            f32 startTime = cur.time;
+            const bool timeEdited = editor::dt::DragFloat("Start time (s)##animTime", &startTime, 0.01f, 0.0f, 100000.0f, "%.2f");
+            if (ImGui::IsItemActivated() || (timeEdited && animEditBefore_.empty())) snapshot();
+            if (timeEdited) tune([&](EntityAnim& n) { n.time = startTime; });
+            if (ImGui::IsItemDeactivatedAfterEdit()) commit();
+            uiReg_.track("details.anim.time");
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("Where in the clip the placement stands, in seconds.\n"
+                                  "The mesh sits at its placement at this time and moves relative\n"
+                                  "to it. Saved with the level (animtime).");
+            bool once = cur.once;
+            if (editor::dt::Checkbox("Play once##animOnce", &once)) {
+                snapshot();
+                tune([&](EntityAnim& n) { n.once = once; });
+                commit();
+            }
+            uiReg_.track("details.anim.once");
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("Play through once and hold the last pose, instead of looping.\n"
+                                  "Saved with the level (animonce).");
+            ImGui::EndDisabled();
+            ImGui::EndDisabled();
+        }
+    }
+}
+#endif
+
+#if AVER_MODULE_SCENE
+// Mesh section: the vehicle token, the mesh path and the Change Mesh picker.
+void SandboxApp::drawMeshAssetPicker(scene::CMeshRenderer* mr, const std::vector<scene::Entity>& multiSelected) {
+#if AVER_MODULE_PHYSICS
+    // VEHICLE: the `vehicle <preset>` token of a placement that drives in Play. Read-only, the
+    // way the file's other authored-elsewhere tokens are shown: the generator writes it, and
+    // the preset is not edited here.
+    if (const std::string* vehicle = level_.vehiclePresetOf(selEntity_)) {
+        ImGui::TextDisabled("vehicle  %s", vehicle->c_str());
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("A physics car in Play (suspension, tyres, gravity, collisions), driven along\n"
+                              "the level's lanes (<level>.oclanes). Sized from this mesh's bounds and the\n"
+                              "preset. Set by the vehicle token on the placement; not editable here.");
+    }
+#endif
+    // Now reassignable: previously just a printed hex id, with no picker and not even
+    // a drop target -- the only mesh drag-drop in the editor lands on the 3D viewport
+    // and spawns a NEW entity, a different verb.
+    const auto meshIt = meshPathById_.find(mr->mesh);
+    ImGui::TextDisabled("mesh  %s", meshIt == meshPathById_.end()
+                                        ? "(unloaded)" : meshIt->second.c_str());
+    if (ImGui::Button("Change Mesh...")) ImGui::OpenPopup("##pickMesh");
+    uiReg_.track("details.mesh.pick");
+    // BUILT ONLY WHILE THE POPUP IS OPEN, like the animation picker above: this used to
+    // copy and sort every loaded mesh path (thousands, in a big level) on every frame
+    // the Details panel showed a mesh, with the popup shut. Kept across the frames it
+    // stays open; see PickerCands.
+    if (ImGui::IsPopupOpen("##pickMesh")) {
+        // Candidates are meshes actually loaded (from the map populated for this --
+        // "the foliage palette, a future asset picker"); listing every .ocmesh in the
+        // content index could offer one the device refused or never loaded, blanking
+        // the entity if picked.
+        PickerCands& pc = pickMeshCands_;
+        const int frame = ImGui::GetFrameCount();
+        if (pc.lastFrame < frame - 1 || pc.stamp != meshPathById_.size()) {
+            pc.list.clear();
+            pc.list.reserve(meshPathById_.size());
+            for (const auto& kv : meshPathById_) pc.list.push_back({kv.second, kv.first});
+            std::sort(pc.list.begin(), pc.list.end(),
+                      [](const AssetChoice& a, const AssetChoice& b) { return a.label < b.label; });
+            pc.stamp = meshPathById_.size();
+        }
+        pc.lastFrame = frame;
+        u64 picked = 0;
+        if (assetPicker("##pickMesh", pc.list, mr->mesh, &picked)) {
+            if (multiSelected.size() <= 1) {
+                assignMeshId(selEntity_, picked);
+            } else {
+                // Applies to the whole selection, same as Transform above: every
+                // entity with a CMeshRenderer takes the pick, not just the anchor.
+                // assignMeshId is already per-entity all-or-nothing (false, a no-op,
+                // for anything without the component), so this just loops it rather
+                // than reimplementing.
+                int n = 0;
+                for (const scene::Entity ent : multiSelected)
+                    if (assignMeshId(ent, picked)) ++n;
+                if (n > 1) {
+                    const auto mit = meshPathById_.find(picked);
+                    cbStatus_ = "Assigned " +
+                        (mit == meshPathById_.end()
+                             ? std::string("mesh")
+                             : std::filesystem::path(mit->second).filename().string()) +
+                        " to " + std::to_string(n) + " entities";
+                }
+            }
+        }
+    } else {
+        pickMeshCands_.drop();
+    }
+}
+#endif
+
+#if AVER_MODULE_SCENE && AVER_MODULE_PBR
+// The Material section of a mesh entity: the surface material, its picker and the material panel.
+void SandboxApp::drawMeshMaterialSection(scene::CMeshRenderer* mr, const std::vector<scene::Entity>& multiSelected) {
+    if (::aver::editor::sectionHeader("Material", ImGuiTreeNodeFlags_DefaultOpen)) {
+        // Same fallback the draw uses: without it, an entity drawn fine via the mesh's
+        // own material would report "(none)" here -- the panel disagreeing with the picture.
+        const i32 shown = mr->material ? mr->material : content_.meshDefaultMaterial(mr->mesh);
+        const char* surfaceName = aver_scene_material_name(shown);
+
+        // Previously unassignable at all -- no picker, and no drag either
+        // (isPlaceableAssetExt refuses .ocmat): the panel could edit parameters but never
+        // change WHICH material.
+        if (ImGui::Button("Change Material...")) ImGui::OpenPopup("##pickMaterial");
+        uiReg_.track("details.material.pick");
+        // BUILT ONLY WHILE THE POPUP IS OPEN: editor::projectMaterialStems below ENUMERATES
+        // the project's Materials directories, which this used to do on every frame the
+        // Details panel showed a mesh entity, popup or not. Kept across the frames it stays
+        // open (see PickerCands), so an open picker does not re-read the disk per frame.
+        if (ImGui::IsPopupOpen("##pickMaterial")) {
+            // EVERY PROJECT MATERIAL STEM, not only the ones level-scoped residency
+            // (levelScopedMaterialsEnabled()) currently keeps bound: with that on, a level
+            // holds only its OWN surfaces in content_.surfaceMaterials(), and listing just
+            // that map here would make every other material in the project unreachable from
+            // this picker. editor::projectMaterialStems() is the same Binaries-then-Content
+            // enumeration loadProjectMaterials() used to drive; picking one that is not yet
+            // resident loads it on demand -- see assignMaterialToken()'s own comment.
+            //
+            // Tokens, not path hashes: content_'s surface map is keyed on the interned token
+            // mr->material holds; an fnv1a64 here could resolve to nothing, or worse, to an
+            // unrelated surface by coincidence. aver_scene_material() interns (or reuses) the
+            // token for a name without loading anything, so every stem gets one whether or
+            // not a .ocmat is behind it yet.
+            PickerCands& pc = pickMaterialCands_;
+            const int frame = ImGui::GetFrameCount();
+            if (pc.lastFrame < frame - 1 || pc.stamp != content_.surfaceMaterials().size()) {
+                std::unordered_set<i32> seen;
+                std::vector<AssetChoice>& cands = pc.list;
+                cands.clear();
+                const std::vector<std::string> stems =
+                    editor::projectMaterialStems(project_.binariesDir(), project_.contentDir());
+                cands.reserve(stems.size());
+                for (const std::string& stem : stems) {
+                    const i32 stemToken = aver_scene_material(0, stem.c_str());
+                    if (!seen.insert(stemToken).second) continue;
+                    cands.push_back({stem, static_cast<u64>(static_cast<u32>(stemToken))});
+                }
+                // A surface already bound (foliage, landscape, a placement override) whose name
+                // is not a bare stem under either Materials folder -- rare, but not listing it
+                // would make an already-assigned material vanish from its own picker.
+                for (const auto& kv : content_.surfaceMaterials()) {
+                    if (!kv.second || !seen.insert(kv.first).second) continue;
+                    // The name of a material surface, not of an entity.
+                    const char* matName = aver_scene_material_name(kv.first);
+                    cands.push_back({matName && *matName ? matName : "(unnamed)",
+                                     static_cast<u64>(static_cast<u32>(kv.first))});
+                }
+                std::sort(cands.begin(), cands.end(),
+                          [](const AssetChoice& a, const AssetChoice& b) { return a.label < b.label; });
+                pc.stamp = content_.surfaceMaterials().size();
+            }
+            pc.lastFrame = frame;
+            u64 picked = 0;
+            if (assetPicker("##pickMaterial", pc.list,
+                            static_cast<u64>(static_cast<u32>(shown)), &picked)) {
+                if (multiSelected.size() <= 1) {
+                    assignMaterialToken(selEntity_, static_cast<i32>(static_cast<u32>(picked)));
+                } else {
+                    // Same shape as the mesh picker just above: one pick, applied to
+                    // every selected entity that has a CMeshRenderer.
+                    int n = 0;
+                    for (const scene::Entity ent : multiSelected)
+                        if (assignMaterialToken(ent, static_cast<i32>(static_cast<u32>(picked)))) ++n;
+                    if (n > 1) {
+                        const char* pickedName =
+                            aver_scene_material_name(static_cast<i32>(static_cast<u32>(picked)));
+                        cbStatus_ = std::string("Assigned surface ") +
+                            (pickedName && *pickedName ? pickedName : "(unnamed)") +
+                            " to " + std::to_string(n) + " entities";
+                    }
+                }
+            }
+        } else {
+            pickMaterialCands_.drop();
+        }
+        const pbr::MaterialHandle authored = content_.authoredFor(shown);
+        if (!authored) {
+            ImGui::TextDisabled("Surface '%s' has no .ocmat loaded.",
+                                surfaceName && *surfaceName ? surfaceName : "(none)");
+            ImGui::TextDisabled("Drawing with the flat fallback; author one under Content" AVER_PATH_SEP "Materials.");
+        } else {
+            ImGui::TextDisabled("Surface  %s", surfaceName && *surfaceName ? surfaceName : "(unnamed)");
+            ImGui::TextDisabled("Shared: editing this changes every entity using it.");
+            materialPanel(authored);
+        }
+    }
+}
+#endif
+
+#if AVER_MODULE_SCENE && AVER_MODULE_PARTICLES
+// The Particle Emitter section.
+void SandboxApp::drawParticleEmitterDetails(scene::World& w) {
+    if (auto* pe = w.component<scene::CParticleEmitter>(selEntity_, scene::kComponentParticleEmitter)) {
+        if (::aver::editor::sectionHeader("Particle Emitter", ImGuiTreeNodeFlags_DefaultOpen)) {
+            bool stopped = (pe->flags & scene::kParticleEmitterStopped) != 0;
+            if (editor::dt::Checkbox("Stopped", &stopped)) {
+                if (stopped) pe->flags |=  scene::kParticleEmitterStopped;
+                else         pe->flags &= ~scene::kParticleEmitterStopped;
+            }
+            ImGui::TextDisabled("effect id 0x%llx", (unsigned long long)pe->effect);
+            // Drop a .ocparticle from the Content Browser to point this emitter at it -- same
+            // id space content_.loadProjectParticleEffects() populates, so a freshly authored
+            // effect resolves immediately. Through the shared helper (assignParticleEffect,
+            // "two implementations of one fact") rather than a second resolve/validate/hash/
+            // assign/mark/log copy -- the picker below would otherwise have been that second copy.
+            // THE BROWSER'S ONE PAYLOAD: it sends its selection under kCbMoveDragDropType
+            // (ImGui keeps one payload per drag, see the viewport drop target), so this row
+            // takes the first .ocparticle in it; kAssetDragDropType is still accepted from a
+            // single-asset source.
+            if (ImGui::BeginDragDropTarget()) {
+                const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(kCbMoveDragDropType);
+                if (!payload) payload = ImGui::AcceptDragDropPayload(kAssetDragDropType);
+                if (payload && payload->Data) {
+                    const std::string blob(
+                        static_cast<const char*>(payload->Data),
+                        payload->DataSize > 0 ? static_cast<usize>(payload->DataSize - 1) : usize(0));
+                    bool assigned = false;
+                    for (const std::string& one : editor::splitDropPayload(blob)) {
+                        if (lowerExt(std::filesystem::path(one)) != ".ocparticle") continue;
+                        assignParticleEffect(selEntity_, one);
+                        assigned = true;
+                        break;
+                    }
+                    if (!assigned) cbStatus_ = "Only a .ocparticle effect can be dropped on this emitter";
+                }
+                ImGui::EndDragDropTarget();
+            }
+            // And the same assignment without needing the Content Browser open at all.
+            if (ImGui::Button("Change Effect...")) ImGui::OpenPopup("##pickEffect");
+            uiReg_.track("details.effect.pick");
+            // BUILT ONLY WHILE THE POPUP IS OPEN: the scan below walks the WHOLE content index
+            // (every asset in the project) with a path parse per entry, and this used to run on
+            // every frame the Details panel showed an emitter. Kept across the frames it stays
+            // open (see PickerCands).
+            if (ImGui::IsPopupOpen("##pickEffect")) {
+                // Candidates come from the content index, not a loaded-effects map: an effect
+                // resolves on ASSIGNMENT (unlike a mesh), so listing only loaded ones would
+                // hide the file the author just made.
+                // content_.index() maps id -> ABSOLUTE path (an earlier draft of this comment
+                // said relative -- it's not). Its KEY is fnv1a64 of the project-relative path
+                // (pe->effect's id space, so no hashing needed), but its VALUE is
+                // `it->path().string()` straight off the directory iterator (content_.adopt());
+                // the two disagree, which is why the label is derived rather than used as-is.
+                // Labelled relative, so this popup reads like the Mesh/Material ones above
+                // instead of the developer's whole local directory tree.
+                PickerCands& pc = pickEffectCands_;
+                const int frame = ImGui::GetFrameCount();
+                if (pc.lastFrame < frame - 1 || pc.stamp != content_.index().size()) {
+                    std::vector<AssetChoice>& cands = pc.list;
+                    cands.clear();
+                    for (const auto& kv : content_.index()) {
+                        if (lowerExt(std::filesystem::path(kv.second)) != ".ocparticle") continue;
+                        cands.push_back({cbRelativeToContent(kv.second), kv.first});
+                    }
+                    std::sort(cands.begin(), cands.end(),
+                              [](const AssetChoice& a, const AssetChoice& b) { return a.label < b.label; });
+                    pc.stamp = content_.index().size();
+                }
+                pc.lastFrame = frame;
+                u64 picked = 0;
+                if (assetPicker("##pickEffect", pc.list, pe->effect, &picked)) {
+                    // Assigned by path, not by writing the id directly, so it goes through the
+                    // same resolve/validate the drop does -- extension check and project-
+                    // relative normalisation included (writing pe->effect would duplicate it).
+                    // Passed straight through: content_.pathFor()'s value is already absolute.
+                    // Joining it onto contentDir() first (as before) was correct only by
+                    // accident (operator/ discards the left side when the right is absolute) --
+                    // and would break the day that map starts storing relative paths, which its
+                    // own key spelling suggests it should.
+                    const std::string path = content_.pathFor(picked);
+                    if (!path.empty())
+                        assignParticleEffect(selEntity_, path);
+                }
+            } else {
+                pickEffectCands_.drop();
+            }
+            ImGui::TextDisabled("age %.2fs   seed 0x%08x", pe->age, pe->seed);
+        }
+    }
+}
+#endif
+
+#if AVER_MODULE_SCENE && AVER_MODULE_PHYSICS
+// The Soft Body section and its physics viewer entries.
+void SandboxApp::drawSoftBodyDetails(scene::World& w) {
+    if (auto* sb = w.component<scene::CSoftBody>(selEntity_, scene::kComponentSoftBody)) {
+        if (::aver::editor::sectionHeader(ICON_TUNE " Soft Body", ImGuiTreeNodeFlags_DefaultOpen)) {
+            bool disabled = (sb->flags & scene::kSoftBodyDisabled) != 0;
+            if (editor::dt::Checkbox("Simulated", &disabled)) {
+                // The checkbox reads POSITIVELY and the flag is stored negatively -- see
+                // kSoftBodyDisabled's own comment for why the flag has to mean that.
+                if (disabled) sb->flags &= ~scene::kSoftBodyDisabled;
+                else          sb->flags |=  scene::kSoftBodyDisabled;
+            }
+            // Shown inverted from the member, so the label is the state rather than its negation.
+            disabled = (sb->flags & scene::kSoftBodyDisabled) == 0;
+
+            f32 maxDist = scene::softBodyMaxDistanceCm(*sb);
+            if (editor::dt::DragFloat("Max distance (cm)", &maxDist, 0.1f, 0.0f, 500.0f, "%.2f"))
+                sb->maxDistanceCm = maxDist;
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("How far a vertex may leave where bone skinning would have\n"
+                                  "put it. 0 reads as the default (%.0f cm), not as pinned.\n"
+                                  "Only reaches the solver on a mesh that HAS a rig.",
+                                  static_cast<double>(scene::kSoftBodyDefaultMaxDistanceCm));
+
+            editor::dt::DragFloat("Compliance", &sb->compliance, 0.0001f, 0.0f, 1.0f, "%.4f");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Inverse stiffness of the edge constraints.\n0 is inextensible.");
+
+            ImGui::SeparatorText("Simulation");
+            // STRAIGHT FROM THE PHYSICS ABI, not from the component. `body` is the handle the
+            // renderer stored; everything below is asked of Jolt this frame.
+            if (sb->body == 0) {
+                ImGui::TextDisabled(ICON_WARNING " no body yet");
+                ImGui::TextWrapped("A body is created on the first frame this entity is drawn "
+                                   "with a mesh whose asset has resolved. If it never appears, "
+                                   "the mesh has no triangles, or this build has no soft-body "
+                                   "render feature.");
+            } else {
+                const i32 particles = aver_phys_softbody_vertex_count(sb->body);
+                ImGui::Text("Body %d   %d particle%s", sb->body, particles,
+                            particles == 1 ? "" : "s");
+                // THE ANSWER TO "WHY IS IT NOT MOVING". A body exists and reports zero
+                // particles only when Jolt took the mesh and found nothing to simulate.
+                if (particles == 0)
+                    ImGui::TextDisabled(ICON_WARNING " the body has no particles");
+
+                // Where its particles actually are, so "is it simulating" needs no debugger:
+                // at rest and falling look identical in every other readout here.
+                std::vector<f32> pos(static_cast<usize>(particles) * 3, 0.0f);
+                const i32 got = particles > 0
+                    ? aver_phys_softbody_vertices(sb->body, pos.data(), particles) : 0;
+                if (got > 0) {
+                    f32 lo[3] = { 1e30f,  1e30f,  1e30f};
+                    f32 hi[3] = {-1e30f, -1e30f, -1e30f};
+                    for (i32 v = 0; v < got; ++v)
+                        for (int c = 0; c < 3; ++c) {
+                            const f32 x = pos[static_cast<usize>(v) * 3 + c];
+                            lo[c] = x < lo[c] ? x : lo[c];
+                            hi[c] = x > hi[c] ? x : hi[c];
+                        }
+                    ImGui::TextDisabled("bounds  x %.0f..%.0f   y %.0f..%.0f   z %.0f..%.0f",
+                                        lo[0], hi[0], lo[1], hi[1], lo[2], hi[2]);
+                    ImGui::TextDisabled("extent  %.0f x %.0f x %.0f cm",
+                                        hi[0]-lo[0], hi[1]-lo[1], hi[2]-lo[2]);
+                }
+            }
+
+#if AVER_MODULE_RENDER_SOFTBODY
+            // Is it actually drawn? Simulating and drawing fail identically from the
+            // viewport; a non-zero draw handle means simulated vertices replace the authored mesh.
+            const bool drawn = softBodyScene_ && softBodyScene_->drawHandle(selEntity_) != 0;
+            ImGui::TextDisabled("%s drawn from the simulation: %s",
+                                drawn ? ICON_VISIBILITY : ICON_WARNING, drawn ? "yes" : "no");
+            if (softBodyScene_)
+                ImGui::TextDisabled("%u resident, %u simulated last frame",
+                                    softBodyScene_->residentCount(),
+                                    softBodyScene_->simulatedLastFrame());
+#else
+            ImGui::TextDisabled(ICON_WARNING " this build has no soft-body render feature, "
+                                "so the simulation is not drawn");
+#endif
+        }
+    }
+}
+#endif
+
+#if AVER_MODULE_SCENE
+// The Add Component and Remove Component buttons and their popups.
+void SandboxApp::drawAddRemoveComponent(scene::World& w) {
+    // ---- Add Component ----
+    // Previously impossible from the editor: every panel above renders only when its
+    // component already exists, so one no importer/template attaches needed a hand-edited file.
+    ImGui::Separator();
+    if (ImGui::Button(ICON_ADD " Add Component")) ImGui::OpenPopup("addComponent");
+    if (ImGui::BeginPopup("addComponent")) {
+        // Listed by hand, not walked from the registry: the registry knows name/size, nothing
+        // about whether menu-attaching one is safe (CWorld/CLocal would corrupt an entity).
+        struct Addable { u32 id; const char* name; const char* tip; };
+        static const Addable kAddable[] = {
+            {scene::kComponentSoftBody, ICON_TUNE " Soft Body",
+             "Simulate this entity's mesh instead of posing it: sag, drape, squash, collide."},
+            {scene::kComponentLight, "Light",
+             "A point, spot or rectangular area light, optionally shaped by an IES profile and a cookie."},
+            {scene::kComponentDecal, "Decal",
+             "A box that projects colour, normal and roughness onto the surfaces inside it."},
+        };
+        for (const Addable& a : kAddable) {
+            const bool present = w.hasComponent(selEntity_, a.id);
+            ImGui::BeginDisabled(present);
+            if (ImGui::MenuItem(a.name)) {
+                // addComponent hands back zero-filled storage with no constructor run, so
+                // defaults are written here -- same fix as World::create(); CSynapseAgent hit this bug once.
+                if (a.id == scene::kComponentSoftBody) {
+                    if (auto* c = static_cast<scene::CSoftBody*>(
+                            w.addComponent(selEntity_, a.id)))
+                        *c = scene::CSoftBody{};
+                } else if (a.id == scene::kComponentLight) {
+                    if (auto* c = static_cast<scene::CLight*>(w.addComponent(selEntity_, a.id)))
+                        *c = editor::makeNewLight(scene::kLightPoint);
+                } else if (a.id == scene::kComponentDecal) {
+                    if (auto* c = static_cast<scene::CDecal*>(w.addComponent(selEntity_, a.id)))
+                        *c = editor::makeNewDecal();
+                }
+                cbStatus_ = std::string("Added ") + a.name;
+                // Not undoable, so at least mark dirty: adding pushes no EditCmd, so without
+                // this the level closed clean and the component was silently gone. Remove
+                // Component below has no such problem -- it captures the component and can be undoable.
+                markLevelUnsaved();
+            }
+            ImGui::EndDisabled();
+            if (present && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("This entity already has one.");
+            else if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", a.tip);
+        }
+        drawPlacedAddMenu();   // "Animation and AI" entries; each is undoable, unlike the three above
+        ImGui::EndPopup();
+    }
+
+    // ---- Remove Component ----
+    // scene::World::removeComponent was implemented and tested (tests/scene/src/SceneTest.cpp)
+    // but had zero editor callers. kRemovable mirrors kAddable's allow-list for the same
+    // reason: CLocal/CWorld/CHierarchy
+    // make the row an entity at all, and removing one by menu would corrupt it, not simplify it.
+    ImGui::SameLine();
+    if (ImGui::Button(ICON_DELETE " Remove Component")) ImGui::OpenPopup("removeComponent");
+    if (ImGui::BeginPopup("removeComponent")) {
+        struct Removable { u32 id; const char* name; };
+        static const Removable kRemovable[] = {
+            {scene::kComponentSoftBody, ICON_TUNE " Soft Body"},
+            {scene::kComponentLight, "Light"},
+            {scene::kComponentDecal, "Decal"},
+        };
+        bool anyPresent = false;
+        for (const Removable& r : kRemovable) {
+            const bool present = w.hasComponent(selEntity_, r.id);
+            anyPresent = anyPresent || present;
+            ImGui::BeginDisabled(!present);
+            if (ImGui::MenuItem(r.name)) {
+                // Undoable: removeComponentFromSelection captures the component byte-exact
+                // before dropping it, unlike Add Component above (no "before" to capture).
+                if (removeComponentFromSelection(r.id))
+                    cbStatus_ = std::string("Removed ") + r.name;
+            }
+            ImGui::EndDisabled();
+            if (!present && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("This entity does not have one.");
+        }
+        if (drawPlacedRemoveMenu()) anyPresent = true;
+        if (!anyPresent) ImGui::TextDisabled("Nothing removable is attached.");
+        ImGui::EndPopup();
+    }
+}
+#endif
+
+// Details for the directional light (sun).
+void SandboxApp::drawSunDetails() {
+    ImGui::TextUnformatted("Directional Light (Sun)"); ImGui::Separator();
+    {
+        f32 elev = 0.0f, azim = 0.0f;
+        sky_.sunAngles(elev, azim);
+        bool moved = editor::dt::SliderFloat("Elevation", &elev, -20.0f, 90.0f, "%.1f deg");
+        moved |= editor::dt::SliderFloat("Azimuth", &azim, -180.0f, 180.0f, "%.1f deg");
+        // Written back only on a real move: the angle round trip is lossy.
+        if (moved) sky_.setSunAngles(elev, azim);
+    }
+    editor::dt::SliderFloat("Intensity", &sky_.sunIntensity, 0.0f, 8.0f, "%.2f");
+    bool useTemp = sky_.sunTemperatureK > 0.0f;
+    if (editor::dt::Checkbox("Use Colour Temperature", &useTemp))
+        sky_.sunTemperatureK = useTemp ? 5500.0f : 0.0f;
+    if (useTemp) {
+        editor::dt::SliderFloat("Temperature", &sky_.sunTemperatureK, 1500.0f, 12000.0f, "%.0f K");
+    } else {
+        editor::dt::ColorEdit3("Colour", sunColor_);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("White (255, 255, 255) is the physical default -- the light\n"
+                              "arriving at the top of the atmosphere. The physical sky tints\n"
+                              "it toward orange by elevation on its own.");
+    }
+    editor::dt::SliderFloat("Angular Size", &sky_.sunAngularDiameterDeg, 0.05f, 8.0f, "%.2f deg");
+    // hasLevelSun_ lives in SandboxApp.hpp's AVER_MODULE_SCENE block beside loadLevel/
+    // saveLevel: only a scene-on build ever runs the loader that populates it.
+#if AVER_MODULE_SCENE
+    markLevelRecordEdited(hasLevelSun_);
+#endif
+}
+
+// Details for Sky + Atmosphere, fog, clouds and water.
+void SandboxApp::drawSkyDetails(Engine& e) {
+    ImGui::TextUnformatted("Sky + Atmosphere"); ImGui::Separator();
+    {
+        int model = sky_.model == rhi::SkyModel::Physical ? 1 : 0;
+        const char* names[] = {"Authored (two-colour dome)", "Physical (Rayleigh + Mie + ozone)"};
+        if (editor::dt::Combo("Sky Model", &model, names, 2))
+            sky_.model = model ? rhi::SkyModel::Physical : rhi::SkyModel::Authored;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Physical derives the dome below from the sun's elevation.\n"
+                              "Sunset stops being a colour somebody picked and becomes geometry.");
+    }
+    const bool physicalSky = sky_.model == rhi::SkyModel::Physical;
+
+    ImGui::BeginDisabled(physicalSky);
+    editor::dt::ColorEdit3("Zenith", skyZenith_); editor::dt::ColorEdit3("Horizon", skyHorizon_);
+    editor::dt::SliderFloat("Atmosphere Height", &sky_.atmosphereHeight, 0.05f, 4.0f, "%.2f");
+    ImGui::EndDisabled();
+    if (physicalSky) {
+        ImGui::TextDisabled("^ derived from the sun's elevation while the model is Physical");
+        if (ImGui::TreeNode("Air")) {
+            editor::dt::SliderFloat("Mie Scatter", &sky_.air.mieScatter, 0.0f, 4e-2f, "%.5f /km",
+                               ImGuiSliderFlags_Logarithmic);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Aerosol. Raise it for haze, dust or a coastal day; the\n"
+                                  "sun's halo and the pale band at the horizon both grow.");
+            editor::dt::SliderFloat("Mie Extinction", &sky_.air.mieExtinction, 0.0f, 4e-2f, "%.5f /km",
+                               ImGuiSliderFlags_Logarithmic);
+            editor::dt::SliderFloat("Mie Anisotropy", &sky_.air.miePhaseG, 0.0f, 0.95f, "%.2f");
+            editor::dt::SliderFloat("Rayleigh Height", &sky_.air.rayleighScaleKm, 1.0f, 20.0f, "%.1f km");
+            editor::dt::SliderFloat("Mie Height", &sky_.air.mieScaleKm, 0.2f, 8.0f, "%.2f km");
+            editor::dt::SliderFloat("Multi-Scatter", &sky_.air.multiScatterGain, 0.0f, 4.0f, "%.2f");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Stands in for every bounce after the first. 1.70 is\n"
+                                  "calibrated: it puts diffuse light at 15-30%% of direct\n"
+                                  "and the zenith's blue/red between 2.5 and 5.");
+            editor::dt::SliderFloat("Planet Radius", &sky_.air.planetRadiusKm, 100.0f, 20000.0f, "%.0f km");
+            editor::dt::SliderFloat("Air Depth", &sky_.air.atmosphereHeightKm, 5.0f, 200.0f, "%.0f km");
+            editor::dt::SliderInt("Sky Steps", &sky_.air.viewSteps, 4, 96);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Samples along a sky ray. 32 is within 3%% of a converged\n"
+                                  "march; below about 16 the horizon starts to band.");
+            editor::dt::SliderInt("Aerial Steps", &sky_.air.aerialSteps, 1, 16);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Samples along the air between the camera and a surface.\n"
+                                  "This one runs per shaded pixel, so it is the expensive one.");
+            ImGui::TreePop();
+        }
+    }
+    editor::dt::ColorEdit3("Ground", sky_.groundAlbedo);
+    editor::dt::SliderFloat("Ground Blend", &sky_.groundBlend, 0.0f, 1.0f, "%.2f");
+    // Range 0..32, logarithmic (used to stop at 2): the multiplier on the only term that fills
+    // an enclosed space (sky light through openings), and an arcade needs far more of it than
+    // a slider stopping at 2 can express. MEASURED on PTTest Sponza at exposure 1,
+    // 3D-viewport luminance percentiles (sunlit surfaces reach 237 in every row):
+    //
+    //   Sky Light  1    p50   8   p90 48    <- median pixel essentially black
+    //   Sky Light  4    p50  15   p90 48
+    //   Sky Light 16    p50  34   p90 75    <- shadows readable, sun unchanged
+    //
+    // The sun itself is correctly scaled (237/255 with no exposure); the fill just couldn't
+    // reach the value the scene needed -- so "everything is too dark" was, in part,
+    // unauthorable. Logarithmic: the useful range spans two orders of magnitude and the
+    // interesting end is the bottom.
+    editor::dt::SliderFloat("Sky Light", &sunAmbient_, 0.0f, 32.0f, "%.2f",
+                       ImGuiSliderFlags_Logarithmic);
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("Height Fog");
+    editor::dt::ColorEdit3("Fog Tint", fogColor_);
+    editor::dt::SliderFloat("Fog Density", &fogDensity_, 1e-7f, 1e-3f, "%.2e",
+                       ImGuiSliderFlags_Logarithmic);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Extinction per cm. Visibility = 3.912 / density.\n"
+                          "2e-6 clear (20 km)   4e-6 light haze (10 km)\n"
+                          "8e-6 haze (5 km)     8e-5 fog (500 m)");
+    editor::dt::SliderFloat("Height Falloff", &sky_.fogFalloff, 0.0f, 0.02f, "%.5f",
+                       ImGuiSliderFlags_Logarithmic);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 = uniform distance fog (the old behaviour)");
+    editor::dt::DragFloat("Fog Height", &sky_.fogHeight, 1.0f);
+    editor::dt::DragFloat("Fog Start", &sky_.fogStart, 1.0f, 0.0f, 1e6f);
+    editor::dt::SliderFloat("Max Opacity", &sky_.fogMaxOpacity, 0.0f, 1.0f, "%.2f");
+    // FOG is its own record and needs its own mark: markLevelRecordEdited went in for SUN/SKY
+    // but missed FOG, silently discarding Fog Tint/Density on a level with no FOG line.
+    // Guarded for the same reason as hasLevelSun_ above.
+#if AVER_MODULE_SCENE
+    markLevelRecordEdited(hasLevelFog_);
+    if (streaming_.enabled()) {
+        const world::StreamSettings& mst = streaming_.settings().stream;
+        const f32 boundaryCm = static_cast<f32>(mst.loadRadius) * static_cast<f32>(mst.chunkSizeCm);
+        editor::dt::Checkbox("Match Fog To Streaming Radius", &matchFogToStreamRadius_);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Recomputes Fog Density every frame -- overriding the slider\n"
+                              "above -- so opacity AT the load boundary (%.0fcm here) equals\n"
+                              "the target below. NOT a free win: hiding a boundary this close\n"
+                              "typically needs an order of magnitude more density than a\n"
+                              "level's authored default, i.e. a visibly foggier world.", boundaryCm);
+        if (matchFogToStreamRadius_) {
+            editor::dt::SliderFloat("Target Opacity At Boundary", &fogMatchTargetOpacity_, 0.5f, 0.99f, "%.2f");
+            const f32 matched = fogDensityForOpacityAt(boundaryCm, fogMatchTargetOpacity_);
+            ImGui::TextDisabled("boundary %.0fcm -> density %.2e", boundaryCm, matched);
+        }
+    }
+#endif
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("Volumetric Clouds");
+    editor::dt::Checkbox("Clouds", &sky_.cloudsEnabled);
+    if (sky_.cloudsEnabled) {
+        editor::dt::SliderFloat("Coverage", &sky_.cloudCoverage, 0.0f, 1.0f, "%.2f");
+        editor::dt::SliderFloat("Density", &sky_.cloudDensity, 0.0f, 4.0f, "%.2f");
+        editor::dt::DragFloat("Layer Bottom", &sky_.cloudBottom, 100.0f);
+        editor::dt::DragFloat("Layer Top", &sky_.cloudTop, 100.0f);
+        f32 featureSize = sky_.cloudScale > 1e-9f ? 1.0f / sky_.cloudScale : 50000.0f;
+        if (editor::dt::DragFloat("Feature Size", &featureSize, 100.0f, 100.0f, 5e6f))
+            sky_.cloudScale = 1.0f / std::fmax(featureSize, 1.0f);
+        editor::dt::DragFloat2("Wind", sky_.cloudWind, 5.0f);
+#if AVER_MODULE_SOFTBODY_SCENE
+        if (ImGui::SmallButton("Copy to cloth wind"))
+            softbody::softBodySystem().setWind(Vec3{sky_.cloudWind[0], sky_.cloudWind[1], 0.0f}, 0.0f, 0.3f, 0.0f);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Sets the soft-body (cloth) wind to this cloud drift. They are independent otherwise.");
+#endif
+    }
+    // CLOUDS is its own record, same reason as FOG. The Clouds checkbox sits above the `if`
+    // deliberately: turning clouds OFF must reach the file, so marking only inside the
+    // enabled branch would make "off" the one setting that could never be saved.
+#if AVER_MODULE_SCENE
+    markLevelRecordEdited(hasLevelClouds_);
+    markLevelRecordEdited(hasLevelSky_);
+#endif
+    // Water lives beside the Sky, not its own mode: it's a level property like sun/fog, and
+    // the weather panel is where an author looks for it. No markLevelRecordEdited needed --
+    // unlike SUN/FOG it rides through saveLevel as part of levelHeader_, so editing IS the edit.
+    ImGui::Separator();
+    buildWaterPanel(e);
+}
+
+// Details for the global Post Process settings.
+void SandboxApp::drawPostProcessDetails(Engine& e) {
+    ImGui::TextUnformatted("Post Process"); ImGui::Separator();
+    editor::dt::Checkbox("Eye Adaptation", &post_.autoExposure);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("The exposure adjusts automatically as the view gets brighter or\n"
+                          "darker, like eyes -- quickly toward light, more slowly toward dark.");
+    // Stops, not the raw linear post_.exposure: a linear drag has no scale, which is how one
+    // landed at 4.05 (+2 stops) and masked the engine's tuned defaults (RHI.hpp) every launch.
+    // EV reads the same whether it's compensation on Eye Adaptation or a fixed exposure.
+    f32 ev = (post_.exposure > 0.0f) ? std::log2(post_.exposure) : 0.0f;
+    if (editor::dt::SliderFloat("Brightness", &ev, -3.0f, 3.0f, "%+.1f EV"))
+        post_.exposure = std::exp2(ev);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(post_.autoExposure
+            ? "Compensation on top of Eye Adaptation's own exposure:\n"
+              "0 = as tuned, +1 = twice as bright, -1 = half."
+            : "Fixed exposure relative to 1, with Eye Adaptation off:\n"
+              "0 = as tuned, +1 = twice as bright, -1 = half.");
+    ImGui::SameLine();
+    if (ImGui::Button("Reset")) post_.exposure = 1.0f;
+    if (post_.autoExposure) {
+        // Live readout, so a stuck-looking value reads as adaptation working, not broken (see
+        // IDevice::postExposureReadout; it lags the eye by a frame or two). Clamps/histogram
+        // cuts are tuned engine defaults (RHI.hpp), not panel-exposed dials.
+        f32 metered = 0.0f;
+        if (e.device() && e.device()->postExposureReadout(metered))
+            ImGui::TextDisabled("Adapted to %+.1f EV", std::log2(metered));
+    }
+    // NIGHT VISION works on a fixed exposure too (Krawczyk/Myszkowski/Seidel 2005, rod-driven
+    // scotopic vision), so it sits beside Eye Adaptation rather than inside its block.
+    bool nightVision = post_.nightVision > 0.5f;
+    if (editor::dt::Checkbox("Night Vision", &nightVision))
+        post_.nightVision = nightVision ? 1.0f : 0.0f;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("In very dim light colour fades and shifts blue-grey as the eye's\n"
+                          "rods take over.");
+    ImGui::Separator();
+    editor::dt::SliderFloat("Bloom", &post_.bloomIntensity, 0.0f, 1.0f, "%.3f");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Zero skips the whole bloom pyramid, not just its weight");
+}
+
 void SandboxApp::buildDetailsPanel(Engine& e) {
     ImGui::Begin(AVER_WIN_DETAILS, &showDetails_);
     detailsFocused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
@@ -2065,74 +3170,12 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
     } else if (sel_==kSelScene && scene::World::instance().valid(selEntity_)) {
         scene::World& w = scene::World::instance();
         const std::string nm = w.name(selEntity_);
-        const auto lit = entityLabels_.find(static_cast<u32>(selEntity_));
         // Editable, which it never was: no rename affordance existed anywhere (not here, not the
         // Outliner, no F2, no context menu) so a level of "Cube 1..40" stayed that way;
         // entityLabels_ was written only at spawn/paste/duplicate/load, never by a person.
         // Committed on Enter or losing focus, not per keystroke -- else every letter typed is its
         // own undo entry (see materialPanel's comment).
-        {
-            char nameBuf[128];
-            std::snprintf(nameBuf, sizeof nameBuf, "%s",
-                          lit != entityLabels_.end() ? lit->second.c_str()
-                                                     : (nm.empty() ? "" : nm.c_str()));
-            ImGui::SetNextItemWidth(-1.0f);
-            const bool entered = ImGui::InputTextWithHint(
-                "##entityname", nm.empty() ? "(unnamed entity)" : nm.c_str(),
-                nameBuf, sizeof nameBuf, ImGuiInputTextFlags_EnterReturnsTrue);
-            if (entered || ImGui::IsItemDeactivatedAfterEdit())
-                renameEntity(selEntity_, nameBuf);
-            uiReg_.track("details.entityName");
-        }
-        ImGui::TextDisabled("#%u  %s", (u32)selEntity_, nm.c_str());
-#if AVER_MODULE_FRAMEWORK
-        // A graph-class actor's root: which class it is, and the way to its graph.
-        if (const int classIdx = classSlotOfEntity(selEntity_); classIdx >= 0) {
-            const usize slot = levelClassInstances_[static_cast<usize>(classIdx)].placement;
-            const std::string cls = slot < classAuthored_.size() ? classAuthored_[slot].className : std::string();
-            ImGui::TextDisabled("Graph class: %s", cls.c_str());
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Open Graph")) {
-                for (const editor::GraphClassDecl& d : editor::scanGraphClasses(project_.contentDir()))
-                    if (d.className == cls) { assetEditors_.open(d.path); break; }
-            }
-            uiReg_.track("details.graphClass.open");
-#if AVER_MODULE_SCRIPTING
-            // Its per-instance [Editable] values (a C# actor's fields): set on the live actor, saved with the level.
-            if (scripts_.editablesAvailable()) {
-                const std::string wire = scripts_.editableList(static_cast<i32>(selEntity_));
-                if (!wire.empty() && ::aver::editor::sectionHeader("Editable", ImGuiTreeNodeFlags_DefaultOpen)) {
-                    usize at = 0;
-                    while (at < wire.size()) {
-                        usize end = wire.find('\n', at);
-                        if (end == std::string::npos) end = wire.size();
-                        const std::string line = wire.substr(at, end - at);
-                        at = end + 1;
-                        std::vector<std::string> col;
-                        for (usize b = 0, t; b <= line.size(); b = t + 1) {
-                            t = line.find('\t', b);
-                            if (t == std::string::npos) t = line.size();
-                            col.push_back(line.substr(b, t - b));
-                        }
-                        if (col.size() < 3) continue;
-                        char buf[256];
-                        std::snprintf(buf, sizeof buf, "%s", col[2].c_str());
-                        ImGui::SetNextItemWidth(-140.0f);
-                        const std::string id = col[0] + "##editable";
-                        if (ImGui::InputText(id.c_str(), buf, sizeof buf, ImGuiInputTextFlags_EnterReturnsTrue) ||
-                            ImGui::IsItemDeactivatedAfterEdit()) {
-                            if (scripts_.editableSet(static_cast<i32>(selEntity_), col[0], buf) && slot < classAuthored_.size())
-                                game::capturePlacementProps(static_cast<i32>(selEntity_), classAuthored_[slot]);
-                        }
-                        ImGui::SameLine();
-                        ImGui::TextDisabled("%s", col[1].c_str());
-                    }
-                    uiReg_.track("details.editable");
-                }
-            }
-#endif
-        }
-#endif
+        drawEntityNameAndClass(nm);
         // Multi-selection, computed once and reused by Transform/Mesh/Material below (which apply
         // to the whole set); name and components stay single-entity, the anchor alone -- per
         // multiSel_'s own header comment, "one entity to talk about".
@@ -2146,436 +3189,13 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
             ImGui::TextDisabled("%d entities selected -- Transform/Mesh/Material below apply to "
                                 "all of them; name/components affect the anchor only.",
                                 (int)multiSelected.size());
-        // PREFAB: what this is an instance of, its overrides, Apply / Revert / Unpack; or, for an ordinary entity,
-        // the way to turn it (and everything under it) into a prefab.
-        if (multiSelected.size() <= 1) {
-            editor::prefabDetailsDraw(prefabModel_, selEntity_, prefabUiCallbacks());
-            if (!prefabSys_.isLinked(selEntity_) && ImGui::SmallButton("Create Prefab...")) {
-                prefabModel_.setContentDir(project_.contentDir());
-                editor::prefabCreateDialogOpen(prefabDlg_, selEntity_, lit != entityLabels_.end() ? lit->second : nm, "Prefabs");
-            }
-            uiReg_.track("details.createPrefab");
-            // [wave3/level-instances] LEVEL INSTANCE: what this is an instance of, edit in place, packed, streaming, overrides.
-            levelInstanceModel_.setContentDir(project_.contentDir());
-            editor::levelInstanceDetailsDraw(levelInstanceModel_, selEntity_, levelInstanceUiCallbacks());
-        }
-        if (const auto* loc = w.component<scene::CLocal>(selEntity_, scene::kComponentLocal)) {
-            if (::aver::editor::sectionHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
-              if (multiSelected.size() <= 1) {
-                Transform xf = loc->xf;
-                Vec3 euler = eulerDegFromQuat(xf.rotation);
-                editor::dt::def3(0.0f, 0.0f, 0.0f);
-                bool moved = editor::dt::DragFloat3("Location (cm)", &xf.position.x, 1.0f);
-                const bool rstL = editor::dt::consumeReset();
-                if (ImGui::IsItemActivated() || rstL) beginTransformEdit();
-                bool done = (ImGui::IsItemDeactivatedAfterEdit() || rstL);
-                editor::dt::def3(0.0f, 0.0f, 0.0f);
-                if (editor::dt::DragFloat3("Rotation", &euler.x, 1.0f)) {
-                    xf.rotation = quatFromEulerDeg(euler); moved = true;
-                }
-                const bool rstR = editor::dt::consumeReset();
-                if (ImGui::IsItemActivated() || rstR) beginTransformEdit();
-                done = done || (ImGui::IsItemDeactivatedAfterEdit() || rstR);
-                editor::dt::def3(1.0f, 1.0f, 1.0f);
-                moved |= editor::dt::DragFloat3("Scale", &xf.scale.x, 0.5f, 0.01f, 100000.0f);
-                const bool rstS = editor::dt::consumeReset();
-                if (ImGui::IsItemActivated() || rstS) beginTransformEdit();
-                done = done || (ImGui::IsItemDeactivatedAfterEdit() || rstS);
-                if (moved) w.setLocalTransform(selEntity_, xf);
-                if (done) endTransformEdit();
-              } else {
-                // MULTI-SELECTION TRANSFORM, PER COMPONENT: shows the anchor's value via the same
-                // DragFloat3 calls as the single-entity branch, but an edited component is SET on
-                // every selected entity, not the gizmo's world-space delta (SandboxViewport.cpp)
-                // -- typing Z=0 floors every prop at its own X/Y. Diffed against `orig*` (anchor's
-                // pre-edit reading) so untouched components stay put.
-                //
-                // forEachMultiMoved supplies the set (for "(mixed)" and the apply): excludes the
-                // anchor and any entity whose parent is selected too (so a selected child isn't
-                // moved twice), same rule as the gizmo drag; endTransformEdit's
-                // multiMoveBefore_/alsoMoved diff still yields one undo entry.
-                Transform xf = loc->xf;
-                Vec3 euler = eulerDegFromQuat(xf.rotation);
-                const Vec3 origPos = xf.position, origEuler = euler, origScale = xf.scale;
-
-                bool posMixed[3] = {false, false, false};
-                bool rotMixed[3] = {false, false, false};
-                bool scaleMixed[3] = {false, false, false};
-                // Same tolerance as nearlySameXform/nearlySameTransform elsewhere: "(mixed)" is a
-                // judgement call about equal-enough numbers, not the bit-exact touch test below.
-                forEachMultiMoved([&](scene::Entity, const Transform& oxf) {
-                    const Vec3 oe = eulerDegFromQuat(oxf.rotation);
-                    if (std::fabs(oxf.position.x - origPos.x) > 1e-4f) posMixed[0] = true;
-                    if (std::fabs(oxf.position.y - origPos.y) > 1e-4f) posMixed[1] = true;
-                    if (std::fabs(oxf.position.z - origPos.z) > 1e-4f) posMixed[2] = true;
-                    if (std::fabs(oe.x - origEuler.x) > 1e-2f) rotMixed[0] = true;
-                    if (std::fabs(oe.y - origEuler.y) > 1e-2f) rotMixed[1] = true;
-                    if (std::fabs(oe.z - origEuler.z) > 1e-2f) rotMixed[2] = true;
-                    if (std::fabs(oxf.scale.x - origScale.x) > 1e-4f) scaleMixed[0] = true;
-                    if (std::fabs(oxf.scale.y - origScale.y) > 1e-4f) scaleMixed[1] = true;
-                    if (std::fabs(oxf.scale.z - origScale.z) > 1e-4f) scaleMixed[2] = true;
-                });
-                // "(mixed)" sits beside the whole DragFloat3 row (one control, three axes), so it
-                // can't mark just the disagreeing axis -- same flag-it/explain-on-hover idiom as
-                // the IOR/F0 check in materialPanel.
-                const auto showMixedTag = [&](const bool m[3]) {
-                    if (!(m[0] || m[1] || m[2])) return;
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("(mixed)");
-                    if (ImGui::IsItemHovered())
-                        ImGui::SetTooltip("X %s   Y %s   Z %s across the selection.\n"
-                                          "Editing a field sets that value on every selected entity.",
-                                          m[0] ? "mixed" : "matches",
-                                          m[1] ? "mixed" : "matches",
-                                          m[2] ? "mixed" : "matches");
-                };
-
-                editor::dt::def3(0.0f, 0.0f, 0.0f);
-                if (posMixed[0] || posMixed[1] || posMixed[2]) editor::dt::reserveRight(ImGui::CalcTextSize("(mixed)").x + ImGui::GetStyle().ItemSpacing.x);
-                bool moved = editor::dt::DragFloat3("Location (cm)", &xf.position.x, 1.0f);
-                const bool rstL = editor::dt::consumeReset();
-                if (ImGui::IsItemActivated() || rstL) beginTransformEdit();
-                bool done = (ImGui::IsItemDeactivatedAfterEdit() || rstL);
-                showMixedTag(posMixed);
-                editor::dt::def3(0.0f, 0.0f, 0.0f);
-                if (rotMixed[0] || rotMixed[1] || rotMixed[2]) editor::dt::reserveRight(ImGui::CalcTextSize("(mixed)").x + ImGui::GetStyle().ItemSpacing.x);
-                if (editor::dt::DragFloat3("Rotation", &euler.x, 1.0f)) {
-                    xf.rotation = quatFromEulerDeg(euler); moved = true;
-                }
-                const bool rstR = editor::dt::consumeReset();
-                if (ImGui::IsItemActivated() || rstR) beginTransformEdit();
-                done = done || (ImGui::IsItemDeactivatedAfterEdit() || rstR);
-                showMixedTag(rotMixed);
-                editor::dt::def3(1.0f, 1.0f, 1.0f);
-                if (scaleMixed[0] || scaleMixed[1] || scaleMixed[2]) editor::dt::reserveRight(ImGui::CalcTextSize("(mixed)").x + ImGui::GetStyle().ItemSpacing.x);
-                moved |= editor::dt::DragFloat3("Scale", &xf.scale.x, 0.5f, 0.01f, 100000.0f);
-                const bool rstS = editor::dt::consumeReset();
-                if (ImGui::IsItemActivated() || rstS) beginTransformEdit();
-                done = done || (ImGui::IsItemDeactivatedAfterEdit() || rstS);
-                showMixedTag(scaleMixed);
-
-                if (moved) {
-                    // "Touched", not "nonzero": which axis a widget wrote this frame, found the
-                    // same way the mixed check above did -- by comparing to the pre-edit reading.
-                    const bool touchPos[3]   = {xf.position.x != origPos.x,
-                                                xf.position.y != origPos.y,
-                                                xf.position.z != origPos.z};
-                    const bool touchRot[3]   = {euler.x != origEuler.x,
-                                                euler.y != origEuler.y,
-                                                euler.z != origEuler.z};
-                    const bool touchScale[3] = {xf.scale.x != origScale.x,
-                                                xf.scale.y != origScale.y,
-                                                xf.scale.z != origScale.z};
-                    w.setLocalTransform(selEntity_, xf);
-                    forEachMultiMoved([&](scene::Entity ent, const Transform& oxf) {
-                        Transform t = oxf;
-                        if (touchPos[0])   t.position.x = xf.position.x;
-                        if (touchPos[1])   t.position.y = xf.position.y;
-                        if (touchPos[2])   t.position.z = xf.position.z;
-                        if (touchRot[0] || touchRot[1] || touchRot[2]) {
-                            Vec3 oe = eulerDegFromQuat(oxf.rotation);
-                            if (touchRot[0]) oe.x = euler.x;
-                            if (touchRot[1]) oe.y = euler.y;
-                            if (touchRot[2]) oe.z = euler.z;
-                            t.rotation = quatFromEulerDeg(oe);
-                        }
-                        if (touchScale[0]) t.scale.x = xf.scale.x;
-                        if (touchScale[1]) t.scale.y = xf.scale.y;
-                        if (touchScale[2]) t.scale.z = xf.scale.z;
-                        w.setLocalTransform(ent, t);
-                    });
-                }
-                if (done) endTransformEdit();
-              }
-            }
-        }
+        drawEntityPrefabSection(nm, multiSelected);
+        drawEntityTransformSection(w, multiSelected);
         if (auto* mr = w.component<scene::CMeshRenderer>(selEntity_, scene::kComponentMeshRenderer)) {
             if (::aver::editor::sectionHeader("Mesh", ImGuiTreeNodeFlags_DefaultOpen)) {
-                bool vis = authoredVisible(selEntity_);
-                if (editor::dt::Checkbox("Visible", &vis)) {
-                    // Applies to the whole selection (same rule as the Mesh/Material pickers below), and unlike
-                    // them pushes undo: Visible is authored, level-saved data, so a click is as recoverable as
-                    // a transform edit (one EditCmd::Visibility for the set, shared with the Outliner's eye).
-                    outlinerSetVisible(multiSelected, vis);
-                }
-                // Saved with the level, Unreal-style -- unlike H/Shift+H/Ctrl+H (temporary,
-                // editor-only, see hideSelection in SandboxViewport.cpp; can disagree with this).
-                if (ImGui::IsItemHovered()) {
-                    const bool hHidden = std::find(editorHidden_.begin(), editorHidden_.end(),
-                                                   selEntity_) != editorHidden_.end();
-                    if (hHidden)
-                        ImGui::SetTooltip("Saved with the level.\n"
-                                          "H hides it in the editor only, without changing this.\n"
-                                          "(hidden in editor, Ctrl+H to show)");
-                    else
-                        ImGui::SetTooltip("Saved with the level.\n"
-                                          "H hides it in the editor only, without changing this.");
-                }
-                // COLLIDES: the .ocworld `nocollide` flag, which until now could only be authored by
-                // editing the file. Whole-selection and one undo entry per click, exactly like
-                // Visible above (EditCmd::Collision). Off removes each entity's static body on the
-                // spot; on fits a fresh one -- both inside setEntityCollide.
-                {
-                    const auto collides = [&](scene::Entity ent) {
-                        const auto it = entityCollide_.find(static_cast<u32>(ent));
-                        return it == entityCollide_.end() ? true : it->second;   // absent = the default
-                    };
-                    // Disabled for an entity the level does not own (a class instance, a preview): saveLevel
-                    // writes nocollide per level placement only, so the edit would dirty the level and be lost.
-                    const bool levelOwned = isLevelOwned(selEntity_);
-                    ImGui::BeginDisabled(!levelOwned);
-                    bool col = collides(selEntity_);
-                    if (editor::dt::Checkbox("Collides", &col)) {
-                        EditCmd c;
-                        c.kind = EditCmd::Kind::Collision;
-                        for (const scene::Entity ent : multiSelected) {
-                            if (!w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer)) continue;
-                            if (!isLevelOwned(ent)) continue;   // a mixed selection edits only what would be saved
-                            const bool before = collides(ent);
-                            if (before == col) continue;   // already there: no dead entry for it
-                            setEntityCollide(ent, col);
-                            c.collide.push_back({editIdFor(ent), before, col});
-                        }
-                        if (!c.collide.empty()) pushEdit(std::move(c));
-                    }
-                    uiReg_.track("details.mesh.collides");
-                    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-                        if (levelOwned)
-                            ImGui::SetTooltip("Saved with the level (off writes nocollide).\n"
-                                              "Off removes its static body, so nothing collides with it.");
-                        else
-                            ImGui::SetTooltip("This entity is not one of the level's own placements, so\n"
-                                              "the level would not save this setting.");
-                    }
-                    ImGui::EndDisabled();
-                }
-                // ANIMATION: the .ocworld anim/animspeed/animtime/animonce tokens -- a transform clip
-                // this placement plays in Play (a car on its route, a fan). Whole-selection and one undo
-                // entry per change, like Collides above (EditCmd::Animation). A skeletal mesh is left
-                // out (its CAnimator is a skeletal clock), and nothing is editable while Play has object
-                // animation live: it has already captured each entity's base.
-                if (!w.hasComponent(selEntity_, scene::kComponentSkeletalMesh)) {
-                    ImGui::SeparatorText("Animation");
-                    if (levelIsLegacyOcmap_) {
-                        ImGui::TextDisabled("The legacy .ocmap format cannot store an animation.");
-                    } else {
-                        std::vector<scene::Entity> targets;   // the selected meshes this section applies to
-                        for (const scene::Entity ent : multiSelected)
-                            if (w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer) &&
-                                !w.hasComponent(ent, scene::kComponentSkeletalMesh))
-                                targets.push_back(ent);
-                        const auto animOf = [&](scene::Entity ent) {
-                            const EntityAnim* a = entityAnim(ent);
-                            return a ? *a : EntityAnim{};
-                        };
-                        const EntityAnim cur = animOf(selEntity_);
-                        const bool live = anim::animSystem().objectAnimationLive();
-                        // Only the level's own placements save an animation (saveLevel writes the tokens
-                        // per levelEntities_ entry); on a class instance or preview an edit would be lost.
-                        const bool levelOwned = isLevelOwned(selEntity_);
-                        if (live) {
-                            ImGui::TextDisabled("Stop Play to edit the animation.");
-                        } else if (!levelOwned) {
-                            ImGui::TextDisabled("Not saved: not one of the level's placements.");
-                            if (ImGui::IsItemHovered())
-                                ImGui::SetTooltip("This entity is not one of the level's own placements (a class\n"
-                                                  "instance or a preview), so the level would not save an animation on it.");
-                        }
-                        ImGui::BeginDisabled(live || !levelOwned);
-
-                        // The clip, and why it would not move this mesh if it would not.
-                        ImGui::TextDisabled("clip  %s", cur.clip.empty() ? "(none)" : cur.clip.c_str());
-                        if (!cur.clip.empty()) {
-                            const u64 clipId = fnv1a64(std::string_view(cur.clip));
-                            const bool indexed = !content_.pathFor(clipId).empty();
-                            const fmt::OcAnimation* clip = indexed ? anim::animSystem().clip(clipId) : nullptr;
-                            if (!indexed)
-                                ImGui::TextDisabled(ICON_WARNING " not found under the project's Content");
-                            else if (!clip)
-                                ImGui::TextDisabled(ICON_WARNING " the clip could not be loaded");
-                            else if (!(clip->flags & fmt::kOcAnimObject))
-                                ImGui::TextDisabled(ICON_WARNING " a skeletal clip: it will not move this mesh");
-                            else
-                                ImGui::TextDisabled("%.2f s", static_cast<double>(clip->duration));
-                        }
-                        if (ImGui::Button("Change Clip...")) ImGui::OpenPopup("##pickAnim");
-                        uiReg_.track("details.anim.clip");
-                        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                            ImGui::SetTooltip("A transform clip this mesh plays in Play: a car on a route, a fan.\n"
-                                              "The placement is where it sits at the start time; the clip\n"
-                                              "moves it from there. Saved with the level (anim).");
-                        // Built only while the popup is open: listing means reading every project .ocanim
-                        // once (AnimSystem caches them) to keep the object clips and drop the skeletal ones.
-                        if (ImGui::IsPopupOpen("##pickAnim")) {
-                            std::vector<AssetChoice> clips;
-                            for (const auto& kv : content_.index()) {
-                                if (lowerExt(std::filesystem::path(kv.second)) != ".ocanim") continue;
-                                const fmt::OcAnimation* c = anim::animSystem().clip(kv.first);
-                                if (c && (c->flags & fmt::kOcAnimObject))
-                                    clips.push_back({cbRelativeToContent(kv.second), kv.first});
-                            }
-                            std::sort(clips.begin(), clips.end(),
-                                      [](const AssetChoice& a, const AssetChoice& b) { return a.label < b.label; });
-                            std::vector<AssetChoice> cands;
-                            cands.push_back({"(None)", 0});
-                            cands.insert(cands.end(), clips.begin(), clips.end());
-                            u64 picked = 0;
-                            const u64 currentId = cur.clip.empty() ? 0 : fnv1a64(std::string_view(cur.clip));
-                            if (assetPicker("##pickAnim", cands, currentId, &picked)) {
-                                // The path is the identity (id = fnv1a64 of it), so it is derived from the
-                                // index's file and checked to hash back to the pick.
-                                const std::string rel = picked ? cbRelativeToContent(content_.pathFor(picked))
-                                                               : std::string();
-                                if (picked && fnv1a64(std::string_view(rel)) != picked) {
-                                    cbStatus_ = "Could not resolve the clip to a project-relative path";
-                                } else {
-                                    EditCmd c;
-                                    c.kind = EditCmd::Kind::Animation;
-                                    for (const scene::Entity ent : targets) {
-                                        if (!isLevelOwned(ent)) continue;   // a mixed selection edits only what would be saved
-                                        const EntityAnim before = animOf(ent);
-                                        EntityAnim after = before;
-                                        after.clip = rel;
-                                        if (rel.empty()) after = EntityAnim{};   // None: back to the defaults
-                                        if (before == after) continue;           // already there: no dead entry
-                                        applyEntityAnim(ent, after);
-                                        c.animation.push_back({editIdFor(ent), before, after});
-                                    }
-                                    if (!c.animation.empty()) pushEdit(std::move(c));
-                                }
-                            }
-                        }
-
-                        // Speed, start time and Play once tune the clips already on the selection (nothing
-                        // to tune on an entity without one). A drag is ONE undo entry: animEditBefore_ is the
-                        // selection as it stood when the widget was grabbed, before that frame's edit lands.
-                        const auto snapshot = [&] {
-                            animEditBefore_.clear();
-                            for (const scene::Entity ent : targets)
-                                if (const EntityAnim* a = entityAnim(ent))
-                                    animEditBefore_.push_back({editIdFor(ent), *a, *a});
-                        };
-                        const auto commit = [&] {
-                            EditCmd c;
-                            c.kind = EditCmd::Kind::Animation;
-                            for (EditCmd::AnimChange& ch : animEditBefore_) {
-                                const scene::Entity ent = entityForEdit(ch.id);
-                                const EntityAnim* now = w.valid(ent) ? entityAnim(ent) : nullptr;
-                                if (!now || *now == ch.before) continue;
-                                ch.after = *now;
-                                c.animation.push_back(ch);
-                            }
-                            animEditBefore_.clear();
-                            if (!c.animation.empty()) pushEdit(std::move(c));
-                        };
-                        const auto tune = [&](auto&& set) {
-                            for (const scene::Entity ent : targets) {
-                                const EntityAnim* a = entityAnim(ent);
-                                if (!a) continue;
-                                EntityAnim next = *a;
-                                set(next);
-                                applyEntityAnim(ent, next);
-                            }
-                        };
-                        ImGui::BeginDisabled(cur.clip.empty());
-                        f32 speed = cur.speed;
-                        const bool speedEdited = editor::dt::DragFloat("Speed##animSpeed", &speed, 0.01f, 0.01f, 100.0f, "%.2f");
-                        if (ImGui::IsItemActivated() || (speedEdited && animEditBefore_.empty())) snapshot();
-                        if (speedEdited) tune([&](EntityAnim& n) { n.speed = speed; });
-                        if (ImGui::IsItemDeactivatedAfterEdit()) commit();
-                        uiReg_.track("details.anim.speed");
-                        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                            ImGui::SetTooltip("Playback speed. Saved with the level (animspeed).");
-                        f32 startTime = cur.time;
-                        const bool timeEdited = editor::dt::DragFloat("Start time (s)##animTime", &startTime, 0.01f, 0.0f, 100000.0f, "%.2f");
-                        if (ImGui::IsItemActivated() || (timeEdited && animEditBefore_.empty())) snapshot();
-                        if (timeEdited) tune([&](EntityAnim& n) { n.time = startTime; });
-                        if (ImGui::IsItemDeactivatedAfterEdit()) commit();
-                        uiReg_.track("details.anim.time");
-                        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                            ImGui::SetTooltip("Where in the clip the placement stands, in seconds.\n"
-                                              "The mesh sits at its placement at this time and moves relative\n"
-                                              "to it. Saved with the level (animtime).");
-                        bool once = cur.once;
-                        if (editor::dt::Checkbox("Play once##animOnce", &once)) {
-                            snapshot();
-                            tune([&](EntityAnim& n) { n.once = once; });
-                            commit();
-                        }
-                        uiReg_.track("details.anim.once");
-                        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                            ImGui::SetTooltip("Play through once and hold the last pose, instead of looping.\n"
-                                              "Saved with the level (animonce).");
-                        ImGui::EndDisabled();
-                        ImGui::EndDisabled();
-                    }
-                }
-#if AVER_MODULE_PHYSICS
-                // VEHICLE: the `vehicle <preset>` token of a placement that drives in Play. Read-only, the
-                // way the file's other authored-elsewhere tokens are shown: the generator writes it, and
-                // the preset is not edited here.
-                if (const std::string* vehicle = level_.vehiclePresetOf(selEntity_)) {
-                    ImGui::TextDisabled("vehicle  %s", vehicle->c_str());
-                    if (ImGui::IsItemHovered())
-                        ImGui::SetTooltip("A physics car in Play (suspension, tyres, gravity, collisions), driven along\n"
-                                          "the level's lanes (<level>.oclanes). Sized from this mesh's bounds and the\n"
-                                          "preset. Set by the vehicle token on the placement; not editable here.");
-                }
-#endif
-                // Now reassignable: previously just a printed hex id, with no picker and not even
-                // a drop target -- the only mesh drag-drop in the editor lands on the 3D viewport
-                // and spawns a NEW entity, a different verb.
-                const auto meshIt = meshPathById_.find(mr->mesh);
-                ImGui::TextDisabled("mesh  %s", meshIt == meshPathById_.end()
-                                                    ? "(unloaded)" : meshIt->second.c_str());
-                if (ImGui::Button("Change Mesh...")) ImGui::OpenPopup("##pickMesh");
-                uiReg_.track("details.mesh.pick");
-                // BUILT ONLY WHILE THE POPUP IS OPEN, like the animation picker above: this used to
-                // copy and sort every loaded mesh path (thousands, in a big level) on every frame
-                // the Details panel showed a mesh, with the popup shut. Kept across the frames it
-                // stays open; see PickerCands.
-                if (ImGui::IsPopupOpen("##pickMesh")) {
-                    // Candidates are meshes actually loaded (from the map populated for this --
-                    // "the foliage palette, a future asset picker"); listing every .ocmesh in the
-                    // content index could offer one the device refused or never loaded, blanking
-                    // the entity if picked.
-                    PickerCands& pc = pickMeshCands_;
-                    const int frame = ImGui::GetFrameCount();
-                    if (pc.lastFrame < frame - 1 || pc.stamp != meshPathById_.size()) {
-                        pc.list.clear();
-                        pc.list.reserve(meshPathById_.size());
-                        for (const auto& kv : meshPathById_) pc.list.push_back({kv.second, kv.first});
-                        std::sort(pc.list.begin(), pc.list.end(),
-                                  [](const AssetChoice& a, const AssetChoice& b) { return a.label < b.label; });
-                        pc.stamp = meshPathById_.size();
-                    }
-                    pc.lastFrame = frame;
-                    u64 picked = 0;
-                    if (assetPicker("##pickMesh", pc.list, mr->mesh, &picked)) {
-                        if (multiSelected.size() <= 1) {
-                            assignMeshId(selEntity_, picked);
-                        } else {
-                            // Applies to the whole selection, same as Transform above: every
-                            // entity with a CMeshRenderer takes the pick, not just the anchor.
-                            // assignMeshId is already per-entity all-or-nothing (false, a no-op,
-                            // for anything without the component), so this just loops it rather
-                            // than reimplementing.
-                            int n = 0;
-                            for (const scene::Entity ent : multiSelected)
-                                if (assignMeshId(ent, picked)) ++n;
-                            if (n > 1) {
-                                const auto mit = meshPathById_.find(picked);
-                                cbStatus_ = "Assigned " +
-                                    (mit == meshPathById_.end()
-                                         ? std::string("mesh")
-                                         : std::filesystem::path(mit->second).filename().string()) +
-                                    " to " + std::to_string(n) + " entities";
-                            }
-                        }
-                    }
-                } else {
-                    pickMeshCands_.drop();
-                }
+                drawMeshVisibleCollides(w, multiSelected);
+                drawMeshAnimation(w, multiSelected);
+                drawMeshAssetPicker(mr, multiSelected);
             }
 
             // The material, which Details never offered: the scene stores a NAME TOKEN, not a
@@ -2585,277 +3205,20 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
             // same sliders (the material system working as designed, not a bug) -- which the
             // panel should say rather than let someone discover.
 #if AVER_MODULE_PBR
-            if (::aver::editor::sectionHeader("Material", ImGuiTreeNodeFlags_DefaultOpen)) {
-                // Same fallback the draw uses: without it, an entity drawn fine via the mesh's
-                // own material would report "(none)" here -- the panel disagreeing with the picture.
-                const i32 shown = mr->material ? mr->material : content_.meshDefaultMaterial(mr->mesh);
-                const char* surfaceName = aver_scene_material_name(shown);
-
-                // Previously unassignable at all -- no picker, and no drag either
-                // (isPlaceableAssetExt refuses .ocmat): the panel could edit parameters but never
-                // change WHICH material.
-                if (ImGui::Button("Change Material...")) ImGui::OpenPopup("##pickMaterial");
-                uiReg_.track("details.material.pick");
-                // BUILT ONLY WHILE THE POPUP IS OPEN: editor::projectMaterialStems below ENUMERATES
-                // the project's Materials directories, which this used to do on every frame the
-                // Details panel showed a mesh entity, popup or not. Kept across the frames it stays
-                // open (see PickerCands), so an open picker does not re-read the disk per frame.
-                if (ImGui::IsPopupOpen("##pickMaterial")) {
-                    // EVERY PROJECT MATERIAL STEM, not only the ones level-scoped residency
-                    // (levelScopedMaterialsEnabled()) currently keeps bound: with that on, a level
-                    // holds only its OWN surfaces in content_.surfaceMaterials(), and listing just
-                    // that map here would make every other material in the project unreachable from
-                    // this picker. editor::projectMaterialStems() is the same Binaries-then-Content
-                    // enumeration loadProjectMaterials() used to drive; picking one that is not yet
-                    // resident loads it on demand -- see assignMaterialToken()'s own comment.
-                    //
-                    // Tokens, not path hashes: content_'s surface map is keyed on the interned token
-                    // mr->material holds; an fnv1a64 here could resolve to nothing, or worse, to an
-                    // unrelated surface by coincidence. aver_scene_material() interns (or reuses) the
-                    // token for a name without loading anything, so every stem gets one whether or
-                    // not a .ocmat is behind it yet.
-                    PickerCands& pc = pickMaterialCands_;
-                    const int frame = ImGui::GetFrameCount();
-                    if (pc.lastFrame < frame - 1 || pc.stamp != content_.surfaceMaterials().size()) {
-                        std::unordered_set<i32> seen;
-                        std::vector<AssetChoice>& cands = pc.list;
-                        cands.clear();
-                        const std::vector<std::string> stems =
-                            editor::projectMaterialStems(project_.binariesDir(), project_.contentDir());
-                        cands.reserve(stems.size());
-                        for (const std::string& stem : stems) {
-                            const i32 stemToken = aver_scene_material(0, stem.c_str());
-                            if (!seen.insert(stemToken).second) continue;
-                            cands.push_back({stem, static_cast<u64>(static_cast<u32>(stemToken))});
-                        }
-                        // A surface already bound (foliage, landscape, a placement override) whose name
-                        // is not a bare stem under either Materials folder -- rare, but not listing it
-                        // would make an already-assigned material vanish from its own picker.
-                        for (const auto& kv : content_.surfaceMaterials()) {
-                            if (!kv.second || !seen.insert(kv.first).second) continue;
-                            // `matName`, not `nm`: the entity-name `nm` set above is still in scope
-                            // here and would be shadowed (C4456) by an unrelated MATERIAL name.
-                            const char* matName = aver_scene_material_name(kv.first);
-                            cands.push_back({matName && *matName ? matName : "(unnamed)",
-                                             static_cast<u64>(static_cast<u32>(kv.first))});
-                        }
-                        std::sort(cands.begin(), cands.end(),
-                                  [](const AssetChoice& a, const AssetChoice& b) { return a.label < b.label; });
-                        pc.stamp = content_.surfaceMaterials().size();
-                    }
-                    pc.lastFrame = frame;
-                    u64 picked = 0;
-                    if (assetPicker("##pickMaterial", pc.list,
-                                    static_cast<u64>(static_cast<u32>(shown)), &picked)) {
-                        if (multiSelected.size() <= 1) {
-                            assignMaterialToken(selEntity_, static_cast<i32>(static_cast<u32>(picked)));
-                        } else {
-                            // Same shape as the mesh picker just above: one pick, applied to
-                            // every selected entity that has a CMeshRenderer.
-                            int n = 0;
-                            for (const scene::Entity ent : multiSelected)
-                                if (assignMaterialToken(ent, static_cast<i32>(static_cast<u32>(picked)))) ++n;
-                            if (n > 1) {
-                                const char* pickedName =
-                                    aver_scene_material_name(static_cast<i32>(static_cast<u32>(picked)));
-                                cbStatus_ = std::string("Assigned surface ") +
-                                    (pickedName && *pickedName ? pickedName : "(unnamed)") +
-                                    " to " + std::to_string(n) + " entities";
-                            }
-                        }
-                    }
-                } else {
-                    pickMaterialCands_.drop();
-                }
-                const pbr::MaterialHandle authored = content_.authoredFor(shown);
-                if (!authored) {
-                    ImGui::TextDisabled("Surface '%s' has no .ocmat loaded.",
-                                        surfaceName && *surfaceName ? surfaceName : "(none)");
-                    ImGui::TextDisabled("Drawing with the flat fallback; author one under Content" AVER_PATH_SEP "Materials.");
-                } else {
-                    ImGui::TextDisabled("Surface  %s", surfaceName && *surfaceName ? surfaceName : "(unnamed)");
-                    ImGui::TextDisabled("Shared: editing this changes every entity using it.");
-                    materialPanel(authored);
-                }
-            }
+            drawMeshMaterialSection(mr, multiSelected);
 #endif
         }
 #if AVER_MODULE_PARTICLES
         // Visible/editable the same way CMeshRenderer is above; no picker beyond drag-drop exists
         // for CMeshRenderer::mesh either, so the emitter's effect id follows the same shape.
-        if (auto* pe = w.component<scene::CParticleEmitter>(selEntity_, scene::kComponentParticleEmitter)) {
-            if (::aver::editor::sectionHeader("Particle Emitter", ImGuiTreeNodeFlags_DefaultOpen)) {
-                bool stopped = (pe->flags & scene::kParticleEmitterStopped) != 0;
-                if (editor::dt::Checkbox("Stopped", &stopped)) {
-                    if (stopped) pe->flags |=  scene::kParticleEmitterStopped;
-                    else         pe->flags &= ~scene::kParticleEmitterStopped;
-                }
-                ImGui::TextDisabled("effect id 0x%llx", (unsigned long long)pe->effect);
-                // Drop a .ocparticle from the Content Browser to point this emitter at it -- same
-                // id space content_.loadProjectParticleEffects() populates, so a freshly authored
-                // effect resolves immediately. Through the shared helper (assignParticleEffect,
-                // "two implementations of one fact") rather than a second resolve/validate/hash/
-                // assign/mark/log copy -- the picker below would otherwise have been that second copy.
-                // THE BROWSER'S ONE PAYLOAD: it sends its selection under kCbMoveDragDropType
-                // (ImGui keeps one payload per drag, see the viewport drop target), so this row
-                // takes the first .ocparticle in it; kAssetDragDropType is still accepted from a
-                // single-asset source.
-                if (ImGui::BeginDragDropTarget()) {
-                    const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(kCbMoveDragDropType);
-                    if (!payload) payload = ImGui::AcceptDragDropPayload(kAssetDragDropType);
-                    if (payload && payload->Data) {
-                        const std::string blob(
-                            static_cast<const char*>(payload->Data),
-                            payload->DataSize > 0 ? static_cast<usize>(payload->DataSize - 1) : usize(0));
-                        bool assigned = false;
-                        for (const std::string& one : editor::splitDropPayload(blob)) {
-                            if (lowerExt(std::filesystem::path(one)) != ".ocparticle") continue;
-                            assignParticleEffect(selEntity_, one);
-                            assigned = true;
-                            break;
-                        }
-                        if (!assigned) cbStatus_ = "Only a .ocparticle effect can be dropped on this emitter";
-                    }
-                    ImGui::EndDragDropTarget();
-                }
-                // And the same assignment without needing the Content Browser open at all.
-                if (ImGui::Button("Change Effect...")) ImGui::OpenPopup("##pickEffect");
-                uiReg_.track("details.effect.pick");
-                // BUILT ONLY WHILE THE POPUP IS OPEN: the scan below walks the WHOLE content index
-                // (every asset in the project) with a path parse per entry, and this used to run on
-                // every frame the Details panel showed an emitter. Kept across the frames it stays
-                // open (see PickerCands).
-                if (ImGui::IsPopupOpen("##pickEffect")) {
-                    // Candidates come from the content index, not a loaded-effects map: an effect
-                    // resolves on ASSIGNMENT (unlike a mesh), so listing only loaded ones would
-                    // hide the file the author just made.
-                    // content_.index() maps id -> ABSOLUTE path (an earlier draft of this comment
-                    // said relative -- it's not). Its KEY is fnv1a64 of the project-relative path
-                    // (pe->effect's id space, so no hashing needed), but its VALUE is
-                    // `it->path().string()` straight off the directory iterator (content_.adopt());
-                    // the two disagree, which is why the label is derived rather than used as-is.
-                    // Labelled relative, so this popup reads like the Mesh/Material ones above
-                    // instead of the developer's whole local directory tree.
-                    PickerCands& pc = pickEffectCands_;
-                    const int frame = ImGui::GetFrameCount();
-                    if (pc.lastFrame < frame - 1 || pc.stamp != content_.index().size()) {
-                        std::vector<AssetChoice>& cands = pc.list;
-                        cands.clear();
-                        for (const auto& kv : content_.index()) {
-                            if (lowerExt(std::filesystem::path(kv.second)) != ".ocparticle") continue;
-                            cands.push_back({cbRelativeToContent(kv.second), kv.first});
-                        }
-                        std::sort(cands.begin(), cands.end(),
-                                  [](const AssetChoice& a, const AssetChoice& b) { return a.label < b.label; });
-                        pc.stamp = content_.index().size();
-                    }
-                    pc.lastFrame = frame;
-                    u64 picked = 0;
-                    if (assetPicker("##pickEffect", pc.list, pe->effect, &picked)) {
-                        // Assigned by path, not by writing the id directly, so it goes through the
-                        // same resolve/validate the drop does -- extension check and project-
-                        // relative normalisation included (writing pe->effect would duplicate it).
-                        // Passed straight through: content_.pathFor()'s value is already absolute.
-                        // Joining it onto contentDir() first (as before) was correct only by
-                        // accident (operator/ discards the left side when the right is absolute) --
-                        // and would break the day that map starts storing relative paths, which its
-                        // own key spelling suggests it should.
-                        const std::string path = content_.pathFor(picked);
-                        if (!path.empty())
-                            assignParticleEffect(selEntity_, path);
-                    }
-                } else {
-                    pickEffectCands_.drop();
-                }
-                ImGui::TextDisabled("age %.2fs   seed 0x%08x", pe->age, pe->seed);
-            }
-        }
+        drawParticleEmitterDetails(w);
 #endif
 
 #if AVER_MODULE_PHYSICS
         // ---- Soft Body, and the physics viewer for it ----
         // Reads the SIMULATION, not just the component: whether it's simulating, particle count,
         // skinned path, and whether it's drawn are answerable only from the live body/render feature.
-        if (auto* sb = w.component<scene::CSoftBody>(selEntity_, scene::kComponentSoftBody)) {
-            if (::aver::editor::sectionHeader(ICON_TUNE " Soft Body", ImGuiTreeNodeFlags_DefaultOpen)) {
-                bool disabled = (sb->flags & scene::kSoftBodyDisabled) != 0;
-                if (editor::dt::Checkbox("Simulated", &disabled)) {
-                    // The checkbox reads POSITIVELY and the flag is stored negatively -- see
-                    // kSoftBodyDisabled's own comment for why the flag has to mean that.
-                    if (disabled) sb->flags &= ~scene::kSoftBodyDisabled;
-                    else          sb->flags |=  scene::kSoftBodyDisabled;
-                }
-                // Shown inverted from the member, so the label is the state rather than its negation.
-                disabled = (sb->flags & scene::kSoftBodyDisabled) == 0;
-
-                f32 maxDist = scene::softBodyMaxDistanceCm(*sb);
-                if (editor::dt::DragFloat("Max distance (cm)", &maxDist, 0.1f, 0.0f, 500.0f, "%.2f"))
-                    sb->maxDistanceCm = maxDist;
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("How far a vertex may leave where bone skinning would have\n"
-                                      "put it. 0 reads as the default (%.0f cm), not as pinned.\n"
-                                      "Only reaches the solver on a mesh that HAS a rig.",
-                                      static_cast<double>(scene::kSoftBodyDefaultMaxDistanceCm));
-
-                editor::dt::DragFloat("Compliance", &sb->compliance, 0.0001f, 0.0f, 1.0f, "%.4f");
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Inverse stiffness of the edge constraints.\n0 is inextensible.");
-
-                ImGui::SeparatorText("Simulation");
-                // STRAIGHT FROM THE PHYSICS ABI, not from the component. `body` is the handle the
-                // renderer stored; everything below is asked of Jolt this frame.
-                if (sb->body == 0) {
-                    ImGui::TextDisabled(ICON_WARNING " no body yet");
-                    ImGui::TextWrapped("A body is created on the first frame this entity is drawn "
-                                       "with a mesh whose asset has resolved. If it never appears, "
-                                       "the mesh has no triangles, or this build has no soft-body "
-                                       "render feature.");
-                } else {
-                    const i32 particles = aver_phys_softbody_vertex_count(sb->body);
-                    ImGui::Text("Body %d   %d particle%s", sb->body, particles,
-                                particles == 1 ? "" : "s");
-                    // THE ANSWER TO "WHY IS IT NOT MOVING". A body exists and reports zero
-                    // particles only when Jolt took the mesh and found nothing to simulate.
-                    if (particles == 0)
-                        ImGui::TextDisabled(ICON_WARNING " the body has no particles");
-
-                    // Where its particles actually are, so "is it simulating" needs no debugger:
-                    // at rest and falling look identical in every other readout here.
-                    std::vector<f32> pos(static_cast<usize>(particles) * 3, 0.0f);
-                    const i32 got = particles > 0
-                        ? aver_phys_softbody_vertices(sb->body, pos.data(), particles) : 0;
-                    if (got > 0) {
-                        f32 lo[3] = { 1e30f,  1e30f,  1e30f};
-                        f32 hi[3] = {-1e30f, -1e30f, -1e30f};
-                        for (i32 v = 0; v < got; ++v)
-                            for (int c = 0; c < 3; ++c) {
-                                const f32 x = pos[static_cast<usize>(v) * 3 + c];
-                                lo[c] = x < lo[c] ? x : lo[c];
-                                hi[c] = x > hi[c] ? x : hi[c];
-                            }
-                        ImGui::TextDisabled("bounds  x %.0f..%.0f   y %.0f..%.0f   z %.0f..%.0f",
-                                            lo[0], hi[0], lo[1], hi[1], lo[2], hi[2]);
-                        ImGui::TextDisabled("extent  %.0f x %.0f x %.0f cm",
-                                            hi[0]-lo[0], hi[1]-lo[1], hi[2]-lo[2]);
-                    }
-                }
-
-#if AVER_MODULE_RENDER_SOFTBODY
-                // Is it actually drawn? Simulating and drawing fail identically from the
-                // viewport; a non-zero draw handle means simulated vertices replace the authored mesh.
-                const bool drawn = softBodyScene_ && softBodyScene_->drawHandle(selEntity_) != 0;
-                ImGui::TextDisabled("%s drawn from the simulation: %s",
-                                    drawn ? ICON_VISIBILITY : ICON_WARNING, drawn ? "yes" : "no");
-                if (softBodyScene_)
-                    ImGui::TextDisabled("%u resident, %u simulated last frame",
-                                        softBodyScene_->residentCount(),
-                                        softBodyScene_->simulatedLastFrame());
-#else
-                ImGui::TextDisabled(ICON_WARNING " this build has no soft-body render feature, "
-                                    "so the simulation is not drawn");
-#endif
-            }
-        }
+        drawSoftBodyDetails(w);
 #endif
 
         // ---- Light (CLight): type, intensity, IES profile, cookie ----
@@ -2876,292 +3239,14 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
         // Their own TU (SandboxComponentDetails.cpp): the sections, and the Add / Remove entries further down.
         drawPlacedComponentSections();
 
-        // ---- Add Component ----
-        // Previously impossible from the editor: every panel above renders only when its
-        // component already exists, so one no importer/template attaches needed a hand-edited file.
-        ImGui::Separator();
-        if (ImGui::Button(ICON_ADD " Add Component")) ImGui::OpenPopup("addComponent");
-        if (ImGui::BeginPopup("addComponent")) {
-            // Listed by hand, not walked from the registry: the registry knows name/size, nothing
-            // about whether menu-attaching one is safe (CWorld/CLocal would corrupt an entity).
-            struct Addable { u32 id; const char* name; const char* tip; };
-            static const Addable kAddable[] = {
-                {scene::kComponentSoftBody, ICON_TUNE " Soft Body",
-                 "Simulate this entity's mesh instead of posing it: sag, drape, squash, collide."},
-                {scene::kComponentLight, "Light",
-                 "A point, spot or rectangular area light, optionally shaped by an IES profile and a cookie."},
-                {scene::kComponentDecal, "Decal",
-                 "A box that projects colour, normal and roughness onto the surfaces inside it."},
-            };
-            for (const Addable& a : kAddable) {
-                const bool present = w.hasComponent(selEntity_, a.id);
-                ImGui::BeginDisabled(present);
-                if (ImGui::MenuItem(a.name)) {
-                    // addComponent hands back zero-filled storage with no constructor run, so
-                    // defaults are written here -- same fix as World::create(); CSynapseAgent hit this bug once.
-                    if (a.id == scene::kComponentSoftBody) {
-                        if (auto* c = static_cast<scene::CSoftBody*>(
-                                w.addComponent(selEntity_, a.id)))
-                            *c = scene::CSoftBody{};
-                    } else if (a.id == scene::kComponentLight) {
-                        if (auto* c = static_cast<scene::CLight*>(w.addComponent(selEntity_, a.id)))
-                            *c = editor::makeNewLight(scene::kLightPoint);
-                    } else if (a.id == scene::kComponentDecal) {
-                        if (auto* c = static_cast<scene::CDecal*>(w.addComponent(selEntity_, a.id)))
-                            *c = editor::makeNewDecal();
-                    }
-                    cbStatus_ = std::string("Added ") + a.name;
-                    // Not undoable, so at least mark dirty: adding pushes no EditCmd, so without
-                    // this the level closed clean and the component was silently gone. Remove
-                    // Component below has no such problem -- it captures the component and can be undoable.
-                    markLevelUnsaved();
-                }
-                ImGui::EndDisabled();
-                if (present && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                    ImGui::SetTooltip("This entity already has one.");
-                else if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("%s", a.tip);
-            }
-            drawPlacedAddMenu();   // "Animation and AI" entries; each is undoable, unlike the three above
-            ImGui::EndPopup();
-        }
-
-        // ---- Remove Component ----
-        // scene::World::removeComponent was implemented and tested (tests/scene/src/SceneTest.cpp)
-        // but had zero editor callers. kRemovable mirrors kAddable's allow-list for the same
-        // reason: CLocal/CWorld/CHierarchy
-        // make the row an entity at all, and removing one by menu would corrupt it, not simplify it.
-        ImGui::SameLine();
-        if (ImGui::Button(ICON_DELETE " Remove Component")) ImGui::OpenPopup("removeComponent");
-        if (ImGui::BeginPopup("removeComponent")) {
-            struct Removable { u32 id; const char* name; };
-            static const Removable kRemovable[] = {
-                {scene::kComponentSoftBody, ICON_TUNE " Soft Body"},
-                {scene::kComponentLight, "Light"},
-                {scene::kComponentDecal, "Decal"},
-            };
-            bool anyPresent = false;
-            for (const Removable& r : kRemovable) {
-                const bool present = w.hasComponent(selEntity_, r.id);
-                anyPresent = anyPresent || present;
-                ImGui::BeginDisabled(!present);
-                if (ImGui::MenuItem(r.name)) {
-                    // Undoable: removeComponentFromSelection captures the component byte-exact
-                    // before dropping it, unlike Add Component above (no "before" to capture).
-                    if (removeComponentFromSelection(r.id))
-                        cbStatus_ = std::string("Removed ") + r.name;
-                }
-                ImGui::EndDisabled();
-                if (!present && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                    ImGui::SetTooltip("This entity does not have one.");
-            }
-            if (drawPlacedRemoveMenu()) anyPresent = true;
-            if (!anyPresent) ImGui::TextDisabled("Nothing removable is attached.");
-            ImGui::EndPopup();
-        }
+        drawAddRemoveComponent(w);
 #endif
     } else if (sel_==-2){
-        ImGui::TextUnformatted("Directional Light (Sun)"); ImGui::Separator();
-        {
-            f32 elev = 0.0f, azim = 0.0f;
-            sky_.sunAngles(elev, azim);
-            bool moved = editor::dt::SliderFloat("Elevation", &elev, -20.0f, 90.0f, "%.1f deg");
-            moved |= editor::dt::SliderFloat("Azimuth", &azim, -180.0f, 180.0f, "%.1f deg");
-            // Written back only on a real move: the angle round trip is lossy.
-            if (moved) sky_.setSunAngles(elev, azim);
-        }
-        editor::dt::SliderFloat("Intensity", &sky_.sunIntensity, 0.0f, 8.0f, "%.2f");
-        bool useTemp = sky_.sunTemperatureK > 0.0f;
-        if (editor::dt::Checkbox("Use Colour Temperature", &useTemp))
-            sky_.sunTemperatureK = useTemp ? 5500.0f : 0.0f;
-        if (useTemp) {
-            editor::dt::SliderFloat("Temperature", &sky_.sunTemperatureK, 1500.0f, 12000.0f, "%.0f K");
-        } else {
-            editor::dt::ColorEdit3("Colour", sunColor_);
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("White (255, 255, 255) is the physical default -- the light\n"
-                                  "arriving at the top of the atmosphere. The physical sky tints\n"
-                                  "it toward orange by elevation on its own.");
-        }
-        editor::dt::SliderFloat("Angular Size", &sky_.sunAngularDiameterDeg, 0.05f, 8.0f, "%.2f deg");
-        // hasLevelSun_ lives in SandboxApp.hpp's AVER_MODULE_SCENE block beside loadLevel/
-        // saveLevel: only a scene-on build ever runs the loader that populates it.
-#if AVER_MODULE_SCENE
-        markLevelRecordEdited(hasLevelSun_);
-#endif
+        drawSunDetails();
     } else if (sel_==-3){
-        ImGui::TextUnformatted("Sky + Atmosphere"); ImGui::Separator();
-        {
-            int model = sky_.model == rhi::SkyModel::Physical ? 1 : 0;
-            const char* names[] = {"Authored (two-colour dome)", "Physical (Rayleigh + Mie + ozone)"};
-            if (editor::dt::Combo("Sky Model", &model, names, 2))
-                sky_.model = model ? rhi::SkyModel::Physical : rhi::SkyModel::Authored;
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Physical derives the dome below from the sun's elevation.\n"
-                                  "Sunset stops being a colour somebody picked and becomes geometry.");
-        }
-        const bool physicalSky = sky_.model == rhi::SkyModel::Physical;
-
-        ImGui::BeginDisabled(physicalSky);
-        editor::dt::ColorEdit3("Zenith", skyZenith_); editor::dt::ColorEdit3("Horizon", skyHorizon_);
-        editor::dt::SliderFloat("Atmosphere Height", &sky_.atmosphereHeight, 0.05f, 4.0f, "%.2f");
-        ImGui::EndDisabled();
-        if (physicalSky) {
-            ImGui::TextDisabled("^ derived from the sun's elevation while the model is Physical");
-            if (ImGui::TreeNode("Air")) {
-                editor::dt::SliderFloat("Mie Scatter", &sky_.air.mieScatter, 0.0f, 4e-2f, "%.5f /km",
-                                   ImGuiSliderFlags_Logarithmic);
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Aerosol. Raise it for haze, dust or a coastal day; the\n"
-                                      "sun's halo and the pale band at the horizon both grow.");
-                editor::dt::SliderFloat("Mie Extinction", &sky_.air.mieExtinction, 0.0f, 4e-2f, "%.5f /km",
-                                   ImGuiSliderFlags_Logarithmic);
-                editor::dt::SliderFloat("Mie Anisotropy", &sky_.air.miePhaseG, 0.0f, 0.95f, "%.2f");
-                editor::dt::SliderFloat("Rayleigh Height", &sky_.air.rayleighScaleKm, 1.0f, 20.0f, "%.1f km");
-                editor::dt::SliderFloat("Mie Height", &sky_.air.mieScaleKm, 0.2f, 8.0f, "%.2f km");
-                editor::dt::SliderFloat("Multi-Scatter", &sky_.air.multiScatterGain, 0.0f, 4.0f, "%.2f");
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Stands in for every bounce after the first. 1.70 is\n"
-                                      "calibrated: it puts diffuse light at 15-30%% of direct\n"
-                                      "and the zenith's blue/red between 2.5 and 5.");
-                editor::dt::SliderFloat("Planet Radius", &sky_.air.planetRadiusKm, 100.0f, 20000.0f, "%.0f km");
-                editor::dt::SliderFloat("Air Depth", &sky_.air.atmosphereHeightKm, 5.0f, 200.0f, "%.0f km");
-                editor::dt::SliderInt("Sky Steps", &sky_.air.viewSteps, 4, 96);
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Samples along a sky ray. 32 is within 3%% of a converged\n"
-                                      "march; below about 16 the horizon starts to band.");
-                editor::dt::SliderInt("Aerial Steps", &sky_.air.aerialSteps, 1, 16);
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Samples along the air between the camera and a surface.\n"
-                                      "This one runs per shaded pixel, so it is the expensive one.");
-                ImGui::TreePop();
-            }
-        }
-        editor::dt::ColorEdit3("Ground", sky_.groundAlbedo);
-        editor::dt::SliderFloat("Ground Blend", &sky_.groundBlend, 0.0f, 1.0f, "%.2f");
-        // Range 0..32, logarithmic (used to stop at 2): the multiplier on the only term that fills
-        // an enclosed space (sky light through openings), and an arcade needs far more of it than
-        // a slider stopping at 2 can express. MEASURED on PTTest Sponza at exposure 1,
-        // 3D-viewport luminance percentiles (sunlit surfaces reach 237 in every row):
-        //
-        //   Sky Light  1    p50   8   p90 48    <- median pixel essentially black
-        //   Sky Light  4    p50  15   p90 48
-        //   Sky Light 16    p50  34   p90 75    <- shadows readable, sun unchanged
-        //
-        // The sun itself is correctly scaled (237/255 with no exposure); the fill just couldn't
-        // reach the value the scene needed -- so "everything is too dark" was, in part,
-        // unauthorable. Logarithmic: the useful range spans two orders of magnitude and the
-        // interesting end is the bottom.
-        editor::dt::SliderFloat("Sky Light", &sunAmbient_, 0.0f, 32.0f, "%.2f",
-                           ImGuiSliderFlags_Logarithmic);
-
-        ImGui::Separator();
-        ImGui::TextUnformatted("Height Fog");
-        editor::dt::ColorEdit3("Fog Tint", fogColor_);
-        editor::dt::SliderFloat("Fog Density", &fogDensity_, 1e-7f, 1e-3f, "%.2e",
-                           ImGuiSliderFlags_Logarithmic);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Extinction per cm. Visibility = 3.912 / density.\n"
-                              "2e-6 clear (20 km)   4e-6 light haze (10 km)\n"
-                              "8e-6 haze (5 km)     8e-5 fog (500 m)");
-        editor::dt::SliderFloat("Height Falloff", &sky_.fogFalloff, 0.0f, 0.02f, "%.5f",
-                           ImGuiSliderFlags_Logarithmic);
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 = uniform distance fog (the old behaviour)");
-        editor::dt::DragFloat("Fog Height", &sky_.fogHeight, 1.0f);
-        editor::dt::DragFloat("Fog Start", &sky_.fogStart, 1.0f, 0.0f, 1e6f);
-        editor::dt::SliderFloat("Max Opacity", &sky_.fogMaxOpacity, 0.0f, 1.0f, "%.2f");
-        // FOG is its own record and needs its own mark: markLevelRecordEdited went in for SUN/SKY
-        // but missed FOG, silently discarding Fog Tint/Density on a level with no FOG line.
-        // Guarded for the same reason as hasLevelSun_ above.
-#if AVER_MODULE_SCENE
-        markLevelRecordEdited(hasLevelFog_);
-        if (streaming_.enabled()) {
-            const world::StreamSettings& mst = streaming_.settings().stream;
-            const f32 boundaryCm = static_cast<f32>(mst.loadRadius) * static_cast<f32>(mst.chunkSizeCm);
-            editor::dt::Checkbox("Match Fog To Streaming Radius", &matchFogToStreamRadius_);
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Recomputes Fog Density every frame -- overriding the slider\n"
-                                  "above -- so opacity AT the load boundary (%.0fcm here) equals\n"
-                                  "the target below. NOT a free win: hiding a boundary this close\n"
-                                  "typically needs an order of magnitude more density than a\n"
-                                  "level's authored default, i.e. a visibly foggier world.", boundaryCm);
-            if (matchFogToStreamRadius_) {
-                editor::dt::SliderFloat("Target Opacity At Boundary", &fogMatchTargetOpacity_, 0.5f, 0.99f, "%.2f");
-                const f32 matched = fogDensityForOpacityAt(boundaryCm, fogMatchTargetOpacity_);
-                ImGui::TextDisabled("boundary %.0fcm -> density %.2e", boundaryCm, matched);
-            }
-        }
-#endif
-
-        ImGui::Separator();
-        ImGui::TextUnformatted("Volumetric Clouds");
-        editor::dt::Checkbox("Clouds", &sky_.cloudsEnabled);
-        if (sky_.cloudsEnabled) {
-            editor::dt::SliderFloat("Coverage", &sky_.cloudCoverage, 0.0f, 1.0f, "%.2f");
-            editor::dt::SliderFloat("Density", &sky_.cloudDensity, 0.0f, 4.0f, "%.2f");
-            editor::dt::DragFloat("Layer Bottom", &sky_.cloudBottom, 100.0f);
-            editor::dt::DragFloat("Layer Top", &sky_.cloudTop, 100.0f);
-            f32 featureSize = sky_.cloudScale > 1e-9f ? 1.0f / sky_.cloudScale : 50000.0f;
-            if (editor::dt::DragFloat("Feature Size", &featureSize, 100.0f, 100.0f, 5e6f))
-                sky_.cloudScale = 1.0f / std::fmax(featureSize, 1.0f);
-            editor::dt::DragFloat2("Wind", sky_.cloudWind, 5.0f);
-#if AVER_MODULE_SOFTBODY_SCENE
-            if (ImGui::SmallButton("Copy to cloth wind"))
-                softbody::softBodySystem().setWind(Vec3{sky_.cloudWind[0], sky_.cloudWind[1], 0.0f}, 0.0f, 0.3f, 0.0f);
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Sets the soft-body (cloth) wind to this cloud drift. They are independent otherwise.");
-#endif
-        }
-        // CLOUDS is its own record, same reason as FOG. The Clouds checkbox sits above the `if`
-        // deliberately: turning clouds OFF must reach the file, so marking only inside the
-        // enabled branch would make "off" the one setting that could never be saved.
-#if AVER_MODULE_SCENE
-        markLevelRecordEdited(hasLevelClouds_);
-        markLevelRecordEdited(hasLevelSky_);
-#endif
-        // Water lives beside the Sky, not its own mode: it's a level property like sun/fog, and
-        // the weather panel is where an author looks for it. No markLevelRecordEdited needed --
-        // unlike SUN/FOG it rides through saveLevel as part of levelHeader_, so editing IS the edit.
-        ImGui::Separator();
-        buildWaterPanel(e);
+        drawSkyDetails(e);
     } else if (sel_==-4){
-        ImGui::TextUnformatted("Post Process"); ImGui::Separator();
-        editor::dt::Checkbox("Eye Adaptation", &post_.autoExposure);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("The exposure adjusts automatically as the view gets brighter or\n"
-                              "darker, like eyes -- quickly toward light, more slowly toward dark.");
-        // Stops, not the raw linear post_.exposure: a linear drag has no scale, which is how one
-        // landed at 4.05 (+2 stops) and masked the engine's tuned defaults (RHI.hpp) every launch.
-        // EV reads the same whether it's compensation on Eye Adaptation or a fixed exposure.
-        f32 ev = (post_.exposure > 0.0f) ? std::log2(post_.exposure) : 0.0f;
-        if (editor::dt::SliderFloat("Brightness", &ev, -3.0f, 3.0f, "%+.1f EV"))
-            post_.exposure = std::exp2(ev);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(post_.autoExposure
-                ? "Compensation on top of Eye Adaptation's own exposure:\n"
-                  "0 = as tuned, +1 = twice as bright, -1 = half."
-                : "Fixed exposure relative to 1, with Eye Adaptation off:\n"
-                  "0 = as tuned, +1 = twice as bright, -1 = half.");
-        ImGui::SameLine();
-        if (ImGui::Button("Reset")) post_.exposure = 1.0f;
-        if (post_.autoExposure) {
-            // Live readout, so a stuck-looking value reads as adaptation working, not broken (see
-            // IDevice::postExposureReadout; it lags the eye by a frame or two). Clamps/histogram
-            // cuts are tuned engine defaults (RHI.hpp), not panel-exposed dials.
-            f32 metered = 0.0f;
-            if (e.device() && e.device()->postExposureReadout(metered))
-                ImGui::TextDisabled("Adapted to %+.1f EV", std::log2(metered));
-        }
-        // NIGHT VISION works on a fixed exposure too (Krawczyk/Myszkowski/Seidel 2005, rod-driven
-        // scotopic vision), so it sits beside Eye Adaptation rather than inside its block.
-        bool nightVision = post_.nightVision > 0.5f;
-        if (editor::dt::Checkbox("Night Vision", &nightVision))
-            post_.nightVision = nightVision ? 1.0f : 0.0f;
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("In very dim light colour fades and shifts blue-grey as the eye's\n"
-                              "rods take over.");
-        ImGui::Separator();
-        editor::dt::SliderFloat("Bloom", &post_.bloomIntensity, 0.0f, 1.0f, "%.3f");
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Zero skips the whole bloom pyramid, not just its weight");
+        drawPostProcessDetails(e);
     } else if (sel_==kSelPostVolume){
         if (postVolumeTools_.drawDetails(e.device(), project_.contentDir(), levelHeader_.postVolumes, post_, viewPos()))
             markLevelUnsaved();

@@ -1862,506 +1862,384 @@ void SandboxApp::drawPlayToolbar(Engine& e) {
 }
 #endif // AVER_WITH_IMGUI
 
-// Builds the whole editor UI for one frame: menu bar, toolbars, panels, drawers and dialogs.
-void SandboxApp::buildUI(Engine& e) {
 #if AVER_WITH_IMGUI
-    uiReg_.beginFrame();
-#endif
-    prefsDevice_ = e.device();
-#if AVER_WITH_IMGUI
-    if (!prefsLoaded_) { prefsLoaded_ = true; loadEditorPreferences(); }
-#endif
+// The File menu.
+void SandboxApp::drawFileMenu(Engine& e) {
+    const bool open_file = ImGui::BeginMenu("File");
+    uiReg_.track("menu.file");
+    if (open_file){
 #if AVER_MODULE_SCENE
-    if (wantMeshReload_) {
-        wantMeshReload_ = false;
-        releaseProjectMeshes(e);
-        loadProjectMeshes(e);
-    }
-#endif
-    if (vsyncOffRequested_) {
-        vsyncOffRequested_ = false;
-        if (prefsDevice_->vsyncCanDisable()) { prefsDevice_->setVSync(false); AVER_INFO("[Sandbox] vsync OFF (--no-vsync)"); }
-        else AVER_WARN("[Sandbox] --no-vsync ignored: this display path cannot tear");
-    }
-    // --vsync: forces it ON, overriding stored preference.
-    if (vsyncOnRequested_) {
-        vsyncOnRequested_ = false;
-        prefsDevice_->setVSync(true);
-        AVER_INFO("[Sandbox] vsync ON (--vsync)");
-    }
-#if AVER_WITH_IMGUI
-    if (!e.device()->uiActive()) return;
-    ++frameNo_;   // the Content Browser's directory-cache freshness clock
-#if AVER_MODULE_SCENE
-    // A render queue job owns the screen: no panels, only the scene in a rect the size of the output.
-    // The post chain then writes the backbuffer, not the texture the (undrawn) Level panel shows.
-    if (renderJobOwnsScreen()) {
-        e.device()->setViewportToTexture(false);
-        applyRenderJobViewport();
-        return;
-    }
-#endif
-
-    if (browserActive_) {
-        // Test hook: AVER_TEST_BROWSER_OPEN=<.ocproject> opens it through this browser path after 120 frames.
-        static const char* testOpen = std::getenv("AVER_TEST_BROWSER_OPEN");
-        if (testOpen && *testOpen && frameNo_ >= 120 && browser_.open(testOpen, nullptr)) {
-            applyProject(e);
-            browserActive_ = false;
-            return;
+        const bool haveProject = project_.valid();
+        ImGui::BeginDisabled(!haveProject);
+        // Asks first; prevents silently discarding unsaved edits.
+        if (ImGui::MenuItem(ICON_NEW_FILE " New Level")) {
+            if (levelHasUnsavedEdits()) pendingNewLevel_ = true;
+            else                        startNewLevel(e);
         }
-        editor::BrowserAction action = browser_.draw(dpi_, fontMedium_, logoUiId_, logoAspect_);
-        // An importer's start-screen button opens its dialog here; the project it converted opens through the browser's upgrade gate.
-        editor::extensionImporter().drawModal(dpi_);
-        if (const std::string converted = editor::extensionImporter().takeOpenRequest(); !converted.empty() && action == editor::BrowserAction::Stay) {
-            std::string openErr;
-            if (browser_.openOrOfferUpgrade(converted, &openErr)) action = editor::BrowserAction::Open;
-            else if (!browser_.upgradePending()) AVER_ERROR("[Editor] cannot open the imported project {}: {}", converted, openErr);
+        uiReg_.track("file.newLevel");
+        // Opens a picker; shows all levels, not just the start level.
+        if (ImGui::MenuItem(ICON_FOLDER_OPEN " Open Level...")) openLevelPickerNow();
+        uiReg_.track("file.openLevel");
+        // Reload: reopens the start level to discard edits.
+        ImGui::BeginDisabled(project_.startMap.empty());
+        if (ImGui::MenuItem(ICON_REFRESH " Reload Start Level")) {
+            const std::string start = project_.contentDir() + AVER_PATH_SEP + project_.startMap;
+            if (!requestOpenLevel(start, "reloaded from the project's start level"))
+                AVER_WARN("[Level] reload: {}", openLevelError_);
         }
-        switch (action) {
-            case editor::BrowserAction::Open: applyProject(e); browserActive_ = false; break;
-            case editor::BrowserAction::Skip: browserActive_ = false; break;
-            case editor::BrowserAction::Quit: requestExitChecked(e); break;
-            case editor::BrowserAction::Stay: break;
+        ImGui::EndDisabled();
+        uiReg_.track("file.reloadStartLevel");
+        if (ImGui::MenuItem(ICON_SAVE " Save Level", "Ctrl+S")) saveLevelInteractive();
+        uiReg_.track("file.saveLevel");
+        if (ImGui::MenuItem(ICON_SAVE_ALL " Save All", editor::chordToString(keybinds_.chordFor(editor::CommandId::SaveAll)).c_str()))
+            saveAll();
+        uiReg_.track("file.saveAll");
+        // Save Level As: saveLevel takes an arbitrary path; this provides the UI.
+        if (ImGui::MenuItem(ICON_SAVE " Save Level As...")) {
+            saveLevelAsName_[0] = '\0';
+            const std::string stem = levelPath_.empty()
+                ? levelName_
+                : std::filesystem::path(levelPath_).stem().string();
+            std::snprintf(saveLevelAsName_, sizeof saveLevelAsName_, "%s",
+                          stem.empty() ? "untitled" : stem.c_str());
+            saveLevelAsError_.clear();
+            wantSaveLevelAs_ = true;
         }
-        return;
-    }
-
-    // Test hook: AVER_TEST_OPEN_LEVEL=<level path> opens it as the Content Browser does, 300 frames after the
-    // project is up (the mid-session level open a user does).
-#if AVER_MODULE_SCENE
-    {
-        static const char* testLevel = std::getenv("AVER_TEST_OPEN_LEVEL");
-        static u64 projectUpAt = 0;
-        static bool levelDone = false;
-        if (testLevel && *testLevel && !levelDone) {
-            if (!projectUpAt) projectUpAt = frameNo_;
-            else if (frameNo_ >= projectUpAt + 300) { levelDone = true; requestOpenLevel(testLevel, "test hook"); }
-        }
-    }
-#endif
-    // Before anything draws; reaps finished workers and may start one.
-    revisionControlTick();
-
-    // Drawer shortcuts (Ctrl+Space: Content Browser, `: Console, Escape: close).
-    {
-        const ImGuiIO& io = ImGui::GetIO();
-        if (!io.WantTextInput && !io.WantCaptureKeyboard) {
-            if (keybinds_.pressed(editor::CommandId::DrawerToggleContent, io)) toggleDrawer(Drawer::Content);
-            if (keybinds_.pressed(editor::CommandId::DrawerToggleConsole, io)) toggleDrawer(Drawer::Console);
-            if (drawer_ != Drawer::None && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel) &&
-                keybinds_.pressed(editor::CommandId::DrawerDismiss, io))
-                drawer_ = Drawer::None;
-        }
-    }
-
-    // The four panel windows were renamed (a tab icon in the title); carry a saved layout across.
-    { static bool migrated = false; if (!migrated) { migrated = true; editor::migrateWindowSettings(); } }
-
-    // ---- menu bar ----
-    if (ImGui::BeginMainMenuBar()) {
-        if (fontMedium_) ImGui::PushFont(fontMedium_, 0.0f);
-        // The engine's mark, as Unreal shows its logo at the start of the menu bar; the drawn "AE" only when logo.png is missing.
-        if (logoSmallUiId_) {
-            const f32 h = ImGui::GetFrameHeight() * 0.92f;
-            const f32 y = ImGui::GetCursorPosY();
-            ImGui::SetCursorPosY(y + (ImGui::GetFrameHeight() - h) * 0.5f);
-            ImGui::Image(static_cast<ImTextureID>(logoSmallUiId_), ImVec2(h * logoAspect_, h));
-            ImGui::SetCursorPosY(y);
-            ImGui::SameLine(0.0f, 6.0f * dpi_);
-        } else {
-            ImGui::TextColored(ImVec4(0.95f,0.42f,0.13f,1),"AE");
-        }
-                    const bool open_file = ImGui::BeginMenu("File");
-        uiReg_.track("menu.file");
-        if (open_file){
-#if AVER_MODULE_SCENE
-            const bool haveProject = project_.valid();
-            ImGui::BeginDisabled(!haveProject);
-            // Asks first; prevents silently discarding unsaved edits.
-            if (ImGui::MenuItem(ICON_NEW_FILE " New Level")) {
-                if (levelHasUnsavedEdits()) pendingNewLevel_ = true;
-                else                        startNewLevel(e);
-            }
-            uiReg_.track("file.newLevel");
-            // Opens a picker; shows all levels, not just the start level.
-            if (ImGui::MenuItem(ICON_FOLDER_OPEN " Open Level...")) openLevelPickerNow();
-            uiReg_.track("file.openLevel");
-            // Reload: reopens the start level to discard edits.
-            ImGui::BeginDisabled(project_.startMap.empty());
-            if (ImGui::MenuItem(ICON_REFRESH " Reload Start Level")) {
-                const std::string start = project_.contentDir() + AVER_PATH_SEP + project_.startMap;
-                if (!requestOpenLevel(start, "reloaded from the project's start level"))
-                    AVER_WARN("[Level] reload: {}", openLevelError_);
-            }
-            ImGui::EndDisabled();
-            uiReg_.track("file.reloadStartLevel");
-            if (ImGui::MenuItem(ICON_SAVE " Save Level", "Ctrl+S")) saveLevelInteractive();
-            uiReg_.track("file.saveLevel");
-            if (ImGui::MenuItem(ICON_SAVE_ALL " Save All", editor::chordToString(keybinds_.chordFor(editor::CommandId::SaveAll)).c_str()))
-                saveAll();
-            uiReg_.track("file.saveAll");
-            // Save Level As: saveLevel takes an arbitrary path; this provides the UI.
-            if (ImGui::MenuItem(ICON_SAVE " Save Level As...")) {
-                saveLevelAsName_[0] = '\0';
-                const std::string stem = levelPath_.empty()
-                    ? levelName_
-                    : std::filesystem::path(levelPath_).stem().string();
-                std::snprintf(saveLevelAsName_, sizeof saveLevelAsName_, "%s",
-                              stem.empty() ? "untitled" : stem.c_str());
-                saveLevelAsError_.clear();
-                wantSaveLevelAs_ = true;
-            }
-            uiReg_.track("file.saveLevelAs");
-            ImGui::EndDisabled();
-            if (!haveProject && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                ImGui::SetTooltip("Open or create a project first - a level belongs to one.");
+        uiReg_.track("file.saveLevelAs");
+        ImGui::EndDisabled();
+        if (!haveProject && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("Open or create a project first - a level belongs to one.");
 #else
-            ImGui::MenuItem(ICON_NEW_FILE " New Level"); ImGui::MenuItem(ICON_FOLDER_OPEN " Open Level..."); ImGui::MenuItem(ICON_SAVE " Save Level");
+        ImGui::MenuItem(ICON_NEW_FILE " New Level"); ImGui::MenuItem(ICON_FOLDER_OPEN " Open Level..."); ImGui::MenuItem(ICON_SAVE " Save Level");
 #endif
 #if AVER_MODULE_LANDSCAPE
-            // Sculpt changes the resident section in memory; save separately.
-            {
-                const bool canSave = landscape_.loaded() && !landscape_.path().empty();
-                ImGui::BeginDisabled(!canSave);
-                if (ImGui::MenuItem(landscape_.dirty() ? ICON_TERRAIN " Save Landscape *" : ICON_TERRAIN " Save Landscape")) saveLandscape();
-                ImGui::EndDisabled();
-                uiReg_.track("file.saveLandscape");
-                if (!canSave && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                    ImGui::SetTooltip(!landscape_.loaded()
-                        ? "No landscape section loaded (--landscape, or <levelname>.ocland beside the level)."
-                        : "This section has no file path to save back to.");
-            }
-#endif
-            ImGui::Separator();
-            // The import entries installed extensions add (child process `AverAssetC <command>` on a worker thread; the modal shows its log).
-            editor::extensionImporter().drawMenuItems([this](const char* id) { uiReg_.track(id); });
-            if (ImGui::MenuItem(ICON_SCREENSHOT " Take Screenshot", editor::chordToString(keybinds_.chordFor(editor::CommandId::Screenshot)).c_str()))
-                requestViewportScreenshot();
-            uiReg_.track("file.takeScreenshot");
-#if AVER_MODULE_SCENE
-            // Starts AverEngineRuntime.exe on this level (separate process).
-            {
-                const bool haveProj = project_.valid();
-                const bool haveLevel = !levelPath_.empty();
-                const std::string runtimeExe = editor::runtimeExecutablePath();
-                ImGui::BeginDisabled(!haveProj || !haveLevel || runtimeExe.empty());
-                if (ImGui::MenuItem(ICON_LAUNCH " Launch in Aver Engine Runtime")) launchInRuntime(e);
-                ImGui::EndDisabled();
-                uiReg_.track("file.launchRuntime");
-                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-                    if (!haveProj)       ImGui::SetTooltip("Open a project first.");
-                    else if (!haveLevel) ImGui::SetTooltip("Save the level first - the runtime reads it from disk.");
-                    else if (runtimeExe.empty())
-                        ImGui::SetTooltip("AverEngineRuntime.exe is not beside the editor - build the runtime (AVER_BUILD_GAME).");
-                    else ImGui::SetTooltip("Starts AverEngineRuntime.exe on this level, as a packaged game would run it.");
-                }
-            }
-#endif
-            ImGui::Separator();
-            // Packaging disabled only with specific reason.
-            {
-                const bool haveProj = project_.valid();
-                const bool haveScripts = haveProj &&
-                    std::filesystem::exists(editor::scriptsBinaryDir(project_));
-                ImGui::BeginDisabled(!haveProj || tools_.compiling());
-                if (ImGui::MenuItem(ICON_PACKAGE " Package Project...")) tools_.openPackageProject();
-                ImGui::EndDisabled();
-                uiReg_.track("file.packageProject");
-                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-                    if (!haveProj)              ImGui::SetTooltip("Open a project first.");
-                    else if (tools_.compiling()) ImGui::SetTooltip("A script build is running; packaging would stage a half-written assembly.");
-                    else if (!haveScripts)       ImGui::SetTooltip("No compiled scripts yet - run Compile .NET first.\nThe packager refuses a project whose Binaries" AVER_PATH_SEP "Scripts is empty.");
-                    else                         ImGui::SetTooltip("Stage this project into a standalone, runnable game directory.\nRuns scripts/stage-game.ps1, which you can also run from a shell.");
-                }
-            }
-            ImGui::Separator(); if(ImGui::MenuItem(ICON_EXIT " Exit")) requestExitChecked(e); ImGui::EndMenu(); }
-                    const bool open_edit = ImGui::BeginMenu("Edit");
-        uiReg_.track("menu.edit");
-        if (open_edit){
-            if (ImGui::MenuItem(ICON_UNDO " Undo", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditUndo)).c_str(), false, canUndo())) undo();
-            uiReg_.track("edit.undo");
-            if (ImGui::MenuItem(ICON_REDO " Redo", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditRedo)).c_str(), false, canRedo())) redo();
-            uiReg_.track("edit.redo");
-            ImGui::Separator();
-            // Shortcut hints from the same registry as handleManip(), so menu and keyboard agree.
-            if (ImGui::MenuItem(ICON_COPY " Copy", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditCopy)).c_str(), false, anySelected())) copySelection();
-            uiReg_.track("edit.copy");
-            if (ImGui::MenuItem(ICON_PASTE " Paste", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditPaste)).c_str(), false, !clipboard_.entities.empty() || clipboard_.hasObject)) pasteClipboard();
-            uiReg_.track("edit.paste");
-            if (ImGui::MenuItem(ICON_DUPLICATE " Duplicate", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditDuplicate)).c_str(), false, anySelected())) duplicateSelection();
-            uiReg_.track("edit.duplicate");
-            if (ImGui::MenuItem(ICON_DELETE " Delete", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditDelete)).c_str(), false, anySelected())) deleteSelection();
-            uiReg_.track("edit.delete");
-            ImGui::Separator();
-            if (ImGui::MenuItem(ICON_TUNE " Editor Preferences...")) showEditorPrefs_ = true;
-            uiReg_.track("edit.editorPreferences");
-            if (ImGui::MenuItem(ICON_PROJECT " Project Settings...")) showProjectSettings_ = true;
-            uiReg_.track("edit.projectSettings");
-            ImGui::EndMenu();
-        }
-                    const bool open_window = ImGui::BeginMenu("Window");
-        uiReg_.track("menu.window");
-        if (open_window){
-            // MenuItem now captures return value so panels can be reopened.
-            ImGui::MenuItem(ICON_OUTLINER " World Outliner", nullptr, &showOutliner_);
-            uiReg_.track("window.worldOutliner");
-            ImGui::MenuItem(ICON_DETAILS " Details", nullptr, &showDetails_);
-            uiReg_.track("window.details");
-            ImGui::MenuItem(ICON_ADD " Place Actors", nullptr, &showPlaceActors_);
-            uiReg_.track("window.placeActors");
-            ImGui::MenuItem(ICON_LOG " Message Log", nullptr, &showMessageLog_);
-            uiReg_.track("window.messageLog");
-            ImGui::MenuItem(ICON_RESET " Undo History", nullptr, &showUndoHistory_);
-            uiReg_.track("window.undoHistory");
-#if AVER_MODULE_SCENE
-            ImGui::MenuItem(ICON_MOVIE " Render Queue", nullptr, &showRenderQueue_);
-            uiReg_.track("window.renderQueue");
-#endif
-            if (ImGui::MenuItem(ICON_FOLDER " Content Browser", "Ctrl+Space", drawer_ == Drawer::Content)) toggleDrawer(Drawer::Content);
-            uiReg_.track("window.contentBrowser");
-            if (ImGui::MenuItem(ICON_LOG " Output Log", nullptr, drawer_ == Drawer::Log)) toggleDrawer(Drawer::Log);
-            // track() names the LAST item; keep it immediately after the widget.
-            uiReg_.track("window.outputLog");
-            if (ImGui::MenuItem(ICON_CONSOLE " Console", "`", drawer_ == Drawer::Console)) toggleDrawer(Drawer::Console);
-            uiReg_.track("window.console");
-            if (ImGui::MenuItem(ICON_WORLD " World Settings", nullptr, showWorldSettings_))
-                showWorldSettings_ = !showWorldSettings_;
-            uiReg_.track("window.worldSettings");
-            ImGui::Separator();
-#if AVER_MODULE_SCENE
-            {
-                const bool streamOn = streaming_.enabled();
-                ImGui::BeginDisabled(!project_.valid());
-                if (ImGui::MenuItem(ICON_LAYERS " Chunk Streaming", nullptr, streamOn)) setChunkStreamingEnabled(!streamOn);
-                ImGui::EndDisabled();
-                uiReg_.track("window.chunkStreaming");
-                ImGui::MenuItem(ICON_PROFILER " GPU Profiler", nullptr, &showProfiler_);
-                uiReg_.track("window.gpuProfiler");
-                ImGui::MenuItem(ICON_NEURAL " Neural Visualiser", nullptr, &showNeuralViz_);
-                uiReg_.track("window.neuralVisualiser");
-                // Which files name an asset; reachable from Content Browser context menu too.
-                ImGui::MenuItem(ICON_LINK " References", nullptr, &showReferences_);
-                uiReg_.track("window.references");
-                if (!project_.valid() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                    ImGui::SetTooltip("Open or create a project first - a streamed world belongs to one.");
-                else if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip(streamOn
-                        ? "Streams chunks generated + saved under <project>" AVER_PATH_SEP "Chunks around the editor camera.\nTurning this off releases every streamed entity."
-                        : "Opt-in: streams chunks generated + saved under <project>" AVER_PATH_SEP "Chunks around the editor camera.\nDoes nothing to your level until switched on.");
-            }
-            {
-                const bool droneOn = droneEntity_ != scene::kInvalidEntity;
-                ImGui::BeginDisabled(!project_.valid());
-                if (ImGui::MenuItem(ICON_BOT " Drone", nullptr, droneOn)) setDroneEnabled(!droneOn);
-                ImGui::EndDisabled();
-                uiReg_.track("window.drone");
-                if (!project_.valid() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                    ImGui::SetTooltip("Open or create a project first - the drone reads its graph from Content" AVER_PATH_SEP "Scripts.");
-                else if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip(droneOn
-                        ? "A cube driven by Content" AVER_PATH_SEP "Scripts" AVER_PATH_SEP "Drone.ocgraph through GraphHost.\nTurning this off releases it."
-                        : "Opt-in: spawns a cube and drives it from Content" AVER_PATH_SEP "Scripts" AVER_PATH_SEP "Drone.ocgraph through GraphHost.");
-            }
-            ImGui::Separator();
-#endif
-            // Outside AVER_MODULE_SCENE; git info is independent of ECS.
-            ImGui::MenuItem(ICON_REVISION " Revision Control", nullptr, &showRevisionControl_);
-            uiReg_.track("window.revisionControl");
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("What git says about this project: the branch, what changed, and\n"
-                                  "each file's history and diff. It READS the repository and cannot\n"
-                                  "alter one -- there is no commit, revert or push here.");
-            ImGui::MenuItem(ICON_LAYERS " Data Layers", nullptr, &showDataLayers_);
-            uiReg_.track("window.dataLayers");
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Group objects into named layers the streamer loads, hides or activates together.\nAssign the selection, set a layer's initial state, and hide or unload one in the editor.");
-            ImGui::MenuItem(ICON_EXTENSION " Extensions", nullptr, editor::extensionsWindow().openFlag());
-            uiReg_.track("window.extensions");
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("The extensions installed beside the editor: status, source and licence.\n"
-                                  "Install an .avext package from a file, or uninstall one.");
-            ImGui::Separator();
-            ImGui::BeginDisabled(gameUi_ == nullptr);
-            if (ImGui::MenuItem(ICON_WIDGETS " Game UI Demo", nullptr, showUiDemo_)) showUiDemo_ = !showUiDemo_;
-            uiReg_.track("window.gameUiDemo");
+        // Sculpt changes the resident section in memory; save separately.
+        {
+            const bool canSave = landscape_.loaded() && !landscape_.path().empty();
+            ImGui::BeginDisabled(!canSave);
+            if (ImGui::MenuItem(landscape_.dirty() ? ICON_TERRAIN " Save Landscape *" : ICON_TERRAIN " Save Landscape")) saveLandscape();
             ImGui::EndDisabled();
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                ImGui::SetTooltip(gameUi_ ? "A hand-written Aver.UI draw list, not built from a widget tree."
-                                          : "The UI render feature is unavailable on this backend.");
-            ImGui::Separator();
-            // Reset Layout applies to the focused tab.
-            const bool assetTabActive = !levelVisible_ && assetEditors_.anyOpen();
-            if (ImGui::MenuItem(assetTabActive ? ICON_LAYOUT " Reset Tab Layout" : ICON_LAYOUT " Reset Layout")) {
-                if (assetTabActive) assetEditors_.resetFocusedLayout();
-                else              { dockBuilt_ = false; dockResetRequested_ = true; }
-            }
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip(assetTabActive
-                    ? "Restores this tab's column widths.\nThe editor's panel layout is left alone."
-                    : "Restores every panel to its default slot.\nOpen an asset tab to reset that tab instead.");
-            ImGui::EndMenu();
+            uiReg_.track("file.saveLandscape");
+            if (!canSave && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip(!landscape_.loaded()
+                    ? "No landscape section loaded (--landscape, or <levelname>.ocland beside the level)."
+                    : "This section has no file path to save back to.");
         }
-        tools_.drawMenu(project_);
-        if (ImGui::BeginMenu("Build")){
-            // Build Geometry is gone; no CSG/brush system exists. Build Lighting planned.
-            ImGui::BeginDisabled(true);
-            ImGui::MenuItem("Build Lighting");
+#endif
+        ImGui::Separator();
+        // The import entries installed extensions add (child process `AverAssetC <command>` on a worker thread; the modal shows its log).
+        editor::extensionImporter().drawMenuItems([this](const char* id) { uiReg_.track(id); });
+        if (ImGui::MenuItem(ICON_SCREENSHOT " Take Screenshot", editor::chordToString(keybinds_.chordFor(editor::CommandId::Screenshot)).c_str()))
+            requestViewportScreenshot();
+        uiReg_.track("file.takeScreenshot");
+#if AVER_MODULE_SCENE
+        // Starts AverEngineRuntime.exe on this level (separate process).
+        {
+            const bool haveProj = project_.valid();
+            const bool haveLevel = !levelPath_.empty();
+            const std::string runtimeExe = editor::runtimeExecutablePath();
+            ImGui::BeginDisabled(!haveProj || !haveLevel || runtimeExe.empty());
+            if (ImGui::MenuItem(ICON_LAUNCH " Launch in Aver Engine Runtime")) launchInRuntime(e);
             ImGui::EndDisabled();
-            uiReg_.track("build.buildLighting");
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                ImGui::SetTooltip("No lightmap baker yet.\nLighting is real-time: the sun, and voxel cone-traced GI.");
+            uiReg_.track("file.launchRuntime");
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                if (!haveProj)       ImGui::SetTooltip("Open a project first.");
+                else if (!haveLevel) ImGui::SetTooltip("Save the level first - the runtime reads it from disk.");
+                else if (runtimeExe.empty())
+                    ImGui::SetTooltip("AverEngineRuntime.exe is not beside the editor - build the runtime (AVER_BUILD_GAME).");
+                else ImGui::SetTooltip("Starts AverEngineRuntime.exe on this level, as a packaged game would run it.");
+            }
+        }
+#endif
+        ImGui::Separator();
+        // Packaging disabled only with specific reason.
+        {
+            const bool haveProj = project_.valid();
+            const bool haveScripts = haveProj &&
+                std::filesystem::exists(editor::scriptsBinaryDir(project_));
+            ImGui::BeginDisabled(!haveProj || tools_.compiling());
+            if (ImGui::MenuItem(ICON_PACKAGE " Package Project...")) tools_.openPackageProject();
+            ImGui::EndDisabled();
+            uiReg_.track("file.packageProject");
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                if (!haveProj)              ImGui::SetTooltip("Open a project first.");
+                else if (tools_.compiling()) ImGui::SetTooltip("A script build is running; packaging would stage a half-written assembly.");
+                else if (!haveScripts)       ImGui::SetTooltip("No compiled scripts yet - run Compile .NET first.\nThe packager refuses a project whose Binaries" AVER_PATH_SEP "Scripts is empty.");
+                else                         ImGui::SetTooltip("Stage this project into a standalone, runnable game directory.\nRuns scripts/stage-game.ps1, which you can also run from a shell.");
+            }
+        }
+        ImGui::Separator(); if(ImGui::MenuItem(ICON_EXIT " Exit")) requestExitChecked(e); ImGui::EndMenu(); }
+}
+#endif
+
+#if AVER_WITH_IMGUI
+// The Edit menu.
+void SandboxApp::drawEditMenu() {
+    const bool open_edit = ImGui::BeginMenu("Edit");
+    uiReg_.track("menu.edit");
+    if (open_edit){
+        if (ImGui::MenuItem(ICON_UNDO " Undo", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditUndo)).c_str(), false, canUndo())) undo();
+        uiReg_.track("edit.undo");
+        if (ImGui::MenuItem(ICON_REDO " Redo", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditRedo)).c_str(), false, canRedo())) redo();
+        uiReg_.track("edit.redo");
+        ImGui::Separator();
+        // Shortcut hints from the same registry as handleManip(), so menu and keyboard agree.
+        if (ImGui::MenuItem(ICON_COPY " Copy", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditCopy)).c_str(), false, anySelected())) copySelection();
+        uiReg_.track("edit.copy");
+        if (ImGui::MenuItem(ICON_PASTE " Paste", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditPaste)).c_str(), false, !clipboard_.entities.empty() || clipboard_.hasObject)) pasteClipboard();
+        uiReg_.track("edit.paste");
+        if (ImGui::MenuItem(ICON_DUPLICATE " Duplicate", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditDuplicate)).c_str(), false, anySelected())) duplicateSelection();
+        uiReg_.track("edit.duplicate");
+        if (ImGui::MenuItem(ICON_DELETE " Delete", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditDelete)).c_str(), false, anySelected())) deleteSelection();
+        uiReg_.track("edit.delete");
+        ImGui::Separator();
+        if (ImGui::MenuItem(ICON_TUNE " Editor Preferences...")) showEditorPrefs_ = true;
+        uiReg_.track("edit.editorPreferences");
+        if (ImGui::MenuItem(ICON_PROJECT " Project Settings...")) showProjectSettings_ = true;
+        uiReg_.track("edit.projectSettings");
+        ImGui::EndMenu();
+    }
+}
+#endif
+
+#if AVER_WITH_IMGUI
+// The Window menu: panels, drawers, layout reset.
+void SandboxApp::drawWindowMenu() {
+    const bool open_window = ImGui::BeginMenu("Window");
+    uiReg_.track("menu.window");
+    if (open_window){
+        // MenuItem now captures return value so panels can be reopened.
+        ImGui::MenuItem(ICON_OUTLINER " World Outliner", nullptr, &showOutliner_);
+        uiReg_.track("window.worldOutliner");
+        ImGui::MenuItem(ICON_DETAILS " Details", nullptr, &showDetails_);
+        uiReg_.track("window.details");
+        ImGui::MenuItem(ICON_ADD " Place Actors", nullptr, &showPlaceActors_);
+        uiReg_.track("window.placeActors");
+        ImGui::MenuItem(ICON_LOG " Message Log", nullptr, &showMessageLog_);
+        uiReg_.track("window.messageLog");
+        ImGui::MenuItem(ICON_RESET " Undo History", nullptr, &showUndoHistory_);
+        uiReg_.track("window.undoHistory");
+#if AVER_MODULE_SCENE
+        ImGui::MenuItem(ICON_MOVIE " Render Queue", nullptr, &showRenderQueue_);
+        uiReg_.track("window.renderQueue");
+#endif
+        if (ImGui::MenuItem(ICON_FOLDER " Content Browser", "Ctrl+Space", drawer_ == Drawer::Content)) toggleDrawer(Drawer::Content);
+        uiReg_.track("window.contentBrowser");
+        if (ImGui::MenuItem(ICON_LOG " Output Log", nullptr, drawer_ == Drawer::Log)) toggleDrawer(Drawer::Log);
+        // track() names the LAST item; keep it immediately after the widget.
+        uiReg_.track("window.outputLog");
+        if (ImGui::MenuItem(ICON_CONSOLE " Console", "`", drawer_ == Drawer::Console)) toggleDrawer(Drawer::Console);
+        uiReg_.track("window.console");
+        if (ImGui::MenuItem(ICON_WORLD " World Settings", nullptr, showWorldSettings_))
+            showWorldSettings_ = !showWorldSettings_;
+        uiReg_.track("window.worldSettings");
+        ImGui::Separator();
+#if AVER_MODULE_SCENE
+        {
+            const bool streamOn = streaming_.enabled();
+            ImGui::BeginDisabled(!project_.valid());
+            if (ImGui::MenuItem(ICON_LAYERS " Chunk Streaming", nullptr, streamOn)) setChunkStreamingEnabled(!streamOn);
+            ImGui::EndDisabled();
+            uiReg_.track("window.chunkStreaming");
+            ImGui::MenuItem(ICON_PROFILER " GPU Profiler", nullptr, &showProfiler_);
+            uiReg_.track("window.gpuProfiler");
+            ImGui::MenuItem(ICON_NEURAL " Neural Visualiser", nullptr, &showNeuralViz_);
+            uiReg_.track("window.neuralVisualiser");
+            // Which files name an asset; reachable from Content Browser context menu too.
+            ImGui::MenuItem(ICON_LINK " References", nullptr, &showReferences_);
+            uiReg_.track("window.references");
+            if (!project_.valid() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("Open or create a project first - a streamed world belongs to one.");
+            else if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(streamOn
+                    ? "Streams chunks generated + saved under <project>" AVER_PATH_SEP "Chunks around the editor camera.\nTurning this off releases every streamed entity."
+                    : "Opt-in: streams chunks generated + saved under <project>" AVER_PATH_SEP "Chunks around the editor camera.\nDoes nothing to your level until switched on.");
+        }
+        {
+            const bool droneOn = droneEntity_ != scene::kInvalidEntity;
+            ImGui::BeginDisabled(!project_.valid());
+            if (ImGui::MenuItem(ICON_BOT " Drone", nullptr, droneOn)) setDroneEnabled(!droneOn);
+            ImGui::EndDisabled();
+            uiReg_.track("window.drone");
+            if (!project_.valid() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("Open or create a project first - the drone reads its graph from Content" AVER_PATH_SEP "Scripts.");
+            else if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(droneOn
+                    ? "A cube driven by Content" AVER_PATH_SEP "Scripts" AVER_PATH_SEP "Drone.ocgraph through GraphHost.\nTurning this off releases it."
+                    : "Opt-in: spawns a cube and drives it from Content" AVER_PATH_SEP "Scripts" AVER_PATH_SEP "Drone.ocgraph through GraphHost.");
+        }
+        ImGui::Separator();
+#endif
+        // Outside AVER_MODULE_SCENE; git info is independent of ECS.
+        ImGui::MenuItem(ICON_REVISION " Revision Control", nullptr, &showRevisionControl_);
+        uiReg_.track("window.revisionControl");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("What git says about this project: the branch, what changed, and\n"
+                              "each file's history and diff. It READS the repository and cannot\n"
+                              "alter one -- there is no commit, revert or push here.");
+        ImGui::MenuItem(ICON_LAYERS " Data Layers", nullptr, &showDataLayers_);
+        uiReg_.track("window.dataLayers");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Group objects into named layers the streamer loads, hides or activates together.\nAssign the selection, set a layer's initial state, and hide or unload one in the editor.");
+        ImGui::MenuItem(ICON_EXTENSION " Extensions", nullptr, editor::extensionsWindow().openFlag());
+        uiReg_.track("window.extensions");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("The extensions installed beside the editor: status, source and licence.\n"
+                              "Install an .avext package from a file, or uninstall one.");
+        ImGui::Separator();
+        ImGui::BeginDisabled(gameUi_ == nullptr);
+        if (ImGui::MenuItem(ICON_WIDGETS " Game UI Demo", nullptr, showUiDemo_)) showUiDemo_ = !showUiDemo_;
+        uiReg_.track("window.gameUiDemo");
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip(gameUi_ ? "A hand-written Aver.UI draw list, not built from a widget tree."
+                                      : "The UI render feature is unavailable on this backend.");
+        ImGui::Separator();
+        // Reset Layout applies to the focused tab.
+        const bool assetTabActive = !levelVisible_ && assetEditors_.anyOpen();
+        if (ImGui::MenuItem(assetTabActive ? ICON_LAYOUT " Reset Tab Layout" : ICON_LAYOUT " Reset Layout")) {
+            if (assetTabActive) assetEditors_.resetFocusedLayout();
+            else              { dockBuilt_ = false; dockResetRequested_ = true; }
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(assetTabActive
+                ? "Restores this tab's column widths.\nThe editor's panel layout is left alone."
+                : "Restores every panel to its default slot.\nOpen an asset tab to reset that tab instead.");
+        ImGui::EndMenu();
+    }
+}
+#endif
+
+#if AVER_WITH_IMGUI
+// The Build menu: navigation, debug overlays and what they show.
+void SandboxApp::drawBuildMenu(Engine& e) {
+    if (ImGui::BeginMenu("Build")){
+        // Build Geometry is gone; no CSG/brush system exists. Build Lighting planned.
+        ImGui::BeginDisabled(true);
+        ImGui::MenuItem("Build Lighting");
+        ImGui::EndDisabled();
+        uiReg_.track("build.buildLighting");
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("No lightmap baker yet.\nLighting is real-time: the sun, and voxel cone-traced GI.");
 #if AVER_MODULE_SYNAPSE
-            ImGui::Separator();
+        ImGui::Separator();
 #if AVER_MODULE_SCENE
-            // Needs both SYNAPSE (grid math) and SCENE (a world to sample).
-            if (ImGui::MenuItem("Bake Navigation")) bakeNavigationNow(e);
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                ImGui::SetTooltip("Samples the live physics scene into a walkable grid and "
-                                  "writes it beside this level as .ocnav.\n"
-                                  "Colours in the overlay are REGIONS: two patches of floor "
-                                  "in different colours have no path between them.");
+        // Needs both SYNAPSE (grid math) and SCENE (a world to sample).
+        if (ImGui::MenuItem("Bake Navigation")) bakeNavigationNow(e);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("Samples the live physics scene into a walkable grid and "
+                              "writes it beside this level as .ocnav.\n"
+                              "Colours in the overlay are REGIONS: two patches of floor "
+                              "in different colours have no path between them.");
 #endif
-            // Show Navigation works even without SCENE (reads a baked .ocnav).
-            ImGui::MenuItem("Show Navigation", nullptr, &showNav_);
-            ImGui::MenuItem("Show Post Volumes", nullptr, &showPostVolumes_);
+        // Show Navigation works even without SCENE (reads a baked .ocnav).
+        ImGui::MenuItem("Show Navigation", nullptr, &showNav_);
+        ImGui::MenuItem("Show Post Volumes", nullptr, &showPostVolumes_);
 #if AVER_MODULE_SCENE
-            ImGui::MenuItem("Show Decals", nullptr, &showDecals_);
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Draws every decal's projector box, not just the selected one's.");
-            if (ImGui::BeginMenu("Show AI")) {
-                ImGui::MenuItem("Sight Cones", nullptr, &aiDebug_.sight);
-                ImGui::MenuItem("Hearing", nullptr, &aiDebug_.hearing);
-                ImGui::MenuItem("Path / Goal", nullptr, &aiDebug_.path);
-                ImGui::MenuItem("Steering", nullptr, &aiDebug_.steering);
-                ImGui::MenuItem("Behaviour Tree State", nullptr, &aiDebug_.btState);
-                ImGui::MenuItem("Cover", nullptr, &aiDebug_.cover);
-                ImGui::MenuItem("Queries (EQS)", nullptr, &aiDebug_.eqs);                 // AI: wave 3 #21
-                ImGui::MenuItem("Smart Object Slots", nullptr, &aiDebug_.smartObjects);
-                ImGui::MenuItem("State Tree", nullptr, &aiDebug_.stateTree);
-                ImGui::EndMenu();
-            }
-            uiReg_.track("view.showAi");
-            if (ImGui::BeginMenu("Show Motion Matching")) {
-                ImGui::MenuItem("Trajectories", nullptr, &motionDebug_.trajectory);
-                ImGui::MenuItem("Matched Frame", nullptr, &motionDebug_.matched);
-                ImGui::MenuItem("Labels", nullptr, &motionDebug_.labels);
-                ImGui::MenuItem("Group Costs", nullptr, &motionDebug_.costs);
-                ImGui::EndMenu();
-            }
-            uiReg_.track("view.showMotionMatching");
+        ImGui::MenuItem("Show Decals", nullptr, &showDecals_);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Draws every decal's projector box, not just the selected one's.");
+        if (ImGui::BeginMenu("Show AI")) {
+            ImGui::MenuItem("Sight Cones", nullptr, &aiDebug_.sight);
+            ImGui::MenuItem("Hearing", nullptr, &aiDebug_.hearing);
+            ImGui::MenuItem("Path / Goal", nullptr, &aiDebug_.path);
+            ImGui::MenuItem("Steering", nullptr, &aiDebug_.steering);
+            ImGui::MenuItem("Behaviour Tree State", nullptr, &aiDebug_.btState);
+            ImGui::MenuItem("Cover", nullptr, &aiDebug_.cover);
+            ImGui::MenuItem("Queries (EQS)", nullptr, &aiDebug_.eqs);                 // AI: wave 3 #21
+            ImGui::MenuItem("Smart Object Slots", nullptr, &aiDebug_.smartObjects);
+            ImGui::MenuItem("State Tree", nullptr, &aiDebug_.stateTree);
+            ImGui::EndMenu();
+        }
+        uiReg_.track("view.showAi");
+        if (ImGui::BeginMenu("Show Motion Matching")) {
+            ImGui::MenuItem("Trajectories", nullptr, &motionDebug_.trajectory);
+            ImGui::MenuItem("Matched Frame", nullptr, &motionDebug_.matched);
+            ImGui::MenuItem("Labels", nullptr, &motionDebug_.labels);
+            ImGui::MenuItem("Group Costs", nullptr, &motionDebug_.costs);
+            ImGui::EndMenu();
+        }
+        uiReg_.track("view.showMotionMatching");
 
 #if AVER_MODULE_CAMERA
-            if (ImGui::BeginMenu("Show Camera Rigs")) {
-                ImGui::MenuItem("Pivot and Lag", nullptr, &cameraDebug_.pivot);
-                ImGui::MenuItem("Arm and Probe", nullptr, &cameraDebug_.arm);
-                ImGui::MenuItem("Fade Radius", nullptr, &cameraDebug_.fade);
-                ImGui::MenuItem("Pitch Limits", nullptr, &cameraDebug_.limits);
-                ImGui::EndMenu();
-            }
-            uiReg_.track("view.showCameraRigs");
+        if (ImGui::BeginMenu("Show Camera Rigs")) {
+            ImGui::MenuItem("Pivot and Lag", nullptr, &cameraDebug_.pivot);
+            ImGui::MenuItem("Arm and Probe", nullptr, &cameraDebug_.arm);
+            ImGui::MenuItem("Fade Radius", nullptr, &cameraDebug_.fade);
+            ImGui::MenuItem("Pitch Limits", nullptr, &cameraDebug_.limits);
+            ImGui::EndMenu();
+        }
+        uiReg_.track("view.showCameraRigs");
 #endif
 #endif
 #if AVER_MODULE_SOFTBODY_SCENE
-            if (ImGui::BeginMenu("Show Soft Bodies")) {
-                ImGui::MenuItem("Strain", nullptr, &softBodyDebug_.strain);
-                ImGui::MenuItem("Pins", nullptr, &softBodyDebug_.pins);
-                ImGui::MenuItem("Pieces", nullptr, &softBodyDebug_.pieces);
-                ImGui::MenuItem("Wind", nullptr, &softBodyDebug_.wind);
-                ImGui::MenuItem("Budget", nullptr, &softBodyDebug_.budget);
+        if (ImGui::BeginMenu("Show Soft Bodies")) {
+            ImGui::MenuItem("Strain", nullptr, &softBodyDebug_.strain);
+            ImGui::MenuItem("Pins", nullptr, &softBodyDebug_.pins);
+            ImGui::MenuItem("Pieces", nullptr, &softBodyDebug_.pieces);
+            ImGui::MenuItem("Wind", nullptr, &softBodyDebug_.wind);
+            ImGui::MenuItem("Budget", nullptr, &softBodyDebug_.budget);
 ImGui::MenuItem("Fields", nullptr, &softBodyDebug_.fields);
 ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
 
-                ImGui::MenuItem("Constraints", nullptr, &softBodyDebug_.constraints);
-                ImGui::EndMenu();
-            }
-            uiReg_.track("view.showSoftBodies");
+            ImGui::MenuItem("Constraints", nullptr, &softBodyDebug_.constraints);
+            ImGui::EndMenu();
+        }
+        uiReg_.track("view.showSoftBodies");
 #endif
 
 #if AVER_MODULE_VEHICLE_SCENE
-            if (ImGui::BeginMenu("Show Vehicles")) {
-                ImGui::MenuItem("Suspension", nullptr, &vehicleDebug_.suspension);
-                ImGui::MenuItem("Forces", nullptr, &vehicleDebug_.forces);
-                ImGui::MenuItem("Slip", nullptr, &vehicleDebug_.slip);
-                ImGui::MenuItem("Chassis", nullptr, &vehicleDebug_.chassis);
-                ImGui::MenuItem("Velocity", nullptr, &vehicleDebug_.velocity);
-                ImGui::MenuItem("Labels", nullptr, &vehicleDebug_.labels);
-                ImGui::SliderFloat("Force scale (cm per 100 N)", &vehicleDebug_.forceScaleCmPer100N, 0.1f, 10.0f, "%.1f");
-                ImGui::EndMenu();
-            }
-            uiReg_.track("view.showVehicles");
+        if (ImGui::BeginMenu("Show Vehicles")) {
+            ImGui::MenuItem("Suspension", nullptr, &vehicleDebug_.suspension);
+            ImGui::MenuItem("Forces", nullptr, &vehicleDebug_.forces);
+            ImGui::MenuItem("Slip", nullptr, &vehicleDebug_.slip);
+            ImGui::MenuItem("Chassis", nullptr, &vehicleDebug_.chassis);
+            ImGui::MenuItem("Velocity", nullptr, &vehicleDebug_.velocity);
+            ImGui::MenuItem("Labels", nullptr, &vehicleDebug_.labels);
+            ImGui::SliderFloat("Force scale (cm per 100 N)", &vehicleDebug_.forceScaleCmPer100N, 0.1f, 10.0f, "%.1f");
+            ImGui::EndMenu();
+        }
+        uiReg_.track("view.showVehicles");
 #endif
 #if AVER_MODULE_PHYSICS
-            editor::drawPhysicsDebugMenu(physicsDebug_, physicsDebugFrame_);   // the whole "Show Physics" submenu
-            uiReg_.track("view.showPhysics");
-            ImGui::MenuItem("Show Collision Shapes", nullptr, &editor::collisionShapeOverlayOptions().enabled);
-            uiReg_.track("view.showCollisionShapes");
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("The collision triangles of the selected entity's body and of every moving body, tinted by physical surface.\n"
-                                  "A yellow cross is the centre of mass, a cyan one the shape's origin. Static bodies: Show Colliders.");
+        editor::drawPhysicsDebugMenu(physicsDebug_, physicsDebugFrame_);   // the whole "Show Physics" submenu
+        uiReg_.track("view.showPhysics");
+        ImGui::MenuItem("Show Collision Shapes", nullptr, &editor::collisionShapeOverlayOptions().enabled);
+        uiReg_.track("view.showCollisionShapes");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("The collision triangles of the selected entity's body and of every moving body, tinted by physical surface.\n"
+                              "A yellow cross is the centre of mass, a cyan one the shape's origin. Static bodies: Show Colliders.");
 #if AVER_MODULE_HAIR_SCENE
-            if (ImGui::BeginMenu("Show Hair")) {
-                ImGui::MenuItem("Guide strands", nullptr, &editor::hairDebugOptions().guides);
-                ImGui::MenuItem("Collision proxies", nullptr, &editor::hairDebugOptions().proxies);
-                ImGui::MenuItem("Selected character only", nullptr, &editor::hairDebugOptions().selectedOnly);
-                ImGui::EndMenu();
-            }
-            uiReg_.track("view.showHair");
-#endif
-            // Toggling forgets the overlay; rebuildColliderOverlay skips unchanged frames.
-            if (ImGui::MenuItem("Show Colliders", nullptr, &showColliders_))
-                colliderOverlayBuilt_ = false;
-            uiReg_.track("view.showColliders");
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Every physics body's WORLD-SPACE BOUNDING BOX.\n"
-                                  "Green = static box, blue = static triangle mesh, amber = it moves.\n"
-                                  "A box collider is drawn exactly; a triangle mesh, sphere or capsule\n"
-                                  "is drawn as its bound -- it collides with its actual shape inside.");
-#endif
-            if (ImGui::MenuItem("Region Colours", nullptr, &navRegionColours_))
-                rebuildNavOverlay(e);
-#endif
+        if (ImGui::BeginMenu("Show Hair")) {
+            ImGui::MenuItem("Guide strands", nullptr, &editor::hairDebugOptions().guides);
+            ImGui::MenuItem("Collision proxies", nullptr, &editor::hairDebugOptions().proxies);
+            ImGui::MenuItem("Selected character only", nullptr, &editor::hairDebugOptions().selectedOnly);
             ImGui::EndMenu();
         }
-        uiReg_.track("menu.build");
-        if (ImGui::BeginMenu("Accessibility")) {
-            editor::drawColourVisionPreviewMenu(accessPreview_);
-            ImGui::EndMenu();
-        }
-        uiReg_.track("menu.accessibility");
-        if (ImGui::BeginMenu("Select")){
-            // Select All now works; disabled only when nothing to select.
-#if AVER_MODULE_SCENE
-            ImGui::BeginDisabled(outlinerOrder_.empty());
-            if (ImGui::MenuItem(ICON_SELECT_ALL " Select All",
-                                editor::chordToString(
-                                    keybinds_.chordFor(editor::CommandId::EditSelectAll)).c_str()))
-                selectAllInOutliner();
-            ImGui::EndDisabled();
-            uiReg_.track("select.all");
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) && outlinerOrder_.empty())
-                ImGui::SetTooltip("Nothing is listed in the World Outliner to select.");
+        uiReg_.track("view.showHair");
 #endif
-            // Clears both sel_ and selEntity_ to avoid stale data.
-            if(ImGui::MenuItem(ICON_DESELECT " Select None")) { sel_=-1; selEntity_=kInvalidId; }
-            uiReg_.track("select.none");
-            ImGui::EndMenu();
-        }
-        uiReg_.track("menu.select");
-        if (ImGui::BeginMenu("Help")){
-            if (ImGui::MenuItem(ICON_INFO " About Aver Engine")) showAbout_ = true;
-            uiReg_.track("help.about");
-            ImGui::EndMenu();
-        }
-        uiReg_.track("menu.help");
-        if (fontMedium_) ImGui::PopFont();
-        ImGui::EndMainMenuBar();
+        // Toggling forgets the overlay; rebuildColliderOverlay skips unchanged frames.
+        if (ImGui::MenuItem("Show Colliders", nullptr, &showColliders_))
+            colliderOverlayBuilt_ = false;
+        uiReg_.track("view.showColliders");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Every physics body's WORLD-SPACE BOUNDING BOX.\n"
+                              "Green = static box, blue = static triangle mesh, amber = it moves.\n"
+                              "A box collider is drawn exactly; a triangle mesh, sphere or capsule\n"
+                              "is drawn as its bound -- it collides with its actual shape inside.");
+#endif
+        if (ImGui::MenuItem("Region Colours", nullptr, &navRegionColours_))
+            rebuildNavOverlay(e);
+#endif
+        ImGui::EndMenu();
     }
+    uiReg_.track("menu.build");
+}
+#endif
 
-    const ImGuiViewport* mv = ImGui::GetMainViewport();
-    const ImVec2 wpos = mv->WorkPos, wsize = mv->WorkSize; // already excludes the menu bar
-    const f32 toolbarH = 42.0f*dpi_, statusH = 26.0f*dpi_;
-
+#if AVER_WITH_IMGUI
+// The main toolbar: save, Add, compile, play controls and settings.
+void SandboxApp::drawMainToolbar(Engine& e, const ImVec2& wpos, const ImVec2& wsize, f32 toolbarH) {
     // ---- main toolbar ----
     ImGui::SetNextWindowPos(wpos);
     ImGui::SetNextWindowSize(ImVec2(wsize.x, toolbarH));
@@ -2449,7 +2327,12 @@ ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
     }
     ImGui::End();
     ImGui::PopStyleVar(2);
+}
+#endif
 
+#if AVER_WITH_IMGUI
+// The dockspace host window and the first-run dock layout.
+void SandboxApp::drawDockHost(const ImVec2& wpos, const ImVec2& wsize, f32 toolbarH, f32 statusH) {
     // ---- dockspace host ----
     ImGui::SetNextWindowPos(ImVec2(wpos.x, wpos.y + toolbarH));
     ImGui::SetNextWindowSize(ImVec2(wsize.x, wsize.y - toolbarH - statusH));
@@ -2494,7 +2377,12 @@ ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
     if (const ImGuiDockNode* cn = ImGui::DockBuilderGetCentralNode(dockId)) centralDock_ = cn->ID;
     editor::drawDockSplitterLines(dockId);
     ImGui::End(); // ##dockhost
+}
+#endif
 
+#if AVER_WITH_IMGUI
+// The Level tab: the scene texture, the asset and actor drop target, and viewport hover state.
+void SandboxApp::drawLevelTab(Engine& e) {
     // ---- the level, as a tab drawing the scene texture ----
     {
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
@@ -2586,52 +2474,12 @@ ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
         ImGui::End();
         ImGui::PopStyleVar();
     }
+}
+#endif
 
-    // No mode panel in Select (redundant with viewport toolbar).
-    outlinerFocused_ = false;
-    detailsFocused_  = false;
-    if (levelVisible_ || !assetEditors_.anyOpen()) {
-        if (mode_ != EditorMode::Select) buildModePanel(e);
-#if AVER_MODULE_SCENE
-        // A floating timeline over the viewport's bottom edge until the user docks it.
-        if (mode_ == EditorMode::Animate && !sequenceRunActive()) buildSequencerWindow();
-#endif
-        buildPanels(e);
-    }
-    // A --sequence-play run keeps the viewport free of overlays: its captures are the comparison.
-#if AVER_MODULE_SCENE
-    const bool runClean = sequenceRunActive();
-#else
-    const bool runClean = false;
-#endif
-    // While a game plays (not ejected) the view is the game's: the toolbars would sit over its HUD (a label in the top-left corner). F8 brings them back.
-    const bool gameView = playSessionActive() && !playEjected_;
-    if (levelVisible_ && !runClean && !gameView) buildViewportOverlay();
-    drawDrawer(e);
-    // drawNotifications after drawDrawer (needs drawerPixelH_ from this frame).
-    if (!runClean) drawNotifications();
-#if AVER_MODULE_SCENE
-    editor::prefabCreateDialogDraw(prefabDlg_, prefabModel_, prefabUiCallbacks());
-    // [wave3/level-instances] the Create Level Instance dialog (the outliner's context menu opens it)
-    editor::levelInstanceCreateDialogDraw(levelInstanceDlg_, levelInstanceModel_,
-                                          [this](scene::Entity e, fmt::OcWorldData& into, i32 parentIdx) {
-                                              return captureEntityForInstance(e, into, parentIdx);
-                                          },
-                                          levelInstanceUiCallbacks());
-#endif
-    buildEditorPrefs();
-    buildProjectSettings();
-    buildWorldSettings();
-    buildProfilerPanel(e);
-    buildNeuralVisualiserPanel(e);
-    buildReferencesPanel();
-    buildRevisionControlPanel();
-#if AVER_MODULE_SCENE
-#if AVER_WITH_IMGUI
-    buildChunkStreamingPanel();
-#endif
-#endif
-#if AVER_MODULE_SCENE
+#if AVER_WITH_IMGUI && AVER_MODULE_SCENE
+// Resolves the --select request. Returns true when it matched a Sun / Sky / Post Process entry.
+bool SandboxApp::applySelectRequest() {
     // Cleared after it fires (prevent repeated firing each frame).
     if (!selectEntity_.empty() && frameNo_ > 5) {
         const std::string want = selectEntity_;
@@ -2646,7 +2494,7 @@ ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
                 if (std::string(ps.shown).find(want) == std::string::npos) continue;
                 sel_ = ps.sel; selEntity_ = kInvalidId;
                 AVER_INFO("[Editor] --select matched '{}' for '{}'", ps.shown, want);
-                return;
+                return true;
             }
         }
         scene::World& sw = scene::World::instance();
@@ -2671,7 +2519,13 @@ ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
                       want, n);
         }
     }
+    return false;
+}
 #endif
+
+#if AVER_WITH_IMGUI
+// Applies --open-asset, --graph-select and --graph-tab once the editor is up.
+void SandboxApp::applyOpenAssetRequests() {
     if (!openAsset_.empty() && frameNo_ > 5) {
         std::string want = openAsset_;
         openAsset_.clear();
@@ -2719,42 +2573,12 @@ ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
             AVER_ERROR("[Editor] --graph-tab: no open editor for '{}'", lastOpenAssetPath_);
         }
     }
-    pumpContentWatch();
-    cbApplyWatchEvents();
-    assetEditors_.draw(e, centralDock_, dpi_);
-    tools_.drawModals(project_, dpi_);
-    editor::extensionImporter().drawModal(dpi_);
-    editor::extensionsWindow().draw(dpi_);
-    drawDataLayersPanel();
-    pollHlodBuild();
-    // The converted project an import dialog was told to open: the same switch the project browser makes.
-    if (const std::string converted = editor::extensionImporter().takeOpenRequest(); !converted.empty()) {
-        std::string openErr;
-        if (levelHasUnsavedEdits() || assetEditors_.anyDirty()) {
-            editor::Notification n;
-            n.severity = editor::NotifySeverity::Warning;
-            n.title = "Save before opening the converted project";
-            n.body = "The open level or an asset has unsaved edits. Save, then open " + converted + " from the project browser.";
-            editor::notifications().push(std::move(n));
-        } else if (browser_.open(converted, &openErr)) {
-            applyProject(e);
-        } else {
-            AVER_ERROR("[Editor] cannot open the imported project {}: {}", converted, openErr);
-        }
-    }
-    nrd2Session_.drawWindow(dpi_);
-    drawUpgradePrompt();
-    drawAboutPrompt(e);
-    drawSaveLevelAsPrompt();
-    drawOpenLevelPrompt(e);
-    drawRecoveryPrompt(e);
-    drawExitPrompt(e);
-    drawPendingOpenPrompt(e);
-    drawLaunchRuntimePrompt(e);
-#if AVER_MODULE_SCENE
-    applyPendingOpen(e);
+}
 #endif
 
+#if AVER_WITH_IMGUI
+// The status bar: project, frame rate, VRAM, background tasks and the drawer buttons.
+void SandboxApp::drawStatusBar(Engine& e, const ImVec2& wpos, const ImVec2& wsize, f32 statusH) {
     // ---- status bar ----
     ImGui::SetNextWindowPos(ImVec2(wpos.x, wpos.y + wsize.y - statusH));
     ImGui::SetNextWindowSize(ImVec2(wsize.x, statusH));
@@ -2984,6 +2808,253 @@ ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
     statusFont.reset();
     ImGui::End();
     ImGui::PopStyleVar(2);
+}
+#endif
+
+// Builds the whole editor UI for one frame: menu bar, toolbars, panels, drawers and dialogs.
+void SandboxApp::buildUI(Engine& e) {
+#if AVER_WITH_IMGUI
+    uiReg_.beginFrame();
+#endif
+    prefsDevice_ = e.device();
+#if AVER_WITH_IMGUI
+    if (!prefsLoaded_) { prefsLoaded_ = true; loadEditorPreferences(); }
+#endif
+#if AVER_MODULE_SCENE
+    if (wantMeshReload_) {
+        wantMeshReload_ = false;
+        releaseProjectMeshes(e);
+        loadProjectMeshes(e);
+    }
+#endif
+    if (vsyncOffRequested_) {
+        vsyncOffRequested_ = false;
+        if (prefsDevice_->vsyncCanDisable()) { prefsDevice_->setVSync(false); AVER_INFO("[Sandbox] vsync OFF (--no-vsync)"); }
+        else AVER_WARN("[Sandbox] --no-vsync ignored: this display path cannot tear");
+    }
+    // --vsync: forces it ON, overriding stored preference.
+    if (vsyncOnRequested_) {
+        vsyncOnRequested_ = false;
+        prefsDevice_->setVSync(true);
+        AVER_INFO("[Sandbox] vsync ON (--vsync)");
+    }
+#if AVER_WITH_IMGUI
+    if (!e.device()->uiActive()) return;
+    ++frameNo_;   // the Content Browser's directory-cache freshness clock
+#if AVER_MODULE_SCENE
+    // A render queue job owns the screen: no panels, only the scene in a rect the size of the output.
+    // The post chain then writes the backbuffer, not the texture the (undrawn) Level panel shows.
+    if (renderJobOwnsScreen()) {
+        e.device()->setViewportToTexture(false);
+        applyRenderJobViewport();
+        return;
+    }
+#endif
+
+    if (browserActive_) {
+        // Test hook: AVER_TEST_BROWSER_OPEN=<.ocproject> opens it through this browser path after 120 frames.
+        static const char* testOpen = std::getenv("AVER_TEST_BROWSER_OPEN");
+        if (testOpen && *testOpen && frameNo_ >= 120 && browser_.open(testOpen, nullptr)) {
+            applyProject(e);
+            browserActive_ = false;
+            return;
+        }
+        editor::BrowserAction action = browser_.draw(dpi_, fontMedium_, logoUiId_, logoAspect_);
+        // An importer's start-screen button opens its dialog here; the project it converted opens through the browser's upgrade gate.
+        editor::extensionImporter().drawModal(dpi_);
+        if (const std::string converted = editor::extensionImporter().takeOpenRequest(); !converted.empty() && action == editor::BrowserAction::Stay) {
+            std::string openErr;
+            if (browser_.openOrOfferUpgrade(converted, &openErr)) action = editor::BrowserAction::Open;
+            else if (!browser_.upgradePending()) AVER_ERROR("[Editor] cannot open the imported project {}: {}", converted, openErr);
+        }
+        switch (action) {
+            case editor::BrowserAction::Open: applyProject(e); browserActive_ = false; break;
+            case editor::BrowserAction::Skip: browserActive_ = false; break;
+            case editor::BrowserAction::Quit: requestExitChecked(e); break;
+            case editor::BrowserAction::Stay: break;
+        }
+        return;
+    }
+
+    // Test hook: AVER_TEST_OPEN_LEVEL=<level path> opens it as the Content Browser does, 300 frames after the
+    // project is up (the mid-session level open a user does).
+#if AVER_MODULE_SCENE
+    {
+        static const char* testLevel = std::getenv("AVER_TEST_OPEN_LEVEL");
+        static u64 projectUpAt = 0;
+        static bool levelDone = false;
+        if (testLevel && *testLevel && !levelDone) {
+            if (!projectUpAt) projectUpAt = frameNo_;
+            else if (frameNo_ >= projectUpAt + 300) { levelDone = true; requestOpenLevel(testLevel, "test hook"); }
+        }
+    }
+#endif
+    // Before anything draws; reaps finished workers and may start one.
+    revisionControlTick();
+
+    // Drawer shortcuts (Ctrl+Space: Content Browser, `: Console, Escape: close).
+    {
+        const ImGuiIO& io = ImGui::GetIO();
+        if (!io.WantTextInput && !io.WantCaptureKeyboard) {
+            if (keybinds_.pressed(editor::CommandId::DrawerToggleContent, io)) toggleDrawer(Drawer::Content);
+            if (keybinds_.pressed(editor::CommandId::DrawerToggleConsole, io)) toggleDrawer(Drawer::Console);
+            if (drawer_ != Drawer::None && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel) &&
+                keybinds_.pressed(editor::CommandId::DrawerDismiss, io))
+                drawer_ = Drawer::None;
+        }
+    }
+
+    // The four panel windows were renamed (a tab icon in the title); carry a saved layout across.
+    { static bool migrated = false; if (!migrated) { migrated = true; editor::migrateWindowSettings(); } }
+
+    // ---- menu bar ----
+    if (ImGui::BeginMainMenuBar()) {
+        if (fontMedium_) ImGui::PushFont(fontMedium_, 0.0f);
+        // The engine's mark, as Unreal shows its logo at the start of the menu bar; the drawn "AE" only when logo.png is missing.
+        if (logoSmallUiId_) {
+            const f32 h = ImGui::GetFrameHeight() * 0.92f;
+            const f32 y = ImGui::GetCursorPosY();
+            ImGui::SetCursorPosY(y + (ImGui::GetFrameHeight() - h) * 0.5f);
+            ImGui::Image(static_cast<ImTextureID>(logoSmallUiId_), ImVec2(h * logoAspect_, h));
+            ImGui::SetCursorPosY(y);
+            ImGui::SameLine(0.0f, 6.0f * dpi_);
+        } else {
+            ImGui::TextColored(ImVec4(0.95f,0.42f,0.13f,1),"AE");
+        }
+        drawFileMenu(e);
+        drawEditMenu();
+        drawWindowMenu();
+        tools_.drawMenu(project_);
+        drawBuildMenu(e);
+        if (ImGui::BeginMenu("Accessibility")) {
+            editor::drawColourVisionPreviewMenu(accessPreview_);
+            ImGui::EndMenu();
+        }
+        uiReg_.track("menu.accessibility");
+        if (ImGui::BeginMenu("Select")){
+            // Select All now works; disabled only when nothing to select.
+#if AVER_MODULE_SCENE
+            ImGui::BeginDisabled(outlinerOrder_.empty());
+            if (ImGui::MenuItem(ICON_SELECT_ALL " Select All",
+                                editor::chordToString(
+                                    keybinds_.chordFor(editor::CommandId::EditSelectAll)).c_str()))
+                selectAllInOutliner();
+            ImGui::EndDisabled();
+            uiReg_.track("select.all");
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) && outlinerOrder_.empty())
+                ImGui::SetTooltip("Nothing is listed in the World Outliner to select.");
+#endif
+            // Clears both sel_ and selEntity_ to avoid stale data.
+            if(ImGui::MenuItem(ICON_DESELECT " Select None")) { sel_=-1; selEntity_=kInvalidId; }
+            uiReg_.track("select.none");
+            ImGui::EndMenu();
+        }
+        uiReg_.track("menu.select");
+        if (ImGui::BeginMenu("Help")){
+            if (ImGui::MenuItem(ICON_INFO " About Aver Engine")) showAbout_ = true;
+            uiReg_.track("help.about");
+            ImGui::EndMenu();
+        }
+        uiReg_.track("menu.help");
+        if (fontMedium_) ImGui::PopFont();
+        ImGui::EndMainMenuBar();
+    }
+
+    const ImGuiViewport* mv = ImGui::GetMainViewport();
+    const ImVec2 wpos = mv->WorkPos, wsize = mv->WorkSize; // already excludes the menu bar
+    const f32 toolbarH = 42.0f*dpi_, statusH = 26.0f*dpi_;
+
+    drawMainToolbar(e, wpos, wsize, toolbarH);
+
+    drawDockHost(wpos, wsize, toolbarH, statusH);
+
+    drawLevelTab(e);
+
+    // No mode panel in Select (redundant with viewport toolbar).
+    outlinerFocused_ = false;
+    detailsFocused_  = false;
+    if (levelVisible_ || !assetEditors_.anyOpen()) {
+        if (mode_ != EditorMode::Select) buildModePanel(e);
+#if AVER_MODULE_SCENE
+        // A floating timeline over the viewport's bottom edge until the user docks it.
+        if (mode_ == EditorMode::Animate && !sequenceRunActive()) buildSequencerWindow();
+#endif
+        buildPanels(e);
+    }
+    // A --sequence-play run keeps the viewport free of overlays: its captures are the comparison.
+#if AVER_MODULE_SCENE
+    const bool runClean = sequenceRunActive();
+#else
+    const bool runClean = false;
+#endif
+    // While a game plays (not ejected) the view is the game's: the toolbars would sit over its HUD (a label in the top-left corner). F8 brings them back.
+    const bool gameView = playSessionActive() && !playEjected_;
+    if (levelVisible_ && !runClean && !gameView) buildViewportOverlay();
+    drawDrawer(e);
+    // drawNotifications after drawDrawer (needs drawerPixelH_ from this frame).
+    if (!runClean) drawNotifications();
+#if AVER_MODULE_SCENE
+    editor::prefabCreateDialogDraw(prefabDlg_, prefabModel_, prefabUiCallbacks());
+    // [wave3/level-instances] the Create Level Instance dialog (the outliner's context menu opens it)
+    editor::levelInstanceCreateDialogDraw(levelInstanceDlg_, levelInstanceModel_,
+                                          [this](scene::Entity e, fmt::OcWorldData& into, i32 parentIdx) {
+                                              return captureEntityForInstance(e, into, parentIdx);
+                                          },
+                                          levelInstanceUiCallbacks());
+#endif
+    buildEditorPrefs();
+    buildProjectSettings();
+    buildWorldSettings();
+    buildProfilerPanel(e);
+    buildNeuralVisualiserPanel(e);
+    buildReferencesPanel();
+    buildRevisionControlPanel();
+#if AVER_MODULE_SCENE
+#if AVER_WITH_IMGUI
+    buildChunkStreamingPanel();
+#endif
+#endif
+#if AVER_MODULE_SCENE
+    if (applySelectRequest()) return;
+#endif
+    applyOpenAssetRequests();
+    pumpContentWatch();
+    cbApplyWatchEvents();
+    assetEditors_.draw(e, centralDock_, dpi_);
+    tools_.drawModals(project_, dpi_);
+    editor::extensionImporter().drawModal(dpi_);
+    editor::extensionsWindow().draw(dpi_);
+    drawDataLayersPanel();
+    pollHlodBuild();
+    // The converted project an import dialog was told to open: the same switch the project browser makes.
+    if (const std::string converted = editor::extensionImporter().takeOpenRequest(); !converted.empty()) {
+        std::string openErr;
+        if (levelHasUnsavedEdits() || assetEditors_.anyDirty()) {
+            editor::Notification n;
+            n.severity = editor::NotifySeverity::Warning;
+            n.title = "Save before opening the converted project";
+            n.body = "The open level or an asset has unsaved edits. Save, then open " + converted + " from the project browser.";
+            editor::notifications().push(std::move(n));
+        } else if (browser_.open(converted, &openErr)) {
+            applyProject(e);
+        } else {
+            AVER_ERROR("[Editor] cannot open the imported project {}: {}", converted, openErr);
+        }
+    }
+    nrd2Session_.drawWindow(dpi_);
+    drawUpgradePrompt();
+    drawAboutPrompt(e);
+    drawSaveLevelAsPrompt();
+    drawOpenLevelPrompt(e);
+    drawRecoveryPrompt(e);
+    drawExitPrompt(e);
+    drawPendingOpenPrompt(e);
+    drawLaunchRuntimePrompt(e);
+#if AVER_MODULE_SCENE
+    applyPendingOpen(e);
+#endif
+
+    drawStatusBar(e, wpos, wsize, statusH);
 #else
     (void)e;
 #endif

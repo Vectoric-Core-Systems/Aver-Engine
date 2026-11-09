@@ -2975,31 +2975,10 @@ static void beginOverlayBar(const char* id, ImGuiWindowFlags flags) {
     ImGui::PopStyleColor(2);
 }
 
-// Draws the viewport's overlay bars: view options on the left, transform tools, snapping and
-// camera speed on the right.
-void SandboxApp::buildViewportOverlay() {
-    if (vpW_ < 80.0f || vpH_ < 60.0f) return;
-    const f32 pad = 8.0f*dpi_;
-    const ImGuiWindowFlags f = ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoMove|
-                               ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_AlwaysAutoResize|
-                               ImGuiWindowFlags_NoDocking|ImGuiWindowFlags_NoSavedSettings|
-                               ImGuiWindowFlags_NoFocusOnAppearing|ImGuiWindowFlags_NoNavFocus;
-
-    // ONE bar across the top of the viewport: view options left, tools / snap / camera right. The right
-    // cluster is aligned from the width it measured last frame (vpBarRightW_).
-    ImGui::SetNextWindowPos(ImVec2(vpX_, vpY_), ImGuiCond_Always, ImVec2(0,0));
-    ImGui::SetNextWindowSizeConstraints(ImVec2(vpW_, 0.0f), ImVec2(vpW_, FLT_MAX));
-    // Compact, like Unreal's viewport toolbar: the small UI font and tight padding keep the whole bar on one row (at 300% DPI the body
-    // font and default padding needed two). The popups opened from the bar share the compact look.
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4.0f * dpi_, 3.0f * dpi_));
-    beginOverlayBar("##vpbar", f);
-    ImGui::PopStyleVar();
-    const bool barFont = editor::editorFonts().secondary != nullptr;
-    if (barFont) ImGui::PushFont(editor::editorFonts().secondary, editor::editorFonts().secondaryPx);
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(5.0f * dpi_, 2.0f * dpi_));
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(3.0f * dpi_, 3.0f * dpi_));
+// The "< Back to" button for an opened level instance and the Perspective / layout popup.
+void SandboxApp::drawViewportViewTypeMenu() {
 #if AVER_MODULE_SCENE
-    // [wave3/level-instances] Open Level on an instance left a way back: this button.
+    // Open Level on an instance left a way back: this button.
     if (const editor::LevelReturnPoint* rp = levelInstanceModel_.returnTop()) {
         const std::string back = "< Back to " + std::filesystem::path(rp->levelPath).stem().string();
         if (ImGui::Button(back.c_str())) levelInstanceBack();
@@ -3023,7 +3002,10 @@ void SandboxApp::buildViewportOverlay() {
             ImGui::SetTooltip("The renderer draws one view per frame; more panes need multi-view rendering.");
         ImGui::EndPopup();
     }
-    ImGui::SameLine();
+}
+
+// The view-mode dropdown: Lit, Unlit, Wireframe and the debug views.
+void SandboxApp::drawViewportViewModeMenu() {
     // Wireframe/a G-buffer debug view force the rasteriser; a ray-hit/triangles debug view forces
     // ray-driven primary visibility -- onUpdate's scratch-copy override (SandboxApp.cpp), never
     // written back to the project. authoredRayDriven is whether that's actually a FALLBACK, the
@@ -3199,7 +3181,10 @@ void SandboxApp::buildViewportOverlay() {
                               "sky-occlusion spatial filters have no runtime knob and stay on.");
         ImGui::EndPopup();
     }
-    ImGui::SameLine();
+}
+
+// The Show dropdown (flags and Go To); returns where the left cluster ends, in window space.
+f32 SandboxApp::drawViewportShowMenu() {
     if (dropButton("Show")) ImGui::OpenPopup("showFlags");
     uiReg_.track("viewport.show");
     const f32 leftEndX = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;   // where the left cluster ends
@@ -3240,22 +3225,11 @@ void SandboxApp::buildViewportOverlay() {
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Fill the fields with the camera's position.");
         ImGui::EndPopup();
     }
-    const f32 icon = ImGui::GetFrameHeight(), gap = 4.0f*dpi_, tinyGap = 1.0f*dpi_;
-    // Right-aligned on the same row when both clusters fit; otherwise the right cluster takes a second row instead of
-    // being drawn over the left one (at 300% DPI, or with the Mode panel docked beside the viewport, they do not fit).
-    const f32 rightX = ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - vpBarRightW_;
-    if (rightX >= leftEndX + gap * 3.0f) ImGui::SameLine(rightX);
-    else ImGui::SetCursorPosX(std::fmax(ImGui::GetStyle().WindowPadding.x, rightX));
-    const f32 rightStartX = ImGui::GetCursorScreenPos().x;
-    auto toolBtn = [&](const char* id, int kind, bool active)->bool {
-        return editor::toolButton(id, kind, active, icon, dpi_);
-    };
+    return leftEndX;
+}
 
-    // Mode first, then that mode's tools, always leftmost ("what am I editing" before "with which
-    // tool" -- previously one flat row, how a brush ended up next to Rotate).
-    // A dropdown, not a row of buttons: two modes fit a row, four don't, and it'd grow per mode
-    // added; a combo also lets an unavailable entry carry its own explanation, which a greyed
-    // button can only deliver by hovering something that looks broken.
+// The editing-mode dropdown at the start of the right cluster.
+void SandboxApp::drawViewportModeCombo(f32 gap) {
     {
         ImGui::PushStyleColor(ImGuiCol_Button, kAverOrangeDim);
         ImGui::PushStyleColor(ImGuiCol_Header, kAverOrangeDim);
@@ -3290,41 +3264,51 @@ void SandboxApp::buildViewportOverlay() {
             ImGui::SetTooltip("Editing mode. Tab switches between Select and the last mode used.");
         ImGui::SameLine(0, gap*2);
     }
+}
 
 #if AVER_MODULE_LANDSCAPE
-    if (mode_ == EditorMode::Landscape) {
-        if (toolBtn("##tSRaise", 4, sculptTool_==SculptTool::Raise)) sculptTool_=SculptTool::Raise;
-        uiReg_.track("tool.sculptRaise");
-        ImGui::SameLine(0, gap);
-        if (toolBtn("##tSLower", 5, sculptTool_==SculptTool::Lower)) sculptTool_=SculptTool::Lower;
-        uiReg_.track("tool.sculptLower");
-        ImGui::SameLine(0, gap);
-        if (toolBtn("##tSSmooth", 6, sculptTool_==SculptTool::Smooth)) sculptTool_=SculptTool::Smooth;
-        uiReg_.track("tool.sculptSmooth");
-        ImGui::SameLine(0, gap);
-        if (toolBtn("##tSFlatten", 7, sculptTool_==SculptTool::Flatten)) sculptTool_=SculptTool::Flatten;
-        uiReg_.track("tool.sculptFlatten");
-        ImGui::SameLine(0, gap);
-        if (toolBtn("##tSRamp", 8, sculptTool_==SculptTool::Ramp)) sculptTool_=SculptTool::Ramp;
-        uiReg_.track("tool.sculptRamp");
-        ImGui::SameLine(0, gap);
-        if (toolBtn("##tSNoise", 9, sculptTool_==SculptTool::Noise)) sculptTool_=SculptTool::Noise;
-        uiReg_.track("tool.sculptNoise");
-        ImGui::SameLine(0, gap*2);
-        // Brush settings live here, in the mode that owns them, not appearing/disappearing from a shared row by tool.
-        char brushLbl[32]; std::snprintf(brushLbl, sizeof brushLbl, "Brush %.0f", sculptRadiusCm_);
-        if (dropButton(brushLbl)) ImGui::OpenPopup("brushParams");
-        ImGui::SameLine(0, gap);
-        if (ImGui::Button(landscape_.dirty() ? "Save Terrain *" : "Save Terrain")) saveLandscape();
-        uiReg_.track("landscape.save");
-        if (ImGui::BeginPopup("brushParams")) {
-            editor::panelFloat("Radius (cm)", &sculptRadiusCm_, 50.0f, 5000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
-            ImGui::SliderFloat("Strength (cm)", &sculptStrengthCm_, 5.0f, 2000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
-            ImGui::EndPopup();
-        }
-    } else
+// Sculpt tool buttons, brush popup and Save Terrain.
+void SandboxApp::drawViewportLandscapeTools(f32 icon, f32 gap) {
+    auto toolBtn = [&](const char* id, int kind, bool active)->bool {
+        return editor::toolButton(id, kind, active, icon, dpi_);
+    };
+    if (toolBtn("##tSRaise", 4, sculptTool_==SculptTool::Raise)) sculptTool_=SculptTool::Raise;
+    uiReg_.track("tool.sculptRaise");
+    ImGui::SameLine(0, gap);
+    if (toolBtn("##tSLower", 5, sculptTool_==SculptTool::Lower)) sculptTool_=SculptTool::Lower;
+    uiReg_.track("tool.sculptLower");
+    ImGui::SameLine(0, gap);
+    if (toolBtn("##tSSmooth", 6, sculptTool_==SculptTool::Smooth)) sculptTool_=SculptTool::Smooth;
+    uiReg_.track("tool.sculptSmooth");
+    ImGui::SameLine(0, gap);
+    if (toolBtn("##tSFlatten", 7, sculptTool_==SculptTool::Flatten)) sculptTool_=SculptTool::Flatten;
+    uiReg_.track("tool.sculptFlatten");
+    ImGui::SameLine(0, gap);
+    if (toolBtn("##tSRamp", 8, sculptTool_==SculptTool::Ramp)) sculptTool_=SculptTool::Ramp;
+    uiReg_.track("tool.sculptRamp");
+    ImGui::SameLine(0, gap);
+    if (toolBtn("##tSNoise", 9, sculptTool_==SculptTool::Noise)) sculptTool_=SculptTool::Noise;
+    uiReg_.track("tool.sculptNoise");
+    ImGui::SameLine(0, gap*2);
+    // Brush settings live here, in the mode that owns them, not appearing/disappearing from a shared row by tool.
+    char brushLbl[32]; std::snprintf(brushLbl, sizeof brushLbl, "Brush %.0f", sculptRadiusCm_);
+    if (dropButton(brushLbl)) ImGui::OpenPopup("brushParams");
+    ImGui::SameLine(0, gap);
+    if (ImGui::Button(landscape_.dirty() ? "Save Terrain *" : "Save Terrain")) saveLandscape();
+    uiReg_.track("landscape.save");
+    if (ImGui::BeginPopup("brushParams")) {
+        editor::panelFloat("Radius (cm)", &sculptRadiusCm_, 50.0f, 5000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
+        ImGui::SliderFloat("Strength (cm)", &sculptStrengthCm_, 5.0f, 2000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
+        ImGui::EndPopup();
+    }
+}
 #endif
-    {
+
+// Select / Move / Rotate / Scale, the space toggle, grid and snap strip.
+void SandboxApp::drawViewportTransformTools(f32 icon, f32 gap, f32 tinyGap) {
+    auto toolBtn = [&](const char* id, int kind, bool active)->bool {
+        return editor::toolButton(id, kind, active, icon, dpi_);
+    };
     if (toolBtn("##tSel", 0, tool_==Tool::Select)) tool_=Tool::Select;
     uiReg_.track("tool.select");
     ImGui::SameLine(0, gap);
@@ -3379,8 +3363,10 @@ void SandboxApp::buildViewportOverlay() {
         stepCombo("##snapSclStep", editor::SnapKind::Scale, scaleSnap_, editor::kScaleSnapPresets,
                   sizeof editor::kScaleSnapPresets / sizeof(f32));
     }
-    }
+}
 
+// The camera-speed button and popup; returns the right edge of the bar's content in screen space.
+f32 SandboxApp::drawViewportCameraSpeed(f32 gap) {
     ImGui::SameLine(0, gap);
     // "Cam 1" at the default 800 cm/s: %g (not %f) so the default reads as "Cam 1" not "Cam 1.00",
     // while slow speeds (0.25 vs 0.5 matters) keep 3 sig figs; whole numbers above 10 only -- at
@@ -3401,6 +3387,62 @@ void SandboxApp::buildViewportOverlay() {
         ImGui::TextDisabled("Right-drag the viewport and scroll UP to speed up.");
         ImGui::EndPopup();
     }
+    return rightEndX;
+}
+
+// Draws the viewport's overlay bars: view options on the left, transform tools, snapping and
+// camera speed on the right.
+void SandboxApp::buildViewportOverlay() {
+    if (vpW_ < 80.0f || vpH_ < 60.0f) return;
+    const f32 pad = 8.0f*dpi_;
+    const ImGuiWindowFlags f = ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoMove|
+                               ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_AlwaysAutoResize|
+                               ImGuiWindowFlags_NoDocking|ImGuiWindowFlags_NoSavedSettings|
+                               ImGuiWindowFlags_NoFocusOnAppearing|ImGuiWindowFlags_NoNavFocus;
+
+    // ONE bar across the top of the viewport: view options left, tools / snap / camera right. The right
+    // cluster is aligned from the width it measured last frame (vpBarRightW_).
+    ImGui::SetNextWindowPos(ImVec2(vpX_, vpY_), ImGuiCond_Always, ImVec2(0,0));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(vpW_, 0.0f), ImVec2(vpW_, FLT_MAX));
+    // Compact, like Unreal's viewport toolbar: the small UI font and tight padding keep the whole bar on one row (at 300% DPI the body
+    // font and default padding needed two). The popups opened from the bar share the compact look.
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4.0f * dpi_, 3.0f * dpi_));
+    beginOverlayBar("##vpbar", f);
+    ImGui::PopStyleVar();
+    const bool barFont = editor::editorFonts().secondary != nullptr;
+    if (barFont) ImGui::PushFont(editor::editorFonts().secondary, editor::editorFonts().secondaryPx);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(5.0f * dpi_, 2.0f * dpi_));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(3.0f * dpi_, 3.0f * dpi_));
+    drawViewportViewTypeMenu();
+    ImGui::SameLine();
+    drawViewportViewModeMenu();
+    ImGui::SameLine();
+    const f32 leftEndX = drawViewportShowMenu();
+    const f32 icon = ImGui::GetFrameHeight(), gap = 4.0f*dpi_, tinyGap = 1.0f*dpi_;
+    // Right-aligned on the same row when both clusters fit; otherwise the right cluster takes a second row instead of
+    // being drawn over the left one (at 300% DPI, or with the Mode panel docked beside the viewport, they do not fit).
+    const f32 rightX = ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - vpBarRightW_;
+    if (rightX >= leftEndX + gap * 3.0f) ImGui::SameLine(rightX);
+    else ImGui::SetCursorPosX(std::fmax(ImGui::GetStyle().WindowPadding.x, rightX));
+    const f32 rightStartX = ImGui::GetCursorScreenPos().x;
+
+    // Mode first, then that mode's tools, always leftmost ("what am I editing" before "with which
+    // tool" -- previously one flat row, how a brush ended up next to Rotate).
+    // A dropdown, not a row of buttons: two modes fit a row, four don't, and it'd grow per mode
+    // added; a combo also lets an unavailable entry carry its own explanation, which a greyed
+    // button can only deliver by hovering something that looks broken.
+    drawViewportModeCombo(gap);
+
+#if AVER_MODULE_LANDSCAPE
+    if (mode_ == EditorMode::Landscape) {
+        drawViewportLandscapeTools(icon, gap);
+    } else
+#endif
+    {
+        drawViewportTransformTools(icon, gap, tinyGap);
+    }
+
+    const f32 rightEndX = drawViewportCameraSpeed(gap);
 
     vpBarRightW_ = rightEndX - rightStartX;
     ImGui::PopStyleVar(2);

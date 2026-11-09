@@ -1267,6 +1267,1103 @@ void SandboxApp::buildAudioSettings() {
 }
 
 #if AVER_MODULE_VOXI
+// Settings > Rendering, Overview: Overall Quality rungs, per-group follow and the feature summary.
+void SandboxApp::renderPageOverview(voxi::Renderer& vx, voxi::Settings& s, const voxi::Resolution& er, bool& changed, u32& overallFollowMask) {
+    using namespace aver::voxi;
+    // Overall Quality: one button moves GI/Ray Tracing/Path Tracing to same rung.
+    ImGui::TextUnformatted("Overall Quality");
+    {
+        const auto qualityButton = [&](const char* label, bool active) {
+            if (active) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+            const bool hit = ImGui::Button(label);
+            if (active) ImGui::PopStyleColor();
+            return hit;
+        };
+        const OverallQuality cur = overallFromSettings(s, vx.deviceInfo());
+        static const OverallQuality kRungs[] = {OverallQuality::Low, OverallQuality::Medium,
+                                                OverallQuality::High, OverallQuality::Epic};
+        static const char* kRungNames[] = {"Low", "Medium", "High", "Epic"};
+        for (int i = 0; i < 4; ++i) {
+            if (i) ImGui::SameLine();
+            if (qualityButton(kRungNames[i], cur == kRungs[i])) {
+                overallFollowMask |= applyOverall(s, kRungs[i], vx.deviceInfo());
+                changed = true;
+#if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
+                // The particle scalability tier follows the preset unless the project pins it (RENDER.PARTICLESCALE).
+                particles::ScalabilityTier pt;
+                if (project_.particleScale < 0 && particles::tierForQualityRung(static_cast<u32>(kRungs[i]), pt))
+                    particles::particleEffects().setScalabilityTier(pt);
+#endif
+            }
+            if (kRungs[i] == OverallQuality::Epic && ImGui::IsItemHovered())
+                ImGui::SetTooltip("Global Illumination's voxel grid goes to 512^3, about\n"
+                                  "3.2 GB -- by far the steepest rung on that ladder. The grid\n"
+                                  "is only ever built at init, so this takes effect on the\n"
+                                  "next project reload, not immediately.");
+        }
+        if (cur == OverallQuality::Custom) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1), "Custom");
+        }
+        // Rungs turn Path Tracing OFF: any tier above Off silently drops to Off.
+        if (s.pathTracing != Quality::Off)
+            ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
+                               "Picking a preset turns path tracing off (the method is %s now).",
+                               s.ptMode == 1u ? "reference path tracing" : "ReSTIR path tracing");
+    }
+
+    // Two groups: each Off..Epic row (where Custom lives). "(modified)" = hand-edited knob. Path tracing
+    // is a Global Illumination method (its page), not a group of its own.
+    {
+        static const ScalabilityGroup kGroups[] = {ScalabilityGroup::GlobalIllumination,
+                                                   ScalabilityGroup::RayTracing};
+        static const Feature kGroupFeature[] = {Feature::GlobalIllumination, Feature::RayTracing};
+        static const char* kGroupLabel[] = {"Global Illumination", "Ray Tracing"};
+        static const char* kTierNames[] = {"Off", "Low", "Medium", "High", "Epic"};
+        // Per-group setter; mirrors applyOverall (Scalability.hpp).
+        const auto setGroupTier = [](Settings& set, ScalabilityGroup g, Quality t) {
+            switch (g) {
+                case ScalabilityGroup::GlobalIllumination:
+                    set.globalIllumination = t;
+                    set.voxelResolution    = ladder::voxelResolution(t);
+                    set.giCones            = ladder::giCones(t);
+                    set.giUpdateInterval   = ladder::giUpdateInterval(t);
+                    set.giRestirVisibility = ladder::giRestirVisibility(t);
+                    break;
+                case ScalabilityGroup::RayTracing:
+                    set.rayTracing         = t;
+                    set.rtShadowRays       = ladder::rtShadowRays(t);
+                    set.rtPixelsPerRayTile = ladder::rtPixelsPerRayTile(t);
+                    set.rtShadowDenoise    = ladder::rtShadowDenoise(t);
+                    set.rtRenderMode       = ladder::rtRenderMode(t);
+                    set.refractionMode     = ladder::refraction(t);
+                    set.giSkyOcclusionRays = ladder::giSkyOcclusionRays(t);
+                    set.giSkyOcclusionTile = ladder::giSkyOcclusionTile(t);
+                    set.lightSamples       = ladder::lightSamples(t);
+                    set.lightCandidates    = ladder::lightCandidates(t);
+                    set.lightHitCandidates = ladder::lightHitCandidates(t);
+                    break;
+                default: break;
+            }
+        };
+        for (int gi = 0; gi < 2; ++gi) {
+            const ScalabilityGroup group = kGroups[gi];
+            ImGui::PushID(gi);
+            ImGui::TextUnformatted(kGroupLabel[gi]);
+            featureStatusBadge(vx, kGroupFeature[gi]);
+            if (!groupFollowsLadder(s, group)) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1), "(modified)");
+            }
+            const bool avail = groupAvailable(group, vx.deviceInfo());
+            ImGui::BeginDisabled(!avail);
+            const Quality gt = groupTier(s, group);
+            const auto qualityButton = [&](const char* label, bool active) {
+                if (active) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+                const bool hit = ImGui::Button(label);
+                if (active) ImGui::PopStyleColor();
+                return hit;
+            };
+            for (int i = 0; i < 5; ++i) {
+                if (i) ImGui::SameLine();
+                if (qualityButton(kTierNames[i], static_cast<u32>(gt) == static_cast<u32>(i))) {
+                    setGroupTier(s, group, static_cast<Quality>(i));
+                    overallFollowMask |= 1u << static_cast<u32>(group);
+                    changed = true;
+                }
+            }
+            ImGui::EndDisabled();
+            ImGui::PopID();
+        }
+    }
+    ImGui::Separator();
+    {
+        // Renderer choice takes effect on restart (device created before project loads).
+        {
+            static const char* kNames[] = {"Engine default", "D3D12", "Vulkan", "D3D11"};
+            static const char* kKeys[]  = {"", "d3d12", "vulkan", "d3d11"};
+            int cur = 0;
+            for (int i = 1; i < 4; ++i) if (projectBackend_ == kKeys[i]) { cur = i; break; }
+            if (ImGui::Combo("Renderer", &cur, kNames, 4)) {
+                projectBackend_ = kKeys[cur];
+                projectDirty_ = true;
+            }
+            uiReg_.track("project.backend");
+            // Shows what is actually running beside what was asked for.
+            ImGui::SameLine();
+            ImGui::TextDisabled("(now: %s)", runningBackend_.c_str());
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Takes effect on the next launch.\n"
+                                  "A backend must be compiled into the build to be usable:\n"
+                                  "configure with -DAVER_RHI_VULKAN=ON for Vulkan.");
+        }
+    }
+}
+
+// Settings > Rendering, Anti-Aliasing: MSAA, AverSR upscaling and frame generation.
+void SandboxApp::renderPageAntiAliasing(voxi::Renderer& vx, voxi::Settings& s, const voxi::Resolution& er, bool& changed) {
+    using namespace aver::voxi;
+    ImGui::TextUnformatted(Renderer::featureName(Feature::Msaa));
+    const u32 mask = vx.deviceInfo().msaaMask;
+    const u32 counts[4] = {1,2,4,8};
+    const char* labels[4] = {"Off","2x","4x","8x"};
+    for (int i=0;i<4;++i) {
+        const bool ok = (mask & counts[i]) != 0;
+        if (i) ImGui::SameLine();
+        ImGui::BeginDisabled(!ok);
+        if (ImGui::RadioButton(labels[i], static_cast<u32>(s.msaa)==counts[i])) { s.msaa=static_cast<Msaa>(counts[i]); changed=true; }
+        ImGui::EndDisabled();
+    }
+    // rtRenderMode.effective: whether ray pass is ACTUALLY ray-driven (not raw request).
+    if (er.rtRenderMode.effective == 1)
+        ImGui::TextDisabled("Primary visibility is ray-driven, so the frame runs at 1x (one ray a pixel); "
+                            "this setting applies when the rasteriser draws.");
+
+#if AVER_MODULE_SR
+    {
+        bool taa = temporalAaEnabled_;
+        ImGui::BeginDisabled(taaFromCli_);
+        if (ImGui::Checkbox("Temporal anti-aliasing (TAA)", &taa)) {
+            temporalAaEnabled_ = taa;
+            project_.taa = taa ? 1 : 0;
+            projectDirty_ = true;
+        }
+        ImGui::EndDisabled();
+        uiReg_.track("project.taa");
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("Jitters the camera by a fraction of a pixel each frame and blends the frames,\n"
+                              "reprojected with motion vectors: smooth edges and stable detail, upscaled to\n"
+                              "the window. Needs MSAA 1 (it reads the G-buffer); otherwise FSR 1 is used.\n"
+                              "Runs moving and still; in motion it leans on the current frame so\n"
+                              "nothing trails.\n\n"
+                              "Round-trips as RENDER.TAA. --taa / --no-taa outrank it.");
+        if (taa && er.sampleCount != 1u)
+            ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
+                               "   MSAA is %ux -- TAA needs 1x, so FSR 1 is used instead.",
+                               static_cast<u32>(s.msaa));
+    }
+    {
+        bool nra = neuraaEnabled_;
+        ImGui::BeginDisabled(neuraaFromCli_);
+        if (ImGui::Checkbox("NeuRAA edge anti-aliasing", &nra)) {
+            neuraaEnabled_ = nra;
+            project_.neuraa = nra ? 1 : 0;
+            projectDirty_ = true;
+        }
+        ImGui::EndDisabled();
+        uiReg_.track("project.neuraa");
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("Finds geometric edges from the ray-traced primary visibility and blends\n"
+                              "each edge pixel with its neighbour by how much of it each surface covers.\n"
+                              "One frame, no history: it works while the camera moves, where TAA does not,\n"
+                              "and TAA builds on it at rest. Ray-driven primary visibility only; the\n"
+                              "rasteriser uses MSAA. View Mode > Edge Classes (NeuRAA) shows what it finds.\n\n"
+                              "Round-trips as RENDER.NEURAA. --neuraa / --no-neuraa outrank it.");
+        if (nra && er.rtRenderMode.effective != 1)
+            ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
+                               "   Primary visibility is the rasteriser -- NeuRAA needs primary rays.");
+    }
+#endif
+    ImGui::Separator();
+#if AVER_MODULE_SR
+    // AverSR's project default sits outside Overall/Custom detection on purpose (module boundary).
+    {
+        const char* rungName = averSrAutoRungName(s, vx.deviceInfo());
+        std::string sourceText = averSrSource_ == voxi::AverSrSource::Auto
+            ? (std::string("Auto from ") + rungName)
+            : (averSrSource_ == voxi::AverSrSource::ForcedOff
+                   ? "forced Off after a failed launch"
+                   : averSrSourceText(averSrSource_));
+        ImGui::Text("Upscaling: AverSR %s (%s)", aver::sr::qualityName(averSrQuality_),
+                    sourceText.c_str());
+        // Only meaningful when source is not Auto; surfaces hidden pinned levels.
+        if (averSrSource_ != voxi::AverSrSource::Auto) {
+            const u32 rungLevel = voxi::autoAverSrLevel(s, vx.deviceInfo());
+            if (rungLevel != static_cast<u32>(averSrQuality_))
+                ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
+                    "(differs from the %s preset's default, %s)", rungName,
+                    aver::sr::qualityName(static_cast<aver::sr::Quality>(rungLevel)));
+        }
+        // One-time migration note (also shown in Display preference).
+        if (averSrMigrationNoteArmed_)
+            ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
+                "AverSR now defaults to Auto (%s). Choose Off for native resolution.",
+                aver::sr::qualityName(averSrQuality_));
+        // -1 ("Follow Overall preset") is explicit default (index 0), not unstated.
+        static const char* kProjDefaultItems[] = {"Follow Overall preset", "Off", "Quality",
+                                                   "Balanced", "Performance"};
+        int projIdx = averSrProjectDefault_ < 0 ? 0 : averSrProjectDefault_ + 1;
+        if (ImGui::Combo("Upscaling default (AverSR)", &projIdx, kProjDefaultItems, 5)) {
+            averSrProjectDefault_ = projIdx == 0 ? -1 : projIdx - 1;
+            averSrMigrationNoteArmed_ = false;
+            averSrCookieTripped_ = false;   // an explicit pick lifts the crash-cookie latch
+            projectDirty_ = true;
+        }
+        uiReg_.track("project.averSr");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("The project's OWN AverSR default, round-tripped as "
+                              "RENDER.AVERSR -- outranked by --aversr and by your own Display "
+                              "preference, and itself outranks the Overall rung's ladder "
+                              "default. \"Follow Overall preset\" (-1) pins nothing.");
+    }
+#endif
+
+    ImGui::Separator();
+    // Frame interpolation for Play and packaged game (RENDER.FRAMEINTERP in project).
+    {
+        bool fg = project_.frameInterp == 1;
+        if (ImGui::Checkbox("Frame interpolation (Play and packaged game)", &fg)) {
+            project_.frameInterp = fg ? 1 : 0;
+            projectDirty_ = true;
+        }
+        uiReg_.track("project.frameInterp");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Generates a frame between every two rendered ones (procedural frame "
+                              "interpolation). Round-trips as RENDER.FRAMEINTERP. Needs V-Sync and 1x "
+                              "anti-aliasing; the viewport while editing has its own Editor Preference.");
+    }
+}
+
+// Settings > Rendering, Global Illumination: quality, lighting method, ReSTIR and voxel controls.
+void SandboxApp::renderPageGi(voxi::Renderer& vx, voxi::Settings& s, const voxi::Resolution& er, bool& changed) {
+    using namespace aver::voxi;
+    const Status st = vx.status(Feature::GlobalIllumination);
+    ImGui::TextUnformatted(Renderer::featureName(Feature::GlobalIllumination));
+    featureStatusBadge(vx, Feature::GlobalIllumination);
+    ImGui::BeginDisabled(st != Status::Ready);
+    int q = static_cast<int>(s.globalIllumination);
+    const char* qs[] = {"Off","Low","Medium","High","Epic"};
+    if (ImGui::Combo("Quality", &q, qs, 5)) { s.globalIllumination = static_cast<Quality>(q); changed = true; }
+
+    // ---- Lighting method: how indirect light is found ----
+    // Round-trips through RENDER.GIMODE, RENDER.PATHTRACING and RENDER.PTMODE.
+    const bool ptOn = s.pathTracing != Quality::Off;
+    const bool ptReady = vx.status(Feature::PathTracing) == Status::Ready;
+    static const char* kMethods[] = {"Voxel cones", "Ray traced (ReSTIR GI)", "ReSTIR path tracing",
+                                     "Path tracing (reference)"};
+    const int method = ptOn ? (s.ptMode == 1u ? 3 : 2) : (s.giMode != 0 ? 1 : 0);
+    if (ImGui::BeginCombo("Method", kMethods[method])) {
+        for (int i = 0; i < 4; ++i) {
+            ImGui::BeginDisabled(i >= 2 && !ptReady);
+            if (ImGui::Selectable(kMethods[i], method == i) && method != i) {
+                s.giMode = i == 0 ? 0u : 1u;
+                if (i < 2) {
+                    s.pathTracing = Quality::Off;
+                } else {
+                    s.ptMode = static_cast<u32>(i - 2);
+                    if (!ptOn) {
+                        s.pathTracing = Quality::High;
+                        s.ptBounces   = ladder::ptBounces(Quality::High);
+                    }
+                }
+                changed = true;
+            }
+            ImGui::EndDisabled();
+        }
+        ImGui::EndCombo();
+    }
+    uiReg_.track("project.gi.method");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Voxel cones: a clipmap of the scene marched with cones. No ray tracing needed;\n"
+                          "soft and stable, leaks light near thin walls and the volume's edge.\n\n"
+                          "Ray traced (ReSTIR GI): one traced bounce per pixel, resampled across\n"
+                          "neighbours and frames, then denoised. The real-time default.\n\n"
+                          "ReSTIR path tracing: the same, but each pixel's sample is a whole light\n"
+                          "path (Bounces below) shaded from every vertex's own material, and\n"
+                          "reflections continue the same way. Clean in motion.\n\n"
+                          "Path tracing (reference): one independent path per pixel per frame, every\n"
+                          "lobe, no reuse and no denoiser, averaged while the view holds still. Converges\n"
+                          "to the ground truth; grainy while moving.\n\n"
+                          "The path tracing methods turn on what they run on: primary rays and ReSTIR GI.\n"
+                          "The denoiser stays as set. Picking an Overall Quality preset turns path tracing off.");
+    if (s.giMode != 0 && !ptOn && er.giMode.reason != DisableReason::None)
+        ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1),
+                           "   ReSTIR is selected and resumes when %s",
+                           disableReasonText(er.giMode.reason));
+    if (ptOn) {
+        int pq = static_cast<int>(s.pathTracing) - 1;
+        const char* pqs[] = {"Low", "Medium", "High", "Epic"};
+        if (ImGui::Combo("Path quality", &pq, pqs, 4)) {
+            s.pathTracing = static_cast<Quality>(pq + 1);
+            s.ptBounces   = ladder::ptBounces(s.pathTracing);
+            changed = true;
+        }
+        uiReg_.track("project.pt.quality");
+        ImGui::SameLine();
+        if (voxiRenderer_.pathTracingRan())
+            ImGui::TextColored(ImVec4(0.45f,0.85f,0.45f,1), "[running]");
+        else
+            ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1), "[not running, see the Output Log]");
+        int bounces = static_cast<int>(s.ptBounces);
+        if (ImGui::SliderInt("Bounces", &bounces, 1, 8)) {
+            s.ptBounces = static_cast<u32>(bounces);
+            changed = true;
+        }
+        uiReg_.track("project.pt.bounces");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Path vertices after the first hit. Path quality re-derives this, so set it\n"
+                              "after picking one. Round-trips as RENDER.PTBOUNCES.");
+    }
+    // ReSTIR's own controls below are inert under the reference path tracer.
+    ImGui::BeginDisabled(ptOn && s.ptMode == 1u);
+
+    // ReSTIR visibility rays: shows er.giRestirVisibility.REQUESTED (not effective).
+    const bool visGreyed = greysControl(er.giRestirVisibility.reason);
+    ImGui::BeginDisabled(visGreyed);
+    int vis = static_cast<int>(er.giRestirVisibility.requested);
+    if (ImGui::Combo("ReSTIR visibility rays", &vis,
+        "No ray (pre-fix, over-bright)\0Reconstructed (no ray)\0Half resolution\0Full\0Cached (NeuRaC)\0")) {
+        s.giRestirVisibility = static_cast<u32>(vis); changed = true;
+    }
+    ImGui::EndDisabled();
+    uiReg_.track("project.gi.restirVisibility");
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("Extra rays per shaded fragment beyond the candidate/sun/sky/\n"
+                          "reflection rays this estimator already traces (cost UNMEASURED):\n"
+                          "  Full           up to 2 (F2 is the expensive one)\n"
+                          "  Cached         the Half ray budget, but those rays also train a\n"
+                          "                 world-space radiance cache (NeuRaC) that the untraced pixels\n"
+                          "                 read (staged ray-driven on D3D12 only; elsewhere\n"
+                          "                 it runs as Half; UNVERIFIED)\n"
+                          "  Half           up to 0.5 at rest, plus Full on pixels with no\n"
+                          "                 valid reconstruction this frame\n"
+                          "  Reconstructed  0 rays -- one voxel-cone march instead\n"
+                          "  No ray         0 -- the pre-fix behaviour\n\n"
+                          "Known error of each approximation:\n"
+                          "  Full           none -- this is the traced ground truth\n"
+                          "  Half           lags about 5 frames and blurs over a 2x2\n"
+                          "                 block where it reconstructs instead of tracing\n"
+                          "  Reconstructed  leaks light through thin/near occluders and past\n"
+                          "                 the voxel volume's own edge\n"
+                          "  No ray         restores cb4b48df's over-brightness outright\n\n"
+                          "Round-trips as RENDER.RESTIRVISIBILITY.");
+    if (visGreyed) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1), "[%s]",
+                           disableReasonText(er.giRestirVisibility.reason));
+    } else if (er.giRestirVisibility.reason == DisableReason::RequiresStagedRayDriven) {
+        // SOFT reason: choice stays live and runs as Half resolution.
+        ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1), "[%s]",
+                           disableReasonText(er.giRestirVisibility.reason));
+    } else if (vis == 0) {
+        // Amber, not red: a legal, live choice that reopens a shipped fix.
+        ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
+            "No ray restores the pre-fix candidate-hit sky and reuse visibility (legacy bits "
+            "4 and 8): shadowed and enclosed areas read over-bright again -- the washed-out "
+            "look cb4b48df fixed.");
+    } else {
+        // Legacy console switches force NoRay for their own ray regardless of this combo.
+        const u32 legacy = editor::consoleLightingLegacySlot();
+        if (legacy & 12u) {
+            std::string which = (legacy & 4u) ? "voxi.legacyRestirHitSky" : "";
+            if (legacy & 8u) which += which.empty() ? "voxi.legacyRestirReuseVisibility"
+                                                    : " / voxi.legacyRestirReuseVisibility";
+            ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
+                "Console switch %s is ON and forces No ray for that ray; this setting is "
+                "ignored for it until the switch is off.", which.c_str());
+        }
+    }
+
+    // Indirect light history: how much previous-frame reservoir weighs into ReSTIR GI combine.
+    const bool histGreyed = greysControl(er.giRestirMaxHistory.reason);
+    ImGui::BeginDisabled(histGreyed);
+    int hist = static_cast<int>(er.giRestirMaxHistory.requested);
+    if (ImGui::SliderInt("Indirect light history (frames)", &hist, 0, 8)) {
+        s.giRestirMaxHistory = static_cast<u32>(hist); changed = true;
+    }
+    ImGui::EndDisabled();
+    uiReg_.track("project.gi.restirHistory");
+    // Tooltip asked before the greyed-reason label (IsItemHovered reads LAST submitted item).
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("How many earlier samples a pixel's ReSTIR reservoir may lean on.\n"
+                          "8 (default): temporal reuse, 37%% less noise in the raw indirect light\n"
+                          "and within 3%% of no reuse in brightness, no flash when the camera\n"
+                          "stops (NeonDistrict Day, viewport mean). 0 turns reuse off: one\n"
+                          "fresh sample per pixel per frame.\n\n"
+                          "(The old +8%%/+104%% overshoot came from two bugs in the reuse pass,\n"
+                          "fixed, not from the history itself.)\n\n"
+                          "Round-trips as RENDER.RESTIRHISTORY.");
+    if (histGreyed) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1), "[%s]", disableReasonText(er.giRestirMaxHistory.reason));
+    }
+    ImGui::EndDisabled();   // ReSTIR controls (reference path tracing)
+
+    ImGui::Spacing();
+    ImGui::TextUnformatted("Voxel volume");
+    ImGui::Separator();
+    int res = static_cast<int>(s.voxelResolution);
+    const char* resLabels[] = {"64", "128", "256", "512"};
+    const int resValues[] = {64, 128, 256, 512};
+    int resIdx = res>=512 ? 3 : (res>=256 ? 2 : (res>=128 ? 1 : 0));
+    if (ImGui::Combo("Voxel grid", &resIdx, resLabels, 4)) { s.voxelResolution = (u32)resValues[resIdx]; changed = true; }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Cubic edge of the GI volume -- memory and per-voxel GPU cost are\n"
+                           "both this NUMBER CUBED, so each step up is an 8x jump:\n"
+                           "  64  ~6 MB    128  ~50 MB    256  ~400 MB    512  ~3.2 GB\n"
+                           "Changing Quality above moves this to match its rung (Off/Low=64,\n"
+                           "Medium=128, High=256, Epic=512) unless you pick a value here\n"
+                           "yourself, which then overrides the tier's default.");
+    // Grid built at init only; change recorded but reaches GPU on reload.
+    if (s.voxelResolution != voxiRenderer_.voxelResolutionBuilt())
+        ImGui::TextWrapped("Takes effect when the project is reloaded; the volume built for "
+                           "this session is still %u^3.", voxiRenderer_.voxelResolutionBuilt());
+    if (ImGui::SliderFloat("GI intensity", &s.giIntensity, 0.0f, 4.0f)) changed = true;
+    if (ImGui::SliderFloat("GI distance", &s.giMaxDistance, 10.0f, 20000.0f, "%.0f")) changed = true;
+    ImGui::DragFloat3("Volume centre", &giCenter_.x, 0.5f);
+    ImGui::DragFloat("Volume extent", &giExtent_, 0.5f, 1.0f, 100000.0f);
+    // Diffuse cone count: tier-derived. Quality above re-derives it.
+    {
+        int cones = static_cast<int>(s.giCones);
+        if (ImGui::SliderInt("Diffuse cones", &cones, 1, 16)) {
+            s.giCones = static_cast<u32>(cones);
+            changed = true;
+        }
+        uiReg_.track("project.gi.cones");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Cones in the diffuse gather, including the axial one.\n"
+                              "Changing Quality above re-derives this from the tier.");
+    }
+    // Fog occlusion: built from GI voxel volume; greys with same prerequisite.
+    {
+        const bool fogOccGreyed = greysControl(er.fogOcclusion.reason);
+        ImGui::BeginDisabled(fogOccGreyed);
+        bool fogOcc = s.fogOcclusion;
+        if (ImGui::Checkbox("Fog respects occlusion", &fogOcc)) { s.fogOcclusion = fogOcc; changed = true; }
+        ImGui::EndDisabled();
+        uiReg_.track("project.gi.fogOcclusion");
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("Fog and haze only glow where the air can actually see the sky.\n"
+                              "Without it, the fog inside a covered arcade or a room is lit as\n"
+                              "if it were outdoors: a blue veil brighter than the walls behind it.\n\n"
+                              "Built from the GI voxel volume (a small sky-visibility grid,\n"
+                              "refreshed a slice per frame, ~0.2 ms), so it needs Global\n"
+                              "Illumination on. Outdoor fog is unchanged.\n\n"
+                              "Round-trips as RENDER.FOGOCCLUSION.");
+        if (fogOccGreyed) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1), "[%s]", disableReasonText(er.fogOcclusion.reason));
+        }
+    }
+    ImGui::EndDisabled();
+}
+
+// Settings > Rendering, Ray Tracing: quality, primary visibility, ray-driven passes and shadows.
+void SandboxApp::renderPageRayTracing(voxi::Renderer& vx, voxi::Settings& s, const voxi::Resolution& er, bool& changed) {
+    using namespace aver::voxi;
+    const Status st = vx.status(Feature::RayTracing);
+    ImGui::TextUnformatted(Renderer::featureName(Feature::RayTracing));
+    featureStatusBadge(vx, Feature::RayTracing);
+    ImGui::BeginDisabled(st != Status::Ready);
+    int q = static_cast<int>(s.rayTracing);
+    const char* qs[] = {"Off","Low","Medium","High","Epic"};
+    if (ImGui::Combo("Quality", &q, qs, 5)) { s.rayTracing = static_cast<Quality>(q); changed = true; }
+
+    // Inner grey: everything below inert while RT is Off (outer grey doesn't cover this).
+    ImGui::BeginDisabled(greysControl(er.rtSubControls));
+
+    if (s.pathTracing != Quality::Off)
+        ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
+                           "Path Tracing is on: primary rays and ReSTIR GI are forced on.");
+    // Primary visibility: rasteriser vs ray-driven (shipped default Medium and above).
+    ImGui::Spacing();
+    ImGui::TextUnformatted("Primary visibility");
+    ImGui::SameLine();
+    ImGui::TextDisabled("(default on every ray-tracing tier)");
+    ImGui::Separator();
+    int mode = static_cast<int>(s.rtRenderMode);
+    if (ImGui::Combo("Finds the first surface", &mode,
+                      "Rasteriser (no ray tracing)\0Primary rays\0")) {
+        s.rtRenderMode = static_cast<u32>(mode); changed = true;
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Primary rays trace one ray per pixel to find the first surface,\n"
+                           "then shade it with ray-traced shadows, GI and reflections. It is\n"
+                           "the default on every ray-tracing tier.\n\n"
+                           "Rasteriser draws the scene WITHOUT ray tracing (shadow maps,\n"
+                           "cone-traced GI): raster + ray tracing was removed because it\n"
+                           "hung GPUs. The ray-tracing settings below do nothing while it\n"
+                           "is selected.");
+
+    // Staged ray-driven passes (A/B over the combo above); default is staged + half-rate GI.
+    const bool stagesGreyed = greysControl(er.rayDrivenStages.reason);
+    ImGui::BeginDisabled(stagesGreyed);
+    int stages = static_cast<int>(er.rayDrivenStages.requested);
+    if (ImGui::Combo("Ray-driven passes", &stages,
+                      "Single pass\0Staged\0"
+                      "Staged + half-rate GI (default)\0")) {
+        s.rayDrivenStages = static_cast<u32>(stages); changed = true;
+    }
+    ImGui::EndDisabled();
+    uiReg_.track("project.rt.rayDrivenStages");
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("How the ray-driven frame is split into GPU passes.\n\n"
+                          "Staged runs the primary ray, lighting and shading as separate GPU passes\n"
+                          "instead of one giant shader: the same image, measured 40-45%% faster.\n"
+                          "Staged + half-rate GI (the default) also traces only half the GI rays each\n"
+                          "frame (a checkerboard) and the denoiser rebuilds the other half: a further\n"
+                          "~1.4 ms faster, within 0.4%% of Staged when still, slightly noisier in motion.\n"
+                          "It needs ReSTIR GI and the denoiser on; without them it behaves as Staged.\n\n"
+                          "Single pass is the one-shader baseline, kept as a fallback. Staged modes\n"
+                          "are D3D12-only; other backends, or a pipeline/resource that is missing,\n"
+                          "fall back to Single pass (logged once).\n\n"
+                          "Round-trips as RENDER.RDSTAGES.");
+    if (stagesGreyed) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1), "[%s]", disableReasonText(er.rayDrivenStages.reason));
+    }
+
+    ImGui::Spacing();
+    ImGui::TextUnformatted("Sun shadow");
+    ImGui::Separator();
+    int rays = static_cast<int>(s.rtShadowRays);
+    if (ImGui::SliderInt("Occlusion rays / pixel", &rays, 1, 32)) {
+        s.rtShadowRays = static_cast<u32>(rays); changed = true;
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("How many rays a pixel that traces THIS frame casts toward the\n"
+                           "sun's disc. Linear in cost -- this is the knob to turn down\n"
+                           "first if ray tracing starts costing frames.");
+
+
+    // MANY LIGHTS (docs/rendering/MANY_LIGHTS.md): the light tree's stochastic tail. Auto engages above
+    // voxi.manyLightsMin lights; a scene at or under it is unchanged.
+    ImGui::Spacing();
+    ImGui::TextUnformatted("Lights");
+    ImGui::Separator();
+    {
+        const bool exhaustive = s.manyLights == 3u;   // the console's ground-truth mode: shown, not offered
+        int ml = s.manyLights == 0u ? 1 : (s.manyLights == 2u ? 2 : 0);
+        ImGui::BeginDisabled(exhaustive);
+        if (ImGui::Combo("Many lights", &ml, "Auto\0Off\0On\0")) {
+            s.manyLights = ml == 1 ? 0u : (ml == 2 ? 2u : 1u);
+            changed = true;
+        }
+        ImGui::EndDisabled();
+        uiReg_.track("project.rt.manyLights");
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("Lights thousands of shadowed lights with a bounded ray budget: each pixel draws\n"
+                              "candidate lights from a light tree by importance and traces a few shadow rays.\n"
+                              "Needs the NRD2 denoiser (Denoising page) and ray tracing; other denoisers keep\n"
+                              "the light grid, which sees at most 24 lights per cell.\n\n"
+                              "Auto turns it on above 48 lights; a scene with 48 or fewer lights renders\n"
+                              "exactly as with it Off. On forces it at any count.\n\n"
+                              "Round-trips as RENDER.MANYLIGHTS (0 off, 1 auto, 2 on).");
+        if (exhaustive) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(exhaustive, set from the console)");
+        }
+        if (s.manyLights != 0u && !exhaustive && denoiserMode(s) != 2u) {
+            ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
+                               "   The Denoiser is not NRD2 -- the light grid is used instead.");
+        }
+    }
+
+    ImGui::EndDisabled();   // the inner grey opened beside the Quality combo above
+    ImGui::EndDisabled();
+}
+
+// Settings > Rendering, Denoising: denoiser mode, NRD2, shadow amortisation and filter radius.
+void SandboxApp::renderPageDenoising(voxi::Renderer& vx, voxi::Settings& s, const voxi::Resolution& er, bool& changed) {
+    using namespace aver::voxi;
+    // Denoiser filters ReSTIR diffuse and RT sky occlusion; only thing needing G-buffer.
+    // Greyed for hard reasons (hardware, tier); left clickable for soft (MSAA), fixable below.
+    const bool denoiserHardGreyed = greysControl(er.denoiser.reason);
+    ImGui::BeginDisabled(denoiserHardGreyed);
+    static const char* kDenoiserModes[] = {"Off", "AMD FidelityFX", "NRD2 (single-frame)"};
+    int denMode = denoiserHardGreyed ? 0 : static_cast<int>(denoiserMode(s));
+    if (ImGui::Combo("Denoiser", &denMode, kDenoiserModes, 3)) {
+        setDenoiserMode(s, static_cast<u32>(denMode));
+        changed = true;
+    }
+    ImGui::EndDisabled();
+    if (denoiserHardGreyed) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1), "[%s]", disableReasonText(er.denoiser.reason));
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("AMD FIDELITYFX filters ReSTIR GI's indirect diffuse and the ray-traced\n"
+                                "sky occlusion (MIT, third_party/fidelityfx-denoiser), with history.\n\n"
+                                "NRD2 denoises the whole composed lighting (shadows, lamps, GI,\n"
+                                "reflections) from THIS frame only: no history, so no smear or\n"
+                                "ghosting. Fixed parameters for now (docs/rendering/NRD2.md).\n"
+                                "Staged ray-driven frames on D3D12 only.\n\n"
+                                "COSTS THE G-BUFFER: velocity, view-space depth and packed\n"
+                                "normal/roughness -- three render targets NOTHING ELSE in\n"
+                                "this engine needs, about 54 MB at 1080p. That is why it is\n"
+                                "off by default rather than something enabled for you.\n\n"
+                                "REQUIRES the G-buffer and D3D12. Under MSAA the G-buffer is\n"
+                                "resolved to one sample a pixel (the nearest surface).\n\n"
+                                "Round-trips as RENDER.DENOISER (0, 1, 2).");
+    {
+        // NRD2's speckle removal: greyed unless NRD2 is the denoiser.
+        ImGui::BeginDisabled(denMode != 2 || denoiserHardGreyed);
+        static const char* kSpeckleModes[] = {"None", "Blur"};
+        int speckle = s.nrd2Speckle > 1u ? 1 : static_cast<int>(s.nrd2Speckle);
+        if (ImGui::Combo("Speckle Removal", &speckle, kSpeckleModes, 2)) {
+            s.nrd2Speckle = static_cast<u32>(speckle);
+            changed = true;
+        }
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("NRD2 only. What happens to the blotches left after NRD2 filters the frame.\n\n"
+                              "BLUR: an edge-aware blur (voxi.nrd2BlurRadius, 8 px) over this frame's\n"
+                              "lighting, stopped at depth and normal edges; textures stay sharp, lamp\n"
+                              "shadow edges soften. NONE: off.\n\n"
+                              "Not captured to the project manifest.");
+    }
+    {
+        // Reflection denoising is FidelityFX's: greyed while it is not the one.
+        const bool ndGreyed = denMode != 1 || denoiserHardGreyed;
+        ImGui::BeginDisabled(ndGreyed);
+        bool dr = s.denoiseReflections;
+        if (ImGui::Checkbox("Denoise Reflections", &dr)) { s.denoiseReflections = dr; changed = true; }
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("Ray-traced reflections through the denoiser's reflection pipeline\n"
+                              "(history along the reflected point, roughness-aware filtering)\n"
+                              "instead of Voxi's own reflection history. Ray-driven staged\n"
+                              "reflections only. Needs the Denoiser on.");
+    }
+
+    // AMD FidelityFX tuning (filters ReSTIR diffuse GI, not the sun shadow below).
+    ImGui::Spacing();
+    ImGui::TextUnformatted("Indirect diffuse: AMD FidelityFX history");
+    ImGui::Separator();
+    {
+        const bool tuneGreyed = greysControl(er.denoiser.reason);
+        ImGui::BeginDisabled(tuneGreyed);
+        int maxSamples = static_cast<int>(s.denoiserMaxSamples);
+        if (ImGui::SliderInt("History depth (frames)", &maxSamples, 1, 255)) {
+            s.denoiserMaxSamples = static_cast<u32>(maxSamples);
+            changed = true;
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("The denoiser's history length, in frames -- a latency/noise\n"
+                              "trade, not a dispatch toggle: higher converges quieter but lags\n"
+                              "longer behind a moving light or camera. Filters the indirect-\n"
+                              "diffuse GI estimate (the \"Denoiser (AMD FidelityFX)\"\n"
+                              "checkbox above), not the sun shadow below.\n"
+                              "[1,255]; default 32.\n"
+                              "NOT captured to the project manifest -- like giSkyOcclusionRays/\n"
+                              "Tile, it has no manifest key (ProjectRenderApply.hpp's own\n"
+                              "capture rule), so it resets to the compiled default on the\n"
+                              "next project reload rather than round-tripping through .ocproject.");
+        float clip = s.denoiserHistoryClipWeight;
+        if (ImGui::SliderFloat("History clip width", &clip, 0.01f, 4.0f, "%.2f")) {
+            s.denoiserHistoryClipWeight = clip;
+            changed = true;
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("Width of the neighbourhood box the history is clipped to.\n"
+                              "Smaller rejects stale history harder (less ghosting, more\n"
+                              "grain); larger trusts it longer. [0.01,4]; default 4 (narrower darkens GI).\n"
+                              "Not captured to the project manifest (see above).");
+        int sunSamples = static_cast<int>(s.denoiserSunMovingSamples);
+        if (ImGui::SliderInt("History while sun moves (frames)", &sunSamples, 1, 255)) {
+            s.denoiserSunMovingSamples = static_cast<u32>(sunSamples);
+            changed = true;
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("History cap while the sun moves (and one frame after), so a\n"
+                              "drag's bounce light does not lag the sun. At or above the\n"
+                              "history depth it has no effect. [1,255]; default 4.\n"
+                              "Not captured to the project manifest (see above).");
+        ImGui::EndDisabled();
+    }
+
+    ImGui::BeginDisabled(greysControl(er.rtSubControls));
+    ImGui::Spacing();
+    ImGui::TextUnformatted("Sun shadow: temporal amortisation");
+    ImGui::Separator();
+    // Tile edge (powers of two only). Options: 1,2,4,8,16 (1..256 px/ray).
+    const int tiles[] = {1, 2, 4, 8, 16};
+    const char* tileLabels[] = {"Off (1x1 -- every pixel, every frame)",
+                                "2x2 (4 pixels/ray)", "4x4 (16 pixels/ray)",
+                                "8x8 (64 pixels/ray)", "16x16 (256 pixels/ray)"};
+    int tileIdx = 0;
+    for (int i = 0; i < 5; ++i) if (tiles[i] == (int)s.rtPixelsPerRayTile) tileIdx = i;
+    if (ImGui::Combo("Shadow amortisation", &tileIdx, tileLabels, 5)) {
+        s.rtPixelsPerRayTile = static_cast<u32>(tiles[tileIdx]); changed = true;
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("At N, one pixel in each NxN tile traces a fresh ray each frame;\n"
+                           "every other pixel reuses a reprojected history sample instead.\n"
+                           "Every pixel gets its own turn every N*N frames. Off is bit-for-\n"
+                           "bit identical to having no denoiser; larger tiles trade a real\n"
+                           "cut in rays traced for more frames of lag on fast-moving shadows.");
+
+    // A second, independent denoiser -- the separate heading is the point: these two fail in
+    // opposite directions. Above reuses THIS pixel across TIME (converges while still, collapses
+    // under motion); below averages NEIGHBOURS with no history (motion can't poison it). They compose.
+    ImGui::Spacing();
+    ImGui::TextUnformatted("Sun shadow: spatial filter");
+    ImGui::Separator();
+    int denoise = static_cast<int>(s.rtShadowDenoise);
+    if (ImGui::SliderInt("Filter radius (px)", &denoise, 0, 3, denoise == 0 ? "Off" : "%d")) {
+        s.rtShadowDenoise = static_cast<u32>(denoise); changed = true;
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Averages a (2R+1)^2 neighbourhood of the shadow, weighting each\n"
+                           "neighbour by how well its depth agrees with this pixel's surface.\n"
+                           "At one ray per pixel the shadow term is a hard 0 or 1, so a\n"
+                           "penumbra comes out dithered rather than soft; this is what\n"
+                           "resolves it without paying for more rays. Keeps no history, so\n"
+                           "unlike amortisation above it costs nothing in lag under motion.");
+
+    ImGui::EndDisabled();
+}
+
+// Settings > Rendering, Materials: layered BSDF shading and refraction.
+void SandboxApp::renderPageMaterials(voxi::Renderer& vx, voxi::Settings& s, const voxi::Resolution& er, bool& changed) {
+    using namespace aver::voxi;
+    // Layered BSDF: changes what every material-shaded draw computes. Reload to take effect.
+    const Status lst = vx.status(Feature::LayeredBsdf);
+    ImGui::TextUnformatted(Renderer::featureName(Feature::LayeredBsdf));
+    featureStatusBadge(vx, Feature::LayeredBsdf);
+    ImGui::BeginDisabled(lst != Status::Ready);
+    int lq = static_cast<int>(s.layeredBsdf);
+    const char* lqs[] = {"Off","Low","Medium","High","Epic"};
+    if (ImGui::Combo("Shading model", &lq, lqs, 5)) {
+        s.layeredBsdf = static_cast<Quality>(lq);
+        changed = true;
+    }
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Off is the standard BRDF. Any other setting adds a clear-coat lobe "
+                          "over the base for materials that author one -- a material with "
+                          "coat weight 0 renders identically either way.");
+    if ((s.layeredBsdf != Quality::Off) != voxiRenderer_.layeredBsdfActive())
+        ImGui::TextWrapped("Takes effect when the project is reloaded; the shaders compiled "
+                           "for this session are unchanged.");
+
+    // ---- Refraction ----
+    ImGui::Separator();
+    ImGui::TextUnformatted("Refraction");
+    {
+        // BeginCombo/Selectable for per-entry prerequisite control (RayTraced has different requirements).
+        static const char* rms[] = {"Off", "Screen-space", "Ray-traced"};
+        if (ImGui::BeginCombo("Mode", rms[s.refractionMode])) {
+            for (int i = 0; i < 3; ++i) {
+                const bool rayTracedGreyed = (i == 2) && greysControl(er.refractionMode.reason);
+                ImGui::BeginDisabled(rayTracedGreyed);
+                if (ImGui::Selectable(rms[i], s.refractionMode == static_cast<u32>(i))) {
+                    s.refractionMode = static_cast<u32>(i);
+                    changed = true;
+                }
+                ImGui::EndDisabled();
+                if (rayTracedGreyed && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip("%s", disableReasonText(er.refractionMode.reason));
+            }
+            ImGui::EndCombo();
+        }
+        uiReg_.track("project.refraction.mode");
+        ImGui::BeginDisabled(s.refractionMode == 0);
+        if (ImGui::SliderFloat("Strength", &s.refractionStrength, 0.0f, 2.0f)) changed = true;
+        uiReg_.track("project.refraction.strength");
+        if (ImGui::SliderFloat("Edge fade", &s.refractionEdgeFade, 0.0f, 1.0f)) changed = true;
+        uiReg_.track("project.refraction.edgeFade");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Screen-space refraction cannot see what the camera never saw.\n"
+                              "This fades the effect out near the screen edge, where the miss\n"
+                              "would otherwise be visible.");
+        ImGui::EndDisabled();
+    }
+
+}
+
+// Settings > Rendering, Post Processing: exposure, bloom, tone mapping and lens effects.
+void SandboxApp::renderPagePost(voxi::Renderer& vx, voxi::Settings& s, const voxi::Resolution& er, bool& changed) {
+    using namespace aver::voxi;
+    // ---- Post processing ----
+    ImGui::Separator();
+    ImGui::TextUnformatted("Post processing");
+    ImGui::TextDisabled("What a PACKAGED GAME renders with. An unticked key is not stated, and");
+    ImGui::TextDisabled("the engine's compiled default applies to it.");
+    {
+        // Lambda for float setting with live mirror (unlike settingInt).
+        const auto postFloat = [&](const char* id, const char* label, f32* key, f32* live,
+                                   f32 lo, f32 hi, const char* form, ImGuiSliderFlags flags,
+                                   const char* trackName, const char* tip) {
+            ImGui::PushID(id);
+            bool stated = (*key >= 0.0f);
+            // Ticking adopts what the viewport already shows, not a hardcoded number.
+            f32 v = stated ? *key : *live;
+            if (ImGui::Checkbox("##stated", &stated)) {
+                // Unticking leaves the viewport alone: "unstated" means compiled default applies next open.
+                *key = stated ? v : -1.0f;
+                if (stated) *live = v;
+                projectDirty_ = true;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Unticked: this project does not state it,\n"
+                                  "and the engine's own default applies.");
+            ImGui::SameLine();
+            ImGui::BeginDisabled(!stated);
+            if (ImGui::SliderFloat(label, &v, lo, hi, form, flags)) {
+                *key = v;
+                *live = v;
+                projectDirty_ = true;
+            }
+            ImGui::EndDisabled();
+            uiReg_.track(trackName);
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("%s", tip);
+            ImGui::PopID();
+        };
+        postFloat("exposure", "Exposure", &project_.postExposure, &post_.exposure,
+                  0.05f, 8.0f, "%.2f", ImGuiSliderFlags_Logarithmic,
+                  "project.post.exposure",
+                  "Linear multiplier on scene radiance, applied before the tone\n"
+                  "curve. With auto exposure below on, it is compensation on the\n"
+                  "adapted value: 1 = as metered, 2 = one stop brighter.\n\n"
+                  "Round-trips as RENDER.EXPOSURE.");
+        postFloat("bloom", "Bloom", &project_.postBloom, &post_.bloomIntensity,
+                  0.0f, 1.0f, "%.3f", 0, "project.post.bloom",
+                  "ZERO IS A REAL ANSWER HERE, which is why the key's sentinel is\n"
+                  "-1 and not 0: zero intensity builds no pyramid and records no\n"
+                  "pass at all (RHI.hpp:151), so it is a cost choice as well as a\n"
+                  "look. The sandbox's own --bloom default is 0 rather than\n"
+                  "PostSettings' 0.06, so every recorded gate image was taken\n"
+                  "with no bloom.\n\nRound-trips as RENDER.BLOOM.");
+        {
+            // Checkbox, not settingInt slider. Tracks before tooltip for ordering.
+            ImGui::PushID("autoExposure");
+            bool stated = project_.postAutoExposure >= 0;
+            bool on = stated ? project_.postAutoExposure != 0 : post_.autoExposure;
+            if (ImGui::Checkbox("##stated", &stated)) {
+                project_.postAutoExposure = stated ? (on ? 1 : 0) : -1;
+                if (stated) post_.autoExposure = on;
+                projectDirty_ = true;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Unticked: this project does not state it,\n"
+                                  "and the engine's own default (on) applies.");
+            ImGui::SameLine();
+            ImGui::BeginDisabled(!stated);
+            if (ImGui::Checkbox("Auto exposure", &on)) {
+                project_.postAutoExposure = on ? 1 : 0;
+                post_.autoExposure = on;
+                projectDirty_ = true;
+            }
+            ImGui::EndDisabled();
+            uiReg_.track("project.post.autoExposure");
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("Eye adaptation from a luminance histogram of the frame.\n"
+                                  "A run with a frame limit forces it OFF unless\n"
+                                  "--auto-exposure asked for it by name, so a capture\n"
+                                  "measures one exposure instead of the histogram's warm-up.\n\n"
+                                  "Round-trips as RENDER.AUTOEXPOSURE.");
+            ImGui::PopID();
+        }
+        // Amber when adaptation is on: the recorded value still applies where adaptation is off.
+        if (post_.autoExposure && project_.postExposure >= 0.0f)
+            ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
+                "Auto exposure is on, so the adaptation overwrites Exposure every frame. The "
+                "recorded value still applies wherever auto exposure is off.");
+        {
+            ImGui::PushID("tonemap");
+            bool stated = project_.postTonemap >= 0;
+            // Clamped from both sources; neither is bounded.
+            int mode = stated ? project_.postTonemap : static_cast<int>(post_.tonemap);
+            if (mode > 7) mode = 7;
+            if (ImGui::Checkbox("##stated", &stated)) {
+                project_.postTonemap = stated ? mode : -1;
+                if (stated) post_.tonemap = static_cast<u32>(mode);
+                projectDirty_ = true;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Unticked: this project does not state it,\n"
+                                  "and the engine's own default (ACES fitted) applies.");
+            ImGui::SameLine();
+            ImGui::BeginDisabled(!stated);
+            if (ImGui::Combo("Tone curve", &mode,
+                             "Per-channel ACES\0ACES fitted (default)\0ACES luminance\0"
+                             "Extended linear\0Extended Reinhard\0Extended filmic\0Extended ACES\0Extended AgX\0")) {
+                project_.postTonemap = mode;
+                post_.tonemap = static_cast<u32>(mode);
+                projectDirty_ = true;
+            }
+            ImGui::EndDisabled();
+            {
+                // The white point and display adjustments (RENDER.TONEMAPWHITE / ADJUST*); an edit states the key.
+                struct Row { const char* label; f32* project; f32* live; f32 hi; };
+                Row rows[] = {{"Tone white", &project_.postTonemapWhite, &post_.tonemapWhite, 16.0f},
+                              {"Brightness", &project_.postAdjustBrightness, &post_.adjustBrightness, 4.0f},
+                              {"Contrast", &project_.postAdjustContrast, &post_.adjustContrast, 4.0f},
+                              {"Saturation", &project_.postAdjustSaturation, &post_.adjustSaturation, 4.0f}};
+                for (Row& r : rows) {
+                    float v = *r.project >= 0.0f ? *r.project : *r.live;
+                    if (ImGui::DragFloat(r.label, &v, 0.01f, 0.001f, r.hi, "%.3f")) {
+                        *r.project = v; *r.live = v; projectDirty_ = true;
+                    }
+                }
+            }
+            uiReg_.track("project.post.tonemap");
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip(
+                    "Which curve resolves HDR radiance to the display:\n"
+                    "  Per-channel     the original Narkowicz/Hill approximation: the\n"
+                    "                  gentlest toe, so dim bounce light stays visible\n"
+                    "                  instead of crushing to black\n"
+                    "  ACES fitted     the DEFAULT: the same curve between the ACES\n"
+                    "                  matrices, the space Unreal's filmic curve runs\n"
+                    "                  in; matched a UE5 Lumen Sponza's contrast\n"
+                    "  ACES luminance  tonemaps LUMINANCE and puts the original\n"
+                    "                  chromaticity back, so hue survives any exposure\n\n"
+                    "Measured on PTTest Sponza at exposure 8: fitted holds chroma 1.41\n"
+                    "where luminance holds 3.09 at the same brightness, and above 5x\n"
+                    "fitted lets BLUE overtake GREEN -- warm stone rendering cold\n"
+                    "(RHI.hpp:196-216).\n\nRound-trips as RENDER.TONEMAP.");
+            ImGui::PopID();
+        }
+        // CLI flag precedence: a flag applies at startup, manifest later.
+        if (postExposureFromCli_ || postBloomFromCli_ || postAutoExpFromCli_)
+            ImGui::TextDisabled("A post-process flag was given on this launch; it outranks "
+                                "these keys when a project opens.");
+    }
+
+}
+
+// Settings > Rendering, Performance: mesh shaders, frame budget and particles.
+void SandboxApp::renderPagePerformance(voxi::Renderer& vx, voxi::Settings& s, const voxi::Resolution& er, bool& changed) {
+    using namespace aver::voxi;
+    ImGui::TextUnformatted("Culling and level of detail");
+    {
+        bool lod = lodSelectEnabled_;
+        if (ImGui::Checkbox("LOD select", &lod)) {
+            setLodSelect(lod, lodErrorThresholdPx_);
+            projectDirty_ = true;
+        }
+        uiReg_.track("project.lod.select");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Off draws every instance at LOD 0. Measured on Electric Dreams:\n"
+                              "102.7 ms median off, 76.7 ms on.");
+        ImGui::BeginDisabled(!lodSelectEnabled_);
+        f32 px = lodErrorThresholdPx_;
+        if (ImGui::SliderFloat("Screen error (px)", &px, 0.25f, 8.0f, "%.2f")) {
+            setLodSelect(lodSelectEnabled_, px);
+            projectDirty_ = true;
+        }
+        uiReg_.track("project.lod.threshold");
+        ImGui::EndDisabled();
+
+        if (ImGui::Checkbox("Occlusion culling", &occlusionCullEnabled_)) projectDirty_ = true;
+        uiReg_.track("project.occlusionCull");
+        if (ImGui::Checkbox("Depth pre-pass", &depthPrepassOverride_)) projectDirty_ = true;
+        uiReg_.track("project.depthPrepass");
+
+    }
+    ImGui::Separator();
+    const Status st = vx.status(Feature::MeshShaders);
+    ImGui::TextUnformatted(Renderer::featureName(Feature::MeshShaders));
+    featureStatusBadge(vx, Feature::MeshShaders);
+    ImGui::BeginDisabled(st != Status::Ready);
+    if (ImGui::Checkbox("Use mesh shaders", &s.meshShaders)) changed = true;
+    ImGui::EndDisabled();
+
+#if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
+    // Where particle emitters simulate (docs/PARTICLES.md). Applies at once to emitters created afterwards; the project key
+    // RENDER.PARTICLEGPU round-trips it, the CLI --particles-cpu / --particles-gpu outranks it.
+    ImGui::Separator();
+    ImGui::TextUnformatted("Particles");
+    {
+        int pg = project_.particleGpu < 0 ? 1 : project_.particleGpu;
+        if (ImGui::Combo("Particles on GPU", &pg, "Off (CPU only)\0Auto\0On\0")) {
+            project_.particleGpu = pg;
+            particles::particleSystem().setGpuMode(pg);
+            particleRenderer_.setGpuEnabled(pg != 0);
+            projectDirty_ = true;
+        }
+        uiReg_.track("project.particles.gpu");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Off keeps every emitter on the CPU. Auto puts an emitter on the GPU when its max particles\n"
+                              "is 2048 or more and the device supports compute and indirect draw. On does so for every\n"
+                              "emitter that can. A tier is chosen when an emitter starts and never changes mid-life.\n\n"
+                              "Round-trips as RENDER.PARTICLEGPU (0 off, 1 auto, 2 on).");
+        const particles::ParticleStats ps = particles::particleSystem().stats();
+        ImGui::TextDisabled("%u GPU emitter(s) / %u particle(s), %u CPU emitter(s) / %u particle(s), %u KB pooled",
+                            ps.gpuEmitters, ps.gpuParticles, ps.cpuEmitters, ps.cpuParticles, ps.gpuAllocatedKB);
+    }
+#endif
+}
+
+// Settings > Rendering, Debug: GI and RT visualisations and history resets.
+void SandboxApp::renderPageDebug(voxi::Renderer& vx, voxi::Settings& s, const voxi::Resolution& er, bool& changed) {
+    using namespace aver::voxi;
+    ImGui::Spacing();
+    ImGui::TextUnformatted("Global illumination");
+    ImGui::Separator();
+    ImGui::Checkbox("Debug: show voxel radiance", &giDebugView_);
+
+    // Debug paints: live console-only. Read/write directly so checkbox and command sync.
+    {
+        bool poisonView = editor::consoleGiPoisonViewSlot();
+        if (ImGui::Checkbox("Debug: GI poison view", &poisonView))
+            editor::consoleGiPoisonViewSlot() = poisonView;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Paints an unmistakable colour over any pixel where one of "
+                              "voxi_restir.hlsli's guards fired THIS frame (giMode 1 / ReSTIR "
+                              "only, except violet):\n"
+                              "  magenta  store-time reservoir guard (the one that matters most)\n"
+                              "  cyan     candidate-radiance clamp\n"
+                              "  yellow   target-pdf guard\n"
+                              "  orange   pre-existing final-estimate guard\n"
+                              "  blue     denoiser-readback guard\n"
+                              "  red      raw estimate hit voxi.giRadianceCeiling, still finite\n"
+                              "  green    denoised readback hit the same ceiling\n"
+                              "  violet   ray-traced specular indirect ceiling hit (either "
+                              "diffuse estimator)\n"
+                              "All colours zero means no guard is firing.");
+
+        bool visPathView = editor::consoleGiVisPathViewSlot();
+        if (ImGui::Checkbox("Debug: GI visibility path view", &visPathView))
+            editor::consoleGiVisPathViewSlot() = visPathView;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Paints F2's resolved visibility path over indirect diffuse:\n"
+                              "  yellow  no ray (mode 0 or a legacy bit)\n"
+                              "  green   reconstructed (voxel cone)\n"
+                              "  blue    half-resolution reconstruction\n"
+                              "  red     half-resolution fallback (traced -- no valid "
+                              "reconstruction available this pixel)\n"
+                              "  white   full trace\n"
+                              "Suppressed while GI poison view above is also on, which paints "
+                              "first.");
+    }
+    // History resets (debug): one button per console command. Reset All = GI + RT + denoiser.
+    ImGui::Spacing();
+    ImGui::TextUnformatted("History resets (debug)");
+    ImGui::Separator();
+    if (ImGui::Button("Reset GI history")) vx.requestGiHistoryReset();
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Invalidates the ReSTIR-GI reservoir + surface history (giMode 1\n"
+                          "only) on the next frame -- the same thing a viewport resize does to\n"
+                          "this one resource. Try this first if a GI blotch/burn-in appears.");
+    ImGui::SameLine();
+    if (ImGui::Button("Reset RT history")) vx.requestRtHistoryReset();
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Invalidates RT shadow/reflection/sky-occlusion history on the next\n"
+                          "frame (all three, plus AO, share one validity flag today). Try\n"
+                          "this if resetting GI history alone did not clear the artifact.");
+    ImGui::SameLine();
+    if (ImGui::Button("Reset denoiser history")) vx.requestDenoiserHistoryReset();
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Forces the AMD FidelityFX denoiser to throw away its own internal\n"
+                          "temporal history on the next frame. Try this if neither GI nor RT history\n"
+                          "reset cleared the artifact.");
+    ImGui::SameLine();
+    if (ImGui::Button("Reset All")) {
+        vx.requestGiHistoryReset();
+        vx.requestRtHistoryReset();
+        vx.requestDenoiserHistoryReset();
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Runs all three resets above at once. Not the first move during a\n"
+                          "bisection -- it clears everything and says nothing about which\n"
+                          "buffer was actually poisoned; try one at a time first.");
+
+}
+
 // Rendering page sub-pages: each feature reports real status; disabled if renderer/GPU can't do it.
 void SandboxApp::buildRenderingSettings(int page) {
     using namespace aver::voxi;
@@ -1281,1084 +2378,23 @@ void SandboxApp::buildRenderingSettings(int page) {
     u32 overallFollowMask = 0;
     ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.45f);
 
-    if (page == kRenderPageOverview) {
-        // Overall Quality: one button moves GI/Ray Tracing/Path Tracing to same rung.
-        ImGui::TextUnformatted("Overall Quality");
-        {
-            const auto qualityButton = [&](const char* label, bool active) {
-                if (active) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
-                const bool hit = ImGui::Button(label);
-                if (active) ImGui::PopStyleColor();
-                return hit;
-            };
-            const OverallQuality cur = overallFromSettings(s, vx.deviceInfo());
-            static const OverallQuality kRungs[] = {OverallQuality::Low, OverallQuality::Medium,
-                                                    OverallQuality::High, OverallQuality::Epic};
-            static const char* kRungNames[] = {"Low", "Medium", "High", "Epic"};
-            for (int i = 0; i < 4; ++i) {
-                if (i) ImGui::SameLine();
-                if (qualityButton(kRungNames[i], cur == kRungs[i])) {
-                    overallFollowMask |= applyOverall(s, kRungs[i], vx.deviceInfo());
-                    changed = true;
-#if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
-                    // The particle scalability tier follows the preset unless the project pins it (RENDER.PARTICLESCALE).
-                    particles::ScalabilityTier pt;
-                    if (project_.particleScale < 0 && particles::tierForQualityRung(static_cast<u32>(kRungs[i]), pt))
-                        particles::particleEffects().setScalabilityTier(pt);
-#endif
-                }
-                if (kRungs[i] == OverallQuality::Epic && ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Global Illumination's voxel grid goes to 512^3, about\n"
-                                      "3.2 GB -- by far the steepest rung on that ladder. The grid\n"
-                                      "is only ever built at init, so this takes effect on the\n"
-                                      "next project reload, not immediately.");
-            }
-            if (cur == OverallQuality::Custom) {
-                ImGui::SameLine();
-                ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1), "Custom");
-            }
-            // Rungs turn Path Tracing OFF: any tier above Off silently drops to Off.
-            if (s.pathTracing != Quality::Off)
-                ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
-                                   "Picking a preset turns path tracing off (the method is %s now).",
-                                   s.ptMode == 1u ? "reference path tracing" : "ReSTIR path tracing");
-        }
+    if (page == kRenderPageOverview) renderPageOverview(vx, s, er, changed, overallFollowMask);
 
-        // Two groups: each Off..Epic row (where Custom lives). "(modified)" = hand-edited knob. Path tracing
-        // is a Global Illumination method (its page), not a group of its own.
-        {
-            static const ScalabilityGroup kGroups[] = {ScalabilityGroup::GlobalIllumination,
-                                                       ScalabilityGroup::RayTracing};
-            static const Feature kGroupFeature[] = {Feature::GlobalIllumination, Feature::RayTracing};
-            static const char* kGroupLabel[] = {"Global Illumination", "Ray Tracing"};
-            static const char* kTierNames[] = {"Off", "Low", "Medium", "High", "Epic"};
-            // Per-group setter; mirrors applyOverall (Scalability.hpp).
-            const auto setGroupTier = [](Settings& set, ScalabilityGroup g, Quality t) {
-                switch (g) {
-                    case ScalabilityGroup::GlobalIllumination:
-                        set.globalIllumination = t;
-                        set.voxelResolution    = ladder::voxelResolution(t);
-                        set.giCones            = ladder::giCones(t);
-                        set.giUpdateInterval   = ladder::giUpdateInterval(t);
-                        set.giRestirVisibility = ladder::giRestirVisibility(t);
-                        break;
-                    case ScalabilityGroup::RayTracing:
-                        set.rayTracing         = t;
-                        set.rtShadowRays       = ladder::rtShadowRays(t);
-                        set.rtPixelsPerRayTile = ladder::rtPixelsPerRayTile(t);
-                        set.rtShadowDenoise    = ladder::rtShadowDenoise(t);
-                        set.rtRenderMode       = ladder::rtRenderMode(t);
-                        set.refractionMode     = ladder::refraction(t);
-                        set.giSkyOcclusionRays = ladder::giSkyOcclusionRays(t);
-                        set.giSkyOcclusionTile = ladder::giSkyOcclusionTile(t);
-                        set.lightSamples       = ladder::lightSamples(t);
-                        set.lightCandidates    = ladder::lightCandidates(t);
-                        set.lightHitCandidates = ladder::lightHitCandidates(t);
-                        break;
-                    default: break;
-                }
-            };
-            for (int gi = 0; gi < 2; ++gi) {
-                const ScalabilityGroup group = kGroups[gi];
-                ImGui::PushID(gi);
-                ImGui::TextUnformatted(kGroupLabel[gi]);
-                featureStatusBadge(vx, kGroupFeature[gi]);
-                if (!groupFollowsLadder(s, group)) {
-                    ImGui::SameLine();
-                    ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1), "(modified)");
-                }
-                const bool avail = groupAvailable(group, vx.deviceInfo());
-                ImGui::BeginDisabled(!avail);
-                const Quality gt = groupTier(s, group);
-                const auto qualityButton = [&](const char* label, bool active) {
-                    if (active) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
-                    const bool hit = ImGui::Button(label);
-                    if (active) ImGui::PopStyleColor();
-                    return hit;
-                };
-                for (int i = 0; i < 5; ++i) {
-                    if (i) ImGui::SameLine();
-                    if (qualityButton(kTierNames[i], static_cast<u32>(gt) == static_cast<u32>(i))) {
-                        setGroupTier(s, group, static_cast<Quality>(i));
-                        overallFollowMask |= 1u << static_cast<u32>(group);
-                        changed = true;
-                    }
-                }
-                ImGui::EndDisabled();
-                ImGui::PopID();
-            }
-        }
-        ImGui::Separator();
-        {
-            // Renderer choice takes effect on restart (device created before project loads).
-            {
-                static const char* kNames[] = {"Engine default", "D3D12", "Vulkan", "D3D11"};
-                static const char* kKeys[]  = {"", "d3d12", "vulkan", "d3d11"};
-                int cur = 0;
-                for (int i = 1; i < 4; ++i) if (projectBackend_ == kKeys[i]) { cur = i; break; }
-                if (ImGui::Combo("Renderer", &cur, kNames, 4)) {
-                    projectBackend_ = kKeys[cur];
-                    projectDirty_ = true;
-                }
-                uiReg_.track("project.backend");
-                // Shows what is actually running beside what was asked for.
-                ImGui::SameLine();
-                ImGui::TextDisabled("(now: %s)", runningBackend_.c_str());
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Takes effect on the next launch.\n"
-                                      "A backend must be compiled into the build to be usable:\n"
-                                      "configure with -DAVER_RHI_VULKAN=ON for Vulkan.");
-            }
-        }
-    }
+    if (page == kRenderPageAntiAliasing) renderPageAntiAliasing(vx, s, er, changed);
 
-    if (page == kRenderPageAntiAliasing) {
-        ImGui::TextUnformatted(Renderer::featureName(Feature::Msaa));
-        const u32 mask = vx.deviceInfo().msaaMask;
-        const u32 counts[4] = {1,2,4,8};
-        const char* labels[4] = {"Off","2x","4x","8x"};
-        for (int i=0;i<4;++i) {
-            const bool ok = (mask & counts[i]) != 0;
-            if (i) ImGui::SameLine();
-            ImGui::BeginDisabled(!ok);
-            if (ImGui::RadioButton(labels[i], static_cast<u32>(s.msaa)==counts[i])) { s.msaa=static_cast<Msaa>(counts[i]); changed=true; }
-            ImGui::EndDisabled();
-        }
-        // rtRenderMode.effective: whether ray pass is ACTUALLY ray-driven (not raw request).
-        if (er.rtRenderMode.effective == 1)
-            ImGui::TextDisabled("Primary visibility is ray-driven, so the frame runs at 1x (one ray a pixel); "
-                                "this setting applies when the rasteriser draws.");
+    if (page == kRenderPageGi) renderPageGi(vx, s, er, changed);
 
-#if AVER_MODULE_SR
-        {
-            bool taa = temporalAaEnabled_;
-            ImGui::BeginDisabled(taaFromCli_);
-            if (ImGui::Checkbox("Temporal anti-aliasing (TAA)", &taa)) {
-                temporalAaEnabled_ = taa;
-                project_.taa = taa ? 1 : 0;
-                projectDirty_ = true;
-            }
-            ImGui::EndDisabled();
-            uiReg_.track("project.taa");
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                ImGui::SetTooltip("Jitters the camera by a fraction of a pixel each frame and blends the frames,\n"
-                                  "reprojected with motion vectors: smooth edges and stable detail, upscaled to\n"
-                                  "the window. Needs MSAA 1 (it reads the G-buffer); otherwise FSR 1 is used.\n"
-                                  "Runs moving and still; in motion it leans on the current frame so\n"
-                                  "nothing trails.\n\n"
-                                  "Round-trips as RENDER.TAA. --taa / --no-taa outrank it.");
-            if (taa && er.sampleCount != 1u)
-                ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
-                                   "   MSAA is %ux -- TAA needs 1x, so FSR 1 is used instead.",
-                                   static_cast<u32>(s.msaa));
-        }
-        {
-            bool nra = neuraaEnabled_;
-            ImGui::BeginDisabled(neuraaFromCli_);
-            if (ImGui::Checkbox("NeuRAA edge anti-aliasing", &nra)) {
-                neuraaEnabled_ = nra;
-                project_.neuraa = nra ? 1 : 0;
-                projectDirty_ = true;
-            }
-            ImGui::EndDisabled();
-            uiReg_.track("project.neuraa");
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                ImGui::SetTooltip("Finds geometric edges from the ray-traced primary visibility and blends\n"
-                                  "each edge pixel with its neighbour by how much of it each surface covers.\n"
-                                  "One frame, no history: it works while the camera moves, where TAA does not,\n"
-                                  "and TAA builds on it at rest. Ray-driven primary visibility only; the\n"
-                                  "rasteriser uses MSAA. View Mode > Edge Classes (NeuRAA) shows what it finds.\n\n"
-                                  "Round-trips as RENDER.NEURAA. --neuraa / --no-neuraa outrank it.");
-            if (nra && er.rtRenderMode.effective != 1)
-                ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
-                                   "   Primary visibility is the rasteriser -- NeuRAA needs primary rays.");
-        }
-#endif
-        ImGui::Separator();
-#if AVER_MODULE_SR
-        // AverSR's project default sits outside Overall/Custom detection on purpose (module boundary).
-        {
-            const char* rungName = averSrAutoRungName(s, vx.deviceInfo());
-            std::string sourceText = averSrSource_ == voxi::AverSrSource::Auto
-                ? (std::string("Auto from ") + rungName)
-                : (averSrSource_ == voxi::AverSrSource::ForcedOff
-                       ? "forced Off after a failed launch"
-                       : averSrSourceText(averSrSource_));
-            ImGui::Text("Upscaling: AverSR %s (%s)", aver::sr::qualityName(averSrQuality_),
-                        sourceText.c_str());
-            // Only meaningful when source is not Auto; surfaces hidden pinned levels.
-            if (averSrSource_ != voxi::AverSrSource::Auto) {
-                const u32 rungLevel = voxi::autoAverSrLevel(s, vx.deviceInfo());
-                if (rungLevel != static_cast<u32>(averSrQuality_))
-                    ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
-                        "(differs from the %s preset's default, %s)", rungName,
-                        aver::sr::qualityName(static_cast<aver::sr::Quality>(rungLevel)));
-            }
-            // One-time migration note (also shown in Display preference).
-            if (averSrMigrationNoteArmed_)
-                ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
-                    "AverSR now defaults to Auto (%s). Choose Off for native resolution.",
-                    aver::sr::qualityName(averSrQuality_));
-            // -1 ("Follow Overall preset") is explicit default (index 0), not unstated.
-            static const char* kProjDefaultItems[] = {"Follow Overall preset", "Off", "Quality",
-                                                       "Balanced", "Performance"};
-            int projIdx = averSrProjectDefault_ < 0 ? 0 : averSrProjectDefault_ + 1;
-            if (ImGui::Combo("Upscaling default (AverSR)", &projIdx, kProjDefaultItems, 5)) {
-                averSrProjectDefault_ = projIdx == 0 ? -1 : projIdx - 1;
-                averSrMigrationNoteArmed_ = false;
-                averSrCookieTripped_ = false;   // an explicit pick lifts the crash-cookie latch
-                projectDirty_ = true;
-            }
-            uiReg_.track("project.averSr");
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("The project's OWN AverSR default, round-tripped as "
-                                  "RENDER.AVERSR -- outranked by --aversr and by your own Display "
-                                  "preference, and itself outranks the Overall rung's ladder "
-                                  "default. \"Follow Overall preset\" (-1) pins nothing.");
-        }
-#endif
+    if (page == kRenderPageRayTracing) renderPageRayTracing(vx, s, er, changed);
 
-        ImGui::Separator();
-        // Frame interpolation for Play and packaged game (RENDER.FRAMEINTERP in project).
-        {
-            bool fg = project_.frameInterp == 1;
-            if (ImGui::Checkbox("Frame interpolation (Play and packaged game)", &fg)) {
-                project_.frameInterp = fg ? 1 : 0;
-                projectDirty_ = true;
-            }
-            uiReg_.track("project.frameInterp");
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Generates a frame between every two rendered ones (procedural frame "
-                                  "interpolation). Round-trips as RENDER.FRAMEINTERP. Needs V-Sync and 1x "
-                                  "anti-aliasing; the viewport while editing has its own Editor Preference.");
-        }
-    }
+    if (page == kRenderPageDenoising) renderPageDenoising(vx, s, er, changed);
 
-    if (page == kRenderPageGi) {
-        const Status st = vx.status(Feature::GlobalIllumination);
-        ImGui::TextUnformatted(Renderer::featureName(Feature::GlobalIllumination));
-        featureStatusBadge(vx, Feature::GlobalIllumination);
-        ImGui::BeginDisabled(st != Status::Ready);
-        int q = static_cast<int>(s.globalIllumination);
-        const char* qs[] = {"Off","Low","Medium","High","Epic"};
-        if (ImGui::Combo("Quality", &q, qs, 5)) { s.globalIllumination = static_cast<Quality>(q); changed = true; }
+    if (page == kRenderPageMaterials) renderPageMaterials(vx, s, er, changed);
 
-        // ---- Lighting method: how indirect light is found ----
-        // Round-trips through RENDER.GIMODE, RENDER.PATHTRACING and RENDER.PTMODE.
-        const bool ptOn = s.pathTracing != Quality::Off;
-        const bool ptReady = vx.status(Feature::PathTracing) == Status::Ready;
-        static const char* kMethods[] = {"Voxel cones", "Ray traced (ReSTIR GI)", "ReSTIR path tracing",
-                                         "Path tracing (reference)"};
-        const int method = ptOn ? (s.ptMode == 1u ? 3 : 2) : (s.giMode != 0 ? 1 : 0);
-        if (ImGui::BeginCombo("Method", kMethods[method])) {
-            for (int i = 0; i < 4; ++i) {
-                ImGui::BeginDisabled(i >= 2 && !ptReady);
-                if (ImGui::Selectable(kMethods[i], method == i) && method != i) {
-                    s.giMode = i == 0 ? 0u : 1u;
-                    if (i < 2) {
-                        s.pathTracing = Quality::Off;
-                    } else {
-                        s.ptMode = static_cast<u32>(i - 2);
-                        if (!ptOn) {
-                            s.pathTracing = Quality::High;
-                            s.ptBounces   = ladder::ptBounces(Quality::High);
-                        }
-                    }
-                    changed = true;
-                }
-                ImGui::EndDisabled();
-            }
-            ImGui::EndCombo();
-        }
-        uiReg_.track("project.gi.method");
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Voxel cones: a clipmap of the scene marched with cones. No ray tracing needed;\n"
-                              "soft and stable, leaks light near thin walls and the volume's edge.\n\n"
-                              "Ray traced (ReSTIR GI): one traced bounce per pixel, resampled across\n"
-                              "neighbours and frames, then denoised. The real-time default.\n\n"
-                              "ReSTIR path tracing: the same, but each pixel's sample is a whole light\n"
-                              "path (Bounces below) shaded from every vertex's own material, and\n"
-                              "reflections continue the same way. Clean in motion.\n\n"
-                              "Path tracing (reference): one independent path per pixel per frame, every\n"
-                              "lobe, no reuse and no denoiser, averaged while the view holds still. Converges\n"
-                              "to the ground truth; grainy while moving.\n\n"
-                              "The path tracing methods turn on what they run on: primary rays and ReSTIR GI.\n"
-                              "The denoiser stays as set. Picking an Overall Quality preset turns path tracing off.");
-        if (s.giMode != 0 && !ptOn && er.giMode.reason != DisableReason::None)
-            ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1),
-                               "   ReSTIR is selected and resumes when %s",
-                               disableReasonText(er.giMode.reason));
-        if (ptOn) {
-            int pq = static_cast<int>(s.pathTracing) - 1;
-            const char* pqs[] = {"Low", "Medium", "High", "Epic"};
-            if (ImGui::Combo("Path quality", &pq, pqs, 4)) {
-                s.pathTracing = static_cast<Quality>(pq + 1);
-                s.ptBounces   = ladder::ptBounces(s.pathTracing);
-                changed = true;
-            }
-            uiReg_.track("project.pt.quality");
-            ImGui::SameLine();
-            if (voxiRenderer_.pathTracingRan())
-                ImGui::TextColored(ImVec4(0.45f,0.85f,0.45f,1), "[running]");
-            else
-                ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1), "[not running, see the Output Log]");
-            int bounces = static_cast<int>(s.ptBounces);
-            if (ImGui::SliderInt("Bounces", &bounces, 1, 8)) {
-                s.ptBounces = static_cast<u32>(bounces);
-                changed = true;
-            }
-            uiReg_.track("project.pt.bounces");
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Path vertices after the first hit. Path quality re-derives this, so set it\n"
-                                  "after picking one. Round-trips as RENDER.PTBOUNCES.");
-        }
-        // ReSTIR's own controls below are inert under the reference path tracer.
-        ImGui::BeginDisabled(ptOn && s.ptMode == 1u);
+    if (page == kRenderPagePost) renderPagePost(vx, s, er, changed);
 
-        // ReSTIR visibility rays: shows er.giRestirVisibility.REQUESTED (not effective).
-        const bool visGreyed = greysControl(er.giRestirVisibility.reason);
-        ImGui::BeginDisabled(visGreyed);
-        int vis = static_cast<int>(er.giRestirVisibility.requested);
-        if (ImGui::Combo("ReSTIR visibility rays", &vis,
-            "No ray (pre-fix, over-bright)\0Reconstructed (no ray)\0Half resolution\0Full\0Cached (NeuRaC)\0")) {
-            s.giRestirVisibility = static_cast<u32>(vis); changed = true;
-        }
-        ImGui::EndDisabled();
-        uiReg_.track("project.gi.restirVisibility");
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("Extra rays per shaded fragment beyond the candidate/sun/sky/\n"
-                              "reflection rays this estimator already traces (cost UNMEASURED):\n"
-                              "  Full           up to 2 (F2 is the expensive one)\n"
-                              "  Cached         the Half ray budget, but those rays also train a\n"
-                              "                 world-space radiance cache (NeuRaC) that the untraced pixels\n"
-                              "                 read (staged ray-driven on D3D12 only; elsewhere\n"
-                              "                 it runs as Half; UNVERIFIED)\n"
-                              "  Half           up to 0.5 at rest, plus Full on pixels with no\n"
-                              "                 valid reconstruction this frame\n"
-                              "  Reconstructed  0 rays -- one voxel-cone march instead\n"
-                              "  No ray         0 -- the pre-fix behaviour\n\n"
-                              "Known error of each approximation:\n"
-                              "  Full           none -- this is the traced ground truth\n"
-                              "  Half           lags about 5 frames and blurs over a 2x2\n"
-                              "                 block where it reconstructs instead of tracing\n"
-                              "  Reconstructed  leaks light through thin/near occluders and past\n"
-                              "                 the voxel volume's own edge\n"
-                              "  No ray         restores cb4b48df's over-brightness outright\n\n"
-                              "Round-trips as RENDER.RESTIRVISIBILITY.");
-        if (visGreyed) {
-            ImGui::SameLine();
-            ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1), "[%s]",
-                               disableReasonText(er.giRestirVisibility.reason));
-        } else if (er.giRestirVisibility.reason == DisableReason::RequiresStagedRayDriven) {
-            // SOFT reason: choice stays live and runs as Half resolution.
-            ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1), "[%s]",
-                               disableReasonText(er.giRestirVisibility.reason));
-        } else if (vis == 0) {
-            // Amber, not red: a legal, live choice that reopens a shipped fix.
-            ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
-                "No ray restores the pre-fix candidate-hit sky and reuse visibility (legacy bits "
-                "4 and 8): shadowed and enclosed areas read over-bright again -- the washed-out "
-                "look cb4b48df fixed.");
-        } else {
-            // Legacy console switches force NoRay for their own ray regardless of this combo.
-            const u32 legacy = editor::consoleLightingLegacySlot();
-            if (legacy & 12u) {
-                std::string which = (legacy & 4u) ? "voxi.legacyRestirHitSky" : "";
-                if (legacy & 8u) which += which.empty() ? "voxi.legacyRestirReuseVisibility"
-                                                        : " / voxi.legacyRestirReuseVisibility";
-                ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
-                    "Console switch %s is ON and forces No ray for that ray; this setting is "
-                    "ignored for it until the switch is off.", which.c_str());
-            }
-        }
+    if (page == kRenderPagePerformance) renderPagePerformance(vx, s, er, changed);
 
-        // Indirect light history: how much previous-frame reservoir weighs into ReSTIR GI combine.
-        const bool histGreyed = greysControl(er.giRestirMaxHistory.reason);
-        ImGui::BeginDisabled(histGreyed);
-        int hist = static_cast<int>(er.giRestirMaxHistory.requested);
-        if (ImGui::SliderInt("Indirect light history (frames)", &hist, 0, 8)) {
-            s.giRestirMaxHistory = static_cast<u32>(hist); changed = true;
-        }
-        ImGui::EndDisabled();
-        uiReg_.track("project.gi.restirHistory");
-        // Tooltip asked before the greyed-reason label (IsItemHovered reads LAST submitted item).
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("How many earlier samples a pixel's ReSTIR reservoir may lean on.\n"
-                              "8 (default): temporal reuse, 37%% less noise in the raw indirect light\n"
-                              "and within 3%% of no reuse in brightness, no flash when the camera\n"
-                              "stops (NeonDistrict Day, viewport mean). 0 turns reuse off: one\n"
-                              "fresh sample per pixel per frame.\n\n"
-                              "(The old +8%%/+104%% overshoot came from two bugs in the reuse pass,\n"
-                              "fixed, not from the history itself.)\n\n"
-                              "Round-trips as RENDER.RESTIRHISTORY.");
-        if (histGreyed) {
-            ImGui::SameLine();
-            ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1), "[%s]", disableReasonText(er.giRestirMaxHistory.reason));
-        }
-        ImGui::EndDisabled();   // ReSTIR controls (reference path tracing)
-
-        ImGui::Spacing();
-        ImGui::TextUnformatted("Voxel volume");
-        ImGui::Separator();
-        int res = static_cast<int>(s.voxelResolution);
-        const char* resLabels[] = {"64", "128", "256", "512"};
-        const int resValues[] = {64, 128, 256, 512};
-        int resIdx = res>=512 ? 3 : (res>=256 ? 2 : (res>=128 ? 1 : 0));
-        if (ImGui::Combo("Voxel grid", &resIdx, resLabels, 4)) { s.voxelResolution = (u32)resValues[resIdx]; changed = true; }
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Cubic edge of the GI volume -- memory and per-voxel GPU cost are\n"
-                               "both this NUMBER CUBED, so each step up is an 8x jump:\n"
-                               "  64  ~6 MB    128  ~50 MB    256  ~400 MB    512  ~3.2 GB\n"
-                               "Changing Quality above moves this to match its rung (Off/Low=64,\n"
-                               "Medium=128, High=256, Epic=512) unless you pick a value here\n"
-                               "yourself, which then overrides the tier's default.");
-        // Grid built at init only; change recorded but reaches GPU on reload.
-        if (s.voxelResolution != voxiRenderer_.voxelResolutionBuilt())
-            ImGui::TextWrapped("Takes effect when the project is reloaded; the volume built for "
-                               "this session is still %u^3.", voxiRenderer_.voxelResolutionBuilt());
-        if (ImGui::SliderFloat("GI intensity", &s.giIntensity, 0.0f, 4.0f)) changed = true;
-        if (ImGui::SliderFloat("GI distance", &s.giMaxDistance, 10.0f, 20000.0f, "%.0f")) changed = true;
-        ImGui::DragFloat3("Volume centre", &giCenter_.x, 0.5f);
-        ImGui::DragFloat("Volume extent", &giExtent_, 0.5f, 1.0f, 100000.0f);
-        // Diffuse cone count: tier-derived. Quality above re-derives it.
-        {
-            int cones = static_cast<int>(s.giCones);
-            if (ImGui::SliderInt("Diffuse cones", &cones, 1, 16)) {
-                s.giCones = static_cast<u32>(cones);
-                changed = true;
-            }
-            uiReg_.track("project.gi.cones");
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Cones in the diffuse gather, including the axial one.\n"
-                                  "Changing Quality above re-derives this from the tier.");
-        }
-        // Fog occlusion: built from GI voxel volume; greys with same prerequisite.
-        {
-            const bool fogOccGreyed = greysControl(er.fogOcclusion.reason);
-            ImGui::BeginDisabled(fogOccGreyed);
-            bool fogOcc = s.fogOcclusion;
-            if (ImGui::Checkbox("Fog respects occlusion", &fogOcc)) { s.fogOcclusion = fogOcc; changed = true; }
-            ImGui::EndDisabled();
-            uiReg_.track("project.gi.fogOcclusion");
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                ImGui::SetTooltip("Fog and haze only glow where the air can actually see the sky.\n"
-                                  "Without it, the fog inside a covered arcade or a room is lit as\n"
-                                  "if it were outdoors: a blue veil brighter than the walls behind it.\n\n"
-                                  "Built from the GI voxel volume (a small sky-visibility grid,\n"
-                                  "refreshed a slice per frame, ~0.2 ms), so it needs Global\n"
-                                  "Illumination on. Outdoor fog is unchanged.\n\n"
-                                  "Round-trips as RENDER.FOGOCCLUSION.");
-            if (fogOccGreyed) {
-                ImGui::SameLine();
-                ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1), "[%s]", disableReasonText(er.fogOcclusion.reason));
-            }
-        }
-        ImGui::EndDisabled();
-    }
-
-    if (page == kRenderPageRayTracing) {
-        const Status st = vx.status(Feature::RayTracing);
-        ImGui::TextUnformatted(Renderer::featureName(Feature::RayTracing));
-        featureStatusBadge(vx, Feature::RayTracing);
-        ImGui::BeginDisabled(st != Status::Ready);
-        int q = static_cast<int>(s.rayTracing);
-        const char* qs[] = {"Off","Low","Medium","High","Epic"};
-        if (ImGui::Combo("Quality", &q, qs, 5)) { s.rayTracing = static_cast<Quality>(q); changed = true; }
-
-        // Inner grey: everything below inert while RT is Off (outer grey doesn't cover this).
-        ImGui::BeginDisabled(greysControl(er.rtSubControls));
-
-        if (s.pathTracing != Quality::Off)
-            ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
-                               "Path Tracing is on: primary rays and ReSTIR GI are forced on.");
-        // Primary visibility: rasteriser vs ray-driven (shipped default Medium and above).
-        ImGui::Spacing();
-        ImGui::TextUnformatted("Primary visibility");
-        ImGui::SameLine();
-        ImGui::TextDisabled("(default on every ray-tracing tier)");
-        ImGui::Separator();
-        int mode = static_cast<int>(s.rtRenderMode);
-        if (ImGui::Combo("Finds the first surface", &mode,
-                          "Rasteriser (no ray tracing)\0Primary rays\0")) {
-            s.rtRenderMode = static_cast<u32>(mode); changed = true;
-        }
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Primary rays trace one ray per pixel to find the first surface,\n"
-                               "then shade it with ray-traced shadows, GI and reflections. It is\n"
-                               "the default on every ray-tracing tier.\n\n"
-                               "Rasteriser draws the scene WITHOUT ray tracing (shadow maps,\n"
-                               "cone-traced GI): raster + ray tracing was removed because it\n"
-                               "hung GPUs. The ray-tracing settings below do nothing while it\n"
-                               "is selected.");
-
-        // Staged ray-driven passes (A/B over the combo above); default is staged + half-rate GI.
-        const bool stagesGreyed = greysControl(er.rayDrivenStages.reason);
-        ImGui::BeginDisabled(stagesGreyed);
-        int stages = static_cast<int>(er.rayDrivenStages.requested);
-        if (ImGui::Combo("Ray-driven passes", &stages,
-                          "Single pass\0Staged\0"
-                          "Staged + half-rate GI (default)\0")) {
-            s.rayDrivenStages = static_cast<u32>(stages); changed = true;
-        }
-        ImGui::EndDisabled();
-        uiReg_.track("project.rt.rayDrivenStages");
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("How the ray-driven frame is split into GPU passes.\n\n"
-                              "Staged runs the primary ray, lighting and shading as separate GPU passes\n"
-                              "instead of one giant shader: the same image, measured 40-45%% faster.\n"
-                              "Staged + half-rate GI (the default) also traces only half the GI rays each\n"
-                              "frame (a checkerboard) and the denoiser rebuilds the other half: a further\n"
-                              "~1.4 ms faster, within 0.4%% of Staged when still, slightly noisier in motion.\n"
-                              "It needs ReSTIR GI and the denoiser on; without them it behaves as Staged.\n\n"
-                              "Single pass is the one-shader baseline, kept as a fallback. Staged modes\n"
-                              "are D3D12-only; other backends, or a pipeline/resource that is missing,\n"
-                              "fall back to Single pass (logged once).\n\n"
-                              "Round-trips as RENDER.RDSTAGES.");
-        if (stagesGreyed) {
-            ImGui::SameLine();
-            ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1), "[%s]", disableReasonText(er.rayDrivenStages.reason));
-        }
-
-        ImGui::Spacing();
-        ImGui::TextUnformatted("Sun shadow");
-        ImGui::Separator();
-        int rays = static_cast<int>(s.rtShadowRays);
-        if (ImGui::SliderInt("Occlusion rays / pixel", &rays, 1, 32)) {
-            s.rtShadowRays = static_cast<u32>(rays); changed = true;
-        }
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("How many rays a pixel that traces THIS frame casts toward the\n"
-                               "sun's disc. Linear in cost -- this is the knob to turn down\n"
-                               "first if ray tracing starts costing frames.");
-
-
-        // MANY LIGHTS (docs/rendering/MANY_LIGHTS.md): the light tree's stochastic tail. Auto engages above
-        // voxi.manyLightsMin lights; a scene at or under it is unchanged.
-        ImGui::Spacing();
-        ImGui::TextUnformatted("Lights");
-        ImGui::Separator();
-        {
-            const bool exhaustive = s.manyLights == 3u;   // the console's ground-truth mode: shown, not offered
-            int ml = s.manyLights == 0u ? 1 : (s.manyLights == 2u ? 2 : 0);
-            ImGui::BeginDisabled(exhaustive);
-            if (ImGui::Combo("Many lights", &ml, "Auto\0Off\0On\0")) {
-                s.manyLights = ml == 1 ? 0u : (ml == 2 ? 2u : 1u);
-                changed = true;
-            }
-            ImGui::EndDisabled();
-            uiReg_.track("project.rt.manyLights");
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                ImGui::SetTooltip("Lights thousands of shadowed lights with a bounded ray budget: each pixel draws\n"
-                                  "candidate lights from a light tree by importance and traces a few shadow rays.\n"
-                                  "Needs the NRD2 denoiser (Denoising page) and ray tracing; other denoisers keep\n"
-                                  "the light grid, which sees at most 24 lights per cell.\n\n"
-                                  "Auto turns it on above 48 lights; a scene with 48 or fewer lights renders\n"
-                                  "exactly as with it Off. On forces it at any count.\n\n"
-                                  "Round-trips as RENDER.MANYLIGHTS (0 off, 1 auto, 2 on).");
-            if (exhaustive) {
-                ImGui::SameLine();
-                ImGui::TextDisabled("(exhaustive, set from the console)");
-            }
-            if (s.manyLights != 0u && !exhaustive && denoiserMode(s) != 2u) {
-                ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
-                                   "   The Denoiser is not NRD2 -- the light grid is used instead.");
-            }
-        }
-
-        ImGui::EndDisabled();   // the inner grey opened beside the Quality combo above
-        ImGui::EndDisabled();
-    }
-
-    if (page == kRenderPageDenoising) {
-        // Denoiser filters ReSTIR diffuse and RT sky occlusion; only thing needing G-buffer.
-        // Greyed for hard reasons (hardware, tier); left clickable for soft (MSAA), fixable below.
-        const bool denoiserHardGreyed = greysControl(er.denoiser.reason);
-        ImGui::BeginDisabled(denoiserHardGreyed);
-        static const char* kDenoiserModes[] = {"Off", "AMD FidelityFX", "NRD2 (single-frame)"};
-        int denMode = denoiserHardGreyed ? 0 : static_cast<int>(denoiserMode(s));
-        if (ImGui::Combo("Denoiser", &denMode, kDenoiserModes, 3)) {
-            setDenoiserMode(s, static_cast<u32>(denMode));
-            changed = true;
-        }
-        ImGui::EndDisabled();
-        if (denoiserHardGreyed) {
-            ImGui::SameLine();
-            ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1), "[%s]", disableReasonText(er.denoiser.reason));
-        }
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("AMD FIDELITYFX filters ReSTIR GI's indirect diffuse and the ray-traced\n"
-                                    "sky occlusion (MIT, third_party/fidelityfx-denoiser), with history.\n\n"
-                                    "NRD2 denoises the whole composed lighting (shadows, lamps, GI,\n"
-                                    "reflections) from THIS frame only: no history, so no smear or\n"
-                                    "ghosting. Fixed parameters for now (docs/rendering/NRD2.md).\n"
-                                    "Staged ray-driven frames on D3D12 only.\n\n"
-                                    "COSTS THE G-BUFFER: velocity, view-space depth and packed\n"
-                                    "normal/roughness -- three render targets NOTHING ELSE in\n"
-                                    "this engine needs, about 54 MB at 1080p. That is why it is\n"
-                                    "off by default rather than something enabled for you.\n\n"
-                                    "REQUIRES the G-buffer and D3D12. Under MSAA the G-buffer is\n"
-                                    "resolved to one sample a pixel (the nearest surface).\n\n"
-                                    "Round-trips as RENDER.DENOISER (0, 1, 2).");
-        {
-            // NRD2's speckle removal: greyed unless NRD2 is the denoiser.
-            ImGui::BeginDisabled(denMode != 2 || denoiserHardGreyed);
-            static const char* kSpeckleModes[] = {"None", "Blur"};
-            int speckle = s.nrd2Speckle > 1u ? 1 : static_cast<int>(s.nrd2Speckle);
-            if (ImGui::Combo("Speckle Removal", &speckle, kSpeckleModes, 2)) {
-                s.nrd2Speckle = static_cast<u32>(speckle);
-                changed = true;
-            }
-            ImGui::EndDisabled();
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                ImGui::SetTooltip("NRD2 only. What happens to the blotches left after NRD2 filters the frame.\n\n"
-                                  "BLUR: an edge-aware blur (voxi.nrd2BlurRadius, 8 px) over this frame's\n"
-                                  "lighting, stopped at depth and normal edges; textures stay sharp, lamp\n"
-                                  "shadow edges soften. NONE: off.\n\n"
-                                  "Not captured to the project manifest.");
-        }
-        {
-            // Reflection denoising is FidelityFX's: greyed while it is not the one.
-            const bool ndGreyed = denMode != 1 || denoiserHardGreyed;
-            ImGui::BeginDisabled(ndGreyed);
-            bool dr = s.denoiseReflections;
-            if (ImGui::Checkbox("Denoise Reflections", &dr)) { s.denoiseReflections = dr; changed = true; }
-            ImGui::EndDisabled();
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                ImGui::SetTooltip("Ray-traced reflections through the denoiser's reflection pipeline\n"
-                                  "(history along the reflected point, roughness-aware filtering)\n"
-                                  "instead of Voxi's own reflection history. Ray-driven staged\n"
-                                  "reflections only. Needs the Denoiser on.");
-        }
-
-        // AMD FidelityFX tuning (filters ReSTIR diffuse GI, not the sun shadow below).
-        ImGui::Spacing();
-        ImGui::TextUnformatted("Indirect diffuse: AMD FidelityFX history");
-        ImGui::Separator();
-        {
-            const bool tuneGreyed = greysControl(er.denoiser.reason);
-            ImGui::BeginDisabled(tuneGreyed);
-            int maxSamples = static_cast<int>(s.denoiserMaxSamples);
-            if (ImGui::SliderInt("History depth (frames)", &maxSamples, 1, 255)) {
-                s.denoiserMaxSamples = static_cast<u32>(maxSamples);
-                changed = true;
-            }
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                ImGui::SetTooltip("The denoiser's history length, in frames -- a latency/noise\n"
-                                  "trade, not a dispatch toggle: higher converges quieter but lags\n"
-                                  "longer behind a moving light or camera. Filters the indirect-\n"
-                                  "diffuse GI estimate (the \"Denoiser (AMD FidelityFX)\"\n"
-                                  "checkbox above), not the sun shadow below.\n"
-                                  "[1,255]; default 32.\n"
-                                  "NOT captured to the project manifest -- like giSkyOcclusionRays/\n"
-                                  "Tile, it has no manifest key (ProjectRenderApply.hpp's own\n"
-                                  "capture rule), so it resets to the compiled default on the\n"
-                                  "next project reload rather than round-tripping through .ocproject.");
-            float clip = s.denoiserHistoryClipWeight;
-            if (ImGui::SliderFloat("History clip width", &clip, 0.01f, 4.0f, "%.2f")) {
-                s.denoiserHistoryClipWeight = clip;
-                changed = true;
-            }
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                ImGui::SetTooltip("Width of the neighbourhood box the history is clipped to.\n"
-                                  "Smaller rejects stale history harder (less ghosting, more\n"
-                                  "grain); larger trusts it longer. [0.01,4]; default 4 (narrower darkens GI).\n"
-                                  "Not captured to the project manifest (see above).");
-            int sunSamples = static_cast<int>(s.denoiserSunMovingSamples);
-            if (ImGui::SliderInt("History while sun moves (frames)", &sunSamples, 1, 255)) {
-                s.denoiserSunMovingSamples = static_cast<u32>(sunSamples);
-                changed = true;
-            }
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                ImGui::SetTooltip("History cap while the sun moves (and one frame after), so a\n"
-                                  "drag's bounce light does not lag the sun. At or above the\n"
-                                  "history depth it has no effect. [1,255]; default 4.\n"
-                                  "Not captured to the project manifest (see above).");
-            ImGui::EndDisabled();
-        }
-
-        ImGui::BeginDisabled(greysControl(er.rtSubControls));
-        ImGui::Spacing();
-        ImGui::TextUnformatted("Sun shadow: temporal amortisation");
-        ImGui::Separator();
-        // Tile edge (powers of two only). Options: 1,2,4,8,16 (1..256 px/ray).
-        const int tiles[] = {1, 2, 4, 8, 16};
-        const char* tileLabels[] = {"Off (1x1 -- every pixel, every frame)",
-                                    "2x2 (4 pixels/ray)", "4x4 (16 pixels/ray)",
-                                    "8x8 (64 pixels/ray)", "16x16 (256 pixels/ray)"};
-        int tileIdx = 0;
-        for (int i = 0; i < 5; ++i) if (tiles[i] == (int)s.rtPixelsPerRayTile) tileIdx = i;
-        if (ImGui::Combo("Shadow amortisation", &tileIdx, tileLabels, 5)) {
-            s.rtPixelsPerRayTile = static_cast<u32>(tiles[tileIdx]); changed = true;
-        }
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("At N, one pixel in each NxN tile traces a fresh ray each frame;\n"
-                               "every other pixel reuses a reprojected history sample instead.\n"
-                               "Every pixel gets its own turn every N*N frames. Off is bit-for-\n"
-                               "bit identical to having no denoiser; larger tiles trade a real\n"
-                               "cut in rays traced for more frames of lag on fast-moving shadows.");
-
-        // A second, independent denoiser -- the separate heading is the point: these two fail in
-        // opposite directions. Above reuses THIS pixel across TIME (converges while still, collapses
-        // under motion); below averages NEIGHBOURS with no history (motion can't poison it). They compose.
-        ImGui::Spacing();
-        ImGui::TextUnformatted("Sun shadow: spatial filter");
-        ImGui::Separator();
-        int denoise = static_cast<int>(s.rtShadowDenoise);
-        if (ImGui::SliderInt("Filter radius (px)", &denoise, 0, 3, denoise == 0 ? "Off" : "%d")) {
-            s.rtShadowDenoise = static_cast<u32>(denoise); changed = true;
-        }
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Averages a (2R+1)^2 neighbourhood of the shadow, weighting each\n"
-                               "neighbour by how well its depth agrees with this pixel's surface.\n"
-                               "At one ray per pixel the shadow term is a hard 0 or 1, so a\n"
-                               "penumbra comes out dithered rather than soft; this is what\n"
-                               "resolves it without paying for more rays. Keeps no history, so\n"
-                               "unlike amortisation above it costs nothing in lag under motion.");
-
-        ImGui::EndDisabled();
-    }
-
-    if (page == kRenderPageMaterials) {
-        // Layered BSDF: changes what every material-shaded draw computes. Reload to take effect.
-        const Status lst = vx.status(Feature::LayeredBsdf);
-        ImGui::TextUnformatted(Renderer::featureName(Feature::LayeredBsdf));
-        featureStatusBadge(vx, Feature::LayeredBsdf);
-        ImGui::BeginDisabled(lst != Status::Ready);
-        int lq = static_cast<int>(s.layeredBsdf);
-        const char* lqs[] = {"Off","Low","Medium","High","Epic"};
-        if (ImGui::Combo("Shading model", &lq, lqs, 5)) {
-            s.layeredBsdf = static_cast<Quality>(lq);
-            changed = true;
-        }
-        ImGui::EndDisabled();
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Off is the standard BRDF. Any other setting adds a clear-coat lobe "
-                              "over the base for materials that author one -- a material with "
-                              "coat weight 0 renders identically either way.");
-        if ((s.layeredBsdf != Quality::Off) != voxiRenderer_.layeredBsdfActive())
-            ImGui::TextWrapped("Takes effect when the project is reloaded; the shaders compiled "
-                               "for this session are unchanged.");
-
-        // ---- Refraction ----
-        ImGui::Separator();
-        ImGui::TextUnformatted("Refraction");
-        {
-            // BeginCombo/Selectable for per-entry prerequisite control (RayTraced has different requirements).
-            static const char* rms[] = {"Off", "Screen-space", "Ray-traced"};
-            if (ImGui::BeginCombo("Mode", rms[s.refractionMode])) {
-                for (int i = 0; i < 3; ++i) {
-                    const bool rayTracedGreyed = (i == 2) && greysControl(er.refractionMode.reason);
-                    ImGui::BeginDisabled(rayTracedGreyed);
-                    if (ImGui::Selectable(rms[i], s.refractionMode == static_cast<u32>(i))) {
-                        s.refractionMode = static_cast<u32>(i);
-                        changed = true;
-                    }
-                    ImGui::EndDisabled();
-                    if (rayTracedGreyed && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                        ImGui::SetTooltip("%s", disableReasonText(er.refractionMode.reason));
-                }
-                ImGui::EndCombo();
-            }
-            uiReg_.track("project.refraction.mode");
-            ImGui::BeginDisabled(s.refractionMode == 0);
-            if (ImGui::SliderFloat("Strength", &s.refractionStrength, 0.0f, 2.0f)) changed = true;
-            uiReg_.track("project.refraction.strength");
-            if (ImGui::SliderFloat("Edge fade", &s.refractionEdgeFade, 0.0f, 1.0f)) changed = true;
-            uiReg_.track("project.refraction.edgeFade");
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Screen-space refraction cannot see what the camera never saw.\n"
-                                  "This fades the effect out near the screen edge, where the miss\n"
-                                  "would otherwise be visible.");
-            ImGui::EndDisabled();
-        }
-
-    }
-
-    if (page == kRenderPagePost) {
-        // ---- Post processing ----
-        ImGui::Separator();
-        ImGui::TextUnformatted("Post processing");
-        ImGui::TextDisabled("What a PACKAGED GAME renders with. An unticked key is not stated, and");
-        ImGui::TextDisabled("the engine's compiled default applies to it.");
-        {
-            // Lambda for float setting with live mirror (unlike settingInt).
-            const auto postFloat = [&](const char* id, const char* label, f32* key, f32* live,
-                                       f32 lo, f32 hi, const char* form, ImGuiSliderFlags flags,
-                                       const char* trackName, const char* tip) {
-                ImGui::PushID(id);
-                bool stated = (*key >= 0.0f);
-                // Ticking adopts what the viewport already shows, not a hardcoded number.
-                f32 v = stated ? *key : *live;
-                if (ImGui::Checkbox("##stated", &stated)) {
-                    // Unticking leaves the viewport alone: "unstated" means compiled default applies next open.
-                    *key = stated ? v : -1.0f;
-                    if (stated) *live = v;
-                    projectDirty_ = true;
-                }
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Unticked: this project does not state it,\n"
-                                      "and the engine's own default applies.");
-                ImGui::SameLine();
-                ImGui::BeginDisabled(!stated);
-                if (ImGui::SliderFloat(label, &v, lo, hi, form, flags)) {
-                    *key = v;
-                    *live = v;
-                    projectDirty_ = true;
-                }
-                ImGui::EndDisabled();
-                uiReg_.track(trackName);
-                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                    ImGui::SetTooltip("%s", tip);
-                ImGui::PopID();
-            };
-            postFloat("exposure", "Exposure", &project_.postExposure, &post_.exposure,
-                      0.05f, 8.0f, "%.2f", ImGuiSliderFlags_Logarithmic,
-                      "project.post.exposure",
-                      "Linear multiplier on scene radiance, applied before the tone\n"
-                      "curve. With auto exposure below on, it is compensation on the\n"
-                      "adapted value: 1 = as metered, 2 = one stop brighter.\n\n"
-                      "Round-trips as RENDER.EXPOSURE.");
-            postFloat("bloom", "Bloom", &project_.postBloom, &post_.bloomIntensity,
-                      0.0f, 1.0f, "%.3f", 0, "project.post.bloom",
-                      "ZERO IS A REAL ANSWER HERE, which is why the key's sentinel is\n"
-                      "-1 and not 0: zero intensity builds no pyramid and records no\n"
-                      "pass at all (RHI.hpp:151), so it is a cost choice as well as a\n"
-                      "look. The sandbox's own --bloom default is 0 rather than\n"
-                      "PostSettings' 0.06, so every recorded gate image was taken\n"
-                      "with no bloom.\n\nRound-trips as RENDER.BLOOM.");
-            {
-                // Checkbox, not settingInt slider. Tracks before tooltip for ordering.
-                ImGui::PushID("autoExposure");
-                bool stated = project_.postAutoExposure >= 0;
-                bool on = stated ? project_.postAutoExposure != 0 : post_.autoExposure;
-                if (ImGui::Checkbox("##stated", &stated)) {
-                    project_.postAutoExposure = stated ? (on ? 1 : 0) : -1;
-                    if (stated) post_.autoExposure = on;
-                    projectDirty_ = true;
-                }
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Unticked: this project does not state it,\n"
-                                      "and the engine's own default (on) applies.");
-                ImGui::SameLine();
-                ImGui::BeginDisabled(!stated);
-                if (ImGui::Checkbox("Auto exposure", &on)) {
-                    project_.postAutoExposure = on ? 1 : 0;
-                    post_.autoExposure = on;
-                    projectDirty_ = true;
-                }
-                ImGui::EndDisabled();
-                uiReg_.track("project.post.autoExposure");
-                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                    ImGui::SetTooltip("Eye adaptation from a luminance histogram of the frame.\n"
-                                      "A run with a frame limit forces it OFF unless\n"
-                                      "--auto-exposure asked for it by name, so a capture\n"
-                                      "measures one exposure instead of the histogram's warm-up.\n\n"
-                                      "Round-trips as RENDER.AUTOEXPOSURE.");
-                ImGui::PopID();
-            }
-            // Amber when adaptation is on: the recorded value still applies where adaptation is off.
-            if (post_.autoExposure && project_.postExposure >= 0.0f)
-                ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
-                    "Auto exposure is on, so the adaptation overwrites Exposure every frame. The "
-                    "recorded value still applies wherever auto exposure is off.");
-            {
-                ImGui::PushID("tonemap");
-                bool stated = project_.postTonemap >= 0;
-                // Clamped from both sources; neither is bounded.
-                int mode = stated ? project_.postTonemap : static_cast<int>(post_.tonemap);
-                if (mode > 7) mode = 7;
-                if (ImGui::Checkbox("##stated", &stated)) {
-                    project_.postTonemap = stated ? mode : -1;
-                    if (stated) post_.tonemap = static_cast<u32>(mode);
-                    projectDirty_ = true;
-                }
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Unticked: this project does not state it,\n"
-                                      "and the engine's own default (ACES fitted) applies.");
-                ImGui::SameLine();
-                ImGui::BeginDisabled(!stated);
-                if (ImGui::Combo("Tone curve", &mode,
-                                 "Per-channel ACES\0ACES fitted (default)\0ACES luminance\0"
-                                 "Extended linear\0Extended Reinhard\0Extended filmic\0Extended ACES\0Extended AgX\0")) {
-                    project_.postTonemap = mode;
-                    post_.tonemap = static_cast<u32>(mode);
-                    projectDirty_ = true;
-                }
-                ImGui::EndDisabled();
-                {
-                    // The white point and display adjustments (RENDER.TONEMAPWHITE / ADJUST*); an edit states the key.
-                    struct Row { const char* label; f32* project; f32* live; f32 hi; };
-                    Row rows[] = {{"Tone white", &project_.postTonemapWhite, &post_.tonemapWhite, 16.0f},
-                                  {"Brightness", &project_.postAdjustBrightness, &post_.adjustBrightness, 4.0f},
-                                  {"Contrast", &project_.postAdjustContrast, &post_.adjustContrast, 4.0f},
-                                  {"Saturation", &project_.postAdjustSaturation, &post_.adjustSaturation, 4.0f}};
-                    for (Row& r : rows) {
-                        float v = *r.project >= 0.0f ? *r.project : *r.live;
-                        if (ImGui::DragFloat(r.label, &v, 0.01f, 0.001f, r.hi, "%.3f")) {
-                            *r.project = v; *r.live = v; projectDirty_ = true;
-                        }
-                    }
-                }
-                uiReg_.track("project.post.tonemap");
-                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                    ImGui::SetTooltip(
-                        "Which curve resolves HDR radiance to the display:\n"
-                        "  Per-channel     the original Narkowicz/Hill approximation: the\n"
-                        "                  gentlest toe, so dim bounce light stays visible\n"
-                        "                  instead of crushing to black\n"
-                        "  ACES fitted     the DEFAULT: the same curve between the ACES\n"
-                        "                  matrices, the space Unreal's filmic curve runs\n"
-                        "                  in; matched a UE5 Lumen Sponza's contrast\n"
-                        "  ACES luminance  tonemaps LUMINANCE and puts the original\n"
-                        "                  chromaticity back, so hue survives any exposure\n\n"
-                        "Measured on PTTest Sponza at exposure 8: fitted holds chroma 1.41\n"
-                        "where luminance holds 3.09 at the same brightness, and above 5x\n"
-                        "fitted lets BLUE overtake GREEN -- warm stone rendering cold\n"
-                        "(RHI.hpp:196-216).\n\nRound-trips as RENDER.TONEMAP.");
-                ImGui::PopID();
-            }
-            // CLI flag precedence: a flag applies at startup, manifest later.
-            if (postExposureFromCli_ || postBloomFromCli_ || postAutoExpFromCli_)
-                ImGui::TextDisabled("A post-process flag was given on this launch; it outranks "
-                                    "these keys when a project opens.");
-        }
-
-    }
-
-    if (page == kRenderPagePerformance) {
-        ImGui::TextUnformatted("Culling and level of detail");
-        {
-            bool lod = lodSelectEnabled_;
-            if (ImGui::Checkbox("LOD select", &lod)) {
-                setLodSelect(lod, lodErrorThresholdPx_);
-                projectDirty_ = true;
-            }
-            uiReg_.track("project.lod.select");
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Off draws every instance at LOD 0. Measured on Electric Dreams:\n"
-                                  "102.7 ms median off, 76.7 ms on.");
-            ImGui::BeginDisabled(!lodSelectEnabled_);
-            f32 px = lodErrorThresholdPx_;
-            if (ImGui::SliderFloat("Screen error (px)", &px, 0.25f, 8.0f, "%.2f")) {
-                setLodSelect(lodSelectEnabled_, px);
-                projectDirty_ = true;
-            }
-            uiReg_.track("project.lod.threshold");
-            ImGui::EndDisabled();
-
-            if (ImGui::Checkbox("Occlusion culling", &occlusionCullEnabled_)) projectDirty_ = true;
-            uiReg_.track("project.occlusionCull");
-            if (ImGui::Checkbox("Depth pre-pass", &depthPrepassOverride_)) projectDirty_ = true;
-            uiReg_.track("project.depthPrepass");
-
-        }
-        ImGui::Separator();
-        const Status st = vx.status(Feature::MeshShaders);
-        ImGui::TextUnformatted(Renderer::featureName(Feature::MeshShaders));
-        featureStatusBadge(vx, Feature::MeshShaders);
-        ImGui::BeginDisabled(st != Status::Ready);
-        if (ImGui::Checkbox("Use mesh shaders", &s.meshShaders)) changed = true;
-        ImGui::EndDisabled();
-
-#if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
-        // Where particle emitters simulate (docs/PARTICLES.md). Applies at once to emitters created afterwards; the project key
-        // RENDER.PARTICLEGPU round-trips it, the CLI --particles-cpu / --particles-gpu outranks it.
-        ImGui::Separator();
-        ImGui::TextUnformatted("Particles");
-        {
-            int pg = project_.particleGpu < 0 ? 1 : project_.particleGpu;
-            if (ImGui::Combo("Particles on GPU", &pg, "Off (CPU only)\0Auto\0On\0")) {
-                project_.particleGpu = pg;
-                particles::particleSystem().setGpuMode(pg);
-                particleRenderer_.setGpuEnabled(pg != 0);
-                projectDirty_ = true;
-            }
-            uiReg_.track("project.particles.gpu");
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Off keeps every emitter on the CPU. Auto puts an emitter on the GPU when its max particles\n"
-                                  "is 2048 or more and the device supports compute and indirect draw. On does so for every\n"
-                                  "emitter that can. A tier is chosen when an emitter starts and never changes mid-life.\n\n"
-                                  "Round-trips as RENDER.PARTICLEGPU (0 off, 1 auto, 2 on).");
-            const particles::ParticleStats ps = particles::particleSystem().stats();
-            ImGui::TextDisabled("%u GPU emitter(s) / %u particle(s), %u CPU emitter(s) / %u particle(s), %u KB pooled",
-                                ps.gpuEmitters, ps.gpuParticles, ps.cpuEmitters, ps.cpuParticles, ps.gpuAllocatedKB);
-        }
-#endif
-    }
-
-    if (page == kRenderPageDebug) {
-        ImGui::Spacing();
-        ImGui::TextUnformatted("Global illumination");
-        ImGui::Separator();
-        ImGui::Checkbox("Debug: show voxel radiance", &giDebugView_);
-
-        // Debug paints: live console-only. Read/write directly so checkbox and command sync.
-        {
-            bool poisonView = editor::consoleGiPoisonViewSlot();
-            if (ImGui::Checkbox("Debug: GI poison view", &poisonView))
-                editor::consoleGiPoisonViewSlot() = poisonView;
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Paints an unmistakable colour over any pixel where one of "
-                                  "voxi_restir.hlsli's guards fired THIS frame (giMode 1 / ReSTIR "
-                                  "only, except violet):\n"
-                                  "  magenta  store-time reservoir guard (the one that matters most)\n"
-                                  "  cyan     candidate-radiance clamp\n"
-                                  "  yellow   target-pdf guard\n"
-                                  "  orange   pre-existing final-estimate guard\n"
-                                  "  blue     denoiser-readback guard\n"
-                                  "  red      raw estimate hit voxi.giRadianceCeiling, still finite\n"
-                                  "  green    denoised readback hit the same ceiling\n"
-                                  "  violet   ray-traced specular indirect ceiling hit (either "
-                                  "diffuse estimator)\n"
-                                  "All colours zero means no guard is firing.");
-
-            bool visPathView = editor::consoleGiVisPathViewSlot();
-            if (ImGui::Checkbox("Debug: GI visibility path view", &visPathView))
-                editor::consoleGiVisPathViewSlot() = visPathView;
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Paints F2's resolved visibility path over indirect diffuse:\n"
-                                  "  yellow  no ray (mode 0 or a legacy bit)\n"
-                                  "  green   reconstructed (voxel cone)\n"
-                                  "  blue    half-resolution reconstruction\n"
-                                  "  red     half-resolution fallback (traced -- no valid "
-                                  "reconstruction available this pixel)\n"
-                                  "  white   full trace\n"
-                                  "Suppressed while GI poison view above is also on, which paints "
-                                  "first.");
-        }
-        // History resets (debug): one button per console command. Reset All = GI + RT + denoiser.
-        ImGui::Spacing();
-        ImGui::TextUnformatted("History resets (debug)");
-        ImGui::Separator();
-        if (ImGui::Button("Reset GI history")) vx.requestGiHistoryReset();
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Invalidates the ReSTIR-GI reservoir + surface history (giMode 1\n"
-                              "only) on the next frame -- the same thing a viewport resize does to\n"
-                              "this one resource. Try this first if a GI blotch/burn-in appears.");
-        ImGui::SameLine();
-        if (ImGui::Button("Reset RT history")) vx.requestRtHistoryReset();
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Invalidates RT shadow/reflection/sky-occlusion history on the next\n"
-                              "frame (all three, plus AO, share one validity flag today). Try\n"
-                              "this if resetting GI history alone did not clear the artifact.");
-        ImGui::SameLine();
-        if (ImGui::Button("Reset denoiser history")) vx.requestDenoiserHistoryReset();
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Forces the AMD FidelityFX denoiser to throw away its own internal\n"
-                              "temporal history on the next frame. Try this if neither GI nor RT history\n"
-                              "reset cleared the artifact.");
-        ImGui::SameLine();
-        if (ImGui::Button("Reset All")) {
-            vx.requestGiHistoryReset();
-            vx.requestRtHistoryReset();
-            vx.requestDenoiserHistoryReset();
-        }
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Runs all three resets above at once. Not the first move during a\n"
-                              "bisection -- it clears everything and says nothing about which\n"
-                              "buffer was actually poisoned; try one at a time first.");
-
-    }
+    if (page == kRenderPageDebug) renderPageDebug(vx, s, er, changed);
 
     ImGui::PopItemWidth();
     ImGui::Separator();
