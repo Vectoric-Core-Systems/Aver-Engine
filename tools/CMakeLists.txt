@@ -6,7 +6,20 @@
 # Sits next to ConvertTool's reason for existing: it ports ConvertTool's own import/merge/verify logic rather than duplicating it (see the tool's
 # own header comment). Registered as a SHIPPING tool -- unlike ConvertTool, ActorSweep and the test executables, it must also be added to
 # scripts/payload.allowlist's [bin] section, or a downloaded engine has nothing for the launcher to invoke.
-add_executable(AverAssetC ${CMAKE_SOURCE_DIR}/tools/AverAssetC.cpp)
+# main() parses the subcommand; each subcommand and the shared writers live in tools/assetc/ (AssetC.hpp declares them).
+add_executable(AverAssetC ${CMAKE_SOURCE_DIR}/tools/AverAssetC.cpp
+  ${CMAKE_SOURCE_DIR}/tools/assetc/Common.cpp
+  ${CMAKE_SOURCE_DIR}/tools/assetc/MeshWrite.cpp
+  ${CMAKE_SOURCE_DIR}/tools/assetc/Material.cpp
+  ${CMAKE_SOURCE_DIR}/tools/assetc/Convert.cpp
+  ${CMAKE_SOURCE_DIR}/tools/assetc/ExtHost.cpp
+  ${CMAKE_SOURCE_DIR}/tools/assetc/Stream.cpp
+  ${CMAKE_SOURCE_DIR}/tools/assetc/Hlod.cpp
+  ${CMAKE_SOURCE_DIR}/tools/assetc/CookChunks.cpp
+  ${CMAKE_SOURCE_DIR}/tools/assetc/Retarget.cpp
+  ${CMAKE_SOURCE_DIR}/tools/assetc/Validate.cpp
+  ${CMAKE_SOURCE_DIR}/tools/assetc/VisBake.cpp
+  ${CMAKE_SOURCE_DIR}/tools/assetc/Hair.cpp)
 target_link_libraries(AverAssetC PRIVATE Aver.Formats Aver.Core Aver.Platform Aver.Anim)   # Aver.Anim: the `retarget` subcommand
 set_target_properties(AverAssetC PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 # The .ocworld Euler encoding (aver/world/LevelTransform.hpp) for the rotated placements a USD
