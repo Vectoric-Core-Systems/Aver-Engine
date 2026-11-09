@@ -25,7 +25,7 @@ namespace aver {
 void SandboxApp::initOrigin(Engine& e) {
     game::OriginBindings& b = origin_.bindings();
     b.device = e.device();
-    b.mobility = &playMobility_;
+    b.mobility = &play_.playMobility_;
     b.streaming = &streaming_;
     b.level = &level_;
 #  if AVER_MODULE_SYNAPSE_SCENE
@@ -62,7 +62,7 @@ void SandboxApp::initOrigin(Engine& e) {
     // A project that is still loading, or Play on its way out (the reload that restores the level), is not a moment to move the world.
     b.busy = [this](bool) -> const char* {
         if (projectLoading_) return "a project is loading";
-        if (pieReloadPending_) return "play is stopping";
+        if (play_.pieReloadPending_) return "play is stopping";
         return nullptr;
     };
 #  if AVER_WITH_AUDIO_ABI

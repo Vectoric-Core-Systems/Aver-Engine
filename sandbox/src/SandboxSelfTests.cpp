@@ -2390,12 +2390,12 @@ void SandboxApp::runClassPlaceTest(Engine& eng) {
     // at the pose Play started from (the snapshot capturePlayWorld takes, written here directly so the
     // test does not start Play's physics and mobility sessions).
     {
-        playClassSnapshot_.clear();
+        play_.playClassSnapshot_.clear();
         for (usize slot = 0; slot < levelClassInstances_.size(); ++slot) {
             const ClassInstance& ci = levelClassInstances_[slot];
             if (ci.removed || ci.entity == 0) continue;
             const scene::Entity r = static_cast<scene::Entity>(ci.entity);
-            playClassSnapshot_.push_back(PlayClassSaved{ci.placement, editIdFor(r), w.localTransform(r)});
+            play_.playClassSnapshot_.push_back(PlayClassSaved{ci.placement, editIdFor(r), w.localTransform(r)});
         }
         const scene::Entity first = static_cast<scene::Entity>(levelClassInstances_[0].entity);
         const EditId firstId = editIdFor(first);

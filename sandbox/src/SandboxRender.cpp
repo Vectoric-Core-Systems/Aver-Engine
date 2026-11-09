@@ -298,7 +298,7 @@ void SandboxApp::beginPlayMobilityFrame() {
                 if (pn > 0) movableRoot = static_cast<scene::Entity>(static_cast<u32>(pn));
             }
 #endif
-            playMobility_.beginFrame(movableRoot);
+            play_.playMobility_.beginFrame(movableRoot);
         }
 }
 #endif
@@ -465,7 +465,7 @@ void SandboxApp::drawDepthPrepass(Engine& e) {
                 popt.ownerHideAll = playView_.ownerHideAll;   // the collision fade, in the depth prepass too
                 popt.cameraCullInv = playView_.cullInv;       // G4 R4: both passes must agree on what is drawn
                 popt.viewerPos = eye_; popt.haveViewerPos = true;
-                popt.mobility = &playMobility_;
+                popt.mobility = &play_.playMobility_;
                 // --no-walk-cache, negated (g_noWalkCacheArg true = cache OFF). MUST MATCH the
                 // colour call site's copt.useMeshLookupCache below -- both passes resolve the same
                 // mesh ids, so caching one and not the other would measure two different things
@@ -1741,7 +1741,7 @@ void SandboxApp::drawSceneEntities(Engine& e) {
         copt.ownerHideAll = playView_.ownerHideAll;   // the collision fade hides every mesh under the target, not only the flagged ones
         copt.cameraCullInv = playView_.cullInv;       // G4 R4: Camera3D.cull_mask and visibility ranges, as in the prepass
         copt.viewerPos = eye_; copt.haveViewerPos = true;
-        copt.mobility = &playMobility_;
+        copt.mobility = &play_.playMobility_;
         // Worded differently from the library's line on purpose: "spawned CMeshRenderer entities"
         // names a concept a packaged game has no vocabulary for, and "culled" deliberately covers
         // occlusion as well as the frustum (see SceneDrawStats' comment for why the two can't be

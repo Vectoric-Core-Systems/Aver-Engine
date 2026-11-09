@@ -503,7 +503,7 @@ void SandboxApp::resolveEditorInputOwnership(Engine& e) {
         ic.releasedByUser    = releasedByUser_;
         // Left at default without the scene (defaultPawnPlay_ is `#if AVER_MODULE_SCENE`).
 #if AVER_MODULE_SCENE
-        ic.defaultPawnPlay   = defaultPawnPlay_ && !playEjected();
+        ic.defaultPawnPlay   = play_.defaultPawnPlay_ && !playEjected();
 #endif
         ic.mouseCaptured     = mouse_.captured();
         ic.pointerInViewport = levelHovered_ && inViewport(oio.MousePos.x, oio.MousePos.y);
@@ -558,7 +558,7 @@ void SandboxApp::tickEditorFlyCamera(const Timestep& t) {
         // The drone pawn looks while the right button is held, read from InputState: ImGui sees
         // neither a captured mouse's clicks over the viewport reliably nor the play window at all.
 #if AVER_MODULE_SCENE
-        if (defaultPawnPlay_ && !playEjected() && input_.mouseHeld(1) &&
+        if (play_.defaultPawnPlay_ && !playEjected() && input_.mouseHeld(1) &&
             (!overUI || inPlayWindow || mouse_.captured()))
             flying_ = true;
 #endif
@@ -578,7 +578,7 @@ void SandboxApp::tickEditorFlyCamera(const Timestep& t) {
             flySpeed_ = flySpeed_ < 20.0f ? 20.0f : (flySpeed_ > 40000.0f ? 40000.0f : flySpeed_);
         };
 #if AVER_MODULE_SCENE
-        if (!flying_ && defaultPawnPlay_ && !playEjected() && !walkCapsule_ && (!overUI || inPlayWindow))
+        if (!flying_ && play_.defaultPawnPlay_ && !playEjected() && !play_.walkCapsule_ && (!overUI || inPlayWindow))
             wheelFlySpeed();
 #endif
 
@@ -616,7 +616,7 @@ void SandboxApp::tickEditorFlyCamera(const Timestep& t) {
         // EJECTED DROPS THE EXCEPTION: spectator pawn stops flying without RMB, block below moves camPos_ instead.
         bool flyPawnDriven = false;
 #if AVER_MODULE_SCENE
-        if ((flying_ || (defaultPawnPlay_ && !playEjected())) && (!io.WantCaptureKeyboard || inPlayWindow)) {
+        if ((flying_ || (play_.defaultPawnPlay_ && !playEjected())) && (!io.WantCaptureKeyboard || inPlayWindow)) {
 #else
         if (flying_ && (!io.WantCaptureKeyboard || inPlayWindow)) {
 #endif
@@ -624,7 +624,7 @@ void SandboxApp::tickEditorFlyCamera(const Timestep& t) {
             // The possessed default pawn also takes the game's own input (AVER_FW_KEY_A.. is A-Z in
             // order), like the walking one, so --play-test and a game's input mapping can fly it.
 #if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE
-            const bool pawnInput = defaultPawnPlay_ && !playEjected();
+            const bool pawnInput = play_.defaultPawnPlay_ && !playEjected();
             auto moveKey = [&](ImGuiKey k, i32 vk) {
                 return flyKey(k, vk) || (pawnInput && aver_fw_input_key(vk - 'A') != 0);
             };
@@ -640,12 +640,12 @@ void SandboxApp::tickEditorFlyCamera(const Timestep& t) {
             if (moveKey(ImGuiKey_Q, 'Q')) step -= up * sp;
 #if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE
             // Move the PAWN (not camera) while default pawn is possessed and not ejected (drivePlayCamera rewrites view every frame).
-            if (defaultPawnPlay_ && !playEjected() && walkCapsule_) {
+            if (play_.defaultPawnPlay_ && !playEjected() && play_.walkCapsule_) {
                 driveDefaultPawnWalk(fwd, right);    // the walking default pawn (Play options > Walk)
-            } else if (defaultPawnPlay_ && !playEjected() && flyCapsule_) {
+            } else if (play_.defaultPawnPlay_ && !playEjected() && play_.flyCapsule_) {
                 driveDefaultPawnFly(t.dt > 0.0f ? step * (1.0f / t.dt) : Vec3{0, 0, 0}, t.dt);   // collides, drifts
                 flyPawnDriven = true;
-            } else if (defaultPawnPlay_ && !playEjected()) {
+            } else if (play_.defaultPawnPlay_ && !playEjected()) {
                 const int32_t pn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
                 if (pn) {
                     const scene::Entity pe = static_cast<scene::Entity>(static_cast<uint32_t>(pn));
@@ -674,7 +674,7 @@ void SandboxApp::tickEditorFlyCamera(const Timestep& t) {
         }
         // Nothing drove the flying pawn: it glides to rest (the keyboard is the UI's for a moment), or
         // stops dead while ejected, where it must stay where Pawn to Camera puts it.
-        if (flyCapsule_ && !flyPawnDriven) driveDefaultPawnFly(Vec3{0, 0, 0}, playEjected() ? 0.0f : t.dt);
+        if (play_.flyCapsule_ && !flyPawnDriven) driveDefaultPawnFly(Vec3{0, 0, 0}, playEjected() ? 0.0f : t.dt);
         // Ctrl+S saves the level (the File menu's label for this shortcut wires nothing).
         // Not gated on levelFocused_ (saving isn't a viewport gesture) but gated on WantTextInput.
         if (!io.WantTextInput && keybinds_.pressed(editor::CommandId::LevelSave, io))
@@ -938,7 +938,7 @@ void SandboxApp::tickGameplay(Engine& e, const Timestep& t, const f32 gameDt) {
         playProf_.begin(editor::PlayPhase::Vehicles);
         vehicles_.postPhysics(scene::World::instance());
 
-        game::tickVehiclesPost(gameDt, playMobility_);
+        game::tickVehiclesPost(gameDt, play_.playMobility_);
         playProf_.end(editor::PlayPhase::Vehicles);
 #endif
     } else if (aver_fw_play_state() == AVER_FW_PLAY_PAUSED) {
@@ -1481,7 +1481,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     } frameStepGuard;
 #if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
     // Stop asked for the level back as it was when Play began (stopPlay; it cannot load from inside the UI).
-    if (pieReloadPending_ && !anyPlayActive()) reloadAfterPlay(e);
+    if (play_.pieReloadPending_ && !anyPlayActive()) reloadAfterPlay(e);
 #endif
     applyConsoleSets(e, t);
     // Camera set first so downstream (view matrix, reprojection, shadow history) sees one consistent frame.
@@ -1549,8 +1549,8 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     pumpGraphDebugger();
 #endif
     // Frame Skip: lift pause for exactly this frame's tick groups. frameStepGuard's destructor puts it back.
-    if (playFrameStepPending_ && aver_fw_play_state() == AVER_FW_PLAY_PAUSED) {
-        playFrameStepPending_ = false;
+    if (play_.playFrameStepPending_ && aver_fw_play_state() == AVER_FW_PLAY_PAUSED) {
+        play_.playFrameStepPending_ = false;
         aver_fw_set_paused(0);
         frameStepGuard.active = true;
     }

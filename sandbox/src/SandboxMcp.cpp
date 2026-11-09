@@ -367,7 +367,7 @@ void SandboxApp::registerMcpAbis() {
         // Play in the selected viewport and Stop, as the toolbar does them, so a client can drive a session end to end.
         if (a.fn == "play") {
             if (anyPlayActive()) { w = "already playing"; return false; }
-            playMode_ = PlayMode::SelectedViewport;
+            play_.playMode_ = PlayMode::SelectedViewport;
             AVER_INFO("[Sandbox] Play: Selected Viewport (MCP)");
             startPlay();
             if (!anyPlayActive()) { w = "Play did not start -- see the [Sandbox] Play lines in the log"; return false; }
@@ -386,9 +386,9 @@ void SandboxApp::registerMcpAbis() {
             r = std::string("{\"state\":") +
                 jq(!anyPlayActive() ? "editor" : s == AVER_FW_PLAY_PAUSED ? "paused" : "playing") +
                 ",\"level\":" + jq(levelPath_) +
-                ",\"edited_level\":" + jq(pieTravelled_ ? pieEditedLevelPath_ : levelPath_) +
-                ",\"travelled\":" + (pieTravelled_ ? "true" : "false") +
-                ",\"reload_pending\":" + (pieReloadPending_ ? "true" : "false") + "}";
+                ",\"edited_level\":" + jq(play_.pieTravelled_ ? play_.pieEditedLevelPath_ : levelPath_) +
+                ",\"travelled\":" + (play_.pieTravelled_ ? "true" : "false") +
+                ",\"reload_pending\":" + (play_.pieReloadPending_ ? "true" : "false") + "}";
             return true;
         }
 #endif

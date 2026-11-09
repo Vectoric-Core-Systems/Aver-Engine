@@ -78,12 +78,12 @@ void SandboxApp::initEditorOrigin() {
     });
     eo.addRebaser("play snapshots", [this](const world::ShiftEvent& ev) {
         scene::World& w = scene::World::instance();
-        rebasePlaySnapshot(playWorldSnapshot_, ev.deltaF,
+        rebasePlaySnapshot(play_.playWorldSnapshot_, ev.deltaF,
                            [&w](scene::Entity e) { return w.valid(e) && w.parent(e) == scene::kInvalidEntity; });
 #if AVER_MODULE_FRAMEWORK
-        for (PlayClassSaved& s : playClassSnapshot_) shiftPos(s.xf.position, ev.deltaF);   // class roots
+        for (PlayClassSaved& s : play_.playClassSnapshot_) shiftPos(s.xf.position, ev.deltaF);   // class roots
 #endif
-        if (playFromHere_) shiftPos(*playFromHere_, ev.deltaF);
+        if (play_.playFromHere_) shiftPos(*play_.playFromHere_, ev.deltaF);
     });
 #if AVER_MODULE_LANDSCAPE && AVER_MODULE_SCENE && AVER_WITH_IMGUI
     eo.addRebaser("foliage brush", [this](const world::ShiftEvent& ev) {

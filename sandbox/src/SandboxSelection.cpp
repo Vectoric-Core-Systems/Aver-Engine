@@ -145,7 +145,7 @@ bool SandboxApp::movableSelected() const { return sel_ >= 0 && sel_ < (int)objec
 
 // True while a play session owns the input, so editor interaction must stand down. False while
 // ejected: the editor has the camera, input and tools back, same as a released mouse.
-bool SandboxApp::gameHasInput() const { return playSessionActive() && !releasedByUser_ && !playEjected_; }
+bool SandboxApp::gameHasInput() const { return playSessionActive() && !releasedByUser_ && !play_.playEjected_; }
 
 // True when the selection is a thing in either world, rather than a sun/sky/post pseudo-entry.
 bool SandboxApp::anySelected() const {

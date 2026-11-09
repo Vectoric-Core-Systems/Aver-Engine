@@ -1512,7 +1512,7 @@ void SandboxApp::launchInRuntime(Engine& e, bool skipDirtyCheck) {
     if (!refreshCookedChunksForPlay()) return;   // a level that names a cooked chunk set gets it re-cooked first when the saved level moved on (SandboxLevelCook.cpp)
     const std::string levelFile = std::filesystem::path(levelPath_).filename().string();
     std::string why;
-    if (editor::launchRuntime(project_.manifestPath, levelPath_, playStandaloneArgs_, &why)) {
+    if (editor::launchRuntime(project_.manifestPath, levelPath_, play_.playStandaloneArgs_, &why)) {
         setUpgradeStatus("Launched " + levelFile + " in Aver Engine Runtime");
         AVER_INFO("[Editor] launched AverEngineRuntime.exe on {}", levelPath_);
     } else {
@@ -1666,9 +1666,9 @@ void SandboxApp::drawPlayToolbar(Engine& e) {
         if (tint) ImGui::PopStyleColor();
         return hit;
     };
-    const char* modeIcon = playMode_ == PlayMode::Simulate   ? ICON_SIMULATE
-                         : playMode_ == PlayMode::Standalone ? ICON_GAMEPAD
-                         : playMode_ == PlayMode::NewWindow  ? ICON_OPEN_IN_NEW : ICON_PLAY;
+    const char* modeIcon = play_.playMode_ == PlayMode::Simulate   ? ICON_SIMULATE
+                         : play_.playMode_ == PlayMode::Standalone ? ICON_GAMEPAD
+                         : play_.playMode_ == PlayMode::NewWindow  ? ICON_OPEN_IN_NEW : ICON_PLAY;
     const std::string platformsLabel = std::string(ICON_PLATFORMS " Platforms");
     const f32 platformsW = ImGui::CalcTextSize(platformsLabel.c_str()).x + ImGui::GetStyle().FramePadding.x * 2.0f + 16.0f * dpi_ + 2.0f * padW;
 
@@ -1681,17 +1681,17 @@ void SandboxApp::drawPlayToolbar(Engine& e) {
     if (!anyPlay) {
         {
             editor::ToolbarCapsule cap(dpi_);
-            if (iconBtn("play", modeIcon, &kGreen)) launchPlay(e, playMode_);
+            if (iconBtn("play", modeIcon, &kGreen)) launchPlay(e, play_.playMode_);
             uiReg_.track("toolbar.play");
             if (ImGui::IsItemHovered()) {
-                if (playMode_ == PlayMode::Standalone) {
+                if (play_.playMode_ == PlayMode::Standalone) {
                     ImGui::SetTooltip("Standalone Game: a separate Aver Engine Runtime on the saved level");
-                } else if (playMode_ == PlayMode::NewWindow) {
+                } else if (play_.playMode_ == PlayMode::NewWindow) {
                     ImGui::SetTooltip("Play in a new window (Esc there returns to the editor)");
                 } else {
-                    const editor::CommandId modeCmd = playMode_ == PlayMode::Simulate
+                    const editor::CommandId modeCmd = play_.playMode_ == PlayMode::Simulate
                                                      ? editor::CommandId::PlaySimulate : editor::CommandId::PlayStart;
-                    ImGui::SetTooltip("%s (%s)", playMode_ == PlayMode::Simulate ? "Simulate" : "Play this level in the selected viewport",
+                    ImGui::SetTooltip("%s (%s)", play_.playMode_ == PlayMode::Simulate ? "Simulate" : "Play this level in the selected viewport",
                                       editor::chordToString(keybinds_.chordFor(modeCmd)).c_str());
                 }
             }
@@ -1704,10 +1704,10 @@ void SandboxApp::drawPlayToolbar(Engine& e) {
             ImGui::TextDisabled("MODES");
             if (ImGui::MenuItem(ICON_PLAY " Selected Viewport",
                                 editor::chordToString(keybinds_.chordFor(editor::CommandId::PlayStart)).c_str(),
-                                playMode_ == PlayMode::SelectedViewport))
+                                play_.playMode_ == PlayMode::SelectedViewport))
                 launchPlay(e, PlayMode::SelectedViewport);
             uiReg_.track("toolbar.play.options.viewport");
-            if (ImGui::MenuItem(ICON_OPEN_IN_NEW " New Window", nullptr, playMode_ == PlayMode::NewWindow))
+            if (ImGui::MenuItem(ICON_OPEN_IN_NEW " New Window", nullptr, play_.playMode_ == PlayMode::NewWindow))
                 launchPlay(e, PlayMode::NewWindow);
             uiReg_.track("toolbar.play.options.newWindow");
             if (ImGui::IsItemHovered())
@@ -1715,7 +1715,7 @@ void SandboxApp::drawPlayToolbar(Engine& e) {
                                   "Esc in that window (or closing it) returns to the editor.");
             if (ImGui::MenuItem(ICON_SIMULATE " Simulate",
                                 editor::chordToString(keybinds_.chordFor(editor::CommandId::PlaySimulate)).c_str(),
-                                playMode_ == PlayMode::Simulate))
+                                play_.playMode_ == PlayMode::Simulate))
                 launchPlay(e, PlayMode::Simulate);
             uiReg_.track("toolbar.play.options.simulate");
             if (ImGui::IsItemHovered())
@@ -1726,7 +1726,7 @@ void SandboxApp::drawPlayToolbar(Engine& e) {
             const bool haveRuntime = !editor::runtimeExecutablePath().empty();
             const bool standaloneOk = project_.valid() && haveLevel && haveRuntime;
             if (ImGui::MenuItem(ICON_GAMEPAD " Standalone Game", nullptr,
-                                playMode_ == PlayMode::Standalone, standaloneOk))
+                                play_.playMode_ == PlayMode::Standalone, standaloneOk))
                 launchPlay(e, PlayMode::Standalone);
             uiReg_.track("toolbar.play.options.standalone");
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
@@ -1738,28 +1738,28 @@ void SandboxApp::drawPlayToolbar(Engine& e) {
             ImGui::Separator();
             ImGui::TextDisabled("SPAWN PLAYER AT");
             // Radio buttons keep the popup open while setting up.
-            if (ImGui::RadioButton("Current Camera Location", playSpawnAt_ == PlaySpawnAt::CameraLocation))
-                playSpawnAt_ = PlaySpawnAt::CameraLocation;
+            if (ImGui::RadioButton("Current Camera Location", play_.playSpawnAt_ == PlaySpawnAt::CameraLocation))
+                play_.playSpawnAt_ = PlaySpawnAt::CameraLocation;
             uiReg_.track("toolbar.play.options.spawnCamera");
-            if (ImGui::RadioButton("Default Player Start", playSpawnAt_ == PlaySpawnAt::PlayerStart))
-                playSpawnAt_ = PlaySpawnAt::PlayerStart;
+            if (ImGui::RadioButton("Default Player Start", play_.playSpawnAt_ == PlaySpawnAt::PlayerStart))
+                play_.playSpawnAt_ = PlaySpawnAt::PlayerStart;
             uiReg_.track("toolbar.play.options.spawnPlayerStart");
 
             ImGui::Separator();
             ImGui::TextDisabled("WITH NO GAMEMODE");
-            if (ImGui::RadioButton("Fly (drone, collides)", !defaultPawnWalk_)) defaultPawnWalk_ = false;
+            if (ImGui::RadioButton("Fly (drone, collides)", !play_.defaultPawnWalk_)) play_.defaultPawnWalk_ = false;
             uiReg_.track("toolbar.play.options.pawnFly");
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Like Unreal's DefaultPawn: flies with no gravity inside a %.0f cm collision "
                                   "capsule that stops at walls and slides along them. WASD, Q/E down/up.", 35.0f);
-            if (ImGui::RadioButton("Walk (gravity, stairs, Space jumps)", defaultPawnWalk_)) defaultPawnWalk_ = true;
+            if (ImGui::RadioButton("Walk (gravity, stairs, Space jumps)", play_.defaultPawnWalk_)) play_.defaultPawnWalk_ = true;
             uiReg_.track("toolbar.play.options.pawnWalk");
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("The engine's default pawn walks as a capsule character, so a level can be "
                                   "walked without writing a GameMode. A project's own GameMode always wins.");
 
             ImGui::Separator();
-            ImGui::Checkbox("Game Gets Mouse Control", &playGameGetsMouse_);
+            ImGui::Checkbox("Game Gets Mouse Control", &play_.playGameGetsMouse_);
             uiReg_.track("toolbar.play.options.mouseControl");
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Capture the mouse the moment Play starts. Off: click the viewport to\n"
@@ -1768,7 +1768,7 @@ void SandboxApp::drawPlayToolbar(Engine& e) {
             ImGui::Separator();
             if (ImGui::MenuItem("Advanced Settings...")) {
                 showEditorPrefs_ = true;
-                scrollPrefsToPlay_ = true;
+                play_.scrollPrefsToPlay_ = true;
             }
             uiReg_.track("toolbar.play.options.advanced");
             ImGui::EndPopup();
@@ -2988,7 +2988,7 @@ void SandboxApp::buildUI(Engine& e) {
     const bool runClean = false;
 #endif
     // While a game plays (not ejected) the view is the game's: the toolbars would sit over its HUD (a label in the top-left corner). F8 brings them back.
-    const bool gameView = playSessionActive() && !playEjected_;
+    const bool gameView = playSessionActive() && !play_.playEjected_;
     if (levelVisible_ && !runClean && !gameView) buildViewportOverlay();
     drawDrawer(e);
     // drawNotifications after drawDrawer (needs drawerPixelH_ from this frame).

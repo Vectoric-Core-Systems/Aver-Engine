@@ -105,12 +105,12 @@ Vec3 feetBelowCamera(const Vec3& cam, f32 eye, int32_t self, f32 ownFeetZ) {
 // Records where everything the LEVEL owns is standing, so Stop can put it back -- a transform
 // snapshot, not a reload or full capture (see playWorldSnapshot_).
 void SandboxApp::capturePlayWorld() {
-    playWorldSnapshot_.clear();
-    playWorldCaptured_ = false;
+    play_.playWorldSnapshot_.clear();
+    play_.playWorldCaptured_ = false;
 #if AVER_MODULE_SCENE
     placedBaseline_.clear();
     scene::World& w = scene::World::instance();
-    playWorldSnapshot_.reserve(levelEntities_.size());
+    play_.playWorldSnapshot_.reserve(levelEntities_.size());
     const game::PathOfIdFn pathFn = [this](u64 id) { return pathOfContentId(id); };
     for (const scene::Entity e : levelEntities_) {
         if (!w.valid(e)) continue;
@@ -123,28 +123,28 @@ void SandboxApp::capturePlayWorld() {
         bool vis = true;
         if (const auto* mr = w.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer))
             vis = (mr->flags & scene::kMeshRendererVisible) != 0;
-        playWorldSnapshot_.push_back({e, w.localTransform(e), vis});
+        play_.playWorldSnapshot_.push_back({e, w.localTransform(e), vis});
         // The authored COMPONENT state, so a save during Play writes it and not what a script did since (fillPlacementFromEntity).
         if (auto comps = game::capturePlacedComponents(w, e, pathFn); !comps.empty())
             placedBaseline_.emplace(static_cast<u32>(e), std::move(comps));
     }
 #if AVER_MODULE_FRAMEWORK
     // The graph-class roots too: Stop puts a surviving one back like any placement, and respawns one that end_play destroyed.
-    playClassSnapshot_.clear();
+    play_.playClassSnapshot_.clear();
     for (const ClassInstance& ci : levelClassInstances_) {
         if (ci.removed) continue;
         const scene::Entity e = static_cast<scene::Entity>(ci.entity);
         if (!w.valid(e)) continue;
-        playClassSnapshot_.push_back({ci.placement, editIdFor(e), w.localTransform(e)});
-        playWorldSnapshot_.push_back({e, w.localTransform(e), true});
+        play_.playClassSnapshot_.push_back({ci.placement, editIdFor(e), w.localTransform(e)});
+        play_.playWorldSnapshot_.push_back({e, w.localTransform(e), true});
     }
 #endif
-    playWorldCaptured_ = true;
+    play_.playWorldCaptured_ = true;
     AVER_INFO("[Sandbox] Play: {} level transform(s) recorded; Stop will put them back",
-              (u32)playWorldSnapshot_.size());
+              (u32)play_.playWorldSnapshot_.size());
     // Here, before begin_play spawns the pawn: everything alive now is level content, everything
     // born from here on starts provisional (PlayMobility.hpp).
-    playMobility_.begin(w);
+    play_.playMobility_.begin(w);
 
     // AND THE AUTHORED PHYSICS BECOMES REAL, here and nowhere else: a CRigidBody is data until
     // PLAY turns it into a Jolt body -- building at LOAD would mean a crate settling while someone
@@ -159,7 +159,7 @@ void SandboxApp::capturePlayWorld() {
     // its Jolt vehicle, from where the entity stands NOW (a car the user nudged in the editor drives from
     // its new spot). After the snapshot, so Stop restores the placement and not wherever the car ended
     // up; after playMobility_.begin, because seeding needs a session to seed into.
-    if (level_.beginVehicles(vehicles_, content_) > 0) playMobility_.seedMovable(vehicles_.entities());
+    if (level_.beginVehicles(vehicles_, content_) > 0) play_.playMobility_.seedMovable(vehicles_.entities());
 #endif
 #endif
 }
@@ -170,11 +170,11 @@ void SandboxApp::capturePlayWorld() {
 // neither meant.
 // An entity the session destroyed is simply skipped -- pretending otherwise by recreating an empty one at the right coordinates would be worse than leaving it gone.
 void SandboxApp::restorePlayWorld() {
-    if (!playWorldCaptured_) return;
+    if (!play_.playWorldCaptured_) return;
 #if AVER_MODULE_SCENE
     scene::World& w = scene::World::instance();
     u32 put = 0, lost = 0;
-    for (const PlaySavedTransform& t : playWorldSnapshot_) {
+    for (const PlaySavedTransform& t : play_.playWorldSnapshot_) {
         if (!w.valid(t.e)) { ++lost; continue; }
         if (w.setLocalTransform(t.e, t.xf)) ++put;
         // THE RAW BIT BACK, same convention as the transform just above -- not through
@@ -199,8 +199,8 @@ void SandboxApp::restorePlayWorld() {
         AVER_INFO("[Sandbox] Stop: the simulated fluid is being re-settled from its authored "
                   "volume; it rebuilds on the next frame");
 #endif
-    playWorldSnapshot_.clear();
-    playWorldCaptured_ = false;
+    play_.playWorldSnapshot_.clear();
+    play_.playWorldCaptured_ = false;
 #if AVER_MODULE_SCENE
     placedBaseline_.clear();
 #endif
@@ -290,8 +290,8 @@ void SandboxApp::startPlay() {
     // PLAY FROM HERE'S ONE-SHOT, taken and cleared before anything below can return early, so it can
     // never outlive the Play press it was set for -- and playSpawnAt_, the persistent choice, is
     // never written. The point is where the pawn's FEET go.
-    const std::optional<Vec3> fromHere = playFromHere_;
-    playFromHere_.reset();
+    const std::optional<Vec3> fromHere = play_.playFromHere_;
+    play_.playFromHere_.reset();
     // BEFORE anything begins, so what is recorded is the editor's level and not one frame of
     // gameplay's effect on it.
 #if AVER_MODULE_SCENE
@@ -304,7 +304,7 @@ void SandboxApp::startPlay() {
     capturePlayWorld();
 #if AVER_MODULE_SCENE
     // After playMobility_.begin: the sequence starts from 0 (when it autoplays) and its actors are seeded.
-    seqEditor_.beginPlay(playMobility_, game::makeSequenceHooks(project_.contentDir(), [this](i32 ent, const std::string& name) {
+    seqEditor_.beginPlay(play_.playMobility_, game::makeSequenceHooks(project_.contentDir(), [this](i32 ent, const std::string& name) {
 #if AVER_MODULE_SCRIPTING
         return scripts_.graphFire(ent, name.c_str());
 #else
@@ -319,8 +319,8 @@ void SandboxApp::startPlay() {
 #endif
     // And the editor's view, for storeLevelView: leaving the level mid-session must remember where
     // the editor camera was, not the pawn's eye the session is driving it from.
-    preplayView_ = editor::LevelView{camPos_.x, camPos_.y, camPos_.z, degrees(yaw_), degrees(pitch_), flySpeed_};
-    preplayViewValid_ = true;
+    play_.preplayView_ = editor::LevelView{camPos_.x, camPos_.y, camPos_.z, degrees(yaw_), degrees(pitch_), flySpeed_};
+    play_.preplayViewValid_ = true;
 
     // TERRAIN COLLISION, BEFORE A SINGLE PAWN EXISTS TO FALL THROUGH IT.
     //
@@ -397,7 +397,7 @@ void SandboxApp::startPlay() {
         // GameMode, or under a project mode when the level names it as its pawn.
         // scene:: needs no further guard: FRAMEWORK is forced off without SCENE.
         if (gm && dronePawn && aver_fw_begin_play_with_pawn(gm == engineGm ? 0 : gi, gm, dronePawn)) {
-            defaultPawnPlay_ = true;
+            play_.defaultPawnPlay_ = true;
             // FIRST PERSON, NO EYE OFFSET, NO BOOM: a flying camera wants to be exactly at its
             // pawn and never see it, i.e. first person with zero eye height.
             // SAVED FIRST, AND PUT BACK ON STOP. aver_fw_set_view writes a PROCESS-WIDE static
@@ -416,13 +416,13 @@ void SandboxApp::startPlay() {
             // Unreal spawns at a PlayerStart, or the editor camera if none -- playSpawnAt_ picks
             // which one is tried FIRST; the other is never consulted for CameraLocation, since the
             // camera is what the user asked for, not merely what is left when there is no marker.
-            bool atCamera = playSpawnAt_ == PlaySpawnAt::CameraLocation;
+            bool atCamera = play_.playSpawnAt_ == PlaySpawnAt::CameraLocation;
             if (fromHere) {
                 // PLAY FROM HERE beats both choices above. A walker's pawn stands ON the point,
                 // level-headed, and startDefaultPawnWalk(false) reads that back as its feet and yaw;
                 // a flyer is a camera, so it hovers one standing eye height above the feet and keeps
                 // the pitch the editor camera had.
-                if (defaultPawnWalk_) placeDefaultPawnAtCamera(*fromHere, yaw_, 0.0f);
+                if (play_.defaultPawnWalk_) placeDefaultPawnAtCamera(*fromHere, yaw_, 0.0f);
                 else placeDefaultPawnAtCamera(*fromHere + Vec3{0.0f, 0.0f, kWalkEye}, yaw_, pitch_);
                 atCamera = false;
             } else if (atCamera)
@@ -430,18 +430,18 @@ void SandboxApp::startPlay() {
             else if (!placePawnAtPlayerStart("the engine's default pawn")) {
                 placeDefaultPawnAtCamera(camPos_, yaw_, pitch_);
                 atCamera = true;
-            } else if (!defaultPawnWalk_) {
+            } else if (!play_.defaultPawnWalk_) {
                 raiseFlyingPawnToEye();
             }
-            if (defaultPawnWalk_) startDefaultPawnWalk(atCamera);
+            if (play_.defaultPawnWalk_) startDefaultPawnWalk(atCamera);
             else                  startDefaultPawnFly();
             AVER_INFO("[Sandbox] Play: GameMode '{}' with the engine's drone pawn ({}, hold RMB to look). "
                       "Pick another in World Settings or Project Settings.", aver_fw_class_name(gm),
-                      walkCapsule_ ? "WASD to walk, Space jumps, Shift runs"
-                                   : flyCapsule_ ? "WASD/QE to fly, collides" : "WASD/QE to fly");
+                      play_.walkCapsule_ ? "WASD to walk, Space jumps, Shift runs"
+                                   : play_.flyCapsule_ ? "WASD/QE to fly, collides" : "WASD/QE to fly");
             // Mouse capture matches the toolbar option from the first frame, not just after a
             // viewport click -- the same convention the GameMode path below follows.
-            releasedByUser_ = !playGameGetsMouse_;
+            releasedByUser_ = !play_.playGameGetsMouse_;
         } else {
             AVER_WARN("[Sandbox] Play: the drone pawn could not start under GameMode '{}'; the viewport "
                       "camera is unchanged", aver_fw_class_name(gm));
@@ -472,14 +472,14 @@ void SandboxApp::startPlay() {
             else
                 AVER_WARN("[Sandbox] Play From Here: {} possessed no pawn to place; it stays where the "
                           "GameMode put it", aver_fw_class_name(gm));
-        } else if (playSpawnAt_ == PlaySpawnAt::CameraLocation) {
+        } else if (play_.playSpawnAt_ == PlaySpawnAt::CameraLocation) {
             if (game::placePossessedPawn(camPos_, degrees(yaw_)))
                 AVER_INFO("[Sandbox] Play: {} spawned at the camera ({:.0f}, {:.0f}, {:.0f}) yaw {:.0f}",
                           aver_fw_class_name(gm), camPos_.x, camPos_.y, camPos_.z, degrees(yaw_));
         } else {
             placePawnAtPlayerStart(aver_fw_class_name(gm));
         }
-        releasedByUser_ = !playGameGetsMouse_;
+        releasedByUser_ = !play_.playGameGetsMouse_;
     } else {
         AVER_WARN("[Sandbox] Play: begin_play was rejected (already playing?)");
 #if AVER_MODULE_SCENE
@@ -510,8 +510,8 @@ void SandboxApp::startDefaultPawnWalk(bool fromCamera) {
         if (f.x * f.x + f.y * f.y > 1e-6f) yaw_ = std::atan2(f.y, f.x);
         pitch_ = 0.0f;
     }
-    walkCapsule_ = aver_phys_character_create(kWalkRadius, kWalkHeight, feet.x, feet.y, feet.z + kWalkHeight * 0.5f);
-    if (!walkCapsule_) {
+    play_.walkCapsule_ = aver_phys_character_create(kWalkRadius, kWalkHeight, feet.x, feet.y, feet.z + kWalkHeight * 0.5f);
+    if (!play_.walkCapsule_) {
         AVER_WARN("[Sandbox] Play: the physics world would not create a walking capsule; the default pawn flies");
         return;
     }
@@ -530,7 +530,7 @@ void SandboxApp::startDefaultPawnWalk(bool fromCamera) {
 // at its bottom, turned by the same yaw/pitch the flying pawn uses, so the first-person view looks where you do.
 void SandboxApp::driveDefaultPawnWalk(const Vec3& fwd, const Vec3& right) {
 #if AVER_MODULE_PHYSICS && AVER_MODULE_SCENE
-    if (!walkCapsule_) return;
+    if (!play_.walkCapsule_) return;
     const int32_t pn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
     if (!pn) return;
     const scene::Entity pe = static_cast<scene::Entity>(static_cast<uint32_t>(pn));
@@ -554,12 +554,12 @@ void SandboxApp::driveDefaultPawnWalk(const Vec3& fwd, const Vec3& right) {
 #undef AVER_WALK_KEY
     wish = wish.getSafeNormal() * speed;
     float v[3] = {0.0f, 0.0f, 0.0f};
-    aver_phys_character_velocity(walkCapsule_, v);
+    aver_phys_character_velocity(play_.walkCapsule_, v);
     f32 vz = v[2];
-    if (jumpKey && aver_phys_character_grounded(walkCapsule_) != 0) vz = kWalkJump;
-    aver_phys_character_set_velocity(walkCapsule_, wish.x, wish.y, vz);
+    if (jumpKey && aver_phys_character_grounded(play_.walkCapsule_) != 0) vz = kWalkJump;
+    aver_phys_character_set_velocity(play_.walkCapsule_, wish.x, wish.y, vz);
     float p[3];
-    if (aver_phys_character_position(walkCapsule_, p) != 0)
+    if (aver_phys_character_position(play_.walkCapsule_, p) != 0)
         pw.setLocalPosition(pe, Vec3{p[0], p[1], p[2] - kWalkHeight * 0.5f});
     pw.setLocalRotation(pe, Quat::fromAxisAngle(Vec3{0, 0, 1}, yaw_) * Quat::fromAxisAngle(Vec3{0, 1, 0}, -pitch_));
 #else
@@ -579,14 +579,14 @@ void SandboxApp::startDefaultPawnFly() {
     scene::World& pw = scene::World::instance();
     if (!pw.valid(pe)) return;
     const Vec3 at = pw.localTransform(pe).position;
-    flyCapsule_ = aver_phys_character_create(kFlyRadius, kFlyHeight, at.x, at.y, at.z);
-    if (!flyCapsule_ || !aver_phys_character_set_gravity_factor(flyCapsule_, 0.0f)) {
-        if (flyCapsule_) aver_phys_character_destroy(flyCapsule_);
-        flyCapsule_ = 0;
+    play_.flyCapsule_ = aver_phys_character_create(kFlyRadius, kFlyHeight, at.x, at.y, at.z);
+    if (!play_.flyCapsule_ || !aver_phys_character_set_gravity_factor(play_.flyCapsule_, 0.0f)) {
+        if (play_.flyCapsule_) aver_phys_character_destroy(play_.flyCapsule_);
+        play_.flyCapsule_ = 0;
         AVER_WARN("[Sandbox] Play: the physics world would not create the flying pawn's collider; it flies without collision");
         return;
     }
-    aver_phys_character_set_stair_stepping(flyCapsule_, 0.0f, 0.0f);
+    aver_phys_character_set_stair_stepping(play_.flyCapsule_, 0.0f, 0.0f);
     AVER_INFO("[Sandbox] Play: the default pawn FLIES with collision (capsule {:.0f} x {:.0f} cm) from ({:.0f}, {:.0f}, {:.0f})",
               kFlyRadius, kFlyHeight, at.x, at.y, at.z);
 #endif
@@ -598,24 +598,24 @@ void SandboxApp::startDefaultPawnFly() {
 // Then the pawn follows the capsule, facing the view.
 void SandboxApp::driveDefaultPawnFly(const Vec3& velocity, f32 dt) {
 #if AVER_MODULE_PHYSICS && AVER_MODULE_SCENE
-    if (!flyCapsule_) return;
+    if (!play_.flyCapsule_) return;
     constexpr f32 kDroneAccel = 9.0f, kDroneDrag = 2.5f;   // 1/s, exponential approach
     Vec3 v = velocity;
     float cur[3];
-    if (dt > 0.0f && aver_phys_character_velocity(flyCapsule_, cur) != 0) {
+    if (dt > 0.0f && aver_phys_character_velocity(play_.flyCapsule_, cur) != 0) {
         const Vec3 now{cur[0], cur[1], cur[2]};
         const f32 rate = velocity.sizeSquared() > 1.0f ? kDroneAccel : kDroneDrag;
         v = now + (velocity - now) * (1.0f - std::exp(-rate * dt));
         if (v.sizeSquared() < 1.0f && velocity.sizeSquared() < 1.0f) v = Vec3{0, 0, 0};   // settle
     }
-    aver_phys_character_set_velocity(flyCapsule_, v.x, v.y, v.z);
+    aver_phys_character_set_velocity(play_.flyCapsule_, v.x, v.y, v.z);
     const int32_t pn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
     if (!pn) return;
     const scene::Entity pe = static_cast<scene::Entity>(static_cast<uint32_t>(pn));
     scene::World& pw = scene::World::instance();
     if (!pw.valid(pe)) return;
     float p[3];
-    if (aver_phys_character_position(flyCapsule_, p) != 0) pw.setLocalPosition(pe, Vec3{p[0], p[1], p[2]});
+    if (aver_phys_character_position(play_.flyCapsule_, p) != 0) pw.setLocalPosition(pe, Vec3{p[0], p[1], p[2]});
     pw.setLocalRotation(pe, Quat::fromAxisAngle(Vec3{0, 0, 1}, yaw_) * Quat::fromAxisAngle(Vec3{0, 1, 0}, -pitch_));
 #else
     (void)velocity; (void)dt;
@@ -630,7 +630,7 @@ bool SandboxApp::dronePlayActive() const { return droneStartedByPlay_; }
 // True while Play is standing in as a plain camera because the project declares no GameMode.
 // Not a play session -- begin_play never ran -- so everything that gates on "are we playing"
 // has to ask this too, exactly as it already had to ask dronePlayActive().
-bool SandboxApp::spectatorPlayActive() const { return defaultPawnPlay_; }
+bool SandboxApp::spectatorPlayActive() const { return play_.defaultPawnPlay_; }
 
 // IS ANY KIND OF PLAY RUNNING -- the question editor chrome actually wants to ask. Three ways to
 // be playing, only one a play SESSION: a real GameMode session, Play standing in a drone, and Play
@@ -656,9 +656,9 @@ void SandboxApp::stopPlay() {
     closePlayWindow();
     // Cleared unconditionally, before anything else: a stale ejected/frame-step flag must never
     // survive into the next Play press, however this session ends.
-    playEjected_ = false;
-    playFrameStepPending_ = false;
-    preplayViewValid_ = false;
+    play_.playEjected_ = false;
+    play_.playFrameStepPending_ = false;
+    play_.preplayViewValid_ = false;
     // A session's state machines, boards, crowds and cover claims end with it.
     game::resetGameSystems();
 #if AVER_MODULE_FRAMEWORK
@@ -691,18 +691,18 @@ void SandboxApp::stopPlay() {
         droneStartedByPlay_ = false;
         AVER_INFO("[Sandbox] Stop: default drone stopped");
     }
-    if (defaultPawnPlay_) {
-        defaultPawnPlay_ = false;
+    if (play_.defaultPawnPlay_) {
+        play_.defaultPawnPlay_ = false;
         AVER_INFO("[Sandbox] Stop: engine default pawn released");
     }
 #if AVER_MODULE_PHYSICS
-    if (walkCapsule_) {
-        aver_phys_character_destroy(walkCapsule_);
-        walkCapsule_ = 0;
+    if (play_.walkCapsule_) {
+        aver_phys_character_destroy(play_.walkCapsule_);
+        play_.walkCapsule_ = 0;
     }
-    if (flyCapsule_) {
-        aver_phys_character_destroy(flyCapsule_);
-        flyCapsule_ = 0;
+    if (play_.flyCapsule_) {
+        aver_phys_character_destroy(play_.flyCapsule_);
+        play_.flyCapsule_ = 0;
     }
 #endif
     // Restored whether or not the default pawn was what ended, so a view this editor changed can
@@ -728,14 +728,14 @@ void SandboxApp::stopPlay() {
 #endif
     // After a level travel those records name the travelled-to level's entities: the Play-start copy reloaded
     // next frame puts the edited level back instead.
-    if (pieTravelled_) {
-        playWorldSnapshot_.clear();
-        playWorldCaptured_ = false;
+    if (play_.pieTravelled_) {
+        play_.playWorldSnapshot_.clear();
+        play_.playWorldCaptured_ = false;
 #if AVER_MODULE_SCENE && AVER_WITH_IMGUI
         placedBaseline_.clear();
 #endif
 #if AVER_MODULE_FRAMEWORK
-        playClassSnapshot_.clear();
+        play_.playClassSnapshot_.clear();
 #endif
     }
     restorePlayWorld();
@@ -750,71 +750,71 @@ void SandboxApp::stopPlay() {
     restoreAnimatedEntities();
     // Ended AFTER the restore, so the frame that puts the level back is judged by editor rules:
     // every restored entity rejoins the GI bake in one rebuild.
-    if (playMobility_.active()) {
+    if (play_.playMobility_.active()) {
         AVER_INFO("[Sandbox] Stop: {} entity/entities moved during play and were kept out of the "
-                  "GI bake; they rejoin it now", playMobility_.movableCount());
-        playMobility_.end();
+                  "GI bake; they rejoin it now", play_.playMobility_.movableCount());
+        play_.playMobility_.end();
     }
     // The level is reloaded from the Play-start copy next frame, and what the session created dies with
     // it there; without a copy, the session's entities go now and the transform restore above stands.
-    if (pieSnapshotPath_.empty()) destroyPlaySpawned();
-    else pieReloadPending_ = true;
+    if (play_.pieSnapshotPath_.empty()) destroyPlaySpawned();
+    else play_.pieReloadPending_ = true;
 #endif
 }
 
 #if AVER_MODULE_SCENE
 // The level as it stands, unsaved edits included, written beside nothing the author owns (a temp file).
 void SandboxApp::writePlaySnapshot() {
-    pieSnapshotPath_.clear();
-    pieReloadPending_ = false;
-    piePreEntities_.clear();
+    play_.pieSnapshotPath_.clear();
+    play_.pieReloadPending_ = false;
+    play_.piePreEntities_.clear();
     scene::World& w = scene::World::instance();
-    piePreEntities_.reserve(w.count());
-    for (u32 i = 0, n = w.count(); i < n; ++i) piePreEntities_.push_back(w.at(i));
-    std::sort(piePreEntities_.begin(), piePreEntities_.end());
+    play_.piePreEntities_.reserve(w.count());
+    for (u32 i = 0, n = w.count(); i < n; ++i) play_.piePreEntities_.push_back(w.at(i));
+    std::sort(play_.piePreEntities_.begin(), play_.piePreEntities_.end());
     std::error_code ec;
     // Per user (userDataDir, not a shared /tmp) and per session (the clock), so two editors never share one.
     const std::filesystem::path dir = std::filesystem::path(userDataDir()) / "PlaySnapshots";
     std::filesystem::create_directories(dir, ec);
     const std::string stem = "play_snapshot_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
     const std::string path = (dir / (stem + (levelIsLegacyOcmap_ ? ".ocmap" : ".ocworld"))).string();
-    pieWasUnsaved_ = levelHasUnsavedEdits();
-    if (saveLevel(path, /*playSnapshot=*/true)) pieSnapshotPath_ = path;
+    play_.pieWasUnsaved_ = levelHasUnsavedEdits();
+    if (saveLevel(path, /*playSnapshot=*/true)) play_.pieSnapshotPath_ = path;
     else AVER_WARN("[Sandbox] Play: could not snapshot the level; Stop will restore transforms only");
 }
 
 // Every entity alive now that was not alive when Play began: actors, bodies and props a session spawned.
 // Chunk-world tiles are left to the chunk world, which owns their bookkeeping.
 void SandboxApp::destroyPlaySpawned() {
-    if (piePreEntities_.empty()) return;
+    if (play_.piePreEntities_.empty()) return;
     scene::World& w = scene::World::instance();
     std::vector<scene::Entity> doomed;
     for (u32 i = 0, n = w.count(); i < n; ++i) {
         const scene::Entity e = w.at(i);
-        if (std::binary_search(piePreEntities_.begin(), piePreEntities_.end(), e)) continue;
+        if (std::binary_search(play_.piePreEntities_.begin(), play_.piePreEntities_.end(), e)) continue;
         if (anyChunkWorldOwns(e)) continue;
         doomed.push_back(e);
     }
     for (const scene::Entity e : doomed) if (w.valid(e)) w.destroy(e);
     w.flush();
-    piePreEntities_.clear();
+    play_.piePreEntities_.clear();
     if (!doomed.empty()) AVER_INFO("[Sandbox] Stop: destroyed {} entity/entities the session created", doomed.size());
 }
 
 // Unloads the level and loads the Play-start copy under the level's own path. The editor camera and the
 // unsaved-changes state carry over; selection and undo history do not (a reload owns new entities).
 void SandboxApp::reloadAfterPlay(Engine& eng) {
-    pieReloadPending_ = false;
-    const std::string snapshot = std::move(pieSnapshotPath_);
-    pieSnapshotPath_.clear();
+    play_.pieReloadPending_ = false;
+    const std::string snapshot = std::move(play_.pieSnapshotPath_);
+    play_.pieSnapshotPath_.clear();
     if (snapshot.empty()) return;
     // The level Play began on, which after a level travel is not the one open now.
-    const std::string keepPath = pieTravelled_ ? pieEditedLevelPath_ : levelPath_;
+    const std::string keepPath = play_.pieTravelled_ ? play_.pieEditedLevelPath_ : levelPath_;
     const std::string path = keepPath.empty() ? snapshot : keepPath;
     levelPath_ = keepPath;   // before the load too, so the view unloadLevel stores is the edited level's
     const Vec3 cam = camPos_; const f32 yaw = yaw_, pitch = pitch_, speed = flySpeed_;
     const world::OriginCm camOrigin = origin_.origin();   // the camera is origin-relative; the reload resets the origin
-    const bool wasUnsaved = pieWasUnsaved_;
+    const bool wasUnsaved = play_.pieWasUnsaved_;
     projectLoading_ = std::make_unique<LoadingScreen>(
         eng, eng.window() != nullptr && maxFrames_ == 0, executableDir() + AVER_PATH_SEP "splash.png");
     startupSettleCount_ = -2;
@@ -862,7 +862,7 @@ void SandboxApp::raiseFlyingPawnToEye() {
 // request is refused.
 void SandboxApp::travelDuringPlay(Engine& eng, const std::string& requested) {
     if (aver_fw_play_state() == AVER_FW_PLAY_EDITOR) return;
-    if (pieSnapshotPath_.empty()) {
+    if (play_.pieSnapshotPath_.empty()) {
         AVER_WARN("[Play] a script asked to change level to '{}': this session has no copy of the edited level to "
                   "restore at Stop, so the editor keeps the level it is editing", requested);
         return;
@@ -875,9 +875,9 @@ void SandboxApp::travelDuringPlay(Engine& eng, const std::string& requested) {
         return;
     }
     AVER_INFO("[Play] level travel to '{}'", path);
-    if (!pieTravelled_) {
-        pieTravelled_ = true;
-        pieEditedLevelPath_ = levelPath_;
+    if (!play_.pieTravelled_) {
+        play_.pieTravelled_ = true;
+        play_.pieEditedLevelPath_ = levelPath_;
     }
 
     // What the session built for the level being left, rebuilt for the new one below as Play start builds it.
@@ -887,22 +887,22 @@ void SandboxApp::travelDuringPlay(Engine& eng, const std::string& requested) {
 #if AVER_MODULE_PHYSICS
     editor::clearPhysicsFromScene();
     vehicles_.end();
-    if (walkCapsule_) { aver_phys_character_destroy(walkCapsule_); walkCapsule_ = 0; }
-    if (flyCapsule_) { aver_phys_character_destroy(flyCapsule_); flyCapsule_ = 0; }
+    if (play_.walkCapsule_) { aver_phys_character_destroy(play_.walkCapsule_); play_.walkCapsule_ = 0; }
+    if (play_.flyCapsule_) { aver_phys_character_destroy(play_.flyCapsule_); play_.flyCapsule_ = 0; }
 #endif
     anim::animSystem().setObjectAnimationLive(false);
     seqEditor_.endPlay();
-    if (playMobility_.active()) playMobility_.end();
-    playWorldSnapshot_.clear();
-    playWorldCaptured_ = false;
+    if (play_.playMobility_.active()) play_.playMobility_.end();
+    play_.playWorldSnapshot_.clear();
+    play_.playWorldCaptured_ = false;
 #if AVER_WITH_IMGUI
     placedBaseline_.clear();
 #endif
 
     aver_fw_travel_begin();
-    pieTravelling_ = true;
+    play_.pieTravelling_ = true;
     loadLevel(eng, path);
-    pieTravelling_ = false;
+    play_.pieTravelling_ = false;
 #if AVER_MODULE_SCRIPTING
     if (scripts_.ready())
 #endif
@@ -925,7 +925,7 @@ void SandboxApp::travelDuringPlay(Engine& eng, const std::string& requested) {
         AVER_WARN("[Play] level travel: no GameMode could begin in '{}'", path);
         return;
     }
-    defaultPawnPlay_ = drone;
+    play_.defaultPawnPlay_ = drone;
     if (!drone) {
         placePawnAtPlayerStart(aver_fw_class_name(gm));
         return;
@@ -934,10 +934,10 @@ void SandboxApp::travelDuringPlay(Engine& eng, const std::string& requested) {
     if (!placePawnAtPlayerStart("the engine's default pawn")) {
         placeDefaultPawnAtCamera(camPos_, yaw_, pitch_);
         atCamera = true;
-    } else if (!defaultPawnWalk_) {
+    } else if (!play_.defaultPawnWalk_) {
         raiseFlyingPawnToEye();
     }
-    if (defaultPawnWalk_) startDefaultPawnWalk(atCamera);
+    if (play_.defaultPawnWalk_) startDefaultPawnWalk(atCamera);
     else                  startDefaultPawnFly();
 }
 #endif
@@ -1317,19 +1317,19 @@ void SandboxApp::openPlayWindow(Engine& e) {
     w->setEventCallback(&sandboxWindowEvent, &input_);
     mouse_.set(false, window_, "Sandbox", "");   // re-captured against the new window next frame
     playWindow_ = std::move(w);
-    playWindowDevice_ = dev;
-    playWindowW_ = pw;
-    playWindowH_ = ph;
+    play_.playWindowDevice_ = dev;
+    play_.playWindowW_ = pw;
+    play_.playWindowH_ = ph;
     AVER_INFO("[Sandbox] Play in New Window: {}x{}", pw, ph);
 }
 
 void SandboxApp::closePlayWindow() {
     if (!playWindow_) return;
     mouse_.set(false, playWindow_.get(), "Sandbox", "");
-    if (playWindowDevice_) playWindowDevice_->setMirrorWindow(nullptr, 0, 0);
+    if (play_.playWindowDevice_) play_.playWindowDevice_->setMirrorWindow(nullptr, 0, 0);
     playWindow_->destroy();
     playWindow_.reset();
-    playWindowDevice_ = nullptr;
+    play_.playWindowDevice_ = nullptr;
     if (window_) window_->focus();
 }
 
@@ -1340,16 +1340,16 @@ void SandboxApp::updatePlayWindow(Engine& e) {
     if (!playWindow_->inModalResize() && e.device() && window_) {
         const u32 pw = std::min(playWindow_->width(), window_->width());
         const u32 ph = std::min(playWindow_->height(), window_->height());
-        if (pw > 0 && ph > 0 && (pw != playWindowW_ || ph != playWindowH_) &&
+        if (pw > 0 && ph > 0 && (pw != play_.playWindowW_ || ph != play_.playWindowH_) &&
             e.device()->setMirrorWindow(playWindow_->nativeHandle(), pw, ph)) {
-            playWindowW_ = pw;
-            playWindowH_ = ph;
+            play_.playWindowW_ = pw;
+            play_.playWindowH_ = ph;
         }
     }
     vpX_ = 0.0f;
     vpY_ = 0.0f;
-    vpW_ = static_cast<f32>(playWindowW_);
-    vpH_ = static_cast<f32>(playWindowH_);
+    vpW_ = static_cast<f32>(play_.playWindowW_);
+    vpH_ = static_cast<f32>(play_.playWindowH_);
 }
 
 // True while a game is playing, in a build with or without the framework.
@@ -1367,7 +1367,7 @@ bool SandboxApp::playSessionActive() const {
 void SandboxApp::launchPlay(Engine& e, PlayMode m) {
 #if AVER_MODULE_FRAMEWORK
     if (anyPlayActive()) return;
-    playMode_ = m;
+    play_.playMode_ = m;
     AVER_INFO("[Sandbox] Play: {}", m == PlayMode::SelectedViewport ? "Selected Viewport" :
                                      m == PlayMode::Simulate ? "Simulate" :
                                      m == PlayMode::NewWindow ? "New Window" : "Standalone");
@@ -1383,7 +1383,7 @@ void SandboxApp::launchPlay(Engine& e, PlayMode m) {
         startPlay();
         // Unreal's Simulate starts ejected: gameplay and physics tick, but the editor keeps the
         // camera, input and tools -- F8 possesses.
-        if (playSessionActive()) playEjected_ = true;
+        if (playSessionActive()) play_.playEjected_ = true;
         break;
     case PlayMode::Standalone:
         launchInRuntime(e);
@@ -1403,11 +1403,11 @@ void SandboxApp::launchPlay(Engine& e, PlayMode m) {
 void SandboxApp::playFromHere(const Vec3& surface) {
 #if AVER_MODULE_FRAMEWORK
     if (anyPlayActive()) return;
-    playFromHere_ = surface + Vec3{0.0f, 0.0f, kPlayFromHereLiftCm};
+    play_.playFromHere_ = surface + Vec3{0.0f, 0.0f, kPlayFromHereLiftCm};
     AVER_INFO("[Sandbox] Play: from here ({:.0f}, {:.0f}, {:.0f}), yaw {:.0f}",
-              playFromHere_->x, playFromHere_->y, playFromHere_->z, degrees(yaw_));
+              play_.playFromHere_->x, play_.playFromHere_->y, play_.playFromHere_->z, degrees(yaw_));
     startPlay();
-    playFromHere_.reset();   // startPlay already took it; this only matters if it ever returns before doing so
+    play_.playFromHere_.reset();   // startPlay already took it; this only matters if it ever returns before doing so
 #else
     (void)surface;
 #endif
@@ -1417,9 +1417,9 @@ void SandboxApp::playFromHere(const Vec3& surface) {
 void SandboxApp::togglePlayEject() {
 #if AVER_MODULE_FRAMEWORK
     if (!playSessionActive()) return;
-    playEjected_ = !playEjected_;
+    play_.playEjected_ = !play_.playEjected_;
     // Possessing again hands the mouse back to the game, same as a fresh session start.
-    if (!playEjected_) releasedByUser_ = false;
+    if (!play_.playEjected_) releasedByUser_ = false;
 #endif
 }
 
@@ -1457,28 +1457,28 @@ void SandboxApp::teleportPawnToCamera() {
 
     Vec3 feet = camPos_;
     const char* what = "the flying default pawn, at the camera itself";
-    if (defaultPawnPlay_ && !walkCapsule_) {
+    if (play_.defaultPawnPlay_ && !play_.walkCapsule_) {
 #if AVER_MODULE_PHYSICS
-        if (flyCapsule_) {
+        if (play_.flyCapsule_) {
             what = "the flying default pawn and its collider, at the camera itself";
-            aver_phys_character_set_position(flyCapsule_, camPos_.x, camPos_.y, camPos_.z);
-            aver_phys_character_set_velocity(flyCapsule_, 0.0f, 0.0f, 0.0f);
+            aver_phys_character_set_position(play_.flyCapsule_, camPos_.x, camPos_.y, camPos_.z);
+            aver_phys_character_set_velocity(play_.flyCapsule_, 0.0f, 0.0f, 0.0f);
         }
 #endif
         placeDefaultPawnAtCamera(camPos_, yaw_, pitch_);
-    } else if (defaultPawnPlay_) {
+    } else if (play_.defaultPawnPlay_) {
         what = "the walking default pawn and its capsule";
         f32 ownFeetZ = -FLT_MAX;
 #if AVER_MODULE_PHYSICS
         float wp[3];
-        if (aver_phys_character_position(walkCapsule_, wp) != 0) ownFeetZ = wp[2] - kWalkHeight * 0.5f;
+        if (aver_phys_character_position(play_.walkCapsule_, wp) != 0) ownFeetZ = wp[2] - kWalkHeight * 0.5f;
 #endif
-        feet = feetBelowCamera(camPos_, kWalkEye, walkCapsule_, ownFeetZ);
+        feet = feetBelowCamera(camPos_, kWalkEye, play_.walkCapsule_, ownFeetZ);
 #if AVER_MODULE_PHYSICS
-        aver_phys_character_set_position(walkCapsule_, feet.x, feet.y, feet.z + kWalkHeight * 0.5f);
+        aver_phys_character_set_position(play_.walkCapsule_, feet.x, feet.y, feet.z + kWalkHeight * 0.5f);
         // Stopped dead: a capsule keeps the last velocity it was given for as long as nothing drives
         // it, and nothing does while ejected -- it would walk off from where it was just put.
-        aver_phys_character_set_velocity(walkCapsule_, 0.0f, 0.0f, 0.0f);
+        aver_phys_character_set_velocity(play_.walkCapsule_, 0.0f, 0.0f, 0.0f);
 #endif
         // The same two writes driveDefaultPawnWalk makes once possessed, so the pawn is already
         // where and how that function will next put it.
@@ -1549,13 +1549,13 @@ void SandboxApp::teleportPawnToCamera() {
 // it for one tick and resume it a frame later than the button shows.
 void SandboxApp::requestPlayFrameStep() {
 #if AVER_MODULE_FRAMEWORK
-    if (aver_fw_play_state() == AVER_FW_PLAY_PAUSED) playFrameStepPending_ = true;
+    if (aver_fw_play_state() == AVER_FW_PLAY_PAUSED) play_.playFrameStepPending_ = true;
 #endif
 }
 
 // True while a real session runs ejected. playSessionActive() already reads false without the
 // framework, so this needs no guard of its own.
-bool SandboxApp::playEjected() const { return playEjected_ && playSessionActive(); }
+bool SandboxApp::playEjected() const { return play_.playEjected_ && playSessionActive(); }
 
 // True while controller 0 possesses a pawn that is a live entity -- what Pawn to Camera needs, asked
 // before its chord may take Shift+F from Frame Selected (with no pawn, Shift+F frames as it always did).

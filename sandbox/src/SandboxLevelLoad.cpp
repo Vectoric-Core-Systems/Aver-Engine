@@ -897,7 +897,7 @@ void SandboxApp::respawnLostClassInstances() {
     scene::World& w = scene::World::instance();
     // One spawn batch, as at level load: each actor's placement properties are on it before it begins play.
     aver_fw_spawn_batch_begin();
-    for (const PlayClassSaved& s : playClassSnapshot_) {
+    for (const PlayClassSaved& s : play_.playClassSnapshot_) {
         const auto it = std::find_if(levelClassInstances_.begin(), levelClassInstances_.end(),
                                      [&](const ClassInstance& ci) { return ci.placement == s.slot && !ci.removed; });
         if (it == levelClassInstances_.end()) continue;
@@ -913,7 +913,7 @@ void SandboxApp::respawnLostClassInstances() {
         multiRebuildSet();
     }
     aver_fw_spawn_batch_end();
-    playClassSnapshot_.clear();
+    play_.playClassSnapshot_.clear();
 }
 
 // World box of the root's mesh parts (not the root itself), for framing a class actor whose body is COMP parts.
@@ -1091,7 +1091,7 @@ void SandboxApp::storeLevelView() {
     editor::LevelView v{camPos_.x, camPos_.y, camPos_.z, degrees(yaw_), degrees(pitch_), flySpeed_};
 #if AVER_MODULE_FRAMEWORK
     // While a session drives the camera from the pawn, camPos_ is the pawn's eye, not the editor's.
-    if (preplayViewValid_ && anyPlayActive() && !playEjected()) v = preplayView_;
+    if (play_.preplayViewValid_ && anyPlayActive() && !playEjected()) v = play_.preplayView_;
 #endif
 
     std::string text;
@@ -1145,14 +1145,14 @@ void SandboxApp::unloadLevel(Engine& eng) {
     // Every way out of a level (open, New, a project switch) ends a running session first, so object
     // animation stops and the Play snapshot is restored before the entities it names go away. A level
     // travel in Play is the one exception: the session goes on into the next level (travelDuringPlay).
-    if (anyPlayActive() && !pieTravelling_) stopPlay();
+    if (anyPlayActive() && !play_.pieTravelling_) stopPlay();
 #endif
 #if AVER_MODULE_SCENE
-    pieReloadPending_ = false;   // leaving the level (or reloading it): a pending Play reload is moot
+    play_.pieReloadPending_ = false;   // leaving the level (or reloading it): a pending Play reload is moot
 #endif
-    if (!pieTravelling_) {
-        pieTravelled_ = false;
-        pieEditedLevelPath_.clear();
+    if (!play_.pieTravelling_) {
+        play_.pieTravelled_ = false;
+        play_.pieEditedLevelPath_.clear();
         // FIRST, while levelPath_ still names the level being left: every way out of a level (another
         // level, New Level) comes through here. Closing the editor does not; onShutdown calls it too.
         storeLevelView();
@@ -1164,7 +1164,7 @@ void SandboxApp::unloadLevel(Engine& eng) {
     for (const ClassInstance& ci : levelClassInstances_) if (ci.entity != 0) aver_fw_destroy(ci.entity);
     levelClassInstances_.clear();
     classAuthored_.clear();
-    playClassSnapshot_.clear();
+    play_.playClassSnapshot_.clear();
 #endif
     scene::World& world = scene::World::instance();
     for (const scene::Entity e : levelEntities_) if (world.valid(e)) world.destroy(e);

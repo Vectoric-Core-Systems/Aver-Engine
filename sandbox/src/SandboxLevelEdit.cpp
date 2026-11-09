@@ -487,7 +487,7 @@ bool SandboxApp::fillPlacementFromEntity(scene::Entity e, fmt::OcWorldPlacement&
     // RUNS they come from the Play-start baseline: a script may have changed an animator's speed or an IK weight since,
     // and an autosave landing mid-Play must write the authored state (the same hazard as the transforms above).
     // An entity with no baseline entry (streamed in during Play) is captured live.
-    if (playWorldCaptured_) {
+    if (play_.playWorldCaptured_) {
         if (const auto baseIt = placedBaseline_.find(static_cast<u32>(e)); baseIt != placedBaseline_.end()) {
             p.components = baseIt->second;
             return true;
@@ -661,7 +661,7 @@ bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
     // The placement transforms of the entities Play is MOVING -- animated ones, and the physics cars --
     // from Play's own snapshot, taken before anything moved. Empty (and free) at any other time.
     std::unordered_map<u32, const Transform*> animPlaced;
-    if (playWorldCaptured_) {
+    if (play_.playWorldCaptured_) {
         const bool clipsLive = anim::animSystem().objectAnimationLive();
         // A CAR'S CLocal IS WHEREVER IT HAS DRIVEN TO, written by VehicleSystem every frame, so a save or an
         // autosave mid-Play would otherwise put each car at a point on its road instead of where it was
@@ -687,7 +687,7 @@ bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
 #endif
         const bool seqLive = seqEditor_.playRunning();
         if (clipsLive || !cars.empty() || seqLive)
-            for (const PlaySavedTransform& t : playWorldSnapshot_) {
+            for (const PlaySavedTransform& t : play_.playWorldSnapshot_) {
                 const u32 key = static_cast<u32>(t.e);
                 const bool clip = clipsLive && entityAnim_.find(key) != entityAnim_.end();
                 if (clip || cars.count(key) != 0 || (seqLive && seqEditor_.drivesTransform(t.e)))

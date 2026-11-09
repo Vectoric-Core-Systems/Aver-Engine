@@ -1297,6 +1297,8 @@ private:
     bool failed_ = false;
 };
 
+#include "state/EditId.hpp"
+#include "state/PlayState.hpp"
 class HitchMarks;
 namespace game { struct SceneDrawStats; }
 
@@ -1692,7 +1694,7 @@ public:
     // --view-mode lit|unlit|wireframe|rayhit-*|triangles|undenoised (applied at startup).
     void setViewMode(const std::string& mode);
     void setPlayTest();                                       // --play-test
-    void setPlayWalk() { defaultPawnWalk_ = true; }          // --play-walk: the no-GameMode default pawn walks
+    void setPlayWalk() { play_.defaultPawnWalk_ = true; }          // --play-walk: the no-GameMode default pawn walks
     void startDefaultPawnWalk(bool fromCamera);                // SandboxPlay.cpp: the capsule for a walking default pawn
     void driveDefaultPawnWalk(const Vec3& fwd, const Vec3& right);   // per frame, from the fly block
     void startDefaultPawnFly();                                // SandboxPlay.cpp: the flying default pawn's collider
@@ -1751,6 +1753,10 @@ private:
             if (on) splash.close(0);
         }
     };
+
+    // ---- feature state: plain-data groups moved out of this class (sandbox/src/state/) ----
+    PlayState play_;   // Play-in-editor session
+    // ---- end feature state ----
 
     void applyProject(Engine& e);
 
@@ -2018,7 +2024,7 @@ private:
 #endif
 
     // Stable identity for an undoable object, so a command survives the entity being recreated.
-    using EditId = u32;
+    using EditId = ::aver::EditId;   // declared at namespace scope (state/EditId.hpp) so the state structs can name it
 
     // One undoable edit (transform, create/destroy). Components captured via EntitySnapshot.
     struct EditCmd {
@@ -4635,9 +4641,6 @@ private:
     // Apply view with mouse-look and wheel clamps.
     void applyLevelView(const editor::LevelView& v);
     std::string levelViewsPath() const;
-    // Editor view saved before Play started (restored on stop).
-    bool preplayViewValid_ = false;
-    editor::LevelView preplayView_{};
 
     bool requestOpenLevel(const std::string& path, const char* why);
 
@@ -4663,10 +4666,6 @@ private:
     void writePlaySnapshot();
     void destroyPlaySpawned();
     void reloadAfterPlay(Engine& eng);
-    std::string pieSnapshotPath_;
-    std::vector<scene::Entity> piePreEntities_;   // every live entity at Play start, sorted
-    bool pieReloadPending_ = false;
-    bool pieWasUnsaved_ = false;
     // LEVEL TRAVEL IN PLAY (Godot's change_scene_to_file, Unreal's OpenLevel in PIE): the requested level replaces the
     // open one for the rest of the session, and Stop reloads the Play-start copy under the level Play began on
     // (pieEditedLevelPath_). pieTravelling_ is set while the swap runs, so unloadLevel neither stops the session nor
@@ -4675,17 +4674,8 @@ private:
     void travelDuringPlay(Engine& eng, const std::string& requested);
     void raiseFlyingPawnToEye();
 #endif
-    bool pieTravelled_ = false;
-    bool pieTravelling_ = false;
-    std::string pieEditedLevelPath_;
 
-    // Snapshot of transforms/visibility/spawned entities at Play start; restored on Stop.
-    bool defaultPawnPlay_ = false;  // True while engine's default GameMode is active.
-    struct PlaySavedTransform { scene::Entity e; Transform xf; bool visible = true; };
-    std::vector<PlaySavedTransform> playWorldSnapshot_;
-    bool playWorldCaptured_ = false;
-    // What moved during session (Voxi GI excludes it). Started in capturePlayWorld, ended in stopPlay.
-    game::PlayMobility playMobility_;
+    using PlaySavedTransform = PlayState::PlaySavedTransform;
 #if AVER_MODULE_SCENE
     // The level's sequence (Animate mode, Play). Its camera and emissive reach the frame through
     // viewOverride_ and DrawWorldOptions::emissiveScale.
@@ -4752,8 +4742,7 @@ private:
     std::vector<fmt::OcWorldPlacement> classAuthored_;      // every class placement of the open level (loaded first, session-added appended)
     std::vector<i64> classAuthoredIndex_;                   // parallel: its placement index in the loaded file, -1 if added this session
     game::PlacementTree placementTree_;                     // the loaded file's hierarchy: placed actors spawn under their parents
-    struct PlayClassSaved { usize slot; EditId id; Transform xf; };
-    std::vector<PlayClassSaved> playClassSnapshot_;        // class roots at Play start, for the Stop respawn
+    using PlayClassSaved = PlayState::PlayClassSaved;
     std::vector<editor::GraphClassDecl> classPickList_;
     bool classPickDirty_ = true;                           // rescan when the Add popup opens
 #endif
@@ -4829,36 +4818,15 @@ private:
 #endif // AVER_MODULE_MCP
     bool releasedByUser_ = false;   // Shift+F1 during a session; cleared when the session ends
 
-    // Play options (persisted in editor.ini). Declared unguarded for toolbar compatibility.
-    enum class PlayMode : u8 {
-        SelectedViewport = 0,   // play in the Level viewport, possessing the player (Alt+P)
-        Simulate         = 1,   // the game runs, the player is not possessed, the editor keeps the camera (Alt+S)
-        Standalone       = 2,   // a separate AverEngineRuntime.exe on the saved level (launchInRuntime)
-        NewWindow        = 3,   // the viewport session, shown in a window of its own; Esc returns
-    };
-    enum class PlaySpawnAt : u8 { PlayerStart = 0, CameraLocation = 1 };
-    PlayMode    playMode_ = PlayMode::SelectedViewport;    // Last launched; main button repeats it.
-    PlaySpawnAt playSpawnAt_ = PlaySpawnAt::PlayerStart;
-    // Default pawn walks (capsule: gravity, stairs, jumps, runs) without GameMode. Off = flying drone.
-    bool        defaultPawnWalk_ = false;
-    int32_t     walkCapsule_ = 0;
-    int32_t     flyCapsule_ = 0;   // the flying default pawn's zero-gravity collider (0 = no-clip fallback)
-    bool        playGameGetsMouse_ = true;   // Capture mouse when viewport session starts.
-    std::string playStandaloneArgs_;         // Extra command line for Standalone Game.
-    // Ejected (F8): editor has camera/input/tools; session keeps running. Possess (F8) to snap back.
-    bool        playEjected_ = false;
-    bool        playFrameStepPending_ = false;
-    bool        scrollPrefsToPlay_ = false;  // "Advanced Settings..." scrolls Preferences to Play, once.
+    using PlayMode = PlayState::PlayMode;
+    using PlaySpawnAt = PlayState::PlaySpawnAt;
     // Start Play (refused while active, like button). Standalone goes through launchInRuntime.
     void launchPlay(Engine& e, PlayMode m);
     // Play From Here: viewport pawn starts at surface, facing camera yaw.
     void playFromHere(const Vec3& surface);
-    std::optional<Vec3> playFromHere_;
     // Play in New Window: the device mirrors the game view into playWindow_ (IDevice::setMirrorWindow),
     // whose input feeds input_. The scene renders at the window's size; see docs/editor/PLAY_IN_NEW_WINDOW.md.
     std::unique_ptr<Window> playWindow_;
-    rhi::IDevice* playWindowDevice_ = nullptr;
-    u32 playWindowW_ = 0, playWindowH_ = 0;
     void openPlayWindow(Engine& e);
     void closePlayWindow();
     void updatePlayWindow(Engine& e);   // per frame, before the scene rect is used

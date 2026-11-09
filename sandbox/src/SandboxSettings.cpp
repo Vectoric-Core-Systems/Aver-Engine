@@ -169,16 +169,16 @@ void SandboxApp::loadEditorPreferences() {
 
     // Play toolbar: clamp out-of-range enums to compiled-in defaults.
     {
-        const i32 storedMode = prefInt("play.mode", static_cast<i32>(playMode_));
-        playMode_ = (storedMode >= 0 && storedMode <= static_cast<i32>(PlayMode::NewWindow))
+        const i32 storedMode = prefInt("play.mode", static_cast<i32>(play_.playMode_));
+        play_.playMode_ = (storedMode >= 0 && storedMode <= static_cast<i32>(PlayMode::NewWindow))
                   ? static_cast<PlayMode>(storedMode) : PlayMode::SelectedViewport;
-        const i32 storedSpawn = prefInt("play.spawnAt", static_cast<i32>(playSpawnAt_));
-        playSpawnAt_ = (storedSpawn >= 0 && storedSpawn <= static_cast<i32>(PlaySpawnAt::CameraLocation))
+        const i32 storedSpawn = prefInt("play.spawnAt", static_cast<i32>(play_.playSpawnAt_));
+        play_.playSpawnAt_ = (storedSpawn >= 0 && storedSpawn <= static_cast<i32>(PlaySpawnAt::CameraLocation))
                      ? static_cast<PlaySpawnAt>(storedSpawn) : PlaySpawnAt::PlayerStart;
     }
-    playGameGetsMouse_  = prefBool  ("play.gameGetsMouse",  playGameGetsMouse_);
-    defaultPawnWalk_    = prefBool  ("play.defaultPawnWalk", defaultPawnWalk_);
-    playStandaloneArgs_ = prefString("play.standaloneArgs", "");
+    play_.playGameGetsMouse_  = prefBool  ("play.gameGetsMouse",  play_.playGameGetsMouse_);
+    play_.defaultPawnWalk_    = prefBool  ("play.defaultPawnWalk", play_.defaultPawnWalk_);
+    play_.playStandaloneArgs_ = prefString("play.standaloneArgs", "");
 
     keybinds_.loadFromPrefs();
 }
@@ -198,38 +198,38 @@ void SandboxApp::resolvePreferredIdeFromPrefs() {
 // already has them.
 void SandboxApp::buildPlayPrefsSection() {
     // Same one-shot pattern as scrollPrefsToKeybinds_: lands here, on the header, then clears.
-    if (scrollPrefsToPlay_) { ImGui::SetScrollHereY(0.0f); scrollPrefsToPlay_ = false; }
+    if (play_.scrollPrefsToPlay_) { ImGui::SetScrollHereY(0.0f); play_.scrollPrefsToPlay_ = false; }
     if (!::aver::editor::sectionHeader("Play", ImGuiTreeNodeFlags_DefaultOpen)) return;
 
     static const char* kModeNames[] = {"Selected Viewport", "Simulate", "Standalone Game", "New Window"};
-    const int modeIdx = static_cast<int>(playMode_);
+    const int modeIdx = static_cast<int>(play_.playMode_);
     if (ImGui::BeginCombo("Default mode", kModeNames[modeIdx])) {
         for (int i = 0; i < 4; ++i)
-            if (ImGui::Selectable(kModeNames[i], modeIdx == i)) playMode_ = static_cast<PlayMode>(i);
+            if (ImGui::Selectable(kModeNames[i], modeIdx == i)) play_.playMode_ = static_cast<PlayMode>(i);
         ImGui::EndCombo();
     }
     uiReg_.track("prefs.play.mode");
 
     static const char* kSpawnNames[] = {"Default Player Start", "Current Camera Location"};
-    const int spawnIdx = static_cast<int>(playSpawnAt_);
+    const int spawnIdx = static_cast<int>(play_.playSpawnAt_);
     if (ImGui::BeginCombo("Spawn player at", kSpawnNames[spawnIdx])) {
         for (int i = 0; i < 2; ++i)
-            if (ImGui::Selectable(kSpawnNames[i], spawnIdx == i)) playSpawnAt_ = static_cast<PlaySpawnAt>(i);
+            if (ImGui::Selectable(kSpawnNames[i], spawnIdx == i)) play_.playSpawnAt_ = static_cast<PlaySpawnAt>(i);
         ImGui::EndCombo();
     }
     uiReg_.track("prefs.play.spawnAt");
 
-    ImGui::Checkbox("Game gets mouse control", &playGameGetsMouse_);
+    ImGui::Checkbox("Game gets mouse control", &play_.playGameGetsMouse_);
     uiReg_.track("prefs.play.gameGetsMouse");
 
-    ImGui::Checkbox("Default pawn walks (no GameMode)", &defaultPawnWalk_);
+    ImGui::Checkbox("Default pawn walks (no GameMode)", &play_.defaultPawnWalk_);
     uiReg_.track("prefs.play.defaultPawnWalk");
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("With no GameMode, Play possesses the engine's default pawn. On: it walks -- a capsule "
                           "with gravity, 40 cm stair steps, Space to jump, Shift to run -- so stairs, decks and "
                           "bridges can be tested by hand. Off: it flies (WASD/QE).");
 
-    editField("Standalone launch arguments", playStandaloneArgs_, 256);
+    editField("Standalone launch arguments", play_.playStandaloneArgs_, 256);
     uiReg_.track("prefs.play.standaloneArgs");
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Appended to AverEngineRuntime.exe's command line, after --project and "
@@ -2544,11 +2544,11 @@ void SandboxApp::saveEditorPreferences() {
 #endif  // AVER_MODULE_SR
     }
 
-    setPrefInt   ("play.mode",           static_cast<i32>(playMode_));
-    setPrefInt   ("play.spawnAt",        static_cast<i32>(playSpawnAt_));
-    setPrefBool  ("play.gameGetsMouse",  playGameGetsMouse_);
-    setPrefBool  ("play.defaultPawnWalk", defaultPawnWalk_);
-    setPrefString("play.standaloneArgs", playStandaloneArgs_);
+    setPrefInt   ("play.mode",           static_cast<i32>(play_.playMode_));
+    setPrefInt   ("play.spawnAt",        static_cast<i32>(play_.playSpawnAt_));
+    setPrefBool  ("play.gameGetsMouse",  play_.playGameGetsMouse_);
+    setPrefBool  ("play.defaultPawnWalk", play_.defaultPawnWalk_);
+    setPrefString("play.standaloneArgs", play_.playStandaloneArgs_);
 
     // The one line in this function that needs the editor UI: keybinds_ is the chord registry the
     // ImGui layer owns. Everything else is a plain setPref* call, so the guard sits only here.
