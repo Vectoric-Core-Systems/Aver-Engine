@@ -480,6 +480,39 @@ int main() {
     }
     std::filesystem::remove_all(outDir / "mm", ec);
 
+    // ---- stream then hlod: per-cell proxies recorded in the .ocstream, a second run leaves them be ---------
+    AVER_INFO("-- hlod bakes per-cell proxies and is incremental --");
+    {
+        const std::filesystem::path hp = outDir / "hlod", content = hp / "Content", proj = hp;
+        std::filesystem::create_directories(content, ec);
+        std::string cout_;
+        const int cc = runCapture("\"" + exe.string() + "\" convert \"" + fixture.string() + "\" --out-dir \"" + content.string() + "\"", cout_);
+        std::string meshName;
+        for (const auto& e : std::filesystem::directory_iterator(content, ec))
+            if (e.path().extension() == ".ocmesh" && meshName.empty()) meshName = e.path().filename().string();
+        check(cc == 0 && !meshName.empty(), "hlod fixture: a mesh was converted");
+        if (!meshName.empty()) {
+            const std::filesystem::path level = hp / "L.ocworld";
+            {
+                std::ofstream f(level);
+                f << "OCWORLD 1\nNAME L\n";
+                f << "PLACE " << meshName << " 100 100 0 0 0 0 1\n";
+                f << "PLACE " << meshName << " 300 100 0 0 0 0 1\n";
+                f << "PLACE " << meshName << " 9000 100 0 0 0 0 1\n";
+            }
+            std::string o1, o2, o3;
+            const std::string base = "\"" + exe.string() + "\" ";
+            const int s1 = runCapture(base + "stream \"" + level.string() + "\" --content-dir \"" + content.string() + "\" --project-dir \"" + proj.string() + "\" --cell 40 --load 100 --evict 120", o1);
+            const int h1 = runCapture(base + "hlod \"" + level.string() + "\" --content-dir \"" + content.string() + "\" --project-dir \"" + proj.string() + "\" --hlod 300", o2);
+            check(s1 == 0 && h1 == 0, "stream then hlod exit 0 (" + std::to_string(s1) + ", " + std::to_string(h1) + ")");
+            check(o2.find("2 cell(s): 2 built") != std::string::npos, "two cells built on the first run");
+            const int h2 = runCapture(base + "hlod \"" + level.string() + "\" --content-dir \"" + content.string() + "\" --project-dir \"" + proj.string() + "\" --hlod 300", o3);
+            check(h2 == 0 && o3.find("0 built, 2 up to date") != std::string::npos, "the second run rebuilds nothing");
+            std::string o4;
+            check(runCapture(base + "hlod \"" + level.string() + "\" --content-dir \"" + content.string() + "\" --bogus", o4) == 2, "an unknown argument is a usage error");
+        }
+    }
+
     // ---- the failure path -------------------------------------------------------------------
     AVER_INFO("-- and a bad input FAILS detectably, rather than silently --");
     {
