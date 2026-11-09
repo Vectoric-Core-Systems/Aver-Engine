@@ -254,6 +254,7 @@ void SandboxApp::buildLandscapePaintTab(Engine& e) {
         ImGui::SetTooltip("Generates the layer's foliage type (set on the layer in its material) at the layer's density where its\n"
                           "paint weight is high enough, into Content/Foliage/<layer>_vegetation.ocinst with a .ocveg record.\n"
                           "Deterministic; running it again regenerates the table and keeps manual edits.");
+    buildBiomeSection();   // LandscapeBiomeTab.cpp: the biome list and Generate Vegetation
 #endif
     ImGui::EndDisabled();
 #else

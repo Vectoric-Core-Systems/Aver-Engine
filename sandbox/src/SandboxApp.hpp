@@ -3470,6 +3470,7 @@ private:
 #endif
 #if AVER_MODULE_SCENE
     void scatterFoliageFromLayer(Engine& e);
+    void buildBiomeSection();   // LandscapeBiomeTab.cpp: Landscape > Paint, the biome list and Generate Vegetation
     // One instance of `sp` at (x, y), scale / yaw drawn from `rng` (foliagePlaceOne's tail, so the brush and the
     // layer scatter place identically).
     void foliagePlaceAt(Engine& e, const FoliageSpecies& sp, f32 x, f32 y, u32& rng);

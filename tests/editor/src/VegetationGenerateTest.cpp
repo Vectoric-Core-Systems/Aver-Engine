@@ -1,5 +1,6 @@
 // The editor glue behind Scatter Foliage From Layer / Generate Vegetation: landscape sections as a PCG query, the one-entry
 // layer biome run, the .ocinst / .ocveg / .ocbiome it writes, and a regenerate that keeps manual edits. No ImGui, no window.
+#include "BiomeListModel.hpp"
 #include "VegetationGenerate.hpp"
 
 #include "aver/core/Log.hpp"
@@ -115,6 +116,61 @@ int main() {
     editor::LayerVegetationRequest bad = req;
     bad.densityPer100m2 = 0.0f;
     check(!editor::generateLayerVegetation({&land}, bad, contentDir).ok, "a zero density is refused");
+
+    // ---- the Landscape mode's biome list: several .ocbiome files, one table ----
+    {
+        std::string bwhy;
+        fmt::OcFoliageData fern = req.type;
+        fmt::OcFoliageData rock = req.type;
+        rock.meshPath = "Meshes/rock.ocmesh";
+        check(fmt::saveOcFoliage((dir / "Foliage/Fern.ocfoliage").string(), fern, &bwhy), "the fern type saves");
+        check(fmt::saveOcFoliage((dir / "Foliage/Rock.ocfoliage").string(), rock, &bwhy), "the rock type saves");
+        fmt::OcBiomeData grassBiome = world::pcgLayerBiome("Grass", "Foliage/Fern.ocfoliage", 20.0f, 0.5f);
+        grassBiome.name = "Meadow";
+        fmt::OcBiomeData rockBiome = world::pcgLayerBiome("Base", "Foliage/Rock.ocfoliage", 2.0f, 0.5f);
+        rockBiome.name = "Rocky";
+        std::filesystem::create_directories(dir / "Biomes", ec);
+        check(fmt::saveOcBiome((dir / "Biomes/Meadow.ocbiome").string(), grassBiome, &bwhy) && fmt::saveOcBiome((dir / "Biomes/Rocky.ocbiome").string(), rockBiome, &bwhy), "two biomes save");
+
+        editor::BiomeVegetationRequest br;
+        br.biomes = {"Biomes/Meadow.ocbiome"};
+        br.seed = 5;
+        br.cellCm = 1600.0f;
+        br.ocinstRel = "Foliage/Biomes_vegetation.ocinst";
+        const auto est = editor::estimateBiomeVegetation({&land}, br, contentDir);
+        check(est.ok && est.instancesPerCellMax > 0.0 && est.bytesPerCellMax > 0.0 && !est.overCap, "the estimate reads the biome and is under the cap");
+        const auto one = editor::generateBiomeVegetation({&land}, br, contentDir);
+        check(one.ok && one.instances > 50, "one biome generates (" + one.error + ", " + std::to_string(one.instances) + ")");
+        br.biomes = {"Biomes/Meadow.ocbiome", "Biomes/Rocky.ocbiome"};
+        const auto two = editor::generateBiomeVegetation({&land}, br, contentDir);
+        check(two.ok && two.instances > one.instances, "a second biome adds its rows (" + std::to_string(two.instances) + " vs " + std::to_string(one.instances) + ")");
+        bool hasRockGroup = false;
+        for (const auto& g : two.table.groups) hasRockGroup |= g.asset == "Meshes/rock.ocmesh";
+        check(hasRockGroup, "the second biome's mesh is in the table");
+        check(two.groupMaterials.size() == two.table.groups.size(), "a material slot for every group");
+        const auto again = editor::generateBiomeVegetation({&land}, br, contentDir);
+        check(again.ok && again.table.transforms == two.table.transforms, "a second run is the same table");
+        fmt::OcVegetationRecord brec;
+        check(fmt::loadOcVegetation((dir / "Foliage/Biomes_vegetation.ocveg").string(), brec, &bwhy) && brec.biomes == br.biomes && brec.count == two.instances,
+              "the record names both biomes and counts the rows");
+        const auto files = editor::biomes::listFiles(contentDir, ".ocbiome");
+        check(files == (std::vector<std::string>{"Biomes/Meadow.ocbiome", "Biomes/Rocky.ocbiome", "Foliage/Grass_vegetation.ocbiome"}), "listFiles finds the biomes, content-relative and sorted");
+        check(editor::biomes::listFiles(contentDir, ".ocfoliage").size() == 2 && editor::biomes::listFiles(contentDir, ".nope").empty(), "listFiles filters by extension");
+        const fmt::OcBiomeData starter = editor::biomes::starterBiome("Fresh", "Foliage/Fern.ocfoliage");
+        check(starter.valid(), "a starter biome is valid");
+        check(editor::biomes::freeBiomePath(contentDir, "Meadow") == "Biomes/Meadow2.ocbiome" && editor::biomes::freeBiomePath(contentDir, "Fresh") == "Biomes/Fresh.ocbiome", "freeBiomePath skips a taken name");
+        check(editor::biomes::stemOf("Foliage/Fern.ocfoliage") == "Fern", "stemOf");
+        check(editor::biomes::estimateLine(1200.0, 115.0 * 1024.0, false) == "Up to 1200 instances and 115 KB per cell" &&
+              editor::biomes::estimateLine(5.0, 3.0 * 1024.0 * 1024.0, true).find("3.0 MB") != std::string::npos, "estimateLine scales to MB and flags the cap");
+        check(editor::biomes::outcomeLine(1, 0, 0) == "Generated 1 instance" && editor::biomes::outcomeLine(40, 2, 1).find("kept 2 manual edits") != std::string::npos, "outcomeLine");
+        br.biomes = {"Biomes/Missing.ocbiome"};
+        const auto missing = editor::generateBiomeVegetation({&land}, br, contentDir);
+        check(!missing.ok && missing.error.find("Missing") != std::string::npos, "a biome that cannot load is refused, naming it");
+        br.biomes.clear();
+        check(!editor::generateBiomeVegetation({&land}, br, contentDir).ok && !editor::estimateBiomeVegetation({&land}, br, contentDir).ok, "no biome selected is refused");
+        br.biomes = {"Biomes/Meadow.ocbiome"};
+        check(!editor::generateBiomeVegetation({}, br, contentDir).ok, "no sections is refused");
+    }
 
     std::filesystem::remove_all(dir, ec);
     AVER_INFO("VegetationGenerateTest: {} of {} checks passed", g_checks - g_failures, g_checks);

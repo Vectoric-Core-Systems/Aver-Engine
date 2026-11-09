@@ -47,4 +47,38 @@ struct LayerVegetationOutcome {
 LayerVegetationOutcome generateLayerVegetation(const std::vector<const fmt::OcLandData*>& sections, const LayerVegetationRequest& req,
                                                const std::string& contentDir);
 
+// The Landscape mode's biome list: several `.ocbiome` files run together over the landscape (priority decides overlaps), into one `.ocinst`
+// and its `.ocveg` record. Manual edits recorded in an existing record are kept, as for a layer run.
+struct BiomeVegetationRequest {
+    std::vector<std::string> biomes;   // content-relative .ocbiome paths, in the order they are listed (order is the seed order)
+    i32 seed = 0;
+    f32 cellCm = 6400.0f;
+    std::string ocinstRel;             // content-relative output; the record is the same path with .ocveg
+};
+
+struct BiomeVegetationOutcome {
+    bool ok = false;
+    std::string error;
+    u32 instances = 0;
+    u32 kept = 0;
+    u32 cellsRun = 0, cellsCapped = 0;
+    f64 bytesPerCellMax = 0.0;         // the estimate that gated the run
+    std::vector<std::string> warnings;
+    fmt::OcInstanceData table;
+    std::vector<std::string> groupMaterials;   // parallel to table.groups: the material of the foliage type whose mesh the group is
+};
+
+// What a run would cost, without running it: the guardrail estimate for the listed biomes, or why they cannot load.
+struct BiomeEstimate {
+    bool ok = false;
+    std::string error;
+    f64 instancesPerCellMax = 0.0, bytesPerCellMax = 0.0;
+    bool overCap = false;
+    std::vector<std::string> warnings;
+};
+BiomeEstimate estimateBiomeVegetation(const std::vector<const fmt::OcLandData*>& sections, const BiomeVegetationRequest& req, const std::string& contentDir);
+
+BiomeVegetationOutcome generateBiomeVegetation(const std::vector<const fmt::OcLandData*>& sections, const BiomeVegetationRequest& req,
+                                               const std::string& contentDir);
+
 } // namespace aver::editor
