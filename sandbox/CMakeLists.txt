@@ -102,6 +102,8 @@ add_executable(Sandbox WIN32
   src/ExtensionImport.cpp
   # Window > Extensions: the installed extensions, Install from file... (.avext) and Uninstall; the work is Aver.Extensions' Avext.cpp.
   src/ExtensionsWindow.cpp
+  src/DataLayersPanel.cpp
+  src/SandboxDataLayers.cpp
   src/ProcessStream.cpp
   src/Nrd2Session.cpp
   src/GraphEditorGeometry.cpp

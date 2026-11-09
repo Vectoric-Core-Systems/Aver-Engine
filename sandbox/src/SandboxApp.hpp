@@ -48,6 +48,7 @@
 // Behaviour-tree format (.ocbt).
 #include "aver/formats/OcBt.hpp"
 #include "aver/formats/GltfImport.hpp"
+#include "DataLayersPanel.hpp"   // Window > Data Layers (W10 step 4)
 #include "ModelImportDialog.hpp"   // ModelImportSummary, writeImportedModel, importFbxToDir (FBX import)
 #if AVER_MODULE_TRIFACTOR
 #include "aver/trifactor/ClusterAdapt.hpp"
@@ -2101,7 +2102,7 @@ private:
 
     // One undoable edit (transform, create/destroy). Components captured via EntitySnapshot.
     struct EditCmd {
-        enum class Kind { Transform, Create, Destroy, CreateObj, DestroyObj, LandscapeStroke, FoliageStroke, Reparent, Material, Rename, RemoveComponent, Visibility, Collision, Animation, Prefab, LevelInstance, LandscapeWeights, WaterBodies, PlacedComponent, OutlinerMeta };
+        enum class Kind { Transform, Create, Destroy, CreateObj, DestroyObj, LandscapeStroke, FoliageStroke, Reparent, Material, Rename, RemoveComponent, Visibility, Collision, Animation, Prefab, LevelInstance, LandscapeWeights, WaterBodies, PlacedComponent, OutlinerMeta, DataLayers };
         Kind kind = Kind::Transform;
         // Monotonic serial for save points; never reused so undo/redo cross saves correctly.
         u64 serial = 0;
@@ -2127,6 +2128,7 @@ private:
         struct OutlinerMetaChange { EditId id = 0; bool lockBefore = false, lockAfter = false; std::string folderBefore, folderAfter; };
         std::vector<OutlinerMetaChange> outlinerMeta;
         std::vector<std::string> foldersBefore, foldersAfter;   // the whole folder list, when foldersChanged
+        editor::dl::Edit dataLayers;   // DATALAYERS: the layer list and membership change, replayed through applyDataLayerEdit()
         bool foldersChanged = false;
 #if AVER_MODULE_SCENE
         editor::EntitySnapshot snap;    // scene entity: asset name, persisted id, every other component
@@ -4699,6 +4701,17 @@ private:
     std::shared_ptr<RcStatusQuery> rcStatusJob_;
     std::shared_ptr<RcFileQuery>   rcFileJob_;
     bool                showRevisionControl_ = false;   // Window > Revision Control.
+    // Window > Data Layers (SandboxDataLayers.cpp). Members are keyed by EditId so an undone delete finds its layers again.
+    editor::dl::Model   dataLayers_;
+    editor::DataLayersUi dataLayersUi_;
+    bool                showDataLayers_ = false;
+    std::unordered_set<u32> dataLayerHidden_;   // entities the layer toggles hid (a subset of editorHidden_)
+    void drawDataLayersPanel();
+    void pushDataLayerEdit(editor::dl::Edit e);
+    void applyDataLayerEdit(const editor::dl::Edit& e, bool undoing);
+    void syncDataLayerVisibility();
+    void loadDataLayers(const fmt::OcWorldData& w);
+    void clearDataLayers();
     std::string         rcProjectDir_;        // Project the latched answer describes.
     std::string         rcRoot_;              // Repository root, git spelling.
     // rcRoot_ normalized (lower-case, forward slashes, no trailing separator). Precomputed per latch.

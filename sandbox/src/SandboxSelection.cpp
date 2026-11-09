@@ -1483,6 +1483,7 @@ void SandboxApp::undo() {
         case EditCmd::Kind::Visibility: applyVisibilityTo(c, /*undoing=*/true); break;
         case EditCmd::Kind::Collision:  applyCollideTo(c, /*undoing=*/true); break;
         case EditCmd::Kind::OutlinerMeta: applyOutlinerMeta(c, /*undoing=*/true); break;
+        case EditCmd::Kind::DataLayers: applyDataLayerEdit(c.dataLayers, /*undoing=*/true); break;
         case EditCmd::Kind::Animation:  applyAnimationTo(c, /*undoing=*/true); break;
         case EditCmd::Kind::Prefab:     if (c.prefab) prefabModel_.undo(*c.prefab);
                                         sel_ = -1; selEntity_ = scene::kInvalidEntity; break;
@@ -1556,6 +1557,7 @@ void SandboxApp::redo() {
         case EditCmd::Kind::Visibility: applyVisibilityTo(c, /*undoing=*/false); break;
         case EditCmd::Kind::Collision:  applyCollideTo(c, /*undoing=*/false); break;
         case EditCmd::Kind::OutlinerMeta: applyOutlinerMeta(c, /*undoing=*/false); break;
+        case EditCmd::Kind::DataLayers: applyDataLayerEdit(c.dataLayers, /*undoing=*/false); break;
         case EditCmd::Kind::Animation:  applyAnimationTo(c, /*undoing=*/false); break;
         case EditCmd::Kind::Prefab:     if (c.prefab) prefabModel_.redo(*c.prefab);
                                         sel_ = -1; selEntity_ = scene::kInvalidEntity; break;

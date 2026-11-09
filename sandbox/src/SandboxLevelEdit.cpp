@@ -479,6 +479,10 @@ bool SandboxApp::fillPlacementFromEntity(scene::Entity e, fmt::OcWorldPlacement&
     if (snapIt != entitySnapZ_.end()) { p.snapToGround = true; p.z = snapIt->second; }
     // [wave3/level-instances] The stable id the placement had when the level was loaded (or it was last saved with).
     if (const auto idIt = entityPlaceId_.find(static_cast<u32>(e)); idIt != entityPlaceId_.end()) p.placementId = idIt->second;
+    // Data layers (the panel keys membership by edit id; an entity that never had one is in no layer).
+    if (!capturingInstance_) {
+        if (const auto editIt = entityToEdit_.find(static_cast<u32>(e)); editIt != entityToEdit_.end()) p.layers = dataLayers_.layersOf(editIt->second);
+    }
     // THE COMPONENT RECORDS (Skeletal Mesh, Animator, Root Motion, ...), read back from the live components. WHILE PLAY
     // RUNS they come from the Play-start baseline: a script may have changed an animator's speed or an IK weight since,
     // and an autosave landing mid-Play must write the authored state (the same hazard as the transforms above).
@@ -506,6 +510,7 @@ bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
     // rides through untouched; the lines below overwrite only what the editor genuinely owns. See
     // levelHeader_.
     fmt::OcWorldData w = levelHeader_;
+    w.dataLayers = dataLayers_.layers();
     w.name = levelName_.empty() ? std::string("untitled") : levelName_;
     // THE MARKER IS THE TRUTH WHEN THERE IS ONE: saveLevel's banner used to list SPAWN among
     // fields that "ride through untouched" -- correct while nothing could edit it, wrong now that

@@ -1010,3 +1010,10 @@ if(TARGET Aver.Landscape)
   target_link_libraries(VegetationGenerateTest PRIVATE Aver.World Aver.Landscape Aver.Formats Aver.Render.Pcg Aver.Core Aver.Platform)
   set_target_properties(VegetationGenerateTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# DataLayerModelTest -- sandbox/src/DataLayerModel.hpp (header-only, no ImGui): the Data Layers panel create/rename/delete cascades, assignment, parent-cycle refusal,
+# undo / redo through Edit, and the editor visible / loaded toggles.
+add_executable(DataLayerModelTest src/DataLayerModelTest.cpp)
+target_include_directories(DataLayerModelTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(DataLayerModelTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(DataLayerModelTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

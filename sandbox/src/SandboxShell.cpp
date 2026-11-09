@@ -2138,6 +2138,10 @@ void SandboxApp::buildUI(Engine& e) {
                 ImGui::SetTooltip("What git says about this project: the branch, what changed, and\n"
                                   "each file's history and diff. It READS the repository and cannot\n"
                                   "alter one -- there is no commit, revert or push here.");
+            ImGui::MenuItem(ICON_LAYERS " Data Layers", nullptr, &showDataLayers_);
+            uiReg_.track("window.dataLayers");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Group objects into named layers the streamer loads, hides or activates together.\nAssign the selection, set a layer's initial state, and hide or unload one in the editor.");
             ImGui::MenuItem(ICON_EXTENSION " Extensions", nullptr, editor::extensionsWindow().openFlag());
             uiReg_.track("window.extensions");
             if (ImGui::IsItemHovered())
@@ -2687,6 +2691,7 @@ ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
     tools_.drawModals(project_, dpi_);
     editor::extensionImporter().drawModal(dpi_);
     editor::extensionsWindow().draw(dpi_);
+    drawDataLayersPanel();
     // The converted project an import dialog was told to open: the same switch the project browser makes.
     if (const std::string converted = editor::extensionImporter().takeOpenRequest(); !converted.empty()) {
         std::string openErr;

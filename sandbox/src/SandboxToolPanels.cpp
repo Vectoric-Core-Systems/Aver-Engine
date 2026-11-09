@@ -194,6 +194,7 @@ void SandboxApp::buildUndoHistoryPanel() {
             case EditCmd::Kind::WaterBodies: return "Water";
             case EditCmd::Kind::PlacedComponent: return "Component";
             case EditCmd::Kind::OutlinerMeta: return "Outliner";
+            case EditCmd::Kind::DataLayers: return "Data Layers";
         }
         return "Edit";
     };

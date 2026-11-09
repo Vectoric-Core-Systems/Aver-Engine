@@ -303,6 +303,7 @@ void SandboxApp::loadLevel(Engine& eng, const std::string& path) {
         // [wave3/level-instances begin] ...the LEVELINST records from level_.instances(), and EXTENT from the live bounds
         levelHeader_.levelInstances.clear();
         levelHeader_.hasExtent = false;
+        loadDataLayers(w);   // DATALAYER records; each placement's membership is set in the entity loop below
         // [wave3/level-instances end]
         if (!levelPcgVolumes_.empty())
             AVER_INFO("[Level] carrying {} PCGVOLUME record(s) through the editor unchanged",
@@ -447,6 +448,7 @@ void SandboxApp::onLevelInstantiated(const game::GameLevel::LoadedLevel& loaded)
         entityCollide_[static_cast<u32>(e)] = p.collide;
         // [wave3/level-instances] A placement's stable id survives a save: instance overrides are keyed by it.
         if (p.placementId) entityPlaceId_[static_cast<u32>(e)] = p.placementId;
+        if (!p.layers.empty()) dataLayers_.setMembers(editIdFor(e), p.layers);
         // THE AUTHORED ANIMATION, remembered for the same reason: world::instantiate has already given
         // the entity a CAnimator, but that is the live clock Play advances, and the save must write what
         // the level said, not where a session left it.
@@ -1199,6 +1201,7 @@ void SandboxApp::unloadLevel(Engine& eng) {
     labelCounts_.clear();
     entityBodies_.clear();
     entityPlaceId_.clear();         // [wave3/level-instances]
+    clearDataLayers();
 #if AVER_MODULE_SCENE
     clearOutlinerMeta();
 #endif
