@@ -1588,6 +1588,16 @@ private:
     bool rtHistSunMoved() const;
     // True when it differs by MORE than one slider-drag step.
     bool rtHistSunJumped() const;
+    // ANY LIGHTING CHANGE, not only a sun step: the whole sky struct (its cloud clock aside) and the lamps. Histories that
+    // otherwise reset only on sun movement (the denoisers, the RT history, the ReSTIR reservoirs, the radiance cache) reset
+    // on these too, so an edit made with the camera still shows at once instead of fading in over the long still-camera history.
+    rhi::SkyAtmosphere relightSky_{};
+    u64  relightLampHash_ = 0;
+    bool relightKeyValid_ = false;
+    bool relightChanged_  = false;   // this frame's lighting differs from last frame's
+    u32  relightHold_     = 0;       // frames of short history left after the last change
+    void updateRelight();
+    bool relighting() const { return relightHold_ > 0u; }
     // This frame's camera view-projection, captured where fitCascades() reads the camera.
     f32  curViewProj_[16] = {};
     f32  prevViewProj_[16] = {};

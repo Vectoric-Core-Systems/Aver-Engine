@@ -1434,6 +1434,7 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
         if (extraWanted_ && settings_.meshExtraStreams && !extraLocalTried_[rtActive_ ? 1 : 0]) createExtraScenePipelines(rtActive_, true);
     }
     ++rtFrameIndex_;
+    updateRelight();
     // Sample frame time at the TOP of the feature's frame.
     if (frameTimeReport_) {
         const u64 now = static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -6561,7 +6562,7 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         dev_->gBufferPrevViewProj(in.prevViewProj);
         std::memcpy(in.prevCamPos, prevCamPos_, sizeof(in.prevCamPos));
         in.historyValid = !dev_->gBufferHistoryInvalid();
-        in.sunMoved     = rtHistSunMoved();
+        in.sunMoved     = rtHistSunMoved() || relighting();
         dev_->taaJitter(in.jitter);
         primaryVisibility(in.visibility);   // NeuRAA's objects, for the object stop
         if (nrd2CapturePending_ && nrd2_.valid()) {
@@ -7498,7 +7499,7 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
         res_->setSrv(bindings_, 13, giSurfNrmHist_[readIdx]);
         cb_.giRestirParams[0] = 1.0f;
         // Sun move voids reservoirs for the frame it moves (radiance from old sun would carry forward).
-        cb_.giRestirParams[1] = (giHistValid_ && !rtHistSunJumped()) ? 1.0f : 0.0f;
+        cb_.giRestirParams[1] = (giHistValid_ && !rtHistSunJumped() && !relightChanged_) ? 1.0f : 0.0f;
         cb_.giRestirParams[2] = static_cast<f32>(writeIdx);
         if (giRadiance_) res_->setUav(bindings_, 9, giRadiance_, 0);
 
@@ -7599,7 +7600,7 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
             frame.radianceHalfRate       = denoiseGiSignal && denoiseGiInputHalfRate_;
             frame.radianceHalfRateParity = denoiseGiHalfRateParity_;
             // Clamp denoiser history during sun movement.
-            if (rtHistSunMoved()) denoiseSunMovingHold_ = 2u;
+            if (rtHistSunMoved() || relighting()) denoiseSunMovingHold_ = 2u;
             else if (denoiseSunMovingHold_ > 0u) --denoiseSunMovingHold_;
             render::denoise::Denoiser::Tuning tuning;
             tuning.maxSamples        = settings_.denoiserMaxSamples;
@@ -7701,7 +7702,7 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
         }
     }
     // Sun movement invalidates history (reprojection would be geometrically correct but temporally stale).
-    const bool sunMoved = rtHistSunMoved();
+    const bool sunMoved = rtHistSunMoved() || relighting();
     cb_.rtHistParams[0] = 1.0f;
     // Three states: 1=usable, 0.5=usable but sun changed this frame, 0=not usable.
     cb_.rtHistParams[1] = (rtHistValid_ && haveViewport) ? (sunMoved ? 0.5f : 1.0f) : 0.0f;
@@ -7788,6 +7789,24 @@ bool VoxiRenderer::rtHistSunMoved() const {
         if (sky.sunColor[i]     != rtHistSunColor_[i]) return true;
     }
     return sky.sunIntensity != rtHistSunIntensity_;
+}
+
+// Once per frame, at the top: did the lighting change since last frame? The lamp hash is last frame's (buildLocalLights runs later),
+// so a lamp edit is seen one frame late.
+void VoxiRenderer::updateRelight() {
+    constexpr u32 kRelightHoldFrames = 4;
+    relightChanged_ = false;
+    if (!dev_) return;
+    rhi::SkyAtmosphere now{};
+    now = dev_->skyAtmosphere();
+    now.cloudTime = 0.0f;   // a clock, not a lighting edit
+    if (relightKeyValid_ && (std::memcmp(&now, &relightSky_, sizeof(now)) != 0 || rdLocalLightHash_ != relightLampHash_))
+        relightChanged_ = true;
+    std::memcpy(&relightSky_, &now, sizeof(now));
+    relightLampHash_ = rdLocalLightHash_;
+    relightKeyValid_ = true;
+    if (relightChanged_) relightHold_ = kRelightHoldFrames;
+    else if (relightHold_ > 0u) --relightHold_;
 }
 
 bool VoxiRenderer::rtHistSunJumped() const {
@@ -7908,7 +7927,7 @@ void VoxiRenderer::updateNeuRaC(rhi::IRenderContext& ctx) {
     if (!dev_->camera(vp, nullptr, eye)) return;
     // The sun jumped against the one the last frame ended on: the cache's light is the old sun's, so let
     // the new samples dominate for a few frames. Unrecorded (first frame) is not a jump.
-    if (rtHistSunIntensity_ >= 0.0f && rtHistSunJumped()) rc_.requestRelax(8u, 0.5f);
+    if (rtHistSunIntensity_ >= 0.0f && (rtHistSunJumped() || relightChanged_)) rc_.requestRelax(8u, 0.5f);
     NeuRaC::Params params{};
     params.coarseCap1  = 16u;
     params.coarseCap2  = 8u;
