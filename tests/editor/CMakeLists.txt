@@ -1017,3 +1017,10 @@ add_executable(DataLayerModelTest src/DataLayerModelTest.cpp)
 target_include_directories(DataLayerModelTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
 target_link_libraries(DataLayerModelTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(DataLayerModelTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# HlodBuildJobTest -- sandbox/src/HlodBuildJob.hpp (header-only, no ImGui): when Build HLOD is refused, the summary line, and the background job's
+# start / progress / cancel / handover with a stand-in bake.
+add_executable(HlodBuildJobTest src/HlodBuildJobTest.cpp)
+target_include_directories(HlodBuildJobTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(HlodBuildJobTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(HlodBuildJobTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

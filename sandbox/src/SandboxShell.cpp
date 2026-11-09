@@ -2692,6 +2692,7 @@ ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
     editor::extensionImporter().drawModal(dpi_);
     editor::extensionsWindow().draw(dpi_);
     drawDataLayersPanel();
+    pollHlodBuild();
     // The converted project an import dialog was told to open: the same switch the project browser makes.
     if (const std::string converted = editor::extensionImporter().takeOpenRequest(); !converted.empty()) {
         std::string openErr;

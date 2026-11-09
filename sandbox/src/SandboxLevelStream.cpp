@@ -453,6 +453,7 @@ void SandboxApp::buildLevelStreamingSettings() {
                               "Saving keeps it current; use this after reimporting meshes or foliage.");
         if (!streamRegenReport_.empty()) ImGui::TextDisabled("%s", streamRegenReport_.c_str());
     }
+    buildHlodSettings();         // SandboxLevelHlod.cpp
     buildCookChunksSettings();   // SandboxLevelCook.cpp: independent of "Stream this level" (a cooked set needs neither)
     const game::LevelStreaming& ls = level_.streaming();
     if (ls.active()) {

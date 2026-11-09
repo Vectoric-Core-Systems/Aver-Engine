@@ -104,6 +104,7 @@ add_executable(Sandbox WIN32
   src/ExtensionsWindow.cpp
   src/DataLayersPanel.cpp
   src/SandboxDataLayers.cpp
+  src/SandboxLevelHlod.cpp
   src/ProcessStream.cpp
   src/Nrd2Session.cpp
   src/GraphEditorGeometry.cpp

@@ -48,6 +48,7 @@
 // Behaviour-tree format (.ocbt).
 #include "aver/formats/OcBt.hpp"
 #include "aver/formats/GltfImport.hpp"
+#include "HlodBuildJob.hpp"       // World Settings > Level Streaming > Build HLOD
 #include "DataLayersPanel.hpp"   // Window > Data Layers (W10 step 4)
 #include "ModelImportDialog.hpp"   // ModelImportSummary, writeImportedModel, importFbxToDir (FBX import)
 #if AVER_MODULE_TRIFACTOR
@@ -4311,6 +4312,13 @@ private:
     bool cookLevelChunks(std::string& report);
     bool refreshCookedChunksForPlay();
     void buildCookChunksSettings();
+    // World Settings > Level Streaming > HLOD (SandboxLevelHlod.cpp): a background bake of the per-cell proxies.
+    void buildHlodSettings();
+    void startHlodBuild();
+    void pollHlodBuild();
+    editor::HlodBuildJob hlodJob_;
+    std::string hlodReport_;
+    bool hlodForce_ = false;
     std::string cookChunksReport_;
     usize streamSeenCount_ = 0;                  // levelEntities_ size at the last adoption pass
     std::unordered_set<u32> streamAdopted_;      // checked by adoptNewLevelEntities (adopted or not a placement)
