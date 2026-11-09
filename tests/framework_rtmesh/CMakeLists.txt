@@ -5,6 +5,11 @@ add_executable(CsgTest src/CsgTest.cpp)
 target_link_libraries(CsgTest PRIVATE Aver.Formats Aver.Platform Aver.Core)
 set_target_properties(CsgTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# EditMeshTest -- the editable polygon mesh behind Modeling mode (aver/formats/EditMesh.hpp): ops with volume/topology invariants, booleans, UV tools, save/reopen.
+add_executable(EditMeshTest src/EditMeshTest.cpp)
+target_link_libraries(EditMeshTest PRIVATE Aver.Formats Aver.Platform Aver.Core)
+set_target_properties(EditMeshTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 add_executable(MeshBuildTest src/MeshBuildTest.cpp)
 target_link_libraries(MeshBuildTest PRIVATE Aver.Formats Aver.Platform Aver.Core)
 set_target_properties(MeshBuildTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
