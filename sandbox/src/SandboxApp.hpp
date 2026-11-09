@@ -1308,6 +1308,7 @@ private:
 #include "state/OcclusionState.hpp"
 #include "state/LodState.hpp"
 #include "state/RevisionControlState.hpp"
+#include "state/McpState.hpp"
 class HitchMarks;
 namespace game { struct SceneDrawStats; }
 
@@ -1774,6 +1775,7 @@ private:
     OcclusionState occl_;   // Software occlusion culling
     LodState lod_;   // Mesh LOD / cluster selection and mesh-shader path
     RevisionControlState revCtl_;   // Revision-control panel
+    McpState mcpState_;   // MCP automation bridge
     // ---- end feature state ----
 
     void applyProject(Engine& e);
@@ -3304,8 +3306,6 @@ private:
     game::AccessFrame access_;
     editor::PostVolumeTools postVolumeTools_;   // POSTVOLUME records: Add menu, boxes, Details, viewport blend
     bool showPostVolumes_ = true;               // Show > Post Volumes: every volume's box, not just the selected one's
-    // A screenshot asked for over MCP: captureCheck requests a new capture for it instead of re-reading frame sf's.
-    bool mcpShotRequest_=false;
 #if AVER_MODULE_SYNAPSE
     // The baked grid and the line mesh drawn from it. Rebuilt on every bake/load; mesh destruction needed to avoid upload buffer leak.
     fmt::OcNavData  nav_;
@@ -4174,21 +4174,11 @@ private:
 #endif
 #if AVER_MODULE_MCP
     mcp::McpBridge mcp_;         // Inert until --mcp.
-    u16  mcpPort_ = 0;           // 0 = never asked for.
-#if AVER_MODULE_SCENE && AVER_MODULE_SCRIPTING
-    // Graph ABI state (load/attach/tick). One graph at a time.
-    std::string  mcpGraphPath_;
-    scene::Entity mcpGraphEntity_ = scene::kInvalidEntity;
-    f32          mcpGraphTimeSeconds_ = 0.0f;
-#endif
 
     void applyMcpCommand(const mcp::Command& c);
     // The pointer an MCP move or click put down, held in ImGui for a moment: with the editor behind another window, the posted move's
     // mouse-leave tracking fires at once and ImGui would forget the position before the click lands.
     void holdMcpPointer();
-    f32 mcpPointerX_ = 0.0f, mcpPointerY_ = 0.0f;
-    int mcpPointerHold_ = 0;   // frames left
-    void* mcpHookCtx_ = nullptr;   // the ImGui context holdMcpPointer installed its NewFramePre hook on
 
     void registerMcpAbis();
 
@@ -4202,7 +4192,6 @@ private:
     // Start MCP channel (register ABIs, install hooks, listen). ABIs registered once only.
     bool mcpStart(u16 port);
     void mcpStop();
-    bool mcpAbisRegistered_ = false;
 #endif // AVER_MODULE_MCP
     bool releasedByUser_ = false;   // Shift+F1 during a session; cleared when the session ends
 

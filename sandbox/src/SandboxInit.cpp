@@ -297,7 +297,7 @@ void SandboxApp::bindWindow(Engine& e) {
 #if AVER_MODULE_MCP
 void SandboxApp::startMcpChannel() {
     // Start MCP channel if port is set (ABI registration, widget hooks, listen shared with status bar).
-    if (mcpPort_ && !mcpStart(mcpPort_))
+    if (mcpState_.mcpPort_ && !mcpStart(mcpState_.mcpPort_))
         AVER_WARN("[Mcp] --mcp was given but the channel did not start; the editor is "
                   "unaffected and carries on");
 }

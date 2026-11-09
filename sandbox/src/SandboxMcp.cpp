@@ -229,7 +229,7 @@ void SandboxApp::applyMcpCommand(const mcp::Command& c) {
     if (c.name == "shot") {
         shot_ = c.arg;
         harness_.capDone_ = false;
-        mcpShotRequest_ = true;
+        mcpState_.mcpShotRequest_ = true;
         return;
     }
 
@@ -240,11 +240,11 @@ void SandboxApp::applyMcpCommand(const mcp::Command& c) {
             // another window the move's mouse-leave tracking fires at once and ImGui drops the position, so a click landed nowhere. Neither the
             // real cursor nor the foreground window is touched. Buttons go to ImGui directly too, and are still posted for the game's input.
             case mcp::InputEvent::Kind::MouseMove:
-                mcpPointerX_ = static_cast<f32>(e.x);
-                mcpPointerY_ = static_cast<f32>(e.y);
-                mcpPointerHold_ = 60;
+                mcpState_.mcpPointerX_ = static_cast<f32>(e.x);
+                mcpState_.mcpPointerY_ = static_cast<f32>(e.y);
+                mcpState_.mcpPointerHold_ = 60;
 #if AVER_WITH_IMGUI
-                ImGui::GetIO().AddMousePosEvent(mcpPointerX_, mcpPointerY_);
+                ImGui::GetIO().AddMousePosEvent(mcpState_.mcpPointerX_, mcpState_.mcpPointerY_);
 #endif
                 break;
             case mcp::InputEvent::Kind::MouseDown:
@@ -295,18 +295,18 @@ void SandboxApp::applyMcpCommand(const mcp::Command& c) {
 void SandboxApp::holdMcpPointer() {
 #if AVER_WITH_IMGUI
     ImGuiContext* ctx = ImGui::GetCurrentContext();
-    if (!ctx || ctx == mcpHookCtx_) return;
+    if (!ctx || ctx == mcpState_.mcpHookCtx_) return;
     ImGuiContextHook h;
     h.Type = ImGuiContextHookType_NewFramePre;
     h.UserData = this;
     h.Callback = [](ImGuiContext*, ImGuiContextHook* hook) {
         SandboxApp* self = static_cast<SandboxApp*>(hook->UserData);
-        if (self->mcpPointerHold_ <= 0) return;
-        --self->mcpPointerHold_;
-        ImGui::GetIO().AddMousePosEvent(self->mcpPointerX_, self->mcpPointerY_);
+        if (self->mcpState_.mcpPointerHold_ <= 0) return;
+        --self->mcpState_.mcpPointerHold_;
+        ImGui::GetIO().AddMousePosEvent(self->mcpState_.mcpPointerX_, self->mcpState_.mcpPointerY_);
     };
     ImGui::AddContextHook(ctx, &h);
-    mcpHookCtx_ = ctx;
+    mcpState_.mcpHookCtx_ = ctx;
 #endif
 }
 
@@ -332,7 +332,7 @@ void SandboxApp::registerMcpAbis() {
             if (a.text.empty()) { w = "screenshot needs a path in \"text\""; return false; }
             shot_ = a.text;
             harness_.capDone_ = false;
-            mcpShotRequest_ = true;
+            mcpState_.mcpShotRequest_ = true;
             r = a.text;
             return true;
         }
@@ -514,43 +514,43 @@ void SandboxApp::registerMcpAbis() {
                     ".NET SDK present so Aver.Scripting.Bridge picks up GraphLoad/GraphTick/GraphUnload";
                 return false;
             }
-            mcpGraphPath_ = a.text;
-            r = "path staged: " + mcpGraphPath_ + " -- call graph::attach <entityId> to load, "
+            mcpState_.mcpGraphPath_ = a.text;
+            r = "path staged: " + mcpState_.mcpGraphPath_ + " -- call graph::attach <entityId> to load, "
                 "compile and bind it";
             return true;
         }
         if (a.fn == "attach") {
             if (a.args.empty()) { w = "attach needs an entity id"; return false; }
-            if (mcpGraphPath_.empty()) { w = "call graph::load <path> first"; return false; }
+            if (mcpState_.mcpGraphPath_.empty()) { w = "call graph::load <path> first"; return false; }
             const scene::Entity ent =
                 static_cast<scene::Entity>(static_cast<u32>(static_cast<i32>(a.args[0])));
             if (!scene::World::instance().valid(ent)) { w = "no live entity with that id"; return false; }
-            if (!scripts_.graphLoad(static_cast<i32>(ent), mcpGraphPath_)) {
-                w = "graph failed to load/compile from '" + mcpGraphPath_ + "' -- see the [Graph] "
+            if (!scripts_.graphLoad(static_cast<i32>(ent), mcpState_.mcpGraphPath_)) {
+                w = "graph failed to load/compile from '" + mcpState_.mcpGraphPath_ + "' -- see the [Graph] "
                     "error line just above in the editor log for why";
                 return false;
             }
-            mcpGraphEntity_ = ent;
-            mcpGraphTimeSeconds_ = 0.0f;
-            r = "attached entity #" + std::to_string(static_cast<u32>(ent)) + " to " + mcpGraphPath_;
+            mcpState_.mcpGraphEntity_ = ent;
+            mcpState_.mcpGraphTimeSeconds_ = 0.0f;
+            r = "attached entity #" + std::to_string(static_cast<u32>(ent)) + " to " + mcpState_.mcpGraphPath_;
             return true;
         }
         if (a.fn == "tick") {
             if (a.args.empty()) { w = "tick needs a seconds value (absolute time, not a delta)"; return false; }
-            if (mcpGraphEntity_ == scene::kInvalidEntity) {
+            if (mcpState_.mcpGraphEntity_ == scene::kInvalidEntity) {
                 w = "no entity attached -- call graph::attach <entityId> first";
                 return false;
             }
-            if (!scene::World::instance().valid(mcpGraphEntity_)) {
+            if (!scene::World::instance().valid(mcpState_.mcpGraphEntity_)) {
                 w = "the attached entity no longer exists";
                 return false;
             }
-            mcpGraphTimeSeconds_ = static_cast<f32>(a.args[0]);
-            scripts_.graphTick(static_cast<i32>(mcpGraphEntity_), mcpGraphTimeSeconds_);
-            const Vec3 p = scene::World::instance().localTransform(mcpGraphEntity_).position;
+            mcpState_.mcpGraphTimeSeconds_ = static_cast<f32>(a.args[0]);
+            scripts_.graphTick(static_cast<i32>(mcpState_.mcpGraphEntity_), mcpState_.mcpGraphTimeSeconds_);
+            const Vec3 p = scene::World::instance().localTransform(mcpState_.mcpGraphEntity_).position;
             char buf[128];
             std::snprintf(buf, sizeof buf, "t=%.3f pos=(%.3f,%.3f,%.3f)",
-                          mcpGraphTimeSeconds_, p.x, p.y, p.z);
+                          mcpState_.mcpGraphTimeSeconds_, p.x, p.y, p.z);
             r = buf;
             return true;
         }
@@ -1435,9 +1435,9 @@ bool SandboxApp::mcpStart(u16 port) {
     // module's registration again for no reason is exactly the kind of habit that stops being
     // harmless the day one of those registrations is not idempotent. mcpAbisRegistered_ is what
     // makes "once" true rather than "true so far".
-    if (!mcpAbisRegistered_) {
+    if (!mcpState_.mcpAbisRegistered_) {
         registerMcpAbis();
-        mcpAbisRegistered_ = true;
+        mcpState_.mcpAbisRegistered_ = true;
     }
     // Widget hooks are UI-only: uiReg_ (the ImGui widget registry) doesn't exist with
     // AVER_ENABLE_UI=OFF, and there's nothing for MCP to resolve. Left unregistered -- MCP's
@@ -1456,7 +1456,7 @@ bool SandboxApp::mcpStart(u16 port) {
     // THE PORT THAT ACTUALLY STARTED, read back off the bridge rather than echoed from `port`:
     // today start() binds exactly what it is given or fails outright, so the two never differ, but
     // asking the bridge is what stays correct the day that stops being true.
-    mcpPort_ = mcp_.port();
+    mcpState_.mcpPort_ = mcp_.port();
     return true;
 }
 
@@ -1513,7 +1513,7 @@ void SandboxApp::drawMcpStatusWidget() {
             // mcpPort_ carries the last port asked for, INCLUDING a port a previous attempt failed
             // to bind -- so a retry from here offers that same value back rather than silently
             // falling to the default and binding somewhere the caller did not ask for.
-            const u16 wantPort = mcpPort_ ? mcpPort_ : 45123;
+            const u16 wantPort = mcpState_.mcpPort_ ? mcpState_.mcpPort_ : 45123;
             if (ImGui::MenuItem("Start")) {
                 if (!mcpStart(wantPort))
                     AVER_WARN("[Mcp] Start (from the status bar) did not bring the channel up; "

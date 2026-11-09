@@ -206,7 +206,7 @@ void SandboxApp::setOpenLevelByName(std::string n) { drawerUi_.openLevelByName_ 
 void SandboxApp::setFocusCompileMenu(bool b) { tools_.armCompileMenu(b); }
 
 #if AVER_MODULE_MCP
-void SandboxApp::setMcpPort(u16 p) { mcpPort_ = p; }
+void SandboxApp::setMcpPort(u16 p) { mcpState_.mcpPort_ = p; }
 
 #endif
 
@@ -2614,11 +2614,11 @@ void SandboxApp::captureCheck(Engine& e) {
                   : (harness_.probeX_ ? harness_.probeX_ : (u32)(viewState_.vpX_ + viewState_.vpW_*0.5f));
     const u32 py_ = harness_.probeV_ >= 0.0f ? (u32)(viewState_.vpY_ + viewState_.vpH_ * harness_.probeV_)
                   : (harness_.probeY_ ? harness_.probeY_ : (u32)(viewState_.vpY_ + viewState_.vpH_*0.5f));
-    if (f==sf || mcpShotRequest_) {
+    if (f==sf || mcpState_.mcpShotRequest_) {
         e.device()->requestCapture(px_, py_);
         harness_.capX_=px_; harness_.capY_=py_; harness_.capVpX_=viewState_.vpX_; harness_.capVpY_=viewState_.vpY_; harness_.capVpW_=viewState_.vpW_; harness_.capVpH_=viewState_.vpH_;
         harness_.capFrame_=f;
-        mcpShotRequest_=false;
+        mcpState_.mcpShotRequest_=false;
     }
     if (f>harness_.capFrame_ && !harness_.capDone_){
         const bool insideReq = (f32)harness_.capX_ >= harness_.capVpX_ && (f32)harness_.capX_ < harness_.capVpX_+harness_.capVpW_ &&
