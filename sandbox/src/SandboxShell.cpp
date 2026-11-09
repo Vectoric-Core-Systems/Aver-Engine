@@ -1092,9 +1092,9 @@ void SandboxApp::drawAboutPrompt(Engine& e) {
     ImGui::SetNextWindowSize(ImVec2(460.0f * viewState_.dpi_, 0.0f), ImGuiCond_Appearing);
     if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
 
-    if (logoUiId_) {
+    if (brand_.logoUiId_) {
         const f32 h = 56.0f * viewState_.dpi_;
-        ImGui::Image(static_cast<ImTextureID>(logoUiId_), ImVec2(h * logoAspect_, h));
+        ImGui::Image(static_cast<ImTextureID>(brand_.logoUiId_), ImVec2(h * brand_.logoAspect_, h));
         ImGui::SameLine(0.0f, 14.0f * viewState_.dpi_);
     }
     ImGui::BeginGroup();
@@ -2311,7 +2311,7 @@ void SandboxApp::drawMainToolbar(Engine& e, const ImVec2& wpos, const ImVec2& ws
     }
     ImGui::SameLine();
     cap.emplace(viewState_.dpi_);
-    tools_.drawCompileButton(project_, viewState_.dpi_, compileIconUiId_);
+    tools_.drawCompileButton(project_, viewState_.dpi_, brand_.compileIconUiId_);
     uiReg_.track("toolbar.compileCs");
     cap.reset();
     ImGui::SameLine();
@@ -2859,7 +2859,7 @@ void SandboxApp::buildUI(Engine& e) {
             browserActive_ = false;
             return;
         }
-        editor::BrowserAction action = browser_.draw(viewState_.dpi_, fontMedium_, logoUiId_, logoAspect_);
+        editor::BrowserAction action = browser_.draw(viewState_.dpi_, fontMedium_, brand_.logoUiId_, brand_.logoAspect_);
         // An importer's start-screen button opens its dialog here; the project it converted opens through the browser's upgrade gate.
         editor::extensionImporter().drawModal(viewState_.dpi_);
         if (const std::string converted = editor::extensionImporter().takeOpenRequest(); !converted.empty() && action == editor::BrowserAction::Stay) {
@@ -2911,11 +2911,11 @@ void SandboxApp::buildUI(Engine& e) {
     if (ImGui::BeginMainMenuBar()) {
         if (fontMedium_) ImGui::PushFont(fontMedium_, 0.0f);
         // The engine's mark, as Unreal shows its logo at the start of the menu bar; the drawn "AE" only when logo.png is missing.
-        if (logoSmallUiId_) {
+        if (brand_.logoSmallUiId_) {
             const f32 h = ImGui::GetFrameHeight() * 0.92f;
             const f32 y = ImGui::GetCursorPosY();
             ImGui::SetCursorPosY(y + (ImGui::GetFrameHeight() - h) * 0.5f);
-            ImGui::Image(static_cast<ImTextureID>(logoSmallUiId_), ImVec2(h * logoAspect_, h));
+            ImGui::Image(static_cast<ImTextureID>(brand_.logoSmallUiId_), ImVec2(h * brand_.logoAspect_, h));
             ImGui::SetCursorPosY(y);
             ImGui::SameLine(0.0f, 6.0f * viewState_.dpi_);
         } else {

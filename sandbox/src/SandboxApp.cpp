@@ -256,18 +256,18 @@ void SandboxApp::loadLogo(Engine& e) {
     td.initialData = levels;
     td.initialDataCount = 1;
     td.initialRowPitch = img.rowPitch();
-    logoTexture_ = res->createTexture(td);
+    brand_.logoTexture_ = res->createTexture(td);
 
-    if (!logoTexture_) { AVER_WARN("[Sandbox] the start-screen mark could not be uploaded"); return; }
-    logoUiId_ = e.device()->uiTextureId(logoTexture_);
-    if (!logoUiId_) { AVER_WARN("[Sandbox] the start-screen mark is not reachable from the UI"); return; }
-    logoAspect_ = h > 0 ? static_cast<f32>(w) / static_cast<f32>(h) : 1.0f;
+    if (!brand_.logoTexture_) { AVER_WARN("[Sandbox] the start-screen mark could not be uploaded"); return; }
+    brand_.logoUiId_ = e.device()->uiTextureId(brand_.logoTexture_);
+    if (!brand_.logoUiId_) { AVER_WARN("[Sandbox] the start-screen mark is not reachable from the UI"); return; }
+    brand_.logoAspect_ = h > 0 ? static_cast<f32>(w) / static_cast<f32>(h) : 1.0f;
     AVER_INFO("[Sandbox] start-screen mark decoded from {} ({}x{})", path, w, h);
 
     // The menu bar's copy: an area average in premultiplied alpha (no dark fringe) down to the bar's height. The full texture has one
     // mip, so sampling it at ~70 px from 512 aliased.
     const u32 sh = std::max(8u, static_cast<u32>(std::lround(22.0f * viewState_.dpi_)));
-    const u32 sw = std::max(1u, static_cast<u32>(std::lround(static_cast<f32>(sh) * logoAspect_)));
+    const u32 sw = std::max(1u, static_cast<u32>(std::lround(static_cast<f32>(sh) * brand_.logoAspect_)));
     std::vector<u8> markPx(static_cast<usize>(sw) * sh * 4);
     for (u32 y = 0; y < sh; ++y)
         for (u32 x = 0; x < sw; ++x) {
@@ -296,8 +296,8 @@ void SandboxApp::loadLogo(Engine& e) {
     const void* smallLevels[1] = {markPx.data()};
     sd.initialData = smallLevels;
     sd.initialRowPitch = sw * 4;
-    logoSmallTexture_ = res->createTexture(sd);
-    if (logoSmallTexture_) logoSmallUiId_ = e.device()->uiTextureId(logoSmallTexture_);
+    brand_.logoSmallTexture_ = res->createTexture(sd);
+    if (brand_.logoSmallTexture_) brand_.logoSmallUiId_ = e.device()->uiTextureId(brand_.logoSmallTexture_);
 }
 
 // Upload Compile C# button's three-tile status sprite sheet. Missing file is non-fatal.
@@ -325,10 +325,10 @@ void SandboxApp::loadCompileIcon(Engine& e) {
     td.initialData = levels;
     td.initialDataCount = 1;
     td.initialRowPitch = img.rowPitch();
-    compileIconTexture_ = res->createTexture(td);
-    if (!compileIconTexture_) { AVER_WARN("[Sandbox] the Compile C# icon could not be uploaded"); return; }
-    compileIconUiId_ = e.device()->uiTextureId(compileIconTexture_);
-    if (!compileIconUiId_) { AVER_WARN("[Sandbox] the Compile C# icon is not reachable from the UI"); return; }
+    brand_.compileIconTexture_ = res->createTexture(td);
+    if (!brand_.compileIconTexture_) { AVER_WARN("[Sandbox] the Compile C# icon could not be uploaded"); return; }
+    brand_.compileIconUiId_ = e.device()->uiTextureId(brand_.compileIconTexture_);
+    if (!brand_.compileIconUiId_) { AVER_WARN("[Sandbox] the Compile C# icon is not reachable from the UI"); return; }
     AVER_INFO("[Sandbox] Compile C# status icons decoded from {} ({}x{})", path, img.width, img.height);
 }
 
@@ -623,18 +623,18 @@ editor::shutdownAnimEditors();
     aver_audio_shutdown();
 #endif
 #if AVER_WITH_IMGUI
-    if (logoTexture_ || compileIconTexture_ || drawerUi_.fileIconsTexture_ || drawerUi_.folderIconsTexture_) {
+    if (brand_.logoTexture_ || brand_.compileIconTexture_ || drawerUi_.fileIconsTexture_ || drawerUi_.folderIconsTexture_) {
         if (rhi::IResourceFactory* res = e.device()->resources()) {
             res->waitIdle();
-            if (logoTexture_) res->destroyTexture(logoTexture_);
-            if (logoSmallTexture_) res->destroyTexture(logoSmallTexture_);
-            if (compileIconTexture_) res->destroyTexture(compileIconTexture_);
+            if (brand_.logoTexture_) res->destroyTexture(brand_.logoTexture_);
+            if (brand_.logoSmallTexture_) res->destroyTexture(brand_.logoSmallTexture_);
+            if (brand_.compileIconTexture_) res->destroyTexture(brand_.compileIconTexture_);
             if (drawerUi_.fileIconsTexture_) res->destroyTexture(drawerUi_.fileIconsTexture_);
             if (drawerUi_.folderIconsTexture_) res->destroyTexture(drawerUi_.folderIconsTexture_);
         }
-        logoTexture_ = 0; logoUiId_ = 0;
-        logoSmallTexture_ = 0; logoSmallUiId_ = 0;
-        compileIconTexture_ = 0; compileIconUiId_ = 0;
+        brand_.logoTexture_ = 0; brand_.logoUiId_ = 0;
+        brand_.logoSmallTexture_ = 0; brand_.logoSmallUiId_ = 0;
+        brand_.compileIconTexture_ = 0; brand_.compileIconUiId_ = 0;
         drawerUi_.fileIconsTexture_ = 0; drawerUi_.fileIconsUiId_ = 0;
         drawerUi_.folderIconsTexture_ = 0; drawerUi_.folderIconsUiId_ = 0;
     }

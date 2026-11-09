@@ -1314,6 +1314,7 @@ private:
 #include "state/PanelState.hpp"
 #include "state/LevelDataState.hpp"
 #include "state/DroneState.hpp"
+#include "state/BrandIconState.hpp"
 class HitchMarks;
 namespace game { struct SceneDrawStats; }
 
@@ -1786,6 +1787,7 @@ private:
     PanelState panels_;   // Editor panel/dialog visibility flags, prompt requests and dock layout 
     LevelDataState lvl_;   // Per-level side tables and caches
     DroneState drone_;   // Editor drone pawn (graph-driven test pawn) runtime state.
+    BrandIconState brand_;
     // ---- end feature state ----
 
     void applyProject(Engine& e);
@@ -3321,14 +3323,7 @@ private:
     // Whether THIS launch's own command line was eligible to register as the single-instance primary.
     bool singleInstanceEligible_ = false;
     bool        armOpenLevelPicker_ = false;   // --open-level-picker, consumed on the first draw
-    rhi::TextureHandle logoTexture_=0;   // 0 when logo.png was absent or undecodable
     int frameNo_ = 0;                                      // bumped once per UI frame; the cache freshness clock
-    rhi::TextureHandle compileIconTexture_=0;   // the Compile C# status sprite sheet (3 tiles)
-    u64 compileIconUiId_=0;
-    u64 logoUiId_=0;
-    rhi::TextureHandle logoSmallTexture_=0;   // the logo area-averaged down to the menu bar's size (the full one has no mips)
-    u64 logoSmallUiId_=0;
-    f32 logoAspect_=1.0f;
     editor::ToolsMenu tools_;
     editor::Nrd2Session nrd2Session_;   // Tools > Train Neural Denoiser, --nrd2-train
     editor::ShaderWarmup shaderWarmup_; // Sandbox.exe --warm-shaders after a project opens

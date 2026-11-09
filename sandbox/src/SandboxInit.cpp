@@ -262,7 +262,7 @@ void SandboxApp::installActorEditorHooks() {
         editor::ActorEditorHooks hooks;
         hooks.compileScripts = [this] { tools_.triggerToolbarCompile(project_); };
         hooks.compileBusy    = [this] { return tools_.compiling(); };
-        hooks.drawCompileButton = [this] { tools_.drawCompileButton(project_, viewState_.dpi_, compileIconUiId_); };
+        hooks.drawCompileButton = [this] { tools_.drawCompileButton(project_, viewState_.dpi_, brand_.compileIconUiId_); };
 #if AVER_WITH_IMGUI
         hooks.openInIde = [this](const std::string& p) {
             const editor::IdeInfo& ide = cbIde();
