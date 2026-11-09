@@ -456,22 +456,22 @@ std::string rcStatusFace(bool busy, const editor::StatusBarSummary& summary) {
 
 // Reaps workers and refreshes state. Once a frame, from buildUI.
 void SandboxApp::revisionControlTick() {
-    if (rcProjectDir_ != project_.dir) {
-        rcProjectDir_ = project_.dir;
-        rcRoot_.clear();
-        rcRootKey_.clear();
-        rcStatus_ = editor::RepoStatus{};
-        rcWhy_.clear();
-        rcMarks_.clear();
-        rcAnswered_ = false;
-        rcGitPresent_ = false;
-        rcRefreshedAt_ = -1.0;
-        rcSelected_.clear();
-        rcSelectedDiffable_ = false;
-        rcLog_.clear();
-        rcDiff_.clear();
-        rcLogWhy_.clear();
-        rcDiffWhy_.clear();
+    if (revCtl_.rcProjectDir_ != project_.dir) {
+        revCtl_.rcProjectDir_ = project_.dir;
+        revCtl_.rcRoot_.clear();
+        revCtl_.rcRootKey_.clear();
+        revCtl_.rcStatus_ = editor::RepoStatus{};
+        revCtl_.rcWhy_.clear();
+        revCtl_.rcMarks_.clear();
+        revCtl_.rcAnswered_ = false;
+        revCtl_.rcGitPresent_ = false;
+        revCtl_.rcRefreshedAt_ = -1.0;
+        revCtl_.rcSelected_.clear();
+        revCtl_.rcSelectedDiffable_ = false;
+        revCtl_.rcLog_.clear();
+        revCtl_.rcDiff_.clear();
+        revCtl_.rcLogWhy_.clear();
+        revCtl_.rcDiffWhy_.clear();
         // Jobs are dropped (detached workers cannot be cancelled).
         rcStatusJob_.reset();
         rcFileJob_.reset();
@@ -481,25 +481,25 @@ void SandboxApp::revisionControlTick() {
         const std::shared_ptr<RcStatusQuery> job = rcStatusJob_;
         rcStatusJob_.reset();
         if (job->dir == project_.dir) {
-            rcGitPresent_ = job->gitPresent;
-            rcRoot_ = job->root;
-            rcRootKey_ = flattenedPath(job->root);
-            rcStatus_ = job->status;
-            rcWhy_ = job->why;
-            rcAnswered_ = true;
-            rcRefreshedAt_ = ImGui::GetTime();
+            revCtl_.rcGitPresent_ = job->gitPresent;
+            revCtl_.rcRoot_ = job->root;
+            revCtl_.rcRootKey_ = flattenedPath(job->root);
+            revCtl_.rcStatus_ = job->status;
+            revCtl_.rcWhy_ = job->why;
+            revCtl_.rcAnswered_ = true;
+            revCtl_.rcRefreshedAt_ = ImGui::GetTime();
 
-            rcMarks_.clear();
-            rcMarks_.reserve(rcStatus_.files.size());
-            for (const editor::FileEntry& f : rcStatus_.files) {
+            revCtl_.rcMarks_.clear();
+            revCtl_.rcMarks_.reserve(revCtl_.rcStatus_.files.size());
+            for (const editor::FileEntry& f : revCtl_.rcStatus_.files) {
                 if (f.ignored()) continue;   // not asked for, and not a change if it arrived anyway
                 editor::FileStatus s = f.conflicted()  ? editor::FileStatus::Conflicted
                                      : f.unstaged != editor::FileStatus::Unmodified ? f.unstaged
                                                                                     : f.staged;
                 if (s == editor::FileStatus::Unmodified) continue;
-                rcMarks_.emplace_back(f.path, s);
+                revCtl_.rcMarks_.emplace_back(f.path, s);
             }
-            std::sort(rcMarks_.begin(), rcMarks_.end(),
+            std::sort(revCtl_.rcMarks_.begin(), revCtl_.rcMarks_.end(),
                       [](const std::pair<std::string, editor::FileStatus>& a,
                          const std::pair<std::string, editor::FileStatus>& b) {
                           return a.first < b.first;
@@ -512,38 +512,38 @@ void SandboxApp::revisionControlTick() {
         rcFileJob_.reset();
         // Latched only when it is still the row on screen: clicking a second file before the first
         // answer arrives must not put one file's history above another file's diff.
-        if (job->root == rcRoot_ && job->path == rcSelected_) {
-            rcLog_ = std::move(job->log);
-            rcLogWhy_ = std::move(job->logWhy);
-            rcDiff_ = std::move(job->diff);
-            rcDiffWhy_ = std::move(job->diffWhy);
+        if (job->root == revCtl_.rcRoot_ && job->path == revCtl_.rcSelected_) {
+            revCtl_.rcLog_ = std::move(job->log);
+            revCtl_.rcLogWhy_ = std::move(job->logWhy);
+            revCtl_.rcDiff_ = std::move(job->diff);
+            revCtl_.rcDiffWhy_ = std::move(job->diffWhy);
         }
     }
 
     // ASKED ONLY WHILE SOMETHING IS SHOWING THE ANSWER. A timer that runs whenever the editor is
     // open would spawn a git process every few seconds for the whole session to keep a panel nobody
     // has opened up to date.
-    if (!showRevisionControl_ && drawerUi_.drawer_ != Drawer::Content) return;
+    if (!revCtl_.showRevisionControl_ && drawerUi_.drawer_ != Drawer::Content) return;
     // Two answers the timer must not retry (settled facts, not slow ones): git missing, or this
     // project not in a repository. Neither changes while the editor watches; Refresh re-asks because
     // the user knows when they've installed git or run `git init`.
-    if (rcAnswered_ && (!rcGitPresent_ || rcRoot_.empty())) return;
+    if (revCtl_.rcAnswered_ && (!revCtl_.rcGitPresent_ || revCtl_.rcRoot_.empty())) return;
 
     constexpr f64 kRcAutoRefreshSec = 4.0;
     const f64 now = ImGui::GetTime();
-    if (rcRefreshedAt_ < 0.0 || now - rcRefreshedAt_ >= kRcAutoRefreshSec) revisionControlRefresh(false);
+    if (revCtl_.rcRefreshedAt_ < 0.0 || now - revCtl_.rcRefreshedAt_ >= kRcAutoRefreshSec) revisionControlRefresh(false);
 }
 
 // Hands `git status` to a worker. Returns immediately, always.
 void SandboxApp::revisionControlRefresh(bool force) {
     if (rcStatusJob_) return;            // one in flight answers everyone waiting
     if (!project_.valid() || project_.dir.empty()) return;
-    if (!force && rcAnswered_ && !rcGitPresent_) return;
+    if (!force && revCtl_.rcAnswered_ && !revCtl_.rcGitPresent_) return;
 
     auto job = std::make_shared<RcStatusQuery>();
     job->dir = project_.dir;
-    const std::string knownRoot = (force || rcProjectDir_ != job->dir) ? std::string() : rcRoot_;
-    rcProjectDir_ = job->dir;
+    const std::string knownRoot = (force || revCtl_.rcProjectDir_ != job->dir) ? std::string() : revCtl_.rcRoot_;
+    revCtl_.rcProjectDir_ = job->dir;
     rcStatusJob_ = job;
 
     // Capture job by value; detached worker cannot be cancelled.
@@ -561,19 +561,19 @@ void SandboxApp::revisionControlRefresh(bool force) {
 
 // Hands one path's history and diff to a worker. Same rules as the refresh above.
 void SandboxApp::revisionControlSelect(const std::string& repoRelativePath) {
-    rcSelected_ = repoRelativePath;
-    rcLog_.clear();
-    rcDiff_.clear();
-    rcLogWhy_.clear();
-    rcDiffWhy_.clear();
-    rcSelectedDiffable_ = isDiffableAsset(repoRelativePath);
-    if (rcRoot_.empty() || repoRelativePath.empty()) return;
+    revCtl_.rcSelected_ = repoRelativePath;
+    revCtl_.rcLog_.clear();
+    revCtl_.rcDiff_.clear();
+    revCtl_.rcLogWhy_.clear();
+    revCtl_.rcDiffWhy_.clear();
+    revCtl_.rcSelectedDiffable_ = isDiffableAsset(repoRelativePath);
+    if (revCtl_.rcRoot_.empty() || repoRelativePath.empty()) return;
     auto job = std::make_shared<RcFileQuery>();
-    job->root = rcRoot_;
+    job->root = revCtl_.rcRoot_;
     job->path = repoRelativePath;
-    job->wantDiff = rcSelectedDiffable_;
-    const editor::DiffSide side = rcDiffSide_;
-    const bool haveCommits = !rcStatus_.initialCommit;
+    job->wantDiff = revCtl_.rcSelectedDiffable_;
+    const editor::DiffSide side = revCtl_.rcDiffSide_;
+    const bool haveCommits = !revCtl_.rcStatus_.initialCommit;
     rcFileJob_ = job;
 
     std::thread([job, side, haveCommits] {
@@ -598,28 +598,28 @@ void SandboxApp::revisionControlSelect(const std::string& repoRelativePath) {
 
 // Editor path as git would name it; empty if not in repository.
 std::string SandboxApp::rcKeyFor(const std::string& absolute) const {
-    if (rcRootKey_.empty() || absolute.size() <= rcRootKey_.size()) return {};
+    if (revCtl_.rcRootKey_.empty() || absolute.size() <= revCtl_.rcRootKey_.size()) return {};
     const std::string flat = flattenedPath(absolute);
-    if (flat.size() <= rcRootKey_.size()) return {};
-    if (flat.compare(0, rcRootKey_.size(), rcRootKey_) != 0) return {};
-    if (flat[rcRootKey_.size()] != '/') return {};
+    if (flat.size() <= revCtl_.rcRootKey_.size()) return {};
+    if (flat.compare(0, revCtl_.rcRootKey_.size(), revCtl_.rcRootKey_) != 0) return {};
+    if (flat[revCtl_.rcRootKey_.size()] != '/') return {};
 
-    std::string key = absolute.substr(rcRootKey_.size() + 1);
+    std::string key = absolute.substr(revCtl_.rcRootKey_.size() + 1);
     for (char& c : key) if (c == '\\') c = '/';
     return key;
 }
 
 // What to mark a Content Browser entry with.
 bool SandboxApp::rcMarkFor(const std::string& absolute, bool isDir, editor::FileStatus& out) const {
-    if (rcMarks_.empty()) return false;
+    if (revCtl_.rcMarks_.empty()) return false;
     const std::string key = rcKeyFor(absolute);
     if (key.empty()) return false;
 
     const auto byPath = [](const std::pair<std::string, editor::FileStatus>& e,
                            const std::string& k) { return e.first < k; };
     if (!isDir) {
-        const auto it = std::lower_bound(rcMarks_.begin(), rcMarks_.end(), key, byPath);
-        if (it == rcMarks_.end() || it->first != key) return false;
+        const auto it = std::lower_bound(revCtl_.rcMarks_.begin(), revCtl_.rcMarks_.end(), key, byPath);
+        if (it == revCtl_.rcMarks_.end() || it->first != key) return false;
         out = it->second;
         return true;
     }
@@ -627,8 +627,8 @@ bool SandboxApp::rcMarkFor(const std::string& absolute, bool isDir, editor::File
     // Folder mark is a summary of child statuses; conflicts rank highest, then untracked.
     const std::string prefix = key + "/";
     int best = 0;
-    for (auto it = std::lower_bound(rcMarks_.begin(), rcMarks_.end(), prefix, byPath);
-         it != rcMarks_.end() && it->first.compare(0, prefix.size(), prefix) == 0; ++it) {
+    for (auto it = std::lower_bound(revCtl_.rcMarks_.begin(), revCtl_.rcMarks_.end(), prefix, byPath);
+         it != revCtl_.rcMarks_.end() && it->first.compare(0, prefix.size(), prefix) == 0; ++it) {
         const int rank = folderRank(it->second);
         if (rank > best) best = rank;
         if (best == 3) break;   // a conflict is the loudest thing a folder can say; stop looking
@@ -657,9 +657,9 @@ ImU32 SandboxApp::rcStatusColour(editor::FileStatus s) {
 
 // Window > Revision Control: what git says about the open project, and nothing that can change it.
 void SandboxApp::buildRevisionControlPanel() {
-    if (!showRevisionControl_) return;
+    if (!revCtl_.showRevisionControl_) return;
     ImGui::SetNextWindowSize(ImVec2(680.0f * viewState_.dpi_, 480.0f * viewState_.dpi_), ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("Revision Control", &showRevisionControl_)) { ImGui::End(); return; }
+    if (!ImGui::Begin("Revision Control", &revCtl_.showRevisionControl_)) { ImGui::End(); return; }
 
     if (!project_.valid()) {
         ImGui::TextWrapped("Open a project first. This panel reports on the repository the "
@@ -676,8 +676,8 @@ void SandboxApp::buildRevisionControlPanel() {
     ImGui::SameLine();
     if (busy) {
         ImGui::TextDisabled("asking git...");
-    } else if (rcRefreshedAt_ >= 0.0) {
-        ImGui::TextDisabled("as of %.0fs ago", ImGui::GetTime() - rcRefreshedAt_);
+    } else if (revCtl_.rcRefreshedAt_ >= 0.0) {
+        ImGui::TextDisabled("as of %.0fs ago", ImGui::GetTime() - revCtl_.rcRefreshedAt_);
     } else {
         ImGui::TextDisabled("not asked yet");
     }
@@ -686,63 +686,63 @@ void SandboxApp::buildRevisionControlPanel() {
                           "A slow or missing git costs the editor nothing.");
     ImGui::Separator();
 
-    if (!rcAnswered_) {
+    if (!revCtl_.rcAnswered_) {
         ImGui::TextWrapped("Waiting for the first answer from git.");
         ImGui::End();
         return;
     }
-    if (!rcGitPresent_) {
+    if (!revCtl_.rcGitPresent_) {
         ImGui::TextWrapped("git was not found. Install it, or put it on PATH, then press Refresh.");
-        if (!rcWhy_.empty()) ImGui::TextDisabled("%s", rcWhy_.c_str());
+        if (!revCtl_.rcWhy_.empty()) ImGui::TextDisabled("%s", revCtl_.rcWhy_.c_str());
         ImGui::End();
         return;
     }
-    if (rcRoot_.empty()) {
+    if (revCtl_.rcRoot_.empty()) {
         ImGui::TextWrapped("'%s' is not inside a git repository.", project_.name.c_str());
         ImGui::TextDisabled("That is a normal way to use the editor. Run `git init` in the project "
                             "folder and press Refresh if you want history for it.");
         // A REAL FAILURE, when there is one. gitRepositoryRoot leaves this empty for "not a
         // repository" precisely so the two cannot be shown as the same thing.
-        if (!rcWhy_.empty()) ImGui::TextColored(ImVec4(0.93f, 0.42f, 0.38f, 1.0f), "%s", rcWhy_.c_str());
+        if (!revCtl_.rcWhy_.empty()) ImGui::TextColored(ImVec4(0.93f, 0.42f, 0.38f, 1.0f), "%s", revCtl_.rcWhy_.c_str());
         ImGui::End();
         return;
     }
 
     // ---- the branch line ----
-    if (rcStatus_.detached) {
+    if (revCtl_.rcStatus_.detached) {
         // NOT GIVEN AN INVENTED NAME. git says `(detached)` where the branch goes, and a UI that
         // fills that in tells somebody they are on a branch they are not on.
         ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.25f, 1.0f), ICON_WARNING " detached HEAD");
-        if (!rcStatus_.headOid.empty()) {
+        if (!revCtl_.rcStatus_.headOid.empty()) {
             ImGui::SameLine();
-            ImGui::TextDisabled("at %.10s", rcStatus_.headOid.c_str());
+            ImGui::TextDisabled("at %.10s", revCtl_.rcStatus_.headOid.c_str());
         }
     } else {
-        ImGui::Text("%s", rcStatus_.branch.empty() ? "(no branch)" : rcStatus_.branch.c_str());
+        ImGui::Text("%s", revCtl_.rcStatus_.branch.empty() ? "(no branch)" : revCtl_.rcStatus_.branch.c_str());
     }
-    if (rcStatus_.initialCommit) {
+    if (revCtl_.rcStatus_.initialCommit) {
         ImGui::SameLine();
         ImGui::TextDisabled("(no commits yet)");
     }
-    if (rcStatus_.hasUpstream) {
+    if (revCtl_.rcStatus_.hasUpstream) {
         ImGui::SameLine();
-        if (rcStatus_.ahead == 0 && rcStatus_.behind == 0)
-            ImGui::TextDisabled("= %s", rcStatus_.upstream.c_str());
+        if (revCtl_.rcStatus_.ahead == 0 && revCtl_.rcStatus_.behind == 0)
+            ImGui::TextDisabled("= %s", revCtl_.rcStatus_.upstream.c_str());
         else
-            ImGui::TextDisabled("%d ahead, %d behind %s", rcStatus_.ahead, rcStatus_.behind,
-                                rcStatus_.upstream.c_str());
+            ImGui::TextDisabled("%d ahead, %d behind %s", revCtl_.rcStatus_.ahead, revCtl_.rcStatus_.behind,
+                                revCtl_.rcStatus_.upstream.c_str());
     } else {
         ImGui::SameLine();
         ImGui::TextDisabled("(tracks nothing)");
     }
-    ImGui::TextDisabled("%s", rcRoot_.c_str());
-    if (rcStatus_.hasConflicts())
+    ImGui::TextDisabled("%s", revCtl_.rcRoot_.c_str());
+    if (revCtl_.rcStatus_.hasConflicts())
         ImGui::TextColored(ImVec4(0.94f, 0.27f, 0.59f, 1.0f),
                            ICON_WARNING " This working tree has unresolved conflicts.");
     ImGui::Separator();
 
     const f32 listH = ImGui::GetContentRegionAvail().y * 0.42f;
-    if (rcStatus_.clean()) {
+    if (revCtl_.rcStatus_.clean()) {
         ImGui::TextColored(ImVec4(0.6f, 0.85f, 0.6f, 1.0f), "Nothing changed. The working tree is clean.");
     } else if (ImGui::BeginTable("##rcFiles", 3,
                                  ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
@@ -754,7 +754,7 @@ void SandboxApp::buildRevisionControlPanel() {
         ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableHeadersRow();
 
-        for (const editor::FileEntry& f : rcStatus_.files) {
+        for (const editor::FileEntry& f : revCtl_.rcStatus_.files) {
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
             // Git's two-letter status codes (necessary for conflicts: "both modified" vs "deleted by us").
@@ -771,7 +771,7 @@ void SandboxApp::buildRevisionControlPanel() {
 
             ImGui::TableSetColumnIndex(2);
             ImGui::PushID(f.path.c_str());
-            if (ImGui::Selectable(f.path.c_str(), rcSelected_ == f.path,
+            if (ImGui::Selectable(f.path.c_str(), revCtl_.rcSelected_ == f.path,
                                   ImGuiSelectableFlags_SpanAllColumns))
                 revisionControlSelect(f.path);
             ImGui::PopID();
@@ -786,22 +786,22 @@ void SandboxApp::buildRevisionControlPanel() {
     }
 
     ImGui::Separator();
-    if (rcSelected_.empty()) {
+    if (revCtl_.rcSelected_.empty()) {
         ImGui::TextDisabled("Pick a file above for its history and its diff.");
         ImGui::End();
         return;
     }
-    ImGui::TextUnformatted(rcSelected_.c_str());
+    ImGui::TextUnformatted(revCtl_.rcSelected_.c_str());
 
     if (ImGui::BeginTabBar("##rcDetail")) {
         if (ImGui::BeginTabItem("History")) {
-            if (rcStatus_.initialCommit) {
+            if (revCtl_.rcStatus_.initialCommit) {
                 ImGui::TextDisabled("This repository has no commits yet, so nothing has a history.");
             } else if (rcFileJob_) {
                 ImGui::TextDisabled("asking git...");
-            } else if (!rcLogWhy_.empty()) {
-                ImGui::TextColored(ImVec4(0.93f, 0.42f, 0.38f, 1.0f), "%s", rcLogWhy_.c_str());
-            } else if (rcLog_.empty()) {
+            } else if (!revCtl_.rcLogWhy_.empty()) {
+                ImGui::TextColored(ImVec4(0.93f, 0.42f, 0.38f, 1.0f), "%s", revCtl_.rcLogWhy_.c_str());
+            } else if (revCtl_.rcLog_.empty()) {
                 // Ordinary answer for untracked files (not a failure).
                 ImGui::TextDisabled("No commits touch this path yet.");
             } else if (ImGui::BeginTable("##rcLog", 3,
@@ -812,7 +812,7 @@ void SandboxApp::buildRevisionControlPanel() {
                 ImGui::TableSetupColumn("Subject", ImGuiTableColumnFlags_WidthStretch);
                 ImGui::TableSetupScrollFreeze(0, 1);
                 ImGui::TableHeadersRow();
-                for (const editor::LogEntry& c : rcLog_) {
+                for (const editor::LogEntry& c : revCtl_.rcLog_) {
                     ImGui::TableNextRow();
                     ImGui::TableSetColumnIndex(0);
                     ImGui::TextUnformatted(c.shortOid.c_str());
@@ -830,7 +830,7 @@ void SandboxApp::buildRevisionControlPanel() {
         }
 
         if (ImGui::BeginTabItem("Diff")) {
-            if (!rcSelectedDiffable_) {
+            if (!revCtl_.rcSelectedDiffable_) {
                 ImGui::TextWrapped("No diff for this file. The viewer covers the text formats "
                                    "(.ocworld, .ocmat, .ocgraph, .cs); everything else a project "
                                    "holds is a binary container or an image, and a unified diff of "
@@ -838,32 +838,32 @@ void SandboxApp::buildRevisionControlPanel() {
                 ImGui::TextDisabled("Its status and its history above still apply.");
             } else {
                 // Both sides offered (staged and worktree can differ); make both calls to avoid short-circuit.
-                int side = rcDiffSide_ == editor::DiffSide::Worktree ? 0 : 1;
+                int side = revCtl_.rcDiffSide_ == editor::DiffSide::Worktree ? 0 : 1;
                 bool sideChanged = ImGui::RadioButton("Worktree", &side, 0);
                 ImGui::SameLine();
                 sideChanged = ImGui::RadioButton("Staged", &side, 1) || sideChanged;
                 if (sideChanged) {
-                    rcDiffSide_ = side == 0 ? editor::DiffSide::Worktree : editor::DiffSide::Index;
-                    revisionControlSelect(rcSelected_);
+                    revCtl_.rcDiffSide_ = side == 0 ? editor::DiffSide::Worktree : editor::DiffSide::Index;
+                    revisionControlSelect(revCtl_.rcSelected_);
                 }
                 ImGui::SameLine();
                 ImGui::TextDisabled(side == 0 ? "(the index vs the file on disk)"
                                               : "(HEAD vs the index)");
                 if (rcFileJob_) {
                     ImGui::TextDisabled("asking git...");
-                } else if (!rcDiffWhy_.empty()) {
-                    ImGui::TextColored(ImVec4(0.93f, 0.42f, 0.38f, 1.0f), "%s", rcDiffWhy_.c_str());
-                } else if (rcDiff_.empty()) {
+                } else if (!revCtl_.rcDiffWhy_.empty()) {
+                    ImGui::TextColored(ImVec4(0.93f, 0.42f, 0.38f, 1.0f), "%s", revCtl_.rcDiffWhy_.c_str());
+                } else if (revCtl_.rcDiff_.empty()) {
                     ImGui::TextDisabled("Nothing differs on this side.");
                 } else {
                     ImGui::BeginChild("##rcDiffText", ImVec2(0.0f, 0.0f), ImGuiChildFlags_Borders,
                                       ImGuiWindowFlags_HorizontalScrollbar);
                     // Clipped: avoid AddText calls for off-screen lines.
                     ImGuiListClipper clip;
-                    clip.Begin(static_cast<int>(rcDiff_.size()));
+                    clip.Begin(static_cast<int>(revCtl_.rcDiff_.size()));
                     while (clip.Step()) {
                         for (int i = clip.DisplayStart; i < clip.DisplayEnd; ++i) {
-                            const std::string& line = rcDiff_[static_cast<usize>(i)];
+                            const std::string& line = revCtl_.rcDiff_[static_cast<usize>(i)];
                             // First char is the diff line type; +++ and --- are headers, not add/remove.
                             ImVec4 col(0.86f, 0.87f, 0.89f, 1.0f);
                             if (line.starts_with("+++") || line.starts_with("---"))
@@ -926,7 +926,7 @@ ImVec4 SandboxApp::rcMoodColour(editor::RepoMood m) {
 void SandboxApp::drawRevisionControlStatusWidget() {
     const bool busy = rcStatusJob_ != nullptr;
     const editor::StatusBarSummary summary = editor::summariseForStatusBar(
-        project_.valid(), rcAnswered_, rcGitPresent_, rcRoot_, rcStatus_, rcWhy_);
+        project_.valid(), revCtl_.rcAnswered_, revCtl_.rcGitPresent_, revCtl_.rcRoot_, revCtl_.rcStatus_, revCtl_.rcWhy_);
     const std::string face = rcStatusFace(busy, summary);
 
     // Carries the same facts the panel would, plus one line this widget owns: what clicking it
@@ -951,7 +951,7 @@ void SandboxApp::drawRevisionControlStatusWidget() {
     if (ImGui::BeginPopup("rcStatusMenu")) {
         // Same toggle the window menu offers (see "window.revisionControl" above) -- this widget
         // exists so the panel isn't the only door.
-        ImGui::MenuItem(ICON_REVISION " Revision Control", nullptr, &showRevisionControl_);
+        ImGui::MenuItem(ICON_REVISION " Revision Control", nullptr, &revCtl_.showRevisionControl_);
         uiReg_.track("statusbar.revisionControl.togglePanel");
 
         // Disabled while busy, not hidden: a running query already answers what a second git
@@ -2071,7 +2071,7 @@ void SandboxApp::drawWindowMenu() {
         ImGui::Separator();
 #endif
         // Outside AVER_MODULE_SCENE; git info is independent of ECS.
-        ImGui::MenuItem(ICON_REVISION " Revision Control", nullptr, &showRevisionControl_);
+        ImGui::MenuItem(ICON_REVISION " Revision Control", nullptr, &revCtl_.showRevisionControl_);
         uiReg_.track("window.revisionControl");
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("What git says about this project: the branch, what changed, and\n"
@@ -2604,7 +2604,7 @@ void SandboxApp::drawStatusBar(Engine& e, const ImVec2& wpos, const ImVec2& wsiz
     // count, DEBUG, VRAM, frame rate) when the bar is too narrow, rather than drawing under the buttons.
     const bool rcBusy = rcStatusJob_ != nullptr;
     const editor::StatusBarSummary rcSummary = editor::summariseForStatusBar(
-        project_.valid(), rcAnswered_, rcGitPresent_, rcRoot_, rcStatus_, rcWhy_);
+        project_.valid(), revCtl_.rcAnswered_, revCtl_.rcGitPresent_, revCtl_.rcRoot_, revCtl_.rcStatus_, revCtl_.rcWhy_);
     const std::string rcFace = rcStatusFace(rcBusy, rcSummary);
     const ImGuiStyle& barStyle = ImGui::GetStyle();
     const f32 barBtnPad = barStyle.FramePadding.x * 2.0f;
