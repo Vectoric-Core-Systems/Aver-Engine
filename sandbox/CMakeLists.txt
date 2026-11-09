@@ -69,6 +69,9 @@ add_executable(Sandbox WIN32
   # W4: Generate Vegetation (biome run over the landscape sections, .ocinst + .ocveg), headless core.
   src/VegetationGenerate.cpp
   src/LandscapeBiomeTab.cpp
+  src/ModelingMode.cpp
+  src/ModelingDraw.cpp
+  src/SandboxModeling.cpp
   src/PcgGraphEditor.cpp
   src/PcgDebugDraw.cpp
   src/SandboxPcg.cpp

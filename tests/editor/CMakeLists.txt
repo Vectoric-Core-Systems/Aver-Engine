@@ -1060,3 +1060,20 @@ if(TARGET Aver.World)
   target_link_libraries(PcgGraphEditorTest PRIVATE Aver.World Aver.Formats Aver.Core Aver.Platform)
   set_target_properties(PcgGraphEditorTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# ModelingPickTest -- sandbox/src/ModelingPick.hpp (header-only, no ImGui): click and marquee picking of vertices, edges and faces over a projected edit mesh.
+if(TARGET Aver.Formats)
+  add_executable(ModelingPickTest src/ModelingPickTest.cpp)
+  target_include_directories(ModelingPickTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+  target_link_libraries(ModelingPickTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+  set_target_properties(ModelingPickTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
+# ModelingModeTest -- the Modeling mode glue headless (sandbox/src/ModelingMode.cpp compiled directly, no ImGui): click and marquee through handleMouse,
+# the select-mode keys, undo routing and the wireframe lines.
+if(TARGET Aver.Formats)
+  add_executable(ModelingModeTest src/ModelingModeTest.cpp ${CMAKE_SOURCE_DIR}/sandbox/src/ModelingMode.cpp)
+  target_include_directories(ModelingModeTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+  target_link_libraries(ModelingModeTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+  set_target_properties(ModelingModeTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()

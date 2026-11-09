@@ -1590,6 +1590,7 @@ void SandboxApp::handleManip(Engine& e) {
     }
     const f32 mx=io.MousePos.x, my=io.MousePos.y;
     const bool overScene = levelHovered_ && inViewport(mx, my);
+    if (mode_ == EditorMode::Modeling) { handleModelingInput(io, overScene, mx, my); return; }   // the mode owns the click: no level picking
 
 #if AVER_MODULE_LANDSCAPE
     const bool isSculptTool = editorModeIsLandscape();
@@ -3473,6 +3474,8 @@ bool SandboxApp::editorModeAvailable(EditorMode m, const char** whyNot) const {
 #endif
         case EditorMode::Simulate:
             return true;
+        case EditorMode::Modeling:
+            return true;
         case EditorMode::Animate:
 #if AVER_MODULE_SCENE
             if (levelEntities_.empty() && levelPath_.empty()) return no("Open or populate a level first.");
@@ -3550,7 +3553,7 @@ void SandboxApp::applyStartMode() {
         for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         if (lower == want) { setEditorMode(static_cast<EditorMode>(i)); return; }
     }
-    AVER_WARN("[Editor] --mode '{}' is not a mode. Use select, landscape, foliage, simulate or animate.", want);
+    AVER_WARN("[Editor] --mode '{}' is not a mode. Use select, landscape, foliage, simulate, animate or modeling.", want);
 }
 
 } // namespace aver

@@ -465,6 +465,7 @@ void SandboxApp::buildModePanel(Engine& e) {
             break;
 #endif
         case EditorMode::Simulate:  buildSimulateModePanel(e);  break;
+        case EditorMode::Modeling:  modeling_.drawPanel(project_.contentDir(), dpi_); break;
 #if AVER_MODULE_SCENE
         case EditorMode::Animate:   buildAnimateModePanel();    break;
 #else

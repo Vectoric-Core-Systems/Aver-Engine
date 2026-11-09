@@ -48,6 +48,7 @@
 // Behaviour-tree format (.ocbt).
 #include "aver/formats/OcBt.hpp"
 #include "aver/formats/GltfImport.hpp"
+#include "ModelingMode.hpp"          // EditorMode::Modeling (W5 step 6)
 #include "PcgGraphEditor.hpp"      // `DOMAIN pcg` graph tab (W3 step 6)
 #include "HlodBuildJob.hpp"       // World Settings > Level Streaming > Build HLOD
 #include "DataLayersPanel.hpp"   // Window > Data Layers (W10 step 4)
@@ -834,17 +835,18 @@ static inline std::vector<rhi::LineVertex> buildPlayerStartArrow(f32 centerZ, f3
 }
 
 // Editor modes: Select (objects), Landscape (terrain), Foliage (scatter), Simulate (play), Animate (level sequence).
-enum class EditorMode { Select, Landscape, Foliage, Simulate, Animate };
-static const char* kEditorModeNames[5] = {"Select", "Landscape", "Foliage", "Simulate", "Animate"};
+enum class EditorMode { Select, Landscape, Foliage, Simulate, Animate, Modeling };
+static const char* kEditorModeNames[6] = {"Select", "Landscape", "Foliage", "Simulate", "Animate", "Modeling"};
 // Mode descriptions.
-static const char* kEditorModeHints[5] = {
+static const char* kEditorModeHints[6] = {
     "Pick and transform objects",
     "Sculpt the terrain heightfield",
     "Paint scattered meshes onto the terrain",
     "Run the game in the viewport",
     "Keyframe actors, a camera path and emissive glow on one level timeline",
+    "Build and edit a mesh: primitives, vertex / edge / face selection, extrude, inset, bevel, booleans, UVs",
 };
-static constexpr int kEditorModeCount = 5;
+static constexpr int kEditorModeCount = 6;
 
 // Object tools. Only meaningful in EditorMode::Select.
 enum class Tool { Select, Move, Rotate, Scale };
@@ -4320,6 +4322,8 @@ private:
     void buildCookChunksSettings();
     // World Settings > Level Streaming > HLOD (SandboxLevelHlod.cpp): a background bake of the per-cell proxies.
     void buildHlodSettings();
+    editor::ModelingMode modeling_;   // SandboxModeling.cpp / ModelingMode.cpp
+    void handleModelingInput(const ImGuiIO& io, bool overScene, f32 mx, f32 my);
     void installPcgEditorHost();   // SandboxPcg.cpp: the PCG Graph tab's landscape / Generate / Clean up
     void cbCreatePcgGraph();       // SandboxPcg.cpp: a starter PCG graph
     void buildPhysAnimSection();   // SandboxPhysAnim.cpp: Simulate / Animate mode panels, Apply Hit

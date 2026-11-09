@@ -1461,6 +1461,7 @@ void SandboxApp::foliageBatchRecreate(EditCmd& c) {
 #endif
 
 void SandboxApp::undo() {
+    if (mode_ == EditorMode::Modeling) { modeling_.undo(); return; }   // the mode has its own document and history
     // The Player Start's handle changes when an undo recreates it; see refreshPlayerStart.
     struct RefreshOnExit { SandboxApp* a; ~RefreshOnExit() { a->refreshPlayerStart(); } } ro{this};
     if (undoStack_.empty()) return;
@@ -1536,6 +1537,7 @@ void SandboxApp::undo() {
 // Re-applies the newest undone command and moves it back to the undo stack. See undo()'s own
 // comment for why CreateObj/DestroyObj's raw objIndex addressing is safe.
 void SandboxApp::redo() {
+    if (mode_ == EditorMode::Modeling) { modeling_.redo(); return; }
     struct RefreshOnExit { SandboxApp* a; ~RefreshOnExit() { a->refreshPlayerStart(); } } ro{this};
     if (redoStack_.empty()) return;
     EditCmd c = redoStack_.back(); redoStack_.pop_back();
