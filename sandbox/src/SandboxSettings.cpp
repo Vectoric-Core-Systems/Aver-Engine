@@ -121,15 +121,24 @@ void SandboxApp::loadEditorPreferences() {
             } else if (pending && !rset_.renderScaleCookieArmed_) {
                 // !renderScaleCookieArmed_: a cookie THIS process armed isn't evidence the previous
                 // launch crashed (see updateAverSrAuto's prefsLoaded_ gate for the frame-1 ordering bug).
-                // Falls back to the default 0.5, not native: a device loss is rarely the scale's fault,
-                // and native resolution is 4x the work (it took NeonDistrict from 57 fps to 3).
-                const f32 fallback = stored == kDefaultRenderScale ? 1.0f : kDefaultRenderScale;
-                AVER_CRITICAL("[Sandbox] the last launch did not survive a stored render scale of "
-                              "{:.2f} -- resetting display.renderScale to {:.2f}. Set it again if that "
-                              "was not the cause.", stored, fallback);
+                // Never raises the cost: a scale above the default drops to it, one at or below it is kept.
+                // A device loss is rarely the scale's fault, and native is 4x the work of 0.5 (the old
+                // "0.5 -> native" fallback left the owner's Caldera at a quarter of its frame rate).
+                const f32 fallback = std::min(stored, kDefaultRenderScale);
+                const bool kept = fallback == stored;
+                AVER_CRITICAL("[Sandbox] the last launch did not survive a stored render scale of {:.2f} -- {} "
+                              "display.renderScale {:.2f}.", stored, kept ? "keeping" : "resetting to", fallback);
+#if AVER_WITH_IMGUI
+                if (!kept)
+                    notifyOutcome(editor::NotifySeverity::Warning, "Render scale reset after a crash",
+                                  "The last launch did not survive render scale " + std::to_string(stored) +
+                                  "; it is now " + std::to_string(fallback) + ". Set it again in Editor "
+                                  "Preferences > Display if that was not the cause.", true);
+#endif
                 setPrefFloat("display.renderScale", fallback);
                 setPrefBool("display.renderScalePending", false);
                 flushEditorPrefs();
+                launch_.prefsDevice_->setRenderScale(fallback);
             } else {
                 setPrefBool("display.renderScalePending", true);
                 flushEditorPrefs();   // ON DISK BEFORE THE DEVICE IS RISKED -- the whole point
