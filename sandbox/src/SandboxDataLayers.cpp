@@ -58,7 +58,7 @@ void SandboxApp::syncDataLayerVisibility() {
     std::vector<u32> release;
     for (const u32 id : dataLayerHidden_) {
         const scene::Entity e = static_cast<scene::Entity>(id);
-        const EditId edit = [&]() { const auto it = entityToEdit_.find(id); return it == entityToEdit_.end() ? EditId(0) : it->second; }();
+        const EditId edit = [&]() { const auto it = edit_.entityToEdit_.find(id); return it == edit_.entityToEdit_.end() ? EditId(0) : it->second; }();
         if (!w.valid(e) || edit == 0 || !dataLayers_.entityHidden(edit)) release.push_back(id);
     }
     for (const u32 id : release) {

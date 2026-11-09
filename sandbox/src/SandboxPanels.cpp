@@ -1520,9 +1520,9 @@ u64 SandboxApp::outlinerSlotSignature(u32 slot) const {
 u64 SandboxApp::outlinerEditMark() const {
     u64 h = kFnv1a64OffsetBasis;
     const auto mix = [&h](u64 v) { h = (h ^ v) * kFnv1a64Prime; };
-    mix(editSerialNext_);
-    mix(static_cast<u64>(undoStack_.size()));
-    mix(static_cast<u64>(redoStack_.size()));
+    mix(edit_.editSerialNext_);
+    mix(static_cast<u64>(edit_.undoStack_.size()));
+    mix(static_cast<u64>(edit_.redoStack_.size()));
     return h;
 }
 
@@ -2419,22 +2419,22 @@ void SandboxApp::drawMeshAnimation(scene::World& w, const std::vector<scene::Ent
             // to tune on an entity without one). A drag is ONE undo entry: animEditBefore_ is the
             // selection as it stood when the widget was grabbed, before that frame's edit lands.
             const auto snapshot = [&] {
-                animEditBefore_.clear();
+                edit_.animEditBefore_.clear();
                 for (const scene::Entity ent : targets)
                     if (const EntityAnim* a = entityAnim(ent))
-                        animEditBefore_.push_back({editIdFor(ent), *a, *a});
+                        edit_.animEditBefore_.push_back({editIdFor(ent), *a, *a});
             };
             const auto commit = [&] {
                 EditCmd c;
                 c.kind = EditCmd::Kind::Animation;
-                for (EditCmd::AnimChange& ch : animEditBefore_) {
+                for (EditCmd::AnimChange& ch : edit_.animEditBefore_) {
                     const scene::Entity ent = entityForEdit(ch.id);
                     const EntityAnim* now = w.valid(ent) ? entityAnim(ent) : nullptr;
                     if (!now || *now == ch.before) continue;
                     ch.after = *now;
                     c.animation.push_back(ch);
                 }
-                animEditBefore_.clear();
+                edit_.animEditBefore_.clear();
                 if (!c.animation.empty()) pushEdit(std::move(c));
             };
             const auto tune = [&](auto&& set) {
@@ -2449,7 +2449,7 @@ void SandboxApp::drawMeshAnimation(scene::World& w, const std::vector<scene::Ent
             ImGui::BeginDisabled(cur.clip.empty());
             f32 speed = cur.speed;
             const bool speedEdited = editor::dt::DragFloat("Speed##animSpeed", &speed, 0.01f, 0.01f, 100.0f, "%.2f");
-            if (ImGui::IsItemActivated() || (speedEdited && animEditBefore_.empty())) snapshot();
+            if (ImGui::IsItemActivated() || (speedEdited && edit_.animEditBefore_.empty())) snapshot();
             if (speedEdited) tune([&](EntityAnim& n) { n.speed = speed; });
             if (ImGui::IsItemDeactivatedAfterEdit()) commit();
             uiReg_.track("details.anim.speed");
@@ -2457,7 +2457,7 @@ void SandboxApp::drawMeshAnimation(scene::World& w, const std::vector<scene::Ent
                 ImGui::SetTooltip("Playback speed. Saved with the level (animspeed).");
             f32 startTime = cur.time;
             const bool timeEdited = editor::dt::DragFloat("Start time (s)##animTime", &startTime, 0.01f, 0.0f, 100000.0f, "%.2f");
-            if (ImGui::IsItemActivated() || (timeEdited && animEditBefore_.empty())) snapshot();
+            if (ImGui::IsItemActivated() || (timeEdited && edit_.animEditBefore_.empty())) snapshot();
             if (timeEdited) tune([&](EntityAnim& n) { n.time = startTime; });
             if (ImGui::IsItemDeactivatedAfterEdit()) commit();
             uiReg_.track("details.anim.time");

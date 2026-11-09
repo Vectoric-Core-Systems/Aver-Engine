@@ -514,15 +514,15 @@ void SandboxApp::handleFoliage(Engine& e, const ImGuiIO& io, bool overScene, f32
     const bool erasing = io.KeyShift || landTool_.foliageErase_;
     if (ImGui::IsMouseClicked(0) && overScene && haveHit) {
         landTool_.foliageStroking_ = true;
-        foliageBatch_ = EditCmd{};
-        foliageBatch_.kind = EditCmd::Kind::FoliageStroke;
-        foliageBatch_.label = erasing ? "Erase foliage" : "Paint foliage";
-        foliageBatch_.batchWasErase = erasing;
+        edit_.foliageBatch_ = EditCmd{};
+        edit_.foliageBatch_.kind = EditCmd::Kind::FoliageStroke;
+        edit_.foliageBatch_.label = erasing ? "Erase foliage" : "Paint foliage";
+        edit_.foliageBatch_.batchWasErase = erasing;
     }
     if (!io.MouseDown[0] && landTool_.foliageStroking_) {
         landTool_.foliageStroking_ = false;
-        if (!foliageBatch_.batchIds.empty()) pushEdit(std::move(foliageBatch_));
-        foliageBatch_ = EditCmd{};
+        if (!edit_.foliageBatch_.batchIds.empty()) pushEdit(std::move(edit_.foliageBatch_));
+        edit_.foliageBatch_ = EditCmd{};
     }
     if (!landTool_.foliageStroking_ || !haveHit) return;
 
@@ -652,8 +652,8 @@ void SandboxApp::foliagePlaceAt(Engine& e, const FoliageSpecies& sp, f32 x, f32 
                                sp.type.collisionRadiusCm > 0.0f ? sp.type.collisionRadiusCm * sc : 0.0f});
 
     EditCmd one = describeEntity(ent);
-    foliageBatch_.batchSnaps.push_back(one.snap);
-    foliageBatch_.batchIds.push_back(one.id);
+    edit_.foliageBatch_.batchSnaps.push_back(one.snap);
+    edit_.foliageBatch_.batchIds.push_back(one.id);
     (void)e;
 }
 
@@ -679,8 +679,8 @@ void SandboxApp::foliageErase(f32 cx, f32 cy) {
         }
         if (!mine) continue;
         EditCmd one = describeEntity(ent);
-        foliageBatch_.batchSnaps.push_back(one.snap);
-        foliageBatch_.batchIds.push_back(one.id);
+        edit_.foliageBatch_.batchSnaps.push_back(one.snap);
+        edit_.foliageBatch_.batchIds.push_back(one.id);
         destroyEntity(ent);
     }
 }
@@ -2207,7 +2207,7 @@ void SandboxApp::copySelection() {
     // too would paste them twice, once orphaned.
     if (selectionUi_.sel_ == SelectionState::kSelScene && !multiStale() && selectionUi_.multiSel_.size() > 1) {
         scene::World& w = scene::World::instance();
-        clipboard_.entities.clear();
+        edit_.clipboard_.entities.clear();
         for (const scene::Entity ent : selectionUi_.multiSel_) {
             if (!w.valid(ent)) continue;
             bool ancestorSelected = false;
@@ -2226,10 +2226,10 @@ void SandboxApp::copySelection() {
             ce.xform = c.after;
             ce.hadBody = c.hadBody;
             ce.hadCollide = c.hadCollide; ce.hadSnapZ = c.hadSnapZ; ce.snapZ = c.snapZ; ce.hadAnim = c.hadAnim;
-            clipboard_.entities.push_back(std::move(ce));
+            edit_.clipboard_.entities.push_back(std::move(ce));
         }
-        clipboard_.hasObject = false;
-        AVER_INFO("[Editor] copied {} entities", clipboard_.entities.size());
+        edit_.clipboard_.hasObject = false;
+        AVER_INFO("[Editor] copied {} entities", edit_.clipboard_.entities.size());
         return;
     }
     if (selectionUi_.sel_ == SelectionState::kSelScene && selectionUi_.selEntity_ != scene::kInvalidEntity && scene::World::instance().valid(selectionUi_.selEntity_)) {
@@ -2244,15 +2244,15 @@ void SandboxApp::copySelection() {
         ce.xform = c.after;
         ce.hadBody = c.hadBody;
         ce.hadCollide = c.hadCollide; ce.hadSnapZ = c.hadSnapZ; ce.snapZ = c.snapZ; ce.hadAnim = c.hadAnim;
-        clipboard_.entities.assign(1, std::move(ce));
-        clipboard_.hasObject  = false;
+        edit_.clipboard_.entities.assign(1, std::move(ce));
+        edit_.clipboard_.hasObject  = false;
         return;
     }
 #endif
     if (movableSelected()) {
-        clipboard_.hasObject = true;
-        clipboard_.object = objects_[selectionUi_.sel_];
-        clipboard_.entities.clear();   // exclusive with the scene path, as the two halves always were
+        edit_.clipboard_.hasObject = true;
+        edit_.clipboard_.object = objects_[selectionUi_.sel_];
+        edit_.clipboard_.entities.clear();   // exclusive with the scene path, as the two halves always were
     }
 }
 
@@ -2264,15 +2264,15 @@ void SandboxApp::pasteClipboard() {
     Vec3 at = viewState_.camPos_ + camForward() * kAddDistance;
     if (viewState_.snapMove_) for (int k = 0; k < 3; ++k) (&at.x)[k] = snapf((&at.x)[k], viewState_.moveSnap_);
 #if AVER_MODULE_SCENE
-    if (!clipboard_.entities.empty()) {
+    if (!edit_.clipboard_.entities.empty()) {
         // Relative layout is preserved, not a loop pasting each item at `at` (which would stack
         // every copied entity on one point -- five props in a row would arrive as one heap).
         // Duplicate gets this for free by offsetting from each original; paste computes the same
         // thing since it moves the whole set to a NEW anchor. First entry lands exactly at `at`
         // (one-item case is bit-identical to before); every other entry keeps its offset from that one.
-        const Vec3 origin = clipboard_.entities.front().xform.pos;
+        const Vec3 origin = edit_.clipboard_.entities.front().xform.pos;
         std::vector<scene::Entity> made;
-        for (const ClipboardEntity& ce : clipboard_.entities) {
+        for (const ClipboardEntity& ce : edit_.clipboard_.entities) {
             EditXform x = ce.xform;
             x.pos = at + (ce.xform.pos - origin);
             const std::string label = makeEntityLabel(std::string(), ce.snap.asset);
@@ -2299,16 +2299,16 @@ void SandboxApp::pasteClipboard() {
         selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = made.front();
         if (made.size() == 1)
             AVER_INFO("[Editor] pasted entity #{} and {} descendant(s)", (u32)made.front(),
-                      clipboard_.entities.front().subtree.size());
+                      edit_.clipboard_.entities.front().subtree.size());
         else
             AVER_INFO("[Editor] pasted {} entities", made.size());
         return;
     }
 #endif
-    if (clipboard_.hasObject) {
-        MeshObj o = clipboard_.object;
+    if (edit_.clipboard_.hasObject) {
+        MeshObj o = edit_.clipboard_.object;
         o.pos = at;
-        o.name = makeEntityLabel(clipboard_.object.name, clipboard_.object.name);
+        o.name = makeEntityLabel(edit_.clipboard_.object.name, edit_.clipboard_.object.name);
         objects_.push_back(o);
         selectionUi_.sel_ = (int)objects_.size() - 1; selectionUi_.selEntity_ = kInvalidId;
         EditCmd c;

@@ -204,7 +204,7 @@ void SandboxApp::buildUndoHistoryPanel() {
         if (!what.empty()) s += ": " + what;
         return s;
     };
-    const usize u = undoStack_.size(), r = redoStack_.size();
+    const usize u = edit_.undoStack_.size(), r = edit_.redoStack_.size();
     ImGui::BeginDisabled(!canUndo());
     if (ImGui::SmallButton(ICON_UNDO " Undo")) undo();
     ImGui::EndDisabled();
@@ -221,7 +221,7 @@ void SandboxApp::buildUndoHistoryPanel() {
     if (ImGui::Selectable("Initial state", u == 0)) clicked = -1;
     for (usize i = 0; i < u + r; ++i) {
         const bool done = i < u;
-        const EditCmd& c = done ? undoStack_[i] : redoStack_[r - 1 - (i - u)];
+        const EditCmd& c = done ? edit_.undoStack_[i] : edit_.redoStack_[r - 1 - (i - u)];
         const std::string label = describe(c) + "###uh" + std::to_string(i);
         if (!done) ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
         if (ImGui::Selectable(label.c_str(), done && i + 1 == u)) clicked = static_cast<int>(i);

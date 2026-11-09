@@ -75,8 +75,8 @@ void SandboxApp::endPaintStroke(const char* label) {
 // Removing a layer changes how many planes a recorded rect has, so weight entries can no longer be replayed.
 void SandboxApp::purgeWeightUndo() {
     const auto weights = [](const EditCmd& c) { return c.kind == EditCmd::Kind::LandscapeWeights; };
-    std::erase_if(undoStack_, weights);
-    std::erase_if(redoStack_, weights);
+    std::erase_if(edit_.undoStack_, weights);
+    std::erase_if(edit_.redoStack_, weights);
 }
 
 // The viewport half: LMB paints the selected layer under the cursor while held.

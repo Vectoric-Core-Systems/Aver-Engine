@@ -1034,7 +1034,7 @@ bool SandboxApp::onCloseGuard() {
 // Does the level differ from its file (uses per-edit serial, not undo stack depth)?
 bool SandboxApp::levelHasUnsavedEdits() const {
     // [wave3/level-instances] An instance being edited in place is unsaved work: commit or discard it first.
-    return currentEditMark() != savedEditMark_
+    return currentEditMark() != edit_.savedEditMark_
 #if AVER_MODULE_SCENE
         || level_.instances().anyDirtyEdit()
 #endif
@@ -1042,10 +1042,10 @@ bool SandboxApp::levelHasUnsavedEdits() const {
 }
 
 // Mark document as saved (after save, load, or new).
-void SandboxApp::markLevelSaved() { savedEditMark_ = currentEditMark(); }
+void SandboxApp::markLevelSaved() { edit_.savedEditMark_ = currentEditMark(); }
 
 // Force dirty state on (for content from outside levelPath_).
-void SandboxApp::markLevelUnsaved() { savedEditMark_ = ~0ull; }
+void SandboxApp::markLevelUnsaved() { edit_.savedEditMark_ = ~0ull; }
 
 // Exit, unless something is unsaved (ask first).
 void SandboxApp::requestExitChecked(Engine& e) {
@@ -1986,7 +1986,7 @@ void SandboxApp::drawEditMenu() {
         // Shortcut hints from the same registry as handleManip(), so menu and keyboard agree.
         if (ImGui::MenuItem(ICON_COPY " Copy", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditCopy)).c_str(), false, anySelected())) copySelection();
         uiReg_.track("edit.copy");
-        if (ImGui::MenuItem(ICON_PASTE " Paste", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditPaste)).c_str(), false, !clipboard_.entities.empty() || clipboard_.hasObject)) pasteClipboard();
+        if (ImGui::MenuItem(ICON_PASTE " Paste", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditPaste)).c_str(), false, !edit_.clipboard_.entities.empty() || edit_.clipboard_.hasObject)) pasteClipboard();
         uiReg_.track("edit.paste");
         if (ImGui::MenuItem(ICON_DUPLICATE " Duplicate", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditDuplicate)).c_str(), false, anySelected())) duplicateSelection();
         uiReg_.track("edit.duplicate");

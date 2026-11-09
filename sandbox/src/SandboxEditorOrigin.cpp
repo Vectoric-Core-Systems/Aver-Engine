@@ -25,18 +25,18 @@ void SandboxApp::initEditorOrigin() {
     // A transform gesture (gizmo drag, nudge, Details drag) holds the pre-gesture transforms. Cancelling puts them back in the OLD
     // frame, before the shift, and closes the gesture without an undo entry.
     eo.addGesture("a transform edit is open",
-        [this] { return editBeforeValid_ || viewState_.dragging_ || selectionUi_.nudgeEditOpen_; },
+        [this] { return edit_.editBeforeValid_ || viewState_.dragging_ || selectionUi_.nudgeEditOpen_; },
         [this] {
             scene::World& w = scene::World::instance();
-            if (editBeforeValid_) {
-                setSelectedXform(editBefore_);
-                for (const auto& [id, xf] : multiMoveBefore_) {
+            if (edit_.editBeforeValid_) {
+                setSelectedXform(edit_.editBefore_);
+                for (const auto& [id, xf] : edit_.multiMoveBefore_) {
                     const scene::Entity e = entityForEdit(id);
                     if (e != scene::kInvalidEntity && w.valid(e)) w.setLocalTransform(e, xf);
                 }
             }
-            editBeforeValid_ = false;
-            multiMoveBefore_.clear();
+            edit_.editBeforeValid_ = false;
+            edit_.multiMoveBefore_.clear();
             viewState_.dragging_ = false;
             viewState_.activeAxis_ = -1;
             selectionUi_.nudgeEditOpen_ = false;
@@ -57,8 +57,8 @@ void SandboxApp::initEditorOrigin() {
         [this] { return landTool_.foliageStroking_; },
         [this] {
             landTool_.foliageStroking_ = false;
-            if (!foliageBatch_.batchIds.empty()) pushEdit(std::move(foliageBatch_));
-            foliageBatch_ = EditCmd{};
+            if (!edit_.foliageBatch_.batchIds.empty()) pushEdit(std::move(edit_.foliageBatch_));
+            edit_.foliageBatch_ = EditCmd{};
         });
 #if AVER_MODULE_FLUIDS
     eo.addGesture("a water edit is open",
@@ -70,9 +70,9 @@ void SandboxApp::initEditorOrigin() {
 
     // ---- the rebasers (commit) ----
     eo.addRebaser("undo and redo", [this](const world::ShiftEvent& ev) {
-        rebaseStacks(undoStack_, redoStack_, ev.deltaF, scene::kInvalidEntity);
+        rebaseStacks(edit_.undoStack_, edit_.redoStack_, ev.deltaF, scene::kInvalidEntity);
     });
-    eo.addRebaser("clipboard", [this](const world::ShiftEvent& ev) { rebaseClipboard(clipboard_, ev.deltaF); });
+    eo.addRebaser("clipboard", [this](const world::ShiftEvent& ev) { rebaseClipboard(edit_.clipboard_, ev.deltaF); });
     eo.addRebaser("placeholder objects", [this](const world::ShiftEvent& ev) {
         for (MeshObj& o : objects_) shiftPos(o.pos, ev.deltaF);
     });

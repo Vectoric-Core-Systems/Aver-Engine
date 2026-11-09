@@ -1215,7 +1215,7 @@ void SandboxApp::unloadLevel(Engine& eng) {
 #endif
     lvl_.entityCollide_.clear();
     lvl_.entityAnim_.clear();
-    animEditBefore_.clear();
+    edit_.animEditBefore_.clear();
     lvl_.entitySnapZ_.clear();
     // The legacy OCMAP state, cleared with the rest -- see levelIsLegacyOcmap_'s own comment
     // for why a stale `true` here would be worse than a stale levelHeader_: it would route the
@@ -1225,13 +1225,13 @@ void SandboxApp::unloadLevel(Engine& eng) {
     lvl_.entityLegacyDeform_.clear();
     lvl_.entityLegacySurface_.clear();
     lvl_.entityLegacyMaterial_.clear();
-    undoStack_.clear();
-    redoStack_.clear();
+    edit_.undoStack_.clear();
+    edit_.redoStack_.clear();
     // A cleared history means nothing is pending against the file either.
     markLevelSaved();
-    editToEntity_.clear();
-    entityToEdit_.clear();
-    editBeforeValid_ = false;
+    edit_.editToEntity_.clear();
+    edit_.entityToEdit_.clear();
+    edit_.editBeforeValid_ = false;
     if (selectionUi_.sel_ == SelectionState::kSelScene) { selectionUi_.sel_ = -1; selectionUi_.selEntity_ = scene::kInvalidEntity; }
 #if AVER_MODULE_PHYSICS
     for (const int32_t b : lvl_.levelBodies_) aver_phys_remove_body(b);

@@ -1395,8 +1395,8 @@ void SandboxApp::runSaveDirtyTest() {
         else      { AVER_ERROR("[savedirty-test] FAIL: {}", what); ++failures; }
     };
 
-    undoStack_.clear();
-    redoStack_.clear();
+    edit_.undoStack_.clear();
+    edit_.redoStack_.clear();
     markLevelSaved();
     check(!levelHasUnsavedEdits(), "a freshly loaded level is not dirty");
 
@@ -1426,8 +1426,8 @@ void SandboxApp::runSaveDirtyTest() {
     check(!levelHasUnsavedEdits(), "and redoing back to it is clean");
 
     // A recovered sidecar is unsaved by construction, whatever the stack says.
-    undoStack_.clear();
-    redoStack_.clear();
+    edit_.undoStack_.clear();
+    edit_.redoStack_.clear();
     markLevelUnsaved();
     check(levelHasUnsavedEdits(), "recovered content reports unsaved even with an empty history");
 
@@ -1435,8 +1435,8 @@ void SandboxApp::runSaveDirtyTest() {
     // emitter's effect assignment push no EditCmd, so levelHasUnsavedEdits() (driven by the undo
     // serial alone) missed them, silently losing changes. Driven via markLevelUnsaved -- the panel
     // needs ImGui state a headless run lacks; this pins the contract those call sites rely on.
-    undoStack_.clear();
-    redoStack_.clear();
+    edit_.undoStack_.clear();
+    edit_.redoStack_.clear();
     markLevelSaved();
     check(!levelHasUnsavedEdits(), "a level with no history and no edits is clean");
     markLevelUnsaved();
@@ -1445,8 +1445,8 @@ void SandboxApp::runSaveDirtyTest() {
     markLevelSaved();
     check(!levelHasUnsavedEdits(), "and only SAVING clears it -- there is no command to undo");
 
-    undoStack_.clear();
-    redoStack_.clear();
+    edit_.undoStack_.clear();
+    edit_.redoStack_.clear();
     markLevelSaved();
     AVER_INFO("[savedirty-test] RESULT: {}", failures == 0 ? "PASS" : "FAIL");
 }
@@ -1541,7 +1541,7 @@ void SandboxApp::runMultiSelectTest(Engine& eng) {
 
         multiClear();
         selectionUi_.sel_ = -1; selectionUi_.selEntity_ = scene::kInvalidEntity;
-        undoStack_.clear(); redoStack_.clear();
+        edit_.undoStack_.clear(); edit_.redoStack_.clear();
         w.destroy(m0); w.destroy(m1); w.destroy(m2); w.flush();
     }
 
@@ -1567,7 +1567,7 @@ void SandboxApp::runMultiSelectTest(Engine& eng) {
 
         multiClear();
         selectionUi_.sel_ = -1; selectionUi_.selEntity_ = scene::kInvalidEntity;
-        undoStack_.clear(); redoStack_.clear();
+        edit_.undoStack_.clear(); edit_.redoStack_.clear();
         selectionUi_.outlinerOrder_.clear();
     }
 
@@ -1590,7 +1590,7 @@ void SandboxApp::runMultiSelectTest(Engine& eng) {
 
         multiClear();
         selectionUi_.sel_ = -1; selectionUi_.selEntity_ = scene::kInvalidEntity;
-        undoStack_.clear(); redoStack_.clear();
+        edit_.undoStack_.clear(); edit_.redoStack_.clear();
 
         // Parent+child selected shouldn't double-copy the child as orphan.
         scene::Entity par = w.create("cpParent");
@@ -1609,7 +1609,7 @@ void SandboxApp::runMultiSelectTest(Engine& eng) {
 
         multiClear();
         selectionUi_.sel_ = -1; selectionUi_.selEntity_ = scene::kInvalidEntity;
-        undoStack_.clear(); redoStack_.clear();
+        edit_.undoStack_.clear(); edit_.redoStack_.clear();
     }
 
     multiClear();
@@ -2005,7 +2005,7 @@ void SandboxApp::runUndoTest(Engine& eng) {
             const pbr::MaterialHandle mh = pbr::MaterialLibrary::get().create(md);
             check(mh != 0, "a probe material was created");
 
-            const usize stackBefore = undoStack_.size();
+            const usize stackBefore = edit_.undoStack_.size();
 
             // What the panel does on release: snapshot before, mutate, push one command.
             pbr::MaterialDesc* live = pbr::MaterialLibrary::get().mutableDesc(mh);
@@ -2020,7 +2020,7 @@ void SandboxApp::runUndoTest(Engine& eng) {
                 mc.matBefore = beforeDesc;
                 mc.matAfter  = *live;
                 pushEdit(std::move(mc));
-                check(undoStack_.size() == stackBefore + 1,
+                check(edit_.undoStack_.size() == stackBefore + 1,
                       "a material edit puts exactly ONE entry on the undo stack");
 
                 undo();
@@ -2058,15 +2058,15 @@ void SandboxApp::runUndoTest(Engine& eng) {
             const scene::Entity re = selectionUi_.selEntity_;
             const std::string spawned = lvl_.entityLabels_.count(static_cast<u32>(re))
                                       ? lvl_.entityLabels_[static_cast<u32>(re)] : std::string();
-            const usize stackBefore = undoStack_.size();
+            const usize stackBefore = edit_.undoStack_.size();
 
             renameEntity(re, "Doorway");
             check(lvl_.entityLabels_[static_cast<u32>(re)] == "Doorway", "renameEntity sets the label");
-            check(undoStack_.size() == stackBefore + 1, "and puts ONE entry on the undo stack");
+            check(edit_.undoStack_.size() == stackBefore + 1, "and puts ONE entry on the undo stack");
 
             // Rename to the SAME name is not an edit.
             renameEntity(re, "Doorway");
-            check(undoStack_.size() == stackBefore + 1, "renaming to the same name pushes nothing");
+            check(edit_.undoStack_.size() == stackBefore + 1, "renaming to the same name pushes nothing");
 
             undo();
             check((lvl_.entityLabels_.count(static_cast<u32>(re))
@@ -2099,10 +2099,10 @@ void SandboxApp::runUndoTest(Engine& eng) {
             w.setLocalTransform(rb, bxf);
 
             // keepWorld: the object must not jump on screen during a drag.
-            const usize stackBefore = undoStack_.size();
+            const usize stackBefore = edit_.undoStack_.size();
             pushReparent(rb, ra);
             check(w.parent(rb) == ra, "a drop parents the dragged entity to the row it landed on");
-            check(undoStack_.size() == stackBefore + 1, "and puts exactly one entry on the undo stack");
+            check(edit_.undoStack_.size() == stackBefore + 1, "and puts exactly one entry on the undo stack");
             const auto* bl = w.component<scene::CLocal>(rb, scene::kComponentLocal);
             check(bl && std::fabs(bl->xf.position.x) < 0.01f
                      && std::fabs(bl->xf.position.z - 300.0f) < 0.01f,
@@ -2120,7 +2120,7 @@ void SandboxApp::runUndoTest(Engine& eng) {
             // A cycle is refused and pushes nothing.
             pushReparent(rc, rb);   // rc under rb, so rb's chain is ra -> rb -> rc
             check(w.parent(rc) == rb, "a grandchild attaches");
-            const usize beforeCycle = undoStack_.size();
+            const usize beforeCycle = edit_.undoStack_.size();
             // The legality test directly (World already refuses via setParent).
             check(reparentLegality(ra, rc) == ReparentLegality::SelfOrDescendant,
                   "the Outliner's own legality test calls an ancestor-under-descendant a cycle");
@@ -2130,25 +2130,25 @@ void SandboxApp::runUndoTest(Engine& eng) {
                   "while an ordinary re-parent onto a non-descendant is allowed");
             pushReparent(ra, rc);   // ra is rc's ancestor: a cycle
             check(w.parent(ra) == scene::kInvalidEntity, "reparenting an ancestor under its own descendant is REFUSED");
-            check(undoStack_.size() == beforeCycle, "and pushes no undo entry");
+            check(edit_.undoStack_.size() == beforeCycle, "and pushes no undo entry");
             pushReparent(ra, ra);
             check(w.parent(ra) == scene::kInvalidEntity, "so is parenting something to itself");
-            check(undoStack_.size() == beforeCycle, "still no undo entry");
+            check(edit_.undoStack_.size() == beforeCycle, "still no undo entry");
 
             // Dropping onto the current parent is a no-op.
             pushReparent(rc, rb);
-            check(undoStack_.size() == beforeCycle, "dropping onto the CURRENT parent adds nothing to the stack");
+            check(edit_.undoStack_.size() == beforeCycle, "dropping onto the CURRENT parent adds nothing to the stack");
 
             // Off-level endpoints are refused: saveLevel only writes a parent for level-owned entities.
             const scene::Entity stray = w.create("stray", scene::kInvalidEntity, Transform{});
             w.flush();
             check(!isLevelOwned(stray), "an entity outside levelEntities_ is not level-owned");
-            const usize beforeStray = undoStack_.size();
+            const usize beforeStray = edit_.undoStack_.size();
             pushReparent(stray, ra);
             check(w.parent(stray) == scene::kInvalidEntity, "reparenting an entity the level does not own is REFUSED");
             pushReparent(rc, stray);
             check(w.parent(rc) == rb, "and so is parenting a level entity UNDER one it does not own");
-            check(undoStack_.size() == beforeStray, "neither pushed an undo entry");
+            check(edit_.undoStack_.size() == beforeStray, "neither pushed an undo entry");
             w.destroy(stray); w.flush();
 
             // The root drop zone.
@@ -2160,7 +2160,7 @@ void SandboxApp::runUndoTest(Engine& eng) {
             // Clean up.
             selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = ra; deleteSelection(); w.flush();
             check(w.count() == rbase, "teardown: the reparent phase leaves no entities behind");
-            undoStack_.clear(); redoStack_.clear(); markLevelSaved();
+            edit_.undoStack_.clear(); edit_.redoStack_.clear(); markLevelSaved();
         }
 
         selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = parent;
@@ -2333,8 +2333,8 @@ void SandboxApp::runClassPlaceTest(Engine& eng) {
     check(e2 != scene::kInvalidEntity && w.valid(e2), "placeClassInstance spawns a class actor");
     if (e2 == scene::kInvalidEntity) { AVER_ERROR("[class-place-test] why: {}", why); finish(); }
     check(liveInstances() == 2 && lvl_.classAuthored_.size() == 2, "two live instances, two authored placements");
-    check(!undoStack_.empty() && undoStack_.back().kind == EditCmd::Kind::Create &&
-          undoStack_.back().className == "AN_CompProbe" && undoStack_.back().classSlot == 1,
+    check(!edit_.undoStack_.empty() && edit_.undoStack_.back().kind == EditCmd::Kind::Create &&
+          edit_.undoStack_.back().className == "AN_CompProbe" && edit_.undoStack_.back().classSlot == 1,
           "the Create edit carries the class name and slot");
     check(selectionUi_.selEntity_ == e2 && subtreeSize(e2) == 3, "the new root is selected and has its parts");
 

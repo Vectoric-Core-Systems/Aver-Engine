@@ -617,7 +617,7 @@ bool SandboxApp::mcpLevelMove(AvId e, const EditXform& x, std::string& why) {
     // A person's drag (gizmo, a Details field, a held nudge) keeps editBefore_ open across frames. Borrowing
     // it here would overwrite that before-state and close the gesture, so their real end would find nothing
     // to record and the drag's undo entry would be lost.
-    if (editBeforeValid_ || viewState_.dragging_) {
+    if (edit_.editBeforeValid_ || viewState_.dragging_) {
         why = "a drag is in flight in the editor (gizmo, Details field or nudge) -- let go of it and retry";
         return false;
     }
@@ -943,7 +943,7 @@ bool SandboxApp::mcpLevelPlace(const std::string& text, std::string& r, std::str
     // Only the last kUndoDepth entities get an entry: pushEdit drops the oldest past that anyway, and
     // a snapshot built to be dropped at once is wasted work on a big batch.
     const usize n = inst.entities.size();
-    const usize firstUndo = n > kUndoDepth ? n - kUndoDepth : 0;
+    const usize firstUndo = n > EditHistoryState::kUndoDepth ? n - EditHistoryState::kUndoDepth : 0;
     for (usize k = firstUndo; k < n; ++k) {
         EditCmd c = describeEntity(inst.entities[k]);
         c.kind = EditCmd::Kind::Create;

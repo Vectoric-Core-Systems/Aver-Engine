@@ -481,7 +481,7 @@ bool SandboxApp::fillPlacementFromEntity(scene::Entity e, fmt::OcWorldPlacement&
     if (const auto idIt = lvl_.entityPlaceId_.find(static_cast<u32>(e)); idIt != lvl_.entityPlaceId_.end()) p.placementId = idIt->second;
     // Data layers (the panel keys membership by edit id; an entity that never had one is in no layer).
     if (!lvl_.capturingInstance_) {
-        if (const auto editIt = entityToEdit_.find(static_cast<u32>(e)); editIt != entityToEdit_.end()) p.layers = dataLayers_.layersOf(editIt->second);
+        if (const auto editIt = edit_.entityToEdit_.find(static_cast<u32>(e)); editIt != edit_.entityToEdit_.end()) p.layers = dataLayers_.layersOf(editIt->second);
     }
     // THE COMPONENT RECORDS (Skeletal Mesh, Animator, Root Motion, ...), read back from the live components. WHILE PLAY
     // RUNS they come from the Play-start baseline: a script may have changed an animator's speed or an IK weight since,

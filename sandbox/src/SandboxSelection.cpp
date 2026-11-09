@@ -280,10 +280,10 @@ void SandboxApp::setSelectedXform(const EditXform& x) {
 // parameter type needs to exist without it. scene::Entity is a bare alias for AvId, so this is a zero-behaviour-change retype.
 SandboxApp::EditId SandboxApp::editIdFor(AvId e) {
     const u32 key = static_cast<u32>(e);
-    if (const auto it = entityToEdit_.find(key); it != entityToEdit_.end()) return it->second;
-    const EditId id = nextEditId_++;
-    entityToEdit_[key] = id;
-    editToEntity_[id]  = e;
+    if (const auto it = edit_.entityToEdit_.find(key); it != edit_.entityToEdit_.end()) return it->second;
+    const EditId id = edit_.nextEditId_++;
+    edit_.entityToEdit_[key] = id;
+    edit_.editToEntity_[id]  = e;
 #if AVER_MODULE_SCENE
     pinStreamed(static_cast<scene::Entity>(e));   // an entity an undo entry names must never stream out
 #endif
@@ -292,16 +292,16 @@ SandboxApp::EditId SandboxApp::editIdFor(AvId e) {
 
 // Returns the entity an edit id names, or kInvalidId.
 AvId SandboxApp::entityForEdit(EditId id) const {
-    const auto it = editToEntity_.find(id);
-    return it == editToEntity_.end() ? kInvalidId : it->second;
+    const auto it = edit_.editToEntity_.find(id);
+    return it == edit_.editToEntity_.end() ? kInvalidId : it->second;
 }
 
 // Points an existing edit id at a newly created entity.
 void SandboxApp::rebindEdit(EditId id, AvId e) {
-    if (const auto old = editToEntity_.find(id); old != editToEntity_.end())
-        entityToEdit_.erase(static_cast<u32>(old->second));
-    editToEntity_[id] = e;
-    entityToEdit_[static_cast<u32>(e)] = id;
+    if (const auto old = edit_.editToEntity_.find(id); old != edit_.editToEntity_.end())
+        edit_.entityToEdit_.erase(static_cast<u32>(old->second));
+    edit_.editToEntity_[id] = e;
+    edit_.entityToEdit_[static_cast<u32>(e)] = id;
 }
 
 #if AVER_MODULE_PBR
@@ -579,23 +579,23 @@ editor::PrefabUiCallbacks SandboxApp::prefabUiCallbacks() {
 #endif
 
 void SandboxApp::pushEdit(EditCmd c) {
-    c.serial = ++editSerialNext_;
-    undoStack_.push_back(std::move(c));
-    redoStack_.clear();
-    if (undoStack_.size() > kUndoDepth) undoStack_.erase(undoStack_.begin());
+    c.serial = ++edit_.editSerialNext_;
+    edit_.undoStack_.push_back(std::move(c));
+    edit_.redoStack_.clear();
+    if (edit_.undoStack_.size() > EditHistoryState::kUndoDepth) edit_.undoStack_.erase(edit_.undoStack_.begin());
 }
 
 // Records the selection's transform before a gesture. False when nothing is selected.
 bool SandboxApp::beginTransformEdit() {
-    if (!selectedXform(editBefore_)) return false;
-    editBeforeValid_ = true;
+    if (!selectedXform(edit_.editBefore_)) return false;
+    edit_.editBeforeValid_ = true;
     // The rest of the selection, captured BEFORE the drag starts moving anything. The mover runs
     // per frame and applies an incremental delta, so by the time the gesture ends the original
     // is gone -- there is no later moment this could be read.
-    multiMoveBefore_.clear();
+    edit_.multiMoveBefore_.clear();
 #if AVER_MODULE_SCENE
     forEachMultiMoved([this](scene::Entity e, const Transform& xf) {
-        multiMoveBefore_.push_back({editIdFor(e), xf});
+        edit_.multiMoveBefore_.push_back({editIdFor(e), xf});
     });
 #endif
     return true;
@@ -603,15 +603,15 @@ bool SandboxApp::beginTransformEdit() {
 
 // Closes the gesture and pushes a transform command, unless nothing actually moved.
 void SandboxApp::endTransformEdit() {
-    if (!editBeforeValid_) return;
-    editBeforeValid_ = false;
+    if (!edit_.editBeforeValid_) return;
+    edit_.editBeforeValid_ = false;
 
     // The rest of the set first, so the "did anything move at all" test below can consider them.
     std::vector<EditCmd::AlsoMoved> also;
 #if AVER_MODULE_SCENE
-    if (!multiMoveBefore_.empty()) {
+    if (!edit_.multiMoveBefore_.empty()) {
         scene::World& w = scene::World::instance();
-        for (const auto& [id, beforeLocal] : multiMoveBefore_) {
+        for (const auto& [id, beforeLocal] : edit_.multiMoveBefore_) {
             const scene::Entity e = entityForEdit(id);
             if (e == scene::kInvalidEntity || !w.valid(e)) continue;
             const auto* loc = w.component<scene::CLocal>(e, scene::kComponentLocal);
@@ -619,7 +619,7 @@ void SandboxApp::endTransformEdit() {
             if (nearlySameTransform(beforeLocal, loc->xf)) continue;
             also.push_back({id, beforeLocal, loc->xf, w.parent(e) == scene::kInvalidEntity});   // root: a floating-origin shift moves its local
         }
-        multiMoveBefore_.clear();
+        edit_.multiMoveBefore_.clear();
     }
 #endif
 
@@ -628,10 +628,10 @@ void SandboxApp::endTransformEdit() {
     // BOTH HALVES, because either can be the only thing that moved. An anchor pinned by a snap
     // while the rest of the set slid is a real gesture, and returning early on the anchor alone
     // would drop the whole record for it.
-    if (nearlySameXform(editBefore_, now) && also.empty()) return;
+    if (nearlySameXform(edit_.editBefore_, now) && also.empty()) return;
     EditCmd c;
     c.kind = EditCmd::Kind::Transform;
-    c.before = editBefore_; c.after = now;
+    c.before = edit_.editBefore_; c.after = now;
     c.alsoMoved = std::move(also);
 #if AVER_MODULE_SCENE
     if (selectionUi_.sel_ == SelectionState::kSelScene) c.id = editIdFor(selectionUi_.selEntity_); else
@@ -1400,14 +1400,14 @@ void SandboxApp::outlinerDeleteFolder(const std::string& path) {
 // The serial of the newest command that changes the level: lock and folder commands are editor-only, so
 // they never move it (and never make the document look unsaved).
 u64 SandboxApp::currentEditMark() const {
-    for (auto it = undoStack_.rbegin(); it != undoStack_.rend(); ++it)
+    for (auto it = edit_.undoStack_.rbegin(); it != edit_.undoStack_.rend(); ++it)
         if (it->kind != EditCmd::Kind::OutlinerMeta) return it->serial;
     return 0ull;
 }
 
-bool SandboxApp::canUndo() const { return !undoStack_.empty(); }
+bool SandboxApp::canUndo() const { return !edit_.undoStack_.empty(); }
 
-bool SandboxApp::canRedo() const { return !redoStack_.empty(); }
+bool SandboxApp::canRedo() const { return !edit_.redoStack_.empty(); }
 
 // Reverses the newest command and moves it to the redo stack.
 // CreateObj/DestroyObj address objects_ directly by the index captured when pushed: undo/redo only
@@ -1464,8 +1464,8 @@ void SandboxApp::undo() {
     if (viewState_.mode_ == EditorMode::Modeling) { modeling_.undo(); return; }   // the mode has its own document and history
     // The Player Start's handle changes when an undo recreates it; see refreshPlayerStart.
     struct RefreshOnExit { SandboxApp* a; ~RefreshOnExit() { a->refreshPlayerStart(); } } ro{this};
-    if (undoStack_.empty()) return;
-    EditCmd c = undoStack_.back(); undoStack_.pop_back();
+    if (edit_.undoStack_.empty()) return;
+    EditCmd c = edit_.undoStack_.back(); edit_.undoStack_.pop_back();
     switch (c.kind) {
         case EditCmd::Kind::Transform: applyXformTo(c, c.before, /*undoing=*/true); break;
 #if AVER_MODULE_SCENE
@@ -1531,7 +1531,7 @@ void SandboxApp::undo() {
 #endif
         default: break;   // Create/Destroy (scene) fall here when AVER_MODULE_SCENE is off
     }
-    redoStack_.push_back(std::move(c));
+    edit_.redoStack_.push_back(std::move(c));
 }
 
 // Re-applies the newest undone command and moves it back to the undo stack. See undo()'s own
@@ -1539,8 +1539,8 @@ void SandboxApp::undo() {
 void SandboxApp::redo() {
     if (viewState_.mode_ == EditorMode::Modeling) { modeling_.redo(); return; }
     struct RefreshOnExit { SandboxApp* a; ~RefreshOnExit() { a->refreshPlayerStart(); } } ro{this};
-    if (redoStack_.empty()) return;
-    EditCmd c = redoStack_.back(); redoStack_.pop_back();
+    if (edit_.redoStack_.empty()) return;
+    EditCmd c = edit_.redoStack_.back(); edit_.redoStack_.pop_back();
     switch (c.kind) {
         case EditCmd::Kind::Transform: applyXformTo(c, c.after, /*undoing=*/false); break;
 #if AVER_MODULE_SCENE
@@ -1602,7 +1602,7 @@ void SandboxApp::redo() {
 #endif
         default: break;   // Create/Destroy (scene) fall here when AVER_MODULE_SCENE is off
     }
-    undoStack_.push_back(std::move(c));
+    edit_.undoStack_.push_back(std::move(c));
 }
 
 // Returns what the status bar calls the current selection.
