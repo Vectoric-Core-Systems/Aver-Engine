@@ -71,9 +71,16 @@ void adoptVersionStamp(fmt::ProjectDesc& p) {
 // it always did. The version tag still draws -- it is just a string from the manifest -- and only
 // the prompt disappears.
 #if AVER_MODULE_UPGRADE
+// "Older" here means older AND something to do: a plan whose steps edit no file (0.7 -> 0.8) opens the project as
+// it is, unprompted and unstamped, so it still opens in the engine that made it.
 bool madeByOlderSeries(const std::string& stamp) {
     upgrade::Version v{};
-    return upgrade::parseVersion(stamp, v) && upgrade::olderSeries(v, upgrade::engineVersion());
+    if (!upgrade::parseVersion(stamp, v) || !upgrade::olderSeries(v, upgrade::engineVersion())) return false;
+    std::vector<const upgrade::Step*> plan;
+    if (!upgrade::planUpgrade(v, plan, nullptr)) return true;   // a gap: the prompt reports it
+    for (const upgrade::Step* s : plan)
+        if (s->editsFiles) return true;
+    return false;
 }
 #else
 bool madeByOlderSeries(const std::string&) { return false; }

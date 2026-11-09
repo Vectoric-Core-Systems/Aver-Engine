@@ -250,7 +250,7 @@ bool step_0_7_to_0_8(const Context& ctx, std::string* err) {
 const std::vector<Step> kSteps = {
     {{0, 1, 0}, {0, 2, 0},
      "Repair the F# starter the 0.1 payload could not reference",
-     &step_0_1_to_0_2},
+     &step_0_1_to_0_2, /*editsFiles=*/true},
     {{0, 2, 0}, {0, 3, 0},
      "Nothing to repair: 0.3's project-visible changes are all additive",
      &step_0_2_to_0_3},

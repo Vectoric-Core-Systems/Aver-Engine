@@ -78,6 +78,9 @@ struct Step {
     Version to;
     const char* summary;   // one line, shown in the prompt
     bool (*apply)(const Context& ctx, std::string* err);
+    // Whether the step changes any file. A plan of steps that edit nothing is not a question for the author: the
+    // editor opens such a project as it is, without the prompt and without restamping it.
+    bool editsFiles = false;
 };
 
 // Every step this engine knows, oldest first.
