@@ -179,6 +179,12 @@ bool LevelFoliage::load(const fmt::OcWorldData& w, GameContent& content, rhi::ID
     syncExtraFiles();   // [wave3/level-instances]
     extrasDirty_ = false;
 
+    cellDist_.assign(cells_.size(), 0.0f);
+    cullKey_.assign(cells_.size(), 0);
+    anyCull_ = false;
+    for (const File& f : files_)
+        for (const fmt::OcInstanceGroup& g : f.data.groups) anyCull_ |= g.cullEndCm > 0.0f;
+
     loadCm_ = w.stream.loadCm;
     evictCm_ = std::max(w.stream.evictCm, w.stream.loadCm);
     streamed_ = w.stream.enabled && device && !cells_.empty();
@@ -231,6 +237,14 @@ void LevelFoliage::update(const Vec3& viewerCm, f32 dt) {
         next[i] = d <= (resident_[i] ? evictCm_ : loadCm_) ? 1 : 0;   // hysteresis
         soon[i] = d <= loadCm_ * kPrefetchFactor ? 1 : 0;
         if (next[i] != resident_[i]) changed = true;
+        if (anyCull_) {
+            // A resident cell's runs thin out (then vanish) with distance per their group's cull range; a step to another quarter
+            // of any run rebuilds, so the viewer walking toward a far cell does not rebuild every check.
+            const u64 key = next[i] ? cullKeyOf(i, d) : 0;
+            if (key != cullKey_[i] && next[i]) changed = true;
+            cullKey_[i] = key;
+            cellDist_[i] = d;
+        }
     }
     if (extrasDirty_) changed = true;   // [wave3/level-instances]
     // Prototype meshes of cells about to load are read on GameContent's workers ahead of time, nearest
@@ -351,6 +365,18 @@ void LevelFoliage::applyResidency(const std::vector<char>& next) {
     hm.mark("release");
 }
 
+u64 LevelFoliage::cullKeyOf(usize cell, f32 distCm) const {
+    const File& f = files_[cells_[cell].file];
+    const fmt::OcInstanceCell& c = f.data.cells[cells_[cell].cell];
+    u64 key = 1;
+    const u64 re = static_cast<u64>(c.firstRun) + c.runCount;
+    for (u64 r = c.firstRun; r < re && r < f.data.runs.size(); ++r) {
+        const u32 g = f.data.runs[static_cast<usize>(r)].group;
+        if (g < f.data.groups.size()) key = key * 5 + fmt::ocInstanceKeepQuarters(f.data.groups[g], distCm);
+    }
+    return key;
+}
+
 void LevelFoliage::rebuild() {
     const auto started = std::chrono::steady_clock::now();
     std::vector<voxi::VoxiRenderer::FoliagePrototype> prototypes;
@@ -359,7 +385,7 @@ void LevelFoliage::rebuild() {
     for (usize fi = 0; fi < files_.size(); ++fi) protoOf[fi].assign(files_[fi].data.groups.size(), -1);
     u32 droppedParts = 0;
 
-    auto emit = [&](usize fi, u32 group, u32 first, u32 count) {
+    auto emit = [&](usize fi, u32 group, u32 first, u32 count, u32 keepQuarters = 4) {
         File& f = files_[fi];
         if (group >= f.data.groups.size()) return;
         i32& slot = protoOf[fi][group];
@@ -391,6 +417,7 @@ void LevelFoliage::rebuild() {
                           "it is skipped", f.path, asset);
                 break;
             }
+            if (keepQuarters < 4 && !fmt::ocInstanceRowKept(static_cast<u32>(k), keepQuarters)) continue;   // culled by distance
             voxi::VoxiRenderer::FoliageInstance inst;
             // Straight copy: same 12-float row-vector convention as FoliageInstance::world.
             for (int c = 0; c < 12; ++c) inst.world[c] = f.data.transforms[base + static_cast<usize>(c)];
@@ -415,7 +442,8 @@ void LevelFoliage::rebuild() {
         const u64 re = static_cast<u64>(c.firstRun) + c.runCount;
         for (u64 r = c.firstRun; r < re && r < d.runs.size(); ++r) {
             const fmt::OcInstanceRun& run = d.runs[static_cast<usize>(r)];
-            emit(cells_[i].file, run.group, run.first, run.count);
+            const u32 keep = anyCull_ && run.group < d.groups.size() ? fmt::ocInstanceKeepQuarters(d.groups[run.group], cellDist_[i]) : 4u;
+            if (keep) emit(cells_[i].file, run.group, run.first, run.count, keep);
         }
     }
 
@@ -454,6 +482,9 @@ void LevelFoliage::clearAll(bool dropExtras) {
     if (voxi_ && loaded_) voxi_->clearFoliage();
     files_.clear();
     cells_.clear();
+    cellDist_.clear();
+    cullKey_.clear();
+    anyCull_ = false;
     resident_.clear();
     residentCount_ = 0;
     streamed_ = false;

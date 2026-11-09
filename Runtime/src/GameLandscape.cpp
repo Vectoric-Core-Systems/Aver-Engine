@@ -8,6 +8,7 @@
 #include "aver/core/Log.hpp"
 #include "aver/core/SurfaceId.hpp"
 #include "aver/landscape/HeightfieldRay.hpp"
+#include "aver/landscape/Paint.hpp"
 #include "aver/landscape/PhysicsBridge.hpp"
 
 #include <algorithm>
@@ -700,6 +701,18 @@ bool GameLandscape::sectionDirty(u32 i) const { return i == 0 ? edit_.dirty : ex
 const fmt::OcLandData* GameLandscape::sectionAt(f32 xCm, f32 yCm) const {
     Hit h;
     return findSection(xCm, yCm, h) ? h.data : nullptr;
+}
+
+f32 GameLandscape::layerWeightAtScene(std::string_view name, f32 xCm, f32 yCm) const {
+    const fmt::OcLandData* d = sectionAt(xCm, yCm);
+    if (!d || !d->hasLayers()) return 0.0f;
+    u32 idx = 0;
+    bool found = false;
+    for (u32 i = 0; i < d->layerNames.size(); ++i)
+        if (d->layerNames[i] == name) { idx = i; found = true; break; }
+    f32 w[8];
+    if (!found || !landscape::layerWeightsAt(*d, xCm, yCm, w)) return 0.0f;
+    return w[idx];
 }
 
 bool GameLandscape::surfaceHeightAtScene(f32 xCm, f32 yCm, f32& outZ) const {

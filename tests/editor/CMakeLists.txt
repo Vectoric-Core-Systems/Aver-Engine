@@ -989,3 +989,15 @@ add_executable(ThumbnailDiskCacheTest src/ThumbnailDiskCacheTest.cpp)
 target_include_directories(ThumbnailDiskCacheTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
 target_link_libraries(ThumbnailDiskCacheTest PRIVATE Aver.Core)
 set_target_properties(ThumbnailDiskCacheTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# VegetationGenerateTest -- the editor glue behind Scatter Foliage From Layer (sandbox/src/VegetationGenerate.cpp): landscape sections as a
+# PCG query, the layer's one-entry biome run, the .ocinst / .ocveg / .ocbiome it writes, and a regenerate that keeps manual edits.
+# Compiled directly with no ImGui, like FoliageTypeEditorTest. Guarded on Aver.Landscape like FoliageAlignTest.
+if(TARGET Aver.Landscape)
+  add_executable(VegetationGenerateTest
+    src/VegetationGenerateTest.cpp
+    ${CMAKE_SOURCE_DIR}/sandbox/src/VegetationGenerate.cpp)
+  target_include_directories(VegetationGenerateTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+  target_link_libraries(VegetationGenerateTest PRIVATE Aver.World Aver.Landscape Aver.Formats Aver.Render.Pcg Aver.Core Aver.Platform)
+  set_target_properties(VegetationGenerateTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()

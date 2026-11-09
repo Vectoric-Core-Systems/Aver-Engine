@@ -66,6 +66,8 @@ add_executable(Sandbox WIN32
   src/SandboxSequenceRun.cpp
   # wave3: the Landscape mode's Paint tab (layers, brush, foliage scatter, terrain material editor) and Water tab (rivers, lakes).
   src/LandscapePaintTool.cpp
+  # W4: Generate Vegetation (biome run over the landscape sections, .ocinst + .ocveg), headless core.
+  src/VegetationGenerate.cpp
   src/WaterSplineTool.cpp
   # Movie Render Queue: the frame plan and PNG / EXR / MP4 output, and the Window > Render Queue panel.
   src/RenderQueueOutput.cpp

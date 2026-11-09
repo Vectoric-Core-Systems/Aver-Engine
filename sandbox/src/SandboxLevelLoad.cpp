@@ -112,8 +112,13 @@ void SandboxApp::setChunkStreamingEnabled(bool on) {
         height = [this](f32 x, f32 y, f32& outZ) { return landscape_.scatterHeightAt(x, y, outZ); };
 #endif
 
+    game::GameStreaming::LayerWeightFn layers;
+#if AVER_MODULE_LANDSCAPE
+    if (landscape_.loaded())
+        layers = [this](std::string_view name, f32 x, f32 y) { return landscape_.layerWeightAtScene(name, x, y); };
+#endif
     streaming_.enable(project_, levelPcgVolumes_, levelHeader_.scatterSpecies, &content_,
-                       std::move(height));
+                       std::move(height), std::move(layers));
     if (streaming_.enabled())
         streaming_.warnIfCameraOutsideGeneratedBand(
             camPos_, "press F to focus something near ground level, or fly down.");

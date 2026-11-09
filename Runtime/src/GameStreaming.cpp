@@ -8,6 +8,7 @@
 #include "aver/scene/World.hpp"
 #include "aver/scene/Components.hpp"
 #include "aver/formats/OcGraph.hpp"
+#include "aver/world/PcgBiome.hpp"
 #include "aver/world/PcgVolumeRunner.hpp"
 #include "aver/world/ScatterPalette.hpp"
 
@@ -95,7 +96,7 @@ void GameStreaming::disable() {
 void GameStreaming::enable(const fmt::ProjectDesc& project,
                             const std::vector<fmt::OcPcgVolume>& pcgVolumes,
                             const std::vector<fmt::OcScatterSpecies>& scatterSpecies,
-                            GameContent* content, HeightQueryFn heightSource) {
+                            GameContent* content, HeightQueryFn heightSource, LayerWeightFn layerWeight) {
     if (primary_) return;
 
     if (!project.valid()) {
@@ -241,15 +242,35 @@ void GameStreaming::enable(const fmt::ProjectDesc& project,
         // A PCGVOLUME with `graph` generates its chunks from that DOMAIN pcg graph, one chunk per PCG cell. The program shares the
         // height source above as its landscape; a Subgraph/Loop node resolves `graph=` against the same Content directory.
         if (graphField) {
-            fmt::OcGraphData gd;
-            std::string gerr;
-            if (!fmt::loadOcgraph(contentDir + AVER_PATH_SEP + v->graph, gd, &gerr) || !world::pcgIsGraph(gd)) {
-                AVER_WARN("[ChunkWorld] field '{}': cannot use graph '{}': {}", v->name, v->graph,
-                          gerr.empty() ? std::string("not a DOMAIN pcg graph") : gerr);
-                continue;
-            }
             auto prog = std::make_shared<world::PcgProgram>();
-            prog->graph = std::make_shared<const fmt::OcGraphData>(std::move(gd));
+            const bool isBiome = v->graph.size() > 8 && v->graph.compare(v->graph.size() - 8, 8, ".ocbiome") == 0;
+            if (isBiome) {
+                // A biome compiles to a graph (docs/PCG.md): the same evaluator, the same cell ownership.
+                world::PcgLoadedBiome loaded;
+                std::string berr;
+                fmt::OcGraphData gd;
+                if (!world::pcgLoadBiome(contentDir, v->graph, loaded, &berr) ||
+                    !world::pcgBuildBiomeGraph({loaded.source()}, gd, &berr)) {
+                    AVER_WARN("[ChunkWorld] field '{}': cannot use biome '{}': {}", v->name, v->graph, berr);
+                    continue;
+                }
+                const world::PcgBiomeEstimate est = world::pcgEstimateBiome({loaded.source()}, static_cast<f32>(cwSettings.stream.chunkSizeCm));
+                for (const std::string& w : est.warnings) AVER_WARN("[ChunkWorld] field '{}': {}", v->name, w);
+                if (est.overCap) {
+                    AVER_WARN("[ChunkWorld] field '{}': biome '{}' is over the per-cell guardrail; not streamed", v->name, v->graph);
+                    continue;
+                }
+                prog->graph = std::make_shared<const fmt::OcGraphData>(std::move(gd));
+            } else {
+                fmt::OcGraphData gd;
+                std::string gerr;
+                if (!fmt::loadOcgraph(contentDir + AVER_PATH_SEP + v->graph, gd, &gerr) || !world::pcgIsGraph(gd)) {
+                    AVER_WARN("[ChunkWorld] field '{}': cannot use graph '{}': {}", v->name, v->graph,
+                              gerr.empty() ? std::string("not a DOMAIN pcg graph") : gerr);
+                    continue;
+                }
+                prog->graph = std::make_shared<const fmt::OcGraphData>(std::move(gd));
+            }
             prog->seed = v->seed;
             if (!v->infinite) {
                 prog->bounded = true;
@@ -258,8 +279,13 @@ void GameStreaming::enable(const fmt::ProjectDesc& project,
                 prog->zMin = static_cast<f32>(v->boundsMin[2]);
                 prog->zMax = static_cast<f32>(v->boundsMax[2]);
             }
-            if (cwSettings.generator.heightSource)
-                prog->landscape = std::make_shared<world::PcgHeightFnLandscape>(cwSettings.generator.heightSource);
+            if (cwSettings.generator.heightSource) {
+                world::PcgHeightFnLandscape::LayerFn lf;
+                if (layerWeight) lf = [this, layerWeight](std::string_view layer, f32 x, f32 y) {
+                    return layerWeight(layer, x - static_cast<f32>(origin_.x), y - static_cast<f32>(origin_.y));
+                };
+                prog->landscape = std::make_shared<world::PcgHeightFnLandscape>(cwSettings.generator.heightSource, std::move(lf));
+            }
             auto subs = std::make_shared<std::map<std::string, std::unique_ptr<fmt::OcGraphData>>>();
             prog->graphLoader = [subs, contentDir](const std::string& name) -> const fmt::OcGraphData* {
                 auto it = subs->find(name);

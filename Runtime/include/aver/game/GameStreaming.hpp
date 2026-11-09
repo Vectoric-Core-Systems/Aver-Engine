@@ -23,6 +23,7 @@
 #  include "aver/world/WorldOrigin.hpp"
 
 #  include <memory>
+#  include <string_view>
 
 namespace aver::game {
 
@@ -44,6 +45,9 @@ public:
     // A callback rather than a landscape reference, so this class does not depend on Aver.Landscape
     // (GeneratorSettings::heightSource asks the same of its installer).
     using HeightQueryFn = std::function<bool(f32 worldXCm, f32 worldYCm, f32& outWorldZCm)>;
+    // Painted layer weight in [0, 1] at scene-frame (x, y), for a PCGVOLUME whose graph is an .ocbiome (its layer mask and layer
+    // gates). Empty = every layer reads 0, so a biome that needs paint generates nothing.
+    using LayerWeightFn = std::function<f32(std::string_view layer, f32 worldXCm, f32 worldYCm)>;
     // Triangle count for a mesh id, for residentTriangleCount() below. Returns 0 for an id it does
     // not know.
     using TriangleLookupFn = std::function<u32(u64 meshId)>;
@@ -63,10 +67,11 @@ public:
     //   content       - binds each restored entity's surface material, as GameLevel::load does. May
     //                   be null.
     //   heightSource  - see HeightQueryFn. Empty = flat.
+    //   layerWeight   - see LayerWeightFn.
     void enable(const fmt::ProjectDesc& project,
                 const std::vector<fmt::OcPcgVolume>& pcgVolumes,
                 const std::vector<fmt::OcScatterSpecies>& scatterSpecies,
-                GameContent* content, HeightQueryFn heightSource = {});
+                GameContent* content, HeightQueryFn heightSource = {}, LayerWeightFn layerWeight = {});
 
     // Drops every resident field and returns the scene to what it looked like before this object
     // touched it. A no-op if not enabled(). Frees each field's physics bodies itself (guarded

@@ -1233,7 +1233,12 @@ void GameApp::enableChunkStreaming() {
     if (landscape_.loaded())
         height = [this](f32 x, f32 y, f32& outZ) { return landscape_.scatterHeightAt(x, y, outZ); };
 #  endif
-    streaming_.enable(project_, level_.pcgVolumes(), level_.scatterSpecies(), &content_, std::move(height));
+    GameStreaming::LayerWeightFn layers;
+#  if AVER_MODULE_LANDSCAPE
+    if (landscape_.loaded())
+        layers = [this](std::string_view name, f32 x, f32 y) { return landscape_.layerWeightAtScene(name, x, y); };
+#  endif
+    streaming_.enable(project_, level_.pcgVolumes(), level_.scatterSpecies(), &content_, std::move(height), std::move(layers));
     streaming_.warnIfCameraOutsideGeneratedBand(camPos_);
 #endif
 }

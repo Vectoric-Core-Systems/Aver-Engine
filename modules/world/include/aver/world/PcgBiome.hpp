@@ -23,6 +23,14 @@ struct PcgBiomeSource {
     std::vector<fmt::OcFoliageData> types;
 };
 
+// A biome file with the foliage types its entries name, loaded from a Content directory (paths are content-relative).
+struct PcgLoadedBiome {
+    fmt::OcBiomeData biome;
+    std::vector<fmt::OcFoliageData> types;
+    PcgBiomeSource source() const { return PcgBiomeSource{&biome, types}; }   // valid while this object lives
+};
+bool pcgLoadBiome(const std::string& contentDir, const std::string& biomePath, PcgLoadedBiome& out, std::string* why = nullptr);
+
 // Nodes are named b<biome>e<entry>_<step>; changing the order of biomes or entries changes the seeds, as it would for a hand graph.
 // False (graph empty) when a biome is invalid or `types` does not match its entries.
 bool pcgBuildBiomeGraph(const std::vector<PcgBiomeSource>& sources, fmt::OcGraphData& out, std::string* why = nullptr);

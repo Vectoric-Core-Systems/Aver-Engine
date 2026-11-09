@@ -149,6 +149,7 @@ private:
     struct CellRef { u32 file, cell; };
 
     void rebuild();
+    u64 cullKeyOf(usize cell, f32 distCm) const;
     void applyResidency(const std::vector<char>& next);
     // [wave3/level-instances begin]
     void clearAll(bool dropExtras);
@@ -165,6 +166,11 @@ private:
     std::vector<File> files_;
     std::vector<CellRef> cells_;
     std::vector<char> resident_;
+    // Per-group distance culling (OcInstanceGroup::cullStartCm/cullEndCm): the viewer's distance to each cell at the last check,
+    // and a key of how much of each run of the cell was kept at that distance, so a crossing of a quarter step rebuilds.
+    std::vector<f32> cellDist_;
+    std::vector<u64> cullKey_;
+    bool anyCull_ = false;
     u32 residentCount_ = 0;
     f32 loadCm_ = 0, evictCm_ = 0;
     f32 accum_ = 0;

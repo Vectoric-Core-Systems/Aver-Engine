@@ -4,6 +4,7 @@
 
 #include "SandboxApp.hpp"
 #include "LandscapePaintTool.hpp"
+#include "VegetationGenerate.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -250,8 +251,9 @@ void SandboxApp::buildLandscapePaintTab(Engine& e) {
     if (ImGui::Button("Scatter Foliage From Layer", ImVec2(-1, 0))) scatterFoliageFromLayer(e);
     ImGui::EndDisabled();
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-        ImGui::SetTooltip("Places the layer's foliage type (set on the layer in its material) at the layer's density where its\n"
-                          "paint weight is high enough. Deterministic; a second run adds more. One undo step.");
+        ImGui::SetTooltip("Generates the layer's foliage type (set on the layer in its material) at the layer's density where its\n"
+                          "paint weight is high enough, into Content/Foliage/<layer>_vegetation.ocinst with a .ocveg record.\n"
+                          "Deterministic; running it again regenerates the table and keeps manual edits.");
 #endif
     ImGui::EndDisabled();
 #else
@@ -261,52 +263,50 @@ void SandboxApp::buildLandscapePaintTab(Engine& e) {
 }
 
 #if AVER_MODULE_SCENE
-// Layer foliage: a one-shot, undoable command (docs/LANDSCAPE_LAYERS_WATER.md). Walks the section on a jittered grid, keeps
-// the cells where the layer's paint is heavy enough and places the layer's foliage type there through the same code the
-// brush uses, all in one FoliageStroke undo entry.
+// Layer foliage: a thin call into Generate Vegetation (docs/PCG.md, W4). The layer's foliage type, density and minimum weight make a
+// one-entry biome that runs over every landscape section; the result is a cell-sorted .ocinst plus a .ocveg record under
+// Content/Foliage, shown through the level's extra foliage tables right away and listed in the level's FOLIAGE files so a save keeps
+// it. A second run regenerates it (same seed, same table) and keeps hand edits recorded in the .ocveg.
 void SandboxApp::scatterFoliageFromLayer(Engine& e) {
+    (void)e;
     const GameLandscapeLayer* l = landscape_.materialLayer(static_cast<u32>(paintLayer_));
-    if (!l || l->foliage.empty() || l->foliageDensity <= 0.0f) return;
+    if (!l || l->foliage.empty() || l->foliageDensity <= 0.0f || !project_.valid()) return;
 
-    // The layer's foliage path, project-relative or absolute, against the palette's absolute asset paths.
-    const auto norm = [](std::string s) {
-        for (char& c : s) c = c == '\\' ? '/' : static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        return s;
-    };
-    std::string want = l->foliage;
-    const bool absolute = want.size() > 1 && (want[1] == ':' || want[0] == '/' || want[0] == '\\');
-    if (!absolute && project_.valid()) want = project_.contentDir() + "/" + want;
-    const FoliageSpecies* species = nullptr;
-    for (const FoliageSpecies& sp : foliagePalette_)
-        if (norm(sp.assetPath) == norm(want)) { species = &sp; break; }
-    if (!species) {
-        setUpgradeStatus("Layer foliage '" + l->foliage + "' is not a loaded foliage type.", editor::NotifySeverity::Warning);
+    std::string rel = l->foliage;   // content-relative; an absolute path is made relative when it lies under Content
+    for (char& c : rel) if (c == '\\') c = '/';
+    const std::string contentDir = project_.contentDir();
+    std::string contentFwd = contentDir;
+    for (char& c : contentFwd) if (c == '\\') c = '/';
+    if (rel.size() > contentFwd.size() && rel.compare(0, contentFwd.size(), contentFwd) == 0) rel = rel.substr(contentFwd.size() + 1);
+
+    editor::LayerVegetationRequest req;
+    req.layer = l->name;
+    req.foliageRel = rel;
+    req.densityPer100m2 = l->foliageDensity;
+    req.minWeight = l->foliageMinWeight;
+    req.seed = static_cast<i32>(fnv1a64(std::string_view(l->name)) & 0x7fffffff);
+    req.ocinstRel = "Foliage/" + l->name + "_vegetation.ocinst";
+    std::string why;
+    if (!fmt::loadOcFoliage(contentDir + "/" + rel, req.type, &why)) {
+        setUpgradeStatus("Layer foliage '" + l->foliage + "' cannot be read: " + why, editor::NotifySeverity::Warning);
         return;
     }
-    // The layer's index in the SECTION's table (paint is stored by name).
-    const auto& names = landscape_.data().layerNames;
-    u32 sectionLayer = 0;
-    bool found = false;
-    for (u32 i = 0; i < names.size(); ++i)
-        if (names[i] == l->name) { sectionLayer = i; found = true; break; }
-    if (!found) { setUpgradeStatus("Nothing is painted with " + l->name + " yet."); return; }
+    std::vector<const fmt::OcLandData*> sections;
+    for (u32 i = 0; i < landscape_.sectionCount(); ++i) sections.push_back(&landscape_.sectionData(i));
+    editor::LayerVegetationOutcome out = editor::generateLayerVegetation(sections, req, contentDir);
+    for (const std::string& w : out.warnings) AVER_WARN("[Vegetation] {}", w);
+    if (!out.ok) { setUpgradeStatus("Generate vegetation: " + out.error, editor::NotifySeverity::Warning); return; }
 
-    constexpr usize kCap = 20000;
-    std::vector<editor::ScatterPoint> pts;
-    editor::layerScatterCandidates(landscape_.data(), sectionLayer, l->foliageDensity, l->foliageMinWeight,
-                                   static_cast<u32>(fnv1a64(std::string_view(l->name))), kCap, pts);
-    if (pts.size() >= kCap)
-        AVER_WARN("[Landscape] layer foliage capped at {} instances; lower the layer's density or paint less of it", kCap);
-
-    foliageBatch_ = EditCmd{};
-    foliageBatch_.kind = EditCmd::Kind::FoliageStroke;
-    foliageBatch_.label = "Scatter foliage";
-    foliageBatch_.batchWasErase = false;
-    for (editor::ScatterPoint& p : pts) foliagePlaceAt(e, *species, p.x, p.y, p.rng);
-    const usize placed = foliageBatch_.batchIds.size();
-    if (placed) pushEdit(std::move(foliageBatch_));
-    foliageBatch_ = EditCmd{};
-    setUpgradeStatus("Scattered " + std::to_string(placed) + " instance(s) of " + species->name + " on " + l->name);
+#  if AVER_MODULE_VOXI
+    if (voxiAttached_) {
+        std::vector<std::string> mats(out.table.groups.size(), req.type.material);
+        levelFoliage_.setExtraTable(fnv1a64(std::string_view(req.ocinstRel)), std::move(out.table), std::move(mats));
+    }
+#  endif
+    if (std::find(levelHeader_.foliageFiles.begin(), levelHeader_.foliageFiles.end(), req.ocinstRel) == levelHeader_.foliageFiles.end())
+        levelHeader_.foliageFiles.push_back(req.ocinstRel);
+    setUpgradeStatus("Generated " + std::to_string(out.instances) + " instance(s) of " + std::filesystem::path(rel).stem().string() +
+                     " on " + l->name + (out.kept ? " (kept " + std::to_string(out.kept) + " manual edit(s))" : std::string()));
 }
 #endif // AVER_MODULE_SCENE
 

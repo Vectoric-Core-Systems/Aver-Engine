@@ -39,6 +39,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -180,6 +181,9 @@ public:
     // The section holding scene-frame (x, y), or null. surfaceHeightAtScene is the same lookup answering the height.
     const fmt::OcLandData* sectionAt(f32 xCm, f32 yCm) const;
     bool surfaceHeightAtScene(f32 xCm, f32 yCm, f32& outZ) const;
+    // The painted weight (0..1) of the layer called `name` at scene-frame (x, y); 0 for an unknown layer or no section there.
+    // What a biome's layer mask and layer gates read when a streamed world generates on this landscape.
+    f32 layerWeightAtScene(std::string_view name, f32 xCm, f32 yCm) const;
 
     // What one section's share of a stroke changed: a rect of samples before / after (undo / redo write them back).
     struct HeightEdit {

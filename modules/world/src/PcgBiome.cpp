@@ -37,6 +37,21 @@ f32 effectivePruneRadius(const fmt::OcBiomeEntry& e, const fmt::OcFoliageData& t
 
 } // namespace
 
+bool pcgLoadBiome(const std::string& contentDir, const std::string& biomePath, PcgLoadedBiome& out, std::string* why) {
+    out = PcgLoadedBiome{};
+    if (!fmt::loadOcBiome(contentDir + "/" + biomePath, out.biome, why)) return false;
+    for (const fmt::OcBiomeEntry& e : out.biome.entries) {
+        fmt::OcFoliageData t;
+        std::string w;
+        if (!fmt::loadOcFoliage(contentDir + "/" + e.foliage, t, &w)) {
+            if (why) *why = "biome " + out.biome.name + ": foliage type " + e.foliage + ": " + w;
+            return false;
+        }
+        out.types.push_back(std::move(t));
+    }
+    return true;
+}
+
 bool pcgBuildBiomeGraph(const std::vector<PcgBiomeSource>& sources, fmt::OcGraphData& out, std::string* why) {
     out = fmt::OcGraphData{};
     out.domain = kPcgDomain;
