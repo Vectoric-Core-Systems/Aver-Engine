@@ -108,7 +108,7 @@ void SandboxApp::capturePlayWorld() {
     play_.playWorldSnapshot_.clear();
     play_.playWorldCaptured_ = false;
 #if AVER_MODULE_SCENE
-    placedBaseline_.clear();
+    assetEdit_.placedBaseline_.clear();
     scene::World& w = scene::World::instance();
     play_.playWorldSnapshot_.reserve(lvl_.levelEntities_.size());
     const game::PathOfIdFn pathFn = [this](u64 id) { return pathOfContentId(id); };
@@ -126,7 +126,7 @@ void SandboxApp::capturePlayWorld() {
         play_.playWorldSnapshot_.push_back({e, w.localTransform(e), vis});
         // The authored COMPONENT state, so a save during Play writes it and not what a script did since (fillPlacementFromEntity).
         if (auto comps = game::capturePlacedComponents(w, e, pathFn); !comps.empty())
-            placedBaseline_.emplace(static_cast<u32>(e), std::move(comps));
+            assetEdit_.placedBaseline_.emplace(static_cast<u32>(e), std::move(comps));
     }
 #if AVER_MODULE_FRAMEWORK
     // The graph-class roots too: Stop puts a surviving one back like any placement, and respawns one that end_play destroyed.
@@ -202,7 +202,7 @@ void SandboxApp::restorePlayWorld() {
     play_.playWorldSnapshot_.clear();
     play_.playWorldCaptured_ = false;
 #if AVER_MODULE_SCENE
-    placedBaseline_.clear();
+    assetEdit_.placedBaseline_.clear();
 #endif
 }
 
@@ -447,7 +447,7 @@ void SandboxApp::startPlay() {
                       "camera is unchanged", aver_fw_class_name(gm));
 #if AVER_MODULE_SCENE
             anim::animSystem().setObjectAnimationLive(false);
-            placedBaseline_.clear();   // no Stop will come to clear it, and a stale baseline would shadow later saves
+            assetEdit_.placedBaseline_.clear();   // no Stop will come to clear it, and a stale baseline would shadow later saves
 #if AVER_MODULE_PHYSICS
             vehicles_.end();   // built by capturePlayWorld; no Stop will come for it
 #endif
@@ -484,7 +484,7 @@ void SandboxApp::startPlay() {
         AVER_WARN("[Sandbox] Play: begin_play was rejected (already playing?)");
 #if AVER_MODULE_SCENE
         anim::animSystem().setObjectAnimationLive(false);
-        placedBaseline_.clear();   // see the drone-pawn branch above
+        assetEdit_.placedBaseline_.clear();   // see the drone-pawn branch above
 #if AVER_MODULE_PHYSICS
         vehicles_.end();   // built by capturePlayWorld; no Stop will come for it
 #endif
@@ -732,7 +732,7 @@ void SandboxApp::stopPlay() {
         play_.playWorldSnapshot_.clear();
         play_.playWorldCaptured_ = false;
 #if AVER_MODULE_SCENE && AVER_WITH_IMGUI
-        placedBaseline_.clear();
+        assetEdit_.placedBaseline_.clear();
 #endif
 #if AVER_MODULE_FRAMEWORK
         play_.playClassSnapshot_.clear();
@@ -896,7 +896,7 @@ void SandboxApp::travelDuringPlay(Engine& eng, const std::string& requested) {
     play_.playWorldSnapshot_.clear();
     play_.playWorldCaptured_ = false;
 #if AVER_WITH_IMGUI
-    placedBaseline_.clear();
+    assetEdit_.placedBaseline_.clear();
 #endif
 
     aver_fw_travel_begin();

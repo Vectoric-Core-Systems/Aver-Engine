@@ -1288,7 +1288,7 @@ void SandboxApp::unloadLevel(Engine& eng) {
     // pinnedMaterialNames_ is every name that must survive regardless -- see
     // pinMaterialResident()'s own comment for who is expected to populate it.
     if (levelScopedMaterialsEnabled()) {
-        const usize released = content_.releaseMaterialsExcept(pinnedMaterialNames_);
+        const usize released = content_.releaseMaterialsExcept(assetEdit_.pinnedMaterialNames_);
         if (released)
             AVER_INFO("[Material] level-scoped residency: {} material(s) released on unload", released);
     }

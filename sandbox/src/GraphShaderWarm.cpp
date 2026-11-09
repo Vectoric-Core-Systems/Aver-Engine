@@ -29,14 +29,14 @@ void SandboxApp::tickGraphShaderWarm(Engine& e) {
     graphWarmup_.poll();
     const auto release = [this](const char* why) {
         voxiRenderer_.holdGraphRebuild(false);
-        graphWarmHeld_ = false;
+        assetEdit_.graphWarmHeld_ = false;
         AVER_INFO("[ShaderWarm] material graphs: {}; the scene pipelines rebuild now", why);
     };
     pbr::MaterialGraphRegistry& reg = pbr::materialGraphs();
     const bool can = rset_.voxiAttached_ && e.window() != nullptr && maxFrames_ == 0 && e.device() != nullptr &&
                      e.device()->backend() == rhi::Backend::D3D12;
     if (!can || reg.count() == 0 || !voxiRenderer_.graphRebuildPending()) {
-        if (graphWarmHeld_) {
+        if (assetEdit_.graphWarmHeld_) {
             graphWarmup_.cancel();
             release("nothing left to wait for");
         }
@@ -44,7 +44,7 @@ void SandboxApp::tickGraphShaderWarm(Engine& e) {
     }
 
     const u64 rev = reg.revision();
-    if (!graphWarmHeld_ || graphWarmRev_ != rev) {
+    if (!assetEdit_.graphWarmHeld_ || assetEdit_.graphWarmRev_ != rev) {
         // A new set of graphs (or a newer one while a run was going): one run for what the registry holds now.
         graphWarmup_.cancel();
         const std::string dir = userDataDir();
@@ -58,17 +58,17 @@ void SandboxApp::tickGraphShaderWarm(Engine& e) {
             if (!f) list.clear();
         }
         if (list.empty()) {
-            if (graphWarmHeld_) release("the graph list could not be written");
+            if (assetEdit_.graphWarmHeld_) release("the graph list could not be written");
             return;
         }
         graphWarmup_.start(projSess_.project_.manifestPath, list);
         if (graphWarmup_.finished()) {   // could not start: compile here, as before
-            if (graphWarmHeld_) release("the background compile could not start");
+            if (assetEdit_.graphWarmHeld_) release("the background compile could not start");
             return;
         }
-        graphWarmRev_ = rev;
-        graphWarmHeld_ = true;
-        graphWarmT0_ = std::chrono::steady_clock::now();
+        assetEdit_.graphWarmRev_ = rev;
+        assetEdit_.graphWarmHeld_ = true;
+        assetEdit_.graphWarmT0_ = std::chrono::steady_clock::now();
         voxiRenderer_.holdGraphRebuild(true);
         AVER_INFO("[ShaderWarm] {} material graph(s) changed: the scene waits for a background compile instead of compiling "
                   "on the render thread", reg.count());
@@ -81,7 +81,7 @@ void SandboxApp::tickGraphShaderWarm(Engine& e) {
         release("the background run composed different shader text (a graph not saved?)");
     } else if (graphWarmup_.finished()) {
         release("the background compile ended");
-    } else if (std::chrono::steady_clock::now() - graphWarmT0_ > std::chrono::minutes(10)) {
+    } else if (std::chrono::steady_clock::now() - assetEdit_.graphWarmT0_ > std::chrono::minutes(10)) {
         graphWarmup_.cancel();
         release("the background compile ran past 10 minutes");
     }

@@ -154,13 +154,13 @@ void SandboxApp::tickLevelPrepToast(Engine& e) {
     // builds are budgeted per frame), which read as an unexplained stutter. A notification says so when it
     // lasts past 0.3 s, and finishes when the builds are done. Interactive runs only.
     if (projectLoading_) {
-        levelPrepArmed_ = true;
-    } else if (levelPrepArmed_ && e.window() != nullptr && maxFrames_ == 0) {
+        assetEdit_.levelPrepArmed_ = true;
+    } else if (assetEdit_.levelPrepArmed_ && e.window() != nullptr && maxFrames_ == 0) {
         using Clock = std::chrono::steady_clock;
         const bool pending = voxiRenderer_.accelBuildsPending();
-        if (levelPrepT0_ == Clock::time_point{}) levelPrepT0_ = Clock::now();
-        const double sec = std::chrono::duration<double>(Clock::now() - levelPrepT0_).count();
-        if (pending && !levelPrepToast_ && sec > 0.3) {
+        if (assetEdit_.levelPrepT0_ == Clock::time_point{}) assetEdit_.levelPrepT0_ = Clock::now();
+        const double sec = std::chrono::duration<double>(Clock::now() - assetEdit_.levelPrepT0_).count();
+        if (pending && !assetEdit_.levelPrepToast_ && sec > 0.3) {
             editor::Notification n;
             n.severity = editor::NotifySeverity::Info;
             n.title = "Preparing " + projSess_.levelName_;
@@ -169,22 +169,22 @@ void SandboxApp::tickLevelPrepToast(Engine& e) {
             n.hasProgress = true;
             n.progress = -1.0f;
             n.dedupKey = "level-prep";
-            levelPrepToast_ = editor::notifications().push(std::move(n));
+            assetEdit_.levelPrepToast_ = editor::notifications().push(std::move(n));
         }
         if (!pending || sec > 60.0) {
-            if (levelPrepToast_) {
+            if (assetEdit_.levelPrepToast_) {
                 char body[48];
                 std::snprintf(body, sizeof body, "Ready after %.1f s.", sec);
-                editor::notifications().setSticky(levelPrepToast_, false);   // finish() leaves sticky set
-                editor::notifications().finish(levelPrepToast_, editor::NotifySeverity::Success,
+                editor::notifications().setSticky(assetEdit_.levelPrepToast_, false);   // finish() leaves sticky set
+                editor::notifications().finish(assetEdit_.levelPrepToast_, editor::NotifySeverity::Success,
                                                projSess_.levelName_ + " ready", body, 3.0);
             }
-            levelPrepArmed_ = false;
-            levelPrepToast_ = 0;
-            levelPrepT0_ = {};
+            assetEdit_.levelPrepArmed_ = false;
+            assetEdit_.levelPrepToast_ = 0;
+            assetEdit_.levelPrepT0_ = {};
         }
     } else {
-        levelPrepArmed_ = false;
+        assetEdit_.levelPrepArmed_ = false;
     }
 }
 #endif

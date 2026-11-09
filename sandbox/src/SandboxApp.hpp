@@ -1318,6 +1318,7 @@ private:
 #include "state/EditHistoryState.hpp"
 #include "state/LaunchConfigState.hpp"
 #include "state/ProjectSessionState.hpp"
+#include "state/AssetEditState.hpp"
 class HitchMarks;
 namespace game { struct SceneDrawStats; }
 
@@ -1413,8 +1414,8 @@ public:
     static bool levelScopedMaterialsEnabled();
 
     // Materials to preserve across level changes (e.g., editor tabs with open materials).
-    void pinMaterialResident(const std::string& name) { pinnedMaterialNames_.insert(name); }
-    void unpinMaterialResident(const std::string& name) { pinnedMaterialNames_.erase(name); }
+    void pinMaterialResident(const std::string& name) { assetEdit_.pinnedMaterialNames_.insert(name); }
+    void unpinMaterialResident(const std::string& name) { assetEdit_.pinnedMaterialNames_.erase(name); }
 #endif
 
 
@@ -1794,6 +1795,7 @@ private:
     EditHistoryState edit_;   // Undo/redo history
     LaunchConfigState launch_;   // Launch configuration and prefs-load flags
     ProjectSessionState projSess_;   // Open project/level identity and pending open requests
+    AssetEditState assetEdit_;   // In-flight material and placed-component edit gestures, pinned material
     // ---- end feature state ----
 
     void applyProject(Engine& e);
@@ -2679,10 +2681,6 @@ private:
     // Undo / redo: puts one component into `st` (nullopt = absent) on the entity behind `id`.
     void applyPlacedComponentState(EditId id, const std::string& type, const std::optional<fmt::OcPlacedComponent>& st);
     editor::AttachContext placedAttachContext(scene::Entity e) const;
-    std::optional<fmt::OcPlacedComponent> placedBefore_;                  // the open gesture's "before"
-    const editor::PlacedKind* placedGesture_ = nullptr;                   // the kind that gesture edits; null = none open
-    // Authored component state at Play start, so a save during Play writes it and not what a script did since.
-    std::unordered_map<u32, std::vector<fmt::OcPlacedComponent>> placedBaseline_;
 #endif
 
     // ---- Three assignments (each asset id type is different) ----
@@ -3004,13 +3002,6 @@ private:
 
     using EditorClipboard = EditHistoryState::EditorClipboard;
 
-#if AVER_MODULE_PBR
-    // One material edit: desc before interaction and which material.
-    bool matEditActive_ = false;
-    bool matEditDirty_  = false;
-    pbr::MaterialHandle matEditHandle_ = 0;
-    pbr::MaterialDesc   matEditBefore_{};
-#endif
 
     // Chord registry (defaults match historic hardcoded keys). See EditorKeybinds.hpp.
 #if AVER_WITH_IMGUI
@@ -3141,14 +3132,7 @@ private:
     editor::ShaderWarmup shaderWarmup_; // Sandbox.exe --warm-shaders after a project opens
     // A level's new material graphs compile in a --warm-shaders --graphs run while Voxi holds its rebuild (GraphShaderWarm.cpp).
     editor::ShaderWarmup graphWarmup_;
-    u64 graphWarmRev_ = 0;               // the registry revision the running graph warm-up was started for
-    bool graphWarmHeld_ = false;
-    std::chrono::steady_clock::time_point graphWarmT0_{};
     void tickGraphShaderWarm(Engine& e);
-    // "Preparing <level>" after the loading screen while ray-tracing structures still build (SandboxRender.cpp).
-    bool levelPrepArmed_ = false;
-    u64 levelPrepToast_ = 0;
-    std::chrono::steady_clock::time_point levelPrepT0_{};
 #if AVER_MODULE_VOXI
     voxi::VoxiRenderer voxiRenderer_;
     editor::SceneLightFeed sceneLightFeed_;   // CLight entities -> Voxi lamps + path-tracer lights, per frame
@@ -3224,7 +3208,6 @@ private:
     std::unique_ptr<aver::editor::ReflTest> refl_;
     int  reflBeaconIndex_ = -1;   // which objects_ entry the schedule shows and hides
     rhi::MeshHandle unitCubeMesh_ = 0;   // the editor's own unit cube, half-extent 1
-    std::string matSaveStatus_;   // what the last 'Save to C#' did
     // A row asked to be deleted; answered after the tree walk (drawOutlinerRow). GUARDED: type is scene::Entity.
     bool inputProbe_ = false;
 
@@ -3232,10 +3215,6 @@ private:
     // ---- the 3D-viewport icon renderer, and the Player Start marker it draws ----
     // viewportIconsReady_ is the ONE flag the render walk consults to skip the Player Start's cube (false unless the feature AND its texture both came up).
     editor::ViewportIconRenderer viewportIcons_;
-#if AVER_MODULE_PBR
-    // pinMaterialResident()/unpinMaterialResident()'s storage -- checked by bindMaterialsForLevel() so a level-scoped release never destroys a material an open tab holds.
-    std::unordered_set<std::string> pinnedMaterialNames_;
-#endif
 
     // Game UI font. Invalid font (missing file) draws nothing.
     ui::UiFont uiFont_;

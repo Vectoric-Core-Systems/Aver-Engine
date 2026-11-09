@@ -488,7 +488,7 @@ bool SandboxApp::fillPlacementFromEntity(scene::Entity e, fmt::OcWorldPlacement&
     // and an autosave landing mid-Play must write the authored state (the same hazard as the transforms above).
     // An entity with no baseline entry (streamed in during Play) is captured live.
     if (play_.playWorldCaptured_) {
-        if (const auto baseIt = placedBaseline_.find(static_cast<u32>(e)); baseIt != placedBaseline_.end()) {
+        if (const auto baseIt = assetEdit_.placedBaseline_.find(static_cast<u32>(e)); baseIt != assetEdit_.placedBaseline_.end()) {
             p.components = baseIt->second;
             return true;
         }

@@ -100,16 +100,16 @@ editor::AttachContext SandboxApp::placedAttachContext(scene::Entity e) const {
 }
 
 void SandboxApp::beginPlacedGesture(const editor::PlacedKind& kind) {
-    placedBefore_ = game::capturePlacedComponent(scene::World::instance(), selectionUi_.selEntity_, kind.type,
+    assetEdit_.placedBefore_ = game::capturePlacedComponent(scene::World::instance(), selectionUi_.selEntity_, kind.type,
                                                  [this](u64 id) { return pathOfContentId(id); });
-    placedGesture_ = &kind;
+    assetEdit_.placedGesture_ = &kind;
 }
 
 // Pushes one undo entry when the component differs from `before` (nullopt = it was absent). A no-op entry would
 // make Ctrl+Z visibly do nothing once, so an unchanged gesture pushes nothing.
 void SandboxApp::commitPlacedEdit(const editor::PlacedKind& kind, std::optional<fmt::OcPlacedComponent> before) {
-    placedBefore_.reset();
-    placedGesture_ = nullptr;
+    assetEdit_.placedBefore_.reset();
+    assetEdit_.placedGesture_ = nullptr;
     scene::World& w = scene::World::instance();
     const scene::Entity e = selectionUi_.selEntity_;
     if (!w.valid(e)) return;
@@ -347,14 +347,14 @@ void SandboxApp::drawPlacedComponentSections() {
     const auto gestureEdit = [&](const editor::PlacedKind& k, bool changed, const auto& write) {
         if (ImGui::IsItemActivated()) beginPlacedGesture(k);
         if (changed) {
-            const bool open = placedGesture_ == &k;
+            const bool open = assetEdit_.placedGesture_ == &k;
             std::optional<fmt::OcPlacedComponent> before;
             if (!open) before = cap(k);
             write();
             if (!open) commitPlacedEdit(k, std::move(before));   // a one-shot change (typed value, keyboard step)
         }
-        if (ImGui::IsItemDeactivatedAfterEdit() && placedGesture_ == &k) commitPlacedEdit(k, placedBefore_);
-        else if (ImGui::IsItemDeactivated() && placedGesture_ == &k) { placedGesture_ = nullptr; placedBefore_.reset(); }   // clicked, changed nothing
+        if (ImGui::IsItemDeactivatedAfterEdit() && assetEdit_.placedGesture_ == &k) commitPlacedEdit(k, assetEdit_.placedBefore_);
+        else if (ImGui::IsItemDeactivated() && assetEdit_.placedGesture_ == &k) { assetEdit_.placedGesture_ = nullptr; assetEdit_.placedBefore_.reset(); }   // clicked, changed nothing
     };
     // A checkbox, combo or button finishes in the frame it changes: one capture either side of the write.
     const auto instantEdit = [&](const editor::PlacedKind& k, bool changed, const auto& write) {
@@ -1133,12 +1133,12 @@ void SandboxApp::drawPlacedComponentSections() {
             editor::dt::InputText("Team", s_team, sizeof s_team);
             s_teamActive = ImGui::IsItemActive();
             if (ImGui::IsItemActivated()) beginPlacedGesture(k);
-            if (ImGui::IsItemDeactivatedAfterEdit() && placedGesture_ == &k) {
+            if (ImGui::IsItemDeactivatedAfterEdit() && assetEdit_.placedGesture_ == &k) {
                 bt.setTeam(w, e, s_team);
-                commitPlacedEdit(k, placedBefore_);
-            } else if (ImGui::IsItemDeactivated() && placedGesture_ == &k) {
-                placedGesture_ = nullptr;
-                placedBefore_.reset();
+                commitPlacedEdit(k, assetEdit_.placedBefore_);
+            } else if (ImGui::IsItemDeactivated() && assetEdit_.placedGesture_ == &k) {
+                assetEdit_.placedGesture_ = nullptr;
+                assetEdit_.placedBefore_.reset();
             }
             ImGui::EndDisabled();
             static const char* const kKinds[] = {"none", "behaviour tree", "state tree"};
