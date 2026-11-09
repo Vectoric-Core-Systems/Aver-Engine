@@ -36,6 +36,14 @@
 aver_add_module(Aver.Runtime.Game.Core
   SOURCES
     src/GameContent.cpp
+    # GameContent's parts: placeholder meshes, runtime (script-built) meshes and textures, the collision build and its disk cache,
+    # the worker mesh prefetch, the material library glue, particle effects and textures.
+    src/GameContentBuiltins.cpp
+    src/GameContentRuntime.cpp
+    src/GameContentCollision.cpp
+    src/GameContentPrefetch.cpp
+    src/GameContentMaterials.cpp
+    src/GameContentParticles.cpp
     src/GameLevel.cpp
     src/GameFoliage.cpp
     # POSTVOLUME blending and the .cube LUT texture cache (rhi + formats only, no scene).
