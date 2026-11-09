@@ -78,7 +78,7 @@ void SandboxApp::setFocusLevelAt(int frame) { harness_.focusLevelAt_ = frame; }
 void SandboxApp::setChunkStreamAuto(int framesIn) { harness_.chunkStreamAutoFrames_ = framesIn; }
 
 #if AVER_MODULE_SCENE
-void SandboxApp::setDroneGraph(std::string relPath) { droneGraphRel_ = std::move(relPath); }
+void SandboxApp::setDroneGraph(std::string relPath) { drone_.droneGraphRel_ = std::move(relPath); }
 
 #endif
 

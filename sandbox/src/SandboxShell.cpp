@@ -2056,7 +2056,7 @@ void SandboxApp::drawWindowMenu() {
                     : "Opt-in: streams chunks generated + saved under <project>" AVER_PATH_SEP "Chunks around the editor camera.\nDoes nothing to your level until switched on.");
         }
         {
-            const bool droneOn = droneEntity_ != scene::kInvalidEntity;
+            const bool droneOn = drone_.droneEntity_ != scene::kInvalidEntity;
             ImGui::BeginDisabled(!project_.valid());
             if (ImGui::MenuItem(ICON_BOT " Drone", nullptr, droneOn)) setDroneEnabled(!droneOn);
             ImGui::EndDisabled();

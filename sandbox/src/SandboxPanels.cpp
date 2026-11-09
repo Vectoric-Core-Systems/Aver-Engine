@@ -1458,7 +1458,7 @@ u64 SandboxApp::outlinerSignature() const {
     mix(fnv1a64(selectionUi_.outlinerFilter_));
     mix(selectionUi_.outlinerTypeMask_);
     mix(selectionUi_.outlinerFolderRev_);
-    mix(static_cast<u64>(droneEntity_));
+    mix(static_cast<u64>(drone_.droneEntity_));
     mix(static_cast<u64>(lvl_.entityLabels_.size()));
     mix(static_cast<u64>(lvl_.levelEntities_.size()));
     mix(lvl_.levelEntities_.empty() ? 0u : static_cast<u64>(lvl_.levelEntities_.front()));
@@ -1491,7 +1491,7 @@ u64 SandboxApp::outlinerSlotSignature(u32 slot) const {
     const bool chunkOwned = anyChunkWorldOwns(ent);
     mix(chunkOwned ? 1u : 0u);
     if (chunkOwned) return h;
-    if (ent == droneEntity_) return h;   // the stamp folds the drone handle in already
+    if (ent == drone_.droneEntity_) return h;   // the stamp folds the drone handle in already
     const bool hasMesh = w.hasComponent(ent, scene::kComponentMeshRenderer);
     const char* nm = w.name(ent);
     mix(hasMesh ? 1u : 0u);
@@ -1620,7 +1620,7 @@ void SandboxApp::rebuildOutlinerCache() {
         if (anyChunkWorldOwns(ent)) continue;
         // The drone is excluded for the same reason: transient, not authored (tracked via the
         // [Drone] AVER_INFO lines instead; it has no Details entry either).
-        if (ent == droneEntity_) continue;
+        if (ent == drone_.droneEntity_) continue;
         const auto* mr = w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer);
         // A RAW POINTER, NOT A std::string: this only needs to test emptiness, and the label
         // below (outlinerLabelFor) reads the name again anyway -- building a std::string here

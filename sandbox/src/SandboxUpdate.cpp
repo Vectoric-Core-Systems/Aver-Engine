@@ -1098,23 +1098,23 @@ void SandboxApp::tickThumbnailsAndTestHooks(Engine& e) {
 #if AVER_MODULE_SCRIPTING
 void SandboxApp::tickGraphs(const Timestep& t, HitchMarks& hm, const f32 gameDt) {
     // Ticks the graph-driven drone if live. Runs before chunk streaming so it sees this frame's drone position/velocity.
-    if (droneEntity_ != scene::kInvalidEntity && droneGraphLoaded_) {
-        droneTimeSeconds_ += t.dt;
-        scripts_.graphTick(static_cast<i32>(droneEntity_), droneTimeSeconds_);
+    if (drone_.droneEntity_ != scene::kInvalidEntity && drone_.droneGraphLoaded_) {
+        drone_.droneTimeSeconds_ += t.dt;
+        scripts_.graphTick(static_cast<i32>(drone_.droneEntity_), drone_.droneTimeSeconds_);
         scene::World& dw = scene::World::instance();
-        if (dw.valid(droneEntity_)) {
-            dronePos_ = dw.localTransform(droneEntity_).position;
+        if (dw.valid(drone_.droneEntity_)) {
+            drone_.dronePos_ = dw.localTransform(drone_.droneEntity_).position;
             const f32 droneInvDt = t.dt > 1e-6f ? 1.0f / t.dt : 0.0f;
-            droneVel_ = droneHaveLastPos_ ? (dronePos_ - droneLastPos_) * droneInvDt
+            drone_.droneVel_ = drone_.droneHaveLastPos_ ? (drone_.dronePos_ - drone_.droneLastPos_) * droneInvDt
                                           : Vec3{0.0f, 0.0f, 0.0f};
-            droneLastPos_ = dronePos_;
-            droneHaveLastPos_ = true;
+            drone_.droneLastPos_ = drone_.dronePos_;
+            drone_.droneHaveLastPos_ = true;
             // Greppable proof the drone MOVED across several frames (not just spawned).
-            if (droneLogsLeft_ > 0) {
-                --droneLogsLeft_;
+            if (drone_.droneLogsLeft_ > 0) {
+                --drone_.droneLogsLeft_;
                 AVER_INFO("[Drone] t={:.3f}s pos=({:.1f},{:.1f},{:.1f}) vel=({:.1f},{:.1f},{:.1f})cm/s",
-                          droneTimeSeconds_, dronePos_.x, dronePos_.y, dronePos_.z,
-                          droneVel_.x, droneVel_.y, droneVel_.z);
+                          drone_.droneTimeSeconds_, drone_.dronePos_.x, drone_.dronePos_.y, drone_.dronePos_.z,
+                          drone_.droneVel_.x, drone_.droneVel_.y, drone_.droneVel_.z);
             }
         }
     }
@@ -1145,8 +1145,8 @@ void SandboxApp::tickChunkAndLevelStreaming(const Timestep& t, HitchMarks& hm) {
         };
 #if AVER_MODULE_SCRIPTING
         // Drone keeps its own corridor resident while flying (both are StreamSource entries).
-        if (droneEntity_ != scene::kInvalidEntity && droneGraphLoaded_) {
-            const world::StreamSource drone{dronePos_, droneVel_};
+        if (drone_.droneEntity_ != scene::kInvalidEntity && drone_.droneGraphLoaded_) {
+            const world::StreamSource drone{drone_.dronePos_, drone_.droneVel_};
             streaming_.tick(viewState_.camPos_, t.dt, &drone, tris);
         } else
 #endif

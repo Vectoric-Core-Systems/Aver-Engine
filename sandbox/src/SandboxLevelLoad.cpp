@@ -130,18 +130,18 @@ void SandboxApp::setChunkStreamingEnabled(bool on) {
 // levelEntities_, so saveLevel/undo/redo never see it, and buildPanels' World Outliner filters it
 // out explicitly by entity id, the same way it filters streaming_.owns(e).
 void SandboxApp::setDroneEnabled(bool on) {
-    if (on == (droneEntity_ != scene::kInvalidEntity)) return;
+    if (on == (drone_.droneEntity_ != scene::kInvalidEntity)) return;
 
     if (!on) {
         scene::World& world = scene::World::instance();
-        if (world.valid(droneEntity_)) { world.destroy(droneEntity_); world.flush(); }
+        if (world.valid(drone_.droneEntity_)) { world.destroy(drone_.droneEntity_); world.flush(); }
 #if AVER_MODULE_SCRIPTING
-        if (scripts_.ready()) scripts_.graphUnload(static_cast<i32>(droneEntity_));
+        if (scripts_.ready()) scripts_.graphUnload(static_cast<i32>(drone_.droneEntity_));
 #endif
-        AVER_INFO("[Drone] disabled -- entity #{} released", (u32)droneEntity_);
-        droneEntity_ = scene::kInvalidEntity;
-        droneGraphLoaded_ = false;
-        droneHaveLastPos_ = false;
+        AVER_INFO("[Drone] disabled -- entity #{} released", (u32)drone_.droneEntity_);
+        drone_.droneEntity_ = scene::kInvalidEntity;
+        drone_.droneGraphLoaded_ = false;
+        drone_.droneHaveLastPos_ = false;
         return;
     }
 
@@ -221,7 +221,7 @@ void SandboxApp::setDroneEnabled(bool on) {
     // that file -- one sample's content compiled into the editor.
     // THE PROJECT'S OWN ANSWER FIRST, then the CLI override: until DRONE.GRAPH existed the drone
     // spawned with no graph from anywhere but --drone-graph, sitting perfectly still.
-    const std::string& droneRel = !droneGraphRel_.empty() ? droneGraphRel_ : project_.droneGraph;
+    const std::string& droneRel = !drone_.droneGraphRel_.empty() ? drone_.droneGraphRel_ : project_.droneGraph;
     const std::string graphPath =
         droneRel.empty() ? std::string() : project_.contentDir() + AVER_PATH_SEP + droneRel;
     if (graphPath.empty()) {
@@ -229,21 +229,21 @@ void SandboxApp::setDroneEnabled(bool on) {
                   "project a DRONE.GRAPH line (e.g. `DRONE.GRAPH Scripts/Drone.ocgraph`), or "
                   "pass --drone-graph <path relative to Content>.",
                   (u32)e);
-        droneGraphLoaded_ = false;
+        drone_.droneGraphLoaded_ = false;
     } else {
-        droneGraphLoaded_ = scripts_.graphLoad(static_cast<i32>(e), graphPath);
-        if (!droneGraphLoaded_)
+        drone_.droneGraphLoaded_ = scripts_.graphLoad(static_cast<i32>(e), graphPath);
+        if (!drone_.droneGraphLoaded_)
             AVER_WARN("[Drone] entity #{} spawned but its graph would not load from '{}' -- see "
                       "the [Graph] error line just above for why", (u32)e, graphPath);
     }
 #endif
-    droneEntity_ = e;
-    droneTimeSeconds_ = 0.0f;
-    droneHaveLastPos_ = false;
-    droneLogsLeft_ = 30;
+    drone_.droneEntity_ = e;
+    drone_.droneTimeSeconds_ = 0.0f;
+    drone_.droneHaveLastPos_ = false;
+    drone_.droneLogsLeft_ = 30;
     AVER_INFO("[Drone] enabled -- entity #{} spawned at ({:.0f},{:.0f},{:.0f}), graph {}",
               (u32)e, xf.position.x, xf.position.y, xf.position.z,
-              droneGraphLoaded_ ? "loaded" : "NOT loaded");
+              drone_.droneGraphLoaded_ ? "loaded" : "NOT loaded");
 }
 
 // Sum of triangle counts over every entity streaming_ currently owns. O(residentEntities), walked

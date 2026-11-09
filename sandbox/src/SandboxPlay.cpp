@@ -625,7 +625,7 @@ void SandboxApp::driveDefaultPawnFly(const Vec3& velocity, f32 dt) {
 // True when Play is standing in a drone because the project declares no GameMode. Not a real
 // play session -- aver_fw_begin_play never ran -- so aver_fw_play_state() knows nothing about it
 // and every place that gates on "are we playing" has to ask this too.
-bool SandboxApp::dronePlayActive() const { return droneStartedByPlay_; }
+bool SandboxApp::dronePlayActive() const { return drone_.droneStartedByPlay_; }
 
 // True while Play is standing in as a plain camera because the project declares no GameMode.
 // Not a play session -- begin_play never ran -- so everything that gates on "are we playing"
@@ -686,9 +686,9 @@ void SandboxApp::stopPlay() {
     // that was never begun does nothing here.
     vehicles_.end();
 #endif
-    if (droneStartedByPlay_) {
+    if (drone_.droneStartedByPlay_) {
         setDroneEnabled(false);
-        droneStartedByPlay_ = false;
+        drone_.droneStartedByPlay_ = false;
         AVER_INFO("[Sandbox] Stop: default drone stopped");
     }
     if (play_.defaultPawnPlay_) {
@@ -1059,7 +1059,7 @@ void SandboxApp::pushInput(bool uiActive) {
 void SandboxApp::drivePlayCamera(f32 dt) {
     // THE DRONE STANDS IN AS THE PAWN WHEN THERE IS NO GameMode: the drone fallback never calls
     // aver_fw_begin_play, so without this the camera would sit still while the drone flies.
-    const scene::Entity standIn = dronePlayActive() ? droneEntity_ : scene::kInvalidEntity;
+    const scene::Entity standIn = dronePlayActive() ? drone_.droneEntity_ : scene::kInvalidEntity;
     // Camera rigs run during a Play session only; authoring and the free-fly camera keep the default projection.
     if (!playSessionActive()) {
         playView_ = game::PlayView{};

@@ -1313,6 +1313,7 @@ private:
 #include "state/DebugOverlayState.hpp"
 #include "state/PanelState.hpp"
 #include "state/LevelDataState.hpp"
+#include "state/DroneState.hpp"
 class HitchMarks;
 namespace game { struct SceneDrawStats; }
 
@@ -1784,6 +1785,7 @@ private:
     DebugOverlayState dbgOv_;   // Debug overlays and diagnostics panels
     PanelState panels_;   // Editor panel/dialog visibility flags, prompt requests and dock layout 
     LevelDataState lvl_;   // Per-level side tables and caches
+    DroneState drone_;   // Editor drone pawn (graph-driven test pawn) runtime state.
     // ---- end feature state ----
 
     void applyProject(Engine& e);
@@ -3908,19 +3910,6 @@ private:
     // PCG chunk streaming (opt-in, transient entities).
     game::GameStreaming streaming_;
 
-    // Graph-driven drone (opt-in, transient). Spawned by setDroneEnabled, ticked via scripts_.graphTick.
-    scene::Entity droneEntity_ = scene::kInvalidEntity;
-    // True if Play started this drone (vs user enabling from Window > Drone).
-    bool droneStartedByPlay_ = false;
-    // .ocgraph path (relative to Content; set only by --drone-graph).
-    std::string droneGraphRel_;
-    bool droneGraphLoaded_ = false;
-    f32  droneTimeSeconds_ = 0.0f;
-    Vec3 dronePos_{};
-    Vec3 droneVel_{};
-    Vec3 droneLastPos_{};
-    bool droneHaveLastPos_ = false;         // False right after enabling; first velocity sample is zero.
-    u32  droneLogsLeft_ = 30;               // More than streaming's 8.
 #endif // AVER_MODULE_SCENE
 
     // Mouse capture (hidden, confined, re-centred each frame while playing).

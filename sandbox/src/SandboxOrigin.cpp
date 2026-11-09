@@ -44,7 +44,7 @@ void SandboxApp::initOrigin(Engine& e) {
     b.water = &water_;
 #  endif
     // Every origin-relative position the editor holds across frames (2.2.5, host members).
-    b.positions = {&viewState_.camPos_, &viewState_.viewPosOv_, &harness_.camWanderBasePos_, &camPosOverride_, &rset_.giCenter_, &dronePos_, &droneLastPos_, &viewState_.eye_};
+    b.positions = {&viewState_.camPos_, &viewState_.viewPosOv_, &harness_.camWanderBasePos_, &camPosOverride_, &rset_.giCenter_, &drone_.dronePos_, &drone_.droneLastPos_, &viewState_.eye_};
 #  if AVER_MODULE_LANDSCAPE
     b.positions.push_back(&landTool_.sculptCursor_);
 #  endif
