@@ -56,7 +56,7 @@ inline bool renameRegion(PhysAnimProfile& p, int index, const std::string& name)
     p.regions[static_cast<usize>(index)].name = name;
     return true;
 }
-// A later region wins for a bone both name, so order is meaning. Returns the new index or -1.
+// When two regions name the same bone the later one wins, so order is meaning. Returns the new index or -1.
 inline int moveRegion(PhysAnimProfile& p, int index, int delta) {
     const int to = index + delta;
     if (index < 0 || to < 0 || index >= static_cast<int>(p.regions.size()) || to >= static_cast<int>(p.regions.size()) || delta == 0) return -1;

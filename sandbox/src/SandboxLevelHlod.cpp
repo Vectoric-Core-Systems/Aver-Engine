@@ -13,10 +13,44 @@
 #    include "aver/trifactor/ClusterBuilder.hpp"
 #  endif
 
+#  include "aver/rhi/PrimitiveMeshes.hpp"
+
 #  include <filesystem>
 #  include <memory>
 
 namespace aver {
+namespace {
+
+// The engine's generated primitives (GameContent::registerBuiltins) as mesh data. They are names, not files, so the bake's own .ocmesh loader
+// skipped them -- and every new project's floor and walls are the built-in cube. Unit size, as the scene draws them; placement scale applies.
+bool builtinMeshData(const std::string& asset, fmt::OcMeshData& out) {
+    std::vector<rhi::MeshVertex> v;
+    std::vector<u32> idx;
+    if (asset == "Meshes/cube.ocmesh") appendBox(v, idx, 0, 0, 0, 1.0f);
+    else if (asset == "Meshes/sphere.ocmesh") appendSphere(v, idx, 1.0f, 24, 48);
+    else if (const rhi::primitives::BuiltinPrimitive* p = rhi::primitives::findBuiltinPrimitive(asset)) p->build(v, idx);
+    else return false;
+    if (v.empty() || idx.empty()) return false;
+    out = fmt::OcMeshData{};
+    out.positions.reserve(v.size() * 3);
+    out.normals.reserve(v.size() * 3);
+    out.uvs.reserve(v.size() * 2);
+    for (const rhi::MeshVertex& m : v) {
+        out.positions.insert(out.positions.end(), {m.px, m.py, m.pz});
+        out.normals.insert(out.normals.end(), {m.nx, m.ny, m.nz});
+        out.uvs.insert(out.uvs.end(), {m.u, m.v});
+    }
+    out.indices = std::move(idx);
+    fmt::OcMeshSubmesh s;
+    s.indexCount = static_cast<u32>(out.indices.size());
+    s.vertexCount = static_cast<u32>(v.size());
+    out.submeshes.push_back(s);
+    out.materialSlots.push_back(std::string());   // the placement's material names it
+    out.computeBounds();
+    return true;
+}
+
+} // namespace
 
 void SandboxApp::startHlodBuild() {
     const std::string blocked = editor::hlodBlockedReason(levelHeader_.stream, project_.valid() && !levelPath_.empty());
@@ -41,6 +75,9 @@ void SandboxApp::startHlodBuild() {
         editor::HlodJobResult res;
         fmt::OcHlodOptions opt;
         opt.force = force;
+        opt.meshLoader = [contentDir](const std::string& asset, fmt::OcMeshData& out) {
+            return fmt::loadOcMesh((std::filesystem::path(contentDir) / asset).string(), out) || builtinMeshData(asset, out);
+        };
         opt.cancel = [&cancel]() { return cancel.load(); };
         opt.progress = [&done, &total](u32 d, u32 t) { done = d; total = t; };
 #  if AVER_MODULE_TRIFACTOR

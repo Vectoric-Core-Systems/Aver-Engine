@@ -147,6 +147,50 @@ void FoliageTypeEditor::setAlignToNormal(bool on) {
     dirty_ = true;
 }
 
+void FoliageTypeEditor::setCullRangeCm(f32 startCm, f32 endCm) {
+    if (!loaded_) return;
+    startCm = std::max(0.0f, startCm);
+    endCm = std::max(0.0f, endCm);
+    if (endCm > 0.0f) startCm = std::min(startCm, endCm);   // valid(): start <= end whenever culling is on
+    if (type_.cullStartCm == startCm && type_.cullEndCm == endCm) return;
+    pushUndo();
+    type_.cullStartCm = startCm;
+    type_.cullEndCm = endCm;
+    dirty_ = true;
+}
+
+void FoliageTypeEditor::setLodScaleBias(f32 bias) {
+    if (!loaded_) return;
+    bias = std::max(0.05f, bias);   // valid() wants > 0
+    if (type_.lodScaleBias == bias) return;
+    pushUndo();
+    type_.lodScaleBias = bias;
+    dirty_ = true;
+}
+
+void FoliageTypeEditor::setAlignMaxAngleDeg(f32 deg) {
+    if (!loaded_) return;
+    deg = std::clamp(deg, 0.0f, 90.0f);
+    if (type_.alignMaxAngleDeg == deg) return;
+    pushUndo();
+    type_.alignMaxAngleDeg = deg;
+    dirty_ = true;
+}
+
+void FoliageTypeEditor::setGroundOffsetCm(f32 cm) {
+    if (!loaded_ || type_.groundOffsetCm == cm) return;
+    pushUndo();
+    type_.groundOffsetCm = cm;
+    dirty_ = true;
+}
+
+void FoliageTypeEditor::setCollision(fmt::OcFoliageData::Collision c) {
+    if (!loaded_ || type_.collision == c) return;
+    pushUndo();
+    type_.collision = c;
+    dirty_ = true;
+}
+
 // ---- drawing --------------------------------------------------------------------------------------
 
 #if AVER_WITH_IMGUI
@@ -172,6 +216,33 @@ void FoliageTypeEditor::drawParams() {
         bool alignToNormal = type_.alignToNormal;
         if (ImGui::Checkbox("Align to slope", &alignToNormal)) setAlignToNormal(alignToNormal);
         ImGui::TextDisabled("Tilts each instance to the sampled terrain normal instead of upright.");
+        ImGui::BeginDisabled(!type_.alignToNormal);
+        f32 maxTilt = type_.alignMaxAngleDeg;
+        if (ImGui::DragFloat("Max tilt (deg)", &maxTilt, 0.5f, 0.0f, 90.0f, "%.0f")) setAlignMaxAngleDeg(maxTilt);
+        ImGui::EndDisabled();
+        ImGui::TextDisabled("Steeper ground tilts the instance only this far. 90 = follow the slope fully.");
+
+        f32 offset = type_.groundOffsetCm;
+        if (ImGui::DragFloat("Ground offset (cm)", &offset, 0.5f, -500.0f, 500.0f, "%.1f")) setGroundOffsetCm(offset);
+        ImGui::TextDisabled("Negative sinks the instance, so a trunk base sits below the surface.");
+    }
+
+    ImGui::SeparatorText("Distance");
+    {
+        f32 cull[2] = {type_.cullStartCm / 100.0f, type_.cullEndCm / 100.0f};
+        if (ImGui::DragFloat2("Cull start / end (m)", cull, 1.0f, 0.0f, 20000.0f, "%.0f")) setCullRangeCm(cull[0] * 100.0f, cull[1] * 100.0f);
+        ImGui::TextDisabled("Thins out from the start and is gone past the end. End 0 = never culled.");
+        f32 bias = type_.lodScaleBias;
+        if (ImGui::DragFloat("LOD distance scale", &bias, 0.01f, 0.05f, 8.0f, "%.2f")) setLodScaleBias(bias);
+        ImGui::TextDisabled("Multiplies the distance at which the mesh switches LOD. 1 = the mesh's own.");
+    }
+
+    ImGui::SeparatorText("Collision");
+    {
+        static const char* kKinds[] = {"None", "Trunk", "Full"};
+        int c = static_cast<int>(type_.collision);
+        if (ImGui::Combo("Collision", &c, kKinds, 3)) setCollision(static_cast<fmt::OcFoliageData::Collision>(c));
+        ImGui::TextDisabled("Carried into the instance file; nothing reads it at runtime yet.");
     }
 
     ImGui::SeparatorText("Palette");

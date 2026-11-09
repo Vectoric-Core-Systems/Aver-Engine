@@ -300,7 +300,7 @@ void OcShapeEditor::drawOutline() {
         const sm::OutlineRow& r = rows[i];
         const ShapeNode& n = shape_.nodes[r.node];
         ImGui::PushID(static_cast<int>(i));
-        ImGui::Indent(static_cast<f32>(r.depth) * 14.0f);
+        if (static_cast<f32>(r.depth) * 14.0f > 0.0f) ImGui::Indent(static_cast<f32>(r.depth) * 14.0f);   // Indent(0) would apply the default indent
         std::string label = n.id + "   " + sm::describe(shape_, n);
         if (n.id == shape_.root) label += "   [root]";
         if (r.repeated) label += "   (again)";
@@ -308,7 +308,7 @@ void OcShapeEditor::drawOutline() {
         if (r.orphan) ImGui::PushStyleColor(ImGuiCol_Text, kDim);
         if (ImGui::Selectable(label.c_str(), n.id == selectedId_)) selectedId_ = n.id;
         if (r.orphan) ImGui::PopStyleColor();
-        ImGui::Unindent(static_cast<f32>(r.depth) * 14.0f);
+        if (static_cast<f32>(r.depth) * 14.0f > 0.0f) ImGui::Unindent(static_cast<f32>(r.depth) * 14.0f);
         ImGui::PopID();
     }
     ImGui::EndChild();

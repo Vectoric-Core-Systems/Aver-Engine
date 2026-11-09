@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cfloat>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -161,8 +162,18 @@ bool PcgGraphEditor::setParam(const std::string& nodeId, const std::string& key,
     return false;
 }
 
+// Undo/redo restore the graph; the canvas draws from displayPos_, so positioned nodes take their restored places (a moved node went back
+// in the data but stayed where it was on screen). Unpositioned nodes keep their display-only layout.
+void PcgGraphEditor::resyncPositionsFromGraph() {
+    for (const fmt::OcGraphNode& n : graph_.nodes)
+        if (n.hasPosition) displayPos_[n.id] = Vec2(static_cast<f32>(n.x), static_cast<f32>(n.y));
+    for (auto it = displayPos_.begin(); it != displayPos_.end();)
+        it = pcged::hasNode(graph_, it->first) ? std::next(it) : displayPos_.erase(it);
+}
+
 void PcgGraphEditor::undo() {
     if (!history_.undo(graph_)) return;
+    resyncPositionsFromGraph();
     dirty_ = true;
     if (!pcged::hasNode(graph_, selNode_)) selNode_.clear();
     invalidate();
@@ -170,6 +181,7 @@ void PcgGraphEditor::undo() {
 
 void PcgGraphEditor::redo() {
     if (!history_.redo(graph_)) return;
+    resyncPositionsFromGraph();
     dirty_ = true;
     if (!pcged::hasNode(graph_, selNode_)) selNode_.clear();
     invalidate();
@@ -301,6 +313,10 @@ void PcgGraphEditor::draw(Engine&) {
         }
     }
 
+    // Every size below is in logical px and scaled by the UI font: at 300% DPI the text is three times larger and
+    // fixed sizes clipped the palette and inspector and drew node titles past their boxes.
+    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+
     // ---- toolbar ----
     ImGui::BeginDisabled(!history_.canUndo());
     if (ImGui::Button("Undo")) undo();
@@ -315,11 +331,11 @@ void PcgGraphEditor::draw(Engine&) {
     ImGui::SameLine();
     ImGui::Checkbox("Auto", &autoRun_);
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(70.0f);
+    ImGui::SetNextItemWidth(70.0f * dpi);
     int seed = setup_.seed;
     if (ImGui::InputInt("Seed", &seed, 0, 0)) setSeed(seed);
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(80.0f);
+    ImGui::SetNextItemWidth(80.0f * dpi);
     f32 halfM = areaHalf_ / 100.0f;
     if (ImGui::InputFloat("Half size (m)", &halfM, 0.0f, 0.0f, "%.0f")) setAreaHalfCm(halfM * 100.0f);
     ImGui::SameLine();
@@ -363,7 +379,7 @@ void PcgGraphEditor::draw(Engine&) {
     };
 
     const f32 totalW = ImGui::GetContentRegionAvail().x;
-    const f32 paletteW = 190.0f, inspectW = 290.0f;
+    const f32 paletteW = 190.0f * dpi, inspectW = 290.0f * dpi;
 
     // ---- palette ----
     ImGui::BeginChild("##pcgpalette", ImVec2(paletteW, 0), true);
@@ -378,7 +394,9 @@ void PcgGraphEditor::draw(Engine&) {
         if (e.category != lastCat) { ImGui::SeparatorText(e.category.c_str()); lastCat = e.category; }
         if (ImGui::Selectable(e.type.c_str())) {
             // Added at the middle of the visible canvas.
-            const Vec2 centre = screenToCanvas(view_, Vec2((totalW - paletteW - inspectW) * 0.5f, 200.0f));
+            CanvasTransform vwAdd = view_;
+            vwAdd.zoom *= dpi;
+            const Vec2 centre = screenToCanvas(vwAdd, Vec2((totalW - paletteW - inspectW) * 0.5f, 200.0f * dpi));
             addNode(e.type, centre.x, centre.y);
         }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s\n%d in, %d out%s", e.doc.c_str(), e.inputs, e.outputs, e.sink ? " (spawner: a result)" : "");
@@ -387,7 +405,7 @@ void PcgGraphEditor::draw(Engine&) {
     ImGui::SameLine();
 
     // ---- canvas ----
-    ImGui::BeginChild("##pcgcanvas", ImVec2(totalW - paletteW - inspectW - 16.0f, 0), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::BeginChild("##pcgcanvas", ImVec2(totalW - paletteW - inspectW - 16.0f * dpi, 0), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     const ImVec2 size = ImGui::GetContentRegionAvail();
     ImGui::InvisibleButton("##canvasbtn", size, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight | ImGuiButtonFlags_MouseButtonMiddle);
@@ -396,16 +414,25 @@ void PcgGraphEditor::draw(Engine&) {
     dl->PushClipRect(origin, ImVec2(origin.x + size.x, origin.y + size.y), true);
     dl->AddRectFilled(origin, ImVec2(origin.x + size.x, origin.y + size.y), IM_COL32(28, 28, 32, 255));
 
-    if (!framed_ && !graph_.nodes.empty()) {
+    // Framed to the canvas, and framed again whenever the canvas changes size until the user zooms, pans or drags: a new tab is often first
+    // drawn squeezed (tiny on its first frame, or under the Content Browser drawer it was created from), and one framing then stuck.
+    if (framed_ && !viewTouched_ && (std::fabs(size.x - framedFor_.x) > 1.0f || std::fabs(size.y - framedFor_.y) > 1.0f)) framed_ = false;
+    if (!framed_ && !graph_.nodes.empty() && size.x > 200.0f * dpi && size.y > 150.0f * dpi) {
         Vec2 lo(1e9f, 1e9f), hi(-1e9f, -1e9f);
         for (const auto& kv : displayPos_) { lo = Vec2(std::min(lo.x, kv.second.x), std::min(lo.y, kv.second.y)); hi = Vec2(std::max(hi.x, kv.second.x + 160.0f), std::max(hi.y, kv.second.y + 80.0f)); }
-        view_ = frameTransform(lo, hi, Vec2(size.x, size.y), 40.0f, 0.3f, 1.0f);
+        view_ = frameTransform(lo, hi, Vec2(size.x, size.y), 40.0f * dpi, 0.3f * dpi, 1.0f * dpi);
+        view_.zoom /= dpi;
         framed_ = true;
+        framedFor_ = Vec2(size.x, size.y);
     }
-    const auto toScreen = [&](Vec2 c) { const Vec2 s = canvasToScreen(view_, c); return ImVec2(origin.x + s.x, origin.y + s.y); };
+    // The layout is in logical canvas units (positions and node sizes alike); the UI scale is folded into the zoom here, so a 300% DPI
+    // screen draws the same graph three times larger instead of growing the nodes into each other. view_.zoom stays the user's zoom.
+    CanvasTransform vw = view_;
+    vw.zoom *= dpi;
+    const auto toScreen = [&](Vec2 c) { const Vec2 s = canvasToScreen(vw, c); return ImVec2(origin.x + s.x, origin.y + s.y); };
 
     // grid
-    const f32 step = 100.0f * view_.zoom;
+    const f32 step = 100.0f * vw.zoom;
     if (step > 8.0f) {
         for (f32 x = std::fmod(view_.panPx.x, step); x < size.x; x += step) dl->AddLine(ImVec2(origin.x + x, origin.y), ImVec2(origin.x + x, origin.y + size.y), IM_COL32(255, 255, 255, 12));
         for (f32 y = std::fmod(view_.panPx.y, step); y < size.y; y += step) dl->AddLine(ImVec2(origin.x, origin.y + y), ImVec2(origin.x + size.x, origin.y + y), IM_COL32(255, 255, 255, 12));
@@ -424,10 +451,15 @@ void PcgGraphEditor::draw(Engine&) {
 
     // input
     const ImVec2 mp = ImGui::GetIO().MousePos;
-    const Vec2 mouseCanvas = screenToCanvas(view_, Vec2(mp.x - origin.x, mp.y - origin.y));
+    const Vec2 mouseCanvas = screenToCanvas(vw, Vec2(mp.x - origin.x, mp.y - origin.y));
     if (hovered) {
-        if (io.MouseWheel != 0.0f) view_ = zoomAroundScreenPoint(view_, std::min(1.5f, std::max(0.25f, view_.zoom * (1.0f + 0.1f * io.MouseWheel))), Vec2(mp.x - origin.x, mp.y - origin.y));
-        if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle, 0.0f) || ImGui::IsMouseDragging(ImGuiMouseButton_Right, 0.0f)) view_.panPx = view_.panPx + Vec2(io.MouseDelta.x, io.MouseDelta.y);
+        if (io.MouseWheel != 0.0f) {
+            viewTouched_ = true;
+            const f32 z = std::min(1.5f, std::max(0.25f, view_.zoom * (1.0f + 0.1f * io.MouseWheel)));
+            view_ = zoomAroundScreenPoint(vw, z * dpi, Vec2(mp.x - origin.x, mp.y - origin.y));
+            view_.zoom = z;
+        }
+        if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle, 0.0f) || ImGui::IsMouseDragging(ImGuiMouseButton_Right, 0.0f)) { view_.panPx = view_.panPx + Vec2(io.MouseDelta.x, io.MouseDelta.y); viewTouched_ = true; }
         if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
             const GraphHitResult hit = hitTest(graph_, layouts, mouseCanvas, style, 1.0f);
             selLink_ = -1;
@@ -437,6 +469,7 @@ void PcgGraphEditor::draw(Engine&) {
             } else if (hit.kind == GraphHitKind::Node) {
                 selNode_ = hit.nodeId;
                 dragNode_ = hit.nodeId;
+                dragMoved_ = false;
                 beginDrag();
                 if (debugOn_) refreshDebug();
             } else if (hit.kind == GraphHitKind::Link) {
@@ -450,10 +483,16 @@ void PcgGraphEditor::draw(Engine&) {
     if (!dragNode_.empty()) {
         if (ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f)) {
             const auto it = displayPos_.find(dragNode_);
-            if (it != displayPos_.end()) moveNode(dragNode_, it->second.x + io.MouseDelta.x / view_.zoom, it->second.y + io.MouseDelta.y / view_.zoom);
+            if (it != displayPos_.end() && (io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f)) {
+                moveNode(dragNode_, it->second.x + io.MouseDelta.x / vw.zoom, it->second.y + io.MouseDelta.y / vw.zoom);
+                dragMoved_ = true;
+                viewTouched_ = true;
+            }
         }
         if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
-            if (!ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f)) history_.cancelPush();   // a click, not a move
+            // Decided by whether the node moved: at release the button is already up, so asking IsMouseDragging here
+            // was always false and every move lost its undo entry.
+            if (!dragMoved_) history_.cancelPush();   // a click, not a move
             dragNode_.clear();
         }
     }
@@ -487,7 +526,9 @@ void PcgGraphEditor::draw(Engine&) {
         }
     }
 
-    // nodes
+    // nodes: text follows the zoom like the boxes do, so a title stays inside its node at any zoom
+    ImFont* font = ImGui::GetFont();
+    const f32 fontPx = ImGui::GetFontSize() * view_.zoom;
     for (usize i = 0; i < graph_.nodes.size(); ++i) {
         const fmt::OcGraphNode& n = graph_.nodes[i];
         const GraphNodeLayout& L = layouts[i];
@@ -497,24 +538,25 @@ void PcgGraphEditor::draw(Engine&) {
         const bool sel = n.id == selNode_;
         const int errs = problemsOf(n.id);
         dl->AddRectFilled(lo, hi, IM_COL32(44, 44, 50, 245), 4.0f);
-        dl->AddRectFilled(lo, ImVec2(hi.x, lo.y + style.headerHeightPx * view_.zoom), categoryColor(spec ? spec->category : "Other"), 4.0f, ImDrawFlags_RoundCornersTop);
+        dl->AddRectFilled(lo, ImVec2(hi.x, lo.y + style.headerHeightPx * vw.zoom), categoryColor(spec ? spec->category : "Other"), 4.0f, ImDrawFlags_RoundCornersTop);
         dl->AddRect(lo, hi, errs ? IM_COL32(230, 70, 60, 255) : sel ? IM_COL32(255, 150, 50, 255) : (def && def->sink) ? IM_COL32(210, 170, 70, 200) : IM_COL32(90, 90, 100, 255), 4.0f, 0, sel ? 2.0f : 1.0f);
         if (view_.zoom > 0.45f) {
-            dl->AddText(ImVec2(lo.x + 8.0f * view_.zoom, lo.y + 4.0f * view_.zoom), IM_COL32(240, 240, 240, 255), n.type.c_str());
+            dl->AddText(font, fontPx, ImVec2(lo.x + 8.0f * vw.zoom, lo.y + 4.0f * vw.zoom), IM_COL32(240, 240, 240, 255), n.type.c_str());
             const auto pc = run_.pointCount.find(n.id);
             if (pc != run_.pointCount.end()) {
                 char b[32];
                 std::snprintf(b, sizeof b, "%u pts", pc->second);
-                dl->AddText(ImVec2(lo.x, hi.y + 2.0f), IM_COL32(150, 200, 150, 255), b);
+                dl->AddText(font, fontPx, ImVec2(lo.x, hi.y + 2.0f * vw.zoom), IM_COL32(150, 200, 150, 255), b);
             }
-            if (errs) dl->AddText(ImVec2(hi.x - 14.0f, lo.y + 2.0f), IM_COL32(255, 90, 80, 255), "!");
+            if (errs) dl->AddText(font, fontPx, ImVec2(hi.x - 14.0f * vw.zoom, lo.y + 2.0f * vw.zoom), IM_COL32(255, 90, 80, 255), "!");
         }
         for (const GraphPinLayout& p : L.pins) {
             const ImVec2 c = toScreen(p.pos);
-            dl->AddCircleFilled(c, style.pinRadiusPx * view_.zoom, pcged::pinColor(p.type));
+            dl->AddCircleFilled(c, style.pinRadiusPx * vw.zoom, pcged::pinColor(p.type));
             if (view_.zoom > 0.6f) {
-                const ImVec2 ts = ImGui::CalcTextSize(p.name.c_str());
-                dl->AddText(ImVec2(p.isOutput ? c.x - ts.x - 8.0f : c.x + 8.0f, c.y - ts.y * 0.5f), IM_COL32(200, 200, 205, 255), p.name.c_str());
+                const ImVec2 ts = font->CalcTextSizeA(fontPx, FLT_MAX, 0.0f, p.name.c_str());
+                const f32 off = 8.0f * vw.zoom;
+                dl->AddText(font, fontPx, ImVec2(p.isOutput ? c.x - ts.x - off : c.x + off, c.y - ts.y * 0.5f), IM_COL32(200, 200, 205, 255), p.name.c_str());
             }
         }
     }
@@ -538,6 +580,7 @@ void PcgGraphEditor::draw(Engine&) {
         ImGui::Separator();
         ImGui::TextDisabled("Parameters");
         const std::string nodeId = sel->id, nodeType = sel->type;
+        const f32 labelCol = ImGui::GetContentRegionAvail().x * 0.45f;
         for (const GraphAttributeRow& row : computeAttributeRows(*sel, pcged::declaredKeys(nodeType))) {
             ImGui::PushID(row.key.c_str());
             const pcged::ParamSpec* spec = pcged::paramSpec(nodeType, row.key);
@@ -546,6 +589,10 @@ void PcgGraphEditor::draw(Engine&) {
                 bool on = shown == "1" || shown == "true";
                 if (ImGui::Checkbox(row.label.c_str(), &on)) setParam(nodeId, row.key, on ? "1" : "0");
             } else {
+                // The name sits in its own column: as only the field's hint it vanished the moment the field held a value.
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted(row.label.c_str());
+                ImGui::SameLine(labelCol);
                 std::string& buf = paramBuf_[nodeId + "." + row.key];
                 if (!ImGui::IsAnyItemActive()) buf = shown;
                 char text[512];

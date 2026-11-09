@@ -63,6 +63,7 @@ public:
     bool unlink(usize index);
     bool moveNode(const std::string& id, f64 x, f64 y);   // no undo entry: a drag pushes one when it starts (beginDrag)
     void beginDrag() { pushUndo(); }
+    void resyncPositionsFromGraph();   // displayPos_ follows the graph after undo/redo
     bool setParam(const std::string& nodeId, const std::string& key, const std::string& value);
     void undo();
     void redo();
@@ -112,9 +113,12 @@ private:
 #if AVER_WITH_IMGUI
     CanvasTransform view_;
     bool framed_ = false;
+    bool viewTouched_ = false;   // the user zoomed, panned or dragged: stop re-framing on resize
+    Vec2 framedFor_{0.0f, 0.0f};   // the canvas size the last framing used
     std::string paletteSearch_;
     // drag state
     std::string dragNode_;
+    bool dragMoved_ = false;   // the dragged node actually moved, so the drag keeps its undo entry
     bool linking_ = false;
     std::string linkNode_, linkPin_;
     bool linkFromOutput_ = true;

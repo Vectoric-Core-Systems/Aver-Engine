@@ -106,6 +106,12 @@ public:
     void setRandomizeYaw(bool on);
     void setCollisionRadiusCm(f32 radiusCm);
     void setAlignToNormal(bool on);
+    // The additive W4.3 fields; each clamps to what OcFoliageData::valid() accepts.
+    void setCullRangeCm(f32 startCm, f32 endCm);
+    void setLodScaleBias(f32 bias);
+    void setAlignMaxAngleDeg(f32 deg);
+    void setGroundOffsetCm(f32 cm);
+    void setCollision(fmt::OcFoliageData::Collision c);
 
 private:
     void loadFromDisk();

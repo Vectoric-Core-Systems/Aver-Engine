@@ -108,7 +108,7 @@ void drawDataLayersPanel(bool* open, dl::Model& model, DataLayersUi& ui, const D
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Editor only: an unloaded layer's objects are hidden and cannot be picked,\nso a big level opens light. They stay in the level and save as before.");
 
             ImGui::TableSetColumnIndex(2);
-            ImGui::Indent(static_cast<f32>(row.depth) * 14.0f * dpi);
+            if (static_cast<f32>(row.depth) * 14.0f * dpi > 0.0f) ImGui::Indent(static_cast<f32>(row.depth) * 14.0f * dpi);   // Indent(0) would apply the default indent
             if (ui.renaming == row.name) {
                 if (ui.focusName) { ImGui::SetKeyboardFocusHere(); ui.focusName = false; }
                 ImGui::SetNextItemWidth(-FLT_MIN);
@@ -129,7 +129,7 @@ void drawDataLayersPanel(bool* open, dl::Model& model, DataLayersUi& ui, const D
                     ui.selected = row.name;
                 if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) startRename(ui, row.name);
             }
-            ImGui::Unindent(static_cast<f32>(row.depth) * 14.0f * dpi);
+            if (static_cast<f32>(row.depth) * 14.0f * dpi > 0.0f) ImGui::Unindent(static_cast<f32>(row.depth) * 14.0f * dpi);
 
             ImGui::TableSetColumnIndex(3);
             ImGui::Text("%zu", model.memberCount(row.name));

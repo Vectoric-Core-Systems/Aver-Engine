@@ -11,6 +11,14 @@
 
 namespace aver::editor {
 
+namespace {
+// The table's folder (Content/Foliage) does not exist in a project that never scattered: the save failed with "write failed".
+void makeOutputDir(const std::string& contentDir, const std::string& rel) {
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(contentDir) / std::filesystem::path(rel).parent_path(), ec);
+}
+}  // namespace
+
 bool LandSectionsQuery::heightAt(f64 x, f64 y, f32& z) const {
     for (const fmt::OcLandData* d : sections_)
         if (d && landscape::surfaceHeightAt(*d, static_cast<f32>(x), static_cast<f32>(y), z)) return true;
@@ -76,6 +84,7 @@ LayerVegetationOutcome generateLayerVegetation(const std::vector<const fmt::OcLa
     if (!r.ok) { out.error = r.error; return out; }
 
     std::string why;
+    makeOutputDir(contentDir, req.ocinstRel);
     if (!fmt::saveOcBiome(contentDir + "/" + biomeRel, biome, &why)) { out.error = why; return out; }
     if (!fmt::saveOcInstances(contentDir + "/" + req.ocinstRel, r.table, &why)) { out.error = why; return out; }
     if (!fmt::saveOcVegetation(contentDir + "/" + recRel, gen.record(), &why)) { out.error = why; return out; }
@@ -164,6 +173,7 @@ BiomeVegetationOutcome generateBiomeVegetation(const std::vector<const fmt::OcLa
     if (!r.ok) { out.error = r.error; return out; }
 
     std::string why;
+    makeOutputDir(contentDir, req.ocinstRel);
     if (!fmt::saveOcInstances(contentDir + "/" + req.ocinstRel, r.table, &why)) { out.error = why; return out; }
     if (!fmt::saveOcVegetation(contentDir + "/" + recRel, gen.record(), &why)) { out.error = why; return out; }
     out.ok = true;

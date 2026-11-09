@@ -2370,14 +2370,14 @@ void AnimEditor::drawBones() {
         // Indented by depth rather than nested, because a tree of one-child chains is all twisties.
         int depth = 0;
         for (i32 p = b.parent; p >= 0 && depth < 32; p = skel_.bones[usize(p)].parent) ++depth;
-        ImGui::Indent(depth * 12.0f);
+        if (depth * 12.0f > 0.0f) ImGui::Indent(depth * 12.0f);   // Indent(0) would apply the default indent
         const bool sel = static_cast<int>(i) == selectedBone_;
         if (ImGui::Selectable(b.name.empty() ? "<unnamed>" : b.name.c_str(), sel))
             selectedBone_ = sel ? -1 : static_cast<int>(i);
         if (ImGui::IsItemHovered() && i < model_.size())
             ImGui::SetTooltip("bone %zu  model (%.1f, %.1f, %.1f) cm", i,
                               model_[i].m[3][0], model_[i].m[3][1], model_[i].m[3][2]);
-        ImGui::Unindent(depth * 12.0f);
+        if (depth * 12.0f > 0.0f) ImGui::Unindent(depth * 12.0f);
         ImGui::PopID();
     }
 #endif

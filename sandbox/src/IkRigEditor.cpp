@@ -569,13 +569,13 @@ void IkRigEditor::drawLeft() {
         int depth = 0;
         for (i32 p = b.parent; p >= 0 && depth < 32; p = skel_.bones[static_cast<usize>(p)].parent) ++depth;
         ImGui::PushID(static_cast<int>(i));
-        ImGui::Indent(depth * 10.0f);
+        if (depth * 10.0f > 0.0f) ImGui::Indent(depth * 10.0f);   // Indent(0) would apply the default indent
         unsigned col = 0;
         for (const auto& t : tag) if (t.first == b.name) col = t.second;
         if (col) ImGui::PushStyleColor(ImGuiCol_Text, col);
         if (ImGui::Selectable(b.name.empty() ? "<unnamed>" : b.name.c_str(), static_cast<i32>(i) == selBone_)) selBone_ = static_cast<i32>(i);
         if (col) ImGui::PopStyleColor();
-        ImGui::Unindent(depth * 10.0f);
+        if (depth * 10.0f > 0.0f) ImGui::Unindent(depth * 10.0f);
         ImGui::PopID();
     }
 }

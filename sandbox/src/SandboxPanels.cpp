@@ -757,11 +757,24 @@ void SandboxApp::buildLandscapeModePanel(Engine& e) {
         ImGui::TextWrapped("This level has no landscape section.");
         ImGui::Spacing();
         ImGui::TextDisabled("CREATE ONE");
-        ImGui::SetNextItemWidth(-1.0f);
-        ImGui::SliderInt("Samples", &landCreateSamples_, 129, 2049);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Grid resolution per side. Must satisfy the quadtree's tiling\n"
-                              "rule, which every power-of-two-plus-one in this range does.");
+        // A choice of the sizes the quadtree can tile, not a free slider: any other count wrote an .ocland that loaded but never built.
+        {
+            static constexpr int kSizes[] = {129, 257, 513, 1025, 2049};
+            if (std::find(std::begin(kSizes), std::end(kSizes), landCreateSamples_) == std::end(kSizes)) landCreateSamples_ = 513;
+            char cur[16];
+            std::snprintf(cur, sizeof cur, "%d", landCreateSamples_);
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::BeginCombo("Samples", cur)) {
+                for (int s : kSizes) {
+                    char lbl[16];
+                    std::snprintf(lbl, sizeof lbl, "%d", s);
+                    if (ImGui::Selectable(lbl, s == landCreateSamples_)) landCreateSamples_ = s;
+                }
+                ImGui::EndCombo();
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Grid resolution per side: a power of two plus one, the sizes the quadtree tiles.");
+        }
         ImGui::SetNextItemWidth(-1.0f);
         ImGui::SliderFloat("Spacing (cm)", &landCreateSpacingCm_, 25.0f, 400.0f, "%.0f");
         ImGui::TextDisabled("%.0f m across",

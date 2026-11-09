@@ -152,6 +152,7 @@ void SandboxApp::buildLandscapePaintTab(Engine& e) {
         ImGui::Spacing();
         ImGui::TextWrapped("The landscape's material has no terrain layers. Pick a layered terrain material above, or open a "
                            "material and press \"Make terrain material\" in its Details panel.");
+        buildBiomeSection();   // biomes need no paint layers: noise, slope, spline and volume masks work on a bare heightfield
         return;
     }
     const bool locked = playSessionActive();

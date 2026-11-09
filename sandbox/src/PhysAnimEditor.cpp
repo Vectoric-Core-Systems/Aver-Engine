@@ -160,6 +160,16 @@ void PhysAnimEditor::draw(Engine&) {
         else if (ImGui::IsKeyPressed(ImGuiKey_Y, false)) redo();
     }
 
+    // Sizes are logical px scaled by the UI font, so the swatches, indents and columns keep their proportions at 300% DPI.
+    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 lineH = ImGui::GetTextLineHeight();
+    const auto swatch = [&](ImU32 col) {
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(p.x, p.y + lineH * 0.15f), ImVec2(p.x + 6.0f * dpi, p.y + lineH * 0.9f), col);
+        ImGui::Dummy(ImVec2(10.0f * dpi, lineH));
+        ImGui::SameLine();
+    };
+
     // ---- toolbar ----
     ImGui::BeginDisabled(!history_.canUndo());
     if (ImGui::Button("Undo")) undo();
@@ -172,7 +182,7 @@ void PhysAnimEditor::draw(Engine&) {
     ImGui::TextDisabled("Skeleton");
     ImGui::SameLine();
     if (!skelScanned_) rescanSkeletons();
-    ImGui::SetNextItemWidth(320.0f);
+    ImGui::SetNextItemWidth(320.0f * dpi);
     if (ImGui::BeginCombo("##skel", skelOk_ ? fs::path(skelPath_).filename().string().c_str() : "(pick a skeleton to preview)")) {
         for (const std::string& c : skelChoices_)
             if (ImGui::Selectable(fs::path(c).filename().string().c_str(), c == skelPath_)) setSkeleton(c);
@@ -184,32 +194,36 @@ void PhysAnimEditor::draw(Engine&) {
     ImGui::Separator();
 
     if (previewStale_) refreshPreview();
-    const f32 rightW = std::max(360.0f, ImGui::GetContentRegionAvail().x * 0.5f);
+    const f32 rightW = std::max(360.0f * dpi, ImGui::GetContentRegionAvail().x * 0.5f);
 
     // ---- left: the skeleton ----
-    ImGui::BeginChild("##bones", ImVec2(ImGui::GetContentRegionAvail().x - rightW - 8.0f, 0), true);
+    ImGui::BeginChild("##bones", ImVec2(ImGui::GetContentRegionAvail().x - rightW - 8.0f * dpi, 0), true);
     ImGui::TextDisabled("Bones  (click one to aim the preview hit at it)");
     if (!skelOk_) {
         ImGui::TextWrapped("Pick a skeleton above to list its bones.");
     } else {
         const auto rows = physanim::boneRows(profile_, skel_);
+        f32 nameColX = 0.0f;
+        for (const physanim::BoneRow& row : rows)
+            nameColX = std::max(nameColX, ImGui::GetCursorPosX() + static_cast<f32>(row.depth) * 14.0f * dpi + 10.0f * dpi +
+                                          ImGui::GetStyle().ItemSpacing.x + ImGui::CalcTextSize(skel_.bones[static_cast<usize>(row.bone)].name.c_str()).x);
+        nameColX += 16.0f * dpi;
         for (const physanim::BoneRow& row : rows) {
             ImGui::PushID(row.bone);
-            ImGui::Indent(static_cast<f32>(row.depth) * 12.0f);
-            const ImVec2 p = ImGui::GetCursorScreenPos();
-            ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(p.x, p.y + 3.0f), ImVec2(p.x + 6.0f, p.y + 15.0f), regionColor(row.region));
-            ImGui::Dummy(ImVec2(10.0f, 0.0f));
-            ImGui::SameLine();
+            // Indent(0) means "the default indent" in ImGui, which pushed every root bone in past its children.
+            if (row.depth > 0) ImGui::Indent(static_cast<f32>(row.depth) * 14.0f * dpi);
+            swatch(regionColor(row.region));
             const f32 heat = preview_.valid && row.bone < static_cast<int>(preview_.peak.size()) ? preview_.peak[static_cast<usize>(row.bone)] : 0.0f;
             if (heat > 0.001f) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.55f + 0.45f * (1.0f - heat), 0.35f * (1.0f - heat), 1.0f));
             if (ImGui::Selectable(skel_.bones[static_cast<usize>(row.bone)].name.c_str(), selBone_ == row.bone, ImGuiSelectableFlags_AllowOverlap)) { selBone_ = row.bone; previewStale_ = true; }
             if (heat > 0.001f) ImGui::PopStyleColor();
             if (preview_.valid) {
-                ImGui::SameLine(ImGui::GetContentRegionAvail().x > 200.0f ? 220.0f : 0.0f);
+                // A column after the longest bone name, not a fixed 220 px that long names ran into.
+                ImGui::SameLine(nameColX);   // the Selectable spans the row (AllowOverlap), so this is an absolute column
                 ImGui::TextDisabled("%s", row.region >= 0 ? profile_.regions[static_cast<usize>(row.region)].name.c_str() : "default");
                 if (heat > 0.001f) { ImGui::SameLine(); ImGui::TextDisabled("%.0f%%", heat * 100.0f); }
             }
-            ImGui::Unindent(static_cast<f32>(row.depth) * 12.0f);
+            if (row.depth > 0) ImGui::Unindent(static_cast<f32>(row.depth) * 14.0f * dpi);
             ImGui::PopID();
         }
     }
@@ -218,15 +232,12 @@ void PhysAnimEditor::draw(Engine&) {
 
     // ---- right: regions, drive, reach, preview, problems ----
     ImGui::BeginChild("##profile", ImVec2(0, 0), false);
-    ImGui::TextDisabled("Regions  (a later region wins for a bone both name)");
+    ImGui::TextDisabled("Regions  (when two regions name the same bone, the later one wins)");
     if (ImGui::Selectable("(defaults: bones in no region)", selRegion_ < 0)) selRegion_ = -1;
     for (int i = 0; i < static_cast<int>(profile_.regions.size()); ++i) {
         ImGui::PushID(i);
         const ragdoll::PhysAnimRegion& r = profile_.regions[static_cast<usize>(i)];
-        const ImVec2 p = ImGui::GetCursorScreenPos();
-        ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(p.x, p.y + 3.0f), ImVec2(p.x + 6.0f, p.y + 15.0f), regionColor(i));
-        ImGui::Dummy(ImVec2(10.0f, 0.0f));
-        ImGui::SameLine();
+        swatch(regionColor(i));
         if (ImGui::Selectable((r.name + "  (" + std::to_string(r.bones.size()) + " bones, " + std::to_string(r.subtrees.size()) + " subtrees)").c_str(), selRegion_ == i)) selRegion_ = i;
         ImGui::PopID();
     }
@@ -251,7 +262,7 @@ void PhysAnimEditor::draw(Engine&) {
     }
     ImGui::EndDisabled();
     if (renaming_ && haveRegion) {
-        ImGui::SetNextItemWidth(200.0f);
+        ImGui::SetNextItemWidth(200.0f * dpi);
         if (ImGui::InputText("##rn", renameBuf_, sizeof renameBuf_, ImGuiInputTextFlags_EnterReturnsTrue)) {
             history_.push(profile_);
             if (!physanim::renameRegion(profile_, selRegion_, renameBuf_)) history_.cancelPush();
@@ -304,7 +315,10 @@ void PhysAnimEditor::draw(Engine&) {
         f32 imp = impulse_ > 0.0f ? impulse_ : profile_.fullImpulse;
         if (ImGui::SliderFloat("Hit impulse (kg*cm/s)", &imp, 50.0f, 20000.0f, "%.0f")) { impulse_ = imp; previewStale_ = true; }
         if (preview_.valid) {
-            ImGui::PlotLines("##curve", preview_.curve.data(), static_cast<int>(preview_.curve.size()), 0, "Envelope on the hit bone", 0.0f, 1.0f, ImVec2(-1.0f, 80.0f));
+            // Plotted to just past the moment it comes to rest: the full 4 s preview squeezed a 0.6 s reaction into the plot's left edge.
+            const int total = static_cast<int>(preview_.curve.size());
+            const int shown = preview_.dt > 0.0f ? std::min(total, std::max(8, static_cast<int>(preview_.settleSeconds / preview_.dt * 1.2f) + 4)) : total;
+            ImGui::PlotLines("##curve", preview_.curve.data(), shown, 0, "Envelope on the hit bone", 0.0f, 1.0f, ImVec2(-1.0f, 80.0f * dpi));
             ImGui::TextDisabled("%u bone(s) react; all at rest after %.2f s", preview_.bonesReached, preview_.settleSeconds);
         }
     }
