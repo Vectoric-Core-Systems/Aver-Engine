@@ -200,6 +200,8 @@ The five static relays (animNotify, animCurve, synapseTarget, synapseTargetResol
 
 ## Runtime/src/GameApp.cpp
 
+Layout: GameApp.cpp holds the constructor, `config`, and the ordered step lists of `onInit`, `onUpdate`, `onShutdown` (each step carries its own AVER_MODULE_* guard). The steps live in GameAppInit.cpp, GameAppUpdate.cpp (with `pushFrame`) and GameAppShutdown.cpp; the features in GameAppRenderFeatures.cpp (skinning, Voxi, HUD, particles, AverSR), GameAppProject.cpp (project open, level hooks, travel, sky and settings), GameAppScripting.cpp, GameAppSave.cpp and GameAppTestContent.cpp (`--pcg-volume-test`, `--particle-test`); `parseArgs` is in GameArgs.cpp. Shared includes and macro defaults are in GameAppInternal.hpp. The sections below still name functions by their old home.
+
 ### Part 0 (208 -> 94 lines, 55% reduction)
 
 Removed extensive technical context from comments:
@@ -399,6 +401,8 @@ Kept:
 - Line 686 (earlier in file) builds same path correctly; only this test was wrong.
 
 ## Runtime/src/GameContent.cpp
+
+Layout: GameContent.cpp keeps the content index and the mesh registry. Placeholder meshes are in GameContentBuiltins.cpp, script-built meshes and textures in GameContentRuntime.cpp, the collision build and its disk cache in GameContentCollision.cpp, the worker mesh prefetch in GameContentPrefetch.cpp, the material library glue in GameContentMaterials.cpp, particle effects in GameContentParticles.cpp. GameContentInternal.hpp carries the shared includes and the collision-build seams.
 
 - **Include guards for AssetType/assetTypeFromPath**: Asset ID always included (not guarded) because it is used by both loadProjectMeshes (scene-guarded) and loadProjectParticleEffects (particles-guarded). Previous PBR-guarded loadProjectMaterials was removed as dead code.
 

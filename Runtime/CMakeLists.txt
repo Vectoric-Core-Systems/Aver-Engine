@@ -244,6 +244,17 @@ if(AVER_BUILD_GAME)
   aver_add_module(Aver.Runtime.Game
     SOURCES
       src/GameApp.cpp
+      # GameApp's feature parts: the command line, project open and level hooks, render features, scripting, the save seams,
+      # test content, and the init / per-frame / shutdown steps GameApp.cpp calls in order.
+      src/GameArgs.cpp
+      src/GameAppProject.cpp
+      src/GameAppRenderFeatures.cpp
+      src/GameAppScripting.cpp
+      src/GameAppSave.cpp
+      src/GameAppTestContent.cpp
+      src/GameAppInit.cpp
+      src/GameAppUpdate.cpp
+      src/GameAppShutdown.cpp
       # LARGE_WORLD phase 2: slot S0 and the origin bindings for the shipped game (the participants themselves are in Core).
       src/GameAppOrigin.cpp
     DEPS

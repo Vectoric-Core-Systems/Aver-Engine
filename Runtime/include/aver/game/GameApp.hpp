@@ -31,7 +31,7 @@
 #endif
 #if AVER_WITH_UI_ABI
 #  include "aver/render/ui/UiRenderer.hpp"
-// UI font uploaded through this process's device, not the editor's (see GameApp.cpp).
+// UI font uploaded through this process's device, not the editor's (see GameAppRenderFeatures.cpp).
 #  include "aver/ui/UiFont.hpp"
 #endif
 #include "aver/game/GameAccessibility.hpp"
@@ -293,12 +293,65 @@ private:
 
 #if AVER_MODULE_VOXI && AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
     // particles DECIDED 4: the two halves of particles::ParticleRenderer::GiSeam.
-    // See GameApp.cpp for the full contract (identical to SandboxApp.cpp).
+    // See GameAppRenderFeatures.cpp for the full contract (identical to SandboxApp.cpp).
     static bool particleGiPrepare(u32 srvBase, u32 samplerBase, u32 cbRegister,
                                   std::string* outPrelude, std::string* outDefines, void* user);
     static void particleGiBind(rhi::IResourceFactory& res, rhi::BindingSetHandle set, u32 srvBase,
                                const void** outCbData, u32* outCbBytes, void* user);
 #endif
+
+    // ---- onInit / onUpdate / onShutdown steps ----
+    // GameApp.cpp holds the ordered calls; each step carries its own module guard. Init steps are in GameAppInit.cpp,
+    // frame steps in GameAppUpdate.cpp, teardown in GameAppShutdown.cpp.
+    void enableFileTrace();
+    void attachCrowdGpu(Engine&);
+    void bindWindowAndInput(Engine&);
+    void logModuleSet();
+    void applyVsyncOverride(Engine&);
+    void initWaterAndLandscape(Engine&);
+    void initGameUi(Engine&);
+    void attachSubViews(Engine&);
+    void startAudioDevice();
+    void registerSynapseComponents();
+    void installControlRig();
+    void installRagdoll();
+    void installAnimationProviders();
+    void installGameplayHosts();
+    void initPrefabs();
+    // The AverSR level and upscaler once the project's render settings are applied (GameAppRenderFeatures.cpp).
+    void resolveAverSr(Engine&);
+    void spawnParticleTest(Engine&);
+    void startScripting();
+    void spawnPlacedClasses();
+    void logSceneCensus();
+    void beginObjectPlay();
+    void beginLevelVehicles();
+
+    void beginFrame(Engine&, const Timestep&);
+    void dumpStatsIfDue(Engine&, const Timestep&);
+    void updateInput(Engine&);
+    void updateUi(Engine&, const Timestep&);
+    void tickWater(Engine&, f32 gameDt);
+    void tickGraphClasses(f32 gameDt);
+    void tickScene(Engine&, const Timestep&, f32 gameDt, bool objectsHeld);
+    void updateCamera(const Timestep&);
+    void pollDiagnostics();
+    void tickFrameBudget(Engine&, const Timestep&);
+    void syncRuntimeAssets(Engine&);
+
+    void detachSubViews();
+    void detachCrowdGpu(rhi::IDevice*);
+    void detachUpscalers(rhi::IDevice*);
+    void shutdownParticles(rhi::IDevice*);
+    void shutdownGameUi(rhi::IDevice*);
+    void removeSceneFeatures(rhi::IDevice*);
+    void shutdownVoxi(rhi::IDevice*);
+    void releaseContentMaterials();
+    void shutdownSceneState(rhi::IDevice*);
+    void shutdownWater(rhi::IDevice*);
+    void shutdownPhysics();
+    void shutdownAudio();
+    void shutdownScripting();
 
     GameConfig cfg_;
     InputState input_;
@@ -442,7 +495,7 @@ private:
     u64 lastReportedSteps_ = 0;
 
     // ---- THE STATIC RELAYS ----
-    // Each guard below is what that relay's body needs (for consistency with GameApp.cpp's definitions).
+    // Each guard below is what that relay's body needs (for consistency with the definitions in GameAppScripting.cpp).
 
 #if AVER_MODULE_SCENE
     // Raises an animation notify as a graph event.

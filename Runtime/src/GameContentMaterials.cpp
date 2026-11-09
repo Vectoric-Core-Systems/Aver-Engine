@@ -134,7 +134,7 @@ pbr::MaterialSystem::ResolvedTexture GameContent::resolveMaterialTexture(const p
     return out;
 }
 
-// ---- wave3 terrain layers ----
+// ---- terrain layers ----
 bool GameContent::resolveTerrainAtlas(const pbr::MaterialDesc& d, pbr::TerrainTextures& out, void* user) {
     auto* self = static_cast<GameContent*>(user);
     if (!self || !self->textureFactory_ || !d.terrain.enabled()) return false;
@@ -199,7 +199,6 @@ bool GameContent::resolveTerrainAtlas(const pbr::MaterialDesc& d, pbr::TerrainTe
     AVER_INFO("[Terrain] material '{}': {} layer(s) packed into {}x{} atlases ({} MiB)", d.name, count, ia.width, ia.height, bytes >> 20);
     return true;
 }
-// ---- end wave3 terrain layers ----
 
 // .ocmat GRAPHREF path to gMaterialGraphId. Returns 0 for materials with no graph or load failure.
 // Broken graph does not disable the material: falls back to stock factors/maps.
