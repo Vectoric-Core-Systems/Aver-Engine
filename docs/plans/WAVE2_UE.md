@@ -322,6 +322,14 @@ Dependency: W2 steps 1-3,5 are independent of everything else. Overlap with W10 
 7. Optional deferred tail seed if the hitch gate trips. **M, G.**
 Cook/package integration: later with `.ocpak` (cross-reference, not in wave 2).
 
+**Status 2026-11-09 (CPU steps 1-3).**
+- Done, headless-tested, full build and the 579-test suite green:
+  - Step 1: `readFileRange` (platform, cases in `FileRangeTest`); `statCachedTexture`/`readCachedMips` and `CachedTextureInfo` in `TextureCache` (the whole-file loader now shares the header parser); `TextureStreamMath.hpp` (window bytes, legal tops, tail/initial mip, footprint to mip, `textureStreamable`); `tests/assets/TextureStreamMathTest`.
+  - Step 2: `TexturePlanner`, `PoolController`, `UploadRing` (`modules/assets`, no device); `tests/assets/TexturePlannerTest`.
+  - Step 3: `MaterialSystem::textureId` owns the ray path's texture ids (cap `kMaterialTexIdCap` = 3072, released two `update()` calls after a texture is destroyed); `VoxiRenderer` takes material texture indices from it and appends all other textures above the cap; `MaterialTextureIdTest`. The streamable predicate is `textureStreamable`.
+- Not done: `MaterialConstants::texIndex` in the raster b2 block still carries `kUnboundTexture` (nothing reads it until the feedback pass, step 5); the `bindFeedbackId`/`forget` streamer hooks (they need `ITextureStreamer`, step 4); the equivalence screenshot (G) for step 3, which is the only check that the ray path's changed table order renders identically; everything in steps 4-7 (RHI, feedback shader, worker, host wiring), held for the owner's patent decision D2.
+- Differences from the design text: fallback textures get ids too (the design said unbound) so the ray path keeps sampling exactly what raster binds; the planner is time-free (hold and retry are in frames) and the tests use the design's FileRangeTest name inside the existing `FileRangeTest`.
+
 ---
 
 ## W9. Shadows on non-RT GPUs

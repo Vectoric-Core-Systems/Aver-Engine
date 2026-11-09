@@ -135,6 +135,11 @@ void MaterialSystem::shutdown() {
     textureRefs_.clear();
     setAverage_.clear();
     setTextures_.clear();
+    texId_.clear();
+    texIdRetired_.clear();
+    texIdFree_.clear();
+    texIdNext_ = 0;
+    texIdFullLogged_ = false;
     if (fallbackSet_) res_->destroyBindingSet(fallbackSet_);
     fallbackSet_ = 0;
     // Every set just destroyed above (entries_'s and fallbackSet_ alike) must leave liveSets_ too, or
@@ -379,7 +384,7 @@ rhi::TextureHandle MaterialSystem::embeddedTableFor(rhi::BindingSetHandle set, c
     td.debugName = "EmbeddedShaderUniforms";
     const rhi::TextureHandle fresh = res_->createTexture(td);
     if (!fresh) return t.tex;   // keep the previous table rather than bind nothing
-    if (t.tex) { embeddedHandles_.erase(t.tex); res_->destroyTexture(t.tex); }
+    if (t.tex) { embeddedHandles_.erase(t.tex); releaseTextureId(t.tex); res_->destroyTexture(t.tex); }
     t.tex = fresh;
     t.regs = p.regs;
     embeddedHandles_.insert(fresh);
@@ -511,6 +516,7 @@ void MaterialSystem::releaseSlotTextures(const std::array<rhi::TextureHandle, kT
         // ZERO LIVE MATERIALS REFERENCE THIS TEXTURE: the moment cache_ stops being honestly
         // describable as "cached" and starts being "leaked". Same deferred-by-contract destroy
         // shutdown() already uses -- see IResourceFactory::destroyTexture's own comment.
+        releaseTextureId(h);
         res_->destroyTexture(h);
         ++outTextures;
         if (const auto kit = cacheKeyOf_.find(h); kit != cacheKeyOf_.end()) {
@@ -531,6 +537,42 @@ const std::array<rhi::TextureHandle, kTextureSlotCount>* MaterialSystem::texture
         rhi::BindingSetHandle set) const {
     const auto it = setTextures_.find(set);
     return it == setTextures_.end() ? nullptr : &it->second;
+}
+
+u32 MaterialSystem::textureId(rhi::TextureHandle h) {
+    if (!h) return kUnboundTexture;
+    if (const auto it = texId_.find(h); it != texId_.end()) return it->second;
+    u32 id;
+    if (!texIdFree_.empty()) { id = texIdFree_.back(); texIdFree_.pop_back(); }
+    else if (texIdNext_ < kMaterialTexIdCap) id = texIdNext_++;
+    else {
+        if (!texIdFullLogged_) {
+            texIdFullLogged_ = true;
+            AVER_WARN("[PBR] {} distinct material textures are in use; further ones get no ray-path id and keep their factor colour. "
+                      "Raise kMaterialTexIdCap (and the renderer's texture table) if a real project needs more.", kMaterialTexIdCap);
+        }
+        return kUnboundTexture;
+    }
+    texId_.emplace(h, id);
+    return id;
+}
+
+// The texture is being destroyed: its id waits two update() calls before it can name another texture.
+void MaterialSystem::releaseTextureId(rhi::TextureHandle h) {
+    const auto it = texId_.find(h);
+    if (it == texId_.end()) return;
+    texIdRetired_.push_back({it->second, updateCalls_ + 2});
+    texId_.erase(it);
+}
+
+void MaterialSystem::recycleTextureIds() {
+    if (texIdRetired_.empty()) return;
+    usize keep = 0;
+    for (const RetiredId& r : texIdRetired_) {
+        if (r.due <= updateCalls_) texIdFree_.push_back(r.id);
+        else texIdRetired_[keep++] = r;
+    }
+    texIdRetired_.resize(keep);
 }
 
 // The entry for `h`, built and filled on first use.
@@ -631,6 +673,7 @@ void MaterialSystem::update() {
     const auto t0 = std::chrono::steady_clock::now();
     MaterialLibrary& lib = MaterialLibrary::get();
     uploadBudget_ = uploadBudgetBytes_;
+    recycleTextureIds();
     advancePending();
 
     const u32 n = lib.count();
@@ -747,7 +790,7 @@ void MaterialSystem::update() {
             }
             setAverage_.erase(it->second.set);
             if (const auto gt = embeddedTables_.find(it->second.set); gt != embeddedTables_.end()) {
-                if (gt->second.tex) { embeddedHandles_.erase(gt->second.tex); res_->destroyTexture(gt->second.tex); }
+                if (gt->second.tex) { embeddedHandles_.erase(gt->second.tex); releaseTextureId(gt->second.tex); res_->destroyTexture(gt->second.tex); }
                 embeddedTables_.erase(gt);
             }
             releasedSets_.insert(it->second.set);

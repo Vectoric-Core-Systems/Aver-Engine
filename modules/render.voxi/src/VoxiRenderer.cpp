@@ -3874,6 +3874,17 @@ u32 VoxiRenderer::residentTexture(rhi::TextureHandle h) {
     return index;
 }
 
+u32 VoxiRenderer::residentMaterialTexture(rhi::TextureHandle h) {
+    if (!h || !rtTexTable_) return pbr::kUnboundTexture;
+    const u32 id = materials_.textureId(h);
+    if (id == pbr::kUnboundTexture) return residentTexture(h);   // material ids exhausted: the general path still works
+    if (rtMaterialTexBound_.size() < pbr::kMaterialTexIdCap) rtMaterialTexBound_.assign(pbr::kMaterialTexIdCap, 0);
+    if (rtMaterialTexBound_[id] == h) return id;
+    if (!res_->setBindlessTexture(rtTexTable_, id, h)) return pbr::kUnboundTexture;
+    rtMaterialTexBound_[id] = h;
+    return id;
+}
+
 // Creates the bindless texture table on first need, once only.
 void VoxiRenderer::ensureTextureTable() {
     if (rtTexTableTried_ || !res_) return;
@@ -4052,7 +4063,7 @@ u64 VoxiRenderer::rtMaterialKey(rhi::BindingSetHandle matSet, const void* author
         // Textures resolved to indices in the bindless table.
         if (const auto* tex = materials_.textures(matSet)) {
             for (u32 t = 0; t < pbr::kTextureSlotCount; ++t)
-                mc.texIndex[t] = residentTexture((*tex)[t]);
+                mc.texIndex[t] = residentMaterialTexture((*tex)[t]);
         }
     } else {
         // The fallback material, as raster binds for this draw. The draw's colour, metallic and roughness

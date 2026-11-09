@@ -604,6 +604,7 @@ private:
 
     // Distinct textures ray can sample. Fixed, not grown (baked into root signature). 4096 limit: 6% of 65536-descriptor heap.
     static constexpr u32 kRtTextureCapacity = 4096;
+    static_assert(pbr::kMaterialTexIdCap < kRtTextureCapacity, "the table needs room above the material ids");
     rhi::BufferHandle rtInstances_[kRtInstanceRing] = {};
     u32               rtInstanceSlot_ = 0;
     // Table built from this. Only meshes new to the set are copied.
@@ -668,7 +669,10 @@ private:
     bool rtLogged_ = false;
 
     // ---- dense per-frame material table a ray hit indexes into (t9, gRtMaterials) ----
+    // Any texture that is not a material's (decals, light shapes): appended above the material ids.
     u32  residentTexture(rhi::TextureHandle h);
+    // A material's texture: MaterialSystem owns its index (textureId), this only makes the table slot name it.
+    u32  residentMaterialTexture(rhi::TextureHandle h);
     void ensureTextureTable();
 
     // TEXTURED ray-driven pipeline and variants.
@@ -720,7 +724,8 @@ private:
 
     rhi::BindlessTableHandle rtTexTable_ = 0;
     std::unordered_map<rhi::TextureHandle, u32> rtTexIndex_;
-    u32  rtTexNext_ = 0;
+    u32  rtTexNext_ = pbr::kMaterialTexIdCap;
+    std::vector<rhi::TextureHandle> rtMaterialTexBound_;   // table slot -> the texture last written there
     bool rtTexTableTried_ = false;
     bool rtTexLogged_ = false;
 

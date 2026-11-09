@@ -17,6 +17,9 @@ namespace aver::pbr {
 
 // A material's SRV table is the glTF set in TextureSlot order: a slot index IS its register offset.
 inline constexpr u32 kMaterialSrvCount = kTextureSlotCount;
+// Ids [0, kMaterialTexIdCap) of the ray path's bindless texture table belong to MaterialSystem::textureId; whatever else
+// the renderer makes resident (decals, light shapes) allocates above it.
+inline constexpr u32 kMaterialTexIdCap = 3072;
 static_assert(kMaterialSrvCount <= rhi::kMaxBindingSlots,
               "a material table must fit in one binding set");
 
@@ -132,6 +135,17 @@ public:
     // raster path does without needing a branch per slot -- and an unset normal map sampling flat
     // (128,128,255) is the whole reason those fallbacks exist.
     const std::array<rhi::TextureHandle, kTextureSlotCount>* textures(rhi::BindingSetHandle set) const;
+
+    // ---- texture ids ----
+    // The index a texture occupies in the ray path's bindless texture table, owned here so it is stable for the
+    // texture's life: it does not move when the texture is later swapped for another mip window, and it is what the
+    // feedback pass will key on. Allocated on first ask for any non-null handle (the effective handles textures()
+    // reports, fallbacks included, so the ray path samples exactly what raster does). kUnboundTexture for a null
+    // handle or when all kMaterialTexIdCap ids are in use (logged once; the caller keeps the factor colour).
+    // An id returns to the pool two update() calls after its texture is destroyed, never earlier, so a draw already
+    // recorded against it cannot see a new texture.
+    u32 textureId(rhi::TextureHandle h);
+    u32 textureIdsInUse() const { return static_cast<u32>(texId_.size()); }
     // The constant block a draw of `h` uses. An unknown or stale handle gets the fallback.
     const MaterialConstants& constants(MaterialHandle h);
     // How many bytes of the block at &constants(h) a draw hands setDrawBinding: sizeof(MaterialConstants) (192), or 256 for a material with
@@ -385,6 +399,15 @@ private:
     struct EmbeddedTable { rhi::TextureHandle tex = 0; std::vector<f32> regs; };
     std::unordered_map<rhi::BindingSetHandle, EmbeddedTable> embeddedTables_;
     std::unordered_set<rhi::TextureHandle> embeddedHandles_;
+    // textureId(): live ids, ids waiting out their two-update grace, and the free list.
+    std::unordered_map<rhi::TextureHandle, u32> texId_;
+    struct RetiredId { u32 id; u64 due; };
+    std::vector<RetiredId> texIdRetired_;
+    std::vector<u32> texIdFree_;
+    u32 texIdNext_ = 0;
+    bool texIdFullLogged_ = false;
+    void releaseTextureId(rhi::TextureHandle h);
+    void recycleTextureIds();
     rhi::TextureHandle embeddedTableFor(rhi::BindingSetHandle set, const EmbeddedParams& p);
     std::unordered_map<std::string, rhi::TextureHandle> rtTextures_;   // "@rt:<name>" -> handle (not owned)
     std::unordered_set<rhi::TextureHandle> rtHandles_;                 // the same handles, for retain/release to skip

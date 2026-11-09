@@ -34,6 +34,14 @@ if(TARGET Aver.Render.PBR.Materials)
   set_target_properties(MaterialResidencyTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
 
+# MaterialTextureIdTest -- MaterialSystem::textureId: unique, stable ids for the ray path's bindless texture table, held two updates
+# after a texture dies, capped at kMaterialTexIdCap, reset by shutdown. A recording RHI; no GPU.
+if(TARGET Aver.Render.PBR.Materials)
+  add_executable(MaterialTextureIdTest src/MaterialTextureIdTest.cpp)
+  target_link_libraries(MaterialTextureIdTest PRIVATE Aver.Render.PBR.Materials Aver.Core)
+  set_target_properties(MaterialTextureIdTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
 # TextureLoaderTest -- the background texture loader against real files: queued -> ready -> taken, the derived-data cache hit path
 # (the second request compresses nothing), priority order, failure reported once, cancellation, and (the "threads" run) real worker
 # threads with a cancel while jobs run. No GPU: a recording factory.
