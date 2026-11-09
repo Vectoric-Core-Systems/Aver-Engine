@@ -326,7 +326,7 @@ inline bool& consoleBlendedGiConeSlot() { static bool v = false; return v; }
 // ConsoleBatch's comment for why the split is closures, not two struct copies.
 //
 // DELIBERATELY ABSENT: occlusion culling and virtualized-geometry LOD selection
-// (SandboxApp::occlusionCullEnabled_/lodSelectEnabled_/setLodSelect). Both are toggled live by the
+// (SandboxApp::occl_.occlusionCullEnabled_/lod_.lodSelectEnabled_/setLodSelect). Both are toggled live by the
 // editor's Rendering panel, but as PRIVATE SandboxApp state with no accessor on voxi::Renderer or
 // rhi::IDevice (this file's SCOPE). Reaching them would mean making them public on SandboxApp, or a
 // per-frame consoleApp() slot mirroring setConsoleDevice() below -- both a SandboxApp.cpp change,

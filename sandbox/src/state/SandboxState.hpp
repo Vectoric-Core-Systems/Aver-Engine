@@ -1,0 +1,26 @@
+// Every feature-state struct SandboxApp owns (one member each: play_, harness_, rset_, ...), in dependency order.
+// Included from SandboxApp.hpp (inside namespace aver) after the engine headers and the editor enums; not a standalone header.
+#pragma once
+
+#include "EditId.hpp"
+#include "PlayState.hpp"
+#include "HarnessState.hpp"
+#include "RenderSettingsState.hpp"
+#include "ViewportState.hpp"
+#include "LandscapeToolState.hpp"
+#include "DrawerState.hpp"
+#include "SelectionState.hpp"
+#include "OcclusionState.hpp"
+#include "LodState.hpp"
+#include "RevisionControlState.hpp"
+#include "McpState.hpp"
+#include "AutosaveSession.hpp"
+#include "DebugOverlayState.hpp"
+#include "PanelState.hpp"
+#include "LevelDataState.hpp"
+#include "DroneState.hpp"
+#include "BrandIconState.hpp"
+#include "EditHistoryState.hpp"
+#include "LaunchConfigState.hpp"
+#include "ProjectSessionState.hpp"
+#include "AssetEditState.hpp"

@@ -579,28 +579,7 @@ std::string ownerProjectOf(const std::string& mapPath);
 
 #include "SandboxRenderFeatures.hpp"
 
-#include "state/EditId.hpp"
-#include "state/PlayState.hpp"
-#include "state/HarnessState.hpp"
-#include "state/RenderSettingsState.hpp"
-#include "state/ViewportState.hpp"
-#include "state/LandscapeToolState.hpp"
-#include "state/DrawerState.hpp"
-#include "state/SelectionState.hpp"
-#include "state/OcclusionState.hpp"
-#include "state/LodState.hpp"
-#include "state/RevisionControlState.hpp"
-#include "state/McpState.hpp"
-#include "state/AutosaveSession.hpp"
-#include "state/DebugOverlayState.hpp"
-#include "state/PanelState.hpp"
-#include "state/LevelDataState.hpp"
-#include "state/DroneState.hpp"
-#include "state/BrandIconState.hpp"
-#include "state/EditHistoryState.hpp"
-#include "state/LaunchConfigState.hpp"
-#include "state/ProjectSessionState.hpp"
-#include "state/AssetEditState.hpp"
+#include "state/SandboxState.hpp"
 class HitchMarks;
 namespace game { struct SceneDrawStats; }
 

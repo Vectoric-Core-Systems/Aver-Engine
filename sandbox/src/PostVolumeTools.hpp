@@ -1,7 +1,7 @@
 #pragma once
 // The editor side of post-process volumes: Add > Post Process Volume, the volume boxes as editor lines, the
 // Details body that edits a volume's fields, and the blend that previews them in the viewport. The records
-// live in the level header (SandboxApp::levelHeader_.postVolumes), so they save and load with the level and
+// live in the level header (SandboxApp::lvl_.levelHeader_.postVolumes), so they save and load with the level and
 // need no entity. Blend and weights are the runtime's (Runtime/include/aver/game/GamePostVolumes.hpp), so the
 // editor shows what the game renders. docs/rendering/POST_VOLUMES.md.
 #include "aver/core/Math.hpp"
