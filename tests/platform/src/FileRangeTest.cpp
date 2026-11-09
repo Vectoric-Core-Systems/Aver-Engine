@@ -463,6 +463,31 @@ int main() {
         check(!directoryExists(longDir), "the long tree is cleaned up");
     }
 
+    // ---- readFileRange: the ranged whole-handle read the texture streamer uses ---------------------
+    {
+        const std::string rangeFile = (dir / "range.bin").string();
+        std::vector<u8> data(1000);
+        for (usize i = 0; i < data.size(); ++i) data[i] = static_cast<u8>(i * 13 + 1);
+        check(writeFileBytes(rangeFile, data.data(), data.size()), "range: fixture written");
+
+        static int traced = 0;
+        traced = 0;
+        setFileTrace([](const char*, void*) { ++traced; }, nullptr);
+        std::vector<u8> out;
+        check(readFileRange(rangeFile, 100, 50, out) && out.size() == 50 &&
+              std::equal(out.begin(), out.end(), data.begin() + 100), "range: a middle slice matches the file");
+        check(traced == 1, "range: the read is traced once");
+        setFileTrace(nullptr, nullptr);
+        check(readFileRange(rangeFile, 0, 1000, out) && out == data, "range: the whole file");
+        check(readFileRange(rangeFile, 999, 1, out) && out.size() == 1 && out[0] == data[999], "range: the last byte");
+        check(readFileRange(rangeFile, 1000, 0, out) && out.empty(), "range: zero bytes at EOF succeeds");
+        check(!readFileRange(rangeFile, 1000, 1, out), "range: one past EOF fails");
+        check(!readFileRange(rangeFile, 990, 11, out), "range: a read straddling EOF fails");
+        check(!readFileRange(rangeFile, 2000, 0, out), "range: an offset beyond EOF fails");
+        check(!readFileRange(rangeFile, 0, ~0ull, out), "range: a size that would overflow fails");
+        check(!readFileRange((dir / "missing.bin").string(), 0, 1, out), "range: a missing file fails");
+    }
+
     std::filesystem::remove_all(dir, ec);
 
     if (g_failures == 0 && g_skipped == 0) AVER_INFO("=== {} assertions, 0 failed ===", g_checks);

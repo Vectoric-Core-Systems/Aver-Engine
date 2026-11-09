@@ -87,6 +87,10 @@ inline std::filesystem::path nativePath(const std::filesystem::path& p) {
 
 // Reads a whole file into `out`. False if it cannot be read.
 bool readFileBytes(const std::string& path, std::vector<u8>& out);
+// Reads exactly `size` bytes starting at `offset` into `out` (resized to `size`). False if the file cannot be opened or
+// is shorter than offset+size; `out` is then unspecified. Traced like readFileBytes. A zero `size` succeeds on any
+// readable file. Thread-safe: it opens its own handle.
+bool readFileRange(const std::string& path, u64 offset, u64 size, std::vector<u8>& out);
 // Reads a whole file into `out` as text. False if it cannot be read.
 bool readFileText(const std::string& path, std::string& out);
 // Writes `size` bytes to the file, truncating it. False on failure.

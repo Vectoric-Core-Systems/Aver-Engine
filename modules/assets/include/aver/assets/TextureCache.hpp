@@ -14,6 +14,7 @@
 // and last-write time, the requested usage, and the encoder/container versions. Nothing that only
 // the DECODED PIXELS could answer -- in particular alphaLooksLikeCutout's verdict -- may feed it;
 // see TextureCache.cpp's cacheKey() for exactly what goes in and why each field does.
+#include "aver/assets/TextureStreamMath.hpp"
 #include "aver/assets/TextureUpload.hpp"   // TextureUsage
 #include "aver/core/Types.hpp"
 #include "aver/rhi/RHIResources.hpp"       // rhi::Format
@@ -64,5 +65,30 @@ bool loadCachedTexture(const std::string& path, TextureUsage usage, CachedTextur
 // once serialise on that one entry rather than racing each other's temporary file -- see the
 // striped lock in the .cpp.
 bool saveCachedTexture(const std::string& path, TextureUsage usage, const CachedTexture& in);
+
+
+// What a cache entry's HEADER says, plus where each mip sits in the file, read without touching the mip data.
+// The streamer's view of a chain: it asks for byte ranges of the file instead of loading all of it.
+// mipOffset[m] is the absolute file offset of mip m; mipOffset[mips] is the file's expected size.
+struct CachedTextureInfo {
+    bool ok = false;
+    std::string file;                            // the .octex path under textureCacheDir()
+    rhi::Format format = rhi::Format::Unknown;
+    u32 width = 0, height = 0, mips = 0;
+    f32 averageLinear[3] = {1.0f, 1.0f, 1.0f};
+    bool coveragePreserved = false;
+    u64 mipOffset[kMaxTextureMips + 1] = {};
+    u64 mipBytes(u32 m) const { return mipOffset[m + 1] - mipOffset[m]; }
+    u64 mipBlockBytes(u32 firstMip, u32 endMip) const { return mipOffset[endMip] - mipOffset[firstMip]; }
+};
+
+// Reads only the header of the cache entry for `path`+`usage` and checks the file is exactly as long as the header
+// promises. Same miss rules as loadCachedTexture (nothing decoded, `path` only stat()ed); false is a miss.
+bool statCachedTexture(const std::string& path, TextureUsage usage, CachedTextureInfo& out);
+
+// Reads the BC7 blocks of mips [firstMip, endMip) in one ranged read: out holds them back to back, mip firstMip
+// first, each tightly packed as in CachedTexture::mipBlocks. False on a bad range, a changed (shorter) file or a
+// read error; the entry is then not usable and the caller keeps what it has.
+bool readCachedMips(const CachedTextureInfo& info, u32 firstMip, u32 endMip, std::vector<u8>& out);
 
 } // namespace aver::assets

@@ -1,6 +1,8 @@
 aver_add_module(Aver.Assets
   SOURCES
     src/AssetId.cpp
+    # Pure texture-streaming residency planner, pool controller and upload ring (no device, no files).
+    src/TexturePlanner.cpp
   DEPS
     Aver.Core
     Aver.Platform

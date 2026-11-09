@@ -340,6 +340,20 @@ bool readFileBytes(const std::string& path, std::vector<u8>& out) {
     return true;
 }
 
+bool readFileRange(const std::string& path, u64 offset, u64 size, std::vector<u8>& out) {
+    if (g_trace) g_trace(path.c_str(), g_traceUser);
+    std::ifstream f(fsPath(path), std::ios::binary | std::ios::ate);
+    if (!f) return false;
+    const std::streamoff fileSize = f.tellg();
+    if (fileSize < 0) return false;
+    const u64 total = static_cast<u64>(fileSize);
+    if (offset > total || size > total - offset) return false;
+    out.resize(static_cast<usize>(size));
+    if (size == 0) return true;
+    f.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+    return static_cast<bool>(f.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(size)));
+}
+
 // Reads a whole file into `out` as text. False if it cannot be read.
 bool readFileText(const std::string& path, std::string& out) {
     // Traced on ENTRY, before the open is attempted, so a path that fails to open is still
