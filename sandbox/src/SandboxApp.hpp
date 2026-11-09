@@ -12,6 +12,7 @@
 #include "aver/platform/InputState.hpp"
 #include "aver/rhi/ShaderFiles.hpp"
 #include "aver/rhi/RHI.hpp"
+#include "aver/rhi/PrimitiveMeshes.hpp"
 #include "aver/rhi/ShaderCacheSweep.hpp"
 #include "aver/core/Log.hpp"
 // Shared runtime content component.
@@ -541,19 +542,8 @@ static const Vec3 kAxisCol[3] = {{202.0f/255.0f, 38.0f/255.0f, 0.0f}, {103.0f/25
                                   {44.0f/255.0f, 126.0f/255.0f, 237.0f/255.0f}};
 static const Vec3 kAxisHi = {1.0f, 1.0f, 0.0f};
 
-// Cube centred at (cx,cy,cz) with half-extent h.
-static inline void appendBox(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx, f32 cx, f32 cy, f32 cz, f32 h) {
-    const f32 p[8][3] = {{-h,-h,-h},{h,-h,-h},{h,h,-h},{-h,h,-h},{-h,-h,h},{h,-h,h},{h,h,h},{-h,h,h}};
-    struct Face { f32 n[3]; int c[4]; };
-    const Face faces[6] = {{{1,0,0},{1,2,6,5}},{{-1,0,0},{0,4,7,3}},{{0,1,0},{3,7,6,2}},
-                           {{0,-1,0},{0,1,5,4}},{{0,0,1},{4,5,6,7}},{{0,0,-1},{0,3,2,1}}};
-    const f32 quadUV[4][2] = {{0,0},{1,0},{1,1},{0,1}};
-    for (const Face& f : faces) {
-        const u32 b = static_cast<u32>(v.size());
-        for (int k = 0; k < 4; ++k) { const f32* c = p[f.c[k]]; v.push_back({cx+c[0],cy+c[1],cz+c[2],f.n[0],f.n[1],f.n[2],quadUV[k][0],quadUV[k][1]}); }
-        idx.push_back(b); idx.push_back(b+1); idx.push_back(b+2); idx.push_back(b); idx.push_back(b+2); idx.push_back(b+3);
-    }
-}
+using rhi::primitives::appendBox;
+using rhi::primitives::appendSphere;
 // Ground quad in XY plane with half-extent s.
 static inline void appendGround(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx, f32 s) {
     const u32 b = static_cast<u32>(v.size());
@@ -561,90 +551,10 @@ static inline void appendGround(std::vector<rhi::MeshVertex>& v, std::vector<u32
     v.push_back({s,s,0,0,0,1,0.5f,0.5f}); v.push_back({-s,s,0,0,0,1,-0.5f,0.5f});
     idx.push_back(b); idx.push_back(b+1); idx.push_back(b+2); idx.push_back(b); idx.push_back(b+2); idx.push_back(b+3);
 }
-// UV sphere of radius r, +Z as pole.
-static inline void appendSphere(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx, f32 r, u32 rings, u32 sectors) {
-    const u32 base = static_cast<u32>(v.size());
-    for (u32 ring = 0; ring <= rings; ++ring) {
-        const f32 phi = kPi * (static_cast<f32>(ring) / static_cast<f32>(rings));
-        const f32 z = std::cos(phi), rad = std::sin(phi);
-        for (u32 sec = 0; sec <= sectors; ++sec) {
-            const f32 theta = 2.0f * kPi * (static_cast<f32>(sec) / static_cast<f32>(sectors));
-            const f32 nx = rad * std::cos(theta), ny = rad * std::sin(theta), nz = z;
-            v.push_back({nx * r, ny * r, nz * r, nx, ny, nz,
-                         static_cast<f32>(sec) / static_cast<f32>(sectors),
-                         static_cast<f32>(ring) / static_cast<f32>(rings)});
-        }
-    }
-    const u32 stride = sectors + 1;
-    for (u32 ring = 0; ring < rings; ++ring) {
-        for (u32 sec = 0; sec < sectors; ++sec) {
-            const u32 a = base + ring * stride + sec, b = a + stride;
-            idx.push_back(a); idx.push_back(b); idx.push_back(a + 1);
-            idx.push_back(a + 1); idx.push_back(b); idx.push_back(b + 1);
-        }
-    }
-}
 
-// Box with independent half-extents (hx,hy,hz), yawed around Z.
-static inline void appendBoxYaw(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx,
-                          f32 cx, f32 cy, f32 cz, f32 hx, f32 hy, f32 hz, f32 yawDeg) {
-    const f32 rad = yawDeg * kDegToRad;
-    const f32 cs = std::cos(rad), sn = std::sin(rad);
-    // Rotate around Z preserving winding.
-    auto rotZ = [cs, sn](f32 lx, f32 ly, f32 lz, f32& ox, f32& oy, f32& oz) {
-        ox = lx * cs - ly * sn; oy = lx * sn + ly * cs; oz = lz;
-    };
-    const f32 p[8][3] = {{-hx,-hy,-hz},{hx,-hy,-hz},{hx,hy,-hz},{-hx,hy,-hz},
-                         {-hx,-hy,hz},{hx,-hy,hz},{hx,hy,hz},{-hx,hy,hz}};
-    struct Face { f32 n[3]; int c[4]; };
-    const Face faces[6] = {{{1,0,0},{1,2,6,5}},{{-1,0,0},{0,4,7,3}},{{0,1,0},{3,7,6,2}},
-                           {{0,-1,0},{0,1,5,4}},{{0,0,1},{4,5,6,7}},{{0,0,-1},{0,3,2,1}}};
-    const f32 quadUV[4][2] = {{0,0},{1,0},{1,1},{0,1}};
-    for (const Face& f : faces) {
-        f32 nx = 0.0f, ny = 0.0f, nz = 0.0f; rotZ(f.n[0], f.n[1], f.n[2], nx, ny, nz);
-        const u32 b = static_cast<u32>(v.size());
-        for (int k = 0; k < 4; ++k) {
-            const f32* c = p[f.c[k]];
-            f32 wx = 0.0f, wy = 0.0f, wz = 0.0f; rotZ(c[0], c[1], c[2], wx, wy, wz);
-            v.push_back({cx+wx, cy+wy, cz+wz, nx, ny, nz, quadUV[k][0], quadUV[k][1]});
-        }
-        idx.push_back(b); idx.push_back(b+1); idx.push_back(b+2);
-        idx.push_back(b); idx.push_back(b+2); idx.push_back(b+3);
-    }
-}
+using rhi::primitives::appendBoxYaw;
+using rhi::primitives::appendCylinderZ;
 
-// Capped cylinder along +Z, flat-shaded.
-static inline void appendCylinderZ(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx,
-                             f32 cx, f32 cy, f32 cz, f32 radius, f32 halfHeight, u32 segments) {
-    for (u32 s = 0; s < segments; ++s) {
-        const f32 a0 = kTwoPi * static_cast<f32>(s) / static_cast<f32>(segments);
-        const f32 a1 = kTwoPi * static_cast<f32>(s + 1) / static_cast<f32>(segments);
-        const f32 x0 = std::cos(a0), y0 = std::sin(a0);
-        const f32 x1 = std::cos(a1), y1 = std::sin(a1);
-        // Side quad: one normal per face (averaged radial).
-        f32 nx = x0 + x1, ny = y0 + y1;
-        const f32 nl = std::sqrt(nx * nx + ny * ny);
-        if (nl > 1e-6f) { nx /= nl; ny /= nl; }
-        const u32 b = static_cast<u32>(v.size());
-        v.push_back({cx + x0 * radius, cy + y0 * radius, cz - halfHeight, nx, ny, 0, 0, 0});
-        v.push_back({cx + x1 * radius, cy + y1 * radius, cz - halfHeight, nx, ny, 0, 1, 0});
-        v.push_back({cx + x1 * radius, cy + y1 * radius, cz + halfHeight, nx, ny, 0, 1, 1});
-        v.push_back({cx + x0 * radius, cy + y0 * radius, cz + halfHeight, nx, ny, 0, 0, 1});
-        idx.push_back(b); idx.push_back(b+1); idx.push_back(b+2);
-        idx.push_back(b); idx.push_back(b+2); idx.push_back(b+3);
-        // Top/bottom caps: one fan triangle per segment.
-        const u32 ct = static_cast<u32>(v.size());
-        v.push_back({cx, cy, cz + halfHeight, 0, 0, 1, 0.5f, 0.5f});
-        v.push_back({cx + x0 * radius, cy + y0 * radius, cz + halfHeight, 0, 0, 1, x0*0.5f+0.5f, y0*0.5f+0.5f});
-        v.push_back({cx + x1 * radius, cy + y1 * radius, cz + halfHeight, 0, 0, 1, x1*0.5f+0.5f, y1*0.5f+0.5f});
-        idx.push_back(ct); idx.push_back(ct+1); idx.push_back(ct+2);
-        const u32 cb = static_cast<u32>(v.size());
-        v.push_back({cx, cy, cz - halfHeight, 0, 0, -1, 0.5f, 0.5f});
-        v.push_back({cx + x1 * radius, cy + y1 * radius, cz - halfHeight, 0, 0, -1, x1*0.5f+0.5f, y1*0.5f+0.5f});
-        v.push_back({cx + x0 * radius, cy + y0 * radius, cz - halfHeight, 0, 0, -1, x0*0.5f+0.5f, y0*0.5f+0.5f});
-        idx.push_back(cb); idx.push_back(cb+1); idx.push_back(cb+2);
-    }
-}
 
 // Placeholder quadcopter from appendBoxYaw/appendCylinderZ.
 static inline void appendDrone(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx) {

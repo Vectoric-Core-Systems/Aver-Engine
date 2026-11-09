@@ -179,68 +179,8 @@ std::string GameContent::resolveAnimAsset(u64 id, void* user) {
 
 namespace {
 
-// Axis-aligned box with independent per-axis half-extents, yawed around Z, placed at (cx,cy,cz).
-// Face table and winding copied from appendBox.
-void appendBoxYaw(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx,
-                   f32 cx, f32 cy, f32 cz, f32 hx, f32 hy, f32 hz, f32 yawDeg) {
-    const f32 rad = yawDeg * kDegToRad;
-    const f32 cs = std::cos(rad), sn = std::sin(rad);
-    // Rotation around Z preserves winding; every face stays CCW-outward.
-    auto rotZ = [cs, sn](f32 lx, f32 ly, f32 lz, f32& ox, f32& oy, f32& oz) {
-        ox = lx * cs - ly * sn; oy = lx * sn + ly * cs; oz = lz;
-    };
-    const f32 p[8][3] = {{-hx,-hy,-hz},{hx,-hy,-hz},{hx,hy,-hz},{-hx,hy,-hz},
-                         {-hx,-hy,hz},{hx,-hy,hz},{hx,hy,hz},{-hx,hy,hz}};
-    struct Face { f32 n[3]; int c[4]; };
-    const Face faces[6] = {{{1,0,0},{1,2,6,5}},{{-1,0,0},{0,4,7,3}},{{0,1,0},{3,7,6,2}},
-                           {{0,-1,0},{0,1,5,4}},{{0,0,1},{4,5,6,7}},{{0,0,-1},{0,3,2,1}}};
-    const f32 quadUV[4][2] = {{0,0},{1,0},{1,1},{0,1}};
-    for (const Face& f : faces) {
-        f32 nx = 0.0f, ny = 0.0f, nz = 0.0f; rotZ(f.n[0], f.n[1], f.n[2], nx, ny, nz);
-        const u32 b = static_cast<u32>(v.size());
-        for (int k = 0; k < 4; ++k) {
-            const f32* c = p[f.c[k]];
-            f32 wx = 0.0f, wy = 0.0f, wz = 0.0f; rotZ(c[0], c[1], c[2], wx, wy, wz);
-            v.push_back({cx+wx, cy+wy, cz+wz, nx, ny, nz, quadUV[k][0], quadUV[k][1]});
-        }
-        idx.push_back(b); idx.push_back(b+1); idx.push_back(b+2);
-        idx.push_back(b); idx.push_back(b+2); idx.push_back(b+3);
-    }
-}
-
-// Capped cylinder standing along +Z, centred at (cx,cy,cz), flat-shaded per face like appendBox.
-// A second copy of SandboxApp.cpp's own appendCylinderZ for file-ownership reasons.
-void appendCylinderZ(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx,
-                      f32 cx, f32 cy, f32 cz, f32 radius, f32 halfHeight, u32 segments) {
-    for (u32 s = 0; s < segments; ++s) {
-        const f32 a0 = kTwoPi * static_cast<f32>(s) / static_cast<f32>(segments);
-        const f32 a1 = kTwoPi * static_cast<f32>(s + 1) / static_cast<f32>(segments);
-        const f32 x0 = std::cos(a0), y0 = std::sin(a0);
-        const f32 x1 = std::cos(a1), y1 = std::sin(a1);
-        // Side quad: one flat normal per face, computed as the average radial direction.
-        f32 nx = x0 + x1, ny = y0 + y1;
-        const f32 nl = std::sqrt(nx * nx + ny * ny);
-        if (nl > 1e-6f) { nx /= nl; ny /= nl; }
-        const u32 b = static_cast<u32>(v.size());
-        v.push_back({cx + x0 * radius, cy + y0 * radius, cz - halfHeight, nx, ny, 0, 0, 0});
-        v.push_back({cx + x1 * radius, cy + y1 * radius, cz - halfHeight, nx, ny, 0, 1, 0});
-        v.push_back({cx + x1 * radius, cy + y1 * radius, cz + halfHeight, nx, ny, 0, 1, 1});
-        v.push_back({cx + x0 * radius, cy + y0 * radius, cz + halfHeight, nx, ny, 0, 0, 1});
-        idx.push_back(b); idx.push_back(b+1); idx.push_back(b+2);
-        idx.push_back(b); idx.push_back(b+2); idx.push_back(b+3);
-        // Top and bottom caps as fan triangles per segment; flat-shaded.
-        const u32 ct = static_cast<u32>(v.size());
-        v.push_back({cx, cy, cz + halfHeight, 0, 0, 1, 0.5f, 0.5f});
-        v.push_back({cx + x0 * radius, cy + y0 * radius, cz + halfHeight, 0, 0, 1, x0*0.5f+0.5f, y0*0.5f+0.5f});
-        v.push_back({cx + x1 * radius, cy + y1 * radius, cz + halfHeight, 0, 0, 1, x1*0.5f+0.5f, y1*0.5f+0.5f});
-        idx.push_back(ct); idx.push_back(ct+1); idx.push_back(ct+2);
-        const u32 cb = static_cast<u32>(v.size());
-        v.push_back({cx, cy, cz - halfHeight, 0, 0, -1, 0.5f, 0.5f});
-        v.push_back({cx + x1 * radius, cy + y1 * radius, cz - halfHeight, 0, 0, -1, x1*0.5f+0.5f, y1*0.5f+0.5f});
-        v.push_back({cx + x0 * radius, cy + y0 * radius, cz - halfHeight, 0, 0, -1, x0*0.5f+0.5f, y0*0.5f+0.5f});
-        idx.push_back(cb); idx.push_back(cb+1); idx.push_back(cb+2);
-    }
-}
+using rhi::primitives::appendBoxYaw;
+using rhi::primitives::appendCylinderZ;
 
 // Placeholder quadcopter: body, four arms with motor pods and rotors, landing skids with struts.
 // Normalised like the unit cube/sphere: nothing goes past 1.0 from origin. Per-axis reach varies.

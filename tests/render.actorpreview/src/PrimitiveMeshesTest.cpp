@@ -1,5 +1,6 @@
 // PrimitiveMeshesTest: every built-in primitive (aver/rhi/PrimitiveMeshes.hpp) is unit-sized, indexes
 // only its own vertices, has unit normals, winds outward, and closed shapes enclose positive volume.
+#include "aver/core/Hash.hpp"
 #include "aver/rhi/PrimitiveMeshes.hpp"
 
 #include <cmath>
@@ -14,6 +15,12 @@ namespace {
 int g_fail = 0;
 void check(bool ok, const std::string& what) {
     if (!ok) { ++g_fail; std::printf("FAIL: %s\n", what.c_str()); }
+}
+
+// Vertex and index bytes hashed together. The literals below were computed from the copies this header
+// replaced (sandbox's SandboxApp.hpp, Runtime's GameMath.hpp and GameContent.cpp), which agreed.
+u64 meshHash(const std::vector<rhi::MeshVertex>& v, const std::vector<u32>& idx) {
+    return (fnv1a64(v.data(), v.size() * sizeof(rhi::MeshVertex)) * 1000003ull) ^ fnv1a64(idx.data(), idx.size() * sizeof(u32));
 }
 } // namespace
 
@@ -94,6 +101,22 @@ int main() {
         check(thick > 3.0f && thick < 5.0f, "banana thickness " + std::to_string(thick) + " cm");
         check(mx[2] - mn[2] > thick / b->spawnScale, "banana is curved");
         check(b->look && std::string(b->look) == "M_Banana", "banana is yellow");
+    }
+
+    // The placeholder builders keep their exact output.
+    {
+        std::vector<rhi::MeshVertex> v; std::vector<u32> idx;
+        appendBox(v, idx, 1.5f, -2.0f, 3.25f, 0.75f); appendBox(v, idx, 0, 0, 0, 1.0f);
+        check(meshHash(v, idx) == 0xc43340d0b45a0f2aull, "appendBox output is unchanged");
+        v.clear(); idx.clear();
+        appendSphere(v, idx, 1.0f, 12, 20); appendSphere(v, idx, 2.5f, 24, 48);
+        check(meshHash(v, idx) == 0x3108c2f4a1c2b926ull, "appendSphere output is unchanged");
+        v.clear(); idx.clear();
+        appendBoxYaw(v, idx, 1, 2, 3, 0.5f, 1.5f, 0.25f, 37.0f); appendBoxYaw(v, idx, 0, 0, 0, 1, 2, 3, 0.0f);
+        check(meshHash(v, idx) == 0xc0e73d9493958e2aull, "appendBoxYaw output is unchanged");
+        v.clear(); idx.clear();
+        appendCylinderZ(v, idx, 1, -2, 3, 0.7f, 1.3f, 8); appendCylinderZ(v, idx, 0, 0, 0, 1, 1, 10);
+        check(meshHash(v, idx) == 0x3ddf7037f5e434c6ull, "appendCylinderZ output is unchanged");
     }
 
     std::printf(g_fail ? "PrimitiveMeshesTest: %d failure(s)\n" : "PrimitiveMeshesTest: all passed\n", g_fail);
