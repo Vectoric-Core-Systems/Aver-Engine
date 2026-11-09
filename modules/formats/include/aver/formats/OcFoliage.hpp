@@ -92,8 +92,25 @@ struct OcFoliageData {
     // as one checkbox for the whole palette.
     bool alignToNormal = false;
 
+    // ---- additive fields (W4.3): absent in a file written before them, so each reads as its default below ----
+    // Distance (cm from the viewer) where the type starts thinning, and where it is gone. 0 = no culling. Between the two
+    // GameFoliage keeps a quantised, seeded share of the instances; past cullEndCm it drops the whole run.
+    f32 cullStartCm = 0.0f;
+    f32 cullEndCm = 0.0f;
+    // Multiplier on the mesh LOD pick distance (> 0; 1 = the mesh's own).
+    f32 lodScaleBias = 1.0f;
+    // With alignToNormal, the largest tilt from +Z in degrees; steeper ground tilts only this far. Default 90 = unlimited.
+    f32 alignMaxAngleDeg = 90.0f;
+    // Lifts (+) or sinks (-) the instance along its up axis, so a trunk base can sit below the surface.
+    f32 groundOffsetCm = 0.0f;
+    // The collision the type asks for; carried into the .ocinst group flags.
+    enum class Collision : u8 { None = 0, Trunk = 1, Full = 2 };
+    Collision collision = Collision::None;
+
     // meshPath is non-empty; scaleMin/scaleMax/weight/collisionRadiusCm are all finite, scaleMin is
-    // positive, scaleMax is not below scaleMin, and collisionRadiusCm is not negative.
+    // positive, scaleMax is not below scaleMin, and collisionRadiusCm is not negative;
+    // the additive fields are finite, cull distances are not negative (and cullStartCm <= cullEndCm when culling),
+    // lodScaleBias is positive and alignMaxAngleDeg lies in [0, 90].
     bool valid() const;
 };
 

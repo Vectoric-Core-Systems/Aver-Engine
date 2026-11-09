@@ -119,6 +119,18 @@ bool parseOcInstances(const u8* bytes, usize size, OcInstanceData& out, std::str
         tmp.groups.push_back(std::move(g));
     }
 
+    if (const AvrChunk* cul = f.find(kOcInstChunkCull)) {
+        Cursor uc{cul->data.data(), cul->data.size()};
+        const u32 n = uc.take<u32>();
+        if (!uc.ok || uc.left / 12 < n) return fail(why, ".ocinst: ICUL is smaller than its count implies");
+        for (u32 i = 0; i < n && i < tmp.groups.size(); ++i) {
+            const f32 a = uc.take<f32>(), b = uc.take<f32>(), c = uc.take<f32>();
+            if (std::isfinite(a) && std::isfinite(b) && std::isfinite(c) && a >= 0.0f && b >= 0.0f && c > 0.0f) {
+                tmp.groups[i].cullStartCm = a; tmp.groups[i].cullEndCm = b; tmp.groups[i].lodScaleBias = c;
+            }
+        }
+    }
+
     if (const AvrChunk* cel = f.find(kOcInstChunkCells)) {
         Cursor cc{cel->data.data(), cel->data.size()};
         tmp.cellCm = cc.take<f32>();
@@ -224,6 +236,14 @@ bool writeOcInstances(const OcInstanceData& in, std::vector<u8>& out, std::strin
     file.add(kOcInstChunkStrings, strt.bytes());
     file.add(kOcInstChunkGroups, std::move(grp), kAvrChunkRequired);
     file.add(kOcInstChunkTransforms, std::move(xfm), kAvrChunkGpuUploadable);
+    bool anyCull = false;
+    for (const OcInstanceGroup& g : in.groups) anyCull |= g.cullStartCm != 0.0f || g.cullEndCm != 0.0f || g.lodScaleBias != 1.0f;
+    if (anyCull) {
+        std::vector<u8> cul;
+        put<u32>(cul, groupCount);
+        for (const OcInstanceGroup& g : in.groups) { put<f32>(cul, g.cullStartCm); put<f32>(cul, g.cullEndCm); put<f32>(cul, g.lodScaleBias); }
+        file.add(kOcInstChunkCull, std::move(cul));
+    }
     if (!in.cells.empty()) {
         std::vector<u8> cel, run;
         put<f32>(cel, in.cellCm);

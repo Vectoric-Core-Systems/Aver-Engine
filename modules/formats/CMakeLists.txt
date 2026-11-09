@@ -104,6 +104,8 @@ aver_add_module(Aver.Formats
     # reason: a header record and a string table, nothing that needs Aver.Scene or Aver.Landscape --
     # see OcFoliage.hpp for why the format itself stays independent of both.
     src/OcFoliage.cpp
+    # .ocbiome -- a biome: a mask and a list of foliage rules, hand-editable text (OcBiome.hpp).
+    src/OcBiome.cpp
     # .ochair -- a strand hair groom. An AVR1 container like .ocfoliage: a text HEAD and two optional binary chunks (strands, an embedded scalp); see OcHair.hpp.
     src/OcHair.cpp
     # .ocinst -- a level's baked instanced-foliage transform table. Beside .ocfoliage for the

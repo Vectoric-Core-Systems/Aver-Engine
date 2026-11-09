@@ -49,6 +49,12 @@ bool OcFoliageData::valid() const {
     if (scaleMax < scaleMin) return false;
     if (!std::isfinite(weight)) return false;
     if (!std::isfinite(collisionRadiusCm) || collisionRadiusCm < 0.0f) return false;
+    if (!std::isfinite(cullStartCm) || !std::isfinite(cullEndCm) || cullStartCm < 0.0f || cullEndCm < 0.0f) return false;
+    if (cullEndCm > 0.0f && cullStartCm > cullEndCm) return false;
+    if (!std::isfinite(lodScaleBias) || !(lodScaleBias > 0.0f)) return false;
+    if (!std::isfinite(alignMaxAngleDeg) || alignMaxAngleDeg < 0.0f || alignMaxAngleDeg > 90.0f) return false;
+    if (!std::isfinite(groundOffsetCm)) return false;
+    if (static_cast<u8>(collision) > 2) return false;
     return true;
 }
 
@@ -73,6 +79,12 @@ bool writeOcFoliage(const OcFoliageData& in, std::vector<u8>& out, std::string* 
         w.u8v(in.randomizeYaw ? 1 : 0);
         w.f32v(in.collisionRadiusCm);
         w.u8v(in.alignToNormal ? 1 : 0);
+        w.f32v(in.cullStartCm);
+        w.f32v(in.cullEndCm);
+        w.f32v(in.lodScaleBias);
+        w.f32v(in.alignMaxAngleDeg);
+        w.f32v(in.groundOffsetCm);
+        w.u8v(static_cast<u8>(in.collision));
     }
 
     Avr1File f;
@@ -128,6 +140,18 @@ bool parseOcFoliage(const u8* bytes, usize size, OcFoliageData& out, std::string
     if (r.ok) tmp.collisionRadiusCm = cr;
     const u8 an = r.u8v();
     if (r.ok) tmp.alignToNormal = (an != 0);
+    const f32 cs = r.f32v();
+    if (r.ok) tmp.cullStartCm = cs;
+    const f32 ce = r.f32v();
+    if (r.ok) tmp.cullEndCm = ce;
+    const f32 lb = r.f32v();
+    if (r.ok) tmp.lodScaleBias = lb;
+    const f32 am = r.f32v();
+    if (r.ok) tmp.alignMaxAngleDeg = am;
+    const f32 go = r.f32v();
+    if (r.ok) tmp.groundOffsetCm = go;
+    const u8 co = r.u8v();
+    if (r.ok) tmp.collision = static_cast<OcFoliageData::Collision>(co);
 
     if (!tmp.valid())
         return fail(why, ".ocfoliage: the file parses but its fields do not hold together "

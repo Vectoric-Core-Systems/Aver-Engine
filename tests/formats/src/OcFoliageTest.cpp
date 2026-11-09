@@ -10,6 +10,7 @@
 
 #include <cstdio>
 #include <filesystem>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -34,6 +35,12 @@ static fmt::OcFoliageData makeFixture() {
     d.randomizeYaw = true;
     d.collisionRadiusCm = 150.0f;
     d.alignToNormal = true;
+    d.cullStartCm = 4000.0f;
+    d.cullEndCm = 9000.0f;
+    d.lodScaleBias = 1.5f;
+    d.alignMaxAngleDeg = 25.0f;
+    d.groundOffsetCm = -12.0f;
+    d.collision = fmt::OcFoliageData::Collision::Trunk;
     return d;
 }
 
@@ -57,6 +64,11 @@ int main() {
         check(back.randomizeYaw == src.randomizeYaw, "randomizeYaw survives");
         check(back.collisionRadiusCm == src.collisionRadiusCm, "collisionRadiusCm survives");
         check(back.alignToNormal == src.alignToNormal, "alignToNormal survives");
+        check(back.cullStartCm == src.cullStartCm && back.cullEndCm == src.cullEndCm, "cull range survives");
+        check(back.lodScaleBias == src.lodScaleBias, "lodScaleBias survives");
+        check(back.alignMaxAngleDeg == src.alignMaxAngleDeg, "alignMaxAngleDeg survives");
+        check(back.groundOffsetCm == src.groundOffsetCm, "groundOffsetCm survives");
+        check(back.collision == src.collision, "collision survives");
 
         // BYTE-IDENTICAL: re-writing what was just parsed back must reproduce the exact same bytes --
         // the round-trip contract this format actually promises (unlike .ocparticle's merge-into-
@@ -104,6 +116,51 @@ int main() {
         negRadius.collisionRadiusCm = -1.0f;
         check(!negRadius.valid(), "a negative collisionRadiusCm is invalid");
         check(!fmt::writeOcFoliage(negRadius, bytes, &why), "and writeOcFoliage refuses it");
+    }
+
+    AVER_INFO("=== the W4.3 fields: validity ===");
+    {
+        std::vector<u8> bytes;
+        std::string why;
+        fmt::OcFoliageData a = makeFixture();
+        a.cullStartCm = 9500.0f;   // start past end
+        check(!a.valid() && !fmt::writeOcFoliage(a, bytes, &why), "cullStartCm past cullEndCm is refused");
+        a = makeFixture();
+        a.cullEndCm = -1.0f;
+        check(!a.valid(), "a negative cull distance is invalid");
+        a = makeFixture();
+        a.cullStartCm = 500.0f; a.cullEndCm = 0.0f;
+        check(a.valid(), "a start with no end is allowed (end 0 = no culling)");
+        a = makeFixture();
+        a.lodScaleBias = 0.0f;
+        check(!a.valid(), "a zero lodScaleBias is invalid (a blind zero-fill would be)");
+        a = makeFixture();
+        a.alignMaxAngleDeg = 120.0f;
+        check(!a.valid(), "alignMaxAngleDeg above 90 is invalid");
+        a = makeFixture();
+        a.groundOffsetCm = std::numeric_limits<f32>::quiet_NaN();
+        check(!a.valid(), "a NaN groundOffsetCm is invalid");
+    }
+
+    AVER_INFO("=== a file written before the W4.3 fields reads their defaults ===");
+    {
+        std::vector<u8> full;
+        std::string why;
+        check(fmt::writeOcFoliage(makeFixture(), full, &why), "reference writes");
+        fmt::Avr1File f;
+        check(fmt::parseAvr1(full.data(), full.size(), f, &why), "parses as AVR1");
+        for (fmt::AvrChunk& c : f.chunks)
+            if (c.id == fmt::kOcFoliageChunkHeader) c.data.resize(26);   // mesh, material, 2 scales, weight, yaw, radius, align
+        std::vector<u8> old;
+        check(fmt::writeAvr1(f, old, &why), "an old-shaped file re-encodes");
+        fmt::OcFoliageData out;
+        check(fmt::parseOcFoliage(old.data(), old.size(), out, &why), "and parses (" + why + ")");
+        const fmt::OcFoliageData def;
+        check(out.alignToNormal && out.collisionRadiusCm == 150.0f, "the old fields are intact");
+        check(out.cullStartCm == 0.0f && out.cullEndCm == 0.0f, "absent cull range reads as none");
+        check(out.lodScaleBias == def.lodScaleBias && out.lodScaleBias == 1.0f, "absent lodScaleBias reads 1.0, not 0");
+        check(out.alignMaxAngleDeg == 90.0f, "absent alignMaxAngleDeg reads 90, not 0");
+        check(out.groundOffsetCm == 0.0f && out.collision == fmt::OcFoliageData::Collision::None, "absent offset and collision read 0 / none");
     }
 
     AVER_INFO("=== corruption: wrong subtype, missing FHDR, null/short input ===");

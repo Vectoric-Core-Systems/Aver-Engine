@@ -60,12 +60,17 @@ inline constexpr u32 kOcInstChunkTransforms = avrFourCC("IXFM");
 // Optional spatial cells (docs/LEVEL_STREAMING.md): ICEL = cell table, IRUN = per-cell row ranges.
 inline constexpr u32 kOcInstChunkCells      = avrFourCC("ICEL");
 inline constexpr u32 kOcInstChunkRuns       = avrFourCC("IRUN");
+// Optional per-group culling (W4.3): u32 count, then count x {f32 cullStartCm, f32 cullEndCm, f32 lodScaleBias}. Absent = defaults.
+inline constexpr u32 kOcInstChunkCull       = avrFourCC("ICUL");
 
 // A reserved bit for a per-group flag word. Cast-shadow is not actually optional today -- foliage
 // casts shadows unconditionally, so every group this tree writes carries `flags = kOcInstanceFlagCastShadow`
 // -- but the bit is named and reserved now rather than left as a bare `1` a future no-shadow toggle
 // would have to go hunting for.
 inline constexpr u32 kOcInstanceFlagCastShadow = 1u;
+// What collision the foliage type asked for (OcFoliageData::Collision); both clear = none. Carried, not built here.
+inline constexpr u32 kOcInstanceFlagCollisionTrunk = 2u;
+inline constexpr u32 kOcInstanceFlagCollisionFull  = 4u;
 
 // One contiguous run of `transforms` that all share a prototype asset. `asset` is the SAME string a
 // PLACE line's own asset column carries, so a loader derives the identical objectId a mesh placement
@@ -76,7 +81,30 @@ struct OcInstanceGroup {
     u32 flags = 0;
     u32 first = 0;
     u32 count = 0;
+    // Distance culling from the viewer, in cm (ICUL chunk). cullEndCm 0 = never culled. GameFoliage keeps a quantised
+    // seeded share of the group's rows between cullStartCm and cullEndCm and none past it, per cell.
+    f32 cullStartCm = 0.0f;
+    f32 cullEndCm = 0.0f;
+    f32 lodScaleBias = 1.0f;
 };
+
+// The share of a group's rows kept when its cell is `distCm` from the viewer, in quarters: 4 = all, 0 = none.
+inline u32 ocInstanceKeepQuarters(const OcInstanceGroup& g, f32 distCm) {
+    if (!(g.cullEndCm > 0.0f)) return 4;
+    if (distCm >= g.cullEndCm) return 0;
+    if (distCm <= g.cullStartCm) return 4;
+    const f32 t = (distCm - g.cullStartCm) / (g.cullEndCm - g.cullStartCm);   // 0 at start, 1 at end
+    const u32 q = 4u - static_cast<u32>(t * 4.0f);                               // 4..1
+    return q < 1u ? 1u : q;
+}
+// Whether row `rowIndex` of a group survives `quarters` (a stable per-row hash, so the same rows stay as the viewer moves).
+inline bool ocInstanceRowKept(u32 rowIndex, u32 quarters) {
+    if (quarters >= 4) return true;
+    if (quarters == 0) return false;
+    u32 h = rowIndex * 2654435761u;
+    h ^= h >> 15; h *= 2246822519u; h ^= h >> 13;
+    return (h & 3u) < quarters;
+}
 
 // One grid cell: world-space AABB (cm) of its instances and its range in OcInstanceData::runs.
 struct OcInstanceCell {

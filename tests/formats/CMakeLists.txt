@@ -443,6 +443,11 @@ add_executable(OcFoliageTest src/OcFoliageTest.cpp)
 target_link_libraries(OcFoliageTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(OcFoliageTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# OcBiomeTest -- the .ocbiome text asset (canonical round trip, hand-written text, refusals, a file) and the .ocinst ICUL
+# per-group cull chunk with its keep rule. Base Aver.Formats; no device.
+add_executable(OcBiomeTest src/OcBiomeTest.cpp)
+target_link_libraries(OcBiomeTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(OcBiomeTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # OcHairTest -- the .ochair strand groom: the byte-identical round trip of the HEAD text and the STRN and SCLP chunks, the refusals valid() promises, forward
 # compatibility (a newer OCHAIR number refused, unknown records and keys skipped), hand-edited text, damaged chunks, and the glTF LINES / LINE_STRIP import. Base
