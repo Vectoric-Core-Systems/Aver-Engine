@@ -528,9 +528,9 @@ void SandboxApp::logSceneRenderStats(const aver::game::SceneDrawStats& colourSta
             g_sceneRenderLog.ownerHidden = colourStats.ownerHidden;
             g_sceneRenderLog.at = sceneNow;
         }
-        lastSceneDrawn_ = colourStats.drawn;
-        lastSceneCulled_ = colourStats.culled;
-        lastSceneOwnerHidden_ = colourStats.ownerHidden;
+        lvl_.lastSceneDrawn_ = colourStats.drawn;
+        lvl_.lastSceneCulled_ = colourStats.culled;
+        lvl_.lastSceneOwnerHidden_ = colourStats.ownerHidden;
 #if AVER_MODULE_TRIFACTOR
         // Greppable `[LOD-SELECT]`, only when the tuple changed. trianglesBeforeLod0 vs
         // trianglesAfterLevel predicts frame time; the cluster-cull counters are real telemetry
@@ -1424,7 +1424,7 @@ void SandboxApp::drawSceneEntities(Engine& e) {
                     self.lod_.lodClusterStats_.lodRejected += cr.stats.lodRejected;
                     self.lod_.lodClusterStats_.clustersDrawn += cr.stats.drawn;
                     self.lod_.lodClusterStats_.trianglesDrawn += cr.stats.trianglesAfter;
-                    if (const auto tIt = self.meshTris_.find(d.meshId); tIt != self.meshTris_.end())
+                    if (const auto tIt = self.lvl_.meshTris_.find(d.meshId); tIt != self.lvl_.meshTris_.end())
                         self.lod_.lodClusterStats_.trianglesBeforeLod0 += tIt->second;
                     if (cr.stats.distinctLevels > 1) ++self.lod_.lodClusterStats_.instancesMixedLevels;
                     self.lod_.lodClusterStats_.maxDistinctLevelsSeen =
@@ -1466,7 +1466,7 @@ void SandboxApp::drawSceneEntities(Engine& e) {
 
                         if (newHandle) {
                             if (cache.handle) {
-                                self.depthProxy_.erase(cache.handle);
+                                self.lvl_.depthProxy_.erase(cache.handle);
                                 c.engine->device()->destroyMesh(cache.handle);
                             }
                             cache.handle = newHandle;
@@ -1490,7 +1490,7 @@ void SandboxApp::drawSceneEntities(Engine& e) {
                             // meshLods_ are looked up by, above) -- not a handle at all, truncated
                             // into whatever 32 bits of depthProxy_'s u32 survived. `mesh`, the
                             // pre-cut SOURCE handle, is the value that belongs here.
-                            self.depthProxy_[newHandle] = mesh;
+                            self.lvl_.depthProxy_[newHandle] = mesh;
                         }
                         // newHandle == 0 (empty cut, or device refused): keep the cache's existing
                         // handle (fail-safe), or fall through to the LOD-0 handle `mesh` already
@@ -1699,16 +1699,16 @@ void SandboxApp::drawSceneEntities(Engine& e) {
                 // is counted, not warned about, and reported in one line after the walk.
                 const u32 slot = aver::scene::entityIndex(ent);
                 const u8  gen  = static_cast<u8>(aver::scene::entityGen(ent));
-                if (slot >= self.undrawnInvisibleGen_.size()) self.undrawnInvisibleGen_.resize(slot + 1u, 0);
-                if (self.undrawnInvisibleGen_[slot] != gen) {
-                    self.undrawnInvisibleGen_[slot] = gen;
+                if (slot >= self.lvl_.undrawnInvisibleGen_.size()) self.lvl_.undrawnInvisibleGen_.resize(slot + 1u, 0);
+                if (self.lvl_.undrawnInvisibleGen_[slot] != gen) {
+                    self.lvl_.undrawnInvisibleGen_[slot] = gen;
                     // Hidden through the visibility API (Entity.SetVisible; Fabric's Godot visible = false) leaves
                     // kMeshRendererVisibilitySet on the renderer: hidden on purpose, so neither warned about nor counted.
                     const scene::CMeshRenderer* hmr = scene::World::instance().component<scene::CMeshRenderer>(
                         ent, scene::kComponentMeshRenderer);
                     const bool hiddenOnPurpose = hmr && !scene::meshVisibilityUndecided(hmr->flags);
                     if (hiddenOnPurpose) {
-                    } else if (self.entityLabels_.find(static_cast<u32>(ent)) != self.entityLabels_.end()) {
+                    } else if (self.lvl_.entityLabels_.find(static_cast<u32>(ent)) != self.lvl_.entityLabels_.end()) {
                         if (c.authoredHiddenNew < 3) c.authoredHiddenIds[c.authoredHiddenNew] = static_cast<u64>(ent);
                         ++c.authoredHiddenNew;
                     } else
@@ -1724,7 +1724,7 @@ void SandboxApp::drawSceneEntities(Engine& e) {
             // the fault, not whichever entity reached it first. Printed raw, not translated:
             // meshPathById_ is empty for exactly these ids (only populated by loadProjectMeshes for
             // meshes that loaded) -- fnv1a64 of the authored path is what to grep the .ocgraph/.ocmap for.
-            if (self.undrawnMissingMesh_.insert(meshId).second)
+            if (self.lvl_.undrawnMissingMesh_.insert(meshId).second)
                 AVER_WARN("[Sandbox] mesh id {} (named by entity {}) is not in content_'s meshes, "
                           "so every entity naming it draws nothing. Built-in primitives are "
                           "seeded at startup and .ocmesh files are registered by "
@@ -2158,10 +2158,10 @@ void SandboxApp::drawClassMarkers(Engine& e) {
     // Class-root markers: a class actor can have no mesh at all, so each live root gets three axis lines to be
     // seen and clicked (pick() tests the same box). Edit mode only; world-space vertices, so identity.
     if (dbgOv_.classMarkerMesh_) { e.device()->destroyLineMesh(dbgOv_.classMarkerMesh_); dbgOv_.classMarkerMesh_ = 0; }
-    if (!noEditorChrome_ && !anyPlayActive() && !levelClassInstances_.empty()) {
+    if (!noEditorChrome_ && !anyPlayActive() && !lvl_.levelClassInstances_.empty()) {
         scene::World& cw = scene::World::instance();
         std::vector<editor::MarkerSeg> segs;
-        for (const ClassInstance& ci : levelClassInstances_) {
+        for (const ClassInstance& ci : lvl_.levelClassInstances_) {
             if (ci.removed || ci.entity == 0) continue;
             const scene::Entity root = static_cast<scene::Entity>(ci.entity);
             if (!cw.valid(root) || cw.destroyPending(root)) continue;
@@ -2213,7 +2213,7 @@ void SandboxApp::drawEditorGizmos(Engine& e) {
     // it draws on top of geometry by design.
     if (!noEditorChrome_) {
         drawGizmo(e);
-        postVolumeTools_.drawOverlay(*e.device(), levelHeader_.postVolumes, showPostVolumes_);
+        postVolumeTools_.drawOverlay(*e.device(), lvl_.levelHeader_.postVolumes, showPostVolumes_);
 #if AVER_MODULE_SCENE
         // The selected decal's projector box and face handles (dim boxes for every decal under Show > Decals).
         decalGizmo_.draw(*e.device(), scene::World::instance(),
@@ -2381,7 +2381,7 @@ void SandboxApp::onRender(Engine& e)  {
     // since SkinSceneTest is a no-op with SCENE off anyway (0, same as lastSceneCulled_ would read).
     if (skinScene_ && !skinScene_->finished())
 #if AVER_MODULE_SCENE
-        skinScene_->tick(e, viewState_.vpX_, viewState_.vpY_, viewState_.vpW_, viewState_.vpH_, static_cast<u32>(lastSceneCulled_ < 0 ? 0 : lastSceneCulled_));
+        skinScene_->tick(e, viewState_.vpX_, viewState_.vpY_, viewState_.vpW_, viewState_.vpH_, static_cast<u32>(lvl_.lastSceneCulled_ < 0 ? 0 : lvl_.lastSceneCulled_));
 #else
         skinScene_->tick(e, viewState_.vpX_, viewState_.vpY_, viewState_.vpW_, viewState_.vpH_, 0u);
 #endif
@@ -3293,7 +3293,7 @@ bool SandboxApp::occlusionWasVisible(scene::Entity e) const {
 #endif
 
  rhi::MeshHandle SandboxApp::depthProxyLookup(rhi::MeshHandle mesh, void* user) {
-    const auto& m = static_cast<const SandboxApp*>(user)->depthProxy_;
+    const auto& m = static_cast<const SandboxApp*>(user)->lvl_.depthProxy_;
     const auto it = m.find(mesh);
     return it == m.end() ? 0 : it->second;
 }

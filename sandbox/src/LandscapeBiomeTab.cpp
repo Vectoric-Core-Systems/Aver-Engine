@@ -134,8 +134,8 @@ void SandboxApp::buildBiomeSection() {
 #  if AVER_MODULE_VOXI
             if (rset_.voxiAttached_) levelFoliage_.setExtraTable(fnv1a64(std::string_view(req.ocinstRel)), std::move(out.table), std::move(out.groupMaterials));
 #  endif
-            if (std::find(levelHeader_.foliageFiles.begin(), levelHeader_.foliageFiles.end(), req.ocinstRel) == levelHeader_.foliageFiles.end()) {
-                levelHeader_.foliageFiles.push_back(req.ocinstRel);
+            if (std::find(lvl_.levelHeader_.foliageFiles.begin(), lvl_.levelHeader_.foliageFiles.end(), req.ocinstRel) == lvl_.levelHeader_.foliageFiles.end()) {
+                lvl_.levelHeader_.foliageFiles.push_back(req.ocinstRel);
                 markLevelUnsaved();
             }
             u.status = editor::biomes::outcomeLine(out.instances, out.kept, out.cellsCapped);

@@ -50,8 +50,8 @@ void SandboxApp::installPcgEditorHost() {
         std::error_code ec;
         std::filesystem::create_directories((std::filesystem::path(project_.contentDir()) / rel).parent_path(), ec);
         if (!fmt::saveOcInstances(project_.contentDir() + "/" + rel, table, why)) return {};
-        if (std::find(levelHeader_.foliageFiles.begin(), levelHeader_.foliageFiles.end(), rel) == levelHeader_.foliageFiles.end()) {
-            levelHeader_.foliageFiles.push_back(rel);
+        if (std::find(lvl_.levelHeader_.foliageFiles.begin(), lvl_.levelHeader_.foliageFiles.end(), rel) == lvl_.levelHeader_.foliageFiles.end()) {
+            lvl_.levelHeader_.foliageFiles.push_back(rel);
             markLevelUnsaved();
         }
 #  if AVER_MODULE_VOXI
@@ -67,12 +67,12 @@ void SandboxApp::installPcgEditorHost() {
     h.clean = [this](const std::string& graphPath, std::string* why) {
         if (!project_.valid()) { if (why) *why = "open a project first"; return false; }
         const std::string rel = outputRelFor(graphPath);
-        const auto it = std::find(levelHeader_.foliageFiles.begin(), levelHeader_.foliageFiles.end(), rel);
+        const auto it = std::find(lvl_.levelHeader_.foliageFiles.begin(), lvl_.levelHeader_.foliageFiles.end(), rel);
         const std::string file = project_.contentDir() + "/" + rel;
         std::error_code ec;
-        const bool had = it != levelHeader_.foliageFiles.end() || std::filesystem::exists(file, ec);
+        const bool had = it != lvl_.levelHeader_.foliageFiles.end() || std::filesystem::exists(file, ec);
         if (!had) { if (why) *why = "nothing was generated for this graph"; return false; }
-        if (it != levelHeader_.foliageFiles.end()) { levelHeader_.foliageFiles.erase(it); markLevelUnsaved(); }
+        if (it != lvl_.levelHeader_.foliageFiles.end()) { lvl_.levelHeader_.foliageFiles.erase(it); markLevelUnsaved(); }
 #  if AVER_MODULE_VOXI
         if (rset_.voxiAttached_) levelFoliage_.clearExtraTable(fnv1a64(std::string_view(rel)));
 #  endif

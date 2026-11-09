@@ -126,12 +126,12 @@ BootConfig SandboxApp::config() const  {
 // Has project reached screen? Returns true when draw count settles for kSettleFrames frames.
 bool SandboxApp::startupComplete() const  {
 #if AVER_MODULE_SCENE
-    if (lastSceneDrawn_ < 0) return false;
+    if (lvl_.lastSceneDrawn_ < 0) return false;
     if (project_.manifestPath.empty()) return true;    // no project loading
-    if (lastSceneDrawn_ == 0) return false;
+    if (lvl_.lastSceneDrawn_ == 0) return false;
     constexpr int kSettleFrames = 8;
-    if (lastSceneDrawn_ == startupSettleCount_) ++startupSettleFrames_;
-    else { startupSettleCount_ = lastSceneDrawn_; startupSettleFrames_ = 0; }
+    if (lvl_.lastSceneDrawn_ == startupSettleCount_) ++startupSettleFrames_;
+    else { startupSettleCount_ = lvl_.lastSceneDrawn_; startupSettleFrames_ = 0; }
     return startupSettleFrames_ >= kSettleFrames;
 #else
     // No scene walk in this tree, so there's no draw count to settle on; up as soon as the engine says so.

@@ -1312,6 +1312,7 @@ private:
 #include "state/AutosaveSession.hpp"
 #include "state/DebugOverlayState.hpp"
 #include "state/PanelState.hpp"
+#include "state/LevelDataState.hpp"
 class HitchMarks;
 namespace game { struct SceneDrawStats; }
 
@@ -1782,6 +1783,7 @@ private:
     AutosaveSession autosave_;   // Level/project/prefs autosave timers, crash-recovery state and the post
     DebugOverlayState dbgOv_;   // Debug overlays and diagnostics panels
     PanelState panels_;   // Editor panel/dialog visibility flags, prompt requests and dock layout 
+    LevelDataState lvl_;   // Per-level side tables and caches
     // ---- end feature state ----
 
     void applyProject(Engine& e);
@@ -3113,8 +3115,6 @@ private:
     bool levelCameraRestored_ = false;
     editor::AssetEditorHost assetEditors_;
     bool wantMeshReload_ = false;
-    // Outliner display names (not scene::World::name which holds asset path).
-    std::unordered_map<u32, std::string> entityLabels_;
 #if AVER_MODULE_SCENE
     editor::DecalImageResolver decalImages_;  // a decal's image id -> a file under the project's content folder
     editor::DecalGizmo decalGizmo_;           // the selected decal's box and its face handles
@@ -3130,8 +3130,6 @@ private:
     // One undo entry for a prefab operation.
     void pushPrefabEdit(const editor::PrefabEdit& edit);
 #endif
-    std::unordered_map<std::string, int> labelCounts_;
-    std::unordered_map<u32, int32_t> entityBodies_;
 
     static constexpr std::size_t kUndoDepth = 128;
     std::vector<EditCmd> undoStack_, redoStack_;
@@ -3427,42 +3425,17 @@ private:
     std::string graphTab_; // --graph-select <nodeId>; see setGraphSelectNode's own comment
 
     editor::ProjectUpgrade pendingUpgrade_;
-    // Every PCGVOLUME the loaded level carried, kept verbatim so a save cannot drop them.
-    std::vector<fmt::OcPcgVolume> levelPcgVolumes_;
     // The loaded level's own header, placements and PCG volumes stripped. Starting from what the file said, overwriting only what the editor owns.
     // ---- the 3D-viewport icon renderer, and the Player Start marker it draws ----
     // viewportIconsReady_ is the ONE flag the render walk consults to skip the Player Start's cube (false unless the feature AND its texture both came up).
     editor::ViewportIconRenderer viewportIcons_;
-    fmt::OcWorldData levelHeader_;
 #if AVER_MODULE_PBR
     // pinMaterialResident()/unpinMaterialResident()'s storage -- checked by bindMaterialsForLevel() so a level-scoped release never destroys a material an open tab holds.
     std::unordered_set<std::string> pinnedMaterialNames_;
 #endif
-    // Whether each level entity's placement said `nocollide`. No component for this: load-time instruction, so without it the save forced `collide = true` on everything.
-    std::unordered_map<u32, bool> entityCollide_;
-    // Each entity's authored object animation; absent = none. The CAnimator on the entity is only the live clock, so saveLevel reads this map.
-    std::unordered_map<u32, EntityAnim> entityAnim_;
     // The Details panel's Animation drag in flight: every selected entity's EntityAnim from the frame the widget was grabbed.
     std::vector<EditCmd::AnimChange> animEditBefore_;
-    // Entities placed with `snap`, and the AUTHORED z offset each was placed at. Absent = not snapped.
-    std::unordered_map<u32, f64> entitySnapZ_;
-#if AVER_MODULE_SCENE && AVER_MODULE_PHYSICS
-    // driveAnimatedBodies' list, kept between frames and rebuilt only when it can have changed.
-    std::vector<world::AnimatedBody> animatedBodies_;
-    bool animatedBodiesBuilt_ = false;
-    usize animatedBodiesFromAnim_ = 0;
-    usize animatedBodiesFromBodies_ = 0;
-    u64 animatedBodiesFromRev_ = 0;
-#endif
 
-    // True while the open level loaded via legacy OCMAP path, not OCWORLD. Reset by unloadLevel.
-    bool levelIsLegacyOcmap_ = false;
-    // Legacy header for OCMAP-only record kinds (ROOT, CLIENT, SURFACE, GROUND, KILLZ).
-    fmt::OcMapData legacyMapHeader_;
-    // Entity legacy data: deform flag, surface index, material name. See onLegacyOcmapInstantiated.
-    std::unordered_map<u32, bool> entityLegacyDeform_;
-    std::unordered_map<u32, i32> entityLegacySurface_;
-    std::unordered_map<u32, std::string> entityLegacyMaterial_;
     // Game UI font. Invalid font (missing file) draws nothing.
     ui::UiFont uiFont_;
     rhi::TextureHandle uiFontTexture_ = 0;
@@ -3478,10 +3451,6 @@ private:
     // placement's stable id across saves (overrides are keyed by it).
     editor::LevelInstanceEditorModel levelInstanceModel_{scene::World::instance(), level_.instances(), level_.assets()};
     editor::LevelInstanceCreateDialog levelInstanceDlg_;
-    std::unordered_map<u32, u64> entityPlaceId_;
-    std::unordered_map<u32, std::string> entityAuthoredName_;   // an instance member's authored `name`, for a commit
-    bool capturingInstance_ = false;                             // fillPlacementFromEntity may read members (a commit)
-    scene::Entity instanceSelPinned_ = scene::kInvalidEntity;    // the selected instance stays loaded while it is selected
     void installLevelInstanceHooks();
     editor::LevelInstanceUiCallbacks levelInstanceUiCallbacks();
     void pushLevelInstanceEdit(const editor::LevelInstanceEdit& edit);
@@ -3569,7 +3538,6 @@ private:
     void initEditorOrigin();
     void afterOriginShift(Engine& e);
     bool originBlocksSave(const char* what);
-    std::string streamRegenReport_;
     // LARGE_WORLD 2.4.5 (SandboxLevelCook.cpp): World Settings > Level Streaming > Cook Chunks, and the freshness check before a Standalone launch.
     bool cookLevelChunks(std::string& report);
     bool refreshCookedChunksForPlay();
@@ -3584,27 +3552,8 @@ private:
     void startHlodBuild();
     void pollHlodBuild();
     editor::HlodBuildJob hlodJob_;
-    std::string hlodReport_;
-    bool hlodForce_ = false;
-    std::string cookChunksReport_;
-    usize streamSeenCount_ = 0;                  // levelEntities_ size at the last adoption pass
-    std::unordered_set<u32> streamAdopted_;      // checked by adoptNewLevelEntities (adopted or not a placement)
-    std::unordered_set<u32> streamSelPinned_;    // pinned because selected
-    bool streamPlayWas_ = false;
-    std::unordered_set<u32> streamPlayResident_; // streamed entities resident when Play started
-    std::vector<i32> streamOutSlot_;             // record index -> saved placement line, last save
-    std::vector<fmt::OcSeqTrack> streamSeqTracks_;   // object tracks of a streamed level, kept aside
-    std::vector<std::string> streamSeqOwner_;        // [wave5/sequencer] the sequence (by name) each aside track belongs to
-    std::vector<fmt::OcSequence> streamSeqHeaders_;  // the level's sequences without tracks, to rebuild them on save
-    // Label each streamed entity got when it streamed in (a changed label is a rename), and what is pinned.
-    std::unordered_map<u32, std::string> streamLabel_;
-    std::unordered_set<u32> streamPinned_;
 #  if AVER_MODULE_VOXI
     game::LevelFoliage levelFoliage_;
-    // The start level's foliage, kept until the renderer attaches (see afterInstantiate).
-    fmt::OcWorldData foliagePendingWorld_;
-    std::vector<std::string> foliagePendingTables_;
-    bool foliagePending_ = false;
 #  endif
 #endif
 
@@ -3948,26 +3897,16 @@ private:
     world::VehicleSystem vehicles_;
 #endif
 
-    std::vector<scene::Entity> levelEntities_;
-
 #if AVER_MODULE_FRAMEWORK
     // Class placements: level_.classPlacements() has the list; spawnClassPlacements fills this.
     // Each instance carries its placement id explicitly, not by position.
     using ClassInstance = editor::LevelClassInstance;
-    std::vector<ClassInstance> levelClassInstances_;
-    std::vector<fmt::OcWorldPlacement> classAuthored_;      // every class placement of the open level (loaded first, session-added appended)
-    std::vector<i64> classAuthoredIndex_;                   // parallel: its placement index in the loaded file, -1 if added this session
     game::PlacementTree placementTree_;                     // the loaded file's hierarchy: placed actors spawn under their parents
     using PlayClassSaved = PlayState::PlayClassSaved;
-    std::vector<editor::GraphClassDecl> classPickList_;
-    bool classPickDirty_ = true;                           // rescan when the Add popup opens
 #endif
 
     // PCG chunk streaming (opt-in, transient entities).
     game::GameStreaming streaming_;
-#if AVER_MODULE_PHYSICS
-    std::vector<int32_t> levelBodies_;
-#endif
 
     // Graph-driven drone (opt-in, transient). Spawned by setDroneEnabled, ticked via scripts_.graphTick.
     scene::Entity droneEntity_ = scene::kInvalidEntity;
@@ -4092,19 +4031,6 @@ private:
     void loadDataLayers(const fmt::OcWorldData& w);
     void clearDataLayers();
 #if AVER_MODULE_SCENE
-    // Mesh id -> project-relative path. Handles/bounds/parts are in content_.
-    std::unordered_map<u64, std::string>     meshPathById_;
-    // Entities missing mesh or with invisible bit. Per-entity or per-id fault. Never cleared on reload.
-    // Invisible: last generation reported per entity slot (0 = none); generations only rise per slot.
-    std::vector<u8> undrawnInvisibleGen_;
-    std::unordered_set<u64> undrawnMissingMesh_;
-    // Triangle count per mesh id (same key as content_). Enables budget reporting instead of guessing.
-    std::unordered_map<u64, u32> meshTris_;
-    // Skeletal mesh ids (have skin weights, colored differently in Content Browser).
-    std::unordered_set<u64> skinnedMeshIds_;
-    // Pick geometry per mesh (lazy-loaded on first click). Empty = tried and unavailable.
-    std::unordered_map<u64, aver::editor::PickGeometry> pickGeometry_;
-    int lastSceneDrawn_=-1;           // Last scene-entity draw count (startupComplete settle input).
     // Settle detector for startupComplete.
     mutable int startupSettleCount_ = -2;   // -2 so cannot match lastSceneDrawn_'s -1.
     mutable int startupSettleFrames_ = 0;
@@ -4113,10 +4039,6 @@ private:
     std::unique_ptr<struct LoadingScreen> projectLoading_;
     // Frames the project loading screen has been up (capped in onRender).
     int projectLoadingFrames_ = 0;
-#if AVER_MODULE_SCENE
-    int lastSceneCulled_=-1;          // Cull count.
-    int lastSceneOwnerHidden_=-1;     // Owner-hide count.
-#endif
 #if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
     using MeshLodLadder = LodState::MeshLodLadder;
 #endif
@@ -4139,9 +4061,6 @@ private:
 
     using LodMeshShaderStats = LodState::LodMeshShaderStats;
 #endif
-
-    // Depth proxy map (populated if Trifactor, empty if not). Each lookup answers 0 if no entry.
-    std::unordered_map<rhi::MeshHandle, rhi::MeshHandle> depthProxy_;
 
     static rhi::MeshHandle depthProxyLookup(rhi::MeshHandle mesh, void* user);
 

@@ -2056,12 +2056,12 @@ void SandboxApp::runUndoTest(Engine& eng) {
             const u32 rnbase = w.count();
             spawnCube(eng); w.flush();
             const scene::Entity re = selectionUi_.selEntity_;
-            const std::string spawned = entityLabels_.count(static_cast<u32>(re))
-                                      ? entityLabels_[static_cast<u32>(re)] : std::string();
+            const std::string spawned = lvl_.entityLabels_.count(static_cast<u32>(re))
+                                      ? lvl_.entityLabels_[static_cast<u32>(re)] : std::string();
             const usize stackBefore = undoStack_.size();
 
             renameEntity(re, "Doorway");
-            check(entityLabels_[static_cast<u32>(re)] == "Doorway", "renameEntity sets the label");
+            check(lvl_.entityLabels_[static_cast<u32>(re)] == "Doorway", "renameEntity sets the label");
             check(undoStack_.size() == stackBefore + 1, "and puts ONE entry on the undo stack");
 
             // Rename to the SAME name is not an edit.
@@ -2069,11 +2069,11 @@ void SandboxApp::runUndoTest(Engine& eng) {
             check(undoStack_.size() == stackBefore + 1, "renaming to the same name pushes nothing");
 
             undo();
-            check((entityLabels_.count(static_cast<u32>(re))
-                   ? entityLabels_[static_cast<u32>(re)] : std::string()) == spawned,
+            check((lvl_.entityLabels_.count(static_cast<u32>(re))
+                   ? lvl_.entityLabels_[static_cast<u32>(re)] : std::string()) == spawned,
                   "undo restores the name it had before");
             redo();
-            check(entityLabels_[static_cast<u32>(re)] == "Doorway", "redo re-applies the rename");
+            check(lvl_.entityLabels_[static_cast<u32>(re)] == "Doorway", "redo re-applies the rename");
 
             // Asset name is not touched: CName is the placement's asset path.
             check(std::string(w.name(re)) == "Meshes/cube.ocmesh",
@@ -2275,7 +2275,7 @@ void SandboxApp::runClassPlaceTest(Engine& eng) {
     };
     auto liveInstances = [&]() {
         usize n = 0;
-        for (const ClassInstance& ci : levelClassInstances_)
+        for (const ClassInstance& ci : lvl_.levelClassInstances_)
             if (!ci.removed && ci.entity != 0 && w.valid(static_cast<scene::Entity>(ci.entity))) ++n;
         return n;
     };
@@ -2301,9 +2301,9 @@ void SandboxApp::runClassPlaceTest(Engine& eng) {
     spawnClassPlacements();   // idempotent; covers a level that finished loading after the retry call
 
     // 1. The level's own class placement is live, with its COMP parts, and the Mesh part is visible.
-    check(liveInstances() == 1 && classAuthored_.size() == 1, "after load: one class placement, one live instance");
+    check(liveInstances() == 1 && lvl_.classAuthored_.size() == 1, "after load: one class placement, one live instance");
     if (liveInstances() != 1) finish();
-    const scene::Entity root = static_cast<scene::Entity>(levelClassInstances_[0].entity);
+    const scene::Entity root = static_cast<scene::Entity>(lvl_.levelClassInstances_[0].entity);
     check(subtreeSize(root) == 3, "the root has its two COMP parts (body, and tip under it)");
     scene::Entity body = scene::kInvalidEntity;
     {
@@ -2332,7 +2332,7 @@ void SandboxApp::runClassPlaceTest(Engine& eng) {
     const scene::Entity e2 = placeClassInstance(editor::makeClassPlacement("AN_CompProbe", Vec3{500, 0, 0}, 90.0), &why);
     check(e2 != scene::kInvalidEntity && w.valid(e2), "placeClassInstance spawns a class actor");
     if (e2 == scene::kInvalidEntity) { AVER_ERROR("[class-place-test] why: {}", why); finish(); }
-    check(liveInstances() == 2 && classAuthored_.size() == 2, "two live instances, two authored placements");
+    check(liveInstances() == 2 && lvl_.classAuthored_.size() == 2, "two live instances, two authored placements");
     check(!undoStack_.empty() && undoStack_.back().kind == EditCmd::Kind::Create &&
           undoStack_.back().className == "AN_CompProbe" && undoStack_.back().classSlot == 1,
           "the Create edit carries the class name and slot");
@@ -2391,13 +2391,13 @@ void SandboxApp::runClassPlaceTest(Engine& eng) {
     // test does not start Play's physics and mobility sessions).
     {
         play_.playClassSnapshot_.clear();
-        for (usize slot = 0; slot < levelClassInstances_.size(); ++slot) {
-            const ClassInstance& ci = levelClassInstances_[slot];
+        for (usize slot = 0; slot < lvl_.levelClassInstances_.size(); ++slot) {
+            const ClassInstance& ci = lvl_.levelClassInstances_[slot];
             if (ci.removed || ci.entity == 0) continue;
             const scene::Entity r = static_cast<scene::Entity>(ci.entity);
             play_.playClassSnapshot_.push_back(PlayClassSaved{ci.placement, editIdFor(r), w.localTransform(r)});
         }
-        const scene::Entity first = static_cast<scene::Entity>(levelClassInstances_[0].entity);
+        const scene::Entity first = static_cast<scene::Entity>(lvl_.levelClassInstances_[0].entity);
         const EditId firstId = editIdFor(first);
         const Transform firstXf = w.localTransform(first);
         aver_fw_destroy(static_cast<int32_t>(first));
@@ -2416,7 +2416,7 @@ void SandboxApp::runClassPlaceTest(Engine& eng) {
 
     // 9. Duplicate refuses a class actor instead of making an unsaved husk.
     {
-        const scene::Entity r = static_cast<scene::Entity>(levelClassInstances_[0].entity);
+        const scene::Entity r = static_cast<scene::Entity>(lvl_.levelClassInstances_[0].entity);
         multiSetSingle(r);
         const u32 before = w.count();
         drawerUi_.cbStatus_.clear();

@@ -618,12 +618,12 @@ void SandboxApp::buildWorldSettings() {
         // Stored by class NAME (handles are process-local). Empty = inherit: the project's GAME.MODE,
         // then the engine's own (the flying drone).
         const std::string projectGm = project_.gameMode.empty() ? "engine default: drone" : project_.gameMode;
-        if (classPicker("GameMode Override", levelHeader_.gameMode, AVER_FW_CLASS_GAME_MODE,
+        if (classPicker("GameMode Override", lvl_.levelHeader_.gameMode, AVER_FW_CLASS_GAME_MODE,
                         ("Project default (" + projectGm + ")").c_str(), "AverDefaultGameMode",
                         "Engine default (drone)"))
             markLevelUnsaved();
         uiReg_.track("worldSettings.gameMode");
-        if (classPicker("Default Pawn", levelHeader_.defaultPawn, AVER_FW_CLASS_PAWN,
+        if (classPicker("Default Pawn", lvl_.levelHeader_.defaultPawn, AVER_FW_CLASS_PAWN,
                         "GameMode's default pawn", "AverDefaultPawn", "Drone (flies, collides)"))
             markLevelUnsaved();
         uiReg_.track("worldSettings.defaultPawn");
@@ -658,14 +658,14 @@ void SandboxApp::buildWorldSettings() {
     // ---- Streaming, per density field ----
     ImGui::TextDisabled("World Streaming");
     ImGui::Separator();
-    if (levelPcgVolumes_.empty()) {
+    if (lvl_.levelPcgVolumes_.empty()) {
         ImGui::TextDisabled("This level declares no PCGVOLUME, so nothing streams.");
     } else {
         // One row per field: radius is per field on purpose -- a single level-wide radius can't
         // serve a dense ground cover and a sparse canopy at once.
         ImGui::TextDisabled("Radius is per density field, in 16m chunks. Cost is quadratic in it.");
-        for (usize i = 0; i < levelPcgVolumes_.size(); ++i) {
-            fmt::OcPcgVolume& v = levelPcgVolumes_[i];
+        for (usize i = 0; i < lvl_.levelPcgVolumes_.size(); ++i) {
+            fmt::OcPcgVolume& v = lvl_.levelPcgVolumes_[i];
             if (v.name == "Sky") continue;   // the cloud field; it streams nothing
             ImGui::PushID(static_cast<int>(i));
             ImGui::Text("%s", v.name.empty() ? "(unnamed)" : v.name.c_str());

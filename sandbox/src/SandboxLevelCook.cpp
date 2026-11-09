@@ -66,8 +66,8 @@ world::CookInput cookInputFor(const fmt::ProjectDesc& project, const std::string
 bool SandboxApp::cookLevelChunks(std::string& report) {
     if (!project_.valid() || levelPath_.empty()) { report = "no level is open"; return false; }
     const CookTarget target = cookTarget(project_.dir, levelPath_);
-    if (levelHeader_.stream.chunksPath != target.relative) {
-        levelHeader_.stream.chunksPath = target.relative;
+    if (lvl_.levelHeader_.stream.chunksPath != target.relative) {
+        lvl_.levelHeader_.stream.chunksPath = target.relative;
         markLevelUnsaved();
     }
     if (!saveLevel(levelPath_)) { report = "the level could not be saved"; return false; }
@@ -95,7 +95,7 @@ bool SandboxApp::cookLevelChunks(std::string& report) {
 // Before a Standalone launch: the runtime streams the cooked set only while it is current (a stale set is skipped with a warning),
 // so a level that names one gets it re-cooked here when the saved level has moved on. False when the cook fails (no launch).
 bool SandboxApp::refreshCookedChunksForPlay() {
-    if (levelHeader_.stream.chunksPath.empty() || !project_.valid() || levelPath_.empty()) return true;   // this level streams the old way
+    if (lvl_.levelHeader_.stream.chunksPath.empty() || !project_.valid() || levelPath_.empty()) return true;   // this level streams the old way
     fmt::OcWorldData w;
     std::string why;
     if (!fmt::loadOcworld(levelPath_, w, &why)) return true;   // the launch reports an unreadable level itself
@@ -108,7 +108,7 @@ bool SandboxApp::refreshCookedChunksForPlay() {
 
     std::string report;
     const bool ok = cookLevelChunks(report);
-    cookChunksReport_ = ok ? "Re-cooked for Play: " + report : "Failed: " + report;
+    lvl_.cookChunksReport_ = ok ? "Re-cooked for Play: " + report : "Failed: " + report;
     if (!ok) setUpgradeStatus("Cooking the level's chunks failed: " + report, editor::NotifySeverity::Error);
     return ok;
 }
@@ -117,11 +117,11 @@ bool SandboxApp::refreshCookedChunksForPlay() {
 void SandboxApp::buildCookChunksSettings() {
     ImGui::Separator();
     ImGui::TextDisabled("Cooked chunks");
-    fmt::OcStreamSettings& st = levelHeader_.stream;
+    fmt::OcStreamSettings& st = lvl_.levelHeader_.stream;
     ImGui::TextDisabled("Set: %s", st.chunksPath.empty() ? "(not cooked)" : st.chunksPath.c_str());
     if (ImGui::Button("Cook Chunks")) {
         std::string report;
-        cookChunksReport_ = cookLevelChunks(report) ? report : "Failed: " + report;
+        lvl_.cookChunksReport_ = cookLevelChunks(report) ? report : "Failed: " + report;
     }
     uiReg_.track("worldSettings.cookChunks");
     if (ImGui::IsItemHovered())
@@ -134,14 +134,14 @@ void SandboxApp::buildCookChunksSettings() {
         if (ImGui::Button("Forget Set")) {
             st.chunksPath.clear();
             markLevelUnsaved();
-            cookChunksReport_.clear();
+            lvl_.cookChunksReport_.clear();
         }
         uiReg_.track("worldSettings.forgetCookedChunks");
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Removes chunks= from the level, so a game streams it from its objects again.\n"
                               "The cooked files stay on disk.");
     }
-    if (!cookChunksReport_.empty()) ImGui::TextDisabled("%s", cookChunksReport_.c_str());
+    if (!lvl_.cookChunksReport_.empty()) ImGui::TextDisabled("%s", lvl_.cookChunksReport_.c_str());
 }
 
 } // namespace aver

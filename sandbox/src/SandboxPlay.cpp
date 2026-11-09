@@ -110,9 +110,9 @@ void SandboxApp::capturePlayWorld() {
 #if AVER_MODULE_SCENE
     placedBaseline_.clear();
     scene::World& w = scene::World::instance();
-    play_.playWorldSnapshot_.reserve(levelEntities_.size());
+    play_.playWorldSnapshot_.reserve(lvl_.levelEntities_.size());
     const game::PathOfIdFn pathFn = [this](u64 id) { return pathOfContentId(id); };
-    for (const scene::Entity e : levelEntities_) {
+    for (const scene::Entity e : lvl_.levelEntities_) {
         if (!w.valid(e)) continue;
         // THE RAW BIT, deliberately NOT authoredVisible(): this is "what Play found", the exact
         // same convention localTransform(e) just below follows, and an entity H-hid before Play
@@ -131,7 +131,7 @@ void SandboxApp::capturePlayWorld() {
 #if AVER_MODULE_FRAMEWORK
     // The graph-class roots too: Stop puts a surviving one back like any placement, and respawns one that end_play destroyed.
     play_.playClassSnapshot_.clear();
-    for (const ClassInstance& ci : levelClassInstances_) {
+    for (const ClassInstance& ci : lvl_.levelClassInstances_) {
         if (ci.removed) continue;
         const scene::Entity e = static_cast<scene::Entity>(ci.entity);
         if (!w.valid(e)) continue;
@@ -385,10 +385,10 @@ void SandboxApp::startPlay() {
                   c ? "not that kind of class" : "not declared (compile .NET?)");
         return 0;
     };
-    const std::string& gmName = !levelHeader_.gameMode.empty() ? levelHeader_.gameMode : project_.gameMode;
+    const std::string& gmName = !lvl_.levelHeader_.gameMode.empty() ? lvl_.levelHeader_.gameMode : project_.gameMode;
     int32_t gm = resolveNamed(gmName, AVER_FW_CLASS_GAME_MODE, "GameMode");
     if (!gm) gm = engineGm;
-    const int32_t pawnOverride = resolveNamed(levelHeader_.defaultPawn, AVER_FW_CLASS_PAWN, "default pawn");
+    const int32_t pawnOverride = resolveNamed(lvl_.levelHeader_.defaultPawn, AVER_FW_CLASS_PAWN, "default pawn");
     const bool    drone = pawnOverride ? pawnOverride == dronePawn : gm == engineGm;
     const int32_t gi = aver_fw_find_class_with_flags(AVER_FW_CLASS_GAME_INSTANCE);  // 0 == none, allowed
     if (drone) {
@@ -777,7 +777,7 @@ void SandboxApp::writePlaySnapshot() {
     const std::filesystem::path dir = std::filesystem::path(userDataDir()) / "PlaySnapshots";
     std::filesystem::create_directories(dir, ec);
     const std::string stem = "play_snapshot_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
-    const std::string path = (dir / (stem + (levelIsLegacyOcmap_ ? ".ocmap" : ".ocworld"))).string();
+    const std::string path = (dir / (stem + (lvl_.levelIsLegacyOcmap_ ? ".ocmap" : ".ocworld"))).string();
     play_.pieWasUnsaved_ = levelHasUnsavedEdits();
     if (saveLevel(path, /*playSnapshot=*/true)) play_.pieSnapshotPath_ = path;
     else AVER_WARN("[Sandbox] Play: could not snapshot the level; Stop will restore transforms only");
@@ -917,9 +917,9 @@ void SandboxApp::travelDuringPlay(Engine& eng, const std::string& requested) {
         const int32_t c = n.empty() ? 0 : aver_fw_class_find(n.c_str());
         return (c && (aver_fw_class_get_flags(c) & flag) != 0) ? c : 0;
     };
-    int32_t gm = named(!levelHeader_.gameMode.empty() ? levelHeader_.gameMode : project_.gameMode, AVER_FW_CLASS_GAME_MODE);
+    int32_t gm = named(!lvl_.levelHeader_.gameMode.empty() ? lvl_.levelHeader_.gameMode : project_.gameMode, AVER_FW_CLASS_GAME_MODE);
     if (!gm) gm = engineGm;
-    const int32_t pawnOverride = named(levelHeader_.defaultPawn, AVER_FW_CLASS_PAWN);
+    const int32_t pawnOverride = named(lvl_.levelHeader_.defaultPawn, AVER_FW_CLASS_PAWN);
     const bool drone = pawnOverride ? pawnOverride == dronePawn : gm == engineGm;
     if (!aver_fw_travel_end(gm, drone ? dronePawn : pawnOverride)) {
         AVER_WARN("[Play] level travel: no GameMode could begin in '{}'", path);
@@ -1089,14 +1089,14 @@ void SandboxApp::drivePlayCamera(f32 dt) {
 // MoveKinematic left on it are zeroed so the first physics step of the next Play does not move it.
 void SandboxApp::restoreAnimatedEntities() {
     scene::World& w = scene::World::instance();
-    for (const auto& kv : entityAnim_) {
+    for (const auto& kv : lvl_.entityAnim_) {
         const scene::Entity e = static_cast<scene::Entity>(kv.first);
         if (!w.valid(e)) continue;
         const EntityAnim authored = kv.second;   // a copy: writeEntityAnim assigns into this very map
         writeEntityAnim(e, authored);
 #if AVER_MODULE_PHYSICS
-        const auto body = entityBodies_.find(kv.first);
-        if (body == entityBodies_.end() ||
+        const auto body = lvl_.entityBodies_.find(kv.first);
+        if (body == lvl_.entityBodies_.end() ||
             aver_phys_body_motion_type(body->second) != AVER_PHYS_MOTION_KINEMATIC) continue;
         const Transform xf = worldTransformOf(w, e);
         aver_phys_body_set_position(body->second, xf.position.x, xf.position.y, xf.position.z);
@@ -1124,27 +1124,27 @@ void SandboxApp::restoreAnimatedEntities() {
 // no longer kinematic (a script, a path that bumps neither) makes the drive itself say so. Any frame
 // not driving drops the list, so every Play starts from a fresh one.
 void SandboxApp::driveAnimatedBodies(f32 dt) {
-    if (entityAnim_.empty() || !anim::animSystem().objectAnimationLive() ||
+    if (lvl_.entityAnim_.empty() || !anim::animSystem().objectAnimationLive() ||
         anim::animSystem().objectAnimationPaused()) {
-        animatedBodiesBuilt_ = false;
+        lvl_.animatedBodiesBuilt_ = false;
         return;
     }
-    if (!animatedBodiesBuilt_ || animatedBodiesFromAnim_ != entityAnim_.size() ||
-        animatedBodiesFromBodies_ != entityBodies_.size() || animatedBodiesFromRev_ != dbgOv_.colliderRev_) {
-        animatedBodies_.clear();
-        for (const auto& kv : entityAnim_) {
-            const auto body = entityBodies_.find(kv.first);
-            if (body != entityBodies_.end() &&
+    if (!lvl_.animatedBodiesBuilt_ || lvl_.animatedBodiesFromAnim_ != lvl_.entityAnim_.size() ||
+        lvl_.animatedBodiesFromBodies_ != lvl_.entityBodies_.size() || lvl_.animatedBodiesFromRev_ != dbgOv_.colliderRev_) {
+        lvl_.animatedBodies_.clear();
+        for (const auto& kv : lvl_.entityAnim_) {
+            const auto body = lvl_.entityBodies_.find(kv.first);
+            if (body != lvl_.entityBodies_.end() &&
                 aver_phys_body_motion_type(body->second) == AVER_PHYS_MOTION_KINEMATIC)
-                animatedBodies_.push_back({static_cast<scene::Entity>(kv.first), body->second});
+                lvl_.animatedBodies_.push_back({static_cast<scene::Entity>(kv.first), body->second});
         }
-        animatedBodiesBuilt_ = true;
-        animatedBodiesFromAnim_ = entityAnim_.size();
-        animatedBodiesFromBodies_ = entityBodies_.size();
-        animatedBodiesFromRev_ = dbgOv_.colliderRev_;
+        lvl_.animatedBodiesBuilt_ = true;
+        lvl_.animatedBodiesFromAnim_ = lvl_.entityAnim_.size();
+        lvl_.animatedBodiesFromBodies_ = lvl_.entityBodies_.size();
+        lvl_.animatedBodiesFromRev_ = dbgOv_.colliderRev_;
     }
-    if (world::driveKinematicBodies(scene::World::instance(), animatedBodies_, dt) != 0)
-        animatedBodiesBuilt_ = false;
+    if (world::driveKinematicBodies(scene::World::instance(), lvl_.animatedBodies_, dt) != 0)
+        lvl_.animatedBodiesBuilt_ = false;
 }
 #endif
 #endif

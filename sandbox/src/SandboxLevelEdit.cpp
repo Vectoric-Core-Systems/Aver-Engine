@@ -93,7 +93,7 @@ void SandboxApp::recordLandscapeInLevel() {
     for (char& c : rel) if (c == '\\') c = '/';
 
     fmt::OcLandscapePlacement lp;
-    if (!levelHeader_.landscapes.empty()) lp = levelHeader_.landscapes.front();   // keep name/material
+    if (!lvl_.levelHeader_.landscapes.empty()) lp = lvl_.levelHeader_.landscapes.front();   // keep name/material
     lp.section = rel;
     // SAME SPLIT AS createLandscapeForLevel above: levelName_ only exists `#if AVER_MODULE_SCENE`,
     // and a scene-less tree has no open level to name, so it falls back to the record's own
@@ -109,8 +109,8 @@ void SandboxApp::recordLandscapeInLevel() {
     lp.y = homeAbs[1];
     lp.z = homeAbs[2];
     // Only the first record is the resident primary; the level's further LANDSCAPE records (extra sections) stay as they are.
-    if (levelHeader_.landscapes.empty()) levelHeader_.landscapes.push_back(std::move(lp));
-    else levelHeader_.landscapes.front() = std::move(lp);
+    if (lvl_.levelHeader_.landscapes.empty()) lvl_.levelHeader_.landscapes.push_back(std::move(lp));
+    else lvl_.levelHeader_.landscapes.front() = std::move(lp);
 }
 
 // Writes the in-memory section back to the path it was loaded from. A sculpt is fully functional
@@ -427,7 +427,7 @@ bool SandboxApp::fillPlacementFromEntity(scene::Entity e, fmt::OcWorldPlacement&
     if (!mr && world.hasComponent(e, scene::kComponentDecal)) return false;
     if (prefabSys_.isLinked(e)) return false;
     // [wave3/level-instances] A member of a level instance is the child level's, not this one's (a commit reads them).
-    if (!capturingInstance_ && level_.instances().isMember(e)) return false;
+    if (!lvl_.capturingInstance_ && level_.instances().isMember(e)) return false;
     static const std::unordered_map<u32, const Transform*> kNone;
     const std::unordered_map<u32, const Transform*>& animPlaced = animPlacedPtr ? *animPlacedPtr : kNone;
     p.asset = world.name(e);
@@ -448,8 +448,8 @@ bool SandboxApp::fillPlacementFromEntity(scene::Entity e, fmt::OcWorldPlacement&
     // `nocollide` now round-trips. This was hardcoded true, so a placement authored
     // nocollide came back colliding and quietly gained a static body on the next load.
     // Entities created in the editor are absent from the map and keep the true default.
-    const auto collideIt = entityCollide_.find(static_cast<u32>(e));
-    p.collide = collideIt == entityCollide_.end() ? true : collideIt->second;
+    const auto collideIt = lvl_.entityCollide_.find(static_cast<u32>(e));
+    p.collide = collideIt == lvl_.entityCollide_.end() ? true : collideIt->second;
     // `hidden`: the Details panel's Visible checkbox, saved with the level (owner decision,
     // Unreal-style). AUTHORED, not the raw kMeshRendererVisible bit -- an entity H is
     // currently hiding must still write visible, or Ctrl+H's own claim of being temporary
@@ -457,7 +457,7 @@ bool SandboxApp::fillPlacementFromEntity(scene::Entity e, fmt::OcWorldPlacement&
     p.visible = authoredVisible(e);
     // THE AUTHORED ANIMATION, from the side map and NEVER from the entity's CAnimator: Play
     // advances that clock, and reading it here would write a session's progress into the level.
-    if (const auto animIt = entityAnim_.find(static_cast<u32>(e)); animIt != entityAnim_.end()) {
+    if (const auto animIt = lvl_.entityAnim_.find(static_cast<u32>(e)); animIt != lvl_.entityAnim_.end()) {
         p.animClip  = animIt->second.clip;
         p.animSpeed = animIt->second.speed;
         p.animTime  = animIt->second.time;
@@ -475,12 +475,12 @@ bool SandboxApp::fillPlacementFromEntity(scene::Entity e, fmt::OcWorldPlacement&
     // rewrite an authored number the user never touched. Moving a snapped object in the
     // viewport therefore does not yet move it in the file -- which is the honest behaviour
     // until the editor grows a way to show and edit a snap offset.
-    const auto snapIt = entitySnapZ_.find(static_cast<u32>(e));
-    if (snapIt != entitySnapZ_.end()) { p.snapToGround = true; p.z = snapIt->second; }
+    const auto snapIt = lvl_.entitySnapZ_.find(static_cast<u32>(e));
+    if (snapIt != lvl_.entitySnapZ_.end()) { p.snapToGround = true; p.z = snapIt->second; }
     // [wave3/level-instances] The stable id the placement had when the level was loaded (or it was last saved with).
-    if (const auto idIt = entityPlaceId_.find(static_cast<u32>(e)); idIt != entityPlaceId_.end()) p.placementId = idIt->second;
+    if (const auto idIt = lvl_.entityPlaceId_.find(static_cast<u32>(e)); idIt != lvl_.entityPlaceId_.end()) p.placementId = idIt->second;
     // Data layers (the panel keys membership by edit id; an entity that never had one is in no layer).
-    if (!capturingInstance_) {
+    if (!lvl_.capturingInstance_) {
         if (const auto editIt = entityToEdit_.find(static_cast<u32>(e)); editIt != entityToEdit_.end()) p.layers = dataLayers_.layersOf(editIt->second);
     }
     // THE COMPONENT RECORDS (Skeletal Mesh, Animator, Root Motion, ...), read back from the live components. WHILE PLAY
@@ -499,7 +499,7 @@ bool SandboxApp::fillPlacementFromEntity(scene::Entity e, fmt::OcWorldPlacement&
 
 bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
     if (originBlocksSave(playSnapshot ? "The Play snapshot" : "Saving the level")) return false;   // LARGE_WORLD: records are written from the scene frame
-    if (levelIsLegacyOcmap_) return saveLevelAsOcmap(path, playSnapshot);
+    if (lvl_.levelIsLegacyOcmap_) return saveLevelAsOcmap(path, playSnapshot);
 
     scene::World& world = scene::World::instance();
     // THE AUTHORED PLACEMENTS ARE SAVED, NOT AN ANIMATE PREVIEW POSE: the sequence's actors go back to
@@ -509,7 +509,7 @@ bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
     // editor does not model -- ID, BUILD, ALGO, SPAWN, the sun's lux, the header notes (credits) --
     // rides through untouched; the lines below overwrite only what the editor genuinely owns. See
     // levelHeader_.
-    fmt::OcWorldData w = levelHeader_;
+    fmt::OcWorldData w = lvl_.levelHeader_;
     w.dataLayers = dataLayers_.layers();
     w.name = levelName_.empty() ? std::string("untitled") : levelName_;
     // THE MARKER IS THE TRUTH WHEN THERE IS ONE: saveLevel's banner used to list SPAWN among
@@ -582,7 +582,7 @@ bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
     assets::captureLevelEnv(rset_.sky_, w);
 
     // Straight back out, in the order they were read. See loadLevel.
-    w.pcgVolumes = levelPcgVolumes_;
+    w.pcgVolumes = lvl_.levelPcgVolumes_;
 
     // LIGHT records, from every live CLight entity (they are not placements; see spawnLightAtCamera).
     w.lights.clear();
@@ -626,7 +626,7 @@ bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
     std::vector<i32> classSlotOf;   // by authored index: the slot that placed actor is written at, -1 if deleted
     if (!streamedSave) {
         i32 slot = static_cast<i32>(w.placements.size());
-        for (const scene::Entity e : levelEntities_) {
+        for (const scene::Entity e : lvl_.levelEntities_) {
             if (!world.valid(e)) continue;
             if (!world.component<scene::CLocal>(e, scene::kComponentLocal)) continue;
             if (!world.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer) &&
@@ -640,15 +640,15 @@ bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
 #if AVER_MODULE_FRAMEWORK
         // Placed actors are written after every ordinary placement, in authored order (appendClassPlacements),
         // one line each unless deleted; their slots are decided now so a placement under one writes its index.
-        std::vector<char> classRemoved(classAuthored_.size(), 0);
-        std::vector<int32_t> classLive(classAuthored_.size(), 0);
-        for (const ClassInstance& ci : levelClassInstances_)
-            if (ci.placement < classAuthored_.size()) {
+        std::vector<char> classRemoved(lvl_.classAuthored_.size(), 0);
+        std::vector<int32_t> classLive(lvl_.classAuthored_.size(), 0);
+        for (const ClassInstance& ci : lvl_.levelClassInstances_)
+            if (ci.placement < lvl_.classAuthored_.size()) {
                 classRemoved[ci.placement] = ci.removed ? 1 : 0;
                 classLive[ci.placement] = ci.entity;
             }
-        classSlotOf.assign(classAuthored_.size(), -1);
-        for (usize k = 0; k < classAuthored_.size(); ++k) {
+        classSlotOf.assign(lvl_.classAuthored_.size(), -1);
+        for (usize k = 0; k < lvl_.classAuthored_.size(); ++k) {
             if (classRemoved[k]) continue;
             classSlotOf[k] = slot;
             if (classLive[k] != 0) slotOf.emplace(static_cast<u32>(classLive[k]), slot);
@@ -689,7 +689,7 @@ bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
         if (clipsLive || !cars.empty() || seqLive)
             for (const PlaySavedTransform& t : play_.playWorldSnapshot_) {
                 const u32 key = static_cast<u32>(t.e);
-                const bool clip = clipsLive && entityAnim_.find(key) != entityAnim_.end();
+                const bool clip = clipsLive && lvl_.entityAnim_.find(key) != lvl_.entityAnim_.end();
                 if (clip || cars.count(key) != 0 || (seqLive && seqEditor_.drivesTransform(t.e)))
                     animPlaced.emplace(key, &t.xf);
             }
@@ -704,7 +704,7 @@ bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
 
     // A streamed level writes its placement records, resident or not (docs/LEVEL_STREAMING.md).
     if (streamedSave) buildStreamedPlacements(w, animPlaced, slotOf);
-    for (const scene::Entity e : streamedSave ? std::vector<scene::Entity>{} : levelEntities_) {
+    for (const scene::Entity e : streamedSave ? std::vector<scene::Entity>{} : lvl_.levelEntities_) {
         if (!world.valid(e)) continue;
         const auto* loc = world.component<scene::CLocal>(e, scene::kComponentLocal);
         const auto* mr  = world.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer);
@@ -755,8 +755,8 @@ bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
         {
             const std::string base = entityLabelBase(p.material, p.asset);
             const std::string shadowDefault = base + " " + std::to_string(++shadowLabelCounts[base]);
-            const auto labelIt = entityLabels_.find(static_cast<u32>(e));
-            if (labelIt != entityLabels_.end() && labelIt->second != shadowDefault)
+            const auto labelIt = lvl_.entityLabels_.find(static_cast<u32>(e));
+            if (labelIt != lvl_.entityLabels_.end() && labelIt->second != shadowDefault)
                 p.name = labelIt->second;
         }
         w.placements.push_back(std::move(p));
@@ -794,12 +794,12 @@ bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
     // graph-as-class actors at all, so there is no live instance list for this call to read.
 #if AVER_MODULE_FRAMEWORK
     // Each live actor's [Editable] values go back onto its authored record (a placement with no live actor keeps the file's).
-    for (const ClassInstance& ci : levelClassInstances_)
-        if (!ci.removed && ci.entity != 0 && ci.placement < classAuthored_.size() &&
+    for (const ClassInstance& ci : lvl_.levelClassInstances_)
+        if (!ci.removed && ci.entity != 0 && ci.placement < lvl_.classAuthored_.size() &&
             world.valid(static_cast<scene::Entity>(ci.entity)))
         {
-            game::capturePlacementProps(ci.entity, classAuthored_[ci.placement]);
-            game::capturePlacementGroups(ci.entity, classAuthored_[ci.placement]);
+            game::capturePlacementProps(ci.entity, lvl_.classAuthored_[ci.placement]);
+            game::capturePlacementGroups(ci.entity, lvl_.classAuthored_[ci.placement]);
         }
     // A live actor's parent is the editor's hierarchy now; one with no entity keeps its file parent, re-indexed.
     const auto slotOfEntity = [&](scene::Entity e) -> i32 {
@@ -807,7 +807,7 @@ bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
         return it == slotOf.end() ? -1 : it->second;
     };
     editor::appendClassPlacements(
-        classAuthored_, levelClassInstances_,
+        lvl_.classAuthored_, lvl_.levelClassInstances_,
         [&world](int32_t e, Transform& xf) {
             const scene::Entity ent = static_cast<scene::Entity>(e);
             if (!world.valid(ent)) return false;
@@ -820,13 +820,13 @@ bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
             if (streamedSave) return -1;
             const scene::Entity live = static_cast<scene::Entity>(liveEntity);
             if (liveEntity != 0 && world.valid(live)) return slotOfEntity(world.parent(live));
-            const i64 fileIndex = k < classAuthoredIndex_.size() ? classAuthoredIndex_[k] : -1;
+            const i64 fileIndex = k < lvl_.classAuthoredIndex_.size() ? lvl_.classAuthoredIndex_[k] : -1;
             if (fileIndex < 0 || static_cast<usize>(fileIndex) >= placementTree_.parent.size()) return -1;
             const i32 fileParent = placementTree_.parent[static_cast<usize>(fileIndex)];
             if (fileParent < 0) return -1;
             if (placementTree_.isClass[static_cast<usize>(fileParent)])   // another placed actor: its authored slot
-                for (usize j = 0; j < classAuthoredIndex_.size() && j < classSlotOf.size(); ++j)
-                    if (classAuthoredIndex_[j] == fileParent) return classSlotOf[j];
+                for (usize j = 0; j < lvl_.classAuthoredIndex_.size() && j < classSlotOf.size(); ++j)
+                    if (lvl_.classAuthoredIndex_[j] == fileParent) return classSlotOf[j];
             return slotOfEntity(placementTree_.entity[static_cast<usize>(fileParent)]);
         },
         w.placements);
@@ -851,7 +851,7 @@ bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
 // legacyMapHeader_ (ROOT, CLIENT, the SURFACE table, GROUND, KILLZ).
 bool SandboxApp::saveLevelAsOcmap(const std::string& path, bool playSnapshot) {
     scene::World& world = scene::World::instance();
-    fmt::OcMapData m = legacyMapHeader_;
+    fmt::OcMapData m = lvl_.legacyMapHeader_;
     m.name = levelName_.empty() ? std::string("untitled") : levelName_;
 
     // THE MARKER IS THE TRUTH WHEN THERE IS ONE -- same reasoning as saveLevel's own SPAWN
@@ -864,7 +864,7 @@ bool SandboxApp::saveLevelAsOcmap(const std::string& path, bool playSnapshot) {
         }
     }
 
-    for (const scene::Entity e : levelEntities_) {
+    for (const scene::Entity e : lvl_.levelEntities_) {
         if (!world.valid(e)) continue;
         const auto* loc = world.component<scene::CLocal>(e, scene::kComponentLocal);
         if (!loc) continue;
@@ -874,14 +874,14 @@ bool SandboxApp::saveLevelAsOcmap(const std::string& path, bool playSnapshot) {
         const Vec3 euler = eulerDegFromQuat(loc->xf.rotation);
         p.roll = euler.x; p.pitch = euler.y; p.yaw = euler.z;
 
-        const auto deformIt = entityLegacyDeform_.find(static_cast<u32>(e));
-        p.deform = deformIt != entityLegacyDeform_.end() && deformIt->second;
+        const auto deformIt = lvl_.entityLegacyDeform_.find(static_cast<u32>(e));
+        p.deform = deformIt != lvl_.entityLegacyDeform_.end() && deformIt->second;
         if (p.deform) {
-            const auto matIt = entityLegacyMaterial_.find(static_cast<u32>(e));
+            const auto matIt = lvl_.entityLegacyMaterial_.find(static_cast<u32>(e));
             // "default" mirrors parseOcmap's own DEFORM fallback, for an entity this session
             // created rather than loaded: there is no editor UI to author a DEFORM placement yet,
             // but the fallback keeps a future one honest anyway.
-            p.material = matIt == entityLegacyMaterial_.end() ? std::string("default") : matIt->second;
+            p.material = matIt == lvl_.entityLegacyMaterial_.end() ? std::string("default") : matIt->second;
             p.scale = 1.0;
             p.surface = -1;
         } else {
@@ -889,8 +889,8 @@ bool SandboxApp::saveLevelAsOcmap(const std::string& path, bool playSnapshot) {
             // OcWorldPlacement's sx/sy/sz -- so a non-uniform edit made through this editor would
             // lose two axes on this save regardless; .x is as good a choice as any.
             p.scale = loc->xf.scale.x;
-            const auto surfIt = entityLegacySurface_.find(static_cast<u32>(e));
-            p.surface = surfIt == entityLegacySurface_.end() ? -1 : surfIt->second;
+            const auto surfIt = lvl_.entityLegacySurface_.find(static_cast<u32>(e));
+            p.surface = surfIt == lvl_.entityLegacySurface_.end() ? -1 : surfIt->second;
         }
         m.placements.push_back(std::move(p));
     }

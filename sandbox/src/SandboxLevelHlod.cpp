@@ -53,15 +53,15 @@ bool builtinMeshData(const std::string& asset, fmt::OcMeshData& out) {
 } // namespace
 
 void SandboxApp::startHlodBuild() {
-    const std::string blocked = editor::hlodBlockedReason(levelHeader_.stream, project_.valid() && !levelPath_.empty());
-    if (!blocked.empty()) { hlodReport_ = blocked; return; }
-    if (!saveLevel(levelPath_)) { hlodReport_ = "The level could not be saved."; return; }
+    const std::string blocked = editor::hlodBlockedReason(lvl_.levelHeader_.stream, project_.valid() && !levelPath_.empty());
+    if (!blocked.empty()) { lvl_.hlodReport_ = blocked; return; }
+    if (!saveLevel(levelPath_)) { lvl_.hlodReport_ = "The level could not be saved."; return; }
     markLevelSaved();
 
     auto w = std::make_shared<fmt::OcWorldData>();
     std::string why;
-    if (!fmt::loadOcworld(levelPath_, *w, &why)) { hlodReport_ = "Failed: " + why; return; }
-    if (!w->stream.enabled) { hlodReport_ = "Failed: the saved level does not stream."; return; }
+    if (!fmt::loadOcworld(levelPath_, *w, &why)) { lvl_.hlodReport_ = "Failed: " + why; return; }
+    if (!w->stream.enabled) { lvl_.hlodReport_ = "Failed: the saved level does not stream."; return; }
     {   // the stream data places each placement in its cell
         fmt::OcStreamData sd;
         if (!w->stream.dataPath.empty() && fmt::loadOcStream((std::filesystem::path(project_.dir) / w->stream.dataPath).string(), sd))
@@ -69,8 +69,8 @@ void SandboxApp::startHlodBuild() {
     }
     const std::string stem = std::filesystem::path(levelPath_).stem().string();
     const std::string contentDir = project_.contentDir(), projectDir = project_.dir;
-    const bool force = hlodForce_;
-    hlodReport_ = "Building...";
+    const bool force = lvl_.hlodForce_;
+    lvl_.hlodReport_ = "Building...";
     hlodJob_.start([w, stem, contentDir, projectDir, force](const std::atomic<bool>& cancel, std::atomic<u32>& done, std::atomic<u32>& total) {
         editor::HlodJobResult res;
         fmt::OcHlodOptions opt;
@@ -98,21 +98,21 @@ void SandboxApp::startHlodBuild() {
 void SandboxApp::pollHlodBuild() {
     editor::HlodJobResult res;
     if (!hlodJob_.poll(res)) return;
-    if (!res.ok) { hlodReport_ = "Failed: " + res.why; return; }
-    if (levelHeader_.stream.hlodCm <= 0.0f && res.hlodCm > 0.0f) {
-        levelHeader_.stream.hlodCm = res.hlodCm;
+    if (!res.ok) { lvl_.hlodReport_ = "Failed: " + res.why; return; }
+    if (lvl_.levelHeader_.stream.hlodCm <= 0.0f && res.hlodCm > 0.0f) {
+        lvl_.levelHeader_.stream.hlodCm = res.hlodCm;
         markLevelUnsaved();
     }
-    hlodReport_ = editor::hlodSummary(res.report);
+    lvl_.hlodReport_ = editor::hlodSummary(res.report);
     for (const std::string& m : res.report.warnings) AVER_WARN("[HLOD] {}", m);
-    AVER_INFO("[HLOD] {}: {}", levelPath_, hlodReport_);
+    AVER_INFO("[HLOD] {}: {}", levelPath_, lvl_.hlodReport_);
 }
 
 // Drawn inside World Settings > Level Streaming, under Cooked chunks.
 void SandboxApp::buildHlodSettings() {
     ImGui::Separator();
     ImGui::TextDisabled("HLOD");
-    fmt::OcStreamSettings& st = levelHeader_.stream;
+    fmt::OcStreamSettings& st = lvl_.levelHeader_.stream;
     f32 hlodM = st.hlodCm / 100.0f;
     ImGui::SetNextItemWidth(200.0f * viewState_.dpi_);
     if (ImGui::SliderFloat("HLOD distance (m)", &hlodM, 0.0f, 5000.0f, hlodM > 0.0f ? "%.0f" : "off")) {
@@ -136,13 +136,13 @@ void SandboxApp::buildHlodSettings() {
               "Objects that move, are hidden, or are in a layer the game can switch are left out."
             : blocked.c_str());
     ImGui::SameLine();
-    ImGui::Checkbox("Rebuild all", &hlodForce_);
+    ImGui::Checkbox("Rebuild all", &lvl_.hlodForce_);
     if (running) {
         ImGui::SameLine();
         if (ImGui::Button("Cancel")) hlodJob_.cancel();
         ImGui::ProgressBar(hlodJob_.fraction(), ImVec2(-FLT_MIN, 0.0f), (std::to_string(hlodJob_.done()) + " / " + std::to_string(hlodJob_.total()) + " cells").c_str());
     }
-    if (!hlodReport_.empty()) ImGui::TextWrapped("%s", hlodReport_.c_str());
+    if (!lvl_.hlodReport_.empty()) ImGui::TextWrapped("%s", lvl_.hlodReport_.c_str());
 }
 
 }  // namespace aver

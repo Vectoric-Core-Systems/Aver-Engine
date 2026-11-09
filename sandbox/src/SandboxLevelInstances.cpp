@@ -23,21 +23,21 @@ void SandboxApp::installLevelInstanceHooks() {
     // static body instantiate made for it.
     h.created = [this](scene::Entity e, i32 body, const fmt::OcWorldPlacement* p) {
         scene::World& w = scene::World::instance();
-        if (std::find(levelEntities_.begin(), levelEntities_.end(), e) == levelEntities_.end()) levelEntities_.push_back(e);
+        if (std::find(lvl_.levelEntities_.begin(), lvl_.levelEntities_.end(), e) == lvl_.levelEntities_.end()) lvl_.levelEntities_.push_back(e);
         if (p) {
             // The label without the ordinal makeEntityLabel would count: instance members must not shift the level's own.
             const std::string base = entityLabelBase(p->material, p->asset);
-            entityLabels_[static_cast<u32>(e)] = p->name.empty() ? base : p->name;
-            entityAuthoredName_[static_cast<u32>(e)] = p->name;
-            entityCollide_[static_cast<u32>(e)] = p->collide;
-            if (!p->animClip.empty()) entityAnim_[static_cast<u32>(e)] = EntityAnim{p->animClip, p->animSpeed, p->animTime, p->animOnce};
+            lvl_.entityLabels_[static_cast<u32>(e)] = p->name.empty() ? base : p->name;
+            lvl_.entityAuthoredName_[static_cast<u32>(e)] = p->name;
+            lvl_.entityCollide_[static_cast<u32>(e)] = p->collide;
+            if (!p->animClip.empty()) lvl_.entityAnim_[static_cast<u32>(e)] = EntityAnim{p->animClip, p->animSpeed, p->animTime, p->animOnce};
         } else {
-            entityLabels_[static_cast<u32>(e)] = w.name(e);
+            lvl_.entityLabels_[static_cast<u32>(e)] = w.name(e);
         }
 #if AVER_MODULE_PHYSICS
         if (body > 0) {
-            entityBodies_[static_cast<u32>(e)] = body;
-            levelBodies_.push_back(body);
+            lvl_.entityBodies_[static_cast<u32>(e)] = body;
+            lvl_.levelBodies_.push_back(body);
             ++dbgOv_.colliderRev_;
         }
 #else
@@ -45,19 +45,19 @@ void SandboxApp::installLevelInstanceHooks() {
 #endif
     };
     h.destroying = [this](scene::Entity e) {
-        levelEntities_.erase(std::remove(levelEntities_.begin(), levelEntities_.end(), e), levelEntities_.end());
-        entityLabels_.erase(static_cast<u32>(e));
-        entityCollide_.erase(static_cast<u32>(e));
-        entityAnim_.erase(static_cast<u32>(e));
-        entitySnapZ_.erase(static_cast<u32>(e));
-        entityPlaceId_.erase(static_cast<u32>(e));
-        entityAuthoredName_.erase(static_cast<u32>(e));
+        lvl_.levelEntities_.erase(std::remove(lvl_.levelEntities_.begin(), lvl_.levelEntities_.end(), e), lvl_.levelEntities_.end());
+        lvl_.entityLabels_.erase(static_cast<u32>(e));
+        lvl_.entityCollide_.erase(static_cast<u32>(e));
+        lvl_.entityAnim_.erase(static_cast<u32>(e));
+        lvl_.entitySnapZ_.erase(static_cast<u32>(e));
+        lvl_.entityPlaceId_.erase(static_cast<u32>(e));
+        lvl_.entityAuthoredName_.erase(static_cast<u32>(e));
         if (selectionUi_.sel_ == SelectionState::kSelScene && e == selectionUi_.selEntity_) { selectionUi_.sel_ = -1; selectionUi_.selEntity_ = scene::kInvalidEntity; }
 #if AVER_MODULE_PHYSICS
-        if (const auto it = entityBodies_.find(static_cast<u32>(e)); it != entityBodies_.end()) {
+        if (const auto it = lvl_.entityBodies_.find(static_cast<u32>(e)); it != lvl_.entityBodies_.end()) {
             aver_phys_remove_body(it->second);
-            levelBodies_.erase(std::remove(levelBodies_.begin(), levelBodies_.end(), it->second), levelBodies_.end());
-            entityBodies_.erase(it);
+            lvl_.levelBodies_.erase(std::remove(lvl_.levelBodies_.begin(), lvl_.levelBodies_.end(), it->second), lvl_.levelBodies_.end());
+            lvl_.entityBodies_.erase(it);
             ++dbgOv_.colliderRev_;
         }
 #endif
@@ -170,11 +170,11 @@ bool SandboxApp::captureEntityForInstance(scene::Entity e, fmt::OcWorldData& int
     if (!w.valid(e) || w.destroyPending(e)) return false;
     if (w.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer)) {
         fmt::OcWorldPlacement p;
-        capturingInstance_ = true;
+        lvl_.capturingInstance_ = true;
         const bool ok = fillPlacementFromEntity(e, p, nullptr);
-        capturingInstance_ = false;
+        lvl_.capturingInstance_ = false;
         if (!ok) return false;
-        if (const auto it = entityAuthoredName_.find(static_cast<u32>(e)); it != entityAuthoredName_.end()) p.name = it->second;
+        if (const auto it = lvl_.entityAuthoredName_.find(static_cast<u32>(e)); it != lvl_.entityAuthoredName_.end()) p.name = it->second;
         p.parent = parentIdx;
         into.placements.push_back(std::move(p));
         return true;
@@ -234,7 +234,7 @@ void SandboxApp::keepPlacementIds(fmt::OcWorldData& w, const std::unordered_map<
     // The ids just made are remembered, so the next save writes the same ones whatever moved in between.
     for (const auto& [key, slot] : slotOf)
         if (slot >= 0 && static_cast<usize>(slot) < w.placements.size() && w.placements[static_cast<usize>(slot)].placementId)
-            entityPlaceId_[key] = w.placements[static_cast<usize>(slot)].placementId;
+            lvl_.entityPlaceId_[key] = w.placements[static_cast<usize>(slot)].placementId;
 }
 
 // EXTENT: the union of the placements' world boxes (and the instances' bounds), the level's own frame.
@@ -253,7 +253,7 @@ void SandboxApp::writeLevelExtent(fmt::OcWorldData& w) {
             if (p.hasBounds) widen(p.boundsMin, p.boundsMax);
     } else {
         scene::World& world = scene::World::instance();
-        for (const scene::Entity e : levelEntities_) {
+        for (const scene::Entity e : lvl_.levelEntities_) {
             if (!world.valid(e) || level_.instances().isMember(e)) continue;
             f32 lo[3], hi[3];
             if (entityWorldBounds(e, lo, hi)) widen(lo, hi);

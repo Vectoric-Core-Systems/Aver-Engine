@@ -623,7 +623,7 @@ bool SandboxApp::mcpLevelMove(AvId e, const EditXform& x, std::string& why) {
     }
     // A snapped placement's file position is its authored ground offset, written back VERBATIM by saveLevel
     // (the same rule the gizmo lives with), so a move reported here would be silently undone on save.
-    if (entitySnapZ_.find(static_cast<u32>(e)) != entitySnapZ_.end()) {
+    if (lvl_.entitySnapZ_.find(static_cast<u32>(e)) != lvl_.entitySnapZ_.end()) {
         why = "entity " + jid(e) + " is a snap-to-ground placement: a save writes back its authored offset "
               "above the ground, not the height it is moved to, so the move would not survive -- remove it "
               "and place it again with the offset you want";
@@ -717,17 +717,17 @@ bool SandboxApp::mcpLevelSave(const std::string& targetIn, std::string& r, std::
 
     const bool renamed = stem != levelName_;
     const std::string prevName = levelName_;
-    const u64 prevId = levelHeader_.contentId, prevLegacyId = legacyMapHeader_.contentId;
+    const u64 prevId = lvl_.levelHeader_.contentId, prevLegacyId = lvl_.legacyMapHeader_.contentId;
     if (renamed) {
         levelName_ = stem;
-        levelHeader_.contentId = 0;
-        legacyMapHeader_.contentId = 0;
+        lvl_.levelHeader_.contentId = 0;
+        lvl_.legacyMapHeader_.contentId = 0;
     }
     if (!saveLevel(dest.string())) {
         if (renamed) {
             levelName_ = prevName;
-            levelHeader_.contentId = prevId;
-            legacyMapHeader_.contentId = prevLegacyId;
+            lvl_.levelHeader_.contentId = prevId;
+            lvl_.legacyMapHeader_.contentId = prevLegacyId;
         }
         setUpgradeStatus("Could not save " + dest.filename().string(), editor::NotifySeverity::Error);
         w = "could not write " + dest.string() + " -- see the editor log";
@@ -799,7 +799,7 @@ bool SandboxApp::mcpLevelPlace(const std::string& text, std::string& r, std::str
         if (!p.animClip.empty()) {
             // saveLevelAsOcmap has no record for an animation: the entity would play in this session and
             // be gone from the file. (An .ocworld level is the only kind that stores one.)
-            if (levelIsLegacyOcmap_) {
+            if (lvl_.levelIsLegacyOcmap_) {
                 w = "placement '" + p.asset + "' has an anim clip, but the open level is a legacy .ocmap, whose "
                     "save cannot store an animation -- it would be lost on save";
                 return false;
@@ -912,7 +912,7 @@ bool SandboxApp::mcpLevelPlace(const std::string& text, std::string& r, std::str
         return false;
     }
 #if AVER_MODULE_PHYSICS
-    levelBodies_.insert(levelBodies_.end(), inst.bodies.begin(), inst.bodies.end());
+    lvl_.levelBodies_.insert(lvl_.levelBodies_.end(), inst.bodies.begin(), inst.bodies.end());
 #endif
 
     std::vector<u32> idFor(doc.placements.size(), 0u);
@@ -921,22 +921,22 @@ bool SandboxApp::mcpLevelPlace(const std::string& text, std::string& r, std::str
         const scene::Entity e = inst.entities[k];
         const fmt::OcWorldPlacement& p = doc.placements[inst.placementIndex[k]];
         idFor[inst.placementIndex[k]] = static_cast<u32>(e);
-        levelEntities_.push_back(e);
+        lvl_.levelEntities_.push_back(e);
         // Called for a named placement too, and its result thrown away: the ordinal it hands back
         // advances labelCounts_, which saveLevel's shadow copy of the same arithmetic relies on.
         const std::string generatedLabel = makeEntityLabel(p.material, p.asset);
-        entityLabels_[static_cast<u32>(e)] = p.name.empty() ? generatedLabel : p.name;
-        entityCollide_[static_cast<u32>(e)] = p.collide;
+        lvl_.entityLabels_[static_cast<u32>(e)] = p.name.empty() ? generatedLabel : p.name;
+        lvl_.entityCollide_[static_cast<u32>(e)] = p.collide;
         if (!p.animClip.empty()) {
-            entityAnim_[static_cast<u32>(e)] = EntityAnim{p.animClip, p.animSpeed, p.animTime, p.animOnce};
+            lvl_.entityAnim_[static_cast<u32>(e)] = EntityAnim{p.animClip, p.animSpeed, p.animTime, p.animOnce};
             ++animated;
         }
         // A `vehicle` PLACEMENT: world::instantiate gave it no body (Play builds the chassis), so level_ has
         // to know it is a car -- or it would be a collider-less prop in Play and lose its token on save.
         if (!p.vehiclePreset.empty()) level_.setVehiclePreset(e, p.vehiclePreset);
-        if (p.snapToGround) entitySnapZ_[static_cast<u32>(e)] = p.z;
+        if (p.snapToGround) lvl_.entitySnapZ_[static_cast<u32>(e)] = p.z;
 #if AVER_MODULE_PHYSICS
-        if (inst.entityBody[k] >= 0) entityBodies_[static_cast<u32>(e)] = inst.entityBody[k];
+        if (inst.entityBody[k] >= 0) lvl_.entityBodies_[static_cast<u32>(e)] = inst.entityBody[k];
 #endif
     }
 
@@ -1025,9 +1025,9 @@ bool SandboxApp::mcpLevelAbi(const mcp::AbiCall& a, std::string& r, std::string&
     // ---- info: the state every other refusal is about ---------------------------------------------
     if (fn == "info") {
         std::string j = "{\"level\":" + jq(levelPath_) + ",\"name\":" + jq(levelName_) +
-                        ",\"entities\":" + std::to_string(levelEntities_.size()) +
+                        ",\"entities\":" + std::to_string(lvl_.levelEntities_.size()) +
                         ",\"dirty\":" + jb(levelHasUnsavedEdits()) +
-                        ",\"format\":" + jq(levelIsLegacyOcmap_ ? "ocmap" : "ocworld") +
+                        ",\"format\":" + jq(lvl_.levelIsLegacyOcmap_ ? "ocmap" : "ocworld") +
                         ",\"playing\":" + jb(playing) +
                         ",\"loading\":" + jb(projectLoading_ != nullptr) +
                         ",\"pendingOpen\":" + jq(panels_.pendingOpenPath_) +
@@ -1124,12 +1124,12 @@ bool SandboxApp::mcpLevelAbi(const mcp::AbiCall& a, std::string& r, std::string&
         if (!a.args.empty() && a.args[0] >= 1.0) maxRows = static_cast<usize>(std::fmin(a.args[0], 1000000.0));
         usize total = 0, shown = 0;
         std::string rows;
-        for (const scene::Entity e : levelEntities_) {
+        for (const scene::Entity e : lvl_.levelEntities_) {
             if (!wd.valid(e)) continue;
             if (!wd.component<scene::CLocal>(e, scene::kComponentLocal)) continue;
             const std::string asset = std::string(wd.name(e));
-            const auto labelIt = entityLabels_.find(static_cast<u32>(e));
-            const std::string label = labelIt == entityLabels_.end() ? std::string() : labelIt->second;
+            const auto labelIt = lvl_.entityLabels_.find(static_cast<u32>(e));
+            const std::string label = labelIt == lvl_.entityLabels_.end() ? std::string() : labelIt->second;
             if (!needle.empty() && lowered(asset).find(needle) == std::string::npos &&
                 lowered(label).find(needle) == std::string::npos) continue;
             ++total;
@@ -1139,8 +1139,8 @@ bool SandboxApp::mcpLevelAbi(const mcp::AbiCall& a, std::string& r, std::string&
             const Vec3 eul = eulerDegFromQuat(t.rotation);   // (roll, pitch, yaw)
             const auto* mr = wd.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer);
             const char* matName = (mr && mr->material) ? aver_scene_material_name(mr->material) : "";
-            const auto collideIt = entityCollide_.find(static_cast<u32>(e));
-            const bool collide = collideIt == entityCollide_.end() ? true : collideIt->second;
+            const auto collideIt = lvl_.entityCollide_.find(static_cast<u32>(e));
+            const bool collide = collideIt == lvl_.entityCollide_.end() ? true : collideIt->second;
             if (!rows.empty()) rows += ",";
             rows += "{\"id\":" + jid(e) + ",\"asset\":" + jq(asset) + ",\"label\":" + jq(label) +
                     ",\"pos\":" + jv3(t.position.x, t.position.y, t.position.z) +
@@ -1282,8 +1282,8 @@ bool SandboxApp::mcpLevelAbi(const mcp::AbiCall& a, std::string& r, std::string&
             }
             r = "{\"id\":" + jid(e) + ",\"visible\":" + jb(authoredVisible(e)) + ",\"changed\":" + jb(changed) + "}";
         } else {
-            const auto it = entityCollide_.find(static_cast<u32>(e));
-            const bool before = it == entityCollide_.end() ? true : it->second;   // absent = the default
+            const auto it = lvl_.entityCollide_.find(static_cast<u32>(e));
+            const bool before = it == lvl_.entityCollide_.end() ? true : it->second;   // absent = the default
             if (before != want) {
                 setEntityCollide(e, want);
                 EditCmd c;
@@ -1313,7 +1313,7 @@ bool SandboxApp::mcpLevelAbi(const mcp::AbiCall& a, std::string& r, std::string&
         after.clip = trimmed(a.text);
         if (!after.clip.empty()) {
             // The Details panel's message for the same case: the legacy save has no animation record.
-            if (levelIsLegacyOcmap_) {
+            if (lvl_.levelIsLegacyOcmap_) {
                 w = "the open level is a legacy .ocmap, whose save cannot store an animation -- it would be "
                     "lost on save";
                 return false;

@@ -58,9 +58,9 @@ void SandboxApp::loadProjectMeshes(Engine& e) {
         auto* p = static_cast<MeshLoadPass*>(user);
         if (!p || !p->app || !p->engine) return;
         SandboxApp& app = *p->app;
-        app.meshTris_.erase(id);
-        app.pickGeometry_.erase(id);
-        app.skinnedMeshIds_.erase(id);   // meshPathById_ stays: it is only a path lookup
+        app.lvl_.meshTris_.erase(id);
+        app.lvl_.pickGeometry_.erase(id);
+        app.lvl_.skinnedMeshIds_.erase(id);   // meshPathById_ stays: it is only a path lookup
 #if AVER_MODULE_PBR
         if (const auto oit = app.selectionUi_.selOutlineLines_.find(id); oit != app.selectionUi_.selOutlineLines_.end()) {
             if (oit->second) p->engine->device()->destroyLineMesh(oit->second);
@@ -73,7 +73,7 @@ void SandboxApp::loadProjectMeshes(Engine& e) {
             // share its vertex buffer, which cannot go while they live).
             const std::vector<rhi::MeshHandle>& levels = lit->second.handles;
             for (usize lvl = 0; lvl < levels.size(); ++lvl) {
-                app.depthProxy_.erase(levels[lvl]);
+                app.lvl_.depthProxy_.erase(levels[lvl]);
                 if (lvl > 0) app.content_.releaseMeshHandle(levels[lvl]);
             }
             app.lod_.meshLods_.erase(lit);
@@ -109,8 +109,8 @@ void SandboxApp::onMeshLoaded(const game::GameContent::LoadedMesh& m, void* user
 
     if (!m.data) {
         // Built-in (sphere/cube/drone): only pick geometry and triangle count.
-        app.meshTris_[m.id] = static_cast<u32>(m.indices.size() / 3);
-        app.pickGeometry_[m.id] = buildPickGeometry(m.vertices, m.indices);
+        app.lvl_.meshTris_[m.id] = static_cast<u32>(m.indices.size() / 3);
+        app.lvl_.pickGeometry_[m.id] = buildPickGeometry(m.vertices, m.indices);
         return;
     }
 
@@ -121,11 +121,11 @@ void SandboxApp::onMeshLoaded(const game::GameContent::LoadedMesh& m, void* user
     const rhi::MeshHandle h = m.handle;
 
     // Project mesh can override a built-in's id: clear the built-in's cached pick geometry.
-    app.pickGeometry_.erase(id);
+    app.lvl_.pickGeometry_.erase(id);
     // Track path back from id for palette/future asset picker.
-    app.meshPathById_[id] = rel;
-    app.meshTris_[id] = static_cast<u32>(md.indices.size() / 3);
-    if (md.hasSkin()) app.skinnedMeshIds_.insert(id);
+    app.lvl_.meshPathById_[id] = rel;
+    app.lvl_.meshTris_[id] = static_cast<u32>(md.indices.size() / 3);
+    if (md.hasSkin()) app.lvl_.skinnedMeshIds_.insert(id);
     const bool quiet = pass->streamed;
     HitchMarks hm(rel.c_str(), 0.25);
 #if AVER_MODULE_TRIFACTOR
@@ -149,7 +149,7 @@ void SandboxApp::onMeshLoaded(const game::GameContent::LoadedMesh& m, void* user
             ladder.clusters.resize(levels);
 
             ladder.handles.push_back(h);
-            ladder.triCounts.push_back(app.meshTris_[id]);
+            ladder.triCounts.push_back(app.lvl_.meshTris_[id]);
             ladder.errorCm.push_back(0.0f);
             if (clusterData) trifactor::buildLevelClusterViews(md, 0, ladder.clusters[0]);
 
@@ -201,7 +201,7 @@ void SandboxApp::onMeshLoaded(const game::GameContent::LoadedMesh& m, void* user
                     // Key on every level's handle: --lod-select picks different levels per instance.
                     for (u32 lvl = 0; lvl < ladder.handles.size(); ++lvl)
                         if (ladder.triCounts[lvl] > ladder.triCounts[pick])
-                            app.depthProxy_[ladder.handles[lvl]] = ladder.handles[pick];
+                            app.lvl_.depthProxy_[ladder.handles[lvl]] = ladder.handles[pick];
                     if (!quiet) AVER_INFO("[Mesh] '{}' depth proxy: LOD {} ({} tris, {:.1f}x less than LOD 0, "
                               "{:.1f}cm error)",
                               rel, pick, ladder.triCounts[pick],
@@ -448,8 +448,8 @@ void SandboxApp::releaseProjectMeshes(Engine& e) {
     // Mesh/bounds/slot-0-material/part tables are content_'s; content_.releaseProjectMeshes drops them.
 #if AVER_MODULE_SCENE
     for (const u64 id : content_.projectMeshIds()) {
-        meshTris_.erase(id);
-        pickGeometry_.erase(id);
+        lvl_.meshTris_.erase(id);
+        lvl_.pickGeometry_.erase(id);
 #if AVER_MODULE_PBR
         // selOutlineLines_ exists only under PBR; line mesh cached here is dropped.
         if (const auto oit = selectionUi_.selOutlineLines_.find(id); oit != selectionUi_.selOutlineLines_.end()) {

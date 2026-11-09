@@ -1140,8 +1140,8 @@ void SandboxApp::tickChunkAndLevelStreaming(const Timestep& t, HitchMarks& hm) {
     // Runs while idling outside Play too (exactly who this feature is for).
     if (streaming_.enabled()) {
         const game::GameStreaming::TriangleLookupFn tris = [this](u64 id) -> u32 {
-            const auto it = meshTris_.find(id);
-            return it != meshTris_.end() ? it->second : 0u;
+            const auto it = lvl_.meshTris_.find(id);
+            return it != lvl_.meshTris_.end() ? it->second : 0u;
         };
 #if AVER_MODULE_SCRIPTING
         // Drone keeps its own corridor resident while flying (both are StreamSource entries).
@@ -1385,7 +1385,7 @@ void SandboxApp::setupCameraAndSky(Engine& e) {
     rset_.sky_.skyLightIntensity = rset_.sunAmbient_;
 #if AVER_MODULE_SCENE
     // A streamed level that hides its load edge in fog (World Settings > Level Streaming).
-    if (level_.streaming().active()) fog = assets::fogForStreamEdge(levelHeader_.stream, rset_.sky_, fog, viewState_.eye_.z);
+    if (level_.streaming().active()) fog = assets::fogForStreamEdge(lvl_.levelHeader_.stream, rset_.sky_, fog, viewState_.eye_.z);
 #endif
     rset_.sky_.fogDensity = fog;
     rset_.sky_.cloudTime = rset_.cloudTime_;
@@ -1454,7 +1454,7 @@ void SandboxApp::pushPostSettings(Engine& e, bool debugViewActiveThisFrame) {
     } else {
         // The level's post volumes blend onto a copy: post_ stays the base the panels edit (POST_VOLUMES.md).
         rhi::PostSettings shown = postVolumeTools_.blend(*e.device(), project_.contentDir(),
-                                                              levelHeader_.postVolumes, rset_.post_, viewPos());
+                                                              lvl_.levelHeader_.postVolumes, rset_.post_, viewPos());
         // The player's accessibility choices win over the level's volumes, in a Play session only (a saved option must not change the
         // authoring view); the editor's colour-vision preview fills in when no filter is set. Scene only: the editor chrome draws after.
         if (playSessionActive()) game::applyAccessibilityToPost(shown, access_.snap);

@@ -117,7 +117,7 @@ void SandboxApp::setChunkStreamingEnabled(bool on) {
     if (landscape_.loaded())
         layers = [this](std::string_view name, f32 x, f32 y) { return landscape_.layerWeightAtScene(name, x, y); };
 #endif
-    streaming_.enable(project_, levelPcgVolumes_, levelHeader_.scatterSpecies, &content_,
+    streaming_.enable(project_, lvl_.levelPcgVolumes_, lvl_.levelHeader_.scatterSpecies, &content_,
                        std::move(height), std::move(layers));
     if (streaming_.enabled())
         streaming_.warnIfCameraOutsideGeneratedBand(
@@ -251,8 +251,8 @@ void SandboxApp::setDroneEnabled(bool on) {
 // streaming panel is open or a log line needs it.
 u64 SandboxApp::residentTriangleCount() const {
     return streaming_.residentTriangleCount([this](u64 id) -> u32 {
-        const auto it = meshTris_.find(id);
-        return it != meshTris_.end() ? it->second : 0u;
+        const auto it = lvl_.meshTris_.find(id);
+        return it != lvl_.meshTris_.end() ? it->second : 0u;
     });
 }
 
@@ -288,26 +288,26 @@ void SandboxApp::loadLevel(Engine& eng, const std::string& path) {
         // hold is GONE on the next save. That silently deleted every PCGVOLUME in the level, including
         // the sky field and the forest generator's own: open, save, and the record no longer exists.
         // The same reasoning as the project manifest keeping unknown keys: preserve what you don't understand.
-        levelPcgVolumes_ = w.pcgVolumes;
+        lvl_.levelPcgVolumes_ = w.pcgVolumes;
         // ...and the rest of the header, for exactly the same reason. Placements and PCG volumes are
         // stripped because they are already held elsewhere; what is left is identity, BUILD, ALGO,
         // SPAWN, the environment numbers the editor does not expose, and the header comments
         // (w.notes: credits/licence lines), which saveLevel writes straight back out.
-        levelHeader_ = w;
+        lvl_.levelHeader_ = w;
         postVolumeTools_.reset(eng.device());   // the previous level's selection and LUT textures
-        levelHeader_.placements.clear();
-        levelHeader_.pcgVolumes.clear();
-        levelHeader_.lights.clear();   // rebuilt from the live CLight entities by saveLevel
-        levelHeader_.decals.clear();   // ...and the DECAL records from the live CDecal entities
-        levelHeader_.prefabInstances.clear();   // ...and the PREFABINST records from the live instances
+        lvl_.levelHeader_.placements.clear();
+        lvl_.levelHeader_.pcgVolumes.clear();
+        lvl_.levelHeader_.lights.clear();   // rebuilt from the live CLight entities by saveLevel
+        lvl_.levelHeader_.decals.clear();   // ...and the DECAL records from the live CDecal entities
+        lvl_.levelHeader_.prefabInstances.clear();   // ...and the PREFABINST records from the live instances
         // [wave3/level-instances begin] ...the LEVELINST records from level_.instances(), and EXTENT from the live bounds
-        levelHeader_.levelInstances.clear();
-        levelHeader_.hasExtent = false;
+        lvl_.levelHeader_.levelInstances.clear();
+        lvl_.levelHeader_.hasExtent = false;
         loadDataLayers(w);   // DATALAYER records; each placement's membership is set in the entity loop below
         // [wave3/level-instances end]
-        if (!levelPcgVolumes_.empty())
+        if (!lvl_.levelPcgVolumes_.empty())
             AVER_INFO("[Level] carrying {} PCGVOLUME record(s) through the editor unchanged",
-                      levelPcgVolumes_.size());
+                      lvl_.levelPcgVolumes_.size());
 
 #if AVER_MODULE_FLUIDS
         // AND THE LEVEL'S OWN WATER, if it authored any: its WATER/WAVE records, before the
@@ -321,7 +321,7 @@ void SandboxApp::loadLevel(Engine& eng, const std::string& path) {
         // BY NAME, not "the first field": a level may declare a cave mask or moisture field too.
         // The floor is INVERTED into coverage: a HIGH density floor leaves LESS material standing, so
         // passing it through unchanged would clear the sky exactly when the author asked for overcast.
-        for (const fmt::OcPcgVolume& v : levelPcgVolumes_) {
+        for (const fmt::OcPcgVolume& v : lvl_.levelPcgVolumes_) {
             if (v.name != "Sky") continue;
             const f64 floorV = v.coverageFloor < 0.0 ? 0.0 : (v.coverageFloor > 1.0 ? 1.0 : v.coverageFloor);
             rset_.sky_.cloudsEnabled = true;
@@ -376,14 +376,14 @@ void SandboxApp::loadLevel(Engine& eng, const std::string& path) {
                 [this](f32 f) { if (projectLoading_) projectLoading_->progress(0.75f + f * 0.15f); }, viewState_.camPos_,
                 &tables);
             if (!levelFoliage_.result().error.empty()) AVER_WARN("[Foliage] {}", levelFoliage_.result().error);
-            foliagePending_ = false;
+            lvl_.foliagePending_ = false;
         } else {
             // A level opened before the renderer attached (the start level): its foliage loads on attach.
-            foliagePendingWorld_ = fmt::OcWorldData{};
-            foliagePendingWorld_.foliageFiles = loaded.world.foliageFiles;
-            foliagePendingWorld_.stream = loaded.world.stream;
-            foliagePendingTables_ = level_.foliageTablePaths(loaded.world.foliageFiles);
-            foliagePending_ = !loaded.world.foliageFiles.empty();
+            lvl_.foliagePendingWorld_ = fmt::OcWorldData{};
+            lvl_.foliagePendingWorld_.foliageFiles = loaded.world.foliageFiles;
+            lvl_.foliagePendingWorld_.stream = loaded.world.stream;
+            lvl_.foliagePendingTables_ = level_.foliageTablePaths(loaded.world.foliageFiles);
+            lvl_.foliagePending_ = !loaded.world.foliageFiles.empty();
         }
         if (projectLoading_) projectLoading_->stage("Finishing", 0.90f);
 #endif
@@ -403,9 +403,9 @@ void SandboxApp::loadLevel(Engine& eng, const std::string& path) {
 void SandboxApp::onLevelInstantiated(const game::GameLevel::LoadedLevel& loaded) {
     const fmt::OcWorldData& w = loaded.world;
     const world::LevelInstance& inst = loaded.instance;
-    levelEntities_ = inst.entities;
+    lvl_.levelEntities_ = inst.entities;
 #if AVER_MODULE_PHYSICS
-    levelBodies_ = inst.bodies;
+    lvl_.levelBodies_ = inst.bodies;
 #endif
     std::vector<scene::Entity> lightEntities;
     {
@@ -416,7 +416,7 @@ void SandboxApp::onLevelInstantiated(const game::GameLevel::LoadedLevel& loaded)
             const std::vector<scene::Entity> lights = game::spawnLevelLights(lw, w.lights);
             lightEntities = lights;
             for (usize k = 0; k < lights.size() && k < w.lights.size(); ++k)
-                entityLabels_[static_cast<u32>(lights[k])] = w.lights[k].name.empty() ? std::string("Light") : w.lights[k].name;
+                lvl_.entityLabels_[static_cast<u32>(lights[k])] = w.lights[k].name.empty() ? std::string("Light") : w.lights[k].name;
         }
         // PREFABINST records: each instance is rebuilt from its asset, with its overrides applied. The hooks add the
         // entities to levelEntities_ and label them.
@@ -426,7 +426,7 @@ void SandboxApp::onLevelInstantiated(const game::GameLevel::LoadedLevel& loaded)
         {
             const std::vector<scene::Entity> decals = editor::spawnDecalsFromRecords(lw, w.decals);
             for (usize k = 0; k < decals.size() && k < w.decals.size(); ++k)
-                entityLabels_[static_cast<u32>(decals[k])] =
+                lvl_.entityLabels_[static_cast<u32>(decals[k])] =
                     w.decals[k].name.empty() ? std::string("Decal") : w.decals[k].name;
         }
     }
@@ -440,20 +440,20 @@ void SandboxApp::onLevelInstantiated(const game::GameLevel::LoadedLevel& loaded)
         // check in saveLevel, SandboxLevelEdit.cpp) -- a placement that carries an authored NAME
         // still occupies a slot in the "Wall 1, Wall 2, ..." sequence, it just isn't shown.
         const std::string generatedLabel = makeEntityLabel(p.material, p.asset);
-        entityLabels_[static_cast<u32>(e)] = p.name.empty() ? generatedLabel : p.name;
+        lvl_.entityLabels_[static_cast<u32>(e)] = p.name.empty() ? generatedLabel : p.name;
         // WHY `collide` IS REMEMBERED AND THE MATERIAL IS NOT: the surface survives on the entity
         // (CMeshRenderer::material), but `nocollide` has no component at all -- a load-time
         // instruction nothing records afterwards. Inferring it from entityBodies_ would be wrong:
         // a level opened before aver_phys_init has no bodies for ANY placement.
-        entityCollide_[static_cast<u32>(e)] = p.collide;
+        lvl_.entityCollide_[static_cast<u32>(e)] = p.collide;
         // [wave3/level-instances] A placement's stable id survives a save: instance overrides are keyed by it.
-        if (p.placementId) entityPlaceId_[static_cast<u32>(e)] = p.placementId;
+        if (p.placementId) lvl_.entityPlaceId_[static_cast<u32>(e)] = p.placementId;
         if (!p.layers.empty()) dataLayers_.setMembers(editIdFor(e), p.layers);
         // THE AUTHORED ANIMATION, remembered for the same reason: world::instantiate has already given
         // the entity a CAnimator, but that is the live clock Play advances, and the save must write what
         // the level said, not where a session left it.
         if (!p.animClip.empty())
-            entityAnim_[static_cast<u32>(e)] = EntityAnim{p.animClip, p.animSpeed, p.animTime, p.animOnce};
+            lvl_.entityAnim_[static_cast<u32>(e)] = EntityAnim{p.animClip, p.animSpeed, p.animTime, p.animOnce};
         // AND `snap`, FOR THE SAME REASON AND A WORSE FAILURE. snapToGround has no component
         // either, but unlike nocollide it also changes what z MEANS: with it set, the authored z
         // is an offset ABOVE the terrain, and world::instantiate resolves it to ground + offset
@@ -462,9 +462,9 @@ void SandboxApp::onLevelInstantiated(const game::GameLevel::LoadedLevel& loaded)
         // token -- baking the terrain into the file, on an open-and-save with no edits at all.
         // LevelClassSave.hpp already says exactly this and already handles it, for CLASS
         // placements only; this is the ordinary-placement half.
-        if (p.snapToGround) entitySnapZ_[static_cast<u32>(e)] = p.z;
+        if (p.snapToGround) lvl_.entitySnapZ_[static_cast<u32>(e)] = p.z;
 #if AVER_MODULE_PHYSICS
-        if (inst.entityBody[k] >= 0) entityBodies_[static_cast<u32>(e)] = inst.entityBody[k];
+        if (inst.entityBody[k] >= 0) lvl_.entityBodies_[static_cast<u32>(e)] = inst.entityBody[k];
 #endif
     }
 #if AVER_MODULE_SCENE
@@ -480,13 +480,13 @@ void SandboxApp::onLevelInstantiated(const game::GameLevel::LoadedLevel& loaded)
         // A streamed level's objects are not loaded yet: the tracks that name a placement by index are kept aside
         // (per sequence) and written back by saveLevel (appendStreamedSequenceTracks); cameras, events, cuts and
         // tracks bound by name are edited as usual and resolve if their actor is loaded. [wave5/sequencer]
-        streamSeqTracks_.clear();
-        streamSeqOwner_.clear();
-        streamSeqHeaders_.clear();
+        lvl_.streamSeqTracks_.clear();
+        lvl_.streamSeqOwner_.clear();
+        lvl_.streamSeqHeaders_.clear();
         // A name is an outliner label (what the level saves for a placement, light or class actor) or the entity's own name.
         const std::function<scene::Entity(const std::string&)> findByName = [this](const std::string& name) -> scene::Entity {
             scene::World& sw = scene::World::instance();
-            for (const auto& kv : entityLabels_)
+            for (const auto& kv : lvl_.entityLabels_)
                 if (kv.second == name && sw.valid(static_cast<scene::Entity>(kv.first))) return static_cast<scene::Entity>(kv.first);
             return sw.find(name);
         };
@@ -495,19 +495,19 @@ void SandboxApp::onLevelInstantiated(const game::GameLevel::LoadedLevel& loaded)
             for (fmt::OcSequence& s : kept) {
                 fmt::OcSequence header = s;
                 header.tracks.clear();
-                streamSeqHeaders_.push_back(std::move(header));
+                lvl_.streamSeqHeaders_.push_back(std::move(header));
                 std::vector<fmt::OcSeqTrack> aside;
                 editor::seqSplitStreamed(s, aside);
                 for (fmt::OcSeqTrack& tr : aside) {
-                    streamSeqTracks_.push_back(std::move(tr));
-                    streamSeqOwner_.push_back(s.name);
+                    lvl_.streamSeqTracks_.push_back(std::move(tr));
+                    lvl_.streamSeqOwner_.push_back(s.name);
                 }
             }
             seqEditor_.load(kept, byPlacement, findByName);
         } else {
             seqEditor_.load(w.sequences, byPlacement, findByName);
         }
-        levelHeader_.sequences.clear();
+        lvl_.levelHeader_.sequences.clear();
     }
 #endif
     // GRAPH-AS-CLASS / any other class placement: level_ collected them (level_.classPlacements());
@@ -517,12 +517,12 @@ void SandboxApp::onLevelInstantiated(const game::GameLevel::LoadedLevel& loaded)
     // The editor's own copy of the class placements (same filter as GameLevel::load): the save and
     // ClassInstance::placement index into it, and placeClassInstance appends to it. Filled here, not in
     // spawnClassPlacements, so a level opened before scripting is ready still saves its class lines.
-    classAuthored_.clear();
-    classAuthoredIndex_.clear();
+    lvl_.classAuthored_.clear();
+    lvl_.classAuthoredIndex_.clear();
     for (usize i = 0; i < w.placements.size(); ++i)
         if (!w.placements[i].className.empty()) {
-            classAuthored_.push_back(w.placements[i]);
-            classAuthoredIndex_.push_back(static_cast<i64>(i));
+            lvl_.classAuthored_.push_back(w.placements[i]);
+            lvl_.classAuthoredIndex_.push_back(static_cast<i64>(i));
         }
     placementTree_.build(w, inst);
 #endif
@@ -635,9 +635,9 @@ void SandboxApp::onLegacyOcmapInstantiated(const game::GameLevel::LoadedLevel& l
     // CARRIED, NOT UNDERSTOOD -- see legacyMapHeader_'s own comment for which five record kinds
     // this is and why. saveLevelAsOcmap starts from this and overwrites only what the editor
     // genuinely owns, the identical levelHeader_ pattern the OCWORLD path above uses.
-    legacyMapHeader_ = m;
-    legacyMapHeader_.placements.clear();
-    levelIsLegacyOcmap_ = true;
+    lvl_.legacyMapHeader_ = m;
+    lvl_.legacyMapHeader_.placements.clear();
+    lvl_.levelIsLegacyOcmap_ = true;
 
     // level_ TRANSLATED the placements into its shared pipeline (GameLevel.cpp's loadLegacyOcmap):
     // MATERIAL IS DELIBERATELY LEFT EMPTY on every synthesised placement, because a legacy PLACE
@@ -645,23 +645,23 @@ void SandboxApp::onLegacyOcmapInstantiated(const game::GameLevel::LoadedLevel& l
     // an .ocmat name. Both values are preserved for the save through entityLegacySurface_/
     // entityLegacyMaterial_ instead, from the file's own records here.
     const world::LevelInstance& inst = loaded.instance;
-    levelEntities_ = inst.entities;
+    lvl_.levelEntities_ = inst.entities;
 #if AVER_MODULE_PHYSICS
-    levelBodies_ = inst.bodies;
+    lvl_.levelBodies_ = inst.bodies;
 #endif
     for (usize k = 0; k < inst.entities.size(); ++k) {
         const scene::Entity e = inst.entities[k];
         const fmt::OcPlacement& p = m.placements[inst.placementIndex[k]];
-        entityLabels_[static_cast<u32>(e)] = makeEntityLabel(std::string(), p.asset);
-        entityCollide_[static_cast<u32>(e)] = true;
+        lvl_.entityLabels_[static_cast<u32>(e)] = makeEntityLabel(std::string(), p.asset);
+        lvl_.entityCollide_[static_cast<u32>(e)] = true;
         // WHICH RECORD KIND THIS ENTITY CAME FROM, AND ITS OWN FIELD -- see the "MATERIAL IS
         // DELIBERATELY LEFT EMPTY" paragraph above for why these live here, and
         // entityLegacyDeform_'s own comment for what an entity absent from these maps saves as.
-        entityLegacyDeform_[static_cast<u32>(e)] = p.deform;
-        if (p.deform) entityLegacyMaterial_[static_cast<u32>(e)] = p.material;
-        else          entityLegacySurface_[static_cast<u32>(e)] = p.surface;
+        lvl_.entityLegacyDeform_[static_cast<u32>(e)] = p.deform;
+        if (p.deform) lvl_.entityLegacyMaterial_[static_cast<u32>(e)] = p.material;
+        else          lvl_.entityLegacySurface_[static_cast<u32>(e)] = p.surface;
 #if AVER_MODULE_PHYSICS
-        if (inst.entityBody[k] >= 0) entityBodies_[static_cast<u32>(e)] = inst.entityBody[k];
+        if (inst.entityBody[k] >= 0) lvl_.entityBodies_[static_cast<u32>(e)] = inst.entityBody[k];
 #endif
     }
 
@@ -702,15 +702,15 @@ void SandboxApp::onLegacyOcmapInstantiated(const game::GameLevel::LoadedLevel& l
 // placed class runs OnTick immediately on load, even outside Play.
 void SandboxApp::spawnClassPlacements() {
 #if AVER_MODULE_SCRIPTING
-    if (!classAuthored_.empty() && scripts_.ready()) configureProjectInput("Level");
+    if (!lvl_.classAuthored_.empty() && scripts_.ready()) configureProjectInput("Level");
 #endif
     // One spawn batch: every placed actor begins play after all of them exist, children first.
     aver_fw_spawn_batch_begin();
-    for (usize slot = 0; slot < classAuthored_.size(); ++slot) spawnClassSlot(slot, nullptr);
+    for (usize slot = 0; slot < lvl_.classAuthored_.size(); ++slot) spawnClassSlot(slot, nullptr);
     placementTree_.attachUnderClassPlacements(scene::World::instance());
     aver_fw_spawn_batch_end();
     usize live = 0;
-    for (const ClassInstance& ci : levelClassInstances_) if (!ci.removed) ++live;
+    for (const ClassInstance& ci : lvl_.levelClassInstances_) if (!ci.removed) ++live;
     if (live > 0)
         AVER_INFO("[Level] {} class instance(s) placed -- an entity exists for each; whether its graph "
                   "COMPILED is reported per instance above, because aver_fw_spawn returns a live entity "
@@ -723,12 +723,12 @@ void SandboxApp::spawnClassPlacements() {
 // set: that exact world pose, no ground query -- undo and the Stop respawn already hold a resolved pose, and
 // adding the ground again would climb.
 scene::Entity SandboxApp::spawnClassSlot(usize slot, const Transform* worldXf) {
-    if (slot >= classAuthored_.size()) return scene::kInvalidEntity;
-    const fmt::OcWorldPlacement& p = classAuthored_[slot];
+    if (slot >= lvl_.classAuthored_.size()) return scene::kInvalidEntity;
+    const fmt::OcWorldPlacement& p = lvl_.classAuthored_[slot];
     scene::World& world = scene::World::instance();
 
     ClassInstance* prior = nullptr;
-    for (ClassInstance& ci : levelClassInstances_)
+    for (ClassInstance& ci : lvl_.levelClassInstances_)
         if (ci.placement == slot) { prior = &ci; break; }
     if (!worldXf && prior) {
         // The retry call at applyProject's tail must not spawn a second copy; a deleted placement stays deleted.
@@ -744,7 +744,7 @@ scene::Entity SandboxApp::spawnClassSlot(usize slot, const Transform* worldXf) {
     }
 
     // The file's parent, if it has one and it is live: the pose is then parent-relative and snaps to nothing.
-    const i64 fileIndex = slot < classAuthoredIndex_.size() ? classAuthoredIndex_[slot] : -1;
+    const i64 fileIndex = slot < lvl_.classAuthoredIndex_.size() ? lvl_.classAuthoredIndex_[slot] : -1;
     const usize treeIndex = fileIndex >= 0 ? static_cast<usize>(fileIndex) : static_cast<usize>(-1);
     const scene::Entity parent = placementTree_.parentEntity(treeIndex, world);
 
@@ -787,7 +787,7 @@ scene::Entity SandboxApp::spawnClassSlot(usize slot, const Transform* worldXf) {
     game::applyPlacementGroups(e, p);
     game::applyPlacedComponents2D(scene::World::instance(), static_cast<scene::Entity>(e), p);   // a Node2D / Sprite2D / CanvasLayer carries its 2D records
     if (prior) { prior->entity = e; prior->removed = false; }
-    else levelClassInstances_.push_back(ClassInstance{slot, e});
+    else lvl_.levelClassInstances_.push_back(ClassInstance{slot, e});
     return static_cast<scene::Entity>(e);
 }
 
@@ -804,7 +804,7 @@ scene::Entity SandboxApp::placeClassInstance(fmt::OcWorldPlacement p, std::strin
     if (!(hideEditorScene_ || !levelPath_.empty()))
         return refuse("Load a level (or hide the editor scene) before dropping assets");
     // A legacy .ocmap save has no record for a class actor: it would be placed now and gone on save.
-    if (levelIsLegacyOcmap_) return refuse("this level is a legacy .ocmap, which cannot store a class actor -- Save As an .ocworld first");
+    if (lvl_.levelIsLegacyOcmap_) return refuse("this level is a legacy .ocmap, which cannot store a class actor -- Save As an .ocworld first");
 #if AVER_MODULE_SCRIPTING
     // Declared again on every placement: a graph written or edited after the project opened becomes placeable,
     // and its COMP data matches the file the managed bind reloads.
@@ -824,12 +824,12 @@ scene::Entity SandboxApp::placeClassInstance(fmt::OcWorldPlacement p, std::strin
     bits.abstractClass = (flags & AVER_FW_CLASS_ABSTRACT) != 0;
     if (const std::string r = editor::classPlaceRefusalText(bits, p.className); !r.empty()) return refuse(r);
 
-    const usize slot = classAuthored_.size();
-    classAuthored_.push_back(p);
-    classAuthoredIndex_.push_back(-1);
+    const usize slot = lvl_.classAuthored_.size();
+    lvl_.classAuthored_.push_back(p);
+    lvl_.classAuthoredIndex_.push_back(-1);
     const scene::Entity e = spawnClassSlot(slot, nullptr);
     if (e == scene::kInvalidEntity) {
-        classAuthored_.pop_back();
+        lvl_.classAuthored_.pop_back();
         return refuse("class '" + p.className + "' failed to spawn (see the log)");
     }
     multiSetSingle(e);
@@ -849,8 +849,8 @@ scene::Entity SandboxApp::placeClassInstance(fmt::OcWorldPlacement p, std::strin
 // Index into levelClassInstances_ of the live class root `e`, or -1.
 int SandboxApp::classSlotOfEntity(scene::Entity e) const {
     if (e == scene::kInvalidEntity) return -1;
-    for (usize i = 0; i < levelClassInstances_.size(); ++i) {
-        const ClassInstance& ci = levelClassInstances_[i];
+    for (usize i = 0; i < lvl_.levelClassInstances_.size(); ++i) {
+        const ClassInstance& ci = lvl_.levelClassInstances_[i];
         if (!ci.removed && ci.entity != 0 && static_cast<scene::Entity>(ci.entity) == e) return static_cast<int>(i);
     }
     return -1;
@@ -863,7 +863,7 @@ scene::Entity SandboxApp::classRootOf(scene::Entity hit) const {
         const scene::Entity ex = static_cast<scene::Entity>(x);
         return w.valid(ex) ? static_cast<int32_t>(w.parent(ex)) : int32_t(0);
     };
-    const int32_t r = editor::classRootOf(static_cast<int32_t>(hit), parentOf, levelClassInstances_);
+    const int32_t r = editor::classRootOf(static_cast<int32_t>(hit), parentOf, lvl_.levelClassInstances_);
     return r == 0 ? scene::kInvalidEntity : static_cast<scene::Entity>(r);
 }
 
@@ -871,15 +871,15 @@ scene::Entity SandboxApp::classRootOf(scene::Entity hit) const {
 void SandboxApp::tagClassEdit(EditCmd& c, scene::Entity e) {
     const int i = classSlotOfEntity(e);
     if (i < 0) return;
-    const usize placement = levelClassInstances_[static_cast<usize>(i)].placement;
-    c.className = classAuthored_[placement].className;
+    const usize placement = lvl_.levelClassInstances_[static_cast<usize>(i)].placement;
+    c.className = lvl_.classAuthored_[placement].className;
     c.classSlot = static_cast<i32>(placement);
     c.subtree.clear();   // the class spawn rebuilds its parts; replaying captured ones would double them
 }
 
 // Undo of a Delete / redo of a Create: spawn the class again at the edit's pose and rebind the EditId to it.
 void SandboxApp::respawnClassFromEdit(const EditCmd& c) {
-    if (c.classSlot < 0 || static_cast<usize>(c.classSlot) >= classAuthored_.size()) return;
+    if (c.classSlot < 0 || static_cast<usize>(c.classSlot) >= lvl_.classAuthored_.size()) return;
     Transform xf;
     xf.position = c.after.pos;
     xf.rotation = world::quatFromEulerDeg(c.after.rotDeg);
@@ -898,9 +898,9 @@ void SandboxApp::respawnLostClassInstances() {
     // One spawn batch, as at level load: each actor's placement properties are on it before it begins play.
     aver_fw_spawn_batch_begin();
     for (const PlayClassSaved& s : play_.playClassSnapshot_) {
-        const auto it = std::find_if(levelClassInstances_.begin(), levelClassInstances_.end(),
+        const auto it = std::find_if(lvl_.levelClassInstances_.begin(), lvl_.levelClassInstances_.end(),
                                      [&](const ClassInstance& ci) { return ci.placement == s.slot && !ci.removed; });
-        if (it == levelClassInstances_.end()) continue;
+        if (it == lvl_.levelClassInstances_.end()) continue;
         const scene::Entity old = static_cast<scene::Entity>(it->entity);
         // end_play destroys with a pending bit that valid() does not show until a flush.
         if (it->entity != 0 && w.valid(old) && !w.destroyPending(old)) continue;
@@ -1161,14 +1161,14 @@ void SandboxApp::unloadLevel(Engine& eng) {
     // BEFORE the raw-entity loop below, and through aver_fw_destroy rather than world.destroy() --
     // see GameLevel::unload's identical comment for why (the managed-dispatch unbind hook is what
     // releases a graph-class instance's GraphHost/VAR storage).
-    for (const ClassInstance& ci : levelClassInstances_) if (ci.entity != 0) aver_fw_destroy(ci.entity);
-    levelClassInstances_.clear();
-    classAuthored_.clear();
+    for (const ClassInstance& ci : lvl_.levelClassInstances_) if (ci.entity != 0) aver_fw_destroy(ci.entity);
+    lvl_.levelClassInstances_.clear();
+    lvl_.classAuthored_.clear();
     play_.playClassSnapshot_.clear();
 #endif
     scene::World& world = scene::World::instance();
-    for (const scene::Entity e : levelEntities_) if (world.valid(e)) world.destroy(e);
-    levelEntities_.clear();
+    for (const scene::Entity e : lvl_.levelEntities_) if (world.valid(e)) world.destroy(e);
+    lvl_.levelEntities_.clear();
 #if AVER_MODULE_SCENE
     // LIGHT RECORDS are bare CLight entities that levelEntities_ does not hold (they are not placements).
     if (scene::ComponentPool* lights = world.pool(scene::kComponentLight)) {
@@ -1197,34 +1197,34 @@ void SandboxApp::unloadLevel(Engine& eng) {
     }
     playerStartYaw_ = 0.0f;
 #endif
-    entityLabels_.clear();
-    labelCounts_.clear();
-    entityBodies_.clear();
-    entityPlaceId_.clear();         // [wave3/level-instances]
+    lvl_.entityLabels_.clear();
+    lvl_.labelCounts_.clear();
+    lvl_.entityBodies_.clear();
+    lvl_.entityPlaceId_.clear();         // [wave3/level-instances]
     clearDataLayers();
 #if AVER_MODULE_SCENE
     clearOutlinerMeta();
 #endif
-    entityAuthoredName_.clear();    // [wave3/level-instances]
+    lvl_.entityAuthoredName_.clear();    // [wave3/level-instances]
     // Cleared with the rest of the level's state: carrying one level's PCG records into the
     // next would write them into a file that never had them.
-    levelPcgVolumes_.clear();
-    levelHeader_ = fmt::OcWorldData{};
+    lvl_.levelPcgVolumes_.clear();
+    lvl_.levelHeader_ = fmt::OcWorldData{};
 #if AVER_MODULE_SCENE
     seqEditor_.reset();   // its actors are gone with the level; nothing to restore
 #endif
-    entityCollide_.clear();
-    entityAnim_.clear();
+    lvl_.entityCollide_.clear();
+    lvl_.entityAnim_.clear();
     animEditBefore_.clear();
-    entitySnapZ_.clear();
+    lvl_.entitySnapZ_.clear();
     // The legacy OCMAP state, cleared with the rest -- see levelIsLegacyOcmap_'s own comment
     // for why a stale `true` here would be worse than a stale levelHeader_: it would route the
     // NEXT level's save through the wrong writer entirely, not just lose a field it carries.
-    levelIsLegacyOcmap_ = false;
-    legacyMapHeader_ = fmt::OcMapData{};
-    entityLegacyDeform_.clear();
-    entityLegacySurface_.clear();
-    entityLegacyMaterial_.clear();
+    lvl_.levelIsLegacyOcmap_ = false;
+    lvl_.legacyMapHeader_ = fmt::OcMapData{};
+    lvl_.entityLegacyDeform_.clear();
+    lvl_.entityLegacySurface_.clear();
+    lvl_.entityLegacyMaterial_.clear();
     undoStack_.clear();
     redoStack_.clear();
     // A cleared history means nothing is pending against the file either.
@@ -1234,9 +1234,9 @@ void SandboxApp::unloadLevel(Engine& eng) {
     editBeforeValid_ = false;
     if (selectionUi_.sel_ == SelectionState::kSelScene) { selectionUi_.sel_ = -1; selectionUi_.selEntity_ = scene::kInvalidEntity; }
 #if AVER_MODULE_PHYSICS
-    for (const int32_t b : levelBodies_) aver_phys_remove_body(b);
+    for (const int32_t b : lvl_.levelBodies_) aver_phys_remove_body(b);
     aver_phys_snapshot_release_all();   // the editor's unloadLevel: snapshots of this level's bodies could never be restored again
-    levelBodies_.clear();
+    lvl_.levelBodies_.clear();
 #endif
 #if AVER_MODULE_FLUIDS
     // THE ONLY teardown site for what a level spawned: this runs on every path that ends a level,
@@ -1262,16 +1262,16 @@ void SandboxApp::unloadLevel(Engine& eng) {
     if (rset_.voxiAttached_) levelFoliage_.clear();
 #endif
 #if AVER_MODULE_SCENE
-    streamLabel_.clear();
-    streamPinned_.clear();
-    streamAdopted_.clear();
-    streamSelPinned_.clear();
-    streamPlayResident_.clear();
-    streamPlayWas_ = false;
-    streamSeenCount_ = 0;
-    streamSeqTracks_.clear();
-    streamSeqOwner_.clear();
-    streamSeqHeaders_.clear();
+    lvl_.streamLabel_.clear();
+    lvl_.streamPinned_.clear();
+    lvl_.streamAdopted_.clear();
+    lvl_.streamSelPinned_.clear();
+    lvl_.streamPlayResident_.clear();
+    lvl_.streamPlayWas_ = false;
+    lvl_.streamSeenCount_ = 0;
+    lvl_.streamSeqTracks_.clear();
+    lvl_.streamSeqOwner_.clear();
+    lvl_.streamSeqHeaders_.clear();
 #endif
 #if AVER_MODULE_PBR
     // LEVEL-SCOPED MATERIAL RESIDENCY (docs: PACKAGE level-materials): every way OUT of a level goes

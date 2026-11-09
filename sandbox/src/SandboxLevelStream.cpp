@@ -39,20 +39,20 @@ void SandboxApp::onStreamedIn(const std::vector<scene::Entity>& es, const std::v
         const scene::Entity e = es[k];
         const fmt::OcWorldPlacement& p = records[placements[k]];
         const u32 key = static_cast<u32>(e);
-        levelEntities_.push_back(e);
+        lvl_.levelEntities_.push_back(e);
         const std::string label = p.name.empty() ? makeEntityLabel(p.material, p.asset) : p.name;
-        entityLabels_[key] = label;
-        streamLabel_[key] = label;
-        entityCollide_[key] = p.collide;
-        if (!p.animClip.empty()) entityAnim_[key] = EntityAnim{p.animClip, p.animSpeed, p.animTime, p.animOnce};
-        if (p.snapToGround) entitySnapZ_[key] = p.z;
+        lvl_.entityLabels_[key] = label;
+        lvl_.streamLabel_[key] = label;
+        lvl_.entityCollide_[key] = p.collide;
+        if (!p.animClip.empty()) lvl_.entityAnim_[key] = EntityAnim{p.animClip, p.animSpeed, p.animTime, p.animOnce};
+        if (p.snapToGround) lvl_.entitySnapZ_[key] = p.z;
 #  if AVER_MODULE_PHYSICS
-        if (k < bodies.size() && bodies[k] >= 0) entityBodies_[key] = bodies[k];
+        if (k < bodies.size() && bodies[k] >= 0) lvl_.entityBodies_[key] = bodies[k];
 #  else
         (void)bodies;
 #  endif
     }
-    streamSeenCount_ = levelEntities_.size();
+    lvl_.streamSeenCount_ = lvl_.levelEntities_.size();
 }
 
 void SandboxApp::onStreamedOut(scene::Entity e, u32 placement, bool writeBack) {
@@ -64,21 +64,21 @@ void SandboxApp::onStreamedOut(scene::Entity e, u32 placement, bool writeBack) {
     }
 #  if AVER_MODULE_PHYSICS
     // The body the editor holds now (an edit rebuilds it); LevelStreaming removes the one it made.
-    if (const auto b = entityBodies_.find(key); b != entityBodies_.end()) {
+    if (const auto b = lvl_.entityBodies_.find(key); b != lvl_.entityBodies_.end()) {
         aver_phys_remove_body(b->second);
-        levelBodies_.erase(std::remove(levelBodies_.begin(), levelBodies_.end(), b->second), levelBodies_.end());
+        lvl_.levelBodies_.erase(std::remove(lvl_.levelBodies_.begin(), lvl_.levelBodies_.end(), b->second), lvl_.levelBodies_.end());
     }
 #  endif
-    levelEntities_.erase(std::remove(levelEntities_.begin(), levelEntities_.end(), e), levelEntities_.end());
-    streamSeenCount_ = levelEntities_.size();
-    entityLabels_.erase(key);
-    streamLabel_.erase(key);
-    entityCollide_.erase(key);
-    entityAnim_.erase(key);
-    entitySnapZ_.erase(key);
-    entityBodies_.erase(key);
-    streamPinned_.erase(key);
-    streamSelPinned_.erase(key);
+    lvl_.levelEntities_.erase(std::remove(lvl_.levelEntities_.begin(), lvl_.levelEntities_.end(), e), lvl_.levelEntities_.end());
+    lvl_.streamSeenCount_ = lvl_.levelEntities_.size();
+    lvl_.entityLabels_.erase(key);
+    lvl_.streamLabel_.erase(key);
+    lvl_.entityCollide_.erase(key);
+    lvl_.entityAnim_.erase(key);
+    lvl_.entitySnapZ_.erase(key);
+    lvl_.entityBodies_.erase(key);
+    lvl_.streamPinned_.erase(key);
+    lvl_.streamSelPinned_.erase(key);
 }
 
 // A placement record from a live entity: parented as the record says while that still holds, else at
@@ -118,15 +118,15 @@ void SandboxApp::refreshStreamRecord(scene::Entity e, u32 placement, fmt::OcWorl
     p.name = old.name;
     p.hasBounds = old.hasBounds;
     for (int i = 0; i < 3; ++i) { p.boundsMin[i] = old.boundsMin[i]; p.boundsMax[i] = old.boundsMax[i]; }
-    const auto label = entityLabels_.find(static_cast<u32>(e));
-    const auto was = streamLabel_.find(static_cast<u32>(e));
-    if (label != entityLabels_.end() && (was == streamLabel_.end() || label->second != was->second)) p.name = label->second;
+    const auto label = lvl_.entityLabels_.find(static_cast<u32>(e));
+    const auto was = lvl_.streamLabel_.find(static_cast<u32>(e));
+    if (label != lvl_.entityLabels_.end() && (was == lvl_.streamLabel_.end() || label->second != was->second)) p.name = label->second;
     ls.updateRecord(placement, p, keepParent);
 }
 
 void SandboxApp::pinStreamed(scene::Entity e) {
     game::LevelStreaming& ls = level_.streaming();
-    if (!ls.active() || !streamPinned_.insert(static_cast<u32>(e)).second) return;
+    if (!ls.active() || !lvl_.streamPinned_.insert(static_cast<u32>(e)).second) return;
     const i32 pi = ls.placementOf(e);
     if (pi >= 0) ls.pin(static_cast<u32>(pi), true);
 }
@@ -136,29 +136,29 @@ void SandboxApp::onStreamedEntityDestroyed(scene::Entity e) {
     if (!ls.active()) return;
     const i32 pi = ls.placementOf(e);
     if (pi >= 0) ls.removeRecord(static_cast<u32>(pi));
-    streamAdopted_.erase(static_cast<u32>(e));
+    lvl_.streamAdopted_.erase(static_cast<u32>(e));
 }
 
 // Entities made this session (drop, duplicate, paste, an undone delete) become records at once, so they
 // hold their mesh and save like any other placement.
 void SandboxApp::adoptNewLevelEntities() {
     game::LevelStreaming& ls = level_.streaming();
-    if (levelEntities_.size() == streamSeenCount_) return;
-    streamSeenCount_ = levelEntities_.size();
+    if (lvl_.levelEntities_.size() == lvl_.streamSeenCount_) return;
+    lvl_.streamSeenCount_ = lvl_.levelEntities_.size();
     scene::World& world = scene::World::instance();
-    const std::vector<scene::Entity> live = levelEntities_;
+    const std::vector<scene::Entity> live = lvl_.levelEntities_;
     for (const scene::Entity e : live) {
         if (!world.valid(e) || ls.owns(e)) continue;
         if (level_.instances().isMember(e)) continue;   // a child level's entity, not a new placement
-        if (!streamAdopted_.insert(static_cast<u32>(e)).second) continue;
+        if (!lvl_.streamAdopted_.insert(static_cast<u32>(e)).second) continue;
         fmt::OcWorldPlacement p;
         bool keepParent = false;
         if (!streamRecordFromEntity(e, nullptr, p, keepParent)) continue;   // a light, decal or prefab part
-        const auto label = entityLabels_.find(static_cast<u32>(e));
-        if (label != entityLabels_.end()) { p.name = label->second; streamLabel_[static_cast<u32>(e)] = label->second; }
+        const auto label = lvl_.entityLabels_.find(static_cast<u32>(e));
+        if (label != lvl_.entityLabels_.end()) { p.name = label->second; lvl_.streamLabel_[static_cast<u32>(e)] = label->second; }
         p.objectId = fnv1a64(std::string_view(p.asset));
         ls.addRecord(p, e);
-        streamPinned_.insert(static_cast<u32>(e));
+        lvl_.streamPinned_.insert(static_cast<u32>(e));
     }
 }
 
@@ -169,10 +169,10 @@ void SandboxApp::tickLevelStreaming(f32 dt) {
     {
         const scene::Entity want = (selectionUi_.sel_ == SelectionState::kSelScene && selectionUi_.selEntity_ != scene::kInvalidEntity)
                                        ? level_.instances().topRootOf(selectionUi_.selEntity_) : scene::kInvalidEntity;
-        if (want != instanceSelPinned_) {
-            if (instanceSelPinned_ != scene::kInvalidEntity) level_.instances().pin(instanceSelPinned_, false);
+        if (want != lvl_.instanceSelPinned_) {
+            if (lvl_.instanceSelPinned_ != scene::kInvalidEntity) level_.instances().pin(lvl_.instanceSelPinned_, false);
             if (want != scene::kInvalidEntity) level_.instances().pin(want, true);
-            instanceSelPinned_ = want;
+            lvl_.instanceSelPinned_ = want;
         }
 #  if AVER_MODULE_VOXI
         if (rset_.voxiAttached_) {
@@ -191,29 +191,29 @@ void SandboxApp::tickLevelStreaming(f32 dt) {
         // An object with a sequence track stays loaded too (the track holds its entity).
         for (const scene::Entity e : seqEditor_.trackEntities()) pinStreamed(e);
         for (const u32 key : selected) {
-            if (!streamSelPinned_.insert(key).second) continue;
+            if (!lvl_.streamSelPinned_.insert(key).second) continue;
             const i32 pi = ls.placementOf(static_cast<scene::Entity>(key));
             if (pi >= 0) ls.pin(static_cast<u32>(pi), true);
         }
-        for (auto it = streamSelPinned_.begin(); it != streamSelPinned_.end();) {
+        for (auto it = lvl_.streamSelPinned_.begin(); it != lvl_.streamSelPinned_.end();) {
             if (selected.count(*it)) { ++it; continue; }
             const i32 pi = ls.placementOf(static_cast<scene::Entity>(*it));
-            if (pi >= 0 && !streamPinned_.count(*it)) ls.pin(static_cast<u32>(pi), false);
-            it = streamSelPinned_.erase(it);
+            if (pi >= 0 && !lvl_.streamPinned_.count(*it)) ls.pin(static_cast<u32>(pi), false);
+            it = lvl_.streamSelPinned_.erase(it);
         }
         // Play's own moves end with Play: what streamed in during it reloads from its record.
         const bool playing = anyPlayActive();
-        if (playing && !streamPlayWas_) {
-            streamPlayResident_.clear();
-            for (const scene::Entity e : levelEntities_) if (ls.owns(e)) streamPlayResident_.insert(static_cast<u32>(e));
-        } else if (!playing && streamPlayWas_) {
+        if (playing && !lvl_.streamPlayWas_) {
+            lvl_.streamPlayResident_.clear();
+            for (const scene::Entity e : lvl_.levelEntities_) if (ls.owns(e)) lvl_.streamPlayResident_.insert(static_cast<u32>(e));
+        } else if (!playing && lvl_.streamPlayWas_) {
             std::vector<scene::Entity> fresh;
-            for (const scene::Entity e : levelEntities_)
-                if (ls.owns(e) && !streamPlayResident_.count(static_cast<u32>(e))) fresh.push_back(e);
+            for (const scene::Entity e : lvl_.levelEntities_)
+                if (ls.owns(e) && !lvl_.streamPlayResident_.count(static_cast<u32>(e))) fresh.push_back(e);
             if (!fresh.empty()) ls.reload(scene::World::instance(), fresh);
-            streamPlayResident_.clear();
+            lvl_.streamPlayResident_.clear();
         }
-        streamPlayWas_ = playing;
+        lvl_.streamPlayWas_ = playing;
     }
     const auto t0 = std::chrono::steady_clock::now();
     level_.tickStreaming(viewers);
@@ -243,7 +243,7 @@ void SandboxApp::buildStreamedPlacements(fmt::OcWorldData& w,
     game::LevelStreaming& ls = level_.streaming();
     adoptNewLevelEntities();
     scene::World& world = scene::World::instance();
-    for (const scene::Entity e : levelEntities_) {
+    for (const scene::Entity e : lvl_.levelEntities_) {
         if (!world.valid(e)) continue;
         const i32 pi = ls.placementOf(e);
         fmt::OcWorldPlacement p;
@@ -251,47 +251,47 @@ void SandboxApp::buildStreamedPlacements(fmt::OcWorldData& w,
         refreshStreamRecord(e, static_cast<u32>(pi), p);
     }
     const auto& records = ls.placements();
-    streamOutSlot_.assign(records.size(), -1);
+    lvl_.streamOutSlot_.assign(records.size(), -1);
     for (u32 i = 0; i < records.size(); ++i) {
         // Class placements are written by appendClassPlacements, from their live instances.
         if (ls.removed(i) || !records[i].className.empty()) continue;
         fmt::OcWorldPlacement p = records[i];
-        p.parent = p.parent >= 0 && static_cast<usize>(p.parent) < streamOutSlot_.size()
-                 ? streamOutSlot_[static_cast<usize>(p.parent)] : -1;
-        streamOutSlot_[i] = static_cast<i32>(w.placements.size());
+        p.parent = p.parent >= 0 && static_cast<usize>(p.parent) < lvl_.streamOutSlot_.size()
+                 ? lvl_.streamOutSlot_[static_cast<usize>(p.parent)] : -1;
+        lvl_.streamOutSlot_[i] = static_cast<i32>(w.placements.size());
         w.placements.push_back(std::move(p));
     }
-    for (const scene::Entity e : levelEntities_) {
+    for (const scene::Entity e : lvl_.levelEntities_) {
         const i32 pi = ls.placementOf(e);
-        if (pi >= 0 && streamOutSlot_[static_cast<usize>(pi)] >= 0)
-            slotOf[static_cast<u32>(e)] = streamOutSlot_[static_cast<usize>(pi)];
+        if (pi >= 0 && lvl_.streamOutSlot_[static_cast<usize>(pi)] >= 0)
+            slotOf[static_cast<u32>(e)] = lvl_.streamOutSlot_[static_cast<usize>(pi)];
     }
 }
 
 // A streamed level's sequence tracks on objects that were not loaded when it opened: kept aside at load
 // and written back here, renumbered to where their placements were saved.
 std::string SandboxApp::sequenceBindName(scene::Entity ent) const {
-    const auto it = entityLabels_.find(static_cast<u32>(ent));
-    if (it == entityLabels_.end() || it->second.empty()) return {};
+    const auto it = lvl_.entityLabels_.find(static_cast<u32>(ent));
+    if (it == lvl_.entityLabels_.end() || it->second.empty()) return {};
     int n = 0;
-    for (const auto& kv : entityLabels_) n += kv.second == it->second ? 1 : 0;
+    for (const auto& kv : lvl_.entityLabels_) n += kv.second == it->second ? 1 : 0;
     return n == 1 ? it->second : std::string();   // a shared name cannot say which actor
 }
 
 void SandboxApp::appendStreamedSequenceTracks(fmt::OcWorldData& w) {
-    if (streamSeqTracks_.empty()) return;
-    for (usize i = 0; i < streamSeqTracks_.size(); ++i) {
-        fmt::OcSeqTrack tr = streamSeqTracks_[i];
-        if (tr.target < 0 || static_cast<usize>(tr.target) >= streamOutSlot_.size() || streamOutSlot_[static_cast<usize>(tr.target)] < 0)
+    if (lvl_.streamSeqTracks_.empty()) return;
+    for (usize i = 0; i < lvl_.streamSeqTracks_.size(); ++i) {
+        fmt::OcSeqTrack tr = lvl_.streamSeqTracks_[i];
+        if (tr.target < 0 || static_cast<usize>(tr.target) >= lvl_.streamOutSlot_.size() || lvl_.streamOutSlot_[static_cast<usize>(tr.target)] < 0)
             continue;   // its placement was deleted
-        tr.target = streamOutSlot_[static_cast<usize>(tr.target)];
+        tr.target = lvl_.streamOutSlot_[static_cast<usize>(tr.target)];
         // Back into the sequence it came from; one the editor wrote nothing for is rebuilt from its header.
-        const std::string& owner = i < streamSeqOwner_.size() ? streamSeqOwner_[i] : std::string();
+        const std::string& owner = i < lvl_.streamSeqOwner_.size() ? lvl_.streamSeqOwner_[i] : std::string();
         fmt::OcSequence* seq = nullptr;
         for (fmt::OcSequence& s : w.sequences)
             if (s.name == owner) { seq = &s; break; }
         if (!seq) {
-            for (const fmt::OcSequence& h : streamSeqHeaders_)
+            for (const fmt::OcSequence& h : lvl_.streamSeqHeaders_)
                 if (h.name == owner) { w.sequences.push_back(h); seq = &w.sequences.back(); break; }
         }
         if (!seq) continue;
@@ -363,7 +363,7 @@ bool SandboxApp::regenerateStreamData(std::string& report) {
         report = why;
         return false;
     }
-    levelHeader_.stream = w.stream;
+    lvl_.levelHeader_.stream = w.stream;
     markLevelSaved();
     report = std::to_string(rep.withBounds) + " of " + std::to_string(rep.placements) + " objects with bounds, " +
              std::to_string(rep.foliageInstances) + " foliage instances in " + std::to_string(rep.foliageCells) + " cells";
@@ -376,7 +376,7 @@ bool SandboxApp::regenerateStreamData(std::string& report) {
 void SandboxApp::buildLevelStreamingSettings() {
     ImGui::TextDisabled("Level Streaming");
     ImGui::Separator();
-    fmt::OcStreamSettings& st = levelHeader_.stream;
+    fmt::OcStreamSettings& st = lvl_.levelHeader_.stream;
     bool on = st.enabled;
     if (ImGui::Checkbox("Stream this level", &on)) {
         st.enabled = on;
@@ -444,14 +444,14 @@ void SandboxApp::buildLevelStreamingSettings() {
             ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "Streaming data is out of date.");
         if (ImGui::Button("Regenerate Streaming Data")) {
             std::string report;
-            streamRegenReport_ = regenerateStreamData(report) ? report : "Failed: " + report;
+            lvl_.streamRegenReport_ = regenerateStreamData(report) ? report : "Failed: " + report;
         }
         uiReg_.track("worldSettings.regenerateStreamData");
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Saves the level, rebuilds every object's bounds from its mesh and sorts the\n"
                               "foliage into cells, into Binaries/Streaming, then reopens the level.\n"
                               "Saving keeps it current; use this after reimporting meshes or foliage.");
-        if (!streamRegenReport_.empty()) ImGui::TextDisabled("%s", streamRegenReport_.c_str());
+        if (!lvl_.streamRegenReport_.empty()) ImGui::TextDisabled("%s", lvl_.streamRegenReport_.c_str());
     }
     buildHlodSettings();         // SandboxLevelHlod.cpp
     buildCookChunksSettings();   // SandboxLevelCook.cpp: independent of "Stream this level" (a cooked set needs neither)

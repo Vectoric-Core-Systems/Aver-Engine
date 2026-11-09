@@ -81,7 +81,7 @@ editor::AttachContext SandboxApp::placedAttachContext(scene::Entity e) const {
     c.hasSkeleton = sm && sm->skeleton != 0;
     const EntityAnim* oa = entityAnim(e);
     c.hasObjectAnim = oa && !oa->clip.empty();
-    c.legacyOcmap = levelIsLegacyOcmap_;
+    c.legacyOcmap = lvl_.levelIsLegacyOcmap_;
     c.prefabLinked = prefabSys_.isLinked(e);
     c.instanceMember = level_.instances().isMember(e);
     const u32 clothId = w.componentId("CCloth"), destructId = w.componentId("CDestructible");
@@ -687,8 +687,8 @@ void SandboxApp::drawPlacedComponentSections() {
                 if (frame - s_first > 2) ImGui::TextColored(kRed, "Bones  0: the skeleton did not load");
                 else                     ImGui::TextDisabled("Bones  resolving...");
             }
-            const auto collideIt = entityCollide_.find(static_cast<u32>(e));
-            if (collideIt == entityCollide_.end() || collideIt->second)
+            const auto collideIt = lvl_.entityCollide_.find(static_cast<u32>(e));
+            if (collideIt == lvl_.entityCollide_.end() || collideIt->second)
                 ImGui::TextDisabled(ICON_WARNING " A character should not have a static collision body: turn Collides off.");
         }
         // ---- Animator ----

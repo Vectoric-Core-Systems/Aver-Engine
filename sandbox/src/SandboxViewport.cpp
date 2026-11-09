@@ -89,10 +89,10 @@ void SandboxApp::rebuildColliderOverlay(Engine& e) {
     mix(static_cast<u64>(static_cast<u32>(n)));
     mix(dbgOv_.colliderRev_);
 #if AVER_MODULE_SCENE
-    mix(static_cast<u64>(levelBodies_.size()));
-    mix(levelBodies_.empty() ? 0u : static_cast<u64>(static_cast<u32>(levelBodies_.front())));
-    mix(levelBodies_.empty() ? 0u : static_cast<u64>(static_cast<u32>(levelBodies_.back())));
-    mix(static_cast<u64>(entityBodies_.size()));
+    mix(static_cast<u64>(lvl_.levelBodies_.size()));
+    mix(lvl_.levelBodies_.empty() ? 0u : static_cast<u64>(static_cast<u32>(lvl_.levelBodies_.front())));
+    mix(lvl_.levelBodies_.empty() ? 0u : static_cast<u64>(static_cast<u32>(lvl_.levelBodies_.back())));
+    mix(static_cast<u64>(lvl_.entityBodies_.size()));
     sig = editor::EditorOriginParticipant::overlaySignature(sig, origin_.generation());   // a floating-origin shift moves every box
 #endif
     bool staticStale =
@@ -144,14 +144,14 @@ void SandboxApp::rebuildColliderOverlay(Engine& e) {
 #if AVER_MODULE_SCENE
             {
                 scene::World& w = scene::World::instance();
-                for (const auto& [ent, body] : entityBodies_) {
+                for (const auto& [ent, body] : lvl_.entityBodies_) {
                     const auto* mr = w.component<scene::CMeshRenderer>(static_cast<scene::Entity>(ent),
                                                                        scene::kComponentMeshRenderer);
                     if (mr && content_.collisionMeshFor(mr->mesh)) meshBodies.insert(body);
                 }
-                tracked.reserve(levelBodies_.size() + entityBodies_.size());
-                tracked.insert(tracked.end(), levelBodies_.begin(), levelBodies_.end());
-                for (const auto& kv : entityBodies_) tracked.push_back(kv.second);
+                tracked.reserve(lvl_.levelBodies_.size() + lvl_.entityBodies_.size());
+                tracked.insert(tracked.end(), lvl_.levelBodies_.begin(), lvl_.levelBodies_.end());
+                for (const auto& kv : lvl_.entityBodies_) tracked.push_back(kv.second);
                 std::sort(tracked.begin(), tracked.end());
             }
 #endif
@@ -263,9 +263,9 @@ rhi::LineHandle SandboxApp::selectionOutlineLines(Engine& e, u64 meshId) {
 #if AVER_MODULE_PBR && AVER_MODULE_SCENE
     if (const auto it = selectionUi_.selOutlineLines_.find(meshId); it != selectionUi_.selOutlineLines_.end()) return it->second;
 
-    const auto pit = meshPathById_.find(meshId);
+    const auto pit = lvl_.meshPathById_.find(meshId);
     const std::string content = project_.contentDir();
-    if (pit == meshPathById_.end() || content.empty()) return 0;
+    if (pit == lvl_.meshPathById_.end() || content.empty()) return 0;
 
     fmt::OcMeshData md;
     std::string why;
@@ -646,8 +646,8 @@ void SandboxApp::foliagePlaceAt(Engine& e, const FoliageSpecies& sp, f32 x, f32 
 #endif
         }
     }
-    levelEntities_.push_back(ent);
-    entityLabels_[static_cast<u32>(ent)] = makeEntityLabel(sp.type.material, sp.type.meshPath);
+    lvl_.levelEntities_.push_back(ent);
+    lvl_.entityLabels_[static_cast<u32>(ent)] = makeEntityLabel(sp.type.material, sp.type.meshPath);
     landTool_.foliagePlaced_.push_back({xf.position,
                                sp.type.collisionRadiusCm > 0.0f ? sp.type.collisionRadiusCm * sc : 0.0f});
 
@@ -662,8 +662,8 @@ void SandboxApp::foliagePlaceAt(Engine& e, const FoliageSpecies& sp, f32 x, f32 
 void SandboxApp::foliageErase(f32 cx, f32 cy) {
     const f32 rSq = landTool_.foliageRadiusCm_ * landTool_.foliageRadiusCm_;
     scene::World& world = scene::World::instance();
-    for (size_t i = levelEntities_.size(); i-- > 0;) {
-        const scene::Entity ent = levelEntities_[i];
+    for (size_t i = lvl_.levelEntities_.size(); i-- > 0;) {
+        const scene::Entity ent = lvl_.levelEntities_[i];
         if (!world.valid(ent)) continue;
         const Transform& xf = world.localTransform(ent);
         const f32 dx = xf.position.x - cx, dy = xf.position.y - cy;
@@ -711,7 +711,7 @@ void SandboxApp::refreshPlayerStart() {
     // Logic lives in editor::refreshPlayerStart (PlayerStartRefresh.hpp), a free function over
     // plain scene::World + std::vector<Entity> so a headless test can exercise it directly (see
     // that header for the pointer-comparison bug this used to hide).
-    playerStart_ = editor::refreshPlayerStart(scene::World::instance(), playerStart_, levelEntities_);
+    playerStart_ = editor::refreshPlayerStart(scene::World::instance(), playerStart_, lvl_.levelEntities_);
 #endif
 }
 
@@ -726,10 +726,10 @@ bool SandboxApp::playerStartTransform(Vec3& outPos, f32& outYawDeg) const {
         return true;
     }
 #endif
-    if (!levelHeader_.hasSpawn) return false;
-    outPos = Vec3{static_cast<f32>(levelHeader_.spawnX), static_cast<f32>(levelHeader_.spawnY),
-                  static_cast<f32>(levelHeader_.spawnZ)};
-    outYawDeg = static_cast<f32>(levelHeader_.spawnYaw);
+    if (!lvl_.levelHeader_.hasSpawn) return false;
+    outPos = Vec3{static_cast<f32>(lvl_.levelHeader_.spawnX), static_cast<f32>(lvl_.levelHeader_.spawnY),
+                  static_cast<f32>(lvl_.levelHeader_.spawnZ)};
+    outYawDeg = static_cast<f32>(lvl_.levelHeader_.spawnYaw);
     return true;
 }
 
@@ -768,7 +768,7 @@ scene::Entity SandboxApp::makePlayerStart(const Vec3& at, f32 yawDeg) {
         mr->aabbMin[2] = -1.0f;
         mr->aabbMax[2] = (kPlayerStartCapsuleHalfHeight * 2.0f) / kEditorCubeHalf;
     }
-    entityLabels_[static_cast<u32>(e)] = "Player Start";
+    lvl_.entityLabels_[static_cast<u32>(e)] = "Player Start";
     playerStartYaw_ = yawDeg;
     return e;
 }
@@ -828,7 +828,7 @@ void SandboxApp::spawnLightAtCamera(i32 kind) {
     if (e == scene::kInvalidEntity) { AVER_WARN("[Editor] Add: the world refused a new light"); return; }
     if (auto* c = static_cast<scene::CLight*>(world.addComponent(e, scene::kComponentLight)))
         *c = editor::makeNewLight(kind);
-    entityLabels_[static_cast<u32>(e)] = label;
+    lvl_.entityLabels_[static_cast<u32>(e)] = label;
     selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = e;
     {
         EditCmd c = describeEntity(e);
@@ -851,7 +851,7 @@ void SandboxApp::spawnDecalAtCamera() {
     const Vec3 f = camForward();
     const scene::Entity e = editor::createEditorDecal(world, at, degrees(std::atan2(f.y, f.x)));
     if (e == scene::kInvalidEntity) { AVER_WARN("[Editor] Add: the world refused a new decal"); return; }
-    entityLabels_[static_cast<u32>(e)] = "Decal";
+    lvl_.entityLabels_[static_cast<u32>(e)] = "Decal";
     selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = e;
     {
         EditCmd c = describeEntity(e);
@@ -896,8 +896,8 @@ void SandboxApp::spawnPrimitive(Engine& engine, const char* assetPath, const cha
             mr->aabbMax[0] = mr->aabbMax[1] = mr->aabbMax[2] =  1.0f;
             if (prim && prim->look) mr->material = aver_scene_material(0, prim->look);
         }
-        levelEntities_.push_back(e);
-        entityLabels_[static_cast<u32>(e)] = makeEntityLabel(prim && prim->look ? std::string(prim->look) : std::string(), kCubeAsset);
+        lvl_.levelEntities_.push_back(e);
+        lvl_.entityLabels_[static_cast<u32>(e)] = makeEntityLabel(prim && prim->look ? std::string(prim->look) : std::string(), kCubeAsset);
 #if AVER_MODULE_PHYSICS
         // Collides like a loaded placement would: a fresh entity has no entityCollide_ entry, which
         // reads as the default (true) everywhere else consulted, so it gets the same body a level
@@ -933,8 +933,8 @@ void SandboxApp::spawnPrimitive(Engine& engine, const char* assetPath, const cha
         }
         mesh = found;
 #if AVER_MODULE_SCENE
-        const auto trisIt = meshTris_.find(assetId);
-        tris = trisIt != meshTris_.end() ? trisIt->second : 0;
+        const auto trisIt = lvl_.meshTris_.find(assetId);
+        tris = trisIt != lvl_.meshTris_.end() ? trisIt->second : 0;
 #else
         // meshTris_ is filled by onMeshLoaded (SandboxAssets.cpp), which only runs under
         // AVER_MODULE_SCENE, so a scene-less build has no per-mesh count; 0 here is honest, vs.
@@ -1083,7 +1083,7 @@ bool SandboxApp::pickSurfacePoint(f32 screenX, f32 screenY, Vec3& out) {
             const auto* mr = w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer);
             if (!mr || !(mr->flags & scene::kMeshRendererVisible) || mr->mesh == 0) continue;
             if (content_.meshFor(mr->mesh) == 0) continue;
-            if (skinnedMeshIds_.count(mr->mesh) != 0 || posedHandle(ent) != 0) continue;
+            if (lvl_.skinnedMeshIds_.count(mr->mesh) != 0 || posedHandle(ent) != 0) continue;
             Vec3 lmin{mr->aabbMin[0], mr->aabbMin[1], mr->aabbMin[2]};
             Vec3 lmax{mr->aabbMax[0], mr->aabbMax[1], mr->aabbMax[2]};
             if (!(lmax.x > lmin.x && lmax.y > lmin.y && lmax.z > lmin.z)) { lmin = Vec3{-1,-1,-1}; lmax = Vec3{1,1,1}; }
@@ -1148,15 +1148,15 @@ void SandboxApp::dropGraphClass(const std::string& fullPath, f32 screenX, f32 sc
 // Body of Add > Actor From Graph: every gameplay graph under Content that declares a CLASS. The list is
 // scanned when the Add popup opens (classPickDirty_) and again on Refresh.
 void SandboxApp::drawGraphActorMenu() {
-    if (classPickDirty_) {
-        classPickList_ = editor::scanGraphClasses(project_.contentDir());
-        classPickDirty_ = false;
+    if (lvl_.classPickDirty_) {
+        lvl_.classPickList_ = editor::scanGraphClasses(project_.contentDir());
+        lvl_.classPickDirty_ = false;
     }
     const bool playing = anyPlayActive();
     const bool noLevel = !(hideEditorScene_ || !levelPath_.empty());
-    if (classPickList_.empty()) ImGui::TextDisabled("No graph under Content declares a CLASS");
+    if (lvl_.classPickList_.empty()) ImGui::TextDisabled("No graph under Content declares a CLASS");
     const editor::GraphClassDecl* chosen = nullptr;
-    for (const editor::GraphClassDecl& d : classPickList_) {
+    for (const editor::GraphClassDecl& d : lvl_.classPickList_) {
         std::string why;
         if (playing) why = "Stop Play before placing an actor";
         else if (noLevel) why = "Load a level (or hide the editor scene) first";
@@ -1182,7 +1182,7 @@ void SandboxApp::drawGraphActorMenu() {
         if (clicked) chosen = &d;
     }
     ImGui::Separator();
-    if (ImGui::MenuItem("Refresh")) classPickDirty_ = true;
+    if (ImGui::MenuItem("Refresh")) lvl_.classPickDirty_ = true;
 
     if (chosen) {
         Vec3 at = viewState_.camPos_ + camForward() * kAddDistance;
@@ -1335,8 +1335,8 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
                 world.addComponent(ent, scene::kComponentParticleEmitter))) {
             pe->effect = effectId;
         }
-        levelEntities_.push_back(ent);
-        entityLabels_[static_cast<u32>(ent)] = makeEntityLabel(std::string(), rel);
+        lvl_.levelEntities_.push_back(ent);
+        lvl_.entityLabels_[static_cast<u32>(ent)] = makeEntityLabel(std::string(), rel);
         selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = ent;
         {
             EditCmd c = describeEntity(ent);
@@ -1403,8 +1403,8 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
         mr->aabbMin[0] = mr->aabbMin[1] = mr->aabbMin[2] = -1.0f;
         mr->aabbMax[0] = mr->aabbMax[1] = mr->aabbMax[2] =  1.0f;
     }
-    levelEntities_.push_back(ent);
-    entityLabels_[static_cast<u32>(ent)] = makeEntityLabel(std::string(), rel);
+    lvl_.levelEntities_.push_back(ent);
+    lvl_.entityLabels_[static_cast<u32>(ent)] = makeEntityLabel(std::string(), rel);
 #if AVER_MODULE_PHYSICS
     // Collides like a loaded placement would (see spawnPrimitive's identical call); mesh-drop
     // branch only, the .ocparticle branch above has no CMeshRenderer. Before describeEntity() so hadBody matches what was built.
@@ -2452,12 +2452,12 @@ void SandboxApp::viewportRay(f32 screenX, f32 screenY, Vec3& ro, Vec3& rd) const
 // reaches; an id mapped to an empty PickGeometry IS the cached "unavailable, use bounds" answer,
 // warned once, not per click.
 const aver::editor::PickGeometry& SandboxApp::pickGeometryFor(u64 meshId) {
-    if (const auto it = pickGeometry_.find(meshId); it != pickGeometry_.end()) return it->second;
+    if (const auto it = lvl_.pickGeometry_.find(meshId); it != lvl_.pickGeometry_.end()) return it->second;
 
     aver::editor::PickGeometry g;   // stays empty (and is still cached) on either failure below
-    const auto pit = meshPathById_.find(meshId);
+    const auto pit = lvl_.meshPathById_.find(meshId);
     const std::string content = project_.contentDir();
-    if (pit == meshPathById_.end() || content.empty()) {
+    if (pit == lvl_.meshPathById_.end() || content.empty()) {
         AVER_WARN("[Pick] mesh id {} has no known project path; clicking it falls back to its "
                   "bounding box.", meshId);
     } else {
@@ -2472,7 +2472,7 @@ const aver::editor::PickGeometry& SandboxApp::pickGeometryFor(u64 meshId) {
                       "its bounding box.", pit->second, why);
         }
     }
-    return pickGeometry_.emplace(meshId, std::move(g)).first->second;
+    return lvl_.pickGeometry_.emplace(meshId, std::move(g)).first->second;
 }
 
 #endif
@@ -2584,7 +2584,7 @@ bool SandboxApp::pick(Engine& e, const ImGuiIO& io) {
             if (c.tBox >= bestT) break;
             // (c) A skinned/posed entity's resting geometry isn't what's drawn (vertices move in a
             // compute pass this ray never runs against), so -- like a non-resident mesh -- it keeps the bounds-only rule.
-            const bool posedOrSkinned = skinnedMeshIds_.count(c.meshId) != 0 || posedHandle(c.ent) != 0;
+            const bool posedOrSkinned = lvl_.skinnedMeshIds_.count(c.meshId) != 0 || posedHandle(c.ent) != 0;
             const aver::editor::PickGeometry* geo = posedOrSkinned ? nullptr : &pickGeometryFor(c.meshId);
             if (!geo || geo->empty()) {
                 if (c.tBox > 0.0f) { bestT = c.tBox; bestEnt = c.ent; best = -1; }
@@ -2640,7 +2640,7 @@ bool SandboxApp::pick(Engine& e, const ImGuiIO& io) {
         if (!noEditorChrome_ && !anyPlayActive()) {
             scene::World& cw = scene::World::instance();
             constexpr f32 h = editor::kClassMarkerHalf;
-            for (const ClassInstance& ci : levelClassInstances_) {
+            for (const ClassInstance& ci : lvl_.levelClassInstances_) {
                 if (ci.removed || ci.entity == 0) continue;
                 const scene::Entity root = static_cast<scene::Entity>(ci.entity);
                 if (!cw.valid(root) || cw.destroyPending(root)) continue;
@@ -2818,7 +2818,7 @@ void SandboxApp::snapSelectionToFloor() {
                       [](const FloorCand& a, const FloorCand& b) { return a.tBox < b.tBox; });
             for (const FloorCand& c : cands) {
                 if (c.tBox >= bestT) break;
-                const bool posedOrSkinned = skinnedMeshIds_.count(c.meshId) != 0 || posedHandle(c.ent) != 0;
+                const bool posedOrSkinned = lvl_.skinnedMeshIds_.count(c.meshId) != 0 || posedHandle(c.ent) != 0;
                 const aver::editor::PickGeometry* geo = posedOrSkinned ? nullptr : &pickGeometryFor(c.meshId);
                 if (!geo || geo->empty()) {
                     if (c.tBox > 0.0f) { bestT = c.tBox; hit = true; hitZ = ro.z - c.tBox; }
@@ -3518,7 +3518,7 @@ std::string SandboxApp::entityLabelBase(const std::string& surface, const std::s
 
 std::string SandboxApp::makeEntityLabel(const std::string& surface, const std::string& asset) {
     const std::string base = entityLabelBase(surface, asset);
-    return base + " " + std::to_string(++labelCounts_[base]);
+    return base + " " + std::to_string(++lvl_.labelCounts_[base]);
 }
 
 // True only when terrain editing is actually possible right now: mode is Landscape AND a section
@@ -3567,7 +3567,7 @@ bool SandboxApp::editorModeAvailable(EditorMode m, const char** whyNot) const {
             return true;
         case EditorMode::Animate:
 #if AVER_MODULE_SCENE
-            if (levelEntities_.empty() && levelPath_.empty()) return no("Open or populate a level first.");
+            if (lvl_.levelEntities_.empty() && levelPath_.empty()) return no("Open or populate a level first.");
             return true;
 #else
             return no("This build has the scene module switched off (AVER_MODULE_SCENE).");

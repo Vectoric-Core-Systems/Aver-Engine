@@ -1180,11 +1180,11 @@ void SandboxApp::drawSaveLevelAsPrompt() {
         // Copy gets a new ID; zero it so the writer recomputes from the new name.
         const bool renamed = stem != levelName_;
         const std::string prevName = levelName_;
-        const u64 prevId = levelHeader_.contentId, prevLegacyId = legacyMapHeader_.contentId;
+        const u64 prevId = lvl_.levelHeader_.contentId, prevLegacyId = lvl_.legacyMapHeader_.contentId;
         if (renamed) {
             levelName_ = stem;
-            levelHeader_.contentId = 0;
-            legacyMapHeader_.contentId = 0;
+            lvl_.levelHeader_.contentId = 0;
+            lvl_.legacyMapHeader_.contentId = 0;
         }
         if (saveLevel(target.string())) {
 #if AVER_MODULE_PHYSICS
@@ -1208,8 +1208,8 @@ void SandboxApp::drawSaveLevelAsPrompt() {
         } else {
             if (renamed) {
                 levelName_ = prevName;
-                levelHeader_.contentId = prevId;
-                legacyMapHeader_.contentId = prevLegacyId;
+                lvl_.levelHeader_.contentId = prevId;
+                lvl_.legacyMapHeader_.contentId = prevLegacyId;
             }
             panels_.saveLevelAsError_ = "Could not write " + target.filename().string() + ".";
         }
@@ -2269,7 +2269,7 @@ void SandboxApp::drawMainToolbar(Engine& e, const ImVec2& wpos, const ImVec2& ws
     if (dropButton(ICON_ADD " Add")) {
         ImGui::OpenPopup("addActor");
 #if AVER_MODULE_FRAMEWORK
-        classPickDirty_ = true;   // Actor From Graph rescans Content each time the popup opens
+        lvl_.classPickDirty_ = true;   // Actor From Graph rescans Content each time the popup opens
 #endif
     }
     uiReg_.track("toolbar.add");
@@ -2302,7 +2302,7 @@ void SandboxApp::drawMainToolbar(Engine& e, const ImVec2& wpos, const ImVec2& ws
 #endif
 #endif
         if (ImGui::Selectable(ICON_POST_PROCESS " Post Process Volume")) {
-            postVolumeTools_.addAtCamera(levelHeader_.postVolumes, viewPos());
+            postVolumeTools_.addAtCamera(lvl_.levelHeader_.postVolumes, viewPos());
             selectionUi_.sel_ = SelectionState::kSelPostVolume; selectionUi_.selEntity_ = kInvalidId;
             markLevelUnsaved();
         }
@@ -2505,8 +2505,8 @@ bool SandboxApp::applySelectRequest() {
             const scene::Entity ent = sw.at(i);
             if (!sw.valid(ent) || sw.destroyPending(ent)) continue;
             const std::string nm = sw.name(ent);
-            const auto lit = entityLabels_.find(static_cast<u32>(ent));
-            const std::string shown = lit != entityLabels_.end() ? lit->second : nm;
+            const auto lit = lvl_.entityLabels_.find(static_cast<u32>(ent));
+            const std::string shown = lit != lvl_.entityLabels_.end() ? lit->second : nm;
             if (shown.find(want) != std::string::npos || nm.find(want) != std::string::npos)
                 found = ent;
         }

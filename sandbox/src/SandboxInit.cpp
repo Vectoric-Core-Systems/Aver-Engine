@@ -244,7 +244,7 @@ void SandboxApp::installAssetEditorHooks() {
         editor::InstanceSetEditorHooks hooks;
         hooks.levelReferences = [this](const std::string& abs) {
             std::error_code ec;
-            for (const std::string& f : levelHeader_.foliageFiles)
+            for (const std::string& f : lvl_.levelHeader_.foliageFiles)
                 if (std::filesystem::equivalent(std::filesystem::path(project_.contentDir()) / f, abs, ec) && !ec) return true;
             return false;
         };
@@ -968,10 +968,10 @@ void SandboxApp::initVoxiBackend(Engine& e) {
         if (voxiRenderer_.init(*e.device())) {
             e.device()->addRenderFeature(&voxiRenderer_);
             rset_.voxiAttached_ = true;
-            if (foliagePending_) {
-                foliagePending_ = false;
-                levelFoliage_.load(foliagePendingWorld_, content_, e.device(), &voxiRenderer_, project_.contentDir(),
-                                   {}, viewState_.camPos_, &foliagePendingTables_);
+            if (lvl_.foliagePending_) {
+                lvl_.foliagePending_ = false;
+                levelFoliage_.load(lvl_.foliagePendingWorld_, content_, e.device(), &voxiRenderer_, project_.contentDir(),
+                                   {}, viewState_.camPos_, &lvl_.foliagePendingTables_);
                 if (!levelFoliage_.result().error.empty()) AVER_WARN("[Foliage] {}", levelFoliage_.result().error);
             }
             if (autosave_.projectRenderPending_) applyProjectRenderSettings();
@@ -1342,7 +1342,7 @@ void SandboxApp::setInitialToolAndCamera() {
     selectionUi_.sel_ = 1;
     bool framedByLevel = false;
 #if AVER_MODULE_SCENE
-    framedByLevel = !levelEntities_.empty();
+    framedByLevel = !lvl_.levelEntities_.empty();
 #endif
     // Restored camera counts as framed (level can have CAMERA record with no placements).
     if (levelCameraRestored_) framedByLevel = true;

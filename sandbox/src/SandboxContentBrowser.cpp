@@ -430,9 +430,9 @@ void SandboxApp::cbCreateFoliageType() {
     // (not "whichever the unordered_map iterates first"); the trade is the chosen mesh may not be
     // what the author meant to scatter, acceptable since it's a starting point -- meshPath can be
     // repointed from the tab this still opens.
-    if (!meshPathById_.empty()) {
+    if (!lvl_.meshPathById_.empty()) {
         std::string best;
-        for (const auto& kv : meshPathById_)
+        for (const auto& kv : lvl_.meshPathById_)
             if (best.empty() || kv.second < best) best = kv.second;
         starter.meshPath = best;
     }
@@ -2178,14 +2178,14 @@ void SandboxApp::drawFolderTree(const std::string& dir) {
 // assigned, so anything unloaded reads as static rather than guessing.
 bool SandboxApp::isSkinnedMeshEntry(const DirEntry& e) const {
 #if AVER_MODULE_SCENE
-    if (e.isDir || e.kindExt != ".ocmesh" || skinnedMeshIds_.empty()) return false;
+    if (e.isDir || e.kindExt != ".ocmesh" || lvl_.skinnedMeshIds_.empty()) return false;
     const std::string content = project_.contentDir();
     if (content.empty()) return false;
     std::error_code ec;
     std::string rel = std::filesystem::relative(e.path, content, ec).string();
     if (ec || rel.empty()) return false;
     for (char& c : rel) if (c == '\\') c = '/';
-    return skinnedMeshIds_.count(fnv1a64(std::string_view(rel))) != 0;
+    return lvl_.skinnedMeshIds_.count(fnv1a64(std::string_view(rel))) != 0;
 #else
     // skinnedMeshIds_ needs AVER_MODULE_SCENE (filled by loadProjectMeshes as it places meshes),
     // so with the module off nothing was ever recorded; every entry reads as a plain static mesh.

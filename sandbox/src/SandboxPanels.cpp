@@ -22,8 +22,8 @@ namespace aver {
 void SandboxApp::beginOutlinerRename(scene::Entity e) {
     selectionUi_.outlinerRenaming_ = e;
     selectionUi_.outlinerRenameFocus_ = true;
-    const auto it = entityLabels_.find(static_cast<u32>(e));
-    const std::string cur = it != entityLabels_.end() ? it->second
+    const auto it = lvl_.entityLabels_.find(static_cast<u32>(e));
+    const std::string cur = it != lvl_.entityLabels_.end() ? it->second
                                                       : scene::World::instance().name(e);
     std::snprintf(selectionUi_.outlinerRenameBuf_, sizeof selectionUi_.outlinerRenameBuf_, "%s", cur.c_str());
 }
@@ -121,12 +121,12 @@ bool SandboxApp::assignMeshId(scene::Entity ent, u64 meshId) {
     // (same fix EditorEntitySnapshot applies when restoring a mesh renderer).
     mr->dirty = 1;
     markLevelUnsaved();
-    const auto it = meshPathById_.find(meshId);
-    drawerUi_.cbStatus_ = "Assigned " + (it == meshPathById_.end()
+    const auto it = lvl_.meshPathById_.find(meshId);
+    drawerUi_.cbStatus_ = "Assigned " + (it == lvl_.meshPathById_.end()
                                    ? std::string("mesh")
                                    : std::filesystem::path(it->second).filename().string());
     AVER_INFO("[Editor] entity {} mesh set to 0x{:016X} ('{}')", ent, meshId,
-              it == meshPathById_.end() ? std::string("?") : it->second);
+              it == lvl_.meshPathById_.end() ? std::string("?") : it->second);
     return true;
 }
 
@@ -566,8 +566,8 @@ editor::SequenceHost SandboxApp::sequenceHost() {
     editor::SequenceHost h;
     h.selection = selectedEntities();
     h.label = [this](scene::Entity ent) {
-        const auto it = entityLabels_.find(static_cast<u32>(ent));
-        return it != entityLabels_.end() ? it->second : scene::World::instance().name(ent);
+        const auto it = lvl_.entityLabels_.find(static_cast<u32>(ent));
+        return it != lvl_.entityLabels_.end() ? it->second : scene::World::instance().name(ent);
     };
     h.editorCamera.position = viewState_.camPos_;
     h.editorCamera.yaw = viewState_.yaw_;
@@ -586,13 +586,13 @@ editor::SequenceHost SandboxApp::sequenceHost() {
     // class actor; the scene's own entity name is the fallback.
     h.findByName = [this](const std::string& name) -> scene::Entity {
         scene::World& w = scene::World::instance();
-        for (const auto& kv : entityLabels_)
+        for (const auto& kv : lvl_.entityLabels_)
             if (kv.second == name && w.valid(static_cast<scene::Entity>(kv.first))) return static_cast<scene::Entity>(kv.first);
         return w.find(name);
     };
     h.nameCount = [this](const std::string& name) {
         int n = 0;
-        for (const auto& kv : entityLabels_) n += kv.second == name ? 1 : 0;
+        for (const auto& kv : lvl_.entityLabels_) n += kv.second == name ? 1 : 0;
         return n;
     };
     h.bindName = [this](scene::Entity ent) { return sequenceBindName(ent); };
@@ -660,7 +660,7 @@ void SandboxApp::buildWaterPanel(Engine& e) {
     // water_.applyLevel on an undeclared member.
 #if AVER_WITH_IMGUI && AVER_MODULE_FLUIDS
     ImGui::TextDisabled("WATER");
-    if (levelHeader_.waters.empty()) {
+    if (lvl_.levelHeader_.waters.empty()) {
         ImGui::TextDisabled("This level has no water.");
         if (ImGui::Button("Add Water", ImVec2(-1, 0))) {
             fmt::OcWaterPlacement wp;
@@ -669,8 +669,8 @@ void SandboxApp::buildWaterPanel(Engine& e) {
             // Rounded so the field shows a number somebody would actually have typed.
             wp.levelCm = std::floor(viewState_.camPos_.z / 10.0f) * 10.0f - 100.0;
             wp.infinite = true;
-            levelHeader_.waters.assign(1, std::move(wp));
-            water_.applyLevel(*e.device(), levelHeader_);
+            lvl_.levelHeader_.waters.assign(1, std::move(wp));
+            water_.applyLevel(*e.device(), lvl_.levelHeader_);
             setUpgradeStatus("Added water");
         }
         uiReg_.track("water.add");
@@ -678,7 +678,7 @@ void SandboxApp::buildWaterPanel(Engine& e) {
         return;
     }
 
-    fmt::OcWaterPlacement& wp = levelHeader_.waters.front();
+    fmt::OcWaterPlacement& wp = lvl_.levelHeader_.waters.front();
     bool changed = false;
 
     {
@@ -727,8 +727,8 @@ void SandboxApp::buildWaterPanel(Engine& e) {
         ImGui::SetTooltip("A simulated volume needs bounds. Turn Infinite off first.");
 
     if (ImGui::Button("Remove Water", ImVec2(-1, 0))) {
-        levelHeader_.waters.clear();
-        levelHeader_.waves.clear();   // a WAVE names a WATER by name; orphaned it means nothing
+        lvl_.levelHeader_.waters.clear();
+        lvl_.levelHeader_.waves.clear();   // a WAVE names a WATER by name; orphaned it means nothing
         changed = true;
         setUpgradeStatus("Removed water");
     }
@@ -736,7 +736,7 @@ void SandboxApp::buildWaterPanel(Engine& e) {
 
     // RE-APPLIED ON EVERY EDIT, so the viewport agrees with the numbers. GameWater::applyLevel is
     // idempotent for the analytic path -- it rebuilds the surface from the record it is handed.
-    if (changed) water_.applyLevel(*e.device(), levelHeader_);
+    if (changed) water_.applyLevel(*e.device(), lvl_.levelHeader_);
     ImGui::Separator();
 #else
     (void)e;
@@ -1017,9 +1017,9 @@ void SandboxApp::buildPanels(Engine& e) {
 // The name a row and a drag preview show for an entity.
 std::string SandboxApp::outlinerLabelFor(scene::Entity e) const {
     const scene::World& w = scene::World::instance();
-    const auto lit = entityLabels_.find(static_cast<u32>(e));
+    const auto lit = lvl_.entityLabels_.find(static_cast<u32>(e));
     // [wave3/level-instances] an instance being edited in place says so in the outliner
-    if (lit != entityLabels_.end())
+    if (lit != lvl_.entityLabels_.end())
         return level_.instances().editing(e) ? lit->second + " [editing]" : lit->second;
     const std::string nm = w.name(e);
     return nm.empty() ? ("Entity " + std::to_string((u32)e)) : nm;
@@ -1289,9 +1289,9 @@ void SandboxApp::drawOutlinerRow(const OutlinerRow& row,
         // [wave3/level-instances begin] the selection (and what is under it) becomes a level, replaced by an instance of it
         if (ImGui::MenuItem("Create Level Instance...")) {
             levelInstanceModel_.setContentDir(project_.contentDir());
-            const auto lbl = entityLabels_.find(static_cast<u32>(row.ent));
+            const auto lbl = lvl_.entityLabels_.find(static_cast<u32>(row.ent));
             editor::levelInstanceCreateDialogOpen(levelInstanceDlg_, selectedEntities(),
-                                                  lbl != entityLabels_.end() ? lbl->second : std::string("Level"));
+                                                  lbl != lvl_.entityLabels_.end() ? lbl->second : std::string("Level"));
         }
         // [wave3/level-instances end]
         ImGui::EndPopup();
@@ -1459,10 +1459,10 @@ u64 SandboxApp::outlinerSignature() const {
     mix(selectionUi_.outlinerTypeMask_);
     mix(selectionUi_.outlinerFolderRev_);
     mix(static_cast<u64>(droneEntity_));
-    mix(static_cast<u64>(entityLabels_.size()));
-    mix(static_cast<u64>(levelEntities_.size()));
-    mix(levelEntities_.empty() ? 0u : static_cast<u64>(levelEntities_.front()));
-    mix(levelEntities_.empty() ? 0u : static_cast<u64>(levelEntities_.back()));
+    mix(static_cast<u64>(lvl_.entityLabels_.size()));
+    mix(static_cast<u64>(lvl_.levelEntities_.size()));
+    mix(lvl_.levelEntities_.empty() ? 0u : static_cast<u64>(lvl_.levelEntities_.front()));
+    mix(lvl_.levelEntities_.empty() ? 0u : static_cast<u64>(lvl_.levelEntities_.back()));
     return h;
 }
 
@@ -1504,8 +1504,8 @@ u64 SandboxApp::outlinerSlotSignature(u32 slot) const {
     if (!hasMesh && *nm == '\0') mix(static_cast<u64>(w.childCount(ent)));
     // The row's label, when entityLabels_ overrides the name: looked up per slot rather than by
     // walking the whole map, since a slice only needs the labels of ITS entities.
-    const auto lit = entityLabels_.find(static_cast<u32>(ent));
-    mix(lit != entityLabels_.end() ? 1u + fnv1a64(lit->second) : 0u);
+    const auto lit = lvl_.entityLabels_.find(static_cast<u32>(ent));
+    mix(lit != lvl_.entityLabels_.end() ? 1u + fnv1a64(lit->second) : 0u);
     return h;
 }
 
@@ -1986,18 +1986,18 @@ void SandboxApp::buildOutlinerPanel() {
         ImGui::TextDisabled("  Foliage  (%u type%s, %u instance%s)", fs.prototypes,
                              fs.prototypes == 1 ? "" : "s", fs.instances, fs.instances == 1 ? "" : "s");
         if (ImGui::IsItemHovered()) {
-            const std::string files = levelHeader_.foliageFiles.empty()
+            const std::string files = lvl_.levelHeader_.foliageFiles.empty()
                 ? std::string("an unknown file")
-                : levelHeader_.foliageFiles.size() == 1
-                    ? levelHeader_.foliageFiles.front()
-                    : std::to_string(levelHeader_.foliageFiles.size()) + " files";
+                : lvl_.levelHeader_.foliageFiles.size() == 1
+                    ? lvl_.levelHeader_.foliageFiles.front()
+                    : std::to_string(lvl_.levelHeader_.foliageFiles.size()) + " files";
             ImGui::SetTooltip("Ray-traced instanced foliage from %s -- static, not individually "
                               "selectable or editable per instance.", files.c_str());
         }
         // Each baked instance table opens in the instance-set editor (the Content Browser's
         // double-click goes to the same tab).
-        for (usize fi = 0; fi < levelHeader_.foliageFiles.size(); ++fi) {
-            const std::string& rel = levelHeader_.foliageFiles[fi];
+        for (usize fi = 0; fi < lvl_.levelHeader_.foliageFiles.size(); ++fi) {
+            const std::string& rel = lvl_.levelHeader_.foliageFiles[fi];
             ImGui::PushID(static_cast<int>(fi));
             ImGui::TextDisabled("    %s", std::filesystem::path(rel).filename().string().c_str());
             ImGui::SameLine();
@@ -2019,7 +2019,7 @@ void SandboxApp::buildOutlinerPanel() {
     uiReg_.track("outliner.postProcess");
     {
         char pvLabel[64];
-        std::snprintf(pvLabel, sizeof pvLabel, ICON_POST_PROCESS " Post Process Volumes (%zu)", levelHeader_.postVolumes.size());
+        std::snprintf(pvLabel, sizeof pvLabel, ICON_POST_PROCESS " Post Process Volumes (%zu)", lvl_.levelHeader_.postVolumes.size());
         if (ImGui::Selectable(pvLabel, selectionUi_.sel_==SelectionState::kSelPostVolume)) { selectionUi_.sel_=SelectionState::kSelPostVolume; selectionUi_.selEntity_=kInvalidId; }
         uiReg_.track("outliner.postVolumes");
     }
@@ -2029,11 +2029,11 @@ void SandboxApp::buildOutlinerPanel() {
 #if AVER_MODULE_SCENE
 // Details header for a scene entity: the editable name, its id, and for a graph-class actor the class and its editable fields.
 void SandboxApp::drawEntityNameAndClass(const std::string& nm) {
-    const auto lit = entityLabels_.find(static_cast<u32>(selectionUi_.selEntity_));
+    const auto lit = lvl_.entityLabels_.find(static_cast<u32>(selectionUi_.selEntity_));
     {
         char nameBuf[128];
         std::snprintf(nameBuf, sizeof nameBuf, "%s",
-                      lit != entityLabels_.end() ? lit->second.c_str()
+                      lit != lvl_.entityLabels_.end() ? lit->second.c_str()
                                                  : (nm.empty() ? "" : nm.c_str()));
         ImGui::SetNextItemWidth(-1.0f);
         const bool entered = ImGui::InputTextWithHint(
@@ -2047,8 +2047,8 @@ void SandboxApp::drawEntityNameAndClass(const std::string& nm) {
 #if AVER_MODULE_FRAMEWORK
     // A graph-class actor's root: which class it is, and the way to its graph.
     if (const int classIdx = classSlotOfEntity(selectionUi_.selEntity_); classIdx >= 0) {
-        const usize slot = levelClassInstances_[static_cast<usize>(classIdx)].placement;
-        const std::string cls = slot < classAuthored_.size() ? classAuthored_[slot].className : std::string();
+        const usize slot = lvl_.levelClassInstances_[static_cast<usize>(classIdx)].placement;
+        const std::string cls = slot < lvl_.classAuthored_.size() ? lvl_.classAuthored_[slot].className : std::string();
         ImGui::TextDisabled("Graph class: %s", cls.c_str());
         ImGui::SameLine();
         if (ImGui::SmallButton("Open Graph")) {
@@ -2080,8 +2080,8 @@ void SandboxApp::drawEntityNameAndClass(const std::string& nm) {
                     const std::string id = col[0] + "##editable";
                     if (ImGui::InputText(id.c_str(), buf, sizeof buf, ImGuiInputTextFlags_EnterReturnsTrue) ||
                         ImGui::IsItemDeactivatedAfterEdit()) {
-                        if (scripts_.editableSet(static_cast<i32>(selectionUi_.selEntity_), col[0], buf) && slot < classAuthored_.size())
-                            game::capturePlacementProps(static_cast<i32>(selectionUi_.selEntity_), classAuthored_[slot]);
+                        if (scripts_.editableSet(static_cast<i32>(selectionUi_.selEntity_), col[0], buf) && slot < lvl_.classAuthored_.size())
+                            game::capturePlacementProps(static_cast<i32>(selectionUi_.selEntity_), lvl_.classAuthored_[slot]);
                     }
                     ImGui::SameLine();
                     ImGui::TextDisabled("%s", col[1].c_str());
@@ -2098,14 +2098,14 @@ void SandboxApp::drawEntityNameAndClass(const std::string& nm) {
 #if AVER_MODULE_SCENE
 // Prefab and level-instance controls for a single selected entity.
 void SandboxApp::drawEntityPrefabSection(const std::string& nm, const std::vector<scene::Entity>& multiSelected) {
-    const auto lit = entityLabels_.find(static_cast<u32>(selectionUi_.selEntity_));
+    const auto lit = lvl_.entityLabels_.find(static_cast<u32>(selectionUi_.selEntity_));
     // PREFAB: what this is an instance of, its overrides, Apply / Revert / Unpack; or, for an ordinary entity,
     // the way to turn it (and everything under it) into a prefab.
     if (multiSelected.size() <= 1) {
         editor::prefabDetailsDraw(prefabModel_, selectionUi_.selEntity_, prefabUiCallbacks());
         if (!prefabSys_.isLinked(selectionUi_.selEntity_) && ImGui::SmallButton("Create Prefab...")) {
             prefabModel_.setContentDir(project_.contentDir());
-            editor::prefabCreateDialogOpen(prefabDlg_, selectionUi_.selEntity_, lit != entityLabels_.end() ? lit->second : nm, "Prefabs");
+            editor::prefabCreateDialogOpen(prefabDlg_, selectionUi_.selEntity_, lit != lvl_.entityLabels_.end() ? lit->second : nm, "Prefabs");
         }
         uiReg_.track("details.createPrefab");
         // LEVEL INSTANCE: what this is an instance of, edit in place, packed, streaming, overrides.
@@ -2280,8 +2280,8 @@ void SandboxApp::drawMeshVisibleCollides(scene::World& w, const std::vector<scen
     // spot; on fits a fresh one -- both inside setEntityCollide.
     {
         const auto collides = [&](scene::Entity ent) {
-            const auto it = entityCollide_.find(static_cast<u32>(ent));
-            return it == entityCollide_.end() ? true : it->second;   // absent = the default
+            const auto it = lvl_.entityCollide_.find(static_cast<u32>(ent));
+            return it == lvl_.entityCollide_.end() ? true : it->second;   // absent = the default
         };
         // Disabled for an entity the level does not own (a class instance, a preview): saveLevel
         // writes nocollide per level placement only, so the edit would dirty the level and be lost.
@@ -2325,7 +2325,7 @@ void SandboxApp::drawMeshAnimation(scene::World& w, const std::vector<scene::Ent
     // animation live: it has already captured each entity's base.
     if (!w.hasComponent(selectionUi_.selEntity_, scene::kComponentSkeletalMesh)) {
         ImGui::SeparatorText("Animation");
-        if (levelIsLegacyOcmap_) {
+        if (lvl_.levelIsLegacyOcmap_) {
             ImGui::TextDisabled("The legacy .ocmap format cannot store an animation.");
         } else {
             std::vector<scene::Entity> targets;   // the selected meshes this section applies to
@@ -2500,8 +2500,8 @@ void SandboxApp::drawMeshAssetPicker(scene::CMeshRenderer* mr, const std::vector
     // Now reassignable: previously just a printed hex id, with no picker and not even
     // a drop target -- the only mesh drag-drop in the editor lands on the 3D viewport
     // and spawns a NEW entity, a different verb.
-    const auto meshIt = meshPathById_.find(mr->mesh);
-    ImGui::TextDisabled("mesh  %s", meshIt == meshPathById_.end()
+    const auto meshIt = lvl_.meshPathById_.find(mr->mesh);
+    ImGui::TextDisabled("mesh  %s", meshIt == lvl_.meshPathById_.end()
                                         ? "(unloaded)" : meshIt->second.c_str());
     if (ImGui::Button("Change Mesh...")) ImGui::OpenPopup("##pickMesh");
     uiReg_.track("details.mesh.pick");
@@ -2516,13 +2516,13 @@ void SandboxApp::drawMeshAssetPicker(scene::CMeshRenderer* mr, const std::vector
         // the entity if picked.
         PickerCands& pc = drawerUi_.pickMeshCands_;
         const int frame = ImGui::GetFrameCount();
-        if (pc.lastFrame < frame - 1 || pc.stamp != meshPathById_.size()) {
+        if (pc.lastFrame < frame - 1 || pc.stamp != lvl_.meshPathById_.size()) {
             pc.list.clear();
-            pc.list.reserve(meshPathById_.size());
-            for (const auto& kv : meshPathById_) pc.list.push_back({kv.second, kv.first});
+            pc.list.reserve(lvl_.meshPathById_.size());
+            for (const auto& kv : lvl_.meshPathById_) pc.list.push_back({kv.second, kv.first});
             std::sort(pc.list.begin(), pc.list.end(),
                       [](const AssetChoice& a, const AssetChoice& b) { return a.label < b.label; });
-            pc.stamp = meshPathById_.size();
+            pc.stamp = lvl_.meshPathById_.size();
         }
         pc.lastFrame = frame;
         u64 picked = 0;
@@ -2539,9 +2539,9 @@ void SandboxApp::drawMeshAssetPicker(scene::CMeshRenderer* mr, const std::vector
                 for (const scene::Entity ent : multiSelected)
                     if (assignMeshId(ent, picked)) ++n;
                 if (n > 1) {
-                    const auto mit = meshPathById_.find(picked);
+                    const auto mit = lvl_.meshPathById_.find(picked);
                     drawerUi_.cbStatus_ = "Assigned " +
-                        (mit == meshPathById_.end()
+                        (mit == lvl_.meshPathById_.end()
                              ? std::string("mesh")
                              : std::filesystem::path(mit->second).filename().string()) +
                         " to " + std::to_string(n) + " entities";
@@ -3248,7 +3248,7 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
     } else if (selectionUi_.sel_==-4){
         drawPostProcessDetails(e);
     } else if (selectionUi_.sel_==SelectionState::kSelPostVolume){
-        if (postVolumeTools_.drawDetails(e.device(), project_.contentDir(), levelHeader_.postVolumes, rset_.post_, viewPos()))
+        if (postVolumeTools_.drawDetails(e.device(), project_.contentDir(), lvl_.levelHeader_.postVolumes, rset_.post_, viewPos()))
             markLevelUnsaved();
     } else ImGui::TextDisabled("Select an actor in the World Outliner");
     editor::dt::end();

@@ -125,8 +125,8 @@ void SandboxApp::handlePaint(Engine& e, const ImGuiIO& io, bool overScene, f32 m
 void SandboxApp::buildLandscapePaintTab(Engine& e) {
 #if AVER_MODULE_PBR
     pbr::MaterialLibrary& lib = pbr::MaterialLibrary::get();
-    if (levelHeader_.landscapes.empty()) recordLandscapeInLevel();
-    const std::string current = levelHeader_.landscapes.empty() ? std::string() : levelHeader_.landscapes.front().material;
+    if (lvl_.levelHeader_.landscapes.empty()) recordLandscapeInLevel();
+    const std::string current = lvl_.levelHeader_.landscapes.empty() ? std::string() : lvl_.levelHeader_.landscapes.front().material;
 
     ImGui::TextDisabled("TERRAIN MATERIAL");
     ImGui::SetNextItemWidth(-1.0f);
@@ -134,9 +134,9 @@ void SandboxApp::buildLandscapePaintTab(Engine& e) {
         for (u32 i = 0; i < lib.count(); ++i) {
             const pbr::MaterialDesc* d = lib.desc(lib.at(i));
             if (!d || !d->terrain.enabled() || d->name.find('#') != std::string::npos) continue;   // '#': a derived copy
-            if (ImGui::Selectable(d->name.c_str(), d->name == current) && !levelHeader_.landscapes.empty() &&
+            if (ImGui::Selectable(d->name.c_str(), d->name == current) && !lvl_.levelHeader_.landscapes.empty() &&
                 !landscape_.weightStrokeActive()) {
-                levelHeader_.landscapes.front().material = d->name;
+                lvl_.levelHeader_.landscapes.front().material = d->name;
                 landscape_.setSurfaceMaterial(d->name);
                 markLevelUnsaved();
             }
@@ -305,8 +305,8 @@ void SandboxApp::scatterFoliageFromLayer(Engine& e) {
         levelFoliage_.setExtraTable(fnv1a64(std::string_view(req.ocinstRel)), std::move(out.table), std::move(mats));
     }
 #  endif
-    if (std::find(levelHeader_.foliageFiles.begin(), levelHeader_.foliageFiles.end(), req.ocinstRel) == levelHeader_.foliageFiles.end())
-        levelHeader_.foliageFiles.push_back(req.ocinstRel);
+    if (std::find(lvl_.levelHeader_.foliageFiles.begin(), lvl_.levelHeader_.foliageFiles.end(), req.ocinstRel) == lvl_.levelHeader_.foliageFiles.end())
+        lvl_.levelHeader_.foliageFiles.push_back(req.ocinstRel);
     setUpgradeStatus("Generated " + std::to_string(out.instances) + " instance(s) of " + std::filesystem::path(rel).stem().string() +
                      " on " + l->name + (out.kept ? " (kept " + std::to_string(out.kept) + " manual edit(s))" : std::string()));
 }

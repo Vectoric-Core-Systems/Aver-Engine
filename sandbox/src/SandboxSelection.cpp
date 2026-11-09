@@ -338,8 +338,8 @@ void SandboxApp::applyMaterialDesc(pbr::MaterialHandle h, const pbr::MaterialDes
 void SandboxApp::applyEntityLabel(EditId id, const std::string& label) {
     const scene::Entity e = entityForEdit(id);
     if (e == scene::kInvalidEntity || !scene::World::instance().valid(e)) return;
-    if (label.empty()) entityLabels_.erase(static_cast<u32>(e));
-    else               entityLabels_[static_cast<u32>(e)] = label;
+    if (label.empty()) lvl_.entityLabels_.erase(static_cast<u32>(e));
+    else               lvl_.entityLabels_[static_cast<u32>(e)] = label;
 }
 
 // Renames the selected entity, as one undoable command. No-ops when the name did not change, so
@@ -347,7 +347,7 @@ void SandboxApp::applyEntityLabel(EditId id, const std::string& label) {
 void SandboxApp::renameEntity(scene::Entity e, const std::string& to) {
     if (e == scene::kInvalidEntity || !scene::World::instance().valid(e)) return;
     std::string from;
-    if (const auto it = entityLabels_.find(static_cast<u32>(e)); it != entityLabels_.end())
+    if (const auto it = lvl_.entityLabels_.find(static_cast<u32>(e)); it != lvl_.entityLabels_.end())
         from = it->second;
     if (from == to) return;
     EditCmd c;
@@ -402,7 +402,7 @@ void SandboxApp::applyVisibilityTo(const EditCmd& c, bool undoing) {
 // carries its own flag, and a body is fitted per entity in world space.
 void SandboxApp::setEntityCollide(scene::Entity e, bool collide) {
     if (!scene::World::instance().valid(e)) return;
-    entityCollide_[static_cast<u32>(e)] = collide;
+    lvl_.entityCollide_[static_cast<u32>(e)] = collide;
     level_.instances().setMemberCollide(e, collide);   // [wave3/level-instances] feeds an instance's override diff
 #if AVER_MODULE_PHYSICS
     rebuildEntityBody(e);
@@ -432,10 +432,10 @@ void SandboxApp::writeEntityAnim(scene::Entity e, const EntityAnim& a) {
     }
     const u32 key = static_cast<u32>(e);
     if (a.clip.empty()) {
-        if (entityAnim_.erase(key)) w.removeComponent(e, scene::kComponentAnimator);
+        if (lvl_.entityAnim_.erase(key)) w.removeComponent(e, scene::kComponentAnimator);
         return;
     }
-    entityAnim_[key] = a;
+    lvl_.entityAnim_[key] = a;
     auto* an = w.component<scene::CAnimator>(e, scene::kComponentAnimator);
     if (!an) an = static_cast<scene::CAnimator*>(w.addComponent(e, scene::kComponentAnimator));
     if (!an) return;
@@ -453,11 +453,11 @@ void SandboxApp::writeEntityAnim(scene::Entity e, const EntityAnim& a) {
 void SandboxApp::applyEntityAnim(scene::Entity e, const EntityAnim& a) {
     if (!scene::World::instance().valid(e)) return;
     const u32 key = static_cast<u32>(e);
-    const bool was = entityAnim_.find(key) != entityAnim_.end();
+    const bool was = lvl_.entityAnim_.find(key) != lvl_.entityAnim_.end();
     writeEntityAnim(e, a);
 #if AVER_MODULE_PHYSICS
-    const bool now = entityAnim_.find(key) != entityAnim_.end();
-    if (was != now && entityBodies_.find(key) != entityBodies_.end()) rebuildEntityBody(e);
+    const bool now = lvl_.entityAnim_.find(key) != lvl_.entityAnim_.end();
+    if (was != now && lvl_.entityBodies_.find(key) != lvl_.entityBodies_.end()) rebuildEntityBody(e);
 #else
     (void)was;
 #endif
@@ -481,8 +481,8 @@ void SandboxApp::setEntityAnim(scene::Entity e, const EntityAnim& a) {
 }
 
 const EntityAnim* SandboxApp::entityAnim(scene::Entity e) const {
-    const auto it = entityAnim_.find(static_cast<u32>(e));
-    return it == entityAnim_.end() ? nullptr : &it->second;
+    const auto it = lvl_.entityAnim_.find(static_cast<u32>(e));
+    return it == lvl_.entityAnim_.end() ? nullptr : &it->second;
 }
 
 // Removes one component from the selected entity as one undoable command. Mirrors renameEntity's
@@ -524,9 +524,9 @@ void SandboxApp::installPrefabHooks() {
     prefab::Hooks h;
     h.created = [this](scene::Entity e) {
         scene::World& w = scene::World::instance();
-        if (std::find(levelEntities_.begin(), levelEntities_.end(), e) == levelEntities_.end())
-            levelEntities_.push_back(e);
-        entityLabels_[static_cast<u32>(e)] = w.name(e);
+        if (std::find(lvl_.levelEntities_.begin(), lvl_.levelEntities_.end(), e) == lvl_.levelEntities_.end())
+            lvl_.levelEntities_.push_back(e);
+        lvl_.entityLabels_[static_cast<u32>(e)] = w.name(e);
 #if AVER_MODULE_PHYSICS
         if (w.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer)) rebuildEntityBody(e);
 #endif
@@ -549,17 +549,17 @@ void SandboxApp::installPrefabHooks() {
 #if AVER_MODULE_FRAMEWORK
         if (aver_fw_class_of(static_cast<int32_t>(e)) != 0) aver_fw_destroy(static_cast<int32_t>(e));   // the actor teardown
 #endif
-        levelEntities_.erase(std::remove(levelEntities_.begin(), levelEntities_.end(), e), levelEntities_.end());
-        entityLabels_.erase(static_cast<u32>(e));
-        entityCollide_.erase(static_cast<u32>(e));
-        entityAnim_.erase(static_cast<u32>(e));
-        entitySnapZ_.erase(static_cast<u32>(e));
+        lvl_.levelEntities_.erase(std::remove(lvl_.levelEntities_.begin(), lvl_.levelEntities_.end(), e), lvl_.levelEntities_.end());
+        lvl_.entityLabels_.erase(static_cast<u32>(e));
+        lvl_.entityCollide_.erase(static_cast<u32>(e));
+        lvl_.entityAnim_.erase(static_cast<u32>(e));
+        lvl_.entitySnapZ_.erase(static_cast<u32>(e));
         if (selectionUi_.sel_ == SelectionState::kSelScene && e == selectionUi_.selEntity_) { selectionUi_.sel_ = -1; selectionUi_.selEntity_ = scene::kInvalidEntity; }
 #if AVER_MODULE_PHYSICS
-        if (const auto it = entityBodies_.find(static_cast<u32>(e)); it != entityBodies_.end()) {
+        if (const auto it = lvl_.entityBodies_.find(static_cast<u32>(e)); it != lvl_.entityBodies_.end()) {
             aver_phys_remove_body(it->second);
-            levelBodies_.erase(std::remove(levelBodies_.begin(), levelBodies_.end(), it->second), levelBodies_.end());
-            entityBodies_.erase(it);
+            lvl_.levelBodies_.erase(std::remove(lvl_.levelBodies_.begin(), lvl_.levelBodies_.end(), it->second), lvl_.levelBodies_.end());
+            lvl_.entityBodies_.erase(it);
             ++dbgOv_.colliderRev_;
         }
 #endif
@@ -724,29 +724,29 @@ SandboxApp::EditCmd SandboxApp::describeEntity(scene::Entity e) {
     scene::World& w = scene::World::instance();
     EditCmd c;
     c.id = editIdFor(e);
-    if (const auto it = entityLabels_.find(static_cast<u32>(e)); it != entityLabels_.end()) c.label = it->second;
+    if (const auto it = lvl_.entityLabels_.find(static_cast<u32>(e)); it != lvl_.entityLabels_.end()) c.label = it->second;
     if (const auto* loc = w.component<scene::CLocal>(e, scene::kComponentLocal)) {
         c.after.pos = loc->xf.position;
         c.after.rotDeg = eulerDegFromQuat(loc->xf.rotation);
         c.after.scale = loc->xf.scale;
     }
-    const auto animIt = entityAnim_.find(static_cast<u32>(e));
-    c.snap = captureAuthored(w, e, selectionUi_.editorHidden_, animIt != entityAnim_.end());
-    if (animIt != entityAnim_.end()) c.hadAnim = animIt->second;
+    const auto animIt = lvl_.entityAnim_.find(static_cast<u32>(e));
+    c.snap = captureAuthored(w, e, selectionUi_.editorHidden_, animIt != lvl_.entityAnim_.end());
+    if (animIt != lvl_.entityAnim_.end()) c.hadAnim = animIt->second;
     if (const scene::Entity par = w.parent(e); par != scene::kInvalidEntity)
         c.parentId = editIdFor(par);
 #if AVER_MODULE_PHYSICS
-    c.hadBody = entityBodies_.find(static_cast<u32>(e)) != entityBodies_.end();
+    c.hadBody = lvl_.entityBodies_.find(static_cast<u32>(e)) != lvl_.entityBodies_.end();
 #endif
     // ABSENT MEANS "the default", exactly as saveLevel reads these maps: an entity created in the
     // editor has no entry and collides. Recording the absence as the default is what makes the
     // restore below a no-op for those, rather than inventing an entry they never had.
-    if (const auto it = entityCollide_.find(static_cast<u32>(e)); it != entityCollide_.end())
+    if (const auto it = lvl_.entityCollide_.find(static_cast<u32>(e)); it != lvl_.entityCollide_.end())
         c.hadCollide = it->second;
     // THE VEHICLE TOKEN is held by level_, not by any component, so a delete that did not carry it would
     // come back from Ctrl+Z as an ordinary mesh: no car in Play, and no token in the next save.
     if (const std::string* vehicle = level_.vehiclePresetOf(e)) c.hadVehicle = *vehicle;
-    if (const auto it = entitySnapZ_.find(static_cast<u32>(e)); it != entitySnapZ_.end()) {
+    if (const auto it = lvl_.entitySnapZ_.find(static_cast<u32>(e)); it != lvl_.entitySnapZ_.end()) {
         c.hadSnapZ = true;
         // entitySnapZ_ is f64 to round-trip the LEVEL FORMAT's own f64 placement z VERBATIM (see
         // its own declaration comment); EditCmd::snapZ is f32, matching every other undo-system
@@ -778,13 +778,13 @@ scene::Entity SandboxApp::spawnEntityFrom(const editor::EntitySnapshot& snap, co
         AVER_WARN("[Editor] the world refused to create '{}'", snap.asset);
         return e;
     }
-    levelEntities_.push_back(e);
-    if (!label.empty()) entityLabels_[static_cast<u32>(e)] = label;
+    lvl_.levelEntities_.push_back(e);
+    if (!label.empty()) lvl_.entityLabels_[static_cast<u32>(e)] = label;
     // The two non-component flags, put back. Only when they differ from the default, so an entity
     // that never had an entry does not gain one -- saveLevel treats present-and-true the same as
     // absent, but an editor-created entity gaining a map entry would be a difference for no reason.
-    if (!collide) entityCollide_[static_cast<u32>(e)] = false;
-    if (hasSnapZ) entitySnapZ_[static_cast<u32>(e)] = snapZ;
+    if (!collide) lvl_.entityCollide_[static_cast<u32>(e)] = false;
+    if (hasSnapZ) lvl_.entitySnapZ_[static_cast<u32>(e)] = snapZ;
     // BEFORE the body below, so a returning animated entity gets its kinematic body first time.
     if (authoredAnim && !authoredAnim->clip.empty()) writeEntityAnim(e, *authoredAnim);
 #if AVER_MODULE_PHYSICS
@@ -885,7 +885,7 @@ void SandboxApp::spawnSubtreeUnder(scene::Entity root, const std::vector<EditCmd
 // levelClassInstances_: a placed actor saves its class, transform and parent (appendClassPlacements),
 // but not component edits, so calling one "level owned" would let edits through that a reload loses.
 bool SandboxApp::isLevelOwned(scene::Entity e) const {
-    return std::find(levelEntities_.begin(), levelEntities_.end(), e) != levelEntities_.end();
+    return std::find(lvl_.levelEntities_.begin(), lvl_.levelEntities_.end(), e) != lvl_.levelEntities_.end();
 }
 
 SandboxApp::ReparentLegality SandboxApp::reparentLegality(scene::Entity dragged, scene::Entity newParent) const {
@@ -987,23 +987,23 @@ void SandboxApp::captureSubtree(EditCmd& c, scene::Entity e) {
             n.xf.rotDeg = eulerDegFromQuat(loc->xf.rotation);
             n.xf.scale = loc->xf.scale;
         }
-        if (const auto lb = entityLabels_.find(static_cast<u32>(d)); lb != entityLabels_.end())
+        if (const auto lb = lvl_.entityLabels_.find(static_cast<u32>(d)); lb != lvl_.entityLabels_.end())
             n.label = lb->second;
-        const auto animIt = entityAnim_.find(static_cast<u32>(d));
-        n.snap = captureAuthored(w, d, selectionUi_.editorHidden_, animIt != entityAnim_.end());
-        if (animIt != entityAnim_.end()) n.hadAnim = animIt->second;
+        const auto animIt = lvl_.entityAnim_.find(static_cast<u32>(d));
+        n.snap = captureAuthored(w, d, selectionUi_.editorHidden_, animIt != lvl_.entityAnim_.end());
+        if (animIt != lvl_.entityAnim_.end()) n.hadAnim = animIt->second;
         // Same two non-component flags the root carries; a subtree restored without them has the
         // identical silent-solidify problem one level down.
-        if (const auto ci = entityCollide_.find(static_cast<u32>(d)); ci != entityCollide_.end())
+        if (const auto ci = lvl_.entityCollide_.find(static_cast<u32>(d)); ci != lvl_.entityCollide_.end())
             n.hadCollide = ci->second;
-        if (const auto si = entitySnapZ_.find(static_cast<u32>(d)); si != entitySnapZ_.end()) {
+        if (const auto si = lvl_.entitySnapZ_.find(static_cast<u32>(d)); si != lvl_.entitySnapZ_.end()) {
             n.hadSnapZ = true;
             // See captureEntity's own comment on the identical f64->f32 narrowing just above:
             // intended and safe, DestroyedNode::snapZ being f32 like every other undo-system field.
             n.snapZ    = static_cast<f32>(si->second);
         }
 #  if AVER_MODULE_PHYSICS
-        n.hadBody = entityBodies_.find(static_cast<u32>(d)) != entityBodies_.end();
+        n.hadBody = lvl_.entityBodies_.find(static_cast<u32>(d)) != lvl_.entityBodies_.end();
 #  endif
         indexOf.emplace(static_cast<u32>(d), static_cast<i32>(c.subtree.size()));
         c.subtree.push_back(std::move(n));
@@ -1031,17 +1031,17 @@ void SandboxApp::rebuildEntityBody(scene::Entity e) {
     // The collider overlay caches what it drew (rebuildColliderOverlay); a body dropped or remade
     // here can leave the body COUNT unchanged, so tell it.
     ++dbgOv_.colliderRev_;
-    if (const auto it = entityBodies_.find(static_cast<u32>(e)); it != entityBodies_.end()) {
+    if (const auto it = lvl_.entityBodies_.find(static_cast<u32>(e)); it != lvl_.entityBodies_.end()) {
         aver_phys_remove_body(it->second);
-        levelBodies_.erase(std::remove(levelBodies_.begin(), levelBodies_.end(), it->second),
-                           levelBodies_.end());
-        entityBodies_.erase(it);
+        lvl_.levelBodies_.erase(std::remove(lvl_.levelBodies_.begin(), lvl_.levelBodies_.end(), it->second),
+                           lvl_.levelBodies_.end());
+        lvl_.entityBodies_.erase(it);
     }
     // `nocollide` MEANS NO BODY, whoever asks: a duplicate, a paste, an undone delete or a drag
     // commit of an entity the level (or the Collides checkbox) marked non-colliding must not quietly
     // gain one. The old body above is dropped first, which is what unchecking Collides relies on.
     // Absent = the default (collides), the same reading saveLevel makes.
-    if (const auto ci = entityCollide_.find(static_cast<u32>(e)); ci != entityCollide_.end() && !ci->second)
+    if (const auto ci = lvl_.entityCollide_.find(static_cast<u32>(e)); ci != lvl_.entityCollide_.end() && !ci->second)
         return;
     // A CAR HAS NO STATIC BODY, whatever its Collides box says: Play builds its dynamic chassis
     // (world::VehicleSystem), and a solid copy of the mesh at the placement would be a second car under
@@ -1064,7 +1064,7 @@ void SandboxApp::rebuildEntityBody(scene::Entity e) {
     // InstantiateOptions::localTrianglesFor's own comment): a mesh with a cached collision mesh --
     // every imported mesh with a .ocmesh, never a built-in -- collides with it here too, so dragging
     // or duplicating a NewSponza wall in the editor does not regress it back to one solid box.
-    const bool animated = entityAnim_.find(static_cast<u32>(e)) != entityAnim_.end();
+    const bool animated = lvl_.entityAnim_.find(static_cast<u32>(e)) != lvl_.entityAnim_.end();
     bool followsEntity = true;   // false: a body whose origin is not the entity's pivot cannot be driven
     i32 body = 0;
     if (const game::GameContent::CollisionMesh* cm = content_.collisionMeshFor(meshId);
@@ -1104,8 +1104,8 @@ void SandboxApp::rebuildEntityBody(scene::Entity e) {
     if (animated && (!followsEntity || !aver_phys_body_set_motion_type(body, AVER_PHYS_MOTION_KINEMATIC)))
         AVER_WARN("[Editor] entity #{}: its body stays static, so it will not carry anything as it moves", (u32)e);
     aver_phys_set_entity(body, static_cast<i32>(e));
-    entityBodies_[static_cast<u32>(e)] = body;
-    levelBodies_.push_back(body);
+    lvl_.entityBodies_[static_cast<u32>(e)] = body;
+    lvl_.levelBodies_.push_back(body);
 }
 
 // rebuildEntityBody for `e` and then for every descendant that currently owns a body. A transform
@@ -1116,7 +1116,7 @@ void SandboxApp::rebuildMovedBodies(scene::Entity e) {
     std::vector<scene::Entity> nodes;
     collectSubtree(scene::World::instance(), e, nodes);
     for (const scene::Entity d : nodes)
-        if (entityBodies_.find(static_cast<u32>(d)) != entityBodies_.end()) rebuildEntityBody(d);
+        if (lvl_.entityBodies_.find(static_cast<u32>(d)) != lvl_.entityBodies_.end()) rebuildEntityBody(d);
 }
 #endif
 
@@ -1150,18 +1150,18 @@ void SandboxApp::destroyEntity(scene::Entity e) {
 #if AVER_MODULE_FRAMEWORK
     if (classIdx >= 0) {
         aver_fw_destroy(static_cast<int32_t>(e));   // managed unbind frees the GraphHost; destroys the subtree like w.destroy
-        levelClassInstances_[classIdx].entity  = 0;
-        levelClassInstances_[classIdx].removed = true;
+        lvl_.levelClassInstances_[classIdx].entity  = 0;
+        lvl_.levelClassInstances_[classIdx].removed = true;
     } else
 #endif
         w.destroy(e);
     for (const scene::Entity d : doomed) {
-        levelEntities_.erase(std::remove(levelEntities_.begin(), levelEntities_.end(), d),
-                             levelEntities_.end());
-        entityLabels_.erase(static_cast<u32>(d));
-        entityCollide_.erase(static_cast<u32>(d));
-        entityAnim_.erase(static_cast<u32>(d));
-        entitySnapZ_.erase(static_cast<u32>(d));
+        lvl_.levelEntities_.erase(std::remove(lvl_.levelEntities_.begin(), lvl_.levelEntities_.end(), d),
+                             lvl_.levelEntities_.end());
+        lvl_.entityLabels_.erase(static_cast<u32>(d));
+        lvl_.entityCollide_.erase(static_cast<u32>(d));
+        lvl_.entityAnim_.erase(static_cast<u32>(d));
+        lvl_.entitySnapZ_.erase(static_cast<u32>(d));
         level_.setVehiclePreset(d, std::string());
         // Deleting the marker must clear the cache, or Add > Player Start keeps refusing to add
         // one on the grounds that the level already has the entity that was just destroyed.
@@ -1173,11 +1173,11 @@ void SandboxApp::destroyEntity(scene::Entity e) {
         // actually happens, so no caller can forget.
         if (selectionUi_.sel_ == SelectionState::kSelScene && d == selectionUi_.selEntity_) { selectionUi_.sel_ = -1; selectionUi_.selEntity_ = scene::kInvalidEntity; }
 #if AVER_MODULE_PHYSICS
-        if (const auto it = entityBodies_.find(static_cast<u32>(d)); it != entityBodies_.end()) {
+        if (const auto it = lvl_.entityBodies_.find(static_cast<u32>(d)); it != lvl_.entityBodies_.end()) {
             aver_phys_remove_body(it->second);
-            levelBodies_.erase(std::remove(levelBodies_.begin(), levelBodies_.end(), it->second),
-                               levelBodies_.end());
-            entityBodies_.erase(it);
+            lvl_.levelBodies_.erase(std::remove(lvl_.levelBodies_.begin(), lvl_.levelBodies_.end(), it->second),
+                               lvl_.levelBodies_.end());
+            lvl_.entityBodies_.erase(it);
             ++dbgOv_.colliderRev_;   // see rebuildEntityBody
         }
 #endif
@@ -1516,8 +1516,8 @@ void SandboxApp::undo() {
             for (const auto& w : c.landWeights) landscape_.applyWeightRect(w.section, w.x0, w.y0, w.x1, w.y1, w.planes, w.before);
             break;
         case EditCmd::Kind::WaterBodies:
-            levelHeader_.rivers = c.riversBefore;
-            levelHeader_.lakes = c.lakesBefore;
+            lvl_.levelHeader_.rivers = c.riversBefore;
+            lvl_.levelHeader_.lakes = c.lakesBefore;
             landTool_.waterBodiesStale_ = true;
             landTool_.waterSel_ = -1; landTool_.waterPt_ = -1;
             markLevelUnsaved();
@@ -1588,8 +1588,8 @@ void SandboxApp::redo() {
             for (const auto& w : c.landWeights) landscape_.applyWeightRect(w.section, w.x0, w.y0, w.x1, w.y1, w.planes, w.after);
             break;
         case EditCmd::Kind::WaterBodies:
-            levelHeader_.rivers = c.riversAfter;
-            levelHeader_.lakes = c.lakesAfter;
+            lvl_.levelHeader_.rivers = c.riversAfter;
+            lvl_.levelHeader_.lakes = c.lakesAfter;
             landTool_.waterBodiesStale_ = true;
             landTool_.waterSel_ = -1; landTool_.waterPt_ = -1;
             markLevelUnsaved();
@@ -1609,8 +1609,8 @@ void SandboxApp::redo() {
 std::string SandboxApp::selectionLabel() const {
 #if AVER_MODULE_SCENE
     if (selectionUi_.sel_ == SelectionState::kSelScene && scene::World::instance().valid(selectionUi_.selEntity_)) {
-        const auto it = entityLabels_.find(static_cast<u32>(selectionUi_.selEntity_));
-        if (it != entityLabels_.end()) return it->second;
+        const auto it = lvl_.entityLabels_.find(static_cast<u32>(selectionUi_.selEntity_));
+        if (it != lvl_.entityLabels_.end()) return it->second;
         const std::string nm = scene::World::instance().name(selectionUi_.selEntity_);
         return nm.empty() ? ("Entity " + std::to_string((u32)selectionUi_.selEntity_)) : nm;
     }

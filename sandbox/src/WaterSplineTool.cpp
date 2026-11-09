@@ -142,8 +142,8 @@ std::string uniqueName(const std::string& base, const std::vector<fmt::OcRiver>&
 // The "before" of an edit gesture: refreshed every idle frame, held while one is open.
 void SandboxApp::waterSnapshotIfIdle() {
     if (landTool_.waterGestureOpen_) return;
-    landTool_.waterGestureRivers_ = levelHeader_.rivers;
-    landTool_.waterGestureLakes_ = levelHeader_.lakes;
+    landTool_.waterGestureRivers_ = lvl_.levelHeader_.rivers;
+    landTool_.waterGestureLakes_ = lvl_.levelHeader_.lakes;
 }
 
 // A record changed: the gesture is open, the level is unsaved, and the meshes rebuild before the next draw.
@@ -157,24 +157,24 @@ void SandboxApp::waterEdited() {
 void SandboxApp::waterGestureEnd(const char* label) {
     if (!landTool_.waterGestureOpen_) return;
     landTool_.waterGestureOpen_ = false;
-    if (editor::sameBodies(landTool_.waterGestureRivers_, levelHeader_.rivers, landTool_.waterGestureLakes_, levelHeader_.lakes)) return;
+    if (editor::sameBodies(landTool_.waterGestureRivers_, lvl_.levelHeader_.rivers, landTool_.waterGestureLakes_, lvl_.levelHeader_.lakes)) return;
     EditCmd c;
     c.kind = EditCmd::Kind::WaterBodies;
     c.label = label;
     c.riversBefore = landTool_.waterGestureRivers_;
-    c.riversAfter = levelHeader_.rivers;
+    c.riversAfter = lvl_.levelHeader_.rivers;
     c.lakesBefore = landTool_.waterGestureLakes_;
-    c.lakesAfter = levelHeader_.lakes;
+    c.lakesAfter = lvl_.levelHeader_.lakes;
     pushEdit(std::move(c));
 }
 
 // Lowers the terrain along the selected river or inside the selected lake: one undoable height stroke.
 void SandboxApp::carveSelectedBody(Engine& e) {
     if (!landscape_.loaded()) return;
-    const int nr = static_cast<int>(levelHeader_.rivers.size());
+    const int nr = static_cast<int>(lvl_.levelHeader_.rivers.size());
     landscape::CarveParams cp;
     if (landTool_.waterSel_ >= 0 && landTool_.waterSel_ < nr) {
-        const fmt::OcRiver& r = levelHeader_.rivers[static_cast<usize>(landTool_.waterSel_)];
+        const fmt::OcRiver& r = lvl_.levelHeader_.rivers[static_cast<usize>(landTool_.waterSel_)];
         std::vector<landscape::CarvePoint> pts;
         editor::riverCarvePoints(r, 250.0f, pts);
         if (pts.empty()) return;
@@ -184,8 +184,8 @@ void SandboxApp::carveSelectedBody(Engine& e) {
         landscape_.carveRiver(e.device(), pts.data(), static_cast<u32>(pts.size()), cp);
         endSculptStroke();
         setUpgradeStatus("Carved the bed of " + r.name);
-    } else if (landTool_.waterSel_ >= nr && landTool_.waterSel_ < nr + static_cast<int>(levelHeader_.lakes.size())) {
-        const fmt::OcLake& l = levelHeader_.lakes[static_cast<usize>(landTool_.waterSel_ - nr)];
+    } else if (landTool_.waterSel_ >= nr && landTool_.waterSel_ < nr + static_cast<int>(lvl_.levelHeader_.lakes.size())) {
+        const fmt::OcLake& l = lvl_.levelHeader_.lakes[static_cast<usize>(landTool_.waterSel_ - nr)];
         std::vector<f32> xy;
         editor::lakeOutlineXY(l, 300.0f, xy);
         if (xy.size() < 6) return;
@@ -200,8 +200,8 @@ void SandboxApp::carveSelectedBody(Engine& e) {
 
 void SandboxApp::buildLandscapeWaterTab(Engine& e) {
     waterSnapshotIfIdle();
-    auto& rivers = levelHeader_.rivers;
-    auto& lakes = levelHeader_.lakes;
+    auto& rivers = lvl_.levelHeader_.rivers;
+    auto& lakes = lvl_.levelHeader_.lakes;
     const int nr = static_cast<int>(rivers.size());
     const int total = nr + static_cast<int>(lakes.size());
     if (landTool_.waterSel_ >= total) { landTool_.waterSel_ = -1; landTool_.waterPt_ = -1; }
@@ -221,7 +221,7 @@ void SandboxApp::buildLandscapeWaterTab(Engine& e) {
     }
     if (total == 0) ImGui::TextDisabled("None yet. Add one, then click on the terrain to place its points.");
 
-    const std::string defaultMaterial = levelHeader_.waters.empty() ? std::string() : levelHeader_.waters.front().material;
+    const std::string defaultMaterial = lvl_.levelHeader_.waters.empty() ? std::string() : lvl_.levelHeader_.waters.front().material;
     if (ImGui::Button("New River")) {
         fmt::OcRiver r;
         r.name = uniqueName("River", rivers, lakes);
@@ -366,8 +366,8 @@ void SandboxApp::handleWaterSpline(Engine& e, const ImGuiIO& io, bool overScene,
     landTool_.sculptCursorValid_ = false;
     waterSnapshotIfIdle();
     if (!landscape_.loaded()) return;
-    auto& rivers = levelHeader_.rivers;
-    auto& lakes = levelHeader_.lakes;
+    auto& rivers = lvl_.levelHeader_.rivers;
+    auto& lakes = lvl_.levelHeader_.lakes;
     const int nr = static_cast<int>(rivers.size());
     if (landTool_.waterSel_ < 0 || landTool_.waterSel_ >= nr + static_cast<int>(lakes.size())) {
         landTool_.waterDrag_ = false;
@@ -481,7 +481,7 @@ void SandboxApp::drawWaterBodies(Engine& e) {
     rhi::IDevice* dev = e.device();
     if (!dev) return;
     if (landTool_.waterBodiesStale_) {
-        water_.rebuildBodies(*dev, levelHeader_);
+        water_.rebuildBodies(*dev, lvl_.levelHeader_);
         landTool_.waterBodiesStale_ = false;
     }
 #if AVER_WITH_IMGUI
@@ -502,8 +502,8 @@ void SandboxApp::drawWaterBodies(Engine& e) {
     };
     mix(&landTool_.waterSel_, sizeof landTool_.waterSel_);
     mix(&landTool_.waterPt_, sizeof landTool_.waterPt_);
-    for (const fmt::OcRiver& r : levelHeader_.rivers) for (const fmt::OcRiverPoint& p : r.points) mix(&p, sizeof p);
-    for (const fmt::OcLake& l : levelHeader_.lakes) { mix(&l.levelCm, sizeof l.levelCm); for (const fmt::OcLakePoint& p : l.points) mix(&p, sizeof p); }
+    for (const fmt::OcRiver& r : lvl_.levelHeader_.rivers) for (const fmt::OcRiverPoint& p : r.points) mix(&p, sizeof p);
+    for (const fmt::OcLake& l : lvl_.levelHeader_.lakes) { mix(&l.levelCm, sizeof l.levelCm); for (const fmt::OcLakePoint& p : l.points) mix(&p, sizeof p); }
 
     if (key != landTool_.waterLinesKey_) {
         landTool_.waterLinesKey_ = key;
@@ -519,9 +519,9 @@ void SandboxApp::drawWaterBodies(Engine& e) {
             seg({p.x, p.y - s, p.z}, {p.x, p.y + s, p.z}, cr, cg, cb);
             seg({p.x, p.y, p.z}, {p.x, p.y, p.z + 2.0f * s}, cr, cg, cb);
         };
-        const int nr = static_cast<int>(levelHeader_.rivers.size());
+        const int nr = static_cast<int>(lvl_.levelHeader_.rivers.size());
         for (int i = 0; i < nr; ++i) {
-            const fmt::OcRiver& r = levelHeader_.rivers[static_cast<usize>(i)];
+            const fmt::OcRiver& r = lvl_.levelHeader_.rivers[static_cast<usize>(i)];
             const bool sel = i == landTool_.waterSel_;
             std::vector<fluids::SplinePoint> pts;
             for (const fmt::OcRiverPoint& p : r.points)
@@ -548,8 +548,8 @@ void SandboxApp::drawWaterBodies(Engine& e) {
                     handle({static_cast<f32>(p.x), static_cast<f32>(p.y), static_cast<f32>(p.z)}, k == landTool_.waterPt_);
                 }
         }
-        for (int j = 0; j < static_cast<int>(levelHeader_.lakes.size()); ++j) {
-            const fmt::OcLake& l = levelHeader_.lakes[static_cast<usize>(j)];
+        for (int j = 0; j < static_cast<int>(lvl_.levelHeader_.lakes.size()); ++j) {
+            const fmt::OcLake& l = lvl_.levelHeader_.lakes[static_cast<usize>(j)];
             const bool sel = nr + j == landTool_.waterSel_;
             std::vector<f32> xy;
             editor::lakeOutlineXY(l, 200.0f, xy);
