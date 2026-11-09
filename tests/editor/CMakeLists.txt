@@ -1024,3 +1024,21 @@ add_executable(HlodBuildJobTest src/HlodBuildJobTest.cpp)
 target_include_directories(HlodBuildJobTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
 target_link_libraries(HlodBuildJobTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(HlodBuildJobTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# PhysAnimEditModelTest -- sandbox/src/PhysAnimEditModel.hpp (header-only, no ImGui): the physical animation profile tab's region edits, bone assignment,
+# clamping, skeleton rows and the offline hit preview over the real HitReaction envelope.
+if(TARGET Aver.Ragdoll)
+  add_executable(PhysAnimEditModelTest src/PhysAnimEditModelTest.cpp)
+  target_include_directories(PhysAnimEditModelTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+  target_link_libraries(PhysAnimEditModelTest PRIVATE Aver.Ragdoll Aver.Formats Aver.Core Aver.Platform)
+  set_target_properties(PhysAnimEditModelTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
+# PhysAnimEditorTest -- the Physical Animation Profile tab as an asset, headless (sandbox/src/PhysAnimEditor.cpp compiled directly, no ImGui): the factory,
+# open, edit / undo / redo, skeleton pick, problems and the save round trip.
+if(TARGET Aver.Ragdoll)
+  add_executable(PhysAnimEditorTest src/PhysAnimEditorTest.cpp ${CMAKE_SOURCE_DIR}/sandbox/src/PhysAnimEditor.cpp)
+  target_include_directories(PhysAnimEditorTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+  target_link_libraries(PhysAnimEditorTest PRIVATE Aver.Ragdoll Aver.Formats Aver.Core Aver.Platform)
+  set_target_properties(PhysAnimEditorTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()

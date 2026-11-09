@@ -149,6 +149,9 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "AnimStateMachineEditor.hpp"
 #include "MontageEditor.hpp"
 #include "IkRigEditor.hpp"      // [wave5/ik-retarget]
+#if AVER_MODULE_RAGDOLL
+#include "PhysAnimEditor.hpp"   // .ocphysanim tab (W6 step 8)
+#endif
 
 #include "FaceRigEditor.hpp"    // [wave9/morph]
 #include "RetargetEditor.hpp"
@@ -2865,6 +2868,7 @@ private:
     // the asset is created beside it; without, in the selected folder.
     void cbCreateIkRig(const std::string& skeletonPath = {});
 
+    void cbCreatePhysAnim();   // a starter .ocphysanim
     void cbCreateFaceRig();   // [wave9/morph] a starter .ocface
     void cbCreateRetarget(const std::string& sourceSkeletonPath = {});
     void cbCreateRig();
@@ -4314,6 +4318,7 @@ private:
     void buildCookChunksSettings();
     // World Settings > Level Streaming > HLOD (SandboxLevelHlod.cpp): a background bake of the per-cell proxies.
     void buildHlodSettings();
+    void buildPhysAnimSection();   // SandboxPhysAnim.cpp: Simulate / Animate mode panels, Apply Hit
     void startHlodBuild();
     void pollHlodBuild();
     editor::HlodBuildJob hlodJob_;

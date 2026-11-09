@@ -398,6 +398,8 @@ if(TARGET Aver.Ragdoll)
   # Ragdolls on skinned entities (brings AVER_MODULE_RAGDOLL=1). The app installs it beside the
   # control rig and ticks it where the animation clock ticks.
   target_link_libraries(Sandbox PRIVATE Aver.Ragdoll)
+  # W6 step 8: the .ocphysanim profile tab and the Apply Hit section of the Simulate / Animate panels.
+  target_sources(Sandbox PRIVATE src/PhysAnimEditor.cpp src/SandboxPhysAnim.cpp)
 endif()
 if(TARGET Aver.Physics)
   # The simulation (brings AVER_MODULE_PHYSICS=1). Named on the executable for the same reason the

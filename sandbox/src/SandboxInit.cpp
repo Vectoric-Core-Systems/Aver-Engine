@@ -122,6 +122,9 @@ void SandboxApp::onInit(Engine& e)  {
     // [wave5/ik-retarget] IK Rig, IK Retargeter, Control Rig; the skeleton tab offers to create the first two.
     assetEditors_.registerFactory(&editor::makeFaceRigEditor);             // .ocface  [wave9/morph]
     assetEditors_.registerFactory(&editor::makeIkRigEditor);               // .ocikrig
+#if AVER_MODULE_RAGDOLL
+    assetEditors_.registerFactory(&editor::makePhysAnimEditor);            // .ocphysanim
+#endif
     assetEditors_.registerFactory(&editor::makeRetargetEditor);            // .ocretarget
     assetEditors_.registerFactory(&editor::makeRigEditor);                 // .ocrig
 #if AVER_WITH_IMGUI   // the Content Browser's create members are ImGui-side

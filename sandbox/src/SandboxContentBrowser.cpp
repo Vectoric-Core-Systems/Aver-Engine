@@ -1418,6 +1418,10 @@ void SandboxApp::drawContentBrowser() {
         if (ImGui::MenuItem("New IK Rig"))          cbCreateIkRig();   // [wave5/ik-retarget]
         uiReg_.track("cb.add.ikRig");
 
+#if AVER_MODULE_RAGDOLL
+        if (ImGui::MenuItem("New Physical Animation Profile")) cbCreatePhysAnim();
+        uiReg_.track("cb.add.physAnim");
+#endif
         if (ImGui::MenuItem("New Face Rig"))        cbCreateFaceRig();   // [wave9/morph]
         uiReg_.track("cb.add.faceRig");
         if (ImGui::MenuItem("New IK Retargeter"))   cbCreateRetarget();
@@ -2117,6 +2121,7 @@ void SandboxApp::drawFolderTree(const std::string& dir) {
         {".ocasm",      {ICON_TREE,       IM_COL32(190, 140, 255, 255), "Animation State Machine"}},
         {".ocmontage",  {ICON_WAVE,       IM_COL32(190, 140, 255, 255), "Animation Montage"}},
         {".ocikrig",    {ICON_TREE,       IM_COL32(255, 170, 110, 255), "IK Rig"}},                 // [wave5/ik-retarget]
+        {".ocphysanim", {ICON_TREE,       IM_COL32(255, 150, 110, 255), "Physical Animation Profile"}},
 
         {".ocface",     {ICON_TREE,       IM_COL32(255, 205, 160, 255), "Face Rig"}},               // [wave9/morph]
         {".ocvis",      {ICON_WAVE,       IM_COL32(170, 220, 255, 255), "Lip-Sync Track"}},         // [wave9/morph]

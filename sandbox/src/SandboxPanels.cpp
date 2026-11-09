@@ -552,6 +552,9 @@ void SandboxApp::buildSimulateModePanel(Engine& e) {
     ImGui::TextWrapped("This build has the gameplay framework module switched off, so there is no "
                        "game mode to run and Play does nothing here.");
 #endif
+#if AVER_MODULE_RAGDOLL && AVER_MODULE_SCENE
+    buildPhysAnimSection();   // SandboxPhysAnim.cpp: Apply Hit on the selected character
+#endif
 }
 
 #if AVER_MODULE_SCENE
@@ -626,6 +629,9 @@ bool SandboxApp::openSequenceFile(const std::string& fullPath) {
 void SandboxApp::buildAnimateModePanel() {
     editor::SequenceHost host = sequenceHost();
     seqEditor_.drawModePanel(host);
+#if AVER_MODULE_RAGDOLL
+    buildPhysAnimSection();   // SandboxPhysAnim.cpp: Apply Hit on the selected character
+#endif
 }
 
 void SandboxApp::buildSequencerWindow() {
