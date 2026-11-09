@@ -4,6 +4,7 @@
 
 #  include "aver/core/Hash.hpp"
 #  include "aver/world/ChunkCodec.hpp"
+#  include "aver/world/PcgSinks.hpp"
 
 #  include <cmath>
 
@@ -119,6 +120,11 @@ ChunkPayload GeneratedChunkSource::generate(const ChunkCoord& c) const {
     p.coord = c;
     p.chunkSizeCm = settings_.chunkSizeCm;
     if (c.z != settings_.surfaceChunkZ) return p;   // a surface world: everything else is air
+
+    if (settings_.pcgProgram) {
+        const PcgCellGenerator gen(settings_.pcgProgram, settings_.chunkSizeCm);
+        return pcgToChunkPayload(gen.generate(c.x, c.y), c, settings_.chunkSizeCm);
+    }
 
     const i64 ox = chunkOriginCmAxis(c.x, settings_.chunkSizeCm);
     const i64 oy = chunkOriginCmAxis(c.y, settings_.chunkSizeCm);

@@ -523,6 +523,7 @@ OcGraphDomain ocGraphDomainOf(const OcGraphData& g) {
     if (g.domain.empty())               return OcGraphDomain::Gameplay;
     if (equalsCI(g.domain, "gameplay")) return OcGraphDomain::Gameplay;
     if (equalsCI(g.domain, "material")) return OcGraphDomain::Material;
+    if (equalsCI(g.domain, "pcg"))      return OcGraphDomain::Pcg;
     return OcGraphDomain::Unknown;
 }
 
@@ -531,6 +532,7 @@ std::string_view ocGraphDomainName(OcGraphDomain d) {
     switch (d) {
     case OcGraphDomain::Gameplay: return "gameplay";
     case OcGraphDomain::Material: return "material";
+    case OcGraphDomain::Pcg:      return "pcg";
     case OcGraphDomain::Unknown:  break;
     }
     return {};

@@ -21,6 +21,7 @@ namespace aver::editor {
 enum class GraphAssetFamily {
     Gameplay,   // absent DOMAIN, or `DOMAIN gameplay` -- the ordinary visual-scripting graph
     Material,   // `DOMAIN material` -- shades a surface; presents as a material asset, not a graph
+    Pcg,        // `DOMAIN pcg` -- a point-set generation graph
     Unknown,    // a DOMAIN this build does not recognise -- deliberately neither of the above
 };
 
@@ -37,6 +38,8 @@ inline GraphAssetPresentation graphAssetPresentationFor(aver::fmt::OcGraphDomain
     switch (domain) {
         case aver::fmt::OcGraphDomain::Material:
             return GraphAssetPresentation{GraphAssetFamily::Material, "Material Graph"};
+        case aver::fmt::OcGraphDomain::Pcg:
+            return GraphAssetPresentation{GraphAssetFamily::Pcg, "PCG Graph"};
         case aver::fmt::OcGraphDomain::Unknown:
             return GraphAssetPresentation{GraphAssetFamily::Unknown, "Unknown Graph"};
         case aver::fmt::OcGraphDomain::Gameplay:

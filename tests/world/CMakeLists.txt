@@ -204,3 +204,28 @@ add_executable(WorldOriginTest src/WorldOriginTest.cpp)
 target_link_libraries(WorldOriginTest PRIVATE Aver.World Aver.Core)
 set_target_properties(WorldOriginTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# PcgPointsTest -- the PCG core: Aver.Pcg hash + Pcg.scatter ported bit for bit (golden vectors generated from the F#
+# module, tests/world/data/pcg_golden.fsx), point sets with named attributes, the spatial grid.
+add_executable(PcgPointsTest src/PcgPointsTest.cpp)
+target_link_libraries(PcgPointsTest PRIVATE Aver.World Aver.Render.Pcg Aver.Core)
+set_target_properties(PcgPointsTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# PcgGraphTest -- every PCG node on its own (landscape through a fake heightfield), then the evaluator: cache, cancel, time
+# budget, cycles, validation, Subgraph/Loop, and the `DOMAIN pcg` .ocgraph round trip.
+add_executable(PcgGraphTest src/PcgGraphTest.cpp)
+target_link_libraries(PcgGraphTest PRIVATE Aver.World Aver.Formats Aver.Render.Pcg Aver.Core)
+set_target_properties(PcgGraphTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# PcgPartitionTest -- per-cell partitioned generation equals the whole, dirty cells, the instance/chunk/actor sinks,
+# GeneratedChunkSource driven by a graph (with persistChunk), and the PCGVOLUME graph= record.
+add_executable(PcgPartitionTest src/PcgPartitionTest.cpp)
+target_link_libraries(PcgPartitionTest PRIVATE
+  Aver.World Aver.Scene Aver.Formats Aver.Platform Aver.Render.Pcg Aver.Core)
+# The shipped sample graph is loaded and run, so it cannot rot.
+target_compile_definitions(PcgPartitionTest PRIVATE
+  AVER_PCG_SAMPLE="${CMAKE_SOURCE_DIR}/templates/FirstPerson/Content/PCG/PG_ForestScatter.ocgraph")
+set_target_properties(PcgPartitionTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

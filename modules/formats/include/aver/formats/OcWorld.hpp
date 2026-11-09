@@ -196,6 +196,15 @@ struct OcPcgVolume {
     // ground-cover tier.
     i32 radiusChunks = 0;
 
+    // A `.ocgraph` (DOMAIN pcg) that generates this volume's content instead of the SCATTER palette over a density
+    // field: `graph <Content-relative path>`. Empty = the density-field path above, which is how every existing volume
+    // (and the "Sky" volume) keeps working. The graph is evaluated per streaming cell (aver::world::PcgCellGenerator),
+    // with `seed` as its seed and `bounds` (when not infinite) as its XY/Z limits.
+    std::string graph;
+    // The graph's result is regenerated every session and never saved into the level (the bare token `transient`);
+    // false = a persisted bake. Only meaningful with `graph`.
+    bool transient = false;
+
     // False means boundsMin/Max are meaningful. True means the field is everywhere.
     bool infinite = true;
     f64 boundsMin[3] = {0, 0, 0};

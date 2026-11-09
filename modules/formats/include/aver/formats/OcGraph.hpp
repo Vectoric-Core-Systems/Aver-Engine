@@ -226,6 +226,7 @@ struct OcGraphComment {
 enum class OcGraphDomain {
     Gameplay,   // no DOMAIN record, or `DOMAIN gameplay`: nodes call the framework, compiled to IL
     Material,   // `DOMAIN material`: nodes shade a surface, compiled to HLSL
+    Pcg,        // `DOMAIN pcg`: typed point-set data flow, run by aver::world::pcgEvaluate (docs/PCG.md)
     Unknown,    // a DOMAIN this build does not know -- deliberately NOT treated as gameplay
 };
 

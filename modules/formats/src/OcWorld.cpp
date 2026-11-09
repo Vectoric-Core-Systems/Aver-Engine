@@ -509,6 +509,8 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
                 else if (equalsCI(t[i], "bias")    && i + 1 < t.size()) v.coverageBias  = parseF64(t[++i]);
                 else if (equalsCI(t[i], "samples") && i + 1 < t.size()) v.samplesPerAxis = static_cast<i32>(parseF64(t[++i]));
                 else if (equalsCI(t[i], "radius")  && i + 1 < t.size()) v.radiusChunks   = static_cast<i32>(parseF64(t[++i]));
+                else if (equalsCI(t[i], "graph")   && i + 1 < t.size()) v.graph          = std::string(t[++i]);
+                else if (equalsCI(t[i], "transient")) v.transient = true;
                 // A BARE TOKEN, not `infinite 1`. It is a statement about what the field IS rather
                 // than a value it carries, and it reads that way in the file.
                 else if (equalsCI(t[i], "infinite")) v.infinite = true;
@@ -1116,6 +1118,8 @@ std::string writeOcworld(const OcWorldData& w) {
             if (v.samplesPerAxis > 0) s += " samples " + std::to_string(v.samplesPerAxis);
             // Same unset-is-not-a-value rule as `samples` directly above.
             if (v.radiusChunks > 0) s += " radius " + std::to_string(v.radiusChunks);
+            if (!v.graph.empty()) s += " graph " + v.graph;
+            if (v.transient && !v.graph.empty()) s += " transient";
             // The bounds token LAST, because parsing `bounds` consumes the six numbers after it and
             // anything following them would have to be re-found. Writing it last means the reader
             // never has to.

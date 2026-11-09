@@ -31,6 +31,12 @@ aver_add_module(Aver.World
     src/PlacementStreamer.cpp
     src/ChunkGenerator.cpp
     src/ScatterPalette.cpp
+    # The PCG graph evaluator: point data, the node set, per-cell partitioned generation and the output sinks. Core + Formats only.
+    src/PcgPoints.cpp
+    src/PcgNodes.cpp
+    src/PcgGraph.cpp
+    src/PcgVolumeRunner.cpp
+    src/PcgSinks.cpp
     src/ChunkWorld.cpp
     # The authored-level cook (LARGE_WORLD 2.4.5): pure Core + Formats + Platform; the same nine pure sources are also compiled straight into AverAssetC (tests/formats).
     src/LevelFlatten.cpp

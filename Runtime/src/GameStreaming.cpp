@@ -7,9 +7,13 @@
 #include "aver/core/Log.hpp"
 #include "aver/scene/World.hpp"
 #include "aver/scene/Components.hpp"
+#include "aver/formats/OcGraph.hpp"
+#include "aver/world/PcgVolumeRunner.hpp"
 #include "aver/world/ScatterPalette.hpp"
 
 #include <chrono>
+#include <map>
+#include <memory>
 #include <cmath>
 #include <cstdlib>
 
@@ -165,7 +169,9 @@ void GameStreaming::enable(const fmt::ProjectDesc& project,
         }
         // A field with no species would generate the fallback cube everywhere. Skip it: a level may
         // declare a field for something other than scatter (a cave mask, a moisture map).
-        if (mine.empty()) {
+        // A volume with a graph generates from the graph and needs no palette.
+        const bool graphField = v && !v->graph.empty();
+        if (mine.empty() && !graphField) {
             AVER_INFO("[ChunkWorld] field '{}' has no SCATTER species; not streamed",
                       v ? v->name : std::string("<none>"));
             continue;
@@ -232,6 +238,42 @@ void GameStreaming::enable(const fmt::ProjectDesc& project,
             cwSettings.generator.heightSource = [this](f32 x, f32 y, f32& z) {
                 return heightSource_(x - static_cast<f32>(origin_.x), y - static_cast<f32>(origin_.y), z);
             };
+        // A PCGVOLUME with `graph` generates its chunks from that DOMAIN pcg graph, one chunk per PCG cell. The program shares the
+        // height source above as its landscape; a Subgraph/Loop node resolves `graph=` against the same Content directory.
+        if (graphField) {
+            fmt::OcGraphData gd;
+            std::string gerr;
+            if (!fmt::loadOcgraph(contentDir + AVER_PATH_SEP + v->graph, gd, &gerr) || !world::pcgIsGraph(gd)) {
+                AVER_WARN("[ChunkWorld] field '{}': cannot use graph '{}': {}", v->name, v->graph,
+                          gerr.empty() ? std::string("not a DOMAIN pcg graph") : gerr);
+                continue;
+            }
+            auto prog = std::make_shared<world::PcgProgram>();
+            prog->graph = std::make_shared<const fmt::OcGraphData>(std::move(gd));
+            prog->seed = v->seed;
+            if (!v->infinite) {
+                prog->bounded = true;
+                prog->area.min = Vec3{static_cast<f32>(v->boundsMin[0]), static_cast<f32>(v->boundsMin[1]), 0.0f};
+                prog->area.max = Vec3{static_cast<f32>(v->boundsMax[0]), static_cast<f32>(v->boundsMax[1]), 0.0f};
+                prog->zMin = static_cast<f32>(v->boundsMin[2]);
+                prog->zMax = static_cast<f32>(v->boundsMax[2]);
+            }
+            if (cwSettings.generator.heightSource)
+                prog->landscape = std::make_shared<world::PcgHeightFnLandscape>(cwSettings.generator.heightSource);
+            auto subs = std::make_shared<std::map<std::string, std::unique_ptr<fmt::OcGraphData>>>();
+            prog->graphLoader = [subs, contentDir](const std::string& name) -> const fmt::OcGraphData* {
+                auto it = subs->find(name);
+                if (it == subs->end()) {
+                    auto g = std::make_unique<fmt::OcGraphData>();
+                    if (!fmt::loadOcgraph(contentDir + AVER_PATH_SEP + name, *g, nullptr) || !world::pcgIsGraph(*g)) g.reset();
+                    it = subs->emplace(name, std::move(g)).first;
+                }
+                return it->second.get();
+            };
+            cwSettings.generator.pcgProgram = prog;
+            cwSettings.generator.generatorVersion = world::pcgGeneratorVersion(*prog);
+        }
+
         if (originGuard_ && cwSettings.stream.chunkSizeCm == world::kWorldChunkCm)
             cwSettings.stream.sourceLimitCm = world::kSubMmCliffCm;
 
