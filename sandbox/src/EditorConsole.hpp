@@ -826,7 +826,7 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
             return true;
         }});
     t.push_back({"voxi.giVolumeFollow", VarType::Bool, false,
-        "The GI voxel volume recentres on the camera while the camera is outside the authored volume (RENDER.GIVOLUME); 0 = always the authored volume",
+        "The GI voxel volume recentres on the camera while the camera is outside the level's volume (its GIVOLUME record, else fitted to the level); 0 = always the level's volume",
         []{ return vBool(Renderer::get().settings().giVolumeFollow); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->giVolumeFollow = on; }); }});
     t.push_back({"voxi.nrd2NeuracGuide", VarType::Bool, false,

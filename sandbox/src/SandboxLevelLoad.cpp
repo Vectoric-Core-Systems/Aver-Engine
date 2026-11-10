@@ -609,15 +609,8 @@ void SandboxApp::onLevelInstantiated(const game::GameLevel::LoadedLevel& loaded)
     // record, or a run passing --cam, never fitted its volume at all: where the camera ends up and
     // how big the level is are different questions and only one of them is about the camera.
     //
-    // BUT AN AUTHORED VOLUME STILL WINS, and that guard is not optional. RENDER.GIVOLUME is a
-    // number a person chose; a fit computed from placement bounds is a guess, and a guess must
-    // not silently replace authorship. I got this wrong first time round and measured the cost
-    // on PTTest, which authors a 5659cm half-extent: fitting unconditionally REPLACED it with
-    // 2356cm and shrank the volume for a level it already covered. project_.giExtent is 0 when
-    // the manifest states nothing, which is exactly the "no author has an opinion" case the fit
-    // is for.
-    //
-    // 0.8: THE VOLUME IS THE LEVEL'S. The project-wide RENDER.GIVOLUME this used to defer to was not authored: the
+    // AN AUTHORED VOLUME WINS over the fit -- the level's own GIVOLUME record. The project-wide RENDER.GIVOLUME this used
+    // to defer to (0.7) was not authored: the
     // Rendering page wrote it on any edit from whichever level was open, in that moment's floating-origin frame. PTTest
     // carried a centre 98 km from every level, and Sponza, lit almost only by bounce light, lost its GI.
     // Saved only at the first region (originBlocksSave), so the record's world cm are the scene frame here.
@@ -1102,9 +1095,14 @@ void SandboxApp::storeLevelView() {
     const std::string key = editor::levelViewKey(projSess_.levelPath_, projSess_.project_.dir);
     if (file.empty() || key.empty()) return;
 
-    editor::LevelView v{viewState_.camPos_.x, viewState_.camPos_.y, viewState_.camPos_.z, degrees(viewState_.yaw_), degrees(viewState_.pitch_), viewState_.flySpeed_};
+    // WORLD cm, not the scene frame: camPos_ is a floating-origin participant, and the level reopens with the origin at the
+    // first region, so a view stored away from it reopened off by the whole origin offset.
+    const world::OriginCm o = origin_.origin();
+    editor::LevelView v{viewState_.camPos_.x + static_cast<f32>(o.x), viewState_.camPos_.y + static_cast<f32>(o.y), viewState_.camPos_.z,
+                        degrees(viewState_.yaw_), degrees(viewState_.pitch_), viewState_.flySpeed_};
 #if AVER_MODULE_FRAMEWORK
-    // While a session drives the camera from the pawn, camPos_ is the pawn's eye, not the editor's.
+    // While a session drives the camera from the pawn, camPos_ is the pawn's eye, not the editor's. preplayView_ is
+    // already world cm: Play starts only at the first region (originBlocksSave, "The Play snapshot").
     if (play_.preplayViewValid_ && anyPlayActive() && !playEjected()) v = play_.preplayView_;
 #endif
 
