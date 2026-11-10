@@ -80,6 +80,13 @@ target_include_directories(GiDispatchBoundsTest PRIVATE ${CMAKE_SOURCE_DIR}/modu
 target_compile_definitions(GiDispatchBoundsTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
 set_target_properties(GiDispatchBoundsTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# GiDrawsSettleTest -- when a draw-list change rebuilds the GI volume (aver/voxi/GiDrawsSettle.hpp): once the list holds
+# still, or at the longest wait, never on every tick it moves. Header-only over Aver.Core, like GiDispatchBoundsTest.
+add_executable(GiDrawsSettleTest src/GiDrawsSettleTest.cpp)
+target_link_libraries(GiDrawsSettleTest PRIVATE Aver.Core)
+target_include_directories(GiDrawsSettleTest PRIVATE ${CMAKE_SOURCE_DIR}/modules/render.voxi/include)
+set_target_properties(GiDrawsSettleTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # GiVisibilityTest -- U1's shared bit definitions and reconstruction arithmetic
 # (aver/voxi/GiVisibility.hpp): the giRestirVisibility mode/half-res-pair packing gAmbientParams.w
 # carries, the tracedPixel phase schedule, and the reconstruction weight giVisReconstruct sums per

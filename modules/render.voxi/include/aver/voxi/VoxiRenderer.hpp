@@ -13,6 +13,7 @@
 #include "aver/voxi/SceneDecal.hpp"
 #include "aver/voxi/RasterLights.hpp"   // R2: rl::Result (the frame's raster local-light list)
 #include "aver/voxi/GiDispatchBounds.hpp"   // VoxelBox/GiDispatchConstants
+#include "aver/voxi/GiDrawsSettle.hpp"
 #include "aver/render/denoise/Denoiser.hpp"
 #include "aver/render/denoise/Nrd2.hpp"
 #include "aver/render/denoise/Nrd2Capture.hpp"
@@ -126,6 +127,9 @@ public:
     void setGiForceRebuild(bool on);
     bool giForceRebuild() const { return giForceRebuild_; }
     void setGiBoundedDispatch(bool on);
+    // Ticks the static draw list must hold still before a change to it alone rebuilds the GI volume (60 at most); 0 = every tick.
+    void setGiSettleTicks(u32 ticks) { giDrawsSettle_.configure(ticks, ticks ? 60u : 0u); }
+    u32  giSettleTicks() const { return giDrawsSettle_.quietTicks(); }
     bool giBoundedDispatch() const { return giBoundedDispatch_; }
     void setGiFreeAccumulator(bool on);
     bool giFreeAccumulator() const { return giFreeAccumulator_; }
@@ -636,7 +640,12 @@ private:
     // table; RtInstance.firstVertex = vertex slot | index slot << 16. A slot no instance used in a build is nulled and
     // reused kRtGeomRetireFrames later (a frame in flight may still read it). An instance whose slot was written in
     // this frame is masked for it: Vulkan applies the write at the next bind of each frame slot.
-    static constexpr u32 kRtGeomCapacity = 8192;
+    // 32768 first (a city level binds more than 8192 mesh buffers at once, and a slot past the table is a mesh rays skip),
+    // 8192 where the device's per-set storage-buffer limit refuses it. Slots are 16-bit in RtInstance.firstVertex.
+    static constexpr u32 kRtGeomCapacity    = 32768;
+    static constexpr u32 kRtGeomCapacityMin = 8192;
+    static_assert(kRtGeomCapacity <= 65536, "vertex and index slots pack into 16 bits each");
+    u32 rtGeomCapacity_ = kRtGeomCapacity;
     static constexpr u32 kRtGeomRetireFrames = 3;
     bool rtGeomBindless_ = false;
     struct RtGeomBinding { u32 slot = 0, written = 0, used = 0; };
@@ -1169,6 +1178,9 @@ private:
     bool giSnapVoxelSky_ = true;
     u64 giSkipped_ = 0, giRebuilt_ = 0;
     mutable u32  giGateWhyMask_ = 0;
+    mutable u32  giLastRejectBit_ = ~0u;   // the reject() bit of the gate's last "changed" answer; ~0u when it held
+    // A change to the static draw list alone rebuilds once the list holds still (GiDrawsSettle.hpp): 6 ticks quiet, 60 at most.
+    GiDrawsSettle giDrawsSettle_{6u, 60u};
     u32          voxelCullLogs_ = 0;
     bool         drawCapReported_ = false;
     u64  giGateNextReport_ = 64;

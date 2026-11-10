@@ -1551,7 +1551,13 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
             // GI rebuild gate: if nothing moved, volume texture already holds the answer.
             const bool converging = giConvergeTicks_ > 0;
             const bool gateUnchanged = giSnapshotUnchanged();
-            if (gateUnchanged && !converging && !giForceRebuild_) {
+            // The static draw list alone moved (streaming in, an object dragged): rebuild once it holds still, not per tick.
+            const bool drawsOnly = !gateUnchanged && giLastRejectBit_ == 4u && !converging && !giForceRebuild_;
+            const bool settleHold = drawsOnly && giDrawsSettle_.hold(giDrawsKey());
+            if (!drawsOnly) giDrawsSettle_.reset();
+            if (settleHold) {
+                ++giSkipped_;   // the previous bake stays on screen until the list settles
+            } else if (gateUnchanged && !converging && !giForceRebuild_) {
                 ++giSkipped_;
                 if (giConvergeTicks_ == 0) ++giQuietTicks_;
                 if (giCacheSettlePending_ && giQuietTicks_ >= kGiCacheDwellTicks && giCacheScheduleDump(ctx))
@@ -2801,7 +2807,9 @@ void VoxiRenderer::giDrawsSubKeys(u64& count, u64& mesh, u64& world, u64& mat) c
 bool VoxiRenderer::giSnapshotUnchanged() const {
     // Which check rejected, said once per reason.
     giRebuildCloudOnly_ = false;
+    giLastRejectBit_ = ~0u;
     const auto reject = [this](u32 bit, const char* which) {
+        giLastRejectBit_ = bit;
         if (!(giGateWhyMask_ & (1u << bit))) {
             giGateWhyMask_ |= (1u << bit);
             AVER_INFO("[Voxi] GI rebuild gate rejected on: {}", which);
@@ -3883,8 +3891,12 @@ void VoxiRenderer::ensureTextureTable() {
     // With buffer arrays, ray hits read each mesh's own buffers and the geometry table is not built.
     // AVER_RT_GEOMETRY_TABLE=1 keeps the table (A/B).
     const char* keepTable = std::getenv("AVER_RT_GEOMETRY_TABLE");
-    if (caps_.rtBindlessBuffers && !(keepTable && *keepTable == '1'))
-        rtTexTable_ = res_->createBindlessTable(kRtTextureCapacity, kRtGeomCapacity);
+    if (caps_.rtBindlessBuffers && !(keepTable && *keepTable == '1')) {
+        for (u32 cap : {kRtGeomCapacity, kRtGeomCapacityMin}) {
+            rtTexTable_ = res_->createBindlessTable(kRtTextureCapacity, cap);
+            if (rtTexTable_) { rtGeomCapacity_ = cap; break; }
+        }
+    }
     rtGeomBindless_ = rtTexTable_ != 0;
     if (!rtTexTable_) rtTexTable_ = res_->createBindlessTextureTable(kRtTextureCapacity);
     if (!rtTexTable_)
@@ -3896,11 +3908,11 @@ void VoxiRenderer::ensureTextureTable() {
 }
 
 rhi::PipelineLayout VoxiRenderer::rtLayout() const {
-    return giLayout(kRtTextureCapacity, rtGeomBindless_ ? kRtGeomCapacity : 0);
+    return giLayout(kRtTextureCapacity, rtGeomBindless_ ? rtGeomCapacity_ : 0);
 }
 
 std::string VoxiRenderer::rtGeomDefs() const {
-    return rtGeomBindless_ ? ";AVER_RT_GEOM_BINDLESS=1;AVER_RT_GEOM_CAPACITY=" + std::to_string(kRtGeomCapacity)
+    return rtGeomBindless_ ? ";AVER_RT_GEOM_BINDLESS=1;AVER_RT_GEOM_CAPACITY=" + std::to_string(rtGeomCapacity_)
                            : std::string();
 }
 
@@ -3909,11 +3921,11 @@ u32 VoxiRenderer::geometrySlot(u32 a, rhi::BufferHandle b, u32 stride, u32 count
     if (it == rtGeomBound_[a].end()) {
         u32 slot = 0;
         if (!rtGeomFree_[a].empty()) { slot = rtGeomFree_[a].back(); rtGeomFree_[a].pop_back(); }
-        else if (rtGeomNext_[a] < kRtGeomCapacity) slot = rtGeomNext_[a]++;
+        else if (rtGeomNext_[a] < rtGeomCapacity_) slot = rtGeomNext_[a]++;
         else {
             if (!rtGeomFullWarned_)
                 AVER_WARN("[Voxi] more than {} mesh buffers on screen at once; rays skip the rest (raise "
-                          "kRtGeomCapacity)", kRtGeomCapacity);
+                          "kRtGeomCapacity)", rtGeomCapacity_);
             rtGeomFullWarned_ = true;
             return ~0u;
         }

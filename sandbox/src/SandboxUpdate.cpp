@@ -1313,6 +1313,7 @@ void SandboxApp::applyDeviceRenderSettings(Engine& e, const Timestep& t) {
         // Console knobs for GI optimisations.
         voxiRenderer_.setGiForceRebuild(editor::consoleGiForceRebuildSlot());
         voxiRenderer_.setGiBoundedDispatch(editor::consoleGiBoundedDispatchSlot());
+        voxiRenderer_.setGiSettleTicks(editor::consoleGiSettleTicksSlot());
         voxiRenderer_.setGiFreeAccumulator(editor::consoleGiFreeAccumulatorSlot());
         // Console knobs for GI vis and blended cone.
         voxiRenderer_.setGiVisPathView(editor::consoleGiVisPathViewSlot());

@@ -312,6 +312,8 @@ inline u32& consoleLightingLegacySlot() { static u32 v = 0; return v; }
 inline bool& consoleGiForceRebuildSlot()    { static bool v = false; return v; }
 // Default TRUE: rebuilds always dispatch bounded (1.3% of grid instead of 100%, measured 30.64->30.25ms on PTTest).
 inline bool& consoleGiBoundedDispatchSlot() { static bool v = true; return v; }
+// Default 6: a draw-list-only change rebuilds the GI volume once the list holds still 6 ticks (60 at most); 0 = every tick.
+inline u32& consoleGiSettleTicksSlot() { static u32 v = 6; return v; }
 // Default TRUE: frees accumulator after 60 quiet ticks (~2048 MiB at Epic's 512^3).
 inline bool& consoleGiFreeAccumulatorSlot() { static bool v = true; return v; }
 
@@ -653,6 +655,16 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         [](ConsoleBatch& b, VarValue v){
             const bool on = v.as.b;
             b.deviceSetters.push_back([on](rhi::IDevice&){ consoleGiBoundedDispatchSlot() = on; });
+        }});
+    t.push_back({"voxi.giSettleTicks", VarType::U32, false,
+        "Ticks the static draw list must hold still before a change to it alone (a level streaming in, an object being "
+        "dragged) rebuilds the GI volume; 60 at the most. Sun, sky and volume changes still rebuild at once. 0 rebuilds on "
+        "every tick the list moves, as before. MEASURED on PTTest Caldera_Capital streaming in, ReSTIR RT: 636 -> 66 "
+        "rebuilds, GPU 85.8 -> 63.4 ms over frames 700-1400. Default 6.",
+        []{ return vU32(consoleGiSettleTicksSlot()); },
+        [](ConsoleBatch& b, VarValue v){
+            const u32 n = v.as.u;
+            b.deviceSetters.push_back([n](rhi::IDevice&){ consoleGiSettleTicksSlot() = n; });
         }});
     t.push_back({"voxi.giFreeAccumulator", VarType::Bool, false,
         "Frees the GI injection accumulator (roughly 2048 MiB at Epic's 512^3, this renderer's single "
