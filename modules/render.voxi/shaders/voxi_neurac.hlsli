@@ -5,6 +5,8 @@
 #define AVER_NEURAC_PURE_HLSLI
 
 #define AVER_RC_CASCADES        3
+// A lookup whose contributing corners hold less trilinear weight than this fades out (rcLookupCascade).
+#define AVER_RC_MIN_COVER       0.25
 #define AVER_RC_RES             64
 #define AVER_RC_CELLS_PER_CASC  262144      // 64^3
 #define AVER_RC_CELLS           786432      // 3 * 64^3

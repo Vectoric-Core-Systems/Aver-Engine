@@ -30,6 +30,7 @@ void rcLookupCascade(uint c, float3 q, float3 N, out float3 value, out float a)
     const float netStrength = info.hdr1.w;
     float3 acc[4] = { (float3)0, (float3)0, (float3)0, (float3)0 };
     float  wsum = 0.0;
+    float  tsum = 0.0;   // trilinear weight of the corners that contributed
     [unroll] for (int i = 0; i < 8; ++i) {
         const int3   o  = int3(i & 1, (i >> 1) & 1, (i >> 2) & 1);
         const int3   wc = b + o + org;
@@ -46,6 +47,7 @@ void rcLookupCascade(uint c, float3 q, float3 N, out float3 value, out float a)
                         * min((float)neff * 0.25, 1.0) * (1.0 - (float)age / (float)AVER_RC_AGE_MAX)
                         * lerp(1.0, trust, netStrength);
         if (w <= 0.0) continue;
+        tsum += tri;
         float3 cc[4];
         rcUnpackSh(cell.a, cell.b.xy, cc);
         [unroll] for (int k = 0; k < 4; ++k) acc[k] += w * cc[k];
@@ -55,7 +57,10 @@ void rcLookupCascade(uint c, float3 q, float3 N, out float3 value, out float a)
     float3 blended[4];
     [unroll] for (int k = 0; k < 4; ++k) blended[k] = acc[k] / wsum;
     value = rcShIrradianceOverPi(blended, N);
-    a     = aEdge * saturate(wsum);
+    // Confidence is the quality of the corners that hold this surface's light, not their share of all eight: beside a wall
+    // or a floor the corners behind it or out in the air never get samples, so a fully trained surface read at most
+    // ~0.5 and paths never ended in the cache. Corners holding under a quarter of the trilinear weight still fade it out.
+    a     = aEdge * saturate(wsum / tsum) * saturate(tsum * (1.0 / AVER_RC_MIN_COVER));
 }
 
 #endif  // AVER_NEURAC_LOOKUP_HLSLI

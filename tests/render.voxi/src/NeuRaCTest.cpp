@@ -577,6 +577,7 @@ int main() {
             {"AVER_RC_CELLS_PER_CASC", rc::kCellsPerCascade}, {"AVER_RC_CELLS", rc::kCells},
             {"AVER_RC_PAYLOAD_BASE", rc::kPayloadBase},       {"AVER_RC_PAYLOAD_INTS", rc::kPayloadInts},
             {"AVER_RC_MARGIN_CELLS", rc::kMarginCells},       {"AVER_RC_CROSSFADE_CELLS", rc::kCrossFadeCells},
+            {"AVER_RC_MIN_COVER", rc::kMinCover},
             {"AVER_RC_MIN_ACCEPT_RATE", rc::kMinAcceptRate},
             {"AVER_RC_TRUST_MAX", rc::kTrustMax},             {"AVER_RC_LEN_MAX", rc::kLenMax},
         };

@@ -21,6 +21,8 @@ inline constexpr i32 kHalfRes          = static_cast<i32>(kRes / 2);
 // Edge margin and cascade cross-fade width.
 inline constexpr u32 kMarginCells      = 1;
 inline constexpr u32 kCrossFadeCells   = 4;
+// A lookup whose contributing corners hold less trilinear weight than this fades out -> AVER_RC_MIN_COVER
+inline constexpr f64 kMinCover        = 0.25;
 
 // ---------------------------------------------------------------- tunables the HLSL mirrors (AVER_RC_*)
 inline constexpr f64 kShScale    = 32768.0;     // 2^15      -> AVER_RC_SH_SCALE

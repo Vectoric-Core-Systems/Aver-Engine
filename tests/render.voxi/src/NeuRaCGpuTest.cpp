@@ -475,7 +475,7 @@ void lookupRef(const Env& e, const rc::RcCell* cells, f32 netStrength, const f32
         for (int a = 0; a < 3; ++a) dEdge = std::min(dEdge, std::min(q[a], static_cast<f32>(rc::kRes) - q[a]));
         const f32 aEdge = std::min(1.0f, std::max(0.0f, (dEdge - static_cast<f32>(rc::kMarginCells)) / static_cast<f32>(rc::kCrossFadeCells)));
         f32 acc[4][3] = {};
-        f32 wsum = 0.0f;
+        f32 wsum = 0.0f, tsum = 0.0f;
         for (int i = 0; i < 8; ++i) {
             const int o[3] = {i & 1, (i >> 1) & 1, (i >> 2) & 1};
             i32 wc[3];
@@ -491,6 +491,7 @@ void lookupRef(const Env& e, const rc::RcCell* cells, f32 netStrength, const f32
             rc::unpackNormal(cell.b[2], dir, len, trust);
             const f32 w = rc::lookupCornerWeight(tri, dot3(dir, N), len, rc::metaNEff(meta), rc::metaAge(meta), trust, netStrength);
             if (w <= 0.0f) continue;
+            tsum += tri;
             f32 sh[rc::kShFloats];
             cellSh(cell, sh);
             for (int k = 0; k < 4; ++k)
@@ -502,7 +503,7 @@ void lookupRef(const Env& e, const rc::RcCell* cells, f32 netStrength, const f32
         for (int k = 0; k < 4; ++k)
             for (int ch = 0; ch < 3; ++ch) blended[k][ch] = acc[k][ch] / wsum;
         rc::shIrradianceOverPi(blended, N, value);
-        const f32 a = aEdge * std::min(1.0f, wsum);
+        const f32 a = aEdge * std::min(1.0f, wsum / tsum) * std::min(1.0f, tsum / static_cast<f32>(rc::kMinCover));
         for (int ch = 0; ch < 3; ++ch) outV[ch] += rem * a * value[ch];
         rem *= 1.0f - a;
     }
