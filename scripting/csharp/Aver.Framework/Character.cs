@@ -80,6 +80,7 @@ public class AverCharacter : AverPawn
     private bool  _yawSeeded;   // has _yaw been taken from the spawn transform yet -- see Drive
     private float _pitch;       // degrees
     private int   _capsule;     // physics character handle; 0 when none
+    internal int PhysicsHandle => _capsule;
     private Entity _view;
 
     /// <summary>The character's head: a child entity at eye height carrying the view pitch.</summary>

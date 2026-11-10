@@ -34,4 +34,12 @@ inline void appendSceneQueryNodeDefs(std::vector<GraphNodeDesc>& t) {
         pin("entity", "int", false), pin("mode", "int", true), pin("has", "bool", true)}});
     t.push_back({"AN_GetActorCount", "Get Actor Count", "Scene", {
         pin("count", "int", true)}});
+    t.push_back({"AN_RaycastIgnoring", "Raycast Ignoring", "Scene", {
+        pin("exec", "exec", false),
+        pin("originX", "float", false), pin("originY", "float", false), pin("originZ", "float", false),
+        pin("dirX", "float", false), pin("dirY", "float", false), pin("dirZ", "float", false),
+        pin("maxDist", "float", false, "10000"), pin("ignore", "int", false),
+        pin("then", "exec", true), pin("hit", "bool", true), pin("entity", "int", true),
+        pin("pointX", "float", true), pin("pointY", "float", true), pin("pointZ", "float", true),
+        pin("distance", "float", true)}});
 }

@@ -1,7 +1,7 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
-// Tests for the SceneQuery family (docs/plans/wave9/VISUAL_SCRIPTING_CSHARP_SYNC.md 2.2): the 12 rows in
+// Tests for the SceneQuery family (docs/plans/wave9/VISUAL_SCRIPTING_CSHARP_SYNC.md 2.2): the 13 rows in
 // GraphSceneQueryNodeTable.cs, every method on GraphSceneQueries. Bare-process scope like MontageNodeTests: the wiring the
 // table owns (pins, the method each row names, required attributes, valid IL, the compiler split) and the rule that an
 // unavailable scene answers 0 or false instead of throwing. What a query returns over a live world is checked where a
@@ -42,6 +42,8 @@ static class SceneQueryNodeTests
         P("an_getdistance", "a:int b:int", "distance:float success:bool"),
         P("an_getragdollstate", "entity:int", "mode:int has:bool"),
         P("an_getactorcount", "", "count:int"),
+        new("an_raycastignoring", GenericKind.Exec, Pins(true, "originX:float originY:float originZ:float dirX:float dirY:float dirZ:float maxDist:float ignore:int",
+            "hit:bool entity:int pointX:float pointY:float pointZ:float distance:float"), new[] { "maxDist=10000" }),
     };
 
     public static int RunAll()
@@ -64,14 +66,14 @@ static class SceneQueryNodeTests
 
     private static int TestRowSetIsTheDesignSet()
     {
-        Console.WriteLine("Test: the scene-query rows are exactly the designed set of 12, 11 pure reads and one exec write");
+        Console.WriteLine("Test: the scene-query rows are exactly the designed set of 13, 11 pure reads and two exec nodes");
         var want = Rows.Select(r => r.Type).OrderBy(x => x).ToArray();
         var got = GameSystemNodes.All.Where(s => s.Owner.Name == "GraphSceneQueries").Select(s => s.Type).OrderBy(x => x).ToArray();
         if (!got.SequenceEqual(want))
             return Fail($"table has [{string.Join(", ", got.Except(want))}] extra and lacks [{string.Join(", ", want.Except(got))}]");
-        if (Rows.Length != 12) return Fail($"expected 12 rows, test lists {Rows.Length}");
+        if (Rows.Length != 13) return Fail($"expected 13 rows, test lists {Rows.Length}");
         var exec = Rows.Where(r => r.Kind == GenericKind.Exec).Select(r => r.Type).ToArray();
-        if (!exec.SequenceEqual(new[] { "an_addcomponent" })) return Fail("only AddComponent may be exec");
+        if (!exec.SequenceEqual(new[] { "an_addcomponent", "an_raycastignoring" })) return Fail("only AddComponent and RaycastIgnoring may be exec");
         Console.WriteLine("  PASS");
         return 0;
     }
@@ -119,6 +121,10 @@ static class SceneQueryNodeTests
             c.Eq("getragdollstate mode is -1", (int)rag["mode"], -1);
 
             c.True("getactorcount is not negative", FamilyAEval.I("an_getactorcount", "count") >= 0);
+
+            var ray = FamilyAEval.Call("an_raycastignoring", FamilyAEval.In("dirX", 1f, "maxDist", 100f, "ignore", 0));
+            c.True("raycastignoring with no world hits nothing", !(bool)ray["hit"]);
+            c.Eq("raycastignoring with no world names no entity", (int)ray["entity"], 0);
         }
         catch (Exception e) { return Fail($"a wrapper threw {e.GetType().Name}: {e.Message}"); }
         return c.Done();

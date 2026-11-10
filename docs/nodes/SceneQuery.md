@@ -2,7 +2,7 @@
 
 # SceneQuery nodes
 
-12 nodes. Rows: `scripting/csharp/Aver.Graph/GraphSceneQueryNodeTable.cs`. Palette: `sandbox/src/GraphNodeDefsSceneQuery.hpp`.
+13 nodes. Rows: `scripting/csharp/Aver.Graph/GraphSceneQueryNodeTable.cs`. Palette: `sandbox/src/GraphNodeDefsSceneQuery.hpp`.
 
 Path: D pure (a read, recomputed per reader), P exec, X trigger (an entry node).
 
@@ -20,3 +20,4 @@ Path: D pure (a read, recomputed per reader), P exec, X trigger (an entry node).
 | `AN_GetParent` | Get Parent | Scene | D | in: `entity` int<br>out: `parent` int | none | `GraphSceneQueries.GetParentForGraph`<br>An entity's parent; 0 for a root or a dead handle. |
 | `AN_GetRagdollState` | Get Ragdoll State | Scene | D | in: `entity` int<br>out: `mode` int, `has` bool | none | `GraphSceneQueries.GetRagdollStateForGraph`<br>The ragdoll mode (-1 none, 0 Kinematic, 1 Limp, 2 Powered); the result is whether the entity has a ragdoll. |
 | `AN_HasComponent` | Has Component | Scene | D | in: `entity` int<br>out: `has` bool | `component` | `GraphSceneQueries.HasComponentForGraph`<br>True when the entity carries the named component (for example CLight). |
+| `AN_RaycastIgnoring` | Raycast Ignoring | Scene | P | in: `exec` exec, `originX` float, `originY` float, `originZ` float, `dirX` float, `dirY` float, `dirZ` float, `maxDist` float = 10000, `ignore` int<br>out: `then` exec, `hit` bool, `entity` int, `pointX` float, `pointY` float, `pointZ` float, `distance` float | none | `GraphSceneQueries.RaycastIgnoringForGraph`<br>A ray that never hits ignore's own body (its character capsule, else its rigid body), so a shot or sight line fired from inside the caster does not hit the caster. |

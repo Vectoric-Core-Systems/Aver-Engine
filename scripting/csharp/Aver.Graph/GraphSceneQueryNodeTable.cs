@@ -27,5 +27,6 @@ internal static partial class GameSystemNodes
         Reg("an_getdistance", GenericKind.Pure, typeof(GraphSceneQueries), "GetDistanceForGraph", "a:int,b:int", "distance:float,success:bool", "p:a,p:b,>distance", "success"),
         Reg("an_getragdollstate", GenericKind.Pure, typeof(GraphSceneQueries), "GetRagdollStateForGraph", "entity:int", "mode:int,has:bool", "p:entity,>mode", "has"),
         Reg("an_getactorcount", GenericKind.Pure, typeof(GraphSceneQueries), "GetActorCountForGraph", "", "count:int", "", "count"),
+        Reg("an_raycastignoring", GenericKind.Exec, typeof(GraphSceneQueries), "RaycastIgnoringForGraph", "originX:float,originY:float,originZ:float,dirX:float,dirY:float,dirZ:float,maxDist:float=10000,ignore:int", "hit:bool,entity:int,pointX:float,pointY:float,pointZ:float,distance:float", "p:originX,p:originY,p:originZ,p:dirX,p:dirY,p:dirZ,p:maxDist,p:ignore,>entity,>pointX,>pointY,>pointZ,>distance", "hit"),
     };
 }

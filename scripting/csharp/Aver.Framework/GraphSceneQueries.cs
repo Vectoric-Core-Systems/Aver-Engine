@@ -5,6 +5,8 @@
 // pin, so a set is read as a count plus an item at an index; the public SceneQueries class is the same thing for C#.
 // Every query is a linear scan of the live scene: cheap for a handful of calls a frame, not for one per entity.
 
+using AP = Aver.Physics;
+
 namespace Aver.Framework;
 
 /// <summary>Counted access to sets of entities: by tag, by actor class, and a parent's children.</summary>
@@ -175,5 +177,29 @@ internal static class GraphSceneQueries
     {
         try { return SceneQueries.ActorCount(); }
         catch (Exception e) { FlowGuard.Failed("GetActorCount", e); return 0; }
+    }
+
+    /// <summary>A ray that never hits <paramref name="ignore"/>'s own body (its character capsule, else its rigid body), so a
+    /// shot or sight line fired from inside the caster does not hit the caster. 0 ignores nothing. The result is whether
+    /// anything was hit; entity is 0 for a hit on something no entity owns (the landscape).</summary>
+    internal static bool RaycastIgnoringForGraph(float originX, float originY, float originZ, float dirX, float dirY, float dirZ,
+                                                 float maxDist, int ignore, out int entity, out float pointX, out float pointY,
+                                                 out float pointZ, out float distance)
+    {
+        entity = 0; pointX = pointY = pointZ = distance = 0f;
+        try
+        {
+            Entity skip = new(ignore);
+            int body = ignore == 0 ? 0 : Actors.Get(skip) is AverCharacter c && c.PhysicsHandle != 0 ? c.PhysicsHandle : skip.RigidBodyHandle;
+            AP.RaycastHit h = AP.Physics.RaycastEx(new AP.Float3(originX, originY, originZ), new AP.Float3(dirX, dirY, dirZ), maxDist,
+                                                   AP.Physics.LayerMaskAll, new AP.Body(body));
+            if (!h.Hit) return false;
+            entity = h.Entity;
+            pointX = h.Point.X; pointY = h.Point.Y; pointZ = h.Point.Z;
+            float ex = pointX - originX, ey = pointY - originY, ez = pointZ - originZ;
+            distance = MathF.Sqrt(ex * ex + ey * ey + ez * ez);
+            return true;
+        }
+        catch (Exception e) { FlowGuard.Failed("RaycastIgnoring", e); return false; }
     }
 }
