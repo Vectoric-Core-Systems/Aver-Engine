@@ -180,6 +180,9 @@ struct ProjectDesc {
 
     // The GI volume's placement. Two sliders in Project Settings > Global Illumination, now persisted.
     // hasGiVolume is a presence flag: volume is a cube (Vec3 center + scalar extent).
+    // LEGACY since 0.8: still parsed and round-tripped, but neither host uses it. The editor wrote it on every
+    // Rendering-page edit from whichever level was open, in that moment's floating-origin frame, so the value was
+    // neither authored nor in world space. The volume is the level's (OcWorldEnv::hasGiVolume).
     bool hasGiVolume = false;   // RENDER.GIVOLUME <cx> <cy> <cz> <extent>
     f32  giCenter[3] = {0, 0, 0};
     f32  giExtent    = 0.0f;    // cm, half-edge of the cube

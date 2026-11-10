@@ -537,6 +537,13 @@ struct OcWorldEnv {
     f64 cloudTop = 280000.0;
     f64 cloudFeatureSize = 50000.0;        // the width of one noise feature, in world units
     f64 cloudWind[2] = {900.0, 260.0};     // world units per second
+
+    // GIVOLUME <cx> <cy> <cz> <extent>: this level's voxel GI volume, world cm (centre, half-edge of the cube).
+    // A level's own record because the right volume is a property of the level: one per project put the
+    // volume one level was fitted to onto every other level. Absent = fitted to the level's placements.
+    bool hasGiVolume = false;
+    f64 giCenter[3] = {0.0, 0.0, 0.0};
+    f64 giExtent = 0.0;
 };
 
 // LEVEL SEQUENCE (docs/formats/FORMAT_SPECS.md section 11): keyframed tracks stored in the level

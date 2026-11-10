@@ -280,6 +280,7 @@ private:
 
     // Applies the loaded level's sun and sky settings to the sky atmosphere.
     void applyLevelSky();
+    void applyLevelGiVolume();   // the level's GIVOLUME record, else fitGiVolumeToLevel()
     void fitGiVolumeToLevel();
 
     // Applies the project's render settings to Voxi.

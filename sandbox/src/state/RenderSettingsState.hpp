@@ -144,6 +144,9 @@ struct RenderSettingsState {
     bool lodShareVertices_ = true;
     bool nrd2MenuWired_ = false;
     bool giDebugView_=false; Vec3 giCenter_{0,0,300}; f32 giExtent_=1200.0f;   // cm
+    // The level's GIVOLUME record: true when the level carried one or the Volume centre/extent was edited here,
+    // so a level save writes it; false = fitted to the level on every load.
+    bool hasLevelGiVolume_ = false;
     bool giConeTraceOff_=false;   // --no-gi-cone: see setGiConeTraceOff's own comment
     // --view-mode undenoised / the dropdown's independent "Undenoised" toggle: forces a bundle of existing runtime knobs off.
     // NOT PERSISTED: reasserted every frame.

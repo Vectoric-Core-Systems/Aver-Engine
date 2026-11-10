@@ -289,14 +289,7 @@ void GameApp::openProject(Engine& e) {
     loadStartMapAtOrigin(cfg_.levelPath);
     loadLevelNav();
     applyLevelSky();
-    // Manifest GI volume wins over auto-fit (mirrors editor precedence)
-    if (project_.hasGiVolume) {
-        giCenter_ = Vec3{project_.giCenter[0], project_.giCenter[1], project_.giCenter[2]};
-        giExtent_ = project_.giExtent;
-        AVER_INFO("[Voxi] GI volume from the manifest: centre[{:.0f} {:.0f} {:.0f}] extent {:.0f}cm",
-                  giCenter_.x, giCenter_.y, giCenter_.z, giExtent_);
-    }
-    if (project_.giExtent <= 0.0f) fitGiVolumeToLevel();
+    applyLevelGiVolume();   // the level's GIVOLUME record, else fitted; RENDER.GIVOLUME is legacy (OcProject.hpp)
 #endif
     applyProjectRenderSettings();
     // RENDER.EXPOSURE/BLOOM/AUTOEXPOSURE/TONEMAP are per-device post state (like PHYSICS/AUDIO)
@@ -356,7 +349,7 @@ void GameApp::travelTo(const std::string& requested) {
     loadStartMapAtOrigin(path);
     loadLevelNav();
     applyLevelSky();
-    if (project_.giExtent <= 0.0f) fitGiVolumeToLevel();
+    applyLevelGiVolume();
     level_.spawnClassPlacements();
     auto named = [](const std::string& n, i32 flag) -> i32 {
         const i32 c = n.empty() ? 0 : aver_fw_class_find(n.c_str());
@@ -400,6 +393,18 @@ void GameApp::applyLevelSky() {
     AVER_INFO("[Level] applied environment: sun={} sky={} fog={} clouds={}, intensity {:.2f}, "
               "model {}", w.hasSun, w.hasSky, w.hasFog, w.hasClouds, sky_.sunIntensity,
               w.skyPhysical ? "physical" : "authored");
+#endif
+}
+
+// The editor's rule (SandboxLevelLoad.cpp): the level's GIVOLUME record, else fitted to the level.
+void GameApp::applyLevelGiVolume() {
+#if AVER_MODULE_SCENE && AVER_MODULE_VOXI
+    const fmt::OcWorldEnv& w = level_.env();
+    if (!w.hasGiVolume) { fitGiVolumeToLevel(); return; }
+    giCenter_ = Vec3{static_cast<f32>(w.giCenter[0]), static_cast<f32>(w.giCenter[1]), static_cast<f32>(w.giCenter[2])};
+    giExtent_ = static_cast<f32>(w.giExtent);
+    AVER_INFO("[Voxi] GI volume from the level: centre[{:.0f} {:.0f} {:.0f}] extent {:.0f}cm",
+              giCenter_.x, giCenter_.y, giCenter_.z, giExtent_);
 #endif
 }
 

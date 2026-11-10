@@ -172,13 +172,7 @@ void SandboxApp::captureRenderSettingsFromUi(const voxi::Settings& requested, u3
     // manifest key, same -1 means unstated rule" shape those two already are.
     projSess_.project_.averSr = rset_.averSrProjectDefault_;
 #endif
-    // The GI volume's placement, which had no key at all -- so a level whose geometry is not at
-    // the origin could never record where its indirect light should be gathered.
-    projSess_.project_.hasGiVolume = true;
-    projSess_.project_.giCenter[0] = rset_.giCenter_.x;
-    projSess_.project_.giCenter[1] = rset_.giCenter_.y;
-    projSess_.project_.giCenter[2] = rset_.giCenter_.z;
-    projSess_.project_.giExtent    = rset_.giExtent_;
+    // The GI volume is not a project setting: it goes out with the level (GIVOLUME, saveLevel).
     autosave_.projectDirty_ = true;
 }
 
@@ -556,6 +550,11 @@ bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
     // silently dropped. That second half was missing for a long time: the claim was in this
     // comment while the flags were set only by the loader, so it held for levels that already
     // had the record and for no others.
+    w.hasGiVolume = rset_.hasLevelGiVolume_;
+    if (w.hasGiVolume) {
+        for (int i = 0; i < 3; ++i) w.giCenter[i] = static_cast<f64>((&rset_.giCenter_.x)[i]);
+        w.giExtent = static_cast<f64>(rset_.giExtent_);
+    }
     w.hasSun    = rset_.hasLevelSun_;
     w.hasSky    = rset_.hasLevelSky_;
     w.hasFog    = rset_.hasLevelFog_;

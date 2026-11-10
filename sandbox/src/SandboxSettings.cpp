@@ -1719,8 +1719,21 @@ void SandboxApp::renderPageGi(voxi::Renderer& vx, voxi::Settings& s, const voxi:
                            "this session is still %u^3.", voxiRenderer_.voxelResolutionBuilt());
     if (ImGui::SliderFloat("GI intensity", &s.giIntensity, 0.0f, 4.0f)) changed = true;
     if (ImGui::SliderFloat("GI distance", &s.giMaxDistance, 10.0f, 20000.0f, "%.0f")) changed = true;
-    ImGui::DragFloat3("Volume centre", &rset_.giCenter_.x, 0.5f);
-    ImGui::DragFloat("Volume extent", &rset_.giExtent_, 0.5f, 1.0f, 100000.0f);
+    // Saved with the LEVEL (its GIVOLUME record), not the project: an edit here marks the level unsaved.
+    if (ImGui::DragFloat3("Volume centre", &rset_.giCenter_.x, 0.5f)) markLevelRecordEdited(rset_.hasLevelGiVolume_);
+    if (ImGui::DragFloat("Volume extent", &rset_.giExtent_, 0.5f, 1.0f, 100000.0f)) markLevelRecordEdited(rset_.hasLevelGiVolume_);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Saved with this level. A level that never had its volume set is fitted to its contents on load.");
+#if AVER_MODULE_SCENE
+    if (rset_.hasLevelGiVolume_) {
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Fit to level")) {
+            fitGiVolumeToLevel();
+            rset_.hasLevelGiVolume_ = false;
+            markLevelUnsaved();
+        }
+    }
+#endif
     // Diffuse cone count: tier-derived. Quality above re-derives it.
     {
         int cones = static_cast<int>(s.giCones);

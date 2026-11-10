@@ -263,7 +263,7 @@ Kept:
 - `openProject()`: load order critical: index → meshes → levels. Without this order, content lookups fail.
 
 - GI volume follows the camera (`voxi.giVolumeFollow`, default on, `VoxiRenderer::setVolume`) while the camera is outside the authored or fitted volume's inner three quarters: recentred in quarter-volume steps with half-volume hysteresis and only once the eye has moved under ~6 m/s for half a second (each recentre re-voxelises; recentring during flight doubled frames over 40 ms), no GI cache files written while following, NeuRaC relaxed (not reset) on a recentre. A km-scale level (Caldera) was otherwise lit with second-bounce light of 0 everywhere but the origin.
-- `openProject()`: manifest GI volume (RENDER.GIVOLUME) wins over auto-fit, mirroring editor precedence. Without the guard, fitGiVolumeToLevel() runs unconditionally and discards hand-authored GI volume on every launch (see docs/RUNTIME-DEDUP.md C4).
+- `openProject()` / `travelTo()`: `applyLevelGiVolume()` -- the level's `GIVOLUME` record, else fitted to the level (the editor's rule). Since 0.8 the project's `RENDER.GIVOLUME` is legacy and ignored: the editor wrote it from whichever level was open, in the floating-origin frame of the moment.
 
 - `openProject()`: RENDER.EXPOSURE/BLOOM/AUTOEXPOSURE/TONEMAP are per-device post state (like PHYSICS/AUDIO), applied separately from render settings.
 

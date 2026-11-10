@@ -353,11 +353,11 @@ void SandboxApp::applyProjectVoxiSettings() {
     voxi::Settings x = vx.settings();
     voxi::applyManifestTwoPhase(projSess_.project_, x, [&]() { vx.setSettings(x); x = vx.settings(); });
 
-    // The GI volume, which is not a voxi::Settings field at all -- it is set through
-    // setVolume(centre, extent), so it has to be applied separately from the knob block above.
+    // RENDER.GIVOLUME is not applied: the GI volume is each level's (GIVOLUME record, else fitted). Cleared so the next
+    // project save drops the stale line instead of carrying it forever.
     if (projSess_.project_.hasGiVolume) {
-        rset_.giCenter_ = Vec3{projSess_.project_.giCenter[0], projSess_.project_.giCenter[1], projSess_.project_.giCenter[2]};
-        rset_.giExtent_ = projSess_.project_.giExtent;
+        AVER_INFO("[Project] RENDER.GIVOLUME ignored: the GI volume is per level since 0.8 (fitted, or the level's GIVOLUME record)");
+        projSess_.project_.hasGiVolume = false;
     }
 }
 

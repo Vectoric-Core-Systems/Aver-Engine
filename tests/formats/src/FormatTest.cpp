@@ -2075,6 +2075,9 @@ static void checkOcworldPrecision() {
     pvol.bounds[3] = v[0] + 1000.123; pvol.bounds[4] = v[1] + 1000.123; pvol.bounds[5] = v[2] + 1000.123;
     w.postVolumes.push_back(pvol);
 
+    w.hasGiVolume = true;
+    w.giCenter[0] = v[2]; w.giCenter[1] = v[0]; w.giCenter[2] = v[1]; w.giExtent = 2356.25;
+
     const std::string text = writeOcworld(w);
     OcWorldData b;
     check(parseOcworld(text, b, &err), "a level of far positions parses again: " + err);
@@ -2083,6 +2086,8 @@ static void checkOcworldPrecision() {
           "PLACE keeps every digit of an f64 position at 1e8 and 1e9 cm");
     check(b.hasSpawn && b.spawnX == v[0] && b.spawnY == v[1] && b.spawnZ == v[2], "SPAWN does");
     check(b.hasCamera && b.camX == v[1] && b.camY == v[2] && b.camZ == v[0], "CAMERA does");
+    check(b.hasGiVolume && b.giCenter[0] == v[2] && b.giCenter[1] == v[0] && b.giCenter[2] == v[1] && b.giExtent == 2356.25,
+          "GIVOLUME does");
     check(b.lights.size() == 1 && b.lights[0].x == v[2] && b.lights[0].y == v[0] && b.lights[0].z == v[1], "LIGHT does");
     check(b.decals.size() == 1 && b.decals[0].x == v[1] && b.decals[0].y == v[0] && b.decals[0].z == v[2], "DECAL does");
     check(b.landscapes.size() == 1 && b.landscapes[0].x == v[0] && b.landscapes[0].y == v[2] && b.landscapes[0].z == v[1], "LANDSCAPE at does");

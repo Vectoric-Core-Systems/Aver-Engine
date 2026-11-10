@@ -486,6 +486,12 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
                 else if (equalsCI(t[i], "start")      && i + 1 < t.size()) out.fogStart      = parseF64(t[i+1]);
                 else if (equalsCI(t[i], "maxopacity") && i + 1 < t.size()) out.fogMaxOpacity = parseF64(t[i+1]);
             }
+        } else if (equalsCI(key, "GIVOLUME")) {
+            if (t.size() >= 5 && tokF(t, 4) > 0.0) {   // a volume with no size is no volume: the level is fitted instead
+                out.hasGiVolume = true;
+                for (int i = 0; i < 3; ++i) out.giCenter[i] = tokF(t, 1 + i);
+                out.giExtent = tokF(t, 4);
+            }
         } else if (equalsCI(key, "CLOUDS")) {
             // The record's PRESENCE is "this level has an opinion about clouds"; the on|off word is
             // the opinion. See OcWorldEnv::hasClouds for why those are two facts and not one.
@@ -1119,6 +1125,10 @@ std::string writeOcworld(const OcWorldData& w) {
              " height " + num(w.fogHeight) +
              " start " + num(w.fogStart) +
              " maxopacity " + num(w.fogMaxOpacity) + "\n";
+    }
+    if (w.hasGiVolume) {   // only a level whose volume was set by hand; the rest are fitted on load
+        s += "GIVOLUME " + num(w.giCenter[0]) + " " + num(w.giCenter[1]) + " " + num(w.giCenter[2]) + " " +
+             num(w.giExtent) + "\n";
     }
     // OMITTED ENTIRELY when the level never spoke about clouds, so a file that predates this record
     // does not grow one and every level in the tree stays byte-identical through a load and save.

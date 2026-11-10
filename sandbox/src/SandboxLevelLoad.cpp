@@ -616,7 +616,20 @@ void SandboxApp::onLevelInstantiated(const game::GameLevel::LoadedLevel& loaded)
     // 2356cm and shrank the volume for a level it already covered. project_.giExtent is 0 when
     // the manifest states nothing, which is exactly the "no author has an opinion" case the fit
     // is for.
-    if (!w.placements.empty() && projSess_.project_.giExtent <= 0.0f) fitGiVolumeToLevel();
+    //
+    // 0.8: THE VOLUME IS THE LEVEL'S. The project-wide RENDER.GIVOLUME this used to defer to was not authored: the
+    // Rendering page wrote it on any edit from whichever level was open, in that moment's floating-origin frame. PTTest
+    // carried a centre 98 km from every level, and Sponza, lit almost only by bounce light, lost its GI.
+    // Saved only at the first region (originBlocksSave), so the record's world cm are the scene frame here.
+    rset_.hasLevelGiVolume_ = w.hasGiVolume;
+    if (w.hasGiVolume) {
+        rset_.giCenter_ = Vec3{static_cast<f32>(w.giCenter[0]), static_cast<f32>(w.giCenter[1]), static_cast<f32>(w.giCenter[2])};
+        rset_.giExtent_ = static_cast<f32>(w.giExtent);
+        AVER_INFO("[Voxi] GI volume from the level: centre ({:.0f},{:.0f},{:.0f}) half-extent {:.0f}cm",
+                  rset_.giCenter_.x, rset_.giCenter_.y, rset_.giCenter_.z, rset_.giExtent_);
+    } else if (!w.placements.empty()) {
+        fitGiVolumeToLevel();
+    }
 #endif
 
     // JUST LOADED MEANS JUST SAVED, as far as the exit prompt is concerned. openLevelDirect
@@ -688,7 +701,8 @@ void SandboxApp::onLegacyOcmapInstantiated(const game::GameLevel::LoadedLevel& l
     // The legacy .ocmap path fitted the GI volume through the camera framing's old side effect too,
     // so it gets the explicit call for the same reason the OCWORLD path above does.
 #if AVER_MODULE_VOXI
-    if (!loaded.world.placements.empty() && projSess_.project_.giExtent <= 0.0f) fitGiVolumeToLevel();
+    rset_.hasLevelGiVolume_ = false;   // an .ocmap has no GIVOLUME record
+    if (!loaded.world.placements.empty()) fitGiVolumeToLevel();
 #endif
 }
 
