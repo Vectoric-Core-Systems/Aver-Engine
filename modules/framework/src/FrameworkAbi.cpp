@@ -2413,6 +2413,45 @@ void    aver_fw_set_view_entity(int32_t entity) { viewRequest().entity = entity;
 // The published view entity, or 0.
 int32_t aver_fw_view_entity(void)               { return viewRequest().entity; }
 
+namespace {
+// The view is the player's: its possessed pawn's, or, with nothing possessed, whichever character drives itself.
+bool publishesView(int32_t pawn) {
+    const int32_t owned = aver_fw_controlled_pawn(aver_fw_player_controller(0));
+    return owned == 0 || owned == pawn;
+}
+} // namespace
+
+int32_t aver_fw_set_view_for(int32_t pawn, int32_t mode, float eyeHeight, float boomLength) {
+    if (!publishesView(pawn)) return 0;
+    aver_fw_set_view(mode, eyeHeight, boomLength);
+    return 1;
+}
+int32_t aver_fw_set_view_entity_for(int32_t pawn, int32_t entity) {
+    if (!publishesView(pawn)) return 0;
+    aver_fw_set_view_entity(entity);
+    return 1;
+}
+
+namespace {
+std::unordered_map<std::string, int32_t>& namedEntities() {
+    static std::unordered_map<std::string, int32_t> m;
+    return m;
+}
+} // namespace
+
+int32_t aver_fw_name_entity(int32_t entity, const char* name) {
+    if (!name || !*name || entity == 0) return 0;
+    return namedEntities().emplace(name, entity).second ? 1 : 0;
+}
+int32_t aver_fw_find_named(const char* name) {
+    if (!name || !*name) return 0;
+    const auto& m = namedEntities();
+    const auto it = m.find(name);
+    if (it == m.end() || !world().valid(toEntity(it->second))) return 0;
+    return it->second;
+}
+void aver_fw_clear_named(void) { namedEntities().clear(); }
+
 // ---- the sky's cloud layer, published by a script -------------------------------------------
 //
 // SAME SHAPE AS ViewRequest, and here for the same reason: it is app-facing state a script wants to

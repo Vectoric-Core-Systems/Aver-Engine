@@ -351,6 +351,16 @@ void GameLevel::load(const std::string& path, GameContent& content) {
         const std::string& preset = w.placements[inst.placementIndex[k]].vehiclePreset;
         if (!preset.empty()) vehiclePlacements_.push_back(VehiclePlacement{inst.entities[k], preset});
     }
+#if AVER_MODULE_FRAMEWORK
+    // A placement's `name` is how scripts find it (Game.Find / FindEntity): the entity's own scene name stays its asset
+    // path, which saving reads back, so the names go to the framework's table instead.
+    aver_fw_clear_named();
+    for (usize k = 0; k < inst.entities.size(); ++k) {
+        const std::string& name = w.placements[inst.placementIndex[k]].name;
+        if (!name.empty() && !aver_fw_name_entity(static_cast<int32_t>(inst.entities[k]), name.c_str()))
+            AVER_WARN("[Level] placement name '{}' is used twice; scripts find the first", name);
+    }
+#endif
 #if AVER_MODULE_PHYSICS
     // The lane file is only read when there is a car to use it, so a level without traffic never looks
     // for one.
@@ -897,6 +907,7 @@ void GameLevel::tickStreaming(const std::vector<Vec3>& viewers) {
 void GameLevel::unload() {
     instances_.end();   // [wave3/level-instances] before anything its members or classes stand on goes
 #if AVER_MODULE_FRAMEWORK
+    aver_fw_clear_named();
     // BEFORE the raw-entity loop below, and through aver_fw_destroy rather than world.destroy(): a
     // class instance needs its managed-dispatch unbind hook to actually fire (HostBridge.cs's
     // DispUnbind), which is what releases its GraphHost/VAR storage and drops it out of

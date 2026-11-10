@@ -208,6 +208,9 @@ internal static class Fw
 
     [DllImport(Lib)] internal static extern void aver_fw_set_view(int mode, float eyeHeight, float boomLength);
     [DllImport(Lib)] internal static extern void aver_fw_set_view_entity(int entity);
+    [DllImport(Lib)] internal static extern int aver_fw_set_view_for(int pawn, int mode, float eyeHeight, float boomLength);
+    [DllImport(Lib)] internal static extern int aver_fw_set_view_entity_for(int pawn, int entity);
+    [DllImport(Lib)] internal static extern int aver_fw_find_named([MarshalAs(UnmanagedType.LPUTF8Str)] string name);
 
     [DllImport(Lib)] internal static extern void aver_fw_set_sky_clouds(
         int seed, float coverage, float density, float bottomCm, float topCm,

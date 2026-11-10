@@ -77,8 +77,11 @@ extern "C" {
  *      (connection, name, rumble); touch state; pointer modes, cursor shapes and images, pointer warp;
  *      window mode/size/position/flags/title requests and the published window state; present modes
  *      (aver_fw_request_present_mode); the frame cap (aver_fw_set_max_fps).
- * 2.9: CONTENT PRELOAD, appended only: aver_fw_prefetch_content / aver_fw_take_prefetch (see that section). */
-#define AVER_FW_ABI_VERSION_MINOR 9
+ * 2.9: CONTENT PRELOAD, appended only: aver_fw_prefetch_content / aver_fw_take_prefetch (see that section).
+ * 2.10: aver_fw_set_view_for / aver_fw_set_view_entity_for (a character publishes the view only when it is the
+ *       player's pawn, or when no pawn is possessed); aver_fw_name_entity / aver_fw_find_named /
+ *       aver_fw_clear_named (a level placement's `name`, findable by scripts). */
+#define AVER_FW_ABI_VERSION_MINOR 10
 #define AVER_FW_ABI_VERSION \
     ((AVER_FW_ABI_VERSION_MAJOR << 16) | AVER_FW_ABI_VERSION_MINOR)
 
@@ -914,6 +917,20 @@ AVER_FW_ABI void aver_fw_view(int32_t* outMode, float* outEyeHeight, float* outB
 AVER_FW_ABI void    aver_fw_set_view_entity(int32_t entity);
 /* The published view entity, or 0. Valid only while the scene says it is. */
 AVER_FW_ABI int32_t aver_fw_view_entity(void);
+/* The same two requests made BY A CHARACTER: applied only when `pawn` is the pawn the player controller possesses,
+ * or when it possesses none (a level whose one character drives itself). Any other character -- an AI soldier,
+ * an NPC -- moving through the same code path leaves the player's camera alone. Return 1 when applied. */
+AVER_FW_ABI int32_t aver_fw_set_view_for(int32_t pawn, int32_t mode, float eyeHeight, float boomLength);
+AVER_FW_ABI int32_t aver_fw_set_view_entity_for(int32_t pawn, int32_t entity);
+
+/* ---- names a level gave its placements ------------------------------------------------------------
+ * A placement's `name` (PLACE ... name SiteA) is what its author calls it, but the entity's own scene name is its
+ * asset path, which level saving reads back. The host registers each named placement here when a level loads and
+ * clears the table when it unloads; Game.Find / FindEntity fall back to it when no entity carries the name itself.
+ * Lookup skips an entity that has since been destroyed. Names are case-sensitive; a repeated name keeps the first. */
+AVER_FW_ABI int32_t aver_fw_name_entity(int32_t entity, const char* name);   /* 1 recorded, 0 refused (empty, taken) */
+AVER_FW_ABI int32_t aver_fw_find_named(const char* name);                     /* the entity, or 0 */
+AVER_FW_ABI void    aver_fw_clear_named(void);
 
 /* ---- the sky's cloud layer, published by a script ------------------------------------------
  *

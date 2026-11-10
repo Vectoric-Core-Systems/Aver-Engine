@@ -55,7 +55,7 @@ Keyed on the job, not the module. If your job is here, the seam is decided.
 | Start or stop a play session; pause it | Framework | `aver_fw_begin_play`, `aver_fw_end_play`, `aver_fw_set_paused` |
 | Push this frame's keyboard/mouse in | Framework | `aver_fw_input_new_frame` → `…_set_key` / `…_set_mouse` |
 | Read whether a key went down this frame | Framework | `aver_fw_input_key_pressed(key)` |
-| Publish which node the play camera follows | Framework | `aver_fw_set_view`, `aver_fw_set_view_entity` |
+| Publish which node the play camera follows | Framework | `aver_fw_set_view`, `aver_fw_set_view_entity`; from a character, `aver_fw_set_view_for` / `aver_fw_set_view_entity_for` (2.10: applied only for the player's pawn) |
 | **Create an entity** with no gameplay meaning (it is *not* bare — `CName`/`CLocal`/`CWorld`/`CHierarchy` are attached at birth, `scene_abi.h:141`) | Scene | `aver_scene_create()` |
 | Read or write **a transform** | Scene | `aver_scene_field("CLocal.position")` → `aver_scene_get_vec` / `set_vec` |
 | Get a **world** matrix (parents composed) | Scene | `aver_scene_world_matrix(e, out16)` |

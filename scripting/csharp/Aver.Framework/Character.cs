@@ -241,9 +241,11 @@ public class AverCharacter : AverPawn
         // class did not write is adopted instead of overwritten. One it did write reads back within
         // float noise, far inside the tolerance, so an undisturbed character never re-seeds.
         //
-        // aver_fw_set_view STAYS THE FIRST NATIVE CALL: CharacterMoveNodeTests proves a graph reached
+        // aver_fw_set_view_for STAYS THE FIRST NATIVE CALL: CharacterMoveNodeTests proves a graph reached
         // this method by the EntryPointNotFoundException that call raises in a process with no engine.
-        Fw.aver_fw_set_view((int)CameraViewMode, EyeHeight, BoomLength);
+        // _FOR, because the view is process-wide: every AI character driving itself through here used to publish its
+        // own camera, and the last one to move took the player's view. Native applies it only for the player's pawn.
+        Fw.aver_fw_set_view_for(Self.Handle, (int)CameraViewMode, EyeHeight, BoomLength);
 
         float placedYaw = YawDegreesFromQuat(Self.LocalRotation);
         if (!_yawSeeded || MathF.Abs(DeltaDegrees(placedYaw, _yaw)) > AdoptToleranceDeg)
@@ -421,7 +423,7 @@ public class AverCharacter : AverPawn
         if (_view.IsAlive)
         {
             _view.SetLocalPosition(Vec3.Up * EyeHeight);
-            Fw.aver_fw_set_view_entity(_view.Handle);
+            Fw.aver_fw_set_view_entity_for(Self.Handle, _view.Handle);
             return;
         }
         int e = SceneNative.aver_scene_create();
@@ -431,7 +433,7 @@ public class AverCharacter : AverPawn
         _view.SetParent(Self);
         _view.SetLocalPosition(Vec3.Up * EyeHeight);
         ApplyLookRotation();
-        Fw.aver_fw_set_view_entity(_view.Handle);
+        Fw.aver_fw_set_view_entity_for(Self.Handle, _view.Handle);
     }
 
     // Writes yaw to the body and pitch to the head.

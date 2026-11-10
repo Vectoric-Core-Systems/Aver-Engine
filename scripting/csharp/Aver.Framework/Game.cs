@@ -152,7 +152,13 @@ public static partial class Game
     public static T? PlayerPawnAs<T>(int playerIndex = 0) where T : AverPawn => Actors.Get<T>(GetPlayerPawn(playerIndex));
 
     /// <summary>The live entity named <paramref name="name"/> (first match), or <see cref="Entity.None"/>. A linear scan.</summary>
-    public static Entity Find(string name) => new(SceneNative.aver_scene_find(name));
+    /// A level placement's `name` counts: its entity's own scene name is the asset path (what saving reads back), so
+    /// when no entity carries the name itself the framework's table of placement names is asked.
+    public static Entity Find(string name)
+    {
+        int e = SceneNative.aver_scene_find(name);
+        return new(e != 0 ? e : Fw.aver_fw_find_named(name));
+    }
 
     /// <summary>Writes the whole world to <paramref name="path"/> and returns whether it landed.
     ///

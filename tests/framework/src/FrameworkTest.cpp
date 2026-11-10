@@ -1039,6 +1039,26 @@ static void testPlayLifecycle() {
     check(aver_fw_begin_play(giC, gmC) == 1, "begin_play starts a session (extra-actor case)");
     const int32_t extra = aver_fw_spawn(pawnC, "extra-play-actor", nullptr, nullptr, nullptr);
     check(extra != 0 && aver_fw_class_of(extra) == pawnC, "an extra actor spawns mid-session");
+
+    // THE VIEW IS THE PLAYER'S (minor 10): a second character driving itself -- an AI soldier -- must not take it.
+    {
+        const int32_t owned = aver_fw_controlled_pawn(aver_fw_player_controller(0));
+        aver_fw_set_view(AVER_FW_VIEW_FIRST_PERSON, 160.0f, 0.0f);
+        aver_fw_set_view_entity(owned);
+        check(aver_fw_set_view_for(extra, AVER_FW_VIEW_THIRD_PERSON, 90.0f, 300.0f) == 0,
+              "an unpossessed character's view request is refused while the player possesses a pawn");
+        check(aver_fw_set_view_entity_for(extra, extra) == 0, "and so is its view entity");
+        int32_t mode = -1; float eye = 0.0f, boom = 0.0f;
+        aver_fw_view(&mode, &eye, &boom);
+        check(mode == AVER_FW_VIEW_FIRST_PERSON && eye == 160.0f && aver_fw_view_entity() == owned,
+              "the player's view is untouched by it");
+        check(aver_fw_set_view_for(owned, AVER_FW_VIEW_THIRD_PERSON, 90.0f, 300.0f) == 1 &&
+                  aver_fw_set_view_entity_for(owned, extra) == 1,
+              "the possessed pawn's own requests are applied");
+        aver_fw_view(&mode, &eye, &boom);
+        check(mode == AVER_FW_VIEW_THIRD_PERSON && boom == 300.0f && aver_fw_view_entity() == extra, "and read back");
+        aver_fw_set_view_entity(0);
+    }
     check(aver_fw_end_play() == 1, "end_play ends the session with an extra actor still live");
     check(aver_fw_class_of(extra) == 0, "end_play tore down the extra play-spawned actor, not just the roots");
     check(aver_fw_game_mode() == 0, "and the session roots are cleared too");
@@ -1066,6 +1086,27 @@ static void testPlayLifecycle() {
     check(aver_fw_begin_play(giC, 0) == 0, "begin_play with an invalid GameMode is refused");
     check(aver_fw_play_state() == AVER_FW_PLAY_EDITOR, "a refused begin_play leaves the state in EDITOR");
     check(aver_fw_game_instance() == 0, "a refused begin_play leaves no GameInstance behind");
+    World::instance().flush();
+}
+
+// A level placement's name (minor 10): registered by the host, found by name, gone with its entity or the level.
+static void testNamedPlacements() {
+    AVER_INFO("=== named placements: the table scripts find a level's named placements in ===");
+    aver_fw_clear_named();
+    const int32_t a = aver_scene_create();
+    const int32_t b = aver_scene_create();
+    check(aver_fw_name_entity(a, "SiteA") == 1, "a placement name is recorded");
+    check(aver_fw_name_entity(b, "SiteA") == 0, "a second placement with the same name is refused (the first keeps it)");
+    check(aver_fw_name_entity(b, "") == 0 && aver_fw_name_entity(0, "X") == 0, "an empty name or entity 0 is refused");
+    check(aver_fw_name_entity(b, "SiteB") == 1, "another name is recorded");
+    check(aver_fw_find_named("SiteA") == a && aver_fw_find_named("SiteB") == b, "each is found by its name");
+    check(aver_fw_find_named("sitea") == 0 && aver_fw_find_named("Nope") == 0, "names are exact; an unknown one is 0");
+    World::instance().destroy(static_cast<Entity>(b));
+    World::instance().flush();
+    check(aver_fw_find_named("SiteB") == 0, "a destroyed entity is not found");
+    aver_fw_clear_named();
+    check(aver_fw_find_named("SiteA") == 0, "clearing the table (a level unload) forgets every name");
+    World::instance().destroy(static_cast<Entity>(a));
     World::instance().flush();
 }
 
@@ -2369,6 +2410,7 @@ int main() {
     testPossessReentrancy();
     testPlayLifecycle();
     testTravel();   // after the lifecycle test: it declares a GameMode and a GameInstance of its own
+    testNamedPlacements();
     testInput();
     testRawVk();
     testGamepad();
