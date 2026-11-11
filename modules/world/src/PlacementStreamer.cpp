@@ -450,9 +450,14 @@ void PlacementStreamer::rebuildHlodItems() {
     std::unordered_map<u64, u32> at;
     at.reserve(hlod_.size());
     for (u32 i = 0; i < hlod_.size(); ++i) { hlod_[i].items.clear(); at.emplace(key(hlod_[i].cell.cx, hlod_[i].cell.cy), i); }
+    const f64 wide = static_cast<f64>(s_.cellCm) * static_cast<f64>(kHlodWideCells);
     for (u32 id = 0; id < items_.size(); ++id) {
         const Item& m = items_[id];
         if (!m.alive) continue;
+        // A wide item (a road, a ground tile) loads by its nearest edge, so it is resident wherever it reaches near a viewer while the
+        // rest of its home cell is far: counted, its cell would never show (a hole) or never hide (its proxy fighting it). Proxies leave
+        // it out (fmt::planHlodCells, the same rule), so the ring does too.
+        if (m.bd.max.x - m.bd.min.x > wide || m.bd.max.y - m.bd.min.y > wide) continue;
         const f64 cx = (m.bd.min.x + m.bd.max.x) * 0.5, cy = (m.bd.min.y + m.bd.max.y) * 0.5;
         const auto it = at.find(key(cellOfD(cx), cellOfD(cy)));
         if (it != at.end()) hlod_[it->second].items.push_back(id);

@@ -181,6 +181,62 @@ int main() {
         fmt::OcMeshData small = cube("stone");
         check(trifactor::simplifyToBudget(small, 100, &under) && under == 12, "a mesh already within budget is untouched");
     }
+    {   // by error (the HLOD path): flat goes to almost nothing, relief stays within the bound, specks are pruned, materials kept
+        const auto gridOf = [](int N, f32 amp) {
+            fmt::OcMeshData g;
+            for (int y = 0; y <= N; ++y)
+                for (int x = 0; x <= N; ++x) {
+                    g.positions.insert(g.positions.end(), {f32(x), f32(y), amp * std::sin(0.4f * x) * std::cos(0.3f * y)});
+                    g.normals.insert(g.normals.end(), {0, 0, 1});
+                    g.uvs.insert(g.uvs.end(), {f32(x) / N, f32(y) / N});
+                }
+            for (int y = 0; y < N; ++y)
+                for (int x = 0; x < N; ++x) {
+                    const u32 a = y * (N + 1) + x, b = a + 1, c = a + N + 1, d = c + 1;
+                    g.indices.insert(g.indices.end(), {a, b, d, a, d, c});
+                }
+            g.materialSlots = {"moss"};
+            fmt::OcMeshSubmesh sm; sm.name = "moss"; sm.indexCount = static_cast<u32>(g.indices.size()); sm.vertexCount = g.vertexCount();
+            g.submeshes = {sm};
+            g.computeBounds();
+            return g;
+        };
+        fmt::OcMeshData flat = gridOf(40, 0.0f);
+        std::string why;
+        const bool flatOk = trifactor::simplifyToError(flat, 0.05f, &why);
+        check(flatOk && flat.indices.size() / 3 <= 8 && finite(flat), "a flat 3200-triangle grid at 0.05 error keeps at most 8 triangles: " + why);
+        check(std::fabs(flat.boundsMin.x) < 1e-4f && std::fabs(flat.boundsMax.x - 40.0f) < 1e-4f &&
+              std::fabs(flat.boundsMax.y - 40.0f) < 1e-4f, "...and keeps its outline");
+
+        fmt::OcMeshData tight = gridOf(40, 2.0f), loose = gridOf(40, 2.0f);
+        const bool reliefOk = trifactor::simplifyToError(tight, 0.01f) && trifactor::simplifyToError(loose, 0.5f);
+        check(reliefOk && loose.indices.size() < tight.indices.size() && tight.indices.size() / 3 > 1000,
+              "relief keeps more triangles at a tighter bound (" + std::to_string(tight.indices.size() / 3) + " at 0.01, " +
+              std::to_string(loose.indices.size() / 3) + " at 0.5)");
+        check(std::fabs(tight.boundsMax.z - gridOf(40, 2.0f).boundsMax.z) < 0.05f, "a tight bound keeps the relief's height");
+
+        // A 100 cm cube with forty 0.5 cm specks beside it: an error of 2 drops the specks, keeps the cube.
+        fmt::OcMeshData big = cube("stone"), speck = cube("stone");
+        std::vector<fmt::OcMergeItem> items = {at(&big, 0, 0, 0, 100, 100, 100)};
+        for (int k = 0; k < 40; ++k) items.push_back(at(&speck, 150.0 + 3.0 * k, 0, 0, 0.5, 0.5, 0.5));
+        fmt::OcMeshData scene;
+        fmt::mergeStaticMeshes(items, {}, scene);
+        const bool specksOk = trifactor::simplifyToError(scene, 2.0f);
+        check(specksOk && scene.indices.size() / 3 <= 12 && scene.indices.size() / 3 >= 10,
+              "specks smaller than the error are pruned and the cube stays (" + std::to_string(scene.indices.size() / 3) + " tris)");
+
+        fmt::OcMeshData two;
+        fmt::OcMeshData g2 = gridOf(20, 1.0f);
+        std::vector<fmt::OcMergeItem> mats = {at(&g2, 0, 0, 0), at(&g2, 20, 0, 0, 1, 1, 1, "rock")};
+        fmt::mergeStaticMeshes(mats, {}, two);
+        check(trifactor::simplifyToError(two, 0.2f) && two.submeshes.size() == 2 && fmt::submeshesPartitionIndices(two) &&
+              two.submeshes[0].indexCount > 0 && two.submeshes[1].indexCount > 0, "each material keeps its own triangles");
+        fmt::OcMeshData keep = cube("stone");
+        check(trifactor::simplifyToError(keep, 0.001f) && keep.indices.size() / 3 == 12, "a cube at a tiny bound keeps every triangle");
+        check(!trifactor::simplifyToError(keep, 0.0f), "a zero bound is refused");
+        fmt::OcMeshData tiny = cube("stone");
+        check(!trifactor::simplifyToError(tiny, 50.0f) && tiny.indices.size() / 3 == 12, "a mesh wholly smaller than the bound reports failure and is left untouched");
+    }
 #endif
 
     if (g_failures == 0) AVER_INFO("=== {} assertions, 0 failed ===", g_checks);

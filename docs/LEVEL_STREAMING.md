@@ -277,5 +277,14 @@ name one merged, simplified proxy per streaming cell and the hash of what it was
 - `world::buildChunkProxy` (ChunkProxy.hpp) makes a proxy for a generated chunk's payload with the same merger, with item and time caps; pure CPU so it can run on a generation worker.
   Nothing calls it from the runtime yet.
 
-NOT done: drawing proxies (renderer integration, off by default) and the ray-tracing policy (proxies must never enter the BLAS/TLAS by default), the `LevelStreaming` consumer of `updateHlod`,
-the editor panels (Data Layers, Build HLOD, per-cell triangle counts), foliage HLOD, HLOD level 2 blocks, and a dithered cross-fade.
+**Runtime generation (`game::LevelHlod`, 0.8).** Every streamed level gets far detail while it runs, in the editor and the game alike (LevelStreaming owns it):
+- `fmt::planHlodCells` groups the eligible placements (the bake's rule) by cell without reading a mesh; a worker builds the cells nearest the viewer first with `fmt::buildHlodProxy`,
+  simplified by ERROR, not budget: `trifactor::simplifyToError` keeps whatever an error of `pixelError` (1) pixels needs at `loadCm - cellCm` in a 2160-pixel-high 60 degree view
+  (Caldera: ~10 cm), with normals weighted and sub-error parts pruned, every material kept. Recognisable before cheap: the proxy is the cell's own surfaces and materials.
+- Each proxy is cached in `<project>/Saved/DerivedDataCache/HLOD/<level>/c_<cx>_<cy>_<hash>.ocmesh`, the hash over the parameters and each placement's asset, material, matrix and source
+  file size and time; the next run reads instead of building.
+- The ring is `STREAM hlod=` when set (negative turns it off), else four load distances; `AVER_HLOD=0` turns it off. A shown proxy is an ordinary mesh entity at the cell corner (mesh
+  `@hlod/<level>/<cx>_<cy>`, uploaded through `GameContent::uploadBuiltMesh`): drawn, shadowed and ray traced like any mesh (in ray-driven mode it must be in the TLAS to be seen at all),
+  kept out of the voxel GI bake, no physics. The editor treats it like a chunk-streamed entity: never in the outliner, picked, or saved (`LevelStreaming::ownsProxy`).
+NOT done: the editor panels (Data Layers, Build HLOD, per-cell triangle counts), foliage HLOD, HLOD level 2+ blocks (coarser merges further out), texture baking for far levels, and a dithered
+cross-fade.

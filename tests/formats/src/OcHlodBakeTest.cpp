@@ -180,6 +180,49 @@ int main() {
         check(!fmt::hlodLayersAllowed({"B"}, d) && !fmt::hlodLayersAllowed({"C"}, d), "a layer under a not-activated parent, or itself not activated: excluded");
     }
 
+    {   // planHlodCells: the runtime generator's plan (no mesh read)
+        fmt::OcWorldData pw;
+        pw.dataLayers = {{"Gameplay", fmt::OcDataLayerState::Activated, true, ""}};
+        pw.placements = {place(100, 100, 1), place(900, 300, 2), place(3100, 100, 3), place(-50, 100, 4), place(200, 200, 5),
+                         place(300, 300, 6), place(400, 400, 7), place(500, 500, 8), place(50, 50, 9)};
+        pw.placements[4].visible = false;                 // hidden
+        pw.placements[5].animClip = "Anims/spin.ocanim";  // animated
+        pw.placements[6].layers = {"Gameplay"};           // a runtime layer
+        pw.placements[7].className = "BP_Door";          // a class
+        pw.placements[8].parent = 2;                      // a child: (50, 50) under the cube at (3100, 100)
+        fmt::OcHlodPlan plan;
+        fmt::planHlodCells(pw, 1000.0f, plan);
+        check(plan.cells.size() == 3, "three cells: (-1,0), (0,0), (3,0) (" + std::to_string(plan.cells.size()) + ")");
+        const auto cellAt = [&](i32 cx, i32 cy) -> const fmt::OcHlodPlan::Cell* {
+            for (const auto& c : plan.cells) if (c.cx == cx && c.cy == cy) return &c;
+            return nullptr;
+        };
+        const auto* a = cellAt(0, 0);
+        const auto* b = cellAt(3, 0);
+        const auto* n = cellAt(-1, 0);
+        check(a && a->placements == std::vector<u32>({0, 1}), "cell (0,0) holds the two visible static cubes; hidden, animated, "
+                                                              "runtime-layer and class placements are left out");
+        check(b && b->placements == std::vector<u32>({2, 8}), "cell (3,0) holds the cube and its child, homed by the child's world position");
+        check(n && n->placements == std::vector<u32>({3}), "a negative coordinate floors into cell -1");
+        check(plan.matrices.size() == pw.placements.size() * 12 && plan.matrices[8 * 12 + 3] == 3150.0 && plan.matrices[8 * 12 + 7] == 150.0,
+              "a child's matrix composes its parent's pose (3150, 150)");
+        check(plan.matrices[4 * 12 + 0] == 0.0, "an ineligible placement has no matrix");
+        fmt::OcWorldData wide = pw;
+        fmt::OcWorldPlacement road = place(500, 500, 10);
+        road.hasBounds = true;
+        road.boundsMin[0] = 0; road.boundsMin[1] = 400; road.boundsMin[2] = 0;
+        road.boundsMax[0] = 4000; road.boundsMax[1] = 600; road.boundsMax[2] = 10;
+        wide.placements.push_back(road);
+        fmt::OcHlodPlan wplan;
+        fmt::planHlodCells(wide, 1000.0f, wplan);
+        bool roadIn = false;
+        for (const auto& c : wplan.cells) for (const u32 i : c.placements) roadIn = roadIn || i == wide.placements.size() - 1;
+        check(!roadIn, "a placement wider than 1.5 cells (a road) is left out of the proxies");
+        fmt::OcHlodPlan none;
+        fmt::planHlodCells(pw, 0.0f, none);
+        check(none.cells.empty(), "a cell size under 1 cm plans nothing");
+    }
+
     fs::remove_all(root, ec);
     if (g_failures == 0) AVER_INFO("=== {} assertions, 0 failed ===", g_checks);
     else                 AVER_ERROR("=== {} assertions, {} FAILED ===", g_checks, g_failures);

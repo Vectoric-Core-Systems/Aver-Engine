@@ -160,6 +160,10 @@ public:
     const char* acquireTag = nullptr;   // diagnostics: who is acquiring (AVER_HITCH_MS sync-read lines)
     void releaseMesh(rhi::IDevice& device, u64 id);
     bool meshLoaded(u64 id) const;
+    // A mesh the host built at run time (a level's HLOD proxy), uploaded under `id` as a lazy mesh is: parts per material slot, the
+    // acquired hook. Replaces one already there. releaseBuiltMesh queues its GPU side like any released mesh (flushMeshReleases).
+    bool uploadBuiltMesh(rhi::IDevice& device, u64 id, const fmt::OcMeshData& md, const std::string& rel);
+    void releaseBuiltMesh(u64 id);
     // G4 R7: uploads the meshes scripts built at run time (framework_rtmesh_abi.h: ArrayMesh, SurfaceTool, ImmediateMesh, MultiMesh) that changed since the last
     // call, and unloads the ones scripts destroyed. A mesh is drawn through the id its path "@rtmesh/<key>" hashes to, like any asset. Returns how many were
     // uploaded; with no runtime mesh in the registry it does nothing. Call once a frame before the draw walk.

@@ -111,6 +111,12 @@ bool buildHlodProxy(const std::vector<OcMergeItem>& items, f64 originX, f64 orig
     OcMergeReport mr;
     if (!mergeStaticMeshes(items, mo, out.mesh, &mr, why)) return false;
     out.trianglesIn = mr.trianglesOut;
+    if (opt.maxErrorCm > 0.0f && opt.simplifyError) {
+        OcMeshData reduced = out.mesh;
+        if (opt.simplifyError(reduced, opt.maxErrorCm) && !reduced.indices.empty()) out.mesh = std::move(reduced);
+        out.mesh.computeBounds();
+        return true;
+    }
     const u32 budget = hlodTargetTriangles(mr.trianglesOut, cellCm, hlodCm, opt);
     if (opt.simplify && mr.trianglesOut > budget) {
         OcMeshData reduced = out.mesh;
@@ -118,6 +124,41 @@ bool buildHlodProxy(const std::vector<OcMergeItem>& items, f64 originX, f64 orig
     }
     out.mesh.computeBounds();
     return true;
+}
+
+void planHlodCells(const OcWorldData& w, f32 cellCm, OcHlodPlan& out) {
+    out = OcHlodPlan{};
+    const usize n = w.placements.size();
+    out.matrices.assign(n * 12, 0.0);
+    if (!(cellCm >= 1.0f)) return;
+    std::vector<Pose> poses(n);
+    for (usize i = 0; i < n; ++i) {
+        const OcWorldPlacement& p = w.placements[i];
+        Pose xf = poseOf(p);
+        if (p.parent >= 0 && static_cast<usize>(p.parent) < i) xf = compose(poses[static_cast<usize>(p.parent)], xf);
+        poses[i] = xf;
+    }
+    std::map<std::pair<i32, i32>, std::vector<u32>> byCell;
+    for (usize i = 0; i < n; ++i) {
+        const OcWorldPlacement& p = w.placements[i];
+        if (p.asset.empty() || !p.className.empty() || !p.vehiclePreset.empty() || !p.animClip.empty() || !p.visible) continue;
+        if (!hlodLayersAllowed(p.layers, w.dataLayers)) continue;
+        const f64 wide = static_cast<f64>(cellCm) * static_cast<f64>(kOcHlodWideCells);
+        if (p.hasBounds && (static_cast<f64>(p.boundsMax[0]) - p.boundsMin[0] > wide || static_cast<f64>(p.boundsMax[1]) - p.boundsMin[1] > wide))
+            continue;
+        matrixOf(poses[i], &out.matrices[i * 12]);
+        f64 cx = poses[i].pos[0], cy = poses[i].pos[1];
+        if (p.hasBounds) { cx = (static_cast<f64>(p.boundsMin[0]) + p.boundsMax[0]) * 0.5; cy = (static_cast<f64>(p.boundsMin[1]) + p.boundsMax[1]) * 0.5; }
+        byCell[{static_cast<i32>(std::floor(cy / cellCm)), static_cast<i32>(std::floor(cx / cellCm))}].push_back(static_cast<u32>(i));
+    }
+    out.cells.reserve(byCell.size());
+    for (auto& [key, list] : byCell) {
+        OcHlodPlan::Cell c;
+        c.cy = key.first;
+        c.cx = key.second;
+        c.placements = std::move(list);
+        out.cells.push_back(std::move(c));
+    }
 }
 
 bool bakeHlod(OcWorldData& w, const std::string& levelStem, const std::string& contentDir, const std::string& projectDir,

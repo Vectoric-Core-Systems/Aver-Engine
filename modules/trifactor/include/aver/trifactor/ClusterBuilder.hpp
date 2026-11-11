@@ -491,4 +491,9 @@ bool simplifyMesh(fmt::OcMeshData& mesh, f32 ratio, std::string* why = nullptr);
 // `achieved` receives the final triangle count either way.
 bool simplifyToBudget(fmt::OcMeshData& mesh, u32 maxTriangles, u32* achieved = nullptr, std::string* why = nullptr);
 
+// Simplifies as far as a geometric error of `maxErrorCm` (mesh units, absolute) allows: what a mesh seen from far enough that this
+// error is under a pixel looks identical with. Normals weigh in, so shading holds; disconnected parts smaller than the error go; each
+// submesh keeps its material and material borders stay locked, as in simplifyMesh. Keeping every triangle is a valid result.
+bool simplifyToError(fmt::OcMeshData& mesh, f32 maxErrorCm, std::string* why = nullptr);
+
 } // namespace aver::trifactor

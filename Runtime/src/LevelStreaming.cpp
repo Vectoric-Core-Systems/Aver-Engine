@@ -78,6 +78,9 @@ void LevelStreaming::begin(const fmt::OcWorldData& w, GameContent& content, rhi:
     s.cellCm = w.stream.cellCm;
     s.loadCm = w.stream.loadCm;
     s.evictCm = std::max(w.stream.evictCm, w.stream.loadCm + 100.0f);
+    const LevelHlod::Settings hs = LevelHlod::settingsFor(w.stream);
+    s.hlodCm = hs.hlodCm;
+    s.hlodEvictCm = hs.hlodEvictCm;
     std::vector<world::AabbD> bounds;
     bounds.reserve(items_.size());
     usize unknown = 0;
@@ -98,6 +101,7 @@ void LevelStreaming::begin(const fmt::OcWorldData& w, GameContent& content, rhi:
         }
         layers_.apply(streamer_);
     }
+    if (hs.hlodCm > 0.0f) hlod_.begin(w, content, device, streamer_, hs);
     active_ = true;
     AVER_INFO("[LevelStream] {} placement(s) in {} root(s); cell {:.0f} m, load {:.0f} m, evict {:.0f} m; "
               "{} root(s) with unknown bounds stay resident",
@@ -120,6 +124,7 @@ bool LevelStreaming::popCompletedLayer(std::string& name, world::LayerState& sta
 
 void LevelStreaming::end(scene::World& world) {
     if (!active_) return;
+    hlod_.end(world);
     for (u32 i = 0; i < items_.size(); ++i)
         if (items_[i].loaded) evictItem(world, i);
     loader_.releaseUnusedShapes();
@@ -294,6 +299,8 @@ void LevelStreaming::tick(scene::World& world, const std::vector<Vec3>& viewersL
     std::vector<u32> toLoad, toEvict;
     streamer_.update(viewers, toLoad, toEvict);
     hm.mark("streamer");
+    hlod_.tick(world, streamer_, viewers, origin_);
+    hm.mark("hlod");
     lastLoaded_ = 0;
     lastEvicted_ = 0;
     using Clock = std::chrono::steady_clock;

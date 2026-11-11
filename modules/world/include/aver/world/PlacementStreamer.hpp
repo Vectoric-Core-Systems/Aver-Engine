@@ -76,6 +76,8 @@ public:
     // hlodCm), and hides past hlodEvictCm. Content = the items whose centre is in the cell and that are eligible (layers).
     // Indices in toShow/toHide are positions in `cells`. Proxies are not content: they have no body and are never ray-traced (the host's rule).
     struct HlodCell { std::int64_t cx = 0, cy = 0; };
+    // Items wider than this many cells on x or y are not a cell's content for the ring (see rebuildHlodItems); fmt::kOcHlodWideCells.
+    static constexpr f32 kHlodWideCells = 1.5f;
     void buildHlod(const std::vector<HlodCell>& cells);
     void updateHlod(const std::vector<Vec3d>& viewers, std::vector<u32>& toShow, std::vector<u32>& toHide);
     void updateHlod(const std::vector<Vec3>& viewers, std::vector<u32>& toShow, std::vector<u32>& toHide);

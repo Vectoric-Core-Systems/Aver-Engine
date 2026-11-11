@@ -76,7 +76,8 @@ void SandboxApp::applyLandscapeToStreaming() {
 // this to tell streamed entities from authored ones, so it MUST see every world -- a streamed
 // entity that no world claims would be offered for editing and written into the level file.
 bool SandboxApp::anyChunkWorldOwns(scene::Entity e) const {
-    return streaming_.owns(e);
+    // A level's far-detail proxies (game::LevelHlod) are transient the same way: drawn, never edited or saved.
+    return streaming_.owns(e) || level_.streaming().ownsProxy(e);
 }
 
 #endif

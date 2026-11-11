@@ -132,6 +132,11 @@ set_target_properties(ItemLoaderTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE
 add_executable(LevelStreamingOriginTest src/LevelStreamingOriginTest.cpp)
 target_link_libraries(LevelStreamingOriginTest PRIVATE Aver.Runtime.Game.Core Aver.World Aver.Scene Aver.Formats Aver.Core)
 set_target_properties(LevelStreamingOriginTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+# LevelHlodTest -- game::LevelHlod's rules (the level ladder and its hysteresis, the error bound, the settings a level's STREAM gives,
+# inert without a project). No GPU, no worker run.
+add_executable(LevelHlodTest src/LevelHlodTest.cpp)
+target_link_libraries(LevelHlodTest PRIVATE Aver.Runtime.Game.Core Aver.World Aver.Scene Aver.Formats Aver.Core)
+set_target_properties(LevelHlodTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 # GameCameraTest -- GameCamera.hpp (wave 10 gameplay cameras): pushCamera with a PlayView (the default is today's camera to float
 # rounding; FOV and roll are inputs now), the legacy boom, and drivePlayCamera with and without a camera rig. A recording stand-in device
 # and a real scene::World; no window, no GPU. The rig cases compile where Aver.Camera exists (it brings AVER_MODULE_CAMERA).

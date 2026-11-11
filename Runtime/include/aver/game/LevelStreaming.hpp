@@ -14,6 +14,7 @@
 
 #if AVER_MODULE_SCENE
 #  include "aver/game/ItemLoader.hpp"
+#  include "aver/game/LevelHlod.hpp"
 #  include "aver/scene/World.hpp"
 #  include "aver/world/DataLayers.hpp"
 #  include <deque>
@@ -85,6 +86,9 @@ public:
 
     // ---- entity mapping ----
     bool owns(scene::Entity e) const { return placementOf_.count(e) != 0; }
+    // A far-detail proxy (LevelHlod): not a placement, never saved or selected.
+    bool ownsProxy(scene::Entity e) const { return hlod_.owns(e); }
+    const LevelHlod& hlod() const { return hlod_; }
     i32 placementOf(scene::Entity e) const;
     scene::Entity entityOf(u32 placement) const;
     // Keeps the root item holding this placement loaded (selection, gizmo, undo).
@@ -140,6 +144,7 @@ private:
     std::vector<u32> rootPlacements_;    // item -> root placement
     std::vector<Item> items_;
     world::PlacementStreamer streamer_;
+    LevelHlod hlod_;
     world::DataLayerSet layers_;
     std::deque<world::DataLayerSet::Completed> completedLayers_;
     world::OriginCm origin_{};

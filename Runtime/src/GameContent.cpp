@@ -369,6 +369,18 @@ void GameContent::releaseMesh(rhi::IDevice& device, u64 id) {
 }
 
 bool GameContent::meshLoaded(u64 id) const { return sceneMeshes_.count(id) != 0; }
+bool GameContent::uploadBuiltMesh(rhi::IDevice& device, u64 id, const fmt::OcMeshData& md, const std::string& rel) {
+    if (sceneMeshes_.count(id)) unloadToPending(id);
+    lazyLoading_ = true;
+    const bool ok = uploadMesh(device, id, md, rel);
+    lazyLoading_ = false;
+    return ok;
+}
+
+void GameContent::releaseBuiltMesh(u64 id) {
+    if (sceneMeshes_.count(id)) unloadToPending(id);
+}
+
 void GameContent::unloadToPending(u64 id) {
     PendingMesh p;
     p.releasedAt = lastFlushFrame_;

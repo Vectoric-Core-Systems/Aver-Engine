@@ -59,6 +59,8 @@ aver_add_module(Aver.Runtime.Game.Core
     src/GameInput.cpp
     src/GameStreaming.cpp
     src/LevelStreaming.cpp
+    # Far detail for a streamed level: merged, simplified proxies per cell, built on a worker and cached (LevelHlod.hpp).
+    src/LevelHlod.cpp
 
     # LARGE_WORLD: the mechanism half of LevelStreaming (mesh acquire, shape cache, instantiate, bodies, COMPONENT apply) and the
     # cooked-chunk streaming entry points. LevelStreaming.cpp calls ItemLoader, so they must be in this library.

@@ -38,6 +38,10 @@ struct OcHlodOptions {
     std::function<bool(const std::string& asset, OcMeshData& out)> meshLoader;
     // Reduces a merged mesh to at most `budget` triangles (trifactor::simplifyToBudget in the tools); null = merge only.
     std::function<bool(OcMeshData& mesh, u32 budget)> simplify;
+    // By error instead (runtime generation): when maxErrorCm > 0 and this is set, the proxy keeps whatever triangles a geometric error
+    // of maxErrorCm needs (trifactor::simplifyToError) and the triangle budget is not used.
+    f32 maxErrorCm = 0.0f;
+    std::function<bool(OcMeshData& mesh, f32 maxErrorCm)> simplifyError;
     // Polled between cells (a background bake); true stops with what was finished written.
     std::function<bool()> cancel;
     std::function<void(u32 done, u32 total)> progress;
@@ -80,5 +84,22 @@ struct OcHlodCellBuild {
 };
 bool buildHlodProxy(const std::vector<OcMergeItem>& items, f64 originX, f64 originY, f32 cellCm, f32 hlodCm,
                     const OcHlodOptions& opt, OcHlodCellBuild& out, std::string* why = nullptr);
+
+// Runtime generation's plan: the level's eligible placements (bakeHlod's rule: a visible static mesh in always-on layers, no class,
+// vehicle or animation) grouped by streaming cell, each with its world matrix (ocMergeMatrix form, parents composed in f64), without
+// reading a mesh. Cells sorted by (cy, cx); placement indices are positions in w.placements.
+// A placement whose bounds are wider than this many cells on x or y (a road, a ground tile) is left out of runtime proxies: it streams
+// by its nearest edge, so it is resident whenever any part of it is near, and merged into a far cell's proxy it would fight itself.
+// world::PlacementStreamer::kHlodWideCells keeps it out of the ring's content the same way.
+inline constexpr f32 kOcHlodWideCells = 1.5f;
+struct OcHlodPlan {
+    struct Cell {
+        i32 cx = 0, cy = 0;
+        std::vector<u32> placements;
+    };
+    std::vector<Cell> cells;
+    std::vector<f64> matrices;   // 12 per placement of w (zero for an ineligible one)
+};
+void planHlodCells(const OcWorldData& w, f32 cellCm, OcHlodPlan& out);
 
 } // namespace aver::fmt

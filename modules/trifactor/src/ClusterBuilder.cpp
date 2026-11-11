@@ -1643,15 +1643,18 @@ bool packLodDag(const LodDag& dag, fmt::OcMeshData& mesh, std::string* why) {
     return true;
 }
 
-bool simplifyMesh(fmt::OcMeshData& mesh, f32 ratio, std::string* why) {
+namespace {
+// simplifyMesh (ratio > 0: a triangle ratio, error unbounded) and simplifyToError (ratio 0: as few triangles as an absolute error of
+// absError mesh units allows, normals weighted so shading holds, parts smaller than the error pruned, collapses allowed across UV
+// and normal seams -- a merged city cell is mostly seams, and without it the bound barely moved the count) share everything else.
+bool simplifyCore(fmt::OcMeshData& mesh, f32 ratio, f32 absError, std::string* why, bool prune = true) {
     const auto fail = [&](const char* m) { if (why) *why = m; return false; };
-
-    if (!(ratio > 0.0f) || !(ratio < 1.0f)) return fail("ratio must be strictly between 0 and 1");
+    const bool byError = !(ratio > 0.0f);
     const u32 vcount = mesh.vertexCount();
     if (vcount == 0 || mesh.indices.empty() || mesh.indices.size() % 3 != 0)
         return fail("mesh has no triangles to simplify");
-    const usize targetIndices = usize(f64(mesh.indices.size()) * f64(ratio)) / 3 * 3;
-    if (targetIndices < 3) return fail("ratio leaves fewer than one triangle");
+    const usize targetIndices = byError ? 0 : usize(f64(mesh.indices.size()) * f64(ratio)) / 3 * 3;
+    if (!byError && targetIndices < 3) return fail("ratio leaves fewer than one triangle");
     // Checked, not assumed: every array below is indexed by these, and meshopt only asserts.
     for (const u32 i : mesh.indices)
         if (i >= vcount) return fail("an index points past the end of the vertex buffer");
@@ -1713,19 +1716,26 @@ bool simplifyMesh(fmt::OcMeshData& mesh, f32 ratio, std::string* why) {
     std::vector<u32> out;
     out.reserve(mesh.indices.size());
     std::vector<u32> newIndexStart(ranges.size()), newIndexCount(ranges.size());
+    // By error, normals are an attribute (a flat wall stays flat, a corner keeps its edge): weight 0.5 per component, the scale
+    // meshoptimizer's own demo uses for unit normals against a position error in mesh units.
+    const bool withNormals = byError && mesh.normals.size() == usize(vcount) * 3;
+    const f32 normalWeights[3] = {0.5f, 0.5f, 0.5f};
     for (usize r = 0; r < ranges.size(); ++r) {
         const usize start = ranges[r].start, count = ranges[r].count;
-        const usize target = usize(f64(count) * f64(ratio)) / 3 * 3;
+        const usize target = byError ? 0 : usize(f64(count) * f64(ratio)) / 3 * 3;
         std::vector<u32> rOut(count);
         usize got = count;
-        if (target >= 3 && count >= 3) {
+        if ((byError || target >= 3) && count >= 3) {
             f32 rErr = 0.0f;
             // meshopt_simplify is exactly this call with no attributes and no locks.
             got = meshopt_simplifyWithAttributes(
                 rOut.data(), mesh.indices.data() + start, count,
-                mesh.positions.data(), vcount, sizeof(f32) * 3, nullptr, 0, nullptr, 0,
+                mesh.positions.data(), vcount, sizeof(f32) * 3,
+                withNormals ? mesh.normals.data() : nullptr, withNormals ? sizeof(f32) * 3 : 0,
+                withNormals ? normalWeights : nullptr, withNormals ? 3 : 0,
                 lock.empty() ? nullptr : lock.data(),
-                target, std::numeric_limits<f32>::max(), 0, &rErr);
+                target, byError ? absError : std::numeric_limits<f32>::max(),
+                byError ? (meshopt_SimplifyErrorAbsolute | (prune ? meshopt_SimplifyPrune : 0) | meshopt_SimplifyPermissive) : 0, &rErr);
             resultError = std::max(resultError, rErr);
         } else {
             // Too small a range to ask for even one triangle at this ratio (a small accent
@@ -1741,7 +1751,8 @@ bool simplifyMesh(fmt::OcMeshData& mesh, f32 ratio, std::string* why) {
     if (out.size() < 3) return fail("the simplifier returned no triangles");
     // A simplifier that barely moved has usually hit a mesh it cannot collapse (every edge on a
     // border, or degenerate topology). Saying so beats writing a "simplified" mesh that is not.
-    if (out.size() > mesh.indices.size() * 9 / 10 && out.size() > targetIndices * 2)
+    // By error, keeping everything is an answer (the mesh is already that simple).
+    if (!byError && out.size() > mesh.indices.size() * 9 / 10 && out.size() > targetIndices * 2)
         return fail("the simplifier could not get near the requested ratio");
     const usize got = out.size();
 
@@ -1835,6 +1846,19 @@ bool simplifyMesh(fmt::OcMeshData& mesh, f32 ratio, std::string* why) {
         *why = buf;
     }
     return true;
+}
+} // namespace
+
+bool simplifyMesh(fmt::OcMeshData& mesh, f32 ratio, std::string* why) {
+    if (!(ratio > 0.0f) || !(ratio < 1.0f)) { if (why) *why = "ratio must be strictly between 0 and 1"; return false; }
+    return simplifyCore(mesh, ratio, 0.0f, why);
+}
+
+bool simplifyToError(fmt::OcMeshData& mesh, f32 maxErrorCm, std::string* why) {
+    if (!(maxErrorCm > 0.0f)) { if (why) *why = "the error bound must be positive"; return false; }
+    if (simplifyCore(mesh, 0.0f, maxErrorCm, why)) return true;
+    // Every part smaller than the bound prunes to nothing; a mesh still has to be something, so keep the parts and simplify them.
+    return simplifyCore(mesh, 0.0f, maxErrorCm, why, false);
 }
 
 bool simplifyToBudget(fmt::OcMeshData& mesh, u32 maxTriangles, u32* achieved, std::string* why) {
