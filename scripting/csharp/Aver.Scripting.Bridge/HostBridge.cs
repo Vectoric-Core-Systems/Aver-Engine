@@ -870,6 +870,7 @@ public static class HostBridge
             if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir))
                 return 0;
             GameplayAbilities.SetContentRoot(dir);   // where BeginSession finds *.ocgas
+            Aver.UI.UiSystem.SetProjectContentRoot(dir);   // where AN_OpenUiLayout's content-relative path is found
 
             int declared = 0;
             // `pawn=` assignments, in a SECOND pass below (Graph.ClassPawn): aver_fw_class_set_default_pawn

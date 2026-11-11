@@ -190,11 +190,18 @@ class Graph:
         self._used_ids.add(id_)
         return id_
 
-    def node(self, type_: str, id: str | None = None, **kw) -> Node:
+    def node(self, type_: str, id: str | None = None, with_exec: bool = False, **kw) -> Node:
+        """with_exec: give a node the reference lists without exec pins (SetMesh, SetParent: written whenever their inputs
+        change) an exec in and a then out, declared with PIN records, so a chain runs it at a point of its choosing."""
         spec = CATALOG.get(type_)
         if spec is None:
             close = [t for t in CATALOG if t.lower() == type_.lower() or t.lower() == "an_" + type_.lower()]
             raise GraphError(f"unknown node type '{type_}'" + (f" (did you mean {close[0]}?)" if close else ""))
+        if with_exec and "exec" not in spec["in"]:
+            spec = dict(spec)
+            spec["in"] = {"exec": "exec", **spec["in"]}
+            spec["out"] = {"then": "exec", **spec["out"]}
+            spec["pinRecords"] = True
         n = Node(self, self._new_id(type_, id), type_, spec)
         # Attributes first: a VAR-typed pin needs n.attrs["var"] to know its type.
         for k, v in list(kw.items()):
@@ -340,6 +347,9 @@ class Graph:
         L.append("")
         for n in self.nodes:
             L.append(" ".join([f"NODE {n.id} {n.type}"] + [f"{k}={v}" for k, v in n.attrs.items()]))
+            if n.spec.get("pinRecords"):
+                L.extend(f"PIN {n.id} {name} in {t}" for name, t in n.spec["in"].items())
+                L.extend(f"PIN {n.id} {name} out {t}" for name, t in n.spec["out"].items())
         for node, pin, v in self.pinvals:
             s = ("true" if v else "false") if isinstance(v, bool) else (str(v) if isinstance(v, int) and node.spec["in"][pin] == "int" else repr(float(v)))
             L.append(f"PINVAL {node.id} {pin} {s}")

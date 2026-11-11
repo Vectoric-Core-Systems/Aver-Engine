@@ -561,9 +561,16 @@ public static class UiSystem
     }
 
     /// <summary>Reads an <c>.ocui</c> file and opens it. Returns none with <see cref="LastError"/> set
-    /// when the file cannot be read or parsed.</summary>
+    /// when the file cannot be read or parsed. A relative path that is not a file from the working directory is looked up
+    /// under <see cref="LayoutRoots"/> (the project's content folder): graphs name layouts content-relative.</summary>
     public static Widget OpenLayout(string path, bool applyEnvironment = true)
     {
+        if (!string.IsNullOrEmpty(path) && !Path.IsPathRooted(path) && !File.Exists(path))
+            foreach (string root in LayoutRoots)
+            {
+                string candidate = Path.Combine(root, path);
+                if (File.Exists(candidate)) { path = candidate; break; }
+            }
         string text;
         try { text = File.ReadAllText(path); }
         catch (Exception ex)
@@ -578,6 +585,16 @@ public static class UiSystem
     /// <summary>Folders, besides the opened file's folder and its parents, where a nested layout's path (a <c>USE</c>
     /// record in a layout) is looked up. A project's content folder goes here.</summary>
     public static List<string> LayoutRoots { get; } = new();
+
+    /// <summary>Makes <paramref name="contentDir"/> the project's layout root, first in <see cref="LayoutRoots"/>, replacing
+    /// the one a previous project set. The scripting host calls it when a project's graphs are declared.</summary>
+    public static void SetProjectContentRoot(string contentDir)
+    {
+        if (s_projectRoot != null) LayoutRoots.Remove(s_projectRoot);
+        s_projectRoot = string.IsNullOrEmpty(contentDir) ? null : contentDir;
+        if (s_projectRoot != null) LayoutRoots.Insert(0, s_projectRoot);
+    }
+    private static string? s_projectRoot;
 
     /// <summary>What went wrong in the last open without stopping it, one per line: a nested layout that could not be
     /// found, or an unknown slot or exposed name. Empty when nothing did.</summary>
