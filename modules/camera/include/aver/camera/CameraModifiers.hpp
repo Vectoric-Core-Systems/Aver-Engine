@@ -121,7 +121,7 @@ public:
                     r.roll += radians(m.c) * a;
                     break;
                 case ModKind::RollLean: r.roll += radians(m.a) * a; break;
-                case ModKind::ArmScale: r.armScale *= 1.0f + (m.a - 1.0f) * a; break;
+                case ModKind::ArmScale: r.armScale *= std::fmax(0.0f, 1.0f + (m.a - 1.0f) * a); break;
                 case ModKind::SocketOffset: r.socketAdd += Vec3{m.a, m.b, m.c} * a; break;
             }
         }
