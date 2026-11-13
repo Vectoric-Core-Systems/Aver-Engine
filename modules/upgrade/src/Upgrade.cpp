@@ -31,13 +31,14 @@ bool writeText(const std::string& path, const std::string& text, std::string* er
     std::ofstream f(aver::nativePath(path), std::ios::binary | std::ios::trunc);
     if (!f) { if (err) *err = "could not write " + path; return false; }
     f << text;
+    f.close();   // buffered bytes reach the file here; a full disk fails only now
     if (!f) { if (err) *err = "could not finish writing " + path; return false; }
     return true;
 }
 
 bool exists(const std::string& path) {
     std::error_code ec;
-    return std::filesystem::exists(path, ec);
+    return std::filesystem::exists(aver::nativePath(path), ec);
 }
 
 // ---------------------------------------------------------------------------
