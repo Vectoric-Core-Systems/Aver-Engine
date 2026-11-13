@@ -369,12 +369,17 @@ void AnimStateMachine::tick(f32 dt) {
             if (hasRoot_) deltas[li] = l.bs.consumeRootDelta();
         } else {
             const f32 before = l.time;
-            l.elapsed += step;
+            // A negative speed (a speed parameter driven below zero) plays the clip backwards: the clock wraps below
+            // zero as it does past the end, and the time spent in the state still counts up for exit-time transitions.
+            l.elapsed += std::fabs(step);
             l.time += step;
             if (s.loop) {
-                if (l.time >= l.duration) l.time = std::fmod(l.time, l.duration);
+                if (l.duration > 0.0f && (l.time >= l.duration || l.time < 0.0f)) {
+                    l.time = std::fmod(l.time, l.duration);
+                    if (l.time < 0.0f) l.time += l.duration;
+                }
             } else {
-                l.time = std::min(l.time, l.duration);
+                l.time = std::clamp(l.time, 0.0f, l.duration);
                 l.elapsed = std::min(l.elapsed, l.duration);
             }
             if (hasRoot_ && l.clip) deltas[li] = rootDeltaBetween(*l.clip, rootSpec_, before, l.time, s.loop);
