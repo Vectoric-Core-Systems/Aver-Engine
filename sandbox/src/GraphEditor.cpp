@@ -655,10 +655,24 @@ void GraphEditor::setCurrentSubgraph(const std::string& funcName) {
     viewTouched_ = false;
 }
 
+// FUNC names collide case-insensitively: the parser refuses two that differ only in case.
+static bool sameFuncName(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) return false;
+    for (usize i = 0; i < a.size(); ++i)
+        if (std::tolower(static_cast<unsigned char>(a[i])) != std::tolower(static_cast<unsigned char>(b[i]))) return false;
+    return true;
+}
+
+static bool funcNameTaken(const fmt::OcGraphData& g, const std::string& name, const std::string& except = {}) {
+    for (const auto& f : g.functions)
+        if (sameFuncName(f.name, name) && f.name != except) return true;
+    return false;
+}
+
 std::string GraphEditor::addFunction(const std::string& name) {
     if (name.empty() || name.find_first_of(" \t") != std::string::npos) return {};
     std::string unique = name;
-    for (int i = 2; findFunction(unique) != nullptr; ++i) unique = name + std::to_string(i);
+    for (int i = 2; funcNameTaken(graph_, unique); ++i) unique = name + std::to_string(i);
 
     pushUndo();
     fmt::OcGraphFunction fn;
@@ -683,7 +697,7 @@ bool GraphEditor::renameFunction(const std::string& oldName, const std::string& 
     if (newName.empty() || newName.find_first_of(" \t") != std::string::npos) return false;
     if (oldName == newName) return true;
     if (findFunction(oldName) == nullptr) return false;
-    if (findFunction(newName) != nullptr) {
+    if (funcNameTaken(graph_, newName, oldName)) {
         showRejectionBanner("cannot rename function '" + oldName + "': '" + newName + "' already exists");
         return false;
     }
