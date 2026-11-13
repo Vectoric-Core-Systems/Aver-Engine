@@ -25,10 +25,17 @@ Vec3 worldPositionOf(scene::World& world, scene::Entity e) {
 // Every one reaches agentSystem()/perceptionSystem() directly rather than through a `user` pointer
 // -- see registerBuiltinBehaviors' own comment for why that is deliberate, not a shortcut.
 
+// The remembered target can be destroyed while its handle is still stored.
+bool liveTarget(scene::World& w, i32 handle) {
+    const auto e = static_cast<scene::Entity>(handle);
+    return handle != 0 && w.valid(e) && !w.destroyPending(e);
+}
+
 bool hasTargetCondition(i32 subject, const fmt::OcBtNode&, void*) {
-    const auto* p = scene::World::instance().component<CSynapsePerception>(
+    scene::World& w = scene::World::instance();
+    const auto* p = w.component<CSynapsePerception>(
         static_cast<scene::Entity>(subject), perceptionSystem().componentType());
-    return p && p->lastKnownTargetEntity != 0;
+    return p && liveTarget(w, p->lastKnownTargetEntity);
 }
 
 bool canSeeTargetCondition(i32 subject, const fmt::OcBtNode&, void*) {
@@ -42,7 +49,7 @@ bool distanceToTargetLessCondition(i32 subject, const fmt::OcBtNode& node, void*
     scene::World& w = scene::World::instance();
     const auto* p = w.component<CSynapsePerception>(static_cast<scene::Entity>(subject),
                                                      perceptionSystem().componentType());
-    if (!p || p->lastKnownTargetEntity == 0) return false;
+    if (!p || !liveTarget(w, p->lastKnownTargetEntity)) return false;
     const Vec3 a = worldPositionOf(w, static_cast<scene::Entity>(subject));
     const Vec3 b = worldPositionOf(w, static_cast<scene::Entity>(p->lastKnownTargetEntity));
     const f32 dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
@@ -89,7 +96,7 @@ BtStatus lookAtAction(i32 subject, const fmt::OcBtNode&, f32, f32&, void*) {
     scene::World& w = scene::World::instance();
     const scene::Entity e = static_cast<scene::Entity>(subject);
     const auto* p = w.component<CSynapsePerception>(e, perceptionSystem().componentType());
-    if (!p || p->lastKnownTargetEntity == 0) return BtStatus::Failure;
+    if (!p || !liveTarget(w, p->lastKnownTargetEntity)) return BtStatus::Failure;
 
     const Vec3 self = worldPositionOf(w, e);
     const Vec3 target = worldPositionOf(w, static_cast<scene::Entity>(p->lastKnownTargetEntity));
