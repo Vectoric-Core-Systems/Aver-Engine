@@ -214,6 +214,7 @@ void NeuraFI::releaseTargets() {
     w_ = h_ = qw_ = qh_ = 0;
     historyValid_ = false;
     histDepth_ = 0;
+    collectAtFrame_ = 0;   // the readback it waited on is gone
 }
 
 bool NeuraFI::ensureTargets(u32 w, u32 h) {
