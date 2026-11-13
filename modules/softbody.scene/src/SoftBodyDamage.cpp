@@ -120,21 +120,32 @@ void SoftBodySystem::applyInbox(scene::World& world) {
             case InboxItem::Kind::Explode: {
                 for (auto& [e, en] : entries_) {
                     if (en.failed) continue;
+                    if (it.entity != scene::kInvalidEntity && e != it.entity) continue;   // a carried remainder: its one body
                     f32 nearest = 1e30f;
                     for (const Piece& p : en.pieces) {
                         if (!p.alive || p.empty || p.baked) continue;
                         nearest = std::min(nearest, dist(clampToBox(it.point, p.boundsMin, p.boundsMax), it.point));
                     }
                     if (nearest > it.radius) continue;
-                    if (depositsThisTick_ >= opt_.maxDepositsPerFrame) break;
-                    ++depositsThisTick_;
-                    const f32 fall = 1.0f - nearest / it.radius;
-                    DamageDeposit d;
-                    d.point = it.point; d.radiusCm = it.radius; d.energyJ = it.energy * fall * fall;
-                    d.kind = static_cast<u8>(DepositKind::Explosion);
-                    depositOn(world, en, nullptr, d, impactScaleOf(world, e), false, SoftEventKind::Impact);
+                    if (depositsThisTick_ >= opt_.maxDepositsPerFrame) {
+                        // Over this frame's deposit budget: this body's share waits for the next tick, as a Damage item
+                        // does, instead of the blast skipping it. The shove below is not budgeted and lands now, so the
+                        // carried item has none.
+                        InboxItem rest = it;
+                        rest.entity = e;
+                        rest.impulse = 0.0f;
+                        carry.push_back(rest);
+                    } else {
+                        ++depositsThisTick_;
+                        const f32 fall = 1.0f - nearest / it.radius;
+                        DamageDeposit d;
+                        d.point = it.point; d.radiusCm = it.radius; d.energyJ = it.energy * fall * fall;
+                        d.kind = static_cast<u8>(DepositKind::Explosion);
+                        depositOn(world, en, nullptr, d, impactScaleOf(world, e), false, SoftEventKind::Impact);
+                    }
                     // The radial shove goes to every piece in reach, cloth included.
                     for (Piece& p : en.pieces) {
+                        if (it.impulse == 0.0f) break;   // a carried remainder: shoved when the blast went off
                         if (!p.alive || p.empty || !p.body || p.frozen) continue;
                         const f32 centre[3] = {it.point.x, it.point.y, it.point.z};
                         const f32 up[3] = {0, 0, 1};
