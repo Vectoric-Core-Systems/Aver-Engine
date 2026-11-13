@@ -475,7 +475,9 @@ bool RegionFile::readChunk(const ChunkLocal& l, ChunkPayload& out, std::string* 
     const u32 firstSector = e.first;
     const u32 byteLength = e.length;
     const u32 crc = e.crc;
-    if (firstSector >= header_.sectorCount) return fail("its directory entry points past the end of the file");
+    if (firstSector >= header_.sectorCount ||
+        u64(firstSector) * header_.sectorBytes + byteLength > u64(header_.sectorCount) * header_.sectorBytes)
+        return fail("its directory entry points past the end of the file");
 
     std::vector<u8> raw(byteLength);
     if (byteLength && !file_.readAt(u64(firstSector) * header_.sectorBytes, raw.data(), raw.size()))
@@ -809,8 +811,13 @@ bool RegionWriter::readAllChunks(std::vector<std::pair<ChunkLocal, ChunkPayload>
             ByteReader r(g.raw.data() + static_cast<usize>(slot) * kGroupDirEntryBytes, kGroupDirEntryBytes);
             const u32 first = r.u32v(), len = r.u32v(), crc = r.u32v();
             if (first == 0) continue;
-            std::vector<u8> raw(len);
             const ChunkLocal l = localOfGroupSlot(g.index, slot);
+            if (first >= header_.sectorCount ||
+                u64(first) * kRegionSectorBytes + len > u64(header_.sectorCount) * kRegionSectorBytes) {
+                if (why) *why = chunkName(l) + ": its directory entry points past the end of the file";
+                return false;
+            }
+            std::vector<u8> raw(len);
             if (len && !file_.readAt(u64(first) * kRegionSectorBytes, raw.data(), raw.size())) {
                 if (why) *why = chunkName(l) + ": payload is truncated";
                 return false;
