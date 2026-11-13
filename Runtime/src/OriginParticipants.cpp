@@ -16,6 +16,9 @@
 #include "aver/world/LevelInstance.hpp"
 
 #include "aver/anim/AnimSystem.hpp"
+#if AVER_MODULE_PHYSICS
+#  include "aver/game/BodyPoseSync.hpp"
+#endif
 #include "aver/anim/ControlRig.hpp"
 #include "aver/anim/MotionMatchSystem.hpp"
 
@@ -239,6 +242,9 @@ void OriginParticipants::install() {
             hair::hairSystem().rebase(d);
 #endif
             world::rebaseKinematicDrivers(d);
+#if AVER_MODULE_PHYSICS
+            bodyPoseSync().rebase(d);   // interpolation's last two poses per body
+#endif
 #if AVER_MODULE_SYNAPSE_SCENE
             synapse::agentSystem().rebase(w, d);
             if (b_.nav) synapse::rebaseNav(*b_.nav, d);

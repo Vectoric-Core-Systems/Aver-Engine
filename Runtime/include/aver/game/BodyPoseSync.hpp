@@ -139,6 +139,16 @@ public:
 
     void clear() { poses_.clear(); drawnBlended_ = false; }
 
+    // A floating-origin shift moved every entity and body by -delta: the stored poses are world-space, so they move too
+    // (else restore() puts tracked entities back in the old frame and present() blends across the shift).
+    void rebase(const Vec3& delta) {
+        for (auto& [entity, t] : poses_) {
+            (void)entity;
+            t.prev.p = t.prev.p - delta;
+            t.cur.p = t.cur.p - delta;
+        }
+    }
+
 private:
     struct Pose { Vec3 p; Quat q; };
     struct Track {
