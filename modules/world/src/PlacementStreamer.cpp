@@ -485,6 +485,7 @@ void PlacementStreamer::updateHlod(const std::vector<Vec3d>& viewers, std::vecto
         usize eligibleN = 0, residentN = 0, residentEligible = 0;
         for (const u32 id : h.items) {
             const Item& m = items_[id];
+            if (!m.alive) continue;   // removed since the lists were built: no longer this cell's content
             if (m.resident) ++residentN;
             if (gated(m, id)) continue;
             ++eligibleN;
