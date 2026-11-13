@@ -20,6 +20,7 @@ namespace {
 std::map<std::string, std::string> g_values;
 std::string g_path;
 bool g_dirty = false;
+bool g_unreadable = false;   // the file exists but could not be read; flushing would replace it with a subset
 std::string g_scratch;   // backs the pointer aver_settings_get_str / _default_path return
 
 // Trims ASCII spaces and tabs from both ends. Deliberately not a general whitespace trim: a value
@@ -34,10 +35,11 @@ std::string trim(const std::string& s) {
 void loadFrom(const std::string& path) {
     g_values.clear();
     g_dirty = false;
+    g_unreadable = false;
     std::string text;
     // A MISSING FILE IS NOT AN ERROR. A first run has no settings; that is the ordinary case, not a
     // failure to report.
-    if (!aver::readFileText(path, text)) return;
+    if (!aver::readFileText(path, text)) { g_unreadable = aver::fileExists(path); return; }
 
     std::size_t i = 0;
     while (i <= text.size()) {
@@ -95,6 +97,10 @@ const char* aver_settings_default_path(void) {
 int32_t aver_settings_flush(void) {
     if (g_path.empty()) return 0;
     if (!g_dirty) return 1;   // already current; not an error, and not a write
+    if (g_unreadable) {
+        AVER_WARN("[Settings] {} exists but could not be read; not overwriting it", g_path);
+        return 0;
+    }
 
     std::string text =
         "# Aver Engine settings. Written by the game; safe to edit by hand.\n"
