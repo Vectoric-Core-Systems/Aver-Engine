@@ -41,6 +41,20 @@ bool isNumericToken(std::string_view s) {
     return digit;
 }
 
+// A '#' starts a comment only as the first non-blank character, as in the C# reader: mid-line it is
+// ordinary data. A trailing ';' is dropped on read by both readers, so a value that ends in one is
+// written with a second.
+std::string_view lineComment(std::string_view s) {
+    const std::string_view t = trim(s);
+    return !t.empty() && t.front() == '#' ? std::string_view() : s;
+}
+
+std::string endLine(std::string line) {
+    if (!line.empty() && line.back() == ';') line += ';';
+    line += '\n';
+    return line;
+}
+
 // Which record kind, if any, a line of EXISTING text belongs to -- used only by writeOcgraph's merge
 // path (see there) to replace each kind in place at its own first occurrence, rather than collapsing
 // every kind into one inserted block. `Other` covers blank lines, comments, and anything writeOcgraph
@@ -52,7 +66,7 @@ enum class OwnedLineKind { Header, Domain, Name, Description, Var, Comp, Comment
 // header; a later stray "OCGRAPH ..." line (malformed input, or inside an unrelated unknown record)
 // falls through to Other like any other line the format doesn't specially recognise there.
 OwnedLineKind classifyLine(std::string_view line, bool sawHeaderYet) {
-    const std::vector<std::string_view> t = splitWhitespace(trim(truncateHash(line)));
+    const std::vector<std::string_view> t = splitWhitespace(trim(lineComment(line)));
     if (t.empty()) return OwnedLineKind::Other; // blank line, or a comment (truncateHash ate it)
     if (!sawHeaderYet && equalsCI(t[0], "OCGRAPH")) return OwnedLineKind::Header;
     if (equalsCI(t[0], "DOMAIN"))      return OwnedLineKind::Domain;
@@ -120,7 +134,7 @@ bool parseOcgraph(std::string_view text, OcGraphData& out, std::string* err) {
         std::string_view rawLine = text.substr(pos, nl - pos);
         pos = nl + 1;
 
-        std::string_view line = stripTrailingSemicolon(truncateHash(rawLine));
+        std::string_view line = stripTrailingSemicolon(lineComment(rawLine));
         if (line.empty()) continue;
 
         std::vector<std::string_view> t = splitWhitespace(line);
@@ -153,24 +167,12 @@ bool parseOcgraph(std::string_view text, OcGraphData& out, std::string* err) {
         } else if (equalsCI(key, "NAME")) {
             out.name = t.size() > 1 ? std::string(t[1]) : std::string();
         } else if (equalsCI(key, "DESCRIPTION")) {
-            // Take the rest of the RAW line as the description -- NOT `line`, which has already
-            // been through truncateHash()/stripTrailingSemicolon() for record-dispatch purposes.
-            // DESCRIPTION is documented as free text ("Optional human-readable description",
-            // aver/formats/OcGraph.hpp), so a literal '#' or trailing ';' inside it is DATA, not a
-            // comment marker or statement terminator. Reading from `line` here silently truncated
-            // any description containing '#' -- exactly what the checked-in cross-impl fixture's own
-            // description does ("...parsed and executed by the C# runtime"), which is how this was
-            // found: an edit-free load of that real file followed by a save did not reproduce it.
-            //
-            // Judged from the RAW extracted text, not from `t.size() > 1` (a token count of the
-            // hash-truncated `line`): a description consisting only of characters after a literal
-            // '#' -- an extreme case, but the whole point of this fix is that '#' is ordinary data
-            // here -- would otherwise still read as "no value" even after switching to `rawLine`.
-            const usize keyEnd = rawLine.find("DESCRIPTION");
-            if (keyEnd != std::string_view::npos) {
-                const std::string_view desc = trim(rawLine.substr(keyEnd + 11));
-                if (!desc.empty()) out.description = std::string(desc);
-            }
+            // The rest of the line after the key; '#' inside it is data (see lineComment).
+            std::string_view rest = line;
+            while (!rest.empty() && isSpace(rest.front())) rest.remove_prefix(1);
+            while (!rest.empty() && !isSpace(rest.front())) rest.remove_prefix(1);
+            const std::string_view desc = trim(rest);
+            if (!desc.empty()) out.description = std::string(desc);
         } else if (equalsCI(key, "VAR")) {
             // VAR <name> <type> [default] -- declares one graph-local persistent variable. See
             // OcGraphVariable's own comment (OcGraph.hpp) for why type/default are opaque strings at
@@ -224,13 +226,9 @@ bool parseOcgraph(std::string_view text, OcGraphData& out, std::string* err) {
             cmt.r = parseI32(t[6], 60);
             cmt.g = parseI32(t[7], 70);
             cmt.b = parseI32(t[8], 90);
-            // The text comes off the RAW line for the reason DESCRIPTION does (see its own comment
-            // above): a literal # inside a comment box is the author writing a # and nothing else.
-            // Located by SKIPPING NINE TOKENS from the start of the raw line rather than by
-            // find("COMMENT") -- the record key is matched case-insensitively a few lines up, so a
-            // file that spells it `Comment` would find nothing and silently lose its text.
+            // Located by skipping nine tokens, since the key is matched case-insensitively.
             {
-                std::string_view rest = rawLine;
+                std::string_view rest = line;
                 for (int skip = 0; skip < 9 && !rest.empty(); ++skip) {
                     while (!rest.empty() && isSpace(rest.front())) rest.remove_prefix(1);
                     while (!rest.empty() && !isSpace(rest.front())) rest.remove_prefix(1);
@@ -557,7 +555,7 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
     // change every existing graph in the tree, which this format's round-trip tests forbid.
     const std::string domainLine = g.domain.empty() ? std::string() : ("DOMAIN " + g.domain + "\n");
     const std::string nameLine = "NAME " + (g.name.empty() ? std::string("untitled") : g.name) + "\n";
-    const std::string descLine = g.description.empty() ? std::string() : ("DESCRIPTION " + g.description + "\n");
+    const std::string descLine = g.description.empty() ? std::string() : endLine("DESCRIPTION " + g.description);
     // ONE ENTRY PER RECORD, not one string per KIND, because the merge path below matches existing
     // lines to records INDIVIDUALLY -- see it for why. `key` is whatever identifies this record in a
     // line of existing text; `used` is set once a line has claimed it, so a record is emitted exactly
@@ -573,7 +571,7 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
     for (const OcGraphVariable& v : g.variables) {
         std::string line = "VAR " + v.name + " " + v.type;
         if (!v.defaultValue.empty()) line += " " + v.defaultValue;
-        line += "\n";
+        line = endLine(std::move(line));
         varRecs.push_back({v.name, line, false});
     }
     // COMP after VAR and before NODE: what the actor IS, then what it remembers, then what it does.
@@ -583,7 +581,7 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
     for (const OcGraphComponent& comp : g.components) {
         std::string line = "COMP " + comp.id + " " + comp.kind;
         for (const std::string& extra : comp.extraTokens) line += " " + extra;
-        line += "\n";
+        line = endLine(std::move(line));
         compRecs.push_back({comp.id, line, false});
     }
     // COMMENT after COMP and before NODE: the regions first, then the nodes that sit in them. Also
@@ -593,7 +591,7 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
                             " " + num(c.h) + " " + std::to_string(c.r) + " " + std::to_string(c.g) +
                             " " + std::to_string(c.b);
         if (!c.text.empty()) line += " " + c.text;
-        line += "\n";
+        line = endLine(std::move(line));
         commentRecs.push_back({c.id, line, false});
     }
     // FUNC before its own FUNCIN/FUNCOUT records, and both before NODE: a reader (human or machine)
@@ -619,7 +617,7 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
         std::string line = "NODE " + node.id + " " + node.type;
         if (node.hasPosition) line += " " + num(node.x) + " " + num(node.y);
         for (const std::string& extra : node.extraTokens) line += " " + extra;
-        line += "\n";
+        line = endLine(std::move(line));
         nodeRecs.push_back({node.id, line, false});
     }
     for (const OcGraphNode& node : g.nodes) {
@@ -628,7 +626,7 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
             line += pin.isOutput ? "out" : "in";
             line += " " + pin.type;
             if (!pin.defaultValue.empty()) line += " " + pin.defaultValue;
-            line += "\n";
+            line = endLine(std::move(line));
             pinRecs.push_back({node.id + " " + pin.name, line, false});
         }
     }
@@ -738,7 +736,7 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
     // `g` (deleted in the editor) simply is not re-emitted, and a record with no line at all (newly
     // added) falls through to the append pass below.
     const auto keyOf = [](OwnedLineKind k, std::string_view line) -> std::string {
-        const std::vector<std::string_view> t = splitWhitespace(trim(truncateHash(line)));
+        const std::vector<std::string_view> t = splitWhitespace(trim(lineComment(line)));
         const auto tok = [&](usize i) { return i < t.size() ? std::string(t[i]) : std::string(); };
         switch (k) {
         case OwnedLineKind::Var:
