@@ -674,6 +674,7 @@ void RegionWriter::release(u32 first, u32 count) {
 
 bool RegionWriter::flushMetadata(std::string* why) {
     const auto fail = [why](const std::string& m) { if (why) *why = m; return false; };
+    u32 retiredTable = 0, retiredTableSectors = 0;
 
     for (Group& g : groups_) {
         if (!g.dirty) continue;
@@ -686,7 +687,7 @@ bool RegionWriter::flushMetadata(std::string* why) {
         // RELOCATED rather than grown in place: the sectors after it belong to somebody else.
         const u32 need = static_cast<u32>(sectorsFor(groups_.size() * 8));
         const u32 old = header_.groupTableSector;
-        const u32 oldNeed = static_cast<u32>(sectorsFor((groups_.size() ? groups_.size() - 1 : 0) * 8));
+        const u32 oldNeed = static_cast<u32>(sectorsFor(usize(header_.groupCount) * 8));   // what the live table was allocated with
         const u32 at = allocate(need ? need : 1, why);
         if (!at) return false;
         ByteWriter gt;
@@ -696,7 +697,8 @@ bool RegionWriter::flushMetadata(std::string* why) {
             return fail("could not write the group table");
         header_.groupTableSector = at;
         header_.groupCount = static_cast<u32>(groups_.size());
-        if (old) release(old, oldNeed ? oldNeed : 1);
+        // Not released yet: until the header names the new table the old one is live, so the free list below must not be written over it.
+        if (old) { retiredTable = old; retiredTableSectors = oldNeed ? oldNeed : 1; }
         groupTableDirty_ = false;
     }
 
@@ -705,13 +707,15 @@ bool RegionWriter::flushMetadata(std::string* why) {
     {
         const u32 oldSector = header_.freeListSector;
         const u32 oldCount = header_.freeListCount;
-        if (free_.empty()) {
+        if (free_.empty() && !retiredTable) {
             header_.freeListSector = 0;
             header_.freeListCount = 0;
         } else {
-            const u32 need = static_cast<u32>(sectorsFor(free_.size() * 8 + 8));
+            const u32 need = static_cast<u32>(sectorsFor((free_.size() + (retiredTable ? 1 : 0)) * 8 + 8));
             const u32 at = allocate(need, why);
             if (!at) return false;
+            // The old table joins the list only after the list's own sectors are taken, so it is recorded as free yet untouched until the header moves on.
+            if (retiredTable) { release(retiredTable, retiredTableSectors); retiredTable = 0; }
             ByteWriter fl;
             for (const Extent& e : free_) { fl.u32v(e.first); fl.u32v(e.count); }
             fl.pad(kRegionSectorBytes);

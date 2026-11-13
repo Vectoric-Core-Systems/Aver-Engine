@@ -128,14 +128,16 @@ int main() {
         RegionWriter w;
         checkWhy(w.open(path, desc, &why), "the region reopens");
         const u32 sectorsBefore = w.header().sectorCount;
-        check(w.freeSectors() == 0, "a freshly grown region has no holes yet");
+        // Holes already exist: each relocated group table is freed once the header no longer names it.
+        const u32 freeBefore = w.freeSectors();
 
         // Replace a chunk with a SMALLER payload: the old sectors go to the free list.
         const ChunkLocal l{511, 511, 511};
         ChunkPayload small = makePayload(1, 99);
         checkWhy(w.writeChunk(l, small, &why), "a chunk is replaced with a smaller payload");
         expect[key(l)] = small;
-        check(w.freeSectors() > 0, "...and its old sectors were freed");
+        // The new payload may fill an existing hole, so freeing the old sectors keeps the count from dropping.
+        check(w.freeSectors() >= freeBefore, "...and its old sectors were freed");
 
         // The next write should REUSE that hole rather than growing the file.
         const ChunkLocal l2{2, 0, 0};
