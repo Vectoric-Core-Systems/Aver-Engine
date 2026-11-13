@@ -130,6 +130,8 @@ public:
     virtual i32 play(i32 sound, const Vec3& position, f32 volume, f32 pitch, bool looping) = 0;         // a voice
     virtual void set(i32 voice, const Vec3& position, f32 volume, f32 pitch) = 0;
     virtual void stop(i32 voice) = 0;
+    // Whether a voice still sounds (a mixer out of voices steals the quietest). A port that cannot tell says yes.
+    virtual bool playing(i32 voice) { return voice != 0; }
 };
 
 enum class CameraEvent : u8 { Enter, Exit, Next, Impact };

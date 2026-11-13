@@ -51,6 +51,7 @@ void VehiclePhysicsSystem::Impl::updateAudio(scene::World& w, f32) {
     if (!audio) return;
     // A looping voice: started on the first frame it is needed, then kept at this volume and pitch.
     auto keepLoop = [&](const detail::Entry& e, i32& voice, const std::string& path, bool start, f32 volume, f32 pitch) {
+        if (voice != 0 && !audio->playing(voice)) voice = 0;   // stolen by the mixer: started again below while still wanted
         if (voice == 0 && start) {
             const i32 s = soundFor(path);
             if (s != 0) voice = audio->play(s, e.pos, 0.0f, pitch, true);

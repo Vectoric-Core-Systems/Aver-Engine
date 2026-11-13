@@ -300,6 +300,7 @@ public:
         aver_audio_set_voice_pitch(voice, pitch);
     }
     void stop(i32 voice) override { if (voice != 0) aver_audio_stop(voice); }
+    bool playing(i32 voice) override { return voice != 0 && aver_audio_playing(voice) != 0; }
 };
 inline VehicleAudioPort g_vehicleAudio;
 #  endif
