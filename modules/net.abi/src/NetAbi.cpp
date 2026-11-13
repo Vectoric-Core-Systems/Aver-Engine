@@ -331,7 +331,10 @@ AVER_NET_API int64_t aver_net_host_connect(int32_t host, const char* ip, int32_t
     HostEntry* h = hostOf(host);
     Address a;
     if (!h || !parseAddr(ip, port, a) || port == 0) return 0;
-    if (!h->host->hasSocket()) {
+    if (h->host->hasSocket()) {
+        const u8 fam = h->host->socket()->localAddress().family;
+        if (fam != 0 && fam != a.family) return 0;   // a socket cannot send across address families
+    } else {
         UdpSocket u;
         if (!u.open(a.family)) return 0;
         // A loopback target is reached from the loopback address; anything else leaves the OS to pick the interface at the first send.
