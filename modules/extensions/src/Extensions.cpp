@@ -547,16 +547,23 @@ bool Registry::isLoaded(std::string_view name) const {
 }
 
 bool Registry::run(std::string_view command, int argc, const char* const* argv, int& exitCode, std::string* why) {
-    const Extension* e = findCommand(command);
-    if (!e) {
-        if (why) *why = "no installed extension offers the command \"" + std::string(command) + "\"";
-        return false;
-    }
     AverExtApi api;
     {
+        // Looked up and loaded under one lock: an Extension pointer outliving it can dangle across a scan().
         std::lock_guard<std::mutex> lock(impl_->mu);
-        if (!impl_->loadLocked(e->name, why)) return false;
-        api = impl_->loaded[e->name]->api;
+        const Extension* e = nullptr;
+        for (const Extension& cand : impl_->list) {
+            if (!cand.ready()) continue;
+            for (const CommandInfo& c : cand.commands) if (c.name == command) { e = &cand; break; }
+            if (e) break;
+        }
+        if (!e) {
+            if (why) *why = "no installed extension offers the command \"" + std::string(command) + "\"";
+            return false;
+        }
+        const std::string name = e->name;
+        if (!impl_->loadLocked(name, why)) return false;
+        api = impl_->loaded[name]->api;
     }
     exitCode = api.runCommand(std::string(command).c_str(), argc, argv);
     return true;
