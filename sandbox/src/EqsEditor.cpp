@@ -12,6 +12,7 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 
@@ -553,12 +554,14 @@ void EqsEditor::drawGeneratorForm(usize oi) {
             ImGui::TextUnformatted("Points (x y z, one per line)");
             std::string text;
             for (const Vec3& p : g.points) text += fmtG(p) + "\n";
-            char buf[2048];
-            std::snprintf(buf, sizeof buf, "%s", text.c_str());
-            ImGui::InputTextMultiline("##points", buf, sizeof buf, ImVec2(-FLT_MIN, 90.0f));
+            // Sized from the text, with room to type: a fixed 2 KB held ~70 of the 256 points the parser takes, and an
+            // edit then replaced the list with the ones that fitted.
+            std::vector<char> buf(std::max<usize>(text.size() + 4096, 8192), '\0');
+            std::memcpy(buf.data(), text.data(), text.size());
+            ImGui::InputTextMultiline("##points", buf.data(), buf.size(), ImVec2(-FLT_MIN, 90.0f));
             if (ImGui::IsItemDeactivatedAfterEdit()) {
                 std::vector<Vec3> pts;
-                const char* s = buf;
+                const char* s = buf.data();
                 while (*s && pts.size() < 256) {
                     float x = 0, y = 0, z = 0;
                     int used = 0;

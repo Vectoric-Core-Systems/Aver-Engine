@@ -1541,13 +1541,16 @@ bool UiLayoutEditor::drawProperty(const UiPropDesc& d, UiWidgetProps* target,
                     break;
                 }
             }
-            char buf[512];
-            std::snprintf(buf, sizeof buf, "%s", tokens.empty() ? "" : tokens[0].c_str());
+            // Sized from the value with room to type: a fixed buffer cut a longer text on the first keystroke, and every
+            // keystroke commits.
+            const std::string cur = tokens.empty() ? std::string() : tokens[0];
+            std::vector<char> buf(std::max<usize>(cur.size() + 1024, 2048), '\0');
+            std::memcpy(buf.data(), cur.data(), cur.size());
             if (std::strcmp(d.key, "text") == 0)
-                changed = ImGui::InputTextMultiline("##v", buf, sizeof buf, ImVec2(-1, ImGui::GetTextLineHeight() * 3.5f));
+                changed = ImGui::InputTextMultiline("##v", buf.data(), buf.size(), ImVec2(-1, ImGui::GetTextLineHeight() * 3.5f));
             else
-                changed = ImGui::InputText("##v", buf, sizeof buf);
-            if (changed) newText = uiQuote(buf);
+                changed = ImGui::InputText("##v", buf.data(), buf.size());
+            if (changed) newText = uiQuote(buf.data());
             break;
         }
         case UiPropType::Color: {
@@ -1590,12 +1593,12 @@ bool UiLayoutEditor::drawProperty(const UiPropDesc& d, UiWidgetProps* target,
         case UiPropType::StringList: {
             std::string joined;
             for (usize i = 0; i < tokens.size(); ++i) { if (i) joined += '\n'; joined += tokens[i]; }
-            char buf[1024];
-            std::snprintf(buf, sizeof buf, "%s", joined.c_str());
-            changed = ImGui::InputTextMultiline("##v", buf, sizeof buf, ImVec2(-1, ImGui::GetTextLineHeight() * 4.5f));
+            std::vector<char> buf(std::max<usize>(joined.size() + 1024, 2048), '\0');   // as String above
+            std::memcpy(buf.data(), joined.data(), joined.size());
+            changed = ImGui::InputTextMultiline("##v", buf.data(), buf.size(), ImVec2(-1, ImGui::GetTextLineHeight() * 4.5f));
             if (changed) {
                 std::string line;
-                for (const char* c = buf;; ++c) {
+                for (const char* c = buf.data();; ++c) {
                     if (*c == '\n' || *c == '\0') {
                         if (!line.empty() || *c == '\n') newText += (newText.empty() ? "" : " ") + uiQuote(line);
                         line.clear();
