@@ -65,14 +65,15 @@ bool step_0_1_to_0_2(const Context& ctx, std::string* err) {
     if (!exists(fsproj) && !exists(sky)) return true;
 
     std::string text;
+    if (!gResourceFn) return true;   // no provider: nothing to compare against, so leave the author's files alone
     if (!engineResource("Sky.fs", ctx, text)) {
-        // No provider, or the host no longer has such a resource. Removing the pair is the correct
+        // The host no longer has such a resource. Removing the pair is the correct
         // outcome and not a fallback: what is on disk cannot compile, and a project with no F# is a
         // supported, working project. Leaving a broken file behind to preserve "content" would
         // preserve nothing an author wrote.
         std::error_code ec;
-        std::filesystem::remove(fsproj, ec);
-        std::filesystem::remove(sky, ec);
+        std::filesystem::remove(aver::nativePath(fsproj), ec);
+        std::filesystem::remove(aver::nativePath(sky), ec);
         AVER_INFO("[Upgrade] '{}': removed the F# starter (no Aver.Pcg to reference)", ctx.name);
         return true;
     }
