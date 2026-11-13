@@ -23,13 +23,23 @@ bool allDigits(const std::string& s) {
     return !s.empty() && std::all_of(s.begin(), s.end(), [](unsigned char c) { return std::isdigit(c) != 0; });
 }
 
+// Digits to a u32 uid; false when the value does not fit.
+bool digitsToUid(const std::string& s, u32& out) {
+    u64 v = 0;
+    for (const char c : s) {
+        v = v * 10 + static_cast<u64>(c - '0');
+        if (v > 0xFFFFFFFFull) return false;
+    }
+    out = static_cast<u32>(v);
+    return true;
+}
+
 bool fail(std::string* why, std::string m) { if (why) *why = std::move(m); return false; }
 
 // An Entity override value as a uid inside `pd`. False when it names something a plain node cannot.
 bool pathToUid(const fmt::OcPrefabData& pd, const std::string& path, u32& uid) {
     if (path.empty()) { uid = pd.rootUid(); return true; }
-    if (!allDigits(path)) return false;
-    uid = static_cast<u32>(std::stoul(path));
+    if (!allDigits(path) || !digitsToUid(path, uid)) return false;
     return pd.find(uid) != nullptr;
 }
 
@@ -51,7 +61,7 @@ bool foldOverride(fmt::OcPrefabData& pd, const fmt::OcPrefabOverride& ov, std::s
     fmt::ocPrefabSplitPath(ov.path, head, rest);
     u32 uid = 0;
     if (head.empty()) uid = pd.rootUid();
-    else if (allDigits(head)) uid = static_cast<u32>(std::stoul(head));
+    else if (allDigits(head) && !digitsToUid(head, uid)) uid = 0;
     fmt::OcPrefabNode* node = uid ? pd.find(uid) : nullptr;
     if (!node) return fail(why, "the override names node '" + ov.path + "', which the prefab does not have");
 
