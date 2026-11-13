@@ -8832,10 +8832,12 @@ bool D3D12ResourceFactory::setTlasStaticInstances(TlasHandle h, const TlasInstan
             newDescs = true;
         }
         u8* mapped = nullptr;
+        bool prefixStaging = false;   // taken from the unbuilt earlier prefix: handed back if this one fails
         // An unbuilt earlier prefix's staging, or a spare the GPU is done with, when large enough.
         if (t->staticStaging && t->staticStaging->GetDesc().Width >= stagingBytes) {
             staging = std::move(t->staticStaging);
             mapped = t->staticStagingMapped;
+            prefixStaging = true;
         } else {
             const u64 done = dev_->fence_ ? dev_->fence_->GetCompletedValue() : 0;
             for (auto it = t->stagingSpares.begin(); it != t->stagingSpares.end(); ++it)
@@ -8861,6 +8863,8 @@ bool D3D12ResourceFactory::setTlasStaticInstances(TlasHandle h, const TlasInstan
             AVER_ERROR("[RHI.D3D12] setTlasStaticInstances: the {:.1f} MiB instance buffer could not be created "
                        "or filled -- the previous prefix kept", static_cast<f64>(descBytes) / (1024.0 * 1024.0));
             if (newDescs && descs) destroyBuffer(descs);
+            // "Kept" must hold: the earlier prefix's descs are still to be copied from this staging at the next build.
+            if (prefixStaging) { t->staticStaging = std::move(staging); t->staticStagingMapped = mapped; }
             return false;
         }
         auto* out = reinterpret_cast<D3D12_RAYTRACING_INSTANCE_DESC*>(mapped);
