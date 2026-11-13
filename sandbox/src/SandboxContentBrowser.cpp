@@ -2948,11 +2948,19 @@ void SandboxApp::importAsset(const std::string& src, const std::string& destDir,
     }
     const std::string name = std::filesystem::path(src).filename().string();
     const std::string dest = destDir + AVER_PATH_SEP + name;
+    // A converted model or audio file never copies its source, so a file of the source's name here is not a collision
+    // (it may BE the source: deleting it for Overwrite deleted the file about to be read). Their own overwrite handling
+    // sits deeper (importGltfToDir's loop, importAudio's own check).
+    if (modelFormatOfPath(src) != ModelFormat::None) { importModel(src, destDir, overwrite); return; }
+#if AVER_HAVE_AUDIO_IMPORT
+    if (fmt::isImportableAudio(src)) { importAudio(src, destDir, overwrite); return; }
+#endif
+    if (std::filesystem::exists(dest, ec) && std::filesystem::equivalent(src, dest, ec)) {
+        notifyOutcome(editor::NotifySeverity::Info, "Already here", name + " is already in this folder.");
+        return;
+    }
     if (std::filesystem::exists(dest, ec)) {
-        // Overwrite, when the Import dialog offered it: this check matches the source's own name,
-        // meaningful for a plain copy where `dest` IS the final output. A converted model/audio
-        // file rarely collides here (the source itself is never copied); its overwrite handling
-        // sits deeper (importGltfToDir's loop, importAudio's own check).
+        // Overwrite, when the Import dialog offered it: `dest` is the final output of a plain copy.
         if (overwrite) {
             cbDeleteEntry(dest);
         } else {
@@ -2965,10 +2973,6 @@ void SandboxApp::importAsset(const std::string& src, const std::string& destDir,
     const std::string ext = std::filesystem::path(src).extension().string();
     std::string lower;
     for (const char c : ext) lower.push_back(c >= 'A' && c <= 'Z' ? char(c - 'A' + 'a') : c);
-    if (modelFormatOfPath(src) != ModelFormat::None) { importModel(src, destDir, overwrite); return; }
-#if AVER_HAVE_AUDIO_IMPORT
-    if (fmt::isImportableAudio(src)) { importAudio(src, destDir, overwrite); return; }
-#endif
 
     std::filesystem::copy_file(src, dest, ec);
     if (ec) { AVER_WARN("[Import] failed to copy '{}' -> '{}': {}", src, dest, ec.message());
