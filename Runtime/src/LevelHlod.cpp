@@ -70,10 +70,12 @@ u32 LevelHlod::levelFor(f64 distanceCm, f32 loadCm, i32 current) {
     const f64 base = std::max(static_cast<f64>(loadCm), 100.0);
     u32 k = 0;
     while (k + 1 < kLevels && distanceCm >= base * static_cast<f64>(1u << (k + 1))) ++k;
+    // Several levels at once (a teleport, a fast camera) step only as far as the margin allows at each threshold crossed,
+    // not all the way back to the shown level.
     if (current >= 0 && static_cast<u32>(current) != k) {
         const u32 cur = static_cast<u32>(current);
-        if (k > cur && distanceCm < base * static_cast<f64>(1u << k) * 1.1) k = cur;
-        if (k < cur && distanceCm > base * static_cast<f64>(1u << cur) * 0.9) k = cur;
+        while (k > cur && distanceCm < base * static_cast<f64>(1u << k) * 1.1) --k;
+        while (k < cur && distanceCm > base * static_cast<f64>(1u << (k + 1)) * 0.9) ++k;
     }
     return k;
 }
@@ -292,7 +294,12 @@ void LevelHlod::work() {
             std::lock_guard<std::mutex> lk(mutex_);
             Cell& c = cells_[pick];
             if (ok && c.loadLevel == level) { c.loaded = std::move(mesh); c.loadedLevel = level; }
-            else if (!ok) c.state = State::Empty;
+            else if (!ok) {
+                // An unreadable cache file is rebuilt, not trusted again; a cell that keeps failing gives up.
+                std::error_code rec;
+                std::filesystem::remove(file, rec);
+                c.state = ++c.loadFailures < 3 ? State::Unbuilt : State::Empty;
+            }
             continue;
         }
         bool fromCache = false;

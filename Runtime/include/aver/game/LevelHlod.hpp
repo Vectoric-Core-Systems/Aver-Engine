@@ -90,6 +90,7 @@ private:
         i32 loadLevel = -1;                     // a level the main thread asked the worker to read
         std::unique_ptr<fmt::OcMeshData> loaded;   // ...and what it read
         i32 loadedLevel = -1;
+        u8 loadFailures = 0;                    // reads of its cache files that failed (rebuilt until 3)
         // Main thread.
         bool wanted = false;                    // the ring shows it
         i32 shownLevel = -1;

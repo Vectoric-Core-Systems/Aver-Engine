@@ -30,6 +30,9 @@ int main() {
     check(LevelHlod::levelFor(56000.0, load, 0) == 1, "...12% past it moves to the coarser one");
     check(LevelHlod::levelFor(48000.0, load, 1) == 1, "hysteresis: 4% inside the threshold keeps the coarser level");
     check(LevelHlod::levelFor(44000.0, load, 1) == 0, "...12% inside it moves back to the finer one");
+    check(LevelHlod::levelFor(105000.0, load, 0) == 1, "two levels coarser at once: holds only the threshold it is near");
+    check(LevelHlod::levelFor(115000.0, load, 0) == 2, "...and takes both once past that one's margin");
+    check(LevelHlod::levelFor(95000.0, load, 3) == 2, "two levels finer at once: holds the level whose threshold it is just inside");
 
     LevelHlod::Settings s;
     const f32 e1 = LevelHlod::errorCmAt(25000.0f, s), e2 = LevelHlod::errorCmAt(50000.0f, s);
