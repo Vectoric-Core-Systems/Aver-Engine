@@ -283,7 +283,10 @@ bool parseVersion(std::string_view text, Version& out) {
     bool any = false;
     for (usize i = 0; i <= text.size(); ++i) {
         const char c = i < text.size() ? text[i] : '.';
-        if (c >= '0' && c <= '9') { value = value * 10 + (c - '0'); any = true; continue; }
+        if (c >= '0' && c <= '9') {
+            if (value > 100000000) return false;   // not a version; also keeps value*10 in int range
+            value = value * 10 + (c - '0'); any = true; continue;
+        }
         if (c != '.' && c != '-' && c != '+') return false;   // junk where a separator belongs
         if (!any) return false;
         if (part == 0) v.major = value;
