@@ -190,7 +190,10 @@ SkinnedScene::Resident* SkinnedScene::acquire(scene::World& world, anim::AnimSys
         skinnable_[meshId] = false;
         return nullptr;
     }
-    if (!pass_.createMesh(*dmd, bones, r.gpu, r.vertices, dmd->hasMorph() ? meshId : 0)) return nullptr;
+    if (!pass_.createMesh(*dmd, bones, r.gpu, r.vertices, dmd->hasMorph() ? meshId : 0)) {
+        skinnable_[meshId] = false;   // draw static; retrying would leak another drawMesh each frame
+        return nullptr;
+    }
 
     // The per-bone rest boxes, once. minWeight ZERO on purpose: at zero this counts exactly the
     // influences the skinning counts, which is what makes the per-frame bound provably contain
