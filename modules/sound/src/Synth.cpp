@@ -1,4 +1,5 @@
 #include "aver/sound/Synth.hpp"
+#include <cmath>
 
 namespace aver::sound {
 namespace {
@@ -48,9 +49,10 @@ bool renderSound(const fmt::OcSoundData& graph, const RenderParams& params,
     if (params.sampleRate == 0) return fail(why, "sound: sample rate is 0");
 
     const f32 duration = params.durationSec > 0.0f ? params.durationSec : graph.durationSec;
-    if (duration <= 0.0f) return fail(why, "sound: duration is not positive");
+    if (!(duration > 0.0f) || !std::isfinite(duration)) return fail(why, "sound: duration is not positive and finite");
 
-    const u64 want = static_cast<u64>(duration * static_cast<f32>(params.sampleRate));
+    const f32 wantF = duration * static_cast<f32>(params.sampleRate);
+    const u64 want = wantF < 1.8e19f ? static_cast<u64>(wantF) : ~u64(0);
     if (want == 0) return fail(why, "sound: the render is zero frames long");
     if (want > maxFrames)
         return fail(why, "sound: a render of " + std::to_string(want) + " frames exceeds the cap of " +
