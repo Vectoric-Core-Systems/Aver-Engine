@@ -766,6 +766,10 @@ bool GraphEditor::addFunctionPin(const std::string& funcName, bool isInput, cons
                                   const std::string& type) {
     fmt::OcGraphFunction* fn = findFunction(funcName);
     if (!fn || pinName.empty() || pinName.find_first_of(" \t") != std::string::npos) return false;
+    if (pinName.find('.') != std::string::npos) {   // a LINK is node.pin, so a '.' in the pin cannot be read back
+        showRejectionBanner("cannot add pin '" + pinName + "': a pin name cannot contain '.'");
+        return false;
+    }
     auto& list = isInput ? fn->inputs : fn->outputs;
     for (const auto& p : list) if (p.name == pinName) return false;
     const std::string t = (type == "int" || type == "bool") ? type : std::string("float");
