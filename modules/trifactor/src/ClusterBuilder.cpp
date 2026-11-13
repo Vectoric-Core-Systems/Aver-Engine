@@ -1826,6 +1826,7 @@ bool simplifyCore(fmt::OcMeshData& mesh, f32 ratio, f32 absError, std::string* w
     // vertex no triangle kept).
     fmt::remapMorphTargets(mesh, remap, static_cast<u32>(newVerts));
     mesh.meshlets.clear();   // stale the moment the triangles change; rebuild after simplifying
+    mesh.coarserLods.clear();   // built from those meshlets, and their indices name vertices the compaction renumbered
     mesh.computeBounds();    // positions changed; writeOcMesh recomputes this too, but an in-memory
                               // caller that reads boundsMin/Max before saving deserves a live value
 
