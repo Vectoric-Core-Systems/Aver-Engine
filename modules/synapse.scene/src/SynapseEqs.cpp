@@ -21,6 +21,8 @@ constexpr usize kMaxQueuedRuns = 64;
 constexpr usize kMaxRetainedResults = 64;
 constexpr usize kMaxDebugRuns = 8;
 constexpr usize kMaxDebugItems = 256;
+// The nav generator visits (2n+1)^2 cells in one uninterruptible step; n is capped so a huge radius cannot freeze the frame.
+constexpr f32 kMaxNavGenCells = 512.0f;
 
 scene::World& world() { return scene::World::instance(); }
 
@@ -278,10 +280,33 @@ u32 EqsSystem::runSync(u32 queryId, const EqsRunParams& params) {
     if (!handle) return 0;
     RunRec& r = *find(handle);
     r.run->setNav(nav_);
+    boundRun(r, nav_);
     r.status = Status::Running;
     r.run->step(0);
     finishRun(r);
     return handle;
+}
+
+void EqsSystem::boundRun(RunRec& r, const fmt::OcNavData* nav) {
+    if (r.bounded || !nav || !nav->valid()) return;
+    r.bounded = true;
+    EqsQuery q = r.run->query();
+    bool changed = false;
+    for (EqsOption& o : q.options) {
+        EqsGenerator& g = o.gen;
+        if (g.kind != EqsGen::Nav) continue;
+        if (g.stride == 0) { g.stride = 1; changed = true; }
+        const f32 maxRadius = kMaxNavGenCells * nav->cellSizeCm * static_cast<f32>(g.stride);
+        if (!(g.radius <= maxRadius)) {   // also catches NaN
+            AVER_WARN("[Synapse] query '{}': nav generator radius capped to {} cm", r.queryName, maxRadius);
+            g.radius = maxRadius;
+            changed = true;
+        }
+    }
+    if (!changed) return;
+    EqsRunParams p = r.run->params();
+    r.run = std::make_unique<EqsRun>(q, std::move(p), makeEnv(r.env.get()));   // nothing was generated before the first bound
+    r.run->setNav(nav);
 }
 
 void EqsSystem::finishRun(RunRec& r) {
@@ -431,6 +456,7 @@ void EqsSystem::tick(scene::World& w, const fmt::OcNavData* nav, f32 dt, Synapse
     for (RunRec* r : order) {
         r->status = Status::Running;
         r->run->setNav(nav);
+        boundRun(*r, nav);
         while (!r->run->done()) {
             if (stepped && exhausted()) return;
             u32 slice = 256;

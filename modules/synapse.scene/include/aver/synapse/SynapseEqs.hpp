@@ -99,6 +99,7 @@ private:
         std::unique_ptr<EqsRun> run;
         double finishedAt = 0;
         bool announced = false;
+        bool bounded = false;   // generator work limits applied (needs the nav grid)
     };
 
     EqsEnv makeEnv(EnvCtx* e) const;
@@ -106,6 +107,7 @@ private:
     const RunRec* find(u32 handle) const;
     u32 create(u32 queryId, const EqsRunParams& params, i32 priority);
     void finishRun(RunRec& r);
+    void boundRun(RunRec& r, const fmt::OcNavData* nav);
 
     static EqsContext envContext(void* user, std::string_view name, const EqsRunParams& p);
     static bool envForward(void* user, u32 entity, Vec3& out);
