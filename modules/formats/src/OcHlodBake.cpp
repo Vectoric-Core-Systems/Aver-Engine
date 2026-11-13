@@ -202,6 +202,13 @@ bool bakeHlod(OcWorldData& w, const std::string& levelStem, const std::string& c
         const OcWorldPlacement& p = w.placements[i];
         if (p.asset.empty() || !p.className.empty() || !p.vehiclePreset.empty() || !p.animClip.empty() || !p.visible) { ++report.placementsExcluded; continue; }
         if (!hlodLayersAllowed(p.layers, w.dataLayers)) { ++report.placementsExcluded; ++report.excludedByLayer; continue; }
+        // Wider than kOcHlodWideCells: the streamer's ring and planHlodCells leave it out of every cell, so it is never
+        // hidden behind a proxy; merged in, it would draw twice wherever the proxy shows.
+        const f64 wide = static_cast<f64>(cellCm) * static_cast<f64>(kOcHlodWideCells);
+        if (p.hasBounds && (static_cast<f64>(p.boundsMax[0]) - p.boundsMin[0] > wide || static_cast<f64>(p.boundsMax[1]) - p.boundsMin[1] > wide)) {
+            ++report.placementsExcluded;
+            continue;
+        }
         if (!meshOf(p.asset).ok) {
             ++report.placementsExcluded;
             if (report.warnings.size() < 16) report.warnings.push_back("no mesh for '" + p.asset + "'");
