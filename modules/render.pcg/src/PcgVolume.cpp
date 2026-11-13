@@ -303,7 +303,11 @@ bool VolumeBuilder::request(const VolumeSpec& spec) {
 
         if (!out_ || !readback_ || !set_) {
             AVER_ERROR("[PCG] could not allocate a {}-voxel volume", voxels);
-            shutdown();
+            if (set_)      { res_->destroyBindingSet(set_); set_ = 0; }
+            if (readback_) { res_->destroyBuffer(readback_); readback_ = 0; }
+            if (out_)      { res_->destroyBuffer(out_); out_ = 0; }
+            bytes_ = 0;
+            state_ = State::Idle;
             return false;
         }
         bytes_ = bytes;
