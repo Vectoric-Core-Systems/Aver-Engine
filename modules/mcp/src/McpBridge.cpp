@@ -23,12 +23,24 @@
 namespace aver::mcp {
 namespace {
 
+// Where `"key":` sits as a KEY of the flat object: preceded by '{' or ',' and followed by ':' (whitespace between). A bare
+// find took `"id":7` written inside a "text" value for the id when the real key was absent. The position of the ':', or npos.
+usize findKeyColon(const std::string& s, const char* key) {
+    const std::string pat = std::string("\"") + key + "\"";
+    for (usize k = s.find(pat); k != std::string::npos; k = s.find(pat, k + 1)) {
+        usize b = k;
+        while (b > 0 && std::isspace(static_cast<unsigned char>(s[b - 1]))) --b;
+        if (b == 0 || (s[b - 1] != '{' && s[b - 1] != ',')) continue;
+        usize c = k + pat.size();
+        while (c < s.size() && std::isspace(static_cast<unsigned char>(s[c]))) ++c;
+        if (c < s.size() && s[c] == ':') return c;
+    }
+    return std::string::npos;
+}
+
 // Reads an integer value for a flat JSON key. Returns false when the key is absent or not a number.
 bool findNumber(const std::string& s, const char* key, i64& out) {
-    const std::string pat = std::string("\"") + key + "\"";
-    const usize k = s.find(pat);
-    if (k == std::string::npos) return false;
-    usize c = s.find(':', k + pat.size());
+    usize c = findKeyColon(s, key);
     if (c == std::string::npos) return false;
     ++c;
     while (c < s.size() && std::isspace(static_cast<unsigned char>(s[c]))) ++c;
@@ -80,10 +92,7 @@ void appendUtf8(std::string& out, u32 cp) {
 // absent or the string is unterminated. \n \r \t \b \f and \uXXXX (surrogate pairs included) used to
 // come back as a bare letter, so a multi-line "text" arrived as one run-together line.
 bool findString(const std::string& s, const char* key, std::string& out) {
-    const std::string pat = std::string("\"") + key + "\"";
-    const usize k = s.find(pat);
-    if (k == std::string::npos) return false;
-    usize c = s.find(':', k + pat.size());
+    usize c = findKeyColon(s, key);
     if (c == std::string::npos) return false;
     c = s.find('"', c);
     if (c == std::string::npos) return false;
@@ -482,6 +491,9 @@ bool McpBridge::start(u16 port) {
                 const int got = ::recv(client, chunk, sizeof chunk, 0);
                 if (got <= 0) break;
                 buffer.append(chunk, static_cast<usize>(got));
+                // One request is one line: a peer streaming bytes with no newline grew this without end. 64 MiB is far past
+                // any real request (a text argument included); past it the connection is dropped.
+                if (buffer.size() > (usize(64) << 20) && buffer.find('\n') == std::string::npos) break;
                 usize nl;
                 while ((nl = buffer.find('\n')) != std::string::npos) {
                     const std::string line = buffer.substr(0, nl);
