@@ -391,7 +391,8 @@ void GameApp::tickScene(Engine& e, const Timestep& t, f32 gameDt, bool objectsHe
 #endif
     anim::animSystem().tick(scene::World::instance(), gameDt);
 #if AVER_MODULE_SOFTBODY_SCENE
-    game::tickSoftBodies(gameDt, camPos_);   // after the pose it reads, before softBodyScene_->update copies the result
+    const Vec3 camFwd = camForward();
+    game::tickSoftBodies(gameDt, camPos_, &camFwd);   // after the pose it reads, before softBodyScene_->update copies the result
 #endif
     // Level sequences: Post phase (transform, material, camera); advanced and Pre-evaluated before the animation tick.
     if (!sequenceDirector_.empty()) sequenceDirector_.evaluate(scene::World::instance(), game::SeqPhase::Post);

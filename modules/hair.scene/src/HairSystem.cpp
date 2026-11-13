@@ -559,7 +559,7 @@ bool HairSystem::Impl::build(HairSystem& sys, scene::World& w, scene::Entity e, 
 
 // ================================================================================ the tick
 
-void HairSystem::tick(scene::World& world, f32 dt, const Vec3& view) {
+void HairSystem::tick(scene::World& world, f32 dt, const Vec3& view, const Vec3* viewForward) {
     Impl& m = *impl_;
     stats_ = HairStats{};
     views_.clear();
@@ -647,7 +647,19 @@ void HairSystem::tick(scene::World& world, f32 dt, const Vec3& view) {
         if (in.havePos && (pos - in.lastPos).size() > teleportCm) in.teleportNext = true;
         in.lastPos = pos;
         in.havePos = true;
-        const HairCadenceResult cad = stepHairCadence(opt_.cadence, in.cadence, distance, true, dt);
+        bool inView = true;
+        if (viewForward) {   // the groom's bounding sphere against the camera plane
+            const f32* b = g.bounds;
+            const f32 cx = 0.5f * (b[0] + b[3]), cy = 0.5f * (b[1] + b[4]), cz = 0.5f * (b[2] + b[5]);
+            const Vec3 centre(cx * W.m[0][0] + cy * W.m[1][0] + cz * W.m[2][0] + W.m[3][0],
+                              cx * W.m[0][1] + cy * W.m[1][1] + cz * W.m[2][1] + W.m[3][1],
+                              cx * W.m[0][2] + cy * W.m[1][2] + cz * W.m[2][2] + W.m[3][2]);
+            const f32 hx = 0.5f * (b[3] - b[0]), hy = 0.5f * (b[4] - b[1]), hz = 0.5f * (b[5] - b[2]);
+            const f32 radius = std::sqrt(hx * hx + hy * hy + hz * hz) * scaleOf(W) + 2.0f;
+            const Vec3 d = centre - view;
+            inView = d.x * viewForward->x + d.y * viewForward->y + d.z * viewForward->z > -radius;
+        }
+        const HairCadenceResult cad = stepHairCadence(opt_.cadence, in.cadence, distance, inView, dt);
 
         // ---- feed the physics ----
         aver_phys_hair_set_transform(in.hair, &W.m[0][0]);

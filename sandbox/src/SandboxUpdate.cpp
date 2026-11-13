@@ -996,7 +996,8 @@ void SandboxApp::tickObjectAnimation(Engine& e, HitchMarks& hm, const f32 gameDt
 void SandboxApp::tickSoftBodySim(HitchMarks& hm, const f32 gameDt) {
     // After the pose it reads (skin palette), before the draw scene copies the result (plan 2.5.2).
     playProf_.begin(editor::PlayPhase::SoftBody);
-    game::tickSoftBodies(gameDt, viewPos());
+    const Vec3 viewFwd = viewForward();
+    game::tickSoftBodies(gameDt, viewPos(), &viewFwd);
     playProf_.end(editor::PlayPhase::SoftBody);
     hm.mark("softBodies");
 }

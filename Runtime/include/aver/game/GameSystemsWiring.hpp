@@ -512,12 +512,12 @@ inline void tickAnimGraphs(f32 dt) {
 
 // Advances cloth and destruction: reads the Jolt soft bodies back, runs dents, tears and debris, pushes the skin
 // palettes. AFTER animSystem().tick (the palette it reads is this frame's) and before the soft-body draw scene
-// updates, in both hosts. `viewPos` is the camera, for the distance tiers.
-inline void tickSoftBodies(f32 dt, const Vec3& viewPos) {
+// updates, in both hosts. `viewPos` is the camera, for the distance tiers; `viewForward` (optional) lets hair skip grooms behind it.
+inline void tickSoftBodies(f32 dt, const Vec3& viewPos, const Vec3* viewForward = nullptr) {
 #if AVER_MODULE_HAIR_SCENE
     // Hair reads the skinned pose and the soft-body wind, and runs before HairScene::update copies the result.
     hair::hairSystem().setWind(softbody::softBodySystem().windVelocity(), 0.0f);
-    hair::hairSystem().tick(scene::World::instance(), dt, viewPos);
+    hair::hairSystem().tick(scene::World::instance(), dt, viewPos, viewForward);
 #endif
 #if AVER_MODULE_SCENE && AVER_MODULE_SOFTBODY_SCENE
     softbody::SoftBodySystem& sys = softbody::softBodySystem();

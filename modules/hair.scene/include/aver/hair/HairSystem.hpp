@@ -150,7 +150,8 @@ public:
     void setWind(const Vec3& windCmS, f32 gustCmS) { wind_ = windCmS; gust_ = gustCmS; }
 
     // Once per frame, after the physics step and World::flush. `view` is the camera position in world cm.
-    void tick(scene::World& world, f32 dt, const Vec3& view);
+    // `viewForward` (unit, optional): a groom wholly behind the camera plane counts as not visible, so HairLod invisibleSeconds applies; null keeps every groom visible.
+    void tick(scene::World& world, f32 dt, const Vec3& view, const Vec3* viewForward = nullptr);
     // Destroys every physics hair, proxy and settings object (components and entities stay). Call before the physics world goes,
     // on level unload and when Play stops.
     void clear();
