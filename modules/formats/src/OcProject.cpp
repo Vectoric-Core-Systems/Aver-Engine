@@ -18,10 +18,32 @@ using namespace aver::fmt::detail;
 
 namespace {
 
-// The trimmed remainder of the line after the key, for prose values.
-std::string_view restOfLine(std::string_view line, std::string_view key) {
-    std::string_view r = line.substr(key.size());
-    return trim(r);
+// The trimmed remainder of the line after the key, for prose values and paths, with escapeText undone.
+std::string restOfLine(std::string_view line, std::string_view key) {
+    const std::string_view r = trim(line.substr(key.size()));
+    std::string o;
+    for (usize i = 0; i < r.size(); ++i) {
+        if (r[i] == '%' && i + 2 < r.size()) {
+            const char a = r[i + 1], b = r[i + 2];
+            const char c = a == '2' && b == '3' ? '#' : a == '3' && (b == 'B' || b == 'b') ? ';' : a == '2' && b == '5' ? '%' : 0;
+            if (c) { o += c; i += 2; continue; }
+        }
+        o += r[i];
+    }
+    return o;
+}
+
+// A prose value or path as written: '#' starts a comment and a trailing ';' is dropped when the file is read, so those
+// (and '%', the escape itself) are written %XX. "C# Shooter" otherwise read back as "C".
+std::string escapeText(const std::string& s) {
+    std::string o;
+    for (const char c : s) {
+        if (c == '#') o += "%23";
+        else if (c == ';') o += "%3B";
+        else if (c == '%') o += "%25";
+        else o += c;
+    }
+    return o;
 }
 
 // THE NAME MIRROR of the physics settings table (modules/physics/src/PhysicsConfig.cpp, aver_phys_setting_name):
@@ -492,7 +514,7 @@ bool isOwnedKey(std::string_view line) {
 // Serialises a manifest, copying every unowned line of `existing` through untouched.
 std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
     std::string owned;
-    if (!d.name.empty())             { owned += "NAME "; owned += d.name; owned += '\n'; }
+    if (!d.name.empty())             { owned += "NAME "; owned += escapeText(d.name); owned += '\n'; }
     if (!d.engineName.empty()) {
         owned += "ENGINE "; owned += d.engineName;
         if (!d.engineMinVersion.empty()) { owned += ' '; owned += d.engineMinVersion; }
@@ -500,9 +522,9 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
     }
     // Records what last opened it, as against ENGINE's minimum requirement.
     if (!d.createdWith.empty())      { owned += "CREATEDWITH "; owned += d.createdWith; owned += '\n'; }
-    if (!d.contentRoot.empty())      { owned += "CONTENT ";  owned += d.contentRoot; owned += '\n'; }
-    if (!d.startMap.empty())         { owned += "STARTMAP "; owned += d.startMap;    owned += '\n'; }
-    if (!d.author.empty())           { owned += "AUTHOR ";   owned += d.author;      owned += '\n'; }
+    if (!d.contentRoot.empty())      { owned += "CONTENT ";  owned += escapeText(d.contentRoot); owned += '\n'; }
+    if (!d.startMap.empty())         { owned += "STARTMAP "; owned += escapeText(d.startMap); owned += '\n'; }
+    if (!d.author.empty())           { owned += "AUTHOR ";   owned += escapeText(d.author); owned += '\n'; }
     for (const ProjectExtension& e : d.extensions) {
         if (e.name.empty()) continue;
         owned += "EXTENSION "; owned += e.name;
@@ -510,9 +532,9 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
         owned += '\n';
     }
     // Owned key: stripped if present, replaced with this if not empty.
-    if (!d.droneGraph.empty())       { owned += "DRONE.GRAPH "; owned += d.droneGraph; owned += '\n'; }
+    if (!d.droneGraph.empty())       { owned += "DRONE.GRAPH "; owned += escapeText(d.droneGraph); owned += '\n'; }
     // Owned key: stripped if present, replaced with this if not empty.
-    if (!d.inputScheme.empty())      { owned += "INPUT.SCHEME "; owned += d.inputScheme; owned += '\n'; }
+    if (!d.inputScheme.empty())      { owned += "INPUT.SCHEME "; owned += escapeText(d.inputScheme); owned += '\n'; }
     if (!d.gameMode.empty())         { owned += "GAME.MODE "; owned += d.gameMode; owned += '\n'; }
     if (!d.localeDefault.empty())    { owned += "LOCALE.DEFAULT "; owned += d.localeDefault; owned += '\n'; }
     appendKey(owned, "RENDER.GI",          d.giQuality);
@@ -602,7 +624,7 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
     appendKey(owned, "RENDER.ADJUSTSATURATION", d.postAdjustSaturation);
 
     // WINDOW.* -- how a shipped game presents itself.
-    if (!d.windowTitle.empty()) owned += "WINDOW.TITLE " + d.windowTitle + "\n";
+    if (!d.windowTitle.empty()) owned += "WINDOW.TITLE " + escapeText(d.windowTitle) + "\n";
     if (d.windowWidth > 0 && d.windowHeight > 0) {
         char b[96];
         std::snprintf(b, sizeof b, "WINDOW.SIZE %d %d\n", d.windowWidth, d.windowHeight);
@@ -671,10 +693,10 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
                       static_cast<double>(d.busVolume[2]), static_cast<double>(d.busVolume[3]));
         owned += b;
     }
-    if (!d.audioBusLayout.empty()) { owned += "AUDIO.BUSLAYOUT "; owned += d.audioBusLayout; owned += '\n'; }
+    if (!d.audioBusLayout.empty()) { owned += "AUDIO.BUSLAYOUT "; owned += escapeText(d.audioBusLayout); owned += '\n'; }
     if (d.audioSpeakers == 6 || d.audioSpeakers == 8) { owned += "AUDIO.SPEAKERS " + std::to_string(d.audioSpeakers) + "\n"; }
     if (d.audioBinaural) owned += "AUDIO.BINAURAL 1\n";
-    if (!d.uiTheme.empty()) { owned += "UI.THEME "; owned += d.uiTheme; owned += '\n'; }
+    if (!d.uiTheme.empty()) { owned += "UI.THEME "; owned += escapeText(d.uiTheme); owned += '\n'; }
     if (!d.uiStretch.empty()) { owned += "UI.STRETCH "; owned += d.uiStretch; owned += '\n'; }
     if (!d.uiAspect.empty()) { owned += "UI.ASPECT "; owned += d.uiAspect; owned += '\n'; }
     if (!d.uiStretchScaleMode.empty()) { owned += "UI.STRETCHSCALEMODE "; owned += d.uiStretchScaleMode; owned += '\n'; }

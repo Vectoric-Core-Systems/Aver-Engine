@@ -369,7 +369,9 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
         } else if (equalsCI(key, "ID")) {
             out.contentId = t.size() > 1 ? parseU64(t[1]) : 0;
         } else if (equalsCI(key, "NAME")) {
+            // The rest of the line, as GAMEMODE: the writer puts the name verbatim, and "Old Town" is a name.
             out.name = t.size() > 1 ? std::string(t[1]) : std::string();
+            for (usize i = 2; i < t.size(); ++i) { out.name += ' '; out.name += std::string(t[i]); }
         } else if (equalsCI(key, "BUILD")) {
             out.build = static_cast<u32>(t.size() > 1 ? parseU64(t[1]) : 0);
         } else if (equalsCI(key, "ALGO")) {

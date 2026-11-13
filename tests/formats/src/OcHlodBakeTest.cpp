@@ -55,6 +55,22 @@ int main() {
     fs::create_directories(content / "Meshes");
     fs::create_directories(project);
     std::string err;
+    {
+        // Paths with spaces (a level called "My Level") come back whole from the .ocstream.
+        fmt::OcStreamData a, b;
+        fmt::OcStreamHlod h;
+        h.cx = 1; h.cy = -2; h.level = 1; h.proxy = "Binaries/Streaming/My Level/hlod/c_1_-2.ocmesh"; h.sourceHash = 0xabcull;
+        a.hlod.push_back(h);
+        fmt::OcStreamFoliage fo;
+        fo.source = "Foliage/Big Trees.ocfoliage"; fo.cells = "Binaries/Streaming/My Level/foliage 100%.cells";
+        a.foliage.push_back(fo);
+        const std::string p = (root / "spaces.ocstream").string();
+        check(fmt::saveOcStream(p, a, &err) && fmt::loadOcStream(p, b, &err), "a stream file with spaced paths saves and loads");
+        check(b.hlod.size() == 1 && b.hlod[0].proxy == h.proxy && b.hlod[0].sourceHash == h.sourceHash,
+              "an HLOD proxy path with a space reads back whole, its hash intact");
+        check(b.foliage.size() == 1 && b.foliage[0].source == fo.source && b.foliage[0].cells == fo.cells,
+              "FOLIAGE paths with spaces and '%' read back whole");
+    }
     check(fmt::saveOcMesh((content / "Meshes" / "cube.ocmesh").string(), cube(), &err), "fixture mesh saved: " + err);
 
     // Cells of 1000 cm: A = (0,0) with three cubes, B = (3,0) with one, C = (0,2) with a layered one.

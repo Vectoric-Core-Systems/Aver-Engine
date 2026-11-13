@@ -177,6 +177,18 @@ static void checkOcproject() {
         ProjectDesc again;
         check(parseOcproject(writeOcproject(sp, ""), again, &serr) && again.startMap == sp.startMap, "and write and parse back the same");
     }
+    {
+        // '#' starts a comment and a trailing ';' is dropped on read: the writer escapes them in text values.
+        ProjectDesc h;
+        h.name = "C# Shooter;";
+        h.windowTitle = "Round #1 - 100% done";
+        h.contentRoot = "Games/C# Demo";
+        ProjectDesc back;
+        std::string herr;
+        check(parseOcproject(writeOcproject(h, ""), back, &herr) && back.name == h.name && back.windowTitle == h.windowTitle &&
+                  back.contentRoot == h.contentRoot,
+              "a project name, title and path with '#', ';' and '%' read back whole: '" + back.name + "'");
+    }
 
     {
         ProjectDesc r;
@@ -683,6 +695,11 @@ static void checkOcworld() {
         OcWorldData w;
         check(parseOcworld("OCWORLD 1\nNAME T\nSKY model authored\n", w, &err), "an authored sky parses");
         check(!w.skyPhysical, "and selects the two-colour dome");
+    }
+    {
+        OcWorldData w;
+        check(parseOcworld("OCWORLD 1\nNAME Old Town\n", w, &err) && w.name == "Old Town",
+              "a level name with a space reads back whole");
     }
     {
         // The record is optional and must stay so: every level written before it existed has none.
