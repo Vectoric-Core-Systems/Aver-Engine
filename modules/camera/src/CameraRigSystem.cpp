@@ -365,7 +365,7 @@ RigResult CameraRigSystem::drive(scene::World& world, const RigFrame& fr) {
             const CCameraRig p = presetRig(r->preset < kCameraPresetCount ? static_cast<CameraPreset>(r->preset) : CameraPreset::Chase);
             const scene::Entity keepTarget = r->target;
             const i32 keepBody = r->ignoreBody;
-            const u32 keepFlags = r->flags & kRigDisabled;
+            const u32 keepFlags = r->flags & (kRigDisabled | kRigCut);
             *r = p;
             r->target = keepTarget;
             r->ignoreBody = keepBody;
