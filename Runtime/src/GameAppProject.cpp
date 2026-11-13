@@ -342,6 +342,18 @@ void GameApp::travelTo(const std::string& requested) {
         return;
     }
     AVER_INFO("[Game] level travel to '{}'", path);
+    // What a level's session set up comes down with it, as at shutdown and as the editor's travel does: object animation
+    // stops, the movable set ends, the old level's cars and ragdolls go before their entities. They begin again for the
+    // new level below; before, its cars stayed inert and the old ones were still stepped.
+    anim::animSystem().setObjectAnimationLive(false);
+    playMobility_.end();
+#if AVER_MODULE_PHYSICS
+    game::clearVehicles();
+    vehicles_.end();
+#endif
+#if AVER_MODULE_RAGDOLL
+    ragdoll::ragdollSystem().clear();
+#endif
     aver_fw_travel_begin();
     scene::World::instance().flush();
     level_.unload();
@@ -359,6 +371,8 @@ void GameApp::travelTo(const std::string& requested) {
     if (!modeClass) modeClass = named(project_.gameMode, AVER_FW_CLASS_GAME_MODE);
     if (aver_fw_travel_end(modeClass, named(levelDefaultPawn_, AVER_FW_CLASS_PAWN))) placePawnAtSpawn();
     else AVER_WARN("[Game] level travel: no GameMode could begin in '{}'", path);
+    beginObjectPlay();       // the new level's objects animate and are movable
+    beginLevelVehicles();    // and its cars become real (needs the session playing, so after travel_end)
 #else
     (void)requested;
 #endif
