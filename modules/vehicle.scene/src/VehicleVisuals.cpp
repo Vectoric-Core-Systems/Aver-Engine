@@ -68,6 +68,19 @@ void VehiclePhysicsSystem::Impl::writeWheelVisuals(scene::World& w, detail::Entr
                 Transform xf = w.localTransform(node);
                 xf.position = pos;
                 xf.rotation = rot;
+                // The pose is in the vehicle's frame; a wheel found under a grouping node ("Wheels/FL") is written in
+                // that node's frame instead, or it drew offset by the group's transform.
+                Mat4 groupToVehicle = Mat4::identity();
+                bool nested = false;
+                for (scene::Entity p = w.parent(node); p != scene::kInvalidEntity && p != e.entity && w.valid(p); p = w.parent(p)) {
+                    groupToVehicle = groupToVehicle * w.localTransform(p).toMatrix();
+                    nested = true;
+                }
+                if (nested) {
+                    const Transform local = transformFromMatrix(xf.toMatrix() * groupToVehicle.inverse());
+                    xf.position = local.position;
+                    xf.rotation = local.rotation;
+                }
                 w.setLocalTransform(node, xf);
                 e.wheelWrittenPos[i] = pos;
                 e.wheelWrittenRot[i] = rot;
