@@ -85,7 +85,10 @@ inline u32 chooseHairLod(f32 distanceCm, const f32 distances[3], f32 lodBias, u3
 
 // The drawn level for a state level: lodBias rounded to whole steps and clamped.
 inline u32 biasedHairLod(u32 stateLevel, f32 lodBias) {
-    const f32 shifted = static_cast<f32>(stateLevel) + lodBias;
+    f32 shifted = static_cast<f32>(stateLevel) + lodBias;
+    if (!(shifted == shifted)) shifted = static_cast<f32>(stateLevel);   // NaN bias draws the state level
+    const f32 top = static_cast<f32>(kHairLodLevels - 1);
+    shifted = shifted < 0.0f ? 0.0f : (shifted > top ? top : shifted);
     const i32 r = static_cast<i32>(shifted < 0.0f ? shifted - 0.5f : shifted + 0.5f);
     if (r < 0) return 0;
     if (r > static_cast<i32>(kHairLodLevels) - 1) return kHairLodLevels - 1;
