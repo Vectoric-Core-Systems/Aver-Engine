@@ -108,8 +108,11 @@ public:
         if (pyramid_ && sceneW == sceneW_ && sceneH == sceneH_ && sampleCount == sampleCount_)
             return true;
         sceneW_ = sceneW; sceneH_ = sceneH; sampleCount_ = sampleCount;
-        if (sceneW_ == 0 || sceneH_ == 0) return false;
-        return createPyramidResources(res);
+        if (sceneW_ == 0 || sceneH_ == 0) { destroyPyramidResources(res); return false; }
+        if (createPyramidResources(res)) return true;
+        // Not ready: drop the half-built pyramid so the next call retries and testBatch sees everything visible.
+        destroyPyramidResources(res);
+        return false;
     }
 
     void buildPyramid(IRenderContext& ctx, TextureHandle sceneDepth, const f32 viewProj[16]) override {
