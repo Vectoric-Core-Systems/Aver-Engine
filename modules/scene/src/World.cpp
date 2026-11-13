@@ -27,38 +27,10 @@ inline bool isTransformType(u32 type) {
     return type == kComponentLocal || type == kComponentWorld || type == kComponentHierarchy;
 }
 
-// Builds a quaternion from three normalised rotation ROWS, matching Mat4::fromQuat's convention.
-Quat quatFromRows(const Vec3& r0, const Vec3& r1, const Vec3& r2) {
-    const f32 trace = r0.x + r1.y + r2.z;
-    if (trace > 0.0f) {
-        const f32 s = std::sqrt(trace + 1.0f) * 2.0f;
-        return {(r1.z - r2.y) / s, (r2.x - r0.z) / s, (r0.y - r1.x) / s, 0.25f * s};
-    }
-    if (r0.x > r1.y && r0.x > r2.z) {
-        const f32 s = std::sqrt(1.0f + r0.x - r1.y - r2.z) * 2.0f;
-        return {0.25f * s, (r1.x + r0.y) / s, (r2.x + r0.z) / s, (r1.z - r2.y) / s};
-    }
-    if (r1.y > r2.z) {
-        const f32 s = std::sqrt(1.0f + r1.y - r0.x - r2.z) * 2.0f;
-        return {(r1.x + r0.y) / s, 0.25f * s, (r2.y + r1.z) / s, (r2.x - r0.z) / s};
-    }
-    const f32 s = std::sqrt(1.0f + r2.z - r0.x - r1.y) * 2.0f;
-    return {(r2.x + r0.z) / s, (r2.y + r1.z) / s, 0.25f * s, (r0.y - r1.x) / s};
-}
-
-// Splits a row-major matrix into position, rotation and scale. Scales always come back positive.
-Transform decomposeRowMajor(const Mat4& m) {
-    Transform t;
-    t.position = {m.m[3][0], m.m[3][1], m.m[3][2]};
-
-    Vec3 r0{m.m[0][0], m.m[0][1], m.m[0][2]};
-    Vec3 r1{m.m[1][0], m.m[1][1], m.m[1][2]};
-    Vec3 r2{m.m[2][0], m.m[2][1], m.m[2][2]};
-    t.scale = {r0.size(), r1.size(), r2.size()};
-
-    t.rotation = quatFromRows(r0.getSafeNormal(), r1.getSafeNormal(), r2.getSafeNormal());
-    return t;
-}
+// Splits a row-major matrix into position, rotation and scale: the core's transformFromMatrix, which keeps a mirror's
+// sign on X and rebuilds a flattened (zero) axis. This copy forced every scale positive and took a zero row's normal as
+// zero, so a mirrored or flattened entity reparented with keepWorld came back with a non-unit rotation.
+Transform decomposeRowMajor(const Mat4& m) { return transformFromMatrix(m); }
 
 const Transform kIdentityTransform{};
 const Mat4      kIdentityMatrix{};

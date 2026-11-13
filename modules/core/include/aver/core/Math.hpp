@@ -308,12 +308,18 @@ inline Transform transformFromMatrix(const Mat4& m) {
     // A ZERO SCALE AXIS LEAVES THE ROTATION UNDEFINED, so it falls back to identity rather than
     // dividing by zero and filling the quaternion with NaN -- which would then propagate into every
     // transform downstream and be attributed to something else entirely.
-    if (std::fabs(sx) < 1e-8f || sy < 1e-8f || sz < 1e-8f) return t;
-
+    // ONE zero axis (a flattened object) still has a rotation: the other two define it, the third is their cross product
+    // (for a rotation, z = x cross y, x = y cross z, y = z cross x). Two or three zero axes leave nothing to go on.
+    const bool zx = std::fabs(sx) < 1e-8f, zy = sy < 1e-8f, zz = sz < 1e-8f;
+    if (int(zx) + int(zy) + int(zz) > 1) return t;
+    Vec3 ux = zx ? Vec3{} : ax * (1.0f / sx), uy = zy ? Vec3{} : ay * (1.0f / sy), uz = zz ? Vec3{} : az * (1.0f / sz);
+    if (zx) ux = cross(uy, uz);
+    if (zy) uy = cross(uz, ux);
+    if (zz) uz = cross(ux, uy);
     Mat4 r = Mat4::identity();
-    r.m[0][0] = ax.x/sx; r.m[0][1] = ax.y/sx; r.m[0][2] = ax.z/sx;
-    r.m[1][0] = ay.x/sy; r.m[1][1] = ay.y/sy; r.m[1][2] = ay.z/sy;
-    r.m[2][0] = az.x/sz; r.m[2][1] = az.y/sz; r.m[2][2] = az.z/sz;
+    r.m[0][0] = ux.x; r.m[0][1] = ux.y; r.m[0][2] = ux.z;
+    r.m[1][0] = uy.x; r.m[1][1] = uy.y; r.m[1][2] = uy.z;
+    r.m[2][0] = uz.x; r.m[2][1] = uz.y; r.m[2][2] = uz.z;
 
     // Shepperd's method: pick the branch whose divisor is largest, so no branch divides by a small
     // number. The naive single-branch form loses most of its precision near a 180-degree rotation.
