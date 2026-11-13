@@ -80,6 +80,7 @@ public:
     u32 roundTripTime() const;               // ms, smoothed
     u32 roundTripTimeVariance() const;       // ms: the jitter estimate
     u32 lastRoundTripTime() const;
+    u32 lastRoundTripTimeVariance() const;   // ms: the last sample's deviation, unsmoothed
     u32 lowestRoundTripTime() const;
     u32 packetLoss() const;                  // fraction of resent reliable commands, scaled by kPacketLossScale
     u32 packetLossVariance() const;

@@ -510,7 +510,7 @@ AVER_NET_API double aver_net_peer_stat(int32_t host, int64_t peer, int32_t which
         case AVER_NET_PEERSTAT_ROUND_TRIP_TIME: return p->roundTripTime();
         case AVER_NET_PEERSTAT_ROUND_TRIP_TIME_VARIANCE: return p->roundTripTimeVariance();
         case AVER_NET_PEERSTAT_LAST_ROUND_TRIP_TIME: return p->lastRoundTripTime();
-        case AVER_NET_PEERSTAT_LAST_ROUND_TRIP_TIME_VARIANCE: return p->roundTripTimeVariance();
+        case AVER_NET_PEERSTAT_LAST_ROUND_TRIP_TIME_VARIANCE: return p->lastRoundTripTimeVariance();
         case AVER_NET_PEERSTAT_PACKET_LOSS_EPOCH: return 0;
         case AVER_NET_PEERSTAT_PACKET_THROTTLE_EPOCH: return 0;
         case AVER_NET_PEERSTAT_PACKET_THROTTLE_ACCELERATION: return accel;

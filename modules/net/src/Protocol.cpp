@@ -132,7 +132,7 @@ struct Peer::Impl {
     u16 unseqHighest = 0;
     std::bitset<kUnseqWindow> unseqSeen;
     // timing
-    u32 rtt = 0, rttVar = 0, lastRtt = 0, lowestRtt = 0;
+    u32 rtt = 0, rttVar = 0, lastRtt = 0, lastRttVar = 0, lowestRtt = 0;
     bool rttSet = false;
     u32 pingInterval = 500, timeoutLimit = 32, timeoutMin = 5000, timeoutMax = 30000;
     u32 throttleInterval = 5000, throttleAccel = 2, throttleDecel = 2;
@@ -156,7 +156,7 @@ struct Peer::Impl {
         channels.clear(); control = Channel{};
         outgoing.clear(); sentReliable.clear(); acks.clear();
         unrelQueued = 0; outUnseqGroup = 0; unseqHighest = 0; unseqSeen.reset();
-        rtt = rttVar = lastRtt = lowestRtt = 0; rttSet = false;
+        rtt = rttVar = lastRtt = lastRttVar = lowestRtt = 0; rttSet = false;
         pingInterval = 500; timeoutLimit = 32; timeoutMin = 5000; timeoutMax = 30000;
         throttleInterval = 5000; throttleAccel = 2; throttleDecel = 2;
         lastSend = lastReceive = connectStart = connectAckedAt = 0;
@@ -415,8 +415,9 @@ struct Host::Impl {
     void updateRtt(P& p, u32 sample) {
         sample = std::max<u32>(sample, 1);
         p.lastRtt = sample;
-        if (!p.rttSet) { p.rtt = sample; p.rttVar = sample / 2; p.lowestRtt = sample; p.rttSet = true; return; }
+        if (!p.rttSet) { p.rtt = sample; p.rttVar = sample / 2; p.lastRttVar = 0; p.lowestRtt = sample; p.rttSet = true; return; }
         const u32 diff = sample > p.rtt ? sample - p.rtt : p.rtt - sample;
+        p.lastRttVar = diff;   // this sample's deviation from the smoothed RTT, unsmoothed
         p.rttVar = (3 * p.rttVar + diff) / 4;
         p.rtt = (7 * p.rtt + sample) / 8;
         p.lowestRtt = std::min(p.lowestRtt, sample);
@@ -802,6 +803,7 @@ u32 Peer::connectData() const { return d_->connectData; }
 u32 Peer::roundTripTime() const { return d_->rtt; }
 u32 Peer::roundTripTimeVariance() const { return d_->rttVar; }
 u32 Peer::lastRoundTripTime() const { return d_->lastRtt; }
+u32 Peer::lastRoundTripTimeVariance() const { return d_->lastRttVar; }
 u32 Peer::lowestRoundTripTime() const { return d_->lowestRtt; }
 u32 Peer::packetLoss() const { return d_->loss; }
 u32 Peer::packetLossVariance() const { return d_->lossVar; }
