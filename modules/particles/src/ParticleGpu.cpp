@@ -435,7 +435,10 @@ void ParticleGpu::recordShifts(rhi::IRenderContext& ctx, std::vector<GpuShift>& 
         ctx.setPipeline(csShift_);
         ctx.setBindingSet(in->set, 0);
         ctx.setConstantBuffer(kSimConstantRegister, &cb, kHeaderBytes);
-        ctx.dispatch(groupsFor(threads, 64), 1, 1);
+        // A big trail emitter (capacity x ring points) can need more than the 65535 groups one dimension allows: the rest
+        // go in y, and CSShift folds y back into the index (rows of exactly 65535 groups).
+        const u32 groups = groupsFor(threads, 64);
+        ctx.dispatch(std::min(groups, 65535u), (groups + 65534u) / 65535u, 1);
         barrier(ctx, pg.particles);
         if (usesTrailBuf(*in)) barrier(ctx, in->trailBuf);
         barrier(ctx, in->eventsBuf);

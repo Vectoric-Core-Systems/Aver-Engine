@@ -471,7 +471,7 @@ void CSUpdate(uint3 dtid : SV_DispatchThreadID) {
 // gpuShiftTrail / gpuShiftEvents in ParticleGpuTypes.hpp. Dispatched with max(capacity, trail points, PEV_CAP) threads.
 [numthreads(64, 1, 1)]
 void CSShift(uint3 dtid : SV_DispatchThreadID) {
-    const uint i = dtid.x;
+    const uint i = dtid.y * (65535u * 64u) + dtid.x;   // rows of 65535 groups when the slots need more than one dimension
     const float3 d = gS.origin;
     if (i < gS.capacity) {
         const float3 pos = gParticles[i].position;
