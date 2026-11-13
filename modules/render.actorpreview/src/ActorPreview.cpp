@@ -254,7 +254,12 @@ bool ActorPreview::createTargets(u32 width, u32 height) {
     dd.clearDepth = 1.0f;
     dd.debugName = "ActorPreview.Depth";
     depth_ = res_->createTexture(dd);
-    if (!color_ || !depth_) { AVER_ERROR("[Preview] could not create the preview targets"); return false; }
+    if (!color_ || !depth_) {
+        if (color_) { res_->destroyTexture(color_); color_ = 0; }
+        if (depth_) { res_->destroyTexture(depth_); depth_ = 0; }
+        AVER_ERROR("[Preview] could not create the preview targets");
+        return false;
+    }
     width_ = width;
     height_ = height;
     return true;
