@@ -6,7 +6,9 @@
 #include "aver/core/Log.hpp"
 #include "aver/platform/FileSystem.hpp"
 
+#include <cerrno>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <map>
@@ -143,7 +145,9 @@ int32_t aver_settings_get_i32(const char* key, int32_t fallback) {
     const std::string* v = find(key);
     if (!v || v->empty()) return fallback;
     char* end = nullptr;
+    errno = 0;
     const long out = std::strtol(v->c_str(), &end, 10);
+    if (errno == ERANGE || out < INT32_MIN || out > INT32_MAX) return fallback;
     return (end && *end == '\0') ? static_cast<int32_t>(out) : fallback;
 }
 
