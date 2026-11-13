@@ -115,6 +115,9 @@ public:
     // convert. Observers fire only when the stored value actually changes.
     bool set(std::string_view name, const BbValue& value);
     bool reset(std::string_view name);
+    // Floating-origin shift: every Vec3 stored on THIS board moves by -delta. Not a value change, so no
+    // observer fires and stamps stay. Forwarded (Shared) keys are shifted on the shared board itself.
+    void rebaseVec3(const Vec3& deltaCm);
     // Change stamp from a process-wide counter; 0 when the key is undefined. Comparable across boards.
     u64  stamp(std::string_view name) const;
 

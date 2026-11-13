@@ -111,6 +111,7 @@ public:
         BtRunningState bt;
         StateTreeInstance st;
         bool started = false;
+        std::string path;    // the nested asset, so a reload can find the runs of it without trusting the node pointer
         bool busy = false;   // inside its own tick: a tree that (indirectly) runs itself fails instead of re-entering
     };
     NestedRun& nested(i32 subject, const void* node) { return nested_[{subject, node}]; }
@@ -119,6 +120,9 @@ public:
     // Re-reads `path` after an edit and swaps it in; entities using it restart their tree and re-bind
     // their blackboard schema. The old tree stays if the file does not load. False on a failed load.
     bool reloadTree(const std::string& path);
+    // Floating-origin shift: every Vec3 blackboard value (entity and team boards) is a world position and moves
+    // with the scene (value -= delta). Call after World::shiftRoots, with the other Synapse rebases.
+    void rebase(const Vec3& deltaCm);
     // Registers an in-memory tree under `name` (tests, tools). Returns its id, like loadTree.
     u64 registerTree(const std::string& name, const BtAsset& asset);
     const BtRuntimeTree* findTree(u64 id) const;
@@ -200,6 +204,7 @@ private:
     BoardRec& boardRec(scene::Entity e);
     void bindBoard(scene::Entity e, BoardRec& rec, u64 team, u64 treeId, const BbSchema* schema);
     void dropRuntime(scene::Entity e);   // aborts and forgets whatever `e` was running
+    void abortNestedOf(const std::string& path);   // aborts and drops every nested run of the tree at `path`
     void syncPerception(scene::World& world, scene::Entity e, Blackboard& board);
 };
 

@@ -40,6 +40,7 @@
 #  include "aver/synapse/Nav.hpp"
 #  include "aver/synapse/SynapseAgent.hpp"
 #  include "aver/synapse/SynapseAi.hpp"
+#  include "aver/synapse/SynapseBt.hpp"
 #endif
 #if AVER_MODULE_VOXI
 #  include "aver/voxi/VoxiRenderer.hpp"
@@ -247,6 +248,7 @@ void OriginParticipants::install() {
 #endif
 #if AVER_MODULE_SYNAPSE_SCENE
             synapse::agentSystem().rebase(w, d);
+            synapse::btSystem().rebase(d);
             if (b_.nav) synapse::rebaseNav(*b_.nav, d);
             if (b_.synapseAi) {
                 b_.synapseAi->hearing().rebase(d);

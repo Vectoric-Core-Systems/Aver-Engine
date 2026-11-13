@@ -444,6 +444,11 @@ bool Blackboard::set(std::string_view name, const BbValue& value) {
     return setLocal(*s, c);
 }
 
+void Blackboard::rebaseVec3(const Vec3& deltaCm) {
+    for (Slot& s : slots_)
+        if (!s.forwarded && s.def.type == BbType::Vec3) s.value.v = s.value.v - deltaCm;
+}
+
 bool Blackboard::reset(std::string_view name) {
     Slot* s = slot(name);
     if (!s) return false;

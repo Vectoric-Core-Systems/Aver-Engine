@@ -162,6 +162,7 @@ BtStatus runBehaviorTreeAction(i32 subject, const fmt::OcBtNode& node, f32 dt, f
         if (board) board->applySchema(tree->schema);
         run.bt.reset();
         run.started = true;
+        run.path = node.stringParam;
     }
     const BtBlackboardCtx ctx{&tree->decorators, board, &tree->children};
     BtStatus s;
@@ -204,6 +205,7 @@ BtStatus runStateTreeAction(i32 subject, const fmt::OcBtNode& node, f32 dt, f32&
     if (!run.started) {
         if (board) board->applySchema(tree->asset.schema);
         run.started = true;
+        run.path = node.stringParam;
     }
     StStatus s;
     {   // the guards end before eraseNested frees `run`
@@ -324,7 +326,7 @@ bool BtSystem::reloadTree(const std::string& path) {
             if (const auto old = stateTrees_.find(id); old != stateTrees_.end())
                 abortStateTree(old->second.asset, registry_, static_cast<i32>(e), rec.inst);
         }
-        nested_.clear();
+        abortNestedOf(path);
         stateTrees_[id] = std::move(rt);
         for (auto& [e, brec] : boards_) {
             const auto* b = world.component<CSynapseBehavior>(e, type_);
@@ -340,10 +342,21 @@ bool BtSystem::reloadTree(const std::string& path) {
     }
     BtRuntimeTree rt = compileBtAsset(asset);
     rt.path = path;
-    trees_[id] = std::move(rt);
-    nested_.clear();
-
     scene::World& world = scene::World::instance();
+    // Running instances leave their nodes through the OLD tree (claims, queries, move requests), then restart on the new one.
+    if (const auto old = trees_.find(id); old != trees_.end()) {
+        std::vector<scene::Entity> running;
+        for (const auto& [e, state] : running_) {
+            const auto* b = world.component<CSynapseBehavior>(e, type_);
+            if (b && b->treeAssetId == id) running.push_back(e);
+        }
+        for (const scene::Entity e : running)
+            if (const auto it = running_.find(e); it != running_.end())
+                abortBt(old->second.tree, registry_, static_cast<i32>(e), it->second);
+    }
+    abortNestedOf(path);
+    trees_[id] = std::move(rt);
+
     for (auto& [e, state] : running_) {
         const auto* b = world.component<CSynapseBehavior>(e, type_);
         if (b && b->treeAssetId == id) state.reset();
@@ -353,6 +366,38 @@ bool BtSystem::reloadTree(const std::string& path) {
         if (b && b->treeAssetId == id) rec->boundTree = 0;   // schema is re-applied on the next tick
     }
     return true;
+}
+
+void BtSystem::abortNestedOf(const std::string& path) {
+    const u64 id = fnv1a64(path);
+    const bool isState = endsWith(path, ".ocst");
+    std::vector<std::pair<i32, const void*>> keys;
+    for (const auto& [k, run] : nested_)
+        if (run.started && run.path == path) keys.push_back(k);
+    for (const auto& k : keys) {
+        const auto it = nested_.find(k);
+        if (it == nested_.end()) continue;
+        if (isState) {
+            if (const StateTreeRuntime* t = findStateTree(id)) abortStateTree(t->asset, registry_, k.first, it->second.st);
+        } else if (const BtRuntimeTree* t = findTree(id)) {
+            abortBt(t->tree, registry_, k.first, it->second.bt);
+        }
+        nested_.erase(k);
+    }
+}
+
+void BtSystem::rebase(const Vec3& deltaCm) {
+    std::vector<Blackboard*> boards;
+    for (auto& [e, rec] : boards_) boards.push_back(&rec->board);
+    std::vector<u64> teamIds{0};
+    for (const auto& [id, name] : teamNames_)
+        if (id != 0) teamIds.push_back(id);   // 0 is the default board, already listed
+    std::vector<Blackboard*> shared;
+    for (const u64 id : teamIds)
+        if (Blackboard* t = teams_.find(id)) shared.push_back(t);
+    // Shared keys live on the team board and are shifted there once, not through every member's forward.
+    for (Blackboard* b : boards) b->rebaseVec3(deltaCm);
+    for (Blackboard* b : shared) b->rebaseVec3(deltaCm);
 }
 
 const BtRuntimeTree* BtSystem::findTree(u64 id) const {
