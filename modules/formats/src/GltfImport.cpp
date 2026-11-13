@@ -128,9 +128,15 @@ struct Buffers {
 // One decoded accessor, widened to f32.
 struct AccessorF {
     std::vector<f32> v;
+    std::vector<u32> u;   // a UNSIGNED_INT accessor's exact values: f32 holds integers exactly only up to 2^24
     u32 components = 0;
     u32 count = 0;
+    u32 index(usize i) const { return u.empty() ? u32(v[i]) : u[i]; }
 };
+
+// An accessor without a bufferView is zeros of its own declared size (sparse may fill some in): nothing in the file bounds
+// it, so it is capped (4 GiB of floats) rather than let a bad count throw out of the allocation.
+constexpr u64 kMaxAccessorValues = u64(1) << 30;
 
 // The 3x3 rotation*scale basis (rows of the row-major node matrix) baked into a mesh copy.
 struct Basis3 { f32 k[9]; };
@@ -250,11 +256,19 @@ private:
         if (nc == 0) return fail(why, "glTF: unknown accessor type");
         out.components = nc;
         out.count = count;
-        out.v.assign(usize(count) * nc, 0.0f);
+        out.v.clear();
+        out.u.clear();
         if (count == 0) return true;
+        const usize total = usize(count) * nc;
+        const bool exact = ct == kUInt;
 
         // Per glTF, an accessor with no bufferView reads as zeros (a sparse block may still fill some in).
-        if (!a.has("bufferView")) return applySparse(a, out, why);
+        if (!a.has("bufferView")) {
+            if (u64(total) > kMaxAccessorValues) return fail(why, "glTF: accessor without a bufferView is too large");
+            out.v.assign(total, 0.0f);
+            if (exact) out.u.assign(total, 0u);
+            return applySparse(a, out, why);
+        }
 
         const u8* base = nullptr; usize len = 0; u32 stride = 0;
         if (!viewBytes(a["bufferView"].asInt(-1), base, len, stride, why)) return false;
@@ -269,10 +283,16 @@ private:
         if (accOff > u64(len) || span > u64(len) - accOff)
             return fail(why, "glTF: accessor runs past the end of its bufferView");
 
+        // Allocated only now: the span check above bounds `count` by the file's own bytes.
+        out.v.assign(total, 0.0f);
+        if (exact) out.u.resize(total);
         const bool normalized = a["normalized"].asBool(false);
         const u8* p = base + accOff;
         for (u32 i = 0; i < count; ++i, p += stride) {
-            for (u32 c = 0; c < nc; ++c) out.v[usize(i) * nc + c] = decodeComponent(ct, p + c * cb, normalized);
+            for (u32 c = 0; c < nc; ++c) {
+                out.v[usize(i) * nc + c] = decodeComponent(ct, p + c * cb, normalized);
+                if (exact) std::memcpy(&out.u[usize(i) * nc + c], p + c * cb, 4);
+            }
         }
         return applySparse(a, out, why);
     }
@@ -319,7 +339,10 @@ private:
             if (idx <= prev) return fail(why, "glTF: sparse indices are not strictly increasing");
             prev = idx;
             const u8* vp = vbase + voff + usize(k) * cb * nc;
-            for (u32 c = 0; c < nc; ++c) out.v[usize(idx) * nc + c] = decodeComponent(ct, vp + c * cb, normalized);
+            for (u32 c = 0; c < nc; ++c) {
+                out.v[usize(idx) * nc + c] = decodeComponent(ct, vp + c * cb, normalized);
+                if (!out.u.empty()) std::memcpy(&out.u[usize(idx) * nc + c], vp + c * cb, 4);   // UNSIGNED_INT only
+            }
         }
         return true;
     }
@@ -589,9 +612,9 @@ bool Gltf::importPrimitive(const JsonValue& prim, const f32 node[16], OcMeshData
         if (idx.components != 1) return fail(why, "glTF: indices accessor is not SCALAR");
         if (idx.count % 3 != 0) return fail(why, "glTF: index count is not a multiple of three");
         for (u32 i = 0; i < idx.count; i += 3) {
-            const u32 a = baseVertex + u32(idx.v[i + 0]);
-            const u32 b = baseVertex + u32(idx.v[i + 1]);
-            const u32 c = baseVertex + u32(idx.v[i + 2]);
+            const u32 a = baseVertex + idx.index(i + 0);
+            const u32 b = baseVertex + idx.index(i + 1);
+            const u32 c = baseVertex + idx.index(i + 2);
             if (reverseWinding) { m.indices.push_back(a); m.indices.push_back(c); m.indices.push_back(b); }
             else                { m.indices.push_back(a); m.indices.push_back(b); m.indices.push_back(c); }
         }
@@ -682,7 +705,7 @@ bool Gltf::importLines(const JsonValue& prim, i64 mode, std::string* why) {
         if (idx.components != 1) return fail(why, "glTF: indices accessor is not SCALAR");
         order.reserve(idx.count);
         for (u32 i = 0; i < idx.count; ++i) {
-            const u32 v = u32(idx.v[i]);
+            const u32 v = idx.index(i);
             if (v >= pos.count) return fail(why, "glTF: a line index is past the end of its POSITION accessor");
             order.push_back(v);
         }
