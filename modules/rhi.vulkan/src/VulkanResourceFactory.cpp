@@ -1286,13 +1286,8 @@ bool VulkanResourceFactory::init() {
     // A full pool gets a sibling (allocSharedSets): NeonDistrict's thousands of materials outgrew one.
     if (!createSharedPool(descriptorPool_)) return false;
 
-    // RhiPipeline::layoutEntry is a RAW POINTER into descriptorLayouts_ (VulkanCommon.hpp section 12:
-    // "owned by VulkanResourceFactory's cache, not by this"). A vector that reallocates on growth
-    // would dangle every already-built pipeline's pointer once a later layout pushes past capacity.
-    // D3D12's RootSigEntry cache has no such hazard (RhiPipeline stores the raw ID3D12RootSignature*,
-    // not a pointer to the cache entry). Reserving up front is the whole mitigation -- past 256
-    // distinct (PipelineLayout, mesh) combinations needs a real fix, not just a bigger number.
-    descriptorLayouts_.reserve(256);
+    // RhiPipeline::layoutEntry is a RAW POINTER into descriptorLayouts_ (VulkanCommon.hpp section 12), so the cache is
+    // a deque: push_back never moves the entries already in it (a reserved vector dangled them past 256 layouts).
 
     return true;
 }

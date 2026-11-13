@@ -2374,7 +2374,7 @@ private:
     std::vector<RhiBindingSet> bindingSets_;
     std::vector<RhiBlas>       blases_;
     std::vector<RhiTlas>       tlases_;
-    std::vector<DescriptorLayoutEntry> descriptorLayouts_;
+    std::deque<DescriptorLayoutEntry> descriptorLayouts_;   // a deque: RhiPipeline::layoutEntry points into it, and push_back keeps those valid
     std::vector<TableShapeEntry>       tableShapes_;
     std::vector<SamplerCacheEntry>     samplers_;
     VkDescriptorSetLayout instanceSetLayout_ = VK_NULL_HANDLE;   // lazily built by instanceSetLayout(); owned here, destroyed in the shutdown sweep
