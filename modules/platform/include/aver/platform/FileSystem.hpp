@@ -162,7 +162,7 @@ bool isTransientFileError(u32 platformErrorCode);
 // more than a bare `false`. `op` is empty and `errorCode` is 0 unless a write step actually failed
 // (a no-op call, or one that succeeded, never touches this).
 struct AtomicWriteError {
-    std::string op;         // "write temp", "swap (MoveFileExW)", or "swap (ReplaceFileW)"
+    std::string op;         // "write temp", "flush temp", "swap (MoveFileExW)", or "swap (ReplaceFileW)"
     u32         errorCode = 0;   // GetLastError() on Windows, errno elsewhere; 0 if not applicable
 };
 

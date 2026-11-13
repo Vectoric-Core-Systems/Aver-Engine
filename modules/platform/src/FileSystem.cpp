@@ -375,7 +375,10 @@ bool writeFileBytes(const std::string& path, const void* data, usize size) {
     std::ofstream f(fsPath(path), std::ios::binary | std::ios::trunc);
     if (!f) return false;
     if (size > 0) f.write(static_cast<const char*>(data), static_cast<std::streamsize>(size));
-    return static_cast<bool>(f);
+    // Closed and checked here: the buffered bytes reach the file on close, and a write that only fails then (a full
+    // disk, a quota) read as success -- which let the atomic write swap an empty temporary over the last good file.
+    f.close();
+    return !f.fail();
 }
 
 // Writes `text` to the file, truncating it. False on failure.
@@ -414,6 +417,26 @@ bool renameFile(const std::string& from, const std::string& to) {
 #endif
 }
 
+namespace {
+// The temporary's data on the disk itself before the swap: the rename is made durable on its own, so without this a power
+// loss just after it could leave `path` naming a file whose bytes never landed.
+bool flushFileToDisk(const std::string& p) {
+#if defined(_WIN32)
+    HANDLE h = CreateFileW(osPath(p).c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    const BOOL ok = FlushFileBuffers(h);
+    CloseHandle(h);
+    return ok != 0;
+#else
+    const int fd = ::open(p.c_str(), O_WRONLY);
+    if (fd < 0) return false;
+    const int r = ::fsync(fd);
+    ::close(fd);
+    return r == 0;
+#endif
+}
+}  // namespace
+
 // Writes `size` bytes to `path` by way of a temporary, so `path` itself is only ever touched by
 // the rename that swaps a COMPLETE replacement into place. See the header comment for the full
 // argument; this is that same write-to-temp-then-swap pattern aver::fmt::saveOcSave and
@@ -432,6 +455,11 @@ bool writeFileBytesAtomic(const std::string& path, const void* data, usize size,
         // fails -- if the destination directory will not accept a new file at all, it will not accept
         // one at `path` either, so there is nothing this fallback could still land. Fall through to
         // the ordinary failure return.
+        return false;
+    }
+    if (!flushFileToDisk(tmp)) {
+        if (outError) outError->op = "flush temp";
+        deleteFile(tmp);
         return false;
     }
 
