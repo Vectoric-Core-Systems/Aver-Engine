@@ -340,7 +340,7 @@ void Destructible::resplit(const Strike& s, HitResult& r) {
         for (auto& [c, pcs] : byComp) {
             const bool fixed = anchored[c] != 0;
             const i32 slot = makeGroup(pcs, fixed, !fixed, origin, rot);
-            if (slot < 0) continue;
+            if (slot < 0) { for (u32 pc : pcs) removePiece(pc); continue; }   // no body: the pieces are gone, not orphaned
             ++r.bodiesCreated;
             const Group& g = groups_[static_cast<size_t>(slot)];
             if (fixed) continue;
