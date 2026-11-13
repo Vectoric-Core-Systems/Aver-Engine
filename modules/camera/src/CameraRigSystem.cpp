@@ -312,7 +312,7 @@ scene::Entity CameraRigSystem::selectAuto(scene::World& w, const RigFrame& fr) {
 }
 
 void CameraRigSystem::startBlend(f32 seconds, BlendCurve curve, bool cutNow, const CameraPov* from) {
-    if (cutNow || seconds <= 0.0f || (!haveLast_ && from == nullptr)) {
+    if (cutNow || !(seconds > 0.0f) || !std::isfinite(seconds) || (!haveLast_ && from == nullptr)) {
         blending_ = false;
         blendAlphaNow_ = 1.0f;
         raise(current_ != scene::kInvalidEntity ? current_ : possessed_, kEvCut);
