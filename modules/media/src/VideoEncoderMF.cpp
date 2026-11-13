@@ -105,7 +105,9 @@ public:
         if (!writer_ || finished_ || !rgba) return false;
         const u32 w = d_.width, h = d_.height;
         const u32 stride = strideBytes ? strideBytes : w * 4u;
-        const DWORD bytes = w * h * 4u;
+        const u64 bytes64 = u64(w) * h * 4u;
+        if (bytes64 > 0x7FFFFFFFull) return false;
+        const DWORD bytes = static_cast<DWORD>(bytes64);
         ComPtr<IMFMediaBuffer> buf;
         if (FAILED(MFCreateMemoryBuffer(bytes, &buf))) return false;
         BYTE* dst = nullptr;
