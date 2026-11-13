@@ -970,7 +970,22 @@ bool SandboxApp::cbCopyEntryTo(const std::string& src, const std::string& destDi
 }
 
 // Moves one entry into `destDir`, and repairs what pointed at its old path.
-bool SandboxApp::cbMoveEntryTo(const std::string& src, const std::string& destDir) {
+// `p` is `root` or lies beneath it (either separator). A folder's rename, move or delete changes every path under it,
+// so selection fix-ups compare by this, not by equality.
+static bool cbUnder(const std::string& p, const std::string& root) {
+    if (p.size() < root.size() || p.compare(0, root.size(), root) != 0) return false;
+    return p.size() == root.size() || p[root.size()] == '/' || p[root.size()] == '\\';
+}
+// The selection follows a folder (or file) that moved from `from` to `to`.
+static void cbRebaseSelection(std::string& dir, std::string& file, std::vector<std::string>& sel, const std::string& from,
+                              const std::string& to) {
+    const auto re = [&](std::string& p) { if (cbUnder(p, from)) p = to + p.substr(from.size()); };
+    re(dir);
+    re(file);
+    for (std::string& sp : sel) re(sp);
+}
+
+bool SandboxApp::cbMoveEntryTo(const std::string& src, const std::string& destDir, bool repointRefs) {
     std::error_code ec;
     const std::filesystem::path s(src);
     const std::filesystem::path d = std::filesystem::path(destDir) / s.filename();
@@ -981,14 +996,13 @@ bool SandboxApp::cbMoveEntryTo(const std::string& src, const std::string& destDi
     }
     std::filesystem::rename(s, d, ec);
     if (ec) { drawerUi_.cbStatus_ = "Move failed: " + ec.message(); return false; }
+    if (repointRefs) cbRewriteReferences(src, d.string());   // after the move, as cbRenameEntry: nothing to repoint if it failed
     // Both folders invalidated: unlike rename/duplicate/create (which stay put), a move empties one
     // and fills another -- forgetting the source leaves a ghost tile that opens nothing.
     cbInvalidate(s.parent_path().string());
     cbInvalidate(destDir);
     // The same bookkeeping cbRenameEntry does, for the same reason: here the path IS the identity.
-    if (drawerUi_.cbSelectedDir_ == src)  drawerUi_.cbSelectedDir_ = d.string();
-    if (drawerUi_.cbSelectedFile_ == src) drawerUi_.cbSelectedFile_ = d.string();
-    for (std::string& sp : drawerUi_.cbSelection_) if (sp == src) sp = d.string();
+    cbRebaseSelection(drawerUi_.cbSelectedDir_, drawerUi_.cbSelectedFile_, drawerUi_.cbSelection_, src, d.string());
     cbRewriteHistory(src, d.string());
     if (const std::string a = cbKeyOf(src), b = cbKeyOf(d.string()); !a.empty() && !b.empty()) { drawerUi_.cbCols_.rebase(a, b); cbColsSave(); }
     return true;
@@ -1050,19 +1064,46 @@ SandboxApp::RefRewriteReport SandboxApp::cbRewriteReferences(const std::string& 
     if (oldRel.empty() || newRel.empty() || oldRel == oldAbs || newRel == newAbs) return rep;
     if (oldRel == newRel) return rep;
 
-    // Scans for the old path -- the same set of files the warning listed, so what the dialog
-    // promised is exactly what gets edited. The rename has already happened on disk by this point.
-    for (const std::string& refRel : cbFindReferencesTo(oldAbs)) {
-        const std::string abs = projSess_.project_.contentDir() + AVER_PATH_SEP + refRel;
+    // A FOLDER moves every file beneath it: references name files, never folders, so each file under the new location
+    // is one (old path, new path) pair. The move has already happened on disk by this point.
+    std::vector<std::pair<std::string, std::string>> pairs;
+    std::error_code ec;
+    if (std::filesystem::is_directory(newAbs, ec)) {
+        for (std::filesystem::recursive_directory_iterator it(newAbs, ec), end; it != end; it.increment(ec)) {
+            if (ec) break;
+            if (!it->is_regular_file(ec)) continue;
+            const std::string sub = std::filesystem::relative(it->path(), newAbs, ec).generic_string();
+            if (ec || sub.empty()) continue;
+            pairs.emplace_back(oldRel + "/" + sub, newRel + "/" + sub);
+        }
+    } else {
+        pairs.emplace_back(oldRel, newRel);
+    }
+    if (pairs.empty()) return rep;
+
+    // One pass over the files that can hold a path, each rewritten for every pair (the scan cbFindReferencesTo runs,
+    // per file instead of per asset, so a folder of a thousand files is not a thousand scans).
+    const std::string content = projSess_.project_.contentDir();
+    for (std::filesystem::recursive_directory_iterator it(content, ec), end; it != end; it.increment(ec)) {
+        if (ec) break;
+        if (!it->is_regular_file(ec)) continue;
+        const std::string ext = lowerExt(it->path());
+        if (ext != ".ocworld" && ext != ".ocmap" && ext != ".ocmat" && ext != ".ocgraph" && ext != ".ocproject") continue;
+        const std::string abs = it->path().string();
         std::string text;
         if (!readFileText(abs, text)) { ++rep.filesFailed; continue; }
-        const editor::RefRewrite r = editor::rewriteAssetRefs(text, oldRel, newRel);
-        if (r.count == 0) continue;                    // matched the scan, changed nothing: leave it alone
-        if (!writeFileTextAtomic(abs, r.text)) { ++rep.filesFailed; continue; }
+        usize count = 0;
+        for (const auto& [o, n] : pairs) {
+            editor::RefRewrite r = editor::rewriteAssetRefs(text, o, n);
+            if (r.count == 0) continue;
+            count += r.count;
+            text = std::move(r.text);
+        }
+        if (count == 0) continue;
+        if (!writeFileTextAtomic(abs, text)) { ++rep.filesFailed; continue; }
         ++rep.filesChanged;
-        rep.refsRewritten += r.count;
-        AVER_INFO("[Editor] repointed {} reference(s) in '{}' from '{}' to '{}'",
-                  r.count, refRel, oldRel, newRel);
+        rep.refsRewritten += count;
+        AVER_INFO("[Editor] repointed {} reference(s) in '{}' from '{}' to '{}'", count, cbRelativeToContent(abs), oldRel, newRel);
     }
     return rep;
 }
@@ -1106,9 +1147,7 @@ void SandboxApp::cbRenameEntry(const std::string& from, const std::string& newNa
     RefRewriteReport rep;
     if (repointRefs) rep = cbRewriteReferences(from, dst.string());
     cbInvalidate(src.parent_path().string());
-    if (drawerUi_.cbSelectedDir_ == from)  { drawerUi_.cbSelectedDir_ = dst.string(); }
-    if (drawerUi_.cbSelectedFile_ == from) { drawerUi_.cbSelectedFile_ = dst.string(); }
-    for (std::string& sp : drawerUi_.cbSelection_) if (sp == from) sp = dst.string();
+    cbRebaseSelection(drawerUi_.cbSelectedDir_, drawerUi_.cbSelectedFile_, drawerUi_.cbSelection_, from, dst.string());
     cbRewriteHistory(from, dst.string());
     if (const std::string a = cbKeyOf(from), b = cbKeyOf(dst.string()); !a.empty() && !b.empty()) { drawerUi_.cbCols_.rebase(a, b); cbColsSave(); }
 
@@ -1248,10 +1287,12 @@ void SandboxApp::cbDeleteEntry(const std::string& path) {
     const std::string parent = src.parent_path().string();
     if (!editor::moveToRecycleBin(path)) { drawerUi_.cbStatus_ = "Could not delete " + src.filename().string(); return; }
     cbInvalidate(parent);
-    if (drawerUi_.cbSelectedFile_ == path) drawerUi_.cbSelectedFile_.clear();
-    drawerUi_.cbSelection_.erase(std::remove(drawerUi_.cbSelection_.begin(), drawerUi_.cbSelection_.end(), path),
+    // A deleted folder takes everything selected beneath it.
+    if (cbUnder(drawerUi_.cbSelectedFile_, path)) drawerUi_.cbSelectedFile_.clear();
+    drawerUi_.cbSelection_.erase(std::remove_if(drawerUi_.cbSelection_.begin(), drawerUi_.cbSelection_.end(),
+                                                [&](const std::string& sp) { return cbUnder(sp, path); }),
                        drawerUi_.cbSelection_.end());
-    if (drawerUi_.cbSelectedDir_ == path) drawerUi_.cbSelectedDir_ = parent;
+    if (cbUnder(drawerUi_.cbSelectedDir_, path)) drawerUi_.cbSelectedDir_ = parent;
     cbRewriteHistory(path, std::string());
     drawerUi_.cbStatus_ = "Moved " + src.filename().string() + " to the recycle bin";
 }
@@ -1713,11 +1754,15 @@ void SandboxApp::cbFileOpModals() {
             }
         }
 #endif
-        if (referenced > 0) {
-            ImGui::Separator();
+        ImGui::Separator();
+        // Default ON, like Rename's: a level, material or graph names an asset by its path, and a move without this left
+        // every one of them pointing at nothing (a folder's move, everything under it).
+        ImGui::Checkbox("Update references to the new path", &drawerUi_.cbMoveRepoint_);
+        if (!drawerUi_.cbMoveRepoint_ && referenced > 0)
             ImGui::TextWrapped("Moving will break %d placement(s) in the open level - a level names "
                                "an asset by its path. Copy is safe.", referenced);
-        }
+        else if (drawerUi_.cbMoveRepoint_)
+            ImGui::TextDisabled("Rewrites path references in .ocworld/.ocmap/.ocmat/.ocgraph/.ocproject.");
 
         ImGui::Separator();
         if (ImGui::Button("Copy Here", ImVec2(120.0f * viewState_.dpi_, 0))) {
@@ -1730,7 +1775,7 @@ void SandboxApp::cbFileOpModals() {
         ImGui::SameLine();
         if (ImGui::Button("Move Here", ImVec2(120.0f * viewState_.dpi_, 0))) {
             int ok = 0;
-            for (const std::string& sp : srcs) if (cbMoveEntryTo(sp, drawerUi_.cbMoveDest_)) ++ok;
+            for (const std::string& sp : srcs) if (cbMoveEntryTo(sp, drawerUi_.cbMoveDest_, drawerUi_.cbMoveRepoint_)) ++ok;
             if (ok) drawerUi_.cbStatus_ = "Moved " + std::to_string(ok) + " item(s)";
             cbAfterMoveOrCopy(srcs);
             ImGui::CloseCurrentPopup();
@@ -1786,6 +1831,11 @@ void SandboxApp::cbFileOpModals() {
                 }
                 ImGui::Separator();
             }
+        } else {
+            ImGui::Separator();
+            ImGui::Checkbox("Update references to the files inside it", &drawerUi_.cbRenameRepoint_);
+            ImGui::TextDisabled("Rewrites path references in .ocworld/.ocmap/.ocmat/.ocgraph/.ocproject.");
+            ImGui::Separator();
         }
 
         ImGui::BeginDisabled(!valid);
@@ -1793,7 +1843,9 @@ void SandboxApp::cbFileOpModals() {
             if (!drawerUi_.cbRenameRefs_.empty() && !drawerUi_.cbRenameRepoint_)
                 AVER_WARN("[Editor] renamed '{}' while {} file(s) still reference its old path",
                           drawerUi_.cbContextPath_, drawerUi_.cbRenameRefs_.size());
-            cbRenameEntry(drawerUi_.cbContextPath_, drawerUi_.cbRenameBuf_, drawerUi_.cbRenameRepoint_ && !drawerUi_.cbRenameRefs_.empty());
+            // A folder has no scan list (references name its files): its checkbox alone decides.
+            cbRenameEntry(drawerUi_.cbContextPath_, drawerUi_.cbRenameBuf_,
+                          drawerUi_.cbRenameRepoint_ && (drawerUi_.cbContextIsDir_ || !drawerUi_.cbRenameRefs_.empty()));
             drawerUi_.cbRenameRefs_.clear();
             ImGui::CloseCurrentPopup();
         }

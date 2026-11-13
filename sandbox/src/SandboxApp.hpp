@@ -1830,7 +1830,7 @@ private:
 
     bool cbCopyEntryTo(const std::string& src, const std::string& destDir);
 
-    bool cbMoveEntryTo(const std::string& src, const std::string& destDir);
+    bool cbMoveEntryTo(const std::string& src, const std::string& destDir, bool repointRefs = false);
 
     std::vector<std::string> cbFindReferencesTo(const std::string& absPath) const;
 

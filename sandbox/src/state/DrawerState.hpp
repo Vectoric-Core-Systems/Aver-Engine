@@ -12,6 +12,7 @@ struct DrawerState {
     std::vector<std::string> cbRenameRefs_;   // the same, for the rename dialog
     // Whether the rename dialog repoints what it found (ON by default; repointing is the usual want).
     bool cbRenameRepoint_ = true;
+    bool cbMoveRepoint_ = true;     // the Move dialog's "update references" (folders included)
 #if AVER_WITH_IMGUI
     // One suggestion row: display (name+description) and insert (bare name).
     struct ConsoleSuggestion { std::string display; std::string insert; std::string tooltip; };
