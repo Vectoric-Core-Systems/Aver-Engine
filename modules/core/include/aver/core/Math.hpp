@@ -46,7 +46,8 @@ struct Vec3 {
     f32 sizeSquared() const { return x * x + y * y + z * z; }
     f32 size() const { return std::sqrt(sizeSquared()); }
 
-    // Unit vector, or zero when shorter than the tolerance.
+    // Unit vector, or zero when the SQUARED length is at most `tolerance` (as UE's GetSafeNormal: the default 1e-8 is a
+    // length of 1e-4). Pass a smaller tolerance for sub-millimetre directions.
     Vec3 getSafeNormal(f32 tolerance = 1e-8f) const {
         const f32 sq = sizeSquared();
         if (sq <= tolerance) return {0, 0, 0};
