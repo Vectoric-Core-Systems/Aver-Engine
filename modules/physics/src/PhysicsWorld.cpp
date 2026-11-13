@@ -624,6 +624,7 @@ int32_t aver_phys_remove_body(int32_t body) {
     bi().RemoveBody(*id);
     bi().DestroyBody(*id);
     g_world->byId.erase(*id);
+    g_world->surfaceSampled.erase(*id);   // keyed by BodyID, which Jolt reuses: a later body must not inherit the flag
     g_world->sensors.erase(body);
     g_world->bodies.erase(body);
     ++g_world->topologyEpoch;   // informational: aver_phys_snapshot_info, aver_phys_stats slot 25 (constraint changes bump it via noteConstraintTopology)
@@ -1126,7 +1127,7 @@ int32_t aver_phys_sphere_cast(float ox, float oy, float oz, float dx, float dy, 
     const auto it = g_world->byId.find(collector.mHit.mBodyID2);
     const int32_t handle = it == g_world->byId.end() ? 0 : it->second;
     if (outPoint)  writeVec(outPoint,  fromJolt(collector.mHit.mContactPointOn2));
-    if (outNormal) writeVec(outNormal, fromJoltUnit(-collector.mHit.mPenetrationAxis.Normalized()));
+    if (outNormal) writeVec(outNormal, fromJoltUnit(-collector.mHit.mPenetrationAxis.NormalizedOr(-JPH::Vec3::sAxisY())));
     return handle;
 }
 

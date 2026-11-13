@@ -232,7 +232,7 @@ public:
         if (it == g_world->byId.end() || hits.count(it->second)) return;
         SeedHit s;
         const Vec3 p = fromJolt(r.mContactPointOn2);
-        const Vec3 n = fromJoltUnit(r.mPenetrationAxis.Normalized());
+        const Vec3 n = fromJoltUnit(r.mPenetrationAxis.NormalizedOr(-JPH::Vec3::sAxisY()));
         s.point[0] = p.x; s.point[1] = p.y; s.point[2] = p.z;
         s.normal[0] = n.x; s.normal[1] = n.y; s.normal[2] = n.z;
         hits.emplace(it->second, s);

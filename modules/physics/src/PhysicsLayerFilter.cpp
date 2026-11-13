@@ -441,7 +441,7 @@ int32_t aver_phys_sphere_cast_mask(float ox, float oy, float oz, float dx, float
 
     if (outPoint) writeVec(outPoint, fromJolt(collector.mHit.mContactPointOn2));
     // Negated: Jolt's penetration axis points into the surface, every normal this ABI returns points away.
-    if (outNormal) writeVec(outNormal, fromJoltUnit(-collector.mHit.mPenetrationAxis.Normalized()));
+    if (outNormal) writeVec(outNormal, fromJoltUnit(-collector.mHit.mPenetrationAxis.NormalizedOr(-JPH::Vec3::sAxisY())));
     return handleForBodyId(collector.mHit.mBodyID2);
 }
 
