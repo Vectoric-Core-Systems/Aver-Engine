@@ -43,7 +43,7 @@ inline constexpr u32 kPoseSeamOnce     = 0x10;
 inline constexpr u32 kPoseSeamOff = 0x1;   // negative on purpose: a zero-filled attach is ON
 
 struct CPoseSeam {
-    f32 weight = 0.0f;   // master weight 0..1 on top of each override's own amount; 0 reads as 1
+    f32 weight = 0.0f;   // master weight 0..1 on top of each override's own amount; 0 (zero-fill) reads as 1, -1 is a set 0
     u32 flags = 0;       // kPoseSeamOff
 };
 static_assert(sizeof(CPoseSeam) == 8, "CPoseSeam must be padding-free");

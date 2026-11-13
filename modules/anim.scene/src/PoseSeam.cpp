@@ -114,7 +114,10 @@ bool PoseSeamSystem::setWeight(scene::Entity e, f32 weight) {
     if (!world_ || g_type == 0 || !std::isfinite(weight)) return false;
     auto* c = world_->component<CPoseSeam>(e, g_type);
     if (!c) return false;
-    c->weight = clamp01f(weight);
+    // A zero-filled component reads 0 as 1, so an explicit 0 (a script fading the seam out) is stored as -1: otherwise
+    // the last step of a fade snapped every override to full strength.
+    const f32 w = clamp01f(weight);
+    c->weight = w > 0.0f ? w : -1.0f;
     return true;
 }
 
@@ -195,7 +198,7 @@ bool PoseSeamSystem::apply(scene::Entity e, const fmt::OcSkeleton& skel, Pose& p
     r.seen = anim_->tickIndex();
     if ((c->flags & kPoseSeamOff) || r.count == 0 || !pose.matches(skel) || r.bones.size() != skel.bones.size()) return false;
 
-    const f32 weight = c->weight > 0.0f ? c->weight : 1.0f;
+    const f32 weight = c->weight > 0.0f ? c->weight : (c->weight < 0.0f ? 0.0f : 1.0f);   // -1: set to 0 (setWeight)
     const usize n = skel.bones.size();
     model_.assign(n, Mat4::identity());
     bool changed = false;
