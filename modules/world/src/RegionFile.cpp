@@ -851,9 +851,12 @@ bool RegionWriter::compact(std::string* why) {
     // riskiest write in the format.
     const std::string tmp = path + ".compact";
     file_.close();
-    if (!writeRegion(tmp, d, std::move(all), why)) { deleteFile(tmp); return false; }
+    // A failed compaction leaves the original file in place, so the writer is reopened on it rather than left closed.
+    const auto reopenOriginal = [&] { open(path, d, nullptr); };
+    if (!writeRegion(tmp, d, std::move(all), why)) { deleteFile(tmp); reopenOriginal(); return false; }
     if (!renameFile(tmp, path)) {
         deleteFile(tmp);
+        reopenOriginal();
         if (why) *why = "could not replace " + path + " with its compacted form";
         return false;
     }
