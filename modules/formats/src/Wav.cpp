@@ -39,7 +39,15 @@ WavResult wavRead(const std::vector<u8>& bytes, audio::SoundData& out) {
         const u8* id = bytes.data() + p;
         const u32 size = readU32(bytes.data() + p + 4);
         const usize body = p + 8;
-        if (body + size > bytes.size()) break;
+        if (body + size > bytes.size()) {
+            // A data chunk longer than the file: a streaming writer that never patched the size (0xFFFFFFFF), or a
+            // truncated download. Every sample present is still good, so take those; any other chunk ends the scan.
+            if (std::memcmp(id, "data", 4) == 0 && body < bytes.size()) {
+                data = bytes.data() + body;
+                dataBytes = bytes.size() - body;
+            }
+            break;
+        }
 
         if (std::memcmp(id, "fmt ", 4) == 0 && size >= 16) {
             format   = readU16(bytes.data() + body + 0);
