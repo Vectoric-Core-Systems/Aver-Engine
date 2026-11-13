@@ -492,6 +492,9 @@ bool SandboxApp::fillPlacementFromEntity(scene::Entity e, fmt::OcWorldPlacement&
 }
 
 bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
+    // DURING PLAY THE WORLD IS THE GAME'S: whatever gameplay moved, spawned or destroyed would be written as the level.
+    // Stop brings back the Play-start copy, so a save (Ctrl+S, the autosave, the control channel) writes that copy.
+    if (!playSnapshot && anyPlayActive()) return saveLevelDuringPlay(path);
     if (originBlocksSave(playSnapshot ? "The Play snapshot" : "Saving the level")) return false;   // LARGE_WORLD: records are written from the scene frame
     if (lvl_.levelIsLegacyOcmap_) return saveLevelAsOcmap(path, playSnapshot);
 
@@ -843,6 +846,29 @@ bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
     // autosave itself and --save-level write, and deleting the recovery file on either would
     // throw away the safety net at the moment it was being created.
     if (path == projSess_.levelPath_ && autosave_.autosaveWritten_) clearAutosave();
+    return true;
+}
+
+// A save while Play runs: the level as Play began (its unsaved edits included), copied from the Play-start snapshot.
+// Refused when there is no snapshot, or when Play travelled to another level (the open level is then not the one edited).
+bool SandboxApp::saveLevelDuringPlay(const std::string& path) {
+    if (play_.pieSnapshotPath_.empty() || play_.pieTravelled_) {
+        AVER_WARN("[Level] not saved during Play: {}", play_.pieTravelled_
+                      ? "Play travelled to another level; stop Play to save the level you were editing"
+                      : "there is no copy of the level as Play began; stop Play to save");
+        return false;
+    }
+    std::vector<u8> bytes;
+    if (!aver::readFileBytes(play_.pieSnapshotPath_, bytes) || !aver::writeFileBytesAtomic(path, bytes.data(), bytes.size())) {
+        AVER_WARN("[Level] save during Play failed: could not copy {} to {}", play_.pieSnapshotPath_, path);
+        return false;
+    }
+    AVER_INFO("[Level] saved during Play: the level as Play began, to {}", path);
+    if (path == projSess_.levelPath_) {
+        markLevelSaved();
+        play_.pieWasUnsaved_ = false;   // Stop reloads exactly what is now on disk
+        if (autosave_.autosaveWritten_) clearAutosave();
+    }
     return true;
 }
 

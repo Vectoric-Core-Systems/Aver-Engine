@@ -1181,6 +1181,7 @@ private:
     bool spectatorPlayActive() const;
 
     bool anyPlayActive() const;
+    bool saveLevelDuringPlay(const std::string& path);
 
     void stopPlay();
 
