@@ -370,8 +370,8 @@ public:
     // ---- copy / paste / duplicate ---------------------------------------------------------------
     // A paste is exactly a palette drop of the same nodes plus their internal links -- deliberate,
     // so it invents no new semantics: a pasted Event node gets an ENTRY record the same way
-    // addNodeFromCatalog does, a CustomEvent gets a fresh unique name the same way, and two OnTicks
-    // are already legal so paste creates no state the palette couldn't. Only links with BOTH ends in
+    // addNodeFromCatalog does, a CustomEvent gets a fresh unique name the same way, and a paste
+    // carrying an event the graph already handles is refused, as the palette refuses a second one. Only links with BOTH ends in
     // the copied set come along -- re-pointing a dangling link at the original would wire the copy
     // into what it was copied from.
     //

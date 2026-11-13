@@ -464,6 +464,15 @@ std::string GraphEditor::addNodeFromCatalog(const std::string& typeId, Vec2 canv
     const GraphNodeDesc* desc = findGraphNodeDescIn(typeId, openGraphDomain());
     if (!desc) return {};
 
+    // One node per event: a second ENTRY for the same name makes the graph invalid.
+    if (desc->category == "Event" && desc->typeId != "CustomEvent" && desc->typeId != "OnInputAction") {
+        for (const auto& e : graph_.entryPoints) {
+            if (e.second != desc->typeId) continue;
+            showRejectionBanner("this graph already has an " + desc->typeId + " node; only one node may handle an event");
+            return {};
+        }
+    }
+
     pushUndo();
     fmt::OcGraphNode node;
     node.id = makeUniqueNodeId(desc->typeId);
@@ -1159,6 +1168,22 @@ void GraphEditor::pastePayload(const ClipPayload& clip, Vec2 canvasPos) {
     if (!plan.ok) {
         showRejectionBanner("Paste refused: " + plan.refusal);
         return;
+    }
+    // An event the graph already handles cannot be pasted (two ENTRY records for one event).
+    {
+        std::vector<std::string> seen;
+        for (const auto& e : graph_.entryPoints) seen.push_back(e.second);
+        for (const auto& cn : clip.nodes) {
+            const GraphNodeDesc* d = findGraphNodeDescIn(cn.type, openGraphDomain());
+            if (!d || d->category != "Event" || d->typeId == "CustomEvent") continue;
+            const std::string name = d->typeId == "OnInputAction" ? inputActionEntryName(cn) : d->typeId;
+            if (name.empty()) continue;
+            if (std::find(seen.begin(), seen.end(), name) != seen.end()) {
+                showRejectionBanner("Paste refused: this graph already has an event node for '" + name + "'");
+                return;
+            }
+            seen.push_back(name);
+        }
     }
     pushUndo();
 

@@ -1739,10 +1739,20 @@ ENTRY tick OnTick
 
     // AN EVENT NODE PASTED GETS ITS OWN ENTRY, exactly as one dropped from the palette does. Without
     // it the node exists, the graph saves, and the event never fires -- with no error at any layer.
+    // A second handler for an event the graph already has is refused: the compiler allows one ENTRY per event.
     {
         const usize entries = g->graph().entryPoints.size();
+        const usize nodes = g->graph().nodes.size();
         g->selectNodes({"tick"});
         g->copySelection();
+        g->pasteClipboard(Vec2{900.0f, 900.0f});
+        check(g->graph().entryPoints.size() == entries && g->graph().nodes.size() == nodes,
+              "a second OnTick is refused, so the graph keeps one ENTRY per event");
+        g->selectNodes({"tick"});
+        g->deleteSelection();
+    }
+    {
+        const usize entries = g->graph().entryPoints.size();
         g->pasteClipboard(Vec2{900.0f, 900.0f});
         check(g->graph().entryPoints.size() == entries + 1,
               "a pasted OnTick carries an ENTRY record, got " +
