@@ -11,6 +11,7 @@ namespace aver::prefab {
 namespace {
 
 constexpr usize kMaxNesting = 8;
+constexpr usize kMaxFlatNodes = 65536;
 
 fmt::OcSaveComponent* findComp(std::vector<fmt::OcSaveComponent>& cs, const std::string& type) {
     for (auto& c : cs) if (c.type == type) return &c;
@@ -39,6 +40,7 @@ struct Flattener {
     std::vector<std::string> stack;
     std::vector<std::string> warnings;
     std::string hardError;
+    usize visited = 0;
 
     Flat run(const std::string& path, std::vector<ResolvedNode>& out) {
         const std::string norm = PrefabLibrary::normalize(path);
@@ -57,6 +59,11 @@ struct Flattener {
 
         const u32 rootUid = data.rootUid();
         for (const fmt::OcPrefabNode& node : data.nodes) {
+            if (++visited > kMaxFlatNodes) {
+                hardError = "prefab '" + norm + "' expands to more than " + std::to_string(kMaxFlatNodes) + " nodes";
+                stack.pop_back();
+                return Flat::Hard;
+            }
             const std::string npath = uidPath(data, node.uid, rootUid);
             const std::string parentPath =
                 node.parent == 0 ? std::string() : uidPath(data, node.parent, rootUid);
