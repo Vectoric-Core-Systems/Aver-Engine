@@ -30,6 +30,25 @@ bool requestGoal(SynapseAi& a, scene::World& w, scene::Entity e, const Vec3& goa
     return true;
 }
 
+// Drops the move request of an aborted path-following action (the agent stops chasing a goal nobody wants).
+void cancelGoal(SynapseAi& a, scene::World& w, scene::Entity e) {
+    const u32 t = a.agentType(w);
+    auto* ag = t ? w.component<CSynapseAgent>(e, t) : nullptr;
+    if (!ag) return;
+    if (ag->status == static_cast<i32>(AgentStatus::Requested) || ag->status == static_cast<i32>(AgentStatus::Pathing))
+        ag->status = static_cast<i32>(AgentStatus::None);
+}
+
+void goalAbort(i32 subject, const fmt::OcBtNode&, void* u) {
+    cancelGoal(ai(u), scene::World::instance(), entityOf(subject));
+}
+
+void takeCoverAbort(i32 subject, const fmt::OcBtNode&, void* u) {
+    SynapseAi& a = ai(u);
+    cancelGoal(a, scene::World::instance(), entityOf(subject));
+    a.tactics().releaseCover(entityOf(subject));   // the point was only claimed to run to
+}
+
 // Running until the agent arrives. A failed path releases `releaseCover` first when asked.
 BtStatus goalProgress(SynapseAi& a, scene::World& w, scene::Entity e, bool releaseCoverOnFail) {
     const u32 t = a.agentType(w);
@@ -450,18 +469,18 @@ void SynapseAi::registerBehaviors(BtRegistry& reg) {
     reg.registerCondition("HeardNoiseTag", &heardNoiseTagCond, this);
     reg.registerCondition("InCover", &inCoverCond, this);
     reg.registerCondition("SquadRoleIs", &squadRoleIsCond, this);
-    reg.registerAction("InvestigateNoise", &investigateNoiseAction, this);
-    reg.registerAction("TakeCover", &takeCoverAction, this);
+    reg.registerAction("InvestigateNoise", &investigateNoiseAction, this, &goalAbort);
+    reg.registerAction("TakeCover", &takeCoverAction, this, &takeCoverAbort);
     reg.registerAction("LeaveCover", &leaveCoverAction, this);
-    reg.registerAction("SquadFlank", &squadFlankAction, this);
-    reg.registerAction("SquadKeepSpacing", &squadKeepSpacingAction, this);
+    reg.registerAction("SquadFlank", &squadFlankAction, this, &goalAbort);
+    reg.registerAction("SquadKeepSpacing", &squadKeepSpacingAction, this, &goalAbort);
     reg.registerAction("SquadSetTarget", &squadSetTargetAction, this);
     reg.registerAction("CrowdSetMode", &crowdSetModeAction, this);
     // AI: wave 3 #21
     reg.registerAction("RunEqsQuery", &runEqsAction, this, &runEqsAbort);
     reg.registerCondition("EqsHasResult", &eqsHasResultCond, this);
     reg.registerAction("ClaimSmartObject", &claimSmartObjectAction, this);
-    reg.registerAction("MoveToSmartObject", &moveToSmartObjectAction, this);
+    reg.registerAction("MoveToSmartObject", &moveToSmartObjectAction, this, &goalAbort);
     reg.registerAction("UseSmartObject", &useSmartObjectAction, this, &useSmartObjectAbort);
     reg.registerAction("ReleaseSmartObject", &releaseSmartObjectAction, this);
     reg.registerCondition("HasSmartObjectClaim", &hasSmartObjectClaimCond, this);

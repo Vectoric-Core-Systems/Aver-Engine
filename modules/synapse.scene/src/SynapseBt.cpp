@@ -78,6 +78,11 @@ BtStatus moveToAction(i32 subject, const fmt::OcBtNode& node, f32, f32& elapsed,
     }
 }
 
+// Stops the move request this node issued when the node is aborted (observer abort, tree swap).
+void moveToAbort(i32 subject, const fmt::OcBtNode&, void*) {
+    agentSystem().cancelGoal(scene::World::instance(), static_cast<scene::Entity>(subject));
+}
+
 // params[0] = the duration, seconds. The one built-in with no scene dependency at all -- kept here
 // beside the other six anyway, so a project reads all seven registrations in one place.
 BtStatus waitAction(i32, const fmt::OcBtNode& node, f32 dt, f32& elapsed, void*) {
@@ -840,7 +845,7 @@ void registerBuiltinBehaviors(BtSystem& system) {
     reg.registerCondition("HasTarget", &hasTargetCondition);
     reg.registerCondition("CanSeeTarget", &canSeeTargetCondition);
     reg.registerCondition("DistanceToTargetLess", &distanceToTargetLessCondition);
-    reg.registerAction("MoveTo", &moveToAction);
+    reg.registerAction("MoveTo", &moveToAction, nullptr, &moveToAbort);
     reg.registerAction("Wait", &waitAction);
     reg.registerAction("LookAt", &lookAtAction);
     reg.registerAction("FireEvent", &fireEventAction);
