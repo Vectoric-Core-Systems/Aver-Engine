@@ -432,6 +432,7 @@ AVER_NAV_API int32_t aver_nav_bake(const float* verts, int32_t nVerts, const int
         if (!at) { t_bakeError = "obstacle data missing"; return 0; }
         NavBakeObstacle o;
         o.position = v3(at); o.radius = at[3]; o.zMin = at[4]; o.height = at[5];
+        if (!(at[6] >= 0.0f && at[6] <= 65536.0f)) { t_bakeError = "an obstacle has a bad vertex count"; return 0; }
         const i32 n = i32(at[6]);
         for (i32 k = 0; k < n; ++k) o.verts.push_back(v3(at + 7 + 3 * k));
         at += 7 + 3 * n;
