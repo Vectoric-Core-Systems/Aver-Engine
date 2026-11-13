@@ -48,6 +48,34 @@ public class PinnedValue
     public required string NodeId { get; init; }  // See Pin.NodeId: string, both id formats.
     public required string PinName { get; init; }
     public required object Value { get; init; }  // float, int, or bool
+
+    /// The value as the pin's declared type needs it, or false with the reason. The parser types a
+    /// literal by its SHAPE, which says nothing about the pin it lands on; the pin type is the authority.
+    public static bool TryFit(PinType pinType, object value, out object fitted, out string why)
+    {
+        fitted = value;
+        why = "";
+        switch (pinType)
+        {
+            case PinType.Float:
+                if (value is float) return true;
+                if (value is int fi) { fitted = (float)fi; return true; }
+                why = "a bool cannot feed a float pin";
+                return false;
+            case PinType.Int:
+                if (value is int) return true;
+                if (value is float ff && ff == MathF.Floor(ff) && Math.Abs(ff) < 2147483520f) { fitted = (int)ff; return true; }
+                why = value is bool ? "a bool cannot feed an int pin" : "a fractional value cannot feed an int pin";
+                return false;
+            case PinType.Bool:
+                if (value is bool) return true;
+                if (value is int bi && (bi == 0 || bi == 1)) { fitted = bi == 1; return true; }
+                why = "a bool pin takes true, false, 0 or 1";
+                return false;
+            default:
+                return true;
+        }
+    }
 }
 
 /// A link connecting an output pin to an input pin.
@@ -545,6 +573,11 @@ public class Graph
             if (pin == null)
             {
                 if (Report("pinval.pin", $"Node {pv.NodeId} has no input pin '{pv.PinName}'", pv.NodeId, pv.PinName)) return;
+            }
+            else if (!PinnedValue.TryFit(pin.Type, pv.Value, out _, out var fitWhy))
+            {
+                if (Report("pinval.type", $"PINVAL on {pv.NodeId}.{pv.PinName} ({pin.Type}): value '{pv.Value}' does not fit -- {fitWhy}",
+                           pv.NodeId, pv.PinName)) return;
             }
         }
 

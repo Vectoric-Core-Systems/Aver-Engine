@@ -354,18 +354,7 @@ public partial class GraphCompiler
 
         if (pv != null)
         {
-            if (pv.Value is float f)
-                _il.Emit(OpCodes.Ldc_R4, f);
-            else if (pv.Value is int i)
-                // A whole-number PINVAL on a float pin (parser tries int.TryParse before
-                // float.TryParse) used to emit ldc.i4 into a float slot -> invalid-program at invoke
-                // time ("Common Language Runtime detected an invalid program"); every float pin in
-                // the engine had this (0 and 1 are what authors type). The pin's declared type is
-                // the authority, so widen to it here.
-                if (pin != null && pin.Type == PinType.Float) _il.Emit(OpCodes.Ldc_R4, (float)i);
-                else _il.Emit(OpCodes.Ldc_I4, i);
-            else if (pv.Value is bool b)
-                _il.Emit(OpCodes.Ldc_I4, b ? 1 : 0);
+            EmitPinnedValue(nodeId, node.Type, pv, pin);
             return;
         }
 

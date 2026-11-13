@@ -37,6 +37,24 @@ public partial class GraphCompiler
         _il.Emit(OpCodes.Ldloc, tmp);
     }
 
+    /// Emits a PINVAL as its pin's declared type -- the parser typed it by the literal's shape, and a
+    /// float literal on an int pin (or a bool on a float pin) used to emit IL the runtime refuses with
+    /// an "invalid program" naming no node. A value that cannot fit the pin is refused here, naming it.
+    private void EmitPinnedValue(string nodeId, string nodeType, PinnedValue pv, Pin? pin)
+    {
+        if (_il == null) return;
+        object v = pv.Value;
+        if (pin != null && pin.Type != PinType.Exec)
+        {
+            if (!PinnedValue.TryFit(pin.Type, pv.Value, out v, out var why))
+                throw new InvalidOperationException(
+                    $"PINVAL on node '{nodeId}' ({nodeType}) pin '{pv.PinName}' ({pin.Type}): value '{pv.Value}' does not fit -- {why}");
+        }
+        if (v is float f) _il.Emit(OpCodes.Ldc_R4, f);
+        else if (v is int i) _il.Emit(OpCodes.Ldc_I4, i);
+        else if (v is bool b) _il.Emit(OpCodes.Ldc_I4, b ? 1 : 0);
+    }
+
     private void EmitPullInputCore(Node node, string pinName)
     {
         if (_il == null) return;
@@ -56,12 +74,7 @@ public partial class GraphCompiler
         var pv = _graph.PinnedValues.FirstOrDefault(p => p.NodeId == node.Id && p.PinName == pinName);
         if (pv != null)
         {
-            if (pv.Value is float pf) _il.Emit(OpCodes.Ldc_R4, pf);
-            // Widen a whole-number PINVAL to the float pin it feeds -- see LoadPin's twin for the
-            // invalid-program this used to emit.
-            else if (pv.Value is int pi && pin != null && pin.Type == PinType.Float) _il.Emit(OpCodes.Ldc_R4, (float)pi);
-            else if (pv.Value is int pi2) _il.Emit(OpCodes.Ldc_I4, pi2);
-            else if (pv.Value is bool pb) _il.Emit(OpCodes.Ldc_I4, pb ? 1 : 0);
+            EmitPinnedValue(node.Id, node.Type, pv, pin);
             return;
         }
 
