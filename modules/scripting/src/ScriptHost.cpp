@@ -8,6 +8,7 @@
 #include "aver/extensions/Extensions.hpp"
 #include "aver/platform/FileSystem.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <format>
 #include <string>
@@ -458,7 +459,7 @@ std::string ScriptHost::hudName(i32 index) const {
     if (!ready_ || !impl_ || !impl_->hudName) return {};
     char buf[128] = {};
     const int32_t n = impl_->hudName(index, buf, static_cast<int32_t>(sizeof buf));
-    return n > 0 ? std::string(buf, static_cast<usize>(n)) : std::string();
+    return n > 0 ? std::string(buf, static_cast<usize>(std::min<int32_t>(n, static_cast<int32_t>(sizeof buf)))) : std::string();
 }
 
 // Calls the HUD's Draw(dt). True if it ran.
@@ -552,7 +553,7 @@ void ScriptHost::graphNodeHits(const std::string& graphName, f32 maxAgeSeconds,
 
     // "nodeId:age;nodeId:age". Parsed here rather than handed over as a string so every caller does
     // not re-derive the format.
-    std::string_view all(buf, static_cast<usize>(n));
+    std::string_view all(buf, static_cast<usize>(std::min<int32_t>(n, static_cast<int32_t>(sizeof buf))));
     usize pos = 0;
     while (pos < all.size()) {
         const usize semi = all.find(';', pos);
@@ -582,7 +583,7 @@ bool ScriptHost::graphDiagnose(const std::string& text, std::string& wire) const
     std::vector<char> buf(64 * 1024, 0);
     const int32_t n = impl_->graphDiagnose(text.c_str(), buf.data(), static_cast<int32_t>(buf.size()));
     if (n < 0) return false;
-    wire.assign(buf.data(), static_cast<usize>(n));
+    wire.assign(buf.data(), static_cast<usize>(std::min<int32_t>(n, static_cast<int32_t>(buf.size()))));
     return true;
 }
 
@@ -594,7 +595,7 @@ std::string ScriptHost::editableList(i32 entity) const {
     if (!editablesAvailable()) return {};
     std::vector<char> buf(16 * 1024, 0);
     const int32_t n = impl_->editableList(entity, buf.data(), static_cast<int32_t>(buf.size()));
-    return n > 0 ? std::string(buf.data(), static_cast<usize>(n)) : std::string();
+    return n > 0 ? std::string(buf.data(), static_cast<usize>(std::min<int32_t>(n, static_cast<int32_t>(buf.size())))) : std::string();
 }
 
 bool ScriptHost::editableSet(i32 entity, const std::string& name, const std::string& value) const {
@@ -622,7 +623,7 @@ bool ScriptHost::graphDebugTakeBreak(std::string& graphAndNode) const {
     char buf[1024] = {};
     const int32_t n = impl_->graphDebugTakeBreak(buf, static_cast<int32_t>(sizeof buf));
     if (n <= 0) return false;
-    graphAndNode.assign(buf, static_cast<usize>(n));
+    graphAndNode.assign(buf, static_cast<usize>(std::min<int32_t>(n, static_cast<int32_t>(sizeof buf))));
     return true;
 }
 
@@ -632,7 +633,7 @@ std::string ScriptHost::graphDebugValues(const std::string& graphName) const {
     // side cuts at an entry boundary when a graph has more.
     std::vector<char> buf(32 * 1024, 0);
     const int32_t n = impl_->graphDebugGetValues(graphName.c_str(), buf.data(), static_cast<int32_t>(buf.size()));
-    return n > 0 ? std::string(buf.data(), static_cast<usize>(n)) : std::string();
+    return n > 0 ? std::string(buf.data(), static_cast<usize>(std::min<int32_t>(n, static_cast<int32_t>(buf.size())))) : std::string();
 }
 
 // Whether the staged bridge exports the graph-class entry points -- see the optional-bind block in init().
