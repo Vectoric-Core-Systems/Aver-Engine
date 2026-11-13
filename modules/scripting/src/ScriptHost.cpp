@@ -223,6 +223,10 @@ ScriptHost::~ScriptHost() {
 bool ScriptHost::init(const HostDesc& desc) {
     if (ready_) return true;
     if (!impl_) impl_ = new Impl();
+    // A previous init() that declined left its host context and nethost open; release them before they are overwritten.
+    if (impl_->ctx && impl_->close) impl_->close(impl_->ctx);
+    impl_->ctx = nullptr;
+    if (impl_->nethost) { aver::freeLibrary(impl_->nethost); impl_->nethost = nullptr; }
 
     const auto decline = [this](std::string why) {
         declineReason_ = std::move(why);
