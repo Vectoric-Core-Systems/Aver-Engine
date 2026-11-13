@@ -91,7 +91,16 @@ void SoftBodySystem::applyInbox(scene::World& world) {
     std::vector<InboxItem> items;
     items.swap(inbox_);
     std::vector<InboxItem> carry;
+    // Bodies with an item held over to the next tick: everything queued after it for the same body waits too, so a
+    // Repair or Release queued after a Damage does not run before it.
+    std::vector<scene::Entity> held;
+    const auto isHeld = [&](scene::Entity e) { return std::find(held.begin(), held.end(), e) != held.end(); };
+    const auto hold = [&](const InboxItem& item, scene::Entity e) {
+        carry.push_back(item);
+        if (e != scene::kInvalidEntity && !isHeld(e)) held.push_back(e);
+    };
     for (InboxItem& it : items) {
+        if (it.entity != scene::kInvalidEntity && isHeld(it.entity)) { carry.push_back(it); continue; }
         switch (it.kind) {
             case InboxItem::Kind::Wind:
                 aver_phys_sb_set_wind(it.dir.x, it.dir.y, it.dir.z, it.a, it.b, it.c);
@@ -108,7 +117,7 @@ void SoftBodySystem::applyInbox(scene::World& world) {
                 else if (auto* de = world.component<CDestructible>(it.entity, destructibleType())) de->preset = it.preset;
                 break;
             case InboxItem::Kind::Damage: {
-                if (depositsThisTick_ >= opt_.maxDepositsPerFrame) { carry.push_back(it); break; }
+                if (depositsThisTick_ >= opt_.maxDepositsPerFrame) { hold(it, it.entity); break; }
                 Entry* en = find(it.entity);
                 if (!en || en->failed) break;
                 ++depositsThisTick_;
@@ -134,7 +143,7 @@ void SoftBodySystem::applyInbox(scene::World& world) {
                         InboxItem rest = it;
                         rest.entity = e;
                         rest.impulse = 0.0f;
-                        carry.push_back(rest);
+                        hold(rest, e);
                     } else {
                         ++depositsThisTick_;
                         const f32 fall = 1.0f - nearest / it.radius;
