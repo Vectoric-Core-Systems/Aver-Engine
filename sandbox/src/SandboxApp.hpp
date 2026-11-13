@@ -2593,6 +2593,7 @@ private:
     void startHlodBuild();
     void pollHlodBuild();
     editor::HlodBuildJob hlodJob_;
+    std::string hlodJobLevel_;   // the level the running bake was started on
 #  if AVER_MODULE_VOXI
     game::LevelFoliage levelFoliage_;
 #  endif

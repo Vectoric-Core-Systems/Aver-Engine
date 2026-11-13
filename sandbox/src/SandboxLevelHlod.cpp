@@ -71,6 +71,7 @@ void SandboxApp::startHlodBuild() {
     const std::string contentDir = projSess_.project_.contentDir(), projectDir = projSess_.project_.dir;
     const bool force = lvl_.hlodForce_;
     lvl_.hlodReport_ = "Building...";
+    hlodJobLevel_ = projSess_.levelPath_;
     hlodJob_.start([w, stem, contentDir, projectDir, force](const std::atomic<bool>& cancel, std::atomic<u32>& done, std::atomic<u32>& total) {
         editor::HlodJobResult res;
         fmt::OcHlodOptions opt;
@@ -98,6 +99,11 @@ void SandboxApp::startHlodBuild() {
 void SandboxApp::pollHlodBuild() {
     editor::HlodJobResult res;
     if (!hlodJob_.poll(res)) return;
+    // Another level opened while it ran: the bake wrote that level's cache, but its settings are not this level's.
+    if (hlodJobLevel_ != projSess_.levelPath_) {
+        AVER_INFO("[HLOD] {}: finished after that level was closed ({})", hlodJobLevel_, res.ok ? "built" : res.why);
+        return;
+    }
     if (!res.ok) { lvl_.hlodReport_ = "Failed: " + res.why; return; }
     if (lvl_.levelHeader_.stream.hlodCm <= 0.0f && res.hlodCm > 0.0f) {
         lvl_.levelHeader_.stream.hlodCm = res.hlodCm;
