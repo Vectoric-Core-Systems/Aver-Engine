@@ -21,7 +21,7 @@ static int32_t makeRect(int32_t map, float x0, float y0, float x1, float y1, flo
     const int32_t r = aver_nav_region_create(map);
     const float v[12] = {x0, y0, z, x1, y0, z, x1, y1, z, x0, y1, z};
     const int32_t idx[4] = {0, 1, 2, 3}, sizes[1] = {4};
-    aver_nav_region_set_mesh(r, v, 4, idx, sizes, 1);
+    aver_nav_region_set_mesh(r, v, 4, idx, 4, sizes, 1);
     aver_nav_region_set_layers(r, layers);
     return r;
 }
@@ -111,7 +111,7 @@ int main() {
         const int32_t bad[3] = {0, 1, 9};
         const int32_t sz[1] = {3};
         const float v3[9] = {0, 0, 0, 1, 0, 0, 0, 1, 0};
-        check(!aver_nav_region_set_mesh(a, v3, 3, bad, sz, 1), "an index out of range is refused");
+        check(!aver_nav_region_set_mesh(a, v3, 3, bad, 3, sz, 1), "an index out of range is refused");
     }
 
     AVER_INFO("baking through the seam");
@@ -138,7 +138,7 @@ int main() {
         // The result goes straight into a region.
         const int32_t map = aver_nav_map_create();
         const int32_t r = aver_nav_region_create(map);
-        check(aver_nav_region_set_mesh(r, bv.data(), counts[0], bi.data(), bs.data(), counts[1]), "load the baked mesh");
+        check(aver_nav_region_set_mesh(r, bv.data(), counts[0], bi.data(), int32_t(bi.size()), bs.data(), counts[1]), "load the baked mesh");
         const float s[3] = {100, 100, 0}, t[3] = {900, 900, 0};
         check(aver_nav_path_query(map, s, t, 1, 0, 0, nullptr, 0, nullptr, 0) == 2 && aver_nav_path_reached() == 1, "and route over it");
         check(aver_nav_bake_free(h) && !aver_nav_bake_counts(h, counts) && !aver_nav_bake_free(h), "free; a freed bake is stale");
@@ -157,7 +157,7 @@ int main() {
         bs.assign(size_t(counts[1]), 0);
         bi.assign(size_t(counts[2]), 0);
         aver_nav_bake_get(h2, bv.data(), bs.data(), bi.data());
-        aver_nav_region_set_mesh(r2, bv.data(), counts[0], bi.data(), bs.data(), counts[1]);
+        aver_nav_region_set_mesh(r2, bv.data(), counts[0], bi.data(), int32_t(bi.size()), bs.data(), counts[1]);
         float cp[3];
         const float centre[3] = {500, 500, 0};
         check(aver_nav_map_closest(m2, centre, 0xFFFFFFFFu, cp, nullptr, nullptr, nullptr) && std::hypot(cp[0] - 500, cp[1] - 500) > 150.0f, "the circle obstacle carves a hole");

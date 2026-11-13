@@ -205,15 +205,18 @@ AVER_NAV_API int32_t aver_nav_region_get(int32_t region, float* out) {
     out[0] = r->enabled ? 1.0f : 0.0f; out[1] = float(r->layers); out[2] = r->enterCost; out[3] = r->travelCost;
     return 1;
 }
-AVER_NAV_API int32_t aver_nav_region_set_mesh(int32_t region, const float* verts, int32_t nVerts, const int32_t* idx, const int32_t* sizes, int32_t nPolys) {
-    if (nVerts < 0 || nPolys < 0 || (nVerts > 0 && !verts) || (nPolys > 0 && (!idx || !sizes))) return 0;
+AVER_NAV_API int32_t aver_nav_region_set_mesh(int32_t region, const float* verts, int32_t nVerts, const int32_t* idx, int32_t nIdx, const int32_t* sizes, int32_t nPolys) {
+    if (nVerts < 0 || nIdx < 0 || nPolys < 0 || (nVerts > 0 && !verts) || (nPolys > 0 && (!idx || !sizes))) return 0;
     std::vector<Vec3> vv;
     vv.reserve(usize(nVerts));
     for (i32 i = 0; i < nVerts; ++i) vv.push_back(v3(verts + 3 * i));
     std::vector<std::vector<u32>> pp;
     i32 at = 0;
+    i64 total = 0;
     for (i32 p = 0; p < nPolys; ++p) {
         if (sizes[p] < 0) return 0;
+        total += sizes[p];
+        if (total > nIdx) return 0;   // the sizes outrun the index array
         std::vector<u32> poly;
         for (i32 k = 0; k < sizes[p]; ++k) {
             if (idx[at + k] < 0) return 0;

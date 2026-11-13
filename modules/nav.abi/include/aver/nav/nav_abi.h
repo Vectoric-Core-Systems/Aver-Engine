@@ -122,7 +122,7 @@ AVER_NAV_API int32_t aver_nav_region_set_edge_connections(int32_t region, int32_
 AVER_NAV_API int32_t aver_nav_region_edge_connections(int32_t region);
 AVER_NAV_API int32_t aver_nav_region_get(int32_t region, float* out4);   /* enabled, layers (as a float of the integer), enter cost, travel cost */
 /* verts: nVerts * 3 floats; polyIndices: the polygons' indices back to back, polySizes: how many each has. 0 when an index is out of range. */
-AVER_NAV_API int32_t aver_nav_region_set_mesh(int32_t region, const float* verts3, int32_t nVerts, const int32_t* polyIndices, const int32_t* polySizes, int32_t nPolys);
+AVER_NAV_API int32_t aver_nav_region_set_mesh(int32_t region, const float* verts3, int32_t nVerts, const int32_t* polyIndices, int32_t nPolyIndices, const int32_t* polySizes, int32_t nPolys);
 AVER_NAV_API int32_t aver_nav_region_polygon_count(int32_t region);      /* polygons the region holds */
 AVER_NAV_API int32_t aver_nav_region_closest(int32_t region, const float* p3, float* outPoint3, float* outNormal3);
 AVER_NAV_API int32_t aver_nav_region_connections(int32_t region, float* out6, int32_t cap);   /* edges shared with other regions: (ax,ay,az,bx,by,bz) each; returns the count */
