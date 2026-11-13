@@ -146,7 +146,9 @@ f32 scalpArea(const ScalpMesh& scalp) {
 bool generateHair(const fmt::OcHairGenerate& g, const ScalpMesh& scalp, fmt::OcHairStrands& out, GenerateStats* stats, std::string* why) {
     if (stats) *stats = GenerateStats{};
     if (g.strands == 0) return fail(why, "hair generate: strands is 0");
-    if (g.segments < 2 || g.segments + 1 > fmt::kOcHairMaxStrandVertices) return fail(why, "hair generate: segments must be 2 to 254");
+    if (g.segments < 2 || g.segments > fmt::kOcHairMaxStrandVertices - 1) return fail(why, "hair generate: segments must be 2 to 254");
+    constexpr u64 kMaxGeneratedPoints = u64(1) << 26;                 // bounds the allocations below for a corrupt strand count
+    if (static_cast<u64>(g.strands) * (g.segments + 1) > kMaxGeneratedPoints) return fail(why, "hair generate: strands x points exceeds the generation cap");
     if (!(g.lengthCm[0] > 0.0f) || g.lengthCm[1] < g.lengthCm[0]) return fail(why, "hair generate: lengthCm must be 0 < min <= max");
     if (!scalpUsable(scalp)) return fail(why, "hair generate: the scalp mesh is empty or malformed");
     const TriTable table = buildTable(scalp);
