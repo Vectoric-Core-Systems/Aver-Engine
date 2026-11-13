@@ -113,6 +113,7 @@ void bindVerticesToCage(const Cage& cage, const f32* positions, u32 vertexCount,
 
     for (u32 v = 0; v < vertexCount; ++v) {
         const Vec3 p{positions[v * 3 + 0], positions[v * 3 + 1], positions[v * 3 + 2]};
+        if (!std::isfinite(p.x + p.y + p.z)) continue;   // stays unbound
         near.clear();
         for (u32 i = 0; i < n; ++i)
             near.push_back({(cage.nodes[i].rest - p).sizeSquared(), static_cast<i32>(i)});
