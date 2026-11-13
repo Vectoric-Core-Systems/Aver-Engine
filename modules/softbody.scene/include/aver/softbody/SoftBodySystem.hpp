@@ -566,6 +566,7 @@ private:
     std::map<scene::Entity, u32> proxyUsers_;
     u32 nextSeq_ = 1;
     u32 stepClock_ = 0;
+    f32 stepCarry_ = 0.0f;   // fixed steps' worth of frame time not yet counted (tick)
     u32 tickCount_ = 0;
     u32 fieldTick_ = 0;
     f32 stepSeconds_ = 1.0f / 60.0f;   // this tick's fixed-step time, what a perSecond field integrates over

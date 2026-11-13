@@ -1039,7 +1039,12 @@ void SoftBodySystem::tick(scene::World& world, f32 dt) {
         return;
     }
     installLayers();
-    const u32 stepsThisTick = std::max(1u, static_cast<u32>(std::lround(std::max(dt, 0.0f) / std::max(aver_phys_fixed_step(), 1e-4f))));
+    // The physics steps this frame's dt covers, the remainder carried: rounding up to one step a frame charged a whole
+    // step to every short frame, so above twice the physics rate field lifetimes ran out and per-second fields pushed
+    // 2-4x too fast. A frame shorter than a step now covers none (no field integrates over it).
+    stepCarry_ += std::max(dt, 0.0f) / std::max(aver_phys_fixed_step(), 1e-4f);
+    const u32 stepsThisTick = static_cast<u32>(stepCarry_);
+    stepCarry_ -= static_cast<f32>(stepsThisTick);
     stepClock_ += stepsThisTick;
     const f32 stepSeconds = static_cast<f32>(stepsThisTick) * aver_phys_fixed_step();
     stepSeconds_ = stepSeconds;
@@ -1055,7 +1060,7 @@ void SoftBodySystem::tick(scene::World& world, f32 dt) {
     ++fieldTick_;
     applyInbox(world);
     applyPressureOps();
-    fieldStep(world, stepSeconds);
+    if (stepsThisTick > 0) fieldStep(world, stepSeconds);
     pollImpacts(world);
 
     for (auto& [e, en] : entries_) {
