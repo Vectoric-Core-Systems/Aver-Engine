@@ -6,7 +6,7 @@ namespace aver::synapse {
 namespace {
 constexpr u32 kIndexBits = 12;
 constexpr u32 kIndexMask = (1u << kIndexBits) - 1;
-constexpr u32 kGenMask = (1u << (32 - kIndexBits)) - 1;
+constexpr u32 kGenMask = (1u << (31 - kIndexBits)) - 1;   // handles cross the ABI as positive int32
 } // namespace
 
 const SoDef* SmartObjectRegistry::defOf(u32 object) const {
