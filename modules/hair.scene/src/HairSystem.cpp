@@ -694,8 +694,9 @@ void HairSystem::tick(scene::World& world, f32 dt, const Vec3& view) {
         }
 
         in.simulatedThisTick = false;
+        if (cad.teleport) in.teleportNext = true;                     // a Half-band resume frame may not update: keep the request
         if (cad.update) {
-            if (in.teleportNext || cad.teleport) {
+            if (in.teleportNext) {
                 aver_phys_hair_teleport(in.hair);
                 in.teleportNext = false;
             }
