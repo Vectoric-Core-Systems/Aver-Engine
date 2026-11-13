@@ -39,6 +39,7 @@ private:
     rhi::IResourceFactory& res_;
     FsrUpscaler            fallback_;
     bool                   failed_ = false, fallbackLogged_ = false;
+    u32                    targetFailW_ = 0, targetFailH_ = 0;   // the size whose targets could not be created
 
     rhi::PipelineHandle   resolve_ = 0, rcas_ = 0;
     rhi::Format           rcasFormat_ = rhi::Format::Unknown;

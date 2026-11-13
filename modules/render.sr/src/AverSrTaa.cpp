@@ -113,16 +113,20 @@ bool TemporalUpscaler::ensureTargets(u32 dstW, u32 dstH) {
 void TemporalUpscaler::execute(rhi::IRenderContext& ctx, const rhi::UpscalerInput& in, rhi::TextureHandle outTarget) {
     if (!in.color || !outTarget || !in.srcWidth || !in.srcHeight || !in.dstWidth || !in.dstHeight) return;
     rhi::TextureDesc outDesc{};
-    const bool ready = in.canRetarget && in.motionVectors && in.depth && !failed_ &&
-                       res_.textureInfo(outTarget, outDesc) && ensurePipelines(outDesc.format) &&
-                       ensureTargets(in.dstWidth, in.dstHeight);
+    // A pipeline that failed to build will fail again: that latches (failed_). Targets that could not be created at one
+    // size (memory, during a resize) are retried when the size changes, instead of FSR 1 for the rest of the run.
+    const bool inputs = in.canRetarget && in.motionVectors && in.depth;
+    bool ready = inputs && !failed_ && res_.textureInfo(outTarget, outDesc);
+    if (ready && !ensurePipelines(outDesc.format)) { failed_ = true; ready = false; }
+    if (ready && in.dstWidth == targetFailW_ && in.dstHeight == targetFailH_) ready = false;
+    if (ready && !ensureTargets(in.dstWidth, in.dstHeight)) { targetFailW_ = in.dstWidth; targetFailH_ = in.dstHeight; ready = false; }
+    if (ready) targetFailW_ = targetFailH_ = 0;
     if (!ready) {
         if (!fallbackLogged_) {
             AVER_INFO("[AverSR] temporal AA needs the G-buffer and a retargetable output, which this device "
                       "does not provide; using FSR 1 instead");
             fallbackLogged_ = true;
         }
-        if (in.canRetarget && in.motionVectors && in.depth && !ready) failed_ = true;   // pipelines/targets
         fallback_.execute(ctx, in, outTarget);
         resetPending_ = true;
         return;
