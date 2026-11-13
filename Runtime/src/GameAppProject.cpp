@@ -347,6 +347,10 @@ void GameApp::travelTo(const std::string& requested) {
     // new level below; before, its cars stayed inert and the old ones were still stepped.
     anim::animSystem().setObjectAnimationLive(false);
     playMobility_.end();
+    // PCG chunk streaming generates from the level's own volumes: it stops with the old level (its chunks' entities and
+    // static bodies go while physics is up) and, if it was running, starts again over the new level's below.
+    const bool chunkStreaming = streaming_.enabled();
+    if (chunkStreaming) streaming_.disable();
 #if AVER_MODULE_PHYSICS
     game::clearVehicles();
     vehicles_.end();
@@ -362,6 +366,7 @@ void GameApp::travelTo(const std::string& requested) {
     loadLevelNav();
     applyLevelSky();
     applyLevelGiVolume();
+    if (chunkStreaming) enableChunkStreaming();
     level_.spawnClassPlacements();
     auto named = [](const std::string& n, i32 flag) -> i32 {
         const i32 c = n.empty() ? 0 : aver_fw_class_find(n.c_str());
