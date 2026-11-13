@@ -407,6 +407,10 @@ void destroyAllVehicles();
 // If body is a chassis, removes its vehicle (constraint and step listener) and forgets it. Called by aver_phys_remove_body before the body goes. Defined in PhysicsVehicle.cpp.
 void releaseVehicleOfBody(int32_t body);
 
+// For a chassis rebuilt under the same handle: gives the new body's settings the old one's object layer and collision group (the layer-filter slot rides in the group),
+// and returns false if a joint still holds the old body (the rebuild would leave it pointing at a freed body). Defined in PhysicsVehicle.cpp.
+bool carryChassisIdentity(const JPH::BodyID& oldId, JPH::BodyCreationSettings& s);
+
 // Jolt takes the stair step-up and step-down as ExtendedUpdate arguments, not as character state. The setter's numbers must be read back at update time;
 // without this call the setter stores a value nothing reads. Defined in PhysicsCharacter.cpp; cleared on shutdown.
 void applyCharacterStairSettings(int32_t handle, JPH::CharacterVirtual::ExtendedUpdateSettings& out);

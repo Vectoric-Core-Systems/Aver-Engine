@@ -46,6 +46,7 @@
 #include <Jolt/Physics/Collision/Shape/OffsetCenterOfMassShape.h>
 #include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
 #include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
+#include <Jolt/Physics/Constraints/TwoBodyConstraint.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Physics/Vehicle/VehicleCollisionTester.h>
 #include <Jolt/Physics/Vehicle/VehicleConstraint.h>
@@ -436,6 +437,11 @@ int32_t aver_phys_vehicle_set_chassis_boxes(int32_t v, const float* boxes6, int3
     s.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
     s.mMassPropertiesOverride.mMass = e->massKg;
     s.mUserData = bi().GetUserData(oldId);
+    if (!carryChassisIdentity(oldId, s)) {
+        AVER_WARN("[Physics] vehicle {}: a joint is attached to the chassis; remove it before replacing the chassis", v);
+        aver::setAbiError(aver::AbiError::Unsupported);
+        return 0;
+    }
     JPH::Body* nb = bi().CreateBody(s);
     if (!nb) { AVER_WARN("[Physics] vehicle {}: no body left for the new chassis", v); return 0; }
     bi().AddBody(nb->GetID(), JPH::EActivation::Activate);
@@ -667,6 +673,19 @@ int32_t aver_phys_vehicle_set_pose(int32_t v, float x, float y, float z,
 // ---- Teardown ---------------------------------------------------------------------------------------
 
 namespace aver::physics::detail {
+
+bool carryChassisIdentity(const JPH::BodyID& oldId, JPH::BodyCreationSettings& s) {
+    const JPH::Body* ob = g_world->system.GetBodyLockInterfaceNoLock().TryGetBody(oldId);
+    if (!ob) return false;
+    for (const JPH::Ref<JPH::Constraint>& c : g_world->system.GetConstraints()) {
+        if (c->GetType() != JPH::EConstraintType::TwoBodyConstraint) continue;
+        const auto* t = static_cast<const JPH::TwoBodyConstraint*>(c.GetPtr());
+        if (t->GetBody1() == ob || t->GetBody2() == ob) return false;
+    }
+    s.mObjectLayer = ob->GetObjectLayer();
+    s.mCollisionGroup = ob->GetCollisionGroup();
+    return true;
+}
 
 void releaseVehicleOfBody(int32_t body) {
     if (!g_world) return;

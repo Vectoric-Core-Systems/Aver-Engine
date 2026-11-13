@@ -639,6 +639,10 @@ int32_t aver_phys_vehicle_set_chassis_shape(int32_t v, int32_t shape) {
     s.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
     s.mMassPropertiesOverride.mMass = e->massKg;
     s.mUserData = bi().GetUserData(oldId);
+    if (!carryChassisIdentity(oldId, s)) {
+        AVER_WARN("[Physics] vehicle {}: a joint is attached to the chassis; remove it before replacing the chassis", v);
+        return fail(AbiError::Unsupported);
+    }
     JPH::Body* nb = bi().CreateBody(s);
     if (!nb) { warnBodyLimit(); return fail(AbiError::AllocationFailed); }
     bi().AddBody(nb->GetID(), JPH::EActivation::Activate);
