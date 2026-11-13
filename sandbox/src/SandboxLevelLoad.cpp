@@ -1161,7 +1161,14 @@ void SandboxApp::unloadLevel(Engine& eng) {
     if (anyPlayActive() && !play_.pieTravelling_) stopPlay();
 #endif
 #if AVER_MODULE_SCENE
-    play_.pieReloadPending_ = false;   // leaving the level (or reloading it): a pending Play reload is moot
+    // Leaving the level (or reloading it): a pending Play reload is moot, and so is the Play-start copy it would have
+    // read (reloadAfterPlay deletes it after reading; nothing else would, and one was left per Play stopped this way).
+    if (play_.pieReloadPending_ && !play_.pieSnapshotPath_.empty()) {
+        std::error_code sec;
+        std::filesystem::remove(play_.pieSnapshotPath_, sec);
+        play_.pieSnapshotPath_.clear();
+    }
+    play_.pieReloadPending_ = false;
 #endif
     if (!play_.pieTravelling_) {
         play_.pieTravelled_ = false;
