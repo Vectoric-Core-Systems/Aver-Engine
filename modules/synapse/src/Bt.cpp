@@ -23,6 +23,7 @@ struct Ctx {
 };
 
 BtStatus tickNode(Ctx& c, i32 idx);
+void clearSubtree(Ctx& c, i32 idx);
 
 // Selector and Sequence differ only in which child status short-circuits.
 BtStatus tickComposite(Ctx& c, i32 idx, BtStatus shortCircuitOn, BtStatus allTookTheOtherStatus) {
@@ -68,7 +69,12 @@ BtStatus tickNodeImpl(Ctx& c, i32 idx) {
             if (s == BtStatus::Failure) anyFailure = true;
             else if (s == BtStatus::Running) anyRunning = true;
         }
-        if (anyFailure) return BtStatus::Failure;
+        if (anyFailure) {
+            // The Parallel is done: siblings still Running are aborted so their claims and requests are released.
+            if (anyRunning && c.track)
+                for (const i32 ch : children) if (c.state.active.count(ch) != 0) clearSubtree(c, ch);
+            return BtStatus::Failure;
+        }
         if (anyRunning) return BtStatus::Running;
         return BtStatus::Success;
     }
