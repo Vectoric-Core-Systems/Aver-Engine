@@ -569,6 +569,7 @@ void VehiclePhysicsSystem::clear() {
     m.byHandle.clear();
     m.inlineSpecs.clear();
     m.sounds.clear();
+    m.soundMisses.clear();
     m.events.clear();
     m.seq = 0;
     m.stats = Stats{};

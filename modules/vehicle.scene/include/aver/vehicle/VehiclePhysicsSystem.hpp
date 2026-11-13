@@ -360,7 +360,8 @@ struct VehiclePhysicsSystem::Impl {
     std::map<scene::Entity, detail::Entry> entries;            // ascending entity id: the determinism contract
     std::unordered_map<i32, scene::Entity> byHandle;           // physics vehicle handle -> entity
     std::map<u64, std::shared_ptr<VehicleSpec>> inlineSpecs;   // specs made from text or presets by spawn()
-    std::unordered_map<std::string, i32> sounds;               // content path -> sound handle (0 = unavailable)
+    std::unordered_map<std::string, i32> sounds;               // content path -> sound handle (loaded ones only)
+    std::unordered_map<std::string, u32> soundMisses;          // content path -> requests since its load last failed
     std::vector<VehicleEvent> events;
     u32 seq = 0;
     Stats stats;

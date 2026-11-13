@@ -24,8 +24,12 @@ i32 VehiclePhysicsSystem::Impl::soundFor(const std::string& path) {
     if (!audio || path.empty()) return 0;
     const auto it = sounds.find(path);
     if (it != sounds.end()) return it->second;
+    // A failed load is retried, every 300th request: caching the 0 left the engine silent for the run when the first
+    // try came before the device opened or while the sound table was full; trying every frame would hit the disk.
+    if (auto miss = soundMisses.find(path); miss != soundMisses.end() && ++miss->second % 300u != 0u) return 0;
     const i32 s = audio->loadSound(path);
-    sounds[path] = s;
+    if (s != 0) { sounds[path] = s; soundMisses.erase(path); }
+    else soundMisses.emplace(path, 0u);
     return s;
 }
 
