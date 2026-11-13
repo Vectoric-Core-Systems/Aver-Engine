@@ -91,6 +91,8 @@ public static class UiGameSettings
     /// Nothing in the engine applies these yet; a game subscribes and drives its own render settings.</summary>
     public static event Action<string, float>? GraphicsChanged;
 
+    internal static void ClearSubscribers() => GraphicsChanged = null;   // scripts unloading: their handlers go with them
+
     /// <summary>Creates the screen over <see cref="Settings"/> and <see cref="Audio"/>. Pass the
     /// controls page's rows (or <see cref="FrameworkRebindProvider.FromContext"/>) to include a
     /// Controls tab. Call <see cref="SettingsScreen.ApplyAll"/> once at startup to restore saved values.</summary>

@@ -58,6 +58,8 @@ public static class Accessibility
     /// also posted as the bus event <c>Access.Changed</c> (string key, float value) for graphs.</summary>
     public static event Action<string, float>? Changed;
 
+    internal static void ClearSubscribers() => Changed = null;   // scripts unloading: their handlers go with them
+
     /// <summary>The value of any key in the table (or a dynamic <c>access.input.toggle.&lt;Action&gt;</c>);
     /// <paramref name="fallback"/> for an unknown key or when the framework is not loaded.</summary>
     public static float Get(string key, float fallback = 0f)

@@ -324,6 +324,17 @@ public static class HostBridge
         GameThread.Reset();   // deferred calls and await continuations hold script-context delegates too
         try { GameplayAbilities.Shutdown(); } catch { }   // its callbacks and behaviours are script-context objects too
         try { Aver.Synapse.ManagedAi.Shutdown(); } catch { }   // AI: wave 3 #21 -- managed leaves and EQS tests are script-context delegates
+        // Game UI handlers, bindings and settings events are script delegates too: left in place, the next Play ran the
+        // last one's handlers beside its own (a command fired twice) and kept the unloaded context alive.
+        try
+        {
+            Aver.UI.UiSystem.ResetForScriptUnload();
+            Aver.UI.UiBindings.ResetForScriptUnload();
+            Accessibility.ClearSubscribers();
+            Loc.ClearSubscribers();
+            UiGameSettings.ClearSubscribers();
+        }
+        catch { }
 
         ScriptLoadContext? ctx = s_context;
         s_context = null;
@@ -867,10 +878,12 @@ public static class HostBridge
         try
         {
             string? dir = Marshal.PtrToStringUTF8(utf8ContentDir);
-            if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir))
+            bool haveDir = !string.IsNullOrEmpty(dir) && Directory.Exists(dir);
+            // Set even with no folder (to none): otherwise a project without content kept the previous project's roots.
+            GameplayAbilities.SetContentRoot(haveDir ? dir! : "");   // where BeginSession finds *.ocgas
+            Aver.UI.UiSystem.SetProjectContentRoot(haveDir ? dir! : "");   // where AN_OpenUiLayout's content-relative path is found
+            if (!haveDir)
                 return 0;
-            GameplayAbilities.SetContentRoot(dir);   // where BeginSession finds *.ocgas
-            Aver.UI.UiSystem.SetProjectContentRoot(dir);   // where AN_OpenUiLayout's content-relative path is found
 
             int declared = 0;
             // `pawn=` assignments, in a SECOND pass below (Graph.ClassPawn): aver_fw_class_set_default_pawn

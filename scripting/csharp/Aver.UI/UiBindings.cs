@@ -247,6 +247,18 @@ public static class UiBindings
     /// <summary>Removes every registered method.</summary>
     public static void ClearMethods() => s_methods.Clear();
 
+    /// <summary>Forgets everything scripts set up: methods, variables, the view model, <see cref="GraphEvent"/> subscribers
+    /// and <see cref="VariableResolver"/>. The script host calls it when scripts unload.</summary>
+    public static void ResetForScriptUnload()
+    {
+        if (s_viewModel != null) ViewModel = null;
+        GraphEvent = null;
+        VariableResolver = null;
+        s_methods.Clear();
+        s_members.Clear();   // keyed by script types: holding them keeps the unloaded context alive
+        ClearVariables();
+    }
+
     /// <summary>Runs a method route: a registered handler by that name, else a public method on <see cref="ViewModel"/>
     /// ("Save", or "Settings.SetVolume" for a method of a member). With route arguments the method takes that many
     /// parameters (converted from the text); without, it takes none or one, filled from the event: a float or double

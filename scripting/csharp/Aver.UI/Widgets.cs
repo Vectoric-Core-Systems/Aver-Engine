@@ -452,6 +452,20 @@ public static class UiSystem
         s_commandHandlers.Clear();
     }
 
+    /// <summary>Forgets everything scripts registered: handlers, <see cref="Event"/> subscribers, the image resolver and
+    /// this frame's event sets. The script host calls it when scripts unload, so the next Play does not run the last
+    /// one's handlers as well as its own.</summary>
+    public static void ResetForScriptUnload()
+    {
+        ClearHandlers();
+        Event = null;
+        ImageResolver = null;
+        s_clickedThisFrame.Clear();
+        s_commandsThisFrame.Clear();
+        s_finishedThisFrame.Clear();
+        s_graphEventsThisFrame.Clear();
+    }
+
     /// <summary>Takes the next event the UI raised, without dispatching it. False when there is none.</summary>
     public static bool TryPoll(out UiEvent e)
     {
@@ -561,11 +575,11 @@ public static class UiSystem
     }
 
     /// <summary>Reads an <c>.ocui</c> file and opens it. Returns none with <see cref="LastError"/> set
-    /// when the file cannot be read or parsed. A relative path that is not a file from the working directory is looked up
-    /// under <see cref="LayoutRoots"/> (the project's content folder): graphs name layouts content-relative.</summary>
+    /// when the file cannot be read or parsed. A relative path is looked up under <see cref="LayoutRoots"/> first (the
+    /// project's content folder: graphs name layouts content-relative), then from the working directory.</summary>
     public static Widget OpenLayout(string path, bool applyEnvironment = true)
     {
-        if (!string.IsNullOrEmpty(path) && !Path.IsPathRooted(path) && !File.Exists(path))
+        if (!string.IsNullOrEmpty(path) && !Path.IsPathRooted(path))
             foreach (string root in LayoutRoots)
             {
                 string candidate = Path.Combine(root, path);

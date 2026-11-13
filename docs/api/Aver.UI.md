@@ -2,7 +2,7 @@
 
 # Aver.UI public API
 
-28 public types and 258 public members, read from `scripting/csharp/Aver.UI/` (10 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+28 public types and 260 public members, read from `scripting/csharp/Aver.UI/` (10 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.UI
 
@@ -181,6 +181,7 @@ Values: `Bold = 1`, `Italic = 2`, `Rich = 4`, `Ellipsis = 8`, `Wrap = 16`
 - `public static void RegisterMethod(string name, Action<UiEvent, IReadOnlyList<string>> handler)` - Registers a handler a method route can name (EVENT Play click method Menu.Start).
 - `public static void RegisterMethod(string name, Action handler)` - Registers a handler that needs neither the event nor arguments.
 - `public static void ClearMethods()` - Removes every registered method.
+- `public static void ResetForScriptUnload()` - Forgets everything scripts set up: methods, variables, the view model, GraphEvent subscribers and VariableResolver.
 - `public static bool InvokeMethod(string target, IReadOnlyList<string> args, UiEvent ev)` - Runs a method route: a registered handler by that name, else a public method on ViewModel ("Save", or "Settings.SetVolume" for a method of a member).
 
 ### UiEvent
@@ -236,6 +237,7 @@ Values: `Command = 0`, `Graph = 1`, `Method = 2`
 - `public static void On(Widget widget, UiEventKind kind, Action<UiEvent> handler)` - Registers a handler for one kind of event on one widget.
 - `public static void OnCommand(string command, Action<UiEvent> handler)` - Registers a handler for a command string (a button's command property).
 - `public static void ClearHandlers()` - Drops every widget and command handler (and Event subscribers are untouched).
+- `public static void ResetForScriptUnload()` - Forgets everything scripts registered: handlers, Event subscribers, the image resolver and this frame's event sets.
 - `public static bool TryPoll(out UiEvent e)` - Takes the next event the UI raised, without dispatching it.
 - `public static int Pump()` - Delivers every pending event to Event and the registered handlers.
 - `public static bool WasClicked(Widget widget)` - Whether widget was clicked in the events the last Pump delivered.

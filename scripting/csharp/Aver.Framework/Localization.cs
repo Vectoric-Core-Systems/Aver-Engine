@@ -141,6 +141,8 @@ public static class Loc
     /// <summary>Raised from <see cref="Pump"/> (the game thread, once per frame) with the new culture after it changed.</summary>
     public static event Action<string>? CultureChanged;
 
+    internal static void ClearSubscribers() => CultureChanged = null;   // scripts unloading: their handlers go with them
+
     /// <summary>Compares the active culture with the last frame's and raises <see cref="CultureChanged"/>. Called by the host's tick.</summary>
     public static void Pump()
     {
