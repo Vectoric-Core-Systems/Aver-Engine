@@ -325,6 +325,8 @@ bool parseOcSkel(const u8* bytes, usize size, OcSkeleton& out, std::string* why)
     out.rootBone = r.u32v();
     if (!r.ok) return fail(why, ".ocskel: truncated SKEL header");
     if (count == 0) return fail(why, ".ocskel: BoneCount is 0");
+    // A bone record starts with name, parent and translation (20 bytes): bound the count by the chunk before sizing.
+    if (count > usize(r.e - r.p) / 20) return fail(why, ".ocskel: BoneCount is more than SKEL holds");
 
     out.bones.clear();
     out.bones.resize(count);
@@ -772,6 +774,8 @@ bool parseOcAnim(const u8* bytes, usize size, OcAnimation& out, std::string* why
     if (out.storage != OcAnimStorage::Keyframed && out.storage != OcAnimStorage::BakedUniform)
         return fail(why, ".ocanim: unknown Storage value");
 
+    // Each track record is 20 bytes of AHDR: a TrackCount the chunk cannot hold fails here, before it sizes anything.
+    if (n > usize(r.e - r.p) / 20) return fail(why, ".ocanim: TrackCount is more than AHDR holds");
     out.tracks.clear();
     out.tracks.resize(n);
     std::vector<u64> offsets(n);

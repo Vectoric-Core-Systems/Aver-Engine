@@ -102,6 +102,7 @@ bool parseOcBt(const u8* bytes, usize size, OcBtData& out, std::string* why) {
     const u32 count = r.u32v();
     if (!r.ok) return fail(why, ".ocbt: truncated BNOD header");
     if (count == 0) return fail(why, ".ocbt: NodeCount is 0");
+    if (count > usize(r.e - r.p) / 4) return fail(why, ".ocbt: NodeCount is more than BNOD holds");   // a node is at least its kind
 
     out.nodes.clear();
     out.nodes.resize(count);

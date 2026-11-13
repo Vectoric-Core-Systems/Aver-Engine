@@ -131,9 +131,10 @@ bool parseOcNav(const u8* bytes, usize size, OcNavData& out, std::string* why) {
     if (!h.ok) return fail(why, ".ocnav: truncated NHDR");
 
     // BOUNDED AGAINST THE CHUNK before reserving: a corrupt width x height could otherwise ask for
-    // an enormous allocation on its way to failing. The multiply is done in u64 so it cannot wrap.
+    // an enormous allocation on its way to failing. width x height is done in u64 (it cannot wrap), and compared
+    // against the chunk divided by the cell size: times the cell size, 2^31 x 2^31 cells would wrap to 0 and pass.
     const u64 want = static_cast<u64>(out.widthCells) * out.heightCells;
-    if (want * kCellBytes > ncel->data.size())
+    if (want > ncel->data.size() / kCellBytes)
         return fail(why, ".ocnav: NHDR claims " + std::to_string(want) +
                          " cells, more than NCEL can hold");
 

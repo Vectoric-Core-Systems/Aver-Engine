@@ -1,5 +1,6 @@
 #include "aver/formats/UsdCrate.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -96,8 +97,9 @@ bool fastDecompress(const u8* src, usize n, std::vector<u8>& out, usize cap) {
     out.clear();
     if (n == 0) return false;
     // Reserved up front: `cap` is the exact decoded size for every caller here, and growing a
-    // multi-megabyte vector by doubling would copy it a dozen times.
-    out.reserve(cap);
+    // multi-megabyte vector by doubling would copy it a dozen times. But `cap` comes from the file: LZ4 expands at most
+    // about 255:1, so no more than that is reserved for `n` compressed bytes (a header claiming 4 GiB from a few bytes).
+    out.reserve(std::min<u64>(static_cast<u64>(cap), static_cast<u64>(n) * 255u + 64u));
     const u32 chunks = src[0];
     if (chunks == 0) return lz4Append(src + 1, n - 1, out, cap);
     usize p = 1;
