@@ -8,6 +8,9 @@
 namespace aver::synapse {
 namespace {
 
+// "No .ocnav yet" is a frame or two (async loader); a level with no grid at all never ends.
+constexpr u32 kNoGridGraceTicks = 300;
+
 // The entity's CURRENT world-space position, decomposed from its world matrix rather than assumed
 // equal to CLocal -- an agent parented to a moving platform (or anything else) must path from
 // where it actually is, not from a local offset that means nothing outside its parent's frame.
@@ -71,6 +74,17 @@ bool AgentSystem::setGoal(aver::scene::World& world, aver::scene::Entity e, cons
     a->goalZCm = goalCm.z;
     a->status = static_cast<i32>(AgentStatus::Requested);
     paths_.erase(e);
+    noGridTicks_.erase(e);
+    return true;
+}
+
+bool AgentSystem::cancelGoal(aver::scene::World& world, aver::scene::Entity e) {
+    auto* a = type_ ? world.component<CSynapseAgent>(e, type_) : nullptr;
+    if (!a) return false;
+    if (a->status == static_cast<i32>(AgentStatus::Requested) || a->status == static_cast<i32>(AgentStatus::Pathing))
+        a->status = static_cast<i32>(AgentStatus::None);
+    paths_.erase(e);
+    noGridTicks_.erase(e);
     return true;
 }
 
@@ -90,7 +104,14 @@ void AgentSystem::tick(aver::scene::World& world, const aver::fmt::OcNavData* na
             // No grid yet is not a failure -- SandboxApp's own .ocnav loader is one frame async
             // (navLoadPending_, serviced from onRender), so a goal set the same tick a level opens
             // must be able to wait rather than give up on a grid that simply has not arrived.
-            if (!nav || !nav->valid()) continue;
+            if (!nav || !nav->valid()) {
+                if (++noGridTicks_[e] > kNoGridGraceTicks) {
+                    a->status = static_cast<i32>(AgentStatus::Failed);
+                    noGridTicks_.erase(e);
+                }
+                continue;
+            }
+            noGridTicks_.erase(e);
 
             PathRequest req;
             req.startXCm = pos.x;
@@ -103,6 +124,7 @@ void AgentSystem::tick(aver::scene::World& world, const aver::fmt::OcNavData* na
                 AgentPath& p = paths_[e];
                 p.points = r.points;
                 p.index = 0;
+                p.partial = r.status == PathStatus::Partial;
                 a->status = static_cast<i32>(AgentStatus::Pathing);
             } else {
                 // Unreachable, OffMesh, or Invalid: GIVES UP HERE. status is now Failed, so this
@@ -137,7 +159,10 @@ void AgentSystem::tick(aver::scene::World& world, const aver::fmt::OcNavData* na
             }
 
             if (p.index >= p.points.size()) {
-                a->status = static_cast<i32>(AgentStatus::Arrived);
+                // A Partial path only reaches the closest point the search found: Arrived only if that is the goal.
+                const f32 gx = a->goalXCm - pos.x, gy = a->goalYCm - pos.y;
+                const bool shortOfGoal = p.partial && gx * gx + gy * gy > arriveSq;
+                a->status = static_cast<i32>(shortOfGoal ? AgentStatus::Failed : AgentStatus::Arrived);
                 paths_.erase(e);
             } else {
                 const Vec3& target = p.points[p.index];
@@ -161,6 +186,13 @@ void AgentSystem::prune(aver::scene::World& world) {
         const auto* a = world.component<CSynapseAgent>(e, type_);
         if (!a || a->status != static_cast<i32>(AgentStatus::Pathing))
             it = paths_.erase(it);
+        else
+            ++it;
+    }
+    for (auto it = noGridTicks_.begin(); it != noGridTicks_.end();) {
+        const auto* a = world.component<CSynapseAgent>(it->first, type_);
+        if (!a || a->status != static_cast<i32>(AgentStatus::Requested))
+            it = noGridTicks_.erase(it);
         else
             ++it;
     }

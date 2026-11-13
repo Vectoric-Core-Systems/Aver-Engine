@@ -37,7 +37,7 @@ enum class AgentStatus : i32 {
     Requested = 1,   // a goal was just set; the system has not attempted to path to it yet
     Pathing   = 2,   // a path exists and the agent has not reached its last waypoint
     Arrived   = 3,   // the last waypoint was reached
-    Failed    = 4,   // the goal was Unreachable, OffMesh, or the grid was Invalid -- given up, not retried
+    Failed    = 4,   // the goal was Unreachable, OffMesh, no grid ever arrived, or a Partial path ended short of it -- given up, not retried
 };
 
 // Registered via World::registerComponent, so it carries no waypoint list of its own -- an array
@@ -96,6 +96,10 @@ public:
     // the same way AnimSystem never adds a CAnimator) or registerComponents() has not run.
     bool setGoal(aver::scene::World& world, aver::scene::Entity e, const aver::Vec3& goalCm);
 
+    // Drops a Requested or Pathing goal (status -> None) and its path, e.g. when the action that issued it
+    // was aborted. An Arrived or Failed agent is left as it is. False when `e` has no CSynapseAgent.
+    bool cancelGoal(aver::scene::World& world, aver::scene::Entity e);
+
     // Advances every CSynapseAgent by one tick:
     //  - Requested agents attempt exactly one findPath call, IF a valid nav grid is available this
     //    tick. No grid yet is not a failure -- the attempt is simply deferred to a later tick (this
@@ -121,6 +125,7 @@ private:
     struct AgentPath {
         std::vector<Vec3> points;
         u32 index = 0;
+        bool partial = false;   // the search budget ran out: the path ends at the closest point, not the goal
     };
 
     u32 type_ = 0;
@@ -128,6 +133,8 @@ private:
     // fix, applied here for the identical reason: an entity index is recycled, its generation is
     // not, and a stale index-only key would hand a fresh spawn a stranger's half-finished path.
     std::unordered_map<aver::scene::Entity, AgentPath> paths_;
+    // Ticks each Requested agent has waited for a nav grid; past a grace period the goal fails.
+    std::unordered_map<aver::scene::Entity, u32> noGridTicks_;
 
     void prune(aver::scene::World& world);
 };
