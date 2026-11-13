@@ -971,6 +971,21 @@ void SandboxApp::applyReparentTo(const EditCmd& c, EditId parentEditId, const Ed
 // this and snapshotting a whole subtree per drag would put real cost on the common case.
 void SandboxApp::captureSubtree(EditCmd& c, scene::Entity e) {
     scene::World& w = scene::World::instance();
+#if AVER_MODULE_SCENE
+    // A delete takes the Outliner's lock and folder with it (editor-only state keyed by the handle, which the recreate
+    // replaces): carried as the command's OutlinerMeta so undo puts them back and redo takes them away again.
+    if (c.kind == EditCmd::Kind::Destroy) {
+        const bool locked = selectionUi_.outlinerLocked_.count(static_cast<u32>(e)) != 0;
+        std::string folder = outlinerFolderOf(e);
+        if (locked || !folder.empty()) {
+            EditCmd::OutlinerMetaChange ch;
+            ch.id = c.id;
+            ch.lockBefore = locked;
+            ch.folderBefore = std::move(folder);
+            c.outlinerMeta.push_back(std::move(ch));
+        }
+    }
+#endif
     std::vector<scene::Entity> nodes;
     collectSubtree(w, e, nodes);
     // nodes[0] is `e` itself, which the command already carries.
@@ -1162,6 +1177,10 @@ void SandboxApp::destroyEntity(scene::Entity e) {
         lvl_.entityCollide_.erase(static_cast<u32>(d));
         lvl_.entityAnim_.erase(static_cast<u32>(d));
         lvl_.entitySnapZ_.erase(static_cast<u32>(d));
+#if AVER_MODULE_SCENE
+        selectionUi_.outlinerLocked_.erase(static_cast<u32>(d));   // the handle is dead: its lock and folder go too
+        selectionUi_.outlinerFolderOf_.erase(static_cast<u32>(d));
+#endif
         level_.setVehiclePreset(d, std::string());
         // Deleting the marker must clear the cache, or Add > Player Start keeps refusing to add
         // one on the grounds that the level already has the entity that was just destroyed.
@@ -1471,7 +1490,7 @@ void SandboxApp::undo() {
 #if AVER_MODULE_SCENE
         case EditCmd::Kind::Create:    destroyEntity(entityForEdit(c.id));
                                        selectionUi_.sel_ = -1; selectionUi_.selEntity_ = scene::kInvalidEntity; break;
-        case EditCmd::Kind::Destroy:   recreateFrom(c); break;
+        case EditCmd::Kind::Destroy:   recreateFrom(c); applyOutlinerMeta(c, /*undoing=*/true); break;
         case EditCmd::Kind::Reparent:  applyReparentTo(c, c.reparentOldParentId, c.before); break;
 #endif
 #if AVER_MODULE_PBR
