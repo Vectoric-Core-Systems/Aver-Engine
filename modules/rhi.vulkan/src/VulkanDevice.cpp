@@ -1856,6 +1856,12 @@ void VulkanDevice::rebuildSceneTargets() {
 // 8. Frame-pacing waits. See VulkanDevice's own field comments: ONE timeline semaphore stands in
 //    for D3D12's fence_/fenceValues_/nextFence_ wholesale.
 // ================================================================================================
+u64 VulkanDevice::completedFrameSerial() const {
+    u64 current = 0;
+    if (!timeline_ || api_.GetSemaphoreCounterValue(device_, timeline_, &current) != VK_SUCCESS) return 0;
+    return frameFences_.completedSerial(current);
+}
+
 bool VulkanDevice::waitTimeline(u64 value) {
     if (!timeline_ || value == 0) return true;
     u64 current = 0;
@@ -3626,6 +3632,7 @@ void VulkanDevice::endFrame() {
 
     const u64 signalValue = ++nextTimelineValue_;
     frameTimelineValues_[frameIndex_] = signalValue;
+    frameFences_.record(frameSerial_, signalValue);
 
     VkSemaphoreSubmitInfo waitInfo{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
     waitInfo.semaphore = imageAvailable_[frameIndex_];

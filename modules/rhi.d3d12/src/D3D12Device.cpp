@@ -1424,6 +1424,7 @@ private:
     ComPtr<ID3D12Resource> blasScratch_[kFrameCount];
     // Advanced ONLY by beginFrame after its fence wait.
     u64 frameSerial_ = 0;
+    FrameFenceLog frameFences_;   // serial -> present fence, for IResourceFactory::completedFrame
     u32 bbIndex_ = 0;      // swapchain image this frame draws first
     u32 rtvSize_ = 0;
 
@@ -2065,6 +2066,10 @@ public:
         return createBlasMultiImpl(geometries, count, true);
     }
     u64              blasMoves() const override { return blasMoves_; }
+    u64              recordingFrame() const override { return dev_->frameSerial_; }
+    u64              completedFrame() const override {
+        return dev_->frameFences_.completedSerial(dev_->fence_ ? dev_->fence_->GetCompletedValue() : 0);
+    }
     bool             setTlasStaticInstances(TlasHandle tlas, const TlasInstance* instances, u32 count) override;
     BufferHandle     tlasStaticInstanceBuffer(TlasHandle tlas) const override;
     u64              blasMemoryBytes(BlasHandle h) const override;
@@ -3330,6 +3335,7 @@ bool D3D12Device::createSwapchainResources(const SwapchainDesc& d) {
     hrOk(device_->CreateCommittedResource(&rbHeap, D3D12_HEAP_FLAG_NONE, &rbDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&captureBuf_)), "capture buffer");
 
     fenceValues_[0] = fenceValues_[1] = 0; nextFence_ = 0;
+    frameFences_.reset();
     if (!startPresentThread()) return false;
     hasSwapchain_ = true;
     AVER_INFO("[RHI.D3D12] swapchain {}x{} + depth (D32) ({} buffers, FLIP_DISCARD; {} present images, "
@@ -6672,6 +6678,7 @@ void D3D12Device::present() {
     }
     ++nextFence_;
     fenceValues_[frameIndex_] = nextFence_;
+    frameFences_.record(frameSerial_, nextFence_);
     // What this frame retired while it recorded is released once this frame is done.
     if (rhiFactory_) rhiFactory_->resolvePendingRetires(nextFence_);
 

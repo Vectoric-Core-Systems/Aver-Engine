@@ -493,9 +493,36 @@ public:
     virtual std::unique_ptr<BufferStaging> stage(const BufferDesc& d) = 0;   // null on failure
 };
 
+// Maps frame ids to the fence value that retires each, so "has frame N finished" needs no wait.
+// A backend record()s a frame when it signals its fence and asks completedSerial() with the
+// fence's current completed value. Ids start at 1; the log holds the last 8 frames.
+class FrameFenceLog {
+public:
+    void record(u64 serial, u64 fence) { slot_[serial % kSlots] = {serial, fence}; }
+    void reset() { for (Entry& e : slot_) e = {}; }
+    // Newest recorded frame whose fence is <= completedFence. Never goes backwards.
+    u64 completedSerial(u64 completedFence) const {
+        for (const Entry& e : slot_)
+            if (e.serial > best_ && e.fence <= completedFence) best_ = e.serial;
+        return best_;
+    }
+private:
+    static constexpr u64 kSlots = 8;
+    struct Entry { u64 serial = 0, fence = 0; };
+    Entry slot_[kSlots];
+    mutable u64 best_ = 0;
+};
+
 class IResourceFactory {
 public:
     virtual ~IResourceFactory() = default;
+
+    // Fence-free readback sync. recordingFrame() is the id of the frame being recorded (0 = this
+    // backend has no ids); completedFrame() the newest frame id whose GPU work has finished, read
+    // without waiting. A readback buffer copied into during frame F may be read once
+    // completedFrame() >= F.
+    virtual u64 recordingFrame() const { return 0; }
+    virtual u64 completedFrame() const { return 0; }
 
     // Off-thread buffer creation: a stager (null where the backend has none) and the render-thread
     // registration of what it made, as createBuffer's result. adoptBuffer: 0 for another device's.

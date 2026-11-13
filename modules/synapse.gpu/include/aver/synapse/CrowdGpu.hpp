@@ -62,8 +62,8 @@ public:
 
 private:
     enum class State { Idle, Dispatch, Copy, Done };
-    // The RHI's readBuffer synchronises nothing and the device is double buffered; three frames
-    // covers it with one to spare (render.pcg's VolumeBuilder uses the same figure).
+    // The RHI's readBuffer synchronises nothing. The answer is read once the device reports the
+    // dispatch's frame complete; a backend with no frame ids falls back to this many frames.
     static constexpr u32 kReadbackFrames = 3;
 
     rhi::IResourceFactory* res_ = nullptr;
@@ -78,6 +78,7 @@ private:
 
     State state_ = State::Idle;
     u32 waited_ = 0;
+    u64 jobFrame_ = 0;   // the frame the dispatch was recorded in; 0 when the backend has no frame ids
     u32 lastLatency_ = 0;
     u32 completed_ = 0;
 

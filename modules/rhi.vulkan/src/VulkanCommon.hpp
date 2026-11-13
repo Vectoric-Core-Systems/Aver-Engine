@@ -1657,6 +1657,8 @@ public:
     u32 graphicsQueueFamily() const { return graphicsQueueFamily_; }
     u32 frameIndexInFlight() const { return frameIndex_; }
     u64 frameSerial() const { return frameSerial_; }
+    // Newest frame id whose submit has retired on the timeline; no wait (IResourceFactory::completedFrame).
+    u64 completedFrameSerial() const;
     VkCommandBuffer currentCommandBuffer() const { return commandBuffers_[frameIndex_]; }
     // The timeline value work recorded RIGHT NOW will retire behind -- the Vulkan analog of
     // D3D12ResourceFactory::retireFence(). One past nextTimelineValue_: the CURRENT frame's submit
@@ -1768,6 +1770,7 @@ private:
     VkSemaphore imageAvailable_[kFrameCount] = {};
     std::vector<VkSemaphore> renderFinished_;     // one per SWAPCHAIN IMAGE (sized at swapchain creation), not per frame in flight
     u32 frameIndex_ = 0;    // 0..kFrameCount-1, the frame-IN-FLIGHT slot
+    FrameFenceLog frameFences_;   // serial -> timeline value, for completedFrameSerial
     u64 frameSerial_ = 0;   // MONOTONIC, unlike frameIndex_, which wraps at kFrameCount and can't tell "this frame" from "two frames ago in the same slot"
     bool frameOpen_ = false;   // between beginFrame and endFrame's command-buffer end; runStandaloneCompute refuses then
 
@@ -2184,6 +2187,8 @@ public:
     bool textureCopyFootprint(TextureHandle t, u32 mip, TextureCopyFootprint& out) const override;
     bool textureInfo(TextureHandle h, TextureDesc& out) const override;
     void waitIdle() override;
+    u64 recordingFrame() const override { return dev_->frameSerial(); }
+    u64 completedFrame() const override { return dev_->completedFrameSerial(); }
 
     // The raw handle for VulkanRenderContext's copy/barrier/vertex-bind paths -- mirrors D3D12's
     // bufferResource() exactly, including "null on a bad handle".

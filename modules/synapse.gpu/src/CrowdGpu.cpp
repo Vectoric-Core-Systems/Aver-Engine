@@ -231,11 +231,13 @@ void GpuCrowdBackend::prePass(rhi::IRenderContext& ctx) {
         ctx.popMarker();
         state_ = State::Copy;
         waited_ = 0;
+        jobFrame_ = res_->recordingFrame();
         return;
     }
 
     if (state_ == State::Copy) {
-        if (++waited_ < kReadbackFrames) return;
+        ++waited_;
+        if (jobFrame_ ? res_->completedFrame() < jobFrame_ : waited_ < kReadbackFrames) return;
         readback_.resize(static_cast<usize>(jobCount_) * 2);
         if (res_->readBuffer(readbackBuf_, readback_.data(), u64(jobCount_) * 8, 0)) {
             result_.resize(jobCount_);
