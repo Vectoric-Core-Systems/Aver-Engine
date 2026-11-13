@@ -293,15 +293,20 @@ AVER_NAV_API int32_t aver_nav_obstacle_get(int32_t obstacle, float* out) {
 }
 
 // ---- agents
+// A script float to a bit mask: a negative number is its two's-complement bits (-1 = all layers); NaN and out-of-range give 0.
+static u32 floatToMask(float f) {
+    if (!(f > -2147483648.0f && f < 4294967296.0f)) return 0;
+    return f < 0.0f ? u32(i32(f)) : u32(f);
+}
 AVER_NAV_API int32_t aver_nav_agent_set_params(int32_t agent, const float* p) {
     NavAgentData* a = g_srv.agent(u32(agent));
     if (!a || !p) return 0;
     a->avoidance = p[AVER_NAV_AGENT_AVOIDANCE] != 0.0f; a->paused = p[AVER_NAV_AGENT_PAUSED] != 0.0f;
     a->radius = std::max(p[AVER_NAV_AGENT_RADIUS], 0.0f); a->height = std::max(p[AVER_NAV_AGENT_HEIGHT], 0.0f);
     a->maxSpeed = std::max(p[AVER_NAV_AGENT_MAX_SPEED], 0.0f); a->neighborDistance = std::max(p[AVER_NAV_AGENT_NEIGHBOR_DIST], 0.0f);
-    a->maxNeighbors = u32(std::max(p[AVER_NAV_AGENT_MAX_NEIGHBORS], 0.0f));
+    a->maxNeighbors = floatToMask(std::max(p[AVER_NAV_AGENT_MAX_NEIGHBORS], 0.0f));
     a->timeHorizonAgents = std::max(p[AVER_NAV_AGENT_HORIZON_AGENTS], 0.0f); a->timeHorizonObstacles = std::max(p[AVER_NAV_AGENT_HORIZON_OBSTACLES], 0.0f);
-    a->avoidanceLayers = u32(p[AVER_NAV_AGENT_LAYERS]); a->avoidanceMask = u32(p[AVER_NAV_AGENT_MASK]); a->priority = std::clamp(p[AVER_NAV_AGENT_PRIORITY], 0.0f, 1.0f);
+    a->avoidanceLayers = floatToMask(p[AVER_NAV_AGENT_LAYERS]); a->avoidanceMask = floatToMask(p[AVER_NAV_AGENT_MASK]); a->priority = std::clamp(p[AVER_NAV_AGENT_PRIORITY], 0.0f, 1.0f);
     return 1;
 }
 AVER_NAV_API int32_t aver_nav_agent_get_params(int32_t agent, float* o) {
