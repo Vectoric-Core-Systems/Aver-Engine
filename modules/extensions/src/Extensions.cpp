@@ -133,11 +133,19 @@ bool escapesDirectory(std::string_view rel) {
     return false;
 }
 
+// True when a manifest string carries a control character; the managed spec is TAB/newline delimited.
+bool hasControlChar(std::string_view s) {
+    for (const char c : s) if (static_cast<unsigned char>(c) < 0x20) return true;
+    return false;
+}
+
 // Why this manifest cannot be used on this engine and platform, or empty.
 std::string refusalReason(Extension& e, std::string_view engineVersion) {
     if (e.name.empty()) return "extension.json has no name";
     if (e.name != e.dirName) return "the name \"" + e.name + "\" does not match the directory \"" + e.dirName + "\"";
     if (std::string why = manifestIncompatibility(e, engineVersion); !why.empty()) return why;
+    if (hasControlChar(e.version) || hasControlChar(e.managedEntry) || hasControlChar(e.actorBase))
+        return "version, managed.entry and managed.actorBase must not contain control characters";
     if (e.nativeName.find_first_of("/\\") != std::string::npos) return "native \"" + e.nativeName + "\" must be a library name, not a path";
     for (const std::string& m : e.managedRuntime)
         if (escapesDirectory(m)) return "managed.runtime \"" + m + "\" leaves the extension's directory";
