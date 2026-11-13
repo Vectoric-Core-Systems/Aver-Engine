@@ -75,6 +75,7 @@ bool bakeNav(const BakeParams& p, FloorProbeFn floor, HeadroomProbeFn headroom, 
     // rather than a wrong one. writeOcNav refuses a grid whose walkable cells carry no region, so
     // forgetting this would also make the result unsaveable.
     st.regions = buildRegions(out);
+    out.touch();
 
     if (stats) *stats = st;
     AVER_INFO("[Synapse] baked {}x{} cells ({} walkable, {} regions) -- rejected {} no-floor, "

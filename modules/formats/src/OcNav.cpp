@@ -5,6 +5,7 @@
 #include "aver/formats/Avr1.hpp"
 #include "aver/platform/FileSystem.hpp"
 
+#include <atomic>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -105,6 +106,11 @@ bool writeOcNav(const OcNavData& in, std::vector<u8>& out, std::string* why) {
     return writeAvr1(f, out, why);
 }
 
+void OcNavData::touch() {
+    static std::atomic<u64> next{0};
+    revision = ++next;
+}
+
 bool parseOcNav(const u8* bytes, usize size, OcNavData& out, std::string* why) {
     Avr1File f;
     if (!parseAvr1(bytes, size, f, why)) return false;
@@ -119,6 +125,7 @@ bool parseOcNav(const u8* bytes, usize size, OcNavData& out, std::string* why) {
     (void)f.find(kChunkNLNK);
 
     R h{nhdr->data.data(), nhdr->data.data() + nhdr->data.size()};
+    out.touch();
     out.cellSizeCm    = h.f32v();
     out.originXCm     = h.f32v();
     out.originYCm     = h.f32v();

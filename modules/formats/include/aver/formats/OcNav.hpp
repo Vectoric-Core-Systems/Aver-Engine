@@ -63,6 +63,12 @@ struct OcNavData {
     // which is every level until somebody bakes one.
     std::vector<OcNavCell> cells;
 
+    // A process-unique stamp, new whenever the cells are rebuilt (bake, load). A consumer that caches
+    // anything derived from the cells compares it instead of hashing them. Code that edits cells in
+    // place calls touch(). Copies carry it, and a different value always means different contents.
+    u64 revision = 0;
+    void touch();
+
     const OcNavCell* at(u32 x, u32 y) const {
         if (x >= widthCells || y >= heightCells) return nullptr;
         const usize i = static_cast<usize>(y) * widthCells + x;

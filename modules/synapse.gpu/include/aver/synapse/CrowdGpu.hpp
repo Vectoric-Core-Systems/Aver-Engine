@@ -93,6 +93,7 @@ private:
 
     const fmt::OcNavData* navStamp_ = nullptr;
     u64 navCells_ = 0;
+    u64 navRevision_ = 0;
     u32 hasWalls_ = 0;
 
     CrowdGrid grid_;

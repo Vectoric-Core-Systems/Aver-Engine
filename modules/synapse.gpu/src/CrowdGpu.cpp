@@ -172,7 +172,7 @@ bool GpuCrowdBackend::solve(const CrowdSolveInput& in, CrowdSolveOutput& out) {
     res_->writeBuffer(cellStartBuf_, grid_.cellStart.data(), u64(grid_.cellStart.size()) * 4, 0);
     res_->writeBuffer(itemsBuf_, grid_.items.data(), u64(n) * 4, 0);
 
-    if (walls && (navStamp_ != in.nav || navCells_ != wallCells)) {
+    if (walls && (navStamp_ != in.nav || navCells_ != wallCells || navRevision_ != in.nav->revision)) {
         blocked_.assign(static_cast<usize>(wallCells), 0u);
         for (u32 y = 0; y < in.nav->heightCells; ++y)
             for (u32 x = 0; x < in.nav->widthCells; ++x)
@@ -181,6 +181,7 @@ bool GpuCrowdBackend::solve(const CrowdSolveInput& in, CrowdSolveOutput& out) {
         res_->writeBuffer(wallsBuf_, blocked_.data(), wallCells * 4, 0);
         navStamp_ = in.nav;
         navCells_ = wallCells;
+        navRevision_ = in.nav->revision;
     }
     hasWalls_ = walls ? 1u : 0u;
 
