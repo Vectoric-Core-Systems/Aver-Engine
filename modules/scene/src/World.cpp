@@ -77,6 +77,7 @@ struct World::Impl {
     std::vector<Entity> destroyQueue;
     std::vector<Entity> doomed;
     std::string         nameBlob{1, '\0'};   // offset 0 is the empty name
+    usize               nameGarbage = 0;      // bytes of the blob no live name points at any more (setName compacts)
 
     // --- hierarchy
     std::vector<Entity> order;
@@ -422,11 +423,32 @@ bool World::setName(Entity e, std::string_view nm) {
     CName* n = component<CName>(e, kComponentName);
     if (!n) return false;
     Impl& d = *impl_;
+    if (n->offset != 0 && n->len == nm.size() && n->offset + n->len < d.nameBlob.size() &&
+        d.nameBlob.compare(n->offset, n->len, nm.data(), nm.size()) == 0)
+        return true;   // unchanged: a script setting the same label every frame appends nothing
+    if (n->offset != 0) d.nameGarbage += n->len + 1u;
     n->offset = static_cast<u32>(d.nameBlob.size());
     n->len    = static_cast<u32>(nm.size());
     d.nameBlob.append(nm);
     d.nameBlob.push_back('\0');   // so name() can hand out a C string without a copy
     n->objectId = fnv1a64(nm);
+    // THE BLOB ONLY GREW: every rename left its old bytes behind, so an entity renamed every frame grew it for the life of
+    // the process. Once most of it is dead, the live names are copied into a fresh one (a name() pointer is good only until
+    // the next setName, as appending could always move it).
+    if (d.nameGarbage > (usize(1) << 20) && d.nameGarbage * 2 > d.nameBlob.size()) {
+        std::string fresh(1, '\0');
+        ComponentPool* names = d.pools[kComponentName].get();
+        for (usize i = 0; i < names->size(); ++i) {
+            CName* c = static_cast<CName*>(names->dataAt(i));
+            if (!c || c->offset == 0 || c->offset + c->len >= d.nameBlob.size()) continue;
+            const u32 at = static_cast<u32>(fresh.size());
+            fresh.append(d.nameBlob, c->offset, c->len);
+            fresh.push_back('\0');
+            c->offset = at;
+        }
+        d.nameBlob = std::move(fresh);
+        d.nameGarbage = 0;
+    }
     return true;
 }
 
