@@ -133,6 +133,12 @@ void SandboxApp::maybeAutosave(f32 dt) {
     // the commonest case being that the user saved manually while the warning was on screen.
     // Counting down to a save that is no longer needed is worse than not warning at all.
     if (!levelHasUnsavedEdits()) { autosave_.autosaveAccum_ = 0.0f; autosaveCancelNotice(); return; }
+    // The sidecar already holds this edit: the level is still unsaved, but there is nothing new to put beside it.
+    if (autosave_.autosaveWritten_ && currentEditMark() == autosave_.autosavedEditMark_) {
+        autosave_.autosaveAccum_ = 0.0f;
+        autosaveCancelNotice();
+        return;
+    }
     if (projSess_.levelPath_.empty() && projSess_.project_.dir.empty()) { autosave_.autosaveAccum_ = 0.0f; autosaveCancelNotice(); return; }
 
     // PENDING: the countdown reached zero LAST frame and the toast said "Saving..." then. Only
@@ -250,6 +256,7 @@ void SandboxApp::autosaveRunSave() {
     const std::string name = std::filesystem::path(dst).filename().string();
     if (saveLevel(dst)) {
         autosave_.autosaveWritten_ = true;
+        autosave_.autosavedEditMark_ = currentEditMark();
         autosave_.autosavePostpones_ = 0;   // a successful save earns the postpones back
         AVER_INFO("[Autosave] wrote {}", dst);
         editor::notifications().finish(autosave_.autosaveNotify_, editor::NotifySeverity::Success,
@@ -290,6 +297,7 @@ void SandboxApp::clearAutosave() {
     std::error_code ec;
     std::filesystem::remove(p, ec);
     autosave_.autosaveWritten_ = false;
+    autosave_.autosavedEditMark_ = ~0ull;
     autosave_.autosaveAccum_ = 0.0f;
 #endif
 }

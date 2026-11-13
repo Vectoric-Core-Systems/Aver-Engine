@@ -835,9 +835,10 @@ bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
     if (!fmt::saveOcworld(path, w, &why)) { AVER_WARN("[Level] save failed: {}", why); return false; }
     AVER_INFO("[Level] saved {} placement(s) to {}", w.placements.size(), path);
     if (playSnapshot) return true;
-    // THE DOCUMENT AND THE FILE NOW AGREE. Without this the exit prompt claims unsaved
-    // changes forever -- see levelHasUnsavedEdits.
-    markLevelSaved();
+    // THE DOCUMENT AND THE FILE NOW AGREE -- only when the file is the level's own. The autosave sidecar,
+    // --save-level and test copies are other files: marking those saved hid unsaved edits from the exit
+    // and open prompts. Save As marks it after it adopts the new path.
+    if (path == projSess_.levelPath_) markLevelSaved();
     // A REAL SAVE RETIRES THE SIDECAR -- but only a save of THE LEVEL. saveLevel is also how the
     // autosave itself and --save-level write, and deleting the recovery file on either would
     // throw away the safety net at the moment it was being created.
@@ -897,7 +898,7 @@ bool SandboxApp::saveLevelAsOcmap(const std::string& path, bool playSnapshot) {
     std::string why;
     if (!fmt::saveOcmap(path, m, &why)) { AVER_WARN("[Level] save failed: {}", why); return false; }
     AVER_INFO("[Level] saved {} placement(s) to {} (legacy .ocmap)", m.placements.size(), path);
-    if (!playSnapshot) markLevelSaved();
+    if (!playSnapshot && path == projSess_.levelPath_) markLevelSaved();   // the level's own file only, as saveLevel
     return true;
 }
 

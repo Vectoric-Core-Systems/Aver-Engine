@@ -42,6 +42,7 @@ struct AutosaveSession {
     // A Postpone that works forever is a way to switch the safety net off without ever deciding to.
     static constexpr u8  kAutosaveMaxPostpones = 3;
     bool autosaveWritten_ = false;
+    u64 autosavedEditMark_ = ~0ull;   // the edit the sidecar holds: the countdown waits for a newer one
     bool autosaveFailedWarned_ = false;
     std::string recoveryPath_;      // a sidecar newer than its level, waiting to be offered
 #endif

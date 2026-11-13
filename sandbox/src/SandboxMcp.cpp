@@ -734,6 +734,7 @@ bool SandboxApp::mcpLevelSave(const std::string& targetIn, std::string& r, std::
         return false;
     }
     projSess_.levelPath_ = dest.string();
+    markLevelSaved();   // the document is now this file
 #if AVER_WITH_IMGUI
     cbInvalidate(dest.parent_path().string());
 #endif

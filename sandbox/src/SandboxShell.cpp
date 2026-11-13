@@ -1201,6 +1201,7 @@ void SandboxApp::drawSaveLevelAsPrompt() {
             }
 #endif
             projSess_.levelPath_ = target.string();
+            markLevelSaved();   // the document is now this file
             cbInvalidate(maps);
             setUpgradeStatus("Saved " + target.filename().string());
             panels_.wantSaveLevelAs_ = false;
