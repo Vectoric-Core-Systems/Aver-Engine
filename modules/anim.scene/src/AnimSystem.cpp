@@ -397,6 +397,13 @@ void AnimSystem::tick(scene::World& world, f32 dt) {
         const u32 keyTime = bitsOf(a->time);
         const u32 keyOnce = a->flags & scene::kAnimatorOnce;
         stepNotifies(e, *a, held ? 0.0f : dt * speed, paused || held);
+        // A sink ran: it is arbitrary code, and adding an animator anywhere moves the pool's storage (so `a` would dangle)
+        // while removing one swaps another entity into this slot. Read the animator again, or leave this entity be.
+        if (fired_ != firedBefore || steadyEpoch_ != epochBefore) {
+            if (i >= animators->size() || animators->entityAt(i) != e) continue;
+            a = static_cast<scene::CAnimator*>(animators->dataAt(i));
+            if (!a) continue;
+        }
         if (settle && fired_ == firedBefore && steadyEpoch_ == epochBefore) {
             Slot& s = slots_[i];
             s.steady   = true;
