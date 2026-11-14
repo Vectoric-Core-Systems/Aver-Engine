@@ -2114,6 +2114,36 @@ CollapseResult GraphEditor::collapseSelectionToFunction(const std::string& name)
     return r;
 }
 
+CollapseResult GraphEditor::collapseSelectionToMacro(const std::string& name) {
+    CollapseOptions options;
+    const GraphNodeDomain domain = openGraphDomain();
+    options.isEventType = [domain](const std::string& type) {
+        const GraphNodeDesc* d = findGraphNodeDescIn(type, domain);
+        return d && d->category == "Event";
+    };
+    fmt::OcGraphData next = graph_;
+    CollapseResult r = collapseToMacro(next, selectedNodes_, name, options);
+    if (!r.ok) {
+        showRejectionBanner("Cannot collapse: " + r.reason);
+        return r;
+    }
+    pushUndo();
+    graph_ = std::move(next);
+    displayPos_[r.entryNodeId] = Vec2{static_cast<f32>(r.entryX), static_cast<f32>(r.entryY)};
+    displayPos_[r.returnNodeId] = Vec2{static_cast<f32>(r.returnX), static_cast<f32>(r.returnY)};
+    displayPos_[r.callNodeId] = Vec2{static_cast<f32>(r.callX), static_cast<f32>(r.callY)};
+    // The tunnels' and instance's pins restate the MACRO record: synthesised and stripped on save, as every macro edit leaves them.
+    for (const auto& n : graph_.nodes)
+        if (n.id == r.entryNodeId || n.id == r.returnNodeId || n.id == r.callNodeId)
+            for (const auto& p : n.pins) synthesizedPins_.insert(pinKey(n.id, p.name, p.isOutput));
+    resyncMacroNodePins(r.functionName);
+    selectedNodes_ = {r.callNodeId};
+    selectedLink_ = -1;
+    selectedComment_.clear();
+    dirty_ = true;
+    return r;
+}
+
 // ---- the bottom panel: Problems and References -----------------------------------------------------------
 
 void GraphEditor::drawBottomPanel(float width, float height, float dpi) {

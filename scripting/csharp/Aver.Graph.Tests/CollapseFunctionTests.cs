@@ -28,7 +28,47 @@ static class CollapseFunctionTests
         failures += FilesArePresent();
         failures += TheOutputDeclaresTheFunctionAndCallsIt();
         failures += BothGraphsComputeTheSameVariables();
+        failures += TheMacroCollapseComputesTheSameVariables();
         return failures;
+    }
+
+    // Collapse to Macro: GraphCollapseTest writes collapse_macro_test.output.ocgraph from collapse_macro_test.ocgraph.
+    private static int TheMacroCollapseComputesTheSameVariables()
+    {
+        Console.WriteLine("Test: Collapse to Macro -- the original and the collapsed graph leave the same variables, tick by tick");
+        const string original = "collapse_macro_test.ocgraph", collapsed = "collapse_macro_test.output.ocgraph";
+        if (!File.Exists(original) || !File.Exists(collapsed))
+            return Expect("both files present (run GraphCollapseTest.exe first)", false);
+        if (!OcGraphParser.Parse(File.ReadAllText(collapsed), out var g, out var perr))
+            return Expect("the collapsed graph parses", false, perr ?? "");
+        int f = Expect("it declares the macro and no function", g.Macros.Count == 1 && g.Functions.Count == 0);
+        f += Expect("the macro has two exec exits", g.Macros.Count == 1 && g.Macros[0].Outputs.Count(p => p.Type == PinType.Exec) == 2);
+
+        string[] vars = { "total", "misses", "last" };
+        for (int ticks = 1; ticks <= 5; ticks++)
+        {
+            var a = RunVars(original, ticks, vars, out var e1);
+            var b = RunVars(collapsed, ticks, vars, out var e2);
+            if (a == null || b == null) return f + Expect($"both run for {ticks} ticks", false, e1 ?? e2 ?? "");
+            f += Expect($"after {ticks} tick(s): {string.Join(", ", a)} both times", a.SequenceEqual(b), string.Join(", ", b));
+        }
+        // By hand: total climbs by 2 while it is under 5 (0, 2, 4 -> 6), then each tick counts a miss.
+        var five = RunVars(original, 5, vars, out _);
+        f += Expect("the original is what the hand calculation says (total 6, misses 2)", five != null && five[0] == 6f && five[1] == 2f,
+                    five == null ? "" : string.Join(", ", five));
+        return f;
+    }
+
+    private static float[]? RunVars(string file, int ticks, string[] vars, out string? err)
+    {
+        err = null;
+        if (!OcGraphParser.Parse(File.ReadAllText(file), out var g, out err)) return null;
+        var fn = new GraphCompiler(g).CompileEntryPoint("OnTick", out err);
+        if (fn == null) return null;
+        var store = GraphVarStore.CreateFor(g);
+        try { for (int i = 0; i < ticks; i++) fn.DynamicInvoke(store); }
+        catch (System.Reflection.TargetInvocationException e) { err = e.InnerException?.Message ?? e.Message; return null; }
+        return vars.Select(store.GetFloat).ToArray();
     }
 
     private static int Expect(string what, bool ok, string detail = "")

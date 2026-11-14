@@ -27,4 +27,6 @@ aver_graphtool_test(GraphClipboardTest ${AVER_GRAPHTOOLS_SRC}/GraphEditorGeometr
 aver_graphtool_test(GraphCollapseTest ${AVER_GRAPHTOOLS_SRC}/GraphEditor.cpp ${AVER_GRAPHTOOLS_SRC}/GraphEditorComponents.cpp ${AVER_GRAPHTOOLS_SRC}/GraphEditorCanvas.cpp ${AVER_GRAPHTOOLS_SRC}/GraphEditorGeometry.cpp ${AVER_GRAPHTOOLS_SRC}/GraphNodeDefs.cpp)
 target_compile_definitions(GraphCollapseTest PRIVATE
   AVER_COLLAPSE_FIXTURE="${CMAKE_SOURCE_DIR}/scripting/csharp/Aver.Graph.Tests/collapse_test.ocgraph"
-  AVER_COLLAPSE_FIXTURE_OUTPUT="${CMAKE_SOURCE_DIR}/scripting/csharp/Aver.Graph.Tests/collapse_test.output.ocgraph")
+  AVER_COLLAPSE_FIXTURE_OUTPUT="${CMAKE_SOURCE_DIR}/scripting/csharp/Aver.Graph.Tests/collapse_test.output.ocgraph"
+  AVER_COLLAPSE_MACRO_FIXTURE="${CMAKE_SOURCE_DIR}/scripting/csharp/Aver.Graph.Tests/collapse_macro_test.ocgraph"
+  AVER_COLLAPSE_MACRO_FIXTURE_OUTPUT="${CMAKE_SOURCE_DIR}/scripting/csharp/Aver.Graph.Tests/collapse_macro_test.output.ocgraph")

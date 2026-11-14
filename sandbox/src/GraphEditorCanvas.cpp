@@ -1021,15 +1021,16 @@ void GraphEditor::drawEventGraph(float dpi) {
         findBarMin_ = findBarMax_ = Vec2{};
     }
 
-    // ---- Collapse to Function's name prompt, queued by the node menu.
+    // ---- Collapse to Function / Macro's name prompt, queued by the node menu.
     if (collapsePopupQueued_) { ImGui::OpenPopup("##graphCollapse"); collapsePopupQueued_ = false; }
     if (ImGui::BeginPopup("##graphCollapse")) {
-        ImGui::TextUnformatted("Collapse to Function");
+        ImGui::TextUnformatted(collapseIntoMacro_ ? "Collapse to Macro" : "Collapse to Function");
         ImGui::SetNextItemWidth(220.0f * dpi);
         if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
         const bool go = ImGui::InputText("Name", collapseNameBuf_, sizeof collapseNameBuf_, ImGuiInputTextFlags_EnterReturnsTrue);
         if (ImGui::Button("Collapse") || go) {
-            collapseSelectionToFunction(collapseNameBuf_);   // a refusal arrives as the banner
+            if (collapseIntoMacro_) collapseSelectionToMacro(collapseNameBuf_);   // a refusal arrives as the banner
+            else collapseSelectionToFunction(collapseNameBuf_);
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
@@ -1101,7 +1102,13 @@ void GraphEditor::drawEventGraph(float dpi) {
             }
             if (ImGui::MenuItem("Collapse to Function...")) {
                 collapsePopupQueued_ = true;
+                collapseIntoMacro_ = false;
                 std::snprintf(collapseNameBuf_, sizeof collapseNameBuf_, "%s", "NewFunction");
+            }
+            if (ImGui::MenuItem("Collapse to Macro...")) {
+                collapsePopupQueued_ = true;
+                collapseIntoMacro_ = true;
+                std::snprintf(collapseNameBuf_, sizeof collapseNameBuf_, "%s", "NewMacro");
             }
             ImGui::Separator();
             if (ImGui::MenuItem("Delete", "Del")) deleteSelection();

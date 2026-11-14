@@ -246,6 +246,8 @@ public:
     // (GraphCollapse.hpp) change nothing and arrive as the rejection banner. Returns the result so a
     // test can read the reason.
     CollapseResult collapseSelectionToFunction(const std::string& name);
+    // The same into a new macro (GraphCollapse.hpp's collapseToMacro): result.functionName is the macro's name.
+    CollapseResult collapseSelectionToMacro(const std::string& name);
 
     // The node id a validator message names, or empty. Public/static because it's a heuristic over
     // prose worth testing alone: reads the first single-quoted token and returns it only if it names
@@ -788,6 +790,7 @@ private:
     // Collapse to Function's name prompt: queued by the node menu, drawn with the other popups.
     char collapseNameBuf_[64] = "NewFunction";
     bool collapsePopupQueued_ = false;
+    bool collapseIntoMacro_ = false;   // which of the two the prompt is for
 
     // ---- Find state ---------------------------------------------------------------------------------------
     FindCursor find_;

@@ -20,6 +20,10 @@
 // not when the inner node that reads it runs. The two agree unless something earlier in the selection
 // changes what that outside node reads (a SetVar before a GetVar feeding it), which is the same rule
 // every function call in this language has.
+//
+// Collapse to Macro (collapseToMacro, below) is the same move into a MACRO. A macro is inlined where it is
+// used, so it has no such difference and fewer refusals: any number of exec entries and exits, a loop taken
+// without its whole body, and a selection with no exec wired in at all are all fine.
 #include "GraphEditorGeometry.hpp"
 #include "GraphMacros.hpp"
 #include "aver/core/Types.hpp"
@@ -92,12 +96,21 @@ inline bool builtinEventType(const std::string& type) {
            t == "oninputaction";
 }
 
-inline bool isDataType(const std::string& t) { return t == "float" || t == "int" || t == "bool"; }
+// Any value a function or macro pin can carry: everything but exec (scalars, float3, string, entity, arrays, structs).
+inline bool isDataType(const std::string& t) { return !t.empty() && t != "exec"; }
 
 // A name fit for a FUNCIN / FUNCOUT record (one bare token).
 inline std::string sanitize(std::string s) {
     for (char& c : s) if (std::isspace(static_cast<unsigned char>(c)) || c == '.') c = '_';
     return s.empty() ? std::string("value") : s;
+}
+
+// The new pin's name for a crossing wire's end: `<node>_<pin>`, or the pin's own name when the node is a function or macro
+// call (those pins were named by a person already). uniqueName then settles any clash.
+inline std::string pinLabel(const fmt::OcGraphData& g, const std::string& nodeId, const std::string& pin) {
+    for (const auto& n : g.nodes)
+        if (n.id == nodeId && (n.type == "CallFunc" || n.type == "MacroInstance")) return sanitize(pin);
+    return sanitize(nodeId + "_" + pin);
 }
 
 inline std::string uniqueName(const std::string& want, std::set<std::string>& used) {
@@ -153,6 +166,8 @@ inline CollapseResult collapseToFunction(fmt::OcGraphData& graph, const std::vec
             return refuse("node '" + n->id + "' (" + n->type + ") reads the graph's parameters, which a function does not receive");
         if (std::any_of(g.outputs.begin(), g.outputs.end(), [&](const auto& o) { return o.first == n->id; }))
             return refuse("node '" + n->id + "' is a graph OUT; the graph hands that value back from the event graph");
+        if (isMacroNodeType(n->type) && n->type != "MacroInstance")
+            return refuse("node '" + n->id + "' (" + n->type + ") is its macro's own entry or exit");
     }
 
     // ---- a loop keeps its whole body --------------------------------------------------------------------
@@ -246,7 +261,7 @@ inline CollapseResult collapseToFunction(fmt::OcGraphData& graph, const std::vec
         if (inputName.count(key)) continue;
         const std::string type = lower(srcPinOf(l)->type);
         if (!isDataType(type)) return refuse("the wire from " + key + " carries a " + type + ", which a function pin cannot");
-        const std::string pn = uniqueName(sanitize(l.sourceNode + "_" + l.sourcePin), usedNames);
+        const std::string pn = uniqueName(pinLabel(g, l.sourceNode, l.sourcePin), usedNames);
         inputName[key] = pn;
         fn.inputs.push_back({pn, type});
     }
@@ -256,7 +271,7 @@ inline CollapseResult collapseToFunction(fmt::OcGraphData& graph, const std::vec
         if (outputName.count(key)) continue;
         const std::string type = lower(srcPinOf(l)->type);
         if (!isDataType(type)) return refuse("the wire from " + key + " carries a " + type + ", which a function pin cannot");
-        const std::string pn = uniqueName(sanitize(l.sourceNode + "_" + l.sourcePin), usedNames);
+        const std::string pn = uniqueName(pinLabel(g, l.sourceNode, l.sourcePin), usedNames);
         outputName[key] = pn;
         fn.outputs.push_back({pn, type});
     }
@@ -401,6 +416,177 @@ inline CollapseResult collapseToFunction(fmt::OcGraphData& graph, const std::vec
     }
     g.links = std::move(links);
     g.functions.push_back(std::move(fn));
+
+    graph = std::move(g);
+    r.ok = true;
+    return r;
+}
+
+// Collapse to Macro. The result reuses CollapseResult: functionName is the macro's name, callNodeId the
+// MacroInstance, entryNodeId / returnNodeId its MacroInput / MacroOutput (both always made).
+inline CollapseResult collapseToMacro(fmt::OcGraphData& graph, const std::vector<std::string>& selectedIds, std::string name,
+                                      const CollapseOptions& options = {}) {
+    using namespace collapseDetail;
+    CollapseResult r;
+    const auto refuse = [&](std::string why) { r.ok = false; r.reason = std::move(why); return r; };
+
+    std::unordered_set<std::string> inS;
+    for (const auto& id : selectedIds)
+        for (const auto& n : graph.nodes) if (n.id == id) { inS.insert(id); break; }
+    if (inS.empty()) return refuse("select the nodes to collapse first");
+    if (name.empty()) name = "CollapsedMacro";
+    if (std::any_of(name.begin(), name.end(), [](char c) { return std::isspace(static_cast<unsigned char>(c)) != 0; }))
+        return refuse("a macro name cannot contain whitespace");
+
+    fmt::OcGraphData g = graph;
+    std::vector<const fmt::OcGraphNode*> sel;
+    for (const auto& n : g.nodes) if (inS.count(n.id)) sel.push_back(&n);
+
+    const std::string sub = subgraphOf(*sel.front());
+    for (const auto* n : sel)
+        if (subgraphOf(*n) != sub) return refuse("the selection spans more than one subgraph");
+
+    for (const auto* n : sel) {
+        const std::string t = lower(n->type);
+        if (std::any_of(g.entryPoints.begin(), g.entryPoints.end(), [&](const auto& e) { return e.first == n->id; }))
+            return refuse("node '" + n->id + "' is an entry point (ENTRY); an event cannot move into a macro");
+        if (options.isEventType ? options.isEventType(n->type) : builtinEventType(n->type))
+            return refuse("node '" + n->id + "' (" + n->type + ") is an event; an event cannot move into a macro");
+        if (t == "funcentry" || t == "funcreturn")
+            return refuse("node '" + n->id + "' (" + n->type + ") is its function's own entry or return");
+        if (isMacroNodeType(n->type) && n->type != "MacroInstance")
+            return refuse("node '" + n->id + "' (" + n->type + ") is its macro's own entry or exit");
+        if (t == "param" || t == "getparam" || t == "self")
+            return refuse("node '" + n->id + "' (" + n->type + ") reads the graph's parameters; leave it outside and wire its value in");
+        if (std::any_of(g.outputs.begin(), g.outputs.end(), [&](const auto& o) { return o.first == n->id; }))
+            return refuse("node '" + n->id + "' is a graph OUT; the graph hands that value back from where it is");
+    }
+
+    const auto srcPinOf = [&](const fmt::OcGraphLink& l) -> const fmt::OcGraphPin* {
+        for (const auto& n : g.nodes) if (n.id == l.sourceNode) return findPin(n, l.sourcePin, true);
+        return nullptr;
+    };
+
+    // ---- the macro's pins: one per distinct thing crossing the edge ----------------------------------------
+    // Data in: per outside source. Exec in: per inside pin entered. Exec and data out: per inside source.
+    fmt::OcGraphMacro m;
+    std::set<std::string> usedNames;
+    std::unordered_map<std::string, std::string> dataInName, execInName, outName;
+    std::vector<usize> crossing;
+    std::vector<std::string> execInKeys, execOutKeys;
+    for (usize i = 0; i < g.links.size(); ++i) {
+        const auto& l = g.links[i];
+        const bool s = inS.count(l.sourceNode) != 0, d = inS.count(l.destNode) != 0;
+        if (s == d) continue;
+        const auto* sp = srcPinOf(l);
+        if (!sp) return refuse("link " + l.sourceNode + "." + l.sourcePin + " names a pin its node has no record of");
+        crossing.push_back(i);
+        const bool exec = lower(sp->type) == "exec";
+        if (!s && exec) {
+            const std::string key = l.destNode + "." + l.destPin;
+            if (!execInName.count(key)) { execInName[key] = ""; execInKeys.push_back(key); }
+        } else if (s && exec) {
+            const std::string key = l.sourceNode + "." + l.sourcePin;
+            if (!outName.count(key)) { outName[key] = ""; execOutKeys.push_back(key); }
+        }
+    }
+    for (const std::string& key : execInKeys) {
+        execInName[key] = uniqueName(execInKeys.size() == 1 ? std::string("exec") : pinLabel(g, key.substr(0, key.find('.')), key.substr(key.find('.') + 1)), usedNames);
+        m.inputs.push_back({execInName[key], "exec"});
+    }
+    for (const usize i : crossing) {
+        const auto& l = g.links[i];
+        const std::string type = srcPinOf(l)->type;
+        if (lower(type) == "exec" || inS.count(l.sourceNode) || dataInName.count(l.sourceNode + "." + l.sourcePin)) continue;
+        const std::string pn = uniqueName(pinLabel(g, l.sourceNode, l.sourcePin), usedNames);
+        dataInName[l.sourceNode + "." + l.sourcePin] = pn;
+        m.inputs.push_back({pn, type});
+    }
+    for (const std::string& key : execOutKeys) {
+        outName[key] = uniqueName(execOutKeys.size() == 1 ? std::string("then") : pinLabel(g, key.substr(0, key.find('.')), key.substr(key.find('.') + 1)), usedNames);
+        m.outputs.push_back({outName[key], "exec"});
+    }
+    for (const usize i : crossing) {
+        const auto& l = g.links[i];
+        const std::string key = l.sourceNode + "." + l.sourcePin;
+        const std::string type = srcPinOf(l)->type;
+        if (lower(type) == "exec" || !inS.count(l.sourceNode) || !outName[key].empty()) continue;
+        outName[key] = uniqueName(pinLabel(g, l.sourceNode, l.sourcePin), usedNames);
+        m.outputs.push_back({outName[key], type});
+    }
+
+    // ---- a name -------------------------------------------------------------------------------------------
+    {
+        const auto taken = [&](const std::string& n) {
+            return std::any_of(g.macros.begin(), g.macros.end(), [&](const fmt::OcGraphMacro& x) { return lower(x.name) == lower(n); });
+        };
+        std::string unique = name;
+        for (int i = 2; taken(unique); ++i) unique = name + std::to_string(i);
+        m.name = unique;
+    }
+    r.functionName = m.name;
+    const std::string bodyKey = macroSubgraphKey(m.name);
+
+    // ---- build --------------------------------------------------------------------------------------------
+    f64 minX = sel.front()->x, maxX = sel.front()->x, minY = sel.front()->y, sumX = 0.0, sumY = 0.0;
+    for (const auto* n : sel) {
+        minX = std::min(minX, n->x);
+        maxX = std::max(maxX, n->x);
+        minY = std::min(minY, n->y);
+        sumX += n->x;
+        sumY += n->y;
+        r.movedIds.push_back(n->id);
+    }
+    for (auto& n : g.nodes) if (inS.count(n.id)) assignSubgraph(n, bodyKey);
+
+    fmt::OcGraphNode in, out, inst;
+    in.id = uniqueNodeId(g, "MacroInput");
+    in.type = "MacroInput";
+    in.x = minX - 300.0; in.y = minY;
+    assignSubgraph(in, bodyKey);
+    in.pins = macroNodePins(in, m);
+    g.nodes.push_back(in);
+    out.id = uniqueNodeId(g, "MacroOutput");
+    out.type = "MacroOutput";
+    out.x = maxX + 360.0; out.y = minY;
+    assignSubgraph(out, bodyKey);
+    out.pins = macroNodePins(out, m);
+    g.nodes.push_back(out);
+    inst.id = uniqueNodeId(g, "MacroInstance");
+    inst.type = "MacroInstance";
+    inst.x = sumX / static_cast<f64>(sel.size()); inst.y = sumY / static_cast<f64>(sel.size());
+    setNodeAttribute(inst, "call", m.name);
+    assignSubgraph(inst, sub);
+    inst.pins = macroNodePins(inst, m);
+    g.nodes.push_back(inst);
+
+    r.entryNodeId = in.id;   r.entryX = in.x;    r.entryY = in.y;
+    r.returnNodeId = out.id; r.returnX = out.x;  r.returnY = out.y;
+    r.callNodeId = inst.id;  r.callX = inst.x;   r.callY = inst.y;
+
+    // ---- re-point the wires -------------------------------------------------------------------------------
+    std::vector<fmt::OcGraphLink> links;
+    std::set<std::string> fed;   // tunnel pins already wired once ("in:" / "out:" + pin)
+    std::unordered_set<usize> isCrossing(crossing.begin(), crossing.end());
+    for (usize i = 0; i < g.links.size(); ++i)
+        if (!isCrossing.count(i)) links.push_back(g.links[i]);
+    for (const usize i : crossing) {
+        const auto& l = g.links[i];
+        const bool exec = lower(srcPinOf(l)->type) == "exec";
+        if (!inS.count(l.sourceNode)) {
+            // Into the selection: the outside end goes to the instance, MacroInput hands it on inside.
+            const std::string& pn = exec ? execInName[l.destNode + "." + l.destPin] : dataInName[l.sourceNode + "." + l.sourcePin];
+            if (exec || fed.insert("inst:" + pn).second) links.push_back({l.sourceNode, l.sourcePin, inst.id, pn});
+            if (!exec || fed.insert("in:" + pn).second) links.push_back({in.id, pn, l.destNode, l.destPin});
+        } else {
+            // Out of it: the inside source goes to MacroOutput once, the instance feeds every outside end.
+            const std::string& pn = outName[l.sourceNode + "." + l.sourcePin];
+            if (fed.insert("out:" + pn).second) links.push_back({l.sourceNode, l.sourcePin, out.id, pn});
+            links.push_back({inst.id, pn, l.destNode, l.destPin});
+        }
+    }
+    g.links = std::move(links);
+    g.macros.push_back(std::move(m));
 
     graph = std::move(g);
     r.ok = true;

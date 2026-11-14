@@ -1,0 +1,39 @@
+OCGRAPH 1
+DOMAIN gameplay
+NAME CollapseMacroTest
+DESCRIPTION Collapse to Macro fixture: GraphCollapseTest collapses gt, lt, br, c2, add and st into a macro (a value in, two exec exits, a value out) and writes collapse_macro_test.output.ocgraph; CollapseFunctionTests runs both graphs and compares their variables.
+
+VAR total float 0
+VAR misses float 0
+VAR last float 0
+
+NODE tick OnTick 0 0
+NODE gt GetVar 0 200 var=total
+NODE c5 ConstFloat 0 300 value=5
+NODE lt Less 200 250
+NODE br Branch 300 0
+NODE c2 ConstFloat 300 300 value=2
+NODE add Add 450 250
+NODE st SetVar 500 0 var=total
+NODE sl SetVar 800 0 var=last
+NODE gm GetVar 600 300 var=misses
+NODE c1 ConstFloat 600 400 value=1
+NODE addm Add 750 350
+NODE sm SetVar 800 100 var=misses
+
+LINK tick.exec br.exec
+LINK gt.value lt.a
+LINK c5.value lt.b
+LINK lt.result br.cond
+LINK br.true st.exec
+LINK gt.value add.a
+LINK c2.value add.b
+LINK add.result st.value
+LINK st.then sl.exec
+LINK add.result sl.value
+LINK br.false sm.exec
+LINK gm.value addm.a
+LINK c1.value addm.b
+LINK addm.result sm.value
+
+ENTRY tick OnTick

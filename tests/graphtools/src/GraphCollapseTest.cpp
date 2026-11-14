@@ -11,7 +11,7 @@
 //   * node ids stay unique, and the saved file reparses.
 // It also WRITES collapse_test.output.ocgraph next to the C# fixtures, so Aver.Graph.Tests'
 // CollapseFunctionTests compiles and RUNS what this editor actually produced and compares its variables
-// with the original graph's.
+// with the original graph's. Collapse to Macro does the same with collapse_macro_test(.output).ocgraph.
 #include "GraphEditor.hpp"
 
 #include "aver/core/Log.hpp"
@@ -293,6 +293,117 @@ static void testLoopBodyAlone() {
           "a loop taken with part of its body is refused: '" + s.reason + "'");
 }
 
+// ================================================================================ Collapse to Function: any data type =
+static void testFunctionCarriesAnyType() {
+    AVER_INFO("=== a float3 wire crossing the edge becomes a float3 function pin ===");
+    const std::string path = scratch("vector.ocgraph",
+        "OCGRAPH 1\nDOMAIN gameplay\nNAME V\nNODE mv MakeVector 0 0\nNODE len VectorLength 200 0\nNODE neg Negate 400 0\n"
+        "LINK mv.v len.v\nLINK len.result neg.a\n");
+    GraphEditor ed(path);
+    ed.selectNodes({"len"});
+    const CollapseResult r = ed.collapseSelectionToFunction("Length");
+    check(r.ok && r.pure, "accepted as a pure function (reason '" + r.reason + "')");
+    if (!r.ok) return;
+    const auto& fn = ed.graph().functions[0];
+    check(fn.inputs.size() == 1 && fn.inputs[0].type == "float3", "its input is a float3");
+    check(hasLink(ed.graph(), "mv", "v", r.callNodeId, fn.inputs[0].name), "the vector feeds the call");
+}
+
+// ================================================================================ Collapse to Macro =
+static const fmt::OcGraphMacro* macroNamed(const fmt::OcGraphData& g, const std::string& name) {
+    for (const auto& m : g.macros) if (m.name == name) return &m;
+    return nullptr;
+}
+
+static void testCollapseToMacro() {
+    AVER_INFO("=== Collapse to Macro: a value in, two exec exits and a value out ===");
+    const std::string original = readFile(AVER_COLLAPSE_MACRO_FIXTURE);
+    check(!original.empty(), "the macro fixture was read");
+    const std::string path = scratch("collapse_macro_test.ocgraph", original);
+    GraphEditor ed(path);
+    const std::string before = ed.serializeForSave();
+    const usize nodes0 = ed.graph().nodes.size();
+
+    ed.selectNodes({"gt", "lt", "br", "c2", "add", "st"});
+    const CollapseResult r = ed.collapseSelectionToMacro("Clamp");
+    check(r.ok, "accepted (reason '" + r.reason + "')");
+    if (!r.ok) return;
+    const fmt::OcGraphData& g = ed.graph();
+    const fmt::OcGraphMacro* m = macroNamed(g, "Clamp");
+    check(m != nullptr && g.functions.empty(), "one MACRO, no function");
+    if (!m) return;
+    check(m->inputs.size() == 2 && m->inputs[0].name == "exec" && m->inputs[0].type == "exec" &&
+          m->inputs[1].name == "c5_value" && m->inputs[1].type == "float",
+          "inputs: exec, then the value wired in (c5_value)");
+    check(m->outputs.size() == 3 && m->outputs[0].name == "st_then" && m->outputs[1].name == "br_false" &&
+          m->outputs[0].type == "exec" && m->outputs[2].name == "add_result" && m->outputs[2].type == "float",
+          "outputs: both exec exits (st_then, br_false), then add_result");
+    check(g.nodes.size() == nodes0 + 3, "three nodes added: MacroInput, MacroOutput, the instance");
+    check(idsUnique(g), "every id is unique");
+    for (const char* id : {"gt", "lt", "br", "c2", "add", "st"}) {
+        const fmt::OcGraphNode* n = nodeById(g, id);
+        check(n && getNodeAttribute(*n, "macro").value == "Clamp", std::string(id) + " lives in the macro body");
+    }
+    const std::string inst = r.callNodeId, in = r.entryNodeId, out = r.returnNodeId;
+    const fmt::OcGraphNode* instNode = nodeById(g, inst);
+    check(instNode && instNode->type == "MacroInstance" && getNodeAttribute(*instNode, "call").value == "Clamp" &&
+          !getNodeAttribute(*instNode, "macro").found, "the instance uses it, from the event graph");
+    check(hasLink(g, "tick", "exec", inst, "exec") && hasLink(g, "c5", "value", inst, "c5_value"), "outside -> the instance's inputs");
+    check(hasLink(g, inst, "st_then", "sl", "exec") && hasLink(g, inst, "br_false", "sm", "exec") &&
+          hasLink(g, inst, "add_result", "sl", "value"), "the instance's outputs -> where each wire went");
+    check(hasLink(g, in, "exec", "br", "exec") && hasLink(g, in, "c5_value", "lt", "b"), "inside: MacroInput hands each input on");
+    check(hasLink(g, "st", "then", out, "st_then") && hasLink(g, "br", "false", out, "br_false") &&
+          hasLink(g, "add", "result", out, "add_result"), "inside: each exit and value reaches MacroOutput once");
+
+    ed.undoForTest();
+    check(ed.serializeForSave() == before, "one Ctrl+Z restores the original exactly");
+    ed.redoForTest();
+
+    std::string why;
+    check(ed.save(&why), "save succeeds (" + why + ")");
+    const std::string saved = readFile(path);
+    fmt::OcGraphData reread;
+    std::string err;
+    check(fmt::parseOcgraph(saved, reread, &err), "the saved file reparses (" + err + ")");
+    check(saved.find("MACRO Clamp") != std::string::npos && saved.find("MACROIN Clamp c5_value float") != std::string::npos &&
+          saved.find("MACROOUT Clamp br_false exec") != std::string::npos, "MACRO, MACROIN and MACROOUT are written");
+    check(saved.find("PIN " + inst + " ") == std::string::npos, "the instance's synthesised pins are not written");
+    writeFile(AVER_COLLAPSE_MACRO_FIXTURE_OUTPUT, saved);
+
+    // Collapsing the instance itself nests the macro; a call's pins keep their own names (st_then, not macroinstance1_st_then).
+    GraphEditor nest(path);
+    nest.selectNodes({inst});
+    const CollapseResult nr = nest.collapseSelectionToMacro("Wrap");
+    const fmt::OcGraphMacro* wrap = nr.ok ? macroNamed(nest.graph(), "Wrap") : nullptr;
+    check(wrap && wrap->outputs.size() == 3 && wrap->outputs[0].name == "st_then" && wrap->outputs[1].name == "br_false" &&
+              wrap->outputs[2].name == "add_result",
+          "a macro around a macro call keeps the call's pin names (reason '" + nr.reason + "')");
+
+    // A loop and part of its body is fine for a macro (it is inlined back exactly), and so is a selection nothing runs.
+    GraphEditor loop(scratch("macroloop.ocgraph",
+        "OCGRAPH 1\nDOMAIN gameplay\nNAME L\nNODE tick OnTick 0 0\nNODE w While 100 0\nNODE b1 PrintString 200 0 text=a\n"
+        "NODE b2 PrintString 300 0 text=b\nLINK tick.exec w.exec\nLINK w.loop b1.exec\nLINK b1.then b2.exec\nENTRY tick OnTick\n"));
+    loop.selectNodes({"w", "b1"});
+    const CollapseResult lr = loop.collapseSelectionToMacro("Half");
+    check(lr.ok, "a loop with part of its body collapses to a macro (reason '" + lr.reason + "')");
+    GraphEditor idle(scratch("macroidle.ocgraph", "OCGRAPH 1\nDOMAIN gameplay\nNAME I\nNODE p PrintString 0 0 text=a\n"));
+    idle.selectNodes({"p"});
+    check(idle.collapseSelectionToMacro("Idle").ok, "an exec node nothing runs collapses to a macro");
+
+    // Refusals.
+    GraphEditor ev(scratch("macroev.ocgraph",
+        "OCGRAPH 1\nDOMAIN gameplay\nNAME E\nNODE tick OnTick 0 0\nNODE p PrintString 100 0 text=a\nLINK tick.exec p.exec\nENTRY tick OnTick\n"));
+    ev.selectNodes({"tick", "p"});
+    const std::string evBefore = ev.serializeForSave();
+    const CollapseResult er = ev.collapseSelectionToMacro("M");
+    check(!er.ok && er.reason.find("entry point") != std::string::npos && ev.serializeForSave() == evBefore,
+          "an ENTRY node is refused and nothing changes: '" + er.reason + "'");
+    GraphEditor pm(scratch("macroparam.ocgraph", "OCGRAPH 1\nDOMAIN gameplay\nNAME P\nPARAM entity int\nNODE pe Param 0 0 param=entity\n"));
+    pm.selectNodes({"pe"});
+    const CollapseResult pr = pm.collapseSelectionToMacro("M");
+    check(!pr.ok && pr.reason.find("parameters") != std::string::npos, "a Param node is refused: '" + pr.reason + "'");
+}
+
 int main() {
     AVER_INFO("======== GraphCollapseTest ========");
     std::error_code ec;
@@ -303,6 +414,8 @@ int main() {
     testPureSelection();
     testRefusals();
     testLoopBodyAlone();
+    testFunctionCarriesAnyType();
+    testCollapseToMacro();
 
     std::filesystem::remove_all(scratchDir(), ec);
     if (g_failures == 0) AVER_INFO("======== GraphCollapseTest: all passed ========");
