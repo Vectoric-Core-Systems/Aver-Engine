@@ -394,9 +394,9 @@ void SandboxApp::applyProjectRenderSettings() {
     // no RENDER.AVERSR key must reset this back to -1, unconditionally, or a project opened right
     // after one that pinned a level would silently inherit that teammate's pin.
     rset_.averSrProjectDefault_ = projSess_.project_.averSr;
-    // Mirrors too: an unstated RENDER.TAA is the engine default (on), not "keep the last project's".
-    if (!rset_.taaFromCli_) rset_.temporalAaEnabled_ = projSess_.project_.taa != 0;
-    if (!rset_.neuraaFromCli_) rset_.neuraaEnabled_ = projSess_.project_.neuraa > 0;
+    // Mirrors too: unstated keys are the engine defaults (TAA off, NeuRAA on), not "keep the last project's".
+    if (!rset_.taaFromCli_) rset_.temporalAaEnabled_ = projSess_.project_.taa > 0;
+    if (!rset_.neuraaFromCli_) rset_.neuraaEnabled_ = projSess_.project_.neuraa != 0;
 
 #if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
     if (rset_.particleGpuArg_ < 0) {   // an unstated RENDER.PARTICLEGPU is auto, not 'keep the last project's'

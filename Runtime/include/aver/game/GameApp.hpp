@@ -147,7 +147,7 @@ struct GameConfig {
     // Parsed locally; GameApp never includes aver/sr/* (module boundary).
     int averSrArg = -1;   // -1 = unstated/auto, else the ladder's numbering 0..3
     // --taa / --no-taa: AverSR temporal AA + upscale (TAAU) on or off, over the project's RENDER.TAA
-    // (unstated = on, as in the editor). Off keeps FSR 1 as the upscaler. -1 = not given.
+    // (unstated = off, as in the editor). Off keeps FSR 1 as the upscaler. -1 = not given.
     int taaArg = -1;
     // --frame-interp 0|1: frame interpolation over the project's RENDER.FRAMEINTERP. -1 = not given.
     int frameInterpArg = -1;

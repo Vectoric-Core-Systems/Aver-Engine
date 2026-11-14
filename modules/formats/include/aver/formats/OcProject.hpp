@@ -152,11 +152,11 @@ struct ProjectDesc {
     // -1 / absent = off; CLI --frame-interp outranks it.
     int frameInterp = -1; // RENDER.FRAMEINTERP  0 off, 1 on (needs vsync and 1x anti-aliasing)
 
-    // RENDER.TAA: temporal anti-aliasing (AverSR TAAU). -1 / absent = engine default (on);
+    // RENDER.TAA: temporal anti-aliasing (AverSR TAAU). -1 / absent = engine default (off);
     // CLI --taa / --no-taa outranks it.
     int taa = -1;         // RENDER.TAA  0 off, 1 on (needs MSAA 1; otherwise FSR 1 is used)
     // RENDER.NEURAA: NeuRAA edge anti-aliasing on ray-driven frames (docs/rendering/NEURAA_NRD.md).
-    // -1 / absent = off; CLI --neuraa / --no-neuraa outranks it.
+    // -1 / absent = engine default (on); CLI --neuraa / --no-neuraa outranks it.
     int neuraa = -1;      // RENDER.NEURAA  0 off, 1 on
     // RENDER.MANYLIGHTS: stochastic many-light direct lighting from a light tree (docs/rendering/MANY_LIGHTS.md).
     // 0 = off (the grid's capped tail), 1 = auto (engages above voxi.manyLightsMin lights), 2 = on. -1 / absent = auto.

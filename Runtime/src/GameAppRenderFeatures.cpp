@@ -309,13 +309,13 @@ void GameApp::resolveAverSr(Engine& e) {
 #if AVER_MODULE_VOXI
     // AverSR resolved after openProject. applyProjectRenderSettings committed project's GI/RT tiers.
     // CLI (--aversr) beats RENDER.AVERSR beats Auto. Shipped game: userLevel pinned to -1.
-    // Upscaler: TAAU (the editor's choice) unless --no-taa / RENDER.TAA 0, then FSR 1. TAAU also runs at
+    // Upscaler: FSR 1 unless --taa / RENDER.TAA 1 asks for TAAU. TAAU also runs at
     // native scale (Off) as the anti-aliasing; FSR 1 only when a level scales the scene.
     if (rhi::IDevice* dev = e.device()) {
         const voxi::Renderer& vx = voxi::Renderer::get();
         const voxi::AverSrDecision dec = voxi::resolveAverSrLevel(
             cfg_.averSrArg, -1, project_.averSr, voxi::autoAverSrLevel(vx.settings(), vx.deviceInfo()));
-        const bool wantTaa = cfg_.taaArg >= 0 ? cfg_.taaArg == 1 : project_.taa != 0;
+        const bool wantTaa = cfg_.taaArg >= 0 ? cfg_.taaArg == 1 : project_.taa > 0;   // unstated = off, as in the editor
 
         // averSrInstaller_ is null when SR module is absent. Resolved level with no installer stays native 1.0.
         f32 scale = 1.0f;

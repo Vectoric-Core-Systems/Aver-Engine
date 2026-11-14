@@ -106,10 +106,10 @@ struct RenderSettingsState {
     std::string neuraaCaptureDir_;          // --neuraa-capture DIR COUNT (training data)
     u32  neuraaCaptureCount_ = 0;
     bool neuraaCaptureStarted_ = false;
-    bool temporalAaEnabled_ = true;   // the project's RENDER.TAA (unstated = on); --no-taa / --taa win over it
+    bool temporalAaEnabled_ = false;  // the project's RENDER.TAA (unstated = off); --no-taa / --taa win over it
     bool taaFromCli_ = false;
     int particleGpuArg_ = -1;   // --particles-cpu / --particles-gpu; -1 follows RENDER.PARTICLEGPU
-    bool neuraaEnabled_ = false;      // the project's RENDER.NEURAA (unstated = off)
+    bool neuraaEnabled_ = true;       // the project's RENDER.NEURAA (unstated = on)
     bool neuraaFromCli_ = false;
     // Edge AA (FXAA-class) in FSR's first pass: --edge-aa or Display > Edge anti-aliasing.
     bool edgeAaEnabled_ = false;
