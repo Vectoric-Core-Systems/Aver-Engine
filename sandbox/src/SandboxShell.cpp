@@ -991,12 +991,12 @@ void SandboxApp::setHudPreview(int index, f32 x, f32 y, f32 w, f32 h) {
 
 #if AVER_WITH_IMGUI
 // Draws a button with a drop-down triangle. Returns true when clicked.
-bool SandboxApp::dropButton(const char* label) {
+bool SandboxApp::dropButton(const char* label, f32 minWidth) {
     const f32 extra = 16.0f*viewState_.dpi_;
-    const ImVec2 ts = ImGui::CalcTextSize(label);
+    const ImVec2 ts = ImGui::CalcTextSize(label, nullptr, true);
     // The label sits left with the arrow in its own space; centred in the whole box it ran into the arrow.
     ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.0f, 0.5f));
-    const bool clicked = ImGui::Button(label, ImVec2(ts.x + ImGui::GetStyle().FramePadding.x*2 + extra, 0));
+    const bool clicked = ImGui::Button(label, ImVec2(std::fmax(minWidth, ts.x + ImGui::GetStyle().FramePadding.x*2 + extra), 0));
     ImGui::PopStyleVar();
     const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
     const f32 cx = mx.x - extra*0.5f - 2.0f*viewState_.dpi_, cy = (mn.y+mx.y)*0.5f, s = 3.0f*viewState_.dpi_;

@@ -1602,7 +1602,7 @@ private:
     // Returns true when click hit something; false on Ctrl-click miss (leaves selection unchanged).
     bool pick(Engine& e, const ImGuiIO& io);
 
-    bool dropButton(const char* label);
+    bool dropButton(const char* label, f32 minWidth = 0.0f);
 
 #endif
 

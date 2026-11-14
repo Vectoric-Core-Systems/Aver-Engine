@@ -3260,17 +3260,20 @@ f32 SandboxApp::drawViewportShowMenu() {
 // The editing-mode dropdown at the start of the right cluster.
 void SandboxApp::drawViewportModeCombo(f32 gap) {
     {
-        ImGui::PushStyleColor(ImGuiCol_Button, kAverOrangeDim);
-        ImGui::PushStyleColor(ImGuiCol_Header, kAverOrangeDim);
-        // Sized from the widest mode name, not a constant: this toolbar is right-anchored and
-        // grows LEFTWARD, so an over-wide item marches across the viewport onto the left toolbar (a fixed 150*dpi did this at 300% DPI).
+        // The same drop button as Perspective / Lit / Show. Sized from the widest mode name, so the
+        // right-anchored bar does not shift when the mode changes.
         f32 widest = 0.0f;
         for (int i = 0; i < kEditorModeCount; ++i)
             widest = std::fmax(widest, ImGui::CalcTextSize(kEditorModeNames[i]).x);
-        ImGui::SetNextItemWidth(widest + ImGui::GetFrameHeight() +
-                                ImGui::GetStyle().FramePadding.x * 4.0f);
         const char* modeLbl = kEditorModeNames[static_cast<int>(viewState_.mode_)];
-        if (ImGui::BeginCombo("##editorMode", modeLbl, ImGuiComboFlags_HeightLarge)) {
+        ImGui::PushID("##editorMode");
+        const bool open = dropButton(modeLbl, widest + ImGui::GetStyle().FramePadding.x * 2.0f + 16.0f * viewState_.dpi_);
+        ImGui::PopID();
+        uiReg_.track("mode.dropdown");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Editing mode. Tab switches between Select and the last mode used.");
+        if (open) ImGui::OpenPopup("editorModeMenu");
+        if (ImGui::BeginPopup("editorModeMenu")) {
             for (int i = 0; i < kEditorModeCount; ++i) {
                 const EditorMode m = static_cast<EditorMode>(i);
                 const char* whyNot = "";
@@ -3285,12 +3288,8 @@ void SandboxApp::drawViewportModeCombo(f32 gap) {
                         ImGui::SetTooltip("%s", whyNot);
                 }
             }
-            ImGui::EndCombo();
+            ImGui::EndPopup();
         }
-        ImGui::PopStyleColor(2);
-        uiReg_.track("mode.dropdown");
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Editing mode. Tab switches between Select and the last mode used.");
         ImGui::SameLine(0, gap*2);
     }
 }
@@ -3365,15 +3364,17 @@ void SandboxApp::drawViewportTransformTools(f32 icon, f32 gap, f32 tinyGap) {
             if (hit) on = !on;
         };
         const auto stepCombo = [&](const char* id, editor::SnapKind kind, f32& value, const f32* presets, usize n) {
-            ImGui::SetNextItemWidth(54.0f * viewState_.dpi_);
-            if (ImGui::BeginCombo(id, editor::snapLabel(kind, value).c_str())) {
+            ImGui::PushID(id);
+            if (dropButton(editor::snapLabel(kind, value).c_str(), 44.0f * viewState_.dpi_)) ImGui::OpenPopup("steps");
+            if (ImGui::BeginPopup("steps")) {
                 for (usize i = 0; i < n; ++i)
                     if (ImGui::Selectable(editor::snapLabel(kind, presets[i]).c_str(), value == presets[i])) value = presets[i];
                 ImGui::Separator();
                 ImGui::SetNextItemWidth(90.0f * viewState_.dpi_);
                 if (ImGui::InputFloat("Custom", &value, 0.0f, 0.0f, "%g")) value = editor::clampSnapStep(kind, value);
-                ImGui::EndCombo();
+                ImGui::EndPopup();
             }
+            ImGui::PopID();
         };
         toggle(ICON_GRID_ON "##showGrid", viewState_.showGrid_, "Show the grid");
         ImGui::SameLine(0, tinyGap);
