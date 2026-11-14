@@ -1390,24 +1390,24 @@ void SandboxApp::drawContentBrowser() {
         drawerUi_.drawerStartSub_.clear();
     }
     ImGui::BeginDisabled(!cbCanBack());
-    if (ImGui::ArrowButton("##cbback", ImGuiDir_Left)) cbBack();
+    if (ImGui::Button(ICON_ARROW_BACK "##cbback")) cbBack();
     ImGui::EndDisabled();
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Back");
     ImGui::SameLine(0.0f, 2.0f*viewState_.dpi_);
     ImGui::BeginDisabled(!cbCanForward());
-    if (ImGui::ArrowButton("##cbfwd", ImGuiDir_Right)) cbForward();
+    if (ImGui::Button(ICON_ARROW_FWD "##cbfwd")) cbForward();
     ImGui::EndDisabled();
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Forward");
     ImGui::SameLine(0.0f, 2.0f*viewState_.dpi_);
     const std::string parent = cbParentDir();
     ImGui::BeginDisabled(parent.empty());
-    if (ImGui::ArrowButton("##cbup", ImGuiDir_Up)) cbNavigate(parent);
+    if (ImGui::Button(ICON_ARROW_UP "##cbup")) cbNavigate(parent);
     ImGui::EndDisabled();
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
         ImGui::SetTooltip(parent.empty() ? "Already at the root" : "Up one folder");
     ImGui::SameLine();
 
-    if (ImGui::Button("+ Add")) ImGui::OpenPopup("cbAddMenu");
+    if (ImGui::Button(ICON_ADD " Add")) ImGui::OpenPopup("cbAddMenu");
     if (ImGui::BeginPopup("cbAddMenu")) {
         ImGui::BeginDisabled(!cbIsEditable(drawerUi_.cbSelectedDir_));
         if (ImGui::MenuItem("New Folder")) { drawerUi_.cbWantNewFolder_ = true; drawerUi_.cbNewFolderBuf_[0] = '\0'; }
@@ -1557,7 +1557,7 @@ void SandboxApp::drawContentBrowser() {
     {
         const std::string reason = cbImportBlockedReason(drawerUi_.cbSelectedDir_);
         ImGui::BeginDisabled(!reason.empty());
-        if (ImGui::Button("Import...")) drawerUi_.cbWantImport_ = true;
+        if (ImGui::Button(ICON_IMPORT " Import...")) drawerUi_.cbWantImport_ = true;
         ImGui::EndDisabled();
         if (!reason.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip("%s", reason.c_str());
@@ -1583,10 +1583,15 @@ void SandboxApp::drawContentBrowser() {
             if (active) ImGui::PopStyleColor();
             return hit;
         };
-        const f32 controls = drawerUi_.cbGallery_ ? 250.0f : 130.0f;
+        // Everything right of the search box, measured: a fixed reserve let Tiles/List cover the Subfolders box.
+        const ImGuiStyle& st = ImGui::GetStyle();
+        const f32 viewGap = 2.0f * viewState_.dpi_, zoomW = 110.0f * viewState_.dpi_;
+        const auto buttonW = [&](const char* s) { return ImGui::CalcTextSize(s, nullptr, true).x + st.FramePadding.x * 2.0f; };
+        const f32 right = st.ItemSpacing.x + ImGui::GetFrameHeight() + st.ItemInnerSpacing.x + ImGui::CalcTextSize("Subfolders").x
+                        + st.ItemSpacing.x + buttonW(ICON_VIEW_TILES "##t") + viewGap + buttonW(ICON_VIEW_LIST "##l")
+                        + (drawerUi_.cbGallery_ ? st.ItemSpacing.x + zoomW : 0.0f);
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(std::fmax(80.0f*viewState_.dpi_,
-            ImGui::GetWindowWidth() - ImGui::GetCursorPosX() - (controls + 14.0f)*viewState_.dpi_));
+        ImGui::SetNextItemWidth(std::fmax(80.0f*viewState_.dpi_, ImGui::GetContentRegionAvail().x - right));
         ImGui::InputTextWithHint("##cbsearch",
                                  drawerUi_.cbSearchDeep_ ? "Search this folder and below..."
                                                : "Search this folder...",

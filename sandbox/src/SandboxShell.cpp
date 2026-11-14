@@ -3653,8 +3653,12 @@ void SandboxApp::drawDrawer(Engine& e) {
         ImGui::TextDisabled(drawerUi_.drawerShown_ == Drawer::Content ? "(Ctrl+Space or Esc to dismiss)" :
                              drawerUi_.drawerShown_ == Drawer::Console ? "(` or Esc to dismiss)" : "(Esc to dismiss)");
     }
-    ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), wsize.x - 34.0f * viewState_.dpi_));
-    if (ImGui::Button("X")) drawerUi_.drawer_ = Drawer::None;
+    const f32 closeW = ImGui::CalcTextSize(ICON_CLOSE).x + ImGui::GetStyle().FramePadding.x * 2.0f;
+    ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), wsize.x - closeW - ImGui::GetStyle().WindowPadding.x));
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+    const bool closeHit = ImGui::Button(ICON_CLOSE "##drawerClose");
+    ImGui::PopStyleColor();
+    if (closeHit) drawerUi_.drawer_ = Drawer::None;
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Close the drawer");
     ImGui::Separator();
 

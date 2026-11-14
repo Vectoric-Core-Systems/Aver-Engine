@@ -147,6 +147,12 @@ inline constexpr unsigned short kIconRangeLast  = 0xF8FF;
 #define ICON_LOCK_OPEN         "\xEE\xA2\x98"   // U+E898 lock_open
 #define ICON_FILTER            "\xEE\x85\x92"   // U+E152 filter_list
 #define ICON_NEW_FOLDER        "\xEE\x8B\x8C"   // U+E2CC create_new_folder
+#define ICON_ARROW_BACK        "\xEE\x97\x84"   // U+E5C4 arrow_back (Content Browser: Back)
+#define ICON_ARROW_FWD         "\xEE\x97\x88"   // U+E5C8 arrow_forward (Content Browser: Forward)
+#define ICON_ARROW_UP          "\xEE\x97\x98"   // U+E5D8 arrow_upward (Content Browser: Up)
+#define ICON_IMPORT            "\xEE\x8B\x84"   // U+E2C4 file_download (Content Browser: Import)
+#define ICON_VIEW_TILES        "\xEE\xA3\xB0"   // U+E8F0 view_module (Content Browser: tiles)
+#define ICON_VIEW_LIST         "\xEE\xA3\xAF"   // U+E8EF view_list (Content Browser: list)
 
 // ---- content browser --------------------------------------------------------------------
 #define ICON_STAR              "\xEE\xA0\xB8"   // U+E838 star
