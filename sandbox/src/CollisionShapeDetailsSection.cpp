@@ -18,6 +18,7 @@
 #endif
 
 #include "imgui.h"
+#include "DetailsTable.hpp"
 
 #include <string>
 #include <utility>
@@ -172,7 +173,7 @@ void drawCollisionShapeSection(const CollisionShapeSectionEnv& env, void* worldP
     SurfaceNames& names = surfaceNames(env.contentDir);
     const std::string current = c->surface == 0 ? std::string("(none)") : cm::surfaceLabel(c->surface, nameOfSurface(names, c->surface));
     ImGui::BeginDisabled(env.playing);
-    if (ImGui::BeginCombo("Surface", current.c_str())) {
+    if (dt::BeginCombo("Surface", current.c_str())) {
         if (ImGui::Selectable("(none)", c->surface == 0)) env.instantEdit(c->surface != 0, [&] { c->surface = 0; });
         for (const auto& p : names.list)
             if (ImGui::Selectable(p.second.c_str(), p.first == c->surface)) env.instantEdit(p.first != c->surface, [&] { c->surface = p.first; });
@@ -182,8 +183,7 @@ void drawCollisionShapeSection(const CollisionShapeSectionEnv& env, void* worldP
         ImGui::SetTooltip("The body's surface label: what a raycast or a contact reports for a shape that names none.\n"
                           "Leaves that name a surface (in the .ocshape) keep theirs and carry the friction.");
     static char s_free[80] = {};
-    ImGui::SetNextItemWidth(160.0f);
-    if (ImGui::InputTextWithHint("##csSurfaceFree", "other name + Enter", s_free, sizeof s_free, ImGuiInputTextFlags_EnterReturnsTrue)) {
+    if (dt::InputTextWithHint("Other Surface", "name + Enter", s_free, sizeof s_free, ImGuiInputTextFlags_EnterReturnsTrue)) {
         if (fmt::ocSurfNameValid(s_free)) {
             const i32 id = aver::surfaceIdFromName(s_free);
             env.instantEdit(id != c->surface, [&] { c->surface = id; });

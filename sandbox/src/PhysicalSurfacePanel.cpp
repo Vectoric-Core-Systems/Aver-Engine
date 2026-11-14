@@ -10,6 +10,7 @@
 #include "aver/platform/FileSystem.hpp"
 
 #include "imgui.h"
+#include "DetailsTable.hpp"
 
 #include <cfloat>
 #include <cstdio>
@@ -220,7 +221,7 @@ void drawMaterialPhysSurface(const std::string& binariesDir, const std::string& 
         AVER_INFO("[Surfaces] {}: PHYSSURFACE {}", s_path, name.empty() ? std::string("(none)") : name);
     };
 
-    if (ImGui::BeginCombo("Physical Surface", s_current.empty() ? "(none)" : s_current.c_str())) {
+    if (dt::BeginCombo("Physical Surface", s_current.empty() ? "(none)" : s_current.c_str())) {
         if (ImGui::Selectable("(none)", s_current.empty())) apply({});
         for (const fmt::OcSurfRecord& r : s.saved.surfaces)
             if (ImGui::Selectable(r.name.c_str(), r.name == s_current)) apply(r.name);
@@ -233,8 +234,7 @@ void drawMaterialPhysSurface(const std::string& binariesDir, const std::string& 
                           "Content/Materials/<name>.ocmat for a lasting value.", s_path.c_str());
     // A name not in the table is allowed (the surface is then just a name); type it here.
     static char s_free[80] = {};
-    ImGui::SetNextItemWidth(160.0f);
-    if (ImGui::InputTextWithHint("##physFree", "other name + Enter", s_free, sizeof s_free, ImGuiInputTextFlags_EnterReturnsTrue)) {
+    if (dt::InputTextWithHint("Other Surface", "name + Enter", s_free, sizeof s_free, ImGuiInputTextFlags_EnterReturnsTrue)) {
         if (fmt::ocSurfNameValid(s_free)) { apply(s_free); s_free[0] = 0; }
     }
     if (std::strlen(s_free) > 0 && !fmt::ocSurfNameValid(s_free)) { ImGui::SameLine(); ImGui::TextColored(kRed, "letters, digits, underscore"); }

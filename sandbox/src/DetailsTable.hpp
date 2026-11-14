@@ -322,6 +322,13 @@ inline bool Combo(const char* l, int* cur, const char* const items[], int count,
 inline bool Combo(const char* l, int* cur, const char* zeroSeparated, int maxHeight = -1) {
     return row(l, nullptr, 0, 0, [&](const char* id) { return ImGui::Combo(id, cur, zeroSeparated, maxHeight); });
 }
+// True while the popup is open: pair with ImGui::EndCombo as ImGui::BeginCombo.
+inline bool BeginCombo(const char* l, const char* preview, ImGuiComboFlags fl = 0) {
+    return row(l, nullptr, 0, 0, [&](const char* id) { return ImGui::BeginCombo(id, preview, fl); });
+}
+inline bool InputTextWithHint(const char* l, const char* hint, char* buf, size_t size, ImGuiInputTextFlags fl = 0) {
+    return row(l, nullptr, 0, 0, [&](const char* id) { return ImGui::InputTextWithHint(id, hint, buf, size, fl); });
+}
 
 } // namespace aver::editor::dt
 #endif
