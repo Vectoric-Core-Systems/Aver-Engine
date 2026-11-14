@@ -186,16 +186,17 @@ If you know Unreal's Blueprints, most of Aver Node reads directly:
 | Event BeginPlay | `OnStart` entry | Fires once, on the graph's own first `Tick()` call — not inside `Load()`, and not a separate editor-preview construction phase (§5). |
 | Event Tick | `OnTick` entry | Fires every `Tick()` call, always strictly after `OnStart` in the tick where both run. |
 | A custom event | Any `ENTRY` name other than `OnStart`/`OnTick`, fired via `Fire()` | See §5 — `OnHit` is the one demonstrated example, and it is not wired to anything today. |
-| A Blueprint variable | `VAR` | Float/Int/Bool only, no struct/array/object reference (§4, §8). |
+| A Blueprint variable | `VAR` | Float, int, bool, float3, string, entity, an array of one (`float[]`), or a user struct (`struct:Name`); no object reference (§4, §8). A struct default is a literal `{field=value|...}`. |
+| A Blueprint struct | `STRUCT <Name>` + `FIELD <Name> <field> <type>`, Make/Break/Set Field nodes | A field is any data type, an array or another struct (one that does not hold this one). Struct values are copied, never shared. |
 | A function/event input | `PARAM` | Closed vocabulary, and it differs by which entry points the file wants (§4) — not free-form the way a Blueprint's own inputs are. |
 | SpawnActorFromClass | `Spawn` node, `class=` attribute | Resolved **by name** at invocation time, not baked to a handle at compile time. |
 | Get/Set on a component variable | `GetField`/`SetField` (scalar), `GetFieldVec3`/`SetFieldVec3` (vector) | Addressed by a `field=` string naming a scene field (e.g. `CLocal.position`), not a live pin reference to a component instance. |
-| A Blueprint **function** | `FUNC <name>` + `FUNCIN`/`FUNCOUT`, body tagged `func=`, called by a `CallFunc` node | Its own method, its own canvas, and it **can recurse** (bounded at depth 120). Float/int/bool signatures only. **A `pure` function cannot recurse** — `Select` evaluates both sides, so only an impure function's `Branch` can terminate one. |
-| A Blueprint **macro** | Collapse to Function (editor) | Not implemented as a macro. Functions are real calls, not inlined; the editor's Collapse to Function turns a selection into one (see Editor tools below). Inlined macros are not in v1. |
-| Branch / Sequence / For Loop / While Loop | `Branch` / `Sequence` / `ForEach` / `While` | `ForEach` is counted-repeat only — there is no array pin type, so no per-element iterator (§8). |
+| A Blueprint **function** | `FUNC <name>` + `FUNCIN`/`FUNCOUT`, body tagged `func=`, called by a `CallFunc` node | Its own method, its own canvas, and it **can recurse** (bounded at depth 120). Pins may be any data type. **A `pure` function cannot recurse** — `Select` evaluates both sides, so only an impure function's `Branch` can terminate one. |
+| A Blueprint **macro** | `MACRO <name>` + `MACROIN`/`MACROOUT`, body tagged `macro=`, used by a `MacroInstance` node | Inlined at every use before compiling, so it may have several exec inputs and outputs; it cannot recurse. Collapse to Macro makes one from a selection. |
+| Branch / Sequence / For Loop / For Each / While Loop | `Branch` / `Sequence` / `ForEach` / `ForEachInArray` / `While` | `ForEach` is a counted repeat; `ForEachInArray` walks an array. |
 
 **Where it deliberately differs, structurally:** one file is one graph and one class at most, and there
-are no inlined macros (a selection collapses into a real function, see Editor tools). There IS now an event-graph-versus-function-graph split — this
+are macros, inlined before compiling (see Editor tools). There IS now an event-graph-versus-function-graph split — this
 paragraph used to say there was not, and `FUNC` made that false. A file holds one event graph plus any
 number of named functions; the editor shows one subgraph at a time and a wire cannot cross between them,
 because they compile to separate methods. What is still true is that `ENTRY` records mark starting
@@ -447,10 +448,10 @@ running. It is also new, and smaller than what it resembles. Specifically:
   one entity's graph raise an event *on a different entity's* graph. `Fire()` is something a host
   calls into one specific `GraphHost`; it is not something a node can invoke.
 - **No immediate-mode 2D drawing from a graph.** The UI nodes drive widgets that already exist (`Aver.UI`); there is no draw call in the palette. This bullet used to carry a node count and the claim that nothing reached `Aver.UI`; the count went stale repeatedly and the second half stopped being true, so it now carries neither. `python scripts/node-catalog.py --counts` prints the current numbers and [`docs/nodes/`](nodes/README.md) lists every node.
-- **No `String` pin.** `PinType` has exactly four members — `Float`, `Int`, `Bool`, `Exec`. Every
-  string a node needs (`field=`, `class=`, `var=`, `name=`, `mesh=`, `material=`) arrives as a
-  `NODE`-line attribute, never as data an upstream node computes or a pin carries.
-- **`VAR` is Float/Int/Bool only, and does not survive a level reload.** Storage is one object per
+- **Names are still attributes.** There are `String` pins now, but the names a node is configured by
+  (`field=`, `class=`, `var=`, `name=`, `mesh=`, `material=`) arrive as `NODE`-line attributes, never
+  as data an upstream node computes.
+- **`VAR` does not survive a level reload.** Storage is one object per
   `GraphHost`, created fresh at `Load()` time and seeded from each `VAR`'s declared default —
   reloading the graph (hot-reload included), respawning the instance, or restarting the process
   all reset every `VAR` to its default. There is no persistence layer underneath it.
@@ -506,7 +507,9 @@ Five tools sit on top of the graph canvas. Their model code (parsing, ranking, s
 
 **Debugger.** F9 toggles a breakpoint on the selected node (a red dot); the set is saved per user in the editor preferences, keyed by graph, never in the `.ocgraph`. Arm the debugger in the toolbar, then press Play: the compiler emits the hooks **only when armed**, so a packaged game and an unarmed editor run byte-identical IL and pay nothing. Arming applies to graphs compiled afterwards, which means the next Play start. Honest semantics: a breakpoint pauses the Play session at the **end of the frame in which the node ran** (`aver_fw_set_paused`), because the engine loop is single-threaded and the editor draws on the same thread; it cannot stop mid-tick. While paused the node pulses red, the notification names it, and every data wire shows its last value as a small label (hover for all). Frame Skip steps one frame and breaks again if the node is reached; the node's context menu has Disable breakpoint (a node under `OnTick` breaks every frame after you resume), and the existing Pause chord resumes. Only values on data inputs are captured (floats, ints and bools widened to double); exec-node result pins are not. Source: `GraphDebug.cs`, the optional `GraphDebug*` bridge exports, `GraphDebugModel.hpp`.
 
-**Collapse to Function.** Select nodes, Collapse to Function, give it a name: the editor makes a function, moves the nodes into it, re-points the crossing links through its `FuncEntry`/`FuncReturn` and puts a `CallFunc` node where the selection was, in one undo step. Behaviour is unchanged (`CollapseFunctionTests` runs both graphs and compares). Data inputs and outputs become function pins named `<node>_<pin>`; at most one exec link may enter and one leave (more is refused with `selection has N exec exits; v1 supports one`); none of either makes the function `pure`. Refused with a named reason: `ENTRY` nodes, `OnStart`/`OnTick`/`OnHit`/`CustomEvent`/`AN_OnEvent`, `FuncEntry`/`FuncReturn`, `Param` nodes, and a selection that separates a `While`/`ForEach` from its loop body. Expanding a function back and true macros are not in v1.
+**Collapse to Function.** Select nodes, Collapse to Function, give it a name: the editor makes a function, moves the nodes into it, re-points the crossing links through its `FuncEntry`/`FuncReturn` and puts a `CallFunc` node where the selection was, in one undo step. Behaviour is unchanged (`CollapseFunctionTests` runs both graphs and compares). Data inputs and outputs become function pins named `<node>_<pin>`; at most one exec link may enter and one leave (more is refused with `selection has N exec exits; v1 supports one`); none of either makes the function `pure`. Pins carry any data type (vectors, strings, entities, arrays, structs). Refused with a named reason: `ENTRY` nodes, `OnStart`/`OnTick`/`OnHit`/`CustomEvent`/`AN_OnEvent`, `FuncEntry`/`FuncReturn`, `Param` nodes, and a selection that separates a `While`/`ForEach` from its loop body. Expanding a function back is not done.
+
+**Collapse to Macro.** The same move into a macro: the selection becomes the macro's body between a `MacroInput` and a `MacroOutput`, and a `MacroInstance` takes its place. A macro is inlined where it is used, so the graph runs exactly as before (`CollapseFunctionTests` compares the two tick by tick), and it takes what a function refuses: any number of exec entries and exits (each a macro pin, `exec` for a single entry and `then` for a single exit, else `<node>_<pin>`), part of a loop's body, exec nodes nothing runs. Still refused: events and `ENTRY` nodes, a function's or macro's own entry and exit, `Param`/`Self` nodes and graph `OUT` nodes.
 
 ## Adding a node family
 
