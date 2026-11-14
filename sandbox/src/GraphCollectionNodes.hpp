@@ -36,6 +36,9 @@ inline std::string structNameOfType(const std::string& type) { return isStructTy
 
 inline std::string arrayTypeOf(const std::string& elem) { return elem + "[]"; }
 
+// What a closed type box shows: a struct by its name alone (the open list and the tooltip keep struct:Name).
+inline std::string typePreviewLabel(const std::string& type) { return isStructTypeName(type) ? structNameOfType(type) : type; }
+
 // "Vector" for float3, the capitalised name otherwise: the suffix of a palette variant ("Array Get (Vector)").
 inline std::string elementFriendlyName(const std::string& elem) {
     if (lowerTypeName(elem) == "float3") return "Vector";
@@ -45,7 +48,7 @@ inline std::string elementFriendlyName(const std::string& elem) {
 }
 
 // A type a VAR, a function pin or a struct field may have in a graph declaring `structs`: a scalar, an array of one, or a
-// declared struct (structs == nullptr accepts any struct:Name). Struct fields are scalars only; see isScalarTypeName.
+// declared struct (structs == nullptr accepts any struct:Name).
 inline bool isDataTypeName(const std::string& type, const std::vector<fmt::OcGraphStruct>* structs) {
     if (isScalarTypeName(type) || isArrayTypeName(type)) return true;
     if (!isStructTypeName(type)) return false;
@@ -61,6 +64,25 @@ inline std::vector<std::string> dataTypeChoices(const std::vector<fmt::OcGraphSt
     for (usize i = 0; i < scalars; ++i) out.push_back(arrayTypeOf(out[i]));
     for (const auto& s : structs) out.push_back("struct:" + s.name);
     return out;
+}
+
+// Whether struct `from` holds struct `target`, directly or through the structs its fields hold (from == target counts).
+inline bool structHolds(const std::vector<fmt::OcGraphStruct>& structs, const std::string& from, const std::string& target,
+                        int depth = 0) {
+    if (from == target) return true;
+    if (depth > 64) return true;   // a cycle already in the file: treat as holding, so nothing deepens it
+    for (const auto& s : structs) {
+        if (s.name != from) continue;
+        for (const auto& f : s.fields)
+            if (isStructTypeName(f.type) && structHolds(structs, structNameOfType(f.type), target, depth + 1)) return true;
+    }
+    return false;
+}
+
+// A type struct `owner` may give a field: any data type except a struct that would end up holding `owner` itself.
+inline bool isStructFieldTypeFor(const std::string& type, const std::string& owner, const std::vector<fmt::OcGraphStruct>& structs) {
+    if (!isDataTypeName(type, &structs)) return false;
+    return !isStructTypeName(type) || !structHolds(structs, structNameOfType(type), owner);
 }
 
 // The pins of an element-typed entry, written for float, with the element pins retyped to `elem`.

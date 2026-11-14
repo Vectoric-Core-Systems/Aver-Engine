@@ -307,7 +307,8 @@ static void testStructsAndArraysInTheEditor() {
     check(ed.addStructField("Pt", "x", "float") && ed.addStructField("Pt", "pos", "float3"), "addStructField adds fields");
     check(!ed.addStructField("Pt", "x", "int"), "a duplicate field is refused");
     check(!ed.addStructField("Pt", "value", "int") && !ed.addStructField("Pt", "result", "int"), "a field named like a struct node's own pin is refused");
-    check(!ed.addStructField("Pt", "q", "float[]") && !ed.addStructField("Pt", "q", "struct:Pt"), "a field must be a scalar type");
+    check(!ed.addStructField("Pt", "q", "struct:Pt"), "a struct cannot hold itself");
+    check(!ed.addStructField("Pt", "q", "exec") && !ed.addStructField("Pt", "q", "struct:Nope"), "nor exec, nor an undeclared struct");
     check(!ed.addStructField("Nope", "q", "int"), "a field of an unknown struct is refused");
     check(ed.addVariable("xs", "float[]", "1,2") && ed.variables().back().type == "float[]", "an array VAR can be declared");
     check(ed.addVariable("p", "struct:Pt", "") && ed.variables().back().type == "struct:Pt", "a VAR of a declared struct can be declared");
@@ -325,6 +326,27 @@ static void testStructsAndArraysInTheEditor() {
               "array and struct function pins are written");
         GraphEditor again(tmp);
         check(again.structs().size() == 1 && again.structs()[0].fields.size() == 2, "the written file reloads with its struct");
+    }
+
+    // ---- fields that are arrays and other structs; rename and delete follow them
+    {
+        const std::string nest = (std::filesystem::path(dir) / "coll_nest.ocgraph").string();
+        writeFile(nest, "OCGRAPH 1\nNAME Nest\n");
+        GraphEditor ne(nest);
+        check(ne.addStruct("Inner") && ne.addStruct("Outer"), "two structs");
+        check(ne.addStructField("Inner", "tags", "string[]"), "an array field");
+        check(ne.addStructField("Outer", "inner", "struct:Inner"), "a field holding another struct");
+        check(!ne.addStructField("Inner", "back", "struct:Outer"), "a field that would make Inner hold itself (through Outer) is refused");
+        check(!ne.retypeStructField("Inner", "tags", "struct:Outer"), "and so is retyping one into that");
+        check(ne.renameStruct("Inner", "Core") && ne.structs()[1].fields[0].type == "struct:Core", "a rename follows into the fields that hold it");
+        std::vector<std::string> blocked;
+        check(!ne.deleteStruct("Core", &blocked) && !blocked.empty() && blocked[0] == "struct Outer.inner",
+              "a struct another struct holds cannot be deleted");
+        std::string why;
+        check(ne.save(&why), "save() succeeds (why='" + why + "')");
+        const std::string text = readFile(nest);
+        check(text.find("FIELD Core tags string[]\n") != std::string::npos && text.find("FIELD Outer inner struct:Core\n") != std::string::npos,
+              "array and struct FIELDs are written");
     }
 
     // ---- palette: variants and per-struct rows write the right node type, attributes and pins

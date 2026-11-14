@@ -503,23 +503,24 @@ public:
     // ---- struct editing (graph-level STRUCT / FIELD declarations) -----------------------------------
     // The same public-surface shape as the variable methods above, and for the same reason: the Structs panel is thin
     // glue over these, so GraphEditorLoadSaveTest drives them with no ImGui context. A struct type is written
-    // `struct:<Name>` on pins, VARs and function pins; a field is a scalar (float, int, bool, float3, string, entity).
+    // `struct:<Name>` on pins, VARs and function pins; a field is any data type (a scalar, an array, another struct
+    // that does not end up holding this one). A struct VAR's default is a literal {field=value|...}.
     const std::vector<fmt::OcGraphStruct>& structs() const { return graph_.structs; }
 
-    // Declares a struct. False for an empty name, one with whitespace, '.', ':' or '@', or one already declared.
+    // Declares a struct. False for an empty name, one with whitespace or one of . : @ = , { } |, or one already declared.
     bool addStruct(const std::string& name);
 
-    // Renames a struct AND every use of it (struct= on Make/Break/SetStructField nodes, pin, VAR and function-pin
-    // types), in one undo step. False when `oldName` is unknown or `newName` is unusable or taken.
+    // Renames a struct AND every use of it (struct= on Make/Break/SetStructField nodes, pin, VAR, function-pin, macro-pin
+    // and field types), in one undo step. False when `oldName` is unknown or `newName` is unusable or taken.
     bool renameStruct(const std::string& oldName, const std::string& newName);
 
-    // Deletes a struct. Refuses (false) while a VAR, function pin, pin or struct node still uses it; `outBlockedBy`
+    // Deletes a struct. Refuses (false) while a VAR, function or macro pin, another struct's field, pin or struct node uses it; `outBlockedBy`
     // then names them. A struct deleted under its users would fail Graph.Validate with no sign why.
     bool deleteStruct(const std::string& name, std::vector<std::string>* outBlockedBy = nullptr);
 
     // Field edits rebuild the pins of every struct node using the struct, dropping wires that no longer fit, in the same
     // undo step. addStructField refuses a duplicate or reserved ("value", "result") name, whitespace and a type that
-    // is not a scalar; retypeStructField the same for the type.
+    // is not data or would make the struct hold itself; retypeStructField the same for the type.
     bool addStructField(const std::string& structName, const std::string& field, const std::string& type);
     bool renameStructField(const std::string& structName, const std::string& oldField, const std::string& newField);
     bool retypeStructField(const std::string& structName, const std::string& field, const std::string& type);

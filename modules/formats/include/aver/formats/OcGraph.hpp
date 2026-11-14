@@ -185,7 +185,8 @@ struct OcGraphMacro {
 
 // One user STRUCT: `STRUCT <Name>`, plus one `FIELD <Name> <field> <type>` record per field. The editor creates and edits
 // these, so they are modelled (see OcGraphFunction for the argument). `type` is opaque here like OcGraphVariable::type;
-// the C# reader (Aver.Graph) accepts float, int, bool, float3, string and entity and refuses a duplicate field name.
+// the C# reader (Aver.Graph) accepts any data type (a scalar, an array, another struct that does not hold this one) and refuses
+// a duplicate field name.
 struct OcGraphStructField {
     std::string name;
     std::string type;

@@ -1355,7 +1355,12 @@ void GraphEditor::drawEventGraph(float dpi) {
             const fmt::OcGraphVariable& v = *vptr;
 
             ImGui::PushID(("##var_" + vname).c_str());
-            ImGui::PushItemWidth(70.0f * dpi);
+            // Name, type and default share the row left of the X button, so a long type (struct:Name) or literal is not cut off.
+            const ImGuiStyle& style = ImGui::GetStyle();
+            const float rowFree = std::max(120.0f * dpi, ImGui::GetContentRegionAvail().x - ImGui::CalcTextSize("X").x -
+                                                            style.FramePadding.x * 2.0f - style.ItemSpacing.x * 3.0f);
+            const float nameW = rowFree * 0.27f, typeW = rowFree * 0.40f, defW = rowFree - nameW - typeW;
+            ImGui::PushItemWidth(nameW);
 
             // ---- name (rename), same activate/apply-live/deactivate shape as attrEditRowKey_/
             // attrEditBuf_ above, keyed by field+name so a delete elsewhere never bleeds into this
@@ -1389,12 +1394,13 @@ void GraphEditor::drawEventGraph(float dpi) {
             // Combo can't typo its way into a type the reader refuses.
             {
                 const std::vector<std::string> typeChoices = dataTypeChoices(graph_.structs);
-                ImGui::PushItemWidth(90.0f * dpi);
-                if (ImGui::BeginCombo("##type", v.type.c_str())) {
+                ImGui::PushItemWidth(typeW);
+                if (ImGui::BeginCombo("##type", typePreviewLabel(v.type).c_str())) {
                     for (const std::string& tc : typeChoices)
                         if (ImGui::Selectable(tc.c_str(), tc == v.type)) retypeVariable(vname, tc);
                     ImGui::EndCombo();
                 }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", v.type.c_str());
                 ImGui::PopItemWidth();
             }
             ImGui::SameLine();
@@ -1402,6 +1408,7 @@ void GraphEditor::drawEventGraph(float dpi) {
             const std::string defRowKey = "vardefault\x1f" + vname;
             char defBuf[256];
             std::snprintf(defBuf, sizeof defBuf, "%s", (varEditRowKey_ == defRowKey) ? varEditBuf_ : v.defaultValue.c_str());
+            ImGui::SetNextItemWidth(defW);
             const bool defChanged = ImGui::InputText("##default", defBuf, sizeof defBuf);
             if (ImGui::IsItemActivated()) varEditRowKey_ = defRowKey;
             if (defChanged && varEditRowKey_ == defRowKey) std::snprintf(varEditBuf_, sizeof varEditBuf_, "%s", defBuf);
@@ -1412,7 +1419,9 @@ void GraphEditor::drawEventGraph(float dpi) {
             } else if (ImGui::IsItemDeactivated()) {
                 varEditRowKey_.clear();
             }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Default value (optional) -- what a fresh GraphHost seeds this variable with");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Default value (optional) -- what a fresh GraphHost seeds this variable with.\n"
+                                  "An array is 1,2,3; a struct is {field=value|field=value}, nested structs in braces.");
             ImGui::PopItemWidth();
             ImGui::SameLine();
 

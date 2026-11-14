@@ -1060,7 +1060,6 @@ void GraphEditor::drawStructsPanel(float dpi) {
     if (!::aver::editor::sectionHeader("Structs", ImGuiTreeNodeFlags_DefaultOpen)) return;
     if (graph_.structs.empty()) ImGui::TextDisabled("No structs declared.");
 
-    static const char* kFieldTypes[] = {"float", "int", "bool", "float3", "string", "entity"};
     std::vector<std::string> names;
     for (const auto& s : graph_.structs) names.push_back(s.name);
 
@@ -1069,6 +1068,10 @@ void GraphEditor::drawStructsPanel(float dpi) {
         for (const auto& s : graph_.structs) if (s.name == sname) { sp = &s; break; }
         if (!sp) continue;
         const std::vector<fmt::OcGraphStructField> fields = sp->fields;   // by value: a row's edit changes the struct
+        // Any data type, less the structs that would end up holding this one.
+        std::vector<std::string> fieldTypes;
+        for (const std::string& t : dataTypeChoices(graph_.structs))
+            if (isStructFieldTypeFor(t, sname, graph_.structs)) fieldTypes.push_back(t);
         ImGui::PushID(("##struct_" + sname).c_str());
 
         const bool open = ImGui::TreeNodeEx("##st", ImGuiTreeNodeFlags_DefaultOpen, "%s", sname.c_str());
@@ -1084,6 +1087,11 @@ void GraphEditor::drawStructsPanel(float dpi) {
             std::string newName = structEditBuf_;
             if (renamed) structEditRowKey_.clear();
 
+            // Field name and type share the row left of its button, so a long type (struct:Name, float3[]) is not cut off.
+            const ImGuiStyle& style = ImGui::GetStyle();
+            const float rowFree = std::max(100.0f * dpi, ImGui::GetContentRegionAvail().x - ImGui::CalcTextSize("X").x -
+                                                            style.FramePadding.x * 2.0f - style.ItemSpacing.x * 2.0f);
+            const float fieldNameW = rowFree * 0.40f, fieldTypeW = rowFree - fieldNameW;
             // Row edits are applied after the loop: one changes the struct the loop is reading.
             std::string pendingRemove, pendingRenameFrom, pendingRenameTo, pendingRetype, pendingRetypeTo;
             for (usize fi = 0; fi < fields.size(); ++fi) {
@@ -1091,7 +1099,7 @@ void GraphEditor::drawStructsPanel(float dpi) {
                 const std::string fkey = "fieldname\x1f" + sname + "\x1f" + fields[fi].name;
                 char buf[64];
                 std::snprintf(buf, sizeof buf, "%s", structEditRowKey_ == fkey ? structEditBuf_ : fields[fi].name.c_str());
-                ImGui::SetNextItemWidth(90.0f * dpi);
+                ImGui::SetNextItemWidth(fieldNameW);
                 if (ImGui::InputText("##fname", buf, sizeof buf)) {
                     structEditRowKey_ = fkey;
                     std::snprintf(structEditBuf_, sizeof structEditBuf_, "%s", buf);
@@ -1102,27 +1110,33 @@ void GraphEditor::drawStructsPanel(float dpi) {
                     structEditRowKey_.clear();
                 }
                 ImGui::SameLine();
-                ImGui::SetNextItemWidth(70.0f * dpi);
-                if (ImGui::BeginCombo("##ftype", fields[fi].type.c_str())) {
-                    for (const char* t : kFieldTypes)
-                        if (ImGui::Selectable(t, fields[fi].type == t)) { pendingRetype = fields[fi].name; pendingRetypeTo = t; }
+                ImGui::SetNextItemWidth(fieldTypeW);
+                if (ImGui::BeginCombo("##ftype", typePreviewLabel(fields[fi].type).c_str())) {
+                    for (const std::string& t : fieldTypes)
+                        if (ImGui::Selectable(t.c_str(), fields[fi].type == t)) { pendingRetype = fields[fi].name; pendingRetypeTo = t; }
                     ImGui::EndCombo();
                 }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", fields[fi].type.c_str());
                 ImGui::SameLine();
                 if (ImGui::SmallButton("X")) pendingRemove = fields[fi].name;
                 ImGui::PopID();
             }
 
-            ImGui::SetNextItemWidth(90.0f * dpi);
+            ImGui::SetNextItemWidth(fieldNameW);
             ImGui::InputTextWithHint("##newfield", "new field", newFieldBuf_, sizeof newFieldBuf_);
             ImGui::SameLine();
-            ImGui::SetNextItemWidth(70.0f * dpi);
-            ImGui::Combo("##newfieldtype", &newFieldTypeIdx_, kFieldTypes, IM_ARRAYSIZE(kFieldTypes));
+            if (newFieldTypeIdx_ < 0 || newFieldTypeIdx_ >= static_cast<int>(fieldTypes.size())) newFieldTypeIdx_ = 0;
+            ImGui::SetNextItemWidth(fieldTypeW);
+            if (ImGui::BeginCombo("##newfieldtype", typePreviewLabel(fieldTypes[static_cast<usize>(newFieldTypeIdx_)]).c_str())) {
+                for (usize ti = 0; ti < fieldTypes.size(); ++ti)
+                    if (ImGui::Selectable(fieldTypes[ti].c_str(), static_cast<int>(ti) == newFieldTypeIdx_)) newFieldTypeIdx_ = static_cast<int>(ti);
+                ImGui::EndCombo();
+            }
             ImGui::SameLine();
             if (ImGui::SmallButton("+") && newFieldBuf_[0] != 0) {
-                if (addStructField(sname, newFieldBuf_, kFieldTypes[newFieldTypeIdx_])) newFieldBuf_[0] = 0;
+                if (addStructField(sname, newFieldBuf_, fieldTypes[static_cast<usize>(newFieldTypeIdx_)])) newFieldBuf_[0] = 0;
                 else showRejectionBanner("cannot add field '" + std::string(newFieldBuf_) +
-                                         "': empty, already used, reserved (value, result) or contains whitespace or one of . : @ =");
+                                         "': empty, already used, reserved (value, result) or contains whitespace or one of . : @ = , { } |");
             }
 
             if (!pendingRemove.empty()) removeStructField(sname, pendingRemove);
@@ -1130,10 +1144,10 @@ void GraphEditor::drawStructsPanel(float dpi) {
             else if (!pendingRenameFrom.empty() && pendingRenameTo != pendingRenameFrom &&
                      !renameStructField(sname, pendingRenameFrom, pendingRenameTo))
                 showRejectionBanner("cannot rename field '" + pendingRenameFrom + "' to '" + pendingRenameTo +
-                                    "': empty, already used, reserved (value, result) or contains whitespace or one of . : @ =");
+                                    "': empty, already used, reserved (value, result) or contains whitespace or one of . : @ = , { } |");
             if (renamed && newName != sname && !renameStruct(sname, newName))
                 showRejectionBanner("cannot rename struct '" + sname + "' to '" + newName +
-                                    "': empty, already used, or contains whitespace or one of . : @ =");
+                                    "': empty, already used, or contains whitespace or one of . : @ = , { } |");
             ImGui::TreePop();
         }
         if (del) deleteStruct(sname);
@@ -1706,7 +1720,8 @@ namespace {
 // A struct or field name becomes part of a struct: type string, a struct= attribute (one token) and, for a field, a pin name
 // in a `node.pin` link, so none of whitespace, '.', ':', '@' or '=' can appear in one.
 bool validStructIdent(const std::string& s) {
-    return !s.empty() && s.find_first_of(" \t\r\n\v\f.:@=") == std::string::npos;
+    // , { } | also delimit struct literals and type signatures (Aver.Graph's GraphStructLiterals).
+    return !s.empty() && s.find_first_of(" \t\r\n\v\f.:@=,{}|") == std::string::npos;
 }
 
 bool reservedFieldName(const std::string& s) { return s == "value" || s == "result"; }
@@ -1817,6 +1832,12 @@ bool GraphEditor::renameStruct(const std::string& oldName, const std::string& ne
         for (auto& p : f.inputs) if (p.type == from) p.type = to;
         for (auto& p : f.outputs) if (p.type == from) p.type = to;
     }
+    for (auto& m : graph_.macros) {
+        for (auto& p : m.inputs) if (p.type == from) p.type = to;
+        for (auto& p : m.outputs) if (p.type == from) p.type = to;
+    }
+    for (auto& s : graph_.structs)
+        for (auto& f : s.fields) if (f.type == from) f.type = to;
     for (auto& n : graph_.nodes) {
         for (auto& p : n.pins) if (p.type == from) p.type = to;
         if (nodeAttrValue(n, "struct") == oldName) setNodeAttribute(n, "struct", newName);
@@ -1839,6 +1860,15 @@ bool GraphEditor::deleteStruct(const std::string& name, std::vector<std::string>
         };
         if (uses(f.inputs) || uses(f.outputs)) users.push_back("function " + f.name);
     }
+    for (const auto& m : graph_.macros) {
+        const auto uses = [&](const std::vector<fmt::OcGraphFunctionPin>& pins) {
+            return std::any_of(pins.begin(), pins.end(), [&](const fmt::OcGraphFunctionPin& p) { return p.type == type; });
+        };
+        if (uses(m.inputs) || uses(m.outputs)) users.push_back("macro " + m.name);
+    }
+    for (const auto& s : graph_.structs)
+        for (const auto& f : s.fields)
+            if (f.type == type) { users.push_back("struct " + s.name + "." + f.name); break; }
     for (const auto& n : graph_.nodes) {
         const bool pinUses = std::any_of(n.pins.begin(), n.pins.end(), [&](const fmt::OcGraphPin& p) { return p.type == type; });
         if (pinUses || nodeAttrValue(n, "struct") == name) users.push_back(n.id);
@@ -1859,13 +1889,13 @@ bool GraphEditor::deleteStruct(const std::string& name, std::vector<std::string>
 }
 
 bool GraphEditor::addStructField(const std::string& structName, const std::string& field, const std::string& type) {
-    if (!validStructIdent(field) || reservedFieldName(field) || !isScalarTypeName(type)) return false;
+    if (!validStructIdent(field) || reservedFieldName(field) || !isStructFieldTypeFor(type, structName, graph_.structs)) return false;
     fmt::OcGraphStruct* st = nullptr;
     for (auto& s : graph_.structs) if (s.name == structName) { st = &s; break; }
     if (!st) return false;
     for (const auto& f : st->fields) if (f.name == field) return false;
     pushUndo();
-    st->fields.push_back({field, lowerTypeName(type)});
+    st->fields.push_back({field, isStructTypeName(type) ? type : lowerTypeName(type)});
     resyncStructNodePins(structName);
     dirty_ = true;
     return true;
@@ -1906,15 +1936,16 @@ bool GraphEditor::renameStructField(const std::string& structName, const std::st
 }
 
 bool GraphEditor::retypeStructField(const std::string& structName, const std::string& field, const std::string& type) {
-    if (!isScalarTypeName(type)) return false;
+    if (!isStructFieldTypeFor(type, structName, graph_.structs)) return false;
+    const std::string t = isStructTypeName(type) ? type : lowerTypeName(type);
     fmt::OcGraphStruct* st = nullptr;
     for (auto& s : graph_.structs) if (s.name == structName) { st = &s; break; }
     if (!st) return false;
     for (auto& f : st->fields) {
         if (f.name != field) continue;
-        if (f.type == lowerTypeName(type)) return true;
+        if (f.type == t) return true;
         pushUndo();
-        f.type = lowerTypeName(type);
+        f.type = t;
         resyncStructNodePins(structName);
         dirty_ = true;
         return true;
