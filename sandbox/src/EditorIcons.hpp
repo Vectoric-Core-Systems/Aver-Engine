@@ -167,3 +167,8 @@ inline constexpr unsigned short kIconRangeLast  = 0xF8FF;
 #define ICON_VIEW_SPLIT         "\xEE\xA5\x89"   // U+E949 vertical_split
 #define ICON_VIEW_QUAD          "\xEE\xA3\xB0"   // U+E8F0 view_module
 #define ICON_CLEAR_ALL          "\xEE\x85\xAC"   // U+E16C delete_sweep
+
+// ---- graph editor toolbar ---------------------------------------------------------------------
+#define ICON_BUG                "\xEE\xA1\xA8"   // U+E868 bug_report
+#define ICON_FRAME_ALL          "\xEE\xA8\x90"   // U+EA10 fit_screen
+#define ICON_AUTO_LAYOUT        "\xEE\x99\xA3"   // U+E663 auto_fix_high

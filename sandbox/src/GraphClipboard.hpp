@@ -9,6 +9,7 @@
 // closing and an editor restart, and reads as ordinary .ocgraph in a text editor) and in a process-wide
 // store (so it still works where there is no OS clipboard to ask, i.e. every headless test).
 #include "GraphEditorGeometry.hpp"
+#include "GraphMacros.hpp"
 #include "aver/core/Types.hpp"
 #include "aver/formats/OcGraph.hpp"
 
@@ -158,7 +159,13 @@ inline PastePlan planPaste(const ClipPayload& p, const fmt::OcGraphData& target)
     for (usize i = 0; i < p.nodes.size(); ++i) {
         const fmt::OcGraphNode& n = p.nodes[i];
         const std::string type = clipLower(n.type);
-        if (type == "funcentry" || type == "funcreturn") { plan.droppedFunctionNodes.push_back(n.id); continue; }
+        if (type == "funcentry" || type == "funcreturn" || type == "macroinput" || type == "macrooutput") { plan.droppedFunctionNodes.push_back(n.id); continue; }
+        if (type == "macroinstance") {
+            const std::string callee = getNodeAttribute(n, "call").value;
+            const bool there = std::any_of(target.macros.begin(), target.macros.end(),
+                                           [&](const fmt::OcGraphMacro& m) { return m.name == callee; });
+            if (!there) { plan.droppedCalls.push_back(n.id); continue; }
+        }
         if (type == "callfunc") {
             const std::string callee = getNodeAttribute(n, "call").value;
             const bool there = std::any_of(target.functions.begin(), target.functions.end(),
@@ -247,8 +254,7 @@ PasteResult applyPaste(fmt::OcGraphData& target, const ClipPayload& p, f64 atX, 
         n.x = atX + (src.x - ox);
         n.y = atY + (src.y - oy);
         n.hasPosition = true;
-        if (!subgraph.empty()) setNodeAttribute(n, "func", subgraph);
-        else removeNodeAttribute(n, "func");
+        assignSubgraph(n, subgraph);
         r.oldToNew[src.id] = n.id;
         r.newIds.push_back(n.id);
         target.nodes.push_back(std::move(n));

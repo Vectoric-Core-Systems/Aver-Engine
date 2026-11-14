@@ -993,4 +993,258 @@ bool GraphEditor::buildMaterialPreview(Engine&, render::preview::PreviewDraw&) {
 
 #endif  // AVER_WITH_IMGUI
 
+// ---- reroutes, macros and the minimap's geometry -----------------------------------------------------------
+// The model half of three features whose gestures live in GraphEditorCanvas.cpp; headless, so
+// GraphEditorLoadSaveTest drives these exact calls.
+
+std::string GraphEditor::insertReroute(usize linkIndex, Vec2 canvasPos) {
+    const f32 dpi = g_graphEditorDpi;
+    const Vec2 at{canvasPos.x - 15.0f * dpi, canvasPos.y - 7.0f * dpi};   // the dot lands centred on the click
+    const std::string id = makeUniqueNodeId("Reroute");
+    // Worked on a copy and committed after the undo snapshot, so a refusal leaves no undo step behind.
+    fmt::OcGraphData next = graph_;
+    if (insertRerouteOnLink(next, linkIndex, at.x, at.y, id).empty()) return {};
+    pushUndo();
+    graph_ = std::move(next);
+    displayPos_[id] = at;
+    selectedNodes_ = {id};
+    selectedLink_ = -1;
+    selectedComment_.clear();
+    dirty_ = true;
+    return id;
+}
+
+fmt::OcGraphMacro* GraphEditor::findMacro(const std::string& name) {
+    for (auto& m : graph_.macros) if (m.name == name) return &m;
+    return nullptr;
+}
+
+static bool macroNameTaken(const fmt::OcGraphData& g, const std::string& name, const std::string& except = {}) {
+    for (const auto& m : g.macros) {
+        if (m.name == except || m.name.size() != name.size()) continue;
+        bool same = true;
+        for (usize i = 0; i < name.size() && same; ++i)
+            same = std::tolower(static_cast<unsigned char>(m.name[i])) == std::tolower(static_cast<unsigned char>(name[i]));
+        if (same) return true;
+    }
+    return false;
+}
+
+std::string GraphEditor::addMacro(const std::string& name) {
+    if (name.empty() || containsWhitespace(name)) return {};
+    std::string unique = name;
+    for (int i = 2; macroNameTaken(graph_, unique); ++i) unique = name + std::to_string(i);
+
+    pushUndo();
+    fmt::OcGraphMacro m;
+    m.name = unique;
+    graph_.macros.push_back(std::move(m));
+
+    // Both tunnels, always: a macro with nowhere to enter or leave is not a macro, and a pin added later needs a node to hang on.
+    const auto tunnel = [&](const char* type, f32 x) {
+        fmt::OcGraphNode n;
+        n.id = makeUniqueNodeId(type);
+        n.type = type;
+        n.x = x; n.y = 0.0;
+        assignSubgraph(n, macroSubgraphKey(unique));
+        displayPos_[n.id] = Vec2{x, 0.0f};
+        graph_.nodes.push_back(std::move(n));
+    };
+    tunnel("MacroInput", 0.0f);
+    tunnel("MacroOutput", 420.0f);
+    dirty_ = true;
+    return unique;
+}
+
+bool GraphEditor::renameMacro(const std::string& oldName, const std::string& newName) {
+    if (newName.empty() || containsWhitespace(newName)) return false;
+    if (oldName == newName) return true;
+    if (!findMacro(oldName)) return false;
+    if (macroNameTaken(graph_, newName, oldName)) {
+        showRejectionBanner("cannot rename macro '" + oldName + "': '" + newName + "' already exists");
+        return false;
+    }
+    pushUndo();
+    findMacro(oldName)->name = newName;
+    // Both attributes move in the same undo step: macro= (whose body a node is in) and call= on an instance.
+    for (auto& n : graph_.nodes) {
+        const GraphNodeAttribute owner = getNodeAttribute(n, "macro");
+        if (owner.found && owner.value == oldName) setNodeAttribute(n, "macro", newName);
+        if (n.type == "MacroInstance") {
+            const GraphNodeAttribute target = getNodeAttribute(n, "call");
+            if (target.found && target.value == oldName) setNodeAttribute(n, "call", newName);
+        }
+    }
+    if (currentSubgraph_ == macroSubgraphKey(oldName)) currentSubgraph_ = macroSubgraphKey(newName);
+    dirty_ = true;
+    return true;
+}
+
+bool GraphEditor::deleteMacro(const std::string& name, std::vector<std::string>* outBlockedBy) {
+    if (!findMacro(name)) return false;
+    const std::string key = macroSubgraphKey(name);
+    std::vector<std::string> callers;
+    for (const auto& n : graph_.nodes) {
+        if (n.type != "MacroInstance") continue;
+        const GraphNodeAttribute target = getNodeAttribute(n, "call");
+        if (target.found && target.value == name && subgraphOf(n) != key) callers.push_back(n.id);
+    }
+    if (!callers.empty()) {
+        if (outBlockedBy) *outBlockedBy = callers;
+        std::string list;
+        for (const auto& c : callers) list += (list.empty() ? "" : ", ") + c;
+        showRejectionBanner("cannot delete macro '" + name + "': still used by " + list);
+        return false;
+    }
+
+    pushUndo();
+    std::unordered_set<std::string> doomed;
+    for (const auto& n : graph_.nodes) if (subgraphOf(n) == key) doomed.insert(n.id);
+    graph_.links.erase(std::remove_if(graph_.links.begin(), graph_.links.end(), [&](const fmt::OcGraphLink& l) {
+        return doomed.count(l.sourceNode) != 0 || doomed.count(l.destNode) != 0;
+    }), graph_.links.end());
+    for (const auto& id : doomed) displayPos_.erase(id);
+    graph_.nodes.erase(std::remove_if(graph_.nodes.begin(), graph_.nodes.end(),
+                                      [&](const fmt::OcGraphNode& n) { return doomed.count(n.id) != 0; }), graph_.nodes.end());
+    graph_.macros.erase(std::remove_if(graph_.macros.begin(), graph_.macros.end(),
+                                       [&](const fmt::OcGraphMacro& m) { return m.name == name; }), graph_.macros.end());
+    if (currentSubgraph_ == key) setCurrentSubgraph({});
+    selectedNodes_.clear();
+    dirty_ = true;
+    return true;
+}
+
+bool GraphEditor::addMacroPin(const std::string& macroName, bool isInput, const std::string& pinName, const std::string& type) {
+    fmt::OcGraphMacro* m = findMacro(macroName);
+    if (!m || pinName.empty() || containsWhitespace(pinName)) return false;
+    if (pinName.find('.') != std::string::npos) {   // a LINK is node.pin, so a '.' in the pin cannot be read back
+        showRejectionBanner("cannot add pin '" + pinName + "': a pin name cannot contain '.'");
+        return false;
+    }
+    auto& list = isInput ? m->inputs : m->outputs;
+    for (const auto& p : list) if (p.name == pinName) return false;
+    const std::string t = (type == "exec" || isDataTypeName(type, &graph_.structs)) ? type : std::string("float");
+
+    pushUndo();
+    fmt::OcGraphMacro* live = findMacro(macroName);
+    (isInput ? live->inputs : live->outputs).push_back(fmt::OcGraphFunctionPin{pinName, t});
+    resyncMacroNodePins(macroName);
+    dirty_ = true;
+    return true;
+}
+
+bool GraphEditor::removeMacroPin(const std::string& macroName, bool isInput, const std::string& pinName) {
+    fmt::OcGraphMacro* m = findMacro(macroName);
+    if (!m) return false;
+    auto& list = isInput ? m->inputs : m->outputs;
+    const auto it = std::find_if(list.begin(), list.end(), [&](const fmt::OcGraphFunctionPin& p) { return p.name == pinName; });
+    if (it == list.end()) return false;
+    pushUndo();
+    auto& liveList = isInput ? findMacro(macroName)->inputs : findMacro(macroName)->outputs;
+    liveList.erase(std::find_if(liveList.begin(), liveList.end(), [&](const fmt::OcGraphFunctionPin& p) { return p.name == pinName; }));
+    resyncMacroNodePins(macroName);   // drops every wire into the pin that is gone
+    dirty_ = true;
+    return true;
+}
+
+// Rebuilds the pins of a macro's tunnels and instances from its declaration. A node's pins are written to the file
+// like any node's (so a value typed into an instance's input persists), except a node the file gave no pins at all,
+// whose derived pins stay unwritten, as a function's are, so opening and saving changes nothing.
+void GraphEditor::resyncMacroNodePins(const std::string& macroName) {
+    const fmt::OcGraphMacro* m = findMacro(macroName);
+    if (!m) return;
+    std::vector<std::string> touched;
+    for (auto& n : graph_.nodes) {
+        if (!isMacroNodeType(n.type)) continue;
+        const bool mine = n.type == "MacroInstance" ? (getNodeAttribute(n, "call").found && getNodeAttribute(n, "call").value == macroName)
+                                                    : (getNodeAttribute(n, "macro").found && getNodeAttribute(n, "macro").value == macroName);
+        if (!mine) continue;
+        bool synthesized = false;
+        for (const auto& p : n.pins) if (synthesizedPins_.erase(pinKey(n.id, p.name, p.isOutput)) != 0) synthesized = true;
+        if (n.pins.empty() && synthesizeEmptyMacroNodes_) synthesized = true;
+        std::vector<fmt::OcGraphPin> next = macroNodePins(n, *m);
+        for (auto& np : next)
+            for (const auto& old : n.pins)
+                if (old.name == np.name && old.isOutput == np.isOutput && old.type == np.type) { np.defaultValue = old.defaultValue; break; }
+        n.pins = std::move(next);
+        if (synthesized) for (const auto& p : n.pins) synthesizedPins_.insert(pinKey(n.id, p.name, p.isOutput));
+        touched.push_back(n.id);
+    }
+    // A wire whose end is gone from a rebuilt node goes with it (a dangling LINK would not reopen).
+    const auto stillThere = [&](const std::string& nodeId, const std::string& pin, bool isOutput) {
+        if (std::find(touched.begin(), touched.end(), nodeId) == touched.end()) return true;
+        for (const auto& n : graph_.nodes) {
+            if (n.id != nodeId) continue;
+            for (const auto& p : n.pins) if (p.name == pin && p.isOutput == isOutput) return true;
+            return false;
+        }
+        return true;
+    };
+    graph_.links.erase(std::remove_if(graph_.links.begin(), graph_.links.end(), [&](const fmt::OcGraphLink& l) {
+        return !(stillThere(l.sourceNode, l.sourcePin, true) && stillThere(l.destNode, l.destPin, false));
+    }), graph_.links.end());
+}
+
+std::string GraphEditor::addMacroNode(const std::string& macroName, Vec2 canvasPos) {
+    if (!findMacro(macroName)) return {};
+    if (currentSubgraph_ == macroSubgraphKey(macroName)) {
+        showRejectionBanner("a macro cannot contain itself -- use a function for recursion");
+        return {};
+    }
+    pushUndo();
+    fmt::OcGraphNode node;
+    node.id = makeUniqueNodeId("MacroInstance");
+    node.type = "MacroInstance";
+    node.x = canvasPos.x;
+    node.y = canvasPos.y;
+    setNodeAttribute(node, "call", macroName);
+    assignSubgraph(node, currentSubgraph_);
+    graph_.nodes.push_back(node);
+    displayPos_[node.id] = canvasPos;
+    resyncMacroNodePins(macroName);
+    selectedNodes_ = {node.id};
+    selectedLink_ = -1;
+    dirty_ = true;
+    return node.id;
+}
+
+void GraphEditor::setMinimapVisible(bool on) {
+    minimapOn_ = on;
+    if (!on) minimapDragging_ = false;
+#if AVER_WITH_IMGUI
+    setPrefBool("graphEditor.minimap", on);
+    flushEditorPrefs();
+#endif
+}
+
+bool GraphEditor::minimapLayout(Vec2 canvasSizePx, float dpi, MinimapLayout* out) {
+    if (!minimapOn_) return false;
+    Vec2 lo, hi;
+    if (!contentBounds(dpi, &lo, &hi)) return false;   // nothing to map
+    const f32 margin = 10.0f * dpi, pad = 6.0f * dpi;
+    const f32 w = std::clamp(220.0f * dpi, 60.0f * dpi, std::max(canvasSizePx.x * 0.4f, 60.0f * dpi));
+    const f32 h = std::clamp(140.0f * dpi, 40.0f * dpi, std::max(canvasSizePx.y * 0.4f, 40.0f * dpi));
+    if (canvasSizePx.x < w + 2.0f * margin || canvasSizePx.y < h + 2.0f * margin) return false;   // no room: it would only be in the way
+    // The view joins the content in what is mapped, so its outline is always on the overlay.
+    const Vec2 viewLo = screenToCanvas(view_, Vec2{0.0f, 0.0f});
+    const Vec2 viewHi = screenToCanvas(view_, canvasSizePx);
+    lo.x = std::min(lo.x, viewLo.x); lo.y = std::min(lo.y, viewLo.y);
+    hi.x = std::max(hi.x, viewHi.x); hi.y = std::max(hi.y, viewHi.y);
+    const f32 bw = std::max(hi.x - lo.x, 1.0f), bh = std::max(hi.y - lo.y, 1.0f);
+    MinimapLayout L;
+    L.max = Vec2{canvasSizePx.x - margin, canvasSizePx.y - margin};
+    L.min = Vec2{L.max.x - w, L.max.y - h};
+    L.scale = std::min((w - 2.0f * pad) / bw, (h - 2.0f * pad) / bh);
+    L.worldMin = lo;
+    L.origin = Vec2{L.min.x + (w - bw * L.scale) * 0.5f, L.min.y + (h - bh * L.scale) * 0.5f};
+    if (out) *out = L;
+    return true;
+}
+
+void GraphEditor::panToMinimapPoint(const MinimapLayout& layout, Vec2 mapPt, Vec2 canvasSizePx) {
+    const Vec2 target = layout.toCanvas(mapPt);
+    view_.panPx = Vec2{canvasSizePx.x * 0.5f - target.x * view_.zoom, canvasSizePx.y * 0.5f - target.y * view_.zoom};
+    viewTouched_ = true;
+}
+
 } // namespace aver::editor

@@ -21,6 +21,7 @@
 // changes what that outside node reads (a SetVar before a GetVar feeding it), which is the same rule
 // every function call in this language has.
 #include "GraphEditorGeometry.hpp"
+#include "GraphMacros.hpp"
 #include "aver/core/Types.hpp"
 #include "aver/formats/OcGraph.hpp"
 
@@ -72,10 +73,7 @@ inline const fmt::OcGraphPin* findPin(const fmt::OcGraphNode& n, const std::stri
     return nullptr;
 }
 
-inline std::string subgraphOf(const fmt::OcGraphNode& n) {
-    const GraphNodeAttribute a = getNodeAttribute(n, "func");
-    return a.found ? a.value : std::string();
-}
+inline std::string subgraphOf(const fmt::OcGraphNode& n) { return nodeSubgraphKey(n); }
 
 inline std::string uniqueNodeId(const fmt::OcGraphData& g, const std::string& type) {
     const std::string base = lower(type);
@@ -137,6 +135,7 @@ inline CollapseResult collapseToFunction(fmt::OcGraphData& graph, const std::vec
     // One subgraph: a selection straddling the event graph and a function (or two functions) has no
     // single place to put the call.
     const std::string sub = subgraphOf(*sel.front());
+    if (isMacroSubgraph(sub)) return refuse("a selection inside a macro cannot be collapsed to a function");
     for (const auto* n : sel)
         if (subgraphOf(*n) != sub) return refuse("the selection spans more than one subgraph (the event graph and function '" +
                                                   (sub.empty() ? subgraphOf(*n) : sub) + "' cannot be collapsed together)");

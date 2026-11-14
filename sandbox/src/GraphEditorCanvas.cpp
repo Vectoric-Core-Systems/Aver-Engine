@@ -226,13 +226,35 @@ void GraphEditor::drawEventGraph(float dpi) {
     const ImVec2 mouseNow = ImGui::GetIO().MousePos;
     const bool overFindBar = findOpen_ && mouseNow.x >= findBarMin_.x && mouseNow.x <= findBarMax_.x &&
                              mouseNow.y >= findBarMin_.y && mouseNow.y <= findBarMax_.y;
-    const bool hovered = hoveredRaw && !overFindBar;
+    // The minimap overlay owns the clicks and wheel over its rectangle; the graph under it does not see them.
+    const Vec2 canvasSizeV{canvasSize.x, canvasSize.y};
+    MinimapLayout mm;
+    const bool mmShown = minimapDragging_ ? (mm = minimapFrozen_, true) : minimapLayout(canvasSizeV, dpi, &mm);
+    const bool overMinimap = mmShown && (minimapDragging_ || mm.contains(fromIm(mouseNow) - origin));
+    const bool hovered = hoveredRaw && !overFindBar && !overMinimap;
     const bool canvasFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows) || hovered;
     if (canvasFocused) g_graphCanvasFocusFrame = ImGui::GetFrameCount();
 
     ImGuiIO& io = ImGui::GetIO();
     const Vec2 mouseScreen = fromIm(io.MousePos) - origin; // canvas-local screen space
     const Vec2 mouseCanvas = screenToCanvas(view_, mouseScreen);
+
+    // Press on the overlay starts a pan; dragging keeps the view centred on the point under the cursor.
+    if (mmShown) {
+        if (hoveredRaw && !overFindBar && !minimapDragging_ && dragMode_ == DragMode::None && overMinimap &&
+            ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            minimapDragging_ = true;
+            minimapFrozen_ = mm;
+        }
+        if (minimapDragging_) {
+            if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                const Vec2 inRect{std::clamp(mouseScreen.x, mm.min.x, mm.max.x), std::clamp(mouseScreen.y, mm.min.y, mm.max.y)};
+                panToMinimapPoint(minimapFrozen_, inRect, canvasSizeV);
+            } else {
+                minimapDragging_ = false;
+            }
+        }
+    }
 
     auto toScreenAbs = [&](Vec2 canvasPt) -> ImVec2 {
         const Vec2 s = canvasToScreen(view_, canvasPt);
@@ -339,9 +361,18 @@ void GraphEditor::drawEventGraph(float dpi) {
                 }
                 pendingMoveSnapshot_ = UndoState{graph_, displayPos_};
                 moveUndoPushed_ = false;
+                if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {   // an instance opens its macro's body
+                    for (const auto& n : graph_.nodes)
+                        if (n.id == hit.nodeId && n.type == "MacroInstance") { openMacro(getNodeAttribute(n, "call").value); break; }
+                }
             } else if (hit.kind == GraphHitKind::Link) {
-                if (!ctrl) selectedNodes_.clear();
-                selectedLink_ = static_cast<int>(hit.linkIndex);
+                if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                    insertReroute(static_cast<usize>(hit.linkIndex), mouseCanvas);
+                    recomputeLayouts(dpi);   // the wire is two links now; draw them this frame
+                } else {
+                    if (!ctrl) selectedNodes_.clear();
+                    selectedLink_ = static_cast<int>(hit.linkIndex);
+                }
             } else {
                 // Comment boxes are tested last: they draw behind everything, so anything drawn on top
                 // (e.g. a node's title bar) owns the click; testing first would make those unclickable.
@@ -692,6 +723,31 @@ void GraphEditor::drawEventGraph(float dpi) {
         const ImU32 headerCol = srcNode ? nodeHeaderColor(*srcNode, desc, graph_.variables)
                                         : headerColorForCategory(std::string());
 
+        // A reroute is a dot in a small capsule, wearing its type's colour; no header, title or labels.
+        if (srcNode && isRerouteNode(*srcNode)) {
+            const f32 z = dpi * view_.zoom;
+            const std::string rt = srcNode->pins.empty() ? std::string("float") : srcNode->pins.front().type;
+            const ImU32 tc = colorForType(rt);
+            dl->AddRectFilled(pMin, pMax, IM_COL32(21, 25, 32, 255), 7.0f * z);
+            dl->AddRect(pMin, pMax, selected ? kSelectionCol : IM_COL32(tc >> IM_COL32_R_SHIFT & 255, tc >> IM_COL32_G_SHIFT & 255, tc >> IM_COL32_B_SHIFT & 255, 150),
+                        7.0f * z, 0, (selected ? 2.5f : 1.2f) * dpi);
+            for (const auto& pl : nl.pins) {
+                const ImVec2 dot = toScreenAbs(pl.pos);
+                const f32 r = 4.0f * z;
+                const bool wired = connectedPins.count({nl.nodeId, pl.name}) != 0;
+                if (isExecPinType(pl.type)) {
+                    const ImVec2 arrow[3] = {ImVec2(dot.x - r * 0.85f, dot.y - r), ImVec2(dot.x + r * 0.95f, dot.y), ImVec2(dot.x - r * 0.85f, dot.y + r)};
+                    if (wired) dl->AddConvexPolyFilled(arrow, 3, tc);
+                    dl->AddPolyline(arrow, 3, wired ? IM_COL32(40, 40, 40, 255) : tc, (wired ? 1.0f : 1.6f) * dpi, ImDrawFlags_Closed);
+                } else if (wired) {
+                    dl->AddCircleFilled(dot, r, tc);
+                } else {
+                    dl->AddCircle(dot, r - 0.8f * dpi, tc, 0, 1.6f * dpi);
+                }
+            }
+            continue;
+        }
+
         // A soft drop shadow, offset down-right, drawn before anything else in the node -- makes it
         // read as sitting ABOVE the wire layer rather than punched out of it. Matters more here than
         // in most UIs: the canvas behind a node is a mesh of bright wires, not empty background.
@@ -869,6 +925,7 @@ void GraphEditor::drawEventGraph(float dpi) {
     }
     dl->ChannelsMerge();
     drawInlineValueEditor();
+    drawMinimap(origin, canvasSizeV, dpi);
 
     // ---- overlays: in-progress link drag, box-select rect, rejection banner (drawn AFTER merge, so
     // always on top regardless of channel) ----------------------------------------------------------
@@ -1013,6 +1070,11 @@ void GraphEditor::drawEventGraph(float dpi) {
                 }
                 if (hasBp && ImGui::MenuItem(breakpointEnabled(rightClickNode_) ? "Disable Breakpoint" : "Enable Breakpoint"))
                     setBreakpointEnabled(rightClickNode_, !breakpointEnabled(rightClickNode_));
+                for (const auto& cand : graph_.nodes)
+                    if (cand.id == rightClickNode_ && cand.type == "MacroInstance" && ImGui::MenuItem("Open Macro")) {
+                        openMacro(getNodeAttribute(cand, "call").value);
+                        break;
+                    }
 
                 // Find References for whatever this node names: a variable, a function, an event, a class.
                 const fmt::OcGraphNode* rn = nullptr;
@@ -1090,7 +1152,7 @@ void GraphEditor::drawEventGraph(float dpi) {
             const std::string_view q(addSearch_);
             // One list for everything the box can add: a comment box and this graph's functions match by
             // name too, so the search is never the one place they cannot be found.
-            struct AddRow { std::string label; const char* category; const GraphNodeDesc* desc; const std::string* fn; };
+            struct AddRow { std::string label; const char* category; const GraphNodeDesc* desc; const std::string* fn; const std::string* macro = nullptr; };
             std::vector<AddRow> rows;
             if (!linkDropPending_ && detail::ciFind("Comment Box", q) != std::string_view::npos)
                 rows.push_back({"Comment Box", "Graph", nullptr, nullptr});
@@ -1098,6 +1160,10 @@ void GraphEditor::drawEventGraph(float dpi) {
                 if (detail::ciFind(f.name, q) != std::string_view::npos || detail::ciFind("Call Function", q) == 0)
                     rows.push_back({"Call " + f.name + (f.pure ? "  (pure)" : ""), "Function", nullptr, &f.name});
             const usize kShown = 200;
+            if (!linkDropPending_)
+                for (const auto& m : graph_.macros)
+                    if (detail::ciFind(m.name, q) != std::string_view::npos || detail::ciFind("Macro", q) == 0)
+                        rows.push_back({"Macro " + m.name, "Macro", nullptr, nullptr, &m.name});
             // This graph's own structs have Make / Break / Set rows the static catalog cannot hold.
             const std::vector<GraphNodeDesc> derived = graphDerivedNodeDescs();
             for (const GraphNodeDesc& d : derived) {
@@ -1143,6 +1209,8 @@ void GraphEditor::drawEventGraph(float dpi) {
                         spawnAndConnectLinkDrop(r.desc->typeId, pendingSpawnCanvasPos_);
                     } else if (r.fn) {
                         addCallNode(*r.fn, pendingSpawnCanvasPos_);
+                    } else if (r.macro) {
+                        addMacroNode(*r.macro, pendingSpawnCanvasPos_);
                     } else {
                         const Vec2 a = pendingSpawnCanvasPos_;
                         addComment(a, Vec2{a.x + 320.0f * dpi, a.y + 180.0f * dpi}, "Comment");
@@ -1162,6 +1230,11 @@ void GraphEditor::drawEventGraph(float dpi) {
                 std::string row = f.name + (f.pure ? "  (pure)" : "");
                 if (ImGui::MenuItem(row.c_str())) addCallNode(f.name, pendingSpawnCanvasPos_);
             }
+            ImGui::EndMenu();
+        }
+        if (!linkDropPending_ && !graph_.macros.empty() && ImGui::BeginMenu("Macro")) {
+            for (const auto& m : graph_.macros)
+                if (ImGui::MenuItem(m.name.c_str())) addMacroNode(m.name, pendingSpawnCanvasPos_);
             ImGui::EndMenu();
         }
         // A comment box is not a node and has no pins, so it sits above the families rather than in one.
@@ -1189,7 +1262,7 @@ void GraphEditor::drawEventGraph(float dpi) {
             // See GraphNodeDefs.hpp's Function block: these three exist in the catalog for their
             // name and colour, and are created by the Functions panel, which knows which function
             // they belong to. Dropping a bare one produces a node with no pins and no owner.
-            if (cat == "Function") continue;
+            if (cat == "Function" || cat == "Macro") continue;
             if (ImGui::BeginMenu(cat.c_str())) {
                 for (const auto& d : graphNodeCatalog()) {
                     if (d.category != cat || (d.domain & domain) == 0u) continue;
@@ -1248,6 +1321,7 @@ void GraphEditor::drawEventGraph(float dpi) {
     ImGui::BeginChild("##graphDetails", ImVec2(detailsW, std::max(avail.y, 80.0f * dpi)), true);
 
     drawFunctionsPanel(dpi);
+    drawMacrosPanel(dpi);
     drawStructsPanel(dpi);
 
     // Variables panel: declare/rename/retype/delete. Lives above the per-node section, drawn regardless
@@ -1516,6 +1590,289 @@ void GraphEditor::drawEventGraph(float dpi) {
     ImGui::EndChild();
 #else
     (void)dpi;
+#endif
+}
+
+// ---- the toolbar: one row, small font, icon buttons --------------------------------------------------------
+
+#if AVER_WITH_IMGUI
+// `text` cut to fit `maxPx` with a trailing "...", measured in the current font.
+static std::string ellipsizeToWidth(const std::string& text, float maxPx) {
+    if (maxPx <= 0.0f) return {};
+    if (ImGui::CalcTextSize(text.c_str()).x <= maxPx) return text;
+    usize n = text.size();
+    while (n > 0 && ImGui::CalcTextSize((text.substr(0, n) + "...").c_str()).x > maxPx) --n;
+    return n == 0 ? std::string() : text.substr(0, n) + "...";
+}
+#endif
+
+void GraphEditor::drawToolbar(float dpi) {
+#if AVER_WITH_IMGUI
+    FontScope small(editorFonts().secondary, editorFonts().secondaryPx);
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const float iconW = ImGui::GetFrameHeight() * 1.25f;
+    const ImVec4 on(0.95f, 0.40f, 0.13f, 0.60f);
+    bool first = true;
+    const auto gap = [&](float extra = 0.0f) {
+        if (!first) ImGui::SameLine(0.0f, style.ItemSpacing.x + extra);
+        first = false;
+    };
+    const auto chord = [](CommandId id) { return chordToString(keybinds().chordFor(id)); };
+    // An icon button whose tooltip carries its name and shortcut. A toggle shows lit while on.
+    const auto iconBtn = [&](const char* icon, const char* id, const std::string& tip, bool lit, bool enabled) {
+        gap();
+        ImGui::BeginDisabled(!enabled);
+        if (lit) ImGui::PushStyleColor(ImGuiCol_Button, on);
+        const bool hit = ImGui::Button((std::string(icon) + "##" + id).c_str(), ImVec2(iconW, 0.0f));
+        if (lit) ImGui::PopStyleColor();
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("%s", tip.c_str());
+        return hit && enabled;
+    };
+
+    const bool focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+    if (iconBtn(ICON_SAVE, "save", "Save  (" + chord(CommandId::AssetSave) + ")", false, true) ||
+        (focused && keybinds().pressed(CommandId::AssetSave, ImGui::GetIO()))) {
+        std::string why;
+        if (!save(&why)) AVER_ERROR("[GraphEditor] save failed for '{}': {}", path_, why);
+        // Checked on save, but the save still happens: a half-built graph is normal mid-build.
+        else if (validate_) { validateNow(validateErr_, validateNode_); }
+    }
+    const bool canValidate = validate_ || diagnose_;
+    if (iconBtn(ICON_CHECK_CIRCLE, "validate", canValidate ? "Validate: list every problem, then check the graph compiles"
+                                                          : "The .NET bridge exports no GraphValidate, so nothing can check this graph.",
+                false, canValidate)) {
+        if (runDiagnosticsNow()) { bottomOpen_ = true; bottomTabRequest_ = 0; }
+        if (!validate_) {
+            // Diagnostics alone: the Problems tab is the answer.
+        } else if (validateNow(validateErr_, validateNode_)) {
+            validateErr_.clear();
+            validateNode_.clear();
+            showRejectionBanner("graph is valid");
+        } else {
+            showRejectionBanner(validateErr_);
+        }
+    }
+    if (debugValuesSrc_) {
+        bool armed = debugSession().armed;
+        if (iconBtn(ICON_BUG, "debug", "Debug: arm the graph debugger. F9 puts a breakpoint on the selected node and wires show their values.\n"
+                                       "Graphs compile when Play starts, so this takes effect on the NEXT Play.",
+                    armed, true)) {
+            armed = !armed;
+            debugSession().setArmed(armed);
+            setPrefBool("graphEditor.debugArmed", armed);
+            flushEditorPrefs();
+        }
+    }
+    gap(4.0f * dpi);
+    if (iconBtn(ICON_UNDO, "undo", "Undo  (" + chord(CommandId::EditUndo) + ")", false, history_.canUndo())) undo();
+    if (iconBtn(ICON_REDO, "redo", "Redo  (" + chord(CommandId::EditRedo) + ")", false, history_.canRedo())) redo();
+    gap(4.0f * dpi);
+    if (iconBtn(ICON_FRAME_ALL, "frame", "Frame All  (" + chord(CommandId::GraphFrameAll) + ")\nFit the whole graph in view; F frames the selection", false, true))
+        framePendingFromToolbar_ = true;
+    if (iconBtn(ICON_AUTO_LAYOUT, "layout", "Auto-Layout\nRe-place every node in dependency columns and SAVE those positions. One undo step.",
+                false, !graph_.nodes.empty())) {
+        applyAutoLayout(dpi);
+        framePendingFromToolbar_ = true;   // a tidy graph you cannot see is not tidy
+    }
+    if (iconBtn(ICON_MAP, "minimap", minimapOn_ ? "Minimap: on (click to hide)" : "Minimap: off (click to show)", minimapOn_, true))
+        setMinimapVisible(!minimapOn_);
+
+    // Which subgraph the canvas shows: a combo, since functions and macros are unbounded and the tab bar below means something else.
+    if (!graph_.functions.empty() || !graph_.macros.empty()) {
+        gap(4.0f * dpi);
+        ImGui::SetNextItemWidth(150.0f * dpi);
+        if (ImGui::BeginCombo("##graphSubgraph", subgraphLabel(currentSubgraph_).c_str())) {
+            if (ImGui::Selectable("Event Graph", currentSubgraph_.empty())) setCurrentSubgraph({});
+            for (const auto& f : graph_.functions) {
+                const std::string row = f.name + (f.pure ? "  (pure)" : "");
+                if (ImGui::Selectable(row.c_str(), currentSubgraph_ == f.name)) setCurrentSubgraph(f.name);
+            }
+            for (const auto& m : graph_.macros) {
+                const std::string key = macroSubgraphKey(m.name);
+                if (ImGui::Selectable(("Macro: " + m.name).c_str(), currentSubgraph_ == key)) setCurrentSubgraph(key);
+            }
+            ImGui::EndCombo();
+        }
+    }
+
+    // The standing answer to "is this graph finished"; click it to open the list.
+    if (diagnose_) {
+        gap(4.0f * dpi);
+        const ProblemCounts counts = countProblems(problems_);
+        ImGui::PushStyleColor(ImGuiCol_Text, counts.errors ? ImVec4(0.95f, 0.45f, 0.40f, 1.0f)
+                                           : counts.warnings ? ImVec4(0.95f, 0.78f, 0.35f, 1.0f)
+                                                             : ImVec4(0.60f, 0.80f, 0.60f, 1.0f));
+        const std::string summary = problemSummary(counts) + "##problemsSummary";
+        if (ImGui::SmallButton(summary.c_str())) {
+            bottomOpen_ = !bottomOpen_;
+            bottomTabRequest_ = 0;
+            setPrefBool("graphEditor.problemsOpen", bottomOpen_);
+            flushEditorPrefs();
+        }
+        ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Click to show or hide the Problems list");
+    }
+
+    // What is left of the row goes to the standing validation result and the file name, the counts keep the right edge.
+    const std::string counts = std::to_string(graph_.nodes.size()) + " nodes, " + std::to_string(graph_.links.size()) + " links";
+    const float countsW = ImGui::CalcTextSize(counts.c_str()).x;
+    const float pad = style.ItemSpacing.x;
+    float room = ImGui::GetContentRegionAvail().x - style.ItemSpacing.x;
+    const bool countsFit = room > countsW + 3.0f * pad + 60.0f * dpi;
+    if (countsFit) room -= countsW + pad;
+    if (!validateErr_.empty() && room > 40.0f * dpi) {
+        gap(4.0f * dpi);
+        const std::string msg = ellipsizeToWidth((validateNode_.empty() ? "" : validateNode_ + ": ") + validateErr_, room * 0.6f);
+        ImGui::TextColored(ImVec4(0.95f, 0.55f, 0.35f, 1.0f), "%s", msg.c_str());
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s%s", validateNode_.empty() ? "" : (validateNode_ + ": ").c_str(), validateErr_.c_str());
+        room -= ImGui::CalcTextSize(msg.c_str()).x + pad;
+    }
+    if (room > 40.0f * dpi) {
+        gap(4.0f * dpi);
+        const std::string name = ellipsizeToWidth(std::filesystem::path(path_).filename().string(), room);
+        ImGui::TextDisabled("%s", name.c_str());
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s\nPan: right- or middle-drag, or Space+drag.  C: comment box.", path_.c_str());
+    }
+    if (countsFit) {
+        ImGui::SameLine(0.0f, 0.0f);
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(ImGui::GetContentRegionAvail().x - countsW, 0.0f));
+        ImGui::TextDisabled("%s", counts.c_str());
+    }
+#else
+    (void)dpi;
+#endif
+}
+
+// ---- the Macros section of the details column ---------------------------------------------------------------
+
+// Thin ImGui glue over addMacro / renameMacro / deleteMacro / addMacroPin / removeMacroPin, as the Functions
+// section is over the function calls; the model is in GraphEditorComponents.cpp and tested headlessly.
+void GraphEditor::drawMacrosPanel(float dpi) {
+#if AVER_WITH_IMGUI
+    if (openGraphDomain() == kDomainMaterial) return;
+    if (!::aver::editor::sectionHeader("Macros", ImGuiTreeNodeFlags_DefaultOpen)) return;
+    if (graph_.macros.empty()) ImGui::TextDisabled("No macros declared.");
+
+    // Data types, then exec: a macro pin may carry control flow, which a function pin may not.
+    std::vector<std::string> typeChoices = dataTypeChoices(graph_.structs);
+    typeChoices.push_back("exec");
+    std::vector<const char*> kTypes;
+    for (const std::string& t : typeChoices) kTypes.push_back(t.c_str());
+    if (newMacroPinType_ < 0 || newMacroPinType_ >= static_cast<int>(kTypes.size())) newMacroPinType_ = 0;
+
+    for (usize mi = 0; mi < graph_.macros.size(); ++mi) {
+        const std::string mname = graph_.macros[mi].name;   // by VALUE: the loop body can delete it
+        ImGui::PushID(static_cast<int>(mi));
+        const bool open = ImGui::TreeNodeEx("##mac", ImGuiTreeNodeFlags_DefaultOpen, "%s", mname.c_str());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Open")) openMacro(mname);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Show this macro's body on the canvas");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Use")) {
+            addMacroNode(mname, screenToCanvas(view_, Vec2{lastCanvasSizePx_.x * 0.5f, lastCanvasSizePx_.y * 0.5f}));
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Add an instance of this macro to the subgraph you are editing");
+
+        if (open) {
+            const std::string nameKey = "macname\x1f" + mname;
+            if (macroEditRowKey_ != nameKey) std::snprintf(macroEditBuf_, sizeof macroEditBuf_, "%s", mname.c_str());
+            ImGui::SetNextItemWidth(150.0f * dpi);
+            if (ImGui::InputText("Name", macroEditBuf_, sizeof macroEditBuf_)) macroEditRowKey_ = nameKey;
+            if (ImGui::IsItemDeactivatedAfterEdit()) {
+                renameMacro(mname, macroEditBuf_);
+                macroEditRowKey_.clear();
+            }
+            for (int side = 0; side < 2; ++side) {
+                const bool isInput = (side == 0);
+                ImGui::TextDisabled("%s", isInput ? "Inputs" : "Outputs");
+                const auto& list = isInput ? graph_.macros[mi].inputs : graph_.macros[mi].outputs;
+                for (usize pi = 0; pi < list.size(); ++pi) {
+                    ImGui::PushID(static_cast<int>(side * 1000 + pi));
+                    ImGui::TextUnformatted(list[pi].name.c_str());
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("%s", list[pi].type.c_str());
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("X")) removeMacroPin(mname, isInput, list[pi].name);
+                    ImGui::PopID();
+                }
+                ImGui::PushID(side);
+                ImGui::SetNextItemWidth(90.0f * dpi);
+                ImGui::InputTextWithHint("##newpin", isInput ? "new input" : "new output", newMacroPinBuf_, sizeof newMacroPinBuf_);
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(90.0f * dpi);
+                ImGui::Combo("##newpintype", &newMacroPinType_, kTypes.data(), static_cast<int>(kTypes.size()));
+                ImGui::SameLine();
+                if (ImGui::SmallButton("+") && newMacroPinBuf_[0] != 0) {
+                    addMacroPin(mname, isInput, newMacroPinBuf_, kTypes[newMacroPinType_]);
+                    newMacroPinBuf_[0] = 0;
+                }
+                ImGui::PopID();
+            }
+            // deleteMacro raises its own banner naming every instance that still uses it.
+            if (ImGui::SmallButton("Delete macro")) deleteMacro(mname);
+            ImGui::TreePop();
+        }
+        ImGui::PopID();
+        ImGui::Separator();
+    }
+
+    if (ImGui::Button("+ New Macro")) {
+        const std::string made = addMacro("NewMacro");
+        if (!made.empty()) openMacro(made);   // a new macro you cannot see is not made
+    }
+#else
+    (void)dpi;
+#endif
+}
+
+// ---- the minimap overlay ----------------------------------------------------------------------------------
+
+// Nodes in their header colours, comment boxes faint, the view outlined. The mouse handling is in drawEventGraph
+// (it has to run before the canvas takes the click); this only paints.
+void GraphEditor::drawMinimap(Vec2 originPx, Vec2 canvasSizePx, float dpi) {
+#if AVER_WITH_IMGUI
+    MinimapLayout L;
+    if (minimapDragging_) L = minimapFrozen_;
+    else if (!minimapLayout(canvasSizePx, dpi, &L)) return;
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const auto at = [&](Vec2 p) { return ImVec2(originPx.x + p.x, originPx.y + p.y); };
+    const ImVec2 a = at(L.min), b = at(L.max);
+    dl->AddRectFilled(a, b, IM_COL32(16, 19, 25, 215), 4.0f * dpi);
+    dl->PushClipRect(a, b, true);
+
+    for (const auto& c : graph_.comments) {
+        const int r = std::clamp(c.r, 0, 255), g = std::clamp(c.g, 0, 255), bl = std::clamp(c.b, 0, 255);
+        dl->AddRectFilled(at(L.toMap(Vec2{static_cast<f32>(c.x), static_cast<f32>(c.y)})),
+                          at(L.toMap(Vec2{static_cast<f32>(c.x + c.w), static_cast<f32>(c.y + c.h)})), IM_COL32(r, g, bl, 45));
+    }
+    std::unordered_map<std::string, const fmt::OcGraphNode*> byId;
+    byId.reserve(graph_.nodes.size());
+    for (const auto& n : graph_.nodes) byId.emplace(n.id, &n);
+    const f32 minPx = 2.0f * dpi;
+    for (const auto& nl : layouts_) {
+        const auto it = byId.find(nl.nodeId);
+        ImU32 col = headerColorForCategory(std::string());
+        if (it != byId.end()) {
+            const fmt::OcGraphNode& n = *it->second;
+            col = isRerouteNode(n) ? colorForType(n.pins.empty() ? std::string("float") : n.pins.front().type)
+                                   : nodeHeaderColor(n, findGraphNodeDesc(n.type), graph_.variables);
+        }
+        ImVec2 p0 = at(L.toMap(nl.min)), p1 = at(L.toMap(nl.max));
+        if (p1.x - p0.x < minPx) p1.x = p0.x + minPx;
+        if (p1.y - p0.y < minPx) p1.y = p0.y + minPx;
+        dl->AddRectFilled(p0, p1, col);
+        if (std::find(selectedNodes_.begin(), selectedNodes_.end(), nl.nodeId) != selectedNodes_.end())
+            dl->AddRect(p0, p1, kSelectionCol, 0.0f, 0, 1.5f * dpi);
+    }
+    // The part of the canvas on screen now.
+    dl->AddRect(at(L.toMap(screenToCanvas(view_, Vec2{0.0f, 0.0f}))), at(L.toMap(screenToCanvas(view_, canvasSizePx))),
+                IM_COL32(235, 235, 240, 230), 0.0f, 0, 1.5f * dpi);
+    dl->PopClipRect();
+    dl->AddRect(a, b, IM_COL32(88, 98, 118, 255), 4.0f * dpi);
+#else
+    (void)originPx; (void)canvasSizePx; (void)dpi;
 #endif
 }
 

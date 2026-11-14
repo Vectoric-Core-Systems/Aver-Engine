@@ -22,6 +22,7 @@
 #include "GraphDebugModel.hpp"
 #include "GraphEditorGeometry.hpp"
 #include "GraphFind.hpp"
+#include "GraphMacros.hpp"
 #include "GraphProblems.hpp"
 #include "SnapshotUndo.hpp"
 #include "aver/formats/OcGraph.hpp"
@@ -312,6 +313,52 @@ public:
     // Drops a CallFunc node calling `funcName`. Separate from addNodeFromCatalog because a call node
     // has no fixed pin shape -- it takes the callee's, which the catalog cannot know.
     std::string addCallNode(const std::string& funcName, Vec2 canvasPos);
+
+    // ---- reroutes (knots) -----------------------------------------------------------------------------
+    // Splits link `linkIndex` with a Reroute at `canvasPos` -- the gesture a double-click on a wire makes -- as ONE
+    // undo step. The reroute takes the wire's type and lives in the subgraph on screen. Returns its id, or empty
+    // for a bad index. connectPins/commitLink retype a reroute that has nothing real wired to it yet to whatever it
+    // is first wired to, along its whole chain (GraphMacros.hpp's prepareRerouteConnect).
+    std::string insertReroute(usize linkIndex, Vec2 canvasPos);
+
+    // ---- macros -------------------------------------------------------------------------------------
+    // A macro is a named subgraph INLINED at every use, with any number of exec and data pins on both sides. Same
+    // shape of API as functions: a declaration (MACRO/MACROIN/MACROOUT), a body of nodes tagged `macro=`, entered
+    // through a MacroInput node and left through a MacroOutput node, and MacroInstance nodes using it.
+    const std::vector<fmt::OcGraphMacro>& macros() const { return graph_.macros; }
+    // Declares a macro and lays down its MacroInput and MacroOutput nodes. Returns the uniquified name, or empty.
+    std::string addMacro(const std::string& name);
+    bool renameMacro(const std::string& oldName, const std::string& newName);
+    // Refuses (false) while an instance outside the macro's own body still uses it.
+    bool deleteMacro(const std::string& name, std::vector<std::string>* outBlockedBy = nullptr);
+    // `type` is a data type or "exec". Both calls rebuild every tunnel and instance's pins and drop wires that lose a pin.
+    bool addMacroPin(const std::string& macroName, bool isInput, const std::string& pinName, const std::string& type);
+    bool removeMacroPin(const std::string& macroName, bool isInput, const std::string& pinName);
+    // Drops an instance of `macroName`, in the subgraph on screen. A macro cannot be placed in its own body.
+    std::string addMacroNode(const std::string& macroName, Vec2 canvasPos);
+    // Shows the macro's body on the canvas.
+    void openMacro(const std::string& macroName) { setCurrentSubgraph(macroSubgraphKey(macroName)); }
+
+    // ---- minimap ------------------------------------------------------------------------------------
+    // The overlay in the canvas's bottom-right corner. All coordinates are canvas-local screen pixels (relative to
+    // the canvas child's top-left), the space `view_` maps into.
+    struct MinimapLayout {
+        Vec2 min, max;        // the overlay's rectangle
+        Vec2 worldMin;        // the canvas-space point drawn at the rectangle's inner top-left
+        f32 scale = 1.0f;     // overlay pixels per canvas unit
+        Vec2 origin;          // where worldMin lands, inside min..max
+        Vec2 toMap(Vec2 canvasPt) const { return Vec2(origin.x + (canvasPt.x - worldMin.x) * scale, origin.y + (canvasPt.y - worldMin.y) * scale); }
+        Vec2 toCanvas(Vec2 mapPt) const { return Vec2(worldMin.x + (mapPt.x - origin.x) / scale, worldMin.y + (mapPt.y - origin.y) / scale); }
+        bool contains(Vec2 p) const { return p.x >= min.x && p.x <= max.x && p.y >= min.y && p.y <= max.y; }
+    };
+    bool minimapVisible() const { return minimapOn_; }
+    // Remembered in the editor prefs ("graphEditor.minimap"; on by default).
+    void setMinimapVisible(bool on);
+    // Where the overlay sits and how it maps, for a canvas of `canvasSizePx`. False when the minimap is off or the
+    // subgraph on screen has no nodes or comment boxes (an empty minimap is just a box in the way).
+    bool minimapLayout(Vec2 canvasSizePx, float dpi, MinimapLayout* out);
+    // Centres the view on the canvas point `mapPt` (overlay pixels) stands for; the click and drag on the overlay.
+    void panToMinimapPoint(const MinimapLayout& layout, Vec2 mapPt, Vec2 canvasSizePx);
 
     // ---- comment boxes ------------------------------------------------------------------------
     // Groups nodes visually and says why they're wired that way, with no pins/links/graph effect
@@ -651,6 +698,20 @@ private:
     // filter from last time is never still applied.
     char addSearch_[128] = {};
     i32  addHighlight_ = 0;   // the search row Enter adds (Up/Down move it)
+
+    bool minimapOn_ = true;
+    bool synthesizeEmptyMacroNodes_ = false;   // set while loading: nodes the file wrote no pins for keep derived ones
+    bool minimapDragging_ = false;
+    MinimapLayout minimapFrozen_;          // the mapping a drag started on, so the overlay does not slide under the cursor
+    fmt::OcGraphMacro* findMacro(const std::string& name);
+    void resyncMacroNodePins(const std::string& macroName);
+    void drawMacrosPanel(float dpi);
+    void drawMinimap(Vec2 originPx, Vec2 canvasSizePx, float dpi);
+    void drawToolbar(float dpi);
+    std::string macroEditRowKey_;
+    char macroEditBuf_[128] = {};
+    char newMacroPinBuf_[64] = {};
+    int newMacroPinType_ = 0;
 
     char newFuncPinBuf_[64] = {};
     int newFuncPinType_ = 0;               // index into the same float/int/bool list the Variables panel uses

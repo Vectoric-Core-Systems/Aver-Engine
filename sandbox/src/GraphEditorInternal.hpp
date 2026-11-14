@@ -6,6 +6,7 @@
 #include "GraphClipboard.hpp"
 #include "GraphCollectionNodes.hpp"
 #include "GraphEditor.hpp"
+#include "GraphMacros.hpp"
 #include "GraphNodeDefs.hpp"
 
 #include <chrono>
@@ -97,6 +98,11 @@ inline std::string nodeTitle(const fmt::OcGraphNode& n, const GraphNodeDesc* des
         if (n.type == "BreakStruct") return "Break " + s;
         return "Set " + s + (f.empty() ? "" : "." + f);
     }
+    // A macro or function call is titled by what it calls.
+    if (n.type == "MacroInstance" || n.type == "CallFunc") {
+        const std::string c = nodeAttrValue(n, "call");
+        return c.empty() ? fallback : c;
+    }
     if (n.type != "GetVar" && n.type != "SetVar") return fallback;
 
     const GraphNodeAttribute a = getNodeAttribute(n, "var");
@@ -129,6 +135,7 @@ inline Vec2 fromIm(ImVec2 v) { return Vec2(v.x, v.y); }
 // entry point and a call stay visually distinct (also matches Blueprint's convention).
 inline ImU32 headerColorForCategory(const std::string& category) {
     if (category == "Function") return IM_COL32(242, 101, 34, 255);
+    if (category == "Macro")    return IM_COL32(124, 92, 196, 255);   // violet: a macro is inlined, not called
     std::string c = category;
     for (char& ch : c) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
 
@@ -208,10 +215,7 @@ constexpr float kCommentMinPx  = 60.0f;
 
 // A node's owning subgraph, read straight from its func= attribute. Empty means the event graph --
 // see GraphEditor::currentSubgraph() for why one convention is used everywhere rather than three.
-inline std::string subgraphOf(const fmt::OcGraphNode& n) {
-    const GraphNodeAttribute a = getNodeAttribute(n, "func");
-    return a.found ? a.value : std::string();
-}
+inline std::string subgraphOf(const fmt::OcGraphNode& n) { return nodeSubgraphKey(n); }
 inline bool isFunctionNodeType(const std::string& t) {
     return t == "FuncEntry" || t == "FuncReturn" || t == "CallFunc";
 }

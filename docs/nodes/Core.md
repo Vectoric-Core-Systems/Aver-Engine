@@ -4,7 +4,7 @@
 
 The nodes the parser (`OcGraphParser.AddDefaultPins`) and the compiler know by hand, plus palette entries that are not table rows. Read from the editor palette (`sandbox/src/GraphNodeDefs*.hpp`); the parser is the ground truth for a pin shape (`docs/AVER_NODE_NODES.md`).
 
-## Gameplay (245)
+## Gameplay (249)
 
 | Type | Display | Category | Pins | Attributes |
 |---|---|---|---|---|
@@ -58,6 +58,7 @@ The nodes the parser (`OcGraphParser.AddDefaultPins`) and the compiler know by h
 | `FlipFlop` | Flip Flop | Flow | in: `exec` exec<br>out: `a` exec, `b` exec, `isA` bool | none |
 | `ForEach` | For Each (counted) | Flow | in: `exec` exec, `count` int<br>out: `loop` exec, `index` int, `done` exec | none |
 | `Gate` | Gate | Flow | in: `exec` exec, `open` bool, `close` bool<br>out: `then` exec | none |
+| `Reroute` | Reroute | Flow | in: `in` float<br>out: `out` float | none |
 | `RerouteBool` | Reroute (Bool) | Flow | in: `a` bool<br>out: `result` bool | none |
 | `RerouteExec` | Reroute (Exec) | Flow | in: `exec` exec<br>out: `then` exec | none |
 | `RerouteFloat` | Reroute (Float) | Flow | in: `a` float<br>out: `result` float | none |
@@ -102,6 +103,9 @@ The nodes the parser (`OcGraphParser.AddDefaultPins`) and the compiler know by h
 | `Or` | OR | Logic | in: `a` bool, `b` bool<br>out: `result` bool | none |
 | `Select` | Select | Logic | in: `cond` bool, `ifTrue` float, `ifFalse` float<br>out: `result` float | none |
 | `Xor` | XOR | Logic | in: `a` bool, `b` bool<br>out: `result` bool | none |
+| `MacroInput` | Macro Input | Macro | none | none |
+| `MacroInstance` | Macro | Macro | none | none |
+| `MacroOutput` | Macro Output | Macro | none | none |
 | `Abs` | Absolute | Math | in: `a` float<br>out: `result` float | none |
 | `Add` | Add | Math | in: `a` float, `b` float<br>out: `result` float | none |
 | `Ceil` | Ceiling | Math | in: `a` float<br>out: `result` float | none |

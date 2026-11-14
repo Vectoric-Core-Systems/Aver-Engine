@@ -71,6 +71,7 @@ f32 pointSegmentDist(Vec2 p, Vec2 a, Vec2 b) {
 // ---------------------------------------------------------------------------------------------------
 
 bool pinTakesInlineValue(const fmt::OcGraphNode& node, const fmt::OcGraphPin& pin) {
+    if (node.type == "Reroute") return false;
     const bool typed = pin.type == "float" || pin.type == "int" || pin.type == "bool" ||
                        pin.type == "float3" || pin.type == "string" || pin.type == "entity";
     if (!typed) return false;
@@ -89,6 +90,21 @@ GraphNodeLayout computeNodeLayout(const fmt::OcGraphNode& node, const std::strin
                                    const GraphLayoutStyle& style, f32 scale) {
     GraphNodeLayout layout;
     layout.nodeId = node.id;
+
+    // A reroute is a small dot with its two pins close beside it: no header, no title, no labels.
+    if (node.type == "Reroute") {
+        layout.min = Vec2(static_cast<f32>(node.x), static_cast<f32>(node.y));
+        layout.max = layout.min + Vec2(30.0f * scale, 14.0f * scale);
+        for (const auto& p : node.pins) {
+            GraphPinLayout pl;
+            pl.name = p.name;
+            pl.type = p.type;
+            pl.isOutput = p.isOutput;
+            pl.pos = Vec2(p.isOutput ? layout.max.x - 5.0f * scale : layout.min.x + 5.0f * scale, layout.min.y + 7.0f * scale);
+            layout.pins.push_back(pl);
+        }
+        return layout;
+    }
 
     usize numInputs = 0, numOutputs = 0;
     f32 maxInputLabelPx = 0.0f, maxOutputLabelPx = 0.0f;

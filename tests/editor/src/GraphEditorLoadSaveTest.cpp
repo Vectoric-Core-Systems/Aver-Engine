@@ -1637,6 +1637,300 @@ static void testFunctionsInTheEditor() {
     }
 }
 
+// =========================================================================== reroutes and macros =
+
+static bool hasLink(const GraphEditor& ed, const std::string& a, const std::string& ap, const std::string& b, const std::string& bp) {
+    for (const auto& l : ed.graph().links)
+        if (l.sourceNode == a && l.sourcePin == ap && l.destNode == b && l.destPin == bp) return true;
+    return false;
+}
+
+static const fmt::OcGraphNode* nodeById(const GraphEditor& ed, const std::string& id) {
+    for (const auto& n : ed.graph().nodes) if (n.id == id) return &n;
+    return nullptr;
+}
+
+static std::string pinTypeOf(const GraphEditor& ed, const std::string& node, const std::string& pin, bool isOutput) {
+    if (const fmt::OcGraphNode* n = nodeById(ed, node))
+        for (const auto& p : n->pins) if (p.name == pin && p.isOutput == isOutput) return p.type;
+    return "?";
+}
+
+static void testRerouteAndMacroRecordsRoundTrip() {
+    AVER_INFO("=== Reroute nodes and MACRO / MACROIN / MACROOUT records survive a load and save byte for byte ===");
+    const std::string text =
+        "OCGRAPH 1\n"
+        "NAME RerouteMacros\n"
+        "\n"
+        "MACRO Pick\n"
+        "MACROIN Pick go exec\n"
+        "MACROIN Pick cond bool\n"
+        "MACROOUT Pick yes exec\n"
+        "MACROOUT Pick no exec\n"
+        "\n"
+        "NODE mi MacroInput 0 0 macro=Pick\n"
+        "NODE mo MacroOutput 400 0 macro=Pick\n"
+        "NODE use MacroInstance 100 100 call=Pick\n"
+        "NODE r Reroute 300 100\n"
+        "PIN r in in float\n"
+        "PIN r out out float\n"
+        "NODE k ConstFloat 0 200 value=3\n"
+        "PIN k value out float\n"
+        "LINK k.value r.in\n";
+
+    fmt::OcGraphData g;
+    std::string err;
+    check(fmt::parseOcgraph(text, g, &err), "the records parse (" + err + ")");
+    check(g.macros.size() == 1 && g.macros[0].name == "Pick", "one macro is modelled");
+    check(g.macros[0].inputs.size() == 2 && g.macros[0].outputs.size() == 2, "with its two inputs and two outputs");
+    check(g.macros[0].inputs[0].type == "exec" && g.macros[0].inputs[1].type == "bool", "an exec pin keeps its type string");
+    check(fmt::writeOcgraph(g, text) == text, "the model writes them back exactly over the existing text");
+
+    const std::string tmp = (std::filesystem::path(scratchDir()) / "reroute_macro_rt.ocgraph").string();
+    writeFile(tmp, text);
+    GraphEditor ed(tmp);
+    check(ed.macros().size() == 1, "the editor loads the macro");
+    std::string why;
+    check(ed.save(&why), "an unedited save succeeds (" + why + ")");
+    check(readFile(tmp) == text, "and writes the file byte for byte -- the instance and tunnels' derived pins are not written");
+    check(pinTypeOf(ed, "use", "go", false) == "exec" && pinTypeOf(ed, "use", "yes", true) == "exec",
+          "yet the instance is drawn with the macro's pins, exec included");
+    check(pinTypeOf(ed, "mi", "cond", true) == "bool" && pinTypeOf(ed, "mo", "no", false) == "exec",
+          "and the tunnels with the inputs as outputs and the outputs as inputs");
+}
+
+static void testInsertRerouteOnALink() {
+    AVER_INFO("=== inserting a reroute splits a link in two, typed as the wire is, in one undo step ===");
+    const std::string text =
+        "OCGRAPH 1\n"
+        "NAME Knots\n"
+        "NODE k ConstFloat 0 0 value=3\n"
+        "PIN k value out float\n"
+        "NODE a Add 400 0\n"
+        "PIN a a in float\n"
+        "PIN a b in float\n"
+        "PIN a result out float\n"
+        "LINK k.value a.a\n";
+    const std::string tmp = (std::filesystem::path(scratchDir()) / "knots.ocgraph").string();
+    writeFile(tmp, text);
+
+    GraphEditor ed(tmp);
+    const usize nodesBefore = ed.graph().nodes.size();
+    check(ed.insertReroute(5, Vec2{200.0f, 10.0f}).empty(), "a link index that is not there inserts nothing");
+    check(!ed.dirty(), "and leaves the graph clean");
+
+    const std::string r = ed.insertReroute(0, Vec2{200.0f, 10.0f});
+    check(!r.empty(), "a reroute is inserted on the link");
+    check(ed.graph().nodes.size() == nodesBefore + 1, "one node was added");
+    check(ed.graph().links.size() == 2, "the one link became two");
+    check(hasLink(ed, "k", "value", r, "in"), "the source feeds the reroute's input");
+    check(hasLink(ed, r, "out", "a", "a"), "and the reroute's output feeds the old destination");
+    check(pinTypeOf(ed, r, "in", false) == "float" && pinTypeOf(ed, r, "out", true) == "float", "the reroute's pins carry the wire's type");
+
+    ed.undoForTest();
+    check(ed.graph().nodes.size() == nodesBefore && ed.graph().links.size() == 1 && hasLink(ed, "k", "value", "a", "a"),
+          "one undo removes the reroute and restores the link");
+    ed.redoForTest();
+    check(ed.graph().links.size() == 2 && nodeById(ed, r) != nullptr, "and redo puts it back");
+
+    std::string why;
+    check(ed.save(&why), "save succeeds (" + why + ")");
+    const std::string saved = readFile(tmp);
+    check(saved.find("PIN " + r + " in in float") != std::string::npos && saved.find("PIN " + r + " out out float") != std::string::npos,
+          "the reroute's pins are written, typed");
+    GraphEditor again(tmp);
+    check(again.graph().links.size() == 2 && pinTypeOf(again, r, "out", true) == "float", "and reload reads the same graph");
+}
+
+static void testRerouteRetypesOnConnectAndAcrossAChain() {
+    AVER_INFO("=== a free reroute takes the type of its first link, along its chain; a typed one refuses the wrong type ===");
+    const std::string text =
+        "OCGRAPH 1\n"
+        "NAME Chain\n"
+        "NODE tick OnTick 0 0\n"
+        "PIN tick exec out exec\n"
+        "ENTRY tick OnTick\n"
+        "NODE br Branch 700 0\n"
+        "PIN br exec in exec\n"
+        "PIN br cond in bool\n"
+        "PIN br true out exec\n"
+        "PIN br false out exec\n"
+        "PIN br tookTrue out bool\n"
+        "NODE k ConstFloat 0 200 value=3\n"
+        "PIN k value out float\n";
+    const std::string tmp = (std::filesystem::path(scratchDir()) / "chain.ocgraph").string();
+    writeFile(tmp, text);
+
+    GraphEditor ed(tmp);
+    const std::string r1 = ed.addNodeFromCatalog("Reroute", Vec2{200.0f, 0.0f});
+    const std::string r2 = ed.addNodeFromCatalog("Reroute", Vec2{400.0f, 0.0f});
+    check(!r1.empty() && !r2.empty(), "the palette adds Reroute");
+    check(ed.connectPins(r1, "out", r2, "in"), "two free reroutes join (neither has a type to disagree with)");
+    check(pinTypeOf(ed, r2, "in", false) == "float", "and stay as they were");
+
+    check(ed.connectPins("tick", "exec", r1, "in"), "an exec output wires into the first reroute");
+    check(pinTypeOf(ed, r1, "in", false) == "exec" && pinTypeOf(ed, r1, "out", true) == "exec", "which becomes an exec reroute");
+    check(pinTypeOf(ed, r2, "in", false) == "exec" && pinTypeOf(ed, r2, "out", true) == "exec", "and so does the next one in the chain");
+
+    check(!ed.connectPins(r2, "out", "br", "cond"), "the exec chain refuses a bool input");
+    check(!hasLink(ed, r2, "out", "br", "cond"), "and no link was made");
+    check(ed.connectPins(r2, "out", "br", "exec"), "it accepts an exec input");
+
+    const std::string r3 = ed.addNodeFromCatalog("Reroute", Vec2{300.0f, 200.0f});
+    check(ed.connectPins("k", "value", r3, "in"), "a float output wires into a separate free reroute");
+    check(pinTypeOf(ed, r3, "out", true) == "float" && pinTypeOf(ed, r1, "out", true) == "exec", "which becomes float without touching the exec chain");
+    check(!ed.connectPins(r3, "out", "br", "cond"), "and a float reroute refuses a bool input");
+
+    std::string why;
+    check(ed.save(&why), "the typed reroutes save (" + why + ")");
+    const std::string saved = readFile(tmp);
+    check(saved.find("PIN " + r2 + " out out exec") != std::string::npos, "with their retyped pins written");
+}
+
+static void testMacrosInTheEditor() {
+    AVER_INFO("=== macros: declare, add pins, instance, rename, delete -- and the body on its own canvas ===");
+    const std::string text =
+        "OCGRAPH 1\n"
+        "NAME MacroEditor\n"
+        "NODE tick OnTick 0 0\n"
+        "PIN tick exec out exec\n"
+        "ENTRY tick OnTick\n";
+    const std::string tmp = (std::filesystem::path(scratchDir()) / "macro_editor.ocgraph").string();
+    writeFile(tmp, text);
+
+    std::string made;
+    std::string useId;
+    {
+        GraphEditor ed(tmp);
+        made = ed.addMacro("Pick");
+        check(made == "Pick" && ed.macros().size() == 1, "addMacro declares it");
+        check(ed.addMacro("pick") == "pick2", "a name that differs only in case is made unique");
+        check(ed.deleteMacro("pick2"), "(and the spare goes)");
+        int inputs = 0, outputs = 0;
+        for (const auto& n : ed.graph().nodes) {
+            if (n.type == "MacroInput") ++inputs;
+            if (n.type == "MacroOutput") ++outputs;
+        }
+        check(inputs == 1 && outputs == 1, "it comes with its entry and exit tunnel nodes");
+
+        check(ed.addMacroPin("Pick", true, "go", "exec"), "an exec input is added");
+        check(ed.addMacroPin("Pick", true, "cond", "bool"), "a data input is added");
+        check(ed.addMacroPin("Pick", false, "yes", "exec") && ed.addMacroPin("Pick", false, "no", "exec"), "two exec outputs are added");
+        check(!ed.addMacroPin("Pick", true, "go", "exec"), "a repeated pin name is refused");
+        check(ed.macros()[0].inputs.size() == 2 && ed.macros()[0].outputs.size() == 2, "the declaration has the four pins");
+
+        std::string entryId, exitId;
+        for (const auto& n : ed.graph().nodes) {
+            if (n.type == "MacroInput") entryId = n.id;
+            if (n.type == "MacroOutput") exitId = n.id;
+        }
+        check(pinTypeOf(ed, entryId, "go", true) == "exec" && pinTypeOf(ed, entryId, "cond", true) == "bool", "the entry tunnel has the inputs as outputs");
+        check(pinTypeOf(ed, exitId, "yes", false) == "exec", "the exit tunnel has the outputs as inputs");
+
+        ed.openMacro("Pick");
+        check(isMacroSubgraph(ed.currentSubgraph()) && macroNameOf(ed.currentSubgraph()) == "Pick", "the macro opens as its own subgraph");
+        Vec2 lo, hi;
+        check(ed.contentBounds(1.0f, &lo, &hi), "its canvas shows the two tunnels");
+        const std::string branch = ed.addNodeFromCatalog("Branch", Vec2{200.0f, 0.0f});
+        check(getNodeAttribute(*nodeById(ed, branch), "macro").value == "Pick", "a node added there belongs to the macro body");
+        check(ed.connectPins(entryId, "go", branch, "exec") && ed.connectPins(entryId, "cond", branch, "cond"), "tunnel pins wire into the body");
+        check(ed.connectPins(branch, "true", exitId, "yes") && ed.connectPins(branch, "false", exitId, "no"), "and the body wires out to the exits");
+        check(ed.addMacroNode("Pick", Vec2{0.0f, 0.0f}).empty(), "a macro cannot be placed in its own body");
+
+        ed.setCurrentSubgraph({});
+        useId = ed.addMacroNode("Pick", Vec2{200.0f, 0.0f});
+        check(!useId.empty() && getNodeAttribute(*nodeById(ed, useId), "call").value == "Pick", "an instance is added to the event graph");
+        check(pinTypeOf(ed, useId, "go", false) == "exec" && pinTypeOf(ed, useId, "cond", false) == "bool" &&
+              pinTypeOf(ed, useId, "yes", true) == "exec" && pinTypeOf(ed, useId, "no", true) == "exec",
+              "with the macro's inputs and outputs as pins");
+        check(ed.connectPins("tick", "exec", useId, "go"), "an exec output wires into the instance's exec input");
+
+        std::string why;
+        check(ed.save(&why), "save succeeds (" + why + ")");
+        const std::string saved = readFile(tmp);
+        check(saved.find("MACRO Pick") != std::string::npos, "the MACRO record is written");
+        check(saved.find("MACROIN Pick go exec") != std::string::npos && saved.find("MACROIN Pick cond bool") != std::string::npos, "so are its MACROIN records");
+        check(saved.find("MACROOUT Pick yes exec") != std::string::npos && saved.find("MACROOUT Pick no exec") != std::string::npos, "and its MACROOUT records");
+        check(saved.find("macro=Pick") != std::string::npos && saved.find("call=Pick") != std::string::npos, "the body nodes and the instance carry macro= and call=");
+    }
+
+    {
+        GraphEditor ed(tmp);
+        check(ed.macros().size() == 1 && ed.macros()[0].inputs.size() == 2, "the macro and its pins reload");
+        check(pinTypeOf(ed, useId, "no", true) == "exec", "and the instance still has the macro's pins");
+
+        // Removing a pin takes the wires into it.
+        check(ed.removeMacroPin("Pick", false, "no"), "a pin is removed");
+        check(pinTypeOf(ed, useId, "no", true) == "?", "from the instance");
+        bool anyNo = false;
+        for (const auto& l : ed.graph().links) if (l.sourcePin == "no" || l.destPin == "no") anyNo = true;
+        check(!anyNo, "and every wire that used it is gone");
+
+        check(ed.renameMacro("Pick", "Choose"), "rename succeeds");
+        std::string why;
+        check(ed.save(&why), "save after rename succeeds (" + why + ")");
+        const std::string after = readFile(tmp);
+        check(after.find("MACRO Choose") != std::string::npos && after.find("MACROIN Choose go exec") != std::string::npos, "the declaration was renamed");
+        check(after.find("macro=Choose") != std::string::npos && after.find("call=Choose") != std::string::npos, "so were the body's macro= and the instance's call=");
+        check(after.find("Pick") == std::string::npos, "and no reference to the old name is left");
+
+        std::vector<std::string> blockers;
+        check(!ed.deleteMacro("Choose", &blockers) && !blockers.empty(), "delete is refused while an instance uses it, naming it");
+        check(ed.selectNode(useId), "the instance selects");
+        ed.deleteSelection();
+        check(ed.deleteMacro("Choose"), "with the instance gone, delete succeeds");
+        bool anyBody = false;
+        for (const auto& n : ed.graph().nodes) if (isMacroNodeType(n.type)) anyBody = true;
+        check(ed.macros().empty() && !anyBody, "the macro and its body go together");
+    }
+}
+
+static void testMinimapGeometry() {
+    AVER_INFO("=== the minimap maps the content and the view, and is absent for an empty graph or when off ===");
+    const std::string empty = (std::filesystem::path(scratchDir()) / "minimap_empty.ocgraph").string();
+    writeFile(empty, "OCGRAPH 1\nNAME Empty\n");
+    {
+        GraphEditor ed(empty);
+        GraphEditor::MinimapLayout L;
+        check(!ed.minimapLayout(Vec2{1200.0f, 800.0f}, 1.0f, &L), "an empty graph has no minimap");
+    }
+
+    const std::string tmp = (std::filesystem::path(scratchDir()) / "minimap.ocgraph").string();
+    writeFile(tmp,
+        "OCGRAPH 1\n"
+        "NAME Mini\n"
+        "NODE k ConstFloat 0 0 value=3\n"
+        "PIN k value out float\n"
+        "NODE a Add 2000 1000\n"
+        "PIN a a in float\n"
+        "PIN a b in float\n"
+        "PIN a result out float\n");
+    GraphEditor ed(tmp);
+    check(ed.minimapVisible(), "the minimap is on by default");
+    GraphEditor::MinimapLayout L;
+    const Vec2 canvas{1200.0f, 800.0f};
+    check(ed.minimapLayout(canvas, 1.0f, &L), "a graph with nodes has one");
+    check(L.max.x <= canvas.x && L.max.y <= canvas.y && L.min.x >= 0.0f && L.min.y >= 0.0f, "inside the canvas");
+    check(L.max.x > canvas.x - 40.0f && L.max.y > canvas.y - 40.0f, "in its bottom-right corner");
+    check(L.contains(Vec2{L.max.x - 1.0f, L.max.y - 1.0f}) && !L.contains(Vec2{10.0f, 10.0f}), "its rectangle is what the clicks are tested against");
+
+    // A click on the overlay centres the view on the point it stands for.
+    const Vec2 mid{(L.min.x + L.max.x) * 0.5f, (L.min.y + L.max.y) * 0.5f};
+    ed.panToMinimapPoint(L, mid, canvas);
+    Vec2 lo, hi;
+    check(ed.contentBounds(1.0f, &lo, &hi), "(content bounds)");
+    GraphEditor::MinimapLayout L2;
+    check(ed.minimapLayout(canvas, 1.0f, &L2), "the overlay is still there after the pan");
+    const Vec2 centre = L2.toCanvas(L2.toMap(L.toCanvas(mid)));
+    check(std::fabs(centre.x - L.toCanvas(mid).x) < 1.0f && std::fabs(centre.y - L.toCanvas(mid).y) < 1.0f, "mapping a point there and back is the identity");
+
+    ed.setMinimapVisible(false);
+    check(!ed.minimapVisible() && !ed.minimapLayout(canvas, 1.0f, &L), "turned off, it is gone");
+    ed.setMinimapVisible(true);
+    check(ed.minimapLayout(canvas, 1.0f, &L), "and back on");
+    check(!ed.minimapLayout(Vec2{70.0f, 50.0f}, 1.0f, &L), "a canvas too small to spare room for it has none");
+}
+
 static void testLoadFailure() {
     AVER_INFO("=== a missing file fails cleanly ===");
     const std::string missing = (std::filesystem::path(scratchDir()) / "does_not_exist.ocgraph").string();
@@ -2273,6 +2567,11 @@ int main() {
     testCommentBoxesRoundTripAndCarryTheirContents();
     testFramingAndAutoLayout();
     testFunctionsInTheEditor();
+    testRerouteAndMacroRecordsRoundTrip();
+    testInsertRerouteOnALink();
+    testRerouteRetypesOnConnectAndAcrossAChain();
+    testMacrosInTheEditor();
+    testMinimapGeometry();
     testLoadFailure();
     testWrongExtensionIsRejectedByFactory();
     testConstNodeValueIsEditable();

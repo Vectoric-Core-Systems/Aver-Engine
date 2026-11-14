@@ -106,6 +106,10 @@ void GraphEditor::loadFromDisk() {
     // FUNC declaration, not a node type. Without this, a call node loaded from disk draws no pins and
     // every wire into it silently disappears.
     for (const auto& f : graph_.functions) resyncFunctionNodePins(f.name);
+    // The same for a macro's tunnels and instances; ones the file wrote no pins for keep derived (unwritten) pins.
+    synthesizeEmptyMacroNodes_ = true;
+    for (const auto& m : graph_.macros) resyncMacroNodePins(m.name);
+    synthesizeEmptyMacroNodes_ = false;
 
     displayPos_.clear();
     for (const auto& n : graph_.nodes)
@@ -129,6 +133,7 @@ void GraphEditor::loadFromDisk() {
 
 #if AVER_WITH_IMGUI
     bottomOpen_ = prefBool("graphEditor.problemsOpen", false);
+    minimapOn_ = prefBool("graphEditor.minimap", true);
     // This user's breakpoints for this graph, read once per session: the session set is the live one
     // after that (a second tab on the same graph must not clobber edits made since).
     {
@@ -408,6 +413,7 @@ void GraphEditor::beginLinkDrop(const std::string& fromNode, const std::string& 
 bool GraphEditor::linkDropAccepts(const GraphNodeDesc& desc) const {
     if (!linkDropPending_) return false;
     if ((desc.domain & openGraphDomain()) == 0u) return false;
+    if (desc.typeId == "Reroute") return true;   // a knot takes the wire's type
 
     // The SAME predicate commitLink uses, not a second rule that happens to agree today -- so the
     // palette never offers a node whose link then gets refused: the author has already committed to
@@ -437,7 +443,8 @@ std::string GraphEditor::spawnAndConnectLinkDrop(const std::string& typeId, Vec2
     const PinTypeCompat compat = openGraphDomain() == kDomainMaterial ? &materialPinTypeMatch
                                                                      : &exactPinTypeMatch;
     std::string targetPin;
-    for (const auto& ps : desc->pins) {
+    if (desc->typeId == "Reroute") targetPin = linkDropFromIsOutput_ ? "in" : "out";
+    else for (const auto& ps : desc->pins) {
         if (ps.isOutput == linkDropFromIsOutput_) continue;
         const bool ok = linkDropFromIsOutput_ ? compat(linkDropFromType_, ps.type)
                                               : compat(ps.type, linkDropFromType_);
@@ -511,7 +518,7 @@ std::string GraphEditor::addNodeFromCatalog(const std::string& typeId, Vec2 canv
     // A node dropped onto a function's canvas belongs to that function -- otherwise it lands in the
     // event graph and vanishes the instant it's drawn: present in the file, invisible on the canvas
     // that made it.
-    if (!currentSubgraph_.empty()) setNodeAttribute(graph_.nodes.back(), "func", currentSubgraph_);
+    assignSubgraph(graph_.nodes.back(), currentSubgraph_);
 
     displayPos_[node.id] = canvasPos;
     selectedNodes_ = {node.id};
@@ -725,7 +732,7 @@ bool GraphEditor::renameFunction(const std::string& oldName, const std::string& 
         const GraphNodeAttribute owner = getNodeAttribute(n, "func");
         if (owner.found && owner.value == oldName) setNodeAttribute(n, "func", newName);
         const GraphNodeAttribute target = getNodeAttribute(n, "call");
-        if (target.found && target.value == oldName) setNodeAttribute(n, "call", newName);
+        if (n.type != "MacroInstance" && target.found && target.value == oldName) setNodeAttribute(n, "call", newName);
     }
     if (currentSubgraph_ == oldName) currentSubgraph_ = newName;
     dirty_ = true;
@@ -737,7 +744,7 @@ bool GraphEditor::deleteFunction(const std::string& name, std::vector<std::strin
     std::vector<std::string> callers;
     for (const auto& n : graph_.nodes) {
         const GraphNodeAttribute target = getNodeAttribute(n, "call");
-        if (!target.found || target.value != name) continue;
+        if (n.type == "MacroInstance" || !target.found || target.value != name) continue;
         // A call INSIDE the function being deleted goes with it, so it is not a blocker.
         if (subgraphOf(n) == name) continue;
         callers.push_back(n.id);
@@ -935,7 +942,7 @@ std::string GraphEditor::addCallNode(const std::string& funcName, Vec2 canvasPos
     setNodeAttribute(node, "call", funcName);
     // A call node dropped while a function's canvas is open belongs to THAT function -- including
     // when it calls the same one, which is how a recursive call is authored.
-    if (!currentSubgraph_.empty()) setNodeAttribute(node, "func", currentSubgraph_);
+    assignSubgraph(node, currentSubgraph_);
     graph_.nodes.push_back(node);
     displayPos_[node.id] = canvasPos;
     resyncFunctionNodePins(funcName);
@@ -1426,7 +1433,17 @@ void GraphEditor::commitLink(const std::string& srcNode, const std::string& srcP
     // MaterialGraphHlsl.cpp), so refusing them here would forbid wiring that works, reading as a
     // broken palette. float2 into float3 stays refused on both sides, since inventing the third
     // component is the compiler guessing. Gameplay graphs keep exact-match, unchanged.
-    const GraphLinkCheck check = canConnectPins(graph_, srcNode, srcPin, dstNode, dstPin,
+    //
+    // A reroute with nothing real wired to it takes the type of whatever it is wired to first, along its chain of
+    // reroutes. That is tried on a copy, so a refused link retypes nothing.
+    fmt::OcGraphData probe;
+    const bool viaReroute = rerouteDetail::isReroute(graph_, srcNode) || rerouteDetail::isReroute(graph_, dstNode);
+    std::vector<std::string> retyped;
+    if (viaReroute) {
+        probe = graph_;
+        retyped = prepareRerouteConnect(probe, srcNode, srcPin, dstNode, dstPin);
+    }
+    const GraphLinkCheck check = canConnectPins(viaReroute ? probe : graph_, srcNode, srcPin, dstNode, dstPin,
                                                 openGraphDomain() == kDomainMaterial
                                                     ? &materialPinTypeMatch
                                                     : &exactPinTypeMatch);
@@ -1435,6 +1452,12 @@ void GraphEditor::commitLink(const std::string& srcNode, const std::string& srcP
         return;
     }
     pushUndo();
+    if (!retyped.empty()) {
+        graph_ = std::move(probe);
+        // A reroute's pins are written with its type, so a retyped one must not be stripped as drawn-only.
+        for (const std::string& id : retyped)
+            for (const char* pin : {"in", "out"}) { synthesizedPins_.erase(pinKey(id, pin, false)); synthesizedPins_.erase(pinKey(id, pin, true)); }
+    }
     fmt::OcGraphLink link;
     link.sourceNode = srcNode; link.sourcePin = srcPin;
     link.destNode = dstNode; link.destPin = dstPin;
@@ -2192,118 +2215,7 @@ void GraphEditor::draw(Engine& e) {
         return;
     }
 
-    if (ImGui::Button("Save") || (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
-                                   keybinds().pressed(CommandId::AssetSave, ImGui::GetIO()))) {
-        std::string why;
-        if (!save(&why)) AVER_ERROR("[GraphEditor] save failed for '{}': {}", path_, why);
-        // Checked on save, but the save still happens: a half-built graph is normal mid-build, and
-        // refusing to write it would be unusable. Result is reported, not enforced.
-        else if (validate_) { validateNow(validateErr_, validateNode_); }
-    }
-    ImGui::SameLine();
-    // Also its own button, not just on save: "is this finished" is a question asked mid-build too.
-    ImGui::BeginDisabled(!validate_ && !diagnose_);
-    if (ImGui::Button("Validate")) {
-        // The full list first (every error and warning, each with its node), then the one-line result.
-        if (runDiagnosticsNow()) { bottomOpen_ = true; bottomTabRequest_ = 0; }
-        if (!validate_) {
-            // Diagnostics alone: the Problems tab is the answer.
-        } else if (validateNow(validateErr_, validateNode_)) {
-            validateErr_.clear();
-            validateNode_.clear();
-            showRejectionBanner("graph is valid");
-        } else {
-            showRejectionBanner(validateErr_);
-        }
-    }
-    ImGui::EndDisabled();
-    if (!validate_ && !diagnose_ && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-        ImGui::SetTooltip("The .NET bridge exports no GraphValidate, so nothing can check this graph.");
-    ImGui::SameLine();
-    // Standing result, so re-pressing Validate isn't needed to remember what was wrong; cleared by the
-    // next Validate or by any edit (see pushUndo).
-    if (!validateErr_.empty()) {
-        ImGui::TextColored(ImVec4(0.95f, 0.55f, 0.35f, 1.0f), "%s%s",
-                           validateNode_.empty() ? "" : (validateNode_ + ": ").c_str(),
-                           validateErr_.c_str());
-        ImGui::SameLine();
-    }
-    if (diagnose_) {
-        // The standing answer to "is this graph finished"; click it to open the list.
-        const ProblemCounts counts = countProblems(problems_);
-        ImGui::PushStyleColor(ImGuiCol_Text, counts.errors ? ImVec4(0.95f, 0.45f, 0.40f, 1.0f)
-                                           : counts.warnings ? ImVec4(0.95f, 0.78f, 0.35f, 1.0f)
-                                                             : ImVec4(0.60f, 0.80f, 0.60f, 1.0f));
-        const std::string summary = problemSummary(counts) + "##problemsSummary";
-        if (ImGui::SmallButton(summary.c_str())) {
-            bottomOpen_ = !bottomOpen_;
-            bottomTabRequest_ = 0;
-            setPrefBool("graphEditor.problemsOpen", bottomOpen_);
-            flushEditorPrefs();
-        }
-        ImGui::PopStyleColor();
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Click to show or hide the Problems list");
-        ImGui::SameLine();
-    }
-    if (debugValuesSrc_) {
-        bool armed = debugSession().armed;
-        if (ImGui::Checkbox("Debug", &armed)) {
-            debugSession().setArmed(armed);
-            setPrefBool("graphEditor.debugArmed", armed);
-            flushEditorPrefs();
-        }
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Arm the graph debugger: F9 puts a breakpoint on the selected node, and wires show their values.\n"
-                              "Graphs compile when Play starts, so this takes effect on the NEXT Play.\n"
-                              "A breakpoint pauses the session at the end of the frame its node ran in; Frame Skip steps.");
-        ImGui::SameLine();
-    }
-    ImGui::BeginDisabled(!history_.canUndo());
-    if (ImGui::Button("Undo")) undo();
-    ImGui::EndDisabled();
-    ImGui::SameLine();
-    ImGui::BeginDisabled(!history_.canRedo());
-    if (ImGui::Button("Redo")) redo();
-    ImGui::EndDisabled();
-    ImGui::SameLine();
-    // Frame All and Auto-Layout are buttons, not just key bindings, so a first-time author can find a
-    // graph that opens on an empty grid without already knowing a shortcut.
-    // A combo, not a second tab bar, for which subgraph the canvas shows: function count is unbounded
-    // and the tab bar above already means something else (DOES vs IS). Absent until a graph declares
-    // its first function.
-    if (!graph_.functions.empty()) {
-        const std::string label = currentSubgraph_.empty() ? std::string("Event Graph") : currentSubgraph_;
-        ImGui::SetNextItemWidth(180.0f * dpi);
-        if (ImGui::BeginCombo("##graphSubgraph", label.c_str())) {
-            if (ImGui::Selectable("Event Graph", currentSubgraph_.empty())) setCurrentSubgraph({});
-            for (const auto& f : graph_.functions) {
-                const bool sel = (currentSubgraph_ == f.name);
-                std::string row = f.name + (f.pure ? "  (pure)" : "");
-                if (ImGui::Selectable(row.c_str(), sel)) setCurrentSubgraph(f.name);
-            }
-            ImGui::EndCombo();
-        }
-        ImGui::SameLine();
-    }
-    if (ImGui::Button("Frame All")) framePendingFromToolbar_ = true;
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Fit the whole graph in view  (Home)\n"
-                                                   "F frames the selection instead");
-    ImGui::SameLine();
-    ImGui::BeginDisabled(graph_.nodes.empty());
-    if (ImGui::Button("Auto-Layout")) {
-        applyAutoLayout(dpi);
-        framePendingFromToolbar_ = true;   // a tidy graph you cannot see is not tidy
-    }
-    ImGui::EndDisabled();
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Re-place every node in dependency columns, and SAVE those positions.\n"
-                           "One undo step. Undo restores exactly where everything was.");
-    ImGui::SameLine();
-    // Pan hint on the status line, not a tooltip: a tooltip only reaches someone already hovering the
-    // thing, backwards for a gesture nobody knew to reach for. Every gesture listed is wired below.
-    ImGui::TextDisabled("%s  |  %zu nodes, %zu links, %zu comments  |  zoom %.0f%%  |  pan: right- or middle-drag, or Space+drag  |  C: comment box",
-                         path_.c_str(), graph_.nodes.size(), graph_.links.size(),
-                         graph_.comments.size(), view_.zoom * 100.0f);
+    drawToolbar(dpi);
 
     // The two tabs an actor gets: what it DOES (event graph) and what it IS (component tree,
     // fmt::OcGraphComponent) -- Blueprint's own split, not merely organisational: the two share no

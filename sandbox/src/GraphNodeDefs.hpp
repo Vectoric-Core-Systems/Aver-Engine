@@ -367,6 +367,17 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     t.push_back({"FuncReturn", "Return", "Function", {}});
     t.push_back({"CallFunc", "Call Function", "Function", {}});
 
+    // -- MACRO: the tunnels and the instance of a graph-local macro, present for display name and header colour like
+    //    the Function trio -- the Macros panel creates them, since their pins come from a MACRO declaration (see
+    //    GraphEditor::resyncMacroNodePins). A palette row per declared macro adds an instance.
+    t.push_back({"MacroInput", "Macro Input", "Macro", {}});
+    t.push_back({"MacroOutput", "Macro Output", "Macro", {}});
+    t.push_back({"MacroInstance", "Macro", "Macro", {}});
+
+    // -- REROUTE: a knot. One in, one out of the same type, whatever that type is (exec included): the editor retypes
+    //    it when it is wired and writes the type on its PIN records. Removed before compiling.
+    t.push_back({"Reroute", "Reroute", "Flow", {pin("in", "float", false), pin("out", "float", true)}});
+
     // -- TAGS AND VISIBILITY: Entity's own tag bitmask, unreachable from a graph until now. A tag is
     //    an int bit pattern, not a string, so it needs none of class=/name=/var='s attribute
     //    machinery -- and a graph can COMPUTE a mask, which a string attribute never could.
@@ -1266,7 +1277,7 @@ inline std::vector<const GraphNodeDesc*> graphPaletteSearch(std::string_view que
         // Function rows are excluded for the reason the category menu excludes them: the Functions
         // panel creates them knowing their owner; a bare one has no pins and no owner. The same goes for
         // the pinless Struct templates; GraphEditor::graphDerivedNodeDescs supplies the per-struct rows.
-        if (d.category == "Function" || d.category == "Struct") continue;
+        if (d.category == "Function" || d.category == "Macro" || d.category == "Struct") continue;
 
         const usize inName = detail::ciFind(d.displayName, query);
         int rank = -1;
