@@ -173,6 +173,19 @@ struct OcGraphFunction {
     std::vector<OcGraphFunctionPin> outputs;   // in declaration order
 };
 
+// One user STRUCT: `STRUCT <Name>`, plus one `FIELD <Name> <field> <type>` record per field. The editor creates and edits
+// these, so they are modelled (see OcGraphFunction for the argument). `type` is opaque here like OcGraphVariable::type;
+// the C# reader (Aver.Graph) accepts float, int, bool, float3, string and entity and refuses a duplicate field name.
+struct OcGraphStructField {
+    std::string name;
+    std::string type;
+};
+
+struct OcGraphStruct {
+    std::string name;
+    std::vector<OcGraphStructField> fields;   // in declaration order
+};
+
 // One COMMENT BOX: a titled, coloured rectangle drawn behind the nodes, grouping them by whatever
 // the author says it groups them by. `COMMENT <id> <x> <y> <w> <h> <r> <g> <b> <text...>`.
 //
@@ -289,6 +302,10 @@ struct OcGraphData {
     // OcGraphFunction for what one IS and why only the declaration lives here while the body rides
     // in ordinary nodes tagged `func=`.
     std::vector<OcGraphFunction> functions;
+
+    // Declared via top-level `STRUCT` / `FIELD` records, in file order. A pin, VAR or function pin of a struct has the
+    // type string `struct:<Name>`; an array has `<elem>[]`. Both are opaque strings at this layer.
+    std::vector<OcGraphStruct> structs;
 
     // Comment boxes, in file order. See OcGraphComment for what one IS and why it carries its
     // colour in the record. Modelled here rather than left in the unknown-record passthrough for

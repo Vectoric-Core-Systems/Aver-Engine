@@ -134,6 +134,9 @@ static int Main()
         // float3, string and entity pins, and the vector / string / entity nodes.
         failures += VectorStringEntityTests.RunAll();
 
+        // Arrays and user structs: nodes, variables, function pins, links.
+        failures += CollectionTests.RunAll();
+
         // Select, InputKey, Raycast: the three node types this slice adds on top of the exec compiler.
         failures += TestConstLiteralShapeDoesNotDecideType();
         failures += NewNodeTests.RunAll();

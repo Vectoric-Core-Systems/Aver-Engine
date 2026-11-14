@@ -30,13 +30,16 @@ public enum PinType
     Float3,
     String,
     Entity,
-}
 
-/// Which pins may be linked: the same type, or Int with Entity (one IL type), in either direction.
-public static class PinTypeRules
-{
-    public static bool Compatible(PinType a, PinType b) =>
-        a == b || (a == PinType.Int && b == PinType.Entity) || (a == PinType.Entity && b == PinType.Int);
+    // Arrays: `<elem>[]` in files, a CLR List of the element's type (GraphTypes.cs). Struct: a user STRUCT,
+    // `struct:<Name>` in files, the name carried beside the type (Pin.StructName).
+    FloatArray,
+    IntArray,
+    BoolArray,
+    Float3Array,
+    StringArray,
+    EntityArray,
+    Struct,
 }
 
 /// A single data input or output on a node.
@@ -46,6 +49,7 @@ public class Pin
     public required PinType Type { get; init; }
     public required bool IsOutput { get; init; }
     public required string NodeId { get; init; }  // String to support both int and string IDs from different formats.
+    public string? StructName { get; init; }      // Which STRUCT a Struct pin carries; null for every other type.
 }
 
 /// A constant output value for a Const node (provided during node creation).
@@ -99,7 +103,11 @@ public class PinnedValue
                 if (value is string) return true;
                 why = "a string pin takes text";
                 return false;
+            case PinType.Struct:
+                why = "a struct pin takes no typed-in value";
+                return false;
             default:
+                if (PinTypeRules.IsArray(pinType)) { why = "an array pin takes no typed-in value"; return false; }
                 return true;
         }
     }
@@ -248,6 +256,7 @@ public class GraphParameter
 {
     public required string Name { get; init; }
     public required PinType Type { get; init; }
+    public string? StructName { get; init; }   // for a Struct type
 }
 
 /// One variable a GRAPH remembers between ticks -- e.g. a hit count, cooldown timer, round state.
@@ -266,6 +275,7 @@ public class GraphVariable
 {
     public required string Name { get; init; }
     public required PinType Type { get; init; }
+    public string? StructName { get; init; }   // for a Struct type; its Default is unused (GraphVarStore builds the zero struct)
 
     // The value a fresh GraphVarStore seeds this variable with. Always a concrete float/int/bool of
     // the DECLARED type (never null) -- an omitted/unparseable `[default]` falls back to the
@@ -273,6 +283,23 @@ public class GraphVariable
     // convention. Typed `object` rather than three separate nullable fields, same reason as
     // ConstantOutput/PinnedValue.
     public required object Default { get; init; }
+}
+
+/// One field of a user STRUCT: `FIELD <Struct> <field> <type>`, a scalar, vector, string or entity type.
+public class GraphStructField
+{
+    public required string Name { get; init; }
+    public required PinType Type { get; init; }
+}
+
+/// One user STRUCT: `STRUCT <Name>` plus its FIELD records in declaration order (the order of the field slots).
+public class GraphStructDef
+{
+    public required string Name { get; init; }
+    public List<GraphStructField> Fields { get; } = new();
+
+    /// The field types in order, e.g. `float,float3,string`: what GraphStructOps builds a zero struct from.
+    public string Signature => string.Join(",", Fields.Select(f => PinTypeRules.Format(f.Type)));
 }
 
 /// One entry in a class graph's COMPONENT TREE, from a `COMP <id> <Kind> [key=value]...` record.
@@ -394,6 +421,9 @@ public class Graph
     // PARAM -- GraphCompiler only appends a GraphVarStore delegate argument when this is non-empty,
     // so a VAR-less graph's delegate shape is unchanged.
     public List<GraphVariable> Variables { get; set; } = new();
+
+    // Declared via top-level `STRUCT <Name>` + `FIELD <Name> <field> <type>` records; empty for every older graph.
+    public List<GraphStructDef> Structs { get; set; } = new();
 
     // Declared via top-level `FUNC`/`FUNCIN`/`FUNCOUT` records. Empty for every pre-function
     // graph; a reader that doesn't know FUNC skips it rather than failing, so an older runtime
@@ -580,7 +610,7 @@ public class Graph
             }
 
             // Pin types must match.
-            if (!PinTypeRules.Compatible(srcPin.Type, tgtPin.Type))
+            if (!PinTypeRules.Compatible(srcPin, tgtPin))
             {
                 if (Report("link.type", $"Link {link.SourceNodeId}.{link.SourcePinName} ({srcPin.Type}) to {link.TargetNodeId}.{link.TargetPinName} ({tgtPin.Type}): type mismatch",
                            link.TargetNodeId, link.TargetPinName)) return;
@@ -853,7 +883,7 @@ public class Graph
             }
 
             var valuePin = node.Pins.FirstOrDefault(p => p.Name == "value" && p.IsOutput);
-            if (valuePin != null && !PinTypeRules.Compatible(valuePin.Type, declared.Type))
+            if (valuePin != null && !PinTypeRules.Compatible(valuePin.Type, valuePin.StructName, declared.Type, declared.StructName))
             {
                 if (Report("param.type", $"Node '{node.Id}' declares output pin 'value' as {valuePin.Type} but parameter '{node.ParamName}' is {declared.Type}", node.Id, "value")) return;
             }
@@ -887,11 +917,13 @@ public class Graph
             }
 
             var valuePin2 = node.Pins.FirstOrDefault(p => p.Name == "value" && p.IsOutput == isGetVar);
-            if (valuePin2 != null && !PinTypeRules.Compatible(valuePin2.Type, declaredVar.Type))
+            if (valuePin2 != null && !PinTypeRules.Compatible(valuePin2.Type, valuePin2.StructName, declaredVar.Type, declaredVar.StructName))
             {
                 if (Report("var.type", $"Node '{node.Id}' declares {(isGetVar ? "output" : "input")} pin 'value' as {valuePin2.Type} but variable '{node.VarName}' is {declaredVar.Type}", node.Id, "value")) return;
             }
         }
+
+        if (CollectionNodes.Check(this, Report)) return;
 
         // Check all output pins reference valid nodes and output pins.
         foreach (var (nodeId, pinName) in Outputs)

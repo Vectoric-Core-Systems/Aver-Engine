@@ -25,7 +25,7 @@ public partial class GraphCompiler
         // Armed: copy the value just pushed to the debugger on its way past (widened to double), so
         // the editor can label the wire. Data inputs only; an exec pin carries no value.
         var pin = node.Pins.FirstOrDefault(p => p.Name == pinName && !p.IsOutput);
-        if (pin == null || pin.Type is PinType.Exec or PinType.Float3 or PinType.String) return;
+        if (pin == null || !PinTypeRules.IsNumeric(pin.Type)) return;
         var tmp = _il.DeclareLocal(PinTypeToCLRType(pin.Type));
         _il.Emit(OpCodes.Stloc, tmp);
         _il.Emit(OpCodes.Ldstr, _graph.Name);
@@ -95,7 +95,7 @@ public partial class GraphCompiler
                 $"A node's default pins are suppressed entirely as soon as it declares ANY pin by hand, " +
                 $"so if this node has PIN records, it needs one for '{pinName}' too (or a LINK into it)");
 
-        EmitZeroOf(pin.Type);
+        EmitZeroOf(pin.Type, pin.StructName);
     }
 
     /// Every node type only the PUSH compiler can run: a side effect, a write, or a creation with no
@@ -138,7 +138,7 @@ public partial class GraphCompiler
     private static bool IsExecOnlyNodeType(string type) => type.ToLowerInvariant() switch
     {
         "onstart" or "ontick" or "onhit" or "customevent" or "branch" or "sequence" or "while" or "foreach"
-            or "funcentry" or "switchint" => true,
+            or "funcentry" or "switchint" or "foreachinarray" => true,
         _ => GameSystemNodes.IsTrigger(type),
     };
 

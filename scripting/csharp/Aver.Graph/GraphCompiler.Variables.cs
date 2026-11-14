@@ -142,6 +142,9 @@ public partial class GraphCompiler
         PinType.Float3 => VarGetVector3Method,
         PinType.String => VarGetStringMethod,
         PinType.Bool => VarGetBoolMethod,
+        PinType.Struct => typeof(GraphVarStore).GetMethod(nameof(GraphVarStore.GetStruct))!,
+        _ when PinTypeRules.IsArray(t) => typeof(GraphVarStore).GetMethod(nameof(GraphVarStore.GetArray))!
+            .MakeGenericMethod(PinTypeRules.ClrType(PinTypeRules.ElementOf(t))),
         _ => throw new InvalidOperationException(
             $"VAR type {t} has no GraphVarStore read accessor"),
     };
@@ -154,6 +157,9 @@ public partial class GraphCompiler
         PinType.Float3 => VarSetVector3Method,
         PinType.String => VarSetStringMethod,
         PinType.Bool => VarSetBoolMethod,
+        PinType.Struct => typeof(GraphVarStore).GetMethod(nameof(GraphVarStore.SetStruct))!,
+        _ when PinTypeRules.IsArray(t) => typeof(GraphVarStore).GetMethod(nameof(GraphVarStore.SetArray))!
+            .MakeGenericMethod(PinTypeRules.ClrType(PinTypeRules.ElementOf(t))),
         _ => throw new InvalidOperationException(
             $"VAR type {t} has no GraphVarStore write accessor"),
     };

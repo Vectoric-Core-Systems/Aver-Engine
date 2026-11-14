@@ -77,6 +77,9 @@ public partial class GraphCompiler
                 case "foreach":
                     EmitForEach(node);
                     return;
+                case "foreachinarray":
+                    EmitForEachInArray(node);
+                    return;
                 default:
                     // Every other node type reached via exec: run its side effect if it has one
                     // (SetField/SetFieldVec3/Spawn/SetVar -- separate predicate/emitter pairs, see

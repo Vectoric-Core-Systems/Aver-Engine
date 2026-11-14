@@ -84,7 +84,11 @@ public partial class GraphCompiler
             {
                 var outLocal = _il.DeclareLocal(PinTypeToCLRType(o.Type));
                 _funcOutLocals.Add(outLocal);
-                if (o.Type == PinType.String) { _il.Emit(OpCodes.Ldstr, ""); _il.Emit(OpCodes.Stloc, outLocal); }
+                if (o.Type is PinType.String or PinType.Struct || PinTypeRules.IsArray(o.Type))
+                {
+                    EmitZeroOf(o.Type, o.StructName);
+                    _il.Emit(OpCodes.Stloc, outLocal);
+                }
             }
 
             // Recursion guard as a helper call, not emitted IL: an unbounded recursive function would

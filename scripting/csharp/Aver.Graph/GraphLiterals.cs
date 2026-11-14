@@ -98,6 +98,24 @@ public static class GraphLiterals
         }
     }
 
+    /// <summary>Reads an array default: elements separated by commas (float3 elements by semicolons, since each one
+    /// holds commas; a comma inside a string element is %2C). Empty text is an empty list. The list is a CLR List of
+    /// the element type; a bad element fails the whole literal.</summary>
+    public static bool TryParseArray(PinType arrayType, string text, out object list)
+    {
+        PinType elem = PinTypeRules.ElementOf(arrayType);
+        list = Activator.CreateInstance(PinTypeRules.ClrType(arrayType))!;
+        if (!PinTypeRules.IsArray(arrayType)) return false;
+        if (text.Length == 0) return true;
+        var add = list.GetType().GetMethod("Add")!;
+        foreach (string part in text.Split(elem == PinType.Float3 ? ';' : ','))
+        {
+            if (!TryParse(elem, elem == PinType.String ? part : part.Trim(), out var v)) return false;
+            add.Invoke(list, new[] { v });
+        }
+        return true;
+    }
+
     /// <summary>The zero value of a data pin type: Vector3.Zero, "", 0.</summary>
     public static object DefaultFor(PinType type) => type switch
     {

@@ -15,14 +15,18 @@ internal enum DataNodeKind
     Pure,
     /// <summary>Runs when the exec walk reaches it; refused by Compile().</summary>
     Exec,
+    /// <summary>Control flow with its own exec pins (ForEachInArray); skipped by Compile().</summary>
+    Flow,
 }
+
+internal sealed record DataPin(string Name, PinType Type, object? Default = null, string? StructName = null);
 
 internal sealed class DataNodeSpec
 {
     public required string Type { get; init; }
     public required DataNodeKind Kind { get; init; }
-    public required (string Name, PinType Type, object? Default)[] Inputs { get; init; }
-    public required (string Name, PinType Type)[] Outputs { get; init; }
+    public required DataPin[] Inputs { get; init; }
+    public required DataPin[] Outputs { get; init; }
 }
 
 internal static class DataNodes
@@ -30,40 +34,32 @@ internal static class DataNodes
     private static readonly Dictionary<string, DataNodeSpec> s_byType = Build();
 
     internal static bool TryGet(string type, out DataNodeSpec spec) => s_byType.TryGetValue(type, out spec!);
-    internal static bool IsPure(string type) => TryGet(type, out var s) && s.Kind == DataNodeKind.Pure;
-    internal static bool IsExec(string type) => TryGet(type, out var s) && s.Kind == DataNodeKind.Exec;
+    internal static bool IsPure(string type) => TryGet(type, out var s) ? s.Kind == DataNodeKind.Pure : CollectionNodes.KindOf(type) == DataNodeKind.Pure;
+    internal static bool IsExec(string type) => TryGet(type, out var s) ? s.Kind == DataNodeKind.Exec : CollectionNodes.KindOf(type) == DataNodeKind.Exec;
 
     internal static void AddDefaultPins(Node node, Graph graph)
     {
-        if (!TryGet(node.Type, out var s)) return;
-        void Add(string name, PinType t, bool isOut) =>
-            node.Pins.Add(new Pin { Name = name, Type = t, IsOutput = isOut, NodeId = node.Id });
-        if (s.Kind == DataNodeKind.Exec) Add("exec", PinType.Exec, false);
-        foreach (var (name, type, dflt) in s.Inputs)
+        if (!TryGet(node.Type, out var s) && !CollectionNodes.TryResolve(node, graph, out s)) return;
+        void Add(DataPin p, bool isOut) =>
+            node.Pins.Add(new Pin { Name = p.Name, Type = p.Type, IsOutput = isOut, NodeId = node.Id, StructName = p.StructName });
+        if (s.Kind != DataNodeKind.Pure) Add(new DataPin("exec", PinType.Exec), false);
+        foreach (var p in s.Inputs)
         {
-            Add(name, type, false);
-            if (dflt != null)
-                graph.PinnedValues.Add(new PinnedValue { NodeId = node.Id, PinName = name, Value = dflt, FromPinDefault = true });
+            Add(p, false);
+            if (p.Default != null)
+                graph.PinnedValues.Add(new PinnedValue { NodeId = node.Id, PinName = p.Name, Value = p.Default, FromPinDefault = true });
         }
-        if (s.Kind == DataNodeKind.Exec) Add("then", PinType.Exec, true);
-        foreach (var (name, type) in s.Outputs) Add(name, type, true);
+        if (s.Kind == DataNodeKind.Exec) Add(new DataPin("then", PinType.Exec), true);
+        foreach (var p in s.Outputs) Add(p, true);
     }
 
-    private static PinType ParseType(string t) => t switch
-    {
-        "float" => PinType.Float,
-        "int" => PinType.Int,
-        "bool" => PinType.Bool,
-        "float3" => PinType.Float3,
-        "string" => PinType.String,
-        "entity" => PinType.Entity,
-        _ => throw new ArgumentException("pin type " + t),
-    };
+    internal static PinType ParseType(string t) => PinTypeRules.TryParse(t, out var pt, out _)
+        ? pt : throw new ArgumentException("pin type " + t);
 
     /// <summary>ins is <c>name:type[=default],...</c>, outs is <c>name:type,...</c>.</summary>
     private static DataNodeSpec Row(string type, DataNodeKind kind, string ins, string outs)
     {
-        var inputs = new List<(string, PinType, object?)>();
+        var inputs = new List<DataPin>();
         foreach (var part in ins.Split(',', StringSplitOptions.RemoveEmptyEntries))
         {
             var eq = part.Split('=', 2);
@@ -71,13 +67,13 @@ internal static class DataNodes
             var pt = ParseType(nt[1]);
             object? dflt = null;
             if (eq.Length > 1 && GraphLiterals.TryParse(pt, eq[1], out var parsed)) dflt = parsed;
-            inputs.Add((nt[0], pt, dflt));
+            inputs.Add(new DataPin(nt[0], pt, dflt));
         }
-        var outputs = new List<(string, PinType)>();
+        var outputs = new List<DataPin>();
         foreach (var part in outs.Split(',', StringSplitOptions.RemoveEmptyEntries))
         {
             var nt = part.Split(':');
-            outputs.Add((nt[0], ParseType(nt[1])));
+            outputs.Add(new DataPin(nt[0], ParseType(nt[1])));
         }
         return new DataNodeSpec { Type = type, Kind = kind, Inputs = inputs.ToArray(), Outputs = outputs.ToArray() };
     }

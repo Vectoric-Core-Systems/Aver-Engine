@@ -59,8 +59,8 @@ std::string endLine(std::string line) {
 // path (see there) to replace each kind in place at its own first occurrence, rather than collapsing
 // every kind into one inserted block. `Other` covers blank lines, comments, and anything writeOcgraph
 // does not model; those are always copied through verbatim, at their original position.
-enum class OwnedLineKind { Header, Domain, Name, Description, Var, Comp, Comment, Func, FuncPin, Node,
-                            Pin, Link, Entry, Out, Other };
+enum class OwnedLineKind { Header, Domain, Name, Description, Struct, StructField, Var, Comp, Comment, Func, FuncPin,
+                            Node, Pin, Link, Entry, Out, Other };
 
 // `sawHeader` is the caller's running state: only the FIRST line whose key is OCGRAPH counts as the
 // header; a later stray "OCGRAPH ..." line (malformed input, or inside an unrelated unknown record)
@@ -72,6 +72,8 @@ OwnedLineKind classifyLine(std::string_view line, bool sawHeaderYet) {
     if (equalsCI(t[0], "DOMAIN"))      return OwnedLineKind::Domain;
     if (equalsCI(t[0], "NAME"))        return OwnedLineKind::Name;
     if (equalsCI(t[0], "DESCRIPTION")) return OwnedLineKind::Description;
+    if (equalsCI(t[0], "STRUCT"))      return OwnedLineKind::Struct;
+    if (equalsCI(t[0], "FIELD"))       return OwnedLineKind::StructField;
     if (equalsCI(t[0], "VAR"))         return OwnedLineKind::Var;
     if (equalsCI(t[0], "COMP"))        return OwnedLineKind::Comp;
     if (equalsCI(t[0], "COMMENT"))     return OwnedLineKind::Comment;
@@ -173,6 +175,34 @@ bool parseOcgraph(std::string_view text, OcGraphData& out, std::string* err) {
             while (!rest.empty() && !isSpace(rest.front())) rest.remove_prefix(1);
             const std::string_view desc = trim(rest);
             if (!desc.empty()) out.description = std::string(desc);
+        } else if (equalsCI(key, "STRUCT")) {
+            // STRUCT <Name> -- see OcGraphStruct (OcGraph.hpp).
+            if (t.size() < 2) {
+                if (err) *err = "STRUCT requires a name: STRUCT Name";
+                return false;
+            }
+            for (const auto& s : out.structs) {
+                if (s.name == t[1]) {
+                    if (err) *err = "duplicate STRUCT name: " + s.name;
+                    return false;
+                }
+            }
+            OcGraphStruct st;
+            st.name = std::string(t[1]);
+            out.structs.push_back(std::move(st));
+        } else if (equalsCI(key, "FIELD")) {
+            // FIELD <Struct> <field> <type>. Its struct must be declared above, for the reason FUNCIN's must.
+            if (t.size() < 4) {
+                if (err) *err = "FIELD requires a struct, a field name and a type: FIELD Struct field type";
+                return false;
+            }
+            OcGraphStruct* owner = nullptr;
+            for (auto& s : out.structs) if (s.name == t[1]) { owner = &s; break; }
+            if (!owner) {
+                if (err) *err = "FIELD names struct '" + std::string(t[1]) + "', which no STRUCT record declares above it";
+                return false;
+            }
+            owner->fields.push_back({std::string(t[2]), std::string(t[3])});
         } else if (equalsCI(key, "VAR")) {
             // VAR <name> <type> [default] -- declares one graph-local persistent variable. See
             // OcGraphVariable's own comment (OcGraph.hpp) for why type/default are opaque strings at
@@ -561,10 +591,16 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
     // line of existing text; `used` is set once a line has claimed it, so a record is emitted exactly
     // once even if the file names it twice.
     struct Rec { std::string key; std::string text; bool used = false; };
-    std::vector<Rec> varRecs, compRecs, commentRecs, funcRecs, funcPinRecs, nodeRecs, pinRecs, linkRecs,
+    std::vector<Rec> structRecs, varRecs, compRecs, commentRecs, funcRecs, funcPinRecs, nodeRecs, pinRecs, linkRecs,
                       entryRecs, outRecs;
-    std::string varBlock, compBlock, commentBlock, funcBlock, funcPinBlock, nodeBlock, pinBlock, linkBlock,
+    std::string structBlock, varBlock, compBlock, commentBlock, funcBlock, funcPinBlock, nodeBlock, pinBlock, linkBlock,
                  entryBlock, outBlock;
+    // STRUCT and its FIELDs (one list, a struct's fields right after it) come first of all: they are types, and the VARs, functions and pins below may name them.
+    for (const OcGraphStruct& st : g.structs) {
+        structRecs.push_back({st.name, "STRUCT " + st.name + "\n", false});
+        for (const OcGraphStructField& f : st.fields)
+            structRecs.push_back({st.name + " " + f.name, "FIELD " + st.name + " " + f.name + " " + f.type + "\n", false});
+    }
     // VAR right after NAME/DESCRIPTION, ahead of NODE -- matching where a graph author naturally
     // writes it (declare what the graph remembers, then the nodes that read/write it) and where the
     // checked-in cross-language fixture (tests/formats/src/OcGraphTest.cpp's own VAR test) puts it.
@@ -648,6 +684,7 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
     }
     // The per-KIND blocks the fresh-write branch below emits are simply those records concatenated,
     // so there is exactly one place that knows how a record is formatted.
+    for (const Rec& r : structRecs) structBlock += r.text;
     for (const Rec& r : varRecs)   varBlock   += r.text;
     for (const Rec& r : compRecs)  compBlock  += r.text;
     for (const Rec& r : commentRecs) commentBlock += r.text;
@@ -667,6 +704,7 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
         out += "# Visual scripting graph, written by the Aver Engine editor.\n";
         out += nameLine;
         out += descLine;
+        if (!structBlock.empty()) { out += "\n"; out += structBlock; }
         if (!varBlock.empty())  { out += "\n"; out += varBlock; }
         if (!compBlock.empty()) { out += "\n"; out += compBlock; }
         if (!commentBlock.empty()) { out += "\n"; out += commentBlock; }
@@ -739,11 +777,13 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
         const std::vector<std::string_view> t = splitWhitespace(trim(lineComment(line)));
         const auto tok = [&](usize i) { return i < t.size() ? std::string(t[i]) : std::string(); };
         switch (k) {
+        case OwnedLineKind::Struct:
         case OwnedLineKind::Var:
         case OwnedLineKind::Comp:
         case OwnedLineKind::Comment:
         case OwnedLineKind::Func:
         case OwnedLineKind::Node:  return tok(1);
+        case OwnedLineKind::StructField: return tok(1) + " " + tok(2);
         // A FUNCIN and a FUNCOUT can name the same function AND the same pin name -- an `x` in
         // and an `x` out is ordinary -- so the direction is part of the key or the two would
         // claim each other's lines and one would be dropped.
@@ -795,6 +835,8 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
         case OwnedLineKind::Description:
             if (!placedDesc) { placedDesc = true; out += descLine; } // empty descLine = line removed
             break;
+        case OwnedLineKind::Struct:      claim(structRecs, keyOf(kinds[i], lines[i]), out); break;
+        case OwnedLineKind::StructField: claim(structRecs, keyOf(kinds[i], lines[i]), out); break;
         case OwnedLineKind::Var:   claim(varRecs,   keyOf(kinds[i], lines[i]), out); break;
         case OwnedLineKind::Comp:  claim(compRecs,  keyOf(kinds[i], lines[i]), out); break;
         case OwnedLineKind::Comment: claim(commentRecs, keyOf(kinds[i], lines[i]), out); break;
@@ -824,6 +866,7 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
     if (!placedDomain && !domainLine.empty()) out += domainLine;
     if (!placedName) out += nameLine;
     if (!placedDesc && !descLine.empty()) out += descLine;
+    appendUnused(structRecs);
     appendUnused(varRecs);
     appendUnused(compRecs);
     appendUnused(commentRecs);

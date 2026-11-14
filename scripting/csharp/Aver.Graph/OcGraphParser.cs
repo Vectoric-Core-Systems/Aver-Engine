@@ -122,9 +122,14 @@ public class OcGraphParser
 
                 string paramName = tokens[1];
                 string paramTypeName = tokens[2];
-                if (!Enum.TryParse<PinType>(paramTypeName, true, out var paramType))
+                if (!PinTypeRules.TryParse(paramTypeName, out var paramType, out _))
                 {
                     err = $"Unknown parameter type '{paramTypeName}'";
+                    return false;
+                }
+                if (paramType == PinType.Struct || PinTypeRules.IsArray(paramType))
+                {
+                    err = $"PARAM '{paramName}' cannot be {paramTypeName} -- the host supplies parameters, and it has no array or struct to hand in";
                     return false;
                 }
                 // PARAM is a DATA argument; exec is control flow, never a value a caller passes in.
@@ -155,7 +160,7 @@ public class OcGraphParser
 
                 string varName = tokens[1];
                 string varTypeName = tokens[2];
-                if (!Enum.TryParse<PinType>(varTypeName, true, out var varType))
+                if (!PinTypeRules.TryParse(varTypeName, out var varType, out var varStruct))
                 {
                     err = $"Unknown variable type '{varTypeName}'";
                     return false;
@@ -179,12 +184,18 @@ public class OcGraphParser
                     PinType.Bool => false,
                     PinType.Int or PinType.Entity => 0,
                     PinType.Float3 or PinType.String => GraphLiterals.DefaultFor(varType),
+                    PinType.Struct => 0,   // unused: GraphVarStore builds the zero struct from its STRUCT
+                    _ when PinTypeRules.IsArray(varType) => GraphLiterals.TryParseArray(varType, "", out var empty) ? empty : 0,
                     _ => 0f, // PinType.Float (Exec already rejected above)
                 };
                 if (tokens.Count > 3)
                 {
                     string defaultStr = tokens[3];
-                    if (varType == PinType.Bool && bool.TryParse(defaultStr, out var b))
+                    if (PinTypeRules.IsArray(varType))
+                    {
+                        if (GraphLiterals.TryParseArray(varType, defaultStr, out var arr)) varDefault = arr;
+                    }
+                    else if (varType == PinType.Bool && bool.TryParse(defaultStr, out var b))
                         varDefault = b;
                     else if (varType == PinType.Int && int.TryParse(defaultStr, NumberStyles.Integer, CultureInfo.InvariantCulture, out var i))
                         varDefault = i;
@@ -196,7 +207,7 @@ public class OcGraphParser
                     // else: unparsed literal keeps the zero-value fallback above rather than failing the graph.
                 }
 
-                graph.Variables.Add(new GraphVariable { Name = varName, Type = varType, Default = varDefault });
+                graph.Variables.Add(new GraphVariable { Name = varName, Type = varType, StructName = varStruct, Default = varDefault });
             }
             else if (key.Equals("COMP", StringComparison.OrdinalIgnoreCase))
             {
@@ -268,9 +279,9 @@ public class OcGraphParser
                     err = $"{key.ToUpperInvariant()} names function '{tokens[1]}', which no FUNC record declares above it";
                     return false;
                 }
-                if (!Enum.TryParse<PinType>(tokens[3], true, out PinType ft))
+                if (!PinTypeRules.TryParse(tokens[3], out PinType ft, out string? ftStruct))
                 {
-                    err = $"{key.ToUpperInvariant()} '{tokens[2]}' has type '{tokens[3]}'; expected float, int or bool";
+                    err = $"{key.ToUpperInvariant()} '{tokens[2]}' has type '{tokens[3]}'; expected float, int, bool, float3, string, entity, an array such as float[], or struct:<Name>";
                     return false;
                 }
                 if (ft == PinType.Exec)
@@ -286,7 +297,38 @@ public class OcGraphParser
                     err = $"function '{owner.Name}' already has {(isIn ? "an input" : "an output")} named '{tokens[2]}'";
                     return false;
                 }
-                list.Add(new GraphParameter { Name = tokens[2], Type = ft });
+                list.Add(new GraphParameter { Name = tokens[2], Type = ft, StructName = ftStruct });
+            }
+            else if (key.Equals("STRUCT", StringComparison.OrdinalIgnoreCase))
+            {
+                // STRUCT <Name> -- declares one user struct; its fields are the FIELD records that follow.
+                if (tokens.Count < 2)
+                {
+                    err = "STRUCT requires a name: STRUCT Name";
+                    return false;
+                }
+                graph.Structs.Add(new GraphStructDef { Name = tokens[1] });
+            }
+            else if (key.Equals("FIELD", StringComparison.OrdinalIgnoreCase))
+            {
+                // FIELD <Struct> <field> <type> -- one field, in declaration order. A duplicate is Validate's to report.
+                if (tokens.Count < 4)
+                {
+                    err = "FIELD requires a struct, a field name and a type: FIELD Struct field float|int|bool|float3|string|entity";
+                    return false;
+                }
+                var owner = graph.Structs.FirstOrDefault(d => d.Name == tokens[1]);
+                if (owner == null)
+                {
+                    err = $"FIELD names struct '{tokens[1]}', which no STRUCT record declares above it";
+                    return false;
+                }
+                if (!PinTypeRules.TryParse(tokens[3], out var fieldType, out _) || !PinTypeRules.IsValueScalar(fieldType))
+                {
+                    err = $"FIELD '{tokens[2]}' has type '{tokens[3]}'; expected float, int, bool, float3, string or entity";
+                    return false;
+                }
+                owner.Fields.Add(new GraphStructField { Name = tokens[2], Type = fieldType });
             }
             else if (key.Equals("CLASS", StringComparison.OrdinalIgnoreCase))
             {
@@ -605,7 +647,7 @@ public class OcGraphParser
                     return false;
                 }
 
-                if (!Enum.TryParse<PinType>(typeName, true, out var pinType))
+                if (!PinTypeRules.TryParse(typeName, out var pinType, out var pinStruct))
                 {
                     err = $"Unknown pin type '{typeName}'";
                     return false;
@@ -616,7 +658,8 @@ public class OcGraphParser
                     Name = pinName,
                     Type = pinType,
                     IsOutput = isOutput,
-                    NodeId = nodeId
+                    NodeId = nodeId,
+                    StructName = pinStruct
                 };
                 node.Pins.Add(pin);
 
@@ -900,6 +943,19 @@ public class OcGraphParser
             case "setentitylocation":
             case "raycastvector":
             case "printtext":
+            case "makearray":
+            case "arraylength":
+            case "arrayget":
+            case "arraycontains":
+            case "arrayfind":
+            case "arrayadd":
+            case "arrayset":
+            case "arrayremoveat":
+            case "arrayclear":
+            case "foreachinarray":
+            case "makestruct":
+            case "breakstruct":
+            case "setstructfield":
                 DataNodes.AddDefaultPins(node, graph);
                 break;
 
@@ -2139,7 +2195,7 @@ public class OcGraphParser
                 // again at the start of every Compile()) reports the specific reason.
                 var declaredParam = graph.Parameters.FirstOrDefault(p => p.Name == node.ParamName);
                 if (declaredParam != null)
-                    node.Pins.Add(new Pin { Name = "value", Type = declaredParam.Type, IsOutput = true, NodeId = node.Id });
+                    node.Pins.Add(new Pin { Name = "value", Type = declaredParam.Type, IsOutput = true, NodeId = node.Id, StructName = declaredParam.StructName });
                 break;
             }
 
@@ -2454,7 +2510,7 @@ public class OcGraphParser
                 if (!fn.IsPure)
                     node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
                 foreach (var p in fn.Inputs)
-                    node.Pins.Add(new Pin { Name = p.Name, Type = p.Type, IsOutput = true, NodeId = node.Id });
+                    node.Pins.Add(new Pin { Name = p.Name, Type = p.Type, IsOutput = true, NodeId = node.Id, StructName = p.StructName });
                 break;
             }
 
@@ -2465,7 +2521,7 @@ public class OcGraphParser
                 if (!fn.IsPure)
                     node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
                 foreach (var p in fn.Outputs)
-                    node.Pins.Add(new Pin { Name = p.Name, Type = p.Type, IsOutput = false, NodeId = node.Id });
+                    node.Pins.Add(new Pin { Name = p.Name, Type = p.Type, IsOutput = false, NodeId = node.Id, StructName = p.StructName });
                 break;
             }
 
@@ -2480,9 +2536,9 @@ public class OcGraphParser
                     node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
                 }
                 foreach (var p in fn.Inputs)
-                    node.Pins.Add(new Pin { Name = p.Name, Type = p.Type, IsOutput = false, NodeId = node.Id });
+                    node.Pins.Add(new Pin { Name = p.Name, Type = p.Type, IsOutput = false, NodeId = node.Id, StructName = p.StructName });
                 foreach (var p in fn.Outputs)
-                    node.Pins.Add(new Pin { Name = p.Name, Type = p.Type, IsOutput = true, NodeId = node.Id });
+                    node.Pins.Add(new Pin { Name = p.Name, Type = p.Type, IsOutput = true, NodeId = node.Id, StructName = p.StructName });
                 break;
             }
 
@@ -2490,7 +2546,7 @@ public class OcGraphParser
             {
                 var declaredVar = graph.Variables.FirstOrDefault(v => v.Name == node.VarName);
                 if (declaredVar != null)
-                    node.Pins.Add(new Pin { Name = "value", Type = declaredVar.Type, IsOutput = true, NodeId = node.Id });
+                    node.Pins.Add(new Pin { Name = "value", Type = declaredVar.Type, IsOutput = true, NodeId = node.Id, StructName = declaredVar.StructName });
                 break;
             }
 
@@ -2505,7 +2561,7 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
                 var declaredVar = graph.Variables.FirstOrDefault(v => v.Name == node.VarName);
                 if (declaredVar != null)
-                    node.Pins.Add(new Pin { Name = "value", Type = declaredVar.Type, IsOutput = false, NodeId = node.Id });
+                    node.Pins.Add(new Pin { Name = "value", Type = declaredVar.Type, IsOutput = false, NodeId = node.Id, StructName = declaredVar.StructName });
                 node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
                 break;
             }

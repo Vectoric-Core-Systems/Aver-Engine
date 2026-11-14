@@ -30,11 +30,15 @@ public partial class GraphCompiler
     private static readonly Type V3 = typeof(Vector3);
 
     /// The zero of a data pin: what an unwired input with no value reads as.
-    private void EmitZeroOf(PinType type)
+    private void EmitZeroOf(PinType type, string? structName = null)
     {
         if (_il == null) return;
         switch (type)
         {
+            case PinType.Struct: EmitZeroStruct(structName ?? ""); break;
+            case var t when PinTypeRules.IsArray(t):
+                _il.Emit(OpCodes.Newobj, PinTypeRules.ClrType(t).GetConstructor(Type.EmptyTypes)!);
+                break;
             case PinType.Float3: _il.Emit(OpCodes.Call, Vector3Zero); break;
             case PinType.String: _il.Emit(OpCodes.Ldstr, ""); break;
             case PinType.Bool:
@@ -57,6 +61,7 @@ public partial class GraphCompiler
     private void EmitPureDataPull(Node node, string pinName)
     {
         if (_il == null) return;
+        if (CollectionNodes.KindOf(node.Type) != null) { EmitCollectionPull(node, pinName); return; }
         void In(string p) => EmitPullInput(node, p);
         void Call(MethodInfo m) => _il.Emit(OpCodes.Call, m);
 
@@ -131,6 +136,7 @@ public partial class GraphCompiler
     private void EmitExecDataNode(Node node)
     {
         if (_il == null) return;
+        if (CollectionNodes.KindOf(node.Type) != null) { EmitExecCollectionNode(node); return; }
         void In(string p) => EmitPullInput(node, p);
         LocalBuilder Vec(string pin)
         {

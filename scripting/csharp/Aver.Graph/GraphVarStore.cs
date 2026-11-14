@@ -29,6 +29,7 @@
 // matters at this scale and needs no second name-to-slot table the way a dense array would.
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Numerics;
 
 namespace Aver.Graph;
@@ -80,6 +81,24 @@ public sealed class GraphVarStore
     /// <summary>Writes a String variable.</summary>
     public void SetString(string name, string value) => _values[name] = value ?? "";
 
+    /// <summary>Reads an array variable: the live list, so an exec node mutates it in place. Created empty if missing.</summary>
+    public List<T> GetArray<T>(string name)
+    {
+        if (_values.TryGetValue(name, out var v) && v is List<T> list) return list;
+        var made = new List<T>();
+        _values[name] = made;
+        return made;
+    }
+
+    /// <summary>Writes an array variable as a COPY, so two variables never share a list.</summary>
+    public void SetArray<T>(string name, List<T> value) => _values[name] = value == null ? new List<T>() : new List<T>(value);
+
+    /// <summary>Reads a struct variable; null if never set (a struct read treats null as the zero struct).</summary>
+    public GraphStruct? GetStruct(string name) => _values.TryGetValue(name, out var v) ? v as GraphStruct : null;
+
+    /// <summary>Writes a struct variable. A struct is immutable, so no copy is needed.</summary>
+    public void SetStruct(string name, GraphStruct value) => _values[name] = value;
+
     /// <summary>Builds a FRESH store, seeded from every VAR <paramref name="graph"/> declares, using
     /// each one's own GraphVariable.Default (itself already resolved to a concrete zero-or-declared
     /// value by OcGraphParser -- see that class's VAR-parsing comment). This is what makes "a variable
@@ -114,6 +133,19 @@ public sealed class GraphVarStore
                     break;
                 case PinType.Bool:
                     store.SetBool(v.Name, v.Default is bool b ? b : false);
+                    break;
+                case PinType.Struct:
+                {
+                    var def = graph.Structs.FirstOrDefault(d => d.Name == v.StructName)
+                        ?? throw new InvalidOperationException($"VAR '{v.Name}' names struct '{v.StructName}', which no STRUCT record declares");
+                    store.SetStruct(v.Name, GraphStructOps.Default(def.Name, def.Signature));
+                    break;
+                }
+                case var t when PinTypeRules.IsArray(t):
+                    // Cloned so every host starts from the declared default, never a list a previous host appended to.
+                    store._values[v.Name] = v.Default is System.Collections.IEnumerable src
+                        ? Activator.CreateInstance(PinTypeRules.ClrType(t), src)!
+                        : Activator.CreateInstance(PinTypeRules.ClrType(t))!;
                     break;
                 default:
                     // Unreachable through the text parser (OcGraphParser rejects VAR ... exec at parse

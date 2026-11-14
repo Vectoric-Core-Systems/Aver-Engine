@@ -368,7 +368,7 @@ public partial class GraphCompiler
                 $"A node's default pins are suppressed entirely as soon as it declares ANY pin by hand, " +
                 $"so if this node has PIN records, it needs one for '{pinName}' too (or a LINK into it)");
 
-        EmitZeroOf(pin.Type);
+        EmitZeroOf(pin.Type, pin.StructName);
     }
 
     /// Shared by Compile() and CompileEntryPoint(): an OUT record must name a DATA pin, never an exec
@@ -404,6 +404,8 @@ public partial class GraphCompiler
         PinType.Entity => typeof(int),
         PinType.Float3 => typeof(System.Numerics.Vector3),
         PinType.String => typeof(string),
+        PinType.Struct => typeof(GraphStruct),
+        _ when PinTypeRules.IsArray(pt) => PinTypeRules.ClrType(pt),
         // PinType.Exec falls here (typeof(void)) but should never actually be asked for -- Compile()
         // rejects an exec-typed OUT, EmitNode skips exec pins for output locals, and OcGraphParser
         // refuses an exec-typed PARAM.
