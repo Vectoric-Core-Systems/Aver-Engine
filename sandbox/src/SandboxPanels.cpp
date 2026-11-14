@@ -2124,19 +2124,19 @@ void SandboxApp::drawEntityTransformSection(scene::World& w, const std::vector<s
             Transform xf = loc->xf;
             Vec3 euler = eulerDegFromQuat(xf.rotation);
             editor::dt::def3(0.0f, 0.0f, 0.0f);
-            bool moved = editor::dt::DragFloat3("Location (cm)", &xf.position.x, 1.0f);
+            bool moved = editor::dt::DragFloat3("Location (cm)", &xf.position.x, 1.0f, 0.0f, 0.0f, "%.1f", ImGuiSliderFlags_NoRoundToFormat);
             const bool rstL = editor::dt::consumeReset();
             if (ImGui::IsItemActivated() || rstL) beginTransformEdit();
             bool done = (ImGui::IsItemDeactivatedAfterEdit() || rstL);
             editor::dt::def3(0.0f, 0.0f, 0.0f);
-            if (editor::dt::DragFloat3("Rotation", &euler.x, 1.0f)) {
+            if (editor::dt::DragFloat3("Rotation", &euler.x, 1.0f, 0.0f, 0.0f, "%.1f", ImGuiSliderFlags_NoRoundToFormat)) {
                 xf.rotation = quatFromEulerDeg(euler); moved = true;
             }
             const bool rstR = editor::dt::consumeReset();
             if (ImGui::IsItemActivated() || rstR) beginTransformEdit();
             done = done || (ImGui::IsItemDeactivatedAfterEdit() || rstR);
             editor::dt::def3(1.0f, 1.0f, 1.0f);
-            moved |= editor::dt::DragFloat3("Scale", &xf.scale.x, 0.5f, 0.01f, 100000.0f);
+            moved |= editor::dt::DragFloat3("Scale", &xf.scale.x, 0.5f, 0.01f, 100000.0f, "%.2f", ImGuiSliderFlags_NoRoundToFormat);
             const bool rstS = editor::dt::consumeReset();
             if (ImGui::IsItemActivated() || rstS) beginTransformEdit();
             done = done || (ImGui::IsItemDeactivatedAfterEdit() || rstS);
@@ -2191,14 +2191,14 @@ void SandboxApp::drawEntityTransformSection(scene::World& w, const std::vector<s
 
             editor::dt::def3(0.0f, 0.0f, 0.0f);
             if (posMixed[0] || posMixed[1] || posMixed[2]) editor::dt::reserveRight(ImGui::CalcTextSize("(mixed)").x + ImGui::GetStyle().ItemSpacing.x);
-            bool moved = editor::dt::DragFloat3("Location (cm)", &xf.position.x, 1.0f);
+            bool moved = editor::dt::DragFloat3("Location (cm)", &xf.position.x, 1.0f, 0.0f, 0.0f, "%.1f", ImGuiSliderFlags_NoRoundToFormat);
             const bool rstL = editor::dt::consumeReset();
             if (ImGui::IsItemActivated() || rstL) beginTransformEdit();
             bool done = (ImGui::IsItemDeactivatedAfterEdit() || rstL);
             showMixedTag(posMixed);
             editor::dt::def3(0.0f, 0.0f, 0.0f);
             if (rotMixed[0] || rotMixed[1] || rotMixed[2]) editor::dt::reserveRight(ImGui::CalcTextSize("(mixed)").x + ImGui::GetStyle().ItemSpacing.x);
-            if (editor::dt::DragFloat3("Rotation", &euler.x, 1.0f)) {
+            if (editor::dt::DragFloat3("Rotation", &euler.x, 1.0f, 0.0f, 0.0f, "%.1f", ImGuiSliderFlags_NoRoundToFormat)) {
                 xf.rotation = quatFromEulerDeg(euler); moved = true;
             }
             const bool rstR = editor::dt::consumeReset();
@@ -2207,7 +2207,7 @@ void SandboxApp::drawEntityTransformSection(scene::World& w, const std::vector<s
             showMixedTag(rotMixed);
             editor::dt::def3(1.0f, 1.0f, 1.0f);
             if (scaleMixed[0] || scaleMixed[1] || scaleMixed[2]) editor::dt::reserveRight(ImGui::CalcTextSize("(mixed)").x + ImGui::GetStyle().ItemSpacing.x);
-            moved |= editor::dt::DragFloat3("Scale", &xf.scale.x, 0.5f, 0.01f, 100000.0f);
+            moved |= editor::dt::DragFloat3("Scale", &xf.scale.x, 0.5f, 0.01f, 100000.0f, "%.2f", ImGuiSliderFlags_NoRoundToFormat);
             const bool rstS = editor::dt::consumeReset();
             if (ImGui::IsItemActivated() || rstS) beginTransformEdit();
             done = done || (ImGui::IsItemDeactivatedAfterEdit() || rstS);
@@ -3143,15 +3143,15 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
             // the only transform edits pushing nothing (selectedXform/endTransformEdit already
             // branch for placeholder objects via the gizmo, so dragging was undoable but typing
             // the same number here was not).
-            editor::dt::DragFloat3("Location (cm)", &o.pos.x, 1.0f);
+            editor::dt::DragFloat3("Location (cm)", &o.pos.x, 1.0f, 0.0f, 0.0f, "%.1f", ImGuiSliderFlags_NoRoundToFormat);
             const bool rstL = editor::dt::consumeReset();
             if (ImGui::IsItemActivated() || rstL) beginTransformEdit();
             bool objDone = (ImGui::IsItemDeactivatedAfterEdit() || rstL);
-            editor::dt::DragFloat3("Rotation", &o.rotDeg.x, 1.0f);
+            editor::dt::DragFloat3("Rotation", &o.rotDeg.x, 1.0f, 0.0f, 0.0f, "%.1f", ImGuiSliderFlags_NoRoundToFormat);
             const bool rstR = editor::dt::consumeReset();
             if (ImGui::IsItemActivated() || rstR) beginTransformEdit();
             objDone = objDone || (ImGui::IsItemDeactivatedAfterEdit() || rstR);
-            editor::dt::DragFloat3("Scale", &o.scale.x, 0.01f, 0.02f, 100.f);
+            editor::dt::DragFloat3("Scale", &o.scale.x, 0.01f, 0.02f, 100.f, "%.2f", ImGuiSliderFlags_NoRoundToFormat);
             const bool rstS = editor::dt::consumeReset();
             if (ImGui::IsItemActivated() || rstS) beginTransformEdit();
             objDone = objDone || (ImGui::IsItemDeactivatedAfterEdit() || rstS);
