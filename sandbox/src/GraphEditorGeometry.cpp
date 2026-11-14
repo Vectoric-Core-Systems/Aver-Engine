@@ -74,6 +74,10 @@ bool pinTakesInlineValue(const fmt::OcGraphNode& node, const fmt::OcGraphPin& pi
     if (node.type == "Reroute") return false;
     const bool typed = pin.type == "float" || pin.type == "int" || pin.type == "bool" ||
                        pin.type == "float3" || pin.type == "string" || pin.type == "entity";
+    // An unwired struct or array input takes a literal too (a struct through its field popup).
+    const bool literal = pin.type.rfind("struct:", 0) == 0 ||
+                         (pin.type.size() > 2 && pin.type.compare(pin.type.size() - 2, 2, "[]") == 0);
+    if (literal) return !pin.isOutput;
     if (!typed) return false;
     if (!pin.isOutput) return true;
     return pin.name == "value" && (node.type == "ConstFloat" || node.type == "ConstInt" || node.type == "ConstBool" ||
@@ -83,6 +87,8 @@ bool pinTakesInlineValue(const fmt::OcGraphNode& node, const fmt::OcGraphPin& pi
 f32 inlineValueWidthPx(const std::string& pinType, const GraphLayoutStyle& style) {
     if (pinType == "float3") return style.inlineValuePx * 2.0f;
     if (pinType == "string") return style.inlineValuePx * 1.6f;
+    if (pinType.rfind("struct:", 0) == 0) return style.inlineValuePx * 2.4f;
+    if (pinType.size() > 2 && pinType.compare(pinType.size() - 2, 2, "[]") == 0) return style.inlineValuePx * 1.6f;
     return style.inlineValuePx;
 }
 

@@ -749,8 +749,17 @@ private:
     std::string inlineEditNode_, inlineEditPin_;
     char inlineEditBuf_[256] = {};
     bool inlineEditFocus_ = false;
-    bool clickInlineValueBox(f32 mx, f32 my);   // true if (mx,my) hit a box: a bool flips, others start editing
+    bool clickInlineValueBox(f32 mx, f32 my);   // true if (mx,my) hit a box: a bool flips, a struct opens its fields, others start editing
     void drawInlineValueEditor();
+    // A struct input's value: a popup with one editor per field (nested structs as tree nodes), written back as the
+    // pin's literal {field=value|...} on each committed field edit.
+    std::string structPopupNode_, structPopupPin_;
+    bool structPopupQueued_ = false;
+    f32 structPopupX_ = 0.0f, structPopupY_ = 0.0f;
+    std::string structFieldEditPath_;
+    char structFieldBuf_[256] = {};
+    void drawStructValuePopup(float dpi);
+    bool drawStructLiteralFields(const fmt::OcGraphStruct& def, std::string& literal, const std::string& path, int depth, float dpi);
 
     // What the right button went down on, recorded at press so release can pick the right popup.
     // Right button is ambiguous: a drag pans, a click opens a menu, and which menu depends on what

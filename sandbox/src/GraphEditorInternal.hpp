@@ -8,6 +8,7 @@
 #include "GraphEditor.hpp"
 #include "GraphMacros.hpp"
 #include "GraphNodeDefs.hpp"
+#include "GraphStructLiteral.hpp"
 
 #include <chrono>
 #include <cmath>

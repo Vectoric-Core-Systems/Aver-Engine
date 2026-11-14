@@ -15,6 +15,7 @@
 #include "GraphCollectionNodes.hpp"
 #include "GraphEditor.hpp"
 #include "GraphNodeDefs.hpp"
+#include "GraphStructLiteral.hpp"
 #include "LevelClassSave.hpp"
 
 #include "aver/core/ErrorCodes.hpp"
@@ -259,6 +260,42 @@ static void testVectorStringEntityPins() {
     check(fmt::decodeGraphString(text) == "hello big world%", "the string default reloads and decodes to what was typed, got '" + text + "'");
     check(fmt::decodeGraphString(fmt::encodeGraphString("a b\tc\nd%20")) == "a b\tc\nd%20", "encode then decode is the identity");
 
+    // ---- struct and array values: the literal helpers, and setPinDefault on struct and array inputs
+    {
+        fmt::OcGraphStruct inner{"Inner", {{"a", "float"}, {"tags", "string[]"}}};
+        fmt::OcGraphStruct outer{"Outer", {{"k", "int"}, {"inner", "struct:Inner"}, {"xs", "float[]"}}};
+        std::string lit = withStructLiteralField("", outer, "xs", "1,2,3");
+        lit = withStructLiteralField(lit, outer, "k", "3");
+        check(lit == "{k=3|xs=1,2,3}", "fields are written in the struct's order, got '" + lit + "'");
+        const std::string in = withStructLiteralField(withStructLiteralField("", inner, "a", "7"), inner, "tags",
+                                                      arrayLiteralFromText("string", "x, y|z , a b"));
+        check(in == "{a=7|tags=x,y%7Cz,a%20b}", "a string array escapes | and spaces per element, got '" + in + "'");
+        lit = withStructLiteralField(lit, outer, "inner", in);
+        check(lit == "{k=3|inner={a=7|tags=x,y%7Cz,a%20b}|xs=1,2,3}", "a nested struct sits in its own braces, got '" + lit + "'");
+        check(structLiteralField(lit, "inner") == in && structLiteralField(lit, "xs") == "1,2,3", "fields read back past the nested braces");
+        check(arrayTextFromLiteral("string", structLiteralField(in, "tags")) == "x, y|z, a b", "a string array shows decoded");
+        check(withStructLiteralField(withStructLiteralField(lit, outer, "k", ""), outer, "inner", "") == "{xs=1,2,3}", "an emptied field is dropped");
+        check(withStructLiteralField("{xs=1}", outer, "xs", "").empty(), "no fields left is the zero struct: an empty literal");
+        check(encodeLiteralString("a,b{c}") == "a%2Cb%7Bc%7D" && fmt::decodeGraphString(encodeLiteralString("a,b{c}|% d")) == "a,b{c}|% d",
+              "a literal's string escapes decode back");
+
+        const std::string sp = (std::filesystem::path(scratchDir()) / "struct_pins_test.ocgraph").string();
+        writeFile(sp, "OCGRAPH 1\nNAME StructPins\nSTRUCT Inner\nFIELD Inner a float\nFIELD Inner tags string[]\n"
+                      "NODE br BreakStruct 0 0 struct=Inner\nPIN br value in struct:Inner\nPIN br a out float\nPIN br tags out string[]\n"
+                      "NODE ln ArrayLength 0 0\nPIN ln array in float[]\nPIN ln length out int\nOUT br a\nOUT ln length\n");
+        GraphEditor se(sp);
+        check(pinTakesInlineValue(fmt::OcGraphNode{}, fmt::OcGraphPin{"a", "float[]", false, ""}) &&
+              pinTakesInlineValue(fmt::OcGraphNode{}, fmt::OcGraphPin{"a", "struct:A", false, ""}) &&
+              !pinTakesInlineValue(fmt::OcGraphNode{}, fmt::OcGraphPin{"a", "struct:A", true, ""}), "struct and array inputs take a value box, outputs do not");
+        check(se.setPinDefault("br", "value", "{a=4|tags=p,q}"), "a struct literal is accepted on a struct input");
+        check(se.setPinDefault("ln", "array", "4, 5, 6"), "an array typed with spaces is accepted");
+        std::string why;
+        check(se.save(&why), "save() succeeds (why='" + why + "')");
+        const std::string saved = readFile(sp);
+        check(saved.find("PIN br value in struct:Inner {a=4|tags=p,q}") != std::string::npos, "the struct literal is written on its PIN");
+        check(saved.find("PIN ln array in float[] 4,5,6") != std::string::npos, "the array is written without spaces");
+    }
+
     const auto& g = ed.graph();
     check(canConnectPins(g, "k", "value", "ev", "e").ok, "an int output connects to an entity input");
     check(!canConnectPins(g, "vl", "result", "vl", "v").ok, "a float output does not connect to a float3 input");
@@ -464,8 +501,8 @@ static void testStructsAndArraysInTheEditor() {
     check(exactPinTypeMatch("int[]", "entity[]") && exactPinTypeMatch("entity[]", "int[]"), "int[] and entity[] match in both directions");
     check(exactPinTypeMatch("struct:A", "struct:A") && !exactPinTypeMatch("struct:A", "struct:B") && !exactPinTypeMatch("struct:A", "float"),
           "a struct matches only itself");
-    check(!pinTakesInlineValue(fmt::OcGraphNode{}, fmt::OcGraphPin{"a", "float[]", false, ""}) &&
-          !pinTakesInlineValue(fmt::OcGraphNode{}, fmt::OcGraphPin{"a", "struct:A", false, ""}), "array and struct pins take no value box");
+    check(!pinTakesInlineValue(fmt::OcGraphNode{}, fmt::OcGraphPin{"a", "float[]", true, ""}) &&
+          !pinTakesInlineValue(fmt::OcGraphNode{}, fmt::OcGraphPin{"a", "struct:A", true, ""}), "array and struct outputs take no value box");
     check(isDataTypeName("float3[]", nullptr) && isDataTypeName("struct:Anything", nullptr) && !isDataTypeName("exec", nullptr) &&
           !isDataTypeName("float[][]", nullptr) && !isDataTypeName("exec[]", nullptr), "the type-name helpers");
 }

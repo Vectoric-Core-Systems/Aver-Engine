@@ -79,6 +79,15 @@ bool GraphEditor::clickInlineValueBox(f32 mx, f32 my) {
         for (const auto& p : node->pins) if (p.name == b.pin && p.isOutput == b.isConst) cur = p.defaultValue;
         if (b.isConst) { const GraphNodeAttribute a = getNodeAttribute(*node, "value"); if (a.found) cur = a.value; }
         if (b.type == "string") cur = fmt::decodeGraphString(cur);
+        if (isArrayTypeName(b.type)) cur = arrayTextFromLiteral(b.type.substr(0, b.type.size() - 2), cur);
+        if (isStructTypeName(b.type)) {
+            structPopupNode_ = b.node;
+            structPopupPin_ = b.pin;
+            structPopupX_ = b.x0;
+            structPopupY_ = b.y1 + 2.0f;
+            structPopupQueued_ = true;
+            return true;
+        }
         if (b.type == "bool") {
             const std::string flipped = (cur == "true" || cur == "1") ? "false" : "true";
             if (b.isConst) setAttribute(b.node, "value", flipped);
@@ -119,7 +128,7 @@ void GraphEditor::drawInlineValueEditor() {
     const bool done = enter || ImGui::IsItemDeactivated() || (!active && ImGui::GetFrameCount() - s_openedFrame > 2);
     if (!done) return;
     const std::string text = inlineEditBuf_;
-    bool ok = text.empty() || box->type == "string";
+    bool ok = text.empty() || box->type == "string" || isArrayTypeName(box->type);   // an array's elements are checked by Validate
     if (!ok && box->type == "float3") {
         // up to three comma-separated numbers; an empty part reads as 0
         ok = true;
@@ -151,6 +160,132 @@ void GraphEditor::drawInlineValueEditor() {
         }
     }
     inlineEditNode_.clear();
+}
+
+namespace {
+// Whether a typed field value parses as its type: a number, an integer, or up to three numbers for float3. Empty clears.
+bool fieldTextFits(const std::string& type, const std::string& text) {
+    if (text.empty()) return true;
+    const auto number = [](const std::string& s, bool integer) {
+        if (s.empty()) return true;
+        char* end = nullptr;
+        if (integer) std::strtol(s.c_str(), &end, 10); else std::strtod(s.c_str(), &end);
+        return end && *end == '\0';
+    };
+    if (type == "float") return number(text, false);
+    if (type == "int" || type == "entity") return number(text, true);
+    if (type == "float3") {
+        const std::vector<std::string> parts = splitLiteralTop(text, ',');
+        if (parts.size() > 3) return false;
+        for (const auto& p : parts) if (!number(p, false)) return false;
+    }
+    return true;
+}
+} // namespace
+
+// One row per field of `def`, editing `literal`; true when a field edit was committed (the caller writes it back).
+bool GraphEditor::drawStructLiteralFields(const fmt::OcGraphStruct& def, std::string& literal, const std::string& path, int depth,
+                                          float dpi) {
+    bool changed = false;
+    f32 labelW = 0.0f;
+    for (const auto& f : def.fields) labelW = std::max(labelW, ImGui::CalcTextSize(f.name.c_str()).x);
+    labelW += 14.0f * dpi;
+    for (const auto& f : def.fields) {
+        ImGui::PushID(f.name.c_str());
+        const std::string cur = structLiteralField(literal, f.name);
+        const std::string fpath = path + "." + f.name;
+        std::string next = cur;
+        bool commit = false;
+        if (isStructTypeName(f.type)) {
+            const fmt::OcGraphStruct* inner = nullptr;
+            for (const auto& s : graph_.structs) if (s.name == structNameOfType(f.type)) { inner = &s; break; }
+            if (inner && depth < 8 &&
+                ImGui::TreeNodeEx("##nested", ImGuiTreeNodeFlags_SpanAvailWidth, "%s  (%s)", f.name.c_str(), inner->name.c_str())) {
+                std::string nested = cur;
+                if (drawStructLiteralFields(*inner, nested, fpath, depth + 1, dpi)) { next = nested; commit = true; }
+                ImGui::TreePop();
+            } else if (!inner) {
+                ImGui::TextDisabled("%s: struct %s is not declared", f.name.c_str(), structNameOfType(f.type).c_str());
+            }
+        } else {
+            const f32 rowX = ImGui::GetCursorPosX();
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(f.name.c_str());
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", f.type.c_str());
+            ImGui::SameLine(rowX + labelW);
+            if (f.type == "bool") {
+                bool v = cur == "true" || cur == "1";
+                if (ImGui::Checkbox("##v", &v)) { next = v ? "true" : ""; commit = true; }
+            } else {
+                const bool isArray = isArrayTypeName(f.type);
+                const std::string elem = isArray ? f.type.substr(0, f.type.size() - 2) : std::string();
+                const std::string shown = f.type == "string" ? fmt::decodeGraphString(cur) : isArray ? arrayTextFromLiteral(elem, cur) : cur;
+                const char* hint = f.type == "string" ? "text" : f.type == "float3" ? "0, 0, 0" : isArray ? (elem == "string" ? "a, b, c" : "1, 2, 3") : "0";
+                char buf[256];
+                std::snprintf(buf, sizeof buf, "%s", structFieldEditPath_ == fpath ? structFieldBuf_ : shown.c_str());
+                ImGui::SetNextItemWidth(std::max(140.0f * dpi, ImGui::GetContentRegionAvail().x));
+                const ImGuiInputTextFlags fl = (f.type == "int" || f.type == "entity") ? ImGuiInputTextFlags_CharsDecimal
+                                               : f.type == "float" ? ImGuiInputTextFlags_CharsScientific : ImGuiInputTextFlags_None;
+                if (ImGui::InputTextWithHint("##v", hint, buf, sizeof buf, fl)) {
+                    structFieldEditPath_ = fpath;
+                    std::snprintf(structFieldBuf_, sizeof structFieldBuf_, "%s", buf);
+                }
+                if (ImGui::IsItemDeactivatedAfterEdit() && structFieldEditPath_ == fpath) {
+                    const std::string t = structFieldBuf_;
+                    structFieldEditPath_.clear();
+                    if (f.type == "string") { next = encodeLiteralString(t); commit = true; }
+                    else if (isArray) { next = arrayLiteralFromText(elem, t); commit = true; }
+                    else if (fieldTextFits(f.type, t)) {
+                        next.clear();
+                        for (const char c : t) if (c != ' ' && c != '\t') next += c;
+                        commit = true;
+                    } else {
+                        showRejectionBanner("'" + t + "' is not a " + f.type + " (field " + f.name + ")");
+                    }
+                }
+            }
+        }
+        if (commit && next != cur) {
+            literal = withStructLiteralField(literal, def, f.name, next);
+            changed = true;
+        }
+        ImGui::PopID();
+    }
+    return changed;
+}
+
+// The popup a struct input's value box opens.
+void GraphEditor::drawStructValuePopup(float dpi) {
+    if (structPopupQueued_) {
+        ImGui::SetNextWindowPos(ImVec2(structPopupX_, structPopupY_));
+        ImGui::OpenPopup("##graphStructValue");
+        structPopupQueued_ = false;
+        structFieldEditPath_.clear();
+    }
+    if (!ImGui::BeginPopup("##graphStructValue")) return;
+    const fmt::OcGraphPin* pin = nullptr;
+    for (const auto& n : graph_.nodes)
+        if (n.id == structPopupNode_)
+            for (const auto& p : n.pins) if (p.name == structPopupPin_ && !p.isOutput) pin = &p;
+    const fmt::OcGraphStruct* def = nullptr;
+    if (pin) for (const auto& s : graph_.structs) if (s.name == structNameOfType(pin->type)) { def = &s; break; }
+    if (!pin || !def) {
+        ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+        return;
+    }
+    ImGui::TextDisabled("%s  (%s)", structPopupPin_.c_str(), def->name.c_str());
+    ImGui::Separator();
+    ImGui::Dummy(ImVec2(260.0f * dpi, 0.0f));
+    if (def->fields.empty()) ImGui::TextDisabled("%s has no fields.", def->name.c_str());
+    std::string literal = pin->defaultValue;
+    const std::string nodeId = structPopupNode_, pinName = structPopupPin_;
+    if (drawStructLiteralFields(*def, literal, "", 0, dpi)) setPinDefault(nodeId, pinName, literal);
+    ImGui::Separator();
+    if (ImGui::SmallButton("Reset")) setPinDefault(nodeId, pinName, "");
+    ImGui::SameLine();
+    ImGui::TextDisabled("unset fields read as zero");
+    ImGui::EndPopup();
 }
 #endif
 
@@ -915,6 +1050,8 @@ void GraphEditor::drawEventGraph(float dpi) {
             std::string shown = unset ? std::string("0") : val;
             if (sp->type == "float3") shown = float3Display(val);
             else if (sp->type == "string") shown = fmt::decodeGraphString(val);
+            else if (isStructTypeName(sp->type)) shown = unset ? std::string("zero") : structLiteralSummary(val);
+            else if (isArrayTypeName(sp->type)) shown = unset ? std::string("empty") : arrayTextFromLiteral(sp->type.substr(0, sp->type.size() - 2), val);
             if (sp->type == "string" && unset) shown = "text";
             const ImVec2 vs = font->CalcTextSizeA(scaledFontPx, FLT_MAX, 0.0f, shown.c_str());
             dl->PushClipRect(b0, b1, true);
@@ -925,6 +1062,7 @@ void GraphEditor::drawEventGraph(float dpi) {
     }
     dl->ChannelsMerge();
     drawInlineValueEditor();
+    drawStructValuePopup(dpi);
     drawMinimap(origin, canvasSizeV, dpi);
 
     // ---- overlays: in-progress link drag, box-select rect, rejection banner (drawn AFTER merge, so

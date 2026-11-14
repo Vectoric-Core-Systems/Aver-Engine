@@ -48,7 +48,7 @@ struct GraphLayoutStyle {
     f32 minWidthPx = 90.0f;
     f32 pinLabelReservePx = 46.0f; // per-side reserve for a pin's label, beyond its dot+gap
     f32 linkHitDistancePx = 6.0f;  // max perpendicular distance from a bezier sample to count as a hit
-    f32 inlineValuePx = 52.0f;     // the value box beside an unwired float/int/bool input, or a Const's value
+    f32 inlineValuePx = 52.0f;     // the value box beside an unwired data input (struct and array too), or a Const's value
 };
 
 // A pin whose value can be typed on the node: a float/int/bool input, or a Const node's `value` output.

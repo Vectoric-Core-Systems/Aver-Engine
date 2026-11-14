@@ -1605,6 +1605,9 @@ bool GraphEditor::setPinDefault(const std::string& nodeId, const std::string& pi
             std::string stored = value;
             if (p.type == "string") {
                 stored = fmt::encodeGraphString(value);
+            } else if (isArrayTypeName(p.type)) {
+                stored = arrayLiteralFromText(p.type.substr(0, p.type.size() - 2), value);
+                if (containsWhitespace(stored)) return false;
             } else {
                 if (p.type == "float3") stored.erase(std::remove(stored.begin(), stored.end(), ' '), stored.end());
                 if (containsWhitespace(stored)) return false;
