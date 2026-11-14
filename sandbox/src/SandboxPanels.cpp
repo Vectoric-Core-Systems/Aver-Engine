@@ -1105,6 +1105,10 @@ const char* SandboxApp::outlinerIconFor(scene::Entity ent) const {
     }
 }
 
+// Where this frame's entity rows start (window-local y), so alternate rows can be striped by position:
+// the clipper skips rows off screen, so a running count would not know a row's parity.
+static float s_outlinerRowsTop = 0.0f;
+
 // The eye and lock slots at the right edge of a row; the row's tree node is narrowed to leave them.
 float SandboxApp::outlinerIconZone() const {
     const float slot = ImGui::GetFontSize() + 6.0f * ImGui::GetFontSize() / 16.0f;
@@ -1118,7 +1122,7 @@ void SandboxApp::drawOutlinerRowIcons(scene::Entity ent, float y0, float y1, boo
     const float slot = ImGui::GetFontSize() + 6.0f * ImGui::GetFontSize() / 16.0f;
     const float x1 = win->WorkRect.Max.x, x0 = x1 - outlinerIconZone();
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    if (selected) dl->AddRectFilled(ImVec2(x0 - ImGui::GetStyle().ItemSpacing.x, y0), ImVec2(x1, y1), ImGui::GetColorU32(ImGuiCol_Header));
+    if (selected) dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), ImGui::GetColorU32(ImGuiCol_Header));   // from where the row's node ends: overlapping it doubled the fill
 
     const bool winHover = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows);
     const bool click = winHover && ImGui::IsMouseClicked(0);
@@ -1220,6 +1224,15 @@ void SandboxApp::drawOutlinerRow(const OutlinerRow& row,
     if (rowSelected) ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImGui::GetStyleColorVec4(ImGuiCol_HeaderActive));
     // The node stops short of the eye/lock zone (WorkRect is what SpanAvailWidth spans).
     ImGuiWindow* rowWin = ImGui::GetCurrentWindow();
+    {
+        // Alternate rows a shade lighter, as Unreal's outliner, drawn first so selection paints over it.
+        const float rowH = ImGui::GetTextLineHeightWithSpacing();
+        if (std::lround((ImGui::GetCursorPosY() - s_outlinerRowsTop) / rowH) & 1) {
+            const float y = ImGui::GetCursorScreenPos().y - ImGui::GetStyle().ItemSpacing.y * 0.5f;
+            rowWin->DrawList->AddRectFilled(ImVec2(rowWin->WorkRect.Min.x, y), ImVec2(rowWin->WorkRect.Max.x, y + rowH),
+                                            ImGui::GetColorU32(ImGuiCol_TableRowBgAlt));
+        }
+    }
     const float rowWorkMax = rowWin->WorkRect.Max.x;
     rowWin->WorkRect.Max.x = rowWorkMax - outlinerIconZone();
     const bool open = ImGui::TreeNodeEx(label.c_str(), flags);
@@ -1929,6 +1942,26 @@ void SandboxApp::buildOutlinerPanel() {
         refreshOutlinerCache();
 
         if (!selectionUi_.outlinerRoots_.empty() && !launch_.hideEditorScene_) ImGui::Separator();
+        if (!selectionUi_.outlinerRoots_.empty()) {
+            // Column header: the label column, then the eye and lock columns the rows draw.
+            ImGuiWindow* win = ImGui::GetCurrentWindow();
+            const float slot = ImGui::GetFontSize() + 6.0f * ImGui::GetFontSize() / 16.0f;
+            const float x0 = win->WorkRect.Max.x - outlinerIconZone();
+            const float h = ImGui::GetFrameHeight();
+            const ImVec2 p = ImGui::GetCursorScreenPos();
+            win->DrawList->AddRectFilled(ImVec2(win->WorkRect.Min.x, p.y), ImVec2(win->WorkRect.Max.x, p.y + h),
+                                         ImGui::GetColorU32(ImGuiCol_TableHeaderBg));
+            const ImU32 dim = ImGui::GetColorU32(ImGuiCol_TextDisabled);
+            const float ty = p.y + (h - ImGui::GetFontSize()) * 0.5f;
+            win->DrawList->AddText(ImVec2(p.x + ImGui::GetStyle().FramePadding.x, ty), dim, "Item Label");
+            const auto glyph = [&](const char* g, float left) {
+                win->DrawList->AddText(ImVec2(left + (slot - ImGui::CalcTextSize(g).x) * 0.5f, ty), dim, g);
+            };
+            glyph(ICON_VISIBILITY, x0);
+            glyph(ICON_LOCK, x0 + slot + ImGui::GetStyle().ItemSpacing.x);
+            ImGui::Dummy(ImVec2(0.0f, h));
+        }
+        s_outlinerRowsTop = ImGui::GetCursorPosY();
         // A FLAT LIST submits only the rows on screen, and its order was recorded by the rebuild;
         // see drawOutlinerFlatRows.
         // A TREE submits the roots that have children and their open rows, and only the on-screen
