@@ -240,7 +240,7 @@ inline std::string sectionHeaderText(const char* label) {
 // Set by the Details search box while it filters: every section opens so a hit is never folded away.
 inline bool& forceSectionsOpen() { static bool b = false; return b; }
 
-// A section title: the header font, and a NEUTRAL header bar -- ImGuiCol_Header is the theme's
+// A section title: the header face at body size, and a NEUTRAL header bar -- ImGuiCol_Header is the theme's
 // selection colour (orange) because Selectable and TreeNode rows use it for "selected", and
 // CollapsingHeader paints it at rest.
 inline bool sectionHeader(const char* label, ImGuiTreeNodeFlags flags = 0) {
@@ -249,7 +249,7 @@ inline bool sectionHeader(const char* label, ImGuiTreeNodeFlags flags = 0) {
     ImGui::PushStyleColor(ImGuiCol_Header, st.Colors[ImGuiCol_FrameBg]);
     ImGui::PushStyleColor(ImGuiCol_HeaderHovered, st.Colors[ImGuiCol_FrameBgHovered]);
     ImGui::PushStyleColor(ImGuiCol_HeaderActive, st.Colors[ImGuiCol_FrameBgActive]);
-    FontScope f(editorFonts().header, editorFonts().headerPx);
+    FontScope f(editorFonts().header, ImGui::GetFontSize());   // the medium face at row size, as Unreal's categories
     if (forceSectionsOpen()) ImGui::SetNextItemOpen(true);
     const bool open = ImGui::CollapsingHeader(shown.c_str(), flags);
     ImGui::PopStyleColor(3);
@@ -262,7 +262,7 @@ inline bool sectionHeader(const char* label, bool* pVisible, ImGuiTreeNodeFlags 
     ImGui::PushStyleColor(ImGuiCol_Header, st.Colors[ImGuiCol_FrameBg]);
     ImGui::PushStyleColor(ImGuiCol_HeaderHovered, st.Colors[ImGuiCol_FrameBgHovered]);
     ImGui::PushStyleColor(ImGuiCol_HeaderActive, st.Colors[ImGuiCol_FrameBgActive]);
-    FontScope f(editorFonts().header, editorFonts().headerPx);
+    FontScope f(editorFonts().header, ImGui::GetFontSize());   // the medium face at row size, as Unreal's categories
     if (forceSectionsOpen()) ImGui::SetNextItemOpen(true);
     const bool open = ImGui::CollapsingHeader(shown.c_str(), pVisible, flags);
     ImGui::PopStyleColor(3);
