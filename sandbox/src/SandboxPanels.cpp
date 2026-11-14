@@ -338,7 +338,7 @@ void SandboxApp::materialPanel(pbr::MaterialHandle handle) {
         ImGui::SetTooltip("Fraction of each channel left after Attenuation Distance. Low channels die "
                           "first: red in water, so depth goes cyan.");
     editor::dt::def(dm.scatterColor, 3);
-    changed |= track(editor::dt::ColorEdit3("Scatter Color", d->scatterColor, ImGuiColorEditFlags_Float));
+    changed |= track(editor::dt::ColorEdit3("Scatter Color", d->scatterColor));
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Single-scattering albedo per channel (linear, 0-1): the share of extinction "
                           "that scatters light toward the eye instead of absorbing it. Gives deep water "
@@ -2871,7 +2871,10 @@ void SandboxApp::drawAddRemoveComponent(scene::World& w) {
     // Previously impossible from the editor: every panel above renders only when its
     // component already exists, so one no importer/template attaches needed a hand-edited file.
     ImGui::Separator();
-    if (ImGui::Button(ICON_ADD " Add Component")) ImGui::OpenPopup("addComponent");
+    // The two buttons share the row, half each, so neither runs past a narrow Details panel.
+    const f32 halfW = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+    if (ImGui::Button(ICON_ADD " Add##addComponent", ImVec2(halfW, 0.0f))) ImGui::OpenPopup("addComponent");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Add Component");
     if (ImGui::BeginPopup("addComponent")) {
         // Listed by hand, not walked from the registry: the registry knows name/size, nothing
         // about whether menu-attaching one is safe (CWorld/CLocal would corrupt an entity).
@@ -2923,7 +2926,8 @@ void SandboxApp::drawAddRemoveComponent(scene::World& w) {
     // reason: CLocal/CWorld/CHierarchy
     // make the row an entity at all, and removing one by menu would corrupt it, not simplify it.
     ImGui::SameLine();
-    if (ImGui::Button(ICON_DELETE " Remove Component")) ImGui::OpenPopup("removeComponent");
+    if (ImGui::Button(ICON_DELETE " Remove##removeComponent", ImVec2(halfW, 0.0f))) ImGui::OpenPopup("removeComponent");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove Component");
     if (ImGui::BeginPopup("removeComponent")) {
         struct Removable { u32 id; const char* name; };
         static const Removable kRemovable[] = {
