@@ -117,8 +117,9 @@ public:
     // Returns false (no-op) if the node doesn't exist or the attribute wasn't set.
     bool clearAttribute(const std::string& nodeId, const std::string& key);
     // The value typed into an input pin (its PIN record's default; empty clears it). A Const node's
-    // `value` output goes through setAttribute instead. False if the node or pin is unknown, the pin is
-    // an output, or the value has whitespace.
+    // `value` output goes through setAttribute instead. A string pin takes its text as typed (stored %-escaped,
+    // fmt::encodeGraphString); a float3 pin takes `x,y,z`, spaces ignored. False if the node or pin is unknown,
+    // the pin is an output, or any other pin's value has whitespace.
     bool setPinDefault(const std::string& nodeId, const std::string& pinName, const std::string& value);
 
     // ---- variable editing (graph-level VAR declarations) -------------------------------------------
@@ -632,7 +633,7 @@ private:
     struct InlineValueBox { std::string node, pin, type; f32 x0 = 0, y0 = 0, x1 = 0, y1 = 0; bool isConst = false; };
     std::vector<InlineValueBox> inlineBoxes_;
     std::string inlineEditNode_, inlineEditPin_;
-    char inlineEditBuf_[64] = {};
+    char inlineEditBuf_[256] = {};
     bool inlineEditFocus_ = false;
     bool clickInlineValueBox(f32 mx, f32 my);   // true if (mx,my) hit a box: a bool flips, others start editing
     void drawInlineValueEditor();

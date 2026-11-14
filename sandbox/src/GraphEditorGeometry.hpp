@@ -54,6 +54,9 @@ struct GraphLayoutStyle {
 // A pin whose value can be typed on the node: a float/int/bool input, or a Const node's `value` output.
 bool pinTakesInlineValue(const fmt::OcGraphNode& node, const fmt::OcGraphPin& pin);
 
+// The width of that value box: a float3 shows three numbers and a string some text, so both are wider than a scalar's.
+f32 inlineValueWidthPx(const std::string& pinType, const GraphLayoutStyle& style);
+
 // One pin's computed position and identity, in CANVAS space (not screen space -- see CanvasTransform
 // below for the canvas->screen step).
 struct GraphPinLayout {
@@ -150,7 +153,7 @@ struct GraphLinkCheck {
 using PinTypeCompat = bool (*)(std::string_view srcType, std::string_view dstType);
 
 // TODAY'S rule, and canConnectPins' default: the two pin-type strings must match exactly (case-
-// insensitively). This is ALSO what enforces "an exec pin only connects to another exec pin, never
+// insensitively), except that `entity` and `int` link in either direction. This is ALSO what enforces "an exec pin only connects to another exec pin, never
 // to data" -- see canConnectPins' own comment above its type check for the long form of why.
 bool exactPinTypeMatch(std::string_view srcType, std::string_view dstType);
 

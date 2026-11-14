@@ -1446,14 +1446,22 @@ std::string GraphEditor::makeUniqueVariableName(const std::string& base) const {
 }
 
 bool GraphEditor::setPinDefault(const std::string& nodeId, const std::string& pinName, const std::string& value) {
-    if (containsWhitespace(value)) return false;
     for (auto& n : graph_.nodes) {
         if (n.id != nodeId) continue;
         for (fmt::OcGraphPin& p : n.pins) {
             if (p.name != pinName || p.isOutput) continue;
-            if (p.defaultValue == value) return true;
+            // A string pin takes its text as typed and stores the %-escaped token; a float3 ignores spaces
+            // around its commas; any other value must already be one token.
+            std::string stored = value;
+            if (p.type == "string") {
+                stored = fmt::encodeGraphString(value);
+            } else {
+                if (p.type == "float3") stored.erase(std::remove(stored.begin(), stored.end(), ' '), stored.end());
+                if (containsWhitespace(stored)) return false;
+            }
+            if (p.defaultValue == stored) return true;
             pushUndo();
-            p.defaultValue = value;
+            p.defaultValue = stored;
             dirty_ = true;
             return true;
         }

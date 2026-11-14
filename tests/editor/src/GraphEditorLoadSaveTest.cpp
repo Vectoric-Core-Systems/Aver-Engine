@@ -228,6 +228,45 @@ static void testPinDefaultRoundTrip() {
     check(a.empty(), "the cleared pin has no value, got '" + a + "'");
 }
 
+// float3, string and entity pins: a typed value survives save and reload (the string as its %-escaped token),
+// the escape round-trips, and the link rule lets entity and int meet but keeps float3 apart from float.
+static void testVectorStringEntityPins() {
+    AVER_INFO("=== float3 / string / entity pins: defaults round-trip, link rule ===");
+    const std::string tmp = (std::filesystem::path(scratchDir()) / "data_pins_test.ocgraph").string();
+    writeFile(tmp, "OCGRAPH 1\nNAME DataPins\nNODE vl VectorLength 0 0\nPIN vl v in float3\nPIN vl result out float\n"
+                   "NODE pt PrintText 0 0\nPIN pt exec in exec\nPIN pt text in string\nPIN pt then out exec\n"
+                   "NODE k ConstInt 0 0\nPIN k value out int 1\nNODE ev IsValidEntity 0 0\nPIN ev e in entity\nPIN ev result out bool\n"
+                   "NODE s Add 0 0\nPIN s a in float\nPIN s b in float\nPIN s result out float\nOUT vl result\n");
+    GraphEditor ed(tmp);
+    check(ed.setPinDefault("vl", "v", "1, 2.5,3"), "a float3 value with spaces after its commas is accepted");
+    check(ed.setPinDefault("pt", "text", "hello big world%"), "a string value with spaces and a percent sign is accepted");
+    std::string why;
+    check(ed.save(&why), "save() succeeds after the edits (why='" + why + "')");
+    const std::string after = readFile(tmp);
+    check(after.find("PIN vl v in float3 1,2.5,3") != std::string::npos, "the float3 is stored as x,y,z with no spaces");
+    check(after.find("PIN pt text in string hello%20big%20world%25") != std::string::npos,
+          "the string is stored %-escaped as one token");
+
+    GraphEditor again(tmp);
+    std::string vec, text;
+    for (const auto& n : again.graph().nodes)
+        for (const auto& p : n.pins) {
+            if (n.id == "vl" && p.name == "v") vec = p.defaultValue;
+            if (n.id == "pt" && p.name == "text") text = p.defaultValue;
+        }
+    check(vec == "1,2.5,3", "the float3 default reloads unchanged, got '" + vec + "'");
+    check(fmt::decodeGraphString(text) == "hello big world%", "the string default reloads and decodes to what was typed, got '" + text + "'");
+    check(fmt::decodeGraphString(fmt::encodeGraphString("a b\tc\nd%20")) == "a b\tc\nd%20", "encode then decode is the identity");
+
+    const auto& g = ed.graph();
+    check(canConnectPins(g, "k", "value", "ev", "e").ok, "an int output connects to an entity input");
+    check(!canConnectPins(g, "vl", "result", "vl", "v").ok, "a float output does not connect to a float3 input");
+    check(!canConnectPins(g, "k", "value", "vl", "v").ok, "an int output does not connect to a float3 input");
+    check(exactPinTypeMatch("entity", "int") && exactPinTypeMatch("int", "entity"), "entity and int match in both directions");
+    check(!exactPinTypeMatch("float3", "float") && !exactPinTypeMatch("float", "float3"), "float3 and float never match");
+    check(!exactPinTypeMatch("entity", "float"), "entity does not match float");
+}
+
 static void testAttributeEditRoundTrip() {
     AVER_INFO("=== attribute editing: setAttribute lands on disk, unknown attribute survives ===");
     const std::string original = readFile(AVER_OCGRAPH_ATTR_FIXTURE);
@@ -2032,6 +2071,7 @@ int main() {
     testAutoLayoutDoesNotDirtyTheFile();
     testAttributeEditRoundTrip();
     testPinDefaultRoundTrip();
+    testVectorStringEntityPins();
     testUnknownAttributeSurvivesEditingADeclaredOne();
     testPathologicalAttributeCases();
     testVariablesParseAndByteIdenticalRoundTrip();

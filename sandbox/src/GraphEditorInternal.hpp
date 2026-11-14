@@ -159,6 +159,8 @@ inline ImU32 colorForType(const std::string& type) {
     if (t == "int")    return IM_COL32( 88, 156, 138, 255);  // turquoise
     if (t == "bool")   return IM_COL32(151,  87,  87, 255);  // red
     if (t == "string") return IM_COL32(160, 102, 139, 255);  // magenta
+    if (t == "float3") return IM_COL32(190, 160,  72, 255);  // gold, Unreal's vector
+    if (t == "entity") return IM_COL32( 80, 140, 190, 255);  // cyan-blue
     if (t == "exec")   return IM_COL32(180, 182, 186, 255);  // white -- see above
     return IM_COL32(131, 134, 138, 255);
 }

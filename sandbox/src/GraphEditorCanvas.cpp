@@ -54,6 +54,20 @@ namespace aver::editor {
 
 using namespace gedetail;
 
+// A float3 literal `x,y,z` as `x, y, z` (a missing part reads 0, so an unset value shows 0, 0, 0).
+static std::string float3Display(const std::string& lit) {
+    std::string out;
+    usize from = 0;
+    for (int i = 0; i < 3; ++i) {
+        usize comma = from <= lit.size() ? lit.find(',', from) : std::string::npos;
+        std::string part = from <= lit.size() ? lit.substr(from, comma == std::string::npos ? std::string::npos : comma - from) : std::string();
+        if (part.empty()) part = "0";
+        out += (i ? ", " : "") + part;
+        from = comma == std::string::npos ? lit.size() + 1 : comma + 1;
+    }
+    return out;
+}
+
 // A click on a node's value box: a bool flips at once; anything else opens a text field over the box.
 bool GraphEditor::clickInlineValueBox(f32 mx, f32 my) {
     for (const InlineValueBox& b : inlineBoxes_) {
@@ -64,6 +78,7 @@ bool GraphEditor::clickInlineValueBox(f32 mx, f32 my) {
         std::string cur;
         for (const auto& p : node->pins) if (p.name == b.pin && p.isOutput == b.isConst) cur = p.defaultValue;
         if (b.isConst) { const GraphNodeAttribute a = getNodeAttribute(*node, "value"); if (a.found) cur = a.value; }
+        if (b.type == "string") cur = fmt::decodeGraphString(cur);
         if (b.type == "bool") {
             const std::string flipped = (cur == "true" || cur == "1") ? "false" : "true";
             if (b.isConst) setAttribute(b.node, "value", flipped);
@@ -95,7 +110,8 @@ void GraphEditor::drawInlineValueEditor() {
     ImGui::SetNextItemWidth(std::max(box->x1 - box->x0, 40.0f));
     if (inlineEditFocus_) { ImGui::SetKeyboardFocusHere(); inlineEditFocus_ = false; }
     const ImGuiInputTextFlags fl = ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll |
-                                   (box->type == "int" ? ImGuiInputTextFlags_CharsDecimal : ImGuiInputTextFlags_CharsScientific);
+                                   ((box->type == "int" || box->type == "entity") ? ImGuiInputTextFlags_CharsDecimal
+                                    : box->type == "float" ? ImGuiInputTextFlags_CharsScientific : ImGuiInputTextFlags_None);
     const bool enter = ImGui::InputText("##graphInlineValue", inlineEditBuf_, sizeof inlineEditBuf_, fl);
     ImGui::PopStyleVar();
     const bool active = ImGui::IsItemActive();
@@ -103,16 +119,36 @@ void GraphEditor::drawInlineValueEditor() {
     const bool done = enter || ImGui::IsItemDeactivated() || (!active && ImGui::GetFrameCount() - s_openedFrame > 2);
     if (!done) return;
     const std::string text = inlineEditBuf_;
-    bool ok = text.empty();
-    if (!ok) {
+    bool ok = text.empty() || box->type == "string";
+    if (!ok && box->type == "float3") {
+        // up to three comma-separated numbers; an empty part reads as 0
+        ok = true;
+        usize parts = 0, from = 0;
+        while (ok && from <= text.size()) {
+            usize comma = text.find(',', from);
+            if (comma == std::string::npos) comma = text.size();
+            std::string part = text.substr(from, comma - from);
+            part.erase(std::remove(part.begin(), part.end(), ' '), part.end());
+            if (!part.empty()) { char* end = nullptr; std::strtod(part.c_str(), &end); ok = end && *end == '\0'; }
+            ++parts;
+            from = comma + 1;
+        }
+        ok = ok && parts <= 3;
+    } else if (!ok) {
         char* end = nullptr;
-        if (box->type == "int") { std::strtol(text.c_str(), &end, 10); }
-        else                    { std::strtod(text.c_str(), &end); }
+        if (box->type == "int" || box->type == "entity") { std::strtol(text.c_str(), &end, 10); }
+        else                                             { std::strtod(text.c_str(), &end); }
         ok = end && *end == '\0';
     }
     if (ok) {
-        if (box->isConst) { if (!text.empty()) setAttribute(box->node, "value", text); }
-        else              setPinDefault(box->node, box->pin, text);
+        if (box->isConst) {
+            std::string v = text;
+            if (box->type == "string") v = fmt::encodeGraphString(text);
+            else if (box->type == "float3") v.erase(std::remove(v.begin(), v.end(), ' '), v.end());
+            if (!v.empty() || box->type == "string") setAttribute(box->node, "value", v);
+        } else {
+            setPinDefault(box->node, box->pin, text);
+        }
     }
     inlineEditNode_.clear();
 }
@@ -791,7 +827,7 @@ void GraphEditor::drawEventGraph(float dpi) {
             InlineValueBox box;
             box.node = nl.nodeId; box.pin = pl.name; box.type = sp->type; box.isConst = pl.isOutput;
             box.x0 = pl.isOutput ? pMin.x + 6.0f * z : tx + textSize.x + 5.0f * z;
-            box.x1 = pl.isOutput ? tx - 5.0f * z : std::min(box.x0 + (style_.inlineValuePx - 8.0f) * z, pMax.x - 6.0f * z);
+            box.x1 = pl.isOutput ? tx - 5.0f * z : std::min(box.x0 + (inlineValueWidthPx(sp->type, style_) - 8.0f) * z, pMax.x - 6.0f * z);
             if (sp->type == "bool") box.x1 = box.x0 + h;
             box.y0 = dot.y - h * 0.5f; box.y1 = dot.y + h * 0.5f;
             if (box.x1 - box.x0 < 8.0f * z) continue;
@@ -815,7 +851,10 @@ void GraphEditor::drawEventGraph(float dpi) {
             }
             if (inlineEditNode_ == box.node && inlineEditPin_ == box.pin) continue;   // the text field draws it
             const bool unset = val.empty();
-            const std::string shown = unset ? std::string("0") : val;
+            std::string shown = unset ? std::string("0") : val;
+            if (sp->type == "float3") shown = float3Display(val);
+            else if (sp->type == "string") shown = fmt::decodeGraphString(val);
+            if (sp->type == "string" && unset) shown = "text";
             const ImVec2 vs = font->CalcTextSizeA(scaledFontPx, FLT_MAX, 0.0f, shown.c_str());
             dl->PushClipRect(b0, b1, true);
             dl->AddText(font, scaledFontPx, ImVec2(box.x0 + 4.0f * z, dot.y - vs.y * 0.5f),

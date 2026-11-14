@@ -4,7 +4,7 @@
 
 The nodes the parser (`OcGraphParser.AddDefaultPins`) and the compiler know by hand, plus palette entries that are not table rows. Read from the editor palette (`sandbox/src/GraphNodeDefs*.hpp`); the parser is the ground truth for a pin shape (`docs/AVER_NODE_NODES.md`).
 
-## Gameplay (207)
+## Gameplay (232)
 
 | Type | Display | Category | Pins | Attributes |
 |---|---|---|---|---|
@@ -30,12 +30,15 @@ The nodes the parser (`OcGraphParser.AddDefaultPins`) and the compiler know by h
 | `ConstBool` | Const Bool | Const | out: `value` bool | `value` |
 | `ConstFloat` | Const Float | Const | out: `value` float | `value` |
 | `ConstInt` | Const Int | Const | out: `value` int | `value` |
+| `ConstString` | Const String | Const | out: `value` string | `value` |
+| `ConstVector` | Const Vector | Const | out: `value` float3 | `value` |
 | `BoolToFloat` | Bool To Float | Convert | in: `a` bool<br>out: `result` float | none |
 | `FloatToInt` | Float To Int | Convert | in: `a` float<br>out: `result` int | none |
 | `IntToFloat` | Int To Float | Convert | in: `a` int<br>out: `result` float | none |
 | `Print` | Print | Debug | in: `exec` exec, `value` float<br>out: `then` exec | none |
 | `PrintInt` | Print Int | Debug | in: `exec` exec, `value` int<br>out: `then` exec | none |
 | `PrintString` | Print String | Debug | in: `exec` exec<br>out: `then` exec | `text` |
+| `PrintText` | Print Text | Debug | in: `exec` exec, `text` string<br>out: `then` exec | none |
 | `CustomEvent` | Custom Event | Event | out: `exec` exec | none |
 | `OnHit` | On Hit | Event | out: `exec` exec | none |
 | `OnStart` | On Start | Event | out: `exec` exec | none |
@@ -169,19 +172,23 @@ The nodes the parser (`OcGraphParser.AddDefaultPins`) and the compiler know by h
 | `CreateEntity` | Create Entity | Scene | in: `exec` exec<br>out: `then` exec, `entity` int, `success` bool | `name` |
 | `FindEntity` | Find Entity | Scene | out: `entity` int, `found` bool | `name` |
 | `GetAnimCurve` | Get Anim Curve | Scene | in: `entity` int<br>out: `value` float | `curve` |
+| `GetEntityLocation` | Get Entity Location | Scene | in: `e` entity<br>out: `location` float3 | none |
 | `GetField` | Get Field | Scene | in: `entity` int<br>out: `value` float | `field` |
 | `GetFieldVec3` | Get Field (Vec3) | Scene | in: `entity` int<br>out: `x` float, `y` float, `z` float | `field` |
 | `GetForward` | Get Forward (Look) | Scene | in: `entity` int<br>out: `x` float, `y` float, `z` float, `eyeX` float, `eyeY` float, `eyeZ` float, `success` bool | none |
 | `GetTags` | Get Tags | Scene | in: `entity` int<br>out: `mask` int | none |
 | `GetViewEntity` | Get View Entity | Scene | in: `entity` int<br>out: `view` int, `success` bool | none |
 | `HasTag` | Has Tag | Scene | in: `entity` int, `mask` int<br>out: `has` bool | none |
+| `IsValidEntity` | Is Valid Entity | Scene | in: `e` entity<br>out: `result` bool | none |
 | `PlayAnimation` | Play Animation | Scene | in: `entity` int, `loop` bool = true<br>out: `success` bool | `clip` |
 | `RagdollImpulse` | Ragdoll Impulse | Scene | in: `exec` exec, `entity` int, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | `bone` |
 | `RagdollStart` | Ragdoll Start | Scene | in: `exec` exec, `entity` int, `mode` int, `blend` float<br>out: `then` exec, `success` bool | none |
 | `RagdollStop` | Ragdoll Stop | Scene | in: `exec` exec, `entity` int, `blend` float<br>out: `then` exec, `success` bool | none |
 | `Raycast` | Raycast | Scene | in: `exec` exec, `originX` float, `originY` float, `originZ` float, `dirX` float, `dirY` float, `dirZ` float, `maxDist` float<br>out: `then` exec, `hit` bool, `entity` int, `pointX` float, `pointY` float, `pointZ` float | none |
+| `RaycastVector` | Raycast Vector | Scene | in: `exec` exec, `origin` float3, `direction` float3, `maxDist` float = 10000<br>out: `then` exec, `hit` bool, `entity` entity, `point` float3 | none |
 | `RemoveTag` | Remove Tag | Scene | in: `exec` exec, `entity` int, `mask` int<br>out: `then` exec, `success` bool | none |
 | `SetControlRig` | Set Control Rig | Scene | in: `entity` int, `weight` float = 1<br>out: `success` bool | `rig` |
+| `SetEntityLocation` | Set Entity Location | Scene | in: `exec` exec, `e` entity, `location` float3<br>out: `then` exec | none |
 | `SetField` | Set Field | Scene | in: `entity` int, `value` float<br>out: `success` bool | `field` |
 | `SetFieldVec3` | Set Field (Vec3) | Scene | in: `entity` int, `x` float, `y` float, `z` float<br>out: `success` bool | `field` |
 | `SetMaterial` | Set Material | Scene | in: `entity` int<br>out: `success` bool | `material` |
@@ -191,6 +198,13 @@ The nodes the parser (`OcGraphParser.AddDefaultPins`) and the compiler know by h
 | `SetRagdollStrength` | Set Ragdoll Strength | Scene | in: `exec` exec, `entity` int, `strength` float<br>out: `then` exec, `success` bool | none |
 | `SetSkeleton` | Set Skeleton | Scene | in: `entity` int<br>out: `success` bool | `skeleton` |
 | `SetVisible` | Set Visible | Scene | in: `exec` exec, `entity` int, `visible` bool<br>out: `then` exec, `success` bool | none |
+| `BoolToString` | Bool To String | String | in: `a` bool<br>out: `result` string | none |
+| `FloatToString` | Float To String | String | in: `a` float<br>out: `result` string | none |
+| `IntToString` | Int To String | String | in: `a` int<br>out: `result` string | none |
+| `StringAppend` | String Append | String | in: `a` string, `b` string<br>out: `result` string | none |
+| `StringEquals` | String Equals | String | in: `a` string, `b` string<br>out: `result` bool | none |
+| `StringLength` | String Length | String | in: `s` string<br>out: `result` int | none |
+| `VectorToString` | Vector To String | String | in: `v` float3<br>out: `result` string | none |
 | `DestroyEntity` | Destroy Entity | Transform | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | none |
 | `GetEntityForward` | Get Forward Axis | Transform | in: `entity` int<br>out: `x` float, `y` float, `z` float, `success` bool | none |
 | `GetEntityRight` | Get Right Axis | Transform | in: `entity` int<br>out: `x` float, `y` float, `z` float, `success` bool | none |
@@ -206,6 +220,8 @@ The nodes the parser (`OcGraphParser.AddDefaultPins`) and the compiler know by h
 | `Translate` | Translate | Transform | in: `exec` exec, `entity` int, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | none |
 | `GetVar` | Get Var | Var | out: `value` float | `var` |
 | `SetVar` | Set Var | Var | in: `exec` exec, `value` float<br>out: `then` exec | `var` |
+| `BreakVector` | Break Vector | Vector | in: `v` float3<br>out: `x` float, `y` float, `z` float | none |
+| `MakeVector` | Make Vector | Vector | in: `x` float, `y` float, `z` float<br>out: `v` float3 | none |
 | `VecAdd` | Vec Add | Vector | in: `ax` float, `ay` float, `az` float, `bx` float, `by` float, `bz` float<br>out: `x` float, `y` float, `z` float | none |
 | `VecCross` | Vec Cross | Vector | in: `ax` float, `ay` float, `az` float, `bx` float, `by` float, `bz` float<br>out: `x` float, `y` float, `z` float | none |
 | `VecDistance` | Vec Distance | Vector | in: `ax` float, `ay` float, `az` float, `bx` float, `by` float, `bz` float<br>out: `result` float | none |
@@ -215,6 +231,15 @@ The nodes the parser (`OcGraphParser.AddDefaultPins`) and the compiler know by h
 | `VecNormalize` | Vec Normalize | Vector | in: `ax` float, `ay` float, `az` float<br>out: `x` float, `y` float, `z` float | none |
 | `VecScale` | Vec Scale | Vector | in: `ax` float, `ay` float, `az` float, `s` float<br>out: `x` float, `y` float, `z` float | none |
 | `VecSub` | Vec Subtract | Vector | in: `ax` float, `ay` float, `az` float, `bx` float, `by` float, `bz` float<br>out: `x` float, `y` float, `z` float | none |
+| `VectorAdd` | Vector Add | Vector | in: `a` float3, `b` float3<br>out: `result` float3 | none |
+| `VectorCross` | Vector Cross | Vector | in: `a` float3, `b` float3<br>out: `result` float3 | none |
+| `VectorDistance` | Vector Distance | Vector | in: `a` float3, `b` float3<br>out: `result` float | none |
+| `VectorDot` | Vector Dot | Vector | in: `a` float3, `b` float3<br>out: `result` float | none |
+| `VectorLength` | Vector Length | Vector | in: `v` float3<br>out: `result` float | none |
+| `VectorLerp` | Vector Lerp | Vector | in: `a` float3, `b` float3, `t` float<br>out: `result` float3 | none |
+| `VectorNormalize` | Vector Normalize | Vector | in: `v` float3<br>out: `result` float3 | none |
+| `VectorScale` | Vector Scale | Vector | in: `v` float3, `s` float = 1<br>out: `result` float3 | none |
+| `VectorSubtract` | Vector Subtract | Vector | in: `a` float3, `b` float3<br>out: `result` float3 | none |
 
 ## Material graph (65)
 

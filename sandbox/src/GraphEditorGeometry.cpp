@@ -71,10 +71,18 @@ f32 pointSegmentDist(Vec2 p, Vec2 a, Vec2 b) {
 // ---------------------------------------------------------------------------------------------------
 
 bool pinTakesInlineValue(const fmt::OcGraphNode& node, const fmt::OcGraphPin& pin) {
-    const bool scalar = pin.type == "float" || pin.type == "int" || pin.type == "bool";
-    if (!scalar) return false;
+    const bool typed = pin.type == "float" || pin.type == "int" || pin.type == "bool" ||
+                       pin.type == "float3" || pin.type == "string" || pin.type == "entity";
+    if (!typed) return false;
     if (!pin.isOutput) return true;
-    return pin.name == "value" && (node.type == "ConstFloat" || node.type == "ConstInt" || node.type == "ConstBool");
+    return pin.name == "value" && (node.type == "ConstFloat" || node.type == "ConstInt" || node.type == "ConstBool" ||
+                                   node.type == "ConstVector" || node.type == "ConstString");
+}
+
+f32 inlineValueWidthPx(const std::string& pinType, const GraphLayoutStyle& style) {
+    if (pinType == "float3") return style.inlineValuePx * 2.0f;
+    if (pinType == "string") return style.inlineValuePx * 1.6f;
+    return style.inlineValuePx;
 }
 
 GraphNodeLayout computeNodeLayout(const fmt::OcGraphNode& node, const std::string& title,
@@ -100,8 +108,10 @@ GraphNodeLayout computeNodeLayout(const fmt::OcGraphNode& node, const std::strin
     if (numInputs > 0) pinsWidthPx += maxInputLabelPx + style.pinLabelReservePx * scale;
     if (numOutputs > 0) pinsWidthPx += maxOutputLabelPx + style.pinLabelReservePx * scale;
     // Room for a value box, reserved whether or not the pin is wired, so wiring one does not resize the node.
+    f32 valueBoxPx = 0.0f;
     for (const auto& p : node.pins)
-        if (pinTakesInlineValue(node, p)) { pinsWidthPx += style.inlineValuePx * scale; break; }
+        if (pinTakesInlineValue(node, p)) valueBoxPx = std::max(valueBoxPx, inlineValueWidthPx(p.type, style));
+    pinsWidthPx += valueBoxPx * scale;
 
     const f32 width = std::max({style.minWidthPx * scale, titleWidthPx, pinsWidthPx});
     const usize rowCount = std::max(numInputs, numOutputs);
@@ -244,7 +254,10 @@ bool wouldCreateCycle(const fmt::OcGraphData& graph, const std::string& sourceNo
 }
 
 bool exactPinTypeMatch(std::string_view srcType, std::string_view dstType) {
-    return ciEquals(srcType, dstType);
+    if (ciEquals(srcType, dstType)) return true;
+    // An entity handle is an int underneath, so the two link in either direction.
+    return (ciEquals(srcType, "entity") && ciEquals(dstType, "int")) ||
+           (ciEquals(srcType, "int") && ciEquals(dstType, "entity"));
 }
 
 bool materialPinTypeMatch(std::string_view srcType, std::string_view dstType) {
