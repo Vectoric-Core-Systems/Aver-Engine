@@ -48,6 +48,7 @@ public class PinnedValue
     public required string NodeId { get; init; }  // See Pin.NodeId: string, both id formats.
     public required string PinName { get; init; }
     public required object Value { get; init; }  // float, int, or bool
+    public bool FromPinDefault { get; init; }      // from a PIN record's default, so a PINVAL may replace it
 
     /// The value as the pin's declared type needs it, or false with the reason. The parser types a
     /// literal by its SHAPE, which says nothing about the pin it lands on; the pin type is the authority.

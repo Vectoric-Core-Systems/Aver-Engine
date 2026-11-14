@@ -608,6 +608,15 @@ public class OcGraphParser
                 };
                 node.Pins.Add(pin);
 
+                // 6th token on an INPUT pin: the value typed into the pin in the editor, read as a pinned
+                // value (an explicit PINVAL for the same pin wins, whichever record comes first).
+                if (tokens.Count > 5 && !isOutput)
+                {
+                    object? inVal = ParseLiteral(tokens[5], typeName);
+                    if (inVal != null && !graph.PinnedValues.Any(p => p.NodeId == nodeId && p.PinName == pinName))
+                        graph.PinnedValues.Add(new PinnedValue { NodeId = nodeId, PinName = pinName, Value = inVal, FromPinDefault = true });
+                }
+
                 // 6th token (C++ format): a default value on an output pin, stored as a ConstantOutput.
                 // Output pins only -- constants are provided on output pins of Const nodes.
                 if (tokens.Count > 5 && isOutput)
@@ -732,6 +741,7 @@ public class OcGraphParser
                 }
 
                 var pv = new PinnedValue { NodeId = nodeId, PinName = pinName, Value = value };
+                graph.PinnedValues.RemoveAll(p => p.NodeId == nodeId && p.PinName == pinName && p.FromPinDefault);
                 graph.PinnedValues.Add(pv);
             }
             else if (key.Equals("OUT", StringComparison.OrdinalIgnoreCase))
@@ -2656,6 +2666,18 @@ public class OcGraphParser
         for (int i = 0; i < parts.Length && i < 3; i++)
             if (float.TryParse(parts[i], NumberStyles.Float, CultureInfo.InvariantCulture, out float f))
                 into[i] = f;
+    }
+
+    /// A literal typed by the pin's declared type (as the output-pin defaults are), or null when it does not parse.
+    private static object? ParseLiteral(string s, string typeName)
+    {
+        if (typeName.Equals("bool", StringComparison.OrdinalIgnoreCase))
+            return bool.TryParse(s, out var b) ? b : (s == "1" ? true : s == "0" ? false : null);
+        if (typeName.Equals("int", StringComparison.OrdinalIgnoreCase))
+            return int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out var i) ? i : null;
+        if (typeName.Equals("float", StringComparison.OrdinalIgnoreCase))
+            return float.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var f) ? f : null;
+        return null;
     }
 
     private static int ParseI32(string s, int dflt = 0)

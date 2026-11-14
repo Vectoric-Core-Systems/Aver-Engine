@@ -128,6 +128,9 @@ static int Main()
         // Exec/flow: branch, sequence, while, forEach, and event entry points (ENTRY/CompileEntryPoint).
         failures += GraphFlowTests.RunAll();
 
+        // A value typed into an unwired input pin (its PIN record default) reaches the node.
+        failures += PinDefaultValueTests.RunAll();
+
         // Select, InputKey, Raycast: the three node types this slice adds on top of the exec compiler.
         failures += TestConstLiteralShapeDoesNotDecideType();
         failures += NewNodeTests.RunAll();
