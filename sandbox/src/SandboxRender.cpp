@@ -209,6 +209,9 @@ void SandboxApp::drawEditorObjects(Engine& e) {
     launch_.hideEditorScene_ = playSessionActive();
 #endif
     const bool hideEditorScene = launch_.hideEditorScene_;
+    // A hidden placeholder cannot stay selected: the default selection (placeholder 1, the Cube)
+    // otherwise showed in Details and the status bar for a level that has no such object.
+    if (hideEditorScene && selectionUi_.sel_ >= 0) selectionUi_.sel_ = -1;
     for (int i=0;i<(int)objects_.size();++i) {
         MeshObj& o = objects_[i];
         if (!o.visible || hideEditorScene || !viewState_.showStaticMeshes_) continue;
