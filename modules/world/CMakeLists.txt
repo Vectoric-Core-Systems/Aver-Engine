@@ -62,6 +62,11 @@ aver_add_module(Aver.World
     Aver.Render.Pcg
 )
 
+# The PCG core is a bit-exact port of Aver.Pcg (F#), which never fuses a*b+c; clang and GCC do by default on arm64.
+set_source_files_properties(src/PcgPoints.cpp src/PcgNodes.cpp src/PcgGraph.cpp src/PcgVolumeRunner.cpp src/PcgSinks.cpp
+                            src/PcgBiome.cpp src/PcgVegetation.cpp
+  PROPERTIES COMPILE_OPTIONS "$<$<COMPILE_LANG_AND_ID:CXX,Clang,AppleClang,GNU>:-ffp-contract=off>")
+
 # The optional half of the link interface, mirroring Runtime/CMakeLists.txt.
 #
 # WHY if(TARGET ...) AND NOT if(AVER_MODULE_...): an unconditional `Aver.Scene` is a hard configure
