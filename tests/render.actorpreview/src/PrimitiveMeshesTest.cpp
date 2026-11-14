@@ -22,6 +22,22 @@ void check(bool ok, const std::string& what) {
 u64 meshHash(const std::vector<rhi::MeshVertex>& v, const std::vector<u32>& idx) {
     return (fnv1a64(v.data(), v.size() * sizeof(rhi::MeshVertex)) * 1000003ull) ^ fnv1a64(idx.data(), idx.size() * sizeof(u32));
 }
+
+// For the builders that use sin/cos: the indices and vertex count exactly, the vertex floats as a weighted sum within a
+// tolerance, since sinf/cosf differ in the last bit between C runtimes and arm64 contracts a*b+c into an FMA.
+void checkTrigMesh(const std::vector<rhi::MeshVertex>& v, const std::vector<u32>& idx, u64 idxHash, usize verts, double sum,
+                   const std::string& what) {
+    double s = 0.0;
+    for (usize i = 0; i < v.size(); ++i) {
+        const rhi::MeshVertex& m = v[i];
+        const f32 f[8] = {m.px, m.py, m.pz, m.nx, m.ny, m.nz, m.u, m.v};
+        for (int k = 0; k < 8; ++k) s += static_cast<double>((i % 13 + 1) * (k + 1)) * f[k];
+    }
+    const u64 h = fnv1a64(idx.data(), idx.size() * sizeof(u32));
+    const bool ok = h == idxHash && v.size() == verts && std::fabs(s - sum) < 0.05;
+    if (!ok) std::printf("  %s: indices 0x%016llxull, %zu vertices, sum %.4f\n", what.c_str(), static_cast<unsigned long long>(h), v.size(), s);
+    check(ok, what + " output is unchanged");
+}
 } // namespace
 
 int main() {
@@ -110,13 +126,13 @@ int main() {
         check(meshHash(v, idx) == 0xc43340d0b45a0f2aull, "appendBox output is unchanged");
         v.clear(); idx.clear();
         appendSphere(v, idx, 1.0f, 12, 20); appendSphere(v, idx, 2.5f, 24, 48);
-        check(meshHash(v, idx) == 0x3108c2f4a1c2b926ull, "appendSphere output is unchanged");
+        checkTrigMesh(v, idx, 0x591d3ca73de7a4eaull, 1498, 79172.1428, "appendSphere");
         v.clear(); idx.clear();
         appendBoxYaw(v, idx, 1, 2, 3, 0.5f, 1.5f, 0.25f, 37.0f); appendBoxYaw(v, idx, 0, 0, 0, 1, 2, 3, 0.0f);
-        check(meshHash(v, idx) == 0xc0e73d9493958e2aull, "appendBoxYaw output is unchanged");
+        checkTrigMesh(v, idx, 0x5455c3860332d6a5ull, 48, 3974.7332, "appendBoxYaw");
         v.clear(); idx.clear();
         appendCylinderZ(v, idx, 1, -2, 3, 0.7f, 1.3f, 8); appendCylinderZ(v, idx, 0, 0, 0, 1, 1, 10);
-        check(meshHash(v, idx) == 0x3ddf7037f5e434c6ull, "appendCylinderZ output is unchanged");
+        checkTrigMesh(v, idx, 0xbc5b9f7c7e251361ull, 180, 12708.7664, "appendCylinderZ");
     }
 
     std::printf(g_fail ? "PrimitiveMeshesTest: %d failure(s)\n" : "PrimitiveMeshesTest: all passed\n", g_fail);
