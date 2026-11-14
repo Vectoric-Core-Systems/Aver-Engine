@@ -1602,15 +1602,15 @@ void SandboxApp::drawContentBrowser() {
         ImGui::Checkbox("Subfolders", &drawerUi_.cbSearchDeep_);
         uiReg_.track("contentBrowser.searchDeep");
 
-        ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), ImGui::GetWindowWidth() - controls*viewState_.dpi_));
-        if (viewTab("Tiles", drawerUi_.cbGallery_)) drawerUi_.cbGallery_ = true;
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Gallery view");
-        ImGui::SameLine(0.0f, 2.0f*viewState_.dpi_);
-        if (viewTab("List", !drawerUi_.cbGallery_)) drawerUi_.cbGallery_ = false;
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("List view");
+        ImGui::SameLine();
+        if (viewTab(ICON_VIEW_TILES "##tiles", drawerUi_.cbGallery_)) drawerUi_.cbGallery_ = true;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Tiles");
+        ImGui::SameLine(0.0f, viewGap);
+        if (viewTab(ICON_VIEW_LIST "##list", !drawerUi_.cbGallery_)) drawerUi_.cbGallery_ = false;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("List");
         if (drawerUi_.cbGallery_) {
             ImGui::SameLine();
-            ImGui::SetNextItemWidth(110.0f*viewState_.dpi_);
+            ImGui::SetNextItemWidth(zoomW);
             ImGui::SliderFloat("##cbzoom", &drawerUi_.cbTileSize_, 56.0f, 168.0f, "%.0f");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Tile size");
         }
@@ -2514,10 +2514,13 @@ static void rcStatusDot(ImDrawList* dl, ImVec2 c, f32 r, ImU32 col, bool conflic
 
 // Draws the gallery view: a wrapped, row-clipped grid of icon tiles.
 void SandboxApp::drawFolderGallery(const std::vector<const DirEntry*>& shown) {
-    const f32 tile   = drawerUi_.cbTileSize_ * viewState_.dpi_;
     const f32 pad    = 8.0f * viewState_.dpi_;
     const f32 labelH = ImGui::GetTextLineHeight() * 2.0f + 4.0f * viewState_.dpi_;   // two lines: names wrap
-    const f32 cellW  = tile, cellH = tile + labelH;
+    // The preview is at most what keeps one whole row, names included, inside a short drawer (past that
+    // the names were cut off); the card keeps its full width so the names still fit on it.
+    const f32 tileW  = drawerUi_.cbTileSize_ * viewState_.dpi_;
+    const f32 tile   = std::fmax(40.0f * viewState_.dpi_, std::fmin(tileW, ImGui::GetContentRegionAvail().y - labelH - pad));
+    const f32 cellW  = tileW, cellH = tile + labelH;
     int perRow = static_cast<int>((ImGui::GetContentRegionAvail().x + pad) / (cellW + pad));
     if (perRow < 1) perRow = 1;
 
