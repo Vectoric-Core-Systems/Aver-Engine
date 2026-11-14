@@ -136,6 +136,7 @@ static int Main()
 
         // Arrays and user structs: nodes, variables, function pins, links.
         failures += CollectionTests.RunAll();
+        failures += RerouteMacroTests.RunAll();
 
         // Select, InputKey, Raycast: the three node types this slice adds on top of the exec compiler.
         failures += TestConstLiteralShapeDoesNotDecideType();

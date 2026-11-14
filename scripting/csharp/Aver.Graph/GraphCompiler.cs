@@ -109,6 +109,8 @@ public partial class GraphCompiler
     {
         err = null;
 
+        if (!GraphLowering.Lower(_graph, out var lowered, out err)) return null;
+        _graph = lowered;
         if (!_graph.Validate(out var validateErr))
         {
             err = validateErr;
@@ -459,6 +461,8 @@ public partial class GraphCompiler
     {
         err = null;
 
+        if (!GraphLowering.Lower(_graph, out var lowered, out err)) return null;
+        _graph = lowered;
         if (!_graph.Validate(out var validateErr))
         {
             err = validateErr;

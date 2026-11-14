@@ -173,6 +173,16 @@ struct OcGraphFunction {
     std::vector<OcGraphFunctionPin> outputs;   // in declaration order
 };
 
+// One user MACRO: `MACRO <name>`, plus `MACROIN <macro> <pin> <type>` / `MACROOUT <macro> <pin> <type>` records. Unlike a
+// function a macro is inlined at compile time, so its pins may be `exec` and there may be several of them. The body is
+// ordinary nodes tagged `macro=<name>` (as a function's are tagged `func=`), entered through a MacroInput node and left
+// through a MacroOutput node; an instance is a MacroInstance node with `call=<name>`. Only the declaration is modelled.
+struct OcGraphMacro {
+    std::string name;
+    std::vector<OcGraphFunctionPin> inputs;    // in declaration order; type may be "exec"
+    std::vector<OcGraphFunctionPin> outputs;
+};
+
 // One user STRUCT: `STRUCT <Name>`, plus one `FIELD <Name> <field> <type>` record per field. The editor creates and edits
 // these, so they are modelled (see OcGraphFunction for the argument). `type` is opaque here like OcGraphVariable::type;
 // the C# reader (Aver.Graph) accepts float, int, bool, float3, string and entity and refuses a duplicate field name.
@@ -302,6 +312,9 @@ struct OcGraphData {
     // OcGraphFunction for what one IS and why only the declaration lives here while the body rides
     // in ordinary nodes tagged `func=`.
     std::vector<OcGraphFunction> functions;
+
+    // Declared via top-level `MACRO` / `MACROIN` / `MACROOUT` records, in file order. See OcGraphMacro.
+    std::vector<OcGraphMacro> macros;
 
     // Declared via top-level `STRUCT` / `FIELD` records, in file order. A pin, VAR or function pin of a struct has the
     // type string `struct:<Name>`; an array has `<elem>[]`. Both are opaque strings at this layer.

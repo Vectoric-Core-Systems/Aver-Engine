@@ -299,6 +299,50 @@ public class OcGraphParser
                 }
                 list.Add(new GraphParameter { Name = tokens[2], Type = ft, StructName = ftStruct });
             }
+            else if (key.Equals("MACRO", StringComparison.OrdinalIgnoreCase))
+            {
+                // MACRO <name> -- declares one macro; its pins are the MACROIN/MACROOUT records that follow.
+                if (tokens.Count < 2)
+                {
+                    err = "MACRO requires a name: MACRO name";
+                    return false;
+                }
+                if (graph.Macros.Any(m => string.Equals(m.Name, tokens[1], StringComparison.OrdinalIgnoreCase)))
+                {
+                    err = $"duplicate MACRO name '{tokens[1]}'";
+                    return false;
+                }
+                graph.Macros.Add(new GraphMacro { Name = tokens[1] });
+            }
+            else if (key.Equals("MACROIN", StringComparison.OrdinalIgnoreCase) ||
+                     key.Equals("MACROOUT", StringComparison.OrdinalIgnoreCase))
+            {
+                // MACROIN/MACROOUT <macro> <pin> <type> -- unlike FUNCIN/FUNCOUT the type may be exec.
+                bool isIn = key.Equals("MACROIN", StringComparison.OrdinalIgnoreCase);
+                if (tokens.Count < 4)
+                {
+                    err = $"{key.ToUpperInvariant()} requires a macro, a pin name and a type: {key.ToUpperInvariant()} macro pin exec|float|int|bool|...";
+                    return false;
+                }
+                var owner = graph.Macros.FirstOrDefault(m => string.Equals(m.Name, tokens[1], StringComparison.OrdinalIgnoreCase));
+                if (owner == null)
+                {
+                    err = $"{key.ToUpperInvariant()} names macro '{tokens[1]}', which no MACRO record declares above it";
+                    return false;
+                }
+                if (!PinTypeRules.TryParse(tokens[3], out PinType mt, out string? mtStruct))
+                {
+                    err = $"{key.ToUpperInvariant()} '{tokens[2]}' has type '{tokens[3]}'; expected exec, float, int, bool, float3, string, entity, an array such as float[], or struct:<Name>";
+                    return false;
+                }
+                var mlist = isIn ? owner.Inputs : owner.Outputs;
+                if (mlist.Any(p => p.Name == tokens[2]))
+                {
+                    err = $"macro '{owner.Name}' already has {(isIn ? "an input" : "an output")} named '{tokens[2]}'";
+                    return false;
+                }
+                mlist.Add(new GraphParameter { Name = tokens[2], Type = mt, StructName = mtStruct });
+            }
             else if (key.Equals("STRUCT", StringComparison.OrdinalIgnoreCase))
             {
                 // STRUCT <Name> -- declares one user struct; its fields are the FIELD records that follow.
@@ -526,6 +570,11 @@ public class OcGraphParser
                     else if (k == "func")
                     {
                         node.FuncOwner = v;
+                    }
+                    // macro= names the MACRO whose body this node is part of (Node.MacroOwner).
+                    else if (k == "macro")
+                    {
+                        node.MacroOwner = v;
                     }
                     // call= names the function a "callfunc" node calls. Distinct from func= above,
                     // which says where the call node itself LIVES -- see Node.CallTarget.
@@ -2538,6 +2587,43 @@ public class OcGraphParser
                 foreach (var p in fn.Inputs)
                     node.Pins.Add(new Pin { Name = p.Name, Type = p.Type, IsOutput = false, NodeId = node.Id, StructName = p.StructName });
                 foreach (var p in fn.Outputs)
+                    node.Pins.Add(new Pin { Name = p.Name, Type = p.Type, IsOutput = true, NodeId = node.Id, StructName = p.StructName });
+                break;
+            }
+
+            // ---- REROUTE / MACROS ------------------------------------------------------------------
+            // A reroute is one in and one out of the same type; untyped files get float. Macro tunnels and
+            // instances derive their pins from the MACRO declaration, as the function nodes above do.
+            case "reroute":
+                node.Pins.Add(new Pin { Name = "in", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "out", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "macroinput":
+            {
+                var m = graph.Macros.FirstOrDefault(x => string.Equals(x.Name, node.MacroOwner, StringComparison.OrdinalIgnoreCase));
+                if (m == null) break;
+                foreach (var p in m.Inputs)
+                    node.Pins.Add(new Pin { Name = p.Name, Type = p.Type, IsOutput = true, NodeId = node.Id, StructName = p.StructName });
+                break;
+            }
+
+            case "macrooutput":
+            {
+                var m = graph.Macros.FirstOrDefault(x => string.Equals(x.Name, node.MacroOwner, StringComparison.OrdinalIgnoreCase));
+                if (m == null) break;
+                foreach (var p in m.Outputs)
+                    node.Pins.Add(new Pin { Name = p.Name, Type = p.Type, IsOutput = false, NodeId = node.Id, StructName = p.StructName });
+                break;
+            }
+
+            case "macroinstance":
+            {
+                var m = graph.Macros.FirstOrDefault(x => string.Equals(x.Name, node.CallTarget, StringComparison.OrdinalIgnoreCase));
+                if (m == null) break;
+                foreach (var p in m.Inputs)
+                    node.Pins.Add(new Pin { Name = p.Name, Type = p.Type, IsOutput = false, NodeId = node.Id, StructName = p.StructName });
+                foreach (var p in m.Outputs)
                     node.Pins.Add(new Pin { Name = p.Name, Type = p.Type, IsOutput = true, NodeId = node.Id, StructName = p.StructName });
                 break;
             }

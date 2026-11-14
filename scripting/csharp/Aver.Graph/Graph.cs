@@ -145,6 +145,11 @@ public class Node
     // rides in the same extraTokens as param=/field=/class=/var=, so the C++ reader needed no change.
     public string? FuncOwner { get; set; }
 
+    // Which macro this node is part of the BODY of ("macro=<name>"); null for every node outside a macro
+    // body. Like func=, an attribute so a node belongs to one place by construction. A MacroInstance names
+    // the macro it uses with call= (shared with CallFunc), so an instance can itself sit inside a macro body.
+    public string? MacroOwner { get; set; }
+
     // Which function a "callfunc" node calls ("call=<name>"). Separate from func= deliberately: a
     // call node both LIVES in one subgraph (func=) and CALLS another (call=) -- one attribute for
     // both would make a recursive call (a node inside Fib calling Fib) indistinguishable from a
@@ -377,6 +382,16 @@ public class GraphFunction
     public string? ReturnNodeId { get; set; }
 }
 
+/// One user MACRO: a named subgraph that, unlike a function, is INLINED at every use, so it may have several
+/// exec inputs and outputs (types include exec). Declared by `MACRO`/`MACROIN`/`MACROOUT`; the body is nodes
+/// tagged `macro=<name>`, entered through a MacroInput node and left through a MacroOutput node. See GraphLowering.
+public class GraphMacro
+{
+    public required string Name { get; init; }
+    public List<GraphParameter> Inputs { get; } = new();
+    public List<GraphParameter> Outputs { get; } = new();
+}
+
 /// Which LANGUAGE a .ocgraph's nodes are written in -- the C# mirror of aver::fmt::OcGraphDomain
 /// (modules/formats/include/aver/formats/OcGraph.hpp), which owns the authoritative comment.
 /// Exists because one extension covers several unrelated languages: this compiler emits IL, a
@@ -394,6 +409,8 @@ public enum GraphDomain
 
 public class Graph
 {
+    internal Graph ShallowClone() => (Graph)MemberwiseClone();
+
     public string Name { get; set; } = "untitled";
     public string Description { get; set; } = "";
 
@@ -429,6 +446,9 @@ public class Graph
     // graph; a reader that doesn't know FUNC skips it rather than failing, so an older runtime
     // keeps the file and just loses the function.
     public List<GraphFunction> Functions { get; set; } = new();
+
+    // Declared via top-level `MACRO`/`MACROIN`/`MACROOUT` records. Expanded away by GraphLowering before compiling.
+    public List<GraphMacro> Macros { get; set; } = new();
 
     // Declared via top-level `COMP <id> <Kind> [key=value]...` records, in FILE order (not tree
     // order -- a component may name a parent declared below it). Empty for every pre-component
@@ -678,6 +698,8 @@ public class Graph
                            entryNodeId)) return;
             }
         }
+
+        if (GraphLowering.Diagnose(this, (c, m, n, p) => Report(c, m, n, p))) return;
 
         // ---- FUNCTIONS -----------------------------------------------------------------------------
         // Runs BEFORE the Param/GetVar blocks below, same reason those run before Outputs: a node
