@@ -70,6 +70,13 @@ f32 pointSegmentDist(Vec2 p, Vec2 a, Vec2 b) {
 // Layout
 // ---------------------------------------------------------------------------------------------------
 
+bool pinTakesInlineValue(const fmt::OcGraphNode& node, const fmt::OcGraphPin& pin) {
+    const bool scalar = pin.type == "float" || pin.type == "int" || pin.type == "bool";
+    if (!scalar) return false;
+    if (!pin.isOutput) return true;
+    return pin.name == "value" && (node.type == "ConstFloat" || node.type == "ConstInt" || node.type == "ConstBool");
+}
+
 GraphNodeLayout computeNodeLayout(const fmt::OcGraphNode& node, const std::string& title,
                                    const GraphLayoutStyle& style, f32 scale) {
     GraphNodeLayout layout;
@@ -92,6 +99,9 @@ GraphNodeLayout computeNodeLayout(const fmt::OcGraphNode& node, const std::strin
     f32 pinsWidthPx = 2.0f * style.paddingXPx * scale;
     if (numInputs > 0) pinsWidthPx += maxInputLabelPx + style.pinLabelReservePx * scale;
     if (numOutputs > 0) pinsWidthPx += maxOutputLabelPx + style.pinLabelReservePx * scale;
+    // Room for a value box, reserved whether or not the pin is wired, so wiring one does not resize the node.
+    for (const auto& p : node.pins)
+        if (pinTakesInlineValue(node, p)) { pinsWidthPx += style.inlineValuePx * scale; break; }
 
     const f32 width = std::max({style.minWidthPx * scale, titleWidthPx, pinsWidthPx});
     const usize rowCount = std::max(numInputs, numOutputs);

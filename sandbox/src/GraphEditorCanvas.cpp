@@ -54,6 +54,70 @@ namespace aver::editor {
 
 using namespace gedetail;
 
+// A click on a node's value box: a bool flips at once; anything else opens a text field over the box.
+bool GraphEditor::clickInlineValueBox(f32 mx, f32 my) {
+    for (const InlineValueBox& b : inlineBoxes_) {
+        if (mx < b.x0 || mx > b.x1 || my < b.y0 || my > b.y1) continue;
+        const fmt::OcGraphNode* node = nullptr;
+        for (const auto& nd : graph_.nodes) if (nd.id == b.node) { node = &nd; break; }
+        if (!node) return false;
+        std::string cur;
+        for (const auto& p : node->pins) if (p.name == b.pin && p.isOutput == b.isConst) cur = p.defaultValue;
+        if (b.isConst) { const GraphNodeAttribute a = getNodeAttribute(*node, "value"); if (a.found) cur = a.value; }
+        if (b.type == "bool") {
+            const std::string flipped = (cur == "true" || cur == "1") ? "false" : "true";
+            if (b.isConst) setAttribute(b.node, "value", flipped);
+            else           setPinDefault(b.node, b.pin, flipped);
+            return true;
+        }
+        inlineEditNode_ = b.node;
+        inlineEditPin_ = b.pin;
+        std::snprintf(inlineEditBuf_, sizeof inlineEditBuf_, "%s", cur.c_str());
+        inlineEditFocus_ = true;
+        return true;
+    }
+    return false;
+}
+
+#if AVER_WITH_IMGUI
+// The text field over the value box being edited. Enter or clicking away commits a value that parses
+// as the pin's type; Escape cancels; an empty field clears an input's value (it reads 0 again).
+void GraphEditor::drawInlineValueEditor() {
+    if (inlineEditNode_.empty()) return;
+    const InlineValueBox* box = nullptr;
+    for (const InlineValueBox& b : inlineBoxes_)
+        if (b.node == inlineEditNode_ && b.pin == inlineEditPin_) { box = &b; break; }
+    static int s_openedFrame = 0;
+    if (inlineEditFocus_) s_openedFrame = ImGui::GetFrameCount();
+    if (!box) { inlineEditNode_.clear(); return; }   // scrolled off, deleted, or wired meanwhile
+    ImGui::SetCursorScreenPos(ImVec2(box->x0, box->y0));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(3.0f, std::max(0.0f, (box->y1 - box->y0 - ImGui::GetFontSize()) * 0.5f)));
+    ImGui::SetNextItemWidth(std::max(box->x1 - box->x0, 40.0f));
+    if (inlineEditFocus_) { ImGui::SetKeyboardFocusHere(); inlineEditFocus_ = false; }
+    const ImGuiInputTextFlags fl = ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll |
+                                   (box->type == "int" ? ImGuiInputTextFlags_CharsDecimal : ImGuiInputTextFlags_CharsScientific);
+    const bool enter = ImGui::InputText("##graphInlineValue", inlineEditBuf_, sizeof inlineEditBuf_, fl);
+    ImGui::PopStyleVar();
+    const bool active = ImGui::IsItemActive();
+    if (active && ImGui::IsKeyPressed(ImGuiKey_Escape)) { inlineEditNode_.clear(); return; }
+    const bool done = enter || ImGui::IsItemDeactivated() || (!active && ImGui::GetFrameCount() - s_openedFrame > 2);
+    if (!done) return;
+    const std::string text = inlineEditBuf_;
+    bool ok = text.empty();
+    if (!ok) {
+        char* end = nullptr;
+        if (box->type == "int") { std::strtol(text.c_str(), &end, 10); }
+        else                    { std::strtod(text.c_str(), &end); }
+        ok = end && *end == '\0';
+    }
+    if (ok) {
+        if (box->isConst) { if (!text.empty()) setAttribute(box->node, "value", text); }
+        else              setPinDefault(box->node, box->pin, text);
+    }
+    inlineEditNode_.clear();
+}
+#endif
+
 // The Event Graph tab: the node canvas and its details column. Lifted out of draw() unchanged when
 // the Viewport tab arrived, so draw() is now just the tab bar -- the only way either tab's body stays
 // readable.
@@ -210,6 +274,8 @@ void GraphEditor::drawEventGraph(float dpi) {
                 selectedLink_ = rightClickLink_;
                 selectedComment_.clear();
             }
+        } else if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && clickInlineValueBox(io.MousePos.x, io.MousePos.y)) {
+            // a value box on a node took the click (a bool flipped, or its text field opened)
         } else if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
             const GraphHitResult hit = hitTest(graph_, layouts_, mouseCanvas, style_, dpi);
             const bool ctrl = io.KeyCtrl;
@@ -575,6 +641,7 @@ void GraphEditor::drawEventGraph(float dpi) {
     }
 
     dl->ChannelsSetCurrent(2); // nodes
+    inlineBoxes_.clear();
     for (const auto& nl : layouts_) {
         const bool selected = std::find(selectedNodes_.begin(), selectedNodes_.end(), nl.nodeId) != selectedNodes_.end();
         const ImVec2 pMin = toScreenAbs(nl.min);
@@ -715,9 +782,49 @@ void GraphEditor::drawEventGraph(float dpi) {
             const f32 tx = pl.isOutput ? dot.x - textSize.x - r - 3.0f * dpi : dot.x + r + 3.0f * dpi;
             dl->AddText(font, scaledFontPx, ImVec2(tx, dot.y - textSize.y * 0.5f),
                          IM_COL32(220, 220, 220, 255), pl.name.c_str());
+
+            // The value typed into an unwired input, or a Const's own value, in a box on the node.
+            const fmt::OcGraphPin* sp = nullptr;
+            if (srcNode) for (const auto& p : srcNode->pins) if (p.name == pl.name && p.isOutput == pl.isOutput) { sp = &p; break; }
+            if (!sp || !pinTakesInlineValue(*srcNode, *sp) || (!pl.isOutput && wired)) continue;
+            const f32 z = dpi * view_.zoom, h = style_.pinRowHeightPx * z * 0.78f;
+            InlineValueBox box;
+            box.node = nl.nodeId; box.pin = pl.name; box.type = sp->type; box.isConst = pl.isOutput;
+            box.x0 = pl.isOutput ? pMin.x + 6.0f * z : tx + textSize.x + 5.0f * z;
+            box.x1 = pl.isOutput ? tx - 5.0f * z : std::min(box.x0 + (style_.inlineValuePx - 8.0f) * z, pMax.x - 6.0f * z);
+            if (sp->type == "bool") box.x1 = box.x0 + h;
+            box.y0 = dot.y - h * 0.5f; box.y1 = dot.y + h * 0.5f;
+            if (box.x1 - box.x0 < 8.0f * z) continue;
+            std::string val = sp->defaultValue;
+            if (pl.isOutput) {
+                const GraphNodeAttribute a = getNodeAttribute(*srcNode, "value");
+                if (a.found) val = a.value;
+            }
+            inlineBoxes_.push_back(box);
+            const ImVec2 b0(box.x0, box.y0), b1(box.x1, box.y1);
+            dl->AddRectFilled(b0, b1, IM_COL32(10, 12, 16, 255), 3.0f * z);
+            dl->AddRect(b0, b1, IM_COL32(64, 70, 82, 255), 3.0f * z, 0, 1.0f * dpi);
+            if (sp->type == "bool") {
+                if (val == "true" || val == "1") {
+                    const ImVec2 c((box.x0 + box.x1) * 0.5f, (box.y0 + box.y1) * 0.5f);
+                    const f32 s = h * 0.28f;
+                    dl->AddLine(ImVec2(c.x - s, c.y), ImVec2(c.x - s * 0.3f, c.y + s * 0.7f), pinCol, 2.0f * dpi);
+                    dl->AddLine(ImVec2(c.x - s * 0.3f, c.y + s * 0.7f), ImVec2(c.x + s, c.y - s * 0.8f), pinCol, 2.0f * dpi);
+                }
+                continue;
+            }
+            if (inlineEditNode_ == box.node && inlineEditPin_ == box.pin) continue;   // the text field draws it
+            const bool unset = val.empty();
+            const std::string shown = unset ? std::string("0") : val;
+            const ImVec2 vs = font->CalcTextSizeA(scaledFontPx, FLT_MAX, 0.0f, shown.c_str());
+            dl->PushClipRect(b0, b1, true);
+            dl->AddText(font, scaledFontPx, ImVec2(box.x0 + 4.0f * z, dot.y - vs.y * 0.5f),
+                        unset ? IM_COL32(120, 124, 132, 255) : IM_COL32(235, 235, 235, 255), shown.c_str());
+            dl->PopClipRect();
         }
     }
     dl->ChannelsMerge();
+    drawInlineValueEditor();
 
     // ---- overlays: in-progress link drag, box-select rect, rejection banner (drawn AFTER merge, so
     // always on top regardless of channel) ----------------------------------------------------------

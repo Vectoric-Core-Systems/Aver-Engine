@@ -116,6 +116,10 @@ public:
     // Deletes the `key=...` token outright (see removeNodeAttribute in GraphEditorGeometry.hpp).
     // Returns false (no-op) if the node doesn't exist or the attribute wasn't set.
     bool clearAttribute(const std::string& nodeId, const std::string& key);
+    // The value typed into an input pin (its PIN record's default; empty clears it). A Const node's
+    // `value` output goes through setAttribute instead. False if the node or pin is unknown, the pin is
+    // an output, or the value has whitespace.
+    bool setPinDefault(const std::string& nodeId, const std::string& pinName, const std::string& value);
 
     // ---- variable editing (graph-level VAR declarations) -------------------------------------------
     // Closes a real bug: dragging SetVar from the palette produced a `var=` naming an undeclared
@@ -624,6 +628,14 @@ private:
     // Selected/drag targets are held BY ID, never index, same reason as varEditRowKey_: a mid-session
     // delete must not hand selection to whatever shuffled into that slot.
     std::string selectedComment_;
+    // Value boxes drawn on nodes last frame (screen space), so a click can edit one before node hit-testing.
+    struct InlineValueBox { std::string node, pin, type; f32 x0 = 0, y0 = 0, x1 = 0, y1 = 0; bool isConst = false; };
+    std::vector<InlineValueBox> inlineBoxes_;
+    std::string inlineEditNode_, inlineEditPin_;
+    char inlineEditBuf_[64] = {};
+    bool inlineEditFocus_ = false;
+    bool clickInlineValueBox(f32 mx, f32 my);   // true if (mx,my) hit a box: a bool flips, others start editing
+    void drawInlineValueEditor();
 
     // What the right button went down on, recorded at press so release can pick the right popup.
     // Right button is ambiguous: a drag pans, a click opens a menu, and which menu depends on what

@@ -202,6 +202,32 @@ static void testAutoLayoutDoesNotDirtyTheFile() {
 //      existing (see OcGraph.hpp), proven here rather than merely read about.
 //   3. editing exactly one attribute changes exactly one token on one NODE line; every other line in the
 //      file -- known records and the hand-authored attribute alike -- is untouched.
+// A value typed into an unwired input pin is the pin's PIN record default: it lands on disk, a wired
+// or unknown pin and an output pin refuse it, and an empty value clears it.
+static void testPinDefaultRoundTrip() {
+    AVER_INFO("=== pin values: setPinDefault writes the PIN default ===");
+    const std::string tmp = (std::filesystem::path(scratchDir()) / "pin_default_test.ocgraph").string();
+    writeFile(tmp, "OCGRAPH 1\nNAME PinDefaultTest\nNODE add Add 0 0\nPIN add a in float\nPIN add b in float 4\n"
+                   "PIN add result out float\nOUT add result\n");
+    GraphEditor ed(tmp);
+    check(ed.setPinDefault("add", "a", "2.5"), "setPinDefault on an input pin reports success");
+    check(ed.dirty(), "a typed pin value dirties the editor");
+    check(!ed.setPinDefault("add", "result", "1"), "an output pin takes no typed value");
+    check(!ed.setPinDefault("add", "nope", "1"), "an unknown pin is refused");
+    check(!ed.setPinDefault("add", "a", "2 5"), "a value with whitespace is refused");
+    std::string why;
+    check(ed.save(&why), "save() succeeds after a pin value edit (why='" + why + "')");
+    const std::string after = readFile(tmp);
+    check(after.find("PIN add a in float 2.5") != std::string::npos, "the typed value is the input PIN record's default on disk");
+    check(after.find("PIN add b in float 4") != std::string::npos, "an untouched pin keeps its value");
+    check(ed.setPinDefault("add", "a", ""), "an empty value clears it");
+    const fmt::OcGraphNode* add = nullptr;
+    for (const auto& n : ed.graph().nodes) if (n.id == "add") { add = &n; break; }
+    std::string a = "unset";
+    if (add) for (const auto& p : add->pins) if (p.name == "a" && !p.isOutput) a = p.defaultValue;
+    check(a.empty(), "the cleared pin has no value, got '" + a + "'");
+}
+
 static void testAttributeEditRoundTrip() {
     AVER_INFO("=== attribute editing: setAttribute lands on disk, unknown attribute survives ===");
     const std::string original = readFile(AVER_OCGRAPH_ATTR_FIXTURE);
@@ -2005,6 +2031,7 @@ int main() {
     testSynthesisedPinsAreNotWritten();
     testAutoLayoutDoesNotDirtyTheFile();
     testAttributeEditRoundTrip();
+    testPinDefaultRoundTrip();
     testUnknownAttributeSurvivesEditingADeclaredOne();
     testPathologicalAttributeCases();
     testVariablesParseAndByteIdenticalRoundTrip();

@@ -1445,6 +1445,23 @@ std::string GraphEditor::makeUniqueVariableName(const std::string& base) const {
     return base + "_x"; // unreachable in practice, mirrors makeUniqueNodeId's own fallback
 }
 
+bool GraphEditor::setPinDefault(const std::string& nodeId, const std::string& pinName, const std::string& value) {
+    if (containsWhitespace(value)) return false;
+    for (auto& n : graph_.nodes) {
+        if (n.id != nodeId) continue;
+        for (fmt::OcGraphPin& p : n.pins) {
+            if (p.name != pinName || p.isOutput) continue;
+            if (p.defaultValue == value) return true;
+            pushUndo();
+            p.defaultValue = value;
+            dirty_ = true;
+            return true;
+        }
+        return false;
+    }
+    return false;
+}
+
 bool GraphEditor::addVariable(const std::string& name, const std::string& type, const std::string& defaultValue) {
     if (name.empty() || containsWhitespace(name)) return false;
     if (containsWhitespace(defaultValue)) return false;
