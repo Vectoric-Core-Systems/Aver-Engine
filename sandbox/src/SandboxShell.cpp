@@ -3644,8 +3644,8 @@ void SandboxApp::drawDrawer(Engine& e) {
 
     {
         editor::FontScope title(editor::editorFonts().header, editor::editorFonts().headerPx);
-        ImGui::TextUnformatted(drawerUi_.drawerShown_ == Drawer::Log ? "Output Log" :
-                                drawerUi_.drawerShown_ == Drawer::Console ? "Console" : "Content Browser");
+        ImGui::TextUnformatted(drawerUi_.drawerShown_ == Drawer::Log ? ICON_LOG " Output Log" :
+                                drawerUi_.drawerShown_ == Drawer::Console ? ICON_CONSOLE " Console" : ICON_FOLDER " Content Browser");
     }
     ImGui::SameLine();
     {
@@ -3706,9 +3706,12 @@ void SandboxApp::drawNotifications() {
     const f32 pad     = 8.0f * viewState_.dpi_;
     const f32 statusH = 26.0f * viewState_.dpi_;
     const f32 width   = 340.0f * viewState_.dpi_;
-    const f32 anchorX = mv->WorkPos.x + mv->WorkSize.x - pad;
     // Above status bar and drawer; drawerPixelH_ is current frame.
-    f32 y = mv->WorkPos.y + mv->WorkSize.y - statusH - drawerUi_.drawerPixelH_ - pad;
+    const f32 floorY = mv->WorkPos.y + mv->WorkSize.y - statusH - drawerUi_.drawerPixelH_;
+    // In the 3D viewport's corner when there is one wide enough, so a toast never covers Details.
+    const bool inView = viewState_.vpW_ >= width + pad * 2.0f && viewState_.vpH_ > 0.0f;
+    const f32 anchorX = inView ? viewState_.vpX_ + viewState_.vpW_ - pad : mv->WorkPos.x + mv->WorkSize.x - pad;
+    f32 y = (inView ? std::fmin(floorY, viewState_.vpY_ + viewState_.vpH_) : floorY) - pad;
 
     const ImGuiWindowFlags base =
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
@@ -3753,7 +3756,10 @@ void SandboxApp::drawNotifications() {
             {
                 std::optional<editor::FontScope> sec;
                 sec.emplace(editor::editorFonts().secondary, editor::editorFonts().secondaryPx);
-                if (!n.body.empty()) {
+                // A long-running progress toast folds to its title and bar; the status bar carries it too.
+                const bool folded = n.hasProgress && n.createdAt >= 0.0 && ImGui::GetTime() - n.createdAt > 8.0 &&
+                                    !ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows);
+                if (!n.body.empty() && !folded) {
                     ImGui::PushTextWrapPos(0.0f);
                     ImGui::TextUnformatted(n.body.c_str());
                     ImGui::PopTextWrapPos();
