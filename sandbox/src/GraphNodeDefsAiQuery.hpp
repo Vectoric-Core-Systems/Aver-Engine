@@ -1,6 +1,6 @@
 #pragma once
 // Palette entries for the AI query nodes: environment queries, smart objects and the entity brain.
-// NOT standalone: include it from GraphNodeDefs.hpp inside namespace aver::editor::detail, after
+// NOT standalone: include it from GraphNodeDefsFamilies.cpp inside namespace aver::editor::detail, after
 // pin()/attr() are defined and before buildCatalog(), then call appendAiQueryNodeDefs(t) just before
 // buildCatalog returns.
 //

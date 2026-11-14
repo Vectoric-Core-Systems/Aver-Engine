@@ -2,7 +2,7 @@
 // Palette entries for the game-systems node families: timers and events, blackboard, streamed audio,
 // animation state machines, game UI, prefabs and decals, Enhanced Input, data tables, localization and
 // montages. (Gameplay abilities are in GraphNodeDefsGas.hpp.) NOT standalone: include it from
-// GraphNodeDefs.hpp inside namespace aver::editor::detail, after pin()/attr() are defined and before
+// GraphNodeDefsFamilies.cpp inside namespace aver::editor::detail, after pin()/attr() are defined and before
 // buildCatalog(), then call appendGameSystemNodeDefs(t) just before buildCatalog returns.
 //
 // The crowd/hearing/cover rows are the synapse agent's own file (GraphNodeDefsSynapseAi.hpp).

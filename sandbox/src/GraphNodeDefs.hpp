@@ -107,22 +107,21 @@ struct GraphNodeDesc {
 
 namespace detail {
 
-inline GraphPinSpec pin(std::string name, std::string type, bool isOutput, std::string def = {}) {
-    return GraphPinSpec{std::move(name), std::move(type), isOutput, std::move(def)};
+// string_view, not std::string by value: the strings are built in here, so a call site holds no string temporaries,
+// each of which cost MSVC Debug an unwind funclet (three sections): the catalog went from 51k sections to 30k.
+inline GraphPinSpec pin(std::string_view name, std::string_view type, bool isOutput, std::string_view def = {}) {
+    return GraphPinSpec{std::string(name), std::string(type), isOutput, std::string(def)};
 }
 
-inline GraphAttributeSpec attr(std::string key, std::string label) {
-    return GraphAttributeSpec{std::move(key), std::move(label)};
+inline GraphAttributeSpec attr(std::string_view key, std::string_view label) {
+    return GraphAttributeSpec{std::string(key), std::string(label)};
 }
 
 // The game-systems node families, each in its own file (GraphNodeDefs<Family>.hpp). cmake/GraphNodeFamilies.cmake
-// finds them and writes GraphNodeFamilies.gen.inc, their includes plus appendGeneratedFamilies(t), so a new family
-// adds a file and edits nothing here. scripts/node-catalog.py checks each against its C# table.
-#if __has_include("GraphNodeFamilies.gen.inc")
-#include "GraphNodeFamilies.gen.inc"
-#else
-#error "GraphNodeFamilies.gen.inc is missing: re-run cmake (cmake/GraphNodeFamilies.cmake writes it)"
-#endif
+// finds them and writes GraphNodeFamilies.gen.inc, which GraphNodeDefsFamilies.cpp includes, so a new family adds a
+// file and edits nothing here. scripts/node-catalog.py checks each against its C# table. A translation unit of its
+// own because the whole catalog in one passed MSVC's 65,536-section limit in Debug (C1128).
+void appendFamilyCatalog(std::vector<GraphNodeDesc>& t);
 
 // One line per node type. This is the "one entry" the build task and Slice 6 both call for.
 inline std::vector<GraphNodeDesc> buildCatalog() {
@@ -1134,7 +1133,7 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
         pin("CoatF0", "float", false)},
         {}, kDomainMaterial});
 
-    appendGeneratedFamilies(t);
+    appendFamilyCatalog(t);
 
     // A family also appended by hand (the old include-and-call convention) would list every node twice: keep the
     // first entry of each (typeId, domain), which is also the one findGraphNodeDesc already returned.

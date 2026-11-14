@@ -1,6 +1,6 @@
 #pragma once
 // Palette entries for the AN_ crowd, hearing, cover and squad nodes. NOT standalone: include it
-// from GraphNodeDefs.hpp inside namespace aver::editor::detail, after pin()/attr() are defined and
+// from GraphNodeDefsFamilies.cpp inside namespace aver::editor::detail, after pin()/attr() are defined and
 // before buildCatalog(), then call appendSynapseAiNodeDefs(t) just before buildCatalog returns.
 //
 // Each node's body is Aver.Synapse's SynapseAiGraph.<Name>ForGraph, reached through a forwarder of

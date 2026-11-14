@@ -1,5 +1,5 @@
 #pragma once
-// Palette entries for the landscape and water nodes. NOT standalone: include it from GraphNodeDefs.hpp inside
+// Palette entries for the landscape and water nodes. NOT standalone: include it from GraphNodeDefsFamilies.cpp inside
 // namespace aver::editor::detail, after pin()/attr() are defined and before buildCatalog(), then call
 // appendTerrainNodeDefs(t) just before buildCatalog returns.
 //

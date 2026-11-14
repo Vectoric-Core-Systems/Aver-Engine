@@ -1,6 +1,6 @@
 #pragma once
 // Palette entries for the Fields nodes (soft-body fields). NOT standalone: GraphNodeFamilies.gen.inc includes it from
-// GraphNodeDefs.hpp inside namespace aver::editor::detail, after pin()/attr() are defined, and calls appendFieldsNodeDefs(t).
+// GraphNodeDefsFamilies.cpp inside namespace aver::editor::detail, after pin()/attr() are defined, and calls appendFieldsNodeDefs(t).
 //
 // MIRRORS scripting/csharp/Aver.Graph/GraphFieldsNodeTable.cs pin for pin (docs/plans/wave10/SOFTBODY_DEPTH.md 2.13). The ids
 // carry the AN_ prefix so pulse, impact and start stay free for the plain verbs. Enum values: kind 0 radial, 1 directional,

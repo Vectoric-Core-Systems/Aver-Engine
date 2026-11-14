@@ -1,5 +1,5 @@
-# Finds the node palette families and writes sandbox/src/GraphNodeFamilies.gen.inc, which GraphNodeDefs.hpp
-# includes. A family is a header sandbox/src/GraphNodeDefs<Family>.hpp holding
+# Finds the node palette families and writes sandbox/src/GraphNodeFamilies.gen.inc, which
+# GraphNodeDefsFamilies.cpp includes. A family is a header sandbox/src/GraphNodeDefs<Family>.hpp holding
 #   inline void append<Family>NodeDefs(std::vector<GraphNodeDesc>& t)
 # so a new family adds that file and edits nothing shared (docs/VISUAL_SCRIPTING.md, "Adding a node family").
 #

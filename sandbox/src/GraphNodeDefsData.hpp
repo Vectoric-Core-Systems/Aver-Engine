@@ -1,6 +1,6 @@
 #pragma once
 // Palette entries for the float3 (vector), string and entity pin nodes. NOT standalone: GraphNodeFamilies.gen.inc includes it from
-// GraphNodeDefs.hpp inside namespace aver::editor::detail, after pin()/attr() are defined, and calls appendDataNodeDefs(t).
+// GraphNodeDefsFamilies.cpp inside namespace aver::editor::detail, after pin()/attr() are defined, and calls appendDataNodeDefs(t).
 //
 // MIRRORS scripting/csharp/Aver.Graph/GraphDataNodes.cs pin for pin; the ids are the .ocgraph node types verbatim. A float3
 // pin's literal is `x,y,z`, a string's is %-escaped (fmt::encodeGraphString), an entity's is an integer. An entity pin links to

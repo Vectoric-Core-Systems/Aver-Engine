@@ -1,6 +1,6 @@
 #pragma once
 // Palette entries for the sun, fog, sky-light and post-layer nodes. NOT standalone: included from
-// GraphNodeDefs.hpp (via GraphNodeFamilies.gen.inc) inside namespace aver::editor::detail, after pin()/attr() are
+// GraphNodeDefsFamilies.cpp (via GraphNodeFamilies.gen.inc) inside namespace aver::editor::detail, after pin()/attr() are
 // defined and before buildCatalog().
 //
 // MIRRORS scripting/csharp/Aver.Graph/GraphWorldFxNodeTable.cs pin for pin

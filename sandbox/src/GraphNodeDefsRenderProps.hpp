@@ -1,6 +1,6 @@
 #pragma once
 // Palette entries for the light, camera and particle-emitter nodes. NOT standalone: GraphNodeFamilies.gen.inc (generated
-// by cmake/GraphNodeFamilies.cmake) includes it from GraphNodeDefs.hpp inside namespace aver::editor::detail, after
+// by cmake/GraphNodeFamilies.cmake) includes it from GraphNodeDefsFamilies.cpp inside namespace aver::editor::detail, after
 // pin()/attr() are defined, and calls appendRenderPropsNodeDefs(t).
 //
 // MIRRORS scripting/csharp/Aver.Graph/GraphRenderPropsNodeTable.cs pin for pin

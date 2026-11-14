@@ -116,6 +116,7 @@ add_executable(Sandbox WIN32
   src/Nrd2Session.cpp
   src/GraphEditorGeometry.cpp
   src/GraphNodeDefs.cpp
+  src/GraphNodeDefsFamilies.cpp
   src/GraphEditor.cpp
   src/GraphEditorComponents.cpp
   src/GraphEditorCanvas.cpp

@@ -14,7 +14,7 @@ if(WIN32)
 endif()
 
 # The node palette families (sandbox/src/GraphNodeDefs<Family>.hpp), found here so a new family edits no shared
-# file: writes sandbox/src/GraphNodeFamilies.gen.inc, which GraphNodeDefs.hpp includes.
+# file: writes sandbox/src/GraphNodeFamilies.gen.inc, which GraphNodeDefsFamilies.cpp includes.
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/GraphNodeFamilies.cmake")
 
 # AN OPTIONAL VERSION SUFFIX (0.7.0 carried "-1"; 0.8.0 has none), which cannot live in project() above: CMake accepts only

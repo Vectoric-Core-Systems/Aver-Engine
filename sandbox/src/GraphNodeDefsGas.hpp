@@ -1,6 +1,6 @@
 #pragma once
 // Palette entries for the gameplay-ability nodes (tags, attributes, effects, abilities). NOT standalone:
-// include it from GraphNodeDefs.hpp inside namespace aver::editor::detail, after pin()/attr() are
+// include it from GraphNodeDefsFamilies.cpp inside namespace aver::editor::detail, after pin()/attr() are
 // defined and before buildCatalog(), then call appendGasNodeDefs(t) just before buildCatalog returns.
 //
 // MIRRORS scripting/csharp/Aver.Graph/GraphGasNodeTable.cs pin for pin (docs/plans/wave2/GAS.md

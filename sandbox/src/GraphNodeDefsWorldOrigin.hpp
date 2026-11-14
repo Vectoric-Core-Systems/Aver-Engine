@@ -1,5 +1,5 @@
 #pragma once
-// Palette entries for the floating-origin nodes. NOT standalone: included from GraphNodeDefs.hpp (via GraphNodeFamilies.gen.inc) inside
+// Palette entries for the floating-origin nodes. NOT standalone: included from GraphNodeDefsFamilies.cpp (via GraphNodeFamilies.gen.inc) inside
 // namespace aver::editor::detail, after pin()/attr() are defined and before buildCatalog().
 //
 // MIRRORS scripting/csharp/Aver.Graph/GraphWorldOriginNodeTable.cs pin for pin (docs/plans/wave11/LARGE_WORLD.md 2.5). A graph float is a single,

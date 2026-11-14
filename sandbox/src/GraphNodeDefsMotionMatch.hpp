@@ -1,5 +1,5 @@
 #pragma once
-// Palette entries for the motion-matching nodes. NOT standalone: include it from GraphNodeDefs.hpp inside
+// Palette entries for the motion-matching nodes. NOT standalone: include it from GraphNodeDefsFamilies.cpp inside
 // namespace aver::editor::detail, after pin()/attr() are defined and before buildCatalog(), then call
 // appendMotionMatchNodeDefs(t) just before buildCatalog returns.
 //

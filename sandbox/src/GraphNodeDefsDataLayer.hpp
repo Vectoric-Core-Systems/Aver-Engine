@@ -1,5 +1,5 @@
 #pragma once
-// Palette entries for the data layer nodes. NOT standalone: included from GraphNodeDefs.hpp (via GraphNodeFamilies.gen.inc) inside
+// Palette entries for the data layer nodes. NOT standalone: included from GraphNodeDefsFamilies.cpp (via GraphNodeFamilies.gen.inc) inside
 // namespace aver::editor::detail, after pin()/attr() are defined and before buildCatalog().
 //
 // MIRRORS scripting/csharp/Aver.Graph/GraphDataLayerNodeTable.cs pin for pin (docs/LEVEL_STREAMING.md). The layer is the node's layer= attribute.

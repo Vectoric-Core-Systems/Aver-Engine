@@ -144,11 +144,11 @@ set_target_properties(MaterialResolveTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${
 # library, for EditorPrefsTest's exact reason above: Sandbox is add_executable-only (no library half),
 # and promoting editor geometry into a real module purely to make it testable would put editor UI code
 # into the engine's dependency graph, which is a worse trade than this one unusual line.
-# GraphNodeDefs.hpp is header-only (see its own header comment) and needs no extra source file.
 add_executable(GraphEditorGeometryTest
   src/GraphEditorGeometryTest.cpp
   ${CMAKE_SOURCE_DIR}/sandbox/src/GraphEditorGeometry.cpp
-  ${CMAKE_SOURCE_DIR}/sandbox/src/GraphNodeDefs.cpp)
+  ${CMAKE_SOURCE_DIR}/sandbox/src/GraphNodeDefs.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/GraphNodeDefsFamilies.cpp)
 target_include_directories(GraphEditorGeometryTest PRIVATE
   ${CMAKE_SOURCE_DIR}/sandbox/src)
 # The repo root, so testNodeCatalogCoversTheCompiler can READ OcGraphParser.cs and compare the two
@@ -179,7 +179,8 @@ add_executable(GraphEditorLoadSaveTest
   ${CMAKE_SOURCE_DIR}/sandbox/src/GraphEditorComponents.cpp
   ${CMAKE_SOURCE_DIR}/sandbox/src/GraphEditorCanvas.cpp
   ${CMAKE_SOURCE_DIR}/sandbox/src/GraphEditorGeometry.cpp
-  ${CMAKE_SOURCE_DIR}/sandbox/src/GraphNodeDefs.cpp)
+  ${CMAKE_SOURCE_DIR}/sandbox/src/GraphNodeDefs.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/GraphNodeDefsFamilies.cpp)
 target_include_directories(GraphEditorLoadSaveTest PRIVATE
   ${CMAKE_SOURCE_DIR}/sandbox/src)
 target_compile_definitions(GraphEditorLoadSaveTest PRIVATE
