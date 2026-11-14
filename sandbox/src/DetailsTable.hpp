@@ -70,6 +70,7 @@ inline f32 detailsSplitPx(f32 fraction, f32 avail, f32 scale) {
 
 #if AVER_WITH_IMGUI
 #include <imgui.h>
+#include <imgui_internal.h>   // RenderTextEllipsis
 
 #include "EditorChrome.hpp"
 #include "EditorIcons.hpp"
@@ -96,6 +97,7 @@ struct State {
     f32 def[4] = {};
     int defN = 0;
     f32 reserveRight = 0.0f;
+    f32 labelNeed = 0.0f, labelNeedNext = 0.0f;   // widest label + reset slot: last frame's, this frame's
 };
 inline State& st() { static State s; return s; }
 
@@ -109,6 +111,10 @@ inline void begin() {
     s.avail = ImGui::GetContentRegionAvail().x;
     if (s.fraction < 0.0f) s.fraction = loadSplitFraction(kSplitKey, 0.40f);
     s.splitPx = detailsSplitPx(s.fraction, s.avail, s.scale);
+    // The label column grows to fit last frame's widest label, up to half the panel, so labels are not cut.
+    s.labelNeed = s.labelNeedNext;
+    s.labelNeedNext = 0.0f;
+    if (s.labelNeed > s.splitPx) s.splitPx = std::max(s.splitPx, std::min(s.labelNeed, s.avail * 0.5f));
 
     char buf[96];
     std::snprintf(buf, sizeof buf, "%s", s.filter.c_str());
@@ -202,19 +208,27 @@ inline bool row(const char* label, f32* cur, int n, int tint, Draw&& draw) {
     const f32 gap = 8.0f * s.scale, btn = ImGui::GetFrameHeight();
     const f32 valueX = ImGui::GetCursorStartPos().x + s.splitPx;
     const f32 labelW = std::max(0.0f, valueX - gap - (defN > 0 ? btn : 0.0f) - ImGui::GetCursorPosX());
+    const f32 textW = ImGui::CalcTextSize(vis.data(), vis.data() + vis.size()).x;
+    s.labelNeedNext = std::max(s.labelNeedNext, ImGui::GetCursorPosX() - ImGui::GetCursorStartPos().x + textW + gap +
+                                                   (defN > 0 ? btn : 0.0f) + 2.0f * s.scale);
 
     ImGui::AlignTextToFramePadding();
     const ImVec2 p = ImGui::GetCursorScreenPos();
     const ImVec2 mn = p, mx(p.x + labelW, p.y + btn);
-    ImGui::PushClipRect(mn, mx, true);
-    ImGui::TextUnformatted(vis.data(), vis.data() + vis.size());
-    ImGui::PopClipRect();
+    if (textW <= labelW) {
+        ImGui::TextUnformatted(vis.data(), vis.data() + vis.size());
+    } else {   // still too long at the column's cap: end in an ellipsis, the whole label in the tooltip below
+        const f32 ty = p.y + (btn - ImGui::GetFontSize()) * 0.5f;
+        ImGui::RenderTextEllipsis(ImGui::GetWindowDrawList(), ImVec2(p.x, ty), ImVec2(mx.x, ty + ImGui::GetFontSize()), mx.x,
+                                  vis.data(), vis.data() + vis.size(), nullptr);
+        ImGui::Dummy(ImVec2(labelW, ImGui::GetTextLineHeight()));
+    }
     if (modified) {
         const Rgba a = editorTheme().accent;
         ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(p.x - 5.0f * s.scale, p.y), ImVec2(p.x - 3.0f * s.scale, p.y + btn),
             ImGui::ColorConvertFloat4ToU32(ImVec4(a.r, a.g, a.b, 1.0f)));
     }
-    if (ImGui::CalcTextSize(vis.data(), vis.data() + vis.size()).x > labelW && ImGui::IsMouseHoveringRect(mn, mx))
+    if (textW > labelW && ImGui::IsMouseHoveringRect(mn, mx))
         ImGui::SetTooltip("%.*s", static_cast<int>(vis.size()), vis.data());
 
     bool reset = false;
@@ -236,7 +250,11 @@ inline bool row(const char* label, f32* cur, int n, int tint, Draw&& draw) {
 
     ImGui::SameLine(valueX);
     ImGui::SetNextItemWidth(std::max(40.0f * s.scale, ImGui::GetContentRegionAvail().x - reserve));
+    // Several cells share a narrow column: tighter side padding inside each keeps "0.000" and "255" whole.
+    const bool cells = std::max(n, tint) >= 2;   // vectors and colours
+    if (cells) ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(3.0f * s.scale, ImGui::GetStyle().FramePadding.y));
     const bool changed = draw(id);
+    if (cells) ImGui::PopStyleVar();
 
     if (tint >= 2) {   // red/green/blue bars at the left edge of the X/Y/Z cells (ImGui's DragScalarN cell widths)
         static const ImU32 kAxis[3] = {IM_COL32(222, 66, 66, 255), IM_COL32(107, 189, 69, 255), IM_COL32(69, 133, 235, 255)};
