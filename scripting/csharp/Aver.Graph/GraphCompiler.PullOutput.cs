@@ -44,6 +44,13 @@ public partial class GraphCompiler
     {
         if (_il == null) return;
         object v = pv.Value;
+        if (pin != null && pin.Type == PinType.Struct && v is string literal)
+        {
+            if (!GraphStructLiterals.TryParse(_graph.Structs, pin.StructName ?? "", literal, out var parsed, out var bad))
+                throw new InvalidOperationException($"node '{nodeId}' ({nodeType}) pin '{pv.PinName}': {bad}");
+            EmitConstValue(parsed);
+            return;
+        }
         if (pin != null && pin.Type != PinType.Exec)
         {
             if (!PinnedValue.TryFit(pin.Type, pv.Value, out v, out var why))
@@ -55,6 +62,7 @@ public partial class GraphCompiler
         else if (v is bool b) _il.Emit(OpCodes.Ldc_I4, b ? 1 : 0);
         else if (v is System.Numerics.Vector3 vec) EmitVector3(vec);
         else if (v is string s) _il.Emit(OpCodes.Ldstr, s);
+        else EmitConstValue(v);
     }
 
     private void EmitPullInputCore(Node node, string pinName)

@@ -184,7 +184,7 @@ public class OcGraphParser
                     PinType.Bool => false,
                     PinType.Int or PinType.Entity => 0,
                     PinType.Float3 or PinType.String => GraphLiterals.DefaultFor(varType),
-                    PinType.Struct => 0,   // unused: GraphVarStore builds the zero struct from its STRUCT
+                    PinType.Struct => 0,   // no literal: GraphVarStore builds the zero struct from its STRUCT
                     _ when PinTypeRules.IsArray(varType) => GraphLiterals.TryParseArray(varType, "", out var empty) ? empty : 0,
                     _ => 0f, // PinType.Float (Exec already rejected above)
                 };
@@ -195,6 +195,8 @@ public class OcGraphParser
                     {
                         if (GraphLiterals.TryParseArray(varType, defaultStr, out var arr)) varDefault = arr;
                     }
+                    else if (varType == PinType.Struct)
+                        varDefault = defaultStr;   // a struct literal, read against its STRUCT once every record is in (Validate reports a bad one)
                     else if (varType == PinType.Bool && bool.TryParse(defaultStr, out var b))
                         varDefault = b;
                     else if (varType == PinType.Int && int.TryParse(defaultStr, NumberStyles.Integer, CultureInfo.InvariantCulture, out var i))
@@ -358,7 +360,7 @@ public class OcGraphParser
                 // FIELD <Struct> <field> <type> -- one field, in declaration order. A duplicate is Validate's to report.
                 if (tokens.Count < 4)
                 {
-                    err = "FIELD requires a struct, a field name and a type: FIELD Struct field float|int|bool|float3|string|entity";
+                    err = "FIELD requires a struct, a field name and a type: FIELD Struct field float|int|bool|float3|string|entity|<elem>[]|struct:<Name>";
                     return false;
                 }
                 var owner = graph.Structs.FirstOrDefault(d => d.Name == tokens[1]);
@@ -367,12 +369,12 @@ public class OcGraphParser
                     err = $"FIELD names struct '{tokens[1]}', which no STRUCT record declares above it";
                     return false;
                 }
-                if (!PinTypeRules.TryParse(tokens[3], out var fieldType, out _) || !PinTypeRules.IsValueScalar(fieldType))
+                if (!PinTypeRules.TryParse(tokens[3], out var fieldType, out var fieldStruct) || fieldType == PinType.Exec)
                 {
-                    err = $"FIELD '{tokens[2]}' has type '{tokens[3]}'; expected float, int, bool, float3, string or entity";
+                    err = $"FIELD '{tokens[2]}' has type '{tokens[3]}'; expected float, int, bool, float3, string, entity, an array such as float[], or struct:<Name>";
                     return false;
                 }
-                owner.Fields.Add(new GraphStructField { Name = tokens[2], Type = fieldType });
+                owner.Fields.Add(new GraphStructField { Name = tokens[2], Type = fieldType, StructName = fieldStruct });
             }
             else if (key.Equals("CLASS", StringComparison.OrdinalIgnoreCase))
             {
@@ -939,7 +941,20 @@ public class OcGraphParser
             if (pv.Raw == null) continue;
             Pin? pin = graph.Nodes.TryGetValue(pv.NodeId, out var node)
                 ? node.Pins.FirstOrDefault(p => p.Name == pv.PinName && !p.IsOutput) : null;
-            if (pin != null && pin.Type is PinType.Float3 or PinType.String)
+            if (pin != null && pin.Type == PinType.Struct)
+            {
+                graph.PinnedValues[i] = new PinnedValue { NodeId = pv.NodeId, PinName = pv.PinName, Value = pv.Raw, Raw = pv.Raw };
+            }
+            else if (pin != null && PinTypeRules.IsArray(pin.Type))
+            {
+                if (!GraphLiterals.TryParseArray(pin.Type, pv.Raw, out var list))
+                {
+                    err = $"Could not parse value '{pv.Raw}' as {PinTypeRules.Format(pin.Type)}";
+                    return false;
+                }
+                graph.PinnedValues[i] = new PinnedValue { NodeId = pv.NodeId, PinName = pv.PinName, Value = list, Raw = pv.Raw };
+            }
+            else if (pin != null && pin.Type is PinType.Float3 or PinType.String)
             {
                 if (!GraphLiterals.TryParse(pin.Type, pv.Raw, out var typed))
                 {
@@ -2894,6 +2909,11 @@ public class OcGraphParser
             return float.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var f) ? f : null;
         if (Enum.TryParse<PinType>(typeName, true, out var pt) && pt is PinType.Float3 or PinType.String or PinType.Entity)
             return GraphLiterals.TryParse(pt, s, out var typed) ? typed : null;
+        if (PinTypeRules.TryParse(typeName, out var ct, out _))
+        {
+            if (PinTypeRules.IsArray(ct)) return GraphLiterals.TryParseArray(ct, s, out var list) ? list : null;
+            if (ct == PinType.Struct) return s;   // read against its STRUCT later (CollectionNodes.Check, the compiler)
+        }
         return null;
     }
 

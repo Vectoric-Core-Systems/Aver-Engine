@@ -104,10 +104,17 @@ public class PinnedValue
                 why = "a string pin takes text";
                 return false;
             case PinType.Struct:
-                why = "a struct pin takes no typed-in value";
+                // A literal stays text until the compiler reads it against its STRUCT; CollectionNodes.Check parses it.
+                if (value is string or GraphStruct) return true;
+                why = "a struct pin takes a literal {field=value|...}";
                 return false;
             default:
-                if (PinTypeRules.IsArray(pinType)) { why = "an array pin takes no typed-in value"; return false; }
+                if (PinTypeRules.IsArray(pinType))
+                {
+                    if (value.GetType() == PinTypeRules.ClrType(pinType)) return true;
+                    why = $"an array pin takes a list of {PinTypeRules.Format(PinTypeRules.ElementOf(pinType))}";
+                    return false;
+                }
                 return true;
         }
     }
@@ -290,11 +297,12 @@ public class GraphVariable
     public required object Default { get; init; }
 }
 
-/// One field of a user STRUCT: `FIELD <Struct> <field> <type>`, a scalar, vector, string or entity type.
+/// One field of a user STRUCT: `FIELD <Struct> <field> <type>`, any data type: a scalar, an array or another struct.
 public class GraphStructField
 {
     public required string Name { get; init; }
     public required PinType Type { get; init; }
+    public string? StructName { get; init; }   // which STRUCT a Struct field holds
 }
 
 /// One user STRUCT: `STRUCT <Name>` plus its FIELD records in declaration order (the order of the field slots).
@@ -303,8 +311,8 @@ public class GraphStructDef
     public required string Name { get; init; }
     public List<GraphStructField> Fields { get; } = new();
 
-    /// The field types in order, e.g. `float,float3,string`: what GraphStructOps builds a zero struct from.
-    public string Signature => string.Join(",", Fields.Select(f => PinTypeRules.Format(f.Type)));
+    /// The field types in order, e.g. `float,float3[],struct:Inner`: what GraphStructOps builds a zero struct from.
+    public string Signature => string.Join(",", Fields.Select(f => PinTypeRules.Format(f.Type, f.StructName)));
 }
 
 /// One entry in a class graph's COMPONENT TREE, from a `COMP <id> <Kind> [key=value]...` record.

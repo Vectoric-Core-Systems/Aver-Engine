@@ -5,6 +5,7 @@
 // CLR types. Arrays are a CLR List of the element type; a struct is a GraphStruct, a name plus a typed object[] of fields.
 
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
@@ -44,7 +45,7 @@ public static class PinTypeRules
         return array != elem;
     }
 
-    /// True for the types a struct field or an array element may have.
+    /// True for the types an array element may have.
     public static bool IsValueScalar(PinType t) =>
         t is PinType.Float or PinType.Int or PinType.Bool or PinType.Float3 or PinType.String or PinType.Entity;
 
@@ -121,40 +122,61 @@ public sealed class GraphStruct
     public object[] Fields { get; }
 }
 
-/// The calls the compiled IL makes for struct values; null-safe so a struct left unset reads as its zero value.
+/// The calls the compiled IL makes for struct values; null-safe so a struct left unset reads as its zero value. A field
+/// may be an array (a fresh empty list in the zero struct) or another struct (null in the zero struct, read as its zero).
 public static class GraphStructOps
 {
-    private static readonly Dictionary<string, object[]> s_templates = new();
+    private static readonly Dictionary<string, Func<object>[]> s_layouts = new();
 
-    private static object ZeroOf(string type) => type switch
+    private static Func<object> ZeroMaker(string type)
     {
-        "float" => 0f,
-        "bool" => false,
-        "float3" => Vector3.Zero,
-        "string" => "",
-        _ => 0,
-    };
-
-    /// The zero struct for a field-type signature such as `float,float3,string`.
-    public static GraphStruct Default(string name, string signature)
-    {
-        object[]? template;
-        lock (s_templates)
+        if (PinTypeRules.TryParse(type, out var t, out _) && PinTypeRules.IsArray(t))
         {
-            if (!s_templates.TryGetValue(signature, out template))
-                s_templates[signature] = template = signature.Length == 0
-                    ? Array.Empty<object>() : signature.Split(',').Select(ZeroOf).ToArray();
+            Type list = PinTypeRules.ClrType(t);
+            return () => Activator.CreateInstance(list)!;
         }
-        return new GraphStruct(name, (object[])template.Clone());
+        object zero = type switch
+        {
+            "float" => 0f,
+            "bool" => false,
+            "float3" => Vector3.Zero,
+            "string" => "",
+            "int" or "entity" => 0,
+            _ => null!,
+        };
+        return () => zero;
     }
 
-    public static GraphStruct Make(string name, object[] fields) => new(name, fields);
+    /// The zero struct for a field-type signature such as `float,float3[],struct:Inner`.
+    public static GraphStruct Default(string name, string signature)
+    {
+        Func<object>[]? makers;
+        lock (s_layouts)
+        {
+            if (!s_layouts.TryGetValue(signature, out makers))
+                s_layouts[signature] = makers = signature.Length == 0
+                    ? Array.Empty<Func<object>>() : signature.Split(',').Select(ZeroMaker).ToArray();
+        }
+        var fields = new object[makers.Length];
+        for (int i = 0; i < makers.Length; i++) fields[i] = makers[i]();
+        return new GraphStruct(name, fields);
+    }
+
+    // A list stored into a struct is copied, so a struct never shares a list with an array variable a node mutates.
+    private static object Own(object v) =>
+        v is IList && v.GetType().IsGenericType ? Activator.CreateInstance(v.GetType(), v)! : v;
+
+    public static GraphStruct Make(string name, object[] fields)
+    {
+        for (int i = 0; i < fields.Length; i++) fields[i] = Own(fields[i]);
+        return new GraphStruct(name, fields);
+    }
 
     /// A copy of `s` with one field replaced.
     public static GraphStruct With(GraphStruct? s, string name, string signature, int index, object value)
     {
         var copy = s == null ? Default(name, signature) : new GraphStruct(s.Name, (object[])s.Fields.Clone());
-        if ((uint)index < (uint)copy.Fields.Length) copy.Fields[index] = value;
+        if ((uint)index < (uint)copy.Fields.Length) copy.Fields[index] = Own(value);
         return copy;
     }
 
@@ -165,6 +187,75 @@ public static class GraphStructOps
     public static bool GetBool(GraphStruct? s, int i) => Field(s, i) is bool v && v;
     public static Vector3 GetVector(GraphStruct? s, int i) => Field(s, i) is Vector3 v ? v : Vector3.Zero;
     public static string GetString(GraphStruct? s, int i) => Field(s, i) as string ?? "";
+    public static List<T> GetArray<T>(GraphStruct? s, int i) => Field(s, i) as List<T> ?? new List<T>();
+    public static GraphStruct? GetStruct(GraphStruct? s, int i) => Field(s, i) as GraphStruct;
+}
+
+/// Struct literals, the text a struct VAR default or a struct pin's typed-in value is written as: `{field=value|...}`.
+/// Fields are named, in any order; one left out keeps its zero. A value is its field type's own literal (float3 `x,y,z`,
+/// an array's list, a nested struct's braces). A string value escapes | { } as %7C %7B %7D besides EncodeString's set.
+public static class GraphStructLiterals
+{
+    private const int MaxDepth = 32;
+
+    public static bool TryParse(IReadOnlyList<GraphStructDef> defs, string structName, string text, out GraphStruct value, out string err) =>
+        TryParse(defs, structName, text, 0, out value, out err);
+
+    private static bool TryParse(IReadOnlyList<GraphStructDef> defs, string structName, string text, int depth,
+                                 out GraphStruct value, out string err)
+    {
+        value = null!;
+        err = "";
+        var def = defs.FirstOrDefault(d => d.Name == structName);
+        if (def == null) { err = $"struct '{structName}' is not declared"; return false; }
+        if (depth > MaxDepth) { err = $"a {structName} literal nests more than {MaxDepth} structs deep"; return false; }
+        text = text.Trim();
+        if (text.Length < 2 || text[0] != '{' || text[^1] != '}') { err = $"'{text}' is not a {structName} literal {{field=value|...}}"; return false; }
+
+        var result = GraphStructOps.Default(def.Name, def.Signature);
+        var seen = new HashSet<string>();
+        foreach (string part in SplitTopLevel(text.Substring(1, text.Length - 2)))
+        {
+            if (part.Length == 0) continue;
+            int eq = part.IndexOf('=');
+            if (eq <= 0) { err = $"'{part}' in a {structName} literal is not field=value"; return false; }
+            string name = part.Substring(0, eq).Trim(), lit = part.Substring(eq + 1);
+            int idx = def.Fields.FindIndex(f => f.Name == name);
+            if (idx < 0) { err = $"struct '{structName}' has no field '{name}'"; return false; }
+            if (!seen.Add(name)) { err = $"a {structName} literal sets field '{name}' twice"; return false; }
+            var field = def.Fields[idx];
+            object v;
+            if (field.Type == PinType.Struct)
+            {
+                if (!TryParse(defs, field.StructName ?? "", lit, depth + 1, out var nested, out err)) return false;
+                v = nested;
+            }
+            else if (PinTypeRules.IsArray(field.Type) ? !GraphLiterals.TryParseArray(field.Type, lit.Trim(), out v)
+                                                       : !GraphLiterals.TryParse(field.Type, field.Type == PinType.String ? lit : lit.Trim(), out v))
+            {
+                err = $"field '{name}' of {structName}: '{lit}' is not a {PinTypeRules.Format(field.Type)}";
+                return false;
+            }
+            result.Fields[idx] = v;
+        }
+        value = result;
+        return true;
+    }
+
+    // Splits on the | that are not inside a nested literal's braces.
+    private static List<string> SplitTopLevel(string s)
+    {
+        var parts = new List<string>();
+        int depth = 0, start = 0;
+        for (int i = 0; i < s.Length; i++)
+        {
+            if (s[i] == '{') depth++;
+            else if (s[i] == '}') depth--;
+            else if (s[i] == '|' && depth == 0) { parts.Add(s.Substring(start, i - start)); start = i + 1; }
+        }
+        parts.Add(s.Substring(start));
+        return parts;
+    }
 }
 
 /// The calls the compiled IL makes for array nodes; null-safe, and an out-of-range index reads or writes nothing.

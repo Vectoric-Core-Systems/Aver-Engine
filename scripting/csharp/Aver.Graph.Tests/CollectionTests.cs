@@ -337,7 +337,7 @@ OUT b2 n
         failures += Refused("a duplicate STRUCT field", "OCGRAPH 1\nSTRUCT S\nFIELD S a float\nFIELD S a int\n", "twice");
         failures += Refused("a duplicate STRUCT", "OCGRAPH 1\nSTRUCT S\nSTRUCT S\n", "Duplicate STRUCT");
         failures += Refused("a FIELD of an undeclared STRUCT", "OCGRAPH 1\nFIELD S a float\n", "no STRUCT");
-        failures += Refused("a FIELD that is not a plain type", "OCGRAPH 1\nSTRUCT S\nFIELD S a float[]\n", "FIELD");
+        failures += Refused("a FIELD of type exec", "OCGRAPH 1\nSTRUCT S\nFIELD S a exec\n", "FIELD");
         failures += Refused("a SetStructField naming a missing field", "OCGRAPH 1\nSTRUCT S\nFIELD S a float\nNODE m SetStructField struct=S field=zz\nOUT m result\n", "field");
         failures += Refused("an array node with an element type it does not have", "OCGRAPH 1\nNODE m MakeArray of=quaternion\nOUT m array\n", "of=");
         failures += Refused("an ArrayAdd with no var=", "OCGRAPH 1\nVAR xs float[]\nNODE a ArrayAdd\n", "var=");
@@ -361,7 +361,7 @@ OUT a result
         failures += Refused("a struct output cannot feed a float input", "OCGRAPH 1\nSTRUCT S\nFIELD S a float\nNODE m MakeStruct struct=S\nNODE a Add\nLINK m value a a\nOUT a result\n", "mismatch");
         failures += Refused("a struct output cannot feed another struct's input", "OCGRAPH 1\nSTRUCT S\nFIELD S a float\nSTRUCT T\nFIELD T b float\nNODE m MakeStruct struct=S\nNODE br BreakStruct struct=T\nLINK m value br value\nOUT br b\n", "mismatch");
         failures += Refused("an array PARAM", "OCGRAPH 1\nPARAM xs float[]\n", "PARAM");
-        failures += Refused("an array pin value typed in as a PINVAL", "OCGRAPH 1\nNODE ln ArrayLength\nPINVAL ln array 1,2\nOUT ln length\n", "");
+        failures += Refused("an array pin value that is not a list of its element", "OCGRAPH 1\nNODE ln ArrayLength\nPINVAL ln array 1,x\nOUT ln length\n", "float[]");
 
         failures += Compiles("an int[] output links into an entity[] input", @"
 OCGRAPH 1
@@ -416,7 +416,116 @@ OUT br pos
 ENTRY s OnTick
 ", new object[] { 4.0f, new Vector3(0, 2, 0) });
 
+        failures += NestedFieldsAndLiterals();
         failures += TypeStrings();
+        return failures;
+    }
+
+    // Struct fields that are arrays or other structs, and struct literals (VAR defaults, typed-in pin values).
+    private static int NestedFieldsAndLiterals()
+    {
+        int failures = 0;
+        const string nest = "STRUCT Inner\nFIELD Inner a float\nFIELD Inner tags string[]\n" +
+                            "STRUCT Outer\nFIELD Outer k int\nFIELD Outer inner struct:Inner\nFIELD Outer xs float[]\n";
+
+        failures += Value("a struct field holds an array", "OCGRAPH 1\n" + nest + @"
+NODE arr MakeArray
+PINVAL arr item0 1
+PINVAL arr item1 2
+NODE mk MakeStruct struct=Outer
+NODE br BreakStruct struct=Outer
+NODE ln ArrayLength
+LINK arr array mk xs
+LINK mk value br value
+LINK br xs ln array
+OUT ln length
+", 2);
+        failures += Value("a struct field holds another struct", "OCGRAPH 1\n" + nest + @"
+NODE mi MakeStruct struct=Inner
+PINVAL mi a 5
+NODE mo MakeStruct struct=Outer
+NODE bo BreakStruct struct=Outer
+NODE bi BreakStruct struct=Inner
+LINK mi value mo inner
+LINK mo value bo value
+LINK bo inner bi value
+OUT bi a
+", 5.0f);
+        failures += Value("an unwired nested struct and array read as zero", "OCGRAPH 1\n" + nest + @"
+NODE bo BreakStruct struct=Outer
+NODE bi BreakStruct struct=Inner
+NODE ln ArrayLength
+LINK bo inner bi value
+LINK bo xs ln array
+OUT bi a
+OUT ln length
+", new object[] { 0.0f, 0 });
+        failures += EntryValue("a list stored in a struct is a copy: an ArrayAdd on the variable it came from leaves the struct alone", "OCGRAPH 1\n" + nest + @"
+VAR xs float[] 1,2
+VAR o struct:Outer
+NODE s OnTick
+NODE gx GetVar var=xs
+NODE mk MakeStruct struct=Outer
+NODE so SetVar var=o
+NODE add ArrayAdd var=xs
+PINVAL add item 9
+NODE go GetVar var=o
+NODE br BreakStruct struct=Outer
+NODE ln ArrayLength
+LINK gx value mk xs
+LINK mk value so value
+LINK s exec so exec
+LINK so then add exec
+LINK go value br value
+LINK br xs ln array
+OUT ln length
+ENTRY s OnTick
+", 2, 3);
+        failures += Value("a struct VAR default is a literal", "OCGRAPH 1\n" + nest + @"
+VAR o struct:Outer {k=3|xs=1,2,3|inner={a=7|tags=x,y%7Cz}}
+NODE go GetVar var=o
+NODE bo BreakStruct struct=Outer
+NODE bi BreakStruct struct=Inner
+NODE ln ArrayLength
+NODE tg ArrayGet of=string
+PINVAL tg index 1
+LINK go value bo value
+LINK bo inner bi value
+LINK bo xs ln array
+LINK bi tags tg array
+OUT bo k
+OUT bi a
+OUT ln length
+OUT tg item
+", new object[] { 3, 7.0f, 3, "y|z" });
+        failures += Value("a typed-in struct value on an unwired input (PINVAL and PIN default)", "OCGRAPH 1\n" + nest + @"
+NODE b1 BreakStruct struct=Inner
+PINVAL b1 value {a=4}
+NODE b2 BreakStruct struct=Inner
+PIN b2 value in struct:Inner {a=6|tags=}
+PIN b2 a out float
+PIN b2 tags out string[]
+OUT b1 a
+OUT b2 a
+", new object[] { 4.0f, 6.0f });
+        failures += Value("a typed-in array value on an unwired input", @"
+OCGRAPH 1
+NODE ln ArrayLength
+PINVAL ln array 4,5,6
+NODE g ArrayGet
+PIN g array in float[] 4,5,6
+PIN g index in int
+PIN g item out float
+PINVAL g index 2
+OUT ln length
+OUT g item
+", new object[] { 3, 6.0f });
+
+        failures += Refused("a struct that contains itself", "OCGRAPH 1\nSTRUCT A\nFIELD A b struct:B\nSTRUCT B\nFIELD B a struct:A\n", "contains itself");
+        failures += Refused("a field naming an undeclared struct", "OCGRAPH 1\nSTRUCT A\nFIELD A b struct:Nope\n", "Nope");
+        failures += Refused("a literal naming a field the struct lacks", "OCGRAPH 1\n" + nest + "VAR o struct:Inner {zz=1}\n", "no field");
+        failures += Refused("a literal whose value does not parse", "OCGRAPH 1\n" + nest + "NODE b BreakStruct struct=Inner\nPINVAL b value {a=abc}\nOUT b a\n", "is not a");
+        failures += Refused("a literal without braces", "OCGRAPH 1\n" + nest + "VAR o struct:Inner a=1\n", "literal");
         return failures;
     }
 

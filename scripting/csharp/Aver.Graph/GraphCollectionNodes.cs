@@ -16,6 +16,8 @@ internal static class CollectionNodes
     /// <summary>Struct field names that would collide with a struct node's own pins.</summary>
     internal static readonly string[] ReservedFieldNames = { "value", "result" };
 
+    private static readonly char[] LiteralChars = { ',', '{', '}', '|', '=' };
+
     private static readonly Dictionary<string, DataNodeKind> s_kinds = new(StringComparer.OrdinalIgnoreCase)
     {
         ["MakeArray"] = DataNodeKind.Pure,
@@ -65,7 +67,7 @@ internal static class CollectionNodes
             var def = StructOf(node, graph);
             if (def == null) return false;
             var st = new DataPin("value", PinType.Struct, null, def.Name);
-            var fields = def.Fields.Select(f => new DataPin(f.Name, f.Type)).ToArray();
+            var fields = def.Fields.Select(f => new DataPin(f.Name, f.Type, null, f.StructName)).ToArray();
             switch (type)
             {
                 case "makestruct": ins = fields; outs = new[] { st }; break;
@@ -75,7 +77,7 @@ internal static class CollectionNodes
                     node.Attrs.TryGetValue("field", out var field);
                     var f = def.Fields.FirstOrDefault(x => x.Name == field);
                     if (f == null) return false;
-                    ins = new[] { st, new DataPin(f.Name, f.Type) };
+                    ins = new[] { st, new DataPin(f.Name, f.Type, null, f.StructName) };
                     outs = new[] { new DataPin("result", PinType.Struct, null, def.Name) };
                     break;
                 }
@@ -122,11 +124,53 @@ internal static class CollectionNodes
             foreach (var f in s.Fields)
             {
                 if (!fields.Add(f.Name) && report("struct.field.duplicate", $"STRUCT '{s.Name}' declares field '{f.Name}' twice", null, null)) return true;
-                if (!PinTypeRules.IsValueScalar(f.Type) &&
-                    report("struct.field.type", $"STRUCT '{s.Name}' field '{f.Name}' is {f.Type}; a field is float, int, bool, float3, string or entity", null, null)) return true;
+                if (f.Type == PinType.Exec &&
+                    report("struct.field.type", $"STRUCT '{s.Name}' field '{f.Name}' is exec; a field holds data", null, null)) return true;
+                if (f.Type == PinType.Struct && !g.Structs.Any(d => d.Name == f.StructName) &&
+                    report("struct.unknown", $"STRUCT '{s.Name}' field '{f.Name}' names struct '{f.StructName}', which no STRUCT record declares", null, null)) return true;
                 if (Array.IndexOf(ReservedFieldNames, f.Name) >= 0 &&
                     report("struct.field.name", $"STRUCT '{s.Name}' field '{f.Name}' is a reserved name (it would collide with a struct node's own pin)", null, null)) return true;
             }
+        }
+
+        foreach (var s in g.Structs)
+            if (s.Name.IndexOfAny(LiteralChars) >= 0 &&
+                report("struct.name", $"STRUCT name '{s.Name}' contains one of , {{ }} | = (they delimit type signatures and struct literals)", null, null)) return true;
+
+        // A struct holding itself, directly or through other structs, would have no finite value.
+        var state = new Dictionary<string, int>();   // 1 = on the path, 2 = done
+        var path = new List<string>();
+        bool Cycle(string name)
+        {
+            if (state.TryGetValue(name, out int st)) return st == 1;
+            var def = g.Structs.FirstOrDefault(d => d.Name == name);
+            if (def == null) return false;
+            state[name] = 1;
+            path.Add(name);
+            foreach (var f in def.Fields)
+                if (f.Type == PinType.Struct && f.StructName != null && Cycle(f.StructName)) return true;
+            path.RemoveAt(path.Count - 1);
+            state[name] = 2;
+            return false;
+        }
+        foreach (var s in g.Structs)
+        {
+            path.Clear();
+            if (Cycle(s.Name) &&
+                report("struct.recursive", $"STRUCT '{s.Name}' contains itself (via {string.Join(" -> ", path)}); a struct cannot hold itself", null, null)) return true;
+        }
+
+        foreach (var v in g.Variables)
+            if (v.Type == PinType.Struct && v.Default is string lit && g.Structs.Any(d => d.Name == v.StructName) &&
+                !GraphStructLiterals.TryParse(g.Structs, v.StructName!, lit, out _, out var why) &&
+                report("struct.literal", $"VAR '{v.Name}' default: {why}", null, null)) return true;
+        foreach (var pv in g.PinnedValues)
+        {
+            if (pv.Value is not string text || !g.Nodes.TryGetValue(pv.NodeId, out var pn)) continue;
+            var pin = pn.Pins.FirstOrDefault(p => p.Name == pv.PinName && !p.IsOutput);
+            if (pin == null || pin.Type != PinType.Struct || !g.Structs.Any(d => d.Name == pin.StructName)) continue;
+            if (!GraphStructLiterals.TryParse(g.Structs, pin.StructName!, text, out _, out var why) &&
+                report("struct.literal", $"Node '{pn.Id}' pin '{pin.Name}': {why}", pn.Id, pin.Name)) return true;
         }
 
         bool Known(string? name) => g.Structs.Any(s => s.Name == name);

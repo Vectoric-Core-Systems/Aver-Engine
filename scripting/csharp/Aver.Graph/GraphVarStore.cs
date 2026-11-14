@@ -138,7 +138,10 @@ public sealed class GraphVarStore
                 {
                     var def = graph.Structs.FirstOrDefault(d => d.Name == v.StructName)
                         ?? throw new InvalidOperationException($"VAR '{v.Name}' names struct '{v.StructName}', which no STRUCT record declares");
-                    store.SetStruct(v.Name, GraphStructOps.Default(def.Name, def.Signature));
+                    GraphStruct value = GraphStructOps.Default(def.Name, def.Signature);
+                    if (v.Default is string literal && !GraphStructLiterals.TryParse(graph.Structs, def.Name, literal, out value, out var why))
+                        throw new InvalidOperationException($"VAR '{v.Name}' default: {why}");
+                    store.SetStruct(v.Name, value);
                     break;
                 }
                 case var t when PinTypeRules.IsArray(t):

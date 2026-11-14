@@ -44,6 +44,50 @@ public partial class GraphCompiler
         if (clr.IsValueType) _il.Emit(OpCodes.Box, clr);
     }
 
+    /// A literal's value on the stack, built fresh each time: a scalar, a Vector3, a string, a List or a GraphStruct
+    /// (whose value-type fields are boxed; a null field stays null).
+    private void EmitConstValue(object? v)
+    {
+        if (_il == null) return;
+        switch (v)
+        {
+            case null: _il.Emit(OpCodes.Ldnull); return;
+            case float f: _il.Emit(OpCodes.Ldc_R4, f); return;
+            case int i: _il.Emit(OpCodes.Ldc_I4, i); return;
+            case bool b: _il.Emit(b ? OpCodes.Ldc_I4_1 : OpCodes.Ldc_I4_0); return;
+            case System.Numerics.Vector3 vec: EmitVector3(vec); return;
+            case string str: _il.Emit(OpCodes.Ldstr, str); return;
+            case GraphStruct gs:
+                _il.Emit(OpCodes.Ldstr, gs.Name);
+                _il.Emit(OpCodes.Ldc_I4, gs.Fields.Length);
+                _il.Emit(OpCodes.Newarr, typeof(object));
+                for (int k = 0; k < gs.Fields.Length; k++)
+                {
+                    _il.Emit(OpCodes.Dup);
+                    _il.Emit(OpCodes.Ldc_I4, k);
+                    EmitConstValue(gs.Fields[k]);
+                    if (gs.Fields[k] is { } fv && fv.GetType().IsValueType) _il.Emit(OpCodes.Box, fv.GetType());
+                    _il.Emit(OpCodes.Stelem_Ref);
+                }
+                _il.Emit(OpCodes.Call, StructOp(nameof(GraphStructOps.Make)));
+                return;
+            case System.Collections.IList list when v.GetType().IsGenericType:
+            {
+                Type lt = v.GetType();
+                _il.Emit(OpCodes.Newobj, lt.GetConstructor(Type.EmptyTypes)!);
+                foreach (var item in list)
+                {
+                    _il.Emit(OpCodes.Dup);
+                    EmitConstValue(item);
+                    _il.Emit(OpCodes.Callvirt, lt.GetMethod("Add")!);
+                }
+                return;
+            }
+            default:
+                throw new InvalidOperationException($"a literal of type {v.GetType().Name} has no IL form");
+        }
+    }
+
     /// The zero struct of `def` on the stack.
     private void EmitZeroStruct(string name)
     {
@@ -87,14 +131,18 @@ public partial class GraphCompiler
                     if (idx < 0) throw new InvalidOperationException($"BreakStruct node '{node.Id}' has no output pin '{pinName}' (a field of '{def.Name}')");
                     In("value");
                     _il.Emit(OpCodes.Ldc_I4, idx);
-                    _il.Emit(OpCodes.Call, StructOp(def.Fields[idx].Type switch
-                    {
-                        PinType.Float => nameof(GraphStructOps.GetFloat),
-                        PinType.Bool => nameof(GraphStructOps.GetBool),
-                        PinType.Float3 => nameof(GraphStructOps.GetVector),
-                        PinType.String => nameof(GraphStructOps.GetString),
-                        _ => nameof(GraphStructOps.GetInt),
-                    }));
+                    PinType ft = def.Fields[idx].Type;
+                    _il.Emit(OpCodes.Call, PinTypeRules.IsArray(ft)
+                        ? StructOp(nameof(GraphStructOps.GetArray)).MakeGenericMethod(PinTypeRules.ClrType(PinTypeRules.ElementOf(ft)))
+                        : StructOp(ft switch
+                        {
+                            PinType.Float => nameof(GraphStructOps.GetFloat),
+                            PinType.Bool => nameof(GraphStructOps.GetBool),
+                            PinType.Float3 => nameof(GraphStructOps.GetVector),
+                            PinType.String => nameof(GraphStructOps.GetString),
+                            PinType.Struct => nameof(GraphStructOps.GetStruct),
+                            _ => nameof(GraphStructOps.GetInt),
+                        }));
                     return;
                 }
                 default: // setstructfield
