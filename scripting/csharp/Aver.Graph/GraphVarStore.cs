@@ -29,6 +29,7 @@
 // matters at this scale and needs no second name-to-slot table the way a dense array would.
 using System;
 using System.Collections.Generic;
+using System.Numerics;
 
 namespace Aver.Graph;
 
@@ -67,6 +68,18 @@ public sealed class GraphVarStore
     /// <summary>Writes a Bool variable.</summary>
     public void SetBool(string name, bool value) => _values[name] = value;
 
+    /// <summary>Reads a Float3 variable; zero if never set.</summary>
+    public Vector3 GetVector3(string name) => _values.TryGetValue(name, out var v) && v is Vector3 f ? f : Vector3.Zero;
+
+    /// <summary>Writes a Float3 variable.</summary>
+    public void SetVector3(string name, Vector3 value) => _values[name] = value;
+
+    /// <summary>Reads a String variable; empty if never set.</summary>
+    public string GetString(string name) => _values.TryGetValue(name, out var v) && v is string s ? s : "";
+
+    /// <summary>Writes a String variable.</summary>
+    public void SetString(string name, string value) => _values[name] = value ?? "";
+
     /// <summary>Builds a FRESH store, seeded from every VAR <paramref name="graph"/> declares, using
     /// each one's own GraphVariable.Default (itself already resolved to a concrete zero-or-declared
     /// value by OcGraphParser -- see that class's VAR-parsing comment). This is what makes "a variable
@@ -90,7 +103,14 @@ public sealed class GraphVarStore
                     store.SetFloat(v.Name, v.Default is float f ? f : 0f);
                     break;
                 case PinType.Int:
+                case PinType.Entity:
                     store.SetInt(v.Name, v.Default is int i ? i : 0);
+                    break;
+                case PinType.Float3:
+                    store.SetVector3(v.Name, v.Default is Vector3 vec ? vec : Vector3.Zero);
+                    break;
+                case PinType.String:
+                    store.SetString(v.Name, v.Default as string ?? "");
                     break;
                 case PinType.Bool:
                     store.SetBool(v.Name, v.Default is bool b ? b : false);
@@ -104,7 +124,7 @@ public sealed class GraphVarStore
                     // to apply.
                     throw new InvalidOperationException(
                         $"VAR '{v.Name}' has type {v.Type}, which GraphVarStore has no accessor for -- " +
-                        "VAR only supports Float/Int/Bool, the same restriction PARAM already has");
+                        "VAR does not support this type");
             }
         }
         return store;

@@ -80,7 +80,12 @@ public partial class GraphCompiler
             _varStoreArgIndex = _graph.Variables.Count > 0 ? fn.Inputs.Count : -1;
             _currentFunc = fn;
             _funcOutLocals = new List<LocalBuilder>();
-            foreach (var o in fn.Outputs) _funcOutLocals.Add(_il.DeclareLocal(PinTypeToCLRType(o.Type)));
+            foreach (var o in fn.Outputs)
+            {
+                var outLocal = _il.DeclareLocal(PinTypeToCLRType(o.Type));
+                _funcOutLocals.Add(outLocal);
+                if (o.Type == PinType.String) { _il.Emit(OpCodes.Ldstr, ""); _il.Emit(OpCodes.Stloc, outLocal); }
+            }
 
             // Recursion guard as a helper call, not emitted IL: an unbounded recursive function would
             // overflow the CLR stack (uncatchable StackOverflowException, taking the whole editor

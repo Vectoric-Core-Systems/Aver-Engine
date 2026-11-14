@@ -358,4 +358,10 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing = "");
 // Writes a graph to disk, creating parent directories.
 bool saveOcgraph(const std::string& path, const OcGraphData& g, std::string* err = nullptr);
 
+// A string pin's or Const node's text as one whitespace-free token: '%' as %25, space %20, tab %09, newline %0A,
+// return %0D. decodeGraphString reverses it (a '%' not followed by two hex digits stays as written). The C#
+// reader (GraphLiterals) uses the same escapes.
+std::string encodeGraphString(std::string_view s);
+std::string decodeGraphString(std::string_view s);
+
 } // namespace aver::fmt

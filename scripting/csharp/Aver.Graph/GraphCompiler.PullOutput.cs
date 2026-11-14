@@ -25,7 +25,7 @@ public partial class GraphCompiler
         // Armed: copy the value just pushed to the debugger on its way past (widened to double), so
         // the editor can label the wire. Data inputs only; an exec pin carries no value.
         var pin = node.Pins.FirstOrDefault(p => p.Name == pinName && !p.IsOutput);
-        if (pin == null || pin.Type == PinType.Exec) return;
+        if (pin == null || pin.Type is PinType.Exec or PinType.Float3 or PinType.String) return;
         var tmp = _il.DeclareLocal(PinTypeToCLRType(pin.Type));
         _il.Emit(OpCodes.Stloc, tmp);
         _il.Emit(OpCodes.Ldstr, _graph.Name);
@@ -53,6 +53,8 @@ public partial class GraphCompiler
         if (v is float f) _il.Emit(OpCodes.Ldc_R4, f);
         else if (v is int i) _il.Emit(OpCodes.Ldc_I4, i);
         else if (v is bool b) _il.Emit(OpCodes.Ldc_I4, b ? 1 : 0);
+        else if (v is System.Numerics.Vector3 vec) EmitVector3(vec);
+        else if (v is string s) _il.Emit(OpCodes.Ldstr, s);
     }
 
     private void EmitPullInputCore(Node node, string pinName)
@@ -93,9 +95,7 @@ public partial class GraphCompiler
                 $"A node's default pins are suppressed entirely as soon as it declares ANY pin by hand, " +
                 $"so if this node has PIN records, it needs one for '{pinName}' too (or a LINK into it)");
 
-        if (pin.Type == PinType.Bool) _il.Emit(OpCodes.Ldc_I4_0);
-        else if (pin.Type == PinType.Int) _il.Emit(OpCodes.Ldc_I4_0);
-        else _il.Emit(OpCodes.Ldc_R4, 0f);
+        EmitZeroOf(pin.Type);
     }
 
     /// Every node type only the PUSH compiler can run: a side effect, a write, or a creation with no
@@ -124,7 +124,7 @@ public partial class GraphCompiler
         IsExecCapableJointCreateType(type) || IsExecCapableJointOpType(type) ||
         IsExecCapablePhysicsQueryType(type) || IsExecCapableRagdollType(type) ||
         IsExecCapableInputBindingOpType(type) || IsExecCapableRebindActionType(type) ||
-        GameSystemNodes.IsExec(type);
+        DataNodes.IsExec(type) || GameSystemNodes.IsExec(type);
 
     /// Node kinds that exist only to be walked by the exec/PUSH compiler, with no data value to
     /// pull -- Compile() skips these rather than failing, since a graph may carry both halves with
@@ -182,6 +182,12 @@ public partial class GraphCompiler
         if (GameSystemNodes.TryGet(source.Type, out var gameSpec) && gameSpec.Kind == GenericKind.Pure)
         {
             EmitGenericPurePull(source, gameSpec, pinName);
+            return;
+        }
+
+        if (DataNodes.IsPure(source.Type))
+        {
+            EmitPureDataPull(source, pinName);
             return;
         }
 

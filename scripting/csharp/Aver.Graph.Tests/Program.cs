@@ -131,6 +131,9 @@ static int Main()
         // A value typed into an unwired input pin (its PIN record default) reaches the node.
         failures += PinDefaultValueTests.RunAll();
 
+        // float3, string and entity pins, and the vector / string / entity nodes.
+        failures += VectorStringEntityTests.RunAll();
+
         // Select, InputKey, Raycast: the three node types this slice adds on top of the exec compiler.
         failures += TestConstLiteralShapeDoesNotDecideType();
         failures += NewNodeTests.RunAll();

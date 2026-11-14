@@ -122,6 +122,10 @@ public partial class GraphCompiler
     private static readonly MethodInfo VarSetIntMethod =
         typeof(GraphVarStore).GetMethod(nameof(GraphVarStore.SetInt))
         ?? throw new InvalidOperationException("Aver.Graph.GraphVarStore.SetInt was not found by reflection");
+    private static readonly MethodInfo VarGetVector3Method = typeof(GraphVarStore).GetMethod(nameof(GraphVarStore.GetVector3))!;
+    private static readonly MethodInfo VarSetVector3Method = typeof(GraphVarStore).GetMethod(nameof(GraphVarStore.SetVector3))!;
+    private static readonly MethodInfo VarGetStringMethod = typeof(GraphVarStore).GetMethod(nameof(GraphVarStore.GetString))!;
+    private static readonly MethodInfo VarSetStringMethod = typeof(GraphVarStore).GetMethod(nameof(GraphVarStore.SetString))!;
     private static readonly MethodInfo VarGetBoolMethod =
         typeof(GraphVarStore).GetMethod(nameof(GraphVarStore.GetBool))
         ?? throw new InvalidOperationException("Aver.Graph.GraphVarStore.GetBool was not found by reflection");
@@ -134,19 +138,23 @@ public partial class GraphCompiler
     private static MethodInfo VarGetMethodFor(PinType t) => t switch
     {
         PinType.Float => VarGetFloatMethod,
-        PinType.Int => VarGetIntMethod,
+        PinType.Int or PinType.Entity => VarGetIntMethod,
+        PinType.Float3 => VarGetVector3Method,
+        PinType.String => VarGetStringMethod,
         PinType.Bool => VarGetBoolMethod,
         _ => throw new InvalidOperationException(
-            $"VAR type {t} has no GraphVarStore read accessor -- VAR only supports Float/Int/Bool"),
+            $"VAR type {t} has no GraphVarStore read accessor"),
     };
 
     /// Picks GraphVarStore's write accessor for a declared VAR's type -- EmitExecSetVar's own dispatch.
     private static MethodInfo VarSetMethodFor(PinType t) => t switch
     {
         PinType.Float => VarSetFloatMethod,
-        PinType.Int => VarSetIntMethod,
+        PinType.Int or PinType.Entity => VarSetIntMethod,
+        PinType.Float3 => VarSetVector3Method,
+        PinType.String => VarSetStringMethod,
         PinType.Bool => VarSetBoolMethod,
         _ => throw new InvalidOperationException(
-            $"VAR type {t} has no GraphVarStore write accessor -- VAR only supports Float/Int/Bool"),
+            $"VAR type {t} has no GraphVarStore write accessor"),
     };
 }

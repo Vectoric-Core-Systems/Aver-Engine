@@ -177,7 +177,8 @@ public class OcGraphParser
                 object varDefault = varType switch
                 {
                     PinType.Bool => false,
-                    PinType.Int => 0,
+                    PinType.Int or PinType.Entity => 0,
+                    PinType.Float3 or PinType.String => GraphLiterals.DefaultFor(varType),
                     _ => 0f, // PinType.Float (Exec already rejected above)
                 };
                 if (tokens.Count > 3)
@@ -189,6 +190,9 @@ public class OcGraphParser
                         varDefault = i;
                     else if (varType == PinType.Float && float.TryParse(defaultStr, NumberStyles.Float, CultureInfo.InvariantCulture, out var f))
                         varDefault = f;
+                    else if (varType is PinType.Float3 or PinType.String or PinType.Entity &&
+                             GraphLiterals.TryParse(varType, defaultStr, out var typed))
+                        varDefault = typed;
                     // else: unparsed literal keeps the zero-value fallback above rather than failing the graph.
                 }
 
@@ -421,6 +425,14 @@ public class OcGraphParser
                             if (float.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out var f32))
                                 constVal = f32;
                         }
+                        else if (kind == "constvector")
+                        {
+                            if (GraphLiterals.TryParseFloat3(v, out var vec)) constVal = vec;
+                        }
+                        else if (kind == "conststring")
+                        {
+                            constVal = GraphLiterals.DecodeString(v);
+                        }
                         else
                         {
                             // Any OTHER node type keeps the old shape-based inference: no declared type
@@ -642,6 +654,11 @@ public class OcGraphParser
                     {
                         if (float.TryParse(valueStr, NumberStyles.Float, CultureInfo.InvariantCulture, out var f)) constVal = f;
                     }
+                    else if (Enum.TryParse<PinType>(typeName, true, out var litType) &&
+                             litType is PinType.Float3 or PinType.String or PinType.Entity)
+                    {
+                        if (GraphLiterals.TryParse(litType, valueStr, out var typed)) constVal = typed;
+                    }
                     else
                     {
                         // An unknown pin type: fall back to inferring from the literal, which is the
@@ -734,13 +751,9 @@ public class OcGraphParser
                 else if (float.TryParse(valueStr, CultureInfo.InvariantCulture, out var f))
                     value = f;
 
-                if (value == null)
-                {
-                    err = $"Could not parse value '{valueStr}' as float, int, or bool";
-                    return false;
-                }
-
-                var pv = new PinnedValue { NodeId = nodeId, PinName = pinName, Value = value };
+                // A float3/string pin's literal parses by shape as nothing (or the wrong thing); the pin may not
+                // exist yet (default pins are added after the last record), so the token is typed afterwards.
+                var pv = new PinnedValue { NodeId = nodeId, PinName = pinName, Value = value ?? valueStr, Raw = valueStr };
                 graph.PinnedValues.RemoveAll(p => p.NodeId == nodeId && p.PinName == pinName && p.FromPinDefault);
                 graph.PinnedValues.Add(pv);
             }
@@ -812,12 +825,43 @@ public class OcGraphParser
             AddDefaultPins(node, graph);
         }
 
+        if (!TypePinnedValues(graph, out err)) return false;
+
         if (validate && !graph.Validate(out var validateErr))
         {
             err = validateErr;
             return false;
         }
 
+        return true;
+    }
+
+    /// Gives every PINVAL its pin's type: float3 and string pins read the token as written, any other pin keeps the
+    /// shape-typed value, and a token that parsed as nothing is refused.
+    private static bool TypePinnedValues(Graph graph, out string? err)
+    {
+        err = null;
+        for (int i = 0; i < graph.PinnedValues.Count; i++)
+        {
+            var pv = graph.PinnedValues[i];
+            if (pv.Raw == null) continue;
+            Pin? pin = graph.Nodes.TryGetValue(pv.NodeId, out var node)
+                ? node.Pins.FirstOrDefault(p => p.Name == pv.PinName && !p.IsOutput) : null;
+            if (pin != null && pin.Type is PinType.Float3 or PinType.String)
+            {
+                if (!GraphLiterals.TryParse(pin.Type, pv.Raw, out var typed))
+                {
+                    err = $"Could not parse value '{pv.Raw}' as {pin.Type.ToString().ToLowerInvariant()}";
+                    return false;
+                }
+                graph.PinnedValues[i] = new PinnedValue { NodeId = pv.NodeId, PinName = pv.PinName, Value = typed, Raw = pv.Raw };
+            }
+            else if (pv.Value is string)
+            {
+                err = $"Could not parse value '{pv.Raw}' as float, int, or bool";
+                return false;
+            }
+        }
         return true;
     }
 
@@ -830,6 +874,35 @@ public class OcGraphParser
 
         switch (node.Type.ToLowerInvariant())
         {
+            // The vector, string and entity nodes: pins come from the table in GraphDataNodes.cs.
+            case "constvector":
+            case "conststring":
+            case "makevector":
+            case "breakvector":
+            case "vectoradd":
+            case "vectorsubtract":
+            case "vectorscale":
+            case "vectordot":
+            case "vectorcross":
+            case "vectorlength":
+            case "vectornormalize":
+            case "vectorlerp":
+            case "vectordistance":
+            case "stringappend":
+            case "floattostring":
+            case "inttostring":
+            case "booltostring":
+            case "vectortostring":
+            case "stringequals":
+            case "stringlength":
+            case "isvalidentity":
+            case "getentitylocation":
+            case "setentitylocation":
+            case "raycastvector":
+            case "printtext":
+                DataNodes.AddDefaultPins(node, graph);
+                break;
+
             case "constfloat":
             case "const_f32":
                 node.Pins.Add(new Pin { Name = "value", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
@@ -2677,6 +2750,8 @@ public class OcGraphParser
             return int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out var i) ? i : null;
         if (typeName.Equals("float", StringComparison.OrdinalIgnoreCase))
             return float.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var f) ? f : null;
+        if (Enum.TryParse<PinType>(typeName, true, out var pt) && pt is PinType.Float3 or PinType.String or PinType.Entity)
+            return GraphLiterals.TryParse(pt, s, out var typed) ? typed : null;
         return null;
     }
 

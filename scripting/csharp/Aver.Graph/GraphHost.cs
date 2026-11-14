@@ -210,7 +210,7 @@ public class GraphHost
         for (int i = 0; i < graph.Parameters.Count; i++)
         {
             var p = graph.Parameters[i];
-            if (p.Type == PinType.Int && p.Name.Equals("entity", StringComparison.OrdinalIgnoreCase))
+            if ((p.Type == PinType.Int || p.Type == PinType.Entity) && p.Name.Equals("entity", StringComparison.OrdinalIgnoreCase))
             {
                 slots[i] = ParamSlot.Entity;
             }
@@ -283,7 +283,7 @@ public class GraphHost
             for (int i = 0; i < graph.Parameters.Count; i++)
             {
                 var p = graph.Parameters[i];
-                if (p.Type == PinType.Int && p.Name.Equals("entity", StringComparison.OrdinalIgnoreCase))
+                if ((p.Type == PinType.Int || p.Type == PinType.Entity) && p.Name.Equals("entity", StringComparison.OrdinalIgnoreCase))
                     slots[i] = ParamSlot.Entity;
                 else if (p.Type == PinType.Float && p.Name.Equals("time", StringComparison.OrdinalIgnoreCase))
                     slots[i] = ParamSlot.Time;
@@ -554,7 +554,7 @@ public class GraphHost
         for (int i = 0; i < _graph.Parameters.Count; i++)
         {
             var p = _graph.Parameters[i];
-            if (p.Type == PinType.Int && p.Name.Equals("entity", StringComparison.OrdinalIgnoreCase))
+            if ((p.Type == PinType.Int || p.Type == PinType.Entity) && p.Name.Equals("entity", StringComparison.OrdinalIgnoreCase))
                 args[i] = entityId;
             else if (p.Type == PinType.Float && p.Name.Equals("time", StringComparison.OrdinalIgnoreCase))
                 args[i] = _execSimTime;

@@ -891,4 +891,40 @@ bool saveOcgraph(const std::string& path, const OcGraphData& g, std::string* err
     return true;
 }
 
+std::string encodeGraphString(std::string_view s) {
+    std::string out;
+    out.reserve(s.size());
+    for (const char c : s) {
+        switch (c) {
+            case '%': out += "%25"; break;
+            case ' ': out += "%20"; break;
+            case '\t': out += "%09"; break;
+            case '\n': out += "%0A"; break;
+            case '\r': out += "%0D"; break;
+            default: out += c; break;
+        }
+    }
+    return out;
+}
+
+std::string decodeGraphString(std::string_view s) {
+    const auto hex = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    std::string out;
+    out.reserve(s.size());
+    for (usize i = 0; i < s.size(); ++i) {
+        if (s[i] == '%' && i + 2 < s.size() && hex(s[i + 1]) >= 0 && hex(s[i + 2]) >= 0) {
+            out += static_cast<char>(hex(s[i + 1]) * 16 + hex(s[i + 2]));
+            i += 2;
+        } else {
+            out += s[i];
+        }
+    }
+    return out;
+}
+
 } // namespace aver::fmt

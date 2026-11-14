@@ -24,6 +24,19 @@ public enum PinType
     // type-equality check below already refuses mixing it with any other type, for free. See
     // GraphCompiler's PUSH VS PULL comment for what an exec pin means to the compiler.
     Exec,
+
+    // Float3: System.Numerics.Vector3, file literal `x,y,z`. String: CLR string, file literal with %XX
+    // escapes (GraphLiterals). Entity: an int handle that links to and from Int pins (PinTypeRules).
+    Float3,
+    String,
+    Entity,
+}
+
+/// Which pins may be linked: the same type, or Int with Entity (one IL type), in either direction.
+public static class PinTypeRules
+{
+    public static bool Compatible(PinType a, PinType b) =>
+        a == b || (a == PinType.Int && b == PinType.Entity) || (a == PinType.Entity && b == PinType.Int);
 }
 
 /// A single data input or output on a node.
@@ -39,7 +52,7 @@ public class Pin
 public class ConstantOutput
 {
     public required string NodeId { get; init; }  // See Pin.NodeId: string, both id formats.
-    public required object Value { get; init; }  // float, int, or bool
+    public required object Value { get; init; }  // float, int, bool, Vector3 or string
 }
 
 /// A pinned value (constant) clamped to an input pin.
@@ -47,8 +60,9 @@ public class PinnedValue
 {
     public required string NodeId { get; init; }  // See Pin.NodeId: string, both id formats.
     public required string PinName { get; init; }
-    public required object Value { get; init; }  // float, int, or bool
+    public required object Value { get; init; }  // float, int, bool, Vector3 or string
     public bool FromPinDefault { get; init; }      // from a PIN record's default, so a PINVAL may replace it
+    public string? Raw { get; init; }              // a PINVAL's token as written, typed once the pin is known
 
     /// The value as the pin's declared type needs it, or false with the reason. The parser types a
     /// literal by its SHAPE, which says nothing about the pin it lands on; the pin type is the authority.
@@ -72,6 +86,18 @@ public class PinnedValue
                 if (value is bool) return true;
                 if (value is int bi && (bi == 0 || bi == 1)) { fitted = bi == 1; return true; }
                 why = "a bool pin takes true, false, 0 or 1";
+                return false;
+            case PinType.Entity:
+                if (value is int) return true;
+                why = "an entity pin takes an integer handle";
+                return false;
+            case PinType.Float3:
+                if (value is System.Numerics.Vector3) return true;
+                why = "a float3 pin takes x,y,z";
+                return false;
+            case PinType.String:
+                if (value is string) return true;
+                why = "a string pin takes text";
                 return false;
             default:
                 return true;
@@ -476,7 +502,7 @@ public class Graph
             return true;
         }
 
-        if (declared.Type != PinType.Int)
+        if (declared.Type != PinType.Int && declared.Type != PinType.Entity)
         {
             // A FLOAT CANNOT HOLD AN ENTITY HANDLE: handles start above 2^24, where a float's
             // mantissa runs out of integers, so the value rounds to a NEIGHBOURING (real, wrong)
@@ -554,7 +580,7 @@ public class Graph
             }
 
             // Pin types must match.
-            if (srcPin.Type != tgtPin.Type)
+            if (!PinTypeRules.Compatible(srcPin.Type, tgtPin.Type))
             {
                 if (Report("link.type", $"Link {link.SourceNodeId}.{link.SourcePinName} ({srcPin.Type}) to {link.TargetNodeId}.{link.TargetPinName} ({tgtPin.Type}): type mismatch",
                            link.TargetNodeId, link.TargetPinName)) return;
@@ -827,7 +853,7 @@ public class Graph
             }
 
             var valuePin = node.Pins.FirstOrDefault(p => p.Name == "value" && p.IsOutput);
-            if (valuePin != null && valuePin.Type != declared.Type)
+            if (valuePin != null && !PinTypeRules.Compatible(valuePin.Type, declared.Type))
             {
                 if (Report("param.type", $"Node '{node.Id}' declares output pin 'value' as {valuePin.Type} but parameter '{node.ParamName}' is {declared.Type}", node.Id, "value")) return;
             }
@@ -861,7 +887,7 @@ public class Graph
             }
 
             var valuePin2 = node.Pins.FirstOrDefault(p => p.Name == "value" && p.IsOutput == isGetVar);
-            if (valuePin2 != null && valuePin2.Type != declaredVar.Type)
+            if (valuePin2 != null && !PinTypeRules.Compatible(valuePin2.Type, declaredVar.Type))
             {
                 if (Report("var.type", $"Node '{node.Id}' declares {(isGetVar ? "output" : "input")} pin 'value' as {valuePin2.Type} but variable '{node.VarName}' is {declaredVar.Type}", node.Id, "value")) return;
             }

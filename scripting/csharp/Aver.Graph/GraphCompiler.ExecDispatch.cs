@@ -119,6 +119,7 @@ public partial class GraphCompiler
                     else if (IsExecCapableRebindActionType(node.Type)) EmitExecRebindAction(node);
                     else if (IsExecCapableCreateEntityType(node.Type)) EmitExecCreateEntity(node);
                     else if (IsExecCapableAudioType(node.Type)) EmitExecAudio(node);
+                    else if (DataNodes.IsExec(node.Type)) EmitExecDataNode(node);
                     else if (GameSystemNodes.IsExec(node.Type)) EmitExecGeneric(node);
                     EmitExecFanOut(node);
                     return;

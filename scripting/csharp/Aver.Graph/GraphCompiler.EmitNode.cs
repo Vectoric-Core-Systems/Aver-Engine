@@ -30,6 +30,8 @@ public partial class GraphCompiler
             _pinLocals[(node.Id, pin.Name)] = local;
         }
 
+        if (DataNodes.IsPure(node.Type)) { EmitSimpleApiRead(node); return; }
+
         // Emit code based on node type.
         switch (node.Type.ToLowerInvariant())
         {
