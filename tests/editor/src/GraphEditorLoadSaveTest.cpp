@@ -12,6 +12,7 @@
 // and the auto-layout design choice: a graph whose nodes are all at the origin still round-trips
 // byte-identically through GraphEditor's real save() path (not just the pure autoLayoutPositions()
 // function in isolation, which GraphEditorGeometryTest already covers).
+#include "GraphCollectionNodes.hpp"
 #include "GraphEditor.hpp"
 #include "GraphNodeDefs.hpp"
 #include "LevelClassSave.hpp"
@@ -265,6 +266,186 @@ static void testVectorStringEntityPins() {
     check(exactPinTypeMatch("entity", "int") && exactPinTypeMatch("int", "entity"), "entity and int match in both directions");
     check(!exactPinTypeMatch("float3", "float") && !exactPinTypeMatch("float", "float3"), "float3 and float never match");
     check(!exactPinTypeMatch("entity", "float"), "entity does not match float");
+}
+
+// STRUCT / FIELD records and an array VAR round-trip byte-identically; the editor's struct calls write them; palette variants and
+// struct rows create typed nodes; struct edits rebuild those nodes' pins; the array and struct link rules.
+static void testStructsAndArraysInTheEditor() {
+    AVER_INFO("=== structs and arrays: records round-trip, edits write them, palette rows, link rules ===");
+    const std::string dir = scratchDir();
+
+    // ---- records survive a load and save untouched, in place
+    {
+        const std::string text =
+            "OCGRAPH 1\nNAME Coll\n\n"
+            "STRUCT Pt\nFIELD Pt x float\nFIELD Pt pos float3\nFIELD Pt name string\n\n"
+            "VAR xs float[] 1,2,3\nVAR dirs float3[] 1,0,0;0,1,0\nVAR p struct:Pt\n\n"
+            "NODE g GetVar 0 0 var=xs\nPIN g value out float[]\n"
+            "NODE a ArrayLength 0 0 of=float\nPIN a array in float[]\nPIN a length out int\n"
+            "LINK g.value a.array\n";
+        const std::string tmp = (std::filesystem::path(dir) / "coll_roundtrip.ocgraph").string();
+        writeFile(tmp, text);
+        GraphEditor ed(tmp);
+        check(ed.structs().size() == 1 && ed.structs()[0].name == "Pt" && ed.structs()[0].fields.size() == 3,
+              "STRUCT and its FIELD records are read");
+        check(ed.structs()[0].fields[1].name == "pos" && ed.structs()[0].fields[1].type == "float3", "a field keeps its name and type");
+        check(ed.variables().size() == 3 && ed.variables()[0].type == "float[]" && ed.variables()[0].defaultValue == "1,2,3",
+              "an array VAR keeps its type and default");
+        check(ed.variables()[2].type == "struct:Pt", "a struct VAR keeps its type");
+        std::string why;
+        check(ed.save(&why), "save() succeeds (why='" + why + "')");
+        check(readFile(tmp) == text, "load then save is byte-identical with STRUCT, FIELD and array VAR records");
+    }
+
+    // ---- the editor's calls write the records, in an order the C# reader needs (STRUCT before its FIELDs)
+    const std::string tmp = (std::filesystem::path(dir) / "coll_edit.ocgraph").string();
+    writeFile(tmp, "OCGRAPH 1\nNAME CollEdit\n");
+    GraphEditor ed(tmp);
+    check(!ed.addStruct("") && !ed.addStruct("A B") && !ed.addStruct("A.B") && !ed.addStruct("A:B"), "an unusable struct name is refused");
+    check(ed.addStruct("Pt"), "addStruct declares a struct");
+    check(!ed.addStruct("Pt"), "a second struct of the same name is refused");
+    check(ed.addStructField("Pt", "x", "float") && ed.addStructField("Pt", "pos", "float3"), "addStructField adds fields");
+    check(!ed.addStructField("Pt", "x", "int"), "a duplicate field is refused");
+    check(!ed.addStructField("Pt", "value", "int") && !ed.addStructField("Pt", "result", "int"), "a field named like a struct node's own pin is refused");
+    check(!ed.addStructField("Pt", "q", "float[]") && !ed.addStructField("Pt", "q", "struct:Pt"), "a field must be a scalar type");
+    check(!ed.addStructField("Nope", "q", "int"), "a field of an unknown struct is refused");
+    check(ed.addVariable("xs", "float[]", "1,2") && ed.variables().back().type == "float[]", "an array VAR can be declared");
+    check(ed.addVariable("p", "struct:Pt", "") && ed.variables().back().type == "struct:Pt", "a VAR of a declared struct can be declared");
+    check(ed.addVariable("q", "struct:Nope", "") && ed.variables().back().type == "float", "a VAR of an undeclared struct falls back to float");
+    check(ed.addFunction("F") == "F" && ed.addFunctionPin("F", true, "pts", "float3[]") && ed.addFunctionPin("F", false, "r", "struct:Pt"),
+          "function pins may be arrays and structs");
+    {
+        std::string why;
+        check(ed.save(&why), "save() succeeds (why='" + why + "')");
+        const std::string after = readFile(tmp);
+        check(after.find("STRUCT Pt\nFIELD Pt x float\nFIELD Pt pos float3\n") != std::string::npos, "STRUCT then its FIELDs are written");
+        check(after.find("VAR xs float[] 1,2\n") != std::string::npos && after.find("VAR p struct:Pt\n") != std::string::npos,
+              "array and struct VARs are written");
+        check(after.find("FUNCIN F pts float3[]\n") != std::string::npos && after.find("FUNCOUT F r struct:Pt\n") != std::string::npos,
+              "array and struct function pins are written");
+        GraphEditor again(tmp);
+        check(again.structs().size() == 1 && again.structs()[0].fields.size() == 2, "the written file reloads with its struct");
+    }
+
+    // ---- palette: variants and per-struct rows write the right node type, attributes and pins
+    {
+        const GraphNodeDesc* variant = findGraphNodeDesc("ArrayGet@float3");
+        check(variant && variant->nodeType == "ArrayGet" && variant->displayName == "Array Get (Vector)", "the catalog holds a palette variant per element type");
+        const std::string id = ed.addNodeFromCatalog("ArrayGet@float3", Vec2{0, 0});
+        const fmt::OcGraphNode* n = nullptr;
+        for (const auto& x : ed.graph().nodes) if (x.id == id) n = &x;
+        check(n && n->type == "ArrayGet" && nodeAttrValue(*n, "of") == "float3", "the variant writes ArrayGet with of=float3, not its palette id");
+        bool arr = false, item = false;
+        if (n) for (const auto& p : n->pins) {
+            if (p.name == "array" && p.type == "float3[]" && !p.isOutput) arr = true;
+            if (p.name == "item" && p.type == "float3" && p.isOutput) item = true;
+        }
+        check(arr && item, "its pins are typed from the element");
+        const std::string plain = ed.addNodeFromCatalog("MakeArray", Vec2{0, 40});
+        bool floatArr = false;
+        for (const auto& x : ed.graph().nodes) if (x.id == plain) for (const auto& p : x.pins) if (p.name == "array" && p.type == "float[]") floatArr = true;
+        check(floatArr, "the plain entry is the float array node");
+        check(ed.addNodeFromCatalog("ArrayAdd@string", Vec2{0, 80}) != "", "an exec array node can be placed");
+
+        const auto derived = ed.graphDerivedNodeDescs();
+        bool hasMake = false, hasBreak = false, hasSetX = false;
+        for (const auto& d : derived) {
+            if (d.typeId == "MakeStruct@Pt") hasMake = true;
+            if (d.typeId == "BreakStruct@Pt") hasBreak = true;
+            if (d.typeId == "SetStructField@Pt.x") hasSetX = true;
+        }
+        check(hasMake && hasBreak && hasSetX, "the palette offers Make, Break and Set <field> for a declared struct");
+        const std::string mk = ed.addNodeFromCatalog("MakeStruct@Pt", Vec2{200, 0});
+        const std::string br = ed.addNodeFromCatalog("BreakStruct@Pt", Vec2{400, 0});
+        const std::string st = ed.addNodeFromCatalog("SetStructField@Pt.pos", Vec2{400, 100});
+        const auto pinsOf = [&](const std::string& nid) {
+            std::string s;
+            for (const auto& x : ed.graph().nodes) if (x.id == nid) {
+                s += x.type + " " + nodeAttrValue(x, "struct") + "/" + nodeAttrValue(x, "field") + ":";
+                for (const auto& p : x.pins) s += " " + p.name + (p.isOutput ? ">" : "<") + p.type;
+            }
+            return s;
+        };
+        check(pinsOf(mk) == "MakeStruct Pt/: x<float pos<float3 value>struct:Pt", "MakeStruct has one input per field and a struct output, got " + pinsOf(mk));
+        check(pinsOf(br) == "BreakStruct Pt/: value<struct:Pt x>float pos>float3", "BreakStruct has a struct input and one output per field, got " + pinsOf(br));
+        check(pinsOf(st) == "SetStructField Pt/pos: value<struct:Pt pos<float3 result>struct:Pt", "SetStructField has the value, its field and the result, got " + pinsOf(st));
+
+        // ---- the link rules
+        check(ed.connectPins(mk, "value", br, "value"), "a struct output links to the same struct's input");
+        check(!ed.connectPins(br, "x", st, "pos"), "a float output cannot be wired into a float3 input");
+        const std::string g1 = ed.addNodeFromCatalog("MakeArray", Vec2{0, 200});
+        const std::string g2 = ed.addNodeFromCatalog("ArrayLength@int", Vec2{200, 200});
+        check(!ed.connectPins(g1, "array", g2, "array"), "a float[] output is refused by an int[] input");
+        const std::string g3 = ed.addNodeFromCatalog("ArrayLength", Vec2{200, 260});
+        check(ed.connectPins(g1, "array", g3, "array"), "a float[] output links to a float[] input");
+        const std::string g4 = ed.addNodeFromCatalog("ArrayLength@entity", Vec2{200, 320});
+        const std::string g5 = ed.addNodeFromCatalog("MakeArray@int", Vec2{0, 320});
+        check(ed.connectPins(g5, "array", g4, "array"), "an int[] output links to an entity[] input");
+
+        // ---- editing the struct rebuilds the nodes that use it
+        check(ed.addStructField("Pt", "name", "string"), "a field is added");
+        check(pinsOf(br).find("name>string") != std::string::npos, "an added field appears on BreakStruct");
+        check(pinsOf(mk).find("name<string") != std::string::npos, "an added field appears on MakeStruct");
+        check(ed.retypeStructField("Pt", "pos", "float"), "a field is retyped");
+        check(pinsOf(br).find("pos>float") != std::string::npos && pinsOf(br).find("pos>float3") == std::string::npos, "the retyped pin follows");
+        check(ed.renameStructField("Pt", "pos", "where"), "a field is renamed");
+        check(pinsOf(br).find("where>float") != std::string::npos && pinsOf(st).find("SetStructField Pt/where") == 0, "the rename reaches the pins and field=");
+        check(ed.removeStructField("Pt", "name"), "a field is removed");
+        check(pinsOf(br).find("name") == std::string::npos, "a removed field leaves BreakStruct");
+        bool stillLinked = false;
+        for (const auto& l : ed.graph().links) if (l.sourceNode == mk && l.destNode == br && l.sourcePin == "value") stillLinked = true;
+        check(stillLinked, "the struct wire survives the field edits");
+
+        // ---- rename and delete
+        std::vector<std::string> blocked;
+        check(!ed.deleteStruct("Pt", &blocked) && !blocked.empty(), "a struct in use cannot be deleted");
+        check(ed.renameStruct("Pt", "Point"), "a struct is renamed");
+        bool allRenamed = true;
+        for (const auto& v : ed.variables()) if (v.name == "p" && v.type != "struct:Point") allRenamed = false;
+        for (const auto& f : ed.functions()) for (const auto& p : f.outputs) if (p.type == "struct:Pt") allRenamed = false;
+        check(allRenamed && nodeAttrValue(*std::find_if(ed.graph().nodes.begin(), ed.graph().nodes.end(),
+                                                         [&](const fmt::OcGraphNode& x) { return x.id == mk; }), "struct") == "Point",
+              "the rename reaches VARs, function pins and struct nodes");
+        std::string why;
+        check(ed.save(&why), "save() succeeds with struct nodes (why='" + why + "')");
+        const std::string after = readFile(tmp);
+        check(after.find("STRUCT Point\nFIELD Point x float\nFIELD Point where float\n") != std::string::npos, "the renamed struct and fields are written");
+        check(after.find("Pt") == std::string::npos, "no stale name is left in the file");
+        ed.undoForTest();
+        check(ed.structs()[0].name == "Pt" || ed.structs()[0].name == "Point", "undo restores the struct list without crashing");
+    }
+
+    // ---- a node written by hand with no PIN records still draws typed pins, and they are not written back
+    {
+        const std::string text = "OCGRAPH 1\nNAME Hand\nSTRUCT S\nFIELD S a int\n\n"
+                                 "NODE g ArrayGet 0 0 of=float3\nNODE m MakeStruct 0 0 struct=S\n";
+        const std::string hand = (std::filesystem::path(dir) / "coll_hand.ocgraph").string();
+        writeFile(hand, text);
+        GraphEditor he(hand);
+        std::string arrT, fieldT;
+        for (const auto& n : he.graph().nodes) {
+            for (const auto& p : n.pins) {
+                if (n.id == "g" && p.name == "array") arrT = p.type;
+                if (n.id == "m" && p.name == "a") fieldT = p.type;
+            }
+        }
+        check(arrT == "float3[]", "a pinless ArrayGet of=float3 gets float3[] pins, got '" + arrT + "'");
+        check(fieldT == "int", "a pinless MakeStruct gets a pin per field, got '" + fieldT + "'");
+        std::string why;
+        check(he.save(&why) && readFile(hand) == text, "saving writes none of the drawn-only pins");
+    }
+
+    // ---- the link rule on type strings
+    check(exactPinTypeMatch("float[]", "float[]"), "same array type matches");
+    check(!exactPinTypeMatch("float[]", "int[]") && !exactPinTypeMatch("float[]", "float") && !exactPinTypeMatch("float", "float[]"),
+          "different arrays, and an array and its element, do not match");
+    check(exactPinTypeMatch("int[]", "entity[]") && exactPinTypeMatch("entity[]", "int[]"), "int[] and entity[] match in both directions");
+    check(exactPinTypeMatch("struct:A", "struct:A") && !exactPinTypeMatch("struct:A", "struct:B") && !exactPinTypeMatch("struct:A", "float"),
+          "a struct matches only itself");
+    check(!pinTakesInlineValue(fmt::OcGraphNode{}, fmt::OcGraphPin{"a", "float[]", false, ""}) &&
+          !pinTakesInlineValue(fmt::OcGraphNode{}, fmt::OcGraphPin{"a", "struct:A", false, ""}), "array and struct pins take no value box");
+    check(isDataTypeName("float3[]", nullptr) && isDataTypeName("struct:Anything", nullptr) && !isDataTypeName("exec", nullptr) &&
+          !isDataTypeName("float[][]", nullptr) && !isDataTypeName("exec[]", nullptr), "the type-name helpers");
 }
 
 static void testAttributeEditRoundTrip() {
@@ -2072,6 +2253,7 @@ int main() {
     testAttributeEditRoundTrip();
     testPinDefaultRoundTrip();
     testVectorStringEntityPins();
+    testStructsAndArraysInTheEditor();
     testUnknownAttributeSurvivesEditingADeclaredOne();
     testPathologicalAttributeCases();
     testVariablesParseAndByteIdenticalRoundTrip();

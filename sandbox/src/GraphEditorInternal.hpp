@@ -4,6 +4,7 @@
 #pragma once
 
 #include "GraphClipboard.hpp"
+#include "GraphCollectionNodes.hpp"
 #include "GraphEditor.hpp"
 #include "GraphNodeDefs.hpp"
 
@@ -25,14 +26,12 @@ inline float g_graphEditorDpi = 1.0f;
 
 inline f32 vecLen(Vec2 v) { return std::sqrt(v.x * v.x + v.y * v.y); }
 
-// The three VAR types the C# PinType enum accepts (Enum.TryParse<PinType>), case-insensitive. Exec is
-// excluded: it's computed-with data, not remembered-between-ticks data (OcGraphParser.cs rejects
-// "VAR ... declared exec"). Graph.Validate() is the real compile-time gate; this only keeps
-// addVariable/retypeVariable's fallback and the Variables panel's Combo honest about what it produces.
-inline bool isValidVarType(const std::string& type) {
-    std::string t = type;
-    for (char& c : t) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    return t == "float" || t == "int" || t == "bool";
+// The VAR types the C# reader accepts: a scalar, an array of one, or a declared struct. Exec is excluded: it's
+// computed-with data, not remembered-between-ticks data (OcGraphParser.cs rejects "VAR ... declared exec").
+// Graph.Validate() is the real compile-time gate; this only keeps addVariable/retypeVariable's fallback and the
+// Variables panel's Combo honest about what it produces.
+inline bool isValidVarType(const std::string& type, const std::vector<fmt::OcGraphStruct>& structs) {
+    return isDataTypeName(type, &structs);
 }
 
 // Shared with setAttribute's no-quoting guard (OcGraph.cpp splitWhitespace / OcGraphParser.cs
@@ -86,7 +85,18 @@ inline std::string findOwnerProjectForGraph(const std::string& graphPath) {
 // the TU, so a box sized for "Get Var" would clip "PlayerSpeed".
 inline std::string nodeTitle(const fmt::OcGraphNode& n, const GraphNodeDesc* desc,
                       const std::vector<fmt::OcGraphVariable>& vars) {
-    const std::string fallback = desc ? desc->displayName : n.type;
+    std::string fallback = desc ? desc->displayName : n.type;
+    // An array node says which element type it works on; a struct node, which struct (and field).
+    if (desc && desc->derivation == GraphPinDerivation::Element && elementOf(n) != "float")
+        return fallback + " (" + elementFriendlyName(elementOf(n)) + ")";
+    if (desc && desc->derivation == GraphPinDerivation::Struct) {
+        const std::string s = nodeAttrValue(n, "struct");
+        if (s.empty()) return fallback;
+        const std::string f = nodeAttrValue(n, "field");
+        if (n.type == "MakeStruct") return "Make " + s;
+        if (n.type == "BreakStruct") return "Break " + s;
+        return "Set " + s + (f.empty() ? "" : "." + f);
+    }
     if (n.type != "GetVar" && n.type != "SetVar") return fallback;
 
     const GraphNodeAttribute a = getNodeAttribute(n, "var");
@@ -145,6 +155,8 @@ constexpr ImU32 kSelectionCol = IM_COL32(226, 188, 96, 255);
 inline ImU32 colorForType(const std::string& type) {
     std::string t = type;
     for (char& c : t) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (isStructTypeName(type)) return IM_COL32( 46,  84, 140, 255);  // dark blue, one for every struct
+    if (isArrayTypeName(type)) t.resize(t.size() - 2);                  // an array wears its element's colour
     // Unreal's pin colours, kept deliberately (see headerColorForCategory above): a Blueprint user
     // already knows green=float, red=bool, so re-hueing would be a worse graph than either palette.
     // Toned down from Unreal's near-fullbright originals (float was (91,255,15), string (255,0,168)) for

@@ -4,7 +4,7 @@
 
 The nodes the parser (`OcGraphParser.AddDefaultPins`) and the compiler know by hand, plus palette entries that are not table rows. Read from the editor palette (`sandbox/src/GraphNodeDefs*.hpp`); the parser is the ground truth for a pin shape (`docs/AVER_NODE_NODES.md`).
 
-## Gameplay (232)
+## Gameplay (245)
 
 | Type | Display | Category | Pins | Attributes |
 |---|---|---|---|---|
@@ -16,6 +16,16 @@ The nodes the parser (`OcGraphParser.AddDefaultPins`) and the compiler know by h
 | `SetViewEntity` | Set View Entity | Actor | in: `entity` int | none |
 | `Spawn` | Spawn | Actor | in: `exec` exec, `x` float, `y` float, `z` float<br>out: `then` exec, `entity` int | `class` |
 | `SynapseSteer` | Synapse Steer | Actor | in: `entity` int, `dt` float, `targetX` float, `targetY` float, `targetZ` float, `turnRate` float, `arriveRadius` float<br>out: `forward` float, `right` float, `yawDelta` float, `arrived` bool, `success` bool | none |
+| `ArrayAdd` | Array Add | Array | in: `exec` exec, `item` float<br>out: `then` exec | `var`, `of` |
+| `ArrayClear` | Array Clear | Array | in: `exec` exec<br>out: `then` exec | `var`, `of` |
+| `ArrayContains` | Array Contains | Array | in: `array` float[], `item` float<br>out: `result` bool | `of` |
+| `ArrayFind` | Array Find | Array | in: `array` float[], `item` float<br>out: `index` int | `of` |
+| `ArrayGet` | Array Get | Array | in: `array` float[], `index` int<br>out: `item` float | `of` |
+| `ArrayLength` | Array Length | Array | in: `array` float[]<br>out: `length` int | `of` |
+| `ArrayRemoveAt` | Array Remove At | Array | in: `exec` exec, `index` int<br>out: `then` exec | `var`, `of` |
+| `ArraySet` | Array Set | Array | in: `exec` exec, `index` int, `item` float<br>out: `then` exec | `var`, `of` |
+| `ForEachInArray` | For Each In Array | Array | in: `exec` exec, `array` float[]<br>out: `loop` exec, `element` float, `index` int, `completed` exec | `of` |
+| `MakeArray` | Make Array | Array | in: `item0` float, `item1` float, `item2` float, `item3` float<br>out: `array` float[] | `of` |
 | `IsSoundPlaying` | Is Sound Playing | Audio | in: `voice` int<br>out: `playing` bool | none |
 | `PlaySound` | Play Sound | Audio | in: `exec` exec, `volume` float, `pitch` float, `looping` bool, `bus` int<br>out: `then` exec, `voice` int, `success` bool | `sound` |
 | `PlaySoundAt` | Play Sound At | Audio | in: `exec` exec, `x` float, `y` float, `z` float, `volume` float, `pitch` float, `looping` bool, `bus` int, `innerCm` float, `outerCm` float<br>out: `then` exec, `voice` int, `success` bool | `sound` |
@@ -205,6 +215,9 @@ The nodes the parser (`OcGraphParser.AddDefaultPins`) and the compiler know by h
 | `StringEquals` | String Equals | String | in: `a` string, `b` string<br>out: `result` bool | none |
 | `StringLength` | String Length | String | in: `s` string<br>out: `result` int | none |
 | `VectorToString` | Vector To String | String | in: `v` float3<br>out: `result` string | none |
+| `BreakStruct` | Break Struct | Struct | none | `struct` |
+| `MakeStruct` | Make Struct | Struct | none | `struct` |
+| `SetStructField` | Set Struct Field | Struct | none | `struct`, `field` |
 | `DestroyEntity` | Destroy Entity | Transform | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | none |
 | `GetEntityForward` | Get Forward Axis | Transform | in: `entity` int<br>out: `x` float, `y` float, `z` float, `success` bool | none |
 | `GetEntityRight` | Get Right Axis | Transform | in: `entity` int<br>out: `x` float, `y` float, `z` float, `success` bool | none |

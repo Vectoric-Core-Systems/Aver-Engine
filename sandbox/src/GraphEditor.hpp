@@ -41,6 +41,8 @@ namespace aver::render::preview { struct PreviewDraw; }
 
 namespace aver::editor {
 
+struct GraphNodeDesc;   // GraphNodeDefs.hpp; this header stays free of it (it shares a name with EditorConsole.hpp's detail::)
+
 // Forward-declared (legal since the enum fixes its underlying type) rather than including
 // GraphNodeDefs.hpp, which would drag the ~250-entry catalog (a function-local static vector) into
 // every including TU.
@@ -98,6 +100,10 @@ public:
     // copy/paste's link remapping. Unknown ids are dropped, not refused: a caller wants the rest of
     // its selection, not nothing.
     void selectNodes(const std::vector<std::string>& nodeIds);
+
+    // Wires an output pin to an input pin exactly as dragging a wire does (same type and cycle checks, one undo step).
+    // False, with the rejection banner raised, when the link was refused. Public so a headless test can drive it.
+    bool connectPins(const std::string& srcNode, const std::string& srcPin, const std::string& dstNode, const std::string& dstPin);
 
     // Exposes undo/redo so a headless test can check paste is one undo step, not one per node.
     void undoForTest() { undo(); }
@@ -445,6 +451,36 @@ public:
     // surfaces through the same rejection banner a rejected link uses (showRejectionBanner below).
     bool deleteVariable(const std::string& name, std::vector<std::string>* outBlockedBy = nullptr);
 
+    // ---- struct editing (graph-level STRUCT / FIELD declarations) -----------------------------------
+    // The same public-surface shape as the variable methods above, and for the same reason: the Structs panel is thin
+    // glue over these, so GraphEditorLoadSaveTest drives them with no ImGui context. A struct type is written
+    // `struct:<Name>` on pins, VARs and function pins; a field is a scalar (float, int, bool, float3, string, entity).
+    const std::vector<fmt::OcGraphStruct>& structs() const { return graph_.structs; }
+
+    // Declares a struct. False for an empty name, one with whitespace, '.', ':' or '@', or one already declared.
+    bool addStruct(const std::string& name);
+
+    // Renames a struct AND every use of it (struct= on Make/Break/SetStructField nodes, pin, VAR and function-pin
+    // types), in one undo step. False when `oldName` is unknown or `newName` is unusable or taken.
+    bool renameStruct(const std::string& oldName, const std::string& newName);
+
+    // Deletes a struct. Refuses (false) while a VAR, function pin, pin or struct node still uses it; `outBlockedBy`
+    // then names them. A struct deleted under its users would fail Graph.Validate with no sign why.
+    bool deleteStruct(const std::string& name, std::vector<std::string>* outBlockedBy = nullptr);
+
+    // Field edits rebuild the pins of every struct node using the struct, dropping wires that no longer fit, in the same
+    // undo step. addStructField refuses a duplicate or reserved ("value", "result") name, whitespace and a type that
+    // is not a scalar; retypeStructField the same for the type.
+    bool addStructField(const std::string& structName, const std::string& field, const std::string& type);
+    bool renameStructField(const std::string& structName, const std::string& oldField, const std::string& newField);
+    bool retypeStructField(const std::string& structName, const std::string& field, const std::string& type);
+    bool removeStructField(const std::string& structName, const std::string& field);
+
+    // The palette rows that depend on THIS graph: Make / Break / Set <field> for every declared struct (typeIds carry
+    // an '@', nodeType and presets say what a click writes). The static catalog cannot hold them; the Add Node menu and
+    // search append these, and addNodeFromCatalog resolves them.
+    std::vector<GraphNodeDesc> graphDerivedNodeDescs() const;
+
 private:
     // ---- identity / data model ---------------------------------------------------------------
     std::string path_;
@@ -624,6 +660,20 @@ private:
     // three call sites that could drift (see .cpp).
     void resyncFunctionNodePins(const std::string& funcName);
     void drawFunctionsPanel(float dpi);
+
+    // ---- array and struct nodes ---------------------------------------------------------------------
+    // Rebuilds the pins of one node whose shape follows an attribute (of=, struct=, field=), keeping a value typed into a
+    // pin that survives under the same name and type and dropping wires whose end no longer fits. No-op for other nodes.
+    void resyncCollectionNodePins(const std::string& nodeId);
+    void resyncStructNodePins(const std::string& structName);
+    // The catalog entry for `typeId`, or one derived from this graph's structs (stored in `storage`).
+    const GraphNodeDesc* resolveNodeDesc(const std::string& typeId, GraphNodeDesc& storage) const;
+    void drawStructsPanel(float dpi);
+    std::string makeUniqueStructName(const std::string& base) const;
+    std::string structEditRowKey_;
+    char structEditBuf_[64] = {};
+    char newFieldBuf_[64] = {};
+    int newFieldTypeIdx_ = 0;
 
     // ---- comment box state ------------------------------------------------------------------------
     // Selected/drag targets are held BY ID, never index, same reason as varEditRowKey_: a mid-session

@@ -803,6 +803,11 @@ void GraphEditor::drawEventGraph(float dpi) {
                 // header when filled; unfilled, it IS the pin.
                 dl->AddPolyline(arrow, 3, wired ? IM_COL32(40, 40, 40, 255) : pinCol,
                                 (wired ? 1.0f : 2.0f) * dpi, ImDrawFlags_Closed);
+            } else if (isArrayTypeName(pl.type)) {
+                // A square, not a circle: shape says "list" where colour says what it holds (the element's colour).
+                const ImVec2 lo(dot.x - r * 0.9f, dot.y - r * 0.9f), hi(dot.x + r * 0.9f, dot.y + r * 0.9f);
+                if (wired) dl->AddRectFilled(lo, hi, pinCol, 1.5f * dpi);
+                else dl->AddRect(lo, hi, pinCol, 1.5f * dpi, 0, 2.0f * dpi);
             } else if (wired) {
                 dl->AddCircleFilled(dot, r, pinCol);
             } else {
@@ -1093,6 +1098,13 @@ void GraphEditor::drawEventGraph(float dpi) {
                 if (detail::ciFind(f.name, q) != std::string_view::npos || detail::ciFind("Call Function", q) == 0)
                     rows.push_back({"Call " + f.name + (f.pure ? "  (pure)" : ""), "Function", nullptr, &f.name});
             const usize kShown = 200;
+            // This graph's own structs have Make / Break / Set rows the static catalog cannot hold.
+            const std::vector<GraphNodeDesc> derived = graphDerivedNodeDescs();
+            for (const GraphNodeDesc& d : derived) {
+                if (linkDropPending_ && !linkDropAccepts(d)) continue;
+                if (detail::ciFind(d.displayName, q) != std::string_view::npos || detail::ciFind(d.category, q) != std::string_view::npos)
+                    rows.push_back({d.displayName, d.category.c_str(), &d, nullptr});
+            }
             for (const GraphNodeDesc* d : graphPaletteSearch(addSearch_, searchDomain, kShown)) {
                 if (linkDropPending_ && !linkDropAccepts(*d)) continue;
                 rows.push_back({d->displayName, d->category.c_str(), d, nullptr});
@@ -1166,6 +1178,7 @@ void GraphEditor::drawEventGraph(float dpi) {
         std::vector<std::string> categories;
         for (const auto& d : graphNodeCatalog()) {
             if ((d.domain & domain) == 0u) continue;
+            if (d.category == "Struct") continue;   // pinless templates; the per-struct rows are added below
             // A category whose every member refuses the pending wire isn't shown, same reason as the
             // domain filter above: an empty submenu is a dead end that looks like a place to check.
             if (linkDropPending_ && !linkDropAccepts(d)) continue;
@@ -1186,6 +1199,19 @@ void GraphEditor::drawEventGraph(float dpi) {
                     // with no ImGui context.
                     if (ImGui::MenuItem(d.displayName.c_str()))
                         spawnAndConnectLinkDrop(d.typeId, pendingSpawnCanvasPos_);
+                }
+                ImGui::EndMenu();
+            }
+        }
+        // Make / Break / Set rows for the structs this graph declares (they depend on the graph, so the catalog has none).
+        {
+            const std::vector<GraphNodeDesc> derived = graphDerivedNodeDescs();
+            bool any = false;
+            for (const auto& d : derived) any = any || !linkDropPending_ || linkDropAccepts(d);
+            if (any && ImGui::BeginMenu("Struct")) {
+                for (const auto& d : derived) {
+                    if (linkDropPending_ && !linkDropAccepts(d)) continue;
+                    if (ImGui::MenuItem(d.displayName.c_str())) spawnAndConnectLinkDrop(d.typeId, pendingSpawnCanvasPos_);
                 }
                 ImGui::EndMenu();
             }
@@ -1222,6 +1248,7 @@ void GraphEditor::drawEventGraph(float dpi) {
     ImGui::BeginChild("##graphDetails", ImVec2(detailsW, std::max(avail.y, 80.0f * dpi)), true);
 
     drawFunctionsPanel(dpi);
+    drawStructsPanel(dpi);
 
     // Variables panel: declare/rename/retype/delete. Lives above the per-node section, drawn regardless
     // of selection -- a variable belongs to the GRAPH, not whichever node is selected, and right after
@@ -1276,13 +1303,19 @@ void GraphEditor::drawEventGraph(float dpi) {
             }
             ImGui::SameLine();
 
-            // ---- type (retype): a Combo, not free text -- VAR only ever declares float/int/bool
-            // (see isValidVarType's own comment), so there is nothing a text field would offer that a
-            // fixed 3-item list doesn't already cover, and a Combo can't typo its way into a 4th.
-            static const char* kVarTypes[] = {"float", "int", "bool"};
-            int typeIdx = 0;
-            for (int i = 0; i < 3; ++i) if (v.type == kVarTypes[i]) { typeIdx = i; break; }
-            if (ImGui::Combo("##type", &typeIdx, kVarTypes, 3)) retypeVariable(vname, kVarTypes[typeIdx]);
+            // ---- type (retype): a Combo, not free text -- the scalars, their arrays and this graph's structs
+            // (see isValidVarType), so there is nothing a text field would offer that the list doesn't, and a
+            // Combo can't typo its way into a type the reader refuses.
+            {
+                const std::vector<std::string> typeChoices = dataTypeChoices(graph_.structs);
+                ImGui::PushItemWidth(90.0f * dpi);
+                if (ImGui::BeginCombo("##type", v.type.c_str())) {
+                    for (const std::string& tc : typeChoices)
+                        if (ImGui::Selectable(tc.c_str(), tc == v.type)) retypeVariable(vname, tc);
+                    ImGui::EndCombo();
+                }
+                ImGui::PopItemWidth();
+            }
             ImGui::SameLine();
 
             const std::string defRowKey = "vardefault\x1f" + vname;
@@ -1388,6 +1421,8 @@ void GraphEditor::drawEventGraph(float dpi) {
                     if (ImGui::BeginCombo(row.label.c_str(), preview.c_str())) {
                         if (ImGui::Selectable("(none)", row.value.empty())) clearAttribute(node->id, "var");
                         for (const fmt::OcGraphVariable& v : graph_.variables) {
+                            // An array node can only address an array variable of its own element type.
+                            if (node->type.rfind("Array", 0) == 0 && lowerTypeName(v.type) != arrayTypeOf(lowerTypeName(elementOf(*node)))) continue;
                             const bool selected = (v.name == row.value);
                             const std::string itemLabel = v.name + "  (" + v.type + ")";
                             if (ImGui::Selectable(itemLabel.c_str(), selected)) setAttribute(node->id, "var", v.name);

@@ -147,7 +147,8 @@ void GraphEditor::synthesizeMissingPins() {
     for (auto& n : graph_.nodes) {
         const GraphNodeDesc* desc = findGraphNodeDesc(n.type);
         if (!desc) continue;   // a type this build does not know: leave it exactly as written
-        for (const GraphPinSpec& spec : desc->pins) {
+        // An array or struct node's pins follow its of= / struct= attributes, not the entry's own float shape.
+        for (const GraphPinSpec& spec : derivedNodePins(n, *desc, graph_.structs)) {
             bool present = false;
             for (const auto& p : n.pins)
                 if (p.isOutput == spec.isOutput && p.name == spec.name) { present = true; break; }
@@ -427,7 +428,8 @@ bool GraphEditor::linkDropAccepts(const GraphNodeDesc& desc) const {
 std::string GraphEditor::spawnAndConnectLinkDrop(const std::string& typeId, Vec2 canvasPos) {
     if (!linkDropPending_) return addNodeFromCatalog(typeId, canvasPos);
 
-    const GraphNodeDesc* desc = findGraphNodeDescIn(typeId, openGraphDomain());
+    GraphNodeDesc derivedStorage;
+    const GraphNodeDesc* desc = resolveNodeDesc(typeId, derivedStorage);
     if (!desc) { linkDropPending_ = false; return {}; }
 
     // Resolve the target pin BEFORE spawning, so a type with no compatible pin costs no node and no
@@ -461,8 +463,11 @@ std::string GraphEditor::addNodeFromCatalog(const std::string& typeId, Vec2 canv
     // Domain-aware: sixteen type names exist in both vocabularies with DIFFERENT PINS (a gameplay Add
     // takes two scalars, a material Add takes two float3s). Resolving by name alone handed a material
     // graph the scalar shape.
-    const GraphNodeDesc* desc = findGraphNodeDescIn(typeId, openGraphDomain());
+    GraphNodeDesc derivedStorage;
+    const GraphNodeDesc* desc = resolveNodeDesc(typeId, derivedStorage);
     if (!desc) return {};
+    // A palette variant ("ArrayGet@float3") is named apart from the node type it writes.
+    const std::string nodeType = desc->nodeType.empty() ? desc->typeId : desc->nodeType;
 
     // One node per event: a second ENTRY for the same name makes the graph invalid.
     if (desc->category == "Event" && desc->typeId != "CustomEvent" && desc->typeId != "OnInputAction") {
@@ -475,13 +480,14 @@ std::string GraphEditor::addNodeFromCatalog(const std::string& typeId, Vec2 canv
 
     pushUndo();
     fmt::OcGraphNode node;
-    node.id = makeUniqueNodeId(desc->typeId);
-    node.type = desc->typeId;
+    node.id = makeUniqueNodeId(nodeType);
+    node.type = nodeType;
     node.x = canvasPos.x;
     node.y = canvasPos.y;
     for (const auto& ps : desc->pins)
         node.pins.push_back(fmt::OcGraphPin{ps.name, ps.type, ps.isOutput, ps.defaultValue});
     graph_.nodes.push_back(node);
+    for (const auto& kv : desc->presets) setNodeAttribute(graph_.nodes.back(), kv.first, kv.second);
 
     // An event node with no `ENTRY <nodeId> <eventName>` record never runs -- the type is only a
     // label (docs/AVER_NODE_NODES.md's Flow section). Dropping an On Tick used to create the node and
@@ -781,7 +787,7 @@ bool GraphEditor::addFunctionPin(const std::string& funcName, bool isInput, cons
     }
     auto& list = isInput ? fn->inputs : fn->outputs;
     for (const auto& p : list) if (p.name == pinName) return false;
-    const std::string t = (type == "int" || type == "bool") ? type : std::string("float");
+    const std::string t = isDataTypeName(type, &graph_.structs) ? type : std::string("float");
 
     pushUndo();
     fmt::OcGraphFunction* live = findFunction(funcName);
@@ -949,7 +955,11 @@ void GraphEditor::drawFunctionsPanel(float dpi) {
 
     if (graph_.functions.empty()) ImGui::TextDisabled("No functions declared.");
 
-    static const char* kTypes[] = {"float", "int", "bool"};
+    // Every type a function pin may have: the scalars, their arrays and this graph's structs.
+    const std::vector<std::string> typeChoices = dataTypeChoices(graph_.structs);
+    std::vector<const char*> kTypes;
+    for (const std::string& t : typeChoices) kTypes.push_back(t.c_str());
+    if (newFuncPinType_ < 0 || newFuncPinType_ >= static_cast<int>(kTypes.size())) newFuncPinType_ = 0;
 
     for (usize fi = 0; fi < graph_.functions.size(); ++fi) {
         const std::string fname = graph_.functions[fi].name;   // by VALUE: the loop body can delete it
@@ -1009,8 +1019,8 @@ void GraphEditor::drawFunctionsPanel(float dpi) {
                 ImGui::InputTextWithHint("##newpin", isInput ? "new input" : "new output",
                                           newFuncPinBuf_, sizeof newFuncPinBuf_);
                 ImGui::SameLine();
-                ImGui::SetNextItemWidth(70.0f * dpi);
-                ImGui::Combo("##newpintype", &newFuncPinType_, kTypes, IM_ARRAYSIZE(kTypes));
+                ImGui::SetNextItemWidth(90.0f * dpi);
+                ImGui::Combo("##newpintype", &newFuncPinType_, kTypes.data(), static_cast<int>(kTypes.size()));
                 ImGui::SameLine();
                 if (ImGui::SmallButton("+") && newFuncPinBuf_[0] != 0) {
                     addFunctionPin(fname, isInput, newFuncPinBuf_, kTypes[newFuncPinType_]);
@@ -1032,6 +1042,99 @@ void GraphEditor::drawFunctionsPanel(float dpi) {
         const std::string made = addFunction("NewFunction");
         if (!made.empty()) setCurrentSubgraph(made);   // a new function you cannot see is not made
     }
+#else
+    (void)dpi;
+#endif
+}
+
+// Thin ImGui glue over addStruct / renameStruct / deleteStruct and the field edits; the model is above, and tested headlessly.
+void GraphEditor::drawStructsPanel(float dpi) {
+#if AVER_WITH_IMGUI
+    if (!::aver::editor::sectionHeader("Structs", ImGuiTreeNodeFlags_DefaultOpen)) return;
+    if (graph_.structs.empty()) ImGui::TextDisabled("No structs declared.");
+
+    static const char* kFieldTypes[] = {"float", "int", "bool", "float3", "string", "entity"};
+    std::vector<std::string> names;
+    for (const auto& s : graph_.structs) names.push_back(s.name);
+
+    for (const std::string& sname : names) {
+        const fmt::OcGraphStruct* sp = nullptr;
+        for (const auto& s : graph_.structs) if (s.name == sname) { sp = &s; break; }
+        if (!sp) continue;
+        const std::vector<fmt::OcGraphStructField> fields = sp->fields;   // by value: a row's edit changes the struct
+        ImGui::PushID(("##struct_" + sname).c_str());
+
+        const bool open = ImGui::TreeNodeEx("##st", ImGuiTreeNodeFlags_DefaultOpen, "%s", sname.c_str());
+        ImGui::SameLine();
+        const bool del = ImGui::SmallButton("X");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Delete -- refused while a variable, function, pin or node still uses this struct");
+        if (open) {
+            const std::string nameKey = "structname\x1f" + sname;
+            if (structEditRowKey_ != nameKey) std::snprintf(structEditBuf_, sizeof structEditBuf_, "%s", sname.c_str());
+            ImGui::SetNextItemWidth(150.0f * dpi);
+            if (ImGui::InputText("Name", structEditBuf_, sizeof structEditBuf_)) structEditRowKey_ = nameKey;
+            const bool renamed = ImGui::IsItemDeactivatedAfterEdit();
+            std::string newName = structEditBuf_;
+            if (renamed) structEditRowKey_.clear();
+
+            // Row edits are applied after the loop: one changes the struct the loop is reading.
+            std::string pendingRemove, pendingRenameFrom, pendingRenameTo, pendingRetype, pendingRetypeTo;
+            for (usize fi = 0; fi < fields.size(); ++fi) {
+                ImGui::PushID(static_cast<int>(fi));
+                const std::string fkey = "fieldname\x1f" + sname + "\x1f" + fields[fi].name;
+                char buf[64];
+                std::snprintf(buf, sizeof buf, "%s", structEditRowKey_ == fkey ? structEditBuf_ : fields[fi].name.c_str());
+                ImGui::SetNextItemWidth(90.0f * dpi);
+                if (ImGui::InputText("##fname", buf, sizeof buf)) {
+                    structEditRowKey_ = fkey;
+                    std::snprintf(structEditBuf_, sizeof structEditBuf_, "%s", buf);
+                }
+                if (ImGui::IsItemDeactivatedAfterEdit() && structEditRowKey_ == fkey) {
+                    pendingRenameFrom = fields[fi].name;
+                    pendingRenameTo = structEditBuf_;
+                    structEditRowKey_.clear();
+                }
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(70.0f * dpi);
+                if (ImGui::BeginCombo("##ftype", fields[fi].type.c_str())) {
+                    for (const char* t : kFieldTypes)
+                        if (ImGui::Selectable(t, fields[fi].type == t)) { pendingRetype = fields[fi].name; pendingRetypeTo = t; }
+                    ImGui::EndCombo();
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("X")) pendingRemove = fields[fi].name;
+                ImGui::PopID();
+            }
+
+            ImGui::SetNextItemWidth(90.0f * dpi);
+            ImGui::InputTextWithHint("##newfield", "new field", newFieldBuf_, sizeof newFieldBuf_);
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(70.0f * dpi);
+            ImGui::Combo("##newfieldtype", &newFieldTypeIdx_, kFieldTypes, IM_ARRAYSIZE(kFieldTypes));
+            ImGui::SameLine();
+            if (ImGui::SmallButton("+") && newFieldBuf_[0] != 0) {
+                if (addStructField(sname, newFieldBuf_, kFieldTypes[newFieldTypeIdx_])) newFieldBuf_[0] = 0;
+                else showRejectionBanner("cannot add field '" + std::string(newFieldBuf_) +
+                                         "': empty, already used, reserved (value, result) or contains whitespace or one of . : @ =");
+            }
+
+            if (!pendingRemove.empty()) removeStructField(sname, pendingRemove);
+            else if (!pendingRetype.empty()) retypeStructField(sname, pendingRetype, pendingRetypeTo);
+            else if (!pendingRenameFrom.empty() && pendingRenameTo != pendingRenameFrom &&
+                     !renameStructField(sname, pendingRenameFrom, pendingRenameTo))
+                showRejectionBanner("cannot rename field '" + pendingRenameFrom + "' to '" + pendingRenameTo +
+                                    "': empty, already used, reserved (value, result) or contains whitespace or one of . : @ =");
+            if (renamed && newName != sname && !renameStruct(sname, newName))
+                showRejectionBanner("cannot rename struct '" + sname + "' to '" + newName +
+                                    "': empty, already used, or contains whitespace or one of . : @ =");
+            ImGui::TreePop();
+        }
+        if (del) deleteStruct(sname);
+        ImGui::PopID();
+        ImGui::Separator();
+    }
+
+    if (ImGui::Button("+ New Struct")) addStruct(makeUniqueStructName("Struct"));
 #else
     (void)dpi;
 #endif
@@ -1397,6 +1500,8 @@ bool GraphEditor::setAttribute(const std::string& nodeId, const std::string& key
             for (fmt::OcGraphPin& p : n.pins)
                 if (p.isOutput && p.name == "value") p.defaultValue = value;
         }
+        // An array or struct node's pins are typed by these attributes, so a change retypes them.
+        if (key == "of" || key == "struct" || key == "field") resyncCollectionNodePins(n.id);
         dirty_ = true;
         return true;
     }
@@ -1413,6 +1518,7 @@ bool GraphEditor::clearAttribute(const std::string& nodeId, const std::string& k
         // name can't be expressed, so clearing the name means the node stops being an entry point.
         if (key == "name" && n.type == "CustomEvent") syncEventEntry(n.id, "");
         if ((key == "action" || key == "event") && n.type == "OnInputAction") syncEventEntry(n.id, "");
+        if (key == "of" || key == "struct" || key == "field") resyncCollectionNodePins(n.id);
         dirty_ = true;
         return true;
     }
@@ -1425,6 +1531,13 @@ void GraphEditor::showRejectionBanner(const std::string& msg) {
     lastRejectAtSec_ = ImGui::GetTime();
 #endif
     AVER_WARN("[GraphEditor] {}", msg);
+}
+
+bool GraphEditor::connectPins(const std::string& srcNode, const std::string& srcPin, const std::string& dstNode, const std::string& dstPin) {
+    commitLink(srcNode, srcPin, dstNode, dstPin);
+    return std::any_of(graph_.links.begin(), graph_.links.end(), [&](const fmt::OcGraphLink& l) {
+        return l.sourceNode == srcNode && l.sourcePin == srcPin && l.destNode == dstNode && l.destPin == dstPin;
+    });
 }
 
 void GraphEditor::reportLinkRejection(const GraphLinkCheck& check) {
@@ -1477,7 +1590,7 @@ bool GraphEditor::addVariable(const std::string& name, const std::string& type, 
     pushUndo();
     fmt::OcGraphVariable var;
     var.name = name;
-    var.type = isValidVarType(type) ? type : "float"; // "float": the palette's own GetVar/SetVar default
+    var.type = isValidVarType(type, graph_.structs) ? type : "float"; // "float": the palette's own GetVar/SetVar default
     var.defaultValue = defaultValue;
     graph_.variables.push_back(std::move(var));
     dirty_ = true;
@@ -1510,7 +1623,7 @@ bool GraphEditor::retypeVariable(const std::string& name, const std::string& new
     fmt::OcGraphVariable* var = nullptr;
     for (auto& v : graph_.variables) if (v.name == name) { var = &v; break; }
     if (!var) return false;
-    const std::string t = isValidVarType(newType) ? newType : "float";
+    const std::string t = isValidVarType(newType, graph_.structs) ? newType : "float";
     if (var->type == t) return true; // no-op, not a failure
     pushUndo();
     var->type = t;
@@ -1559,6 +1672,242 @@ bool GraphEditor::deleteVariable(const std::string& name, std::vector<std::strin
     graph_.variables.erase(std::remove_if(graph_.variables.begin(), graph_.variables.end(),
                                            [&](const fmt::OcGraphVariable& v) { return v.name == name; }),
                             graph_.variables.end());
+    dirty_ = true;
+    return true;
+}
+
+// ---- Structs ----------------------------------------------------------------------------------------------------
+
+namespace {
+
+// A struct or field name becomes part of a struct: type string, a struct= attribute (one token) and, for a field, a pin name
+// in a `node.pin` link, so none of whitespace, '.', ':', '@' or '=' can appear in one.
+bool validStructIdent(const std::string& s) {
+    return !s.empty() && s.find_first_of(" \t\r\n\v\f.:@=") == std::string::npos;
+}
+
+bool reservedFieldName(const std::string& s) { return s == "value" || s == "result"; }
+
+} // namespace
+
+std::string GraphEditor::makeUniqueStructName(const std::string& base) const {
+    for (int i = 1; i < 1000000; ++i) {
+        const std::string candidate = base + std::to_string(i);
+        bool taken = false;
+        for (const auto& s : graph_.structs) if (s.name == candidate) { taken = true; break; }
+        if (!taken) return candidate;
+    }
+    return base + "_x";
+}
+
+std::vector<GraphNodeDesc> GraphEditor::graphDerivedNodeDescs() const {
+    if (openGraphDomain() == kDomainMaterial) return {};
+    return structPaletteEntries(graph_.structs);
+}
+
+const GraphNodeDesc* GraphEditor::resolveNodeDesc(const std::string& typeId, GraphNodeDesc& storage) const {
+    if (const GraphNodeDesc* d = findGraphNodeDescIn(typeId, openGraphDomain())) return d;
+    if (typeId.find('@') == std::string::npos) return nullptr;
+    for (GraphNodeDesc& d : graphDerivedNodeDescs()) {
+        if (d.typeId != typeId) continue;
+        storage = std::move(d);
+        return &storage;
+    }
+    return nullptr;
+}
+
+void GraphEditor::resyncCollectionNodePins(const std::string& nodeId) {
+    fmt::OcGraphNode* node = nullptr;
+    for (auto& n : graph_.nodes) if (n.id == nodeId) { node = &n; break; }
+    if (!node) return;
+    const GraphNodeDesc* desc = findGraphNodeDesc(node->type);
+    if (!desc || desc->derivation == GraphPinDerivation::Fixed) return;
+    const std::vector<GraphPinSpec> specs = derivedNodePins(*node, *desc, graph_.structs);
+    if (specs.empty() && desc->derivation == GraphPinDerivation::Struct) return;   // names no declared struct: leave as written
+
+    // Pins that were only drawn (never written) stay that way.
+    bool synthesized = false;
+    for (const auto& p : node->pins) {
+        if (synthesizedPins_.erase(pinKey(node->id, p.name, p.isOutput)) != 0) synthesized = true;
+    }
+    std::vector<fmt::OcGraphPin> next;
+    for (const GraphPinSpec& s : specs) {
+        fmt::OcGraphPin p{s.name, s.type, s.isOutput, s.defaultValue};
+        for (const auto& old : node->pins)
+            if (old.name == s.name && old.isOutput == s.isOutput && old.type == s.type) { p.defaultValue = old.defaultValue; break; }
+        if (synthesized) synthesizedPins_.insert(pinKey(node->id, p.name, p.isOutput));
+        next.push_back(std::move(p));
+    }
+    node->pins = std::move(next);
+
+    // A wire whose end is gone, or no longer fits the pin's new type, is dropped (a dangling or ill-typed LINK is not survivable).
+    const auto pinType = [&](const std::string& id, const std::string& pin, bool isOutput) -> const std::string* {
+        for (const auto& n : graph_.nodes) {
+            if (n.id != id) continue;
+            for (const auto& p : n.pins) if (p.name == pin && p.isOutput == isOutput) return &p.type;
+            return nullptr;
+        }
+        return nullptr;
+    };
+    std::vector<fmt::OcGraphLink> kept;
+    for (const auto& l : graph_.links) {
+        if (l.sourceNode != nodeId && l.destNode != nodeId) { kept.push_back(l); continue; }
+        const std::string* src = pinType(l.sourceNode, l.sourcePin, true);
+        const std::string* dst = pinType(l.destNode, l.destPin, false);
+        if (src && dst && exactPinTypeMatch(*src, *dst)) kept.push_back(l);
+    }
+    graph_.links = std::move(kept);
+}
+
+void GraphEditor::resyncStructNodePins(const std::string& structName) {
+    std::vector<std::string> ids;
+    for (const auto& n : graph_.nodes) {
+        const GraphNodeDesc* d = findGraphNodeDesc(n.type);
+        if (d && d->derivation == GraphPinDerivation::Struct && nodeAttrValue(n, "struct") == structName) ids.push_back(n.id);
+    }
+    for (const auto& id : ids) resyncCollectionNodePins(id);
+}
+
+bool GraphEditor::addStruct(const std::string& name) {
+    if (!validStructIdent(name)) return false;
+    for (const auto& s : graph_.structs) if (s.name == name) return false;
+    pushUndo();
+    fmt::OcGraphStruct s;
+    s.name = name;
+    graph_.structs.push_back(std::move(s));
+    dirty_ = true;
+    return true;
+}
+
+bool GraphEditor::renameStruct(const std::string& oldName, const std::string& newName) {
+    if (!validStructIdent(newName)) return false;
+    fmt::OcGraphStruct* st = nullptr;
+    for (auto& s : graph_.structs) if (s.name == oldName) { st = &s; break; }
+    if (!st) return false;
+    if (newName == oldName) return true;
+    for (const auto& s : graph_.structs) if (s.name == newName) return false;
+    pushUndo();
+    st->name = newName;
+    const std::string from = "struct:" + oldName, to = "struct:" + newName;
+    for (auto& v : graph_.variables) if (v.type == from) v.type = to;
+    for (auto& f : graph_.functions) {
+        for (auto& p : f.inputs) if (p.type == from) p.type = to;
+        for (auto& p : f.outputs) if (p.type == from) p.type = to;
+    }
+    for (auto& n : graph_.nodes) {
+        for (auto& p : n.pins) if (p.type == from) p.type = to;
+        if (nodeAttrValue(n, "struct") == oldName) setNodeAttribute(n, "struct", newName);
+    }
+    dirty_ = true;
+    return true;
+}
+
+bool GraphEditor::deleteStruct(const std::string& name, std::vector<std::string>* outBlockedBy) {
+    bool exists = false;
+    for (const auto& s : graph_.structs) if (s.name == name) { exists = true; break; }
+    if (!exists) return false;
+
+    const std::string type = "struct:" + name;
+    std::vector<std::string> users;
+    for (const auto& v : graph_.variables) if (v.type == type) users.push_back("variable " + v.name);
+    for (const auto& f : graph_.functions) {
+        const auto uses = [&](const std::vector<fmt::OcGraphFunctionPin>& pins) {
+            return std::any_of(pins.begin(), pins.end(), [&](const fmt::OcGraphFunctionPin& p) { return p.type == type; });
+        };
+        if (uses(f.inputs) || uses(f.outputs)) users.push_back("function " + f.name);
+    }
+    for (const auto& n : graph_.nodes) {
+        const bool pinUses = std::any_of(n.pins.begin(), n.pins.end(), [&](const fmt::OcGraphPin& p) { return p.type == type; });
+        if (pinUses || nodeAttrValue(n, "struct") == name) users.push_back(n.id);
+    }
+    if (!users.empty()) {
+        if (outBlockedBy) *outBlockedBy = users;
+        std::string msg = "cannot delete struct '" + name + "': still used by ";
+        for (usize i = 0; i < users.size(); ++i) { if (i) msg += ", "; msg += users[i]; }
+        showRejectionBanner(msg);
+        return false;
+    }
+    pushUndo();
+    graph_.structs.erase(std::remove_if(graph_.structs.begin(), graph_.structs.end(),
+                                         [&](const fmt::OcGraphStruct& s) { return s.name == name; }),
+                          graph_.structs.end());
+    dirty_ = true;
+    return true;
+}
+
+bool GraphEditor::addStructField(const std::string& structName, const std::string& field, const std::string& type) {
+    if (!validStructIdent(field) || reservedFieldName(field) || !isScalarTypeName(type)) return false;
+    fmt::OcGraphStruct* st = nullptr;
+    for (auto& s : graph_.structs) if (s.name == structName) { st = &s; break; }
+    if (!st) return false;
+    for (const auto& f : st->fields) if (f.name == field) return false;
+    pushUndo();
+    st->fields.push_back({field, lowerTypeName(type)});
+    resyncStructNodePins(structName);
+    dirty_ = true;
+    return true;
+}
+
+bool GraphEditor::renameStructField(const std::string& structName, const std::string& oldField, const std::string& newField) {
+    if (!validStructIdent(newField) || reservedFieldName(newField)) return false;
+    fmt::OcGraphStruct* st = nullptr;
+    for (auto& s : graph_.structs) if (s.name == structName) { st = &s; break; }
+    if (!st) return false;
+    fmt::OcGraphStructField* field = nullptr;
+    for (auto& f : st->fields) if (f.name == oldField) { field = &f; break; }
+    if (!field) return false;
+    if (newField == oldField) return true;
+    for (const auto& f : st->fields) if (f.name == newField) return false;
+    pushUndo();
+    field->name = newField;
+    // The field's pin is renamed in place, with its wires, rather than rebuilt (which would drop them).
+    for (auto& n : graph_.nodes) {
+        const GraphNodeDesc* d = findGraphNodeDesc(n.type);
+        if (!d || d->derivation != GraphPinDerivation::Struct || nodeAttrValue(n, "struct") != structName) continue;
+        const bool isSet = n.type == "SetStructField";
+        if (isSet && nodeAttrValue(n, "field") != oldField) continue;
+        for (auto& p : n.pins) {
+            if (p.name != oldField || (n.type == "BreakStruct") != p.isOutput) continue;
+            for (auto& l : graph_.links) {
+                if (p.isOutput && l.sourceNode == n.id && l.sourcePin == oldField) l.sourcePin = newField;
+                if (!p.isOutput && l.destNode == n.id && l.destPin == oldField) l.destPin = newField;
+            }
+            if (synthesizedPins_.erase(pinKey(n.id, p.name, p.isOutput)) != 0) synthesizedPins_.insert(pinKey(n.id, newField, p.isOutput));
+            p.name = newField;
+        }
+        if (isSet) setNodeAttribute(n, "field", newField);
+    }
+    resyncStructNodePins(structName);
+    dirty_ = true;
+    return true;
+}
+
+bool GraphEditor::retypeStructField(const std::string& structName, const std::string& field, const std::string& type) {
+    if (!isScalarTypeName(type)) return false;
+    fmt::OcGraphStruct* st = nullptr;
+    for (auto& s : graph_.structs) if (s.name == structName) { st = &s; break; }
+    if (!st) return false;
+    for (auto& f : st->fields) {
+        if (f.name != field) continue;
+        if (f.type == lowerTypeName(type)) return true;
+        pushUndo();
+        f.type = lowerTypeName(type);
+        resyncStructNodePins(structName);
+        dirty_ = true;
+        return true;
+    }
+    return false;
+}
+
+bool GraphEditor::removeStructField(const std::string& structName, const std::string& field) {
+    fmt::OcGraphStruct* st = nullptr;
+    for (auto& s : graph_.structs) if (s.name == structName) { st = &s; break; }
+    if (!st) return false;
+    const auto it = std::find_if(st->fields.begin(), st->fields.end(), [&](const fmt::OcGraphStructField& f) { return f.name == field; });
+    if (it == st->fields.end()) return false;
+    pushUndo();
+    st->fields.erase(it);
+    resyncStructNodePins(structName);
     dirty_ = true;
     return true;
 }

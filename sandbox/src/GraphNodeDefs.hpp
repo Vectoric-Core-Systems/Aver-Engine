@@ -79,6 +79,10 @@ enum GraphNodeDomain : std::uint32_t {
     kDomainBoth     = kDomainGameplay | kDomainMaterial,
 };
 
+// How a node's pins follow an attribute instead of being fixed (GraphCollectionNodes.hpp): Element retypes the pins written as
+// float to the node's of= element type (array nodes); Struct builds one pin per field of the STRUCT named by struct=.
+enum class GraphPinDerivation : std::uint8_t { Fixed, Element, Struct };
+
 // One entry in the node palette / spawn table.
 struct GraphNodeDesc {
     std::string typeId;                // matches OcGraphNode::type; looked up case-insensitively
@@ -93,6 +97,12 @@ struct GraphNodeDesc {
     // ~200 lines needed touching. Only the Material section at the bottom of buildCatalog() sets
     // this explicitly.
     GraphNodeDomain domain = kDomainGameplay;
+
+    // A palette VARIANT has its own typeId, so the palette can name and find it ("ArrayGet@float3"), and writes `nodeType` (empty =
+    // typeId) with the `presets` NODE-line attributes already set. Entries without them behave exactly as before.
+    std::string nodeType;
+    std::vector<std::pair<std::string, std::string>> presets;
+    GraphPinDerivation derivation = GraphPinDerivation::Fixed;
 };
 
 namespace detail {
@@ -1254,8 +1264,9 @@ inline std::vector<const GraphNodeDesc*> graphPaletteSearch(std::string_view que
     for (const GraphNodeDesc& d : graphNodeCatalog()) {
         if ((d.domain & domain) == 0u) continue;
         // Function rows are excluded for the reason the category menu excludes them: the Functions
-        // panel creates them knowing their owner; a bare one has no pins and no owner.
-        if (d.category == "Function") continue;
+        // panel creates them knowing their owner; a bare one has no pins and no owner. The same goes for
+        // the pinless Struct templates; GraphEditor::graphDerivedNodeDescs supplies the per-struct rows.
+        if (d.category == "Function" || d.category == "Struct") continue;
 
         const usize inName = detail::ciFind(d.displayName, query);
         int rank = -1;

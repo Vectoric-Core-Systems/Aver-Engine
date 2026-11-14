@@ -254,10 +254,16 @@ bool wouldCreateCycle(const fmt::OcGraphData& graph, const std::string& sourceNo
 }
 
 bool exactPinTypeMatch(std::string_view srcType, std::string_view dstType) {
+    // Struct names are case-sensitive (the C# reader compares them ordinally); everything else is not.
+    const auto isStruct = [](std::string_view t) { return t.size() > 7 && ciEquals(t.substr(0, 7), "struct:"); };
+    if (isStruct(srcType) || isStruct(dstType))
+        return isStruct(srcType) && isStruct(dstType) && srcType.substr(7) == dstType.substr(7);
     if (ciEquals(srcType, dstType)) return true;
-    // An entity handle is an int underneath, so the two link in either direction.
+    // An entity handle is an int underneath, so the two link in either direction, and so do their arrays.
     return (ciEquals(srcType, "entity") && ciEquals(dstType, "int")) ||
-           (ciEquals(srcType, "int") && ciEquals(dstType, "entity"));
+           (ciEquals(srcType, "int") && ciEquals(dstType, "entity")) ||
+           (ciEquals(srcType, "entity[]") && ciEquals(dstType, "int[]")) ||
+           (ciEquals(srcType, "int[]") && ciEquals(dstType, "entity[]"));
 }
 
 bool materialPinTypeMatch(std::string_view srcType, std::string_view dstType) {
