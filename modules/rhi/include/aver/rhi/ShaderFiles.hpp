@@ -48,6 +48,13 @@ const std::string& shaderFile(std::string_view name);
 // Returns nullptr rather than an empty string so "absent" and "empty file" stay distinguishable.
 const std::string* shaderFileIfPresent(std::string_view name);
 
+// The text an `#include "requested"` names, for both compilers' include handlers (DXC's DxcShaderInclude, D3D12's FXC
+// fallback), so an include resolves the same whichever compiles it. The compiler's resolved path is not parsed: "./"
+// is stripped, then suffixes are tried longest first ("a/b/c.hlsli", "b/c.hlsli", "c.hlsli"), which covers a bare
+// include, a nested one with the includer's directory prepended, and one written against a root. Empty (and logged,
+// by shaderFile) when nothing matches.
+const std::string& shaderIncludeText(std::string_view requested);
+
 // A hash of EVERY shader file that could take part in a compile, for a cache key to fold in.
 //
 // WHY A BLOB CACHE NEEDS THIS. The DXIL cache keys on the source text handed to DXC plus the defines

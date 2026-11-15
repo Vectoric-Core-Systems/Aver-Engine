@@ -222,7 +222,22 @@ public:
             macros.push_back({nullptr, nullptr});
             ComPtr<ID3DBlob> err;
             const UINT flags = D3DCOMPILE_PACK_MATRIX_ROW_MAJOR | D3DCOMPILE_ENABLE_STRICTNESS;
-            HRESULT hr = D3DCompile(src, std::strlen(src), "aver.hlsl", macros.data(), nullptr, entry, target51, flags, 0, out, &err);
+            // Includes resolve through the same lookup as DXC's (shaderIncludeText), so ui.hlsl and post.hlsl, which
+            // #include a .hlsli, build without DXC too. The text is copied: hot reload may replace the cached string.
+            struct FxcInclude final : ID3DInclude {
+                HRESULT STDMETHODCALLTYPE Open(D3D_INCLUDE_TYPE, LPCSTR name, LPCVOID, LPCVOID* data, UINT* bytes) override {
+                    if (!name || !data || !bytes) return E_POINTER;
+                    const std::string& text = shaderIncludeText(name);
+                    if (text.empty()) return E_FAIL;
+                    char* copy = new char[text.size()];
+                    std::memcpy(copy, text.data(), text.size());
+                    *data = copy;
+                    *bytes = static_cast<UINT>(text.size());
+                    return S_OK;
+                }
+                HRESULT STDMETHODCALLTYPE Close(LPCVOID data) override { delete[] static_cast<const char*>(data); return S_OK; }
+            } includes;
+            HRESULT hr = D3DCompile(src, std::strlen(src), "aver.hlsl", macros.data(), &includes, entry, target51, flags, 0, out, &err);
             if (FAILED(hr) && err) AVER_ERROR("[RHI.D3D12] {} ({}): {}", entry, target51, static_cast<const char*>(err->GetBufferPointer()));
             return hr;
         }
@@ -2863,6 +2878,9 @@ void D3D12Device::queryCaps() {
               caps_.meshShaderTier, caps_.dxcAvailable, caps_.conservativeRaster,
               caps_.resourceBindingTier);
     AVER_INFO("[RHI.D3D12] ray-traced bindless textures: {}", caps_.rtBindlessTextures ? "yes" : "no");
+    if (!caps_.dxcAvailable)
+        AVER_WARN("[RHI.D3D12] no DXC compiler (dxcompiler.dll): shaders above SM 6.0 are refused, so ray tracing, mesh "
+                  "shaders and every feature that needs SM 6.x stay off; each logs its own error when it fails to build");
     // Logged beside SM: engine compiles SM 6.5; device may report 6.6 but atomic support differs.
     AVER_INFO("[RHI.D3D12] 64-bit shader atomics: {}", caps_.shaderInt64Atomics ? "yes" : "no");
     if (capsOverride().active)

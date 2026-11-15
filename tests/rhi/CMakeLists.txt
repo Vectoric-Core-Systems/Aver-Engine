@@ -95,6 +95,11 @@ add_executable(ShaderCacheSweepTest src/ShaderCacheSweepTest.cpp)
 target_link_libraries(ShaderCacheSweepTest PRIVATE Aver.RHI Aver.Core Aver.Platform)
 set_target_properties(ShaderCacheSweepTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# ShaderIncludeLookupTest -- the include lookup DXC's handler and D3D12's FXC fallback share, with no device.
+add_executable(ShaderIncludeLookupTest src/ShaderIncludeLookupTest.cpp)
+target_link_libraries(ShaderIncludeLookupTest PRIVATE Aver.RHI Aver.Core Aver.Platform)
+set_target_properties(ShaderIncludeLookupTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # PrecompiledShaderTest -- ShaderDesc::bytecode and PipelineLayout::constantSpace/samplerSpace,
 # together, against a real D3D12 device (WARP, so no GPU required).
 #

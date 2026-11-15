@@ -60,7 +60,7 @@ public:
         // tree can also collide with ITSELF that way (the same filename under several
         // subdirectories).
         //
-        // SUFFIXES, LONGEST FIRST, because DXC's resolved path is not something to parse. For a bare
+        // SUFFIXES, LONGEST FIRST (shaderIncludeText, shared with D3D12's FXC fallback), because DXC's resolved path is not something to parse. For a bare
         // `#include "x.hlsl"` it hands back "./x.hlsl"; for a nested include it prepends the
         // includer's own directory, so an include written against a root
         // ("Vendor/Utils/Color.hlsli")
@@ -69,21 +69,7 @@ public:
         // the LAST attempt is exactly the old basename behaviour -- so every include that worked
         // before still resolves the same way, by the same lookup.
         std::wstring w(path);
-        for (wchar_t& c : w) if (c == L'\\') c = L'/';
-        std::string rel(w.begin(), w.end());   // shader filenames are ASCII by construction
-        while (rel.rfind("./", 0) == 0) rel.erase(0, 2);
-
-        const std::string* found = nullptr;
-        for (size_t at = 0; at != std::string::npos;) {
-            if (const std::string* t = shaderFileIfPresent(rel.substr(at))) { found = t; break; }
-            const size_t next = rel.find('/', at);
-            at = (next == std::string::npos) ? std::string::npos : next + 1;
-        }
-        // The bare filename is what the final failure should name: it is what the author wrote, and
-        // shaderFile()'s own error explains where it was looked for.
-        const size_t lastSlash = rel.find_last_of('/');
-        const std::string name = lastSlash == std::string::npos ? rel : rel.substr(lastSlash + 1);
-        const std::string& text = found ? *found : shaderFile(name);
+        const std::string& text = shaderIncludeText(std::string(w.begin(), w.end()));   // ASCII by construction
         // E_FAIL, NOT AN EMPTY BLOB. shaderFile() answers a missing file with an empty string so the
         // caller can carry on; here that would compile an empty include and report the failure as
         // whatever declaration went missing three files away. Failing the load makes DXC say "cannot

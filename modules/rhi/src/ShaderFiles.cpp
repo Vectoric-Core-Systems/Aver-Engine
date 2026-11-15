@@ -121,6 +121,20 @@ const std::string* shaderFileIfPresent(std::string_view name) {
     return nullptr;
 }
 
+const std::string& shaderIncludeText(std::string_view requested) {
+    std::string rel(requested);
+    for (char& c : rel) if (c == '\\') c = '/';
+    while (rel.rfind("./", 0) == 0) rel.erase(0, 2);
+    for (size_t at = 0; at != std::string::npos;) {
+        if (const std::string* t = shaderFileIfPresent(std::string_view(rel).substr(at))) return *t;
+        const size_t next = rel.find('/', at);
+        at = (next == std::string::npos) ? std::string::npos : next + 1;
+    }
+    // The bare filename is what the failure names: shaderFile() logs where it looked.
+    const size_t lastSlash = rel.find_last_of('/');
+    return shaderFile(lastSlash == std::string::npos ? std::string_view(rel) : std::string_view(rel).substr(lastSlash + 1));
+}
+
 const std::string& shaderFile(std::string_view name) {
     if (const auto it = g_cache.find(name); it != g_cache.end()) return it->second;
 
