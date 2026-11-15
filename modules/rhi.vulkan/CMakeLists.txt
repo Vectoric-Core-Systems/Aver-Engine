@@ -85,9 +85,8 @@ endif()
 # their original reasons: glslang/shaderc would be a second source of truth for the same HLSL, and
 # the LunarG SDK as a build dependency is what third_party/vulkan-headers/README.md exists to avoid.
 #
-# WHAT IS STILL NOT TRUE is that this backend is at parity. The cascade shadow map reads unshadowed under
-# --no-rt (cause not found; see the comment above VulkanDevice::pushRenderScope), and RT shadows mask
-# it. Compiling and running are not the same as correct; see docs before trusting a picture.
+# Parity is measured, not assumed: docs/VULKAN.md records what has been compared against D3D12 (the --no-rt
+# cascade shadow matched on 2026-11-16) and what has not. Compiling and running are not the same as correct.
 #
 # Every configuration this engine currently builds keeps AVER_RHI_D3D12 ON alongside
 # AVER_RHI_VULKAN (scripts/module-matrix.ps1's vulkan-on row layers Vulkan ON TOP of the default

@@ -1,5 +1,9 @@
 # The Vulkan backend
 
+> **2026-11-16:** the cascaded shadow map defect below no longer reproduces: Vulkan and D3D12 `--no-rt` frames of the
+> default scene match within two steps on 99.8% of pixels, shadow included, and validation reports nothing while
+> rendering (two shutdown errors from present tracking remain). See "The cascade shadow map" below.
+>
 > **STATUS, checked against source on 2026-10-04: real, off by default, and one unexplained shadow-map defect short of correct.** `modules/rhi.vulkan` is not a stub and has not been for two weeks. It builds a real `VkInstance`/`VkPhysicalDevice`/`VkDevice`, presents a swapchain, draws the scene — grid, cube, shadow, sky, world axes — with instanced draws, runs the whole editor UI (menus, toolbar, World Outliner, Details, dockspace, 3D viewport) through its own ImGui backend, and tears down with **zero leaked objects** and **10 non-fatal validation errors, down from 156**. It needs no Vulkan SDK to build or run. **`AVER_RHI_VULKAN` now defaults `ON`** (`CMakeLists.txt:58`), so a default build of the engine *does* contain Vulkan code — this banner said "still `OFF` by default … contains no Vulkan code at all", citing `CMakeLists.txt:30`, and both the default and the line number changed before 2026-09-20. The backend is still chosen with `--backend vulkan` rather than automatically, so a default *run* is still D3D12. And it has one confirmed, precisely-diagnosed rendering defect: **the cascaded shadow map reads unshadowed on this backend** (`--no-rt`), cause not yet found; see below.
 >
 > This replaces a 2026-08-02 draft that opened "STATUS: PLAN ONLY. No Vulkan code has been written." Everything below was checked against the tree as it stands, not carried over from that draft or from any commit message taken at face value — commit messages are cited as evidence of intent, source and `git log` dates are what settled every claim.
@@ -210,44 +214,23 @@ problem.
 
 ---
 
-## The known open defect: the cascade shadow map reads unshadowed
+## The cascade shadow map: no longer reproduces (measured 2026-11-16)
 
-> **G4 R2 note.** The raster local-light shadow pass (R2 of [G4_RENDER.md](https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G4_RENDER.md)) needed depth-only draws to reach their own target on this backend, so it calls `IRenderContext::setTargetsIsolated(true)`:
-> `pushRenderScope(..., isolated)` suspends the scene scope and opens a temporary one over the targets named by `setRenderTargets`. The sun's cascade pass and the GI-only map run from `prePass`, outside any scope, and need no such retarget. Unrun; the first Vulkan frame with a shadowed light is the check.
+`c97f092` (2026-08-23) found the cascaded shadow map reading unshadowed on this backend: with `--no-rt`, the floor
+beside the default scene's cube was (66, 66, 66) on Vulkan against (13, 15, 19) on D3D12. The cause was never found
+(the old "cascade draws join the scene scope" explanation did not hold: `shadowPass` runs from `prePass`, before
+`openSceneScope`).
 
-**Confirmed in source, and it is the one thing in this document that is still actually broken.**
+Re-measured on 2026-11-16 on an RX 7800 XT, default scene, `--no-rt --frames 150`, Vulkan with `--debug-layer`: the
+shadow beside the cube is there on both backends, mean (28, 25, 34) on each against a floor of about (88, 89, 95),
+and the two frames differ by more than two steps on 0.2% of pixels (anti-aliasing and noise). Some change between
+August and now fixed it; which one was not bisected. The GI-only map (`giShadowPass`, same shape) is covered by the
+same frame: the cone-traced ambient matches too.
 
-`c97f092` (2026-08-23, "Vulkan: instanced draws, and the shadow-map defect found while verifying
-them") found this while verifying that instanced draws changed no pixels, by forcing the raster
-shadow path with `--no-rt` and probing the floor beside the cube in the default scene:
-
-```
-D3D12   darkest floor pixel (13, 15, 19)  -- a shadow
-Vulkan  darkest floor pixel (66, 66, 66)  -- unshadowed floor, no shadow
-```
-
-**Cause: not found.** An earlier version of this section blamed `pushRenderScope`: the cascade draws were said to
-join the scene scope and land in the scene's attachments. That does not hold. `VoxiRenderer::shadowPass` and
-`giShadowPass` run from `prePass`, which `VulkanDevice::beginFrame` calls **before** `openSceneScope` (it did at
-`c97f092` too), so no scope is open, `renderScopeDepth_` is 0, and every shadow draw opens its own scope over the shadow
-texture. (The join-don't-nest behaviour is real, and still matters for a feature that draws from inside the scene
-scope; that is what `setTargetsIsolated` is for.)
-
-Read end to end, the write side looks consistent: a depth-only pipeline (no colour targets, `D32_SFLOAT`, one sample,
-depth bias on), the atlas moved to `DEPTH_ATTACHMENT_OPTIMAL` by `textureBarrier`, `clearDepth`, per-draw `LOAD` scopes,
-a viewport and scissor per cascade quadrant, `-fvk-invert-y` on the vertex stage. Suspects, most likely first:
-
-1. The `DepthWrite -> ShaderResource` barrier's destination stage is fragment shader only
-   (`toVkImageBarrierInfo`, `VulkanCommon.hpp`), so a compute pass that samples the atlas is not ordered after the writes.
-2. The sampling side under `--no-rt` (`gShadowTex.SampleCmpLevelZero` with the immutable comparison sampler s1) has not
-   been inspected on Vulkan.
-3. The measured pixel may not come from the cascade path at all.
-
-The next step is one Vulkan `--no-rt` run with a capture of the shadow atlas; nothing in the backend should change
-before that. `giShadowPass` has the same shape, so GI's shadow map is equally unverified.
-
-It is masked in normal use because **ray-traced shadows are the default and do work**; the defect only shows
-with `--no-rt` or on hardware without ray-tracing support.
+Validation in that run: no errors while rendering; ten warnings (vertex attributes a depth-only vertex shader does
+not consume); two errors at shutdown, `vkDestroySemaphore` and `vkDestroySwapchainKHR` "in use by VkQueue". Those two
+are the layer's present tracking: without `VK_EXT_swapchain_maintenance1` present fences it cannot see a present
+finish, and a `vkDeviceWaitIdle` before the teardown (tried) does not clear them.
 
 ---
 

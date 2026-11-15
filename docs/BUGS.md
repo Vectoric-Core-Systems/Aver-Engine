@@ -82,9 +82,9 @@ Each built and passed the CPU suite (587/587); none has been seen on screen.
 
 ## Still open
 
-- **Vulkan cascade shadow map** (0.4.0, 0.5.0). Its write path was traced and nothing was found wrong; the old
-  "joins the scene scope" explanation is gone from the code and `docs/VULKAN.md`, which lists the suspects. Needs one
-  Vulkan `--no-rt` run with validation on.
+- **Vulkan cascade shadow map** (0.4.0, 0.5.0): no longer reproduces. Measured 2026-11-16, default scene, `--no-rt`: the
+  cube's shadow is there on Vulkan as on D3D12, mean (28, 25, 34) on both, frames within two steps on 99.8% of pixels;
+  validation clean while rendering. Which change fixed it was not bisected. `docs/VULKAN.md` has the numbers.
 - **GI key churn with LOD selection on.** A culled entity plans its base parts while a visible one may plan a
   substituted LOD handle (`SandboxRender.cpp`, "KNOWN RESIDUAL (F4)"). Only with the opt-in LOD/cluster paths.
 - **Frame determinism** (0.5.0), measured 2026-11-16 with six-run pairwise diff matrices. Bit-identical between runs:

@@ -3469,18 +3469,9 @@ bool VulkanDevice::openSceneScope(VkCommandBuffer cmd, bool load) {
 // A joined draw keeps the OWNER's attachments, so a feature that draws from inside the scene scope with
 // its own setRenderTargets lands in the scene unless it asks for `isolated` (setTargetsIsolated).
 //
-// OPEN DEFECT, CAUSE NOT FOUND: the cascade shadow map reads unshadowed on Vulkan (--no-rt floor pixel
-// 66,66,66 vs D3D12 13,15,19, measured at c97f0929). The explanation that used to sit here -- the cascade
-// draws join the scene scope -- does not hold: VoxiRenderer::shadowPass (and giShadowPass) run from
-// prePass, which beginFrame calls BEFORE openSceneScope, so renderScopeDepth_ is 0 and every shadow draw
-// opens its own scope over shadowTex_ (same at c97f0929). By reading, the write side is consistent:
-// depth-only pipeline (0 colour targets, D32, 1 sample), DEPTH_ATTACHMENT_OPTIMAL via textureBarrier,
-// clearDepth + per-draw LOAD scopes, per-cascade viewport/scissor, -fvk-invert-y on the VS. Suspects, in
-// order: (1) the DepthWrite -> ShaderResource barrier's dst stage is FRAGMENT only
-// (toVkImageBarrierInfo), so compute readers of the atlas are not ordered after it; (2) the sampling side
-// under --no-rt (gShadowTex/SampleCmpLevelZero, immutable comparison sampler s1) was never inspected on
-// Vulkan; (3) the measured pixel may not come from the cascade path at all. Needs one Vulkan --no-rt run
-// with a capture of the shadow atlas before anything here changes.
+// The cascade passes (VoxiRenderer::shadowPass, giShadowPass) run from prePass, before openSceneScope, so each
+// opens its own scope over the shadow atlas. The 'cascade map reads unshadowed' defect measured at c97f0929 no
+// longer reproduces (2026-11-16, docs/VULKAN.md).
 bool VulkanDevice::pushRenderScope(VkCommandBuffer cmd, const VkRenderingInfo& ri, bool isolated) {
     if (renderScopeDepth_ != 0) {
         if (isolated) {
