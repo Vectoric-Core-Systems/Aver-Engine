@@ -103,8 +103,17 @@ public:
     void setDebugForceWaitIdle(bool on) override { debugForceWaitIdle_ = on; }
 
     bool ensureSized(IResourceFactory& res, u32 sceneW, u32 sceneH, u32 sampleCount) override {
+        // A failed compile is not retried: it would fail the same way every frame (and log it every frame). releaseAll
+        // clears the latch, so a device recreate tries again.
+        if (staticFailed_) return false;
         if (!staticOk_) staticOk_ = createStaticPipelines(res);
-        if (!staticOk_) return false;
+        if (!staticOk_) {
+            staticFailed_ = true;
+            if (reducePso_) { res.destroyPipeline(reducePso_); reducePso_ = 0; }
+            if (testPso_)   { res.destroyPipeline(testPso_);   testPso_ = 0; }
+            AVER_ERROR("[Occlusion] occlusion culling is off for this device (its pipelines did not build)");
+            return false;
+        }
         if (pyramid_ && sceneW == sceneW_ && sceneH == sceneH_ && sampleCount == sampleCount_)
             return true;
         sceneW_ = sceneW; sceneH_ = sceneH; sampleCount_ = sampleCount;
@@ -357,6 +366,7 @@ public:
         }
         boxCapacity_ = 0;
         staticOk_ = false;
+        staticFailed_ = false;
         res_ = nullptr;
     }
 
@@ -572,6 +582,7 @@ private:
     TextureHandle pyramid_ = 0;
 
     bool staticOk_ = false;
+    bool staticFailed_ = false;
     PipelineHandle reducePso_ = 0, testPso_ = 0, seedPso_ = 0;
     BindingSetHandle seedSet_ = 0;
     std::vector<BindingSetHandle> reduceSets_;
