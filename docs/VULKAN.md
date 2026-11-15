@@ -1,6 +1,6 @@
 # The Vulkan backend
 
-> **STATUS, checked against source on 2026-10-04: real, off by default, and one shadow map short of correct.** `modules/rhi.vulkan` is not a stub and has not been for two weeks. It builds a real `VkInstance`/`VkPhysicalDevice`/`VkDevice`, presents a swapchain, draws the scene — grid, cube, shadow, sky, world axes — with instanced draws, runs the whole editor UI (menus, toolbar, World Outliner, Details, dockspace, 3D viewport) through its own ImGui backend, and tears down with **zero leaked objects** and **10 non-fatal validation errors, down from 156**. It needs no Vulkan SDK to build or run. **`AVER_RHI_VULKAN` now defaults `ON`** (`CMakeLists.txt:58`), so a default build of the engine *does* contain Vulkan code — this banner said "still `OFF` by default … contains no Vulkan code at all", citing `CMakeLists.txt:30`, and both the default and the line number changed before 2026-09-20. The backend is still chosen with `--backend vulkan` rather than automatically, so a default *run* is still D3D12. And it has one confirmed, precisely-diagnosed rendering defect: **the cascaded shadow map has never been written on this backend**, for a structural reason recorded below.
+> **STATUS, checked against source on 2026-10-04: real, off by default, and one unexplained shadow-map defect short of correct.** `modules/rhi.vulkan` is not a stub and has not been for two weeks. It builds a real `VkInstance`/`VkPhysicalDevice`/`VkDevice`, presents a swapchain, draws the scene — grid, cube, shadow, sky, world axes — with instanced draws, runs the whole editor UI (menus, toolbar, World Outliner, Details, dockspace, 3D viewport) through its own ImGui backend, and tears down with **zero leaked objects** and **10 non-fatal validation errors, down from 156**. It needs no Vulkan SDK to build or run. **`AVER_RHI_VULKAN` now defaults `ON`** (`CMakeLists.txt:58`), so a default build of the engine *does* contain Vulkan code — this banner said "still `OFF` by default … contains no Vulkan code at all", citing `CMakeLists.txt:30`, and both the default and the line number changed before 2026-09-20. The backend is still chosen with `--backend vulkan` rather than automatically, so a default *run* is still D3D12. And it has one confirmed, precisely-diagnosed rendering defect: **the cascaded shadow map reads unshadowed on this backend** (`--no-rt`), cause not yet found; see below.
 >
 > This replaces a 2026-08-02 draft that opened "STATUS: PLAN ONLY. No Vulkan code has been written." Everything below was checked against the tree as it stands, not carried over from that draft or from any commit message taken at face value — commit messages are cited as evidence of intent, source and `git log` dates are what settled every claim.
 
@@ -210,11 +210,10 @@ problem.
 
 ---
 
-## The known open defect: the shadow cascade map is never written
+## The known open defect: the cascade shadow map reads unshadowed
 
 > **G4 R2 note.** The raster local-light shadow pass (R2 of [G4_RENDER.md](https://github.com/Vectoric-Core-Systems/Fabric-Connector/blob/main/docs/plans/G4_RENDER.md)) needed depth-only draws to reach their own target on this backend, so it calls `IRenderContext::setTargetsIsolated(true)`:
-> `pushRenderScope(..., isolated)` suspends the scene scope and opens a temporary one over the targets named by `setRenderTargets`. That is the retarget this section describes, applied to those draws only; the sun's cascade
-> pass and the GI-only map still join the scene scope and are **still unwritten** on Vulkan. Unrun; the first Vulkan frame with a shadowed light is the check.
+> `pushRenderScope(..., isolated)` suspends the scene scope and opens a temporary one over the targets named by `setRenderTargets`. The sun's cascade pass and the GI-only map run from `prePass`, outside any scope, and need no such retarget. Unrun; the first Vulkan frame with a shadowed light is the check.
 
 **Confirmed in source, and it is the one thing in this document that is still actually broken.**
 
@@ -227,42 +226,28 @@ D3D12   darkest floor pixel (13, 15, 19)  -- a shadow
 Vulkan  darkest floor pixel (66, 66, 66)  -- unshadowed floor, no shadow
 ```
 
-**The cause is `pushRenderScope`** (`VulkanDevice.cpp:2732`):
+**Cause: not found.** An earlier version of this section blamed `pushRenderScope`: the cascade draws were said to
+join the scene scope and land in the scene's attachments. That does not hold. `VoxiRenderer::shadowPass` and
+`giShadowPass` run from `prePass`, which `VulkanDevice::beginFrame` calls **before** `openSceneScope` (it did at
+`c97f092` too), so no scope is open, `renderScopeDepth_` is 0, and every shadow draw opens its own scope over the shadow
+texture. (The join-don't-nest behaviour is real, and still matters for a feature that draws from inside the scene
+scope; that is what `setTargetsIsolated` is for.)
 
-```cpp
-bool VulkanDevice::pushRenderScope(VkCommandBuffer cmd, const VkRenderingInfo& ri) {
-    if (renderScopeDepth_ != 0) return false;   // already inside one: join it rather than nest
-    api_.CmdBeginRendering(cmd, &ri);
-    ++renderScopeDepth_;
-    return true;
-}
-```
+Read end to end, the write side looks consistent: a depth-only pipeline (no colour targets, `D32_SFLOAT`, one sample,
+depth bias on), the atlas moved to `DEPTH_ATTACHMENT_OPTIMAL` by `textureBarrier`, `clearDepth`, per-draw `LOAD` scopes,
+a viewport and scissor per cascade quadrant, `-fvk-invert-y` on the vertex stage. Suspects, most likely first:
 
-Vulkan's dynamic-rendering scopes (`vkCmdBeginRendering`/`vkCmdEndRendering`) cannot nest, and this
-function's join-don't-nest behaviour was written correctly for the case it was designed around: two
-independent owners drawing into the *same* attachments on one command buffer. It is wrong when the
-inner caller names **different** attachments. `VoxiRenderer::shadowPass` calls
-`setRenderTargets(nullptr, 0, shadowTex_)` and issues its draws from inside the scene scope that
-`beginFrame` already opened over the scene's colour/depth targets — so those draws join the *scene's*
-attachments instead of the shadow map's. The shadow map is never written. It looks like nothing is
-wrong because the light-space geometry lands outside the scene viewport and is simply clipped rather
-than producing visible corruption. `giShadowPass` has the identical shape, so voxel GI light
-injection is unshadowed on this backend too — the defect is not limited to the raster cascade.
+1. The `DepthWrite -> ShaderResource` barrier's destination stage is fragment shader only
+   (`toVkImageBarrierInfo`, `VulkanCommon.hpp`), so a compute pass that samples the atlas is not ordered after the writes.
+2. The sampling side under `--no-rt` (`gShadowTex.SampleCmpLevelZero` with the immutable comparison sampler s1) has not
+   been inspected on Vulkan.
+3. The measured pixel may not come from the cascade path at all.
 
-It is masked in normal use because **ray-traced shadows are the default and do work** — this defect
-only shows up with `--no-rt` or on hardware without ray-tracing support.
+The next step is one Vulkan `--no-rt` run with a capture of the shadow atlas; nothing in the backend should change
+before that. `giShadowPass` has the same shape, so GI's shadow map is equally unverified.
 
-**Not fixed as of `c97f092`, and the attempt that was tried is recorded rather than hidden.** Making
-`pushRenderScope` retarget to the inner attachments does get draws into the shadow map, but surfaces
-three more mismatches at once: the bound pipeline's `rasterizationSamples` and
-`VkPipelineRenderingCreateInfo` formats are still the scene's, and the shadow image is never
-transitioned to `DEPTH_ATTACHMENT_OPTIMAL`. That attempt took validation errors from 10 to 40 and
-broke the floor draw entirely, and was reverted. The real fix, per the comment left at
-`VulkanDevice.cpp:2490-2521` for the next person to find, is architectural: the scope needs to
-**follow the currently-bound render targets** (close on retarget, reopen lazily at the next draw,
-persist across draws instead of opening and closing around each one), and pipelines need to be built
-against the sample count and formats of the targets they are actually used with — a change to how
-every pass on this backend acquires its render scope, not a local patch.
+It is masked in normal use because **ray-traced shadows are the default and do work**; the defect only shows
+with `--no-rt` or on hardware without ray-tracing support.
 
 ---
 
@@ -274,7 +259,7 @@ every pass on this backend acquires its render scope, not a local patch.
 > quoted — so both the default and the parenthetical it corrected have changed. **The reasoning below
 > survives as a description of what the flag switches on; it no longer answers "why off", because it
 > is not off.** Nobody has written down why the default flipped while the backend still has 10
-> validation errors and a shadow map that has never been written — that is an open question, not
+> validation errors and a cascade shadow map that reads unshadowed — that is an open question, not
 > something this pass could answer from the tree.
 
 Building with it — which a default configure now does:
@@ -309,7 +294,7 @@ the same harness D3D12 is held to.
 
 ## What is not done
 
-- **The cascaded shadow map bug above.** The single confirmed rendering defect.
+- **The cascaded shadow map bug above.** The single confirmed rendering defect, cause not found.
 - **`VulkanPipeline.cpp` is gone.** It was an unfinished, never-built file split that duplicated six
   functions of `VulkanResourceFactory.cpp` (the linker discarded its copies, `LNK4006`), so deleting
   it changed no behaviour. The one thing only it had, masking targets 1+ of a blended multi-target
@@ -354,9 +339,8 @@ the same harness D3D12 is held to.
 
 In rough order of leverage:
 
-1. **Fix `pushRenderScope`** so it follows the currently-bound render targets instead of joining
-   whatever scope happens to be open. This is the one confirmed rendering defect, it is precisely
-   diagnosed, and the comment at `VulkanDevice.cpp:2490-2521` already describes the shape of the fix.
+1. **Find the cause of the unshadowed cascade map**: one Vulkan `--no-rt` run with a capture of the shadow atlas, then
+   the suspects listed under the open defect above. Do not change the backend before that run.
 2. **Give `scripts/gates.ps1` a `-Backend` switch** that selects the executable and baseline file
    together, the way `-Release` already does. Without it, this backend cannot be regression-tested at
    all, and cannot ever be turned on by default responsibly.

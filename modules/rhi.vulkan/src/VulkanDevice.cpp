@@ -3465,23 +3465,22 @@ bool VulkanDevice::openSceneScope(VkCommandBuffer cmd, bool load) {
     return pushRenderScope(cmd, ri);
 }
 
-// KNOWN DEFECT, MEASURED, NOT FIXED: a pass wanting its own render target doesn't get one -- this
-// joins whatever scope is already open and discards the caller's VkRenderingInfo, which is right for
-// two owners sharing one command buffer (dynamic-rendering scopes can't nest) but wrong when the
-// inner request names different attachments.
-// COST: VoxiRenderer::shadowPass's setRenderTargets(nullptr, 0, shadowTex_) (VoxiRenderer.cpp:1175)
-// draws into the SCENE's attachments instead, so the cascade shadow map is never written (light-space
-// geometry just clips outside the scene viewport -- nothing looks obviously broken). Measured beside
-// the cube with --no-rt (forces the cascade path; ray-traced shadows, the default, DO work here):
-// D3D12 darkest floor pixel (13,15,19, shadowed) vs Vulkan (66,66,66, unshadowed). giShadowPass
-// (:1293) has the same shape -- GI's shadow map and voxel light injection are equally unshadowed here.
-// TRIED, REVERTED: closing/reopening the scope does retarget correctly ("[Voxi shadow map]" attaches,
-// draws arrive), but the bound pipeline's rasterizationSamples/VkPipelineRenderingCreateInfo formats
-// stay the SCENE's, and the shadow image is never transitioned to DEPTH_ATTACHMENT_OPTIMAL --
-// validation errors went 10->40 and the floor stopped drawing.
-// REAL FIX: belongs with setRenderTargets -- the scope must follow the bound targets (close on
-// retarget, reopen lazily, persist across draws) and pipelines must match the targets they actually
-// use; a deliberate change, not a patch under this bug.
+// Opens a rendering scope over `ri`, or joins the one already open (dynamic-rendering scopes cannot nest).
+// A joined draw keeps the OWNER's attachments, so a feature that draws from inside the scene scope with
+// its own setRenderTargets lands in the scene unless it asks for `isolated` (setTargetsIsolated).
+//
+// OPEN DEFECT, CAUSE NOT FOUND: the cascade shadow map reads unshadowed on Vulkan (--no-rt floor pixel
+// 66,66,66 vs D3D12 13,15,19, measured at c97f0929). The explanation that used to sit here -- the cascade
+// draws join the scene scope -- does not hold: VoxiRenderer::shadowPass (and giShadowPass) run from
+// prePass, which beginFrame calls BEFORE openSceneScope, so renderScopeDepth_ is 0 and every shadow draw
+// opens its own scope over shadowTex_ (same at c97f0929). By reading, the write side is consistent:
+// depth-only pipeline (0 colour targets, D32, 1 sample), DEPTH_ATTACHMENT_OPTIMAL via textureBarrier,
+// clearDepth + per-draw LOAD scopes, per-cascade viewport/scissor, -fvk-invert-y on the VS. Suspects, in
+// order: (1) the DepthWrite -> ShaderResource barrier's dst stage is FRAGMENT only
+// (toVkImageBarrierInfo), so compute readers of the atlas are not ordered after it; (2) the sampling side
+// under --no-rt (gShadowTex/SampleCmpLevelZero, immutable comparison sampler s1) was never inspected on
+// Vulkan; (3) the measured pixel may not come from the cascade path at all. Needs one Vulkan --no-rt run
+// with a capture of the shadow atlas before anything here changes.
 bool VulkanDevice::pushRenderScope(VkCommandBuffer cmd, const VkRenderingInfo& ri, bool isolated) {
     if (renderScopeDepth_ != 0) {
         if (isolated) {
