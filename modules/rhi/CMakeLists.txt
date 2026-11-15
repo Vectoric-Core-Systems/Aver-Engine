@@ -7,6 +7,7 @@ aver_add_module(Aver.RHI
     src/CustomEnvPrograms.cpp
     src/Atmosphere.cpp
     src/EditorLines.cpp
+    src/Meshlets.cpp
     src/null/NullDevice.cpp
   DEPS
     Aver.Core

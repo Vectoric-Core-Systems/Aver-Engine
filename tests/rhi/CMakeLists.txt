@@ -13,6 +13,11 @@ add_executable(WorldShiftTest src/WorldShiftTest.cpp)
 target_link_libraries(WorldShiftTest PRIVATE Aver.RHI Aver.Core Aver.Platform)
 set_target_properties(WorldShiftTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# MeshletTest -- the mesh-shader path's meshlet buffer (layout, limits, round trip, ASMain's frustum test) with no device.
+add_executable(MeshletTest src/MeshletTest.cpp)
+target_link_libraries(MeshletTest PRIVATE Aver.RHI Aver.Core Aver.Platform)
+set_target_properties(MeshletTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # LineMeshTest -- destroyLineMesh's contract, against a real backend.
 #
 # The only RHI test here that creates a device. It has to: the rules under test (a slot is kept and
