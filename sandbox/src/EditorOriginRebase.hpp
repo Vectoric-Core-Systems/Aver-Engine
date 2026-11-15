@@ -54,6 +54,10 @@ void rebaseCmd(Cmd& c, const Vec3& deltaF, Entity invalid) {
             // Both ends are local transforms: a root on that end is the frame the scene shifts.
             if (c.reparentOldParentId == 0) shiftPos(c.before.pos, deltaF);
             if (c.reparentNewParentId == 0) shiftPos(c.after.pos, deltaF);
+            for (auto& m : c.reparentMoves) {   // the rest of a multi-row Outliner drop, by the same rule
+                if (m.oldParentId == 0) shiftPos(m.before.pos, deltaF);
+                if (m.newParentId == 0) shiftPos(m.after.pos, deltaF);
+            }
             break;
         case K::CreateObj:
         case K::DestroyObj:

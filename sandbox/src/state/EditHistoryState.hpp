@@ -118,6 +118,13 @@ struct EditHistoryState {
         // Reparent before/after parent (0 = root). Separate from parentId to avoid confusion.
         EditId reparentOldParentId = 0;
         EditId reparentNewParentId = 0;
+        // A multi-row Outliner drop: the entities after the first (which uses the fields above), each with its parent and local transform.
+        struct ReparentMove { EditId id = 0, oldParentId = 0, newParentId = 0; EditXform before{}, after{}; };
+        std::vector<ReparentMove> reparentMoves;
+        // Sibling order: every World::orderStamp this edit changed, before / after. Undo and redo put them back exactly.
+        struct OrderStamp { EditId id = 0; u64 before = 0, after = 0; };
+        std::vector<OrderStamp> orderStamps;
+        bool reorderOnly = false;   // the drop only re-sequenced siblings: no entity changes parent
 #endif
     };
 #if AVER_MODULE_LANDSCAPE

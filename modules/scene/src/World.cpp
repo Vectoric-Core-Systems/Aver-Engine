@@ -767,6 +767,30 @@ u64 World::orderStamp(Entity e) const {
     return valid(e) ? impl_->orderStamp[entityIndex(e)] : 0;
 }
 
+bool World::setSiblingOrder(const std::vector<Entity>& inOrder) {
+    Impl& d = *impl_;
+    std::vector<u64> stamps;
+    stamps.reserve(inOrder.size());
+    for (const Entity e : inOrder) {
+        if (!valid(e) || d.parentOf(e) != d.parentOf(inOrder.front())) return false;
+        stamps.push_back(d.orderStamp[entityIndex(e)]);
+    }
+    std::sort(stamps.begin(), stamps.end());
+    if (std::adjacent_find(stamps.begin(), stamps.end()) != stamps.end()) return false;   // a duplicate entity (stamps are unique)
+    for (usize i = 0; i < inOrder.size(); ++i) d.orderStamp[entityIndex(inOrder[i])] = stamps[i];
+    ++d.hierarchyRev;
+    return true;
+}
+
+bool World::setOrderStamp(Entity e, u64 stamp) {
+    if (!valid(e)) return false;
+    Impl& d = *impl_;
+    d.orderStamp[entityIndex(e)] = stamp;
+    if (stamp >= d.nextStamp) d.nextStamp = stamp + 1;
+    ++d.hierarchyRev;
+    return true;
+}
+
 // Changes on every create, reparent and retire.
 u64 World::hierarchyRevision() const { return impl_->hierarchyRev; }
 

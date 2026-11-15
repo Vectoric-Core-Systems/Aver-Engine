@@ -4,6 +4,7 @@
 #include "SandboxApp.hpp"
 #include "WorldOriginPanel.hpp"   // Show > World Origin
 #include "ViewportMarquee.hpp"
+#include "GroupTransform.hpp"   // Rotate/Scale about the selection centre
 #include "aver/rhi/PrimitiveMeshes.hpp"
 
 #include "SoftShapeDetailsModel.hpp"   // wave 11: the rope end handle drag (SoftShapeGizmos.cpp)
@@ -1758,6 +1759,41 @@ void SandboxApp::handleEditVerbKeys(const ImGuiIO& io) {
 #endif
 
 #if AVER_WITH_IMGUI
+#if AVER_MODULE_SCENE
+// One Rotate/Scale step for a multi-selection: the anchor `o` (world) and every other member swing /
+// stretch about the pivot fixed at drag start (the selection centre), so the group moves as one body.
+void SandboxApp::applyGroupDrag(EditXform& o, f32 mx, f32 my) {
+    const Vec3 pivot = viewState_.groupPivot_;
+    // The tools read the gizmo origin and axes from this: the pivot, in the anchor's orientation.
+    EditXform g = o; g.pos = pivot;
+    const Quat frame = quatFromEulerDeg(o.rotDeg);
+    Quat dq = Quat::identity();
+    Vec3 fac{1.0f, 1.0f, 1.0f};
+    if (viewState_.tool_ == Tool::Rotate) {
+        applyRotate(g, viewState_.prevMouseX_, viewState_.prevMouseY_, mx, my);
+        dq = editor::deltaRotation(frame, quatFromEulerDeg(g.rotDeg));
+        if (std::fabs(dq.x) < 1e-7f && std::fabs(dq.y) < 1e-7f && std::fabs(dq.z) < 1e-7f) return;   // no step this frame
+    } else {
+        const Vec3 s0 = g.scale;
+        applyScale(g, mx - viewState_.prevMouseX_, my - viewState_.prevMouseY_);
+        fac = editor::scaleFactors(s0, g.scale, viewState_.activeAxis_ == 3);
+    }
+    auto step = [&](const Transform& t) {
+        return viewState_.tool_ == Tool::Rotate ? editor::rotateAboutPivot(t, pivot, dq)
+                                                : editor::scaleAboutPivot(t, pivot, frame, fac);
+    };
+    Transform at; at.position = o.pos; at.rotation = frame; at.scale = o.scale;
+    at = step(at);
+    o.pos = at.position; o.rotDeg = eulerDegFromQuat(at.rotation); o.scale = at.scale;
+    // The others in WORLD space, then back to local through each one's parent.
+    scene::World& w = scene::World::instance();
+    forEachMultiMoved([&](scene::Entity ent, const Transform&) {
+        const Transform nt = step(worldTransformOf(w, ent));
+        w.setLocalTransform(ent, localFromWorldFor(w, ent, EditXform{nt.position, eulerDegFromQuat(nt.rotation), nt.scale}));
+    });
+}
+#endif
+
 // Applies the active gizmo drag to the selection for this frame's mouse position.
 void SandboxApp::applyGizmoDrag(f32 mx, f32 my) {
     if (viewState_.dragging_ && anySelected()) {
@@ -1765,7 +1801,17 @@ void SandboxApp::applyGizmoDrag(f32 mx, f32 my) {
         if (selectedXform(o)) {
             const f32 dx=mx-viewState_.prevMouseX_, dy=my-viewState_.prevMouseY_;
             const Vec3 before = o.pos;
-            if (viewState_.tool_==Tool::Move)        applyMove(o, dx, dy);
+#if AVER_MODULE_SCENE
+            const bool group = viewState_.groupDrag_ && viewState_.tool_ != Tool::Move;
+#else
+            const bool group = false;
+#endif
+            if (group) {
+#if AVER_MODULE_SCENE
+                applyGroupDrag(o, mx, my);
+#endif
+            }
+            else if (viewState_.tool_==Tool::Move)   applyMove(o, dx, dy);
             else if (viewState_.tool_==Tool::Rotate) applyRotate(o, viewState_.prevMouseX_, viewState_.prevMouseY_, mx, my);
             else if (viewState_.tool_==Tool::Scale)  applyScale(o, dx, dy);
             setSelectedXform(o);
@@ -1775,9 +1821,7 @@ void SandboxApp::applyGizmoDrag(f32 mx, f32 my) {
             // already applied to the anchor, so re-deriving per entity could snap each separately
             // and change their spacing).
             //
-            // Move only: rotate/scale about a shared pivot need a pivot CHOSEN (anchor? centroid?
-            // each object's own?), and picking one silently would be worse than the honest gap --
-            // they still act on the anchor alone.
+            // Rotate/Scale of a multi-selection pivot on the selection centre (applyGroupDrag above).
             if (viewState_.tool_ == Tool::Move) {
                 const Vec3 delta = o.pos - before;
                 if (delta.x != 0.0f || delta.y != 0.0f || delta.z != 0.0f) {
@@ -1853,6 +1897,14 @@ void SandboxApp::handleManip(Engine& e) {
     viewState_.hoverAxis_ = -1;
     EditXform gx;
     const bool haveGizmo = isXformTool && anySelected() && selectedXform(gx);
+#if AVER_MODULE_SCENE
+    // With several selected the gizmo sits at the selection centre (fixed for the length of a drag).
+    if (haveGizmo) {
+        Vec3 gp;
+        if (viewState_.dragging_ && viewState_.groupDrag_ && viewState_.tool_ != Tool::Move) gx.pos = viewState_.groupPivot_;
+        else if (groupGizmoPivot(gp))                      gx.pos = gp;
+    }
+#endif
     Vec3 gaxis[3];
     if (haveGizmo) gizmoBasis(gx, gaxis);
     if (haveGizmo && !viewState_.dragging_ && overScene)
@@ -2038,6 +2090,13 @@ void SandboxApp::drawGizmo(Engine& e) {
     if (viewState_.tool_!=Tool::Move && viewState_.tool_!=Tool::Rotate && viewState_.tool_!=Tool::Scale) return;
     EditXform x;
     if (!selectedXform(x)) return;
+#if AVER_MODULE_SCENE
+    {
+        Vec3 gp;
+        if (viewState_.dragging_ && viewState_.groupDrag_ && viewState_.tool_ != Tool::Move) x.pos = viewState_.groupPivot_;
+        else if (groupGizmoPivot(gp))                      x.pos = gp;
+    }
+#endif
     const Vec3 O = x.pos;
     const f32 L = gizmoLen(O);
     // The handles are drawn along the SAME axes pickAxis tests and applyMove drags. The line
@@ -2726,6 +2785,12 @@ bool SandboxApp::selectionBounds(Vec3& center, f32& radius) const {
     // selectedRadius for a single object.
     radius = std::fmax(1.0f, dist(mn, mx) * 0.5f);
     return true;
+}
+
+bool SandboxApp::groupGizmoPivot(Vec3& pivot) const {
+    if (selectionUi_.sel_ != SelectionState::kSelScene || multiStale() || selectionUi_.multiSel_.size() < 2) return false;
+    f32 radius;
+    return selectionBounds(pivot, radius);
 }
 
 #if AVER_WITH_IMGUI

@@ -1078,3 +1078,15 @@ if(TARGET Aver.Formats)
   target_link_libraries(ModelingModeTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
   set_target_properties(ModelingModeTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# GroupTransformTest -- sandbox/src/GroupTransform.hpp: rotate / scale about a shared pivot (multi-selection gizmos). Header-only, Core-only.
+add_executable(GroupTransformTest src/GroupTransformTest.cpp)
+target_include_directories(GroupTransformTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(GroupTransformTest PRIVATE Aver.Core)
+set_target_properties(GroupTransformTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# OutlinerReorderTest -- sandbox/src/OutlinerReorder.hpp: drop zones and sibling placement for the Outliner. Header-only, Core-only.
+add_executable(OutlinerReorderTest src/OutlinerReorderTest.cpp)
+target_include_directories(OutlinerReorderTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(OutlinerReorderTest PRIVATE Aver.Core)
+set_target_properties(OutlinerReorderTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

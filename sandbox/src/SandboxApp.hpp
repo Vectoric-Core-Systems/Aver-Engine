@@ -1362,6 +1362,14 @@ private:
     ReparentLegality reparentLegality(scene::Entity dragged, scene::Entity newParent) const;
 
     void pushReparent(scene::Entity child, scene::Entity newParent);
+    // Several rows at once under newParent, optionally placed before/after `anchor` (a child of newParent). One undo entry.
+    void pushReparentMoves(const std::vector<scene::Entity>& ents, scene::Entity newParent, scene::Entity anchor, bool placeAfter);
+    // After sibling order changes: rebuild the Outliner and re-sequence levelEntities_ (the saved placement order).
+    void afterHierarchyOrderChange();
+    void reparentEntityTo(EditId id, EditId parentEditId, const EditXform& xf);
+    void applyReparentCmd(const EditCmd& c, bool undoing);
+    // What dragging `dragged` carries: the whole selection when it is part of it (the dragged row first), else just the row.
+    std::vector<scene::Entity> outlinerDragSet(scene::Entity dragged) const;
 
     void applyReparentTo(const EditCmd& c, EditId parentEditId, const EditXform& xf);
 
@@ -1507,6 +1515,10 @@ private:
     void applyMove(EditXform& o, f32 dx, f32 dy);
     void applyScale(EditXform& o, f32 dx, f32 dy);
     void applyRotate(EditXform& o, f32 px, f32 py, f32 mx, f32 my);
+#if AVER_MODULE_SCENE
+    // Rotate/Scale step for a multi-selection about viewState_.groupPivot_; `o` is the anchor (world), updated in place.
+    void applyGroupDrag(EditXform& o, f32 mx, f32 my);
+#endif
 
     void handleManip(Engine& e);
 #if AVER_WITH_IMGUI && AVER_MODULE_SCENE
@@ -1541,6 +1553,8 @@ private:
     void unhideAll();
     // Union of selection's world bounds for framing and gizmo anchor.
     bool selectionBounds(Vec3& center, f32& radius) const;
+    // True with several entities selected; `pivot` is then the selection's bounds centre (the gizmo's origin).
+    bool groupGizmoPivot(Vec3& pivot) const;
 #endif
 
 #if AVER_MODULE_LANDSCAPE && AVER_WITH_IMGUI

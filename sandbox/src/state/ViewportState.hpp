@@ -42,6 +42,8 @@ struct ViewportState {
     // Rotation drag accumulators for snap working on total swept angle rather than per-frame delta.
     f32 rotDragDeg_=0.0f, rotAppliedDeg_=0.0f;
     f32 prevMouseX_=0, prevMouseY_=0;
+    // Multi-selection Rotate/Scale: pivot (selection bounds centre) fixed at drag start, and whether this drag uses it.
+    Vec3 groupPivot_{0,0,0}; bool groupDrag_=false;
     // snapping (off by default; toggled from the toolbar carets)
     bool snapMove_=false, snapRot_=false, snapScale_=false;
     f32  vpBarRightW_ = 0.0f;   // width the viewport options bar's right cluster measured last frame

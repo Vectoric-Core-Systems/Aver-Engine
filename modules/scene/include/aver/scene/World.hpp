@@ -9,6 +9,7 @@
 #include "aver/scene/Fields.hpp"
 
 #include <string_view>
+#include <vector>
 
 namespace aver::scene {
 
@@ -124,6 +125,11 @@ public:
     // Creation or reparent order: siblings, and roots, sort by it ascending (the child list itself is
     // newest-first). 0 for a stale handle.
     u64    orderStamp(Entity e) const;
+    // Re-sequences siblings: `inOrder` (all under one parent, or all roots) take the stamps they hold now, redistributed ascending in this
+    // sequence, so they sort as listed and every other entity keeps its place. False (nothing changed) on a stale handle, a duplicate, or mixed parents.
+    bool   setSiblingOrder(const std::vector<Entity>& inOrder);
+    // Puts back a stamp read earlier from orderStamp (undo). A stamp is only meaningful among its siblings; the caller restores a whole changed set.
+    bool   setOrderStamp(Entity e, u64 stamp);
     // Changes on every create, reparent and retire.
     u64    hierarchyRevision() const;
     // Number of immediate children.

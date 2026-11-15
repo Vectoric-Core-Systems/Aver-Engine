@@ -4,6 +4,7 @@
 
 #include "SandboxApp.hpp"
 #include "EditorChrome.hpp"
+#include "OutlinerReorder.hpp"
 #if AVER_MODULE_FRAMEWORK
 #  include "aver/game/PlacementProps.hpp"
 #endif
@@ -1025,16 +1026,56 @@ std::string SandboxApp::outlinerLabelFor(scene::Entity e) const {
     return nm.empty() ? ("Entity " + std::to_string((u32)e)) : nm;
 }
 
+// The rows an Outliner drag carries: the whole selection when the dragged row is part of it, else just that row. The dragged row
+// comes first (drawOutlinerFlatRows keeps it submitted by reading the first entity of the payload).
+std::vector<scene::Entity> SandboxApp::outlinerDragSet(scene::Entity dragged) const {
+    std::vector<scene::Entity> v{dragged};
+    if (!multiIsSelected(dragged)) return v;
+    for (const scene::Entity e : selectedEntities())
+        if (e != dragged) v.push_back(e);
+    return v;
+}
+
+// A drag payload's entities (ImGui allows one payload per drag, so a multi-row drag carries an array), or nullptr when the payload
+// is not ours.
+static const scene::Entity* outlinerPayloadEntities(const ImGuiPayload* p, int& count) {
+    count = 0;
+    if (!p || !p->IsDataType(kOutlinerReparentDragDropType) || p->DataSize < static_cast<int>(sizeof(scene::Entity)) ||
+        p->DataSize % static_cast<int>(sizeof(scene::Entity)) != 0)
+        return nullptr;
+    count = p->DataSize / static_cast<int>(sizeof(scene::Entity));
+    return static_cast<const scene::Entity*>(p->Data);
+}
+
+// `ents` in the order the Outliner shows them (rows it does not list go last, keeping their given order), so a multi-row drop
+// lands in the sequence the user sees.
+static void outlinerSortVisual(std::vector<scene::Entity>& ents, const std::vector<scene::Entity>& visual) {
+    if (ents.size() < 2) return;
+    std::unordered_map<u32, u32> pos;
+    pos.reserve(visual.size());
+    for (u32 i = 0; i < visual.size(); ++i) pos.emplace(static_cast<u32>(visual[i]), i);
+    const auto key = [&](scene::Entity e) { const auto it = pos.find(static_cast<u32>(e)); return it == pos.end() ? ~0u : it->second; };
+    std::stable_sort(ents.begin(), ents.end(), [&](scene::Entity a, scene::Entity b) { return key(a) < key(b); });
+}
+
 // Makes a row draggable. Default flags on purpose: TreeNodeEx already opens a collapsed parent
 // when a drag hovers it, and that is free unless SourceNoHoldToOpenOthers is passed.
+// Dragging a selected row carries the whole selection.
 void SandboxApp::drawOutlinerDragSource(scene::Entity ent) {
     if (!ImGui::BeginDragDropSource()) return;
-    ImGui::SetDragDropPayload(kOutlinerReparentDragDropType, &ent, sizeof(scene::Entity));
+    int n = 0;
+    if (!outlinerPayloadEntities(ImGui::GetDragDropPayload(), n)) {   // first frame of the drag: build the payload once
+        const std::vector<scene::Entity> set = outlinerDragSet(ent);
+        ImGui::SetDragDropPayload(kOutlinerReparentDragDropType, set.data(), set.size() * sizeof(scene::Entity));
+        n = static_cast<int>(set.size());
+    }
     ImGui::TextUnformatted(outlinerLabelFor(ent).c_str());
+    if (n > 1) ImGui::Text("+ %d more", n - 1);
     ImGui::EndDragDropSource();
 }
 
-// Makes a row a drop target, in two tiers.
+// Makes a row a drop target, in two tiers, and splits it in zones: the top quarter inserts the dragged rows BEFORE this one, the
+// bottom quarter AFTER it (sibling reorder, re-parenting first when the parents differ), the middle re-parents onto it.
 // A CYCLE IS NEVER OFFERED: the row peeks at the payload before BeginDragDropTarget, so dropping
 // onto yourself or a descendant has no target at all (GraphEditor's/BtEditor's filter-before-
 // offering idiom). World::setParent refuses a cycle anyway; this keeps the UI from proposing one.
@@ -1044,17 +1085,23 @@ void SandboxApp::drawOutlinerDragSource(scene::Entity ent) {
 // visibly works and quietly reverts is worse than one that explains why it can't happen.
 void SandboxApp::drawOutlinerDropTarget(scene::Entity ent) {
     scene::World& w = scene::World::instance();
-    scene::Entity dragged = scene::kInvalidEntity;
-    if (const ImGuiPayload* peek = ImGui::GetDragDropPayload())
-        if (peek->IsDataType(kOutlinerReparentDragDropType) &&
-            peek->DataSize == static_cast<int>(sizeof(scene::Entity)))
-            dragged = *static_cast<const scene::Entity*>(peek->Data);
+    int n = 0;
+    const scene::Entity* dragged = outlinerPayloadEntities(ImGui::GetDragDropPayload(), n);
 
-    if (dragged != scene::kInvalidEntity && outlinerIsAncestorOf(w, dragged, ent)) return;
+    // Is this row, or anything above it, one of the carried rows? (The payload is the selection when it holds more than one row.)
+    if (dragged) {
+        for (scene::Entity p = ent; p != scene::kInvalidEntity; p = w.parent(p))
+            if (p == dragged[0] || (n > 1 && multiIsSelected(p))) return;
+    }
 
     if (!ImGui::BeginDragDropTarget()) return;
-    const bool offLevel = dragged != scene::kInvalidEntity &&
-                          reparentLegality(dragged, ent) == ReparentLegality::OffLevel;
+    const float y0 = ImGui::GetItemRectMin().y, y1 = ImGui::GetItemRectMax().y;
+    const editor::OutlinerDropZone zone = editor::outlinerDropZone(ImGui::GetMousePos().y, y0, y1);
+    const bool into = zone == editor::OutlinerDropZone::Into;
+    const scene::Entity newParent = into ? ent : w.parent(ent);
+    const scene::Entity anchor = into ? scene::kInvalidEntity : ent;
+
+    const bool offLevel = dragged && reparentLegality(dragged[0], newParent) == ReparentLegality::OffLevel;
     if (offLevel) {
         // Peek only, so ImGui never paints the row as about to accept -- the delivering branch is
         // structurally unreachable here, not merely un-taken.
@@ -1062,11 +1109,22 @@ void SandboxApp::drawOutlinerDropTarget(scene::Entity ent) {
                                      ImGuiDragDropFlags_AcceptPeekOnly);
         ImGui::SetTooltip("'%s' is not part of the saved level. This relationship would be lost "
                           "on the next save.",
-                          outlinerLabelFor(isLevelOwned(dragged) ? ent : dragged).c_str());
-    } else if (const ImGuiPayload* payload =
-                   ImGui::AcceptDragDropPayload(kOutlinerReparentDragDropType)) {
-        if (payload->DataSize == static_cast<int>(sizeof(scene::Entity)))
-            pushReparent(*static_cast<const scene::Entity*>(payload->Data), ent);
+                          outlinerLabelFor(isLevelOwned(dragged[0]) ? ent : dragged[0]).c_str());
+    } else if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(
+                   kOutlinerReparentDragDropType,
+                   ImGuiDragDropFlags_AcceptBeforeDelivery | (into ? 0 : ImGuiDragDropFlags_AcceptNoDrawDefaultRect))) {
+        if (!into) {   // an insertion line on the edge the dragged rows will land on, instead of the whole-row highlight
+            const float y = zone == editor::OutlinerDropZone::Before ? y0 : y1;
+            ImGui::GetWindowDrawList()->AddLine(ImVec2(ImGui::GetItemRectMin().x, y), ImVec2(ImGui::GetItemRectMax().x, y),
+                                                ImGui::GetColorU32(ImGuiCol_DragDropTarget), 2.0f);
+        }
+        int count = 0;
+        if (payload->IsDelivery())
+            if (const scene::Entity* data = outlinerPayloadEntities(payload, count)) {
+                std::vector<scene::Entity> ents(data, data + count);
+                outlinerSortVisual(ents, selectionUi_.outlinerOrder_);
+                pushReparentMoves(ents, newParent, anchor, zone == editor::OutlinerDropZone::After);
+            }
     }
     ImGui::EndDragDropTarget();
 }
@@ -1331,11 +1389,9 @@ void SandboxApp::drawOutlinerRow(const OutlinerRow& row,
 // nearly always.
 static int outlinerPinnedRoots(const std::vector<scene::Entity>& roots, scene::Entity renaming,
                                scene::Entity ctxRow, int (&out)[3]) {
-    scene::Entity dragged = scene::kInvalidEntity;
-    if (const ImGuiPayload* peek = ImGui::GetDragDropPayload())
-        if (peek->IsDataType(kOutlinerReparentDragDropType) &&
-            peek->DataSize == static_cast<int>(sizeof(scene::Entity)))
-            dragged = *static_cast<const scene::Entity*>(peek->Data);
+    int draggedCount = 0;
+    const scene::Entity* draggedRows = outlinerPayloadEntities(ImGui::GetDragDropPayload(), draggedCount);
+    const scene::Entity dragged = draggedRows ? draggedRows[0] : scene::kInvalidEntity;   // the row the drag started on
     const scene::Entity pins[3] = {renaming, dragged, ctxRow};
     int pinned = 0;                      // distinct pins, so the scan below stops at the last one
     for (int a = 0; a < 3; ++a) {
@@ -1395,7 +1451,7 @@ void SandboxApp::drawOutlinerFlatRows() {
 // (outlinerParentRoots_, found once by the rebuild): each maximal run of leaf roots between two
 // parents goes through its own ImGuiListClipper, exactly as drawOutlinerFlatRows does for a whole
 // flat list, and each parent is drawn by drawOutlinerRow with its open subtree, as before. Roots
-// keep their alphabetical order, so the rows come out in the same places as they always did; the
+// keep their sibling order, so the rows come out in the same places as they always did; the
 // clipper only declines to build the ones nobody can see. Per frame that is the rows on screen, the
 // parents and their subtrees, plus one memcpy of the root entities into outlinerOrder_.
 //
@@ -1701,13 +1757,14 @@ void SandboxApp::rebuildOutlinerCache() {
             selectionUi_.outlinerRoots_.push_back(&r);   // true root, or one whose parent was filtered out or
                                             // gone -- promoted so it stays reachable.
     }
-    // ALPHABETICAL, not scan order: linkToParent PREPENDS, so the engine's child order is
-    // newest-first and the list would visibly reshuffle every time anything is attached.
-    const auto byLabel = [](const OutlinerRow* a, const OutlinerRow* b) { return a->shown < b->shown; };
-    std::sort(selectionUi_.outlinerRoots_.begin(), selectionUi_.outlinerRoots_.end(), byLabel);
-    for (auto& kv : selectionUi_.outlinerChildren_) std::sort(kv.second.begin(), kv.second.end(), byLabel);
+    // SIBLING ORDER (World::orderStamp: creation / reparent / drag-reorder order), not scan order -- linkToParent PREPENDS, so the
+    // engine's child list is newest-first and would visibly reshuffle every time anything is attached -- and no longer alphabetical,
+    // so a row dropped between two siblings stays there and the order is what the level saves.
+    const auto bySibling = [&w](const OutlinerRow* a, const OutlinerRow* b) { return w.orderStamp(a->ent) < w.orderStamp(b->ent); };
+    std::sort(selectionUi_.outlinerRoots_.begin(), selectionUi_.outlinerRoots_.end(), bySibling);
+    for (auto& kv : selectionUi_.outlinerChildren_) std::sort(kv.second.begin(), kv.second.end(), bySibling);
 
-    // Roots filed in a folder leave the root list and draw under their folder (same alphabetical order).
+    // Roots filed in a folder leave the root list and draw under their folder (same sibling order).
     selectionUi_.outlinerFolderRows_.clear();
     if (!selectionUi_.outlinerFolderOf_.empty()) {
         std::vector<const OutlinerRow*> unfiled;
@@ -1727,7 +1784,7 @@ void SandboxApp::rebuildOutlinerCache() {
     selectionUi_.outlinerAuditCursor_ = 0;
 
     // THE ROOTS AS A PLAIN ARRAY, and which of them have children, both found HERE so the per-frame
-    // draws never touch a row to learn them: the roots are alphabetical, so their rows sit all over
+    // draws never touch a row to learn them: the roots are in sibling order, so their rows sit all over
     // outlinerRows_ and a pass over them is a cache miss per root (52k of them every frame).
     // outlinerParentRoots_ is empty for a flat list, which skips the lookups.
     selectionUi_.outlinerRootEnts_.clear();
@@ -1850,11 +1907,13 @@ void SandboxApp::drawOutlinerFolders(const std::string& parent) {
         const bool open = ImGui::TreeNodeEx(label.c_str(), ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth |
                                                            ImGuiTreeNodeFlags_DefaultOpen);
         if (ImGui::BeginDragDropTarget()) {
-            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(kOutlinerReparentDragDropType))
-                if (payload->DataSize == static_cast<int>(sizeof(scene::Entity))) {
-                    doMove = moveTargets(*static_cast<const scene::Entity*>(payload->Data));
+            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(kOutlinerReparentDragDropType)) {
+                int count = 0;
+                if (const scene::Entity* data = outlinerPayloadEntities(payload, count)) {
+                    doMove = moveTargets(data[0]);
                     doMoveTo = path;
                 }
+            }
             ImGui::EndDragDropTarget();
         }
         if (ImGui::BeginPopupContextItem("##folderCtx")) {
@@ -1999,12 +2058,14 @@ void SandboxApp::buildOutlinerPanel() {
         uiReg_.track("outliner.rootDropZone");
         if (ImGui::BeginDragDropTarget()) {
             if (const ImGuiPayload* payload =
-                    ImGui::AcceptDragDropPayload(kOutlinerReparentDragDropType))
-                if (payload->DataSize == static_cast<int>(sizeof(scene::Entity))) {
-                    const scene::Entity dragged = *static_cast<const scene::Entity*>(payload->Data);
-                    pushReparent(dragged, scene::kInvalidEntity);
-                    outlinerMoveToFolder({dragged}, std::string());
+                    ImGui::AcceptDragDropPayload(kOutlinerReparentDragDropType)) {
+                int count = 0;
+                if (const scene::Entity* data = outlinerPayloadEntities(payload, count)) {
+                    std::vector<scene::Entity> dragged(data, data + count);
+                    pushReparentMoves(dragged, scene::kInvalidEntity, scene::kInvalidEntity, false);
+                    outlinerMoveToFolder(dragged, std::string());
                 }
+            }
             ImGui::EndDragDropTarget();
         }
     }

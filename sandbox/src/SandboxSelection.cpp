@@ -3,8 +3,10 @@
 // verbatim; the class itself is declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
+#include "OutlinerReorder.hpp"
 
 #include <cstring>
+#include <unordered_set>
 
 namespace aver {
 #if AVER_MODULE_SCENE
@@ -589,6 +591,10 @@ void SandboxApp::pushEdit(EditCmd c) {
 bool SandboxApp::beginTransformEdit() {
     if (!selectedXform(edit_.editBefore_)) return false;
     edit_.editBeforeValid_ = true;
+#if AVER_MODULE_SCENE
+    // Rotate/Scale of several objects pivot on the selection centre, fixed now for the whole gesture.
+    viewState_.groupDrag_ = groupGizmoPivot(viewState_.groupPivot_);
+#endif
     // The rest of the selection, captured BEFORE the drag starts moving anything. The mover runs
     // per frame and applies an incremental delta, so by the time the gesture ends the original
     // is gone -- there is no later moment this could be read.
@@ -605,6 +611,7 @@ bool SandboxApp::beginTransformEdit() {
 void SandboxApp::endTransformEdit() {
     if (!edit_.editBeforeValid_) return;
     edit_.editBeforeValid_ = false;
+    viewState_.groupDrag_ = false;
 
     // The rest of the set first, so the "did anything move at all" test below can consider them.
     std::vector<EditCmd::AlsoMoved> also;
@@ -898,58 +905,151 @@ SandboxApp::ReparentLegality SandboxApp::reparentLegality(scene::Entity dragged,
     return ReparentLegality::Ok;
 }
 
-// Reparents `child` under `newParent` (kInvalidEntity = make it a root) and pushes one undo
-// entry. GUARD THEN MUTATE: a refused drop must not leave a phantom command on the stack.
+// Reparents `child` under `newParent` (kInvalidEntity = make it a root) and pushes one undo entry.
 void SandboxApp::pushReparent(scene::Entity child, scene::Entity newParent) {
+    pushReparentMoves({child}, newParent, scene::kInvalidEntity, false);
+}
+
+// Moves `in` under `newParent` (kInvalidEntity = roots) and, when `anchor` (a child of newParent) is given, sets them
+// directly before / after it among the siblings (their given sequence). ONE undo entry for the whole drop.
+//
+// GUARD THEN MUTATE: a refused drop must not leave a phantom command on the stack. keepWorld = TRUE for the live drop (the
+// object must not jump out from under the mouse); undo and redo REPLAY the captured local values and order stamps rather than
+// recomputing, because the decompose is not guaranteed bit-exact across repeated cycles. NO BODY REBUILD: keepWorld leaves each
+// world transform exactly where it was, and undo/redo replay the identical numbers under the identical rule.
+// A refusal by World (the return value is checked) records nothing for that entity.
+//
+// ORDER IS THE WORLD'S sibling stamp (World::orderStamp). Every stamp this changed is recorded before/after, so undo puts the
+// old order back exactly; afterHierarchyOrderChange then keeps the saved placement order in step, which is how the order
+// survives save/load (the writer emits siblings in placement order and the loader stamps in file order).
+void SandboxApp::pushReparentMoves(const std::vector<scene::Entity>& in, scene::Entity newParent, scene::Entity anchor, bool placeAfter) {
     scene::World& w = scene::World::instance();
-    if (!w.valid(child)) return;
-    if (reparentLegality(child, newParent) != ReparentLegality::Ok) return;
-    const scene::Entity oldParent = w.parent(child);
-    if (oldParent == newParent) return;   // dropped back where it was; no undo-stack noise
+    // The LOCAL transform of an entity as the edit history stores it.
+    const auto localXformOf = [&w](scene::Entity e) {
+        EditXform x{};
+        if (const auto* loc = w.component<scene::CLocal>(e, scene::kComponentLocal)) {
+            x.pos = loc->xf.position;
+            x.rotDeg = eulerDegFromQuat(loc->xf.rotation);
+            x.scale = loc->xf.scale;
+        }
+        return x;
+    };
+    if (newParent != scene::kInvalidEntity && !w.valid(newParent)) return;
+    if (anchor != scene::kInvalidEntity && (!w.valid(anchor) || w.parent(anchor) != newParent)) return;
+
+    // Legality against ONE set built here (isLevelOwned is a linear search per call; a big selection would be quadratic).
+    const std::unordered_set<u32> owned(lvl_.levelEntities_.begin(), lvl_.levelEntities_.end());
+    const auto isOwned = [&](scene::Entity e) { return owned.count(static_cast<u32>(e)) != 0; };
+    std::vector<scene::Entity> ents;
+    for (const scene::Entity e : in) {
+        if (!w.valid(e) || e == anchor || std::find(ents.begin(), ents.end(), e) != ents.end()) continue;
+        if (newParent != scene::kInvalidEntity && outlinerIsAncestorOf(w, e, newParent)) continue;   // a cycle
+        if (!isOwned(e) || (newParent != scene::kInvalidEntity && !isOwned(newParent))) continue;    // off-level: lost on save
+        ents.push_back(e);
+    }
+    // A carried row beneath another carried row rides along with its ancestor.
+    {
+        const std::vector<scene::Entity> all = ents;
+        ents.erase(std::remove_if(ents.begin(), ents.end(), [&](scene::Entity e) {
+            for (scene::Entity p = w.parent(e); p != scene::kInvalidEntity; p = w.parent(p))
+                if (std::find(all.begin(), all.end(), p) != all.end()) return true;
+            return false;
+        }), ents.end());
+    }
+    if (ents.empty()) return;
+
+    // Siblings in stamp order: the children of `p`, or every root.
+    const auto siblingsOf = [&](scene::Entity p) {
+        std::vector<scene::Entity> v;
+        if (p != scene::kInvalidEntity) {
+            for (scene::Entity c = w.firstChild(p); c != scene::kInvalidEntity; c = w.nextSibling(c)) v.push_back(c);
+        } else {
+            for (u32 i = 0; i < w.count(); ++i) {
+                const scene::Entity e = w.at(i);
+                if (w.valid(e) && !w.destroyPending(e) && w.parent(e) == scene::kInvalidEntity) v.push_back(e);
+            }
+        }
+        std::sort(v.begin(), v.end(), [&](scene::Entity a, scene::Entity b) { return w.orderStamp(a) < w.orderStamp(b); });
+        return v;
+    };
+
+    std::unordered_map<u32, u64> stampBefore;   // every entity whose stamp this may change
+    for (const scene::Entity e : ents) stampBefore[static_cast<u32>(e)] = w.orderStamp(e);
+    if (anchor != scene::kInvalidEntity)
+        for (const scene::Entity s : siblingsOf(newParent)) stampBefore[static_cast<u32>(s)] = w.orderStamp(s);
+
+    std::vector<EditCmd::ReparentMove> moves;
+    std::vector<scene::Entity> placed;   // carried rows now under newParent
+    for (const scene::Entity e : ents) {
+        const scene::Entity oldParent = w.parent(e);
+        if (oldParent != newParent) {
+            EditCmd::ReparentMove m;
+            m.id = editIdFor(e);
+            m.oldParentId = oldParent != scene::kInvalidEntity ? editIdFor(oldParent) : 0;
+            m.before = localXformOf(e);
+            if (!w.setParent(e, newParent, true)) continue;
+            m.newParentId = newParent != scene::kInvalidEntity ? editIdFor(newParent) : 0;
+            m.after = localXformOf(e);
+            moves.push_back(m);
+        }
+        placed.push_back(e);
+    }
+
+    if (anchor != scene::kInvalidEntity && !placed.empty()) {
+        std::vector<scene::Entity> sib = siblingsOf(newParent);
+        if (editor::placeBeside(sib, placed, anchor, placeAfter)) w.setSiblingOrder(sib);
+    }
+
+    std::vector<EditCmd::OrderStamp> stamps;
+    for (const auto& [key, was] : stampBefore) {
+        const scene::Entity e = static_cast<scene::Entity>(key);
+        if (!w.valid(e)) continue;
+        const u64 now = w.orderStamp(e);
+        if (now != was) stamps.push_back({editIdFor(e), was, now});
+    }
+    if (moves.empty() && stamps.empty()) return;   // dropped back where it was; no undo-stack noise
 
     EditCmd c;
     c.kind = EditCmd::Kind::Reparent;
-    c.id = editIdFor(child);
-    c.reparentOldParentId = oldParent != scene::kInvalidEntity ? editIdFor(oldParent) : 0;
-    if (const auto* loc = w.component<scene::CLocal>(child, scene::kComponentLocal)) {
-        c.before.pos = loc->xf.position;
-        c.before.rotDeg = eulerDegFromQuat(loc->xf.rotation);
-        c.before.scale = loc->xf.scale;
+    if (!moves.empty()) {
+        const EditCmd::ReparentMove& m0 = moves.front();
+        c.id = m0.id;
+        c.reparentOldParentId = m0.oldParentId;
+        c.reparentNewParentId = m0.newParentId;
+        c.before = m0.before;
+        c.after = m0.after;
+        c.reparentMoves.assign(moves.begin() + 1, moves.end());
+    } else {
+        // Only the order changed: nothing is re-parented on undo/redo (that would restamp the row).
+        c.reorderOnly = true;
+        c.id = editIdFor(placed.front());
+        c.reparentOldParentId = c.reparentNewParentId = newParent != scene::kInvalidEntity ? editIdFor(newParent) : 0;
+        c.before = c.after = localXformOf(placed.front());
     }
-
-    // keepWorld = TRUE for the live drop: this is somebody dragging, and the object must not
-    // jump out from under the mouse. Undo and redo then REPLAY the captured local values rather
-    // than running keepWorld a second time -- the decompose is not guaranteed bit-exact across
-    // repeated cycles, and replaying stored ground truth is what applyXformTo and recreateFrom
-    // already do. NO BODY REBUILD ANYWHERE IN THIS FUNCTION OR IN applyReparentTo, unlike a
-    // Transform command: keepWorld's whole job is to leave `child`'s WORLD transform exactly where
-    // it was, and undo/redo replay the identical local numbers under the identical rule -- a body
-    // fitted in world space never goes stale here, on the anchor or on any descendant.
-    //
-    // AND THE RETURN VALUE IS CHECKED, which no existing caller of setParent does. A refusal
-    // here means the world declined the move; pushing a command for it would put an entry on
-    // the stack whose undo restores a state that never happened.
-    if (!w.setParent(child, newParent, true)) return;
-
-    if (const auto* loc = w.component<scene::CLocal>(child, scene::kComponentLocal)) {
-        c.after.pos = loc->xf.position;
-        c.after.rotDeg = eulerDegFromQuat(loc->xf.rotation);
-        c.after.scale = loc->xf.scale;
-    }
-    c.reparentNewParentId = newParent != scene::kInvalidEntity ? editIdFor(newParent) : 0;
-    selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = child;
+    c.orderStamps = std::move(stamps);
+    if (ents.size() == 1) { selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = ents.front(); }
+    afterHierarchyOrderChange();
     pushEdit(std::move(c));
 }
 
-// Undo and redo share this: re-parent WITHOUT keepWorld, then stamp the exact local transform
-// captured at that end of the edit. keepWorld would recompute one instead, which is how a
-// repeated undo/redo cycle drifts.
+// Sibling order changed (drop, undo, redo): the Outliner rebuilds its rows, and the level's entity list -- which is the order
+// saveLevel writes placements in -- is re-sequenced to the world's sibling order. A streamed level writes its own records.
+void SandboxApp::afterHierarchyOrderChange() {
+    ++selectionUi_.outlinerFolderRev_;
+    if (level_.streaming().active()) return;
+    scene::World& w = scene::World::instance();
+    std::stable_sort(lvl_.levelEntities_.begin(), lvl_.levelEntities_.end(),
+                     [&](scene::Entity a, scene::Entity b) { return w.orderStamp(a) < w.orderStamp(b); });
+}
+
+// Re-parents one entity WITHOUT keepWorld, then stamps the exact local transform captured at that end of the edit. keepWorld
+// would recompute one instead, which is how a repeated undo/redo cycle drifts.
 //
 // A PARENT THAT NO LONGER EXISTS resolves to root rather than aborting -- losing the
 // relationship is recoverable by hand, leaving the entity somewhere nobody asked for is not.
-void SandboxApp::applyReparentTo(const EditCmd& c, EditId parentEditId, const EditXform& xf) {
+void SandboxApp::reparentEntityTo(EditId id, EditId parentEditId, const EditXform& xf) {
     scene::World& w = scene::World::instance();
-    const scene::Entity e = static_cast<scene::Entity>(entityForEdit(c.id));
+    const scene::Entity e = static_cast<scene::Entity>(entityForEdit(id));
     if (e == scene::kInvalidEntity || !w.valid(e)) return;
     scene::Entity parent = scene::kInvalidEntity;
     if (parentEditId) {
@@ -962,7 +1062,31 @@ void SandboxApp::applyReparentTo(const EditCmd& c, EditId parentEditId, const Ed
     t.rotation = quatFromEulerDeg(xf.rotDeg);
     t.scale    = xf.scale;
     w.setLocalTransform(e, t);
-    selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = e;
+}
+
+// Undo and redo of the first entity of a Reparent command.
+void SandboxApp::applyReparentTo(const EditCmd& c, EditId parentEditId, const EditXform& xf) {
+    reparentEntityTo(c.id, parentEditId, xf);
+    const scene::Entity e = static_cast<scene::Entity>(entityForEdit(c.id));
+    if (e != scene::kInvalidEntity && scene::World::instance().valid(e)) {
+        selectionUi_.sel_ = SelectionState::kSelScene; selectionUi_.selEntity_ = e;
+    }
+}
+
+// Undo / redo of a whole Reparent command: every moved entity, then the recorded sibling stamps (the re-parenting restamps
+// each moved row, so the stamps go last).
+void SandboxApp::applyReparentCmd(const EditCmd& c, bool undoing) {
+    if (!c.reorderOnly) {
+        applyReparentTo(c, undoing ? c.reparentOldParentId : c.reparentNewParentId, undoing ? c.before : c.after);
+        for (const EditCmd::ReparentMove& m : c.reparentMoves)
+            reparentEntityTo(m.id, undoing ? m.oldParentId : m.newParentId, undoing ? m.before : m.after);
+    }
+    scene::World& w = scene::World::instance();
+    for (const EditCmd::OrderStamp& s : c.orderStamps) {
+        const scene::Entity e = static_cast<scene::Entity>(entityForEdit(s.id));
+        if (e != scene::kInvalidEntity && w.valid(e)) w.setOrderStamp(e, undoing ? s.before : s.after);
+    }
+    afterHierarchyOrderChange();
 }
 
 // Fills `c.subtree` with `e`'s descendants, parents before children, for a Destroy.
@@ -1491,7 +1615,7 @@ void SandboxApp::undo() {
         case EditCmd::Kind::Create:    destroyEntity(entityForEdit(c.id));
                                        selectionUi_.sel_ = -1; selectionUi_.selEntity_ = scene::kInvalidEntity; break;
         case EditCmd::Kind::Destroy:   recreateFrom(c); applyOutlinerMeta(c, /*undoing=*/true); break;
-        case EditCmd::Kind::Reparent:  applyReparentTo(c, c.reparentOldParentId, c.before); break;
+        case EditCmd::Kind::Reparent:  applyReparentCmd(c, /*undoing=*/true); break;
 #endif
 #if AVER_MODULE_PBR
         case EditCmd::Kind::Material:  applyMaterialDesc(c.matHandle, c.matBefore); break;
@@ -1566,7 +1690,7 @@ void SandboxApp::redo() {
         case EditCmd::Kind::Create:    recreateFrom(c); break;
         case EditCmd::Kind::Destroy:   destroyEntity(entityForEdit(c.id));
                                        selectionUi_.sel_ = -1; selectionUi_.selEntity_ = scene::kInvalidEntity; break;
-        case EditCmd::Kind::Reparent:  applyReparentTo(c, c.reparentNewParentId, c.after); break;
+        case EditCmd::Kind::Reparent:  applyReparentCmd(c, /*undoing=*/false); break;
 #endif
 #if AVER_MODULE_PBR
         case EditCmd::Kind::Material:  applyMaterialDesc(c.matHandle, c.matAfter); break;

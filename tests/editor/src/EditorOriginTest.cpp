@@ -72,6 +72,8 @@ struct Cmd {
     struct AlsoMoved { u32 id = 0; Transform beforeLocal, afterLocal; bool root = true; };
     std::vector<AlsoMoved> alsoMoved;
     u32 parentId = 0, reparentOldParentId = 0, reparentNewParentId = 0;
+    struct ReparentMove { u32 id = 0, oldParentId = 0, newParentId = 0; Xf before{}, after{}; };
+    std::vector<ReparentMove> reparentMoves;
     struct Obj { Vec3 pos{}; } objSnapshot;
     std::shared_ptr<PrefabEdit> prefab;
 };
@@ -127,6 +129,18 @@ static void testRebase() {
         editor::originRebase::rebaseCmd(c, d, fake::kInvalid);
         check(same(c.before.pos, Vec3{X - kStep, 0.0f, 0.0f}) && same(c.after.pos, Vec3{12.0f, 0.0f, 0.0f}),
               "Reparent: the root end moves, the child end does not");
+    }
+    {   // a multi-row drop: every carried entity follows the same root/child rule
+        Cmd c; c.kind = K::Reparent;
+        c.reparentMoves.resize(2);
+        c.reparentMoves[0].before.pos = Vec3{X, 0.0f, 0.0f};    // root -> child of 9
+        c.reparentMoves[0].after.pos = Vec3{5.0f, 0.0f, 0.0f};  c.reparentMoves[0].newParentId = 9;
+        c.reparentMoves[1].before.pos = Vec3{6.0f, 0.0f, 0.0f}; c.reparentMoves[1].oldParentId = 9;   // child -> root
+        c.reparentMoves[1].after.pos = Vec3{X, 0.0f, 0.0f};
+        editor::originRebase::rebaseCmd(c, d, fake::kInvalid);
+        check(same(c.reparentMoves[0].before.pos, Vec3{X - kStep, 0.0f, 0.0f}) && same(c.reparentMoves[0].after.pos, Vec3{5.0f, 0.0f, 0.0f}) &&
+              same(c.reparentMoves[1].before.pos, Vec3{6.0f, 0.0f, 0.0f}) && same(c.reparentMoves[1].after.pos, Vec3{X - kStep, 0.0f, 0.0f}),
+              "Reparent, multi-row: each carried entity's root end moves, its child end does not");
     }
     {   // the placeholder objects
         Cmd a; a.kind = K::CreateObj; a.objSnapshot.pos = Vec3{X, 3.0f, 4.0f};
