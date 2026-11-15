@@ -60,6 +60,7 @@
 
 #include "aver/rhi/RHI.hpp"
 #include "aver/rhi/EditorLines.hpp"
+#include "aver/rhi/Meshlets.hpp"
 #include "aver/rhi/FrameConstants.hpp"
 #include "VulkanRegisterMap.hpp"
 #include "aver/core/Log.hpp"
@@ -882,6 +883,12 @@ struct GpuMesh {
     VkDeviceMemory vbMemory = VK_NULL_HANDLE, ibMemory = VK_NULL_HANDLE;
     VkDeviceAddress vbAddress = 0, ibAddress = 0;   // buffer_device_address for a mesh pipeline's push-constant geometry block (PushConstantLayout::meshVertexAddrOffset/meshIndexAddrOffset); analog of D3D12's raw root-SRV bind
     u32 indexCount = 0;
+    // The mesh-shader path's geometry (Meshlets.hpp), built from these indices and owned with them (ibOwned); none when
+    // mesh shaders are unsupported, and then this mesh draws through vertex input.
+    VkBuffer ml = VK_NULL_HANDLE;
+    VkDeviceAddress mlAddress = 0;
+    BufferHandle mlBuffer = 0;
+    u32 meshletCount = 0;
     BufferHandle vbBuffer = 0;   // RHI-level handles mirroring vb/ib, so a shader can get descriptors over this mesh's geometry (IDevice::meshGeometry); same purpose as D3D12's vbBuffer/ibBuffer
     BufferHandle ibBuffer = 0;
     u32 vertexCount = 0;
@@ -1679,6 +1686,10 @@ private:
     bool initAccelerationStructures();
     bool initMeshShaders();
     void dispatchMesh(const GpuMesh& m);
+    // Uploads `mb` as `m`'s meshlet buffer (device-local through a one-shot copy, or host memory); on failure `m` keeps
+    // vertex input.
+    void attachMeshlets(GpuMesh& m, const MeshletBuffer& mb, bool deviceLocal);
+    bool meshHasMeshlets(MeshHandle mesh) const { return mesh && mesh <= meshes_.size() && meshes_[mesh - 1].ml; }
     bool createPipeline();               // the FIXED scene/wire/sky/line PSOs (not the generic factory path)
     bool createSwapchainResources(const SwapchainDesc& d);
     // One binary semaphore per swapchain image, signalled by the frame's submit and waited on by its
@@ -2007,6 +2018,7 @@ private:
 
     // ---- W4: default-heap static meshes (--mesh-heap default) ----
     bool staticMeshDefaultHeap_ = true;   // setStaticMeshHeapDefault's stored value; false = the Upload heap
+    bool buildMeshlets_ = false;          // meshes get meshlet buffers once the mesh-shader path initialised
     // The C-7 "static meshes on the Default heap" line, once for this device's life -- logged on the
     // first mesh actually built that way, not at flag-set time, so a run that sets the flag but never
     // builds a mesh (an empty scene) says nothing.

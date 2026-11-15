@@ -175,7 +175,7 @@ bool patchPushConstants(std::string& src, bool mesh) {
                    "backend's push-constant patch can fold into the push-constant block");
         return false;
     }
-    if (haveMesh) body += "\n    uint gTriCount; uint3 _msPad;\n";
+    if (haveMesh) body += "\n    uint gMeshletCount; uint gVtxCount; uint gGroupBase; uint gMeshletFlags;\n";
 
     std::string repl = "struct AverPcBlock {" + body + "};\n";
     repl += "[[vk::push_constant]] ConstantBuffer<AverPcBlock> gAverPc;\n";
@@ -187,7 +187,12 @@ bool patchPushConstants(std::string& src, bool mesh) {
     repl += "static float    gReflectance  = gAverPc.gReflectance;\n";
     repl += "static float    gF90          = gAverPc.gF90;\n";
     repl += "static float4   gEmissive     = gAverPc.gEmissive;\n";
-    if (haveMesh) repl += "static uint gTriCount = gAverPc.gTriCount;\n";
+    if (haveMesh) {
+        repl += "static uint gMeshletCount = gAverPc.gMeshletCount;\n";
+        repl += "static uint gVtxCount     = gAverPc.gVtxCount;\n";
+        repl += "static uint gGroupBase    = gAverPc.gGroupBase;\n";
+        repl += "static uint gMeshletFlags = gAverPc.gMeshletFlags;\n";
+    }
 
     src.replace(pos, (close + 2) - pos, repl);
 
@@ -1461,14 +1466,14 @@ bool VulkanDevice::initMeshShaders() {
         return false;
     }
 
-    // set 0 (kVkSetTable0), bindings kMeshSrvBase/+1: gVerts/gIndices SSBOs, FRESH per draw -- see
+    // set 0 (kVkSetTable0), bindings kMeshSrvBase/+1: gVerts/gMeshlets SSBOs, FRESH per draw -- see
     // dispatchMesh() (same StructuredBuffer-always-descriptor-bound reason as the file header).
     if (!meshGeomLayout_) {
         VkDescriptorSetLayoutBinding binds[2] = {};
         binds[0].binding = kMeshSrvBase; binds[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         binds[0].descriptorCount = 1; binds[0].stageFlags = VK_SHADER_STAGE_MESH_BIT_EXT;
         binds[1].binding = kMeshSrvBase + 1; binds[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        binds[1].descriptorCount = 1; binds[1].stageFlags = VK_SHADER_STAGE_MESH_BIT_EXT;
+        binds[1].descriptorCount = 1; binds[1].stageFlags = VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT;
         VkDescriptorSetLayoutCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
         ci.bindingCount = 2; ci.pBindings = binds;
         if (!vkOk(api_.CreateDescriptorSetLayout(device_, &ci, nullptr, &meshGeomLayout_), "mesh geometry set layout")) return false;
@@ -1504,8 +1509,9 @@ bool VulkanDevice::initMeshShaders() {
     if (!patchPushConstants(src, /*mesh=*/true)) return false;
     const std::string defines = "AVER_MS=1;AVER_MS_VTX_REG=" + std::to_string(kMeshSrvBase) +
                                 ";AVER_MS_IDX_REG=" + std::to_string(kMeshSrvBase + 1);
-    std::vector<u32> msSpv, psSpv;
-    if (!vulkanShaderCompiler().compile(src.c_str(), "MSMain", ShaderStage::Mesh, 65, defines.c_str(), msSpv)) {
+    std::vector<u32> asSpv, msSpv, psSpv;
+    if (!vulkanShaderCompiler().compile(src.c_str(), "ASMain", ShaderStage::Amplification, 65, defines.c_str(), asSpv) ||
+        !vulkanShaderCompiler().compile(src.c_str(), "MSMain", ShaderStage::Mesh, 65, defines.c_str(), msSpv)) {
         AVER_WARN("[RHI.Vulkan] mesh shaders failed to compile; the input-assembler path stays in use");
         return false;
     }
@@ -1513,14 +1519,21 @@ bool VulkanDevice::initMeshShaders() {
         AVER_WARN("[RHI.Vulkan] mesh shaders failed to compile; the input-assembler path stays in use");
         return false;
     }
-    VkShaderModule msMod{}, psMod{};
+    VkShaderModule asMod{}, msMod{}, psMod{};
     VkShaderModuleCreateInfo mci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    mci.codeSize = asSpv.size() * sizeof(u32); mci.pCode = asSpv.data();
+    if (!vkOk(api_.CreateShaderModule(device_, &mci, nullptr, &asMod), "as module")) return false;
     mci.codeSize = msSpv.size() * sizeof(u32); mci.pCode = msSpv.data();
-    if (!vkOk(api_.CreateShaderModule(device_, &mci, nullptr, &msMod), "ms module")) return false;
+    if (!vkOk(api_.CreateShaderModule(device_, &mci, nullptr, &msMod), "ms module")) { api_.DestroyShaderModule(device_, asMod, nullptr); return false; }
     mci.codeSize = psSpv.size() * sizeof(u32); mci.pCode = psSpv.data();
-    if (!vkOk(api_.CreateShaderModule(device_, &mci, nullptr, &psMod), "ms-path ps module")) { api_.DestroyShaderModule(device_, msMod, nullptr); return false; }
+    if (!vkOk(api_.CreateShaderModule(device_, &mci, nullptr, &psMod), "ms-path ps module")) {
+        api_.DestroyShaderModule(device_, asMod, nullptr);
+        api_.DestroyShaderModule(device_, msMod, nullptr);
+        return false;
+    }
 
-    VkPipelineShaderStageCreateInfo stages[2] = {
+    VkPipelineShaderStageCreateInfo stages[3] = {
+        {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_TASK_BIT_EXT, asMod, "ASMain", nullptr},
         {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_MESH_BIT_EXT, msMod, "MSMain", nullptr},
         {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, psMod, "PSMainPlain", nullptr},
     };
@@ -1549,18 +1562,20 @@ bool VulkanDevice::initMeshShaders() {
     dyn.dynamicStateCount = 2; dyn.pDynamicStates = dynStates;
     VkGraphicsPipelineCreateInfo gp{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
     gp.pNext = &rendering;
-    gp.stageCount = 2; gp.pStages = stages;
+    gp.stageCount = 3; gp.pStages = stages;
     gp.pVertexInputState = &vin; gp.pInputAssemblyState = &ia; gp.pViewportState = &vp;
     gp.pRasterizationState = &rs; gp.pMultisampleState = &ms; gp.pDepthStencilState = &ds;
     gp.pColorBlendState = &cb; gp.pDynamicState = &dyn;
     gp.layout = meshPipelineLayout_;
     const bool built = vkOk(api_.CreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &gp, nullptr, &meshPso_), "mesh pso");
+    api_.DestroyShaderModule(device_, asMod, nullptr);
     api_.DestroyShaderModule(device_, msMod, nullptr);
     api_.DestroyShaderModule(device_, psMod, nullptr);
     if (!built) return false;
 
     msSupported_ = true;
-    AVER_INFO("[RHI.Vulkan] mesh shader path ready (ms_6_5)");
+    buildMeshlets_ = true;   // meshStager() hands it to the loader's stager
+    AVER_INFO("[RHI.Vulkan] mesh shader path ready (meshlets, as_6_5 + ms_6_5)");
     return true;
 }
 
@@ -1586,8 +1601,7 @@ void VulkanDevice::setMeshShaders(bool enabled) {
 // execution time, so reuse across draws in one frame would make earlier draws silently read the
 // LAST mesh's geometry. A fresh set per draw costs an allocation, not correctness.
 void VulkanDevice::dispatchMesh(const GpuMesh& m) {
-    const u32 tris = m.indexCount / 3;
-    if (!tris || !m.vb || !m.ib) return;
+    if (!m.meshletCount || !m.vb || !m.ml) return;
     VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     dai.descriptorPool = meshGeomPool_[frameIndex_];
     dai.descriptorSetCount = 1; dai.pSetLayouts = &meshGeomLayout_;
@@ -1597,7 +1611,7 @@ void VulkanDevice::dispatchMesh(const GpuMesh& m) {
         return;
     }
     VkDescriptorBufferInfo vbInfo{m.vb, 0, VK_WHOLE_SIZE};
-    VkDescriptorBufferInfo ibInfo{m.ib, 0, VK_WHOLE_SIZE};
+    VkDescriptorBufferInfo ibInfo{m.ml, 0, VK_WHOLE_SIZE};
     VkWriteDescriptorSet writes[2] = {};
     writes[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}; writes[0].dstSet = set; writes[0].dstBinding = kMeshSrvBase;
     writes[0].descriptorCount = 1; writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; writes[0].pBufferInfo = &vbInfo;
@@ -1607,13 +1621,43 @@ void VulkanDevice::dispatchMesh(const GpuMesh& m) {
 
     VkCommandBuffer cmd = commandBuffers_[frameIndex_];
     api_.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipelineLayout_, 0, 1, &set, 0, nullptr);
-    // {tris, vertexCount, first group, 0}: the shader bounds every index, and a mesh over 65535 groups is several draws.
-    const u32 groups = (tris + kMeshShaderTrisPerGroup - 1) / kMeshShaderTrisPerGroup;
+    // {meshlets, vertexCount, first group, flags}: the shader bounds every index, and a mesh over 65535 groups is several draws.
+    const u32 groups = (m.meshletCount + kMeshletsPerAmplificationGroup - 1) / kMeshletsPerAmplificationGroup;
+    const u32 flags = m.computeWritten ? kMeshletFlagNoCull : 0u;
     for (u32 base = 0; base < groups; base += 65535u) {
-        const u32 tc[4] = {tris, m.vertexCount, base, 0};
+        const u32 tc[4] = {m.meshletCount, m.vertexCount, base, flags};
         api_.CmdPushConstants(cmd, meshPipelineLayout_, VK_SHADER_STAGE_ALL, PushConstantLayout::kObjectBytes, sizeof(tc), tc);
         api_.CmdDrawMeshTasksEXT(cmd, std::min(65535u, groups - base), 1, 1);
     }
+}
+
+void VulkanDevice::attachMeshlets(GpuMesh& m, const MeshletBuffer& mb, bool deviceLocal) {
+    if (!mb.meshletCount || !rhiFactory_) return;
+    const u64 bytes = static_cast<u64>(mb.words.size()) * sizeof(u32);
+    BufferDesc d;
+    d.bytes = bytes;
+    d.kind = deviceLocal ? BufferKind::Default : BufferKind::Upload;
+    d.debugName = "mesh meshlets";
+    const BufferHandle h = rhiFactory_->createBuffer(d);
+    RhiBuffer* rb = rhiFactory_->buffer(h);
+    bool ok = rb && rb->buffer;
+    if (ok && deviceLocal) {
+        const VkBuffer dst = rb->buffer;
+        const void* srcs[1] = {mb.words.data()};
+        const VkDeviceSize size = bytes;
+        ok = rhiFactory_->uploadToDeviceBuffers(&dst, srcs, &size, 1, "rhi meshlet upload");
+    } else if (ok) {
+        ok = rhiFactory_->writeBuffer(h, mb.words.data(), bytes, 0);
+    }
+    if (!ok) {
+        if (h) rhiFactory_->destroyBuffer(h);
+        AVER_WARN("[RHI.Vulkan] a mesh's meshlet buffer could not be made; it draws through vertex input");
+        return;
+    }
+    m.ml = rb->buffer;
+    m.mlAddress = rb->address;
+    m.mlBuffer = h;
+    m.meshletCount = mb.meshletCount;
 }
 
 // ================================================================================================
@@ -1917,6 +1961,7 @@ struct VulkanMeshStaging final : MeshStaging {
     u8* vbMapped = nullptr;
     u8* ibMapped = nullptr;
     u64 vbytes = 0, ibytes = 0;
+    MeshletBuffer meshlets;   // built on the worker, uploaded when adopted
     // Default heap: vb/ib are empty device-local buffers and `staging` holds their bytes (vertices, then indices),
     // copied when adopted on the main thread.
     VkBuffer staging = VK_NULL_HANDLE;
@@ -1935,6 +1980,7 @@ class VulkanMeshStager final : public IMeshStager {
 public:
     explicit VulkanMeshStager(std::shared_ptr<VulkanDevice::StagerState> state) : state_(std::move(state)) {}
     std::atomic<bool> defaultHeap{false};
+    std::atomic<bool> meshlets{false};
     std::unique_ptr<MeshStaging> stage(const MeshVertex* verts, u32 vcount, const u32* indices, u32 icount) override {
         if (!verts || !indices || vcount == 0 || icount == 0) return nullptr;
         auto s = std::make_unique<VulkanMeshStaging>();
@@ -1951,6 +1997,8 @@ public:
         s->m.boundsRadius = std::sqrt(dx * dx + dy * dy + dz * dz);
         s->vbytes = static_cast<u64>(vcount) * sizeof(MeshVertex);
         s->ibytes = static_cast<u64>(icount) * sizeof(u32);
+        if (meshlets.load(std::memory_order_relaxed))
+            s->meshlets = buildMeshlets(indices, icount, vcount, &verts->px, sizeof(MeshVertex));
 
         std::lock_guard<std::mutex> l(state_->m);
         VulkanDevice* dev = state_->dev;
@@ -1973,6 +2021,12 @@ public:
         auto s = std::make_unique<VulkanMeshStaging>();
         s->m.indexCount = icount;
         s->ibytes = static_cast<u64>(icount) * sizeof(u32);
+        if (meshlets.load(std::memory_order_relaxed)) {
+            // The vertices are the source mesh's, on the GPU only: meshlets without bounds, sized by the largest index.
+            u32 vcount = 0;
+            for (u32 k = 0; k < icount; ++k) vcount = std::max(vcount, indices[k] + 1);
+            s->meshlets = buildMeshlets(indices, icount, vcount, nullptr, 0);
+        }
         std::lock_guard<std::mutex> l(state_->m);
         VulkanDevice* dev = state_->dev;
         if (!dev) return nullptr;
@@ -2050,6 +2104,7 @@ std::shared_ptr<IMeshStager> VulkanDevice::meshStager() {
     if (!device_ || !rhiFactory_) return nullptr;
     if (!meshStager_) meshStager_ = std::make_shared<VulkanMeshStager>(stagerState());
     static_cast<VulkanMeshStager&>(*meshStager_).defaultHeap = staticMeshDefaultHeap_;
+    static_cast<VulkanMeshStager&>(*meshStager_).meshlets = buildMeshlets_;
     return meshStager_;
 }
 
@@ -2090,6 +2145,7 @@ MeshHandle VulkanDevice::adoptMesh(std::unique_ptr<MeshStaging> staged) {
     m.vb = s->vb; m.vbMemory = s->vbMemory; m.vbAddress = s->vbAddress;
     m.ib = s->ib; m.ibMemory = s->ibMemory; m.ibAddress = s->ibAddress;
     s->vb = s->ib = VK_NULL_HANDLE;   // owned by the factory from here
+    attachMeshlets(m, s->meshlets, onDefault);
     meshes_.push_back(std::move(m));
     return static_cast<MeshHandle>(meshes_.size());
 }
@@ -2194,6 +2250,8 @@ MeshHandle VulkanDevice::createMesh(const MeshVertex* verts, u32 vcount, const u
         rhiFactory_->writeBuffer(m.vbBuffer, verts, vbytes, 0);
         rhiFactory_->writeBuffer(m.ibBuffer, indices, ibytes, 0);
     }
+    if (buildMeshlets_ && indices)
+        attachMeshlets(m, buildMeshlets(indices, icount, vcount, &verts->px, sizeof(MeshVertex)), useDefaultHeap);
 
     meshes_.push_back(std::move(m));
     return static_cast<MeshHandle>(meshes_.size());
@@ -2385,6 +2443,9 @@ MeshHandle VulkanDevice::shareVertices(MeshHandle source, const u32* indices, u3
     } else if (!st) {
         rhiFactory_->writeBuffer(m.ibBuffer, indices, ibytes, 0);
     }
+    // The shared vertices are on the GPU only, so these meshlets have no bounds.
+    if (st) attachMeshlets(m, st->meshlets, idd.kind == BufferKind::Default);
+    else if (buildMeshlets_) attachMeshlets(m, buildMeshlets(indices, indexCount, m.vertexCount, nullptr, 0), useDefaultHeap);
 
     meshes_.push_back(std::move(m));
     const MeshHandle h = static_cast<MeshHandle>(meshes_.size());
@@ -2417,6 +2478,8 @@ MeshHandle VulkanDevice::createSkinTargetMesh(MeshHandle source, BufferHandle* o
     GpuMesh m;
     m.vb = rb->buffer; m.vbMemory = rb->memory; m.vbAddress = rb->address;
     m.ib = src.ib; m.ibMemory = VK_NULL_HANDLE; m.ibAddress = src.ibAddress;   // SHARED, not owned
+    m.ml = src.ml; m.mlAddress = src.mlAddress; m.mlBuffer = src.mlBuffer;     // the meshlets go with the indices
+    m.meshletCount = src.meshletCount;                                         // (culling off: computeWritten)
     m.indexCount = src.indexCount;
     m.vbBuffer = vh;
     m.ibBuffer = src.ibBuffer;
@@ -2480,6 +2543,7 @@ bool VulkanDevice::destroyMesh(MeshHandle mesh) {
         if (m.vbOwned && m.vbBuffer) rhiFactory_->destroyBuffer(m.vbBuffer);
         if (m.xOwned && m.vbxBuffer) rhiFactory_->destroyBuffer(m.vbxBuffer);   // R1's second stream, by its owner only
         if (m.ibOwned && m.ibBuffer) rhiFactory_->destroyBuffer(m.ibBuffer);
+        if (m.ibOwned && m.mlBuffer) rhiFactory_->destroyBuffer(m.mlBuffer);
     }
     if (!m.ibOwned && m.ibSource != 0 && m.ibSource <= meshes_.size()) {
         GpuMesh& src = meshes_[m.ibSource - 1];
@@ -2492,6 +2556,7 @@ bool VulkanDevice::destroyMesh(MeshHandle mesh) {
     m.vb = VK_NULL_HANDLE; m.ib = VK_NULL_HANDLE;
     m.vbMemory = VK_NULL_HANDLE; m.ibMemory = VK_NULL_HANDLE;
     m.vbAddress = m.ibAddress = 0;
+    m.ml = VK_NULL_HANDLE; m.mlAddress = 0; m.mlBuffer = 0; m.meshletCount = 0;
     m.indexCount = 0; m.vertexCount = 0;
     m.vbBuffer = 0; m.ibBuffer = 0;
     m.vbx = VK_NULL_HANDLE; m.vbxBuffer = 0; m.hasExtra = false; m.xOwned = true;
@@ -2784,6 +2849,8 @@ void VulkanDevice::replayBlendedDraws(VkCommandBuffer cmd) {
     const bool featureMs = msActive_ && meshPso_;
     const PipelineHandle blendedPso = owner ? owner->scenePipeline(featureMs, false, true) : 0;
     const bool blendedMs = featureMs && isMeshPipeline(blendedPso);
+    // The vertex-input twin, for a mesh without meshlets.
+    const PipelineHandle blendedIaPso = owner && blendedMs ? owner->scenePipeline(false, false, true) : blendedPso;
     if (!blendedPso) {
         // 0 for blended=true means no blended variant: drop rather than draw opaque.
         if (!blendedPipelineMissingWarned_) {
@@ -2902,8 +2969,8 @@ void VulkanDevice::replayBlendedDraws(VkCommandBuffer cmd) {
                 }
             }
         }
-        PipelineHandle drawPso = blendedPso;
-        bool drawMs = blendedMs;
+        bool drawMs = blendedMs && meshHasMeshlets(bd.mesh);
+        PipelineHandle drawPso = drawMs ? blendedPso : blendedIaPso;
         if (const u32 fxKey = drawMaterialFxKey(bd.binding.constants, bd.binding.bytes)) {
             if (const PipelineHandle fxp = owner->scenePipelineFx(fxKey, false, true)) { drawPso = fxp; drawMs = false; }
         }
@@ -2986,7 +3053,7 @@ void VulkanDevice::drawMesh(MeshHandle mesh, const f32 world[16], const f32 colo
         // assembler; drawMeshDepthPrepass has no mesh-shader twin). Passing msActive_ unconditionally
         // gave prepassed draws the ordinary Less/write-on pipeline, rejecting the equal depth the prepass
         // just wrote -- the frame came out almost unshaded (full account/measurement: D3D12Device::drawMesh's twin).
-        bool featureMs = msActive_ && meshPso_ && !prepassed;
+        bool featureMs = msActive_ && meshPso_ && !prepassed && meshHasMeshlets(mesh);
         PipelineHandle fp = 0;
         // R1: a mesh with the second vertex stream takes the feature's variant that reads it, on the vertex-input path
         // (D3D12Device::drawMesh's twin); 0 = none yet, and the mesh draws as every mesh does.
@@ -3031,7 +3098,7 @@ void VulkanDevice::drawMesh(MeshHandle mesh, const f32 world[16], const f32 colo
     }
 
     const GpuMesh& m = meshes_[mesh - 1];
-    const bool useMs = msActive_ && meshPso_;
+    const bool useMs = msActive_ && meshPso_ && m.ml;
     VkCommandBuffer cmd = commandBuffers_[frameIndex_];
     VkPipeline pso = useMs ? meshPso_ : scenePso_;
     VkPipelineLayout layout = useMs ? meshPipelineLayout_ : scenePipelineLayout_;

@@ -8880,16 +8880,18 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     // Mesh-shader variants.
     const std::string msDefs = rasterDefs("AVER_MS=1") + ";" + rhi::meshGeometryDefines(scene.layout);
     const rhi::ShaderHandle msMain = msOk ? compile("MSMain", rhi::ShaderStage::Mesh, 65, msDefs.c_str()) : 0;
-    if (msMain && psVoxi) {
+    // ASMain culls the meshlets MSMain draws; every mesh-shader variant takes both.
+    const rhi::ShaderHandle asMain = msMain ? compile("ASMain", rhi::ShaderStage::Amplification, 65, msDefs.c_str()) : 0;
+    if (msMain && asMain && psVoxi) {
         rhi::GraphicsPipelineDesc p = scene;
-        p.ms = msMain; p.ps = psVoxi;
+        p.as = asMain; p.ms = msMain; p.ps = psVoxi;
         sceneMsPso_ = res_->createGraphicsPipeline(p);
     }
     if (msOk && !sceneMsPso_) AVER_WARN("[Voxi] mesh-shader scene variant unavailable");
 
-    if (msMain && psVoxiGbuf) {
+    if (msMain && asMain && psVoxiGbuf) {
         rhi::GraphicsPipelineDesc p = sceneGbuf;
-        p.ms = msMain; p.ps = psVoxiGbuf;
+        p.as = asMain; p.ms = msMain; p.ps = psVoxiGbuf;
         sceneMsGbufPso_ = res_->createGraphicsPipeline(p);
     }
     if (msOk && !sceneMsGbufPso_) AVER_WARN("[Voxi] mesh-shader G-buffer scene variant unavailable");
@@ -9234,17 +9236,17 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     if (rtOk && !rayDrivenGbufPso_)
         AVER_WARN("[Voxi] ray-driven G-buffer primary-visibility pass unavailable");
 
-    if (msMain && psRt) {
+    if (msMain && asMain && psRt) {
         rhi::GraphicsPipelineDesc p = scene;
-        p.ms = msMain; p.ps = psRt;
+        p.as = asMain; p.ms = msMain; p.ps = psRt;
         p.layout = giRt;
         sceneMsRtPso_ = res_->createGraphicsPipeline(p);
     }
     if (msOk && rtOk && !sceneMsRtPso_) AVER_WARN("[Voxi] mesh-shader + ray-tracing scene variant unavailable");
 
-    if (msMain && psRtGbuf) {
+    if (msMain && asMain && psRtGbuf) {
         rhi::GraphicsPipelineDesc p = sceneGbuf;
-        p.ms = msMain; p.ps = psRtGbuf;
+        p.as = asMain; p.ms = msMain; p.ps = psRtGbuf;
         p.layout = giRt;
         sceneMsRtGbufPso_ = res_->createGraphicsPipeline(p);
     }
@@ -9264,9 +9266,9 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
         AVER_WARN("[Voxi] blended scene pipeline unavailable; translucent materials will not draw");
 
 
-    if (msMain && psVoxi) {
+    if (msMain && asMain && psVoxi) {
         rhi::GraphicsPipelineDesc p = scene;
-        p.ms = msMain; p.ps = psVoxi;
+        p.as = asMain; p.ms = msMain; p.ps = psVoxi;
         p.blend = rhi::BlendMode::PremultipliedAlpha;   // see sceneBlendedPso_ above for why
         p.depth.test = true;    // same test-on/write-off state as sceneBlendedPso_ above
         p.depth.write = false;

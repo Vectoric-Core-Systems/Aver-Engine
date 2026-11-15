@@ -168,8 +168,11 @@ Content lives OUTSIDE the engine: example project at
   mesh PS.
 - **Lines**: unlit `createLineMesh`/`drawLines` (grid, gizmo), line PSO.
 - **Wireframe**: second FillMode=WIREFRAME mesh PSO via `setWireframe`.
-- **Mesh shader geometry path** (`IDevice::setMeshShaders`, dev flag `--ms`): `MSMain` replaces the
-  input assembler for every draw. A generic capability, not an effect, which is why it lives here.
+- **Mesh shader geometry path** (`IDevice::setMeshShaders`, dev flag `--ms`): meshlets (`rhi/Meshlets.hpp`, at most
+  64 vertices and 124 triangles, built when a mesh is created) replace the input assembler. `ASMain` culls them against
+  the view frustum's side planes, 32 per group; `MSMain` emits each survivor's vertices once. A mesh without meshlets
+  (made before the path initialised, or its buffer refused) draws through the input assembler. Off by default on AMD
+  (`AVER_MESH_SHADERS=1` turns it on). A generic capability, not an effect, which is why it lives here.
 - Shaders: compiled at runtime by **DXC → DXIL, SM 6.0** baseline; SM 6.5 for the mesh-shader and
   RayQuery variants. Falls back to FXC/SM 5.1 if `dxcompiler.dll` is absent. `dxcompiler.dll`+
   `dxil.dll` are copied into `bin/` by CMake and MUST ship with the product (`docs/MINIMUM_SPECS.md` §5b).

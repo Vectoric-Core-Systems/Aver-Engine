@@ -11,6 +11,7 @@
 #include "aver/rhi/Tonemap.hpp"
 #include "aver/rhi/DxcShaderInclude.hpp"
 #include "aver/rhi/EditorLines.hpp"
+#include "aver/rhi/Meshlets.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/CrashReport.hpp"
 
@@ -430,6 +431,11 @@ struct GpuMesh {
     BufferHandle vbBuffer = 0;
     // Index buffer as RHI buffer; allows shaders to read geometry via descriptors.
     BufferHandle ibBuffer = 0;
+    // The mesh-shader path's geometry (Meshlets.hpp), built from these indices and owned with them (ibOwned); none
+    // when mesh shaders are unsupported, and then this mesh draws through the input assembler.
+    ComPtr<ID3D12Resource> ml;
+    BufferHandle mlBuffer = 0;
+    u32 meshletCount = 0;
     u32 vertexCount = 0;
     // Whether a compute pass writes these vertices (prevents spurious BLAS rebuilds).
     bool computeWritten = false;
@@ -1258,6 +1264,11 @@ private:
     bool initAccelerationStructures();
     bool initMeshShaders();
     void dispatchMesh(const GpuMesh& m);
+    // Builds and uploads `m`'s meshlet buffer on the heap its indices use; on failure `m` keeps the input assembler.
+    void attachMeshlets(GpuMesh& m, const u32* indices, u32 indexCount, const MeshVertex* verts, bool onDefaultHeap);
+    bool meshHasMeshlets(MeshHandle mesh) const { return mesh && mesh <= meshes_.size() && meshes_[mesh - 1].ml; }
+    // True when `p` is a mesh-shader pipeline (a feature may hand back its input-assembler twin instead).
+    bool isMeshPipeline(PipelineHandle p);
     void bindGraphicsRoot(ID3D12RootSignature* rs); // switch root signature + rebind shared params
     bool createPipeline();
     bool createSwapchainResources(const SwapchainDesc& d);
@@ -1663,6 +1674,8 @@ private:
 
     // Static mesh default heap (false = Upload heap, the default).
     bool staticMeshDefaultHeap_ = true;   // VRAM; uploads through the staging ring, no wait
+    // Meshes get meshlet buffers once the mesh-shader path initialised (msSupported_).
+    bool buildMeshlets_ = false;
     // Default-heap first-mesh warning (once, on first actual build).
     bool staticMeshDefaultHeapLogged_ = false;
     // Fallback-to-Upload warning (once, on any failure).
@@ -3198,12 +3211,13 @@ bool D3D12Device::initMeshShaders() {
 
     const std::string msDefs = "AVER_MS=1;AVER_MS_VTX_REG=" + std::to_string(kSceneMeshSrvBase) +
                                ";AVER_MS_IDX_REG=" + std::to_string(kSceneMeshSrvBase + 1);
-    ComPtr<ID3DBlob> ms, ps;
+    ComPtr<ID3DBlob> as, ms, ps;
     auto ok = [&](const char* entry, const char* fxcTarget, const char* target, ComPtr<ID3DBlob>& out,
                   const char* defs) {
         return SUCCEEDED(shaderCompiler().compile(sceneShaderSource().c_str(), entry, fxcTarget, &out, target, defs));
     };
-    if (!ok("MSMain",      "vs_5_1", "ms_6_5", ms, msDefs.c_str()) ||
+    if (!ok("ASMain",      "vs_5_1", "as_6_5", as, msDefs.c_str()) ||
+        !ok("MSMain",      "vs_5_1", "ms_6_5", ms, msDefs.c_str()) ||
         !ok("PSMainPlain", "ps_5_1", "ps_6_5", ps, msDefs.c_str())) {
         AVER_WARN("[RHI.D3D12] mesh shaders failed to compile; the IA path stays in use");
         return false;
@@ -3211,6 +3225,7 @@ bool D3D12Device::initMeshShaders() {
 
     MeshPsoStream s{};
     s.rootSig = msRootSig_.Get();
+    s.as = D3D12_SHADER_BYTECODE{as->GetBufferPointer(), as->GetBufferSize()};
     s.ms = D3D12_SHADER_BYTECODE{ms->GetBufferPointer(), ms->GetBufferSize()};
     s.ps = D3D12_SHADER_BYTECODE{ps->GetBufferPointer(), ps->GetBufferSize()};
     s.raster.value.FillMode = D3D12_FILL_MODE_SOLID;
@@ -3230,7 +3245,8 @@ bool D3D12Device::initMeshShaders() {
     if (!hrOk(device2->CreatePipelineState(&sd, IID_PPV_ARGS(&msPso_)), "mesh pso")) return false;
 
     msSupported_ = true;
-    AVER_INFO("[RHI.D3D12] mesh shader path ready (ms_6_5)");
+    buildMeshlets_ = true;   // meshStager() hands it to the loader's stager
+    AVER_INFO("[RHI.D3D12] mesh shader path ready (meshlets, as_6_5 + ms_6_5)");
     return true;
 }
 
@@ -3749,10 +3765,12 @@ void boundsOfVertices(const MeshVertex* verts, u32 vcount, GpuMesh& m) {
 struct D3D12MeshStaging final : MeshStaging {
     GpuMesh m;   // bounds and counts; buffers below until adopted
     ID3D12Device* device = nullptr;   // the one that made them
-    ComPtr<ID3D12Resource> vb, ib;
+    ComPtr<ID3D12Resource> vb, ib, ml;
     u8* vbMapped = nullptr;
     u8* ibMapped = nullptr;
-    u64 vbytes = 0, ibytes = 0;
+    u8* mlMapped = nullptr;
+    u64 vbytes = 0, ibytes = 0, mlbytes = 0;
+    MeshletBuffer meshlets;   // built on the worker; its bytes follow the indices in `staging`
     // Default heap: vb/ib are empty Default buffers and `staging` holds their bytes (vertices, then indices), copied
     // when adopted on the main thread.
     ComPtr<ID3D12Resource> staging;
@@ -3762,6 +3780,7 @@ class D3D12MeshStager final : public IMeshStager {
 public:
     explicit D3D12MeshStager(ComPtr<ID3D12Device> device) : device_(std::move(device)) {}
     std::atomic<bool> defaultHeap{false};
+    std::atomic<bool> meshlets{false};
     std::unique_ptr<MeshStaging> stage(const MeshVertex* verts, u32 vcount, const u32* indices, u32 icount) override {
         if (!device_ || !verts || !indices || vcount == 0 || icount == 0) return nullptr;
         auto s = std::make_unique<D3D12MeshStaging>();
@@ -3772,9 +3791,11 @@ public:
         boundsOfVertices(verts, vcount, s->m);
         s->vbytes = static_cast<u64>(vcount) * sizeof(MeshVertex);
         s->ibytes = static_cast<u64>(icount) * sizeof(u32);
+        stageMeshlets(*s, indices, icount, vcount, verts);
         if (defaultHeap.load(std::memory_order_relaxed) && makeDefault(*s, verts, indices)) return s;
         if (!make(s->vbytes, "mesh vertices", verts, s->vb, s->vbMapped) ||
             !make(s->ibytes, "mesh indices", indices, s->ib, s->ibMapped)) return nullptr;
+        makeMeshletUpload(*s);
         return s;
     }
     std::unique_ptr<MeshStaging> stageIndices(const u32* indices, u32 icount) override {
@@ -3783,19 +3804,37 @@ public:
         s->device = device_.Get();
         s->m.indexCount = icount;
         s->ibytes = static_cast<u64>(icount) * sizeof(u32);
+        // The vertices are the source mesh's, on the GPU only: meshlets without bounds, sized by the largest index.
+        u32 vcount = 0;
+        for (u32 k = 0; k < icount; ++k) vcount = std::max(vcount, indices[k] + 1);
+        stageMeshlets(*s, indices, icount, vcount, nullptr);
         if (defaultHeap.load(std::memory_order_relaxed) && makeDefault(*s, nullptr, indices)) return s;
         if (!make(s->ibytes, "mesh indices (shared vertices)", indices, s->ib, s->ibMapped)) return nullptr;
+        makeMeshletUpload(*s);
         return s;
     }
 
 private:
     // Empty Default buffers plus one filled upload buffer; false (nothing kept) to fall back to the Upload heap.
+    void stageMeshlets(D3D12MeshStaging& s, const u32* indices, u32 icount, u32 vcount, const MeshVertex* verts) {
+        if (!meshlets.load(std::memory_order_relaxed)) return;
+        s.meshlets = buildMeshlets(indices, icount, vcount, verts ? &verts->px : nullptr, sizeof(MeshVertex));
+        s.mlbytes = static_cast<u64>(s.meshlets.words.size()) * sizeof(u32);
+    }
+    // Upload-heap twin of makeDefault's third buffer. A failure costs the mesh its meshlets, not the mesh.
+    void makeMeshletUpload(D3D12MeshStaging& s) {
+        if (s.mlbytes && !make(s.mlbytes, "mesh meshlets", s.meshlets.words.data(), s.ml, s.mlMapped)) {
+            s.ml.Reset(); s.mlMapped = nullptr; s.mlbytes = 0; s.meshlets = {};
+        }
+        s.meshlets.words = {};
+    }
     bool makeDefault(D3D12MeshStaging& s, const void* verts, const void* indices) {
-        ComPtr<ID3D12Resource> staging, vb, ib;
+        ComPtr<ID3D12Resource> staging, vb, ib, ml;
         u8* mapped = nullptr;
-        if (!make(s.vbytes + s.ibytes, "mesh staging", nullptr, staging, mapped)) return false;
+        if (!make(s.vbytes + s.ibytes + s.mlbytes, "mesh staging", nullptr, staging, mapped)) return false;
         if (s.vbytes) std::memcpy(mapped, verts, s.vbytes);
         std::memcpy(mapped + s.vbytes, indices, s.ibytes);
+        if (s.mlbytes) std::memcpy(mapped + s.vbytes + s.ibytes, s.meshlets.words.data(), s.mlbytes);
         staging->Unmap(0, nullptr);
         auto hp = heapProps(D3D12_HEAP_TYPE_DEFAULT);
         const auto makeDst = [&](u64 bytes, const char* name, ComPtr<ID3D12Resource>& res) {
@@ -3807,9 +3846,12 @@ private:
         };
         if (s.vbytes && !makeDst(s.vbytes, "mesh vertices", vb)) return false;
         if (!makeDst(s.ibytes, s.vbytes ? "mesh indices" : "mesh indices (shared vertices)", ib)) return false;
+        if (s.mlbytes && !makeDst(s.mlbytes, "mesh meshlets", ml)) return false;
         s.staging = std::move(staging);
         s.vb = std::move(vb);
         s.ib = std::move(ib);
+        s.ml = std::move(ml);
+        s.meshlets.words = {};
         return true;
     }
     bool make(u64 bytes, const char* name, const void* src, ComPtr<ID3D12Resource>& res, u8*& mapped) {
@@ -3831,6 +3873,7 @@ std::shared_ptr<IMeshStager> D3D12Device::meshStager() {
     if (!device_ || !rhiFactory_) return nullptr;
     if (!meshStager_) meshStager_ = std::make_shared<D3D12MeshStager>(device_);
     static_cast<D3D12MeshStager&>(*meshStager_).defaultHeap = staticMeshDefaultHeap_;
+    static_cast<D3D12MeshStager&>(*meshStager_).meshlets = buildMeshlets_;
     return meshStager_;
 }
 
@@ -3844,8 +3887,9 @@ MeshHandle D3D12Device::adoptMesh(std::unique_ptr<MeshStaging> staged) {
     auto* s = dynamic_cast<D3D12MeshStaging*>(staged.get());
     if (!s || !rhiFactory_ || !s->vb || !s->ib || s->device != device_.Get()) return 0;
     const bool onDefault = s->staging != nullptr;
-    const BufferCopyItem copies[2] = {{s->vb.Get(), 0, s->vbytes}, {s->ib.Get(), s->vbytes, s->ibytes}};
-    if (onDefault && !rhiFactory_->copyStagedBuffers(s->staging, 0, copies, 2, false)) return 0;
+    const BufferCopyItem copies[3] = {{s->vb.Get(), 0, s->vbytes}, {s->ib.Get(), s->vbytes, s->ibytes},
+                                      {s->ml.Get(), s->vbytes + s->ibytes, s->mlbytes}};
+    if (onDefault && !rhiFactory_->copyStagedBuffers(s->staging, 0, copies, 3, false)) return 0;
     GpuMesh m = s->m;
     BufferDesc vd;
     vd.bytes = s->vbytes;
@@ -3857,6 +3901,15 @@ MeshHandle D3D12Device::adoptMesh(std::unique_ptr<MeshStaging> staged) {
     idd.kind = onDefault ? BufferKind::Default : BufferKind::Upload;
     idd.debugName = "mesh indices";
     m.ibBuffer = rhiFactory_->registerBuffer(s->ib, s->ibMapped, idd);
+    if (s->ml) {
+        BufferDesc mld;
+        mld.bytes = s->mlbytes;
+        mld.kind = onDefault ? BufferKind::Default : BufferKind::Upload;
+        mld.debugName = "mesh meshlets";
+        m.mlBuffer = rhiFactory_->registerBuffer(s->ml, s->mlMapped, mld);
+        m.ml = s->ml;
+        m.meshletCount = s->meshlets.meshletCount;
+    }
     m.vb = s->vb;
     m.ib = s->ib;
     m.vbv.BufferLocation = m.vb->GetGPUVirtualAddress();
@@ -3937,6 +3990,7 @@ MeshHandle D3D12Device::createMesh(const MeshVertex* verts, u32 vcount, const u3
         AVER_INFO("[RHI.D3D12] static meshes on the Default heap: vertex and index buffers copied through the "
                   "staging ring (--mesh-heap upload keeps them in system memory)");
     }
+    attachMeshlets(m, indices, icount, verts, useDefault);
 
     m.vbv.BufferLocation = m.vb->GetGPUVirtualAddress();
     m.vbv.SizeInBytes = static_cast<UINT>(vbytes);
@@ -4084,14 +4138,23 @@ MeshHandle D3D12Device::shareVertices(MeshHandle source, const u32* indices, u32
 
     if (st) {
         const bool onDefault = st->staging != nullptr;
-        const BufferCopyItem copy{st->ib.Get(), 0, ibytes};
-        if (onDefault && !rhiFactory_->copyStagedBuffers(st->staging, 0, &copy, 1, false)) return 0;
+        const BufferCopyItem copies[2] = {{st->ib.Get(), 0, ibytes}, {st->ml.Get(), ibytes, st->mlbytes}};
+        if (onDefault && !rhiFactory_->copyStagedBuffers(st->staging, 0, copies, 2, false)) return 0;
         BufferDesc idd;
         idd.bytes = ibytes;
         idd.kind = onDefault ? BufferKind::Default : BufferKind::Upload;
         idd.debugName = "mesh indices (shared vertices)";
         m.ib = st->ib;
         m.ibBuffer = rhiFactory_->registerBuffer(st->ib, st->ibMapped, idd);
+        if (st->ml) {
+            BufferDesc mld;
+            mld.bytes = st->mlbytes;
+            mld.kind = idd.kind;
+            mld.debugName = "mesh meshlets (shared vertices)";
+            m.mlBuffer = rhiFactory_->registerBuffer(st->ml, st->mlMapped, mld);
+            m.ml = st->ml;
+            m.meshletCount = st->meshlets.meshletCount;
+        }
     } else if (!allocateIndices(useDefault)) {
         if (!useDefault) return 0;
         useDefault = false;
@@ -4101,6 +4164,8 @@ MeshHandle D3D12Device::shareVertices(MeshHandle source, const u32* indices, u32
         AVER_INFO("[RHI.D3D12] static meshes on the Default heap: index buffers copied through the staging ring "
                   "(--mesh-heap upload keeps them in system memory)");
     }
+    // The shared vertices are on the GPU only, so these meshlets have no bounds.
+    if (!st) attachMeshlets(m, indices, indexCount, nullptr, useDefault);
 
     m.indexCount = indexCount;
     m.ibv.BufferLocation = m.ib->GetGPUVirtualAddress();
@@ -4142,6 +4207,9 @@ MeshHandle D3D12Device::createSkinTargetMesh(MeshHandle source, BufferHandle* ou
     m.vb = rb->res;
     m.ib = src.ib;                 // SHARED: skinning moves vertices and never renumbers triangles
     m.ibv = src.ibv;
+    m.ml = src.ml;                 // the meshlets go with the indices (culling is off: computeWritten)
+    m.mlBuffer = src.mlBuffer;
+    m.meshletCount = src.meshletCount;
     m.indexCount = src.indexCount;
     m.vbBuffer = vh;
     // Bounds copied from source (deformation can exceed seed; better than origin point).
@@ -4588,6 +4656,7 @@ bool D3D12Device::destroyMesh(MeshHandle mesh) {
         if (m.xOwned && m.vbxBuffer) rhiFactory_->destroyBuffer(m.vbxBuffer);
         // ONLY IF OWNED. A skin target's indices belong to its source.
         if (m.ibOwned && m.ibBuffer) rhiFactory_->destroyBuffer(m.ibBuffer);
+        if (m.ibOwned && m.mlBuffer) rhiFactory_->destroyBuffer(m.mlBuffer);
     }
     // Give the source its share back, so a source held open only by this target can now go too.
     if (!m.ibOwned && m.ibSource != 0 && m.ibSource <= meshes_.size()) {
@@ -4603,6 +4672,9 @@ bool D3D12Device::destroyMesh(MeshHandle mesh) {
     // Slot CLEARED AND KEPT (never recycled); a stale handle draws nothing, not random memory.
     m.vb.Reset();
     m.ib.Reset();
+    m.ml.Reset();
+    m.mlBuffer = 0;
+    m.meshletCount = 0;
     m.vbx.Reset();
     m.vbxv = D3D12_VERTEX_BUFFER_VIEW{};
     m.vbxBuffer = 0;
@@ -4734,7 +4806,7 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
         if (!f->overridesScenePipeline() || !rhiContext_) continue;
         // Unlit uses feature's pipeline (not fallback, which hardcodes gBaseColor).
         // Prepassed draw must use IA path (depth prepass writes through IA/vsMain, not mesh shaders).
-        bool featureMs = msActive_ && msPso_ && !prepassed;
+        bool featureMs = msActive_ && msPso_ && !prepassed && meshHasMeshlets(mesh);
         PipelineHandle fp = 0;
         // R1: a mesh with the second vertex stream takes the feature's variant that reads it, on the input-assembler path
         // (the mesh-shader path fetches MeshVertex only). 0 = no variant yet, and the mesh draws as every mesh does.
@@ -4750,6 +4822,7 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
         }
         if (!fp) fp = f->scenePipeline(featureMs, prepassed, false);
         if (!fp) break;
+        featureMs = featureMs && isMeshPipeline(fp);
         const BindingSetHandle bs = f->sceneBindingSet();
         const void* cb = nullptr; u32 cbBytes = 0;
         const bool haveCb = f->sceneConstants(&cb, &cbBytes) && cb && cbBytes;
@@ -4792,7 +4865,7 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
     }
 
     const GpuMesh& m = meshes_[mesh - 1];
-    const bool useMs = msActive_ && msPso_;
+    const bool useMs = msActive_ && msPso_ && m.ml;
     bindGraphicsRoot(useMs ? msRootSig_.Get() : rootSig_.Get());
     // Cache PSO: skip re-issuing SetPipelineState if unchanged (hundreds to thousands calls per scene).
     ID3D12PipelineState* wantPso = useMs ? msPso_.Get() : pso_.Get();
@@ -4810,26 +4883,53 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
     cmdList_->DrawIndexedInstanced(m.indexCount, 1, 0, 0, 0);
 }
 
-// DispatchMesh over `tris` triangles (AVER_MS_TRIS per group) with the MeshCB block {tris, vertexCount, first group, 0}.
-// D3D12 caps a dispatch at 65535 groups a dimension, so a mesh over ~4.2M triangles is several dispatches.
-static void dispatchMeshTriangles(ID3D12GraphicsCommandList* cl, ID3D12GraphicsCommandList6* cl6, UINT countParam, u32 tris,
-                           u32 vertexCount) {
+// DispatchMesh over a mesh's meshlets, kMeshletsPerAmplificationGroup to an amplification group, with the MeshCB block
+// {meshlets, vertices, first group, flags}. D3D12 caps a dispatch at 65535 groups a dimension.
+static void dispatchMeshlets(ID3D12GraphicsCommandList* cl, ID3D12GraphicsCommandList6* cl6, UINT countParam, const GpuMesh& m) {
     constexpr u32 kMaxGroups = 65535;
-    const u32 groups = (tris + kMeshShaderTrisPerGroup - 1) / kMeshShaderTrisPerGroup;
+    const u32 groups = (m.meshletCount + kMeshletsPerAmplificationGroup - 1) / kMeshletsPerAmplificationGroup;
+    const u32 flags = m.computeWritten ? kMeshletFlagNoCull : 0u;
     for (u32 base = 0; base < groups; base += kMaxGroups) {
-        const u32 tc[4] = {tris, vertexCount, base, 0};
+        const u32 tc[4] = {m.meshletCount, m.vertexCount, base, flags};
         cl->SetGraphicsRoot32BitConstants(countParam, 4, tc, 0);
         cl6->DispatchMesh(std::min(kMaxGroups, groups - base), 1, 1);
     }
 }
 
-// Mesh-shader draw via DispatchMesh; group count from triangle count (must match AVER_MS_TRIS).
 void D3D12Device::dispatchMesh(const GpuMesh& m) {
-    const u32 tris = m.indexCount / 3;
-    if (!tris) return;
+    if (!m.meshletCount || !m.ml || !m.vb) return;
     cmdList_->SetGraphicsRootShaderResourceView(kMeshVertexParam, m.vb->GetGPUVirtualAddress());
-    cmdList_->SetGraphicsRootShaderResourceView(kMeshIndexParam, m.ib->GetGPUVirtualAddress());
-    dispatchMeshTriangles(cmdList_.Get(), cmdList6_.Get(), kMeshCountParam, tris, m.vertexCount);
+    cmdList_->SetGraphicsRootShaderResourceView(kMeshIndexParam, m.ml->GetGPUVirtualAddress());
+    dispatchMeshlets(cmdList_.Get(), cmdList6_.Get(), kMeshCountParam, m);
+}
+
+void D3D12Device::attachMeshlets(GpuMesh& m, const u32* indices, u32 indexCount, const MeshVertex* verts, bool onDefaultHeap) {
+    if (!buildMeshlets_ || !rhiFactory_ || !indices) return;
+    MeshletBuffer mb = buildMeshlets(indices, indexCount, m.vertexCount, verts ? &verts->px : nullptr, sizeof(MeshVertex));
+    if (!mb.meshletCount) return;
+    const u64 bytes = static_cast<u64>(mb.words.size()) * sizeof(u32);
+    BufferDesc d;
+    d.bytes = bytes;
+    d.kind = onDefaultHeap ? BufferKind::Default : BufferKind::Upload;
+    d.debugName = "mesh meshlets";
+    const BufferHandle h = rhiFactory_->createBuffer(d);
+    RhiBuffer* rb = rhiFactory_->buffer(h);
+    const bool ok = rb && rb->res &&
+                    (onDefaultHeap ? rhiFactory_->uploadBuffers({{rb->res.Get(), mb.words.data(), bytes}})
+                                   : rhiFactory_->writeBuffer(h, mb.words.data(), bytes, 0));
+    if (!ok) {
+        if (h) rhiFactory_->destroyBuffer(h);
+        AVER_WARN("[RHI.D3D12] a mesh's meshlet buffer could not be made; it draws through the input assembler");
+        return;
+    }
+    m.ml = rb->res;
+    m.mlBuffer = h;
+    m.meshletCount = mb.meshletCount;
+}
+
+bool D3D12Device::isMeshPipeline(PipelineHandle p) {
+    const RhiPipeline* rp = rhiFactory_ ? rhiFactory_->pipeline(p) : nullptr;
+    return rp && rp->mesh;
 }
 
 // Uploads line list to GPU; EditorLines owns buffers and slot table.
@@ -6159,8 +6259,10 @@ void D3D12Device::endFrame() {
         for (IRenderFeature* f : features_) {
             if (f->overridesScenePipeline()) { owner = f; break; }
         }
-        const PipelineHandle blendedPso = owner
-            ? owner->scenePipeline(msActive_ && msPso_, false, true) : 0;
+        const bool blendedMs = msActive_ && msPso_;
+        const PipelineHandle blendedPso = owner ? owner->scenePipeline(blendedMs, false, true) : 0;
+        // The input-assembler twin, for a mesh without meshlets.
+        const PipelineHandle blendedIaPso = owner && blendedMs ? owner->scenePipeline(false, false, true) : blendedPso;
 
         if (!blendedPso) {
             // Returning 0 for blended=true means no blended variant. Drop rather than fall back to opaque.
@@ -6218,8 +6320,8 @@ void D3D12Device::endFrame() {
                 }
 
                 // R6: a translucent material with BaseMaterial3D features (blend mode, depth modes, cull, shader features) has its own variant.
-                PipelineHandle drawPso = blendedPso;
-                bool drawMs = msActive_ && msPso_;
+                bool drawMs = blendedMs && meshHasMeshlets(bd.mesh) && isMeshPipeline(blendedPso);
+                PipelineHandle drawPso = drawMs ? blendedPso : blendedIaPso;
                 if (const u32 fxKey = drawMaterialFxKey(bd.binding.constants, bd.binding.bytes)) {
                     if (const PipelineHandle fxp = owner->scenePipelineFx(fxKey, false, true)) { drawPso = fxp; drawMs = false; }
                 }
@@ -9724,12 +9826,11 @@ void D3D12RenderContext::dispatchMeshFor(MeshHandle mesh) {
     if (!dev_->cmdList6_) { AVER_ERROR("[RHI.D3D12] DispatchMesh is unavailable on this command list"); return; }
     if (mesh == 0 || mesh > dev_->meshes_.size()) { AVER_ERROR("[RHI.D3D12] dispatchMeshFor with an invalid mesh handle"); return; }
     const GpuMesh& m = dev_->meshes_[mesh - 1];
-    const u32 tris = m.indexCount / 3;
-    if (!tris) return;
+    if (!m.meshletCount || !m.ml || !m.vb) return;   // callers pick the input assembler for a mesh without meshlets
     applyDrawBinding();
     dev_->cmdList_->SetGraphicsRootShaderResourceView(static_cast<UINT>(pipe_->msVertexParam), m.vb->GetGPUVirtualAddress());
-    dev_->cmdList_->SetGraphicsRootShaderResourceView(static_cast<UINT>(pipe_->msIndexParam), m.ib->GetGPUVirtualAddress());
-    dispatchMeshTriangles(dev_->cmdList_.Get(), dev_->cmdList6_.Get(), static_cast<UINT>(pipe_->msCountParam), tris, m.vertexCount);
+    dev_->cmdList_->SetGraphicsRootShaderResourceView(static_cast<UINT>(pipe_->msIndexParam), m.ml->GetGPUVirtualAddress());
+    dispatchMeshlets(dev_->cmdList_.Get(), dev_->cmdList6_.Get(), static_cast<UINT>(pipe_->msCountParam), m);
 }
 
 // Dispatches an amplification+mesh-shader pipeline over one cluster cut.

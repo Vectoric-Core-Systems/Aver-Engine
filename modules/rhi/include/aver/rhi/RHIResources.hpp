@@ -381,15 +381,12 @@ constexpr u32 kAllMips = 0xFFFFFFFFu;
 // Whole-resource transition; otherwise a mip index.
 constexpr u32 kAllSubresources = 0xFFFFFFFFu;
 
-// Triangles per mesh-shader group: 32, so a group is 96 threads writing ONE output vertex each (96 vertices, 32 triangles).
-// More vertices than threads (the old 64 triangles / 64 threads / 192 vertices) is a path the driver emulates.
-constexpr u32 kMeshShaderTrisPerGroup = 32;
-
 // Clusters per amplification-shader thread group; shader's [numthreads] must agree.
 constexpr u32 kClusterAmplificationGroupSize = 32;
 
 // ---------------------------------------------------------------- reserved registers
-// Reserved by the backend for dispatchMeshFor(), declared in sharedShaderPrelude().
+// Reserved by the backend for dispatchMeshFor(), declared in sharedShaderPrelude(): MeshCB {meshlet count, vertex count,
+// first amplification group, flags (Meshlets.hpp)}.
 constexpr u32 kMeshGeometryConstantRegister = 5;
 constexpr u32 kFeatureFrameConstantRegister = 4;
 // b1: per-draw block (transform, then shading constants).

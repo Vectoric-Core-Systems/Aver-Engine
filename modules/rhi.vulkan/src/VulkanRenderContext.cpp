@@ -675,20 +675,20 @@ void VulkanRenderContext::dispatchMeshFor(MeshHandle mesh) {
     }
     if (mesh == 0 || mesh > dev_->meshes_.size()) { AVER_ERROR("[RHI.Vulkan] dispatchMeshFor with an invalid mesh handle"); return; }
     const GpuMesh& m = dev_->meshes_[mesh - 1];
-    const u32 tris = m.indexCount / 3;
-    if (!tris) return;
+    if (!m.meshletCount || !m.ml) return;   // callers pick vertex input for a mesh without meshlets
     applyDrawBinding();
     const DescriptorLayoutEntry* le = pipe_->layoutEntry;
     if (!le || !le->mesh) { AVER_ERROR("[RHI.Vulkan] dispatchMeshFor: pipeline's cached layout is not a mesh layout"); return; }
     dev_->api().CmdPushConstants(cb, le->pipelineLayout, VK_SHADER_STAGE_ALL,
                                  le->pushConstants.meshVertexAddrOffset, sizeof(VkDeviceAddress), &m.vbAddress);
     dev_->api().CmdPushConstants(cb, le->pipelineLayout, VK_SHADER_STAGE_ALL,
-                                 le->pushConstants.meshIndexAddrOffset, sizeof(VkDeviceAddress), &m.ibAddress);
-    // {tris, vertexCount, first group, 0}: the shader bounds every index, and a mesh over 65535 groups is several draws.
-    const u32 groups = (tris + kMeshShaderTrisPerGroup - 1) / kMeshShaderTrisPerGroup;
+                                 le->pushConstants.meshIndexAddrOffset, sizeof(VkDeviceAddress), &m.mlAddress);
+    // {meshlets, vertexCount, first group, flags}: the shader bounds every index, and a mesh over 65535 groups is several draws.
+    const u32 groups = (m.meshletCount + kMeshletsPerAmplificationGroup - 1) / kMeshletsPerAmplificationGroup;
+    const u32 flags = m.computeWritten ? kMeshletFlagNoCull : 0u;
     const bool ownScope = beginRenderScope(*dev_, cb);
     for (u32 base = 0; base < groups; base += 65535u) {
-        const u32 tc[4] = {tris, m.vertexCount, base, 0};
+        const u32 tc[4] = {m.meshletCount, m.vertexCount, base, flags};
         dev_->api().CmdPushConstants(cb, le->pipelineLayout, VK_SHADER_STAGE_ALL,
                                      le->pushConstants.meshCountOffset, sizeof(tc), tc);
         dev_->api().CmdDrawMeshTasksEXT(cb, std::min(65535u, groups - base), 1, 1);

@@ -10,6 +10,10 @@ triggering inputs for anything summarised below.
 
 ## [Unreleased]
 
+### Mesh shaders draw meshlets (not yet run on a GPU)
+
+- The mesh-shader geometry path now draws meshlets: up to 64 vertices and 124 triangles each, built when a mesh is created. An amplification shader culls them against the view frustum, 32 at a time, and each vertex is shaded once instead of once per triangle corner. D3D12 and Vulkan both build them; Vulkan's mesh path compiles again (its push-constant block had lost two fields). Mesh shaders stay off by default on AMD until the NeonDistrict load is re-checked (`AVER_MESH_SHADERS=1`).
+
 ### Brittle destruction (headless)
 
 - Voronoi fracture of a closed mesh (`fracture::voronoi`: uniform, radial, brick and clustered seeds, bounded neighbour search, inside material and UVs, contact graph with anchors), the `.ocfrac` asset, and `Aver.Destruct`'s `Destructible` (strain from `HitEvent`s, piece bodies from convex hulls, debris cap, sleeping despawn, optional breakable joints). `csg::Prepared` builds a BSP once for many booleans. See `docs/DESTRUCTION.md`. No editor tool yet.

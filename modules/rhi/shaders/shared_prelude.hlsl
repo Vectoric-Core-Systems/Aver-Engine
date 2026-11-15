@@ -919,9 +919,10 @@ SkyOut VSky(uint id : SV_VertexID) {
 }
 
 #if AVER_MS
-// ================= Mesh shader geometry path =================
-// One group per 64 triangles, read from root SRVs and expanded unindexed. The two SRV registers
-// arrive as -D macros from rhi::meshGeometryDefines.
+// ================= Meshlet geometry path =================
+// ASMain culls a mesh's meshlets (Meshlets.hpp), AVER_MESHLET_AS_GROUP to a group, against the view frustum's side
+// planes; MSMain emits each survivor's vertices once and its triangles by local index. The two SRV registers arrive as
+// -D macros from rhi::meshGeometryDefines.
 #if !defined(AVER_MS_VTX_REG) || !defined(AVER_MS_IDX_REG)
 #error "AVER_MS needs AVER_MS_VTX_REG / AVER_MS_IDX_REG from rhi::meshGeometryDefines"
 #endif
@@ -931,46 +932,78 @@ SkyOut VSky(uint id : SV_VertexID) {
 
 // Vertex stride on the mesh-shader path: must match rhi::MeshVertex byte for byte.
 struct MeshVtx { float3 pos; float3 nrm; float2 uv; };
-StructuredBuffer<MeshVtx> gVerts   : register(AVER_REG_JOIN(t, AVER_MS_VTX_REG));
-ByteAddressBuffer         gIndices : register(AVER_REG_JOIN(t, AVER_MS_IDX_REG));
-// gVtxCount bounds every index (0: unchecked). gGroupBase: a draw over 65535 groups is several DispatchMesh calls, each
-// starting at this group.
-cbuffer MeshCB : register(AVER_CB_JOIN(b, AVER_MESH_GEOM_CB)) { uint gTriCount; uint gVtxCount; uint gGroupBase; uint _msPad; };
+StructuredBuffer<MeshVtx> gVerts    : register(AVER_REG_JOIN(t, AVER_MS_VTX_REG));
+ByteAddressBuffer         gMeshlets : register(AVER_REG_JOIN(t, AVER_MS_IDX_REG));
+// gVtxCount bounds every vertex read (0: unchecked). gGroupBase: a mesh over 65535 amplification groups is several
+// DispatchMesh calls, each starting at this group. gMeshletFlags: AVER_MESHLET_NO_CULL when the vertices move.
+cbuffer MeshCB : register(AVER_CB_JOIN(b, AVER_MESH_GEOM_CB)) { uint gMeshletCount; uint gVtxCount; uint gGroupBase; uint gMeshletFlags; };
 
+struct MeshletPayload { uint ids[AVER_MESHLET_AS_GROUP]; };
+groupshared MeshletPayload gsMeshletIds;
+groupshared uint gsMeshletKeep[AVER_MESHLET_AS_GROUP];
+groupshared uint gsMeshletKept;
 
-// Triangles this group owns.
-uint msTriCount(uint group) { return min(AVER_MS_TRIS, gTriCount - group * AVER_MS_TRIS); }
-
-// Triangle `tri`'s indices, or vertex 0 three times (zero area, never rasterised) when one names a vertex past the
-// buffer. Root views have no bounds check: unlike the input assembler, a stray index here reads arbitrary GPU memory.
-uint3 msTriangle(uint tri) {
-    uint3 idx = gIndices.Load3(tri * 12);
-    if (gVtxCount != 0 && any(idx >= gVtxCount)) idx = uint3(0, 0, 0);
-    return idx;
+// False only when the mesh-space sphere lies wholly outside a side plane of clip space. The planes come from
+// world * viewProj (clip = p * M, so a plane is a sum of M's columns), so they are already in mesh space and no world
+// scale is estimated. Depth planes are left out: a pipeline without depth clip draws what they would cull.
+bool meshletInFrustum(float3 c, float r) {
+    const float4x4 t = transpose(mul(gWorld, gViewProj));
+    const float4 planes[4] = {t[3] + t[0], t[3] - t[0], t[3] + t[1], t[3] - t[1]};
+    [unroll] for (uint i = 0; i < 4; ++i) {
+        const float len = length(planes[i].xyz);
+        if (len > 1e-20 && dot(planes[i].xyz, c) + planes[i].w < -r * len) return false;
+    }
+    return true;
 }
 
-// Pulls this group's triangles from the vertex and index buffers and emits them transformed, unindexed: ONE THREAD PER
-// OUTPUT VERTEX (thread t writes corner t % 3 of triangle t / 3), and the first `count` threads write the triangles.
-[numthreads(AVER_MS_TRIS * 3, 1, 1)]
-[outputtopology("triangle")]
-void MSMain(uint gid : SV_GroupID, uint gtid : SV_GroupThreadID,
-            out vertices VSOut verts[AVER_MS_TRIS * 3],
-            out indices uint3 tris[AVER_MS_TRIS]) {
-    const uint group = gGroupBase + gid;
-    const uint count = msTriCount(group);
-    SetMeshOutputCounts(count * 3, count);   // must run for the whole group, before any output
-    if (gtid < count) tris[gtid] = uint3(gtid * 3, gtid * 3 + 1, gtid * 3 + 2);
-    if (gtid >= count * 3) return;
+// Survivors keep their meshlet order (an ordered count, not an atomic), so triangles rasterise in index order as they
+// do on the input assembler: a translucent mesh blends the same on both paths, every frame.
+[numthreads(AVER_MESHLET_AS_GROUP, 1, 1)]
+void ASMain(uint gid : SV_GroupID, uint gtid : SV_GroupThreadID) {
+    const uint id = (gGroupBase + gid) * AVER_MESHLET_AS_GROUP + gtid;
+    bool keep = false;
+    if (id < gMeshletCount) {
+        const float4 sphere = asfloat(gMeshlets.Load4(id * 32 + 16));
+        keep = sphere.w < 0.0 || (gMeshletFlags & AVER_MESHLET_NO_CULL) != 0 || meshletInFrustum(sphere.xyz, sphere.w);
+    }
+    gsMeshletKeep[gtid] = keep ? 1u : 0u;
+    GroupMemoryBarrierWithGroupSync();
+    uint slot = 0;
+    for (uint k = 0; k < gtid; ++k) slot += gsMeshletKeep[k];
+    if (keep) gsMeshletIds.ids[slot] = id;
+    if (gtid == AVER_MESHLET_AS_GROUP - 1) gsMeshletKept = slot + (keep ? 1u : 0u);
+    GroupMemoryBarrierWithGroupSync();
+    // Uniform across the group, as DispatchMesh requires.
+    DispatchMesh(gsMeshletKept, 1, 1, gsMeshletIds);
+}
 
-    const uint3 idx = msTriangle(group * AVER_MS_TRIS + gtid / 3);
-    const MeshVtx v = gVerts[idx[gtid % 3]];
-    const float4 wp = mul(float4(v.pos, 1.0), gWorld);
-    VSOut ov;
-    ov.wpos  = wp.xyz;
-    ov.pos   = mul(wp, gViewProj);
-    ov.nrmWS = averTransformNormal(v.nrm, gWorld);
-    ov.uv    = v.uv;
-    verts[gtid] = ov;
+// One group per surviving meshlet: thread t writes vertex t and triangle t. Counts and local indices are clamped and
+// every global index bounded, so a damaged buffer draws wrong triangles, never reads past the vertex buffer.
+[numthreads(128, 1, 1)]
+[outputtopology("triangle")]
+void MSMain(uint gid : SV_GroupID, uint gtid : SV_GroupThreadID, in payload MeshletPayload pl,
+            out vertices VSOut verts[AVER_MESHLET_VERTS],
+            out indices uint3 tris[AVER_MESHLET_TRIS]) {
+    const uint4 d = gMeshlets.Load4(pl.ids[gid] * 32);
+    const uint vc = min(d.z & 0xFF, (uint)AVER_MESHLET_VERTS);
+    const uint tc = vc ? min((d.z >> 8) & 0xFF, (uint)AVER_MESHLET_TRIS) : 0;
+    SetMeshOutputCounts(vc, tc);   // must run for the whole group, before any output
+    if (gtid < tc) {
+        const uint p = gMeshlets.Load((d.y + gtid) * 4);
+        tris[gtid] = min(uint3(p & 0xFF, (p >> 8) & 0xFF, (p >> 16) & 0xFF), vc - 1);
+    }
+    if (gtid < vc) {
+        uint g = gMeshlets.Load((d.x + gtid) * 4);
+        if (gVtxCount != 0 && g >= gVtxCount) g = 0;
+        const MeshVtx v = gVerts[g];
+        const float4 wp = mul(float4(v.pos, 1.0), gWorld);
+        VSOut ov = (VSOut)0;
+        ov.wpos  = wp.xyz;
+        ov.pos   = mul(wp, gViewProj);
+        ov.nrmWS = averTransformNormal(v.nrm, gWorld);
+        ov.uv    = v.uv;
+        verts[gtid] = ov;
+    }
 }
 #endif // AVER_MS
 

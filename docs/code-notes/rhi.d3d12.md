@@ -80,7 +80,8 @@ Kept: essential high-level description of feature.
 - Unlit shading uses feature's pipeline (not fallback, which hardcodes gBaseColor).
 - Prepassed draw must use IA path (depth prepass writes through IA/vsMain, not mesh shaders).
 - PSO caching: hundreds to thousands of drawMesh calls per scene share one PSO.
-- Mesh-shader draw via DispatchMesh; group count from triangle count (must match AVER_MS_TRIS).
+- Mesh-shader draw via DispatchMesh over the mesh's meshlet buffer (bound where the index buffer was): one amplification
+  group per kMeshletsPerAmplificationGroup meshlets; a mesh without meshlets takes the input-assembler pipeline.
 - Line meshes: EditorLines owns buffers and slot table; stale handles not reused.
 - Gizmos/wireframes depth-test against ray pass depth.
 - blackbodySrgb returns linear sRGB; lightColor is display-encoded; re-encode to avoid double decoding.

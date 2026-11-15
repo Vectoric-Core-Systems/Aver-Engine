@@ -2,6 +2,7 @@
 // structures it feeds, the colour-space helpers, the sky and the camera post.
 #include "aver/rhi/RHIResources.hpp"
 #include "aver/rhi/RHI.hpp"
+#include "aver/rhi/Meshlets.hpp"
 #include "aver/rhi/ShaderFiles.hpp"
 
 #include "aver/core/Log.hpp"
@@ -92,7 +93,9 @@ const std::string& colorHlsl() {
 // the C++. The asserts are kept, but their job has changed: they no longer stand in for a coupling
 // (there is a real one now), they PIN VALUES OTHER CODE DEPENDS ON -- a root signature laid out
 // elsewhere, a backend that uploads 32 dwords. Change one and the assert asks whether you meant to.
-static_assert(kMeshShaderTrisPerGroup * 3 <= 128, "AVER_MS_TRIS is emitted from this: one thread per output vertex, 128 threads at most");
+static_assert(kMeshletMaxVertices <= 128 && kMeshletMaxTriangles <= 128,
+              "MSMain is one 128-thread group per meshlet, one output vertex and one triangle per thread");
+static_assert(kMeshletMaxVertices <= 256 && kMeshletDescDwords == 8, "a meshlet's local indices are bytes; its desc is two uint4");
 static_assert(kMeshGeometryConstantRegister == 5, "MeshCB in the prelude derives its register from this");
 static_assert(kObjectConstantRegister == 1, "PerObject in the prelude derives its register from this");
 static_assert(kObjectConstantDwords == 32,
@@ -124,7 +127,10 @@ std::string shaderConstantsHlsl() {
     s += "#define AVER_FEATURE_FRAME_CB "   + std::to_string(kFeatureFrameConstantRegister) + "\n";
     s += "#define AVER_MESH_GEOM_CB "       + std::to_string(kMeshGeometryConstantRegister) + "\n";
     s += "#define AVER_OBJECT_DWORDS "      + std::to_string(kObjectConstantDwords) + "\n";
-    s += "#define AVER_MS_TRIS "            + std::to_string(kMeshShaderTrisPerGroup) + "\n";
+    s += "#define AVER_MESHLET_VERTS "      + std::to_string(kMeshletMaxVertices) + "\n";
+    s += "#define AVER_MESHLET_TRIS "       + std::to_string(kMeshletMaxTriangles) + "\n";
+    s += "#define AVER_MESHLET_AS_GROUP "   + std::to_string(kMeshletsPerAmplificationGroup) + "\n";
+    s += "#define AVER_MESHLET_NO_CULL "    + std::to_string(kMeshletFlagNoCull) + "\n";
     s += "#define AVER_MSC_GROUP "          + std::to_string(kClusterAmplificationGroupSize) + "\n";
     return s;
 }

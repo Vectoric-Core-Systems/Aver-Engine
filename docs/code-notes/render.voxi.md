@@ -1176,7 +1176,7 @@ Cached mode (giRestirVisibility_=4) wires as mode 2 (HalfResolution) to shader, 
 
 - Textured ray-driven pipeline: Bindless texture table is a root-signature difference, cannot be a runtime toggle. Built only when both hardware AND ensureTextureTable() confirm descriptors are real; failures fall back to flat-albedo pipeline, itself falling back to rasteriser — three levels of fallback, none a black screen.
 
-- Mesh-shader and RayQuery support: MSMain, PSMainVoxi with defines (AVER_MS, AVER_RT, AVER_GBUFFER) — optional variants. MSVoxel and RayQuery variants use same pattern; fallbacks exist if compilation fails.
+- Mesh-shader and RayQuery support: ASMain + MSMain (meshlets), PSMainVoxi with defines (AVER_MS, AVER_RT, AVER_GBUFFER) — optional variants. MSVoxel and RayQuery variants use same pattern; fallbacks exist if compilation fails.
 
 - CSAirVis gating: Compiled against full Voxi layout (reads t0's mip chain via gVoxelSamp, writes u16). Requires SM 6.0, gated on instancedShadowsOk for clean fallback to placeholder when unavailable.
 
