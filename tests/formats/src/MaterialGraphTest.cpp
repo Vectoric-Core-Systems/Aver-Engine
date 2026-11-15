@@ -53,11 +53,17 @@ static void check(bool cond, const std::string& what) {
 // a test that cannot tell the two apart is worse than one that says which it saw.
 class Dxc {
 public:
+    Dxc() = default;
+    // The SPIR-V twin: the same source to Vulkan's SPIR-V, through the SPIR-V-capable DXC (vendored on Windows, the
+    // bin/ one elsewhere) with the backend's UAV register shift, as VoxiSpirvCompileTest does.
+    static Dxc spirv() { Dxc d; d.spirv_ = true; return d; }
+    const char* name() const { return spirv_ ? "SPIR-V" : "DXIL"; }
+
     bool available() {
         if (tried_) return compiler_ != nullptr;
         tried_ = true;
 #if defined(_WIN32)
-        dll_ = loadLibrary("dxcompiler.dll");
+        dll_ = spirv_ ? loadLibrary(AVER_REPO_ROOT "/third_party/dxc-spirv/dxcompiler.dll") : loadLibrary("dxcompiler.dll");
 #elif defined(__APPLE__)
         dll_ = loadLibrary((executableDir() + "/libdxcompiler.dylib").c_str());
 #else
@@ -88,6 +94,9 @@ public:
         args.push_back(L"PSMaterialGraphTest");
         args.push_back(L"-Zpr");     // row-major, matching the engine's own D3DCOMPILE_PACK_MATRIX_ROW_MAJOR
         args.push_back(L"-Vd");      // no validation: dxil.dll signing is irrelevant to "does it compile"
+        if (spirv_) {
+            for (const wchar_t* a : {L"-spirv", L"-fspv-target-env=vulkan1.3", L"-fvk-u-shift", L"28", L"0"}) args.push_back(a);
+        }
         for (usize b = 0; b <= defines.size();) {
             const usize e = std::min(defines.find(';', b), defines.size());
             if (e > b) {
@@ -123,6 +132,7 @@ public:
     }
 
 private:
+    bool spirv_ = false;
     bool tried_ = false;
     void* dll_ = nullptr;
     ComPtr<IDxcUtils> utils_;
@@ -721,7 +731,7 @@ static void runNodeCase(Dxc& dxc, const char* label, const fmt::OcGraphData& g) 
     e.hlsl = body.hlsl;
     std::string err;
     const bool ok = dxc.compile(compose(pbr::materialGraphHlsl({e})), defines(true), err);
-    check(ok, std::string(label) + ": DXC compiles it: " + err);
+    check(ok, std::string(label) + ": DXC compiles it to " + dxc.name() + ": " + err);
 }
 
 using GraphBuilder = fmt::OcGraphData (*)();
@@ -1598,9 +1608,11 @@ int main() {
     // it actually got to -- which sends the reader looking at the wrong test.
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     Dxc dxc;
+    Dxc dxcSpirv = Dxc::spirv();
     AVER_INFO("==================================================");
     AVER_INFO("material graph -> HLSL");
     AVER_INFO("  DXC: {}", dxc.available() ? "loaded" : "NOT AVAILABLE -- compile checks will SKIP");
+    AVER_INFO("  DXC (SPIR-V): {}", dxcSpirv.available() ? "loaded" : "NOT AVAILABLE -- Vulkan compile checks will SKIP");
 
     testDomainIsRequired();
     testOutputNodeIsRequired();
@@ -1616,6 +1628,12 @@ int main() {
     testFromParsedText(dxc);
     testGeneratedImportGraph(dxc);
     testEveryNewNodeTypeCompiles(dxc);
+    // The same generated HLSL for Vulkan: every graph shape above, to SPIR-V.
+    AVER_INFO("=== the compile checks again, to SPIR-V ===");
+    testItActuallyCompiles(dxcSpirv);
+    testFromParsedText(dxcSpirv);
+    testGeneratedImportGraph(dxcSpirv);
+    testEveryNewNodeTypeCompiles(dxcSpirv);
     testSwizzleRules();
     testTimeRules();
     testFlowRules();

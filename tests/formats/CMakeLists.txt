@@ -236,6 +236,8 @@ if(TARGET Aver.Render.PBR.Materials)
   add_executable(MaterialGraphTest src/MaterialGraphTest.cpp)
   target_link_libraries(MaterialGraphTest PRIVATE
     Aver.Render.PBR.Materials Aver.Formats Aver.RHI Aver.Core Aver.Platform)
+  # AVER_REPO_ROOT: the SPIR-V pass loads the vendored SPIR-V-capable DXC (third_party/dxc-spirv) on Windows.
+  target_compile_definitions(MaterialGraphTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
   set_target_properties(MaterialGraphTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
