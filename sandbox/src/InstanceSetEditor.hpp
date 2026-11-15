@@ -13,6 +13,7 @@
 // The model (InstanceSetModel.hpp) and the gizmo maths (PreviewGizmo.hpp) already existed; this file is
 // the glue that gives them a tab.
 #include "AssetEditor.hpp"
+#include "FileStamp.hpp"
 #include "InstanceSetModel.hpp"
 
 #include <filesystem>
@@ -81,13 +82,10 @@ public:
     const f32* boundsHi() const { return hi_; }
 
 private:
-    struct Stamp { std::uintmax_t size = 0; long long mtime = 0; bool valid = false; };
-    static Stamp stampOf(const std::string& path);
-
     std::string path_;
     InstanceSetModel model_;
     bool loaded_ = false;
-    Stamp stamp_;
+    FileStamp stamp_;
     f32 lo_[3] = {0, 0, 0}, hi_[3] = {0, 0, 0};
     bool haveBounds_ = false;
 };

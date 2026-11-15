@@ -122,19 +122,6 @@ bool rayPlaneZ(const f32 o[3], const f32 d[3], f32 planeZ, f32 out[3]) {
 
 // ============================================================================ the document
 
-InstanceSetDoc::Stamp InstanceSetDoc::stampOf(const std::string& path) {
-    Stamp s;
-    std::error_code ec;
-    const std::uintmax_t size = std::filesystem::file_size(path, ec);
-    if (ec) return s;
-    const auto t = std::filesystem::last_write_time(path, ec);
-    if (ec) return s;
-    s.size = size;
-    s.mtime = static_cast<long long>(t.time_since_epoch().count());
-    s.valid = true;
-    return s;
-}
-
 bool InstanceSetDoc::load(const std::string& path, std::string* why) {
     fmt::OcInstanceData data;
     if (!fmt::loadOcInstances(path, data, why)) return false;   // a failed (re)load leaves the old state
@@ -147,7 +134,7 @@ bool InstanceSetDoc::load(const std::string& path, std::string* why) {
     }
     path_ = path;
     loaded_ = true;
-    stamp_ = stampOf(path_);
+    stamp_ = FileStamp::of(path_);
     haveBounds_ = false;
     recomputeBounds();
     return true;
@@ -159,13 +146,12 @@ bool InstanceSetDoc::save(std::string* why) {
     model_.exportTo(out);
     if (!fmt::saveOcInstances(path_, out, why)) return false;
     model_.markSaved();
-    stamp_ = stampOf(path_);
+    stamp_ = FileStamp::of(path_);
     return true;
 }
 
 bool InstanceSetDoc::diskMatchesLastIo() const {
-    const Stamp now = stampOf(path_);
-    return now.valid && stamp_.valid && now.size == stamp_.size && now.mtime == stamp_.mtime;
+    return FileStamp::of(path_).sameAs(stamp_);
 }
 
 void InstanceSetDoc::recomputeBounds() {

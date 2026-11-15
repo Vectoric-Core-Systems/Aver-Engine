@@ -13,6 +13,7 @@
 #include "EditorIcons.hpp"
 #include "EditorKeybinds.hpp"
 #include "EditorWidgets.hpp"
+#include "FileStamp.hpp"
 #include "PreviewChrome.hpp"
 #include "SnapshotUndo.hpp"
 #include "AnimCurveGeometry.hpp"
@@ -440,6 +441,7 @@ public:
                                 : fmt::saveOcSkel(path_, skel_, why);
         if (!ok) return false;
         dirty_ = false;
+        stamp_ = FileStamp::of(path_);
         return true;
     }
     void draw(Engine& e) override;
@@ -455,7 +457,16 @@ public:
 #if AVER_WITH_IMGUI
     void drawSequencerStrip(bool seqExpanded, f32 stripH, f32 seqSplitAvail, f32 seqHandleH, f32 minSeqH, f32 minMainH);
 #endif
-    void onFileChanged() override { reload_ = true; }
+    // A save's own watcher echo is skipped (the undo history survives it), and a dirty tab keeps its edits -- the
+    // rule ParticleEditor and InstanceSetEditor already follow.
+    void onFileChanged() override {
+        if (FileStamp::of(path_).sameAs(stamp_)) return;
+        if (dirty_) {
+            AVER_WARN("[AnimEditor] '{}' changed on disk, but this tab has unsaved edits -- keeping them", path_);
+            return;
+        }
+        reload_ = true;
+    }
 
     // Restores the view/tracks split to its default fraction and persists it (SplitPane, see
     // EditorWidgets.hpp). Only that boundary -- the fixed-width bones column and the internal
@@ -591,6 +602,7 @@ private:
     bool isClip_ = true;
     bool reload_ = false;
     bool dirty_ = false;
+    FileStamp stamp_;   // after the last load or save
     int  selectedNotify_ = -1;
     char notifyNameBuf_[96] = {};
     int  selectedSocket_ = -1;
@@ -841,6 +853,7 @@ void AnimEditor::openClip(const std::string& path) {
     if (!fmt::loadOcAnim(path, c, &why)) { AVER_WARN("[AnimEditor] {}", why); return; }
     clip_ = std::move(c);
     path_ = path;
+    stamp_ = FileStamp::of(path_);
     isClip_ = true;
     time_ = 0.0f;
     playing_ = true;
