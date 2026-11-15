@@ -181,10 +181,10 @@ void GameWater::applyLevel(rhi::IDevice& device, const fmt::OcWorldData& w) {
 
 #if AVER_FLUIDS_SIMULATED
     // A simulated record is not a Gerstner surface, and taking both paths would draw two waters in
-    // the same hole. Returns rather than falling through: the soft body IS the water for this
+    // the same hole. Returns rather than falling through: the particle fluid IS the water for this
     // record.
     if (wp.simulate) {
-        retireDisplaced();   // the soft body is the water now
+        retireDisplaced();   // the particle fluid is the water now
         if (wp.infinite) {
             // A simulated volume is a closed shell needing a size; an endless ocean has none to
             // give it. Refused here, not in the parser -- the format's job is to carry what was
@@ -493,7 +493,7 @@ void GameWater::update(rhi::IDevice& device, f32 dt) {
         if (fluidHandle_) fluidSurfaceMaterial_[fluidHandle_] = fluidWantSurfaceMaterial_;
         const char* nm = fluidWantName_.empty() ? "unnamed" : fluidWantName_.c_str();
         if (fluidHandle_) {
-            AVER_INFO("[Water] '{}' is SIMULATED: a {}x{}x{} cm soft body centred at ({}, {}, {})",
+            AVER_INFO("[Water] '{}' is SIMULATED: a {}x{}x{} cm particle fluid centred at ({}, {}, {})",
                       nm, fluidWantDesc_.halfExtentCm[0] * 2.0f, fluidWantDesc_.halfExtentCm[1] * 2.0f,
                       fluidWantDesc_.halfExtentCm[2] * 2.0f, fluidWantDesc_.centreCm[0],
                       fluidWantDesc_.centreCm[1], fluidWantDesc_.centreCm[2]);
@@ -508,12 +508,11 @@ void GameWater::update(rhi::IDevice& device, f32 dt) {
         const fluids::FluidHandle h = fluidScene_.spawn(req.desc, device);
         if (h) {
             fluidGraphHandles_.push_back(h);
-            AVER_INFO("[Fluid] '{}' is SIMULATED: a {}x{}x{} cm soft body centred at ({}, {}, {}), "
-                      "compliance={}, damping={}, iterations={}, pressure={}",
+            AVER_INFO("[Fluid] '{}' is SIMULATED: a {}x{}x{} cm particle fluid centred at ({}, {}, {}), "
+                      "{} particles, damping={}, iterations={}",
                       req.label, req.desc.halfExtentCm[0] * 2.0f, req.desc.halfExtentCm[1] * 2.0f,
                       req.desc.halfExtentCm[2] * 2.0f, req.desc.centreCm[0], req.desc.centreCm[1],
-                      req.desc.centreCm[2], req.desc.compliance, req.desc.damping,
-                      req.desc.iterations, req.desc.pressure);
+                      req.desc.centreCm[2], fluidScene_.particleCount(h), req.desc.damping, req.desc.iterations);
         } else {
             AVER_ERROR("[Fluid] '{}' asked to be simulated but the fluid body could not be created",
                        req.label);
@@ -521,49 +520,29 @@ void GameWater::update(rhi::IDevice& device, f32 dt) {
     }
     fluidGraphQueue_.clear();
 
-    // AFTER the physics step, BEFORE any prePass: update() reads the solver's current particle
-    // positions, so running before the step draws the previous frame's shape.
-    fluidScene_.update();
+    // After the physics step and before any prePass: steps the particles by this frame's dt and stages the surface.
+    fluidScene_.update(dt);
 
 #if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE
-    // Fallback for a gap in Jolt's own soft-body update: a fluid volume's own collision pass never
-    // sees the player's capsule.
-    if (fluidHandle_) {
-        const i32 body = fluidScene_.physicsBody(fluidHandle_);
+    // The player's capsule is not one of the colliders the particles see (those are baked at spawn), so a nearby pawn
+    // pushes the water by its own velocity, recovered by finite difference across frames.
+    if (fluidHandle_ || !fluidGraphHandles_.empty()) {
         const i32 pawn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
-        if (body && pawn) {
+        if (pawn) {
             const scene::Entity pe = static_cast<scene::Entity>(static_cast<u32>(pawn));
             const Mat4& wm = scene::World::instance().worldMatrix(pe);
             const Vec3 playerPos{wm.m[3][0], wm.m[3][1], wm.m[3][2]};
-
-            // Cheap AABB-ish reject before touching the solver: most frames the player is nowhere
-            // near any given pool, and the impulse ABI walks every particle to answer that the slow
-            // way.
-            const auto& d = fluidWantDesc_;
-            const f32 marginCm = 200.0f;
-            const bool nearVolume =
-                std::abs(playerPos.x - d.centreCm[0]) < d.halfExtentCm[0] + marginCm &&
-                std::abs(playerPos.y - d.centreCm[1]) < d.halfExtentCm[1] + marginCm &&
-                std::abs(playerPos.z - d.centreCm[2]) < d.halfExtentCm[2] + marginCm;
-
-            if (nearVolume) {
-                // No native handle reaches the character's physics velocity, so it is recovered by
-                // finite difference across frames.
-                Vec3 vel{0.0f, 0.0f, 0.0f};
-                if (fluidPrevPlayerValid_ && dt > 1.0e-5f)
-                    vel = (playerPos - fluidPrevPlayerPosCm_) * (1.0f / dt);
-
-                // Centred a half-height above the feet (the entity's origin is the character's
-                // feet) and sized to bracket its default capsule without reading it back.
-                const Vec3 centre = playerPos + Vec3{0.0f, 0.0f, 90.0f};
-                const f32 radiusCm = 90.0f;
-                aver_phys_softbody_apply_impulse(body, &centre.x, radiusCm, &vel.x, 0.5f);
-            }
-
+            Vec3 vel{0.0f, 0.0f, 0.0f};
+            if (fluidPrevPlayerValid_ && dt > 1.0e-5f) vel = (playerPos - fluidPrevPlayerPosCm_) * (0.5f / dt);
+            // Centred a half-height above the feet (the entity's origin) and sized to bracket the default capsule.
+            const Vec3 centre = playerPos + Vec3{0.0f, 0.0f, 90.0f};
+            const f32 radiusCm = 90.0f;
+            if (fluidHandle_) fluidScene_.addImpulse(fluidHandle_, &centre.x, radiusCm, &vel.x);
+            for (const fluids::FluidHandle h : fluidGraphHandles_) fluidScene_.addImpulse(h, &centre.x, radiusCm, &vel.x);
             fluidPrevPlayerPosCm_ = playerPos;
             fluidPrevPlayerValid_ = true;
         } else {
-            fluidPrevPlayerValid_ = false;   // no pawn this frame -- next frame's diff would be bogus
+            fluidPrevPlayerValid_ = false;   // no pawn this frame: the next frame's difference would be bogus
         }
     }
 #endif

@@ -1,24 +1,12 @@
 #pragma once
-// A fluid volume the water module offers, simulated by the engine's Jolt-backed soft-body solver --
-// without this module ever learning Jolt exists (README.md's buoyancy row: "this module must never
-// learn what Jolt is"; the two halves "meet in the composition root and nowhere else"). This is the
-// water-module half; modules/physics/include/aver/physics/physics_abi.h's aver_phys_softbody_* block
-// is the physics half. Nothing below includes that header, names a Jolt type, or calls an
-// aver_phys_ symbol.
-//
-// Two responsibilities, neither of them physics:
-//   (a) generateFluidSeedShell builds the seed shape -- a closed box mesh fed to
-//       aver_phys_softbody_create's verticesXyz/indices. Pure arithmetic, testable with no
-//       GPU/physics world, same spirit as GerstnerWave.hpp.
-//   (b) FluidVolume::updateFromSimulation takes the result back: world-space vertex positions
-//       matching aver_phys_softbody_vertices' output, held for a renderer, normals recomputed each
-//       update. Stateful, unlike (a), since a renderer needs something to read on frames the host
-//       skips.
-//
-// The composition root sequences (a) into aver_phys_softbody_create, steps the world, and feeds
-// aver_phys_softbody_vertices' readback to (b); none of that lives here -- this file never creates or
-// steps a soft body, and does not know a body handle exists.
+// A fluid volume the water module offers, simulated on the CPU by a position-based fluid (PbfFluid.hpp)
+// rather than a Jolt soft-body shell: a pressurised shell is a balloon, and no single pressure holds
+// every shape (docs/FLUIDS.md). This header holds the authored description (FluidVolumeDesc), the
+// real-unit material layer, the mapping from a desc to solver settings, and the box "seed shell" the
+// graph editor draws as a preview of the volume's extent. The solver is PbfFluid.hpp, the surface mesh
+// FluidSurface.hpp, and FluidScene.hpp joins them to the rasteriser. Nothing here names Jolt.
 #include "aver/core/Types.hpp"
+#include "aver/fluids/PbfFluid.hpp"
 
 #include <optional>
 #include <string>
@@ -27,76 +15,29 @@
 
 namespace aver::fluids {
 
-// Inverse stiffness of the seed shell's edge constraints, NOT zero like Jolt's default and
-// aver::scene::CSoftBody::compliance's cloth/rag-doll default (Components.hpp: inextensible). A
-// perfectly inextensible shell bounces like a taut balloon skin; a liquid has no skin, so letting the
-// edges give a little lets it sag and slosh instead. An informed starting point, not measured (no
-// GPU Gems-style derivation exists for an XPBD compliance value) -- just the direction: more than 0,
-// not so much the shell loses its shape.
-constexpr f32 kHeavyLiquidCompliance = 1.0e-4f;
-
-// Jolt's own defaults for SoftBodyCreationSettings::mLinearDamping/::mNumIterations
-// (Jolt/Physics/SoftBody/SoftBodyCreationSettings.h), named rather than left as bare numbers, same
-// reason as kHeavyLiquidCompliance -- not a behaviour change for existing callers, since
-// aver_phys_softbody_create had no way to carry other values down before.
+// Defaults of the fields the solver no longer reads. `compliance`/`pressure` were Jolt soft-body knobs
+// (edge give, shell pressure); a desc that still sets them is accepted and logged once, then ignored.
+// `damping` and `iterations` still mean something: see fluidPbfSettings.
+constexpr f32 kFluidLegacyCompliance = 1.0e-4f;
 constexpr f32 kDefaultFluidDamping    = 0.1f;
 constexpr u32 kDefaultFluidIterations = 5;
 
-// Internal pressure is DERIVED PER VOLUME, not a constant -- see fluidPressureFor() for the
-// arithmetic. `pressure` left at this sentinel asks for that derivation; any other non-negative value
-// passes to the solver untouched, for an author tuning one particular pool.
+// "Not authored" for the retired `pressure` field -- the same sentinel a WATER record and the managed
+// relay already pass, kept so existing callers and files parse and spawn unchanged.
 constexpr f32 kFluidPressureAuto = -1.0f;
 
-// Fraction of the derived balance point actually used -- MEASURED: the balance assumes pressure alone
-// holds the top face up, but the side walls also carry it, so it over-estimates and the shell gains
-// volume. Swept on the FirstPerson pool's proportions (6x4x1.2m, 8x8x4, 4s, free-standing on a floor)
-// -- final depth vs the 1.2m start:
-//
-//     0.00 -> 84%   0.25 -> 86%   0.40 -> 95%   0.50 -> 94%
-//     0.60 -> 97%   0.75 -> 97%   1.05 -> 134% (ballooning)
-//
-// 0.4-0.75 holds the shape; past that it inflates. SoftBodyTest::testPressureHoldsAShellUp pins both ends
-// (collapse and balloon).
-//
-// NOT SHAPE-INDEPENDENT (swept 2026-11-15, free-standing, 4 s, same formula): the headroom that keeps the depth
-// grows with how deep the shell is for its width and with how finely it is subdivided. A 8x8x0.5 m pond at 10x10
-// wants ~0.25 (balloons to 134% at 0.6); a 1x1x0.8 m tub at 6x6x4 and a 3 m cube at 6^3 want ~1.2 (sag to 78% and
-// 91% at 0.6); this pool at 16x16 wants ~1.1; a 3 m cube at 12^3 collapses at any value. Holding the enclosed volume
-// instead (pressure steered each step) was tried and made it worse: at constant volume a pressurised box shell
-// domes into a cushion. A shape-independent liquid needs a different model (volume constraints, or the basin
-// carrying the walls), not a different constant.
-constexpr f32 kFluidPressureHeadroom = 0.6f;
-
-// Centimetres to Jolt's metres, for the pressure coefficient specifically: gravity loses a factor of
-// 100, volume 1e6, area 1e4 (pressure = gravity * volume / area). Not a general cm->m conversion --
-// see fluidPressureFor.
-constexpr f32 kFluidCmToJolt = 1.0e-4f;
-
-// Cubic centimetres to cubic metres for a VOLUME alone -- distinct from kFluidCmToJolt above (a
-// compound ratio, not interchangeable). 1 cm^3 = (0.01 m)^3 = 1e-6 m^3; fluidParticleMassKg uses this
-// to convert desc.halfExtentCm's box into the m^3 a kg/m^3 density multiplies against -- get this one
-// wrong and a real-looking density produces a particle mass a million times too large or too small.
-constexpr f32 kFluidCmCubedToM3 = 1.0e-6f;
-
-// "No density asked for": the sentinel densityKgM3 defaults to. fluidParticleMassKg treats it (and
-// any non-positive value, since a fluid with zero/negative density is not physical) as a request for
-// TODAY'S BEHAVIOUR -- mass 1, invMass 1, matching aver_phys_softbody_create's null-invMasses path
-// (`v.mInvMass = invMasses ? invMasses[i] : 1.0f`, PhysicsWorld.cpp's buildSoftShared). Defaulting to
-// real water (1000) instead would silently make every existing volume ~28,000x heavier than what it
-// was tuned against.
+// "No density asked for": the sentinel densityKgM3 defaults to (any non-positive value is the same,
+// since a fluid with zero/negative density is not physical).
 constexpr f32 kFluidDensityUnset = -1.0f;
 
 // THE MATERIAL LAYER: real fluid values an author can type -- density and viscosity -- instead of
 // FluidVolumeDesc's four raw solver knobs (design brief: "real fluid values that can be entered").
-//   densityKgM3 IS REAL: becomes an actual per-particle mass (fluidParticleMassKg), honoured by the
-//   solver directly through invMass (testDensityScalesMassAndPressure, FluidVolumeTest.cpp).
-//   viscosityPaS IS A CALIBRATED FIT, NOT REAL: Jolt's soft-body solver has no shear-stress term;
-//   damping is the closest proxy but removes energy uniformly rather than by shear --
-//   fluidDampingForViscosity maps it, see that function's measured calibration.
-//   SURFACE TENSION, POUR, SPLIT, MERGE, PUDDLE ARE REFUSED, deliberately -- not merely unimplemented:
-//   aver_phys_softbody_create's `indices` never change after a body is built (FluidScene::spawn), so
-//   vertex count and edges are FROZEN for its lifetime -- no parameter can make a fixed-topology shell
-//   tear, join or reflow.
+//   densityKgM3 is kept for the record and for preset identity; a PBF fluid is incompressible at one
+//   rest density, so it does not change how the particles move (gravity acts the same on any density).
+//   viscosityPaS IS A CALIBRATED FIT, NOT REAL: it maps to `damping` (fluidDampingForViscosity, a table
+//   measured on the old solver) and `damping` maps to the XSPH viscosity coefficient
+//   (fluidXsphForDamping) -- a thicker fluid shears less, which is the direction, not a unit.
+//   SURFACE TENSION is not modelled. POUR, SPLIT and MERGE need nothing special now: it is particles.
 //
 // PRESETS (Water()/Honey()/etc.) are plain factories returning this same struct, not a second
 // enum-keyed path; downstream code cannot tell a preset from a hand-typed value. Renamed from
@@ -132,9 +73,8 @@ struct FluidPhysicsMaterial {
 // One fluid volume's authored placement, size, subdivision and solver tuning -- everything a level
 // author or composition root needs to see without opening FluidVolume.cpp.
 struct FluidVolumeDesc {
-    // World-space centre, in engine centimetres -- hands straight to aver_phys_softbody_create's
-    // cx/cy/cz. See generateFluidSeedShell's comment for why the shell is built centred on LOCAL
-    // (0,0,0) rather than pre-offset by this point.
+    // World-space centre, in engine centimetres. The solver works in metres LOCAL to this point; the
+    // preview shell (generateFluidSeedShell) is likewise built about local (0,0,0).
     f32 centreCm[3] = {0.0f, 0.0f, 0.0f};
 
     // Half-extent per axis, cm: shell spans [-halfExtentCm[i], +halfExtentCm[i]] on local axis i
@@ -147,25 +87,31 @@ struct FluidVolumeDesc {
     // mostly from its horizontal sloshing, not from vertical detail a camera rarely sees end-on.
     i32 subdivisions[3] = {8, 8, 4};
 
-    // Passed straight through to aver_phys_softbody_create -- see that ABI's own comment for exact
-    // semantics. See kHeavyLiquidCompliance for why compliance is not Jolt's cloth-shaped 0, and
-    // fluidPressureFor below for why pressure defaults to a sentinel rather than to any number.
-    f32 compliance = kHeavyLiquidCompliance;
+    // Retired Jolt soft-body knobs (edge give, shell pressure): still parsed and carried so existing
+    // .ocworld/.ocgraph/script calls keep working, but the particle solver has no use for them.
+    f32 compliance = kFluidLegacyCompliance;
     f32 pressure   = kFluidPressureAuto;
 
-    // damping (mLinearDamping, 1/s: dv/dt = -damping*v) and iterations (mNumIterations, solver passes
-    // per step) -- real Jolt parameters, UNREACHABLE from this struct before aver_phys_softbody_create
-    // grew arguments for them. None stands alone for "thickness": compliance sets edge give,
-    // iterations sets how crisply that converges, damping sets velocity loss -- a "thick" fluid needs
-    // all three. See kDefaultFluidDamping/kDefaultFluidIterations for why these default to Jolt's own
-    // numbers.
+    // `damping` (1/s) is now the fluid's thickness: fluidXsphForDamping maps it to the XSPH viscosity
+    // coefficient. `iterations` is the density-solver passes per substep (clamped to 2..12).
     f32 damping    = kDefaultFluidDamping;
     u32 iterations = kDefaultFluidIterations;
 
-    // REAL fluid density, kg/m^3 (water ~998, honey ~1420, lava ~2700-3100). Unlike the solver KNOBS
-    // above (tuned by feel), this feeds a real per-particle mass (fluidParticleMassKg), honoured
-    // directly through invMass. Left at kFluidDensityUnset, a desc gets today's exact behaviour --
-    // see that constant's comment for why "unset", not "default to water".
+    // Particle fill. The volume's box is filled with a lattice of particles at `particleSpacingCm`;
+    // 0 derives it from `subdivisions`: 2 particles per subdivision per axis (8 per cell), so the
+    // authored resolution still means "finer is more particles". Spacing is coarsened until the count
+    // fits maxParticles, the cost cap (about 1.5 ms per 1000 particles per substep, docs/FLUIDS.md).
+    f32 particleSpacingCm = 0.0f;
+    u32 maxParticles      = 4000;
+
+    // The volume's own box as container: side walls and floor on, top open (a pool). Scene colliders
+    // are collided against in addition (FluidScene voxelises them at spawn).
+    bool containSides = true;
+    bool containFloor = true;
+    bool containTop   = false;
+
+    // REAL fluid density, kg/m^3 (water ~998, honey ~1420, lava ~2700-3100); see the material layer
+    // above for what it does and does not change. Left at kFluidDensityUnset it is simply unspecified.
     f32 densityKgM3 = kFluidDensityUnset;
 
     // THE MATERIAL LAYER: a SECOND, OPTIONAL input on top of densityKgM3/damping above, not a
@@ -179,59 +125,21 @@ struct FluidVolumeDesc {
     std::optional<FluidPhysicsMaterial> material;
 };
 
-// Particle count of the shell generateFluidSeedShell would build for `desc` -- the same
-// blockA+blockB+blockC arithmetic that function partitions a box's boundary into, factored out so
-// fluidParticleMassKg can divide by it without paying for the vertex array. Shares the formula with
-// generateFluidSeedShell's own shellBlockCounts (FluidVolume.cpp) rather than re-deriving it, so the
-// two cannot drift apart; FluidVolumeTest checks them against each other.
-i32 fluidShellParticleCount(const FluidVolumeDesc& desc);
+// PARTICLE SOLVER SETTINGS FROM A DESC.
+//
+// Fill spacing in cm: desc.particleSpacingCm when positive, else the spacing at which 8 particles
+// fill each authored subdivision cell (never below 1 cm). PbfFluid::init may coarsen it further to
+// respect maxParticles.
+f32 fluidParticleSpacingCm(const FluidVolumeDesc& desc);
 
-// Real per-particle mass, in KILOGRAMS -- Jolt's own unit. Confirmed, not assumed: Jolt's gravity
-// (`toJoltDir(Vec3(0,0,-980))`, PhysicsWorld.cpp) already runs the same cm->m conversion positions
-// get, so a mass in kg needs no further conversion.
-//
-// mass_total_kg = desc.densityKgM3 * enclosedVolumeM3 (box's 8*hx*hy*hz, the same V as
-// fluidPressureFor's derivation, via kFluidCmCubedToM3). mass_per_particle_kg = mass_total_kg /
-// fluidShellParticleCount(desc), UNIFORM across the shell -- simpler than fluidPressureFor's
-// area-weighted split, since mass (unlike area) is not uneven per particle.
-//
-// Returns exactly 1.0f (today's implicit mass) when densityKgM3 is at or below kFluidDensityUnset, or
-// the desc is too degenerate to divide by (zero particles/volume), rather than a divide-by-zero or a
-// made-up number.
-f32 fluidParticleMassKg(const FluidVolumeDesc& desc);
+// XSPH viscosity coefficient for a `damping` value: 0.01 + 0.1 * damping, clamped to [0.01, 0.5].
+// Water's mapped damping (0.01) is the thinnest end; honey's (3.0) is visibly thick but still flows.
+f32 fluidXsphForDamping(f32 damping);
 
-// The internal pressure this shell needs, in Jolt's SoftBodyCreationSettings::mPressure units (n R T,
-// not force/area -- ApplyPressure in SoftBodyMotionProperties.cpp).
-//
-// COMPUTED, NOT A CONSTANT: Jolt turns it into a per-face impulse of `pressure * dt / V * area`, so a
-// particle's share scales with area/volume, which changes with pool size and subdivision -- no one
-// number fits two pools (a hardcoded 20.0 that used to live here was about a millionth of what a
-// 6x4x1.2m pool needed, and it collapsed into a puddle within two seconds).
-//
-// BALANCE, over the WHOLE top face -- exact, unlike balancing a notional per-particle cell, which
-// undershoots by (sx+1)(sy+1)/(sx sy), ~27% at the 8x8 a pool actually uses (area share is uneven per
-// particle, mass `p` is not) -- for mass `p` per particle (fluidParticleMassKg; reduces to the old
-// hardcoded-1 when densityKgM3 is unset). This balance is what changed the moment density became
-// real: it is now the only thing standing between pressure holding the shell up and a dense fluid
-// puddling regardless of pressure -- the same symptom kFluidPressureHeadroom's sweep documents, but
-// from mass, not a bad headroom constant:
-//
-//     pressure * A / V  ==  gravity * m                 [ balance, over the whole top face ]
-//     A = 4 hx hy                                       [ the top face ]
-//     m = (sx + 1) (sy + 1) * p                         [ its particles, mass `p` each ]
-//     V = 8 hx hy hz                                    [ the box ]
-//  => pressure = gravity * V * m / A = 2 * gravity * hz * (sx + 1) (sy + 1) * p
-//
-// IN METRES: V, a and gravity here are Jolt's, not the engine's cm. Converting costs
-// (1/100 gravity) * (1e-6 volume) / (1e-4 area) = 1e-4 overall (kFluidCmToJolt) -- a coefficient
-// 10,000x too large once ballooned a 1.2m pool over the camera within four seconds.
-//
-// INDEPENDENT OF FOOTPRINT (volume and top area scale together and cancel); DEPENDS ON DEPTH and
-// subdivision (finer grid means more mass on the same footprint).
-//
-// `gravityCmPerS2` defaults to PhysicsWorld's startup magnitude -- a world with different gravity
-// should pass its own value rather than let an Earth-derived shell float or sink.
-f32 fluidPressureFor(const FluidVolumeDesc& desc, f32 gravityCmPerS2 = 980.0f);
+// The solver settings a desc asks for: bounds = the volume's box in metres LOCAL to its centre (cm to
+// m via kFluidCmToM), walls per the contain* flags, spacing from fluidParticleSpacingCm, iterations
+// and viscosity from the desc. Gravity is Earth's, Z down.
+PbfSettings fluidPbfSettings(const FluidVolumeDesc& desc);
 
 // ---------------------------------------------------------------------------------------------
 // THE MATERIAL LAYER -- see FluidPhysicsMaterial's comment above for the split this section holds to
@@ -246,11 +154,12 @@ constexpr f32 kDampingAnchorLow  = 0.01f;          // measured: least-damped end
 constexpr f32 kDampingAnchorHigh = 3.0f;           // measured: the sweep's own tau-minimum, not its
                                                     // noisier, non-monotonic damping=10.0 row
 
-// Jolt's `damping` (mLinearDamping, 1/s) that best reproduces the settling a real fluid of
-// `viscosityPaS` would show -- a MEASURED calibration, not a closed form: Jolt's soft-body solver has
-// no shear-stress term to derive one from.
+// The `damping` (1/s) that best reproduces the settling a real fluid of `viscosityPaS` would show --
+// a MEASURED calibration, not a closed form, taken on the previous Jolt soft-body solver (which has no
+// shear-stress term to derive one from) and kept as the monotonic viscosity -> damping scale that
+// fluidXsphForDamping now turns into the PBF viscosity.
 //
-// MEASUREMENT: tests/physics/src/FluidDampingCalibrationTest.cpp -- spawn the FirstPerson pool shell
+// MEASUREMENT (old solver): tests/physics/src/FluidDampingCalibrationTest.cpp -- spawn the FirstPerson pool shell
 // (300x200x60cm, 8x8x4, 258 particles) at production compliance/pressure, settle 3s, hit every
 // particle with a 400 cm/s lateral impulse, step 600x1/60s reading aver_phys_softbody_vertices, fit
 // mean per-vertex speed to v(t) = v0*exp(-t/tau) by least squares on ln(v) vs t past each run's
@@ -315,10 +224,8 @@ std::optional<FluidPhysicsMaterial> fluidPhysicsMaterialPreset(std::string_view 
 bool fluidResolvePhysicsMaterial(FluidVolumeDesc& desc, std::string* outConflict = nullptr);
 
 // Builds a closed, subdivided-box triangle shell from `desc`, in LOCAL space -- vertices run from
-// -halfExtentCm to +halfExtentCm about local (0,0,0), NOT desc.centreCm, mirroring how
-// aver_phys_softbody_create splits placement (cx/cy/cz) from shape (`verticesXyz`, local; see
-// modules/render.softbody's CSoftBody wiring). Baking centreCm in here too would double the offset
-// once a caller also passes it as cx/cy/cz.
+// -halfExtentCm to +halfExtentCm about local (0,0,0), NOT desc.centreCm. This is the box the graph
+// editor previews for a Fluid component; the simulated volume's own surface comes from the particles.
 //
 // CLOSED: no duplicated seam vertices or T-junctions -- shared corners/edges between the six faces
 // are the SAME output vertex. Triangles wind OUTWARD, generalising ChunkMesh.cpp's single-face +Z-up
@@ -328,44 +235,31 @@ bool fluidResolvePhysicsMaterial(FluidVolumeDesc& desc, std::string* outConflict
 // would still produce a CLOSED mesh with one face inside-out, a defect only a per-face winding check
 // would catch.
 //
-// Clears and refills `outPositionsCm` (xyz-interleaved) and `outIndices` (3 per triangle, matching
-// aver_phys_softbody_create's `indices`). Pure arithmetic, deterministic, no device/solver/state.
+// Clears and refills `outPositionsCm` (xyz-interleaved) and `outIndices` (3 per triangle). Pure
+// arithmetic, deterministic, no device/solver/state.
 void generateFluidSeedShell(const FluidVolumeDesc& desc,
                              std::vector<f32>& outPositionsCm,
                              std::vector<i32>& outIndices);
 
-// The stateful half: what a renderer reads every frame. Owns the desc a seed shell was built from,
-// the topology, and current positions/normals -- the seed shell until the first simulated frame
-// arrives, the solver's output after.
+// The desc plus its preview shell: what the graph editor draws for a Fluid component (a box at the
+// desc's centre, with outward normals). Not the simulated surface -- see FluidScene.
 class FluidVolume {
 public:
     explicit FluidVolume(const FluidVolumeDesc& desc) : desc_(desc) {}
 
     const FluidVolumeDesc& desc() const { return desc_; }
 
-    // (a) Calls generateFluidSeedShell and keeps the result. Also seeds positionsCm()/normals() with
-    // that shell placed at desc().centreCm (LOCAL + centre = WORLD), so a renderer drawing before the
-    // physics solver's first callback still gets a correctly-shaped, lit body, not an empty one.
+    // Calls generateFluidSeedShell and keeps the result, and fills positionsCm()/normals() with that
+    // shell placed at desc().centreCm (LOCAL + centre = WORLD).
     void generateSeedShell();
 
-    // What a caller hands to aver_phys_softbody_create: the LOCAL seed positions and the closed
-    // topology generateSeedShell built. Empty until generateSeedShell has been called.
+    // The LOCAL seed positions and the closed topology generateSeedShell built. Empty until it has run.
     const std::vector<f32>& seedPositionsCm() const { return seedPositionsCm_; }
     const std::vector<i32>& indices() const { return indices_; }
     i32 vertexCount() const { return static_cast<i32>(seedPositionsCm_.size() / 3); }
 
-    // (b) Copies this frame's simulated vertex positions -- WORLD-space, xyz-interleaved, matching
-    // aver_phys_softbody_vertices' buffer -- into positionsCm(), then recomputes normals(). `vertexCount`
-    // should equal this object's own vertexCount() (particle count never changes once built, so a
-    // mismatch can only mean the wrong buffer went to the wrong FluidVolume); rather than trust it,
-    // only the overlapping prefix is copied, so a wrong buffer shows a partially-stuck body rather
-    // than a crash or an out-of-bounds read.
-    void updateFromSimulation(const f32* verticesXyz, i32 vertexCount);
-
-    // Current vertex positions (world-space cm) and per-vertex normals, xyz-interleaved, index-parallel
-    // with indices() -- what a renderer draws. Recomputed by area-weighted face averaging every time
-    // positionsCm() changes (recomputeNormals), since the seed shell's normals stop being correct the
-    // instant the body deforms.
+    // Preview vertex positions (world-space cm) and per-vertex normals, xyz-interleaved, index-parallel
+    // with indices().
     const std::vector<f32>& positionsCm() const { return positionsCm_; }
     const std::vector<f32>& normals() const { return normals_; }
 

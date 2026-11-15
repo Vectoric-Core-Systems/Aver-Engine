@@ -1,6 +1,6 @@
 # Aver.Fluids -- everything this engine knows about liquid, in one module: the analytic Gerstner
-# surface and its underwater fog override, the soft-body fluid VOLUME (seed shell out, simulated
-# vertices back), and the rendering of both. See README.md.
+# surface and its underwater fog override, the simulated fluid VOLUME (a CPU position-based particle
+# solver plus its surface mesher), and the rendering of both. See README.md.
 #
 # ONE MODULE BECAUSE IT IS ONE SUBJECT. This was Aver.Water and Aver.Render.Fluid, split along a line
 # that turned out to describe the implementation rather than the domain: an author placing a WATER
@@ -15,26 +15,29 @@
 # not decoration: it is what let the wave math be tested with no world at all and what kept this
 # buildable in a tree with the scene or the physics off. Merging naively would have made the Gerstner
 # grid unbuildable without Jolt for no reason. So FluidScene.cpp -- the only half that touches the
-# solver's ABI -- is added ONLY when physics is present, and the analytic surface, the underwater
-# override and FluidVolume's own generate/readback arithmetic build exactly as before without it.
-# FluidVolume itself still never calls a solver: it builds the shell one is created FROM and takes
-# simulated vertices BACK, which is why it sits on the unconditional side of this list.
+# physics world (the overlap query that voxelises scene colliders) -- is added ONLY when physics is
+# present, and the analytic surface, the underwater override, FluidVolume's desc/preview arithmetic and
+# the whole particle solver and mesher (PbfFluid, FluidSurface: pure CPU, no physics, no device) build
+# without it, which is also what lets tests/fluids run the solver with nothing else linked.
 set(_fluids_sources
   src/WaterRenderer.cpp
   # The displaced mesh surface (compute-waved grid drawn through the material path); no physics.
   src/WaterSurface.cpp
   src/Underwater.cpp
   src/FluidVolume.cpp
+  # The position-based fluid solver, its static-collider distance field and the surface mesher.
+  src/PbfFluid.cpp
+  src/FluidSurface.cpp
   # Spline rivers and closed-outline lakes: the CPU spline, their meshes and the water point query.
   src/WaterBody.cpp
 )
 set(_fluids_deps Aver.Core Aver.RHI)
 
 if(AVER_MODULE_PHYSICS)
-  # The join between a simulated volume and the rasteriser. render.softbody's CMakeLists sets the
-  # precedent this follows: a module may own both the simulation seam and the drawing when "the
-  # vertices this module uploads have no source other than the physics module", because the
-  # alternative is an indirection through a composition root with no second implementer behind it.
+  # The join between a simulated volume and the rasteriser (it also asks the physics world which
+  # colliders the volume touches). render.softbody's CMakeLists sets the precedent: a module may own
+  # both the simulation seam and the drawing, because the alternative is an indirection through a
+  # composition root with no second implementer behind it.
   list(APPEND _fluids_sources src/FluidScene.cpp)
   list(APPEND _fluids_deps Aver.Physics)
 endif()

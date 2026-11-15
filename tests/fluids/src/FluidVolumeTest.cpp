@@ -1,13 +1,11 @@
-// FluidVolume.hpp's seed-shell geometry: generateFluidSeedShell's pure box-lattice arithmetic, and
-// the placement/normal bookkeeping FluidVolume::generateSeedShell layers on top of it. CPU-only, no
-// RHI device, no window, no physics solver -- this exercises exactly the "(a)" half of
-// FluidVolume.hpp's own two-halves comment, never updateFromSimulation's solver-fed half, because
-// there is no solver here to hand it simulated vertices from. Links Aver.Fluids because FluidVolume.cpp
+// FluidVolume.hpp's preview shell: generateFluidSeedShell's pure box-lattice arithmetic, the
+// placement/normal bookkeeping FluidVolume::generateSeedShell layers on top of it, and the material
+// layer (presets, viscosity fit, precedence). The particle solver has its own PbfFluidTest. CPU-only,
+// no RHI device, no window, no physics world. Links Aver.Fluids because FluidVolume.cpp
 // is a real .cpp (unlike header-only GerstnerWave.hpp), and through it Aver.RHI -- the same link shape
 // UnderwaterFogTest.cpp uses for the same reason: a struct and some plain arithmetic, never a device.
 //
-// What is actually worth checking here is whether the solver can hold pressure in this shell at all,
-// which is a question about the mesh's TOPOLOGY (closed, consistently wound, no torn seams) at least
+// What is worth checking here is the mesh's TOPOLOGY (closed, consistently wound, no torn seams) at least
 // as much as about where its vertices land. FluidVolume.hpp's own header comment is explicit that the
 // per-face winding table has been worked out algebraically but "not been checked by running anything",
 // and that a wrong entry in it would still pass a closedness check alone -- so closedness and winding
@@ -304,130 +302,6 @@ static void testSeedNormalsAreOutwardAndUnitLength() {
           " did not)");
 }
 
-// ---- the derived internal pressure --------------------------------------------------------------
-//
-// Checked as a FORMULA rather than against remembered numbers, because the two ways this went wrong
-// were both invisible in a single value: it was once a constant that happened to suit no pool at all,
-// and once right in shape but 10,000x out because the derivation was done in centimetres while Jolt
-// integrates in metres. A relationship holds or it does not; a number can be wrong and still look
-// plausible.
-static void testDerivedPressure() {
-    AVER_INFO("-- the pressure a shell needs is derived from the shell --");
-
-    fluids::FluidVolumeDesc d;
-    d.halfExtentCm[0] = 300.0f; d.halfExtentCm[1] = 200.0f; d.halfExtentCm[2] = 60.0f;
-    d.subdivisions[0] = 8; d.subdivisions[1] = 8; d.subdivisions[2] = 4;
-
-    check(fluids::FluidVolumeDesc{}.pressure == fluids::kFluidPressureAuto,
-          "a desc asks for a derived pressure unless its author says otherwise");
-
-    const f32 g = 980.0f;
-    const f32 expect = fluids::kFluidPressureHeadroom * fluids::kFluidCmToJolt *
-                       2.0f * g * 60.0f * 9.0f * 9.0f;
-    check(near(fluids::fluidPressureFor(d, g), expect, 1e-3f),
-          "it is 2 g hz (sx+1)(sy+1), in Jolt's metres");
-
-    // IN METRES. Independent of the closed form above: a 6 x 4 x 1.2 m box of particles weighing one
-    // unit each needs pressure/V * A to balance gravity * mass, with V and A read in metres. This is
-    // the check that would have caught the 10,000x, since it never mentions a centimetre.
-    const f32 volumeM3 = 6.0f * 4.0f * 1.2f;
-    const f32 topAreaM2 = 6.0f * 4.0f;
-    const f32 topMass = 9.0f * 9.0f;
-    const f32 fromUnits = fluids::kFluidPressureHeadroom * (g / 100.0f) * volumeM3 * topMass / topAreaM2;
-    check(near(fluids::fluidPressureFor(d, g), fromUnits, 1e-2f),
-          "and it balances that shell's own weight when everything is read in metres");
-
-    // DEPTH, NOT FOOTPRINT. Widening a pool adds enclosed volume and top area in the same proportion;
-    // deepening it adds only volume. A constant could express neither.
-    fluids::FluidVolumeDesc wide = d;   wide.halfExtentCm[0] *= 3.0f;
-    fluids::FluidVolumeDesc deep = d;   deep.halfExtentCm[2] *= 3.0f;
-    check(near(fluids::fluidPressureFor(wide, g), fluids::fluidPressureFor(d, g), 1e-3f),
-          "three times as wide needs the same pressure");
-    check(near(fluids::fluidPressureFor(deep, g), 3.0f * fluids::fluidPressureFor(d, g), 1e-1f),
-          "three times as deep needs three times the pressure");
-
-    // A finer top grid puts more particles -- and so more mass -- on the same footprint.
-    fluids::FluidVolumeDesc fine = d;   fine.subdivisions[0] = 17; fine.subdivisions[1] = 17;
-    check(fluids::fluidPressureFor(fine, g) > fluids::fluidPressureFor(d, g),
-          "a finer top grid weighs more and needs more");
-
-    check(near(fluids::fluidPressureFor(d, 0.0f), 0.0f, 1e-6f),
-          "no gravity, no pressure -- there is nothing to hold up");
-    fluids::FluidVolumeDesc flat = d;   flat.halfExtentCm[2] = 0.0f;
-    check(near(fluids::fluidPressureFor(flat, g), 0.0f, 1e-6f), "and a shell with no depth needs none either");
-}
-
-// Case 7: fluidShellParticleCount agrees with what generateFluidSeedShell actually builds --
-// FluidVolume.hpp's own comment on fluidShellParticleCount promises this ("FluidVolumeTest checks
-// them against each other directly for that reason"), so this is that check, not a re-derivation of
-// the same arithmetic that could quietly drift alongside it.
-static void testShellParticleCountMatchesGenerator() {
-    AVER_INFO("-- fluidShellParticleCount agrees with what generateFluidSeedShell actually builds --");
-    const FluidVolumeDesc descs[] = {
-        makeDesc(0.0f, 0.0f, 0.0f, 100.0f, 100.0f, 50.0f, 1, 1, 1),
-        makeDesc(0.0f, 0.0f, 0.0f, 100.0f, 100.0f, 50.0f, 4, 3, 2),
-        makeDesc(0.0f, 0.0f, 0.0f, 300.0f, 200.0f, 60.0f, 8, 8, 4),
-    };
-    for (const auto& d : descs) {
-        std::vector<f32> pos;
-        std::vector<i32> idx;
-        generateFluidSeedShell(d, pos, idx);
-        const i32 built = static_cast<i32>(pos.size() / 3);
-        check(fluidShellParticleCount(d) == built,
-              "fluidShellParticleCount(" + std::to_string(d.subdivisions[0]) + "," +
-              std::to_string(d.subdivisions[1]) + "," + std::to_string(d.subdivisions[2]) +
-              ") = " + std::to_string(fluidShellParticleCount(d)) +
-              ", the generator actually built " + std::to_string(built));
-    }
-}
-
-// ---- density: an unset one reproduces the old mass-1 behaviour; a real one scales mass AND pressure
-static void testDensityScalesMassAndPressure() {
-    AVER_INFO("-- an unset density reproduces mass 1; a real one scales both mass and pressure --");
-
-    fluids::FluidVolumeDesc d;
-    d.halfExtentCm[0] = 300.0f; d.halfExtentCm[1] = 200.0f; d.halfExtentCm[2] = 60.0f;
-    d.subdivisions[0] = 8; d.subdivisions[1] = 8; d.subdivisions[2] = 4;
-
-    check(near(fluids::fluidParticleMassKg(d), 1.0f, 1e-6f),
-          "a desc that never asked for a density gets mass 1, today's exact behaviour");
-
-    const f32 basePressure = fluids::fluidPressureFor(d);
-
-    fluids::FluidVolumeDesc water = d;
-    water.densityKgM3 = 1000.0f;
-    const f32 massWater = fluids::fluidParticleMassKg(water);
-    // mass = density * (8 hx hy hz, in m^3) / particleCount, restated directly here rather than
-    // trusting fluidParticleMassKg to check itself against its own formula.
-    const f32 volumeM3 = 8.0f * 3.0f * 2.0f * 0.6f;   // hx=3m, hy=2m, hz=0.6m
-    const f32 expectMass = 1000.0f * volumeM3 / static_cast<f32>(fluids::fluidShellParticleCount(d));
-    check(near(massWater, expectMass, 1e-3f),
-          "water's own particle mass matches density * volume / particleCount directly (" +
-          std::to_string(massWater) + " vs " + std::to_string(expectMass) + " kg)");
-    check(massWater > 1.0f, "water's real particle mass is well above the old mass-1 stand-in (" +
-                            std::to_string(massWater) + " kg)");
-
-    fluids::FluidVolumeDesc water2x = d;
-    water2x.densityKgM3 = 2000.0f;
-    check(near(fluids::fluidParticleMassKg(water2x), 2.0f * massWater, 1e-2f),
-          "doubling density doubles the particle mass");
-
-    // THE FIX THIS FILE EXISTS TO PROVE: pressure must scale by the SAME real mass invMasses now
-    // carries, or a dense fluid puddles regardless of pressure -- see fluidPressureFor's own "WHY
-    // THIS HAD TO CHANGE" comment.
-    check(near(fluids::fluidPressureFor(water), basePressure * massWater, 1e-1f),
-          "the pressure this shell derives scales by the SAME real mass -- unset density's own "
-          "pressure times that mass, not a second, independent number");
-    check(fluids::fluidPressureFor(water) > basePressure,
-          "so a real (non-unit) density needs MORE pressure to hold the same shell up, matching "
-          "the extra weight it now actually carries");
-
-    fluids::FluidVolumeDesc zeroDensity = d;
-    zeroDensity.densityKgM3 = 0.0f;
-    check(near(fluids::fluidParticleMassKg(zeroDensity), 1.0f, 1e-6f),
-          "a density of exactly 0 (nonsensical for a fluid) falls back to mass 1, same as unset");
-}
-
 // ---- the material layer: presets, the viscosity->damping fit, and the precedence rule -----------
 
 // Case 8: the presets are just the same struct, filled -- checked against the literal numbers
@@ -564,9 +438,6 @@ int main() {
     testEveryTriangleFacesOutward();
     testSubdivisionScaling();
     testSeedNormalsAreOutwardAndUnitLength();
-    testDerivedPressure();
-    testShellParticleCountMatchesGenerator();
-    testDensityScalesMassAndPressure();
     testMaterialPresets();
     testViscosityDampingFit();
     testResolveMaterialPrecedence();

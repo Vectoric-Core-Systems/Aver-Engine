@@ -4,7 +4,7 @@
 - **Depends on:** Core, RHI
 - **Option:** `AVER_MODULE_FLUIDS` (ON)
 
-Water in three parts. This module implements two; the solver-driven buoyancy is in `modules/physics`. The module was `modules/water` until `b887a78` ("Water and render.fluid become one module called Fluids") merged it with `render.fluid`. The tables and sections below describe only the water half (`GerstnerWave`/`WaterRenderer`/`Underwater`); the solver-driven half that motivated the rename also lives here and is not documented below: `FluidVolume.hpp`/`.cpp` and `FluidScene.hpp`/`.cpp` ("FluidVolume builds a closed shell of arbitrary compliance and pressure and hands it to a solver. That is a fluid, not specifically water", per that commit's message).
+Water in three parts. This module implements two; the solver-driven buoyancy is in `modules/physics`. The module was `modules/water` until `b887a78` ("Water and render.fluid become one module called Fluids") merged it with `render.fluid`. The tables and sections below describe only the water half (`GerstnerWave`/`WaterRenderer`/`Underwater`); the solver-driven half that motivated the rename also lives here and is not documented below: `FluidVolume.hpp`/`.cpp` (the authored description), `PbfFluid` (the CPU position-based particle solver), `FluidSurface` (the meshed surface) and `FluidScene` (spawn, step, render) -- see `docs/FLUIDS.md`.
 
 | Part | Where | Why there |
 | --- | --- | --- |

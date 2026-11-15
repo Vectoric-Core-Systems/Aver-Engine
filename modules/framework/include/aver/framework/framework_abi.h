@@ -971,9 +971,8 @@ typedef int32_t (AVER_FW_CALL* aver_fw_fluid_spawn_fn)(
     void* user);
 /* Installs the provider. Passing null clears it. Always returns 1. */
 AVER_FW_ABI int32_t aver_fw_set_fluid_spawn_provider(aver_fw_fluid_spawn_fn fn, void* user);
-/* Requests a fluid volume. `pressure` < 0 asks the solver to derive it from the volume's own size
- * (fluids::kFluidPressureAuto -- the same sentinel OcWaterPlacement's own pressure field uses),
- * matching what an unauthored `pressure=` already means on a WATER record. Returns 1 when a
+/* Requests a fluid volume (a particle fluid: `compliance` and `pressure` are accepted and ignored,
+ * `damping` is its viscosity, `iterations` its density passes per substep). Returns 1 when a
  * provider accepted the request, 0 when there is none. */
 AVER_FW_ABI int32_t aver_fw_fluid_spawn(float cx, float cy, float cz, float hx, float hy, float hz,
                                         float compliance, float damping, int32_t iterations,

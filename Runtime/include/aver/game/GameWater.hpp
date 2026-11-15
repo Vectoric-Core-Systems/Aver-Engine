@@ -207,7 +207,7 @@ private:
 
 #if AVER_FLUIDS_SIMULATED
     // ---- the simulated half: a soft-body volume, kept beside the analytic renderer rather than
-    // inside it -- a WATER record is either a Gerstner surface or a soft body, never both. ----
+    // inside it -- a WATER record is either a Gerstner surface or a particle fluid, never both. ----
     fluids::FluidScene fluidScene_;
 
     fluids::FluidHandle fluidHandle_ = 0;

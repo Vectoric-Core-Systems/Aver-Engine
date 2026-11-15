@@ -32,12 +32,7 @@ inline f32 latticeLerp(f32 halfExtentCm, i32 idx, i32 n) {
 }
 
 // Vertex counts of the three disjoint boundary blocks generateFluidSeedShell partitions a box's
-// surface into -- see that function's own top-of-file comment for exactly what block A/B/C mean and
-// why the split is done this way at all. Factored out to ONE place so fluidShellParticleCount
-// (FluidVolume.hpp) can answer "how many particles will this shell have" from just (nx, ny, nz),
-// without walking generateFluidSeedShell's own loops to build the array first -- and so that the two
-// never have a chance to disagree: there is only one copy of this arithmetic now, not two that
-// happen to compute the same thing today.
+// surface into -- see that function's own top-of-file comment for what block A/B/C mean.
 struct ShellBlockCounts { i32 a, b, c; };
 inline ShellBlockCounts shellBlockCounts(i32 nx, i32 ny, i32 nz) {
     return ShellBlockCounts{2 * (ny + 1) * (nz + 1), 2 * (nx - 1) * (nz + 1), 2 * (nx - 1) * (ny - 1)};
@@ -45,54 +40,34 @@ inline ShellBlockCounts shellBlockCounts(i32 nx, i32 ny, i32 nz) {
 
 } // namespace
 
-i32 fluidShellParticleCount(const FluidVolumeDesc& desc) {
-    // The same clamp generateFluidSeedShell applies, for the same reason: a subdivision count below 1
-    // is not a shell.
-    const i32 nx = std::max(1, desc.subdivisions[0]);
-    const i32 ny = std::max(1, desc.subdivisions[1]);
-    const i32 nz = std::max(1, desc.subdivisions[2]);
-    const ShellBlockCounts blocks = shellBlockCounts(nx, ny, nz);
-    return blocks.a + blocks.b + blocks.c;
+f32 fluidParticleSpacingCm(const FluidVolumeDesc& desc) {
+    if (desc.particleSpacingCm > 0.0f) return std::max(desc.particleSpacingCm, 1.0f);
+    // 8 particles per authored cell: cell width / 2 per axis, geometric mean over the three axes.
+    f32 cell = 1.0f;
+    for (int a = 0; a < 3; ++a)
+        cell *= 2.0f * std::fabs(desc.halfExtentCm[a]) / static_cast<f32>(std::max(1, desc.subdivisions[a]));
+    return std::max(0.5f * std::cbrt(cell), 1.0f);
 }
 
-f32 fluidParticleMassKg(const FluidVolumeDesc& desc) {
-    // <= 0, not < 0: kFluidDensityUnset is -1, but an author who typed 0 by mistake (or on purpose,
-    // meaning "massless") gets the identical fallback rather than a division that quietly produces
-    // an infinite inverse mass at the call site below. See this function's own header comment.
-    if (desc.densityKgM3 <= 0.0f) return 1.0f;
-
-    const f32 hx = std::fabs(desc.halfExtentCm[0]);
-    const f32 hy = std::fabs(desc.halfExtentCm[1]);
-    const f32 hz = std::fabs(desc.halfExtentCm[2]);
-    // cm^3 -> m^3 via kFluidCmCubedToM3 -- see that constant's own comment for the arithmetic check
-    // (1 cm = 0.01 m, so 1 cm^3 = 1e-6 m^3). 8 hx hy hz is the SAME enclosed-volume expression
-    // fluidPressureFor's own derivation uses, just read here directly off desc rather than passed in.
-    const f32 enclosedVolumeM3 = 8.0f * hx * hy * hz * kFluidCmCubedToM3;
-    const i32 particleCount = fluidShellParticleCount(desc);
-    if (particleCount <= 0 || enclosedVolumeM3 <= 0.0f) return 1.0f;   // degenerate desc: fall back
-
-    return desc.densityKgM3 * enclosedVolumeM3 / static_cast<f32>(particleCount);
+f32 fluidXsphForDamping(f32 damping) {
+    return std::clamp(0.01f + 0.1f * damping, 0.01f, 0.5f);
 }
 
-f32 fluidPressureFor(const FluidVolumeDesc& desc, f32 gravityCmPerS2) {
-    // The same clamp generateFluidSeedShell applies, for the same reason: a subdivision count below 1
-    // is not a shell, and reading one here would make the pressure disagree with the mesh the solver
-    // is actually given.
-    // Particles ALONG each top-face axis: one more than the number of segments.
-    const f32 nx = static_cast<f32>(std::max(1, desc.subdivisions[0]) + 1);
-    const f32 ny = static_cast<f32>(std::max(1, desc.subdivisions[1]) + 1);
-    const f32 hz = std::fabs(desc.halfExtentCm[2]);
-    const f32 g  = std::fabs(gravityCmPerS2);
-    // The particle mass this shell's solver will actually use -- see fluidParticleMassKg's own
-    // comment. Exactly 1.0f whenever desc.densityKgM3 is left at kFluidDensityUnset, which is what
-    // makes this multiplication a no-op for every desc written before density existed: the formula
-    // below is bit-for-bit the pre-density one in that case, not merely close to it.
-    const f32 particleMassKg = fluidParticleMassKg(desc);
-    // 2 * g * hz * nx * ny * particleMassKg, scaled out of centimetres into the metres Jolt integrates
-    // in -- both steps derived in the header. Zero depth or zero gravity legitimately wants zero
-    // pressure, since there is nothing for it to hold up, and Jolt reads a non-positive coefficient as
-    // "no pressure at all", so neither needs a special case here.
-    return kFluidPressureHeadroom * kFluidCmToJolt * 2.0f * g * hz * nx * ny * particleMassKg;
+PbfSettings fluidPbfSettings(const FluidVolumeDesc& desc) {
+    PbfSettings s;
+    for (int a = 0; a < 3; ++a) {
+        const f32 h = std::fabs(desc.halfExtentCm[a]) * kFluidCmToM;
+        s.bounds.lo[a] = -h;
+        s.bounds.hi[a] = h;
+    }
+    for (int a = 0; a < 2; ++a) s.bounds.wallLo[a] = s.bounds.wallHi[a] = desc.containSides;
+    s.bounds.wallLo[2] = desc.containFloor;
+    s.bounds.wallHi[2] = desc.containTop;
+    s.spacingM = fluidParticleSpacingCm(desc) * kFluidCmToM;
+    s.maxParticles = std::max(1u, desc.maxParticles);
+    s.iterations = std::clamp(desc.iterations, 2u, 12u);
+    s.xsph = fluidXsphForDamping(desc.damping);
+    return s;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -188,8 +163,6 @@ void generateFluidSeedShell(const FluidVolumeDesc& desc,
     const f32 hy = desc.halfExtentCm[1];
     const f32 hz = desc.halfExtentCm[2];
 
-    // shellBlockCounts is the SAME arithmetic fluidShellParticleCount reads through -- see that
-    // anonymous-namespace helper's own comment for why there is only one copy of it now.
     const ShellBlockCounts blocks = shellBlockCounts(nx, ny, nz);
     const i32 blockAVerts = blocks.a;
     const i32 blockBVerts = blocks.b;
@@ -326,18 +299,12 @@ void generateFluidSeedShell(const FluidVolumeDesc& desc,
 }
 
 // ---------------------------------------------------------------------------------------------
-// (b) THE STATEFUL HALF.
+// THE PREVIEW SHELL, STATEFUL.
 
 void FluidVolume::generateSeedShell() {
     generateFluidSeedShell(desc_, seedPositionsCm_, indices_);
 
-    // Seeds positionsCm()/normals() from the LOCAL shell placed at desc().centreCm (LOCAL + centre
-    // = WORLD -- see generateFluidSeedShell's own header comment for why the shell itself is built
-    // about local (0,0,0) rather than pre-offset), so a renderer that draws before the physics
-    // solver's first callback still gets a correctly-shaped, correctly-lit body rather than an
-    // empty one. updateFromSimulation below replaces this the moment the solver's own positions
-    // start arriving; nothing re-adds centreCm there, because the solver already returns WORLD
-    // positions.
+    // positionsCm()/normals() from the LOCAL shell placed at desc().centreCm (LOCAL + centre = WORLD).
     const usize n = seedPositionsCm_.size();
     positionsCm_.resize(n);
     for (usize v = 0; v < n; v += 3) {
@@ -345,18 +312,6 @@ void FluidVolume::generateSeedShell() {
         positionsCm_[v + 1] = seedPositionsCm_[v + 1] + desc_.centreCm[1];
         positionsCm_[v + 2] = seedPositionsCm_[v + 2] + desc_.centreCm[2];
     }
-    recomputeNormals();
-}
-
-void FluidVolume::updateFromSimulation(const f32* verticesXyz, i32 vertexCount) {
-    if (verticesXyz == nullptr) return;
-
-    // Only the overlapping prefix is copied and the rest of positionsCm() is left exactly as it
-    // was -- see this function's own header comment for why a count mismatch is handled this way
-    // instead of trusted or asserted.
-    const i32 n = std::min(vertexCount, this->vertexCount());
-    if (n <= 0) return;
-    std::copy(verticesXyz, verticesXyz + static_cast<usize>(n) * 3, positionsCm_.begin());
     recomputeNormals();
 }
 
@@ -402,7 +357,7 @@ void FluidVolume::recomputeNormals() {
         const f32 lenSq = x * x + y * y + z * z;
         // A vertex with no incident triangle sums to exactly zero here rather than an arbitrary
         // unit direction. That should not happen for a closed shell fed straight back from the
-        // solver, but updateFromSimulation trusts whatever positions a caller hands it, not only
+        // solver, but a caller may hand it any position set, not only
         // ones this file generated.
         const f32 invLen = lenSq > 1e-12f ? 1.0f / std::sqrt(lenSq) : 0.0f;
         x *= invLen; y *= invLen; z *= invLen;

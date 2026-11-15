@@ -232,9 +232,8 @@ public static partial class Game
     /// FluidVolume.hpp's own FluidVolumeDesc comment for what each means and its unit. Defaults
     /// (1.0e-4, 0.1, 5, -1) are the same numbers FluidVolumeDesc itself defaults to, so calling this
     /// with none of the four gets the identical solver an unauthored WATER record already gets.
-    /// `pressure` below zero asks the solver to derive it from the volume's own size
-    /// (fluidPressureFor) rather than use the value passed -- the same sentinel a WATER record's own
-    /// unauthored `pressure=` already means.
+    /// The fluid is a particle (PBF) solver now: `compliance` and `pressure` are accepted for old callers and
+    /// ignored, `damping` is its viscosity and `iterations` its density passes per substep.
     ///
     /// NO DENSITY OR VISCOSITY HERE -- see <see cref="SpawnFluidVolumeMaterial"/> for the layer that
     /// takes real fluid values instead of solver knobs. This overload is the raw escape hatch, kept

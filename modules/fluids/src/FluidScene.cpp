@@ -1,10 +1,10 @@
-// See FluidScene.hpp for the whole design. What follows is spawn/despawn/update/prePass, the private
-// retire() they share, and the one small packing helper both spawn() and update() call.
+// The solver-to-rasteriser join. See FluidScene.hpp.
 #include "aver/fluids/FluidScene.hpp"
 #include "aver/physics/physics_abi.h"
 #include "aver/core/Log.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -12,47 +12,11 @@ namespace aver::fluids {
 
 namespace {
 
-// A ceiling, so a runaway spawner degrades to "no new volume" rather than exhausting Jolt and GPU
-// memory in silence -- SoftBodyScene's kMaxResident, and for the same reason. Set to the same value:
-// a fluid volume costs about the same per instance as a soft body (one Jolt object plus its own
-// staging ring), and unlike a soft body's entity, fluid volumes are typically placed by a level
-// author in the low tens rather than spawned by the hundreds at runtime.
+// More than this many resident volumes and a new spawn is refused.
 constexpr u32 kMaxResident = 64;
 
-// Copies FluidVolume's own positions and normals straight into the interleaved layout the rasteriser
-// reads. NOT a general-purpose pack: it does no space conversion and computes no normal of its own,
-// because both of those are already done by the time either caller reaches this -- see spawn()'s and
-// update()'s own comments for why. `out` is resized to match; UVs are written as zero rather than
-// left uninitialised, since this shell has no source parameterisation to carry across.
-//
-// originCm, WHEN GIVEN, IS SUBTRACTED, and that is what keeps the buffer in the mesh-LOCAL frame the
-// rest of this engine assumes. The seed shell is already built about local (0,0,0)
-// (FluidVolume.cpp: "LOCAL + centre = WORLD"), but the SOLVER hands its particles back in absolute
-// world space, so update() has to put them back. This buffer used to be left in world space and
-// drawn with an identity matrix -- which renders correctly and sorts WRONG: the blended flush orders
-// draws by world[12..14] (D3D12Device.cpp:5006-5013), and an identity matrix's translation is the
-// world ORIGIN, so a pool authored anywhere else sorted as though it sat at (0,0,0) and could
-// composite on the wrong side of a glass pane it was plainly in front of.
-//
-// Normals are NOT offset: a translation does not rotate them.
-void packFluidVerts(const std::vector<f32>& positionsCm, const std::vector<f32>& normals,
-                    std::vector<rhi::MeshVertex>& out, const f32* originCm = nullptr) {
-    const f32 ox = originCm ? originCm[0] : 0.0f;
-    const f32 oy = originCm ? originCm[1] : 0.0f;
-    const f32 oz = originCm ? originCm[2] : 0.0f;
-    const size_t n = positionsCm.size() / 3;
-    out.resize(n);
-    for (size_t i = 0; i < n; ++i) {
-        out[i].px = positionsCm[i * 3 + 0] - ox;
-        out[i].py = positionsCm[i * 3 + 1] - oy;
-        out[i].pz = positionsCm[i * 3 + 2] - oz;
-        out[i].nx = normals[i * 3 + 0];
-        out[i].ny = normals[i * 3 + 1];
-        out[i].nz = normals[i * 3 + 2];
-        out[i].u = 0.0f;
-        out[i].v = 0.0f;
-    }
-}
+// Particles within this many metres of the scene's colliders are what the field has to resolve.
+constexpr f32 kSolidMarginSpacings = 2.0f;
 
 } // namespace
 
@@ -66,61 +30,30 @@ bool FluidScene::init(rhi::IDevice& dev) {
     if (!ready_) {
         AVER_WARN("[Fluid] this device has no resource factory; fluid volumes cannot be spawned "
                   "this run");
-        return ready_;
     }
-
-    // NO SHADERS AND NO PIPELINE. This class used to compile VSFluid/PSFluid here and build its own
-    // PSO, because it drew its own volumes through IRenderFeature::transparentPass. It does not draw
-    // anything any more -- the composition root draws drawHandle() as an ordinary translucent mesh
-    // with an authored .ocmat -- so there is nothing here to compile and nothing to keep in step with
-    // the scene target's sample count and formats.
     return ready_;
 }
 
 void FluidScene::shutdown() {
-    for (auto& kv : live_) retire(kv.second);
+    for (auto& kv : live_) retire(*kv.second);
     live_.clear();
     dev_ = nullptr;
     res_ = nullptr;
     ready_ = false;
+    haveLastUpdate_ = false;
 }
 
-// Tears down one resident's physics and GPU state. Also the unwind path inside spawn() when a later
-// step fails after an earlier one succeeded -- every field it touches is guarded by its own
-// null/zero check, so it is safe to call on a partially-built Resident.
 void FluidScene::retire(Resident& r) {
-    // The physics body first: a resource-factory failure below must not leave a soft body still
-    // simulating for a handle nothing will draw again.
-    if (r.body) {
-        aver_phys_remove_body(r.body);
-        r.body = 0;
-    }
-
     if (res_) {
         for (rhi::BufferHandle& h : r.staging) {
             if (h) { res_->destroyBuffer(h); h = 0; }
         }
     }
-
-    // r.vertices is deliberately NOT destroyed here through the factory, for the identical reason
-    // SoftBodyScene::retire states: it is the buffer createSkinTargetMesh allocated as r.drawMesh's
-    // vertex stream, and destroyMesh already frees it as part of freeing the mesh.
-    if (dev_ && r.drawMesh) {
-        dev_->destroyMesh(r.drawMesh);
-    }
+    // destroyMesh on the draw mesh releases its vertex buffer; `source` is its own mesh handle.
+    if (dev_ && r.drawMesh) dev_->destroyMesh(r.drawMesh);
     r.drawMesh = 0;
     r.vertices = 0;
-
-    // r.source, UNLIKE SoftBodyScene's equivalent, IS ours to free -- this module built it with its
-    // own createMesh call in spawn() rather than borrowing it from a host's asset cache, so nothing
-    // else will ever destroy it if this does not. Freeing it AFTER r.drawMesh, not before, matters:
-    // createSkinTargetMesh built r.drawMesh to share r.source's index buffer, and destroyMesh's own
-    // contract is to return false and free nothing for a mesh that is "still shared" -- so freeing
-    // r.source first here would just fail quietly and leak it. By the time this line runs r.drawMesh
-    // is already gone and holds no more shares, so this is the call that actually releases it.
-    if (dev_ && r.source) {
-        dev_->destroyMesh(r.source);
-    }
+    if (dev_ && r.source) dev_->destroyMesh(r.source);
     r.source = 0;
 }
 
@@ -131,16 +64,6 @@ FluidHandle FluidScene::spawn(const fluids::FluidVolumeDesc& desc, rhi::IDevice&
         return 0;
     }
 
-    // THE MATERIAL LAYER RESOLVES HERE, AND ONLY HERE -- see fluids::fluidResolvePhysicsMaterial's own
-    // doc comment (FluidVolume.hpp) for why this is the one call every fluid request converges on
-    // regardless of how it was authored: a WATER record via game::GameWater::applyLevel's direct
-    // construction (shared by both hosts, and formerly the editor's own applyLevelWater), a graph's
-    // `COMP ... Fluid` line via either of the framework relay's two
-    // providers, or any future direct caller of this function. A desc that never set `material` is
-    // untouched by this (fluidResolvePhysicsMaterial's own early-out), so every caller from before this
-    // layer existed spawns identically to before. A desc that DOES set `material` alongside a
-    // hand-set raw `damping` REFUSES the whole spawn rather than picking a winner -- this is the
-    // design brief's precedence rule, enforced at the one point it cannot be silently skipped.
     fluids::FluidVolumeDesc resolved = desc;
     std::string materialConflict;
     if (!fluids::fluidResolvePhysicsMaterial(resolved, &materialConflict)) {
@@ -148,32 +71,67 @@ FluidHandle FluidScene::spawn(const fluids::FluidVolumeDesc& desc, rhi::IDevice&
         return 0;
     }
 
-    Resident r(resolved);
-    r.vol.generateSeedShell();
+    static bool warnedLegacy = false;
+    if (!warnedLegacy && (resolved.compliance != kFluidLegacyCompliance || resolved.pressure != kFluidPressureAuto)) {
+        warnedLegacy = true;
+        AVER_WARN("[Fluid] compliance and pressure belong to the retired soft-body shell and are ignored; "
+                  "the volume is a particle fluid now (use damping for thickness, iterations for stiffness)");
+    }
 
-    // The render mesh's OWN coordinate frame -- what createMesh's `source` is measured in, and
-    // therefore what its once-computed bounds and any BLAS built from it are measured in too -- is
-    // built from seedPositionsCm(), the LOCAL shell, not positionsCm(), the WORLD one
-    // generateSeedShell() also populates. Every other MeshHandle in this engine keeps its own local
-    // origin near its own geometry and lets a per-draw world matrix carry it to its actual placement
-    // (meshBounds's own comment calls this out explicitly: a local-space bounding sphere, "before
-    // any world transform"). Baking desc.centreCm into what the RHI treats as this mesh's local
-    // frame would leave that bounding sphere sitting nowhere near the geometry it exists to cull,
-    // for no benefit this module needs -- the physics body below is built from this exact same LOCAL
-    // array for the identical reason.
-    std::vector<rhi::MeshVertex> seedVerts;
-    packFluidVerts(r.vol.seedPositionsCm(), r.vol.normals(), seedVerts);
+    auto rp = std::make_unique<Resident>(resolved);
+    Resident& r = *rp;
+    const fluids::PbfSettings settings = fluids::fluidPbfSettings(resolved);
 
-    // vol.indices() is i32 (FluidVolume's own choice, matching aver_phys_softbody_create's
-    // int32_t* below); IDevice::createMesh wants u32*. The reinterpret_cast is well-defined --
-    // accessing an object through a pointer to its corresponding signed/unsigned type is explicitly
-    // permitted, unlike most pointer-cast aliasing -- and every index here is a small non-negative
-    // count that reads as the identical value either way.
-    r.source = dev.createMesh(seedVerts.data(), static_cast<u32>(seedVerts.size()),
-                              reinterpret_cast<const u32*>(r.vol.indices().data()),
-                              static_cast<u32>(r.vol.indices().size()));
+    // Voxelise the scene's static colliders around the volume. The query asks the physics world
+    // whether anything touches a sphere; local metres go to world cm through the volume centre.
+    {
+        const f32 margin = kSolidMarginSpacings * std::max(settings.spacingM, 0.01f);
+        f32 lo[3], hi[3];
+        for (int a = 0; a < 3; ++a) {
+            lo[a] = settings.bounds.lo[a] - margin;
+            hi[a] = settings.bounds.hi[a] + margin;
+        }
+        const f32 cx = resolved.centreCm[0], cy = resolved.centreCm[1], cz = resolved.centreCm[2];
+        r.solid.build(lo, hi, 0.5f * settings.spacingM,
+                      [cx, cy, cz](const f32 c[3], f32 radiusM) {
+                          int32_t body = 0;
+                          return aver_phys_overlap_sphere(cx + c[0] * kFluidMToCm, cy + c[1] * kFluidMToCm,
+                                                          cz + c[2] * kFluidMToCm, radiusM * kFluidMToCm,
+                                                          &body, 1) > 0;
+                      });
+    }
+
+    const u32 n = r.sim.init(settings, &r.solid);
+    if (n == 0) {
+        AVER_WARN("[Fluid] the volume has no room for a single particle (extent or colliders); refusing it");
+        return 0;
+    }
+
+    const u32 maxTris = std::clamp(8u * n, 4096u, kFluidMaxSurfaceTris);
+    r.mesher.configure(settings.bounds, r.sim.spacing(), maxTris);
+    r.maxVerts = maxTris * 3u;
+    r.packed.assign(r.maxVerts, rhi::MeshVertex{});
+    for (rhi::MeshVertex& v : r.packed) { v.nz = 1.0f; }
+
+    // The template mesh: identity indices, every vertex at one corner but the second (the opposite
+    // corner), so its bounds are the volume's box and its first triangle is degenerate.
+    {
+        std::vector<rhi::MeshVertex> seed(r.maxVerts);
+        std::vector<u32> idx(r.maxVerts);
+        const f32 hx = std::fabs(resolved.halfExtentCm[0]), hy = std::fabs(resolved.halfExtentCm[1]),
+                  hz = std::fabs(resolved.halfExtentCm[2]);
+        for (u32 i = 0; i < r.maxVerts; ++i) {
+            rhi::MeshVertex& v = seed[i];
+            const f32 s = (i == 1) ? 1.0f : -1.0f;
+            v.px = s * hx; v.py = s * hy; v.pz = s * hz;
+            v.nx = 0.0f; v.ny = 0.0f; v.nz = 1.0f;
+            v.u = 0.0f; v.v = 0.0f;
+            idx[i] = i;
+        }
+        r.source = dev.createMesh(seed.data(), r.maxVerts, idx.data(), r.maxVerts);
+    }
     if (!r.source) {
-        AVER_WARN("[Fluid] this device would not upload the seed shell; refusing this volume");
+        AVER_WARN("[Fluid] this device would not upload the surface template; refusing this volume");
         return 0;
     }
 
@@ -184,11 +142,8 @@ FluidHandle FluidScene::spawn(const fluids::FluidVolumeDesc& desc, rhi::IDevice&
         return 0;
     }
 
-    // The staging ring, one Upload buffer per frame-in-flight -- see this module's header for the
-    // full argument (writeBuffer is immediate and unsynchronised, and this engine keeps
-    // kFluidFramesInFlight frames going at once).
     rhi::BufferDesc bd;
-    bd.bytes = static_cast<u64>(r.vol.vertexCount()) * sizeof(rhi::MeshVertex);
+    bd.bytes = static_cast<u64>(r.maxVerts) * sizeof(rhi::MeshVertex);
     bd.kind = rhi::BufferKind::Upload;
     bd.debugName = "Fluid staging";
     bool ringOk = true;
@@ -202,198 +157,131 @@ FluidHandle FluidScene::spawn(const fluids::FluidVolumeDesc& desc, rhi::IDevice&
         return 0;
     }
 
-    const fluids::FluidVolumeDesc& d = r.vol.desc();
-    // invMasses is UNIFORM -- every particle gets the SAME inverse mass, never 0 -- so NOTHING IS
-    // PINNED regardless of what that shared value is. A pinned particle is how a flag stays attached
-    // to its pole -- exactly the wrong behaviour for a liquid, whose entire reason for existing here
-    // is that a hard enough slosh can carry it clean over the basin rim and leave it there. Pinning
-    // even the bottom ring would tether the whole body to its rest shape forever and defeat the one
-    // behaviour this module exists to allow.
-    //
-    // The shared value itself is fluids::fluidParticleMassKg(d), inverted: 1/1.0f == 1.0f whenever
-    // d.densityKgM3 is left at fluids::kFluidDensityUnset, so this array is filled with exactly 1.0f
-    // in every slot for a desc that never asked for a real density -- bit-for-bit the same per-vertex
-    // value aver_phys_softbody_create's own `invMasses ? invMasses[i] : 1.0f` fallback already used
-    // when this was still a null pointer (PhysicsWorld.cpp's buildSoftShared). A desc that DID ask
-    // for a density gets a real per-particle mass instead: denser water sags harder under the same
-    // pressure and compliance, exactly the physics fluidPressureFor's own derivation now accounts
-    // for below.
-    const f32 particleMassKg = fluids::fluidParticleMassKg(d);
-    const std::vector<f32> invMasses(static_cast<usize>(r.vol.vertexCount()), 1.0f / particleMassKg);
-    // A desc that did not name a pressure gets one derived from its own size and subdivision. Done
-    // HERE rather than inside fluids::FluidVolume because this is the module that owns the moment the
-    // body is created -- FluidVolume deliberately knows nothing about soft bodies -- and done at all
-    // because a single constant cannot be right for two pools of different depths. See
-    // fluids::fluidPressureFor for the arithmetic -- as of the density field above, that arithmetic
-    // reads d.densityKgM3 too, so this already balances the SAME real mass invMasses just derived.
-    const f32 pressure = d.pressure < 0.0f ? fluids::fluidPressureFor(d) : d.pressure;
-    // damping/iterations pass straight through, the identical "the desc already carries the real
-    // number, this call site just forwards it" shape compliance and pressure already have -- see
-    // FluidVolumeDesc's own comment on the two fields for what each does and why neither substitutes
-    // for the other, and aver_phys_softbody_create's own doc comment for the clamp this ABI call
-    // applies before either reaches Jolt.
-    r.body = aver_phys_softbody_create(r.vol.seedPositionsCm().data(), r.vol.vertexCount(),
-                                       r.vol.indices().data(),
-                                       static_cast<int32_t>(r.vol.indices().size()),
-                                       invMasses.data(),
-                                       d.centreCm[0], d.centreCm[1], d.centreCm[2],
-                                       d.compliance, pressure, d.damping,
-                                       static_cast<int32_t>(d.iterations));
-    if (!r.body) {
-        AVER_WARN("[Fluid] Jolt refused to create a body for this volume; refusing it");
-        retire(r);
-        return 0;
-    }
+    // First surface now, so the volume draws the frame after it spawns rather than once it has stepped.
+    r.mesher.build(r.sim.positions().data(), n);
+    stageSurface(r);
+
+    AVER_INFO("[Fluid] volume: {} particles at {:.1f} cm spacing, {} surface triangles, solid cells {}",
+              n, r.sim.spacing() * kFluidMToCm, r.mesher.triangleCount(), r.solid.solidCellCount());
 
     const FluidHandle h = nextHandle_++;
-    live_.emplace(h, std::move(r));
+    live_.emplace(h, std::move(rp));
     return h;
 }
 
 void FluidScene::despawn(FluidHandle h) {
     const auto it = live_.find(h);
     if (it == live_.end()) return;
-    retire(it->second);
+    retire(*it->second);
     live_.erase(it);
 }
 
-void FluidScene::update() {
-    // NO CLOCK PARAMETER ANY MORE. This took the composition root's Timestep::total purely to fill
-    // gFluidTime for PSFluid's decorative ripple -- a detail the fluid shader drew that the solver
-    // never computed. Both are gone: an authored .ocmat gets surface detail from a normal map, which
-    // is the same answer every other surface in the engine already uses.
-    if (!ready_) return;
+void FluidScene::stageSurface(Resident& r) {
+    const u32 tris = r.mesher.triangleCount();
+    const u32 verts = tris * 3u;
+    const std::vector<f32>& P = r.mesher.positions();
+    const std::vector<f32>& N = r.mesher.normals();
+    for (u32 v = 0; v < verts; ++v) {
+        rhi::MeshVertex& o = r.packed[v];
+        o.px = P[v * 3 + 0] * kFluidMToCm; o.py = P[v * 3 + 1] * kFluidMToCm; o.pz = P[v * 3 + 2] * kFluidMToCm;
+        o.nx = N[v * 3 + 0]; o.ny = N[v * 3 + 1]; o.nz = N[v * 3 + 2];
+        o.u = 0.0f; o.v = 0.0f;
+    }
+    // Vertices the previous surface used and this one does not collapse to the centre point.
+    const u32 writeVerts = std::max(verts, r.usedVerts);
+    for (u32 v = verts; v < writeVerts; ++v) {
+        rhi::MeshVertex& o = r.packed[v];
+        o.px = o.py = o.pz = 0.0f;
+        o.nx = 0.0f; o.ny = 0.0f; o.nz = 1.0f;
+        o.u = 0.0f; o.v = 0.0f;
+    }
+    r.usedVerts = verts;
+    if (writeVerts == 0) { r.stagedThisFrame = false; return; }
 
-    // Reused across every resident this call rather than allocated per-volume: each buffer's
-    // capacity only ever grows to the largest volume touched so far. SoftBodyScene::update keeps the
-    // identical shared scratch for the identical reason.
-    std::vector<f32> physicsXyz;
-    std::vector<rhi::MeshVertex> packed;
-
-    for (auto& kv : live_) {
-        const FluidHandle h = kv.first;
-        Resident& r = kv.second;
-        // Sized from the SOLVER's own count, not just trusted to still equal r.vol.vertexCount() --
-        // the two are supposed to be the same particle count forever once a body is built (nothing
-        // in this ABI adds or removes soft-body particles after creation), but reading the body's
-        // own answer and checking it against what FluidVolume expects is what turns a silent
-        // mismatch into the warning below instead of a buffer overrun.
-        const int32_t bodyCount = aver_phys_softbody_vertex_count(r.body);
-        const i32 expected = r.vol.vertexCount();
-        physicsXyz.resize(static_cast<size_t>(bodyCount) * 3);
-        const int32_t got = aver_phys_softbody_vertices(r.body, physicsXyz.data(), bodyCount);
-        if (got != expected) {
-            // The handle went bad, or the particle count changed, without this resident going
-            // anywhere. Leave prePass nothing new to copy rather than stage a short, torn read -- the
-            // mesh keeps showing its last good frame instead of collapsing toward the origin.
-            AVER_WARN("[Fluid] volume {} read back {} of {} expected particles this frame; its mesh "
-                      "keeps last frame's pose", h, got, expected);
-            r.stagedThisFrame = false;
-            continue;
-        }
-
-        // updateFromSimulation also recomputes normals from this frame's deformed shape -- the seed
-        // shell's normals stop being correct the instant the body moves, which is the whole point of
-        // simulating it.
-        r.vol.updateFromSimulation(physicsXyz.data(), got);
-
-        // WHERE THE SHELL ACTUALLY IS, versus where it was authored to be.
-        //
-        // A soft body is free to go anywhere the solver takes it, and nothing downstream notices: the
-        // mesh is drawn from whatever positions come back, so a volume that has escaped its authored
-        // box renders happily over whatever it now covers. That is not hypothetical -- it is how the
-        // PTTest pool came to paint the pit's concrete walls white, which read for a whole session as
-        // a renderer bug (a "blown-out pit interior", plus scattered dark pixels that were really the
-        // wall showing through) and cost a full bisect of the texturing work to attribute correctly.
-        //
-        // The authored box is desc.centreCm +/- desc.halfExtentCm (FluidVolume.hpp:182-187). A little
-        // overshoot is normal and expected -- pressure inflates the shell and the surface oscillates --
-        // so this only says what the numbers are and lets the reader judge; it deliberately does not
-        // warn on a threshold nobody has calibrated.
-        {
-            const std::vector<f32>& p = r.vol.positionsCm();
-            if (p.size() >= 3 && (updates_ & (updates_ + 1)) == 0) {
-                f32 lo[3] = {p[0], p[1], p[2]}, hi[3] = {p[0], p[1], p[2]};
-                for (usize v = 3; v + 2 < p.size(); v += 3)
-                    for (int a = 0; a < 3; ++a) {
-                        lo[a] = std::min(lo[a], p[v + static_cast<usize>(a)]);
-                        hi[a] = std::max(hi[a], p[v + static_cast<usize>(a)]);
-                    }
-                const fluids::FluidVolumeDesc& d = r.vol.desc();
-                AVER_INFO("[Fluid] volume {} shell bounds after {} update(s): "
-                          "x [{:.1f} {:.1f}] y [{:.1f} {:.1f}] z [{:.1f} {:.1f}] cm; "
-                          "authored x [{:.1f} {:.1f}] y [{:.1f} {:.1f}] z [{:.1f} {:.1f}]",
-                          h, updates_,
-                          lo[0], hi[0], lo[1], hi[1], lo[2], hi[2],
-                          d.centreCm[0] - d.halfExtentCm[0], d.centreCm[0] + d.halfExtentCm[0],
-                          d.centreCm[1] - d.halfExtentCm[1], d.centreCm[1] + d.halfExtentCm[1],
-                          d.centreCm[2] - d.halfExtentCm[2], d.centreCm[2] + d.halfExtentCm[2]);
-            }
-        }
-
-        // Packed straight from FluidVolume's own positions and normals, NOT through
-        // render::softBodyPackVertices. That helper exists to solve two problems neither apply here:
-        // it recomputes normals by re-walking the index buffer and accumulating face normals, which
-        // is exactly what updateFromSimulation just finished doing to this same deformed shape, and
-        // it converts world-space positions back to mesh-local because drawMesh is about to apply a
-        // further entity transform on top. Nothing here applies a further transform -- see
-        // drawHandle()'s own comment for why the composition root draws this buffer with an identity
-        // world matrix -- so vol.positionsCm() is used exactly as FluidVolume already produced it,
-        // in WORLD space, with no conversion and no second normal computation.
-        // The solver's positions are ABSOLUTE WORLD; the mesh's frame is local about the volume's
-        // centre, the same frame spawn() seeded it in. See packFluidVerts for why that difference
-        // matters to sorting rather than only to placement.
-        packFluidVerts(r.vol.positionsCm(), r.vol.normals(), packed, r.vol.desc().centreCm);
-
-        r.ringSlot = (r.ringSlot + 1) % kFluidFramesInFlight;
-        const rhi::BufferHandle stage = r.staging[r.ringSlot];
-        const u64 bytes = static_cast<u64>(packed.size()) * sizeof(rhi::MeshVertex);
-        if (!stage || !res_->writeBuffer(stage, packed.data(), bytes)) {
-            AVER_WARN("[Fluid] volume {} could not stage this frame's vertices; its mesh keeps "
-                      "last frame's pose", h);
-            r.stagedThisFrame = false;
-            continue;
-        }
-        r.stagedThisFrame = true;
+    if (r.mesher.truncated() && !r.warnedTruncated) {
+        r.warnedTruncated = true;
+        AVER_WARN("[Fluid] a volume's surface exceeds {} triangles; the excess is not drawn "
+                  "(lower the particle count or the volume size)", r.maxVerts / 3u);
     }
 
-    ++updates_;
+    r.ringSlot = (r.ringSlot + 1) % kFluidFramesInFlight;
+    const rhi::BufferHandle stage = r.staging[r.ringSlot];
+    const u64 bytes = static_cast<u64>(writeVerts) * sizeof(rhi::MeshVertex);
+    if (!stage || !res_->writeBuffer(stage, r.packed.data(), bytes)) {
+        AVER_WARN("[Fluid] could not stage a volume's surface this frame; its mesh keeps last frame's shape");
+        r.stagedThisFrame = false;
+        return;
+    }
+    r.copyVerts = writeVerts;
+    r.stagedThisFrame = true;
+}
+
+void FluidScene::update() {
+    const auto now = std::chrono::steady_clock::now();
+    f32 dt = 1.0f / 60.0f;
+    if (haveLastUpdate_) dt = std::chrono::duration<f32>(now - lastUpdate_).count();
+    lastUpdate_ = now;
+    haveLastUpdate_ = true;
+    update(std::clamp(dt, 0.0f, 0.1f));
+}
+
+void FluidScene::update(f32 dtSeconds) {
+    if (!ready_) return;
+    for (auto& kv : live_) {
+        Resident& r = *kv.second;
+        if (r.sim.advance(dtSeconds) == 0) continue;   // no whole step this frame: the surface is current
+        r.mesher.build(r.sim.positions().data(), r.sim.count());
+        stageSurface(r);
+    }
 }
 
 rhi::MeshHandle FluidScene::drawHandle(FluidHandle h) const {
     const auto it = live_.find(h);
-    return it == live_.end() ? 0 : it->second.drawMesh;
+    return it == live_.end() ? 0 : it->second->drawMesh;
 }
 
 bool FluidScene::volumeOrigin(FluidHandle h, f32 out[3]) const {
     const auto it = live_.find(h);
     if (it == live_.end()) return false;
-    const fluids::FluidVolumeDesc& d = it->second.vol.desc();
+    const fluids::FluidVolumeDesc& d = it->second->desc;
     out[0] = d.centreCm[0];
     out[1] = d.centreCm[1];
     out[2] = d.centreCm[2];
     return true;
 }
 
-int32_t FluidScene::physicsBody(FluidHandle h) const {
+int32_t FluidScene::physicsBody(FluidHandle) const { return 0; }
+
+u32 FluidScene::particleCount(FluidHandle h) const {
     const auto it = live_.find(h);
-    return it == live_.end() ? 0 : it->second.body;
+    return it == live_.end() ? 0u : it->second->sim.count();
+}
+
+u32 FluidScene::triangleCount(FluidHandle h) const {
+    const auto it = live_.find(h);
+    return it == live_.end() ? 0u : it->second->mesher.triangleCount();
+}
+
+void FluidScene::addImpulse(FluidHandle h, const f32 centreCm[3], f32 radiusCm, const f32 velCmPerS[3]) {
+    const auto it = live_.find(h);
+    if (it == live_.end()) return;
+    Resident& r = *it->second;
+    const f32 local[3] = {(centreCm[0] - r.desc.centreCm[0]) * kFluidCmToM,
+                          (centreCm[1] - r.desc.centreCm[1]) * kFluidCmToM,
+                          (centreCm[2] - r.desc.centreCm[2]) * kFluidCmToM};
+    const f32 dv[3] = {velCmPerS[0] * kFluidCmToM, velCmPerS[1] * kFluidCmToM, velCmPerS[2] * kFluidCmToM};
+    r.sim.addImpulse(local, radiusCm * kFluidCmToM, dv);
 }
 
 void FluidScene::prePass(rhi::IRenderContext& ctx) {
     if (!ready_ || live_.empty()) return;
     for (auto& kv : live_) {
-        Resident& r = kv.second;
+        Resident& r = *kv.second;
         if (!r.stagedThisFrame) continue;   // update() had nothing new to show this frame
 
         const rhi::BufferHandle stage = r.staging[r.ringSlot];
-        const u64 bytes = static_cast<u64>(r.vol.vertexCount()) * sizeof(rhi::MeshVertex);
+        const u64 bytes = static_cast<u64>(r.copyVerts) * sizeof(rhi::MeshVertex);
 
-        // GeometryRead -> CopyDest for the copy, then straight back -- the only two states this
-        // buffer is ever in, exactly as SoftBodyScene::prePass documents and for the same reason.
-        // The round trip happens every frame a resident is staged, not once, because GeometryRead is
-        // a READ state and the input assembler may have consumed the buffer in that state on any
-        // prior frame.
         ctx.bufferBarrier(r.vertices, r.state, rhi::ResourceState::CopyDest);
         ctx.copyBuffer(r.vertices, stage, bytes);
         ctx.bufferBarrier(r.vertices, rhi::ResourceState::CopyDest, rhi::ResourceState::GeometryRead);
@@ -402,17 +290,5 @@ void FluidScene::prePass(rhi::IRenderContext& ctx) {
         r.stagedThisFrame = false;   // consumed; the next copy needs a fresh stage from update()
     }
 }
-
-
-
-// transparentPass IS GONE, AND THE ABSENCE IS THE FEATURE. This class used to bind its own pipeline
-// and issue its own drawIndexed here, which is what kept water out of the TLAS, out of the shadow
-// term, out of fog and out of back-to-front sorting -- everything IDevice::drawMesh already arranges
-// for any other surface. sandbox/src/SandboxApp.cpp now draws drawHandle() through setDrawBlended()
-// + drawMesh() with a real .ocmat, so a fluid volume is an ordinary translucent mesh and this class
-// is what its own header always said it was modelled on: SoftBodyScene, a feature that produces
-// GEOMETRY and lets the composition root decide how it is shaded.
-//
-// Deleted rather than left as an empty override, so nothing can quietly start drawing here again.
 
 } // namespace aver::fluids

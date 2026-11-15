@@ -30,6 +30,13 @@ add_executable(FluidVolumeTest src/FluidVolumeTest.cpp)
 target_link_libraries(FluidVolumeTest PRIVATE Aver.Fluids Aver.RHI Aver.Core Aver.Platform)
 set_target_properties(FluidVolumeTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# PbfFluidTest -- the particle fluid: solver (tank holds its depth, dam break spreads, scene colliders,
+# determinism), the surface mesher, and the desc -> solver-settings mapping. CPU only: PbfFluid.cpp and
+# FluidSurface.cpp are pure arithmetic, so this needs no device, no window and no physics world.
+add_executable(PbfFluidTest src/PbfFluidTest.cpp)
+target_link_libraries(PbfFluidTest PRIVATE Aver.Fluids Aver.RHI Aver.Core Aver.Platform)
+set_target_properties(PbfFluidTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # WaterSurfaceTest -- the displaced surface's CPU half: grid layout and builder, camera snapping, and
 # the WATER record's cell/radius tokens. No device; links Aver.Formats only for the record parse.
 add_executable(WaterSurfaceTest src/WaterSurfaceTest.cpp)
