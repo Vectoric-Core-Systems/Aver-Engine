@@ -10,6 +10,18 @@ triggering inputs for anything summarised below.
 
 ## [Unreleased]
 
+### Known issues from earlier releases
+
+Every known issue from 0.3.0 to 0.8.0 was rechecked; most had been fixed without the lists saying so. `docs/BUGS.md`
+("rechecked, 2026-11-15") has the whole table, including what is still open.
+
+- The animation editor keeps unsaved edits when its file changes on disk, and its own save no longer clears undo.
+- The occlusion culler stops retrying a failed shader compile every frame (and no longer leaks a pipeline doing it).
+- Without DXC, the UI and post shaders build again: the FXC fallback resolves `#include`. One startup line now says
+  what is off without DXC.
+- Saving a level as legacy `.ocmap` warns when a non-uniform scale is reduced to its X scale.
+- `--refl-test`'s mirror was nearly black (base colour 0.02 on a metal), so the test could not pass; fixed, not yet run.
+
 ### Mesh shaders draw meshlets (not yet run on a GPU)
 
 - The mesh-shader geometry path now draws meshlets: up to 64 vertices and 124 triangles each, built when a mesh is created. An amplification shader culls them against the view frustum, 32 at a time, and each vertex is shaded once instead of once per triangle corner. D3D12 and Vulkan both build them; Vulkan's mesh path compiles again (its push-constant block had lost two fields). Mesh shaders stay off by default on AMD until the NeonDistrict load is re-checked (`AVER_MESH_SHADERS=1`).

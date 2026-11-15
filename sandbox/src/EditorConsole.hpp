@@ -416,7 +416,7 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
 
     // ---- dial fields, each derived from a tier above unless set explicitly -----------------
     t.push_back({"voxi.voxelResolution", VarType::U32, false,
-        "Cubic voxel grid edge (engine clamps to [32,512])",
+        "Cubic voxel grid edge (engine clamps to [32,512]) -- NOT live: the volume is built at project load, so a change takes a reload",
         []{ return vU32(Renderer::get().settings().voxelResolution); },
         [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->voxelResolution = n; }); }});
     t.push_back({"voxi.giCones", VarType::U32, false,

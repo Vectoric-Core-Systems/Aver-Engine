@@ -5,6 +5,76 @@ reproduce is a rumour.
 
 ---
 
+# Known issues from earlier releases, rechecked — 2026-11-15
+
+Every "Known issues" bullet from the 0.3.0–0.8.0 notes, the two "Open" lists below and the open GitHub issues,
+checked against the tree at ff44d086. Release notes are left as they were published; this is the current state.
+
+## Fixed now
+
+- **The animation editor reloaded over unsaved edits** (0.4.0). A dirty tab now keeps its edits and says so, and its
+  own save's watcher echo no longer reloads it, so undo survives a save (`AnimEditor::onFileChanged`, with the
+  size + mtime stamp now shared as `sandbox/src/FileStamp.hpp`, which InstanceSetEditor already used).
+- **The occlusion culler retried its failed shader compile every frame** (0.4.0), and each retry leaked whichever of
+  its two pipelines had built. A failure now latches until the device is recreated, frees the partial pipeline and
+  logs once (`OcclusionCuller::ensureSized`).
+- **Without DXC, the UI and post shaders could not build**, because the FXC fallback had no include handler and both
+  `#include "aver_colour_vision.hlsli"`. FXC now resolves includes through the same lookup as DXC
+  (`rhi::shaderIncludeText`, `ShaderIncludeLookupTest`); `fxc /T vs_5_1|ps_5_1` compiles `ui.hlsl` that way. The
+  device also logs one line saying what is off without DXC (0.4.0's "silently drops" — each module already logged
+  its own error).
+- **A legacy `.ocmap` save dropped a non-uniform scale with no word** (0.4.0, then said to be unreachable; the
+  editor can author one). It still keeps X — the format has one scale — and now warns, naming the first placement.
+- **`--refl-test` could not pass** (BUGS 0.5.0 Open). Its mirror was metallic with base colour 0.02, and a metal's
+  base colour is its reflectance, so it returned about 2% of the beacon against a 0.05 threshold. Now 0.95, and the
+  beacon is placed from the camera the run actually uses. **Not run** (engine runs are off); the next run says
+  whether it passes.
+- `voxi.voxelResolution`'s console description now says it takes a reload (the settings panel already did).
+
+## Already fixed; only the notes were stale
+
+| Known issue | Where it was fixed |
+|---|---|
+| Saving a level reloads it (0.4.0) | Nothing reloads the open level on a watcher event; only asset tabs are notified (`SandboxAutosave.cpp` pumpContentWatch) |
+| A mesh renders with one material (0.5.0) | Per-slot GPU meshes (841aa8ec), one draw per part in both hosts (`SceneSubmission.hpp` planEntityDraws); a substituted LOD/skinned mesh still draws one slot |
+| `Runtime` is a diverged twin (0.4.0) | No such class remains; both hosts share `Runtime/` GameApp, GameRender and GameCamera |
+| Voxi.hpp says the GI gather is not clamped (0.4.0) | The comment now describes the ceiling (`giRadianceCeiling`, `AVER_VOX_MAXRAD`) |
+| Vulkan's bindless texture table is a stub (0.5.0) | Real table (`VulkanResourceFactory::createBindlessTable`), gated on RT tier 1.1 and descriptor indexing |
+| Vulkan has no shader blob cache (0.5.0) | SPIR-V cache in `VulkanShaderCompiler.cpp` (a7939c6e) |
+| rt-penumbra gate is blind (0.4.0) | Probe re-picked into a real penumbra (d5944ccf); baseline 69,72,79 sits between umbra and sunlit |
+| Six nodes undocumented (0.4.0) | All six are in `docs/nodes/Core.md` |
+| No 2D HUD from a graph (0.3.0, 0.4.0) | `CreateUiWidget`, `SetUiText` and the UiText nodes (`docs/nodes/GameSystem.md`, `UiText.md`) |
+| Firing is level-triggered (0.3.0) | Closed in 0.4.0 |
+| The selection outline is invisible in ray-driven; no wireframe there | Outline drawn as lines; wireframe forces a raster frame (`SandboxUpdate.cpp`) |
+| GI reservoir NaN burn-in | Non-finite reservoirs are emptied before store (`voxi_restir.hlsli`, store guard); the first NaN's origin was never proven, so a long flight with `voxi.giPoisonView` is the real check |
+| NRD AO outputs zero | NRD was replaced by the FidelityFX denoiser (69f3ecff); the occlusion output no longer exists |
+| GitHub #3 Linux: C# cannot load Aver.Settings | d78b0f58 (`NativeResolver.cs`) |
+| GitHub #4 Wayland hang in present() on a hidden window | cd5dae9f (the window is shown before the warm-up frames on Wayland) |
+| GitHub #5 macOS WatcherTest: rewrite reads as Created | 0d1b9f7d (FSEvents backend tracks known paths) |
+| GitHub #6 macOS arm64 NeuralConvTest FMA | 0d1b9f7d (`-ffp-contract=off` on the neural module and its test) |
+
+## Still open
+
+- **Vulkan cascade shadow map** (0.4.0, 0.5.0). The cascade pass runs in `prePass`, before the scene scope opens, and
+  it did when the defect was measured (c97f0929), so the comment's "joins the scene scope" story does not explain
+  that measurement. Needs one Vulkan `--no-rt` floor probe before either the comment or the claim changes.
+- **GI can be dominated by one saturated emitter** (0.4.0). The ceiling is still per component, so it bounds
+  magnitude, not hue. A peak-preserving clamp (scale the colour so its largest channel meets the ceiling) leaves
+  every image under the ceiling byte-identical; it changes the look, so it waits for a decision and a GPU check.
+- **Voxel resolution changes take a reload** (0.4.0). Honest in the UI now; a live rebuild of the volume risks the
+  mid-frame teardown that removed the device twice.
+- **Group rotate/scale and Outliner reorder/multi-drag** (0.5.0). Needs the pivot decided (anchor, selection
+  centre, or each object's own) and a stored sibling order.
+- **A fluid volume pancakes** (0.4.0). Waits on the fluid-model decision.
+- **The editor viewport sometimes starts at 45x45** (STATUS §4g). The rect is the Level dock tab's content size,
+  not the OS window; a dock built while the window is still tiny is the leading suspect. Needs runs.
+- **Frame determinism and GI churn under motion** (0.5.0). Need measurement runs.
+- **Skinned meshes bounce no GI** (BUGS 0.5.0 Open, a documented trade). Needs partial revoxelisation.
+- **Material graphs on Vulkan**: compiled to SPIR-V by `VoxiSpirvCompileTest`, never rendered there.
+- **The horizontal glass slab reading near-black at steep angles**: no fix commit names it; needs a capture.
+
+---
+
 # 0.5.0 — in progress, 2026-08-27
 
 A six-lens sweep across rendering, physics/fluids, audio/animation, formats/save, graph/scripting and

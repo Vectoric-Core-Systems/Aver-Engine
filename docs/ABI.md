@@ -1503,7 +1503,7 @@ There is genuine C ABI test coverage here, more than this project's history woul
 
 **It has a direct C ABI test, unlike most seams.** `tests/settings/src/SettingsTest.cpp` links `Aver.Settings` and drives the exported functions, which puts it in the same small company as `tests/scene` and `tests/framework`.
 
-**Open question, not resolved by this pass.** `Aver.Settings.dll` is P/Invoked by the shipped managed layer, and whether the packaging allowlists stage it was raised during the 2026-09-20 sweep but is `docs/PACKAGING.md`'s business, not this document's. If a shipped game's `Settings.Get…` throws a `DllNotFoundException`, start there.
+**Resolved since.** `Aver.Settings.dll` is P/Invoked by the shipped managed layer; both packaging allowlists stage it (`scripts/game.allowlist`, `scripts/payload.allowlist`), and every `Aver.*` native library is loaded from the executable folder under its platform name by `scripting/csharp/Shared/NativeResolver.cs` (d78b0f58, GitHub #3).
 
 ---
 
