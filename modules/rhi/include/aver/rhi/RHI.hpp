@@ -180,7 +180,8 @@ struct PostSettings {
     // 4x an edge pixel. Implemented in post.hlsl's CSHistogram.
     f32  meteringCenterWeight = 0.5f;   // [0,1]
 
-    // Target brightness -- the log-average of the histogram's middle band.
+    // Target brightness -- the log-average of the histogram's middle band. 0.125 is a reflected-light meter's
+    // calibration (ISO 2720, K = 12.5): the scene's average luminance lands at 12.5% of white.
     f32  exposureKey    = 0.125f;
     // Fraction of the histogram discarded at each end before averaging.
     f32  histogramLowPercent  = 0.10f;

@@ -69,7 +69,11 @@ light, about 2x the vendored setting, with the blotches mostly gone. Ruled out b
 blotch source: the NeuRaC cache read, ReSTIR reuse, the history clip, a prefilter variance floor, and
 an input firefly clamp (16x the frame mean already removed over half the night GI).
 
-Still open: the remaining loss (~0.84 by day), suspected in the variance-guided prefilter; the
+Second scene (2026-11-15, same method, `--tonemap 0` inverted, fixed exposure): PTTest's NewSponza by day keeps
+**0.93** of the raw GI mean with these values, so the 0.2 bias is not a NeonDistrict-only fit. Night scenes and
+the other levels are not re-measured yet.
+
+Still open: the remaining loss (~0.84 by day on NeonDistrict), suspected in the variance-guided prefilter; the
 reflection, shadow and AO histories read the nearest texel rather than a bilinear footprint;
 `denoiserSunMovingSamples` below 8 has no visible effect.
 

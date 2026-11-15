@@ -295,9 +295,8 @@ void CSExposure() {
             // keyEff blends the authored middle grey (exposureKey, gPostMisc.x) between "as
             // authored" (adaptationRealism 0, today's full-adaptation behaviour -- keyEff ==
             // exposureKey exactly, the lerp's base case) and the perceptual curve above, normalised
-            // so keyEff == exposureKey at the reference Yref = 100 cd/m^2 too (a dim interior;
-            // exposureKey was tuned against NewSponza's noon courtyard, which meters ~82 cd/m^2, so
-            // the two nearly coincide at full realism there). averEyeAlpha(100.0) is computed, not
+            // so keyEff == exposureKey at the reference Yref = 100 cd/m^2 too (a dim interior; a
+            // sunlit courtyard meters about 80 cd/m^2, so the two nearly coincide at full realism there). averEyeAlpha(100.0) is computed, not
             // the 0.530 hardcoded, so it can never drift from the formula above.
             float keyEff = gPostMisc.x * lerp(1.0, averEyeAlpha(avgLumCdm2) / max(averEyeAlpha(100.0), 1e-4), gPostEye.x);
             target = keyEff / max(avgLum, 1e-4);

@@ -294,8 +294,9 @@ private:
     // ---- STAGED GI REBUILD: a rebuild too big for one frame's GPU submission, a slice per frame ----
     // Phase 0 draws the GI shadow map, phase 1 injects into the accumulator, and the last slice
     // resolves and filters. The volume being replaced stays in use until then.
-    // 16M: on NeonDistrict 1.5M triangles cost ~3 ms of GI shadow, so a slice is ~30 ms shadow or
-    // ~100 ms injection, and a full rebuild takes about 25 frames.
+    // A SAFETY BOUND against Windows' 2 s GPU timeout, not a tuning: at ~2 ms of GI shadow per million triangles
+    // (an RX 7800 XT) a 16M slice is ~30 ms of shadow or ~100 ms of injection, so a GPU 10x slower still stays far
+    // under 2 s. A large city rebuilds over about 25 frames.
     static constexpr u64 kGiBuildTrisPerFrame = 16000000;
     struct GiBuild {
         bool  active = false;

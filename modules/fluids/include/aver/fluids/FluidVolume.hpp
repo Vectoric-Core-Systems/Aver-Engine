@@ -55,9 +55,16 @@ constexpr f32 kFluidPressureAuto = -1.0f;
 //     0.00 -> 84%   0.25 -> 86%   0.40 -> 95%   0.50 -> 94%
 //     0.60 -> 97%   0.75 -> 97%   1.05 -> 134% (ballooning)
 //
-// 0.4-0.75 holds the shape; past that it inflates. 0.6 sits mid-plateau, clear of the blow-up, far
-// enough to survive a shell whose proportions differ from this pool's. SoftBodyTest::testPressureHoldsAShellUp
-// pins both ends (collapse and balloon).
+// 0.4-0.75 holds the shape; past that it inflates. SoftBodyTest::testPressureHoldsAShellUp pins both ends
+// (collapse and balloon).
+//
+// NOT SHAPE-INDEPENDENT (swept 2026-11-15, free-standing, 4 s, same formula): the headroom that keeps the depth
+// grows with how deep the shell is for its width and with how finely it is subdivided. A 8x8x0.5 m pond at 10x10
+// wants ~0.25 (balloons to 134% at 0.6); a 1x1x0.8 m tub at 6x6x4 and a 3 m cube at 6^3 want ~1.2 (sag to 78% and
+// 91% at 0.6); this pool at 16x16 wants ~1.1; a 3 m cube at 12^3 collapses at any value. Holding the enclosed volume
+// instead (pressure steered each step) was tried and made it worse: at constant volume a pressurised box shell
+// domes into a cushion. A shape-independent liquid needs a different model (volume constraints, or the basin
+// carrying the walls), not a different constant.
 constexpr f32 kFluidPressureHeadroom = 0.6f;
 
 // Centimetres to Jolt's metres, for the pressure coefficient specifically: gravity loses a factor of
