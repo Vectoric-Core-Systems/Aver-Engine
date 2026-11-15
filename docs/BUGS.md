@@ -101,7 +101,10 @@ Each built and passed the CPU suite (587/587); none has been seen on screen.
   `--capture-settled N` therefore builds one structure a frame, waits for 30 quiet frames, rebuilds the GI volume from
   black, restarts every sequence and history, and captures N frames on: six NewSponza runs then differ by about 5% of
   pixels, almost all by one or two steps (0.1% by more than 8).
-- **The near-black glass slab**: needs a capture.
+- **The horizontal glass slab reading near-black at steep angles** (probed 43,46,49 around 2026-09-01; the scene it was
+  seen in is not recorded): no longer reproduces. Measured 2026-11-16 with a 500 x 360 x 6 cm M_Glass slab placed over
+  FluidShow's pool (ray-driven, not saved): mean (204,213,210) at a grazing angle from above, (184,182,168) looking
+  down at about 62 degrees, (131,126,129) looking up at it from below at 55 degrees.
 
 ---
 
