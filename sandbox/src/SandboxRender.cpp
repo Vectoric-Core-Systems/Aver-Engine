@@ -2266,8 +2266,14 @@ void SandboxApp::tickReflectionTest(Engine& e) {
             voxiRenderer_.setSettings(vs);
         }
 #endif
-        if (reflBeaconIndex_ >= 0 && reflBeaconIndex_ < (int)objects_.size())
+        if (reflBeaconIndex_ >= 0 && reflBeaconIndex_ < (int)objects_.size()) {
+            if (refl_->atStart()) {
+                const Vec3 bp = aver::editor::ReflTest::beaconPosition(viewState_.camPos_, Vec3{0, 0, 0});
+                objects_[reflBeaconIndex_].pos = bp;
+                refl_->setBeaconPosition(bp);
+            }
             objects_[reflBeaconIndex_].visible = refl_->beaconVisible();
+        }
         refl_->tick(e, viewState_.vpX_, viewState_.vpY_, viewState_.vpW_, viewState_.vpH_);
     }
 }

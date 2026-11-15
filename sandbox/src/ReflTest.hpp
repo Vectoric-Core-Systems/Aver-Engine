@@ -44,6 +44,9 @@ public:
 
     void tick(Engine& e, f32 vpX, f32 vpY, f32 vpW, f32 vpH);
     bool finished() const { return done_; }
+    // Before the first tick: the host re-places the beacon from the camera the run actually uses (a --cam or a
+    // restored camera lands after setup).
+    bool atStart() const { return phase_ == kRayWith && step_ == 0 && !done_; }
 
 private:
     void report();

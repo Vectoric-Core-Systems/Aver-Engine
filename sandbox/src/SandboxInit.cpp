@@ -734,13 +734,14 @@ void SandboxApp::setupReflectionTest() {
         objects_.clear();
         selectionUi_.sel_ = -1;
 
-        // Metallic near-smooth mirror.
+        // Metallic near-smooth mirror. A metal's base colour IS its reflectance (F0): this was 0.02, a near-black mirror
+        // that returned about 2% of the beacon, under the 0.05 the check needs -- the reason it always failed.
         MeshObj m;
         m.name = "ReflMirror";
         m.mesh = unitCubeMesh_;
         m.pos = Vec3{0, 0, -20.0f};
         m.scale = Vec3{1800.0f, 1800.0f, 20.0f};
-        m.color[0] = 0.02f; m.color[1] = 0.02f; m.color[2] = 0.02f;
+        m.color[0] = 0.95f; m.color[1] = 0.95f; m.color[2] = 0.95f;
         m.metallic = 1.0f; m.roughness = 0.03f;
         m.aabbMin = Vec3{-1900, -1900, -60}; m.aabbMax = Vec3{1900, 1900, 20};
         objects_.push_back(m);
