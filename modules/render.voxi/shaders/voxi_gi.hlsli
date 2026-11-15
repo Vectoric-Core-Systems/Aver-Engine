@@ -161,6 +161,18 @@ cbuffer VoxiFrame : register(AVER_GI_JOIN(b, AVER_GI_FRAME_REG)) {
 #endif
 };
 
+// Peak-preserving radiance ceiling: scales ALL channels by one factor so the largest component lands on
+// AVER_VOX_MAXRAD and hue survives (a per-component clamp turns a saturated emitter's bounce into one colour).
+// Untouched when no component exceeds the ceiling. Ceil = above only (min() twin); Clamp = also floors at 0.
+// Mirrored verbatim in voxi_gi.hlsli (never in the same compile as voxi.hlsl).
+float3 averRadCeil(float3 v)
+{
+    const float cap = AVER_VOX_MAXRAD;
+    const float m   = max(v.x, max(v.y, v.z));
+    return m > cap ? v * (cap / m) : v;
+}
+float3 averRadClamp(float3 v) { return averRadCeil(max(v, 0.0)); }
+
 // t(AVER_GI_SRV) the GI volume, t(AVER_GI_SRV_1) the shadow map -- the only two of Voxi's table-0
 // union this prelude declares a symbol for; see giShaderDefines()'s own comment on why the rest of
 // kGiSrvCount/kGiUavCount are reserved by the caller's layout but never named here.
@@ -302,7 +314,7 @@ float3 coneTracedIndirect(float3 wpos, float3 N, out float ao) {
         // answer (fully open) is right, and that case must not change.
         occ = occWsum > 1e-4 ? occ / occWsum : 0.0;
         ao = saturate(1.0 - occ);
-        return min(sum.rgb * gVoxelParams.y, AVER_VOX_MAXRAD);
+        return averRadCeil(sum.rgb * gVoxelParams.y);
     }
 
     // CORRECTED (default). The math below is the same text as voxi_cone.hlsli's own corrected gather
@@ -354,5 +366,5 @@ float3 coneTracedIndirect(float3 wpos, float3 N, out float ao) {
     // included into voxi.hlsl for PSMainVoxi/PSVoxel/PSVoxelDebug/PSRayDriven; this file, for the
     // cluster-material and particle passes); clamping only one of them would be a difference between
     // the raster/ray-driven and cluster/particle paths that nothing in the build would report.
-    return min(sum.rgb * gVoxelParams.y, AVER_VOX_MAXRAD);
+    return averRadCeil(sum.rgb * gVoxelParams.y);
 }

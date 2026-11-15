@@ -344,7 +344,7 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
             const float3 rawSky = averSkyRadianceCheap(dir) * gAmbient.r;
             const bool   bad    = any(isnan(rawSky)) || any(isinf(rawSky));
             nonFiniteCandidate  = nonFiniteCandidate || bad;
-            sampleRadiance      = bad ? float3(0.0, 0.0, 0.0) : min(max(rawSky, 0.0), AVER_VOX_MAXRAD);
+            sampleRadiance      = bad ? float3(0.0, 0.0, 0.0) : averRadClamp(rawSky);
         }
         return true;
     }
@@ -409,7 +409,7 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
         sampleNormal = s.N;
         const bool bad     = any(isnan(radiance)) || any(isinf(radiance));
         nonFiniteCandidate = nonFiniteCandidate || bad;
-        sampleRadiance     = bad ? float3(0.0, 0.0, 0.0) : min(max(radiance, 0.0), AVER_VOX_MAXRAD);
+        sampleRadiance     = bad ? float3(0.0, 0.0, 0.0) : averRadClamp(radiance);
         return true;
     }
 #endif
@@ -426,7 +426,7 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
         // Cone's radiance only (no sky fallback): the volume is one-voxel shells, sparsely sampled.
         if (gVoxelParams.w > 0.5) {
             const float4 cone = traceCone(hitPos, s.N, AVER_VOX_INJECT_APERTURE);
-            indY = min(cone.rgb, AVER_VOX_MAXRAD);
+            indY = averRadCeil(cone.rgb);
         } else indY = averSkyIrradiance(s.N) * gAmbient.r;
 #if AVER_NEURAC
     } else if (f2Path == 4u) {
@@ -435,7 +435,7 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
         float rem;
         const float3 cached = rcLookup(hitPos, s.N, rem);
         indY = cached + rem * (averSkyIrradiance(s.N) * gAmbient.r * clamp(rho2, 0.0, AVER_GI_VIS_RHO_MAX));
-        indY = min(max(indY, 0.0), AVER_VOX_MAXRAD);
+        indY = averRadClamp(indY);
 #endif
     } else if (f2Path == 2u) {
         // Half non-traced: no ray, no cone, one occlusion ratio.
@@ -459,7 +459,7 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
             if (gVoxelParams.w > 0.5 && insideVolume(uvw)) {
                 const float4 vox = gVoxelTex.SampleLevel(gVoxelSamp, uvw, 0);
                 // Normalise by occupancy (alpha) rather than premultiplied mean.
-                indY = vox.a > AVER_GI_VOX_MIN_OCC ? min(vox.rgb / vox.a, AVER_VOX_MAXRAD) : 0.0;
+                indY = vox.a > AVER_GI_VOX_MIN_OCC ? averRadCeil(vox.rgb / vox.a) : 0.0;
             }
         }
         // Only reachable at f2Path == 3u (traced path).
@@ -479,7 +479,7 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
     {
         const bool bad     = any(isnan(radiance)) || any(isinf(radiance));
         nonFiniteCandidate = nonFiniteCandidate || bad;
-        sampleRadiance     = bad ? float3(0.0, 0.0, 0.0) : min(max(radiance, 0.0), AVER_VOX_MAXRAD);
+        sampleRadiance     = bad ? float3(0.0, 0.0, 0.0) : averRadClamp(radiance);
     }
     return true;
 }
@@ -927,7 +927,7 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         const float3 estNonNeg = max(est, 0.0);
         giPoisonEstCeilHit = !giPoisonEstHit && any(estNonNeg > AVER_VOX_MAXRAD);
         outDiffuse = giPoisonEstHit ? float3(0.0, 0.0, 0.0)
-                                     : min(estNonNeg, AVER_VOX_MAXRAD);
+                                     : averRadCeil(estNonNeg);
     }
     // W6/M5: gAverHistoryWrite gates the reservoir store (blended fragments don't write here).
     // A reused sample found blocked is stored with W = 0, not emptied: its weight already counted that

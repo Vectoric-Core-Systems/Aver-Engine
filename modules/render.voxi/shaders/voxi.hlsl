@@ -132,6 +132,17 @@ RWTexture3D<uint> gVoxelAccum : register(u1);
 #define AVER_VOX_FIXED 16384.0
 // Voxel/GI radiance ceiling (per-frame from gViewParams.y, falls back to 16.0 if 0).
 #define AVER_VOX_MAXRAD (gViewParams.y > 0.0 ? gViewParams.y : 16.0)
+// Peak-preserving radiance ceiling: scales ALL channels by one factor so the largest component lands on
+// AVER_VOX_MAXRAD and hue survives (a per-component clamp turns a saturated emitter's bounce into one colour).
+// Untouched when no component exceeds the ceiling. Ceil = above only (min() twin); Clamp = also floors at 0.
+// Mirrored verbatim in voxi_gi.hlsli (never in the same compile as voxi.hlsl).
+float3 averRadCeil(float3 v)
+{
+    const float cap = AVER_VOX_MAXRAD;
+    const float m   = max(v.x, max(v.y, v.z));
+    return m > cap ? v * (cap / m) : v;
+}
+float3 averRadClamp(float3 v) { return averRadCeil(max(v, 0.0)); }
 // Single cone aperture (tan of half-angle): 0.577 = tan(30°) = 60° cone.
 #define AVER_VOX_INJECT_APERTURE 0.577
 // Re-emission gain for next bake (compensation constant for cone under-counting).
@@ -1084,10 +1095,10 @@ float3 rdTranslucentPath(float3 dir, float hitT, float3 background, float2 pixel
                                                        s.attenuationDistance, s.scatterColor);
             T = averVolumeTransmittance(s.attenuationColor, s.attenuationDistance, th);
             if (any(s.scatterColor > 0.0) && !rtHitFromBehind(h, dir))
-                acc += thr * min(averSurfaceInscatter(s, th, dir, sun, ind), AVER_VOX_MAXRAD);
+                acc += thr * averRadCeil(averSurfaceInscatter(s, th, dir, sun, ind));
         }
         const float a = saturate(s.alpha);
-        acc += thr * min(specular + diffuse * a, AVER_VOX_MAXRAD);
+        acc += thr * averRadCeil(specular + diffuse * a);
         thr *= (1.0 - a) * T;
         if (max(thr.r, max(thr.g, thr.b)) < 1e-3) break;
         tmin = h.t + ptBias(h.pos);
@@ -1225,7 +1236,7 @@ float3 rtReflectionTemporalEx(float3 wpos, float3 N, float3 Ng, float3 R, float3
         }
 
         // Write raw temporal value, never filtered (prevents compounding IIR).
-        col = clamp(col, 0.0, AVER_VOX_MAXRAD);
+        col = averRadClamp(col);
         if (gAverHistoryWrite)
             gRtReflHistOut[uint2(pixel)] = curHit ? float4(col, histDepth) : float4(0.0, 0.0, 0.0, -1.0);
         hit = curHit;
@@ -1264,7 +1275,7 @@ float3 rtReflectionTemporalEx(float3 wpos, float3 N, float3 Ng, float3 R, float3
 
     hit = curHit;
     // Raw, not filtered.
-    col = clamp(col, 0.0, AVER_VOX_MAXRAD);
+    col = averRadClamp(col);
     if (gAverHistoryWrite)
         gRtReflHistOut[uint2(pixel)] = curHit ? float4(col, histDepth) : float4(0.0, 0.0, 0.0, -1.0);
     if (curHit && doSpatial) {
@@ -1823,7 +1834,7 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
             // PRE-clamp value tested against same ceiling as clamp below.
             const float3 specRaw = lerp(specHit ? refl : skyR, skyR, skyW);
             giPoisonSpecCeilHit = any(specRaw >= AVER_VOX_MAXRAD);
-            ind4.specular = clamp(specRaw, 0.0, AVER_VOX_MAXRAD);
+            ind4.specular = averRadClamp(specRaw);
             ind4.specularTraced = 1.0;
         }
     } else
@@ -1833,7 +1844,7 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
         float4 sceneSpec    = traceCone(i.wpos, R, specAperture);
         // Sky skipped where cone already saw a wall (avoids paying for values multiplied away).
         const float skyWeight = 1.0 - sceneSpec.a;
-        ind4.specular       = min(sceneSpec.rgb * gVoxelParams.y, AVER_VOX_MAXRAD);
+        ind4.specular       = averRadCeil(sceneSpec.rgb * gVoxelParams.y);
         if (skyWeight > 0.004) ind4.specular += skyColor(R) * skyWeight;
     } else {
         ind4.specular       = skyColor(R);
@@ -2344,7 +2355,7 @@ RayDrivenOut PSRayDriven(SkyOut i) {
 #endif
         // Skip march when occluded (HLSL doesn't short-circuit).
         const float skyWeight = 1.0 - sceneSpec.a;
-        ind.specular        = min(sceneSpec.rgb * gVoxelParams.y, AVER_VOX_MAXRAD);
+        ind.specular        = averRadCeil(sceneSpec.rgb * gVoxelParams.y);
 #if AVER_RD_ABLATE == AVER_RD_ABL_ROUGHSKY
         // ablated: atmosphere march
 #else
@@ -2378,7 +2389,7 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         // clamp() not min(): min bounds above only, and negative radiance historically rendered wrong.
         const float3 specRaw = lerp(specHit ? refl : skyR, skyR, skyW);
         giPoisonSpecCeilHit = any(specRaw >= AVER_VOX_MAXRAD);
-        ind.specular = clamp(specRaw, 0.0, AVER_VOX_MAXRAD);
+        ind.specular = averRadClamp(specRaw);
         ind.specularTraced = 1.0;
     } else if (gVoxelParams.w > 0.5) {
         // Voxel-cone fallback (rough > 0.75 or RT unavailable).
@@ -2391,7 +2402,7 @@ RayDrivenOut PSRayDriven(SkyOut i) {
 #endif
         // Skip march when occluded (HLSL doesn't short-circuit).
         const float skyWeight = 1.0 - sceneSpec.a;
-        ind.specular        = min(sceneSpec.rgb * gVoxelParams.y, AVER_VOX_MAXRAD);
+        ind.specular        = averRadCeil(sceneSpec.rgb * gVoxelParams.y);
 #if AVER_RD_ABLATE == AVER_RD_ABL_ROUGHSKY
         // ablated: atmosphere march (mode 4 covers only reflection branch).
 #else
@@ -3252,7 +3263,7 @@ void rdDenoisedReflection(float3 wpos, float hitT, inout float3 refl) {
         const float3 c4 = gDenoisedRefl.Load(int3(q, 0)).rgb;
         if (all(isfinite(c4))) { sum += c4 * wk; wsum += wk; }
     }
-    if (wsum > 1e-3) refl = clamp(sum / wsum, 0.0, AVER_VOX_MAXRAD);
+    if (wsum > 1e-3) refl = averRadClamp(sum / wsum);
 }
 
 // Reflection trace/filter split (Settings::rayDrivenReflSplit / AVER_RD_REFL_SPLIT):
@@ -3338,8 +3349,8 @@ void CSRdRefl(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gidx
             rdDenoisedReflection(s.wpos, 0.0, refl);
         } else {
             bool specHit = false;
-            const float3 fresh = clamp(rtReflection(s.wpos, s.N, s.Ng, R, L, float2(pixel) + 0.5, lobeRough,
-                                                    frameIdx, specHit), 0.0, AVER_VOX_MAXRAD);
+            const float3 fresh = averRadClamp(rtReflection(s.wpos, s.N, s.Ng, R, L, float2(pixel) + 0.5, lobeRough,
+                                                       frameIdx, specHit));
             const float hitT = gAverReflHitT;
             gRdReflDnIn[pixel] = float4(fresh, hitT);
             refl = fresh;
@@ -3390,7 +3401,7 @@ void CSRdRefl(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gidx
             // Same ceiling as PSRayDriven (guards unbounded-term incident). clamp(), not min().
             const float3 specRaw = lerp(specHit ? refl : skyR, skyR, skyW);
             // .a is the stage decision: nonzero marks traced pixel. 2.0 vs 1.0 carries pre-clamp ceiling test.
-            gRdReflTex[pixel] = float4(clamp(specRaw, 0.0, AVER_VOX_MAXRAD),
+            gRdReflTex[pixel] = float4(averRadClamp(specRaw),
                                        any(specRaw >= AVER_VOX_MAXRAD) ? 2.0 : 1.0);
         }
     } else {
@@ -3458,7 +3469,7 @@ void CSRdReflFilter(uint3 tid : SV_DispatchThreadID) {
     // Exact same compose as CSRdRefl's non-split tail: repeated verbatim, mirrors R1's control flow.
     const float skyW = 0.0;
     const float3 specRaw = lerp(specHit ? refl : skyR, skyR, skyW);
-    gRdReflTex[pixel] = float4(clamp(specRaw, 0.0, AVER_VOX_MAXRAD),
+    gRdReflTex[pixel] = float4(averRadClamp(specRaw),
                                any(specRaw >= AVER_VOX_MAXRAD) ? 2.0 : 1.0);
 }
 
@@ -3679,7 +3690,7 @@ void PSVoxel(VoxOut i) {
                     + room.rgb * bounceGain;
     // Lamp's own glow: without it, emissive surface injects nothing. After albedo multiply (emission is exiting light).
     radiance += s.emissive;
-    radiance = clamp(radiance, 0.0, AVER_VOX_MAXRAD);
+    radiance = averRadClamp(radiance);
 
     // insideVolume() inclusive of 1.0; conservative raster produces uvw == 1.0 exactly.
     uint3 c = min(uint3(uvw * gVoxelParams.x), (uint)gVoxelParams.x - 1);

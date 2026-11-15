@@ -637,5 +637,5 @@ float3 ptReferencePixel(AverSurface s, float3 wpos, float2 pixel) {
     v.s     = s;
     v.cover = 1.0;   // the primary ray sees the opaque lane; glass is composited over it afterwards
     const float3 l = s.emissive + ptDirect(v, pixel, rng) + ptContinue(v, pixel, rng, ptBounceCount());
-    return all(isfinite(l)) ? min(l, 64.0 * AVER_VOX_MAXRAD) : float3(0.0, 0.0, 0.0);
+    return all(isfinite(l)) ? l * min(1.0, 64.0 * AVER_VOX_MAXRAD / max(max(l.x, max(l.y, l.z)), 1e-6)) : float3(0.0, 0.0, 0.0);
 }

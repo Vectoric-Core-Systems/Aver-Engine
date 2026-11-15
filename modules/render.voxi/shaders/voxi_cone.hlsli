@@ -187,5 +187,5 @@ float3 coneTracedIndirect(float3 wpos, float3 N, out float ao) {
     // injection's own constant rather than a second one to keep in step.
     // A CLAMP IS NOT A LIGHTING MODEL: it stops divergence, not correctness at the ceiling. Fires in
     // nothing shipped -- ElectricDreams, the gate scene, the furnace all measured bit-identical.
-    return min(sum.rgb * gVoxelParams.y, AVER_VOX_MAXRAD);
+    return averRadCeil(sum.rgb * gVoxelParams.y);
 }
