@@ -20,13 +20,16 @@ Every known issue from 0.3.0 to 0.8.0 was rechecked; most had been fixed without
 - Without DXC, the UI and post shaders build again: the FXC fallback resolves `#include`. One startup line now says
   what is off without DXC.
 - Saving a level as legacy `.ocmap` warns when a non-uniform scale is reduced to its X scale.
-- `--refl-test`'s mirror was nearly black (base colour 0.02 on a metal), so the test could not pass; fixed, not yet run.
+- `--refl-test`'s mirror was nearly black (base colour 0.02 on a metal), so the test could not pass. It passes now: the
+  beacon moves 9 of 9 mirror probes under ray tracing (largest 0.58) and none under cone tracing.
 
-Then the ones still open were fixed in code (built and unit-tested, not yet run):
+Then the ones still open were fixed in code, and checked in the editor on 2026-11-16 (the fluid in Play, a live voxel
+resolution change, a group rotate and its undo, an Outliner reorder and its undo):
 
 - **Fluids are particles.** The simulated fluid volume is a CPU position-based fluid with a meshed surface instead of
   a pressurised Jolt shell, so it holds its depth in a tank instead of flattening. `compliance` and `pressure` are
-  still read and ignored; `damping` is viscosity.
+  still read and ignored; `damping` is viscosity. The surface's triangle budget follows the volume's size, not its
+  particle count (a wide pool's surface had holes where the excess was dropped).
 - GI keeps a bright saturated emitter's hue: the radiance ceiling scales the colour instead of clamping each channel.
 - Changing the voxel resolution applies live, with one GI re-bake. `voxi.giSkinnedInterval` (opt-in) lets skinned
   meshes bounce GI, refreshed every N ticks.
@@ -34,6 +37,11 @@ Then the ones still open were fixed in code (built and unit-tested, not yet run)
   reorders siblings (top/bottom of a row), and siblings list in that order.
 - The editor no longer starts with a 45x45 viewport: the layout waits for a real window size and repairs itself.
 - `MaterialGraphTest` compiles every material graph case to SPIR-V as well as DXIL.
+- Two no longer reproduce, measured: the Vulkan cascade shadow map under `--no-rt` (it matches D3D12), and the
+  horizontal glass slab reading near-black at steep angles.
+- `--capture-settled N` captures a streamed level once loading has gone quiet, with its acceleration structures built
+  one a frame, the GI volume rebuilt from black and every per-frame sequence and history restarted. Ray-traced
+  NewSponza captures then agree run to run within one or two steps on about 95% of pixels (`docs/BUGS.md`).
 
 ### Mesh shaders draw meshlets (not yet run on a GPU)
 
