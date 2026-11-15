@@ -3,6 +3,7 @@
 // verbatim; the class itself is declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
+#include "aver/core/JsonText.hpp"
 
 #include "aver/core/Hash.hpp"
 #include "aver/formats/OcAnim.hpp"
@@ -29,26 +30,7 @@ namespace {
 // JSON pieces for the level ABI's replies. The bridge escapes the whole reply once more on the wire,
 // so a client parses twice; these only have to make the result string itself valid JSON.
 std::string jq(const std::string& s) {
-    std::string out = "\"";
-    for (const char c : s) {
-        switch (c) {
-            case '"':  out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n";  break;
-            case '\r': out += "\\r";  break;
-            case '\t': out += "\\t";  break;
-            default:
-                if (static_cast<unsigned char>(c) < 0x20) {
-                    char buf[8];
-                    std::snprintf(buf, sizeof buf, "\\u%04x", static_cast<unsigned>(c) & 0xFFu);
-                    out += buf;
-                } else {
-                    out.push_back(c);
-                }
-        }
-    }
-    out.push_back('"');
-    return out;
+    return aver::jsonQuoted(s);
 }
 
 std::string jb(bool b) { return b ? "true" : "false"; }

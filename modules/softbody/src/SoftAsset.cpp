@@ -1,5 +1,6 @@
 // .ocsoft read/write, the preset resolution, validation and the paint run-length codec.
 #include "aver/softbody/SoftAsset.hpp"
+#include "aver/core/JsonText.hpp"
 
 #include "aver/core/Hash.hpp"
 #include "aver/formats/Json.hpp"
@@ -55,24 +56,7 @@ std::string num(f32 v) {
 std::string unum(u32 v) { return std::to_string(v); }
 
 std::string esc(const std::string& s) {
-    std::string out = "\"";
-    for (const char c : s) {
-        switch (c) {
-            case '"':  out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n"; break;
-            case '\r': out += "\\r"; break;
-            case '\t': out += "\\t"; break;
-            default:
-                if (static_cast<unsigned char>(c) < 0x20) {
-                    char buf[8];
-                    std::snprintf(buf, sizeof buf, "\\u%04x", static_cast<unsigned>(c));
-                    out += buf;
-                } else out += c;
-        }
-    }
-    out += '"';
-    return out;
+    return aver::jsonQuoted(s);
 }
 
 std::string hex64(u64 v) {

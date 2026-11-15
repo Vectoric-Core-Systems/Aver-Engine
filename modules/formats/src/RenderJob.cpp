@@ -1,4 +1,5 @@
 #include "aver/formats/RenderJob.hpp"
+#include "aver/core/JsonText.hpp"
 
 #include "aver/formats/Json.hpp"
 #include "aver/platform/FileSystem.hpp"
@@ -13,25 +14,7 @@ namespace {
 template <class T> T clampTo(T v, T lo, T hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
 std::string jsonString(const std::string& s) {
-    std::string o = "\"";
-    for (const char c : s) {
-        switch (c) {
-        case '"':  o += "\\\""; break;
-        case '\\': o += "\\\\"; break;
-        case '\n': o += "\\n"; break;
-        case '\r': o += "\\r"; break;
-        case '\t': o += "\\t"; break;
-        default:
-            if (static_cast<unsigned char>(c) < 0x20) {
-                char buf[8];
-                std::snprintf(buf, sizeof buf, "\\u%04x", c);
-                o += buf;
-            } else {
-                o += c;
-            }
-        }
-    }
-    return o + "\"";
+    return aver::jsonQuoted(s);
 }
 
 std::string num(f64 v) {

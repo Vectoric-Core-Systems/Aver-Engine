@@ -1,4 +1,5 @@
 #include "aver/core/TraceCapture.hpp"
+#include "aver/core/JsonText.hpp"
 
 #include "aver/core/Log.hpp"
 
@@ -41,19 +42,7 @@ u32 threadTrack() {
 }
 
 void appendEscaped(std::string& out, const char* s) {
-    for (; s && *s; ++s) {
-        const unsigned char c = static_cast<unsigned char>(*s);
-        switch (c) {
-            case '"': out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n"; break;
-            case '\r': out += "\\r"; break;
-            case '\t': out += "\\t"; break;
-            default:
-                if (c < 0x20) { char b[8]; std::snprintf(b, sizeof b, "\\u%04x", c); out += b; }
-                else out += static_cast<char>(c);
-        }
-    }
+    if (s) aver::appendJsonEscaped(out, s);
 }
 
 // Caller holds s.m. Returns whether a capture was armed or running.

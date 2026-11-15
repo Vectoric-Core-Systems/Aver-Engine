@@ -1,4 +1,5 @@
 #include "AssetC.hpp"
+#include "aver/core/JsonText.hpp"
 
 namespace assetc {
 
@@ -31,26 +32,7 @@ std::string safe(const std::string& in, const std::string& fallback) {
 // ---- the JSON-Lines result contract ----
 
 std::string jsonEscape(const std::string& in) {
-    std::string out;
-    out.reserve(in.size() + 8);
-    for (char c : in) {
-        switch (c) {
-            case '"':  out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n";  break;
-            case '\r': out += "\\r";  break;
-            case '\t': out += "\\t";  break;
-            default:
-                if (static_cast<unsigned char>(c) < 0x20) {
-                    char buf[8];
-                    std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c));
-                    out += buf;
-                } else {
-                    out.push_back(c);
-                }
-        }
-    }
-    return out;
+    return aver::jsonEscaped(in);
 }
 
 void emit(const std::string& json) {

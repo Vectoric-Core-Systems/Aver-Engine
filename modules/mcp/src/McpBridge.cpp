@@ -1,5 +1,6 @@
 // The MCP control channel: the line protocol parser, the loopback listener, and the frame pump.
 #include "aver/mcp/McpBridge.hpp"
+#include "aver/core/JsonText.hpp"
 
 #include "aver/core/Log.hpp"
 
@@ -153,26 +154,7 @@ u32 keyCodeFor(const std::string& name) {
 
 // Escapes a value being placed inside a JSON string.
 std::string jsonEscape(const std::string& in) {
-    std::string out;
-    out.reserve(in.size() + 8);
-    for (const char c : in) {
-        switch (c) {
-            case '"':  out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n";  break;
-            case '\r': out += "\\r";  break;
-            case '\t': out += "\\t";  break;
-            default:
-                if (static_cast<unsigned char>(c) < 0x20) {
-                    char buf[8];
-                    std::snprintf(buf, sizeof buf, "\\u%04x", static_cast<unsigned>(c) & 0xFFu);
-                    out += buf;
-                } else {
-                    out.push_back(c);
-                }
-        }
-    }
-    return out;
+    return aver::jsonEscaped(in);
 }
 
 // The button index for a button name. Defaults to left.

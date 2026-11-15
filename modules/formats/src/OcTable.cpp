@@ -1,5 +1,6 @@
 // Data-table reader and writer (.csv, table-shaped .json). See OcTable.hpp and docs/DATA_TABLES.md.
 #include "aver/formats/OcTable.hpp"
+#include "aver/core/JsonText.hpp"
 #include "aver/core/CharConv.hpp"   // floating from_chars where libc++ has none
 #include "aver/formats/Json.hpp"
 #include "aver/formats/detail/Csv.hpp"
@@ -85,26 +86,7 @@ std::string numText(f64 v) {
 }
 
 std::string jsonQuote(std::string_view s) {
-    std::string o = "\"";
-    for (const char c : s) {
-        switch (c) {
-            case '"':  o += "\\\""; break;
-            case '\\': o += "\\\\"; break;
-            case '\n': o += "\\n"; break;
-            case '\r': o += "\\r"; break;
-            case '\t': o += "\\t"; break;
-            default:
-                if (static_cast<u8>(c) < 0x20) {
-                    char b[8];
-                    std::snprintf(b, sizeof b, "\\u%04x", static_cast<unsigned>(static_cast<u8>(c)));
-                    o += b;
-                } else {
-                    o.push_back(c);
-                }
-        }
-    }
-    o.push_back('"');
-    return o;
+    return aver::jsonQuoted(s);
 }
 
 // Row-name uniqueness is ASCII case-insensitive (UE FName parity).

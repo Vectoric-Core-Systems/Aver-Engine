@@ -3,6 +3,7 @@
 #pragma once
 
 #include "aver/formats/Json.hpp"
+#include "aver/core/JsonText.hpp"
 #include "aver/platform/FileSystem.hpp"
 
 #include <cstdio>
@@ -14,25 +15,7 @@
 namespace aver::anim::ajson {
 
 inline std::string esc(std::string_view s) {
-    std::string o = "\"";
-    for (const char c : s) {
-        switch (c) {
-            case '"':  o += "\\\""; break;
-            case '\\': o += "\\\\"; break;
-            case '\n': o += "\\n"; break;
-            case '\r': o += "\\r"; break;
-            case '\t': o += "\\t"; break;
-            default:
-                if (static_cast<unsigned char>(c) < 0x20) {
-                    char b[8];
-                    std::snprintf(b, sizeof b, "\\u%04x", static_cast<unsigned>(static_cast<unsigned char>(c)));
-                    o += b;
-                } else {
-                    o += c;
-                }
-        }
-    }
-    return o + "\"";
+    return aver::jsonQuoted(s);
 }
 
 inline std::string num(f32 v) {
