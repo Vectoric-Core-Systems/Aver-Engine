@@ -6,6 +6,7 @@
 #include "aver/core/Log.hpp"
 // QualityLadder.hpp: tier derivation logic. RenderSettingsResolver.hpp: resolve() step in setSettings.
 #include "aver/voxi/QualityLadder.hpp"
+#include "aver/voxi/GiVoxelPolicy.hpp"
 #include "aver/voxi/RenderSettingsResolver.hpp"
 
 #include <algorithm>
@@ -116,7 +117,9 @@ void Renderer::setSettings(const Settings& s) {
     if (n.pathTracing != settings_.pathTracing && n.ptBounces == settings_.ptBounces)
         n.ptBounces = ptBouncesForQuality(n.pathTracing);
 
-    n.voxelResolution = std::clamp(n.voxelResolution, 32u, 512u);
+    n.voxelResolution = clampVoxelResolution(n.voxelResolution);
+    // 0 keeps skinned draws out of the GI volume; any other value is floored so a refresh is never every other tick.
+    if (n.giSkinnedInterval != 0) n.giSkinnedInterval = std::clamp(n.giSkinnedInterval, kMinGiSkinnedInterval, 100000u);
     // At least the axial cone, or the gather returns nothing.
     n.giCones         = std::clamp(n.giCones, 1u, 16u);
     // 1 is per-pixel (no-op); 16 is well past usable range.

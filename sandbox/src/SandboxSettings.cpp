@@ -1713,10 +1713,10 @@ void SandboxApp::renderPageGi(voxi::Renderer& vx, voxi::Settings& s, const voxi:
                            "Changing Quality above moves this to match its rung (Off/Low=64,\n"
                            "Medium=128, High=256, Epic=512) unless you pick a value here\n"
                            "yourself, which then overrides the tier's default.");
-    // Grid built at init only; change recorded but reaches GPU on reload.
+    // Applied live by VoxiRenderer::beginScene (waits for the GPU, rebuilds the volume); this shows only until the next frame.
     if (s.voxelResolution != voxiRenderer_.voxelResolutionBuilt())
-        ImGui::TextWrapped("Takes effect when the project is reloaded; the volume built for "
-                           "this session is still %u^3.", voxiRenderer_.voxelResolutionBuilt());
+        ImGui::TextWrapped("Applies live at the start of the next frame: the GI volume is rebuilt at "
+                           "the new size (a short hitch). Running at %u^3 until then.", voxiRenderer_.voxelResolutionBuilt());
     if (ImGui::SliderFloat("GI intensity", &s.giIntensity, 0.0f, 4.0f)) changed = true;
     if (ImGui::SliderFloat("GI distance", &s.giMaxDistance, 10.0f, 20000.0f, "%.0f")) changed = true;
     // Saved with the LEVEL (its GIVOLUME record), not the project: an edit here marks the level unsaved.

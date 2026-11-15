@@ -402,6 +402,12 @@ struct Settings {
     u32 shadowCascadeSize = 2048;
     // The width of the PCF kernel in shadow texels. 1 is the fixed 3x3 filter of old; 0 collapses it to a single hard comparison; up to 4.
     f32 shadowFilterScale = 1.0f;
+
+    // ---- skinned meshes in the GI volume ----
+    // Compute-skinned draws bounce no GI by default: the rebuild gate cannot see a pose change, so a baked pose would freeze.
+    // N > 0 voxelises them and re-bakes the volume every N GI ticks (floored at 30) while one is inside it, so the bounce
+    // follows the animation at that cadence. Each refresh is a full rebuild plus its convergence ticks; 0 keeps them out.
+    u32 giSkinnedInterval = 0;
 };
 
 // The denoiser as one value: 0 off, 1 AMD FidelityFX, 2 NRD2. Setting 0 keeps the kind, so switching

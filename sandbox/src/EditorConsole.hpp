@@ -416,9 +416,13 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
 
     // ---- dial fields, each derived from a tier above unless set explicitly -----------------
     t.push_back({"voxi.voxelResolution", VarType::U32, false,
-        "Cubic voxel grid edge (engine clamps to [32,512]) -- NOT live: the volume is built at project load, so a change takes a reload",
+        "Cubic voxel grid edge (engine clamps to [32,512]). Applies live at the start of the next frame: the GPU is drained, the volume is rebuilt at the new edge and GI re-bakes from scratch (a hitch). If the new size cannot be allocated the running volume stays",
         []{ return vU32(Renderer::get().settings().voxelResolution); },
         [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->voxelResolution = n; }); }});
+    t.push_back({"voxi.giSkinnedInterval", VarType::U32, false,
+        "0 (default) keeps compute-skinned characters out of the GI volume: they bounce no indirect light. N > 0 voxelises them and re-bakes the volume every N GI ticks (floored at 30) while one is inside it, so the bounce follows the animation at that cadence; each refresh is a full rebuild plus its convergence ticks. Not measured on a GPU yet",
+        []{ return vU32(Renderer::get().settings().giSkinnedInterval); },
+        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->giSkinnedInterval = n; }); }});
     t.push_back({"voxi.giCones", VarType::U32, false,
         "Diffuse gather cone count -- the one GI setting that actually costs anything (engine clamps to [1,16])",
         []{ return vU32(Renderer::get().settings().giCones); },

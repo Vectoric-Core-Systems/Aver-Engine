@@ -1240,6 +1240,12 @@ constexpr u64 mixMeshId(u64 x) {
 // Starts a new draw list; Voxi runs a frame behind.
 // Clears submit()'s per-mesh cache; bounds staleness to at most one frame.
 void VoxiRenderer::beginScene() {
+    // voxi.voxelResolution applies live: here, at the top of the frame, before any pass records, with the GPU drained.
+    if (giReady_ && res_) {
+        const u32 want = clampVoxelResolution(settings_.voxelResolution);
+        if (voxelResolutionRebuildDue(want, voxelResBuilt_, voxelResFailed_)) applyVoxelResolution(want);
+        else if (want == voxelResBuilt_) voxelResFailed_ = 0;
+    }
     drawsPrev_.swap(draws_);
     ++drawLanesToken_;
     draws_.clear();
@@ -2736,7 +2742,7 @@ void VoxiRenderer::carryPrevTransform(u64 groupKey, const f32* world, f32* outPr
 bool VoxiRenderer::giVoxelisedDraw(const Draw& d) const {
     if (d.translucent) return false;
     if (d.movable) return false;   // Moving in Play: rebuilds volume every frame it moves.
-    if (dev_ && dev_->meshVertexBuffer(d.mesh)) return false;
+    if (dev_ && dev_->meshVertexBuffer(d.mesh) && !giSkinnedVoxelised()) return false;
     if (d.boundsRadius < 0.0f) return true;   // no bounds stated: assume it counts
     const Vec3 volCentre{center_[0], center_[1], center_[2]};
     const f32 volRadius = (extent_ > 1.0f ? extent_ : 1.0f) * 1.7320508f;
@@ -2751,16 +2757,19 @@ u64 VoxiRenderer::giDrawsKey() const {
     u64 key = 0;
     u64 counted = 0;
     DrawMaterialMemo matMemo{};
+    const u64 skinBucket = giSkinBucket();
     for (usize di = 0; di < drawsPrev_.size(); ++di) {
         const Draw& d = drawsPrev_[di];
-        // Skip translucent, movable, skinned, out-of-volume (see giVoxelisedDraw).
+        // Skip translucent, movable, skinned (unless giSkinnedInterval), out-of-volume (see giVoxelisedDraw).
         if (!giVoxelisedDraw(d)) continue;
         DrawLanes* lanes = drawLanes(di);
         u64 h = 1469598103934665603ull;
         // depthMesh, not mesh: voxelizePass draws depthMesh.
         h ^= static_cast<u64>(d.depthMesh);
         h *= 1099511628211ull;
-        hashWorldInto(h, d, lanes);
+        // A posed mesh's key moves once per refresh window, not with its transform or pose (neither is visible here).
+        if (skinBucket && dev_ && dev_->meshVertexBuffer(d.mesh)) { h ^= skinBucket; h *= 1099511628211ull; }
+        else hashWorldInto(h, d, lanes);
         // Material lands in baked radiance (PSVoxel reads it).
         hashDrawMaterialInto(h, d, matMemo, false, lanes);
         // Finalise before adding (splitmix64's avalanche).
@@ -2785,6 +2794,7 @@ void VoxiRenderer::giDrawsSubKeys(u64& count, u64& mesh, u64& world, u64& mat) c
         h ^= h >> 33; return h;
     };
     DrawMaterialMemo matMemo{};
+    const u64 skinBucket = giSkinBucket();
     for (usize di = 0; di < drawsPrev_.size(); ++di) {
         const Draw& d = drawsPrev_[di];
         if (!giVoxelisedDraw(d)) continue;
@@ -2792,7 +2802,8 @@ void VoxiRenderer::giDrawsSubKeys(u64& count, u64& mesh, u64& world, u64& mat) c
         ++count;
         mesh += mix(1469598103934665603ull ^ static_cast<u64>(d.depthMesh));
         u64 w = 1469598103934665603ull;
-        hashWorldInto(w, d, lanes);
+        if (skinBucket && dev_ && dev_->meshVertexBuffer(d.mesh)) { w ^= skinBucket; w *= 1099511628211ull; }   // as giDrawsKey
+        else hashWorldInto(w, d, lanes);
         // Mesh folded into world axis too: without it, swapped transforms read unchanged.
         w ^= static_cast<u64>(d.depthMesh); w *= 1099511628211ull;
         world += mix(w);
@@ -2863,7 +2874,7 @@ bool VoxiRenderer::giSnapshotUnchanged() const {
             std::vector<rhi::MeshHandle> now2;
             for (const Draw& d : drawsPrev_) {
                 if (d.translucent || d.movable) continue;
-                if (dev_ && dev_->meshVertexBuffer(d.mesh)) continue;
+                if (dev_ && dev_->meshVertexBuffer(d.mesh) && !giSkinnedVoxelised()) continue;
                 now2.push_back(d.depthMesh);
             }
             std::sort(now2.begin(), now2.end());
@@ -2888,7 +2899,7 @@ bool VoxiRenderer::giSnapshotUnchanged() const {
                 if (!found) { why += "=not-submitted "; continue; }
                 if (found->translucent) { why += "=translucent "; continue; }
                 if (found->movable) { why += "=movable "; continue; }
-                if (dev_ && dev_->meshVertexBuffer(found->mesh)) { why += "=skinned "; continue; }
+                if (dev_ && dev_->meshVertexBuffer(found->mesh) && !giSkinnedVoxelised()) { why += "=skinned "; continue; }
                 if (found->boundsRadius >= 0.0f) {
                     const Vec3 volCentre{center_[0], center_[1], center_[2]};
                     const f32 volRadius = (extent_ > 1.0f ? extent_ : 1.0f) * 1.7320508f;
@@ -5586,7 +5597,7 @@ u64 VoxiRenderer::giBuildTriangles(usize begin, usize end, u64 stopAt) const {
     end = std::min(end, drawsPrev_.size());
     for (usize i = begin; i < end && tris <= stopAt; ++i) {
         const Draw& d = drawsPrev_[i];
-        if (d.translucent || d.movable || !dev_ || dev_->meshVertexBuffer(d.mesh)) continue;
+        if (d.translucent || d.movable || !dev_ || (dev_->meshVertexBuffer(d.mesh) && !giSkinnedVoxelised())) continue;
         u32 indices = 0;
         if (dev_->meshGeometry(d.depthMesh, nullptr, nullptr, nullptr, &indices)) tris += indices / 3u;
     }
@@ -5671,7 +5682,11 @@ void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx, usize begin, usize end
         const f32 origin[3] = {center_[0] - extent_, center_[1] - extent_, center_[2] - extent_};
         for (const Draw& d : drawsPrev_) {
             if (d.translucent) continue;
-            if (dev_ && dev_->meshVertexBuffer(d.mesh)) continue;
+            if (dev_ && dev_->meshVertexBuffer(d.mesh)) {
+                // A posed mesh outgrows its bind-pose bounds: when it is injected the dispatch box is the whole grid.
+                if (giSkinnedVoxelised() && giVoxelisedDraw(d)) anyUnbounded = true;
+                continue;
+            }
             if (!giVoxelisedDraw(d)) continue;
 
             f32 lmin[3], lmax[3];
@@ -5749,7 +5764,8 @@ void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx, usize begin, usize end
         const Draw& d = drawsPrev_[di];
         // Translucent draws excluded (depth-only pass) -- see shadowPass's note on the same skip.
         if (d.translucent) continue;
-        // A COMPUTE-SKINNED MESH IS EXCLUDED, DELIBERATELY -- a trade, not a fix. giDrawsKey hashes
+        // A COMPUTE-SKINNED MESH IS EXCLUDED unless Settings::giSkinnedInterval asks for it (then giDrawsKey moves once per
+        // interval for it, so the pose is re-baked at that cadence). By default a trade, not a fix. giDrawsKey hashes
         // mesh/transform/material, never the vertex buffer a skinning dispatch rewrites every frame,
         // so once a character's TRANSFORM settles the gate reports "unchanged" and its indirect-light
         // contribution freezes at whatever pose the last rebuild saw. Measured on a real rig: 2
@@ -5761,7 +5777,7 @@ void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx, usize begin, usize end
         // them). So the interim state is absence, not a silent freeze:
         // a skinned character bounces no indirect light (matches PtSceneView::submitDraw). Real fix
         // is partial revoxelisation, which voxelizePass doesn't support today.
-        if (dev_ && dev_->meshVertexBuffer(d.mesh)) { ++voxelSkinned; continue; }
+        if (dev_ && dev_->meshVertexBuffer(d.mesh) && !giSkinnedVoxelised()) { ++voxelSkinned; continue; }
         // Counted apart from the bounds cull for the same reason skinned is: absence, not a cull.
         if (d.movable) { ++voxelMovable; continue; }
         // The bounds half of giVoxelisedDraw, kept inline only for the census counters below -- the
@@ -8395,20 +8411,105 @@ bool VoxiRenderer::createVoxelVolume(u32 resolution) {
     res_->setUav(resolveBindings_, 1, voxelAccumTex_, 0);
 
     // One set per mip filter step: single-mip source view makes reading level m-1 while writing level m legal.
-    mipBindings_.reserve(voxelMips_ ? voxelMips_ - 1 : 0);
-    for (u32 m = 1; m < voxelMips_; ++m) {
+    return createMipBindings(voxelTex_, voxelMips_, mipBindings_);
+}
+
+bool VoxiRenderer::createMipBindings(rhi::TextureHandle tex, u32 mips, std::vector<rhi::BindingSetHandle>& out) {
+    std::vector<rhi::BindingSetHandle> made;
+    made.reserve(mips ? mips - 1 : 0);
+    for (u32 m = 1; m < mips; ++m) {
         rhi::BindingSetDesc md;
         md.srvCount = 1;
         md.uavCount = 1;
         md.srvKinds[0] = rhi::SlotKind::Texture3D;
         md.uavKinds[0] = rhi::SlotKind::Texture3D;
         const rhi::BindingSetHandle s = res_->createBindingSet(md);
-        if (!s) { AVER_ERROR("[Voxi] mip binding set {} could not be created", m); return false; }
-        res_->setSrv(s, 0, voxelTex_, m - 1);
-        res_->setUav(s, 0, voxelTex_, m);
-        mipBindings_.push_back(s);
+        if (!s) {
+            AVER_ERROR("[Voxi] mip binding set {} could not be created", m);
+            for (rhi::BindingSetHandle h : made) res_->destroyBindingSet(h);
+            return false;
+        }
+        res_->setSrv(s, 0, tex, m - 1);
+        res_->setUav(s, 0, tex, m);
+        made.push_back(s);
     }
+    out.insert(out.end(), made.begin(), made.end());
     return true;
+}
+
+// Swaps the radiance volume and injection accumulator for a new edge and repoints every binding set at them.
+// Called from beginScene() only: nothing of this frame is recorded yet, and waitIdle() retires every submitted frame, so no
+// descriptor still names what is replaced. Any failure keeps the running volume and is not retried until the request changes.
+void VoxiRenderer::applyVoxelResolution(u32 resolution) {
+    const u32 from = voxelResBuilt_;
+    res_->waitIdle();
+
+    rhi::TextureDesc d;
+    d.dim    = rhi::TextureDim::Tex3D;
+    d.width  = resolution;
+    d.height = resolution;
+    d.depth  = resolution;
+    d.mips   = 0;
+    d.format = rhi::Format::RGBA16F;
+    d.bind   = rhi::ResourceBind::ShaderResource | rhi::ResourceBind::UnorderedAccess;
+    d.initialState = rhi::ResourceState::ShaderResource;
+    d.debugName    = "Voxi radiance volume";
+    const rhi::TextureHandle newTex = res_->createTexture(d);
+    rhi::TextureDesc got{};
+    if (!newTex || !res_->textureInfo(newTex, got)) {
+        AVER_ERROR("[Voxi] voxi.voxelResolution {}^3 could not be allocated; the {}^3 volume keeps running", resolution, from);
+        if (newTex) res_->destroyTexture(newTex);
+        voxelResFailed_ = resolution;
+        return;
+    }
+    // createInjectionAccumulator assigns voxelAccumTex_ even when it fails, so the running one is held aside.
+    const rhi::TextureHandle oldTex = voxelTex_, oldAccum = voxelAccumTex_;
+    if (!createInjectionAccumulator(resolution)) {
+        voxelAccumTex_ = oldAccum;
+        res_->destroyTexture(newTex);
+        voxelResFailed_ = resolution;
+        return;
+    }
+    std::vector<rhi::BindingSetHandle> newMips;
+    if (!createMipBindings(newTex, got.mips, newMips)) {
+        res_->destroyTexture(voxelAccumTex_);
+        voxelAccumTex_ = oldAccum;
+        res_->destroyTexture(newTex);
+        voxelResFailed_ = resolution;
+        return;
+    }
+
+    voxelTex_       = newTex;
+    voxelMips_      = got.mips;
+    voxelResBuilt_  = resolution;
+    voxelResFailed_ = 0;
+    ++voxelGen_;
+    res_->setSrv(bindings_, 0, voxelTex_, rhi::kAllMips);
+    res_->setUav(bindings_, 0, voxelTex_, 0);
+    res_->setUav(bindings_, 1, voxelAccumTex_, 0);
+    res_->setUav(clearBindings_, 0, voxelTex_, 0);
+    res_->setUav(clearBindings_, 1, voxelAccumTex_, 0);
+    res_->setUav(resolveBindings_, 0, voxelTex_, 0);
+    res_->setUav(resolveBindings_, 1, voxelAccumTex_, 0);
+    for (rhi::BindingSetHandle s : mipBindings_) if (s) res_->destroyBindingSet(s);
+    mipBindings_.swap(newMips);
+    if (oldTex)   res_->destroyTexture(oldTex);
+    if (oldAccum) res_->destroyTexture(oldAccum);
+
+    // A full GI rebuild at the new edge: the old bake, its staging, cache probe and dispatch box all described another grid.
+    giAccumWanted_ = false;
+    giQuietTicks_ = 0;
+    giBuild_ = GiBuild{};
+    giSnapValid_ = false;
+    giBoxPrevValid_ = false;
+    giDrawsSettle_.reset();
+    giCacheDumpCountdown_ = 0;
+    giCacheFreeBuffers();
+    giCacheMipOffsets_.clear();
+    giCacheSettlePending_ = false;
+    giCacheTried_ = false;
+    AVER_INFO("[Voxi] GI voxel volume {}^3 -> {}^3 (voxi.voxelResolution applied live; the volume rebuilds from scratch)",
+              from, resolution);
 }
 
 // Creates or releases airVisTex_ against airVisWanted(). Idempotent: returns true once existence matches.

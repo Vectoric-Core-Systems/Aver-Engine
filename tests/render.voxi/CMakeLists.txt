@@ -87,6 +87,13 @@ target_link_libraries(GiDrawsSettleTest PRIVATE Aver.Core)
 target_include_directories(GiDrawsSettleTest PRIVATE ${CMAKE_SOURCE_DIR}/modules/render.voxi/include)
 set_target_properties(GiDrawsSettleTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# GiVoxelPolicyTest -- the live voxel-resolution rebuild's clamp/due rule and the skinned-draw refresh bucket
+# (aver/voxi/GiVoxelPolicy.hpp). Header-only over Aver.Core, like GiDrawsSettleTest.
+add_executable(GiVoxelPolicyTest src/GiVoxelPolicyTest.cpp)
+target_link_libraries(GiVoxelPolicyTest PRIVATE Aver.Core)
+target_include_directories(GiVoxelPolicyTest PRIVATE ${CMAKE_SOURCE_DIR}/modules/render.voxi/include)
+set_target_properties(GiVoxelPolicyTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # GiVisibilityTest -- U1's shared bit definitions and reconstruction arithmetic
 # (aver/voxi/GiVisibility.hpp): the giRestirVisibility mode/half-res-pair packing gAmbientParams.w
 # carries, the tracedPixel phase schedule, and the reconstruction weight giVisReconstruct sums per

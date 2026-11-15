@@ -14,6 +14,7 @@
 #include "aver/voxi/RasterLights.hpp"   // R2: rl::Result (the frame's raster local-light list)
 #include "aver/voxi/GiDispatchBounds.hpp"   // VoxelBox/GiDispatchConstants
 #include "aver/voxi/GiDrawsSettle.hpp"
+#include "aver/voxi/GiVoxelPolicy.hpp"
 #include "aver/render/denoise/Denoiser.hpp"
 #include "aver/render/denoise/Nrd2.hpp"
 #include "aver/render/denoise/Nrd2Capture.hpp"
@@ -276,6 +277,13 @@ public:
 private:
     bool createShadowResources();
     bool createVoxelVolume(u32 resolution);
+    // One single-mip binding set per filter step over `tex` (mips levels), appended to `out`; all or nothing.
+    bool createMipBindings(rhi::TextureHandle tex, u32 mips, std::vector<rhi::BindingSetHandle>& out);
+    // Swaps the radiance volume and accumulator for a new edge and rebinds everything that names them. Only from beginScene().
+    void applyVoxelResolution(u32 resolution);
+    // Compute-skinned draws are voxelised (Settings::giSkinnedInterval > 0); the pose bucket they hash into giDrawsKey.
+    bool giSkinnedVoxelised() const { return settings_.giSkinnedInterval != 0; }
+    u64  giSkinBucket() const { return aver::voxi::giSkinBucket(rtFrameIndex_, settings_.giSkinnedInterval); }
     bool createInjectionAccumulator(u32 resolution);
     void manageInjectionAccumulator(rhi::IRenderContext& ctx);
     bool createPipelines();
@@ -1737,6 +1745,8 @@ private:
     u32  giConvergeTicks_ = 0;
 
     u32  voxelMips_ = 0, voxelResBuilt_ = 0;
+    // A resolution applyVoxelResolution could not allocate: not retried until the setting changes again.
+    u32  voxelResFailed_ = 0;
     bool giReady_ = false, rtSupported_ = false, rtActive_ = false, debugView_ = false;
     // See setGiPoisonView. Independent of debugView_.
     bool giPoisonView_ = false;
