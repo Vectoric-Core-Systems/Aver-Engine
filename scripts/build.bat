@@ -14,10 +14,17 @@ REM whichever was measured last.
 setlocal
 if not defined AVER_BUILD_CONFIG set "AVER_BUILD_CONFIG=Debug"
 if not defined AVER_BUILD_DIR    set "AVER_BUILD_DIR=build"
-set "VS=C:\Program Files\Microsoft Visual Studio\18\Community"
+REM Visual Studio: AVER_VS if set, else the newest install with the C++ tools that vswhere finds (any version or edition).
+set "VS=%AVER_VS%"
+set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+if not defined VS if exist "%VSWHERE%" for /f "usebackq delims=" %%i in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VS=%%i"
+if not defined VS (echo [build] no Visual Studio with the C++ tools found; set AVER_VS to its folder & exit /b 3)
 call "%VS%\VC\Auxiliary\Build\vcvars64.bat" >nul || (echo [build] vcvars64 failed & exit /b 1)
+REM VS's own CMake and Ninja when installed, else whatever is on PATH.
 set "CMAKE=%VS%\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
 set "NINJA=%VS%\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe"
+if not exist "%CMAKE%" set "CMAKE=cmake"
+if not exist "%NINJA%" set "NINJA=ninja"
 set "ROOT=%~dp0.."
 pushd "%ROOT%"
 echo [build] %AVER_BUILD_CONFIG% -^> %AVER_BUILD_DIR%

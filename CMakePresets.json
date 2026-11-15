@@ -8,10 +8,7 @@
       "description": "Requires a VS Developer environment (run scripts/build.bat which calls vcvars64).",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_MAKE_PROGRAM": "C:/Program Files/Microsoft Visual Studio/18/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja/ninja.exe"
-      }
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
     },
     {
       "name": "msvc-ninja-release",

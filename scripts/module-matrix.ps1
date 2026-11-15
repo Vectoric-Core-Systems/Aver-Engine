@@ -222,9 +222,17 @@ if (-not $cmake) { Write-Host "[matrix] Could not locate cmake.exe." -Foreground
 # Given the header above calls this matrix "the only thing that can answer" whether the engine still
 # builds with a module off, a check that silently cannot start is a check nobody runs.
 if (-not $env:INCLUDE) {
-    $vcvars = "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat"
-    if (-not (Test-Path $vcvars)) {
-        Write-Host "[matrix] No MSVC environment (INCLUDE is unset) and no vcvars64.bat at $vcvars. Run this from a Developer prompt, or correct the path here." -ForegroundColor Red; exit 3  # ExitCode.Environment
+    # The newest Visual Studio with the C++ tools (any version or edition), as build.bat finds it.
+    $vcvars = ''
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+    if (Test-Path -LiteralPath $vswhere) {
+        $vs = (Invoke-Native $vswhere @('-latest', '-products', '*', '-requires',
+                'Microsoft.VisualStudio.Component.VC.Tools.x86.x64', '-property', 'installationPath')).Output |
+              Where-Object { $_ -is [string] -and $_ } | Select-Object -First 1
+        if ($vs) { $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat' }
+    }
+    if (-not $vcvars -or -not (Test-Path -LiteralPath $vcvars)) {
+        Write-Host "[matrix] No MSVC environment (INCLUDE is unset) and vswhere found no Visual Studio with the C++ tools. Run this from a Developer prompt." -ForegroundColor Red; exit 3  # ExitCode.Environment
     }
     # Import what vcvars sets rather than re-launching this script under cmd: one process, and the
     # variables are then visible to ninja too, which needs them just as much as the configure does.

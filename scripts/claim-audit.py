@@ -14,12 +14,28 @@ result is CAUGHT, 1 when SURVIVED, 2 on a setup error (no match, build failure).
 import argparse, os, subprocess, sys
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-VCVARS = r"C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat"
+
+
+def find_vcvars():
+    # The newest Visual Studio with C++ tools, as vswhere reports it; "" when there is none.
+    vswhere = os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+                           "Microsoft Visual Studio", "Installer", "vswhere.exe")
+    if not os.path.exists(vswhere):
+        return ""
+    r = subprocess.run([vswhere, "-latest", "-products", "*", "-requires",
+                        "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath"],
+                       capture_output=True, text=True)
+    vs = r.stdout.strip().splitlines()[0] if r.stdout.strip() else ""
+    path = os.path.join(vs, "VC", "Auxiliary", "Build", "vcvars64.bat") if vs else ""
+    return path if path and os.path.exists(path) else ""
+
+
+VCVARS = find_vcvars()
 
 
 def run(cmd, label):
     print(f"[claim-audit] {label}: {cmd}", flush=True)
-    full = f'call "{VCVARS}" >nul 2>&1 && {cmd}' if os.path.exists(VCVARS) else cmd
+    full = f'call "{VCVARS}" >nul 2>&1 && {cmd}' if VCVARS else cmd
     r = subprocess.run(full, shell=True, cwd=ROOT, capture_output=True, text=True)
     tail = (r.stdout + r.stderr).strip().splitlines()[-6:]
     for line in tail:
