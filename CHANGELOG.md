@@ -41,7 +41,7 @@ resolution change, a group rotate and its undo, an Outliner reorder and its undo
   horizontal glass slab reading near-black at steep angles.
 - `--capture-settled N` captures a streamed level once loading has gone quiet, with its acceleration structures built
   one a frame, the GI volume rebuilt from black and every per-frame sequence and history restarted. Ray-traced
-  NewSponza captures then agree run to run within one or two steps on about 95% of pixels (`docs/BUGS.md`).
+  NewSponza captures then match run to run on about 95% of pixels, and the rest are almost all one or two steps off (`docs/BUGS.md`).
 
 ### Mesh shaders draw meshlets (not yet run on a GPU)
 
