@@ -4,7 +4,7 @@
     python scripts/shots.py diff <dir-a> <dir-b> [--threshold 8] [--block 8] [--min-island 4] [--ignore x0,y0,x1,y1]
 
 capture: one headed, bounded editor run per shot. A shot list line is `name | args...` (args as on the command
-line, e.g. a level path and flags); '#' starts a comment. Without --list, the default list below is used.
+line, e.g. a level path and flags); '#' starts a comment. --list is required.
 Writes <name>.png and <name>.log (stdout + stderr); flags a device loss.
 
 diff: for every <name>.png in both dirs, prints mean / p99 / max per-pixel delta (0-255, mean of RGB), the share
@@ -16,12 +16,6 @@ Needs Pillow and numpy.
 """
 import argparse, os, subprocess, sys
 
-DEFAULT_SHOTS = [
-    "sponza_night | ../../../Aver Projects/PTTest/Content/Maps/NewSponza_Night.ocworld --render-scale 0.5 "
-    "--frame-interp 0 --set post.autoExposure 0 --denoiser 2",
-]
-
-
 def die(code, msg):
     print(msg, file=sys.stderr)
     sys.exit(code)  # code per core/ErrorCodes.hpp ExitCode: 1 failed, 2 usage, 3 environment
@@ -29,7 +23,9 @@ def die(code, msg):
 
 def parse_list(path):
     shots = []
-    lines = open(path, encoding="utf-8").read().splitlines() if path else DEFAULT_SHOTS
+    if not path:
+        die(2, "capture needs --list <shots.txt>: one `name | level path and flags` per line")
+    lines = open(path, encoding="utf-8").read().splitlines()
     for line in lines:
         line = line.split("#", 1)[0].strip()
         if not line:

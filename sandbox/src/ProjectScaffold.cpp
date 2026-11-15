@@ -185,11 +185,8 @@ std::string startLevelText(const std::string& name) {
     s += "# The level a new project opens. Everything here is editable: these are starting values,\n";
     s += "# not engine defaults, and changing them changes only this level.\n";
     s += "NAME " + name + "\n\n";
-    // THE SKY A NEW PROJECT OPENS WITH IS SKYFORGE'S, deliberately and value for value. SkyForge is
-    // the project this engine is actually developed against, so it is the sky that has been looked
-    // at every day and tuned by eye; a template that differed from it meant the first thing anyone
-    // saw was NOT the thing the engine was tuned to produce. Keep these in step with
-    // SkyForge/Content/Maps/Default.ocworld if that one is ever retuned.
+    // The engine's reference daylight: the sky the renderer is tuned and checked against, so the first
+    // thing anyone sees is what the engine was tuned to produce.
     //
     // AUTHORED IN DEGREES, which is the whole point of a derived sky: elevation is the only input
     // that matters and a direction vector invites getting its sign wrong. 59.5 degrees is high
@@ -202,10 +199,7 @@ std::string startLevelText(const std::string& name) {
     // PHYSICAL sky, the engine's real model: Rayleigh, Cornette-Shanks Mie, an ozone tent and a
     // Chapman-function transmittance.
     //
-    // NO OVERRIDES: the same "SkyForge is the tuned target" reasoning as the paragraph above, just
-    // applied to the engine's OWN AtmosphereProfile defaults (Atmosphere.hpp) instead of a per-level
-    // one. SkyForge's own Default.ocworld carries no SKY overrides either, so the two are identical
-    // by construction, not by being kept in step by hand.
+    // NO OVERRIDES: the engine's own AtmosphereProfile defaults (Atmosphere.hpp) are the tuned target.
     //
     // MEASURED, NOT DESCRIBED, AGAIN: an earlier version of this comment described the defaults
     // BEFORE this session's atmosphere pass, and called near-white at the zenith "the tuned value" --
@@ -215,7 +209,7 @@ std::string startLevelText(const std::string& name) {
     // that file). Re-measured after: sky high (74,92,114), horizon (178,200,204) -- genuinely blue at
     // both, not a few codes apart from white.
     s += "SKY model physical\n";
-    // 2e-5 per centimetre, matching SkyForge. Thin enough to read as air rather than as weather,
+    // 2e-5 per centimetre. Thin enough to read as air rather than as weather,
     // and the cooler blue-grey tint belongs with an unhazed sky -- the old 0.62 0.7 0.82 was
     // compensating for the Mie warmth that is now gone.
     s += "FOG exp density 0.00002 color 0.7 0.78 0.88\n\n";

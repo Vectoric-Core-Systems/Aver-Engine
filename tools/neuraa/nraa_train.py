@@ -7,6 +7,8 @@
    the WEIGHTS only (parameter space): no image loss is back-propagated, and model selection uses the
    held-out weight error. Image error judges the finished network only (design doc section 7).
 usage: nraa_train.py <capture root> <out weights> [--train dir,dir] [--val dir]
+  The scene folders under the root that hold *.bin captures; without --val the last one (by name) is held out,
+  without --train the rest train.
 """
 import glob, os, sys, time
 import numpy as np
@@ -166,11 +168,12 @@ def main():
         print(__doc__.split('usage:')[1].strip())
         return 2   # ExitCode.Usage
     root, out = sys.argv[1], sys.argv[2]
-    # Scene folders under the root: --train a,b --val c (default: v1's nd_day,sponza / cyber).
     opt = {k: v.split(',') for k, v in zip(sys.argv[3::2], sys.argv[4::2]) if k in ('--train', '--val')}
     pick = lambda dirs: sorted(f for d in dirs for f in glob.glob(os.path.join(root, d, '*.bin')))
-    train = pick(opt.get('--train', ['nd_day', 'sponza']))
-    val = pick(opt.get('--val', ['cyber']))
+    scenes = sorted(d for d in os.listdir(root) if glob.glob(os.path.join(root, d, '*.bin')))
+    valDirs = opt.get('--val', scenes[-1:])
+    train = pick(opt.get('--train', [d for d in scenes if d not in valDirs]))
+    val = pick(valDirs)
     for name, files in (('train', train), ('val', val)):
         if not files:
             print('no *.bin captures for %s under %s' % (name, root))

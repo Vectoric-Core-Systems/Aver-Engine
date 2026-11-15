@@ -747,7 +747,7 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
     return out;
 }
 
-// The render settings every new project starts with: the PTTest reference project's, minus Path
+// The render settings every new project starts with: the engine's full ray-traced profile, without Path
 // Tracing (it takes over the viewport) and temporal AA. Written explicitly rather than left to engine
 // defaults, so a project's look does not drift across engine versions and every value has a line to edit.
 void applyNewProjectRenderDefaults(ProjectDesc& d) {
