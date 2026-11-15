@@ -332,7 +332,8 @@ void LevelFoliage::update(const Vec3& viewerCm, f32 dt) {
 }
 
 void LevelFoliage::applyResidency(const std::vector<char>& next) {
-    for (File& f : files_) std::fill(f.use.begin(), f.use.end(), f.data.cells.empty() ? 1u : 0u);   // cell-less files are always resident
+    // Cell-less files and extra tables are always resident (an extra table's cells are not in cells_).
+    for (File& f : files_) std::fill(f.use.begin(), f.use.end(), f.data.cells.empty() || f.extra ? 1u : 0u);
     u32 count = 0;
     for (usize i = 0; i < cells_.size(); ++i) {
         if (!next[i]) continue;
@@ -431,9 +432,14 @@ void LevelFoliage::rebuild() {
 
     for (usize fi = 0; fi < files_.size(); ++fi) {
         const fmt::OcInstanceData& d = files_[fi].data;
-        if (!d.cells.empty()) continue;   // cell files are walked below
-        for (usize g = 0; g < d.groups.size(); ++g)
-            emit(fi, static_cast<u32>(g), d.groups[g].first, d.groups[g].count);
+        if (d.cells.empty()) {
+            for (usize g = 0; g < d.groups.size(); ++g)
+                emit(fi, static_cast<u32>(g), d.groups[g].first, d.groups[g].count);
+        } else if (files_[fi].extra) {
+            // A cell-sorted extra table (Generate Vegetation's): every run, all resident. Its groups' rows are not
+            // contiguous, so the runs index them.
+            for (const fmt::OcInstanceRun& run : d.runs) emit(fi, run.group, run.first, run.count);
+        }   // a level file's cells are walked below
     }
     for (usize i = 0; i < cells_.size(); ++i) {
         if (!resident_[i]) continue;
