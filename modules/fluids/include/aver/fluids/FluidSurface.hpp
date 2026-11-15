@@ -21,6 +21,11 @@ public:
     // triangles kept (extra ones are dropped and truncated() reports it).
     void configure(const PbfBounds& bounds, f32 spacingM, u32 maxTris);
 
+    // Triangles a surface in this box may need: a sheet across each of the box's three cross-sections, about eight
+    // triangles a mesher cell (a plane cuts four to six of a cell's tetrahedra), doubled for waves and splashes.
+    // Surface area, not particle count, sets it: a wide shallow pool has far more surface per particle than a tank.
+    static u32 surfaceBudget(const PbfBounds& bounds, f32 spacingM);
+
     // Rebuilds the mesh from xyz-interleaved local-metre positions.
     void build(const f32* posM, u32 n);
 

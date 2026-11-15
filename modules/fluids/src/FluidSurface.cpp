@@ -18,6 +18,14 @@ inline f32 splatWeight(f32 r2, f32 R2) {
 
 } // namespace
 
+u32 FluidSurfaceMesher::surfaceBudget(const PbfBounds& bounds, f32 spacingM) {
+    const f32 cell = 0.6f * std::max(spacingM, 1.0e-3f);   // configure()'s starting cell
+    f64 n[3];
+    for (int a = 0; a < 3; ++a) n[a] = std::max(1.0, std::ceil(static_cast<f64>(bounds.hi[a] - bounds.lo[a]) / cell));
+    const f64 tris = 16.0 * (n[0] * n[1] + n[0] * n[2] + n[1] * n[2]);
+    return static_cast<u32>(std::min(tris, 4.0e9));
+}
+
 void FluidSurfaceMesher::configure(const PbfBounds& bounds, f32 spacingM, u32 maxTris) {
     bounds_ = bounds;
     const f32 sp = std::max(spacingM, 1.0e-3f);

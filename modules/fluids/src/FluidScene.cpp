@@ -107,7 +107,8 @@ FluidHandle FluidScene::spawn(const fluids::FluidVolumeDesc& desc, rhi::IDevice&
         return 0;
     }
 
-    const u32 maxTris = std::clamp(8u * n, 4096u, kFluidMaxSurfaceTris);
+    const u32 maxTris = std::clamp(std::max(8u * n, FluidSurfaceMesher::surfaceBudget(settings.bounds, r.sim.spacing())),
+                                   4096u, kFluidMaxSurfaceTris);
     r.mesher.configure(settings.bounds, r.sim.spacing(), maxTris);
     r.maxVerts = maxTris * 3u;
     r.packed.assign(r.maxVerts, rhi::MeshVertex{});

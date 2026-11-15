@@ -1,6 +1,7 @@
 // The particle fluid: PbfFluid (solver), SolidField (static-collider distance field), FluidSurfaceMesher
 // (density splat + marching tetrahedra) and the desc -> solver-settings mapping. CPU only: no device,
 // no window, no physics world -- scene colliders are stood in for by an analytic overlap function.
+#include "aver/fluids/FluidScene.hpp"
 #include "aver/fluids/FluidSurface.hpp"
 #include "aver/fluids/FluidVolume.hpp"
 #include "aver/fluids/PbfFluid.hpp"
@@ -272,6 +273,27 @@ static void testSurfaceMesh() {
     check(none.triangleCount() == 0, "no particles, no triangles");
 }
 
+static void testSurfaceBudget() {
+    AVER_INFO("-- a wide shallow pool's surface fits the mesher's budget (FluidShow's 6 x 4 x 1.2 m pool) --");
+    FluidVolumeDesc d;
+    d.halfExtentCm[0] = 300.0f; d.halfExtentCm[1] = 200.0f; d.halfExtentCm[2] = 60.0f;
+    const PbfSettings s = fluidPbfSettings(d);
+    PbfFluid f;
+    f.init(s);
+    const u32 budget = FluidSurfaceMesher::surfaceBudget(s.bounds, f.spacing());
+    FluidSurfaceMesher seeded;   // the spawn frame's mesh: the seed lattice, before any step
+    seeded.configure(s.bounds, f.spacing(), budget);
+    seeded.build(f.positions().data(), f.count());
+    check(!seeded.truncated(), "the freshly seeded pool meshes inside it too (" + std::to_string(seeded.triangleCount()) + ")");
+    for (int i = 0; i < 120; ++i) f.step(kPbfFixedDt);
+    FluidSurfaceMesher m;
+    m.configure(s.bounds, f.spacing(), budget);
+    m.build(f.positions().data(), f.count());
+    check(!m.truncated(), "the pool meshes inside its budget (" + std::to_string(m.triangleCount()) + " of " +
+                          std::to_string(budget) + ", " + std::to_string(f.count()) + " particles)");
+    check(budget <= kFluidMaxSurfaceTris, "and the budget is under the scene's cap");
+}
+
 static void testDescMapping() {
     AVER_INFO("-- a FluidVolumeDesc maps to solver settings; the retired pressure fields still parse --");
     FluidVolumeDesc d;
@@ -314,6 +336,7 @@ int main() {
     testDeterminism();
     testImpulse();
     testSurfaceMesh();
+    testSurfaceBudget();
     testDescMapping();
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
     return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
