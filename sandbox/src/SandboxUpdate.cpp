@@ -356,6 +356,7 @@ void SandboxApp::tickAutoFrameCommands(Engine& e, const Timestep& t) {
         }
     }
 #if AVER_MODULE_VOXI
+    if (harness_.captureSettled_ && !harness_.captureSettledAt_) tickCaptureSettled(e);
     // --gi-history-reset-at: resets GI reservoir and denoiser history.
     if (harness_.giHistoryResetAtFrames_ > 0 && --harness_.giHistoryResetAtFrames_ == 0) {
         voxi::Renderer::get().requestGiHistoryReset();

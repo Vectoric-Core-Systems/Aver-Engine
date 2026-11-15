@@ -1559,6 +1559,8 @@ public:
         refreshWorldOriginRows();
     }
     void setFrameTime(f32 seconds, f32 deltaSeconds) override {
+        lastFrameSeconds_ = seconds;
+        seconds -= shaderTimeBase_;
         frameCB_.time[0] = std::fmod(seconds, 3600.0f);   // see the D3D12 twin for why it wraps
         frameCB_.time[1] = seconds;
         frameCB_.time[2] = deltaSeconds;
@@ -1978,6 +1980,8 @@ private:
     VkDescriptorSetLayout postLutSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorSet postLutSets_[kFrameCount] = {};
     u32 lensFrame_ = 0;   // film grain's per-frame seed
+    void restartFrameSequences() override { lensFrame_ = 0; shaderTimeBase_ = lastFrameSeconds_; }
+    f32 shaderTimeBase_ = 0.0f, lastFrameSeconds_ = 0.0f;   // restartFrameSequences: gTime counts from the restart
     VkPipeline histogramPso_ = VK_NULL_HANDLE, exposurePso_ = VK_NULL_HANDLE;
     VkPipeline localGridPso_ = VK_NULL_HANDLE, localBlurPso_ = VK_NULL_HANDLE;   // CSLocalGrid, CSLocalBlur -- local exposure's two compute passes
     ConstantRing postRing_[kFrameCount]{};   // reuses section 5's ConstantRing shape; the ONE place outside VulkanRenderContext.cpp that owns a ring, as D3D12Device::postConstants() does separately from D3D12RenderContext::ringAlloc()

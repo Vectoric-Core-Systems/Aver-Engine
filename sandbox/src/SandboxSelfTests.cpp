@@ -269,6 +269,39 @@ void SandboxApp::setSunSweep(int framesIn, f32 degPerFrame, int turns) {
 
 void SandboxApp::setGiHistoryResetAt(int framesIn) { harness_.giHistoryResetAtFrames_ = framesIn; }
 
+// --capture-settled: a streamed level reaches the same content at a different frame every run (loads are budgeted by
+// wall-clock time, meshes arrive from worker threads, BLASes build over frames), and a frame-count capture then compares two
+// different scenes. This waits for the content instead: 30 quiet frames in a row, then the GI, RT, denoiser and upscaler
+// histories and every per-frame sequence (noise frame, jitter, grain, shader clock, cloud drift) restart together, and
+// captureCheck takes the probe and --screenshot N frames on. Streamed RT content still differs run to run: docs/BUGS.md.
+void SandboxApp::tickCaptureSettled(Engine& e) {
+    constexpr u32 kQuietFrames = 30;
+    bool quiet = !projectLoading_;
+#if AVER_MODULE_SCENE
+    if (level_.streaming().active()) quiet = quiet && level_.streaming().settled() && level_.streaming().lastLoaded() == 0 &&
+                                             level_.streaming().lastEvicted() == 0;
+#endif
+#if AVER_MODULE_VOXI
+    if (rset_.voxiAttached_)
+        quiet = quiet && !voxiRenderer_.accelBuildsPending() && voxiRenderer_.accelBuildsLastFrame() == 0 &&
+                !voxiRenderer_.graphRebuildPending() &&
+                voxiRenderer_.materials().pendingMaterialCount() == 0;
+#endif
+    harness_.captureSettledQuiet_ = quiet ? harness_.captureSettledQuiet_ + 1u : 0u;
+    if (harness_.captureSettledQuiet_ < kQuietFrames) return;
+    harness_.captureSettledAt_ = e.time().frame;
+#if AVER_MODULE_VOXI
+    voxi::Renderer::get().requestGiHistoryReset();
+    voxi::Renderer::get().requestRtHistoryReset();   // shadow, reflection and sky-occlusion share it
+    voxi::Renderer::get().requestDenoiserHistoryReset();
+    voxiRenderer_.restartNoiseSequence();
+#endif
+    if (e.device()) e.device()->restartFrameSequences();
+    rset_.cloudTime_ = 0.0f;   // cloud drift is a clock too
+    AVER_INFO("[Sandbox] --capture-settled: content quiet at frame {}; sample sequences and histories restarted, capturing at frame {}",
+              harness_.captureSettledAt_, harness_.captureSettledAt_ + harness_.captureSettled_);
+}
+
 #if AVER_MODULE_SR
 void SandboxApp::setAverSrCycleAuto(int framesIn) { harness_.averSrCycleFrames_ = framesIn; }
 
@@ -2609,7 +2642,16 @@ void SandboxApp::captureCheck(Engine& e) {
     // --luma-sweep and --firefly-metric share the device's capture slot; don't stomp.
     if (harness_.lumaSweep_ || harness_.fireflyMetric_) return;
     const u64 f = e.time().frame;
-    const u64 sf = maxFrames_>8?maxFrames_-3:4;
+    u64 sf = maxFrames_>8?maxFrames_-3:4;
+    if (harness_.captureSettled_) {
+        // Waiting: no capture yet (and none at the time limit: a run that never settled says so instead).
+        if (!harness_.captureSettledAt_) {
+            if (maxFrames_ != 0 && f + 1 >= maxFrames_)
+                AVER_ERROR("[Sandbox] --capture-settled: loading never went quiet within --frames {}; no capture taken", maxFrames_);
+            return;
+        }
+        sf = harness_.captureSettledAt_ + harness_.captureSettled_;
+    }
     const u32 px_ = harness_.probeU_ >= 0.0f ? (u32)(viewState_.vpX_ + viewState_.vpW_ * harness_.probeU_)
                   : (harness_.probeX_ ? harness_.probeX_ : (u32)(viewState_.vpX_ + viewState_.vpW_*0.5f));
     const u32 py_ = harness_.probeV_ >= 0.0f ? (u32)(viewState_.vpY_ + viewState_.vpH_ * harness_.probeV_)
@@ -2645,6 +2687,7 @@ void SandboxApp::captureCheck(Engine& e) {
             if (e.device()->getFrameImage(img,iw,ih)&&iw&&ih && stbi_write_png(shot_.c_str(),(int)iw,(int)ih,4,img.data(),(int)iw*4))
                 AVER_INFO("[Sandbox] screenshot: {} ({}x{})", shot_, iw, ih); }
         harness_.capDone_=true;
+        if (harness_.captureSettled_) e.requestExit();
     }
 }
 

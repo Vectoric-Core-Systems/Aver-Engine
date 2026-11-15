@@ -69,6 +69,7 @@ private:
     void* splashForApp_ = nullptr;
     Clock frameClock_;
     Timestep time_;
+    f32 fixedDt_ = 0.0f;   // BootConfig::fixedDt
     bool exit_ = false;
     bool inFrame_ = false;
     f32 maxFps_ = 0.0f;

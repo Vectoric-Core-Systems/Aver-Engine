@@ -25,6 +25,7 @@ Engine::~Engine() = default;
 // Full lifecycle: init subsystems, run the loop, shut down. Returns the process code.
 int Engine::run(Application* app) {
     BootConfig cfg = app->config();
+    fixedDt_ = cfg.fixedDt > 0.0f ? cfg.fixedDt : 0.0f;
     // Name and version come from Version.hpp, which CMake injects from project(). This line used to
     // spell "Aver Engine 0.1.0" out by hand, so the banner stayed on 0.1.0 through any version bump
     // -- the one line in the process most likely to be quoted in a bug report, and the one guaranteed
@@ -255,7 +256,8 @@ void Engine::frameStep() {
             swapchain_->resize(w, h);
     }
 
-    const f64 dt = frameClock_.restart();
+    const f64 wallDt = frameClock_.restart();
+    const f64 dt = fixedDt_ > 0.0f ? static_cast<f64>(fixedDt_) : wallDt;
     frameBeginNs_ = static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count());
     time_.dt = static_cast<f32>(dt);

@@ -116,6 +116,8 @@ static u32 logTextRows(std::string_view t) {
 BootConfig SandboxApp::config() const  {
     BootConfig c; c.windowTitle="Aver Engine \xE2\x80\x94 Editor"; c.windowWidth=1600; c.windowHeight=900;
     c.maxFrames=maxFrames_; c.headless=headless_; c.useWarp=launch_.useWarp_;
+    // --capture-settled compares runs pixel for pixel, so time-driven shading (gTime, every dt blend) must not follow the wall clock.
+    if (harness_.captureSettled_) c.fixedDt = 1.0f / 60.0f;
     // Windowed by default; bounded captures must not be reshaped by --fullscreen.
     c.fullscreen = launch_.fullscreenOverride_ && maxFrames_ == 0;
     c.enableDebugLayer=launch_.debugLayer_;

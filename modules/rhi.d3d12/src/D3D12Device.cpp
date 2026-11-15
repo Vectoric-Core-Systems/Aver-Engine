@@ -1026,6 +1026,11 @@ public:
         cb.jitter[0] = jx; cb.jitter[1] = jy;
     }
     void setJitterSuppressed(bool on) override { jitterSuppressed_ = on; }
+    void restartFrameSequences() override {
+        taaJitterIndex_ = 0; lensFrame_ = 0; shaderTimeBase_ = lastFrameSeconds_;
+        if (upscaler_) upscaler_->reset();
+    }
+    f32 shaderTimeBase_ = 0.0f, lastFrameSeconds_ = 0.0f;   // restartFrameSequences: gTime counts from the restart
     bool taaJitter(f32 out[2]) const override {
         out[0] = taaJitterThisFrame_[0]; out[1] = taaJitterThisFrame_[1];
         return true;
@@ -1098,6 +1103,8 @@ public:
         refreshWorldOriginRows();
     }
     void setFrameTime(f32 seconds, f32 deltaSeconds) override {
+        lastFrameSeconds_ = seconds;
+        seconds -= shaderTimeBase_;
         // Time wrapped to 3600s for seamless ripple effects.
         frameCB_.time[0] = std::fmod(seconds, 3600.0f);
         frameCB_.time[1] = seconds;

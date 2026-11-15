@@ -785,6 +785,8 @@ public:
     void setSunSetAt(int framesIn, f32 elevDeg, f32 azimDeg);
     void setSunSweep(int framesIn, f32 degPerFrame, int turns);
     void setGiHistoryResetAt(int framesIn);
+    void setCaptureSettled(int frames) { harness_.captureSettled_ = frames > 0 ? static_cast<u32>(frames) : 0u; }
+    void tickCaptureSettled(Engine& e);
 #if AVER_MODULE_SR
     void setAverSrCycleAuto(int framesIn);   // --aversr-cycle [N]
 #endif

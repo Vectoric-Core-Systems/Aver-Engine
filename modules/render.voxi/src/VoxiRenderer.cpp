@@ -1440,6 +1440,7 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
         if (extraWanted_ && settings_.meshExtraStreams && !extraLocalTried_[rtActive_ ? 1 : 0]) createExtraScenePipelines(rtActive_, true);
     }
     ++rtFrameIndex_;
+    accelBuildsLastFrame_ = 0;   // set again by this frame's acceleration-structure update, if one runs
     updateRelight();
     // Sample frame time at the TOP of the feature's frame.
     if (frameTimeReport_) {
@@ -1553,7 +1554,7 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
         giBuildStep(ctx);
     } else if (giEnabled()) {
         // Amortised revoxelisation: skip voxelize/filter on off frames, cone trace samples last-built volume.
-        if (giUpdateInterval_ <= 1 || ((rtFrameIndex_ - 1) % giUpdateInterval_) == 0) {
+        if (giUpdateInterval_ <= 1 || ((noiseFrame() - 1) % giUpdateInterval_) == 0) {
             // GI rebuild gate: if nothing moved, volume texture already holds the answer.
             const bool converging = giConvergeTicks_ > 0;
             const bool gateUnchanged = giSnapshotUnchanged();
@@ -2163,6 +2164,7 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
                   blasDeferred, kBlasBuildBytesPerFrame >> 20);
         blasDeferLogged_ = true;
     }
+    accelBuildsLastFrame_ = firstBuilds + static_cast<u32>(rebuiltThisFrame_.size());
     // First-time build is always full. Dynamic mesh refits tracked separately.
     const u32 rebuilds = (static_cast<u32>(rebuiltThisFrame_.size()) << 16) | (firstBuilds & 0xFFFFu);
     if (rebuilds != lastBlasRebuilds_) {
@@ -6215,7 +6217,7 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         const bool giCb = giDispatch && settings_.rayDrivenStages == 2u && rdGiCbCsPso_ != 0 &&
                           (denoiseGiRanThisFrame_ || nrd2GiFill);
         giCbWrittenThisFrame_ = giCb;
-        giCbParityWritten_    = rtFrameIndex_ & 1u;   // the shader's gRtHistParams.z: one counter for both
+        giCbParityWritten_    = noiseFrame() & 1u;   // the shader's gRtHistParams.z: one counter for both
         if (giCb && !rdGiCbRunLogged_) {
             rdGiCbRunLogged_ = true;
             AVER_INFO("[Voxi] half-rate ReSTIR GI running: CSRdGi traces one checkerboard half each "
@@ -7734,7 +7736,7 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     cb_.rtHistParams[0] = 1.0f;
     // Three states: 1=usable, 0.5=usable but sun changed this frame, 0=not usable.
     cb_.rtHistParams[1] = (rtHistValid_ && haveViewport) ? (sunMoved ? 0.5f : 1.0f) : 0.0f;
-    cb_.rtHistParams[2] = static_cast<f32>(rtFrameIndex_);
+    cb_.rtHistParams[2] = static_cast<f32>(noiseFrame());
     // Tile edge as bit count (shader masks/shifts instead of multiply/modulo).
     u32 tileBits = 0;
     for (u32 v = rtPixelsPerRayTile_; v > 1; v >>= 1) ++tileBits;
@@ -7965,7 +7967,7 @@ void VoxiRenderer::updateNeuRaC(rhi::IRenderContext& ctx) {
     if (rcNetActive_ && !rcNetWasActive_) rcNet_.resetWarmup();   // re-enabled: the trust bits are stale
     rcNetWasActive_ = rcNetActive_;
     params.netStrength = rcNetActive_ ? rcNet_.warmStrength(settings_.neuracNetStrength) : 0.0f;
-    const NeuRaC::Bindings b = rc_.beginFrame(ctx, eye, rtFrameIndex_, params);
+    const NeuRaC::Bindings b = rc_.beginFrame(ctx, eye, noiseFrame(), params);
     if (!b.info || !b.accum || !b.cells) { rcNetActive_ = false; return; }
 
     res_->setSrvBuffer(bindings_, 22, b.info, b.infoStride, b.infoCount, 0);
@@ -8627,7 +8629,7 @@ void VoxiRenderer::recordFroxelFog(rhi::IRenderContext& ctx) {
     f.viewProj = vp;
     // A camera cut or level load: the G-buffer reports it when it is on, and nothing else does.
     f.historyOk = !(dev_->gBufferEnabled() && dev_->gBufferHistoryInvalid());
-    f.frameIndex = rtFrameIndex_;
+    f.frameIndex = noiseFrame();
     froxel_.record(ctx, bindings_, f);
     froxelRecorded_ = true;
 }

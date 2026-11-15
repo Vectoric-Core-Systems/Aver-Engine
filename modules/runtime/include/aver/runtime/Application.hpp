@@ -13,6 +13,7 @@ struct BootConfig {
     u32 windowWidth = 1280;
     u32 windowHeight = 720;
     u64 maxFrames = 0;     // 0 = run until the window is closed
+    f32 fixedDt = 0.0f;    // > 0: every frame advances the clock by exactly this (a reproducible capture); 0 = wall clock
     bool headless = false; // skip window creation entirely
     bool useWarp = false;  // ask the RHI for the software rasteriser
     // Borderless fullscreen for an INTERACTIVE run; see WindowDesc::fullscreen for why a capture run

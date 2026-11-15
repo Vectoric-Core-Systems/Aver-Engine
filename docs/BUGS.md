@@ -87,7 +87,18 @@ Each built and passed the CPU suite (587/587); none has been seen on screen.
   Vulkan `--no-rt` run with validation on.
 - **GI key churn with LOD selection on.** A culled entity plans its base parts while a visible one may plan a
   substituted LOD handle (`SandboxRender.cpp`, "KNOWN RESIDUAL (F4)"). Only with the opt-in LOD/cluster paths.
-- **Frame determinism** (0.5.0) and **the near-black glass slab**: need measurement runs or a capture.
+- **Frame determinism** (0.5.0), measured 2026-11-16. Bit-identical between two runs: the built-in scene with ray
+  tracing (raster, ray-driven, denoiser, `--pt-scene`, ReSTIR visibility) and NewSponza with `--no-rt`. NOT identical:
+  NewSponza (streamed) with ray tracing. The new `--capture-settled N` waits until streaming, BLAS builds, materials and
+  graphs have been quiet for 30 frames, runs at a fixed 1/60 s step, restarts every sequence the renderer and device
+  own (noise frame, jitter, grain seed, shader clock, cloud drift, GI update phase) and the GI, RT, denoiser and
+  upscaler histories, then captures N frames later. Runs that settle on the same frame then differ by about 7% of
+  pixels, almost all by one step; runs that settle a frame apart differ by about 57%. Ruled out by measurement: TLAS
+  instance order (hash identical), the radiance cache, BLAS compaction and refit, the camera, the shader clock, the
+  capture taking a generated frame (it takes the real one). The settle frame is set by the last arrival, so some state
+  still integrates the streaming schedule; the voxel GI volume is the next suspect (it converges over rebuilds and
+  can restore from the GI cache).
+- **The near-black glass slab**: needs a capture.
 
 ---
 

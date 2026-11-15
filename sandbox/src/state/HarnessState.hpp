@@ -3,6 +3,10 @@
 #pragma once
 
 struct HarnessState {
+    // --capture-settled N: wait until loading is quiet, restart the sample sequences and histories, capture N frames later.
+    u32 captureSettled_ = 0;
+    u32 captureSettledQuiet_ = 0;   // consecutive quiet frames so far
+    u64 captureSettledAt_ = 0;      // the frame the sequences restarted (0 = still waiting)
     int hudPreviewIndex_ = -1;
     int hudTest_ = -1;
     bool saveProject_ = false;

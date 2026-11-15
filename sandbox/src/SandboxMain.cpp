@@ -286,7 +286,7 @@ Application* createApplication(int argc, char** argv) {
     for (int i = 1; i < argc; ++i)
         if (!std::strcmp(argv[i], "--no-walk-cache")) noWalkCacheArg = true;
     // --sun-set-at N ELEV AZIM / --gi-history-reset-at N: verification-only.
-    int sunSetAtArg = 0, giHistoryResetAtArg = 0;
+    int sunSetAtArg = 0, giHistoryResetAtArg = 0, captureSettledArg = 0;
     f32 sunSetElevArg = 0.0f, sunSetAzimArg = 0.0f;
     for (int i = 1; i + 3 < argc; ++i)
         if (!std::strcmp(argv[i], "--sun-set-at")) {
@@ -307,8 +307,12 @@ Application* createApplication(int argc, char** argv) {
         }
     for (int i = 1; i + 1 < argc; ++i)
         if (!std::strcmp(argv[i], "--sun-sweep-frames")) sunSweepTurnsArg = std::atoi(argv[i + 1]);
-    for (int i = 1; i + 1 < argc; ++i)
+    for (int i = 1; i + 1 < argc; ++i) {
         if (!std::strcmp(argv[i], "--gi-history-reset-at")) giHistoryResetAtArg = std::atoi(argv[i + 1]);
+        // --capture-settled N: the probe and --screenshot are taken N frames after loading went quiet and every sample
+        // sequence restarted, so two runs of a streamed level compare pixel for pixel. --frames is then only the time limit.
+        if (!std::strcmp(argv[i], "--capture-settled")) captureSettledArg = std::atoi(argv[i + 1]);
+    }
     // --nrd2-capture DIR POSES [HOLD] [HELDOUT_FROM]: NRD2 training poses of the current level (needs
     // --denoiser 2 and --cam-wander; DIR "default" = %LOCALAPPDATA%/AverEngine/nrd2_dataset/<level>).
     // --nrd2-oracle grad|grid: the oracle fit (gradient, or derivative-free pattern search).
@@ -1394,6 +1398,7 @@ Application* createApplication(int argc, char** argv) {
     if (sunSetAtArg > 0)         app->setSunSetAt(sunSetAtArg, sunSetElevArg, sunSetAzimArg);
     if (sunSweepAtArg > 0)       app->setSunSweep(sunSweepAtArg, sunSweepDegArg, sunSweepTurnsArg);
     if (giHistoryResetAtArg > 0) app->setGiHistoryResetAt(giHistoryResetAtArg);
+    if (captureSettledArg > 0) app->setCaptureSettled(captureSettledArg);
 #if AVER_MODULE_SR
     if (aversrCycle > 0) app->setAverSrCycleAuto(aversrCycle);
     if (resizeCycleArg > 0) app->setResizeCycle(resizeCycleArg);

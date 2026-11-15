@@ -298,6 +298,9 @@ void LevelStreaming::tick(scene::World& world, const std::vector<Vec3>& viewersL
         for (const world::DataLayerSet::Completed& c : layers_.settle(streamer_, viewers)) completedLayers_.push_back(c);   // last tick's loads and evictions
     std::vector<u32> toLoad, toEvict;
     streamer_.update(viewers, toLoad, toEvict);
+    settled_ = layers_.pending() == 0;
+    for (const u32 item : toLoad) settled_ = settled_ && !(item < items_.size() && !items_[item].loaded);
+    for (const u32 item : toEvict) settled_ = settled_ && !(item < items_.size() && items_[item].loaded);
     hm.mark("streamer");
     hlod_.tick(world, streamer_, viewers, origin_);
     hm.mark("hlod");

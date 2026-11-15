@@ -643,6 +643,9 @@ public:
     // Holds the temporal-AA jitter at zero from the next uploaded frame (NRD2's training capture holds a
     // still pose on one sample position). Backends without jitter ignore it.
     virtual void setJitterSuppressed(bool on) { (void)on; }
+    // Starts the per-frame sequences the device owns (temporal-AA jitter, film-grain seed, the shaders' clock) over from their
+    // first value at the next uploaded frame and drops the upscaler's history (--capture-settled).
+    virtual void restartFrameSequences() {}
     // This frame's temporal-AA jitter in scene pixels, as the uploaded camera carries it ((0, 0) = none).
     // False, `out` untouched: unknown (backends without jitter reporting).
     virtual bool taaJitter(f32 out[2]) const { (void)out; return false; }

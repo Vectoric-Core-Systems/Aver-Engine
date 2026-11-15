@@ -110,6 +110,12 @@ public:
     bool manyLightsRunning() const { return manyLightsLive_; }
     // Some draw's first bottom-level build waits for a later frame (they are budgeted per frame).
     bool accelBuildsPending() const { return blasBuildsDeferred_; }
+    // Bottom-level builds and rebuilds the last ray-traced frame made (new meshes reaching the ray tracer).
+    u32 accelBuildsLastFrame() const { return accelBuildsLastFrame_; }
+    // Restarts every per-frame sample sequence (ReSTIR and path seeds, the checkerboard parity, NeuRaC, froxel jitter) from 0 at the
+    // next frame, so two runs that restart at the same scene state draw the same samples (--capture-settled). Bookkeeping that ages
+    // resources by frame keeps counting from start-up.
+    void restartNoiseSequence() { noiseBase_ = rtFrameIndex_; }
     // Path Tracing ran last frame: multi-bounce ReSTIR GI and reflections in the staged frame.
     bool pathTracingRan() const { return ptRanThisFrame_; }
 
@@ -555,6 +561,9 @@ private:
     u32 giUpdateInterval_ = 1;
     // Frame count (simulated, not wall-clock). Keeps trace schedule, disc-sample rotation deterministic.
     u32 rtFrameIndex_ = 0;
+    u32 accelBuildsLastFrame_ = 0;
+    u32 noiseBase_ = 0;   // restartNoiseSequence(): the frame the shaders' sample sequences count from
+    u32 noiseFrame() const { return rtFrameIndex_ - noiseBase_; }
 
     // Frame-period sampler: wall-clock period between prePass calls.
     // CPU period (tracks GPU cost while GPU-bound). Run with --no-vsync or every reading is refresh interval.

@@ -112,6 +112,8 @@ public:
     usize residentEntities() const { return placementOf_.size(); }
     // What the last tick() did: roots loaded and evicted.
     u32 lastLoaded() const { return lastLoaded_; }
+    // Nothing in range was waiting to load and nothing out of range was waiting to evict at the last tick (no layer change pending either).
+    bool settled() const { return settled_; }
     u32 lastEvicted() const { return lastEvicted_; }
 
 private:
@@ -133,6 +135,7 @@ private:
 
     bool active_ = false;
     u32 lastLoaded_ = 0, lastEvicted_ = 0;
+    bool settled_ = false;
     u32 stalledTicks_ = 0;   // ticks with roots waiting and none read (see tick)
     GameContent* content_ = nullptr;
     rhi::IDevice* device_ = nullptr;
