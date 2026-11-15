@@ -7,6 +7,7 @@ struct HarnessState {
     u32 captureSettled_ = 0;
     u32 captureSettledQuiet_ = 0;   // consecutive quiet frames so far
     u64 captureSettledAt_ = 0;      // the frame the sequences restarted (0 = still waiting)
+    bool captureSettledGi_ = false; // the GI volume restart from black was requested
     int hudPreviewIndex_ = -1;
     int hudTest_ = -1;
     bool saveProject_ = false;

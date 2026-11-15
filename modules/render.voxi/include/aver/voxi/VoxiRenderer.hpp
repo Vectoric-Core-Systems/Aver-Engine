@@ -116,6 +116,18 @@ public:
     // next frame, so two runs that restart at the same scene state draw the same samples (--capture-settled). Bookkeeping that ages
     // resources by frame keeps counting from start-up.
     void restartNoiseSequence() { noiseBase_ = rtFrameIndex_; }
+    // Builds at most one new bottom-level structure a frame (--capture-settled).
+    void setSerialBlasBuilds(bool on) { serialBlasBuilds_ = on; }
+    // Zeroes the radiance volume, then rebuilds it `rebuilds` times without the GI cache (--capture-settled). Each
+    // injection traces into the previous bake, so without this the volume carries the order content arrived in.
+    void restartGiFromBlack(u32 rebuilds) {
+        if (!giEnabled()) return;
+        giFromBlackPending_ = true;
+        giFromBlackTicks_ = rebuilds;
+    }
+    bool giFromBlackRunning() const {
+        return giEnabled() && (giFromBlackPending_ || giFromBlackTicks_ > 0 || giBuild_.active);
+    }
     // Path Tracing ran last frame: multi-bounce ReSTIR GI and reflections in the staged frame.
     bool pathTracingRan() const { return ptRanThisFrame_; }
 
@@ -1752,6 +1764,9 @@ private:
     // How many extra bakes a change buys: PSVoxel's feedback term adds one bounce per rebuild.
     static constexpr u32 kGiConvergeTicks = 5;
     u32  giConvergeTicks_ = 0;
+    bool serialBlasBuilds_ = false;
+    bool giFromBlackPending_ = false;   // restartGiFromBlack: the blank rebuild is due
+    u32  giFromBlackTicks_ = 0;         // restartGiFromBlack: forced rebuilds left, none restored from the cache
 
     u32  voxelMips_ = 0, voxelResBuilt_ = 0;
     // A resolution applyVoxelResolution could not allocate: not retried until the setting changes again.

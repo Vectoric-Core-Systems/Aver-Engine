@@ -1554,9 +1554,16 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
         giBuildStep(ctx);
     } else if (giEnabled()) {
         // Amortised revoxelisation: skip voxelize/filter on off frames, cone trace samples last-built volume.
-        if (giUpdateInterval_ <= 1 || ((noiseFrame() - 1) % giUpdateInterval_) == 0) {
+        if (giFromBlackPending_ && voxelAccumTex_) {
+            // restartGiFromBlack: a full-box pass that injects no draws resolves every voxel to zero, then the mips.
+            giFromBlackPending_ = false;
+            giBoxPrevValid_ = false;
+            voxelizePass(ctx, 0, 0, true, true);
+            filterMips(ctx);
+        } else if (giUpdateInterval_ <= 1 || ((noiseFrame() - 1) % giUpdateInterval_) == 0) {
             // GI rebuild gate: if nothing moved, volume texture already holds the answer.
-            const bool converging = giConvergeTicks_ > 0;
+            const bool converging = giConvergeTicks_ > 0 || giFromBlackTicks_ > 0;
+            const bool noCache = giForceRebuild_ || giFromBlackTicks_ > 0;
             const bool gateUnchanged = giSnapshotUnchanged();
             // The static draw list alone moved (streaming in, an object dragged): rebuild once it holds still, not per tick.
             const bool drawsOnly = !gateUnchanged && giLastRejectBit_ == 4u && !converging && !giForceRebuild_;
@@ -1576,8 +1583,9 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
                     giAccumWanted_ = true;
                 } else {
                     ++giRebuilt_;
-                    if (converging) --giConvergeTicks_;
-                    else            giConvergeTicks_ = kGiConvergeTicks;
+                    if (giFromBlackTicks_ > 0)  --giFromBlackTicks_;
+                    else if (converging)        --giConvergeTicks_;
+                    else                        giConvergeTicks_ = kGiConvergeTicks;
                     takeGiSnapshot();
                     // Any sky or sun byte change lands here: decay the cache's history, do not clear it.
                     if (rc_.valid()) rc_.requestRelax(4u, 0.25f);
@@ -1589,14 +1597,14 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
                     if (staged) {
                         giBuild_ = GiBuild{};
                         giBuild_.active = true;
-                        giBuild_.tryCache = !giForceRebuild_;
+                        giBuild_.tryCache = !noCache;
                         giBuild_.settleCloudOnly = !gateUnchanged;
                         giBuildStep(ctx);
                     } else {
                         // GI-only map must exist before injection reads it.
                         giShadowPass(ctx, 0, drawsPrev_.size(), true, true);
                         // Cache read: between "gate says rebuild" and rebuild itself.
-                        if (giForceRebuild_ || !giCacheRestore(ctx)) {
+                        if (noCache || !giCacheRestore(ctx)) {
                             voxelizePass(ctx, 0, drawsPrev_.size(), true, true);
                             filterMips(ctx);
                             if (!gateUnchanged)
@@ -1907,7 +1915,9 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     // CPU time making new structures (two allocations each): 120 small meshes arriving at once were
     // ~100 ms of one frame; past kBlasCreateMsPerFrame the rest wait like the byte budget's.
     f64 blasCreateMs = 0.0;
-    auto blasBudgetSpent = [&] { return blasBytesThisFrame >= kBlasBuildBytesPerFrame || blasCreateMs >= kBlasCreateMsPerFrame; };
+    // serialBlasBuilds_ (--capture-settled): one new structure a frame, so the frame each is built in no longer
+    // depends on CPU time; a streamed level's images otherwise vary with how its builds were batched.
+    auto blasBudgetSpent = [&] { return (serialBlasBuilds_ && firstBuilds > 0) || blasBytesThisFrame >= kBlasBuildBytesPerFrame || blasCreateMs >= kBlasCreateMsPerFrame; };
     // Made and recorded (a static structure's scratch is allocated by its build).
     auto timedCreate = [&](auto&& make) {
         const auto t0 = std::chrono::steady_clock::now();

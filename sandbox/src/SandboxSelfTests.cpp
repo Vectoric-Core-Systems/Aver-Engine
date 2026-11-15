@@ -270,10 +270,11 @@ void SandboxApp::setSunSweep(int framesIn, f32 degPerFrame, int turns) {
 void SandboxApp::setGiHistoryResetAt(int framesIn) { harness_.giHistoryResetAtFrames_ = framesIn; }
 
 // --capture-settled: a streamed level reaches the same content at a different frame every run (loads are budgeted by
-// wall-clock time, meshes arrive from worker threads, BLASes build over frames), and a frame-count capture then compares two
-// different scenes. This waits for the content instead: 30 quiet frames in a row, then the GI, RT, denoiser and upscaler
-// histories and every per-frame sequence (noise frame, jitter, grain, shader clock, cloud drift) restart together, and
-// captureCheck takes the probe and --screenshot N frames on. Streamed RT content still differs run to run: docs/BUGS.md.
+// wall-clock time, meshes arrive from worker threads, BLASes build over frames), and a frame-count capture then compares
+// two different scenes. This waits for the content instead, with its BLASes built one a frame: 30 quiet frames in a row,
+// the GI volume rebuilt from black, then the GI, RT, denoiser and upscaler histories and every per-frame sequence (noise
+// frame, jitter, grain, shader clock, cloud drift) restart together, and captureCheck takes the probe and --screenshot
+// N frames on. What still differs between runs: docs/BUGS.md (frame determinism).
 void SandboxApp::tickCaptureSettled(Engine& e) {
     constexpr u32 kQuietFrames = 30;
     bool quiet = !projectLoading_;
@@ -282,13 +283,30 @@ void SandboxApp::tickCaptureSettled(Engine& e) {
                                              level_.streaming().lastEvicted() == 0;
 #endif
 #if AVER_MODULE_VOXI
+    // Bottom-level structures build one a frame: the image of a streamed level was measured to depend on how the
+    // builds were batched, and batches follow CPU time (docs/BUGS.md, frame determinism).
+    voxiRenderer_.setSerialBlasBuilds(true);
     if (rset_.voxiAttached_)
         quiet = quiet && !voxiRenderer_.accelBuildsPending() && voxiRenderer_.accelBuildsLastFrame() == 0 &&
                 !voxiRenderer_.graphRebuildPending() &&
                 voxiRenderer_.materials().pendingMaterialCount() == 0;
 #endif
     harness_.captureSettledQuiet_ = quiet ? harness_.captureSettledQuiet_ + 1u : 0u;
+    if (!quiet) harness_.captureSettledGi_ = false;
     if (harness_.captureSettledQuiet_ < kQuietFrames) return;
+#if AVER_MODULE_VOXI
+    // The radiance volume is rebuilt from black first: each rebuild traces into the last, so a volume that converged while
+    // content streamed in still holds the arrival order. 32 rebuilds leave under 0.1% of the bounce (gain at most 0.8).
+    if (rset_.voxiAttached_) {
+        if (!harness_.captureSettledGi_) {
+            harness_.captureSettledGi_ = true;
+            voxiRenderer_.restartGiFromBlack(32);
+            AVER_INFO("[Sandbox] --capture-settled: content quiet at frame {}; rebuilding the GI volume from black", e.time().frame);
+            return;
+        }
+        if (voxiRenderer_.giFromBlackRunning()) return;
+    }
+#endif
     harness_.captureSettledAt_ = e.time().frame;
 #if AVER_MODULE_VOXI
     voxi::Renderer::get().requestGiHistoryReset();
@@ -298,7 +316,7 @@ void SandboxApp::tickCaptureSettled(Engine& e) {
 #endif
     if (e.device()) e.device()->restartFrameSequences();
     rset_.cloudTime_ = 0.0f;   // cloud drift is a clock too
-    AVER_INFO("[Sandbox] --capture-settled: content quiet at frame {}; sample sequences and histories restarted, capturing at frame {}",
+    AVER_INFO("[Sandbox] --capture-settled: settled at frame {}; sample sequences and histories restarted, capturing at frame {}",
               harness_.captureSettledAt_, harness_.captureSettledAt_ + harness_.captureSettled_);
 }
 

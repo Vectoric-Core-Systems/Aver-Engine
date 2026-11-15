@@ -87,17 +87,20 @@ Each built and passed the CPU suite (587/587); none has been seen on screen.
   Vulkan `--no-rt` run with validation on.
 - **GI key churn with LOD selection on.** A culled entity plans its base parts while a visible one may plan a
   substituted LOD handle (`SandboxRender.cpp`, "KNOWN RESIDUAL (F4)"). Only with the opt-in LOD/cluster paths.
-- **Frame determinism** (0.5.0), measured 2026-11-16. Bit-identical between two runs: the built-in scene with ray
-  tracing (raster, ray-driven, denoiser, `--pt-scene`, ReSTIR visibility) and NewSponza with `--no-rt`. NOT identical:
-  NewSponza (streamed) with ray tracing. The new `--capture-settled N` waits until streaming, BLAS builds, materials and
-  graphs have been quiet for 30 frames, runs at a fixed 1/60 s step, restarts every sequence the renderer and device
-  own (noise frame, jitter, grain seed, shader clock, cloud drift, GI update phase) and the GI, RT, denoiser and
-  upscaler histories, then captures N frames later. Runs that settle on the same frame then differ by about 7% of
-  pixels, almost all by one step; runs that settle a frame apart differ by about 57%. Ruled out by measurement: TLAS
-  instance order (hash identical), the radiance cache, BLAS compaction and refit, the camera, the shader clock, the
-  capture taking a generated frame (it takes the real one). The settle frame is set by the last arrival, so some state
-  still integrates the streaming schedule; the voxel GI volume is the next suspect (it converges over rebuilds and
-  can restore from the GI cache).
+- **Frame determinism** (0.5.0), measured 2026-11-16 with six-run pairwise diff matrices. Bit-identical between runs:
+  the built-in scene with ray tracing (raster, ray-driven, denoiser, `--pt-scene`, ReSTIR visibility) and NewSponza with
+  `--no-rt`. NewSponza (streamed) with ray tracing: runs fell into groups that differed by 54-61% of pixels (symmetric
+  one-step noise), the group set by the build schedule of the bottom-level structures; within a group about 7%.
+  Hashing every CPU-side input the GPU gets (frame constants, RT instance rows, material table, light list) after the
+  restart showed them identical across groups except the per-mesh geometry slots, and shifting the slots moved images by
+  only a few percent. Ruled out by measurement: TLAS instance order, the GI volume (rebuilt from black), NeuRaC, ReSTIR GI,
+  the denoiser, BLAS compaction, the scratch buffer's prior contents (fresh zeroed scratch per build), the camera, jitter,
+  the shader clock, frame parity, and the capture taking a generated frame. Building the structures in a different
+  batching (all rebuilt at once, or each with its own scratch) made images vary MORE; building one a frame made all six
+  runs one group. The cause sits below the engine's own state (the driver's BVH build under batching is the suspect).
+  `--capture-settled N` therefore builds one structure a frame, waits for 30 quiet frames, rebuilds the GI volume from
+  black, restarts every sequence and history, and captures N frames on: six NewSponza runs then differ by about 5% of
+  pixels, almost all by one or two steps (0.1% by more than 8).
 - **The near-black glass slab**: needs a capture.
 
 ---
