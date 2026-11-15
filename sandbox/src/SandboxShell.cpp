@@ -2357,7 +2357,10 @@ void SandboxApp::drawDockHost(const ImVec2& wpos, const ImVec2& wsize, f32 toolb
         AVER_INFO("[Editor] dock layout restored from editor-layout.ini");
     }
 
-    if (!panels_.dockBuilt_ && dockSize.x > 1.0f && dockSize.y > 1.0f) {
+    // A layout split while the window is still tiny (first frames, before the final WM_SIZE) leaves the Level tab at
+    // ImGui's minimum node size -- the "viewport 45x45" starts. Build only once the host is a real size.
+    const f32 minDock = 200.0f * viewState_.dpi_;
+    if (!panels_.dockBuilt_ && dockSize.x >= minDock && dockSize.y >= minDock) {
         panels_.dockResetRequested_ = false;
         panels_.dockBuilt_ = true;
         ImGui::DockBuilderRemoveNode(dockId);
@@ -2376,6 +2379,24 @@ void SandboxApp::drawDockHost(const ImVec2& wpos, const ImVec2& wsize, f32 toolb
         ImGui::DockBuilderFinish(dockId);
     }
     if (const ImGuiDockNode* cn = ImGui::DockBuilderGetCentralNode(dockId)) viewState_.centralDock_ = cn->ID;
+    // Self-heal a degenerate layout (built tiny, or restored that way from editor-layout.ini): a docked Level tab at
+    // both minimum dimensions inside a full-size host for several frames gets the default layout, once a session.
+    {
+        static int degenerateFrames = 0;
+        static bool healed = false;
+        const ImGuiWindow* lw = ImGui::FindWindowByName(AVER_WIN_LEVEL);
+        const f32 tiny = 64.0f * viewState_.dpi_;
+        const bool degenerate = !healed && panels_.dockBuilt_ && lw && lw->DockIsActive && !lw->Hidden &&
+                                lw->Size.x < tiny && lw->Size.y < tiny && dockSize.x >= 4 * minDock && dockSize.y >= 2 * minDock;
+        degenerateFrames = degenerate ? degenerateFrames + 1 : 0;
+        if (degenerateFrames >= 3) {
+            healed = true;
+            panels_.dockBuilt_ = false;
+            panels_.dockResetRequested_ = true;
+            AVER_WARN("[Editor] the Level tab was docked at {:.0f}x{:.0f} in a {:.0f}x{:.0f} window; rebuilt the default layout",
+                      lw->Size.x, lw->Size.y, dockSize.x, dockSize.y);
+        }
+    }
     editor::drawDockSplitterLines(dockId);
     ImGui::End(); // ##dockhost
 }
