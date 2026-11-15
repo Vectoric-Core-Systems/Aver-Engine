@@ -12,6 +12,8 @@
 #if AVER_MODULE_VEHICLE_SCENE
 #include "aver/vehicle/VehiclePhysicsSystem.hpp"   // entities(): the vehicles Play is driving
 #endif
+#include <algorithm>
+#include <cmath>
 
 namespace aver {
 #if AVER_MODULE_LANDSCAPE
@@ -890,6 +892,8 @@ bool SandboxApp::saveLevelAsOcmap(const std::string& path, bool playSnapshot) {
         }
     }
 
+    u32 nonUniform = 0;
+    std::string firstNonUniform;
     for (const scene::Entity e : lvl_.levelEntities_) {
         if (!world.valid(e)) continue;
         const auto* loc = world.component<scene::CLocal>(e, scene::kComponentLocal);
@@ -913,8 +917,13 @@ bool SandboxApp::saveLevelAsOcmap(const std::string& path, bool playSnapshot) {
         } else {
             // Legacy PLACE is UNIFORM scale only -- OcPlacement has one `scale` field, not
             // OcWorldPlacement's sx/sy/sz -- so a non-uniform edit made through this editor would
-            // lose two axes on this save regardless; .x is as good a choice as any.
+            // lose two axes on this save; .x is kept, and the save says so below.
             p.scale = loc->xf.scale.x;
+            const Vec3 s = loc->xf.scale;
+            const f32 tol = 1e-4f * std::max(1.0f, std::fabs(s.x));
+            if (std::fabs(s.y - s.x) > tol || std::fabs(s.z - s.x) > tol) {
+                if (nonUniform++ == 0) firstNonUniform = p.asset;
+            }
             const auto surfIt = lvl_.entityLegacySurface_.find(static_cast<u32>(e));
             p.surface = surfIt == lvl_.entityLegacySurface_.end() ? -1 : surfIt->second;
         }
@@ -924,6 +933,9 @@ bool SandboxApp::saveLevelAsOcmap(const std::string& path, bool playSnapshot) {
     std::string why;
     if (!fmt::saveOcmap(path, m, &why)) { AVER_WARN("[Level] save failed: {}", why); return false; }
     AVER_INFO("[Level] saved {} placement(s) to {} (legacy .ocmap)", m.placements.size(), path);
+    if (nonUniform && !playSnapshot)
+        AVER_WARN("[Level] {} placement(s) (first: '{}') have a non-uniform scale, which legacy .ocmap cannot hold: "
+                  "saved with their X scale. Save As .ocworld to keep all three axes.", nonUniform, firstNonUniform);
     if (!playSnapshot && path == projSess_.levelPath_) markLevelSaved();   // the level's own file only, as saveLevel
     return true;
 }
