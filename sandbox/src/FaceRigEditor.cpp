@@ -675,19 +675,11 @@ void FaceRigEditor::draw(Engine& e) {
     before_ = asset_;
     heldViseme_ = heldNext_;   // what the Visemes tab saw last frame; the preview (drawn before the tab) uses it
     heldNext_ = -1;
-    if (ImGui::Button("Save") || (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
-                                  keybinds().pressed(CommandId::AssetSave, ImGui::GetIO()))) {
+    if (assetSaveButton()) {
         std::string why;
         if (!save(&why)) AVER_ERROR("[FaceRigEditor] save failed for '{}': {}", path_, why);
     }
-    {
-        const ImGuiIO& io = ImGui::GetIO();
-        const bool focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
-        if (focused && !io.WantTextInput) {
-            if (canUndo() && keybinds().pressed(CommandId::EditUndo, io)) undo();
-            if (canRedo() && keybinds().pressed(CommandId::EditRedo, io)) redo();
-        }
-    }
+    assetUndoRedoShortcuts(canUndo(), canRedo(), [&] { undo(); }, [&] { redo(); });
     ImGui::SameLine();
     ImGui::BeginDisabled(!canUndo());
     if (ImGui::Button("Undo")) undo();

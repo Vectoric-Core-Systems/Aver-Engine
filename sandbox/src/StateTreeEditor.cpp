@@ -619,19 +619,11 @@ void dashedBezier(ImDrawList* dl, ImVec2 a, ImVec2 b, ImVec2 c, ImVec2 d, ImU32 
 } // namespace
 
 void StateTreeEditor::drawToolbar() {
-    if (ImGui::Button("Save") || (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
-                                  keybinds().pressed(CommandId::AssetSave, ImGui::GetIO()))) {
+    if (assetSaveButton()) {
         std::string why;
         if (!save(&why)) AVER_ERROR("[StateTreeEditor] save failed for '{}': {}", path_, why);
     }
-    {
-        const ImGuiIO& io = ImGui::GetIO();
-        const bool focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
-        if (focused && !io.WantTextInput) {
-            if (canUndo() && keybinds().pressed(CommandId::EditUndo, io)) undo();
-            if (canRedo() && keybinds().pressed(CommandId::EditRedo, io)) redo();
-        }
-    }
+    assetUndoRedoShortcuts(canUndo(), canRedo(), [&] { undo(); }, [&] { redo(); });
     ImGui::SameLine();
     ImGui::BeginDisabled(!canUndo());
     if (ImGui::Button("Undo")) undo();

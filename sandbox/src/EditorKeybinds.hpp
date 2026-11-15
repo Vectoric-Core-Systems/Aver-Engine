@@ -183,5 +183,20 @@ private:
     std::string conflictLabel_; // label of the command blocking the last capture attempt, or empty
 };
 
+// The shortcuts every asset tab shares, while its window (or a child) has focus. The Save button, or Save's chord:
+inline bool assetSaveButton() {
+    return ImGui::Button("Save") || (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+                                     keybinds().pressed(CommandId::AssetSave, ImGui::GetIO()));
+}
+
+// Undo and Redo's chords, except while a text field has the keyboard (Ctrl+Z then undoes the typing, not the asset).
+template <class Undo, class Redo>
+void assetUndoRedoShortcuts(bool canUndo, bool canRedo, Undo&& undo, Redo&& redo) {
+    const ImGuiIO& io = ImGui::GetIO();
+    if (!ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) || io.WantTextInput) return;
+    if (canUndo && keybinds().pressed(CommandId::EditUndo, io)) undo();
+    if (canRedo && keybinds().pressed(CommandId::EditRedo, io)) redo();
+}
+
 } // namespace aver::editor
 #endif // AVER_WITH_IMGUI

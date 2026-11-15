@@ -2465,14 +2465,7 @@ void AnimEditor::drawHeader() {
     // Ctrl+Z/Ctrl+Y reach the same undo()/redo() as the buttons, guarded the same way, and skipped
     // while an InputText has focus (it has its own Ctrl+Z; WantTextInput is the same check
     // SoundEditor.cpp uses to tell the two apart). Follows isClip_, same as pushUndo().
-    {
-        const ImGuiIO& io = ImGui::GetIO();
-        const bool focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
-        if (focused && !io.WantTextInput) {
-            if (canUndo() && keybinds().pressed(CommandId::EditUndo, io)) undo();
-            if (canRedo() && keybinds().pressed(CommandId::EditRedo, io)) redo();
-        }
-    }
+    assetUndoRedoShortcuts(canUndo(), canRedo(), [&] { undo(); }, [&] { redo(); });
     ImGui::BeginDisabled(!canUndo());
     if (ImGui::Button(ICON_UNDO " Undo")) undo();
     ImGui::EndDisabled();
