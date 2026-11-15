@@ -22,6 +22,19 @@ Every known issue from 0.3.0 to 0.8.0 was rechecked; most had been fixed without
 - Saving a level as legacy `.ocmap` warns when a non-uniform scale is reduced to its X scale.
 - `--refl-test`'s mirror was nearly black (base colour 0.02 on a metal), so the test could not pass; fixed, not yet run.
 
+Then the ones still open were fixed in code (built and unit-tested, not yet run):
+
+- **Fluids are particles.** The simulated fluid volume is a CPU position-based fluid with a meshed surface instead of
+  a pressurised Jolt shell, so it holds its depth in a tank instead of flattening. `compliance` and `pressure` are
+  still read and ignored; `damping` is viscosity.
+- GI keeps a bright saturated emitter's hue: the radiance ceiling scales the colour instead of clamping each channel.
+- Changing the voxel resolution applies live, with one GI re-bake. `voxi.giSkinnedInterval` (opt-in) lets skinned
+  meshes bounce GI, refreshed every N ticks.
+- Rotate and Scale on a multi-selection pivot on the selection centre. The Outliner drags the whole selection and
+  reorders siblings (top/bottom of a row), and siblings list in that order.
+- The editor no longer starts with a 45x45 viewport: the layout waits for a real window size and repairs itself.
+- `MaterialGraphTest` compiles every material graph case to SPIR-V as well as DXIL.
+
 ### Mesh shaders draw meshlets (not yet run on a GPU)
 
 - The mesh-shader geometry path now draws meshlets: up to 64 vertices and 124 triangles each, built when a mesh is created. An amplification shader culls them against the view frustum, 32 at a time, and each vertex is shaded once instead of once per triangle corner. D3D12 and Vulkan both build them; Vulkan's mesh path compiles again (its push-constant block had lost two fields). Mesh shaders stay off by default on AMD until the NeonDistrict load is re-checked (`AVER_MESH_SHADERS=1`).

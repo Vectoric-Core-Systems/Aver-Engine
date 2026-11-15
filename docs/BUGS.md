@@ -53,25 +53,41 @@ checked against the tree at ff44d086. Release notes are left as they were publis
 | GitHub #5 macOS WatcherTest: rewrite reads as Created | 0d1b9f7d (FSEvents backend tracks known paths) |
 | GitHub #6 macOS arm64 NeuralConvTest FMA | 0d1b9f7d (`-ffp-contract=off` on the neural module and its test) |
 
+## Fixed in code the same day, not yet run (engine runs were off)
+
+Each built and passed the CPU suite (587/587); none has been seen on screen.
+
+- **GI hue under a saturated emitter.** The radiance ceiling scales the whole colour by its largest channel instead of
+  clamping each channel, so a red emitter's bounce stays red rather than flooding the frame; anything under the
+  ceiling is unchanged (`averRadCeil` / `averRadClamp` beside each `AVER_VOX_MAXRAD`). Poison checks still read the
+  raw value. SPIR-V and DXIL compile (`VoxiSpirvCompileTest`).
+- **Voxel resolution applies live.** `VoxiRenderer::beginScene` rebuilds the volume at the top of a frame, after a
+  GPU wait and before any recording, then forces a full GI rebuild; a failed allocation keeps the old volume
+  (`applyVoxelResolution`, rules in `GiVoxelPolicy.hpp`, `GiVoxelPolicyTest`).
+- **Skinned meshes can bounce GI**, opt-in: `voxi.giSkinnedInterval` N (at least 30 ticks) voxelises skinned draws and
+  keys them on a pose bucket, so a walking character costs one GI rebuild per N ticks. Default 0 keeps the old
+  exclusion; true partial revoxelisation is still not built.
+- **Group Rotate and Scale** pivot on the selection centre (the gizmo sits there for all three tools), one undo
+  entry per drag (`GroupTransform.hpp`, `GroupTransformTest`).
+- **Outliner multi-drag and reorder.** A drag carries the whole selection; a row's top/bottom quarter inserts
+  before/after it, the middle reparents. Sibling order is `World::orderStamp`, kept through undo and save
+  (`OutlinerReorderTest`, `SceneSiblingOrderTest`). Siblings now list in that order, not alphabetically.
+- **The fluid is a particle fluid.** The Jolt pressure shell is replaced by a CPU position-based fluid
+  (`PbfFluid`) with a marching-tetrahedra surface (`FluidSurface`): a 1 m tank holds 97% of its depth, nothing
+  leaks, runs are deterministic (`PbfFluidTest`). Default cap 4000 particles, about 8 ms a frame on one thread.
+  Scene colliders are sampled once at spawn; buoyancy still reads the flat plane. `docs/FLUIDS.md`.
+- **The 45x45 viewport.** The default dock layout is no longer split while the host is under 200 px, and a docked
+  Level tab stuck at minimum size in a full window gets the default layout back once, with a warning.
+- **Material graphs on Vulkan:** `MaterialGraphTest` now compiles every graph and node case to SPIR-V too.
+
 ## Still open
 
-- **Vulkan cascade shadow map** (0.4.0, 0.5.0). The cascade pass runs in `prePass`, before the scene scope opens, and
-  it did when the defect was measured (c97f0929), so the comment's "joins the scene scope" story does not explain
-  that measurement. Needs one Vulkan `--no-rt` floor probe before either the comment or the claim changes.
-- **GI can be dominated by one saturated emitter** (0.4.0). The ceiling is still per component, so it bounds
-  magnitude, not hue. A peak-preserving clamp (scale the colour so its largest channel meets the ceiling) leaves
-  every image under the ceiling byte-identical; it changes the look, so it waits for a decision and a GPU check.
-- **Voxel resolution changes take a reload** (0.4.0). Honest in the UI now; a live rebuild of the volume risks the
-  mid-frame teardown that removed the device twice.
-- **Group rotate/scale and Outliner reorder/multi-drag** (0.5.0). Needs the pivot decided (anchor, selection
-  centre, or each object's own) and a stored sibling order.
-- **A fluid volume pancakes** (0.4.0). Waits on the fluid-model decision.
-- **The editor viewport sometimes starts at 45x45** (STATUS §4g). The rect is the Level dock tab's content size,
-  not the OS window; a dock built while the window is still tiny is the leading suspect. Needs runs.
-- **Frame determinism and GI churn under motion** (0.5.0). Need measurement runs.
-- **Skinned meshes bounce no GI** (BUGS 0.5.0 Open, a documented trade). Needs partial revoxelisation.
-- **Material graphs on Vulkan**: compiled to SPIR-V by `VoxiSpirvCompileTest`, never rendered there.
-- **The horizontal glass slab reading near-black at steep angles**: no fix commit names it; needs a capture.
+- **Vulkan cascade shadow map** (0.4.0, 0.5.0). Its write path was traced and nothing was found wrong; the old
+  "joins the scene scope" explanation is gone from the code and `docs/VULKAN.md`, which lists the suspects. Needs one
+  Vulkan `--no-rt` run with validation on.
+- **GI key churn with LOD selection on.** A culled entity plans its base parts while a visible one may plan a
+  substituted LOD handle (`SandboxRender.cpp`, "KNOWN RESIDUAL (F4)"). Only with the opt-in LOD/cluster paths.
+- **Frame determinism** (0.5.0) and **the near-black glass slab**: need measurement runs or a capture.
 
 ---
 
