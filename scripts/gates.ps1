@@ -98,16 +98,25 @@ param(
     # caught before a single gate launches -- not 153 silent NO-BASELINEs, and not, under -Record, 153
     # numbers quietly recorded from whatever order DeviceDesc::preferred defaults to.
     [string]   $Backend = 'd3d12',
-    [string]   $Exe = $(if ($Release) { "$PSScriptRoot\..\build-release\bin\Sandbox.exe" } else { "$PSScriptRoot\..\build\bin\Sandbox.exe" }),
+    [string]   $Exe = '',            # default filled in below the param block
     # Suffixed with the backend, but ONLY when it differs from the default -- so 'd3d12' (again,
     # default or explicit) names the exact file this script has always used, and every other value
     # gets its own oracle rather than being silently compared against D3D12's numbers. See the header
     # comment for why that is the considered answer here and not a shortcut.
-    [string]   $BaselineFile = $(
-        $backendSuffix = if ($Backend.ToLowerInvariant() -eq 'd3d12') { '' } else { ".$($Backend.ToLowerInvariant())" }
-        if ($Release) { "$PSScriptRoot\gates.baseline.release$backendSuffix.txt" } else { "$PSScriptRoot\gates.baseline$backendSuffix.txt" }
-    )
+    [string]   $BaselineFile = ''    # default filled in below the param block
 )
+
+# THE PATH DEFAULTS LIVE HERE, NOT IN param(): Windows PowerShell 5.1 can leave $PSScriptRoot empty while it evaluates
+# parameter defaults, and then they came out as '\..\build-release\bin\Sandbox.exe' and '\gates.baseline.release.txt':
+# a run that took them (release.ps1's included) found no editor, or no baseline and called every gate NO-BASELINE.
+$scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+if (-not $Exe) {
+    $Exe = if ($Release) { "$scriptDir\..\build-release\bin\Sandbox.exe" } else { "$scriptDir\..\build\bin\Sandbox.exe" }
+}
+if (-not $BaselineFile) {
+    $backendSuffix = if ($Backend.ToLowerInvariant() -eq 'd3d12') { '' } else { ".$($Backend.ToLowerInvariant())" }
+    $BaselineFile = if ($Release) { "$scriptDir\gates.baseline.release$backendSuffix.txt" } else { "$scriptDir\gates.baseline$backendSuffix.txt" }
+}
 
 # Launches are spaced by this much. Back-to-back, a process occasionally comes up while the previous
 # one is still tearing its window down, the new window opens at a different size, and the probe lands
