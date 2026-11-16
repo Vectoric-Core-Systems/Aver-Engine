@@ -113,6 +113,10 @@ void GameStreaming::enable(const fmt::ProjectDesc& project,
     for (const fmt::OcPcgVolume& pv : pcgVolumes)
         if (pv.name != "Sky") fields.push_back(&pv);
 
+    // A level that declares no density field and no scatter species has nothing to stream. Both hosts turn streaming
+    // on a few frames after load whatever the level holds, so this is the common case, not a failure: say nothing.
+    if (fields.empty() && scatterSpecies.empty()) return;
+
     // No non-Sky volume still builds exactly ONE world on GeneratorSettings' shipped defaults --
     // the single-species fallback every level had before PCGVOLUME existed.
     const usize fieldCount = fields.empty() ? usize{1} : fields.size();
