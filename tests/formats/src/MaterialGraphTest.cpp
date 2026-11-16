@@ -53,10 +53,10 @@ static void check(bool cond, const std::string& what) {
 // a test that cannot tell the two apart is worse than one that says which it saw.
 class Dxc {
 public:
-    Dxc() = default;
-    // The SPIR-V twin: the same source to Vulkan's SPIR-V, through the SPIR-V-capable DXC (vendored on Windows, the
-    // bin/ one elsewhere) with the backend's UAV register shift, as VoxiSpirvCompileTest does.
-    static Dxc spirv() { Dxc d; d.spirv_ = true; return d; }
+    // spirv: the SPIR-V twin -- the same source to Vulkan's SPIR-V, through the SPIR-V-capable DXC (vendored on Windows, the
+    // bin/ one elsewhere) with the backend's UAV register shift, as VoxiSpirvCompileTest does. A constructor, not a factory:
+    // Dxc holds ComPtrs, which neither copy nor move outside Windows, so it is built where it lives.
+    explicit Dxc(bool spirv = false) : spirv_(spirv) {}
     const char* name() const { return spirv_ ? "SPIR-V" : "DXIL"; }
 
     bool available() {
@@ -1608,7 +1608,7 @@ int main() {
     // it actually got to -- which sends the reader looking at the wrong test.
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     Dxc dxc;
-    Dxc dxcSpirv = Dxc::spirv();
+    Dxc dxcSpirv(true);
     AVER_INFO("==================================================");
     AVER_INFO("material graph -> HLSL");
     AVER_INFO("  DXC: {}", dxc.available() ? "loaded" : "NOT AVAILABLE -- compile checks will SKIP");
