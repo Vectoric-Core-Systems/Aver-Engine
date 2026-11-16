@@ -10,12 +10,9 @@
 // any installer inventory show, so the absence was visible in several places at once and only
 // noticed when a file association made it matter.
 //
-// The numeric version is duplicated from the top-level project(AverEngine VERSION 0.1.0) rather than
-// generated, because a .rc is not configured through CMake in this tree. If the two disagree the
-// build is not wrong, only the About box -- but they should be changed together.
-#define AVER_VER_MAJOR 0
-#define AVER_VER_MINOR 1
-#define AVER_VER_PATCH 0
+// The numbers come from project(AverEngine VERSION ...) through AverVersionRc.h, which sandbox/CMakeLists.txt
+// generates; they were typed here once and still said 0.1.0 at 0.8.0.
+#include "AverVersionRc.h"
 
 1 VERSIONINFO
 FILEVERSION    AVER_VER_MAJOR, AVER_VER_MINOR, AVER_VER_PATCH, 0
@@ -38,11 +35,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "Aver Engine"
             VALUE "FileDescription",  "Aver Engine"
-            VALUE "FileVersion",      "0.1.0.0"
+            VALUE "FileVersion",      AVER_VER_STRING
             VALUE "InternalName",     "Sandbox"
             VALUE "OriginalFilename", "Sandbox.exe"
             VALUE "ProductName",      "Aver Engine"
-            VALUE "ProductVersion",   "0.1.0.0"
+            VALUE "ProductVersion",   AVER_VER_STRING
         END
     END
     BLOCK "VarFileInfo"

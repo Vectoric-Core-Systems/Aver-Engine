@@ -609,6 +609,9 @@ set_target_properties(Sandbox.Theme PROPERTIES FOLDER "sandbox")
 # replacing the icon would not re-run the resource compiler and the exe would keep the old one.
 set_property(SOURCE Sandbox.rc APPEND PROPERTY
   OBJECT_DEPENDS ${CMAKE_SOURCE_DIR}/branding/icon.ico)
+# VERSIONINFO's numbers, from project(VERSION): the one place the version is written.
+configure_file(AverVersionRc.h.in ${CMAKE_CURRENT_BINARY_DIR}/generated/AverVersionRc.h @ONLY)
+target_include_directories(Sandbox PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
 
 # The editor control channel. OPTIONAL in the strongest sense: without it the editor has no idea it
 # ever existed, which is what `if(TARGET ...)` here and AVER_MODULE_MCP in the module both enforce.
