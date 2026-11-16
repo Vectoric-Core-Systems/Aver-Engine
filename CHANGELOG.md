@@ -8,7 +8,10 @@ parentheses are short refs into this repository — `git show <hash>` for the fu
 usually longer and more useful than the line here. `docs/BUGS.md` carries the full defect list with
 triggering inputs for anything summarised below.
 
-## [Unreleased]
+## [0.8.0] — not yet published
+
+Everything since 0.5.0. 0.6.0 (2026-10-04) and 0.7.0 (2026-10-12) were published with install notes only, so their
+changes are listed here too.
 
 ### Known issues from earlier releases
 
@@ -40,6 +43,10 @@ resolution change, a group rotate and its undo, an Outliner reorder and its undo
 - TriFactor LOD selection is on in new projects (they were created with `RENDER.LODSELECT 0`), and a coarser level of a
   multi-material mesh draws each slot with its own material instead of one for the whole mesh. `--lod-select`,
   `--no-lod-select`, `--occlusion-cull` and `--depth-prepass` now outrank the project and are never saved into it.
+- **Packaged games** (`scripts/stage-game.ps1`, `verify-game.ps1`) select TriFactor LOD levels as the editor does
+  (`RENDER.LODSELECT`, `RENDER.LODTHRESHOLD`). Staging accepts any import Windows itself provides (V5's `ntdll.dll` was
+  refused), and verification runs the game as a first-time player, so its own `Settings.ini` no longer fails it.
+  A level with no PCG volume no longer logs a chunk-streaming warning.
 - Two no longer reproduce, measured: the Vulkan cascade shadow map under `--no-rt` (it matches D3D12), and the
   horizontal glass slab reading near-black at steep angles.
 - `--capture-settled N` captures a streamed level once loading has gone quiet, with its acceleration structures built
