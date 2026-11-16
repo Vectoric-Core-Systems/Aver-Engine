@@ -176,11 +176,22 @@ if (-not (Test-Path -LiteralPath $exe)) {
 
     # cwd = C:\, deliberately. See the description: it is the working directory rather than the copy
     # that makes this a real isolation test.
-    Note "running: AverEngineRuntime.exe $($args -join ' ')   (cwd = C:\)"
-    $proc = Start-Process -FilePath $exe -ArgumentList $args -WorkingDirectory 'C:\' `
-                          -NoNewWindow -Wait -PassThru `
-                          -RedirectStandardOutput (Join-Path $scratch 'run.out') `
-                          -RedirectStandardError  (Join-Path $scratch 'run.err')
+    # A FRESH PLAYER, TOO. The game keeps the player's own state (Settings.ini: bindings, culture) in the per-user
+    # directory, which is right for a game and is not package content. AVER_USER_DATA_DIR points it at an empty folder
+    # inside the scratch copy, so those opens count as inside, and the run proves the game starts on a machine that
+    # has never run it instead of reading this developer's saved settings.
+    $userData = Join-Path $scratch '_userdata'
+    $prevUserData = $env:AVER_USER_DATA_DIR
+    $env:AVER_USER_DATA_DIR = $userData
+    Note "running: AverEngineRuntime.exe $($args -join ' ')   (cwd = C:\, user data = $userData)"
+    try {
+        $proc = Start-Process -FilePath $exe -ArgumentList $args -WorkingDirectory 'C:\' `
+                              -NoNewWindow -Wait -PassThru `
+                              -RedirectStandardOutput (Join-Path $scratch 'run.out') `
+                              -RedirectStandardError  (Join-Path $scratch 'run.err')
+    } finally {
+        $env:AVER_USER_DATA_DIR = $prevUserData
+    }
     $code = $proc.ExitCode
     # BOTH STREAMS. This read run.out alone, and the engine writes part of its log to stderr -- so
     # the "[RHI] device created" assertion below could never see that line and reported a healthy

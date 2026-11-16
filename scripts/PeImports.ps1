@@ -105,6 +105,23 @@ $AverOsProvidedDlls = @(
     'ws2_32.dll', 'ucrtbase.dll', 'xinput1_4.dll'
 )
 
+# A project's own native DLLs import whatever Windows DLLs their authors used (V5's v5_core.dll imports ntdll.dll), so a
+# list grounded in the engine's binaries alone cannot cover them, and it has already gone stale twice for the engine's own.
+# Beyond the list: a DLL in System32 that Microsoft signed its version info for is part of Windows -- unless it is one of
+# the redistributables Windows does not guarantee (the CRTs below, and the retired DirectX SDK's d3dx*, xinput1_1..1_3,
+# xaudio2_0..2_7, x3daudio*, xapofx*), which a payload must ship or avoid.
+$AverNotOsPattern = '(?i)^(d3dx.*|xinput1_[123]|xaudio2_[0-7]|x3daudio.*|xapofx.*|d3dcsx.*)\.dll$'
+function Test-AverOsDll([string] $name) {
+    $l = $name.ToLower()
+    if ($l -like 'api-ms-win-*' -or $l -like 'ext-ms-win-*') { return $true }
+    if ($AverOsProvidedDlls -contains $l) { return $true }
+    if ($l -match $AverNotOsPattern -or $l -match $AverVcRuntimePattern -or $l -match $AverDebugCrtPattern) { return $false }
+    $sys = Join-Path ([Environment]::GetFolderPath('System')) $l
+    if (-not (Test-Path -LiteralPath $sys)) { return $false }
+    $company = (Get-Item -LiteralPath $sys).VersionInfo.CompanyName
+    return $company -eq 'Microsoft Corporation'
+}
+
 # The debug CRT, which ships with Visual Studio and may not be redistributed at all.
 $AverDebugCrtPattern = '(?i)^(msvcp\d+d|vcruntime\d+(_\d+)?d|ucrtbased|msvcr\d+d)\.dll$'
 

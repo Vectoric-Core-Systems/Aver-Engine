@@ -515,7 +515,7 @@ foreach ($pe in $pes) {
         }
         $lower = $imp.ToLower()
         if ($lower -like 'api-ms-win-*') { continue }
-        if ($osProvided -contains $lower) { continue }
+        if (Test-AverOsDll $lower) { continue }
         if ($stagedNames.ContainsKey($lower)) { continue }
         if (-not $unresolved.ContainsKey($lower)) { $unresolved[$lower] = New-Object System.Collections.Generic.List[string] }
         $unresolved[$lower].Add($pe.FullName.Substring($outFull.Length + 1))
