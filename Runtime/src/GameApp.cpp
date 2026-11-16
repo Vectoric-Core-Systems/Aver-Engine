@@ -1,5 +1,11 @@
 #include "GameAppInternal.hpp"
 
+#if AVER_MODULE_TRIFACTOR
+#  include "aver/trifactor/ClusterAdapt.hpp"
+#  include "aver/trifactor/ClusterSelect.hpp"
+#endif
+#include <algorithm>
+
 // OK to define twice: separate binaries don't collide on symbols (unlike Image.cpp's STB_IMAGE_IMPLEMENTATION).
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
@@ -90,6 +96,38 @@ void GameApp::tickGameplay(f32 dt) {
 }
 
 #if AVER_MODULE_SCENE
+void GameApp::decideLod(EntityDecision& d, void* user) {
+#if AVER_MODULE_TRIFACTOR
+    GameApp& self = *static_cast<GameApp*>(user);
+    // Culled and owner-hidden entities go to Voxi on the direct route at full detail, as in the editor; a posed, soft or
+    // hair handle is already a substitute.
+    if (d.frustumCulled || d.ownerHidden || d.skinned || !d.haveWorldBox || d.chosenMesh != d.baseMesh) return;
+    const GameContent::LodLadder* ladder = self.content_.lodLadderFor(d.meshId);
+    if (!ladder) return;
+    trifactor::View view;
+    view.eye = self.eye_;
+    view.viewProj = self.viewProj_;
+    view.viewportHeightPx = self.lodViewHeightPx_;
+    view.verticalFovRadians = self.playView_.fovYRad;
+    const Vec3 lo = d.worldBoxMin, hi = d.worldBoxMax;
+    const Vec3 centre{(lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f, (lo.z + hi.z) * 0.5f};
+    const f32 dx = hi.x - lo.x, dy = hi.y - lo.y, dz = hi.z - lo.z;
+    const f32 radius = 0.5f * std::sqrt(dx * dx + dy * dy + dz * dz);
+    f32 threshold = self.lodThresholdPx_;
+    if (const auto* mr = scene::World::instance().component<scene::CMeshRenderer>(d.entity, scene::kComponentMeshRenderer);
+        mr && mr->lodBias != 0.0f && std::isfinite(mr->lodBias))
+        threshold *= std::exp2(-std::clamp(mr->lodBias, -8.0f, 8.0f));   // the editor's lodThresholdFor
+    const u32 level = trifactor::chooseLevelCached(ladder->errorCm, centre, radius, threshold, view);
+    ++self.lodTested_;
+    if (level > 0 && level < ladder->handles.size()) {
+        d.chosenMesh = ladder->handles[level];
+        ++self.lodCollapsed_;
+    }
+#else
+    (void)d; (void)user;
+#endif
+}
+
 bool GameApp::sequenceEmissiveScale(scene::Entity e, f32 outRgb[3], void* user) {
     return static_cast<const GameApp*>(user)->sequenceDirector_.emissiveScale(e, outRgb);
 }
@@ -318,6 +356,14 @@ void GameApp::onRender(Engine& e) {
             opts.emissiveScale = &GameApp::sequenceEmissiveScale;
             opts.user = this;
         }
+#if AVER_MODULE_TRIFACTOR
+        if (lodSelect_) {
+            lodViewHeightPx_ = static_cast<f32>(e.window() ? e.window()->height() : cfg_.height);
+            lodTested_ = lodCollapsed_ = 0;
+            opts.decide = &GameApp::decideLod;
+            opts.user = this;
+        }
+#endif
 #if AVER_MODULE_VOXI
         // Culled and owner-hidden entities reach Voxi too, so off-screen casters keep shadow and GI.
         if (voxiAttached_) opts.voxiRenderer = &voxiRenderer_;
@@ -329,6 +375,13 @@ void GameApp::onRender(Engine& e) {
 #endif
 #endif
         drawWorld(*dev, viewProj_, content_, drawStats_, ms, skinnedScene_.get(), opts);
+#if AVER_MODULE_TRIFACTOR
+        if (lodSelect_ && (lodTested_ != lodLoggedTested_ || lodCollapsed_ != lodLoggedCollapsed_)) {
+            AVER_INFO("[LOD-SELECT] instances={} levelCollapsed={}", lodTested_, lodCollapsed_);
+            lodLoggedTested_ = lodTested_;
+            lodLoggedCollapsed_ = lodCollapsed_;
+        }
+#endif
 #if AVER_MODULE_FRAMEWORK
         game::drawScriptDebugLines(dev, scriptDebugMesh_, e.time().dt);   // scripts' DebugDraw lines
 #endif

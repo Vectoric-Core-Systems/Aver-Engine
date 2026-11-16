@@ -227,6 +227,26 @@ bool GameContent::uploadMesh(rhi::IDevice& device, u64 id, const fmt::OcMeshData
         meshAcquired_(LoadedMesh{id, rel, &md, verts, md.indices, h, &cpu->lodStaged}, meshAcquiredUser_);
     hm.mark("upload:hooks");
 
+    // The LOD ladder the game's draw walk selects from. A skinned mesh draws through its pose, never a level.
+#if AVER_MODULE_TRIFACTOR
+    if (buildLodLadders_ && md.lodCount() > 1 && !md.hasSkin()) {
+        LodLadder ladder;
+        ladder.handles.push_back(h);
+        ladder.errorCm.push_back(0.0f);
+        for (u32 lvl = 1; lvl < md.lodCount(); ++lvl) {
+            const fmt::OcMeshLod& lod = md.coarserLods[lvl - 1];
+            rhi::MeshHandle lh = device.createMeshSharingVertices(h, lod.indices.data(), (u32)lod.indices.size());
+            if (!lh) lh = device.createMesh(verts.data(), (u32)verts.size(), lod.indices.data(), (u32)lod.indices.size());
+            if (!lh) break;
+            // Drawn whole, a split mesh's level would give every slot one material: a level that cannot be cut ends the ladder.
+            if (partsFor(id) && !buildLevelParts(device, id, md, lvl, h, lh)) { device.destroyMesh(lh); break; }
+            ladder.handles.push_back(lh);
+            ladder.errorCm.push_back(trifactor::levelWorldErrorCm(md, lvl));
+        }
+        if (ladder.handles.size() > 1) lodLadders_[id] = std::move(ladder);
+    }
+#endif
+
     // Coarse LOD for shadow/GI/voxelise passes (depth-only). 20cm target error (one shadow texel).
 #if AVER_MODULE_TRIFACTOR
     if (buildDepthProxies_ && md.lodCount() > 1) {
@@ -400,6 +420,10 @@ void GameContent::unloadToPending(u64 id) {
     if (const auto pit = meshParts_.find(id); pit != meshParts_.end()) {
         for (const MeshPart& q : pit->second) if (q.mesh) p.others.push_back(q.mesh);
         meshParts_.erase(pit);
+    }
+    if (const auto lit = lodLadders_.find(id); lit != lodLadders_.end()) {
+        for (usize lvl = 1; lvl < lit->second.handles.size(); ++lvl) p.others.push_back(lit->second.handles[lvl]);
+        lodLadders_.erase(lit);
     }
     if (const auto sit = sceneMeshes_.find(id); sit != sceneMeshes_.end()) {
         if (const auto dit = depthProxyMap_.find(sit->second); dit != depthProxyMap_.end()) {
@@ -604,6 +628,11 @@ bool GameContent::buildLevelParts(rhi::IDevice& device, u64 id, const fmt::OcMes
     return true;
 }
 
+const GameContent::LodLadder* GameContent::lodLadderFor(u64 id) const {
+    const auto it = lodLadders_.find(id);
+    return it == lodLadders_.end() ? nullptr : &it->second;
+}
+
 const std::vector<GameContent::MeshPart>* GameContent::levelPartsFor(rhi::MeshHandle levelHandle, u64 id) const {
     const auto it = levelParts_.find(levelHandle);
     return (it != levelParts_.end() && it->second.meshId == id) ? &it->second.parts : nullptr;
@@ -690,6 +719,10 @@ void GameContent::releaseProjectMeshes(rhi::IDevice& device, bool destroyBaseHan
             for (const MeshPart& p : pit->second)
                 if (p.mesh) device.destroyMesh(p.mesh);
             meshParts_.erase(pit);
+        }
+        if (const auto lit = lodLadders_.find(id); lit != lodLadders_.end()) {
+            for (usize lvl = 1; lvl < lit->second.handles.size(); ++lvl) device.destroyMesh(lit->second.handles[lvl]);
+            lodLadders_.erase(lit);
         }
         if (const auto sit = sceneMeshes_.find(id); sit != sceneMeshes_.end()) {
             // Depth proxy is keyed on the base handle.

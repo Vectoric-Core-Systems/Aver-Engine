@@ -215,6 +215,16 @@ public:
     // Whether loadProjectMeshes uploads a coarser LOD per mesh as its depth-pass stand-in.
     void setBuildDepthProxies(bool on) { buildDepthProxies_ = on; }
 
+    // TriFactor LOD: every coarser level a mesh carries, as handles sharing LOD 0's vertices (a split mesh's levels cut
+    // into parts, buildLevelParts), with each level's world-space error (trifactor::levelWorldErrorCm). The game's draw
+    // walk picks one per instance with trifactor::chooseLevelCached. The editor builds its own ladder and turns this off.
+    struct LodLadder {
+        std::vector<rhi::MeshHandle> handles;   // [0] is the mesh itself
+        std::vector<f32> errorCm;
+    };
+    void setBuildLodLadders(bool on) { buildLodLadders_ = on; }
+    const LodLadder* lodLadderFor(u64 id) const;
+
     // A mesh uploaded elsewhere, registered under `id` (the editor's --skin-scene-test).
     void registerMesh(u64 id, rhi::MeshHandle handle, const std::pair<Vec3, Vec3>& bounds);
 
@@ -334,6 +344,8 @@ private:
     MeshLoadedFn meshLoaded_ = nullptr;
     void* meshLoadedUser_ = nullptr;
     bool buildDepthProxies_ = true;
+    bool buildLodLadders_ = true;
+    std::unordered_map<u64, LodLadder> lodLadders_;
     MeshLoadedFn meshAcquired_ = nullptr;
     void* meshAcquiredUser_ = nullptr;
     MeshReleasedFn meshReleased_ = nullptr;

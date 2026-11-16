@@ -388,6 +388,13 @@ private:
     game::SequenceDirector sequenceDirector_;
     // DrawWorldOptions::emissiveScale sink; user is the GameApp.
     static bool sequenceEmissiveScale(scene::Entity e, f32 outRgb[3], void* user);
+    // DrawWorldOptions::decide: TriFactor LOD selection per visible instance (RENDER.LODSELECT, on unless the project says
+    // 0), the editor's rule: chooseLevelCached against the content's ladder, RENDER.LODTHRESHOLD pixels of screen error.
+    static void decideLod(EntityDecision& d, void* user);
+    bool lodSelect_ = true;
+    f32 lodThresholdPx_ = 1.0f;
+    f32 lodViewHeightPx_ = 1080.0f;
+    u32 lodTested_ = 0, lodCollapsed_ = 0, lodLoggedTested_ = 0, lodLoggedCollapsed_ = 0;   // [LOD-SELECT], as the editor logs it
 #  if AVER_MODULE_PHYSICS
     // The level's physics cars (world::VehicleSystem). Built once play begins.
     // Cars only advance while playing, so projects with no GameMode never build them.

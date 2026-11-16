@@ -294,6 +294,9 @@ void GameApp::openProject(Engine& e) {
     applyProjectRenderSettings();
     // RENDER.EXPOSURE/BLOOM/AUTOEXPOSURE/TONEMAP are per-device post state (like PHYSICS/AUDIO)
     applyProjectPostSettings();
+    // TriFactor LOD selection: on unless the project says RENDER.LODSELECT 0, as in the editor.
+    lodSelect_ = project_.lodSelect != 0;
+    if (project_.lodThresholdPx > 0.0f) lodThresholdPx_ = project_.lodThresholdPx;
 #if AVER_MODULE_PHYSICS
     // Apply physics settings from manifest
     game::applyProjectPhysics(project_);

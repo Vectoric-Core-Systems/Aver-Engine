@@ -43,6 +43,7 @@ void SandboxApp::loadProjectMeshes(Engine& e) {
     pass.app = this;
     pass.engine = &e;
     content_.setBuildDepthProxies(false);   // editor builds the LOD ladder and its own depth proxies
+    content_.setBuildLodLadders(false);
     content_.setMeshLoadedHook(&SandboxApp::onMeshLoaded, &pass);
     content_.loadProjectMeshes(*e.device());
     content_.setMeshLoadedHook(nullptr, nullptr);
