@@ -119,6 +119,17 @@ int main(int argc, char** argv) {
     writeFileText((root / "Extensions" / "Old" / "extension.json").string(),
                   manifest("Old", 1, R"JSON([ { "menu": "Import Old...", "command": "oldcmd" } ])JSON"));
 
+    // ---- nothing installed, nothing offered: an engine without extensions (no Fabric) has no import entries -------------------------
+    {
+        fsys::create_directories(root / "Empty" / "Extensions", ec);
+        ExtensionImporter none;
+        none.scan((root / "Empty" / "Extensions").string());
+        check(none.entries().empty(), "an empty Extensions folder adds no import entry");
+        ExtensionImporter missing;
+        missing.scan((root / "Nowhere" / "Extensions").string());
+        check(missing.entries().empty(), "a missing Extensions folder adds no import entry");
+    }
+
     // ---- the importers the loader lists ------------------------------------------------------------------------------------------
     AVER_INFO("-- the manifest --");
     ExtensionImporter importer;
