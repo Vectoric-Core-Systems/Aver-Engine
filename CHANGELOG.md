@@ -20,8 +20,11 @@ Every known issue from 0.3.0 to 0.8.0 was rechecked; most had been fixed without
 
 - The animation editor keeps unsaved edits when its file changes on disk, and its own save no longer clears undo.
 - The occlusion culler stops retrying a failed shader compile every frame (and no longer leaks a pipeline doing it).
-- Without DXC, the UI and post shaders build again: the FXC fallback resolves `#include`. One startup line now says
-  what is off without DXC.
+- Without DXC, the FXC fallback resolves `#include`, and one startup line says what is off without DXC. The UI,
+  skinning, particles and the other modules that ask for SM 6.0 stay off without it (`docs/BUGS.md`).
+- Without DXC, the scene draws again. Strand hair (2026-10-22) left the shaded surface partly unset before filling its
+  hair fields, which FXC refuses, so the main scene shader failed and `--force-caps no-dxc` drew a black viewport.
+  Packaged games ship DXC, so this only showed where `dxcompiler.dll` cannot load.
 - Saving a level as legacy `.ocmap` warns when a non-uniform scale is reduced to its X scale.
 - `--refl-test`'s mirror was nearly black (base colour 0.02 on a metal), so the test could not pass. It passes now: the
   beacon moves 9 of 9 mirror probes under ray tracing (largest 0.58) and none under cone tracing.

@@ -23,6 +23,18 @@ checked against the tree at ff44d086. Release notes are left as they were publis
   (`rhi::shaderIncludeText`, `ShaderIncludeLookupTest`); `fxc /T vs_5_1|ps_5_1` compiles `ui.hlsl` that way. The
   device also logs one line saying what is off without DXC (0.4.0's "silently drops" — each module already logged
   its own error).
+  **Corrected 2026-11-17, from a run:** FXC can compile `ui.hlsl`, but the UI never asks it to. `ShaderDesc::minShaderModel`
+  defaults to 60 and the device refuses anything above SM 5.1 without DXC, so under `--force-caps no-dxc` the UI,
+  skinning, particles, hair ribbons, crowds, editor lines and icons, previews, occlusion culling and FSR 1 are still off
+  (each logs once). Turning one back on means asking for SM 5.1 and checking FXC compiles it. Packaged games ship
+  `dxcompiler.dll`, so this is the case where that DLL cannot load.
+- **Without DXC, the scene drew black** (since strand hair, 2026-10-22). `averComposeSurface` declared the surface
+  unset and `averHairInit` takes it `inout`; FXC refuses that (X3508), so `PSMainVoxi` failed and the Voxi pipeline
+  never built. The surface is zeroed at its declaration now; under `no-dxc` the gate probes read the hardware path's
+  values again (cube 57,25,20, shadow 15,25,40, sunlit 87,89,95), and the DXC path is unchanged.
+- **WARP with ray tracing crashes** (found 2026-11-17, open). `gates.ps1 -Config warp`: `rt` exits 0x80131506, `ms-rt`
+  0xC0000374 (heap corruption), and `ms-rt-gi` ran over 20 minutes without finishing. Not diagnosed: it may be WARP's
+  DXR or a bug of ours that hardware tolerates. The warp baseline rows were not re-recorded with the 11-17 probes.
 - **A legacy `.ocmap` save dropped a non-uniform scale with no word** (0.4.0, then said to be unreachable; the
   editor can author one). It still keeps X — the format has one scale — and now warns, naming the first placement.
 - **`--refl-test` could not pass** (BUGS 0.5.0 Open). Its mirror was metallic with base colour 0.02, and a metal's

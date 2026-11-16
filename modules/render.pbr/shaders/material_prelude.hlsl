@@ -1052,7 +1052,8 @@ float3 averHairInit(inout AverSurface s, AverVertex v, AverMaterialData m) {
 // energy split, coverage and the rest. No clip(): raster's averBuildSurface does that (compute can't).
 AverSurface averComposeSurface(AverVertex v, AverLight l, AverAuthored a, AverMaterialData m,
                                AverDrawTerms d, float3 N) {
-    AverSurface s;
+    // Zeroed first: averHairInit takes it inout, and FXC (SM 5.1, --force-caps no-dxc) refuses an inout struct that is not fully set (X3508).
+    AverSurface s = (AverSurface)0;
     s.N = N;
     s.V = v.V;
 #if AVER_HAIR_SHADING
