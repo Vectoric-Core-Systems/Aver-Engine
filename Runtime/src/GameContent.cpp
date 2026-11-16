@@ -384,6 +384,12 @@ void GameContent::releaseBuiltMesh(u64 id) {
 void GameContent::unloadToPending(u64 id) {
     PendingMesh p;
     p.releasedAt = lastFlushFrame_;
+    for (auto it = levelParts_.begin(); it != levelParts_.end();) {
+        if (it->second.meshId == id) {
+            for (const MeshPart& q : it->second.parts) if (q.mesh) p.others.push_back(q.mesh);
+            it = levelParts_.erase(it);
+        } else ++it;
+    }
     for (auto it = posedParts_.begin(); it != posedParts_.end();) {
         if (it->second.meshId == id) {
             for (const MeshPart& q : it->second.parts) if (q.mesh) p.others.push_back(q.mesh);
@@ -519,6 +525,90 @@ void GameContent::buildMeshParts(rhi::IDevice& device, u64 id, const fmt::OcMesh
     if (keepBaseIndices) meshPartBaseIndices_[id] = std::move(baseIndices);
 }
 
+bool GameContent::buildLevelParts(rhi::IDevice& device, u64 id, const fmt::OcMeshData& md, u32 level,
+                                  rhi::MeshHandle whole, rhi::MeshHandle levelHandle) {
+    const auto pit = meshParts_.find(id);
+    if (pit == meshParts_.end() || level == 0 || level > md.coarserLods.size() || !whole || !levelHandle) return false;
+    const std::vector<MeshPart>& base = pit->second;
+    const fmt::OcMeshLod& lod = md.coarserLods[level - 1];
+    const u32 vcount = md.vertexCount();
+    const usize levelTris = lod.indices.size() / 3;
+    // Several submeshes may name one slot; the first part with it takes that slot's triangles.
+    auto partForSlot = [&](u32 slot) -> i32 {
+        for (usize i = 0; i < base.size(); ++i) if (base[i].slot == slot) return static_cast<i32>(i);
+        return -1;
+    };
+    std::vector<std::vector<u32>> idx(base.size());
+
+    bool ok = md.meshletsMaterialPure && !lod.meshlets.empty();
+    if (ok) {
+        usize tris = 0;
+        for (const fmt::OcMeshMeshlet& m : lod.meshlets) {
+            const i32 p = partForSlot(m.materialSlot);
+            if (p < 0) { ok = false; break; }
+            for (usize t = 0; t + 2 < m.triangles.size() && ok; t += 3, ++tris)
+                for (usize k = 0; k < 3; ++k) {
+                    const u8 li = m.triangles[t + k];
+                    if (li >= m.vertices.size() || m.vertices[li] >= vcount) { ok = false; break; }
+                    idx[static_cast<usize>(p)].push_back(m.vertices[li]);
+                }
+            if (!ok) break;
+        }
+        ok = ok && tris == levelTris;   // the meshlets must cover the level exactly
+    }
+    if (!ok) {
+        for (std::vector<u32>& v : idx) v.clear();
+        constexpr i32 kNone = -1, kShared = -2;
+        std::vector<i32> owner(vcount, kNone);
+        for (const fmt::OcMeshSubmesh& sm : md.submeshes) {
+            const i32 p = partForSlot(sm.materialSlot);
+            const usize end = usize(sm.indexStart) + sm.indexCount;
+            if (p < 0 || end > md.indices.size()) continue;
+            for (usize k = sm.indexStart; k < end; ++k) {
+                const u32 v = md.indices[k];
+                if (v >= vcount) continue;
+                owner[v] = (owner[v] == kNone || owner[v] == p) ? p : kShared;
+            }
+        }
+        ok = true;
+        for (usize t = 0; t + 2 < lod.indices.size() && ok; t += 3) {
+            i32 p = kNone;
+            for (usize k = 0; k < 3 && ok; ++k) {
+                const u32 v = lod.indices[t + k];
+                if (v >= vcount) { ok = false; break; }
+                const i32 o = owner[v];
+                if (o >= 0) { if (p >= 0 && p != o) ok = false; else p = o; }
+            }
+            if (!ok || p < 0) { ok = false; break; }   // no owned vertex, or two parts' vertices in one triangle
+            idx[static_cast<usize>(p)].insert(idx[static_cast<usize>(p)].end(),
+                                              lod.indices.begin() + static_cast<std::ptrdiff_t>(t),
+                                              lod.indices.begin() + static_cast<std::ptrdiff_t>(t + 3));
+        }
+    }
+    if (!ok) return false;
+
+    PosedParts entry;
+    entry.meshId = id;
+    entry.parts.reserve(base.size());
+    for (usize i = 0; i < base.size(); ++i) {
+        MeshPart part = base[i];
+        part.mesh = idx[i].empty() ? 0
+                  : device.createMeshSharingVertices(whole, idx[i].data(), static_cast<u32>(idx[i].size()));
+        if (!idx[i].empty() && !part.mesh) {
+            for (const MeshPart& q : entry.parts) if (q.mesh) device.destroyMesh(q.mesh);
+            return false;
+        }
+        entry.parts.push_back(part);
+    }
+    levelParts_[levelHandle] = std::move(entry);
+    return true;
+}
+
+const std::vector<GameContent::MeshPart>* GameContent::levelPartsFor(rhi::MeshHandle levelHandle, u64 id) const {
+    const auto it = levelParts_.find(levelHandle);
+    return (it != levelParts_.end() && it->second.meshId == id) ? &it->second.parts : nullptr;
+}
+
 const std::vector<GameContent::MeshPart>* GameContent::partsFor(u64 id) const {
     const auto it = meshParts_.find(id);
     return it == meshParts_.end() ? nullptr : &it->second;
@@ -589,6 +679,10 @@ void GameContent::releaseProjectMeshes(rhi::IDevice& device, bool destroyBaseHan
         for (const MeshPart& p : kv.second.parts)
             if (p.mesh) device.destroyMesh(p.mesh);
     posedParts_.clear();
+    for (auto& kv : levelParts_)
+        for (const MeshPart& p : kv.second.parts)
+            if (p.mesh) device.destroyMesh(p.mesh);
+    levelParts_.clear();
     for (const u64 id : projectMeshIds_) {
         meshPartBaseIndices_.erase(id);
         // Split parts are this class's uploads; nothing else keys on them.

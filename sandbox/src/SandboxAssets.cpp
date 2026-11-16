@@ -181,6 +181,15 @@ void SandboxApp::onMeshLoaded(const game::GameContent::LoadedMesh& m, void* user
                     ok = false;
                     break;
                 }
+                // A split mesh's level draws as its own parts, each slot with its material (the draw walk plans
+                // them through levelPartsFor). A level that cannot be cut by slot ends the ladder: drawn whole it
+                // would give every slot the entity's one material.
+                if (app.content_.partsFor(id) && !app.content_.buildLevelParts(*e.device(), id, md, lvl, h, lh)) {
+                    e.device()->destroyMesh(lh);
+                    if (!quiet) AVER_INFO("[Mesh] '{}' LOD {} could not be cut by material slot; the ladder stops at {} level(s)",
+                                          rel, lvl, ladder.handles.size());
+                    break;
+                }
                 ++pass->lodCoarserLevels;
                 ladder.handles.push_back(lh);
                 ladder.triCounts.push_back(trifactor::levelTriangleCount(md, lvl));

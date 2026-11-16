@@ -229,3 +229,9 @@ if(TARGET Aver.Framework AND TARGET Aver.Scene AND TARGET Aver.Render.PBR.Materi
   target_link_libraries(SubViewportHostTest PRIVATE Aver.Runtime.Game.Core Aver.Render.ActorPreview Aver.Render.PBR.Materials Aver.Framework Aver.Scene Aver.Formats Aver.Core)
   set_target_properties(SubViewportHostTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# LevelPartsTest -- GameContent::buildLevelParts: a coarser LOD level of a multi-material mesh cut into its parts (by meshlet
+# slot, else vertex ownership), refused when a triangle spans two parts. A recording device; no GPU, no window.
+add_executable(LevelPartsTest src/LevelPartsTest.cpp)
+target_link_libraries(LevelPartsTest PRIVATE Aver.Runtime.Game.Core Aver.Scene Aver.Formats Aver.Platform Aver.Core)
+set_target_properties(LevelPartsTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

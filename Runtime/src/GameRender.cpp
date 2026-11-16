@@ -1001,6 +1001,12 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
                 planParts = posed;
                 planFrom = posedMesh;
             }
+        } else if (parts != nullptr && dec.chosenMesh != handle && dec.chosenMesh != 0) {
+            // A LOD level the host substituted: its own parts, so each slot keeps its material (buildLevelParts).
+            if (const auto* level = content.levelPartsFor(dec.chosenMesh, mr->mesh)) {
+                planParts = level;
+                planFrom = dec.chosenMesh;
+            }
         }
         // Per-surface material overrides (CSurfaceMaterials): one component probe per entity, and only in a world that registered the component.
         const scene::CSurfaceMaterials* surfaceOverrides =

@@ -230,6 +230,14 @@ public:
     const std::vector<MeshPart>* posedPartsFor(rhi::IDevice& device, u64 id,
                                                rhi::MeshHandle baseMesh, rhi::MeshHandle posedMesh);
 
+    // A coarser LOD level of a split mesh, cut into the same parts (one per entry of partsFor(id), same slots and
+    // materials) over `whole`'s vertices, so a level the draw walk substitutes still draws each slot with its own
+    // material. A level's triangles are told apart by material-pure meshlets, else by which part's LOD-0 slice owns
+    // their vertices (simplification only drops vertices). False, nothing registered, when neither can.
+    bool buildLevelParts(rhi::IDevice& device, u64 id, const fmt::OcMeshData& md, u32 level, rhi::MeshHandle whole,
+                         rhi::MeshHandle levelHandle);
+    const std::vector<MeshPart>* levelPartsFor(rhi::MeshHandle levelHandle, u64 id) const;
+
     // Forgets every project mesh (lazy refcounts survive; the next loadProjectMeshes re-uploads held
     // ones; adopt() drops them). If `destroyBaseHandles` is false, only forgets the handles.
     void releaseProjectMeshes(rhi::IDevice& device, bool destroyBaseHandles = true);
@@ -317,6 +325,8 @@ private:
     // posed MeshHandle -> its posed parts. Empty = refused, cached. Keyed by handle (never recycled).
     struct PosedParts { u64 meshId = 0; std::vector<MeshPart> parts; };
     std::unordered_map<rhi::MeshHandle, PosedParts> posedParts_;
+    // LOD level MeshHandle -> its parts (buildLevelParts). Keyed by handle, like posedParts_.
+    std::unordered_map<rhi::MeshHandle, PosedParts> levelParts_;
     // collisionMeshFor's cache: mesh id -> collision mesh, or null pointer cached for "none".
     std::unordered_map<u64, std::unique_ptr<CollisionMesh>> collisionMeshCache_;
     // Incremented once per collisionMeshFor call answered from disk cache.
