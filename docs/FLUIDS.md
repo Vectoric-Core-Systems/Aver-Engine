@@ -26,7 +26,7 @@ holds; where this page and that one disagree, this page is the newer one and say
 | Piece | Where | Checked by |
 | --- | --- | --- |
 | The position-based fluid solver, with its scene-collider distance field | `modules/fluids/{include,src}/aver/fluids/PbfFluid.{hpp,cpp}` | `PbfFluidTest.cpp`: `testTankHoldsItsDepth`, `testDamBreakSpreads`, `testSolidFieldAndFloorCollision`, `testDeterminism`, `testImpulse` |
-| The surface mesher (density splat, marching tetrahedra) | `.../FluidSurface.{hpp,cpp}` | `PbfFluidTest.cpp::testSurfaceMesh` |
+| The surface mesher (density splat, marching tetrahedra; `surfaceBudget` sizes its triangle cap from the box's cross-sections, since surface grows with area, not particle count) | `.../FluidSurface.{hpp,cpp}` | `PbfFluidTest.cpp::testSurfaceMesh`, `testSurfaceBudget` |
 | Desc → solver settings (spacing, walls, viscosity) | `.../FluidVolume.{hpp,cpp}` — `fluidPbfSettings`, `fluidParticleSpacingCm`, `fluidXsphForDamping` | `PbfFluidTest.cpp::testDescMapping` |
 | Viscosity → damping (the old calibrated fit, kept as the scale) | same file — `fluidDampingForViscosity` | `FluidVolumeTest.cpp`: `testViscosityDampingFit`, `testMaterialPresets` |
 | The material precedence rule | same file — `fluidResolvePhysicsMaterial`, called only from `FluidScene::spawn` | `testResolveMaterialPrecedence` |

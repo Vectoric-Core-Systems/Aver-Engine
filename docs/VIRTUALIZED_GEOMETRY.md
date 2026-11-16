@@ -1,5 +1,20 @@
 # Virtualized geometry: clustering, LOD hierarchies, and GPU-driven rendering
 
+> **2026-11-16/17: per-instance LOD selection is ON by default, in the editor and in packaged games.**
+> - New projects write `RENDER.LODSELECT 1` (`fmt::applyNewProjectRenderDefaults`); they had written 0 since 2026-10-04,
+>   copied from PTTest, so every project made since drew everything at LOD 0. A project that states nothing gets the
+>   editor's default, which was already on.
+> - A coarser level of a multi-material mesh draws each slot with its own material (`GameContent::buildLevelParts`,
+>   `levelPartsFor`; the draw walk plans a substituted level from its parts, as it plans a posed mesh from
+>   `posedPartsFor`). The triangles are told apart by material-pure meshlets, else by which part's LOD-0 slice owns their
+>   vertices; a level that cannot be cut ends that mesh's ladder. Before, a coarser level drew whole with one material
+>   (NewSponza's curtains went near-black), which is the likely reason LOD selection had been switched off.
+> - The packaged game selects levels as the editor does (`GameApp::decideLod`; `docs/PACKAGING.md`).
+> - `--lod-select`, `--no-lod-select` (and `--occlusion-cull`, `--depth-prepass`) outrank the project's keys and are never
+>   saved into it; a Project Settings edit of the control takes over.
+> - Measured on NewSponza, ray-driven: 52 of 90 visible instances on a coarser level, 9.42 M -> 8.00 M triangles, frame
+>   98.99 -> 98.52 ms. Ray-driven primary visibility does not pay per raster triangle; raster tiers gain more.
+
 > **STATUS AS WRITTEN (2026-08-08): PLAN ONLY. No code has been written.** That is no longer true and
 > has not been since a later commit built Slice 0 of §7 almost exactly as designed here, under a name
 > this plan did not anticipate. **Re-verified 2026-09-02:** `modules/trifactor/` (module name

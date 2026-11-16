@@ -1,5 +1,22 @@
 # Packaging an Aver project into a shippable game
 
+> **2026-11-17, checked for 0.8.0.** FirstPerson, FluidShow, MilSimLab and V5 stage and verify from `build-release`
+> (`stage-game.ps1 -BuildDir build-release`, `verify-game.ps1`): no file opened outside the package, and each game's
+> scene census matches the editor's. Three changes since the notes below:
+>
+> - **Verification runs the game as a first-time player.** The game keeps the player's own state (`Settings.ini`:
+>   bindings, saved culture) in the per-user directory, which is right for a game and is not package content. `verify-game.ps1`
+>   points `AVER_USER_DATA_DIR` at an empty folder inside its scratch copy, so those opens count as inside the package and
+>   the run proves the game starts on a machine that has never run it. Before, every package that read its settings failed.
+> - **An import Windows itself provides is not a missing DLL.** `Test-AverOsDll` (`scripts/PeImports.ps1`) keeps the
+>   hand-kept list as the fast path and otherwise accepts a DLL that System32 holds with Microsoft's version info, except
+>   the redistributables Windows does not guarantee (the VC and debug CRTs, the DirectX SDK's `d3dx*`, `xinput1_1`..`1_3`,
+>   `xaudio2_0`..`2_7`, `x3daudio*`, `xapofx*`). A project's own native DLL may import anything Windows ships: V5's
+>   `v5_core.dll` imports `ntdll.dll`, and staging used to refuse it. `stage-payload.ps1` uses the same rule.
+> - **The packaged game selects TriFactor LOD levels** as the editor does (`RENDER.LODSELECT`, on unless the project says 0;
+>   `RENDER.LODTHRESHOLD`; `CMeshRenderer::lodBias`). It logs `[LOD-SELECT] instances=N levelCollapsed=M` when the counts
+>   change. See `docs/VIRTUALIZED_GEOMETRY.md`.
+
 > **RENAMED 2026-09-16.** The runtime moved to `Runtime/`: the library that was `modules/runtime.game`
 > is `Runtime/` (target still `Aver.Runtime.Game`), and the executable that was `game/AverGame.exe` is
 > `Runtime/host` -> **`AverEngineRuntime.exe`**, shown as "Aver Engine Runtime". The design record below
