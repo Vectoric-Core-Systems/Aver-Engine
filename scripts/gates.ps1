@@ -291,14 +291,22 @@ $Gates = @(
     # the sample slips a pixel in any direction, and the gate cannot be flipped by a subpixel wobble.
     # Only 576 pixels in the whole frame disagree at all; the two paths are bit-identical on the
     # other 4.5 million, which is itself worth knowing.
-    @{ name = 'shadow';        args = @('--no-gi','--no-rt','--probe-rel','0.53545','0.48536') },
-    @{ name = 'shadow-rt';     args = @('--no-gi','--rt','--probe-rel','0.53545','0.48536') },
-    @{ name = 'shadow-ms-rt';  args = @('--no-gi','--ms','--rt','--probe-rel','0.53545','0.48536') },
-    @{ name = 'shadow-gi';     args = @('--gi','--no-rt','--probe-rel','0.53545','0.48536') },
-    @{ name = 'penumbra';      args = @('--no-gi','--no-rt','--probe-rel','0.57545','0.50610') },
-    @{ name = 'penumbra-rt';   args = @('--no-gi','--rt','--probe-rel','0.57545','0.50610') },
-    @{ name = 'sunlit';        args = @('--no-gi','--no-rt','--probe-rel','0.42636','0.48536') },
-    @{ name = 'sunlit-gi';     args = @('--gi','--no-rt','--probe-rel','0.42636','0.48536') },
+    # RE-PICKED 2026-11-17 by the recipe above (capture, then scripts in the session scratchpad). The viewport is now
+    # 2585x1639 at (0,270), from 2750x1639: the same aspect trap as 07-29, and again every probe had slid (`shadow` onto the
+    # cube's face, `rt-penumbra` into the umbra) while the centre probes, still on their face, only drifted a code or two.
+    #   shadow    (1436,847) pcf (15,25,39) rt (15,24,37), flat 7x7
+    #   sunlit    (937,847)  same scanline, (87,89,95) in both, 7x7 varies by 0; lum(sunlit)-lum(shadow) = 65
+    #   penumbra  (1500,829) pcf (47,52,63) vs rt (21,29,42), weakest-3x3 L1 = 35
+    #   rt-penumbra (1463,850) rt (65,68,75) between umbra lum 23 and lit 89; vs PCF L1 >= 53 over its 3x3. The 1-spp
+    #             dither leaves no 3x3 uniform within 2 codes any more; this one varies by 7, the flattest partial pixel.
+    @{ name = 'shadow';        args = @('--no-gi','--no-rt','--probe-rel','0.5557060','0.5170836') },
+    @{ name = 'shadow-rt';     args = @('--no-gi','--rt','--probe-rel','0.5557060','0.5170836') },
+    @{ name = 'shadow-ms-rt';  args = @('--no-gi','--ms','--rt','--probe-rel','0.5557060','0.5170836') },
+    @{ name = 'shadow-gi';     args = @('--gi','--no-rt','--probe-rel','0.5557060','0.5170836') },
+    @{ name = 'penumbra';      args = @('--no-gi','--no-rt','--probe-rel','0.5804642','0.5061013') },
+    @{ name = 'penumbra-rt';   args = @('--no-gi','--rt','--probe-rel','0.5804642','0.5061013') },
+    @{ name = 'sunlit';        args = @('--no-gi','--no-rt','--probe-rel','0.3626692','0.5170836') },
+    @{ name = 'sunlit-gi';     args = @('--gi','--no-rt','--probe-rel','0.3626692','0.5170836') },
 
     # rt-penumbra -- the only gate that samples a PARTIALLY OCCLUDED ray-traced pixel.
     #
@@ -347,7 +355,7 @@ $Gates = @(
     # AND IT IS GENUINELY PARTIAL: 58,58,61 sits between this scene's umbra (18,25,35) and its
     # sunlit value (89,85,82), a little over halfway. That is the property the gate is named for and
     # had lost.
-    @{ name = 'rt-penumbra';   args = @('--no-gi','--rt','--sun-angle','8.0','--probe-rel','0.5672727','0.5149481') }
+    @{ name = 'rt-penumbra';   args = @('--no-gi','--rt','--sun-angle','8.0','--probe-rel','0.5661509','0.5189140') }
 )
 
 # Each configuration is a device this machine can be made to look like. `--force-caps` is
@@ -365,6 +373,9 @@ $Configs = [ordered]@{
     'no-dxc'             = @('--force-caps','no-dxc')
     'warp'               = @('--warp')      # ~19x slower than hardware; budget ~15 minutes
 }
+# 2026-11-17: under `warp` the RT gates crash (rt 0x80131506, ms-rt 0xC0000374) and ms-rt-gi ran 20+ minutes without
+# finishing, so the warp rows were NOT re-recorded with the 11-17 probes and are stale for every relocated probe.
+# Hardware configurations decide a release; warp is a warning until this is diagnosed.
 
 # ---------------------------------------------------------------- helpers
 
