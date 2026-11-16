@@ -163,10 +163,13 @@ void SandboxApp::captureRenderSettingsFromUi(const voxi::Settings& requested, u3
     // The forced flag is exactly the distinction, and it already exists for the symmetric bug on
     // the way in (applyProjectRenderSettings clobbering the flag from the manifest's default).
     if (!rset_.frameBudgetForced_) projSess_.project_.frameBudgetMs = rset_.frameBudgetMs_;
-    projSess_.project_.lodSelect          = lod_.lodSelectEnabled_ ? 1 : 0;
-    projSess_.project_.lodThresholdPx     = lod_.lodErrorThresholdPx_;
-    projSess_.project_.occlusionCull      = occl_.occlusionCullEnabled_ ? 1 : 0;
-    projSess_.project_.depthPrepass       = rset_.depthPrepassOverride_ ? 1 : 0;
+    // Same rule for these three: a value the command line set is a test override, not the project's.
+    if (!lod_.lodSelectFromCli_) {
+        projSess_.project_.lodSelect      = lod_.lodSelectEnabled_ ? 1 : 0;
+        projSess_.project_.lodThresholdPx = lod_.lodErrorThresholdPx_;
+    }
+    if (!occl_.occlusionCullFromCli_) projSess_.project_.occlusionCull = occl_.occlusionCullEnabled_ ? 1 : 0;
+    if (!rset_.depthPrepassFromCli_)  projSess_.project_.depthPrepass  = rset_.depthPrepassOverride_ ? 1 : 0;
 #if AVER_MODULE_SR
     // optimisation-wave-2, 3.3 A: NOT a voxi::Settings field (module boundary, Scalability.hpp's
     // own header comment) so it rides along beside occlusionCull/depthPrepass here rather than

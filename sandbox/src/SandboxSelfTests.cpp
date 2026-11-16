@@ -17,6 +17,12 @@ void SandboxApp::setLodSelect(bool on, f32 thresholdPx) {
 #endif
 }
 
+void SandboxApp::markLodSelectFromCli() {
+#if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
+    lod_.lodSelectFromCli_ = true;
+#endif
+}
+
 // --lod-cluster-stats: separate gate to measure cluster selection.
 void SandboxApp::setLodClusterStats(bool on) {
 #if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR

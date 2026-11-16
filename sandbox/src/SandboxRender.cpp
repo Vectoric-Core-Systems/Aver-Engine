@@ -2749,7 +2749,7 @@ const char* SandboxApp::occlusionSuppressingFeatureName() const {
 
 void SandboxApp::setMsaaOverride(int n) { rset_.msaaOverride_ = n; }
 
-void SandboxApp::setDepthPrepassOverride(bool on) { rset_.depthPrepassOverride_ = on; }
+void SandboxApp::setDepthPrepassOverride(bool on) { rset_.depthPrepassOverride_ = on; rset_.depthPrepassFromCli_ = true; }
 
 void SandboxApp::setGBufferOverride(bool on) { rset_.gbufferOverride_ = on; }
 
@@ -2760,7 +2760,7 @@ void SandboxApp::setGBufferDebugView(GBufferDebugFeature::Mode m) { rset_.gbuffe
 // --occlusion-cull: see occlusionCullEnabled_'s own member comment. Unset (default) never
 // reorders the entity walk or calls occluder_ at all, reproducing today's frame exactly. Guarded
 // the same as the member it assigns: with the module OFF, that member doesn't exist either.
-void SandboxApp::setOcclusionCullOverride(bool on) { occl_.occlusionCullEnabled_ = on; }
+void SandboxApp::setOcclusionCullOverride(bool on) { occl_.occlusionCullEnabled_ = on; occl_.occlusionCullFromCli_ = true; }
 
 // --no-occlusion-cull: the CLI has no way to say "off" that beats a level's own manifest --
 // applyProjectVoxiSettings writes occlusionCullEnabled_ during load, AFTER CLI setters run at

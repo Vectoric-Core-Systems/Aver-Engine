@@ -421,15 +421,20 @@ void SandboxApp::applyProjectRenderSettings() {
     // pre-pass are editor-side per-frame flags rather than fields on voxi::Settings, so they
     // are applied directly rather than through setSettings. Same manifest keys, same -1 means
     // unstated rule.
-    if (projSess_.project_.lodSelect >= 0)
-        setLodSelect(projSess_.project_.lodSelect != 0,
-                     projSess_.project_.lodThresholdPx >= 0.0f ? projSess_.project_.lodThresholdPx : lod_.lodErrorThresholdPx_);
-    else if (projSess_.project_.lodThresholdPx >= 0.0f)
-        setLodSelect(lod_.lodSelectEnabled_, projSess_.project_.lodThresholdPx);
-    if (projSess_.project_.occlusionCull >= 0) occl_.occlusionCullEnabled_ = projSess_.project_.occlusionCull != 0;
+    // A flag given on the command line outranks the manifest (as --taa does); a UI edit clears the mark.
+    if (!lod_.lodSelectFromCli_) {
+        if (projSess_.project_.lodSelect >= 0)
+            setLodSelect(projSess_.project_.lodSelect != 0,
+                         projSess_.project_.lodThresholdPx >= 0.0f ? projSess_.project_.lodThresholdPx : lod_.lodErrorThresholdPx_);
+        else if (projSess_.project_.lodThresholdPx >= 0.0f)
+            setLodSelect(lod_.lodSelectEnabled_, projSess_.project_.lodThresholdPx);
+    }
+    if (projSess_.project_.occlusionCull >= 0 && !occl_.occlusionCullFromCli_)
+        occl_.occlusionCullEnabled_ = projSess_.project_.occlusionCull != 0;
     // projectBackend_ and frameBudgetMs_ were applied above the hasRenderSettings() guard --
     // see the comment there for why they cannot live down here with the rest of the block.
-    if (projSess_.project_.depthPrepass  >= 0) rset_.depthPrepassOverride_ = projSess_.project_.depthPrepass != 0;
+    if (projSess_.project_.depthPrepass  >= 0 && !rset_.depthPrepassFromCli_)
+        rset_.depthPrepassOverride_ = projSess_.project_.depthPrepass != 0;
 
     // PHYSICS.* AND AUDIO.* USED TO BE APPLIED HERE, and that is why they now are not: everything
     // from this point on is reached only past the hasRenderSettings() and voxiAttached_ returns

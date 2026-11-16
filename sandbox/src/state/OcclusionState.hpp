@@ -6,6 +6,7 @@ struct OcclusionState {
     // --occlusion-cull: hierarchical-Z two-pass box culling (modules/occlusion). OFF (default) never calls occluder_.
     // UNGUARDED on this side of the #if, a MANIFEST MIRROR (RENDER.OCCLUSIONCULL round-trips through it).
     bool occlusionCullEnabled_ = false;
+    bool occlusionCullFromCli_ = false;   // --occlusion-cull: outranks RENDER.OCCLUSIONCULL, never saved into it
 #if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
     bool occlusionCullForceOff_ = false;   // --no-occlusion-cull: see setOcclusionCullForceOff's own comment
     // --occlusion-waitidle / --no-occlusion-waitidle: see setOcclusionDebugForceWaitIdle. DEFAULTS TRUE.

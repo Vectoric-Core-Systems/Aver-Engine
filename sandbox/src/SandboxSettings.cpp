@@ -2255,6 +2255,7 @@ void SandboxApp::renderPagePerformance(voxi::Renderer& vx, voxi::Settings& s, co
         bool lod = lod_.lodSelectEnabled_;
         if (ImGui::Checkbox("LOD select", &lod)) {
             setLodSelect(lod, lod_.lodErrorThresholdPx_);
+            lod_.lodSelectFromCli_ = false;   // the user chose it here: it is the project's now
             autosave_.projectDirty_ = true;
         }
         uiReg_.track("project.lod.select");
@@ -2265,14 +2266,21 @@ void SandboxApp::renderPagePerformance(voxi::Renderer& vx, voxi::Settings& s, co
         f32 px = lod_.lodErrorThresholdPx_;
         if (ImGui::SliderFloat("Screen error (px)", &px, 0.25f, 8.0f, "%.2f")) {
             setLodSelect(lod_.lodSelectEnabled_, px);
+            lod_.lodSelectFromCli_ = false;
             autosave_.projectDirty_ = true;
         }
         uiReg_.track("project.lod.threshold");
         ImGui::EndDisabled();
 
-        if (ImGui::Checkbox("Occlusion culling", &occl_.occlusionCullEnabled_)) autosave_.projectDirty_ = true;
+        if (ImGui::Checkbox("Occlusion culling", &occl_.occlusionCullEnabled_)) {
+            occl_.occlusionCullFromCli_ = false;
+            autosave_.projectDirty_ = true;
+        }
         uiReg_.track("project.occlusionCull");
-        if (ImGui::Checkbox("Depth pre-pass", &rset_.depthPrepassOverride_)) autosave_.projectDirty_ = true;
+        if (ImGui::Checkbox("Depth pre-pass", &rset_.depthPrepassOverride_)) {
+            rset_.depthPrepassFromCli_ = false;
+            autosave_.projectDirty_ = true;
+        }
         uiReg_.track("project.depthPrepass");
 
     }

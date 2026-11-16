@@ -696,6 +696,7 @@ public:
     void setVSyncOff(bool off);               // --no-vsync
     void setVSyncOn(bool on) { rset_.vsyncOnRequested_ = on; }   // --vsync
     void setLodSelect(bool on, f32 thresholdPx);
+    void markLodSelectFromCli();   // --lod-select / --no-lod-select was given
 #if AVER_MODULE_FRAMEWORK && AVER_MODULE_VOXI
     void applyScriptRender(voxi::Renderer& vx);   // framework_render_abi.h at the frame boundary (SandboxUpdate.cpp)
 #endif

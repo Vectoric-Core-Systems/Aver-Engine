@@ -108,6 +108,7 @@ struct RenderSettingsState {
     bool neuraaCaptureStarted_ = false;
     bool temporalAaEnabled_ = false;  // the project's RENDER.TAA (unstated = off); --no-taa / --taa win over it
     bool taaFromCli_ = false;
+    bool depthPrepassFromCli_ = false;   // --depth-prepass: outranks RENDER.DEPTHPREPASS, never saved into it
     int particleGpuArg_ = -1;   // --particles-cpu / --particles-gpu; -1 follows RENDER.PARTICLEGPU
     bool neuraaEnabled_ = true;       // the project's RENDER.NEURAA (unstated = on)
     bool neuraaFromCli_ = false;

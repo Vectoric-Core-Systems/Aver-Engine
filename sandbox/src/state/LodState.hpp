@@ -16,6 +16,7 @@ struct LodState {
 #endif
     // LOD knobs (persisted via RENDER.LODSELECT/LODTHRESHOLDPX in project settings).
     bool lodSelectEnabled_ = true;      // ON by default (--lod-select / editor toggle).
+    bool lodSelectFromCli_ = false;     // --lod-select / --no-lod-select given: outranks RENDER.LODSELECT, never saved into it
     f32  lodErrorThresholdPx_ = 1.0f;   // Projected screen error tolerance (--lod-error-px).
 #if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
     // LOD cluster stats (informational per-meshlet telemetry, CPU cost). OFF by default.
