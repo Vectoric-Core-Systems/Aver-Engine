@@ -37,6 +37,9 @@ resolution change, a group rotate and its undo, an Outliner reorder and its undo
   reorders siblings (top/bottom of a row), and siblings list in that order.
 - The editor no longer starts with a 45x45 viewport: the layout waits for a real window size and repairs itself.
 - `MaterialGraphTest` compiles every material graph case to SPIR-V as well as DXIL.
+- TriFactor LOD selection is on in new projects (they were created with `RENDER.LODSELECT 0`), and a coarser level of a
+  multi-material mesh draws each slot with its own material instead of one for the whole mesh. `--lod-select`,
+  `--no-lod-select`, `--occlusion-cull` and `--depth-prepass` now outrank the project and are never saved into it.
 - Two no longer reproduce, measured: the Vulkan cascade shadow map under `--no-rt` (it matches D3D12), and the
   horizontal glass slab reading near-black at steep angles.
 - `--capture-settled N` captures a streamed level once loading has gone quiet, with its acceleration structures built
