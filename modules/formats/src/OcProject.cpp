@@ -766,7 +766,7 @@ void applyNewProjectRenderDefaults(ProjectDesc& d) {
     d.layeredBsdf        = 0;
     d.refractionStrength = 1.0f;
     d.refractionEdgeFade = 0.15f;
-    d.lodSelect          = 0;
+    d.lodSelect          = 1;      // TriFactor LOD selection (a coarser level of a multi-material mesh keeps its slots)
     d.lodThresholdPx     = 1.0f;
     d.occlusionCull      = 1;
     d.depthPrepass       = 0;

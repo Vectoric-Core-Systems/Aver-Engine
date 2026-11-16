@@ -1113,9 +1113,9 @@ void SandboxApp::drawSceneEntities(Engine& e) {
                 // KNOWN RESIDUAL, STATED RATHER THAN FIXED (F4): this route never runs LOD/cluster
                 // selection (skinned/soft-body aside), so it always plans the base mesh's full part
                 // split -- a visible entity whose LOD/cluster cut substitutes a different handle
-                // delivers ONE draw while the same entity, culled, delivers its base parts. Only
-                // live with LOD selection or the CLI cluster paths (LODSELECT is 0 in PTTest, so
-                // dormant here).
+                // delivers that level's draws (its parts, levelPartsFor) while the same entity, culled,
+                // delivers its base parts. Live wherever LOD selection is on, the default since 2026-11-16:
+                // the GI gate sees the handles change as an entity crosses the frustum edge.
                 c.entityCulled = d.frustumCulled || d.occlusionCulled;
 #if AVER_MODULE_VOXI
                 // THE SOFT-BODY SEAM: posedHandle() asks skinning first, then soft-body (skinning
